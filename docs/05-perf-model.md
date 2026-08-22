@@ -136,16 +136,19 @@ around it.
    dominates, suspect its Triton launch path
    (`vllm/third_party/flash_linear_attention/ops/fused_recurrent.py`), not the
    arithmetic.
-5. **Per-kernel fixed cost inside a replayed list** - capture ~700 trivial
-   kernels, replay, divide. Then the same at ~250. This number sizes the
-   fusion list (doc 04) and is the hard floor of the design.
+5. ✅ **Per-kernel fixed cost inside a replayed list** - **0.52 µs/kernel**
+   (`noop`) and **0.63 µs/kernel** (`ctrl_read`) at N = 700, measured
+   2026-08-22 (doc 07 #5, `tools/probe/probe_replay`). The empty submit +
+   fence round trip - the floor no fusion removes - is **6.4 µs**. Both are
+   under the 1 µs threshold, so the fusion list in doc 04 is *not* on the
+   phase-1 critical path.
 6. **One GEMV microbench** - int4 g64, K=5120, N=17408 (`gate_proj`) and
    N=1024 (`k_proj`, the worst fill case), against 600 GB/s. If the kernel
    cannot hit ~90% of bandwidth standalone at N=1024 without split-K, the
    split-K argument in doc 08 is confirmed on this silicon.
 
-1-3 are done. 5 and 6 are phase 0; no decode kernel is designed before they
-exist.
+1-3 and 5 are done. 6 is phase 0; no decode kernel is designed before it
+exists.
 
 ## Benchmark
 
