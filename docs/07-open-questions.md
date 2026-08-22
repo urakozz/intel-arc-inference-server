@@ -13,6 +13,8 @@ embedding is gathered; the vision tower is skipped. The checkpoint has no
 duplicated tensor names, so header arithmetic is exact here - the
 dedup-by-name rule stays in the loader for checkpoints that do.
 
+Reproduce: `python3 tools/probe/checkpoint_bytes.py <snapshot>`.
+
 Consequence: vLLM's 31.50 t/s is **81% MBU**. The host-overhead thesis is
 nearly exhausted on this model (doc 05); it remains the main lever for the MoE
 phases, where `W` is still an estimate. Confirm resident bytes on first load.

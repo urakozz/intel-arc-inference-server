@@ -173,8 +173,9 @@ Re-run `probe_gemv` over M before trusting any of this for speculative decode.
   measured.** The k-group is 64 because the *scale* group is 64; unrolling
   further would need a second scale in flight for no obvious gain on a
   bandwidth-bound loop.
-- **Atomics instead of partials - rejected on determinism, not measured.** See
-  above; the traffic argument says it would be worth 0.6% at most.
+- **Atomics instead of partials - rejected on determinism, not measured.** The
+  traffic argument says it would be worth 2.35% at most at M = 1 (`out/o_proj`,
+  S = 16) and ~19% at M = 8 - see above.
 
 ### Measured
 
