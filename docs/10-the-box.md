@@ -28,6 +28,37 @@ The NVMe (Crucial P1, PCH slot) drops out under APST. Kernel needs
 `nvme_core.default_ps_max_latency_us=0`. Fixed 2026-08-12 - if the box loses its
 disk after a kernel update, check this first.
 
+## Toolchain on the host (not in Docker)
+
+Probed 2026-08-22. The C++ side builds **natively on the host**; no container
+is needed for anything except the Python oracle.
+
+| | |
+|---|---|
+| OS / kernel | Ubuntu 26.04, kernel 7.2.0 |
+| GPUs as seen by `lspci` | 2 × `Battlemage G31` (04:00.0, 08:00.0) + an NVIDIA GT 710 for display → `ocloc -device bmg-g31` |
+| GPU driver | `libze_intel_gpu.so.1.15.39122`, IGC `2.38.x`, `intel-ocloc 26.27.39122` |
+| Level Zero | headers in `/usr/include/level_zero/`, loader in `/usr/lib/x86_64-linux-gnu/` |
+| oneAPI | `/opt/intel/oneapi/{2026.0,2026.1}`; `icpx` at `/opt/intel/oneapi/compiler/2026.1/bin/icpx` - **not on `PATH`** in a non-interactive shell; `source /opt/intel/oneapi/setvars.sh` or use the full path |
+| Host compilers | `g++ 15.2`, `cmake 4.2.3`, `ccache`; **no `ninja`** on the host (`apt install ninja-build`, or use the one in the image's venv) |
+| Python on host | 3.14, **no torch / transformers** |
+| Rust | none - the tokenizer dependency (doc 11) needs `rustup` or a prebuilt static lib |
+
+Inside `vllm-xpu-env-next-p314-t214-vxkp0`: `transformers 5.15.0` with
+`transformers/models/qwen3_5/modeling_qwen3_5.py` (`Qwen3_5GatedDeltaNet`,
+`Qwen3_5RMSNormGated`, `Qwen3_5ForConditionalGeneration`, …), `torch
+2.14.0+xpu`, `icpx` and `ocloc` also present. `fla`
+(**flash-linear-attention**, the Triton GDN kernel library; vLLM vendors its
+ops under `vllm/third_party/flash_linear_attention/`) is **not** installed -
+deliberately left out: without it transformers runs its pure-torch GDN loop,
+which is the reference math in doc 03 and the only one we want the oracle to
+speak. It is slow, which is fine for short golden prompts on CPU, and the
+dequantised 27B (~54 GB bf16) does not fit a B70 anyway. The container only
+sees the GPU with `--device /dev/dri`.
+
+`sycl-tla` targets this part as `-fsycl-targets=spir64_gen` with
+`-device bmg-g21,bmg-g31` (`cmake/FindDPCPP.cmake:78-95`); the B70 is G31.
+
 ## Models in the HF cache
 
 `~/.cache/huggingface` - **117 GB total**, mounted into containers at
