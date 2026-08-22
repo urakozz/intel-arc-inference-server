@@ -91,6 +91,75 @@ transformer layer (`self_attn` q/k/v/o + `mlp` at the main model's shapes),
 `mtp.norm`. It shares `embed_tokens` and `lm_head` with the main model - so a
 draft step reads **0.85 + 2.54 GB**, and `lm_head` width matters twice.
 
+### Layer math - verified in the modeling file
+
+From `transformers 5.15.0`, `models/qwen3_5/modeling_qwen3_5.py` inside the
+reference image (doc 10). This is the contract the kernels and the oracle
+(doc 04, testing) must agree on. `x` is one token's hidden vector, `⊙` is
+elementwise, all norms run in fp32.
+
+**RMSNorm - Gemma-style `(1 + w)`.** `Qwen3_5RMSNorm` (used for
+`input_layernorm`, `post_attention_layernorm`, the final `norm`, `q_norm`,
+`k_norm`) computes `x · rsqrt(mean(x²) + 1e-6) ⊙ (1 + w)`. **The `+1` is not in
+the weights**; the loader bakes it in (store `1 + w`) so the kernel is a plain
+RMSNorm. `Qwen3_5RMSNormGated` (GDN output norm) is plain `w` - no `+1` - and
+multiplies by `silu(z)` *after* normalising.
+
+**Decoder layer.** `x += mixer(norm₁(x)); x += mlp(norm₂(x))`, where
+`mlp(h) = W_down · (silu(W_gate h) ⊙ W_up h)`.
+
+**GDN layer** (`Qwen3_5GatedDeltaNet.forward`, decode path):
+
+```
+qkv  = W_qkv h                       # 10240 = q 16×128 | k 16×128 | v 48×128
+z    = W_z   h                       # 6144  = 48×128
+b, a = W_b h, W_a h                  # 48 each, bf16 weights
+qkv  = silu(conv1d_4tap(qkv))        # depthwise over the last 4 tokens; state = previous 3; no bias
+β    = sigmoid(b)                    # [48]
+g    = −exp(A_log) ⊙ softplus(a + dt_bias)      # [48], fp32
+q, k = repeat_interleave(q, 3), repeat_interleave(k, 3)   # v-head h uses k-head h // 3
+q, k = l2norm(q), l2norm(k)          # per head, eps 1e-6;  q ⋅= 1/√128
+per v-head h, state S_h ∈ fp32[128 k × 128 v]:
+  S_h  = S_h · exp(g_h)
+  kv   = kᵀ S_h                      # [128 v]
+  Δ    = (v − kv) ⊙ β_h
+  S_h += k ⊗ Δ                       # rank-1 update
+  o_h  = qᵀ S_h                      # [128 v]
+o    = RMSNormGated(o, z)            # per head: w ⊙ (o · rsqrt(mean(o²)+eps)) ⊙ silu(z)
+out  = W_out · o                     # 6144 → 5120
+```
+
+The whole recurrence is 48 independent 128×128 fp32 state updates per layer -
+~3 MB read + written. `torch_recurrent_gated_delta_rule` is the 51-line
+reference; the chunked form is used for prefill.
+
+**Full-attention layer** (`Qwen3_5Attention.forward`):
+
+```
+qg = W_q h   viewed as 24 heads × [q 256 | gate 256]   # per-head interleaved, NOT two halves
+k  = W_k h   →  4 × 256 ;  v = W_v h  →  4 × 256
+q, k = RMSNorm_{1+w}(q), RMSNorm_{1+w}(k)                # over 256, per head
+RoPE on the first 64 dims only (partial_rotary_factor 0.25), θ = 1e7,
+  inv_freq_i = θ^(−2i/64), i < 32; rotate_half over the 64-slice (non-interleaved halves);
+  dims 64..255 pass through
+GQA 6:1: q-head j reads kv-head j // 6 ;  scores = q·k / √256 ; softmax in fp32
+attn = softmax(scores) · v  →  24 × 256 = 6144
+attn = attn ⊙ sigmoid(gate)                            # gate is 6144, head-major
+out  = W_o · attn                                      # 6144 → 5120
+```
+
+`rope_parameters` carries interleaved mRoPE (`mrope_section [11, 11, 10]`).
+For text the model expands one position id to every stream, so
+`apply_interleaved_mrope` copies each frequency onto itself - **plain RoPE**.
+The loader precomputes `cos/sin[max_model_len, 64]` once.
+
+**Head.** `logits = W_lm · RMSNorm_{1+w}(x)`; `lm_head` is a separate tensor
+(`tie_word_embeddings: false`); only the last token's logits are needed.
+
+**Per-token state the decode list owns:** per GDN layer a conv window
+`[10240 × 3]` bf16 and `S[48 × 128 × 128]` fp32; per FA layer a KV ring
+`[max_model_len × 4 × 256]` × 2 bf16; plus `position`.
+
 ### Byte accounting - `W` is measured
 
 Index manifest, 2399 tensors across 6 files, **no duplicated names** (unlike
