@@ -14,4 +14,7 @@ inline std::string gemv_variant(unsigned M, unsigned K, unsigned N, unsigned S, 
   return "gemv_M" + std::to_string(M) + "_K" + std::to_string(K) + "_N" + std::to_string(N) +
          "_S" + std::to_string(S) + "_L" + std::to_string(L);
 }
+inline std::string gemv_bf16_variant(unsigned M, unsigned K, unsigned N) {
+  return "gemv_bf16_M" + std::to_string(M) + "_K" + std::to_string(K) + "_N" + std::to_string(N);
+}
 }  // namespace kernels

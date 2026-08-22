@@ -34,6 +34,21 @@ inline double tol_for(const std::vector<float>& ref) {
   return 1e-4 * mx + 1e-5;
 }
 
+// Replay a closed list 8 times, drop the first 3 (warm-up / clock ramp) and
+// return the median of the last 5, divided by the launches recorded in it.
+inline double time_list(l0::Queue& q, l0::Fence& fence, l0::CmdList& list, int launches) {
+  std::vector<double> us;
+  for (int rep = 0; rep < 8; ++rep) {
+    auto t0 = std::chrono::steady_clock::now();
+    q.execute(list, &fence);
+    fence.wait();
+    double total = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+    if (rep >= 3) us.push_back(total / launches);
+  }
+  std::sort(us.begin(), us.end());
+  return us[us.size() / 2];
+}
+
 inline GemvResult run_gemv(l0::Context& ctx, l0::Queue& q, l0::Fence& fence,
                            const common::Int4Gptq& w, const std::vector<uint16_t>& x,
                            GemvCase c, int timed_launches) {
@@ -91,16 +106,47 @@ inline GemvResult run_gemv(l0::Context& ctx, l0::Queue& q, l0::Fence& fence,
     l0::CmdList list = l0::CmdList::regular(ctx);
     for (int i = 0; i < timed_launches; ++i) { bind(i % NB); list.launch(k, c.N / 64, c.S); }
     list.close();
-    std::vector<double> us;
-    for (int rep = 0; rep < 8; ++rep) {
-      auto t0 = std::chrono::steady_clock::now();
-      q.execute(list, &fence);
-      fence.wait();
-      double total = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
-      if (rep >= 3) us.push_back(total / timed_launches);
-    }
-    std::sort(us.begin(), us.end());
-    r.us_per_launch = us[us.size() / 2];
+    r.us_per_launch = time_list(q, fence, list, timed_launches);
+  }
+  return r;
+}
+
+// bf16 weights in the canonical tile layout. Same shape of run as run_gemv, but
+// no split-K (the kernel has no S) and no separate scales buffer.
+inline GemvResult run_gemv_bf16(l0::Context& ctx, l0::Queue& q, l0::Fence& fence,
+                                const common::Bf16Tiled& w, const std::vector<uint16_t>& x,
+                                uint32_t M, int timed_launches) {
+  GemvResult r;
+  r.weight_bytes = w.bytes();
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  const int NB = timed_launches ? std::max(2, int((72u << 20) / w.bytes()) + 1) : 1;
+  std::vector<l0::Mem> wbufs; wbufs.reserve(NB);
+  for (int i = 0; i < NB; ++i) {
+    wbufs.emplace_back(ctx, l0::MemKind::Device, w.bytes());
+    imm.copy(wbufs.back().ptr(), w.data.data(), w.bytes());
+  }
+  l0::Mem xbuf(ctx, l0::MemKind::Device, x.size() * 2);
+  imm.copy(xbuf.ptr(), x.data(), x.size() * 2);
+  l0::Mem obuf(ctx, l0::MemKind::Device, size_t(M) * w.N * 4);
+  l0::Module mod(ctx, kernels::path(kernels::gemv_bf16_variant(M, w.K, w.N)));
+  l0::Kernel k = mod.kernel("gemv_bf16");
+  k.group_size(64);
+  auto bind = [&](int i) { k.arg_ptr(0, wbufs[i].ptr()); k.arg_ptr(1, xbuf.ptr()); k.arg_ptr(2, obuf.ptr()); };
+
+  // Correctness launch, read back here (see run_gemv): the timing launches
+  // below cycle through the other weight copies.
+  {
+    l0::CmdList list = l0::CmdList::regular(ctx);
+    bind(0); list.launch(k, w.N / 64); list.close();
+    q.execute(list, &fence); fence.wait();
+    r.out.resize(size_t(M) * w.N);
+    imm.copy(r.out.data(), obuf.ptr(), r.out.size() * 4);
+  }
+  if (timed_launches > 0) {
+    l0::CmdList list = l0::CmdList::regular(ctx);
+    for (int i = 0; i < timed_launches; ++i) { bind(i % NB); list.launch(k, w.N / 64); }
+    list.close();
+    r.us_per_launch = time_list(q, fence, list, timed_launches);
   }
   return r;
 }

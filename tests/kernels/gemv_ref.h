@@ -27,3 +27,17 @@ inline std::vector<uint16_t> random_bf16(size_t n, uint32_t seed, float lo = -1.
   for (auto& e : v) e = common::f32_to_bf16(d(rng));
   return v;
 }
+
+// Same, weights row-major [N][K] bf16 (the canonical dense layout before tiling).
+inline void gemv_bf16_ref(const uint16_t* w_rowmajor, uint32_t K, uint32_t N,
+                          const std::vector<uint16_t>& x_bf16, uint32_t M, std::vector<float>& out) {
+  out.assign(size_t(M) * N, 0.f);
+  for (uint32_t n = 0; n < N; ++n)
+    for (uint32_t m = 0; m < M; ++m) {
+      double acc = 0.0;
+      for (uint32_t k = 0; k < K; ++k)
+        acc += double(common::bf16_to_f32(x_bf16[size_t(m) * K + k])) *
+               double(common::bf16_to_f32(w_rowmajor[size_t(n) * K + k]));
+      out[size_t(m) * N + n] = float(acc);
+    }
+}
