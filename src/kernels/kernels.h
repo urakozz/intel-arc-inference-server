@@ -10,4 +10,8 @@ namespace kernels {
 inline std::string path(const std::string& variant) {
   return std::string(B70_KERNEL_DIR) + "/" + variant + ".bin";
 }
+inline std::string gemv_variant(unsigned M, unsigned K, unsigned N, unsigned S, unsigned L) {
+  return "gemv_M" + std::to_string(M) + "_K" + std::to_string(K) + "_N" + std::to_string(N) +
+         "_S" + std::to_string(S) + "_L" + std::to_string(L);
+}
 }  // namespace kernels
