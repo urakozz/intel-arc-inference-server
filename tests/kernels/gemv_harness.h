@@ -71,7 +71,9 @@ inline GemvResult run_gemv(l0::Context& ctx, l0::Queue& q, l0::Fence& fence,
     k.arg_ptr(3, obuf.ptr());
   };
 
-  // Correctness launch.
+  // Correctness launch. Read back here, while wbufs[0] is the bound weight
+  // buffer: the timing launches below cycle through the other copies, so after
+  // them `out` would hold whichever copy ran last.
   {
     l0::CmdList list = l0::CmdList::regular(ctx);
     bind(0);
@@ -79,6 +81,11 @@ inline GemvResult run_gemv(l0::Context& ctx, l0::Queue& q, l0::Fence& fence,
     list.close();
     q.execute(list, &fence);
     fence.wait();
+    std::vector<float> partials(out_n);
+    imm.copy(partials.data(), obuf.ptr(), out_n * 4);
+    r.out.assign(size_t(c.M) * c.N, 0.f);
+    for (uint32_t s = 0; s < c.S; ++s)
+      for (size_t i = 0; i < size_t(c.M) * c.N; ++i) r.out[i] += partials[size_t(s) * c.M * c.N + i];
   }
   if (timed_launches > 0) {
     l0::CmdList list = l0::CmdList::regular(ctx);
@@ -95,10 +102,5 @@ inline GemvResult run_gemv(l0::Context& ctx, l0::Queue& q, l0::Fence& fence,
     std::sort(us.begin(), us.end());
     r.us_per_launch = us[us.size() / 2];
   }
-  std::vector<float> partials(out_n);
-  imm.copy(partials.data(), obuf.ptr(), out_n * 4);
-  r.out.assign(size_t(c.M) * c.N, 0.f);
-  for (uint32_t s = 0; s < c.S; ++s)
-    for (size_t i = 0; i < size_t(c.M) * c.N; ++i) r.out[i] += partials[size_t(s) * c.M * c.N + i];
   return r;
 }
