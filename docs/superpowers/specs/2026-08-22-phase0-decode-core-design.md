@@ -209,6 +209,15 @@ Two layouts, selected by `probe_gemv` (Section 4.2), both implemented by
   Tiles ordered k-group inner, n-tile outer. One subgroup streams one
   contiguous 544 B block per k-group.
 
+**Chosen: layout 1** (2026-08-23, `probe_gemv`); `S` per shape: out/o_proj 16,
+q‖k‖v 1, qkv‖z 1, gate‖up 4, down 16. The margin is 2712 vs 2666 GB/s summed
+over the five shapes - **the two layouts are within 2% of each other** by the
+deciding metric (3.7% apart in wall time) - and layout 1's entire lead comes
+from `qkv‖z` (N = 16384), where layout 0's power-of-two row stride caps it at
+420 GB/s against layout 1's 560; layout 0 is 0.9-6.3% ahead on the other four
+shapes. Recorded as the rule in Section 4.2 dictates; `docs/12-kernels.md` has
+the full 51-row table.
+
 The loser is deleted from the tree once the probe has chosen.
 
 ### 6.4 Load-time fusion and derived tensors

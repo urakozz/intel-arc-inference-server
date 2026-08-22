@@ -107,7 +107,13 @@ GEMV gap rather than competing with it.
    serve both. `M == 1` and small-`M` share an implementation; large `M` is a
    separate sycl-tla instantiation.
 2. **The decode kernel must split K.** Without it the device cannot be filled at
-   realistic output sizes, whatever else is right.
+   realistic output sizes, whatever else is right. **Confirmed on this
+   silicon** (2026-08-23, `probe_gemv`, doc 05 item 6): at N = 5120 - the worst
+   fill case, 320 subgroups - the int4 GEMV runs at **259 GB/s (43% of 600) at
+   S = 1 and 526 GB/s (88%) at S = 16** in the canonical layout, and 262 → 534
+   GB/s for `down` (K = 17408); split-K is worth **2.0×** at that shape. It is
+   not universal, though: at N ≥ 14336 the grid already fills the device and
+   S = 1 is the best setting, not merely an acceptable one.
 3. **Dequantise inline in the accumulation loop.** Never a separate pass, never a
    temporary buffer - that would double the traffic that is the entire budget.
 4. **Parameterise the decode kernel on `M ∈ [1,8]` from the start.** Retrofitting
