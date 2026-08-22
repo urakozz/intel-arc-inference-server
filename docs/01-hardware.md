@@ -42,6 +42,19 @@ the read-bandwidth denominator in every roofline calculation.** That is ~99% of 
 256-bit GDDR6 @ 19 Gbps theoretical peak (608 GB/s), which also tells you the
 hardware peak.
 
+Re-measured with a plain Level Zero launch (`tools/probe/probe_bw`, `bw_sum.cl`,
+2026-08-22): 590 GB/s median at 2 GB (min 585, max 592) and 584 GB/s median at
+8 GB (min 580, max 588), 20 timed iterations after 5 warm-ups. Agrees with the
+torch probe within 3%. Use 600 GB/s.
+
+Seed the buffer with incompressible data. The B70 compresses device-local
+memory losslessly, so a `zeCommandListAppendMemoryFill` of one repeated 32-bit
+word reads back at 1022 GB/s -- above the 608 GB/s theoretical peak, because
+most of those loads never reach DRAM. Timing is not the culprit: at 1, 2 and 4
+launches per submission the elapsed time was 2.102 / 4.203 / 8.402 ms, exactly
+linear. That, not the concurrent download, is the likely explanation of the
+discarded 1150 GB/s probe below.
+
 > An earlier probe reported 1150 GB/s. It was taken while a model was still
 > downloading and is wrong. Discard it.
 
