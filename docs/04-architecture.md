@@ -194,6 +194,24 @@ Deferring batching is not a shortcut - it isolates the variable being tested
 (per-token host + kernel cost) and keeps the first milestone reachable.
 Concurrency is a phase-5 concern at the earliest.
 
+### Follow-on: prefix caching (for Open WebUI / opencode use)
+
+Not in specs 1-3. The benchmark runs `--no-cache`, and the KV ring and GDN
+state are already persistent device memory - which is the prerequisite. Three
+stages, to be planned after plan 3 is done:
+
+1. **Nothing in specs 1-2.** Single stream; state buffers persistent.
+2. **Session continuation** - small, after spec 2: keep the last request's
+   final state resident; if the next prompt's token ids start with the
+   previous prompt + generated ids, continue from that state and prefill only
+   the new tokens. Covers the multi-turn chat case with zero snapshot
+   management: a prefix check and a `pos` update.
+3. **Block snapshots** - its own spec, probably alongside batching: a pool of
+   `(token-hash-chain, position, ~151 MB GDN state + KV slice)` entries at
+   1024-token boundaries, LRU, restored then tail-recomputed - the vLLM
+   scheme. Pays off only once several concurrent conversations share system
+   prompts.
+
 The server owns the **tokenizer and chat template** - the component the first
 draft of these docs omitted entirely. Both are host code on the request path:
 encode once per request, detokenise once per token (off the GPU's critical path,
