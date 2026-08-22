@@ -16,6 +16,12 @@
 - **Python appears exactly once**, in `tools/`, for offline weight conversion and
   benchmark glue. Never in the serving path - Python *is* the overhead being
   removed.
+- **Linux only.** Ubuntu on the box is the target; no Windows or macOS
+  runtime, and no portability shims for them.
+- **The server never downloads models.** `hf download <repo>` puts them in the
+  standard HF cache; the loader resolves a repo id against that cache
+  (`refs/main` → snapshot) or takes an absolute snapshot path. A missing
+  snapshot is an error naming the path, not a fetch.
 
 ## Why the decode step is the whole design
 
