@@ -218,7 +218,10 @@ from `qkv‖z` (N = 16384), where layout 0's power-of-two row stride caps it at
 shapes. Recorded as the rule in Section 4.2 dictates; `docs/12-kernels.md` has
 the full 51-row table.
 
-The loser is deleted from the tree once the probe has chosen.
+The loser is deleted from the tree once the probe has chosen (deferred to
+plan 2's loader by controller ruling, 2026-08-23: the margin is 1.7% and
+layout 1 loses four shapes of five; plan 2 re-examines per-shape before
+deleting anything).
 
 ### 6.4 Load-time fusion and derived tensors
 

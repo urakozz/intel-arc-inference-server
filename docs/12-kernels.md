@@ -74,9 +74,14 @@ bandwidth, and that `S` recovers it.
 replays of the same captured command list would produce different logits. The
 runtime's whole premise is one list replayed per token, and the golden-tensor
 tests compare bitwise. Determinism is not negotiable for either. The cost is
-`S ×` the output bytes: at N = 34816, S = 4, M = 1 that is 557 KB written
-against 94.7 MB read - **0.6%**, and it is a write, which this kernel otherwise
-does not do. Atomics would save that 0.6% and forfeit reproducibility.
+`S ×` the output bytes, and it varies by an order of magnitude across the
+chosen configurations: 0.59% at `gate‖up` (S = 4, 557 KB against 94.7 MB), but
+**2.35% at `out/o_proj` (S = 16, 327,680 B against 13.93 MB)** - that is the
+bound at M = 1, not the `gate‖up` figure. It is also a *write*, which this
+kernel otherwise does not do. At M = 8 the same worst case grows to **~19%**
+(2.62 MB of partials), which is the point at which this trade would have to be
+re-examined rather than assumed. Atomics would save that and forfeit
+reproducibility; today the trade is cheap, at M = 8 and S = 16 it would not be.
 
 ### The two layouts
 
@@ -133,8 +138,16 @@ re-running - the probe is the arbiter, not this paragraph.
 ### Rejected, and what was actually measured
 
 Measured, and only this: **layout 0 vs layout 1** and **S ∈ {1,2,4,8,16}**, at
-all five production shapes, twice. Everything below was decided by argument.
-Saying so is the point of this section.
+all five production shapes, **at M = 1**, twice. Everything below was decided by
+argument. Saying so is the point of this section.
+
+**`M` is the biggest unmeasured axis.** The kernel is parameterised on
+M ∈ [1,8] and only `gemv_M2_K5120_N5120_S1_L0` is even compiled today; nothing
+above M = 1 has been timed. The `S` picks in the table below are therefore
+**M = 1 picks**, and they will not simply carry over: the split-K partials scale
+with M, so `out/o_proj` at S = 16 goes from 2.35% of weight bytes at M = 1 to
+**~19% at M = 8**, and the rule would very likely choose a smaller `S` there.
+Re-run `probe_gemv` over M before trusting any of this for speculative decode.
 
 - **Shuffle-broadcast of activations (OpenVINO's pattern) vs same-line vector
   loads - NOT measured.** OpenVINO's GEMV holds `x` in registers and
@@ -172,12 +185,15 @@ and replayed 8 times, median of the last 5, `µs = list time / 40`. The list
 cycles through `NB = max(2, 72 MB / weight_bytes + 1)` identical weight copies
 at different addresses, so consecutive launches miss the 24 MB L2 and the number
 is DRAM bandwidth, not cache bandwidth. GB/s counts **weight bytes only**
-(nibbles + f16 scales); activations and output are under 1% of it. Correctness
+(nibbles + f16 scales). The activation vector is 10 KB, read once into cache;
+the fp32 partials written are **0.15-2.4% of weight bytes at the chosen `S`,
+worst at `out/o_proj` S = 16** (327,680 B against 13.93 MB) - not "under 1%",
+and worth remembering when reading a GB/s figure that ignores them. Correctness
 is checked against a double-accumulating CPU reference at **every** one of the
 50 int4 configurations - all passed.
 
 ```bash
-tools/box.sh run ./build/tools/probe/probe_gemv | tee /tmp/probe_gemv.md
+tools/box.sh run ./build/tools/probe/probe_gemv | tee docs/probe-gemv-2026-08-23.md
 ```
 
 Best `S` per shape in the canonical layout 1, and the `S = 1` row it is measured
@@ -193,7 +209,8 @@ against:
 | `lm_head` bf16 | 5120×248320 | 15520 | 585 (97%) | - | 585 | 97% | 4349.5 |
 
 `S` is the smallest value within 3% of that shape's best (spec §4.2). The full
-51-row matrix is in the probe's output.
+51-row matrix, verbatim, is committed as
+[probe-gemv-2026-08-23.md](probe-gemv-2026-08-23.md).
 
 Four things worth reading off it:
 
@@ -279,7 +296,9 @@ comparison.
 
 ### Measured
 
-Same probe, same date, same command. `w.bytes() = 2.54 GB`, 10 timed launches
+Same probe, same date, same command, and **M = 1 only** - like `gemv`, this
+kernel is written for M ∈ [1,8] but has never been timed above M = 1, and only
+the M = 1 variants are compiled. `w.bytes() = 2.54 GB`, 10 timed launches
 cycling 2 weight copies (5.09 GB device-resident):
 
 | shape | K×N | µs | GB/s | % of 600 |
