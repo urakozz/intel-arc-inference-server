@@ -25,8 +25,9 @@ int main() {
   l0::Fence f(q);
   const double peak = 600.0;  // GB/s, doc 01
   struct Shape { uint32_t K, N; const char* name; };
-  const Shape shapes[] = {{5120, 5120, "out/o_proj"}, {5120, 14336, "q|k|v"}, {5120, 16384, "qkv|z"},
-                          {5120, 34816, "gate|up"}, {17408, 5120, "down"}};
+  // Names use U+2016 (‖), not '|': this table is pasted into docs/ as markdown.
+  const Shape shapes[] = {{5120, 5120, "out/o_proj"}, {5120, 14336, "q‖k‖v"}, {5120, 16384, "qkv‖z"},
+                          {5120, 34816, "gate‖up"}, {17408, 5120, "down"}};
   const uint32_t Ss[] = {1, 2, 4, 8, 16};
   double layout_sum[2] = {0, 0};
   std::map<std::pair<uint32_t, uint32_t>, std::map<uint32_t, double>> best;  // (L, shape idx) -> S -> GB/s

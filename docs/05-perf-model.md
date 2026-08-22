@@ -174,8 +174,12 @@ around it.
    `lm_head` alone is 4.35 ms of a 25.8 ms token.
 
    ```bash
-   tools/box.sh run ./build/tools/probe/probe_gemv | tee /tmp/probe_gemv.md
+   tools/box.sh run ./build/tools/probe/probe_gemv | tee docs/probe-gemv-2026-08-23.md
    ```
+
+   The full 51-row matrix is committed verbatim as
+   [probe-gemv-2026-08-23.md](probe-gemv-2026-08-23.md). All of it is **M = 1**;
+   the `S` picks are M = 1 picks (doc 12).
 
 1-3, 5 and 6 are done. 4 is the remaining phase-0 measurement; no decode
 kernel is designed before its inputs exist.
