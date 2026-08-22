@@ -22,6 +22,27 @@ struct Int4Gptq {
   }
   size_t bytes() const { return qweight.size() * 4 + scales.size() * 2; }
 
+  // Layout 1 (spec 1 §6.3): per (n_tile of 16, k_group of 64) one 544-byte
+  // tile: 128 u32 nibbles indexed [k_octet j][lane l] = word (g*8+j, n_tile*16+l),
+  // then 16 f16 scales packed two per u32. Tiles ordered g-inner, n_tile-outer,
+  // so one subgroup streams contiguous memory along K.
+  static constexpr uint32_t kTileU32 = 136;
+  std::vector<uint32_t> tiled() const {
+    const uint32_t G = K / kGroup, NT = N / 16;
+    std::vector<uint32_t> t(size_t(NT) * G * kTileU32);
+    for (uint32_t nt = 0; nt < NT; ++nt)
+      for (uint32_t g = 0; g < G; ++g) {
+        uint32_t* tile = &t[(size_t(nt) * G + g) * kTileU32];
+        for (uint32_t j = 0; j < 8; ++j)
+          for (uint32_t l = 0; l < 16; ++l)
+            tile[j * 16 + l] = qweight[size_t(g * 8 + j) * N + nt * 16 + l];
+        for (uint32_t l = 0; l < 16; l += 2)
+          tile[128 + l / 2] = uint32_t(scales[size_t(g) * N + nt * 16 + l]) |
+                              (uint32_t(scales[size_t(g) * N + nt * 16 + l + 1]) << 16);
+      }
+    return t;
+  }
+
   // Uniform random nibbles, scales in [0.02, 0.08]: typical magnitude of a
   // 27B checkpoint's group scales, so outputs are O(1) for unit inputs.
   static Int4Gptq random(uint32_t K, uint32_t N, uint32_t seed) {
