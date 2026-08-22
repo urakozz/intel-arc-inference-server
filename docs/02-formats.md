@@ -100,6 +100,16 @@ model load. Consequences:
 The canonical layout is chosen by what the `sycl-tla` mixed-dtype mainloop wants,
 not by what any checkpoint happens to ship.
 
+**Canonical int4 layout chosen 2026-08-23 by `probe_gemv`: layout 1** (the tiled
+544-byte block per 16 `n` × 64 `k`, scales inline) - 2712 vs 2666 GB/s summed
+over the five decode shapes, so **the two layouts are within 2% of each other**
+by the deciding metric (3.7% apart in wall time). The whole lead comes from one
+shape, `qkv‖z` at N = 16384, where layout 0's power-of-two 64 KB row stride caps
+it at 420 GB/s against layout 1's 560; on the other four shapes layout 0 is
+0.9-6.3% ahead. Recorded as the rule dictates, and worth re-running if the shape
+mix changes - the full table and the argument are in
+[12-kernels.md](12-kernels.md).
+
 ## W4A16 for decode, possibly W4A8 for prefill
 
 The *weight* format is settled (int4, symmetric). The **activation** width is a
