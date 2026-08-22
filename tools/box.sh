@@ -8,7 +8,7 @@
 set -euo pipefail
 BOX="${BOX:-user@box}"
 REMOTE_DIR="${REMOTE_DIR:-b70-inference-server}"
-JOBS="${JOBS:-8}"
+JOBS="${JOBS:-44}"
 cd "$(dirname "$0")/.."
 
 sync_tree() {
