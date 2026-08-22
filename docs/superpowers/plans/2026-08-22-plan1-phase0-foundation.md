@@ -1302,7 +1302,7 @@ int main() {
 
   common::Int4Gptq r = common::Int4Gptq::random(128, 64, 1);
   CHECK_EQ(r.qweight.size(), size_t(128 / 8 * 64));
-  CHECK(r.at(5, 7) >= -8.0f * 0.05f && r.at(5, 7) <= 7.0f * 0.05f);
+  CHECK(r.at(5, 7) >= -8.0f * 0.08f && r.at(5, 7) <= 7.0f * 0.08f);   // scales are in [0.02, 0.08]
   std::puts("int4_test OK");
   return 0;
 }
