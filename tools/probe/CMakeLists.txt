@@ -4,3 +4,8 @@ target_link_libraries(probe_bw PRIVATE b70_l0)
 b70_target_kernel_dir(probe_bw)
 add_dependencies(probe_bw kernel_bw_sum)
 
+add_executable(probe_replay probe_replay.cc)
+target_include_directories(probe_replay PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(probe_replay PRIVATE b70_l0)
+b70_target_kernel_dir(probe_replay)
+add_dependencies(probe_replay kernel_noop kernel_ctrl_read)

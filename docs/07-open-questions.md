@@ -73,12 +73,29 @@ phase 2.
 
 ## 5. What is the per-kernel fixed cost inside a replayed command list?
 
-The hard limit of the entire design, and now a sized question: the 27B is
-~700 kernels per token unfused, ~250 after the fusion list in doc 04. A step
-at the roofline is ~26 ms. Capture 700 trivial kernels into one list, replay
-it, divide; repeat at 250. If the answer is ≥ 3 µs per kernel, fusion is on
-the phase-1 critical path; if it is < 1 µs, fusion can wait. Also measure one
-empty submit + fence round trip - that is the floor no fusion removes.
+Measured 2026-08-22 by `tools/probe/probe_replay`: one in-order regular list
+of N launches, closed once, replayed 1000 times behind a fence (median, after
+20 warm-ups).
+
+| kernel | N | us/replay | us/kernel |
+|---|---|---|---|
+| (empty list) | 0 | 6.4 | - |
+| noop | 1 | 9.9 | 9.89 |
+| noop | 250 | 134.6 | 0.54 |
+| noop | 700 | 360.7 | 0.52 |
+| ctrl_read | 1 | 5.9 | 5.90 |
+| ctrl_read | 250 | 161.4 | 0.65 |
+| ctrl_read | 700 | 438.6 | 0.63 |
+
+Per-kernel cost is 0.52 µs (`noop`) and 0.63 µs (`ctrl_read`, which reads one
+dword of a shared-memory control block - the shape of every decode kernel's
+first instruction) → **< 1 µs, so fusion is not on the phase-1 critical path**
+(spec 1 §4.1 rule: ≥ 3 µs yes, < 1 µs no) and the unfused ~645-kernel list
+(spec 1 §9.1) ships first at ~0.4 ms of a ~26 ms step.
+
+The empty submit + fence round trip is **6.4 µs** - the floor no fusion
+removes, paid once per token. The N = 1 rows are that floor plus one kernel,
+not a per-kernel number.
 
 ## 6. How much accuracy does quantising `lm_head` cost?
 
