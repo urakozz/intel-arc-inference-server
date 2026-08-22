@@ -87,7 +87,7 @@ Create one regular, in-order command list with N launches of a trivial kernel
 
 Decision rule written into doc 04: if µs/kernel ≥ 3, the fusion list in doc
 04 is on this spec's critical path (Section 9.6 ordering); if < 1, the
-unfused ~400-kernel list ships first and fusion is deferred.
+unfused ~650-kernel list ships first and fusion is deferred.
 
 ### 4.2 `probe_gemv` (C++ host + the real `gemv.cl`) → doc 05 item 6, doc 08
 
@@ -174,7 +174,9 @@ bf16 if `.weight` does. No label is trusted. At load, assert and fail by name:
 
 - `quantization_config.sym == true`, `desc_act == false`, `group_size == 64`;
 - `g_idx[k] == k / 64` for every k (identity under g64);
-- every `qzeros` word `== 0x88888888`;
+- every `qzeros` word `== 0x77777777` - GPTQ **v1** stores `zero − 1`, so the
+  symmetric zero point 8 is stored as 7 (read from the checkpoint 2026-08-22);
+  dequant is `w = (q − 8) · scale` either way;
 - shapes match doc 03's tables for every layer;
 - the 98 `dynamic` exclusions match exactly the tensors found in bf16.
 
@@ -219,7 +221,7 @@ The loser is deleted from the tree once the probe has chosen.
 | GDN state `S[48][128][128]` fp32 × 48 layers | 151 MB |
 | GDN conv ring `[16][10240]` bf16 × 48 layers (depth 16 ≥ M + 3 so a step's writes never land on slots another work-group reads as history) | 15.7 MB |
 | KV ring `[max_model_len][4][256]` bf16 × 2 × 16 layers | 1.07 GB |
-| Activations: residual `[2][8][5120]` bf16 (double-buffered, Section 9.2); partials fp32 `[S_max=16][8][34816]` (17.8 MB); qkvz, qkv, ab, gdn_out, attn_out, mlp_mid; logits `[8][248320]` fp32 (7.9 MB); attention partials `[24][64][8][258]` fp32 (12.7 MB) | < 100 MB |
+| Activations: residual `[8][5120]` bf16; normalised/activated `x` `[8][17408]` bf16; partials fp32 `[S_max=16][8][34816]` (17.8 MB); qkvz, qkv, ab, gdn_out, attn_out, mlp_mid; logits `[8][248320]` fp32 (7.9 MB); attention partials `[24][64][8][258]` fp32 (12.7 MB) | < 100 MB |
 | Control block | 64 B, `zeMemAllocShared` |
 
 ≈ 19.3 GB of 32 GB. Upload: one `zeCommandListAppendMemoryCopy` per buffer on
@@ -330,62 +332,71 @@ data-dependent work-group counts. Reductions are fixed-tree or two-stage.
 
 ### 9.1 Per-token kernel sequence
 
-GDN layer (6): `gemv(qkv‖z)` → `gemv_bf16(a‖b)` → `gdn_step` → `gemv(out_proj)`
-→ `gemv(gate‖up)` → `gemv(down_proj)`.
-FA layer (7): `gemv(q‖k‖v)` → `attn_prep` → `attn_decode` → `attn_reduce` →
-`gemv(o_proj)` → `gemv(gate‖up)` → `gemv(down_proj)`.
-Per token: `embed_gather` first; `gemv(lm_head)`, `argmax_stage1`,
-`argmax_stage2` last. **404 kernels per token.** Doc 04's "~250" is revised to
-this number; the further fusions it listed are deferred behind `probe_replay`.
+GDN layer (10): `prep(RESIDUAL|RMSNORM)` → `gemv(qkv‖z)` → `gemv_bf16(a‖b)` →
+`gdn_step` → `prep(GATED_HEAD)` → `gemv(out_proj)` → `prep(RESIDUAL|RMSNORM)`
+→ `gemv(gate‖up)` → `prep(SILU_MUL)` → `gemv(down_proj)`.
+FA layer (10): `prep(RESIDUAL|RMSNORM)` → `gemv(q‖k‖v)` → `attn_prep` →
+`attn_decode` → `attn_reduce` → `gemv(o_proj)` → `prep(RESIDUAL|RMSNORM)` →
+`gemv(gate‖up)` → `prep(SILU_MUL)` → `gemv(down_proj)`.
+Per token: `embed_gather` first; `prep(RESIDUAL|RMSNORM)` with the final norm,
+`gemv_bf16(lm_head)`, `argmax_stage1`, `argmax_stage2` last. **645 kernels per
+token.** Doc 04's "~250" is revised to this number. Folding `prep` into the
+following GEMV's prologue was the original design and was rejected during
+planning: staging `M × K` activations in SLM does not fit (8 × 17408 × 4 B =
+557 KB against 128 KB), and re-reading split-K partials in every work-group
+costs up to ~25% extra L2 traffic on `gate‖up`. It returns as the first
+optimisation candidate once `probe_replay` prices a kernel.
 
-### 9.2 `gemv` - the int4 linear
+### 9.2 `gemv` - the int4 linear, and `prep`
 
 ```
-gemv<M, K, N, S, S_PREV, PROLOGUE, LAYOUT>(
+gemv<M, K, N, S, LAYOUT>(
   const uint*   w,          // canonical int4 (+ scales inline for layout 1)
   const half*   scales,     // layout 0 only
-  const void*   x,          // bf16 [M][K]  if S_PREV == 1, else fp32 partials [S_PREV][M][K]
-  const ushort* norm_w,     // (1+w) bf16 [K] when PROLOGUE has RMSNORM
-  const ushort* resid_in,   // bf16 [M][K] residual stream, read when PROLOGUE has RESIDUAL
-  ushort*       resid_out,  // bf16 [M][K] written by work-group 0 when PROLOGUE has RESIDUAL
-  const void*   aux,        // GATED_RMSNORM_PER_HEAD only: fp32 z [M][6144]; norm_w is then the gated norm's w[128]
-  float*        out)        // fp32 partials [S][M][N]
+  const ushort* x,          // bf16 [M][K], already normalised / activated by `prep`
+  float*        out)        // fp32 partials [S][M][N]  (S == 1: just [M][N])
 ```
 
-**Residual discipline.** The residual stream is double-buffered; a `RESIDUAL`
-prologue reads `resid_in` and work-group 0 writes `resid_out`, so no
-work-group ever reads a buffer another is writing. Capture alternates the two
-buffers at every `RESIDUAL` consumer. **Exactly one consumer of each partials
-buffer carries `RESIDUAL`** - `gemv(qkv‖z)` / `gemv(q‖k‖v)` for the previous
-layer's `down` partials, `gemv(gate‖up)` for the mixer's partials, `lm_head`
-for the last layer's - and any later reader of the same input
-(`gemv_bf16(a‖b)`) takes the materialised `resid_out` with `S_PREV = 1`. Two
-consumers with `RESIDUAL` on one buffer would add the partials twice; the
-capture code asserts this.
+- Subgroup owns 16 consecutive `n`; work-group = 4 subgroups = 64 `n`; grid =
+  `(N/64) × S`; work-group `(gn, s)` handles k-groups `[s·G/S, (s+1)·G/S)`,
+  `G = K/64`. Requires `N % 64 == 0`, `K % 64 == 0`, `S | G` - asserted at
+  capture; `a‖b` is zero-padded to N = 128 at load.
+- Per k-group: lane reads its 8 u32 words (64 nibbles for its `n`) and one
+  f16 scale - layout 0 as strided coalesced loads, layout 1 as one
+  `intel_sub_group_block_read8` + one ushort block read; `x[m][k]` for the
+  group's 64 k come in as `ushort8` vector loads (16 lanes hitting the same
+  line - a broadcast load, no shuffles); `acc[m] += (nibble − 8) · scale · x`.
+- Epilogue: `out[s][m][n] = acc[m]`. Nothing else. Residual, activation and
+  normalisation live in `prep` so split-K stays deterministic and the GEMV
+  stays one thing.
 
-- **Prologue** (every work-group, redundantly - the input is ≤ 70 KB and in
-  L2): `x_m = S_PREV == 1 ? x : Σ_s partials[s]`; then by `PROLOGUE` flags:
-  `RESIDUAL` → `x_m += resid_in; if (group_id == 0) resid_out = x_m`;
-  `SILU_MUL` → `x_m = silu(x_m[gate lanes]) · x_m[up lanes]` (only for
-  `down_proj`, whose K = 17408 input is the interleaved gate‖up output);
-  `RMSNORM` → `x_m *= rsqrt(mean(x_m²) + 1e-6) · norm_w`. `x_m` for all `M`
-  rows is staged in SLM as fp32.
-- **Main loop:** subgroup owns 16 consecutive `n`; work-group = 4 subgroups
-  = 64 `n`; grid = `(N/64) × S`; each work-group handles k-groups
-  `[s·K/64/S, (s+1)·K/64/S)`. Per k-group: block-read 8 u32 per lane
-  (64 nibbles for this lane's `n`), one f16 scale, then for each of the 64 k:
-  `acc[m] += (nibble − 8) · scale · x_m[k]` with `x_m[k]` broadcast from SLM.
-- **Epilogue:** write `out[s][m][n]` fp32. No residual, no activation - those
-  belong to the consumer's prologue so split-K stays deterministic.
+`gemv_bf16<M, K, N>` is the same skeleton over bf16 weights in the canonical
+bf16 layout (tiles `[n_tile][k_octet][8 k][16 n]` ushort, one
+`intel_sub_group_block_read_us8` per lane per 8 k), `S = 1`, used for `a‖b`
+(N = 128 padded) and `lm_head` (N = 248320, writes fp32 logits).
 
-Variants compiled: one per distinct `(K, N, S, PROLOGUE, LAYOUT)` actually used
-(≈ 10) × `M`. `S` per shape comes from `probe_gemv`.
+```
+prep<M, K, MODE, S_PREV>(
+  const float*  partials,   // fp32 [S_PREV][M][K_in]
+  ushort*       resid,      // bf16 [M][K] residual stream, read + written in place (RESIDUAL)
+  const ushort* norm_w,     // (1+w) bf16 [K] (RMSNORM) | gated norm w[128] (GATED_HEAD)
+  const float*  aux,        // GATED_HEAD: fp32 z [M][6144]
+  ushort*       x_out)      // bf16 [M][K_out]
+```
 
-`gemv_bf16<M, K, N>` is the same skeleton over bf16 weights, S = 1, used for
-`a‖b` (N = 96, PROLOGUE = RMSNORM on `resid_out`, S_PREV = 1) and `lm_head`
-(N = 248320, PROLOGUE = RESIDUAL | RMSNORM consuming the last `down`
-partials with the final norm). `lm_head` writes fp32 logits directly
-(`S = 1`).
+One work-group of 256 per `(m, chunk of 4096 k)`; each work-item owns its
+elements end-to-end, so in-place residual update has no cross-work-group
+hazard. Modes: `RESIDUAL|RMSNORM` - `r = resid + Σ_s partials; resid = r;
+x_out = r · rsqrt(mean(r²)+1e-6) · norm_w` (the mean is a work-group
+reduction; with K = 5120 one work-group covers the row, and `K_out = K`);
+`SILU_MUL` - input `[M][34816]` interleaved in 16-column blocks, `x_out[k] =
+silu(g[k]) · u[k]`, `K_out = 17408`; `GATED_HEAD` - per 128-wide head:
+`x_out = w · (o · rsqrt(mean(o²)+1e-6)) · silu(z)`, `K = K_out = 6144`
+(plan 3).
+
+Variants compiled: one per distinct `(K, N, S, LAYOUT)` actually used
+(≈ 6) × `M`, plus `prep` per `(K, MODE)`. `S` per shape comes from
+`probe_gemv`.
 
 ### 9.3 `embed_gather<M>`
 
@@ -420,14 +431,14 @@ Per token `m` in order:
    written back once.
 5. Gated norm over the head's 128 `o` values needs all 4 chunks: the kernel
    writes `o` to scratch fp32, and the **last** step - the RMS over 128, `× w
-   × silu(z)` - is done in `gemv(out_proj)`'s prologue (`PROLOGUE =
-   GATED_RMSNORM_PER_HEAD`, a fourth prologue flag, with `z` passed in place of
-   `norm_w`). No cross-work-group synchronisation inside `gdn_step`.
+   × silu(z)` - is `prep(GATED_HEAD)` (Section 9.2). No cross-work-group
+   synchronisation inside `gdn_step`.
 
 ### 9.5 `attn_prep<M>`, `attn_decode<M>`, `attn_reduce<M>`
 
 - `attn_prep`: grid 28 work-groups (24 q-heads + 4 k-heads) × `M`. Sums the
-  `q‖k‖v` partials for its head (512 values for a q-head: `[q 256 | gate 256]`
+  `q‖k‖v` partials for its head (it is the one consumer, so it plays `prep`'s
+  role) (512 values for a q-head: `[q 256 | gate 256]`
   interleaved per head, 256 for k/v), RMSNorm(1+w) over 256 for q and k,
   RoPE on dims 0-63 with `cos/sin[pos+m]` (`rotate_half` over the 64 slice),
   writes q fp32 to scratch, gate fp32 to scratch, k and v bf16 into the KV
@@ -482,7 +493,8 @@ section cannot state why its lane assignment is shaped that way is not done.
 
 | Test | Checks | Tolerance |
 |---|---|---|
-| `tests/kernels/gemv_*` | each `(K,N,S,PROLOGUE,LAYOUT)` variant vs CPU reference, random data | per output: abs err ≤ 2⁻⁷ × max|reference row| (bf16 output) |
+| `tests/kernels/gemv_*` | each `(K,N,S,LAYOUT)` variant vs CPU reference, random data | per output: abs err ≤ 1e-4 × max|reference row| + 1e-5 (fp32 output, summation order only) |
+| `tests/kernels/prep_*` | each `(K, MODE)` vs CPU reference | ≤ 2⁻⁷ relative (bf16 output) |
 | `tests/kernels/gdn_step` | one layer, random state, vs C++ port of `torch_recurrent_gated_delta_rule` | fp32 state rel err ≤ 1e-5; output ≤ 1e-3 |
 | `tests/kernels/attn_*` | random KV at depths 1, 255, 256, 4096 vs CPU softmax | ≤ 1e-3 |
 | `tests/kernels/argmax` | ties, masked tail, all-equal | exact |
@@ -517,12 +529,13 @@ monotonic clock around the step loop and prints a markdown row
 
 | Risk | Where it shows | Response |
 |---|---|---|
-| Per-kernel replay cost ≥ 3 µs makes 404 kernels ≈ 10% of a step | `probe_replay` | pull doc 04's fusion list into this spec before `gdn_step` |
+| Per-kernel replay cost ≥ 3 µs makes 645 kernels ≈ 7-8% of a step | `probe_replay` | pull doc 04's fusion list into this spec before `gdn_step` |
 | GEMV cannot fill the device at N = 1024 even with split-K | `probe_gemv` | lane-per-(n, k-half) variant; reported in doc 08 |
 | `zeMemAllocShared` reads inside kernels are slow | `probe_replay` variant reading the control block | fall back to device memory + one 64 B copy per step |
 | Oracle too slow on CPU for 64-token prompts | first `dump.py` run | shorten to 32 tokens; the test is about layers, not length |
 | Kernel count in one list exceeds a driver limit | capture | split into two lists executed back-to-back (still zero host work) |
-| Ring-write ownership in `gdn_step` or the residual double-buffer races | `replay_determinism` | designed not to (Sections 9.2, 9.4); the test is the proof, not the argument |
+| Ring-write ownership in `gdn_step` races | `replay_determinism` | designed not to (Section 9.4); the test is the proof, not the argument |
+| 645 kernels × per-kernel cost is a large fraction of a step | `probe_replay` | fold `prep` into the GEMV prologue for the K = 5120 consumers (fits: 5120 × M × 2 B) - measured, not assumed |
 
 Open questions touched: doc 07 #5 (resolved by 4.1), #12 (measured by 8.6),
 #13 (untouched - no sycl-tla here), #6 (`lm_head` quantisation - deferred to
