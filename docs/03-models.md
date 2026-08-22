@@ -180,6 +180,10 @@ the 9B), total 20.03 GB on disk:
 **`W` = 12.163 + 0.760 + 0.052 + 2.543 = 15.52 GB per decode token** (no MTP).
 See doc 05 for what follows from it.
 
+Reproduce: `python3 tools/probe/checkpoint_bytes.py <snapshot>` - it reads the
+index and the safetensors headers only (no tensor data) and prints this table,
+`W`, the `lm_head` int4/int8 variants and the MTP head.
+
 ### Three facts that should drive phase 1
 
 1. **No MoE.** The hardest kernel family in the later models is simply absent.
