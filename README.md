@@ -70,7 +70,7 @@ one beats vLLM on its own model.
 
 | # | Model | Adds |
 |---|-------|------|
-| 0 | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` | **measurement only** - `W` ✅ 15.52 GB (doc 05), vLLM baseline ✅ 31.50 t/s, replay floor latency at ~700 kernels, one GEMV microbench against 600 GB/s |
+| 0 | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` | **done 2026-08-23** - `W` ✅ 15.52 GB (doc 03), vLLM baseline ✅ 31.50 t/s (BENCHMARKS.md), replay floor ✅ 0.52 µs/kernel (doc 07 #5), GEMV ✅ 526 GB/s at N=5120 / 585 GB/s lm_head (doc 12), bandwidth ✅ 590 GB/s via L0 (doc 01) |
 | 1 | same | dense + hybrid attention (48 GDN + 16 full), int4 g64. **Target: > 31.50 t/s tg256, ≥ 1973 t/s pp4096** |
 | 2 | same | MTP speculative decoding on the shipped head. **Target: > 45.23 t/s** (vLLM, 2 draft tokens) |
 | 3 | `olka-fi/Ornith-1.0-35B-MXFP4` | MoE (grouped GEMM) + MXFP4 |
