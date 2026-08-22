@@ -26,6 +26,20 @@ and, before that, measure the three numbers the whole design rests on.
 - A CLI, `b70-decode`, that ingests token ids, generates greedily, and reports
   tg256 t/s at depth 4096.
 
+**Platform and model acquisition** (project-wide, decided 2026-08-23)
+
+- **Linux only.** Ubuntu on the box is the only target; no Windows, no macOS
+  runtime. Nothing in the tree may pay for portability it will not use
+  (`mmap`, `/dev/dri`, Level Zero loader paths are Linux facts).
+- **The server never downloads.** Models arrive via `hf download <repo>` into
+  the standard HuggingFace cache (`~/.cache/huggingface/hub`, or
+  `$HF_HOME/hub`), or the user passes an absolute snapshot path. The loader
+  accepts either a repo id (`Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ`,
+  resolved to `hub/models--<org>--<name>/snapshots/<rev>` with `<rev>` read
+  from `refs/main`) or a directory. No network code, no `HF_TOKEN`, no
+  `.incomplete` handling - a missing or partial snapshot is an error that
+  names the path.
+
 **Out of scope** (follow-on specs)
 
 - Prefill kernels (sycl-tla, W4A16 then W4A8), tokenizer, chat template,
@@ -160,8 +174,9 @@ against this order is a review failure.
 
 ### 6.1 Input and naming
 
-Input is the snapshot directory. The loader reads `config.json` (architecture
-fields, `quantization_config.dynamic` as data), uses
+Input is a snapshot directory, or a HF repo id resolved against the local
+cache as described in §1 (never downloaded). The loader reads `config.json`
+(architecture fields, `quantization_config.dynamic` as data), uses
 `model.safetensors.index.json` as the manifest, mmaps the shards it names, and
 deduplicates by tensor name (index wins). Names: strip `model.language_model.`;
 skip `model.visual.*`; `lm_head.weight` is top-level; `mtp.*` is loaded only

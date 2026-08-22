@@ -76,6 +76,12 @@ one beats vLLM on its own model.
 | 3 | `olka-fi/Ornith-1.0-35B-MXFP4` | MoE (grouped GEMM) + MXFP4 |
 | 4 | `palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4` | MoE **and** MTP together |
 
+## Platform
+
+Linux (Ubuntu on the box) only. Models are fetched with `hf download` into the
+standard HuggingFace cache or pointed to by absolute path; the server itself
+never downloads anything.
+
 ## v1 definition of done
 
 OpenAI-compatible endpoint (`/v1/completions`, `/v1/chat/completions`, SSE),
