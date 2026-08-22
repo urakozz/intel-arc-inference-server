@@ -112,8 +112,11 @@ GEMV gap rather than competing with it.
    fill case, 320 subgroups - the int4 GEMV runs at **259 GB/s (43% of 600) at
    S = 1 and 526 GB/s (88%) at S = 16** in the canonical layout, and 262 → 534
    GB/s for `down` (K = 17408); split-K is worth **2.0×** at that shape. It is
-   not universal, though: at N ≥ 14336 the grid already fills the device and
-   S = 1 is the best setting, not merely an acceptable one.
+   not universal, and it does not track `N` monotonically: at N = 14336 and
+   N = 16384 the grid already fills the device and S = 1 is the *best* setting,
+   not merely an acceptable one, while `gate‖up` at N = 34816 still needs S = 4
+   (S = 1 → 425 GB/s, 71%; S = 4 → 538) despite having 2176 subgroups. Subgroup
+   count is necessary, not sufficient - measure per shape (doc 12).
 3. **Dequantise inline in the accumulation loop.** Never a separate pass, never a
    temporary buffer - that would double the traffic that is the entire budget.
 4. **Parameterise the decode kernel on `M ∈ [1,8]` from the start.** Retrofitting
