@@ -1,0 +1,36 @@
+#pragma once
+#include <cstdint>
+#include <cstring>
+
+namespace common {
+inline float bf16_to_f32(uint16_t h) {
+  uint32_t u = uint32_t(h) << 16; float f; std::memcpy(&f, &u, 4); return f;
+}
+// Round-to-nearest-even; NaN inputs are not expected and not handled.
+inline uint16_t f32_to_bf16(float f) {
+  uint32_t u; std::memcpy(&u, &f, 4);
+  uint32_t rounding = ((u >> 16) & 1u) + 0x7FFFu;
+  return uint16_t((u + rounding) >> 16);
+}
+// IEEE half <-> float, normal range only (scales are ~1e-3..1; never subnormal).
+inline float f16_to_f32(uint16_t h) {
+  uint32_t sign = (h >> 15) & 1u, exp = (h >> 10) & 0x1Fu, man = h & 0x3FFu;
+  uint32_t u;
+  if (exp == 0) u = sign << 31;                                   // zero / subnormal -> 0
+  else if (exp == 31) u = (sign << 31) | 0x7F800000u | (man << 13);
+  else u = (sign << 31) | ((exp + 112u) << 23) | (man << 13);
+  float f; std::memcpy(&f, &u, 4); return f;
+}
+inline uint16_t f32_to_f16(float f) {
+  uint32_t u; std::memcpy(&u, &f, 4);
+  uint32_t sign = (u >> 16) & 0x8000u;
+  int32_t exp = int32_t((u >> 23) & 0xFFu) - 127 + 15;
+  uint32_t man = u & 0x7FFFFFu;
+  if (exp <= 0) return uint16_t(sign);                            // flush to zero
+  if (exp >= 31) return uint16_t(sign | 0x7C00u);
+  uint32_t half = sign | (uint32_t(exp) << 10) | (man >> 13);
+  uint32_t rem = man & 0x1FFFu;                                   // RNE on the 13 dropped bits
+  if (rem > 0x1000u || (rem == 0x1000u && (half & 1u))) half += 1u;
+  return uint16_t(half);
+}
+}  // namespace common
