@@ -8,9 +8,11 @@
   `STANDARD_REQUIRED ON`; its README requires "at least C++17". Match it. Bump to
   C++20 only after the thing runs.
 - **`icpx`** (oneAPI DPC++) for SYCL, **Level Zero** for the runtime, **CMake**.
-- **Builds on the box, not on the Mac.** The B70 and the oneAPI toolchain live on
-  `box`. CLion must use a remote toolchain - same arrangement as
-  `~/CLionProjects/vllm-xpu-kernels`.
+- **Builds on the box, not on the Mac - natively, not in Docker.** The host has
+  oneAPI 2026.1 (`icpx`), `ocloc 26.27`, IGC 2.38 and the Level Zero headers
+  (doc 10). CLion uses a remote toolchain - same arrangement as
+  `~/CLionProjects/vllm-xpu-kernels`. The reference container is needed only
+  for the Python oracle.
 - **Python appears exactly once**, in `tools/`, for offline weight conversion and
   benchmark glue. Never in the serving path - Python *is* the overhead being
   removed.
