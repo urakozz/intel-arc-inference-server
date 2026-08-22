@@ -180,9 +180,13 @@ list, in order of kernels saved:
    as a second dtype stream);
 5. residual add into the GEMV epilogue (free once 1 is done).
 
-Target after fusion: **~250 kernels per token**. Doc 07 #5 measures the
+Target after fusion: **~650 (spec 1 §9.1)**. Doc 07 #5 measures the
 per-kernel floor before any of this is built, so the fusion list is sized by a
-number rather than by taste.
+number rather than by taste. Measured 2026-08-22: **0.52 µs/kernel** (`noop`)
+and **0.63 µs/kernel** (`ctrl_read`) inside a replayed list - the 3-5 µs
+estimate above is ~6× pessimistic, 645 kernels cost ~0.4 ms of a ~26 ms step,
+so fusion is *not* on the phase-1 critical path and the unfused list ships
+first.
 
 ## Server
 
