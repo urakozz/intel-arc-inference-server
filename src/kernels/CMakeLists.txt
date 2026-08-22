@@ -19,3 +19,10 @@ foreach(L 0 1)
   endforeach()
 endforeach()
 add_gemv_variant(2 5120 5120 1 0)   # spec 1 §9: the M loop must compile at M=2
+
+set(GEMV_BF16_CL ${CMAKE_CURRENT_SOURCE_DIR}/gemv_bf16.cl)
+function(add_gemv_bf16_variant M K N)
+  add_ocloc_kernel(gemv_bf16_M${M}_K${K}_N${N} SOURCE ${GEMV_BF16_CL} DEFINES M=${M} K=${K} N=${N})
+endfunction()
+add_gemv_bf16_variant(1 5120 248320)   # lm_head
+add_gemv_bf16_variant(1 5120 128)      # in_proj_a || in_proj_b, zero-padded 96 -> 128
