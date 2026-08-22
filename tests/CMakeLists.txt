@@ -12,3 +12,7 @@ target_link_libraries(launch_test PRIVATE b70_l0)
 b70_target_kernel_dir(launch_test)
 add_dependencies(launch_test kernel_noop)
 add_test(NAME launch_test COMMAND launch_test)
+
+add_executable(int4_test kernels/int4_test.cc)
+target_include_directories(int4_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME int4_test COMMAND int4_test)
