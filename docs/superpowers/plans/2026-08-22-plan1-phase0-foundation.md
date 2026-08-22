@@ -31,8 +31,9 @@ plan's probe results exist, because they decide the canonical layout and `S`.
   data-dependent work-group counts; reductions are fixed-tree or two-stage.
 - `ocloc compile -device bmg-g31 -output <name> -output_no_suffix -out_dir <dir>`
   produces `<dir>/<name>.bin` (verified on the box 2026-08-22).
-- The box builds with `JOBS=8` (doc 09: 8 jobs is the fastest setting; 16+
-  swaps). Builds run on the box only; the Mac never compiles this.
+- The box builds with `JOBS=44` (all 22c/44t - the user's call, 2026-08-22;
+  doc 09's "8 jobs" limit was about the vLLM/torch build's giant template
+  TUs, not this tree). Builds run on the box only; the Mac never compiles this.
 - The checkpoint's GPTQ v1 convention: `qzeros` words are `0x77777777`,
   `g_idx` is the identity; dequant is `w = (q − 8) · scale`, `q` = unsigned nibble.
 - Every kernel lands with a section in `docs/12-kernels.md` (what it
