@@ -1,7 +1,35 @@
 #include "loader/quant.h"
+
+#include <cstdint>
 #include <stdexcept>
+#include <string>
 
 namespace loader {
+
+void check_align(const void* p, size_t a, const std::string& name) {
+  if (reinterpret_cast<uintptr_t>(p) % a != 0)
+    throw std::runtime_error("tensor '" + name + "': mmapped data is not " + std::to_string(a) +
+                             "-byte aligned - cannot reinterpret_cast");
+}
+
+namespace {
+
+// 4 hex digits, so a bad f16 is reported as the bit pattern it actually is.
+std::string hex16(uint16_t v) {
+  static const char* d = "0123456789ABCDEF";
+  return {d[(v >> 12) & 0xF], d[(v >> 8) & 0xF], d[(v >> 4) & 0xF], d[v & 0xF]};
+}
+
+// The two-dimensional tensors this file indexes by [0]/[1]. safetensors lets a
+// header declare any rank, so the rank is checked before the index rather than
+// after the crash.
+void check_rank2(const TensorInfo& t, const std::string& name) {
+  if (t.shape.size() != 2)
+    throw std::runtime_error(name + ": rank " + std::to_string(t.shape.size()) +
+                             ", expected 2 (a [K/8][N] or [N][K] matrix)");
+}
+
+}  // namespace
 
 QuantConfig QuantConfig::parse(const common::json::Value& config_json) {
   const common::json::Value* qcv = config_json.find("quantization_config");
@@ -37,12 +65,16 @@ LinearSrc LinearSrc::classify(const SafetensorsSet& set, const std::string& pref
     if (sc == ts.end()) throw std::runtime_error(prefix + ": qweight without scales");
     if (qw->second.dtype != "I32") throw std::runtime_error(prefix + ".qweight dtype " + qw->second.dtype);
     if (sc->second.dtype != "F16") throw std::runtime_error(prefix + ".scales dtype " + sc->second.dtype);
+    check_rank2(qw->second, prefix + ".qweight");
+    check_rank2(sc->second, prefix + ".scales");
     LinearSrc s;
     s.kind = WKind::Int4;
     s.K = uint32_t(qw->second.shape[0]) * 8;
     s.N = uint32_t(qw->second.shape[1]);
     if (sc->second.shape[0] != s.K / 64 || sc->second.shape[1] != s.N)
       throw std::runtime_error(prefix + ".scales shape mismatch");
+    check_align(set.data(qw->second), alignof(uint32_t), prefix + ".qweight");
+    check_align(set.data(sc->second), alignof(uint16_t), prefix + ".scales");
     s.qweight = reinterpret_cast<const uint32_t*>(set.data(qw->second));
     s.scales = reinterpret_cast<const uint16_t*>(set.data(sc->second));
     s.name = prefix;
@@ -51,10 +83,12 @@ LinearSrc LinearSrc::classify(const SafetensorsSet& set, const std::string& pref
   auto w = ts.find(prefix + ".weight");
   if (w != ts.end()) {
     if (w->second.dtype != "BF16") throw std::runtime_error(prefix + ".weight dtype " + w->second.dtype);
+    check_rank2(w->second, prefix + ".weight");
     LinearSrc s;
     s.kind = WKind::Bf16;
     s.N = uint32_t(w->second.shape[0]);
     s.K = uint32_t(w->second.shape[1]);
+    check_align(set.data(w->second), alignof(uint16_t), prefix + ".weight");
     s.weight = reinterpret_cast<const uint16_t*>(set.data(w->second));
     s.name = prefix;
     return s;
@@ -62,9 +96,11 @@ LinearSrc LinearSrc::classify(const SafetensorsSet& set, const std::string& pref
   throw std::runtime_error("no qweight or weight for linear '" + prefix + "'");
 }
 
-void assert_quant_invariants(const SafetensorsSet& set) {
+QuantScan assert_quant_invariants(const SafetensorsSet& set) {
+  QuantScan scan;
   for (const auto& [name, t] : set.tensors()) {
     if (name.size() > 7 && name.compare(name.size() - 7, 7, ".qzeros") == 0) {
+      check_align(set.data(t), alignof(uint32_t), name);
       const uint32_t* p = reinterpret_cast<const uint32_t*>(set.data(t));
       size_t n = set.bytes(t) / 4;
       for (size_t i = 0; i < n; ++i)
@@ -72,14 +108,34 @@ void assert_quant_invariants(const SafetensorsSet& set) {
           throw std::runtime_error(name + "[" + std::to_string(i) + "] = " +
                                    std::to_string(p[i]) + ", expected 0x77777777 (sym zero-point 8)");
     } else if (name.size() > 6 && name.compare(name.size() - 6, 6, ".g_idx") == 0) {
+      check_align(set.data(t), alignof(int32_t), name);
       const int32_t* p = reinterpret_cast<const int32_t*>(set.data(t));
       size_t n = set.bytes(t) / 4;
       for (size_t i = 0; i < n; ++i)
         if (p[i] != int32_t(i / 64))
           throw std::runtime_error(name + "[" + std::to_string(i) + "] = " +
                                    std::to_string(p[i]) + ", expected identity k/64");
+    } else if (name.size() > 7 && name.compare(name.size() - 7, 7, ".scales") == 0) {
+      // The dequant is scale * (q - 8) with no guard, so a NaN/Inf scale
+      // poisons a whole group of 64 weights and there is nowhere downstream
+      // that would notice. 0.76 GB of f16, ~0.3 s - cheaper than finding it in
+      // a logit. Subnormals are counted, not rejected: they occur in this
+      // checkpoint (0x00A8 in layers.10.linear_attn.in_proj_qkv.scales, and
+      // more) and they are perfectly meaningful f16 values.
+      check_align(set.data(t), alignof(uint16_t), name);
+      const uint16_t* p = reinterpret_cast<const uint16_t*>(set.data(t));
+      size_t n = set.bytes(t) / 2;
+      for (size_t i = 0; i < n; ++i) {
+        const uint32_t exp = (p[i] >> 10) & 0x1Fu, man = p[i] & 0x3FFu;
+        if (exp == 0x1Fu)
+          throw std::runtime_error(name + "[" + std::to_string(i) + "] = 0x" +
+                                   hex16(p[i]) + ", an f16 " + (man ? "NaN" : "Inf") +
+                                   " - the dequant has no guard for it");
+        if (exp == 0 && man != 0) ++scan.subnormal_scales;
+      }
     }
   }
+  return scan;
 }
 
 }  // namespace loader

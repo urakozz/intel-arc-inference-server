@@ -1,9 +1,11 @@
 // End-to-end load of the real checkpoint, with a device round-trip proof:
 // one tile of layer 0's qkv||z read back from the device must equal the CPU
 // repack of the mmapped source - the canonical bytes on device mean exactly
-// what the kernels were tested against.
+// what the kernels were tested against. The small blocks get the same
+// treatment: every bake is read back at its loader/small_layout.h offset.
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 #include "check.h"
 #include "common/bf16.h"
@@ -13,7 +15,23 @@
 #include "loader/loader.h"
 #include "loader/quant.h"
 #include "loader/safetensors.h"
+#include "loader/small_layout.h"
 #include "model/qwen35.h"
+
+namespace {
+// Little helpers so a readback is compared as the type the kernel will read,
+// not as bytes. memcpy, because the block is a byte buffer.
+float f32_at(const std::vector<uint8_t>& b, size_t off) {
+  float v;
+  std::memcpy(&v, b.data() + off, 4);
+  return v;
+}
+uint16_t u16_at(const std::vector<uint8_t>& b, size_t off) {
+  uint16_t v;
+  std::memcpy(&v, b.data() + off, 2);
+  return v;
+}
+}  // namespace
 
 int main(int argc, char** argv) {
   const std::string arg = argc > 1 ? argv[1] : "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ";
@@ -23,6 +41,9 @@ int main(int argc, char** argv) {
   // Counts: 64 layers x linears + lm_head.
   CHECK_EQ(m.layer_small.size(), size_t(64));
   CHECK_EQ(m.linears.size(), size_t(48 * 5 + 16 * 4 + 1));
+  CHECK_EQ(m.max_len, uint32_t(16384));
+  // lm_head is the one linear that belongs to no layer (loader::kTopLevel).
+  CHECK(m.linears.count({loader::kTopLevel, model::LinearId::LmHead}) == 1);
 
   // Resident total within 2% of W + declared padding/widening.
   const double gb = 1e9;
@@ -56,17 +77,51 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "first mismatch at u32 %zu: want %08X got %08X\n", i, want[i], got[i]);
   CHECK_EQ(diff, size_t(0));
 
-
   // Every checkpoint tensor is either loaded or deliberately dropped (qzeros,
   // g_idx, visual, mtp) - nothing is skipped by accident.
   CHECK_EQ(m.report.unconsumed, size_t(0));
 
-  // The (1+w) bake: one fp32 add, one round-to-nearest-even cast back to bf16.
-  std::vector<uint16_t> norms(2 * 5120);
-  imm.copy(norms.data(), m.layer_small[0].norms.ptr(), norms.size() * 2);
-  const uint16_t* in_ln = reinterpret_cast<const uint16_t*>(
-      set.data(set.tensors().at(strip("layers.0.input_layernorm.weight"))));
-  CHECK_EQ(norms[0], common::f32_to_bf16(1.0f + common::bf16_to_f32(in_ln[0])));
+  // The mmapped sources of the small tensors. The base of a safetensors data
+  // section is 8-aligned by construction on every shard of this checkpoint (the
+  // loader's own check_align asserts it before it casts anything), so these
+  // casts are safe here.
+  auto src16 = [&](const std::string& n) {
+    return reinterpret_cast<const uint16_t*>(set.data(set.tensors().at(strip(n))));
+  };
+
+  // --- the norms block, fp32 (1 + w) at both halves --------------------------
+  // Ruling 2026-08-25: fp32 add, STORED fp32 - no cast back to bf16, so the
+  // multiplier carries no rounding the HF reference does not have.
+  std::vector<uint8_t> norms(loader::kNormsBlockBytes);
+  imm.copy(norms.data(), m.layer_small[0].norms.ptr(), norms.size());
+  CHECK_EQ(f32_at(norms, loader::kNormsOffInput),
+           1.0f + common::bf16_to_f32(src16("layers.0.input_layernorm.weight")[0]));
+  CHECK_EQ(f32_at(norms, loader::kNormsOffPost),
+           1.0f + common::bf16_to_f32(src16("layers.0.post_attention_layernorm.weight")[0]));
+
+  // --- layer 0's GDN block: one field per bake, at its offset -----------------
+  std::vector<uint8_t> gdn(loader::kGdnBlockBytes);
+  imm.copy(gdn.data(), m.layer_small[0].gdn.ptr(), gdn.size());
+  CHECK_EQ(f32_at(gdn, loader::kGdnOffConv),
+           common::bf16_to_f32(src16("layers.0.linear_attn.conv1d.weight")[0]));
+  CHECK_EQ(f32_at(gdn, loader::kGdnOffNegA),
+           -std::exp(common::bf16_to_f32(src16("layers.0.linear_attn.A_log")[0])));
+  CHECK_EQ(f32_at(gdn, loader::kGdnOffDtBias),
+           common::bf16_to_f32(src16("layers.0.linear_attn.dt_bias")[0]));
+  // RMSNormGated is the one norm without the +1 - and the one that stays bf16,
+  // so this must be the checkpoint's raw word, NOT 1+w and NOT widened.
+  CHECK_EQ(u16_at(gdn, loader::kGdnOffGatedNorm), src16("layers.0.linear_attn.norm.weight")[0]);
+
+  // --- an FA layer's k_norm, fp32 (1 + w) at its offset -----------------------
+  std::vector<uint8_t> fa(loader::kFaBlockBytes);
+  imm.copy(fa.data(), m.layer_small[3].gdn.ptr(), fa.size());
+  CHECK_EQ(f32_at(fa, loader::kFaOffKNorm),
+           1.0f + common::bf16_to_f32(src16("layers.3.self_attn.k_norm.weight")[0]));
+
+  // --- the final norm, the one that belongs to no layer ----------------------
+  std::vector<uint8_t> fnorm(loader::kFinalNormBytes);
+  imm.copy(fnorm.data(), m.final_norm.ptr(), fnorm.size());
+  CHECK_EQ(f32_at(fnorm, 0), 1.0f + common::bf16_to_f32(src16("norm.weight")[0]));
 
   // a||b's 32 pad rows really are zero on the device (rows 96..127 of the
   // [128][5120] tiled buffer, i.e. n-tiles 6 and 7).

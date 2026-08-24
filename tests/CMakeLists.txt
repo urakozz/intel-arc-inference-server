@@ -63,6 +63,20 @@ target_include_directories(qwen35_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_S
 target_link_libraries(qwen35_test PRIVATE b70_model)
 add_test(NAME qwen35_test COMMAND qwen35_test)
 
+# The model table and src/kernels/CMakeLists.txt are two lists that have to
+# agree: every row's compiled variant must exist before plan 3 binds it. No
+# device, no checkpoint - just the filenames.
+add_executable(kernel_table_test kernels/kernel_table_test.cc)
+target_include_directories(kernel_table_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kernel_table_test PRIVATE b70_model)
+b70_target_kernel_dir(kernel_table_test)
+add_dependencies(kernel_table_test
+  kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K6144_N5120_S16_L1
+  kernel_gemv_M1_K5120_N34816_S4_L1 kernel_gemv_M1_K17408_N5120_S16_L1
+  kernel_gemv_M1_K5120_N14336_S1_L1
+  kernel_gemv_bf16_M1_K5120_N128 kernel_gemv_bf16_M1_K5120_N248320)
+add_test(NAME kernel_table_test COMMAND kernel_table_test)
+
 # Needs the real 19 GB checkpoint and a B70: label `checkpoint` so it can be
 # excluded (`ctest -LE checkpoint`) where the model or the card is absent.
 add_executable(load_checkpoint_test loader/load_checkpoint_test.cc)

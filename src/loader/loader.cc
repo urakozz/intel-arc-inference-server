@@ -15,58 +15,31 @@
 #include "common/repack.h"
 #include "l0/cmdlist.h"
 #include "loader/safetensors.h"
+#include "loader/small_layout.h"
 
 namespace loader {
 namespace {
 
 using model::Qwen35;
 
-// ---------------------------------------------------------------------------
-// The per-layer "small tensor" blocks.
-//
-// Each layer gets at most two device allocations that are not GEMV weights: a
-// norms block (both layernorms, always) and a kind-specific block. Offsets are
-// compile-time constants so the kernels can be compiled against them; the
-// static_asserts below are what fails if this file is edited without the
-// kernels being told.
-//
-// norms  [0]      input_layernorm  (1 + w) bf16 [5120]
-//        [10240]  post_attention_layernorm (1 + w) bf16 [5120]
-//
-// GDN block (docs/03-models.md "Layer math"):
-//        [0]      conv1d      fp32 [10240][4]   (source is bf16 [10240][1][4])
-//        [163840] -exp(A_log) fp32 [48]
-//        [164032] dt_bias     fp32 [48]
-//        [164224] linear_attn.norm.weight  plain w bf16 [128]  (RMSNormGated:
-//                 no +1 - it is the one norm in the model without it)
-//
-// FA block:
-//        [0]      q_norm (1 + w) bf16 [256]
-//        [512]    k_norm (1 + w) bf16 [256]
-// ---------------------------------------------------------------------------
-constexpr size_t kConvRows = 10240, kConvTaps = 4;  // qkv width x conv kernel dim
-constexpr size_t kNormsOffInput = 0;
-constexpr size_t kNormsOffPost = kNormsOffInput + size_t(Qwen35::kHidden) * 2;
-constexpr size_t kNormsBlockBytes = kNormsOffPost + size_t(Qwen35::kHidden) * 2;
-static_assert(kNormsBlockBytes == 20480, "norms block layout changed");
-
-constexpr size_t kGdnOffConv = 0;
-constexpr size_t kGdnOffNegA = kGdnOffConv + kConvRows * kConvTaps * 4;
-constexpr size_t kGdnOffDtBias = kGdnOffNegA + size_t(Qwen35::kGdnVHeads) * 4;
-constexpr size_t kGdnOffGatedNorm = kGdnOffDtBias + size_t(Qwen35::kGdnVHeads) * 4;
-constexpr size_t kGdnBlockBytes = kGdnOffGatedNorm + size_t(Qwen35::kGdnHeadDim) * 2;
-static_assert(kGdnOffNegA % 4 == 0 && kGdnOffDtBias % 4 == 0, "fp32 fields must be 4-aligned");
-static_assert(kGdnOffGatedNorm % 2 == 0, "bf16 field must be 2-aligned");
-static_assert(kGdnBlockBytes == 164480, "GDN small block layout changed");
-
-constexpr size_t kFaOffQNorm = 0;
-constexpr size_t kFaOffKNorm = kFaOffQNorm + size_t(Qwen35::kFaHeadDim) * 2;
-constexpr size_t kFaBlockBytes = kFaOffKNorm + size_t(Qwen35::kFaHeadDim) * 2;
-static_assert(kFaBlockBytes == 1024, "FA small block layout changed");
+// The per-layer small-tensor block offsets live in loader/small_layout.h - the
+// one place they are defined, shared with model::LayerDesc::small_tensors (the
+// table this file walks) and with plan 3's kernels. Nothing here re-derives an
+// offset or names a tensor: `load_small` executes the table, and both throw if
+// the table and the header disagree.
 
 // `W` from docs/03-models.md's byte accounting (measured 2026-08-24):
 // 12.163 qweight + 0.760 scales + 0.052 bf16 smalls + 2.543 lm_head.
 constexpr double kDocW = 15.519e9;
+
+// Bytes this loader adds over the checkpoint's own bf16 by widening a tensor to
+// fp32 at load. Itemised rather than hidden in a tolerance: the W cross-check
+// adds exactly this to its expected side and the report prints the split.
+struct Widen {
+  size_t norm = 0;   // the RMSNorm family, stored fp32 (1 + w)
+  size_t gdn = 0;    // conv1d, -exp(A_log), dt_bias - the fp32 recurrence
+  size_t total() const { return norm + gdn; }
+};
 
 // ---------------------------------------------------------------------------
 // Name mapping (requirement 1). The checkpoint carries three top-level
@@ -108,15 +81,6 @@ NameView build_view(const SafetensorsSet& set) {
   return v;
 }
 
-// A mmapped tensor is reinterpret_cast to uint32_t/uint16_t; the safetensors
-// data section is 8-aligned on every file seen so far, but a loud failure beats
-// undefined behaviour if a future checkpoint pads differently.
-void check_align(const void* p, size_t a, const std::string& name) {
-  if (reinterpret_cast<uintptr_t>(p) % a != 0)
-    throw std::runtime_error("tensor '" + name + "': mmapped data is not " + std::to_string(a) +
-                             "-byte aligned - cannot reinterpret_cast");
-}
-
 const TensorInfo& take(NameView& v, const SafetensorsSet& set, const std::string& stripped) {
   auto it = v.names.find(stripped);
   if (it == v.names.end())
@@ -126,26 +90,78 @@ const TensorInfo& take(NameView& v, const SafetensorsSet& set, const std::string
   return set.tensors().at(it->second);
 }
 
-// A bf16 tensor of an exact element count - the doc-03 shape table, enforced by
-// name for everything that is not a GEMV weight.
-const uint16_t* bf16_of(NameView& v, const SafetensorsSet& set, const std::string& stripped,
-                        size_t elems) {
-  const TensorInfo& t = take(v, set, stripped);
-  if (t.dtype != "BF16")
-    throw std::runtime_error("tensor '" + stripped + "': dtype " + t.dtype + ", expected BF16");
-  if (set.bytes(t) != elems * 2)
-    throw std::runtime_error("tensor '" + stripped + "': " + std::to_string(set.bytes(t) / 2) +
-                             " elements, expected " + std::to_string(elems));
-  const uint8_t* p = set.data(t);
-  check_align(p, alignof(uint16_t), stripped);
-  return reinterpret_cast<const uint16_t*>(p);
+// ---------------------------------------------------------------------------
+// Small tensors: the model description's table is walked, never second-guessed.
+// ---------------------------------------------------------------------------
+
+// The device element size implied by a bake kind. small_layout.h's block
+// offsets are derived from these, and load_small's bounds check pins the two
+// together - a table entry that would overrun its block throws by name.
+size_t bake_elem_bytes(model::SmallBake b) {
+  return b == model::SmallBake::PlainBf16 ? 2 : 4;
+}
+size_t src_elem_bytes(const model::SmallTensor& t) {
+  return std::strcmp(t.dtype, "F32") == 0 ? 4 : 2;
 }
 
-// Gemma-style RMSNorm: the kernel wants a plain multiply, so the `+1` is baked
-// in here. One fp32 add, one round-to-nearest-even cast back - the same single
-// rounding discipline as every other conversion in this project.
-void bake_one_plus(const uint16_t* w, uint16_t* out, size_t n) {
-  for (size_t i = 0; i < n; ++i) out[i] = common::f32_to_bf16(1.0f + common::bf16_to_f32(w[i]));
+// The source bytes of one table entry, with the dtype and the exact element
+// count the model description declares enforced by name.
+const uint8_t* small_src(NameView& v, const SafetensorsSet& set, const std::string& full,
+                         const model::SmallTensor& t) {
+  const TensorInfo& info = take(v, set, full);
+  if (info.dtype != t.dtype)
+    throw std::runtime_error("tensor '" + full + "': dtype " + info.dtype + ", expected " +
+                             t.dtype);
+  const size_t esz = src_elem_bytes(t);
+  if (set.bytes(info) != size_t(t.elems) * esz)
+    throw std::runtime_error("tensor '" + full + "': " + std::to_string(set.bytes(info) / esz) +
+                             " elements, expected " + std::to_string(t.elems));
+  const uint8_t* p = set.data(info);
+  check_align(p, esz, full);
+  return p;
+}
+
+// The bakes themselves (docs/13-loader.md "What the loader bakes in").
+void bake_small(const model::SmallTensor& t, const uint8_t* src, uint8_t* dst, Widen& widen) {
+  const size_t n = t.elems;
+  const uint16_t* w = reinterpret_cast<const uint16_t*>(src);
+  std::vector<float> f;
+  switch (t.bake) {
+    case model::SmallBake::PlainBf16:
+      // RMSNormGated: plain w, and bf16 - the reference's own parameter dtype
+      // is bf16 and it multiplies in the bf16 domain, so widening would move
+      // away from the oracle rather than towards it.
+      std::memcpy(dst, src, n * 2);
+      return;
+    case model::SmallBake::OnePlusWFp32:
+      // Gemma-style RMSNorm: x*rsqrt(mean(x^2)+eps)*(1 + w). The reference does
+      // the whole product in fp32, so the `+1` is added in fp32 and STORED
+      // fp32 - no cast back to bf16, which removes a rounding the oracle never
+      // had (up to 0.39% on a multiplier near 1). Ruling 2026-08-25.
+      f.resize(n);
+      for (size_t i = 0; i < n; ++i) f[i] = 1.0f + common::bf16_to_f32(w[i]);
+      widen.norm += n * 2;
+      break;
+    case model::SmallBake::NegExpFp32:
+      // The GDN decay is only ever used as exp(g) with
+      // g = -exp(A_log) * softplus(a + dt_bias): the exp is a per-head
+      // constant, hoisted out of 48 layers x every token.
+      f.resize(n);
+      for (size_t i = 0; i < n; ++i) f[i] = -std::exp(common::bf16_to_f32(w[i]));
+      widen.gdn += n * 2;
+      break;
+    case model::SmallBake::RawFp32Widen:
+      // The recurrence and the 4-tap depthwise conv accumulate in fp32:
+      // widening once at load saves a convert per tap per token.
+      f.resize(n);
+      for (size_t i = 0; i < n; ++i) f[i] = common::bf16_to_f32(w[i]);
+      widen.gdn += n * 2;
+      break;
+    case model::SmallBake::RawFp32:
+      std::memcpy(dst, src, n * 4);   // already fp32 in the checkpoint
+      return;
+  }
+  std::memcpy(dst, f.data(), n * 4);
 }
 
 l0::Mem upload(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
@@ -164,6 +180,7 @@ const char* id_name(model::LinearId id) {
     case model::LinearId::Qkv: return "Qkv";
     case model::LinearId::OProj: return "OProj";
     case model::LinearId::LmHead: return "LmHead";
+    case model::LinearId::kCount: break;   // the table size, not a linear
   }
   return "?";
 }
@@ -190,10 +207,26 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
   if (sh.K % 64 != 0 || sh.N % 16 != 0)
     throw std::runtime_error(id + ": shape K=" + std::to_string(sh.K) + " N=" +
                              std::to_string(sh.N) + " violates K%64==0, N%16==0");
+  // The layout knob is NOT a one-row edit (fix C1, 2026-08-25). `layout` is
+  // meaningful for int4 only - bf16 rows carry 0 as a documented filler - and
+  // this loader implements the layout-1 repack alone. Layout 0 additionally
+  // needs a loader path (the GPTQ-native w[K/8][N] kept as shipped) and a
+  // SECOND device buffer, because gemv.cl's LAYOUT==0 takes `w` and `scales`
+  // as separate arguments while DeviceWeight holds one l0::Mem. Until both
+  // exist, flipping a row must fail here rather than repack it as layout 1 and
+  // hand the kernel bytes it cannot read.
+  if (fl.kind == model::WeightKind::Int4 && sh.layout != 1)
+    throw std::runtime_error(
+        id + ": the model description says layout " + std::to_string(sh.layout) +
+        ", but the loader implements layout 1 only. Layout 0 needs a loader path (keep "
+        "qweight[K/8][N] as shipped, no repack) and a second device buffer in "
+        "DeviceWeight for scales[K/64][N] - gemv.cl's LAYOUT==0 binds them separately. "
+        "See docs/13-loader.md, \"Layout and split-K come from the table\".");
 
   std::vector<LinearSrc> srcs;
   uint32_t n_sum = 0;
   for (const std::string& part : fl.parts) {
+    // classify() checks the alignment of every pointer it casts (M6).
     LinearSrc s = LinearSrc::classify(set, ckpt_name(layer_prefix + part));
     const bool int4 = s.kind == WKind::Int4;
     if (int4 != (fl.kind == model::WeightKind::Int4))
@@ -202,12 +235,9 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
                                (fl.kind == model::WeightKind::Int4 ? "int4" : "bf16") +
                                " - the checkpoint's dynamic exclusions moved");
     if (int4) {
-      check_align(s.qweight, alignof(uint32_t), s.name + ".qweight");
-      check_align(s.scales, alignof(uint16_t), s.name + ".scales");
       view.consumed.insert(layer_prefix + part + ".qweight");
       view.consumed.insert(layer_prefix + part + ".scales");
     } else {
-      check_align(s.weight, alignof(uint16_t), s.name + ".weight");
       view.consumed.insert(layer_prefix + part + ".weight");
     }
     if (s.K != sh.K)
@@ -284,63 +314,39 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
 }
 
 // Everything in a layer that is not a GEMV weight, packed into the two blocks
-// documented at the top of this file. `widen` accumulates the bytes this
-// conversion adds over the checkpoint's own bf16 - the W cross-check itemises
-// them rather than hiding them in a tolerance.
+// of loader/small_layout.h. This function knows no tensor names and no offsets:
+// it walks model::LayerDesc::small_tensors, which carries both (fix I3). The
+// two throws below are what fires if the table and the header disagree.
 SmallTensors load_small(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet& set,
                         NameView& view, const model::LayerDesc& ld, LoadReport& rep,
-                        size_t& widen) {
+                        Widen& widen) {
   const std::string lp = Qwen35::layer_prefix(ld.index);
-  std::vector<uint16_t> norms(kNormsBlockBytes / 2);
-  bake_one_plus(bf16_of(view, set, lp + "input_layernorm.weight", Qwen35::kHidden),
-                norms.data() + kNormsOffInput / 2, Qwen35::kHidden);
-  bake_one_plus(bf16_of(view, set, lp + "post_attention_layernorm.weight", Qwen35::kHidden),
-                norms.data() + kNormsOffPost / 2, Qwen35::kHidden);
-  rep.small_bytes += kNormsBlockBytes;
-  l0::Mem norms_mem = upload(ctx, imm, norms.data(), kNormsBlockBytes);
+  const size_t kind_bytes = ld.kind == model::LayerKind::FA ? kFaBlockBytes : kGdnBlockBytes;
+  std::vector<uint8_t> norms(kNormsBlockBytes, 0), kind(kind_bytes, 0);
+  size_t filled_norms = 0, filled_kind = 0;
 
-  if (ld.kind == model::LayerKind::FA) {
-    std::vector<uint16_t> b(kFaBlockBytes / 2);
-    bake_one_plus(bf16_of(view, set, lp + "self_attn.q_norm.weight", Qwen35::kFaHeadDim),
-                  b.data() + kFaOffQNorm / 2, Qwen35::kFaHeadDim);
-    bake_one_plus(bf16_of(view, set, lp + "self_attn.k_norm.weight", Qwen35::kFaHeadDim),
-                  b.data() + kFaOffKNorm / 2, Qwen35::kFaHeadDim);
-    rep.small_bytes += kFaBlockBytes;
-    return {std::move(norms_mem), upload(ctx, imm, b.data(), kFaBlockBytes)};
+  for (const model::SmallTensor& t : ld.small_tensors) {
+    const bool in_norms = t.block == model::SmallBlock::Norms;
+    std::vector<uint8_t>& dst = in_norms ? norms : kind;
+    const size_t bytes = size_t(t.elems) * bake_elem_bytes(t.bake);
+    if (size_t(t.offset) + bytes > dst.size())
+      throw std::runtime_error(
+          "small tensor '" + lp + t.name + "': " + std::to_string(bytes) + " B at offset " +
+          std::to_string(t.offset) + " overruns its " + std::to_string(dst.size()) +
+          "-byte block - model::LayerDesc::small_tensors and loader/small_layout.h disagree");
+    bake_small(t, small_src(view, set, lp + t.name, t), dst.data() + t.offset, widen);
+    (in_norms ? filled_norms : filled_kind) += bytes;
   }
+  if (filled_norms != norms.size() || filled_kind != kind.size())
+    throw std::runtime_error(
+        "layer " + std::to_string(ld.index) + ": the small-tensor table fills " +
+        std::to_string(filled_norms) + "/" + std::to_string(norms.size()) + " norms B and " +
+        std::to_string(filled_kind) + "/" + std::to_string(kind.size()) +
+        " kind-block B - every byte of a block must have an owner");
 
-  std::vector<uint8_t> b(kGdnBlockBytes, 0);
-  // conv1d.weight bf16 [10240][1][4] -> fp32 [10240][4]: the 4-tap depthwise
-  // state is accumulated in fp32, so the taps are widened once here.
-  {
-    const uint16_t* w = bf16_of(view, set, lp + "linear_attn.conv1d.weight", kConvRows * kConvTaps);
-    std::vector<float> f(kConvRows * kConvTaps);
-    for (size_t i = 0; i < f.size(); ++i) f[i] = common::bf16_to_f32(w[i]);
-    std::memcpy(b.data() + kGdnOffConv, f.data(), f.size() * 4);
-    widen += f.size() * 4 - f.size() * 2;
-  }
-  // A_log -> -exp(A_log): the decay is only ever used as exp(g) with
-  // g = -exp(A_log) * softplus(...), so the exp is hoisted to load time.
-  {
-    const uint16_t* w = bf16_of(view, set, lp + "linear_attn.A_log", Qwen35::kGdnVHeads);
-    std::vector<float> f(Qwen35::kGdnVHeads);
-    for (size_t i = 0; i < f.size(); ++i) f[i] = -std::exp(common::bf16_to_f32(w[i]));
-    std::memcpy(b.data() + kGdnOffNegA, f.data(), f.size() * 4);
-    widen += f.size() * 4 - f.size() * 2;
-  }
-  {
-    const uint16_t* w = bf16_of(view, set, lp + "linear_attn.dt_bias", Qwen35::kGdnVHeads);
-    std::vector<float> f(Qwen35::kGdnVHeads);
-    for (size_t i = 0; i < f.size(); ++i) f[i] = common::bf16_to_f32(w[i]);
-    std::memcpy(b.data() + kGdnOffDtBias, f.data(), f.size() * 4);
-    widen += f.size() * 4 - f.size() * 2;
-  }
-  // RMSNormGated is plain w - the one norm in the model without the +1.
-  std::memcpy(b.data() + kGdnOffGatedNorm,
-              bf16_of(view, set, lp + "linear_attn.norm.weight", Qwen35::kGdnHeadDim),
-              size_t(Qwen35::kGdnHeadDim) * 2);
-  rep.small_bytes += kGdnBlockBytes;
-  return {std::move(norms_mem), upload(ctx, imm, b.data(), kGdnBlockBytes)};
+  rep.small_bytes += norms.size() + kind.size();
+  return {upload(ctx, imm, norms.data(), norms.size()),
+          upload(ctx, imm, kind.data(), kind.size())};
 }
 
 // cos/sin[p][0..1][i] for the 64 rotary dims (partial_rotary_factor 0.25 of
@@ -379,8 +385,11 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   const QuantConfig qc = QuantConfig::parse(common::json::parse(cs.str()));
 
   SafetensorsSet set(snap);
-  assert_quant_invariants(set);   // requirement 6: before a single byte is repacked
+  // Requirement 6: before a single byte is repacked. Returns what it counted
+  // but did not reject (subnormal f16 scales, which this checkpoint has).
+  const QuantScan scan = assert_quant_invariants(set);
   NameView view = build_view(set);
+  Widen widen;
 
   // embed_tokens is uploaded row-major and verbatim: it is gathered one row per
   // token, so no tiling helps and the mmap is already the canonical layout.
@@ -393,23 +402,27 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                              std::to_string(Qwen35::kVocab) + "][" +
                              std::to_string(Qwen35::kHidden) + "], got " + emb.dtype);
   // The model's final pre-lm_head RMSNorm - the one norm that belongs to no
-  // layer. Same Gemma-style (1 + w) bake as all the others.
-  std::vector<uint16_t> fnorm(Qwen35::kHidden);
-  bake_one_plus(bf16_of(view, set, "norm.weight", Qwen35::kHidden), fnorm.data(),
-                Qwen35::kHidden);
+  // layer, so it is not in any LayerDesc's table; described here in the same
+  // terms and baked by the same code, into its own allocation at offset 0.
+  const model::SmallTensor fnorm_desc{"norm.weight",        Qwen35::kHidden,
+                                      "BF16",               model::SmallBlock::Norms,
+                                      0,                    model::SmallBake::OnePlusWFp32};
+  std::vector<uint8_t> fnorm(kFinalNormBytes);
+  bake_small(fnorm_desc, small_src(view, set, fnorm_desc.name, fnorm_desc), fnorm.data(), widen);
   const std::vector<float> rope = rope_table(max_len);
 
   LoadedModel m{{},
                 {},
                 l0::Mem(ctx, l0::MemKind::Device, set.bytes(emb)),
-                l0::Mem(ctx, l0::MemKind::Device, fnorm.size() * 2),
+                l0::Mem(ctx, l0::MemKind::Device, fnorm.size()),
                 l0::Mem(ctx, l0::MemKind::Device, rope.size() * 4),
-                {}};
+                {},
+                max_len};
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   imm.copy(m.embed.ptr(), set.data(emb), set.bytes(emb));
   m.report.embed_bytes += set.bytes(emb);
-  imm.copy(m.final_norm.ptr(), fnorm.data(), fnorm.size() * 2);
-  m.report.small_bytes += fnorm.size() * 2;
+  imm.copy(m.final_norm.ptr(), fnorm.data(), fnorm.size());
+  m.report.small_bytes += fnorm.size();
   const size_t rope_bytes = rope.size() * 4;
   imm.copy(m.rope.ptr(), rope.data(), rope_bytes);
   m.report.small_bytes += rope_bytes;
@@ -422,7 +435,6 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   st.bf_tiled.resize(size_t(Qwen35::shape(model::LinearId::LmHead).N) *
                      Qwen35::shape(model::LinearId::LmHead).K);
 
-  size_t widen = 0;
   const std::vector<model::LayerDesc> layers = Qwen35::layers();
   m.layer_small.reserve(layers.size());
   for (const model::LayerDesc& ld : layers) {
@@ -432,21 +444,21 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                         load_linear(ctx, imm, set, view, lp, fl, st, m.report));
     m.layer_small.push_back(load_small(ctx, imm, set, view, ld, m.report, widen));
   }
-  {
-    model::FusedLinear head{model::LinearId::LmHead, Qwen35::shape(model::LinearId::LmHead),
-                            model::WeightKind::Bf16, model::Fuse::Single, {"lm_head"}, 0};
-    m.linears.emplace(std::make_pair(uint32_t(65535), model::LinearId::LmHead),
-                      load_linear(ctx, imm, set, view, "", head, st, m.report));
-  }
+  m.linears.emplace(std::make_pair(kTopLevel, model::LinearId::LmHead),
+                    load_linear(ctx, imm, set, view, "",
+                                Qwen35::linear(model::LinearId::LmHead), st, m.report));
 
-  std::string first_unconsumed;
+  // Up to five names, so a checkpoint that grew a family of tensors says which
+  // family rather than making the reader re-run with a debugger.
+  std::string unconsumed;
   for (const auto& [stripped, full] : view.names) {
     (void)full;
     if (view.consumed.count(stripped)) continue;
     if (stripped.size() > 7 && stripped.compare(stripped.size() - 7, 7, ".qzeros") == 0) continue;
     if (stripped.size() > 6 && stripped.compare(stripped.size() - 6, 6, ".g_idx") == 0) continue;
-    if (m.report.unconsumed++ == 0) first_unconsumed = stripped;
+    if (m.report.unconsumed++ < 5) unconsumed += (unconsumed.empty() ? "" : ", ") + stripped;
   }
+  if (m.report.unconsumed > 5) unconsumed += ", …";
 
   const LoadReport& r = m.report;
   const double gb = 1e9;
@@ -458,7 +470,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   const size_t small_resident = r.small_bytes - rope_bytes;
   const size_t per_token = r.int4_bytes + r.scale_bytes + r.bf16_linear_bytes + r.pad_bytes +
                            r.lm_head_bytes + small_resident;
-  const double expected = kDocW + double(r.pad_bytes) + double(widen);
+  const double expected = kDocW + double(r.pad_bytes) + double(widen.total());
   const double delta = (double(per_token) - expected) / expected;
   m.report.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
@@ -467,6 +479,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       "  quant     int4 g%u sym desc_act=false, %zu dynamic exclusion rules\n"
       "  tensors   %zu language-model + lm_head; skipped %zu visual, %zu mtp;\n"
       "            dropped %zu qzeros + %zu g_idx (invariants asserted), %zu unconsumed%s%s\n"
+      "  scales    %zu subnormal f16 (exact on device and in f16_to_f32; not an error)\n"
       "  linears   %zu fused weights, %zu layers\n"
       "  int4        %13zu B  %7.3f GB\n"
       "  scales      %13zu B  %7.3f GB\n"
@@ -478,18 +491,19 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       "  embed       %13zu B  %7.3f GB   (resident, gathered - not per-token)\n"
       "  rope        %13zu B  %7.3f GB   (resident, ~256 B per token - not per-token)\n"
       "  total       %13zu B  %7.3f GB\n"
-      "  W check     %.3f GB vs %.3f GB expected = %.3f doc-03 + %.3f pad + %.6f widen"
-      "  ->  %+.3f%%\n"
+      "  W check     %.3f GB vs %.3f GB expected = %.3f doc-03 + %.3f pad + %.6f widen\n"
+      "              widen = %zu B RMSNorm fp32 (1+w) + %zu B GDN fp32  ->  %+.3f%%\n"
       "  load        %.1f s\n",
       snap.c_str(), qc.group_size, qc.dynamic_rule_count, view.names.size() - 1,
       view.visual_skipped, view.mtp_skipped, view.qzeros, view.g_idx, r.unconsumed,
-      r.unconsumed ? " incl. " : "", first_unconsumed.c_str(), m.linears.size(),
+      r.unconsumed ? " incl. " : "", unconsumed.c_str(), scan.subnormal_scales, m.linears.size(),
       m.layer_small.size(), r.int4_bytes, r.int4_bytes / gb, r.scale_bytes, r.scale_bytes / gb,
       r.bf16_linear_bytes, r.bf16_linear_bytes / gb, (r.bf16_linear_bytes + r.pad_bytes) / gb,
       r.lm_head_bytes, r.lm_head_bytes / gb, small_resident, small_resident / gb,
       r.pad_bytes, r.pad_bytes / gb, per_token, per_token / gb, r.embed_bytes, r.embed_bytes / gb,
       rope_bytes, rope_bytes / gb, r.total(), r.total() / gb, per_token / gb, expected / gb,
-      kDocW / gb, r.pad_bytes / gb, widen / gb, delta * 100.0, m.report.seconds);
+      kDocW / gb, r.pad_bytes / gb, widen.total() / gb, widen.norm, widen.gdn, delta * 100.0,
+      m.report.seconds);
 
   if (std::fabs(delta) > 0.02)
     throw std::runtime_error("resident read-per-token bytes " + std::to_string(per_token) +

@@ -20,11 +20,15 @@ deliberately has **no `fla`**: the fallback path *is* the contract (doc 03).
 | `tokenize.py` | `encode` a prompt file to ids / `decode` ids back. Raw text, no chat template, no special tokens. |
 | `dump.py` | Builds `Qwen3_5ForCausalLM` from the config, loads a `dequant.py`-produced bf16 state dict `strict=True`, forwards the prompt with hooks, greedy-decodes, writes one safetensors file. |
 | `run_in_container.sh` | Wraps `docker run` for the box: read-only HF cache at `/hf`, repo at `/ws`, `$SNAP` resolved to the snapshot directory, **`-u $(id -u):$(id -g)`** so outputs are not root-owned, no memory limit. |
+| `golden.sh` | The production run: the three prompts, serially, `--gen 32`. This is the script that made the files plan 3 compares against - committed rather than retyped. |
+| `check.sh` | Re-reads the three written files in a separate process and prints the block quoted under "Sanity checks" below. |
 
-Prompts live in `tests/golden/prompts/`: `prose.txt` (plain English),
-`code.txt` (a Python function), `cjk.txt` (Chinese plus two emoji - multi-byte
-tokens and the tail of `lm_head`). Each must tokenize to **24-64 ids**;
-`dump.py --max-prompt` enforces the ceiling.
+Prompts live in `tests/golden/prompts/`: `prose.txt` (plain English, **42 ids**),
+`code.txt` (a Python function, **61 ids** - 3 under the ceiling, so do not edit
+it without re-tokenizing), `cjk.txt` (Chinese plus two emoji - multi-byte tokens
+and the tail of `lm_head` - **38 ids**). Each must tokenize to **24-64 ids**;
+`dump.py --max-prompt` enforces the ceiling. The counts are the ones the
+recorded run used and are what `n_prompt` in each golden file's metadata says.
 
 ## Running it
 
@@ -49,12 +53,22 @@ tools/oracle/run_in_container.sh 'python3 tools/oracle/dump.py "$SNAP" \
 ```
 
 `dump.py` takes **one** `--prompt`/`--out` pair, so three prompts are three
-container invocations and the 118 s load+dequant is paid three times. Task 8
-drove them from a throwaway `for p in prose code cjk` loop in
-`oracle-out/golden.sh`, launched detached (`setsid nohup … > log 2>&1 </dev/null &`)
-so the 17-minute serial run outlives the ssh session, and tailed the log.
-Making `dump.py` accept repeated pairs would save ~4 minutes per full re-run;
-it was not worth touching the numerics path for.
+container invocations and the 118 s load+dequant is paid three times. The full
+run and its re-read are the two committed scripts - no retyping, and the recipe
+is under version control:
+
+```bash
+# on the box, from the repo root, detached so the 17-min run outlives the ssh
+setsid nohup tools/oracle/golden.sh > oracle-out/golden.log 2>&1 </dev/null &
+tail -f oracle-out/golden.log
+tools/oracle/check.sh          # re-read what was written, in a fresh process
+```
+
+`cmake --build build --target golden` prints exactly this sequence; it does not
+run it (the oracle needs the container and 61 GiB, and never runs from the Mac
+- see the target's comment in `CMakeLists.txt`). Making `dump.py` accept
+repeated `--prompt`/`--out` pairs would save ~4 minutes per full re-run; it was
+not worth touching the numerics path for.
 
 **Outputs stay on the box**, in `~/b70-inference-server/oracle-out/` - hundreds
 of MB per prompt. `.gitignore` has `oracle-out/` and `tools/box.sh sync` passes
@@ -94,7 +108,7 @@ and do not depend on prompt length.
 
 #### Sanity checks on the written files
 
-Re-read by a separate process (`oracle-out/check.sh`), not the writer's own
+Re-read by a separate process (`tools/oracle/check.sh`), not the writer's own
 claim: `tokens` length, distinctness, `resid.L63` finiteness, and the
 continuation decoded back through `tokenize.py decode`.
 
@@ -186,11 +200,29 @@ state, or `resid.L63` contains a NaN/Inf.
 Nothing here is trusted absolutely. Each link is trusted only against the next
 one, and it is worth being explicit about where the chain currently ends.
 
-1. **The bits.** `dequant.py` fixes the one meaning of the int4 nibbles -
-   `(q - 8) * scale`, product in fp32, one RNE cast to bf16 - and the C++
-   loader test matches it **bit-exactly** on the committed fixture. Loader and
-   oracle therefore start from identical bf16 weights by construction, not by
-   agreement.
+1. **The bits - the *convention*, not the values.** `dequant.py` fixes the one
+   meaning of the int4 nibbles: nibble order within the `[K/8, N]` u32 word,
+   zero point 8 (`q - 8`, no `qzeros` stream), the group axis (64 along `K`),
+   and the packing. `tests/golden/dequant_fixture.safetensors` pins **that
+   convention** bit-exactly against the C++ side, and that is all it pins.
+
+   It is **not** a claim that the engine and the oracle hold equal weight
+   values, because the engine never materialises a weight: `gemv.cl` computes
+   `scale · Σ(q − 8)·x` with the products and the sum in fp32 and the scale
+   applied once per group of 64, while `dequant.py` materialises
+   `bf16(scale · (q − 8))` and torch then multiplies bf16 weights by the
+   activations. Two different accumulation orders and two different rounding
+   points on the same bits. That divergence is **expected, and it is the
+   engine that is the more accurate of the two** - measured at roughly
+   **0.2% RMS per weight** (the bf16 mantissa is 8 bits; a per-weight RNE cast
+   costs ~2⁻⁹ relative). Read a disagreement of that order as this, not as a
+   bug; the golden test's gate is token equality for exactly this reason.
+
+   The controller ruling of **2026-08-25** removed one member of this family
+   deliberately: RMSNorm weights are now stored fp32 `1 + w`, so the norm
+   multiplier no longer carries a bf16 rounding the reference never had (docs
+   13, "What the loader bakes in"). What is left is the GEMV accumulation
+   difference above, which is inherent to not materialising weights.
 2. **The math.** The oracle runs those weights through `transformers` 5.15's
    pure-torch `modeling_qwen3_5.py` on CPU, `attn_implementation="eager"` (fp32
    softmax), deliberately without `fla`. That reference implementation - not

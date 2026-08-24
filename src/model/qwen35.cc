@@ -3,6 +3,14 @@
 #include <array>
 #include <cstddef>
 #include <initializer_list>
+#include <stdexcept>
+
+// The one header this translation unit borrows from outside src/model: a
+// code-free set of block offsets (fix I2/I3, 2026-08-25). The small-tensor
+// table below carries those constants as its destination offsets so the model
+// description and the loader's packing cannot drift apart; nothing else about
+// the loader is visible here, and no library dependency is created.
+#include "loader/small_layout.h"
 
 namespace model {
 namespace {
@@ -21,8 +29,11 @@ namespace {
 // Part names are layer-relative; a consumer joins them with layer_prefix().
 // LmHead is a top-level tensor and appears in no layer's list; plan 3 binds
 // it from this row directly.
-const std::array<FusedLinear, 8>& table() {
-  static const std::array<FusedLinear, 8> t = {{
+constexpr size_t kLinearCount = static_cast<size_t>(LinearId::kCount);
+static_assert(kLinearCount == 8, "LinearId grew: add the row below and re-check the shape table");
+
+const std::array<FusedLinear, kLinearCount>& table() {
+  static const std::array<FusedLinear, kLinearCount> t = {{
       // GDN: in_proj_qkv (10240 = q 16x128 | k 16x128 | v 48x128) || in_proj_z (6144).
       {LinearId::QkvZ, {5120, 16384, 1, 1}, WeightKind::Int4, Fuse::Concat,
        {"linear_attn.in_proj_qkv", "linear_attn.in_proj_z"}, 0},
@@ -70,28 +81,63 @@ const std::vector<FusedLinear>& fa_linears() {
   return v;
 }
 
-// Everything a layer needs that is not a GEMV weight (docs/03-models.md).
-// The loader bakes the RMSNorm (1 + w) into the layernorm weights; the GDN
-// gated norm is plain w.
-const std::vector<std::string>& gdn_small() {
-  static const std::vector<std::string> v = {
-      "input_layernorm.weight", "post_attention_layernorm.weight",
-      "linear_attn.conv1d.weight", "linear_attn.A_log",
-      "linear_attn.dt_bias", "linear_attn.norm.weight"};
+// Everything a layer needs that is not a GEMV weight (docs/03-models.md), with
+// the shape, source dtype, device placement and bake of each - the loader
+// walks exactly this and hardcodes nothing (fix I3). Offsets are the
+// loader/small_layout.h constants; the entries fill their block exactly and
+// the loader throws if they do not.
+//
+// Ruling 2026-08-25: the RMSNorm family (input/post layernorms, q_norm,
+// k_norm, and the top-level final norm) is stored fp32 `1 + w` - the HF
+// reference multiplies in fp32, so a bf16 multiplier would add a rounding it
+// never had. `linear_attn.norm` is RMSNormGated: plain `w`, and it stays bf16
+// because the reference's own parameter dtype is bf16 and it multiplies in the
+// bf16 domain.
+const std::vector<SmallTensor>& gdn_small() {
+  static const std::vector<SmallTensor> v = {
+      {"input_layernorm.weight", Qwen35::kHidden, "BF16", SmallBlock::Norms,
+       loader::kNormsOffInput, SmallBake::OnePlusWFp32},
+      {"post_attention_layernorm.weight", Qwen35::kHidden, "BF16", SmallBlock::Norms,
+       loader::kNormsOffPost, SmallBake::OnePlusWFp32},
+      // bf16 [10240][1][4] in the checkpoint; the 4-tap depthwise state is
+      // accumulated in fp32, so the taps are widened once at load.
+      {"linear_attn.conv1d.weight", uint32_t(loader::kConvRows * loader::kConvTaps), "BF16",
+       SmallBlock::Kind, loader::kGdnOffConv, SmallBake::RawFp32Widen},
+      // Only ever used as exp(g) with g = -exp(A_log)*softplus(...): hoisted.
+      {"linear_attn.A_log", Qwen35::kGdnVHeads, "BF16", SmallBlock::Kind, loader::kGdnOffNegA,
+       SmallBake::NegExpFp32},
+      {"linear_attn.dt_bias", Qwen35::kGdnVHeads, "BF16", SmallBlock::Kind,
+       loader::kGdnOffDtBias, SmallBake::RawFp32Widen},
+      {"linear_attn.norm.weight", Qwen35::kGdnHeadDim, "BF16", SmallBlock::Kind,
+       loader::kGdnOffGatedNorm, SmallBake::PlainBf16},
+  };
   return v;
 }
-const std::vector<std::string>& fa_small() {
-  static const std::vector<std::string> v = {
-      "input_layernorm.weight", "post_attention_layernorm.weight",
-      "self_attn.q_norm.weight", "self_attn.k_norm.weight"};
+const std::vector<SmallTensor>& fa_small() {
+  static const std::vector<SmallTensor> v = {
+      {"input_layernorm.weight", Qwen35::kHidden, "BF16", SmallBlock::Norms,
+       loader::kNormsOffInput, SmallBake::OnePlusWFp32},
+      {"post_attention_layernorm.weight", Qwen35::kHidden, "BF16", SmallBlock::Norms,
+       loader::kNormsOffPost, SmallBake::OnePlusWFp32},
+      {"self_attn.q_norm.weight", Qwen35::kFaHeadDim, "BF16", SmallBlock::Kind,
+       loader::kFaOffQNorm, SmallBake::OnePlusWFp32},
+      {"self_attn.k_norm.weight", Qwen35::kFaHeadDim, "BF16", SmallBlock::Kind,
+       loader::kFaOffKNorm, SmallBake::OnePlusWFp32},
+  };
   return v;
 }
 
 }  // namespace
 
-const GemvShape& Qwen35::shape(LinearId id) {
-  return table()[static_cast<size_t>(id)].shape;
+const FusedLinear& Qwen35::linear(LinearId id) {
+  const size_t i = static_cast<size_t>(id);
+  if (i >= kLinearCount)   // kCount, or an out-of-range cast from plan 3's dispatch
+    throw std::out_of_range("Qwen35::linear: LinearId ordinal " + std::to_string(i) +
+                            " is out of range (table has " + std::to_string(kLinearCount) + ")");
+  return table()[i];
 }
+
+const GemvShape& Qwen35::shape(LinearId id) { return linear(id).shape; }
 
 // Built per call from the two per-kind templates rather than cached: layers()
 // returns by value, so a static of all 64 would be copied on every call anyway
