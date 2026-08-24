@@ -38,3 +38,7 @@ target_link_libraries(gemv_bf16_test PRIVATE b70_l0)
 b70_target_kernel_dir(gemv_bf16_test)
 add_dependencies(gemv_bf16_test kernel_gemv_bf16_M1_K5120_N128 kernel_gemv_bf16_M1_K5120_N248320)
 add_test(NAME gemv_bf16_test COMMAND gemv_bf16_test)
+
+add_executable(json_test common/json_test.cc)
+target_include_directories(json_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME json_test COMMAND json_test)
