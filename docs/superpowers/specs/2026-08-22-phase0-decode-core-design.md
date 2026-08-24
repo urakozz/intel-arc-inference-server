@@ -107,13 +107,15 @@ unfused ~650-kernel list ships first and fusion is deferred.
 
 Runs the production GEMV kernel (Section 9.2) on random int4 g64 weights at
 the shapes the model actually runs after load-time fusion (Section 6.4):
-`(K, N)` ∈ {(5120, 5120) out/o_proj, (5120, 14336) q‖k‖v, (5120, 16384)
+`(K, N)` ∈ {(6144, 5120) out/o_proj, (5120, 14336) q‖k‖v, (5120, 16384)
 qkv‖z, (5120, 34816) gate‖up, (17408, 5120) down}, plus the bf16 `lm_head`
 (5120, 248320); M = 1; S ∈ {1, 2, 4, 8, 16}; both canonical layouts
 (Section 6.3). Report GB/s of weight bytes per configuration. Checks results
 against a CPU reference at every configuration (this is also the GEMV unit
 test). N = 5120 is the worst fill case (320 subgroups) and the one split-K
-exists for.
+exists for. (corrected 2026-08-24: §4.2 originally said (5120, 5120), a
+controller authoring error caught by the final review; the 2026-08-23 probe run
+measured that non-production shape)
 
 Decision rules: the layout with the higher GB/s summed over the five int4
 shapes becomes the canonical layout; `S` per shape is the smallest value
@@ -209,14 +211,16 @@ Two layouts, selected by `probe_gemv` (Section 4.2), both implemented by
   Tiles ordered k-group inner, n-tile outer. One subgroup streams one
   contiguous 544 B block per k-group.
 
-**Chosen: layout 1** (2026-08-23, `probe_gemv`); `S` per shape: out/o_proj 16,
-q‖k‖v 1, qkv‖z 1, gate‖up 4, down 16. The margin is 2712 vs 2666 GB/s summed
+**Chosen: layout 1** (2026-08-23, `probe_gemv`; **re-decided 2026-08-24** after
+the §4.2 `out/o_proj` shape correction, on a full re-run of the matrix - same
+layout, same `S` picks, same margin); `S` per shape: out/o_proj 16, q‖k‖v 1,
+qkv‖z 1, gate‖up 4, down 16. The margin is 2713 vs 2667 GB/s summed
 over the five shapes - **the two layouts are within 2% of each other** by the
-deciding metric (3.7% apart in wall time) - and layout 1's entire lead comes
+deciding metric (3.6% apart in wall time) - and layout 1's entire lead comes
 from `qkv‖z` (N = 16384), where layout 0's power-of-two row stride caps it at
-420 GB/s against layout 1's 560; layout 0 is 0.9-6.3% ahead on the other four
+419 GB/s against layout 1's 559; layout 0 is 1.1-6.8% ahead on the other four
 shapes. Recorded as the rule in Section 4.2 dictates; `docs/12-kernels.md` has
-the full 51-row table.
+the full 51-row table, `docs/probe-gemv-2026-08-24.md` the raw run.
 
 The loser is deleted from the tree once the probe has chosen (deferred to
 plan 2's loader by controller ruling, 2026-08-23: the margin is 1.7% and

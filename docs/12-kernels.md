@@ -76,9 +76,9 @@ runtime's whole premise is one list replayed per token, and the golden-tensor
 tests compare bitwise. Determinism is not negotiable for either. The cost is
 `S ×` the output bytes, and it varies by an order of magnitude across the
 chosen configurations: 0.59% at `gate‖up` (S = 4, 557 KB against 94.7 MB), but
-**2.35% at `out/o_proj` (S = 16, 327,680 B against 13.93 MB)** - that is the
+**1.96% at `out/o_proj` (S = 16, 327,680 B against 16.71 MB)** - that is the
 bound at M = 1, not the `gate‖up` figure. It is also a *write*, which this
-kernel otherwise does not do. At M = 8 the same worst case grows to **~19%**
+kernel otherwise does not do. At M = 8 the same worst case grows to **~16%**
 (2.62 MB of partials), which is the point at which this trade would have to be
 re-examined rather than assumed. Atomics would save that and forfeit
 reproducibility; today the trade is cheap, at M = 8 and S = 16 it would not be.
@@ -103,21 +103,21 @@ being a second stream. The address stream a subgroup issues does not depend on
 `N` at all. That independence is the whole reason the layout exists.
 
 **Which won.** Layout 1, by the probe's rule (higher GB/s summed over the five
-int4 shapes), **2712 vs 2666 - 1.7%.** That is inside the noise the rule was
+int4 shapes), **2713 vs 2667 - 1.7%.** That is inside the noise the rule was
 written to tolerate, and the honest reading is this:
 
 | shape | K×N | layout 0 best | layout 1 best | winner |
 |---|---|---|---|---|
-| out/o_proj | 5120×5120 | **549** | 526 | 0, by 4.4% |
-| q‖k‖v | 5120×14336 | **576** | 542 | 0, by 6.3% |
-| qkv‖z | 5120×16384 | 420 | **560** | **1, by 33%** |
-| gate‖up | 5120×34816 | **554** | 549 | 0, by 0.9% |
-| down | 17408×5120 | **566** | 534 | 0, by 6.0% |
+| out/o_proj | 6144×5120 | **549** | 533 | 0, by 3.0% |
+| q‖k‖v | 5120×14336 | **577** | 541 | 0, by 6.7% |
+| qkv‖z | 5120×16384 | 419 | **559** | **1, by 33%** |
+| gate‖up | 5120×34816 | **555** | 549 | 0, by 1.1% |
+| down | 17408×5120 | **567** | 531 | 0, by 6.8% |
 
 **Layout 1 loses four shapes out of five and wins the sum on one.** The one is
 `qkv‖z`, and it is the only shape whose `N` is a power of two: at N = 16384
-layout 0's row stride is exactly 64 KB, and layout 0 never exceeds 420 GB/s
-there at any `S`, while layout 1 hits 560 at `S = 1`. Every other shape has a
+layout 0's row stride is exactly 64 KB, and layout 0 never exceeds 419 GB/s
+there at any `S`, while layout 1 hits 559 at `S = 1`. Every other shape has a
 non-power-of-two stride (20480, 57344, 139264 bytes) and layout 0 is fine. The
 mechanism is almost certainly DRAM channel/bank aliasing on the power-of-two
 stride - **that is an inference from the shape of the data, not a measured
@@ -125,12 +125,12 @@ cause**; nothing in this project has read a memory-controller counter. What is
 measured is that the penalty is real, reproducible, and confined to N = 2^k.
 
 In wall time rather than the rule's GB/s sum, each layout at its own rule-chosen
-`S`, one instance of each of the five shapes: **layout 0 459.9 µs, layout 1
-442.8 µs - layout 1 is 3.7% faster.** Both metrics agree in direction.
+`S`, one instance of each of the five shapes: **layout 0 465.3 µs, layout 1
+449.0 µs - layout 1 is 3.6% faster.** Both metrics agree in direction.
 
 What layout 1 costs, recorded so the next person can revisit it: a load-time
 repack pass over 12.16 GB of weights (`repack()`), and the loss of the
-zero-copy-from-`mmap` option that layout 0 would have allowed. A 3.7% decode
+zero-copy-from-`mmap` option that layout 0 would have allowed. A 3.6% decode
 win pays for a one-off load cost; it would not pay for much else. If the model
 mix ever shifts to shapes with no power-of-two `N`, this decision is worth
 re-running - the probe is the arbiter, not this paragraph.
@@ -145,8 +145,8 @@ argument. Saying so is the point of this section.
 M ∈ [1,8] and only `gemv_M2_K5120_N5120_S1_L0` is even compiled today; nothing
 above M = 1 has been timed. The `S` picks in the table below are therefore
 **M = 1 picks**, and they will not simply carry over: the split-K partials scale
-with M, so `out/o_proj` at S = 16 goes from 2.35% of weight bytes at M = 1 to
-**~19% at M = 8**, and the rule would very likely choose a smaller `S` there.
+with M, so `out/o_proj` at S = 16 goes from 1.96% of weight bytes at M = 1 to
+**~16% at M = 8**, and the rule would very likely choose a smaller `S` there.
 Re-run `probe_gemv` over M before trusting any of this for speculative decode.
 
 - **Shuffle-broadcast of activations (OpenVINO's pattern) vs same-line vector
@@ -174,12 +174,12 @@ Re-run `probe_gemv` over M before trusting any of this for speculative decode.
   further would need a second scale in flight for no obvious gain on a
   bandwidth-bound loop.
 - **Atomics instead of partials - rejected on determinism, not measured.** The
-  traffic argument says it would be worth 2.35% at most at M = 1 (`out/o_proj`,
-  S = 16) and ~19% at M = 8 - see above.
+  traffic argument says it would be worth 1.96% at most at M = 1 (`out/o_proj`,
+  S = 16) and ~16% at M = 8 - see above.
 
 ### Measured
 
-`probe_gemv`, **2026-08-23**, on the box (`CL_DRIVER_VERSION 26.27.39122.14`,
+`probe_gemv`, **2026-08-24**, on the box (`CL_DRIVER_VERSION 26.27.39122.14`,
 kernels AOT-compiled by `ocloc -device bmg-g31`, host `-O2`), weights random.
 Timing: each configuration is 40 launches recorded in one regular command list
 and replayed 8 times, median of the last 5, `µs = list time / 40`. The list
@@ -187,14 +187,14 @@ cycles through `NB = max(2, 72 MB / weight_bytes + 1)` identical weight copies
 at different addresses, so consecutive launches miss the 24 MB L2 and the number
 is DRAM bandwidth, not cache bandwidth. GB/s counts **weight bytes only**
 (nibbles + f16 scales). The activation vector is 10 KB, read once into cache;
-the fp32 partials written are **0.15-2.4% of weight bytes at the chosen `S`,
-worst at `out/o_proj` S = 16** (327,680 B against 13.93 MB) - not "under 1%",
+the fp32 partials written are **0.15-2.0% of weight bytes at the chosen `S`,
+worst at `out/o_proj` S = 16** (327,680 B against 16.71 MB) - not "under 1%",
 and worth remembering when reading a GB/s figure that ignores them. Correctness
 is checked against a double-accumulating CPU reference at **every** one of the
 50 int4 configurations - all passed.
 
 ```bash
-tools/box.sh run ./build/tools/probe/probe_gemv | tee docs/probe-gemv-2026-08-23.md
+tools/box.sh run "./build/tools/probe/probe_gemv" | tee docs/probe-gemv-2026-08-24.md
 ```
 
 Best `S` per shape in the canonical layout 1, and the `S = 1` row it is measured
@@ -202,22 +202,31 @@ against:
 
 | shape | K×N | subgroups at S=1 | S=1 GB/s | chosen S | GB/s | % of 600 | µs |
 |---|---|---|---|---|---|---|---|
-| out/o_proj | 5120×5120 | 320 | 259 (43%) | **16** | 526 | 88% | 26.5 |
-| q‖k‖v | 5120×14336 | 896 | 542 (90%) | **1** | 542 | 90% | 72.0 |
-| qkv‖z | 5120×16384 | 1024 | 560 (93%) | **1** | 560 | 93% | 79.5 |
-| gate‖up | 5120×34816 | 2176 | 425 (71%) | **4** | 538 | 90% | 176.2 |
-| down | 17408×5120 | 320 | 262 (44%) | **16** | 534 | 89% | 88.6 |
-| `lm_head` bf16 | 5120×248320 | 15520 | 585 (97%) | - | 585 | 97% | 4349.5 |
+| out/o_proj | 6144×5120 | 320 | 259 (43%) | **16** | 533 | 89% | 31.3 |
+| q‖k‖v | 5120×14336 | 896 | 540 (90%) | **1** | 540 | 90% | 72.2 |
+| qkv‖z | 5120×16384 | 1024 | 559 (93%) | **1** | 559 | 93% | 79.7 |
+| gate‖up | 5120×34816 | 2176 | 426 (71%) | **4** | 536 | 89% | 176.7 |
+| down | 17408×5120 | 320 | 261 (44%) | **16** | 531 | 89% | 89.1 |
+| `lm_head` bf16 | 5120×248320 | 15520 | 584 (97%) | - | 584 | 97% | 4350.5 |
 
 `S` is the smallest value within 3% of that shape's best (spec §4.2). The full
 51-row matrix, verbatim, is committed as
-[probe-gemv-2026-08-23.md](probe-gemv-2026-08-23.md).
+[probe-gemv-2026-08-24.md](probe-gemv-2026-08-24.md).
+
+**Re-measured 2026-08-24 after a shape correction.** The 2026-08-23 run had
+`out/o_proj` at (5120, 5120); the model's output projections are 6144 → 5120
+(doc 03), and spec §4.2 was wrong. The whole matrix was re-run at the corrected
+shape so that no number here is a mix of two sessions. **The decision did not
+change:** canonical layout still 1, `S` still 16 / 1 / 1 / 4 / 16, the layout
+margin still 1.7% (2713 vs 2667). `out/o_proj` grew 20% in weight bytes
+(13.93 → 16.71 MB) and behaves the same: 320 subgroups at `S` = 1, 259 GB/s
+there, 533 at `S` = 16.
 
 Four things worth reading off it:
 
-1. **Split-K is worth 2.0× exactly where the spec said it would be.** Both
-   N = 5120 shapes double: 259 → 526 and 262 → 534 GB/s. The prediction that
-   N = 5120 is the worst fill case is confirmed.
+1. **Split-K is worth ~2× exactly where the spec said it would be.** Both
+   N = 5120 shapes double: 259 → 533 GB/s (2.06×) and 261 → 531 (2.03×). The
+   prediction that N = 5120 is the worst fill case is confirmed.
 2. **Split-K is not universal.** At N = 14336 and N = 16384 the grid already
    fills the device and `S = 1` is the *best* setting, not merely adequate -
    splitting there costs a few percent. A kernel that always split K would be
@@ -227,14 +236,19 @@ Four things worth reading off it:
    93% - and still only reaches 71% until `S` = 4. So "fill the device" is the
    right first-order story for N = 5120 but does not explain everything the
    probe sees, and this document does not pretend otherwise.
-4. **The `S` curve is not monotonic and the bumps are real, not noise.**
-   `out/o_proj` reads 259 / 449 / 485 / 455 / 526 across S = 1..16 and `down`
-   reads 262 / 469 / 431 / 448 / 534; a second full run reproduces every cell
-   (median deviation 0.21%, worst 2.1%) and picks the identical `S` everywhere.
-   Something about how `(N/64) × S` groups land on 32 subslices is being
-   sampled here. It is not explained, and the rule does not need it explained -
-   but do not "clean up" these numbers by assuming bigger `S` is monotonically
-   better.
+4. **The `S` curve is not monotonic, and mostly the bumps are real.**
+   `out/o_proj` reads 259 / 451 / 467 / 453 / 533 across S = 1..16 and `down`
+   reads 261 / 470 / 482 / 447 / 531. A second full run picks the identical `S`
+   everywhere, agrees to a median of 0.21% per cell, and reproduces
+   `out/o_proj`'s dip at S = 8 exactly (259 / 451 / 465 / 454 / 533). One cell
+   does **not** reproduce: `down` layout 1 S = 4 reads 482 in run 1 against 429
+   in run 2 - an 11.0% spread, and the 2026-08-23 run read 431 there, so run 1
+   is the outlier. It decides nothing (`down` picks S = 16 in every run) and is
+   recorded rather than smoothed. Something about how `(N/64) × S` groups land
+   on 32 subslices is being sampled here. It is not explained, and the rule does
+   not need it explained - but do not "clean up" these numbers by assuming
+   bigger `S` is monotonically better, and do not treat a single cell as
+   settled at better than ~10% without a second run.
 
 ---
 
@@ -259,7 +273,7 @@ reasoning is the same and is not repeated.
 **What differs is that there is no `S`.** N = 248320 gives 3880 work-groups and
 **15520 subgroups** against 256 EUs - the grid fills the device on `N` alone,
 which is what spec §4.2 predicted. The measurement settles it rather than
-arguing it: **585 GB/s, 97% of the 600 GB/s roofline denominator and 99% of the
+arguing it: **584 GB/s, 97% of the 600 GB/s roofline denominator and 99% of the
 590 GB/s that `probe_bw` measures through the same launch path.** There is no
 headroom left for split-K to recover, so the `S` parameter was never added, and
 the partial-sum buffer it would need (S × 248320 fp32 = 1 MB per slice) never
@@ -304,8 +318,8 @@ cycling 2 weight copies (5.09 GB device-resident):
 
 | shape | K×N | µs | GB/s | % of 600 |
 |---|---|---|---|---|
-| `lm_head` bf16 | 5120×248320 | 4349.5 | **585** | **97%** |
+| `lm_head` bf16 | 5120×248320 | 4350.5 | **584** | **97%** |
 
-For scale: at 585 GB/s `lm_head` alone is **4.35 ms**, against the 25.8 ms a
+For scale: at 584 GB/s `lm_head` alone is **4.35 ms**, against the 25.8 ms a
 38.7 t/s token allows - 17% of the step for 16.4% of the bytes. That is why
 item 1 of doc 05's specialisation list is `lm_head`, not a kernel.

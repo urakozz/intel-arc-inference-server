@@ -100,15 +100,18 @@ model load. Consequences:
 The canonical layout is chosen by what the `sycl-tla` mixed-dtype mainloop wants,
 not by what any checkpoint happens to ship.
 
-**Canonical int4 layout chosen 2026-08-23 by `probe_gemv`: layout 1** (the tiled
-544-byte block per 16 `n` × 64 `k`, scales inline) - 2712 vs 2666 GB/s summed
-over the five decode shapes, so **the two layouts are within 2% of each other**
-by the deciding metric (3.7% apart in wall time). The whole lead comes from one
-shape, `qkv‖z` at N = 16384, where layout 0's power-of-two 64 KB row stride caps
-it at 420 GB/s against layout 1's 560; on the other four shapes layout 0 is
-0.9-6.3% ahead. Recorded as the rule dictates, and worth re-running if the shape
-mix changes - the full table and the argument are in
-[12-kernels.md](12-kernels.md).
+**Canonical int4 layout chosen 2026-08-23 and re-decided 2026-08-24 by
+`probe_gemv`: layout 1** (the tiled 544-byte block per 16 `n` × 64 `k`, scales
+inline) - 2713 vs 2667 GB/s summed over the five decode shapes, so **the two
+layouts are within 2% of each other** by the deciding metric (3.6% apart in wall
+time). The whole lead comes from one shape, `qkv‖z` at N = 16384, where layout
+0's power-of-two 64 KB row stride caps it at 419 GB/s against layout 1's 559; on
+the other four shapes layout 0 is 1.1-6.8% ahead. The 2026-08-24 re-run measures
+the whole matrix again at the corrected `out/o_proj` shape (6144 × 5120, not the
+5120 × 5120 spec §4.2 wrongly listed) and **reaches the same decision: same
+layout, same `S` per shape, same 1.7% margin.** Recorded as the rule dictates,
+and worth re-running if the shape mix changes - the full table and the argument
+are in [12-kernels.md](12-kernels.md).
 
 ## W4A16 for decode, possibly W4A8 for prefill
 
