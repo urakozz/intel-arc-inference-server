@@ -106,6 +106,8 @@ scans every word of every `.qzeros`, `.g_idx` and `.scales` in the checkpoint
   only" comment allowed. Flushing would have made the host-side reference
   disagree with both the kernel and the oracle on 1658 groups.
 
+**Binding constraint for the kernels (plan 3):** because real group scales are subnormal f16, device kernels must never be compiled with `-cl-denorms-are-zero` (or any FP16 denorm-flushing option) - flushing would zero 1 658 real scales and silently diverge from both this loader's host reference and the oracle. Recorded 2026-08-25.
+
 All three throw with tensor name, element index and the offending value.
 Neither `qzeros` nor `g_idx` is uploaded: **0.202 GB dropped at load**, and the
 report prints the counts (and the subnormal count) so the drop is visible
