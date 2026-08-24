@@ -6,10 +6,13 @@ if the checkpoint does not mean what this project assumes. Everything the decode
 loop needs is resident and canonical when `loader::load` returns; nothing is
 converted, branched on, or discovered at run time.
 
-`src/loader/{snapshot,safetensors,quant,loader}.{h,cc}`, driven by the model
-description in `src/model/qwen35.{h,cc}` (doc 03) and the canonical layouts in
+`src/loader/{snapshot,safetensors,quant,loader}.{h,cc}` plus
+`src/loader/small_layout.h` (the small-tensor block offsets, shared with the
+model description and plan 3's kernels), driven by the model description in
+`src/model/qwen35.{h,cc}` (doc 03) and the canonical layouts in
 `src/common/repack.h` (doc 12). Measured on the box **2026-08-24** against
-`Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ`.
+`Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ`; the byte accounting below
+re-measured **2026-08-25** after the fp32-RMSNorm ruling.
 
 ## Snapshot resolution - and why it never downloads
 
@@ -74,11 +77,11 @@ cannot read cannot mislead it.
 dynamic rule - the exact pattern that made a published MTP head unusable
 (BENCHMARKS.md). This checkpoint's copy has been corrected to `-:`.
 
-### The two data asserts, and what measured them
+### The three data asserts, and what measured them
 
 `assert_quant_invariants(set)` runs **before a single byte is repacked** and
-scans every word of every `.qzeros` and `.g_idx` in the checkpoint (0.202 GB,
-under a second):
+scans every word of every `.qzeros`, `.g_idx` and `.scales` in the checkpoint
+(0.202 GB of the first two, 0.760 GB of scales; ~1 s in total):
 
 - **Every `qzeros` word is `0x77777777`.** GPTQ v1 stores *zero point − 1*, so
   the packed nibble `7` means a zero point of 8 - symmetric. Measured over all
@@ -91,9 +94,22 @@ under a second):
   all 400 `g_idx` tensors 2026-08-24. This is what licenses the layout-1 repack
   to compute a group index arithmetically instead of carrying a per-`k` table.
 
-Both throw with tensor name, element index and the offending value. Neither
-array is uploaded: **0.202 GB dropped at load**, and the report prints the
-counts so the drop is visible rather than assumed.
+- **Every `.scales` f16 is finite.** The dequant is `scale·(q − 8)` with no
+  guard anywhere downstream, so one NaN or Inf scale poisons a group of 64
+  weights silently. This one is new on **2026-08-25**, and it immediately
+  found something: **1658 of the 380 108 800 scales in this checkpoint are
+  subnormal f16** (the first is `layers.10.linear_attn.in_proj_qkv.scales[1444]
+  = 0x00A8` ≈ 1.0e-5). Subnormals are *counted and reported, not rejected* -
+  they are exact f16 values, the kernel reads the f16 word natively, and
+  `common::f16_to_f32` was corrected the same day to decode them exactly
+  (`man · 2⁻²⁴`) instead of flushing them to zero as its old "normal range
+  only" comment allowed. Flushing would have made the host-side reference
+  disagree with both the kernel and the oracle on 1658 groups.
+
+All three throw with tensor name, element index and the offending value.
+Neither `qzeros` nor `g_idx` is uploaded: **0.202 GB dropped at load**, and the
+report prints the counts (and the subnormal count) so the drop is visible
+rather than assumed.
 
 One more assert exists because the loader `reinterpret_cast`s mmapped bytes to
 `uint32_t`/`uint16_t`: every such pointer is checked for alignment and throws
@@ -119,7 +135,9 @@ consumed - **0**, and the test asserts it (`report.unconsumed`). Every name in
 the view is either loaded or deliberately dropped, and the drop is counted.
 Nothing is silently ignored; if a future checkpoint grows a tensor this loader
 does not know about, the number stops being 0 and both the report and the test
-say so.
+say so - and the report names **up to five** of the unconsumed tensors (then
+`…`), so a checkpoint that grew a whole family says which family instead of
+sending the reader back with a debugger.
 
 ## Fusion: why these weights are welded together
 
@@ -173,19 +191,31 @@ different shapes cannot get past its own linear's name.
 The kernels should do arithmetic, not bookkeeping. Four transformations happen
 once at load:
 
-**`1 + w` for every RMSNorm weight.** `Qwen3_5RMSNorm` is Gemma-style:
-`x·rsqrt(mean(x²)+ε) ⊙ (1 + w)`, and the `+1` is **not** in the checkpoint
-(doc 03, "Layer math"). Storing `1 + w` makes the kernel a plain RMSNorm - one
-multiply, no constant to materialise per element. The bake is **one fp32 add and
-one round-to-nearest-even cast back to bf16**: a single rounding, the same
-discipline as every other conversion in this project. Applied to
-`input_layernorm`, `post_attention_layernorm`, and FA's `q_norm`/`k_norm`.
+**`1 + w`, stored fp32, for every RMSNorm weight.** `Qwen3_5RMSNorm` is
+Gemma-style: `x·rsqrt(mean(x²)+ε) ⊙ (1 + w)`, and the `+1` is **not** in the
+checkpoint (doc 03, "Layer math"). Storing `1 + w` makes the kernel a plain
+RMSNorm - one multiply, no constant to materialise per element.
 
-**`linear_attn.norm.weight` is left alone.** `Qwen3_5RMSNormGated` is plain `w`
-- it is the one norm in the model *without* the `+1`, and it multiplies by
-`silu(z)` after normalising. Baking `+1` into it would be a silent accuracy bug
-in all 48 GDN layers, which is why it is called out here and in the offset block
-in `loader.cc`.
+The bake is **one fp32 add, stored as fp32 - no cast back to bf16**
+(controller ruling **2026-08-25**, changed from the original bf16 store). The
+reason is the reference: HF computes the whole of `x·rsqrt(…)·(1 + w)` in fp32
+and never rounds the multiplier. Storing `1 + w` as bf16 introduces a rounding
+the oracle does not have, and it lands where bf16 is weakest - `w` is small, so
+`1 + w` sits just above 1.0, where bf16's 8-bit mantissa steps by 2⁻⁸: up to
+**0.39% error on the multiplier**, at ~130 sites (128 layernorms + the final
+norm), compounding down 64 layers. Storing fp32 **removes** that rounding
+entirely and closes the divergence; it costs 1 337 344 B of VRAM (below), which
+is 0.0086% of the weights. Applied to `input_layernorm`,
+`post_attention_layernorm`, FA's `q_norm`/`k_norm`, and the final `norm`.
+
+**`linear_attn.norm.weight` is left alone - plain `w`, and still bf16.**
+`Qwen3_5RMSNormGated` is plain `w`: it is the one norm in the model *without*
+the `+1`, and it multiplies by `silu(z)` after normalising. Baking `+1` into it
+would be a silent accuracy bug in all 48 GDN layers. It also keeps its bf16
+storage, for the mirror image of the argument above: the reference's own
+parameter dtype is bf16 and it multiplies in the bf16 domain, so widening it
+would move *away* from the oracle rather than towards it. Both facts are called
+out here and in `src/loader/small_layout.h`.
 
 **`A_log → −exp(A_log)`, fp32.** The GDN decay is only ever used as
 `g = −exp(A_log) ⊙ softplus(a + dt_bias)`. The `exp` is a per-head constant, so
@@ -199,21 +229,26 @@ of VRAM and saves a per-tap convert in the GDN kernel.
 ### The per-layer small-tensor blocks
 
 Everything that is not a GEMV weight is packed into **two allocations per
-layer** with compile-time offsets (`loader.cc`, `static_assert`ed on block size
-and field alignment - the assert is what fails if this file is edited without
-the kernels being told):
+layer** with compile-time offsets. Those offsets live in exactly one file,
+**`src/loader/small_layout.h`**, `static_assert`ed on every offset, every block
+size and every field alignment - the assert is what fails if the layout is
+edited without the kernels being told. Three consumers read that header and
+none of them re-derives a number: the loader packs against it, the model
+description's small-tensor table (below) carries those constants as its
+destination offsets, and **plan 3's GDN / FA / norm kernel bindings include it**
+to find each field inside the block they are handed.
 
 ```
-norms  (both kinds, 20480 B)     [0]      input_layernorm       (1+w) bf16 [5120]
-                                 [10240]  post_attention_ln     (1+w) bf16 [5120]
+norms  (both kinds, 40960 B)     [0]      input_layernorm       (1+w) fp32 [5120]
+                                 [20480]  post_attention_ln     (1+w) fp32 [5120]
 
 GDN    (164480 B)                [0]      conv1d                fp32 [10240][4]
                                  [163840] -exp(A_log)           fp32 [48]
                                  [164032] dt_bias               fp32 [48]
                                  [164224] linear_attn.norm      plain w bf16 [128]
 
-FA     (1024 B)                  [0]      q_norm                (1+w) bf16 [256]
-                                 [512]    k_norm                (1+w) bf16 [256]
+FA     (2048 B)                  [0]      q_norm                (1+w) fp32 [256]
+                                 [1024]   k_norm                (1+w) fp32 [256]
 ```
 
 One block per layer instead of six allocations per layer keeps the descriptor
@@ -221,8 +256,21 @@ count down for plan 3's captured command list, and makes each layer's constants
 one contiguous read.
 
 The one norm that belongs to no layer - `model.language_model.norm.weight`, the
-final RMSNorm before `lm_head` - gets its own 10 240 B allocation,
-`LoadedModel::final_norm`, baked `(1 + w)` like all the rest.
+final RMSNorm before `lm_head` - gets its own 20 480 B allocation,
+`LoadedModel::final_norm`, baked fp32 `(1 + w)` like all the rest.
+
+**The table is the loader, and the model description owns it.**
+`model::LayerDesc::small_tensors` is not a list of names any more: each entry
+carries the layer-relative name, the exact element count, the required source
+dtype, which of the two blocks it lands in, its byte offset there (a
+`small_layout.h` constant) and its bake kind - `one_plus_w_fp32`, `plain_bf16`,
+`neg_exp_fp32`, `raw_fp32_widen`, `raw_fp32`. `loader::load_small` **walks**
+that table and hardcodes no name, no dtype and no offset, so adding a small
+tensor is a row in `qwen35.cc` plus (if it moves the layout) a constant in
+`small_layout.h`. Two checks keep the pair honest at load: an entry that would
+overrun its block throws naming the tensor, and a block the entries do not tile
+*exactly* throws naming the layer. `tests/model/qwen35_test` asserts the six GDN
+and four FA rows, their offsets and their bakes without touching a device.
 
 ### The RoPE table
 
@@ -263,10 +311,22 @@ power-of-two stride where layout 0 collapses from ~550 to 419 GB/s. The
 controller ruling of **2026-08-24** kept both repack paths rather than deleting
 the loser, because flipping individual rows to layout 0 is a measured +3.5%
 best-per-shape option - a phase-1 tuning knob to be measured end-to-end, not a
-decision to be relitigated in the loader. The mechanism supports it: change one
-row in `qwen35.cc` and the loader repacks that linear differently, with no other
-edit anywhere. bf16 weights (`AB`, `LmHead`) have exactly one tiled layout and
-carry `layout 0` as a filler.
+decision to be relitigated in the loader.
+
+**Turning that knob is not a one-row edit, and the loader now says so.** Only
+the *kernel* side of layout 0 exists today: `gemv.cl` compiles it, and the probe
+measured it. The loader implements the layout-1 repack alone, and
+`loader::DeviceWeight` holds a single `l0::Mem` - while `gemv.cl`'s `LAYOUT == 0`
+binds `w` (`qweight[K/8][N]`, as shipped) and `scales[K/64][N]` as **two
+separate buffers**. Flipping a row to layout 0 therefore needs (a) a loader path
+that keeps the GPTQ-native arrays instead of repacking, and (b) a second device
+allocation in `DeviceWeight`. Until both exist, `load_linear` **throws** on any
+int4 row whose `layout` is not 1, naming the linear and both missing pieces - so
+forgetting is loud at load rather than silent bytes the kernel cannot read.
+(This doc previously claimed "change one row … with no other edit anywhere";
+that was wrong, and the guard is what makes it stay corrected.) bf16 weights
+(`AB`, `LmHead`) have exactly one tiled layout and carry `layout 0` as a filler,
+which is why the guard is scoped to int4 rows.
 
 ## Memory and the `W` cross-check - measured 2026-08-24
 
@@ -282,20 +342,21 @@ loader: .../snapshots/2a9077667e28aa53e61d91bdee5d7962e8674668/
   quant     int4 g64 sym desc_act=false, 98 dynamic exclusion rules
   tensors   2050 language-model + lm_head; skipped 333 visual, 15 mtp;
             dropped 400 qzeros + 400 g_idx (invariants asserted), 0 unconsumed
+  scales    1658 subnormal f16 (exact on device and in f16_to_f32; not an error)
   linears   305 fused weights, 64 layers
   int4          12163481600 B   12.163 GB
   scales          760217600 B    0.760 GB
   bf16_linear      47185920 B    0.047 GB   (a‖b real rows; 0.063 GB with padding)
   lm_head        2542796800 B    2.543 GB
-  small             9232384 B    0.009 GB   (per-layer blocks + final norm)
+  small            10569728 B    0.011 GB   (per-layer blocks + final norm)
   pad              15728640 B    0.016 GB
-  read/token    15538642944 B   15.539 GB
+  read/token    15539980288 B   15.540 GB
   embed          2542796800 B    2.543 GB   (resident, gathered - not per-token)
   rope              4194304 B    0.004 GB   (resident, ~256 B per token - not per-token)
-  total         18085634048 B   18.086 GB
-  W check     15.539 GB vs 15.539 GB expected = 15.519 doc-03 + 0.016 pad + 0.003941 widen
-              ->  -0.000%
-  load        13.1 s
+  total         18086971392 B   18.087 GB
+  W check     15.540 GB vs 15.540 GB expected = 15.519 doc-03 + 0.016 pad + 0.005279 widen
+              widen = 1337344 B RMSNorm fp32 (1+w) + 3941376 B GDN fp32  ->  -0.000%
+  load        13.6 s
 ```
 
 Every uploaded byte lands in exactly one bucket, and the buckets sum to the
@@ -314,19 +375,29 @@ loader's own itemised additions - never a widened tolerance:
 | `a‖b` zero padding | 15 728 640 | 32 rows × 5120 × 2 B × 48 GDN layers, to reach the 16-wide tile |
 | `conv1d` bf16→fp32 | 3 932 160 | 40960 taps × 2 B × 48 layers |
 | `A_log`, `dt_bias` bf16→fp32 | 9 216 | 48 heads × 2 B × 2 tensors × 48 layers |
+| both layernorms bf16→fp32 | 1 310 720 | 5120 × 2 B × 2 norms × 64 layers |
+| FA `q_norm`, `k_norm` bf16→fp32 | 16 384 | 256 × 2 B × 2 norms × 16 FA layers |
+| final `norm` bf16→fp32 | 10 240 | 5120 × 2 B, once |
+
+The last three rows are the 2026-08-25 RMSNorm ruling: **1 337 344 B** in total,
+which is what the report's `widen` line itemises as *"RMSNorm fp32 (1+w)"*
+against the GDN family's 3 941 376 B. Widening is a byte cost, never a
+tolerance: both sides of the cross-check move by exactly the same amount.
 
 The RoPE table (4 194 304 B) is *not* in this list: it is resident but not
 streamed per token, so it is excluded from both sides rather than added to both.
 
 Measured delta: **−27 072 B, −0.00017%** - the loader is 27 KB *under* doc 03's
-figure, which is the rounding in "15.519". Note the three totals the report
-prints and why they differ: **read/token 15.539 GB** is what the decode step
-streams; **total 18.086 GB** adds `embed_tokens` (gathered one row at a time,
-~0 traffic) and the RoPE table (~256 B read per token). All three are printed,
-labelled.
+figure, which is the rounding in "15.519". It is unchanged by the fp32-RMSNorm
+ruling, because the same 1 337 344 B are added to *both* sides. Note the three
+totals the report prints and why they differ: **read/token 15.540 GB** is what
+the decode step streams; **total 18.087 GB** adds `embed_tokens` (gathered one
+row at a time, ~0 traffic) and the RoPE table (~256 B read per token). All three
+are printed, labelled.
 
-**Load time: 13.0-13.2 s** (warm page cache; 11.3 s of it is user CPU in the
-single-threaded repack), against a 120 s target. No thread pool was built: the
+**Load time: 13.6 s** (warm page cache, 2026-08-25 - up ~0.4 s from 13.1 s
+before, which is the new full scan of 0.76 GB of `.scales`), against a 120 s
+target. No thread pool was built: the
 known lever (a `std::async` pool over per-linear repack) is not worth its
 complexity at 13 s. On a cold page cache this is bounded below by reading 19 GB
 off the disk, and the figure should be re-measured before anyone calls it fast.
@@ -353,13 +424,22 @@ That check rides on a property of layout 1: tiles are ordered `n_tile`-outer,
 loader ever ordered them differently the test would be wrong rather than the
 loader - it is written down here so that is a decision and not a surprise.
 
-The tile check covers the int4 path only, so three more readbacks pin the
-transformations it cannot see - each one a value the kernels would otherwise
-have to take on trust:
+The tile check covers the int4 path only, so the small blocks are read back
+field by field at their `small_layout.h` offsets - **every bake kind is
+represented, and each check would fail if the block layout moved**:
 
-- **the `(1+w)` bake**: layer 0's `input_layernorm[0]` on the device equals
-  `f32_to_bf16(1.0f + bf16_to_f32(src))` computed independently - the single
-  rounding, verified rather than asserted;
+- **the norms block**, both halves: `input_layernorm[0]` at `[0]` and
+  `post_attention_layernorm[0]` at `[20480]` equal `1.0f + bf16_to_f32(src)` as
+  **fp32** - which is simultaneously the proof of the bake, of the fp32 store
+  (a bf16 store would not compare equal) and of the post half's new offset;
+- **layer 0's GDN block**, one field per bake: `conv[0]` at `[0]` equals
+  `bf16_to_f32(src conv1d[0])`; `negA[0]` at `[163840]` equals
+  `−exp(bf16_to_f32(src A_log[0]))`; `dt_bias[0]` at `[164032]` equals
+  `bf16_to_f32(src)`; and the gated norm at `[164224]` is the checkpoint's
+  **raw bf16 word** - not `1+w`, not widened. That last one is the check that
+  would catch someone "fixing" the inconsistency;
+- **an FA layer's `k_norm`**: layer 3's, fp32 `1 + w` at `[1024]`;
+- **the final norm**, fp32 `1 + w` in its own allocation;
 - **the `a‖b` padding**: rows 96..127 of the tiled `[128][5120]` buffer read
   back as zero, all 163 840 of them, so the 32 pad rows contribute nothing to
   the GEMV;

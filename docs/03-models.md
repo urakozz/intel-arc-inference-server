@@ -101,8 +101,10 @@ elementwise, all norms run in fp32.
 **RMSNorm - Gemma-style `(1 + w)`.** `Qwen3_5RMSNorm` (used for
 `input_layernorm`, `post_attention_layernorm`, the final `norm`, `q_norm`,
 `k_norm`) computes `x · rsqrt(mean(x²) + 1e-6) ⊙ (1 + w)`. **The `+1` is not in
-the weights**; the loader bakes it in (store `1 + w`) so the kernel is a plain
-RMSNorm. `Qwen3_5RMSNormGated` (GDN output norm) is plain `w` - no `+1` - and
+the weights**; the loader bakes it in (store `1 + w`, **as fp32** - the
+reference does the whole product in fp32, so rounding the multiplier back to
+bf16 would add an error it does not have; controller ruling 2026-08-25, doc 13)
+so the kernel is a plain RMSNorm. `Qwen3_5RMSNormGated` (GDN output norm) is plain `w` - no `+1` - and
 multiplies by `silu(z)` *after* normalising.
 
 **Decoder layer.** `x += mixer(norm₁(x)); x += mlp(norm₂(x))`, where

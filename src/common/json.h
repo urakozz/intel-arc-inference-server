@@ -8,7 +8,6 @@
 //   false/null. Not supported: comments, trailing commas, NaN/Infinity;
 //   duplicate keys resolve to the last occurrence.
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <stdexcept>
