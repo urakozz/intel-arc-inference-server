@@ -23,6 +23,8 @@ int main() {
   std::remove((dir + "/b.safetensors").c_str());
   std::remove((dir + "/model.safetensors.index.json").c_str());
   std::remove((dir + "/config.json").c_str());
+  std::remove((dir + "/c.safetensors").c_str());
+  std::remove((dir + "/trunc.safetensors").c_str());
   // GCC's warn_unused_result on system() is not silenced by a (void) cast,
   // so the result is checked instead (-Werror is live).
   CHECK(system(("mkdir -p " + dir).c_str()) == 0);
@@ -64,6 +66,36 @@ int main() {
   bool threw = false;
   try { loader::SafetensorsSet bad(snap); } catch (const std::runtime_error& e) {
     threw = std::string(e.what()).find("ghost") != std::string::npos;
+  }
+  CHECK(threw);
+
+  // A header length of UINT64_MAX must not wrap the bounds check: an 8-byte
+  // file has a 0-byte header, so parse_header rejects it instead of building a
+  // ~2^64-long view over the mapping.
+  {
+    std::ofstream f(dir + "/trunc.safetensors", std::ios::binary);
+    uint64_t huge = ~uint64_t(0);
+    f.write(reinterpret_cast<const char*>(&huge), 8);
+  }
+  threw = false;
+  try {
+    loader::MappedFile mf(dir + "/trunc.safetensors");
+    CHECK_EQ(mf.size(), size_t(8));
+    loader::SafetensorsSet::parse_header(mf.data(), mf.size());
+  } catch (const std::runtime_error& e) {
+    threw = std::string(e.what()).find("header length") != std::string::npos;
+  }
+  CHECK(threw);
+
+  // data_offsets past the end of the data section -> throw naming the tensor.
+  write_st(dir + "/c.safetensors",
+           R"({"big":{"dtype":"BF16","shape":[524288],"data_offsets":[0,1048576]}})",
+           std::vector<uint8_t>(8, 0));
+  std::ofstream(dir + "/model.safetensors.index.json")
+      << R"({"weight_map":{"big":"c.safetensors"}})";
+  threw = false;
+  try { loader::SafetensorsSet oob(snap); } catch (const std::runtime_error& e) {
+    threw = std::string(e.what()).find("big") != std::string::npos;
   }
   CHECK(threw);
 
