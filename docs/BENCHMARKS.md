@@ -178,3 +178,6 @@ bug, not vLLM or XPU.
 - Baseline: ~71-72 t/s single-stream decode on Python 3.14 / torch 2.13.
 - Torch 2.14+ can return non-contiguous GDN projections. The local patch
   materializes only `num_actual_tokens` rows before calling the SYCL kernel.
+- The oracle's greedy tokens for the three golden prompts (`prose`, `code`,
+  `cjk`, 32 ids each) exist at `~/b70-inference-server/oracle-out/` on the box
+  and are the plan-3 golden gate: the engine must reproduce them exactly.
