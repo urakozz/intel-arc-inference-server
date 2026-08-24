@@ -28,7 +28,8 @@ struct SmallTensors {          // per layer: everything that is not a GEMV weigh
 struct LoadReport {            // printed by load(); asserted by the test
   size_t int4_bytes = 0, scale_bytes = 0, bf16_linear_bytes = 0;
   size_t embed_bytes = 0, lm_head_bytes = 0, small_bytes = 0, pad_bytes = 0;
-  size_t total() const;
+  size_t total() const;             // the seven byte fields above
+  size_t unconsumed = 0;            // checkpoint tensors nothing loaded (must be 0)
   double seconds = 0;
 };
 
@@ -36,6 +37,7 @@ struct LoadedModel {
   std::map<std::pair<uint32_t, model::LinearId>, DeviceWeight> linears;  // layer 65535 = top level (lm_head)
   std::vector<SmallTensors> layer_small;   // [64]
   l0::Mem embed;                            // bf16 [248320][5120] row-major (gathered)
+  l0::Mem final_norm;                       // pre-lm_head RMSNorm, (1+w) bf16 [5120]
   l0::Mem rope;                             // fp32 [max_len][2][32] cos/sin pairs
   LoadReport report;
 };
