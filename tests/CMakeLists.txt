@@ -57,3 +57,8 @@ add_executable(dequant_fixture_test loader/dequant_fixture_test.cc)
 target_include_directories(dequant_fixture_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(dequant_fixture_test PRIVATE b70_loader)
 add_test(NAME dequant_fixture_test COMMAND dequant_fixture_test ${CMAKE_SOURCE_DIR}/tests/golden/dequant_fixture.safetensors)
+
+add_executable(qwen35_test model/qwen35_test.cc)
+target_include_directories(qwen35_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(qwen35_test PRIVATE b70_model)
+add_test(NAME qwen35_test COMMAND qwen35_test)
