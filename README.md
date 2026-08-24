@@ -120,6 +120,8 @@ host-bound story is true of the MoE models (phases 3-4), where it is worth
 | [docs/09-vllm-patch-postmortem.md](docs/09-vllm-patch-postmortem.md) | What months of patching vLLM's kernels actually bought (+9% prefill, −19% decode) and why - the evidence this project rests on |
 | [docs/10-the-box.md](docs/10-the-box.md) | Access, hardware, cached models and their quirks, images, how to run the reference stack |
 | [docs/11-tokenizer-and-chat-template.md](docs/11-tokenizer-and-chat-template.md) | The component the first draft forgot: BPE, chat template, streaming detokenisation, and what each option costs goal 3 |
+| [docs/12-kernels.md](docs/12-kernels.md) | The measured GEMV kernels: the two int4 layouts, split-K, and which won on which shape |
+| [docs/13-loader.md](docs/13-loader.md) | **Checkpoint → canonical device buffers**: snapshot rules, the index as manifest, every quantisation assert and what measured it, the fusion table, the `1+w` bake, and the resident-byte cross-check against `W` |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | **The baseline numbers and the exact commands that produced them.** Every vLLM figure quoted elsewhere traces back here |
 
 **Every number in these docs is labelled measured or estimated.** Estimates are

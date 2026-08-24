@@ -62,3 +62,11 @@ add_executable(qwen35_test model/qwen35_test.cc)
 target_include_directories(qwen35_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(qwen35_test PRIVATE b70_model)
 add_test(NAME qwen35_test COMMAND qwen35_test)
+
+# Needs the real 19 GB checkpoint and a B70: label `checkpoint` so it can be
+# excluded (`ctest -LE checkpoint`) where the model or the card is absent.
+add_executable(load_checkpoint_test loader/load_checkpoint_test.cc)
+target_include_directories(load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(load_checkpoint_test PRIVATE b70_loader b70_model)
+add_test(NAME load_checkpoint_test COMMAND load_checkpoint_test)
+set_tests_properties(load_checkpoint_test PROPERTIES LABELS checkpoint TIMEOUT 600)
