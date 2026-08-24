@@ -114,15 +114,30 @@ than ~2% of a step. GDN layers have no such problem - their state is fixed-size.
 
 ### Device selection
 
-`ONEAPI_DEVICE_SELECTOR=level_zero:N` is honoured from the start (user
-decision, 2026-08-25): `l0::Context`'s default device comes from the env var
-when set (`level_zero:0` / `level_zero:1`; `level_zero:*` and unset both mean
-device 0 until P/D disaggregation exists), and an explicit `--device N` flag
-beats the env var. Rationale: the box has two B70s, and even on PCIe 3.0 the
-second card usefully serves a second *independent* request (two single-stream
-engines side by side) long before any cross-GPU work is built. Implementation
-lands with the runtime/CLI (plan 3 task 1); until then probes and tests bind
-device 0 explicitly.
+`--device N` is the single authoritative knob (user decision, 2026-08-25),
+and it must govern **both** execution paths - the raw-L0 decode loop and the
+future SYCL prefill - so they always land on the same physical card. The
+precedence contract, top wins:
+
+1. **`--device N`** - selects GPU `N`. For the SYCL path the engine binds the
+   *same* card by Level Zero handle interop (`sycl::make_device` from the
+   `ze_device_handle_t`), not by trusting a second selector to agree.
+2. **`ONEAPI_DEVICE_SELECTOR=level_zero:N`** - the default when the flag is
+   absent. The SYCL runtime honours it natively; the raw-L0 path parses it
+   itself (L0 does not read it). `level_zero:*` and unset both mean device 0
+   until P/D disaggregation exists.
+3. **`ZE_AFFINITY_MASK`** - a Level Zero *driver*-level filter that sits
+   underneath both: it restricts which devices are enumerated at all, and it
+   already works with our binaries today. We respect it and never set it;
+   note that under a mask, `--device`/selector indices refer to the masked
+   (visible) view - the same re-numbering the driver gives everyone.
+
+Rationale: the box has two B70s, and even on PCIe 3.0 the second card
+usefully serves a second *independent* request (two single-stream engines
+side by side) long before any cross-GPU work exists. Implementation lands
+with the runtime/CLI (plan 3 task 1); until then probes and tests bind
+device 0 explicitly, and `ZE_AFFINITY_MASK=1` is the working stopgap for
+running them on the second card.
 
 ### Where SYCL stops and Level Zero begins
 
