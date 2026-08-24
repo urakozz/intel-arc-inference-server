@@ -1,0 +1,10 @@
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out

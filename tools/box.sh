@@ -15,6 +15,7 @@ cd "$(dirname "$0")/.."
 sync_tree() {
   rsync -az --delete \
     --exclude build --exclude .git --exclude 'cmake-build-*' --exclude .idea \
+    --exclude oracle-out \
     ./ "$BOX:$REMOTE_DIR/"
 }
 configure_and_build() {
