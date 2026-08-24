@@ -21,6 +21,7 @@ endfunction()
 
 enable_testing()
 add_subdirectory(src/common)
+add_subdirectory(src/loader)
 add_subdirectory(src/kernels)
 add_subdirectory(src/l0)
 add_subdirectory(tools/probe)
