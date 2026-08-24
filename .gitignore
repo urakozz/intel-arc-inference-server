@@ -50,6 +50,8 @@ build.ninja
 # Never commit weights. The canonical repacked layout produced by tools/ is a
 # build product of a checkpoint - regenerate it, do not track it.
 *.safetensors
+# ...except small committed test fixtures (gitignore has no inline comments).
+!tests/golden/*.safetensors
 *.gguf
 *.pt
 *.pth
