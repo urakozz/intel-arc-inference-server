@@ -323,3 +323,231 @@ cycling 2 weight copies (5.09 GB device-resident):
 For scale: at 584 GB/s `lm_head` alone is **4.35 ms**, against the 25.8 ms a
 38.7 t/s token allows - 17% of the step for 16.4% of the bytes. That is why
 item 1 of doc 05's specialisation list is `lm_head`, not a kernel.
+
+---
+
+## `prep` - the three between-GEMV kernels
+
+`src/kernels/prep.cl`, one file with three entry points and five compiled
+variants: `prep_res_norm_M1_K5120_SP{0,16}` (plus `prep_res_norm_M2_K5120_SP16`,
+compile-only, spec 1 §9's M-loop rule), `prep_silu_mul_M1`,
+`prep_gated_head_M1`. Everything between two GEMVs of a decode step lives here:
+sum the previous GEMV's split-K partials, add the residual, normalise, activate.
+
+### Rounding discipline - the substance of these kernels
+
+The oracle is torch, and **torch rounds per op**: a linear's output is bf16, and
+every elementwise op widens to fp32 internally and rounds its result back to
+bf16. These kernels match that discipline wherever it is cheap, so that the
+engine's residual stream stays comparable to the golden tensors op for op:
+
+- a GEMV's split-K partials are summed in fp32 and rounded to bf16 **once** -
+  that bf16 value *is* the linear's output in the reference;
+- the residual add is `rne_bf16(f32(resid) + f32(mixer_b))` - bf16 in, bf16 out,
+  exactly torch's bf16 add;
+- a norm widens the bf16 input to fp32, multiplies by the **fp32 `(1 + w)`**
+  weight (the loader's bake, docs/13-loader.md) and rounds the result to bf16 -
+  the reference's `type_as(x)`;
+- **inside-op** accumulation (the variance sum) stays fp32 and is *not* matched
+  to torch term for term. That residual drift is what the golden gate's design
+  absorbs: tokens exact is the gate, tensor cosines are diagnostics.
+
+No kernel here deviates from that discipline.
+
+The payoff is that `tests/kernels/prep_ref.h` is not an approximation but the
+same op chain in the same order, so `prep_test` asserts **bit-exact** equality
+rather than a tolerance - which is a far sharper instrument. Two spellings had
+to be pinned to get there, and both are copied verbatim into the reference:
+
+1. **`1.0f / sqrt(x)`, never `rsqrt(x)`.** `rsqrt` is a ~2 ulp approximation
+   with no cross-implementation guarantee, so nothing bit-exact can be built
+   through it. Correctly rounded `sqrt` followed by a correctly rounded divide
+   is reproducible on the host (controller ruling, 2026-08-25 - the same rule
+   binds the GDN and FA kernels that come later).
+2. **The square-accumulate is an explicit `fma`.** `sum += v*v` may or may not
+   be contracted into a fused multiply-add by either compiler; writing the
+   fusion explicitly on both sides removes the question instead of relying on
+   two different compilers' `-ffp-contract` defaults agreeing.
+
+…and one **build option**, which is the finding of this task:
+**`-cl-fp32-correctly-rounded-divide-sqrt` is required on any kernel that is
+compared bit-exactly and divides or takes a square root.** OpenCL's default
+allows **2.5 ulp** on both `/` and `sqrt`, and this is not theoretical: without
+the flag the device's `1/sqrt(mean + 1e-6)` came out **1-2 ulp below** the
+host's, and one `x_out` element in 5120 sat close enough to a round-to-nearest
+tie (fp32 product `0x3FB88001`, one ulp above the tie) to fall on the other side
+of it. 5119/5120 exact - which is exactly the kind of "almost" a tolerance would
+have hidden. `add_ocloc_kernel` grew an `OPTIONS` parameter for it (and refuses
+`-cl-denorms-are-zero`, which stays forbidden project-wide, docs/13-loader.md).
+The flag is opt-in per kernel rather than global so that the already-measured
+`gemv` binaries are untouched; no existing kernel contains an fp32 divide or
+`sqrt`, so nothing else needs it **today**, and the next kernel that grows one
+must add it.
+
+**The variance tree order** is stated identically in `prep.cl` and `prep_ref.h`,
+because the comparison is only exact if both walk it the same way: each of the
+work-group's WG lanes accumulates its own strided slice - lane `i` takes
+`k = i, i+WG, i+2·WG, …` in ascending `k` - into one fp32 register with `fma`,
+writes it to SLM, and then a fixed pairwise tree collapses SLM: for
+`stride = WG/2, WG/4, …, 1`, lane `i < stride` does `red[i] += red[i + stride]`,
+with a barrier after every step (so 256 → 128 → 64 → … → 1 at WG = 256). No
+data-dependent branch and no atomic anywhere, so a replayed command list gives
+the same bits - the acceptance every kernel in this plan is held to.
+
+### `prep_res_norm` - residual add + RMSNorm
+
+```
+mixer_b = rne_bf16(Σ_s partials[s][m][k])            (skipped when S_PREV == 0)
+r_b     = rne_bf16(f32(resid[m][k]) + f32(mixer_b))  (S_PREV == 0: r_b = resid)
+resid[m][k] = r_b                                    (the residual stream)
+rstd    = 1 / sqrt(mean_k(f32(r_b)²) + 1e-6)
+x_out[m][k] = rne_bf16(f32(r_b) · rstd · norm_w[k])
+```
+
+`partials` is fp32 `[S_PREV][M][K]` from the previous GEMV, `resid` is bf16
+`[M][K]` read and written in place, `norm_w` is the fp32 `(1 + w)` weight, and
+`x_out` is bf16 `[M][K]` - the next GEMV's activation input.
+
+**One work-group of 256 per token; grid `(1, M)`.** RMSNorm's mean is over the
+whole row, so the row cannot be split across work-groups without a second
+kernel; the work-group *is* the reduction domain. Phase 1 folds the partials in
+and stages the row in SLM as fp32, phase 2 reduces, phase 3 rescales - barriers
+between phases, and phase 3 re-reads the row from **SLM** instead of re-widening
+`resid` from DRAM.
+
+**SLM bound: `K·4 = 20 KB` for the row plus 1 KB for the reduction = 21 KB**, at
+K = 5120. That is the number that decides the shape of this kernel: it fits
+comfortably inside the 64 KB a work-group may allocate, so staging the row costs
+nothing anyone can feel, and one work-group per token stays possible at every
+hidden size this model family uses. At M = 1 exactly one work-group runs - see
+*Rejected* for what that costs.
+
+### `prep_silu_mul` - the MLP activation
+
+```
+gflat = (k/16)·32 + k%16 ;  uflat = gflat + 16
+g_b = rne_bf16(Σ_s partials[s][m][gflat]) ;  u_b likewise
+s_b = rne_bf16(silu_f32(f32(g_b)))
+x_out[m][k] = rne_bf16(f32(s_b) · f32(u_b))
+```
+
+with `silu(x) = x / (1 + exp(-x))`, plain `exp` (not `native_exp`). The index
+arithmetic is the loader's `cols_interleave16`: `gate‖up` is one fused linear
+whose columns interleave in 16-wide blocks, precisely so that the lane holding
+`gate[n]` also holds `up[n]` at a fixed offset (docs/13-loader.md). This kernel
+is the consumer that pays for that layout - its two loads are 64 bytes apart.
+
+**Grid `(5, M)`, WG 256, no reduction, no SLM, no barrier.** Five chunks of 4096
+cover 17408; the last chunk covers 1024 and the `k < k1` bound is what makes
+that safe. Chunking rather than one giant work-group is free here (there is
+nothing to reduce) and gives the machine five work-groups per token instead of
+one.
+
+### `prep_gated_head` - `Qwen3_5RMSNormGated`, one v-head per work-group
+
+```
+o_b = rne_bf16(gdn_o[m][h][i])                    (recurrence output → bf16)
+z_b = rne_bf16(Σ_s qkvz_partials[s][m][10240 + h·128 + i])
+var = mean_i(f32(o_b)²)                           (128-lane tree)
+n_b = rne_bf16(f32(o_b) · (1 / sqrt(var + 1e-6)))
+t_b = rne_bf16(f32(gated_w[i]) · f32(n_b))
+x_out[m][h·128+i] = rne_bf16(f32(t_b) · silu_f32(f32(z_b)))
+```
+
+This is doc 03's op chain exactly - norm → cast → `×w` → `×silu(z.float())` →
+cast. `gated_w` is **bf16 plain `w`, no `+1`**: the one norm in the model
+without the increment and the one whose weight stays bf16, because the reference
+multiplies in the bf16 domain (`loader/small_layout.h`, `kGdnOffGatedNorm`).
+
+**Grid `(48, M)`, WG 128 - one work-group per (v-head, token), one lane per
+channel.** The head dimension *is* the reduction domain (128), so the mapping is
+forced and pleasant: the variance tree is exactly the work-group's 128 lanes
+with one term each, which is also why there is no `fma` in this kernel's
+reduction - a lane's contribution is a single multiply.
+
+**The silu factor is deliberately the last op.** Everything through `t_b` is a
+rounded scalar chain the host reproduces exactly; only the final product carries
+`exp`'s slack. That ordering is what lets the test hold the norm to the exact
+bar while allowing the gate a tolerance.
+
+### What the test asserts
+
+`tests/kernels/prep_test.cc`, against `prep_ref.h`, on random inputs
+(partials ~ N(0,1), residual bf16, `norm_w = 1 + U(±0.05)`):
+
+| case | bar | result |
+|---|---|---|
+| `prep_res_norm` SP=0 - `x_out`, `resid` | **bit-exact** | 5120/5120, 5120/5120 |
+| `prep_res_norm` SP=16 - `x_out`, `resid` | **bit-exact** | 5120/5120, 5120/5120 |
+| `prep_silu_mul` random | ≤ 2 bf16 ulp | 17408/17408 exact |
+| `prep_silu_mul`, silu argument 30.0 | **bit-exact** | 17408/17408 |
+| `prep_gated_head` random | ≤ 2 bf16 ulp | 6144/6144 exact |
+| `prep_gated_head`, silu argument 30.0 | **bit-exact** | 6144/6144 |
+
+The 2 ulp tolerance exists because OpenCL allows **3 ulp** on fp32 `exp` where
+the host's `expf` is ~0.5 - it is a contract, not an observation: today's driver
+matches the host on every one of the 23552 silu values tested. It is kept
+because a driver update may change `exp` and must not fail this test, while a
+change in the *arithmetic* still will.
+
+The bar on the silu-carrying kernels is held up by the two extra cases: with the
+silu argument forced to **30.0f**, `exp(-30) ≈ 9.4e-14` is far below `2^-24`, so
+`1 + exp(-30)` is exactly `1.0f` in fp32 on *any* conforming implementation and
+`silu(30) = 30.0f` on both sides. Those cases are asserted **bit-exact**, which
+pins `s_b`, and pins the gated head's `n_b`/`t_b` chain - the norm intermediates
+that are otherwise not directly observable, since only `x_out` leaves the
+kernel.
+
+### Rejected, and what was not measured
+
+**Nothing here has been timed.** There is no `probe_prep`, no wall-clock number
+in this section, and the arithmetic below is arithmetic - say so rather than
+implying a measurement. What *is* measured is bit-exactness (above) and the
+0.52 µs/kernel launch floor (doc 07 #5) these kernels are compared against.
+
+- **Fusing the norm into the following GEMV's prologue - rejected for this
+  plan** (spec 1 §9.2 history, doc 04's fusion list item 1). It would remove
+  ~128 launches per token. Two numbers say do not bother yet: the per-kernel
+  cost inside a replayed list is **0.52 µs**, so the whole between-GEMV kernel
+  count - 129 `prep_res_norm` + 64 `prep_silu_mul` + 48 `prep_gated_head` = 241
+  launches - is **~0.125 ms of a ~26 ms step**; and the traffic these kernels
+  add is ~89 MB per token (below) against the token's 15.52 GB of weights,
+  **0.58%**. Fusion also has a real cost: the norm's reduction is over the whole
+  row, so a fused prologue would need every GEMV work-group to either redundantly
+  reduce the row (N/64 = 80 work-groups each summing 5120 elements) or take a
+  cross-work-group barrier the split-K design deliberately does not have. Spec
+  §4.1's rule - fuse at ≥ 3 µs, do not below 1 µs - puts this below the line.
+- **One work-group per token in `prep_res_norm` is the risk in this design, and
+  it is unmeasured.** At M = 1 the whole kernel is a single work-group on a
+  single Xe-core pulling `S_PREV·K·4` = **320 KB of partials** at S = 16. One
+  core cannot approach the 600 GB/s roofline, so the honest expectation is
+  latency-bound single-digit µs, not the 0.63 µs the traffic arithmetic gives.
+  If a profile ever shows this on the critical path, the fix is a two-stage
+  reduction (a grid-wide sum-of-squares kernel, then a small finish kernel) or
+  folding the partial sum into the GEMV epilogue - both trade the launch count
+  this design saves. Not built, not measured; recorded so it is not rediscovered.
+- **Summing split-K partials with atomics in the GEMV instead of here -
+  rejected on determinism**, same argument as `gemv`'s section: a float atomic
+  add is order-dependent and two replays would differ. That decision is what
+  gives these kernels their `partials` argument in the first place.
+- **Subgroup reductions (`sub_group_reduce_add`) instead of the SLM tree - not
+  used.** The SLM tree's order is *stateable*, and the whole bit-exactness
+  contract rests on the reference reproducing it; a subgroup reduce's internal
+  order is the compiler's business. Faster, probably, on a kernel whose
+  reduction is not the bottleneck. Not measured.
+- **`native_exp` / `native_rsqrt` - rejected outright.** Both would put the
+  residual stream somewhere the host cannot follow, for an activation that is a
+  rounding error's worth of the step.
+
+### Traffic per token (arithmetic, not a measurement)
+
+| kernel | calls/token | bytes/call | total |
+|---|---|---|---|
+| `prep_res_norm` | 129 (2 per layer + the final norm; layer 0's is the SP = 0 variant, 51,200 B) | 378,880 at SP = 16 (327,680 partials + 20,480 resid r+w + 20,480 `norm_w` + 10,240 out) | 48.5 MB |
+| `prep_silu_mul` | 64 | 591,872 (557,056 partials + 34,816 out) | 37.9 MB |
+| `prep_gated_head` | 48 | 61,696 (24,576 `z` + 24,576 `gdn_o` + 256 `w` + 12,288 out) | 3.0 MB |
+
+**≈ 89.4 MB per token, 0.58% of the 15.52 GB the weights cost** - 0.15 ms at
+the roofline, against 0.125 ms of launch overhead for the same 241 kernels. The
+split-K partials are two thirds of it, which is the price recorded in `gemv`'s
+section for keeping the replay deterministic.
