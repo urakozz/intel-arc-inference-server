@@ -112,6 +112,18 @@ full-attention layers read `seq_len` KV entries. Two honest options:
 Start with 1. Move to 2 only if doc 07 #12 shows the idle work-groups cost more
 than ~2% of a step. GDN layers have no such problem - their state is fixed-size.
 
+### Device selection
+
+`ONEAPI_DEVICE_SELECTOR=level_zero:N` is honoured from the start (user
+decision, 2026-08-25): `l0::Context`'s default device comes from the env var
+when set (`level_zero:0` / `level_zero:1`; `level_zero:*` and unset both mean
+device 0 until P/D disaggregation exists), and an explicit `--device N` flag
+beats the env var. Rationale: the box has two B70s, and even on PCIe 3.0 the
+second card usefully serves a second *independent* request (two single-stream
+engines side by side) long before any cross-GPU work is built. Implementation
+lands with the runtime/CLI (plan 3 task 1); until then probes and tests bind
+device 0 explicitly.
+
 ### Where SYCL stops and Level Zero begins
 
 `sycl-tla` kernels are launched through the SYCL runtime. Putting one into a raw
