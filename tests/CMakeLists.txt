@@ -52,3 +52,8 @@ add_executable(quant_test loader/quant_test.cc)
 target_include_directories(quant_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(quant_test PRIVATE b70_loader)
 add_test(NAME quant_test COMMAND quant_test)
+
+add_executable(dequant_fixture_test loader/dequant_fixture_test.cc)
+target_include_directories(dequant_fixture_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dequant_fixture_test PRIVATE b70_loader)
+add_test(NAME dequant_fixture_test COMMAND dequant_fixture_test ${CMAKE_SOURCE_DIR}/tests/golden/dequant_fixture.safetensors)

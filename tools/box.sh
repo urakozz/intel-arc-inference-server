@@ -4,6 +4,7 @@
 #   tools/box.sh build           sync + cmake configure + build
 #   tools/box.sh test [regex]    sync + build + ctest (optionally -R regex)
 #   tools/box.sh run <cmd...>    run a shell command in the remote tree
+#   tools/box.sh pull <path>     copy a generated file back from the box
 # Env: BOX (ssh target), REMOTE_DIR (relative to $HOME on the box), JOBS.
 set -euo pipefail
 BOX="${BOX:-user@box}"
@@ -26,5 +27,6 @@ case "${1:-}" in
   test)  sync_tree; configure_and_build
          ssh "$BOX" "cd '$REMOTE_DIR' && ctest --test-dir build --output-on-failure ${2:+-R $2}" ;;
   run)   shift; ssh "$BOX" "cd '$REMOTE_DIR' && $*" ;;
-  *)     echo "usage: $0 sync|build|test [regex]|run <cmd...>" >&2; exit 2 ;;
+  pull)  shift; rsync -az "$BOX:$REMOTE_DIR/$1" "$1" ;;
+  *)     echo "usage: $0 sync|build|test [regex]|run <cmd...>|pull <path>" >&2; exit 2 ;;
 esac
