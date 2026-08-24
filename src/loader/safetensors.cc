@@ -36,7 +36,9 @@ std::vector<std::pair<std::string, TensorInfo>> SafetensorsSet::parse_header(con
   if (n < 8) throw std::runtime_error("safetensors: file too small");
   uint64_t hlen = 0;
   std::memcpy(&hlen, p, 8);
-  if (8 + hlen > n) throw std::runtime_error("safetensors: header length exceeds file");
+  // n >= 8 here, so subtract instead of adding: `8 + hlen` would wrap for
+  // hlen near UINT64_MAX and let a crafted/truncated file through.
+  if (hlen > n - 8) throw std::runtime_error("safetensors: header length exceeds file");
   common::json::Value h =
       common::json::parse(std::string_view(reinterpret_cast<const char*>(p) + 8, hlen));
   std::vector<std::pair<std::string, TensorInfo>> out;
@@ -85,6 +87,12 @@ SafetensorsSet::SafetensorsSet(const std::string& snapshot_dir) {
                                " but the file's header has no such tensor");
     TensorInfo t = it->second;
     t.file = file_id[fname];
+    const size_t avail = files_[t.file].size() - data_start_[t.file];
+    if (t.begin > t.end || t.end > avail)
+      throw std::runtime_error("tensor '" + tensor + "' in " + fname +
+                               " has data_offsets [" + std::to_string(t.begin) + ", " +
+                               std::to_string(t.end) + "] outside the file's " +
+                               std::to_string(avail) + "-byte data section");
     tensors_.emplace(tensor, std::move(t));   // index is the manifest: one entry per name
   }
 }
