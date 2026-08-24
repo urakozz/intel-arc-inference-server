@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include "common/repack.h"
 
 namespace common {
 inline float bf16_to_f32(uint16_t h) {
@@ -40,13 +41,12 @@ inline uint16_t f32_to_f16(float f) {
 struct Bf16Tiled {
   uint32_t K = 0, N = 0;
   std::vector<uint16_t> data;
+  // The tile math itself lives in common/repack.h (repack_bf16_tiled) - one
+  // implementation shared with the loader.
   static Bf16Tiled from_rowmajor(const uint16_t* w, uint32_t K, uint32_t N) {
     Bf16Tiled t; t.K = K; t.N = N;
     t.data.resize(size_t(N) * K);
-    const uint32_t K8 = K / 8;
-    for (uint32_t n = 0; n < N; ++n)
-      for (uint32_t k = 0; k < K; ++k)
-        t.data[((size_t(n / 16) * K8 + k / 8) * 8 + k % 8) * 16 + n % 16] = w[size_t(n) * K + k];
+    repack_bf16_tiled(w, K, N, t.data.data());
     return t;
   }
   size_t bytes() const { return data.size() * 2; }

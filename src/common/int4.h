@@ -3,6 +3,7 @@
 #include <random>
 #include <vector>
 #include "common/bf16.h"
+#include "common/repack.h"
 
 namespace common {
 // GPTQ layout 0 (spec 1 §6.3): qweight[K/8][N] u32, nibble i of word (r, n)
@@ -26,20 +27,12 @@ struct Int4Gptq {
   // tile: 128 u32 nibbles indexed [k_octet j][lane l] = word (g*8+j, n_tile*16+l),
   // then 16 f16 scales packed two per u32. Tiles ordered g-inner, n_tile-outer,
   // so one subgroup streams contiguous memory along K.
+  // The tile math itself lives in common/repack.h - one implementation shared
+  // with the loader, which repacks straight from the mmapped checkpoint.
   static constexpr uint32_t kTileU32 = 136;
   std::vector<uint32_t> tiled() const {
-    const uint32_t G = K / kGroup, NT = N / 16;
-    std::vector<uint32_t> t(size_t(NT) * G * kTileU32);
-    for (uint32_t nt = 0; nt < NT; ++nt)
-      for (uint32_t g = 0; g < G; ++g) {
-        uint32_t* tile = &t[(size_t(nt) * G + g) * kTileU32];
-        for (uint32_t j = 0; j < 8; ++j)
-          for (uint32_t l = 0; l < 16; ++l)
-            tile[j * 16 + l] = qweight[size_t(g * 8 + j) * N + nt * 16 + l];
-        for (uint32_t l = 0; l < 16; l += 2)
-          tile[128 + l / 2] = uint32_t(scales[size_t(g) * N + nt * 16 + l]) |
-                              (uint32_t(scales[size_t(g) * N + nt * 16 + l + 1]) << 16);
-      }
+    std::vector<uint32_t> t(size_t(N / 16) * (K / kGroup) * kTileU32);
+    repack_int4_layout1(qweight.data(), scales.data(), K, N, t.data());
     return t;
   }
 
