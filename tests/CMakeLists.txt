@@ -20,6 +20,13 @@ b70_target_kernel_dir(arg_capture_test)
 add_dependencies(arg_capture_test kernel_noop)
 add_test(NAME arg_capture_test COMMAND arg_capture_test)
 
+# The only test here that needs neither a GPU nor a kernel: device_index_from_env
+# is a pure parse of ONEAPI_DEVICE_SELECTOR (doc 04, "Device selection").
+add_executable(device_select_test l0/device_select_test.cc)
+target_include_directories(device_select_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(device_select_test PRIVATE b70_l0)
+add_test(NAME device_select_test COMMAND device_select_test)
+
 add_executable(int4_test kernels/int4_test.cc)
 target_include_directories(int4_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME int4_test COMMAND int4_test)
@@ -76,6 +83,13 @@ add_dependencies(kernel_table_test
   kernel_gemv_M1_K5120_N14336_S1_L1
   kernel_gemv_bf16_M1_K5120_N128 kernel_gemv_bf16_M1_K5120_N248320)
 add_test(NAME kernel_table_test COMMAND kernel_table_test)
+
+# Every decode allocation, sized from the model constants: the two byte totals
+# are pinned so a size change has to be argued for in the test's arithmetic.
+add_executable(buffers_test runtime/buffers_test.cc)
+target_include_directories(buffers_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(buffers_test PRIVATE b70_runtime b70_l0 b70_model)
+add_test(NAME buffers_test COMMAND buffers_test)
 
 # Needs the real 19 GB checkpoint and a B70: label `checkpoint` so it can be
 # excluded (`ctest -LE checkpoint`) where the model or the card is absent.
