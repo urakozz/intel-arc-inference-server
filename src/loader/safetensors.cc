@@ -48,6 +48,12 @@ std::vector<std::pair<std::string, TensorInfo>> SafetensorsSet::parse_header(con
     t.dtype = e.at("dtype").str();
     for (const auto& d : e.at("shape").arr()) t.shape.push_back(uint64_t(d.num()));
     const auto& off = e.at("data_offsets").arr();
+    // Indexed by [0]/[1] two lines down: a header is free to write any array,
+    // so the pair is checked before it is read (the file is untrusted input).
+    if (off.size() != 2)
+      throw std::runtime_error("safetensors: tensor '" + name + "' has " +
+                               std::to_string(off.size()) +
+                               " data_offsets, expected exactly 2 [begin, end]");
     t.begin = uint64_t(off[0].num());
     t.end = uint64_t(off[1].num());
     out.emplace_back(name, std::move(t));

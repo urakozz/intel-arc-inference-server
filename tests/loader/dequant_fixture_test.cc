@@ -29,6 +29,10 @@ int main(int argc, char** argv) {
   common::Int4Gptq w;
   w.K = uint32_t(qw->shape[0]) * 8;
   w.N = uint32_t(qw->shape[1]);
+  // `base` is 8 + header_len, and safetensors pads its header to an 8-byte
+  // multiple, so the data section - and every tensor offset in it - is
+  // 8-aligned by construction here (loader::check_align asserts the same thing
+  // on the real checkpoint's shards).
   const uint32_t* qp = reinterpret_cast<const uint32_t*>(base + qw->begin);
   const uint16_t* sp = reinterpret_cast<const uint16_t*>(base + sc->begin);
   w.qweight.assign(qp, qp + size_t(w.K / 8) * w.N);

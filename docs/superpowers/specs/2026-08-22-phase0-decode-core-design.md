@@ -236,7 +236,11 @@ deleting anything).
   holds `gate[n]` also holds `up[n]` after a fixed offset.
 - `in_proj_a ‖ in_proj_b` → one bf16 matrix, N = 96.
 - RMSNorm weights (`input_layernorm`, `post_attention_layernorm`, `norm`,
-  `q_norm`, `k_norm`) stored as `1 + w`. `linear_attn.norm` stored as `w`.
+  `q_norm`, `k_norm`) stored as `1 + w` - **fp32, amended 2026-08-25**: the
+  reference computes the whole product in fp32, so a bf16 multiplier would add
+  a rounding it never had (docs/13, "What the loader bakes in").
+  `linear_attn.norm` stored as `w`, and stays bf16 (RMSNormGated multiplies in
+  the bf16 domain).
 - `A_log` → `−exp(A_log)` fp32; `dt_bias` fp32; `conv1d.weight` fp32
   `[10240][4]`.
 - RoPE table `cos/sin[max_model_len][32]` fp32 from `inv_freq_i = θ^(−2i/64)`.
@@ -258,6 +262,10 @@ deleting anything).
 ≈ 19.3 GB of 32 GB. Upload: one `zeCommandListAppendMemoryCopy` per buffer on
 the immediate list; the loader asserts total resident bytes against `W`.
 
+**Who allocates what.** State, KV, activation-scratch and control-block
+allocations are the runtime's (plan 3); the loader owns weights only (decided
+2026-08-25).
+
 ### 6.6 Loader test
 
 `tests/loader/repack_roundtrip`: for 8 random tiles per layout, dequantise
@@ -265,6 +273,14 @@ from the file with `quant::dequant_reference()` and from a readback of the
 device buffer; bit-exact equality. `dequant_reference()` is ported line-for-line
 from `tools/oracle/dequant.py` and the two are cross-checked by a fixture
 the oracle writes (Section 10).
+
+**Amended 2026-08-25 (names as delivered).** The reference dequant shipped as
+`common::Int4Gptq::at()` in `src/common/int4.h` rather than a free
+`quant::dequant_reference()`, and the roundtrip shipped as
+`tests/loader/load_checkpoint_test` (real checkpoint, real device) plus
+`tests/loader/dequant_fixture_test` (the oracle fixture, bit-exact). Only
+layout 1 is exercised, because only layout 1 has a loader path - see §6.3 and
+the `load_linear` guard.
 
 ## 7. Model description (`src/model`)
 
@@ -519,6 +535,18 @@ section cannot state why its lane assignment is shaped that way is not done.
 - Three prompts in `tests/golden/prompts/`: English prose, Python source, a
   CJK paragraph. Generated files are ~1 GB each and are not committed
   (`.gitignore` already excludes `*.safetensors`); `make golden` regenerates.
+- **Amended 2026-08-25 (names as delivered).** `dump.py`'s CLI is
+  `dump.py <snapshot> --prompt <ids> --out <file> [--gen N] [--max-prompt N]`,
+  one pair per invocation, not three positional arguments; it builds
+  **`Qwen3_5ForCausalLM`** (the text model - `ForConditionalGeneration` would
+  drag in the vision tower this project does not serve) on `meta` and loads with
+  `assign=True`. The files are **285-350 MiB**, not ~1 GB, because the batch
+  dimension is squeezed and only the prompt's GDN/conv states are kept. `make
+  golden` (CMake target `golden`) **prints** the on-box invocation and names the
+  committed scripts `tools/oracle/golden.sh` and `tools/oracle/check.sh` that
+  perform it - the oracle needs the reference container and 61 GiB and cannot
+  run from a build tree, so a target that pretended to drive it would be a lie
+  on every machine that cannot.
 - **Delivered 2026-08-25** (runs made 2026-08-24 on the box, `--gen 32`, serially):
   the three golden files live at `~/b70-inference-server/oracle-out/` on the box as
   `prose.golden.safetensors` (42 prompt ids, 296.6 MiB), `code.golden.safetensors`
@@ -535,7 +563,7 @@ section cannot state why its lane assignment is shaped that way is not done.
 | `tests/kernels/gdn_step` | one layer, random state, vs C++ port of `torch_recurrent_gated_delta_rule` | fp32 state rel err ≤ 1e-5; output ≤ 1e-3 |
 | `tests/kernels/attn_*` | random KV at depths 1, 255, 256, 4096 vs CPU softmax | ≤ 1e-3 |
 | `tests/kernels/argmax` | ties, masked tail, all-equal | exact |
-| `tests/loader/repack_roundtrip` | Section 6.6 | exact |
+| `tests/loader/repack_roundtrip` | Section 6.6 - **delivered 2026-08-25 as `tests/loader/load_checkpoint_test`** (device readback of layer 0's `QkvZ` tiles vs an independent CPU repack, plus every small-tensor bake at its `small_layout.h` offset) and **`tests/loader/dequant_fixture_test`** (`dequant_reference()` shipped as `common::Int4Gptq::at()`, cross-checked bit-exactly against the oracle's committed fixture). `tests/loader/quant_test` covers the repack/column-map algebra and the invariant failures. | exact |
 | `tests/runtime/replay_determinism` | Section 8.7 | bitwise |
 | `tests/golden/golden_test` | per-layer cosine of `resid.L{i}` ≥ 0.999 and max-abs reported per layer; `gdn_state` cosine ≥ 0.999; 32 tokens equal | tokens exact; tensors diagnostic |
 

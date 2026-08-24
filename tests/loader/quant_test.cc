@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include "check.h"
+#include "common/bf16.h"
 #include "common/int4.h"
 #include "common/json.h"
 #include "common/repack.h"
@@ -12,20 +13,27 @@
 #include "loader/safetensors.h"
 
 // Writes one safetensors file: 8-byte LE header length, header JSON, data.
+// The header is space-padded so the data section starts 8-aligned, exactly as
+// the real writer does - loader::check_align refuses to cast anything less.
 static void write_st(const std::string& path, const std::string& header,
                      const std::vector<uint8_t>& data) {
+  std::string h = header;
+  while ((8 + h.size()) % 8 != 0) h.push_back(' ');
   std::ofstream f(path, std::ios::binary);
-  uint64_t n = header.size();
+  uint64_t n = h.size();
   f.write(reinterpret_cast<const char*>(&n), 8);
-  f.write(header.data(), std::streamsize(header.size()));
+  f.write(h.data(), std::streamsize(h.size()));
   f.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
 }
 
 // One .qzeros (8 words) + one .g_idx (128 entries, group 64) laid end to end.
-static std::vector<uint8_t> qz_gidx_bytes(uint32_t qzeros_word5) {
+// `bad_gidx` >= 0 breaks that one g_idx entry (a permuted checkpoint, i.e.
+// desc_act smuggled in behind a `false` label).
+static std::vector<uint8_t> qz_gidx_bytes(uint32_t qzeros_word5, int bad_gidx = -1) {
   std::vector<uint32_t> w(8, 0x77777777u);
   w[5] = qzeros_word5;
   for (uint32_t k = 0; k < 128; ++k) w.push_back(k / 64);
+  if (bad_gidx >= 0) w[8 + size_t(bad_gidx)] = 3;   // identity would be 0 or 1
   std::vector<uint8_t> bytes(w.size() * 4);
   std::memcpy(bytes.data(), w.data(), bytes.size());
   return bytes;
@@ -93,7 +101,8 @@ int main() {
   CHECK_EQ(il[63].qweight, p2.qweight.data()); CHECK_EQ(il[63].n, uint32_t(31));
 
   // assert_quant_invariants over a synthetic two-tensor set: the good pair
-  // passes, a single corrupted qzeros word throws naming tensor and index.
+  // passes; a single corrupted qzeros word and a single non-identity g_idx
+  // entry each throw, naming the tensor and the element index.
   const std::string dir = "/tmp/b70_quant_test";
   CHECK(system(("mkdir -p " + dir).c_str()) == 0);
   const std::string hdr =
@@ -102,6 +111,7 @@ int main() {
   const std::string ix = R"({"weight_map":{"blk.qzeros":"FILE","blk.g_idx":"FILE"}})";
   write_st(dir + "/good.safetensors", hdr, qz_gidx_bytes(0x77777777u));
   write_st(dir + "/bad.safetensors", hdr, qz_gidx_bytes(0x77770777u));
+  write_st(dir + "/badg.safetensors", hdr, qz_gidx_bytes(0x77777777u, 70));
   {
     std::string good_ix = ix;
     good_ix.replace(good_ix.find("FILE"), 4, "good.safetensors");
@@ -123,6 +133,63 @@ int main() {
     threw = msg.find("blk.qzeros") != std::string::npos && msg.find("[5]") != std::string::npos;
   }
   CHECK(threw);
+
+  // The g_idx branch: element 70 is 3 where the identity says 1. Until now the
+  // only exercised failure was qzeros, so this half of the invariant was
+  // asserted by inspection only.
+  {
+    std::string badg_ix = ix;
+    badg_ix.replace(badg_ix.find("FILE"), 4, "badg.safetensors");
+    badg_ix.replace(badg_ix.find("FILE"), 4, "badg.safetensors");
+    std::ofstream(dir + "/model.safetensors.index.json") << badg_ix;
+  }
+  threw = false;
+  try {
+    loader::assert_quant_invariants(loader::SafetensorsSet(dir + "/"));
+  } catch (const std::runtime_error& e) {
+    const std::string msg = e.what();
+    threw = msg.find("blk.g_idx") != std::string::npos && msg.find("[70]") != std::string::npos &&
+            msg.find("identity") != std::string::npos;
+  }
+  CHECK(threw);
+
+  // .scales: a NaN/Inf f16 is a hard error (the dequant has no guard for it);
+  // a subnormal is counted and allowed, because the real checkpoint has them
+  // and the device reads the f16 word natively.
+  {
+    const std::string shdr =
+        R"({"blk.scales":{"dtype":"F16","shape":[1,4],"data_offsets":[0,8]}})";
+    const std::string six = R"({"weight_map":{"blk.scales":"FILE"}})";
+    auto scale_bytes = [](uint16_t bad) {
+      const uint16_t v[4] = {0x3C00u /*1.0*/, 0x00A8u /*subnormal*/, 0x3800u /*0.5*/, bad};
+      std::vector<uint8_t> b(8);
+      std::memcpy(b.data(), v, 8);
+      return b;
+    };
+    write_st(dir + "/sc_ok.safetensors", shdr, scale_bytes(0x0000u));
+    write_st(dir + "/sc_inf.safetensors", shdr, scale_bytes(0x7C00u));
+    std::string ok_ix = six;
+    ok_ix.replace(ok_ix.find("FILE"), 4, "sc_ok.safetensors");
+    std::ofstream(dir + "/model.safetensors.index.json") << ok_ix;
+    loader::QuantScan sc = loader::assert_quant_invariants(loader::SafetensorsSet(dir + "/"));
+    CHECK_EQ(sc.subnormal_scales, size_t(1));
+    // ...and f16_to_f32 decodes that subnormal exactly rather than flushing it.
+    CHECK_EQ(common::f16_to_f32(0x00A8u), float(0xA8) * 5.9604644775390625e-08f);
+    CHECK(common::f16_to_f32(0x00A8u) > 0.0f);
+
+    std::string inf_ix = six;
+    inf_ix.replace(inf_ix.find("FILE"), 4, "sc_inf.safetensors");
+    std::ofstream(dir + "/model.safetensors.index.json") << inf_ix;
+    threw = false;
+    try {
+      loader::assert_quant_invariants(loader::SafetensorsSet(dir + "/"));
+    } catch (const std::runtime_error& e) {
+      const std::string msg = e.what();
+      threw = msg.find("blk.scales") != std::string::npos && msg.find("[3]") != std::string::npos &&
+              msg.find("Inf") != std::string::npos;
+    }
+    CHECK(threw);
+  }
 
   std::puts("quant_test OK");
   return 0;

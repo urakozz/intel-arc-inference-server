@@ -55,6 +55,8 @@ int main() {
   CHECK_EQ(set.bytes(t0), size_t(8));
   CHECK_EQ(set.data(t0)[0], uint8_t(1));
   const auto& t1 = set.tensors().at("t1");
+  // The data section starts at 8 + header_len and this fixture's header is
+  // written 8-aligned, so the cast is safe by construction.
   CHECK_EQ(reinterpret_cast<const uint32_t*>(set.data(t1))[1], uint32_t(6));
   // Dedup by index: "dup" must come from b.safetensors.
   const auto& dup = set.tensors().at("dup");
