@@ -145,7 +145,9 @@ around it.
 6. ✅ **GEMV bandwidth matrix** - the production `gemv.cl` at the five int4
    shapes the 27B runs after load-time fusion, both canonical layouts,
    `S` ∈ {1,2,4,8,16}, plus the bf16 `lm_head`: 51 configurations, measured
-   **2026-08-23** with `tools/probe/probe_gemv`. GB/s counts weight bytes
+   **2026-08-24** with `tools/probe/probe_gemv` (re-run that day at the
+   corrected `out/o_proj` shape 6144 × 5120 - spec §4.2 had said 5120 × 5120,
+   which the model does not contain; doc 12). GB/s counts weight bytes
    (nibbles + f16 scales); each configuration is 40 launches in one replayed
    list cycling ≥ 72 MB of distinct weight copies, so the 24 MB L2 is missed
    and the number is DRAM bandwidth. **All 50 int4 configurations matched the
@@ -153,36 +155,37 @@ around it.
 
    | shape | K×N | layout | S | GB/s | % of 600 |
    |---|---|---|---|---|---|
-   | out/o_proj | 5120×5120 | 0 | 4 | 549 | 92% |
-   | q‖k‖v | 5120×14336 | 0 | 2 | 576 | 96% |
-   | qkv‖z | 5120×16384 | **1** | 1 | 560 | 93% |
-   | gate‖up | 5120×34816 | 0 | 8 | 554 | 92% |
-   | down | 17408×5120 | 0 | 4 | 566 | 94% |
-   | `lm_head` bf16 | 5120×248320 | tiled | - | **585** | **97%** |
+   | out/o_proj | 6144×5120 | 0 | 4 | 549 | 92% |
+   | q‖k‖v | 5120×14336 | 0 | 2 | 577 | 96% |
+   | qkv‖z | 5120×16384 | **1** | 1 | 559 | 93% |
+   | gate‖up | 5120×34816 | 0 | 8 | 555 | 93% |
+   | down | 17408×5120 | 0 | 4 | 567 | 94% |
+   | `lm_head` bf16 | 5120×248320 | tiled | - | **584** | **97%** |
 
    The probe's decision rule (spec §4.2) picks **layout 1** - by 1.7% summed
-   over the five shapes, 3.7% in wall time - and `S` = 16 / 1 / 1 / 4 / 16 for
+   over the five shapes, 3.6% in wall time - and `S` = 16 / 1 / 1 / 4 / 16 for
    the shapes in the order above. Doc 12 carries the full reasoning, including
    what layout 1 costs on the four shapes where layout 0 was ahead.
 
    Two conclusions. **The split-K argument in doc 08 is confirmed:** at
    N = 5120 - 320 subgroups, the worst fill case - the kernel reaches
-   259 GB/s (43%) at `S` = 1 and 526 GB/s (88%) at `S` = 16, a 2.0× gain, and
+   259 GB/s (43%) at `S` = 1 and 533 GB/s (89%) at `S` = 16, a 2.06× gain, and
    the same doubling appears on `down`. **`lm_head` needs no split-K:** 15520
    subgroups already reach 97% of the 600 GB/s denominator, which is 99% of the
    590 GB/s `probe_bw` measures through the same launch path. At that rate
    `lm_head` alone is 4.35 ms of a 25.8 ms token.
 
    ```bash
-   tools/box.sh run ./build/tools/probe/probe_gemv | tee docs/probe-gemv-2026-08-23.md
+   tools/box.sh run "./build/tools/probe/probe_gemv" | tee docs/probe-gemv-2026-08-24.md
    ```
 
    The full 51-row matrix is committed verbatim as
-   [probe-gemv-2026-08-23.md](probe-gemv-2026-08-23.md). All of it is **M = 1**;
+   [probe-gemv-2026-08-24.md](probe-gemv-2026-08-24.md) (the superseded
+   2026-08-23 run is kept alongside it). All of it is **M = 1**;
    the `S` picks are M = 1 picks (doc 12).
 
-1-3, 5 and 6 are done. 4 is the remaining phase-0 measurement; no decode
-kernel is designed before its inputs exist.
+1-3, 5 and 6 are done. 4 (GDN vs GEMM split) is phase-1 diagnostics - useful
+before kernel-effort allocation, not a phase-0 gate.
 
 ## Benchmark
 
