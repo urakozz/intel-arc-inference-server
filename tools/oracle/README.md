@@ -28,19 +28,33 @@ tokens and the tail of `lm_head`). Each must tokenize to **24-64 ids**;
 
 ## Running it
 
-Everything runs on the box; the Mac never loads the model.
+Everything runs on the box; the Mac never loads the model. Sync from the Mac,
+then run the container commands **on the box** - wrapping them in
+`tools/box.sh run` adds a third layer of quoting around `"$SNAP"` and is easy
+to get wrong.
 
 ```bash
-tools/box.sh sync
-tools/box.sh run "mkdir -p oracle-out && tools/oracle/run_in_container.sh '
-  python3 tools/oracle/tokenize.py \"\$SNAP\" encode tests/golden/prompts/prose.txt > /ws/oracle-out/prose.ids'"
-tools/box.sh run "tools/oracle/run_in_container.sh '
-  python3 tools/oracle/dump.py \"\$SNAP\" --prompt /ws/oracle-out/prose.ids \
-    --out /ws/oracle-out/prose.golden.safetensors --gen 32'"
+tools/box.sh sync                                  # on the Mac
+ssh user@box                          # everything below: on the box
+cd ~/b70-inference-server && mkdir -p oracle-out
+
+# ids: seconds, tokenizer only
+tools/oracle/run_in_container.sh 'python3 tools/oracle/tokenize.py "$SNAP" \
+  encode tests/golden/prompts/prose.txt > /ws/oracle-out/prose.ids'
+
+# the dump: ~5.5 min, ONE PROMPT AT A TIME (61 GiB peak, 121 GB box)
+tools/oracle/run_in_container.sh 'python3 tools/oracle/dump.py "$SNAP" \
+  --prompt /ws/oracle-out/prose.ids \
+  --out /ws/oracle-out/prose.golden.safetensors --gen 32'
 ```
 
-A run takes tens of minutes, so launch it detached (`setsid nohup … > log 2>&1
-< /dev/null &`) and tail the log rather than holding an ssh session open.
+`dump.py` takes **one** `--prompt`/`--out` pair, so three prompts are three
+container invocations and the 118 s load+dequant is paid three times. Task 8
+drove them from a throwaway `for p in prose code cjk` loop in
+`oracle-out/golden.sh`, launched detached (`setsid nohup … > log 2>&1 </dev/null &`)
+so the 17-minute serial run outlives the ssh session, and tailed the log.
+Making `dump.py` accept repeated pairs would save ~4 minutes per full re-run;
+it was not worth touching the numerics path for.
 
 **Outputs stay on the box**, in `~/b70-inference-server/oracle-out/` - hundreds
 of MB per prompt. `.gitignore` has `oracle-out/` and `tools/box.sh sync` passes
@@ -48,13 +62,97 @@ of MB per prompt. `.gitignore` has `oracle-out/` and `tools/box.sh sync` passes
 
 ### Exact commands and measured numbers
 
-_(filled by Task 8: per-prompt id counts, wall time, peak RSS, output size.)_
+Run 2026-08-24 21:42-21:58 on the box (`box`, 121 GB),
+image `vllm-xpu-env-next-p314-t214-vxkp0:latest`, serially, `--gen 32` for all
+three. The three commands were exactly the two-line `run_in_container.sh` form
+above with `prose` replaced by `code` / `cjk`. Every number below is from the
+per-prompt logs in `oracle-out/{prose,code,cjk}.log`.
 
-| Prompt | ids | wall | peak RSS | output | first greedy tokens |
-|---|---|---|---|---|---|
-| prose | _(t8)_ | _(t8)_ | _(t8)_ | _(t8)_ | _(t8)_ |
-| code | _(t8)_ | _(t8)_ | _(t8)_ | _(t8)_ | _(t8)_ |
-| cjk | _(t8)_ | _(t8)_ | _(t8)_ | _(t8)_ | _(t8)_ |
+| Prompt | ids | wall | load+dequant | prefill | 32 greedy | peak RSS | output | manifest |
+|---|---|---|---|---|---|---|---|---|
+| prose | 42 | 314.5 s | 117.9 s | 14.8 s | 181.7 s | 61.4 GiB | 296.6 MiB (311,030,384 B) | 290 tensors |
+| code  | 61 | 324.9 s | 118.1 s | 19.0 s | 187.7 s | 61.5 GiB | 350.2 MiB (367,258,272 B) | 290 tensors |
+| cjk   | 38 | 316.1 s | 117.7 s | 13.9 s | 184.4 s | 61.4 GiB | 285.3 MiB (299,192,968 B) | 290 tensors |
+
+Wall is `dump.py`'s own (`time.time()`); the `docker run` wrapper adds ~17.5 s of
+container start (5:32.0 / 5:42.4 / 5:33.7 measured by `/usr/bin/time`). Peak RSS
+is `dump.py`'s own `getrusage(RUSAGE_SELF)` inside the container - do **not**
+read the wrapper's 28 MB, which is the docker *client*. Serial total including
+the reloads: 16 min 48 s. Each state dict is the same 851 tensors, 400
+dequantised from int4, 50.10 GiB; each manifest is the same 290 tensors -
+64 `resid` + 64 `mixer` + 64 `mlp` + 48 `gdn_state` + 48 `conv_state` +
+`logits` + `tokens` - with only `T` (42/61/38) and the `logits` row count
+(`T + 32` = 74/93/70) differing. Decode is ~5.8 s/token on CPU, memory-bound on
+50 GB of bf16 weights.
+
+The file sizes reconcile exactly against that manifest, which is a cheap check
+that a golden file holds what it claims: prose = 70.1 MiB `logits` + 78.8 MiB
+activations + 144.0 MiB GDN states + 3.8 MiB conv = 296.6 MiB; code =
+88.1 + 114.4 + 144.0 + 3.8 = 350.2; cjk = 66.3 + 71.2 + 144.0 + 3.8 = 285.3.
+Note that the 48 fp32 `[48,128,128]` recurrent states are ~half of every file
+and do not depend on prompt length.
+
+#### Sanity checks on the written files
+
+Re-read by a separate process (`oracle-out/check.sh`), not the writer's own
+claim: `tokens` length, distinctness, `resid.L63` finiteness, and the
+continuation decoded back through `tokenize.py decode`.
+
+```
+=== prose  (311030384 bytes)
+  tokens: len=32 distinct=24 degenerate=False
+  ids: [3113, 7810, 279, 1118, 479, 654, 8980, 1000, 381, 1142, 440, 279, 1834, 725, 2213, 13,
+        3113, 11292, 279, 4220, 6092, 1000, 381, 6992, 11, 321, 539, 5600, 279, 72103, 1000, 381]
+  resid.L63: shape=(42, 5120) finite=True min=-175.0000 max=352.0000
+  logits: shape=(74, 248320) finite=True min=-15.3750 max=25.5000
+  metadata: n_prompt=42 gen=32 attn=eager group_size=64
+  decoded:
+  |  By eight the first trawlers would be back with the day’s catch. By nine the whole town would be moving, and by ten the harbour would be
+  repr: ' By eight the first trawlers would be back with the day’s catch. By nine the whole town would be moving, and by ten the harbour would be\n'
+=== code  (367258272 bytes)
+  tokens: len=32 distinct=24 degenerate=False
+  ids: [271, 727, 40523, 17, 19490, 11, 750, 11, 15131, 1590, 198, 262, 460, 498, 1030, 8474,
+        3620, 11, 750, 681, 15131, 8, 364, 343, 303, 2663, 60, 271, 727, 40523, 18, 19490]
+  resid.L63: shape=(61, 5120) finite=True min=-182.0000 max=592.0000
+  logits: shape=(93, 248320) finite=True min=-16.3750 max=30.0000
+  metadata: n_prompt=61 gen=32 attn=eager group_size=64
+  decoded:
+  |
+  |
+  | def clamp2(values, lo, hi):
+  |     return [min(max(v, lo), hi) for v in values]
+  |
+  | def clamp3(values
+  repr: '\n\ndef clamp2(values, lo, hi):\n    return [min(max(v, lo), hi) for v in values]\n\ndef clamp3(values\n'
+=== cjk  (299192968 bytes)
+  tokens: len=32 distinct=28 degenerate=False
+  ids: [29545, 271, 95815, 108553, 97663, 108447, 96494, 3709, 98844, 95895, 97771, 95726,
+        114183, 101650, 100700, 1710, 271, 550, 220, 99737, 96863, 271, 99737, 96863, 95761,
+        105064, 97463, 95793, 100830, 98252, 96019, 115534]
+  resid.L63: shape=(38, 5120) finite=True min=-214.0000 max=632.0000
+  logits: shape=(70, 248320) finite=True min=-18.3750 max=23.3750
+  metadata: n_prompt=38 gen=32 attn=eager group_size=64
+  decoded:
+  | ️
+  |
+  | 我站在船舷边，看着对岸的轮廓慢慢清晰。
+  |
+  | ## 渡轮
+  |
+  | 渡轮是这座岛和大陆之间最古老的
+  repr: '️\n\n我站在船舷边，看着对岸的轮廓慢慢清晰。\n\n## 渡轮\n\n渡轮是这座岛和大陆之间最古老的\n'
+```
+
+The three continuations as text:
+
+- **prose** - ` By eight the first trawlers would be back with the day’s catch. By nine the whole town would be moving, and by ten the harbour would be`
+- **code** - a blank line, then `def clamp2(values, lo, hi):` / `    return [min(max(v, lo), hi) for v in values]`, then a blank line and `def clamp3(values` - the model continued the file with the next function, which is what a code prompt should do.
+- **cjk** - `我站在船舷边，看着对岸的轮廓慢慢清晰。` then a `## 渡轮` heading and `渡轮是这座岛和大陆之间最古老的` - grammatical Chinese, and it opens by completing the trailing emoji's variation selector (`️`), which is exactly the multi-byte behaviour this prompt exists to pin.
+
+24 / 24 / 28 distinct ids out of 32: none degenerate. `resid.L63` and `logits`
+finite in all three. `dump.py`'s own aborts (strict load, no surviving meta
+tensor, `tokens` length, every GDN layer's state present, `resid.L63` finite)
+also passed inside each run, or nothing would have been written.
 
 ## What is in a golden file
 
@@ -85,9 +183,45 @@ state, or `resid.L63` contains a NaN/Inf.
 
 ## The trust chain
 
-_(written by Task 8: what the golden file is trusted against, and what a
-three-way disagreement between the engine, the oracle and vLLM would mean -
-the dequant convention being the first suspect.)_
+Nothing here is trusted absolutely. Each link is trusted only against the next
+one, and it is worth being explicit about where the chain currently ends.
+
+1. **The bits.** `dequant.py` fixes the one meaning of the int4 nibbles -
+   `(q - 8) * scale`, product in fp32, one RNE cast to bf16 - and the C++
+   loader test matches it **bit-exactly** on the committed fixture. Loader and
+   oracle therefore start from identical bf16 weights by construction, not by
+   agreement.
+2. **The math.** The oracle runs those weights through `transformers` 5.15's
+   pure-torch `modeling_qwen3_5.py` on CPU, `attn_implementation="eager"` (fp32
+   softmax), deliberately without `fla`. That reference implementation - not
+   our kernels - decides what the correct activations are.
+3. **The engine.** **Plan 3's golden test compares the engine against THESE
+   files**: `oracle-out/{prose,code,cjk}.golden.safetensors` on the box, the
+   ones produced by the run recorded above. Per-layer `resid`/`mixer`/`mlp`,
+   the GDN and conv states after the prompt, the logits rows and the 32 greedy
+   token ids. Their metadata pins the snapshot path, the prompt ids, `gen`, the
+   attention implementation and the group size, so a golden file always says
+   what it is a golden file *of*. Regenerate and the comparison target changes;
+   that is the point of recording the exact numbers above.
+
+What that chain does **not** yet prove is that the checkpoint was unpacked the
+way its author packed it. Link 1 is exactly what makes link 3 meaningful and
+also what limits it: the C++ loader and the oracle are pinned to the *same*
+`dequant.py` convention (bit-exactly, by test), so a convention that is wrong
+moves the engine and the oracle **together** and the golden test still passes. **The cross-check against vLLM is deferred to plan 3 deliberately** -
+it needs a working engine to be worth running, and doing it now would only
+compare two CPU paths that already share their input.
+
+When it does run, read a three-way disagreement like this:
+
+- **engine ≠ oracle** → an engine bug (kernel, layout, fusion, fp32 accumulation
+  boundary). The oracle is the reference; the engine is wrong.
+- **engine == oracle, both ≠ vLLM's greedy output** → **the dequant convention
+  is the common suspect**, because it is the one thing the engine and the oracle
+  share and vLLM does not. Check `dequant.py` first - zero-point handling
+  (`q - 8` vs. an explicit `qzeros`), the group axis, the `[K/8, N]` packing
+  order and nibble ordering, `desc_act`/`g_idx` - before touching a kernel.
+- **all three agree** → the chain is closed.
 
 ## Decisions worth knowing
 

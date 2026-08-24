@@ -519,6 +519,12 @@ section cannot state why its lane assignment is shaped that way is not done.
 - Three prompts in `tests/golden/prompts/`: English prose, Python source, a
   CJK paragraph. Generated files are ~1 GB each and are not committed
   (`.gitignore` already excludes `*.safetensors`); `make golden` regenerates.
+- **Delivered 2026-08-25** (runs made 2026-08-24 on the box, `--gen 32`, serially):
+  the three golden files live at `~/b70-inference-server/oracle-out/` on the box as
+  `prose.golden.safetensors` (42 prompt ids, 296.6 MiB), `code.golden.safetensors`
+  (61 ids, 350.2 MiB) and `cjk.golden.safetensors` (38 ids, 285.3 MiB) - 290 tensors
+  each, not committed. Commands, timings, peak RSS and the sanity-check output are in
+  `tools/oracle/README.md`.
 
 ## 11. Tests
 
