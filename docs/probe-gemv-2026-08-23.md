@@ -1,5 +1,9 @@
 # `probe_gemv` raw matrix - 2026-08-23
 
+**Superseded by [probe-gemv-2026-08-24.md](probe-gemv-2026-08-24.md): the
+`out/o_proj` shape in this run was (5120,5120), not the production
+(6144,5120).** Kept unchanged as the historical record.
+
 The complete output of `tools/probe/probe_gemv`, run 1, verbatim. This is the
 record the layout and `S` decisions in [12-kernels.md](12-kernels.md),
 [05-perf-model.md](05-perf-model.md), [02-formats.md](02-formats.md),

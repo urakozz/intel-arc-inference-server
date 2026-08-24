@@ -8,17 +8,17 @@ function(add_gemv_variant M K N S L)
                    DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L})
 endfunction()
 # Probe matrix (spec 1 §4.2): the five int4 shapes the 27B runs after load-time
-# fusion, both layouts, S in {1,2,4,8,16}. All S divide K/64 (80 and 272).
+# fusion, both layouts, S in {1,2,4,8,16}. All S divide K/64 (96, 80 and 272).
 foreach(L 0 1)
   foreach(S 1 2 4 8 16)
-    add_gemv_variant(1 5120 5120  ${S} ${L})
+    add_gemv_variant(1 6144 5120  ${S} ${L})
     add_gemv_variant(1 5120 14336 ${S} ${L})
     add_gemv_variant(1 5120 16384 ${S} ${L})
     add_gemv_variant(1 5120 34816 ${S} ${L})
     add_gemv_variant(1 17408 5120 ${S} ${L})
   endforeach()
 endforeach()
-add_gemv_variant(2 5120 5120 1 0)   # spec 1 §9: the M loop must compile at M=2
+add_gemv_variant(2 6144 5120 1 0)   # spec 1 §9: the M loop must compile at M=2
 
 set(GEMV_BF16_CL ${CMAKE_CURRENT_SOURCE_DIR}/gemv_bf16.cl)
 function(add_gemv_bf16_variant M K N)

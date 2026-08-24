@@ -26,10 +26,11 @@ int main() {
   const double peak = 600.0;  // GB/s, doc 01
   struct Shape { uint32_t K, N; const char* name; };
   // Names use U+2016 (‖), not '|': this table is pasted into docs/ as markdown.
-  const Shape shapes[] = {{5120, 5120, "out/o_proj"}, {5120, 14336, "q‖k‖v"}, {5120, 16384, "qkv‖z"},
+  const Shape shapes[] = {{6144, 5120, "out/o_proj"}, {5120, 14336, "q‖k‖v"}, {5120, 16384, "qkv‖z"},
                           {5120, 34816, "gate‖up"}, {17408, 5120, "down"}};
   const uint32_t Ss[] = {1, 2, 4, 8, 16};
   double layout_sum[2] = {0, 0};
+  bool all_ok = true;  // any row over tolerance makes the probe exit non-zero
   std::map<std::pair<uint32_t, uint32_t>, std::map<uint32_t, double>> best;  // (L, shape idx) -> S -> GB/s
 
   std::printf("| shape | K×N | L | S | µs | GB/s | %% of 600 | max abs err | tol |\n|---|---|---|---|---|---|---|---|---|\n");
@@ -44,6 +45,7 @@ int main() {
       for (uint32_t S : Ss) {
         GemvResult r = run_gemv(ctx, q, f, w, x, {1, sh.K, sh.N, S, L}, 40);
         double err = max_abs_err(r.out, ref);
+        if (err > tol) all_ok = false;
         double gbps = double(r.weight_bytes) / (r.us_per_launch * 1e3);
         best[{L, si}][S] = gbps;
         std::printf("| %s | %u×%u | %u | %u | %.1f | %.0f | %.0f%% | %.2g | %.2g |%s\n", sh.name, sh.K, sh.N, L, S,
@@ -76,5 +78,5 @@ int main() {
     for (uint32_t S : Ss) if (best[{Lwin, si}][S] >= 0.97 * b) { pick = S; break; }
     std::printf("- %s (%u×%u): S = %u\n", shapes[si].name, shapes[si].K, shapes[si].N, pick);
   }
-  return 0;
+  return all_ok ? 0 : 1;
 }

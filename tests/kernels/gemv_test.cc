@@ -24,11 +24,11 @@ int main() {
   l0::Context ctx(0);
   l0::Queue q(ctx);
   l0::Fence f(q);
-  run_case(ctx, q, f, {1, 5120, 5120, 1, 0});
-  run_case(ctx, q, f, {1, 5120, 5120, 4, 1});
+  run_case(ctx, q, f, {1, 6144, 5120, 1, 0});
+  run_case(ctx, q, f, {1, 6144, 5120, 4, 1});
   run_case(ctx, q, f, {1, 17408, 5120, 8, 0});
   run_case(ctx, q, f, {1, 5120, 34816, 2, 1});
-  run_case(ctx, q, f, {2, 5120, 5120, 1, 0});
+  run_case(ctx, q, f, {2, 6144, 5120, 1, 0});
   std::puts("gemv_test OK");
   return 0;
 }
