@@ -42,3 +42,8 @@ add_test(NAME gemv_bf16_test COMMAND gemv_bf16_test)
 add_executable(json_test common/json_test.cc)
 target_include_directories(json_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME json_test COMMAND json_test)
+
+add_executable(safetensors_test loader/safetensors_test.cc)
+target_include_directories(safetensors_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(safetensors_test PRIVATE b70_loader)
+add_test(NAME safetensors_test COMMAND safetensors_test)
