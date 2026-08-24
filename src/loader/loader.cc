@@ -392,16 +392,24 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
     throw std::runtime_error("embed_tokens.weight: expected BF16 [" +
                              std::to_string(Qwen35::kVocab) + "][" +
                              std::to_string(Qwen35::kHidden) + "], got " + emb.dtype);
+  // The model's final pre-lm_head RMSNorm - the one norm that belongs to no
+  // layer. Same Gemma-style (1 + w) bake as all the others.
+  std::vector<uint16_t> fnorm(Qwen35::kHidden);
+  bake_one_plus(bf16_of(view, set, "norm.weight", Qwen35::kHidden), fnorm.data(),
+                Qwen35::kHidden);
   const std::vector<float> rope = rope_table(max_len);
 
   LoadedModel m{{},
                 {},
                 l0::Mem(ctx, l0::MemKind::Device, set.bytes(emb)),
+                l0::Mem(ctx, l0::MemKind::Device, fnorm.size() * 2),
                 l0::Mem(ctx, l0::MemKind::Device, rope.size() * 4),
                 {}};
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   imm.copy(m.embed.ptr(), set.data(emb), set.bytes(emb));
   m.report.embed_bytes += set.bytes(emb);
+  imm.copy(m.final_norm.ptr(), fnorm.data(), fnorm.size() * 2);
+  m.report.small_bytes += fnorm.size() * 2;
   const size_t rope_bytes = rope.size() * 4;
   imm.copy(m.rope.ptr(), rope.data(), rope_bytes);
   m.report.small_bytes += rope_bytes;
@@ -431,23 +439,28 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                       load_linear(ctx, imm, set, view, "", head, st, m.report));
   }
 
-  const LoadReport& r = m.report;
-  const double gb = 1e9;
-  const size_t per_token = r.int4_bytes + r.scale_bytes + r.bf16_linear_bytes + r.pad_bytes +
-                           r.lm_head_bytes + r.small_bytes;
-  const double expected = kDocW + double(r.pad_bytes) + double(widen) + double(rope_bytes);
-  const double delta = (double(per_token) - expected) / expected;
-  m.report.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-
-  size_t unconsumed = 0;
   std::string first_unconsumed;
   for (const auto& [stripped, full] : view.names) {
     (void)full;
     if (view.consumed.count(stripped)) continue;
     if (stripped.size() > 7 && stripped.compare(stripped.size() - 7, 7, ".qzeros") == 0) continue;
     if (stripped.size() > 6 && stripped.compare(stripped.size() - 6, 6, ".g_idx") == 0) continue;
-    if (unconsumed++ == 0) first_unconsumed = stripped;
+    if (m.report.unconsumed++ == 0) first_unconsumed = stripped;
   }
+
+  const LoadReport& r = m.report;
+  const double gb = 1e9;
+  // The RoPE table is resident but NOT streamed per token: the decode step reads
+  // one position's 2 x 32 floats (~256 B), not the 4.19 MB table. It therefore
+  // sits outside the read-per-token figure on both sides of the cross-check,
+  // and outside `small` in the printout - but inside total(), because the
+  // seven buckets must account for every byte allocated.
+  const size_t small_resident = r.small_bytes - rope_bytes;
+  const size_t per_token = r.int4_bytes + r.scale_bytes + r.bf16_linear_bytes + r.pad_bytes +
+                           r.lm_head_bytes + small_resident;
+  const double expected = kDocW + double(r.pad_bytes) + double(widen);
+  const double delta = (double(per_token) - expected) / expected;
+  m.report.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
   std::printf(
       "loader: %s\n"
@@ -459,23 +472,24 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       "  scales      %13zu B  %7.3f GB\n"
       "  bf16_linear %13zu B  %7.3f GB   (a‖b real rows; %.3f GB with padding)\n"
       "  lm_head     %13zu B  %7.3f GB\n"
-      "  small       %13zu B  %7.3f GB   (incl. rope %.3f GB)\n"
+      "  small       %13zu B  %7.3f GB   (per-layer blocks + final norm)\n"
       "  pad         %13zu B  %7.3f GB\n"
       "  read/token  %13zu B  %7.3f GB\n"
       "  embed       %13zu B  %7.3f GB   (resident, gathered - not per-token)\n"
+      "  rope        %13zu B  %7.3f GB   (resident, ~256 B per token - not per-token)\n"
       "  total       %13zu B  %7.3f GB\n"
       "  W check     %.3f GB vs %.3f GB expected = %.3f doc-03 + %.3f pad + %.6f widen"
-      " + %.6f rope  ->  %+.3f%%\n"
+      "  ->  %+.3f%%\n"
       "  load        %.1f s\n",
       snap.c_str(), qc.group_size, qc.dynamic_rule_count, view.names.size() - 1,
-      view.visual_skipped, view.mtp_skipped, view.qzeros, view.g_idx, unconsumed,
-      unconsumed ? " incl. " : "", first_unconsumed.c_str(), m.linears.size(),
+      view.visual_skipped, view.mtp_skipped, view.qzeros, view.g_idx, r.unconsumed,
+      r.unconsumed ? " incl. " : "", first_unconsumed.c_str(), m.linears.size(),
       m.layer_small.size(), r.int4_bytes, r.int4_bytes / gb, r.scale_bytes, r.scale_bytes / gb,
       r.bf16_linear_bytes, r.bf16_linear_bytes / gb, (r.bf16_linear_bytes + r.pad_bytes) / gb,
-      r.lm_head_bytes, r.lm_head_bytes / gb, r.small_bytes, r.small_bytes / gb, rope_bytes / gb,
+      r.lm_head_bytes, r.lm_head_bytes / gb, small_resident, small_resident / gb,
       r.pad_bytes, r.pad_bytes / gb, per_token, per_token / gb, r.embed_bytes, r.embed_bytes / gb,
-      r.total(), r.total() / gb, per_token / gb, expected / gb, kDocW / gb, r.pad_bytes / gb,
-      widen / gb, rope_bytes / gb, delta * 100.0, m.report.seconds);
+      rope_bytes, rope_bytes / gb, r.total(), r.total() / gb, per_token / gb, expected / gb,
+      kDocW / gb, r.pad_bytes / gb, widen / gb, delta * 100.0, m.report.seconds);
 
   if (std::fabs(delta) > 0.02)
     throw std::runtime_error("resident read-per-token bytes " + std::to_string(per_token) +

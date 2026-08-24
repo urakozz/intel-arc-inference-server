@@ -115,10 +115,11 @@ The checkpoint has three top-level namespaces. The loader builds a view of
 - `mtp.*` (15 tensors, 0.849 GB) is **skipped in v1** - MTP is phase 2 (doc 03).
 
 Both skip counts are printed. So is the count of tensors the loader never
-consumed: it is **1**, `norm.weight` - the model's final RMSNorm, which has no
-home in this version's `LoadedModel` (see "Known gap" below). Nothing is
-silently ignored; if a future checkpoint grows a tensor this loader does not
-know about, the number changes and the report says so.
+consumed - **0**, and the test asserts it (`report.unconsumed`). Every name in
+the view is either loaded or deliberately dropped, and the drop is counted.
+Nothing is silently ignored; if a future checkpoint grows a tensor this loader
+does not know about, the number stops being 0 and both the report and the test
+say so.
 
 ## Fusion: why these weights are welded together
 
@@ -219,6 +220,10 @@ One block per layer instead of six allocations per layer keeps the descriptor
 count down for plan 3's captured command list, and makes each layer's constants
 one contiguous read.
 
+The one norm that belongs to no layer - `model.language_model.norm.weight`, the
+final RMSNorm before `lm_head` - gets its own 10 240 B allocation,
+`LoadedModel::final_norm`, baked `(1 + w)` like all the rest.
+
 ### The RoPE table
 
 `rope[p][0][i] = cos(p·θ^(−2i/64))`, `[1][i] = sin(…)`, `i < 32`, fp32,
@@ -230,6 +235,12 @@ onto every stream, so `apply_interleaved_mrope` copies each frequency onto
 itself: **plain RoPE** (doc 03). The angles are computed in `double` and stored
 `float` - 4.19 MB at the default length, a rounding error against 18 GB, and it
 removes a transcendental from the FA prologue.
+
+The table is **resident but not per-token traffic**: a decode step reads one
+position's `2 × 32` floats, ~256 B, not the 4.19 MB. It is therefore reported on
+its own line next to `embed_tokens` and kept out of the read-per-token figure on
+both sides of the `W` cross-check - while still counted in `total()`, because
+the report's buckets must account for every byte allocated.
 
 ## Layout and split-K come from the table, not from here
 
@@ -270,20 +281,21 @@ verbatim.
 loader: .../snapshots/2a9077667e28aa53e61d91bdee5d7962e8674668/
   quant     int4 g64 sym desc_act=false, 98 dynamic exclusion rules
   tensors   2050 language-model + lm_head; skipped 333 visual, 15 mtp;
-            dropped 400 qzeros + 400 g_idx (invariants asserted), 1 unconsumed incl. norm.weight
+            dropped 400 qzeros + 400 g_idx (invariants asserted), 0 unconsumed
   linears   305 fused weights, 64 layers
   int4          12163481600 B   12.163 GB
   scales          760217600 B    0.760 GB
   bf16_linear      47185920 B    0.047 GB   (a‖b real rows; 0.063 GB with padding)
   lm_head        2542796800 B    2.543 GB
-  small            13416448 B    0.013 GB   (incl. rope 0.004 GB)
+  small             9232384 B    0.009 GB   (per-layer blocks + final norm)
   pad              15728640 B    0.016 GB
-  read/token    15542827008 B   15.543 GB
+  read/token    15538642944 B   15.539 GB
   embed          2542796800 B    2.543 GB   (resident, gathered - not per-token)
-  total         18085623808 B   18.086 GB
-  W check     15.543 GB vs 15.543 GB expected = 15.519 doc-03 + 0.016 pad + 0.003941 widen
-              + 0.004194 rope  ->  -0.000%
-  load        12.9 s
+  rope              4194304 B    0.004 GB   (resident, ~256 B per token - not per-token)
+  total         18085634048 B   18.086 GB
+  W check     15.539 GB vs 15.539 GB expected = 15.519 doc-03 + 0.016 pad + 0.003941 widen
+              ->  -0.000%
+  load        13.1 s
 ```
 
 Every uploaded byte lands in exactly one bucket, and the buckets sum to the
@@ -302,15 +314,18 @@ loader's own itemised additions - never a widened tolerance:
 | `a‖b` zero padding | 15 728 640 | 32 rows × 5120 × 2 B × 48 GDN layers, to reach the 16-wide tile |
 | `conv1d` bf16→fp32 | 3 932 160 | 40960 taps × 2 B × 48 layers |
 | `A_log`, `dt_bias` bf16→fp32 | 9 216 | 48 heads × 2 B × 2 tensors × 48 layers |
-| RoPE table | 4 194 304 | 16384 × 2 × 32 × 4 B; not from the checkpoint at all |
 
-Measured delta: **−37 312 B, −0.00024%** - the loader is 37 KB *under* doc 03's
-figure, which is the rounding in "15.519". Note the two totals the report
-prints and why they differ: **read/token 15.543 GB** is what the decode step
-streams; **total 18.086 GB** adds `embed_tokens`, which is resident but gathered
-one row at a time and therefore ~0 traffic. Both are printed, labelled.
+The RoPE table (4 194 304 B) is *not* in this list: it is resident but not
+streamed per token, so it is excluded from both sides rather than added to both.
 
-**Load time: 12.9-13.2 s** (warm page cache; 11.3 s of it is user CPU in the
+Measured delta: **−27 072 B, −0.00017%** - the loader is 27 KB *under* doc 03's
+figure, which is the rounding in "15.519". Note the three totals the report
+prints and why they differ: **read/token 15.539 GB** is what the decode step
+streams; **total 18.086 GB** adds `embed_tokens` (gathered one row at a time,
+~0 traffic) and the RoPE table (~256 B read per token). All three are printed,
+labelled.
+
+**Load time: 13.0-13.2 s** (warm page cache; 11.3 s of it is user CPU in the
 single-threaded repack), against a 120 s target. No thread pool was built: the
 known lever (a `std::async` pool over per-linear repack) is not worth its
 complexity at 13 s. On a cold page cache this is bounded below by reading 19 GB
@@ -338,6 +353,23 @@ That check rides on a property of layout 1: tiles are ordered `n_tile`-outer,
 loader ever ordered them differently the test would be wrong rather than the
 loader - it is written down here so that is a decision and not a surprise.
 
+The tile check covers the int4 path only, so three more readbacks pin the
+transformations it cannot see - each one a value the kernels would otherwise
+have to take on trust:
+
+- **the `(1+w)` bake**: layer 0's `input_layernorm[0]` on the device equals
+  `f32_to_bf16(1.0f + bf16_to_f32(src))` computed independently - the single
+  rounding, verified rather than asserted;
+- **the `a‖b` padding**: rows 96..127 of the tiled `[128][5120]` buffer read
+  back as zero, all 163 840 of them, so the 32 pad rows contribute nothing to
+  the GEMV;
+- **the RoPE table**: `p = 0` is exactly `(1, 0)` and `p = 1`'s first frequency
+  is `(cos 1, sin 1)` - `inv_freq[0] = θ⁰ = 1`, so this catches a wrong `θ`
+  exponent sign or a transposed `[2][32]`.
+
+And `report.unconsumed == 0` is asserted, which is what makes the "nothing is
+skipped by accident" claim testable instead of rhetorical.
+
 ## Deliberately not loaded
 
 - **`model.visual.*`** (333 tensors, 0.921 GB) - this checkpoint is a VLM; the
@@ -349,12 +381,3 @@ loader - it is written down here so that is a decision and not a surprise.
 - **`*.qzeros`, `*.g_idx`** (800 tensors, 0.202 GB) - fully scanned to prove the
   invariants above, then dropped. They are constants; uploading them would cost
   0.2 GB of every token's bandwidth to re-read a value the kernel already knows.
-
-### Known gap
-
-`model.language_model.norm.weight`, the final pre-`lm_head` RMSNorm, is
-**parsed, counted and reported as unconsumed but not uploaded**: this version's
-`LoadedModel` has per-layer `SmallTensors` and no top-level slot for it. It is
-10 KB and one `(1+w)` bake away from done; plan 3 needs it for the head and
-should add the field. It is listed here rather than fixed silently because the
-loader's whole claim is that nothing is skipped by accident.
