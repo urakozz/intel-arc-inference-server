@@ -2,9 +2,11 @@
 // one tile of layer 0's qkv||z read back from the device must equal the CPU
 // repack of the mmapped source - the canonical bytes on device mean exactly
 // what the kernels were tested against.
+#include <cmath>
 #include <cstdio>
 #include <vector>
 #include "check.h"
+#include "common/bf16.h"
 #include "common/repack.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -53,6 +55,37 @@ int main(int argc, char** argv) {
     if (want[i] != got[i] && ++diff == 1)
       std::fprintf(stderr, "first mismatch at u32 %zu: want %08X got %08X\n", i, want[i], got[i]);
   CHECK_EQ(diff, size_t(0));
+
+
+  // Every checkpoint tensor is either loaded or deliberately dropped (qzeros,
+  // g_idx, visual, mtp) - nothing is skipped by accident.
+  CHECK_EQ(m.report.unconsumed, size_t(0));
+
+  // The (1+w) bake: one fp32 add, one round-to-nearest-even cast back to bf16.
+  std::vector<uint16_t> norms(2 * 5120);
+  imm.copy(norms.data(), m.layer_small[0].norms.ptr(), norms.size() * 2);
+  const uint16_t* in_ln = reinterpret_cast<const uint16_t*>(
+      set.data(set.tensors().at(strip("layers.0.input_layernorm.weight"))));
+  CHECK_EQ(norms[0], common::f32_to_bf16(1.0f + common::bf16_to_f32(in_ln[0])));
+
+  // a||b's 32 pad rows really are zero on the device (rows 96..127 of the
+  // [128][5120] tiled buffer, i.e. n-tiles 6 and 7).
+  std::vector<uint16_t> ab(size_t(128) * 5120);
+  imm.copy(ab.data(), m.linears.at({0u, model::LinearId::AB}).mem.ptr(), ab.size() * 2);
+  size_t nonzero = 0;
+  for (uint32_t n = 96; n < 128; ++n)
+    for (uint32_t k = 0; k < 5120; ++k)
+      nonzero += ab[((size_t(n / 16) * (5120 / 8) + k / 8) * 8 + k % 8) * 16 + n % 16] != 0;
+  CHECK_EQ(nonzero, size_t(0));
+
+  // RoPE: position 0 is exactly (1, 0); position 1's first frequency is
+  // (cos 1, sin 1) since inv_freq[0] = theta^0 = 1.
+  std::vector<float> rp(128);
+  imm.copy(rp.data(), m.rope.ptr(), rp.size() * 4);
+  CHECK_EQ(rp[0], 1.0f);
+  CHECK_EQ(rp[32], 0.0f);
+  CHECK_NEAR(rp[64], std::cos(1.0), 1e-6);
+  CHECK_NEAR(rp[96], std::sin(1.0), 1e-6);
 
   std::printf("load_checkpoint_test OK (%.1f s load)\n", m.report.seconds);
   return 0;
