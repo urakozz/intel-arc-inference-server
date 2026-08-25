@@ -337,6 +337,24 @@ the position loop - so the two are alternatives, not complements, and the retile
 is by far the cheaper experiment. **Both numbers are extrapolations from a
 two-parameter fit with one validation point; neither is a promise.**
 
+> **FALSIFIED, 2026-08-25 - both predictions in this paragraph, and the second
+> one badly.** The retile was executed (§L5) and is the cleanest test this fit
+> could get, since it changes the block length and nothing else.
+>
+> | this paragraph's prediction | measured | miss |
+> |---|---|---|
+> | 128-position block: **214.5 µs/launch, 3.43 ms/token** | **296.684 µs, 4.747 ms/token** | **+38.3%** |
+> | 64-position block: **2.44 ms/token** | **3.585 ms/token** (224.046 µs/launch) | **+46.9%** |
+> | "264 work-groups, past the point any measurement here reaches" | **260 work-groups, measured, and free** | reached |
+>
+> The *direction* held - a finer block is the right attack and it paid - but
+> every number here is wrong and the model behind them (§2's `F + fill·P`) is
+> dead. So is the refit that replaced it. §L5 carries the sweep that chose 64
+> by measurement instead. The sentence about SLM staging also stands
+> **corrected**: staging and the retile are indeed alternatives, and the sweep
+> now bounds what staging could ever be worth at a fraction of a fraction of the
+> row (docs/12, `attn` → Rejected).
+
 ### 3. `gdn_step` is exonerated, completely
 
 0.733 ms in situ, against a **0.671 ms** traffic floor (396 MB/token at the
@@ -601,14 +619,41 @@ first, and its result is why the other two were run at all.
 | **256** - before | 68 | 369.988 | 80.241 | **6.058** | 37387.510 | the baseline |
 | 128 - the planned retile | 132 | 296.684 | 127.240 | **4.931** | 36380.755 | works, and falsifies §2's fit by +38% |
 | **64 - shipped** | 260 | **224.046** | 196.195 | **3.839** | **35342.441** | the knee |
-| 32 | 516 | 203.888 | 452.816 | 3.772 | 35363.298 | `attn_decode` still falls, Σ goes **up** |
+| 32 | 516 | 203.837 | 450.208 | 3.769 | 35361.950 | family 0.070 ms better; not worth its footprint |
 
-**32 is the measurement that made 64 a decision rather than a preference.**
-`attn_decode` improves by another 20.2 µs/launch there - 0.32 ms/token - but
-`attn_reduce` merges 129 blocks instead of 65 and costs +0.257 ms, and the
-step's whole sum of kernel durations comes out **21 µs higher** than at 64,
-inside drift. The knee is measured on both sides, which is not something this
-document has been able to say about a tuning parameter before.
+**Why the sweep stopped at 64 - stated carefully, because the first version of
+this section overclaimed it.** It said "64 is the knee, measured on both sides",
+resting on the step's Σ coming out 19.5 µs higher at 32. **That does not hold:**
+the non-attn launches drifted **+0.283%** (+89.3 µs) between those two runs, so
+the Σ sign is drift, and at family level B32 is **0.070 ms/token BETTER** than
+B64 (3.769 vs 3.839), not worse. The claim is withdrawn. What actually decides
+it is three things that do not depend on a sign:
+
+1. **The marginal gain has collapsed.** The three halvings bought **−1.127,
+   −1.092 and −0.070 ms/token**. The third is 6% of the second and about a third
+   of one run's drift on the untouched launches - i.e. it is at the edge of what
+   this instrument can even see.
+2. **`attn_reduce` is on a steep ramp** - 80.2 → 127.2 → 196.2 → **450.2**
+   µs/step - and it is what cancels the rest: at 32, `attn_decode` gives up
+   323 µs/step and `attn_reduce` takes back 254 of them. One more halving would
+   plainly cross over.
+3. **`attn_part` would double again, 50.7 → 101.4 MB**, per-step scratch 77.6 →
+   128.3 MB. Doubling the largest scratch buffer in the step for 0.070 ms/token
+   - under the drift - is not a trade worth making.
+
+**The B32 transcript**, `--profile --depth 4096 --steps 32` on the idle box (a
+second independent run made specifically to record this row; the first run's
+family total was 3772.280 µs, 0.08% away, so it reproduces):
+
+```
+  attn_decode                               16   3261.393   9.23%     203.837
+  attn_reduce                               16    450.208   1.27%      28.138
+  attn_prep                                 16     57.617   0.16%       3.601
+  attn_decode_M1_L16384_B32                 16   3261.393   9.23%     203.837
+  attn_reduce_M1_L16384_B32                 16    450.208   1.27%      28.138
+  sum of 774 kernel durations    35361.950 us   [35225.417 .. 35492.292]
+  fence wall (submit + wait)     36379.774 us   [36246.242 .. 36542.172]
+```
 
 ### §2's model was falsified, and so was the one that replaced it
 
@@ -687,12 +732,22 @@ account for is a finding and not a rounding error.
 
 `attn_decode` is still **3.585 ms/token, 10.1% of the step** and the largest
 non-GEMV row by a wide margin - `gdn_step` is 0.762. The plan's own L5 design,
-**SLM staging of the KV tiles, was never built**, and the measurement now argues
-against it rather than deferring it: it shortens the 6× q-head reread *inside*
-the block walk, and the block walk is what model D put at ~147 µs of the
-original 370 and the retile has already taken most of. The retiled launch costs
-224 µs in total. Staging would be optimising at most a quarter of what is left,
-against a term nothing has identified.
+**SLM staging of the KV tiles, was never built**, and the measurement argues
+against it rather than deferring it.
+
+**The argument deliberately uses no cost model**, since this section has just
+finished killing two: a chain through model D would be a chain through something
+declared falsified three paragraphs ago. Take the bound straight off the sweep
+instead. Halving the block halves the positions one work-group walks serially,
+so a halving buys back **at most** whatever walk is still there. The **second**
+halving (64 → 32) bought only **20.2 µs/launch** - which bounds everything still
+walk-shaped in a launch at roughly **0.3-0.6 ms/token** across the 16 layers.
+SLM staging attacks a *subset* of that: the 6× q-head reread *inside* the walk,
+not the walk itself. Its entire ceiling is a fraction of a fraction of a
+3.585 ms row, for six accumulators and six `(mx, sm)` pairs per work-item and
+the project's highest-risk correctness change. That is a clear no, and it stays
+a clear no however the ~200 µs that is *not* walk-shaped turns out to be
+explained.
 
 **The next thing to do on this kernel is a probe that names the 224 µs**, not
 another design against a model. `attn_reduce`, meanwhile, has gone 0.076 →
@@ -707,8 +762,17 @@ where they did not move at all. docs/14 records both columns and the reason:
 the gate's longest prompt reaches `pos` **92**, which at `ATTN_BLOCK` 64 is two
 blocks against 256's one. It covers the reassociation barely, and the 65-block
 merge that runs at depth 4096 not at all. That depth is held only by
-`attn_test`'s `pos = 4095` and L16384 `pos = 16383` cases, at ≤ 2 bf16 ulp
-against a host reference that models the same blocking.
+`attn_test`'s `pos = 4095` (64-block merge) and L16384 `pos = 16383` (256-block
+merge) cases, against a host reference that models the same blocking - where the
+worst gated distance measured is **1 bf16 ulp on one word**, against a ruled bar
+of 2 (docs/12, `attn` → What the test asserts).
+
+**Ruling, for the gate task and for spec 1.6.** For spec 1.5, `attn_test`'s ulp
+bars **are** the deep-depth authority on attention arithmetic; the golden gate
+is not, and no lever should claim it is. A **deep-context golden prompt** - one
+long enough to put the gate past `pos` 4096, where `nb` is 65 rather than 2 - is
+a **memo item for spec 1.6**, not a spec 1.5 deliverable: it needs a new oracle
+run, and this spec's gate budget is spent.
 
 ## The ranked lever ladder
 
@@ -791,8 +855,9 @@ row (−2.219 ms on the attn family) landed inside its own 1.5-2.5 band - 0.32 m
 of the difference is unattributed and recorded as such in §L5. The step is now
 **36.32 ms** (measured, BENCHMARKS.md, recorded median 27.53 t/s) and **the gap
 to the 31.746 ms bar is 4.574 ms**. What remains on the ladder is L4 (≤0.3) and
-L3 (≤0.06), so **the ladder's own optimistic ceiling is 35.96 ms ≈ 27.8 t/s** -
-**3.6 ms short of the bar with every lever cut.**
+L3 (≤0.06), so **the ladder's own optimistic ceiling is 35.96 ms = 27.81 t/s** -
+**4.214 ms short of the 31.746 ms bar (3.69 t/s short of 31.50) with every lever
+cut.**
 
 **This document predicted that outcome before the first lever was run**, and the
 prediction was the point of ranking them: "the ladder as specified is
@@ -816,9 +881,16 @@ instrument, not for the ladder.
 What the measurement adds to that memo, in advance and in order of size:
 
 1. **`lm_head` at int4: ~3.3 ms**, no kernel work, docs/05 specialisation 1.
-   Alone it converts the projected 34.7 into 31.4 ms/token - over the bar.
    It is the single largest measured item in the step that spec 1.5 does not
-   touch.
+   touch. **It is no longer sufficient on its own, and that is the single most
+   important consequence of L5's result.** This item used to read "it converts
+   the projected 34.7 into 31.4 ms/token - over the bar"; that arithmetic was
+   written against a ladder projection of 34.7 ms that assumed L5 would pay
+   −3.0. L5 paid −1.73, so the ladder's optimistic ceiling is **35.96 ms**, and
+   35.96 − 3.3 = **32.66 ms = 30.62 t/s - still UNDER the 31.50 t/s bar**, by
+   0.88 t/s / 0.91 ms. **A second item is required**, and the memo has to name
+   one rather than treating `lm_head` as the closer. Items 2 and 3 below are
+   what is on the shelf, and item 2 has since been spent.
 2. ~~**`attn_decode`'s 247 µs full-block critical path**~~ - **taken, §L5.**
    The retile shipped at `ATTN_BLOCK` 64 (260 work-groups at depth 4096) and paid
    −2.219 ms in situ, −1.73 on the bench. It *was* the cheapest untried thing in
@@ -829,6 +901,18 @@ What the measurement adds to that memo, in advance and in order of size:
 3. **`a‖b` → `gdn_step` prologue fusion** and **norm → GEMV prologue fusion**
    remain redesigns, but §1 now prices what they are really buying: not the
    0.7 µs launch, the work-group count.
+4. **A deep-context golden prompt** - not a performance item, a *trust* item,
+   and L5 is why it is on this list. The gate's prompts reach `pos` 92, so the
+   engine's attention arithmetic at the depth it is actually benchmarked at
+   (`nb` = 65) has **no oracle**, only `attn_test`'s ulp bars against a host
+   reference. That was tolerable while attention was untouched; it is a standing
+   gap now that a lever has reassociated it. Cost is one oracle run at a longer
+   prompt. §L5 and docs/14.
+5. **The instrument's error bar needs re-establishing.** Two levers in a row
+   have now missed their in-situ→bench prediction by more than the ±0.1 ms this
+   document claims: L1 by 0.087 (inside), L5 by **0.32 (outside)**. The
+   attribution method is the basis of every ranking on this page, so a residual
+   it cannot explain is a finding about the method, not about the lever. §L5.
 
 ## What this document does not settle
 

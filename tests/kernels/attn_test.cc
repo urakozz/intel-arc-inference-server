@@ -34,9 +34,14 @@
 //     an unfloored ratio there would measure the cancellation, not the kernel.
 //     **(b) ≤ 2 bf16 ulp on every element with `|ref| >= rms/8`.** The floor in
 //     (a) divides by the RMS, so (a) goes slack on exactly the elements a bf16
-//     output can most easily flip - and `attn_out` *is* bf16, so a single
-//     round-to-nearest boundary flip on an element the size of the RMS is
-//     already 2^-8 = 3.9e-3 of relative error. **(b) is therefore the
+//     output can most easily flip - and `attn_out` *is* bf16. **The ulp
+//     arithmetic, stated properly, because it is what sizes (a):** bf16 has
+//     **7** explicit mantissa bits, so inside a binade [2^k, 2^k+1) the spacing
+//     is 2^(k-7) and ONE ulp is between 2^-8 and 2^-7 of the element -
+//     **3.9e-3 to 7.8e-3**, the top of that range at the *bottom* of a binade.
+//     Two ulp is therefore **7.8e-3 to 1.5625e-2**. So a single
+//     round-to-nearest boundary flip on a gated element reaches 7.8e-3 of
+//     relative error. **(b) is therefore the
 //     arbiter**: if a change ever trips (a), check (b) before believing the
 //     kernel broke. The `rms/8` gate is what keeps (b)
 //     meaningful - below it a ulp is not a unit of error (one dim cancels to
@@ -46,25 +51,32 @@
 //     twice, and `exp`'s 3 ulp can push a boundary value one ulp at each of
 //     those roundings and no further.
 //
-//     **(a) read 1e-3 until spec 1.5's lever L5, and that was a latent
-//     contradiction, not a tighter bar.** The sentence above - written when
-//     this test was - already says a single ulp on an RMS-sized element is
-//     3.9e-3, *four times* the 1e-3 (a) then asserted, so (a) could only ever
-//     pass while the device happened to reproduce the host bit for bit. It did,
-//     at every depth, until L5 halved `ATTN_BLOCK`: the retile moves where the
-//     online softmax's partial-accumulation boundary falls, which moves the
-//     fp32 `acc/sm` in its last bits, and at `pos = 254` one dim of 6144 landed
-//     the far side of a bf16 rounding boundary - **1 ulp, against (b)'s ruled
-//     2**, and `attn_part` agreeing to 6.0e-7 (fp32) underneath it. (That first
-//     observation was at `ATTN_BLOCK` 128; the lever shipped at 64, where the
-//     same case reads the same way.) Asserting
-//     1e-3 *and* 2 ulp was asserting a contradiction; the fix is to make (a)
-//     say what it can actually mean, which is **2 bf16 ulp of an RMS-sized
-//     element = 2 · 2^-8 = 7.81e-3**, rounded to 8e-3. (a) keeps its job - it
-//     is the only bar covering the elements BELOW (b)'s `rms/8` gate, where it
-//     still catches any absolute error over 2 ulp of the RMS - and (b) stays
-//     the tighter of the two everywhere it applies. Neither bar was loosened
-//     past what the other already allowed.
+//     **(a) read 1e-3 until spec 1.5's lever L5, and 1e-3 was never consistent
+//     with (b).** One ulp on a gated element reaches 7.8e-3, so (a) at 1e-3
+//     could only ever pass while the device happened to reproduce the host bit
+//     for bit on every gated element. At `ATTN_BLOCK` 256 it did, at every
+//     depth. L5 reassociates the softmax partials (4 waves per block accumulate
+//     where 16 did, and `attn_reduce` merges 4x as many), which moves the fp32
+//     `acc/sm` in its last bits, and the first gated word to land the far side
+//     of a bf16 rounding boundary took (a) with it - **1 ulp, against (b)'s
+//     ruled 2**, with `attn_part` agreeing to ~6e-07 (fp32) underneath it. The
+//     tripping element was **above** the rms/8 gate in both configurations
+//     observed: at the intermediate `ATTN_BLOCK` 128 it was `pos = 254` index
+//     504, |ref| in [0.0312, 0.0625) against rms 7.194e-02 and rms/8 8.99e-03;
+//     at the shipped 64 it is L16384 `pos = 16383`, |ref| in [0.00195, 0.00391)
+//     against rms 9.45e-03 and rms/8 1.18e-03. So the warrant is the
+//     contradiction with (b), NOT the "below the gate a ulp is not a unit of
+//     error" argument - these words carry real signal.
+//
+//     **(a) is now 8e-3 = 2^-7, one gated ulp at its worst. That narrows the
+//     contradiction ~8x; it does NOT remove it.** A legitimate 2-ulp gated
+//     difference lands anywhere in (7.8e-3, 1.5625e-2], so one in the residual
+//     band **(8e-3, 1.5625e-2] would still trip (a) while (b) passes**. Nothing
+//     measured is within 5x of that band (worst (a) anywhere is the L16384
+//     case's 1.615e-3), and (b) is the arbiter, so the bar stays at 8e-3 rather
+//     than being raised to 1.5625e-2 where it would stop covering anything.
+//     (a)'s remaining job is the elements BELOW (b)'s `rms/8` gate, where it
+//     still catches any absolute error over 2 ulp of the RMS.
 //
 // Eight depths pin the block edges and the early-out at `max_len = 4096`
 // (64 blocks of `attn_ref::kBlock` = 64 - spec 1.5's lever L5 quartered the
@@ -644,11 +656,13 @@ void run_case(Dev& d, uint32_t pos, uint32_t M, uint32_t n_act, uint32_t seed,
               canary_blocks, M, canary_words);
 
   CHECK(q_rel <= 2.0 / 256.0);   // 2 ulp of bf16
-  // 8e-3 = 2 bf16 ulp (2 x 2^-8 = 7.81e-3) of an RMS-sized element, which is
-  // exactly what the ulp bar below already permits; see the header. Tightening
-  // this is not available while `require_ulp`'s bar is 2 - the two would
-  // contradict - and loosening it further would stop it covering the elements
-  // under the rms/8 gate, which is the only thing it is still for.
+  // 8e-3 ~ 2^-7: ONE bf16 ulp at its worst (bottom of a binade), which the
+  // 2-ulp bar below plainly permits. It is NOT the full 2-ulp reach - that is
+  // 2^-6 = 1.5625e-2 - so the residual band (8e-3, 1.5625e-2] can still trip
+  // this while `require_ulp` passes; the header argues why that is the right
+  // place to stop. Tightening below 7.8e-3 would contradict the 2-ulp bar
+  // outright; loosening to 1.5625e-2 would stop it covering the elements under
+  // the rms/8 gate, which is the only thing it is still for.
   require(eo, 8e-3, "attn_out");
 
   CHECK(std::memcmp(r0.attn_q.data(), r1.attn_q.data(), qg * 4) == 0);
