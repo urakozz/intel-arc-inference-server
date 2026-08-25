@@ -210,7 +210,9 @@ kernels per token - the estimate here was ~700; the built list, counted by
 `runtime::CapturedStep::kernel_count`, is 645 (2026-08-25). Inside a replayed
 list each kernel still pays a fixed dispatch + drain cost. The 3-5 µs guessed
 here turned out to be **0.52 µs** measured (`probe_replay`, doc 07 #5), so the
-whole list costs ~0.34 ms of a ~26 ms step rather than the 2-3.5 ms feared -
+whole list costs ~0.34 ms of a ~26 ms *estimated* step (first measured value:
+37.7 ms/token with the debug tap enabled, 2026-08-25 - Task 9 owns the real
+number) rather than the 2-3.5 ms feared -
 which is why fusion is deferred out of phase 1 entirely (spec §4.1) instead of
 being its first move. The list below survives as the phase-1 fusion order if a
 later measurement makes it worth the correctness risk:
