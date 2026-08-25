@@ -202,6 +202,18 @@ add_dependencies(engine_smoke_test ${B70_DECODE_LIST_KERNELS})
 add_test(NAME engine_smoke_test COMMAND engine_smoke_test)
 set_tests_properties(engine_smoke_test PROPERTIES LABELS checkpoint TIMEOUT 900)
 
+# The same list captured twice - plain and profiled (plan 4 spec §3.5). It is
+# the profiler's calibration: the instrumented list must generate the same 8
+# tokens as the plain one, its 645 timestamps must tile the step in walk order,
+# and their sum must fit inside the fence wall. Same checkpoint and card as the
+# two above, so the same label; ~49 replays of the real step, no oracle dumps.
+add_executable(profile_capture_test runtime/profile_capture_test.cc)
+target_include_directories(profile_capture_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(profile_capture_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
+add_dependencies(profile_capture_test ${B70_DECODE_LIST_KERNELS})
+add_test(NAME profile_capture_test COMMAND profile_capture_test)
+set_tests_properties(profile_capture_test PROPERTIES LABELS checkpoint TIMEOUT 900)
+
 # The golden gate (spec §11): the engine against the CPU oracle, 3 prompts x 32
 # greedy tokens, element-exact, plus the per-layer / GDN-state / logit-row
 # diagnostics. Needs what engine_smoke_test needs AND the ~1 GB of oracle dumps

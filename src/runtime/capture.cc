@@ -118,22 +118,31 @@ void require(bool ok, const std::string& what) {
 // under construction and hands it back closed.
 class Capture {
  public:
-  Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, l0::Mem* tap)
-      : ctx_(ctx), m_(m), b_(b), tap_(tap), step_{l0::CmdList::regular(ctx), 0, {}, {}} {}
+  Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, l0::Mem* tap,
+          ProfileEvents* prof)
+      : ctx_(ctx), m_(m), b_(b), tap_(tap), prof_(prof),
+        step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
 
   CapturedStep run() {
     kv_stride_ = size_t(b_.max_len) * Qwen35::kFaKvHeads * Qwen35::kFaHeadDim * kBf16;
     check_sizes();
+    // A ProfileEvents handed to a second build must describe that build, not
+    // both. (The profiler's own test builds twice against one set of buffers.)
+    if (prof_) prof_->events.clear();
 
+    // `layer_` is what the labels' "L<n>" prefix reads; the five launches
+    // outside the layer loop belong to the token boundary and get "--".
     embed_gather();
     uint32_t gdn = 0, fa = 0;   // the two per-kind index maps: GDN 0..47, FA 0..15
     for (const model::LayerDesc& layer : Qwen35::layers()) {
+      layer_ = static_cast<int>(layer.index);
       if (layer.kind == model::LayerKind::GDN)
         gdn_layer(layer.index, gdn++);
       else
         fa_layer(layer.index, fa++);
       tap(layer.index);
     }
+    layer_ = kBoundary;
     head();
 
     require(gdn == kGdnLayers && fa == kFaLayers, "layer kind counts are not 48 GDN / 16 FA");
@@ -141,6 +150,11 @@ class Capture {
     // what launch i ran - which is the property that makes the vector a usable
     // record of the list rather than a lifetime bag.
     require(step_.kernels.size() == step_.kernel_count, "a Kernel was created but never launched");
+    // The same property for the two index-parallel records Task 3 reads:
+    // labels[i] names launch i, and (profiled) events[i] times it.
+    require(step_.labels.size() == step_.kernel_count, "a launch went unlabelled");
+    require(!prof_ || prof_->events.size() == step_.kernel_count,
+            "a launch got no profiling event");
     step_.list.close();
     return std::move(step_);
   }
@@ -162,6 +176,15 @@ class Capture {
     if (tap_)
       require(tap_->size() >= size_t(Qwen35::kLayers) * kCapM * Qwen35::kHidden * kBf16,
               "debug_resid is smaller than [64][M][5120] bf16");
+    // The profiling precondition that IS knowable before the walk. The other
+    // one - that the walk fits the pool - is not: `kernel_count` is 0 here and
+    // only the walk itself produces it, so that bound is checked per launch in
+    // `launch()`, which throws on the launch that would overrun the pool.
+    if (prof_)
+      require(prof_->pool.capacity() >= ProfileEvents::kProfileCapacity,
+              "profile event pool capacity " + std::to_string(prof_->pool.capacity()) +
+                  " is below ProfileEvents::kProfileCapacity " +
+                  std::to_string(ProfileEvents::kProfileCapacity));
 
     // Four `.cl` constants mirror three of the model table's split-K counts,
     // and nothing else connects the two. A GEMV's `partials` are fp32
@@ -202,10 +225,42 @@ class Capture {
     step_.kernels.push_back(std::make_unique<l0::Kernel>(*it->second, entry));
     l0::Kernel& k = *step_.kernels.back();
     k.group_size(wg);
+    // The two halves of the launch's label. Held here rather than passed to
+    // `launch()` because this is where they are already known and it keeps
+    // every binding site's `launch(k, grid…)` line unchanged; `launch()`
+    // consumes and clears them, so an unpaired kernel()/launch() throws instead
+    // of silently repeating the previous site's name.
+    pending_entry_ = entry;
+    pending_variant_ = variant;
     return k;
   }
+
+  // THE launch site. Every binding function above funnels through here, so the
+  // three index-parallel records - the list's commands, `labels`, and (when
+  // profiling) `events` - are appended together or not at all. Tap copies do
+  // not come through here: they are commands, not kernels, and get neither a
+  // label nor an event, exactly as they are excluded from `kernel_count`.
   void launch(l0::Kernel& k, uint32_t gx, uint32_t gy = 1) {
-    step_.list.launch(k, gx, gy);
+    require(!pending_entry_.empty(), "launch() without a preceding kernel()");
+    l0::Event* signal = nullptr;
+    if (prof_) {
+      // Checked before the event is made, so the throw names the launch that
+      // would have overrun the pool rather than coming out of zeEventCreate.
+      require(step_.kernel_count < ProfileEvents::kProfileCapacity,
+              "the decode walk has more than " +
+                  std::to_string(ProfileEvents::kProfileCapacity) +
+                  " launches: raise ProfileEvents::kProfileCapacity");
+      prof_->events.emplace_back(prof_->pool, static_cast<uint32_t>(step_.kernel_count));
+      // The vector reserved kProfileCapacity, so this reference stays valid -
+      // and it would not matter if it did not: `launch` copies the handle into
+      // the command list here and never looks at the Event object again.
+      signal = &prof_->events.back();
+    }
+    step_.list.launch(k, gx, gy, 1, signal);
+    step_.labels.push_back((layer_ == kBoundary ? std::string("--")
+                                                : "L" + std::to_string(layer_)) +
+                           " " + pending_entry_ + " " + pending_variant_);
+    pending_entry_.clear();
     ++step_.kernel_count;
   }
 
@@ -424,19 +479,34 @@ class Capture {
     }
   }
 
+  // The layer a launch belongs to, for its label. `kBoundary` is the five
+  // launches outside the layer loop (embed_gather, the final prep_res_norm,
+  // lm_head and the two argmax stages).
+  static constexpr int kBoundary = -1;
+
   l0::Context& ctx_;
   const loader::LoadedModel& m_;
   DecodeBuffers& b_;
   l0::Mem* tap_;
+  ProfileEvents* prof_;
   CapturedStep step_;
   size_t kv_stride_ = 0;
+  int layer_ = kBoundary;
+  std::string pending_entry_, pending_variant_;
 };
 
 }  // namespace
 
+ProfileEvents::ProfileEvents(l0::Context& ctx) : pool(ctx, kProfileCapacity) {
+  // Reserve rather than let `build` grow it: 1024 events is 24 KB of host
+  // vector and the reservation keeps every reference `build` hands to the
+  // command list stable for the whole walk.
+  events.reserve(kProfileCapacity);
+}
+
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                   l0::Mem* debug_resid) {
-  return Capture(ctx, m, b, debug_resid).run();
+                   l0::Mem* debug_resid, ProfileEvents* prof) {
+  return Capture(ctx, m, b, debug_resid, prof).run();
 }
 
 }  // namespace runtime
