@@ -4,8 +4,10 @@ One section per device kernel: what it computes, how the work is assigned and
 **why**, what was rejected, and the numbers that decided it. A section that only
 restates the code is not finished. Written as kernels land (spec 1 §3).
 
-Everything measured here was measured on the box with the probes in
-`tools/probe/`. Weight buffers are filled with **random** nibbles, never a
+Everything measured here was measured on the box, either with the probes in
+`tools/probe/` or - for the two token-boundary kernels, whose cost is a few µs
+and needs no separate harness - by a timing loop inside their own test, printed
+and never asserted. Weight buffers are filled with **random** nibbles, never a
 uniform value: the B70 losslessly compresses device-local memory, so a buffer of
 one repeated word reads back above the 608 GB/s theoretical peak and any timing
 taken from it is fiction (doc 01). Real weights are incompressible within a
@@ -551,3 +553,253 @@ implying a measurement. What *is* measured is bit-exactness (above) and the
 the roofline, against 0.125 ms of launch overhead for the same 241 kernels. The
 split-K partials are two thirds of it, which is the price recorded in `gemv`'s
 section for keeping the replay deterministic.
+
+---
+
+## `embed_gather` - the token id → the residual stream
+
+`src/kernels/embed_gather.cl`, one compiled variant (`embed_gather_M1`). The
+first kernel of a decode step:
+
+```
+row            = ctrl[CTRL_CUR + m]        (runtime::Control::cur_token[m])
+resid[m][0..K) = embed[row][0..K)          K = 5120, bf16, copied verbatim
+```
+
+No arithmetic and therefore no rounding: the embedding table is bf16, the
+residual stream is bf16, and the reference op is `embed_tokens(ids)` - a gather,
+not a computation. The row moves as raw `ushort`.
+
+### Why it reads the control block instead of taking the id as an argument
+
+This is the kernel that justifies the whole capture-once/replay-per-token
+design, so it is worth stating plainly. Level Zero resolves a kernel's arguments
+at `zeCommandListAppendLaunchKernel` time, **not** at execute time -
+`tests/l0/arg_capture_test.cc` exists to prove that, by binding two different
+buffers between two appends of the same `Kernel` object and requiring both to be
+written. Good for the timed GEMV harness; fatal for a token id. An id passed as
+an argument would be frozen into the list when the list was recorded, and every
+replay of that list would gather the same row forever. The alternatives are to
+re-record ~650 launches per token, or to drive the step from an immediate list.
+Neither has been measured - a captured list exists precisely so that whatever
+recording costs is paid once - and neither needs to be, because the id can
+simply live in memory the kernel reads when it runs.
+
+So the id lives in the `zeMemAllocShared` control block, whose *contents* are
+read when the kernel runs. `embed_gather` is the only reader of `cur_token`
+inside the list and `argmax_stage2` is its only writer; the host writes it only
+during prompt ingestion. `tests/kernels/embed_gather_test.cc` asserts exactly
+this property: one closed list, executed twice with nothing rebound and only
+`cur_token[0]` changed between replays, must produce two different rows.
+
+### Work assignment, and why
+
+**Grid (1, M), one work-group of 256 per token.** 5120/256 = **20 elements per
+work-item** with lane `i` taking `k = i, i+256, …`, so each iteration is one
+fully coalesced 512-byte read and 512-byte write per subgroup. There is nothing
+to reduce and nothing to share, so a wider grid would only add launch cost to a
+kernel that moves 20 KB.
+
+### The out-of-range convention
+
+`row >= VOCAB` is **not clamped**. An id outside the table cannot come out of
+this engine - argmax masks at `kVocabUsed`, and the tokenizer's ids are smaller
+still - so it means the control block is wrong, i.e. an engine bug. Clamping
+would hide that behind a plausible-looking token and a plausible-looking
+continuation. Instead the kernel writes nothing, leaves the residual stream as it
+was, and sets `Control::debug_flag = 0xDEAD0001` (the same channel
+`check_finite` uses), so the host can see *which* step went wrong. The test
+covers both `kVocab` and `0xFFFFFFFF`, checks that `resid` still holds its
+prefilled sentinel, and then replays a valid id to show the list still works.
+
+### Rejected
+
+- **`zeCommandListAppendMemoryCopy` instead of a kernel - cannot express this.**
+  The copy's source address depends on a value that is not known until the list
+  executes, and an appended copy captures its pointers at append time exactly as
+  a kernel captures its arguments. The indirection has to happen *on the device*,
+  which means a kernel.
+- **Passing the id as a kernel argument and re-recording per token - rejected**,
+  see above.
+- **A wider grid (several work-groups per token) - not built, not measured.** At
+  10 KB per token the kernel is launch- and latency-bound; splitting it adds
+  launches to save nothing.
+
+### Measured
+
+**3.65 µs per token** - median of 5 replays (of 8, first 3 dropped) of a closed
+list holding 512 back-to-back launches, printed by `embed_gather_test`. Two
+caveats, both honest: the same list at **64** launches per execution measures
+**6.59 µs** per launch, and doc 07 #5's 6.4 µs submit-and-fence floor accounts
+for only 0.1 µs of that 2.9 µs gap - so something (device clock ramp within a
+short execution is the guess, not a finding) makes short bursts dearer, and the
+512-launch figure is the marginal cost on a device already working, which is the
+engine's case; and the test's stand-in table is 64 rows (655 KB, L2-resident),
+while the real [248320][5120] table is 2.54 GB, so in the engine the row is a
+cold 10 KB read.
+Either way it is one kernel per token against a ~26 ms step: **0.014%**, and the
+20 KB of traffic is 0.0001% of the token's 15.52 GB of weights.
+
+---
+
+## `argmax` - deterministic greedy sampling, in two fixed stages
+
+`src/kernels/argmax.cl`, two entry points and two compiled variants
+(`argmax_stage1_M1`, `argmax_stage2`; both binaries carry both entry points, as
+with `prep`). Together they turn one row of `lm_head` logits into the next token
+and move the control block on by one step:
+
+```
+stage 1  grid (243, M), WG 256 - group g reduces logits[m][g·1024 … +1024)
+                                 to one (value, index) pair in part[m][g]
+stage 2  grid (1, 1),   WG 256 - folds each active token's 243 pairs, writes
+                                 ctrl.out_token[m]; then lane 0 sets
+                                 ctrl.cur_token[0] = out_token[n_active-1]
+                                 and ctrl.pos += n_active
+```
+
+`argmax_stage2` is the **only writer of `pos` and `cur_token` inside the list**.
+That is what makes the list self-advancing: the host writes the control block
+once at prompt ingestion and then only reads `out_token[0]` after each fence.
+
+### Why two fixed stages and not atomics
+
+A global `atomic_max` over 248320 candidates (or the float compare-exchange loop
+it really has to be, since OpenCL has no float atomic max) is **order-dependent
+by construction**: which of two equal logits is seen as "already the max"
+depends on which work-group arrives first, and that is scheduling, not
+arithmetic. Equal logits are not exotic at the top of a peaked distribution -
+two spellings of the same word is precisely where greedy decoding is fragile -
+so an atomic argmax can emit a different token on two replays of the same list
+with the same inputs. The acceptance for every kernel in this plan is that a
+replay is bit-reproducible, and the golden gate's bar is *token-exact* output,
+so that is disqualifying before any performance argument.
+
+A two-stage tree has no data-dependent order at all: every comparison is between
+a fixed pair of SLM slots in a fixed sequence, so the result is a pure function
+of the logits. Nor does it look like a performance sacrifice - 243 work-groups
+reading 4 KB each, then one reading 2 KB, against an atomic version's serialised
+update path - but that is reasoning, not a measurement: the atomic version was
+never built, because determinism settles it before speed is asked.
+
+### The comparator, and the tie rule
+
+One function, `argmax_better`, used by both stages and repeated in the test's
+host reference:
+
+```
+(a.v > b.v) || (a.v == b.v && a.i < b.i)      // strictly greater wins;
+                                              // an exact tie takes the LOWER index
+```
+
+Because ties resolve to the lower index rather than to "whichever the tree saw
+first", the *bracketing* of the reduction cannot change the answer - which is
+what lets stage 1 and stage 2 use different tree widths (256 lanes over 1024
+logits, then 256 lanes over 243 partials) and still agree with a sequential
+host scan. It is also the oracle's rule - `torch.argmax` documents that "if
+multiple values equal the maximum of the tensor, the first occurrence of the
+maximum value is returned" (torch 2.12 docs, checked 2026-08-25) - so the golden
+gate compares like with like on exactly the inputs where greedy decoding is
+most fragile. Lanes with nothing to reduce seed `(-INFINITY, 0x7FFFFFFF)`:
+`-INF` loses to every real logit and `0x7FFFFFFF` loses every tie, so idle lanes
+cannot affect the result (stage 2 has 13 of them, 243 partials into 256 lanes).
+
+### The 248077 mask, and where the number comes from
+
+`lm_head` is [5120][**248320**] because the tiling wants a round row count, but
+the tokenizer defines **248077** ids (`model::Qwen35::kVocabUsed`, the
+checkpoint config's `vocab_size`; doc 03). Rows 248077..248319 hold whatever the
+checkpoint stored there, and their logits are ordinary finite numbers that can
+perfectly well be the largest in the row - emitting one would be an id the
+tokenizer cannot decode. So a candidate at index `>= VOCAB_USED` contributes
+`(-INFINITY, idx)` and can never win. Indices `>= VOCAB` are not read at all:
+the row is only `VOCAB` wide, and the last work-group's bound is clamped
+(243 × 1024 = 248832 > 248320).
+
+The number is baked as `-D VOCAB_USED=248077` in one CMake line, not spelled in
+the `.cl` file, and `argmax_test` plants the row's two largest logits inside the
+masked tail - one of them exactly at 248077 - and requires the best *usable*
+index to come out.
+
+### Work assignment, and why
+
+**Stage 1: chunk 1024, WG 256, grid (243, M).** 1024 logits per work-group is
+`runtime::DecodeBuffers`' `kArgmaxChunk`, and 243 = ⌈248320/1024⌉ is the shape of
+`argmax_part` (fp32 [M][243][2]); the two constants are derived from the same
+arithmetic on both sides. 243 work-groups over 32 Xe-cores (doc 01) is ~7.6 each
+- enough to fill the device without making the stage-2 fold wide enough to need
+a third stage. Each lane scans a strided slice into a register pair, then the
+same fixed pairwise SLM tree `prep.cl` uses (256 → 128 → … → 1, barrier after
+every step) collapses the work-group.
+
+**Stage 2: one work-group, m looped internally.** The fold is 243 pairs per
+token - a single tree, and the kernel has to be a single work-group anyway
+because it owns the control block's per-step bookkeeping, which exactly one lane
+must do. The `m` loop's bound is `ctrl[CTRL_NACT]`, read by every lane, so it is
+uniform and the barriers inside are reached by all 256; the barrier at the top of
+the loop body is what makes the SLM reuse across `m` safe. `n_active == 0` would
+be an empty step (an engine bug) and `out_token[n-1]` would index off the front
+of the field, so that case writes nothing rather than something plausible.
+
+**The index travels as a float**, which keeps `argmax_part` a plain fp32 buffer
+instead of a struct the host would have to lay out by hand. That is lossless,
+not "close enough": every integer below 2²⁴ = 16777216 is exactly representable
+in fp32, and the largest index this kernel can emit is 248319 - 67× under the
+limit, so `(uint)(float)idx` is the identity for every id in this vocabulary.
+Both the `.cl` and this section say so where the conversion happens, because the
+day someone reuses this kernel for a 20M-entry table is the day it stops being
+true.
+
+### What the test asserts
+
+`tests/kernels/argmax_test.cc`, six cases, all through **one closed list
+replayed once per case** (a fresh list per case could not show that `pos`
+advances per *execution*):
+
+| case | expected |
+|---|---|
+| unique max at 123456 | 123456 |
+| exact three-way tie at 5000, 5001 (same stage-1 group, different lanes) and 90000 (different group) | 5000 - both trees' tie-breaks exercised |
+| the row's two largest logits in the masked tail (248077 and 248200) | 1000, the best usable index |
+| all 248320 logits equal | 0 |
+| max at 248076, the last usable index | 248076 |
+| a random row, against the host reference | agrees (17977) |
+
+and after every replay: `out_token[0]` = the expected id, `cur_token[0]` = the
+same id (fed straight back to `embed_gather`), `pos` advanced by exactly
+`n_active`, `debug_flag` still 0.
+
+### Rejected, and what was not measured
+
+- **A global atomic max - rejected on determinism**, above. Not measured, and it
+  would not matter if it were faster.
+- **One work-group scanning all 248320 logits - rejected, not measured.** It
+  removes a kernel and the `argmax_part` buffer, but puts 993 KB of streaming
+  reads on a single Xe-core out of 32. The launch it saves is 0.52 µs (doc 07
+  #5); the serialisation it buys is much more than that.
+- **`work_group_reduce_max` / subgroup reductions - not used**, the same
+  argument as `prep`'s variance tree: the SLM tree's order is *stateable*, and a
+  built-in reduce cannot carry the index alongside the value anyway, so the tie
+  rule would have to be rebuilt on top of it.
+- **Packing (value, index) into one `ulong` (or the float's low mantissa bits)
+  - rejected as unnecessary.** The fp32 pair is exact (above) and keeps
+  `argmax_part` a buffer the host can print.
+- **Sampling (temperature / top-p / top-k) - out of scope for this plan**, which
+  is greedy-only by spec. When it lands it replaces **stage 2 only**: stage 1's
+  243 pairs are an argmax-shaped summary and a sampler needs the full row, so the
+  right shape is a different stage-1 (a partial softmax) rather than a patch on
+  this one. Recorded so it is not discovered the hard way.
+
+### Measured
+
+**4.39 µs per token for both stages** - median of 5 replays (of 8, first 3
+dropped) of a closed list holding 512 back-to-back (stage 1 + stage 2) pairs,
+printed by `argmax_test`. The same list at 64 pairs per execution measures
+**8.88 µs**, the same short-burst penalty `embed_gather` shows and with the same
+unexplained cause, so treat this as the marginal cost on a device already
+working and not as a constant. The logits sit in one 993 KB buffer that is
+re-read every iteration and is therefore L2-resident - which is the engine's
+case too, since `lm_head` has just written them. Against a ~26 ms step this is
+**0.017%**, and the ~1 MB of traffic per token (993 KB of logits read, 1944 B of
+partials written and read back) is 0.006% of the token's 15.52 GB of weights.
+For scale, `lm_head` itself - the GEMV that produces those logits - is 4.35 ms.

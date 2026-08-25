@@ -29,4 +29,32 @@ inline std::string prep_silu_mul_variant(unsigned M) { return "prep_silu_mul_M" 
 inline std::string prep_gated_head_variant(unsigned M) {
   return "prep_gated_head_M" + std::to_string(M);
 }
+
+// The control block as the kernels see it: `runtime::Control`
+// (src/runtime/control.h) indexed as a flat `uint` array. The device side gets
+// these numbers from ONE place - the `CTRL_DEFINES` line in
+// src/kernels/CMakeLists.txt - and this is the host mirror, checked against
+// `offsetof(runtime::Control, …)` by tests/kernels/argmax_test.cc (and by the
+// capture unit). Keep the three in step; a mismatch is a silently wrong token.
+namespace ctrl_index {
+inline constexpr unsigned kPos = 0;         // Control::pos
+inline constexpr unsigned kNActive = 1;     // Control::n_active
+inline constexpr unsigned kCurToken = 2;    // Control::cur_token[8]
+inline constexpr unsigned kOutToken = 10;   // Control::out_token[8]
+inline constexpr unsigned kDebugFlag = 18;  // Control::debug_flag
+}  // namespace ctrl_index
+
+// The token-boundary kernels (src/kernels/embed_gather.cl, argmax.cl). `M` is
+// the launch grid's y extent, i.e. the tokens in flight; it appears in the name
+// because the runtime asks for kernels by (kernel, M), even though these two
+// generate M-independent code (M only bounds a compile-time assert).
+inline std::string embed_gather_variant(unsigned M) {
+  return "embed_gather_M" + std::to_string(M);
+}
+inline std::string argmax_stage1_variant(unsigned M) {
+  return "argmax_stage1_M" + std::to_string(M);
+}
+// Stage 2 is a single work-group that loops m < ctrl.n_active internally: no
+// variants at all, so the binary is named after the entry point.
+inline std::string argmax_stage2_variant() { return "argmax_stage2"; }
 }  // namespace kernels
