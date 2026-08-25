@@ -206,6 +206,10 @@
 // below assumes. If qkv is ever re-tuned to a wider split-K, those loads must
 // sum the slices - and attn_ref.h with them. Fail the build here rather than
 // silently read slice 0.
+// The `#error` below can only check this file against itself; the other half of
+// the pairing - that QKV_S still equals `model::Qwen35`'s Qkv.S - is asserted at
+// capture time by runtime::Capture::check_sizes (src/runtime/capture.cc), which
+// is the only place that can see both numbers.
 #define QKV_S 1
 #if QKV_S != 1
 #error "attn assumes qkv runs S=1; the partials index must loop s otherwise"

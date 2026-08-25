@@ -1,5 +1,7 @@
 # Each test is add_executable + b70_target_kernel_dir + add_test. No framework:
-# tests/check.h exits non-zero on the first failed CHECK.
+# tests/check.h exits non-zero on the first failed CHECK. The exception is the
+# `b70_cli_reject` block at the bottom, which has no source file of its own: it
+# drives the shipped `b70-decode` binary and asserts its exit code.
 
 add_executable(copy_test l0/copy_test.cc)
 target_include_directories(copy_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -152,6 +154,12 @@ set_tests_properties(load_checkpoint_test PROPERTIES LABELS checkpoint TIMEOUT 6
 # the same point for the model table's GEMV rows). One list, because all three
 # tests below capture the same decode list. (src/cli/b70-decode deliberately
 # depends on ALL kernels instead - see src/cli/CMakeLists.txt.)
+#
+# None of the three calls `b70_target_kernel_dir`, and that is not an omission:
+# they *build* the variants (add_dependencies) but never name a path, because
+# `runtime::build` is what opens the modules and B70_KERNEL_DIR is PRIVATE to
+# b70_runtime's own compile of capture.cc. Adding the call back would define an
+# unused macro in three translation units that do not include kernels/kernels.h.
 set(B70_DECODE_LIST_KERNELS
   kernel_embed_gather_M1 kernel_argmax_stage1_M1 kernel_argmax_stage2
   kernel_prep_res_norm_M1_K5120_SP0 kernel_prep_res_norm_M1_K5120_SP16
@@ -168,7 +176,6 @@ set(B70_DECODE_LIST_KERNELS
 add_executable(replay_determinism_test runtime/replay_determinism_test.cc)
 target_include_directories(replay_determinism_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(replay_determinism_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
-b70_target_kernel_dir(replay_determinism_test)
 add_dependencies(replay_determinism_test ${B70_DECODE_LIST_KERNELS})
 add_test(NAME replay_determinism_test COMMAND replay_determinism_test)
 set_tests_properties(replay_determinism_test PROPERTIES LABELS checkpoint TIMEOUT 900)
@@ -180,7 +187,6 @@ set_tests_properties(replay_determinism_test PROPERTIES LABELS checkpoint TIMEOU
 add_executable(engine_smoke_test runtime/engine_smoke_test.cc)
 target_include_directories(engine_smoke_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(engine_smoke_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
-b70_target_kernel_dir(engine_smoke_test)
 add_dependencies(engine_smoke_test ${B70_DECODE_LIST_KERNELS})
 add_test(NAME engine_smoke_test COMMAND engine_smoke_test)
 set_tests_properties(engine_smoke_test PROPERTIES LABELS checkpoint TIMEOUT 900)
@@ -196,9 +202,76 @@ set_tests_properties(engine_smoke_test PROPERTIES LABELS checkpoint TIMEOUT 900)
 add_executable(golden_gate_test golden/golden_gate_test.cc)
 target_include_directories(golden_gate_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(golden_gate_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
-b70_target_kernel_dir(golden_gate_test)
 add_dependencies(golden_gate_test ${B70_DECODE_LIST_KERNELS})
 add_test(NAME golden_gate_test COMMAND golden_gate_test
   ${CMAKE_SOURCE_DIR}/oracle-out ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
 set_tests_properties(golden_gate_test PROPERTIES
   LABELS "checkpoint;golden" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+
+# --- b70-decode's host-side rejections ---------------------------------------
+# The product binary had no automated test at all. These are the argument
+# rejections that short-circuit BEFORE `l0::Context` is constructed
+# (src/cli/b70_decode.cc: the parse loop, the mode checks, then `read_ids`) - so
+# they need neither a GPU nor the 19 GB checkpoint, and they carry no label:
+# they belong in the plain suite that runs everywhere.
+#
+# Each case runs the real binary and requires **exit 1**, the code `main`'s
+# catch-all returns. `WILL_FAIL TRUE` would have been shorter and wrong: it
+# accepts *any* non-zero status, and a segfault is non-zero, so a CLI that
+# crashed on a bad flag would pass it. The `sh -c` wrapper pins the exact
+# number, so exit 0, exit 2 and a signal all fail.
+#
+# It also greps the output for the `device:` line the CLI prints immediately
+# after `l0::Context` is built. That is the guard on this block's own premise:
+# if one of these rejections ever moved to after the device is opened it would
+# still exit 1 (a bogus model path throws in the loader), the test would still
+# pass, and it would silently have stopped testing what it says it tests.
+function(b70_cli_reject name)
+  add_test(NAME ${name} COMMAND sh -c [==[
+out=$("$@" 2>&1)
+rc=$?
+printf '%s\n' "$out" >&2
+if [ "$rc" -ne 1 ]
+then
+  echo "b70_cli_reject: expected exit 1, got $rc" >&2
+  exit 1
+fi
+if printf '%s\n' "$out" | grep -q '^device:'
+then
+  echo "b70_cli_reject: the rejection happened after l0::Context was built" >&2
+  exit 1
+fi
+]==] b70_cli_reject $<TARGET_FILE:b70-decode> ${ARGN})
+  set_tests_properties(${name} PROPERTIES TIMEOUT 60)
+endfunction()
+
+# The model argument is a path that does not exist, on purpose: every case below
+# must reject before anything tries to open it, and if one stops doing so the
+# `device:` grep above turns that into a failure rather than a false pass.
+set(B70_NO_MODEL /nonexistent/b70-model)
+# tests/cli/ok.ids is three ids from the bench prompt, all in vocabulary. Cases
+# that are not about the file's contents use it deliberately, so that a pass
+# means the flag combination was rejected and not that the file was bad.
+set(B70_OK_IDS ${CMAKE_CURRENT_SOURCE_DIR}/cli/ok.ids)
+# tests/cli/oov.ids is one legal id followed by 248320 - `Qwen35::kVocab`
+# exactly, the first row `read_ids` rejects (rows [kVocabUsed, kVocab) are
+# legitimate; beyond kVocab embed_gather would read past the allocation).
+set(B70_OOV_IDS ${CMAKE_CURRENT_SOURCE_DIR}/cli/oov.ids)
+
+# "exactly one of --ids and --bench" - the two modes are exclusive.
+b70_cli_reject(cli_reject_ids_and_bench ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --bench)
+# "--n belongs to --ids" - --bench sizes its run with --depth and --tg.
+b70_cli_reject(cli_reject_n_with_bench ${B70_NO_MODEL} --bench --n 4)
+# "--depth and --tg belong to --bench" - the mirror of the case above.
+b70_cli_reject(cli_reject_depth_with_ids ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --depth 64)
+b70_cli_reject(cli_reject_tg_with_ids ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --tg 8)
+# "unknown option" - anything starting with '-' the parse loop does not know.
+b70_cli_reject(cli_reject_unknown_flag ${B70_NO_MODEL} --bench --frobnicate)
+# "a snapshot directory or HF repo id is required" - no positional argument.
+b70_cli_reject(cli_reject_no_model --bench)
+# "--ids needs --n" - the mode is chosen but not sized.
+b70_cli_reject(cli_reject_ids_without_n ${B70_NO_MODEL} --ids ${B70_OK_IDS})
+# "cannot open --ids file" - a typo'd prompt path must not cost a 13-second load.
+b70_cli_reject(cli_reject_missing_ids_file ${B70_NO_MODEL} --ids /nonexistent/prompt.ids --n 4)
+# "id 248320 is outside the vocabulary" - read_ids' bound, from the fixture.
+b70_cli_reject(cli_reject_oov_id ${B70_NO_MODEL} --ids ${B70_OOV_IDS} --n 4)

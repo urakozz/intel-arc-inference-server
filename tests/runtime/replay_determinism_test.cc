@@ -8,16 +8,23 @@
 //   1. **Same list, same state, twice.** Ingest a fixed 16-id prompt, snapshot
 //      every persistent buffer, generate 8 tokens recording the ids and the
 //      per-layer residual tap, restore the snapshot, generate 8 again. The two
-//      token sequences, the two residual traces and the two *final* states must
-//      be bitwise identical. This is what rules out a data-dependent reduction
-//      order, an atomic, or a work-group count that varies with arrival order.
+//      token sequences, the two residual traces, the two *final* states and the
+//      last step's `logits` and `x` must be bitwise identical. This is what
+//      rules out a data-dependent reduction order, an atomic, or a work-group
+//      count that varies with arrival order. The `logits`/`x` pair is what
+//      carries the bar past *argmax resolution*: the residual tap ends at layer
+//      63's input, so without it the only witness to layer 63's MLP, the final
+//      norm and lm_head is an integer arg-max that a low-bit difference in all
+//      248320 logits need not move.
 //   2. **Fresh-process equivalent.** Re-zero the persistent state, re-ingest
-//      the same prompt from pos = 0 and generate again: same ids. Deliberately,
-//      only control/gdn_state/conv_ring/kv are re-zeroed - this run starts from
-//      run 2's leftover *scratch*, different bytes than run 1's fresh
-//      allocations. Identical ids and taps therefore prove no step reads
-//      scratch it has not first written. Do NOT "clean this up" by zeroing
-//      scratch too: that would delete exactly the coverage this run adds.
+//      the same prompt from pos = 0 and generate again: same ids, same taps,
+//      and the same five persistent buffers at the end - the state token 9
+//      would read. Deliberately, only control/gdn_state/conv_ring/kv are
+//      re-zeroed - this run starts from run 2's leftover *scratch*, different
+//      bytes than run 1's fresh allocations. Identical ids and taps therefore
+//      prove no step reads scratch it has not first written. Do NOT "clean this
+//      up" by zeroing scratch too: that would delete exactly the coverage this
+//      run adds.
 //   3. **Structure.** kernel_count == 645 (spec §9.1 as amended), one module
 //      per distinct variant, every generated id < kVocabUsed, and no NaN or
 //      Inf anywhere in the residual trace.
@@ -67,9 +74,21 @@ constexpr size_t kTapElems = size_t(Qwen35::kLayers) * kCapM * Qwen35::kHidden;
 constexpr size_t kTapBytes = kTapElems * 2;
 
 // Everything that survives a token boundary (runtime::DecodeBuffers' first
-// group) - the whole of what a replay is allowed to depend on.
+// group) - the whole of what a replay is allowed to depend on - plus the two
+// scratch buffers at the *end* of a step, which are snapshotted but never
+// restored.
+//
+// The scratch pair is what raises the run-B bar past argmax resolution.
+// Comparing the generated ids compares `argmax(logits)`, an integer: two runs
+// whose layer-63 MLP, final norm and lm_head differed in the low bits of every
+// logit would still agree on the arg of the max and this test would report
+// bitwise determinism. `logits` is fp32 [M][248320] and `x` is the last thing
+// prep_res_norm wrote before it, so comparing both compares that tail of the
+// step at full resolution. (The per-layer tap ends at layer 63's *input*
+// residual, so it does not reach either.)
 struct State {
   std::vector<uint8_t> gdn_state, conv_ring, kv_k, kv_v, control;
+  std::vector<uint8_t> logits, x;   // scratch: snapshotted, never restored
 };
 
 struct Run {
@@ -161,8 +180,14 @@ int main(int argc, char** argv) {
     rd(s.kv_k, b.kv_k);
     rd(s.kv_v, b.kv_v);
     rd(s.control, b.control);
+    rd(s.logits, b.logits);
+    rd(s.x, b.x);
     return s;
   };
+  // Only the persistent five are written back. `logits` and `x` are deliberately
+  // left as run A left them - restoring scratch would delete run B's other job,
+  // which is to start from *different* scratch bytes than run A's fresh
+  // allocations and still produce the same tokens.
   auto restore = [&](const State& s) {
     auto wr = [&](const std::vector<uint8_t>& src, l0::Mem& d) {
       CHECK_EQ(src.size(), d.size());
@@ -236,12 +261,20 @@ int main(int argc, char** argv) {
   same_bytes(final_a.kv_k, final_b.kv_k, "kv_k");
   same_bytes(final_a.kv_v, final_b.kv_v, "kv_v");
   same_bytes(final_a.control, final_b.control, "control");
+  // The step's tail at full resolution rather than at argmax resolution: the
+  // 248320 fp32 logits the last token produced, and the normalised row lm_head
+  // read to produce them. Nothing else in this test can see a difference in
+  // layer 63's MLP, the final norm or lm_head that does not move the arg of the
+  // max (see State).
+  same_bytes(final_a.logits, final_b.logits, "logits");
+  same_bytes(final_a.x, final_b.x, "x");
 
   // --- run C: fresh-process equivalent --------------------------------------
   zero_state();
   ingest();
   Run cc;
   generate(cc);
+  const State final_c = snapshot();
   for (int g = 0; g < kGen; ++g) {
     if (a.ids[g] != cc.ids[g])
       std::fprintf(stderr, "token %d: run A %u, fresh run %u\n", g, a.ids[g], cc.ids[g]);
@@ -255,6 +288,18 @@ int main(int argc, char** argv) {
         CHECK(false);
       }
     }
+  // And the state the fresh run *ends* in, which run C did not check at all
+  // before: identical ids and taps say the visible outputs agree, but the KV
+  // cache, the 48 GDN recurrent states, the conv rings and the control block are
+  // what the *next* token would read. A fresh-ingest path that reproduced 8
+  // tokens and left one of those different would be a bug that only appeared at
+  // token 9. All five persistent buffers, byte for byte, against run A's final
+  // state.
+  same_bytes(final_a.gdn_state, final_c.gdn_state, "fresh-ingest gdn_state");
+  same_bytes(final_a.conv_ring, final_c.conv_ring, "fresh-ingest conv_ring");
+  same_bytes(final_a.kv_k, final_c.kv_k, "fresh-ingest kv_k");
+  same_bytes(final_a.kv_v, final_c.kv_v, "fresh-ingest kv_v");
+  same_bytes(final_a.control, final_c.control, "fresh-ingest control");
 
   std::printf("replay_determinism_test OK (%d tokens x 3 runs bitwise identical)\n", kGen);
   return 0;

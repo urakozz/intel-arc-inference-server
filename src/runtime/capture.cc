@@ -162,6 +162,30 @@ class Capture {
     if (tap_)
       require(tap_->size() >= size_t(Qwen35::kLayers) * kCapM * Qwen35::kHidden * kBf16,
               "debug_resid is smaller than [64][M][5120] bf16");
+
+    // Four `.cl` constants mirror three of the model table's split-K counts,
+    // and nothing else connects the two. A GEMV's `partials` are fp32
+    // `[S][M][N]`; at S = 1 that collapses to `[M][N]` and a token's row base is
+    // `m·N`, which is what `gdn_step`, `attn_prep` and `prep_gated_head` assume.
+    // `prep_silu_mul` is the other side of the same coin: it *does* loop the
+    // slices, and it loops exactly SILU_S = 4 of them.
+    //
+    // Retuning a row in `model/qwen35.cc` changes which GEMV variant is bound
+    // but not the baked constant, and the mismatch is silent - the consumer
+    // reads slice 0 of N (or sums four slices of a two-slice tensor) and the
+    // token is wrong 64 layers later with no error anywhere. The kernels
+    // `#error` on their own constants; only this side can see the table. So the
+    // pairing is asserted here, at capture, before a single command is
+    // appended. If one of these fires, the fix is the kernel (loop `s`), not
+    // the guard.
+    require(Qwen35::shape(LinearId::QkvZ).S == 1,
+            "qkv||z is no longer S=1, but gdn_step.cl (QKVZ_S) and prep.cl "
+            "(GATED_S) bake S=1 into their partials indexing");
+    require(Qwen35::shape(LinearId::GateUp).S == 4,
+            "gate||up is no longer S=4, but prep.cl (SILU_S) bakes a 4-slice sum");
+    require(Qwen35::shape(LinearId::Qkv).S == 1,
+            "qkv is no longer S=1, but attn.cl (QKV_S) bakes S=1 into every "
+            "partials load");
   }
 
   // One launch site: load (or reuse) the variant's device binary, make a fresh
