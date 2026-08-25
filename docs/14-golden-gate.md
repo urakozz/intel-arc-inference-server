@@ -8,7 +8,7 @@ and a kernel written from the same wrong reading of the modeling file agree
 perfectly with each other and disagree with the model.
 
 The golden gate is the test that closes that hole. It compares the **whole
-engine** - 645 kernels, the loader, the int4 repack, the captured command list,
+engine** - 774 kernels, the loader, the int4 repack, the captured command list,
 the decode loop - against a reference the project did not write: `transformers`
 5.15 on CPU, the pure-torch gated-delta-rule, `attn_implementation="eager"`,
 over the same checkpoint dequantised by the same convention the C++ loader is

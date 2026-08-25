@@ -87,6 +87,14 @@ run was checking.
 | host, outside the fence entirely | - | **0.097** | **0.097** | 0.23% | **measured**, `Engine::last_gen_ms() − last_fence_ms()` |
 | **total** | **645** | **42.141** | **42.141** | 100% | **measured**, median of three |
 
+> **This is the step at `43bb720`, before spec 1.5 cut a lever**, and it is kept
+> whole because it is what the 42.141 ms bench row partitions. Since then lever
+> L2 took the `a‖b` GEMV from 2.335 to 0.256 ms/token and lever L1 took
+> `prep_res_norm` from 2.871 to 0.484 (so the `prep` share of the bucket row is
+> 1.202, and the launch count is **774**, not 645). The recorded step is
+> **38.046 ms** at `b045e11` - BENCHMARKS.md, and
+> [15-step-anatomy.md](15-step-anatomy.md) §L2 and §L1 for each before/after.
+
 Two memo lines, not rows, because they overlap the rows above: **dispatch** was
 645 × 0.52 µs = 0.335 ms (**estimated**, doc 07 #5) and is **0.473 ms derived in
 situ** - 1.1% of the token, and now a row of its own above; and **everything
@@ -171,9 +179,10 @@ Read that table twice before proposing anything.
    **nothing**; splitting K to 16× the subgroups took the same launch from
    48.774 to 5.340 µs, i.e. that run's row from 2.341 to **0.256 ms/token**
    (docs/15 §L2; the 2.335 above is the anatomy run's reading of the same
-   pre-lever row, 0.3% away - one run's pair per sentence, never a mix). The unit is the **subgroup**. `prep_res_norm`'s 2.871 ms is still a
-   parallelism story and L1 still has a case, but it now rests on that curve
-   rather than on §1's table. `attn_decode` is a third failure again: its
+   pre-lever row, 0.3% away - one run's pair per sentence, never a mix). The unit is the **subgroup**. `prep_res_norm`'s 2.871 ms was still a
+   parallelism story and L1's case rested on that curve rather than on §1's
+   table - **and the curve was right**: lever L1 split the kernel in two,
+   16 → 320 subgroups, and took the row to **0.484 ms/token** (docs/15 §L1). `attn_decode` is a third failure again: its
    work-groups are nearly free (3.4× for +6.9%) and what costs is one
    work-group's serial walk of a 256-position block.
 
@@ -188,6 +197,12 @@ In this order, because that is the order the evidence supports:
 2. **`prep_res_norm`'s single work-group**, if the profile confirms it: a
    two-stage reduction, or fold the split-K sum into the GEMV epilogue.
    129 launches is where the leverage is.
+   **Done (2026-08-25, spec 1.5 lever L1):** the profile confirmed it at 22.4 µs
+   and 17.0 GB/s per launch, and the two-stage reduction is what was built -
+   `prep_res_fold` (20 work-groups, 320 subgroups) then `prep_norm_finish`
+   (20 more). 2.893 → **0.484 ms/token**, golden gate 96/96, and the *launch*
+   count deliberately went up: 645 → 774. Folding into the GEMV epilogue was
+   never tried and is now worth ≤0.484 ms.
 3. **`in_proj_a‖b`**: 48 launches of an 8-subgroup kernel. Fusing it into the
    `qkv‖z` GEMV (doc 04's fusion item 4) removes the launch and the fill
    problem at once - the one fusion the measurement now argues for.
@@ -208,8 +223,9 @@ kernels do while they run is.
 yields). The profile ranks the levers by measured share as `attn_decode` 5.782 >
 `prep_res_norm` 2.871 > `a‖b` 2.335 > `gdn_step` 0.733 > GEMV's in-situ excess
 over its floor 0.659; the execution order docs/15 rules is **`a‖b` → `prep`
-two-stage → attention** (`a‖b` is **cut**: −1.875 ms/token on the bench, the
-step is 40.266 ms at `a1e2d3a`), with `gdn_step` **skipped by ruling** (it is at 92% of
+two-stage → attention** (`a‖b` is **cut**: −1.875 ms/token on the bench;
+`prep` is **cut**: −2.216 ms/token on the bench, and the step is **38.046 ms**
+at `b045e11`, BENCHMARKS.md), with `gdn_step` **skipped by ruling** (it is at 92% of
 device bandwidth - there is 0.06 ms in the whole kernel) and the GEMV `S` retune
 conditional on the gate being within reach. Fusion is re-priced too: the in-situ
 dispatch gap is 0.473 ms (**derived**, doc 07 #5), so removing launches is worth
@@ -399,10 +415,11 @@ All six are done. 4 was half-done on 2026-08-25 (GEMM 67.3% / rest 32.7%, the
 per-kernel in-situ profile, [15-step-anatomy.md](15-step-anatomy.md). The
 aggregate that was "the entire gap to vLLM" is now seven measured rows, and the
 gap's largest addressable members were `attn_decode` (5.782 ms), `prep_res_norm`
-(2.871) and the `a‖b` GEMV (2.335). **`a‖b` has since been cut** - spec 1.5's
-lever L2 took it to 0.256 ms/token and the step to 40.266 ms - so the list of
-addressable members is now `attn_decode` and `prep_res_norm`, and the three
-figures above are the pre-lever anatomy they were measured in.
+(2.871) and the `a‖b` GEMV (2.335). **Two of the three have since been cut** -
+lever L2 took `a‖b` to 0.256 ms/token and lever L1 took `prep_res_norm` to
+0.484, and the step is **38.046 ms** at `b045e11` - so the list of addressable
+members is now `attn_decode` alone, and the three figures above are the
+pre-lever anatomy they were measured in.
 
 ## Benchmark
 

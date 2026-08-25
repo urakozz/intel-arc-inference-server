@@ -84,7 +84,13 @@ and both with their bench row in [BENCHMARKS.md](BENCHMARKS.md):
 | row | at `43bb720` | now | lever |
 |---|---|---|---|
 | `a‖b` GEMV | 2.335 ms | **0.256 ms** | L2 (`a1e2d3a`), [docs/15](15-step-anatomy.md) §L2 |
-| `prep` (the `res_norm` share of it) | 3.573 ms (2.871 of it `res_norm`) | **1.202 ms** (0.484 of it the two-stage pair) | L1, [docs/15](15-step-anatomy.md) §L1 |
+| `prep` family | 3.573 ms (2.871 of it `res_norm`) | **1.202 ms** (0.484 of it the two-stage pair) | L1 (`b045e11`), [docs/15](15-step-anatomy.md) §L1 |
+
+**Both "now" columns are a different run from the "at `43bb720`" column**, so
+they are a change of state and not a before/after pair: each lever's own
+before/after is measured within one session and lives in its §L2 / §L1 section.
+The drift between two runs of this instrument on untouched launches is 0.3-0.5%,
+measured twice.
 
 **The launch count moved with L1 and 645 did not survive it.** Splitting every
 `prep_res_norm` site into `prep_res_fold` + `prep_norm_finish` makes each of the
