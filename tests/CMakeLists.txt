@@ -298,3 +298,9 @@ b70_cli_reject(cli_reject_ids_without_n ${B70_NO_MODEL} --ids ${B70_OK_IDS})
 b70_cli_reject(cli_reject_missing_ids_file ${B70_NO_MODEL} --ids /nonexistent/prompt.ids --n 4)
 # "id 248320 is outside the vocabulary" - read_ids' bound, from the fixture.
 b70_cli_reject(cli_reject_oov_id ${B70_NO_MODEL} --ids ${B70_OOV_IDS} --n 4)
+# --profile is a third mode, exclusive with the other two: it replays an
+# INSTRUMENTED list (645 host-scope event signals per step), so it can never
+# produce a bench row, and it sizes its own run with --depth and --steps rather
+# than with --ids/--n. Both rejections are the mode check, host-side.
+b70_cli_reject(cli_reject_profile_and_bench ${B70_NO_MODEL} --profile --bench)
+b70_cli_reject(cli_reject_profile_and_ids ${B70_NO_MODEL} --profile --ids ${B70_OK_IDS} --n 4)

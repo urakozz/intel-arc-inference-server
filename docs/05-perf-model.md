@@ -64,25 +64,43 @@ decomposition is what scopes the next spec.
 ### Where the 42.14 ms goes
 
 A **partition**: every launch and the host appear once, and the rows sum to the
-measured 42.141 ms exactly - 28.346 + 2.314 + 0.046 + 0.008 + 11.330 + 0.097 -
-which is why they carry three decimals where the prose rounds to two.
+measured 42.141 ms exactly - 28.346 + 2.314 + 0.046 + 0.008 + 11.330 + 0.097 in
+the original column, 29.005 + 5.782 + 0.017 + 6.768 + 0.473 + 0.097 = 42.142 in
+the in-situ one (one µs of rounding) - which is why they carry three decimals
+where the prose rounds to two.
 
-| part | launches | ms/token | share | how it was obtained |
-|---|---|---|---|---|
-| GEMV - the int4 mixers/MLPs and bf16 `lm_head` | 257 | **28.346** | 67.3% | **measured per kernel**, `probe_gemv` 2026-08-24, at exactly the shapes, layout and `S` the model table binds; summed over the layer counts. **A floor, not an in-situ charge** - see below |
-| `attn_decode`'s per-block work at depth 4096 | (of 48) | **2.314** | 5.5% | **estimated**: a two-point extrapolation from the depth experiment (doc 07 #12, doc 12 `attn` → Measured) - 0.1361 ms/block × 17 blocks, with the measured 2.144 ms delta as its floor |
-| the fixed attention grid's early-out | (of 48) | **0.046** | 0.11% | **measured**, the `--max-len` experiment (doc 07 #12) |
-| `embed_gather` + `argmax` | 3 | **0.008** | 0.02% | **measured per kernel** (doc 12) |
-| `prep` + `gdn_step` + `attn_prep`/`attn_reduce` + the `a‖b` GEMV | 369 | **11.330** | 26.9% | **aggregate**, not separated: 30.7 µs per launch |
-| host, outside the fence entirely | - | **0.097** | 0.23% | **measured**, `Engine::last_gen_ms() − last_fence_ms()` |
-| **total** | **645** | **42.141** | 100% | **measured**, median of three |
+The **in-situ** column was added 2026-08-25 by `b70-decode --profile --depth
+4096 --steps 32` - Level Zero kernel timestamps on the replayed list, every one
+of the 645 launches timed in the step it actually runs in. The full anatomy,
+the method and its caveats are [15-step-anatomy.md](15-step-anatomy.md); the
+"how it was obtained" column is kept as written because it is what the in-situ
+run was checking.
 
-Two memo lines, not rows, because they overlap the rows above: **dispatch** is
-645 × 0.52 µs = 0.335 ms (**estimated**, doc 07 #5), spread across every kernel
-row - 0.8% of the token, 3.0% of the unsplit bucket; and **everything that is
-not a GEMV** is 42.141 − 28.346 = **13.795 ms** (32.7%), of which 13.698 is
-device time and 0.097 is host. The second is the figure point 3 below compares
-against vLLM.
+| part | launches | ms/token | **in situ** | share | how it was obtained |
+|---|---|---|---|---|---|
+| GEMV - the int4 mixers/MLPs and bf16 `lm_head` | 257 | **28.346** | **29.005** | 68.8% | **measured per kernel**, `probe_gemv` 2026-08-24, at exactly the shapes, layout and `S` the model table binds; summed over the layer counts. **A floor, not an in-situ charge** - see below. In situ: **+2.3%**, so the floor was right |
+| `attn_decode`'s per-block work at depth 4096 | (of 48) | **2.314** | **5.782** | 13.7% | **estimated**: a two-point extrapolation from the depth experiment (doc 07 #12, doc 12 `attn` → Measured) - 0.1361 ms/block × 17 blocks, with the measured 2.144 ms delta as its floor. In situ: **+145%**, the largest error the profiler found |
+| the fixed attention grid's early-out | (of 48) | **0.046** | (inside the row above) | - | **measured**, the `--max-len` experiment (doc 07 #12). Re-confirmed per kernel in situ: 192 idle work-groups per layer cost **0.04%** of `attn_decode` |
+| `embed_gather` + `argmax` | 3 | **0.008** | **0.017** | 0.04% | **measured per kernel** (doc 12) |
+| `prep` + `gdn_step` + `attn_prep`/`attn_reduce` + the `a‖b` GEMV | 369 | **11.330** | **6.768** | 16.1% | **aggregate**, not separated: 30.7 µs per launch. In situ, separated: `prep` 3.573, `a‖b` 2.335, `gdn_step` 0.733, `attn_prep`+`attn_reduce` 0.127 |
+| dispatch gap | - | (memo line) | **0.473** | 1.1% | **derived** in situ (bench fence − Σ kernel durations); it was a memo line rather than a row, so the bucket above silently carried it |
+| host, outside the fence entirely | - | **0.097** | **0.097** | 0.23% | **measured**, `Engine::last_gen_ms() − last_fence_ms()` |
+| **total** | **645** | **42.141** | **42.141** | 100% | **measured**, median of three |
+
+Two memo lines, not rows, because they overlap the rows above: **dispatch** was
+645 × 0.52 µs = 0.335 ms (**estimated**, doc 07 #5) and is **0.473 ms derived in
+situ** - 1.1% of the token, and now a row of its own above; and **everything
+that is not a GEMV** is 42.141 − 29.005 = **13.136 ms** (31.2%) in situ
+(13.795 against the floor), of which 13.039 is device time and 0.097 is host.
+The second is the figure point 3 below compares against vLLM.
+
+**The four things the in-situ column changed**, in size order: `attn_decode` is
+2.45× its estimate and the second-largest item in the step; the unsplit bucket
+is 6.768 ms rather than 11.330, because it had been carrying everyone else's
+error; `gdn_step` is at **1.09× its own traffic floor** (540 GB/s, 92% of the
+device) and is exonerated as a suspect; and the GEMV floor was accurate to 2.3%,
+which resolves the "the two move in opposite directions" caveat below in favour
+of the floor. Point 5's suspect ranking is superseded accordingly.
 
 Read that table twice before proposing anything.
 
@@ -113,9 +131,17 @@ Read that table twice before proposing anything.
    much and the suspect ranking in point 5 changes with it. Spec 1.5's first
    task must measure both sides in the same run, not compare one measured in
    situ against one transplanted.
+
+   **Answered 2026-08-25 (docs/15): 29.005 ms in situ, +2.3%.** The floor was a
+   good floor. The bucket did shrink by exactly that 0.659 ms, and the stall the
+   probe could not see is worth naming in one shape only - `out/o_proj`, +7.0%,
+   entered directly from `attn_reduce`/`prep_gated_head`. The "~2.0 ms of
+   headroom to the roofline" reading survives with 0.66 ms of it now spoken for.
 3. **The 13.795 ms of non-GEMV work is the whole gap.** To reach 31.746 ms/token
    the budget for everything that is not a GEMV is **3.400 ms**; we spend
    13.795. Closing 10.4 of those milliseconds is exactly the phase-1 shortfall.
+   (In situ: 13.136 ms against the same 3.400 ms budget - the shortfall is
+   10.395 ms either way, since the total is the measured step.)
 4. **The attention early-out is exonerated** (doc 07 #12, resolved): a grid
    sized for `max_len` 16384 costs **0.046 ms/token - 0.11% of the step** in
    idle work-groups. Context-bucketed lists would buy nothing.
@@ -128,6 +154,18 @@ Read that table twice before proposing anything.
    subslices (doc 01), 48 times per token, and it was never in the probe matrix.
    `gdn_step`'s 48 launches move 396 MB - 0.67 ms at the roofline - so if it is
    costing multiples of that, the cause is occupancy, not traffic.
+
+   **Resolved 2026-08-25 (docs/15), and this point scored 2½ out of 3.**
+   `prep_res_norm` is **2.871 ms** - the named mechanism exactly (one work-group
+   at 17.0 GB/s), the magnitude 2.3× smaller than the 5.2 ms guessed. `a‖b` is
+   **2.335 ms** at 27.0 GB/s, 21× its traffic - the second suspect, convicted.
+   `gdn_step` is **0.733 ms**, 1.09× the 0.67 ms named right here as the test,
+   so it is *not* costing multiples of its traffic and the occupancy charge is
+   dropped. What none of the three anticipated is the item that outweighs all of
+   them: **`attn_decode` at 5.782 ms.** The occupancy story generalises, though -
+   1, 2 and 4 work-groups are what `prep_res_norm`, `a‖b` and `attn_decode`'s
+   depth-independent term are given, and one work-group on this device is worth
+   about 13-17 GB/s (measured three ways, docs/15).
 
 ### What spec 1.5 is scoped to do
 
@@ -150,6 +188,25 @@ In this order, because that is the order the evidence supports:
 Fusion for its own sake stays rejected: 645 × 0.52 µs = 0.335 ms is 0.8% of the
 step (doc 07 #5, estimated). Kernel *count* is not the problem; what those
 kernels do while they run is.
+
+**Step 1 is done, and it re-ordered steps 2-5** (2026-08-25,
+[15-step-anatomy.md](15-step-anatomy.md) carries the ladder and the expected
+yields). The profile ranks the levers by measured share as `attn_decode` 5.782 >
+`prep_res_norm` 2.871 > `a‖b` 2.335 > `gdn_step` 0.733 > GEMV's in-situ excess
+over its floor 0.659; the execution order docs/15 rules is **`a‖b` → `prep`
+two-stage → attention**, with `gdn_step` **skipped by ruling** (it is at 92% of
+device bandwidth - there is 0.06 ms in the whole kernel) and the GEMV `S` retune
+conditional on the gate being within reach. Fusion is re-priced too: the in-situ
+dispatch gap is 0.473 ms (**derived**, doc 07 #5), so removing launches is worth
+even less than the estimate said - but §1 of docs/15 shows what the fusion
+candidates were really buying, which is work-groups, not launches.
+
+One number the ladder does not touch and the gate cannot ignore: **`lm_head` is
+4.376 ms in situ, 10.4% of the step**, at 97% of device bandwidth and 0.6% above
+its probe floor. There is nothing to tune; quantising it to int4 is worth ~3.3 ms
+and is specialisation 1 below, deliberately outside spec 1.5. docs/15's gate
+arithmetic says the ladder alone lands around 34.4 ms/token (~29.0 t/s) and that
+`lm_head` is the difference between missing the bar and clearing it.
 
 ## Where the headroom actually is
 
@@ -258,13 +315,15 @@ around it.
    speculation (BENCHMARKS.md). MTP: 42.56 / 45.23 at 1 / 2 drafts.
 3. ✅ **Achieved MBU** - 81% on this model at 600 GB/s / 15.52 GB, **83.0%** on
    the measured 590 / 15.540 pair. The 50-63% figure is MoE-only.
-4. ⚠️ **GDN vs GEMM time split** - **half-answered on our own engine
-   2026-08-25** (doc 07 #3): GEMV **28.35 ms of a 42.14 ms step (67.3%)**,
-   everything else 13.795 ms (32.7%). GEMM dominates as predicted. The estimate's
-   *mechanism* was wrong: the non-GEMV third is not kernel count (645 × 0.52 µs
-   = 0.335 ms, 2.4% of it) but time inside `prep` / `gdn_step` / `attn`, and
-   this measurement does not separate those three. Doing so is spec 1.5's first
-   task. **Estimate before measuring** (2026-08-22, kept for the record): the
+4. ✅ **GDN vs GEMM time split** - **answered on our own engine 2026-08-25**
+   (doc 07 #3, docs/15): GEMV **29.005 ms of a 42.141 ms step (68.8%)**,
+   everything else 13.136 ms (31.2%). GEMM dominates as predicted. The estimate's
+   *mechanism* was wrong: the non-GEMV third is not kernel count (0.473 ms of
+   in-situ dispatch gap, 3.6% of it) but time inside `prep` / `gdn_step` /
+   `attn` - and the per-kernel profile separates them: `attn_decode` **5.782**,
+   `prep` **3.573**, `a‖b` **2.335**, `gdn_step` **0.733**, `attn_prep` +
+   `attn_reduce` **0.127**. `gdn_step`, the kernel this row was written to
+   worry about, is 1.7% of the step at 92% of device bandwidth. **Estimate before measuring** (2026-08-22, kept for the record): the
    recurrent state is 3 MB per layer, read and written once per token - ~150 MB
    across 48 layers, ~2% of `W`. Expect GEMM to dominate bandwidth and GDN to
    dominate *kernel count*; under replay the second is what the fusion list in
@@ -320,11 +379,12 @@ around it.
    2026-08-23 run is kept alongside it). All of it is **M = 1**;
    the `S` picks are M = 1 picks (doc 12).
 
-1-3, 5 and 6 are done; 4 is half-done as of 2026-08-25 (GEMM 67.3% / rest
-32.7%, the "rest" not yet split three ways). Finishing it - a per-kernel
-profile of `prep`, `gdn_step` and `attn` - is now the top item of spec 1.5,
-because that aggregate 13.795 ms - 11.33 of it in kernels nothing has split -
-is the entire gap to vLLM.
+All six are done. 4 was half-done on 2026-08-25 (GEMM 67.3% / rest 32.7%, the
+"rest" not split) and was finished the same day by spec 1.5's first task: the
+per-kernel in-situ profile, [15-step-anatomy.md](15-step-anatomy.md). The
+aggregate that was "the entire gap to vLLM" is now seven measured rows, and the
+gap's largest addressable members are `attn_decode` (5.782 ms), `prep_res_norm`
+(2.871) and the `a‖b` GEMV (2.335).
 
 ## Benchmark
 
