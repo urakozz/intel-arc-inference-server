@@ -101,6 +101,7 @@ Three things this settles, and one it does not.
    does. The honest position is the one §11 already took - the tokens are the
    bar - and the practical consequence is that **every lever that reorders a sum
    runs the gate, and records both columns, as this one did.**
+
 The engine's continuations are the three recorded in `tools/oracle/README.md`
 ("Sanity checks on the written files"), id for id, including the CJK prompt's
 completion of a trailing emoji variation selector.

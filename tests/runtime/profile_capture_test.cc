@@ -100,8 +100,8 @@ int main(int argc, char** argv) {
               plain.kernel_count, instr.kernel_count, prof.events.size(), b.max_len);
 
   // --- C (structure half): what Task 3's CLI indexes by --------------------
-  // Spec §9.1 as amended: 48 GDN layers x 11 + 16 FA layers x 11 + 6
-  // token-boundary kernels - 645 plus the 129 launches spec 1.5's lever L1
+  // Spec §9.1 as amended: 48 GDN layers x 12 + 16 FA layers x 12 + 6
+  // token-boundary kernels (576 + 192 + 6) - 645 plus the 129 launches L1
   // added by splitting every `prep_res_norm` site into `prep_res_fold` +
   // `prep_norm_finish`. replay_determinism_test pins the same 774 (and the
   // module count, which this test does not); if a lever changes the launch

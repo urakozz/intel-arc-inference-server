@@ -234,7 +234,7 @@ row is the harness's own median, **38.05**. The ingest half of the same runs
 reads 153.7-153.9 s for 4096 ids, 37.53-37.57 ms/token on an un-instrumented
 list.
 
-**−2.216 ms/token, and all of it is one kernel family.** `prep_res_norm` ran
+**−2.220 ms/token, and all of it is one kernel family.** `prep_res_norm` ran
 129× per token as ONE work-group per launch - 22.4 µs and 17.0 GB/s through a
 single Xe-core - and is now two launches, `prep_res_fold` + `prep_norm_finish`,
 on 20 work-groups each: **2.893 → 0.484 ms/token measured in situ**. The
@@ -246,10 +246,10 @@ clear; its per-layer *diagnostics* do move, and docs/14 now records both
 columns.
 
 **The three deltas, and why they differ.** The lever's own profile row falls
-2.409 ms; the bench falls 2.216 ms. The difference is +0.182 ms of run-to-run
+2.409 ms; the bench falls 2.220 ms (40.266 − 38.046). The difference is +0.182 ms of run-to-run
 drift on the 516 untouched launches (+0.50%, the same effect §L2 measured at
 +0.30%) and +0.095 ms derived for the 129 extra dispatches at 0.733 µs. Predicted
-bench delta −2.133 ms against −2.216 measured: 0.083 ms apart, inside the
+bench delta −2.133 ms against −2.220 measured: **0.087 ms apart**, inside the
 ±0.1 ms this instrument is claimed at.
 
 ### The `a1e2d3a` row - spec 1.5 lever L2

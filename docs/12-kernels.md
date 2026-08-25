@@ -804,11 +804,32 @@ bar while allowing the gate a tolerance.
 | two-stage SP=0/16, `G`=20 - `resid` vs the **single-stage** reference | **bit-exact** | 5120/5120 both |
 | two-stage SP=0/16 - `sumsq`, `x_out` vs the **two-stage** reference | **bit-exact** | 20/20, 5120/5120 both |
 | two-stage SP=16 - `x_out` vs the **single-stage** reference | ≤ 2 bf16 ulp where \|ref\| ≥ rms/8 | **0 ulp**, 5120/5120 exact |
-| two-stage SP=16 at `W`=1 (stage B on one work-group) | same three bars | identical bits to `W`=20 |
+| two-stage **SP=16 only** at `W`=1 (stage B on one work-group) | same three bars | bit-exact vs the same reference, hence identical to `W`=20 transitively |
 | `prep_silu_mul` random | ≤ 2 bf16 ulp | 17408/17408 exact |
 | `prep_silu_mul`, silu argument 30.0 | **bit-exact** | 17408/17408 |
 | `prep_gated_head` random | ≤ 2 bf16 ulp | 6144/6144 exact |
 | `prep_gated_head`, silu argument 30.0 | **bit-exact** | 6144/6144 |
+
+**A weakness in bar 1, found by mutating the kernel and recorded so it is not
+rediscovered.** `resid` bit-identity is a *necessary* check of stage A's
+`s = 0 … S_PREV-1` fold order and a **weak** one. Reversing that loop in
+`prep_res_fold` - a deliberate mutation, rebuilt and re-run - **did not fail
+`prep_test`**: the 16-slice fp32 sum is rounded to bf16 by `rne_bf16(acc)` the
+instant it is formed, and bf16 keeps 8 mantissa bits, so an fp32 last-ulp
+reordering has to land on a bf16 rounding boundary to survive. **Estimated**:
+reordering 16 fp32 additions perturbs the sum by ~√16 = 4 fp32 ulps, i.e. a
+relative 4·2⁻²⁴, while a bf16 ulp is a relative 2⁻⁸ - so an element crosses a
+boundary with probability ≈ 4·2⁻¹⁶ ≈ 6×10⁻⁵, and over 5120 elements that is
+**≈0.3 expected crossings**. Usually none, and on this seed none.
+
+Two things pin the s-order in spite of that, and they are why the weakness is
+recorded rather than fixed: **`prep_res_norm` is still compiled and still run**
+by the same test, bit-exact against a reference whose fold loop is the same text
+stage A's is; and the **golden gate**, which walks 64 layers of real rows. What
+is *not* covered is an edit that changes stage A's `s` loop alone, in a way the
+single-stage kernel does not share. A test that closed it would compare stage
+A's `resid` against `prep_res_norm`'s **device** output over the same buffers
+rather than against the host reference.
 
 **The two-stage rows are three bars, not one, and they say different things.**
 `resid` is graded against the reference of the kernel it replaces, because
@@ -872,8 +893,9 @@ implying a measurement. What *is* measured is bit-exactness (above) and the
   > was built, and it is worth **−2.409 ms/token measured in situ**. The
   > magnitude the paragraph guessed was wrong in both directions (it feared
   > 40 µs, it got 22.3; it called the fix a trade against launch count, and the
-  > 129 extra launches cost ~0.094 ms derived against a 2.409 ms saving - a
-  > 26:1 trade). The mechanism it named was right. See Measured below.
+  > 129 extra launches cost 0.095 ms derived against a 2.409 ms saving - a
+  > 25.5:1 trade, 2.409294 / 0.094557). The mechanism it named was right. See
+  > Measured below.
 - **Summing split-K partials with atomics in the GEMV instead of here -
   rejected on determinism**, same argument as `gemv`'s section: a float atomic
   add is order-dependent and two replays would differ. That decision is what
@@ -1009,7 +1031,7 @@ Note what this does *not* implicate: launch count. 241 `prep` launches × 0.733 
 remove launches, which is not the problem; a two-stage reduction keeps the
 launches and removes the serialisation, which is.
 
-### Measured - lever L1 cut it: 2.871 → 0.484 ms/token
+### Measured - lever L1 cut it: 2.893 → 0.484 ms/token
 
 Executed 2026-08-25 against the extrapolation above, with the same instrument
 (`b70-decode --profile --depth 4096 --steps 32`, 32 replayed steps, idle box).

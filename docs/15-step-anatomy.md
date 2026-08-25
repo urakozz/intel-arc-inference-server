@@ -50,8 +50,10 @@ only after the fence.
 > and the next four is the step at `43bb720`, which was 645 launches. Lever L1
 > (§L1) split each of the 129 `prep_res_norm` sites into two, so the current
 > walk is **774** and a run of the same command today prints 774 everywhere 645
-> appears below. The counts in §L2 and §L1 say which is which per table. Positions 4096…4127, so `nb` (live 256-position attention
-blocks) is 17 throughout - the same regime the recorded bench row measures.
+> appears below. The counts in §L2 and §L1 say which is which per table.
+
+Positions 4096…4127, so `nb` (live 256-position attention blocks) is 17
+throughout - the same regime the recorded bench row measures.
 
 **Reproducibility (measured).** Two independent runs of the identical command,
 three minutes apart:
@@ -495,6 +497,14 @@ stage B  prep_norm_finish(sumsq, resid, norm_w, x)  grid (20, M), WG 256
 
 All measured, in situ, 129 launches of each stage per step.
 
+> **Disclosure on the middle row.** It was produced by an *uncommitted* one-line
+> edit to `src/runtime/capture.cc` binding `prep_norm_finish_..._W1` on a grid
+> of 1, reverted immediately after the run. **No commit in this history
+> reproduces it**, so it cannot be re-derived by checking out a sha - the `W=1`
+> *binary* is still built and still unit-tested, but its capture binding is not.
+> Re-measuring it means re-applying that one line. Row 1 and row 3 are both at
+> committed shas (`b15f70f`, `b045e11`).
+
 **The fold is 60% of the lever and the rescale is the other 40%.** The plan
 wrote stage B as a single work-group because the *reduction* is what it was
 splitting; the measurement says the rescale pass - 10 KB of `resid` + 20 KB of
@@ -540,7 +550,7 @@ Both from `--profile --depth 4096 --steps 32`, before at `b15f70f` and after at
 | Σ of all kernel durations | 39621.549 (645) | 37394.336 (774) | −2227.2 | measured, in situ |
 | fence wall (profiled) | 40496.734 | 38400.907 | −2095.8 | measured, in situ |
 | dispatch gap (profiled, upper bound) | 875.185 / 1.357 µs per launch | 1006.571 / 1.300 | +131.4 | measured, in situ |
-| **recorded step (`--bench`, median of 3)** | **40.266 ms** | **38.046 ms** | **−2.216 ms** | **measured (bench)** |
+| **recorded step (`--bench`, median of 3)** | **40.266 ms** | **38.046 ms** | **−2.220 ms** | **measured (bench)** |
 
 **The three deltas do not agree exactly, and the arithmetic that closes them is
 this:** the lever's own row falls 2.409 ms; +0.182 ms comes back as run-to-run
@@ -548,8 +558,8 @@ drift on the 516 untouched launches (the same effect §L2 measured at +0.30%,
 here +0.50%, spread over every family - `attn_decode` +89 µs, `gemv` +56,
 `prep_gated_head` +6); and +0.095 ms is **derived** for the 129 extra dispatches
 at the un-instrumented 0.733 µs/launch this document measures. −2.409 + 0.182 +
-0.095 = **−2.133 ms predicted** (summed unrounded) against **−2.216 measured**,
-0.083 ms apart -
+0.095 = **−2.133 ms predicted** (summed unrounded) against **−2.220 measured**
+(40.266 − 38.046), **0.087 ms apart** -
 inside the ±0.1 ms nothing here is claimed better than.
 
 `lm_head` is the control: untouched binding, untouched binary, +0.04%.
@@ -557,8 +567,8 @@ inside the ±0.1 ms nothing here is claimed better than.
 ### The launch count moved, on purpose, and it was cheap
 
 **645 → 774.** Each of the 129 sites is two launches now. At the derived
-0.733 µs/launch that is 0.095 ms/token bought for 2.409 ms saved - a **26:1**
-trade - and it is the measured answer to doc 04's long-standing worry that
+0.733 µs/launch that is 0.095 ms/token bought for 2.409 ms saved - a
+**25.5:1** trade (2.409294 / 0.094557) - and it is the measured answer to doc 04's long-standing worry that
 kernel count is a first-class cost. It is not: the step's dispatch total is
 ~0.57 ms derived (774 × 0.733), 1.5% of 38.05.
 
@@ -588,7 +598,10 @@ produce. Yields are estimated, and each says on what basis.
 
 **L2 → L1 → L5**, then L4 only if the gate is within reach, and L3 not at all.
 *(L2 and L1 are both executed and both accepted; L5 is next and is now the
-largest row in the step by a factor of six.)*
+largest non-GEMV row in the step by a wide margin: measured at `b045e11`,
+`attn_decode` 5.922 ms against the whole `prep` family's 1.202 (**4.9×**) and
+`gdn_step`'s 0.748 (**7.9×**). Only the GEMV rows are bigger, and no lever in
+this spec touches them.)*
 
 Share ranks L5 first, and it is the biggest number on the page. It is
 nevertheless third to execute, for reasons the measurement itself supplies:
@@ -604,7 +617,7 @@ nevertheless third to execute, for reasons the measurement itself supplies:
   kernel landed.** Its only correctness exposure is the global Σx² tree, which
   the golden gate arbitrates.
   *(Executed. It was a day; the mechanism held and the yield landed at the top
-  of the band at −2.409 ms in situ, −2.216 ms on the bench. The gate arbitrated
+  of the band at −2.409 ms in situ, −2.220 ms on the bench. The gate arbitrated
   the Σ tree and passed 96/96 - but its per-layer **diagnostics** moved in both
   directions, and re-running the gate before as well as after is what made that
   readable; docs/14 now carries both columns. §L1.)*
@@ -627,7 +640,7 @@ Spec §2's success bar is 31.746 ms/token; the step is 42.141. **The gap is
 | | ms | |
 |---|---|---|
 | L2 `a‖b` | −1.9 | **actual −1.875 (bench), banked** |
-| L1 `prep_res_norm` | −2.4 | **actual −2.216 (bench), banked** |
+| L1 `prep_res_norm` | −2.4 | **actual −2.220 (bench), banked** |
 | L5 attention | −3.0 | |
 | L4 GEMV `S` | −0.3 | |
 | L3 `gdn_step` | −0.06 | |
@@ -636,7 +649,7 @@ Spec §2's success bar is 31.746 ms/token; the step is 42.141. **The gap is
 That lands at **34.4 ms/token ≈ 29.0 t/s** - short of 31.50 by about 2.7 ms.
 
 **Two levers in, the arithmetic is unchanged and both estimates held.** L2 paid
-−1.875 ms against −1.9; L1 paid −2.216 against −2.4. The step is now
+−1.875 ms against −1.9; L1 paid −2.220 against −2.4. The step is now
 **38.046 ms** (measured, BENCHMARKS.md, recorded median 38.05) and **the gap to
 the 31.746 ms bar is 6.300 ms**; the three remaining levers are priced at −3.36
 optimistically, so the ladder now lands at **34.7 ms/token ≈ 28.8 t/s** - within

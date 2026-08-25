@@ -90,8 +90,11 @@ run was checking.
 > **This is the step at `43bb720`, before spec 1.5 cut a lever**, and it is kept
 > whole because it is what the 42.141 ms bench row partitions. Since then lever
 > L2 took the `a‖b` GEMV from 2.335 to 0.256 ms/token and lever L1 took
-> `prep_res_norm` from 2.871 to 0.484 (so the `prep` share of the bucket row is
-> 1.202, and the launch count is **774**, not 645). The recorded step is
+> `prep_res_norm` from **2.893 to 0.484** - that pair is L1's own before/after
+> run (`b15f70f` → `b045e11`), not this table's 2.871, which is the anatomy
+> run's reading of the same pre-lever row 0.8% away; a before/after is two rows
+> of one comparison and the two must not be mixed inside one arrow. The `prep`
+> share of the bucket row is 1.202 and the launch count is **774**, not 645. The recorded step is
 > **38.046 ms** at `b045e11` - BENCHMARKS.md, and
 > [15-step-anatomy.md](15-step-anatomy.md) §L2 and §L1 for each before/after.
 
@@ -224,7 +227,7 @@ yields). The profile ranks the levers by measured share as `attn_decode` 5.782 >
 `prep_res_norm` 2.871 > `a‖b` 2.335 > `gdn_step` 0.733 > GEMV's in-situ excess
 over its floor 0.659; the execution order docs/15 rules is **`a‖b` → `prep`
 two-stage → attention** (`a‖b` is **cut**: −1.875 ms/token on the bench;
-`prep` is **cut**: −2.216 ms/token on the bench, and the step is **38.046 ms**
+`prep` is **cut**: −2.220 ms/token on the bench, and the step is **38.046 ms**
 at `b045e11`, BENCHMARKS.md), with `gdn_step` **skipped by ruling** (it is at 92% of
 device bandwidth - there is 0.06 ms in the whole kernel) and the GEMV `S` retune
 conditional on the gate being within reach. Fusion is re-priced too: the in-situ
