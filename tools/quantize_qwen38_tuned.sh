@@ -17,6 +17,17 @@
 # Usage (on the box):  bash quantize_qwen38_tuned.sh
 #   overridables: MODEL, OUT, DEVICE (default 1 = second B70)
 set -euo pipefail
+
+# --- expected console noise (harmless, do not chase) ------------------------
+echo "NOTE: two messages you may see and can ignore:"
+echo "  1) '[transformers] The fast path is not available ... fla / causal-conv1d'"
+echo "     Expected on XPU: those fused GDN kernels are CUDA-oriented"
+echo "     (causal-conv1d has no XPU build). transformers falls back to the"
+echo "     pure-torch path - quantization math is IDENTICAL, tuned runs are"
+echo "     just somewhat slower. Nothing to install."
+echo "  2) 'Download complete: ... 0.00B' - the model resolved from the local"
+echo "     HF cache; zero bytes were downloaded. Cosmetic progress-bar artifact."
+
 MODEL="${MODEL:-Qwen/Qwen3.8-27B}"
 DEVICE="${DEVICE:-1}"
 VENVPY="$HOME/auto-round/.venv/bin/python"    # torch-2.13+xpu venv
