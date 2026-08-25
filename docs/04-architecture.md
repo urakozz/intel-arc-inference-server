@@ -248,10 +248,13 @@ first.
 
 What the profile *does* say about this list is that the fusion candidates above
 were mispriced in kind, not in size: what items 1 and 4 would really buy is not
-the 0.7 µs launch but the **work-group count** of the kernels they absorb -
-`prep_res_norm` runs on one work-group and `a‖b` on two, and one work-group is
-worth ~15 GB/s on this device (docs/15 §1). Spec 1.5 attacks that directly,
-without fusing anything.
+the 0.7 µs launch but the **parallelism** of the kernels they absorb -
+`prep_res_norm` ran on one work-group and `a‖b` on two. Spec 1.5 attacks that
+directly, without fusing anything, and item 4 is now **moot**: lever L2 took
+`a‖b` from 2.335 to 0.256 ms/token inside the kernel, so absorbing it into
+`qkv‖z` would buy 0.256 ms at best and cost a fused kernel. (The unit that
+turned out to matter is the **subgroup**, not the work-group - docs/15 §L2
+measured the work-group reading and it bought nothing.)
 
 ## Server
 
