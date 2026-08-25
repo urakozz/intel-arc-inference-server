@@ -28,29 +28,43 @@ token. The roofline on the two measured constants (15.540 GB/token, 590 GB/s)
 is 26.34 ms. Full rows in [BENCHMARKS.md](BENCHMARKS.md), the verdict and what
 it scopes in [05-perf-model.md](05-perf-model.md).
 
-Two kinds of number appear in the sections below, and **every one of them says
-which it is**:
+Three kinds of number appear in the sections below, and **every one of them
+says which it is**:
 
 - **per-kernel measured** - `gemv` and `gemv_bf16` (`probe_gemv`, at exactly the
-  shapes/layout/`S` the model table binds), `embed_gather` and `argmax` (timing
-  loops in their own tests), and `attn`'s per-block cost and early-out cost
-  (the two `--bench` experiments in doc 07 #12).
+  shapes/layout/`S` the model table binds; read as a **floor**, see that
+  section's caveat), `embed_gather` and `argmax` (timing loops in their own
+  tests), and `attn`'s early-out cost (the `--max-len` pair in doc 07 #12).
+- **estimated** - `attn_decode`'s per-block work, which is a **two-point
+  extrapolation** from the same pair of `--bench` runs, not a timing; and the
+  0.52 µs/kernel dispatch floor from doc 07 #5.
 - **aggregate** - `prep` and `gdn_step` have **no** per-kernel number. What
-  exists is the whole-step measurement minus everything that does: they share a
-  ~11.4 ms bucket with `attn_prep`/`attn_reduce` and the `a‖b` GEMV. Splitting
-  that bucket is spec 1.5's first task; nothing in this document pretends it is
-  already split.
+  exists is the whole-step measurement minus everything that does: they share an
+  **11.33 ms** bucket with `attn_prep`/`attn_reduce` and the `a‖b` GEMV.
+  Splitting that bucket is spec 1.5's first task; nothing in this document
+  pretends it is already split.
 
-| | launches/token | ms/token | kind |
-|---|---|---|---|
-| `gemv` + `gemv_bf16` (`lm_head`) | 257 | **28.35** | per-kernel measured, summed |
-| `attn_decode` per-block work at depth 4096 | (inside the 48) | **2.34** | measured (depth slope) |
-| fixed-grid early-out, `max_len` 16384 | (inside the 48) | **0.046** | measured |
-| `embed_gather` + `argmax` | 3 | **0.008** | per-kernel measured |
-| `prep` (241) + `gdn_step` (48) + `attn_prep`/`attn_reduce` (32) + `a‖b` GEMV (48) | 369 | **≈ 11.4** | **aggregate, not separated** |
-| - dispatch inside that, 645 × 0.52 µs | - | 0.335 | estimated (doc 07 #5) |
-| host, outside the fence | - | 0.097 | measured |
-| **total** | **645** | **42.141** | measured |
+The rows below are a **partition** of the token: every launch and the host
+appear exactly once, and the rows sum to the measured total exactly
+(28.346 + 2.314 + 0.046 + 0.008 + 11.330 + 0.097 = 42.141), which is why they
+are quoted to three decimals even where the prose rounds.
+
+| | launches/token | ms/token | share | kind |
+|---|---|---|---|---|
+| `gemv` + `gemv_bf16` (`lm_head`) | 257 | **28.346** | 67.3% | per-kernel measured, summed (a floor) |
+| `attn_decode` per-block work at depth 4096 | (of the 48) | **2.314** | 5.5% | **estimated** (two-point extrapolation) |
+| fixed-grid early-out, `max_len` 16384 | (of the 48) | **0.046** | 0.11% | measured |
+| `embed_gather` + `argmax` | 3 | **0.008** | 0.02% | per-kernel measured |
+| `prep` (241) + `gdn_step` (48) + `attn_prep`/`attn_reduce` (32) + `a‖b` GEMV (48) | 369 | **11.330** | 26.9% | **aggregate, not separated** - 30.7 µs/launch |
+| host, outside the fence | - | **0.097** | 0.23% | measured |
+| **total** | **645** | **42.141** | 100% | measured |
+
+Two memo lines that are *not* rows, because they overlap the rows above:
+**dispatch** is 645 × 0.52 µs = **0.335 ms** (estimated, doc 07 #5), spread
+across every kernel row - 0.8% of the token and 3.0% of the unsplit bucket. And
+**everything that is not a GEMV** is 42.141 − 28.346 = **13.795 ms** (32.7%), of
+which 13.698 is device time and 0.097 is the host; that is the figure doc 05
+compares against vLLM's 3.400 ms non-GEMV budget.
 
 ---
 
@@ -410,7 +424,7 @@ matrix - the matrix covers the five int4 shapes and `lm_head` - and it runs
 **48 times per token** at 2 work-groups / 8 subgroups over 1.3 MB. Its traffic
 would be 0.11 ms per token at 590 GB/s; a kernel that occupies 8 of the device's
 subgroups will not be at 590 GB/s, and nothing here knows what it is instead. It
-sits inside the aggregate 11.4 ms bucket at the top of this document and doc 05
+sits inside the aggregate 11.33 ms bucket at the top of this document and doc 05
 names it as the second suspect for that bucket. Measuring it is one row added to
 `probe_gemv`'s bf16 list.
 
@@ -605,7 +619,9 @@ implying a measurement. What *is* measured is bit-exactness (above) and the
   ~128 launches per token. Two numbers say do not bother yet: the per-kernel
   cost inside a replayed list is **0.52 µs**, so the whole between-GEMV kernel
   count - 129 `prep_res_norm` + 64 `prep_silu_mul` + 48 `prep_gated_head` = 241
-  launches - is **~0.125 ms of a ~26 ms step**; and the traffic these kernels
+  launches - is **~0.125 ms**, which was 0.5% of the ~26 ms roofline step this
+  argument was made against and is **0.3% of the 42.141 ms step measured
+  2026-08-25**; and the traffic these kernels
   add is ~89 MB per token (below) against the token's 15.52 GB of weights,
   **0.58%**. Fusion also has a real cost: the norm's reduction is over the whole
   row, so a fused prologue would need every GEMV work-group to either redundantly
@@ -651,14 +667,17 @@ section for keeping the replay deterministic.
 
 **These three kernels still have no per-kernel number, and this section will not
 invent one.** What exists after 2026-08-25 is a bound. Of a measured 42.141
-ms/token step, 28.35 ms is per-kernel-measured GEMV, 2.34 ms is measured
-attention block work, 0.008 ms is `embed_gather` + `argmax`, and 0.046 ms is the
-attention grid's early-out. That leaves **≈ 11.4 ms across 369 launches** -
-`prep`'s 241, `gdn_step`'s 48, `attn_prep`/`attn_reduce`'s 32 and the 48 `a‖b`
-GEMVs - an average of **31 µs per launch**. `prep` owns 241 of those 369.
+ms/token step, 28.346 ms is per-kernel-measured GEMV, 2.31 ms is *estimated*
+attention block work, 0.008 ms is `embed_gather` + `argmax`, 0.046 ms is the
+attention grid's early-out and 0.097 ms is host time outside the fence. That
+leaves **11.33 ms across 369 launches** - `prep`'s 241, `gdn_step`'s 48,
+`attn_prep`/`attn_reduce`'s 32 and the 48 `a‖b` GEMVs - an average of **30.7 µs
+per launch**. `prep` owns 241 of those 369. (The ±0.2 ms of uncertainty in the
+attention extrapolation moves in and out of this bucket; nothing below turns on
+it.)
 
 Against that bound the traffic arithmetic above is a **75× under-prediction**:
-89.4 MB is 0.15 ms at the roofline, and the bucket `prep` sits in costs 11.4.
+89.4 MB is 0.15 ms at the roofline, and the bucket `prep` sits in costs 11.33.
 Even sharing it three ways, these kernels are nowhere near bandwidth-bound. The
 "Rejected" note above predicted exactly this and named the mechanism:
 
@@ -933,7 +952,7 @@ measured 2026-08-25** this is **0.010%** (0.017% of the ~26 ms roofline token it
 was first quoted against), and the ~1 MB of traffic per token (993 KB of logits
 read, 1944 B of partials written and read back) is 0.006% of the token's
 15.52 GB of weights. For scale, `lm_head` itself - the GEMV that produces those
-logits - is 4.35 ms, **473× this kernel**. Sampling is free and the two
+logits - is 4.35 ms, **991× this kernel** (4350.5 µs / 4.39 µs). Sampling is free and the two
 token-boundary kernels together (8.04 µs) are the only two numbers in this
 document small enough to stop thinking about.
 
@@ -1192,7 +1211,9 @@ layer**, read once and written once by the 192 work-groups that partition it.
 
 **≈ 396 MB per token**, of which the state's 302 MB is **1.9% of the token's
 15.52 GB of weights** - the share doc 03 predicted. At the measured 600 GB/s
-that is ~0.5 ms of a ~26 ms step, plus 48 launches × 0.52 µs = 25 µs of launch
+that is ~0.5 ms of the ~26 ms roofline step this table was written against -
+1.2% of the 42.141 ms step measured 2026-08-25 - plus 48 launches × 0.52 µs =
+25 µs of launch
 overhead. The redundant reads are the price of 192 work-groups instead of 48 and
 of not paying for a second kernel; whether that trade was right is what the
 measurement below has to settle, and this table is what it should be compared
@@ -1200,16 +1221,17 @@ against.
 
 ### Measured - **aggregate only**
 
-**`gdn_step` has no per-kernel number.** It shares the ≈ 11.4 ms bucket
+**`gdn_step` has no per-kernel number.** It shares the 11.33 ms bucket
 described at the top of this document and in `prep`'s Measured section: the
 42.141 ms step measured 2026-08-25, minus 28.35 ms of per-kernel-measured GEMV,
-minus 2.34 ms of measured attention block work, minus 0.054 ms of
-`embed_gather`/`argmax`/early-out, leaves 11.4 ms shared by `prep`'s 241
+minus 2.31 ms of *estimated* attention block work, minus 0.054 ms of
+`embed_gather`/`argmax`/early-out and 0.097 ms of host time, leaves 11.33 ms
+shared by `prep`'s 241
 launches, `gdn_step`'s 48, `attn_prep`/`attn_reduce`'s 32 and 48 `a‖b` GEMVs.
 
 What can be said honestly, and no more:
 
-- The **upper bound** on `gdn_step` is 11.4 ms - 27% of the step - and the
+- The **upper bound** on `gdn_step` is 11.33 ms - 26.9% of the step - and the
   **lower bound** from the traffic table above is ~0.67 ms at 590 GB/s
   (0.5 ms at the 600 GB/s denominator it was written against).
 - If the profile puts it near the bound, the cause is **not** the 396 MB: it is
@@ -1636,34 +1658,66 @@ than three.
 Both come from `b70-decode --bench` on an idle box, tg 256, three runs each,
 2026-08-25 (doc 07 #12, now resolved; every row in
 [BENCHMARKS.md](BENCHMARKS.md)). Neither is a per-kernel timing - there is no
-`probe_attn` - but both isolate `attn_decode` by changing **only** what it does,
-with the other 597 kernels held identical, so they are attributable to this trio
-and are labelled *measured* rather than *aggregate*.
+`probe_attn`. Each pair isolates `attn_decode` by changing **only** what it
+does, with the other 597 kernels held identical, so the *differences* are
+attributable to this trio.
 
-| what varies | median ms/token |
-|---|---|
-| depth 4096, `--max-len 16384` (4 × 64 grid, ~17.5 live blocks) | 42.141 |
-| depth 64, `--max-len 16384` (4 × 64 grid, ~1.5 live blocks) | 39.997 |
-| depth 64, `--max-len 4096` (4 × 16 grid, ~1.5 live blocks) | 39.951 |
+**Live blocks per token, counted properly.** `attn_reduce` merges
+`nb = (pos + m)/256 + 1` blocks (`attn.cl:474`), and `attn_decode`'s early-out
+turns off exactly the rest, so `nb` is the count of blocks doing work. `tg` 256
+from depth `D` walks `pos = D … D+255`:
 
-**1. A live 256-position block costs 0.134 ms/token.** (42.141 − 39.997) / 16
-blocks. Across all 16 FA layers that block is 6.29 MB × 16 = 100.7 MB of KV
-reads (the 6× q-head reread in the table above), so 0.134 ms implies **751
-GB/s** - *above* the 590 GB/s `probe_bw` measures. That is the L2 question this
-section left open, answered: **the 6× reread is substantially cache-served**, as
-predicted for the depth-4096 regime where one layer's live blocks are ~16 MB
-against 24 MB of L2. The staged variant in "Rejected" would be optimising a
-read that mostly is not reaching DRAM. At depth 4096 attention is therefore
-**2.34 ms of the 42.141 ms step, 5.6%** - real, but not where the phase-1 gap
-lives.
+| run | `pos` range | `nb` | mean `nb` | median ms/token |
+|---|---|---|---|---|
+| depth 4096, `--max-len 16384` (4 × 64 grid) | 4096…4351 | 17 throughout | **17.00** | 42.141 |
+| depth 64, `--max-len 16384` (4 × 64 grid) | 64…319 | 1 for 192 tokens, 2 for 64 | **1.25** | 39.997 |
+| depth 64, `--max-len 4096` (4 × 16 grid) | 64…319 | same 1.25 | **1.25** | 39.951 |
 
-**2. The early-out is free: 0.046 ms/token, 0.11% of the step.** Rows 2 and 3
-differ only in grid size - same depth, same live blocks, same work - so the
-0.046 ms is exactly what 48 extra idle blocks × 4 kv-heads × 16 layers = **3072
-early-outed work-groups** cost, i.e. **~15 ns each**. The design decision this
+**1. A live 256-position block costs ≈ 0.1361 ms/token - estimated, from a
+two-point line.** (42.141 − 39.997) / (17.00 − 1.25) = 2.144 / 15.75. Across
+all 16 FA layers a block is 6.29 MB × 16 = 100.7 MB of KV reads (the 6× q-head
+reread in the table above), so 0.1361 ms implies **740 GB/s** - *above* the
+590 GB/s `probe_bw` measures. That is the L2 question this section left open,
+answered in the direction it guessed: **the 6× reread is substantially
+cache-served**, as predicted for the depth-4096 regime where one layer's live
+blocks are ~16 MB against 24 MB of L2. The staged variant in "Rejected" would
+be optimising a read that mostly is not reaching DRAM.
+
+Extrapolating that slope to 17 blocks puts attention's per-block work at
+**≈ 2.31 ms of the 42.141 ms step, 5.5%** - and that number is **estimated, not
+measured**, because it is one line through two points. Two other timings from
+the same day say the line is not exact:
+
+| point | `nb` | predicted by the line | measured |
+|---|---|---|---|
+| CLI run, depth 42, tg 32 (`pos` 42…73) | 1 throughout | 39.96 | **38.51** |
+| depth-4096 ingest, `pos` 0…4095 | mean ≈ 8.5 | 40.98 | **41.61** |
+
+Neither point is a clean comparison - different `tg`, different thermal history,
+and the ingest average sweeps `nb` rather than holding it - but both miss by
+0.6-1.5 ms, so the slope is not constant across the whole range. What survives
+unconditionally is the **2.144 ms difference itself**: going from `nb` 1.25 to
+17 costs that much, all of it inside `attn_decode`/`attn_reduce`. Treat 2.31 ms
+as the central estimate with the measured 2.144 ms as its floor, and note that
+±0.2 ms of it moves in or out of the unsplit bucket at the top of this document.
+
+**2. The early-out is free: 0.046 ms/token, 0.11% of the step - measured.**
+Rows 2 and 3 hold depth, live blocks and every byte of real work identical and
+change the compiled `MAXLEN`/grid. `--max-len` is not *purely* the grid - it
+also changes `attn_part`'s stride, the block headers `attn_reduce` stages into
+SLM, and the KV allocation's footprint - but `attn_reduce`'s merge loop is
+bounded by `nb`, not `NBLOCKS`, and `nb` is 1.25 in both rows, so the dominant
+term in the difference is the 48 extra idle blocks × 4 kv-heads × 16 layers =
+**3072 early-outed work-groups**: **~15 ns each**. The design decision this
 section defends ("The early-out - the answer to a grid that cannot be re-sized")
 is vindicated at 1/18th of the 2% bar doc 07 #12 set for abandoning it.
 Context-bucketed lists are not worth building.
+
+This pair is also the one **thermally matched** comparison in the set: both runs
+are preceded by the same 2.4 s ingest, so neither carries the other's heat. The
+2.144 ms depth delta above does *not* have that property - its depth-4096 run is
+preceded by 170 s of continuous replay against the depth-64 run's 2.4 s - which
+is a second reason to call the 2.31 ms figure estimated.
 
 What is still unmeasured: `attn_prep` and `attn_reduce` individually. They are
 32 of the 369 launches in the aggregate bucket described at the top of this
