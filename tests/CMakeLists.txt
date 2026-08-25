@@ -98,9 +98,11 @@ add_executable(attn_test kernels/attn_test.cc)
 target_include_directories(attn_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(attn_test PRIVATE b70_l0)
 b70_target_kernel_dir(attn_test)
-add_dependencies(attn_test kernel_attn_prep_M1 kernel_attn_decode_M1_L4096
-  kernel_attn_reduce_M1_L4096 kernel_attn_prep_M2 kernel_attn_decode_M2_L4096
-  kernel_attn_reduce_M2_L4096 kernel_attn_decode_M1_L16384 kernel_attn_reduce_M1_L16384)
+add_dependencies(attn_test kernel_attn_prep_M1
+  kernel_attn_decode_M1_L4096_B${ATTN_BLOCK} kernel_attn_reduce_M1_L4096_B${ATTN_BLOCK}
+  kernel_attn_prep_M2
+  kernel_attn_decode_M2_L4096_B${ATTN_BLOCK} kernel_attn_reduce_M2_L4096_B${ATTN_BLOCK}
+  kernel_attn_decode_M1_L16384_B${ATTN_BLOCK} kernel_attn_reduce_M1_L16384_B${ATTN_BLOCK})
 add_test(NAME attn_test COMMAND attn_test)
 
 # The two kernels at a token's boundary. Both read the shared control block at
@@ -189,7 +191,8 @@ set(B70_DECODE_LIST_KERNELS
   kernel_prep_res_fold_M1_K5120_SP0_G20 kernel_prep_res_fold_M1_K5120_SP16_G20
   kernel_prep_norm_finish_M1_K5120_G20_W20
   kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1 kernel_gdn_step_M1
-  kernel_attn_prep_M1 kernel_attn_decode_M1_L16384 kernel_attn_reduce_M1_L16384
+  kernel_attn_prep_M1 kernel_attn_decode_M1_L16384_B${ATTN_BLOCK}
+  kernel_attn_reduce_M1_L16384_B${ATTN_BLOCK}
   kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K5120_N14336_S1_L1
   kernel_gemv_M1_K6144_N5120_S16_L1 kernel_gemv_M1_K5120_N34816_S4_L1
   kernel_gemv_M1_K17408_N5120_S16_L1

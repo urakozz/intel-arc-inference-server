@@ -1,6 +1,6 @@
 // attn.cl - the decode-attention trio: `attn_prep` (q/k RMSNorm + partial RoPE
-// + the KV cache write), `attn_decode` (one flash-decode block of 256 KV
-// positions per work-group, with the device-side early-out that makes a
+// + the KV cache write), `attn_decode` (one flash-decode block of ATTN_BLOCK
+// KV positions per work-group, with the device-side early-out that makes a
 // `max_len`-sized grid affordable under replay) and `attn_reduce` (merge the
 // blocks, divide by the softmax denominator, apply the output gate). 16 of the
 // model's 64 layers run all three.
@@ -23,7 +23,7 @@
 //     kv_k, kv_v    bf16 [max_len][4][256]  this layer's caches
 //
 //   attn_decode(ctrl, attn_q, kv_k, kv_v, attn_part)
-//     attn_part     fp32 [24][MAXLEN/256][M][258]   {mx, sm, acc[256]}
+//     attn_part     fp32 [24][MAXLEN/ATTN_BLOCK][M][258]   {mx, sm, acc[256]}
 //
 //   attn_reduce(ctrl, attn_part, attn_gate, attn_out)
 //     attn_out      bf16 [M][6144]
@@ -49,12 +49,33 @@
 // work-group: v needs no norm and no RoPE, so it is one extra rounding on a
 // work-item that is already resident.
 //
-// **attn_decode: grid (4 kv-heads, MAXLEN/256 blocks), work-group 256 = 16
-// subgroups × 16 lanes (SIMD16).** The grid spans the whole cache because the
-// captured list cannot be re-sized per token; the work-groups past the context
-// exit on their first instruction (below). A work-group owns one 256-position
-// block of one kv-head and loops over that head's **six** q-heads (GQA 6:1) and
-// the tokens in flight.
+// **attn_decode: grid (4 kv-heads, MAXLEN/ATTN_BLOCK blocks), work-group 256 =
+// 16 subgroups × 16 lanes (SIMD16).** The grid spans the whole cache because
+// the captured list cannot be re-sized per token; the work-groups past the
+// context exit on their first instruction (below). A work-group owns one
+// ATTN_BLOCK-position block of one kv-head and loops over that head's **six**
+// q-heads (GQA 6:1) and the tokens in flight.
+//
+// **The block is 64 positions, and that is the whole of spec 1.5's lever L5.**
+// It was 256. docs/15 §2's four in-situ points fit `F + fill · P` - F ≈ 90.8 µs
+// of per-launch fixed cost, P ≈ 247.4 µs for one work-group's serial walk of
+// one FULL block - so at depth 4096 roughly 73% of a 361 µs launch was one
+// work-group walking one block, and the same measurement found work-group
+// COUNT nearly free (`nb` 5 → 17 is 3.40× the live work-groups for +6.9% of
+// time). That fit did NOT survive the retile (see ATTN_BLOCK below: it
+// over-predicted the B128 gain by 38%), but its *direction* did, and the block
+// size that pays was then measured at four values rather than extrapolated.
+// Quartering the block shortens that walk and multiplies the grid: at
+// depth 4096, 65 blocks × 4 kv-heads = **260 work-groups**, against 68 before.
+// docs/15 called 264 work-groups "past the point any measurement here reaches";
+// it is measured now, and it is fine. Nothing else about the kernel changed -
+// the wave is still 16 positions, the online-softmax arithmetic inside a wave
+// is untouched, and the order the waves compose in is untouched. What moves is
+// only WHERE the partial-accumulation boundary falls: **4** waves per block
+// instead of 16, with `attn_reduce` merging four times as many blocks in the
+// same fixed ascending order.
+// That reassociation is a real (last-ulp) change to `attn_part` and `attn_out`,
+// which is why the golden gate is run before and after (docs/14).
 //
 // The q-head loop is the OUTER one, so this kernel reads its block's K and V
 // **six times over** (once per q-head), not once. That is a real cost and it is
@@ -69,7 +90,15 @@
 // loop (16 positions × 256 × 2 B × 2 = 16 KB of SLM, six accumulators per
 // work-item). That is the main unmeasured lever on this kernel and it is
 // deferred to Task 9's measurement, not assumed (docs/12-kernels.md,
-// "Rejected, and what was not measured").
+// "Rejected, and what was not measured"). **Task 9 measured the retile instead,
+// and the retile is what shipped.** SLM staging stays un-built - and the
+// measurement now argues against it rather than merely deferring it. Fitting
+// the B256/B128 pair as `F + walk` puts the per-launch term that is NOT the
+// block walk at ~223 µs of 370, and the retile has since taken the whole launch
+// to 224 µs; whatever remains is dominated by a term neither the walk nor the
+// q-head reread explains, and SLM staging attacks only the reread. The
+// arithmetic is in docs/12's attn "Measured" section, with the caveat it
+// deserves: three models have died on this kernel already.
 //
 // **attn_reduce: grid (24, M), work-group 256** - one work-group per (q-head,
 // token), work-item `d` owning dim `d` of the 256-wide output. The merge
@@ -92,7 +121,7 @@
 // is masked to −INF inside the wave. So a block that is partially valid writes
 // real partials for each `m`, and the all-masked-for-this-m case falls out of
 // the online update as `(−INF, 0, 0)` with no special case. `attn_reduce` reads
-// exactly `nb(m) = (pos+m)/256 + 1` blocks - every one of which starts at or
+// exactly `nb(m) = (pos+m)/ATTN_BLOCK + 1` blocks - every one of which starts at or
 // before `pos+m` and therefore ran - so it never reads a block the early-out
 // skipped, and needs no data-dependent skip logic of its own.
 // What that costs at short context is doc 07 #12, measured in Task 9.
@@ -110,8 +139,9 @@
 //     The 16 lane partials collapse with a fixed pairwise tree: for
 //     `stride = 8, 4, 2, 1`, `dot_red[16s+l] += dot_red[16s+l+stride]`.
 //     `dot_red[16s] · 1/16` is the score (1/16 = 1/√256, doc 03).
-//  3. **The online softmax wave** (`attn_decode`): the block's 256 positions are
-//     walked in 16 waves of 16. With the wave's scores `sc[0..15]` (−INF where
+//  3. **The online softmax wave** (`attn_decode`): the block's ATTN_BLOCK
+//     positions are walked in ATTN_BLOCK/16 waves of 16 - 4 waves since lever
+//     L5. With the wave's scores `sc[0..15]` (−INF where
 //     the causal bound masks the position),
 //         nmx  = max(mx, sc[0], sc[1], …, sc[15])          (ascending s)
 //         resc = exp(mx − nmx)                              (0 when mx = −INF)
@@ -215,9 +245,41 @@
 #error "attn assumes qkv runs S=1; the partials index must loop s otherwise"
 #endif
 
-#define ATTN_BLOCK 256    /* KV positions per attn_decode work-group */
-#define WAVES 16          /* ATTN_BLOCK / WAVE_P */
+// ATTN_BLOCK - KV positions per attn_decode work-group, and the ONE number
+// this kernel's blocking depends on. It is a `-D` rather than a literal
+// because it must agree with `runtime::DecodeBuffers::kAttnBlock` on the host,
+// which sizes `attn_part` and sets attn_decode's grid: it is in the compiled
+// binary's NAME (`attn_decode_M1_L16384_B64`), so a host that disagrees names
+// a file that does not exist and throws at capture rather than striding
+// `attn_part` wrongly - the arrangement `prep_res_fold`'s `G` uses for exactly
+// the same reason (src/kernels/CMakeLists.txt).
+//
+// It was 256 until spec 1.5's lever L5, and it is now **64** - a number that
+// was measured, not derived. docs/15 §2's `F + fill·P` fit (F ≈ 90.8 µs fixed,
+// P ≈ 247.4 µs per full block, from the `nb` = 1 and 5 points) predicted
+// 214.5 µs/launch at a 128-position block; the retile measured **296.684**,
+// +38%, which is the third model this kernel has falsified. Four block sizes,
+// measured in situ at depth 4096 - `attn_decode` µs/launch, then the attn
+// family's ms/token:
+//
+//     B256  369.988  6.058 | B128  296.684  4.931
+//     B64   224.046  3.839 | B32   203.888  3.772
+//
+// `attn_decode` is still falling at B32, but `attn_reduce`'s merge (now over
+// twice as many blocks again) goes 196 → 453 µs/step and the step's whole sum
+// of 774 kernel durations goes UP. **64 is the knee, measured on both sides.**
+// What is *measured* and not fitted: the three points 256 → 128 → 64 each cost
+// ~73 µs less per launch than the last, which is linear in log2(block) and not
+// in the block; nothing here explains that, and this file does not invent a
+// fourth model to fit it (docs/12 `attn` → Measured).
+#ifndef ATTN_BLOCK
+#error "attn: ATTN_BLOCK must be defined (src/kernels/CMakeLists.txt); it must equal runtime::DecodeBuffers::kAttnBlock"
+#endif
 #define WAVE_P 16         /* positions per wave = subgroups per work-group */
+#define WAVES (ATTN_BLOCK / WAVE_P)   /* waves per block: 4 at ATTN_BLOCK 64 */
+#if ATTN_BLOCK % WAVE_P != 0
+#error "attn: ATTN_BLOCK must be a multiple of WAVE_P (16) - a block is walked in whole waves"
+#endif
 #define SG 16             /* SIMD16: 16 subgroups of 16 lanes */
 #define PER_LANE 16       /* elements of the 256-dim dot per lane: 256 / 16 */
 #define NBLOCKS (MAXLEN / ATTN_BLOCK)
@@ -228,7 +290,7 @@
 #define WG_RED 256
 
 #if MAXLEN % ATTN_BLOCK != 0
-#error "attn: MAXLEN must be a multiple of ATTN_BLOCK (the grid is MAXLEN/256 blocks)"
+#error "attn: MAXLEN must be a multiple of ATTN_BLOCK (the grid is MAXLEN/ATTN_BLOCK blocks)"
 #endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
@@ -332,7 +394,7 @@ __kernel void attn_prep(__global const uint* restrict ctrl,
 }
 
 // ---------------------------------------------------------------------------
-// attn_decode - grid (4 kv-heads, MAXLEN/256 blocks), work-group 256 = 16
+// attn_decode - grid (4 kv-heads, MAXLEN/ATTN_BLOCK blocks), work-group 256 = 16
 // subgroups × 16 lanes. Work-group `(j, blk)` owns one block of kv-head `j` and
 // loops over that head's six q-heads and the tokens in flight. Work-item `lid`
 // owns accumulator dim `lid`; subgroup `lid/16` owns one position of the wave
@@ -350,7 +412,7 @@ __kernel void attn_decode(__global const uint* restrict ctrl,
                           __global const ushort* restrict kv_v,
                           __global float* restrict attn_part) {
   const uint j = get_group_id(0);            // kv-head
-  const uint blk = get_group_id(1);          // 256-position block
+  const uint blk = get_group_id(1);          // ATTN_BLOCK-position block
   const uint lid = get_local_id(0);
   const uint sgid = lid / SG;                // owns this wave's position sgid
   const uint lane = lid % SG;                // owns 16 elements of that dot
@@ -453,7 +515,7 @@ __kernel void attn_decode(__global const uint* restrict ctrl,
 // itself has no barrier; every work-item then runs the identical scalar merge
 // (order 4 of the header) alongside its own `acc`.
 //
-//   nb = (pos + m)/256 + 1
+//   nb = (pos + m)/ATTN_BLOCK + 1
 //   merge blocks 0 … nb-1 ascending ;  out = acc / sm
 //   attn_out[m][h·256+d] = rne_bf16(f32(rne_bf16(out)) · sigmoid_f32(gate))
 // ---------------------------------------------------------------------------
@@ -465,6 +527,17 @@ __kernel void attn_reduce(__global const uint* restrict ctrl,
   const uint h = get_group_id(0);
   const uint m = get_group_id(1);
   const uint d = get_local_id(0);
+  // NBLOCKS went 4x with lever L5 (ATTN_BLOCK 256 -> 64), so these two arrays
+  // did too: at MAXLEN 16384 they are 256 floats each, **2048 B of SLM
+  // together** against the 64 KB a work-group may have. The merge loop below is
+  // bounded by `nb`, not by NBLOCKS, so the extra length costs nothing at short
+  // context. What it DOES cost at depth 4096 is four times as many merge steps
+  // (nb 17 -> 65), and that is measured: this kernel goes 80.241 -> 196.195
+  // µs/step, +116 µs, against `attn_decode`'s -2336 µs. It is why the lever is
+  // judged on the attn FAMILY's net and not on `attn_decode` alone, and it is
+  // also what stops the retile one step earlier than `attn_decode` would like:
+  // at ATTN_BLOCK 32 this row reaches 452.816 µs/step and eats the whole
+  // remaining gain (docs/12 `attn` -> Measured).
   __local float hmx[NBLOCKS], hsm[NBLOCKS];
 
   const uint pos = ctrl[CTRL_POS];

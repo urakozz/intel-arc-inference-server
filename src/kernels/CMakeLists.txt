@@ -147,33 +147,74 @@ add_ocloc_kernel(argmax_stage2 SOURCE ${ARGMAX_CL} DEFINES ${ARGMAX_DEFINES})
 #
 #   * `M`, as everywhere - the tokens in flight;
 #   * `MAXLEN`, which `attn_decode` and `attn_reduce` need because
-#     `attn_part` is strided `[24][MAXLEN/256][M][258]` (the *grid* comes from
-#     `buffers.max_len` at capture, but the stride has to be a compile-time
+#     `attn_part` is strided `[24][MAXLEN/ATTN_BLOCK][M][258]` (the *grid* comes
+#     from `buffers.max_len` at capture, but the stride has to be a compile-time
 #     constant). `attn_prep` touches no `max_len`-shaped array - it indexes the
 #     KV caches by absolute position - so its variants carry no `L`.
+#
+# ATTN_BLOCK - KV positions per `attn_decode` work-group - is the third, and it
+# is here rather than as a literal in attn.cl because the HOST has to know it
+# too: `runtime::DecodeBuffers::kAttnBlock` sizes `attn_part` and sets
+# `attn_decode`'s grid, and nothing can check the two against each other. So it
+# goes in the NAME on both sides (`attn_decode_M1_L16384_B64`,
+# `kernels::attn_decode_variant`) exactly as `prep_res_fold`'s `G` does above:
+# a host that disagrees names a binary that does not exist and throws at
+# capture, instead of striding `attn_part` at one size while the kernel writes
+# it at another. `attn_prep` does not block, so it carries no `B` either.
+#
+# **64, from 256, is spec 1.5's lever L5** and the number is MEASURED, not
+# extrapolated. docs/15 §2's fit over four low-depth points predicted 214.5 us
+# per launch at a 128-position block; the retile measured **296.684**, +38%, so
+# that model died the way its two predecessors did. Four block sizes were then
+# measured in situ at depth 4096 (docs/12 `attn` -> Measured, docs/15 §L5),
+# attn_decode us/launch and the attn FAMILY ms/token:
+#
+#   B256  369.988  6.058 | B128  296.684  4.931 | B64  224.046  3.839
+#   B32   203.888  3.772  <- attn_decode still falls, attn_reduce goes
+#                            196 -> 453 us/step and the whole step's sum of 774
+#                            kernel durations goes UP by 21 us. 64 is the knee,
+#                            and it is measured on both sides.
+#
+# Both compiled lengths move together; there is no mixed-block build, because
+# `kAttnBlock` is one number for the whole engine.
+#
+# `CACHE INTERNAL` (which implies FORCE, so editing the line still takes effect
+# on the next configure) rather than a plain `set`: tests/CMakeLists.txt is a
+# SIBLING directory scope and would not otherwise see it, and it must, because
+# attn_test's `add_dependencies` names the very binaries this number names.
+set(ATTN_BLOCK 64 CACHE INTERNAL
+    "KV positions per attn_decode work-group; must equal runtime::DecodeBuffers::kAttnBlock")
 #
 # QNORM_OFF / KNORM_OFF are the FA small block's offsets **in floats**, i.e.
 # loader/small_layout.h's kFaOffQNorm (0 B) and kFaOffKNorm (1024 B) divided by
 # 4. The kernel takes the block base as a `const float*` and indexes with these,
 # so the byte offsets stay in the one header that owns them; small_layout.h's
 # static_asserts are what keeps this line honest - exactly as GDN_DEFINES does.
-set(ATTN_DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256)
+# ATTN_BLOCK is in the SHARED define list, not in add_attn_decode/_reduce
+# alone, because all three entry points live in one .cl file: `attn_prep`'s
+# compile would otherwise trip the `#ifndef ATTN_BLOCK / #error` guard that is
+# there to stop a build from silently taking a default. It is inert in that
+# binary - `attn_prep` expands neither ATTN_BLOCK nor NBLOCKS nor WAVES, so an
+# unused `-D` cannot reach its codegen - which is why `attn_prep` carries no
+# `_B` in its name while the two kernels whose behaviour and buffer stride DO
+# depend on the value carry it in theirs.
+set(ATTN_DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 ATTN_BLOCK=${ATTN_BLOCK})
 set(ATTN_CL ${CMAKE_CURRENT_SOURCE_DIR}/attn.cl)
 function(add_attn_prep MM)
   add_ocloc_kernel(attn_prep_M${MM} SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM})
 endfunction()
 function(add_attn_decode MM LL)
-  add_ocloc_kernel(attn_decode_M${MM}_L${LL} SOURCE ${ATTN_CL}
+  add_ocloc_kernel(attn_decode_M${MM}_L${LL}_B${ATTN_BLOCK} SOURCE ${ATTN_CL}
                    DEFINES ${ATTN_DEFINES} M=${MM} MAXLEN=${LL})
 endfunction()
 function(add_attn_reduce MM LL)
-  add_ocloc_kernel(attn_reduce_M${MM}_L${LL} SOURCE ${ATTN_CL}
+  add_ocloc_kernel(attn_reduce_M${MM}_L${LL}_B${ATTN_BLOCK} SOURCE ${ATTN_CL}
                    DEFINES ${ATTN_DEFINES} M=${MM} MAXLEN=${LL})
 endfunction()
 add_attn_prep(1)
 add_attn_decode(1 16384)   # the loader's default max_len (docs/13-loader.md)
 add_attn_reduce(1 16384)
-add_attn_decode(1 4096)    # attn_test's buffers: 16 blocks, cheap to fill
+add_attn_decode(1 4096)    # attn_test's buffers: 64 blocks, cheap to fill
 add_attn_reduce(1 4096)
 # M = 2 is compiled per spec 1 §9 (the M loop must compile); all three are also
 # RUN by attn_test, as the only cover for per-m causal masking (a position valid
@@ -181,8 +222,8 @@ add_attn_reduce(1 4096)
 #
 # Note the asymmetry, which is deliberate while M = 2 is test-only: the M = 2
 # decode/reduce pair exists **at L4096 only**, the length attn_test allocates.
-# There is no `attn_decode_M2_L16384` / `attn_reduce_M2_L16384`, so
-# `kernels::attn_{decode,reduce}_variant(2, 16384)` names no file and the
+# There is no `attn_decode_M2_L16384_B*` / `attn_reduce_M2_L16384_B*`, so
+# `kernels::attn_{decode,reduce}_variant(2, 16384, 128)` names no file and the
 # runtime cannot bind M = 2 attention at the loader's default max_len. Whoever
 # turns M > 1 on (plan 3's MTP work) adds the L16384 rows here first.
 add_attn_prep(2)
