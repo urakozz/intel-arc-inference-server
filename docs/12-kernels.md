@@ -1080,6 +1080,14 @@ absolute position and so needs no `max_len`, while the other two bake it because
 compile-time constant. The *grid* still comes from `buffers.max_len` at capture,
 so the variant bound to a layer must be the one built for that `max_len`.
 
+The compiled set is deliberately asymmetric while M = 2 is test-only:
+`attn_prep_M{1,2}`, `attn_{decode,reduce}_M1_L{4096,16384}` and
+`attn_{decode,reduce}_M2_L4096` - the 4096 rows being the length `attn_test`
+allocates. **There is no `attn_{decode,reduce}_M2_L16384`**, so
+`kernels::attn_decode_variant(2, 16384)` names no file and the runtime cannot
+bind M = 2 attention at the loader's default `max_len`. Whoever turns M > 1 on
+(plan 3's MTP work) adds those two rows to `src/kernels/CMakeLists.txt` first.
+
 ```
 attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v)
 
@@ -1274,6 +1282,13 @@ contains at least its own first position inside the causal bound - the same fact
 that lets the early-out leave blocks `≥ nb` untouched. So no guard is needed
 here and none is written; the −INF case exists only in `attn_decode`'s wave.
 
+`nb` is nonetheless clamped to `NBLOCKS` before the header-staging loop. Under
+the real precondition - `pos + n_active ≤ max_len`, which the engine enforces
+when it advances `Control::pos` - the clamp is dead code. It is there so that a
+*violated* precondition costs a wrong answer instead of an SLM overrun writing
+past `hmx`/`hsm` into whatever the compiler laid out next, which is the kind of
+failure that reproduces as something else entirely three kernels later.
+
 ### The RoPE rounding - the one op this trio does not match torch on
 
 RoPE is applied to the **fp32 widened normalised value**: `attn_q` keeps the fp32
@@ -1312,15 +1327,15 @@ softmax, in the merge and in the final sigmoid. `1.0f/sqrt` is not among them
 (every kernel builds with `-cl-fp32-correctly-rounded-divide-sqrt`), which is
 why the norm, the RoPE and the KV cache are held **bit-exact**:
 
-| case | `attn_q` roped dims | `attn_part` | `attn_out` rel (bar 1e-3) | `attn_out` words differing / worst | blocks still canary |
+| case | `attn_q` roped dims | `attn_part` | `attn_out` rel (bar 1e-3) | `attn_out` ulp: worst anywhere / worst at `|ref| ≥ rms/8` (bar 2) | blocks still canary |
 |---|---|---|---|---|---|
-| `pos = 0` (one valid position; 15 blocks early-out) | **0** | **0** | **0** | 0 / 6144 | 360 × 1 |
-| `pos = 254` (block 0 partial; 255 masked) | **0** | 4.670e-07 | 1.326e-05 | 1 / 6144, 1 ulp | 360 × 1 |
-| `pos = 255` (block 0 exactly full) | **0** | 5.024e-07 | **0** | 0 / 6144 | 360 × 1 |
-| `pos = 256` (block 1: one valid position, 15 empty waves) | **0** | 7.109e-07 | 8.664e-04 | 1 / 6144, 2 ulp | 336 × 1 |
-| `pos = 4095` (cache full to `max_len`; 16-block merge) | **0** | 7.240e-07 | 1.995e-04 | 3 / 6144, 95 ulp | 0 |
-| `pos = 254`, M = 2 (per-`m` mask **inside** one block) | **0** | 6.420e-07 | **0** | 0 / 12288 | 360 × 2 |
-| `pos = 255`, M = 2 (per-`m` mask **across** the block edge) | **0** | 8.018e-07 | 1.270e-05 | 2 / 12288, 2 ulp | 336 × 2 |
+| `pos = 0` (one valid position; 15 blocks early-out) | **0** | **0** | **0** | 0 (0 of 6144 differ) / **0** of 5282 | 360 × 1 |
+| `pos = 254` (block 0 partial; 255 masked) | **0** | 4.670e-07 | 1.326e-05 | 1 (1 word) / **0** of 5278 | 360 × 1 |
+| `pos = 255` (block 0 exactly full) | **0** | 5.024e-07 | **0** | 0 (0 words) / **0** of 5299 | 360 × 1 |
+| `pos = 256` (block 1: one valid position, 15 empty waves) | **0** | 7.109e-07 | 8.664e-04 | 2 (1 word) / **0** of 5267 | 336 × 1 |
+| `pos = 4095` (cache full to `max_len`; 16-block merge) | **0** | 7.240e-07 | 1.995e-04 | 95 (3 words) / **0** of 5305 | 0 |
+| `pos = 254`, M = 2 (per-`m` mask **inside** one block) | **0** | 6.420e-07 | **0** | 0 (0 of 12288) / **0** of 10562 | 360 × 2 |
+| `pos = 255`, M = 2 (per-`m` mask **across** the block edge) | **0** | 8.018e-07 | 1.270e-05 | 2 (2 words) / **0** of 10480 | 336 × 2 |
 
 and, in **every** case:
 
@@ -1333,26 +1348,35 @@ and, in **every** case:
 - replay - **bitwise identical** on all six outputs (`attn_q`, `attn_gate`,
   `attn_part`, `kv_k`, `kv_v`, `attn_out`), from freshly re-uploaded inputs.
 
-Two bars are carried on `attn_out` and they are blind in opposite places. The
-ruled one is a relative error floored at the tensor's RMS - `acc/sm` is a
-weighted average of *signed* v values, so a dim can cancel to ~1e-9 against an
-RMS of ~0.07 and an unfloored ratio there would measure the cancellation rather
-than the kernel (the `pos = 4095` row's "95 ulp" is exactly one such dim, 3.5e-10
-of absolute nothing). The second is an absolute bar at the tensor's scale: no
-element may move by more than **2 bf16 ulp of the RMS**, where the 2 is the
-arithmetic of the final chain and not a fudge -
-`rne_bf16(f32(rne_bf16(acc/sm)) · sigmoid_f32(gate))` rounds to bf16 twice, and
-3 ulp of `exp` slack can push a boundary value one ulp at each of those
-roundings and no further. The worst observed is `pos = 256`'s 6.104e-05 against
-a bar of 5.5e-04.
+**`attn_out` carries two bars, and the second one is the arbiter.**
 
-**The `pos = 256` row is the one to watch.** 8.664e-04 against a bar of 1e-3 is
-a 1.15× margin, and it is thin for a structural reason rather than a numerical
-one: `attn_out` is bf16, so a *single* boundary flip on an element the size of
-the tensor's RMS is already `2^-8 = 3.9e-3` of relative error - four times the
-ruled bar. Today every flip has landed on an element below the RMS and the bar
-holds; it is luck that they have, and the absolute-at-scale bar beside it is
-what should be trusted if a driver update moves the row.
+**(a) Relative error ≤ 1e-3, floored at the tensor's RMS.** The 1e-3 is the
+plan's; the *floor* is this task's deviation from it, and it is not optional:
+`acc/sm` is a weighted average of *signed* v values, so a dim can cancel to
+~6.6e-10 against an RMS of ~0.07, and an unfloored ratio there would measure the
+cancellation rather than the kernel (the `pos = 4095` row's "95 ulp anywhere" is
+exactly one such dim - 3.5e-10 of absolute nothing).
+
+**(b) ≤ 2 bf16 ulp on every element with `|ref| ≥ rms/8`.** Dividing by the RMS
+is what makes (a) slack on exactly the elements a bf16 output can most easily
+move: `attn_out` *is* bf16, so a **single** round-to-nearest boundary flip on an
+element the size of the RMS is already `2^-8 = 3.9e-3` of relative error, four
+times (a)'s bar. So (b) is the one to trust - **if a driver change ever trips
+(a), read (b) before believing the kernel broke.** The `rms/8` gate is what
+keeps (b) from being either vacuous or false: below it a bf16 ulp is not a unit
+of error at all, above it it is the only unit that means anything. The **2** is
+the arithmetic of the final chain rather than a fudge -
+`rne_bf16(f32(rne_bf16(acc/sm)) · sigmoid_f32(gate))` rounds to bf16 **twice**,
+and 3 ulp of `exp` slack can push a boundary value one ulp at each of those
+roundings and no further; 3 would mean an arithmetic difference.
+
+The measured picture is sharper than either bar. Across all seven cases the
+worst gated distance is **0**: every one of the ~5280 elements per token at or
+above `rms/8` (86% of the 6144) is **bit-identical** to the reference, and the
+one-to-three words that differ at all lie strictly below the gate. The thin
+number in the table - `pos = 256`'s 8.664e-04 against (a)'s 1e-3, a 1.15×
+margin - comes entirely from a dim at `|ref| ≈ 0.006` against an RMS of 0.070,
+i.e. from (a) measuring cancellation, which is the structural reason (b) exists.
 
 The M = 2 variant is compiled for spec 1 §9's M-loop rule and **run**, on the
 gdn_step precedent, because it is the only cover for per-`m` causal masking - at

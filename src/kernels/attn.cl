@@ -471,7 +471,13 @@ __kernel void attn_reduce(__global const uint* restrict ctrl,
   // Every block up to and including the one holding position `pos+m` ran, and
   // no other block is read - which is what lets attn_decode's early-out leave
   // the rest untouched (header, "The early-out").
-  const uint nb = (pos + m) / ATTN_BLOCK + 1;
+  uint nb = (pos + m) / ATTN_BLOCK + 1;
+  // The real precondition is `pos + n_active <= max_len`, which the engine
+  // enforces when it advances `Control::pos` - under it `nb <= NBLOCKS` always.
+  // This clamp buys nothing when that holds; it exists so that a *violated*
+  // precondition is a wrong answer rather than an SLM buffer overrun writing
+  // past `hmx`/`hsm` into whatever the compiler put next.
+  if (nb > NBLOCKS) nb = NBLOCKS;
   for (uint b = d; b < nb; b += WG_RED) {
     __global const float* restrict p =
         attn_part + (((size_t)h * NBLOCKS + b) * M + m) * PART;
