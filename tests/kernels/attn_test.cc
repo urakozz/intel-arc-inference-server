@@ -25,17 +25,25 @@
 //   * `attn_part` - relative error ≤ 1e-3 on the finite entries, and **exactly
 //     equal bit patterns** where the reference produced ±INF (a block that is
 //     entirely beyond the causal bound for one `m` of an M > 1 step).
-//   * `attn_out` - the ruled relative error ≤ 1e-3 (floored at the tensor's RMS:
-//     `acc/sm` is a weighted average of signed v values, so individual dims
-//     cancel to near zero and an unfloored ratio there would measure the
-//     cancellation, not the kernel) **and** a max absolute error of at most
-//     2 bf16 ulp of that RMS. The 2 is the arithmetic of the final chain rather
-//     than a fudge: `rne_bf16(f32(rne_bf16(acc/sm)) · sigmoid_f32(gate))` rounds
-//     to bf16 twice, and `exp`'s 3 ulp of fp32 slack can push a boundary value
-//     one ulp at each of those roundings and no further. The number of words
-//     that differ at all, and the worst per-element bf16 ulp distance, are
-//     printed but not asserted on - a dim cancelled to 1e-9 can be 95 ulp from
-//     the reference and still be 1e-10 of absolute nothing.
+//   * `attn_out` - two bars, because neither alone is honest about a bf16
+//     tensor built by cancellation.
+//     **(a) Relative error ≤ 1e-3, floored at the tensor's RMS.** This is the
+//     plan's 1e-3; the *floor* is the deviation from it. `acc/sm` is a weighted
+//     average of *signed* v values, so individual dims cancel to near zero and
+//     an unfloored ratio there would measure the cancellation, not the kernel.
+//     **(b) ≤ 2 bf16 ulp on every element with `|ref| >= rms/8`.** The floor in
+//     (a) divides by the RMS, so (a) goes slack on exactly the elements a bf16
+//     output can most easily flip - and `attn_out` *is* bf16, so a single
+//     round-to-nearest boundary flip on an element the size of the RMS is
+//     already 2^-8 = 3.9e-3 of relative error, four times (a)'s bar. **(b) is
+//     therefore the arbiter**: if a driver change ever trips (a), check (b)
+//     before believing the kernel broke. The `rms/8` gate is what keeps (b)
+//     meaningful - below it a ulp is not a unit of error (one dim cancels to
+//     ~6.6e-10 against an RMS of ~0.07, where 3.5e-10 of wobble is 95 ulp of
+//     nothing). The **2** is the arithmetic of the final chain and not a fudge:
+//     `rne_bf16(f32(rne_bf16(acc/sm)) · sigmoid_f32(gate))` rounds to bf16
+//     twice, and `exp`'s 3 ulp can push a boundary value one ulp at each of
+//     those roundings and no further.
 //
 // Five depths pin the block edges and the early-out, all with `max_len = 4096`
 // (16 blocks of 256):
@@ -186,6 +194,12 @@ Err compare_f32(const std::vector<float>& got, const std::vector<float>& ref) {
   const double floor = e.rms > 0.0 ? e.rms : 1.0;
   for (size_t i = 0; i < ref.size(); ++i) {
     if (!std::isfinite(ref[i])) continue;
+    // Where the reference is finite the device must be too. Without this a NaN
+    // or an Inf in `got` would sail through every ratio below: `fabs(NaN - r)`
+    // is NaN and `NaN > e.worst` is false, so the worst-error scan would simply
+    // decline to see it. The one thing a softmax kernel is most likely to get
+    // wrong is exactly a NaN (exp(-INF - -INF)), so this is not a formality.
+    CHECK(std::isfinite(got[i]));
     ++e.counted;
     const double d = std::fabs(double(got[i]) - double(ref[i])), a = std::fabs(double(ref[i]));
     if (d > e.max_abs) e.max_abs = d;
@@ -230,46 +244,64 @@ int32_t bf16_key(uint16_t u) {
   return (u & 0x8000u) ? -int32_t(u & 0x7FFFu) : int32_t(u);
 }
 
-// How many `attn_out` words differ from the reference at all, and by how far in
-// the output's own dtype. **Diagnostic only** - a per-element ulp count is the
-// wrong shape for this tensor and is not asserted on: `acc/sm` is a weighted
-// average of signed v values, so a dim can cancel to ~1e-9 against a tensor RMS
-// of ~0.07, and a 1e-10 absolute wobble there is 95 bf16 ulp of nothing. The
-// two numbers are printed because they say what the relative bar cannot: how
-// *localised* the disagreement is (one word in 6144, typically).
+// The second `attn_out` bar, in the output's own dtype: **no element carrying
+// real signal may sit more than `bar` bf16 ulp from the reference.**
+//
+// "Carrying real signal" is `|ref| >= rms/8`, and the gate is what makes the
+// bar meaningful rather than either vacuous or false. `acc/sm` is a weighted
+// average of *signed* v values, so individual dims cancel; one of them lands at
+// ~6.6e-10 against a tensor RMS of ~0.07, where a 3.5e-10 wobble is 95 bf16 ulp
+// of absolute nothing. Below the gate a ulp is not a unit of error. Above it,
+// it is the only unit that means anything, because the floored relative bar
+// divides by the RMS and so goes slack on exactly the elements a bf16 output
+// can most easily flip.
+//
+// `bar` is **2**, and that is the arithmetic of the final chain rather than a
+// fudge: `rne_bf16(f32(rne_bf16(acc/sm)) · sigmoid_f32(gate))` rounds to bf16
+// **twice**, and `exp`'s 3 ulp of fp32 slack can push a boundary value one ulp
+// at each of those roundings and no further. Three would mean an arithmetic
+// difference, not a rounding cascade.
+//
+// The all-element count and worst distance are gathered too, and printed rather
+// than asserted on - they say how *localised* a disagreement is (typically one
+// word in 6144), which no aggregate can.
 struct UlpErr {
-  size_t off = 0;
-  int32_t worst = 0;
+  size_t off = 0;          // words differing at all
+  int32_t worst = 0;       // worst ulp distance anywhere
+  size_t checked = 0;      // elements at or above the rms/8 gate
+  int32_t worst_gated = 0; // worst ulp distance among those - the asserted number
 };
 
-UlpErr bf16_ulp_stats(const std::vector<uint16_t>& got, const std::vector<uint16_t>& ref) {
+UlpErr require_ulp(const std::vector<uint16_t>& got, const std::vector<uint16_t>& ref, double rms,
+                   int32_t bar, const char* what) {
   CHECK_EQ(got.size(), ref.size());
   UlpErr e;
+  const double gate = rms / 8.0;
+  size_t bad = 0;
   for (size_t i = 0; i < ref.size(); ++i) {
+    const bool signal = std::fabs(double(common::bf16_to_f32(ref[i]))) >= gate;
+    if (signal) ++e.checked;
     if (got[i] == ref[i]) continue;
     ++e.off;
     int32_t dk = bf16_key(got[i]) - bf16_key(ref[i]);
     if (dk < 0) dk = -dk;
     if (dk > e.worst) e.worst = dk;
+    if (!signal) continue;
+    if (dk > e.worst_gated) e.worst_gated = dk;
+    if (dk <= bar) continue;
+    if (bad < 3)
+      std::fprintf(stderr, "%s: element %zu: got 0x%04X ref 0x%04X (%d bf16 ulp, |ref| %.3e >= "
+                           "rms/8 %.3e)\n",
+                   what, i, got[i], ref[i], dk, std::fabs(double(common::bf16_to_f32(ref[i]))),
+                   gate);
+    ++bad;
   }
+  if (bad)
+    std::fprintf(stderr, "%s: %zu of the %zu words at |ref| >= rms/8 are more than %d bf16 ulp "
+                         "out\n",
+                 what, bad, e.checked, bar);
+  CHECK_EQ(bad, size_t{0});
   return e;
-}
-
-// The second `attn_out` bar, and the one that is immune to cancellation: no
-// element may move by more than **2 bf16 ulp of the tensor's own RMS**. The 2
-// is the arithmetic of the final chain rather than a fudge -
-// `rne_bf16(f32(rne_bf16(acc/sm)) · sigmoid_f32(gate))` rounds to bf16 twice,
-// and `exp`'s 3 ulp of fp32 slack can push a boundary value one ulp at each of
-// those roundings and no further. Stated as an absolute bar at the tensor's
-// scale it says the same thing about the large dims while staying silent about
-// the ones cancellation drove to zero, which is exactly the division of labour
-// the floored relative bar cannot express on its own.
-void require_abs_at_scale(const Err& e, double ulps, const char* what) {
-  const double bar = ulps * e.rms / 256.0;   // bf16 has 8 mantissa bits
-  if (!(e.max_abs <= bar))
-    std::fprintf(stderr, "%s: max abs %.3e > %.1f bf16 ulp of rms %.3e (= %.3e)\n", what,
-                 e.max_abs, ulps, e.rms, bar);
-  CHECK(e.max_abs <= bar);
 }
 
 void require_bits16(const std::vector<uint16_t>& got, const std::vector<uint16_t>& ref,
@@ -529,18 +561,19 @@ void run_case(Dev& d, uint32_t pos, uint32_t M, uint32_t n_act, uint32_t seed) {
     outr_f[i] = common::bf16_to_f32(out_ref[i]);
   }
   const Err eo = compare_f32(out_f, outr_f);
-  const UlpErr eu = bf16_ulp_stats(r0.attn_out, out_ref);
+  const UlpErr eu = require_ulp(r0.attn_out, out_ref, eo.rms, 2, "attn_out");
 
   std::printf("attn pos=%u M=%u n_act=%u: attn_q roped rel %.3e (pass-through dims bit-exact), "
               "kv_k/kv_v bit-exact (%zu words each), attn_part rel %.3e (>=rms %.3e) over %zu "
               "finite words, attn_out rel %.3e (>=rms %.3e, max abs %.3e), %zu/%zu words differ "
-              "(worst %d bf16 ulp); %zu blocks x %u m (%zu words) still canary\n",
+              "(worst %d bf16 ulp anywhere; %d over the %zu at |ref| >= rms/8); %zu blocks x %u m "
+              "(%zu words) still canary\n",
               pos, M, n_act, q_rel, kKvElems, ep.worst, ep.plain, ep.counted, eo.worst, eo.plain,
-              eo.max_abs, eu.off, out_ref.size(), eu.worst, canary_blocks, M, canary_words);
+              eo.max_abs, eu.off, out_ref.size(), eu.worst, eu.worst_gated, eu.checked,
+              canary_blocks, M, canary_words);
 
   CHECK(q_rel <= 2.0 / 256.0);   // 2 ulp of bf16
   require(eo, 1e-3, "attn_out");
-  require_abs_at_scale(eo, 2.0, "attn_out");
 
   CHECK(std::memcmp(r0.attn_q.data(), r1.attn_q.data(), qg * 4) == 0);
   CHECK(std::memcmp(r0.attn_gate.data(), r1.attn_gate.data(), qg * 4) == 0);
