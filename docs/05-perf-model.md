@@ -502,4 +502,4 @@ images and the exact serve and bench commands are in
 short of that baseline (it was 23.73 t/s / 24.7% short at `62bdd4d`, before the
 lever ladder). No `pp4096` figure exists yet: this engine has no prefill kernel
 (spec 2), so a prompt costs one decode replay per id - 4096 ids in 141.0 s,
-34.43 ms/token, measured in the gate's own runs.
+median **34.44 ms/token**, measured in the gate's own three runs.
