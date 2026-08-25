@@ -39,6 +39,15 @@ struct LoadReport {            // printed by load(); asserted by the checkpoint 
   // reports it on its own line; total() and this field do not.
   size_t small_bytes = 0;
   size_t total() const;             // the seven byte fields above
+  // **`W`, as this load actually measured it** - the bytes a decode step
+  // streams: everything in total() except `embed_tokens` (gathered one row per
+  // token) and the RoPE table (~256 B per token). It is a FIELD rather than a
+  // constant because it is no longer one number: the published checkpoint's
+  // bf16 `lm_head` makes it 15.540 GB and a packed one makes it 13.673 GB
+  // (both measured 2026-08-26). Anything that divides by W - the MBU line the
+  // bench prints, the roofline - has to read it from here, or it reports one
+  // checkpoint's efficiency against another's denominator.
+  size_t read_per_token = 0;
   size_t unconsumed = 0;            // checkpoint tensors nothing loaded (must be 0)
   double seconds = 0;
 };
