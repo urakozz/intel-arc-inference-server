@@ -210,11 +210,14 @@ kernels per token - the estimate here was ~700; the built list, counted by
 `runtime::CapturedStep::kernel_count`, is 645 (2026-08-25). Inside a replayed
 list each kernel still pays a fixed dispatch + drain cost. The 3-5 µs guessed
 here turned out to be **0.52 µs** measured (`probe_replay`, doc 07 #5), so the
-whole list costs ~0.34 ms of a ~26 ms *estimated* step (first measured value:
-37.7 ms/token with the debug tap enabled, 2026-08-25 - Task 9 owns the real
-number) rather than the 2-3.5 ms feared -
-which is why fusion is deferred out of phase 1 entirely (spec §4.1) instead of
-being its first move. The list below survives as the phase-1 fusion order if a
+whole list costs ~0.34 ms rather than the 2-3.5 ms feared. The step it is a
+fraction of is now measured too: **42.14 ms/token** at depth 4096, tg 256,
+median of three runs 2026-08-25 (`tools/bench_decode.sh`, docs/05 and
+BENCHMARKS.md) - so the 645 launches are **0.8%** of a token, and fusion stays
+deferred out of phase 1 entirely (spec §4.1) instead of being its first move.
+The measurement also says where the effort *should* go, which is not here: 67%
+of that step is GEMV and the other 33% is time inside `prep` / `gdn_step` /
+`attn`, not launch overhead. The list below survives as the phase-1 fusion order if a
 later measurement makes it worth the correctness risk:
 
 1. RMSNorm into the following GEMV's prologue (2 per layer, 128 total);
@@ -231,9 +234,9 @@ Target after fusion: **~650 (spec 1 §9.1)**. Doc 07 #5 measures the
 per-kernel floor before any of this is built, so the fusion list is sized by a
 number rather than by taste. Measured 2026-08-22: **0.52 µs/kernel** (`noop`)
 and **0.63 µs/kernel** (`ctrl_read`) inside a replayed list - the 3-5 µs
-estimate above is ~6× pessimistic, 645 kernels cost ~0.4 ms of a ~26 ms step,
-so fusion is *not* on the phase-1 critical path and the unfused list ships
-first.
+estimate above is ~6× pessimistic, 645 kernels cost 0.335 ms of the 42.14 ms
+step measured 2026-08-25 (**0.8%**), so fusion is *not* on the phase-1 critical
+path and the unfused list ships first.
 
 ## Server
 

@@ -28,10 +28,19 @@ independent of each other, and each is labelled by how well it is established.
 | MTP on a weight-stationary `M ∈ [1,8]` verify | draft traffic shared with the verify step; ~55-70 t/s ceiling vs vLLM's 45 (estimate) | phase 2 (doc 05) |
 | W4A8 prefill on native s8×s4 DPAS | int8 systolic rate, zero dequantisation | atom exists in `sycl-tla`; no mainloop yet (doc 07 #9) |
 
-On the 27B dense the roofline is **38.7 t/s** and vLLM already sits at 31.50.
-Every decode lever above is worth ×1.1-1.2 on its own; they multiply to
-~×1.4 at best (≈44 t/s) without speculation. Phase 2 is where the larger
-numbers live. Doc 05 has the arithmetic; `W` is measured, not estimated.
+On the 27B dense the roofline is **38.7 t/s** (600 GB/s ÷ 15.52 GB; 37.97 on
+the loader's measured 15.540 GB and the 590 GB/s a Level Zero launch actually
+gets) and vLLM already sits at 31.50. Every decode lever above is worth ×1.1-1.2
+on its own; they multiply to ~×1.4 at best (≈44 t/s) without speculation. Phase
+2 is where the larger numbers live. Doc 05 has the arithmetic; `W` is measured,
+not estimated.
+
+**First measurement of this engine, 2026-08-25: 23.73 t/s - below vLLM, not
+above it.** Lever 2 delivered completely (0.23% of the step is host time) and
+lever 1 is 89-97% of roofline where it was probed, and the engine is still 24.7%
+short, because a third of the token is spent in kernels neither lever describes.
+The levers are not wrong; they were not the whole cost model. Doc 05's "Phase 1,
+measured" section is the honest version, and it is what spec 1.5 is scoped from.
 
 ## How this project is built - read this first
 
@@ -71,7 +80,7 @@ one beats vLLM on its own model.
 | # | Model | Adds |
 |---|-------|------|
 | 0 | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` | **done 2026-08-23** (GEMV re-measured 2026-08-24) - `W` ✅ 15.52 GB (doc 03), vLLM baseline ✅ 31.50 t/s (BENCHMARKS.md), replay floor ✅ 0.52 µs/kernel (doc 07 #5), GEMV ✅ 533 GB/s at N=5120 / 584 GB/s lm_head (doc 12), bandwidth ✅ 590 GB/s via L0 (doc 01) |
-| 1 | same | dense + hybrid attention (48 GDN + 16 full), int4 g64. **Target: > 31.50 t/s tg256, ≥ 1973 t/s pp4096** |
+| 1 | same | dense + hybrid attention (48 GDN + 16 full), int4 g64. **Target: > 31.50 t/s tg256, ≥ 1973 t/s pp4096.** Decode core **done 2026-08-25** (tag `decode-core-done`): 645-kernel replayed list, 96/96 golden tokens vs the CPU oracle, `b70-decode --bench`. **Target NOT met: tg256 @ depth 4096 = 23.73 t/s measured, 24.7% short of 31.50** (median of 3, `tools/bench_decode.sh`, BENCHMARKS.md). 62.5% MBU against vLLM's 83.0%. 99.8% of the step is inside the fence - the gap is kernel time, not host time: 28.35 ms of the 42.14 ms token is measured GEMV, and the 13.79 ms of non-GEMV work is the whole shortfall (doc 05). No prefill kernel yet, so there is no pp4096 number. Optimisation is spec 1.5, scoped from that decomposition |
 | 2 | same | MTP speculative decoding on the shipped head. **Target: > 45.23 t/s** (vLLM, 2 draft tokens) |
 | 3 | `olka-fi/Ornith-1.0-35B-MXFP4` | MoE (grouped GEMM) + MXFP4 |
 | 4 | `palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4` | MoE **and** MTP together |
