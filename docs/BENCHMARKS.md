@@ -165,6 +165,66 @@ bug, not vLLM or XPU.
 
 `tg256 c2` is aggregate over 2 streams; per-request is roughly half.
 
+## b70-decode - this project, phase 1
+
+Same box, same checkpoint, same `--max-model-len 16k` / `pp4096` / `depth 1` /
+`concurrency 1` shape as the vLLM rows above, so the `tg256` columns compare
+directly. This engine has no prefill kernel yet (a prompt costs one decode
+replay per id - spec 2 owns prefill), so there is no `pp4096` number to put
+beside vLLM's 1973; the ingest rate is recorded instead, and it is the decode
+rate, because it *is* decode.
+
+```bash
+tools/bench_decode.sh                 # 3 runs at depth 4096, tg 256; median + spread
+tools/bench_decode.sh --depth 64      # the doc 07 #12 depth experiment
+```
+
+**Measured 2026-08-25** on an idle box (no container, no other GPU work), three
+runs each, `b70-decode` at commit `62bdd4d`, `debug_resid` off, default
+`--max-len 16384`:
+
+| engine | depth | tg | t/s | ms/token |
+|---|---|---|---|---|
+| vLLM `p314-t214-vxkp0`, no speculation | 1 | 256 | **31.50** | 31.75 |
+| **b70-decode `62bdd4d`** | **4096** | **256** | **23.73** | **42.14** |
+| b70-decode `62bdd4d` | 64 | 256 | 25.00 | 40.00 |
+
+**b70-decode is 24.7% short of vLLM** - 23.73 against 31.50, a factor of 1.327
+the other way. The number is recorded as measured; nothing was tuned to produce
+it, and no `.cl` file was touched in the task that measured it. The
+decomposition and what it scopes are in
+[05-perf-model.md](05-perf-model.md#phase-1-measured--the-honest-verdict).
+
+Every run, verbatim:
+
+| shape | runs (t/s) | median | min | max | spread |
+|---|---|---|---|---|---|
+| depth 4096, tg 256 | 23.72 / 23.73 / 23.74 | **23.73** | 23.72 | 23.74 | 0.02 (0.08%) |
+| depth 64, tg 256 | 25.00 / 25.00 / 24.97 | **25.00** | 24.97 | 25.00 | 0.03 (0.12%) |
+| depth 64, tg 256, `--max-len 4096` | 25.03 / 25.03 / 25.03 | **25.03** | 25.03 | 25.03 | 0.00 (0.00%) |
+
+A 0.08% spread over three runs is not a rounding artefact of the harness: the
+per-run ingest times at depth 4096 were 170432.1 / 170477.7 / 170447.8 ms, i.e.
+the same 4096 replays to within 0.03%. A replayed command list with no host work
+in it is about as reproducible as a wall clock allows.
+
+The median row's own breakdown (run 2, the median run):
+
+```
+ingest: 4096 ids in 170477.7 ms (41.62 ms/token), pos 4096
+generate: 256 ids, 23.73 t/s, 42.14 ms/token (99.8% of it inside the fence)
+  wall 10788.2 ms, fence 10763.3 ms, host 24.9 ms
+  per token: 42.141 ms total = 42.044 ms fence + 0.097 ms host
+  MBU: 23.73 t/s x 15.540 GB = 369 GB/s of 590 GB/s measured = 62.5%
+  dispatch floor (estimated): 645 kernels x 0.52 us = 0.335 ms/token, 0.8% of the fence
+```
+
+**`W` = 15.540 GB/token and 590 GB/s are both measured** - the loader's own
+byte report (docs/13) and `tools/probe/probe_bw` through the same Level Zero
+launch path (docs/01). On those two constants the roofline is 26.34 ms/token =
+**37.97 t/s**, vLLM's 31.50 is **83.0% MBU**, and b70-decode's 23.73 is
+**62.5%**.
+
 ## Notes
 
 - The 3.12/2.13 row was run with `--depth 1 2` and no concurrency sweep, so only

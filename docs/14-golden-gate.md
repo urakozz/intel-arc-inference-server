@@ -212,6 +212,38 @@ command list's bitwise reproducibility (Task 6's `replay_determinism_test`)
 observed end to end, on the real checkpoint, through a 61-token ingest and 32
 generated tokens - measured.
 
+## The CLI cross-check - closed 2026-08-25
+
+The gate proves the **engine**. It does not run `b70-decode`: it links
+`runtime::Engine` directly, reads the `.ids` files itself and compares in
+process. So until this check, the shipped binary - its argument parsing, its
+`--ids` reader, its ingest/generate call order, its stdout channel - had never
+been graded against anything.
+
+```bash
+tools/box.sh run "./build/src/cli/b70-decode Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ \
+  --ids tests/golden/prompts/prose.ids --n 32 > /tmp/cli_prose.out"
+```
+
+stdout, all 32 ids, compared against the `tokens` tensor read straight out of
+`oracle-out/prose.golden.safetensors` (dtype I32, shape [32]) rather than
+against a derived file:
+
+```
+3113 7810 279 1118 479 654 8980 1000 381 1142 440 279 1834 725 2213 13
+3113 11292 279 4220 6092 1000 381 6992 11 321 539 5600 279 72103 1000 381
+```
+
+**32/32 equal.** The CLI reproduces the oracle's continuation exactly, on the
+same prompt, through the product binary. Its stderr on that run -
+`ingest: 42 ids in 1600.7 ms (38.11 ms/token)`, `generate: 32 ids, 25.97 t/s`
+- is also the first end-to-end confirmation that the `--ids` path and the
+`--bench` path measure the same engine.
+
+This is a **check, not a test**: it is a documented command with a recorded
+result, and no new test binary was built for it. The gate remains the
+regression barrier.
+
 ## The vLLM cross-check - status: still open, now actionable
 
 `tools/oracle/README.md`'s trust chain is explicit that the golden gate has a

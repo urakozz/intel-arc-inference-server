@@ -175,9 +175,16 @@ struct DecodeBuffers {
   `buffers.cc` computes each size from the constants (no literals except the
   table in one place), allocates device memory (control = shared), and
   provides the two byte totals. Expected @ max_len 16384, M 8: persistent ≈
-  150.99 + 15.73 + 2×536.87 + 0.000128 GB ≈ **1240.5 MB**; scratch ≈ **44 MB**
+  150.99 + 15.73 + 2×536.87 + 0.000128 GB ≈ **1240.5 MB**; scratch **39.52 MB**
   (dominated by partials 17.8 + attn_part 12.7 + logits 7.9). The test pins
   the exact numbers.
+
+  *(Corrected 2026-08-25, Task 9: this line said "≈ 44 MB". The eleven
+  per-field sizes the plan itself gives add to **39,521,472 B = 39.52 MB**,
+  which is what `DecodeBuffers::scratch_bytes()` returns and what
+  `tests/runtime/buffers_test.cc` asserts - the "44" was a slip in the summary
+  line, not a missing buffer. Every per-field figure in the plan was already
+  right.)*
 
 - [ ] **Step 1: Failing tests.** `tests/l0/device_select_test.cc` (host-only,
   no GPU): `setenv`/`unsetenv` around `l0::Context::device_index_from_env()` -

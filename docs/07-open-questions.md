@@ -65,6 +65,17 @@ a bandwidth one, and replay removes most of the kernel-count cost. Expect GEMM
 to dominate. If a vLLM profile says otherwise, the Triton launch path is the
 first suspect.
 
+**Half-answered on our own engine, 2026-08-25 - and the estimate above is
+wrong about *why*.** Of a measured 42.14 ms step (doc 05), GEMV is **28.35 ms
+(67.3%)** - measured per kernel by `probe_gemv` at the shapes the model table
+binds - and everything else is **13.79 ms (32.7%)**. So GEMM does dominate, as
+predicted. What was not predicted is that the non-GEMV third is **not** a
+kernel-count problem: 645 launches × 0.52 µs is 0.335 ms, 2.4% of that 13.79 ms.
+It is time spent *inside* `prep`, `gdn_step` and `attn`, and this measurement
+does **not** separate the three - that separation is spec 1.5's first job
+(doc 05, "What spec 1.5 is scoped to do"). Attention's share is bounded:
+2.34 ms of per-block work at depth 4096, measured by the #12 experiment.
+
 ## 4. What is vLLM's MBU on the phase-1 model? - **resolved: 81%**
 
 31.50 t/s × 15.52 GB = 489 GB/s of 600. The 50-63% figure was MoE-only. The
@@ -72,6 +83,11 @@ projected headroom for phase 1 is therefore ×1.23 to the bf16-`lm_head`
 roofline and ~×1.35 with `lm_head` at int4 (doc 05) - not 1.4-1.5× from host
 work alone. The thesis survives; its weight shifts to the MoE phases and to
 phase 2.
+
+**On the loader-measured `W` and the Level Zero bandwidth (15.540 GB, 590 GB/s
+- the pair docs/05 and BENCHMARKS.md use from 2026-08-25 on): 489 GB/s of 590 =
+83.0%.** Same conclusion, and the denominator that b70-decode's own 62.5% is
+quoted against, so the two are comparable.
 
 ## 5. What is the per-kernel fixed cost inside a replayed command list?
 
@@ -93,7 +109,8 @@ Per-kernel cost is 0.52 µs (`noop`) and 0.63 µs (`ctrl_read`, which reads one
 dword of a shared-memory control block - the shape of every decode kernel's
 first instruction) → **< 1 µs, so fusion is not on the phase-1 critical path**
 (spec 1 §4.1 rule: ≥ 3 µs yes, < 1 µs no) and the unfused ~645-kernel list
-(spec 1 §9.1) ships first at ~0.4 ms of a ~26 ms step.
+(spec 1 §9.1) ships first at 0.335 ms of a step **measured at 42.14 ms**
+2026-08-25 - **0.8%**, confirming the call (doc 05).
 
 The empty submit + fence round trip is **6.4 µs** - the floor no fusion
 removes, paid once per token. The N = 1 rows are that floor plus one kernel,
@@ -170,12 +187,48 @@ toolchain in the build) and ownership (a hand-written byte-level BPE - no
 dependency, parity must be proven on a corpus). Resolve before the server
 milestone, not before the decode core.
 
-## 12. What does a fixed-grid attention kernel cost at short context?
+## 12. What does a fixed-grid attention kernel cost at short context? - **resolved: 0.046 ms/token, 0.11% of a step. Keep the fixed grid.**
 
 Under replay the attention grid is sized for `max_model_len` and idle
-work-groups exit early (doc 04, "Attention under replay"). Measure the step
-time at `seq_len = 64` vs `seq_len = 4096` with the same list. If the
-difference exceeds ~2% of a step, capture context-bucketed lists instead.
+work-groups exit early (doc 04, "Attention under replay"). The original test:
+measure the step at `seq_len = 64` vs `seq_len = 4096` with the same list, and
+if the difference exceeds ~2% of a step, capture context-bucketed lists
+instead.
+
+**Measured 2026-08-25**, `b70-decode --bench`, tg 256, three runs each on an
+idle box (BENCHMARKS.md carries every row):
+
+| shape | grid (`attn_decode`) | t/s | ms/token |
+|---|---|---|---|
+| depth 4096, `--max-len 16384` | 4 × 64 blocks | 23.73 | 42.141 |
+| depth 64, `--max-len 16384` | 4 × 64 blocks | 25.00 | 39.997 |
+| depth 64, `--max-len 4096` | 4 × 16 blocks | 25.03 | 39.951 |
+
+The first two rows are the experiment as written: **2.144 ms/token, 5.1% of the
+step**, well over the 2% bar. But that difference is not what the question was
+asking about - it is the *real* work of 16 more live 256-position blocks, which
+a bucketed list would still have to do. Reading it as the fixed grid's cost
+would have got the answer exactly backwards.
+
+The third row is the experiment the question actually needed, and it exists
+because `attn_decode`/`attn_reduce` are already compiled at `MAXLEN = 4096` as
+well as 16384: **same depth, same work, one quarter of the grid.** The
+difference is **0.046 ms/token - 0.11% of the step** for 48 extra blocks ×
+4 kv-heads × 16 layers = **3072 extra work-groups**, i.e. **~15 ns per
+early-outed work-group**. That is the number this entry wanted.
+
+**Resolution: the fixed grid stays.** Context-bucketed lists would buy 0.11% and
+cost a captured list per bucket, the memory for it, and a host-side branch on
+context length in the one loop that currently has no branches at all. The
+early-out (doc 12, "The early-out - the answer to a grid that cannot be
+re-sized") does its job. Attention is not on the phase-1 critical path - doc 05
+puts the phase-1 shortfall in `prep`/`gdn_step` instead.
+
+```bash
+tools/bench_decode.sh --depth 64          # rows 2
+tools/bench_decode.sh                     # row 1
+tools/box.sh run "./build/src/cli/b70-decode <model> --bench --depth 64 --tg 256 --max-len 4096"   # row 3
+```
 
 ## 13. Can a `sycl-tla` kernel be appended to a raw L0 command list at all?
 
