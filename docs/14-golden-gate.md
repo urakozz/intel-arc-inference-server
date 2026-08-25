@@ -78,6 +78,46 @@ an otherwise idle box, 2026-08-25, the second at the commit that landed L1:
 | cjk | before L1 (`b15f70f`) | **32/32** | 0.999775022 (L51, t=0) | 0.999830388 | 0.999908549 (L33) | 0.999906932 |
 | cjk | after L1 | **32/32** | 0.999690168 (L51, t=0) | 0.999832133 | 0.999904153 (L33) | 0.999876394 |
 
+**Lever L5 (attention `ATTN_BLOCK` 256 → 64, `c746840`) is the first one that
+moved nothing.** Two more gate runs on the same idle box, 2026-08-25, before at
+`0bfa891` and after at the commit that landed the retile:
+
+| prompt | | exact/32 | tap min cos (layer, t) | L63 tail | `gdn_state` min cos | logit min cos |
+|---|---|---|---|---|---|---|
+| prose | before L5 (`0bfa891`) | **32/32** | 0.994806738 (L62, t=24) | 0.997115152 | 0.999851574 (L60) | 0.999864052 |
+| prose | after L5 | **32/32** | 0.994806738 (L62, t=24) | 0.997115152 | 0.999851574 (L60) | 0.999864052 |
+| code | before L5 (`0bfa891`) | **32/32** | **0.913533675** (L59, t=41) | 0.982882165 | 0.998530392 (L60) | 0.999818731 |
+| code | after L5 | **32/32** | **0.913533675** (L59, t=41) | 0.982882165 | 0.998530392 (L60) | 0.999818731 |
+| cjk | before L5 (`0bfa891`) | **32/32** | 0.999690168 (L51, t=0) | 0.999832133 | 0.999904153 (L33) | 0.999876394 |
+| cjk | after L5 | **32/32** | 0.999690168 (L51, t=0) | 0.999832133 | 0.999904153 (L33) | 0.999876394 |
+
+Every column is identical to all nine printed decimals, on all three prompts.
+After L2 and L1 each walked `code`'s worst tap across 0.9863 → 0.8291 → 0.9135,
+that is a striking result - and **it should be read as a limit of the gate, not
+as a property of the lever.**
+
+**Why it did not move, and what that costs.** L5 reassociates the attention
+softmax's partials: a work-group now accumulates 4 waves into a partial where it
+accumulated 16, and `attn_reduce` merges four times as many of them. But the
+gate's prompts are **42, 61 and 38 ids** and each generates 32, so the deepest
+context any of them reaches is `pos` **92**. At `ATTN_BLOCK` 64 that is two
+blocks; at 256 it was one. The gate therefore exercises a **two-block merge
+against a one-block merge** - genuine coverage of the reassociation, and about
+3% of the 65-block merge the engine runs at depth 4096. Before the retile
+shipped at 64 the same runs were done at 128, where the gate's depths fall
+inside a *single* block and the change is provably a no-op there (a wholly
+masked wave leaves `(mx, sm, acc)` exactly, `resc = 1` and `fma(acc, 1, 0)`),
+so those runs were a control and nothing more.
+
+**What does cover the deep merge** is `tests/kernels/attn_test.cc`, at
+`pos = 4095` (64 live blocks) and `pos = 16383` on the L16384 binary (256 live
+blocks, a 256-step merge), where the device is held to **≤ 2 bf16 ulp** against
+a host reference that models the same blocking - and nothing else does. There is
+no oracle at depth 4096. **A lever that changes attention arithmetic cannot be
+signed off by this gate alone**, and the next one should say so before it starts
+rather than after.
+
+
 Three things this settles, and one it does not.
 
 1. **The gate held, both times, on all three prompts.** 96/96 token ids
@@ -95,12 +135,15 @@ Three things this settles, and one it does not.
    unchanged" and did not re-measure these cosines. So the diagnostics in the
    table above should be read as *the engine of `adc2544`*, not as a standing
    contract.
-4. **What it does not settle**: whether any of this is a *trend*. Three levers
-   in, the worst tap cosine has been 0.9863, 0.8291 and 0.9135 without a token
-   ever moving, and there is no model here for how far it can go before one
-   does. The honest position is the one §11 already took - the tokens are the
-   bar - and the practical consequence is that **every lever that reorders a sum
-   runs the gate, and records both columns, as this one did.**
+4. **What it does not settle**: whether any of this is a *trend*. Four levers
+   in, the worst tap cosine has been 0.9863, 0.8291, 0.9135 and 0.9135 (L5 moved
+   it by less than 1e-9) without a token ever moving, and there is no model here
+   for how far it can go before one does. The honest position is the one §11
+   already took - the tokens are the bar - and the practical consequence is that
+   **every lever that reorders a sum runs the gate, and records both columns, as
+   this one did.** L5 adds a second consequence: a gate run that shows *no*
+   movement has to be checked for whether the change was reachable at all from
+   42/61/38-id prompts, because L5's was barely.
 
 The engine's continuations are the three recorded in `tools/oracle/README.md`
 ("Sanity checks on the written files"), id for id, including the CJK prompt's

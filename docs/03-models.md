@@ -210,8 +210,8 @@ pessimistic: the list **was** 645 kernels at 0.52 µs = 0.335 ms estimated,
 **0.473 ms measured in situ 2026-08-25** (0.733 µs/launch - doc 07 #5,
 docs/15), and the step **was** 42.14 ms - docs 07 #5 and 05. (Both figures are
 that measurement's, at `43bb720`. Spec 1.5's lever L1 has since taken the list
-to **774** launches deliberately and the step to **38.05 ms** - docs/04,
-BENCHMARKS.md.) The conclusion inverted and the in-situ
+to **774** launches deliberately, and levers L2/L1/L5 together have taken the
+step to **36.32 ms** - docs/04, BENCHMARKS.md.) The conclusion inverted and the in-situ
 number keeps it inverted: fusion is *not* on the phase-1 critical path.)
 Fusion (norm into GEMV prologue, conv1d + l2norm + recurrence + gated norm
 into one GDN kernel, gate ‖ up ‖ SiLU into one GEMV) is part of phase 1, not a
