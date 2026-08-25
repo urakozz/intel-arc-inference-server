@@ -20,19 +20,23 @@ struct DecodeBuffers {
   // that no compiled binary matches throws at capture instead of striding
   // `attn_part` at one size while the kernel writes it at another.
   //
-  // **64 is measured on both sides, which is the only reason it is 64.**
-  // docs/15 §2's `F + fill·P` fit predicted 214.5 µs/launch at a 128-position
-  // block; the retile measured 296.684. So the block size was swept in situ at
-  // depth 4096 instead - `attn_decode` µs/launch, then the attn family's
-  // ms/token:
+  // **64 is measured, not derived - but it is not a knee either.** docs/15 §2's
+  // `F + fill·P` fit predicted 214.5 µs/launch at a 128-position block; the
+  // retile measured 296.684. So the block size was swept in situ at depth 4096
+  // instead - `attn_decode` µs/launch, then the attn family's ms/token:
   //
   //     B256 369.988 / 6.058   B128 296.684 / 4.931
-  //     B64  224.046 / 3.839   B32  203.888 / 3.772
+  //     B64  224.046 / 3.839   B32  203.837 / 3.769
   //
-  // B32 still shortens `attn_decode`, but `attn_reduce`'s merge runs over four
-  // times the blocks (196 → 453 µs/step) and the step's sum of 774 kernel
-  // durations comes out 21 µs HIGHER than at B64. 64 is the knee.
-  // docs/12 `attn` → Measured carries the arithmetic.
+  // B32's family total is **0.070 ms/token better than B64**, so there is no
+  // crossover to point at: the step-Σ difference that once looked like one
+  // (+19.5 µs) is inside the +0.283% drift the untouched launches showed
+  // between those two runs. 64 is chosen because the marginal gain has
+  // collapsed (−1.127, −1.092, −0.070 ms/token for the three halvings, the last
+  // about a third of one run's drift), because `attn_reduce` is on a steep ramp
+  // (80 → 127 → 196 → 450 µs/step), and because B32 would double `attn_part`
+  // again - 50.7 → 101.4 MB, per-step scratch 77.6 → 128.3 MB - to buy that
+  // 0.070 ms. docs/12 `attn` → Measured carries the arithmetic.
   static constexpr uint32_t kAttnBlock = 64;
   // **prep_res_norm's two-stage grid** (spec 1.5 lever L1). Stage A
   // (`prep_res_fold`) runs this many work-groups over the hidden row and writes

@@ -170,10 +170,17 @@ add_ocloc_kernel(argmax_stage2 SOURCE ${ARGMAX_CL} DEFINES ${ARGMAX_DEFINES})
 # attn_decode us/launch and the attn FAMILY ms/token:
 #
 #   B256  369.988  6.058 | B128  296.684  4.931 | B64  224.046  3.839
-#   B32   203.888  3.772  <- attn_decode still falls, attn_reduce goes
-#                            196 -> 453 us/step and the whole step's sum of 774
-#                            kernel durations goes UP by 21 us. 64 is the knee,
-#                            and it is measured on both sides.
+#   B32   203.837  3.769
+#
+# **64 is NOT a knee** -- B32's family total is 0.070 ms/token BETTER, and the
+# step-Sigma difference that once looked like a crossover (+19.5 us) is inside
+# the +0.283% drift the untouched launches showed between those two runs. 64 is
+# chosen on three things that do not need a sign: the marginal gain has
+# collapsed (-1.127, -1.092, -0.070 ms/token for the three halvings, the last
+# about a third of one run's drift); `attn_reduce`'s merge is on a steep ramp
+# (80 -> 127 -> 196 -> 450 us/step, taking back 254 of attn_decode's 323 at
+# B32); and `attn_part` would double again to 101.4 MB of scratch to buy that
+# 0.070 ms.
 #
 # Both compiled lengths move together; there is no mixed-block build, because
 # `kAttnBlock` is one number for the whole engine.
@@ -223,7 +230,7 @@ add_attn_reduce(1 4096)
 # Note the asymmetry, which is deliberate while M = 2 is test-only: the M = 2
 # decode/reduce pair exists **at L4096 only**, the length attn_test allocates.
 # There is no `attn_decode_M2_L16384_B*` / `attn_reduce_M2_L16384_B*`, so
-# `kernels::attn_{decode,reduce}_variant(2, 16384, 128)` names no file and the
+# `kernels::attn_{decode,reduce}_variant(2, 16384, 64)` names no file and the
 # runtime cannot bind M = 2 attention at the loader's default max_len. Whoever
 # turns M > 1 on (plan 3's MTP work) adds the L16384 rows here first.
 add_attn_prep(2)

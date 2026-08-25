@@ -263,12 +263,17 @@
 // family's ms/token:
 //
 //     B256  369.988  6.058 | B128  296.684  4.931
-//     B64   224.046  3.839 | B32   203.888  3.772
+//     B64   224.046  3.839 | B32   203.837  3.769
 //
-// `attn_decode` is still falling at B32, but `attn_reduce`'s merge (now over
-// twice as many blocks again) goes 196 → 453 µs/step and the step's whole sum
-// of 774 kernel durations goes UP. **64 is the knee, measured on both sides.**
-// What is *measured* and not fitted: the three points 256 → 128 → 64 each cost
+// **64 is NOT a knee** - B32's family total is 0.070 ms/token *better*, and the
+// step's Σ difference that once looked like a crossover (+19.5 µs) is inside
+// the +0.283% drift the untouched launches showed between those two runs. 64 is
+// chosen because the marginal gain has collapsed (the three halvings bought
+// −1.127, −1.092 and −0.070 ms/token, the last about a third of one run's
+// drift), because `attn_reduce`'s merge is on a steep ramp (80 → 127 → 196 →
+// 450 µs/step, taking back 254 of `attn_decode`'s 323 at B32), and because
+// `attn_part` would double again to 101.4 MB of device scratch for that
+// 0.070 ms. What is *measured* and not fitted: the three points 256 → 128 → 64 each cost
 // ~73 µs less per launch than the last, which is linear in log2(block) and not
 // in the block; nothing here explains that, and this file does not invent a
 // fourth model to fit it (docs/12 `attn` → Measured).

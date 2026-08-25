@@ -2339,7 +2339,7 @@ merges `nb = (pos+m)/ATTN_BLOCK + 1` blocks, which at depth 4096 goes 17 → 65.
 It costs 116 µs against `attn_decode`'s 2335, a **20:1** trade, and it is why
 this lever is judged on the family's net rather than on `attn_decode` alone.
 
-#### The block sweep - four values, measured, and the knee is real
+#### The block sweep - four values, measured, and why it stopped at 64
 
 The retile was run at three sizes below 256 before one was chosen. All at depth
 4096, `--steps 32`, same box, same session:

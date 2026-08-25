@@ -618,7 +618,7 @@ first, and its result is why the other two were run at all.
 |---|---|---|---|---|---|---|
 | **256** - before | 68 | 369.988 | 80.241 | **6.058** | 37387.510 | the baseline |
 | 128 - the planned retile | 132 | 296.684 | 127.240 | **4.931** | 36380.755 | works, and falsifies §2's fit by +38% |
-| **64 - shipped** | 260 | **224.046** | 196.195 | **3.839** | **35342.441** | the knee |
+| **64 - shipped** | 260 | **224.046** | 196.195 | **3.839** | **35342.441** | shipped: the last halving that pays |
 | 32 | 516 | 203.837 | 450.208 | 3.769 | 35361.950 | family 0.070 ms better; not worth its footprint |
 
 **Why the sweep stopped at 64 - stated carefully, because the first version of
@@ -781,7 +781,7 @@ produce. Yields are estimated, and each says on what basis.
 
 | rank | lever | measured | share of Σ | expected yield | basis |
 |---|---|---|---|---|---|
-| 1 | ~~**L5** attention (`attn_decode`)~~ **- CUT, §L5** | **5.782 ms** (5.920 re-measured at `0bfa891`) | 13.9% | **−2.219 ms measured** on the attn family, −1.73 ms on the bench (predicted 1.5-2.5) | **done**. The prediction landed inside its band; the *model* behind it did not. §2's `F + fill·P` fit predicted 214.5 µs/launch at a 128-position block and measured 296.684 (+38%), and the refit that replaced it missed B64 by −13.8% the other way. `ATTN_BLOCK` was swept 256/128/64/32 instead of fitted and **shipped at 64**, the measured knee: at 32 `attn_decode` still improves but `attn_reduce` doubles again and the step's Σ goes up. Row is now 3.585 ms and still the largest non-GEMV row in the step |
+| 1 | ~~**L5** attention (`attn_decode`)~~ **- CUT, §L5** | **5.782 ms** (5.920 re-measured at `0bfa891`) | 13.9% | **−2.219 ms measured** on the attn family, −1.73 ms on the bench (predicted 1.5-2.5) | **done**. The prediction landed inside its band; the *model* behind it did not. §2's `F + fill·P` fit predicted 214.5 µs/launch at a 128-position block and measured 296.684 (+38%), and the refit that replaced it missed B64 by −13.8% the other way. `ATTN_BLOCK` was swept 256/128/64/32 instead of fitted and **shipped at 64** - not on a knee (B32's family is 0.070 ms/token *better*) but because the marginal gain collapses (−1.127 → −1.092 → −0.070 ms) while `attn_part` would double to 101.4 MB. Row is now 3.585 ms and still the largest non-GEMV row in the step |
 | 2 | ~~**L1** `prep_res_norm` two-stage~~ **- CUT, §L1** | **2.871 ms** | 6.9% | **−2.409 ms measured** (predicted 1.5-2.4) | **done**. The prediction landed at the top of its band and the *mechanism* landed too: 16 → 320 subgroups took the fold from 17.0 to 173 GB/s, exactly the sub-linear shape §L2's curve implied. The surprise was elsewhere - stage B's grid, which the plan wrote as one work-group, was worth 0.96 ms of the 2.41. Row is now 0.484 ms and 5.7× from its traffic floor |
 | 3 | ~~**L2** `a‖b` GEMV occupancy~~ **- CUT, §L2** | **2.335 ms** | 5.6% | **−2.085 ms measured** (predicted 1.2-1.9) | **done**. The prediction landed, the *mechanism* did not: `COLS_PER_WG` 16 was worth **zero** and what paid was a 16-way K split inside the work-group (8 → 128 subgroups). Row is now 0.256 ms and 0.15 ms from its traffic floor |
 | 4 | **L3** `gdn_step` retile | **0.733 ms** | 1.8% | **≤0.06 ms** | **candidate for skip-by-ruling** - 1.09× its own 0.671 ms traffic floor, 92% of device bandwidth; the lever cannot repay a day of work at any outcome |
@@ -828,7 +828,10 @@ nevertheless third to execute, for reasons the measurement itself supplies:
   measurement now argues against it, §L5 - and "measure the retile first" was the
   single most valuable sentence in this section: the retile immediately falsified
   the fit that priced it, and the block size ended up **64, not 128**, chosen by
-  a four-value sweep with the knee measured on both sides. The correctness risk
+  a four-value sweep - on the collapse of the marginal gain and on footprint,
+  **not** on a knee: B32 is measured 0.070 ms/token BETTER at family level, and
+  64 wins because the third halving buys ~nothing (−1.127 → −1.092 → −0.070 ms)
+  while `attn_part` would double to 101.4 MB. The correctness risk
   did not materialise, but the gate turned out unable to see the change: its
   prompts reach `pos` 92 and the reassociation lives at depth. §L5, docs/14.)*
 
