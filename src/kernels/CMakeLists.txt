@@ -31,22 +31,21 @@ add_gemv_bf16_variant(1 5120 128)      # in_proj_a || in_proj_b, zero-padded 96 
 # binary carries all three and the runtime loads the one it asked for. Only
 # prep_res_norm has a shape to vary; the other two bake the model's dimensions.
 #
-# `-cl-fp32-correctly-rounded-divide-sqrt` is not decoration: prep's references
-# are compared **bit-exactly**, and by default OpenCL allows 2.5 ulp on `/` and
-# `sqrt`. Measured without it, the device's `1/sqrt(mean+eps)` sat 1-2 ulp under
-# the host's and one x_out element in 5120 landed on the wrong side of a
-# round-to-nearest tie (docs/12-kernels.md, "Rounding discipline").
+# These used to pass `-cl-fp32-correctly-rounded-divide-sqrt` by hand. It is now
+# the project-wide default in cmake/ocloc.cmake -- prep's references are compared
+# bit-exactly and OpenCL's default 2.5 ulp on `/` and `sqrt` really does break
+# that (docs/12-kernels.md, "Rounding discipline"), and the next kernel with a
+# divide should not have to remember (controller ruling 2026-08-25, Task 4).
 set(PREP_CL ${CMAKE_CURRENT_SOURCE_DIR}/prep.cl)
-set(PREP_OPTS -cl-fp32-correctly-rounded-divide-sqrt)
 function(add_prep_res_norm M K SP)
   add_ocloc_kernel(prep_res_norm_M${M}_K${K}_SP${SP} SOURCE ${PREP_CL}
-                   DEFINES M=${M} K=${K} S_PREV=${SP} OPTIONS ${PREP_OPTS})
+                   DEFINES M=${M} K=${K} S_PREV=${SP})
 endfunction()
 add_prep_res_norm(1 5120 0)    # first norm of a layer: no mixer partials to fold in
 add_prep_res_norm(1 5120 16)   # after out_proj / down (S = 16)
 add_prep_res_norm(2 5120 16)   # spec 1 §9: the M loop must compile at M=2
-add_ocloc_kernel(prep_silu_mul_M1 SOURCE ${PREP_CL} DEFINES M=1 OPTIONS ${PREP_OPTS})
-add_ocloc_kernel(prep_gated_head_M1 SOURCE ${PREP_CL} DEFINES M=1 OPTIONS ${PREP_OPTS})
+add_ocloc_kernel(prep_silu_mul_M1 SOURCE ${PREP_CL} DEFINES M=1)
+add_ocloc_kernel(prep_gated_head_M1 SOURCE ${PREP_CL} DEFINES M=1)
 
 # The control block (runtime::Control, src/runtime/control.h) seen as a flat
 # `uint` array - the kernels that touch it index it with these. This ONE line is
@@ -57,8 +56,23 @@ add_ocloc_kernel(prep_gated_head_M1 SOURCE ${PREP_CL} DEFINES M=1 OPTIONS ${PREP
 # whose every assertion reads or writes a *named struct field*.
 set(CTRL_DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=2 CTRL_OUT=10 CTRL_DEBUG=18)
 
+# gdn_step: the GDN decode step (conv1d update + SiLU, l2norm, gated delta-rule
+# recurrence) - 48 of the model's 64 layers. `M` is its whole variant space:
+# every other dimension is the model's and is baked into the source.
+#
+# NEGA_OFF / DTBIAS_OFF are the layer's GDN small-block offsets **in floats**,
+# i.e. loader/small_layout.h's kGdnOffNegA (163840 B) and kGdnOffDtBias
+# (164032 B) divided by 4. The kernel takes the block base as a `const float*`
+# and indexes with these, so the byte offsets stay in the one header that owns
+# them; small_layout.h's static_asserts are what keeps this line honest.
+set(GDN_DEFINES ${CTRL_DEFINES} NEGA_OFF=40960 DTBIAS_OFF=41008)
+set(GDN_CL ${CMAKE_CURRENT_SOURCE_DIR}/gdn_step.cl)
+add_ocloc_kernel(gdn_step_M1 SOURCE ${GDN_CL} DEFINES ${GDN_DEFINES} M=1)
+add_ocloc_kernel(gdn_step_M2 SOURCE ${GDN_CL} DEFINES ${GDN_DEFINES} M=2)  # spec 1 §9: compile-only
+
 # embed_gather and argmax are pure compare-and-copy: no divide, no sqrt, no
-# rounding, so neither takes -cl-fp32-correctly-rounded-divide-sqrt.
+# rounding, so the project-wide correctly-rounded flag changes nothing in
+# their code -- which is what keeps the flag safe as a default.
 add_ocloc_kernel(embed_gather_M1 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
                  DEFINES ${CTRL_DEFINES} M=1 HIDDEN=5120 VOCAB=248320)
 

@@ -30,6 +30,11 @@ inline std::string prep_gated_head_variant(unsigned M) {
   return "prep_gated_head_M" + std::to_string(M);
 }
 
+// The GDN decode step (src/kernels/gdn_step.cl). Grid (48 heads, 4 state-column
+// chunks), work-group 256; `M` is its whole variant space, every other
+// dimension being the model's and baked into the source.
+inline std::string gdn_step_variant(unsigned M) { return "gdn_step_M" + std::to_string(M); }
+
 // The control block as the kernels see it: `runtime::Control`
 // (src/runtime/control.h) indexed as a flat `uint` array. The device side gets
 // these numbers from ONE place - the `CTRL_DEFINES` line in
