@@ -428,9 +428,22 @@ subgroups** against 256 EUs - the grid fills the device on `N` alone, which is
 what spec §4.2 predicted. The measurement settles it rather than arguing it:
 **584 GB/s, 97% of the 600 GB/s roofline denominator and 99% of the 590 GB/s
 that `probe_bw` measures through the same launch path.** There is no headroom
-for split-K to recover, so `lm_head`'s variant carries neither define, and its
-binary and its in-situ time are unmoved by the knobs existing (4378.555 ->
-4378.353 µs/launch, 0.005%, measured across the change).
+for split-K to recover, so `lm_head`'s variant carries neither define and its
+ocloc command line is character-for-character the one it always had.
+
+**Its in-situ time is measured unmoved across the change: 4378.555 → 4379.089
+µs/launch, +0.012%** (before at `43bb720`, after at the committed `a1e2d3a`;
+docs/15 §L2). **Its binary is not byte-identical, and that is worth stating
+plainly** - restructuring the K loop for `KSPLIT` changed IGC's output at
+`KSPLIT == 1` as well, and the intermediate `KU` experiment proved this is a
+real risk rather than a theoretical one (it cost `lm_head` 1.3% for a knob worth
+nothing). So the timing control above is the *secondary* evidence. The primary
+evidence is the acceptance that ran after the change: the **golden gate at
+96/96, element-exact**, which drives every token through `lm_head`'s logits and
+`argmax`, and `replay_determinism_test` green. This project's build flags pin
+correctly-rounded `/` and `sqrt` but say nothing about `FP_CONTRACT`, so "same
+defines ⇒ same numerics" is not airtight for any kernel here - which is exactly
+why the gate, and not a hash, is the ruled arbiter.
 
 **`a‖b` needed both, and what it needed them for was measured** (spec 1.5 lever
 L2; the three-point sweep is docs/15 §L2). At `{64, 1}` the whole launch is
@@ -461,7 +474,19 @@ bits every time. Reordering a sum is exactly what the golden gate exists to
 arbitrate, and it did - **96/96 element-exact, unchanged**. (`gemv_bf16_test`
 holds the split build to the reference tolerance, not to the unsplit build's
 bytes; it is in fact *closer* to the double-precision reference than the unsplit
-build, 8.3e-07 against 2.4e-06, which is what pairwise summation does.)
+build: **4.77e-07 against 2.38e-06** on the test's own fixed-seed inputs, which
+is what pairwise summation does.)
+
+**No test pins the merge *order*, and none can cheaply.** `gemv_bf16_test`'s
+pair bar is the reference tolerance, which at this shape is 3.11e-04 against an
+observed 2.15e-06 difference - about **150× of slack**, enough to swallow any
+re-association of the sixteen slices. What actually holds the order is (a) the
+kernel text, which contains no atomic, no data-dependent branch and no
+arrival-order dependence - the tree is a `for` over compile-time strides with a
+`barrier` after each step, so *which* subgroup finishes first cannot change the
+result - and (b) the golden gate, which is the ruled arbiter for exactly this
+class of change. A reordering that mattered would show up there as a flipped
+token, not here as a tolerance failure.
 
 ### Layout
 
@@ -521,6 +546,15 @@ situ, 2026-08-25 (docs/15), 48 launches per token over 1.31 MB each:
 | `{64, 1}` - as it shipped through plan 3 | 8 | 48.774 | **2.341** | 26.9 | measured, in situ |
 | **`{16, 16}` - since spec 1.5 lever L2** | **128** | **5.340** | **0.256** | **245** | **measured, in situ** |
 
+**Two numbers exist for the same pre-lever row and both are right.** docs/15's
+anatomy run reads **48.6 µs / 2.335 ms**; the before-run of the L2 measurement,
+at the identical sha and on the same box, reads **48.774 µs / 2.341 ms**. They
+are two runs of one instrument 0.3% apart, which is its run-to-run spread on
+this row, and nothing turns on the difference. **The 48.774 / 2.341 pair is used
+throughout the L2 arithmetic**, because a before/after must be two rows of the
+same comparison; docs/15's own anatomy tables keep 2.335, because that is what
+the run they report measured. Do not mix the halves.
+
 The `{64, 1}` row is the one doc 05 called the aggregate bucket's second
 suspect, and it was the right call: 2.341 ms/token, 5.6% of the sum of kernel
 durations, **21× the 0.11 ms its traffic is worth** at the measured 590 GB/s.
@@ -535,7 +569,7 @@ At `{16, 16}` it is **245 GB/s, 41.6% of the device**, and 2.4× the 2.22 µs it
 1.31 MB is worth at full bandwidth - so **at most 0.15 ms/token is left in this
 kernel** and a wider split cannot repay the golden-gate run it would need.
 `lm_head`, the same kernel at N = 248320, remains at 97% of bandwidth and is
-untouched (4378.555 → 4378.353 µs/launch across the change).
+measured unmoved across the change (4378.555 → 4379.089 µs/launch, +0.012%).
 
 ---
 
@@ -819,14 +853,47 @@ not 40; 2.871 ms for `prep_res_norm`, not 5.2. And the traffic arithmetic above
 is a **24× under-prediction** for the family (89.4 MB is 0.15 ms at the
 roofline; the family costs 3.573), not the 75× the bucket bound allowed for.
 
-What the in-situ numbers add that no bound could: **the per-work-group ceiling.**
-17.0 GB/s on one work-group, 12.2 GB/s each on `prep_silu_mul`'s five, and
-13.5 GB/s each on the `a‖b` GEMV's two (`gemv_bf16` → Measured). A single Xe-core
-cannot keep enough loads in flight to beat ~15 GB/s, so **~40 work-groups are
-needed to saturate 590 GB/s** - and `gdn_step`, at 192, reaches 540. That makes
-`prep_res_norm`'s fix predictable rather than hopeful: the two-stage reduction is
-not a guess about latency, it is a work-group count. It is spec 1.5's lever L1
-(docs/15's ladder, rank 2), estimated at 1.5-2.4 ms.
+What the in-situ numbers add that no bound could: **a parallelism ceiling - and
+the unit of it is the subgroup, not the work-group.**
+
+The paragraph this replaces read it the other way. It said 17.0 GB/s on one
+work-group, 12.2 each on `prep_silu_mul`'s five and 13.5 each on the `a‖b`
+GEMV's two, therefore ~40 work-groups saturate 590 GB/s, therefore
+`prep_res_norm`'s fix "is not a guess about latency, it is a work-group count".
+**That reading was acted on and it bought nothing.** Spec 1.5's lever L2 gave
+`a‖b` four times the work-groups at an unchanged subgroup count - 2 → 8, the
+exact experiment the sentence licensed - and the launch went 48.774 → **49.127**
+µs, a 0.7% regression where the model said ~12 µs. The 13.5 GB/s cited above is
+that same kernel's number, so this is not a distant counter-example; it is the
+citation itself failing when used.
+
+**What is measured, and what L1 should be designed on** (docs/15 §L2, three
+points, one instrument):
+
+| `a‖b` subgroups | µs/launch | GB/s | GB/s per subgroup |
+|---|---|---|---|
+| 8 | 48.774 | 26.9 | 3.36 |
+| 32 | 13.115 | 99.9 | 3.12 |
+| 128 | 5.340 | 245 | 1.92 |
+
+A subgroup pulls roughly what a subgroup pulls, and the curve is **sub-linear at
+the top** - 16× the subgroups bought 9.1×. Note also that the three "per
+work-group" figures in the old paragraph are not comparable as written:
+`prep_res_norm`'s one work-group is **16 subgroups**, `prep_silu_mul`'s five are
+**80**, and `a‖b`'s two were **8**, so per subgroup they read 1.06 / 0.76 /
+3.36 GB/s. `a‖b`'s is 3-4× the others because its subgroup pulls 256 B per load
+(`intel_sub_group_block_read_us8`) where prep's pulls 64 B - the signature of a
+kernel latency-bound with one load in flight per thread.
+
+**So L1's case survives, and its basis changes.** A two-stage `prep_res_norm`
+multiplies subgroups, not just work-groups: 16 today → ~320 across 20
+work-groups. That is a 20× on the axis the measurement says matters, and even at
+L2's sub-linear rate it is a large number. But it is an extrapolation off the
+table above and **not** off a work-group ceiling, the top of that curve is where
+it bends, and whoever cuts L1 should read docs/15 §L2 before designing: two of
+the three things tried in L2 were worth zero, and they were the two the ranking
+called certain. It is spec 1.5's lever L1 (docs/15's ladder, rank 2), estimated
+at 1.5-2.4 ms.
 
 Worse than bandwidth, in fact: the 320 KB of partials `prep_res_norm` folds were
 written by the GEMV that ran immediately before it, so most of that 17.0 GB/s is

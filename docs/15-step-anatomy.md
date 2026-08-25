@@ -187,6 +187,14 @@ bench step:
 | host, outside the fence | - | **0.097** | 0.2% | measured (bench) |
 | **total** | **645** | **42.141** | 100% | measured (bench, median of three) |
 
+> **Superseded as the current step - see §L2.** This partition is the step at
+> `43bb720`, before spec 1.5 cut its first lever, and it is kept whole because
+> every row is one measurement of one run and because it is what the 42.141 ms
+> bench row partitions. Lever L2 has since taken the `a‖b` row to
+> **0.256 ms/token** and the step to **40.266 ms** (BENCHMARKS.md); the
+> before/after and its arithmetic are §L2 below. Every other row here is
+> untouched by that lever.
+
 Compare with the same table in docs/05: five rows that were a floor, an
 extrapolation and a remainder are now seven rows that were all measured in one
 run. **98.6% of the step is kernel time inside the fence** (41.571 of 42.141);
@@ -351,6 +359,16 @@ Five `--profile --depth 4096 --steps 32` runs, same box, same session, each
 building the full engine and replaying 32 instrumented steps. The column that
 decides is `gemv_bf16` at 5120×128, 48 launches:
 
+**On the baseline this table starts from.** Row 0 is `48.774 µs / 2.341 ms`,
+while the anatomy tables earlier in this document say `48.6 µs / 2.335 ms`.
+Those are **two runs of this same instrument at the same sha**, 0.3% apart,
+which is its run-to-run spread on this row (§"Reproducibility" measures 0.05%
+for the `gemv` family and 2.5% for the smallest row quoted). The L2 arithmetic
+below uses the 48.774 / 2.341 pair throughout, because a before/after has to be
+two rows of one comparison; the anatomy tables keep 2.335, because that is what
+the run they report measured. The two must not be mixed inside one sentence -
+48.774 × 48 is 2.341, not 2.335.
+
 | tiling (`COLS_PER_WG`, `KSPLIT`) | work-groups | **subgroups** | µs/launch | ms/token | GB/s | GB/s per subgroup |
 |---|---|---|---|---|---|---|
 | `{64, 1}` - as plan 3 shipped it | 2 | 8 | **48.774** | **2.341** | 26.9 | 3.36 |
@@ -494,8 +512,11 @@ Spec §2's success bar is 31.746 ms/token; the step is 42.141. **The gap is
 That lands at **34.4 ms/token ≈ 29.0 t/s** - short of 31.50 by about 2.7 ms.
 
 **One lever in, the arithmetic is unchanged and the estimate held.** L2 paid
-−1.875 ms against the −1.9 it was priced at, so the remaining ladder is
-40.266 − 5.8 = **34.5 ms/token optimistically**, the same place. What the
+−1.875 ms against the −1.9 it was priced at. The step is now **40.266 ms**
+(measured, BENCHMARKS.md) and **the gap to the 31.746 ms bar is 8.520 ms**; the
+four remaining levers are priced at −5.76 optimistically, so the ladder lands at
+**34.5 ms/token**, the same place it landed when this section was written in
+advance. What the
 execution changed is confidence, not the total: the yield was right and the
 *reason* was wrong, which is a warning about L1's and L5's yields rather than
 about their existence.

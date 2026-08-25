@@ -169,8 +169,9 @@ Read that table twice before proposing anything.
    is worth 12-17 GB/s (docs/15 §1, three points). Lever L2 tested that on `a‖b`
    by giving it 4× the work-groups at the same subgroup count and it bought
    **nothing**; splitting K to 16× the subgroups took the same launch from
-   48.774 to 5.340 µs and the row from 2.335 to **0.256 ms/token** (docs/15
-   §L2). The unit is the **subgroup**. `prep_res_norm`'s 2.871 ms is still a
+   48.774 to 5.340 µs, i.e. that run's row from 2.341 to **0.256 ms/token**
+   (docs/15 §L2; the 2.335 above is the anatomy run's reading of the same
+   pre-lever row, 0.3% away - one run's pair per sentence, never a mix). The unit is the **subgroup**. `prep_res_norm`'s 2.871 ms is still a
    parallelism story and L1 still has a case, but it now rests on that curve
    rather than on §1's table. `attn_decode` is a third failure again: its
    work-groups are nearly free (3.4× for +6.9%) and what costs is one
@@ -397,8 +398,11 @@ All six are done. 4 was half-done on 2026-08-25 (GEMM 67.3% / rest 32.7%, the
 "rest" not split) and was finished the same day by spec 1.5's first task: the
 per-kernel in-situ profile, [15-step-anatomy.md](15-step-anatomy.md). The
 aggregate that was "the entire gap to vLLM" is now seven measured rows, and the
-gap's largest addressable members are `attn_decode` (5.782 ms), `prep_res_norm`
-(2.871) and the `a‖b` GEMV (2.335).
+gap's largest addressable members were `attn_decode` (5.782 ms), `prep_res_norm`
+(2.871) and the `a‖b` GEMV (2.335). **`a‖b` has since been cut** - spec 1.5's
+lever L2 took it to 0.256 ms/token and the step to 40.266 ms - so the list of
+addressable members is now `attn_decode` and `prep_res_norm`, and the three
+figures above are the pre-lever anatomy they were measured in.
 
 ## Benchmark
 
