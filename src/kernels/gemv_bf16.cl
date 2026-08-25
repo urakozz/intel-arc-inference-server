@@ -90,8 +90,9 @@ __kernel void gemv_bf16(__global const ushort* restrict w,
                         __global const ushort* restrict x,
                         __global float* restrict out) {
 #if KSPLIT > 1
-  // [subgroup][m][lane]: one fp32 partial per column per K slice. 256 B at the
-  // a‖b tiling. Declared here because OpenCL wants __local at kernel scope.
+  // [subgroup][m][lane]: one fp32 partial per column per K slice. At the a‖b
+  // tiling that is 16 subgroups x M 1 x 16 lanes x 4 B = **1024 B** per
+  // work-group. Declared here because OpenCL wants __local at kernel scope.
   __local float red[SG_PER_WG][M][SG];
 #endif
   const uint lane = get_sub_group_local_id();
