@@ -121,17 +121,29 @@ inline std::string gdn_step_variant(unsigned M) { return "gdn_step_M" + std::to_
 // The decode-attention trio (src/kernels/attn.cl), the 16 full-attention
 // layers. `attn_prep` runs a grid of (28, M) - 24 q-heads then 4 kv-heads - and
 // indexes the KV caches by absolute position, so `M` is its whole variant
-// space. `attn_decode` (grid (4 kv-heads, max_len/256 blocks)) and
-// `attn_reduce` (grid (24, M)) additionally bake `MAXLEN`, because `attn_part`
-// is strided `[24][MAXLEN/256][M][258]` and the stride has to be a compile-time
-// constant; the grid itself is set at capture from `buffers.max_len`, which
-// must therefore equal the `MAXLEN` of the variant bound to it.
+// space. `attn_decode` (grid (4 kv-heads, max_len/BLOCK blocks)) and
+// `attn_reduce` (grid (24, M)) additionally bake `MAXLEN` **and** `BLOCK`,
+// because `attn_part` is strided `[24][MAXLEN/BLOCK][M][258]` and the stride
+// has to be a compile-time constant; the grid itself is set at capture from
+// `buffers.max_len`, which must therefore equal the `MAXLEN` of the variant
+// bound to it.
+//
+// `BLOCK` is in the name - `attn_decode_M1_L16384_B64` - for the reason
+// `prep_res_fold`'s `G` is: it is the ONE number the host and the device must
+// agree on that neither can check against the other. The host's copy is
+// `runtime::DecodeBuffers::kAttnBlock`, and it sizes `attn_part` and sets the
+// grid; the device's is `-DATTN_BLOCK` in src/kernels/CMakeLists.txt. Putting
+// it in the name turns a disagreement into "no such binary" at capture instead
+// of a buffer strided one way and written another. Spec 1.5's lever L5 moved
+// it from 256 to 64 and is why it is a parameter at all.
 inline std::string attn_prep_variant(unsigned M) { return "attn_prep_M" + std::to_string(M); }
-inline std::string attn_decode_variant(unsigned M, unsigned MAXLEN) {
-  return "attn_decode_M" + std::to_string(M) + "_L" + std::to_string(MAXLEN);
+inline std::string attn_decode_variant(unsigned M, unsigned MAXLEN, unsigned BLOCK) {
+  return "attn_decode_M" + std::to_string(M) + "_L" + std::to_string(MAXLEN) + "_B" +
+         std::to_string(BLOCK);
 }
-inline std::string attn_reduce_variant(unsigned M, unsigned MAXLEN) {
-  return "attn_reduce_M" + std::to_string(M) + "_L" + std::to_string(MAXLEN);
+inline std::string attn_reduce_variant(unsigned M, unsigned MAXLEN, unsigned BLOCK) {
+  return "attn_reduce_M" + std::to_string(M) + "_L" + std::to_string(MAXLEN) + "_B" +
+         std::to_string(BLOCK);
 }
 
 // The control block as the kernels see it: `runtime::Control`

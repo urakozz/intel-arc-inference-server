@@ -12,7 +12,28 @@ namespace runtime {
 struct DecodeBuffers {
   static constexpr uint32_t kM = 8;
   static constexpr uint32_t kConvRing = 16;     // ring depth >= M + 3 (spec §9.4)
-  static constexpr uint32_t kAttnBlock = 256;   // KV positions per attn_decode work-group
+  // KV positions per `attn_decode` work-group - spec 1.5's lever L5 took it
+  // from 256 to 64. It is the ONE home for the number on the host: `attn_part`
+  // below is strided by `max_len / kAttnBlock` blocks, capture.cc launches
+  // `attn_decode` with exactly that many, and it is the `_B64` half of both
+  // compiled variant names (`kernels::attn_decode_variant`), so a value here
+  // that no compiled binary matches throws at capture instead of striding
+  // `attn_part` at one size while the kernel writes it at another.
+  //
+  // **64 is measured on both sides, which is the only reason it is 64.**
+  // docs/15 §2's `F + fill·P` fit predicted 214.5 µs/launch at a 128-position
+  // block; the retile measured 296.684. So the block size was swept in situ at
+  // depth 4096 instead - `attn_decode` µs/launch, then the attn family's
+  // ms/token:
+  //
+  //     B256 369.988 / 6.058   B128 296.684 / 4.931
+  //     B64  224.046 / 3.839   B32  203.888 / 3.772
+  //
+  // B32 still shortens `attn_decode`, but `attn_reduce`'s merge runs over four
+  // times the blocks (196 → 453 µs/step) and the step's sum of 774 kernel
+  // durations comes out 21 µs HIGHER than at B64. 64 is the knee.
+  // docs/12 `attn` → Measured carries the arithmetic.
+  static constexpr uint32_t kAttnBlock = 64;
   // **prep_res_norm's two-stage grid** (spec 1.5 lever L1). Stage A
   // (`prep_res_fold`) runs this many work-groups over the hidden row and writes
   // one fp32 sum-of-squares each; stage B (`prep_norm_finish`) folds exactly
@@ -43,7 +64,7 @@ struct DecodeBuffers {
   l0::Mem gdn_o;          // fp32 [M][48][128] (gdn_step output, pre gated-norm)
   l0::Mem attn_q;         // fp32 [M][24][256] (post norm+rope)
   l0::Mem attn_gate;      // fp32 [M][24][256]
-  l0::Mem attn_part;      // fp32 [24][max_len/256][M][258] (m, l, acc[256]) = 12.68 MB @16384
+  l0::Mem attn_part;      // fp32 [24][max_len/kAttnBlock][M][258] (m, l, acc[256]) = 50.72 MB @16384
   l0::Mem attn_out;       // bf16 [M][6144]
   l0::Mem logits;         // fp32 [M][248320] = 7.95 MB
   l0::Mem argmax_part;    // fp32+idx pairs, stage-1 output: [M][243][2]

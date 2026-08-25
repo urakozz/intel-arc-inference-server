@@ -171,13 +171,18 @@ class Capture {
  private:
   // Preconditions this file can check before a single command is appended.
   void check_sizes() {
-    // The attention variants bake MAXLEN (attn_part's stride); the grid comes
-    // from b.max_len, and the RoPE table from the loader's. All three are one
-    // number or the KV cache is read at the wrong stride.
+    // The attention variants bake MAXLEN (attn_part's stride) and ATTN_BLOCK
+    // (its block count); the grid comes from b.max_len and kAttnBlock, and the
+    // RoPE table from the loader's. All of them are one number or the KV cache
+    // is read at the wrong stride. The block size needs no `require` here - it
+    // is in the variant NAME (`..._B128`), so a host/device disagreement is a
+    // missing binary at `kernel()` rather than a wrong stride at replay.
     require(m_.max_len == b_.max_len, "model max_len " + std::to_string(m_.max_len) +
                                           " != buffers max_len " + std::to_string(b_.max_len));
     require(b_.max_len % DecodeBuffers::kAttnBlock == 0,
-            "max_len must be a multiple of 256 (attn_decode's block grid)");
+            "max_len must be a multiple of DecodeBuffers::kAttnBlock (" +
+                std::to_string(DecodeBuffers::kAttnBlock) + ") - attn_decode's block grid");
+
     require(b_.gdn_state.size() == kGdnStateStride * kGdnLayers, "gdn_state is not 48 slices");
     require(b_.conv_ring.size() == kConvRingStride * kGdnLayers, "conv_ring is not 48 slices");
     require(b_.kv_k.size() == kv_stride_ * kFaLayers, "kv_k is not 16 slices");
@@ -494,12 +499,20 @@ class Capture {
       launch(k, Qwen35::kFaQHeads + Qwen35::kFaKvHeads, kCapM);
     }
     // attn_decode(ctrl, attn_q, kv_k, kv_v, attn_part) - attn.cl (Task 5), grid
-    // (4 kv-heads, max_len/256 blocks), WG 256. The grid spans the whole cache
-    // because a captured list cannot resize; the work-groups past the context
-    // early-out on their first instruction.
+    // (4 kv-heads, max_len/kAttnBlock blocks), WG 256. The grid spans the whole
+    // cache because a captured list cannot resize; the work-groups past the
+    // context early-out on their first instruction. Since spec 1.5's lever L5
+    // the block is 64 positions, so this grid is (4, 256) = 1024 work-groups at
+    // max_len 16384, of which 260 are live at depth 4096 - nearly 4x the 68
+    // before. docs/15 §2 measured work-group count as very nearly free but put
+    // ~264 work-groups "past the point any measurement here reaches"; the
+    // measurement now reaches it, and the extra idle work-groups cost 0.04% per
+    // the same document's early-out row. What is bought is a quartered
+    // per-work-group serial walk (369.988 -> 224.046 µs/launch, measured).
     {
-      l0::Kernel& k =
-          kernel(kernels::attn_decode_variant(kCapM, b_.max_len), "attn_decode", kWgAttn);
+      l0::Kernel& k = kernel(
+          kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
+          "attn_decode", kWgAttn);
       k.arg_ptr(0, b_.control.ptr());
       k.arg_ptr(1, b_.attn_q.ptr());
       k.arg_ptr(2, kk);
@@ -511,7 +524,8 @@ class Capture {
     // grid (24 q-heads, M), WG 256.
     {
       l0::Kernel& k =
-          kernel(kernels::attn_reduce_variant(kCapM, b_.max_len), "attn_reduce", kWgAttn);
+          kernel(kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
+                 "attn_reduce", kWgAttn);
       k.arg_ptr(0, b_.control.ptr());
       k.arg_ptr(1, b_.attn_part.ptr());
       k.arg_ptr(2, b_.attn_gate.ptr());
