@@ -25,9 +25,9 @@
 //      prove no step reads scratch it has not first written. Do NOT "clean this
 //      up" by zeroing scratch too: that would delete exactly the coverage this
 //      run adds.
-//   3. **Structure.** kernel_count == 645 (spec §9.1 as amended), one module
-//      per distinct variant, every generated id < kVocabUsed, and no NaN or
-//      Inf anywhere in the residual trace.
+//   3. **Structure.** kernel_count == 774 (spec §9.1 as amended, plus spec
+//      1.5's lever L1), one module per distinct variant, every generated id <
+//      kVocabUsed, and no NaN or Inf anywhere in the residual trace.
 //
 // It does NOT judge output quality - whether the continuation reads like
 // English is Task 8's golden gate, which compares against the oracle. What is
@@ -125,12 +125,18 @@ int main(int argc, char** argv) {
   std::printf("captured: %zu kernels, %zu modules, max_len %u, persistent %.2f GB\n",
               cap.kernel_count, cap.modules.size(), b.max_len,
               b.persistent_bytes() / 1e9);
-  // 48 GDN layers x 10 + 16 FA layers x 10 + 5 token-boundary kernels
-  // (embed_gather, final prep_res_norm, lm_head, argmax x2) - spec §9.1.
-  CHECK_EQ(cap.kernel_count, size_t(645));
-  // One Module per distinct variant: embed_gather, 2 prep_res_norm, silu_mul,
-  // gated_head, gdn_step, 3 attn, 5 int4 gemv, 2 bf16 gemv, 2 argmax.
-  CHECK_EQ(cap.modules.size(), size_t(18));
+  // 48 GDN layers x 11 + 16 FA layers x 11 + 6 token-boundary kernels
+  // (embed_gather, the final norm's two launches, lm_head, argmax x2) - spec
+  // §9.1's 645 plus the 129 launches spec 1.5's lever L1 added by splitting
+  // every `prep_res_norm` site into `prep_res_fold` + `prep_norm_finish`.
+  // 645 + 129 = 774, and 129 = 2 per layer x 64 + the final norm.
+  CHECK_EQ(cap.kernel_count, size_t(774));
+  // One Module per distinct variant: embed_gather, 2 prep_res_fold (SP0/SP16),
+  // 1 prep_norm_finish (it does not read `partials`, so the two prep modes
+  // share it), silu_mul, gated_head, gdn_step, 3 attn, 5 int4 gemv, 2 bf16
+  // gemv, 2 argmax. That is 19 - the 18 of plan 3 with the 2 `prep_res_norm`
+  // modules replaced by the pair's 3.
+  CHECK_EQ(cap.modules.size(), size_t(19));
 
   l0::Queue q(ctx);
   l0::Fence fence(q);

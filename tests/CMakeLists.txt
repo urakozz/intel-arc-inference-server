@@ -67,7 +67,16 @@ add_executable(prep_test kernels/prep_test.cc)
 target_include_directories(prep_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(prep_test PRIVATE b70_l0)
 b70_target_kernel_dir(prep_test)
+# Both shapes of the residual norm: the single-work-group `prep_res_norm` and
+# the `prep_res_fold` + `prep_norm_finish` pair the runtime binds since spec
+# 1.5's lever L1. The test runs the pair against the single kernel's own
+# reference (`resid` bit-identical, `x` to the ruled ulp bar for the reordered
+# Sigma), so both must exist - the same arrangement lever L2 left for
+# gemv_bf16's two tilings. `_W1` is stage B's single-work-group finish, run to
+# prove the grid changes no bits.
 add_dependencies(prep_test kernel_prep_res_norm_M1_K5120_SP0 kernel_prep_res_norm_M1_K5120_SP16
+  kernel_prep_res_fold_M1_K5120_SP0_G20 kernel_prep_res_fold_M1_K5120_SP16_G20
+  kernel_prep_norm_finish_M1_K5120_G20_W20 kernel_prep_norm_finish_M1_K5120_G20_W1
   kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1)
 add_test(NAME prep_test COMMAND prep_test)
 
@@ -177,7 +186,8 @@ set_tests_properties(load_checkpoint_test PROPERTIES LABELS checkpoint TIMEOUT 6
 # unused macro in three translation units that do not include kernels/kernels.h.
 set(B70_DECODE_LIST_KERNELS
   kernel_embed_gather_M1 kernel_argmax_stage1_M1 kernel_argmax_stage2
-  kernel_prep_res_norm_M1_K5120_SP0 kernel_prep_res_norm_M1_K5120_SP16
+  kernel_prep_res_fold_M1_K5120_SP0_G20 kernel_prep_res_fold_M1_K5120_SP16_G20
+  kernel_prep_norm_finish_M1_K5120_G20_W20
   kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1 kernel_gdn_step_M1
   kernel_attn_prep_M1 kernel_attn_decode_M1_L16384 kernel_attn_reduce_M1_L16384
   kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K5120_N14336_S1_L1
@@ -187,7 +197,7 @@ set(B70_DECODE_LIST_KERNELS
 
 # The captured decode list, replayed: spec §8.7's determinism proof and the
 # acceptance for every kernel in plan 3. Needs the real checkpoint and a B70
-# (label `checkpoint`), and it is the one test that runs all 645 kernels.
+# (label `checkpoint`), and it is the one test that runs all 774 kernels.
 add_executable(replay_determinism_test runtime/replay_determinism_test.cc)
 target_include_directories(replay_determinism_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(replay_determinism_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
@@ -208,7 +218,7 @@ set_tests_properties(engine_smoke_test PROPERTIES LABELS checkpoint TIMEOUT 900)
 
 # The same list captured twice - plain and profiled (plan 4 spec §3.5). It is
 # the profiler's calibration: the instrumented list must generate the same 8
-# tokens as the plain one, its 645 timestamps must tile the step in walk order,
+# tokens as the plain one, its 774 timestamps must tile the step in walk order,
 # and their sum must fit inside the fence wall. Same checkpoint and card as the
 # two above, so the same label; ~49 replays of the real step, no oracle dumps.
 add_executable(profile_capture_test runtime/profile_capture_test.cc)
@@ -322,7 +332,7 @@ b70_cli_reject(cli_reject_missing_ids_file ${B70_NO_MODEL} --ids /nonexistent/pr
 # "id 248320 is outside the vocabulary" - read_ids' bound, from the fixture.
 b70_cli_reject(cli_reject_oov_id ${B70_NO_MODEL} --ids ${B70_OOV_IDS} --n 4)
 # --profile is a third mode, exclusive with the other two: it replays an
-# INSTRUMENTED list (645 host-scope event signals per step), so it can never
+# INSTRUMENTED list (774 host-scope event signals per step), so it can never
 # produce a bench row, and it sizes its own run with --depth and --steps rather
 # than with --ids/--n. Both rejections are the mode check, host-side - and both
 # name the message, because "exit 1 before the device" is also what an unknown

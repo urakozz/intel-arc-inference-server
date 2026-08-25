@@ -19,6 +19,7 @@
 //   x            8 x 17408 x 2 B                                  =       278,528
 //   partials     16 (S_max) x 8 x 34816 (2 x intermediate) x 4 B  =    17,825,792
 //   ab_out       8 x 128 (a||b padded N) x 4 B                    =         4,096
+//   norm_sumsq   20 (kNormGroups) x 8 x 4 B                       =           640
 //   gdn_o        8 x 48 x 128 x 4 B                               =       196,608
 //   attn_q       8 x 24 q-heads x 256 x 4 B                       =       196,608
 //   attn_gate    same                                             =       196,608
@@ -26,13 +27,23 @@
 //   attn_out     8 x 24 x 256 x 2 B                               =        98,304
 //   logits       8 x 248320 x 4 B                                 =     7,946,240
 //   argmax_part  8 x ceil(248320/1024) = 243 x 2 x 4 B            =        15,552
-//                                                           total =    39,521,472  (39.52 MB)
+//                                                           total =    39,522,112  (39.52 MB)
 //
-// NOTE: plan 3's prose says scratch is "≈ 44 MB"; the eleven sizes it gives
-// per field add to 39.52 MB, and its own itemisation (17.8 + 12.7 + 7.9 =
+// `norm_sumsq` is the twelfth field and the only one added since plan 3: spec
+// 1.5's lever L1 split `prep_res_norm` into `prep_res_fold`, which writes one
+// fp32 sum-of-squares per (work-group, token), and `prep_norm_finish`, which
+// folds the 20 of them into the rms. `DecodeBuffers::kNormGroups` = 20 is the
+// one home for that count - it is also stage A's grid and half of both
+// compiled variant names - and 20 x 8 x 4 = 640 B moves the scratch total from
+// plan 3's 39,521,472 to 39,522,112. That is +0.0016%, which is why the
+// "39.52 MB" summary is unchanged and the byte figure is not.
+//
+// NOTE: plan 3's prose says scratch is "≈ 44 MB"; the eleven sizes it gave per
+// field add to 39,521,472 B, and its own itemisation (17.8 + 12.7 + 7.9 =
 // 38.4 for the three big ones, 1.1 for the other eight) agrees with 39.52.
 // The "44" is a slip in the summary line, not a missing buffer. Every
-// per-field MB figure in the plan matches the table above exactly.
+// per-field MB figure in the plan matches the table above exactly - the plan
+// simply predates `norm_sumsq`.
 #include <cstdint>
 #include <cstdio>
 #include "check.h"
@@ -52,7 +63,7 @@ int main() {
 
   CHECK_EQ(b.max_len, 16384u);
   CHECK_EQ(b.persistent_bytes(), size_t{1240465536});
-  CHECK_EQ(b.scratch_bytes(), size_t{39521472});
+  CHECK_EQ(b.scratch_bytes(), size_t{39522112});
 
   // The control block is shared memory: the host reads and writes it directly,
   // and the constructor left it zeroed - including the padding, which the

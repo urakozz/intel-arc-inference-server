@@ -11,7 +11,8 @@
 #include "model/qwen35.h"
 #include "runtime/control.h"
 
-// capture.cc - the 645-kernel decode step, bound once.
+// capture.cc - the 774-kernel decode step, bound once (645 until spec 1.5's
+// lever L1 split every `prep_res_norm` site into two launches).
 //
 // This is the file where every kernel of plan 3 meets every buffer of Task 1
 // and every weight of plan 2, in the one order spec §9.1 fixes. It is a
@@ -28,10 +29,11 @@
 // kernel's own contract, cited, never from arithmetic invented here.
 //
 // **The dataflow, in one paragraph.** `resid` (bf16 [M][5120]) is the residual
-// stream and only `prep_res_norm` advances it: it folds the previous GEMV's
-// split-K `partials` into it, then writes the normalised row to the shared
-// bf16 scratch `x`. Every int4 GEMV reads `x` (or, for o_proj, `attn_out`) and
-// writes `partials`; every prep reads `partials` and writes `x`. So a layer is
+// stream and only the `prep_res_fold` / `prep_norm_finish` pair advances it:
+// stage A folds the previous GEMV's split-K `partials` into it, stage B writes
+// the normalised row to the shared bf16 scratch `x`. Every int4 GEMV reads `x`
+// (or, for o_proj, `attn_out`) and writes `partials`; every prep reads
+// `partials` and writes `x`. So a layer is
 // a chain of alternating writes to two buffers, serialised by the list's
 // in-order flag - no aliasing hazard needs an event, and no scratch value is
 // read in a step before that step has written it. The persistent state
@@ -77,6 +79,8 @@ constexpr uint32_t kWgEmbed = 256;    // embed_gather.cl WG_EMBED  (Task 3)
 constexpr uint32_t kWgGemv = 64;      // gemv.cl WG_N = 16x4 (plan 1 §9.2); gemv_bf16.cl's
                                       // WG_N is its COLS_PER_WG, per shape (see gemv_bf16 below)
 constexpr uint32_t kWgResNorm = 256;  // prep.cl WG_RES            (Task 2)
+constexpr uint32_t kWgResFold = 256;  // prep.cl WG_FOLD           (spec 1.5 L1)
+constexpr uint32_t kWgNormFinish = 256;  // prep.cl WG_NORM        (spec 1.5 L1)
 constexpr uint32_t kWgSilu = 256;     // prep.cl WG_SILU           (Task 2)
 constexpr uint32_t kWgGated = 128;    // prep.cl WG_GATED          (Task 2)
 constexpr uint32_t kWgGdn = 256;      // gdn_step.cl WG_GDN        (Task 4)
@@ -218,7 +222,7 @@ class Capture {
   // Kernel for it and set its group size. A Kernel per site is not required -
   // arguments are captured at append, so one object could serve many launches -
   // but it keeps the list auditable (kernels[i] is what launch i ran) for the
-  // cost of 645 handles.
+  // cost of 774 handles.
   l0::Kernel& kernel(const std::string& variant, const char* entry, uint32_t wg) {
     auto it = step_.modules.find(variant);
     if (it == step_.modules.end())
@@ -289,20 +293,57 @@ class Capture {
     launch(k, 1, kCapM);
   }
 
-  // prep_res_norm(partials, resid, norm_w, x_out) - src/kernels/prep.cl
-  // (Task 2), grid (1, M), WG 256. `s_prev` is the split-K width of the GEMV
-  // whose partials this call folds into the residual stream; the SP0 variant
-  // folds nothing and does not read `partials` at all (layer 0, whose residual
-  // stream is embed_gather's output). `norm_w` is fp32 `1 + w`
-  // (loader/small_layout.h - the RMSNorm family is fp32 on device).
+  // The residual add + RMSNorm site - **TWO launches since spec 1.5's lever
+  // L1**, src/kernels/prep.cl:
+  //
+  //   prep_res_fold(partials, resid, sumsq)        grid (kNormGroups, M), WG 256
+  //   prep_norm_finish(sumsq, resid, norm_w, x)    grid (kNormGroups, M), WG 256
+  //
+  // `s_prev` is the split-K width of the GEMV whose partials stage A folds into
+  // the residual stream; the SP0 variant folds nothing and does not read
+  // `partials` at all (layer 0, whose residual stream is embed_gather's
+  // output). `norm_w` is fp32 `1 + w` (loader/small_layout.h - the RMSNorm
+  // family is fp32 on device) and only stage B reads it.
+  //
+  // **This is the one binding site in the file that appends two commands**, so
+  // it is the one that moved the launch count: 129 sites x 2 = 258 launches
+  // where there were 129, and the walk is 645 + 129 = **774** (the constant
+  // pinned by tests/runtime/replay_determinism_test.cc and
+  // tests/runtime/profile_capture_test.cc, and the count docs/04 and docs/12
+  // quote). `ProfileEvents::kProfileCapacity` is 1024 and did not have to move.
+  //
+  // Why two: RMSNorm's mean is over the whole row, so ONE kernel's reduction
+  // domain is one work-group - 16 subgroups on one Xe-core, measured at 22.3 µs
+  // and 17.0 GB/s in situ. The split makes it 320 subgroups on both passes at
+  // the cost of a launch (0.73 µs derived, docs/15). The per-element fold chain
+  // is unchanged, so `resid` is bit-identical and the golden gate's per-layer
+  // taps are untouched; the global Σx² tree is not, which is why this lever's
+  // acceptance runs the gate (prep.cl states the tree, docs/12 the contract).
+  //
+  // `b_.norm_sumsq` is a single 640-byte allocation shared by all 129 sites:
+  // the list is in-order, so a site's stage B has consumed its own stage A's
+  // sums before the next site's stage A overwrites them.
   void res_norm(uint32_t s_prev, const void* norm_w) {
-    l0::Kernel& k = kernel(kernels::prep_res_norm_variant(kCapM, Qwen35::kHidden, s_prev),
-                           "prep_res_norm", kWgResNorm);
-    k.arg_ptr(0, b_.partials.ptr());
-    k.arg_ptr(1, b_.resid.ptr());
-    k.arg_ptr(2, norm_w);
-    k.arg_ptr(3, b_.x.ptr());
-    launch(k, 1, kCapM);
+    const uint32_t g = DecodeBuffers::kNormGroups;
+    {
+      l0::Kernel& k =
+          kernel(kernels::prep_res_fold_variant(kCapM, Qwen35::kHidden, s_prev, g),
+                 "prep_res_fold", kWgResFold);
+      k.arg_ptr(0, b_.partials.ptr());
+      k.arg_ptr(1, b_.resid.ptr());
+      k.arg_ptr(2, b_.norm_sumsq.ptr());
+      launch(k, g, kCapM);
+    }
+    {
+      l0::Kernel& k =
+          kernel(kernels::prep_norm_finish_variant(kCapM, Qwen35::kHidden, g, g),
+                 "prep_norm_finish", kWgNormFinish);
+      k.arg_ptr(0, b_.norm_sumsq.ptr());
+      k.arg_ptr(1, b_.resid.ptr());
+      k.arg_ptr(2, norm_w);
+      k.arg_ptr(3, b_.x.ptr());
+      launch(k, g, kCapM);
+    }
   }
 
   // gemv(w, scales, x, out) - src/kernels/gemv.cl (plan 1 §9.2), grid (N/64, S),

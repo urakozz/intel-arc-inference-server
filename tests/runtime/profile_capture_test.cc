@@ -1,7 +1,7 @@
 // profile_capture_test - spec §3.5: the captured decode step, instrumented.
 //
 // Task 1 proved the event machinery on a two-noop list. This proves it on the
-// real 645-launch step, and it proves the one property that lets the profiler
+// real 774-launch step, and it proves the one property that lets the profiler
 // be trusted at all: **an instrumented list computes the same tokens as a
 // plain one.** A profiler that changed what it measures would price a fiction.
 //
@@ -18,14 +18,14 @@
 //   B. **Monotone, non-overlapping.** After a profiled replay, every launch's
 //      `duration_us()` is > 0, and on the raw timestamp query the global start
 //      of launch i+1 is at or after the global end of launch i. The list is
-//      in-order, so its 645 kernels tile the step end to end in walk order;
+//      in-order, so its 774 kernels tile the step end to end in walk order;
 //      an overlap would mean the driver had reordered them and every per-kernel
 //      share in docs/15 would be wrong.
 //   C. **Σ ≤ wall, and the gap.** The per-kernel durations sum to no more than
 //      1.001 x the host-measured fence wall of that same replay, and the
 //      difference - the first in-situ dispatch+gap measurement this project
 //      has - is printed. Plus the structure Task 3's CLI indexes by:
-//      `labels.size() == kernel_count == 645` and `labels[0]` naming the
+//      `labels.size() == kernel_count == 774` and `labels[0]` naming the
 //      token-boundary `embed_gather`.
 //
 // Deliberately NOT asserted: any absolute microsecond number. This test is the
@@ -100,11 +100,14 @@ int main(int argc, char** argv) {
               plain.kernel_count, instr.kernel_count, prof.events.size(), b.max_len);
 
   // --- C (structure half): what Task 3's CLI indexes by --------------------
-  // Spec §9.1 as amended: 48 GDN layers x 10 + 16 FA layers x 10 + 5
-  // token-boundary kernels. replay_determinism_test pins the same 645; if a
-  // lever changes the launch count, BOTH move together.
-  CHECK_EQ(plain.kernel_count, size_t(645));
-  CHECK_EQ(instr.kernel_count, size_t(645));
+  // Spec §9.1 as amended: 48 GDN layers x 11 + 16 FA layers x 11 + 6
+  // token-boundary kernels - 645 plus the 129 launches spec 1.5's lever L1
+  // added by splitting every `prep_res_norm` site into `prep_res_fold` +
+  // `prep_norm_finish`. replay_determinism_test pins the same 774 (and the
+  // module count, which this test does not); if a lever changes the launch
+  // count, BOTH move together.
+  CHECK_EQ(plain.kernel_count, size_t(774));
+  CHECK_EQ(instr.kernel_count, size_t(774));
   CHECK_EQ(plain.labels.size(), plain.kernel_count);
   CHECK_EQ(instr.labels.size(), instr.kernel_count);
   CHECK_EQ(prof.events.size(), instr.kernel_count);

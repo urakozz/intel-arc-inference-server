@@ -13,6 +13,19 @@ struct DecodeBuffers {
   static constexpr uint32_t kM = 8;
   static constexpr uint32_t kConvRing = 16;     // ring depth >= M + 3 (spec §9.4)
   static constexpr uint32_t kAttnBlock = 256;   // KV positions per attn_decode work-group
+  // **prep_res_norm's two-stage grid** (spec 1.5 lever L1). Stage A
+  // (`prep_res_fold`) runs this many work-groups over the hidden row and writes
+  // one fp32 sum-of-squares each; stage B (`prep_norm_finish`) folds exactly
+  // these, in ascending index order, into the rms. It is the ONE home for the
+  // number: `norm_sumsq` below is sized from it, src/runtime/capture.cc
+  // launches both grids from it AND puts it in both variant names
+  // (`kernels::prep_res_fold_variant`), so a change here that no compiled
+  // binary matches throws at capture instead of reducing the wrong count.
+  //
+  // 20 at kHidden = 5120 is one element per lane in a 256-lane work-group:
+  // 320 subgroups against the single-work-group kernel's 16, which is the axis
+  // docs/15 §L2 measured as the one that pays.
+  static constexpr uint32_t kNormGroups = 20;
 
   DecodeBuffers(l0::Context& ctx, uint32_t max_len);
 
@@ -26,6 +39,7 @@ struct DecodeBuffers {
   l0::Mem x;              // bf16 [M][17408]  (prep output; largest K)
   l0::Mem partials;       // fp32 [16][M][34816] (max S x max N)       = 17.83 MB
   l0::Mem ab_out;         // fp32 [M][128]    (a||b GEMV output, S=1)
+  l0::Mem norm_sumsq;     // fp32 [kNormGroups][M] (prep_res_fold -> prep_norm_finish)
   l0::Mem gdn_o;          // fp32 [M][48][128] (gdn_step output, pre gated-norm)
   l0::Mem attn_q;         // fp32 [M][24][256] (post norm+rope)
   l0::Mem attn_gate;      // fp32 [M][24][256]
