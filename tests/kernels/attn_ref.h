@@ -32,9 +32,11 @@
 //     The 16 lane partials then collapse with a fixed pairwise tree: for
 //     `stride = 8, 4, 2, 1`, `dot_red[16s + l] += dot_red[16s + l + stride]`.
 //     `dot_red[16s]` × 1/16 is the score.
-//  3. **The online softmax wave** (`attn_decode`): a block of 256 positions is
-//     walked in 16 waves of 16. Given the wave's scores `sc[0..15]` (−INF where
-//     the causal bound masks the position),
+//  3. **The online softmax wave** (`attn_decode`): a block of `kBlock` = 64
+//     positions is walked in 4 waves of 16. The wave is 16 because the
+//     work-group has 16 subgroups; the wave *count* is `kBlock / 16`, which is
+//     the one thing spec 1.5's lever L5 changed. Given the wave's scores
+//     `sc[0..15]` (−INF where the causal bound masks the position),
 //         nmx  = max(mx, sc[0], sc[1], …, sc[15])        (ascending s)
 //         resc = exp(mx − nmx)                            (0 when mx = −INF)
 //         w[s] = exp(sc[s] − nmx) ;  ssum = Σ_s w[s]      (ascending s)
@@ -47,13 +49,13 @@
 //     position leaves `nmx = −INF`; that case is skipped whole (`resc = 1`,
 //     `w = 0`), because `exp(−INF − (−INF))` is a NaN and nothing else here is.
 //  4. **The block merge** (`attn_reduce`): blocks are merged in **ascending
-//     block order**, `b = 0 … nb−1` with `nb = (pos + m)/256 + 1`:
+//     block order**, `b = 0 … nb−1` with `nb = (pos + m)/kBlock + 1`:
 //         nmx = max(mx, bmx) ; a = exp(mx − nmx) ; bs = exp(bmx − nmx)
 //         sm  = fma(sm, a, bsm·bs)
 //         acc[d] = fma(acc[d], a, bacc[d]·bs)
 //         mx  = nmx
 //     Every one of those `nb` blocks has at least its own first position inside
-//     the causal bound (`256b ≤ pos + m`), so `bmx` is finite and `nmx` is never
+//     the causal bound (`kBlock·b ≤ pos + m`), so `bmx` is finite and `nmx` is never
 //     −INF. Blocks `≥ nb` are never read - which is what lets `attn_decode`'s
 //     per-block early-out leave them untouched.
 //
@@ -110,8 +112,16 @@ constexpr uint32_t kKOff = 12288, kVOff = 13312;
 constexpr uint32_t kRotHalf = 32, kRotDim = 64;   // partial RoPE: dims 0..63
 constexpr uint32_t kQNormOff = 0;       // FA small block, in floats: 0 / 4
 constexpr uint32_t kKNormOff = 256;     //                         1024 / 4
-constexpr uint32_t kBlock = 256;        // KV positions per attn_decode work-group
-constexpr uint32_t kWaves = 16, kWaveP = 16;      // 16 waves of 16 positions
+// KV positions per attn_decode work-group - attn.cl's ATTN_BLOCK, which spec
+// 1.5's lever L5 took from 256 to 64. Everything block-shaped in this file is
+// DERIVED from it (`kWaves` below, `nblocks = max_len / kBlock` in both
+// kernels, `nb = (pos + m)/kBlock + 1` in the merge), so the reference follows
+// the kernel's blocking by construction and cannot be left modelling the old
+// one. Only the *wave* is fixed at 16 positions: it is the work-group's
+// subgroup count, not a function of the block.
+constexpr uint32_t kBlock = 64;
+constexpr uint32_t kWaveP = 16;                   // positions per wave = subgroups
+constexpr uint32_t kWaves = kBlock / kWaveP;      // 4 waves of 16 positions
 constexpr uint32_t kLanes = 16, kPerLane = 16;    // SIMD16: 16 lanes x 16 elements
 constexpr float kScale = 0.0625f;       // 1/sqrt(256)
 constexpr uint32_t kPartStride = 258;   // {mx, sm, acc[256]} per (qh, block, m)
@@ -203,7 +213,7 @@ inline void prep(uint32_t pos, uint32_t n_act, uint32_t M, const float* partials
 }
 
 // --------------------------------------------------------------------------
-// attn_decode - grid (4 kv-heads, max_len/256 blocks), work-group 256.
+// attn_decode - grid (4 kv-heads, max_len/kBlock blocks), work-group 256.
 // The per-block early-out and the wave scheme are order 2 and 3 of the header.
 // --------------------------------------------------------------------------
 inline void decode(uint32_t pos, uint32_t n_act, uint32_t M, uint32_t max_len,

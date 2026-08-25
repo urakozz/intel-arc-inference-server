@@ -23,11 +23,29 @@
 //   gdn_o        8 x 48 x 128 x 4 B                               =       196,608
 //   attn_q       8 x 24 q-heads x 256 x 4 B                       =       196,608
 //   attn_gate    same                                             =       196,608
-//   attn_part    24 x (16384/256 = 64 blocks) x 8 x 258 x 4 B     =    12,681,216
+//   attn_part    24 x (16384/64 = 256 blocks) x 8 x 258 x 4 B     =    50,724,864
 //   attn_out     8 x 24 x 256 x 2 B                               =        98,304
 //   logits       8 x 248320 x 4 B                                 =     7,946,240
 //   argmax_part  8 x ceil(248320/1024) = 243 x 2 x 4 B            =        15,552
-//                                                           total =    39,522,112  (39.52 MB)
+//                                                           total =    77,565,760  (77.57 MB)
+//
+// `attn_part` grew 4x with spec 1.5's lever L5: `DecodeBuffers::kAttnBlock`
+// went 256 -> 64 KV positions per `attn_decode` work-group, which shortens each
+// work-group's serial walk of a block (the critical path docs/15 §2 measured)
+// and quadruples the block count this buffer is strided by. It is the ONE home
+// for that number on the host - `attn_part`'s size, `attn_decode`'s grid in
+// capture.cc, and the `_B64` half of both compiled variant names all read it,
+// so a host that disagrees with the kernel's `ATTN_BLOCK` names a binary that
+// does not exist and throws at capture instead of striding `attn_part` wrongly.
+//
+// The cost is **+38,043,648 B of device scratch**, taking the whole per-step
+// scratch from 39.52 MB to 77.57 MB. That is the largest single line in this
+// table after `partials`, and it is worth stating what it is NOT: it is not
+// persistent (1240.47 MB of KV and GDN state dwarf it) and it is not close to
+// any limit on a device holding a 15.5 GB checkpoint. What it buys is
+// measured - the attn family 6.058 -> 3.839 ms/token, docs/15 §L5 - and it is
+// the reason the sweep stopped at 64: `kAttnBlock` 32 would take this buffer to
+// 101 MB for 0.067 ms/token that the step's own total does not show.
 //
 // `norm_sumsq` is the twelfth field and the only one added since plan 3: spec
 // 1.5's lever L1 split `prep_res_norm` into `prep_res_fold`, which writes one
@@ -63,7 +81,7 @@ int main() {
 
   CHECK_EQ(b.max_len, 16384u);
   CHECK_EQ(b.persistent_bytes(), size_t{1240465536});
-  CHECK_EQ(b.scratch_bytes(), size_t{39522112});
+  CHECK_EQ(b.scratch_bytes(), size_t{77565760});
 
   // The control block is shared memory: the host reads and writes it directly,
   // and the constructor left it zeroed - including the padding, which the

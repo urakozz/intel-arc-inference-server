@@ -1631,10 +1631,11 @@ That settles the retune this document invited. Spec 1.5's lever L3 (`CHUNK_V`
 **skip-by-ruling**. The `gdn_step` occupancy suspicion in doc 05 point 5 is
 withdrawn on measurement; the occupancy problem it was looking for is real, but
 it is in `prep_res_norm` (1 work-group) and `a‖b` (2), not here. (`attn_decode`
-is not an occupancy story either: its cost is one work-group's *serial walk* of
-a full 256-position block - see this document's attn Measured section, which
+is not an occupancy story either: its cost was read as one work-group's *serial
+walk* of a full block - see this document's attn Measured sections, which
 withdrew the earlier "depth-independent term" reading on the depth-1024
-falsification run.)
+falsification run, and then withdrew the walk's own coefficient when lever L5's
+block sweep falsified it too.)
 
 The 48 launches cost 35 µs of dispatch (0.733 µs each, derived in situ -
 docs/15), 4.8% of the kernel's own time and 0.08% of the step. Kernel count was
@@ -1672,14 +1673,15 @@ RoPE over dims 0..63, pairs (i, i+32); dims 64..255 pass through
 
 attn_decode(ctrl, attn_q, kv_k, kv_v, attn_part)
 
-per (kv-head j, 256-position block), per q-head qh of j's six, per token m:
+per (kv-head j, ATTN_BLOCK-position block; 64 since lever L5), per q-head qh
+of j's six, per token m:
   score_p = (Σ_d attn_q[m][qh][d] · f32(kv_k[p][j][d])) / 16   for p <= pos+m
   online softmax in waves of 16 positions -> (mx, sm) and acc[256]
   attn_part[qh][block][m] = {mx, sm, acc[256]}                 (258 fp32)
 
 attn_reduce(ctrl, attn_part, attn_gate, attn_out)
 
-nb = (pos + m)/256 + 1 ; merge blocks 0..nb-1 ascending ; out = acc/sm
+nb = (pos + m)/ATTN_BLOCK + 1 ; merge blocks 0..nb-1 ascending ; out = acc/sm
 attn_out[m][h·256+d] = rne_bf16(f32(rne_bf16(out)) · sigmoid_f32(attn_gate[m][h][d]))
 ```
 
@@ -1709,10 +1711,11 @@ The one piece of cross-lane traffic is RoPE, which pairs dim `i` with dim
 rather than staying in a register: 64 of the 256 work-items need a value another
 work-item computed.
 
-**`attn_decode`: grid (4 kv-heads, MAXLEN/256 blocks), work-group 256 = 16
-subgroups × 16 lanes (SIMD16).** Work-group `(j, blk)` owns one 256-position
-block of one kv-head and loops over that head's six q-heads and the tokens in
-flight. Work-item `lid` owns accumulator dim `lid`; within a wave, subgroup
+**`attn_decode`: grid (4 kv-heads, MAXLEN/`ATTN_BLOCK` blocks), work-group
+256 = 16 subgroups × 16 lanes (SIMD16).** Work-group `(j, blk)` owns one
+`ATTN_BLOCK`-position block of one kv-head - **64 positions since spec 1.5's
+lever L5**, 256 before it - and loops over that head's six q-heads and the
+tokens in flight. Work-item `lid` owns accumulator dim `lid`; within a wave, subgroup
 `lid/16` owns one KV position and its lane `lid%16` sixteen elements of that
 position's 256-dim dot.
 
@@ -1772,7 +1775,8 @@ runs for every `m`, and a position outside a given `m`'s causal bound is masked
 to −INF inside the wave - so a partially valid block writes real partials for
 each `m`, and the all-masked-for-this-`m` case falls out of the online update as
 `(−INF, 0, 0)` with no special case anywhere. The pairing that makes this safe
-is with `attn_reduce`, which reads exactly `nb(m) = (pos+m)/256 + 1` blocks:
+is with `attn_reduce`, which reads exactly `nb(m) = (pos+m)/ATTN_BLOCK + 1`
+blocks:
 every one of those starts at or before `pos+m` and therefore ran, so the reducer
 never reads a block the early-out skipped and needs no data-dependent skip logic
 of its own. `attn_test` asserts both halves at once - it canary-fills
@@ -1791,7 +1795,9 @@ Nothing here assumes an answer.
 
 ### The wave: an online softmax with a stateable order
 
-A block's 256 positions are walked in 16 waves of 16. Everything below is stated
+A block's `ATTN_BLOCK` positions are walked in `ATTN_BLOCK/16` waves of 16 -
+**4 waves since lever L5**, 16 before it. The wave is 16 because the work-group
+has 16 subgroups; only the wave *count* moved. Everything below is stated
 identically in `attn.cl` and `tests/kernels/attn_ref.h`, because the reference
 reproducing it bit for bit is what buys the tight bars.
 
@@ -1960,20 +1966,35 @@ compared as **exact bit patterns**, not as numbers.
 
 ### Rejected, and what was not measured
 
-**Nothing here has been timed.** There is no `probe_attn`; the arithmetic in the
-next section is arithmetic. Task 9 measures the per-layer time and doc 07 #12's
-depth sweep; until it does, this section states no wall-clock number.
+**This section was written before anything here had been timed** ("there is no
+`probe_attn`; the arithmetic in the next section is arithmetic"). It no longer
+holds: `--profile` times all three kernels in situ, and spec 1.5's lever L5
+swept `ATTN_BLOCK` over four values. The two items that were *the* open levers
+- SLM staging and the block size - are annotated below with what the
+measurement said, and the numbers themselves are in "Measured - lever L5".
 
-- **SLM-staged K/V tiles instead of direct loads - the main open lever, not
-  measured.** As built, the q-head loop is outer and a work-group reads its
-  block's K and V six times (next section). Moving the q-head loop *inside* the
-  wave loop and staging the wave's 16 K rows and 16 V rows in SLM
-  (16 × 256 × 2 B × 2 = 16 KB, plus six q-heads staged = 6 KB, plus the existing
-  1 KB tree) would read them once outright, at the cost of six accumulators and
-  six `(mx, sm)` pairs per work-item instead of one. The per-q-head arithmetic
-  and every stated order would be unchanged, so the reference would not move.
-  Whether it is worth it depends entirely on how much of the reread the 24 MB
-  L2 already absorbs, which is a measurement, not an argument.
+- **SLM-staged K/V tiles instead of direct loads - spec 1.5's lever L5 as the
+  plan wrote it. NOT BUILT, and the measurement now argues against it rather
+  than merely deferring it.** As built, the q-head loop is outer and a
+  work-group reads its block's K and V six times (next section). Moving the
+  q-head loop *inside* the wave loop and staging the wave's 16 K rows and 16 V
+  rows in SLM (16 × 256 × 2 B × 2 = 16 KB, plus six q-heads staged = 6 KB, plus
+  the existing 1 KB tree) would read them once outright, at the cost of six
+  accumulators and six `(mx, sm)` pairs per work-item instead of one. The
+  per-q-head arithmetic and every stated order would be unchanged, so the
+  reference would not move.
+
+  **What ruled it out was the block sweep below, not an argument.** Lever L5
+  was executed as an `ATTN_BLOCK` retile - the cheaper half of the same attack
+  - and it took `attn_decode` from 369.988 to **224.046 µs/launch**. Fitting the
+  256/128 pair as `F + walk` puts the part of a launch that is *not* the block
+  walk at ~223 µs of the original 370, and the retiled launch now costs 224 µs
+  in total: whatever dominates this kernel today is not the walk, and SLM
+  staging shortens only the reread inside the walk. It would be optimising at
+  most a quarter of what is left, against a term nothing has yet identified.
+  Worth revisiting only with a probe that names that term first. (Three cost
+  models have died on this kernel already - see below - so this paragraph is a
+  reading of the measurements, not a fourth model.)
 - **`sub_group_barrier` for the score tree - not used, not measured.** The
   16-wide tree is entirely inside one subgroup, so four of the six
   `barrier(CLK_LOCAL_MEM_FENCE)` per wave could be subgroup fences instead of
@@ -1984,10 +2005,10 @@ depth sweep; until it does, this section states no wall-clock number.
 - **A flash-style single work-group walking the whole `max_len` - rejected on
   fill.** One work-group per (q-head, token) is 24 work-groups per layer on a
   card with 32 Xe-cores: three quarters of the machine idle, on 16 layers per
-  token. Splitting the KV into 256-position blocks is what turns that into
-  4 × (max_len/256) work-groups - 256 at `max_len` 16384, eight per Xe-core -
-  and the price is the two-pass structure (`attn_part` plus `attn_reduce`) and
-  one extra launch per layer.
+  token. Splitting the KV into `ATTN_BLOCK`-position blocks is what turns that
+  into 4 × (max_len/`ATTN_BLOCK`) work-groups - 1024 at `max_len` 16384 and
+  `ATTN_BLOCK` 64, 32 per Xe-core - and the price is the two-pass structure
+  (`attn_part` plus `attn_reduce`) and one extra launch per layer.
 - **One work-group per (q-head, block) - rejected**, argued above: identical
   byte count, 6× the work-groups, and the six passes over a block scattered
   across independent work-groups instead of back to back inside one.
@@ -2001,12 +2022,17 @@ depth sweep; until it does, this section states no wall-clock number.
   `prep` and `gdn_step`: the SLM tree's order is *stateable*, and the whole
   comparison rests on the reference reproducing it, while a subgroup reduce's
   internal order is the compiler's business. Faster, probably. Not measured.
-- **A larger `ATTN_BLOCK` (512, 1024) - not measured.** 256 was chosen because
-  it makes the block a whole number of 16-position waves, makes `attn_part`'s
-  `[24][max_len/256][M][258]` the size `runtime::DecodeBuffers` already
-  allocates, and gives one work-group per Xe-core per 8 blocks at 16k. A larger
-  block means fewer work-groups and a shorter merge; a smaller one means better
-  fill at short context. Both are depth-dependent and neither is guessable.
+- **`ATTN_BLOCK` - no longer a guess. MEASURED at 256, 128, 64 and 32**, and
+  the answer is **64** (spec 1.5's lever L5; the sweep is the last section of
+  this chapter). 256 was originally chosen because it makes the block a whole
+  number of 16-position waves, makes `attn_part`'s
+  `[24][max_len/ATTN_BLOCK][M][258]` a size `runtime::DecodeBuffers` can
+  allocate, and gives one work-group per Xe-core per 8 blocks at 16k. Only the
+  first of those was a real constraint. **Larger** blocks (512, 1024) are still
+  not measured and now have no motive: the sweep's slope runs the other way.
+  **Smaller than 64** is measured and rejected - at 32, `attn_decode` keeps
+  falling but `attn_reduce`'s merge more than doubles and the step's total sum
+  of kernel durations comes out *higher*.
 - **`attn_part` in bf16 - rejected outright.** The partials are a softmax
   numerator and denominator; rounding them is rounding the *accumulator*, not an
   op's output, which is exactly what the rounding discipline forbids. It would
@@ -2176,3 +2202,121 @@ Four in-situ points, all with this instrument, 2026-08-25:
    work-groups at depth 4096, predicted ≈3.43 ms/token), not SLM staging. Spec
    1.5's lever L5, ranked 1 by measured share in docs/15 and third to execute
    there; expected yield 1.5-2.5 ms, extrapolated.
+
+   **Executed 2026-08-25 - the direction held and the number did not.** The
+   128-position retile measured 296.684 µs/launch against the 214.5 this fit
+   predicted (+38.3%), which falsifies `F + fill · P` as surely as the
+   depth-1024 point falsified its two predecessors. The block was then swept to
+   64 and 32 rather than fitted, and 64 shipped. Everything after this point in
+   the section is the *pre-L5* record and is kept as such; the after numbers,
+   the sweep and the two further falsifications are in **"Measured - lever L5"**
+   at the end of this chapter.
+
+### Measured - lever L5 cut it: the attn family 6.058 → 3.839 ms/token
+
+Spec 1.5's lever L5, executed 2026-08-25. `b70-decode --profile --depth 4096
+--steps 32` on an idle box, before at `0bfa891` and after at the commit that
+landed the retile. **The lever is one number: `ATTN_BLOCK`, 256 → 64** - KV
+positions per `attn_decode` work-group. No arithmetic was rewritten: the wave is
+still 16 positions, the online-softmax update inside a wave is character for
+character what it was, and `attn_reduce`'s merge is the same fixed ascending
+order over more blocks. What moved is *where the partial-accumulation boundary
+falls*.
+
+| kernel | before (`0bfa891`) | after | delta | kind |
+|---|---|---|---|---|
+| `attn_decode` (16 launches) | **5919.814 µs** (369.988/launch) | **3584.736** (224.046/launch) | **−2335.1** | measured, in situ |
+| `attn_reduce` (16) | 80.241 (5.015/launch) | 196.195 (12.262/launch) | **+116.0** | measured, in situ |
+| `attn_prep` (16) | 58.057 | 58.070 | +0.0 | measured, in situ |
+| **the attn family** | **6058.112** | **3839.001** | **−2219.1** | measured, in situ |
+| the 726 untouched launches, Σ | 31329.398 | 31503.440 | +174.0 (**+0.56%**) | measured, in situ |
+| Σ of all 774 kernel durations | 37387.510 | 35342.441 | −2045.1 | measured, in situ |
+| fence wall (profiled) | 38413.428 | 36357.567 | −2055.9 | measured, in situ |
+
+−2219.1 + 174.0 = **−2045.1**, which is the Σ delta to the last digit: the
+lever's own row and the by-now-familiar run-to-run drift on everything it did
+not touch (§L2 measured that at +0.30%, §L1 at +0.50%, here +0.56%) account for
+the whole difference. **The launch count did not move** - 774 before and after,
+three attention launches per FA layer as always - so unlike L1 there is no
+dispatch term to add.
+
+`attn_reduce` got **2.4× slower** and that is the design working as intended: it
+merges `nb = (pos+m)/ATTN_BLOCK + 1` blocks, which at depth 4096 goes 17 → 65.
+It costs 116 µs against `attn_decode`'s 2335, a **20:1** trade, and it is why
+this lever is judged on the family's net rather than on `attn_decode` alone.
+
+#### The block sweep - four values, measured, and the knee is real
+
+The retile was run at three sizes below 256 before one was chosen. All at depth
+4096, `--steps 32`, same box, same session:
+
+| `ATTN_BLOCK` | live WGs @ 4096 | `attn_decode` µs/launch | `attn_decode` ms/token | `attn_reduce` µs/step | **attn family ms/token** | Σ 774 µs |
+|---|---|---|---|---|---|---|
+| **256** (before) | 68 | 369.988 | 5.920 | 80.241 | **6.058** | 37387.510 |
+| 128 | 132 | 296.684 | 4.747 | 127.240 | **4.931** | 36380.755 |
+| **64** (shipped) | 260 | **224.046** | **3.585** | 196.195 | **3.839** | **35342.441** |
+| 32 | 516 | 203.888 | 3.262 | 452.816 | 3.772 | 35363.298 |
+
+**64 is the knee and it is measured on both sides.** At 32 `attn_decode` still
+improves (−20.2 µs/launch, −0.32 ms/token) but `attn_reduce` more than doubles
+again (+256.6 µs/step) and the step's whole Σ comes out **21 µs higher** than at
+64 - inside drift, i.e. 32 buys nothing and costs 101 MB of `attn_part` to buy
+it. `attn_part` at 64 is 50.7 MB against 12.7 before
+(tests/runtime/buffers_test.cc carries the arithmetic).
+
+#### A third model died here, and this document does not offer a fourth
+
+The section above this one fitted the four in-situ *depth* points as
+`F + fill · P` with **F ≈ 90.8 µs** of per-launch fixed cost and **P ≈ 247.4 µs**
+for one work-group's serial walk of a full 256-position block, and predicted
+**214.5 µs/launch** for a 128-position block. The retile is the cleanest possible
+test of that model - it changes the block length and nothing else - and it
+measured **296.684**, **+38.3%**. Refitting `F + walk` on the 256/128 pair gives
+F ≈ 223.4 µs and a 256-block walk of ≈ 146.6 µs, which predicts **260.0 µs** at
+a 64-position block; that prediction was written down before the run and
+measured **224.046**, **−13.8%** the other way. Two more falsifications, on the
+same kernel, by the same method that killed the first two.
+
+What is **measured** and not fitted, over 256 → 128 → 64:
+
+- each halving of the block costs **≈ 73 µs less per launch** - 73.304 then
+  72.638 - which is linear in `log2(ATTN_BLOCK)` and *not* in the block. No
+  mechanism here explains that and none is invented; a fourth point at 32 breaks
+  it too (−20.2, not −73), so it is a local description over three points, not a
+  law.
+- **work-group count is still nearly free**, now measured a great deal further
+  than before: 68 → 260 live work-groups while the launch got **39% faster**.
+  docs/15 §2 called 264 work-groups "past the point any measurement here
+  reaches". It is reached; it is fine.
+- the whole launch is now **224 µs**, of which the earlier fit called ~223 µs
+  "fixed". Whatever `attn_decode` is actually limited by at depth 4096, no model
+  in this document has named it, and the next person to attack this kernel should
+  measure that term before designing against it.
+
+#### What it cost in correctness, and what proved it
+
+`attn_part` and `attn_out` are reassociated - 4 waves per block accumulate into a
+partial where 16 did, and `attn_reduce` merges 4× as many partials - so the last
+bits move. `tests/kernels/attn_test.cc` re-ran at ten depths (0, 63, 127, 129,
+254, 255, 256, 4095 at L4096; two M = 2 cases; pos 16383 at L16384) with
+`attn_ref.h` deriving its blocking from `kBlock` so the reference follows the
+kernel by construction:
+
+- `kv_k` / `kv_v` **bit-exact** over the whole cache at every depth (16.8 M
+  words each at L16384);
+- `attn_q` roped dims **0 ulp** (`rel 0.000e+00`) at every depth;
+- `attn_part` worst relative error **7.6e-07** - fp32 noise;
+- `attn_out` worst **2 bf16 ulp** at `|ref| ≥ rms/8`, against the ruled bar of 2,
+  on at most 3 words of 6144;
+- the early-out asserted directly by canary, at the new geometry (24 × 63 blocks
+  still canary at `pos` 0, 0 at `pos` 4095).
+
+The **golden gate ran before and after** (docs/14) and returned **96/96 token
+ids element-exact both times, with every diagnostic cosine unchanged to the nine
+decimals it prints** - the first lever in this spec whose tap cosines did not
+move at all. The reason is worth stating rather than celebrating: the gate's
+longest prompt reaches `pos` 92, so it exercises **two** 64-position blocks
+where it exercised one 256-position block. It is real coverage of the merge and
+no coverage at all of the 65-block merge that runs at depth 4096. That depth is
+covered by `attn_test`'s `pos = 4095` and L16384 `pos = 16383` cases and by
+nothing else.
