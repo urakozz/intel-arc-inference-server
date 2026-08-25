@@ -525,6 +525,196 @@ than swept up because it is in the raw logs.
   regression test, and no new test binary was built for it. Re-run it after any
   change to `dequant.py` or the loader's packing assumptions.
 
+## The RTN-checkpoint gate - 2026-08-26, and the tie it found
+
+Everything above is the gate on `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ`.
+Spec 1.6 §5.1 added a second checkpoint -
+`~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64`, this project's own RTN
+quantisation with a packed `lm_head` (docs/13) - and a golden set is bound to
+exactly one checkpoint, so a second one was produced: **`oracle-out-rtn/`**,
+same three prompts, same committed `.ids`, same `--gen 32`, same container.
+The Vishva007 golden files were not touched.
+
+### The standing gate did not move
+
+Re-run 2026-08-26 with the whole spec-1.6 §5.1 change in the tree:
+
+```
+  prompt   ids   exact/32   tap min cos (layer,t)   L63 tail   gdn min cos   logit min cos
+  prose     42   32/32      0.994806738 (62,24)   0.997115152  0.999851574 (L60)  0.999864052
+  code      61   32/32      0.913533675 (59,41)   0.982882165  0.998530392 (L60)  0.999818731
+  cjk       38   32/32      0.999690168 (51, 0)   0.999832133  0.999904153 (L33)  0.999876394
+golden_gate_test OK: 3 prompts x 32 greedy tokens, element-exact against the CPU oracle
+```
+
+**96/96, and the full suite 40/40 green.** Nothing regressed.
+
+### The new checkpoint's own gate: 79/96, and why
+
+```
+  prompt   ids   exact/32   tap min cos (layer,t)   L63 tail   gdn min cos   logit min cos
+  prose     42   15/32      0.999817776 (62,41)   0.999842062  0.999900713 (L60)  0.628406785
+  code      61   32/32      0.896471198 (63, 7)   0.788012934  0.999677518 (L60)  0.999830544
+  cjk       38   32/32      0.999851232 (62,12)   0.999844791  0.999909240 (L33)  0.999936448
+GATE FAILED: prose reproduced 15/32 tokens (first mismatch 15)
+```
+
+`code` and `cjk` are exact. `prose` diverges at generated step 15 and never
+recovers - which is what a greedy sequence does after one different token, so
+**15/32 is one event, not seventeen.** `prose`'s `logit min cos` of 0.628 is
+that event's consequence: every row after step 15 compares two different
+contexts. The cosine **at the decision row itself is 0.999944**, in the same
+band as every other row in this document.
+
+#### The decision row, read exactly
+
+The oracle's own top-two logits at that row are **bit-identical**:
+
+```
+decision row for generated step 15 = logits[56]
+   id    271  f32 19.750000000  bits 0x419E0000
+   id    353  f32 19.750000000  bits 0x419E0000
+   id   2717  f32 17.375000000  bits 0x418B0000
+   top-2 gap = 0.000000000e+00   bf16 ulp at that magnitude = 1.250000000e-01
+   BIT-EQUAL: True
+```
+
+The engine's fp32 logits separate the same pair by **0.0156, in favour of 353**
+- which is **one eighth of one bf16 ulp** at that magnitude. `torch.argmax`
+broke the exact tie by lowest index and returned 271.
+
+**The oracle's logits are on the bf16 grid.** `dump.py` records
+`out.logits[0].to(torch.float32)`, and `out.logits` from a bf16 model *is* bf16,
+so widening it to fp32 lands exactly on bf16-representable values - every word
+in the golden `logits` tensor has zero low 16 bits, verified over all six golden
+files. The reference therefore carries ~8 mantissa bits at the decision, and
+**cannot resolve any two candidates that fall inside one ulp of each other.**
+This one is not merely inside an ulp; it is the same number.
+
+#### How exposed each golden set is - measured over all six files
+
+Exact top-two ties among the 32 **decision** rows:
+
+| golden set | prose | code | cjk |
+|---|---|---|---|
+| `oracle-out/` (Vishva007) | 0 | 0 | **2** (steps 13, 26) |
+| `oracle-out-rtn/` (RTN) | **3** (steps 15, 26, 29) | 0 | 0 |
+
+**The published checkpoint's set has ties too, and the gate passes 96/96 there.**
+On `cjk` steps 13 and 26 the engine happened to agree with torch's
+lowest-index tie-break. So the standing 96/96 has, from the day it was recorded,
+contained two decisions the reference does not determine - the coin came up
+heads twice. That is a fact about the gate, not about either checkpoint, and it
+is recorded here because it was not known before 2026-08-26.
+
+#### The flip is one event, and that is measured, not argued
+
+Teacher-forcing: feed the engine the prompt **plus the golden continuation
+through the tied step** (42 + 16 ids) and generate the remaining 16.
+
+```
+engine  40 557 11362 383 279 172113 440 821 1142 2272 279 8981 9506 11 9799 279
+golden  40 557 11362 383 279 172113 440 821 1142 2272 264 8981 9506 11 9799 279
+```
+
+**15 of 16**, and the single difference is at generated step 26 - the **second**
+bit-exact tie (ids 264 and 279). At step 29, the third tie, the engine agrees
+with the oracle.
+
+The complete picture for `prose`, 32 decisions:
+
+| | count | engine vs oracle |
+|---|---|---|
+| rows where the oracle's top-2 differ | 29 | **29/29 element-exact** |
+| rows where the oracle's top-2 are bit-identical | 3 | 1 agree, 2 differ |
+
+**The engine reproduces every decision the reference actually determines.**
+
+#### What this is, and what is being asked
+
+This is the flip spec 1.5's re-assessment memo §5.1 predicted in writing:
+
+> "a flipped token here would be a *legitimate* flip, not a bug, and spec §2's
+> ruling then applies: **stop and surface it as a decision**, never absorb it."
+
+So it is surfaced, and **the gate has not been weakened.** `golden_gate_test`
+still asserts exact token equality; the RTN checkpoint fails it at 79/96 and
+will keep failing it until somebody decides what a gate should do at a row its
+reference cannot resolve. The options, none of them taken here:
+
+1. **Leave it.** The RTN checkpoint has no green gate. Honest, and it means the
+   engine's correctness on that checkpoint rests on `code` + `cjk` (64/64) plus
+   the 29/29 analysis above rather than on a passing test.
+2. **Treat a bit-exact oracle tie as satisfied by either id.** Narrow, and
+   arguably not a weakening at all - it declines to assert something the
+   reference does not determine. It does change the gate's contract, it would
+   also apply retroactively to `cjk`'s two rows on the published checkpoint, and
+   it needs the tie detected from the golden `logits` at test time.
+3. **Give the oracle more resolution** - have `dump.py` compute the head in
+   fp32 so its logits stop landing on the bf16 grid. That changes the oracle's
+   numerics, which is the one thing this document is most reluctant about, and
+   it would invalidate both existing golden sets.
+4. **Change the prompt.** Cheapest and worst: it hides a property of the gate
+   behind a choice of input.
+
+The third bullet of the trust chain (`tools/oracle/README.md`) already says the
+engine is **the more accurate of the two** - it never materialises a bf16 weight
+- and this row is that statement arriving somewhere it has consequences. A
+reasonable reading of the measurement is that the engine is *right* at step 15
+and the oracle is *tied*; that reading is not a licence to change the bar
+without a ruling.
+
+#### Diagnostics, RTN checkpoint, for the record
+
+Per-prompt minima over the 64-layer tap, the L63 tail, the 48 GDN states and the
+logit rows. The `code` prompt's low taps are the standing anomaly this document
+already describes ("The `code` prompt's LOW rows"), and `code` is 32/32 exact
+on this checkpoint too - low taps still do not predict flips.
+
+| prompt | exact/32 | tap min cos | L63 tail | gdn min cos | logit cos at the decision rows |
+|---|---|---|---|---|---|
+| prose | 15/32 | 0.999817776 (L62, t41) | 0.999842062 | 0.999900713 (L60) | 0.99994 … 0.99998 for steps 0-15 |
+| code | **32/32** | 0.896471198 (L63, t7) | 0.788012934 | 0.999677518 (L60) | 0.999830544 min |
+| cjk | **32/32** | 0.999851232 (L62, t12) | 0.999844791 | 0.999909240 (L33) | 0.999936448 min |
+
+`gdn_state`: 0 of 144 below the 0.999 diagnostic bar on any prompt.
+
+#### The RTN golden set, re-read in a separate process
+
+`OUT_DIR=oracle-out-rtn tools/oracle/check.sh`, 2026-08-26:
+
+| prompt | bytes | tokens | distinct | `resid.L63` finite | continuation |
+|---|---|---|---|---|---|
+| prose | 311 030 280 | 32 | 25 | yes | ` By eight the whole town would be awake.\n\nI was not awake.\n\nI was sitting on the quay with my back against a cold stone, watching the` |
+| code | 367 258 168 | 32 | 24 | yes | `def clamp2(values, lo, hi): return [min(max(v, lo), hi) for v in values]` then `def clamp3(values` |
+| cjk | 299 192 864 | 32 | 29 | yes | `我站在船舷边，看着对岸的轮廓一点点清晰起来。` then a `## 渡轮，是这座城市的另一种呼吸` heading |
+
+Two things worth noticing. **`code`'s 32 ids are identical to the published
+checkpoint's** - an RTN quantisation and a tuned AutoRound one produce the same
+continuation on structured text, which is a free signal that the RTN weights are
+faithful. And `cjk` again opens by completing the trailing emoji's variation
+selector, which is what that prompt exists to pin.
+
+Regeneration cost, 2026-08-26, box under a 12-core vLLM XPU kernel compile,
+`ORACLE_THREADS=28` (torch reported 22 intra-op threads - the image caps it):
+**25 min 14 s** for all three serially, against 16 min 48 s on an idle box.
+
+### Running the RTN gate
+
+```bash
+# the golden set (on the box, detached; ~25 min under load)
+OUT_DIR=oracle-out-rtn \
+ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 \
+ORACLE_THREADS=28 tools/oracle/golden.sh
+
+# the gate itself: golden dir, prompt dir, snapshot
+tools/box.sh run './build/tests/golden_gate_test "$PWD/oracle-out-rtn" \
+  "$PWD/tests/golden/prompts" $HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64'
+```
+
+`ctest` still runs the gate against `oracle-out/` and the published checkpoint -
+that registration is unchanged, and it is the one that is green.
+
 ## Running the gate
 
 ```bash

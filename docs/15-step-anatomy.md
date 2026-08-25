@@ -1577,3 +1577,132 @@ falsified itself twice before it falsified anything else.
   is the pattern this whole document keeps finding.
 - **M > 1.** Everything here is the M = 1 decode step. The bucket's kernels are
   the ones whose costs move most with M, and none of that is measured.
+
+
+---
+
+## Spec 1.6 §5.1 - `lm_head` at int4, landed and measured
+
+The re-assessment memo's headline item, executed 2026-08-26. **Accepted.** The
+memo priced it at "~3.3 ms (estimated), and ≤3.26 ms whatever happens
+(derived)". It paid **−3.203 ms/token in situ** - 98.3% of a bound the memo
+derived before any of the work started, and the closest any lever in this
+project has come to its own ceiling.
+
+**It required a new checkpoint, not a new kernel.** The memo's proof-1 was "the
+checkpoint requant path", and that is where the work went:
+`tools/quantize_qwen38_rtn.sh` produced `qwen38-27b-w4g64-rtn`, whose `lm_head`
+is int4 g64 sym in this project's exact packing. `gemv.cl` is byte-for-byte
+unchanged; one compiled variant was added and one binding site now dispatches on
+what the loader classified (docs/12, "The sixth shape"; docs/13, "The second
+checkpoint").
+
+### The in-situ site, and the step around it
+
+`b70-decode --profile --depth 4096 --steps 32`, both checkpoints, **back to back
+on the same box in the same hour** - that pairing is the point, because the
+box was not idle (a 12-core vLLM XPU kernel compile was running throughout, and
+a 22-thread oracle dump for part of it).
+
+| | bf16 head | int4 head | Δ |
+|---|---|---|---|
+| `lm_head` µs/launch | 4381.289 | **1178.164** | **−3203.1 µs** |
+| Σ of 774 kernel durations | 35343.285 µs | 32306.439 µs | −3036.8 µs |
+| fence wall, profiled list | 36413.689 µs | 33471.849 µs | −2941.8 µs |
+| `lm_head` share of Σ | 12.40% | **3.65%** | |
+| token boundary (6 launches) | 4402.370 µs | 1201.374 µs | |
+
+**The site moved −3.203 and the step-Σ moved −3.037**, a miss of 0.166 ms
+(+0.53%) - which is drift on the 773 launches this lever did not touch, and sits
+squarely inside the +0.30% / +0.50% / +0.56% the L2, L1 and L5 measurements each
+recorded for the same quantity. Nothing new is being attributed here; §5.4's
+finding that *within-run* spread is not *across-run* spread is exactly why this
+is reported as drift and not as a second effect.
+
+### What the launch is now
+
+675 430 400 B in 1178.164 µs is **573.3 GB/s, 97.2% of the measured 590**. The
+bandwidth floor is 1144.8 µs; the launch is **2.9% above it**. §4 of this
+document said of the bf16 row "there is nothing to tune"; that is now true of
+the int4 row for the same reason, one 3.7× shorter.
+
+### The bench, and the honest conditions
+
+`--bench --depth 4096 --tg 64`, **single runs, not medians of three**, on a
+loaded box. A record-grade row is deferred to a quiet window and named as a
+follow-on.
+
+| checkpoint | t/s | ms/token | MBU | W | roofline |
+|---|---|---|---|---|---|
+| `Vishva007` (bf16 head) | 27.57 | 36.27 | 72.6% | 15.540 GB | 37.97 t/s |
+| **`qwen38-27b-w4g64-rtn`** | **30.20** | **33.11** | **70.0%** | **13.673 GB** | **43.15 t/s** |
+| Δ | **+2.63** | **−3.16** | −2.6 pp | −1.867 GB | +5.18 |
+
+**The load is measurable and it is small.** The bf16 checkpoint read 36.27 ms
+under load against the standing idle-box median of **36.32** - 0.14% apart. A
+decode step that is 99.7% inside the fence is not competing for the CPU the
+compile is using, and that is what licenses reading the paired rows as a
+comparison rather than as two anecdotes. It is still one run each.
+
+Against the standing gate row (36.32 / 27.54) the delta is **−3.21 ms, +2.66
+t/s**. The memo's §4 arithmetic projected 33.02 ms / 30.28 t/s from the measured
+step; the measurement is 33.11 / 30.20 - **0.09 ms apart**.
+
+### The memo's other prediction, also confirmed
+
+> "Note the direction this pushes MBU: the engine would read 418 GB/s = 70.9%,
+> *below* today's 72.5%. Quantising `lm_head` removes the most efficient work in
+> the step; what is left is the inefficient part."
+
+Measured: **413 GB/s = 70.0%**, from 72.6%. The engine got faster and less
+efficient, exactly as written, and the reason is that a launch running at 97% of
+device bandwidth was replaced by a smaller one - the average of what remains is
+worse because the best row shrank. Any reading of MBU that treats it as a
+quality score has to survive this row.
+
+**The `--bench` MBU line was wrong until this landed and is now fixed**: it
+divided by a hardcoded 15.540 GB. On the new checkpoint that would have printed
+79.4% where the honest figure is 70.0% - one checkpoint's throughput against
+another's denominator. `W` now comes from `LoadReport::read_per_token`, and the
+line prints the `W` it used.
+
+### Where this leaves the bar
+
+| | ms/token | t/s | kind |
+|---|---|---|---|
+| the bar (vLLM `p314-t214-vxkp0`, no speculation) | 31.746 | **31.50** | measured |
+| spec 1.5's gate, `ef6acb0` | 36.32 | 27.54 | measured, median of 3, idle |
+| **+ `lm_head` int4, `qwen38-27b-w4g64-rtn`** | **33.11** | **30.20** | **measured, 1 run, box under load** |
+| the memo's projection for this row | 33.02 | 30.28 | derived, 2026-08-25 |
+| the new roofline (13.673 GB ÷ 590 GB/s) | 23.174 | 43.15 | measured / derived |
+
+**Still short of the bar by 1.36 ms (1.30 t/s), and the memo said it would be.**
+§4's headline - "`lm_head` at int4 is necessary and NOT sufficient", and "it
+cannot clear 31.50 t/s even if it lands perfectly, because the bytes it still
+reads forbid it" - is now a measured statement rather than a derived one. It
+landed at 98.3% of perfectly and the bar is still 1.30 t/s away.
+
+What that changes about the remaining work is the *shape* of it, not the size.
+The step is now 33.11 ms of which **zero** is a bytes lever: the memo's own
+sentence, "this is a bytes lever, not a kernel lever, and it is the only one of
+that kind left", has been spent. Everything remaining is in §5.2's territory -
+`attn_decode`'s 3.585 ms, the `prep` family's distance from its floor, and
+GEMV's excess over its own - and §5.2's probe has since named `attn_decode`'s
+dominant term as the KV load path with ~0.45 ms/token reachable by tuning. The
+arithmetic that follows from those two facts is not written here because it
+would be a projection, and this document's whole record is that projections on
+this step have died four times.
+
+### What did NOT move, and what did
+
+- **Launch count: 774**, unchanged. Module count: **19**, unchanged - one module
+  swapped for another, one for one, and `replay_determinism_test` now asserts
+  the swap by name so a future change that is not one-for-one says so.
+- **Determinism**: bitwise-identical replays on the new checkpoint, 8 tokens ×
+  3 runs.
+- **The golden gate did move, and not in the direction of a pass.** The
+  published checkpoint is still **96/96 element-exact** with the full 40/40
+  suite green. The new checkpoint's own gate reads **79/96**, on one legitimate
+  flip at a decision row where the oracle's top-two logits are **bit-identical**.
+  That is docs/14, "The RTN-checkpoint gate", and it is a decision, not a result
+  to absorb.
