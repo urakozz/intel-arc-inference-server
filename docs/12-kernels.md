@@ -381,10 +381,15 @@ tie (fp32 product `0x3FB88001`, one ulp above the tie) to fall on the other side
 of it. 5119/5120 exact - which is exactly the kind of "almost" a tolerance would
 have hidden. `add_ocloc_kernel` grew an `OPTIONS` parameter for it (and refuses
 `-cl-denorms-are-zero`, which stays forbidden project-wide, docs/13-loader.md).
-The flag is opt-in per kernel rather than global so that the already-measured
-`gemv` binaries are untouched; no existing kernel contains an fp32 divide or
-`sqrt`, so nothing else needs it **today**, and the next kernel that grows one
-must add it.
+
+It started opt-in per kernel, to leave the already-measured `gemv` binaries
+untouched. **It is now the project-wide default** (`cmake/ocloc.cmake`,
+controller ruling 2026-08-25, plan 3 Task 4): `gdn_step` is the second kernel to
+need it and "the next kernel that grows a divide must remember the flag" is not
+a rule anyone can be relied on to follow. Making it the default is safe because
+the kernels without a divide or a `sqrt` cannot be affected by it - every
+binary was rebuilt and all 18 tests, `gemv` and `gemv_bf16` included, came back
+byte-for-byte green.
 
 **The variance tree order** is stated identically in `prep.cl` and `prep_ref.h`,
 because the comparison is only exact if both walk it the same way: each of the
@@ -803,3 +808,257 @@ case too, since `lm_head` has just written them. Against a ~26 ms step this is
 **0.017%**, and the ~1 MB of traffic per token (993 KB of logits read, 1944 B of
 partials written and read back) is 0.006% of the token's 15.52 GB of weights.
 For scale, `lm_head` itself - the GEMV that produces those logits - is 4.35 ms.
+
+
+---
+
+## `gdn_step` - the gated delta-rule decode step
+
+`src/kernels/gdn_step.cl`, variants `gdn_step_M1` (used) and `gdn_step_M2`
+(spec 1 §9's M-loop rule). **48 of the model's 64 layers run this**, no library
+implements it and `sycl-tla` has no example for it: it is the engine's
+original-work kernel, and the one that decides whether the golden gate can pass
+(doc 03, "GDN dominates the layer count, not the byte count").
+
+One kernel does the whole GDN mixer between the qkv‖z GEMV and
+`prep_gated_head`: the depthwise conv1d update and its SiLU, the q/k l2norm,
+and the recurrent state update.
+
+```
+gdn_step(ctrl, qkvz_partials, ab_out, gdn_small, conv_ring, state, gdn_o)
+
+a_b, b_b = rne_bf16(ab_out[m][h]), rne_bf16(ab_out[m][48+h])
+g        = negA[h] · softplus(f32(a_b) + dt_bias[h])      (fp32; negA = -exp(A_log), baked)
+beta     = 1 / (1 + exp(-f32(b_b)))                       (fp32)
+raw_b    = rne_bf16(qkvz_partials[0][m][ch])              -> conv_ring[(pos+m)%16][ch]
+conv     = Σ_{t=0..3} w[ch][t] · f32(window_t)            (window_3 = this token)
+x_b      = rne_bf16(silu_f32(conv))
+qn_b     = rne_bf16(f32(q_b) · 1/sqrt(Σ q² + 1e-6))  ;  qf = f32(qn_b) · 1/√128
+kn_b     = rne_bf16(f32(k_b) · 1/sqrt(Σ k² + 1e-6))  ;  kf = f32(kn_b)
+S       *= exp(g) ;  kv[v] = Σ_k S[k][v]·kf[k]
+Δ[v]     = (f32(v_b[v]) − kv[v])·beta ;  S[k][v] += kf[k]·Δ[v]
+gdn_o[m][h][v] = Σ_k qf[k]·S[k][v]                        (fp32; prep_gated_head rounds it)
+```
+
+That is doc 03's GDN block op for op, and `tests/kernels/gdn_ref.h` is the same
+chain on the host - trees included, which is the point of the next two sections.
+
+### Work assignment, and why
+
+**Grid `(48 heads, 4 chunks)`, work-group 256 = 16 subgroups × 16 lanes
+(SIMD16).** Work-group `(h, c)` owns state columns `[32c, 32c+32)` of head `h`.
+With `lid = get_local_id(0)`, `sgid = lid/16` and `lane = lid%16`, work-item
+`(sgid, lane)` owns an **8 k × 2 v tile**:
+
+```
+          v columns owned by the work-group  (c = 1 shown)
+          32 .. 47                48 .. 63
+        +------------------------------------------+
+k   0.. 7|  sgid = 0 : lane owns columns 32+lane and 32+lane+16
+k   8..15|  sgid = 1 : "
+k  16..23|  sgid = 2 : "
+   …     |  …
+k 120..127| sgid = 15: "
+        +------------------------------------------+
+          16 subgroups × 8 k = 128 k-rows
+          16 lanes × 2 v      = 32 v columns
+          16 fp32 of state per work-item, in registers
+```
+
+Three things chose that shape.
+
+**Why (head, chunk) and not one work-group per head.** 48 work-groups on a card
+with **32 Xe-cores** is 1.5 per core: half the machine idle on the layer type
+that runs 48 times per token, and no second work-group per core to hide the
+state load's latency behind. Splitting the 128 v columns four ways gives
+**192 work-groups**, six per Xe-core, at the cost of convolving each head's
+channels four times (below). The state slice per work-group is
+`128 × 32 × 4 B = 16 KB`, which is 16 fp32 per work-item - registers, not SLM.
+
+**Why the lane index picks the *column* and the subgroup picks the k-band.**
+`state` is k-major, so a row's 128 v are contiguous. Under this mapping a
+subgroup's 16 lanes read `32c + lane` at a fixed k-row - **16 consecutive fp32,
+one full 64 B cache line per access**, and the column pair's second half is the
+next line. The obvious alternative (lane picks the k-row) makes every subgroup
+access a 16-way gather of 8 B at a 4 KB stride. Same arithmetic, same registers,
+an order of magnitude apart on the load that dominates this kernel's traffic.
+
+**Why the tile is 8×2 and not, say, 16×1.** Columns are independent under the
+rank-1 update `S[k][v] += kf[k]·Δ[v]`, so the update needs no communication at
+all - no atomics, no barrier. Only the two contractions cross work-items, and
+for a fixed column they cross exactly the 16 subgroups, which is a 16-wide SLM
+tree. Two columns per lane amortise that tree over two results.
+
+**The trees, stated once and obeyed twice** (`gdn_step.cl` and `gdn_ref.h` carry
+this text verbatim, as `prep` does):
+
+- `kv[v] = Σ_k S[k][v]·kf[k]` - band `sgid` contributes
+  `Σ_{kk=0..7} S[8·sgid+kk][v]·kf[8·sgid+kk]`, accumulated in **ascending kk**
+  with an explicit `fma`, into `kv_red[sgid][v−32c]`. The 16 band partials then
+  collapse pairwise: for `stride = 8, 4, 2, 1`, work-items with `sgid < stride`
+  do `kv_red[sgid][j] += kv_red[sgid+stride][j]`, barrier after each step.
+- `o[v] = Σ_k qf[k]·S[k][v]` - identical shape, in `o_red`.
+- the two l2norm sums are a different tree: lane `lid < 128` contributes
+  `f32(q_b[lid])²` - one term per lane, so a plain multiply and no `fma` - and
+  lane `128+i` the k term; each 128-wide array collapses with
+  `stride = 64, 32, …, 1`.
+
+A tree's order is a property of the **bands**, not of `c` or `lane`. That is
+what lets the host reference walk whole 128-column heads and still land on the
+same bits, and it is why nothing here needs an atomic: two replays of the
+captured list produce identical bytes, which `gdn_step_test` asserts directly.
+
+**SLM: 6912 B** - 768 B of conv outputs, 1 KB of l2norm sums, 1 KB of
+normalised q/k, and 2 KB each for the two reduction arrays. The reduction arrays
+are laid out `[16 bands][32 columns]` rather than `[32][16]` so that both the
+writes and every tree step are lane-contiguous in SLM. Measured from the
+compiler's own `zeinfo`: `slm_size 6912`, `grf_count 128`, `simd_size 16` (the
+`intel_reqd_sub_group_size(16)` in the source, honoured), `barrier_count 1`, and
+**neither a `private_size` nor a `spill_mem_size` entry** - the 16 fp32 of state
+stay in registers, which was the design's one real risk.
+
+### The conv in the prologue, and the four-fold redundancy it costs
+
+Each work-group convolves 384 channels: the 128 **q** and 128 **k** of k-head
+`h/3` (the `repeat_interleave(·, 3)` in doc 03) and the 128 **v** of head `h`.
+Every one of the head's four chunks computes all 384, so each channel is
+convolved 4 times, and each q/k channel 12 times (3 v-heads × 4 chunks).
+
+That is deliberate. The alternative is a separate `conv1d + silu` kernel per
+layer, which costs **one more launch per GDN layer** (48 per token, ~25 µs at
+the measured 0.52 µs floor, doc 07 #5) plus a round trip of the convolved qkv
+through DRAM - and it does not even save the redundant *reads*, since every
+work-group still needs the full 128-wide q and k for the l2norm, whose reduction
+domain is the head. The redundant work itself is four taps of `fma` on 384
+channels: 1536 `fma` per work-group against the recurrence's four passes over
+the 4096-cell slice, so under a tenth of the group's arithmetic. The
+redundant *reads* are 192 × (1536 B of partials + 6144 B of conv weights +
+2304 B of ring history) ≈ 1.9 MB per layer, against the state's 6.3 MB, and
+they are L2-resident by construction - 12 work-groups reading the same 512 B of
+q channels within microseconds of each other.
+
+### Ring ownership - the argument, written out
+
+The conv state is a **ring of 16 slots × 10240 channels of bf16** per layer
+(`runtime::DecodeBuffers::conv_ring`), holding raw qkv values - the reference's
+`conv_states` likewise hold the *input* sequence, not the convolved one. Since
+up to 12 work-groups compute the same raw value, exactly one stores it:
+
+- `c == 0` writes this head's **v** channels, `4096 + 128h … +128`;
+- `c == 0 && h % 3 == 0` also writes the **q** and **k** channels of k-head
+  `h/3`, which that triple of v-heads shares.
+
+Together those cover all 10240 channels exactly once - 48 × 128 v plus 16 × 128
+q plus 16 × 128 k. *Which* work-group owns a channel is a bandwidth decision and
+not a correctness one, because the value is identical wherever it is recomputed:
+it is `rne_bf16` of a buffer nothing writes during this step.
+
+The correctness argument is about **slots**, not owners. A work-group writes
+slots `(pos+m) % 16` for `m < n_active` and reads slots `(pos−1) % 16`,
+`(pos−2) % 16`, `(pos−3) % 16`. With ring depth **16 ≥ M + 3** (plan 1 §9.4,
+which is where the depth 16 comes from) those two sets cannot intersect, so **no
+work-group ever reads a slot any work-group is writing this step** - and that,
+not a barrier, is what makes 192 independent work-groups safe without any
+cross-work-group synchronisation, which Level Zero would not give inside one
+launch anyway. Within a work-group the argument is simpler still: each work-item
+reads its own channel's three history slots *before* the loop that writes, and
+the newer window entries come from its own registers rather than from the ring.
+
+`gdn_step_test` pins this without going through the reference at all: at
+`pos = 5` it blanks ring slots 2-4 and requires `gdn_o` to move, then blanks the
+*other thirteen* slots and requires `gdn_o` to be **bitwise unchanged**. The
+pair proves the window is exactly those three slots and that nothing reads the
+slot this step writes - a shared misreading in kernel and reference could not
+survive it.
+
+### What the test asserts
+
+`tests/kernels/gdn_step_test.cc` against `gdn_ref.h`, on seeded random inputs
+(partials and state ~ N(0,·), conv weights U(±0.5), `negA = −exp(U(−4, 0.5))`,
+every ring slot filled). The reference reproduces every rounding and every tree,
+so what is left between host and device is only the libm functions OpenCL does
+not require to be correctly rounded - `exp` (3 ulp) in the decay, the sigmoid
+and the SiLU, `log1p` (2 ulp) in the softplus. `1.0f/sqrt` is *not* among them,
+because every kernel now builds with `-cl-fp32-correctly-rounded-divide-sqrt`.
+
+| case | bar | measured |
+|---|---|---|
+| `pos = 0` (history below zero) - `state` | rel ≤ 1e-5 | **3.26e-07** |
+| `pos = 0` - `gdn_o` | rel ≤ 1e-3 | **5.38e-07** |
+| `pos = 0` - `conv_ring`, all 163840 words | **bit-exact** | 163840/163840 |
+| `pos = 5` (history in slots 2,3,4) - `state` | rel ≤ 1e-5 | **3.44e-07** |
+| `pos = 5` - `gdn_o` | rel ≤ 1e-3 | **4.39e-07** |
+| `pos = 5` - `conv_ring` | **bit-exact** | 163840/163840 |
+| `pos = 5`, M = 2, n_active = 2 - `state` / `gdn_o` | rel ≤ 1e-5 / 1e-3 | **4.59e-07 / 5.58e-07** |
+| slot ownership (device only, no reference) | see above | holds |
+| replay of every case | **bitwise** identical | holds |
+
+"Relative error" is per element floored at the tensor's own RMS,
+`|got − ref| / max(|ref|, rms(ref))`: `Δ = (v − kv)·β` is a difference of two
+same-sized numbers, so an individual state cell can land arbitrarily close to
+zero by cancellation and an unfloored ratio there would measure the
+cancellation, not the kernel. In practice the floor never binds at M = 1 - the
+worst element is above the RMS in both cases, so those numbers are ordinary
+relative errors. The margins are 30× on `state` and 2000× on `gdn_o`; the bars
+are kept where the plan set them because they are the bars a *driver* change
+must not break, not descriptions of today's driver.
+
+The M = 2 variant is compile-only by the plan, but it is run anyway: at `m = 1`
+two of the conv window's three older taps are this step's own raw values instead
+of ring slots, and nothing else covers that path.
+
+### Rejected, and what was not measured
+
+**Nothing here has been timed.** There is no `probe_gdn`, and the arithmetic
+below is arithmetic. Task 9 measures the per-layer time; until it does, this
+section states no wall-clock number.
+
+- **SIMD32 - the shape the SYCL reference uses, not measured here.**
+  `vllm-xpu-kernels/csrc/xpu/gdn_attn/gated_delta_rule.hpp` runs
+  `sub_group_size = 32`, 8 subgroups of 32, 4 k-rows and 4 v-columns per lane -
+  the same 16 cells per work-item and the same 32 columns per group, reached
+  from the other side. SIMD16 is this project's constraint, and the mapping
+  above adapts cleanly to it (16 bands of 8 instead of 32 bands of 4), so no
+  blocker was hit and no switch was needed. What SIMD32 would buy is a
+  contraction that reduces inside one subgroup rather than across sixteen -
+  their code uses `reduce_over_group` where this one uses an SLM tree. That
+  would be faster and would give up the *stateable* reduction order the
+  bit-comparable reference rests on. Unmeasured on both counts.
+- **State in SLM instead of registers - rejected.** 16 KB per work-group would
+  fit, and it would let the state be loaded fully coalesced regardless of the
+  tile mapping. It also puts every recurrence access through SLM and caps
+  occupancy at four work-groups per Xe-core. The register form compiles with no
+  spill and no private memory (`zeinfo`, above), which was the condition for
+  keeping it. Not measured.
+- **`sub_group_reduce_add` instead of the SLM trees - not used**, the same
+  ruling as `prep`: the tree's order is stateable and the whole comparison rests
+  on the reference reproducing it, while a subgroup reduce's internal order is
+  the compiler's business. Faster, probably. Not measured.
+- **A separate conv kernel - rejected**, argued above: one more launch per GDN
+  layer and a DRAM round trip, to save redundant `fma`s worth under a tenth of
+  the work-group's arithmetic and reads that are L2-resident.
+- **One work-group per head (48) - rejected on occupancy**, argued above.
+- **`native_exp` - rejected outright**, as in `prep`: it would put the decay,
+  and therefore the whole recurrence, somewhere the host cannot follow.
+- **Atomics for the two contractions - never considered seriously.** A float
+  atomic add is order-dependent, and two replays of the captured list would
+  differ. Determinism is an acceptance criterion for this plan, not a nicety.
+
+### Traffic per token (arithmetic, not a measurement)
+
+The state is the whole story: `48 heads × 128 × 128 × 4 B` = **3.146 MB per
+layer**, read once and written once by the 192 work-groups that partition it.
+
+| item | per layer | per token (× 48) |
+|---|---|---|
+| `state` read + written | 6.29 MB | 302 MB |
+| redundant conv inputs (partials, weights, ring history; 4-12× by design, L2-resident) | 1.9 MB | 92 MB |
+| `conv_ring` written | 20 KB | 0.98 MB |
+| `gdn_o` written | 24 KB | 1.18 MB |
+
+**≈ 396 MB per token**, of which the state's 302 MB is **1.9% of the token's
+15.52 GB of weights** - the share doc 03 predicted. At the measured 600 GB/s
+that is ~0.5 ms of a ~26 ms step, plus 48 launches × 0.52 µs = 25 µs of launch
+overhead. The redundant reads are the price of 192 work-groups instead of 48 and
+of not paying for a second kernel; whether that trade was right is Task 9's
+measurement to make, and this table is what it should be compared against.
