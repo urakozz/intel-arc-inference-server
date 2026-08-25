@@ -259,11 +259,11 @@ XPU kernel compile ran throughout, and for part of the window a 22-thread oracle
 dump as well. A record-grade median-of-three row on a quiet box is a named
 follow-on and has not been taken.
 
-| engine / checkpoint | depth | tg | t/s | ms/token | MBU | grade |
-|---|---|---|---|---|---|---|
-| **b70-decode, `qwen38-27b-w4g64-rtn`** (int4 `lm_head`) | 4096 | 64 | **30.20** | **33.11** | 70.0% of 13.673 GB | iterate, 1 run, box loaded |
-| b70-decode, `Vishva007` (bf16 `lm_head`) - **the control, same hour, same load** | 4096 | 64 | 27.57 | 36.27 | 72.6% of 15.540 GB | iterate, 1 run, box loaded |
-| b70-decode `ef6acb0`, `Vishva007` - the standing record row | 4096 | 256 | 27.54 | 36.32 | 72.5% of 15.540 GB | **record**, median of 3, idle |
+| engine / checkpoint                                                              | depth | tg  | t/s       | ms/token  | MBU                | grade                         |
+|----------------------------------------------------------------------------------|-------|-----|-----------|-----------|--------------------|-------------------------------|
+| **b70-decode, `qwen38-27b-w4g64-rtn`** (int4 `lm_head`)                          | 4096  | 64  | **30.20** | **33.11** | 70.0% of 13.673 GB | iterate, 1 run, box loaded    |
+| b70-decode, `Vishva007` (bf16 `lm_head`) - **the control, same hour, same load** | 4096  | 64  | 27.57     | 36.27     | 72.6% of 15.540 GB | iterate, 1 run, box loaded    |
+| b70-decode `ef6acb0`, `Vishva007` - the standing record row                      | 4096  | 256 | 27.54     | 36.32     | 72.5% of 15.540 GB | **record**, median of 3, idle |
 
 **The control row is what makes the pair readable.** `Vishva007` under load read
 **36.27** against its standing idle median of **36.32** - 0.14% apart. A decode
