@@ -211,6 +211,13 @@ Read that table twice before proposing anything.
    16 → 320 subgroups, and took the row to **0.484 ms/token** (docs/15 §L1). `attn_decode` is a third failure again: its
    work-groups are nearly free (3.4× for +6.9%) and what costs is one
    work-group's serial walk of a 256-position block.
+   **Both halves of that sentence were withdrawn 2026-08-25** (`probe_attn`,
+   docs/15 "Spec 1.6 §5.2"): the 3.4×/+6.9% measurement is real but was taken at
+   `ATTN_BLOCK` **256**, a low-occupancy regime the shipped block size no longer
+   enters - at 64 the launch is *linear* in live work-groups over 68 → 1004 -
+   and what costs is not a serial walk but the **KV load path at 55.4% of the
+   launch, throughput-shaped**, of which 39.2% is the 32-byte load messages
+   themselves. The subgroup curve this paragraph is about is untouched by that.
 
 ### What spec 1.5 is scoped to do
 

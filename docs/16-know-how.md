@@ -30,13 +30,28 @@ overhead, are the binding constraint (docs/15).
 - **Single-work-group kernels are poison**: one Xe core streams ~13-17 GB/s.
   A 129-launch/token family of single-WG kernels cost 2.9 ms where its
   traffic was worth ~0.15 ms (docs/15 §L1).
-- **Serial block walks dominate decode attention**: ~73% of an attention
-  launch was one work-group's serial walk of a KV block; work-group count
-  was nearly free (3.4× WGs → +6.9% time). Halving the block size paid 39%,
-  the second halving only 9% (docs/12 attn, docs/15 §L5).
+- **Block size, not work-group count, is the attention knob - and the reason
+  changed**: halving `ATTN_BLOCK` paid 39%, the second halving only 9%
+  (docs/12 attn, docs/15 §L5). The `3.4× WGs → +6.9% time` measurement is real
+  but it was taken at `ATTN_BLOCK` **256**, where the device is only half
+  occupied; **at the shipped 64 the launch is linear in live work-groups**
+  (68 → 1004 = 14.8× for 11.8× the time), so "work-group count is nearly free"
+  and "it is a serial-walk latency problem" are both **withdrawn** (spec-1.6
+  stage 0). Occupancy is most of why the retile paid.
 - **The KV load path is the named dominant term** of the retiled attention
-  launch: 55.4% (30.9% cache service + 24.4% the 32-byte load messages),
-  throughput-shaped (spec-1.6 stage 0, docs/15).
+  launch: 55.4% - **39.2% the 32-byte load messages themselves, 16.2% cache
+  service** - throughput-shaped, not a latency chain (spec-1.6 stage 0,
+  docs/15). *The first, uncontrolled measurement read 30.9/24.4 and was voided
+  by a compiler-hoisting control; quote the numbers above.*
+- **A "hold the address constant" ablation is not a cache ablation**: a
+  loop-invariant address over a `restrict` pointer is legally hoistable and IGC
+  hoisted it, turning a cache-miss probe into a message-count probe and
+  inverting the answer. Make the hot address a function of the loop variable
+  (spec-1.6 stage 0, docs/15 §5.2 "methodology finding 2").
+- **Warm up a device probe for ~100 launches, not one replay**: at 40 the same
+  binary read 264 and 206 µs on consecutive invocations; from ~100 it locks to
+  0.25%. `gemv_harness.h`'s 8-replays-drop-3 is the convention (spec-1.6
+  stage 0).
 - **L2 absorbs the 6× KV reread** at depth 4096: ~740 GB/s effective over
   live blocks (docs/12).
 - **Idle (early-out) work-groups cost ~15 ns each** - fixed grids with
@@ -96,8 +111,12 @@ overhead, are the binding constraint (docs/15).
   discipline: write both models' predictions down *before* the run.
 - **Measure the instrument before trusting it**: run-to-run drift was
   0.3-0.5% (~0.15 ms) - larger than every remaining lever. Repeated-run
-  averaging brought the attribution floor to **0.051 ms/step** (2σ,
-  cross-process). Attribute nothing below the measured floor.
+  averaging brought the attribution floor to **0.051 ms/step with one
+  unexplained outlier family and 0.011 ms without it** (2σ, cross-process, n=3
+  so both carry a 4.42× upper bound). Quote both or neither: the larger figure
+  is 103% accounted for by that one family. Attribute nothing below the floor,
+  and note that within-PROCESS repeatability is not the floor - one family
+  reproduced to 0.3% inside a process and landed 31% apart between three.
 - **Record-grade vs iteration-grade runs**: absolutes come only from an
   idle box, medians-of-3, sha-named binaries; everything else is labelled
   relative/under-load. Every number in every doc carries measured vs
