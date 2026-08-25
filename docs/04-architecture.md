@@ -85,9 +85,13 @@ capture time, and the list is **byte-identical on every replay**. That is what
 makes the capture-safety rule below testable: replay the same list twice from
 the same state and diff the outputs.
 
-Measured, 2026-08-25: the captured decode step is **645 kernels** - 48 GDN
-layers × 10 + 16 full-attention layers × 10 + 5 at the token boundary
-(`embed_gather`, the final `prep_res_norm`, `lm_head`, two argmax stages).
+Measured, 2026-08-25: the captured decode step is **774 kernels** - 48 GDN
+layers × 11 + 16 full-attention layers × 11 + 6 at the token boundary
+(`embed_gather`, the final norm's two launches, `lm_head`, two argmax stages).
+It was **645** (× 10, × 10, 5) until spec 1.5's lever L1 split every
+`prep_res_norm` site into `prep_res_fold` + `prep_norm_finish`: 129 sites × 2 =
+258 launches where there were 129, so 645 + 129 = 774
+([12-kernels.md](12-kernels.md), `prep_res_fold`).
 `runtime::build` (`src/runtime/capture.cc`) is the one walk that binds them,
 and `tests/runtime/replay_determinism_test` is the diff above, run for real:
 same list, same state, twice, bitwise on the token ids, on a per-layer residual
@@ -205,15 +209,16 @@ is the part that must be *correct*; the GEMV/GEMM is the part that decides the
 *speed* (doc 05). Budget correctness time for the first and benchmark time for
 the second.
 
-**Kernel count is a first-class design input.** Unfused, the 27B is **645**
+**Kernel count is a first-class design input.** Unfused, the 27B is **774**
 kernels per token - the estimate here was ~700; the built list, counted by
-`runtime::CapturedStep::kernel_count`, is 645 (2026-08-25). Inside a replayed
+`runtime::CapturedStep::kernel_count`, was 645 when it was first walked
+(2026-08-25) and is 774 since spec 1.5's lever L1 (above). Inside a replayed
 list each kernel still pays a fixed dispatch + drain cost. The 3-5 µs guessed
 here turned out to be **0.52 µs** measured (`probe_replay`, doc 07 #5), so the
 whole list costs ~0.34 ms rather than the 2-3.5 ms feared. The step it is a
 fraction of is now measured too: **42.14 ms/token** at depth 4096, tg 256,
 median of three runs 2026-08-25 (`tools/bench_decode.sh`, docs/05 and
-BENCHMARKS.md) - so the 645 launches are **0.8%** of a token, and fusion stays
+BENCHMARKS.md) - so the launches are **~1%** of a token, and fusion stays
 deferred out of phase 1 entirely (spec §4.1) instead of being its first move.
 The measurement also says where the effort *should* go, which is not here: 67%
 of that step is GEMV and the other 33% is time inside `prep` / `gdn_step` /
@@ -232,13 +237,17 @@ later measurement makes it worth the correctness risk:
 
 Target after fusion: the five items above remove 128 + 64 + 144 + 144 + 0 = 480
 launches, so a fully fused step would be **~165** kernels per token (estimated -
-arithmetic on a list where nothing is built). **645** is the *unfused* count and
-it is measured, not a target: `runtime::CapturedStep::kernel_count`, 2026-08-25.
+arithmetic on a list where nothing is built, and off the 645-launch list it was
+written against). **774** is the *unfused* count and it is measured, not a
+target: `runtime::CapturedStep::kernel_count`, 2026-08-25. **Note the direction
+the first two levers moved it**: L1 *added* 129 launches to buy 2.4 ms, at a
+derived 0.733 µs each. Launch count is not the lever it was once feared to be,
+in either direction.
 Doc 07 #5 measures the per-kernel floor before any of this is built, so the
 fusion list is sized by a number rather than by taste. Measured 2026-08-22:
 **0.52 µs/kernel** (`noop`) and **0.63 µs/kernel** (`ctrl_read`) inside a
-replayed list - the 3-5 µs estimate above is ~6× pessimistic, so 645 kernels
-were priced at 0.335 ms of the 42.14 ms step measured 2026-08-25 (**0.8%**,
+replayed list - the 3-5 µs estimate above is ~6× pessimistic, so the 645 kernels
+of that list were priced at 0.335 ms of the 42.14 ms step measured 2026-08-25 (**0.8%**,
 estimated). **Superseded 2026-08-25 by an in-situ measurement, same conclusion:
 0.473 ms, 0.733 µs/launch, 1.1% of the step** - derived from the profiler's
 per-kernel timestamps (doc 07 #5, [15-step-anatomy.md](15-step-anatomy.md)),

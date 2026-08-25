@@ -73,6 +73,12 @@ DecodeBuffers::DecodeBuffers(l0::Context& ctx, uint32_t max_len)
       partials(ctx, l0::MemKind::Device, partials_bytes()),
       ab_out(ctx, l0::MemKind::Device,
              size_t{kM} * Q::shape(model::LinearId::AB).N * kFp32),
+      // prep_res_fold's chunk sums-of-squares, one fp32 per (work-group,
+      // token): 20 x 8 x 4 = 640 B, one allocation reused by all 129 sites
+      // because the list is in-order and each site's stage B consumes what its
+      // own stage A wrote before the next site's stage A overwrites it.
+      norm_sumsq(ctx, l0::MemKind::Device,
+                 size_t{DecodeBuffers::kNormGroups} * kM * kFp32),
       gdn_o(ctx, l0::MemKind::Device, size_t{kM} * kGdnValueDim * kFp32),
       attn_q(ctx, l0::MemKind::Device, size_t{kM} * kFaValueDim * kFp32),
       attn_gate(ctx, l0::MemKind::Device, size_t{kM} * kFaValueDim * kFp32),
@@ -96,8 +102,8 @@ size_t DecodeBuffers::persistent_bytes() const {
 }
 
 size_t DecodeBuffers::scratch_bytes() const {
-  return resid.size() + x.size() + partials.size() + ab_out.size() + gdn_o.size() +
-         attn_q.size() + attn_gate.size() + attn_part.size() + attn_out.size() + logits.size() +
-         argmax_part.size();
+  return resid.size() + x.size() + partials.size() + ab_out.size() + norm_sumsq.size() +
+         gdn_o.size() + attn_q.size() + attn_gate.size() + attn_part.size() + attn_out.size() +
+         logits.size() + argmax_part.size();
 }
 }  // namespace runtime

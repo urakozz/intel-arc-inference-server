@@ -38,8 +38,10 @@ namespace runtime {
 struct ProfileEvents {
   l0::EventPool pool;              // capacity kProfileCapacity
   std::vector<l0::Event> events;   // one per launch, walk order
-  // 645 today (spec §9.1); the headroom is for plan 4's levers, which move the
-  // launch count in both directions. `build` throws rather than overrun it.
+  // 774 today (spec §9.1's 645, plus the 129 launches spec 1.5's lever L1 added
+  // by splitting every `prep_res_norm` site in two); the headroom is for plan
+  // 4's remaining levers, which move the launch count in both directions.
+  // `build` throws rather than overrun it.
   static constexpr uint32_t kProfileCapacity = 1024;
   explicit ProfileEvents(l0::Context& ctx);
 };
@@ -51,13 +53,13 @@ struct ProfileEvents {
 // host mutates nothing in it, ever.
 struct CapturedStep {
   l0::CmdList list;                                            // closed, in-order
-  size_t kernel_count = 0;                                     // 645 at M = 1 (spec §9.1)
+  size_t kernel_count = 0;                                     // 774 at M = 1 (spec §9.1 + L1)
   std::map<std::string, std::unique_ptr<l0::Module>> modules;  // by variant name
   std::vector<std::unique_ptr<l0::Kernel>> kernels;            // append order
   // One per launch, walk order: "L<layer> <kernel> <variant>", and
   // "-- <kernel> <variant>" for the five token-boundary launches that belong
-  // to no layer. ALWAYS filled - 645 small strings built on the host during a
-  // capture that already opens 18 device binaries, so there is no profiling
+  // to no layer. ALWAYS filled - 774 small strings built on the host during a
+  // capture that already opens 19 device binaries, so there is no profiling
   // switch on them and no way for a profiled walk to be described differently
   // from a plain one.
   std::vector<std::string> labels;
@@ -73,14 +75,17 @@ struct CapturedStep {
 // copy of `resid` after every layer - the golden gate's per-layer tap. Copies
 // are commands, not kernels, so `kernel_count` does not count them and
 // determinism is unaffected. The tap runs after the layer's LAST kernel, and
-// the residual stream is only advanced by `prep_res_norm`, so tap[L] holds the
-// hidden state with layer L's *mixer* contribution folded in and layer L's MLP
-// contribution still sitting un-folded in `partials` (layer L+1's leading
-// `prep_res_norm` folds it). No tap holds the final hidden state - but after a
-// step's fence, `b.resid` holds it pre-norm (the final `prep_res_norm` folds
-// layer 63's MLP into `resid` first, like every prep, before writing the
-// normalised row to `x`) and `b.x` holds its final-normalised form; both are
-// readable without any capture change.
+// the residual stream is only advanced by `prep_res_fold` - whose per-element
+// arithmetic is the single-work-group `prep_res_norm`'s, unchanged, which is
+// exactly why spec 1.5's lever L1 left every tap byte where it was. So tap[L]
+// holds the hidden state with layer L's *mixer* contribution folded in and
+// layer L's MLP contribution still sitting un-folded in `partials` (layer
+// L+1's leading `prep_res_fold` folds it). No tap holds the final hidden state
+// - but after a step's fence, `b.resid` holds it pre-norm (the final
+// `prep_res_fold` folds layer 63's MLP into `resid` first, like every prep,
+// before its `prep_norm_finish` writes the normalised row to `x`) and `b.x`
+// holds its final-normalised form; both are readable without any capture
+// change.
 //
 // prof: when non-null, launch `i` signals `prof->events[i]` - the events are
 // created here, one per launch, so the caller never has to know the count in

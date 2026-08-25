@@ -5,7 +5,7 @@
 // it did not write: `transformers` 5.15 on CPU, the pure-torch
 // gated-delta-rule, run over the same checkpoint dequantised by the same rule
 // the C++ loader is bit-compared against (tools/oracle/README.md). If the two
-// agree on 3 x 32 greedy tokens, element-exact, then 645 kernels, the loader,
+// agree on 3 x 32 greedy tokens, element-exact, then 774 kernels, the loader,
 // the repack, the capture and the decode loop are all right together.
 //
 // The gate, per prompt:
@@ -297,7 +297,7 @@ int main(int argc, char** argv) {
   CHECK(model.embed.size() >= size_t(Qwen35::kVocab) * kHid * 2);
   runtime::Engine eng(ctx, std::move(model), kMaxLen, /*debug_resid=*/true);
   CHECK(eng.debug_resid());
-  CHECK_EQ(eng.step().kernel_count, size_t(645));
+  CHECK_EQ(eng.step().kernel_count, size_t(774));   // 645 + lever L1's 129
   l0::CmdList imm = l0::CmdList::immediate(ctx);
 
   const size_t gdn_stride = kGdnElems * sizeof(float);

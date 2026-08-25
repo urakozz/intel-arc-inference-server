@@ -85,6 +85,29 @@ inline std::string prep_res_norm_variant(unsigned M, unsigned K, unsigned S_PREV
   return "prep_res_norm_M" + std::to_string(M) + "_K" + std::to_string(K) + "_SP" +
          std::to_string(S_PREV);
 }
+// **The two-stage split of `prep_res_norm`** - spec 1.5 lever L1. The runtime
+// binds this pair at every one of the 129 sites; `prep_res_norm_variant` above
+// still names the single-work-group kernel, which stays compiled and stays run
+// by tests/kernels/prep_test.cc as the pair's reference.
+//
+// `G` is stage A's work-group count and therefore the number of fp32 partial
+// sums-of-squares it writes; stage B's `G` is how many it folds, and the two
+// MUST be the same number - the grid `runtime::DecodeBuffers::kNormGroups`
+// launches, and the size `norm_sumsq` is allocated at. It is in both names for
+// that reason: pairing mismatched grids names a binary that does not exist and
+// throws at capture rather than reducing the wrong number of slices.
+//
+// `W` is stage B's own work-group count. W = G spreads the rescale pass over
+// the same grid the fold uses; W = 1 is the plan's literal single-work-group
+// finish and is compiled as the measurement control (src/kernels/CMakeLists.txt).
+inline std::string prep_res_fold_variant(unsigned M, unsigned K, unsigned S_PREV, unsigned G) {
+  return "prep_res_fold_M" + std::to_string(M) + "_K" + std::to_string(K) + "_SP" +
+         std::to_string(S_PREV) + "_G" + std::to_string(G);
+}
+inline std::string prep_norm_finish_variant(unsigned M, unsigned K, unsigned G, unsigned W) {
+  return "prep_norm_finish_M" + std::to_string(M) + "_K" + std::to_string(K) + "_G" +
+         std::to_string(G) + "_W" + std::to_string(W);
+}
 inline std::string prep_silu_mul_variant(unsigned M) { return "prep_silu_mul_M" + std::to_string(M); }
 inline std::string prep_gated_head_variant(unsigned M) {
   return "prep_gated_head_M" + std::to_string(M);

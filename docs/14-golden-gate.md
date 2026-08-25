@@ -60,6 +60,47 @@ All measured. "tap median cos" is the mean over the 64 layers of each layer's
 that is the upper of the two central values, not their mean) - the typical
 comparison, next to the worst one. The test prints it, so the figure is read
 off a log rather than derived by hand.
+
+### The diagnostics move with every lever; the gate does not
+
+**The table above is the engine at `adc2544`, and only the `exact/32` column has
+stayed put.** Spec 1.5's levers reorder floating-point sums - L2 split the `a‖b`
+GEMV's K, L1 split `prep_res_norm`'s Σx² - and each such change moves `x` in the
+last bf16 ulp somewhere, which the next 60-odd layers amplify. Two gate runs on
+an otherwise idle box, 2026-08-25, the second at the commit that landed L1:
+
+| prompt | | exact/32 | tap min cos (layer, t) | L63 tail | `gdn_state` min cos | logit min cos |
+|---|---|---|---|---|---|---|
+| prose | before L1 (`b15f70f`) | **32/32** | 0.999448759 (L62, t=24) | 0.999718243 | 0.999905491 (L49) | 0.999924384 |
+| prose | after L1 | **32/32** | 0.994806738 (L62, t=24) | 0.997115152 | 0.999851574 (L60) | 0.999864052 |
+| code | before L1 (`b15f70f`) | **32/32** | **0.829087356** (L59, t=41) | 0.964064662 | 0.997263854 (L60) | 0.999666022 |
+| code | after L1 | **32/32** | **0.913533675** (L59, t=41) | 0.982882165 | 0.998530392 (L60) | 0.999818731 |
+| cjk | before L1 (`b15f70f`) | **32/32** | 0.999775022 (L51, t=0) | 0.999830388 | 0.999908549 (L33) | 0.999906932 |
+| cjk | after L1 | **32/32** | 0.999690168 (L51, t=0) | 0.999832133 | 0.999904153 (L33) | 0.999876394 |
+
+Three things this settles, and one it does not.
+
+1. **The gate held, both times, on all three prompts.** 96/96 token ids
+   element-exact. That is the whole test; everything else on this page is a
+   diagnostic and §11's ruling is what makes that the right arrangement.
+2. **The movement has no direction.** L1 made `code`'s worst tap *better*
+   (0.829 → 0.914) and `prose`'s *worse* (0.99945 → 0.99481). It is the
+   chaotic sensitivity of a handful of ill-conditioned positions -
+   `code` t=41, `prose` t=24 - not a degradation. The census bears it out: after
+   L1, 44 of `code`'s 3904 (layer, t) comparisons are below 0.999, on **3 of its
+   61 positions**, and `cjk` has none at all.
+3. **The `b15f70f` column is itself already far from the table above** -
+   `code`'s worst tap reads 0.9863 there and 0.8291 at `b15f70f`, and nothing
+   between them touched `prep`. That drift is **L2's**, which reported "96/96,
+   unchanged" and did not re-measure these cosines. So the diagnostics in the
+   table above should be read as *the engine of `adc2544`*, not as a standing
+   contract.
+4. **What it does not settle**: whether any of this is a *trend*. Three levers
+   in, the worst tap cosine has been 0.9863, 0.8291 and 0.9135 without a token
+   ever moving, and there is no model here for how far it can go before one
+   does. The honest position is the one §11 already took - the tokens are the
+   bar - and the practical consequence is that **every lever that reorders a sum
+   runs the gate, and records both columns, as this one did.**
 The engine's continuations are the three recorded in `tools/oracle/README.md`
 ("Sanity checks on the written files"), id for id, including the CJK prompt's
 completion of a trailing emoji variation selector.
@@ -68,10 +109,11 @@ completion of a trailing emoji variation selector.
 
 The engine's per-layer tap is **not** layer *i*'s output. `runtime/capture.h` is
 the single authority: the copy runs after layer *i*'s last kernel, and the
-residual stream is advanced only by `prep_res_norm`, so `tap[i]` holds the
-hidden state with layer *i*'s **mixer** folded in and layer *i*'s MLP still
-sitting un-folded in `partials` - layer *i+1*'s leading `prep_res_norm` folds
-it. The oracle's `resid.L{i}` is the layer *output*, post-MLP. Comparing the two
+residual stream is advanced only by `prep_res_fold` (`prep_res_norm` until spec
+1.5's lever L1 - the per-element arithmetic is the same one, which is why the
+comparator below is unchanged), so `tap[i]` holds the hidden state with layer
+*i*'s **mixer** folded in and layer *i*'s MLP still sitting un-folded in
+`partials` - layer *i+1*'s leading `prep_res_fold` folds it. The oracle's `resid.L{i}` is the layer *output*, post-MLP. Comparing the two
 directly would report a divergence that is a definition mismatch and nothing
 else. The comparator is therefore **built** from two golden tensors rather than
 read from one:
@@ -82,7 +124,8 @@ expected_tap[0][t] = bf16( embed[ids[t]]   + mixer.L0[t]   )
 ```
 
 summed in fp32 from the two golden bf16 tensors and rounded RNE
-(`common/bf16.h`), because that is the arithmetic `prep_res_norm` does. The
+(`common/bf16.h`), because that is the arithmetic `prep_res_fold` does (and
+`prep_res_norm` before it, unchanged). The
 oracle dumps no embedding tensor, so layer 0's `resid.L-1` is gathered
 host-side out of `LoadedModel::embed` - the same bf16 table the device gathers
 from, so that row contributes no error of its own.
@@ -363,7 +406,7 @@ the int4 weights go through **`XPUwNa16LinearKernel for AutoGPTQLinearMethod`**
 prefill and decode kernels (`qwen_gdn_linear_attn.py`, the fused CUDA path
 declined on an XPU), and the full-attention layers run **FlashAttention v2**.
 Different unpack, different kernels, different device (XPU vs the oracle's CPU
-and the engine's own 645 Level Zero kernels), different scheduler. The only
+and the engine's own 774 Level Zero kernels), different scheduler. The only
 thing all three share is the checkpoint's bytes and the prompt ids.
 
 That is exactly what makes 96/96 informative: it is the packing convention -

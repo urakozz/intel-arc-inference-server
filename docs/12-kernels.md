@@ -77,11 +77,23 @@ where the prose rounds.
 
 **This partition is the step as it stood at `43bb720`, before spec 1.5 cut its
 first lever.** It is kept whole because it is what the 42.141 ms bench row
-partitions and because every row above is one measurement of one run. Lever L2
-has since taken the `a‖b` row from **2.335 to 0.256 ms/token** (measured, in
-situ, same instrument) and the bench row that goes with the new step is in
-[BENCHMARKS.md](BENCHMARKS.md); the before/after and its arithmetic are
-[15-step-anatomy.md](15-step-anatomy.md) §L2.
+partitions and because every row above is one measurement of one run. Two levers
+have moved rows out of it since, both measured in situ with the same instrument
+and both with their bench row in [BENCHMARKS.md](BENCHMARKS.md):
+
+| row | at `43bb720` | now | lever |
+|---|---|---|---|
+| `a‖b` GEMV | 2.335 ms | **0.256 ms** | L2 (`a1e2d3a`), [docs/15](15-step-anatomy.md) §L2 |
+| `prep` (the `res_norm` share of it) | 3.573 ms (2.871 of it `res_norm`) | **1.202 ms** (0.484 of it the two-stage pair) | L1, [docs/15](15-step-anatomy.md) §L1 |
+
+**The launch count moved with L1 and 645 did not survive it.** Splitting every
+`prep_res_norm` site into `prep_res_fold` + `prep_norm_finish` makes each of the
+129 sites two launches, so the captured walk is **645 + 129 = 774** - the number
+`runtime::CapturedStep::kernel_count` reports and
+tests/runtime/replay_determinism_test.cc pins. The module count goes 18 → 19
+(two `prep_res_norm` variants out, two `prep_res_fold` and one shared
+`prep_norm_finish` in). `ProfileEvents::kProfileCapacity` is 1024 and did not
+have to move.
 
 **98.6% of the step is kernel time inside the fence** (41.571 ms of Σ per-kernel
 durations, measured), 1.1% is dispatch and 0.2% is the host. The dispatch row is
@@ -671,8 +683,60 @@ between phases, and phase 3 re-reads the row from **SLM** instead of re-widening
 K = 5120. That is the number that decides the shape of this kernel: it fits
 comfortably inside the 64 KB a work-group may allocate, so staging the row costs
 nothing anyone can feel, and one work-group per token stays possible at every
-hidden size this model family uses. At M = 1 exactly one work-group runs - see
-*Rejected* for what that costs.
+hidden size this model family uses. At M = 1 exactly one work-group runs.
+
+**That last sentence is what spec 1.5's lever L1 cut, and this kernel is no
+longer what the runtime binds** - it is kept compiled and it is still run by
+`prep_test`, as the two-stage pair's reference. The pair is next.
+
+### `prep_res_fold` + `prep_norm_finish` - the same norm, in two launches
+
+The kernel above was measured at **22.3 µs and 17.0 GB/s in situ**, 129 times a
+token, and the reason is in its own design paragraph: one work-group is one
+Xe-core, and one Xe-core is 16 subgroups. Lever L1 splits it (`src/kernels/prep.cl`):
+
+```
+stage A  prep_res_fold(partials, resid, sumsq)        grid (G, M), WG 256
+  mixer_b = rne_bf16(Σ_s partials[s][m][k])           (skipped when S_PREV == 0)
+  r_b     = rne_bf16(f32(resid[m][k]) + f32(mixer_b))
+  resid[m][k] = r_b
+  sumsq[g][m] = tree_lanes(Σ_{k ∈ chunk g} f32(r_b)²)
+
+stage B  prep_norm_finish(sumsq, resid, norm_w, x)    grid (W, M), WG 256
+  rstd        = 1 / sqrt(Σ_{g=0}^{G-1} sumsq[g][m] / K + 1e-6)
+  x_out[m][k] = rne_bf16(f32(resid[m][k]) · rstd · norm_w[k])
+```
+
+**`G = 20` at K = 5120 is one element per lane**, which is what makes the design
+land where the measurement says it should: 20 work-groups × 16 subgroups =
+**320 subgroups against 16**. `W` is stage B's own grid and is also 20 - the
+rescale is the *other* pass over the row and spreading it is worth about as much
+as spreading the fold (see Measured below, where both halves are priced
+separately). Both numbers are `runtime::DecodeBuffers::kNormGroups`, which is
+also the size of the 640-byte `norm_sumsq` scratch and is in **both compiled
+variant names**, so a host that pairs mismatched grids names a binary that does
+not exist and throws at capture.
+
+**Stage A has no SLM row.** At chunk = WG = 256 the value a lane squares is the
+one it just wrote, so the 20 KB `row[K]` staging disappears and the kernel's SLM
+falls from 21 KB to 1 KB. Stage B re-widens `resid` from memory instead - SLM
+does not survive a launch boundary - and those are the bytes stage A wrote a
+launch earlier, so they are L2-warm.
+
+**The numerics contract, which is the reason this shape and not another.** The
+per-element chain in stage A is the single-work-group kernel's, verbatim: same
+`s = 0 … S_PREV-1` order, same two bf16 RNE steps. That chain does not care
+which lane runs it, so **`resid` comes out bit-identical** - `prep_test` asserts
+it against `prep_res_norm`'s own reference, at both prep modes. The **one**
+thing that changes is the global Σx² tree: G chunk trees, then a fixed
+ascending-`g` fold, where there used to be 256 whole-row lane accumulators and
+one tree. That can move `x` in the last bf16 ulp, and **the golden gate is the
+arbiter** - see "What the test asserts" and docs/14 for what it moved and what
+it did not.
+
+Determinism is unaffected: G is fixed at compile time, the `g` loop is in index
+order, there is no atomic and no data-dependent branch, so a replayed list still
+produces the same bits (`replay_determinism_test`, green).
 
 ### `prep_silu_mul` - the MLP activation
 
@@ -731,10 +795,25 @@ bar while allowing the gate a tolerance.
 |---|---|---|
 | `prep_res_norm` SP=0 - `x_out`, `resid` | **bit-exact** | 5120/5120, 5120/5120 |
 | `prep_res_norm` SP=16 - `x_out`, `resid` | **bit-exact** | 5120/5120, 5120/5120 |
+| two-stage SP=0/16, `G`=20 - `resid` vs the **single-stage** reference | **bit-exact** | 5120/5120 both |
+| two-stage SP=0/16 - `sumsq`, `x_out` vs the **two-stage** reference | **bit-exact** | 20/20, 5120/5120 both |
+| two-stage SP=16 - `x_out` vs the **single-stage** reference | ≤ 2 bf16 ulp where \|ref\| ≥ rms/8 | **0 ulp**, 5120/5120 exact |
+| two-stage SP=16 at `W`=1 (stage B on one work-group) | same three bars | identical bits to `W`=20 |
 | `prep_silu_mul` random | ≤ 2 bf16 ulp | 17408/17408 exact |
 | `prep_silu_mul`, silu argument 30.0 | **bit-exact** | 17408/17408 |
 | `prep_gated_head` random | ≤ 2 bf16 ulp | 6144/6144 exact |
 | `prep_gated_head`, silu argument 30.0 | **bit-exact** | 6144/6144 |
+
+**The two-stage rows are three bars, not one, and they say different things.**
+`resid` is graded against the reference of the kernel it replaces, because
+bit-identity there is the lever's whole numerics claim. `sumsq` and `x` are
+graded against a reference that models the new Σ tree, because that reference
+reproduces the tree and anything but bit-identity would be a transcription bug.
+The ruled ≤ 2 ulp bar is the third comparison - the two-stage device output
+against the *single-stage* reference - and on this input it came back **0 ulp on
+all 5120 elements**, which is what an fp32 reordering usually does to a value
+with 8 mantissa bits. That is a measurement of one seed and not a proof: the
+engine's real rows do move (docs/14), and the gate is what arbitrates them.
 
 The 2 ulp tolerance exists because OpenCL allows **3 ulp** on fp32 `exp` where
 the host's `expf` is ~0.5 - it is a contract, not an observation: today's driver
@@ -780,6 +859,15 @@ implying a measurement. What *is* measured is bit-exactness (above) and the
   reduction (a grid-wide sum-of-squares kernel, then a small finish kernel) or
   folding the partial sum into the GEMV epilogue - both trade the launch count
   this design saves. Not built, not measured; recorded so it is not rediscovered.
+
+  > **Measured, then built, 2026-08-25 (spec 1.5 lever L1).** The profile put
+  > it on the critical path at **22.3 µs and 2.871 ms/token**, the named fix -
+  > "a grid-wide sum-of-squares kernel, then a small finish kernel" - is what
+  > was built, and it is worth **−2.409 ms/token measured in situ**. The
+  > magnitude the paragraph guessed was wrong in both directions (it feared
+  > 40 µs, it got 22.3; it called the fix a trade against launch count, and the
+  > 129 extra launches cost ~0.094 ms derived against a 2.409 ms saving - a
+  > 26:1 trade). The mechanism it named was right. See Measured below.
 - **Summing split-K partials with atomics in the GEMV instead of here -
   rejected on determinism**, same argument as `gemv`'s section: a float atomic
   add is order-dependent and two replays would differ. That decision is what
@@ -797,7 +885,9 @@ implying a measurement. What *is* measured is bit-exactness (above) and the
 
 | kernel | calls/token | bytes/call | total |
 |---|---|---|---|
-| `prep_res_norm` | 129 (2 per layer + the final norm; layer 0's is the SP = 0 variant, 51,200 B) | 378,880 at SP = 16 (327,680 partials + 20,480 resid r+w + 20,480 `norm_w` + 10,240 out) | 48.5 MB |
+| `prep_res_norm` (until lever L1) | 129 (2 per layer + the final norm; layer 0's is the SP = 0 variant, 51,200 B) | 378,880 at SP = 16 (327,680 partials + 20,480 resid r+w + 20,480 `norm_w` + 10,240 out) | 48.5 MB |
+| `prep_res_fold` (stage A, since L1) | 129 | 348,240 at SP = 16 (327,680 partials + 10,240 resid r + 10,240 resid w + 80 `sumsq` out) | 44.9 MB |
+| `prep_norm_finish` (stage B, since L1) | 129 | 41,040 unique (80 `sumsq`, re-read by every work-group but one cache line + 10,240 resid + 20,480 `norm_w` + 10,240 out) | 5.3 MB |
 | `prep_silu_mul` | 64 | 591,872 (557,056 partials + 34,816 out) | 37.9 MB |
 | `prep_gated_head` | 48 | 61,696 (24,576 `z` + 24,576 `gdn_o` + 256 `w` + 12,288 out) | 3.0 MB |
 
@@ -805,6 +895,13 @@ implying a measurement. What *is* measured is bit-exactness (above) and the
 the roofline, against 0.125 ms of launch overhead for the same 241 kernels. The
 split-K partials are two thirds of it, which is the price recorded in `gemv`'s
 section for keeping the replay deterministic.
+
+Lever L1 changes the family's arithmetic slightly: 44.9 + 5.3 + 37.9 + 3.0 =
+**91.1 MB per token across 370 launches** (the pair's re-read of `resid` in
+stage B is the +1.7 MB, and it is L2-warm). At the measured 590 GB/s that is
+**0.154 ms**; the family measures 1.202 ms, so it is 7.8× its own traffic
+floor - better than the 24× the single-stage family sat at, and the remaining
+~1.05 ms is what a third lever here would have to go after.
 
 ### Measured - per kernel, in situ (2026-08-25); the suspect was half right
 
@@ -905,6 +1002,58 @@ Note what this does *not* implicate: launch count. 241 `prep` launches × 0.733 
 0.4% of the step. Fusing the norm into the GEMV prologue (doc 04 item 1) would
 remove launches, which is not the problem; a two-stage reduction keeps the
 launches and removes the serialisation, which is.
+
+### Measured - lever L1 cut it: 2.871 → 0.484 ms/token
+
+Executed 2026-08-25 against the extrapolation above, with the same instrument
+(`b70-decode --profile --depth 4096 --steps 32`, 32 replayed steps, idle box).
+The prediction was 1.5-2.4 ms and **the outcome is −2.409 ms**, at the very top
+of the band. Both runs are the whole engine; the before is `b15f70f` (the
+binary of L2's `a1e2d3a`), the after is the commit this section lands in.
+
+| row | before | after | µs/launch | kind |
+|---|---|---|---|---|
+| `prep_res_norm` (129 launches) | **2893.180 µs** | - | 22.428 | measured, in situ |
+| `prep_res_fold` (129) | - | **259.495 µs** | **2.012** | measured, in situ |
+| `prep_norm_finish` (129) | - | **224.391 µs** | **1.739** | measured, in situ |
+| **the site, both stages** | **2893.180** | **483.886** | 3.751 | **−2409.294 µs** |
+| SP16 variant, per launch | 22.498 | 2.011 (A) | | measured |
+| SP0 variant (layer 0), per launch | 13.372 | 2.096 (A) | | measured |
+| Σ of all kernel durations | 39621.549 (645) | 37394.336 (774) | | measured, in situ |
+| fence wall (profiled) | 40496.734 | 38400.907 | | measured, in situ |
+
+**Stage A alone is 10.2× faster on 20× the subgroups** - 348,240 B in 2.012 µs
+is **173 GB/s** against the single-work-group kernel's 17.0, and 20× the
+subgroups buying 10.2× is the same sub-linear shape §L2 measured for `a‖b`
+(16× the subgroups bought 9.1×). The subgroup was the right invariant and the
+extrapolation off it held.
+
+**Both halves of the split were priced, and the second half is not a rounding.**
+A third profile run bound stage B at `W = 1` - the plan's literal
+single-work-group finish - with everything else identical:
+
+| stage B grid | stage A µs/launch | stage B µs/launch | family µs/step | vs `prep_res_norm` |
+|---|---|---|---|---|
+| `W = 1` (one work-group) | 1.973 | **9.194** | **1440.586** | −1452.594 µs |
+| **`W = 20` (shipped)** | 2.012 | **1.739** | **483.886** | **−2409.294 µs** |
+
+So the fold is worth −1.45 ms and spreading the *rescale* is worth a further
+**−0.96 ms**. The plan wrote stage B as one work-group and would have banked 60%
+of the lever; the rescale pass is the same latency-bound walk over the same row
+and it wanted the same treatment. Note what `W = 1` costs: 41,040 B in 9.194 µs
+is **4.5 GB/s**, worse per byte than the single-work-group kernel it came from,
+because stage B's head is a 20-deep chain of `sumsq` loads that nothing overlaps
+when only one work-group is live.
+
+**What is left in this pair.** Its own traffic is 44.9 + 5.3 = **50.2 MB/token**
+(the Traffic table above), which is **0.085 ms** at the measured 590 GB/s. The
+pair costs 0.484 ms - **5.7× its floor**, against the **34.9×** the
+single-work-group kernel sat at (48.5 MB, 0.082 ms floor, 2.871 ms measured). So
+the whole remaining prize here is ~**0.40 ms/token**, and it would have to come
+from stage B's `sumsq` fold (a 20-load dependent chain on the head of every
+launch, which a lane-parallel load plus an SLM tree would shorten) or from not
+re-reading `resid` in stage B at all. Neither can repay its own golden-gate run
+at that size, and the ladder has bigger rows left.
 
 ---
 
