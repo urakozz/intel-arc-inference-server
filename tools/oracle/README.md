@@ -72,8 +72,76 @@ repeated `--prompt`/`--out` pairs would save ~4 minutes per full re-run; it was
 not worth touching the numerics path for.
 
 **Outputs stay on the box**, in `~/b70-inference-server/oracle-out/` - hundreds
-of MB per prompt. `.gitignore` has `oracle-out/` and `tools/box.sh sync` passes
-`--exclude oracle-out`, so a sync from the Mac neither deletes nor commits them.
+of MB per prompt. `.gitignore` has `oracle-out/` and `oracle-out-*/`, and
+`tools/box.sh sync` excludes both, so a sync from the Mac neither deletes nor
+commits them.
+
+### One golden set per checkpoint - 2026-08-26
+
+A golden set is the oracle's answer **for one set of weights**, so it belongs to
+exactly one checkpoint and overwriting one with another's output silently
+changes what the gate means. Since spec 1.6 §5.1 there are two:
+
+| directory | checkpoint | `lm_head` |
+|---|---|---|
+| `oracle-out/` | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` (HF cache) | bf16 |
+| `oracle-out-rtn/` | `~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** |
+
+`golden.sh` takes `OUT_DIR` and neither default clobbers the other. It reads the
+**committed** `tests/golden/prompts/*.ids` rather than re-tokenizing: the two
+checkpoints ship the identical tokenizer, so re-running `tokenize.py` could only
+be a chance to change the ids by accident. Verified byte-identical to the
+`oracle-out/*.ids` the 2026-08-24 run used.
+
+`run_in_container.sh` grew two knobs for this. **`ORACLE_SNAP`** is an absolute
+host path to a snapshot, mounted read-only at `/snap` - the way to reach a
+self-quantised checkpoint that never went through `hf download`; it takes
+precedence over `ORACLE_MODEL`. **`ORACLE_THREADS`** caps `OMP_NUM_THREADS` and
+`MKL_NUM_THREADS`, because the box is shared and torch's default is every
+thread on it. `dump.py` prints `torch.get_num_threads()` so the cap that was
+actually applied is in the log rather than assumed - note that the reference
+image capped a requested 28 at **22**.
+
+```bash
+# on the box, from the repo root
+OUT_DIR=oracle-out-rtn \
+ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 \
+ORACLE_THREADS=28 tools/oracle/golden.sh
+
+OUT_DIR=oracle-out-rtn \
+ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 \
+tools/oracle/check.sh
+```
+
+**Measured 2026-08-26**, three prompts serially, box under a 12-core vLLM XPU
+kernel compile: **25 min 14 s** (prose 7:28, code 9:49, cjk 7:57) against
+16 min 48 s on an idle box. The output files are within ~100 bytes of the
+`oracle-out/` ones - same 290-tensor manifest, same shapes.
+
+### Two config vocabularies, and an int4 head
+
+`dump.py` reads what `src/loader/quant.cc` reads, deliberately in the same
+shape, because the golden gate is the only thing grading the two against each
+other:
+
+- `quant_method` `"gptq"` **or** `"auto-round"`; `packing_format`, when present,
+  must be `"auto_round:auto_gptq"`.
+- **A missing `desc_act` is auto-round's spelling of `false`, and it is proven,
+  not assumed**: `dump.py` counts the `.g_idx` tensors in the snapshot and dies
+  if there are any. A permutation needs a `g_idx` to carry it.
+- **`lm_head` is dequantised like any other `.qweight`** - `map_name` already
+  left it top level and `Qwen3_5ForCausalLM` already wanted `lm_head.weight`,
+  so this needed no new branch. What it did need is memory:
+  `dequant_gptq` gained an `n_chunk` column split (bit-identical - columns are
+  independent, and the fixture writer asserts it at two widths, one of them
+  ragged), used above 65536 columns. That is exactly one tensor, `[5120,
+  248320]`, whose unchunked intermediates are ~25 GB on top of a ~47 GB state
+  dict. `build_state_dict` prints which kind of head it found.
+- **`model_extra_tensors.safetensors` is skipped cleanly on both checkpoints**:
+  its tensors are all `mtp.*`, the duplicate-name check still runs over them
+  first (that check is the 9B lesson), and nothing in the shard is materialised.
+  The RTN checkpoint has 29 `mtp` tensors against the published one's 15, and 8
+  of them are int4; the skip is by name and does not care.
 
 ### Exact commands and measured numbers
 
@@ -299,6 +367,21 @@ moves the engine and the oracle **together** and the golden test still passes.
    `enforce_eager` path.** The chain is closed for these three prompts, and
    `dequant.py` is cross-checked rather than merely self-consistent. Full
    record - command, ids, caveats - in `docs/14-golden-gate.md` §cross-check.
+
+> **The chain has a resolution limit, found 2026-08-26 and recorded in
+> docs/14 ("The RTN-checkpoint gate").** `dump.py` records
+> `out.logits[0].to(torch.float32)`, and `out.logits` from a bf16 model *is*
+> bf16 - so every value in a golden `logits` tensor lands exactly on the bf16
+> grid (verified: zero low 16 bits, all six files). The reference therefore
+> carries ~8 mantissa bits at a decision, and **two candidates inside one ulp of
+> each other are indistinguishable to it**. Measured: `oracle-out-rtn/prose` has
+> **3 decision rows where the top two logits are bit-identical**, and
+> `oracle-out/cjk` has **2** - the latter has been there since the sets were
+> made, and the engine happened to agree with `torch.argmax`'s lowest-index
+> tie-break on both. On the RTN set it does not, at the first one, and the gate
+> reads 79/96. This is the point where "the engine is the more accurate of the
+> two" stops being a footnote and starts deciding a token. It is an open
+> decision, not a fixed bug.
 
 Read a future three-way disagreement like this:
 

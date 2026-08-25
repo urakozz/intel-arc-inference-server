@@ -438,6 +438,60 @@ Four things worth reading off it:
    bigger `S` is monotonically better, and do not treat a single cell as
    settled at better than ~10% without a second run.
 
+### The sixth shape: `lm_head` at int4 - measured in situ 2026-08-26
+
+Spec 1.6 §5.1. Everything above prices the five per-layer shapes. There is now a
+sixth, and it is the only one that is not per-layer: when the checkpoint ships a
+packed head (`tools/quantize_qwen38_rtn.sh`), `lm_head` is a `gemv` at
+**5120×248320, S = 1, layout 1** instead of a `gemv_bf16`.
+
+**Nothing in `gemv.cl` changed.** One variant was added to the build and one
+binding site in `src/runtime/capture.cc` now dispatches on the loaded weight's
+kind. The launch count is unchanged (774); the module count is unchanged (19 -
+`gemv_bf16_M1_K5120_N248320` stops being opened and `gemv_M1_K5120_N248320_S1_L1`
+starts, one for one).
+
+**The output goes straight into `logits`, and `S = 1` is what makes that legal.**
+`gemv.cl` writes `out[(s·M + m)·N + n]`. At `S = 1` that collapses to `[M][N]` -
+which *is* the fp32 layout `argmax_stage1` reads. So the capture binds `logits`
+as the `out` argument and the split-K accumulator's degenerate case becomes the
+logits row itself: no `partials` slice, no rebinding of `argmax`, no direct-out
+variant of this kernel. The fit is exact rather than comfortable - `S·M·N·4` =
+1·8·248320·4 = 7 946 240 B, and `DecodeBuffers::logits` is 7 946 240 B - and
+`gemv()` now carries a `require` that the bound output holds `[S][M][N]`,
+because `partials`' sizing (buffers.cc, the max-S × max-N rectangle over the
+table's int4 rows) stops covering a GEMV the moment one is bound elsewhere.
+
+`S = 1` was not chosen to make that work; the two reasons coincide. `N / 64 =
+3880` work-groups × 4 subgroups = **15 520 subgroups** against 32 Xe-cores - the
+same grid the bf16 kernel ran at 98.5% of device bandwidth. Split-K exists to
+buy threads and there are none left to buy. Only the one bindable variant is
+compiled: a probe row over `S ∈ {1,2,4,8,16}` × both layouts would cost ten more
+`ocloc` compiles of a 3880-work-group kernel to price splits nothing can bind.
+
+**Measured**, `b70-decode --profile --depth 4096 --steps 32`, in situ, mean of
+32 profiled replays, 2026-08-26 - and the bf16 row beside it is a **back-to-back
+run of the same instrument on the same box in the same hour**, not the
+2026-08-25 figure:
+
+| `lm_head` | bytes/token | µs/launch | GB/s | % of measured 590 | ms/token |
+|---|---|---|---|---|---|
+| bf16, `gemv_bf16` | 2 542 796 800 | 4381.289 | 580.4 | 98.4% | 4.381 |
+| **int4 g64, `gemv`** | **675 430 400** | **1178.164** | **573.3** | **97.2%** | **1.178** |
+| Δ | −73.4% | **−3203.1** | | | **−3.203** |
+
+**−3.203 ms/token, against a ceiling of −3.26** (0.675 GB at 590 GB/s is a
+1.145 ms floor no kernel can go under; spec 1.5's re-assessment memo §4 derived
+the bound before the work started). That is **98.3% of the maximum the device
+permits**, and the 33.4 µs left over is 2.9% above the floor - the same order as
+every other saturated shape here. There is nothing further to win in this
+launch.
+
+Read the GB/s column carefully: int4 reads *fewer* bytes at a *slightly lower*
+rate. 97.2% against 98.4% is not a regression to chase - the launch is 3.7×
+shorter, so its fixed costs are a larger fraction of it, and 573 GB/s is still
+above every per-layer int4 shape in the table above.
+
 ---
 
 ## `gemv_bf16` - bf16 × bf16, M ∈ [1,8]
@@ -577,6 +631,11 @@ For scale: at 584 GB/s `lm_head` alone is **4.35 ms** - 16.5% of the 26.34 ms
 roofline token for 16.4% of the bytes, and **10.3% of the 42.141 ms step
 measured 2026-08-25**. That is why item 1 of doc 05's specialisation list is
 `lm_head`, not a kernel: at int4 it would be ~1.1 ms.
+
+> **That estimate has since been measured: 1.178 ms**, on a checkpoint that
+> ships the head packed (2026-08-26, `gemv` → "The sixth shape" above). This
+> row remains what the *bf16* head costs, and it is still what the published
+> `Vishva007` checkpoint pays.
 
 **The other user, `a‖b` (5120×128), had never been timed - now it has, and it
 has since been cut.** It is still not in the probe matrix (the matrix covers the
