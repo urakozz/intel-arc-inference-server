@@ -52,6 +52,14 @@ int main() {
   CHECK_EQ(parse("level_zero:1"), 1u);
   CHECK_EQ(parse("level_zero:01"), 1u);
   CHECK_EQ(parse("level_zero:7"), 7u);
+  // The boundary at the sentinel. `l0::Context::kFromEnv` is 0xFFFFFFFF and
+  // means "ask the environment", so it is the one value this parser must never
+  // *return* - returning it would send Context straight back here and recurse
+  // in spirit, and `--device 4294967295` is rejected by the CLI for the same
+  // reason. One below it is an ordinary (absurd) index and is accepted: the
+  // rejection is the sentinel itself, not "a big number".
+  CHECK_EQ(parse("level_zero:4294967294"), 4294967294u);
+  CHECK_EQ(parse("level_zero:4294967294"), l0::Context::kFromEnv - 1u);
 
   // Rejected: another backend, a multi-backend list, a device list, a
   // malformed index, an index that cannot be a uint32. Binding card 0 for any
@@ -70,6 +78,8 @@ int main() {
       "level_zero:1.0",        //
       "*",                     // backend omitted
       "level_zero:99999999999",// does not fit a uint32
+      "level_zero:4294967295", // fits a uint32, but IS kFromEnv (the sentinel)
+      "level_zero:4294967296", // one past a uint32
       " level_zero:1",         // leading space is not a selector
   };
   for (const char* v : bad) {

@@ -230,13 +230,16 @@ later measurement makes it worth the correctness risk:
    as a second dtype stream);
 5. residual add into the GEMV epilogue (free once 1 is done).
 
-Target after fusion: **~650 (spec 1 §9.1)**. Doc 07 #5 measures the
-per-kernel floor before any of this is built, so the fusion list is sized by a
-number rather than by taste. Measured 2026-08-22: **0.52 µs/kernel** (`noop`)
-and **0.63 µs/kernel** (`ctrl_read`) inside a replayed list - the 3-5 µs
-estimate above is ~6× pessimistic, 645 kernels cost 0.335 ms of the 42.14 ms
-step measured 2026-08-25 (**0.8%**), so fusion is *not* on the phase-1 critical
-path and the unfused list ships first.
+Target after fusion: the five items above remove 128 + 64 + 144 + 144 + 0 = 480
+launches, so a fully fused step would be **~165** kernels per token (estimated -
+arithmetic on a list where nothing is built). **645** is the *unfused* count and
+it is measured, not a target: `runtime::CapturedStep::kernel_count`, 2026-08-25.
+Doc 07 #5 measures the per-kernel floor before any of this is built, so the
+fusion list is sized by a number rather than by taste. Measured 2026-08-22:
+**0.52 µs/kernel** (`noop`) and **0.63 µs/kernel** (`ctrl_read`) inside a
+replayed list - the 3-5 µs estimate above is ~6× pessimistic, 645 kernels cost
+0.335 ms of the 42.14 ms step measured 2026-08-25 (**0.8%**), so fusion is *not*
+on the phase-1 critical path and the unfused list ships first.
 
 ## Server
 

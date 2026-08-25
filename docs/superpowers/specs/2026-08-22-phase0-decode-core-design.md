@@ -366,6 +366,17 @@ runs on the residual stream after every 8th layer and writes the first
 offending layer index into the control block's `pad[0]`; the engine reports
 it after the fence.
 
+**Amended 2026-08-25 (ruling R3-5).** `check_finite` is deliberately **not
+built**. The per-layer residual tap delivered instead (`runtime::build`'s
+optional `debug_resid`, a device-to-device copy after every one of the 64
+layers) supersedes it for diagnosis: it is finer-grained (every layer, not
+every eighth), it is off by default and costs nothing when it is, and it hands
+the host the offending *values* rather than one layer index - which is what
+`tests/runtime/replay_determinism_test` and `tests/golden/golden_gate_test`
+actually use to find a bad layer. The control block's field stays reserved
+(`runtime::Control::debug_flag`, still named for this kernel and still zero),
+so a debug build can add the kernel later without moving a byte.
+
 ## 9. Kernels
 
 All OpenCL C 3.0, `intel_reqd_sub_group_size(16)`, fp32 accumulation,
