@@ -175,8 +175,11 @@ void case_res_norm(Dev& d, uint32_t M, uint32_t K, uint32_t S_PREV) {
 //   1. `resid` **bit-exact against the SINGLE-stage reference**. The lever's
 //      whole numerics claim is that the per-element fold chain is untouched, and
 //      this is that claim: the same s = 0..15 order, the same two RNE steps,
-//      just distributed differently. If it holds, the golden gate's per-layer
-//      residual taps see byte-identical tensors and cannot move.
+//      just distributed differently. Note what it does NOT buy: this is a
+//      per-launch property for one set of inputs, not a promise about the
+//      engine's tensors. The reordered Sigma below moves `x` in the last ulp on
+//      real rows, so the golden gate's per-layer taps DO move (measured, both
+//      directions, docs/14) even though every `resid` write here is exact.
 //   2. `x` and `sumsq` **bit-exact against the TWO-stage reference**, which
 //      models the new Σ tree (G chunk trees, then ascending g). Nothing in this
 //      pair is allowed to be "close": the reference reproduces the tree, so the
@@ -191,6 +194,16 @@ void case_res_norm(Dev& d, uint32_t M, uint32_t K, uint32_t S_PREV) {
 // 1 is the plan's literal single-work-group finish. Both are run and both must
 // produce the same bits, because they fold the same G partials in the same
 // order - the grid changes who rescales which element, not the arithmetic.
+//
+// **How that equality is actually established, precisely.** Each grid is
+// compared to the SAME host reference and each is required to be bit-exact
+// against it, so their equality to each other is *transitive through the
+// reference*, not asserted directly. That is strictly as strong (both equal a
+// third fixed thing) and it is worth naming, because a reader looking for a
+// `CHECK(x_got_W1 == x_got_W20)` will not find one. Note also the coverage
+// asymmetry: `W = 1` is exercised at **SP16 only** (main() below), because the
+// stage-B kernel does not read `partials` at all and so cannot distinguish the
+// prep modes - SP0 and SP16 bind the identical `prep_norm_finish` binary.
 void case_res_norm_two_stage(Dev& d, uint32_t M, uint32_t K, uint32_t S_PREV, uint32_t G,
                              uint32_t norm_wgs) {
   const size_t np = S_PREV ? size_t(S_PREV) * M * K : 1;

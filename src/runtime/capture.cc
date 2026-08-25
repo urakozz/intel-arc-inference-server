@@ -78,7 +78,9 @@ constexpr size_t kBf16 = 2, kFp32 = 4;
 constexpr uint32_t kWgEmbed = 256;    // embed_gather.cl WG_EMBED  (Task 3)
 constexpr uint32_t kWgGemv = 64;      // gemv.cl WG_N = 16x4 (plan 1 §9.2); gemv_bf16.cl's
                                       // WG_N is its COLS_PER_WG, per shape (see gemv_bf16 below)
-constexpr uint32_t kWgResNorm = 256;  // prep.cl WG_RES            (Task 2)
+// prep.cl's WG_RES (the single-work-group `prep_res_norm`) has no constant
+// here any more: spec 1.5's lever L1 replaced that binding with the pair below,
+// and the kernel is compiled and tested but never captured.
 constexpr uint32_t kWgResFold = 256;  // prep.cl WG_FOLD           (spec 1.5 L1)
 constexpr uint32_t kWgNormFinish = 256;  // prep.cl WG_NORM        (spec 1.5 L1)
 constexpr uint32_t kWgSilu = 256;     // prep.cl WG_SILU           (Task 2)
@@ -137,7 +139,7 @@ class Capture {
     // both. (The profiler's own test builds twice against one set of buffers.)
     if (prof_) prof_->events.clear();
 
-    // `layer_` is what the labels' "L<n>" prefix reads; the five launches
+    // `layer_` is what the labels' "L<n>" prefix reads; the six launches
     // outside the layer loop belong to the token boundary and get "--".
     embed_gather();
     uint32_t gdn = 0, fa = 0;   // the two per-kind index maps: GDN 0..47, FA 0..15
@@ -315,10 +317,16 @@ class Capture {
   // Why two: RMSNorm's mean is over the whole row, so ONE kernel's reduction
   // domain is one work-group - 16 subgroups on one Xe-core, measured at 22.3 µs
   // and 17.0 GB/s in situ. The split makes it 320 subgroups on both passes at
-  // the cost of a launch (0.73 µs derived, docs/15). The per-element fold chain
-  // is unchanged, so `resid` is bit-identical and the golden gate's per-layer
-  // taps are untouched; the global Σx² tree is not, which is why this lever's
-  // acceptance runs the gate (prep.cl states the tree, docs/12 the contract).
+  // the cost of a launch (0.73 µs derived, docs/15).
+  //
+  // The per-element fold chain is unchanged, so `resid` out of one launch is
+  // bit-identical for the same inputs; the global Σx² tree is NOT, so `x` can
+  // move in the last bf16 ulp and everything downstream of it moves with it.
+  // The golden gate's per-layer tap diagnostics were **measured to move in both
+  // directions** across this lever while the token ids stayed 96/96 exact
+  // (docs/14). That is why this lever's acceptance ran the gate before as well
+  // as after - the gate is the arbiter, not the bit-identity of `resid`
+  // (prep.cl states the tree, docs/12 the contract).
   //
   // `b_.norm_sumsq` is a single 640-byte allocation shared by all 129 sites:
   // the list is in-order, so a site's stage B has consumed its own stage A's
@@ -541,9 +549,10 @@ class Capture {
     }
   }
 
-  // The layer a launch belongs to, for its label. `kBoundary` is the five
-  // launches outside the layer loop (embed_gather, the final prep_res_norm,
-  // lm_head and the two argmax stages).
+  // The layer a launch belongs to, for its label. `kBoundary` is the six
+  // launches outside the layer loop (embed_gather, the final norm's
+  // prep_res_fold + prep_norm_finish, lm_head and the two argmax stages).
+  // It was five until spec 1.5's lever L1 split that norm.
   static constexpr int kBoundary = -1;
 
   l0::Context& ctx_;

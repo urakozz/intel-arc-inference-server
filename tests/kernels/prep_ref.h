@@ -121,10 +121,18 @@ inline void res_norm(const float* partials, uint16_t* resid, const float* norm_w
 // So `x` may move in the last bf16 ulp against the single-stage reference; it
 // does NOT move against this one, which is why the test holds the two-stage
 // device output bit-exact here and to a ulp bar there.
+// `kWgRes` is used below as stage A's work-group width, which is only correct
+// because prep.cl defines WG_FOLD == WG_RES == 256. The two are separate names
+// on the device side and this reference silently assumes they are equal: the
+// tree it builds is `kWgRes` wide and the lane stride it walks is `kWgRes`, so
+// a prep.cl that changed WG_FOLD alone would leave this reference modelling a
+// different tree and `prep_test`'s "bit-exact vs the two-stage reference" bar
+// would fail with no hint as to why. Keep them equal, or thread the width
+// through as a parameter the way `G` is.
 inline void res_fold(const float* partials, uint16_t* resid, float* sumsq, uint32_t M, uint32_t K,
                      uint32_t S_PREV, uint32_t G) {
   const uint32_t chunk = (K + G - 1) / G;
-  std::vector<float> red(kWgRes);
+  std::vector<float> red(kWgRes);   // == WG_FOLD; see the note above
   for (uint32_t m = 0; m < M; ++m) {
     uint16_t* rp = resid + size_t(m) * K;
     for (uint32_t g = 0; g < G; ++g) {

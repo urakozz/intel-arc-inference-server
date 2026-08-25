@@ -184,14 +184,23 @@ __kernel void prep_res_norm(__global const float* restrict partials,
 // **The numerics contract, which is the whole point of this shape.** Stage A
 // walks its chunk with the SAME per-element chain the single-WG kernel uses -
 // the same s = 0…S_PREV-1 partial order, the same two bf16 RNE steps - and the
-// per-element chain is independent of who runs it. So `resid` comes out
-// **bit-identical** to prep_res_norm's, which is what leaves the golden gate's
-// per-layer tap diagnostics untouched. The ONE thing that changes is the global
-// Σx² tree: instead of 256 lane accumulators over the whole row collapsed by
-// one pairwise tree, it is FOLD_G chunk trees (each 256 → 128 → … → 1 over
-// lanes holding their own chunk's terms) summed by stage B in ascending `g`.
-// That moves `x` by at most a last-ulp rounding, and the arbiter for it is the
-// golden gate, not a tolerance (docs/12 `prep_res_norm` → Measured).
+// per-element chain is independent of who runs it. So **`resid` out of one
+// launch, given the same inputs, is bit-identical** to prep_res_norm's, which
+// `prep_test` asserts. The ONE thing that changes is the global Σx² tree:
+// instead of 256 lane accumulators over the whole row collapsed by one pairwise
+// tree, it is FOLD_G chunk trees (each 256 → 128 → … → 1 over lanes holding
+// their own chunk's terms) summed by stage B in ascending `g`.
+//
+// **That does NOT mean the engine's tensors are unchanged, and the first draft
+// of this comment claimed it did.** The reordered Σ moves `x` in the last bf16
+// ulp somewhere in a real row; the next GEMV consumes that `x`; 60-odd layers
+// amplify it. Measured, before and after this lever on the same box: the golden
+// gate's per-layer tap cosines **do move, in both directions** - `code`'s worst
+// tap 0.829 → 0.914, `prose`'s 0.99945 → 0.99481 - while the token ids stayed
+// 96/96 element-exact. The arbiter is the gate, not a tolerance and not a
+// bit-identity argument, and the standing rule is that every lever which
+// reorders a sum runs it **before as well as after** (docs/14, "The diagnostics
+// move with every lever"; docs/12 `prep_res_fold` → the numerics contract).
 //
 // Nothing here is data-dependent, there is no atomic, FOLD_G is fixed at
 // compile time and the `g` loop is in index order, so two replays of the
