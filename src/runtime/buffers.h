@@ -20,6 +20,19 @@ struct DecodeBuffers {
   // that no compiled binary matches throws at capture instead of striding
   // `attn_part` at one size while the kernel writes it at another.
   //
+  // **One home on the host, three in the tree - and the only thing binding them
+  // needs a GPU.** The same 64 also lives in `src/kernels/CMakeLists.txt`
+  // (`ATTN_BLOCK`, which compiles it into the kernel and into the binary's
+  // name) and in `tests/kernels/attn_ref.h` (`attn_ref::kBlock`, which the
+  // reference walks blocks with). Nothing checks the three against each other
+  // at compile time: the guard is the missing-binary throw described above, and
+  // that throw fires at CAPTURE - it needs a device, a loaded model and a
+  // built kernel set, so a CPU-only build or a host-side review sees a
+  // disagreement not at all. `kNormGroups` below has exactly the same shape
+  // (here, CMake's `FOLD_G`/`NORM_G`, and `prep.cl`'s own `#define FOLD_G 20`
+  // fallback). A device-free cross-check - a static_assert or a generated
+  // header - is recorded as spec-1.6 work and is deliberately NOT added here.
+  //
   // **64 is measured, not derived - but it is not a knee either.** docs/15 §2's
   // `F + fill·P` fit predicted 214.5 µs/launch at a 128-position block; the
   // retile measured 296.684. So the block size was swept in situ at depth 4096

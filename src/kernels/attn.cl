@@ -98,7 +98,7 @@
 // to 224 µs; whatever remains is dominated by a term neither the walk nor the
 // q-head reread explains, and SLM staging attacks only the reread. The
 // arithmetic is in docs/12's attn "Measured" section, with the caveat it
-// deserves: three models have died on this kernel already.
+// deserves: four models have died on this kernel already.
 //
 // **attn_reduce: grid (24, M), work-group 256** - one work-group per (q-head,
 // token), work-item `d` owning dim `d` of the 256-wide output. The merge
@@ -258,7 +258,10 @@
 // was measured, not derived. docs/15 §2's `F + fill·P` fit (F ≈ 90.8 µs fixed,
 // P ≈ 247.4 µs per full block, from the `nb` = 1 and 5 points) predicted
 // 214.5 µs/launch at a 128-position block; the retile measured **296.684**,
-// +38%, which is the third model this kernel has falsified. Four block sizes,
+// +38%, which is the third model this kernel has falsified - and the refit on
+// the 256/128 pair (F ≈ 223.4 µs, walk ≈ 146.6 µs per 256 positions) then
+// predicted 260.0 µs at a 64-position block and measured **224.046**, −13.8%,
+// which is the fourth. Four block sizes,
 // measured in situ at depth 4096 - `attn_decode` µs/launch, then the attn
 // family's ms/token:
 //
@@ -276,7 +279,7 @@
 // 0.070 ms. What is *measured* and not fitted: the three points 256 → 128 → 64 each cost
 // ~73 µs less per launch than the last, which is linear in log2(block) and not
 // in the block; nothing here explains that, and this file does not invent a
-// fourth model to fit it (docs/12 `attn` → Measured).
+// fifth model to fit it (docs/12 `attn` → Measured).
 #ifndef ATTN_BLOCK
 #error "attn: ATTN_BLOCK must be defined (src/kernels/CMakeLists.txt); it must equal runtime::DecodeBuffers::kAttnBlock"
 #endif
@@ -541,7 +544,7 @@ __kernel void attn_reduce(__global const uint* restrict ctrl,
   // µs/step, +116 µs, against `attn_decode`'s -2336 µs. It is why the lever is
   // judged on the attn FAMILY's net and not on `attn_decode` alone, and it is
   // also what stops the retile one step earlier than `attn_decode` would like:
-  // at ATTN_BLOCK 32 this row reaches 452.816 µs/step and eats the whole
+  // at ATTN_BLOCK 32 this row reaches 450.208 µs/step and eats the whole
   // remaining gain (docs/12 `attn` -> Measured).
   __local float hmx[NBLOCKS], hsm[NBLOCKS];
 

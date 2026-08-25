@@ -69,9 +69,14 @@ per-kernel number … they share an **11.33 ms** bucket with
 `attn_prep`/`attn_reduce` and the `a‖b` GEMV, an average of 30.7 µs per launch."
 That bucket was the step minus everything that had a number, so it also carried
 everyone else's error. Measured in situ it is **6.768 ms across those same 369
-launches** (18.3 µs/launch); the other 4.562 ms was GEMV sitting 0.659 ms above
-its transplanted floor, `attn_decode` sitting 3.422 ms above its extrapolation,
-and 0.473 ms of dispatch gap the old partition had no row for (docs/15).
+launches** (18.3 µs/launch); the other 4.562 ms was never the bucket's, and
+**four** terms account for it to within 1 µs - GEMV sitting 0.659 ms above its
+transplanted floor, `attn_decode` sitting 3.422 ms above its estimate
+(5.782 − 2.314 − 0.046, the 0.046 being the attention early-out's own old line),
+`embed_gather` + `argmax` 0.009 ms above the 0.008 they were carried at, and
+0.473 ms of dispatch gap the old partition had no row for:
+0.659 + 3.422 + 0.009 + 0.473 = **4.563** (docs/15, "The 11.330 ms bucket,
+attributed").
 
 The rows below are a **partition** of the token: every launch and the host
 appear exactly once, and the rows sum to the measured total
@@ -846,9 +851,32 @@ recorded rather than fixed: **`prep_res_norm` is still compiled and still run**
 by the same test, bit-exact against a reference whose fold loop is the same text
 stage A's is; and the **golden gate**, which walks 64 layers of real rows. What
 is *not* covered is an edit that changes stage A's `s` loop alone, in a way the
-single-stage kernel does not share. A test that closed it would compare stage
-A's `resid` against `prep_res_norm`'s **device** output over the same buffers
-rather than against the host reference.
+single-stage kernel does not share.
+
+**The obvious closing test would close nothing, and that is worth writing down.**
+Comparing stage A's `resid` against `prep_res_norm`'s **device** output buys no
+bit: `case_res_norm` and `case_res_norm_two_stage`
+(tests/kernels/prep_test.cc) build their inputs from *identical* seeds, and each
+already holds its own device `resid` bit-exact against the same host reference -
+so the two device outputs are equal already, transitively through that
+reference, and asserting it directly restates what both bars have proved. Nor
+would it help if they were not equal: a device-vs-device comparison inherits
+exactly the bf16-rounding insensitivity estimated above, which is the thing that
+let the reversed `s` loop through. It buys one real thing and only that -
+independence from `prep_ref`'s fold text tracking `prep.cl`'s, since neither
+side would pass through the host reference - and that is a different weakness
+from this one.
+
+**Three things would actually close it**, in ascending cost: (a) grade the sum
+**before it is rounded** - expose stage A's fp32 fold (as `sumsq` already is)
+so no `rne_bf16` step can absorb the reordering; (b) **search seeds** for an
+input where the `s` order does cross a bf16 boundary - at the ≈0.3 expected
+crossings per 5120 elements estimated above, ~20 seeds finds one, and that seed
+then becomes a permanent regression input; or (c) a **mutation harness** that
+rebuilds with the loop reversed and requires `prep_test` to fail, which is the
+only one of the three that tests the test rather than the kernel. All three are
+spec-1.6 work; none is built, which is why the weakness is recorded rather than
+fixed.
 
 **The two-stage rows are three bars, not one, and they say different things.**
 `resid` is graded against the reference of the kernel it replaces, because
@@ -2404,7 +2432,7 @@ total was 3772.280 µs, 0.08% away, so the row reproduces):
   fence wall (submit + wait)     36379.774 us   [36246.242 .. 36542.172]
 ```
 
-#### A third model died here, and this document does not offer a fourth
+#### The third and fourth models died here, and this document does not offer a fifth
 
 The section above this one fitted the four in-situ *depth* points as
 `F + fill · P` with **F ≈ 90.8 µs** of per-launch fixed cost and **P ≈ 247.4 µs**

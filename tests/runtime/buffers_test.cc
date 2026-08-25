@@ -45,7 +45,7 @@
 // any limit on a device holding a 15.5 GB checkpoint. What it buys is
 // measured - the attn family 6.058 -> 3.839 ms/token, docs/15 §L5 - and it is
 // the reason the sweep stopped at 64: `kAttnBlock` 32 would take this buffer to
-// 101 MB for 0.067 ms/token that the step's own total does not show.
+// 101 MB for 0.070 ms/token that the step's own total does not show.
 //
 // `norm_sumsq` is the twelfth field and the only one added since plan 3: spec
 // 1.5's lever L1 split `prep_res_norm` into `prep_res_fold`, which writes one

@@ -165,7 +165,10 @@ add_ocloc_kernel(argmax_stage2 SOURCE ${ARGMAX_CL} DEFINES ${ARGMAX_DEFINES})
 # **64, from 256, is spec 1.5's lever L5** and the number is MEASURED, not
 # extrapolated. docs/15 §2's fit over four low-depth points predicted 214.5 us
 # per launch at a 128-position block; the retile measured **296.684**, +38%, so
-# that model died the way its two predecessors did. Four block sizes were then
+# that model died the way its two predecessors did -- and so did the refit that
+# replaced it, which called 260.0 us at a 64-position block and measured
+# 224.046, -13.8% the other way. Four models dead on this kernel, and no fifth
+# is offered. Four block sizes were then
 # measured in situ at depth 4096 (docs/12 `attn` -> Measured, docs/15 §L5),
 # attn_decode us/launch and the attn FAMILY ms/token:
 #
@@ -189,6 +192,15 @@ add_ocloc_kernel(argmax_stage2 SOURCE ${ARGMAX_CL} DEFINES ${ARGMAX_DEFINES})
 # on the next configure) rather than a plain `set`: tests/CMakeLists.txt is a
 # SIBLING directory scope and would not otherwise see it, and it must, because
 # attn_test's `add_dependencies` names the very binaries this number names.
+#
+# **This is one of THREE homes for the number** -- here,
+# `runtime::DecodeBuffers::kAttnBlock` (src/runtime/buffers.h) and
+# `attn_ref::kBlock` (tests/kernels/attn_ref.h) -- and nothing checks them
+# against each other at compile time. The guard is the missing-binary throw at
+# capture, which needs a device and a loaded model to fire, so a CPU-only build
+# never sees a disagreement. Same arrangement for FOLD_G / NORM_G above and
+# `runtime::DecodeBuffers::kNormGroups`. A device-free cross-check is a spec-1.6
+# item and is deliberately not added here.
 set(ATTN_BLOCK 64 CACHE INTERNAL
     "KV positions per attn_decode work-group; must equal runtime::DecodeBuffers::kAttnBlock")
 #
