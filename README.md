@@ -122,6 +122,7 @@ host-bound story is true of the MoE models (phases 3-4), where it is worth
 | [docs/11-tokenizer-and-chat-template.md](docs/11-tokenizer-and-chat-template.md) | The component the first draft forgot: BPE, chat template, streaming detokenisation, and what each option costs goal 3 |
 | [docs/12-kernels.md](docs/12-kernels.md) | The measured GEMV kernels: the two int4 layouts, split-K, and which won on which shape |
 | [docs/13-loader.md](docs/13-loader.md) | **Checkpoint → canonical device buffers**: snapshot rules, the index as manifest, every quantisation assert and what measured it, the fusion table, the `1+w` bake, and the resident-byte cross-check against `W` |
+| [docs/14-golden-gate.md](docs/14-golden-gate.md) | **The engine == the CPU oracle**: 3 prompts × 32 greedy tokens element-exact, the named divergence classes and their measured magnitudes, and the one vLLM cross-check still open |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | **The baseline numbers and the exact commands that produced them.** Every vLLM figure quoted elsewhere traces back here |
 
 **Every number in these docs is labelled measured or estimated.** Estimates are

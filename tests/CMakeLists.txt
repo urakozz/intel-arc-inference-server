@@ -149,9 +149,9 @@ set_tests_properties(load_checkpoint_test PROPERTIES LABELS checkpoint TIMEOUT 6
 
 # Every variant runtime::build binds, by name: a missing .bin is a
 # zeModuleCreate failure minutes into a load otherwise (kernel_table_test makes
-# the same point for the model table's GEMV rows). One list, because both tests
-# below capture the same decode list. (src/cli/b70-decode deliberately depends
-# on ALL kernels instead - see src/cli/CMakeLists.txt.)
+# the same point for the model table's GEMV rows). One list, because all three
+# tests below capture the same decode list. (src/cli/b70-decode deliberately
+# depends on ALL kernels instead - see src/cli/CMakeLists.txt.)
 set(B70_DECODE_LIST_KERNELS
   kernel_embed_gather_M1 kernel_argmax_stage1_M1 kernel_argmax_stage2
   kernel_prep_res_norm_M1_K5120_SP0 kernel_prep_res_norm_M1_K5120_SP16
@@ -184,3 +184,21 @@ b70_target_kernel_dir(engine_smoke_test)
 add_dependencies(engine_smoke_test ${B70_DECODE_LIST_KERNELS})
 add_test(NAME engine_smoke_test COMMAND engine_smoke_test)
 set_tests_properties(engine_smoke_test PROPERTIES LABELS checkpoint TIMEOUT 900)
+
+# The golden gate (spec §11): the engine against the CPU oracle, 3 prompts x 32
+# greedy tokens, element-exact, plus the per-layer / GDN-state / logit-row
+# diagnostics. Needs what engine_smoke_test needs AND the ~1 GB of oracle dumps
+# that live only on the box - hence the second label and the SKIP_RETURN_CODE:
+# absent goldens make the test exit 77, which ctest reports as SKIP rather than
+# a failure. Both directories are passed absolute so the test does not depend on
+# ctest's working directory; the prompt ids are committed, so a missing .ids
+# file is a real failure and not a skip.
+add_executable(golden_gate_test golden/golden_gate_test.cc)
+target_include_directories(golden_gate_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(golden_gate_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
+b70_target_kernel_dir(golden_gate_test)
+add_dependencies(golden_gate_test ${B70_DECODE_LIST_KERNELS})
+add_test(NAME golden_gate_test COMMAND golden_gate_test
+  ${CMAKE_SOURCE_DIR}/oracle-out ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
+set_tests_properties(golden_gate_test PROPERTIES
+  LABELS "checkpoint;golden" SKIP_RETURN_CODE 77 TIMEOUT 1800)
