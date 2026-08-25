@@ -60,12 +60,19 @@ constexpr uint32_t kBenchPrompt[] = {
     49813, 78911, 1141, 20459, 13,    3113,  7840,  279,  2981, 1000, 381,  16850, 1495, 13};
 constexpr size_t kBenchPromptLen = sizeof(kBenchPrompt) / sizeof(kBenchPrompt[0]);
 
-// Both measured, both cited where the bench prints the MBU it implies:
-//   W  - bytes the loader makes resident and every token reads, from the
-//        loader's own report (docs/13, 15,539,980,288 B = 15.540 GB).
+// The MBU line divides by two measured quantities, and only ONE of them is a
+// constant:
+//   W  - bytes every token reads. **This is a property of the checkpoint, not
+//        of the engine**, and since spec 1.6 §5.1 it is no longer one number:
+//        15.540 GB with a bf16 `lm_head`, 13.673 GB with a packed one (both
+//        measured 2026-08-26). It is therefore read from `LoadReport::
+//        read_per_token`, which is what this load actually made resident, and
+//        printed beside the percentage so a row always says which W it used.
+//        A hardcoded W would have reported the RTN checkpoint's 30.10 t/s as
+//        79.3% of the device when the honest figure is 69.8%.
 //   BW - `tools/probe/probe_bw`, 590 GB/s median at 2 GB through the same
-//        Level Zero path this engine submits on (docs/01).
-constexpr double kBytesPerToken = 15.539980288;   // GB, measured
+//        Level Zero path this engine submits on (docs/01). That one IS a
+//        device constant.
 constexpr double kDeviceGBs = 590.0;              // GB/s, measured
 
 void usage() {
@@ -738,14 +745,18 @@ int run(int argc, char** argv) {
   // is an *estimate* carried from doc 07 #5 (0.52 µs/kernel, probe_replay) -
   // it is what the captured list costs in dispatch alone, and it is printed
   // beside the fence time to show how little of the fence it can explain.
-  const double achieved_gbs = eng.last_tok_per_s() * kBytesPerToken;
+  const double bytes_per_token = double(eng.model().report.read_per_token) / 1e9;
+  const double achieved_gbs = eng.last_tok_per_s() * bytes_per_token;
   const double dispatch_ms = double(eng.step().kernel_count) * 0.52e-3;
   std::fprintf(stderr,
                "  MBU: %.2f t/s x %.3f GB = %.0f GB/s of %.0f GB/s measured = %.1f%%\n"
+               "       (W is this checkpoint's own read/token, from the loader report above;\n"
+               "        roofline at %.0f GB/s = %.2f t/s = %.3f ms/token)\n"
                "  dispatch floor (estimated): %zu kernels x 0.52 us = %.3f ms/token,"
                " %.1f%% of the fence\n",
-               eng.last_tok_per_s(), kBytesPerToken, achieved_gbs, kDeviceGBs,
-               100.0 * achieved_gbs / kDeviceGBs, eng.step().kernel_count, dispatch_ms,
+               eng.last_tok_per_s(), bytes_per_token, achieved_gbs, kDeviceGBs,
+               100.0 * achieved_gbs / kDeviceGBs, kDeviceGBs, kDeviceGBs / bytes_per_token,
+               1000.0 * bytes_per_token / kDeviceGBs, eng.step().kernel_count, dispatch_ms,
                100.0 * dispatch_ms / (eng.last_fence_ms() / double(tg)));
 
   // The row's identity comes from the environment, not from a configure-time
