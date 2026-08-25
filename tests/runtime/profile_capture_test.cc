@@ -122,8 +122,13 @@ int main(int argc, char** argv) {
   }
   // Launch 0 is the token boundary's embed_gather - no layer, hence "--".
   CHECK(instr.labels[0].rfind("-- embed_gather", 0) == 0);
-  std::printf("labels[0]   = \"%s\"\nlabels[1]   = \"%s\"\nlabels[644] = \"%s\"\n",
-              instr.labels[0].c_str(), instr.labels[1].c_str(), instr.labels[644].c_str());
+  // The last label is printed by INDEX-FROM-THE-END, not by a literal: 644 was
+  // the last index of the 645-launch walk and is now an arbitrary mid-walk
+  // launch, and a hard-coded index would silently stop showing the tail the
+  // next time a lever moves the count.
+  std::printf("labels[0]   = \"%s\"\nlabels[1]   = \"%s\"\nlabels[%zu] = \"%s\"\n",
+              instr.labels[0].c_str(), instr.labels[1].c_str(), instr.labels.size() - 1,
+              instr.labels.back().c_str());
 
   l0::Queue q(ctx);
   l0::Fence fence(q);

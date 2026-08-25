@@ -947,12 +947,15 @@ throughout. All measured.
 column sums; §L5 rounds the same number to −1.73.)
 
 **The two Δ columns differ by 0.892 ms and three measured terms close it to
-0.012.** Drift on the launches each lever did *not* touch: +0.119 (L2, +0.30%),
+0.003.** Drift on the launches each lever did *not* touch: +0.119 (L2, +0.30%),
 +0.182 (L1, +0.50%), +0.174 (L5, +0.56%). L1's 129 extra dispatches: +0.095
-(derived at 0.733 µs/launch). L5's unattributed residual: +0.31 (§L5).
-0.475 + 0.095 + 0.31 = **0.880** against **0.892**. Nothing else is needed to
-explain the ladder, and the largest single term in that reconciliation is the
-one nobody can attribute.
+(derived at 0.733 µs/launch). L5's **full in-situ→bench miss**: +0.319 (§L5 -
+the whole of it, of which ~0.01 is the `nb` 65 → 69 merge term named there and
+the remaining ~0.31 is the unattributed residual). 0.475 + 0.095 + 0.319 =
+**0.889** against **0.892**. Nothing else is needed to explain the ladder, and
+the largest single term in that reconciliation is still the one nobody can
+attribute. (The reconciliation takes the whole miss, not the ~0.31 remainder:
+the ~0.01 that *is* attributed is part of the same column difference.)
 
 **The step no longer closes to better than ~0.31 ms - and the second arithmetic
 is not a second witness.** The L5 after-run's Σ over all 774 launches is
