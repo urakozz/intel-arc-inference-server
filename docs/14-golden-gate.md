@@ -244,7 +244,7 @@ This is a **check, not a test**: it is a documented command with a recorded
 result, and no new test binary was built for it. The gate remains the
 regression barrier.
 
-## The vLLM cross-check - status: still open, now actionable
+## The vLLM cross-check - closed 2026-08-25
 
 `tools/oracle/README.md`'s trust chain is explicit that the golden gate has a
 ceiling: the C++ loader and the oracle are pinned to the **same** `dequant.py`
@@ -254,25 +254,158 @@ the oracle **together** and this gate still passes. Closing that needs a third
 implementation that shares nothing with either: vLLM's own greedy output on the
 same checkpoint.
 
-That cross-check **has not been run.** It was deferred out of plan 2
-deliberately - it needs a working engine to be worth running - and this task
-did not run it either. What changed today is that it is now actionable, and the
-three-way reading is no longer hypothetical:
+**It has now been run.** Result, measured 2026-08-25 on the box, image
+`vllm-xpu-env-next-p314-t214-vxkp0:latest`, vLLM
+`0.27.2rc1.dev365+g5ee84d3c5.d20260821` / torch `2.14.0+xpu` on the Arc Pro B70:
+
+> **3 prompts × 32 greedy tokens, 96/96 token ids element-exact against the
+> oracle's golden `tokens` - and therefore against the engine, which the gate
+> already proved equal to it, id for id. The trust chain is closed end to end.**
+
+The three readings were named in advance. This is which one landed:
 
 - **engine ≠ oracle** → an engine bug. The oracle is the reference. *(Ruled out
-  today for these three prompts: 96/96 exact.)*
+  2026-08-25 for these three prompts: 96/96 exact, top of this document.)*
 - **engine == oracle, both ≠ vLLM greedy** → **suspect `dequant.py` first**,
   because the convention is the one thing the engine and the oracle share and
   vLLM does not: zero point (`q − 8` vs an explicit `qzeros`), the group axis,
   the `[K/8, N]` packing and nibble order, `desc_act`/`g_idx`. Do not touch a
-  kernel first.
-- **all three agree** → the chain is closed.
+  kernel first. *(Did not happen - no divergence to attribute.)*
+- **all three agree** → the chain is closed. **← this one, 96/96.**
 
-Running it means a vLLM greedy generation on
-`Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` with the three committed prompt id
-files and 32 tokens, temperature 0, and comparing against
-`tests/golden/prompts/*.ids` → the ids in `tools/oracle/README.md`. It is a
-short job on the box and it is the last link.
+### How it was run
+
+`tools/oracle/vllm_check.py` is the committed script. It reads the three
+committed `.ids` files and hands them to the offline `vllm.LLM` as
+`prompt_token_ids`, so **no tokenizer is in the loop** on either side and a
+tokenizer difference cannot masquerade as a token difference. It reads the
+oracle's `tokens` tensor (`i32[32]`) straight out of
+`oracle-out/<p>.golden.safetensors` - the golden file itself, not a derived
+copy - and prints the comparison. Exit 0 iff every id matched.
+
+Two settings matter for the check to mean what it says.
+`SamplingParams(temperature=0, max_tokens=32, min_tokens=32, ignore_eos=True)`:
+`ignore_eos` is there because `dump.py`'s greedy loop is a bare argmax with no
+stop condition, so without it a stop would silently shorten the comparison. And
+`enable_prefix_caching=False` with `max_num_seqs=1`, one `generate()` call per
+prompt - a correctness check has no business letting a cached prefix or a
+two-prompt batch change which kernel shape runs.
+
+The container is the one recorded in `docs/BENCHMARKS.md` (the 31.50 t/s
+baseline was measured with it, on this same checkpoint), run as the calling
+uid/gid - the recorded gotcha; as root the outputs come back root-owned:
+
+```bash
+# on the box, from ~/b70-inference-server
+docker run --rm --entrypoint bash -u "$(id -u):$(id -g)" \
+  --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
+  --device /dev/dri \
+  -v /dev/dri/by-path:/dev/dri/by-path:ro -v /sys/class/drm:/sys/class/drm:ro \
+  --group-add "$(getent group render | cut -d: -f3)" \
+  --group-add "$(getent group video  | cut -d: -f3)" \
+  --ipc=host --pid=host --net=host --shm-size=16g \
+  -e ZE_FLAT_HIERARCHY=FLAT -e ONEAPI_DEVICE_SELECTOR=level_zero:0 \
+  -e VLLM_USE_V2_MODEL_RUNNER=1 -e VLLM_XPU_ENABLE_XPU_GRAPH=1 \
+  -e VLLM_WORKER_MULTIPROC_METHOD=spawn -e CCL_ZE_IPC_EXCHANGE=sockets \
+  -e HF_HUB_OFFLINE=1 -e HF_HUB_ENABLE_HF_TRANSFER=0 \
+  -e HF_HOME=/scratch/hf -e HOME=/scratch -e PYTHONUNBUFFERED=1 \
+  -v "$HOME/b70-inference-server:/ws" -w /ws \
+  -v "$HOME/.cache/huggingface:/hf:ro" -v /tmp:/scratch \
+  vllm-xpu-env-next-p314-t214-vxkp0:latest -c \
+  'SNAP=$(ls -d /hf/hub/models--Vishva007--Qwen3.8-27B-W4A16-AutoRound-GPTQ/snapshots/*/ | head -1);
+   python3 tools/oracle/vllm_check.py "$SNAP" \
+     --prompts /ws/tests/golden/prompts --golden /ws/oracle-out'
+```
+
+### The ids
+
+vLLM's 32 generated ids per prompt, copied out of the run's stdout. The
+oracle/engine row is the golden `tokens` tensor, which the script read from the
+`.safetensors` in the same process:
+
+```
+prose  (42 prompt ids)
+  oracle/engine  3113 7810 279 1118 479 654 8980 1000 381 1142 440 279 1834 725 2213 13
+                 3113 11292 279 4220 6092 1000 381 6992 11 321 539 5600 279 72103 1000 381
+  vllm           3113 7810 279 1118 479 654 8980 1000 381 1142 440 279 1834 725 2213 13
+                 3113 11292 279 4220 6092 1000 381 6992 11 321 539 5600 279 72103 1000 381
+  MATCH 32/32
+
+code   (61 prompt ids)
+  oracle/engine  271 727 40523 17 19490 11 750 11 15131 1590 198 262 460 498 1030 8474
+                 3620 11 750 681 15131 8 364 343 303 2663 60 271 727 40523 18 19490
+  vllm           271 727 40523 17 19490 11 750 11 15131 1590 198 262 460 498 1030 8474
+                 3620 11 750 681 15131 8 364 343 303 2663 60 271 727 40523 18 19490
+  MATCH 32/32
+
+cjk    (38 prompt ids)
+  oracle/engine  29545 271 95815 108553 97663 108447 96494 3709 98844 95895 97771 95726 114183 101650 100700 1710
+                 271 550 220 99737 96863 271 99737 96863 95761 105064 97463 95793 100830 98252 96019 115534
+  vllm           29545 271 95815 108553 97663 108447 96494 3709 98844 95895 97771 95726 114183 101650 100700 1710
+                 271 550 220 99737 96863 271 99737 96863 95761 105064 97463 95793 100830 98252 96019 115534
+  MATCH 32/32
+
+=== VERDICT: 96/96 ids equal across 3 prompts
+=== ALL THREE AGREE - the trust chain is closed (docs/14 §cross-check).
+```
+
+vLLM's detokenisation of those ids is the same three continuations recorded in
+`tools/oracle/README.md` - including the CJK prompt's completion of the trailing
+emoji's variation selector, and `code`'s `def clamp2(values, lo, hi):` /
+`    return [min(max(v, lo), hi) for v in values]`.
+
+### Why this is a third implementation and not a second look at the same code
+
+Nothing in the vLLM path is shared with the engine or the oracle. Read off the
+run's own log: the architecture resolves to `Qwen3_5ForConditionalGeneration`,
+the int4 weights go through **`XPUwNa16LinearKernel for AutoGPTQLinearMethod`**
+- vLLM's own GPTQ unpack, not `dequant.py` - the GDN layers run the **Triton**
+prefill and decode kernels (`qwen_gdn_linear_attn.py`, the fused CUDA path
+declined on an XPU), and the full-attention layers run **FlashAttention v2**.
+Different unpack, different kernels, different device (XPU vs the oracle's CPU
+and the engine's own 645 Level Zero kernels), different scheduler. The only
+thing all three share is the checkpoint's bytes and the prompt ids.
+
+That is exactly what makes 96/96 informative: it is the packing convention -
+zero point `q − 8` with no `qzeros` stream, group 64 along `K`, `[K/8, N]` u32
+words, `desc_act: false` - being read the same way by an implementation that
+never saw `dequant.py`. `dequant.py` is now cross-checked, not just
+self-consistent, and it is **no longer a suspect** for a divergence measured on
+these three prompts.
+
+### Measured cost, and the control run
+
+| Run | `enforce_eager` | load | prose | code | cjk | verdict | rc |
+|---|---|---|---|---|---|---|---|
+| compiled (the recorded serve config) | `False` | 212.1 s | 1.1 s | 1.1 s | 1.0 s | **96/96** | 0 |
+| control | `True` | 57.1 s | 4.7 s | 4.7 s | 4.6 s | **96/96** | 0 |
+
+The second run exists so the verdict does not rest on the torch.compile / XPU
+Graph path: `--enforce-eager` takes a different execution path through the same
+weights and produced **byte-identical id blocks** (`md5sum` over the three
+32-id blocks equal across the two logs). Model load is 17.07 GiB on device,
+6.9 s of weight load; the rest of the compiled run's 212 s is Inductor.
+
+Both runs print `double free or corruption (fasttop)` from the XPU stack's
+teardown **after** the verdict line and after `XPUWorker shutdown: done`, and
+both still exit **0**. It is a shutdown artifact of the container's stack, it
+happens once the comparison is already printed, and it is recorded here rather
+than swept up because it is in the raw logs.
+
+### Two caveats worth keeping
+
+- **The box's `config.json` is locally edited.** sha256
+  `a56f436ea109c6dc9ee707fee2e13933d2c3b87cb0ec7bbad8d1d5aef8b6579b`, 12440 B -
+  the two `mtp` rules flipped to exclusions per `docs/BENCHMARKS.md` ("Checkpoint
+  bug, not vLLM or XPU"). The edit only changes whether vLLM quantises the MTP
+  head, which neither the engine nor the oracle loads at all (`dump.py`'s
+  `SKIP_PREFIXES`). No quantised tensor either of them reads is affected. The
+  script prints that hash on every run so a future re-run says whether it is
+  comparing the same file.
+- **Three prompts, 96 tokens.** This closes the chain *for these prompts*. It is
+  a check with a recorded result, like the CLI cross-check above - not a
+  regression test, and no new test binary was built for it. Re-run it after any
+  change to `dequant.py` or the loader's packing assumptions.
 
 ## Running the gate
 
