@@ -19,6 +19,8 @@ is skipped, the MTP head is phase 2.
 ```
 ceiling(27B, no MTP) = 600 / 15.52 = 38.7 t/s
 vLLM p314-t214-vxkp0  =               31.50 t/s  ->  489 GB/s  ->  81% MBU
+                                       (600 GB/s / 15.52 GB denominators;
+                                        83.0% on the measured 590 / 15.540 pair)
 ```
 
 Resident bytes on load should equal this figure unless the loader pads; the
@@ -29,10 +31,16 @@ what it actually makes resident: **15,539,980,288 B = 15.540 GB per token**
 (docs/13) - the 15.519 GB of doc-03 header arithmetic plus 0.016 GB of tiling
 pad and 0.005 GB of fp32-widened norms. And doc 01 measures **590 GB/s** through
 a plain Level Zero launch (`probe_bw`) against the 600 GB/s it recommends as the
-general roofline denominator. Every number below and in
-[BENCHMARKS.md](BENCHMARKS.md) uses **15.540 GB and 590 GB/s**, because that
-pair describes the path this engine submits on, and it is applied to vLLM's
-number too so the comparison is like-for-like:
+general roofline denominator. **"Phase 1, measured" below, and the b70-decode
+section of [BENCHMARKS.md](BENCHMARKS.md), use 15.540 GB and 590 GB/s
+throughout**, because that pair describes the path this engine submits on, and
+they apply it to vLLM's number too so the comparison is like-for-like. The rest
+of this document - the tables in "Where the headroom actually is", the
+specialisation list and the "what to measure" list - predates that pair and
+still reads **600 GB/s / 15.52 GB**, which is why vLLM appears there as 81% MBU
+and here as 83.0%. Those are the same measurement on two denominators, not two
+measurements; each site that carries the older pair now says so inline. Do not
+mix them inside one comparison:
 
 ```
 ceiling(27B, no MTP) = 590 / 15.540 = 37.97 t/s   (26.34 ms/token)
@@ -55,16 +63,26 @@ decomposition is what scopes the next spec.
 
 ### Where the 42.14 ms goes
 
-| part | ms/token | share | how it was obtained |
-|---|---|---|---|
-| GEMV - 257 of the 645 launches, the int4 mixers/MLPs and bf16 `lm_head` | **28.35** | 67.3% | **measured per kernel**, `probe_gemv` 2026-08-24, at exactly the shapes, layout and `S` the model table binds; summed over the layer counts |
-| everything else - 388 launches (241 `prep`, 48 `gdn_step`, 48 `attn`, 48 `in_proj_a‖b` bf16 GEMV, `embed_gather`, 2× `argmax`) | **13.79** | 32.7% | **aggregate**: the measured step minus the row above |
-| - of which `attn_decode`'s real per-block work at depth 4096 | 2.34 | 5.6% | **measured**, the depth experiment below |
-| - of which `embed_gather` + `argmax` | 0.008 | 0.02% | **measured per kernel** (doc 12) |
-| - of which the fixed attention grid's early-out | 0.046 | 0.11% | **measured**, the `--max-len` experiment below |
-| - leaving `prep` + `gdn_step` + `attn_prep`/`attn_reduce` + the `a‖b` GEMV | **≈ 11.4** | 27.1% | **aggregate**, not separated: ~31 µs per launch over 369 launches |
-| host, outside the fence entirely | **0.097** | 0.23% | **measured**, `Engine::last_gen_ms() − last_fence_ms()` |
-| dispatch inside the fence (645 × 0.52 µs) | 0.335 | 0.8% | **estimated** from doc 07 #5 |
+A **partition**: every launch and the host appear once, and the rows sum to the
+measured 42.141 ms exactly - 28.346 + 2.314 + 0.046 + 0.008 + 11.330 + 0.097 -
+which is why they carry three decimals where the prose rounds to two.
+
+| part | launches | ms/token | share | how it was obtained |
+|---|---|---|---|---|
+| GEMV - the int4 mixers/MLPs and bf16 `lm_head` | 257 | **28.346** | 67.3% | **measured per kernel**, `probe_gemv` 2026-08-24, at exactly the shapes, layout and `S` the model table binds; summed over the layer counts. **A floor, not an in-situ charge** - see below |
+| `attn_decode`'s per-block work at depth 4096 | (of 48) | **2.314** | 5.5% | **estimated**: a two-point extrapolation from the depth experiment (doc 07 #12, doc 12 `attn` → Measured) - 0.1361 ms/block × 17 blocks, with the measured 2.144 ms delta as its floor |
+| the fixed attention grid's early-out | (of 48) | **0.046** | 0.11% | **measured**, the `--max-len` experiment (doc 07 #12) |
+| `embed_gather` + `argmax` | 3 | **0.008** | 0.02% | **measured per kernel** (doc 12) |
+| `prep` + `gdn_step` + `attn_prep`/`attn_reduce` + the `a‖b` GEMV | 369 | **11.330** | 26.9% | **aggregate**, not separated: 30.7 µs per launch |
+| host, outside the fence entirely | - | **0.097** | 0.23% | **measured**, `Engine::last_gen_ms() − last_fence_ms()` |
+| **total** | **645** | **42.141** | 100% | **measured**, median of three |
+
+Two memo lines, not rows, because they overlap the rows above: **dispatch** is
+645 × 0.52 µs = 0.335 ms (**estimated**, doc 07 #5), spread across every kernel
+row - 0.8% of the token, 3.0% of the unsplit bucket; and **everything that is
+not a GEMV** is 42.141 − 28.346 = **13.795 ms** (32.7%), of which 13.698 is
+device time and 0.097 is host. The second is the figure point 3 below compares
+against vLLM.
 
 Read that table twice before proposing anything.
 
@@ -74,20 +92,34 @@ Read that table twice before proposing anything.
    thesis was always about vLLM's Python/Triton launch path (doc 09), and
    replay did exactly what doc 08 said it would - which is precisely why the
    remaining gap is *not* excusable as overhead. It is kernel time.
-2. **GEMV is not the problem.** 28.35 ms of measured GEMV is 89% of vLLM's
-   *entire* 31.75 ms step. Those kernels run at 89-97% of 600 GB/s and the
-   engine binds the probe's own best layout and `S` for every shape, so the
-   "GEMV fill at the chosen `S` vs the probe matrix" suspect is **ruled out**:
-   production and probe are the same configuration. There is ~2.0 ms of
-   headroom between the GEMV sum and the 26.34 ms roofline, and that is all
-   there is.
-3. **The 13.79 ms of non-GEMV work is the whole gap.** To reach 31.75 ms/token
-   the budget for everything that is not a GEMV is **3.4 ms**; we spend 13.79.
-   Closing 10.4 of those milliseconds is exactly the phase-1 shortfall.
+2. **GEMV is not the problem - with one caveat that this section is the wrong
+   place to omit.** 28.346 ms of measured GEMV is 89% of vLLM's *entire*
+   31.75 ms step. Those kernels run at 89-97% of the 600 GB/s denominator the
+   probe reports against (85-92% of 590), and the engine binds the probe's own
+   best layout and `S` for every shape, so the "GEMV fill at the chosen `S` vs
+   the probe matrix" suspect is **ruled out**: production and probe are the same
+   configuration. There is ~2.0 ms of headroom between the GEMV sum and the
+   26.34 ms roofline, and that is all there is.
+
+   **The caveat (doc 12, `gemv` → Measured):** 28.346 ms is *transplanted*
+   probe data - 40 independent launches replayed in their own in-order list -
+   not GEMV time observed inside the decode list. It is therefore a **floor**.
+   What the probe cannot see is a stall left behind by the *preceding* kernel: in
+   the engine every GEMV is entered directly after a `prep` or `attn`/`gdn`
+   kernel, and any drain or cache state that costs would land in GEMV's in-situ
+   time, not in the probe's. Since the unsplit bucket below is defined as the
+   step minus this number, **the two move in opposite directions**: if a profile
+   finds GEMV above 28.346 in situ, the 11.33 ms bucket shrinks by exactly that
+   much and the suspect ranking in point 5 changes with it. Spec 1.5's first
+   task must measure both sides in the same run, not compare one measured in
+   situ against one transplanted.
+3. **The 13.795 ms of non-GEMV work is the whole gap.** To reach 31.746 ms/token
+   the budget for everything that is not a GEMV is **3.400 ms**; we spend
+   13.795. Closing 10.4 of those milliseconds is exactly the phase-1 shortfall.
 4. **The attention early-out is exonerated** (doc 07 #12, resolved): a grid
    sized for `max_len` 16384 costs **0.046 ms/token - 0.11% of the step** in
    idle work-groups. Context-bucketed lists would buy nothing.
-5. **The named suspect inside the 11.4 ms is `prep_res_norm`**, on the strength
+5. **The named suspect inside the 11.33 ms is `prep_res_norm`**, on the strength
    of its own design note rather than a measurement: 129 launches per token, and
    each is a **single work-group** reducing 320 KB of split-K partials on one
    Xe-core (doc 12, "One work-group per token in `prep_res_norm` is the risk in
@@ -101,7 +133,7 @@ Read that table twice before proposing anything.
 
 In this order, because that is the order the evidence supports:
 
-1. **Get a per-kernel profile.** The 11.4 ms is an aggregate and no amount of
+1. **Get a per-kernel profile.** The 11.33 ms is an aggregate and no amount of
    arguing splits it. Level Zero kernel timestamps on a one-off instrumented
    capture, or a `probe_prep` / `probe_gdn` in the shape of `probe_gemv`.
    Nothing else should be attempted before this number exists.
@@ -135,15 +167,17 @@ now **measured** and the MoE `W` still an estimate (doc 07 #1):
 
 | Model | t/s | `W` | Ceiling @ 600 GB/s | MBU |
 |---|---|---|---|---|
-| **Qwen3.8-27B dense int4 (phase 1)** | 31.50 | **15.52 GB, measured** | **38.7** | **81%** |
+| **Qwen3.8-27B dense int4 (phase 1)** | 31.50 | **15.52 GB, measured** | **38.7** | **81%** (83.0% at 590 / 15.540) |
 | Ornith 35B-A3B MoE, MXFP4 / GPTQ | 72.65 / 73.31 | ~3B active × 4.1 bit + lm_head ≈ 4-5 GB, estimate | ~120-150 | ~50-60% |
 
 The "50-63% MBU" figure describes the MoE models. On the dense 27B vLLM is
-already at 81%, so **the entire remaining gap to the roofline - host overhead,
+already at 81% - 83.0% on the 590 / 15.540 pair "Phase 1, measured" uses - so
+**the entire remaining gap to the roofline - host overhead,
 device under-fill, everything - is ×1.23.** The MoE number also has an obvious
 mechanism (160 launches and 200 allocations per step, doc 03) that the dense
 path under XPU graphs does not; vLLM's residual per-step scheduling is a few ms
-against a ~32 ms step, which is exactly consistent with 81%.
+against a ~32 ms step, which is exactly consistent with 81%. (Every percentage
+in this section is on the 600 GB/s / 15.52 GB pair.)
 
 So the honest projection for phase 1 is a product of small factors, not one
 large one:
@@ -151,7 +185,7 @@ large one:
 | Lever | Ceiling effect | Est. t/s |
 |---|---|---|
 | vLLM today | - | 31.50 |
-| Fill the device (GEMV + split-K) and delete host work: 81% → ~95% MBU | ×1.17 | ~36.8 |
+| Fill the device (GEMV + split-K) and delete host work: 81% → ~95% MBU (600/15.52 basis) | ×1.17 | ~36.8 |
 | Drop `qzeros` + `g_idx` | ×1.013 | ~37.3 |
 | `lm_head` int8 | ×1.09 | ~40.6 |
 | `lm_head` int4 (instead of int8) | ×1.14 | **~42.5** |
@@ -222,10 +256,11 @@ around it.
    bytes on first load.
 2. ✅ **vLLM baseline t/s** - pp4096 1973 / tg256 31.50, `p314-t214-vxkp0`, no
    speculation (BENCHMARKS.md). MTP: 42.56 / 45.23 at 1 / 2 drafts.
-3. ✅ **Achieved MBU** - 81% on this model. The 50-63% figure is MoE-only.
+3. ✅ **Achieved MBU** - 81% on this model at 600 GB/s / 15.52 GB, **83.0%** on
+   the measured 590 / 15.540 pair. The 50-63% figure is MoE-only.
 4. ⚠️ **GDN vs GEMM time split** - **half-answered on our own engine
    2026-08-25** (doc 07 #3): GEMV **28.35 ms of a 42.14 ms step (67.3%)**,
-   everything else 13.79 ms (32.7%). GEMM dominates as predicted. The estimate's
+   everything else 13.795 ms (32.7%). GEMM dominates as predicted. The estimate's
    *mechanism* was wrong: the non-GEMV third is not kernel count (645 × 0.52 µs
    = 0.335 ms, 2.4% of it) but time inside `prep` / `gdn_step` / `attn`, and
    this measurement does not separate those three. Doing so is spec 1.5's first
@@ -288,7 +323,8 @@ around it.
 1-3, 5 and 6 are done; 4 is half-done as of 2026-08-25 (GEMM 67.3% / rest
 32.7%, the "rest" not yet split three ways). Finishing it - a per-kernel
 profile of `prep`, `gdn_step` and `attn` - is now the top item of spec 1.5,
-because that aggregate 13.79 ms is the entire gap to vLLM.
+because that aggregate 13.795 ms - 11.33 of it in kernels nothing has split -
+is the entire gap to vLLM.
 
 ## Benchmark
 

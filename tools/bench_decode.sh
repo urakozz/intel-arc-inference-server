@@ -57,8 +57,16 @@ else
   tools/box.sh sync
 fi
 
+if ! [ "$RUNS" -ge 1 ] 2>/dev/null; then
+  echo "bench_decode.sh: --runs must be a positive integer, got '$RUNS'" >&2
+  exit 2
+fi
+
 echo "bench: $MODEL, depth $DEPTH, tg $TG, $RUNS run(s), sha $SHA" >&2
 
+# `rows` is only ever expanded after at least one run, which the --runs guard
+# above enforces -- an empty array would trip `set -u` on older bash (3.2, which
+# is what macOS ships).
 rows=()
 for i in $(seq 1 "$RUNS"); do
   echo "=== run $i/$RUNS ===" >&2
@@ -69,7 +77,7 @@ for i in $(seq 1 "$RUNS"); do
   rows+=("$row")
 done
 
-printf '%s\n' "${rows[@]}" | awk -F'|' -v n="$RUNS" '
+printf '%s\n' "${rows[@]}" | awk -F'|' '
   { ts[NR] = $5 + 0; mspt[NR] = $6 + 0 }
   END {
     if (NR < 1) exit 0
@@ -77,8 +85,12 @@ printf '%s\n' "${rows[@]}" | awk -F'|' -v n="$RUNS" '
       if (ts[j] < ts[i]) { t = ts[i]; ts[i] = ts[j]; ts[j] = t
                            t = mspt[i]; mspt[i] = mspt[j]; mspt[j] = t }
     mid = int((NR + 1) / 2)
-    # The parentheses around the ternary are load-bearing: the awk that ships
-    # with macOS rejects `a ? b : c` unparenthesised in an argument list.
+    # The parentheses around the ternary are load-bearing, and this is not a
+    # macOS quirk: in POSIX awk grammar a bare `>` inside a print/printf
+    # argument list parses as an output redirection, so `a > 0 ? b : c` is
+    # ambiguous there. Hoisting it into its own assignment settles it portably.
+    # (Getting this wrong is what made the first run of this script print every
+    # row and then die at the summary -- the rows were fine, the median was not.)
     pct = (ts[mid] > 0) ? (100 * (ts[NR] - ts[1]) / ts[mid]) : 0
     printf "median %.2f t/s (%.2f ms/token) over %d run(s); min %.2f, max %.2f, spread %.2f (%.2f%%)\n",
            ts[mid], mspt[mid], NR, ts[1], ts[NR], ts[NR] - ts[1], pct

@@ -68,13 +68,14 @@ first suspect.
 **Half-answered on our own engine, 2026-08-25 - and the estimate above is
 wrong about *why*.** Of a measured 42.14 ms step (doc 05), GEMV is **28.35 ms
 (67.3%)** - measured per kernel by `probe_gemv` at the shapes the model table
-binds - and everything else is **13.79 ms (32.7%)**. So GEMM does dominate, as
+binds - and everything else is **13.795 ms (32.7%)**. So GEMM does dominate, as
 predicted. What was not predicted is that the non-GEMV third is **not** a
-kernel-count problem: 645 launches × 0.52 µs is 0.335 ms, 2.4% of that 13.79 ms.
+kernel-count problem: 645 launches × 0.52 µs is 0.335 ms, 2.4% of that 13.795 ms.
 It is time spent *inside* `prep`, `gdn_step` and `attn`, and this measurement
 does **not** separate the three - that separation is spec 1.5's first job
 (doc 05, "What spec 1.5 is scoped to do"). Attention's share is bounded:
-2.34 ms of per-block work at depth 4096, measured by the #12 experiment.
+2.31 ms of per-block work at depth 4096 - *estimated* by extrapolating the #12
+experiment's two points, not timed.
 
 ## 4. What is vLLM's MBU on the phase-1 model? - **resolved: 81%**
 
@@ -198,24 +199,36 @@ instead.
 **Measured 2026-08-25**, `b70-decode --bench`, tg 256, three runs each on an
 idle box (BENCHMARKS.md carries every row):
 
-| shape | grid (`attn_decode`) | t/s | ms/token |
-|---|---|---|---|
-| depth 4096, `--max-len 16384` | 4 × 64 blocks | 23.73 | 42.141 |
-| depth 64, `--max-len 16384` | 4 × 64 blocks | 25.00 | 39.997 |
-| depth 64, `--max-len 4096` | 4 × 16 blocks | 25.03 | 39.951 |
+Live blocks are `nb = (pos + m)/256 + 1` (`attn.cl:474`), counted over the 256
+positions each `tg` walks:
+
+| shape | grid (`attn_decode`) | live blocks (`nb`) | t/s | ms/token |
+|---|---|---|---|---|
+| depth 4096, `--max-len 16384` | 4 × 64 | 17 throughout (`pos` 4096…4351) | 23.73 | 42.141 |
+| depth 64, `--max-len 16384` | 4 × 64 | mean 1.25 (1 for 192 tokens, 2 for 64) | 25.00 | 39.997 |
+| depth 64, `--max-len 4096` | 4 × 16 | mean 1.25, same as above | 25.03 | 39.951 |
 
 The first two rows are the experiment as written: **2.144 ms/token, 5.1% of the
 step**, well over the 2% bar. But that difference is not what the question was
-asking about - it is the *real* work of 16 more live 256-position blocks, which
-a bucketed list would still have to do. Reading it as the fixed grid's cost
-would have got the answer exactly backwards.
+asking about - it is the *real* work of 15.75 more live 256-position blocks,
+which a bucketed list would still have to do. Reading it as the fixed grid's
+cost would have got the answer exactly backwards.
 
 The third row is the experiment the question actually needed, and it exists
 because `attn_decode`/`attn_reduce` are already compiled at `MAXLEN = 4096` as
-well as 16384: **same depth, same work, one quarter of the grid.** The
-difference is **0.046 ms/token - 0.11% of the step** for 48 extra blocks ×
-4 kv-heads × 16 layers = **3072 extra work-groups**, i.e. **~15 ns per
-early-outed work-group**. That is the number this entry wanted.
+well as 16384: **same depth, same live blocks, same work, one quarter of the
+grid.** The difference is **0.046 ms/token - 0.11% of the step** for 48 extra
+idle blocks × 4 kv-heads × 16 layers = **3072 extra work-groups**, i.e. **~15 ns
+per early-outed work-group**. (`--max-len` also changes `attn_part`'s stride and
+the KV footprint, but `attn_reduce`'s merge loop is bounded by `nb` - 1.25 in
+both rows - so the early-out dominates the difference; doc 12's `attn` →
+Measured spells this out.) That is the number this entry wanted.
+
+The pair is also **thermally matched** - both runs follow the same 2.4 s ingest
+- which the 2.144 ms depth delta is not: its depth-4096 run follows 170 s of
+continuous replay. That asymmetry is one reason doc 05 labels the 2.31 ms of
+attention work it extrapolates from that delta *estimated* rather than
+measured.
 
 **Resolution: the fixed grid stays.** Context-bucketed lists would buy 0.11% and
 cost a captured list per bucket, the memory for it, and a host-side branch on
@@ -225,9 +238,14 @@ re-sized") does its job. Attention is not on the phase-1 critical path - doc 05
 puts the phase-1 shortfall in `prep`/`gdn_step` instead.
 
 ```bash
-tools/bench_decode.sh --depth 64          # rows 2
 tools/bench_decode.sh                     # row 1
-tools/box.sh run "./build/src/cli/b70-decode <model> --bench --depth 64 --tg 256 --max-len 4096"   # row 3
+tools/bench_decode.sh --depth 64          # row 2
+# Row 3 has no --max-len flag in the harness, so it is a direct box.sh run. The
+# $(...) is deliberately substituted by the LOCAL shell: tools/box.sh syncs the
+# tree without .git, so the box cannot name the commit and the row would print
+# `unknown` (the run recorded above passed B70_GIT_SHA=62bdd4d this way).
+SHA=$(git rev-parse --short HEAD)
+tools/box.sh run "B70_GIT_SHA=$SHA ./build/src/cli/b70-decode <model> --bench --depth 64 --tg 256 --max-len 4096"
 ```
 
 ## 13. Can a `sycl-tla` kernel be appended to a raw L0 command list at all?
