@@ -296,10 +296,30 @@ worth saying explicitly what happened to it: **nothing bad.** The per-launch
 in-situ timing of the retiled kernel is 224.046 µs against 369.988 (docs/15
 §L5), i.e. the launch got **39% faster while quadrupling its grid** - which is a
 far stronger version of this entry's finding than the 0.11% it was resolved on.
-Transplanting the ~15 ns/work-group measured here puts the 576 extra idle
-work-groups at ~0.19 µs/launch, under 0.1% of the retiled kernel. **The fixed
-grid is cheaper than this entry could prove in 2026-08's measurement, not more
-expensive.**
+**The transplant, done once and properly** (an earlier version of this
+paragraph mixed two different rates and got it wrong by 47×). This entry's own
+rate is **0.046 ms/token / 3072 work-groups = 14.97 ns per early-outed
+work-group**. The retile adds 576 idle work-groups per launch, and there are 16
+`attn_decode` launches per token, so it adds **9216 per token**:
+
+    9216 x 14.97 ns = 138 us/token = 0.138 ms  ->  0.38% of the 36.32 ms step
+    per launch: 576 x 14.97 ns = 8.6 us        ->  3.8% of the retiled 224.046 us
+
+That is the **conservative** rate. docs/15 §2 measured the same experiment on the
+kernel itself rather than on a whole-step bench difference and got 0.04% of a
+153.608 µs launch for 192 work-groups = **0.32 ns/work-group**, 47× smaller,
+which would put the same 9216 at 0.003 ms/token. The two disagree because one is
+a bench delta carrying everything else that differs between two runs and the
+other is a kernel timing; this entry keeps its own, larger number so the bound is
+not flattered.
+
+**Neither figure is a term to add, and that is the point.** The retiled kernel's
+224.046 µs/launch was measured *with* all 764 of its idle work-groups in the
+grid, so whatever they cost is already inside the −2.219 ms/token the lever
+banked. The transplant only answers "did quadrupling the grid blow the early-out
+budget", and the direct measurement answers it better: **the launch got 39%
+faster while its grid grew 4×.** **The fixed grid is cheaper than this entry
+could prove in 2026-08's measurement, not more expensive.**
 
 **Resolution: the fixed grid stays.** Context-bucketed lists would buy 0.11% and
 cost a captured list per bucket, the memory for it, and a host-side branch on
