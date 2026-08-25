@@ -164,13 +164,17 @@ Read that table twice before proposing anything.
    `gdn_step` is **0.733 ms**, 1.09× the 0.67 ms named right here as the test,
    so it is *not* costing multiples of its traffic and the occupancy charge is
    dropped. What none of the three anticipated is the item that outweighs all of
-   them: **`attn_decode` at 5.782 ms.** The occupancy story generalises, though -
-   1 and 2 work-groups are what `prep_res_norm` and `a‖b` are given, and one
-   work-group on this device is worth about 12-17 GB/s (measured three ways,
-   docs/15 §1, which also records why extrapolating that ×8 is the weak step in
-   both levers' yields). `attn_decode` is a different failure: its work-groups
-   are nearly free (3.4× for +6.9%) and what costs is one work-group's serial
-   walk of a 256-position block.
+   them: **`attn_decode` at 5.782 ms.** The occupancy story generalises, but
+   **not in the unit this paragraph first wrote it in.** It said one work-group
+   is worth 12-17 GB/s (docs/15 §1, three points). Lever L2 tested that on `a‖b`
+   by giving it 4× the work-groups at the same subgroup count and it bought
+   **nothing**; splitting K to 16× the subgroups took the same launch from
+   48.774 to 5.340 µs and the row from 2.335 to **0.256 ms/token** (docs/15
+   §L2). The unit is the **subgroup**. `prep_res_norm`'s 2.871 ms is still a
+   parallelism story and L1 still has a case, but it now rests on that curve
+   rather than on §1's table. `attn_decode` is a third failure again: its
+   work-groups are nearly free (3.4× for +6.9%) and what costs is one
+   work-group's serial walk of a 256-position block.
 
 ### What spec 1.5 is scoped to do
 
@@ -186,6 +190,10 @@ In this order, because that is the order the evidence supports:
 3. **`in_proj_a‖b`**: 48 launches of an 8-subgroup kernel. Fusing it into the
    `qkv‖z` GEMV (doc 04's fusion item 4) removes the launch and the fill
    problem at once - the one fusion the measurement now argues for.
+   **Done, and without the fusion (2026-08-25, spec 1.5 lever L2):** the fill
+   problem was the 8 subgroups, and a 16-way K split inside the work-group makes
+   128 of them. 2.335 → **0.256 ms/token**, no fusion, no extra launch, golden
+   gate 96/96. The fusion is now worth ≤0.256 ms and is not argued for.
 4. **`gdn_step` occupancy**, if the profile puts it above ~1 ms.
 5. Only then the ~2.0 ms of GEMV headroom, and the `lm_head` quantisation below,
    which is worth 4.35 → ~1.1 ms and needs no kernel work at all.
@@ -199,7 +207,8 @@ kernels do while they run is.
 yields). The profile ranks the levers by measured share as `attn_decode` 5.782 >
 `prep_res_norm` 2.871 > `a‖b` 2.335 > `gdn_step` 0.733 > GEMV's in-situ excess
 over its floor 0.659; the execution order docs/15 rules is **`a‖b` → `prep`
-two-stage → attention**, with `gdn_step` **skipped by ruling** (it is at 92% of
+two-stage → attention** (`a‖b` is **cut**: −1.875 ms/token on the bench, the
+step is 40.266 ms at `a1e2d3a`), with `gdn_step` **skipped by ruling** (it is at 92% of
 device bandwidth - there is 0.06 ms in the whole kernel) and the GEMV `S` retune
 conditional on the gate being within reach. Fusion is re-priced too: the in-situ
 dispatch gap is 0.473 ms (**derived**, doc 07 #5), so removing launches is worth

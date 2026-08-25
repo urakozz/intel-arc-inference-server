@@ -180,13 +180,15 @@ tools/bench_decode.sh --depth 64      # the doc 07 #12 depth experiment
 ```
 
 **Measured 2026-08-25** on an idle box (no container, no other GPU work), three
-runs each, `b70-decode` at commit `62bdd4d`, `debug_resid` off, default
-`--max-len 16384`:
+runs each, `debug_resid` off, default `--max-len 16384`. Two commits appear: the
+phase-1 rows are `62bdd4d` and the current row is `a1e2d3a` (spec 1.5 lever L2,
+measured the same way on the same day and box):
 
 | engine | depth | tg | t/s | ms/token |
 |---|---|---|---|---|
 | vLLM `p314-t214-vxkp0`, no speculation | 1 † | 256 | **31.50** | 31.75 |
-| **b70-decode `62bdd4d`** | **4096** † | **256** | **23.73** | **42.14** |
+| **b70-decode `a1e2d3a`** - spec 1.5 lever L2 | **4096** † | **256** | **24.83** | **40.27** |
+| b70-decode `62bdd4d` - phase 1, before any lever | 4096 † | 256 | 23.73 | 42.14 |
 | b70-decode `62bdd4d` | 64 † | 256 | 25.00 | 40.00 |
 
 † **The two `depth` columns do not mean the same thing.** `llama-benchy`'s
@@ -204,13 +206,42 @@ name the binary that produced it, so the bench apparatus was committed first
 `src/`, `tests/` and the kernels are byte-for-byte the same; the later commit
 touches docs and one `awk` line in `tools/bench_decode.sh`.
 
-**b70-decode is 24.7% short of vLLM** - 23.73 against 31.50, a factor of 1.327
-the other way. The number is recorded as measured; nothing was tuned to produce
-it, and no `.cl` file was touched in the task that measured it. The
+The `a1e2d3a` row follows the same rule for the same reason: `a1e2d3a` is the
+commit that carries the kernel change and `tools/bench_decode.sh` read that sha
+out of the worktree it measured; the row itself and the docs around it are
+committed after it, touching no `src/` file.
+
+**b70-decode is 21.2% short of vLLM** - 24.83 against 31.50, a factor of 1.269
+the other way; it was 24.7% short (23.73) before spec 1.5's first lever. The
 decomposition and what it scopes are in
 [05-perf-model.md](05-perf-model.md#phase-1-measured--the-honest-verdict).
 
-Every run's t/s, and what three of them agree on:
+### The `a1e2d3a` row - spec 1.5 lever L2
+
+**Measured 2026-08-25**, same command, same idle box, three runs, `debug_resid`
+off, default `--max-len 16384`:
+
+| shape | runs (t/s) | median | min | max | spread |
+|---|---|---|---|---|---|
+| depth 4096, tg 256 | 24.83 / 24.84 / 24.83 | **24.83** | 24.83 | 24.84 | 0.01 (0.04%) |
+
+`per token: 40.266 ms total = 40.166 ms fence + 0.100 ms host`, MBU 386 GB/s of
+590 = **65.4%** (it was 62.5%). The ingest half of the same runs reads
+162.8 s for 4096 ids, 39.75 ms/token.
+
+**−1.875 ms/token, and all of it is one kernel.** The `a‖b` GEMV
+(`gemv_bf16` 5120×128, 48 launches/token) went from 2.341 to 0.256 ms/token when
+its K was split 16 ways inside the work-group - 8 hardware threads per launch to
+128. The in-situ before/after, the two bit-identical variants that were worth
+**nothing**, and why the ladder's stated mechanism was the wrong invariant are
+in [15-step-anatomy.md](15-step-anatomy.md) §L2. The golden gate is unchanged at
+96/96 element-exact, which is the bar a reordered summation has to clear.
+
+The `62bdd4d` rows below stay: they are what the step was before any lever, and
+every number in docs/05, docs/12's partition and docs/15's anatomy is measured
+against them.
+
+Every run's t/s at `62bdd4d`, and what three of them agree on:
 
 | shape | runs (t/s) | median | min | max | spread |
 |---|---|---|---|---|---|

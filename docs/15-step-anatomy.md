@@ -196,6 +196,15 @@ run. **98.6% of the step is kernel time inside the fence** (41.571 of 42.141);
 
 ### 1. One work-group is worth about 12-17 GB/s, and that is the whole story of the bucket
 
+> **Superseded in part by the L2 measurement below - read §L2 before you use
+> this section to price anything.** The three points here are all still
+> measured and still true as *totals*. What is false is the per-work-group
+> reading of them and the extrapolation that reading licensed: L2 gave the
+> `a‖b` GEMV four times the work-groups at the identical subgroup count and it
+> bought **nothing** (48.774 → 49.127 µs/launch). The invariant that priced out
+> is the **subgroup**, not the work-group. Everything below stands as written -
+> it is what this run measured - with that correction attached.
+
 Three independent points, all measured in this run, all from docs/12's own byte
 counts:
 
@@ -328,6 +337,105 @@ is nothing to tune. Quantising it to int4 is worth ~3.3 ms
 specialisation list, deliberately outside spec 1.5. It is named here because
 the gate arithmetic below cannot be read honestly without it.
 
+## Lever L2 - `a‖b` GEMV, cut and measured
+
+The first lever of spec 1.5, executed 2026-08-25 against this document's own
+ranking, with this document's own instrument. **Accepted**: the recorded step is
+**42.141 → 40.266 ms/token** (`tools/bench_decode.sh`, median of three, idle
+box, sha `a1e2d3a`; BENCHMARKS.md carries the row). The lever's own row moved
+**2.341 → 0.256 ms/token**.
+
+### What was tried, in the order it was tried, and what each was worth
+
+Five `--profile --depth 4096 --steps 32` runs, same box, same session, each
+building the full engine and replaying 32 instrumented steps. The column that
+decides is `gemv_bf16` at 5120×128, 48 launches:
+
+| tiling (`COLS_PER_WG`, `KSPLIT`) | work-groups | **subgroups** | µs/launch | ms/token | GB/s | GB/s per subgroup |
+|---|---|---|---|---|---|---|
+| `{64, 1}` - as plan 3 shipped it | 2 | 8 | **48.774** | **2.341** | 26.9 | 3.36 |
+| `{16, 1}` - the ladder's option (a) | 8 | 8 | **49.127** | 2.358 | 26.7 | 3.34 |
+| `{16, 1}` + 4 block reads in flight | 8 | 8 | **49.052** | 2.354 | 26.7 | 3.34 |
+| `{16, 4}` - the ladder's option (b) | 8 | 32 | **13.115** | 0.630 | 99.9 | 3.12 |
+| **`{16, 16}` - shipped** | **8** | **128** | **5.340** | **0.256** | **245** | 1.92 |
+
+All five are measured, in situ, per launch. The last row is re-measured at the
+committed sha and reads **5.342 µs / 256.403 µs per step** - 0.04% from the
+tuning run, which is what this instrument's reproducibility looks like.
+
+### §1's mechanism was the wrong invariant, and the lever is what proved it
+
+The ladder priced L2 off §1: two work-groups at 13.5 GB/s each, so four times
+the work-groups is four times the bandwidth. **Option (a) is exactly that
+experiment and it returned nothing** - 48.774 → 49.127 µs, a 0.7% *regression*,
+where the model said ~12 µs. A bit-identical variant that also gave each
+subgroup four outstanding block reads (a `KU` knob, since deleted) returned
+nothing either, 49.052 µs, and cost `lm_head` 1.3% by perturbing its codegen.
+
+What the three failed/flat points share is that **the launch still had eight
+subgroups**. `COLS_PER_WG` re-spreads the same eight over more work-groups;
+loads-in-flight changes what one of them does. Only splitting K makes more of
+them, and when it does the time falls almost in proportion: 8 → 32 → 128
+subgroups reads 48.774 → 13.115 → 5.340 µs, i.e. **3.36 → 3.12 → 1.92 GB/s per
+subgroup**. A subgroup pulls what it pulls; the launch was slow because it only
+ever had eight.
+
+This does not overturn §1's three measurements - they are totals and they are
+still what they were. It overturns the *per-work-group* reading of them. Note
+that the two are not distinguishable in §1's own table: `prep_res_norm` (1
+work-group) has 16 subgroups, `prep_silu_mul` (5) has 80, `a‖b` (2) had 8, and
+per **subgroup** those read 1.06 / 0.76 / 3.36 GB/s - a spread §1 could not see
+because it never divided by the right thing. The `a‖b` figure is 3-4× the others
+because its subgroup pulls 256 B per load (`intel_sub_group_block_read_us8`)
+where prep's pulls 64 B, which is the shape of a **latency-bound** kernel with
+one load in flight per thread: rate = bytes per load ÷ ~60-75 ns.
+
+**What this changes for L1, which is next.** L1's yield does not collapse - a
+two-stage `prep_res_norm` multiplies work-groups *and* subgroups together (20
+work-groups × 16 subgroups = 320, against 16) - but its **basis** changes, and
+so does the thing to measure first. §1's ×8 arithmetic is not evidence any more;
+the evidence is this section's three-point subgroup curve, and it is
+sub-linear at the top (128 subgroups gave 1.92 GB/s each where 8 gave 3.36).
+Whoever cuts L1 should read the curve, not §1's table, and should expect the
+same surprise budget: **two of the three things tried here were worth zero, and
+they were the two the ranking called certain.**
+
+### Attribution: the whole step, before and after
+
+Both from `--profile --depth 4096 --steps 32`, before at `43bb720` and after at
+`a1e2d3a`:
+
+| | before | after | delta | kind |
+|---|---|---|---|---|
+| `gemv_bf16_M1_K5120_N128…` | **2341.136 µs** | **256.403 µs** | **−2084.7** | measured, in situ |
+| `gemv_bf16` - `lm_head` | 4378.555 | 4379.089 | +0.5 (0.01%) | measured, in situ |
+| Σ of 645 kernel durations | 41597.288 | 39631.634 | −1965.7 | measured, in situ |
+| fence wall (profiled) | 42453.888 | 40515.713 | −1938.2 | measured, in situ |
+| **recorded step (`--bench`, median of 3)** | **42.141 ms** | **40.266 ms** | **−1.875 ms** | **measured (bench)** |
+
+**The three deltas do not agree exactly, and the difference is the honest error
+bar of this comparison, not a missing effect.** The lever's own row falls
+2.085 ms; Σ falls 1.966 ms because the other 597 launches read **+119 µs
+(+0.30%)** higher in the after run than the before run - spread over every
+family (`attn_decode` +42 µs, `prep_res_norm` +21, `gate‖up` +18), which is
+run-to-run drift of the same kind §"Reproducibility" measures at 0.006% for two
+runs three minutes apart and is here an order of magnitude larger after a day of
+work on the box. **The bench row is the number that counts** (−1.875 ms, median
+of three, 0.04% spread) and it is 0.09 ms below Σ's delta, which is the same
+drift seen from the other side. Nothing in the lever is claimed at better than
+±0.1 ms.
+
+`lm_head` is the control: same binding, same `{64, 1}` variant, and it did not
+move (+0.01%). The launch count is 645 before and after.
+
+### What is left in this kernel
+
+1.31 MB at the measured 590 GB/s is **2.22 µs**, and the shipped tiling is
+5.34 µs - 2.4×. So the whole remaining prize is **0.15 ms/token**, and a 32-way
+split (which would need its own golden-gate run, because it reorders the sum
+again) cannot repay it. `a‖b` is now the step's **eleventh** largest variant row
+at 0.65% of Σ, below `prep_silu_mul`. It is finished.
+
 ## The ranked lever ladder
 
 Ranked by **measured in-situ share**, which is what this document exists to
@@ -336,8 +444,8 @@ produce. Yields are estimated, and each says on what basis.
 | rank | lever | measured | share of Σ | expected yield | basis |
 |---|---|---|---|---|---|
 | 1 | **L5** attention (`attn_decode`) | **5.782 ms** | 13.9% | **1.5-2.5 ms** (extrapolated) | four-point in-situ fit (§2): ~247 µs of the 361 is ONE work-group's serial walk of a 256-position block, and work-group count is measured nearly free (3.4× for +6.9%). A 128-position retile predicts 3.43 ms/token. Extrapolated from two fitted parameters with one validation point |
-| 2 | **L1** `prep_res_norm` two-stage | **2.871 ms** | 6.9% | **1.5-2.4 ms** (extrapolated) | one work-group at 17.0 GB/s; §1's per-WG ceiling makes 20 work-groups worth ~10×, leaving ~0.3-0.5 ms plus a second launch per site (129 × 0.7 µs = 0.09 ms). **The ×8 extrapolation is the weak step - see §1's caveat** |
-| 3 | **L2** `a‖b` GEMV occupancy | **2.335 ms** | 5.6% | **1.2-1.9 ms** (extrapolated) | two work-groups at 13.5 GB/s each; `COLS_PER_WG` 16 → 8 WGs is 4× the slices at bit-identical arithmetic, K-split-by-4 → 32 WGs is the ceiling (~0.15 ms). **The ×4-×16 extrapolation is the weak step - see §1's caveat** |
+| 2 | **L1** `prep_res_norm` two-stage | **2.871 ms** | 6.9% | **1.5-2.4 ms** (extrapolated) | one work-group, 16 subgroups, at 17.0 GB/s. **The basis has changed: §1's per-WG ceiling is not evidence any more (§L2), the three-point subgroup curve is.** A two-stage split multiplies subgroups 16 → ~320, and §L2 measured that curve sub-linear at the top. Still an extrapolation, now from a different table |
+| 3 | ~~**L2** `a‖b` GEMV occupancy~~ **- CUT, §L2** | **2.335 ms** | 5.6% | **−2.085 ms measured** (predicted 1.2-1.9) | **done**. The prediction landed, the *mechanism* did not: `COLS_PER_WG` 16 was worth **zero** and what paid was a 16-way K split inside the work-group (8 → 128 subgroups). Row is now 0.256 ms and 0.15 ms from its traffic floor |
 | 4 | **L3** `gdn_step` retile | **0.733 ms** | 1.8% | **≤0.06 ms** | **candidate for skip-by-ruling** - 1.09× its own 0.671 ms traffic floor, 92% of device bandwidth; the lever cannot repay a day of work at any outcome |
 | 5 | **L4** GEMV `S` retune in situ | **0.659 ms** of excess | 1.6% | **≤0.3 ms** | **candidate for skip-by-ruling** - the whole in-situ excess over the probe floor is 0.659 ms across six shapes, the `S` picks are already the probe's own best, and each candidate costs a full golden-gate run because `S` reorders the split-K merge |
 
@@ -351,6 +459,10 @@ nevertheless third to execute, for reasons the measurement itself supplies:
 - **L2 is half a day and its option (a) is bit-identical** (same per-column
   arithmetic order, more work-groups). §1 makes its yield close to arithmetic.
   It is the cheapest ms on the ladder and it de-risks nothing else.
+  *(Executed. It was half a day; option (a) was bit-identical and worth
+  nothing; the yield landed at the top of the predicted band by a different
+  mechanism, and it did NOT de-risk nothing else - it falsified the model L1's
+  yield was resting on. §L2.)*
 - **L1 is a day, its mechanism is measured and its design was written when the
   kernel landed.** Its only correctness exposure is the global Σx² tree, which
   the golden gate arbitrates.
@@ -370,16 +482,23 @@ nevertheless third to execute, for reasons the measurement itself supplies:
 Spec §2's success bar is 31.746 ms/token; the step is 42.141. **The gap is
 10.395 ms.** Summing the optimistic end of every lever above:
 
-| | ms |
-|---|---|
-| L2 `a‖b` | −1.9 |
-| L1 `prep_res_norm` | −2.4 |
-| L5 attention | −3.0 |
-| L4 GEMV `S` | −0.3 |
-| L3 `gdn_step` | −0.06 |
-| **the whole ladder, optimistically** | **−7.7** |
+| | ms | |
+|---|---|---|
+| L2 `a‖b` | −1.9 | **actual −1.875 (bench), banked** |
+| L1 `prep_res_norm` | −2.4 | |
+| L5 attention | −3.0 | |
+| L4 GEMV `S` | −0.3 | |
+| L3 `gdn_step` | −0.06 | |
+| **the whole ladder, optimistically** | **−7.7** | |
 
 That lands at **34.4 ms/token ≈ 29.0 t/s** - short of 31.50 by about 2.7 ms.
+
+**One lever in, the arithmetic is unchanged and the estimate held.** L2 paid
+−1.875 ms against the −1.9 it was priced at, so the remaining ladder is
+40.266 − 5.8 = **34.5 ms/token optimistically**, the same place. What the
+execution changed is confidence, not the total: the yield was right and the
+*reason* was wrong, which is a warning about L1's and L5's yields rather than
+about their existence.
 **The ladder as specified is arithmetically unlikely to clear the gate**, and
 this document says so before the first lever is cut rather than after the last.
 The spec anticipated exactly this ("the win is *arithmetically* reachable but
