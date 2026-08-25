@@ -122,9 +122,16 @@ add_attn_decode(1 16384)   # the loader's default max_len (docs/13-loader.md)
 add_attn_reduce(1 16384)
 add_attn_decode(1 4096)    # attn_test's buffers: 16 blocks, cheap to fill
 add_attn_reduce(1 4096)
-# M = 2 is compiled per spec 1 §9 (the M loop must compile); it is also RUN by
-# attn_test, as the only cover for per-m causal masking (a position valid for
-# m = 1 and masked for m = 0, both inside one block and across a block edge).
+# M = 2 is compiled per spec 1 §9 (the M loop must compile); all three are also
+# RUN by attn_test, as the only cover for per-m causal masking (a position valid
+# for m = 1 and masked for m = 0, both inside one block and across a block edge).
+#
+# Note the asymmetry, which is deliberate while M = 2 is test-only: the M = 2
+# decode/reduce pair exists **at L4096 only**, the length attn_test allocates.
+# There is no `attn_decode_M2_L16384` / `attn_reduce_M2_L16384`, so
+# `kernels::attn_{decode,reduce}_variant(2, 16384)` names no file and the
+# runtime cannot bind M = 2 attention at the loader's default max_len. Whoever
+# turns M > 1 on (plan 3's MTP work) adds the L16384 rows here first.
 add_attn_prep(2)
 add_attn_decode(2 4096)
 add_attn_reduce(2 4096)
