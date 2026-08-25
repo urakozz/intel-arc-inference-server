@@ -47,3 +47,26 @@ add_prep_res_norm(1 5120 16)   # after out_proj / down (S = 16)
 add_prep_res_norm(2 5120 16)   # spec 1 §9: the M loop must compile at M=2
 add_ocloc_kernel(prep_silu_mul_M1 SOURCE ${PREP_CL} DEFINES M=1 OPTIONS ${PREP_OPTS})
 add_ocloc_kernel(prep_gated_head_M1 SOURCE ${PREP_CL} DEFINES M=1 OPTIONS ${PREP_OPTS})
+
+# The control block (runtime::Control, src/runtime/control.h) seen as a flat
+# `uint` array - the kernels that touch it index it with these. This ONE line is
+# where the device side's field indices live: no `.cl` file spells a number.
+# The host mirror is `kernels::ctrl_index` (src/kernels/kernels.h), which
+# argmax_test static_asserts against `offsetof(runtime::Control, …)`; that the
+# numbers below match is proved end to end by argmax_test / embed_gather_test,
+# whose every assertion reads or writes a *named struct field*.
+set(CTRL_DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=2 CTRL_OUT=10 CTRL_DEBUG=18)
+
+# embed_gather and argmax are pure compare-and-copy: no divide, no sqrt, no
+# rounding, so neither takes -cl-fp32-correctly-rounded-divide-sqrt.
+add_ocloc_kernel(embed_gather_M1 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                 DEFINES ${CTRL_DEFINES} M=1 HIDDEN=5120 VOCAB=248320)
+
+# VOCAB_USED = model::Qwen35::kVocabUsed: `lm_head` has 248320 rows because the
+# tiling wants a round number, but only the first 248077 are real tokens.
+set(ARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=248320 VOCAB_USED=248077)
+set(ARGMAX_CL ${CMAKE_CURRENT_SOURCE_DIR}/argmax.cl)
+add_ocloc_kernel(argmax_stage1_M1 SOURCE ${ARGMAX_CL} DEFINES ${ARGMAX_DEFINES} M=1)
+# Stage 2 has no shape to vary: it loops m < ctrl.n_active internally, so its
+# binary name is the entry-point name (both entry points are in both binaries).
+add_ocloc_kernel(argmax_stage2 SOURCE ${ARGMAX_CL} DEFINES ${ARGMAX_DEFINES})
