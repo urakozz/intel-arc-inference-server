@@ -26,7 +26,7 @@ case "${1:-}" in
   sync)  sync_tree ;;
   build) sync_tree; configure_and_build ;;
   test)  sync_tree; configure_and_build
-         ssh "$BOX" "cd '$REMOTE_DIR' && ctest --test-dir build --output-on-failure ${2:+-R $2}" ;;
+         ssh "$BOX" "cd '$REMOTE_DIR' && ctest --test-dir build --output-on-failure ${2:+-R \"$2\"}" ;;
   run)   shift; ssh "$BOX" "cd '$REMOTE_DIR' && $*" ;;
   pull)  shift; rsync -az "$BOX:$REMOTE_DIR/$1" "$1" ;;
   *)     echo "usage: $0 sync|build|test [regex]|run <cmd...>|pull <path>" >&2; exit 2 ;;
