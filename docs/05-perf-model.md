@@ -24,6 +24,101 @@ vLLM p314-t214-vxkp0  =               31.50 t/s  ->  489 GB/s  ->  81% MBU
 Resident bytes on load should equal this figure unless the loader pads; the
 first load asserts it.
 
+**Two constants, both measured, and which one to use.** The loader now reports
+what it actually makes resident: **15,539,980,288 B = 15.540 GB per token**
+(docs/13) - the 15.519 GB of doc-03 header arithmetic plus 0.016 GB of tiling
+pad and 0.005 GB of fp32-widened norms. And doc 01 measures **590 GB/s** through
+a plain Level Zero launch (`probe_bw`) against the 600 GB/s it recommends as the
+general roofline denominator. Every number below and in
+[BENCHMARKS.md](BENCHMARKS.md) uses **15.540 GB and 590 GB/s**, because that
+pair describes the path this engine submits on, and it is applied to vLLM's
+number too so the comparison is like-for-like:
+
+```
+ceiling(27B, no MTP) = 590 / 15.540 = 37.97 t/s   (26.34 ms/token)
+vLLM p314-t214-vxkp0 =                31.50 t/s  ->  489 GB/s  ->  83.0% MBU
+b70-decode 62bdd4d   =                23.73 t/s  ->  369 GB/s  ->  62.5% MBU
+```
+
+## Phase 1, measured - the honest verdict
+
+**b70-decode does not beat vLLM. Measured 2026-08-25, median of three runs on
+an idle box: 23.73 t/s at tg256, depth 4096 - against vLLM's 31.50. That is
+24.7% short, a factor of 1.327 the wrong way.** Per token: 42.14 ms against
+vLLM's 31.75 and a 26.34 ms roofline. Spread over the three runs was 0.02 t/s
+(0.08%). Full rows, the depth experiment and the exact command are in
+[BENCHMARKS.md](BENCHMARKS.md#b70-decode--this-project-phase-1).
+
+Nothing was tuned to produce that number and nothing will be tuned in the plan
+that measured it. What the plan owes instead is the decomposition, because the
+decomposition is what scopes the next spec.
+
+### Where the 42.14 ms goes
+
+| part | ms/token | share | how it was obtained |
+|---|---|---|---|
+| GEMV - 257 of the 645 launches, the int4 mixers/MLPs and bf16 `lm_head` | **28.35** | 67.3% | **measured per kernel**, `probe_gemv` 2026-08-24, at exactly the shapes, layout and `S` the model table binds; summed over the layer counts |
+| everything else - 388 launches (241 `prep`, 48 `gdn_step`, 48 `attn`, 48 `in_proj_a‖b` bf16 GEMV, `embed_gather`, 2× `argmax`) | **13.79** | 32.7% | **aggregate**: the measured step minus the row above |
+| - of which `attn_decode`'s real per-block work at depth 4096 | 2.34 | 5.6% | **measured**, the depth experiment below |
+| - of which `embed_gather` + `argmax` | 0.008 | 0.02% | **measured per kernel** (doc 12) |
+| - of which the fixed attention grid's early-out | 0.046 | 0.11% | **measured**, the `--max-len` experiment below |
+| - leaving `prep` + `gdn_step` + `attn_prep`/`attn_reduce` + the `a‖b` GEMV | **≈ 11.4** | 27.1% | **aggregate**, not separated: ~31 µs per launch over 369 launches |
+| host, outside the fence entirely | **0.097** | 0.23% | **measured**, `Engine::last_gen_ms() − last_fence_ms()` |
+| dispatch inside the fence (645 × 0.52 µs) | 0.335 | 0.8% | **estimated** from doc 07 #5 |
+
+Read that table twice before proposing anything.
+
+1. **The host-overhead thesis is finished for this engine.** 99.77% of the step
+   is inside `execute` + `fence.wait()`; the host spends **97 µs per token**
+   writing four bytes and submitting. There is no host work left to delete. The
+   thesis was always about vLLM's Python/Triton launch path (doc 09), and
+   replay did exactly what doc 08 said it would - which is precisely why the
+   remaining gap is *not* excusable as overhead. It is kernel time.
+2. **GEMV is not the problem.** 28.35 ms of measured GEMV is 89% of vLLM's
+   *entire* 31.75 ms step. Those kernels run at 89-97% of 600 GB/s and the
+   engine binds the probe's own best layout and `S` for every shape, so the
+   "GEMV fill at the chosen `S` vs the probe matrix" suspect is **ruled out**:
+   production and probe are the same configuration. There is ~2.0 ms of
+   headroom between the GEMV sum and the 26.34 ms roofline, and that is all
+   there is.
+3. **The 13.79 ms of non-GEMV work is the whole gap.** To reach 31.75 ms/token
+   the budget for everything that is not a GEMV is **3.4 ms**; we spend 13.79.
+   Closing 10.4 of those milliseconds is exactly the phase-1 shortfall.
+4. **The attention early-out is exonerated** (doc 07 #12, resolved): a grid
+   sized for `max_len` 16384 costs **0.046 ms/token - 0.11% of the step** in
+   idle work-groups. Context-bucketed lists would buy nothing.
+5. **The named suspect inside the 11.4 ms is `prep_res_norm`**, on the strength
+   of its own design note rather than a measurement: 129 launches per token, and
+   each is a **single work-group** reducing 320 KB of split-K partials on one
+   Xe-core (doc 12, "One work-group per token in `prep_res_norm` is the risk in
+   this design, and it is unmeasured"). At 40 µs each that alone is 5.2 ms. The
+   `in_proj_a‖b` GEMV is the second: N = 128 is 8 subgroups on a device with 32
+   subslices (doc 01), 48 times per token, and it was never in the probe matrix.
+   `gdn_step`'s 48 launches move 396 MB - 0.67 ms at the roofline - so if it is
+   costing multiples of that, the cause is occupancy, not traffic.
+
+### What spec 1.5 is scoped to do
+
+In this order, because that is the order the evidence supports:
+
+1. **Get a per-kernel profile.** The 11.4 ms is an aggregate and no amount of
+   arguing splits it. Level Zero kernel timestamps on a one-off instrumented
+   capture, or a `probe_prep` / `probe_gdn` in the shape of `probe_gemv`.
+   Nothing else should be attempted before this number exists.
+2. **`prep_res_norm`'s single work-group**, if the profile confirms it: a
+   two-stage reduction, or fold the split-K sum into the GEMV epilogue.
+   129 launches is where the leverage is.
+3. **`in_proj_a‖b`**: 48 launches of an 8-subgroup kernel. Fusing it into the
+   `qkv‖z` GEMV (doc 04's fusion item 4) removes the launch and the fill
+   problem at once - the one fusion the measurement now argues for.
+4. **`gdn_step` occupancy**, if the profile puts it above ~1 ms.
+5. Only then the ~2.0 ms of GEMV headroom, and the `lm_head` quantisation below,
+   which is worth 4.35 → ~1.1 ms and needs no kernel work at all.
+
+Fusion for its own sake stays rejected: 645 × 0.52 µs = 0.335 ms is 0.8% of the
+step (doc 07 #5, estimated). Kernel *count* is not the problem; what those
+kernels do while they run is.
+
 ## Where the headroom actually is
 
 The original claim was that the gap between the current stack and the ceiling is
@@ -128,12 +223,18 @@ around it.
 2. ✅ **vLLM baseline t/s** - pp4096 1973 / tg256 31.50, `p314-t214-vxkp0`, no
    speculation (BENCHMARKS.md). MTP: 42.56 / 45.23 at 1 / 2 drafts.
 3. ✅ **Achieved MBU** - 81% on this model. The 50-63% figure is MoE-only.
-4. **GDN vs GEMM time split.** 48 of 64 layers are GDN. **Estimate before
-   measuring:** the recurrent state is 3 MB per layer, read and written once
-   per token - ~150 MB across 48 layers, ~2% of `W`. Expect GEMM to dominate
-   bandwidth and GDN to dominate *kernel count*; under replay the second is
-   what the fusion list in doc 04 attacks. If a profile of vLLM says GDN
-   dominates, suspect its Triton launch path
+4. ⚠️ **GDN vs GEMM time split** - **half-answered on our own engine
+   2026-08-25** (doc 07 #3): GEMV **28.35 ms of a 42.14 ms step (67.3%)**,
+   everything else 13.79 ms (32.7%). GEMM dominates as predicted. The estimate's
+   *mechanism* was wrong: the non-GEMV third is not kernel count (645 × 0.52 µs
+   = 0.335 ms, 2.4% of it) but time inside `prep` / `gdn_step` / `attn`, and
+   this measurement does not separate those three. Doing so is spec 1.5's first
+   task. **Estimate before measuring** (2026-08-22, kept for the record): the
+   recurrent state is 3 MB per layer, read and written once per token - ~150 MB
+   across 48 layers, ~2% of `W`. Expect GEMM to dominate bandwidth and GDN to
+   dominate *kernel count*; under replay the second is what the fusion list in
+   doc 04 attacks. If a profile of vLLM says GDN dominates, suspect its Triton
+   launch path
    (`vllm/third_party/flash_linear_attention/ops/fused_recurrent.py`), not the
    arithmetic.
 5. ✅ **Per-kernel fixed cost inside a replayed list** - **0.52 µs/kernel**
@@ -184,8 +285,10 @@ around it.
    2026-08-23 run is kept alongside it). All of it is **M = 1**;
    the `S` picks are M = 1 picks (doc 12).
 
-1-3, 5 and 6 are done. 4 (GDN vs GEMM split) is phase-1 diagnostics - useful
-before kernel-effort allocation, not a phase-0 gate.
+1-3, 5 and 6 are done; 4 is half-done as of 2026-08-25 (GEMM 67.3% / rest
+32.7%, the "rest" not yet split three ways). Finishing it - a per-kernel
+profile of `prep`, `gdn_step` and `attn` - is now the top item of spec 1.5,
+because that aggregate 13.79 ms is the entire gap to vLLM.
 
 ## Benchmark
 
@@ -211,3 +314,8 @@ Phase-1 baseline is the first row: **pp4096 1973 / tg256 31.50.** Full tables,
 images and the exact serve and bench commands are in
 [BENCHMARKS.md](BENCHMARKS.md); the dense 27B rows there use `--max-model-len
 16k`, `pp4096`, `depth 1`, `concurrency 1`, which is the v1 definition of done.
+
+**b70-decode's own row, measured 2026-08-25: tg256 23.73 t/s at depth 4096** -
+`tools/bench_decode.sh`, median of three, and 24.7% short of that baseline. No
+`pp4096` figure exists yet: this engine has no prefill kernel (spec 2), so a
+prompt costs one decode replay per id - 4096 ids in 170.5 s.

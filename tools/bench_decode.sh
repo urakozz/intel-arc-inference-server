@@ -77,7 +77,9 @@ printf '%s\n' "${rows[@]}" | awk -F'|' -v n="$RUNS" '
       if (ts[j] < ts[i]) { t = ts[i]; ts[i] = ts[j]; ts[j] = t
                            t = mspt[i]; mspt[i] = mspt[j]; mspt[j] = t }
     mid = int((NR + 1) / 2)
+    # The parentheses around the ternary are load-bearing: the awk that ships
+    # with macOS rejects `a ? b : c` unparenthesised in an argument list.
+    pct = (ts[mid] > 0) ? (100 * (ts[NR] - ts[1]) / ts[mid]) : 0
     printf "median %.2f t/s (%.2f ms/token) over %d run(s); min %.2f, max %.2f, spread %.2f (%.2f%%)\n",
-           ts[mid], mspt[mid], NR, ts[1], ts[NR], ts[NR] - ts[1],
-           ts[mid] > 0 ? 100 * (ts[NR] - ts[1]) / ts[mid] : 0
+           ts[mid], mspt[mid], NR, ts[1], ts[NR], ts[NR] - ts[1], pct
   }' >&2
