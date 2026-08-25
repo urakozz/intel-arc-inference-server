@@ -175,7 +175,7 @@ class Capture {
     // (its block count); the grid comes from b.max_len and kAttnBlock, and the
     // RoPE table from the loader's. All of them are one number or the KV cache
     // is read at the wrong stride. The block size needs no `require` here - it
-    // is in the variant NAME (`..._B128`), so a host/device disagreement is a
+    // is in the variant NAME (`..._B64`), so a host/device disagreement is a
     // missing binary at `kernel()` rather than a wrong stride at replay.
     require(m_.max_len == b_.max_len, "model max_len " + std::to_string(m_.max_len) +
                                           " != buffers max_len " + std::to_string(b_.max_len));
@@ -506,9 +506,15 @@ class Capture {
     // max_len 16384, of which 260 are live at depth 4096 - nearly 4x the 68
     // before. docs/15 §2 measured work-group count as very nearly free but put
     // ~264 work-groups "past the point any measurement here reaches"; the
-    // measurement now reaches it, and the extra idle work-groups cost 0.04% per
-    // the same document's early-out row. What is bought is a quartered
-    // per-work-group serial walk (369.988 -> 224.046 µs/launch, measured).
+    // measurement now reaches it. The idle work-groups grow with the grid: at
+    // depth 4096 there are 1024 - 260 = 764 of them per launch, against
+    // 256 - 68 = 188 before, so the retile added 576. Their cost here is
+    // TRANSPLANTED, not measured: docs/15 §2's early-out row put 192 extra idle
+    // work-groups at 0.04% of a 153.608 us launch (~0.06 us), which scales to
+    // ~0.19 us for 576 -- under 0.1% of this kernel's 224 us. It is quoted only
+    // to say the growth is negligible, and it is a transplant, so it is not
+    // evidence for anything finer. What is bought is a quartered per-work-group
+    // serial walk (369.988 -> 224.046 us/launch, measured).
     {
       l0::Kernel& k = kernel(
           kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),

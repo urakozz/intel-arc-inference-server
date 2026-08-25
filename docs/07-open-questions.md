@@ -254,8 +254,9 @@ instead.
 **Measured 2026-08-25**, `b70-decode --bench`, tg 256, three runs each on an
 idle box (BENCHMARKS.md carries every row):
 
-Live blocks are `nb = (pos + m)/256 + 1` (`attn.cl:474`), counted over the 256
-positions each `tg` walks:
+Live blocks are `nb = (pos + m)/ATTN_BLOCK + 1` (`attn.cl:551`; the divisor was
+a literal 256 when this was measured - see the L5 note at the end of this
+entry), counted over the 256 positions each `tg` walks:
 
 | shape | grid (`attn_decode`) | live blocks (`nb`) | t/s | ms/token |
 |---|---|---|---|---|
@@ -284,6 +285,21 @@ The pair is also **thermally matched** - both runs follow the same 2.4 s ingest
 continuous replay. That asymmetry is one reason doc 05 labels the 2.31 ms of
 attention work it extrapolates from that delta *estimated* rather than
 measured.
+
+**Re-checked against a 4× larger grid, 2026-08-25 (spec 1.5 lever L5) - the
+resolution survives, and the margin is wider than it was.** Every number above
+was measured at `ATTN_BLOCK` 256, where `attn_decode`'s grid at `max_len` 16384
+was 4 × 64 = 256 work-groups. L5 took the block to **64**, so the grid is now
+4 × 256 = **1024** and the idle work-groups at depth 4096 went 188 → 764 per
+launch. That is exactly the input this entry's conclusion depends on, so it is
+worth saying explicitly what happened to it: **nothing bad.** The per-launch
+in-situ timing of the retiled kernel is 224.046 µs against 369.988 (docs/15
+§L5), i.e. the launch got **39% faster while quadrupling its grid** - which is a
+far stronger version of this entry's finding than the 0.11% it was resolved on.
+Transplanting the ~15 ns/work-group measured here puts the 576 extra idle
+work-groups at ~0.19 µs/launch, under 0.1% of the retiled kernel. **The fixed
+grid is cheaper than this entry could prove in 2026-08's measurement, not more
+expensive.**
 
 **Resolution: the fixed grid stays.** Context-bucketed lists would buy 0.11% and
 cost a captured list per bucket, the memory for it, and a host-side branch on
