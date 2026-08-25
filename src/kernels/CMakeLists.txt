@@ -68,7 +68,9 @@ set(CTRL_DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=2 CTRL_OUT=10 CTRL_DEBUG=18)
 set(GDN_DEFINES ${CTRL_DEFINES} NEGA_OFF=40960 DTBIAS_OFF=41008)
 set(GDN_CL ${CMAKE_CURRENT_SOURCE_DIR}/gdn_step.cl)
 add_ocloc_kernel(gdn_step_M1 SOURCE ${GDN_CL} DEFINES ${GDN_DEFINES} M=1)
-add_ocloc_kernel(gdn_step_M2 SOURCE ${GDN_CL} DEFINES ${GDN_DEFINES} M=2)  # spec 1 §9: compile-only
+# M=2 is compiled per spec 1 §9 (the M loop must compile); it is also RUN by
+# gdn_step_test, as the only cover for the conv window's intra-step path.
+add_ocloc_kernel(gdn_step_M2 SOURCE ${GDN_CL} DEFINES ${GDN_DEFINES} M=2)
 
 # embed_gather and argmax are pure compare-and-copy: no divide, no sqrt, no
 # rounding, so the project-wide correctly-rounded flag changes nothing in

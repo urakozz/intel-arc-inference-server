@@ -80,6 +80,7 @@ constexpr uint32_t kHeads = 48;          // v-heads = work-groups in x
 constexpr uint32_t kChunks = 4;          // state-column chunks = work-groups in y
 constexpr uint32_t kDim = 128;           // head dim, k and v alike
 constexpr uint32_t kQkvzN = 16384;       // qkv‖z row width (z at 10240, not read here)
+constexpr uint32_t kQkvzS = 1;           // qkv‖z split-K slices; gdn_step.cl guards this
 constexpr uint32_t kConvRows = 10240;    // the qkv channels the depthwise conv covers
 constexpr uint32_t kConvTaps = 4;
 constexpr uint32_t kQOff = 0, kKOff = 2048, kVOff = 4096;   // flat qkv channel bases
@@ -128,7 +129,8 @@ inline void step(uint32_t pos, uint32_t n_act, uint32_t M, const float* qkvz, co
       win[3 - j] = p < 0 ? 0.0f : f32(ring[size_t(uint64_t(p) % kRing) * kConvRows + ch]);
     }
     for (uint32_t m = 0; m < n_act; ++m) {
-      const uint16_t raw_b = rne(qkvz[size_t(m) * kQkvzN + ch]);   // gdn_step.cl: raw_b
+      // Slice kQkvzS - 1 == 0; at S = 1 there is nothing to sum (gdn_step.cl: raw_b).
+      const uint16_t raw_b = rne(qkvz[(size_t(kQkvzS - 1) * M + m) * kQkvzN + ch]);
       ring[size_t((pos + m) % kRing) * kConvRows + ch] = raw_b;
       win[3] = f32(raw_b);
       float acc = 0.0f;
