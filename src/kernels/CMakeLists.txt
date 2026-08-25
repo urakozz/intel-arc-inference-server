@@ -19,6 +19,14 @@ foreach(L 0 1)
   endforeach()
 endforeach()
 add_gemv_variant(2 6144 5120 1 0)   # spec 1 §9: the M loop must compile at M=2
+# The SIXTH int4 shape, and the only one that is not per-layer: `lm_head` at
+# 5120x248320, when the checkpoint ships it packed (spec 1.6 §5.1). Exactly one
+# variant is built, not a probe row of the matrix above, because exactly one is
+# bindable: layout 1 is the only int4 repack the loader implements, and S must
+# be 1 for the capture to write straight into `logits` (model/qwen35.h argues
+# both). A probe sweep over this shape would cost five more ocloc compiles of a
+# 3880-work-group kernel to price splits the binding cannot use.
+add_gemv_variant(1 5120 248320 1 1)  # lm_head int4: 3880 work-groups, device full
 
 set(GEMV_BF16_CL ${CMAKE_CURRENT_SOURCE_DIR}/gemv_bf16.cl)
 # `C` and `S` are the kernel's COLS_PER_WG (output columns per work-group) and

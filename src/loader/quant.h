@@ -13,13 +13,42 @@ namespace loader {
 // Every such cast in the loader goes through this first.
 void check_align(const void* p, size_t a, const std::string& name);
 
+// **Two spellings of the same quantisation, and the loader accepts both.**
+// Measured against the two checkpoints this project runs (2026-08-26):
+//
+//   Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ  (published, bf16 lm_head)
+//     quant_method "gptq", provider "auto-round", desc_act false,
+//     `dynamic` = 98 regex rules, all "-:", 400 `g_idx` tensors shipped.
+//   qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64      (ours, int4 lm_head)
+//     quant_method "auto-round", packing_format "auto_round:auto_gptq",
+//     **no `desc_act` key at all**, **no `dynamic` key** - the exclusions are
+//     `extra_config`, a per-module object - and **no `g_idx` tensor anywhere**.
+//
+// Nothing here is trusted to decide what a tensor *is*: that is
+// `LinearSrc::classify` on the shipped suffixes (docs/02's rule). What this
+// parse does is refuse a checkpoint whose *arithmetic* differs from the one the
+// kernels implement - a different group size, an asymmetric zero point, an
+// activation-order permutation - and it has to read two vocabularies to do it.
 struct QuantConfig {
   uint32_t bits = 0, group_size = 0;
   bool sym = false, desc_act = true;
-  size_t dynamic_rule_count = 0;
+  // `desc_act` absent is auto-round's spelling of false, and this records that
+  // it was inferred rather than read. `loader::load` then proves it from the
+  // bytes: an undeclared desc_act with any `g_idx` tensor in the checkpoint is
+  // a throw, because `g_idx` is the only mechanism an activation-order
+  // permutation has (docs/13, "The three data asserts").
+  bool desc_act_declared = false;
+  std::string quant_method, packing_format;
+  size_t dynamic_rule_count = 0;   // GPTQ `dynamic`: "-:" exclusion regexes
+  // auto-round `extra_config`: one object per module, `bits: 16` meaning "left
+  // in fp", `bits: 4` meaning "quantised, and here are its parameters".
+  size_t extra_excluded = 0, extra_quantised = 0;
   // Takes the whole config.json value and reads its quantization_config.
-  // Throws unless bits==4, group_size==64, sym, !desc_act; throws on any
-  // "+:" dynamic rule (the known-broken checkpoint pattern, BENCHMARKS.md).
+  // Throws unless bits==4, group_size==64, sym, and desc_act is false or
+  // absent; throws on any "+:" dynamic rule (the known-broken checkpoint
+  // pattern, BENCHMARKS.md); throws on an `extra_config` module that would be
+  // quantised at anything but g64 sym int4, and on an unknown `quant_method`
+  // or `packing_format`.
   static QuantConfig parse(const common::json::Value& config_json);
 };
 
@@ -39,6 +68,11 @@ struct LinearSrc {
 // What the scan counted but did not reject.
 struct QuantScan {
   size_t subnormal_scales = 0;   // see assert_quant_invariants
+  // How many `.g_idx` tensors the checkpoint ships (0 on an auto-round
+  // `auto_round:auto_gptq` checkpoint, 400 on the published GPTQ one). Counted
+  // here because this is the pass that already walks every tensor, and used by
+  // `loader::load` to prove an undeclared `desc_act` really is false.
+  size_t g_idx_tensors = 0;
 };
 
 // Scans every .qzeros word (must be 0x77777777 - GPTQ v1 stores zero-1, i.e.

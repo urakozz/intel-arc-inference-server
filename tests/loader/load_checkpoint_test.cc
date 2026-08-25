@@ -47,11 +47,29 @@ int main(int argc, char** argv) {
 
   // Resident total within 2% of W + declared padding/widening.
   const double gb = 1e9;
-  std::printf("resident: %.3f GB (int4 %.3f, scales %.3f, lm_head %.3f)\n",
+  const bool lm_int4 =
+      m.linears.at({loader::kTopLevel, model::LinearId::LmHead}).kind == model::WeightKind::Int4;
+  std::printf("resident: %.3f GB (int4 %.3f, scales %.3f, lm_head %.3f %s)\n",
               m.report.total() / gb, m.report.int4_bytes / gb, m.report.scale_bytes / gb,
-              m.report.lm_head_bytes / gb);
+              m.report.lm_head_bytes / gb, lm_int4 ? "int4 g64" : "bf16");
   CHECK(m.report.int4_bytes > 12.0e9 && m.report.int4_bytes < 12.4e9);
-  CHECK(m.report.lm_head_bytes > 2.5e9 && m.report.lm_head_bytes < 2.6e9);
+  // **The `lm_head` bucket is per checkpoint, so the bar is too** (spec 1.6
+  // §5.1). bf16 is 5120 x 248320 x 2 = 2 542 796 800 B; int4 g64 is K*N/2
+  // nibbles + K*N/32 scales = 635 699 200 + 39 731 200 = 675 430 400. A single
+  // range spanning both would assert nothing; the exact byte count is asserted
+  // instead, because both are computable and neither is a measurement.
+  CHECK_EQ(m.report.lm_head_bytes, lm_int4 ? size_t(675430400) : size_t(2542796800));
+  // The int4 head's shape row is the one the capture will bind: layout 1 (the
+  // only repack the loader implements) and S = 1 (what lets the GEMV write
+  // straight at `logits`). A checkpoint that moved either would fail at
+  // capture with a missing binary; failing here says which row moved.
+  {
+    const loader::DeviceWeight& lh = m.linears.at({loader::kTopLevel, model::LinearId::LmHead});
+    CHECK_EQ(lh.shape.K, uint32_t(5120));
+    CHECK_EQ(lh.shape.N, uint32_t(248320));
+    CHECK_EQ(lh.shape.S, uint32_t(1));
+    if (lm_int4) CHECK_EQ(lh.shape.layout, uint32_t(1));
+  }
 
   // Device round-trip: tile 0 of layer 0 QkvZ vs CPU repack of the source.
   std::string snap = loader::resolve_snapshot(arg);
