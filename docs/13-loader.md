@@ -14,6 +14,13 @@ model description and plan 3's kernels), driven by the model description in
 `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ`; the byte accounting below
 re-measured **2026-08-25** after the fp32-RMSNorm ruling.
 
+**Two checkpoints since 2026-08-26**, and the loader takes both without a
+conditional anywhere in the walk. The second is this project's own
+`qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` (tools/quantize_qwen38_rtn.sh), whose
+`lm_head` is packed. Everything in this document that differs between them says
+which one it is; the section **"The second checkpoint"** below is the delta
+list, and it is the list that was *measured against the files*, not assumed.
+
 ## Snapshot resolution - and why it never downloads
 
 `resolve_snapshot(arg)`:
@@ -73,9 +80,14 @@ other way ("the checkpoint's dynamic exclusions moved"). A regex the loader
 cannot read cannot mislead it.
 
 `QuantConfig::parse` additionally throws unless `bits == 4`,
-`group_size == 64`, `sym == true`, `desc_act == false`, and throws on any `+:`
-dynamic rule - the exact pattern that made a published MTP head unusable
-(BENCHMARKS.md). This checkpoint's copy has been corrected to `-:`.
+`group_size == 64`, `sym == true`, and `desc_act` is false **or absent** (see
+"The second checkpoint" below - absence is auto-round's spelling of false and is
+proven from the shipped `g_idx` count, not taken on trust). It throws on any
+`+:` dynamic rule - the exact pattern that made a published MTP head unusable
+(BENCHMARKS.md); the published checkpoint's copy has been corrected to `-:`. It
+also throws on an unrecognised `quant_method` or `packing_format`, and on an
+`extra_config` module that claims to be packed at anything but g64 symmetric
+int4.
 
 ### The three data asserts, and what measured them
 
@@ -126,11 +138,18 @@ The checkpoint has three top-level namespaces. The loader builds a view of
 
 - `model.language_model.` is **stripped**, so `model::Qwen35`'s layer-relative
   names (`layers.5.mlp.gate_proj`) bind directly;
-- `lm_head.weight` is kept top level (it is genuinely outside the language
-  model's namespace, and `tie_word_embeddings: false`);
+- **`lm_head.*` is kept top level** (it is genuinely outside the language
+  model's namespace, and `tie_word_embeddings: false`) - that is one tensor
+  (`.weight`) on the published checkpoint and three (`.qweight`, `.qzeros`,
+  `.scales`) on a checkpoint that packed the head. The drop counters cover this
+  branch too, so a packed head's `qzeros` is reported as dropped rather than
+  quietly missing from the tally, and the report prints the language-model and
+  top-level counts separately instead of subtracting a hardcoded 1;
 - `model.visual.*` (333 tensors, 0.921 GB) is **skipped** - this is a
   vision-language checkpoint served text-only;
-- `mtp.*` (15 tensors, 0.849 GB) is **skipped in v1** - MTP is phase 2 (doc 03).
+- `mtp.*` is **skipped in v1** - MTP is phase 2 (doc 03). 15 tensors (0.849 GB)
+  on the published checkpoint, 29 on the self-quantised one, which also packs 8
+  of them; the skip is by name and does not care.
 
 Both skip counts are printed. So is the count of tensors the loader never
 consumed - **0**, and the test asserts it (`report.unconsumed`). Every name in
@@ -306,6 +325,7 @@ The loader does not choose layouts. `model::Qwen35`'s per-linear row carries
 | `Down` | 17408 × 5120 | 1 | 16 |
 | `OutProj` / `OProj` | 6144 × 5120 | 1 | 16 |
 | `AB`, `LmHead` (bf16) | - | n/a | - |
+| `LmHead` (int4, if the checkpoint packed it) | 5120 × 248320 | 1 | 1 |
 
 All rows are layout 1 today, and layout 1 **loses four of the five int4 shapes**
 (doc 12): it wins the sum only because `QkvZ` at `N = 16384` is the one
@@ -332,10 +352,11 @@ which is why the guard is scoped to int4 rows.
 
 ## Memory and the `W` cross-check - measured 2026-08-24
 
-Repack is single-threaded, staged through one reused host buffer per kind (the
-largest int4 linear is `gate‖up` at 94.7 MB; the bf16 tile buffer is sized for
-`lm_head`'s 2.54 GB and allocated once), and uploaded with **one synchronous
-copy per linear**. `embed_tokens` skips staging entirely - it is gathered one
+Repack is single-threaded, staged through one reused host buffer per kind
+(sized from the linears **this** load will repack - see "Staging is sized from
+the linears this load will repack" below; with a bf16 head that is `gate‖up`'s
+94.7 MB of int4 and `lm_head`'s 2.54 GB of bf16 tiles, and with a packed head
+the two swap ends), and uploaded with **one synchronous copy per linear**. `embed_tokens` skips staging entirely - it is gathered one
 row per token, so row-major *is* its canonical layout and the mmap is copied
 verbatim.
 
@@ -452,11 +473,187 @@ represented, and each check would fail if the block layout moved**:
 And `report.unconsumed == 0` is asserted, which is what makes the "nothing is
 skipped by accident" claim testable instead of rhetorical.
 
+## The second checkpoint - measured against the files, 2026-08-26
+
+Spec 1.6 §5.1 needed an `lm_head` this project could read at int4, and
+`tools/quantize_qwen38_rtn.sh` produced one:
+`~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64`. The engine takes it and the
+published checkpoint with one code path. The deltas below were **probed off the
+real files before a line was written** - three of the five were not in the
+brief and two of those change what the loader has to check.
+
+|                                   | `Vishva007/…-AutoRound-GPTQ`             | `qwen38-27b-w4g64-rtn`                                                                                               |
+|-----------------------------------|------------------------------------------|----------------------------------------------------------------------------------------------------------------------|
+| `quant_method`                    | `"gptq"` (with `provider: "auto-round"`) | **`"auto-round"`**                                                                                                   |
+| `packing_format`                  | absent                                   | **`"auto_round:auto_gptq"`**                                                                                         |
+| `desc_act`                        | `false`, declared                        | **the key does not exist**                                                                                           |
+| exclusions                        | `dynamic`: 98 regexes, all `-:`          | **`extra_config`: 98 per-module objects** - 97 at `bits: 16`, plus `lm_head` at `bits: 4, group_size: 64, sym: true` |
+| `.g_idx` tensors                  | 400                                      | **0 - none shipped at all**                                                                                          |
+| `lm_head`                         | `.weight`, BF16 `[248320][5120]`         | **`.qweight` I32 `[640][248320]` + `.qzeros` + `.scales` F16 `[80][248320]`**                                        |
+| `mtp.*`                           | 15 tensors, all bf16                     | 29 tensors, 8 of them int4                                                                                           |
+| language-model tensors            | 2050                                     | 1650 (no `g_idx` family)                                                                                             |
+| subnormal f16 scales              | 1658                                     | 1628                                                                                                                 |
+| **read/token `W`**                | **15.540 GB**                            | **13.673 GB**                                                                                                        |
+| roofline at the measured 590 GB/s | 37.97 t/s                                | **43.15 t/s**                                                                                                        |
+
+Both checkpoints are `int4 g64 sym`, GPTQ v1 `qzeros` (`0x77777777` over all 401
+of the second one's), the same 5120-wide model and the same tokenizer.
+
+### The two config vocabularies, and the one that says nothing
+
+`QuantConfig::parse` reads both. `bits`, `group_size` and `sym` are spelled the
+same in each and are still hard requirements. The rest needed widening:
+
+- **`quant_method` and `packing_format` are checked, not trusted.** They decide
+  nothing about a tensor - that is `classify` on the shipped suffixes - but an
+  unrecognised value means an unrecognised *packing*, and a wrong nibble order
+  is a silently wrong model. Both observed spellings are named and anything
+  else throws with the value it found.
+- **`extra_config` replaces `dynamic`, and it can be read exactly.** `dynamic`
+  is a regex list the loader deliberately does not interpret; `extra_config` is
+  a per-module object, so `bits: 16` is counted as an exclusion and `bits: 4`
+  is checked for `group_size == 64` and `sym` - a module packed at g128 would
+  dequantise wrong with nothing else to catch it. The `+:` hazard has no
+  analogue here: a claim that a module is packed is checked against the shipped
+  tensors at every load site, by `classify`.
+- **`desc_act` is absent, and absence is proven rather than assumed.** The
+  auto-round writer never permutes, so it never emits the key. Inferring
+  `false` from silence is exactly the kind of assumption this loader exists to
+  refuse - so the inference is checked against the bytes: an undeclared
+  `desc_act` with **any** `g_idx` tensor in the checkpoint throws, naming the
+  count. A permutation needs a `g_idx` to carry it; there are none, so there is
+  nothing the missing key could have meant. The report prints
+  `desc_act=false (inferred, 0 g_idx)` so the distinction survives into the log.
+
+Note what this costs the **third data assert**: with no `g_idx` tensors, the
+identity check has nothing to scan. The invariant is not weakened - it is
+replaced by a stronger statement (the vector does not exist) - but the
+`g_idx` count in the report is now load-bearing rather than decorative, which
+is why `QuantScan` carries it.
+
+### `lm_head`: the one linear whose kind is the checkpoint's to choose
+
+Everything else in this model is fixed by the architecture plus a quantiser
+exclusion list that is the same in both checkpoints. `lm_head` is not.
+`model::Qwen35::lm_head(kind)` carries both rows and
+`LinearSrc::classify(set, "lm_head")` picks - by content, like every other
+linear, so a config that lied about it would be caught by the tensors. One
+classification then drives the staging sizes, the byte buckets, the `W`
+cross-check, and the shape and layout the capture binds.
+
+The int4 row is `{K 5120, N 248320, S 1, layout 1}`. `S = 1` is argued in
+`src/model/qwen35.h` and in doc 12; the short version is that 3880 work-groups
+already saturate the device and that `S = 1` is what lets the capture write the
+result straight into `logits`.
+
+**`lm_head` keeps its own byte bucket in both kinds** - 2 542 796 800 B bf16,
+675 430 400 B int4 (`K·N/2` nibbles + `K·N/32` scales). It has to: it is the one
+row whose format differs, so folding it into `int4`/`scales` would make the two
+reports incomparable exactly where they differ.
+
+### The `W` cross-check across the boundary
+
+doc 03's `W = 15.519 GB` was measured over a checkpoint with a bf16 head. A
+packed head is an **itemised term on the expected side**, the same rule the
+padding and the fp32 widening follow - the 2% tolerance never moves:
+
+```
+  W check     13.673 GB vs 13.673 GB expected = 15.519 doc-03 + 0.016 pad
+                                              + 0.005279 widen -1.867 lm_head
+```
+
+`−1.867 GB` is `675 430 400 − 2 542 796 800`. Measured delta **−0.000%** on both
+checkpoints, 2026-08-26.
+
+### Staging is sized from the linears this load will repack
+
+Not from a constant, because the maximum swaps ends:
+
+| | bf16 head | int4 head |
+|---|---|---|
+| largest int4 linear | `gate‖up`, 2176×80×136 u32 = **94.7 MB** | **`lm_head`, 15520×80×136 u32 = 675.4 MB** |
+| largest bf16 tile buffer | **`lm_head`, 2.54 GB** | `a‖b` `[128][5120]` = **1.3 MB** |
+
+Sizing both for the maximum would cost 2.5 GB of host RSS for nothing. The
+`load_linear` bound checks stay where they are: a mis-sized buffer is a message
+naming the linear, never a heap overrun.
+
+### The repack at 5120×248320 - the overflow audit
+
+`lm_head` at int4 is **7.1× the largest int4 tensor this repack had ever seen**
+by element count (1 271 398 400 against `gate‖up`'s 178 257 920), so every
+integer expression on the path was read for width before the first run. The
+result: **nothing overflows, and nothing needed changing.**
+
+| site (`src/common/repack.h`, `src/loader/loader.cc`) | expression | width | max value here |
+|---|---|---|---|
+| tile base | `out + (size_t(nt) * G + g) * 136` | `size_t` - `nt` is promoted first | 168 857 464 |
+| nibble source | `c.qweight[size_t(g * 8 + j) * c.n_part + c.n]` | `g*8+j` is `uint32_t` but ≤ 639; the product is `size_t` | 158 876 799 |
+| scale source | `c0.scales[size_t(g) * c0.n_part + c0.n]` | `size_t` | 19 859 519 |
+| column map index | `cols[nt * 16 + l]` | `uint32_t` | 248 319 |
+| staging bound | `size_t(sh.N / 16) * (sh.K / 64) * 136` | `size_t` | 168 857 600 |
+| byte buckets | `size_t(sh.K) * sh.N / 2`, `/32` | `size_t` | 635 699 200 |
+| bf16 head tiling | `out[((size_t(n / 16) * K8 + k / 8) * 8 + k % 8) * 16 + n % 16]` | `size_t` | 1 271 398 399 |
+| safetensors offsets | `TensorInfo::begin/end` | `uint64_t`; `bytes()` returns `size_t` | 3.2 GB shards |
+
+The one expression that is *not* 64-bit - `g * 8 + j` - is bounded by
+`K/64 · 8 + 7 = 647` for any `K` this model has, and the shape table is
+enforced by name before it runs. It is called out here rather than widened so
+that the next person does not have to re-derive the bound.
+
+**The size change did surface a real defect, and it was under-sizing, not
+overflow**: the int4 staging buffer was sized from `gate‖up` alone and is 7.1×
+too small for a packed head. It would have thrown - `load_linear` checks
+`words > st.i4.size()` and names the linear - rather than corrupting anything,
+which is the behaviour that check exists for. It is fixed above.
+
+### `mtp.*` and `model_extra_tensors.safetensors` are ignored cleanly
+
+Both checkpoints put `mtp.*` in `model_extra_tensors.safetensors` and both point
+the index at it, so the shard is opened and its header parsed like any other -
+that is the dedup rule working, not a leak. The skip is by **name**, in
+`build_view`, before the shard is relevant: 29 tensors counted as `mtp`, none of
+them ever read, none of them able to reach `unconsumed`. Measured
+**`0 unconsumed`** on both checkpoints 2026-08-26, which is what the checkpoint
+test asserts.
+
+One consequence worth stating because it is not obvious:
+`assert_quant_invariants` walks the whole `SafetensorsSet`, so it *does* scan
+the 8 int4 `mtp` modules' `qzeros` and `scales` - tensors the engine never
+loads. That is a deliberate over-approximation (the invariants hold for them,
+measured), and it is why the second checkpoint's `qzeros` count is **401**
+(400 language-model + `lm_head`) while its subnormal-scale count includes
+`mtp`'s.
+
+### The report, both checkpoints, 2026-08-26
+
+```
+  quant     int4 g64 sym desc_act=false (declared), 98 dynamic exclusion rules
+  tensors   2050 language-model + 1 top-level; skipped 333 visual, 15 mtp;
+            dropped 400 qzeros + 400 g_idx (invariants asserted), 0 unconsumed
+  lm_head        2542796800 B    2.543 GB   (bf16, by checkpoint content)
+  read/token    15539980288 B   15.540 GB
+  W check     15.540 GB vs 15.540 GB expected = … +0.000 lm_head  ->  -0.000%
+
+  quant     int4 g64 sym desc_act=false (inferred, 0 g_idx), 97 extra_config exclusions + 1 explicit int4
+  tensors   1650 language-model + 3 top-level; skipped 333 visual, 29 mtp;
+            dropped 401 qzeros + 0 g_idx (invariants asserted), 0 unconsumed
+  lm_head         675430400 B    0.675 GB   (int4 g64, by checkpoint content)
+  read/token    13672613888 B   13.673 GB
+  W check     13.673 GB vs 13.673 GB expected = … -1.867 lm_head  ->  -0.000%
+```
+
+Load times that day are **not** comparable to the 13.6 s recorded above: the box
+was running a 12-core vLLM XPU kernel compile throughout, and a cold-cache load
+of the second checkpoint read 41.4 s against a warm 12.6 s. Nothing about load
+time was being measured.
+
 ## Deliberately not loaded
 
 - **`model.visual.*`** (333 tensors, 0.921 GB) - this checkpoint is a VLM; the
   project serves text. Phase scope, doc 03.
-- **`mtp.*`** (15 tensors, 0.849 GB) - speculative decoding is phase 2. The
+- **`mtp.*`** (15 tensors, 0.849 GB on the published checkpoint; 29 on the
+  self-quantised one) - speculative decoding is phase 2. The
   head is shipped and correct in this checkpoint; v1 simply does not build a
   draft path, and counting the skip in the report is how that stays a decision
   rather than an oversight.

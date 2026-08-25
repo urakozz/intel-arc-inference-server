@@ -167,6 +167,21 @@ bug, not vLLM or XPU.
 
 ## b70-decode - this project, phase 1
 
+> **Every row below names its checkpoint, and from 2026-08-26 that is
+> load-bearing rather than pedantic.** This engine now runs two, and they do not
+> read the same number of bytes per token:
+>
+> | checkpoint | `lm_head` | **W** read/token | roofline @ 590 GB/s |
+> |---|---|---|---|
+> | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` | bf16 | **15.540 GB** | **37.97 t/s** (26.34 ms) |
+> | `qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** | **13.673 GB** | **43.15 t/s** (23.17 ms) |
+>
+> Both measured by the loader itself (docs/13). A t/s figure is comparable
+> across the boundary - it is tokens per second either way - but **MBU and the
+> roofline are not**, because W is the denominator of both. Everything in this
+> section down to "The new-checkpoint rows" is the **`Vishva007`** checkpoint;
+> the vLLM rows above it are too. No number is restated across the boundary.
+
 Same box, same checkpoint, same `--max-model-len 16k` / `pp4096` / `depth 1` /
 `concurrency 1` shape as the vLLM rows above, so the `tg256` columns compare
 directly. This engine has no prefill kernel yet (a prompt costs one decode
@@ -230,6 +245,53 @@ scopes are in
 [05-perf-model.md](05-perf-model.md#phase-1-measured--the-honest-verdict); why
 the ladder stopped here is
 [the spec 1.5 re-assessment memo](superpowers/specs/2026-08-25-spec1.5-reassessment.md).
+
+### The new-checkpoint rows - `qwen38-27b-w4g64-rtn`, 2026-08-26
+
+**A different checkpoint, therefore a different W, therefore a different
+roofline and a different MBU denominator.** These rows are *not* continuations
+of the ladder above; they are the same engine reading 1.867 GB/token less.
+Spec 1.6 §5.1 - docs/15 has the derivation, docs/12 the launch.
+
+**Grade: ITERATE, not RECORD.** Single runs, not the median of three
+`tools/bench_decode.sh` produces, and the box was **not idle** - a 12-core vLLM
+XPU kernel compile ran throughout, and for part of the window a 22-thread oracle
+dump as well. A record-grade median-of-three row on a quiet box is a named
+follow-on and has not been taken.
+
+| engine / checkpoint | depth | tg | t/s | ms/token | MBU | grade |
+|---|---|---|---|---|---|---|
+| **b70-decode, `qwen38-27b-w4g64-rtn`** (int4 `lm_head`) | 4096 | 64 | **30.20** | **33.11** | 70.0% of 13.673 GB | iterate, 1 run, box loaded |
+| b70-decode, `Vishva007` (bf16 `lm_head`) - **the control, same hour, same load** | 4096 | 64 | 27.57 | 36.27 | 72.6% of 15.540 GB | iterate, 1 run, box loaded |
+| b70-decode `ef6acb0`, `Vishva007` - the standing record row | 4096 | 256 | 27.54 | 36.32 | 72.5% of 15.540 GB | **record**, median of 3, idle |
+
+**The control row is what makes the pair readable.** `Vishva007` under load read
+**36.27** against its standing idle median of **36.32** - 0.14% apart. A decode
+step that is 99.7% inside the fence does not contend with a CPU compile, and
+that is the evidence for it rather than an assumption. The two iterate rows were
+run back to back, so the difference between them is the checkpoint.
+
+**Δ = +2.63 t/s, −3.16 ms/token** against the same-hour control; **+2.66 t/s,
+−3.21 ms** against the standing record row. In-situ, the `lm_head` launch alone
+moved **4381.289 → 1178.164 µs**, −3.203 ms/token, which is **98.3% of the
+−3.26 ms ceiling** the re-assessment memo derived from the bytes.
+
+Note `tg`: **64, not 256.** These are iterate-grade runs and 64 was chosen to
+keep the turnaround short on a loaded box. The standing record row is `tg 256`,
+so the two are not the same measurement even ignoring the median - another
+reason the record row is still owed.
+
+**MBU falls while throughput rises**, from 72.6% to 70.0%, and that is the
+memo's own prediction: `lm_head` at bf16 was the most bandwidth-efficient launch
+in the step (98.4% of device), so removing three quarters of its bytes lowers
+the average of what remains. The bench's MBU line divided by a hardcoded
+15.540 GB until 2026-08-26 and would have printed 79.4% here; it now reads W
+from the loader's own report and prints which W it used.
+
+**Against the bar**, which is `Vishva007`-shaped and stays where it is: 30.20
+t/s is **1.30 t/s short of vLLM's 31.50**. The memo said `lm_head` at int4 was
+necessary and not sufficient, and it landed at 98.3% of its ceiling and did not
+clear the bar - as derived, before the work started.
 
 ### The `ef6acb0` row - the spec 1.5 gate
 
