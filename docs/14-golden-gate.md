@@ -381,10 +381,40 @@ these three prompts.
 | control | `True` | 57.1 s | 4.7 s | 4.7 s | 4.6 s | **96/96** | 0 |
 
 The second run exists so the verdict does not rest on the torch.compile / XPU
-Graph path: `--enforce-eager` takes a different execution path through the same
-weights and produced **byte-identical id blocks** (`md5sum` over the three
-32-id blocks equal across the two logs). Model load is 17.07 GiB on device,
-6.9 s of weight load; the rest of the compiled run's 212 s is Inductor.
+Graph path. It is the **same command as above with `--enforce-eager` appended**
+to the `python3 tools/oracle/vllm_check.py "$SNAP" …` line - same image, same
+env, same mounts, same `-u $(id -u):$(id -g)` - and its log is
+`~/b70-inference-server/oracle-out/vllm_check_eager.log` on the box (the
+compiled run's is `vllm_check.log` beside it; both are under `oracle-out/`, so
+neither is committed).
+
+`--enforce-eager` takes a different execution path through the same weights and
+produced **byte-identical id blocks**. That claim is one `md5sum` per log over
+exactly the id lines of the three `=== <prompt>: 32 ids in …` stanzas - the
+`grep -A2` takes each stanza header plus its two 16-id lines, and the second
+`grep` drops the headers, leaving only the six lines of ids that are hashed:
+
+```
+$ cd ~/b70-inference-server/oracle-out
+$ grep -A2 -E "^=== (prose|code|cjk): " vllm_check.log       | grep -E "^[0-9]+ " | md5sum
+8decb0462f5af85ac0f0d6dbb63ae591  -
+$ grep -A2 -E "^=== (prose|code|cjk): " vllm_check_eager.log | grep -E "^[0-9]+ " | md5sum
+8decb0462f5af85ac0f0d6dbb63ae591  -
+$ grep -A2 -E "^=== (prose|code|cjk): " vllm_check.log       | grep -E "^[0-9]+ " | wc -lc
+      6     470
+$ grep -A2 -E "^=== (prose|code|cjk): " vllm_check_eager.log | grep -E "^[0-9]+ " | wc -lc
+      6     470
+```
+
+6 lines / 470 bytes on both sides, same digest: the eager run's 96 ids are the
+same bytes as the compiled run's 96 ids quoted above, and therefore the same
+96 golden ids. The eager run's three 32-id blocks are quoted verbatim in this
+task's report (`.superpowers/sdd/2026-08-25-plan4-spec1.5-decode-performance/task-4-report.md`,
+§fix round) rather than repeated here, because they are character-identical to
+the block already above and a second copy would only be noise.
+
+Model load is 17.07 GiB on device, 6.9 s of weight load; the rest of the
+compiled run's 212 s is Inductor.
 
 Both runs print `double free or corruption (fasttop)` from the XPU stack's
 teardown **after** the verdict line and after `XPUWorker shutdown: done`, and
