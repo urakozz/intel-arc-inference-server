@@ -181,14 +181,15 @@ tools/bench_decode.sh --depth 64      # the doc 07 #12 depth experiment
 
 **Measured 2026-08-25** on an idle box (no container, no other GPU work), three
 runs each, `debug_resid` off, default `--max-len 16384`. Three commits appear:
-the phase-1 rows are `62bdd4d`, and the two lever rows are `a1e2d3a` (spec 1.5
-lever L2) and `b045e11` (lever L1), all measured the same way on the same day
-and box:
+the phase-1 rows are `62bdd4d`, and the three lever rows are `a1e2d3a` (spec
+1.5 lever L2), `b045e11` (lever L1) and `c746840` (lever L5), all measured the
+same way on the same day and box:
 
 | engine | depth | tg | t/s | ms/token |
 |---|---|---|---|---|
 | vLLM `p314-t214-vxkp0`, no speculation | 1 † | 256 | **31.50** | 31.75 |
-| **b70-decode `b045e11`** - spec 1.5 levers L2 + L1 | **4096** † | **256** | **26.28** | **38.05** |
+| **b70-decode `c746840`** - spec 1.5 levers L2 + L1 + L5 | **4096** † | **256** | **27.53** | **36.32** |
+| b70-decode `b045e11` - levers L2 + L1 | 4096 † | 256 | 26.28 | 38.05 |
 | b70-decode `a1e2d3a` - lever L2 only | 4096 † | 256 | 24.83 | 40.27 |
 | b70-decode `62bdd4d` - phase 1, before any lever | 4096 † | 256 | 23.73 | 42.14 |
 | b70-decode `62bdd4d` | 64 † | 256 | 25.00 | 40.00 |
@@ -208,15 +209,59 @@ name the binary that produced it, so the bench apparatus was committed first
 `src/`, `tests/` and the kernels are byte-for-byte the same; the later commit
 touches docs and one `awk` line in `tools/bench_decode.sh`.
 
-The `a1e2d3a` and `b045e11` rows follow the same rule for the same reason: each
-is the commit that carries its kernel change and `tools/bench_decode.sh` read
-that sha out of the worktree it measured; the rows themselves and the docs
-around them are committed after, touching no `src/` file.
+The `a1e2d3a`, `b045e11` and `c746840` rows follow the same rule for the same
+reason: each is the commit that carries its kernel change and
+`tools/bench_decode.sh` read that sha out of the worktree it measured; the rows
+themselves and the docs around them are committed after, touching no `src/`
+file.
 
-**b70-decode is 16.6% short of vLLM** - 26.28 against 31.50, a factor of 1.199
-the other way; it was 21.2% short (24.83) after one lever and 24.7% short
-(23.73) before any. The decomposition and what it scopes are in
+**b70-decode is 12.6% short of vLLM** - 27.53 against 31.50, a factor of 1.144
+the other way; it was 16.6% short (26.28) after two levers, 21.2% short (24.83)
+after one and 24.7% short (23.73) before any. The decomposition and what it
+scopes are in
 [05-perf-model.md](05-perf-model.md#phase-1-measured--the-honest-verdict).
+
+### The `c746840` row - spec 1.5 lever L5
+
+**Measured 2026-08-25**, same command (`tools/bench_decode.sh`), same idle box,
+three runs, `debug_resid` off, default `--max-len 16384`:
+
+| shape | runs (t/s) | median | min | max | spread |
+|---|---|---|---|---|---|
+| depth 4096, tg 256 | 27.51 / 27.53 / 27.54 | **27.53** | 27.51 | 27.54 | 0.03 (0.11%) |
+
+The recorded row is the harness's own median column, **27.53 t/s / 36.32
+ms/token**, and MBU 427 GB/s of 590 = **72.5%** (it was 69.2%, and 62.5% before
+any lever). The ingest half of the same runs reads 141.2 s for 4096 ids,
+34.48 ms/token on an un-instrumented list.
+
+**−1.73 ms/token, and all of it is the attention trio.** `attn_decode` walked a
+256-position KV block per work-group; `ATTN_BLOCK` is now **64**, which
+quarters the serial walk that docs/15 §2 measured as the launch's real cost and
+takes the grid from 68 to 260 live work-groups at depth 4096 - a region the same
+document called unmeasured, and which turns out to be free. In situ the family
+goes **6.058 → 3.839 ms/token** (`attn_decode` 5.920 → 3.585, `attn_reduce`
+0.080 → 0.196 as it merges 65 blocks instead of 17). The launch count did
+**not** move: 774 before and after. The four-value block sweep that chose 64,
+and the two cost models it falsified on the way, are in
+[12-kernels.md](12-kernels.md) "Measured - lever L5" and
+[15-step-anatomy.md](15-step-anatomy.md) §L5. The golden gate is **96/96
+element-exact before and after**, with every diagnostic cosine unchanged to nine
+decimals - and docs/14 says why that is a weaker result than it looks.
+
+**The three deltas, and the 0.32 ms this one does not close.** The lever's own
+profile rows fall **2.219 ms**; run-to-run drift on the 726 untouched launches
+adds back **+0.174 ms** (+0.56%, the same effect §L2 measured at +0.30% and §L1
+at +0.50%); there is no dispatch term because the launch count is unchanged.
+Predicted bench delta **−2.045 ms** against **−1.73 measured**: **0.32 ms
+apart**, against the 0.087 ms L1 landed within and the ±0.1 ms this instrument
+is claimed at. It is not the launch count and not the drift, both of which are
+already in the arithmetic. One *named* contributor, and it is too small: the
+bench sweeps `pos` 4096 → 4351, so `nb` runs 65 → 69 here where it was a flat 17
+before, and the after-run therefore averages ~3% more block-merge work per token
+than the single depth-4096 profile point that priced it - worth ~0.01 ms by
+`attn_reduce`'s own slope. **The rest is unattributed**, and it is recorded as
+unattributed rather than absorbed into a rounding.
 
 ### The `b045e11` row - spec 1.5 lever L1
 
@@ -320,7 +365,8 @@ through the same Level Zero launch path ([01-hardware.md](01-hardware.md)). On
 those two constants the roofline is 26.34 ms/token = **37.97 t/s**, vLLM's 31.50
 is **83.0% MBU**, and b70-decode's 23.73 is **62.5%**. (That 62.5% is the
 `62bdd4d` row this paragraph sits under and is now historical: the current
-engine is `b045e11` at **26.28 t/s = 69.2% MBU**, the top b70-decode row above.)
+engine is `c746840` at **27.53 t/s = 72.5% MBU**, the top b70-decode row
+above.)
 
 ## Notes
 

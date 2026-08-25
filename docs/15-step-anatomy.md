@@ -198,13 +198,14 @@ bench step:
 > **Superseded as the current step - see §L2 and §L1.** This partition is the
 > step at `43bb720`, before spec 1.5 cut its first lever, and it is kept whole
 > because every row is one measurement of one run and because it is what the
-> 42.141 ms bench row partitions. Two rows have moved since:
-> lever L2 took `a‖b` to **0.256 ms/token** and lever L1 took `prep`'s
-> `res_norm` share from 2.871 to **0.484**, so the `prep` row reads **1.202 ms**
-> and the launch count reads **774**. The step is **38.046 ms**
-> (BENCHMARKS.md, recorded median 38.05). Each lever's before/after and its
-> arithmetic are §L2 and §L1 below; no other row here has been re-measured
-> except as drift.
+> 42.141 ms bench row partitions. Three rows have moved since:
+> lever L2 took `a‖b` to **0.256 ms/token**, lever L1 took `prep`'s
+> `res_norm` share from 2.871 to **0.484** (so the `prep` row reads **1.202 ms**
+> and the launch count reads **774**), and lever L5 took the attention family
+> from 6.058 to **3.839** (`attn_decode` 5.920 → **3.585**) with the launch
+> count unchanged. The step is **36.32 ms** (BENCHMARKS.md, recorded median
+> 27.53 t/s). Each lever's before/after and its arithmetic are §L2, §L1 and §L5
+> below; no other row here has been re-measured except as drift.
 
 Compare with the same table in docs/05: five rows that were a floor, an
 extrapolation and a remainder are now seven rows that were all measured in one
@@ -581,6 +582,134 @@ remaining prize is **~0.40 ms** and it is in two places: stage B's 20-deep
 stage B's re-read of `resid`. Neither can repay its own golden-gate run, and L5
 is 5.9 ms.
 
+## Lever L5 - attention `ATTN_BLOCK`, cut and measured
+
+`attn_decode` was the largest non-GEMV row in the step and §2 above says what it
+spends: not occupancy - work-group count is measured nearly free - but **one
+work-group's serial walk of a full KV block**. The lever is therefore one
+number, `ATTN_BLOCK`, and this section is mostly about how badly §2's model
+predicted what changing it would do.
+
+### What was tried, in the order it was tried, and what each was worth
+
+Four block sizes, all `--profile --depth 4096 --steps 32`, same idle box, same
+session. The plan (and §2) scoped this lever as **256 → 128**; 128 was run
+first, and its result is why the other two were run at all.
+
+| `ATTN_BLOCK` | live WGs @ 4096 | `attn_decode` µs/launch | `attn_reduce` µs/step | **attn family ms/token** | Σ 774 µs | verdict |
+|---|---|---|---|---|---|---|
+| **256** - before | 68 | 369.988 | 80.241 | **6.058** | 37387.510 | the baseline |
+| 128 - the planned retile | 132 | 296.684 | 127.240 | **4.931** | 36380.755 | works, and falsifies §2's fit by +38% |
+| **64 - shipped** | 260 | **224.046** | 196.195 | **3.839** | **35342.441** | the knee |
+| 32 | 516 | 203.888 | 452.816 | 3.772 | 35363.298 | `attn_decode` still falls, Σ goes **up** |
+
+**32 is the measurement that made 64 a decision rather than a preference.**
+`attn_decode` improves by another 20.2 µs/launch there - 0.32 ms/token - but
+`attn_reduce` merges 129 blocks instead of 65 and costs +0.257 ms, and the
+step's whole sum of kernel durations comes out **21 µs higher** than at 64,
+inside drift. The knee is measured on both sides, which is not something this
+document has been able to say about a tuning parameter before.
+
+### §2's model was falsified, and so was the one that replaced it
+
+§2 fitted the four in-situ *depth* points as `F + fill · P` - F ≈ 90.8 µs of
+per-launch fixed cost, P ≈ 247.4 µs for a full 256-position block - and
+predicted **214.5 µs/launch** at a 128-position block, "3.43 ms/token, saving
+≈2.35 ms", marked *(extrapolated)*.
+
+The retile is the cleanest test that model could get: it changes the block
+length and nothing else. It measured **296.684 µs**, **+38.3%**.
+
+| model | fitted to | predicted | measured | verdict |
+|---|---|---|---|---|
+| **C** §2's `F + fill·P` (F 90.8, P 247.4), from the `nb` 1 and 5 depth points | B128: 214.5 µs | | **296.684** | **falsified, +38.3%** |
+| **D** refit `F + walk` on the B256/B128 pair (F 223.4, walk 146.6 per 256 positions) | B64: 260.0 µs | | **224.046** | **falsified, −13.8%** |
+
+Model D's B64 prediction was written down before the run, as §2's two were.
+**That is four cost models this kernel has now killed** (§2's A and B, then C
+and D), and the discipline that catches them is the same every time: state the
+prediction, then measure the point that would break it.
+
+**What is measured, and what this document will not do with it.** Over 256 →
+128 → 64 each halving costs **≈ 73 µs less per launch** (73.304, then 72.638) -
+linear in `log2(ATTN_BLOCK)`, not in the block - and the B32 point breaks even
+that (−20.2, not −73). A fifth model would fit three of the four points and this
+document declines to write it. What it will say:
+
+- **Work-group count is free a great deal further than anything here had
+  measured.** 68 → 260 live work-groups while the launch got **39% faster**.
+  §2 put 264 work-groups "past the point any measurement here reaches"; it is
+  reached.
+- **The launch is now 224 µs, and model D called ~223 µs of the *original* 370
+  "not the block walk".** Whatever dominates `attn_decode` today is a term no
+  model in this document has named, and it is now essentially the whole kernel.
+  That is the finding, and it is the one the next person needs.
+
+### Attribution: the whole step, before and after
+
+Before at `0bfa891`, after at `c746840`, both `--profile --depth 4096
+--steps 32` on the idle box.
+
+| | before | after | delta | kind |
+|---|---|---|---|---|
+| `attn_decode` (16 launches) | **5919.814 µs** (369.988/launch) | **3584.736** (224.046/launch) | **−2335.1** | measured, in situ |
+| `attn_reduce` (16) | 80.241 (5.015/launch) | 196.195 (12.262/launch) | +116.0 | measured, in situ |
+| `attn_prep` (16) | 58.057 | 58.070 | +0.0 | measured, in situ |
+| **the site (attn family)** | **6058.112** | **3839.001** | **−2219.1** | measured, in situ |
+| `gemv_bf16` - `lm_head` | 4379.899 | 4388.493 | +8.6 (0.20%) | measured, in situ |
+| `gdn_step` | 748.659 | 761.706 | +13.0 (1.74%) | measured, in situ |
+| the 726 untouched launches, Σ | 31329.398 | 31503.440 | **+174.0 (+0.56%)** | measured, in situ |
+| Σ of all kernel durations (774 both) | 37387.510 | 35342.441 | −2045.1 | measured, in situ |
+| fence wall (profiled) | 38413.428 | 36357.567 | −2055.9 | measured, in situ |
+| dispatch gap (profiled, upper bound) | 1025.919 / 1.325 µs per launch | 1005.914 / 1.300 | −20.0 | measured, in situ |
+| **recorded step (`--bench`, median of 3)** | **38.046 ms** | **36.32 ms** | **−1.73 ms** | **measured (bench)** |
+
+−2219.1 + 174.0 = **−2045.1**, the Σ delta exactly. `lm_head` is the control:
+untouched binding, untouched binary, +0.20%.
+
+**The launch count did NOT move - 774 before and after.** Unlike L1 there is no
+dispatch term to add, which makes this lever's arithmetic simpler and its
+residual harder to excuse.
+
+**And there is a residual.** The in-situ attribution predicts **−2.045 ms** on
+the bench; the bench measured **−1.73**. That is **0.32 ms apart**, against
+0.087 for L1 and the ±0.1 ms this instrument has been claimed at. Neither the
+launch count (unchanged) nor the drift (+0.174, already counted) explains it.
+The one *named* contributor is too small by an order of magnitude: `--bench`
+sweeps `pos` 4096 → 4351, so `nb` runs 65 → 69 at `ATTN_BLOCK` 64 where it was a
+flat 17 at 256, and the after-run therefore averages ~3% more merge work per
+token than the single profile point that priced it - ~0.01 ms by `attn_reduce`'s
+own slope. **The remaining ~0.31 ms is unattributed.** It is recorded here as
+unattributed, because this document's whole method is that a number nobody can
+account for is a finding and not a rounding error.
+
+### What is left in this kernel, and what L5 did NOT do
+
+`attn_decode` is still **3.585 ms/token, 10.1% of the step** and the largest
+non-GEMV row by a wide margin - `gdn_step` is 0.762. The plan's own L5 design,
+**SLM staging of the KV tiles, was never built**, and the measurement now argues
+against it rather than deferring it: it shortens the 6× q-head reread *inside*
+the block walk, and the block walk is what model D put at ~147 µs of the
+original 370 and the retile has already taken most of. The retiled launch costs
+224 µs in total. Staging would be optimising at most a quarter of what is left,
+against a term nothing has identified.
+
+**The next thing to do on this kernel is a probe that names the 224 µs**, not
+another design against a model. `attn_reduce`, meanwhile, has gone 0.076 →
+0.196 ms and is the term that closed the sweep - it is now 5.1% of the family
+and it is the reason 32 is not better than 64.
+
+### The gate did not move, and that is a result about the gate
+
+96/96 element-exact before and after, and **every diagnostic cosine identical to
+all nine printed decimals** on all three prompts - the first lever in this spec
+where they did not move at all. docs/14 records both columns and the reason:
+the gate's longest prompt reaches `pos` **92**, which at `ATTN_BLOCK` 64 is two
+blocks against 256's one. It covers the reassociation barely, and the 65-block
+merge that runs at depth 4096 not at all. That depth is held only by
+`attn_test`'s `pos = 4095` and L16384 `pos = 16383` cases, at ≤ 2 bf16 ulp
+against a host reference that models the same blocking.
+
 ## The ranked lever ladder
 
 Ranked by **measured in-situ share**, which is what this document exists to
@@ -588,7 +717,7 @@ produce. Yields are estimated, and each says on what basis.
 
 | rank | lever | measured | share of Σ | expected yield | basis |
 |---|---|---|---|---|---|
-| 1 | **L5** attention (`attn_decode`) | **5.782 ms** (5.922 re-measured at `b045e11`) | 13.9% | **1.5-2.5 ms** (extrapolated) | four-point in-situ fit (§2): ~247 µs of the 361 is ONE work-group's serial walk of a 256-position block, and work-group count is measured nearly free (3.4× for +6.9%). A 128-position retile predicts 3.43 ms/token. Extrapolated from two fitted parameters with one validation point |
+| 1 | ~~**L5** attention (`attn_decode`)~~ **- CUT, §L5** | **5.782 ms** (5.920 re-measured at `0bfa891`) | 13.9% | **−2.219 ms measured** on the attn family, −1.73 ms on the bench (predicted 1.5-2.5) | **done**. The prediction landed inside its band; the *model* behind it did not. §2's `F + fill·P` fit predicted 214.5 µs/launch at a 128-position block and measured 296.684 (+38%), and the refit that replaced it missed B64 by −13.8% the other way. `ATTN_BLOCK` was swept 256/128/64/32 instead of fitted and **shipped at 64**, the measured knee: at 32 `attn_decode` still improves but `attn_reduce` doubles again and the step's Σ goes up. Row is now 3.585 ms and still the largest non-GEMV row in the step |
 | 2 | ~~**L1** `prep_res_norm` two-stage~~ **- CUT, §L1** | **2.871 ms** | 6.9% | **−2.409 ms measured** (predicted 1.5-2.4) | **done**. The prediction landed at the top of its band and the *mechanism* landed too: 16 → 320 subgroups took the fold from 17.0 to 173 GB/s, exactly the sub-linear shape §L2's curve implied. The surprise was elsewhere - stage B's grid, which the plan wrote as one work-group, was worth 0.96 ms of the 2.41. Row is now 0.484 ms and 5.7× from its traffic floor |
 | 3 | ~~**L2** `a‖b` GEMV occupancy~~ **- CUT, §L2** | **2.335 ms** | 5.6% | **−2.085 ms measured** (predicted 1.2-1.9) | **done**. The prediction landed, the *mechanism* did not: `COLS_PER_WG` 16 was worth **zero** and what paid was a 16-way K split inside the work-group (8 → 128 subgroups). Row is now 0.256 ms and 0.15 ms from its traffic floor |
 | 4 | **L3** `gdn_step` retile | **0.733 ms** | 1.8% | **≤0.06 ms** | **candidate for skip-by-ruling** - 1.09× its own 0.671 ms traffic floor, 92% of device bandwidth; the lever cannot repay a day of work at any outcome |
@@ -597,11 +726,11 @@ produce. Yields are estimated, and each says on what basis.
 ### The order to execute, and why it is not the share order
 
 **L2 → L1 → L5**, then L4 only if the gate is within reach, and L3 not at all.
-*(L2 and L1 are both executed and both accepted; L5 is next and is now the
-largest non-GEMV row in the step by a wide margin: measured at `b045e11`,
-`attn_decode` 5.922 ms against the whole `prep` family's 1.202 (**4.9×**) and
-`gdn_step`'s 0.748 (**7.9×**). Only the GEMV rows are bigger, and no lever in
-this spec touches them.)*
+*(All three are executed and all three accepted. L5 was the largest non-GEMV row
+in the step when it was run - 5.920 ms at `0bfa891` against the whole `prep`
+family's 1.202 (**4.9×**) and `gdn_step`'s 0.749 (**7.9×**) - and at 3.585 ms it
+still is. Only the GEMV rows are bigger, and no lever in this spec touches
+them.)*
 
 Share ranks L5 first, and it is the biggest number on the page. It is
 nevertheless third to execute, for reasons the measurement itself supplies:
@@ -631,6 +760,13 @@ nevertheless third to execute, for reasons the measurement itself supplies:
   the effort and no change to the softmax arithmetic. Whoever runs L5 should
   measure the retile first. Running it after two banked, certain wins means it
   is attempted with the gate arithmetic already known.
+  *(Executed. The retile was the right half - SLM staging was never built and the
+  measurement now argues against it, §L5 - and "measure the retile first" was the
+  single most valuable sentence in this section: the retile immediately falsified
+  the fit that priced it, and the block size ended up **64, not 128**, chosen by
+  a four-value sweep with the knee measured on both sides. The correctness risk
+  did not materialise, but the gate turned out unable to see the change: its
+  prompts reach `pos` 92 and the reassociation lives at depth. §L5, docs/14.)*
 
 ### The gate arithmetic, stated in advance
 
@@ -641,34 +777,41 @@ Spec §2's success bar is 31.746 ms/token; the step is 42.141. **The gap is
 |---|---|---|
 | L2 `a‖b` | −1.9 | **actual −1.875 (bench), banked** |
 | L1 `prep_res_norm` | −2.4 | **actual −2.220 (bench), banked** |
-| L5 attention | −3.0 | |
+| L5 attention | −3.0 | **actual −1.73 (bench), banked** |
 | L4 GEMV `S` | −0.3 | |
 | L3 `gdn_step` | −0.06 | |
 | **the whole ladder, optimistically** | **−7.7** | |
 
 That lands at **34.4 ms/token ≈ 29.0 t/s** - short of 31.50 by about 2.7 ms.
 
-**Two levers in, the arithmetic is unchanged and both estimates held.** L2 paid
-−1.875 ms against −1.9; L1 paid −2.220 against −2.4. The step is now
-**38.046 ms** (measured, BENCHMARKS.md, recorded median 38.05) and **the gap to
-the 31.746 ms bar is 6.300 ms**; the three remaining levers are priced at −3.36
-optimistically, so the ladder now lands at **34.7 ms/token ≈ 28.8 t/s** - within
-0.3 ms of where this section put it before a single lever was cut, which is the
-best that can be said for a set of estimates.
+**Three levers in, the ladder is spent and the gate is not cleared.** L2 paid
+−1.875 ms against −1.9; L1 paid −2.220 against −2.4; L5 paid **−1.73 against
+−3.0**, the first estimate to miss low, and it missed low even though its in-situ
+row (−2.219 ms on the attn family) landed inside its own 1.5-2.5 band - 0.32 ms
+of the difference is unattributed and recorded as such in §L5. The step is now
+**36.32 ms** (measured, BENCHMARKS.md, recorded median 27.53 t/s) and **the gap
+to the 31.746 ms bar is 4.574 ms**. What remains on the ladder is L4 (≤0.3) and
+L3 (≤0.06), so **the ladder's own optimistic ceiling is 35.96 ms ≈ 27.8 t/s** -
+**3.6 ms short of the bar with every lever cut.**
 
-**What the two executions changed is where the remaining risk sits.** Both
-predicted yields landed; both landed for reasons the ranking got partly wrong
-(L2: the work-group count was worth zero and the K-split was everything; L1: the
-fold was priced and the rescale, treated as a formality, was 40% of the win). L5
-is the only lever left with a yield large enough to matter and it is the one
-whose design is still a sketch. **The ladder as specified is still
-arithmetically unlikely to clear the gate** - §6's short path still writes the
-memo - but the shortfall is now 2.9 ms rather than 2.7, on two fewer unknowns.
-This document said the ladder was arithmetically unlikely to clear the gate
-before the first lever was cut rather than after the last, and two levers in it
-still is. The spec anticipated exactly this ("the win is *arithmetically*
-reachable but tight") and provided for it: §6's short path writes the
-re-assessment memo.
+**This document predicted that outcome before the first lever was run**, and the
+prediction was the point of ranking them: "the ladder as specified is
+arithmetically unlikely to clear the gate". It said 34.4 ms optimistically; three
+levers in, the measured answer is 36.3 with two negligible levers left. The
+spec anticipated exactly this ("the win is *arithmetically* reachable but
+tight") and provided for it: **§6's short path writes the re-assessment memo,
+and it should now be written.**
+
+**What the three executions changed is where the remaining risk sits.** All
+three yields landed in or near their bands; all three landed for reasons the
+ranking got partly wrong (L2: the work-group count was worth zero and the
+K-split was everything; L1: the fold was priced and the rescale, treated as a
+formality, was 40% of the win; L5: the retile worked, the *model* that priced it
+was falsified twice, and the block size that shipped was 64 rather than the 128
+the plan scoped). The pattern is consistent enough to state: **on this device
+the mechanism named in advance has been wrong every single time, and the
+measurement has been right every single time.** That is an argument for the
+instrument, not for the ladder.
 
 What the measurement adds to that memo, in advance and in order of size:
 
@@ -676,30 +819,36 @@ What the measurement adds to that memo, in advance and in order of size:
    Alone it converts the projected 34.7 into 31.4 ms/token - over the bar.
    It is the single largest measured item in the step that spec 1.5 does not
    touch.
-2. **`attn_decode`'s 247 µs full-block critical path** - a 128-position retile
-   (at depth 4096: 33 blocks × 4 kv-heads = **132 work-groups**, against 68
-   today) is a grid change of exactly the kind L3 was scoped for, predicted at
-   ≈2.35 ms, and this document says L3's budget went to the wrong kernel. It is
-   the cheapest untried thing in the step.
+2. ~~**`attn_decode`'s 247 µs full-block critical path**~~ - **taken, §L5.**
+   The retile shipped at `ATTN_BLOCK` 64 (260 work-groups at depth 4096) and paid
+   −2.219 ms in situ, −1.73 on the bench. It *was* the cheapest untried thing in
+   the step. What replaces it on this list is the **224 µs that a retiled
+   `attn_decode` launch still costs** and that no model in this document has
+   named - a probe that identifies that term is now worth more than any design
+   written against the models that have already died.
 3. **`a‖b` → `gdn_step` prologue fusion** and **norm → GEMV prologue fusion**
    remain redesigns, but §1 now prices what they are really buying: not the
    0.7 µs launch, the work-group count.
 
 ## What this document does not settle
 
-- **`attn_decode`'s internal split.** 5.782 ms is measured at four points; the
-  `F` ≈ 90.8 / `P` ≈ 247.4 µs decomposition is a **two-parameter fit to two of
-  them with the third as a −6.4% check**, and the fourth (the `--max-len` pair)
-  only rules out the grid. Two models that fitted the first two points were
-  falsified by the third - the same could happen again, and the retile yield
-  above is the prediction that would go with it. What is *measured* and not
-  fitted: work-group count is nearly free over 20 → 68, and depth 64 → 1024
-  costs +120% while 1024 → 4096 costs +6.9%.
-- **Every *remaining* yield in the ladder is an estimate.** §1's per-work-group
+- **`attn_decode`'s internal split - still not settled, and now falsified
+  twice more.** The `F` ≈ 90.8 / `P` ≈ 247.4 decomposition was a two-parameter
+  fit with one check; §L5 tested it by changing the block length and nothing
+  else, and it missed by **+38.3%**. Its replacement, refitted on the
+  B256/B128 pair, missed B64 by **−13.8%**. **Four models have now died on this
+  kernel** and this document offers no fifth. What is *measured* and not fitted:
+  work-group count is nearly free over **20 → 260**; depth 64 → 1024 costs +120%
+  while 1024 → 4096 costs +6.9%; and block 256 → 128 → 64 costs ~73 µs/launch
+  per halving while 64 → 32 costs only 20. The launch is now 224 µs and what
+  dominates it is unknown.
+- **Every *remaining* yield in the ladder is an estimate**, and only L3 and L4
+  remain, both priced at "cannot repay a golden-gate run". §1's per-work-group
   ceiling was measured at 1, 2 and 5 work-groups and the extrapolation off it was
   falsified by L2; the subgroup curve that replaced it has since been measured at
   8, 16, 32, 128 and 320 subgroups across two kernels (§L2, §L1) and it has held
-  every time, sub-linearly. What remains unmeasured is L5, whose yield rests on a
-  two-parameter fit, not on that curve at all.
+  every time, sub-linearly. L5 never rested on that curve - it rested on a
+  two-parameter fit, and the fit was wrong while the *direction* was right, which
+  is the pattern this whole document keeps finding.
 - **M > 1.** Everything here is the M = 1 decode step. The bucket's kernels are
   the ones whose costs move most with M, and none of that is measured.
