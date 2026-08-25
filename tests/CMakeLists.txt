@@ -351,3 +351,10 @@ b70_cli_reject(cli_reject_depth_zero_bench ${B70_NO_MODEL} --bench --depth 0
   EXPECT "--depth 0 would ingest nothing")
 b70_cli_reject(cli_reject_depth_zero_profile ${B70_NO_MODEL} --profile --depth 0
   EXPECT "--depth 0 would ingest nothing")
+# `--repeats` is repeated-run averaging of the INSTRUMENTED replays and belongs
+# to --profile alone (the memo's §5.4 item; src/cli/b70_decode.cc). Both
+# rejections are host-side and land before l0::Context, like every case above.
+b70_cli_reject(cli_reject_repeats_with_bench ${B70_NO_MODEL} --bench --repeats 5
+  EXPECT "--repeats belongs to --profile")
+b70_cli_reject(cli_reject_repeats_zero ${B70_NO_MODEL} --profile --repeats 0
+  EXPECT "--repeats 0 would profile nothing")

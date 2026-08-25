@@ -2,7 +2,8 @@
 //
 //   b70-decode <snapshot-or-repo> --ids <file> --n <N> [--device N] [--max-len 16384]
 //   b70-decode <snapshot-or-repo> --bench [--depth 4096] [--tg 256] [--device N]
-//   b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--device N]
+//   b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--repeats 1]
+//                                           [--device N]
 //
 // The first two run `runtime::Engine`. The third does not: it replays an
 // *instrumented* capture and needs one event reset before every replay, which
@@ -21,6 +22,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -72,7 +74,8 @@ void usage() {
       "usage:\n"
       "  b70-decode <snapshot-or-repo> --ids <file> --n <N> [--device N] [--max-len 16384]\n"
       "  b70-decode <snapshot-or-repo> --bench [--depth 4096] [--tg 256] [--device N]\n"
-      "  b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--device N]\n"
+      "  b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--repeats 1]\n"
+      "                                          [--device N]\n"
       "\n"
       "  <snapshot-or-repo>  a snapshot directory, or an HF repo id resolved against the local\n"
       "                      cache ($HF_HOME or ~/.cache/huggingface). Never downloads.\n"
@@ -86,7 +89,11 @@ void usage() {
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
-      "                 an unprofiled list does not pay for (spec 1.5 §3.3).\n");
+      "                 an unprofiled list does not pay for (spec 1.5 §3.3).\n"
+      "  --repeats R    --profile only: R independent sessions of --steps replays each, over\n"
+      "                 ONE ingest, each starting from a rewind of pos to the post-ingest\n"
+      "                 value. Adds a per-family mean +/- spread table and the 2sigma delta\n"
+      "                 this instrument can resolve. Default 1 (the pre-flag report).\n");
 }
 
 // The loader reports itself with std::printf - to stdout, which is this CLI's
@@ -212,8 +219,88 @@ void print_rollup(const char* title, const char* what, std::vector<Agg> rows, ui
   }
 }
 
+// --- --repeats: repeated-run averaging (the memo's §5.4) ---------------------
+//
+// The problem it exists for, measured: the profiler reproduces to 0.006% over
+// two runs three minutes apart, but across a day of work on the box the
+// *untouched* launches of the step drifted +0.30% / +0.50% / +0.56% across
+// spec 1.5's three levers - 0.12 to 0.18 ms per comparison. Two levers in a row
+// then missed their in-situ→bench prediction in OPPOSITE directions (L1 by
+// +0.087 ms, L5 by −0.319), which is a resolution limit rather than a missing
+// constant, and every remaining candidate on the menu is smaller than it
+// (docs/superpowers/specs/2026-08-25-spec1.5-reassessment.md §5.4).
+//
+// A "session" here is `--steps` instrumented replays run after rewinding
+// `Control::pos` to the post-ingest value, so **every session profiles the
+// identical launch shape** - the same 774 launches at the same positions, the
+// same `nb`, the same grid - and the spread across sessions is drift and
+// scheduling noise, nothing else. The ingest is paid once for all of them; at
+// depth 4096 it is ~170 s and repeating it would dominate the run for a number
+// nobody reads.
+//
+// **What this measures and what it does not.** Sessions are consecutive inside
+// one process, so the spread they report is short-timescale drift only. It is a
+// LOWER bound on the floor of a before/after comparison between two binaries,
+// which is a comparison across two processes and (usually) two build+sync
+// cycles. The honest attribution floor is the across-PROCESS spread of the same
+// family, obtained by running this command N times; docs/15's instrument
+// section records both and quotes the larger one.
+struct Stat {
+  double mean = 0.0, sd = 0.0, lo = 0.0, hi = 0.0;
+  // The sample (n−1) standard deviation: the sessions are a sample of the
+  // sessions this box could have run, not the population. 0 by definition at
+  // one session, which is why `--repeats 1` prints no spread at all.
+  static Stat of(const std::vector<double>& v) {
+    Stat s;
+    if (v.empty()) return s;
+    s.lo = s.hi = v[0];
+    for (double x : v) {
+      s.mean += x;
+      s.lo = std::min(s.lo, x);
+      s.hi = std::max(s.hi, x);
+    }
+    s.mean /= double(v.size());
+    if (v.size() < 2) return s;
+    double ss = 0.0;
+    for (double x : v) ss += (x - s.mean) * (x - s.mean);
+    s.sd = std::sqrt(ss / double(v.size() - 1));
+    return s;
+  }
+  // The bar an A/B attribution has to clear. Two binaries measured with R
+  // sessions each give two means whose difference has standard error
+  // sd·sqrt(2/R) (both sides contribute, both are means of R). At 2σ the
+  // resolvable delta is therefore 2·sd·sqrt(2/R) - this is the number docs/15
+  // quotes as the instrument's floor, and it is per family because that is the
+  // unit an attribution is written in.
+  double resolvable_2sigma(size_t sessions) const {
+    return sessions < 2 ? 0.0 : 2.0 * sd * std::sqrt(2.0 / double(sessions));
+  }
+};
+
+// One family's per-session totals, in the order the sessions ran.
+struct Series {
+  std::string name;
+  std::vector<double> us;  // us/step, one entry per session
+};
+
+void print_repeat_table(const char* title, const char* what, std::vector<Series> rows,
+                        size_t sessions) {
+  std::sort(rows.begin(), rows.end(), [](const Series& x, const Series& y) {
+    return Stat::of(x.us).mean > Stat::of(y.us).mean;
+  });
+  std::printf("\n%s\n  %-34s   mean us/step        sd     sd%%        min .. max"
+              "    2sigma-resolvable\n",
+              title, what);
+  for (const Series& r : rows) {
+    const Stat s = Stat::of(r.us);
+    std::printf("  %-34s  %13.3f  %8.3f  %6.3f%%  %9.3f .. %9.3f  %10.3f\n", r.name.c_str(), s.mean,
+                s.sd, s.mean != 0.0 ? 100.0 * s.sd / s.mean : 0.0, s.lo, s.hi,
+                s.resolvable_2sigma(sessions));
+  }
+}
+
 int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
-                const std::vector<uint32_t>& ids, uint32_t steps) {
+                const std::vector<uint32_t>& ids, uint32_t steps, uint32_t repeats) {
   runtime::DecodeBuffers buffers(ctx, model.max_len);
   // Two lists over ONE set of buffers - the pattern
   // tests/runtime/profile_capture_test.cc proved and the golden gate already
@@ -276,58 +363,97 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
   // The measured half. Every event is reset before EVERY replay (re-signalling
   // an un-reset event is undefined) and nothing is queried before the fence
   // (`duration_us()` throws on an unsignalled event, by design).
-  std::vector<double> per_launch(n, 0.0);
+  //
+  // `--repeats R` wraps this in R sessions. Each session first rewinds
+  // `Control::pos` to the value the ingest left, so all R sessions profile the
+  // SAME launch shape at the SAME positions - the spread across them is drift,
+  // not a difference in what was run. Everything the single-session report
+  // prints is computed from the grand totals below, so `--repeats 1` (the
+  // default) prints exactly what this mode printed before the flag existed.
+  const uint32_t ingest_pos = c->pos;
+  std::vector<double> per_launch(n, 0.0);           // Σ over every replay of every session
+  std::vector<std::vector<double>> session_launch;  // [session][launch], Σ over that session
+  std::vector<double> session_sum, session_wall;    // us/step, one entry per session
   double sum_all = 0.0, wall_all = 0.0;
   double sum_lo = 0.0, sum_hi = 0.0, wall_lo = 0.0, wall_hi = 0.0;
-  for (uint32_t s = 0; s < steps; ++s) {
-    for (l0::Event& e : prof.events) e.reset();
-    const auto s0 = std::chrono::steady_clock::now();
-    replay(instr);
-    const double wall =
-        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - s0).count();
-    double sum = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-      const double d = prof.events[i].duration_us();
-      per_launch[i] += d;
-      sum += d;
+  bool first_replay = true;
+  for (uint32_t r = 0; r < repeats; ++r) {
+    // The rewind. `pos` is the only thing that has to move: argmax_stage2
+    // advanced it by one per replay, and every launch's grid and every
+    // kernel's live-block count is a function of it.
+    c->pos = ingest_pos;
+    c->n_active = 1;
+    std::vector<double> launch_r(n, 0.0);
+    double sum_r = 0.0, wall_r = 0.0;
+    for (uint32_t s = 0; s < steps; ++s) {
+      for (l0::Event& e : prof.events) e.reset();
+      const auto s0 = std::chrono::steady_clock::now();
+      replay(instr);
+      const double wall =
+          std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - s0).count();
+      double sum = 0.0;
+      for (size_t i = 0; i < n; ++i) {
+        const double d = prof.events[i].duration_us();
+        per_launch[i] += d;
+        launch_r[i] += d;
+        sum += d;
+      }
+      if (first_replay) {
+        sum_lo = sum_hi = sum;
+        wall_lo = wall_hi = wall;
+        first_replay = false;
+      }
+      sum_lo = std::min(sum_lo, sum);
+      sum_hi = std::max(sum_hi, sum);
+      wall_lo = std::min(wall_lo, wall);
+      wall_hi = std::max(wall_hi, wall);
+      sum_all += sum;
+      wall_all += wall;
+      sum_r += sum;
+      wall_r += wall;
     }
-    if (s == 0) {
-      sum_lo = sum_hi = sum;
-      wall_lo = wall_hi = wall;
-    }
-    sum_lo = std::min(sum_lo, sum);
-    sum_hi = std::max(sum_hi, sum);
-    wall_lo = std::min(wall_lo, wall);
-    wall_hi = std::max(wall_hi, wall);
-    sum_all += sum;
-    wall_all += wall;
+    session_launch.push_back(std::move(launch_r));
+    session_sum.push_back(sum_r / steps);
+    session_wall.push_back(wall_r / steps);
+    if (repeats > 1)
+      std::fprintf(stderr, "session %u/%u: %.3f us Σ, %.3f us wall, pos %u → %u, last id %u\n",
+                   r + 1, repeats, session_sum.back(), session_wall.back(), ingest_pos, c->pos,
+                   c->out_token[0]);
   }
-  const double sum_us = sum_all / steps;    // Σ per-kernel device time, per step
-  const double wall_us = wall_all / steps;  // submit + fence, per step
+  const uint32_t replays = steps * repeats;
+  const double sum_us = sum_all / replays;    // Σ per-kernel device time, per step
+  const double wall_us = wall_all / replays;  // submit + fence, per step
 
   // --- the report. stdout: it is this mode's answer. ------------------------
   std::printf(
       "# b70-decode --profile - in-situ step anatomy\n"
-      "depth %zu, steps %u, %zu launches/step, max_len %u, device %s (%u EUs)\n"
+      "depth %zu, steps %u, repeats %u (%u profiled replays), %zu launches/step, max_len %u,\n"
+      "device %s (%u EUs)\n"
       "PROFILE MODE IS NOT BENCH MODE: every launch below signals a host-visible\n"
       "kernel-timestamp event, a per-launch flush an unprofiled list never pays. Per-kernel\n"
       "durations are kernelStart->kernelEnd and EXCLUDE that flush (it lands after kernelEnd),\n"
       "so they are comparable to probe per-kernel numbers; the gap at the bottom INCLUDES it\n"
       "and is an upper bound. The engine's ms/token comes from --bench, never from here.\n"
-      "Every `share` below is of the sum of kernel durations, not of the fence wall.\n",
-      ids.size(), steps, n, buffers.max_len, ctx.name().c_str(), ctx.eu_count());
+      "Every `share` below is of the sum of kernel durations, not of the fence wall.\n"
+      "%s",
+      ids.size(), steps, repeats, replays, n, buffers.max_len, ctx.name().c_str(), ctx.eu_count(),
+      repeats > 1 ? "REPEATED-RUN AVERAGING IS ON: the rollups below are the grand mean over every\n"
+                    "replay of every session; the repeatability table after them is what prices an\n"
+                    "attribution. A session is `steps` replays after a rewind of Control::pos to the\n"
+                    "post-ingest value, so every session profiles the identical launch shape.\n"
+                  : "");
 
   std::vector<size_t> order(n);
   for (size_t i = 0; i < n; ++i) order[i] = i;
   std::sort(order.begin(), order.end(),
             [&](size_t a, size_t b) { return per_launch[a] > per_launch[b]; });
   const size_t top = std::min<size_t>(30, n);
-  std::printf("\ntop %zu launches by mean us/step (measured, mean of %u steps)\n"
+  std::printf("\ntop %zu launches by mean us/step (measured, mean of %u profiled replays)\n"
               "  rank  launch    us/step   share  label\n",
-              top, steps);
+              top, replays);
   for (size_t r = 0; r < top; ++r) {
     const size_t i = order[r];
-    const double us = per_launch[i] / steps;
+    const double us = per_launch[i] / replays;
     std::printf("  %4zu  %6zu  %9.3f  %5.2f%%  %s\n", r + 1, i, us, 100.0 * us / sum_us,
                 instr.labels[i].c_str());
   }
@@ -352,14 +478,14 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
                  us);
     }
   }
-  print_rollup("per-kernel-family rollup (measured, mean of the steps)", "family", by_family, steps,
-               sum_us);
+  print_rollup("per-kernel-family rollup (measured, mean of every profiled replay)", "family",
+               by_family, replays, sum_us);
   print_rollup("per-variant rollup - the rows docs/12 and probe_gemv price", "variant", by_variant,
-               steps, sum_us);
-  print_rollup("per-layer-kind rollup", "layer kind", by_kind, steps, sum_us);
+               replays, sum_us);
+  print_rollup("per-layer-kind rollup", "layer kind", by_kind, replays, sum_us);
 
   std::printf(
-      "\ntotals per step (mean of %u; the per-step spread is the honest error bar)\n"
+      "\ntotals per step (mean of %u profiled replays; the per-replay spread is in brackets)\n"
       "  sum of %zu kernel durations   %10.3f us   [%.3f .. %.3f]   MEASURED, per-kernel,\n"
       "                                                                   flush-free\n"
       "  fence wall (submit + wait)    %10.3f us   [%.3f .. %.3f]   MEASURED, profiled list\n"
@@ -367,8 +493,51 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
       "                                                 UPPER BOUND: includes one host-scope\n"
       "                                                 flush per launch (spec 1.5 §3.3)\n"
       "  sum / wall                    %10.4f\n",
-      steps, n, sum_us, sum_lo, sum_hi, wall_us, wall_lo, wall_hi, wall_us - sum_us,
+      replays, n, sum_us, sum_lo, sum_hi, wall_us, wall_lo, wall_hi, wall_us - sum_us,
       (wall_us - sum_us) / double(n), n, sum_us / wall_us);
+  // --- the repeatability report, and the attribution floor it prices -------
+  //
+  // This is the memo's §5.4 item. Everything above is a mean; this is what the
+  // mean is worth. Each row's series is that family's us/step in each of the R
+  // sessions, and `2sigma-resolvable` is the delta a before/after attribution
+  // has to beat for this instrument to see it (2*sd*sqrt(2/R), derived).
+  if (repeats > 1) {
+    std::vector<Series> fam;
+    auto series_for = [&fam, repeats](const std::string& name) -> Series& {
+      for (Series& x : fam)
+        if (x.name == name) return x;
+      fam.push_back(Series{name, std::vector<double>(repeats, 0.0)});
+      return fam.back();
+    };
+    for (size_t i = 0; i < n; ++i) {
+      Series& row = series_for(split_label(instr.labels[i]).entry);
+      for (uint32_t r = 0; r < repeats; ++r) row.us[r] += session_launch[r][i] / steps;
+    }
+    std::vector<double> gap(repeats, 0.0);
+    for (uint32_t r = 0; r < repeats; ++r) gap[r] = session_wall[r] - session_sum[r];
+    print_repeat_table("per-family repeatability across the sessions (measured)", "family", fam,
+                       repeats);
+    const Stat ss = Stat::of(session_sum), sw = Stat::of(session_wall), sg = Stat::of(gap);
+    std::printf("\n  %-34s  %13.3f  %8.3f  %6.3f%%  %9.3f .. %9.3f  %10.3f\n"
+                "  %-34s  %13.3f  %8.3f  %6.3f%%  %9.3f .. %9.3f  %10.3f\n"
+                "  %-34s  %13.3f  %8.3f  %6.3f%%  %9.3f .. %9.3f  %10.3f\n",
+                "SUM of kernel durations", ss.mean, ss.sd, 100.0 * ss.sd / ss.mean, ss.lo, ss.hi,
+                ss.resolvable_2sigma(repeats), "fence wall (profiled)", sw.mean, sw.sd,
+                100.0 * sw.sd / sw.mean, sw.lo, sw.hi, sw.resolvable_2sigma(repeats),
+                "gap = wall - SUM (derived)", sg.mean, sg.sd,
+                sg.mean != 0.0 ? 100.0 * sg.sd / sg.mean : 0.0, sg.lo, sg.hi,
+                sg.resolvable_2sigma(repeats));
+    std::printf(
+        "\n  The `2sigma-resolvable` column is the ATTRIBUTION FLOOR of this instrument at\n"
+        "  --repeats %u: two binaries measured this way have means whose difference carries a\n"
+        "  standard error of sd*sqrt(2/R), so a family-level delta below the column is not a\n"
+        "  measurement. It is a LOWER bound on the real floor -- these %u sessions are\n"
+        "  consecutive inside ONE process, so they see short-timescale drift only, while a\n"
+        "  before/after comparison spans two processes and usually a build. The across-process\n"
+        "  figure is in docs/15-step-anatomy.md and it is the one to quote.\n",
+        repeats, repeats);
+  }
+
   std::printf(
       "\nreading these numbers\n"
       "  - Per-kernel us are in-situ and flush-free: compare them directly with the\n"
@@ -376,16 +545,18 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
       "  - The gap is NOT a dispatch cost this engine pays: subtract the flush\n"
       "    (doc 07 #5's 0.52 us/kernel from probe_replay is the unprofiled estimate).\n"
       "  - The fence wall above is inflated by the same flushes and is NOT ms/token.\n"
-      "    The recorded step time is the --bench median in docs/BENCHMARKS.md.\n");
+      "    The recorded step time is the --bench median in docs/BENCHMARKS.md.\n"
+      "  - A mean without a spread is not an attribution: run --repeats R (R >= 5) before\n"
+      "    claiming a delta under ~0.3 ms, and read the floor off the table above.\n");
   return 0;
 }
 
 int run(int argc, char** argv) {
   std::string path, ids_path;
-  uint32_t n = 0, depth = 4096, tg = 256, steps = 32, max_len = 16384;
+  uint32_t n = 0, depth = 4096, tg = 256, steps = 32, repeats = 1, max_len = 16384;
   uint32_t device = l0::Context::kFromEnv;
   bool bench = false, profile = false, have_n = false;
-  bool have_depth = false, have_tg = false, have_steps = false;
+  bool have_depth = false, have_tg = false, have_steps = false, have_repeats = false;
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -422,6 +593,9 @@ int run(int argc, char** argv) {
     } else if (a == "--steps") {
       steps = parse_u32("--steps", value(i, "--steps"));
       have_steps = true;
+    } else if (a == "--repeats") {
+      repeats = parse_u32("--repeats", value(i, "--repeats"));
+      have_repeats = true;
     } else if (!a.empty() && a[0] == '-') {
       usage();
       throw std::runtime_error("unknown option '" + a + "'");
@@ -455,6 +629,9 @@ int run(int argc, char** argv) {
   if (have_steps && !profile)
     throw std::runtime_error("--steps belongs to --profile; --bench sizes its run with --depth"
                              " and --tg, --ids with --n");
+  if (have_repeats && !profile)
+    throw std::runtime_error("--repeats belongs to --profile; it is repeated-run averaging of the"
+                             " instrumented replays and nothing else has any");
   if (have_depth && !synthetic)
     throw std::runtime_error("--depth belongs to --bench and --profile; --ids sizes its run"
                              " with --n");
@@ -465,6 +642,7 @@ int run(int argc, char** argv) {
   if (!synthetic && n == 0) throw std::runtime_error("--n 0 would generate nothing");
   if (bench && tg == 0) throw std::runtime_error("--tg 0 would time nothing");
   if (profile && steps == 0) throw std::runtime_error("--steps 0 would profile nothing");
+  if (profile && repeats == 0) throw std::runtime_error("--repeats 0 would profile nothing");
   // Both synthetic modes exist to measure a step at a context depth, and the
   // cost of a step depends on that depth (attention's live-block count is the
   // measured example - docs/15). Depth 0 measures a shape nobody runs.
@@ -485,6 +663,9 @@ int run(int argc, char** argv) {
     // Both synthetic modes ingest to --depth and then replay: --tg generated
     // tokens for --bench, --steps instrumented ones for --profile. Same bound
     // either way - the KV cache and the RoPE table stop at max_len.
+    // `--repeats` does NOT enter this bound: every session rewinds `pos` to the
+    // post-ingest value, so R sessions reach exactly the same highest position
+    // one session does. That is the point of the rewind.
     const uint32_t after = bench ? tg : steps;
     const char* after_flag = bench ? "--tg " : "--steps ";
     if (size_t(depth) + size_t(after) > size_t(max_len))
@@ -507,7 +688,7 @@ int run(int argc, char** argv) {
   // --profile forks here: it replays an instrumented capture and has to reset
   // 774 events before every replay, which is the caller's job by design
   // (runtime/capture.h) - so it runs its own loop rather than an Engine's.
-  if (profile) return run_profile(ctx, model, ids, steps);
+  if (profile) return run_profile(ctx, model, ids, steps, repeats);
 
   // debug_resid off: the per-layer tap costs 64 device copies a token and only
   // the golden gate (Task 8) reads it.

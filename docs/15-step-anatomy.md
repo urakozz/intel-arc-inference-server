@@ -25,6 +25,12 @@ never pays. So:
   `--bench` median in [BENCHMARKS.md](BENCHMARKS.md) - 42.141 ms, measured
   2026-08-25, median of three on an idle box. Nothing in this document replaces
   it, and no row here is ever a bench row.
+- **A mean is not an attribution.** Every single-run number below carries this
+  instrument's drift and nothing says how much. `--profile --repeats R` prices
+  that directly, and the floor it measures - **0.051 ms at the step, 0.2-15 µs
+  per family, across processes** - is in "Spec 1.6 §5.4" near the end of this
+  document. Read it before believing any delta under ~0.3 ms, including several
+  in the lever sections that follow.
 
 Every number below says which kind it is: **measured** (this instrument or a
 named earlier one), **derived** (arithmetic over two measurements), or
@@ -989,6 +995,146 @@ mechanism.** Every lever landed in or near its predicted band; every one landed
 for a reason the ranking got wrong. That is an argument for this instrument, not
 for the ladder - and it is the reason the memo's first item is a probe rather
 than a design.
+
+## Spec 1.6 §5.4 - repeated-run averaging, and the attribution floor it measures
+
+The re-assessment memo ranked this **above every design on its menu except the
+probe**: "it is the *precondition* for believing any yield under ~0.5 ms, which
+is every remaining item". The measured problem it was asked to fix is that this
+profiler reproduces to **0.006% over two runs three minutes apart** and yet the
+*untouched* launches drifted **+0.30% / +0.50% / +0.56%** across spec 1.5's
+three levers - 0.12 to 0.18 ms per comparison - and two levers in a row then
+missed their in-situ→bench prediction **in opposite directions** (L1 by +0.087,
+L5 by −0.319). Errors that run both ways at 0.09-0.32 ms are a resolution limit,
+not a missing constant.
+
+### What was built
+
+`b70-decode --profile` gains **`--repeats R`** (default 1; `--repeats 1` prints
+exactly the report it printed before the flag existed). R **sessions** of
+`--steps` instrumented replays run over **one** ingest - at depth 4096 the
+ingest is ~140 s and repeating it would dominate the run for a number nobody
+reads - and each session begins by rewinding `Control::pos` to the post-ingest
+value. That rewind is the point: **every session profiles the identical launch
+shape**, the same 774 launches at the same positions with the same `nb`, so what
+the spread across them contains is drift and scheduling and nothing else. The
+report gains a per-family **mean, sd, min..max** and a **2σ-resolvable Δ**
+column, and the same three rows for Σ, for the fence wall and for the derived
+gap. Two CLI rejections cover the flag (`--repeats` outside `--profile`,
+`--repeats 0`), so the suite is 40 tests.
+
+The 2σ column is `2·sd·sqrt(2/R)`: two binaries measured this way give two means
+whose difference carries a standard error of `sd·sqrt(2/R)`, and that is the bar
+an attribution has to clear. It is printed per family because a family is the
+unit an attribution is written in.
+
+### The floor, measured
+
+**Box conditions.** 2026-08-25 22:34-22:56 CEST, load average **14-15** - a
+docker `vllm-xpu-kernels` build held the CPU throughout. The GPU was otherwise
+idle and no AutoRound run was live. Every number below is a **device-clocked
+kernel timestamp**, which is what makes it quotable under load; **no
+bench-grade wall-clock absolute is recorded in this section**, and the 36.32 ms
+step it is compared against is the idle-box `--bench` median already on record.
+
+Three **independent processes** of
+`--profile --depth 4096 --steps 32 --repeats 5` - 480 profiled replays in all.
+Two floors, and the difference between them is the finding:
+
+| family | proc 1 | proc 2 | proc 3 | **within-process 2σ (worst of 3)** | **across-process 2σ** |
+|---|---|---|---|---|---|
+| `gemv` (256) | 24850.221 | 24866.465 | 24851.246 | 11.756 | **14.855** |
+| `gemv_bf16` (49) | 4647.967 | 4650.310 | 4650.266 | 2.594 | **2.188** |
+| `attn_decode` (16) | 3571.395 | 3571.074 | 3571.075 | 12.425 | **0.302** |
+| `gdn_step` (48) | 755.142 | 753.733 | 757.863 | 2.508 | **3.428** |
+| `prep_silu_mul` (64) | 639.450 | 639.130 | 638.090 | 2.096 | **1.161** |
+| `prep_res_fold` (129) | 261.690 | 257.513 | 252.235 | 2.695 | **7.737** |
+| `prep_norm_finish` (129) | 223.383 | 223.514 | 223.902 | 2.288 | **0.441** |
+| **`attn_reduce` (16)** | **194.034** | **193.638** | **254.099** | 1.639 | **56.817** |
+| `prep_gated_head` (48) | 84.107 | 82.774 | 86.936 | 1.363 | **3.471** |
+| `attn_prep` (16) | 59.292 | 59.387 | 59.534 | 1.988 | **0.199** |
+| **Σ of 774 kernel durations** | **35304.571** | **35315.042** | **35362.834** | **29.101** | **50.721** |
+| fence wall (profiled) | 36361.637 | 36374.786 | 36424.767 | 21.547 | 54.391 |
+| gap = wall − Σ (derived) | 1057.066 | 1059.743 | 1061.933 | 22.573 | 3.981 |
+
+µs/step, measured. The within-process column is the tool's own 2σ at R = 5; the
+across-process column is 2·sd·sqrt(2/3) over the three process means (derived).
+
+> ### **The step-level attribution floor is 0.051 ms** (Σ, 2σ, three processes)
+>
+> Against the **±0.1 ms** the single-run method was claimed at and the
+> **0.12-0.18 ms** of day-scale drift spec 1.5 actually measured, that is a 2-3.5×
+> improvement, and it is the first time this project has had the number rather
+> than an adjective. Per family, and setting `attn_reduce` aside for the
+> paragraph below, the floor runs **0.2 to 15 µs** - `attn_decode` resolves to
+> **0.30 µs/step**, `gemv` to **14.9**.
+
+**What this unlocks, named.** The memo parked **L4** - 0.659 ms of measured
+in-situ GEMV excess - as "blocked on §5.4 … inside the instrument's own drift".
+`gemv`'s floor is now **14.9 µs**, so an `S` retune worth L4's estimated
+≤0.3 ms is **20× the bar**. The instrument is no longer what blocks L4; only its
+golden-gate cost is.
+
+### The finding that justifies the whole exercise: within ≠ across
+
+**`attn_reduce` reproduces to 0.3% inside every process and lands 31% apart
+between them.** Processes 1 and 2 measure 194.034 and 193.638 µs/step with
+within-process sd of 0.62 and 1.30; process 3 measures **254.099** with an sd of
+0.72. Three tight distributions, two of which agree and one of which does not,
+on **one binary, one box, one twenty-minute window**. Its across-process floor
+is **56.8 µs against a within-process 1.6** - a factor of **35**.
+
+Nothing here explains it (the launch shape is identical: `nb` is 65 in all
+three, the merge loop is bounded by `nb`, and the allocation sizes are fixed by
+`max_len`), and it is recorded unexplained, as this document records everything
+it cannot account for. What it *proves* is the design rule the tool now prints
+in its own output: **R sessions inside one process are a lower bound on the
+floor, not the floor.** An attribution must compare two binaries across
+processes, R ≥ 5 each, and read the bar off the across-process spread.
+
+**And the window matters too.** These three processes ran within twenty minutes.
+Spec 1.5's ±0.12-0.18 ms was measured across a **day**. So the operating rule is
+two-tier, and both tiers are measured: **compare two binaries in one sitting and
+the floor is 0.05 ms; compare across a day and it is ~0.15 ms** until somebody
+measures a day-scale series with this flag.
+
+### The ~0.31 ms unattributed residual does NOT resolve - it is confirmed
+
+§L5 and the memo both close on a step that "no longer closes to better than
+~0.31 ms". The obvious hope for a better instrument was that the residual was
+the instrument. It is not.
+
+Σ is now known to **35.327 ms ± 0.031** (mean and across-process sd of 480
+replays) where it was one run's 35.342. Running the memo's own arithmetic on it -
+Σ + the derived 0.567 ms dispatch + the measured 0.101 ms host - gives
+**35.995 ms against the recorded 36.32**, a residual of **0.325 ms**. That is
+**6.4× the Σ row's own 2σ**, and the bench side contributes only ±0.015 ms (the
+gate's median-of-three spread was 0.04%). **The residual is a real term at
+better than 6σ.**
+
+*(The memo's caveat still applies and is not repealed by a better Σ: the
+0.733 µs/launch dispatch rate in that arithmetic was **defined** as the closing
+residual of the 645-launch step at `43bb720`, so this construction cannot be
+quoted as an independent witness. What it now is, is a construction whose one
+noisy input has been pinned.)*
+
+**Read per launch, with Σ pinned**, the memo's genuinely new number holds and
+tightens: 36.32 − 0.101 host − 35.327 Σ = **0.892 ms over 774 launches =
+1.152 µs/launch**, against **0.733 µs/launch** at `43bb720`. That is **+57%**,
+where the memo derived +55% from a single Σ and could only bound it between +23%
+and +86%. Σ's own ±0.031 ms is now ±0.04 µs/launch, so the remaining width is
+entirely in the *other* end - one un-repeated run at `43bb720` - and repeating
+that measurement is a cheap way to close it. **The cost outside the kernels grew
+while the kernels shrank, and it is now measured on 480 replays instead of one.**
+
+### One row this refines while it is here
+
+`attn_decode` was recorded at **224.046 µs/launch** from a single profiled run
+at `c746840`. The 480-replay mean at `4f16131` is **223.199 µs/launch**, with an
+across-process 2σ of **0.019 µs/launch** - 0.38% under the recorded figure and
+the tightest number in this document. The recorded L5 rows are left as they
+were, because they are what that lever measured; 223.199 is what the row is
+today, and it is what §5.2 below compares its probe against.
 
 ## What this document does not settle
 
