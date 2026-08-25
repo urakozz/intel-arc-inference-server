@@ -139,7 +139,25 @@ int main(int argc, char** argv) {
   // share it), silu_mul, gated_head, gdn_step, 3 attn, 5 int4 gemv, 2 bf16
   // gemv, 2 argmax. That is 19 - the 18 of plan 3 with the 2 `prep_res_norm`
   // modules replaced by the pair's 3.
+  //
+  // **19 on BOTH checkpoints, and that is arithmetic rather than luck**
+  // (spec 1.6 §5.1). An int4 `lm_head` swaps one module for another -
+  // `gemv_bf16_M1_K5120_N248320` out, `gemv_M1_K5120_N248320_S1_L1` in - so
+  // the bf16 gemv count falls 2 -> 1 and the int4 gemv count rises 5 -> 6.
+  // Nothing else in the walk depends on the checkpoint, so if this ever fires
+  // on one checkpoint and not the other, the swap is not one-for-one any more
+  // and the reason belongs in the message, not in a widened number.
   CHECK_EQ(cap.modules.size(), size_t(19));
+  {
+    const bool lm_int4 =
+        m.linears.at({loader::kTopLevel, model::LinearId::LmHead}).kind ==
+        model::WeightKind::Int4;
+    const char* want = lm_int4 ? "gemv_M1_K5120_N248320_S1_L1" : "gemv_bf16_M1_K5120_N248320";
+    const char* nope = lm_int4 ? "gemv_bf16_M1_K5120_N248320" : "gemv_M1_K5120_N248320_S1_L1";
+    std::printf("lm_head: %s -> module %s\n", lm_int4 ? "int4 g64" : "bf16", want);
+    CHECK_EQ(cap.modules.count(want), size_t(1));
+    CHECK_EQ(cap.modules.count(nope), size_t(0));
+  }
 
   l0::Queue q(ctx);
   l0::Fence fence(q);

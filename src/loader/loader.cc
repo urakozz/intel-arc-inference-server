@@ -1,5 +1,6 @@
 #include "loader/loader.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -32,6 +33,15 @@ using model::Qwen35;
 // 12.163 qweight + 0.760 scales + 0.052 bf16 smalls + 2.543 lm_head.
 constexpr double kDocW = 15.519e9;
 
+// doc-03's `W` was measured over a checkpoint with a **bf16** `lm_head`. A
+// checkpoint that packs it (spec 1.6 §5.1) reads 0.675 GB there instead of
+// 2.543, and that difference goes on the EXPECTED side of the cross-check as
+// an itemised term - never into a widened tolerance, which is the same rule
+// the padding and the fp32 widening follow.
+constexpr size_t kLmHeadBf16Bytes = size_t(5120) * 248320 * 2;                 // 2 542 796 800
+constexpr size_t kLmHeadInt4Bytes = size_t(5120) * 248320 / 2 +                // 635 699 200
+                                    size_t(5120) * 248320 / 32;               //  39 731 200
+
 // Bytes this loader adds over the checkpoint's own bf16 by widening a tensor to
 // fp32 at load. Itemised rather than hidden in a tolerance: the W cross-check
 // adds exactly this to its expected side and the report prints the split.
@@ -55,10 +65,16 @@ std::string ckpt_name(const std::string& stripped) {
   return starts_with(stripped, "lm_head") ? stripped : kLmPrefix + stripped;
 }
 
+bool has_suffix(const std::string& s, const char* suf) {
+  const size_t n = std::strlen(suf);
+  return s.size() > n && s.compare(s.size() - n, n, suf) == 0;
+}
+
 struct NameView {
   std::map<std::string, std::string> names;  // stripped -> checkpoint name
   std::set<std::string> consumed;            // stripped names actually loaded
   size_t mtp_skipped = 0, visual_skipped = 0, qzeros = 0, g_idx = 0;
+  size_t top_level = 0;                      // names outside model.language_model.
 };
 
 NameView build_view(const SafetensorsSet& set) {
@@ -68,14 +84,28 @@ NameView build_view(const SafetensorsSet& set) {
     if (starts_with(name, "model.visual.")) {          // no vision tower in v1
       ++v.visual_skipped;
     } else if (starts_with(name, "mtp.")) {            // no speculation in v1
+      // The RTN checkpoint's `mtp.*` are 29 tensors in their own shard
+      // (`model_extra_tensors.safetensors`, pointed at by the index like any
+      // other) and 8 of them are int4 rather than the published checkpoint's
+      // all-bf16 15. Skipping is by NAME, before the shard matters: the file is
+      // mmapped and its header parsed because the index names it, and then
+      // nothing in it is ever read. It is counted here, so it lands in the
+      // report's `mtp` figure and can never land in `unconsumed`.
       ++v.mtp_skipped;
     } else if (starts_with(name, kLmPrefix)) {
       std::string stripped = name.substr(std::strlen(kLmPrefix));
-      if (stripped.size() > 7 && stripped.compare(stripped.size() - 7, 7, ".qzeros") == 0) ++v.qzeros;
-      if (stripped.size() > 6 && stripped.compare(stripped.size() - 6, 6, ".g_idx") == 0) ++v.g_idx;
+      if (has_suffix(stripped, ".qzeros")) ++v.qzeros;
+      if (has_suffix(stripped, ".g_idx")) ++v.g_idx;
       v.names.emplace(std::move(stripped), name);
     } else {
-      v.names.emplace(name, name);                     // lm_head.weight
+      // lm_head - `.weight` on the published checkpoint, `.qweight`/`.qzeros`/
+      // `.scales` on one that packed it. The drop counters cover this branch
+      // too, so an int4 head's qzeros are reported as dropped rather than
+      // silently missing from the tally.
+      if (has_suffix(name, ".qzeros")) ++v.qzeros;
+      if (has_suffix(name, ".g_idx")) ++v.g_idx;
+      ++v.top_level;
+      v.names.emplace(name, name);
     }
   }
   return v;
@@ -185,15 +215,29 @@ const char* id_name(model::LinearId id) {
   return "?";
 }
 
-// Host staging, allocated once and reused. The largest int4 linear is gate‖up
-// (2176 n-tiles x 80 k-groups x 136 u32 = 94.7 MB); the largest bf16 tile
-// buffer is lm_head (2.54 GB); the row-major bf16 concat buffer only ever holds
-// a‖b padded to [128][5120].
+// Host staging, allocated once and reused, and sized from the linears this
+// load will actually repack - **which is not a constant across checkpoints**.
+// With a bf16 `lm_head` the largest int4 linear is `gate‖up` (2176 n-tiles x
+// 80 k-groups x 136 u32 = 94.7 MB) and the bf16 tile buffer must hold
+// `lm_head`'s 2.54 GB. With an int4 `lm_head` the two swap places: the int4
+// buffer has to hold 15520 x 80 x 136 u32 = **675.4 MB** - 7.1x `gate‖up`, the
+// largest int4 tensor this repack has ever seen - and the bf16 tile buffer
+// only ever holds `a‖b` at [128][5120], 1.3 MB. Sizing both for the maximum
+// would cost 2.5 GB of host RSS for nothing.
+//
+// The staging bound is not the only place that has to hold: `load_linear`
+// throws by name if a linear does not fit what it was given, which is what
+// turns a mis-sized buffer into a message instead of a heap overrun.
 struct Staging {
   std::vector<uint32_t> i4;
   std::vector<uint16_t> bf_src;
   std::vector<uint16_t> bf_tiled;
 };
+
+// The int4 staging words one linear needs: n-tiles x k-groups x 136.
+size_t int4_words(const model::GemvShape& s) {
+  return size_t(s.N / 16) * (s.K / 64) * 136;
+}
 
 // One fused linear: classify every part, check the preconditions the repack
 // helpers document but cannot check (Task-3 review minor, closed here at the
@@ -280,9 +324,16 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
                                " bytes exceeds the int4 staging buffer");
     common::repack_int4_layout1_cols(sh.K, sh.N, cols, st.i4.data());
     // The 136-u32 tile is 128 u32 of nibbles + 8 u32 of scales, so the two
-    // buckets below add up to exactly the bytes uploaded.
-    rep.int4_bytes += size_t(sh.K) * sh.N / 2;
-    rep.scale_bytes += size_t(sh.K) * sh.N / 32;
+    // buckets below add up to exactly the bytes uploaded. `lm_head` keeps its
+    // OWN bucket in both kinds - it is the one row whose format the checkpoint
+    // chooses, so the report has to show it separately for the two to be
+    // comparable at all, and the W cross-check adjusts exactly this line.
+    if (fl.id == model::LinearId::LmHead) {
+      rep.lm_head_bytes += size_t(sh.K) * sh.N / 2 + size_t(sh.K) * sh.N / 32;
+    } else {
+      rep.int4_bytes += size_t(sh.K) * sh.N / 2;
+      rep.scale_bytes += size_t(sh.K) * sh.N / 32;
+    }
     return {upload(ctx, imm, st.i4.data(), words * 4), sh, fl.kind};
   }
 
@@ -388,8 +439,34 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // Requirement 6: before a single byte is repacked. Returns what it counted
   // but did not reject (subnormal f16 scales, which this checkpoint has).
   const QuantScan scan = assert_quant_invariants(set);
+  // The content proof behind an auto-round config's silence on `desc_act`
+  // (quant.h). A permutation needs a `g_idx` to carry it; if none is shipped
+  // there is nothing for `desc_act: true` to have meant, and the layout-1
+  // repack's arithmetic group index is safe. If one IS shipped under a config
+  // that never declared the key, this stops - the scan already proved every
+  // entry is the identity, but "the config did not say" plus "there is a
+  // permutation vector" is exactly the combination nobody should assume about.
+  if (!qc.desc_act_declared && scan.g_idx_tensors != 0)
+    throw std::runtime_error(
+        "config.json declares no desc_act (auto-round's spelling of false) but the checkpoint "
+        "ships " + std::to_string(scan.g_idx_tensors) +
+        " g_idx tensors - refusing to infer that no activation-order permutation exists. Add "
+        "\"desc_act\": false to quantization_config if that is what the quantiser meant.");
   NameView view = build_view(set);
   Widen widen;
+
+  // **`lm_head`'s kind is the checkpoint's to choose, and it is chosen by
+  // content.** `classify` looks for `lm_head.qweight` and falls back to
+  // `lm_head.weight`, exactly as it does for every per-layer linear; the
+  // config's `extra_config`/`dynamic` claims are never consulted (docs/02).
+  // Everything downstream - the staging sizes, the byte buckets, the W
+  // cross-check, the shape and layout the capture binds - follows from this
+  // one line, so a checkpoint that packs the head and one that does not are
+  // the same code path with a different row.
+  const model::FusedLinear& lm_row = Qwen35::lm_head(
+      LinearSrc::classify(set, "lm_head").kind == WKind::Int4 ? model::WeightKind::Int4
+                                                              : model::WeightKind::Bf16);
+  const bool lm_int4 = lm_row.kind == model::WeightKind::Int4;
 
   // embed_tokens is uploaded row-major and verbatim: it is gathered one row per
   // token, so no tiling helps and the mmap is already the canonical layout.
@@ -428,12 +505,12 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   m.report.small_bytes += rope_bytes;
 
   Staging st;
-  st.i4.resize(size_t(Qwen35::shape(model::LinearId::GateUp).N / 16) *
-               (Qwen35::shape(model::LinearId::GateUp).K / 64) * 136);
-  st.bf_src.resize(size_t(Qwen35::shape(model::LinearId::AB).N) *
-                   Qwen35::shape(model::LinearId::AB).K);
-  st.bf_tiled.resize(size_t(Qwen35::shape(model::LinearId::LmHead).N) *
-                     Qwen35::shape(model::LinearId::LmHead).K);
+  const model::GemvShape& ab = Qwen35::shape(model::LinearId::AB);
+  st.i4.resize(std::max(int4_words(Qwen35::shape(model::LinearId::GateUp)),
+                        lm_int4 ? int4_words(lm_row.shape) : size_t(0)));
+  st.bf_src.resize(size_t(ab.N) * ab.K);
+  st.bf_tiled.resize(std::max(size_t(ab.N) * ab.K,
+                              lm_int4 ? size_t(0) : size_t(lm_row.shape.N) * lm_row.shape.K));
 
   const std::vector<model::LayerDesc> layers = Qwen35::layers();
   m.layer_small.reserve(layers.size());
@@ -445,8 +522,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
     m.layer_small.push_back(load_small(ctx, imm, set, view, ld, m.report, widen));
   }
   m.linears.emplace(std::make_pair(kTopLevel, model::LinearId::LmHead),
-                    load_linear(ctx, imm, set, view, "",
-                                Qwen35::linear(model::LinearId::LmHead), st, m.report));
+                    load_linear(ctx, imm, set, view, "", lm_row, st, m.report));
 
   // Up to five names, so a checkpoint that grew a family of tensors says which
   // family rather than making the reader re-run with a debugger.
@@ -454,14 +530,22 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   for (const auto& [stripped, full] : view.names) {
     (void)full;
     if (view.consumed.count(stripped)) continue;
-    if (stripped.size() > 7 && stripped.compare(stripped.size() - 7, 7, ".qzeros") == 0) continue;
-    if (stripped.size() > 6 && stripped.compare(stripped.size() - 6, 6, ".g_idx") == 0) continue;
+    if (has_suffix(stripped, ".qzeros")) continue;
+    if (has_suffix(stripped, ".g_idx")) continue;
     if (m.report.unconsumed++ < 5) unconsumed += (unconsumed.empty() ? "" : ", ") + stripped;
   }
   if (m.report.unconsumed > 5) unconsumed += ", …";
 
   const LoadReport& r = m.report;
   const double gb = 1e9;
+  // The two vocabularies print as one line, naming whichever one this
+  // checkpoint spoke - a report that always said "dynamic exclusion rules"
+  // would be silently wrong about an auto-round config.
+  const std::string rules =
+      qc.dynamic_rule_count != 0
+          ? std::to_string(qc.dynamic_rule_count) + " dynamic exclusion rules"
+          : std::to_string(qc.extra_excluded) + " extra_config exclusions + " +
+                std::to_string(qc.extra_quantised) + " explicit int4";
   // The RoPE table is resident but NOT streamed per token: the decode step reads
   // one position's 2 x 32 floats (~256 B), not the 4.19 MB table. It therefore
   // sits outside the read-per-token figure on both sides of the cross-check,
@@ -470,40 +554,48 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   const size_t small_resident = r.small_bytes - rope_bytes;
   const size_t per_token = r.int4_bytes + r.scale_bytes + r.bf16_linear_bytes + r.pad_bytes +
                            r.lm_head_bytes + small_resident;
-  const double expected = kDocW + double(r.pad_bytes) + double(widen.total());
+  // doc-03's W measured a bf16 lm_head. A packed one is an itemised term on the
+  // expected side, exactly like the padding and the fp32 widening - the check
+  // stays at 2%, and the two sides move together or the load fails.
+  const double lm_adjust =
+      lm_int4 ? double(kLmHeadInt4Bytes) - double(kLmHeadBf16Bytes) : 0.0;
+  const double expected = kDocW + double(r.pad_bytes) + double(widen.total()) + lm_adjust;
   const double delta = (double(per_token) - expected) / expected;
   m.report.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
   std::printf(
       "loader: %s\n"
-      "  quant     int4 g%u sym desc_act=false, %zu dynamic exclusion rules\n"
-      "  tensors   %zu language-model + lm_head; skipped %zu visual, %zu mtp;\n"
+      "  quant     int4 g%u sym desc_act=false (%s), %s\n"
+      "  tensors   %zu language-model + %zu top-level; skipped %zu visual, %zu mtp;\n"
       "            dropped %zu qzeros + %zu g_idx (invariants asserted), %zu unconsumed%s%s\n"
       "  scales    %zu subnormal f16 (exact on device and in f16_to_f32; not an error)\n"
       "  linears   %zu fused weights, %zu layers\n"
       "  int4        %13zu B  %7.3f GB\n"
       "  scales      %13zu B  %7.3f GB\n"
       "  bf16_linear %13zu B  %7.3f GB   (a‖b real rows; %.3f GB with padding)\n"
-      "  lm_head     %13zu B  %7.3f GB\n"
+      "  lm_head     %13zu B  %7.3f GB   (%s, by checkpoint content)\n"
       "  small       %13zu B  %7.3f GB   (per-layer blocks + final norm)\n"
       "  pad         %13zu B  %7.3f GB\n"
       "  read/token  %13zu B  %7.3f GB\n"
       "  embed       %13zu B  %7.3f GB   (resident, gathered - not per-token)\n"
       "  rope        %13zu B  %7.3f GB   (resident, ~256 B per token - not per-token)\n"
       "  total       %13zu B  %7.3f GB\n"
-      "  W check     %.3f GB vs %.3f GB expected = %.3f doc-03 + %.3f pad + %.6f widen\n"
+      "  W check     %.3f GB vs %.3f GB expected = %.3f doc-03 + %.3f pad + %.6f widen"
+      " %+.3f lm_head\n"
       "              widen = %zu B RMSNorm fp32 (1+w) + %zu B GDN fp32  ->  %+.3f%%\n"
       "  load        %.1f s\n",
-      snap.c_str(), qc.group_size, qc.dynamic_rule_count, view.names.size() - 1,
+      snap.c_str(), qc.group_size, qc.desc_act_declared ? "declared" : "inferred, 0 g_idx",
+      rules.c_str(), view.names.size() - view.top_level, view.top_level,
       view.visual_skipped, view.mtp_skipped, view.qzeros, view.g_idx, r.unconsumed,
       r.unconsumed ? " incl. " : "", unconsumed.c_str(), scan.subnormal_scales, m.linears.size(),
       m.layer_small.size(), r.int4_bytes, r.int4_bytes / gb, r.scale_bytes, r.scale_bytes / gb,
       r.bf16_linear_bytes, r.bf16_linear_bytes / gb, (r.bf16_linear_bytes + r.pad_bytes) / gb,
-      r.lm_head_bytes, r.lm_head_bytes / gb, small_resident, small_resident / gb,
+      r.lm_head_bytes, r.lm_head_bytes / gb, lm_int4 ? "int4 g64" : "bf16",
+      small_resident, small_resident / gb,
       r.pad_bytes, r.pad_bytes / gb, per_token, per_token / gb, r.embed_bytes, r.embed_bytes / gb,
       rope_bytes, rope_bytes / gb, r.total(), r.total() / gb, per_token / gb, expected / gb,
-      kDocW / gb, r.pad_bytes / gb, widen.total() / gb, widen.norm, widen.gdn, delta * 100.0,
-      m.report.seconds);
+      kDocW / gb, r.pad_bytes / gb, widen.total() / gb, lm_adjust / gb, widen.norm, widen.gdn,
+      delta * 100.0, m.report.seconds);
 
   if (std::fabs(delta) > 0.02)
     throw std::runtime_error("resident read-per-token bytes " + std::to_string(per_token) +

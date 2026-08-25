@@ -55,11 +55,25 @@ const std::array<FusedLinear, kLinearCount>& table() {
       // K = 6144 = 24 heads x 256.
       {LinearId::OProj, {6144, 5120, 16, 1}, WeightKind::Int4, Fuse::Single,
        {"self_attn.o_proj"}, 0},
-      // Top level, not quantised, read in full every token (2.54 GB).
+      // Top level. The bf16 row: 2.543 GB read in full every token. This is
+      // the row `linear(LinearId::LmHead)` returns and the one the shipped
+      // bf16 checkpoint needs; `lm_head_int4()` below is its counterpart
+      // for a checkpoint that packed this tensor, and the loader picks between
+      // them by content (Qwen35::lm_head, qwen35.h).
       {LinearId::LmHead, {5120, 248320, 1, 0}, WeightKind::Bf16, Fuse::Single,
        {"lm_head"}, 0},
   }};
   return t;
+}
+
+// The int4 `lm_head` - same tensor, same K and N, 0.675 GB instead of 2.543.
+// Deliberately NOT a ninth entry in `table()`: `LinearId` indexes that array
+// and `LinearId::LmHead` must stay one ordinal, so a second row for the same id
+// lives beside it. The `{S, layout}` choice is argued in qwen35.h.
+const FusedLinear& lm_head_int4() {
+  static const FusedLinear r = {LinearId::LmHead, {5120, 248320, 1, 1}, WeightKind::Int4,
+                                Fuse::Single,     {"lm_head"},          0};
+  return r;
 }
 
 std::vector<FusedLinear> pick(std::initializer_list<LinearId> ids) {
@@ -135,6 +149,10 @@ const FusedLinear& Qwen35::linear(LinearId id) {
     throw std::out_of_range("Qwen35::linear: LinearId ordinal " + std::to_string(i) +
                             " is out of range (table has " + std::to_string(kLinearCount) + ")");
   return table()[i];
+}
+
+const FusedLinear& Qwen35::lm_head(WeightKind kind) {
+  return kind == WeightKind::Int4 ? lm_head_int4() : linear(LinearId::LmHead);
 }
 
 const GemvShape& Qwen35::shape(LinearId id) { return linear(id).shape; }

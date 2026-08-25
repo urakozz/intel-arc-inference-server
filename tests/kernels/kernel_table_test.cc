@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <vector>
 #include "check.h"
 #include "kernels/kernels.h"
 #include "model/qwen35.h"
@@ -15,8 +16,20 @@ int main() {
   using model::LinearId;
   using model::Qwen35;
   size_t checked = 0, missing = 0;
-  for (size_t i = 0; i < size_t(LinearId::kCount); ++i) {
-    const model::FusedLinear& fl = Qwen35::linear(LinearId(i));
+  // The eight table rows, plus the int4 `lm_head` row - which is NOT in the
+  // table (LinearId::LmHead is one ordinal and `table()` is indexed by it), so
+  // the loop below would never see it and the missing binary would surface as
+  // a zeModuleCreate failure 13 s into a load of the RTN checkpoint. `lm_head`
+  // is the one linear whose kind is a property of the checkpoint rather than of
+  // the model (model/qwen35.h), so BOTH of its kinds must be compiled for the
+  // engine to accept both checkpoints, and this is the list that says so.
+  auto rows = [] {
+    std::vector<model::FusedLinear> v;
+    for (size_t i = 0; i < size_t(LinearId::kCount); ++i) v.push_back(Qwen35::linear(LinearId(i)));
+    v.push_back(Qwen35::lm_head(model::WeightKind::Int4));
+    return v;
+  }();
+  for (const model::FusedLinear& fl : rows) {
     const model::GemvShape& s = fl.shape;
     // bf16 rows have one tiled layout and no split-K variant; their `layout`
     // and `S` columns are fillers (docs/13-loader.md), so they are not part of
@@ -30,14 +43,16 @@ int main() {
             : kernels::gemv_bf16_variant(1, s.K, s.N, kernels::gemv_bf16_tiling(s.N));
     const std::string path = kernels::path(variant);
     if (!std::filesystem::exists(path)) {
-      std::fprintf(stderr, "no device binary for table row %zu (%s): %s\n", i,
-                   fl.parts[0].c_str(), path.c_str());
+      std::fprintf(stderr, "no device binary for table row %zu (%s, %s): %s\n", checked,
+                   fl.parts[0].c_str(),
+                   fl.kind == model::WeightKind::Int4 ? "int4" : "bf16", path.c_str());
       ++missing;
     }
     ++checked;
   }
   CHECK_EQ(missing, size_t(0));
-  CHECK_EQ(checked, size_t(8));
-  std::printf("kernel_table_test OK (%zu table rows have a compiled binary)\n", checked);
+  CHECK_EQ(checked, size_t(9));   // 8 table rows + the int4 lm_head row
+  std::printf("kernel_table_test OK (%zu rows have a compiled binary: 8 table + int4 lm_head)\n",
+              checked);
   return 0;
 }

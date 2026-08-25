@@ -47,7 +47,66 @@ int main() {
   loader::QuantConfig qc = loader::QuantConfig::parse(ok);
   CHECK_EQ(qc.group_size, uint32_t(64));
   CHECK_EQ(qc.dynamic_rule_count, size_t(1));
+  CHECK(qc.desc_act_declared);
+  CHECK_EQ(qc.quant_method, std::string("gptq"));
+  CHECK_EQ(qc.extra_excluded, size_t(0));
+
+  // The SECOND spelling: auto-round's `auto_round:auto_gptq`, as written by
+  // tools/quantize_qwen38_rtn.sh (2026-08-26). No `desc_act` key, no `dynamic`
+  // key, an `extra_config` object instead - and an `lm_head` entry that says
+  // the head itself was packed. Every field below is copied from the real
+  // config.json of models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64.
+  auto ar = parse(R"({"quantization_config":{"bits":4,"group_size":64,"sym":true,
+      "data_type":"int","autoround_version":"0.14.2","quant_method":"auto-round",
+      "packing_format":"auto_round:auto_gptq",
+      "extra_config":{
+        "lm_head":{"act_bits":16,"act_data_type":"float","act_dynamic":true,"act_group_size":64,
+                   "act_sym":true,"bits":4,"data_type":"int","group_size":64,
+                   "rotation_config":null,"super_bits":null,"super_group_size":null,"sym":true},
+        "model.language_model.layers.0.linear_attn.in_proj_a":{"bits":16,"data_type":"fp"},
+        "model.language_model.layers.0.linear_attn.in_proj_b":{"bits":16,"data_type":"fp"},
+        "mtp.fc":{"bits":16,"data_type":"fp"}}}})");
+  loader::QuantConfig aq = loader::QuantConfig::parse(ar);
+  CHECK_EQ(aq.group_size, uint32_t(64));
+  CHECK(aq.sym);
+  CHECK(!aq.desc_act);           // inferred, not read
+  CHECK(!aq.desc_act_declared);  // and the loader knows it was inferred
+  CHECK_EQ(aq.quant_method, std::string("auto-round"));
+  CHECK_EQ(aq.packing_format, std::string("auto_round:auto_gptq"));
+  CHECK_EQ(aq.dynamic_rule_count, size_t(0));
+  CHECK_EQ(aq.extra_excluded, size_t(3));
+  CHECK_EQ(aq.extra_quantised, size_t(1));
+
   bool threw = false;
+  // An extra_config module quantised at a group size the kernels do not
+  // implement is a hard stop naming the module - the failure mode `dynamic`'s
+  // regexes could only be approximated at.
+  try {
+    auto g128mod = parse(R"({"quantization_config":{"bits":4,"group_size":64,"sym":true,
+        "quant_method":"auto-round","extra_config":{"lm_head":{"bits":4,"group_size":128,"sym":true}}}})");
+    loader::QuantConfig::parse(g128mod);
+  } catch (const std::runtime_error& e) {
+    threw = std::string(e.what()).find("lm_head") != std::string::npos;
+  }
+  CHECK(threw);
+  threw = false;
+  try {
+    auto pf = parse(R"({"quantization_config":{"bits":4,"group_size":64,"sym":true,
+        "quant_method":"auto-round","packing_format":"auto_round:awq"}})");
+    loader::QuantConfig::parse(pf);
+  } catch (const std::runtime_error& e) {
+    threw = std::string(e.what()).find("packing_format") != std::string::npos;
+  }
+  CHECK(threw);
+  threw = false;
+  // desc_act=true is still refused whichever vocabulary declares it.
+  try {
+    auto da = parse(R"({"quantization_config":{"bits":4,"group_size":64,"sym":true,
+        "desc_act":true,"quant_method":"auto-round"}})");
+    loader::QuantConfig::parse(da);
+  } catch (const std::runtime_error&) { threw = true; }
+  CHECK(threw);
+  threw = false;
   try {
     auto bad = parse(R"({"quantization_config":{"bits":4,"group_size":64,"sym":true,
         "desc_act":false,"dynamic":{"+:.*mtp.*":{}}}})");
@@ -118,7 +177,14 @@ int main() {
     good_ix.replace(good_ix.find("FILE"), 4, "good.safetensors");
     std::ofstream(dir + "/model.safetensors.index.json") << good_ix;
   }
-  loader::assert_quant_invariants(loader::SafetensorsSet(dir + "/"));
+  {
+    // The scan also COUNTS the g_idx tensors it walked. That count is what
+    // `loader::load` uses to prove an auto-round checkpoint's undeclared
+    // `desc_act` really is false: no g_idx anywhere means no mechanism for an
+    // activation-order permutation to exist (docs/13).
+    loader::QuantScan gs = loader::assert_quant_invariants(loader::SafetensorsSet(dir + "/"));
+    CHECK_EQ(gs.g_idx_tensors, size_t(1));
+  }
   {
     std::string bad_ix = ix;
     bad_ix.replace(bad_ix.find("FILE"), 4, "bad.safetensors");
@@ -173,6 +239,7 @@ int main() {
     std::ofstream(dir + "/model.safetensors.index.json") << ok_ix;
     loader::QuantScan sc = loader::assert_quant_invariants(loader::SafetensorsSet(dir + "/"));
     CHECK_EQ(sc.subnormal_scales, size_t(1));
+    CHECK_EQ(sc.g_idx_tensors, size_t(0));   // the auto-round shape: none shipped
     // ...and f16_to_f32 decodes that subnormal exactly rather than flushing it.
     CHECK_EQ(common::f16_to_f32(0x00A8u), float(0xA8) * 5.9604644775390625e-08f);
     CHECK(common::f16_to_f32(0x00A8u) > 0.0f);
