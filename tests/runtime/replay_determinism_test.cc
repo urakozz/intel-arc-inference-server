@@ -1,0 +1,259 @@
+// replay_determinism_test - spec §8.7, and the acceptance for every kernel in
+// plan 3: the captured decode list, replayed, is a pure function of the state
+// it reads. A kernel that breaks this is rejected whatever else it does
+// (doc 04's capture-safety rule).
+//
+// Three comparisons, in order of strength:
+//
+//   1. **Same list, same state, twice.** Ingest a fixed 16-id prompt, snapshot
+//      every persistent buffer, generate 8 tokens recording the ids and the
+//      per-layer residual tap, restore the snapshot, generate 8 again. The two
+//      token sequences, the two residual traces and the two *final* states must
+//      be bitwise identical. This is what rules out a data-dependent reduction
+//      order, an atomic, or a work-group count that varies with arrival order.
+//   2. **Fresh-process equivalent.** Re-zero the persistent state, re-ingest
+//      the same prompt from pos = 0 and generate again: same ids. This is what
+//      rules out a scratch buffer that is read before it is written in a step
+//      (run 2 above inherits run 1's scratch; this one does not inherit run
+//      1's *anything* except the weights).
+//   3. **Structure.** kernel_count == 645 (spec §9.1 as amended), one module
+//      per distinct variant, every generated id < kVocabUsed, and no NaN or
+//      Inf anywhere in the residual trace.
+//
+// It does NOT judge output quality - whether the continuation reads like
+// English is Task 8's golden gate, which compares against the oracle. What is
+// asserted here is that whatever the engine computes, it computes it the same
+// way every time.
+//
+// Label `checkpoint`: needs the real 19 GB checkpoint and a B70.
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include "check.h"
+#include "l0/cmdlist.h"
+#include "l0/context.h"
+#include "l0/fence.h"
+#include "l0/memory.h"
+#include "l0/queue.h"
+#include "loader/loader.h"
+#include "model/qwen35.h"
+#include "runtime/buffers.h"
+#include "runtime/capture.h"
+#include "runtime/control.h"
+
+namespace {
+using model::Qwen35;
+
+// The first 16 ids of tests/golden/prompts/prose.txt under the checkpoint's own
+// tokenizer - "The harbour at dawn was quiet enough to hear the ropes creak
+// against the bollards" (tools/oracle/tokenize.py, oracle-out/prose.ids,
+// 2026-08-25). Literal here on purpose: Task 8 is what commits the .ids files,
+// and this test must not wait on it. If the committed prose.ids ever disagrees
+// with this prefix, this list is the one to change.
+constexpr uint32_t kPrompt[] = {760, 72103, 506, 37119, 557, 11012, 3213, 310,
+                                6512, 279, 61789, 272, 1072, 2272, 279, 197616};
+constexpr size_t kPromptLen = sizeof(kPrompt) / sizeof(kPrompt[0]);
+
+constexpr int kGen = 8;             // generated tokens per run
+constexpr uint32_t kCapM = 1;       // the captured list's M (only M = 1 compiles)
+// The residual tap: bf16 [64 layers][M][5120], one buffer per step.
+constexpr size_t kTapElems = size_t(Qwen35::kLayers) * kCapM * Qwen35::kHidden;
+constexpr size_t kTapBytes = kTapElems * 2;
+
+// Everything that survives a token boundary (runtime::DecodeBuffers' first
+// group) - the whole of what a replay is allowed to depend on.
+struct State {
+  std::vector<uint8_t> gdn_state, conv_ring, kv_k, kv_v, control;
+};
+
+struct Run {
+  uint32_t ids[kGen] = {};
+  std::vector<uint16_t> tap = std::vector<uint16_t>(size_t(kGen) * kTapElems);
+};
+
+void same_bytes(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, const char* what) {
+  CHECK_EQ(a.size(), b.size());
+  size_t diff = 0, first = 0;
+  for (size_t i = 0; i < a.size(); ++i)
+    if (a[i] != b[i]) {
+      if (diff == 0) first = i;
+      ++diff;
+    }
+  if (diff != 0)
+    std::fprintf(stderr, "%s: %zu of %zu bytes differ, first at byte %zu\n", what, diff, a.size(),
+                 first);
+  CHECK_EQ(diff, size_t(0));
+}
+
+// bf16 carries fp32's exponent field: all ones is Inf or NaN either way.
+bool bf16_finite(uint16_t w) { return (w & 0x7F80u) != 0x7F80u; }
+}  // namespace
+
+int main(int argc, char** argv) {
+  const std::string arg = argc > 1 ? argv[1] : "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ";
+  l0::Context ctx(0);
+  loader::LoadedModel m = loader::load(ctx, arg);
+  runtime::DecodeBuffers b(ctx, m.max_len);
+  l0::Mem tapmem(ctx, l0::MemKind::Device, kTapBytes);
+
+  runtime::CapturedStep cap = runtime::build(ctx, m, b, &tapmem);
+  std::printf("captured: %zu kernels, %zu modules, max_len %u, persistent %.2f GB\n",
+              cap.kernel_count, cap.modules.size(), b.max_len,
+              b.persistent_bytes() / 1e9);
+  // 48 GDN layers x 10 + 16 FA layers x 10 + 5 token-boundary kernels
+  // (embed_gather, final prep_res_norm, lm_head, argmax x2) - spec §9.1.
+  CHECK_EQ(cap.kernel_count, size_t(645));
+  // One Module per distinct variant: embed_gather, 2 prep_res_norm, silu_mul,
+  // gated_head, gdn_step, 3 attn, 5 int4 gemv, 2 bf16 gemv, 2 argmax.
+  CHECK_EQ(cap.modules.size(), size_t(18));
+
+  l0::Queue q(ctx);
+  l0::Fence fence(q);
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  runtime::Control* c = b.control.as<runtime::Control>();
+
+  // --- the raw decode loop (spec §8.4/§8.5) ---------------------------------
+  // Task 7's Engine wraps exactly this; the test drives it itself so this task
+  // stands alone. Note where the engine-layer precondition lives: every
+  // attention kernel's bound assumes `pos + n_active <= max_len`, and the
+  // *caller* of the list is what guarantees it (Task 5 ruling). Here the caller
+  // is this loop, so the check is here.
+  auto step = [&]() {
+    CHECK(size_t(c->pos) + size_t(c->n_active) <= size_t(b.max_len));
+    q.execute(cap.list, &fence);
+    fence.wait();
+  };
+  // Prompt ingestion: one step per id, the host writing four bytes of shared
+  // memory between replays and nothing else. After the last one `cur_token[0]`
+  // holds the first generated token - argmax_stage2 put it there.
+  auto ingest = [&]() {
+    c->n_active = 1;
+    for (uint32_t id : kPrompt) {
+      c->cur_token[0] = id;
+      step();
+    }
+    CHECK_EQ(c->pos, uint32_t(kPromptLen));
+  };
+  // Generation: the host writes nothing at all. Step g embeds the token the
+  // previous step sampled, so `cur_token[0]` read before the step IS generated
+  // token g; the tap it leaves behind is that token's residual trace.
+  auto generate = [&](Run& r) {
+    for (int g = 0; g < kGen; ++g) {
+      r.ids[g] = c->cur_token[0];
+      step();
+      imm.copy(r.tap.data() + size_t(g) * kTapElems, tapmem.ptr(), kTapBytes);
+    }
+  };
+  auto snapshot = [&]() {
+    State s;
+    auto rd = [&](std::vector<uint8_t>& d, const l0::Mem& src) {
+      d.resize(src.size());
+      imm.copy(d.data(), src.ptr(), src.size());
+    };
+    rd(s.gdn_state, b.gdn_state);
+    rd(s.conv_ring, b.conv_ring);
+    rd(s.kv_k, b.kv_k);
+    rd(s.kv_v, b.kv_v);
+    rd(s.control, b.control);
+    return s;
+  };
+  auto restore = [&](const State& s) {
+    auto wr = [&](const std::vector<uint8_t>& src, l0::Mem& d) {
+      CHECK_EQ(src.size(), d.size());
+      imm.copy(d.ptr(), src.data(), src.size());
+    };
+    wr(s.gdn_state, b.gdn_state);
+    wr(s.conv_ring, b.conv_ring);
+    wr(s.kv_k, b.kv_k);
+    wr(s.kv_v, b.kv_v);
+    wr(s.control, b.control);
+  };
+  auto zero_state = [&]() {
+    for (l0::Mem* mm : {&b.control, &b.gdn_state, &b.conv_ring, &b.kv_k, &b.kv_v})
+      imm.fill(mm->ptr(), 0u, mm->size());
+  };
+
+  // --- run A: ingest, snapshot, generate ------------------------------------
+  ingest();
+  const State after_ingest = snapshot();
+  Run a;
+  const auto t0 = std::chrono::steady_clock::now();
+  generate(a);
+  const double gen_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  const State final_a = snapshot();
+  CHECK_EQ(c->pos, uint32_t(kPromptLen + kGen));
+
+  std::printf("run A ids:");
+  for (uint32_t id : a.ids) std::printf(" %u", id);
+  std::printf("   (%.1f ms/token over %d generated tokens)\n", gen_ms / kGen, kGen);
+
+  // Structure: an id the tokenizer cannot spell is an engine bug, not a rare
+  // token (argmax masks at kVocabUsed - src/kernels/argmax.cl).
+  for (uint32_t id : a.ids) CHECK(id < Qwen35::kVocabUsed);
+  // And nothing in the residual stream may be NaN or Inf: the kernels' rounding
+  // helpers do not handle either, so one would poison every later layer.
+  for (int g = 0; g < kGen; ++g)
+    for (uint32_t l = 0; l < Qwen35::kLayers; ++l)
+      for (uint32_t k = 0; k < Qwen35::kHidden; ++k) {
+        const uint16_t w = a.tap[(size_t(g) * Qwen35::kLayers + l) * Qwen35::kHidden + k];
+        if (!bf16_finite(w)) {
+          std::fprintf(stderr, "non-finite resid: token %d layer %u element %u = 0x%04X\n", g, l, k,
+                       w);
+          CHECK(false);
+        }
+      }
+
+  // --- run B: restore the post-ingest state, generate again ------------------
+  restore(after_ingest);
+  Run bb;
+  generate(bb);
+  const State final_b = snapshot();
+
+  for (int g = 0; g < kGen; ++g) {
+    if (a.ids[g] != bb.ids[g])
+      std::fprintf(stderr, "token %d: run A %u, run B %u\n", g, a.ids[g], bb.ids[g]);
+    CHECK_EQ(a.ids[g], bb.ids[g]);
+  }
+  // Bitwise on the tap, compared per (token, layer) so a failure names the
+  // first layer that diverged - the diagnostic this tap exists for.
+  for (int g = 0; g < kGen; ++g)
+    for (uint32_t l = 0; l < Qwen35::kLayers; ++l) {
+      const size_t off = (size_t(g) * Qwen35::kLayers + l) * Qwen35::kHidden;
+      if (std::memcmp(a.tap.data() + off, bb.tap.data() + off, Qwen35::kHidden * 2) != 0) {
+        std::fprintf(stderr, "resid tap differs at generated token %d, layer %u\n", g, l);
+        CHECK(false);
+      }
+    }
+  same_bytes(final_a.gdn_state, final_b.gdn_state, "gdn_state");
+  same_bytes(final_a.conv_ring, final_b.conv_ring, "conv_ring");
+  same_bytes(final_a.kv_k, final_b.kv_k, "kv_k");
+  same_bytes(final_a.kv_v, final_b.kv_v, "kv_v");
+  same_bytes(final_a.control, final_b.control, "control");
+
+  // --- run C: fresh-process equivalent --------------------------------------
+  zero_state();
+  ingest();
+  Run cc;
+  generate(cc);
+  for (int g = 0; g < kGen; ++g) {
+    if (a.ids[g] != cc.ids[g])
+      std::fprintf(stderr, "token %d: run A %u, fresh run %u\n", g, a.ids[g], cc.ids[g]);
+    CHECK_EQ(a.ids[g], cc.ids[g]);
+  }
+  for (int g = 0; g < kGen; ++g)
+    for (uint32_t l = 0; l < Qwen35::kLayers; ++l) {
+      const size_t off = (size_t(g) * Qwen35::kLayers + l) * Qwen35::kHidden;
+      if (std::memcmp(a.tap.data() + off, cc.tap.data() + off, Qwen35::kHidden * 2) != 0) {
+        std::fprintf(stderr, "fresh-ingest resid differs at generated token %d, layer %u\n", g, l);
+        CHECK(false);
+      }
+    }
+
+  std::printf("replay_determinism_test OK (%d tokens x 3 runs bitwise identical)\n", kGen);
+  return 0;
+}

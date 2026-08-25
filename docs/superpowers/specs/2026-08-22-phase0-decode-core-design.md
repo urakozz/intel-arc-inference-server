@@ -312,6 +312,8 @@ struct Control {          // 64 B, zeMemAllocShared, read by kernels, written by
 };
 ```
 
+**Correction 2026-08-25 (plan 3 Task 6):** the block is **128 B**, not the 64 B this sketch claims - its own fields need 96, plus the `debug_flag` §8.8 asks for; `src/runtime/control.h`'s `static_assert(sizeof(Control) == 128)` is the authority.
+
 Kernels read `pos` and `n_active` and derive `seq_len = pos + n_active`.
 The argmax kernel writes `out_token[m]`, sets `cur_token[0] = out_token[n_active−1]`
 and does `pos += n_active`. Nothing in the list is ever mutated after close.
