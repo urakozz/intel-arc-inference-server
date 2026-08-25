@@ -28,6 +28,17 @@ token. The roofline on the two measured constants (15.540 GB/token, 590 GB/s)
 is 26.34 ms. Full rows in [BENCHMARKS.md](BENCHMARKS.md), the verdict and what
 it scopes in [05-perf-model.md](05-perf-model.md).
 
+> **That 42.141 ms is the step at `43bb720`, and every "% of a step" below is
+> against it.** Spec 1.5's three levers (`a‖b` K-split, `prep_res_norm`
+> two-stage, `ATTN_BLOCK` 256 → 64 - each with its own "Measured - lever L*"
+> section in this document) took the recorded step to **36.32 ms/token /
+> 27.54 t/s** at the spec 1.5 gate, `ef6acb0`, 2026-08-25. The percentages here
+> were not recomputed: each lever's own section carries its before/after, and
+> re-basing a document-wide denominator halfway through would make two numbers
+> for one quantity. Multiply by 42.141/36.32 = 1.16 to read a share against
+> today's step. Why the spec closed short is
+> [the re-assessment memo](superpowers/specs/2026-08-25-spec1.5-reassessment.md).
+
 Four kinds of number appear in the sections below, and **every one of them says
 which it is**:
 
