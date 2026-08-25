@@ -111,8 +111,9 @@ so those runs were a control and nothing more.
 
 **What does cover the deep merge** is `tests/kernels/attn_test.cc`, at
 `pos = 4095` (64 live blocks) and `pos = 16383` on the L16384 binary (256 live
-blocks, a 256-step merge), where the device is held to **≤ 2 bf16 ulp** against
-a host reference that models the same blocking - and nothing else does. There is
+blocks, a 256-step merge), where the device is held to a ruled **≤ 2 bf16 ulp**
+and measures **1 ulp on one word** at its worst, against a host reference that
+models the same blocking - and nothing else does. There is
 no oracle at depth 4096. **A lever that changes attention arithmetic cannot be
 signed off by this gate alone**, and the next one should say so before it starts
 rather than after.

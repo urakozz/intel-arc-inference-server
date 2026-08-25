@@ -1646,17 +1646,30 @@ never the question here either.
 `src/kernels/attn.cl`, three entry points in one file. **16 of the model's 64
 layers** run all three, in order, per token: `attn_prep` → `attn_decode` →
 `attn_reduce`. Variants are `attn_prep_M{M}` and
-`attn_{decode,reduce}_M{M}_L{MAXLEN}` - `attn_prep` indexes the KV caches by
-absolute position and so needs no `max_len`, while the other two bake it because
-`attn_part` is strided `[24][MAXLEN/256][M][258]` and a stride must be a
-compile-time constant. The *grid* still comes from `buffers.max_len` at capture,
-so the variant bound to a layer must be the one built for that `max_len`.
+`attn_{decode,reduce}_M{M}_L{MAXLEN}_B{ATTN_BLOCK}` - `attn_prep` indexes the KV
+caches by absolute position and blocks nothing, so it needs neither suffix, while
+the other two bake `MAXLEN` because `attn_part` is strided
+`[24][MAXLEN/ATTN_BLOCK][M][258]` and a stride must be a compile-time constant.
+The *grid* still comes from `buffers.max_len` at capture, so the variant bound
+to a layer must be the one built for that `max_len`.
+
+**`B` is in the name for a reason `L` is not.** `MAXLEN` is checked at capture
+(`check_sizes` requires `model.max_len == buffers.max_len`); `ATTN_BLOCK` cannot
+be, because its host twin - `runtime::DecodeBuffers::kAttnBlock`, which sizes
+`attn_part` and sets `attn_decode`'s grid - lives on the other side of a
+compiler. Putting it in the name turns a disagreement into "no such binary" at
+`zeModuleCreate` instead of a buffer strided one way and written another. It is
+the arrangement `prep_res_fold`'s `G` uses, for the same reason, and spec 1.5's
+lever L5 - which moved the block from 256 to 64 - is why it is a parameter at
+all. `kernels::attn_{decode,reduce}_variant` therefore take **three** arguments
+(`M`, `MAXLEN`, `BLOCK`), and `src/kernels/CMakeLists.txt` holds the one
+`ATTN_BLOCK` value both sides read.
 
 The compiled set is deliberately asymmetric while M = 2 is test-only:
-`attn_prep_M{1,2}`, `attn_{decode,reduce}_M1_L{4096,16384}` and
-`attn_{decode,reduce}_M2_L4096` - the 4096 rows being the length `attn_test`
-allocates. **There is no `attn_{decode,reduce}_M2_L16384`**, so
-`kernels::attn_decode_variant(2, 16384)` names no file and the runtime cannot
+`attn_prep_M{1,2}`, `attn_{decode,reduce}_M1_L{4096,16384}_B64` and
+`attn_{decode,reduce}_M2_L4096_B64` - the 4096 rows being the length `attn_test`
+allocates. **There is no `attn_{decode,reduce}_M2_L16384_B*`**, so
+`kernels::attn_decode_variant(2, 16384, 64)` names no file and the runtime cannot
 bind M = 2 attention at the loader's default `max_len`. Whoever turns M > 1 on
 (plan 3's MTP work) adds those two rows to `src/kernels/CMakeLists.txt` first.
 
@@ -1893,32 +1906,47 @@ with `cos/sin` from the loader's table, whose angles were computed in `double`
 
 `tests/kernels/attn_test.cc` against `attn_ref.h`, on seeded random inputs
 (qkv partials ~ N(0,1), the FA block's fp32 `1 + w` norms ~ U(0.75, 1.25), the
-loader's real RoPE table, and **the entire 4096-position KV cache** filled with
-random bf16 - not just the prefix, so a read past the causal bound shows up as
-noise rather than as a convenient zero). `max_len = 4096`, i.e. 16 blocks.
+loader's real RoPE table, and **the entire KV cache** filled with random bf16 -
+not just the prefix, so a read past the causal bound shows up as noise rather
+than as a convenient zero).
+
+**This section is the post-L5 state.** `ATTN_BLOCK` is **64**, so `max_len =
+4096` is **64 blocks** and the L16384 binary is 256. The pre-L5 table - seven
+cases at `ATTN_BLOCK` 256, where the worst gated distance was **0** - is kept
+below as labelled history, because it is the measurement the bars were ruled on.
 
 Because the reference reproduces every rounding, every tree and every wave, the
 only thing left between host and device is the one libm function OpenCL does not
 require to be correctly rounded and this trio uses: **`exp`, 3 ulp**, in the
 softmax, in the merge and in the final sigmoid. `1.0f/sqrt` is not among them
 (every kernel builds with `-cl-fp32-correctly-rounded-divide-sqrt`), which is
-why the norm, the RoPE and the KV cache are held **bit-exact**:
+why the norm, the RoPE and the KV cache are held **bit-exact**.
 
-| case | `attn_q` roped dims | `attn_part` | `attn_out` rel (bar 1e-3) | `attn_out` ulp: worst anywhere / worst at `|ref| ≥ rms/8` (bar 2) | blocks still canary |
+**11 cases at 9 distinct depths.** Eight at L4096 M = 1, two at L4096 M = 2, one
+on the L16384 binary. `pos` 63, 127 and 129 were added by lever L5: the retile
+moved the block edge out from under `pos` 255, which used to be the "block
+exactly full" case and is now merely `4 · 64`.
+
+| case (`ATTN_BLOCK` 64) | `attn_q` roped dims | `attn_part` | `attn_out` rel (bar **8e-3**) | `attn_out` ulp: worst anywhere / worst at `\|ref\| ≥ rms/8` (bar 2) | blocks still canary |
 |---|---|---|---|---|---|
-| `pos = 0` (one valid position; 15 blocks early-out) | **0** | **0** | **0** | 0 (0 of 6144 differ) / **0** of 5282 | 360 × 1 |
-| `pos = 254` (block 0 partial; 255 masked) | **0** | 4.670e-07 | 1.326e-05 | 1 (1 word) / **0** of 5278 | 360 × 1 |
-| `pos = 255` (block 0 exactly full) | **0** | 5.024e-07 | **0** | 0 (0 words) / **0** of 5299 | 360 × 1 |
-| `pos = 256` (block 1: one valid position, 15 empty waves) | **0** | 7.109e-07 | 8.664e-04 | 2 (1 word) / **0** of 5267 | 336 × 1 |
-| `pos = 4095` (cache full to `max_len`; 16-block merge) | **0** | 7.240e-07 | 1.995e-04 | 95 (3 words) / **0** of 5305 | 0 |
-| `pos = 254`, M = 2 (per-`m` mask **inside** one block) | **0** | 6.420e-07 | **0** | 0 (0 of 12288) / **0** of 10562 | 360 × 2 |
-| `pos = 255`, M = 2 (per-`m` mask **across** the block edge) | **0** | 8.018e-07 | 1.270e-05 | 2 (2 words) / **0** of 10480 | 336 × 2 |
+| `pos = 0` (one valid position; 63 blocks early-out) | **0** | **0** | **0** | 0 (0 of 6144 differ) / **0** of 5282 | 1512 × 1 |
+| `pos = 63` (block 0 exactly full - **new at L5**) | **0** | 3.837e-07 | 2.673e-05 | 1 (1 word) / **0** of 5264 | 1512 × 1 |
+| `pos = 127` (block 1 exactly full; 2-block merge - **new at L5**) | **0** | 5.095e-07 | **0** | 0 (0 words) / **0** of 5264 | 1488 × 1 |
+| `pos = 129` (block 2: two valid positions, 3 empty waves - **new at L5**) | **0** | 5.459e-07 | 6.051e-04 | 1 (2 words) / **1** of 5307 | 1464 × 1 |
+| `pos = 254` (block 3 partial; 255 masked) | **0** | 6.045e-07 | **0** | 0 (0 words) / **0** of 5278 | 1440 × 1 |
+| `pos = 255` (block 3 exactly full) | **0** | 5.719e-07 | **0** | 0 (0 words) / **0** of 5299 | 1440 × 1 |
+| `pos = 256` (block 4: one valid position, 3 empty waves) | **0** | 5.252e-07 | **0** | 0 (0 words) / **0** of 5267 | 1416 × 1 |
+| `pos = 4095` (cache full to `max_len`; **64**-block merge) | **0** | 7.599e-07 | 1.995e-04 | 90 (3 words) / **0** of 5305 | 0 |
+| `pos = 254`, M = 2 (per-`m` mask **inside** one block) | **0** | 6.009e-07 | 1.285e-05 | 1 (1 of 12288) / **0** of 10562 | 1440 × 2 |
+| `pos = 255`, M = 2 (per-`m` mask **across** the block edge) | **0** | 4.818e-07 | 1.270e-05 | 2 (3 words) / **0** of 10480 | 1416 × 2 |
+| **L16384**, `pos = 16383` (**256**-block merge; `hmx`/`hsm` at full length) | **0** | 7.522e-07 | 1.615e-03 | 1 (2 words) / **1** of 5271 | 0 |
 
 and, in **every** case:
 
-- `kv_k` and `kv_v` - **bit-exact over all 4 194 304 words of each cache**, not
-  just the slots this step writes. The untouched slots are what prove
-  `attn_prep` writes positions `pos … pos+n_active−1` and nothing else.
+- `kv_k` and `kv_v` - **bit-exact over all 4 194 304 words of each cache** at
+  L4096 (16 777 216 at L16384), not just the slots this step writes. The
+  untouched slots are what prove `attn_prep` writes positions
+  `pos … pos+n_active−1` and nothing else.
 - `attn_q`'s pass-through dims 64..255 and the whole of `attn_gate` -
   **bit-exact**. The roped dims 0..63 carry the ruled 2 ulp bf16 bar and come
   back at **0** everywhere, which is the fma spelling above doing its job.
@@ -1927,42 +1955,86 @@ and, in **every** case:
 
 **`attn_out` carries two bars, and the second one is the arbiter.**
 
-**(a) Relative error ≤ 1e-3, floored at the tensor's RMS.** The 1e-3 is the
-plan's; the *floor* is this task's deviation from it, and it is not optional:
-`acc/sm` is a weighted average of *signed* v values, so a dim can cancel to
-~6.6e-10 against an RMS of ~0.07, and an unfloored ratio there would measure the
-cancellation rather than the kernel (the `pos = 4095` row's "95 ulp anywhere" is
-exactly one such dim - 3.5e-10 of absolute nothing).
+**(a) Relative error ≤ 8e-3, floored at the tensor's RMS.** The *floor* is this
+trio's deviation from a plain relative bar, and it is not optional: `acc/sm` is a
+weighted average of *signed* v values, so a dim can cancel to ~6.6e-10 against an
+RMS of ~0.07, and an unfloored ratio there would measure the cancellation rather
+than the kernel (the `pos = 4095` row's "90 ulp anywhere" is exactly one such dim
+- 3.8e-06 of absolute nothing against a 0.07 RMS).
 
 **(b) ≤ 2 bf16 ulp on every element with `|ref| ≥ rms/8`.** Dividing by the RMS
 is what makes (a) slack on exactly the elements a bf16 output can most easily
-move: `attn_out` *is* bf16, so a **single** round-to-nearest boundary flip on an
-element the size of the RMS is already `2^-8 = 3.9e-3` of relative error, four
-times (a)'s bar. So (b) is the one to trust - **if a driver change ever trips
-(a), read (b) before believing the kernel broke.** The `rms/8` gate is what
-keeps (b) from being either vacuous or false: below it a bf16 ulp is not a unit
-of error at all, above it it is the only unit that means anything. The **2** is
-the arithmetic of the final chain rather than a fudge -
+move. **The ulp arithmetic, stated properly, because it is what sizes (a):**
+bf16 has **7 explicit mantissa bits**, so inside a binade `[2^k, 2^k+1)` the
+spacing is `2^(k-7)` and one ulp is between `2^-8` and `2^-7` of the element -
+**3.9e-3 to 7.8e-3** - with the top of that range at the *bottom* of a binade.
+Two ulp is therefore **7.8e-3 to 1.5625e-2**. So (b) is the one to trust -
+**if a change ever trips (a), read (b) before believing the kernel broke.** The
+`rms/8` gate is what keeps (b) from being either vacuous or false: below it a
+bf16 ulp is not a unit of error at all, above it it is the only unit that means
+anything. The **2** is the arithmetic of the final chain rather than a fudge -
 `rne_bf16(f32(rne_bf16(acc/sm)) · sigmoid_f32(gate))` rounds to bf16 **twice**,
 and 3 ulp of `exp` slack can push a boundary value one ulp at each of those
 roundings and no further; 3 would mean an arithmetic difference.
 
-The measured picture is sharper than either bar. Across all seven cases the
-worst gated distance is **0**: every one of the ~5280 elements per token at or
-above `rms/8` (86% of the 6144) is **bit-identical** to the reference, and the
-one-to-three words that differ at all lie strictly below the gate. The thin
-number in the table - `pos = 256`'s 8.664e-04 against (a)'s 1e-3, a 1.15×
-margin - comes entirely from a dim at `|ref| ≈ 0.006` against an RMS of 0.070,
-i.e. from (a) measuring cancellation, which is the structural reason (b) exists.
+**(a) read 1e-3 before lever L5, and 1e-3 was never consistent with (b).** One
+ulp on a gated element reaches 7.8e-3, so (a) at 1e-3 could only pass while the
+device happened to reproduce the host bit for bit - which, at `ATTN_BLOCK` 256,
+it did on every gated element of every case. L5 reassociates the softmax
+partials (4 waves per block accumulate where 16 did, and `attn_reduce` merges
+4× as many), and the first gated word to land the far side of a bf16 rounding
+boundary took (a) with it. **(a) is now 8e-3 = 2^-7, one gated ulp at its worst.**
+
+**What that does and does not fix.** It removes the guaranteed contradiction and
+narrows the remaining one ~8×, but it does **not** remove it: a legitimate 2-ulp
+gated difference lands anywhere in `(7.8e-3, 1.5625e-2]`, so one in the residual
+band **`(8e-3, 1.5625e-2]` would trip (a) while (b) still passes**. Nothing
+measured is within 5× of that band - the worst (a) reading anywhere in the table
+is the L16384 case's 1.615e-3 - and (b) remains the arbiter, so the bar is left
+at 8e-3 rather than raised to 1.5625e-2, where it would stop covering anything.
+(a)'s remaining job is the elements **below** (b)'s `rms/8` gate, where it still
+catches any absolute error over 2 ulp of the RMS.
+
+**The measured picture is still much sharper than either bar.** The worst gated
+distance across all 11 cases is **1 ulp**, on **one word** in each of two cases
+(`pos = 129` and L16384 `pos = 16383`); the other nine cases are **bit-identical
+on every gated element**, and the 5264-5307 gated words per token are 86% of the
+6144. Everything else that differs at all lies strictly below the gate. Against
+`ATTN_BLOCK` 256's "worst gated 0 in all seven cases", that is the whole
+correctness cost of the retile: **two words, one ulp each.**
 
 The M = 2 variant is compiled for spec 1 §9's M-loop rule and **run**, on the
 gdn_step precedent, because it is the only cover for per-`m` causal masking - at
 M = 1 every position in flight shares one causal bound. At `pos = 254, n = 2`
-position 255 is masked for `m = 0` and valid for `m = 1`, so block 0 must produce
-two different partials for the same (q-head, block); at `pos = 255, n = 2`
-block 1 is wholly beyond `m = 0`'s bound, writes `(−INF, 0, 0)`, and
-`attn_reduce` - whose `nb(0)` is 1 - must not read it. The `−INF` headers are
-compared as **exact bit patterns**, not as numbers.
+positions 254 and 255 are both in **block 3** (192…255) and 255 is masked for
+`m = 0` and valid for `m = 1`, so that block must produce two different partials
+for the same (q-head, block); at `pos = 255, n = 2` **block 4** is wholly beyond
+`m = 0`'s bound, writes `(−INF, 0, 0)`, and `attn_reduce` - whose `nb(0)` is
+**4** - must not read it. The `−INF` headers are compared as **exact bit
+patterns**, not as numbers.
+
+#### History: the same bars at `ATTN_BLOCK` 256 (pre-L5)
+
+Seven cases, `max_len = 4096` = 16 blocks, bar (a) at the then-1e-3. Kept because
+it is the run the two bars were ruled on, and because "worst gated **0**, every
+one of the ~5280 gated elements bit-identical" is the baseline the row above is
+measured against.
+
+| case (`ATTN_BLOCK` 256) | `attn_part` | `attn_out` rel (bar 1e-3) | ulp: anywhere / gated | canary |
+|---|---|---|---|---|
+| `pos = 0` (15 blocks early-out) | **0** | **0** | 0 / **0** of 5282 | 360 × 1 |
+| `pos = 254` (block 0 partial) | 4.670e-07 | 1.326e-05 | 1 / **0** of 5278 | 360 × 1 |
+| `pos = 255` (block 0 exactly full) | 5.024e-07 | **0** | 0 / **0** of 5299 | 360 × 1 |
+| `pos = 256` (block 1: one valid position, 15 empty waves) | 7.109e-07 | 8.664e-04 | 2 / **0** of 5267 | 336 × 1 |
+| `pos = 4095` (16-block merge) | 7.240e-07 | 1.995e-04 | 95 / **0** of 5305 | 0 |
+| `pos = 254`, M = 2 | 6.420e-07 | **0** | 0 / **0** of 10562 | 360 × 2 |
+| `pos = 255`, M = 2 | 8.018e-07 | 1.270e-05 | 2 / **0** of 10480 | 336 × 2 |
+
+The thin number there - `pos = 256`'s 8.664e-04 against 1e-3, a 1.15× margin -
+came entirely from a dim at `|ref| ≈ 0.006` against an RMS of 0.070, i.e. from
+(a) measuring cancellation, which is the structural reason (b) exists. That
+margin is also the clearest sign, in hindsight, that 1e-3 was living on borrowed
+time: it was one reassociation away from failing, and L5 was that reassociation.
 
 ### Rejected, and what was not measured
 
@@ -1986,15 +2058,19 @@ measurement said, and the numbers themselves are in "Measured - lever L5".
 
   **What ruled it out was the block sweep below, not an argument.** Lever L5
   was executed as an `ATTN_BLOCK` retile - the cheaper half of the same attack
-  - and it took `attn_decode` from 369.988 to **224.046 µs/launch**. Fitting the
-  256/128 pair as `F + walk` puts the part of a launch that is *not* the block
-  walk at ~223 µs of the original 370, and the retiled launch now costs 224 µs
-  in total: whatever dominates this kernel today is not the walk, and SLM
-  staging shortens only the reread inside the walk. It would be optimising at
-  most a quarter of what is left, against a term nothing has yet identified.
-  Worth revisiting only with a probe that names that term first. (Three cost
-  models have died on this kernel already - see below - so this paragraph is a
-  reading of the measurements, not a fourth model.)
+  - and it took `attn_decode` from 369.988 to **224.046 µs/launch**.
+
+  The bound that rules staging out needs **no cost model at all**, which matters
+  because four of them have died on this kernel (see "Measured - lever L5").
+  Take it straight off the sweep: halving the block halves the positions one
+  work-group walks serially, so a halving buys back *at most* the walk that is
+  left. The **second** halving (64 → 32) bought only **20.2 µs/launch**, which
+  bounds everything still walk-shaped in a launch at roughly **0.3-0.6 ms/token**
+  across the 16 layers. SLM staging attacks a *subset* of that - the 6× q-head
+  reread inside the walk, not the walk itself - so its whole ceiling is a
+  fraction of a fraction of a 3.585 ms row. That is not worth six accumulators
+  and six `(mx, sm)` pairs per work-item. Worth revisiting only after a probe
+  names what the other ~200 µs of the launch actually is.
 - **`sub_group_barrier` for the score tree - not used, not measured.** The
   16-wide tree is entirely inside one subgroup, so four of the six
   `barrier(CLK_LOCAL_MEM_FENCE)` per wave could be subgroup fences instead of
@@ -2030,9 +2106,15 @@ measurement said, and the numbers themselves are in "Measured - lever L5".
   allocate, and gives one work-group per Xe-core per 8 blocks at 16k. Only the
   first of those was a real constraint. **Larger** blocks (512, 1024) are still
   not measured and now have no motive: the sweep's slope runs the other way.
-  **Smaller than 64** is measured and rejected - at 32, `attn_decode` keeps
-  falling but `attn_reduce`'s merge more than doubles and the step's total sum
-  of kernel durations comes out *higher*.
+  **Smaller than 64** is measured and rejected, but on the marginal-gain and
+  footprint arguments rather than on a sign change: at 32 the attn family is
+  0.070 ms/token *better*, not worse - the step-Σ difference (+19.5 µs) sits
+  inside the +0.28% drift the non-attn launches showed between those two runs and
+  cannot carry the argument. What carries it is that the marginal gain has
+  collapsed (**−1.127 → −1.092 → −0.070 ms** for the three halvings) while
+  `attn_part` would go 50.7 → **101.4 MB** and `attn_reduce` is on a steep ramp
+  (80 → 196 → 450 µs/step). 0.070 ms is not worth doubling the largest scratch
+  buffer in the step.
 - **`attn_part` in bf16 - rejected outright.** The partials are a softmax
   numerator and denominator; rounding them is rounding the *accumulator*, not an
   op's output, which is exactly what the rounding discipline forbids. It would
@@ -2054,8 +2136,8 @@ the 6× is the q-head loop being outer:
 |---|---|---|
 | `kv_k` + `kv_v` read by `attn_decode` (6 q-head passes) | `6·D·4·1024 B` | **100.7 MB** |
 | - of which *unique* (what a staged version would read) | `D·4·1024 B` | 16.8 MB |
-| `attn_part` written then read | `2 · 24 · (D/256) · 258 · 4 B` | 0.79 MB |
-| `attn_q` read by `attn_decode` (staged once per q-head per block) | `24 · (D/256) · 1 KB` | 0.39 MB |
+| `attn_part` written then read | `2 · 24 · (D/64) · 258 · 4 B` | **3.17 MB** |
+| `attn_q` read by `attn_decode` (staged once per q-head per block) | `24 · (D/64) · 1 KB` | **1.57 MB** |
 | `attn_prep`: partials read, `attn_q`/`attn_gate`/KV written | ~110 KB | 0.11 MB |
 | `attn_reduce`: `attn_gate` read, `attn_out` written | ~37 KB | 0.04 MB |
 
@@ -2064,11 +2146,20 @@ the 6× is the q-head loop being outer:
 ("KV and state sizes at the benchmark shape"). The gap between those two numbers
 is the reread, and how much of it reaches DRAM is a cache question: **the card
 has 24 MB of L2** (doc 01), one FA layer's whole KV at `D` = 4096 is 16.8 MB, and
-at that depth only 64 of the grid's work-groups survive the early-out, holding
-256 KB of block each - 16 MB resident. So at the benchmark depth the reread
-should be almost entirely L2-served, and at `max_len` 16384 (64 MB of live
-blocks) it cannot be. Which of those regimes the real step lands in is exactly
-what Task 9 has to measure before the staged variant above is worth building.
+at that depth **260** of the grid's work-groups survive the early-out, holding
+**64 KB** of block each - 16 MB resident, the same total, since the resident set
+is the live KV and the block size only decides how it is cut up. So at the
+benchmark depth the reread should be almost entirely L2-served, and at `max_len`
+16384 (64 MB of live blocks) it cannot be.
+
+**Resolved against, 2026-08-25 (spec 1.5 lever L5).** This paragraph closed by
+saying which regime the step lands in "is exactly what Task 9 has to measure
+before the staged variant above is worth building". Task 9 measured it, and the
+answer made the staged variant moot rather than justified: the L5 sweep bounds
+everything still walk-shaped in a launch at ~0.3-0.6 ms/token (see "Rejected"
+above), and staging attacks a subset of that. The 6× reread is real and it is
+mostly L2-served at this depth, exactly as this paragraph guessed - it is simply
+not where the time goes.
 
 Launches: **3 per FA layer × 16 layers = 48 per token**, ~25 µs at the measured
 0.52 µs floor (doc 07 #5) - the same order as `gdn_step`'s 48, and the reason
@@ -2085,7 +2176,8 @@ does, with the other 597 kernels held identical, so the *differences* are
 attributable to this trio.
 
 **Live blocks per token, counted properly.** `attn_reduce` merges
-`nb = (pos + m)/256 + 1` blocks (`attn.cl:474`), and `attn_decode`'s early-out
+`nb = (pos + m)/ATTN_BLOCK + 1` blocks (`attn.cl:551`; the divisor was a literal
+256 when this was written), and `attn_decode`'s early-out
 turns off exactly the rest, so `nb` is the count of blocks doing work. `tg` 256
 from depth `D` walks `pos = D … D+255`:
 
@@ -2160,7 +2252,9 @@ profiler found anywhere in the step. `attn_prep` and `attn_reduce`, the two
 kernels this section left unmeasured, are together **0.127 ms** - 0.3% - and are
 not worth another sentence.
 
-Four in-situ points, all with this instrument, 2026-08-25:
+Four in-situ points, all with this instrument, 2026-08-25. **Superseded by lever
+L5 - this table is `ATTN_BLOCK` 256 throughout and is kept as the record the
+retile was predicted from and then falsified against** ("Measured - lever L5"):
 
 | run | `nb` | live WGs | positions attended | µs/launch | ms/token |
 |---|---|---|---|---|---|
@@ -2207,10 +2301,10 @@ Four in-situ points, all with this instrument, 2026-08-25:
    128-position retile measured 296.684 µs/launch against the 214.5 this fit
    predicted (+38.3%), which falsifies `F + fill · P` as surely as the
    depth-1024 point falsified its two predecessors. The block was then swept to
-   64 and 32 rather than fitted, and 64 shipped. Everything after this point in
-   the section is the *pre-L5* record and is kept as such; the after numbers,
-   the sweep and the two further falsifications are in **"Measured - lever L5"**
-   at the end of this chapter.
+   64 and 32 rather than fitted, and 64 shipped. The whole of this section -
+   including the four-point in-situ table **above** this list - is the *pre-L5*
+   record and is kept as such; the after numbers, the sweep and the two further
+   falsifications are in **"Measured - lever L5"** at the end of this chapter.
 
 ### Measured - lever L5 cut it: the attn family 6.058 → 3.839 ms/token
 
@@ -2255,14 +2349,41 @@ The retile was run at three sizes below 256 before one was chosen. All at depth
 | **256** (before) | 68 | 369.988 | 5.920 | 80.241 | **6.058** | 37387.510 |
 | 128 | 132 | 296.684 | 4.747 | 127.240 | **4.931** | 36380.755 |
 | **64** (shipped) | 260 | **224.046** | **3.585** | 196.195 | **3.839** | **35342.441** |
-| 32 | 516 | 203.888 | 3.262 | 452.816 | 3.772 | 35363.298 |
+| 32 | 516 | 203.837 | 3.261 | 450.208 | 3.769 | 35361.950 |
 
-**64 is the knee and it is measured on both sides.** At 32 `attn_decode` still
-improves (−20.2 µs/launch, −0.32 ms/token) but `attn_reduce` more than doubles
-again (+256.6 µs/step) and the step's whole Σ comes out **21 µs higher** than at
-64 - inside drift, i.e. 32 buys nothing and costs 101 MB of `attn_part` to buy
-it. `attn_part` at 64 is 50.7 MB against 12.7 before
+**Why the sweep stopped at 64, stated carefully - the earlier "knee measured on
+both sides" claim was too strong and is withdrawn.** At `ATTN_BLOCK` 32 the attn
+family is **3.769 ms/token against 64's 3.839 - 0.070 ms BETTER**, not worse.
+The step's Σ does come out higher at 32 (35361.950 vs 35342.441, +19.5 µs), but
+the non-attn launches drifted **+0.283%** (+89.3 µs) between those two runs, so
+that sign is drift and cannot carry the argument. Three things that can:
+
+1. **The marginal gain has collapsed.** The three halvings bought
+   **−1.127, −1.092 and −0.070 ms/token** on the family. The third is 6% of the
+   second and roughly a third of one run's drift.
+2. **`attn_reduce` is on a steep ramp** - 80.2 → 127.2 → 196.2 → **450.2**
+   µs/step - and it is what cancels `attn_decode`'s remaining gain: at 32,
+   `attn_decode` gives up 323 µs/step and `attn_reduce` takes back 254.
+3. **`attn_part` would double again, 50.7 → 101.4 MB**, taking per-step scratch
+   from 77.6 to 128.3 MB. 0.070 ms/token - under the run-to-run drift - is not
+   worth doubling the largest scratch buffer in the step.
+
+`attn_part` at 64 is 50.7 MB against 12.7 before
 (tests/runtime/buffers_test.cc carries the arithmetic).
+
+**The B32 row's transcript** (`--profile --depth 4096 --steps 32`, idle box, a
+second independent run made specifically to record it; the first run's family
+total was 3772.280 µs, 0.08% away, so the row reproduces):
+
+```
+  attn_decode                               16   3261.393   9.23%     203.837
+  attn_reduce                               16    450.208   1.27%      28.138
+  attn_prep                                 16     57.617   0.16%       3.601
+  attn_decode_M1_L16384_B32                 16   3261.393   9.23%     203.837
+  attn_reduce_M1_L16384_B32                 16    450.208   1.27%      28.138
+  sum of 774 kernel durations    35361.950 us   [35225.417 .. 35492.292]
+  fence wall (submit + wait)     36379.774 us   [36246.242 .. 36542.172]
+```
 
 #### A third model died here, and this document does not offer a fourth
 
@@ -2297,17 +2418,23 @@ What is **measured** and not fitted, over 256 → 128 → 64:
 
 `attn_part` and `attn_out` are reassociated - 4 waves per block accumulate into a
 partial where 16 did, and `attn_reduce` merges 4× as many partials - so the last
-bits move. `tests/kernels/attn_test.cc` re-ran at ten depths (0, 63, 127, 129,
-254, 255, 256, 4095 at L4096; two M = 2 cases; pos 16383 at L16384) with
-`attn_ref.h` deriving its blocking from `kBlock` so the reference follows the
-kernel by construction:
+bits move. `tests/kernels/attn_test.cc` re-ran **11 cases at 9 distinct depths**
+(0, 63, 127, 129, 254, 255, 256, 4095 at L4096 M = 1; 254 and 255 again at
+M = 2; 16383 on the L16384 binary) with `attn_ref.h` deriving its blocking from
+`kBlock` so the reference follows the kernel by construction:
 
 - `kv_k` / `kv_v` **bit-exact** over the whole cache at every depth (16.8 M
   words each at L16384);
 - `attn_q` roped dims **0 ulp** (`rel 0.000e+00`) at every depth;
 - `attn_part` worst relative error **7.6e-07** - fp32 noise;
-- `attn_out` worst **2 bf16 ulp** at `|ref| ≥ rms/8`, against the ruled bar of 2,
-  on at most 3 words of 6144;
+- `attn_out` worst **1 bf16 ulp** at `|ref| ≥ rms/8`, against the ruled bar of 2
+  - and on **one word** in each of exactly two cases (`pos = 129`, L16384
+  `pos = 16383`); the other nine cases are bit-identical on every gated element.
+  (Worst distance *anywhere*, gate included, is 90 ulp on one sub-gate
+  cancellation dim at `pos = 4095` - 3.8e-06 of absolute nothing against a 0.07
+  RMS, which is the structural reason the gate exists.) Against `ATTN_BLOCK`
+  256's "worst gated 0 in all seven cases", **two words at one ulp is the whole
+  correctness cost of the retile**;
 - the early-out asserted directly by canary, at the new geometry (24 × 63 blocks
   still canary at `pos` 0, 0 at `pos` 4095).
 
