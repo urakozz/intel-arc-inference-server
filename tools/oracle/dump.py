@@ -60,6 +60,15 @@ dequant_gptq = _dequant.dequant_gptq
 SKIP_PREFIXES = ("model.visual.", "mtp.")
 QUANT_SUFFIXES = (".scales", ".qzeros", ".g_idx")
 
+# Column-chunk width for the dequant of very wide tensors. The only one that
+# needs it is an int4 `lm_head` at [5120, 248320]: unchunked it materialises
+# several intermediates of that shape (int32 nibbles, fp32 q, fp32 scales,
+# fp32 product) for ~25 GB of transient RSS on top of a ~47 GB state dict.
+# dequant.py's chunking is bit-identical by construction and asserted in its
+# fixture writer, so this changes peak memory and nothing else.
+DEQUANT_CHUNK = 8192
+DEQUANT_CHUNK_ABOVE = 65536   # columns; below this the unchunked path is fine
+
 
 def die(msg: str, code: int = 2) -> None:
     print(f"FATAL: {msg}", file=sys.stderr)
@@ -87,7 +96,14 @@ def build_state_dict(snapshot: str, group_size: int) -> dict[str, torch.Tensor]:
 
     sd: dict[str, torch.Tensor] = {}
     n_quant = 0
+    lm_head_kind = "absent"
     for key in sorted(where):
+        # `mtp.*` lives in its own shard (`model_extra_tensors.safetensors`) on
+        # both checkpoints and is skipped by NAME, so the shard is opened, its
+        # header read, and nothing in it is ever materialised. The duplicate
+        # check above still covers it, which is the point of doing it before
+        # the skip: an extra-tensors shard that overlapped a numbered one is
+        # the failure this whole loop is shaped around (doc 03, the 9B).
         if key.startswith(SKIP_PREFIXES) or key.endswith(QUANT_SUFFIXES):
             continue
         if key.endswith(".qweight"):
@@ -95,26 +111,69 @@ def build_state_dict(snapshot: str, group_size: int) -> dict[str, torch.Tensor]:
             scales_key = base + ".scales"
             if scales_key not in where:
                 die(f"{key} has no {scales_key}")
+            qw = where[key].get_tensor(key)
+            chunk = DEQUANT_CHUNK if qw.shape[1] > DEQUANT_CHUNK_ABOVE else 0
             # dequant_gptq returns [K, N] = [in, out]; nn.Linear wants [out, in].
-            w = dequant_gptq(where[key].get_tensor(key), where[scales_key].get_tensor(scales_key), group_size)
+            w = dequant_gptq(qw, where[scales_key].get_tensor(scales_key), group_size, chunk)
+            del qw
             sd[map_name(base) + ".weight"] = w.t().contiguous()
+            del w
             n_quant += 1
+            if base == "lm_head":
+                lm_head_kind = "int4 (dequantised here)"
         else:
             t = where[key].get_tensor(key)
             if t.dtype != torch.bfloat16:
                 die(f"unquantised tensor {key} is {t.dtype}, expected bfloat16")
             sd[map_name(key)] = t
+            if key == "lm_head.weight":
+                lm_head_kind = "bf16 (as shipped)"
+    if lm_head_kind == "absent":
+        die("no lm_head.weight and no lm_head.qweight - this checkpoint has no head")
+    # Printed because it is the one tensor whose FORMAT differs between the two
+    # checkpoints this oracle is run against, and a golden set is only
+    # comparable to an engine that made the same choice.
+    print(f"lm_head: {lm_head_kind}")
     print(f"state dict: {len(sd)} tensors, {n_quant} dequantised from int4, "
           f"{sum(t.numel() * t.element_size() for t in sd.values()) / 2**30:.2f} GiB")
     return sd
 
 
 def check_quant_config(snapshot: str) -> int:
+    """The same two config vocabularies loader::QuantConfig::parse accepts.
+
+    GPTQ writes `quant_method: gptq` and an explicit `desc_act`; auto-round's
+    `auto_round:auto_gptq` writer emits `quant_method: auto-round`,
+    `packing_format`, and NO `desc_act` key at all. Absence is that writer's
+    spelling of false - and it is proven here the way the C++ loader proves it,
+    from the shipped tensors: a permutation needs a `g_idx` to carry it, so no
+    `g_idx` anywhere means there is nothing an unstated `desc_act: true` could
+    have meant. Keep this check in step with src/loader/quant.cc; the two are
+    graded against each other by the golden gate and by nothing else.
+    """
     with open(os.path.join(snapshot, "config.json"), encoding="utf-8") as f:
         q = json.load(f).get("quantization_config") or {}
-    if q.get("bits") != 4 or not q.get("sym") or q.get("desc_act"):
-        die(f"dequant_gptq assumes int4 symmetric desc_act=false; config says "
-            f"bits={q.get('bits')} sym={q.get('sym')} desc_act={q.get('desc_act')}")
+    if q.get("bits") != 4 or not q.get("sym"):
+        die(f"dequant_gptq assumes int4 symmetric; config says "
+            f"bits={q.get('bits')} sym={q.get('sym')}")
+    method, packing = q.get("quant_method"), q.get("packing_format")
+    if method not in (None, "gptq", "auto-round"):
+        die(f"quant_method {method!r} is neither 'gptq' nor 'auto-round'; dequant.py implements "
+            f"the GPTQ v1 packing those two share")
+    if packing not in (None, "auto_round:auto_gptq"):
+        die(f"packing_format {packing!r} is not 'auto_round:auto_gptq'")
+    if "desc_act" in q:
+        if q["desc_act"]:
+            die("desc_act is true; dequant_gptq assumes no activation-order permutation")
+    else:
+        n_gidx = 0
+        for path in sorted(glob.glob(os.path.join(snapshot, "*.safetensors"))):
+            with safe_open(path, framework="pt", device="cpu") as h:
+                n_gidx += sum(1 for k in h.keys() if k.endswith(".g_idx"))
+        if n_gidx:
+            die(f"config declares no desc_act (auto-round's false) but the checkpoint ships "
+                f"{n_gidx} g_idx tensors - refusing to infer that nothing is permuted")
+        print(f"desc_act: absent, inferred false ({method}); 0 g_idx tensors shipped")
     gs = q.get("group_size")
     if gs != 64:
         die(f"group_size {gs} != 64 (dequant.py's convention, doc 02)")
@@ -160,6 +219,12 @@ def main() -> None:
 
     t0 = time.time()
     torch.manual_seed(0)  # nothing samples, but pin it anyway
+    # The CPU pool this run actually got. torch reads OMP_NUM_THREADS at import,
+    # so this is the honest number after any cap the wrapper applied - printed
+    # because a dump's wall time is only interpretable next to it, and the box
+    # is shared (tools/oracle/run_in_container.sh, ORACLE_THREADS).
+    print(f"torch intra-op threads: {torch.get_num_threads()} "
+          f"(OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS', 'unset')})")
     group_size = check_quant_config(args.snapshot)
 
     with open(args.prompt, encoding="utf-8") as f:
