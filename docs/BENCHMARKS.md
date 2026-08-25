@@ -248,7 +248,7 @@ columns.
 **The three deltas, and why they differ.** The lever's own profile row falls
 2.409 ms; the bench falls 2.216 ms. The difference is +0.182 ms of run-to-run
 drift on the 516 untouched launches (+0.50%, the same effect §L2 measured at
-+0.30%) and +0.094 ms derived for the 129 extra dispatches at 0.733 µs. Predicted
++0.30%) and +0.095 ms derived for the 129 extra dispatches at 0.733 µs. Predicted
 bench delta −2.133 ms against −2.216 measured: 0.083 ms apart, inside the
 ±0.1 ms this instrument is claimed at.
 

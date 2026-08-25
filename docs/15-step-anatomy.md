@@ -546,9 +546,10 @@ Both from `--profile --depth 4096 --steps 32`, before at `b15f70f` and after at
 this:** the lever's own row falls 2.409 ms; +0.182 ms comes back as run-to-run
 drift on the 516 untouched launches (the same effect §L2 measured at +0.30%,
 here +0.50%, spread over every family - `attn_decode` +89 µs, `gemv` +56,
-`prep_gated_head` +6); and +0.094 ms is **derived** for the 129 extra dispatches
+`prep_gated_head` +6); and +0.095 ms is **derived** for the 129 extra dispatches
 at the un-instrumented 0.733 µs/launch this document measures. −2.409 + 0.182 +
-0.094 = **−2.133 ms predicted** against **−2.216 measured**, 0.083 ms apart -
+0.095 = **−2.133 ms predicted** (summed unrounded) against **−2.216 measured**,
+0.083 ms apart -
 inside the ±0.1 ms nothing here is claimed better than.
 
 `lm_head` is the control: untouched binding, untouched binary, +0.04%.
@@ -556,7 +557,7 @@ inside the ±0.1 ms nothing here is claimed better than.
 ### The launch count moved, on purpose, and it was cheap
 
 **645 → 774.** Each of the 129 sites is two launches now. At the derived
-0.733 µs/launch that is 0.094 ms/token bought for 2.409 ms saved - a **26:1**
+0.733 µs/launch that is 0.095 ms/token bought for 2.409 ms saved - a **26:1**
 trade - and it is the measured answer to doc 04's long-standing worry that
 kernel count is a first-class cost. It is not: the step's dispatch total is
 ~0.57 ms derived (774 × 0.733), 1.5% of 38.05.
