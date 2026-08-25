@@ -57,8 +57,9 @@ struct CapturedStep {
   std::map<std::string, std::unique_ptr<l0::Module>> modules;  // by variant name
   std::vector<std::unique_ptr<l0::Kernel>> kernels;            // append order
   // One per launch, walk order: "L<layer> <kernel> <variant>", and
-  // "-- <kernel> <variant>" for the five token-boundary launches that belong
-  // to no layer. ALWAYS filled - 774 small strings built on the host during a
+  // "-- <kernel> <variant>" for the six token-boundary launches that belong to
+  // no layer (embed_gather, the final norm's two launches, lm_head, and the
+  // two argmax stages). ALWAYS filled - 774 small strings built on the host during a
   // capture that already opens 19 device binaries, so there is no profiling
   // switch on them and no way for a profiled walk to be described differently
   // from a plain one.
@@ -76,8 +77,20 @@ struct CapturedStep {
 // are commands, not kernels, so `kernel_count` does not count them and
 // determinism is unaffected. The tap runs after the layer's LAST kernel, and
 // the residual stream is only advanced by `prep_res_fold` - whose per-element
-// arithmetic is the single-work-group `prep_res_norm`'s, unchanged, which is
-// exactly why spec 1.5's lever L1 left every tap byte where it was. So tap[L]
+// arithmetic is the single-work-group `prep_res_norm`'s, unchanged, so one
+// launch of it writes the same `resid` bytes for the same inputs.
+//
+// **That is a per-launch property and NOT a claim that the tap tensors are
+// stable across a numerics change**, which is what an earlier draft of this
+// comment asserted about spec 1.5's lever L1. L1 reordered the norm's global
+// Σx², which moves `x` in the last bf16 ulp and therefore moves every
+// subsequent layer's input; the taps this parameter produces were **measured**
+// to move in both directions across it (`code`'s worst cosine 0.829 → 0.914,
+// `prose`'s 0.99945 → 0.99481) while the gate's token ids stayed 96/96
+// element-exact. Read the taps as diagnostics of one engine build, never as a
+// contract between two (docs/14, "The diagnostics move with every lever").
+//
+// So tap[L]
 // holds the hidden state with layer L's *mixer* contribution folded in and
 // layer L's MLP contribution still sitting un-folded in `partials` (layer
 // L+1's leading `prep_res_fold` folds it). No tap holds the final hidden state

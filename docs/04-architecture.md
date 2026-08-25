@@ -86,11 +86,13 @@ makes the capture-safety rule below testable: replay the same list twice from
 the same state and diff the outputs.
 
 Measured, 2026-08-25: the captured decode step is **774 kernels** - 48 GDN
-layers × 11 + 16 full-attention layers × 11 + 6 at the token boundary
-(`embed_gather`, the final norm's two launches, `lm_head`, two argmax stages).
+layers × 12 + 16 full-attention layers × 12 + 6 at the token boundary
+(`embed_gather`, the final norm's two launches, `lm_head`, two argmax stages),
+i.e. 576 + 192 + 6.
 It was **645** (× 10, × 10, 5) until spec 1.5's lever L1 split every
-`prep_res_norm` site into `prep_res_fold` + `prep_norm_finish`: 129 sites × 2 =
-258 launches where there were 129, so 645 + 129 = 774
+`prep_res_norm` site into `prep_res_fold` + `prep_norm_finish`. Each layer holds
+two of those sites and the boundary holds one, so 129 sites × 2 = 258 launches
+where there were 129, and 645 + 129 = 774
 ([12-kernels.md](12-kernels.md), `prep_res_fold`).
 `runtime::build` (`src/runtime/capture.cc`) is the one walk that binds them,
 and `tests/runtime/replay_determinism_test` is the diff above, run for real:

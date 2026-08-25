@@ -125,11 +125,14 @@ int main(int argc, char** argv) {
   std::printf("captured: %zu kernels, %zu modules, max_len %u, persistent %.2f GB\n",
               cap.kernel_count, cap.modules.size(), b.max_len,
               b.persistent_bytes() / 1e9);
-  // 48 GDN layers x 11 + 16 FA layers x 11 + 6 token-boundary kernels
+  // 48 GDN layers x 12 + 16 FA layers x 12 + 6 token-boundary kernels
   // (embed_gather, the final norm's two launches, lm_head, argmax x2) - spec
-  // §9.1's 645 plus the 129 launches spec 1.5's lever L1 added by splitting
-  // every `prep_res_norm` site into `prep_res_fold` + `prep_norm_finish`.
-  // 645 + 129 = 774, and 129 = 2 per layer x 64 + the final norm.
+  // §9.1's 645 (x 10, x 10, 5) plus the 129 launches spec 1.5's lever L1 added
+  // by splitting every `prep_res_norm` site into `prep_res_fold` +
+  // `prep_norm_finish`. A layer holds two of those sites (the input/pre-mixer
+  // norm and the MLP's post norm) so it gains 2, and the boundary holds one
+  // (the final norm) so it gains 1: 129 sites = 2 x 64 + 1.
+  // 576 + 192 + 6 = 774 = 645 + 129.
   CHECK_EQ(cap.kernel_count, size_t(774));
   // One Module per distinct variant: embed_gather, 2 prep_res_fold (SP0/SP16),
   // 1 prep_norm_finish (it does not read `partials`, so the two prep modes
