@@ -205,6 +205,10 @@ And one that drives the replay design: **~700 kernels per token** at one
 kernel per op (≈ 11 per GDN layer, ≈ 9 per FA layer, plus `lm_head` and
 sampling). At a few µs of fixed cost each inside a command list that is
 2-3 ms of a ~26 ms step - the same order as the host overhead being removed.
+(Design-time framing, 2026-08-22. Both halves were later measured and both were
+pessimistic: the list is 645 kernels at 0.52 µs = 0.335 ms, and the step is
+42.14 ms - docs 07 #5 and 05. The conclusion inverted: fusion is *not* on the
+phase-1 critical path.)
 Fusion (norm into GEMV prologue, conv1d + l2norm + recurrence + gated norm
 into one GDN kernel, gate ‖ up ‖ SiLU into one GEMV) is part of phase 1, not a
 later optimisation. Doc 07 #5 measures the fixed cost first.

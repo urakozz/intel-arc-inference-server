@@ -185,9 +185,24 @@ runs each, `b70-decode` at commit `62bdd4d`, `debug_resid` off, default
 
 | engine | depth | tg | t/s | ms/token |
 |---|---|---|---|---|
-| vLLM `p314-t214-vxkp0`, no speculation | 1 | 256 | **31.50** | 31.75 |
-| **b70-decode `62bdd4d`** | **4096** | **256** | **23.73** | **42.14** |
-| b70-decode `62bdd4d` | 64 | 256 | 25.00 | 40.00 |
+| vLLM `p314-t214-vxkp0`, no speculation | 1 † | 256 | **31.50** | 31.75 |
+| **b70-decode `62bdd4d`** | **4096** † | **256** | **23.73** | **42.14** |
+| b70-decode `62bdd4d` | 64 † | 256 | 25.00 | 40.00 |
+
+† **The two `depth` columns do not mean the same thing.** `llama-benchy`'s
+`--depth 1` is a *conversation* depth - one turn - and that turn is
+`--pp 4096`, so vLLM decodes its 256 tokens with ~4096 KV positions resident.
+`b70-decode --depth N` counts **KV positions** directly. The comparable rows are
+therefore vLLM's `depth 1` (≈ 4096 positions) and b70-decode's `depth 4096`,
+which is why the bolded row is the one against 31.50; the `depth 64` row is the
+doc 07 #12 experiment and has no vLLM counterpart.
+
+**Why the rows say `62bdd4d` and not the tagged commit.** The sha in a row must
+name the binary that produced it, so the bench apparatus was committed first
+(`62bdd4d`), measured, and the numbers and docs committed after (`1210e06`, tag
+`decode-core-done`). The two trees are identical along the engine's path -
+`src/`, `tests/` and the kernels are byte-for-byte the same; the later commit
+touches docs and one `awk` line in `tools/bench_decode.sh`.
 
 **b70-decode is 24.7% short of vLLM** - 23.73 against 31.50, a factor of 1.327
 the other way. The number is recorded as measured; nothing was tuned to produce
@@ -195,7 +210,7 @@ it, and no `.cl` file was touched in the task that measured it. The
 decomposition and what it scopes are in
 [05-perf-model.md](05-perf-model.md#phase-1-measured--the-honest-verdict).
 
-Every run, verbatim:
+Every run's t/s, and what three of them agree on:
 
 | shape | runs (t/s) | median | min | max | spread |
 |---|---|---|---|---|---|
@@ -208,22 +223,35 @@ per-run ingest times at depth 4096 were 170432.1 / 170477.7 / 170447.8 ms, i.e.
 the same 4096 replays to within 0.03%. A replayed command list with no host work
 in it is about as reproducible as a wall clock allows.
 
-The median row's own breakdown (run 2, the median run):
+The median run's own output - an **excerpt**, not the whole transcript: the
+loader's full byte report is 18 more lines and lives in
+[13-loader.md](13-loader.md) (its `read/token` and `W check` lines are quoted
+below because they are what `W` rests on), and the two-line parenthetical that
+follows the `wall` line explains what "host" is and is dropped here for width.
 
 ```
+  read/token    15539980288 B   15.540 GB
+  W check     15.540 GB vs 15.540 GB expected = 15.519 doc-03 + 0.016 pad + 0.005279 widen
+              widen = 1337344 B RMSNorm fp32 (1+w) + 3941376 B GDN fp32  ->  -0.000%
+  load        13.7 s
+engine: 645 kernels, 18 modules, max_len 16384, 1.24 GB of persistent state
 ingest: 4096 ids in 170477.7 ms (41.62 ms/token), pos 4096
 generate: 256 ids, 23.73 t/s, 42.14 ms/token (99.8% of it inside the fence)
-  wall 10788.2 ms, fence 10763.3 ms, host 24.9 ms
+  wall 10788.2 ms, fence 10763.3 ms, host 24.9 ms  (host = wall - fence: argument-free
+  replay, so this is submit + the four bytes of shared memory, nothing else)
   per token: 42.141 ms total = 42.044 ms fence + 0.097 ms host
   MBU: 23.73 t/s x 15.540 GB = 369 GB/s of 590 GB/s measured = 62.5%
   dispatch floor (estimated): 645 kernels x 0.52 us = 0.335 ms/token, 0.8% of the fence
 ```
 
-**`W` = 15.540 GB/token and 590 GB/s are both measured** - the loader's own
-byte report (docs/13) and `tools/probe/probe_bw` through the same Level Zero
-launch path (docs/01). On those two constants the roofline is 26.34 ms/token =
-**37.97 t/s**, vLLM's 31.50 is **83.0% MBU**, and b70-decode's 23.73 is
-**62.5%**.
+**`W` = 15.540 GB/token and 590 GB/s are both measured.** `W` is the loader's
+own report, printed by the very run above and derived in
+[13-loader.md](13-loader.md) ("read/token 15.540 GB", the byte table and the
+`W check` line) - 15.519 GB of doc-03 header arithmetic + 0.016 GB tiling pad +
+0.005279 GB of fp32-widened norms. The bandwidth is `tools/probe/probe_bw`
+through the same Level Zero launch path ([01-hardware.md](01-hardware.md)). On
+those two constants the roofline is 26.34 ms/token = **37.97 t/s**, vLLM's 31.50
+is **83.0% MBU**, and b70-decode's 23.73 is **62.5%**.
 
 ## Notes
 
