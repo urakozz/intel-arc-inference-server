@@ -249,8 +249,22 @@ set_tests_properties(golden_gate_test PROPERTIES
 # if one of these rejections ever moved to after the device is opened it would
 # still exit 1 (a bogus model path throws in the loader), the test would still
 # pass, and it would silently have stopped testing what it says it tests.
+# `EXPECT <substring>` pins WHICH rejection fired. Without it a case only
+# asserts "exit 1 before the device", which every unknown flag satisfies too -
+# so a test for a flag the parser does not know yet passes for the wrong reason
+# and keeps passing if the feature is deleted. The default expectation is
+# `b70-decode:`, the prefix `main`'s catch-all prints on every rejection (and
+# which `usage()`'s own "b70-decode <snapshot-or-repo>" lines do not match), so
+# the nine cases written before this argument existed gain a free check and
+# none of them changes.
 function(b70_cli_reject name)
+  cmake_parse_arguments(R "" "EXPECT" "" ${ARGN})
+  if(NOT R_EXPECT)
+    set(R_EXPECT "b70-decode:")
+  endif()
   add_test(NAME ${name} COMMAND sh -c [==[
+expect=$1
+shift
 out=$("$@" 2>&1)
 rc=$?
 printf '%s\n' "$out" >&2
@@ -264,7 +278,12 @@ then
   echo "b70_cli_reject: the rejection happened after l0::Context was built" >&2
   exit 1
 fi
-]==] b70_cli_reject $<TARGET_FILE:b70-decode> ${ARGN})
+if ! printf '%s\n' "$out" | grep -qF -- "$expect"
+then
+  echo "b70_cli_reject: exit 1, but the message does not contain '$expect'" >&2
+  exit 1
+fi
+]==] b70_cli_reject "${R_EXPECT}" $<TARGET_FILE:b70-decode> ${R_UNPARSED_ARGUMENTS})
   set_tests_properties(${name} PROPERTIES TIMEOUT 60)
 endfunction()
 
@@ -301,6 +320,17 @@ b70_cli_reject(cli_reject_oov_id ${B70_NO_MODEL} --ids ${B70_OOV_IDS} --n 4)
 # --profile is a third mode, exclusive with the other two: it replays an
 # INSTRUMENTED list (645 host-scope event signals per step), so it can never
 # produce a bench row, and it sizes its own run with --depth and --steps rather
-# than with --ids/--n. Both rejections are the mode check, host-side.
-b70_cli_reject(cli_reject_profile_and_bench ${B70_NO_MODEL} --profile --bench)
-b70_cli_reject(cli_reject_profile_and_ids ${B70_NO_MODEL} --profile --ids ${B70_OK_IDS} --n 4)
+# than with --ids/--n. Both rejections are the mode check, host-side - and both
+# name the message, because "exit 1 before the device" is also what an unknown
+# flag does: without EXPECT these two would pass on a binary that had never
+# heard of --profile.
+b70_cli_reject(cli_reject_profile_and_bench ${B70_NO_MODEL} --profile --bench
+  EXPECT "exactly one of --ids, --bench and --profile")
+b70_cli_reject(cli_reject_profile_and_ids ${B70_NO_MODEL} --profile --ids ${B70_OK_IDS} --n 4
+  EXPECT "exactly one of --ids, --bench and --profile")
+# "--depth 0 would ingest nothing" - both synthetic modes measure a step at a
+# context depth, and depth 0 is not one.
+b70_cli_reject(cli_reject_depth_zero_bench ${B70_NO_MODEL} --bench --depth 0
+  EXPECT "--depth 0 would ingest nothing")
+b70_cli_reject(cli_reject_depth_zero_profile ${B70_NO_MODEL} --profile --depth 0
+  EXPECT "--depth 0 would ingest nothing")

@@ -237,9 +237,21 @@ it is measured, not a target: `runtime::CapturedStep::kernel_count`, 2026-08-25.
 Doc 07 #5 measures the per-kernel floor before any of this is built, so the
 fusion list is sized by a number rather than by taste. Measured 2026-08-22:
 **0.52 µs/kernel** (`noop`) and **0.63 µs/kernel** (`ctrl_read`) inside a
-replayed list - the 3-5 µs estimate above is ~6× pessimistic, 645 kernels cost
-0.335 ms of the 42.14 ms step measured 2026-08-25 (**0.8%**), so fusion is *not*
-on the phase-1 critical path and the unfused list ships first.
+replayed list - the 3-5 µs estimate above is ~6× pessimistic, so 645 kernels
+were priced at 0.335 ms of the 42.14 ms step measured 2026-08-25 (**0.8%**,
+estimated). **Superseded 2026-08-25 by an in-situ measurement, same conclusion:
+0.473 ms, 0.733 µs/launch, 1.1% of the step** - derived from the profiler's
+per-kernel timestamps (doc 07 #5, [15-step-anatomy.md](15-step-anatomy.md)),
+and above both probe floors because every decode kernel reads the control
+block. Fusion is *not* on the phase-1 critical path and the unfused list ships
+first.
+
+What the profile *does* say about this list is that the fusion candidates above
+were mispriced in kind, not in size: what items 1 and 4 would really buy is not
+the 0.7 µs launch but the **work-group count** of the kernels they absorb -
+`prep_res_norm` runs on one work-group and `a‖b` on two, and one work-group is
+worth ~15 GB/s on this device (docs/15 §1). Spec 1.5 attacks that directly,
+without fusing anything.
 
 ## Server
 

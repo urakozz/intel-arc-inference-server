@@ -469,8 +469,9 @@ still not in the probe matrix (the matrix covers the five int4 shapes and
 (docs/15). It runs **48 times per token** at 2 work-groups / 8 subgroups over
 1.31 MB, and the paragraph this replaces guessed the direction correctly:
 
-**48.640 µs per launch, 2.335 ms per token, 5.6% of the step - measured, in
-situ.** That is **27.0 GB/s**, 4.6% of the 590 GB/s the device does, and **21×**
+**48.640 µs per launch, 2.335 ms per token, 5.5% of the step - measured, in
+situ** (5.6% of the sum of kernel durations, which is the denominator docs/15's
+rollups use)**.** That is **27.0 GB/s**, 4.6% of the 590 GB/s the device does, and **21×**
 the 0.11 ms its traffic is worth at full bandwidth. Per work-group it is
 13.5 GB/s, which docs/15 shows is simply what one work-group can pull on this
 device (`prep_res_norm` at one work-group reads 17.0 GB/s, `prep_silu_mul` at
@@ -1833,34 +1834,45 @@ profiler found anywhere in the step. `attn_prep` and `attn_reduce`, the two
 kernels this section left unmeasured, are together **0.127 ms** - 0.3% - and are
 not worth another sentence.
 
-Three in-situ points, all with this instrument, 2026-08-25:
+Four in-situ points, all with this instrument, 2026-08-25:
 
-| run | `nb` | grid | µs/launch | ms/token |
-|---|---|---|---|---|
-| depth 4096, `--max-len 16384` | 17 | 256 WGs, 68 live | **361.400** | 5.782 |
-| depth 64, `--max-len 16384` | 1 | 256 WGs, 4 live | **153.608** | 2.458 |
-| depth 64, `--max-len 4096` | 1 | 64 WGs, 4 live | **153.665** | 2.459 |
+| run | `nb` | live WGs | positions attended | µs/launch | ms/token |
+|---|---|---|---|---|---|
+| depth 4096, `--max-len 16384` | 17 | 68 | 4097 | **361.400** | 5.782 |
+| depth 1024, `--max-len 16384` | 5 | 20 | 1025 | **338.165** | 5.411 |
+| depth 64, `--max-len 16384` | 1 | 4 | 65 | **153.608** | 2.458 |
+| depth 64, `--max-len 4096` | 1 | 4 | 65 | **153.665** | 2.459 |
 
-1. **The early-out is free, re-confirmed on the kernel itself.** Rows 2 and 3
+1. **The early-out is free, re-confirmed on the kernel itself.** Rows 3 and 4
    differ by 192 idle work-groups per layer and by **0.04%** - inside the noise
    of a run whose whole-step spread is 0.47%. Doc 07 #12 got this from a
    0.046 ms whole-step difference; this is the same verdict measured where it
    happens. Context-bucketed lists stay dead.
-2. **The slope is 12.987 µs per live block per launch = 0.208 ms/token per
-   block** (derived from rows 1-2), against the 0.1361 ms/token the `--bench`
-   line gave. At `nb` = 17 that is 3.53 ms of block-scaled work - and **2.25 ms
-   that does not scale with depth at all**, which rows 2 and 3 prove is not the
-   idle grid. It is one wave of block work with only **4 live work-groups per
-   layer**, the same starvation `prep_res_norm` and `a‖b` show.
-3. **It is not bandwidth-bound, and the L2 reading above needs correcting.**
-   100.7 MB of KV per layer (the 6× q-head reread) in 361.4 µs is **279 GB/s** -
-   47% of the measured 590 - and the *unique* 16.8 MB is **46 GB/s**. The
-   inference above ("0.1361 ms implies 740 GB/s … the 6× reread is substantially
-   cache-served") had the right direction - 46 GB/s of unique traffic cannot be
-   DRAM-limited - but the wrong magnitude, because the 0.1361 ms it rested on was
-   the under-predicted slope. What follows for the staged variant in "Rejected"
-   is unchanged in kind and changed in size: SLM staging removes issue slots and
-   L2 traffic, not DRAM traffic, from a kernel that turns out to be worth 5.782 ms.
-   Spec 1.5's lever L5, ranked 1 by measured share in docs/15 and third to
-   execute there, with an expected yield of 1.0-3.0 ms and the widest error bar
-   on the ladder.
+2. **The depth-1024 point falsified two models the depth-64/4096 pair
+   admitted**, both pre-registered with their predictions before it was run
+   (docs/15 §2): a linear-in-blocks fit with a 2.25 ms depth-independent
+   intercept predicted 205.6 µs and a wave/occupancy model predicted 153.6;
+   measured **338.165**. The intercept was an artefact of treating `nb` = 1 as a
+   full block when it is **65 of 256 positions**. Nothing in this document claims
+   a depth-independent term.
+3. **What fits: the launch costs what its slowest single work-group costs.**
+   Work-group count is nearly free - `nb` 5 → 17 is **3.40× the live
+   work-groups for +6.9% of time** - and what moves the number is the *fill* of
+   the critical-path block. `F + fill · P` gives **F ≈ 90.8 µs fixed, P ≈ 247.4 µs
+   for a full 256-position block** (derived from the `nb` 1 and 5 points; the
+   `nb` = 17 point is a check at −6.4%). So ~73% of a launch at depth 4096 is one
+   work-group's serial walk of one block. This is a latency problem on a critical
+   path, not an occupancy problem on a grid.
+4. **It is not bandwidth-bound, and the L2 reading above needs correcting.**
+   The effective rate rises with depth: 10.4 GB/s at `nb` = 1, 74.5 at `nb` = 5,
+   **278.6 at `nb` = 17** (47% of the measured 590) counting the 6× q-head
+   reread; the *unique* 16.8 MB at depth 4096 is **46 GB/s**. The inference above
+   ("0.1361 ms implies 740 GB/s … the 6× reread is substantially cache-served")
+   had the right direction - 46 GB/s of unique traffic cannot be DRAM-limited -
+   but the wrong magnitude, because the 0.1361 ms it rested on is 35% below the
+   in-situ slope. What follows for the staged variant in "Rejected" changes
+   shape: the target is the 247 µs full-block critical path, and the cheapest
+   attack on it is a **finer block** (128 positions → 33 blocks × 4 = 132
+   work-groups at depth 4096, predicted ≈3.43 ms/token), not SLM staging. Spec
+   1.5's lever L5, ranked 1 by measured share in docs/15 and third to execute
+   there; expected yield 1.5-2.5 ms, extrapolated.
