@@ -26,6 +26,13 @@
 //   PB_NO_V       1: the V global load becomes arithmetic (same fma count)
 //   PB_HOT_K      1: every K load reads block 0's rows - same MESSAGE count, L1-resident
 //   PB_HOT_V      1: same for V
+//   PB_HOT_W      1: modifies PB_HOT_K/PB_HOT_V so the L1-resident address still
+//                   DEPENDS ON THE WAVE INDEX. Without it the hot address is
+//                   loop-invariant in `w` over a `restrict` pointer and IGC's LICM
+//                   may legally hoist the loads out of the wave loop, which would
+//                   make `hotkv` a measurement of a quarter of the messages rather
+//                   than of the same messages served from L1. This is the control
+//                   that decides whether the cache/issue split is real.
 //   PB_KT / PB_VT 1: index K / V as a TRANSPOSED cache - [KV_HEADS][MAXLEN][HD]
 //                   instead of [MAXLEN][KV_HEADS][HD]. Same buffer, same message
 //                   count, same bytes; consecutive positions of one kv-head go
@@ -68,6 +75,9 @@
 #endif
 #ifndef PB_HOT_V
 #define PB_HOT_V 0
+#endif
+#ifndef PB_HOT_W
+#define PB_HOT_W 0
 #endif
 #ifndef PB_KT
 #define PB_KT 0
@@ -128,6 +138,9 @@
 // this project puts in binary names to avoid.
 #if PB_PREFETCH && (PB_NO_K || PB_HOT_K || PB_VEC != 1)
 #error "probe_attn: PB_PREFETCH is exclusive with PB_NO_K, PB_HOT_K and PB_VEC"
+#endif
+#if PB_HOT_W && !(PB_HOT_K || PB_HOT_V)
+#error "probe_attn: PB_HOT_W modifies PB_HOT_K/PB_HOT_V and needs one of them"
 #endif
 #if PB_NO_K && (PB_VEC != 1 || PB_HOT_K)
 #error "probe_attn: PB_NO_K removes the load PB_VEC and PB_HOT_K describe"
@@ -257,7 +270,13 @@ __kernel void probe_attn(__global const uint* restrict ctrl,
           // position onto block 0, which keeps the message COUNT and the
           // instruction stream identical and makes every one of them an L1 hit.
 #if PB_HOT_K
+#if PB_HOT_W
+          // Sixteen rows, 8 KB, L1-resident - and a different one of them each
+          // wave, so no load here is loop-invariant and none can be hoisted.
+          const uint kp = bstart + ((w + sgid) & (WAVE_P - 1u));
+#else
           const uint kp = bstart + sgid;
+#endif
 #else
           const uint kp = p;
 #endif
@@ -338,7 +357,11 @@ __kernel void probe_attn(__global const uint* restrict ctrl,
           const float vf = (float)((ps + lid) & 7u);
 #else
 #if PB_HOT_V
+#if PB_HOT_W
+          const uint vp = bstart + ((w + s) & (WAVE_P - 1u));
+#else
           const uint vp = bstart + s;
+#endif
 #else
           const uint vp = ps;
 #endif
@@ -402,7 +425,11 @@ __kernel void probe_attn(__global const uint* restrict ctrl,
           const float vf = (float)((ps + lid) & 7u);
 #else
 #if PB_HOT_V
+#if PB_HOT_W
+          const uint vp = bstart + ((w + s) & (WAVE_P - 1u));
+#else
           const uint vp = bstart + s;
+#endif
 #else
           const uint vp = ps;
 #endif
