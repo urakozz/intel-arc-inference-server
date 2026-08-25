@@ -856,7 +856,8 @@ That lands at **34.4 ms/token ≈ 29.0 t/s** - short of 31.50 by about 2.7 ms.
 −3.0**, the first estimate to miss low, and it missed low even though its in-situ
 row (−2.219 ms on the attn family) landed inside its own 1.5-2.5 band - 0.32 ms
 of the difference is unattributed and recorded as such in §L5. The step is now
-**36.32 ms** (measured, BENCHMARKS.md, recorded median 27.53 t/s) and **the gap
+**36.32 ms** (measured, BENCHMARKS.md - 27.53 t/s at `c746840`, re-measured
+27.54 at the gate below, the same engine twice) and **the gap
 to the 31.746 ms bar is 4.574 ms**. What remains on the ladder is L4 (≤0.3) and
 L3 (≤0.06), so **the ladder's own optimistic ceiling is 35.96 ms = 27.81 t/s** -
 **4.214 ms short of the 31.746 ms bar (3.69 t/s short of 31.50) with every lever
@@ -916,6 +917,61 @@ What the measurement adds to that memo, in advance and in order of size:
    document claims: L1 by 0.087 (inside), L5 by **0.32 (outside)**. The
    attribution method is the basis of every ranking on this page, so a residual
    it cannot explain is a finding about the method, not about the lever. §L5.
+
+## The ladder, closed - the final ledger
+
+The §6 gate was run 2026-08-25 from a clean worktree at `ef6acb0`
+(`tools/bench_decode.sh`, median of three, idle box):
+**27.54 t/s / 36.32 ms/token**, min 27.54, max 27.55, spread 0.04%. The bar was
+31.50 t/s / 31.746 ms - **short by 3.96 t/s (12.6%), 4.574 ms/token still to
+find**. The section above predicted this before the first lever was cut. Spec
+1.5 therefore closes on its short path, and the priced menu is
+[the re-assessment memo](superpowers/specs/2026-08-25-spec1.5-reassessment.md).
+
+**Every lever, final.** Bench rows are the recorded medians (BENCHMARKS.md);
+in-situ rows are `--profile --depth 4096 --steps 32`, the same instrument
+throughout. All measured.
+
+| lever | what shipped | in-situ site, before → after | in-situ Δ | bench step, before → after | **bench Δ** | sha | gate |
+|---|---|---|---|---|---|---|---|
+| **L2** `a‖b` GEMV | `{COLS_PER_WG, KSPLIT}` `{64,1}` → `{16,16}` - 8 → 128 subgroups | 2.341 → **0.256** ms | −2.085 | 42.141 → 40.266 | **−1.875** | `a1e2d3a` | 96/96 |
+| **L1** `prep_res_norm` | one 1-work-group kernel → `prep_res_fold` + `prep_norm_finish`, 20 work-groups each - 16 → 320 subgroups | 2.893 → **0.484** ms | −2.409 | 40.266 → 38.046 | **−2.220** | `b045e11` | 96/96 |
+| **L5** attention | `ATTN_BLOCK` 256 → **64** - 68 → 260 live work-groups | attn family 6.058 → **3.839** ms | −2.219 | 38.046 → 36.32 | **−1.726** | `c746840` | 96/96 |
+| **L3** `gdn_step` | - | not attempted | - | - | - | - | skip-by-ruling: 1.09× its floor, whole kernel worth 0.06 ms |
+| **L4** GEMV `S` | - | not attempted | - | - | - | - | skip-by-ruling: ≤0.3 ms, inside this instrument's drift |
+| **the ladder** | | | **−6.713** | **42.141 → 36.32** | **−5.821** | `ef6acb0` (gate) | **96/96 throughout** |
+
+(The L5 bench Δ is quoted unrounded here - 38.046 − 36.32 = 1.726 - so the
+column sums; §L5 rounds the same number to −1.73.)
+
+**The two Δ columns differ by 0.892 ms and three measured terms close it to
+0.012.** Drift on the launches each lever did *not* touch: +0.119 (L2, +0.30%),
++0.182 (L1, +0.50%), +0.174 (L5, +0.56%). L1's 129 extra dispatches: +0.095
+(derived at 0.733 µs/launch). L5's unattributed residual: +0.31 (§L5).
+0.475 + 0.095 + 0.31 = **0.880** against **0.892**. Nothing else is needed to
+explain the ladder, and the largest single term in that reconciliation is the
+one nobody can attribute.
+
+**The step no longer closes to better than ~0.31 ms, from a second direction.**
+The L5 after-run's Σ over all 774 launches is 35.342 ms measured; the derived
+dispatch gap at 774 launches is 0.567 ms and the gate's own host term is
+0.101 ms measured - **36.010 ms against a measured 36.32**. That is the same
+0.31 ms, reached without going through any lever's before/after. Two
+independent routes to one unexplained residual is why the memo puts
+repeated-run averaging on the menu ahead of every sub-0.5 ms design.
+
+**What did not work, kept because a ladder that records only its wins is not a
+measurement:** `a‖b` option (a) `{16,1}` (+0.7%, worth zero - §L2), the
+block-read `KU` variant (worth zero *and* −1.3% on `lm_head` - §L2), L1's
+stage B on one work-group (the plan's literal design, 60% of the win - §L1),
+`ATTN_BLOCK` 128 (superseded) and 32 (0.070 ms/token better at family level,
+rejected on a 101.4 MB `attn_part` - §L5).
+
+**The ranking's record: three for three on yield, zero for three on
+mechanism.** Every lever landed in or near its predicted band; every one landed
+for a reason the ranking got wrong. That is an argument for this instrument, not
+for the ladder - and it is the reason the memo's first item is a probe rather
+than a design.
 
 ## What this document does not settle
 

@@ -180,15 +180,16 @@ tools/bench_decode.sh --depth 64      # the doc 07 #12 depth experiment
 ```
 
 **Measured 2026-08-25** on an idle box (no container, no other GPU work), three
-runs each, `debug_resid` off, default `--max-len 16384`. Three commits appear:
-the phase-1 rows are `62bdd4d`, and the three lever rows are `a1e2d3a` (spec
-1.5 lever L2), `b045e11` (lever L1) and `c746840` (lever L5), all measured the
-same way on the same day and box:
+runs each, `debug_resid` off, default `--max-len 16384`. Five commits appear:
+the phase-1 rows are `62bdd4d`, the three lever rows are `a1e2d3a` (spec
+1.5 lever L2), `b045e11` (lever L1) and `c746840` (lever L5), and `ef6acb0` is
+the spec 1.5 **gate** - all measured the same way on the same day and box:
 
 | engine | depth | tg | t/s | ms/token |
 |---|---|---|---|---|
 | vLLM `p314-t214-vxkp0`, no speculation | 1 † | 256 | **31.50** | 31.75 |
-| **b70-decode `c746840`** - spec 1.5 levers L2 + L1 + L5 | **4096** † | **256** | **27.53** | **36.32** |
+| **b70-decode `ef6acb0`** - the spec 1.5 gate, levers L2 + L1 + L5 | **4096** † | **256** | **27.54** | **36.32** |
+| b70-decode `c746840` - lever L5, the row it was accepted on | 4096 † | 256 | 27.53 | 36.32 |
 | b70-decode `b045e11` - levers L2 + L1 | 4096 † | 256 | 26.28 | 38.05 |
 | b70-decode `a1e2d3a` - lever L2 only | 4096 † | 256 | 24.83 | 40.27 |
 | b70-decode `62bdd4d` - phase 1, before any lever | 4096 † | 256 | 23.73 | 42.14 |
@@ -213,13 +214,47 @@ The `a1e2d3a`, `b045e11` and `c746840` rows follow the same rule for the same
 reason: each is the commit that carries its kernel change and
 `tools/bench_decode.sh` read that sha out of the worktree it measured; the rows
 themselves and the docs around them are committed after, touching no `src/`
-file.
+file. **`ef6acb0` is the same tree as `c746840` along every path the engine
+reads** - the four commits between them touch only `docs/` - which is why the
+two rows measure the same engine and read 0.04% apart.
 
-**b70-decode is 12.6% short of vLLM** - 27.53 against 31.50, a factor of 1.144
+**b70-decode is 12.6% short of vLLM** - 27.54 against 31.50, a factor of 1.144
 the other way; it was 16.6% short (26.28) after two levers, 21.2% short (24.83)
 after one and 24.7% short (23.73) before any. The decomposition and what it
 scopes are in
-[05-perf-model.md](05-perf-model.md#phase-1-measured--the-honest-verdict).
+[05-perf-model.md](05-perf-model.md#phase-1-measured--the-honest-verdict); why
+the ladder stopped here is
+[the spec 1.5 re-assessment memo](superpowers/specs/2026-08-25-spec1.5-reassessment.md).
+
+### The `ef6acb0` row - the spec 1.5 gate
+
+**The recorded gate of spec 1.5**, run 2026-08-25 on the idle box from a clean
+worktree at `ef6acb0`, `tools/bench_decode.sh` with its defaults:
+
+| shape | runs (t/s) | median | min | max | spread |
+|---|---|---|---|---|---|
+| depth 4096, tg 256 | 27.54 / 27.54 / 27.55 | **27.54** | 27.54 | 27.55 | 0.01 (0.04%) |
+
+**Verdict: short.** The bar was **≥ 31.50 t/s** (31.746 ms/token); the engine
+measures **27.54 t/s / 36.32 ms/token**, **3.96 t/s - 12.6% - short**, with
+**4.574 ms/token** still to find. MBU is 428 GB/s of 590 = **72.5%**, against
+vLLM's 83.0%. The ingest half of the same runs reads 141.0 s for 4096 ids,
+**34.43 ms/token** on an un-instrumented list.
+
+Per spec 1.5 §6 the short path stops the spec and writes
+[the re-assessment memo](superpowers/specs/2026-08-25-spec1.5-reassessment.md),
+which carries the per-lever ledger, the remaining gap and the priced redesign
+menu. Its headline: `lm_head` at int4 (~3.3 ms, **estimated**) is the largest
+item left and it is **necessary but not sufficient** - it lands at 30.62 t/s,
+0.88 t/s under the bar, so a second item is required and none has a measured
+price yet. The three levers that produced this row are `a1e2d3a`, `b045e11` and
+`c746840` below; the golden gate is **96/96 element-exact** at every one of
+them and the full suite is green at `ef6acb0`.
+
+This row measures the same binary path as the `c746840` row (docs-only commits
+between) and reproduces it to **0.04%**: 27.54 against 27.53, both 36.32
+ms/token. Neither number is a correction of the other - they are two medians of
+one engine, and the gate row is the one spec 1.5 closes on.
 
 ### The `c746840` row - spec 1.5 lever L5
 
@@ -365,8 +400,8 @@ through the same Level Zero launch path ([01-hardware.md](01-hardware.md)). On
 those two constants the roofline is 26.34 ms/token = **37.97 t/s**, vLLM's 31.50
 is **83.0% MBU**, and b70-decode's 23.73 is **62.5%**. (That 62.5% is the
 `62bdd4d` row this paragraph sits under and is now historical: the current
-engine is `c746840` at **27.53 t/s = 72.5% MBU**, the top b70-decode row
-above.)
+engine is the `ef6acb0` gate row at **27.54 t/s = 72.5% MBU**, the top
+b70-decode row above.)
 
 ## Notes
 

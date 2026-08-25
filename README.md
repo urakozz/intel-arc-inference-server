@@ -24,7 +24,7 @@ independent of each other, and each is labelled by how well it is established.
 |---|---|---|
 | Fill the device at `M = 1` - GEMV, split-K, `M ∈ [1,8]` | the gap from vLLM's **81% MBU** to ~95%: ≤ ×1.2 | verified in source (doc 08); the only decode lever that is pure kernel work |
 | Byte-identical Level Zero replay | zero host work per token - but ~700 kernels per token means per-kernel fixed cost is the new host overhead; fusion is part of this lever | established on MoE (~55% MBU); on the 27B dense it shares the same ≤ ×1.2 with the row above (doc 05) |
-| Quantise `lm_head` (+ the MTP head) | 2.54 GB of 15.52 GB per token → ×1.14 at int4, ×1.09 at int8 | **measured** bytes; accuracy cost unmeasured (doc 07 #6) |
+| Quantise `lm_head` (+ the MTP head) | 2.54 GB of 15.52 GB per token → ×1.14 at int4, ×1.09 at int8 | **measured** bytes; accuracy cost unmeasured (doc 07 #6). In situ the row is **4.376 ms of the measured 36.32 ms token** and int4 would cut ~3.3 (estimated) - the largest item left in the step, and **not sufficient on its own** to clear 31.50 (memo, doc 15) |
 | MTP on a weight-stationary `M ∈ [1,8]` verify | draft traffic shared with the verify step; ~55-70 t/s ceiling vs vLLM's 45 (estimate) | phase 2 (doc 05) |
 | W4A8 prefill on native s8×s4 DPAS | int8 systolic rate, zero dequantisation | atom exists in `sycl-tla`; no mainloop yet (doc 07 #9) |
 
@@ -35,12 +35,27 @@ on its own; they multiply to ~×1.4 at best (≈44 t/s) without speculation. Pha
 2 is where the larger numbers live. Doc 05 has the arithmetic; `W` is measured,
 not estimated.
 
-**First measurement of this engine, 2026-08-25: 23.73 t/s - below vLLM, not
-above it.** Lever 2 delivered completely (0.23% of the step is host time) and
-lever 1 is 89-97% of roofline where it was probed, and the engine is still 24.7%
-short, because a third of the token is spent in kernels neither lever describes.
-The levers are not wrong; they were not the whole cost model. Doc 05's "Phase 1,
-measured" section is the honest version, and it is what spec 1.5 is scoped from.
+**Measured state, 2026-08-25 at the spec 1.5 gate: 27.54 t/s against vLLM's
+31.50 - still below it, 12.6% short.** MBU is **72.5%** (428 GB/s of the
+measured 590) against vLLM's **83.0%**, on a 37.97 t/s roofline. The first
+measurement of this engine was 23.73 t/s / 24.7% short (2026-08-25, `62bdd4d`);
+spec 1.5's lever ladder took it to 27.54 in three measured cuts - the `a‖b`
+GEMV K-split (−1.875 ms/token), the `prep_res_norm` two-stage reduction
+(−2.220) and the `ATTN_BLOCK` 256 → 64 attention retile (−1.726) - with the
+golden gate **96/96 element-exact** at every one. That closed **56% of the
+10.395 ms/token gap** it started with and **did not close the gate**: 4.574
+ms/token remain.
+
+Lever 2 of the four below delivered completely (0.3% of the step is host time)
+and lever 1 is 89-97% of roofline where it was probed; what the ladder found is
+that the rest of the token is neither. The levers are not wrong; they were not
+the whole cost model. Doc 05's "Phase 1, measured" section is the honest
+version, and
+[the spec 1.5 re-assessment memo](docs/superpowers/specs/2026-08-25-spec1.5-reassessment.md)
+is why the ladder stopped there and what a spec 1.6 would cost - its headline
+being that quantising `lm_head` (~3.3 ms, estimated, lever 3 below) is
+**necessary but not sufficient**: it lands at 30.62 t/s, 0.88 t/s under the
+bar, so a second item is required and none has a measured price yet.
 
 ## How this project is built - read this first
 
@@ -80,7 +95,7 @@ one beats vLLM on its own model.
 | # | Model | Adds |
 |---|-------|------|
 | 0 | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` | **done 2026-08-23** (GEMV re-measured 2026-08-24) - `W` ✅ 15.52 GB (doc 03), vLLM baseline ✅ 31.50 t/s (BENCHMARKS.md), replay floor ✅ 0.52 µs/kernel (doc 07 #5), GEMV ✅ 533 GB/s at N=5120 / 584 GB/s lm_head (doc 12), bandwidth ✅ 590 GB/s via L0 (doc 01) |
-| 1 | same | dense + hybrid attention (48 GDN + 16 full), int4 g64. **Target: > 31.50 t/s tg256, ≥ 1973 t/s pp4096.** Decode core **done 2026-08-25** (tag `decode-core-done`): 645-kernel replayed list, 96/96 golden tokens vs the CPU oracle, `b70-decode --bench`. **Target NOT met: tg256 @ depth 4096 = 23.73 t/s measured, 24.7% short of 31.50** (median of 3, `tools/bench_decode.sh`, BENCHMARKS.md). 62.5% MBU against vLLM's 83.0%. 99.8% of the step is inside the fence - the gap is kernel time, not host time: 29.01 ms of the 42.14 ms token is GEMV and the 13.14 ms of non-GEMV work is the whole shortfall (both **measured per kernel in situ** 2026-08-25 - `b70-decode --profile`, doc 15; the `probe_gemv` transplant that read 28.35 was a floor and was right to 2.3%). The non-GEMV third splits as `attn_decode` 5.78, `prep` 3.57, `a‖b` GEMV 2.34, `gdn_step` 0.73. No prefill kernel yet, so there is no pp4096 number. Optimisation is spec 1.5, scoped from that decomposition |
+| 1 | same | dense + hybrid attention (48 GDN + 16 full), int4 g64. **Target: > 31.50 t/s tg256, ≥ 1973 t/s pp4096.** Decode core **done 2026-08-25** (tag `decode-core-done`); the decode optimisation pass, spec 1.5, **closed short 2026-08-25** (tag `spec1.5-done`): 774-kernel replayed list, 96/96 golden tokens vs the CPU oracle at every step, `b70-decode --bench` and `--profile`. **Target NOT met: tg256 @ depth 4096 = 27.54 t/s measured at the spec 1.5 gate, 12.6% short of 31.50** (median of 3, spread 0.04%, `tools/bench_decode.sh`, BENCHMARKS.md) - it was 23.73 t/s / 24.7% short before the lever ladder. **72.5% MBU against vLLM's 83.0%**, on a 37.97 t/s roofline. 99.7% of the step is inside the fence - the gap is kernel time, not host time: **29.01 ms of the 36.32 ms token is GEMV** (79.9%, **measured per kernel in situ** - `b70-decode --profile`, doc 15 - and untouched by every lever; the `probe_gemv` transplant that read 28.35 was a floor and was right to 2.3%), and the non-GEMV remainder is ~7.3 ms, down from 13.14. The three levers, all measured on the bench: `a‖b` GEMV K-split **−1.875 ms**, `prep_res_norm` two-stage **−2.220**, `ATTN_BLOCK` 256 → 64 **−1.726**. Why the ladder stopped there and what a spec 1.6 would cost is [the re-assessment memo](docs/superpowers/specs/2026-08-25-spec1.5-reassessment.md). No prefill kernel yet, so there is no pp4096 number |
 | 2 | same | MTP speculative decoding on the shipped head. **Target: > 45.23 t/s** (vLLM, 2 draft tokens) |
 | 3 | `olka-fi/Ornith-1.0-35B-MXFP4` | MoE (grouped GEMM) + MXFP4 |
 | 4 | `palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4` | MoE **and** MTP together |
@@ -132,7 +147,7 @@ host-bound story is true of the MoE models (phases 3-4), where it is worth
 | [docs/12-kernels.md](docs/12-kernels.md) | The measured GEMV kernels: the two int4 layouts, split-K, and which won on which shape |
 | [docs/13-loader.md](docs/13-loader.md) | **Checkpoint → canonical device buffers**: snapshot rules, the index as manifest, every quantisation assert and what measured it, the fusion table, the `1+w` bake, and the resident-byte cross-check against `W` |
 | [docs/14-golden-gate.md](docs/14-golden-gate.md) | **The engine == the CPU oracle == vLLM**: 3 prompts × 32 greedy tokens element-exact all three ways, the named divergence classes and their measured magnitudes, and the closed trust chain |
-| [docs/15-step-anatomy.md](docs/15-step-anatomy.md) | **The decode step, launch by launch**: all 645 kernels timed in situ, the aggregate bucket finally split, the measured dispatch gap, and the ranked lever ladder spec 1.5 executes |
+| [docs/15-step-anatomy.md](docs/15-step-anatomy.md) | **The decode step, launch by launch**: every kernel timed in situ (645 then, 774 now), the aggregate bucket finally split, the measured dispatch gap, the ranked lever ladder spec 1.5 executed, and the closing per-lever ledger |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | **The baseline numbers and the exact commands that produced them.** Every vLLM figure quoted elsewhere traces back here |
 
 **Every number in these docs is labelled measured or estimated.** Estimates are

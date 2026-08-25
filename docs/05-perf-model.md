@@ -45,21 +45,42 @@ mix them inside one comparison:
 ```
 ceiling(27B, no MTP) = 590 / 15.540 = 37.97 t/s   (26.34 ms/token)
 vLLM p314-t214-vxkp0 =                31.50 t/s  ->  489 GB/s  ->  83.0% MBU
+b70-decode ef6acb0   =                27.54 t/s  ->  428 GB/s  ->  72.5% MBU
 b70-decode 62bdd4d   =                23.73 t/s  ->  369 GB/s  ->  62.5% MBU
+                                       (62bdd4d is phase 1 before spec 1.5's
+                                        lever ladder; ef6acb0 is its gate)
 ```
 
 ## Phase 1, measured - the honest verdict
 
-**b70-decode does not beat vLLM. Measured 2026-08-25, median of three runs on
-an idle box: 23.73 t/s at tg256, depth 4096 - against vLLM's 31.50. That is
-24.7% short, a factor of 1.327 the wrong way.** Per token: 42.14 ms against
-vLLM's 31.75 and a 26.34 ms roofline. Spread over the three runs was 0.02 t/s
-(0.08%). Full rows, the depth experiment and the exact command are in
-[BENCHMARKS.md](BENCHMARKS.md#b70-decode--this-project-phase-1).
+**b70-decode does not beat vLLM. Measured 2026-08-25 at the spec 1.5 gate
+(`ef6acb0`), median of three runs on an idle box: 27.54 t/s at tg256, depth
+4096 - against vLLM's 31.50. That is 12.6% short, a factor of 1.144 the wrong
+way.** Per token: 36.32 ms against vLLM's 31.75 and a 26.34 ms roofline; MBU
+**428 GB/s of 590 = 72.5%**, against vLLM's 83.0%. Spread over the three runs
+was 0.01 t/s (0.04%). Full rows, the depth experiment and the exact command are
+in [BENCHMARKS.md](BENCHMARKS.md#b70-decode--this-project-phase-1).
 
-Nothing was tuned to produce that number and nothing will be tuned in the plan
-that measured it. What the plan owes instead is the decomposition, because the
-decomposition is what scopes the next spec.
+**The phase-1 first measurement is kept, dated, because it is what spec 1.5 was
+scoped from: 23.73 t/s / 42.141 ms/token, 24.7% short, 62.5% MBU - 2026-08-25,
+`62bdd4d`, before any lever.** Nothing was tuned to produce *that* number and
+nothing was tuned in the plan that measured it; what that plan owed was the
+decomposition below, because the decomposition is what scoped spec 1.5.
+
+**What spec 1.5 then bought, all measured, golden gate 96/96 at every step:**
+`a‖b` GEMV K-split **−1.875 ms**, `prep_res_norm` two-stage **−2.220 ms**,
+`ATTN_BLOCK` 256 → 64 **−1.726 ms** - 42.141 → 36.32 ms/token, +16.1%
+throughput, 62.5% → 72.5% MBU. That closed **56% of the 10.395 ms/token gap**
+this spec opened with, and it did **not** close the gate: **4.574 ms/token
+remain**. Spec 1.5's stopping
+rule fired at its own §6 gate and the spec closed short (tag `spec1.5-done`).
+The per-lever ledger, the remaining gap and the priced menu of what a spec 1.6
+would have to do are in
+[the re-assessment memo](superpowers/specs/2026-08-25-spec1.5-reassessment.md);
+its headline is that `lm_head` at int4 (~3.3 ms, **estimated**) is the largest
+item left in the step and is **necessary but not sufficient** - 30.62 t/s,
+0.88 t/s under the bar, so a second item is required and none has a measured
+price.
 
 ### Where the 42.14 ms goes
 
@@ -240,11 +261,27 @@ even less than the estimate said - but §1 of docs/15 shows what the fusion
 candidates were really buying, which is work-groups, not launches.
 
 One number the ladder does not touch and the gate cannot ignore: **`lm_head` is
-4.376 ms in situ, 10.4% of the step**, at **581 GB/s - 98.5% of the measured
-590** - and 0.6% above its probe floor. There is nothing to tune; quantising it to int4 is worth ~3.3 ms
-and is specialisation 1 below, deliberately outside spec 1.5. docs/15's gate
-arithmetic says the ladder alone lands around 34.4 ms/token (~29.0 t/s) and that
-`lm_head` is the difference between missing the bar and clearing it.
+4.376 ms in situ, 12.0% of the 36.32 ms step**, at **581 GB/s - 98.5% of the
+measured 590** - and 0.6% above its probe floor. There is nothing to tune;
+quantising it to int4 is worth ~3.3 ms (**estimated**) and is specialisation 1
+below, deliberately outside spec 1.5.
+
+**Closed 2026-08-25, short, at the §6 gate - 27.54 t/s / 36.32 ms/token
+measured** (tag `spec1.5-done`). docs/15's gate arithmetic, written before the
+first lever, put the whole ladder at ~34.4 ms optimistically; the measured
+answer is 36.32 with L3 and L4 unspent and ruled not worth their golden-gate
+runs (≤0.06 and ≤0.3 ms). **The claim this paragraph used to end on -
+that `lm_head` is the difference between missing the bar and clearing it - is
+withdrawn, and L5 is why:** it was written against a projection that assumed
+attention would pay −3.0 ms, and attention paid **−1.726**. On the ladder's own
+optimistic ceiling of 35.96 ms, `lm_head` at int4 lands at **32.66 ms =
+30.62 t/s - still 0.88 t/s under the bar**. It is necessary and it is not
+sufficient; a second item is required and none has a measured price yet. That
+is the subject of
+[the spec 1.5 re-assessment memo](superpowers/specs/2026-08-25-spec1.5-reassessment.md),
+which prices every candidate - and puts a probe that names `attn_decode`'s
+unexplained 224 µs launch ahead of every design, because four cost models have
+now died on that kernel.
 
 ## Where the headroom actually is
 
@@ -361,7 +398,10 @@ around it.
    `attn` - and the per-kernel profile separates them: `attn_decode` **5.782**,
    `prep` **3.573**, `a‖b` **2.335**, `gdn_step` **0.733**, `attn_prep` +
    `attn_reduce` **0.127**. `gdn_step`, the kernel this row was written to
-   worry about, is 1.7% of the step at 92% of device bandwidth. **Estimate before measuring** (2026-08-22, kept for the record): the
+   worry about, is 1.7% of the step at 92% of device bandwidth. (Those shares
+   are the 42.141 ms step the profile ran on. Spec 1.5's levers took the step to
+   **36.32 ms** without touching a single GEMV, so GEMV's share is now
+   **79.9%** - the split moved further towards GEMM, not away from it.) **Estimate before measuring** (2026-08-22, kept for the record): the
    recurrent state is 3 MB per layer, read and written once per token - ~150 MB
    across 48 layers, ~2% of `W`. Expect GEMM to dominate bandwidth and GDN to
    dominate *kernel count*; under replay the second is what the fusion list in
@@ -457,7 +497,9 @@ images and the exact serve and bench commands are in
 [BENCHMARKS.md](BENCHMARKS.md); the dense 27B rows there use `--max-model-len
 16k`, `pp4096`, `depth 1`, `concurrency 1`, which is the v1 definition of done.
 
-**b70-decode's own row, measured 2026-08-25: tg256 23.73 t/s at depth 4096** -
-`tools/bench_decode.sh`, median of three, and 24.7% short of that baseline. No
-`pp4096` figure exists yet: this engine has no prefill kernel (spec 2), so a
-prompt costs one decode replay per id - 4096 ids in 170.5 s.
+**b70-decode's own row, measured 2026-08-25 at the spec 1.5 gate: tg256
+27.54 t/s at depth 4096** - `tools/bench_decode.sh`, median of three, and 12.6%
+short of that baseline (it was 23.73 t/s / 24.7% short at `62bdd4d`, before the
+lever ladder). No `pp4096` figure exists yet: this engine has no prefill kernel
+(spec 2), so a prompt costs one decode replay per id - 4096 ids in 141.0 s,
+34.43 ms/token, measured in the gate's own runs.
