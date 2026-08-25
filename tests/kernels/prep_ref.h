@@ -104,6 +104,67 @@ inline void res_norm(const float* partials, uint16_t* resid, const float* norm_w
   }
 }
 
+// prep_res_fold / prep_norm_finish: prep_res_norm in two launches (spec 1.5
+// lever L1), and the reference is the same two halves.
+//
+// Everything per element is prep_res_norm's chain unchanged - same partial
+// order, same two RNE steps - so `resid` out of `res_fold` is bit-identical to
+// `res_norm`'s and the test asserts exactly that. What differs is the Σx² tree:
+//
+//   res_norm      256 lane accumulators over the WHOLE row (lane i takes
+//                 k = i, i+256, …), collapsed 256 -> 128 -> … -> 1.
+//   res_fold      G chunks of K/G; inside chunk g, lane i takes
+//                 k = g·chunk + i, + WG_FOLD, … (one element each at
+//                 chunk == WG_FOLD), collapsed 256 -> … -> 1 per chunk.
+//   norm_finish   Σ_{g=0}^{G-1} of those G fp32 sums, ascending g.
+//
+// So `x` may move in the last bf16 ulp against the single-stage reference; it
+// does NOT move against this one, which is why the test holds the two-stage
+// device output bit-exact here and to a ulp bar there.
+inline void res_fold(const float* partials, uint16_t* resid, float* sumsq, uint32_t M, uint32_t K,
+                     uint32_t S_PREV, uint32_t G) {
+  const uint32_t chunk = (K + G - 1) / G;
+  std::vector<float> red(kWgRes);
+  for (uint32_t m = 0; m < M; ++m) {
+    uint16_t* rp = resid + size_t(m) * K;
+    for (uint32_t g = 0; g < G; ++g) {
+      const uint32_t k0 = g * chunk, k1 = k0 + chunk > K ? K : k0 + chunk;
+      for (uint32_t i = 0; i < kWgRes; ++i) {
+        float acc2 = 0.f;
+        for (uint32_t k = k0 + i; k < k1; k += kWgRes) {
+          uint16_t r_b;
+          if (S_PREV == 0) {
+            r_b = rp[k];
+          } else {
+            float acc = 0.f;
+            for (uint32_t s = 0; s < S_PREV; ++s) acc += partials[(size_t(s) * M + m) * K + k];
+            r_b = rne(f32(rp[k]) + f32(rne(acc)));
+          }
+          rp[k] = r_b;
+          const float v = f32(r_b);
+          acc2 = std::fma(v, v, acc2);
+        }
+        red[i] = acc2;   // a lane with no element contributes an exact 0.0f
+      }
+      for (uint32_t stride = kWgRes / 2; stride > 0; stride >>= 1)
+        for (uint32_t i = 0; i < stride; ++i) red[i] += red[i + stride];
+      sumsq[size_t(g) * M + m] = red[0];
+    }
+  }
+}
+
+inline void norm_finish(const float* sumsq, const uint16_t* resid, const float* norm_w,
+                        uint16_t* x_out, uint32_t M, uint32_t K, uint32_t G) {
+  for (uint32_t m = 0; m < M; ++m) {
+    float total = 0.f;
+    for (uint32_t g = 0; g < G; ++g) total += sumsq[size_t(g) * M + m];
+    const float mean = total / float(K);
+    const float rstd = 1.0f / std::sqrt(mean + 1e-6f);
+    for (uint32_t k = 0; k < K; ++k)
+      x_out[size_t(m) * K + k] = rne(f32(resid[size_t(m) * K + k]) * rstd * norm_w[k]);
+  }
+}
+
 // prep_silu_mul: gate||up (interleaved in 16-column blocks) -> silu(gate)·up.
 //   gflat = (k/16)·32 + k%16 ;  uflat = gflat + 16
 //   g_b = rne(Σ_s partials[s][m][gflat]) ;  u_b likewise

@@ -45,7 +45,32 @@
 #define S_PREV 0          /* prep_res_norm's split-K slice count; 0 = no mixer */
 #endif
 
+// The two-stage split of prep_res_norm (spec 1.5 lever L1). `FOLD_G` is stage
+// A's work-group count and therefore the number of fp32 partial sums-of-squares
+// it writes; `NORM_G` is how many of them stage B folds (it must equal the
+// FOLD_G of the stage-A launch that fed it) and `NORM_WGS` is stage B's own
+// work-group count. All three are in the compiled variant's NAME
+// (kernels::prep_res_fold_variant / prep_norm_finish_variant), so a host that
+// asks for a grid the binary was not built for names a file that does not
+// exist and throws at capture rather than reducing the wrong number of slices.
+#ifndef FOLD_G
+#define FOLD_G 20
+#endif
+#ifndef NORM_G
+#define NORM_G 20
+#endif
+#ifndef NORM_WGS
+#define NORM_WGS 20
+#endif
+
 #define WG_RES 256
+#define WG_FOLD 256
+#define WG_NORM 256
+// Ceiling division: a K that is not a multiple of the group count leaves the
+// last chunk short, and the `k < k1` bound is what makes that safe (the same
+// device prep_silu_mul's ragged 1024-wide last chunk uses).
+#define FOLD_CHUNK ((K + FOLD_G - 1) / FOLD_G)
+#define NORM_CHUNK ((K + NORM_WGS - 1) / NORM_WGS)
 #define WG_SILU 256
 #define WG_GATED 128
 
@@ -137,6 +162,132 @@ __kernel void prep_res_norm(__global const float* restrict partials,
 
   for (uint k = lid; k < K; k += WG_RES)
     x_out[(size_t)m * K + k] = rne_bf16(row[k] * rstd * norm_w[k]);
+}
+
+// ---------------------------------------------------------------------------
+// prep_res_fold / prep_norm_finish - prep_res_norm in two launches (spec 1.5
+// lever L1). Same maths, one Σ apart, and 320 subgroups instead of 16.
+//
+// **Why two kernels.** RMSNorm's mean is over the whole row, so a single kernel
+// cannot split the row across work-groups: the work-group IS the reduction
+// domain, and at M = 1 that is ONE work-group - 16 subgroups on one Xe-core,
+// measured at 22.3 µs and 17.0 GB/s in situ (docs/12 `prep_res_norm` →
+// Measured). What the measurement says is scarce is the **subgroup**
+// (docs/15 §L2: 8 → 32 → 128 subgroups took the `a‖b` GEMV 48.8 → 13.1 →
+// 5.3 µs, while spreading the same 8 over 4× the work-groups bought zero). A
+// grid-wide reduction needs a second launch, and a second launch is what this
+// pair is.
+//
+//   stage A  prep_res_fold(partials, resid, sumsq)      grid (FOLD_G, M)
+//   stage B  prep_norm_finish(sumsq, resid, norm_w, x)  grid (NORM_WGS, M)
+//
+// **The numerics contract, which is the whole point of this shape.** Stage A
+// walks its chunk with the SAME per-element chain the single-WG kernel uses -
+// the same s = 0…S_PREV-1 partial order, the same two bf16 RNE steps - and the
+// per-element chain is independent of who runs it. So `resid` comes out
+// **bit-identical** to prep_res_norm's, which is what leaves the golden gate's
+// per-layer tap diagnostics untouched. The ONE thing that changes is the global
+// Σx² tree: instead of 256 lane accumulators over the whole row collapsed by
+// one pairwise tree, it is FOLD_G chunk trees (each 256 → 128 → … → 1 over
+// lanes holding their own chunk's terms) summed by stage B in ascending `g`.
+// That moves `x` by at most a last-ulp rounding, and the arbiter for it is the
+// golden gate, not a tolerance (docs/12 `prep_res_norm` → Measured).
+//
+// Nothing here is data-dependent, there is no atomic, FOLD_G is fixed at
+// compile time and the `g` loop is in index order, so two replays of the
+// captured list still produce the same bits.
+
+// Stage A: fold the previous GEMV's split-K partials into the residual stream
+// and reduce this chunk's Σx².
+//
+//   mixer_b = rne_bf16(Σ_s partials[s][m][k])            (skipped if S_PREV==0)
+//   r_b     = rne_bf16(f32(resid[m][k]) + f32(mixer_b))
+//   resid[m][k] = r_b
+//   sumsq[g][m] = tree_{lanes}(Σ_{k in chunk g} f32(r_b)²)
+//
+// No SLM row staging: at FOLD_CHUNK = 256 and WG_FOLD = 256 a lane owns exactly
+// one element, so the value it squares is the one it just wrote and the 20 KB
+// `row[K]` array the single-WG kernel needs is gone with it. That drops this
+// kernel's SLM from 21 KB to 1 KB, which is the other half of what lets 20
+// work-groups be resident at once.
+__attribute__((reqd_work_group_size(WG_FOLD, 1, 1)))
+__kernel void prep_res_fold(__global const float* restrict partials,
+                            __global ushort* restrict resid,
+                            __global float* restrict sumsq) {
+  const uint g = get_group_id(0);
+  const uint m = get_group_id(1);
+  const uint lid = get_local_id(0);
+  __local float red[WG_FOLD];
+  __global ushort* rp = resid + (size_t)m * K;
+
+  const uint k0 = g * FOLD_CHUNK;
+  uint k1 = k0 + FOLD_CHUNK;
+  if (k1 > K) k1 = K;
+
+  float acc2 = 0.f;
+  for (uint k = k0 + lid; k < k1; k += WG_FOLD) {
+#if S_PREV == 0
+    const ushort r_b = rp[k];
+#else
+    float acc = 0.f;
+    for (uint s = 0; s < S_PREV; ++s) acc += partials[((size_t)s * M + m) * K + k];
+    const ushort r_b = rne_bf16(bf16f(rp[k]) + bf16f(rne_bf16(acc)));
+#endif
+    rp[k] = r_b;
+    const float v = bf16f(r_b);
+    acc2 = fma(v, v, acc2);
+  }
+  // A lane with no element in this chunk contributes an exact 0.0f, so the tree
+  // below is the same shape for every g whatever FOLD_CHUNK is.
+  red[lid] = acc2;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint stride = WG_FOLD / 2; stride > 0; stride >>= 1) {
+    if (lid < stride) red[lid] += red[lid + stride];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (lid == 0) sumsq[(size_t)g * M + m] = red[0];
+}
+
+// Stage B: the global Σ, the rms, and the normalised row.
+//
+//   rstd        = 1 / sqrt(Σ_{g=0}^{NORM_G-1} sumsq[g][m] / K + 1e-6)
+//   x_out[m][k] = rne_bf16(f32(resid[m][k]) · rstd · norm_w[k])
+//
+// **Every lane of every work-group folds the NORM_G partials itself**, in the
+// same ascending-`g` order, so every work-group computes bit-identical `rstd`
+// from bit-identical inputs and the grid is free of any cross-work-group
+// dependency. NORM_G is 20 floats: 80 bytes, the same 80 bytes for every lane
+// of the subgroup, and one cache line after the first lane touches it. That is
+// what buys the second half of the lever - the rescale phase is the OTHER
+// serialised pass over the row (10 KB of `resid` + 20 KB of `norm_w` + 10 KB of
+// `x` through one Xe-core), and NORM_WGS spreads it exactly as stage A spreads
+// the fold. NORM_WGS = 1 is the plan's literal design and is kept compiled so
+// the two can be measured against each other.
+//
+// `resid` is re-widened from DRAM here rather than handed over in SLM - SLM
+// does not survive a launch boundary. The bytes are the ones stage A just
+// wrote, so they are L2-warm, and `bf16f(resid[k])` is by construction the same
+// float the single-WG kernel kept in `row[k]`.
+__attribute__((reqd_work_group_size(WG_NORM, 1, 1)))
+__kernel void prep_norm_finish(__global const float* restrict sumsq,
+                               __global const ushort* restrict resid,
+                               __global const float* restrict norm_w,
+                               __global ushort* restrict x_out) {
+  const uint w = get_group_id(0);
+  const uint m = get_group_id(1);
+  const uint lid = get_local_id(0);
+
+  float total = 0.f;
+  for (uint g = 0; g < NORM_G; ++g) total += sumsq[(size_t)g * M + m];
+  const float mean = total / (float)K;
+  const float rstd = 1.0f / sqrt(mean + 1e-6f);
+
+  const __global ushort* rp = resid + (size_t)m * K;
+  const uint k0 = w * NORM_CHUNK;
+  uint k1 = k0 + NORM_CHUNK;
+  if (k1 > K) k1 = K;
+  for (uint k = k0 + lid; k < k1; k += WG_NORM)
+    x_out[(size_t)m * K + k] = rne_bf16(bf16f(rp[k]) * rstd * norm_w[k]);
 }
 
 // ---------------------------------------------------------------------------

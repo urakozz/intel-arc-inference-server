@@ -16,6 +16,7 @@
 //     conforming implementation and `silu(30) = 30.0f` on both sides. Those
 //     cases are asserted bit-exact, which pins the norm/mul chain (`n_b`, `t_b`,
 //     `s_b`) that is otherwise not directly observable.
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <random>
@@ -109,6 +110,21 @@ struct Dev {
     q.execute(list, &fence);
     fence.wait();
   }
+
+  // Two launches in ONE in-order list, which is how runtime::build appends the
+  // two-stage prep pair: stage B must see stage A's `sumsq` and its rewritten
+  // `resid`, and the list's in-order flag is the only thing that makes it so.
+  // Running them as two lists would test a synchronisation the engine does not
+  // use.
+  void run2(l0::Kernel& a, uint32_t agx, uint32_t agy, l0::Kernel& b, uint32_t bgx,
+            uint32_t bgy) {
+    l0::CmdList list = l0::CmdList::regular(ctx);
+    list.launch(a, agx, agy);
+    list.launch(b, bgx, bgy);
+    list.close();
+    q.execute(list, &fence);
+    fence.wait();
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -150,6 +166,125 @@ void case_res_norm(Dev& d, uint32_t M, uint32_t K, uint32_t S_PREV) {
               M, K, S_PREV, cx.exact, cx.n, cx.max_ulp, cr.exact, cr.n, cr.max_ulp);
   require(cx, 0, "prep_res_norm x_out");
   require(cr, 0, "prep_res_norm resid");
+}
+
+// ---------------------------------------------------------------------------
+// The two-stage prep_res_norm - spec 1.5's lever L1 (prep_res_fold +
+// prep_norm_finish). Three bars, and they are not the same bar:
+//
+//   1. `resid` **bit-exact against the SINGLE-stage reference**. The lever's
+//      whole numerics claim is that the per-element fold chain is untouched, and
+//      this is that claim: the same s = 0..15 order, the same two RNE steps,
+//      just distributed differently. If it holds, the golden gate's per-layer
+//      residual taps see byte-identical tensors and cannot move.
+//   2. `x` and `sumsq` **bit-exact against the TWO-stage reference**, which
+//      models the new Σ tree (G chunk trees, then ascending g). Nothing in this
+//      pair is allowed to be "close": the reference reproduces the tree, so the
+//      only reason for a difference would be a transcription bug.
+//   3. `x` against the single-stage reference at the **Task-5 ruled bar**: <= 2
+//      bf16 ulp wherever |ref| >= rms/8. This is the ONE quantity the lever
+//      moves, it moves it by reordering a fp32 sum, and the printed max ulp is
+//      the number the report carries. The arbiter for the change is the golden
+//      gate, not this tolerance (docs/12, `prep_res_norm` -> Measured).
+//
+// `norm_wgs` is stage B's own work-group count: 20 is what the runtime binds,
+// 1 is the plan's literal single-work-group finish. Both are run and both must
+// produce the same bits, because they fold the same G partials in the same
+// order - the grid changes who rescales which element, not the arithmetic.
+void case_res_norm_two_stage(Dev& d, uint32_t M, uint32_t K, uint32_t S_PREV, uint32_t G,
+                             uint32_t norm_wgs) {
+  const size_t np = S_PREV ? size_t(S_PREV) * M * K : 1;
+  // The SAME seeds case_res_norm uses, so the single-stage reference below is
+  // literally the reference that kernel is graded against.
+  std::vector<float> partials = random_f32(np, 100 + S_PREV, 0.f, 1.f);
+  std::vector<uint16_t> resid = random_bf16(size_t(M) * K, 200 + S_PREV, -1.f, 1.f);
+  std::vector<float> norm_w(K);
+  {
+    std::mt19937 rng(300 + S_PREV);
+    std::uniform_real_distribution<float> d05(-0.05f, 0.05f);
+    for (auto& w : norm_w) w = 1.0f + d05(rng);
+  }
+
+  std::vector<uint16_t> resid_one = resid, x_one(size_t(M) * K, 0);
+  prep_ref::res_norm(partials.data(), resid_one.data(), norm_w.data(), x_one.data(), M, K, S_PREV);
+
+  std::vector<uint16_t> resid_two = resid, x_two(size_t(M) * K, 0);
+  std::vector<float> sumsq_ref(size_t(G) * M, 0.f);
+  prep_ref::res_fold(partials.data(), resid_two.data(), sumsq_ref.data(), M, K, S_PREV, G);
+  prep_ref::norm_finish(sumsq_ref.data(), resid_two.data(), norm_w.data(), x_two.data(), M, K, G);
+
+  // The reference's own consistency check, before the device is asked anything:
+  // the two host paths must agree on `resid` bit for bit, or the claim being
+  // tested is false in the reference and the device comparison proves nothing.
+  CHECK(resid_one == resid_two);
+
+  l0::Mem pbuf = upload(d.ctx, d.imm, partials);
+  l0::Mem rbuf = upload(d.ctx, d.imm, resid);
+  l0::Mem wbuf = upload(d.ctx, d.imm, norm_w);
+  l0::Mem sbuf(d.ctx, l0::MemKind::Device, size_t(G) * M * sizeof(float));
+  l0::Mem xbuf(d.ctx, l0::MemKind::Device, size_t(M) * K * 2);
+  l0::Module amod(d.ctx, kernels::path(kernels::prep_res_fold_variant(M, K, S_PREV, G)));
+  l0::Kernel ka = amod.kernel("prep_res_fold");
+  ka.group_size(256);
+  ka.arg_ptr(0, pbuf.ptr());
+  ka.arg_ptr(1, rbuf.ptr());
+  ka.arg_ptr(2, sbuf.ptr());
+  l0::Module bmod(d.ctx, kernels::path(kernels::prep_norm_finish_variant(M, K, G, norm_wgs)));
+  l0::Kernel kb = bmod.kernel("prep_norm_finish");
+  kb.group_size(256);
+  kb.arg_ptr(0, sbuf.ptr());
+  kb.arg_ptr(1, rbuf.ptr());
+  kb.arg_ptr(2, wbuf.ptr());
+  kb.arg_ptr(3, xbuf.ptr());
+  d.run2(ka, G, M, kb, norm_wgs, M);
+
+  std::vector<uint16_t> x_got(size_t(M) * K), resid_got(size_t(M) * K);
+  std::vector<float> sumsq_got(size_t(G) * M);
+  download(d.imm, x_got, xbuf);
+  download(d.imm, resid_got, rbuf);
+  download(d.imm, sumsq_got, sbuf);
+
+  Cmp cr = compare(resid_got, resid_one);      // bar 1
+  Cmp cx2 = compare(x_got, x_two);             // bar 2
+  size_t sum_exact = 0;
+  for (size_t i = 0; i < sumsq_got.size(); ++i)
+    if (sumsq_got[i] == sumsq_ref[i]) ++sum_exact;
+
+  // Bar 3, with the magnitude guard: the rms of the single-stage reference row,
+  // over the same K the kernel divides by.
+  double sq = 0.0;
+  for (size_t i = 0; i < x_one.size(); ++i) {
+    const double v = prep_ref::f32(x_one[i]);
+    sq += v * v;
+  }
+  const double rms = std::sqrt(sq / double(x_one.size()));
+  const double guard = rms / 8.0;
+  uint32_t worst_ulp = 0;
+  size_t graded = 0, exact_vs_one = 0;
+  for (size_t i = 0; i < x_one.size(); ++i) {
+    if (x_got[i] == x_one[i]) ++exact_vs_one;
+    if (std::fabs(double(prep_ref::f32(x_one[i]))) < guard) continue;
+    ++graded;
+    const int32_t diff = bf16_key(x_got[i]) - bf16_key(x_one[i]);
+    const uint32_t u = uint32_t(diff < 0 ? -diff : diff);
+    if (u > worst_ulp) worst_ulp = u;
+  }
+
+  std::printf("prep_res_fold+norm_finish M=%u K=%u SP=%u G=%u W=%u:\n"
+              "  resid vs single-stage ref  %zu/%zu exact (max %u ulp)   [bar: bit-exact]\n"
+              "  sumsq vs two-stage ref     %zu/%zu exact                [bar: bit-exact]\n"
+              "  x     vs two-stage ref     %zu/%zu exact (max %u ulp)   [bar: bit-exact]\n"
+              "  x     vs single-stage ref  %zu/%zu exact, max %u ulp over %zu of %zu graded"
+              " (|ref| >= rms/8 = %.6g)   [bar: <= 2 ulp]\n",
+              M, K, S_PREV, G, norm_wgs, cr.exact, cr.n, cr.max_ulp, sum_exact, sumsq_ref.size(),
+              cx2.exact, cx2.n, cx2.max_ulp, exact_vs_one, x_one.size(), worst_ulp, graded,
+              x_one.size(), guard);
+
+  require(cr, 0, "prep_res_fold resid (vs single-stage reference)");
+  CHECK_EQ(sum_exact, sumsq_ref.size());
+  require(cx2, 0, "prep_norm_finish x_out (vs two-stage reference)");
+  CHECK(worst_ulp <= 2);
+  CHECK(graded > 0);
 }
 
 // `exact_silu`: force every gate column to sum to 30.0f, making silu(gate)
@@ -226,6 +361,12 @@ int main() {
   Dev d;
   case_res_norm(d, 1, 5120, 0);
   case_res_norm(d, 1, 5120, 16);
+  // The two-stage pair the runtime binds (G = 20), at both prep modes and at
+  // both stage-B grids - the 20-work-group finish the engine uses and the
+  // single-work-group one kept as its measurement control.
+  case_res_norm_two_stage(d, 1, 5120, 0, 20, 20);
+  case_res_norm_two_stage(d, 1, 5120, 16, 20, 20);
+  case_res_norm_two_stage(d, 1, 5120, 16, 20, 1);
   case_silu_mul(d, 1, false);
   case_silu_mul(d, 1, true);
   case_gated_head(d, 1, false);

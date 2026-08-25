@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
     std::printf("engine: %zu kernels, %zu modules, max_len %u, captured+reset in %.1f ms\n",
                 eng.step().kernel_count, eng.step().modules.size(), eng.max_len(),
                 ms_since(t_build));
-    CHECK_EQ(eng.step().kernel_count, size_t(645));
+    CHECK_EQ(eng.step().kernel_count, size_t(774));   // 645 + lever L1's 129
     CHECK_EQ(eng.pos(), uint32_t(0));      // the constructor reset it
     CHECK_EQ(eng.last_tok_per_s(), 0.0);   // nothing generated yet
     CHECK(!eng.debug_resid());

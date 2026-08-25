@@ -67,6 +67,36 @@ endfunction()
 add_prep_res_norm(1 5120 0)    # first norm of a layer: no mixer partials to fold in
 add_prep_res_norm(1 5120 16)   # after out_proj / down (S = 16)
 add_prep_res_norm(2 5120 16)   # spec 1 §9: the M loop must compile at M=2
+
+# The two-stage split of prep_res_norm - spec 1.5 lever L1. The runtime binds
+# THIS pair at all 129 sites; the single-WG `prep_res_norm` above stays compiled
+# and stays run by prep_test, which grades the pair against it (`resid`
+# bit-identical, `x` to the ulp bar for the reordered Sigma). That is the same
+# arrangement lever L2 left behind for `gemv_bf16`'s two tilings.
+#
+# G is in the NAME on both sides: stage A's FOLD_G is how many fp32 partial
+# sums-of-squares it writes and stage B's NORM_G is how many it folds, so a host
+# that pairs mismatched grids names a binary that does not exist and throws at
+# capture instead of reducing the wrong number of slices. `W` is stage B's own
+# work-group count, and W=1 is the plan's literal single-work-group finish, kept
+# compiled as the measurement control for W=20.
+function(add_prep_res_fold M K SP G)
+  add_ocloc_kernel(prep_res_fold_M${M}_K${K}_SP${SP}_G${G} SOURCE ${PREP_CL}
+                   DEFINES M=${M} K=${K} S_PREV=${SP} FOLD_G=${G})
+endfunction()
+function(add_prep_norm_finish M K G W)
+  add_ocloc_kernel(prep_norm_finish_M${M}_K${K}_G${G}_W${W} SOURCE ${PREP_CL}
+                   DEFINES M=${M} K=${K} NORM_G=${G} NORM_WGS=${W})
+endfunction()
+# G = 20 at K = 5120 is one element per lane in a 256-lane work-group, which is
+# 320 subgroups against the single-WG kernel's 16 (docs/15 §L2: the subgroup is
+# the unit that priced out, not the work-group).
+add_prep_res_fold(1 5120 0 20)
+add_prep_res_fold(1 5120 16 20)
+add_prep_res_fold(2 5120 16 20)    # spec 1 §9: the M loop must compile at M=2
+add_prep_norm_finish(1 5120 20 20)
+add_prep_norm_finish(1 5120 20 1)  # the single-work-group finish, for the record
+add_prep_norm_finish(2 5120 20 20)
 add_ocloc_kernel(prep_silu_mul_M1 SOURCE ${PREP_CL} DEFINES M=1)
 add_ocloc_kernel(prep_gated_head_M1 SOURCE ${PREP_CL} DEFINES M=1)
 
