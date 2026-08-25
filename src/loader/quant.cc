@@ -38,7 +38,31 @@ QuantConfig QuantConfig::parse(const common::json::Value& config_json) {
   q.bits = uint32_t(qcv->at("bits").num());
   q.group_size = uint32_t(qcv->at("group_size").num());
   q.sym = qcv->at("sym").boolean();
-  q.desc_act = qcv->at("desc_act").boolean();
+  // `desc_act` is GPTQ's key. auto-round's `auto_round:auto_gptq` writer does
+  // not emit it - it never permutes - so absence means false. Recorded as
+  // inferred, and `loader::load` proves it from the shipped `g_idx` count
+  // rather than taking the silence on trust.
+  if (const common::json::Value* da = qcv->find("desc_act"); da && !da->is_null()) {
+    q.desc_act = da->boolean();
+    q.desc_act_declared = true;
+  } else {
+    q.desc_act = false;
+    q.desc_act_declared = false;
+  }
+  if (const common::json::Value* qm = qcv->find("quant_method")) q.quant_method = qm->str();
+  if (const common::json::Value* pf = qcv->find("packing_format")) q.packing_format = pf->str();
+  // The label decides nothing about a tensor (that is `classify`), but an
+  // unrecognised one means an unrecognised *packing*, and a wrong nibble order
+  // is a silently wrong model. Both observed spellings are named; anything else
+  // stops here with the value it found.
+  if (!q.quant_method.empty() && q.quant_method != "gptq" && q.quant_method != "auto-round")
+    throw std::runtime_error("quantization_config.quant_method '" + q.quant_method +
+                             "' is neither 'gptq' nor 'auto-round' - this loader implements the "
+                             "GPTQ v1 packing those two share (docs/02, docs/13)");
+  if (!q.packing_format.empty() && q.packing_format != "auto_round:auto_gptq")
+    throw std::runtime_error("quantization_config.packing_format '" + q.packing_format +
+                             "' is not 'auto_round:auto_gptq' - the qweight[K/8][N] nibble order "
+                             "this loader repacks is that format's");
   if (const common::json::Value* dyn = qcv->find("dynamic")) {
     for (const auto& [rule, unused] : dyn->obj()) {
       (void)unused;
@@ -47,6 +71,42 @@ QuantConfig QuantConfig::parse(const common::json::Value& config_json) {
             "quantization_config.dynamic has a non-exclusion rule '" + rule +
             "' - this is the broken-MTP-config pattern (BENCHMARKS.md); fix the checkpoint");
       ++q.dynamic_rule_count;
+    }
+  }
+  // auto-round's `extra_config` replaces `dynamic`: a per-module object, not a
+  // regex list, so it can be read exactly instead of approximately. `bits: 16`
+  // is an exclusion; `bits: 4` is a module the quantiser claims it packed, and
+  // for those the group size and symmetry MUST match the kernels' - a module
+  // at g128 or asymmetric would dequantise wrong with no other warning. The
+  // `+:` hazard `dynamic` guards against has no analogue here: a claim that a
+  // module is packed is checked against the shipped tensors by
+  // `LinearSrc::classify` at every load site.
+  if (const common::json::Value* ec = qcv->find("extra_config")) {
+    for (const auto& [module, rule] : ec->obj()) {
+      if (!rule.is_object())
+        throw std::runtime_error("quantization_config.extra_config['" + module +
+                                 "'] is not an object - this loader reads auto-round's per-module "
+                                 "form {bits, group_size, sym, ...}");
+      const common::json::Value* b = rule.find("bits");
+      const uint32_t mb = b ? uint32_t(b->num()) : q.bits;
+      if (mb == 16) {
+        ++q.extra_excluded;
+        continue;
+      }
+      if (mb != 4)
+        throw std::runtime_error("quantization_config.extra_config['" + module + "'] has bits=" +
+                                 std::to_string(mb) + " - this loader implements 4 (packed) and "
+                                 "16 (left in fp) only");
+      const common::json::Value* gs = rule.find("group_size");
+      const common::json::Value* sy = rule.find("sym");
+      const uint32_t mg = gs ? uint32_t(gs->num()) : q.group_size;
+      const bool ms = sy ? sy->boolean() : q.sym;
+      if (mg != 64 || !ms)
+        throw std::runtime_error("quantization_config.extra_config['" + module +
+                                 "'] is int4 g" + std::to_string(mg) + " sym=" +
+                                 (ms ? "true" : "false") +
+                                 ", but the kernels implement g64 symmetric only");
+      ++q.extra_quantised;
     }
   }
   if (q.bits != 4 || q.group_size != 64 || !q.sym || q.desc_act)
@@ -108,6 +168,7 @@ QuantScan assert_quant_invariants(const SafetensorsSet& set) {
           throw std::runtime_error(name + "[" + std::to_string(i) + "] = " +
                                    std::to_string(p[i]) + ", expected 0x77777777 (sym zero-point 8)");
     } else if (name.size() > 6 && name.compare(name.size() - 6, 6, ".g_idx") == 0) {
+      ++scan.g_idx_tensors;
       check_align(set.data(t), alignof(int32_t), name);
       const int32_t* p = reinterpret_cast<const int32_t*>(set.data(t));
       size_t n = set.bytes(t) / 4;

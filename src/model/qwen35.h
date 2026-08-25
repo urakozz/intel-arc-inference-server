@@ -88,7 +88,38 @@ struct Qwen35 {
   static bool is_fa(uint32_t layer) { return layer % 4 == 3; }
   // The whole table row (LmHead appears in no layer's list; consumers bind it
   // from here). Throws std::out_of_range on kCount or a bad cast.
+  //
+  // **`linear(LinearId::LmHead)` returns the bf16 row.** It is the historical
+  // row and the one every checkpoint before 2026-08-26 shipped, so keeping it
+  // as the default is what stops a silent change of meaning for callers that
+  // do not know about the second one. Callers that must honour the checkpoint
+  // (the loader, and through it the capture) use `lm_head(kind)` below.
   static const FusedLinear& linear(LinearId id);
+  // **`lm_head` is the ONE linear whose kind is a property of the checkpoint,
+  // not of the model** - everything else is fixed by the architecture plus the
+  // quantiser's exclusion list, which is the same for every checkpoint this
+  // project accepts. `lm_head` is not: the shipped
+  // `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` leaves it bf16 (2.543 GB read
+  // per token), and the self-quantised `qwen38-27b-w4g64-rtn`
+  // (tools/quantize_qwen38_rtn.sh, `--quant_lm_head`) packs it int4 g64 sym
+  // (0.675 GB). Both rows live here; `loader::LinearSrc::classify` picks by
+  // which tensors the checkpoint actually ships, never by a config label
+  // (docs/02's rule, docs/13's "Classification" table).
+  //
+  // The int4 row is `{K 5120, N 248320, S 1, layout 1}`:
+  //   * **layout 1** because it is the only int4 repack the loader implements
+  //     (`load_linear` throws on any other), and it is the measured winner at
+  //     every large `N` (docs/probe-gemv-2026-08-24.md).
+  //   * **S = 1** for two independent reasons that agree. First, occupancy is
+  //     already saturated without a split: `N / 64 = 3880` work-groups of 4
+  //     subgroups = 15 520 subgroups against the 32 Xe-cores, which is the same
+  //     grid the bf16 kernel ran at 98.5% of measured device bandwidth. Split-K
+  //     buys threads, and there is nothing here to buy them with. Second, S = 1
+  //     is what lets the capture bind this GEMV's output **straight at
+  //     `logits`**: `gemv.cl` writes `out[(s*M + m)*N + n]`, which at S = 1 is
+  //     exactly the `[M][N]` fp32 row `argmax_stage1` reads. Any S > 1 would
+  //     need a fold kernel that does not exist.
+  static const FusedLinear& lm_head(WeightKind kind);
   static const GemvShape& shape(LinearId id);         // the per-shape table
   static std::vector<LayerDesc> layers();             // all 64, fully populated
   // Checkpoint-name helpers ("model.language_model." prefix already stripped

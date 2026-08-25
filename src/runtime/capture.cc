@@ -382,20 +382,38 @@ class Capture {
   // which is the plan-1 convention and keeps the argument count honest. (Both
   // parameters are `restrict`-qualified; the aliasing is unobservable because
   // `scales` is never dereferenced under LAYOUT 1.)
-  void gemv(uint32_t layer, LinearId id, const void* x) {
-    const model::FusedLinear& fl = Qwen35::linear(id);
-    const model::GemvShape& s = fl.shape;
-    require(fl.kind == model::WeightKind::Int4, "gemv bound to a bf16 table row");
-    require(s.N % kGemvColsPerWg == 0, "gemv N is not a multiple of 64");
+  //
+  // **The shape and the kind come from the LOADED weight, not from the model
+  // table** (spec 1.6 §5.1). For seven of the eight rows the two are the same
+  // object - `loader::load_linear` copies the table row's `GemvShape` and
+  // `WeightKind` into the `DeviceWeight` it returns. The eighth is `lm_head`,
+  // whose kind is a property of the checkpoint (model/qwen35.h): the loader
+  // classifies it by content and stores the row it actually packed, so reading
+  // the shape from the device weight is what makes one capture serve both
+  // checkpoints without a conditional anywhere in the walk.
+  //
+  // `out` is `partials` for every per-layer GEMV - its consumer is a `prep`
+  // that folds the S slices. `lm_head` passes `logits` instead; see `head()`.
+  void gemv(uint32_t layer, LinearId id, const void* x, const l0::Mem& out) {
     const loader::DeviceWeight& w = m_.linears.at({layer, id});
+    const model::GemvShape& s = w.shape;
+    require(w.kind == model::WeightKind::Int4, "gemv bound to a bf16 weight");
+    require(s.N % kGemvColsPerWg == 0, "gemv N is not a multiple of 64");
+    // `gemv.cl` writes `out[(s*M + m)*N + n]`, so the output allocation must
+    // hold S*M*N floats. Nothing else checks this: `partials` is sized as the
+    // max-S x max-N rectangle over the table's int4 rows (buffers.cc), which
+    // stops covering a GEMV the moment one is bound to a different allocation.
+    require(out.size() >= size_t(s.S) * kCapM * s.N * sizeof(float),
+            "the GEMV's output allocation is smaller than its [S][M][N] fp32 result");
     l0::Kernel& k =
         kernel(kernels::gemv_variant(kCapM, s.K, s.N, s.S, s.layout), "gemv", kWgGemv);
     k.arg_ptr(0, w.mem.ptr());
     k.arg_ptr(1, w.mem.ptr());
     k.arg_ptr(2, x);
-    k.arg_ptr(3, b_.partials.ptr());
+    k.arg_ptr(3, out.ptr());
     launch(k, s.N / kGemvColsPerWg, s.S);
   }
+  void gemv(uint32_t layer, LinearId id, const void* x) { gemv(layer, id, x, b_.partials); }
 
   // gemv_bf16(w, x, out) - src/kernels/gemv_bf16.cl (plan 1 §9.2), grid
   // (N/COLS_PER_WG), WG COLS_PER_WG. No split-K: it writes its fp32 output
@@ -414,12 +432,13 @@ class Capture {
   // the split DOES reorder the summation (gemv_bf16.cl names the tree), which
   // is why this lever's acceptance runs the golden gate.
   void gemv_bf16(uint32_t layer, LinearId id, const void* x, const l0::Mem& out) {
-    const model::FusedLinear& fl = Qwen35::linear(id);
-    const model::GemvShape& s = fl.shape;
-    require(fl.kind == model::WeightKind::Bf16, "gemv_bf16 bound to an int4 table row");
+    const loader::DeviceWeight& w = m_.linears.at({layer, id});
+    const model::GemvShape& s = w.shape;
+    require(w.kind == model::WeightKind::Bf16, "gemv_bf16 bound to an int4 weight");
     const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(s.N);
     require(s.N % t.cols == 0, "gemv_bf16 N is not a multiple of its work-group width");
-    const loader::DeviceWeight& w = m_.linears.at({layer, id});
+    require(out.size() >= size_t(kCapM) * s.N * sizeof(float),
+            "the bf16 GEMV's output allocation is smaller than its [M][N] fp32 result");
     // The work-group is one lane per column per K slice - the kernel's
     // reqd_work_group_size(COLS_PER_WG / 16 * KSPLIT subgroups of 16).
     l0::Kernel& k =
@@ -571,9 +590,35 @@ class Capture {
 
   // The token boundary: fold layer 63's MLP into the residual stream under the
   // final norm, project to logits, sample.
+  // **`lm_head` is the one launch in the walk whose kernel depends on the
+  // checkpoint** (spec 1.6 §5.1). The published checkpoint ships it bf16 and it
+  // is a `gemv_bf16`; a checkpoint quantised with `--quant_lm_head` ships it
+  // int4 g64 and it is a `gemv`. The loader has already decided which
+  // (`Qwen35::lm_head`, by content), so this reads the decision off the loaded
+  // weight rather than re-deriving it.
+  //
+  // **Both write straight into `logits`, and the int4 path needs no kernel
+  // change to do it.** `gemv_bf16` has always written its fp32 output
+  // directly. `gemv` writes `out[(s*M + m)*N + n]` - at `S = 1` that is exactly
+  // `[M][N]`, the layout `argmax_stage1` reads, so binding `logits` as the
+  // `out` argument makes the split-K accumulator's degenerate case *be* the
+  // logits row. No `partials` slice is involved, no rebinding of `argmax`, no
+  // direct-out variant of `gemv.cl`: the S = 1 that the shape needs for
+  // occupancy reasons is the same S = 1 that makes this legal. `logits` is
+  // fp32 [M][248320] = 7 946 240 B and the result is S*M*N*4 = the same
+  // number - an exact fit, checked by the `require` in `gemv()` rather than
+  // asserted here.
+  //
+  // The launch COUNT is identical either way (one launch, 774 total). The
+  // MODULE count is too, though not trivially: `gemv_bf16_M1_K5120_N248320`
+  // stops being opened and `gemv_M1_K5120_N248320_S1_L1` starts, one for one,
+  // so `CapturedStep::modules.size()` is 19 on both checkpoints.
   void head() {
     res_norm(Qwen35::shape(LinearId::Down).S, m_.final_norm.ptr());
-    gemv_bf16(loader::kTopLevel, LinearId::LmHead, b_.x.ptr(), b_.logits);
+    if (m_.linears.at({loader::kTopLevel, LinearId::LmHead}).kind == model::WeightKind::Int4)
+      gemv(loader::kTopLevel, LinearId::LmHead, b_.x.ptr(), b_.logits);
+    else
+      gemv_bf16(loader::kTopLevel, LinearId::LmHead, b_.x.ptr(), b_.logits);
     // argmax_stage1(logits, part) - src/kernels/argmax.cl (Task 3), grid
     // (kVocab/1024 = 243, M), WG 256.
     {
