@@ -143,6 +143,10 @@
 // ever re-tuned to a wider split-K, that load must sum the slices the way
 // prep_gated_head does for `z` - and the reference and the ring's bit-exact bar
 // with it. Fail the build here rather than silently read slice 0.
+// The `#error` below can only check this file against itself; the other half of
+// the pairing - that QKVZ_S still equals `model::Qwen35`'s QkvZ.S - is asserted
+// at capture time by runtime::Capture::check_sizes (src/runtime/capture.cc),
+// which is the only place that can see both numbers.
 #define QKVZ_S 1
 #if QKVZ_S != 1
 #error "gdn_step assumes qkv||z runs S=1; the partials index must loop s otherwise"

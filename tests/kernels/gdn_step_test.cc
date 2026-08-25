@@ -128,6 +128,17 @@ Err compare_f32(const std::vector<float>& got, const std::vector<float>& ref) {
   e.rms = std::sqrt(sq / double(ref.size()));
   const double floor = e.rms > 0.0 ? e.rms : 1.0;
   for (size_t i = 0; i < ref.size(); ++i) {
+    // The device must be finite wherever the reference is. Without this every
+    // ratio below is blind to a NaN: `fabs(NaN - r)` is NaN, `NaN > e.worst` is
+    // false, and the worst-error scan simply declines to see it - a kernel that
+    // returned all-NaN would pass with a reported error of 0. `gdn_o` is built
+    // from an exp'd decay times a running state, which is exactly the shape of
+    // arithmetic that produces one. (attn_test's compare_f32 has carried this
+    // check since the attention wave; this closes the same hole here. The
+    // reference itself is checked too: a non-finite `ref` would mean the
+    // fixture, not the kernel, and the tolerance below would be meaningless.)
+    CHECK(std::isfinite(ref[i]));
+    CHECK(std::isfinite(got[i]));
     const double d = std::fabs(double(got[i]) - double(ref[i])), a = std::fabs(double(ref[i]));
     if (d > e.max_abs) e.max_abs = d;
     const double rel = d / (a > floor ? a : floor);

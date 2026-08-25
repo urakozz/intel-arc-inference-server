@@ -33,18 +33,40 @@ TG="${TG:-256}"
 RUNS="${RUNS:-3}"
 BUILD=1
 
+# `set -u` is on, so a bare `--depth` at the end of the line would abort with
+# `$2: unbound variable` -- bash's message about this script's internals, not
+# this script's message about the operator's command. Every value-taking flag
+# goes through this first, so a missing (or empty) value takes the same exit-2
+# path as an unknown argument. `need_value "$@"` sees the flag as $1 and its
+# value, if there is one, as $2; the `||` short-circuits so `-z "$2"` is never
+# reached when $2 does not exist.
+need_value() {
+  if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+    echo "bench_decode.sh: $1 needs a value" >&2
+    exit 2
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --depth) DEPTH="$2"; shift 2 ;;
-    --tg)    TG="$2";    shift 2 ;;
-    --runs)  RUNS="$2";  shift 2 ;;
-    --model) MODEL="$2"; shift 2 ;;
+    --depth) need_value "$@"; DEPTH="$2"; shift 2 ;;
+    --tg)    need_value "$@"; TG="$2";    shift 2 ;;
+    --runs)  need_value "$@"; RUNS="$2";  shift 2 ;;
+    --model) need_value "$@"; MODEL="$2"; shift 2 ;;
     --no-build) BUILD=0; shift ;;
     -h|--help)
       awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
     *) echo "bench_decode.sh: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
+
+# Everything the arguments alone can decide is decided before the box is
+# touched. `--runs 0` used to be caught *after* a full remote rebuild, which
+# spent a couple of minutes on the box to reject four characters.
+if ! [ "$RUNS" -ge 1 ] 2>/dev/null; then
+  echo "bench_decode.sh: --runs must be a positive integer, got '$RUNS'" >&2
+  exit 2
+fi
 
 SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if [ "$SHA" != unknown ] && ! git diff --quiet HEAD 2>/dev/null; then
@@ -57,16 +79,11 @@ else
   tools/box.sh sync
 fi
 
-if ! [ "$RUNS" -ge 1 ] 2>/dev/null; then
-  echo "bench_decode.sh: --runs must be a positive integer, got '$RUNS'" >&2
-  exit 2
-fi
-
 echo "bench: $MODEL, depth $DEPTH, tg $TG, $RUNS run(s), sha $SHA" >&2
 
 # `rows` is only ever expanded after at least one run, which the --runs guard
-# above enforces -- an empty array would trip `set -u` on older bash (3.2, which
-# is what macOS ships).
+# (now above the build, so it costs nothing to trip) enforces -- an empty array
+# would trip `set -u` on older bash (3.2, which is what macOS ships).
 rows=()
 for i in $(seq 1 "$RUNS"); do
   echo "=== run $i/$RUNS ===" >&2

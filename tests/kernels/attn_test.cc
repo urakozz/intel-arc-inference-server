@@ -15,9 +15,10 @@
 // and the KV cache are held to **bit-exact** and only `attn_out` and
 // `attn_part` carry a tolerance:
 //
-//   * `kv_k` / `kv_v` - bit-exact over **all** 4.19 M words of each cache, not
-//     just the slots this step writes. The untouched slots prove that the only
-//     positions `attn_prep` writes are `pos … pos+n_active−1`.
+//   * `kv_k` / `kv_v` - bit-exact over **all** of each cache (4.19 M words at
+//     `max_len = 4096`, 16.8 M at 16384), not just the slots this step writes.
+//     The untouched slots prove that the only positions `attn_prep` writes are
+//     `pos … pos+n_active−1`.
 //   * `attn_q` - bit-exact on the pass-through dims 64..255; the ruled bar on
 //     the roped dims 0..63 is 2 ulp bf16 (the rotation is a rounded product
 //     plus an `fma`, spelled identically on both sides, so it lands bit-exact
@@ -45,7 +46,7 @@
 //     twice, and `exp`'s 3 ulp can push a boundary value one ulp at each of
 //     those roundings and no further.
 //
-// Five depths pin the block edges and the early-out, all with `max_len = 4096`
+// Five depths pin the block edges and the early-out at `max_len = 4096`
 // (16 blocks of 256):
 //
 //   * `pos = 0`   - one valid position in the whole cache; 15 of the 16 blocks
@@ -72,6 +73,16 @@
 //     beyond `m = 0`'s bound (it writes `−INF, 0, 0` and `attn_reduce` must not
 //     read it, since `nb(0) = 1`) while for `m = 1` it holds the one valid
 //     position 256.
+//
+// One case runs at `max_len = 16384` - `pos = 16383, M = 1`. `MAXLEN` is a
+// compile-time `-D` (attn_part's block stride and `NBLOCKS` both come from it),
+// so L16384 is a **different binary**, and it is the one the captured decode
+// list binds and the product ships; every case above tests a variant nothing
+// runs in anger. One depth, at the far end of the cache, is what makes that
+// binary's own arithmetic true: 64 live blocks and a 64-step merge in
+// `attn_reduce`, four times the longest any L4096 case reaches. It costs 67 MB
+// of KV on the device and a few seconds of reference on the host, which is why
+// it is one case and not a second sweep.
 //
 // The early-out is asserted directly rather than inferred: `attn_part` is
 // canary-filled (1e30 in every word) *inside the replayed list*, so any block
@@ -115,11 +126,24 @@ using attn_ref::kQkvN;
 using attn_ref::kRotDim;
 
 constexpr uint32_t kWG = 256;
-constexpr uint32_t kMaxLen = 4096;                  // 16 blocks of 256
-constexpr uint32_t kNBlocks = kMaxLen / kBlock;
+// Two compiled caches are exercised. `kMaxLen` is the cheap one every case
+// below the last one uses: 16 blocks of 256, a 4 MB KV cache, a whole sweep of
+// block edges for the price of one. `kProdLen` is the one the *product* runs -
+// b70-decode's default `--max-len` and the only attention variant
+// runtime::build binds (tests/CMakeLists.txt's B70_DECODE_LIST_KERNELS) - and it
+// is a different compiled kernel, not the same kernel with a bigger grid:
+// MAXLEN is a `-D` that sets attn_part's block stride and NBLOCKS. Running only
+// L4096 left the shipped binary untested, so the last case below runs L16384
+// once, at the far end of its cache (67 MB of KV, 1.6 MB of attn_part).
+constexpr uint32_t kMaxLen = 4096;
+constexpr uint32_t kProdLen = 16384;
 constexpr uint32_t kFaSmallFloats = 2048 / 4;       // loader::kFaBlockBytes / 4
-constexpr size_t kKvElems = size_t(kMaxLen) * kKvHeads * kHeadDim;
 constexpr float kCanary = 1.0e30f;
+
+constexpr uint32_t blocks_of(uint32_t max_len) { return max_len / kBlock; }
+constexpr size_t kv_elems_of(uint32_t max_len) {
+  return size_t(max_len) * kKvHeads * kHeadDim;
+}
 
 uint32_t canary_bits() {
   uint32_t u;
@@ -363,25 +387,27 @@ struct Dev {
 // Everything one launch needs, built from one seed.
 struct Inputs {
   uint32_t M = 1;
+  uint32_t max_len = kMaxLen;
   std::vector<float> partials, fa_small, rope;
   std::vector<uint16_t> kv_k0, kv_v0;
 };
 
-Inputs make_inputs(uint32_t M, uint32_t seed) {
+Inputs make_inputs(uint32_t M, uint32_t seed, uint32_t max_len) {
   Inputs in;
   in.M = M;
+  in.max_len = max_len;
   // The fused qkv GEMV's partials (S = 1). sigma 1 keeps the pre-norm head
   // vectors at a realistic scale; the norm removes it anyway.
   in.partials = random_f32(size_t(M) * kQkvN, seed + 1, 0.f, 1.f);
   // The layer's FA small block: q_norm fp32 (1+w)[256] at float 0, k_norm at
   // float 256 (loader/small_layout.h). The loader bakes 1 + w, so centre on 1.
   in.fa_small = uniform_f32(kFaSmallFloats, seed + 2, 0.75f, 1.25f);
-  in.rope = rope_table(kMaxLen);
+  in.rope = rope_table(max_len);
   // The whole KV cache is seeded, not just the prefix: a read past the causal
   // bound would then show up as noise rather than as a convenient zero, and
   // the untouched-slot half of the bit-exact bar has something to prove.
-  in.kv_k0 = random_bf16(kKvElems, seed + 3, -2.f, 2.f);
-  in.kv_v0 = random_bf16(kKvElems, seed + 4, -2.f, 2.f);
+  in.kv_k0 = random_bf16(kv_elems_of(max_len), seed + 3, -2.f, 2.f);
+  in.kv_v0 = random_bf16(kv_elems_of(max_len), seed + 4, -2.f, 2.f);
   return in;
 }
 
@@ -398,8 +424,8 @@ struct Run {
 // replays, so two calls are a determinism test rather than two decode steps.
 struct Bound {
   Dev& d;
-  uint32_t M;
-  size_t part_elems, qg_elems, out_elems;
+  uint32_t M, max_len, n_blocks;
+  size_t kv_elems, part_elems, qg_elems, out_elems;
   l0::Mem ctrl_mem, pbuf, sbuf, ropebuf, qbuf, gbuf, kbuf, vbuf, partbuf, obuf;
   l0::Module mod_prep, mod_dec, mod_red;
   l0::Kernel k_prep, k_dec, k_red;
@@ -408,7 +434,10 @@ struct Bound {
   Bound(Dev& dev, const Inputs& in, uint32_t pos, uint32_t n_act)
       : d(dev),
         M(in.M),
-        part_elems(size_t(kQHeads) * kNBlocks * in.M * kPartStride),
+        max_len(in.max_len),
+        n_blocks(blocks_of(in.max_len)),
+        kv_elems(kv_elems_of(in.max_len)),
+        part_elems(size_t(kQHeads) * n_blocks * in.M * kPartStride),
         qg_elems(size_t(in.M) * kQHeads * kHeadDim),
         out_elems(size_t(in.M) * kOutN),
         ctrl_mem(d.ctx, l0::MemKind::Shared, sizeof(runtime::Control)),
@@ -417,13 +446,13 @@ struct Bound {
         ropebuf(d.ctx, l0::MemKind::Device, in.rope.size() * 4),
         qbuf(d.ctx, l0::MemKind::Device, qg_elems * 4),
         gbuf(d.ctx, l0::MemKind::Device, qg_elems * 4),
-        kbuf(d.ctx, l0::MemKind::Device, kKvElems * 2),
-        vbuf(d.ctx, l0::MemKind::Device, kKvElems * 2),
+        kbuf(d.ctx, l0::MemKind::Device, kv_elems * 2),
+        vbuf(d.ctx, l0::MemKind::Device, kv_elems * 2),
         partbuf(d.ctx, l0::MemKind::Device, part_elems * 4),
         obuf(d.ctx, l0::MemKind::Device, out_elems * 2),
         mod_prep(d.ctx, kernels::path(kernels::attn_prep_variant(in.M))),
-        mod_dec(d.ctx, kernels::path(kernels::attn_decode_variant(in.M, kMaxLen))),
-        mod_red(d.ctx, kernels::path(kernels::attn_reduce_variant(in.M, kMaxLen))),
+        mod_dec(d.ctx, kernels::path(kernels::attn_decode_variant(in.M, in.max_len))),
+        mod_red(d.ctx, kernels::path(kernels::attn_reduce_variant(in.M, in.max_len))),
         k_prep(mod_prep, "attn_prep"),
         k_dec(mod_dec, "attn_decode"),
         k_red(mod_red, "attn_reduce"),
@@ -465,28 +494,28 @@ struct Bound {
     list.fill(gbuf.ptr(), 0u, qg_elems * 4);
     list.fill(obuf.ptr(), 0u, out_elems * 2);
     list.launch(k_prep, kQHeads + kKvHeads, M);
-    list.launch(k_dec, kKvHeads, kNBlocks);
+    list.launch(k_dec, kKvHeads, n_blocks);
     list.launch(k_red, kQHeads, M);
     list.close();
   }
 
   Run go(const Inputs& in) {
-    d.imm.copy(kbuf.ptr(), in.kv_k0.data(), kKvElems * 2);
-    d.imm.copy(vbuf.ptr(), in.kv_v0.data(), kKvElems * 2);
+    d.imm.copy(kbuf.ptr(), in.kv_k0.data(), kv_elems * 2);
+    d.imm.copy(vbuf.ptr(), in.kv_v0.data(), kv_elems * 2);
     d.q.execute(list, &d.fence);
     d.fence.wait();
     Run r;
     r.attn_q.resize(qg_elems);
     r.attn_gate.resize(qg_elems);
     r.attn_part.resize(part_elems);
-    r.kv_k.resize(kKvElems);
-    r.kv_v.resize(kKvElems);
+    r.kv_k.resize(kv_elems);
+    r.kv_v.resize(kv_elems);
     r.attn_out.resize(out_elems);
     d.imm.copy(r.attn_q.data(), qbuf.ptr(), qg_elems * 4);
     d.imm.copy(r.attn_gate.data(), gbuf.ptr(), qg_elems * 4);
     d.imm.copy(r.attn_part.data(), partbuf.ptr(), part_elems * 4);
-    d.imm.copy(r.kv_k.data(), kbuf.ptr(), kKvElems * 2);
-    d.imm.copy(r.kv_v.data(), vbuf.ptr(), kKvElems * 2);
+    d.imm.copy(r.kv_k.data(), kbuf.ptr(), kv_elems * 2);
+    d.imm.copy(r.kv_v.data(), vbuf.ptr(), kv_elems * 2);
     d.imm.copy(r.attn_out.data(), obuf.ptr(), out_elems * 2);
     return r;
   }
@@ -494,19 +523,22 @@ struct Bound {
 
 // Build the inputs, run the reference, run the trio twice from identical
 // uploads, and compare against the reference and against itself.
-void run_case(Dev& d, uint32_t pos, uint32_t M, uint32_t n_act, uint32_t seed) {
-  CHECK(pos + n_act <= kMaxLen);
-  const Inputs in = make_inputs(M, seed);
+void run_case(Dev& d, uint32_t pos, uint32_t M, uint32_t n_act, uint32_t seed,
+              uint32_t max_len = kMaxLen) {
+  CHECK(pos + n_act <= max_len);
+  const uint32_t n_blocks = blocks_of(max_len);
+  const size_t kv_elems = kv_elems_of(max_len);
+  const Inputs in = make_inputs(M, seed, max_len);
 
   const size_t qg = size_t(M) * kQHeads * kHeadDim;
-  const size_t part_elems = size_t(kQHeads) * kNBlocks * M * kPartStride;
+  const size_t part_elems = size_t(kQHeads) * n_blocks * M * kPartStride;
   std::vector<float> q_ref(qg, 0.f), g_ref(qg, 0.f), part_ref(part_elems, kCanary);
   std::vector<uint16_t> k_ref = in.kv_k0, v_ref = in.kv_v0, out_ref(size_t(M) * kOutN, 0);
   attn_ref::prep(pos, n_act, M, in.partials.data(), in.fa_small.data(), in.rope.data(),
                  q_ref.data(), g_ref.data(), k_ref.data(), v_ref.data());
-  attn_ref::decode(pos, n_act, M, kMaxLen, q_ref.data(), k_ref.data(), v_ref.data(),
+  attn_ref::decode(pos, n_act, M, max_len, q_ref.data(), k_ref.data(), v_ref.data(),
                    part_ref.data());
-  attn_ref::reduce(pos, n_act, M, kMaxLen, part_ref.data(), g_ref.data(), out_ref.data());
+  attn_ref::reduce(pos, n_act, M, max_len, part_ref.data(), g_ref.data(), out_ref.data());
 
   Bound b(d, in, pos, n_act);
   const Run r0 = b.go(in);
@@ -525,11 +557,11 @@ void run_case(Dev& d, uint32_t pos, uint32_t M, uint32_t n_act, uint32_t seed) {
   // is still the canary this list filled in.
   size_t canary_blocks = 0, canary_words = 0;
   for (uint32_t h = 0; h < kQHeads; ++h)
-    for (uint32_t blk = 0; blk < kNBlocks; ++blk) {
+    for (uint32_t blk = 0; blk < n_blocks; ++blk) {
       if (blk * kBlock < pos + n_act) continue;
       ++canary_blocks;
       for (uint32_t m = 0; m < M; ++m) {
-        const size_t base = (size_t(h) * kNBlocks + blk) * M * kPartStride + size_t(m) * kPartStride;
+        const size_t base = (size_t(h) * n_blocks + blk) * M * kPartStride + size_t(m) * kPartStride;
         for (uint32_t w = 0; w < kPartStride; ++w) {
           CHECK(r0.attn_part[base + w] == kCanary);
           ++canary_words;
@@ -541,10 +573,10 @@ void run_case(Dev& d, uint32_t pos, uint32_t M, uint32_t n_act, uint32_t seed) {
   // (and prove nothing - the loop above already compared it exactly).
   std::vector<float> part_got, part_want;
   for (uint32_t h = 0; h < kQHeads; ++h)
-    for (uint32_t blk = 0; blk < kNBlocks; ++blk) {
+    for (uint32_t blk = 0; blk < n_blocks; ++blk) {
       if (blk * kBlock >= pos + n_act) continue;
       for (uint32_t m = 0; m < M; ++m) {
-        const size_t base = (size_t(h) * kNBlocks + blk) * M * kPartStride + size_t(m) * kPartStride;
+        const size_t base = (size_t(h) * n_blocks + blk) * M * kPartStride + size_t(m) * kPartStride;
         for (uint32_t w = 0; w < kPartStride; ++w) {
           part_got.push_back(r0.attn_part[base + w]);
           part_want.push_back(part_ref[base + w]);
@@ -563,13 +595,13 @@ void run_case(Dev& d, uint32_t pos, uint32_t M, uint32_t n_act, uint32_t seed) {
   const Err eo = compare_f32(out_f, outr_f);
   const UlpErr eu = require_ulp(r0.attn_out, out_ref, eo.rms, 2, "attn_out");
 
-  std::printf("attn pos=%u M=%u n_act=%u: attn_q roped rel %.3e (pass-through dims bit-exact), "
-              "kv_k/kv_v bit-exact (%zu words each), attn_part rel %.3e (>=rms %.3e) over %zu "
-              "finite words, attn_out rel %.3e (>=rms %.3e, max abs %.3e), %zu/%zu words differ "
-              "(worst %d bf16 ulp anywhere; %d over the %zu at |ref| >= rms/8); %zu blocks x %u m "
-              "(%zu words) still canary\n",
-              pos, M, n_act, q_rel, kKvElems, ep.worst, ep.plain, ep.counted, eo.worst, eo.plain,
-              eo.max_abs, eu.off, out_ref.size(), eu.worst, eu.worst_gated, eu.checked,
+  std::printf("attn L%u pos=%u M=%u n_act=%u: attn_q roped rel %.3e (pass-through dims "
+              "bit-exact), kv_k/kv_v bit-exact (%zu words each), attn_part rel %.3e (>=rms %.3e) "
+              "over %zu finite words, attn_out rel %.3e (>=rms %.3e, max abs %.3e), %zu/%zu words "
+              "differ (worst %d bf16 ulp anywhere; %d over the %zu at |ref| >= rms/8); %zu blocks "
+              "x %u m (%zu words) still canary\n",
+              max_len, pos, M, n_act, q_rel, kv_elems, ep.worst, ep.plain, ep.counted, eo.worst,
+              eo.plain, eo.max_abs, eu.off, out_ref.size(), eu.worst, eu.worst_gated, eu.checked,
               canary_blocks, M, canary_words);
 
   CHECK(q_rel <= 2.0 / 256.0);   // 2 ulp of bf16
@@ -578,12 +610,12 @@ void run_case(Dev& d, uint32_t pos, uint32_t M, uint32_t n_act, uint32_t seed) {
   CHECK(std::memcmp(r0.attn_q.data(), r1.attn_q.data(), qg * 4) == 0);
   CHECK(std::memcmp(r0.attn_gate.data(), r1.attn_gate.data(), qg * 4) == 0);
   CHECK(std::memcmp(r0.attn_part.data(), r1.attn_part.data(), part_elems * 4) == 0);
-  CHECK(std::memcmp(r0.kv_k.data(), r1.kv_k.data(), kKvElems * 2) == 0);
-  CHECK(std::memcmp(r0.kv_v.data(), r1.kv_v.data(), kKvElems * 2) == 0);
+  CHECK(std::memcmp(r0.kv_k.data(), r1.kv_k.data(), kv_elems * 2) == 0);
+  CHECK(std::memcmp(r0.kv_v.data(), r1.kv_v.data(), kv_elems * 2) == 0);
   CHECK(std::memcmp(r0.attn_out.data(), r1.attn_out.data(), out_ref.size() * 2) == 0);
-  std::printf("attn pos=%u M=%u: replay bitwise identical (attn_q, attn_gate, attn_part, "
+  std::printf("attn L%u pos=%u M=%u: replay bitwise identical (attn_q, attn_gate, attn_part, "
               "kv_k, kv_v, attn_out)\n",
-              pos, M);
+              max_len, pos, M);
 }
 
 }  // namespace
@@ -606,6 +638,16 @@ int main() {
   // attn_reduce, whose nb(0) is 1, must not read it).
   run_case(d, 254, 2, 2, 6000);
   run_case(d, 255, 2, 2, 7000);
+  // L16384 - the ONLY attention variant the captured decode list binds, and
+  // until now compiled but never executed (tests/CMakeLists.txt named it as a
+  // dependency, which built it and proved nothing). MAXLEN is a compile-time
+  // define, so this is a different binary from every case above: a different
+  // NBLOCKS (64, not 16) and a different attn_part block stride. One depth, at
+  // the far end of the cache, because that is where both differ most -
+  // pos = 16383 makes all 64 blocks live and gives attn_reduce a 64-step merge,
+  // four times the longest merge any L4096 case can reach. Same bars as the
+  // rest; ~67 MB of KV and 1.6 MB of attn_part on the device.
+  run_case(d, kProdLen - 1, 1, 1, 8000, kProdLen);
   std::puts("attn_test OK");
   return 0;
 }

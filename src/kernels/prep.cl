@@ -52,6 +52,10 @@
 // prep_silu_mul's shapes are the model's and never vary (M is its whole variant
 // space): gate‖up is 2 × 17408 columns interleaved in 16-column blocks, split-K
 // S = 4 (docs/13-loader.md, model::Qwen35's table).
+// SILU_S is a *copy* of GateUp.S and this file cannot see the table it copies.
+// runtime::Capture::check_sizes (src/runtime/capture.cc) asserts the pair at
+// capture time, so a retune in model/qwen35.cc throws there rather than making
+// this loop sum the wrong number of slices in silence.
 #define SILU_S 4
 #define SILU_N 17408
 #define SILU_FUSED_N 34816
@@ -59,6 +63,8 @@
 
 // prep_gated_head's shapes, likewise fixed: qkv‖z is 16384 wide with z at
 // column 10240, split-K S = 1; 48 v-heads of 128 (model::Qwen35).
+// GATED_S is a *copy* of QkvZ.S; runtime::Capture::check_sizes
+// (src/runtime/capture.cc) asserts the pair at capture time - see SILU_S above.
 #define GATED_S 1
 #define GATED_HEADS 48
 #define HEAD_DIM 128
