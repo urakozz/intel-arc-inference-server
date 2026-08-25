@@ -29,13 +29,26 @@
 namespace {
 using model::Qwen35;
 
-// The bench prompt, cycled to --depth. The same 16 prose ids the runtime tests
-// use (tests/runtime/replay_determinism_test.cc); Task 8 is what commits the
-// real .ids files, and Task 9 may point the bench at them. What matters for a
-// timing run is that the ids are fixed and legal, not what they say.
-constexpr uint32_t kBenchPrompt[] = {760, 72103, 506, 37119, 557, 11012, 3213, 310,
-                                     6512, 279, 61789, 272, 1072, 2272, 279, 197616};
+// The bench prompt, cycled to --depth: the 42 ids of the committed golden
+// prompt `tests/golden/prompts/prose.ids`, baked in so a bench run needs
+// nothing but the binary and the checkpoint. Every id is below kVocabUsed, so
+// none of them is a row the sampler masks. What matters for a timing run is
+// that the ids are fixed and legal, not what they say - decode reads every
+// weight per token regardless - but reusing the golden prompt means the depth-N
+// bench and the golden gate ingest the same tokens for their first 42 steps.
+constexpr uint32_t kBenchPrompt[] = {
+    760,   72103, 506, 37119, 557,   11012, 3213, 310,   6512, 279, 61789, 272, 1072,  2272,
+    279,   197616, 2271, 13,   469,   68042, 29123, 7247, 383,  279, 1387,  12615, 1345, 279,
+    49813, 78911, 1141, 20459, 13,    3113,  7840,  279,  2981, 1000, 381,  16850, 1495, 13};
 constexpr size_t kBenchPromptLen = sizeof(kBenchPrompt) / sizeof(kBenchPrompt[0]);
+
+// Both measured, both cited where the bench prints the MBU it implies:
+//   W  - bytes the loader makes resident and every token reads, from the
+//        loader's own report (docs/13, 15,539,980,288 B = 15.540 GB).
+//   BW - `tools/probe/probe_bw`, 590 GB/s median at 2 GB through the same
+//        Level Zero path this engine submits on (docs/01).
+constexpr double kBytesPerToken = 15.539980288;   // GB, measured
+constexpr double kDeviceGBs = 590.0;              // GB/s, measured
 
 void usage() {
   std::fprintf(
@@ -239,28 +252,49 @@ int run(int argc, char** argv) {
     return 0;
   }
 
-  // --bench. The scaffold only in this task: it runs the depth/tg shape and
-  // prints the row, but the number that goes into docs/BENCHMARKS.md is Task
-  // 9's to measure (3 runs on an idle box, median) and to record.
+  // --bench. One shape, one row, and the decomposition that makes the row
+  // actionable. Nothing here is tuned or retried: the number printed is the
+  // number the run produced. tools/bench_decode.sh is what runs it three times
+  // and takes the median; docs/BENCHMARKS.md records that median.
   eng.generate(tg);
   report_generate(eng, tg);
+
+  const double ms_per_token = eng.last_gen_ms() / double(tg);
+  const double host_ms = eng.last_gen_ms() - eng.last_fence_ms();
   std::fprintf(stderr,
                "  wall %.1f ms, fence %.1f ms, host %.1f ms  (host = wall - fence: argument-free\n"
-               "  replay, so this is submit + the four bytes of shared memory, nothing else)\n",
-               eng.last_gen_ms(), eng.last_fence_ms(), eng.last_gen_ms() - eng.last_fence_ms());
+               "  replay, so this is submit + the four bytes of shared memory, nothing else)\n"
+               "  per token: %.3f ms total = %.3f ms fence + %.3f ms host\n",
+               eng.last_gen_ms(), eng.last_fence_ms(), host_ms, ms_per_token,
+               eng.last_fence_ms() / double(tg), host_ms / double(tg));
+
+  // MBU against the two measured constants, spelled out so the reader can
+  // check the arithmetic without leaving the terminal. The kernel-count line
+  // is an *estimate* carried from doc 07 #5 (0.52 µs/kernel, probe_replay) -
+  // it is what the captured list costs in dispatch alone, and it is printed
+  // beside the fence time to show how little of the fence it can explain.
+  const double achieved_gbs = eng.last_tok_per_s() * kBytesPerToken;
+  const double dispatch_ms = double(eng.step().kernel_count) * 0.52e-3;
+  std::fprintf(stderr,
+               "  MBU: %.2f t/s x %.3f GB = %.0f GB/s of %.0f GB/s measured = %.1f%%\n"
+               "  dispatch floor (estimated): %zu kernels x 0.52 us = %.3f ms/token,"
+               " %.1f%% of the fence\n",
+               eng.last_tok_per_s(), kBytesPerToken, achieved_gbs, kDeviceGBs,
+               100.0 * achieved_gbs / kDeviceGBs, eng.step().kernel_count, dispatch_ms,
+               100.0 * dispatch_ms / (eng.last_fence_ms() / double(tg)));
 
   // The row's identity comes from the environment, not from a configure-time
   // git call: tools/box.sh syncs the tree WITHOUT .git, so the box cannot know
-  // its own sha. Whoever runs the bench exports it (Task 9's
-  // tools/bench_decode.sh does), and an unset variable prints as `unknown`
-  // rather than as a wrong sha in a recorded measurement.
+  // its own sha. Whoever runs the bench exports it (tools/bench_decode.sh
+  // does), and an unset variable prints as `unknown` rather than as a wrong
+  // sha in a recorded measurement.
   const char* sha = std::getenv("B70_GIT_SHA");
   if (sha == nullptr || *sha == '\0') sha = "unknown";
   std::printf("| b70-decode %s | %u | %u | %.2f | %.2f |\n", sha, depth, tg, eng.last_tok_per_s(),
-              tg ? eng.last_gen_ms() / tg : 0.0);
+              ms_per_token);
   std::fprintf(stderr,
-               "(measured, one run. docs/BENCHMARKS.md takes the median of three on an idle box -\n"
-               " Task 9. B70_GIT_SHA unset prints `unknown`.)\n");
+               "(measured, one run. docs/BENCHMARKS.md records the median of three on an idle box;\n"
+               " tools/bench_decode.sh is that harness. B70_GIT_SHA unset prints `unknown`.)\n");
   return 0;
 }
 }  // namespace
