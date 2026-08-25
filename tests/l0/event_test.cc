@@ -36,8 +36,9 @@ int main() {
   l0::Context ctx(0);
 
   // 1. Calibration. `cycles_per_us` divides tick counts into a time, so it has
-  //    to be positive; `valid_bits` is 32 on BMG and the mask is only sane in
-  //    a range that covers every part we might run on.
+  //    to be positive; `valid_bits` is **64** on this BMG driver (measured -
+  //    l0/event.h, so nothing wraps in practice) and the CHECK is deliberately
+  //    the wider 24..64 range, which covers a 32-bit part too.
   const l0::TimerCalib calib = l0::TimerCalib::query(ctx);
   std::printf("timer: %.6f cycles/us, %u valid bits\n", calib.cycles_per_us, calib.valid_bits);
   CHECK(calib.cycles_per_us > 0.0);

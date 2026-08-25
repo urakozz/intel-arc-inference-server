@@ -168,7 +168,7 @@ void report_generate(const runtime::Engine& eng, uint32_t n) {
 
 // One rollup row. `us` is the row's time summed over every profiled step and is
 // divided by the step count exactly once, at print time; `launches` is the
-// row's launch count in ONE step, because the rollup walks the 645 launch
+// row's launch count in ONE step, because the rollup walks the 774 launch
 // indices once and each index's total already covers every step.
 struct Agg {
   std::string name;
@@ -187,8 +187,9 @@ void accumulate(std::vector<Agg>& rows, const std::string& name, double us) {
 }
 
 // "L12 gemv gemv_M1_K5120_N16384_S1_L1" - the three fields runtime::build
-// writes per launch: the layer tag ("--" for the five token-boundary
-// launches), the entry point, and the compiled variant.
+// writes per launch: the layer tag ("--" for the six token-boundary launches -
+// embed_gather, the final norm's two, lm_head, and the two argmax stages, named
+// in runtime/capture.h), the entry point, and the compiled variant.
 struct Label {
   std::string layer, entry, variant;
 };
@@ -216,7 +217,7 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
   runtime::DecodeBuffers buffers(ctx, model.max_len);
   // Two lists over ONE set of buffers - the pattern
   // tests/runtime/profile_capture_test.cc proved and the golden gate already
-  // used. The plain list does the ingestion (an instrumented one would pay 645
+  // used. The plain list does the ingestion (an instrumented one would pay 774
   // host-scope flushes on each of ~4096 tokens for a number nobody reads); the
   // profiled list is the one that is measured. Both bake the same allocations,
   // so whichever is replayed advances the same state.
@@ -437,7 +438,7 @@ int run(int argc, char** argv) {
     throw std::runtime_error("a snapshot directory or HF repo id is required");
   }
   // Three modes, exactly one of them. `--profile` is exclusive with `--bench`
-  // for a reason that is not tidiness: a profiled list signals 645 host-visible
+  // for a reason that is not tidiness: a profiled list signals 774 host-visible
   // events per step, so it can never produce a bench row (spec 1.5 §3.3).
   const int modes = int(!ids_path.empty()) + int(bench) + int(profile);
   if (modes != 1) {
@@ -504,7 +505,7 @@ int run(int argc, char** argv) {
   }();
 
   // --profile forks here: it replays an instrumented capture and has to reset
-  // 645 events before every replay, which is the caller's job by design
+  // 774 events before every replay, which is the caller's job by design
   // (runtime/capture.h) - so it runs its own loop rather than an Engine's.
   if (profile) return run_profile(ctx, model, ids, steps);
 

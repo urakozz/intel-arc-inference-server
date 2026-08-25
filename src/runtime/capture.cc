@@ -137,6 +137,18 @@ class Capture {
     check_sizes();
     // A ProfileEvents handed to a second build must describe that build, not
     // both. (The profiler's own test builds twice against one set of buffers.)
+    //
+    // **The hazard that creates, named so it is not rediscovered.** This clear
+    // destroys the `l0::Event` objects, and `launch()` below has already copied
+    // their handles into an EARLIER profiled list's commands - a captured list
+    // holds handles, not the vector, and has no way to learn they are gone. So
+    // one `ProfileEvents` may back exactly ONE live profiled list: reusing one
+    // across two profiled builds leaves the first list signalling destroyed
+    // handles on its next replay. Both callers that build twice against one set
+    // of buffers (src/cli/b70_decode.cc's --profile and
+    // tests/runtime/profile_capture_test.cc) build the PLAIN list first and the
+    // profiled one second, so neither hits it; that ordering is the pattern to
+    // copy, not an accident of how they were written.
     if (prof_) prof_->events.clear();
 
     // `layer_` is what the labels' "L<n>" prefix reads; the six launches
@@ -241,9 +253,13 @@ class Capture {
     k.group_size(wg);
     // The two halves of the launch's label. Held here rather than passed to
     // `launch()` because this is where they are already known and it keeps
-    // every binding site's `launch(k, grid…)` line unchanged; `launch()`
-    // consumes and clears them, so an unpaired kernel()/launch() throws instead
-    // of silently repeating the previous site's name.
+    // every binding site's `launch(k, grid…)` line unchanged. `launch()`
+    // consumes both and clears **`pending_entry_` only** - that one field is
+    // the whole interlock, and its emptiness is what the `require` at the top
+    // of `launch()` tests, so an unpaired kernel()/launch() throws instead of
+    // silently repeating the previous site's name. `pending_variant_` keeps its
+    // last value on purpose-of-omission rather than by design: it is never read
+    // without `pending_entry_` having just been set beside it.
     pending_entry_ = entry;
     pending_variant_ = variant;
     return k;
@@ -394,7 +410,7 @@ class Capture {
   // knob existed. `a‖b` (N = 128) takes `{16, 16}`, spec 1.5's lever L2: 8
   // work-groups of 16 K-slice subgroups, 128 hardware threads against 8. The
   // launch COUNT is unchanged either way - one launch per site, so the
-  // 645-kernel walk and every ripple rule that counts it are unaffected - but
+  // 774-kernel walk and every ripple rule that counts it are unaffected - but
   // the split DOES reorder the summation (gemv_bf16.cl names the tree), which
   // is why this lever's acceptance runs the golden gate.
   void gemv_bf16(uint32_t layer, LinearId id, const void* x, const l0::Mem& out) {
