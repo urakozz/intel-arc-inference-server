@@ -21,11 +21,34 @@ endforeach()
 add_gemv_variant(2 6144 5120 1 0)   # spec 1 §9: the M loop must compile at M=2
 
 set(GEMV_BF16_CL ${CMAKE_CURRENT_SOURCE_DIR}/gemv_bf16.cl)
-function(add_gemv_bf16_variant M K N)
-  add_ocloc_kernel(gemv_bf16_M${M}_K${K}_N${N} SOURCE ${GEMV_BF16_CL} DEFINES M=${M} K=${K} N=${N})
+# `C` and `S` are the kernel's COLS_PER_WG (output columns per work-group) and
+# KSPLIT (subgroups splitting one tile's K, merged in SLM). Both are suppressed
+# from the name AND from the command line at their defaults, exactly as
+# `kernels::gemv_bf16_variant` suppresses them from the name -- so the two
+# cannot drift, and the pre-lever binaries (lm_head's above all) are still built
+# by the identical ocloc invocation they always were.
+function(add_gemv_bf16_variant M K N C S)
+  set(name gemv_bf16_M${M}_K${K}_N${N})
+  set(defs M=${M} K=${K} N=${N})
+  if(NOT C EQUAL 64)
+    set(name ${name}_C${C})
+    list(APPEND defs COLS_PER_WG=${C})
+  endif()
+  if(NOT S EQUAL 1)
+    set(name ${name}_S${S})
+    list(APPEND defs KSPLIT=${S})
+  endif()
+  add_ocloc_kernel(${name} SOURCE ${GEMV_BF16_CL} DEFINES ${defs})
 endfunction()
-add_gemv_bf16_variant(1 5120 248320)   # lm_head
-add_gemv_bf16_variant(1 5120 128)      # in_proj_a || in_proj_b, zero-padded 96 -> 128
+add_gemv_bf16_variant(1 5120 248320 64 1)  # lm_head: 3880 work-groups, device full
+add_gemv_bf16_variant(1 5120 128 64 1)     # a‖b (zero-padded 96 -> 128) as it shipped
+# a‖b as the runtime binds it since spec 1.5's lever L2 (kernels::gemv_bf16_tiling):
+# 8 work-groups of 16 K-slice subgroups = 128 threads, against 8. `16` is
+# measured, not chosen: 1 / 4 / 16 read 48.774 / 13.115 / 5.340 us in situ
+# (docs/15 §L2). The `{64, 1}` build above is kept and still compiled --
+# gemv_bf16_test runs both over one set of inputs and holds their outputs to the
+# reference tolerance, which is the bar a reordered sum gets.
+add_gemv_bf16_variant(1 5120 128 16 16)
 
 # The between-GEMV kernels: three entry points in one file (prep.cl), so each
 # binary carries all three and the runtime loads the one it asked for. Only

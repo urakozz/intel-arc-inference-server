@@ -74,7 +74,8 @@ constexpr size_t kBf16 = 2, kFp32 = 4;
 
 // --- work-group sizes, one per kernel, from each kernel's own contract -------
 constexpr uint32_t kWgEmbed = 256;    // embed_gather.cl WG_EMBED  (Task 3)
-constexpr uint32_t kWgGemv = 64;      // gemv.cl / gemv_bf16.cl WG_N = 16x4 (plan 1 §9.2)
+constexpr uint32_t kWgGemv = 64;      // gemv.cl WG_N = 16x4 (plan 1 §9.2); gemv_bf16.cl's
+                                      // WG_N is its COLS_PER_WG, per shape (see gemv_bf16 below)
 constexpr uint32_t kWgResNorm = 256;  // prep.cl WG_RES            (Task 2)
 constexpr uint32_t kWgSilu = 256;     // prep.cl WG_SILU           (Task 2)
 constexpr uint32_t kWgGated = 128;    // prep.cl WG_GATED          (Task 2)
@@ -83,7 +84,9 @@ constexpr uint32_t kWgAttn = 256;     // attn.cl WG_PREP/WG_DEC/WG_RED (Task 5)
 constexpr uint32_t kWgArgmax = 256;   // argmax.cl WG_ARGMAX       (Task 3)
 
 // --- grid divisors that are a kernel's constant, not a model dimension ------
-// gemv/gemv_bf16: a work-group is 4 subgroups of 16 lanes, one column each.
+// gemv: a work-group is 4 subgroups of 16 lanes, one column each. (gemv_bf16's
+// grid is per shape and comes from kernels::gemv_bf16_tiling - see the binding
+// below.)
 constexpr uint32_t kGemvColsPerWg = 64;
 // prep_silu_mul: SILU_CHUNK outputs per work-group (prep.cl).
 constexpr uint32_t kSiluChunk = 4096;
@@ -324,19 +327,37 @@ class Capture {
     launch(k, s.N / kGemvColsPerWg, s.S);
   }
 
-  // gemv_bf16(w, x, out) - src/kernels/gemv_bf16.cl (plan 1 §9.2), grid (N/64),
-  // WG 64. No split-K: it writes its fp32 output directly, not into `partials`.
+  // gemv_bf16(w, x, out) - src/kernels/gemv_bf16.cl (plan 1 §9.2), grid
+  // (N/COLS_PER_WG), WG COLS_PER_WG. No split-K: it writes its fp32 output
+  // directly, not into `partials`.
+  //
+  // **The tiling is the kernel's, and it is per shape.** Unlike every other
+  // binding in this file the grid divisor is not a constant: it comes from
+  // `kernels::gemv_bf16_tiling(N)`, the same function
+  // tests/kernels/kernel_table_test.cc uses to name the binary that must exist.
+  // `lm_head` (N = 248320) takes `{64, 1}` and is untouched - 3880 work-groups,
+  // 98.5% of measured bandwidth in situ (docs/15), same binary as before the
+  // knob existed. `a‖b` (N = 128) takes `{16, 16}`, spec 1.5's lever L2: 8
+  // work-groups of 16 K-slice subgroups, 128 hardware threads against 8. The
+  // launch COUNT is unchanged either way - one launch per site, so the
+  // 645-kernel walk and every ripple rule that counts it are unaffected - but
+  // the split DOES reorder the summation (gemv_bf16.cl names the tree), which
+  // is why this lever's acceptance runs the golden gate.
   void gemv_bf16(uint32_t layer, LinearId id, const void* x, const l0::Mem& out) {
     const model::FusedLinear& fl = Qwen35::linear(id);
     const model::GemvShape& s = fl.shape;
     require(fl.kind == model::WeightKind::Bf16, "gemv_bf16 bound to an int4 table row");
-    require(s.N % kGemvColsPerWg == 0, "gemv_bf16 N is not a multiple of 64");
+    const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(s.N);
+    require(s.N % t.cols == 0, "gemv_bf16 N is not a multiple of its work-group width");
     const loader::DeviceWeight& w = m_.linears.at({layer, id});
-    l0::Kernel& k = kernel(kernels::gemv_bf16_variant(kCapM, s.K, s.N), "gemv_bf16", kWgGemv);
+    // The work-group is one lane per column per K slice - the kernel's
+    // reqd_work_group_size(COLS_PER_WG / 16 * KSPLIT subgroups of 16).
+    l0::Kernel& k =
+        kernel(kernels::gemv_bf16_variant(kCapM, s.K, s.N, t), "gemv_bf16", t.cols * t.ksplit);
     k.arg_ptr(0, w.mem.ptr());
     k.arg_ptr(1, x);
     k.arg_ptr(2, out.ptr());
-    launch(k, s.N / kGemvColsPerWg);
+    launch(k, s.N / t.cols);
   }
 
   // The MLP half, identical in both layer kinds: post-norm folding the mixer's
