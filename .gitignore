@@ -75,6 +75,7 @@ bench-out/
 # Oracle golden dumps: hundreds of MB per prompt, produced on the box by
 # tools/oracle/dump.py and never committed (tools/box.sh excludes them from sync).
 oracle-out/
+oracle-out-*/
 
 # ---- Python tooling (tools/ only) ------------------------------------------
 __pycache__/
