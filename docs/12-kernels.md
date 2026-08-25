@@ -75,6 +75,14 @@ where the prose rounds.
 | host, outside the fence | - | **0.097** | 0.23% | measured |
 | **total** | **645** | **42.141** | 100% | measured (bench, median of three) |
 
+**This partition is the step as it stood at `43bb720`, before spec 1.5 cut its
+first lever.** It is kept whole because it is what the 42.141 ms bench row
+partitions and because every row above is one measurement of one run. Lever L2
+has since taken the `a‖b` row from **2.335 to 0.256 ms/token** (measured, in
+situ, same instrument) and the bench row that goes with the new step is in
+[BENCHMARKS.md](BENCHMARKS.md); the before/after and its arithmetic are
+[15-step-anatomy.md](15-step-anatomy.md) §L2.
+
 **98.6% of the step is kernel time inside the fence** (41.571 ms of Σ per-kernel
 durations, measured), 1.1% is dispatch and 0.2% is the host. The dispatch row is
 now a real row rather than the memo line it used to be - 0.473 ms **derived**
@@ -404,19 +412,56 @@ out[m][n] = Σ_k x[m][k] · w[k][n]        (w bf16, no scales, no split-K)
 
 ### Work assignment, and why
 
-Identical skeleton to `gemv`: lane per `n`, SIMD16, 64-`n` work-groups, fp32
-accumulator in a register, one store per lane, no cross-lane traffic. The
-reasoning is the same and is not repeated.
+Identical skeleton to `gemv`: lane per `n`, SIMD16, fp32 accumulator in a
+register, one store per lane. The reasoning is the same and is not repeated.
 
-**What differs is that there is no `S`.** N = 248320 gives 3880 work-groups and
-**15520 subgroups** against 256 EUs - the grid fills the device on `N` alone,
-which is what spec §4.2 predicted. The measurement settles it rather than
-arguing it: **584 GB/s, 97% of the 600 GB/s roofline denominator and 99% of the
-590 GB/s that `probe_bw` measures through the same launch path.** There is no
-headroom left for split-K to recover, so the `S` parameter was never added, and
-the partial-sum buffer it would need (S × 248320 fp32 = 1 MB per slice) never
-exists. The other user, `a‖b`, is 2 work-groups (8 subgroups) over 1.3 MB - far too
-small to be worth a second kernel or a second code path.
+**Two compile-time knobs, `COLS_PER_WG` and `KSPLIT`, and they exist for one
+shape.** `COLS_PER_WG` is the output columns per work-group (== the work-group
+size at KSPLIT 1), so the grid is `N / COLS_PER_WG`; `KSPLIT` is how many
+subgroups split one 16-column tile's K, each into its own fp32 accumulator,
+merged through SLM. `kernels::gemv_bf16_tiling(N)` picks the pair and
+`src/runtime/capture.cc` binds it; `{64, 1}` is the historical tiling and
+`lm_head` keeps it.
+
+**`lm_head` needs neither knob.** N = 248320 gives 3880 work-groups and **15520
+subgroups** against 256 EUs - the grid fills the device on `N` alone, which is
+what spec §4.2 predicted. The measurement settles it rather than arguing it:
+**584 GB/s, 97% of the 600 GB/s roofline denominator and 99% of the 590 GB/s
+that `probe_bw` measures through the same launch path.** There is no headroom
+for split-K to recover, so `lm_head`'s variant carries neither define, and its
+binary and its in-situ time are unmoved by the knobs existing (4378.555 ->
+4378.353 µs/launch, 0.005%, measured across the change).
+
+**`a‖b` needed both, and what it needed them for was measured** (spec 1.5 lever
+L2; the three-point sweep is docs/15 §L2). At `{64, 1}` the whole launch is
+**8 subgroups** - 2 work-groups of 4 - reading 1.31 MB at 26.9 GB/s. What that
+launch is short of is neither work-groups nor loads in flight, both of which
+were tried in situ and were worth nothing:
+
+| what was changed | subgroups | µs/launch | verdict |
+|---|---|---|---|
+| `{64, 1}` - as it shipped | 8 | **48.774** | the baseline |
+| `COLS_PER_WG` 16: 2 work-groups → 8, bit-identical | 8 | **49.127** | **nothing** |
+| + 4 block reads in flight per subgroup, bit-identical | 8 | **49.052** | **nothing**, and −1.3% on `lm_head` |
+| `{16, 4}` - K split four ways | 32 | **13.115** | −1.712 ms/token |
+| **`{16, 16}` - K split sixteen ways (shipped)** | **128** | **5.340** | **−2.085 ms/token** |
+
+A subgroup pulls 3.36 / 3.12 / 1.92 GB/s at 8 / 32 / 128 of them; **the launch
+was slow because it only ever had eight**. `COLS_PER_WG` 16 is still in the
+shipped pair, but for the other half of the job: it spreads the 128 subgroups
+over eight Xe-cores instead of packing them onto one.
+
+**The split's merge order is part of the kernel's contract**, because it is not
+the unsplit build's single ascending chain. Subgroup `q` of a tile holds
+k ∈ [q·K/KSPLIT, (q+1)·K/KSPLIT) and the work-group collapses the slices with
+prep.cl's tree - `for stride = KSPLIT/2 … 1: if (q < stride) red[q] += red[q +
+stride]`, a barrier after each step - so at KSPLIT 16 the strides are 8, 4, 2, 1.
+No atomic, no data-dependent branch, fixed grid: a replayed list gives the same
+bits every time. Reordering a sum is exactly what the golden gate exists to
+arbitrate, and it did - **96/96 element-exact, unchanged**. (`gemv_bf16_test`
+holds the split build to the reference tolerance, not to the unsplit build's
+bytes; it is in fact *closer* to the double-precision reference than the unsplit
+build, 8.3e-07 against 2.4e-06, which is what pairwise summation does.)
 
 ### Layout
 
@@ -438,9 +483,12 @@ comparison.
 - **Split-K - not built, not measured.** Argued away by the 97% above. If a
   future model puts a small-`N` bf16 matrix on the decode path, this conclusion
   does not transfer; re-measure.
-- **A separate small-`N` kernel for `a‖b` - rejected.** 1.3 MB and 2
-  work-groups against a 15.52 GB/token budget. Zero-padding 96 → 128 at load
-  costs 33% of a rounding error.
+- **A separate small-`N` kernel for `a‖b` - rejected, and still rejected.** The
+  original reasoning ("1.3 MB and 2 work-groups against a 15.52 GB/token
+  budget") was wrong about the *size* of the prize - those 2 work-groups cost
+  2.335 ms/token, 5.5% of the step - but right about the remedy: what `a‖b`
+  needed was two `#define`s in this file, not a second kernel. Zero-padding
+  96 → 128 at load costs 33% of a rounding error.
 - **Quantising `lm_head` to int4/int8 - deferred, not a kernel question.** It
   would cut this row from 2.54 GB to 0.66 GB (int4) or 1.27 GB (int8) and is
   worth ×1.14 on the roofline (doc 05 §1) - **a far bigger lever than anything
@@ -463,26 +511,31 @@ roofline token for 16.4% of the bytes, and **10.3% of the 42.141 ms step
 measured 2026-08-25**. That is why item 1 of doc 05's specialisation list is
 `lm_head`, not a kernel: at int4 it would be ~1.1 ms.
 
-**The other user, `a‖b` (5120×128), had never been timed - now it has.** It is
-still not in the probe matrix (the matrix covers the five int4 shapes and
-`lm_head`); what timed it is `b70-decode --profile`, in situ, 2026-08-25
-(docs/15). It runs **48 times per token** at 2 work-groups / 8 subgroups over
-1.31 MB, and the paragraph this replaces guessed the direction correctly:
+**The other user, `a‖b` (5120×128), had never been timed - now it has, and it
+has since been cut.** It is still not in the probe matrix (the matrix covers the
+five int4 shapes and `lm_head`); what timed it is `b70-decode --profile`, in
+situ, 2026-08-25 (docs/15), 48 launches per token over 1.31 MB each:
 
-**48.640 µs per launch, 2.335 ms per token, 5.5% of the step - measured, in
-situ** (5.6% of the sum of kernel durations, which is the denominator docs/15's
-rollups use)**.** That is **27.0 GB/s**, 4.6% of the 590 GB/s the device does, and **21×**
-the 0.11 ms its traffic is worth at full bandwidth. Per work-group it is
-13.5 GB/s, which docs/15 shows is simply what one work-group can pull on this
-device (`prep_res_norm` at one work-group reads 17.0 GB/s, `prep_silu_mul` at
-five reads 12.2 GB/s each). The kernel is not slow; it has been given 2 of 32
-subslices. `lm_head`, the same kernel at N = 248320, runs at 97% of bandwidth.
+| `a‖b` tiling | subgroups | µs/launch | ms/token | GB/s | kind |
+|---|---|---|---|---|---|
+| `{64, 1}` - as it shipped through plan 3 | 8 | 48.774 | **2.341** | 26.9 | measured, in situ |
+| **`{16, 16}` - since spec 1.5 lever L2** | **128** | **5.340** | **0.256** | **245** | **measured, in situ** |
 
-doc 05 named this the second suspect for the aggregate bucket and it was the
-right call: it is the bucket's largest single member after `prep_res_norm`.
-Widening it - `COLS_PER_WG` 16 for tiny N, giving 8 work-groups at bit-identical
-per-column arithmetic - is spec 1.5's lever L2 (docs/15's ladder, rank 3, first
-to execute).
+The `{64, 1}` row is the one doc 05 called the aggregate bucket's second
+suspect, and it was the right call: 2.341 ms/token, 5.6% of the sum of kernel
+durations, **21× the 0.11 ms its traffic is worth** at the measured 590 GB/s.
+The diagnosis in the paragraph this replaces was not the right call - it read
+"per work-group it is 13.5 GB/s, which is simply what one work-group can pull on
+this device … it has been given 2 of 32 subslices", and giving it 8 subslices
+changed **nothing** (49.127 µs). The per-work-group ceiling was the wrong
+invariant for this kernel; the subgroup count was the right one. See "Work
+assignment, and why" above for the sweep, and docs/15 §L2 for the lever.
+
+At `{16, 16}` it is **245 GB/s, 41.6% of the device**, and 2.4× the 2.22 µs its
+1.31 MB is worth at full bandwidth - so **at most 0.15 ms/token is left in this
+kernel** and a wider split cannot repay the golden-gate run it would need.
+`lm_head`, the same kernel at N = 248320, remains at 97% of bandwidth and is
+untouched (4378.555 → 4378.353 µs/launch across the change).
 
 ---
 

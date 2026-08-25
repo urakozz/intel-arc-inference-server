@@ -20,10 +20,14 @@ int main() {
     const model::GemvShape& s = fl.shape;
     // bf16 rows have one tiled layout and no split-K variant; their `layout`
     // and `S` columns are fillers (docs/13-loader.md), so they are not part of
-    // the name.
-    const std::string variant = fl.kind == model::WeightKind::Int4
-                                    ? kernels::gemv_variant(1, s.K, s.N, s.S, s.layout)
-                                    : kernels::gemv_bf16_variant(1, s.K, s.N);
+    // the name. What they DO carry is a tiling - a work-group width and a K
+    // split - and it is per shape (spec 1.5 lever L2): the name below therefore
+    // goes through the same `gemv_bf16_tiling` the runtime binds with, so this
+    // test checks the binary runtime::build will actually open, not a sibling.
+    const std::string variant =
+        fl.kind == model::WeightKind::Int4
+            ? kernels::gemv_variant(1, s.K, s.N, s.S, s.layout)
+            : kernels::gemv_bf16_variant(1, s.K, s.N, kernels::gemv_bf16_tiling(s.N));
     const std::string path = kernels::path(variant);
     if (!std::filesystem::exists(path)) {
       std::fprintf(stderr, "no device binary for table row %zu (%s): %s\n", i,
