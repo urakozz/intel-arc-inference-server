@@ -49,7 +49,7 @@ Two consequences:
   `lm_head.weight` as top-level. Design for it rather than requiring
   re-exported checkpoints.
 
-## 3. Is GDN or GEMM the larger share of decode time?
+## 3. Is GDN or GEMM the larger share of decode time? - **resolved: GEMM, 68.8%; GDN's own kernel is 1.7%**
 
 48 of 64 layers are linear attention, and GDN is the one kernel with no
 `sycl-tla` starting point. If GDN dominates, it should be the first kernel
@@ -76,6 +76,27 @@ does **not** separate the three - that separation is spec 1.5's first job
 (doc 05, "What spec 1.5 is scoped to do"). Attention's share is bounded:
 2.31 ms of per-block work at depth 4096 - *estimated* by extrapolating the #12
 experiment's two points, not timed.
+
+**Resolved, 2026-08-25, per kernel in situ** (`b70-decode --profile`, the full
+anatomy in [15-step-anatomy.md](15-step-anatomy.md)). GEMM dominates and the
+margin is slightly larger than the transplant said: **29.005 ms, 68.8%**, with
+everything else at 13.136 ms. The three-way separation the paragraph above
+deferred:
+
+| | ms/token | share | |
+|---|---|---|---|
+| GEMV (257 launches) | 29.005 | 68.8% | measured, in situ |
+| `attn_decode` (16) | 5.782 | 13.7% | measured, in situ - 2.45× the 2.31 ms estimated above |
+| `prep` (241) | 3.573 | 8.5% | measured, in situ |
+| `a‖b` GEMV (48) | 2.335 | 5.5% | measured, in situ |
+| **`gdn_step` (48)** | **0.733** | **1.7%** | measured, in situ - 92% of device bandwidth |
+
+The 2026-08-22 estimate was right that GDN is a small share and wrong about the
+reason it would be small: not "kernel-count, and replay removes it" but *it is
+the best-occupied kernel in the engine* - 192 work-groups at 540 GB/s, 1.09× its
+own traffic floor (doc 12, `gdn_step` → Measured). The occupancy problem the
+estimate expected to find in GDN is real and lives in the three kernels that
+were given 1, 2 and 4 work-groups.
 
 ## 4. What is vLLM's MBU on the phase-1 model? - **resolved: 81%**
 
@@ -116,6 +137,34 @@ first instruction) → **< 1 µs, so fusion is not on the phase-1 critical path*
 The empty submit + fence round trip is **6.4 µs** - the floor no fusion
 removes, paid once per token. The N = 1 rows are that floor plus one kernel,
 not a per-kernel number.
+
+**Measured in situ, 2026-08-25, on the real 645-kernel decode list** - the
+numbers above are noop and `ctrl_read` lists; these are the engine's own step
+(`b70-decode --profile --depth 4096 --steps 32`, [15](15-step-anatomy.md)):
+
+| | µs/step | µs/launch | kind |
+|---|---|---|---|
+| profiled gap (fence wall − Σ kernel durations) | 851.4 | 1.320 | measured - **upper bound** |
+| **un-instrumented gap** | **473** | **0.733** | **derived** |
+| this table's `noop` floor × 645 | 335 | 0.52 | estimated |
+
+The profiled number is an upper bound because every launch in a profiled list
+signals a host-visible event, and that flush is inside the *gap* (it lands after
+`kernelEnd`, so it never touches a kernel's own duration). The **derived** row
+is the honest one and it is arithmetic over two instruments: the bench step is
+42.141 ms of which 0.097 ms is host outside the fence, so an un-instrumented
+fence is 42.044 ms; Σ of the in-situ kernel durations is 41.571 ms; the
+difference is 0.473 ms.
+
+**0.733 µs/launch lands between this table's `noop` (0.52) and `ctrl_read`
+(0.63) floors, a shade above both** - which is what 645 kernels that each read
+the shared control block should cost, and it confirms the probe's
+transplantability at the third decimal. The conclusion is unchanged and now
+rests on a measurement rather than an extrapolation: **0.473 ms is 1.1% of a
+42.141 ms step, so fusion for launch-count's sake is not a lever** (spec 1 §4.1's
+≥ 3 µs rule). A by-product: the profiler's own distortion is 0.379 ms/step,
+**0.587 µs per launch** (derived) - a profiled step is 0.9% longer than a real
+one, all of it in the gap.
 
 ## 6. How much accuracy does quantising `lm_head` cost?
 

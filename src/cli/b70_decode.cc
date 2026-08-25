@@ -1,17 +1,25 @@
-// b70-decode - spec §12. Two modes over one runtime::Engine:
+// b70-decode - spec §12, plus spec 1.5 §3.4. Three modes:
 //
 //   b70-decode <snapshot-or-repo> --ids <file> --n <N> [--device N] [--max-len 16384]
 //   b70-decode <snapshot-or-repo> --bench [--depth 4096] [--tg 256] [--device N]
+//   b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--device N]
+//
+// The first two run `runtime::Engine`. The third does not: it replays an
+// *instrumented* capture and needs one event reset before every replay, which
+// is the caller's business by design (runtime/capture.h) and not something an
+// Engine that owns its own queue can be asked to do from outside.
 //
 // stdout is the machine-readable channel and carries nothing but the answer:
 // one generated id per line in `--ids` mode, one markdown row in `--bench`
-// mode. Everything else - the device, the loader's report, the timings - goes
-// to stderr, so `b70-decode … --ids p.ids --n 32 > out` is a file of ids.
+// mode, the anatomy tables in `--profile` mode. Everything else - the device,
+// the loader's report, the timings - goes to stderr, so
+// `b70-decode … --ids p.ids --n 32 > out` is a file of ids.
 //
 // There is no tokenizer here (spec 2 owns it): ids in, ids out.
 // tools/oracle/tokenize.py is what turns text into an `--ids` file today.
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -19,11 +27,19 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "l0/cmdlist.h"
 #include "l0/context.h"
+#include "l0/event.h"
+#include "l0/fence.h"
+#include "l0/queue.h"
 #include "loader/loader.h"
 #include "model/qwen35.h"
+#include "runtime/buffers.h"
+#include "runtime/capture.h"
+#include "runtime/control.h"
 #include "runtime/engine.h"
 
 namespace {
@@ -56,6 +72,7 @@ void usage() {
       "usage:\n"
       "  b70-decode <snapshot-or-repo> --ids <file> --n <N> [--device N] [--max-len 16384]\n"
       "  b70-decode <snapshot-or-repo> --bench [--depth 4096] [--tg 256] [--device N]\n"
+      "  b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--device N]\n"
       "\n"
       "  <snapshot-or-repo>  a snapshot directory, or an HF repo id resolved against the local\n"
       "                      cache ($HF_HOME or ~/.cache/huggingface). Never downloads.\n"
@@ -65,7 +82,11 @@ void usage() {
       "  --max-len <L>  KV cache and RoPE capacity (default 16384; the attention kernels are\n"
       "                 compiled per max_len, so only the compiled ones load)\n"
       "  --bench        ingest --depth synthetic ids, then time --tg generated ones and print\n"
-      "                 a markdown row on stdout\n");
+      "                 a markdown row on stdout\n"
+      "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
+      "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
+      "                 Never a bench row: every launch signals a host-visible event\n"
+      "                 an unprofiled list does not pay for (spec 1.5 §3.3).\n");
 }
 
 // The loader reports itself with std::printf - to stdout, which is this CLI's
@@ -134,11 +155,236 @@ void report_generate(const runtime::Engine& eng, uint32_t n) {
                eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
 }
 
+// --- --profile: the in-situ step anatomy (spec 1.5 §3.4) ---------------------
+//
+// What this mode measures, and what it does not. Each launch signals a
+// kernel-timestamp event, and `kernelStart → kernelEnd` is that kernel's own
+// device time: the host-scope flush the signal carries lands *after*
+// `kernelEnd`, so a per-kernel number here is directly comparable to a probe's
+// per-kernel number. The **gap** (fence wall − Σ durations) is the opposite: it
+// contains one such flush per launch, so it is an UPPER BOUND on what an
+// unprofiled list pays between kernels. Both statements are printed with the
+// numbers, because a number without its provenance is not a measurement.
+
+// One rollup row. `us` is the row's time summed over every profiled step and is
+// divided by the step count exactly once, at print time; `launches` is the
+// row's launch count in ONE step, because the rollup walks the 645 launch
+// indices once and each index's total already covers every step.
+struct Agg {
+  std::string name;
+  double us = 0.0;
+  size_t launches = 0;
+};
+
+void accumulate(std::vector<Agg>& rows, const std::string& name, double us) {
+  for (Agg& a : rows)
+    if (a.name == name) {
+      a.us += us;
+      ++a.launches;
+      return;
+    }
+  rows.push_back(Agg{name, us, 1});
+}
+
+// "L12 gemv gemv_M1_K5120_N16384_S1_L1" - the three fields runtime::build
+// writes per launch: the layer tag ("--" for the five token-boundary
+// launches), the entry point, and the compiled variant.
+struct Label {
+  std::string layer, entry, variant;
+};
+Label split_label(const std::string& s) {
+  const size_t a = s.find(' ');
+  const size_t b = a == std::string::npos ? a : s.find(' ', a + 1);
+  if (a == std::string::npos || b == std::string::npos)
+    throw std::runtime_error("profile: unparseable launch label '" + s + "'");
+  return Label{s.substr(0, a), s.substr(a + 1, b - a - 1), s.substr(b + 1)};
+}
+
+void print_rollup(const char* title, const char* what, std::vector<Agg> rows, uint32_t steps,
+                  double total_us) {
+  std::sort(rows.begin(), rows.end(), [](const Agg& x, const Agg& y) { return x.us > y.us; });
+  std::printf("\n%s\n  %-34s  launches    us/step   share   us/launch\n", title, what);
+  for (const Agg& a : rows) {
+    const double us = a.us / steps;
+    std::printf("  %-34s  %8zu  %9.3f  %5.2f%%  %10.3f\n", a.name.c_str(), a.launches, us,
+                100.0 * us / total_us, a.launches ? us / double(a.launches) : 0.0);
+  }
+}
+
+int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
+                const std::vector<uint32_t>& ids, uint32_t steps) {
+  runtime::DecodeBuffers buffers(ctx, model.max_len);
+  // Two lists over ONE set of buffers - the pattern
+  // tests/runtime/profile_capture_test.cc proved and the golden gate already
+  // used. The plain list does the ingestion (an instrumented one would pay 645
+  // host-scope flushes on each of ~4096 tokens for a number nobody reads); the
+  // profiled list is the one that is measured. Both bake the same allocations,
+  // so whichever is replayed advances the same state.
+  //
+  // `debug_resid` off on both: the tap is 64 device copies a token and only the
+  // golden gate reads it.
+  runtime::CapturedStep plain = runtime::build(ctx, model, buffers);
+  runtime::ProfileEvents prof(ctx);
+  runtime::CapturedStep instr = runtime::build(ctx, model, buffers, nullptr, &prof);
+  const size_t n = instr.kernel_count;
+  std::fprintf(stderr,
+               "engine: %zu kernels, %zu modules, max_len %u, %.2f GB of persistent state"
+               " (profiled list: %zu events)\n",
+               n, instr.modules.size(), buffers.max_len, buffers.persistent_bytes() / 1e9,
+               prof.events.size());
+
+  // One queue for both lists: the ingestion and the measured replays go through
+  // the same ordering domain the Engine would use, so nothing about the
+  // measurement depends on a second queue landing somewhere else.
+  l0::Queue q(ctx);
+  l0::Fence fence(q);
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  runtime::Control* c = buffers.control.as<runtime::Control>();
+
+  // Engine::reset()'s persistent group, spelled out because this mode does not
+  // construct an Engine. Scratch is deliberately not zeroed, for the reason
+  // Engine::reset() gives: no step may read scratch it has not first written.
+  for (l0::Mem* m : {&buffers.control, &buffers.gdn_state, &buffers.conv_ring, &buffers.kv_k,
+                     &buffers.kv_v})
+    imm.fill(m->ptr(), 0u, m->size());
+
+  auto replay = [&](runtime::CapturedStep& s) {
+    // Engine::replay()'s precondition; here this loop is the caller, so the
+    // check is here (the Task-5 ruling recorded in runtime/engine.h).
+    if (size_t(c->pos) + size_t(c->n_active) > size_t(buffers.max_len))
+      throw std::runtime_error("profile: pos " + std::to_string(c->pos) + " + n_active " +
+                               std::to_string(c->n_active) + " exceeds max_len " +
+                               std::to_string(buffers.max_len));
+    q.execute(s.list, &fence);
+    fence.wait();
+  };
+
+  const auto t0 = std::chrono::steady_clock::now();
+  c->n_active = 1;
+  for (uint32_t id : ids) {
+    c->cur_token[0] = id;
+    replay(plain);
+  }
+  const double ingest_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  std::fprintf(stderr,
+               "ingest: %zu ids in %.1f ms (%.2f ms/token), pos %u - un-instrumented list, so"
+               " this half is a normal decode\n",
+               ids.size(), ingest_ms, ids.empty() ? 0.0 : ingest_ms / double(ids.size()), c->pos);
+
+  // The measured half. Every event is reset before EVERY replay (re-signalling
+  // an un-reset event is undefined) and nothing is queried before the fence
+  // (`duration_us()` throws on an unsignalled event, by design).
+  std::vector<double> per_launch(n, 0.0);
+  double sum_all = 0.0, wall_all = 0.0;
+  double sum_lo = 0.0, sum_hi = 0.0, wall_lo = 0.0, wall_hi = 0.0;
+  for (uint32_t s = 0; s < steps; ++s) {
+    for (l0::Event& e : prof.events) e.reset();
+    const auto s0 = std::chrono::steady_clock::now();
+    replay(instr);
+    const double wall =
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - s0).count();
+    double sum = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+      const double d = prof.events[i].duration_us();
+      per_launch[i] += d;
+      sum += d;
+    }
+    if (s == 0) {
+      sum_lo = sum_hi = sum;
+      wall_lo = wall_hi = wall;
+    }
+    sum_lo = std::min(sum_lo, sum);
+    sum_hi = std::max(sum_hi, sum);
+    wall_lo = std::min(wall_lo, wall);
+    wall_hi = std::max(wall_hi, wall);
+    sum_all += sum;
+    wall_all += wall;
+  }
+  const double sum_us = sum_all / steps;    // Σ per-kernel device time, per step
+  const double wall_us = wall_all / steps;  // submit + fence, per step
+
+  // --- the report. stdout: it is this mode's answer. ------------------------
+  std::printf(
+      "# b70-decode --profile - in-situ step anatomy\n"
+      "depth %zu, steps %u, %zu launches/step, max_len %u, device %s (%u EUs)\n"
+      "PROFILE MODE IS NOT BENCH MODE: every launch below signals a host-visible\n"
+      "kernel-timestamp event, a per-launch flush an unprofiled list never pays. Per-kernel\n"
+      "durations are kernelStart->kernelEnd and EXCLUDE that flush (it lands after kernelEnd),\n"
+      "so they are comparable to probe per-kernel numbers; the gap at the bottom INCLUDES it\n"
+      "and is an upper bound. The engine's ms/token comes from --bench, never from here.\n"
+      "Every `share` below is of the sum of kernel durations, not of the fence wall.\n",
+      ids.size(), steps, n, buffers.max_len, ctx.name().c_str(), ctx.eu_count());
+
+  std::vector<size_t> order(n);
+  for (size_t i = 0; i < n; ++i) order[i] = i;
+  std::sort(order.begin(), order.end(),
+            [&](size_t a, size_t b) { return per_launch[a] > per_launch[b]; });
+  const size_t top = std::min<size_t>(30, n);
+  std::printf("\ntop %zu launches by mean us/step (measured, mean of %u steps)\n"
+              "  rank  launch    us/step   share  label\n",
+              top, steps);
+  for (size_t r = 0; r < top; ++r) {
+    const size_t i = order[r];
+    const double us = per_launch[i] / steps;
+    std::printf("  %4zu  %6zu  %9.3f  %5.2f%%  %s\n", r + 1, i, us, 100.0 * us / sum_us,
+                instr.labels[i].c_str());
+  }
+
+  // The three rollups. `family` is the entry point (what docs/12 has a section
+  // for); `variant` is the compiled binary (what docs/12's per-shape tables and
+  // the probe price); `layer kind` is the GDN / FA / token-boundary split.
+  std::vector<model::LayerDesc> layers = Qwen35::layers();
+  std::vector<Agg> by_family, by_variant, by_kind;
+  for (size_t i = 0; i < n; ++i) {
+    const Label lab = split_label(instr.labels[i]);
+    const double us = per_launch[i];
+    accumulate(by_family, lab.entry, us);
+    accumulate(by_variant, lab.variant, us);
+    if (lab.layer == "--") {
+      accumulate(by_kind, "token boundary", us);
+    } else {
+      const unsigned long idx = std::stoul(lab.layer.substr(1));
+      if (idx >= layers.size()) throw std::runtime_error("profile: label names layer " + lab.layer);
+      accumulate(by_kind, layers[idx].kind == model::LayerKind::GDN ? "GDN layers (48)"
+                                                                    : "FA layers (16)",
+                 us);
+    }
+  }
+  print_rollup("per-kernel-family rollup (measured, mean of the steps)", "family", by_family, steps,
+               sum_us);
+  print_rollup("per-variant rollup - the rows docs/12 and probe_gemv price", "variant", by_variant,
+               steps, sum_us);
+  print_rollup("per-layer-kind rollup", "layer kind", by_kind, steps, sum_us);
+
+  std::printf(
+      "\ntotals per step (mean of %u; the per-step spread is the honest error bar)\n"
+      "  sum of %zu kernel durations   %10.3f us   [%.3f .. %.3f]   MEASURED, per-kernel,\n"
+      "                                                                   flush-free\n"
+      "  fence wall (submit + wait)    %10.3f us   [%.3f .. %.3f]   MEASURED, profiled list\n"
+      "  gap = wall - sum              %10.3f us   = %.3f us/launch over %zu launches\n"
+      "                                                 UPPER BOUND: includes one host-scope\n"
+      "                                                 flush per launch (spec 1.5 §3.3)\n"
+      "  sum / wall                    %10.4f\n",
+      steps, n, sum_us, sum_lo, sum_hi, wall_us, wall_lo, wall_hi, wall_us - sum_us,
+      (wall_us - sum_us) / double(n), n, sum_us / wall_us);
+  std::printf(
+      "\nreading these numbers\n"
+      "  - Per-kernel us are in-situ and flush-free: compare them directly with the\n"
+      "    probe-transplant floors in docs/12 (`gemv` -> Measured) and with docs/05's table.\n"
+      "  - The gap is NOT a dispatch cost this engine pays: subtract the flush\n"
+      "    (doc 07 #5's 0.52 us/kernel from probe_replay is the unprofiled estimate).\n"
+      "  - The fence wall above is inflated by the same flushes and is NOT ms/token.\n"
+      "    The recorded step time is the --bench median in docs/BENCHMARKS.md.\n");
+  return 0;
+}
+
 int run(int argc, char** argv) {
   std::string path, ids_path;
-  uint32_t n = 0, depth = 4096, tg = 256, max_len = 16384;
+  uint32_t n = 0, depth = 4096, tg = 256, steps = 32, max_len = 16384;
   uint32_t device = l0::Context::kFromEnv;
-  bool bench = false, have_n = false, have_bench_size = false;
+  bool bench = false, profile = false, have_n = false;
+  bool have_depth = false, have_tg = false, have_steps = false;
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -164,12 +410,17 @@ int run(int argc, char** argv) {
       max_len = parse_u32("--max-len", value(i, "--max-len"));
     } else if (a == "--bench") {
       bench = true;
+    } else if (a == "--profile") {
+      profile = true;
     } else if (a == "--depth") {
       depth = parse_u32("--depth", value(i, "--depth"));
-      have_bench_size = true;
+      have_depth = true;
     } else if (a == "--tg") {
       tg = parse_u32("--tg", value(i, "--tg"));
-      have_bench_size = true;
+      have_tg = true;
+    } else if (a == "--steps") {
+      steps = parse_u32("--steps", value(i, "--steps"));
+      have_steps = true;
     } else if (!a.empty() && a[0] == '-') {
       usage();
       throw std::runtime_error("unknown option '" + a + "'");
@@ -185,34 +436,53 @@ int run(int argc, char** argv) {
     usage();
     throw std::runtime_error("a snapshot directory or HF repo id is required");
   }
-  if (bench == !ids_path.empty()) {
+  // Three modes, exactly one of them. `--profile` is exclusive with `--bench`
+  // for a reason that is not tidiness: a profiled list signals 645 host-visible
+  // events per step, so it can never produce a bench row (spec 1.5 §3.3).
+  const int modes = int(!ids_path.empty()) + int(bench) + int(profile);
+  if (modes != 1) {
     usage();
-    throw std::runtime_error("exactly one of --ids and --bench");
+    throw std::runtime_error("exactly one of --ids, --bench and --profile");
   }
-  if (bench && have_n)
-    throw std::runtime_error("--n belongs to --ids; --bench sizes its run with --depth and --tg");
-  if (!bench && have_bench_size)
-    throw std::runtime_error("--depth and --tg belong to --bench; --ids sizes its run with --n");
-  if (!bench && !have_n) {
+  const bool synthetic = bench || profile;   // the two modes that cycle the baked prompt
+  if (have_n && ids_path.empty())
+    throw std::runtime_error("--n belongs to --ids; --bench sizes its run with --depth and --tg,"
+                             " --profile with --depth and --steps");
+  if (have_tg && !bench)
+    throw std::runtime_error("--tg belongs to --bench; --ids sizes its run with --n and --profile"
+                             " with --depth and --steps");
+  if (have_steps && !profile)
+    throw std::runtime_error("--steps belongs to --profile; --bench sizes its run with --depth"
+                             " and --tg, --ids with --n");
+  if (have_depth && !synthetic)
+    throw std::runtime_error("--depth belongs to --bench and --profile; --ids sizes its run"
+                             " with --n");
+  if (!synthetic && !have_n) {
     usage();
     throw std::runtime_error("--ids needs --n");
   }
-  if (!bench && n == 0) throw std::runtime_error("--n 0 would generate nothing");
+  if (!synthetic && n == 0) throw std::runtime_error("--n 0 would generate nothing");
   if (bench && tg == 0) throw std::runtime_error("--tg 0 would time nothing");
+  if (profile && steps == 0) throw std::runtime_error("--steps 0 would profile nothing");
 
   // Everything that can be judged without the device or the 19 GB checkpoint is
   // judged first: failing on a typo'd --ids path after a 13-second load is a
   // worse CLI than failing in a millisecond.
   std::vector<uint32_t> ids;
-  if (!bench) {
+  if (!synthetic) {
     ids = read_ids(ids_path);
     if (ids.size() + size_t(n) > size_t(max_len))
       throw std::runtime_error("prompt (" + std::to_string(ids.size()) + " ids) + --n " +
                                std::to_string(n) + " exceeds --max-len " + std::to_string(max_len));
   } else {
-    if (size_t(depth) + size_t(tg) > size_t(max_len))
-      throw std::runtime_error("--depth " + std::to_string(depth) + " + --tg " +
-                               std::to_string(tg) + " exceeds --max-len " +
+    // Both synthetic modes ingest to --depth and then replay: --tg generated
+    // tokens for --bench, --steps instrumented ones for --profile. Same bound
+    // either way - the KV cache and the RoPE table stop at max_len.
+    const uint32_t after = bench ? tg : steps;
+    const char* after_flag = bench ? "--tg " : "--steps ";
+    if (size_t(depth) + size_t(after) > size_t(max_len))
+      throw std::runtime_error("--depth " + std::to_string(depth) + " + " + after_flag +
+                               std::to_string(after) + " exceeds --max-len " +
                                std::to_string(max_len));
     ids.resize(depth);
     for (uint32_t i = 0; i < depth; ++i) ids[i] = kBenchPrompt[i % kBenchPromptLen];
@@ -226,6 +496,11 @@ int run(int argc, char** argv) {
     StdoutToStderr redirect;
     return loader::load(ctx, path, max_len);
   }();
+
+  // --profile forks here: it replays an instrumented capture and has to reset
+  // 645 events before every replay, which is the caller's job by design
+  // (runtime/capture.h) - so it runs its own loop rather than an Engine's.
+  if (profile) return run_profile(ctx, model, ids, steps);
 
   // debug_resid off: the per-layer tap costs 64 device copies a token and only
   // the golden gate (Task 8) reads it.
