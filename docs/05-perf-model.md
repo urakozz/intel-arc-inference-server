@@ -95,7 +95,7 @@ Read that table twice before proposing anything.
 2. **GEMV is not the problem - with one caveat that this section is the wrong
    place to omit.** 28.346 ms of measured GEMV is 89% of vLLM's *entire*
    31.75 ms step. Those kernels run at 89-97% of the 600 GB/s denominator the
-   probe reports against (85-92% of 590), and the engine binds the probe's own
+   probe reports against (90-99% of 590), and the engine binds the probe's own
    best layout and `S` for every shape, so the "GEMV fill at the chosen `S` vs
    the probe matrix" suspect is **ruled out**: production and probe are the same
    configuration. There is ~2.0 ms of headroom between the GEMV sum and the
