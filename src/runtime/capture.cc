@@ -227,7 +227,9 @@ class Capture {
   // WG 64. Every int4 row of the model table is layout 1, whose tiled buffer
   // carries its f16 scales inline (`loader::load_linear` throws on any other
   // layout), so the `scales` argument is unread - bind the same allocation,
-  // which is the plan-1 convention and keeps the argument count honest.
+  // which is the plan-1 convention and keeps the argument count honest. (Both
+  // parameters are `restrict`-qualified; the aliasing is unobservable because
+  // `scales` is never dereferenced under LAYOUT 1.)
   void gemv(uint32_t layer, LinearId id, const void* x) {
     const model::FusedLinear& fl = Qwen35::linear(id);
     const model::GemvShape& s = fl.shape;

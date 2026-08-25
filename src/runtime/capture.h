@@ -39,8 +39,11 @@ struct CapturedStep {
 // the residual stream is only advanced by `prep_res_norm`, so tap[L] holds the
 // hidden state with layer L's *mixer* contribution folded in and layer L's MLP
 // contribution still sitting un-folded in `partials` (layer L+1's leading
-// `prep_res_norm` folds it). No tap holds the final hidden state - the final
-// `prep_res_norm` folds layer 63's MLP straight into `x` for lm_head.
+// `prep_res_norm` folds it). No tap holds the final hidden state - but after a
+// step's fence, `b.resid` holds it pre-norm (the final `prep_res_norm` folds
+// layer 63's MLP into `resid` first, like every prep, before writing the
+// normalised row to `x`) and `b.x` holds its final-normalised form; both are
+// readable without any capture change.
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                    l0::Mem* debug_resid = nullptr);
 
