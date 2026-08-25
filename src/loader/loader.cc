@@ -554,6 +554,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   const size_t small_resident = r.small_bytes - rope_bytes;
   const size_t per_token = r.int4_bytes + r.scale_bytes + r.bf16_linear_bytes + r.pad_bytes +
                            r.lm_head_bytes + small_resident;
+  m.report.read_per_token = per_token;
   // doc-03's W measured a bf16 lm_head. A packed one is an itemised term on the
   // expected side, exactly like the padding and the fp32 widening - the check
   // stays at 2%, and the two sides move together or the load fails.
