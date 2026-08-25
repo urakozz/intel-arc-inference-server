@@ -508,13 +508,15 @@ class Capture {
     // ~264 work-groups "past the point any measurement here reaches"; the
     // measurement now reaches it. The idle work-groups grow with the grid: at
     // depth 4096 there are 1024 - 260 = 764 of them per launch, against
-    // 256 - 68 = 188 before, so the retile added 576. Their cost here is
-    // TRANSPLANTED, not measured: docs/15 §2's early-out row put 192 extra idle
-    // work-groups at 0.04% of a 153.608 us launch (~0.06 us), which scales to
-    // ~0.19 us for 576 -- under 0.1% of this kernel's 224 us. It is quoted only
-    // to say the growth is negligible, and it is a transplant, so it is not
-    // evidence for anything finer. What is bought is a quartered per-work-group
-    // serial walk (369.988 -> 224.046 us/launch, measured).
+    // 256 - 68 = 188 before, so the retile added 576. **Their cost is not a
+    // term to add**: the 224.046 us/launch below was measured WITH all 764 of
+    // them present, so whatever they cost is already inside it. For a bound
+    // anyway, the two available transplants disagree 47x -- doc 07 #12's own
+    // 14.97 ns/work-group puts 576 at 8.6 us/launch (3.8% of 224 us, 0.38% of
+    // the step across 16 launches), docs/15 §2's in-situ 0.32 ns/work-group puts
+    // it at 0.18 us -- and doc 07 #12 keeps the larger one so the bound is not
+    // flattered. What is bought is a quartered per-work-group serial walk
+    // (369.988 -> 224.046 us/launch, measured, grid growth included).
     {
       l0::Kernel& k = kernel(
           kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
