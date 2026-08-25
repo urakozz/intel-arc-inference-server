@@ -22,6 +22,7 @@ deliberately has **no `fla`**: the fallback path *is* the contract (doc 03).
 | `run_in_container.sh` | Wraps `docker run` for the box: read-only HF cache at `/hf`, repo at `/ws`, `$SNAP` resolved to the snapshot directory, **`-u $(id -u):$(id -g)`** so outputs are not root-owned, no memory limit. |
 | `golden.sh` | The production run: the three prompts, serially, `--gen 32`. This is the script that made the files plan 3 compares against - committed rather than retyped. |
 | `check.sh` | Re-reads the three written files in a separate process and prints the block quoted under "Sanity checks" below. |
+| `vllm_check.py` | The third implementation: vLLM's own greedy 32 tokens on the same three prompt id files, compared against the golden `tokens`. Closes the trust chain's last link - run and recorded 2026-08-25, **96/96** (`docs/14-golden-gate.md` §cross-check). |
 
 Prompts live in `tests/golden/prompts/`: `prose.txt` (plain English, **42 ids**),
 `code.txt` (a Python function, **61 ids** - 3 under the ceiling, so do not edit
@@ -283,15 +284,23 @@ one, and it is worth being explicit about where the chain currently ends.
    what it is a golden file *of*. Regenerate and the comparison target changes;
    that is the point of recording the exact numbers above.
 
-What that chain does **not** yet prove is that the checkpoint was unpacked the
-way its author packed it. Link 1 is exactly what makes link 3 meaningful and
+What links 1-3 on their own do **not** prove is that the checkpoint was unpacked
+the way its author packed it. Link 1 is exactly what makes link 3 meaningful and
 also what limits it: the C++ loader and the oracle are pinned to the *same*
 `dequant.py` convention (bit-exactly, by test), so a convention that is wrong
-moves the engine and the oracle **together** and the golden test still passes. **The cross-check against vLLM is deferred to plan 3 deliberately** -
-it needs a working engine to be worth running, and doing it now would only
-compare two CPU paths that already share their input.
+moves the engine and the oracle **together** and the golden test still passes.
 
-When it does run, read a three-way disagreement like this:
+4. **The third implementation.** `vllm_check.py` runs vLLM's own greedy
+   generation on the same checkpoint and the same three prompt id files -
+   vLLM's GPTQ unpack (`XPUwNa16LinearKernel`), its Triton GDN kernels, its
+   FlashAttention, on the XPU: nothing shared with either of the paths above
+   except the checkpoint's bytes. **Run 2026-08-25: 96/96 token ids
+   element-exact against the golden `tokens`, on both the compiled and the
+   `enforce_eager` path.** The chain is closed for these three prompts, and
+   `dequant.py` is cross-checked rather than merely self-consistent. Full
+   record - command, ids, caveats - in `docs/14-golden-gate.md` §cross-check.
+
+Read a future three-way disagreement like this:
 
 - **engine ≠ oracle** → an engine bug (kernel, layout, fusion, fp32 accumulation
   boundary). The oracle is the reference; the engine is wrong.
@@ -300,7 +309,7 @@ When it does run, read a three-way disagreement like this:
   share and vLLM does not. Check `dequant.py` first - zero-point handling
   (`q - 8` vs. an explicit `qzeros`), the group axis, the `[K/8, N]` packing
   order and nibble ordering, `desc_act`/`g_idx` - before touching a kernel.
-- **all three agree** → the chain is closed.
+- **all three agree** → the chain is closed. *(This is the 2026-08-25 result.)*
 
 ## Decisions worth knowing
 
