@@ -95,8 +95,12 @@ The 2026-08-22 estimate was right that GDN is a small share and wrong about the
 reason it would be small: not "kernel-count, and replay removes it" but *it is
 the best-occupied kernel in the engine* - 192 work-groups at 540 GB/s, 1.09× its
 own traffic floor (doc 12, `gdn_step` → Measured). The occupancy problem the
-estimate expected to find in GDN is real and lives in the three kernels that
-were given 1, 2 and 4 work-groups.
+estimate expected to find in GDN is real and lives in the kernels that were
+given one or two work-groups - but **the unit is the subgroup, not the
+work-group**: spec 1.5's lever L2 gave `a‖b` 4× the work-groups at an unchanged
+subgroup count and it bought nothing, and a 16-way K split (8 → 128 subgroups)
+took its row from 2.335 to **0.256 ms/token** (docs/15 §L2). The `a‖b` row above
+is therefore the pre-lever number.
 
 ## 4. What is vLLM's MBU on the phase-1 model? - **resolved: 81%**
 
