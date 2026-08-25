@@ -7,7 +7,11 @@
 # `loader::LoadedModel`'s device weights, and b70_l0 because the allocations
 # and the command list are Level Zero ones. b70_target_kernel_dir supplies
 # B70_KERNEL_DIR, which kernels/kernels.h needs to name a variant's binary.
-add_library(b70_runtime STATIC buffers.cc capture.cc)
+#
+# engine.cc is the decode loop that owns a capture: ingestion, greedy
+# generation, reset and the max_len precondition. It adds no dependency - the
+# Engine is the three files above wired to a queue and a fence.
+add_library(b70_runtime STATIC buffers.cc capture.cc engine.cc)
 target_include_directories(b70_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_runtime PUBLIC b70_l0 b70_model b70_loader)
 b70_target_kernel_dir(b70_runtime)
