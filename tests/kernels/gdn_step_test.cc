@@ -39,9 +39,16 @@
 //      pair pins the window to exactly those three slots, and pins the ring
 //      write to a slot no reader touches, without consulting gdn_ref.h.
 //
-// A fourth case runs the compile-only M = 2 variant at n_active = 2. It is the
-// only cover for the conv window's intra-step path, where token 1's two newest
-// older taps are token 0's raw values rather than ring slots.
+// Two more positions cover the window's edges: `pos = 1`, where the clamp is
+// *partial* (positions -2 and -1 contribute zeros but position 0 is a real ring
+// slot), and `pos = 15` at M = 2, where the write wraps - slots 15 and 0 - while
+// the window reads 12, 13 and 14.
+//
+// A last case runs the M = 2 variant at n_active = 2. It is the only cover for
+// the conv window's intra-step path: at `m = 1` the window is positions 3, 4, 5
+// and 6, so **two of its four entries are this step's own raw values** - token
+// 0's at position 5 and token 1's own at position 6 - while positions 3 and 4
+// are still ring slots. Of the three *older* taps, exactly one is intra-step.
 //
 // Every case replays its launch from freshly re-uploaded inputs and requires
 // `gdn_o`, `state` and `conv_ring` to be bitwise identical - the determinism the
@@ -341,11 +348,16 @@ int main() {
   // pos = 5: the history is ring slots 2, 3, 4 and the write lands in slot 5.
   run_case(d, 5, 1, 1, 2000);
   case_ring_slots(d, 5, 3000);
-  // M = 2 is a compile-only variant in this plan (spec 1 §9's M-loop rule), but
-  // running it costs nothing and is the ONLY cover for the conv window's
-  // intra-step path - at m = 1 two of the three older taps come from this step's
-  // own raw values instead of the ring. Delete this line, not the variant, if a
-  // later plan wants the M loop back to compile-only.
+  // pos = 1: the clamp is partial - positions -2 and -1 contribute zeros, but
+  // position 0 is a real ring slot, so the `p < 0` guard has to be per tap.
+  run_case(d, 1, 1, 1, 5000);
+  // pos = 15, M = 2: the write wraps (slots 15 and 0) while the window reads
+  // slots 12, 13, 14 - the disjointness argument at the one place it could bite.
+  run_case(d, 15, 2, 2, 6000);
+  // M = 2 is compiled for spec 1 §9's M-loop rule; running it costs nothing and
+  // is the ONLY cover for the conv window's intra-step path - at m = 1 exactly
+  // one of the three older taps (position 5, token 0's raw value) comes from
+  // this step rather than the ring; positions 3 and 4 are still ring slots.
   run_case(d, 5, 2, 2, 4000);
   std::puts("gdn_step_test OK");
   return 0;

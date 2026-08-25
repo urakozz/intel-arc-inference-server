@@ -989,6 +989,8 @@ because every kernel now builds with `-cl-fp32-correctly-rounded-divide-sqrt`.
 | `pos = 5` (history in slots 2,3,4) - `state` | rel ≤ 1e-5 | **3.44e-07** |
 | `pos = 5` - `gdn_o` | rel ≤ 1e-3 | **4.39e-07** |
 | `pos = 5` - `conv_ring` | **bit-exact** | 163840/163840 |
+| `pos = 1` (partial clamp: -2, -1 zero, 0 a real slot) - `state` / `gdn_o` | rel ≤ 1e-5 / 1e-3 | **3.35e-07 / 4.20e-07** |
+| `pos = 15`, M = 2 (write wraps to slots 15 and 0) - `state` / `gdn_o` | rel ≤ 1e-5 / 1e-3 | **4.18e-07 / 5.57e-07** |
 | `pos = 5`, M = 2, n_active = 2 - `state` / `gdn_o` | rel ≤ 1e-5 / 1e-3 | **4.59e-07 / 5.58e-07** |
 | slot ownership (device only, no reference) | see above | holds |
 | replay of every case | **bitwise** identical | holds |
@@ -997,15 +999,19 @@ because every kernel now builds with `-cl-fp32-correctly-rounded-divide-sqrt`.
 `|got − ref| / max(|ref|, rms(ref))`: `Δ = (v − kv)·β` is a difference of two
 same-sized numbers, so an individual state cell can land arbitrarily close to
 zero by cancellation and an unfloored ratio there would measure the
-cancellation, not the kernel. In practice the floor never binds at M = 1 - the
-worst element is above the RMS in both cases, so those numbers are ordinary
-relative errors. The margins are 30× on `state` and 2000× on `gdn_o`; the bars
-are kept where the plan set them because they are the bars a *driver* change
-must not break, not descriptions of today's driver.
+cancellation, not the kernel. In practice the floor barely does anything: the
+worst `state` element is above the RMS in every M = 1 case, and across the whole
+table the floored and unfloored numbers differ by at most 1.3× (`pos = 1`'s
+`gdn_o`), which is why both are printed. The margins are ~20× on `state` and
+~1800× on `gdn_o`; the bars are kept where the plan set them because they are
+the bars a *driver* change must not break, not descriptions of today's driver.
 
-The M = 2 variant is compile-only by the plan, but it is run anyway: at `m = 1`
-two of the conv window's three older taps are this step's own raw values instead
-of ring slots, and nothing else covers that path.
+The M = 2 variant is compiled for spec 1 §9's M-loop rule and run anyway,
+because nothing else covers the conv window's intra-step path: at `m = 1` the
+window is positions 3, 4, 5 and 6, so **two of its four entries are this step's
+own raw values** - token 0's at position 5 and token 1's own at position 6 -
+while positions 3 and 4 are still ring slots. Of the three *older* taps, exactly
+one is intra-step.
 
 ### Rejected, and what was not measured
 

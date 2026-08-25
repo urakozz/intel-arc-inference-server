@@ -102,7 +102,14 @@
 //     convolved one;
 //   * the conv accumulates fp32 over widened bf16 inputs and fp32 weights, taps
 //     **ascending** (t = 0 the oldest, t = 3 the current token), with explicit
-//     `fma` so neither compiler's contraction default matters;
+//     `fma` so neither compiler's contraction default matters. That tap order is
+//     `causal_conv1d_update`'s: it rolls the conv state left by one and drops
+//     the new input into the last column, then multiplies column `i` by
+//     `weight[i]` - so `conv_state[..., -1]` (the newest value) meets weight
+//     index `width − 1`, i.e. tap 3 here. Checked against the SYCL reference's
+//     decode path, `vllm-xpu-kernels/csrc/xpu/gdn_attn/causal_conv1d.hpp`, which
+//     fills `local_input[Width-1]` from the current token and sums
+//     `local_input[i] * local_weights[i]` over ascending `i`;
 //   * `x_b = rne_bf16(silu_f32(conv))` - the activation's bf16 output;
 //   * l2norm sums squares of the widened bf16 in fp32 (tree above),
 //     `inv = 1.0f / sqrt(sum + 1e-6f)` - **never `rsqrt`**, which is a ~2 ulp
@@ -128,6 +135,17 @@
 #endif
 #ifndef DTBIAS_OFF
 #error "gdn_step: DTBIAS_OFF must be defined (src/kernels/CMakeLists.txt)"
+#endif
+
+// The qkv‖z GEMV's split-K slice count (model::Qwen35's table, docs/13-loader.md).
+// At S = 1 the fp32 `[S][M][N]` partials collapse to `[M][N]` and a token's row
+// base is `m·QKVZ_N`, which is what the `raw_b` load below assumes. If qkv‖z is
+// ever re-tuned to a wider split-K, that load must sum the slices the way
+// prep_gated_head does for `z` - and the reference and the ring's bit-exact bar
+// with it. Fail the build here rather than silently read slice 0.
+#define QKVZ_S 1
+#if QKVZ_S != 1
+#error "gdn_step assumes qkv||z runs S=1; the partials index must loop s otherwise"
 #endif
 
 // The model's dimensions (model::Qwen35); none of them is a variant.
@@ -224,8 +242,11 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
     float win2 = p1 < 0 ? 0.0f : bf16f(conv_ring[((size_t)((uint)p1 % RING)) * CONV_ROWS + ch]);
 
     for (uint m = 0; m < n_act; ++m) {
-      // The qkv linear's bf16 output (gdn_ref.h: `raw_b`).
-      const ushort raw_b = rne_bf16(qkvz_partials[(size_t)m * QKVZ_N + ch]);
+      // The qkv linear's bf16 output (gdn_ref.h: `raw_b`). The slice index is
+      // `QKVZ_S - 1 == 0`: with one slice there is nothing to sum, which the
+      // `#if QKVZ_S != 1` above is what keeps true.
+      const ushort raw_b =
+          rne_bf16(qkvz_partials[((size_t)(QKVZ_S - 1) * M + m) * QKVZ_N + ch]);
       if (own_ring) conv_ring[((size_t)((pos + m) % RING)) * CONV_ROWS + ch] = raw_b;
       const float win3 = bf16f(raw_b);            // tap 3 is the current token
       float acc = 0.0f;                           // taps ascending, explicit fma
