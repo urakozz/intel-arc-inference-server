@@ -168,6 +168,52 @@ finite in all three. `dump.py`'s own aborts (strict load, no surviving meta
 tensor, `tokens` length, every GDN layer's state present, `resid.L63` finite)
 also passed inside each run, or nothing would have been written.
 
+## The gate: what these files are compared against, and what it proved
+
+`tests/golden/golden_gate_test.cc` is the consumer of everything above. The full
+story - the divergence classes, the magnitudes, the `code` prompt's anomalous
+position - is `docs/14-golden-gate.md`; this section is how to run it and the
+one-line result.
+
+```bash
+tools/box.sh test golden_gate_test          # sync + build + ctest, on the box
+# the full diagnostic log (per-layer tables, attribution traces, every step):
+tools/box.sh run './build/tests/golden_gate_test "$PWD/oracle-out" "$PWD/tests/golden/prompts"'
+```
+
+The three prompt id files are **committed** as
+`tests/golden/prompts/{prose,code,cjk}.ids` - the same 42 / 61 / 38 ids the
+`prompt_ids` metadata above records, pulled from `oracle-out/` and small enough
+to version. The `.safetensors` are not committed and never leave the box; when
+they are absent the test exits **77**, which ctest reports as SKIP.
+
+Per prompt the test ingests the ids one per replay (reading the per-layer
+residual tap after each), then generates 32 ids as 32 × `generate(1)`, reading
+`buffers().logits` before each step so a mismatch can be reported with both
+top-5 sets. What it asserts:
+
+| | Bar | Measured 2026-08-25 |
+|---|---|---|
+| 32 generated ids == `tokens` | **exact - the gate** | 32/32 on all three prompts |
+| `gdn_state` vs `gdn_state.L{i}`, per GDN layer | cosine ≥ 0.999 | min 0.999537, 0 of 144 below |
+| per-layer residual tap | diagnostic, `**LOW**` under 0.999 | 36 of 9024 (layer, position) pairs low, all on 3 positions of the `code` prompt |
+| logits at each decision row | diagnostic | 0.999844 … 0.999989 over 96 rows |
+
+Two things about the tap comparison are easy to get wrong and are worth
+repeating here, because they are properties of *these files*:
+
+- the engine's `tap[i]` is **not** `resid.L{i}`. It is the residual with layer
+  *i*'s mixer folded in and its MLP not yet folded, so the test builds
+  `bf16(resid.L{i-1}[t] + mixer.L{i}[t])` in fp32 and rounds RNE. Layer 0 has no
+  `resid.L-1` - these files contain no embedding tensor - so the embedding rows
+  are gathered from the loaded model instead;
+- layer 63's post-MLP residual has no tap. `resid.L63` is compared against the
+  engine's `b.resid` after the fence, which is that same vector.
+
+The engine reproduced all three continuations recorded above id for id,
+including the CJK prompt's completion of the trailing emoji's variation
+selector.
+
 ## What is in a golden file
 
 Batch is always 1 and the batch dimension is squeezed out.
@@ -228,8 +274,9 @@ one, and it is worth being explicit about where the chain currently ends.
    softmax), deliberately without `fla`. That reference implementation - not
    our kernels - decides what the correct activations are.
 3. **The engine.** **Plan 3's golden test compares the engine against THESE
-   files**: `oracle-out/{prose,code,cjk}.golden.safetensors` on the box, the
-   ones produced by the run recorded above. Per-layer `resid`/`mixer`/`mlp`,
+   files** - and as of **2026-08-25 it passes, 96/96 token ids exact**
+   (`docs/14-golden-gate.md`): `oracle-out/{prose,code,cjk}.golden.safetensors`
+   on the box, the ones produced by the run recorded above. Per-layer `resid`/`mixer`/`mlp`,
    the GDN and conv states after the prompt, the logits rows and the 32 greedy
    token ids. Their metadata pins the snapshot path, the prompt ids, `gen`, the
    attention implementation and the group size, so a golden file always says
