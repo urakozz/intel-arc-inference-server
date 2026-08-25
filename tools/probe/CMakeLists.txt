@@ -44,6 +44,14 @@ add_probe_attn(noloads     PB_NO_K=1 PB_NO_V=1)          # - both
 add_probe_attn(hotk        PB_HOT_K=1)                   # same K messages, all L1-resident
 add_probe_attn(hotv        PB_HOT_V=1)
 add_probe_attn(hotkv       PB_HOT_K=1 PB_HOT_V=1)
+# The LICM control (review issue I2). `hotk`/`hotv`/`hotkv` hold the address
+# constant across the wave loop, which IGC may legally hoist; these three keep
+# the 8 KB L1-resident footprint but make the row a function of `w`, so the
+# message COUNT is provably the base kernel's. hotkv2 == hotkv means no
+# hoisting happened and the cache/issue split stands.
+add_probe_attn(hotk2       PB_HOT_K=1 PB_HOT_W=1)
+add_probe_attn(hotv2       PB_HOT_V=1 PB_HOT_W=1)
+add_probe_attn(hotkv2      PB_HOT_K=1 PB_HOT_V=1 PB_HOT_W=1)
 add_probe_attn(kt          PB_KT=1)                      # K from a [head][pos][dim] cache
 add_probe_attn(vt          PB_VT=1)                      # V from a [head][pos][dim] cache
 add_probe_attn(kvt         PB_KT=1 PB_VT=1)              # both

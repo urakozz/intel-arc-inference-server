@@ -522,7 +522,13 @@ class Capture {
     // max_len 16384, of which 260 are live at depth 4096 - nearly 4x the 68
     // before. docs/15 §2 measured work-group count as very nearly free but put
     // ~264 work-groups "past the point any measurement here reaches"; the
-    // measurement now reaches it. The idle work-groups grow with the grid: at
+    // measurement now reaches it. **"Nearly free" is WITHDRAWN for this grid
+    // (2026-08-25, tools/probe/probe_attn; docs/15 "Spec 1.6 §5.2"):** that was
+    // measured at ATTN_BLOCK 256 over 20 -> 68 work-groups, a low-occupancy
+    // regime, and at the shipped block the launch is LINEAR in live
+    // work-groups (68 -> 1004 = 14.8x for 11.8x the time). What survives, and
+    // is what this comment actually needs, is the sentence below: the IDLE
+    // work-groups are free -- now measured per kernel at 1.63 ns each. The idle work-groups grow with the grid: at
     // depth 4096 there are 1024 - 260 = 764 of them per launch, against
     // 256 - 68 = 188 before, so the retile added 576. **Their cost is not a
     // term to add**: the 224.046 us/launch below was measured WITH all 764 of

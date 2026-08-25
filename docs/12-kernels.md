@@ -1792,13 +1792,13 @@ and reading the block once outright is the first item in the not-measured list.
 > **Half of that paragraph is now measured, and the other half is corrected**
 > (`tools/probe/probe_attn`, 2026-08-25 - [15-step-anatomy.md](15-step-anatomy.md),
 > "Spec 1.6 §5.2"). Running 1, 2, 3 and 6 of the six passes and nothing else
-> measures **66.771 / 95.833 / 121.250 / 206.250 µs** per launch: a line through
-> those four points is 39.09 µs + **27.81 µs per pass** and predicts the sixth to
-> 0.14%. Subtracting the 4.167 µs the grid and the q staging genuinely cost
-> leaves the **first** pass at ≈ 62.6 µs against ≈ 27.8 µs for each of the other
-> five - a ratio of **2.25**, which is this paragraph's mechanism, measured for
+> measures **66.771 / 96.979 / 122.396 / 207.396 µs** per launch: a line through
+> those four points is 39.46 µs + **27.98 µs per pass** and predicts the sixth to
+> 0.04%. Subtracting the 4.167 µs the grid and the q staging genuinely cost
+> leaves the **first** pass at ≈ 62.6 µs against ≈ 28.0 µs for each of the other
+> five - a ratio of **2.24**, which is this paragraph's mechanism, measured for
 > the first time. What the paragraph got wrong is the implication: passes 2..6
-> being cache hits does not make them cheap. **They cost 5 × 27.81 = 139 µs,
+> being cache hits does not make them cheap. **They cost 5 × 27.98 = 139.9 µs,
 > 67% of the launch.** The reread is the largest thing in this kernel and the
 > (kv-head, block) grid makes it *cheaper*, not free.
 
@@ -2132,21 +2132,32 @@ measurement said, and the numbers themselves are in "Measured - lever L5".
   and six `(mx, sm)` pairs per work-item. Worth revisiting only after a probe
   names what the other ~200 µs of the launch actually is.
 
-  > **The probe was run, the ceiling is bigger than this paragraph said, and the
-  > ruling still holds - for a better reason** (`probe_attn`, 2026-08-25;
+  > **The probe was run; this paragraph's BOUND was right and its reasoning was
+  > half wrong** (`probe_attn`, 2026-08-25;
   > [15-step-anatomy.md](15-step-anatomy.md), "Spec 1.6 §5.2"). The 6× reread is
-  > **not** a fraction of a fraction: it is **139 µs of a 206 µs launch (67%)**,
-  > measured on the q-head axis. But staging cannot collect that, and the number
-  > that says so is `hotkv` - the same kernel with the same **message count**
-  > and every KV access an L1 hit, which is the best any staged version can be.
-  > It measures **142.500 µs, −30.9%**, so **1.108 ms/token is the ceiling for
-  > every locality attack on this kernel**, staging included, before staging's
-  > own 16 KB of SLM per work-group and 16 KB per wave of SLM writes are
-  > subtracted. The reason the reread is expensive is not that it misses: it is
-  > that **24.4% of the launch is the load messages themselves** (`hotkv` −
-  > `noloads` = 50.417 µs), and staging issues the same number of them from SLM
-  > instead of from L1. So the ruling is unchanged and its basis is now a
-  > measurement rather than an extrapolation off the block sweep.
+  > **not** a fraction of a fraction: it is **139.9 µs of a 207.4 µs launch
+  > (67%)**, measured on the q-head axis. But staging cannot collect that, and
+  > the number that says so is `hotkv2` - the same kernel with the same
+  > **message count** and every KV access L1-resident, which is the best any
+  > staged version can be. It measures **173.750 µs, −16.2%**, so
+  > **0.579 ms/token is the ceiling for every locality attack on this kernel**,
+  > staging included, before staging's own 16 KB of SLM per work-group and 16 KB
+  > per wave of SLM writes are subtracted. **That lands inside the 0.3-0.6
+  > ms/token this paragraph bounded staging at off the block sweep** - the
+  > extrapolation was right and the probe confirms it.
+  >
+  > The reason the reread is expensive is not that it misses: it is that
+  > **39.2% of the launch is the load messages themselves** (`hotkv2` −
+  > `noloads` = 81.354 µs), and staging issues the same number of them from SLM
+  > instead of from L1. **The ruling is unchanged and its basis is now a
+  > measurement.**
+  >
+  > *A correction inside the correction, recorded because it changed the
+  > answer:* the first version of this note quoted `hotkv` (−30.9%) and a
+  > 1.108 ms ceiling. `hotkv` holds the hot address **loop-invariant in the wave
+  > index**, which IGC hoisted for the V load - `hotkv2`, whose row is a
+  > function of `w`, measures 173.750 against `hotkv`'s 141.146. The
+  > uncontrolled rows are withdrawn and the ceiling above is the controlled one.
 - **`sub_group_barrier` for the score tree - not used, and now MEASURED
   (2026-08-25).** The 16-wide tree is entirely inside one subgroup, so the tree's
   `barrier(CLK_LOCAL_MEM_FENCE)` steps could be subgroup fences instead of
@@ -2156,8 +2167,10 @@ measurement said, and the numbers themselves are in "Measured - lever L5".
   and the probe now exists: `probe_attn`'s `sgtree` variant narrows **three of
   the four** tree barriers (the fourth must stay work-group wide - `dot_red[s·16]`
   is then read by all 16 subgroups) and changes **no arithmetic and no order at
-  all**. It measures **198.333 µs against the base 206.250 - −3.8%**, i.e. a
-  ceiling of **0.138 ms/token** (derived). It is the cheapest item this project
+  all**. It measures **199.271 µs against the base 207.396 - −3.9%** (−3.6…−4.3%
+  over four invocations), i.e. a ceiling of **0.139 ms/token** (derived, and it
+  assumes the probe's share transfers to a live launch that sits 7.6% above the
+  probe floor). It is the cheapest item this project
   has priced and it is still small; it is recorded as measured rather than taken,
   because the memo's §5.3 ruling stands - the golden gate cannot see an attention
   change at the depth attention is benchmarked at.
@@ -2245,15 +2258,15 @@ mostly L2-served at this depth, exactly as this paragraph guessed - it is simply
 not where the time goes.
 
 **Corrected on its last clause, 2026-08-25 (`probe_attn`).** The reread being
-cache-served is confirmed - the first q-head pass costs 2.25× the other five -
+cache-served is confirmed - the first q-head pass costs 2.24× the other five -
 but "not where the time goes" is wrong: **it is exactly where the time goes.**
-The five re-read passes are **139 µs of a 206 µs launch (67%, measured)**, and
-the KV load path as a whole is **55.4%** of it (`noloads`: 92.083 µs against
-206.250). What the paragraph should have said, and what the probe measures, is
+The five re-read passes are **139.9 µs of a 207.4 µs launch (67%, measured)**,
+and the KV load path as a whole is **55.4%** of it (`noloads`: 92.396 µs against
+207.396). What the paragraph should have said, and what the probe measures, is
 that the reread is expensive *despite* being cache-served, because the cost is
-the **32-byte load messages** - 3.19 M of them per launch - and a cache hit
-issues one just like a miss does. Full arithmetic in
-[15-step-anatomy.md](15-step-anatomy.md), "Spec 1.6 §5.2".
+the **32-byte load messages** - 3.19 M of them per launch, **39.2% of the launch
+on their own** - and a cache hit issues one just like a miss does. Full
+arithmetic in [15-step-anatomy.md](15-step-anatomy.md), "Spec 1.6 §5.2".
 
 Launches: **3 per FA layer × 16 layers = 48 per token**, ~25 µs at the measured
 0.52 µs floor (doc 07 #5) - the same order as `gdn_step`'s 48, and the reason
@@ -2377,6 +2390,20 @@ retile was predicted from and then falsified against** ("Measured - lever L5"):
    `nb` = 17 point is a check at −6.4%). So ~73% of a launch at depth 4096 is one
    work-group's serial walk of one block. This is a latency problem on a critical
    path, not an occupancy problem on a grid.
+
+   > **The 3.40×/+6.9% MEASUREMENT stands; both conclusions in the last sentence
+   > are WITHDRAWN, 2026-08-25** (`probe_attn`; [15-step-anatomy.md](15-step-anatomy.md),
+   > "Spec 1.6 §5.2"). The measurement was taken at `ATTN_BLOCK` **256**, where
+   > 20 → 68 work-groups is 320 → 1088 hardware threads on a device with ~2048
+   > slots - a **low-occupancy regime**. At the shipped block size the same axis
+   > is linear (68 → 1004 live work-groups: 14.8× for 11.8× the time), so
+   > work-group count is *not* free where the engine actually runs. And it is
+   > **not a latency problem**: removing the wave-to-wave dependency buys 1.3%
+   > and a wave of K prefetch buys nothing, while halving the K load's message
+   > width buys 10.8% and quartering it buys no more. The launch is
+   > **throughput-limited in the KV load path - 55.4%, of which 39.2% is the
+   > 32-byte load messages themselves.** `F ≈ 90.8 µs of fixed cost` is also
+   > gone: everything genuinely fixed per launch measures **2.0%**.
 4. **It is not bandwidth-bound, and the L2 reading above needs correcting.**
    The effective rate rises with depth: 10.4 GB/s at `nb` = 1, 74.5 at `nb` = 5,
    **278.6 at `nb` = 17** (47% of the measured 590) counting the 6× q-head
@@ -2568,50 +2595,79 @@ nothing else.
 
 ### Measured - `probe_attn` names the launch's dominant term (2026-08-25)
 
-The full battery, its pre-registered predictions and its four falsifications are
-in [15-step-anatomy.md](15-step-anatomy.md), "Spec 1.6 §5.2"; this is the row
-this chapter needs. `tools/probe/probe_attn` is a **copy** of `attn_decode`
-(this file is untouched) with one term removed per compiled variant, and it is
-validated twice before anything is read off it: its base variant reads
-**206.250 µs** against the in-situ **224.046** (in situ **+8.6%**, the direction
-and order of `probe_gemv`'s own transplant), and it reproduces all four in-situ
-`ATTN_BLOCK` points - 182.604 / 206.250 / 258.229 / 349.792 against 203.837 /
-224.046 / 296.684 / 369.988, every one within 6-15% and the same sign.
+The full battery, its pre-registered predictions, the two controls that voided
+its own first answers and its four falsifications are in
+[15-step-anatomy.md](15-step-anatomy.md), "Spec 1.6 §5.2"; this is the row this
+chapter needs.
 
-| term, removed one at a time | µs/launch | share of the 206.250 |
+**Box conditions:** 2026-08-25 22:17-23:35 CEST, load average **12.1-16.4** (an
+unrelated docker build held the CPU); card 0 otherwise idle, no AutoRound run
+live. Every figure is a **device-clocked kernel timestamp**, so CPU load cannot
+enter it, and **no bench-grade wall-clock absolute is recorded** - the in-situ
+figures compared against are quoted from the record.
+
+`tools/probe/probe_attn` is a **copy** of `attn_decode` (this file is untouched)
+with one term removed per compiled variant. Two validations were pre-registered:
+
+- **Base reproduces the launch - PASSED.** 207.396 µs against the in-situ
+  **223.199** (docs/15 §5.4's 480-replay mean; §L5's single-run 224.046 is 0.38%
+  above it). In situ is **+7.6%** above the probe floor, the direction and order
+  of `probe_gemv`'s own transplant.
+- **The block sweep reproduces - FAILED at the ±10% that was written down.**
+  182.396 / 207.396 / 261.146 / 349.375 against 203.837 / 223.199 / 296.684 /
+  369.988 is **−10.5 / −7.1 / −12.0 / −5.6%**: sign and shape reproduce, two of
+  four points miss the tolerance, and the per-halving deltas do not reproduce at
+  all (probe −88.2 / −53.8 / −25.0 against in-situ −73.3 / −72.6 / −20.2).
+  **Transplant fidelity varies across a 6.4-point band with block size**, which
+  is carried as a ±1-share-point caveat on every ceiling below.
+
+| term, removed one at a time | µs/launch | share of the 207.396 |
 |---|---|---|
-| **both KV global loads** | 92.083 | **55.4%** |
-| - of it, cache service (all accesses L1-resident) | 142.500 | 30.9% |
-| - of it, the load messages themselves | - | 24.4% |
-| the whole online softmax update | 152.500 | 26.1% |
-| all six work-group barriers per wave | 173.125 | 16.1% |
-| `exp` | 175.000 | 15.2% |
+| **both KV global loads** | 92.396 | **55.4%** |
+| - of it, the load messages themselves (`hotkv2` − `noloads`) | - | **39.2%** |
+| - of it, cache service (base − `hotkv2`) | 173.750 | **16.2%** |
+| the whole online softmax update | 153.125 | 26.2% |
+| all six work-group barriers per wave | 172.500 | 16.8% |
+| `exp` | 175.312 | 15.5% |
 | the grid, the q staging and the `attn_part` stores together | - | **2.0%** |
-| the loop-carried chain across waves | 202.917 | **1.6%** |
-| the K load's latency (one wave of prefetch) | 206.562 | **+0.2%** |
+| the loop-carried chain across waves | 204.792 | **1.3%** |
+| the K load's latency (one wave of prefetch) | 206.354 | **0.5%** |
 
-**The dominant term is the KV load path and it is throughput-shaped, not
-latency-shaped**: breaking the wave-to-wave dependency buys 1.6% and prefetching
-buys nothing. Two consequences for this chapter's design notes, both already
-folded into the sections above: the 6× q-head reread costs **139 µs, 67% of the
-launch** (it is cache-served and expensive anyway, because a hit issues a 32-byte
-message just like a miss does), and the **fixed** per-launch cost this project
-looked for since docs/15 §2 is **4.167 µs, 2.0%** - the 1024-work-group grid
-alone is 1.667 µs, **1.63 ns per work-group**, nine times cheaper than the ~15 ns
-this chapter estimated for an early-outed work-group.
+**The dominant term is the KV load path and it is throughput-shaped**: halving
+the K load's message width buys 10.8% and quartering it buys no more, the launch
+is linear in live work-groups (68 → 1004 is 14.8× for 11.8× the time), and
+cutting the wave-to-wave dependency buys 1.3%. (The prefetch row agrees but is
+the weakest of the four - it carries +32 floats per lane of register pressure.)
 
-**What is reachable, measured, and what it costs** (shares scaled to the in-situ
-3.585 ms/token row - derived):
+> **The split above is the CONTROLLED one, and the control inverted it.**
+> The obvious cache-miss ablation holds the hot address constant, which is
+> loop-invariant in the wave index over a `restrict` pointer and which IGC
+> hoisted for the V load: `hotkv` reads 141.146 µs where the hoist-proof
+> `hotkv2` reads **173.750**. `hotk`/`hotv`/`hotkv` are **withdrawn**, and with
+> them the 30.9% / 24.4% split an earlier draft of this section carried.
+
+Two consequences for this chapter's design notes, both folded into the sections
+above: the 6× q-head reread costs **139.9 µs, 67% of the launch** (it is
+cache-served and expensive anyway, because a hit issues a 32-byte message just
+like a miss does), and the **fixed** per-launch cost this project looked for
+since docs/15 §2 is **4.167 µs, 2.0%** - the 1024-work-group grid alone is
+1.667 µs, **1.63 ns per work-group**, nine times cheaper than the ~15 ns this
+chapter estimated for an early-outed work-group.
+
+**What is reachable, measured, and what it costs.** Shares are measured; the
+ms/token column is **derived and assumes the probe's share transfers to the live
+launch**, which sits 7.6% above the probe floor with that offset unplaced - read
+each row as "the probe's share × the 3.571 ms/token row", not as a promise.
 
 | change | ms/token | arithmetic risk |
 |---|---|---|
-| every KV access an L1/SLM hit - the bound, not a design | −1.108 | - (a ceiling: SLM staging is the only mechanism and cannot beat it) |
-| a `[head][pos][dim]` KV cache **and** 64 B K load messages | −0.438 | one reassociation of the K dot |
-| - the transposed cache alone | −0.290 | **none** |
-| - 64 B K messages alone | −0.357 | one reassociation of the K dot |
-| the tree's three inner barriers at subgroup scope | −0.138 | **none** |
+| every KV access an L1/SLM hit - the bound, not a design | −0.579 | - (a ceiling: SLM staging is the only mechanism and cannot beat it) |
+| a `[head][pos][dim]` KV cache **and** 64 B K load messages | −0.407 | one reassociation of the K dot |
+| - the transposed cache alone | −0.268 | **none** |
+| - 64 B K messages alone | −0.386 | one reassociation of the K dot |
+| the tree's three inner barriers at subgroup scope | −0.139 | **none** |
 
-`exp` (−0.543) and the work-group barriers (−0.576) are measured and **not
+`exp` (−0.553) and the work-group barriers (−0.600) are measured and **not
 available**: `native_exp` is ruled out by the rounding discipline at the top of
 this chapter, and the barriers that remain after `sgtree` are what publish
 `dot_red` across subgroups. Nothing above has been taken - the memo's §5.3 rule

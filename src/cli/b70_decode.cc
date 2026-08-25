@@ -369,7 +369,9 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
   // SAME launch shape at the SAME positions - the spread across them is drift,
   // not a difference in what was run. Everything the single-session report
   // prints is computed from the grand totals below, so `--repeats 1` (the
-  // default) prints exactly what this mode printed before the flag existed.
+  // default) prints the same NUMBERS this mode printed before the flag existed.
+  // Not the same TEXT: the header gained a line and two rollup titles were
+  // reworded. Numbers unchanged, wording not.
   const uint32_t ingest_pos = c->pos;
   std::vector<double> per_launch(n, 0.0);           // Σ over every replay of every session
   std::vector<std::vector<double>> session_launch;  // [session][launch], Σ over that session
