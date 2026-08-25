@@ -85,6 +85,14 @@ capture time, and the list is **byte-identical on every replay**. That is what
 makes the capture-safety rule below testable: replay the same list twice from
 the same state and diff the outputs.
 
+Measured, 2026-08-25: the captured decode step is **645 kernels** - 48 GDN
+layers × 10 + 16 full-attention layers × 10 + 5 at the token boundary
+(`embed_gather`, the final `prep_res_norm`, `lm_head`, two argmax stages).
+`runtime::build` (`src/runtime/capture.cc`) is the one walk that binds them,
+and `tests/runtime/replay_determinism_test` is the diff above, run for real:
+same list, same state, twice, bitwise on the token ids, on a per-layer residual
+tap and on every persistent buffer - then once more from a re-zeroed state.
+
 Level Zero's mutable-command-list extension (`level-zero/include/ze_api.h:14498`,
 `ZE_MUTABLE_COMMAND_EXP_FLAG_KERNEL_ARGUMENTS`; implemented for Xe2 in
 `compute-runtime/level_zero/core/source/mutable_cmdlist/mutable_cmdlist_hw_from_xe_hpg_to_xe3.inl`)
@@ -197,11 +205,15 @@ is the part that must be *correct*; the GEMV/GEMM is the part that decides the
 *speed* (doc 05). Budget correctness time for the first and benchmark time for
 the second.
 
-**Kernel count is a first-class design input.** Unfused, the 27B is ~700
-kernels per token (doc 03). Inside a replayed list each kernel still pays a
-fixed dispatch + drain cost; at 3-5 µs that is 2-3.5 ms of a ~26 ms step -
-the same magnitude as the host overhead replay removes. The phase-1 fusion
-list, in order of kernels saved:
+**Kernel count is a first-class design input.** Unfused, the 27B is **645**
+kernels per token - the estimate here was ~700; the built list, counted by
+`runtime::CapturedStep::kernel_count`, is 645 (2026-08-25). Inside a replayed
+list each kernel still pays a fixed dispatch + drain cost. The 3-5 µs guessed
+here turned out to be **0.52 µs** measured (`probe_replay`, doc 07 #5), so the
+whole list costs ~0.34 ms of a ~26 ms step rather than the 2-3.5 ms feared -
+which is why fusion is deferred out of phase 1 entirely (spec §4.1) instead of
+being its first move. The list below survives as the phase-1 fusion order if a
+later measurement makes it worth the correctness risk:
 
 1. RMSNorm into the following GEMV's prologue (2 per layer, 128 total);
 2. `gate_proj` ‖ `up_proj` ‖ SiLU·mul into one GEMV with two weight streams

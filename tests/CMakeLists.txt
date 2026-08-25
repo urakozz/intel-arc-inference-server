@@ -146,3 +146,25 @@ target_include_directories(load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src 
 target_link_libraries(load_checkpoint_test PRIVATE b70_loader b70_model)
 add_test(NAME load_checkpoint_test COMMAND load_checkpoint_test)
 set_tests_properties(load_checkpoint_test PROPERTIES LABELS checkpoint TIMEOUT 600)
+
+# The captured decode list, replayed: spec §8.7's determinism proof and the
+# acceptance for every kernel in plan 3. Needs the real checkpoint and a B70
+# (label `checkpoint`), and it is the one test that runs all 645 kernels.
+add_executable(replay_determinism_test runtime/replay_determinism_test.cc)
+target_include_directories(replay_determinism_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(replay_determinism_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
+b70_target_kernel_dir(replay_determinism_test)
+# Every variant runtime::build binds, by name: a missing .bin is a
+# zeModuleCreate failure minutes into a load otherwise (kernel_table_test makes
+# the same point for the model table's GEMV rows).
+add_dependencies(replay_determinism_test
+  kernel_embed_gather_M1 kernel_argmax_stage1_M1 kernel_argmax_stage2
+  kernel_prep_res_norm_M1_K5120_SP0 kernel_prep_res_norm_M1_K5120_SP16
+  kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1 kernel_gdn_step_M1
+  kernel_attn_prep_M1 kernel_attn_decode_M1_L16384 kernel_attn_reduce_M1_L16384
+  kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K5120_N14336_S1_L1
+  kernel_gemv_M1_K6144_N5120_S16_L1 kernel_gemv_M1_K5120_N34816_S4_L1
+  kernel_gemv_M1_K17408_N5120_S16_L1
+  kernel_gemv_bf16_M1_K5120_N128 kernel_gemv_bf16_M1_K5120_N248320)
+add_test(NAME replay_determinism_test COMMAND replay_determinism_test)
+set_tests_properties(replay_determinism_test PROPERTIES LABELS checkpoint TIMEOUT 900)
