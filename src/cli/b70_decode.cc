@@ -464,6 +464,12 @@ int run(int argc, char** argv) {
   if (!synthetic && n == 0) throw std::runtime_error("--n 0 would generate nothing");
   if (bench && tg == 0) throw std::runtime_error("--tg 0 would time nothing");
   if (profile && steps == 0) throw std::runtime_error("--steps 0 would profile nothing");
+  // Both synthetic modes exist to measure a step at a context depth, and the
+  // cost of a step depends on that depth (attention's live-block count is the
+  // measured example - docs/15). Depth 0 measures a shape nobody runs.
+  if (synthetic && depth == 0)
+    throw std::runtime_error("--depth 0 would ingest nothing; --bench and --profile both measure"
+                             " a step at a context depth");
 
   // Everything that can be judged without the device or the 19 GB checkpoint is
   // judged first: failing on a typo'd --ids path after a 13-second load is a

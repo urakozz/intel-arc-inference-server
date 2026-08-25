@@ -194,7 +194,7 @@ run. **98.6% of the step is kernel time inside the fence** (41.571 of 42.141);
 
 ## What the measurement says that nothing else did
 
-### 1. One work-group is worth about 13-17 GB/s, and that is the whole story of the bucket
+### 1. One work-group is worth about 12-17 GB/s, and that is the whole story of the bucket
 
 Three independent points, all measured in this run, all from docs/12's own byte
 counts:
@@ -207,49 +207,106 @@ counts:
 | `gdn_step` | 192 | 540 | 2.8 (saturated - the device is the limit, not the core) |
 
 A single Xe-core cannot keep enough loads in flight to exceed ~15 GB/s, so
-**saturating 590 GB/s needs roughly 40 work-groups**, and every kernel in the
-bucket that is slow is slow for exactly one reason: it was given one or two.
-This is the mechanism docs/12 wrote down as a risk when `prep_res_norm` landed
-("One work-group per token in `prep_res_norm` is the risk in this design, and it
-is unmeasured") - measured, confirmed, and now also priced for `a‖b`, which had
-never been timed at all. It is also what makes both levers *predictable*: the
-fix is work-groups, and the yield is close to linear in them until ~40.
+**saturating 590 GB/s needs roughly 40 work-groups** - a shade above the
+device's 32 Xe-cores (docs/01), i.e. ~1.25 work-groups per core, which is the
+coherent answer for a machine that needs a little oversubscription to hide
+latency. Every kernel in the bucket that is slow is slow for exactly one reason:
+it was given one or two. This is the mechanism docs/12 wrote down as a risk when
+`prep_res_norm` landed ("One work-group per token in `prep_res_norm` is the risk
+in this design, and it is unmeasured") - measured, confirmed, and now also
+priced for `a‖b`, which had never been timed at all.
+
+**The caveat these three points do not cover, and every yield in the ladder
+rests on it.** The table mixes two kinds of traffic: `prep_res_norm`'s 320 KB of
+partials and `prep_silu_mul`'s 557 KB were written by the GEMV immediately
+before them and are **L2-served**, while `a‖b`'s 1.31 MB of weights are a cold
+**DRAM** read. That they land within 12-17 GB/s of each other says the limit is
+the core's outstanding-load capacity rather than where the bytes come from -
+which is the reading this document takes - but it is three points, all at 1, 2
+and 5 work-groups, and **the ladder extrapolates them 4× to 8×** to price L1
+(1 → 20 work-groups) and L2 (2 → 8 or 32). Linearity that far is an assumption,
+not a measurement: `gdn_step` at 192 work-groups reaches 540 GB/s, so the curve
+certainly bends somewhere between 5 and 192, and nothing here locates the knee.
+Every ladder yield below is marked *(extrapolated)* for that reason, and Tasks
+5-6 measure the real slope with this same instrument.
 
 The hypothesis in docs/12 and docs/05 - 129 launches at "40 µs apiece, 5.2 ms" -
 was **half right**: the mechanism is exactly as named, the magnitude is 22.3 µs
 and 2.871 ms.
 
-### 2. `attn_decode` is 2.45× its estimate, and it is the second-largest thing in the step
+### 2. `attn_decode` is 2.45× its estimate, and what it spends is a serial critical path
 
 5.782 ms in situ against the 2.360 ms docs/12 extrapolated (2.314 estimated
 block work + 0.046 measured early-out). The estimate was a line through two
-`--bench` points at different depths; it under-predicted the slope by 53%.
+`--bench` points at different depths; its 0.1361 ms/token per block is **35%
+below** the 0.208 the first two in-situ points gave.
 
-Three in-situ points, all measured with this instrument:
+**Four in-situ points. The third one falsified the model the first two
+suggested**, which is why this section reads the way it does.
 
-| run | `nb` | grid | µs/launch | ms/token |
-|---|---|---|---|---|
-| depth 4096, `--max-len 16384` | 17 | 4 × 64 = 256 WGs (68 live) | **361.400** | 5.782 |
-| depth 64, `--max-len 16384` | 1 | 4 × 64 = 256 WGs (4 live) | **153.608** | 2.458 |
-| depth 64, `--max-len 4096` | 1 | 4 × 16 = 64 WGs (4 live) | **153.665** | 2.459 |
+| run | `nb` | live WGs | positions attended | µs/launch | ms/token |
+|---|---|---|---|---|---|
+| depth 4096, `--max-len 16384` | 17 | 68 | 4097 | **361.400** | 5.782 |
+| depth 1024, `--max-len 16384` | 5 | 20 | 1025 | **338.165** | 5.411 |
+| depth 64, `--max-len 16384` | 1 | 4 | 65 | **153.608** | 2.458 |
+| depth 64, `--max-len 4096` | 1 | 4 | 65 | **153.665** | 2.459 |
 
-- **The fixed grid is free - re-confirmed per kernel.** Rows 2 and 3 differ by
+- **The fixed grid is free - re-confirmed per kernel.** Rows 3 and 4 differ by
   192 idle work-groups per layer and by **0.04%**. Doc 07 #12 concluded this
   from a whole-step difference of 0.046 ms; this is the same conclusion measured
   on the kernel itself. Context-bucketed lists remain worthless.
-- **The in-situ slope is 12.987 µs per live block per launch** = **0.208
-  ms/token per block** (derived from rows 1-2), against the 0.1361 ms/token the
-  bench two-point line gave (estimated, docs/12). At `nb` = 17 that is 3.53 ms
-  of block-scaled work and **2.25 ms that does not scale with depth at all**.
-- The depth-independent 2.25 ms is **not** the early-out (rows 2 vs 3 settle
-  that). It is one wave of block work with only 4 live work-groups per layer -
-  the same starvation as §1, in the kernel where it is least visible.
-- **It is not bandwidth-bound.** 100.7 MB of KV reads per layer (the 6× q-head
-  reread) in 361.4 µs is **279 GB/s** - 47% of the measured 590 - and the
-  *unique* 16.8 MB is only 46 GB/s. docs/12 inferred 740 GB/s from the bench
-  line and concluded the reread was "substantially cache-served"; the direction
-  was right (46 GB/s of unique traffic cannot be DRAM-limited) but the magnitude
-  was not. There is real time in this kernel and it is not being spent on DRAM.
+
+**The two models the `nb` = 1 and `nb` = 17 pair admitted, and their fate.**
+Both were written down with their `nb` = 5 predictions *before* the depth-1024
+run (the pre-registration is in this task's report):
+
+| model | fitted to nb 1 and 17 | predicted at nb = 5 | measured | verdict |
+|---|---|---|---|---|
+| **A** linear in blocks + intercept | 140.621 + 12.987·`nb` | 205.556 µs | 338.165 | **falsified**, −39% |
+| **B** wave/occupancy, a wave = 32 WGs, flat while 4·`nb` ≤ 32 | 153.608 · max(1, `nb`/8) | 153.608 µs | 338.165 | **falsified**, −55% |
+
+**Neither survives, and the "2.25 ms depth-independent term" model A implied is
+withdrawn.** It was an artefact of fitting a line through a point that is not on
+the same footing as the others: at `nb` = 1 the single live block holds **65 of
+its 256 positions** (25.4% full), so that point measures a quarter-block, not a
+cheap full one.
+
+**What fits all four points.** `attn_decode`'s work-groups run concurrently, and
+the launch costs what its *slowest single work-group* costs - one 256-position
+block walked for all 6 q-heads:
+
+- **Work-group count is nearly free.** `nb` 5 → 17 is **3.40× the live
+  work-groups (20 → 68) for +6.9% of time**. Whatever this kernel is limited by,
+  it is not how many work-groups are resident.
+- **Block *fill* is what moves it.** Writing the cost as `F + fill · P`, where
+  `fill` is the valid fraction of the critical-path block, the `nb` = 1 and
+  `nb` = 5 points give **F ≈ 90.8 µs of per-launch fixed cost and P ≈ 247.4 µs
+  of full-block critical path** (derived, two parameters from two points). The
+  `nb` = 17 point is then a *check*, not a fit: predicted 338.2, measured 361.4
+  - **−6.4%**, the residual being the mild memory pressure of 3.4× the
+  work-groups.
+- So **~73% of a launch at depth 4096 is one work-group's serial walk of one
+  block** and the rest is fixed cost. The kernel is latency-bound on a critical
+  path, not throughput-bound on a grid.
+- **It is not bandwidth-bound, and the effective rate rises with depth.**
+  10.4 GB/s at `nb` = 1, 74.5 at `nb` = 5, **278.6 at `nb` = 17** (47% of the
+  measured 590) counting the 6× q-head reread; the *unique* KV at depth 4096 is
+  46 GB/s. docs/12 inferred 740 GB/s from the bench line and called the reread
+  "substantially cache-served"; the direction was right (46 GB/s of unique
+  traffic cannot be DRAM-limited) but the magnitude was not.
+
+**What this re-aims L5 at.** Not "attack a depth-independent term" - there is no
+such term. The target is the **247 µs full-block critical path**, and since
+work-group count is measured to be nearly free, the direct attack is a **finer
+block**: 128 positions halves the walk and doubles the grid (at depth 4096, 33
+blocks × 4 kv-heads = **132 work-groups**, inside the range measured free). The
+`F + P/2` prediction is **214.5 µs/launch = 3.43 ms/token, saving ≈2.35 ms**;
+64-position blocks predict 2.44 ms but need 264 work-groups, past the point any
+measurement here reaches. SLM staging (the plan's L5 design) attacks the same
+critical path from the other side - it shortens the 6 q-head passes rather than
+the position loop - so the two are alternatives, not complements, and the retile
+is by far the cheaper experiment. **Both numbers are extrapolations from a
+two-parameter fit with one validation point; neither is a promise.**
 
 ### 3. `gdn_step` is exonerated, completely
 
@@ -263,8 +320,10 @@ right trade and the measurement says so.
 
 ### 4. `lm_head` is 10.4% of the step and no lever in this spec touches it
 
-4.376 ms in one launch, at 0.6% above its probe floor and 97% of device
-bandwidth. There is nothing to tune. Quantising it to int4 is worth ~3.3 ms
+4.376 ms in one launch, at 0.6% above its probe floor and **581 GB/s in situ -
+98.5% of the measured 590** (the 97% the probe reports is against the 600 GB/s
+theoretical denominator; docs/15 uses the measured one everywhere else). There
+is nothing to tune. Quantising it to int4 is worth ~3.3 ms
 (4.376 → ~1.1, docs/12 `gemv_bf16` → Measured) and it is item 1 of docs/05's
 specialisation list, deliberately outside spec 1.5. It is named here because
 the gate arithmetic below cannot be read honestly without it.
@@ -276,9 +335,9 @@ produce. Yields are estimated, and each says on what basis.
 
 | rank | lever | measured | share of Σ | expected yield | basis |
 |---|---|---|---|---|---|
-| 1 | **L5** attention (`attn_decode`) | **5.782 ms** | 13.9% | **1.0-3.0 ms**, wide | not bandwidth-bound (279 GB/s on rereads, 46 on unique bytes), so SLM staging removes issue slots rather than DRAM; the 2.25 ms depth-independent term is 4-work-group starvation and may respond to a finer block instead |
-| 2 | **L1** `prep_res_norm` two-stage | **2.871 ms** | 6.9% | **1.5-2.4 ms** | one work-group at 17.0 GB/s; §1's per-WG ceiling makes 20 work-groups worth ~10×, leaving ~0.3-0.5 ms plus a second launch per site (129 × 0.7 µs = 0.09 ms) |
-| 3 | **L2** `a‖b` GEMV occupancy | **2.335 ms** | 5.6% | **1.2-1.9 ms** | two work-groups at 13.5 GB/s each; `COLS_PER_WG` 16 → 8 WGs is 4× the slices at bit-identical arithmetic, K-split-by-4 → 32 WGs is the ceiling (~0.15 ms) |
+| 1 | **L5** attention (`attn_decode`) | **5.782 ms** | 13.9% | **1.5-2.5 ms** (extrapolated) | four-point in-situ fit (§2): ~247 µs of the 361 is ONE work-group's serial walk of a 256-position block, and work-group count is measured nearly free (3.4× for +6.9%). A 128-position retile predicts 3.43 ms/token. Extrapolated from two fitted parameters with one validation point |
+| 2 | **L1** `prep_res_norm` two-stage | **2.871 ms** | 6.9% | **1.5-2.4 ms** (extrapolated) | one work-group at 17.0 GB/s; §1's per-WG ceiling makes 20 work-groups worth ~10×, leaving ~0.3-0.5 ms plus a second launch per site (129 × 0.7 µs = 0.09 ms). **The ×8 extrapolation is the weak step - see §1's caveat** |
+| 3 | **L2** `a‖b` GEMV occupancy | **2.335 ms** | 5.6% | **1.2-1.9 ms** (extrapolated) | two work-groups at 13.5 GB/s each; `COLS_PER_WG` 16 → 8 WGs is 4× the slices at bit-identical arithmetic, K-split-by-4 → 32 WGs is the ceiling (~0.15 ms). **The ×4-×16 extrapolation is the weak step - see §1's caveat** |
 | 4 | **L3** `gdn_step` retile | **0.733 ms** | 1.8% | **≤0.06 ms** | **candidate for skip-by-ruling** - 1.09× its own 0.671 ms traffic floor, 92% of device bandwidth; the lever cannot repay a day of work at any outcome |
 | 5 | **L4** GEMV `S` retune in situ | **0.659 ms** of excess | 1.6% | **≤0.3 ms** | **candidate for skip-by-ruling** - the whole in-situ excess over the probe floor is 0.659 ms across six shapes, the `S` picks are already the probe's own best, and each candidate costs a full golden-gate run because `S` reorders the split-K merge |
 
@@ -295,11 +354,15 @@ nevertheless third to execute, for reasons the measurement itself supplies:
 - **L1 is a day, its mechanism is measured and its design was written when the
   kernel landed.** Its only correctness exposure is the global Σx² tree, which
   the golden gate arbitrates.
-- **L5 is the only sketch-level design in the plan** (the plan says so), it is
-  the one lever whose expected yield the measurement does *not* pin - 279 GB/s
-  on cache-served rereads means removing the rereads may buy far less than the
-  5.782 ms suggests - and it carries the ladder's highest correctness risk
-  (online-softmax staging). Running it after two banked, certain wins means it
+- **L5 is the only sketch-level design in the plan** (the plan says so) and it
+  carries the ladder's highest correctness risk (online-softmax staging). Its
+  target is now identified - the 247 µs full-block critical path of §2, not the
+  "depth-independent term" the two-point fit suggested and the third point
+  killed - but the yield is still an extrapolation, and the mechanism the plan
+  wrote L5 around (SLM staging) is probably the *wrong* half of it: a
+  **128-position block retile** attacks the same critical path for a fraction of
+  the effort and no change to the softmax arithmetic. Whoever runs L5 should
+  measure the retile first. Running it after two banked, certain wins means it
   is attempted with the gate arithmetic already known.
 
 ### The gate arithmetic, stated in advance
@@ -328,20 +391,25 @@ What the measurement adds to that memo, in advance and in order of size:
    Alone it converts the projected 34.4 into 31.1 ms/token - over the bar.
    It is the single largest measured item in the step that spec 1.5 does not
    touch.
-2. **`attn_decode`'s 2.25 ms depth-independent term** - a block retile
-   (128-position blocks → 34 × 4 = 136 work-groups) is a grid change of exactly
-   the kind L3 was scoped for, and this document says L3's budget went to the
-   wrong kernel.
+2. **`attn_decode`'s 247 µs full-block critical path** - a 128-position retile
+   (at depth 4096: 33 blocks × 4 kv-heads = **132 work-groups**, against 68
+   today) is a grid change of exactly the kind L3 was scoped for, predicted at
+   ≈2.35 ms, and this document says L3's budget went to the wrong kernel. It is
+   the cheapest untried thing in the step.
 3. **`a‖b` → `gdn_step` prologue fusion** and **norm → GEMV prologue fusion**
    remain redesigns, but §1 now prices what they are really buying: not the
    0.7 µs launch, the work-group count.
 
 ## What this document does not settle
 
-- **`attn_decode`'s internal split.** 5.782 ms is measured; the 3.53 / 2.25 ms
-  scaling split is derived from two depths of the same instrument, and the
-  reason the depth-independent half costs what it does is a hypothesis
-  (4-work-group starvation) with the early-out ruled out but nothing else.
+- **`attn_decode`'s internal split.** 5.782 ms is measured at four points; the
+  `F` ≈ 90.8 / `P` ≈ 247.4 µs decomposition is a **two-parameter fit to two of
+  them with the third as a −6.4% check**, and the fourth (the `--max-len` pair)
+  only rules out the grid. Two models that fitted the first two points were
+  falsified by the third - the same could happen again, and the retile yield
+  above is the prediction that would go with it. What is *measured* and not
+  fitted: work-group count is nearly free over 20 → 68, and depth 64 → 1024
+  costs +120% while 1024 → 4096 costs +6.9%.
 - **Every yield in the ladder is an estimate.** The per-work-group ceiling in §1
   is measured at 1, 2 and 5 work-groups; the claim that it stays roughly linear
   to ~40 is an extrapolation, and L1's and L2's real yields are what Tasks 5-6
