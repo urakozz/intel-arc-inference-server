@@ -1068,3 +1068,388 @@ that is ~0.5 ms of a ~26 ms step, plus 48 launches × 0.52 µs = 25 µs of launc
 overhead. The redundant reads are the price of 192 work-groups instead of 48 and
 of not paying for a second kernel; whether that trade was right is Task 9's
 measurement to make, and this table is what it should be compared against.
+
+## `attn` - decode attention in three kernels
+
+`src/kernels/attn.cl`, three entry points in one file. **16 of the model's 64
+layers** run all three, in order, per token: `attn_prep` → `attn_decode` →
+`attn_reduce`. Variants are `attn_prep_M{M}` and
+`attn_{decode,reduce}_M{M}_L{MAXLEN}` - `attn_prep` indexes the KV caches by
+absolute position and so needs no `max_len`, while the other two bake it because
+`attn_part` is strided `[24][MAXLEN/256][M][258]` and a stride must be a
+compile-time constant. The *grid* still comes from `buffers.max_len` at capture,
+so the variant bound to a layer must be the one built for that `max_len`.
+
+```
+attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v)
+
+x_b    = rne_bf16(qkv_partials[0][m][col])                  (the linear's bf16 out)
+rstd   = 1 / sqrt(mean_i(f32(x_b)²) + 1e-6)                 (fp32; never rsqrt)
+nrm[i] = f32(rne_bf16(f32(x_b[i]) · rstd · w[i]))           (fp32 (1+w) weight)
+RoPE over dims 0..63, pairs (i, i+32); dims 64..255 pass through
+  q-head  h: attn_q[m][h][i] = roped ;  attn_gate[m][h][i] = f32(rne_bf16(gate col))
+  kv-head j: kv_k[pos+m][j][i] = rne_bf16(roped)
+             kv_v[pos+m][j][i] = rne_bf16(v col)            (never normed or roped)
+
+attn_decode(ctrl, attn_q, kv_k, kv_v, attn_part)
+
+per (kv-head j, 256-position block), per q-head qh of j's six, per token m:
+  score_p = (Σ_d attn_q[m][qh][d] · f32(kv_k[p][j][d])) / 16   for p <= pos+m
+  online softmax in waves of 16 positions -> (mx, sm) and acc[256]
+  attn_part[qh][block][m] = {mx, sm, acc[256]}                 (258 fp32)
+
+attn_reduce(ctrl, attn_part, attn_gate, attn_out)
+
+nb = (pos + m)/256 + 1 ; merge blocks 0..nb-1 ascending ; out = acc/sm
+attn_out[m][h·256+d] = rne_bf16(f32(rne_bf16(out)) · sigmoid_f32(attn_gate[m][h][d]))
+```
+
+That is doc 03's full-attention block op for op, and `tests/kernels/attn_ref.h`
+is the same chain on the host - trees, waves and merge order included.
+
+**The column map** is the one thing here that is easy to get wrong and silent
+when wrong. `q_proj ‖ k_proj ‖ v_proj` is 12288 + 1024 + 1024 = 14336 columns
+(S = 1), and inside `q_proj` the 24 heads are **interleaved per head, not two
+halves**: head `h` is `[h·512, h·512+256)` and its output gate is the next 256.
+k-head `j` is at `12288 + j·256`, v-head `j` at `13312 + j·256`. GQA is 6:1, so
+q-head `h` reads kv-head `h/6`.
+
+### Work assignment, and why
+
+**`attn_prep`: grid (28, M), work-group 256.** A head is exactly 256 wide and
+the work-group is 256, so work-item `i` owns dim `i` and the RMSNorm's reduction
+domain *is* the work-group - the same shape `prep_gated_head` uses for its
+128-wide GDN heads, and for the same reason. Work-groups 0..23 are q-heads (each
+also writing its gate), 24..27 are the four kv-heads. 28 and not 32 because k
+and v of a kv-head share a work-group: v is never normed and never roped, so it
+is one extra `rne_bf16` on a work-item that is already resident, against a whole
+extra work-group's worth of launch and scheduling.
+
+The one piece of cross-lane traffic is RoPE, which pairs dim `i` with dim
+`i ± 32`. That is why the normalised head goes through SLM (`nrm[256]`, 1 KB)
+rather than staying in a register: 64 of the 256 work-items need a value another
+work-item computed.
+
+**`attn_decode`: grid (4 kv-heads, MAXLEN/256 blocks), work-group 256 = 16
+subgroups × 16 lanes (SIMD16).** Work-group `(j, blk)` owns one 256-position
+block of one kv-head and loops over that head's six q-heads and the tokens in
+flight. Work-item `lid` owns accumulator dim `lid`; within a wave, subgroup
+`lid/16` owns one KV position and its lane `lid%16` sixteen elements of that
+position's 256-dim dot.
+
+*Why the kv-head and not the q-head.* The q-head loop is the **outer** one, so a
+work-group reads its block's K and V six times over. A (q-head, block) grid
+reads exactly the same bytes - 24 work-groups per block instead of 4, each
+reading the block once - so the choice is not about byte count. It is about
+*when*: under the kv-head grid the six passes happen inside one work-group, back
+to back, so passes 2..6 are L1/L2 hits by construction instead of a bet on 24
+independent work-groups landing on the same cache at the same time. It also
+launches 6× fewer work-groups. What it costs is in "Traffic per token" below,
+and reading the block once outright is the first item in the not-measured list.
+
+*Why the lane index picks the dim within a position, and not the position.* At a
+fixed `t` the 16 lanes of a subgroup read `kv_k[p][j][lane + 16t]` - 16
+**consecutive** bf16, one 32 B access. The alternative (lane `l` takes the
+contiguous run `[16l, 16l+16)`) spans 512 B in 16 two-byte pieces per step. Same
+arithmetic, same registers, an order of magnitude apart on the load that *is*
+this kernel.
+
+*Why 16 subgroups × 16 positions and not one position per work-item.* Giving
+work-item `p` the whole 256-dim dot for position `p` needs no reduction at all -
+and makes every access a 2 KB-strided gather, because the 256 work-items would
+be reading 256 different KV rows at the same dim. The subgroup form pays one
+16-wide SLM tree per position to keep every load coalesced.
+
+**`attn_reduce`: grid (24, M), work-group 256.** One work-group per (q-head,
+token), work-item `d` owning dim `d`. The `nb` block headers are staged into SLM
+in a single pass so the merge loop has no barrier at all, and every work-item
+then runs the *identical* scalar merge alongside its own `acc` - identical
+inputs in an identical order give identical bits, so nothing has to be published
+and no work-item diverges. That is cheaper than electing one work-item to
+compute the scalars and broadcast them, which would cost a barrier per block.
+
+**`zeinfo`** (the compiler's own report, `-device bmg-g31`): `attn_prep`
+`simd_size 32, slm_size 2048, grf_count 128, barrier_count 1`; `attn_decode`
+`simd_size 16` (the `intel_reqd_sub_group_size(16)` in the source, honoured),
+`slm_size 2048, grf_count 128, barrier_count 1`; `attn_reduce` `simd_size 32,
+slm_size 512` (at `MAXLEN = 16384`: 64 blocks × 2 headers), `grf_count 128`.
+**None of the three has a `private_size` or a `spill_mem_size` entry** - the
+16-float `sc[]` array each `attn_decode` work-item carries through a wave stays
+in registers, which was this kernel's one real register risk.
+
+### The early-out - the answer to a grid that cannot be re-sized
+
+Under replay the attention grid is baked at capture and sized for `max_len`
+(doc 04, "Attention under replay"), so at a context of `pos` tokens most of
+`attn_decode`'s work-groups have nothing to do. Each one tests **one uniform
+condition before touching anything**:
+
+```
+if (block_start >= pos + n_active) return;
+```
+
+The test is per **block**, not per token in flight. A block live for any `m`
+runs for every `m`, and a position outside a given `m`'s causal bound is masked
+to −INF inside the wave - so a partially valid block writes real partials for
+each `m`, and the all-masked-for-this-`m` case falls out of the online update as
+`(−INF, 0, 0)` with no special case anywhere. The pairing that makes this safe
+is with `attn_reduce`, which reads exactly `nb(m) = (pos+m)/256 + 1` blocks:
+every one of those starts at or before `pos+m` and therefore ran, so the reducer
+never reads a block the early-out skipped and needs no data-dependent skip logic
+of its own. `attn_test` asserts both halves at once - it canary-fills
+`attn_part` with 1e30 *inside the replayed list*, requires every block at or
+beyond `pos + n_active` to come back still holding the canary, and requires
+`attn_out` to match the reference, which it could not if the merge had read a
+1e30 header (that block would win the running max outright and drive the output
+to 1).
+
+**What the early-out costs at short context is open question #12 in doc 07** -
+whether a `max_len`-sized grid of mostly-immediate-return work-groups is cheap
+enough to keep one captured list for every depth, or whether context-bucketed
+lists are needed. It is measured in Task 9 as the step time at depth 64 against
+depth 4096 with the same list; the threshold doc 07 sets is ~2% of a step.
+Nothing here assumes an answer.
+
+### The wave: an online softmax with a stateable order
+
+A block's 256 positions are walked in 16 waves of 16. Everything below is stated
+identically in `attn.cl` and `tests/kernels/attn_ref.h`, because the reference
+reproducing it bit for bit is what buys the tight bars.
+
+**The score dot.** Subgroup `s` owns the wave's position `p_s`; its lane `l`
+accumulates the 16 elements `d = l + 16t`, `t = 0..15` **ascending**, with an
+explicit `fma`, into `dot_red[16s + l]`. The 16 lane partials collapse with a
+fixed pairwise tree - for `stride = 8, 4, 2, 1`,
+`dot_red[16s+l] += dot_red[16s+l+stride]` - and `dot_red[16s] · 1/16` is the
+score (1/16 = 1/√256, doc 03). A masked position skips the dot entirely and is
+overwritten with −INF, so an unwritten cache slot never reaches the arithmetic.
+
+**The update**, computed **redundantly by all 256 work-items** from the same SLM
+words in the same order:
+
+```
+nmx   = max(mx, sc[0], sc[1], …, sc[15])          (ascending s)
+resc  = exp(mx − nmx)                              (0 when mx = −INF)
+sc[s] = exp(sc[s] − nmx) ;  ssum = Σ_s sc[s]       (ascending s)
+sm    = fma(sm, resc, ssum)
+mx    = nmx
+        - and, in the work-item that owns dim d,
+t     = Σ_s fma(sc[s], f32(kv_v[p_s][j][d]), t)    (ascending s)
+acc   = fma(acc, resc, t)
+```
+
+Two properties are load-bearing. First, **the −INF algebra works out on its
+own**: `exp(−INF − finite) = 0`, so a masked position contributes a zero weight
+and a first wave with `mx = −INF` gets `resc = 0`, both without a branch. The
+single case that does not work out is `nmx = −INF` - every position of the wave
+masked *and* no earlier valid position - where `exp(−INF − (−INF))` is a NaN;
+that wave is skipped whole (`resc = 1`, all weights 0). It is not a hypothetical:
+at `pos = 256` block 1 holds exactly one valid position, in wave 0 subgroup 0,
+and its other fifteen waves take that path.
+
+Second, **redundant is cheaper than elected here.** The obvious shape is to let
+one subgroup own `(mx, sm)` and publish the rescale factor and the 16 weights
+through SLM; that costs an extra barrier per wave and leaves 240 work-items idle
+through a serial 16-iteration loop, 96 times per (q-head, token). Recomputing
+the same scalars in every work-item costs 16 SLM reads and some ALU that is
+free next to the KV loads, and it is *more* obviously deterministic, not less.
+(This is the one deliberate departure from the plan's ruled scheme, which named
+subgroup 0 as the updater; the ruled order is unchanged, only who runs it.)
+
+### The block merge, and why `nb` needs no skip logic
+
+`attn_reduce` merges in **ascending block order**, `b = 0 … nb−1`:
+
+```
+nmx = max(mx, bmx) ; a = exp(mx − nmx) ; bs = exp(bmx − nmx)
+sm  = fma(sm, a, bsm·bs)
+acc = fma(acc, a, bacc·bs)
+mx  = nmx
+```
+
+which is the canonical flash-attention rescale, with `mx = −INF` on entry so the
+first block's `a` is 0 and the first merge is a plain copy. `nmx` is never −INF
+inside the loop, because block `b < nb` starts at `256b ≤ pos+m` and therefore
+contains at least its own first position inside the causal bound - the same fact
+that lets the early-out leave blocks `≥ nb` untouched. So no guard is needed
+here and none is written; the −INF case exists only in `attn_decode`'s wave.
+
+### The RoPE rounding - the one op this trio does not match torch on
+
+RoPE is applied to the **fp32 widened normalised value**: `attn_q` keeps the fp32
+result and the k written to the cache is `rne_bf16` of it, one rounding for the
+whole pair. torch reaches the same value through bf16 tensor ops and therefore
+rounds once more, *inside* the cos/sin multiply-add. This is a **≤ 1-op
+difference** against the reference, taken deliberately (controller ruling
+2026-08-25) rather than by oversight, and it is recorded here because it is the
+only place in this trio where the kernel is not a per-op transcription of the
+oracle. Everything else - the linear's rounding, the norm's `type_as`, the
+gate's widening, the two roundings in the final gated product - is torch's op
+chain exactly. The rotation itself is one rounded product plus one `fma`,
+spelled identically on both sides:
+
+```
+out_i      = fma(x_i,      cos_i, −(x_{i+32}·sin_i))
+out_{i+32} = fma(x_{i+32}, cos_i,  (x_i·sin_i))
+```
+
+with `cos/sin` from the loader's table, whose angles were computed in `double`
+(doc 13, "The RoPE table"). Dims 64..255 pass through untouched - the
+`partial_rotary_factor 0.25` of doc 03.
+
+### What the test asserts
+
+`tests/kernels/attn_test.cc` against `attn_ref.h`, on seeded random inputs
+(qkv partials ~ N(0,1), the FA block's fp32 `1 + w` norms ~ U(0.75, 1.25), the
+loader's real RoPE table, and **the entire 4096-position KV cache** filled with
+random bf16 - not just the prefix, so a read past the causal bound shows up as
+noise rather than as a convenient zero). `max_len = 4096`, i.e. 16 blocks.
+
+Because the reference reproduces every rounding, every tree and every wave, the
+only thing left between host and device is the one libm function OpenCL does not
+require to be correctly rounded and this trio uses: **`exp`, 3 ulp**, in the
+softmax, in the merge and in the final sigmoid. `1.0f/sqrt` is not among them
+(every kernel builds with `-cl-fp32-correctly-rounded-divide-sqrt`), which is
+why the norm, the RoPE and the KV cache are held **bit-exact**:
+
+| case | `attn_q` roped dims | `attn_part` | `attn_out` rel (bar 1e-3) | `attn_out` words differing / worst | blocks still canary |
+|---|---|---|---|---|---|
+| `pos = 0` (one valid position; 15 blocks early-out) | **0** | **0** | **0** | 0 / 6144 | 360 × 1 |
+| `pos = 254` (block 0 partial; 255 masked) | **0** | 4.670e-07 | 1.326e-05 | 1 / 6144, 1 ulp | 360 × 1 |
+| `pos = 255` (block 0 exactly full) | **0** | 5.024e-07 | **0** | 0 / 6144 | 360 × 1 |
+| `pos = 256` (block 1: one valid position, 15 empty waves) | **0** | 7.109e-07 | 8.664e-04 | 1 / 6144, 2 ulp | 336 × 1 |
+| `pos = 4095` (cache full to `max_len`; 16-block merge) | **0** | 7.240e-07 | 1.995e-04 | 3 / 6144, 95 ulp | 0 |
+| `pos = 254`, M = 2 (per-`m` mask **inside** one block) | **0** | 6.420e-07 | **0** | 0 / 12288 | 360 × 2 |
+| `pos = 255`, M = 2 (per-`m` mask **across** the block edge) | **0** | 8.018e-07 | 1.270e-05 | 2 / 12288, 2 ulp | 336 × 2 |
+
+and, in **every** case:
+
+- `kv_k` and `kv_v` - **bit-exact over all 4 194 304 words of each cache**, not
+  just the slots this step writes. The untouched slots are what prove
+  `attn_prep` writes positions `pos … pos+n_active−1` and nothing else.
+- `attn_q`'s pass-through dims 64..255 and the whole of `attn_gate` -
+  **bit-exact**. The roped dims 0..63 carry the ruled 2 ulp bf16 bar and come
+  back at **0** everywhere, which is the fma spelling above doing its job.
+- replay - **bitwise identical** on all six outputs (`attn_q`, `attn_gate`,
+  `attn_part`, `kv_k`, `kv_v`, `attn_out`), from freshly re-uploaded inputs.
+
+Two bars are carried on `attn_out` and they are blind in opposite places. The
+ruled one is a relative error floored at the tensor's RMS - `acc/sm` is a
+weighted average of *signed* v values, so a dim can cancel to ~1e-9 against an
+RMS of ~0.07 and an unfloored ratio there would measure the cancellation rather
+than the kernel (the `pos = 4095` row's "95 ulp" is exactly one such dim, 3.5e-10
+of absolute nothing). The second is an absolute bar at the tensor's scale: no
+element may move by more than **2 bf16 ulp of the RMS**, where the 2 is the
+arithmetic of the final chain and not a fudge -
+`rne_bf16(f32(rne_bf16(acc/sm)) · sigmoid_f32(gate))` rounds to bf16 twice, and
+3 ulp of `exp` slack can push a boundary value one ulp at each of those
+roundings and no further. The worst observed is `pos = 256`'s 6.104e-05 against
+a bar of 5.5e-04.
+
+**The `pos = 256` row is the one to watch.** 8.664e-04 against a bar of 1e-3 is
+a 1.15× margin, and it is thin for a structural reason rather than a numerical
+one: `attn_out` is bf16, so a *single* boundary flip on an element the size of
+the tensor's RMS is already `2^-8 = 3.9e-3` of relative error - four times the
+ruled bar. Today every flip has landed on an element below the RMS and the bar
+holds; it is luck that they have, and the absolute-at-scale bar beside it is
+what should be trusted if a driver update moves the row.
+
+The M = 2 variant is compiled for spec 1 §9's M-loop rule and **run**, on the
+gdn_step precedent, because it is the only cover for per-`m` causal masking - at
+M = 1 every position in flight shares one causal bound. At `pos = 254, n = 2`
+position 255 is masked for `m = 0` and valid for `m = 1`, so block 0 must produce
+two different partials for the same (q-head, block); at `pos = 255, n = 2`
+block 1 is wholly beyond `m = 0`'s bound, writes `(−INF, 0, 0)`, and
+`attn_reduce` - whose `nb(0)` is 1 - must not read it. The `−INF` headers are
+compared as **exact bit patterns**, not as numbers.
+
+### Rejected, and what was not measured
+
+**Nothing here has been timed.** There is no `probe_attn`; the arithmetic in the
+next section is arithmetic. Task 9 measures the per-layer time and doc 07 #12's
+depth sweep; until it does, this section states no wall-clock number.
+
+- **SLM-staged K/V tiles instead of direct loads - the main open lever, not
+  measured.** As built, the q-head loop is outer and a work-group reads its
+  block's K and V six times (next section). Moving the q-head loop *inside* the
+  wave loop and staging the wave's 16 K rows and 16 V rows in SLM
+  (16 × 256 × 2 B × 2 = 16 KB, plus six q-heads staged = 6 KB, plus the existing
+  1 KB tree) would read them once outright, at the cost of six accumulators and
+  six `(mx, sm)` pairs per work-item instead of one. The per-q-head arithmetic
+  and every stated order would be unchanged, so the reference would not move.
+  Whether it is worth it depends entirely on how much of the reread the 24 MB
+  L2 already absorbs, which is a measurement, not an argument.
+- **`sub_group_barrier` for the score tree - not used, not measured.** The
+  16-wide tree is entirely inside one subgroup, so four of the six
+  `barrier(CLK_LOCAL_MEM_FENCE)` per wave could be subgroup fences instead of
+  work-group barriers (96 barriers per (q-head, token) would become 32). Full
+  barriers were kept for the same reason `gdn_step` keeps them: they are the
+  primitive whose semantics need no argument, and this kernel's cost is its
+  loads. Worth trying with a probe in hand; not worth guessing at.
+- **A flash-style single work-group walking the whole `max_len` - rejected on
+  fill.** One work-group per (q-head, token) is 24 work-groups per layer on a
+  card with 32 Xe-cores: three quarters of the machine idle, on 16 layers per
+  token. Splitting the KV into 256-position blocks is what turns that into
+  4 × (max_len/256) work-groups - 256 at `max_len` 16384, eight per Xe-core -
+  and the price is the two-pass structure (`attn_part` plus `attn_reduce`) and
+  one extra launch per layer.
+- **One work-group per (q-head, block) - rejected**, argued above: identical
+  byte count, 6× the work-groups, and the six passes over a block scattered
+  across independent work-groups instead of back to back inside one.
+- **A two-pass softmax over the whole block** (all 256 scores to SLM, then one
+  max, then a single un-rescaled accumulation) - **rejected.** It is simpler and
+  drops the per-wave rescale entirely, but it costs another 1 KB of SLM and,
+  more to the point, it does not generalise: the online form is what lets the
+  block size grow without the score array growing with it. The plan ruled the
+  online scheme; this notes what was given up.
+- **`sub_group_reduce_add` for the score dot - not used**, the same ruling as
+  `prep` and `gdn_step`: the SLM tree's order is *stateable*, and the whole
+  comparison rests on the reference reproducing it, while a subgroup reduce's
+  internal order is the compiler's business. Faster, probably. Not measured.
+- **A larger `ATTN_BLOCK` (512, 1024) - not measured.** 256 was chosen because
+  it makes the block a whole number of 16-position waves, makes `attn_part`'s
+  `[24][max_len/256][M][258]` the size `runtime::DecodeBuffers` already
+  allocates, and gives one work-group per Xe-core per 8 blocks at 16k. A larger
+  block means fewer work-groups and a shorter merge; a smaller one means better
+  fill at short context. Both are depth-dependent and neither is guessable.
+- **`attn_part` in bf16 - rejected outright.** The partials are a softmax
+  numerator and denominator; rounding them is rounding the *accumulator*, not an
+  op's output, which is exactly what the rounding discipline forbids. It would
+  also halve nothing that matters - `attn_part` is under 1% of this kernel's
+  traffic.
+- **`native_exp` - rejected outright**, as everywhere in this project: it would
+  put the softmax somewhere the host reference cannot follow.
+- **Atomics for the block merge (one kernel instead of two) - never considered
+  seriously.** A float atomic add is order-dependent and two replays of the
+  captured list would differ. Determinism is an acceptance criterion for this
+  plan, not a nicety.
+
+### Traffic per token (arithmetic, not a measurement)
+
+At context depth `D`, per FA layer, M = 1. The KV cache is the whole story and
+the 6× is the q-head loop being outer:
+
+| item | per layer at `D` | at `D` = 4096 |
+|---|---|---|
+| `kv_k` + `kv_v` read by `attn_decode` (6 q-head passes) | `6·D·4·1024 B` | **100.7 MB** |
+| - of which *unique* (what a staged version would read) | `D·4·1024 B` | 16.8 MB |
+| `attn_part` written then read | `2 · 24 · (D/256) · 258 · 4 B` | 0.79 MB |
+| `attn_q` read by `attn_decode` (staged once per q-head per block) | `24 · (D/256) · 1 KB` | 0.39 MB |
+| `attn_prep`: partials read, `attn_q`/`attn_gate`/KV written | ~110 KB | 0.11 MB |
+| `attn_reduce`: `attn_gate` read, `attn_out` written | ~37 KB | 0.04 MB |
+
+**≈ 102 MB per layer, 1.63 GB per token across the 16 FA layers** - against a
+*unique*-KV floor of 268 MB per token, which is the 1.7% of `W` doc 03 predicted
+("KV and state sizes at the benchmark shape"). The gap between those two numbers
+is the reread, and how much of it reaches DRAM is a cache question: **the card
+has 24 MB of L2** (doc 01), one FA layer's whole KV at `D` = 4096 is 16.8 MB, and
+at that depth only 64 of the grid's work-groups survive the early-out, holding
+256 KB of block each - 16 MB resident. So at the benchmark depth the reread
+should be almost entirely L2-served, and at `max_len` 16384 (64 MB of live
+blocks) it cannot be. Which of those regimes the real step lands in is exactly
+what Task 9 has to measure before the staged variant above is worth building.
+
+Launches: **3 per FA layer × 16 layers = 48 per token**, ~25 µs at the measured
+0.52 µs floor (doc 07 #5) - the same order as `gdn_step`'s 48, and the reason
+`attn_prep` folds the norm, the RoPE and the KV write into one kernel rather
+than three.

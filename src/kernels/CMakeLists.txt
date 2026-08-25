@@ -86,3 +86,45 @@ add_ocloc_kernel(argmax_stage1_M1 SOURCE ${ARGMAX_CL} DEFINES ${ARGMAX_DEFINES} 
 # Stage 2 has no shape to vary: it loops m < ctrl.n_active internally, so its
 # binary name is the entry-point name (both entry points are in both binaries).
 add_ocloc_kernel(argmax_stage2 SOURCE ${ARGMAX_CL} DEFINES ${ARGMAX_DEFINES})
+
+# attn: the decode-attention trio (attn_prep / attn_decode / attn_reduce) - the
+# 16 full-attention layers. Three entry points in one file, so each binary
+# carries all three and the runtime loads the one it asked for (prep.cl's
+# pattern). Two things vary:
+#
+#   * `M`, as everywhere - the tokens in flight;
+#   * `MAXLEN`, which `attn_decode` and `attn_reduce` need because
+#     `attn_part` is strided `[24][MAXLEN/256][M][258]` (the *grid* comes from
+#     `buffers.max_len` at capture, but the stride has to be a compile-time
+#     constant). `attn_prep` touches no `max_len`-shaped array - it indexes the
+#     KV caches by absolute position - so its variants carry no `L`.
+#
+# QNORM_OFF / KNORM_OFF are the FA small block's offsets **in floats**, i.e.
+# loader/small_layout.h's kFaOffQNorm (0 B) and kFaOffKNorm (1024 B) divided by
+# 4. The kernel takes the block base as a `const float*` and indexes with these,
+# so the byte offsets stay in the one header that owns them; small_layout.h's
+# static_asserts are what keeps this line honest - exactly as GDN_DEFINES does.
+set(ATTN_DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256)
+set(ATTN_CL ${CMAKE_CURRENT_SOURCE_DIR}/attn.cl)
+function(add_attn_prep MM)
+  add_ocloc_kernel(attn_prep_M${MM} SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM})
+endfunction()
+function(add_attn_decode MM LL)
+  add_ocloc_kernel(attn_decode_M${MM}_L${LL} SOURCE ${ATTN_CL}
+                   DEFINES ${ATTN_DEFINES} M=${MM} MAXLEN=${LL})
+endfunction()
+function(add_attn_reduce MM LL)
+  add_ocloc_kernel(attn_reduce_M${MM}_L${LL} SOURCE ${ATTN_CL}
+                   DEFINES ${ATTN_DEFINES} M=${MM} MAXLEN=${LL})
+endfunction()
+add_attn_prep(1)
+add_attn_decode(1 16384)   # the loader's default max_len (docs/13-loader.md)
+add_attn_reduce(1 16384)
+add_attn_decode(1 4096)    # attn_test's buffers: 16 blocks, cheap to fill
+add_attn_reduce(1 4096)
+# M = 2 is compiled per spec 1 §9 (the M loop must compile); it is also RUN by
+# attn_test, as the only cover for per-m causal masking (a position valid for
+# m = 1 and masked for m = 0, both inside one block and across a block edge).
+add_attn_prep(2)
+add_attn_decode(2 4096)
+add_attn_reduce(2 4096)

@@ -63,6 +63,20 @@ b70_target_kernel_dir(gdn_step_test)
 add_dependencies(gdn_step_test kernel_gdn_step_M1 kernel_gdn_step_M2)
 add_test(NAME gdn_step_test COMMAND gdn_step_test)
 
+# The decode-attention trio. Its reference (attn_ref.h) reproduces the kernels'
+# norm tree, score tree, wave order and block-merge order exactly, so the KV
+# cache and the norm/RoPE outputs are held bit-exact and only the `exp`-carrying
+# tensors have a tolerance. M = 2 is run, not just compiled: it is the only
+# cover for per-m causal masking.
+add_executable(attn_test kernels/attn_test.cc)
+target_include_directories(attn_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+target_link_libraries(attn_test PRIVATE b70_l0)
+b70_target_kernel_dir(attn_test)
+add_dependencies(attn_test kernel_attn_prep_M1 kernel_attn_decode_M1_L4096
+  kernel_attn_reduce_M1_L4096 kernel_attn_prep_M2 kernel_attn_decode_M2_L4096
+  kernel_attn_reduce_M2_L4096 kernel_attn_decode_M1_L16384 kernel_attn_reduce_M1_L16384)
+add_test(NAME attn_test COMMAND attn_test)
+
 # The two kernels at a token's boundary. Both read the shared control block at
 # *execution* time, which is what the replayed list needs and what a kernel
 # argument (captured at append - tests/l0/arg_capture_test.cc) could not give.

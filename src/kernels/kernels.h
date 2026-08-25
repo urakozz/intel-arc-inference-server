@@ -35,6 +35,22 @@ inline std::string prep_gated_head_variant(unsigned M) {
 // dimension being the model's and baked into the source.
 inline std::string gdn_step_variant(unsigned M) { return "gdn_step_M" + std::to_string(M); }
 
+// The decode-attention trio (src/kernels/attn.cl), the 16 full-attention
+// layers. `attn_prep` runs a grid of (28, M) - 24 q-heads then 4 kv-heads - and
+// indexes the KV caches by absolute position, so `M` is its whole variant
+// space. `attn_decode` (grid (4 kv-heads, max_len/256 blocks)) and
+// `attn_reduce` (grid (24, M)) additionally bake `MAXLEN`, because `attn_part`
+// is strided `[24][MAXLEN/256][M][258]` and the stride has to be a compile-time
+// constant; the grid itself is set at capture from `buffers.max_len`, which
+// must therefore equal the `MAXLEN` of the variant bound to it.
+inline std::string attn_prep_variant(unsigned M) { return "attn_prep_M" + std::to_string(M); }
+inline std::string attn_decode_variant(unsigned M, unsigned MAXLEN) {
+  return "attn_decode_M" + std::to_string(M) + "_L" + std::to_string(MAXLEN);
+}
+inline std::string attn_reduce_variant(unsigned M, unsigned MAXLEN) {
+  return "attn_reduce_M" + std::to_string(M) + "_L" + std::to_string(MAXLEN);
+}
+
 // The control block as the kernels see it: `runtime::Control`
 // (src/runtime/control.h) indexed as a flat `uint` array. The device side gets
 // these numbers from ONE place - the `CTRL_DEFINES` line in
