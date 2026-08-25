@@ -12,10 +12,12 @@
 //      be bitwise identical. This is what rules out a data-dependent reduction
 //      order, an atomic, or a work-group count that varies with arrival order.
 //   2. **Fresh-process equivalent.** Re-zero the persistent state, re-ingest
-//      the same prompt from pos = 0 and generate again: same ids. This is what
-//      rules out a scratch buffer that is read before it is written in a step
-//      (run 2 above inherits run 1's scratch; this one does not inherit run
-//      1's *anything* except the weights).
+//      the same prompt from pos = 0 and generate again: same ids. Deliberately,
+//      only control/gdn_state/conv_ring/kv are re-zeroed - this run starts from
+//      run 2's leftover *scratch*, different bytes than run 1's fresh
+//      allocations. Identical ids and taps therefore prove no step reads
+//      scratch it has not first written. Do NOT "clean this up" by zeroing
+//      scratch too: that would delete exactly the coverage this run adds.
 //   3. **Structure.** kernel_count == 645 (spec §9.1 as amended), one module
 //      per distinct variant, every generated id < kVocabUsed, and no NaN or
 //      Inf anywhere in the residual trace.
