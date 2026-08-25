@@ -140,8 +140,10 @@ Read that table twice before proposing anything.
 3. **The 13.795 ms of non-GEMV work is the whole gap.** To reach 31.746 ms/token
    the budget for everything that is not a GEMV is **3.400 ms**; we spend
    13.795. Closing 10.4 of those milliseconds is exactly the phase-1 shortfall.
-   (In situ: 13.136 ms against the same 3.400 ms budget - the shortfall is
-   10.395 ms either way, since the total is the measured step.)
+   (In situ the arithmetic shifts and the conclusion does not: GEMV is 29.005,
+   so the non-GEMV budget is 31.746 − 29.005 = **2.741 ms** against 13.136 ms
+   spent. The shortfall is 10.395 ms either way, because the total is the
+   measured step.)
 4. **The attention early-out is exonerated** (doc 07 #12, resolved): a grid
    sized for `max_len` 16384 costs **0.046 ms/token - 0.11% of the step** in
    idle work-groups. Context-bucketed lists would buy nothing.
@@ -163,9 +165,12 @@ Read that table twice before proposing anything.
    so it is *not* costing multiples of its traffic and the occupancy charge is
    dropped. What none of the three anticipated is the item that outweighs all of
    them: **`attn_decode` at 5.782 ms.** The occupancy story generalises, though -
-   1, 2 and 4 work-groups are what `prep_res_norm`, `a‖b` and `attn_decode`'s
-   depth-independent term are given, and one work-group on this device is worth
-   about 13-17 GB/s (measured three ways, docs/15).
+   1 and 2 work-groups are what `prep_res_norm` and `a‖b` are given, and one
+   work-group on this device is worth about 12-17 GB/s (measured three ways,
+   docs/15 §1, which also records why extrapolating that ×8 is the weak step in
+   both levers' yields). `attn_decode` is a different failure: its work-groups
+   are nearly free (3.4× for +6.9%) and what costs is one work-group's serial
+   walk of a 256-position block.
 
 ### What spec 1.5 is scoped to do
 
@@ -202,8 +207,8 @@ even less than the estimate said - but §1 of docs/15 shows what the fusion
 candidates were really buying, which is work-groups, not launches.
 
 One number the ladder does not touch and the gate cannot ignore: **`lm_head` is
-4.376 ms in situ, 10.4% of the step**, at 97% of device bandwidth and 0.6% above
-its probe floor. There is nothing to tune; quantising it to int4 is worth ~3.3 ms
+4.376 ms in situ, 10.4% of the step**, at **581 GB/s - 98.5% of the measured
+590** - and 0.6% above its probe floor. There is nothing to tune; quantising it to int4 is worth ~3.3 ms
 and is specialisation 1 below, deliberately outside spec 1.5. docs/15's gate
 arithmetic says the ladder alone lands around 34.4 ms/token (~29.0 t/s) and that
 `lm_head` is the difference between missing the bar and clearing it.
