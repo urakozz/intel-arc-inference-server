@@ -282,7 +282,9 @@ own report, printed by the very run above and derived in
 0.005279 GB of fp32-widened norms. The bandwidth is `tools/probe/probe_bw`
 through the same Level Zero launch path ([01-hardware.md](01-hardware.md)). On
 those two constants the roofline is 26.34 ms/token = **37.97 t/s**, vLLM's 31.50
-is **83.0% MBU**, and b70-decode's 23.73 is **62.5%**.
+is **83.0% MBU**, and b70-decode's 23.73 is **62.5%**. (That 62.5% is the
+`62bdd4d` row this paragraph sits under and is now historical: the current
+engine is `a1e2d3a` at **24.83 t/s = 65.4% MBU**, the row above.)
 
 ## Notes
 

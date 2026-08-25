@@ -20,11 +20,27 @@ inline std::string gemv_variant(unsigned M, unsigned K, unsigned N, unsigned S, 
 // (`cols * ksplit` lanes) and the grid (`N / cols` work-groups). `{64, 1}` is
 // what every bf16 GEMV was compiled at until spec 1.5's lever L2.
 //
-// **The choice is a function of `N` and lives here** so that the runtime
-// (src/runtime/capture.cc) and the table check (tests/kernels/kernel_table_test.cc)
-// cannot drift apart. `lm_head` (N = 248320) keeps `{64, 1}`: 3880 work-groups
-// at 98.5% of measured bandwidth in situ, nothing to win - and it is measured
-// unmoved by this knob existing (4378.555 -> 4378.353 µs/launch in situ, 0.005%).
+// **The choice is a function of `N` and lives here** so that the two callers
+// that must agree - the runtime (src/runtime/capture.cc) and the table check
+// (tests/kernels/kernel_table_test.cc) - cannot drift apart. It is not a
+// project-wide invariant: tools/probe/probe_gemv.cc builds its own tiling and
+// bypasses this function. That is harmless because the probe times `lm_head`
+// only, at the default `{64, 1}`, which is what this function would hand it -
+// but a probe row for any other shape must be routed through here first.
+//
+// `lm_head` (N = 248320) keeps `{64, 1}`: 3880 work-groups at 98.5% of measured
+// bandwidth in situ, nothing to win, and measured unmoved in situ across the
+// change - **4378.555 -> 4379.089 µs/launch, +0.012%** (before at `43bb720`,
+// after at the committed `a1e2d3a`; docs/15 §L2 carries both rollups).
+//
+// Its **binary is not** byte-identical, though its ocloc command line is:
+// restructuring the K loop for `KSPLIT` changed IGC's output at `KSPLIT == 1`
+// too. What covers lm_head's numerics is therefore not the defines but the
+// acceptance that ran after the change - the golden gate 96/96 element-exact
+// (every token passes through lm_head's logits and argmax) and
+// replay_determinism_test green. `-cl-fp32-correctly-rounded-divide-sqrt` does
+// not pin `FP_CONTRACT`, so "same defines ⇒ same numerics" was never airtight
+// for any kernel here; the gate is the arbiter and always was.
 // `a‖b` (N = 128) takes `{16, 16}` - 8 work-groups of 16 K-slice subgroups, so
 // **128 hardware threads over the launch instead of 8**, and both halves of the
 // pair earn their place: the `ksplit` is what creates the threads and the

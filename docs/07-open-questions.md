@@ -99,8 +99,10 @@ estimate expected to find in GDN is real and lives in the kernels that were
 given one or two work-groups - but **the unit is the subgroup, not the
 work-group**: spec 1.5's lever L2 gave `a‖b` 4× the work-groups at an unchanged
 subgroup count and it bought nothing, and a 16-way K split (8 → 128 subgroups)
-took its row from 2.335 to **0.256 ms/token** (docs/15 §L2). The `a‖b` row above
-is therefore the pre-lever number.
+took that run's row from 2.341 to **0.256 ms/token** (docs/15 §L2). The `a‖b`
+row above is the pre-lever number as *this* table's run measured it, 2.335 -
+0.3% from the L2 before-run's 2.341, which is the instrument's spread on this
+row and the reason the two are never mixed inside one sentence.
 
 ## 4. What is vLLM's MBU on the phase-1 model? - **resolved: 81%**
 
