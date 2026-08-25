@@ -5,6 +5,7 @@
 
 namespace l0 {
 class Kernel;
+class Event;
 
 // Two flavours. immediate(): synchronous - every append executes and completes
 // before returning; used for uploads and tests. regular(): in-order, recorded
@@ -21,8 +22,12 @@ class CmdList {
   void copy(void* dst, const void* src, size_t bytes);
   void fill(void* dst, uint32_t pattern, size_t bytes);
   // Appends a launch with gx*gy*gz work-groups; the kernel's group size must
-  // already be set (Kernel::group_size).
-  void launch(Kernel& k, uint32_t gx, uint32_t gy = 1, uint32_t gz = 1);
+  // already be set (Kernel::group_size). `signal`, when given, is signalled by
+  // the device at this kernel's completion and carries its timestamps; it
+  // observes only - nothing in the list waits on it, so a profiled list runs
+  // the same commands in the same order as an unprofiled one.
+  void launch(Kernel& k, uint32_t gx, uint32_t gy = 1, uint32_t gz = 1,
+              Event* signal = nullptr);
   void close();
   void reset();
   bool is_immediate() const { return immediate_; }

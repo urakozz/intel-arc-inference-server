@@ -1,5 +1,6 @@
 #include "l0/cmdlist.h"
 #include "l0/error.h"
+#include "l0/event.h"
 #include "l0/kernel.h"
 
 namespace l0 {
@@ -35,9 +36,10 @@ void CmdList::copy(void* dst, const void* src, size_t bytes) {
 void CmdList::fill(void* dst, uint32_t pattern, size_t bytes) {
   ZE_CHECK(zeCommandListAppendMemoryFill(l_, dst, &pattern, sizeof pattern, bytes, nullptr, 0, nullptr));
 }
-void CmdList::launch(Kernel& k, uint32_t gx, uint32_t gy, uint32_t gz) {
+void CmdList::launch(Kernel& k, uint32_t gx, uint32_t gy, uint32_t gz, Event* signal) {
   ze_group_count_t gc{gx, gy, gz};
-  ZE_CHECK(zeCommandListAppendLaunchKernel(l_, k.handle(), &gc, nullptr, 0, nullptr));
+  ZE_CHECK(zeCommandListAppendLaunchKernel(l_, k.handle(), &gc,
+                                           signal ? signal->handle() : nullptr, 0, nullptr));
 }
 void CmdList::close() { ZE_CHECK(zeCommandListClose(l_)); }
 void CmdList::reset() { ZE_CHECK(zeCommandListReset(l_)); }
