@@ -54,6 +54,23 @@ add_dependencies(prep_test kernel_prep_res_norm_M1_K5120_SP0 kernel_prep_res_nor
   kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1)
 add_test(NAME prep_test COMMAND prep_test)
 
+# The two kernels at a token's boundary. Both read the shared control block at
+# *execution* time, which is what the replayed list needs and what a kernel
+# argument (captured at append - tests/l0/arg_capture_test.cc) could not give.
+add_executable(embed_gather_test kernels/embed_gather_test.cc)
+target_include_directories(embed_gather_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(embed_gather_test PRIVATE b70_l0 b70_model)
+b70_target_kernel_dir(embed_gather_test)
+add_dependencies(embed_gather_test kernel_embed_gather_M1)
+add_test(NAME embed_gather_test COMMAND embed_gather_test)
+
+add_executable(argmax_test kernels/argmax_test.cc)
+target_include_directories(argmax_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(argmax_test PRIVATE b70_l0 b70_model)
+b70_target_kernel_dir(argmax_test)
+add_dependencies(argmax_test kernel_argmax_stage1_M1 kernel_argmax_stage2)
+add_test(NAME argmax_test COMMAND argmax_test)
+
 add_executable(json_test common/json_test.cc)
 target_include_directories(json_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME json_test COMMAND json_test)
