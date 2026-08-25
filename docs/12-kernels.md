@@ -1333,8 +1333,11 @@ That settles the retune this document invited. Spec 1.5's lever L3 (`CHUNK_V`
 32 → 16, GRF mode, SIMD width) has nothing to buy and docs/15 ranks it
 **skip-by-ruling**. The `gdn_step` occupancy suspicion in doc 05 point 5 is
 withdrawn on measurement; the occupancy problem it was looking for is real, but
-it is in `prep_res_norm` (1 work-group), `a‖b` (2) and `attn_decode`'s
-depth-independent term (4 live), not here.
+it is in `prep_res_norm` (1 work-group) and `a‖b` (2), not here. (`attn_decode`
+is not an occupancy story either: its cost is one work-group's *serial walk* of
+a full 256-position block - see this document's attn Measured section, which
+withdrew the earlier "depth-independent term" reading on the depth-1024
+falsification run.)
 
 The 48 launches cost 35 µs of dispatch (0.733 µs each, derived in situ -
 docs/15), 4.8% of the kernel's own time and 0.08% of the step. Kernel count was
