@@ -6,6 +6,7 @@
 
 #include "l0/cmdlist.h"
 #include "l0/context.h"
+#include "l0/event.h"
 #include "l0/kernel.h"
 #include "l0/memory.h"
 #include "l0/module.h"
@@ -13,6 +14,35 @@
 #include "runtime/buffers.h"
 
 namespace runtime {
+
+// Profiling state for ONE captured list: the timestamp pool and one event per
+// launch, in walk order (event i is launch i, and `CapturedStep::labels[i]`
+// names it). Caller-owned like the residual tap, and for the same reason -
+// `build` only borrows it, so the caller decides whether the instrumentation
+// outlives the list and how many replays it accumulates.
+//
+// The pool is created at `kProfileCapacity`, not at the launch count: the walk
+// has not run yet when the caller constructs this, and a pool cannot grow. The
+// `events` vector is filled by `build` to exactly `kernel_count` entries, so
+// `events.size()` is the honest count and the unused pool slots cost nothing.
+//
+// `std::vector<l0::Event>` beside the pool it draws from is safe: an `Event`
+// holds a handle and a copy of the pool's `TimerCalib`, never a reference to
+// the pool, so a reallocation that moves the vector moves handles and leaves
+// the pool alone. (The constructor reserves anyway - no reallocation happens.)
+//
+// Events must be `reset()` before EVERY replay: re-signalling an un-signalled-
+// again event is undefined, and `duration_us()` throws on an unsignalled one.
+// Both are the caller's business, not `build`'s - the list is captured once and
+// replayed by whoever owns the queue.
+struct ProfileEvents {
+  l0::EventPool pool;              // capacity kProfileCapacity
+  std::vector<l0::Event> events;   // one per launch, walk order
+  // 645 today (spec §9.1); the headroom is for plan 4's levers, which move the
+  // launch count in both directions. `build` throws rather than overrun it.
+  static constexpr uint32_t kProfileCapacity = 1024;
+  explicit ProfileEvents(l0::Context& ctx);
+};
 
 // The decode step, captured once. Owns every Module/Kernel the list references
 // (Level Zero resolves a launch's arguments at append time - proven by
@@ -24,6 +54,13 @@ struct CapturedStep {
   size_t kernel_count = 0;                                     // 645 at M = 1 (spec §9.1)
   std::map<std::string, std::unique_ptr<l0::Module>> modules;  // by variant name
   std::vector<std::unique_ptr<l0::Kernel>> kernels;            // append order
+  // One per launch, walk order: "L<layer> <kernel> <variant>", and
+  // "-- <kernel> <variant>" for the five token-boundary launches that belong
+  // to no layer. ALWAYS filled - 645 small strings built on the host during a
+  // capture that already opens 18 device binaries, so there is no profiling
+  // switch on them and no way for a profiled walk to be described differently
+  // from a plain one.
+  std::vector<std::string> labels;
 };
 
 // Builds the whole per-token list against `m`'s weights and `b`'s allocations
@@ -44,7 +81,18 @@ struct CapturedStep {
 // layer 63's MLP into `resid` first, like every prep, before writing the
 // normalised row to `x`) and `b.x` holds its final-normalised form; both are
 // readable without any capture change.
+//
+// prof: when non-null, launch `i` signals `prof->events[i]` - the events are
+// created here, one per launch, so the caller never has to know the count in
+// advance. `build` throws if the walk has more launches than
+// `ProfileEvents::kProfileCapacity`. The signal observes only: nothing in the
+// list waits on an event, so a profiled list appends the same commands in the
+// same order with the same arguments as a plain one and replays to the same
+// tokens (tests/runtime/profile_capture_test.cc asserts exactly that). It is
+// not free, though - each signal carries a host-scope flush at kernel
+// completion - so a profiled list is never a bench list (spec §3.3): it prices
+// shares and per-kernel deltas, not the absolute step.
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                   l0::Mem* debug_resid = nullptr);
+                   l0::Mem* debug_resid = nullptr, ProfileEvents* prof = nullptr);
 
 }  // namespace runtime
