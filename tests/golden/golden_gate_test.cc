@@ -77,7 +77,21 @@ constexpr uint32_t kGen = 32;
 constexpr uint32_t kHid = Qwen35::kHidden;  // 5120
 constexpr size_t kGdnElems =
     size_t(Qwen35::kGdnVHeads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;  // 48*128*128
-constexpr double kBar = 0.999;  // the spec's cosine bar for every diagnostic
+// The cosine bar for every tensor comparison in this test - and it marks rows
+// `**LOW**`, it does not fail the run. Spec §11 is explicit that token equality
+// is the gate and tensors are diagnostics, "because 64 layers of bf16 residual
+// drift make a hard tensor bound either useless or flaky", and the `code`
+// prompt is the standing demonstration: 36 of its 3904 tap comparisons sit
+// below this bar on 3 of 61 positions while all 32 token ids are exact
+// (docs/14-golden-gate.md).
+//
+// `gdn_state` was gating until the Task 8 review ruled it back to a diagnostic
+// (2026-08-25). Measured margin at the time of that ruling: worst 0.999537065
+// (`code`, L60), i.e. 5.4e-4 of headroom on a bound the spec never asked to be
+// hard. Anything that legitimately shifts numerics - or simply a longer prompt
+// - could put it under, and failing the golden gate on a recurrent-state
+// cosine would say "the engine is wrong" when the tokens say otherwise.
+constexpr double kBar = 0.999;
 const char* const kPrompts[] = {"prose", "code", "cjk"};
 
 // --- the golden file ------------------------------------------------------
@@ -90,6 +104,7 @@ class Golden {
     uint64_t hlen = 0;
     CHECK(file_.size() >= 8);
     std::memcpy(&hlen, file_.data(), 8);
+    CHECK(hlen <= file_.size() - 8);
     data_start_ = size_t(8 + hlen);
     for (auto& e : loader::SafetensorsSet::parse_header(file_.data(), file_.size()))
       tensors_.emplace(e.first, e.second);
@@ -102,6 +117,21 @@ class Golden {
     }
     return it->second;
   }
+  // shape[i] with the rank checked first: a 1-D tensor indexed at [1] is
+  // undefined behaviour, and a golden file is untrusted input like any other.
+  uint64_t dim(const std::string& n, size_t rank, size_t i) const {
+    const loader::TensorInfo& t = info(n);
+    if (t.shape.size() != rank) {
+      std::fprintf(stderr, "golden '%s' is %zu-D, expected %zu-D\n", n.c_str(), t.shape.size(),
+                   rank);
+      std::exit(1);
+    }
+    return t.shape[i];
+  }
+  // dtype, element count AND byte extent, the last mirroring what
+  // loader/safetensors.cc does for the checkpoint: `data_offsets` is a claim in
+  // a header, and a truncated or mislabelled dump must exit(1) with a message
+  // rather than SIGBUS somewhere inside a cosine loop minutes later.
   const void* raw(const std::string& n, const char* dtype, size_t want_elems) const {
     const loader::TensorInfo& t = info(n);
     if (t.dtype != dtype) {
@@ -113,6 +143,21 @@ class Golden {
     if (elems != want_elems) {
       std::fprintf(stderr, "golden '%s' has %zu elements, expected %zu\n", n.c_str(), elems,
                    want_elems);
+      std::exit(1);
+    }
+    const size_t esz = std::strcmp(dtype, "BF16") == 0 ? 2 : 4;   // F32 / I32 are 4
+    const size_t want_bytes = want_elems * esz;
+    if (t.begin > t.end || t.end - t.begin != want_bytes) {
+      std::fprintf(stderr, "golden '%s' spans %llu bytes ([%llu, %llu)), expected %zu\n", n.c_str(),
+                   (unsigned long long)(t.end - t.begin), (unsigned long long)t.begin,
+                   (unsigned long long)t.end, want_bytes);
+      std::exit(1);
+    }
+    const size_t avail = file_.size() - data_start_;
+    if (t.end > avail) {
+      std::fprintf(stderr,
+                   "golden '%s' ends at %llu, past the file's %zu-byte data section - truncated?\n",
+                   n.c_str(), (unsigned long long)t.end, avail);
       std::exit(1);
     }
     return file_.data() + data_start_ + t.begin;
@@ -269,10 +314,15 @@ int main(int argc, char** argv) {
     const uint32_t T = uint32_t(ids.size());
     v.n_prompt = T;
     CHECK(T > 0 && T <= 64);
-    CHECK_EQ(g.info("resid.L0").shape[0], uint64_t(T));   // the ids file IS this file's prompt
-    CHECK_EQ(g.info("resid.L0").shape[1], uint64_t(kHid));
-    const uint32_t V = uint32_t(g.info("logits").shape[1]);
-    const uint32_t Lrows = uint32_t(g.info("logits").shape[0]);
+    // The one standing consistency check between a committed .ids file and the
+    // golden dump it is the prompt of: same number of positions. (The ids were
+    // additionally verified byte-equal to each file's `prompt_ids` metadata by
+    // hand when they were committed; `parse_header` drops `__metadata__`, so
+    // the test cannot re-check that, and plumbing it through is not worth it.)
+    CHECK_EQ(g.dim("resid.L0", 2, 0), uint64_t(T));
+    CHECK_EQ(g.dim("resid.L0", 2, 1), uint64_t(kHid));
+    const uint32_t V = uint32_t(g.dim("logits", 2, 1));
+    const uint32_t Lrows = uint32_t(g.dim("logits", 2, 0));
     CHECK_EQ(Lrows, T + kGen);
     const uint32_t Vcmp = std::min(V, Qwen35::kVocab);
     std::printf(
@@ -309,6 +359,7 @@ int main(int argc, char** argv) {
     std::vector<double> cos_lt(size_t(Qwen35::kLayers) * T), nb_lt(size_t(Qwen35::kLayers) * T);
     uint32_t n_low_pairs = 0;
     std::vector<uint32_t> low_t;   // the distinct positions that go below the bar
+    std::vector<double> med_l(Qwen35::kLayers, 1.0);   // per-layer upper-median cosine
     for (uint32_t l = 0; l < Qwen35::kLayers; ++l) {
       const std::string ls = std::to_string(l);
       const uint16_t* mix = g.bf16("mixer.L" + ls, size_t(T) * kHid);
@@ -332,11 +383,28 @@ int main(int argc, char** argv) {
         lrel = std::max(lrel, m.rel);
       }
       if (lmin < v.tap_min_cos) { v.tap_min_cos = lmin; v.tap_min_layer = l; v.tap_min_t = at; }
+      // Upper median: element T/2 of the sorted row, which for even T is the
+      // upper of the two central values rather than their mean. Named that way
+      // in the header so nobody averages two of these and calls it a median.
       std::vector<double> row(cos_lt.begin() + size_t(l) * T, cos_lt.begin() + size_t(l + 1) * T);
       std::nth_element(row.begin(), row.begin() + T / 2, row.end());
+      med_l[l] = row[T / 2];
       std::printf("      %2u  %-4s  %.9f   %4u   %.9f   %.3e   %9.3f  %9.3f%s\n", l,
-                  Qwen35::is_fa(l) ? "FA" : "GDN", lmin, at, row[T / 2], lrel, lnb, lerr,
+                  Qwen35::is_fa(l) ? "FA" : "GDN", lmin, at, med_l[l], lrel, lnb, lerr,
                   lmin < kBar ? "   **LOW**" : "");
+    }
+    // Printed rather than derived by hand afterwards: this is the number the
+    // docs quote as "the typical comparison", and the split says whether the
+    // softmax path (FA) diverges more than the GEMV path alone (GDN).
+    {
+      double all = 0, gdn = 0, fa = 0;
+      uint32_t ng = 0, nf = 0;
+      for (uint32_t l = 0; l < Qwen35::kLayers; ++l) {
+        all += med_l[l];
+        if (Qwen35::is_fa(l)) { fa += med_l[l]; ++nf; } else { gdn += med_l[l]; ++ng; }
+      }
+      std::printf("  mean of the 64 per-layer upper-medians: %.9f   (GDN %u: %.9f, FA %u: %.9f)\n",
+                  all / Qwen35::kLayers, ng, gdn / ng, nf, fa / nf);
     }
     std::printf("  census: %u of the %u (layer, t) tap comparisons are below %.3f, on %zu of the"
                 " %u positions:", n_low_pairs, uint32_t(Qwen35::kLayers) * T, kBar, low_t.size(), T);
@@ -435,6 +503,7 @@ int main(int argc, char** argv) {
     }
 
     // ---- 4. THE GATE: 32 greedy ids, element-exact --------------------------
+    CHECK_EQ(g.dim("tokens", 1, 0), uint64_t(kGen));
     const int32_t* gtok = g.i32("tokens", kGen);
     const float* glog = g.f32("logits", size_t(Lrows) * V);
     std::vector<float> dec(Qwen35::kVocab);
@@ -451,15 +520,20 @@ int main(int argc, char** argv) {
       const float* grow = glog + size_t(p == 0 ? T - 1 : T + p - 1) * V;
       const Metric lm = compare_f32(dec.data(), grow, Vcmp, sa, sb);
       v.logit_min_cos = std::min(v.logit_min_cos, lm.cos);
-      const uint32_t ea = argmax_masked(dec.data(), Qwen35::kVocab, Qwen35::kVocabUsed);
-      const uint32_t gam = argmax_masked(grow, V, Qwen35::kVocabUsed);
-      const uint32_t gaf = argmax_full(grow, V);
+      // Both compared argmaxes see the SAME width, so a future dump narrower
+      // than the engine's padded row cannot silently desymmetrize the pair.
+      // The device-consistency check below is separate and must keep the full
+      // engine width, because the device argmaxes the whole padded row.
+      const uint32_t ea = argmax_masked(dec.data(), Vcmp, Qwen35::kVocabUsed);
+      const uint32_t gam = argmax_masked(grow, Vcmp, Qwen35::kVocabUsed);
+      const uint32_t ea_dev = argmax_masked(dec.data(), Qwen35::kVocab, Qwen35::kVocabUsed);
+      const uint32_t gaf = argmax_full(grow, V);   // the pad-tail check wants all of V
 
       const uint32_t id = eng.generate(1)[0];
       etok.push_back(id);
       // The device's two-stage argmax and a host argmax over the same fp32 row
       // must agree; if they ever do not, the bug is in argmax, not upstream.
-      CHECK_EQ(id, ea);
+      CHECK_EQ(id, ea_dev);
       const bool ok = id == uint32_t(gtok[p]);
       if (ok) ++v.exact;
       if (!ok && v.first_bad < 0) v.first_bad = int(p);
@@ -487,8 +561,9 @@ int main(int argc, char** argv) {
 
   // ---- 5. the verdict, once every prompt has printed its diagnostics -------
   std::printf("\n================ golden gate ================\n");
-  std::printf("  prompt   ids   exact/%u   tap min cos (layer,t)   L63 tail   gdn min cos   "
-              "logit min cos\n", kGen);
+  std::printf("  the gate is the exact/%u column alone; every cosine below is a diagnostic\n"
+              "  prompt   ids   exact/%u   tap min cos (layer,t)   L63 tail   gdn min cos   "
+              "logit min cos\n", kGen, kGen);
   for (const Verdict& v : verdicts)
     std::printf("  %-7s %4u   %2u/%u      %.9f (%2u,%2u)   %.9f  %.9f (L%u)  %.9f\n", v.name.c_str(),
                 v.n_prompt, v.exact, kGen, v.tap_min_cos, v.tap_min_layer, v.tap_min_t,
@@ -501,11 +576,8 @@ int main(int argc, char** argv) {
                    v.name.c_str(), v.exact, kGen, v.first_bad);
       bad = true;
     }
-    if (v.gdn_min_cos < kBar) {
-      std::fprintf(stderr, "GATE FAILED: %s gdn_state L%u cosine %.9f < %.3f\n", v.name.c_str(),
-                   v.gdn_min_layer, v.gdn_min_cos, kBar);
-      bad = true;
-    }
+    // gdn_state is NOT gated - see kBar's comment. It prints **LOW** per layer
+    // like the tap does, and the token ids are what decide this test.
   }
   if (bad) return 1;
   std::printf("golden_gate_test OK: 3 prompts x %u greedy tokens, element-exact against the "
