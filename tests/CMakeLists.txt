@@ -56,7 +56,11 @@ add_executable(gemv_bf16_test kernels/gemv_bf16_test.cc)
 target_include_directories(gemv_bf16_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(gemv_bf16_test PRIVATE b70_l0)
 b70_target_kernel_dir(gemv_bf16_test)
-add_dependencies(gemv_bf16_test kernel_gemv_bf16_M1_K5120_N128 kernel_gemv_bf16_M1_K5120_N248320)
+# Both a||b tilings: the test runs the `{64, 1}` build and the retiled one the
+# runtime binds over one set of inputs, and holds each - and their difference -
+# to the reference tolerance (spec 1.5 lever L2 reorders the sum).
+add_dependencies(gemv_bf16_test kernel_gemv_bf16_M1_K5120_N128
+  kernel_gemv_bf16_M1_K5120_N128_C16_S16 kernel_gemv_bf16_M1_K5120_N248320)
 add_test(NAME gemv_bf16_test COMMAND gemv_bf16_test)
 
 add_executable(prep_test kernels/prep_test.cc)
@@ -142,7 +146,7 @@ add_dependencies(kernel_table_test
   kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K6144_N5120_S16_L1
   kernel_gemv_M1_K5120_N34816_S4_L1 kernel_gemv_M1_K17408_N5120_S16_L1
   kernel_gemv_M1_K5120_N14336_S1_L1
-  kernel_gemv_bf16_M1_K5120_N128 kernel_gemv_bf16_M1_K5120_N248320)
+  kernel_gemv_bf16_M1_K5120_N128_C16_S16 kernel_gemv_bf16_M1_K5120_N248320)
 add_test(NAME kernel_table_test COMMAND kernel_table_test)
 
 # Every decode allocation, sized from the model constants: the two byte totals
@@ -179,7 +183,7 @@ set(B70_DECODE_LIST_KERNELS
   kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K5120_N14336_S1_L1
   kernel_gemv_M1_K6144_N5120_S16_L1 kernel_gemv_M1_K5120_N34816_S4_L1
   kernel_gemv_M1_K17408_N5120_S16_L1
-  kernel_gemv_bf16_M1_K5120_N128 kernel_gemv_bf16_M1_K5120_N248320)
+  kernel_gemv_bf16_M1_K5120_N128_C16_S16 kernel_gemv_bf16_M1_K5120_N248320)
 
 # The captured decode list, replayed: spec §8.7's determinism proof and the
 # acceptance for every kernel in plan 3. Needs the real checkpoint and a B70

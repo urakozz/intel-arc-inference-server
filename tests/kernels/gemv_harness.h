@@ -112,10 +112,15 @@ inline GemvResult run_gemv(l0::Context& ctx, l0::Queue& q, l0::Fence& fence,
 }
 
 // bf16 weights in the canonical tile layout. Same shape of run as run_gemv, but
-// no split-K (the kernel has no S) and no separate scales buffer.
+// no `partials` buffer and no separate scales buffer: this kernel's split-K, if
+// its tiling has one, is merged inside the work-group, so `out` is final.
+// `t` is that tiling (COLS_PER_WG, KSPLIT) and it picks the compiled variant,
+// the work-group size and the grid together (kernels::gemv_bf16_variant). The
+// default is the build every caller used before spec 1.5's lever L2.
 inline GemvResult run_gemv_bf16(l0::Context& ctx, l0::Queue& q, l0::Fence& fence,
                                 const common::Bf16Tiled& w, const std::vector<uint16_t>& x,
-                                uint32_t M, int timed_launches) {
+                                uint32_t M, int timed_launches,
+                                kernels::GemvBf16Tiling t = {kernels::kGemvBf16Cols, 1}) {
   GemvResult r;
   r.weight_bytes = w.bytes();
   l0::CmdList imm = l0::CmdList::immediate(ctx);
@@ -128,23 +133,25 @@ inline GemvResult run_gemv_bf16(l0::Context& ctx, l0::Queue& q, l0::Fence& fence
   l0::Mem xbuf(ctx, l0::MemKind::Device, x.size() * 2);
   imm.copy(xbuf.ptr(), x.data(), x.size() * 2);
   l0::Mem obuf(ctx, l0::MemKind::Device, size_t(M) * w.N * 4);
-  l0::Module mod(ctx, kernels::path(kernels::gemv_bf16_variant(M, w.K, w.N)));
+  l0::Module mod(ctx, kernels::path(kernels::gemv_bf16_variant(M, w.K, w.N, t)));
   l0::Kernel k = mod.kernel("gemv_bf16");
-  k.group_size(64);
+  // The work-group is one lane per column per K slice, which is the kernel's
+  // reqd_work_group_size; the grid stays N / cols work-groups.
+  k.group_size(t.cols * t.ksplit);
   auto bind = [&](int i) { k.arg_ptr(0, wbufs[i].ptr()); k.arg_ptr(1, xbuf.ptr()); k.arg_ptr(2, obuf.ptr()); };
 
   // Correctness launch, read back here (see run_gemv): the timing launches
   // below cycle through the other weight copies.
   {
     l0::CmdList list = l0::CmdList::regular(ctx);
-    bind(0); list.launch(k, w.N / 64); list.close();
+    bind(0); list.launch(k, w.N / t.cols); list.close();
     q.execute(list, &fence); fence.wait();
     r.out.resize(size_t(M) * w.N);
     imm.copy(r.out.data(), obuf.ptr(), r.out.size() * 4);
   }
   if (timed_launches > 0) {
     l0::CmdList list = l0::CmdList::regular(ctx);
-    for (int i = 0; i < timed_launches; ++i) { bind(i % NB); list.launch(k, w.N / 64); }
+    for (int i = 0; i < timed_launches; ++i) { bind(i % NB); list.launch(k, w.N / t.cols); }
     list.close();
     r.us_per_launch = time_list(q, fence, list, timed_launches);
   }

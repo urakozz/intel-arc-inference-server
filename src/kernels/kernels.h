@@ -14,9 +14,53 @@ inline std::string gemv_variant(unsigned M, unsigned K, unsigned N, unsigned S, 
   return "gemv_M" + std::to_string(M) + "_K" + std::to_string(K) + "_N" + std::to_string(N) +
          "_S" + std::to_string(S) + "_L" + std::to_string(L);
 }
-inline std::string gemv_bf16_variant(unsigned M, unsigned K, unsigned N) {
-  return "gemv_bf16_M" + std::to_string(M) + "_K" + std::to_string(K) + "_N" + std::to_string(N);
+// **`gemv_bf16`'s tiling - two compile-time knobs, chosen per shape.** They are
+// the kernel's `COLS_PER_WG` and `KSPLIT` (src/kernels/gemv_bf16.cl); together
+// they fix the compiled variant's name, the work-group size
+// (`cols * ksplit` lanes) and the grid (`N / cols` work-groups). `{64, 1}` is
+// what every bf16 GEMV was compiled at until spec 1.5's lever L2.
+//
+// **The choice is a function of `N` and lives here** so that the runtime
+// (src/runtime/capture.cc) and the table check (tests/kernels/kernel_table_test.cc)
+// cannot drift apart. `lm_head` (N = 248320) keeps `{64, 1}`: 3880 work-groups
+// at 98.5% of measured bandwidth in situ, nothing to win - and it is measured
+// unmoved by this knob existing (4378.555 -> 4378.353 µs/launch in situ, 0.005%).
+// `a‖b` (N = 128) takes `{16, 16}` - 8 work-groups of 16 K-slice subgroups, so
+// **128 hardware threads over the launch instead of 8**, and both halves of the
+// pair earn their place: the `ksplit` is what creates the threads and the
+// `cols` is what spreads them over eight Xe-cores rather than one.
+//
+// The width is measured, not chosen (docs/15 §L2, in situ, three points):
+// ksplit 1 / 4 / 16 read **48.774 / 13.115 / 5.340 µs** per launch. 16 stops
+// 2.4x above the shape's 2.22 µs traffic floor, so at most 0.15 ms/token is
+// left in it and a 32-way split cannot repay its own gate run.
+//
+// **`ksplit > 1` changes the summation order** (the K slices are merged by a
+// fixed SLM tree - gemv_bf16.cl states the order), so a variant with it is held
+// to the reference tolerance and to the golden gate, not to bit-identity.
+inline constexpr unsigned kGemvBf16Cols = 64;      // 4 subgroups per work-group
+inline constexpr unsigned kGemvBf16TinyCols = 16;  // 1 column tile per work-group
+// The B70's Xe-core count (docs/01-hardware.md). A shape whose default grid
+// already puts at least one work-group on every core is not the tiny-N case.
+inline constexpr unsigned kGemvBf16Cores = 32;
+struct GemvBf16Tiling {
+  unsigned cols;    // COLS_PER_WG: output columns per work-group
+  unsigned ksplit;  // KSPLIT: subgroups splitting one tile's K, merged in SLM
+};
+inline constexpr GemvBf16Tiling gemv_bf16_tiling(unsigned N) {
+  return N / kGemvBf16Cols >= kGemvBf16Cores ? GemvBf16Tiling{kGemvBf16Cols, 1}
+                                             : GemvBf16Tiling{kGemvBf16TinyCols, 16};
 }
+// Both suffixes are empty at the default tiling, so `{64, 1}` names exactly the
+// binaries that existed before this knob did. `_S` is `gemv.cl`'s letter for a
+// split-K width and means the same thing here, one level down (in a work-group
+// rather than across them).
+inline std::string gemv_bf16_variant(unsigned M, unsigned K, unsigned N, GemvBf16Tiling t) {
+  return "gemv_bf16_M" + std::to_string(M) + "_K" + std::to_string(K) + "_N" + std::to_string(N) +
+         (t.cols == kGemvBf16Cols ? "" : "_C" + std::to_string(t.cols)) +
+         (t.ksplit == 1 ? "" : "_S" + std::to_string(t.ksplit));
+}
+
 // The between-GEMV kernels (src/kernels/prep.cl). Only `prep_res_norm` varies
 // in shape: `prep_silu_mul` and `prep_gated_head` have the model's dimensions
 // (17408 / gate||up S=4, 48x128 / qkv||z S=1) baked into the source, so `M` is
