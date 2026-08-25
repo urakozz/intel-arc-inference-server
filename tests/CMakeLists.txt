@@ -54,6 +54,15 @@ add_dependencies(prep_test kernel_prep_res_norm_M1_K5120_SP0 kernel_prep_res_nor
   kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1)
 add_test(NAME prep_test COMMAND prep_test)
 
+# The GDN decode step. Its reference (gdn_ref.h) reproduces the kernel's tree
+# orders exactly, so the bars are ulp-tight and the conv ring is bit-exact.
+add_executable(gdn_step_test kernels/gdn_step_test.cc)
+target_include_directories(gdn_step_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+target_link_libraries(gdn_step_test PRIVATE b70_l0)
+b70_target_kernel_dir(gdn_step_test)
+add_dependencies(gdn_step_test kernel_gdn_step_M1 kernel_gdn_step_M2)
+add_test(NAME gdn_step_test COMMAND gdn_step_test)
+
 # The two kernels at a token's boundary. Both read the shared control block at
 # *execution* time, which is what the replayed list needs and what a kernel
 # argument (captured at append - tests/l0/arg_capture_test.cc) could not give.
