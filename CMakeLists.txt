@@ -45,4 +45,7 @@ add_subdirectory(src/runtime)
 add_subdirectory(src/kernels)
 add_subdirectory(src/l0)
 add_subdirectory(tools/probe)
+# After src/kernels: src/cli reads that directory's target list to depend on
+# every compiled device binary.
+add_subdirectory(src/cli)
 add_subdirectory(tests)
