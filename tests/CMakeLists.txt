@@ -22,6 +22,17 @@ b70_target_kernel_dir(arg_capture_test)
 add_dependencies(arg_capture_test kernel_noop)
 add_test(NAME arg_capture_test COMMAND arg_capture_test)
 
+# Kernel-timestamp events (plan 4's profiler foundation): the device timer
+# calibration and the signal parameter on launch, on a two-launch regular list.
+# Same shape as launch_test - a GPU and the noop binary, no checkpoint - so it
+# carries no label, like every other test in this l0 group.
+add_executable(event_test l0/event_test.cc)
+target_include_directories(event_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(event_test PRIVATE b70_l0)
+b70_target_kernel_dir(event_test)
+add_dependencies(event_test kernel_noop)
+add_test(NAME event_test COMMAND event_test)
+
 # The only test here that needs neither a GPU nor a kernel: device_index_from_env
 # is a pure parse of ONEAPI_DEVICE_SELECTOR (doc 04, "Device selection").
 add_executable(device_select_test l0/device_select_test.cc)
