@@ -75,6 +75,7 @@ def read_ids(path: str) -> list[int]:
 
 def read_golden_tokens(path: str) -> list[int]:
     """The oracle's greedy continuation, read from the golden file itself."""
+    import numpy as np
     from safetensors import safe_open
 
     with safe_open(path, framework="numpy") as f:
@@ -83,6 +84,11 @@ def read_golden_tokens(path: str) -> list[int]:
         t = f.get_tensor("tokens")
     if t.ndim != 1:
         die(f"{path}: `tokens` has shape {t.shape}, expected 1-D")
+    # dump.py writes i32. A float `tokens` would truncate silently through
+    # int(x) below and turn a corrupt golden file into a plausible-looking
+    # divergence, so refuse anything that is not an integer type.
+    if not np.issubdtype(t.dtype, np.integer):
+        die(f"{path}: `tokens` dtype is {t.dtype}, expected an integer type (dump.py writes i32)")
     return [int(x) for x in t]
 
 
