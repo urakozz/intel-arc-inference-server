@@ -204,8 +204,10 @@ bench step:
 > and the launch count reads **774**), and lever L5 took the attention family
 > from 6.058 to **3.839** (`attn_decode` 5.920 → **3.585**) with the launch
 > count unchanged. The step is **36.32 ms** (BENCHMARKS.md, recorded median
-> 27.53 t/s). Each lever's before/after and its arithmetic are §L2, §L1 and §L5
-> below; no other row here has been re-measured except as drift.
+> 27.53 t/s at `c746840`, re-measured **27.54** at the spec 1.5 gate `ef6acb0` -
+> the same engine twice, 0.04% apart; both print 36.32 ms/token). Each lever's
+> before/after and its arithmetic are §L2, §L1 and §L5 below; no other row here
+> has been re-measured except as drift.
 
 Compare with the same table in docs/05: five rows that were a floor, an
 extrapolation and a remainder are now seven rows that were all measured in one
@@ -952,17 +954,29 @@ column sums; §L5 rounds the same number to −1.73.)
 explain the ladder, and the largest single term in that reconciliation is the
 one nobody can attribute.
 
-**The step no longer closes to better than ~0.31 ms, from a second direction.**
-The L5 after-run's Σ over all 774 launches is 35.342 ms measured; the derived
-dispatch gap at 774 launches is 0.567 ms and the gate's own host term is
-0.101 ms measured - **36.010 ms against a measured 36.32**. That is the same
-0.31 ms, reached without going through any lever's before/after. Two
-independent routes to one unexplained residual is why the memo puts
-repeated-run averaging on the menu ahead of every sub-0.5 ms design.
+**The step no longer closes to better than ~0.31 ms - and the second arithmetic
+is not a second witness.** The L5 after-run's Σ over all 774 launches is
+35.342 ms measured; the derived dispatch gap at 774 launches is 0.567 ms and
+the gate's own host term is 0.101 ms measured - **36.010 ms against a measured
+36.32**, the same 0.31 ms reached without going through any lever's
+before/after. **It is the same measurement restated**: the 0.733 µs/launch rate
+was *defined* as this document's closing residual for the 645-launch step, so
+carrying it to 774 launches reproduces by construction whatever the ladder did
+not close. Anyone quoting it as corroboration is quoting one number twice.
+
+**Read per launch, the same numbers do say something new.** The un-instrumented
+gap was **0.733 µs/launch** at `43bb720` (0.473 ms / 645); at the gate it is
+36.32 − 0.101 host − 35.342 Σ = 0.877 ms / 774 = **1.133 µs/launch, +55%**
+(derived, cross-run; a ±0.5% band on Σ spans +23…+86%, so the direction holds
+and the magnitude does not). **The cost outside the kernels grew while the
+kernels shrank.** The obvious suspect is drain - `attn_decode` retires 260
+work-groups where it retired 68 - but nothing here measures that, and it is why
+the memo ranks repeated-run averaging ahead of every sub-0.5 ms design.
 
 **What did not work, kept because a ladder that records only its wins is not a
 measurement:** `a‖b` option (a) `{16,1}` (+0.7%, worth zero - §L2), the
-block-read `KU` variant (worth zero *and* −1.3% on `lm_head` - §L2), L1's
+block-read `KU` variant (worth zero *and* **+1.3% on `lm_head`** - a cost, not
+a saving; §L2), L1's
 stage B on one work-group (the plan's literal design, 60% of the win - §L1),
 `ATTN_BLOCK` 128 (superseded) and 32 (0.070 ms/token better at family level,
 rejected on a 101.4 MB `attn_part` - §L5).

@@ -214,9 +214,14 @@ The `a1e2d3a`, `b045e11` and `c746840` rows follow the same rule for the same
 reason: each is the commit that carries its kernel change and
 `tools/bench_decode.sh` read that sha out of the worktree it measured; the rows
 themselves and the docs around them are committed after, touching no `src/`
-file. **`ef6acb0` is the same tree as `c746840` along every path the engine
-reads** - the four commits between them touch only `docs/` - which is why the
-two rows measure the same engine and read 0.04% apart.
+file. **`ef6acb0` runs the same binary as `c746840`, and the claim is stronger than
+"docs only".** There are **three** commits between them and they are *not*
+docs-only: they touch `src/kernels/attn.cl`, `src/kernels/CMakeLists.txt`,
+`src/runtime/buffers.h`, `src/runtime/capture.cc` and
+`tests/kernels/attn_test.cc`. **Every changed line in those five files is a
+comment or blank** - verified line by line - and the L5 fix rounds proved the
+consequence directly: all 8 attention binaries rebuilt **sha256-identical**.
+That is why the two rows measure the same engine and read 0.04% apart.
 
 **b70-decode is 12.6% short of vLLM** - 27.54 against 31.50, a factor of 1.144
 the other way; it was 16.6% short (26.28) after two levers, 21.2% short (24.83)
@@ -239,7 +244,7 @@ worktree at `ef6acb0`, `tools/bench_decode.sh` with its defaults:
 measures **27.54 t/s / 36.32 ms/token**, **3.96 t/s - 12.6% - short**, with
 **4.574 ms/token** still to find. MBU is 428 GB/s of 590 = **72.5%**, against
 vLLM's 83.0%. The ingest half of the same runs reads 141.0 s for 4096 ids,
-**34.43 ms/token** on an un-instrumented list.
+median **34.44 ms/token** (34.43 / 34.45 / 34.44) on an un-instrumented list.
 
 Per spec 1.5 §6 the short path stops the spec and writes
 [the re-assessment memo](superpowers/specs/2026-08-25-spec1.5-reassessment.md),
@@ -247,14 +252,23 @@ which carries the per-lever ledger, the remaining gap and the priced redesign
 menu. Its headline: `lm_head` at int4 (~3.3 ms, **estimated**) is the largest
 item left and it is **necessary but not sufficient** - it lands at 30.62 t/s,
 0.88 t/s under the bar, so a second item is required and none has a measured
-price yet. The three levers that produced this row are `a1e2d3a`, `b045e11` and
+price yet. **That conclusion is bounded, not estimated:** int4 g64 still reads
+0.66 GB, a **1.12 ms floor** at the measured 590 GB/s, so the saving cannot
+exceed **3.26 ms** and the best step reachable with L3 and L4 also at their
+ceilings is **32.70 ms = 30.58 t/s - 0.92 t/s under**. `lm_head` cannot clear
+31.50 even if it lands perfectly. The three levers that produced this row are `a1e2d3a`, `b045e11` and
 `c746840` below; the golden gate is **96/96 element-exact** at every one of
 them and the full suite is green at `ef6acb0`.
 
-This row measures the same binary path as the `c746840` row (docs-only commits
-between) and reproduces it to **0.04%**: 27.54 against 27.53, both 36.32
-ms/token. Neither number is a correction of the other - they are two medians of
-one engine, and the gate row is the one spec 1.5 closes on.
+This row measures the same binary as the `c746840` row (three commits between;
+their `src/` and `tests/` hunks are comment-only and the attention binaries are
+sha256-identical) and reproduces it to **0.04%**: 27.54 against 27.53, both
+36.32 ms/token. **Unrounded they reconcile exactly at printed precision:** the
+gate's own per-token print is **36.317 ms** (= 27.5352 t/s, prints 27.54),
+while a median printing 27.53 is 36.324 ms (derived) - the two are **~7 µs per
+token apart**, an order of magnitude inside the 0.04% spread, and both print
+36.32. Neither number is a correction of the other; they are two medians of one
+engine, and the gate row is the one spec 1.5 closes on.
 
 ### The `c746840` row - spec 1.5 lever L5
 

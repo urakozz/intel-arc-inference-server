@@ -35,8 +35,14 @@ it scopes in [05-perf-model.md](05-perf-model.md).
 > 27.54 t/s** at the spec 1.5 gate, `ef6acb0`, 2026-08-25. The percentages here
 > were not recomputed: each lever's own section carries its before/after, and
 > re-basing a document-wide denominator halfway through would make two numbers
-> for one quantity. Multiply by 42.141/36.32 = 1.16 to read a share against
-> today's step. Why the spec closed short is
+> for one quantity. **To read a share against today's step, multiply by
+> 42.141/36.32 = 1.16 - but ONLY for a row no lever touched.** For the three
+> rows the ladder cut, the conversion is meaningless and wrong by up to an
+> order of magnitude: applying it to `a‖b`'s old 5.5% gives 6.4% where the
+> measured share today is **0.7%**, a 9× error. `a‖b`, the `prep` family and
+> the attention family are re-quoted at their post-lever values in the table
+> below and in each lever's own "Measured - lever L*" section. Why the spec
+> closed short is
 > [the re-assessment memo](superpowers/specs/2026-08-25-spec1.5-reassessment.md).
 
 Four kinds of number appear in the sections below, and **every one of them says
@@ -88,16 +94,18 @@ where the prose rounds.
 
 **This partition is the step as it stood at `43bb720`, before spec 1.5 cut its
 first lever.** It is kept whole because it is what the 42.141 ms bench row
-partitions and because every row above is one measurement of one run. Two levers
-have moved rows out of it since, both measured in situ with the same instrument
-and both with their bench row in [BENCHMARKS.md](BENCHMARKS.md):
+partitions and because every row above is one measurement of one run. **Three**
+levers have moved rows out of it since - the whole spec-1.5 ladder - each
+measured in situ with the same instrument and each with its bench row in
+[BENCHMARKS.md](BENCHMARKS.md):
 
 | row | at `43bb720` | now | lever |
 |---|---|---|---|
 | `a‖b` GEMV | 2.335 ms | **0.256 ms** | L2 (`a1e2d3a`), [docs/15](15-step-anatomy.md) §L2 |
 | `prep` family | 3.573 ms (2.871 of it `res_norm`) | **1.202 ms** (0.484 of it the two-stage pair) | L1 (`b045e11`), [docs/15](15-step-anatomy.md) §L1 |
+| `attn_decode` (+ `attn_prep`/`attn_reduce`) | 5.782 ms (5.909 with the pair) | **3.585 ms** (**3.839** with the pair) | L5 (`c746840`), [docs/15](15-step-anatomy.md) §L5 |
 
-**Both "now" columns are a different run from the "at `43bb720`" column**, so
+**All three "now" columns are a different run from the "at `43bb720`" column**, so
 they are a change of state and not a before/after pair: each lever's own
 before/after is measured within one session and lives in its §L2 / §L1 section.
 The drift between two runs of this instrument on untouched launches is 0.3-0.5%,
@@ -484,7 +492,7 @@ were tried in situ and were worth nothing:
 |---|---|---|---|
 | `{64, 1}` - as it shipped | 8 | **48.774** | the baseline |
 | `COLS_PER_WG` 16: 2 work-groups → 8, bit-identical | 8 | **49.127** | **nothing** |
-| + 4 block reads in flight per subgroup, bit-identical | 8 | **49.052** | **nothing**, and −1.3% on `lm_head` |
+| + 4 block reads in flight per subgroup, bit-identical | 8 | **49.052** | **nothing**, and it made `lm_head` **1.3% slower** |
 | `{16, 4}` - K split four ways | 32 | **13.115** | −1.712 ms/token |
 | **`{16, 16}` - K split sixteen ways (shipped)** | **128** | **5.340** | **−2.085 ms/token** |
 
