@@ -97,7 +97,20 @@
 //                    VALUES -- signext(q ^ 8) == q - 8 for every q in [0,16) --
 //                    and identical accumulation order, so bit-identical
 //                    outputs. ALU only, zero message change: it is here to ask
-//                    whether the plateau shapes have any ALU term at all.
+//                    whether the plateau shapes have any ALU term at all. It
+//                    turned out to be worth +1.5% mean, positive at six shapes
+//                    of six (2026-08-26), so the answer is "yes, a small one".
+//
+//                    **Note for whoever promotes this into src/kernels/gemv.cl.**
+//                    It leans on `>>` over a NEGATIVE `int` being an ARITHMETIC
+//                    shift. OpenCL C requires that (it is not C's
+//                    implementation-defined behaviour: OpenCL fixes the sign
+//                    fill), and it is verified empirically here -- every cell of
+//                    every `deq` row came back bit-identical to `base` on this
+//                    driver. A future compiler that disagreed would produce
+//                    wrong logits at every token, which the golden gate catches
+//                    immediately and loudly. Keep the gate in that lever's
+//                    acceptance; do not promote it on a unit test alone.
 //
 // **Why there is no layout-1 2D-block variant.** The canonical tile is 136
 // u32 = **544 bytes**, and 544 is not a multiple of 64, so consecutive tiles
