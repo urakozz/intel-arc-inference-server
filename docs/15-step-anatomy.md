@@ -1700,9 +1700,12 @@ this step have died four times.
   the swap by name so a future change that is not one-for-one says so.
 - **Determinism**: bitwise-identical replays on the new checkpoint, 8 tokens ×
   3 runs.
-- **The golden gate did move, and not in the direction of a pass.** The
-  published checkpoint is still **96/96 element-exact** with the full 40/40
-  suite green. The new checkpoint's own gate reads **79/96**, on one legitimate
-  flip at a decision row where the oracle's top-two logits are **bit-identical**.
-  That is docs/14, "The RTN-checkpoint gate", and it is a decision, not a result
-  to absorb.
+- **The golden gate moved, was surfaced as a decision, and is now green on
+  both checkpoints.** The first RTN run read 79/96 on one flip at a decision row
+  where the oracle's top-two logits are **bit-identical** - the legitimate flip
+  the memo predicted. The controller ruled that such a row is UNDETERMINED, and
+  under the amended semantics (determined rows element-exact at unchanged
+  strictness, undetermined rows judged on argmax-set membership, the tail
+  teacher-forced) the measured result is **`Vishva007` 94/94 determined + 2
+  tie-agreements** and **RTN 93/93 determined + 3 undetermined**, suite 40/40.
+  docs/14, "The RTN-checkpoint gate", has the ruling and both outputs.

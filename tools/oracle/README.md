@@ -343,7 +343,8 @@ one, and it is worth being explicit about where the chain currently ends.
    softmax), deliberately without `fla`. That reference implementation - not
    our kernels - decides what the correct activations are.
 3. **The engine.** **Plan 3's golden test compares the engine against THESE
-   files** - and as of **2026-08-25 it passes, 96/96 token ids exact**
+   files** - and as of **2026-08-25 it passes, 96/96 token ids exact** (re-read
+   under the 2026-08-26 ruling as 94 determined-exact + 2 tie-agreements)
    (`docs/14-golden-gate.md`): `oracle-out/{prose,code,cjk}.golden.safetensors`
    on the box, the ones produced by the run recorded above. Per-layer `resid`/`mixer`/`mlp`,
    the GDN and conv states after the prompt, the logits rows and the 32 greedy
@@ -380,8 +381,14 @@ moves the engine and the oracle **together** and the golden test still passes.
 > made, and the engine happened to agree with `torch.argmax`'s lowest-index
 > tie-break on both. On the RTN set it does not, at the first one, and the gate
 > reads 79/96. This is the point where "the engine is the more accurate of the
-> two" stops being a footnote and starts deciding a token. It is an open
-> decision, not a fixed bug.
+> two" stops being a footnote and starts deciding a token.
+>
+> **Resolved by ruling, 2026-08-26**: such a row is UNDETERMINED, and the gate
+> asserts membership of the golden argmax set there instead of torch's
+> lowest-index tie-break, at unchanged strictness everywhere else. Both gates
+> are green under it - 187 of 187 determined rows element-exact across the two
+> checkpoints. The reference's resolution limit is now a property the gate
+> *knows about* rather than one it trips over. docs/14 has the ruling.
 
 Read a future three-way disagreement like this:
 
