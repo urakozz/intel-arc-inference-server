@@ -604,10 +604,17 @@ class Capture {
   // `out` argument makes the split-K accumulator's degenerate case *be* the
   // logits row. No `partials` slice is involved, no rebinding of `argmax`, no
   // direct-out variant of `gemv.cl`: the S = 1 that the shape needs for
-  // occupancy reasons is the same S = 1 that makes this legal. `logits` is
-  // fp32 [M][248320] = 7 946 240 B and the result is S*M*N*4 = the same
-  // number - an exact fit, checked by the `require` in `gemv()` rather than
-  // asserted here.
+  // occupancy reasons is the same S = 1 that makes this legal.
+  //
+  // **The sizes, exactly.** This capture compiles `kCapM = 1`, so the launch
+  // writes `S*kCapM*N*4` = 1*1*248320*4 = **993 280 B**. `logits` is allocated
+  // for `DecodeBuffers::kM = 8` tokens in flight - 8*248320*4 = **7 946 240 B**
+  // - so there is **8x headroom, not an exact fit**. The `require` in `gemv()`
+  // checks the figure the launch actually writes against the allocation, which
+  // is a real bound (it would catch a genuinely undersized output) and not a
+  // tight one. When M > 1 is turned on the two converge: at `kCapM = kM` the
+  // launch fills the allocation exactly, and `logits`' [M][N] layout is
+  // already what `out[(s*M + m)*N + n]` produces at S = 1 for every m.
   //
   // The launch COUNT is identical either way (one launch, 774 total). The
   // MODULE count is too, though not trivially: `gemv_bf16_M1_K5120_N248320`
