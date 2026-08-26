@@ -18,6 +18,9 @@ constexpr uint32_t kTopLevel = 65535;
 
 struct DeviceWeight {
   l0::Mem mem;                 // the canonical bytes on device
+  // Layout 0's real, independent f16 [K/64][N] allocation. Null for layout 1
+  // (scales are inline in mem) and for bf16 weights.
+  std::unique_ptr<l0::Mem> scales;
   model::GemvShape shape;      // K, N, S, layout as the kernel variant needs
   model::WeightKind kind;
 };

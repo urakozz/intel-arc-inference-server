@@ -217,7 +217,8 @@ class Capture {
     // `[S][M][N]`; at S = 1 that collapses to `[M][N]` and a token's row base is
     // `m·N`, which is what `gdn_step`, `attn_prep` and `prep_gated_head` assume.
     // `prep_silu_mul` is the other side of the same coin: it *does* loop the
-    // slices, and it loops exactly SILU_S = 4 of them.
+    // slices, and it loops exactly SILU_S = 8 of them. `attn_prep` likewise
+    // folds QKV_S = 2 before applying the linear's bf16 rounding.
     //
     // Retuning a row in `model/qwen35.cc` changes which GEMV variant is bound
     // but not the baked constant, and the mismatch is silent - the consumer
@@ -230,10 +231,10 @@ class Capture {
     require(Qwen35::shape(LinearId::QkvZ).S == 1,
             "qkv||z is no longer S=1, but gdn_step.cl (QKVZ_S) and prep.cl "
             "(GATED_S) bake S=1 into their partials indexing");
-    require(Qwen35::shape(LinearId::GateUp).S == 4,
-            "gate||up is no longer S=4, but prep.cl (SILU_S) bakes a 4-slice sum");
-    require(Qwen35::shape(LinearId::Qkv).S == 1,
-            "qkv is no longer S=1, but attn.cl (QKV_S) bakes S=1 into every "
+    require(Qwen35::shape(LinearId::GateUp).S == 8,
+            "gate||up is no longer S=8, but prep.cl (SILU_S) bakes an 8-slice sum");
+    require(Qwen35::shape(LinearId::Qkv).S == 2,
+            "qkv is no longer S=2, but attn.cl (QKV_S) bakes a 2-slice sum into every "
             "partials load");
   }
 
@@ -376,12 +377,10 @@ class Capture {
   }
 
   // gemv(w, scales, x, out) - src/kernels/gemv.cl (plan 1 §9.2), grid (N/64, S),
-  // WG 64. Every int4 row of the model table is layout 1, whose tiled buffer
-  // carries its f16 scales inline (`loader::load_linear` throws on any other
-  // layout), so the `scales` argument is unread - bind the same allocation,
-  // which is the plan-1 convention and keeps the argument count honest. (Both
-  // parameters are `restrict`-qualified; the aliasing is unobservable because
-  // `scales` is never dereferenced under LAYOUT 1.)
+  // WG 64. Layout 0 reads GPTQ-native qweight and f16 scales from two distinct
+  // allocations owned by DeviceWeight. Layout 1 carries scales inline and does
+  // not dereference the scales argument, so it retains the historical binding
+  // of w.mem there. The requires below make either ownership mistake loud.
   //
   // **The shape and the kind come from the LOADED weight, not from the model
   // table** (spec 1.6 §5.1). For seven of the eight rows the two are the same
@@ -399,6 +398,9 @@ class Capture {
     const model::GemvShape& s = w.shape;
     require(w.kind == model::WeightKind::Int4, "gemv bound to a bf16 weight");
     require(s.N % kGemvColsPerWg == 0, "gemv N is not a multiple of 64");
+    require((s.layout == 0) == bool(w.scales),
+            s.layout == 0 ? "layout-0 GEMV has no independent scales allocation"
+                          : "layout-1 GEMV unexpectedly owns a separate scales allocation");
     // `gemv.cl` writes `out[(s*M + m)*N + n]`, so the output allocation must
     // hold S*M*N floats. Nothing else checks this: `partials` is sized as the
     // max-S x max-N rectangle over the table's int4 rows (buffers.cc), which
@@ -408,7 +410,7 @@ class Capture {
     l0::Kernel& k =
         kernel(kernels::gemv_variant(kCapM, s.K, s.N, s.S, s.layout), "gemv", kWgGemv);
     k.arg_ptr(0, w.mem.ptr());
-    k.arg_ptr(1, w.mem.ptr());
+    k.arg_ptr(1, s.layout == 0 ? w.scales->ptr() : w.mem.ptr());
     k.arg_ptr(2, x);
     k.arg_ptr(3, out.ptr());
     launch(k, s.N / kGemvColsPerWg, s.S);
@@ -451,7 +453,7 @@ class Capture {
 
   // The MLP half, identical in both layer kinds: post-norm folding the mixer's
   // partials, gate‖up, SiLU·mul, down. `mixer_s` is the split-K width of the
-  // GEMV that produced those partials (out_proj / o_proj, both S = 16).
+  // GEMV that produced those partials (out_proj / o_proj, both S = 4).
   void mlp(uint32_t layer, uint32_t mixer_s) {
     res_norm(mixer_s, at(m_.layer_small[layer].norms, loader::kNormsOffPost));
     gemv(layer, LinearId::GateUp, b_.x.ptr());
@@ -470,7 +472,7 @@ class Capture {
   void gdn_layer(uint32_t layer, uint32_t g) {
     // Layer 0 leads the whole step, so there are no previous partials to fold
     // and `resid` is exactly embed_gather's output: the SP0 variant. Every
-    // other layer folds the previous layer's `down` (S = 16).
+    // other layer folds the previous layer's `down` (S = 4).
     res_norm(layer == 0 ? 0u : Qwen35::shape(LinearId::Down).S,
              at(m_.layer_small[layer].norms, loader::kNormsOffInput));
     gemv(layer, LinearId::QkvZ, b_.x.ptr());

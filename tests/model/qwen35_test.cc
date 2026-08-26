@@ -27,11 +27,28 @@ int main() {
     CHECK_EQ(s.K % 64, uint32_t(0));
     CHECK_EQ((s.K / 64) % s.S, uint32_t(0));
   }
-  // The measured table (docs/probe-gemv-2026-08-24.md): spot-check the two
-  // that differ from naive expectations.
-  CHECK_EQ(Qwen35::shape(LinearId::OutProj).K, uint32_t(6144));
-  CHECK_EQ(Qwen35::shape(LinearId::OutProj).S, uint32_t(16));
-  CHECK_EQ(Qwen35::shape(LinearId::GateUp).S, uint32_t(4));
+  // Task 4's production map. Every cell is literal so a wrong layout or split
+  // cannot hide behind a helper shared with the table under test.
+  struct ShapeWant { LinearId id; uint32_t K, N, S, layout; };
+  for (const ShapeWant& w : {
+           ShapeWant{LinearId::OutProj, 6144, 5120, 4, 0},
+           ShapeWant{LinearId::OProj, 6144, 5120, 4, 0},
+           ShapeWant{LinearId::Qkv, 5120, 14336, 2, 0},
+           ShapeWant{LinearId::QkvZ, 5120, 16384, 1, 1},
+           ShapeWant{LinearId::GateUp, 5120, 34816, 8, 0},
+           ShapeWant{LinearId::Down, 17408, 5120, 4, 0},
+       }) {
+    const auto& s = Qwen35::shape(w.id);
+    CHECK_EQ(s.K, w.K);
+    CHECK_EQ(s.N, w.N);
+    CHECK_EQ(s.S, w.S);
+    CHECK_EQ(s.layout, w.layout);
+  }
+  const auto& int4_head = Qwen35::lm_head(model::WeightKind::Int4).shape;
+  CHECK_EQ(int4_head.K, uint32_t(5120));
+  CHECK_EQ(int4_head.N, uint32_t(248320));
+  CHECK_EQ(int4_head.S, uint32_t(1));
+  CHECK_EQ(int4_head.layout, uint32_t(1));
 
   // Fusion wiring for layer 0 (GDN) and 3 (FA).
   CHECK_EQ(layers[0].linears.size(), size_t(5));

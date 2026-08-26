@@ -60,6 +60,25 @@ inline std::vector<ColSource> cols_interleave16(const Part& a, const Part& b) {
   return cols;
 }
 
+// int4 layout 0: GPTQ-native qweight [K/8][N_total] plus a separate scales
+// [K/64][N_total] allocation. The checkpoint already has this geometry for a
+// Single part; the column map is still applied so Concat and Interleave16 use
+// the exact same fused-N contract as layout 1.
+inline void repack_int4_layout0_cols(uint32_t K, uint32_t N_total,
+                                     const std::vector<ColSource>& cols,
+                                     uint32_t* qweight_out, uint16_t* scales_out) {
+  for (uint32_t r = 0; r < K / 8; ++r)
+    for (uint32_t n = 0; n < N_total; ++n) {
+      const ColSource& c = cols[n];
+      qweight_out[size_t(r) * N_total + n] = c.qweight[size_t(r) * c.n_part + c.n];
+    }
+  for (uint32_t g = 0; g < K / 64; ++g)
+    for (uint32_t n = 0; n < N_total; ++n) {
+      const ColSource& c = cols[n];
+      scales_out[size_t(g) * N_total + n] = c.scales[size_t(g) * c.n_part + c.n];
+    }
+}
+
 // Same tiles as repack_int4_layout1, but output column n reads cols[n] - the
 // fused case, where one linear's columns come from several checkpoint tensors.
 // cols.size() must be N_total; every part must share K.

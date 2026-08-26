@@ -447,9 +447,9 @@ Inputs make_inputs(uint32_t M, uint32_t seed, uint32_t max_len) {
   Inputs in;
   in.M = M;
   in.max_len = max_len;
-  // The fused qkv GEMV's partials (S = 1). sigma 1 keeps the pre-norm head
+  // The fused qkv GEMV's partials (S = 2). sigma 1 keeps the pre-norm head
   // vectors at a realistic scale; the norm removes it anyway.
-  in.partials = random_f32(size_t(M) * kQkvN, seed + 1, 0.f, 1.f);
+  in.partials = random_f32(size_t(attn_ref::kQkvS) * M * kQkvN, seed + 1, 0.f, 1.f);
   // The layer's FA small block: q_norm fp32 (1+w)[256] at float 0, k_norm at
   // float 256 (loader/small_layout.h). The loader bakes 1 + w, so centre on 1.
   in.fa_small = uniform_f32(kFaSmallFloats, seed + 2, 0.75f, 1.25f);
