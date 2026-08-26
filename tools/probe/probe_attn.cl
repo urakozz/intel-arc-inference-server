@@ -47,6 +47,11 @@
 //   PB_NO_SOFTMAX 1: drop the whole online update (fmax, exp, ssum, the rescales)
 //   PB_DEP_BREAK  1: waves stop being loop-carried - (mx, sm) are per-wave, acc is a sum
 //   PB_PREFETCH   1: the next wave's K row is loaded before this wave's barriers
+//   PB_B2D        1 two `intel_sub_group_2d_block_read_16b_8r16x1c` | 2 one
+//                   `..._8r16x2c` - the whole 512 B K row in 2 or 1 messages
+//                   instead of 16, SAME values in the SAME fma order, so this
+//                   one is bit-identical to the base rather than deliberately
+//                   wrong. Spec 1.7's P3-prep transfer check.
 //
 // The one thing NO switch may do is let the compiler delete work: every
 // ablation that removes a load replaces it with arithmetic over `p`/`lid` so
@@ -112,6 +117,9 @@
 #ifndef PB_PREFETCH
 #define PB_PREFETCH 0
 #endif
+#ifndef PB_B2D
+#define PB_B2D 0
+#endif
 
 // The model's dimensions - attn.cl's, verbatim, because a probe that measures a
 // different shape measures nothing.
@@ -156,6 +164,15 @@
 #endif
 #if PB_PREFETCH && PB_KT
 #error "probe_attn: PB_PREFETCH writes its own K address"
+#endif
+// PB_B2D replaces the K load itself, so it is exclusive with every other switch
+// that also rewrites it. PB_KT is allowed: it only moves `krow`, and the row is
+// still 512 contiguous, 512-byte-aligned bytes either way.
+#if PB_B2D && (PB_NO_K || PB_HOT_K || PB_PREFETCH || PB_VEC != 1)
+#error "probe_attn: PB_B2D is exclusive with PB_NO_K, PB_HOT_K, PB_PREFETCH and PB_VEC"
+#endif
+#if PB_B2D != 0 && PB_B2D != 1 && PB_B2D != 2
+#error "probe_attn: PB_B2D must be 1 (two block messages) or 2 (one)"
 #endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
@@ -312,6 +329,38 @@ __kernel void probe_attn(__global const uint* restrict ctrl,
             a = fma(qs[d0 + 1u], bf16f(kk.s1), a);
             a = fma(qs[d0 + 2u], bf16f(kk.s2), a);
             a = fma(qs[d0 + 3u], bf16f(kk.s3), a);
+          }
+#elif PB_B2D
+          // **P3-prep (spec 1.7 §3).** The K row seen as a 2D surface: 8 rows of
+          // 64 B, pitch 64 B, height 8 - which is exactly the 512 B the row
+          // occupies and nothing more. One or two 2D block messages replace the
+          // SIXTEEN 32 B loads the base kernel issues per row.
+          //
+          // The destination mapping is what makes this a clean swap rather than
+          // a different kernel: a 16-column block over SIMD16 gives lane `l`
+          // column `l` of each row, i.e. `v[r] = krow[32*r + l]`. The base
+          // kernel's `t`-th element for this lane is `krow[lane + 16*t]`, so
+          // even `t` is `v0[t/2]` and odd `t` is `v1[t/2]`, and the loop below
+          // runs the SAME sixteen fma in the SAME order over the SAME values.
+          // Bit-identical to `base`, with 8x or 16x fewer K messages.
+          {
+#if PB_B2D == 1
+            ushort v0[8], v1[8];
+            intel_sub_group_2d_block_read_16b_8r16x1c((__global void*)(__global ushort*)krow,
+                                                      64, 8, 64, (int2)(0, 0), v0);
+            intel_sub_group_2d_block_read_16b_8r16x1c((__global void*)(__global ushort*)krow,
+                                                      64, 8, 64, (int2)(16, 0), v1);
+#else
+            ushort vv[16];
+            intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)(__global ushort*)krow,
+                                                      64, 8, 64, (int2)(0, 0), vv);
+            __private const ushort* v0 = vv;
+            __private const ushort* v1 = vv + 8;
+#endif
+            for (uint t = 0; t < PER_LANE; ++t) {
+              const ushort kk = (t & 1u) ? v1[t >> 1] : v0[t >> 1];
+              a = fma(qs[lane + SG * t], bf16f(kk), a);
+            }
           }
 #else
           for (uint t = 0; t < PER_LANE; ++t) {

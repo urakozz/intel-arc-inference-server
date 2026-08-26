@@ -73,6 +73,18 @@
 //                    costs 8 integer mads per k-group that PGL_PFBUF does not,
 //                    so it is a CONSERVATIVE control: it can only make
 //                    `pfbuf - ballast` look better than the truth, never worse.
+//   PGL_CACHECTL  **MEASURED BROKEN 2026-08-26 - do not read its GB/s.** The
+//                    builtin below compiles and runs, but under the signature
+//                    declared here it does NOT reproduce
+//                    `intel_sub_group_block_read8`'s data mapping: all three
+//                    policies differed from `base` in EVERY cell (max abs err
+//                    52-94 against a 0.005 bar) and timed at 129-136% of the
+//                    measured 590 GB/s, which is what reading the wrong,
+//                    cache-resident bytes looks like. The rows were removed
+//                    from the battery rather than reported. Reviving this needs
+//                    IGC's actual declaration, not a plausible one -- and
+//                    whatever replaces it must be byte-checked before its GB/s
+//                    is quoted, which is how this was caught.
 //   PGL_CACHECTL  1..7: the 512 B weight read becomes
 //                    `__builtin_IB_simd_block_read_8_global_cacheopts` at that
 //                    LSC cache policy -- same message, same data mapping, same
