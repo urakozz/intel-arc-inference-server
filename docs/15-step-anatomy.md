@@ -1628,6 +1628,10 @@ the int4 row for the same reason, one 3.7× shorter.
 
 ### The bench, and the honest conditions
 
+> **Superseded 2026-08-26 by record-grade rows - see "The record rows" below.**
+> The iterate rows are kept because they are what the lever was accepted on and
+> because the same-hour control is the evidence that the comparison was sound.
+
 `--bench --depth 4096 --tg 64`, **single runs, not medians of three**, on a
 loaded box. A record-grade row is deferred to a quiet window and named as a
 follow-on.
@@ -1676,6 +1680,15 @@ line prints the `W` it used.
 | the memo's projection for this row | 33.02 | 30.28 | derived, 2026-08-25 |
 | the new roofline (13.673 GB ÷ 590 GB/s) | 23.174 | 43.15 | measured / derived |
 
+> **Re-measured at record grade, 2026-08-26** (idle box, median of three,
+> `tg 256`, `647f2d0`): `Vishva007` **27.52 / 36.34**, `qwen38-27b-w4g64-rtn`
+> and `qwen38-27b-w4g64-tuned` **both 30.04 / 33.29**. Against the bar the gap
+> is **1.46 t/s (1.55 ms)**, not 1.30 - the iterate row was a single run at
+> `tg 64` on a loaded box, and `tg 64 → 256` alone is a named +0.086 ms/token
+> (mean KV depth 4127.5 → 4223.5, +2.33% of `attn_decode`'s 3.585 ms).
+> docs/BENCHMARKS.md, "The record rows", carries the triples and the
+> reconciliation. **The conclusion does not move; it hardens.**
+
 **Still short of the bar by 1.36 ms (1.30 t/s), and the memo said it would be.**
 §4's headline - "`lm_head` at int4 is necessary and NOT sufficient", and "it
 cannot clear 31.50 t/s even if it lands perfectly, because the bytes it still
@@ -1709,3 +1722,28 @@ this step have died four times.
   teacher-forced) the measured result is **`Vishva007` 94/94 determined + 2
   tie-agreements** and **RTN 93/93 determined + 3 undetermined**, suite 40/40.
   docs/14, "The RTN-checkpoint gate", has the ruling and both outputs.
+
+### The follow-ups this section owed - closed 2026-08-26
+
+§5.1 landed on a loaded box and left five items behind. Four are now closed and
+each is closed by a measurement, not by a decision:
+
+| owed item | status | where the evidence is |
+|---|---|---|
+| **record-grade median-of-three on BOTH checkpoints, idle box** | **CLOSED** - `Vishva007` **27.52 / 36.34**, RTN **30.04 / 33.29**, spreads 0.15% / 0.07%, `647f2d0`, zero DRM fd holders before and after | docs/BENCHMARKS.md, "The record rows" |
+| **the tuned artifact's drop-in** (probe → oracle regen → gate → bench) | **CLOSED** - byte-verified (int4 g64 sym, packed head, `0x77777777`, 2015 tensors = 16.411 GiB of shards); `oracle-out-tuned/` regenerated in 18 min 16 s; gate **94/94 determined + 2 tie-agreements**; record row **30.04 / 33.29** | docs/14, "The tuned-checkpoint gate" |
+| **vLLM smoke test of the self-quantised artifacts** (upload preflight) | **CLOSED, and it is a NEGATIVE result** - vLLM cannot load a quantised `lm_head`: `AttributeError: Cannot determine in_features for layer.` The bf16-head control loads and returns 96/96 in the same container, which isolates it | docs/14, "The vLLM smoke test" |
+| **the parked gate guard** (empty argmax set → UB; the wrong `dump.py` comment) | **CLOSED** - `CHECK(!d.set.empty())` plus a corrected comment in `golden_decision()`; all three gates re-run after it and byte-identical, suite 40/40 | `tests/golden/golden_gate_test.cc` |
+| **vLLM fair re-baseline on the new checkpoint** | **STILL OPEN, and now bigger than it was** - the operator's rebuild carries the *same image tag* with a different vLLM (`dev514` vs `dev365`) and a **different quantization backend** (INC wNa16 vs AutoGPTQ). The 31.50 t/s bar was measured on the old contents and has not been re-measured | docs/14, "The backend changed under the same image tag" |
+
+**The bar did not move and the conclusion did not soften.** At record grade the
+engine is **1.46 t/s (4.6%) short** of 31.50 rather than the 1.30 the iterate row
+suggested - the properly-measured number is the slightly worse one, which is the
+direction that costs nothing to believe.
+
+**One thing the tuned artifact settles for free**: `tuned` and `rtn` have
+identical tensor manifests and record **the same t/s to every printed digit**
+(30.04 / 33.29 / 411 GB/s / 69.6%), two medians of three taken 45 minutes apart.
+The quantisation *algorithm* is not a decode-speed variable on this engine; only
+the layout is. Whether it is an *accuracy* variable is doc 07 #6, and that is
+still unmeasured.

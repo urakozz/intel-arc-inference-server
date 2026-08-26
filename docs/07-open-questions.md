@@ -181,6 +181,33 @@ false` in `quantization_config`). Needs a perplexity or `lm_eval` comparison
 against the unquantised baseline before adoption. In phase 2 the same question
 applies to the 0.85 GB bf16 MTP head, and `lm_head` is read twice per step.
 
+**Still open - but as of 2026-08-26 it is now answerable, and it was not
+before.** The *speed* half is measured and closed (`lm_head` int4 is worth
+−3.05 ms/token at record grade, docs/BENCHMARKS.md "The record rows"); this
+question is the *accuracy* half and no eval has been run. What changed is that
+there is now a **tuned** artifact to run one on:
+`~/models/qwen38-27b-w4g64-tuned/Qwen3.8-27B-w4g64` - the same W4A16 g64
+symmetric recipe as the published checkpoint, produced by AutoRound's sign-SGD
+tuning, differing from it in exactly the variable under test (`--quant_lm_head`)
+rather than in the tuning algorithm as well. That makes `tuned` vs `Vishva007`
+a controlled comparison and `rtn` vs `tuned` a second one that prices the
+tuning itself. All three are loadable by this engine and all three have green
+golden gates (docs/14).
+
+**Deliberately not run here.** The `lm_eval` comparison is a recorded next step
+for the operator, not something to slip into a measurement task: it is hours of
+GPU, it needs task selection and a seed policy decided up front, and - see
+below - the obvious vehicle for running it is currently blocked.
+
+> **Caveat on the vehicle.** vLLM in the current image **cannot load either
+> int4-`lm_head` artifact** (docs/14, "The vLLM smoke test"): its INC wNa16
+> scheme raises `AttributeError: Cannot determine in_features for layer.` on the
+> quantised head. So an `lm_eval` run through vLLM would have to use the
+> published checkpoint only, which is the baseline and not the thing under test.
+> Evaluating the int4 head today means going through `transformers` on CPU (the
+> oracle's own path, which does dequantise it - `lm_head: int4 (dequantised
+> here)`) or through this engine.
+
 ## 7. Can 24 MB of L2 be exploited deliberately?
 
 Unusually large. A 4096×4096 int4 tile is 8 MB. Whether multi-layer weight

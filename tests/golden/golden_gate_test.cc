@@ -275,7 +275,16 @@ struct GoldenDecision {
 // Same masking rule as argmax_masked, so the set and the argmax cannot disagree
 // about which columns are eligible. fp32 `==` here is bit-equality for every
 // value a finite logit can take, which is what "the reference does not
-// distinguish them" means; `dump.py` aborts on a non-finite logits row.
+// distinguish them" means.
+//
+// **The set is empty only if the whole row is NaN.** NaN compares false against
+// everything, so neither loop below would ever fire - and every caller indexes
+// `set[0]`. `dump.py` does NOT rule that out: its finiteness abort covers
+// `resid.L{n-1}` only, never a `logits` row (see its "Hard aborts" list). An
+// earlier version of this comment said that it did, and that was wrong. The
+// CHECK below turns a corrupt future golden into a named failure at a named
+// line instead of undefined behaviour. It cannot fire on any golden file that
+// exists today - every logit row in all nine is finite.
 GoldenDecision golden_decision(const float* row, uint32_t n, uint32_t used) {
   GoldenDecision d;
   const uint32_t lim = n < used ? n : used;
@@ -285,6 +294,7 @@ GoldenDecision golden_decision(const float* row, uint32_t n, uint32_t used) {
   d.value = bv;
   for (uint32_t i = 0; i < lim; ++i)
     if (row[i] == bv) d.set.push_back(i);
+  CHECK(!d.set.empty());   // an all-NaN golden logits row - see above
   return d;
 }
 
