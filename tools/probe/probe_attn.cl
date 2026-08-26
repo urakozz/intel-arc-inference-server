@@ -22,6 +22,7 @@
 //   PB_MAXLEN     grid extent                      (16384 = the loader default)
 //   PB_GQA        q-head passes per work-group     (6 = GQA 6:1; 1 isolates the reread)
 //   PB_GPACK      0 base q-head-outer walk | 2/3/6 heads share one staged K/V walk
+//   PB_GREG       0 base/staged walk | 2/3/6 heads reuse private-register K/V
 //   PB_STAGE      0 whole kernel | 1 return at the early-out | 2 return after q staging
 //   PB_NO_K       1: the K global load becomes arithmetic (same fma count)
 //   PB_NO_V       1: the V global load becomes arithmetic (same fma count)
@@ -69,6 +70,9 @@
 #endif
 #ifndef PB_GPACK
 #define PB_GPACK 0
+#endif
+#ifndef PB_GREG
+#define PB_GREG 0
 #endif
 #ifndef PB_STAGE
 #define PB_STAGE 0
@@ -181,6 +185,12 @@
 #if PB_GPACK && (PB_GPACK > PB_GQA || PB_GQA % PB_GPACK != 0)
 #error "probe_attn: PB_GPACK must divide PB_GQA"
 #endif
+#if PB_GREG && (PB_GREG > PB_GQA || PB_GQA % PB_GREG != 0)
+#error "probe_attn: PB_GREG must divide PB_GQA"
+#endif
+#if PB_GPACK && PB_GREG
+#error "probe_attn: choose SLM or register GQA packing, not both"
+#endif
 // The packed path is a correctness-candidate in its own right. Keep its first
 // measurement free of the deliberately-wrong ablations above; combinations
 // can be priced only after the isolated transplant survives its byte gate.
@@ -188,6 +198,17 @@
                  PB_NO_PART || PB_VEC != 1 || PB_EXP || PB_NO_TREE || PB_NO_BARRIER || \
                  PB_SG_TREE || PB_NO_SOFTMAX || PB_DEP_BREAK || PB_PREFETCH || PB_B2D)
 #error "probe_attn: PB_GPACK cannot be combined with another ablation"
+#endif
+#if PB_GREG && (PB_STAGE || PB_NO_K || PB_NO_V || PB_HOT_K || PB_HOT_V || PB_KT || PB_VT || \
+                PB_NO_PART || PB_VEC != 1 || PB_EXP || PB_NO_TREE || PB_NO_BARRIER || \
+                PB_SG_TREE || PB_NO_SOFTMAX || PB_DEP_BREAK || PB_PREFETCH || PB_B2D)
+#error "probe_attn: PB_GREG cannot be combined with another ablation"
+#endif
+
+#if PB_GREG
+#define PB_PACK PB_GREG
+#else
+#define PB_PACK PB_GPACK
 #endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
@@ -233,12 +254,19 @@ __kernel void probe_attn(__global const uint* restrict ctrl,
   const uint lid = get_local_id(0);
   const uint sgid = lid / SG;
   const uint lane = lid % SG;
-#if PB_GPACK
+#if PB_GPACK || PB_GREG
   // One 16-position wave is 8 KB of K plus 8 KB of V. Q staging costs
   // PB_GPACK*1 KB. Even gpack6 stays below 24 KB total SLM including dot_red.
-  __local float qpack[PB_GPACK * HD];
+#if PB_GPACK
+  // The SLM form is the first transplant: one staged copy supplies the pack.
+  __local float qpack[PB_PACK * HD];
   __local ushort kstage[WAVE_P * HD];
   __local ushort vstage[WAVE_P * HD];
+#else
+  // Register reuse keeps only Q in SLM; each work-item retains its own K/V
+  // slice privately, avoiding the staged form's immediate SLM round trip.
+  __local float qpack[PB_PACK * HD];
+#endif
 #else
   __local float qs[HD];
 #endif
@@ -257,23 +285,23 @@ __kernel void probe_attn(__global const uint* restrict ctrl,
   return;
 #else
 
-#if PB_GPACK
+#if PB_GPACK || PB_GREG
   // Q-head packing: preserve each head's operation order, but invert the two
   // outer loops so PB_GPACK heads consume one K/V wave. This is the OpenCL
   // analogue of vLLM Xe2 decode's packed-Q dimension. K and V remain bf16 in
   // SLM, so staging is value-preserving rather than a precision conversion.
   const uint bound = pos;
-  for (uint qbase = 0; qbase < PB_GQA; qbase += PB_GPACK) {
-    for (uint qi = 0; qi < PB_GPACK; ++qi) {
+  for (uint qbase = 0; qbase < PB_GQA; qbase += PB_PACK) {
+    for (uint qi = 0; qi < PB_PACK; ++qi) {
       const uint qh = j * 6u + qbase + qi;
       qpack[qi * HD + lid] = attn_q[(size_t)qh * HD + lid];
     }
     PB_BARRIER();
 
-    float mx[PB_GPACK];
-    float sm[PB_GPACK];
-    float acc[PB_GPACK];
-    for (uint qi = 0; qi < PB_GPACK; ++qi) {
+    float mx[PB_PACK];
+    float sm[PB_PACK];
+    float acc[PB_PACK];
+    for (uint qi = 0; qi < PB_PACK; ++qi) {
       mx[qi] = -INFINITY;
       sm[qi] = 0.0f;
       acc[qi] = 0.0f;
@@ -282,6 +310,20 @@ __kernel void probe_attn(__global const uint* restrict ctrl,
     for (uint w = 0; w < WAVES; ++w) {
       const uint p = bstart + w * WAVE_P + sgid;
 
+#if PB_GREG
+      ushort kreg[PER_LANE];
+      ushort vreg[WAVE_P];
+      for (uint t = 0; t < PER_LANE; ++t) {
+        const uint d = lane + SG * t;
+        const size_t kidx = ((size_t)p * KV_HEADS + j) * HD + d;
+        kreg[t] = p <= bound ? kv_k[kidx] : (ushort)0;
+      }
+      for (uint s = 0; s < WAVE_P; ++s) {
+        const uint ps = bstart + w * WAVE_P + s;
+        const size_t vidx = ((size_t)ps * KV_HEADS + j) * HD + lid;
+        vreg[s] = ps <= bound ? kv_v[vidx] : (ushort)0;
+      }
+#else
       // Every subgroup stages one 256-element K row. Across the work-group,
       // every work-item also stages its output dimension from all 16 V rows.
       // These are exactly the addresses base reads, once per pack rather than
@@ -297,13 +339,18 @@ __kernel void probe_attn(__global const uint* restrict ctrl,
         vstage[s * HD + lid] = ps <= bound ? kv_v[vidx] : (ushort)0;
       }
       PB_BARRIER();
+#endif
 
-      for (uint qi = 0; qi < PB_GPACK; ++qi) {
+      for (uint qi = 0; qi < PB_PACK; ++qi) {
         float a = 0.0f;
         if (p <= bound) {
           for (uint t = 0; t < PER_LANE; ++t) {
             const uint d = lane + SG * t;
+#if PB_GREG
+            a = fma(qpack[qi * HD + d], bf16f(kreg[t]), a);
+#else
             a = fma(qpack[qi * HD + d], bf16f(kstage[sgid * HD + d]), a);
+#endif
           }
         }
 
@@ -338,8 +385,13 @@ __kernel void probe_attn(__global const uint* restrict ctrl,
         }
 
         float tsum = 0.0f;
-        for (uint s = 0; s < WAVE_P; ++s)
+        for (uint s = 0; s < WAVE_P; ++s) {
+#if PB_GREG
+          tsum = fma(sc[s], bf16f(vreg[s]), tsum);
+#else
           tsum = fma(sc[s], bf16f(vstage[s * HD + lid]), tsum);
+#endif
+        }
         acc[qi] = fma(acc[qi], resc, tsum);
 
         // The next head overwrites dot_red and the next wave overwrites K/V.
@@ -348,7 +400,7 @@ __kernel void probe_attn(__global const uint* restrict ctrl,
       }
     }
 
-    for (uint qi = 0; qi < PB_GPACK; ++qi) {
+    for (uint qi = 0; qi < PB_PACK; ++qi) {
       const uint qh = j * 6u + qbase + qi;
       __global float* restrict out =
           attn_part + (((size_t)qh * NBLOCKS + blk)) * PART;
@@ -657,6 +709,6 @@ __kernel void probe_attn(__global const uint* restrict ctrl,
 #endif  // PB_STAGE == 2
     }
   }
-#endif  // PB_GPACK
+#endif  // PB_GPACK || PB_GREG
 #endif  // PB_STAGE == 1
 }
