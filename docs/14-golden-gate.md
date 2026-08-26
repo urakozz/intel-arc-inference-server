@@ -20,6 +20,13 @@ Pro B70, `tests/golden/golden_gate_test.cc`):
 > **3 prompts × 32 greedy tokens, 96/96 token ids element-exact, first run, no
 > engine change required.**
 
+**Amended 2026-08-26** by the controller's gate-semantics ruling (see "The
+RTN-checkpoint gate" below): a decision row whose golden top-1 is not unique is
+UNDETERMINED, and the gate asserts membership of the golden argmax set there
+rather than torch's tie-break. Re-read under that rule this result is
+**94 determined rows element-exact + 2 tie-agreements** - the same 96 token ids,
+and not one determined row moved.
+
 Nothing in the engine was modified to make the gate pass. `.cl` edits were
 budgeted for this task and none were spent.
 
@@ -27,7 +34,7 @@ budgeted for this task and none were spent.
 
 | | Bar | Measured |
 |---|---|---|
-| 32 generated ids == golden `tokens`, per prompt | **exact - this is the gate, and the only thing that fails the test** | 32/32, 32/32, 32/32 |
+| generated ids vs golden `tokens`, per prompt | **the gate, and the only thing that fails the test.** Since the 2026-08-26 ruling: element-exact on every row whose golden argmax is UNIQUE, and a member of the golden argmax set on rows where it is not (below) | 32/32, 32/32, 32/32 - re-read as 94 determined-exact + 2 tie-agreements |
 | `gdn_state` after the prompt, per GDN layer, cosine | diagnostic, `**LOW**` below 0.999 | min **0.999537**, 0/144 layer-prompt pairs below the bar |
 | per-layer residual tap cosine | diagnostic, `**LOW**` below 0.999 | see below |
 | logits row at every decision point, cosine | diagnostic | 0.999844 … 0.999989 over all 96 rows |
@@ -547,9 +554,15 @@ Re-run 2026-08-26 with the whole spec-1.6 §5.1 change in the tree:
 golden_gate_test OK: 3 prompts x 32 greedy tokens, element-exact against the CPU oracle
 ```
 
-**96/96, and the full suite 40/40 green.** Nothing regressed.
+**96/96, and the full suite 40/40 green.** Nothing regressed. (Re-read under the
+amended semantics further down: 94 determined-exact + 2 tie-agreements, the same
+32/32/32 tokens.)
 
-### The new checkpoint's own gate: 79/96, and why
+### The new checkpoint's own gate, as first run: 79/96, and why
+
+> This is the run **under the pre-amendment semantics**, kept because it is what
+> opened the question. The amended verdict is at the end of this section: both
+> gates green, 93/93 determined rows exact on this checkpoint.
 
 ```
   prompt   ids   exact/32   tap min cos (layer,t)   L63 tail   gdn min cos   logit min cos
@@ -631,39 +644,106 @@ The complete picture for `prose`, 32 decisions:
 
 **The engine reproduces every decision the reference actually determines.**
 
-#### What this is, and what is being asked
+#### What this is, and the ruling that resolved it
 
 This is the flip spec 1.5's re-assessment memo §5.1 predicted in writing:
 
 > "a flipped token here would be a *legitimate* flip, not a bug, and spec §2's
 > ruling then applies: **stop and surface it as a decision**, never absorb it."
 
-So it is surfaced, and **the gate has not been weakened.** `golden_gate_test`
-still asserts exact token equality; the RTN checkpoint fails it at 79/96 and
-will keep failing it until somebody decides what a gate should do at a row its
-reference cannot resolve. The options, none of them taken here:
+It was surfaced with the arithmetic above and **the controller ruled**:
 
-1. **Leave it.** The RTN checkpoint has no green gate. Honest, and it means the
-   engine's correctness on that checkpoint rests on `code` + `cjk` (64/64) plus
-   the 29/29 analysis above rather than on a passing test.
-2. **Treat a bit-exact oracle tie as satisfied by either id.** Narrow, and
-   arguably not a weakening at all - it declines to assert something the
-   reference does not determine. It does change the gate's contract, it would
-   also apply retroactively to `cjk`'s two rows on the published checkpoint, and
-   it needs the tie detected from the golden `logits` at test time.
-3. **Give the oracle more resolution** - have `dump.py` compute the head in
-   fp32 so its logits stop landing on the bf16 grid. That changes the oracle's
-   numerics, which is the one thing this document is most reluctant about, and
-   it would invalidate both existing golden sets.
-4. **Change the prompt.** Cheapest and worst: it hides a property of the gate
-   behind a choice of input.
+> **A golden decision row whose top-1 is not unique is UNDETERMINED.** The gate
+> asserts token equality on determined rows at full strictness, requires the
+> engine's id to be a member of the golden argmax set on undetermined rows, and
+> continues teacher-forced after a divergence so the tail is still judged on the
+> reference's own context.
 
-The third bullet of the trust chain (`tools/oracle/README.md`) already says the
-engine is **the more accurate of the two** - it never materialises a bf16 weight
-- and this row is that statement arriving somewhere it has consequences. A
-reasonable reading of the measurement is that the engine is *right* at step 15
-and the oracle is *tied*; that reading is not a licence to change the bar
-without a ruling.
+The ruling is **not a tolerance and not a weakening**. On a row where the
+maximum is unique, the gate is exactly as strict as it has always been: one id,
+element-exact, and every such row must pass. What it declines to do is assert an
+answer the reference does not contain - grading the engine on `torch.argmax`'s
+lowest-index tie-break was never something this gate set out to do, and nobody
+noticed it was doing it until a coin came up tails.
+
+It applies **retroactively and symmetrically**: `oracle-out/cjk`'s two tied rows
+are re-read as undetermined too, so the published checkpoint's 96/96 becomes
+**94 determined-exact + 2 tie-agreements**. Not one determined row moved.
+
+Of the four options this section previously listed, the ruling is option 2.
+Option 1 (leave it) would have left a correct engine with a red gate; option 3
+(fp32 logits from the oracle) changes the reference's numerics and invalidates
+both golden sets for a problem that is one bit wide; option 4 (change the
+prompt) hides a property of the gate behind a choice of input.
+
+#### The amended gate is implemented, and the census is derived, not pasted
+
+`tests/golden/golden_gate_test.cc` computes `golden_decision()` - the full set
+of ids attaining the maximum - from the golden `logits` row at every decision,
+so the tie census is **committed code re-deriving the fact**, not a number
+copied out of a console. What it finds:
+
+| golden set | undetermined decision rows |
+|---|---|
+| `oracle-out/` (Vishva007) | `cjk` steps **13, 26** |
+| `oracle-out-rtn/` (RTN) | `prose` steps **15, 26, 29** |
+
+- identical to the hand-run census recorded above.
+
+**Clause (iii) has an ordering that is the whole point.** The teacher-forcing
+flag must be set *before* the advance, not after: the replay at the divergence
+row is the one that writes the diverging token into the KV cache, the conv ring
+and the GDN recurrent state, so letting it consume the engine's own id and only
+forcing from the *next* row leaves every later row reading a contaminated state.
+Measured both ways on `prose`, 2026-08-26:
+
+| flag set | teacher-forced rows' logit cos | determined rows exact |
+|---|---|---|
+| after the advance (wrong) | 0.628 … 0.998 | **26/29** |
+| **before the advance (correct)** | **0.9999** | **29/29** |
+
+Same code, one statement moved. The cosine band is the evidence that the tail is
+genuinely on the reference's context; 0.63 is what a diverged sequence looks
+like and 0.9999 is what every other row in this document looks like.
+
+This also **corrects a claim made earlier in this task**. The first
+"29/29 determined rows exact" came from an ad-hoc CLI teacher-forcing run that
+itself diverged again at the step-26 tie and free-ran from there - 25 rows
+on-context and 4 off. Under the committed clause (iii) all 29 are on-context,
+and the claim is now earned rather than approximately right.
+
+### Both gates under the amended semantics - 2026-08-26
+
+**`Vishva007` + `oracle-out/`:**
+
+```
+  prompt   ids   det-exact  tie-agree  tie-member   tap min cos (layer,t)   L63 tail   gdn min cos   logit min cos
+  prose     42    32/32         0          0        0.994806738 (62,24)   0.997115152  0.999851574 (L60)  0.999864052
+  code      61    32/32         0          0        0.913533675 (59,41)   0.982882165  0.998530392 (L60)  0.999818731
+  cjk       38    30/30         2          0        0.999690168 (51, 0)   0.999832133  0.999904153 (L33)  0.999876394
+  TOTAL: 94/94 determined rows exact, 2 undetermined (2 agree + 0 other member)
+```
+
+Legacy strict count (every row including the tie-break): **32/32/32 = 96/96**,
+unchanged. The amendment cost this checkpoint nothing and moved no determined
+row.
+
+**`qwen38-27b-w4g64-rtn` + `oracle-out-rtn/`:**
+
+```
+  prompt   ids   det-exact  tie-agree  tie-member   tap min cos (layer,t)   L63 tail   gdn min cos   logit min cos
+  prose     42    29/29         1          2        0.999817776 (62,41)   0.999842062  0.999900713 (L60)  0.999939441
+  code      61    32/32         0          0        0.896471198 (63, 7)   0.788012934  0.999677518 (L60)  0.999830544
+  cjk       38    32/32         0          0        0.999851232 (62,12)   0.999844791  0.999909240 (L33)  0.999936448
+  TOTAL: 93/93 determined rows exact, 3 undetermined (1 agree + 2 other member)
+```
+
+Legacy strict count: **30/32, 32/32, 32/32**. `prose`'s `logit min cos` is
+**0.999939441** - the free-running run's 0.628 was the divergence's consequence
+and is gone once the walk is teacher-forced.
+
+**Both gates green. 187 of 187 determined rows element-exact across the two
+checkpoints, and 5 undetermined rows all inside their golden argmax sets.**
 
 #### Diagnostics, RTN checkpoint, for the record
 
@@ -714,7 +794,8 @@ tools/box.sh run './build/tests/golden_gate_test "$PWD/oracle-out-rtn" \
 ```
 
 `ctest` still runs the gate against `oracle-out/` and the published checkpoint -
-that registration is unchanged, and it is the one that is green.
+that registration is unchanged. **Both** are green under the amended semantics;
+the RTN one has to be invoked by hand because ctest registers one golden dir.
 
 ## Running the gate
 
