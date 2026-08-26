@@ -168,6 +168,32 @@ def rand_i32(shape: tuple[int, ...]) -> torch.Tensor:
 # --------------------------------------------------------------------------
 
 
+def init_single_process_parallel() -> None:
+    """vLLM's `PackedvLLMParameter` reads the TP rank at construction, so the
+    real `create_weights` cannot run outside an initialised parallel group.
+    One process, world size 1 - the same TP=1 the box serves with."""
+    import socket
+
+    from vllm.distributed import (
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    os.environ.setdefault("LOCAL_RANK", "0")
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        distributed_init_method=f"tcp://127.0.0.1:{port}",
+        local_rank=0,
+        backend="gloo",
+    )
+    initialize_model_parallel(1, 1)
+
+
 def _noop_weight_loader(*args, **kwargs):  # never called: nothing is loaded
     raise AssertionError("weight_loader must not run in this bench")
 
@@ -198,27 +224,53 @@ def build_layer(method, k: int, n: int, act_dtype: torch.dtype):
     return layer
 
 
-def time_shape(call, launches: int, replays: int = 8, drop: int = 3):
-    """8 replays, drop the first `drop`, median of the rest. Returns
-    (us/call, enqueue us/call) - the second is the host-bound control."""
-    per, enq = [], []
+def time_batches(run, launches: int, replays: int = 8, drop: int = 3):
+    """8 replays of one batch of `launches` calls, drop the first `drop`,
+    median of the rest. Returns (us/call, submit us/call) - the second is the
+    host-bound control: wall time of the submission loop BEFORE the final
+    synchronize. Device-bound rows have submit << total."""
+    per, sub = [], []
     for rep in range(replays):
         torch.xpu.synchronize()
         t0 = time.perf_counter()
-        for i in range(launches):
-            call(i)
+        run()
         t1 = time.perf_counter()
         torch.xpu.synchronize()
         t2 = time.perf_counter()
         if rep >= drop:
             per.append((t2 - t0) * 1e6 / launches)
-            enq.append((t1 - t0) * 1e6 / launches)
+            sub.append((t1 - t0) * 1e6 / launches)
     per.sort()
-    enq.sort()
-    return per[len(per) // 2], enq[len(enq) // 2]
+    sub.sort()
+    return per[len(per) // 2], sub[len(sub) // 2]
 
 
-def run_one(method, name, k, n, act_dtype, group, launches, verify=False):
+def make_runner(call, launches: int, mode: str):
+    """`eager`: one Python call per launch - every launch pays vLLM's full
+    host path. `graph`: the same `launches` calls captured into ONE XPUGraph
+    and replayed, which is (a) what vLLM serving actually does
+    (VLLM_XPU_ENABLE_XPU_GRAPH=1; docs/09 records ~3x lost without it) and
+    (b) the exact analogue of the ONE Level Zero command list our own
+    gemv_harness.h records 40 launches into. Returns (run, keepalive)."""
+    if mode == "eager":
+
+        def run():
+            for i in range(launches):
+                call(i)
+
+        return run, None
+
+    g = torch.xpu.XPUGraph()
+    with torch.xpu.graph(g):
+        for i in range(launches):
+            call(i)
+    torch.xpu.synchronize()
+    g.replay()  # one untimed replay: first replay can carry setup cost
+    torch.xpu.synchronize()
+    return g.replay, g
+
+
+def run_one(method, name, k, n, act_dtype, group, launches, mode, verify=False):
     qw_b, sc_b = weight_bytes(k, n, group)
     total_b = qw_b + sc_b
     nb = nb_copies(qw_b)
@@ -255,10 +307,11 @@ def run_one(method, name, k, n, act_dtype, group, launches, verify=False):
         call(i)
     torch.xpu.synchronize()
 
-    warm_us, _ = time_shape(call, launches)  # discarded pass - the ramp control
-    us, enq = time_shape(call, launches)
+    run, keepalive = make_runner(call, launches, mode)
+    warm_us, _ = time_batches(run, launches)  # discarded pass - the ramp control
+    us, enq = time_batches(run, launches)
 
-    del wqs, qcopies, scopies, w_q, w_s, x, layer
+    del run, keepalive, wqs, qcopies, scopies, w_q, w_s, x, layer
     torch.xpu.empty_cache()
 
     return {
@@ -266,6 +319,7 @@ def run_one(method, name, k, n, act_dtype, group, launches, verify=False):
         "K": k,
         "N": n,
         "act": str(act_dtype).replace("torch.", ""),
+        "mode": mode,
         "NB": nb,
         "MB": total_b / (1 << 20),
         "us": us,
@@ -277,10 +331,69 @@ def run_one(method, name, k, n, act_dtype, group, launches, verify=False):
     }
 
 
+def print_tables(rows: list[dict], mode: str, a: str) -> None:
+    sel = [
+        r
+        for r in rows
+        if r["act"] == a and r["mode"] == mode and not r.get("is_control")
+    ]
+    if not sel:
+        return
+    print(
+        f"\n## vLLM `int4_gemm_w4a16` (oneDNN) at M=1, activations {a}, "
+        f"{mode} dispatch"
+    )
+    print(
+        "\n| shape | K x N | MB (qweight+scales) | NB | us/call | GB/s | "
+        "% of 590 | ours `base` | ours best | theirs / ours `base` |"
+    )
+    print("|---|---|---|---|---|---|---|---|---|---|")
+    for r in sel:
+        base, best = OURS[r["name"]]
+        print(
+            f"| {r['name']} | {r['K']}x{r['N']} | {r['MB']:.2f} | {r['NB']} | "
+            f"{r['us']:.1f} | {r['gbs']:.0f} | {r['gbs'] / WALL_GBS * 100:.0f}% | "
+            f"{base} | {best} | {r['gbs'] / base:.3f} |"
+        )
+    mean_theirs = sum(r["gbs"] for r in sel) / len(sel)
+    mean_ours = sum(OURS[r["name"]][0] for r in sel) / len(sel)
+    print(
+        f"\nmean: theirs {mean_theirs:.0f} GB/s, ours `base` {mean_ours:.0f} GB/s, "
+        f"ratio {mean_theirs / mean_ours:.3f}"
+    )
+    print("\n### host-submission control (is the row device-bound?)")
+    print("\n| shape | us/call | submit us/call | submit share |")
+    print("|---|---|---|---|")
+    for r in sel:
+        print(
+            f"| {r['name']} | {r['us']:.1f} | {r['enqueue_us']:.1f} | "
+            f"{r['enqueue_us'] / r['us'] * 100:.0f}% |"
+        )
+    print("\n### ramp control (discarded warm-up pass beside the recorded pass)")
+    print("\n| shape | warm-up (discarded) GB/s | recorded GB/s | ramp |")
+    print("|---|---|---|---|")
+    for r in sel:
+        print(
+            f"| {r['name']} | {r['warm_gbs']:.0f} | {r['gbs']:.0f} | "
+            f"{(r['gbs'] / r['warm_gbs'] - 1) * 100:+.1f}% |"
+        )
+    ctls = [
+        r for r in rows if r["act"] == a and r["mode"] == mode and r.get("is_control")
+    ]
+    if ctls:
+        first, c = sel[0], ctls[0]
+        print(
+            f"\ndrift control: {first['name']} {first['gbs']:.0f} GB/s at battery "
+            f"start, {c['gbs']:.0f} GB/s at battery end "
+            f"({(c['gbs'] / first['gbs'] - 1) * 100:+.2f}%)"
+        )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--snap", required=True, help="checkpoint snapshot dir (config.json)")
     ap.add_argument("--act", default="float16", choices=["float16", "bfloat16", "both"])
+    ap.add_argument("--mode", default="both", choices=["eager", "graph", "both"])
     ap.add_argument("--launches", type=int, default=40)
     ap.add_argument("--warm-seconds", type=float, default=20.0)
     ap.add_argument("--warm-dispatches", type=int, default=100)
@@ -289,14 +402,22 @@ def main() -> int:
     args = ap.parse_args()
 
     shapes = [s for s in SHAPES if not args.only or args.only in s[0]]
+    modes = ["graph", "eager"] if args.mode == "both" else [args.mode]
 
     # ---- provenance -------------------------------------------------------
+    import contextlib
+
     import vllm
+    from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.kernels.linear import (
         MPLinearLayerConfig,
         choose_mp_linear_kernel,
     )
     from vllm.model_executor.layers.quantization import get_quantization_config
+
+    # vLLM's parameter and parallel machinery reads the ambient VllmConfig.
+    stack = contextlib.ExitStack()
+    stack.enter_context(set_current_vllm_config(VllmConfig()))
 
     print("## environment (measured)")
     print(f"python              {sys.version.split()[0]}")
@@ -357,6 +478,8 @@ def main() -> int:
                 f"{choose_mp_linear_kernel(c).__name__}"
             )
 
+    init_single_process_parallel()
+
     # ---- device warm-up: the cold-start ramp is worth up to +42.8% --------
     wk, wn = 5120, 14336
     warm_layer = build_layer(method, wk, wn, primary)
@@ -385,86 +508,56 @@ def main() -> int:
 
     print("\n## run")
     rows: list[dict] = []
-    for act in acts:
-        for i, (name, k, n) in enumerate(shapes):
-            r = run_one(method, name, k, n, act, group, args.launches, verify=(i == 0))
-            rows.append(r)
-            print(
-                f"  [{r['act']}] {name:<14} {r['us']:9.1f} us  {r['gbs']:5.0f} GB/s "
-                f"(enqueue {r['enqueue_us']:.1f} us/call, NB={r['NB']}"
-                + (
-                    f", apply==op {r['apply_matches_op']}"
-                    if r["apply_matches_op"] is not None
-                    else ""
+    for mode in modes:
+        for act in acts:
+            for i, (name, k, n) in enumerate(shapes):
+                r = run_one(
+                    method,
+                    name,
+                    k,
+                    n,
+                    act,
+                    group,
+                    args.launches,
+                    mode,
+                    verify=(i == 0),
                 )
-                + ")",
+                rows.append(r)
+                print(
+                    f"  [{mode}/{r['act']}] {name:<14} {r['us']:9.1f} us  "
+                    f"{r['gbs']:5.0f} GB/s (submit {r['enqueue_us']:.1f} us/call, "
+                    f"NB={r['NB']}"
+                    + (
+                        f", apply==op {r['apply_matches_op']}"
+                        if r["apply_matches_op"] is not None
+                        else ""
+                    )
+                    + ")",
+                    flush=True,
+                )
+            # ramp / drift control: the first shape, re-timed after the battery
+            name, k, n = shapes[0]
+            ctl = run_one(
+                method, name + " (re-timed)", k, n, act, group, args.launches, mode
+            )
+            ctl["is_control"] = True
+            rows.append(ctl)
+            print(
+                f"  [{mode}/{ctl['act']}] {name} re-timed  {ctl['us']:.1f} us  "
+                f"{ctl['gbs']:.0f} GB/s",
                 flush=True,
             )
-        # ramp / drift control: the first shape, re-timed after the battery
-        name, k, n = shapes[0]
-        ctl = run_one(method, name + " (re-timed)", k, n, act, group, args.launches)
-        ctl["is_control"] = True
-        rows.append(ctl)
-        print(
-            f"  [{ctl['act']}] {name} re-timed  {ctl['us']:.1f} us  "
-            f"{ctl['gbs']:.0f} GB/s",
-            flush=True,
-        )
 
     # ---- tables -----------------------------------------------------------
-    for act in acts:
-        a = str(act).replace("torch.", "")
-        sel = [r for r in rows if r["act"] == a and not r.get("is_control")]
-        if not sel:
-            continue
-        print(f"\n## vLLM `int4_gemm_w4a16` (oneDNN) at M=1, activations {a}")
-        print(
-            "\n| shape | K x N | MB (qweight+scales) | NB | us/call | GB/s | "
-            "% of 590 | ours `base` | ours best | theirs / ours `base` |"
-        )
-        print("|---|---|---|---|---|---|---|---|---|---|")
-        for r in sel:
-            base, best = OURS[r["name"]]
-            print(
-                f"| {r['name']} | {r['K']}x{r['N']} | {r['MB']:.2f} | {r['NB']} | "
-                f"{r['us']:.1f} | {r['gbs']:.0f} | {r['gbs'] / WALL_GBS * 100:.0f}% | "
-                f"{base} | {best} | {r['gbs'] / base:.3f} |"
-            )
-        mean_theirs = sum(r["gbs"] for r in sel) / len(sel)
-        mean_ours = sum(OURS[r["name"]][0] for r in sel) / len(sel)
-        print(
-            f"\nmean: theirs {mean_theirs:.0f} GB/s, ours `base` {mean_ours:.0f} GB/s, "
-            f"ratio {mean_theirs / mean_ours:.3f}"
-        )
-        print("\n### host-dispatch control (is the row device-bound?)")
-        print("\n| shape | us/call | enqueue us/call | enqueue share |")
-        print("|---|---|---|---|")
-        for r in sel:
-            print(
-                f"| {r['name']} | {r['us']:.1f} | {r['enqueue_us']:.1f} | "
-                f"{r['enqueue_us'] / r['us'] * 100:.0f}% |"
-            )
-        print("\n### ramp control (discarded warm-up pass beside the recorded pass)")
-        print("\n| shape | warm-up (discarded) GB/s | recorded GB/s | ramp |")
-        print("|---|---|---|---|")
-        for r in sel:
-            print(
-                f"| {r['name']} | {r['warm_gbs']:.0f} | {r['gbs']:.0f} | "
-                f"{(r['gbs'] / r['warm_gbs'] - 1) * 100:+.1f}% |"
-            )
-        ctls = [r for r in rows if r["act"] == a and r.get("is_control")]
-        if ctls:
-            first, c = sel[0], ctls[0]
-            print(
-                f"\ndrift control: {first['name']} {first['gbs']:.0f} GB/s at battery "
-                f"start, {c['gbs']:.0f} GB/s at battery end "
-                f"({(c['gbs'] / first['gbs'] - 1) * 100:+.2f}%)"
-            )
+    for mode in modes:
+        for act in acts:
+            print_tables(rows, mode, str(act).replace("torch.", ""))
 
     if args.json:
         with open(args.json, "w") as f:
             json.dump({"rows": rows, "ours": OURS}, f, indent=1)
         print(f"\nwrote {args.json}")
+    stack.close()
     return 0
 
 
