@@ -1055,8 +1055,17 @@ exit 77, which ctest reports as **SKIP** - verified by hiding the directory and
 re-running. The test also asserts that each `.ids` file has as many ids as its
 golden file's `resid.L0` has rows, so a stale ids file cannot silently pass.
 
-**Measured cost** (fix-round run, 2026-08-25, the run every number in this
-document comes from): **24.12 s** under ctest, **23.87 s** standalone, of which
-**13.4 s** is the checkpoint load; peak RSS **20,489,588 KB = 19.5 GiB**
-(`/usr/bin/time -v`). Full suite: **23/23 tests, 105.01 s**. One checkpoint load
-serves all three prompts.
+**Measured cost** (fix-round run, 2026-08-25): **24.12 s** under ctest,
+**23.87 s** standalone, of which **13.4 s** is the checkpoint load; peak RSS
+**20,489,588 KB = 19.5 GiB** (`/usr/bin/time -v`). One checkpoint load serves
+all three prompts.
+
+> **Correction, 2026-08-26.** This paragraph used to end "Full suite: 23/23
+> tests, 105.01 s". That figure is from the plan-3 commit that introduced this
+> test (`7334315`) and was carried forward when the paragraph was re-dated to
+> the 2026-08-25 fix round - by which time the suite was already **40** tests,
+> so it was attached to a run it did not come from. **Measured 2026-08-26 on the
+> idle box: 40/40 tests, 136.10 s**, of which the `golden` label is **26.43 s**
+> and the five `checkpoint`-labelled tests are 118.05 s. The gate on the tuned
+> checkpoint, which loads the smaller int4 head, costs **24.45 s** standalone at
+> peak RSS **16,768,572 KB = 15.99 GiB**.
