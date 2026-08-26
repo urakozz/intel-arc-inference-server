@@ -116,6 +116,9 @@ const Variant kVariants[] = {
     {"gpack2", 64, "two q-heads share each SLM-staged K/V wave (byte-identical candidate)"},
     {"gpack3", 64, "three q-heads share each SLM-staged K/V wave (byte-identical candidate)"},
     {"gpack6", 64, "all six q-heads share one SLM-staged K/V wave (byte-identical candidate)"},
+    {"greg2", 64, "two q-heads reuse private-register K/V (byte-identical candidate)"},
+    {"greg3", 64, "three q-heads reuse private-register K/V (byte-identical candidate)"},
+    {"greg6", 64, "all six q-heads reuse private-register K/V (byte-identical candidate)"},
     {"b2d", 64, "15 of every 16 K messages: the row in TWO 2D block reads (same order)"},
     {"b2d1", 64, "all but one K message: the row in ONE 2D block read (same order)"},
     {"kvt_b2d", 64, "both strides AND the row in two 2D block reads"},
@@ -337,7 +340,10 @@ int main(int argc, char** argv) {
                                std::strcmp(v.tag, "b2d1") == 0 ||
                                std::strcmp(v.tag, "gpack2") == 0 ||
                                std::strcmp(v.tag, "gpack3") == 0 ||
-                               std::strcmp(v.tag, "gpack6") == 0;
+                               std::strcmp(v.tag, "gpack6") == 0 ||
+                               std::strcmp(v.tag, "greg2") == 0 ||
+                               std::strcmp(v.tag, "greg3") == 0 ||
+                               std::strcmp(v.tag, "greg6") == 0;
       if (claims_base && !same) {
         bytes = "**DIFFERS - the mapping guess is WRONG**";
         exact_ok = false;

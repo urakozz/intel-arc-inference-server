@@ -77,6 +77,10 @@ add_probe_attn(gqa3        PB_GQA=3)
 add_probe_attn(gpack2      PB_GPACK=2)
 add_probe_attn(gpack3      PB_GPACK=3)
 add_probe_attn(gpack6      PB_GPACK=6)
+# Same loop inversion with each work-item's K/V slice retained privately.
+add_probe_attn(greg2       PB_GREG=2)
+add_probe_attn(greg3       PB_GREG=3)
+add_probe_attn(greg6       PB_GREG=6)
 # P3-prep (spec 1.7 §3): the GEMV battery's 2D-block technique transferred to the
 # KV walk. 16 messages of 32 B per K row become 2 (`b2d`) or 1 (`b2d1`), with
 # the SAME values in the SAME fma order -- the only probe_attn variants that are
