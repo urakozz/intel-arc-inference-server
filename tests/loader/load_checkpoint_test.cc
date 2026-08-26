@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <vector>
 #include "check.h"
 #include "common/bf16.h"
@@ -86,6 +87,7 @@ int main(int argc, char** argv) {
   common::repack_int4_layout1_cols(K, NT_check * 16, cols4, want.data());
 
   const loader::DeviceWeight& dw = m.linears.at({0u, model::LinearId::QkvZ});
+  CHECK(!dw.scales);  // layout 1 carries scales inline in dw.mem
   std::vector<uint32_t> got(want.size());
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   imm.copy(got.data(), dw.mem.ptr(), got.size() * 4);
@@ -94,6 +96,72 @@ int main(int argc, char** argv) {
     if (want[i] != got[i] && ++diff == 1)
       std::fprintf(stderr, "first mismatch at u32 %zu: want %08X got %08X\n", i, want[i], got[i]);
   CHECK_EQ(diff, size_t(0));
+
+  // Layout 0 owns two real allocations and preserves the checkpoint's
+  // [K/8][N] qweight + [K/64][N] scales geometry after each fusion map. Read
+  // both first/last rows at boundary columns; expectations are derived from
+  // the checkpoint parts directly, not from the repacker's column helpers.
+  auto check_layout0 = [&](uint32_t layer, model::LinearId id,
+                           const std::function<common::ColSource(uint32_t)>& source,
+                           const std::vector<uint32_t>& columns) {
+    const loader::DeviceWeight& w = m.linears.at({layer, id});
+    CHECK_EQ(w.shape.layout, uint32_t(0));
+    CHECK(w.scales);
+    CHECK(w.scales->ptr() != w.mem.ptr());
+    CHECK_EQ(w.mem.size(), size_t(w.shape.K / 8) * w.shape.N * sizeof(uint32_t));
+    CHECK_EQ(w.scales->size(), size_t(w.shape.K / 64) * w.shape.N * sizeof(uint16_t));
+    for (uint32_t n : columns) {
+      const common::ColSource c = source(n);
+      for (uint32_t row : {uint32_t(0), w.shape.K / 8 - 1}) {
+        uint32_t qgot = 0;
+        imm.copy(&qgot, w.mem.as<uint32_t>() + size_t(row) * w.shape.N + n, sizeof(qgot));
+        CHECK_EQ(qgot, c.qweight[size_t(row) * c.n_part + c.n]);
+      }
+      for (uint32_t g : {uint32_t(0), w.shape.K / 64 - 1}) {
+        uint16_t sgot = 0;
+        imm.copy(&sgot, w.scales->as<uint16_t>() + size_t(g) * w.shape.N + n, sizeof(sgot));
+        CHECK_EQ(sgot, c.scales[size_t(g) * c.n_part + c.n]);
+      }
+    }
+  };
+
+  // Single: GDN out_proj.
+  loader::LinearSrc outp =
+      loader::LinearSrc::classify(set, strip("layers.0.linear_attn.out_proj"));
+  check_layout0(
+      0, model::LinearId::OutProj,
+      [&](uint32_t n) { return common::ColSource{outp.qweight, outp.scales, n, outp.N}; },
+      {0, 15, 16, outp.N - 1});
+
+  // Concat: FA q || k || v, including both part boundaries.
+  loader::LinearSrc q = loader::LinearSrc::classify(set, strip("layers.3.self_attn.q_proj"));
+  loader::LinearSrc k = loader::LinearSrc::classify(set, strip("layers.3.self_attn.k_proj"));
+  loader::LinearSrc v = loader::LinearSrc::classify(set, strip("layers.3.self_attn.v_proj"));
+  check_layout0(
+      3, model::LinearId::Qkv,
+      [&](uint32_t n) {
+        if (n < q.N) return common::ColSource{q.qweight, q.scales, n, q.N};
+        n -= q.N;
+        if (n < k.N) return common::ColSource{k.qweight, k.scales, n, k.N};
+        n -= k.N;
+        return common::ColSource{v.qweight, v.scales, n, v.N};
+      },
+      {0, q.N - 1, q.N, q.N + k.N - 1, q.N + k.N, q.N + k.N + v.N - 1});
+
+  // Interleave16: gate/up in alternating 16-column blocks.
+  loader::LinearSrc gate = loader::LinearSrc::classify(set, strip("layers.0.mlp.gate_proj"));
+  loader::LinearSrc up = loader::LinearSrc::classify(set, strip("layers.0.mlp.up_proj"));
+  check_layout0(
+      0, model::LinearId::GateUp,
+      [&](uint32_t n) {
+        const uint32_t base = (n / 32) * 16;
+        const bool from_up = n % 32 >= 16;
+        const uint32_t src_n = base + n % 16;
+        return common::ColSource{from_up ? up.qweight : gate.qweight,
+                                 from_up ? up.scales : gate.scales, src_n,
+                                 from_up ? up.N : gate.N};
+      },
+      {0, 15, 16, 31, 32, 47, 48, 63, gate.N + up.N - 1});
 
   // Every checkpoint tensor is either loaded or deliberately dropped (qzeros,
   // g_idx, visual, mtp) - nothing is skipped by accident.

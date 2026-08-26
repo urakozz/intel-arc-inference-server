@@ -76,12 +76,12 @@
 
 // prep_silu_mul's shapes are the model's and never vary (M is its whole variant
 // space): gate‖up is 2 × 17408 columns interleaved in 16-column blocks, split-K
-// S = 4 (docs/13-loader.md, model::Qwen35's table).
+// S = 8 (Task 4's measured production map, model::Qwen35's table).
 // SILU_S is a *copy* of GateUp.S and this file cannot see the table it copies.
 // runtime::Capture::check_sizes (src/runtime/capture.cc) asserts the pair at
 // capture time, so a retune in model/qwen35.cc throws there rather than making
 // this loop sum the wrong number of slices in silence.
-#define SILU_S 4
+#define SILU_S 8
 #define SILU_N 17408
 #define SILU_FUSED_N 34816
 #define SILU_CHUNK 4096   /* 5 work-groups cover 17408; the last does 1024 */

@@ -48,7 +48,7 @@ namespace prep_ref {
 
 // The device dimensions these kernels are compiled for (mirrors prep.cl).
 constexpr uint32_t kWgRes = 256, kWgSilu = 256, kWgGated = 128;
-constexpr uint32_t kSiluS = 4;              // split-K slices of gate||up
+constexpr uint32_t kSiluS = 8;              // split-K slices of gate||up
 constexpr uint32_t kSiluN = 17408;          // intermediate size
 constexpr uint32_t kSiluFusedN = 34816;     // gate||up, interleaved in 16-column blocks
 constexpr uint32_t kGatedS = 1;             // split-K slices of qkv||z

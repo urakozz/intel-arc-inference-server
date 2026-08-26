@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstring>
+#include <vector>
 #include "check.h"
 #include "common/bf16.h"
 #include "common/int4.h"
@@ -45,6 +46,44 @@ int main() {
   common::Int4Gptq r = common::Int4Gptq::random(128, 64, 1);
   CHECK_EQ(r.qweight.size(), size_t(128 / 8 * 64));
   CHECK(r.at(5, 7) >= -8.0f * 0.08f && r.at(5, 7) <= 7.0f * 0.08f);   // scales are in [0.02, 0.08]
+
+  // Layout 0 keeps qweight and scales in separate row-major arrays. Exercise
+  // all three fusion maps with hand-derived tagged values; expected values do
+  // not call the repacker or its column-map helpers.
+  constexpr uint32_t RK = 64, PN = 32, RN = 64;
+  std::vector<uint32_t> aq(size_t(RK / 8) * PN), bq(size_t(RK / 8) * PN);
+  std::vector<uint16_t> as(size_t(RK / 64) * PN), bs(size_t(RK / 64) * PN);
+  for (uint32_t row = 0; row < RK / 8; ++row)
+    for (uint32_t n = 0; n < PN; ++n) {
+      aq[size_t(row) * PN + n] = 0xA0000000u | (row << 8) | n;
+      bq[size_t(row) * PN + n] = 0xB0000000u | (row << 8) | n;
+    }
+  for (uint32_t n = 0; n < PN; ++n) {
+    as[n] = uint16_t(0x1000u + n);
+    bs[n] = uint16_t(0x2000u + n);
+  }
+  const common::Part ap{aq.data(), as.data(), PN}, bp{bq.data(), bs.data(), PN};
+  auto check_layout0 = [&](const std::vector<common::ColSource>& cols, bool interleave) {
+    std::vector<uint32_t> oq(size_t(RK / 8) * RN);
+    std::vector<uint16_t> os(size_t(RK / 64) * RN);
+    common::repack_int4_layout0_cols(RK, RN, cols, oq.data(), os.data());
+    for (uint32_t n = 0; n < RN; ++n) {
+      const bool from_b = interleave ? (n % 32 >= 16) : (n >= PN);
+      const uint32_t src_n = interleave ? (n / 32) * 16 + (n % 16) : (n % PN);
+      CHECK_EQ(os[n], uint16_t((from_b ? 0x2000u : 0x1000u) + src_n));
+      for (uint32_t row = 0; row < RK / 8; ++row)
+        CHECK_EQ(oq[size_t(row) * RN + n],
+                 (from_b ? 0xB0000000u : 0xA0000000u) | (row << 8) | src_n);
+    }
+  };
+  check_layout0(common::cols_concat({ap, bp}), false);              // Concat
+  check_layout0(common::cols_interleave16(ap, bp), true);           // Interleave16
+  std::vector<uint32_t> single_q(size_t(RK / 8) * PN);
+  std::vector<uint16_t> single_s(PN);
+  common::repack_int4_layout0_cols(RK, PN, common::cols_concat({ap}),
+                                   single_q.data(), single_s.data());
+  CHECK_EQ(single_q, aq);                                           // Single
+  CHECK_EQ(single_s, as);
   std::puts("int4_test OK");
   return 0;
 }

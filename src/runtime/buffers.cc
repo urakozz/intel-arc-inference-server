@@ -37,7 +37,7 @@ constexpr uint32_t kArgmaxGroups = (Q::kVocab + kArgmaxChunk - 1) / kArgmaxChunk
 
 // `partials` is the S-split accumulator every int4 GEMV writes before its prep
 // kernel sums it. It is the conservative max-S x max-N rectangle over the int4
-// rows of the model table (spec §7's [S_max=16][8][34816]), not the max of
+// rows of the model table (Task 4: [S_max=8][8][34816]), not the max of
 // S*N: one buffer has to fit whichever row is running. The bf16 rows are
 // excluded because they do not use it - a||b writes ab_out, lm_head writes
 // logits directly.

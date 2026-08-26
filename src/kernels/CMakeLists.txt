@@ -4,8 +4,25 @@ add_ocloc_kernel(ctrl_read SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/ctrl_read.cl)
 
 set(GEMV_CL ${CMAKE_CURRENT_SOURCE_DIR}/gemv.cl)
 function(add_gemv_variant M K N S L)
+  set(extra_defs)
+  if(M EQUAL 1)
+    # Task 4's exact production cells, copied from probe_gemv_loads.cl. The
+    # variant names stay shape-only, so capture's 19-module topology is
+    # unchanged; only these binaries receive the measured arithmetic/geometry.
+    if(L EQUAL 0 AND K EQUAL 6144 AND N EQUAL 5120 AND S EQUAL 4)
+      list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
+    elseif(L EQUAL 0 AND K EQUAL 5120 AND N EQUAL 14336 AND S EQUAL 2)
+      list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
+    elseif(L EQUAL 0 AND K EQUAL 5120 AND N EQUAL 34816 AND S EQUAL 8)
+      list(APPEND extra_defs GEMV_DEQ_SHIFT=1)
+    elseif(L EQUAL 0 AND K EQUAL 17408 AND N EQUAL 5120 AND S EQUAL 4)
+      list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
+    elseif(L EQUAL 1 AND K EQUAL 5120 AND N EQUAL 248320 AND S EQUAL 1)
+      list(APPEND extra_defs GEMV_DEQ_SHIFT=1)
+    endif()
+  endif()
   add_ocloc_kernel(gemv_M${M}_K${K}_N${N}_S${S}_L${L} SOURCE ${GEMV_CL}
-                   DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L})
+                   DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L} ${extra_defs})
 endfunction()
 # Probe matrix (spec 1 §4.2): the five int4 shapes the 27B runs after load-time
 # fusion, both layouts, S in {1,2,4,8,16}. All S divide K/64 (96, 80 and 272).
@@ -19,12 +36,17 @@ foreach(L 0 1)
   endforeach()
 endforeach()
 add_gemv_variant(2 6144 5120 1 0)   # spec 1 §9: the M loop must compile at M=2
+# Test-only arithmetic/load control for Task 4's tuned out/o_proj cell. It is
+# never loaded by capture and therefore does not affect the runtime module
+# count; gemv_test compares all 16 signed nibbles against it bit-for-bit.
+add_ocloc_kernel(gemv_control_M1_K6144_N5120_S4_L0 SOURCE ${GEMV_CL}
+                 DEFINES M=1 K=6144 N=5120 S=4 LAYOUT=0 GEMV_BLOCK2D=0 GEMV_DEQ_SHIFT=0)
 # The SIXTH int4 shape, and the only one that is not per-layer: `lm_head` at
 # 5120x248320, when the checkpoint ships it packed (spec 1.6 §5.1). Exactly one
 # variant is built, not a probe row of the matrix above, because exactly one is
-# bindable: layout 1 is the only int4 repack the loader implements, and S must
-# be 1 for the capture to write straight into `logits` (model/qwen35.h argues
-# both). A probe sweep over this shape would cost five more ocloc compiles of a
+# bindable: layout 1 remains the measured large-N winner, and S must be 1 for
+# the capture to write straight into `logits` (model/qwen35.h argues both). A
+# probe sweep over this shape would cost five more ocloc compiles of a
 # 3880-work-group kernel to price splits the binding cannot use.
 add_gemv_variant(1 5120 248320 1 1)  # lm_head int4: 3880 work-groups, device full
 
@@ -73,7 +95,8 @@ function(add_prep_res_norm M K SP)
                    DEFINES M=${M} K=${K} S_PREV=${SP})
 endfunction()
 add_prep_res_norm(1 5120 0)    # first norm of a layer: no mixer partials to fold in
-add_prep_res_norm(1 5120 16)   # after out_proj / down (S = 16)
+add_prep_res_norm(1 5120 4)    # Task 4: after out_proj / o_proj / down (S = 4)
+add_prep_res_norm(1 5120 16)   # pre-Task-4 control retained for prep_test/probes
 add_prep_res_norm(2 5120 16)   # spec 1 §9: the M loop must compile at M=2
 
 # The two-stage split of prep_res_norm - spec 1.5 lever L1. The runtime binds
@@ -100,6 +123,7 @@ endfunction()
 # 320 subgroups against the single-WG kernel's 16 (docs/15 §L2: the subgroup is
 # the unit that priced out, not the work-group).
 add_prep_res_fold(1 5120 0 20)
+add_prep_res_fold(1 5120 4 20)     # Task 4 production mixer/down split
 add_prep_res_fold(1 5120 16 20)
 add_prep_res_fold(2 5120 16 20)    # spec 1 §9: the M loop must compile at M=2
 add_prep_norm_finish(1 5120 20 20)

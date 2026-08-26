@@ -48,8 +48,11 @@ add_executable(gemv_test kernels/gemv_test.cc)
 target_include_directories(gemv_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(gemv_test PRIVATE b70_l0)
 b70_target_kernel_dir(gemv_test)
-add_dependencies(gemv_test kernel_gemv_M1_K6144_N5120_S1_L0 kernel_gemv_M1_K6144_N5120_S4_L1
-  kernel_gemv_M1_K17408_N5120_S8_L0 kernel_gemv_M1_K5120_N34816_S2_L1 kernel_gemv_M2_K6144_N5120_S1_L0)
+add_dependencies(gemv_test
+  kernel_gemv_control_M1_K6144_N5120_S4_L0
+  kernel_gemv_M1_K6144_N5120_S4_L0 kernel_gemv_M1_K5120_N14336_S2_L0
+  kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K5120_N34816_S8_L0
+  kernel_gemv_M1_K17408_N5120_S4_L0 kernel_gemv_M2_K6144_N5120_S1_L0)
 add_test(NAME gemv_test COMMAND gemv_test)
 
 add_executable(gemv_bf16_test kernels/gemv_bf16_test.cc)
@@ -74,8 +77,8 @@ b70_target_kernel_dir(prep_test)
 # Sigma), so both must exist - the same arrangement lever L2 left for
 # gemv_bf16's two tilings. `_W1` is stage B's single-work-group finish, run to
 # prove the grid changes no bits.
-add_dependencies(prep_test kernel_prep_res_norm_M1_K5120_SP0 kernel_prep_res_norm_M1_K5120_SP16
-  kernel_prep_res_fold_M1_K5120_SP0_G20 kernel_prep_res_fold_M1_K5120_SP16_G20
+add_dependencies(prep_test kernel_prep_res_norm_M1_K5120_SP0 kernel_prep_res_norm_M1_K5120_SP4
+  kernel_prep_res_fold_M1_K5120_SP0_G20 kernel_prep_res_fold_M1_K5120_SP4_G20
   kernel_prep_norm_finish_M1_K5120_G20_W20 kernel_prep_norm_finish_M1_K5120_G20_W1
   kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1)
 add_test(NAME prep_test COMMAND prep_test)
@@ -154,9 +157,9 @@ target_include_directories(kernel_table_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${C
 target_link_libraries(kernel_table_test PRIVATE b70_model)
 b70_target_kernel_dir(kernel_table_test)
 add_dependencies(kernel_table_test
-  kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K6144_N5120_S16_L1
-  kernel_gemv_M1_K5120_N34816_S4_L1 kernel_gemv_M1_K17408_N5120_S16_L1
-  kernel_gemv_M1_K5120_N14336_S1_L1
+  kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K6144_N5120_S4_L0
+  kernel_gemv_M1_K5120_N34816_S8_L0 kernel_gemv_M1_K17408_N5120_S4_L0
+  kernel_gemv_M1_K5120_N14336_S2_L0 kernel_gemv_M1_K5120_N248320_S1_L1
   kernel_gemv_bf16_M1_K5120_N128_C16_S16 kernel_gemv_bf16_M1_K5120_N248320)
 add_test(NAME kernel_table_test COMMAND kernel_table_test)
 
@@ -188,14 +191,14 @@ set_tests_properties(load_checkpoint_test PROPERTIES LABELS checkpoint TIMEOUT 6
 # unused macro in three translation units that do not include kernels/kernels.h.
 set(B70_DECODE_LIST_KERNELS
   kernel_embed_gather_M1 kernel_argmax_stage1_M1 kernel_argmax_stage2
-  kernel_prep_res_fold_M1_K5120_SP0_G20 kernel_prep_res_fold_M1_K5120_SP16_G20
+  kernel_prep_res_fold_M1_K5120_SP0_G20 kernel_prep_res_fold_M1_K5120_SP4_G20
   kernel_prep_norm_finish_M1_K5120_G20_W20
   kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1 kernel_gdn_step_M1
   kernel_attn_prep_M1 kernel_attn_decode_M1_L16384_B${ATTN_BLOCK}
   kernel_attn_reduce_M1_L16384_B${ATTN_BLOCK}
-  kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K5120_N14336_S1_L1
-  kernel_gemv_M1_K6144_N5120_S16_L1 kernel_gemv_M1_K5120_N34816_S4_L1
-  kernel_gemv_M1_K17408_N5120_S16_L1
+  kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K5120_N14336_S2_L0
+  kernel_gemv_M1_K6144_N5120_S4_L0 kernel_gemv_M1_K5120_N34816_S8_L0
+  kernel_gemv_M1_K17408_N5120_S4_L0 kernel_gemv_M1_K5120_N248320_S1_L1
   kernel_gemv_bf16_M1_K5120_N128_C16_S16 kernel_gemv_bf16_M1_K5120_N248320)
 
 # The captured decode list, replayed: spec §8.7's determinism proof and the

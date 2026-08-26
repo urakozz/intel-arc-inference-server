@@ -14,7 +14,7 @@
 // Column map of the fused qkv linear (doc 03; model::Qwen35's `LinearId::Qkv`)
 // ---------------------------------------------------------------------------
 // `q_proj ‖ k_proj ‖ v_proj` = 12288 + 1024 + 1024 = 14336 columns, split-K
-// S = 1. Inside q_proj the 24 heads are **interleaved per head**, not two
+// S = 2. Inside q_proj the 24 heads are **interleaved per head**, not two
 // halves: head `h` is `[h·512, h·512+256)` and its gate is the next 256.
 // k-head `j` is at `12288 + j·256`, v-head `j` at `13312 + j·256`.
 //
@@ -62,9 +62,8 @@
 // ---------------------------------------------------------------------------
 // Rounding discipline (plan 3 Task 2's preamble, applied op by op)
 // ---------------------------------------------------------------------------
-//   * `x_b = rne_bf16(partials[…])` - the qkv linear's bf16 output, rounded
-//     once (S = 1, so the split-K sum is a single term; it is still rounded,
-//     because that rounding is the linear's);
+//   * `x_b = rne_bf16(Σ_s partials[s][…])` - the qkv linear's bf16 output,
+//     summed in ascending slice order and rounded once;
 //   * the norm widens to fp32, sums squares in fp32, uses `1.0f / sqrt(mean +
 //     1e-6f)` - **never `rsqrt`** - multiplies by the fp32 `(1 + w)` weight the
 //     loader baked (loader/small_layout.h) and rounds back to bf16, then widens
@@ -107,7 +106,7 @@ constexpr uint32_t kKvHeads = 4;        // k/v heads; GQA 6:1
 constexpr uint32_t kGqa = 6;            // q-heads per kv-head
 constexpr uint32_t kHeadDim = 256;
 constexpr uint32_t kQkvN = 14336;       // q‖gate (12288) ‖ k (1024) ‖ v (1024)
-constexpr uint32_t kQkvS = 1;           // qkv split-K slices (model::Qwen35's table)
+constexpr uint32_t kQkvS = 2;           // qkv split-K slices (model::Qwen35's table)
 constexpr uint32_t kKOff = 12288, kVOff = 13312;
 constexpr uint32_t kRotHalf = 32, kRotDim = 64;   // partial RoPE: dims 0..63
 constexpr uint32_t kQNormOff = 0;       // FA small block, in floats: 0 / 4
@@ -138,7 +137,7 @@ inline float ninf() { return -std::numeric_limits<float>::infinity(); }
 // 24..27 are kv-heads; the loop below walks them in that order because the
 // kernel's work-groups are independent and the order is immaterial.
 //
-//   partials  fp32 [1][M][14336]   the qkv GEMV's split-K partials (S = 1)
+//   partials  fp32 [2][M][14336]   the qkv GEMV's split-K partials (S = 2)
 //   fa_small  fp32                 q_norm (1+w)[256] at 0, k_norm at 256
 //   rope      fp32 [max_len][2][32] cos at [p][0][i], sin at [p][1][i]
 //   attn_q    fp32 [M][24][256]    normed + roped, fp32
@@ -154,22 +153,26 @@ inline void prep(uint32_t pos, uint32_t n_act, uint32_t M, const float* partials
     const uint32_t h = is_q ? wg : wg - kQHeads;                 // q-head or kv-head
     const float* nw = fa_small + (is_q ? kQNormOff : kKNormOff);
     for (uint32_t m = 0; m < n_act; ++m) {
-      // Slice kQkvS - 1 == 0: with one slice there is nothing to sum.
-      const size_t row = (size_t(kQkvS - 1) * M + m) * kQkvN;
-      const size_t base = row + (is_q ? size_t(h) * 2 * kHeadDim
-                                      : size_t(kKOff) + size_t(h) * kHeadDim);
+      const size_t base = is_q ? size_t(h) * 2 * kHeadDim
+                               : size_t(kKOff) + size_t(h) * kHeadDim;
+      auto qkv_sum = [&](size_t col) {
+        float v = 0.0f;
+        for (uint32_t s = 0; s < kQkvS; ++s)
+          v += partials[(size_t(s) * M + m) * kQkvN + col];
+        return v;
+      };
 
       // The linear's bf16 output, then the norm's sum of squares: one term per
       // lane (a plain multiply, no fma) and the 256 -> 1 pairwise tree.
       for (uint32_t i = 0; i < kHeadDim; ++i) {
-        const float xf = f32(rne(partials[base + i]));
+        const float xf = f32(rne(qkv_sum(base + i)));
         red[i] = xf * xf;
       }
       for (uint32_t stride = kHeadDim / 2; stride > 0; stride >>= 1)
         for (uint32_t i = 0; i < stride; ++i) red[i] += red[i + stride];
       const float rstd = 1.0f / std::sqrt(red[0] / float(kHeadDim) + 1e-6f);   // never rsqrt
       for (uint32_t i = 0; i < kHeadDim; ++i)
-        nrm[i] = f32(rne(f32(rne(partials[base + i])) * rstd * nw[i]));
+        nrm[i] = f32(rne(f32(rne(qkv_sum(base + i))) * rstd * nw[i]));
 
       // Partial RoPE over dims 0..63, pairs (i, i+32), on the fp32 widened
       // normalised value. rotate_half over the 64-slice:
@@ -201,12 +204,12 @@ inline void prep(uint32_t pos, uint32_t n_act, uint32_t M, const float* partials
       if (is_q) {
         for (uint32_t i = 0; i < kHeadDim; ++i)
           attn_gate[(size_t(m) * kQHeads + h) * kHeadDim + i] =
-              f32(rne(partials[base + kHeadDim + i]));
+              f32(rne(qkv_sum(base + kHeadDim + i)));
       } else {
         // v is never normed and never roped: the linear's rounding, and done.
         for (uint32_t i = 0; i < kHeadDim; ++i)
           kv_v[(size_t(pos + m) * kKvHeads + h) * kHeadDim + i] =
-              rne(partials[row + kVOff + size_t(h) * kHeadDim + i]);
+              rne(qkv_sum(size_t(kVOff) + size_t(h) * kHeadDim + i));
       }
     }
   }

@@ -13,7 +13,7 @@
 //
 //   attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v)
 //     ctrl          uint[]  runtime::Control: pos at CTRL_POS, n_active at CTRL_NACT
-//     qkv_partials  fp32 [1][M][14336]      the fused qkv GEMV's partials (S = 1)
+//     qkv_partials  fp32 [2][M][14336]      the fused qkv GEMV's partials (S = 2)
 //     fa_small      fp32                    this layer's FA block: q_norm (1+w)[256]
 //                                           at QNORM_OFF, k_norm at KNORM_OFF
 //                                           (loader/small_layout.h)
@@ -32,7 +32,7 @@
 // The column map of the fused qkv linear
 // ---------------------------------------------------------------------------
 // `q_proj ‖ k_proj ‖ v_proj` = 12288 + 1024 + 1024 = 14336 columns (doc 03;
-// model::Qwen35's `LinearId::Qkv`, `Fuse::Concat`, S = 1). Inside q_proj the 24
+// model::Qwen35's `LinearId::Qkv`, `Fuse::Concat`, S = 2). Inside q_proj the 24
 // heads are **interleaved per head, not two halves**: head `h` is
 // `[h·512, h·512+256)` and its output gate is the next 256. k-head `j` sits at
 // `12288 + j·256` and v-head `j` at `13312 + j·256`. GQA is 6:1, so q-head `h`
@@ -168,9 +168,8 @@
 // ---------------------------------------------------------------------------
 // Rounding discipline (plan 3 Task 2's preamble, op by op)
 // ---------------------------------------------------------------------------
-//   * `x_b = rne_bf16(qkv_partials[…])` - the qkv linear's bf16 output, rounded
-//     once (S = 1, so the split-K sum is a single term; it is still rounded,
-//     because that rounding is the linear's);
+//   * `x_b = rne_bf16(Σ_s qkv_partials[s][…])` - the qkv linear's two slices,
+//     summed in ascending order and rounded once;
 //   * the norm widens to fp32, sums squares in fp32 (tree 1 above), uses
 //     `1.0f / sqrt(mean + 1e-6f)` - **never `rsqrt`**, a ~2 ulp approximation
 //     with no cross-implementation guarantee - multiplies by the fp32 `(1 + w)`
@@ -231,19 +230,11 @@
 #define OUT_N 6144        /* 24 x 256 */
 #define SCALE 0.0625f     /* 1/sqrt(256) */
 
-// The fused qkv GEMV's split-K slice count (model::Qwen35's table). At S = 1
-// the fp32 `[S][M][N]` partials collapse to `[M][N]`, which is what every load
-// below assumes. If qkv is ever re-tuned to a wider split-K, those loads must
-// sum the slices - and attn_ref.h with them. Fail the build here rather than
-// silently read slice 0.
-// The `#error` below can only check this file against itself; the other half of
-// the pairing - that QKV_S still equals `model::Qwen35`'s Qkv.S - is asserted at
-// capture time by runtime::Capture::check_sizes (src/runtime/capture.cc), which
-// is the only place that can see both numbers.
-#define QKV_S 1
-#if QKV_S != 1
-#error "attn assumes qkv runs S=1; the partials index must loop s otherwise"
-#endif
+// The fused qkv GEMV's split-K slice count (model::Qwen35's table). Task 4
+// retunes it to S=2; attn_prep folds those slices in ascending order before the
+// linear's bf16 rounding. attn_ref.h mirrors that exact order. The other half
+// of the pairing is asserted by runtime::Capture::check_sizes.
+#define QKV_S 2
 
 // ATTN_BLOCK - KV positions per attn_decode work-group, and the ONE number
 // this kernel's blocking depends on. It is a `-D` rather than a literal
@@ -316,12 +307,18 @@ inline ushort rne_bf16(float f) {
 // everything before it stays bit-comparable with the host.
 inline float sigmoid_f32(float x) { return 1.0f / (1.0f + exp(-x)); }
 
+inline float qkv_sum(__global const float* restrict p, uint m, size_t col) {
+  float v = 0.0f;
+  for (uint s = 0; s < QKV_S; ++s) v += p[((size_t)s * M + m) * QKV_N + col];
+  return v;
+}
+
 // ---------------------------------------------------------------------------
 // attn_prep - grid (28, M), work-group 256. Work-groups 0..23 are q-heads,
 // 24..27 are kv-heads (kv-head j = group 24+j). Work-item `i` owns dim `i`, so
 // the norm's reduction domain is exactly the work-group.
 //
-//   x_b   = rne_bf16(qkv_partials[0][m][col])          (the linear's bf16 out)
+//   x_b   = rne_bf16(Σ_s qkv_partials[s][m][col])      (the linear's bf16 out)
 //   rstd  = 1 / sqrt(mean_i(f32(x_b)²) + 1e-6)          (tree 1; never rsqrt)
 //   nrm[i]= f32(rne_bf16(f32(x_b[i]) · rstd · w[i]))    (fp32 (1+w) weight)
 //   RoPE over dims 0..63, pairs (i, i+32), on nrm; dims 64..255 pass through
@@ -351,12 +348,9 @@ __kernel void attn_prep(__global const uint* restrict ctrl,
   const bool is_q = wg < Q_HEADS;
   const uint h = is_q ? wg : wg - Q_HEADS;                  // q-head, or kv-head j
   __global const float* restrict nw = fa_small + (is_q ? QNORM_OFF : KNORM_OFF);
-  // Slice QKV_S - 1 == 0: with one slice there is nothing to sum (the `#if`
-  // above is what keeps that true).
-  const size_t row = ((size_t)(QKV_S - 1) * M + m) * QKV_N;
-  const size_t base = row + (is_q ? (size_t)h * 2 * HD : (size_t)K_OFF + (size_t)h * HD);
+  const size_t base = is_q ? (size_t)h * 2 * HD : (size_t)K_OFF + (size_t)h * HD;
 
-  const float xf = bf16f(rne_bf16(qkv_partials[base + i]));
+  const float xf = bf16f(rne_bf16(qkv_sum(qkv_partials, m, base + i)));
   red[i] = xf * xf;                                        // one term per lane: plain multiply
   barrier(CLK_LOCAL_MEM_FENCE);
   for (uint stride = WG_PREP / 2; stride > 0; stride >>= 1) {
@@ -393,11 +387,11 @@ __kernel void attn_prep(__global const uint* restrict ctrl,
   if (is_q) {
     attn_q[((size_t)m * Q_HEADS + h) * HD + i] = outv;
     attn_gate[((size_t)m * Q_HEADS + h) * HD + i] =
-        bf16f(rne_bf16(qkv_partials[base + HD + i]));
+        bf16f(rne_bf16(qkv_sum(qkv_partials, m, base + HD + i)));
   } else {
     const size_t slot = ((size_t)(pos + m) * KV_HEADS + h) * HD + i;
     kv_k[slot] = rne_bf16(outv);
-    kv_v[slot] = rne_bf16(qkv_partials[row + V_OFF + (size_t)h * HD + i]);
+    kv_v[slot] = rne_bf16(qkv_sum(qkv_partials, m, V_OFF + (size_t)h * HD + i));
   }
 }
 

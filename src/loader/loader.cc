@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -230,13 +231,20 @@ const char* id_name(model::LinearId id) {
 // turns a mis-sized buffer into a message instead of a heap overrun.
 struct Staging {
   std::vector<uint32_t> i4;
+  std::vector<uint16_t> i4_scales;
   std::vector<uint16_t> bf_src;
   std::vector<uint16_t> bf_tiled;
 };
 
-// The int4 staging words one linear needs: n-tiles x k-groups x 136.
+// The int4 weight staging words one linear needs. Layout 0 keeps the GPTQ
+// [K/8][N] words; layout 1 builds n-tiles x k-groups x 136 words, including
+// its inline scales.
 size_t int4_words(const model::GemvShape& s) {
-  return size_t(s.N / 16) * (s.K / 64) * 136;
+  return s.layout == 0 ? size_t(s.K / 8) * s.N
+                       : size_t(s.N / 16) * (s.K / 64) * 136;
+}
+size_t int4_scale_elems(const model::GemvShape& s) {
+  return s.layout == 0 ? size_t(s.K / 64) * s.N : 0;
 }
 
 // One fused linear: classify every part, check the preconditions the repack
@@ -251,21 +259,11 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
   if (sh.K % 64 != 0 || sh.N % 16 != 0)
     throw std::runtime_error(id + ": shape K=" + std::to_string(sh.K) + " N=" +
                              std::to_string(sh.N) + " violates K%64==0, N%16==0");
-  // The layout knob is NOT a one-row edit (fix C1, 2026-08-25). `layout` is
-  // meaningful for int4 only - bf16 rows carry 0 as a documented filler - and
-  // this loader implements the layout-1 repack alone. Layout 0 additionally
-  // needs a loader path (the GPTQ-native w[K/8][N] kept as shipped) and a
-  // SECOND device buffer, because gemv.cl's LAYOUT==0 takes `w` and `scales`
-  // as separate arguments while DeviceWeight holds one l0::Mem. Until both
-  // exist, flipping a row must fail here rather than repack it as layout 1 and
-  // hand the kernel bytes it cannot read.
-  if (fl.kind == model::WeightKind::Int4 && sh.layout != 1)
-    throw std::runtime_error(
-        id + ": the model description says layout " + std::to_string(sh.layout) +
-        ", but the loader implements layout 1 only. Layout 0 needs a loader path (keep "
-        "qweight[K/8][N] as shipped, no repack) and a second device buffer in "
-        "DeviceWeight for scales[K/64][N] - gemv.cl's LAYOUT==0 binds them separately. "
-        "See docs/13-loader.md, \"Layout and split-K come from the table\".");
+  // `layout` is meaningful for int4 only - bf16 rows carry 0 as a documented
+  // filler. Both supported int4 layouts have explicit paths below; rejecting
+  // any other value here prevents it from silently taking layout 1's bytes.
+  if (fl.kind == model::WeightKind::Int4 && sh.layout > 1)
+    throw std::runtime_error(id + ": unsupported int4 layout " + std::to_string(sh.layout));
 
   std::vector<LinearSrc> srcs;
   uint32_t n_sum = 0;
@@ -318,11 +316,18 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
     if (cols.size() != sh.N)
       throw std::runtime_error(id + ": column map has " + std::to_string(cols.size()) +
                                " entries, need " + std::to_string(sh.N));
-    const size_t words = size_t(sh.N / 16) * (sh.K / 64) * 136;
+    const size_t words = int4_words(sh);
     if (words > st.i4.size())
       throw std::runtime_error(id + ": " + std::to_string(words * 4) +
                                " bytes exceeds the int4 staging buffer");
-    common::repack_int4_layout1_cols(sh.K, sh.N, cols, st.i4.data());
+    const size_t scale_elems = int4_scale_elems(sh);
+    if (scale_elems > st.i4_scales.size())
+      throw std::runtime_error(id + ": " + std::to_string(scale_elems * 2) +
+                               " bytes exceeds the layout-0 scale staging buffer");
+    if (sh.layout == 0)
+      common::repack_int4_layout0_cols(sh.K, sh.N, cols, st.i4.data(), st.i4_scales.data());
+    else
+      common::repack_int4_layout1_cols(sh.K, sh.N, cols, st.i4.data());
     // The 136-u32 tile is 128 u32 of nibbles + 8 u32 of scales, so the two
     // buckets below add up to exactly the bytes uploaded. `lm_head` keeps its
     // OWN bucket in both kinds - it is the one row whose format the checkpoint
@@ -334,7 +339,12 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
       rep.int4_bytes += size_t(sh.K) * sh.N / 2;
       rep.scale_bytes += size_t(sh.K) * sh.N / 32;
     }
-    return {upload(ctx, imm, st.i4.data(), words * 4), sh, fl.kind};
+    l0::Mem weight = upload(ctx, imm, st.i4.data(), words * 4);
+    std::unique_ptr<l0::Mem> scales;
+    if (sh.layout == 0)
+      scales = std::make_unique<l0::Mem>(
+          upload(ctx, imm, st.i4_scales.data(), scale_elems * sizeof(uint16_t)));
+    return {std::move(weight), std::move(scales), sh, fl.kind};
   }
 
   const size_t elems = size_t(sh.N) * sh.K;
@@ -361,7 +371,7 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
   else
     rep.bf16_linear_bytes += size_t(n_sum) * sh.K * 2;
   rep.pad_bytes += size_t(sh.N - n_sum) * sh.K * 2;
-  return {upload(ctx, imm, st.bf_tiled.data(), elems * 2), sh, fl.kind};
+  return {upload(ctx, imm, st.bf_tiled.data(), elems * 2), nullptr, sh, fl.kind};
 }
 
 // Everything in a layer that is not a GEMV weight, packed into the two blocks
@@ -504,15 +514,23 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   imm.copy(m.rope.ptr(), rope.data(), rope_bytes);
   m.report.small_bytes += rope_bytes;
 
+  const std::vector<model::LayerDesc> layers = Qwen35::layers();
   Staging st;
   const model::GemvShape& ab = Qwen35::shape(model::LinearId::AB);
-  st.i4.resize(std::max(int4_words(Qwen35::shape(model::LinearId::GateUp)),
-                        lm_int4 ? int4_words(lm_row.shape) : size_t(0)));
+  size_t max_i4_words = lm_int4 ? int4_words(lm_row.shape) : 0;
+  size_t max_i4_scales = lm_int4 ? int4_scale_elems(lm_row.shape) : 0;
+  for (const model::LayerDesc& ld : layers)
+    for (const model::FusedLinear& fl : ld.linears)
+      if (fl.kind == model::WeightKind::Int4) {
+        max_i4_words = std::max(max_i4_words, int4_words(fl.shape));
+        max_i4_scales = std::max(max_i4_scales, int4_scale_elems(fl.shape));
+      }
+  st.i4.resize(max_i4_words);
+  st.i4_scales.resize(max_i4_scales);
   st.bf_src.resize(size_t(ab.N) * ab.K);
   st.bf_tiled.resize(std::max(size_t(ab.N) * ab.K,
                               lm_int4 ? size_t(0) : size_t(lm_row.shape.N) * lm_row.shape.K));
 
-  const std::vector<model::LayerDesc> layers = Qwen35::layers();
   m.layer_small.reserve(layers.size());
   for (const model::LayerDesc& ld : layers) {
     const std::string lp = Qwen35::layer_prefix(ld.index);
