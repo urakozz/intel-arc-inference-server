@@ -150,6 +150,12 @@ def check_quant_config(snapshot: str) -> int:
     `g_idx` anywhere means there is nothing an unstated `desc_act: true` could
     have meant. Keep this check in step with src/loader/quant.cc; the two are
     graded against each other by the golden gate and by nothing else.
+
+    It is deliberately NOT a full mirror. `extra_config`'s per-module rules are
+    not read here: the C++ loader validates them (a module claiming int4 at
+    anything but g64 symmetric throws) and it runs first on any checkpoint this
+    oracle is pointed at, so a config that would fool this function has already
+    failed the load. What this checks is what `dequant_gptq` itself assumes.
     """
     with open(os.path.join(snapshot, "config.json"), encoding="utf-8") as f:
         q = json.load(f).get("quantization_config") or {}

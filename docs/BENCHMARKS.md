@@ -285,7 +285,8 @@ reason the record row is still owed.
 memo's own prediction: `lm_head` at bf16 was the most bandwidth-efficient launch
 in the step (98.4% of device), so removing three quarters of its bytes lowers
 the average of what remains. The bench's MBU line divided by a hardcoded
-15.540 GB until 2026-08-26 and would have printed 79.4% here; it now reads W
+15.540 GB until 2026-08-26 and would have printed **79.5%** here (30.20 x
+15.53998 / 590 = 79.54); it now reads W
 from the loader's own report and prints which W it used.
 
 **Against the bar**, which is `Vishva007`-shaped and stays where it is: 30.20

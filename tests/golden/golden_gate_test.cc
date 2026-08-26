@@ -16,7 +16,19 @@
 //   * generate 32 ids as 32 x generate(1), reading `buffers().logits` before
 //     each step - that fp32 row is exactly the row whose argmax the step is
 //     about to consume, so a mismatch can be reported with both top-5s;
-//   * **GATE**: the 32 ids == golden `tokens`, element-exact.
+//   * **GATE**, under the controller's ruling of 2026-08-26 (docs/14, "The
+//     RTN-checkpoint gate"): a golden decision row whose top-1 is **not unique**
+//     is UNDETERMINED, and the three clauses are
+//       (i)   determined rows - the engine's id == the golden id, element-exact,
+//             every one of them. Unchanged strictness; this is the gate.
+//       (ii)  undetermined rows - the engine's id must be a MEMBER of the golden
+//             argmax set. The oracle's logits are bf16 widened to fp32, so two
+//             candidates can be the same word; which one `torch.argmax` returns
+//             is its lowest-index tie-break, not an output of the model.
+//       (iii) after any divergence the walk continues TEACHER-FORCED on the
+//             oracle's token, so clause (i) still binds the tail on the
+//             reference's own context instead of grading a diverged sequence.
+//     The tie census is derived here from the golden `logits`, never pasted in.
 //
 // Diagnostics - printed for every prompt whether or not the gate passes, and
 // evaluated only after all three prompts have printed, so a failure still
@@ -67,6 +79,7 @@
 #include "loader/safetensors.h"
 #include "model/qwen35.h"
 #include "runtime/buffers.h"
+#include "runtime/control.h"
 #include "runtime/engine.h"
 
 namespace {
@@ -235,6 +248,46 @@ uint32_t argmax_masked(const float* row, uint32_t n, uint32_t used) {
 }
 uint32_t argmax_full(const float* row, uint32_t n) { return argmax_masked(row, n, n); }
 
+// --- the controller's gate-semantics ruling, 2026-08-26 --------------------
+//
+// **A golden decision row whose top-1 is not unique is UNDETERMINED.** The
+// oracle's logits are bf16 values widened to fp32 (`dump.py` records
+// `out.logits[0].to(torch.float32)` and `out.logits` from a bf16 model IS
+// bf16), so a decision row carries ~8 mantissa bits and two candidates can land
+// on the same word. When they do, `torch.argmax` returns the lower index - and
+// that is a property of torch's tie-break, not an output of the model. Asserting
+// it would make this gate grade the engine on a coin toss (docs/14, "The
+// RTN-checkpoint gate").
+//
+// This is NOT a tolerance and it is NOT a relaxation of the bar. On a row where
+// the maximum IS unique the gate is exactly as strict as it always was: one id,
+// element-exact. The ruling only declines to assert an answer the reference does
+// not contain. It applies to BOTH checkpoints - the published one's `cjk` golden
+// set has had two such rows since it was made.
+struct GoldenDecision {
+  std::vector<uint32_t> set;   // ascending; set[0] is what torch's argmax returned
+  float value = 0.0f;
+  bool determined() const { return set.size() == 1; }
+  bool contains(uint32_t id) const {
+    return std::find(set.begin(), set.end(), id) != set.end();
+  }
+};
+// Same masking rule as argmax_masked, so the set and the argmax cannot disagree
+// about which columns are eligible. fp32 `==` here is bit-equality for every
+// value a finite logit can take, which is what "the reference does not
+// distinguish them" means; `dump.py` aborts on a non-finite logits row.
+GoldenDecision golden_decision(const float* row, uint32_t n, uint32_t used) {
+  GoldenDecision d;
+  const uint32_t lim = n < used ? n : used;
+  float bv = -INFINITY;
+  for (uint32_t i = 0; i < lim; ++i)
+    if (row[i] > bv) bv = row[i];
+  d.value = bv;
+  for (uint32_t i = 0; i < lim; ++i)
+    if (row[i] == bv) d.set.push_back(i);
+  return d;
+}
+
 void print_top5(const char* tag, const float* row, uint32_t n, uint32_t used) {
   std::vector<std::pair<float, uint32_t>> v;
   v.reserve(n);
@@ -267,7 +320,15 @@ bool exists(const std::string& p) { return std::ifstream(p).good(); }
 struct Verdict {
   std::string name;
   uint32_t n_prompt = 0, exact = 0;
-  int first_bad = -1;
+  // The gate under the 2026-08-26 ruling. `n_determined + n_tie == kGen`
+  // always; the gate passes iff `det_exact == n_determined` AND
+  // `tie_agree + tie_member == n_tie`.
+  uint32_t n_determined = 0, det_exact = 0;   // clause (i): unique golden argmax
+  uint32_t n_tie = 0, tie_agree = 0;          // clause (ii), engine took torch's pick
+  uint32_t tie_member = 0;                    // clause (ii), engine took another member
+  int first_bad = -1;        // first DETERMINED row the engine got wrong - the failure
+  int first_diverge = -1;    // first row where engine != golden, tie or not
+  std::vector<uint32_t> tie_steps;   // the undetermined rows, for the census
   double tap_min_cos = 1.0, tail_min_cos = 1.0, gdn_min_cos = 1.0, logit_min_cos = 1.0;
   uint32_t tap_min_layer = 0, tap_min_t = 0, gdn_min_layer = 0;
 };
@@ -512,10 +573,27 @@ int main(int argc, char** argv) {
     };
     read_logits();  // the row whose argmax is generated token 0: golden logits[T-1]
 
-    std::printf("  greedy %u:  step  engine  golden   logit-cos   engine-argmax golden-argmax "
-                "(masked / full)\n", kGen);
+    // **Clause (iii) of the ruling: after a divergence the walk continues
+    // TEACHER-FORCED.** A greedy sequence never recovers from one different
+    // token, so a free-running tail compares two different contexts and says
+    // nothing about the engine - every row after a divergence would be a
+    // consequence of it, not an independent test. Feeding the oracle's own
+    // token instead puts the engine back on the reference's context, and
+    // clause (i) then binds the remaining DETERMINED rows at full strictness.
+    // `ingest({id})` is the same single replay of the same captured list that
+    // `generate(1)` runs; the only difference is which token `cur_token`
+    // carries into it (runtime/engine.cc).
+    //
+    // Teacher-forcing starts at the first divergence of EITHER kind. On a tie
+    // row that is the ruling; on a determined row the gate has already failed
+    // and the tail is then a diagnostic, which is worth more than 16 rows of
+    // noise.
+    runtime::Control* ctrl = eng.buffers().control.as<runtime::Control>();
+    std::printf("  greedy %u:  step  engine  golden  det?  logit-cos   engine-argmax "
+                "golden-argmax (masked / full)\n", kGen);
     std::vector<uint32_t> etok;
     etok.reserve(kGen);
+    bool forced = false;
     for (uint32_t p = 0; p < kGen; ++p) {
       const float* grow = glog + size_t(p == 0 ? T - 1 : T + p - 1) * V;
       const Metric lm = compare_f32(dec.data(), grow, Vcmp, sa, sb);
@@ -528,59 +606,153 @@ int main(int argc, char** argv) {
       const uint32_t gam = argmax_masked(grow, Vcmp, Qwen35::kVocabUsed);
       const uint32_t ea_dev = argmax_masked(dec.data(), Qwen35::kVocab, Qwen35::kVocabUsed);
       const uint32_t gaf = argmax_full(grow, V);   // the pad-tail check wants all of V
+      const GoldenDecision gd = golden_decision(grow, Vcmp, Qwen35::kVocabUsed);
+      // torch's argmax and this one break a tie the same way, so set[0] is
+      // what the dump recorded. If that ever stops holding, the golden file and
+      // this test disagree about the reference itself.
+      CHECK_EQ(gd.set[0], gam);
+      CHECK_EQ(gam, uint32_t(gtok[p]));
 
-      const uint32_t id = eng.generate(1)[0];
-      etok.push_back(id);
-      // The device's two-stage argmax and a host argmax over the same fp32 row
-      // must agree; if they ever do not, the bug is in argmax, not upstream.
+      // The engine's token p: produced by the previous replay and sitting in
+      // `cur_token`, which is what the NEXT replay will consume. Read here
+      // rather than from generate()'s return value so that the device-vs-host
+      // argmax cross-check runs on every step, teacher-forced ones included.
+      const uint32_t id = ctrl->cur_token[0];
       CHECK_EQ(id, ea_dev);
+      etok.push_back(id);
+
       const bool ok = id == uint32_t(gtok[p]);
       if (ok) ++v.exact;
-      if (!ok && v.first_bad < 0) v.first_bad = int(p);
-      std::printf("            %4u  %6u  %6u   %.9f   %6u %6u %6u %s%s\n", p, id,
-                  uint32_t(gtok[p]), lm.cos, ea, gam, gaf, ok ? "" : "  <== MISMATCH",
-                  gam != gaf ? "  [golden argmax is a padding id]" : "");
-      if (!ok && int(p) == v.first_bad) {
-        std::printf("      first mismatch at generated position %u: engine %u, golden %u"
+      if (gd.determined()) {
+        ++v.n_determined;
+        if (ok) ++v.det_exact;
+        else if (v.first_bad < 0) v.first_bad = int(p);
+      } else {
+        ++v.n_tie;
+        v.tie_steps.push_back(p);
+        if (ok) ++v.tie_agree;
+        else if (gd.contains(id)) ++v.tie_member;
+        else if (v.first_bad < 0) v.first_bad = int(p);   // not even a member: a real failure
+      }
+      if (!ok && v.first_diverge < 0) v.first_diverge = int(p);
+
+      const char* mark = ok ? ""
+                            : (gd.determined() ? "  <== MISMATCH (determined - GATE)"
+                                               : "  <== differs, but the golden row is a TIE");
+      std::printf("            %4u  %6u  %6u  %-4s  %.9f   %6u %6u %6u %s%s%s\n", p, id,
+                  uint32_t(gtok[p]), gd.determined() ? "yes" : "TIE", lm.cos, ea, gam, gaf,
+                  mark, gam != gaf ? "  [golden argmax is a padding id]" : "",
+                  forced ? "  [teacher-forced]" : "");
+      if (!ok && int(p) == v.first_diverge) {
+        std::printf("      first divergence at generated position %u: engine %u, golden %u"
                     "  (decision row = golden logits[%u], cos %.9f, relL2 %.3e)\n",
                     p, id, uint32_t(gtok[p]), p == 0 ? T - 1 : T + p - 1, lm.cos, lm.rel);
+        if (!gd.determined()) {
+          std::printf("      the golden row is UNDETERMINED: %zu ids attain the maximum"
+                      " %.9f -", gd.set.size(), double(gd.value));
+          for (uint32_t i : gd.set) std::printf(" %u", i);
+          std::printf("\n      the engine's %u is a member, so clause (ii) is satisfied; the"
+                      " walk continues teacher-forced on the golden %u\n", id, uint32_t(gtok[p]));
+        }
         print_top5("engine", dec.data(), Qwen35::kVocab, Qwen35::kVocabUsed);
         print_top5("golden", grow, V, Qwen35::kVocabUsed);
       }
+
+      // Advance one replay. Free-running until the first divergence, then the
+      // oracle's token - see the clause-(iii) note above.
+      //
+      // **`forced` is set BEFORE the advance, and that ordering is the whole
+      // point.** The replay at the divergence row is the one that writes the
+      // diverging token into the KV cache, the conv ring and the GDN recurrent
+      // state; letting it consume the engine's own id and only teacher-forcing
+      // from the NEXT row leaves every later row reading a contaminated state,
+      // which is the free-running tail this clause exists to avoid. Measured
+      // 2026-08-26: with the flag set after the advance, prose's teacher-forced
+      // rows read logit cosines of 0.63 … 0.99 and three determined rows
+      // "failed"; setting it before, they read 0.9999 and pass. Same code, one
+      // statement moved.
+      if (!ok) forced = true;
+      if (forced) {
+        CHECK(uint32_t(gtok[p]) < Qwen35::kVocabUsed);
+        eng.ingest({uint32_t(gtok[p])});
+      } else {
+        CHECK_EQ(eng.generate(1)[0], id);
+      }
       read_logits();
     }
-    std::printf("  %s: %u/%u tokens exact%s\n", pname, v.exact, kGen,
-                v.first_bad < 0 ? "" : ("  (first mismatch at " + std::to_string(v.first_bad) + ")").c_str());
+    // The census the ruling requires be DERIVED here rather than pasted from a
+    // console log: which rows this golden file leaves undetermined.
+    std::printf("  undetermined rows in this golden file: %u of %u", v.n_tie, kGen);
+    if (v.n_tie == 0) {
+      std::printf(" (none)\n");
+    } else {
+      std::printf(" -");
+      for (uint32_t t : v.tie_steps) std::printf(" step %u", t);
+      std::printf("\n");
+    }
+    std::printf("  %s: %u determined-exact / %u tie-agreements / %u tie-set-members"
+                "   (%u determined + %u undetermined = %u)%s\n",
+                pname, v.det_exact, v.tie_agree, v.tie_member, v.n_determined, v.n_tie, kGen,
+                v.first_bad < 0 ? "" : "   ** GATE FAILURE **");
+    std::printf("  legacy strict count (every row, tie-break included): %u/%u\n", v.exact, kGen);
     std::printf("  engine:");
     for (uint32_t id : etok) std::printf(" %u", id);
     std::printf("\n  golden:");
     for (uint32_t p = 0; p < kGen; ++p) std::printf(" %u", uint32_t(gtok[p]));
     std::printf("\n");
+    CHECK_EQ(v.n_determined + v.n_tie, kGen);
     verdicts.push_back(v);
   }
 
   // ---- 5. the verdict, once every prompt has printed its diagnostics -------
   std::printf("\n================ golden gate ================\n");
-  std::printf("  the gate is the exact/%u column alone; every cosine below is a diagnostic\n"
-              "  prompt   ids   exact/%u   tap min cos (layer,t)   L63 tail   gdn min cos   "
-              "logit min cos\n", kGen, kGen);
+  std::printf("  the gate is the token columns alone; every cosine below is a diagnostic.\n"
+              "  det-exact: rows whose golden argmax is UNIQUE, engine element-exact - full\n"
+              "             strictness, and every one of them must pass.\n"
+              "  tie-agree / tie-member: rows where the golden top-1 is NOT unique. The\n"
+              "             engine's id must be a member of the golden argmax set; -agree\n"
+              "             is the member torch's lowest-index tie-break happened to pick.\n"
+              "  After any divergence the walk is teacher-forced on the oracle's token, so\n"
+              "  every determined row is judged on the reference's own context.\n"
+              "  prompt   ids   det-exact  tie-agree  tie-member   tap min cos (layer,t)   "
+              "L63 tail   gdn min cos   logit min cos\n");
   for (const Verdict& v : verdicts)
-    std::printf("  %-7s %4u   %2u/%u      %.9f (%2u,%2u)   %.9f  %.9f (L%u)  %.9f\n", v.name.c_str(),
-                v.n_prompt, v.exact, kGen, v.tap_min_cos, v.tap_min_layer, v.tap_min_t,
-                v.tail_min_cos, v.gdn_min_cos, v.gdn_min_layer, v.logit_min_cos);
+    std::printf("  %-7s %4u    %2u/%-2u        %2u         %2u        %.9f (%2u,%2u)   %.9f  "
+                "%.9f (L%u)  %.9f\n",
+                v.name.c_str(), v.n_prompt, v.det_exact, v.n_determined, v.tie_agree,
+                v.tie_member, v.tap_min_cos, v.tap_min_layer, v.tap_min_t, v.tail_min_cos,
+                v.gdn_min_cos, v.gdn_min_layer, v.logit_min_cos);
 
+  uint32_t tot_det = 0, tot_det_ok = 0, tot_tie = 0, tot_agree = 0, tot_member = 0;
   bool bad = false;
   for (const Verdict& v : verdicts) {
-    if (v.exact != kGen) {
-      std::fprintf(stderr, "GATE FAILED: %s reproduced %u/%u tokens (first mismatch %d)\n",
-                   v.name.c_str(), v.exact, kGen, v.first_bad);
+    tot_det += v.n_determined;
+    tot_det_ok += v.det_exact;
+    tot_tie += v.n_tie;
+    tot_agree += v.tie_agree;
+    tot_member += v.tie_member;
+    if (v.det_exact != v.n_determined) {
+      std::fprintf(stderr,
+                   "GATE FAILED: %s got %u of %u DETERMINED rows exact (first bad row %d) - a row"
+                   " whose golden argmax is unique is not a judgement call\n",
+                   v.name.c_str(), v.det_exact, v.n_determined, v.first_bad);
+      bad = true;
+    }
+    if (v.tie_agree + v.tie_member != v.n_tie) {
+      std::fprintf(stderr,
+                   "GATE FAILED: %s produced an id outside the golden argmax set on an"
+                   " undetermined row (%u agree + %u member != %u ties, first bad row %d)\n",
+                   v.name.c_str(), v.tie_agree, v.tie_member, v.n_tie, v.first_bad);
       bad = true;
     }
     // gdn_state is NOT gated - see kBar's comment. It prints **LOW** per layer
     // like the tap does, and the token ids are what decide this test.
   }
+  std::printf("  TOTAL: %u/%u determined rows exact, %u undetermined (%u agree + %u other"
+              " member)\n", tot_det_ok, tot_det, tot_tie, tot_agree, tot_member);
   if (bad) return 1;
-  std::printf("golden_gate_test OK: 3 prompts x %u greedy tokens, element-exact against the "
-              "CPU oracle\n", kGen);
+  std::printf("golden_gate_test OK: 3 prompts x %u greedy tokens - %u/%u determined rows"
+              " element-exact against the CPU oracle, %u undetermined rows all inside the"
+              " golden argmax set\n", kGen, tot_det_ok, tot_det, tot_tie);
   return 0;
 }

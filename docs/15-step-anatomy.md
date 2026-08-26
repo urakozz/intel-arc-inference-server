@@ -1662,7 +1662,7 @@ quality score has to survive this row.
 
 **The `--bench` MBU line was wrong until this landed and is now fixed**: it
 divided by a hardcoded 15.540 GB. On the new checkpoint that would have printed
-79.4% where the honest figure is 70.0% - one checkpoint's throughput against
+**79.5%** (30.20 x 15.53998 / 590 = 79.54) where the honest figure is 70.0% - one checkpoint's throughput against
 another's denominator. `W` now comes from `LoadReport::read_per_token`, and the
 line prints the `W` it used.
 

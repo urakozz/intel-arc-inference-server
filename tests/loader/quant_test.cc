@@ -99,6 +99,18 @@ int main() {
   }
   CHECK(threw);
   threw = false;
+  // An unrecognised quant_method is an unrecognised PACKING, and a wrong nibble
+  // order is a silently wrong model - so it stops here naming the value.
+  try {
+    auto qm = parse(R"({"quantization_config":{"bits":4,"group_size":64,"sym":true,
+        "quant_method":"awq"}})");
+    loader::QuantConfig::parse(qm);
+  } catch (const std::runtime_error& e) {
+    const std::string msg = e.what();
+    threw = msg.find("quant_method") != std::string::npos && msg.find("awq") != std::string::npos;
+  }
+  CHECK(threw);
+  threw = false;
   // desc_act=true is still refused whichever vocabulary declares it.
   try {
     auto da = parse(R"({"quantization_config":{"bits":4,"group_size":64,"sym":true,
@@ -184,6 +196,21 @@ int main() {
     // activation-order permutation to exist (docs/13).
     loader::QuantScan gs = loader::assert_quant_invariants(loader::SafetensorsSet(dir + "/"));
     CHECK_EQ(gs.g_idx_tensors, size_t(1));
+    // ...and this is the pair the loader refuses: a config that never declared
+    // `desc_act` (so the loader would infer false) over a checkpoint that DOES
+    // ship a permutation vector. The identity scan above has already passed on
+    // this very tensor - "every entry is the identity" is not the same claim as
+    // "the quantiser said it does not permute", and the loader declines to
+    // infer the second from silence. `loader::load` owns the throw; what is
+    // asserted here is the two inputs it decides on, so the rule stays readable
+    // without a device and a 19 GB checkpoint.
+    auto ar_nodesc = parse(R"({"quantization_config":{"bits":4,"group_size":64,"sym":true,
+        "quant_method":"auto-round","packing_format":"auto_round:auto_gptq"}})");
+    const loader::QuantConfig nq = loader::QuantConfig::parse(ar_nodesc);
+    CHECK(!nq.desc_act_declared);          // the loader will infer
+    CHECK_EQ(gs.g_idx_tensors, size_t(1)); // ...but there IS a g_idx here
+    // => loader::load throws. The condition it evaluates, spelled out:
+    CHECK(!nq.desc_act_declared && gs.g_idx_tensors != 0);
   }
   {
     std::string bad_ix = ix;

@@ -7,10 +7,11 @@
 #
 #   tools/box.sh sync && ssh <box>
 #   cd ~/b70-inference-server
-#   setsid nohup tools/oracle/golden.sh > oracle-out/golden.log 2>&1 </dev/null &
+#   OUT_DIR=... setsid nohup tools/oracle/golden.sh > "$OUT_DIR"/golden.log 2>&1 </dev/null &
 #
-# (detached, so the run outlives the ssh session). Prompt ids must already exist
-# as $OUT_DIR/<p>.ids - see "Running it" in tools/oracle/README.md.
+# (detached, so the run outlives the ssh session). Prompt ids come from
+# $IDS_DIR, which defaults to the COMMITTED tests/golden/prompts - see
+# "Running it" in tools/oracle/README.md.
 #
 # **One golden set per checkpoint, in its own directory.** The gate's whole
 # assertion is that the engine reproduces the oracle's ids on the SAME weights,

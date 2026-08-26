@@ -68,8 +68,10 @@ constexpr size_t kBenchPromptLen = sizeof(kBenchPrompt) / sizeof(kBenchPrompt[0]
 //        measured 2026-08-26). It is therefore read from `LoadReport::
 //        read_per_token`, which is what this load actually made resident, and
 //        printed beside the percentage so a row always says which W it used.
-//        A hardcoded W would have reported the RTN checkpoint's 30.10 t/s as
-//        79.3% of the device when the honest figure is 69.8%.
+//        A hardcoded W would have reported the RTN checkpoint's 30.20 t/s as
+//        79.5% of the device when the honest figure is 70.0% (measured
+//        2026-08-26; 30.20 x 15.53998 / 590 = 79.54 against
+//        30.20 x 13.67261 / 590 = 69.99).
 //   BW - `tools/probe/probe_bw`, 590 GB/s median at 2 GB through the same
 //        Level Zero path this engine submits on (docs/01). That one IS a
 //        device constant.
