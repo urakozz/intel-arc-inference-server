@@ -580,7 +580,8 @@ decision row for generated step 15 = logits[56]
 ```
 
 The engine's fp32 logits separate the same pair by **0.0156, in favour of 353**
-- which is **one eighth of one bf16 ulp** at that magnitude. `torch.argmax`
+- which is **≈ one eighth of one bf16 ulp** at that magnitude (0.015590 against
+an ulp of 0.125; the ratio is 0.1247, not exactly 1/8). `torch.argmax`
 broke the exact tie by lowest index and returned 271.
 
 **The oracle's logits are on the bf16 grid.** `dump.py` records

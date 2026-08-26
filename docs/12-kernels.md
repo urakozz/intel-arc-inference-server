@@ -456,15 +456,26 @@ starts, one for one).
 which *is* the fp32 layout `argmax_stage1` reads. So the capture binds `logits`
 as the `out` argument and the split-K accumulator's degenerate case becomes the
 logits row itself: no `partials` slice, no rebinding of `argmax`, no direct-out
-variant of this kernel. The fit is exact rather than comfortable - `S·M·N·4` =
-1·8·248320·4 = 7 946 240 B, and `DecodeBuffers::logits` is 7 946 240 B - and
-`gemv()` now carries a `require` that the bound output holds `[S][M][N]`,
-because `partials`' sizing (buffers.cc, the max-S × max-N rectangle over the
-table's int4 rows) stops covering a GEMV the moment one is bound elsewhere.
+variant of this kernel.
+
+The sizes, exactly: this capture compiles `kCapM = 1`, so the launch writes
+`S·kCapM·N·4` = 1·1·248320·4 = **993 280 B** into a `logits` allocation sized
+for `DecodeBuffers::kM = 8` tokens in flight, 8·248320·4 = **7 946 240 B** -
+**8× headroom, not an exact fit**. `gemv()` carries a `require` that the bound
+output holds what the launch actually writes; it is a real bound (it would catch
+a genuinely undersized output) rather than a tight one, and it is needed because
+`partials`' sizing (buffers.cc, the max-S × max-N rectangle over the table's
+int4 rows) stops covering a GEMV the moment one is bound elsewhere. At `M > 1`
+the two converge: `kCapM = kM` fills the allocation exactly, and the `[M][N]`
+layout is already what `out[(s·M + m)·N + n]` produces at `S = 1` for every m.
 
 `S = 1` was not chosen to make that work; the two reasons coincide. `N / 64 =
 3880` work-groups × 4 subgroups = **15 520 subgroups** against 32 Xe-cores - the
-same grid the bf16 kernel ran at 98.5% of device bandwidth. Split-K exists to
+same grid the bf16 kernel ran at 98.4% of device bandwidth (docs/15 §4 quotes
+**98.5%** for the same row; that figure is the 2026-08-25 anatomy run's
+4376 µs/launch, and 98.4% is the 2026-08-26 back-to-back control run's
+4381.289 - two runs of one instrument 0.12% apart, and nothing here turns on
+which is used). Split-K exists to
 buy threads and there are none left to buy. Only the one bindable variant is
 compiled: a probe row over `S ∈ {1,2,4,8,16}` × both layouts would cost ten more
 `ocloc` compiles of a 3880-work-group kernel to price splits nothing can bind.

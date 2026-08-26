@@ -525,7 +525,7 @@ same in each and are still hard requirements. The rest needed widening:
   nothing the missing key could have meant. The report prints
   `desc_act=false (inferred, 0 g_idx)` so the distinction survives into the log.
 
-Note what this costs the **third data assert**: with no `g_idx` tensors, the
+Note what this costs the **second data assert**: with no `g_idx` tensors, the
 identity check has nothing to scan. The invariant is not weakened - it is
 replaced by a stronger statement (the vector does not exist) - but the
 `g_idx` count in the report is now load-bearing rather than decorative, which
@@ -614,8 +614,20 @@ the index at it, so the shard is opened and its header parsed like any other -
 that is the dedup rule working, not a leak. The skip is by **name**, in
 `build_view`, before the shard is relevant: 29 tensors counted as `mtp`, none of
 them ever read, none of them able to reach `unconsumed`. Measured
-**`0 unconsumed`** on both checkpoints 2026-08-26, which is what the checkpoint
-test asserts.
+**`0 unconsumed`** on both checkpoints 2026-08-26.
+
+**`unconsumed` is report-only at load - nothing throws on it.** `loader::load`
+counts it, names up to five, and prints it; the assertion that it is 0 lives in
+`tests/loader/load_checkpoint_test` and nowhere else. So on a box without the
+test, a checkpoint that grew a tensor family loads and serves, and the only
+evidence is a line in the log. That is a deliberate trade - a load is not the
+place to refuse a checkpoint over an unread tensor - but it is worth knowing
+*which* claim rides on it. The `lm_head`-in-both-forms handling does: the
+top-level branch of `build_view` puts every `lm_head.*` name in the view, and
+what proves that all of them are either consumed or deliberately dropped (the
+packed head's `.qzeros`) is the unconsumed count being 0, checked by the test.
+A future head form with a fourth tensor would load silently and be caught only
+by `ctest -L checkpoint`.
 
 One consequence worth stating because it is not obvious:
 `assert_quant_invariants` walks the whole `SafetensorsSet`, so it *does* scan
