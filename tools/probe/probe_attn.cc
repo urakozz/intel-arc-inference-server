@@ -113,6 +113,9 @@ const Variant kVariants[] = {
     {"gqa1", 64, "5 of the 6 q-head passes"},
     {"gqa2", 64, "4 of the 6 q-head passes"},
     {"gqa3", 64, "3 of the 6 q-head passes"},
+    {"b2d", 64, "15 of every 16 K messages: the row in TWO 2D block reads (same order)"},
+    {"b2d1", 64, "all but one K message: the row in ONE 2D block read (same order)"},
+    {"kvt_b2d", 64, "both strides AND the row in two 2D block reads"},
     {"b32", 32, "half the block - the L5 sweep's fourth point, transplanted"},
     {"b128", 128, "- double the block (L5's second point)"},
     {"b256", 256, "- the pre-L5 block (L5's first point)"},
@@ -239,6 +242,17 @@ int main(int argc, char** argv) {
   l0::Mem attn_part(ctx, l0::MemKind::Device,
                     size_t(kQHeads) * max_blocks * kPart * sizeof(float));
 
+  // Output byte-check. Most variants here compute a wrong answer on purpose, so
+  // this is a COLUMN and not a gate -- except for `b2d`/`b2d1`, which are the
+  // only variants that claim the same values in the same order as `base`. That
+  // claim rests on a guess about how a 2D block read distributes its rows over
+  // the subgroup, and a guess about a load's data mapping is exactly what
+  // silently invalidated three rows of the GEMV battery this hour. So it is
+  // checked, and a mismatch makes this probe exit non-zero.
+  const size_t part_floats = size_t(kQHeads) * (kMaxLen / 32) * kPart;
+  std::vector<float> part_host(part_floats), part_base;
+  bool b2d_ok = true;
+
   l0::EventPool pool(ctx, reps);
   std::vector<l0::Event> events;
   events.reserve(reps);
@@ -253,7 +267,7 @@ int main(int argc, char** argv) {
               pos, reps, kReplays - kWarmup, kWarmup, kvsets, ctx.name().c_str(),
               ctx.eu_count());
   std::printf("| variant | live WGs | us/launch (median) | mean | min .. max | vs base |"
-              " wall/reps | removes |\n|---|---|---|---|---|---|---|---|\n");
+              " wall/reps | bytes | removes |\n|---|---|---|---|---|---|---|---|---|\n");
 
   double base_us = 0.0;
   for (const Variant& v : kVariants) {
@@ -302,6 +316,20 @@ int main(int argc, char** argv) {
     }
     const double wall_us = timed_wall_us / double(kReplays - kWarmup);
     const Row r = summarise(us);
+    imm.copy(part_host.data(), attn_part.ptr(), part_floats * sizeof(float));
+    const char* bytes = "-";
+    if (std::strcmp(v.tag, "base") == 0) {
+      part_base = part_host;
+      bytes = "(the control)";
+    } else if (!part_base.empty()) {
+      const bool same = std::memcmp(part_base.data(), part_host.data(),
+                                    part_floats * sizeof(float)) == 0;
+      bytes = same ? "identical" : "differs (by design)";
+      if (std::strncmp(v.tag, "b2d", 3) == 0 && !same) {
+        bytes = "**DIFFERS - the mapping guess is WRONG**";
+        b2d_ok = false;
+      }
+    }
     if (std::strcmp(v.tag, "base") == 0) base_us = r.median;
     char rel[32] = "-";
     if (base_us > 0.0 && std::strcmp(v.tag, "base") != 0)
@@ -312,9 +340,12 @@ int main(int argc, char** argv) {
     // out well below, the durations would be contended launches and the whole
     // table would be measuring the wrong thing. It is the mean over the timed
     // replays, so it is comparable to the median column directly.
-    std::printf("| `%s` | %u | **%.3f** | %.3f | %.3f .. %.3f | %s | %.3f | %s |\n", v.tag, live,
-                r.median, r.mean, r.lo, r.hi, rel, wall_us / double(reps), v.what);
+    std::printf("| `%s` | %u | **%.3f** | %.3f | %.3f .. %.3f | %s | %.3f | %s | %s |\n", v.tag,
+                live, r.median, r.mean, r.lo, r.hi, rel, wall_us / double(reps), bytes, v.what);
     std::fflush(stdout);
   }
-  return 0;
+  if (!b2d_ok)
+    std::puts("\n**A `b2d` row did not reproduce `base`'s bytes.** Its timing is therefore not a\n"
+              "measurement of the same work and must not be read as one.");
+  return b2d_ok ? 0 : 1;
 }

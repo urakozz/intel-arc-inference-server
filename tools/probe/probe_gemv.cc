@@ -58,9 +58,6 @@ const LoadVariant kVariants[] = {
     {"pf4",      1, false, "10+1pf", "prefetch() 4 ahead"},
     {"pfbuf",    1, false, "10",     "register double-buffer (+8 u32/lane)"},
     {"ballast",  1, false, "10",     "pfbuf's register-pressure control"},
-    {"cc1",      1, false, "10",     "weight read L1UC_L3UC (bypass both)"},
-    {"cc2",      1, false, "10",     "weight read L1UC_L3C"},
-    {"cc5",      1, false, "10",     "weight read L1S_L3UC (L1 streaming)"},
     {"l0base",   0, false, "17",     "GPTQ-native, 8 strided 64 B loads"},
     {"l0b2d",    0, false, "10",     "+ 2D block read 8r16 (one message)"},
     {"l0b2dx",   0, false, "6",      "+ 2D block read and wide activations"},
@@ -94,6 +91,7 @@ int run_loads(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
   std::puts("which is src/kernels/gemv.cl verbatim. Timing is the house 8-replay/drop-3");
   std::puts("median over 40 launches cycling NB weight copies past the 24 MB L2.\n");
   bool all_ok = true;
+  std::vector<double> warm_first;   // the discarded warm-up config, kept as ramp evidence
   std::vector<double> base_first;  // GB/s of the `base` row, per shape, for the drift control
   for (const LoadShape& sh : kShapes) {
     common::Int4Gptq w = common::Int4Gptq::random(sh.K, sh.N, 42);
@@ -103,10 +101,23 @@ int run_loads(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
     const double tol = tol_for(ref);
     std::printf("\n## %s - %u×%u, %.2f MB of weights\n\n", sh.name, sh.K, sh.N,
                 double(w.bytes()) / (1u << 20));
+    // WARM-UP, discarded. The 8-replay/drop-3 inside `time_list` covers the
+    // ramp WITHIN a configuration; it does not cover the device ramping down
+    // while the host computes this shape's CPU reference, which takes seconds
+    // of GPU idle. Measured 2026-08-26: without this the first recorded
+    // configuration of a shape read 355 / 475 / 524 GB/s where the same binary
+    // read 534 / 541 / 538 once the device was warm - +50.4% / +13.8% / +2.7%.
+    // That is a clock ramp, not a variant, and it would have been attributed to
+    // whichever variant happened to be first.
+    const std::string warm = pgl_name("base", sh.K, sh.N, sh.S_prod, 1);
+    const double warm_gbps =
+        double(w.bytes()) /
+        (run_gemv(ctx, q, f, w, x, {1, sh.K, sh.N, sh.S_prod, 1, warm.c_str()}, 40).us_per_launch * 1e3);
     std::printf("| variant | L | S | msgs | µs | GB/s | %% of 590 | Δ%% vs base | bytes vs base | what |\n");
     std::printf("|---|---|---|---|---|---|---|---|---|---|\n");
     std::vector<float> base_out;
     double base_gbps = 0;
+    warm_first.push_back(warm_gbps);
     for (const LoadVariant& v : kVariants) {
       if (v.s_l0best && sh.S_l0 == sh.S_prod) continue;      // no second S to run
       if (!std::strcmp(v.tag, "l0b2d16") && !sh.blk2d16) continue;  // odd k-groups per slice
@@ -122,6 +133,12 @@ int run_loads(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
         base_first.push_back(gbps);
         bytes = "(the control)";
         if (err > tol) { all_ok = false; bytes = "**WRONG vs CPU ref**"; }
+      } else if (S != sh.S_prod) {
+        // A different split-K width reorders the sum (S partials folded by the
+        // host here, as `prep` does in situ), so this row is held to the
+        // reference tolerance, not to bit-identity.
+        if (err > tol) { all_ok = false; bytes = "**WRONG vs CPU ref**"; }
+        else bytes = "ref ok (S reorders the sum)";
       } else {
         size_t diff = 0;
         for (size_t i = 0; i < base_out.size(); ++i)
@@ -144,6 +161,16 @@ int run_loads(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
   // Drift control (the Task-A lesson): re-measure every `base` row at the end
   // of the battery on the same instrument in the same process. A battery whose
   // control has moved has not measured its variants either.
+  // The ramp control. `warm` is the discarded warm-up configuration and `base`
+  // is the identical binary run immediately after it: the gap between them is
+  // how much of the device's clock ramp this battery would have charged to
+  // whichever variant came first.
+  std::puts("\n## ramp control - the discarded warm-up beside the recorded `base`\n");
+  std::printf("| shape | warm-up (discarded) GB/s | recorded `base` GB/s | ramp |\n|---|---|---|---|\n");
+  for (size_t i = 0; i < base_first.size(); ++i)
+    std::printf("| %s | %.0f | %.0f | %+.1f%% |\n", kShapes[i].name, warm_first[i], base_first[i],
+                100.0 * (base_first[i] / warm_first[i] - 1.0));
+
   std::puts("\n## drift control - `base` re-measured after the whole battery\n");
   std::printf("| shape | GB/s at battery start | GB/s at battery end | Δ%% |\n|---|---|---|---|\n");
   double worst = 0;
@@ -152,6 +179,10 @@ int run_loads(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
     common::Int4Gptq w = common::Int4Gptq::random(sh.K, sh.N, 42);
     std::vector<uint16_t> x = random_bf16(sh.K, 5);
     const std::string name = pgl_name("base", sh.K, sh.N, sh.S_prod, 1);
+    // Same discarded warm-up as the battery: regenerating the random weights
+    // above is seconds of GPU idle, and without this the control measures the
+    // ramp back out of it instead of the drift it is here for.
+    run_gemv(ctx, q, f, w, x, {1, sh.K, sh.N, sh.S_prod, 1, name.c_str()}, 40);
     GemvResult r = run_gemv(ctx, q, f, w, x, {1, sh.K, sh.N, sh.S_prod, 1, name.c_str()}, 40);
     const double gbps = double(r.weight_bytes) / (r.us_per_launch * 1e3);
     const double d = 100.0 * (gbps / base_first[i] - 1.0);
