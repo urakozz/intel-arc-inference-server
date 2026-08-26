@@ -20,7 +20,14 @@
 #include "l0/queue.h"
 #include <chrono>
 
-struct GemvCase { uint32_t M, K, N, S, L; };
+// `variant`, when set, names the compiled binary to load INSTEAD of
+// `kernels::gemv_variant(M, K, N, S, L)`. It exists for one caller -
+// tools/probe/probe_gemv.cc's `--loads` battery, whose kernels are built from
+// tools/probe/probe_gemv_loads.cl and are named `pgl_<tag>_M1_K…_N…_S…_L…`.
+// The entry point is still `gemv` and the four arguments and the grid are
+// still gemv.cl's, which is the whole reason the override is one string and
+// not a second harness. Left null (every other caller), nothing changes.
+struct GemvCase { uint32_t M, K, N, S, L; const char* variant = nullptr; };
 struct GemvResult { std::vector<float> out; double us_per_launch = 0; size_t weight_bytes = 0; };
 
 inline double max_abs_err(const std::vector<float>& got, const std::vector<float>& ref) {
@@ -76,7 +83,8 @@ inline GemvResult run_gemv(l0::Context& ctx, l0::Queue& q, l0::Fence& fence,
   const size_t out_n = size_t(c.S) * c.M * c.N;
   l0::Mem obuf(ctx, l0::MemKind::Device, out_n * 4);
 
-  l0::Module mod(ctx, kernels::path(kernels::gemv_variant(c.M, c.K, c.N, c.S, c.L)));
+  l0::Module mod(ctx, kernels::path(c.variant ? std::string(c.variant)
+                                              : kernels::gemv_variant(c.M, c.K, c.N, c.S, c.L)));
   l0::Kernel k = mod.kernel("gemv");
   k.group_size(64);
   auto bind = [&](int i) {
