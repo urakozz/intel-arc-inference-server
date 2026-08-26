@@ -325,7 +325,13 @@ int main(int argc, char** argv) {
       const bool same = std::memcmp(part_base.data(), part_host.data(),
                                     part_floats * sizeof(float)) == 0;
       bytes = same ? "identical" : "differs (by design)";
-      if (std::strncmp(v.tag, "b2d", 3) == 0 && !same) {
+      // EXACT names, not a prefix. `kvt_b2d` starts with neither and would slip
+      // through a `strstr`, and it must: PB_KT/PB_VT reinterpret the same buffer
+      // with a different index mapping, so its VALUES differ from base by
+      // construction and "differs (by design)" is the correct reading for it.
+      // Only these two claim base's bytes.
+      const bool claims_base = std::strcmp(v.tag, "b2d") == 0 || std::strcmp(v.tag, "b2d1") == 0;
+      if (claims_base && !same) {
         bytes = "**DIFFERS - the mapping guess is WRONG**";
         b2d_ok = false;
       }

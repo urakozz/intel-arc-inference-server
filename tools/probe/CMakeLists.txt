@@ -133,12 +133,11 @@ foreach(row IN LISTS PGL_SHAPES)
   add_probe_gemv_loads(pf4     ${K} ${N} ${SP} 1 PGL_PREFETCH=4)
   add_probe_gemv_loads(pfbuf   ${K} ${N} ${SP} 1 PGL_PFBUF=1)
   add_probe_gemv_loads(ballast ${K} ${N} ${SP} 1 PGL_BALLAST=1)   # pfbuf's register control
-  # LSC cache policy on the 512 B weight read. The weight stream is read once
-  # per token and never reused, so every line it keeps in L1 is a line the
-  # activation vector loses. 1 = L1UC_L3UC, 2 = L1UC_L3C, 5 = L1S_L3UC.
-  add_probe_gemv_loads(cc1     ${K} ${N} ${SP} 1 PGL_CACHECTL=1)
-  add_probe_gemv_loads(cc2     ${K} ${N} ${SP} 1 PGL_CACHECTL=2)
-  add_probe_gemv_loads(cc5     ${K} ${N} ${SP} 1 PGL_CACHECTL=5)
+  # No PGL_CACHECTL variants are built. The knob still exists and is documented
+  # in probe_gemv_loads.cl, but it was MEASURED BROKEN 2026-08-26 -- the builtin
+  # compiles and does not reproduce block_read8's data mapping under the
+  # signature we declared, so its GB/s is meaningless. Dead binaries would only
+  # invite someone to read them.
   # layout 0 - where a 2D block read has messages to remove, at both S values
   add_probe_gemv_loads(l0base  ${K} ${N} ${SP} 0)
   add_probe_gemv_loads(l0b2d   ${K} ${N} ${SP} 0 PGL_BLK2D=8)
@@ -146,9 +145,21 @@ foreach(row IN LISTS PGL_SHAPES)
   if(B16)
     add_probe_gemv_loads(l0b2d16 ${K} ${N} ${SP} 0 PGL_BLK2D=16)
   endif()
+  add_probe_gemv_loads(l0deq   ${K} ${N} ${SP} 0 PGL_DEQ_SHIFT=1)
   if(NOT S0 EQUAL SP)
     add_probe_gemv_loads(l0base ${K} ${N} ${S0} 0)
     add_probe_gemv_loads(l0b2d  ${K} ${N} ${S0} 0 PGL_BLK2D=8)
+    # The composed cell (fix round I1): the retuned layout+S AND the dequant
+    # change together, because `deq`'s gain shrinks as a shape approaches the
+    # wall and the retuned cells sit at 94-97% of it. Composing them by
+    # multiplication would over-count.
+    add_probe_gemv_loads(l0deq    ${K} ${N} ${S0} 0 PGL_DEQ_SHIFT=1)
+    add_probe_gemv_loads(l0b2ddeq ${K} ${N} ${S0} 0 PGL_BLK2D=8 PGL_DEQ_SHIFT=1)
+    # Layout 1 at the SAME alternate S (fix round I2): layout and S were varied
+    # together in the first battery, so this is the row that separates them --
+    # an S-table one-liner inside layout 1 against the layout-0 rider.
+    add_probe_gemv_loads(base   ${K} ${N} ${S0} 1)
+    add_probe_gemv_loads(deq    ${K} ${N} ${S0} 1 PGL_DEQ_SHIFT=1)
   endif()
 endforeach()
 add_dependencies(probe_gemv ${PROBE_GEMV_LOADS_TARGETS})
