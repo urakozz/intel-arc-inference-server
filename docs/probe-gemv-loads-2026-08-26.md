@@ -38,10 +38,10 @@ Rows at **the production `S`** keep the accumulation order exactly and are held
 tolerance question, and the probe exits non-zero on one.
 
 Rows at **any other `S`** cannot be: a different split-K width folds a different
-number of fp32 partials, which reorders the sum. Those twelve cells are held to
+number of fp32 partials, which reorders the sum. Those thirty cells are held to
 the **double-accumulating CPU reference's tolerance** instead, and the `bytes vs
 base` column says `ref ok (S reorders the sum)` for exactly those. **Do not
-quote "every row is bit-identical" for this table** - twelve of them are not,
+quote "every row is bit-identical" for this table** - thirty of them are not,
 and a lever built on them is a golden-gate lever, not a bit-identity one.
 
 ## Caveats to carry with any cell you quote
@@ -191,7 +191,7 @@ this probe measures; the **consumer's read is not**. That read is
 | gate‖up | 4 → 8 | 64 | +35.65 MB | **+0.060** |
 | down | 16 → 4 | 64 | −15.73 MB | **−0.027** |
 | lm_head | 1 → 1 | 1 | 0 | 0 |
-| **net** | | | **+4.9 MB** | **+0.009** |
+| **net** | | | **+5.11 MB** | **+0.009** |
 
 Two shapes want a *smaller* `S` and pay `prep` back; `gate‖up` alone costs
 +0.060 ms against its own +0.25 ms gain. **The four changes very nearly cancel
@@ -238,13 +238,13 @@ forward - but it is not excluded, and `l0b2d16` (fewer messages, materially
 
 **One correction to the verbatim block below.** Its third paragraph - printed by
 the program - says "Every row is held byte-identical to `base`". That was the
-program's own header at the time of this run and it is **wrong for the twelve
+program's own header at the time of this run and it is **wrong for the thirty
 rows at a non-production `S`**, exactly as the section above explains. The
 printf has been corrected in `tools/probe/probe_gemv.cc`; re-running the battery
 purely to reprint one paragraph would have cost a device run for no measurement,
 so the output is left verbatim and corrected here. **The `bytes vs base` column
 in the table is, and always was, right** - it says `ref ok (S reorders the sum)`
-on precisely those twelve rows.
+on precisely those thirty rows.
 
 ---
 
