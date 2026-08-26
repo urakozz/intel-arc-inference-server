@@ -113,6 +113,9 @@ const Variant kVariants[] = {
     {"gqa1", 64, "5 of the 6 q-head passes"},
     {"gqa2", 64, "4 of the 6 q-head passes"},
     {"gqa3", 64, "3 of the 6 q-head passes"},
+    {"gpack2", 64, "two q-heads share each SLM-staged K/V wave (byte-identical candidate)"},
+    {"gpack3", 64, "three q-heads share each SLM-staged K/V wave (byte-identical candidate)"},
+    {"gpack6", 64, "all six q-heads share one SLM-staged K/V wave (byte-identical candidate)"},
     {"b2d", 64, "15 of every 16 K messages: the row in TWO 2D block reads (same order)"},
     {"b2d1", 64, "all but one K message: the row in ONE 2D block read (same order)"},
     {"kvt_b2d", 64, "both strides AND the row in two 2D block reads"},
@@ -251,7 +254,7 @@ int main(int argc, char** argv) {
   // checked, and a mismatch makes this probe exit non-zero.
   const size_t part_floats = size_t(kQHeads) * (kMaxLen / 32) * kPart;
   std::vector<float> part_host(part_floats), part_base;
-  bool b2d_ok = true;
+  bool exact_ok = true;
 
   l0::EventPool pool(ctx, reps);
   std::vector<l0::Event> events;
@@ -330,10 +333,14 @@ int main(int argc, char** argv) {
       // with a different index mapping, so its VALUES differ from base by
       // construction and "differs (by design)" is the correct reading for it.
       // Only these two claim base's bytes.
-      const bool claims_base = std::strcmp(v.tag, "b2d") == 0 || std::strcmp(v.tag, "b2d1") == 0;
+      const bool claims_base = std::strcmp(v.tag, "b2d") == 0 ||
+                               std::strcmp(v.tag, "b2d1") == 0 ||
+                               std::strcmp(v.tag, "gpack2") == 0 ||
+                               std::strcmp(v.tag, "gpack3") == 0 ||
+                               std::strcmp(v.tag, "gpack6") == 0;
       if (claims_base && !same) {
         bytes = "**DIFFERS - the mapping guess is WRONG**";
-        b2d_ok = false;
+        exact_ok = false;
       }
     }
     if (std::strcmp(v.tag, "base") == 0) base_us = r.median;
@@ -350,8 +357,8 @@ int main(int argc, char** argv) {
                 live, r.median, r.mean, r.lo, r.hi, rel, wall_us / double(reps), bytes, v.what);
     std::fflush(stdout);
   }
-  if (!b2d_ok)
-    std::puts("\n**A `b2d` row did not reproduce `base`'s bytes.** Its timing is therefore not a\n"
-              "measurement of the same work and must not be read as one.");
-  return b2d_ok ? 0 : 1;
+  if (!exact_ok)
+    std::puts("\n**A byte-identical candidate did not reproduce `base`'s bytes.** Its timing is\n"
+              "therefore not a measurement of the same work and must not be read as one.");
+  return exact_ok ? 0 : 1;
 }

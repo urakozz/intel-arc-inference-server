@@ -72,6 +72,11 @@ add_probe_attn(loadsonly   PB_NO_SOFTMAX=1 PB_NO_TREE=1) # loads + dot + V sum o
 add_probe_attn(gqa1        PB_GQA=1)
 add_probe_attn(gqa2        PB_GQA=2)
 add_probe_attn(gqa3        PB_GQA=3)
+# Correctness-candidate GQA packing: 2, 3 or all 6 Q heads share each staged
+# K/V wave. Unlike the ablations above, all three must reproduce base's bytes.
+add_probe_attn(gpack2      PB_GPACK=2)
+add_probe_attn(gpack3      PB_GPACK=3)
+add_probe_attn(gpack6      PB_GPACK=6)
 # P3-prep (spec 1.7 §3): the GEMV battery's 2D-block technique transferred to the
 # KV walk. 16 messages of 32 B per K row become 2 (`b2d`) or 1 (`b2d1`), with
 # the SAME values in the SAME fma order -- the only probe_attn variants that are
