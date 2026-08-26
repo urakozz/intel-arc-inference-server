@@ -62,8 +62,13 @@ const LoadVariant kVariants[] = {
     {"l0b2d",    0, false, "10",     "+ 2D block read 8r16 (one message)"},
     {"l0b2dx",   0, false, "6",      "+ 2D block read and wide activations"},
     {"l0b2d16",  0, false, "9.5",    "+ 2D block read 16r16 (two k-groups)"},
+    {"l0deq",    0, false, "17",     "GPTQ-native + xor/shift dequant"},
+    {"base",     1, true,  "10",     "layout 1 at layout 0's best S - the S-ONLY option"},
+    {"deq",      1, true,  "10",     "layout 1 at that S, + xor/shift dequant"},
     {"l0base",   0, true,  "17",     "GPTQ-native at layout 0's own best S"},
     {"l0b2d",    0, true,  "10",     "+ 2D block read 8r16, same S"},
+    {"l0deq",    0, true,  "17",     "+ xor/shift dequant - THE COMPOSED CELL"},
+    {"l0b2ddeq", 0, true,  "10",     "+ 2D block read and xor/shift dequant"},
 };
 struct LoadShape {
   uint32_t K, N, S_prod, S_l0;
@@ -87,8 +92,11 @@ int run_loads(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
   std::puts("# probe_gemv --loads - the P1 load-path battery (spec 1.7 §3)\n");
   std::puts("Same arithmetic, same bytes, different message counts. `msgs` is the LSC");
   std::puts("messages one subgroup issues per k-group (64 K elements, 544 weight bytes):");
-  std::puts("weights + scales + activations. Every row is held byte-identical to `base`,");
-  std::puts("which is src/kernels/gemv.cl verbatim. Timing is the house 8-replay/drop-3");
+  std::puts("weights + scales + activations. Rows at the PRODUCTION S are held byte-identical");
+  std::puts("to `base` (src/kernels/gemv.cl verbatim); rows at any other S fold a different");
+  std::puts("number of fp32 partials and so reorder the sum, and are held to the CPU");
+  std::puts("reference's tolerance instead - the `bytes vs base` column says which.");
+  std::puts("Timing is the house 8-replay/drop-3");
   std::puts("median over 40 launches cycling NB weight copies past the 24 MB L2.\n");
   bool all_ok = true;
   std::vector<double> warm_first;   // the discarded warm-up config, kept as ramp evidence
