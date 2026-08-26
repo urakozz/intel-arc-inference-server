@@ -168,15 +168,20 @@ bug, not vLLM or XPU.
 ## b70-decode - this project, phase 1
 
 > **Every row below names its checkpoint, and from 2026-08-26 that is
-> load-bearing rather than pedantic.** This engine now runs two, and they do not
-> read the same number of bytes per token:
+> load-bearing rather than pedantic.** This engine now runs three, and they do
+> not all read the same number of bytes per token:
 >
 > | checkpoint | `lm_head` | **W** read/token | roofline @ 590 GB/s |
 > |---|---|---|---|
 > | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` | bf16 | **15.540 GB** | **37.97 t/s** (26.34 ms) |
 > | `qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** | **13.673 GB** | **43.15 t/s** (23.17 ms) |
+> | `qwen38-27b-w4g64-tuned/Qwen3.8-27B-w4g64` | **int4 g64** | **13.673 GB** | **43.15 t/s** (23.17 ms) |
 >
-> Both measured by the loader itself (docs/13). A t/s figure is comparable
+> The two self-quantised checkpoints share a row because they share a *layout*:
+> 2015 tensors each, every name, dtype and shape identical, verified from the
+> safetensors headers. They differ in the nibbles, not the bytes read.
+>
+> All measured by the loader itself (docs/13). A t/s figure is comparable
 > across the boundary - it is tokens per second either way - but **MBU and the
 > roofline are not**, because W is the denominator of both. Everything in this
 > section down to "The new-checkpoint rows" is the **`Vishva007`** checkpoint;
@@ -203,7 +208,8 @@ the spec 1.5 **gate** - all measured the same way on the same day and box:
 | engine | depth | tg | t/s | ms/token |
 |---|---|---|---|---|
 | vLLM `p314-t214-vxkp0`, no speculation | 1 † | 256 | **31.50** | 31.75 |
-| **b70-decode `ef6acb0`** - the spec 1.5 gate, levers L2 + L1 + L5 | **4096** † | **256** | **27.54** | **36.32** |
+| **b70-decode `647f2d0`** - the standing row, re-measured 2026-08-26 | **4096** † | **256** | **27.52** | **36.34** |
+| b70-decode `ef6acb0` - the spec 1.5 gate, levers L2 + L1 + L5 | 4096 † | 256 | 27.54 | 36.32 |
 | b70-decode `c746840` - lever L5, the row it was accepted on | 4096 † | 256 | 27.53 | 36.32 |
 | b70-decode `b045e11` - levers L2 + L1 | 4096 † | 256 | 26.28 | 38.05 |
 | b70-decode `a1e2d3a` - lever L2 only | 4096 † | 256 | 24.83 | 40.27 |
@@ -253,17 +259,69 @@ roofline and a different MBU denominator.** These rows are *not* continuations
 of the ladder above; they are the same engine reading 1.867 GB/token less.
 Spec 1.6 §5.1 - docs/15 has the derivation, docs/12 the launch.
 
+### The record rows - all three checkpoints, one idle box, 2026-08-26
+
+**The record-grade rows this section owed have been taken.** `647f2d0`, clean
+worktree, `tools/bench_decode.sh --runs 3 --depth 4096 --tg 256`, one after
+another on a box that was **idle in the strong sense**: no container running and
+**not one process on the machine holding a DRM file descriptor**, verified
+before and after each triple (`grep -l drm-driver /proc/*/fdinfo/*` returned
+nothing every time). The only other CPU on the box was a root telemetry daemon
+at ~15% of one core.
+
+| engine / checkpoint | depth | tg | runs (t/s) | **t/s** | **ms/token** | MBU | grade |
+|---|---|---|---|---|---|---|---|
+| **b70-decode `647f2d0`, `qwen38-27b-w4g64-tuned`** (int4 `lm_head`) | 4096 | 256 | 30.06 / 30.04 / 30.02 | **30.04** | **33.29** | 69.6% of 13.673 GB | **record**, median of 3, idle |
+| **b70-decode `647f2d0`, `qwen38-27b-w4g64-rtn`** (int4 `lm_head`) | 4096 | 256 | 30.04 / 30.05 / 30.03 | **30.04** | **33.29** | 69.6% of 13.673 GB | **record**, median of 3, idle |
+| **b70-decode `647f2d0`, `Vishva007`** (bf16 `lm_head`) | 4096 | 256 | 27.52 / 27.55 / 27.51 | **27.52** | **36.34** | 72.5% of 15.540 GB | **record**, median of 3, idle |
+
+Spreads: 0.04 (0.13%), 0.02 (0.07%), 0.04 (0.15%) - the band every record triple
+in this document has reported. Ingest, from the same runs: **31.40**, **31.41**
+and **34.47** ms/token over 4096 ids.
+
+**The two self-quantised checkpoints record the same number to every printed
+digit.** 30.04 t/s, 33.29 ms/token, 411 GB/s, 69.6% - two medians of three taken
+45 minutes apart with an 18-minute 22-thread oracle run between them. They have
+identical tensor manifests (2015 tensors, every name/dtype/shape equal, verified
+from the safetensors headers), therefore identical `W`, therefore the same speed
+class; the prediction was made from the headers before either was benched.
+`tuned` and `rtn` differ in the nibbles, and the nibbles are not a cost.
+
+**The checkpoint delta, at record grade:** **+2.52 t/s, −3.05 ms/token**
+(27.52 → 30.04). **Ingest moves by −3.06 ms**, the same amount to within
+0.01 ms - which is what a per-token *bytes* lever must do on an engine whose
+ingest is decode, and neither figure was tuned to make it so.
+
+**Against the bar**, which is `Vishva007`-shaped and stays where it is: **30.04
+t/s is 1.46 t/s (4.6%) short of vLLM's 31.50.** The re-assessment memo's
+conclusion - `lm_head` at int4 is necessary and not sufficient - is unchanged
+and slightly reinforced by the properly-measured row.
+
+**Why these rows are a shade under the iterate rows below, and it is not drift
+alone.** `--bench` sweeps `pos` from `DEPTH` to `DEPTH + TG − 1`, so mean KV
+depth is 4127.5 at `tg 64` and 4223.5 at `tg 256`: **+2.33% of attention work
+per token**, worth **+0.083 ms** against `attn_decode`'s measured 3.585 ms plus
+~0.003 ms of extra `attn_reduce` block merging - **≈ +0.086 ms/token, and it
+applies to both checkpoints equally**, because attention does not know which
+head is packed. `Vishva007` moved +0.07 ms (36.27 → 36.34), which is that term
+and nothing else. The RTN row moved +0.18 ms (33.11 → 33.29): that term plus
+~0.09 ms, i.e. **0.27%**, which sits inside the day-scale drift tier this
+document has measured three times on untouched launches (+0.30% at §L2, +0.50%
+at §L1, +0.56% at §L5). The honest reading is that a single run on a loaded box
+was ~0.09 ms optimistic against today's median of three.
+
+### The iterate-grade rows this replaces - kept, because they are the record of how it was found
+
 **Grade: ITERATE, not RECORD.** Single runs, not the median of three
 `tools/bench_decode.sh` produces, and the box was **not idle** - a 12-core vLLM
 XPU kernel compile ran throughout, and for part of the window a 22-thread oracle
-dump as well. A record-grade median-of-three row on a quiet box is a named
-follow-on and has not been taken.
+dump as well.
 
 | engine / checkpoint                                                              | depth | tg  | t/s       | ms/token  | MBU                | grade                         |
 |----------------------------------------------------------------------------------|-------|-----|-----------|-----------|--------------------|-------------------------------|
 | **b70-decode, `qwen38-27b-w4g64-rtn`** (int4 `lm_head`)                          | 4096  | 64  | **30.20** | **33.11** | 70.0% of 13.673 GB | iterate, 1 run, box loaded    |
 | b70-decode, `Vishva007` (bf16 `lm_head`) - **the control, same hour, same load** | 4096  | 64  | 27.57     | 36.27     | 72.6% of 15.540 GB | iterate, 1 run, box loaded    |
-| b70-decode `ef6acb0`, `Vishva007` - the standing record row                      | 4096  | 256 | 27.54     | 36.32     | 72.5% of 15.540 GB | **record**, median of 3, idle |
+| b70-decode `ef6acb0`, `Vishva007` - the then-standing record row                 | 4096  | 256 | 27.54     | 36.32     | 72.5% of 15.540 GB | **record**, median of 3, idle |
 
 **The control row is what makes the pair readable.** `Vishva007` under load read
 **36.27** against its standing idle median of **36.32** - 0.14% apart. A decode
@@ -482,6 +540,17 @@ b70-decode row above.)
 
 ## Notes
 
+- **An image tag is not a version. Read the vLLM version, not the tag.** The
+  `vllm-xpu-env-next-p314-t214-vxkp0:latest` that produced the 31.50 t/s bar was
+  vLLM `0.27.2rc1.dev365+g5ee84d3c5.d20260821`; the tag was rebuilt 2026-08-26
+  and now carries `0.27.2rc1.dev514+g0e30bd62f.d20260826` - **and a different
+  quantization backend**, `quantization=inc` (Intel Neural Compressor wNa16 with
+  `auto_round_kernel`) where the recorded run used `AutoGPTQLinearMethod` /
+  `XPUwNa16LinearKernel`. **Every vLLM row in this document was measured on the
+  older contents and none has been re-measured**; a fair re-baseline in the new
+  build is a named follow-on. The rebuild was verified correct on the published
+  checkpoint (`vllm_check.py`, 96/96 element-exact - docs/14) but correctness is
+  not speed.
 - The 3.12/2.13 row was run with `--depth 1 2` and no concurrency sweep, so only
   the `d2 c1` column is a like-for-like comparison.
 - Torch 2.14 enables Inductor's `batch_linear_lhs` pre-grad fusion on XPU. It
