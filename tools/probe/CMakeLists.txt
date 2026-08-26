@@ -72,6 +72,13 @@ add_probe_attn(loadsonly   PB_NO_SOFTMAX=1 PB_NO_TREE=1) # loads + dot + V sum o
 add_probe_attn(gqa1        PB_GQA=1)
 add_probe_attn(gqa2        PB_GQA=2)
 add_probe_attn(gqa3        PB_GQA=3)
+# P3-prep (spec 1.7 §3): the GEMV battery's 2D-block technique transferred to the
+# KV walk. 16 messages of 32 B per K row become 2 (`b2d`) or 1 (`b2d1`), with
+# the SAME values in the SAME fma order -- the only probe_attn variants that are
+# bit-identical to `base` rather than deliberately wrong.
+add_probe_attn(b2d         PB_B2D=1)
+add_probe_attn(b2d1        PB_B2D=2)
+add_probe_attn(kvt_b2d     PB_KT=1 PB_VT=1 PB_B2D=1)
 add_probe_attn(b32         PB_BLOCK=32)                  # the L5 sweep, transplanted
 add_probe_attn(b128        PB_BLOCK=128)
 add_probe_attn(b256        PB_BLOCK=256)
