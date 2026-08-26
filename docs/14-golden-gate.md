@@ -797,6 +797,249 @@ tools/box.sh run './build/tests/golden_gate_test "$PWD/oracle-out-rtn" \
 that registration is unchanged. **Both** are green under the amended semantics;
 the RTN one has to be invoked by hand because ctest registers one golden dir.
 
+## The tuned-checkpoint gate - 2026-08-26
+
+The third checkpoint is `~/models/qwen38-27b-w4g64-tuned/Qwen3.8-27B-w4g64`,
+this project's own **tuned** AutoRound quantisation (sign-SGD, hours rather than
+minutes) with the same packed `lm_head` - `tools/quantize_qwen38_tuned.sh`,
+auto-round pinned v0.14.2. Verified from its safetensors headers before anything
+else was done to it: int4 g64 symmetric, `lm_head.qweight` present,
+`lm_head.qzeros` reading `0x77777777`, **2015 tensors totalling 16.411 GiB of
+shards (16.430 GiB for the directory)**.
+
+**Its tensor manifest is identical to the RTN checkpoint's** - every name, dtype
+and shape equal, zero on either side only - so it reads the same `W` =
+**13.673 GB/token** and the loader needed no new branch for it.
+
+A golden set belongs to exactly one checkpoint, so it got its own,
+**`oracle-out-tuned/`**, from the same committed pipeline, the same committed
+`.ids`, the same `--gen 32`, the same container, the same `ORACLE_THREADS=28`
+(22 actual, image-capped). `oracle-out/` and `oracle-out-rtn/` were not touched.
+
+### The gate: 94/94 determined rows exact, 2 undetermined, both agreements
+
+```
+  prompt   ids   det-exact  tie-agree  tie-member   tap min cos (layer,t)   L63 tail   gdn min cos   logit min cos
+  prose     42    32/32         0          0        0.999329787 (34,14)   0.999883123  0.999898151 (L49)  0.999890503
+  code      61    30/30         2          0        0.904137135 (63,18)   0.816395022  0.999836164 (L60)  0.999834770
+  cjk       38    32/32         0          0        0.999739356 (51, 0)   0.999844826  0.999907915 (L33)  0.999942307
+  TOTAL: 94/94 determined rows exact, 2 undetermined (2 agree + 0 other member)
+golden_gate_test OK: 3 prompts x 32 greedy tokens - 94/94 determined rows element-exact against the CPU oracle, 2 undetermined rows all inside the golden argmax set
+```
+
+Legacy strict count (grading torch's tie-break too): **32/32/32 = 96/96**. The
+engine did not diverge on a single row, so the amendment cost this checkpoint
+nothing either. Cost: **24.45 s** wall, peak RSS **16,768,572 KB = 15.99 GiB**
+(`/usr/bin/time -v`) - 3.5 GiB under the published checkpoint's 19.5 GiB,
+because the int4 head is smaller in the loader's arena too.
+
+### Each checkpoint's ties land on a different prompt
+
+The census is computed by the committed `golden_decision()` from the golden
+`logits` at every decision row - derived, never pasted:
+
+| golden set | undetermined decision rows | det-exact | undetermined |
+|---|---|---|---|
+| `oracle-out/` (`Vishva007`) | `cjk` **13, 26** | 94/94 | 2 (2 agree) |
+| `oracle-out-rtn/` (RTN) | `prose` **15, 26, 29** | 93/93 | 3 (1 agree + 2 member) |
+| **`oracle-out-tuned/` (tuned)** | **`code` 1, 3** | **94/94** | **2 (2 agree)** |
+
+**Three checkpoints, three different prompts carrying the ties.** That is the
+strongest evidence yet that the mechanism is what the ruling says it is: an
+arithmetic accident of the bf16 grid at one particular decision, not a property
+of a prompt, of a checkpoint, or of the engine. Running total across all three:
+**281 of 281 determined rows element-exact, and 7 undetermined rows all inside
+their golden argmax sets.**
+
+### Running the tuned gate
+
+```bash
+# the golden set (on the box, detached; 18 min 16 s measured on an IDLE box)
+OUT_DIR=oracle-out-tuned \
+ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-tuned/Qwen3.8-27B-w4g64 \
+ORACLE_THREADS=28 tools/oracle/golden.sh
+
+# the gate itself: golden dir, prompt dir, snapshot
+tools/box.sh run './build/tests/golden_gate_test "$PWD/oracle-out-tuned" \
+  "$PWD/tests/golden/prompts" $HOME/models/qwen38-27b-w4g64-tuned/Qwen3.8-27B-w4g64'
+```
+
+Like the RTN gate, invoked by hand: `ctest` registers one golden dir. **All
+three are green under the amended semantics.**
+
+### The `golden_decision()` guard - added 2026-08-26
+
+`golden_decision()` returns the set of ids attaining the row maximum, and every
+caller indexes `set[0]`. **The set is empty only if the whole row is NaN** - NaN
+compares false against everything, so neither of the two loops fires - and
+`dump.py` does *not* rule that out: its finiteness abort covers
+`resid.L{n−1}` only, never a `logits` row. A comment in this function used to
+claim otherwise; it was wrong and has been corrected, and a `CHECK(!d.set.empty())`
+now turns a corrupt future golden into a named failure at a named line instead
+of undefined behaviour.
+
+It cannot fire on anything that exists: every logit row in all nine golden files
+is finite. **All three gates were re-run after the change and every number is
+byte-identical to the run before it**, and the full suite is **40/40**
+(136.10 s). That is the point of recording it - the guard is inert on today's
+inputs by construction, which is why it rode along with this touch rather than
+costing a box cycle of its own.
+
+Regeneration cost, all three prompts serially: **18 min 16 s** (prose 6:12.04,
+code 6:10.23, cjk 5:54.10; `dump.py`'s own walls 350.6 / 351.4 / 335.7 s; peak
+RSS 62.8 GiB each). Against the RTN set's **25 min 14 s** at the same
+`ORACLE_THREADS=28` under a 12-core compile, **an idle box bought 6 min 58 s -
+28%**. The 2026-08-24 run's 16 min 48 s is *not* comparable: it ran uncapped and
+got the box's full 44 threads.
+
+### The tuned golden set, re-read in a separate process
+
+`OUT_DIR=oracle-out-tuned … tools/oracle/check.sh`, 2026-08-26:
+
+| prompt | bytes | tokens | distinct | `resid.L63` finite | continuation |
+|---|---|---|---|---|---|
+| prose | 311 030 280 | 32 | 24 | yes | ` By eight the first trawlers would be back with the day’s catch. By nine the whole town would be awake, and by ten the harbour would be` |
+| code | 367 258 168 | 32 | 23 | yes | `def clamp2(values, lo, hi): return [lo if v < lo else hi if v > hi else v for v in values]` |
+| cjk | 299 192 864 | 32 | 26 | yes | `我站在船尾，看着水面被船头推开，又慢慢合拢。` then `“你确定要坐这班船？”` and `我回头` |
+
+**The three files are byte-for-byte the same length as the RTN set's** - same
+290-tensor manifest, same shapes. The published checkpoint's are 104 bytes
+larger apiece, because its `snapshot` metadata string is a longer path.
+
+`code` writes a *different but equally correct* `clamp2` -
+`[lo if v < lo else hi if v > hi else v for v in values]` against the other two
+checkpoints' `[min(max(v, lo), hi) for v in values]` - and `cjk` again opens by
+completing the trailing emoji's variation selector, which is what that prompt
+exists to pin.
+
+**How each self-quantised set's continuation compares to the published
+checkpoint's, measured over all nine `*.tokens` files:**
+
+| prompt | RTN vs `Vishva007` | tuned vs `Vishva007` |
+|---|---|---|
+| prose | prefix 3, 3/32 equal | **prefix 23, 31/32 equal** (only step 23: `33206` vs `6992`) |
+| code | **prefix 32, 32/32 equal** | prefix 14, 16/32 equal |
+| cjk | prefix 13, 14/32 equal | prefix 5, 5/32 equal |
+
+**This is not a quality measurement and must not be read as one.** Greedy
+continuations cascade - one flipped token changes every token after it - so
+prefix length is a very noisy proxy, and the table does not run the same way on
+all three prompts: tuned tracks the published checkpoint almost perfectly on
+`prose` and it is *RTN* that matches all 32 on `code`. The honest statement is
+that all three checkpoints produce fluent, on-topic continuations in three
+scripts and none of them is degenerate. doc 07 #6 still wants an `lm_eval`, and
+now has an artifact to run it on.
+
+## The vLLM smoke test - 2026-08-26, and what it found
+
+The vLLM cross-check above closed the trust chain **for the published
+checkpoint**. The self-quantised ones have never been through a third
+implementation, and one of them is a candidate for upload, so both were put
+through `tools/oracle/vllm_check.py` in the operator's freshly built container.
+
+**Headline: vLLM does not load either int4-`lm_head` artifact. It is not our
+packing, and the isolation is measured, not argued.**
+
+### What was run
+
+`vllm_check.py` needed no adaptation - it already takes `--prompts` and
+`--golden` as directories. What differs from the recorded 2026-08-25 invocation
+is one mount: these checkpoints never went through `hf download`, so instead of
+resolving a snapshot under the read-only HF cache the artifact is bind-mounted
+read-only at `/snap` and passed as the snapshot argument - the same mechanism
+`tools/oracle/run_in_container.sh` grew for `ORACLE_SNAP`. Same image, same env
+block, same `-u $(id -u):$(id -g)`, nothing installed into the container.
+
+> **The HF-cache checkpoint must NOT be reached this way.** A snapshot directory
+> under `~/.cache/huggingface/hub/…/snapshots/…` is a tree of symlinks into
+> `../../blobs/`; bind-mounting only the snapshot leaves every one of them
+> dangling and the run dies on `FileNotFoundError: /snap/config.json`. For that
+> checkpoint use the recorded `/hf` mount and resolve the snapshot **inside** the
+> container. (Found the hard way; recorded so the next person does not.)
+
+### The three results
+
+| checkpoint | `lm_head` | weights load | engine init | verdict |
+|---|---|---|---|---|
+| `qwen38-27b-w4g64-rtn` | **int4** | **OK, 5.21 s**, 7 shards, 16.41 GiB | **FAILS** | `AttributeError: Cannot determine in_features for layer.` |
+| `qwen38-27b-w4g64-tuned` | **int4** | **OK, 4.45 s** | **FAILS** | identical error |
+| `Vishva007` (control) | bf16 | OK, 4.84 s | **OK, 158.0 s** | **96/96, ALL THREE AGREE**, rc 0 |
+
+**The control is what makes this a finding rather than a failure.** Same
+container, same script, same three prompt id files, same day - the only variable
+is whether `lm_head` is packed. The published checkpoint declares the *same*
+`quant_method: auto-round`, the same bits/group_size/sym, and goes through the
+same INC path for all 305 of its linear layers; it loads and generates and
+reproduces the golden tokens exactly. The two artifacts that differ from it only
+in the head do not get past weight post-processing.
+
+### The exact failure, and the mechanism
+
+```
+File ".../vllm/model_executor/layers/quantization/inc/inc_linear.py", line 39,
+     in process_weights_after_loading
+    return self.scheme.process_weights_after_loading(layer)
+File ".../vllm/model_executor/layers/quantization/inc/schemes/inc_wna16_linear.py",
+     line 395, in process_weights_after_loading
+    raise AttributeError("Cannot determine in_features for layer.")
+AttributeError: Cannot determine in_features for layer.
+```
+
+The scheme's `process_weights_after_loading` reads:
+
+```python
+if hasattr(layer, "input_size_per_partition"):
+    in_features = layer.input_size_per_partition
+elif hasattr(layer, "input_size"):
+    in_features = layer.input_size
+else:
+    raise AttributeError("Cannot determine in_features for layer.")
+```
+
+Both attributes are set by the scheme's own `create_weights`, which runs for
+`LinearBase` layers. `lm_head` is a `ParallelLMHead` - a `VocabParallelEmbedding`
+subclass carrying `num_embeddings` / `embedding_dim`, not `input_size`. A
+quantised head therefore reaches this branch by construction. **The weights had
+already loaded**; nothing about the packing, the nibble order, the zero point or
+the group axis was rejected. This is vLLM's post-load path not modelling a
+quantised `lm_head`, and it is a vLLM-side gap.
+
+### The backend changed under the same image tag - read the version, not the tag
+
+The operator's rebuild carries the same name as the one docs/BENCHMARKS.md
+records, and it is **not** the same software:
+
+| | recorded 2026-08-25 | this run, 2026-08-26 |
+|---|---|---|
+| image tag | `vllm-xpu-env-next-p314-t214-vxkp0:latest` | *the same tag* |
+| vLLM | `0.27.2rc1.dev365+g5ee84d3c5.d20260821` | `0.27.2rc1.dev514+g0e30bd62f.d20260826` |
+| quantization backend | `AutoGPTQLinearMethod` / `XPUwNa16LinearKernel` | **`quantization=inc`**, INC wNa16 + `auto_round_kernel` |
+
+**This matters for more than the smoke test.** The 31.50 t/s bar in
+docs/BENCHMARKS.md was measured on the *older* contents of this tag, and a
+different quantization backend is exactly the kind of change that can move a
+decode number. **The bar has not been re-measured in the new build, so it stands
+as recorded and must not be quietly attributed to the new image.** A fair
+re-baseline is a named follow-on.
+
+The one thing the new build did reproduce is the cross-check itself: **96/96,
+element-exact, through a quantization backend that shares nothing with the
+2026-08-25 run either.** The trust chain for the published checkpoint is now
+closed twice, through two different vLLM unpack paths.
+
+### What this does and does not license
+
+- **Does**: the RTN and tuned artifacts are *not* uploadable as drop-in vLLM
+  checkpoints today. Any README shipped with them must say so, name the error
+  and the version it was seen at, and note that the same bytes load and generate
+  correctly in this engine (three green golden gates) and in `transformers`
+  (the oracle dequantises the head - `lm_head: int4 (dequantised here)`).
+- **Does not**: say anything against the packing. `dump.py` and this engine both
+  read the head; the only implementation that refuses is the one that never
+  looks at it. And it is **not** a three-way cross-check of these artifacts -
+  that link of their trust chain is still open, and stays open until vLLM (or
+  another independent implementation) can read a quantised head.
+
 ## Running the gate
 
 ```bash
