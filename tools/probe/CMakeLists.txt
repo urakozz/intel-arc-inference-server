@@ -81,3 +81,67 @@ target_include_directories(probe_attn PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CU
 target_link_libraries(probe_attn PRIVATE b70_l0)
 b70_target_kernel_dir(probe_attn)
 add_dependencies(probe_attn ${PROBE_ATTN_TARGETS})
+
+# probe_gemv_loads - spec 1.7 §3's P1 battery: the SAME arithmetic as the
+# production int4 GEMV with a different number of load messages under it, at
+# the six production shapes. `tools/probe/probe_gemv_loads.cl` states the
+# message-count model each tag moves; `probe_gemv --loads` runs them.
+#
+# One tag = one `-D` set = one binary = one row, and the tag list here and the
+# `kVariants` table in probe_gemv.cc are two lists nothing checks against each
+# other -- a tag whose binary is missing throws by name at `l0::Module`, which
+# is the same guard probe_attn uses one directory up.
+#
+# These are PROBE kernels. `src/kernels/gemv.cl` is not touched by any of them,
+# no runtime path binds them, and with every PGL_* knob at 0 the source IS
+# gemv.cl -- which is what makes `base` a control rather than a paraphrase.
+set(PROBE_GEMV_LOADS_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_gemv_loads.cl)
+function(add_probe_gemv_loads TAG K N S L)
+  add_ocloc_kernel(pgl_${TAG}_M1_K${K}_N${N}_S${S}_L${L} SOURCE ${PROBE_GEMV_LOADS_CL}
+                   DEFINES M=1 K=${K} N=${N} S=${S} LAYOUT=${L} ${ARGN})
+  list(APPEND PROBE_GEMV_LOADS_TARGETS kernel_pgl_${TAG}_M1_K${K}_N${N}_S${S}_L${L})
+  set(PROBE_GEMV_LOADS_TARGETS ${PROBE_GEMV_LOADS_TARGETS} PARENT_SCOPE)
+endfunction()
+
+# The six production shapes at the S the engine binds (model/qwen35.cc), plus
+# the S layout 0 picks for itself in docs/probe-gemv-2026-08-24.md -- the
+# layout-0 rows are the battery's only apples-to-apples message-count contrast
+# (17 messages per subgroup-step against layout 1's 10, byte-identical traffic).
+#   K N S_prod S_l0best  blk2d16-able (G/S even)
+set(PGL_SHAPES "6144 5120 16 4 1" "5120 14336 1 2 1" "5120 16384 1 16 1"
+               "5120 34816 4 8 1" "17408 5120 16 4 0" "5120 248320 1 1 1")
+foreach(row IN LISTS PGL_SHAPES)
+  separate_arguments(f UNIX_COMMAND "${row}")
+  list(GET f 0 K)
+  list(GET f 1 N)
+  list(GET f 2 SP)
+  list(GET f 3 S0)
+  list(GET f 4 B16)
+  # layout 1 - the production load path and the four things that can be done to it
+  add_probe_gemv_loads(base    ${K} ${N} ${SP} 1)
+  add_probe_gemv_loads(xwide   ${K} ${N} ${SP} 1 PGL_XWIDE=1)
+  add_probe_gemv_loads(deq     ${K} ${N} ${SP} 1 PGL_DEQ_SHIFT=1)
+  add_probe_gemv_loads(pf1     ${K} ${N} ${SP} 1 PGL_PREFETCH=1)
+  add_probe_gemv_loads(pf2     ${K} ${N} ${SP} 1 PGL_PREFETCH=2)  # bestla's production distance
+  add_probe_gemv_loads(pf4     ${K} ${N} ${SP} 1 PGL_PREFETCH=4)
+  add_probe_gemv_loads(pfbuf   ${K} ${N} ${SP} 1 PGL_PFBUF=1)
+  add_probe_gemv_loads(ballast ${K} ${N} ${SP} 1 PGL_BALLAST=1)   # pfbuf's register control
+  # LSC cache policy on the 512 B weight read. The weight stream is read once
+  # per token and never reused, so every line it keeps in L1 is a line the
+  # activation vector loses. 1 = L1UC_L3UC, 2 = L1UC_L3C, 5 = L1S_L3UC.
+  add_probe_gemv_loads(cc1     ${K} ${N} ${SP} 1 PGL_CACHECTL=1)
+  add_probe_gemv_loads(cc2     ${K} ${N} ${SP} 1 PGL_CACHECTL=2)
+  add_probe_gemv_loads(cc5     ${K} ${N} ${SP} 1 PGL_CACHECTL=5)
+  # layout 0 - where a 2D block read has messages to remove, at both S values
+  add_probe_gemv_loads(l0base  ${K} ${N} ${SP} 0)
+  add_probe_gemv_loads(l0b2d   ${K} ${N} ${SP} 0 PGL_BLK2D=8)
+  add_probe_gemv_loads(l0b2dx  ${K} ${N} ${SP} 0 PGL_BLK2D=8 PGL_XWIDE=1)
+  if(B16)
+    add_probe_gemv_loads(l0b2d16 ${K} ${N} ${SP} 0 PGL_BLK2D=16)
+  endif()
+  if(NOT S0 EQUAL SP)
+    add_probe_gemv_loads(l0base ${K} ${N} ${S0} 0)
+    add_probe_gemv_loads(l0b2d  ${K} ${N} ${S0} 0 PGL_BLK2D=8)
+  endif()
+endforeach()
+add_dependencies(probe_gemv ${PROBE_GEMV_LOADS_TARGETS})
