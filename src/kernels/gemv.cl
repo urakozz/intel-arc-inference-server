@@ -18,6 +18,20 @@
 #ifndef LAYOUT
 #define LAYOUT 0
 #endif
+#ifndef GEMV_BLOCK2D
+#define GEMV_BLOCK2D 0
+#endif
+#ifndef GEMV_DEQ_SHIFT
+#define GEMV_DEQ_SHIFT 0
+#endif
+#if GEMV_BLOCK2D
+#if LAYOUT != 0
+#error "gemv: GEMV_BLOCK2D is layout 0 only"
+#endif
+#if GEMV_BLOCK2D != 8
+#error "gemv: GEMV_BLOCK2D must be 8 (one 64-K group)"
+#endif
+#endif
 #define SG 16
 #define SG_PER_WG 4
 #define WG_N (SG * SG_PER_WG)
@@ -30,6 +44,24 @@ inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
 // 8 nibbles of one u32 word times 8 consecutive activations.
 inline float dot8(uint word, ushort8 xv) {
+#if GEMV_DEQ_SHIFT
+  // OpenCL C defines right shift of a signed integer as arithmetic sign-fill.
+  // For every q in [0,16), signext4(q ^ 8) == q - 8. One word-wide xor plus
+  // the shift pair per nibble therefore preserves the exact integer values and
+  // the dot-product order while removing mask/subtract work. gemv_test drives
+  // all 16 nibbles through this path and requires bit-identity with the control.
+  const uint u = word ^ 0x88888888u;
+  float a = 0.f;
+  a += (float)(((int)(u << 28)) >> 28) * bf16f(xv.s0);
+  a += (float)(((int)(u << 24)) >> 28) * bf16f(xv.s1);
+  a += (float)(((int)(u << 20)) >> 28) * bf16f(xv.s2);
+  a += (float)(((int)(u << 16)) >> 28) * bf16f(xv.s3);
+  a += (float)(((int)(u << 12)) >> 28) * bf16f(xv.s4);
+  a += (float)(((int)(u <<  8)) >> 28) * bf16f(xv.s5);
+  a += (float)(((int)(u <<  4)) >> 28) * bf16f(xv.s6);
+  a += (float)(((int)(u      )) >> 28) * bf16f(xv.s7);
+  return a;
+#else
   float a = 0.f;
   a += (float)((int)((word      ) & 0xFu) - 8) * bf16f(xv.s0);
   a += (float)((int)((word >>  4) & 0xFu) - 8) * bf16f(xv.s1);
@@ -40,6 +72,7 @@ inline float dot8(uint word, ushort8 xv) {
   a += (float)((int)((word >> 24) & 0xFu) - 8) * bf16f(xv.s6);
   a += (float)((int)((word >> 28) & 0xFu) - 8) * bf16f(xv.s7);
   return a;
+#endif
 }
 
 __attribute__((intel_reqd_sub_group_size(SG)))
@@ -62,8 +95,17 @@ __kernel void gemv(__global const uint* restrict w,
     uint wv[8];
     float scale;
 #if LAYOUT == 0
+#if GEMV_BLOCK2D
+    // One message reads this subgroup's 16 columns across the eight u32 rows
+    // of a 64-K group from the GPTQ-native [K/8][N] surface. This is the exact
+    // geometry measured by probe_gemv_loads.cl's l0b2ddeq cells.
+    intel_sub_group_2d_block_read_32b_8r16x1c(
+        (__global void*)(__global uint*)w, (int)(N * 4u), (int)(K / 8u), (int)(N * 4u),
+        (int2)((int)(n_tile * SG), (int)(g * 8u)), wv);
+#else
     __global const uint* wp = w + (size_t)(g * 8) * N + n;
     for (int j = 0; j < 8; ++j) wv[j] = wp[(size_t)j * N];
+#endif
     scale = (float)scales[(size_t)g * N + n];
 #else
     __global const uint* tile = w + ((size_t)n_tile * G + g) * TILE_U32;

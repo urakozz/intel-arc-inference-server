@@ -17,7 +17,7 @@
 // Per-step scratch, M = 8:
 //   resid        8 x 5120 x 2 B                                   =        81,920
 //   x            8 x 17408 x 2 B                                  =       278,528
-//   partials     16 (S_max) x 8 x 34816 (2 x intermediate) x 4 B  =    17,825,792
+//   partials      8 (S_max) x 8 x 34816 (2 x intermediate) x 4 B  =     8,912,896
 //   ab_out       8 x 128 (a||b padded N) x 4 B                    =         4,096
 //   norm_sumsq   20 (kNormGroups) x 8 x 4 B                       =           640
 //   gdn_o        8 x 48 x 128 x 4 B                               =       196,608
@@ -27,7 +27,7 @@
 //   attn_out     8 x 24 x 256 x 2 B                               =        98,304
 //   logits       8 x 248320 x 4 B                                 =     7,946,240
 //   argmax_part  8 x ceil(248320/1024) = 243 x 2 x 4 B            =        15,552
-//                                                           total =    77,565,760  (77.57 MB)
+//                                                           total =    68,652,864  (68.65 MB)
 //
 // `attn_part` grew 4x with spec 1.5's lever L5: `DecodeBuffers::kAttnBlock`
 // went 256 -> 64 KV positions per `attn_decode` work-group, which shortens each
@@ -38,9 +38,9 @@
 // so a host that disagrees with the kernel's `ATTN_BLOCK` names a binary that
 // does not exist and throws at capture instead of striding `attn_part` wrongly.
 //
-// The cost is **+38,043,648 B of device scratch**, taking the whole per-step
-// scratch from 39.52 MB to 77.57 MB. That is the largest single line in this
-// table after `partials`, and it is worth stating what it is NOT: it is not
+// Task 4's lower split widths save **8,912,896 B** in `partials`, taking the
+// whole per-step scratch from 77.57 MB to 68.65 MB. `attn_part` is now the
+// largest line in this table, and it is worth stating what it is NOT: it is not
 // persistent (1240.47 MB of KV and GDN state dwarf it) and it is not close to
 // any limit on a device holding a 15.5 GB checkpoint. What it buys is
 // measured - the attn family 6.058 -> 3.839 ms/token, docs/15 §L5 - and it is
@@ -81,7 +81,7 @@ int main() {
 
   CHECK_EQ(b.max_len, 16384u);
   CHECK_EQ(b.persistent_bytes(), size_t{1240465536});
-  CHECK_EQ(b.scratch_bytes(), size_t{77565760});
+  CHECK_EQ(b.scratch_bytes(), size_t{68652864});
 
   // The control block is shared memory: the host reads and writes it directly,
   // and the constructor left it zeroed - including the padding, which the

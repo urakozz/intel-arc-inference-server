@@ -75,7 +75,7 @@ struct DecodeBuffers {
   // --- per-step scratch (overwritten every token) ---
   l0::Mem resid;          // bf16 [M][5120]
   l0::Mem x;              // bf16 [M][17408]  (prep output; largest K)
-  l0::Mem partials;       // fp32 [16][M][34816] (max S x max N)       = 17.83 MB
+  l0::Mem partials;       // fp32 [8][M][34816] (max S x max N)        = 8.91 MB
   l0::Mem ab_out;         // fp32 [M][128]    (a||b GEMV output, S=1)
   l0::Mem norm_sumsq;     // fp32 [kNormGroups][M] (prep_res_fold -> prep_norm_finish)
   l0::Mem gdn_o;          // fp32 [M][48][128] (gdn_step output, pre gated-norm)

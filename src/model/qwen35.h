@@ -13,15 +13,12 @@
 // cannot drift apart.
 namespace model {
 
-// One GEMV's compiled configuration. layout/S are measured values
-// (docs/probe-gemv-2026-08-24.md); the table below is the single place they
-// live. Flipping a row to layout 0 is the phase-1 tuning knob recorded in
-// spec §6.3 - but it is **not** a one-line knob: the loader implements the
-// layout-1 repack only, and `loader::load_linear` throws on any int4 row that
-// is not layout 1. Turning the knob means writing the layout-0 loader path
-// (GPTQ-native `w[K/8][N]` + a separate `scales[K/64][N]`, which `gemv.cl`'s
-// LAYOUT==0 takes as two buffers) and giving `loader::DeviceWeight` a second
-// allocation. The guard makes forgetting that loud instead of silent.
+// One GEMV's compiled configuration. layout/S are measured values; the table
+// below is the single place they live. Layout 0 is GPTQ-native
+// `w[K/8][N]` plus a separate `scales[K/64][N]` allocation. Layout 1 is the
+// subgroup-tiled repack with scales inline. `loader::load_linear` implements
+// both and capture checks that the separate scale allocation exists exactly
+// for layout 0.
 // `layout` is meaningful for WeightKind::Int4 only; bf16 weights have a single
 // tiled layout (common::repack_bf16_tiled) and carry layout 0 as a filler.
 struct GemvShape { uint32_t K, N, S, layout; };

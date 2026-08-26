@@ -201,9 +201,9 @@ void case_res_norm(Dev& d, uint32_t M, uint32_t K, uint32_t S_PREV) {
 // reference*, not asserted directly. That is strictly as strong (both equal a
 // third fixed thing) and it is worth naming, because a reader looking for a
 // `CHECK(x_got_W1 == x_got_W20)` will not find one. Note also the coverage
-// asymmetry: `W = 1` is exercised at **SP16 only** (main() below), because the
+// asymmetry: `W = 1` is exercised at **SP4 only** (main() below), because the
 // stage-B kernel does not read `partials` at all and so cannot distinguish the
-// prep modes - SP0 and SP16 bind the identical `prep_norm_finish` binary.
+// prep modes - SP0 and SP4 bind the identical `prep_norm_finish` binary.
 void case_res_norm_two_stage(Dev& d, uint32_t M, uint32_t K, uint32_t S_PREV, uint32_t G,
                              uint32_t norm_wgs) {
   const size_t np = S_PREV ? size_t(S_PREV) * M * K : 1;
@@ -309,7 +309,8 @@ void case_silu_mul(Dev& d, uint32_t M, bool exact_silu) {
     for (size_t s = 0; s < S; ++s)
       for (size_t m = 0; m < M; ++m)
         for (size_t j = 0; j < FN; ++j)
-          if ((j / 16) % 2 == 0) partials[(s * M + m) * FN + j] = 7.5f;   // 4 slices -> 30.0
+          if ((j / 16) % 2 == 0)
+            partials[(s * M + m) * FN + j] = 30.0f / float(S);  // all slices -> 30.0
 
   std::vector<uint16_t> x_ref(size_t(M) * N, 0);
   prep_ref::silu_mul(partials.data(), x_ref.data(), M);
@@ -373,13 +374,13 @@ void case_gated_head(Dev& d, uint32_t M, bool exact_silu) {
 int main() {
   Dev d;
   case_res_norm(d, 1, 5120, 0);
-  case_res_norm(d, 1, 5120, 16);
+  case_res_norm(d, 1, 5120, 4);
   // The two-stage pair the runtime binds (G = 20), at both prep modes and at
   // both stage-B grids - the 20-work-group finish the engine uses and the
   // single-work-group one kept as its measurement control.
   case_res_norm_two_stage(d, 1, 5120, 0, 20, 20);
-  case_res_norm_two_stage(d, 1, 5120, 16, 20, 20);
-  case_res_norm_two_stage(d, 1, 5120, 16, 20, 1);
+  case_res_norm_two_stage(d, 1, 5120, 4, 20, 20);
+  case_res_norm_two_stage(d, 1, 5120, 4, 20, 1);
   case_silu_mul(d, 1, false);
   case_silu_mul(d, 1, true);
   case_gated_head(d, 1, false);

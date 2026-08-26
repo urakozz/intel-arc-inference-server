@@ -19,8 +19,8 @@ namespace {
 // read from the checkpoint headers (docs/03-models.md); (layout, S) are the
 // decision block of docs/probe-gemv-2026-08-24.md, measured on the box:
 //
-//   canonical layout 1; out/o_proj S=16, q||k||v S=1, qkv||z S=1,
-//   gate||up S=4, down S=16.
+//   Task 4 production map: out/o_proj L0 S4, q||k||v L0 S2,
+//   qkv||z L1 S1, gate||up L0 S8, down L0 S4.
 //
 // The two bf16 rows (AB, LmHead) have no layout choice - one tiled layout
 // (common::repack_bf16_tiled) - so they carry layout 0 as a filler.
@@ -42,18 +42,18 @@ const std::array<FusedLinear, kLinearCount>& table() {
       {LinearId::AB, {5120, 128, 1, 0}, WeightKind::Bf16, Fuse::Concat,
        {"linear_attn.in_proj_a", "linear_attn.in_proj_b"}, 96},
       // K = 6144 = 48 value heads x 128.
-      {LinearId::OutProj, {6144, 5120, 16, 1}, WeightKind::Int4, Fuse::Single,
+      {LinearId::OutProj, {6144, 5120, 4, 0}, WeightKind::Int4, Fuse::Single,
        {"linear_attn.out_proj"}, 0},
       // gate || up interleaved so the lane holding gate[n] finds up[n] at +16.
-      {LinearId::GateUp, {5120, 34816, 4, 1}, WeightKind::Int4, Fuse::Interleave16,
+      {LinearId::GateUp, {5120, 34816, 8, 0}, WeightKind::Int4, Fuse::Interleave16,
        {"mlp.gate_proj", "mlp.up_proj"}, 0},
-      {LinearId::Down, {17408, 5120, 16, 1}, WeightKind::Int4, Fuse::Single,
+      {LinearId::Down, {17408, 5120, 4, 0}, WeightKind::Int4, Fuse::Single,
        {"mlp.down_proj"}, 0},
       // FA: q_proj is 12288 (24 heads x 256 x (q || gate)), k/v 1024 each.
-      {LinearId::Qkv, {5120, 14336, 1, 1}, WeightKind::Int4, Fuse::Concat,
+      {LinearId::Qkv, {5120, 14336, 2, 0}, WeightKind::Int4, Fuse::Concat,
        {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}, 0},
       // K = 6144 = 24 heads x 256.
-      {LinearId::OProj, {6144, 5120, 16, 1}, WeightKind::Int4, Fuse::Single,
+      {LinearId::OProj, {6144, 5120, 4, 0}, WeightKind::Int4, Fuse::Single,
        {"self_attn.o_proj"}, 0},
       // Top level. The bf16 row: 2.543 GB read in full every token. This is
       // the row `linear(LinearId::LmHead)` returns and the one the shipped
