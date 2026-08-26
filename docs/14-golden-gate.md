@@ -830,8 +830,15 @@ golden_gate_test OK: 3 prompts x 32 greedy tokens - 94/94 determined rows elemen
 Legacy strict count (grading torch's tie-break too): **32/32/32 = 96/96**. The
 engine did not diverge on a single row, so the amendment cost this checkpoint
 nothing either. Cost: **24.45 s** wall, peak RSS **16,768,572 KB = 15.99 GiB**
-(`/usr/bin/time -v`) - 3.5 GiB under the published checkpoint's 19.5 GiB,
-because the int4 head is smaller in the loader's arena too.
+(`/usr/bin/time -v`) - **3.55 GiB under** the published checkpoint's 19.5 GiB.
+
+> **That saving is about twice the head's own**, and the gap is not explained
+> here. Packing `lm_head` removes 1 867 366 400 B = **1.74 GiB** of weight; the
+> observed peak-RSS drop is 3.55 GiB, a factor of 2.04. A plausible reading is
+> that the head is briefly **twice resident** during load on the bf16 path
+> (source shard plus the repacked device-bound copy) so removing it saves the
+> pair - but that is a **hypothesis, not a measurement**: no allocation trace was
+> taken. Recorded as an open loose end rather than as an explanation.
 
 ### Each checkpoint's ties land on a different prompt
 
@@ -844,12 +851,32 @@ The census is computed by the committed `golden_decision()` from the golden
 | `oracle-out-rtn/` (RTN) | `prose` **15, 26, 29** | 93/93 | 3 (1 agree + 2 member) |
 | **`oracle-out-tuned/` (tuned)** | **`code` 1, 3** | **94/94** | **2 (2 agree)** |
 
-**Three checkpoints, three different prompts carrying the ties.** That is the
-strongest evidence yet that the mechanism is what the ruling says it is: an
-arithmetic accident of the bf16 grid at one particular decision, not a property
-of a prompt, of a checkpoint, or of the engine. Running total across all three:
-**281 of 281 determined rows element-exact, and 7 undetermined rows all inside
-their golden argmax sets.**
+**Three checkpoints, three different prompts carrying the ties** - which is
+consistent with the mechanism the ruling names: an arithmetic accident of the
+bf16 grid at one particular decision, not a property of a prompt, a checkpoint
+or the engine.
+
+> **Do not over-read it.** The striking part is not that the three sets differ -
+> it is that within each set the ties **cluster onto a single prompt** (2 on
+> `cjk`, 3 on `prose`, 2 on `code`, none elsewhere). Under a uniform model in
+> which each tie lands independently on one of three prompts, all-in-one-prompt
+> happens with probability 1/9 · 1/3 · 1/3 ≈ **1 in 81** - small, but this is a
+> pattern noticed *after* looking, over 7 events, and no mechanism for
+> per-prompt clustering has been proposed or tested. It is an observation with a
+> plausible innocent explanation (a prompt's logit magnitudes set the local bf16
+> ulp, so one prompt can simply sit closer to the grid) and it is recorded, not
+> concluded.
+
+Running total across all three: **281 of 281 determined rows element-exact, and
+7 undetermined rows all inside their golden argmax sets.**
+
+The census line the committed test prints for the tuned set, verbatim:
+
+```
+  prose: 32 determined-exact / 0 tie-agreements / 0 tie-set-members   (32 determined + 0 undetermined = 32)
+  code: 30 determined-exact / 2 tie-agreements / 0 tie-set-members   (30 determined + 2 undetermined = 32)
+  cjk: 32 determined-exact / 0 tie-agreements / 0 tie-set-members   (32 determined + 0 undetermined = 32)
+```
 
 ### Running the tuned gate
 
@@ -866,6 +893,13 @@ tools/box.sh run './build/tests/golden_gate_test "$PWD/oracle-out-tuned" \
 
 Like the RTN gate, invoked by hand: `ctest` registers one golden dir. **All
 three are green under the amended semantics.**
+
+Regeneration cost, all three prompts serially: **18 min 16 s** (prose 6:12.04,
+code 6:10.23, cjk 5:54.10; `dump.py`'s own walls 350.6 / 351.4 / 335.7 s; peak
+RSS 62.8 GiB each). Against the RTN set's **25 min 14 s** at the same
+`ORACLE_THREADS=28` under a 12-core compile, **an idle box bought 6 min 58 s -
+28%**. The 2026-08-24 run's 16 min 48 s is *not* comparable: it ran uncapped and
+got the box's full 44 threads.
 
 ### The `golden_decision()` guard - added 2026-08-26
 
@@ -884,13 +918,6 @@ byte-identical to the run before it**, and the full suite is **40/40**
 (136.10 s). That is the point of recording it - the guard is inert on today's
 inputs by construction, which is why it rode along with this touch rather than
 costing a box cycle of its own.
-
-Regeneration cost, all three prompts serially: **18 min 16 s** (prose 6:12.04,
-code 6:10.23, cjk 5:54.10; `dump.py`'s own walls 350.6 / 351.4 / 335.7 s; peak
-RSS 62.8 GiB each). Against the RTN set's **25 min 14 s** at the same
-`ORACLE_THREADS=28` under a 12-core compile, **an idle box bought 6 min 58 s -
-28%**. The 2026-08-24 run's 16 min 48 s is *not* comparable: it ran uncapped and
-got the box's full 44 threads.
 
 ### The tuned golden set, re-read in a separate process
 
@@ -957,25 +984,52 @@ block, same `-u $(id -u):$(id -g)`, nothing installed into the container.
 > checkpoint use the recorded `/hf` mount and resolve the snapshot **inside** the
 > container. (Found the hard way; recorded so the next person does not.)
 
+### The exact invocation
+
+```bash
+# on the box; $SNAP_HOST is the artifact directory, $GOLDEN its golden set
+docker run --rm --entrypoint bash -u "$(id -u):$(id -g)" \
+  --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
+  --device /dev/dri \
+  -v /dev/dri/by-path:/dev/dri/by-path:ro -v /sys/class/drm:/sys/class/drm:ro \
+  --group-add "$(getent group render | cut -d: -f3)" \
+  --group-add "$(getent group video  | cut -d: -f3)" \
+  --ipc=host --pid=host --net=host --shm-size=16g \
+  -e ZE_FLAT_HIERARCHY=FLAT -e ONEAPI_DEVICE_SELECTOR=level_zero:0 \
+  -e VLLM_USE_V2_MODEL_RUNNER=1 -e VLLM_XPU_ENABLE_XPU_GRAPH=1 \
+  -e VLLM_WORKER_MULTIPROC_METHOD=spawn -e CCL_ZE_IPC_EXCHANGE=sockets \
+  -e HF_HUB_OFFLINE=1 -e HF_HUB_ENABLE_HF_TRANSFER=0 \
+  -e HF_HOME=/scratch/hf -e HOME=/scratch -e PYTHONUNBUFFERED=1 \
+  -v "$HOME/b70-inference-server:/ws" -w /ws \
+  -v "$HOME/.cache/huggingface:/hf:ro" -v /tmp:/scratch \
+  -v "$SNAP_HOST:/snap:ro" \
+  vllm-xpu-env-next-p314-t214-vxkp0:latest -c \
+  'python3 tools/oracle/vllm_check.py /snap \
+     --prompts /ws/tests/golden/prompts --golden /ws/'"$GOLDEN"
+```
+
+The control run drops the `/snap` mount and resolves the snapshot under `/hf`
+instead - see the symlink warning above.
+
 ### The three results
 
-| checkpoint | `lm_head` | weights load | engine init | verdict |
-|---|---|---|---|---|
-| `qwen38-27b-w4g64-rtn` | **int4** | **OK, 5.21 s**, 7 shards, 16.41 GiB | **FAILS** | `AttributeError: Cannot determine in_features for layer.` |
-| `qwen38-27b-w4g64-tuned` | **int4** | **OK, 4.45 s** | **FAILS** | identical error |
-| `Vishva007` (control) | bf16 | OK, 4.84 s | **OK, 158.0 s** | **96/96, ALL THREE AGREE**, rc 0 |
+| checkpoint | `quant_method` | `lm_head` | backend vLLM chose | weights load | engine init | verdict |
+|---|---|---|---|---|---|---|
+| `qwen38-27b-w4g64-rtn` | `"auto-round"` | **int4** | `quantization=inc` (INC wNa16, `auto_round_kernel`) | **OK, 5.21 s**, 7 shards, 16.41 GiB | **FAILS** | `AttributeError: Cannot determine in_features for layer.` |
+| `qwen38-27b-w4g64-tuned` | `"auto-round"` | **int4** | `quantization=inc` | **OK, 4.45 s** | **FAILS** | identical error |
+| `Vishva007` (control) | `"gptq"` (+ `provider: "auto-round"`) | bf16 | `quantization=auto_gptq` - `XPUwNa16LinearKernel for AutoGPTQLinearMethod` | OK, 4.84 s | **OK, 158.0 s** | **96/96, ALL THREE AGREE**, rc 0 |
 
-**The control is what makes this a finding rather than a failure.** Same
-container, same script, same three prompt id files, same day - the only variable
-is whether `lm_head` is packed. The published checkpoint declares the *same*
-`quant_method: auto-round`, the same bits/group_size/sym, and goes through the
-same INC path for all 305 of its linear layers; it loads and generates and
-reproduces the golden tokens exactly. The two artifacts that differ from it only
-in the head do not get past weight post-processing.
+**vLLM picks its backend from `quant_method`, and our checkpoints do not spell
+it the way the published one does** (docs/13's checkpoint-difference table:
+`"gptq"` + `provider: "auto-round"` against `"auto-round"` +
+`packing_format`). So the control differs from the artifacts in **two** ways at
+once, not one, and that has to be said before anything is concluded from it.
 
 ### The exact failure, and the mechanism
 
 ```
+File ".../vllm/model_executor/model_loader/utils.py", line 113, in process_weights_after_loading
+    quant_method.process_weights_after_loading(module)
 File ".../vllm/model_executor/layers/quantization/inc/inc_linear.py", line 39,
      in process_weights_after_loading
     return self.scheme.process_weights_after_loading(layer)
@@ -996,15 +1050,45 @@ else:
     raise AttributeError("Cannot determine in_features for layer.")
 ```
 
-Both attributes are set by the scheme's own `create_weights`, which runs for
-`LinearBase` layers. `lm_head` is a `ParallelLMHead` - a `VocabParallelEmbedding`
-subclass carrying `num_embeddings` / `embedding_dim`, not `input_size`. A
-quantised head therefore reaches this branch by construction. **The weights had
-already loaded**; nothing about the packing, the nibble order, the zero point or
-the group axis was rejected. This is vLLM's post-load path not modelling a
-quantised `lm_head`, and it is a vLLM-side gap.
+Both attributes are set by the same scheme's own `create_weights` twenty lines
+above (`layer.in_features = input_size_per_partition`), which runs for
+`LinearBase` layers. **The weights had already loaded** - nothing about the
+packing, the nibble order, the zero point or the group axis was rejected. This
+is vLLM's INC post-load path meeting a module it did not create weights for.
 
-### The backend changed under the same image tag - read the version, not the tag
+### What is proven, and what is not
+
+**Proven, from the logs quoted above:**
+
+- vLLM routes a `quant_method: "auto-round"` checkpoint to `quantization=inc`,
+  and **both** of our artifacts die there in `process_weights_after_loading`.
+  Neither is loadable in this image today. For the upload README that is the
+  operative fact and it does not depend on the cause.
+- The failure is *after* a clean weight load, so it is not a rejection of the
+  packing.
+
+**Not proven - and an earlier version of this section claimed it:**
+
+- **That the packed `lm_head` is the cause.** `lm_head` is a `ParallelLMHead`
+  (a `VocabParallelEmbedding` subclass carrying `num_embeddings` /
+  `embedding_dim`, not `input_size`), so a quantised head *would* reach that
+  `else` by construction - but **the traceback never names the failing module**,
+  and no line in either log identifies it. The mechanism is a plausible reading
+  of the source, not a measurement.
+- **That the bf16 control isolates the head.** It does not: it also changes
+  `quant_method`, and therefore the entire backend. `Vishva007` never enters the
+  INC path at all, so its success says nothing about which module breaks inside
+  that path. The control's real content is narrower and still worth having -
+  *the rebuilt image is not broken, and the published checkpoint still returns
+  96/96 on it.*
+
+**The experiment that would settle it** (not run - it needs a checkpoint we do
+not have, or a config edit that changes what is under test): an
+`"auto-round"`-declared checkpoint with a **bf16** head. If it loads, the head is
+the cause; if it fails identically, the INC path is broken for this model shape
+regardless of the head.
+
+### The version changed under the same image tag - read the version, not the tag
 
 The operator's rebuild carries the same name as the one docs/BENCHMARKS.md
 records, and it is **not** the same software:
@@ -1013,32 +1097,41 @@ records, and it is **not** the same software:
 |---|---|---|
 | image tag | `vllm-xpu-env-next-p314-t214-vxkp0:latest` | *the same tag* |
 | vLLM | `0.27.2rc1.dev365+g5ee84d3c5.d20260821` | `0.27.2rc1.dev514+g0e30bd62f.d20260826` |
-| quantization backend | `AutoGPTQLinearMethod` / `XPUwNa16LinearKernel` | **`quantization=inc`**, INC wNa16 + `auto_round_kernel` |
 
-**This matters for more than the smoke test.** The 31.50 t/s bar in
-docs/BENCHMARKS.md was measured on the *older* contents of this tag, and a
-different quantization backend is exactly the kind of change that can move a
-decode number. **The bar has not been re-measured in the new build, so it stands
-as recorded and must not be quietly attributed to the new image.** A fair
-re-baseline is a named follow-on.
+**That row alone is enough**: 149 commits of vLLM separate the software the bar
+was measured on from the software in the tag today. **The 31.50 t/s bar has not
+been re-measured in the new build, so it stands as recorded and must not be
+quietly attributed to the new image.** A fair re-baseline is a named follow-on.
 
-The one thing the new build did reproduce is the cross-check itself: **96/96,
-element-exact, through a quantization backend that shares nothing with the
-2026-08-25 run either.** The trust chain for the published checkpoint is now
-closed twice, through two different vLLM unpack paths.
+> **A correction, 2026-08-26.** This section previously carried a third row
+> claiming the *quantization backend* also changed with the rebuild
+> (`AutoGPTQLinearMethod` → INC wNa16). **That was confounded and is withdrawn.**
+> The two cells came from runs on two different checkpoints, and vLLM selects the
+> backend from `quant_method`. Measured on `dev514`, the published checkpoint
+> still logs `Using XPUwNa16LinearKernel for AutoGPTQLinearMethod` - the same
+> backend as 2026-08-25. **The backend difference is checkpoint-driven, not
+> rebuild-driven.**
+
+What the new build did reproduce is the cross-check: **96/96, element-exact**,
+on the published checkpoint. Because the backend is the same one as 2026-08-25,
+this is the chain closed **twice through the rebuilt stack** - same unpack path,
+two vLLM versions 149 commits apart - and *not*, as this section briefly said,
+through two independent unpack paths. It is a regression check on the rebuild,
+which is worth having and is less than was claimed.
 
 ### What this does and does not license
 
 - **Does**: the RTN and tuned artifacts are *not* uploadable as drop-in vLLM
-  checkpoints today. Any README shipped with them must say so, name the error
-  and the version it was seen at, and note that the same bytes load and generate
+  checkpoints today. Any README shipped with them must say so, quote the error
+  and the vLLM version it was seen at, say that vLLM routed them to INC wNa16
+  because of their `quant_method`, and note that the same bytes load and generate
   correctly in this engine (three green golden gates) and in `transformers`
   (the oracle dequantises the head - `lm_head: int4 (dequantised here)`).
-- **Does not**: say anything against the packing. `dump.py` and this engine both
-  read the head; the only implementation that refuses is the one that never
-  looks at it. And it is **not** a three-way cross-check of these artifacts -
-  that link of their trust chain is still open, and stays open until vLLM (or
-  another independent implementation) can read a quantised head.
+- **Does not**: say anything against the packing, and **does not name the packed
+  head as the proven cause** - see "What is proven, and what is not". It is also
+  **not** a three-way cross-check of these artifacts: that link of their trust
+  chain is still open, and stays open until vLLM or another independent
+  implementation can load them.
 
 ## Running the gate
 
