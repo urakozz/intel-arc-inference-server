@@ -175,24 +175,54 @@ one, all of it in the gap.
 ## 6. How much accuracy does quantising `lm_head` cost?
 
 On the 27B it is 2.54 GB → 0.66 GB per token at int4 (×1.14 on the ceiling)
-or 1.27 GB at int8 (×1.09) - doc 05. `lm_head` is known to be
+or 1.27 GB at int8 (×1.09) - doc 05, from the header arithmetic. **Measured
+since, from the loader's own byte report on a real int4 head: 2 542 796 800 B →
+675 430 400 B, i.e. 2.543 → 0.675 GB** (docs/13). The estimate was 0.015 GB low
+because it did not carry the f16 `scales` stream; the ×1.14 is unaffected. `lm_head` is known to be
 quantisation-sensitive and the checkpoint author chose not to (`lm_head:
 false` in `quantization_config`). Needs a perplexity or `lm_eval` comparison
 against the unquantised baseline before adoption. In phase 2 the same question
 applies to the 0.85 GB bf16 MTP head, and `lm_head` is read twice per step.
 
-**Still open - but as of 2026-08-26 it is now answerable, and it was not
-before.** The *speed* half is measured and closed (`lm_head` int4 is worth
-−3.05 ms/token at record grade, docs/BENCHMARKS.md "The record rows"); this
-question is the *accuracy* half and no eval has been run. What changed is that
-there is now a **tuned** artifact to run one on:
-`~/models/qwen38-27b-w4g64-tuned/Qwen3.8-27B-w4g64` - the same W4A16 g64
-symmetric recipe as the published checkpoint, produced by AutoRound's sign-SGD
-tuning, differing from it in exactly the variable under test (`--quant_lm_head`)
-rather than in the tuning algorithm as well. That makes `tuned` vs `Vishva007`
-a controlled comparison and `rtn` vs `tuned` a second one that prices the
-tuning itself. All three are loadable by this engine and all three have green
-golden gates (docs/14).
+**Still open - but as of 2026-08-26 there is finally something to run it on.**
+The *speed* half is measured and closed (`lm_head` int4 is worth −3.05 ms/token
+at record grade, docs/BENCHMARKS.md "The record rows"); this question is the
+*accuracy* half and **no eval has been run**. What changed is that
+`~/models/qwen38-27b-w4g64-tuned/Qwen3.8-27B-w4g64` now exists beside
+`-rtn`, and all three checkpoints load in this engine with green golden gates
+(docs/14).
+
+**Only one of the two available comparisons is controlled, and it is not the
+obvious one.**
+
+| pair | what varies | controlled? |
+|---|---|---|
+| **`rtn` vs `tuned`** | **the tuning algorithm alone** - one script, one pinned auto-round v0.14.2, one flag apart; byte-identical tensor manifests | **YES.** This prices *tuning*, at a fixed head treatment |
+| `tuned` vs `Vishva007` | `--quant_lm_head` **and much else** | **NO** |
+
+`tuned` vs `Vishva007` is the pair that would price *quantising the head*, and
+it is confounded. docs/13's checkpoint-difference table enumerates what else
+moves between them: `quant_method` (`"auto-round"` vs `"gptq"` + `provider`),
+`packing_format` (present vs absent), `desc_act` (absent vs declared `false`),
+**400 `.g_idx` tensors present vs none shipped**, exclusions expressed as
+`extra_config` objects vs `dynamic` regexes, 29 `mtp` tensors (8 int4) vs 15
+(all bf16), 1650 vs 2050 language-model tensors, and 1628 vs 1658 subnormal f16
+scales. On top of that the published checkpoint's own tuning hyper-parameters
+(iterations, sequence length, calibration set) are **not published**, so even
+the tuning is not held fixed.
+
+**So the eventual `lm_eval` should be read as two separate results**, and
+neither on its own answers the title question cleanly:
+
+1. `rtn` vs `tuned` - *what tuning buys*, controlled, both with int4 heads;
+2. `tuned` vs `Vishva007` - *the whole self-quantisation delta*, confounded, and
+   a difference here cannot be attributed to the head without a further run.
+
+The clean experiment for the title question does not exist yet: it is a pair
+quantised by **the same script and version, differing only in
+`--quant_lm_head`**. That is one more `tools/quantize_qwen38_tuned.sh` run with
+the flag dropped, and it is the cheapest way to make this question answerable
+rather than merely runnable.
 
 **Deliberately not run here.** The `lm_eval` comparison is a recorded next step
 for the operator, not something to slip into a measurement task: it is hours of
@@ -200,13 +230,15 @@ GPU, it needs task selection and a seed policy decided up front, and - see
 below - the obvious vehicle for running it is currently blocked.
 
 > **Caveat on the vehicle.** vLLM in the current image **cannot load either
-> int4-`lm_head` artifact** (docs/14, "The vLLM smoke test"): its INC wNa16
-> scheme raises `AttributeError: Cannot determine in_features for layer.` on the
-> quantised head. So an `lm_eval` run through vLLM would have to use the
-> published checkpoint only, which is the baseline and not the thing under test.
-> Evaluating the int4 head today means going through `transformers` on CPU (the
-> oracle's own path, which does dequantise it - `lm_head: int4 (dequantised
-> here)`) or through this engine.
+> self-quantised artifact** (docs/14, "The vLLM smoke test"). It routes them to
+> its INC wNa16 path on their `quant_method: "auto-round"`, and that path raises
+> `AttributeError: Cannot determine in_features for layer.` after the weights
+> have loaded. *Which* module it fails on is not identified in the logs, so the
+> quantised head is a plausible cause and not a proven one. Either way an
+> `lm_eval` through vLLM would have to use the published checkpoint only, which
+> is the baseline and not the thing under test. Evaluating the int4 head today
+> means `transformers` on CPU (the oracle's own path, which does dequantise it -
+> `lm_head: int4 (dequantised here)`) or this engine.
 
 ## 7. Can 24 MB of L2 be exploited deliberately?
 

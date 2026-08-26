@@ -185,7 +185,11 @@ bug, not vLLM or XPU.
 > across the boundary - it is tokens per second either way - but **MBU and the
 > roofline are not**, because W is the denominator of both. Everything in this
 > section down to "The new-checkpoint rows" is the **`Vishva007`** checkpoint;
-> the vLLM rows above it are too. No number is restated across the boundary.
+> the vLLM rows above it are too. **No number is restated across the boundary
+> with a different meaning**: where `647f2d0`'s `Vishva007` row (27.52 t/s /
+> 36.34 ms / 72.5%) appears on both sides it is the *same* measurement of the
+> *same* checkpoint, quoted once as the ladder's current head and once inside
+> the record-row table.
 
 Same box, same checkpoint, same `--max-model-len 16k` / `pp4096` / `depth 1` /
 `concurrency 1` shape as the vLLM rows above, so the `tg256` columns compare
@@ -199,11 +203,14 @@ tools/bench_decode.sh                 # 3 runs at depth 4096, tg 256; median + s
 tools/bench_decode.sh --depth 64      # the doc 07 #12 depth experiment
 ```
 
-**Measured 2026-08-25** on an idle box (no container, no other GPU work), three
-runs each, `debug_resid` off, default `--max-len 16384`. Five commits appear:
-the phase-1 rows are `62bdd4d`, the three lever rows are `a1e2d3a` (spec
-1.5 lever L2), `b045e11` (lever L1) and `c746840` (lever L5), and `ef6acb0` is
-the spec 1.5 **gate** - all measured the same way on the same day and box:
+**Measured on an idle box** (no container, no other GPU work), three runs each,
+`debug_resid` off, default `--max-len 16384`, all with the same harness.
+**Six commits over two days.** Five were measured 2026-08-25: the phase-1 rows
+are `62bdd4d`, the three lever rows are `a1e2d3a` (spec 1.5 lever L2),
+`b045e11` (lever L1) and `c746840` (lever L5), and `ef6acb0` is the spec 1.5
+**gate**. The `647f2d0` row was measured **2026-08-26** - see "The record rows"
+below for that day's conditions, and the day-drift control that the `ef6acb0`
+and `647f2d0` rows form together:
 
 | engine | depth | tg | t/s | ms/token |
 |---|---|---|---|---|
@@ -244,8 +251,24 @@ comment or blank** - verified line by line - and the L5 fix rounds proved the
 consequence directly: all 8 attention binaries rebuilt **sha256-identical**.
 That is why the two rows measure the same engine and read 0.04% apart.
 
-**b70-decode is 12.6% short of vLLM** - 27.54 against 31.50, a factor of 1.144
-the other way; it was 16.6% short (26.28) after two levers, 21.2% short (24.83)
+**That argument covers `c746840` ↔ `ef6acb0` and does NOT extend to
+`ef6acb0` ↔ `647f2d0`.** Those two are *not* the same binary: the range carries
+**666 insertions and 113 deletions across 11 `src/` files** - the auto-round
+loader branch (`loader.cc`, `quant.{h,cc}`, `qwen35.{h,cc}`), the `LmHead`
+capture rebind (`capture.cc`, `buffers.h`) and the CLI's checkpoint handling
+(`b70_decode.cc`). (Only the last hop, `4c81c18..647f2d0`, is comment-only in
+`src/`: 15 insertions, every changed line a comment or blank, verified.) The two
+rows nevertheless read **27.54 and 27.52** - **−0.02 t/s, +0.02 ms/token** - and
+that difference is **inside the measured day-to-day drift of this instrument on
+this exact checkpoint and shape**: the same two rows put ingest at 34.44 and
+34.47 ms/token, **+0.087%**, and decode at +0.055%. The delta is attributed, not
+dangling: the loader work added a code path the published checkpoint does not
+take, and the engine it builds for that checkpoint measures the same to within a
+drift figure this document can now quote from a same-checkpoint control.
+
+**b70-decode is 12.6% short of vLLM** - **27.52** against 31.50 at the current
+commit `647f2d0` (27.54 at `ef6acb0`; **12.63% and 12.57%, which round to the
+same 12.6%**), a factor of 1.145 the other way; it was 16.6% short (26.28) after two levers, 21.2% short (24.83)
 after one and 24.7% short (23.73) before any. The decomposition and what it
 scopes are in
 [05-perf-model.md](05-perf-model.md#phase-1-measured--the-honest-verdict); why
@@ -275,9 +298,12 @@ at ~15% of one core.
 | **b70-decode `647f2d0`, `qwen38-27b-w4g64-rtn`** (int4 `lm_head`) | 4096 | 256 | 30.04 / 30.05 / 30.03 | **30.04** | **33.29** | 69.6% of 13.673 GB | **record**, median of 3, idle |
 | **b70-decode `647f2d0`, `Vishva007`** (bf16 `lm_head`) | 4096 | 256 | 27.52 / 27.55 / 27.51 | **27.52** | **36.34** | 72.5% of 15.540 GB | **record**, median of 3, idle |
 
-Spreads: 0.04 (0.13%), 0.02 (0.07%), 0.04 (0.15%) - the band every record triple
-in this document has reported. Ingest, from the same runs: **31.40**, **31.41**
-and **34.47** ms/token over 4096 ids.
+Spreads: 0.04 (0.13%), 0.02 (0.07%), 0.04 (0.15%). Two of those three are the
+**loosest record triples in this document** - every earlier one sits at
+0.00-0.11% - so they are quoted as what they are rather than as confirmation of
+a band they define. All three remain far inside the ±0.1 ms/token this
+instrument is claimed at. Ingest, from the same runs: **31.40**, **31.41** and
+**34.47** ms/token over 4096 ids.
 
 **The two self-quantised checkpoints record the same number to every printed
 digit.** 30.04 t/s, 33.29 ms/token, 411 GB/s, 69.6% - two medians of three taken
@@ -297,18 +323,78 @@ t/s is 1.46 t/s (4.6%) short of vLLM's 31.50.** The re-assessment memo's
 conclusion - `lm_head` at int4 is necessary and not sufficient - is unchanged
 and slightly reinforced by the properly-measured row.
 
-**Why these rows are a shade under the iterate rows below, and it is not drift
-alone.** `--bench` sweeps `pos` from `DEPTH` to `DEPTH + TG − 1`, so mean KV
-depth is 4127.5 at `tg 64` and 4223.5 at `tg 256`: **+2.33% of attention work
-per token**, worth **+0.083 ms** against `attn_decode`'s measured 3.585 ms plus
-~0.003 ms of extra `attn_reduce` block merging - **≈ +0.086 ms/token, and it
-applies to both checkpoints equally**, because attention does not know which
-head is packed. `Vishva007` moved +0.07 ms (36.27 → 36.34), which is that term
-and nothing else. The RTN row moved +0.18 ms (33.11 → 33.29): that term plus
-~0.09 ms, i.e. **0.27%**, which sits inside the day-scale drift tier this
-document has measured three times on untouched launches (+0.30% at §L2, +0.50%
-at §L1, +0.56% at §L5). The honest reading is that a single run on a loaded box
-was ~0.09 ms optimistic against today's median of three.
+#### The day-scale drift of this instrument, finally measured on a control
+
+The `ef6acb0` and `647f2d0` rows are the **same checkpoint, same shape
+(`4096`/`256`), same harness, both idle, both medians of three, one day apart**.
+That is a same-checkpoint day-drift control, and it is the tightest one this
+project has:
+
+| | 2026-08-25 `ef6acb0` | 2026-08-26 `647f2d0` | drift |
+|---|---|---|---|
+| decode | 27.54 t/s / 36.32 ms | 27.52 t/s / 36.34 ms | **+0.055%** |
+| ingest (4096 ids) | 34.44 ms/token | 34.47 ms/token | **+0.087%** |
+
+**≤0.09%.** That replaces the +0.30 / +0.50 / +0.56% figures §L2/§L1/§L5 quote
+for run-to-run drift on untouched launches - those were measured *across a
+kernel change*, so they carry the change's own noise; this one carries nothing
+but the day. Anything larger than ~0.1% between two idle medians of this
+instrument needs a cause other than drift.
+
+#### Why these rows are under the iterate rows, and what does NOT explain it
+
+`--bench` sweeps `pos` from `DEPTH` to `DEPTH + TG − 1`, so mean KV depth is
+4127.5 at `tg 64` and 4223.5 at `tg 256`: **+2.33% of attention work per
+token**, worth **+0.083 ms** against `attn_decode`'s measured 3.585 ms plus
+~0.003 ms of extra `attn_reduce` block merging - **≈ +0.086 ms/token**. It
+applies to **both** checkpoints equally, because attention does not know which
+head is packed:
+
+| | iterate (tg 64, loaded, 1 run) | record (tg 256, idle, med 3) | shift | `tg` predicts | residual |
+|---|---|---|---|---|---|
+| `Vishva007` | 36.27 | 36.34 | +0.07 | +0.086 | **−0.016** |
+| `qwen38-27b-w4g64-rtn` | 33.11 | 33.29 | +0.18 | +0.086 | **+0.094** |
+
+**And because it applies equally, `tg` cancels out of the lever itself.** The
+`lm_head` delta reads **3.16 ms** at iterate grade (36.27 − 33.11) and
+**3.05 ms** at record grade (36.34 − 33.29). The `tg` term cannot explain that
+0.11 ms, and neither can drift: 0.11 ms on 33.2 ms is **0.33%**, which is
+**~4× the 0.087% the control above measures**. This is stated as unexplained
+rather than absorbed - see the next block.
+
+#### Three values for one quantity, and they do not close
+
+The `lm_head`-at-int4 lever has been measured three ways, and they span
+**0.15 ms**:
+
+| grade | figure | of the memo's 3.26 ms ceiling | of the byte-exact 3.165 ms |
+|---|---|---|---|
+| **in situ**, `--profile`, the launch alone (4381.289 → 1178.164 µs) | **3.203 ms** | **98.3%** | 101.2% |
+| **bench, iterate grade** (tg 64, loaded, 1 run each) | **3.16 ms** | 96.9% | 99.8% |
+| **bench, record grade** (tg 256, idle, medians of 3) | **3.05 ms** | **93.6%** | 96.4% |
+
+**The in-situ figure is the best-anchored of the three and it is the largest.**
+It reconciles against the bytes to a microsecond: `lm_head` reads
+2 542 796 800 B at bf16 and 675 430 400 B at int4, a difference of 1.8674 GB =
+**3.165 ms** at the measured 590 GB/s; the bf16 launch ran at 98.4% of device
+(4310 ideal vs 4381.289 measured, +0.071 ms) and the int4 launch at 97.2%
+(1144.8 vs 1178.164, +0.033 ms), and `3.165 + 0.071 − 0.033 = 3.203`. Exactly.
+
+So the profile says the lever is ~3.20 ms and the record bench says 3.05 ms.
+**The direction of the discrepancy is not resolvable from what has been
+measured.** The `Vishva007` end is solid - it reproduces its own record row to
+0.055%. That puts the 0.15 ms on the int4 end, and there are two readings:
+either the single loaded `tg 64` RTN run was ~0.1 ms fast, or **today's int4
+triples are ~0.1 ms slow** - and the profile evidence points at the second,
+which is the opposite of what an earlier version of this section concluded. Both
+int4 triples (RTN and tuned, 45 minutes apart) agree to every printed digit, so
+whatever it is, it is systematic and not noise.
+
+**The experiment that would settle it** - a `--profile` run on the current tree,
+pricing the `lm_head` launch under today's conditions - was not run: this task
+took no measurement after its benches. It is a named follow-on, and until it is
+run the honest statement is that this lever is known to **±0.15 ms**, and that
+every percentage above must be quoted with its grade attached.
 
 ### The iterate-grade rows this replaces - kept, because they are the record of how it was found
 
@@ -330,14 +416,22 @@ that is the evidence for it rather than an assumption. The two iterate rows were
 run back to back, so the difference between them is the checkpoint.
 
 **Δ = +2.63 t/s, −3.16 ms/token** against the same-hour control; **+2.66 t/s,
-−3.21 ms** against the standing record row. In-situ, the `lm_head` launch alone
-moved **4381.289 → 1178.164 µs**, −3.203 ms/token, which is **98.3% of the
+−3.21 ms** against the then-standing record row. In-situ, the `lm_head` launch
+alone moved **4381.289 → 1178.164 µs**, −3.203 ms/token, which is **98.3% of the
 −3.26 ms ceiling** the re-assessment memo derived from the bytes.
 
+> **Both percentages are live, and they must be quoted with their grade.**
+> **98.3%** is the *in-situ launch* figure; the *record-grade bench* lever is
+> **3.05 ms = 93.6%** of the same ceiling, and the iterate-grade bench lever
+> quoted in this very paragraph is 3.16 ms = 96.9%. The three do not close -
+> "Three values for one quantity, and they do not close", above, has the
+> reconciliation attempt and names the run that would settle it.
+
 Note `tg`: **64, not 256.** These are iterate-grade runs and 64 was chosen to
-keep the turnaround short on a loaded box. The standing record row is `tg 256`,
-so the two are not the same measurement even ignoring the median - another
-reason the record row is still owed.
+keep the turnaround short on a loaded box, so they are not the same measurement
+as a `tg 256` record row even ignoring the median. **That record row has since
+been taken** (2026-08-26, above); the `tg` difference is priced there and is not
+free.
 
 **MBU falls while throughput rises**, from 72.6% to 70.0%, and that is the
 memo's own prediction: `lm_head` at bf16 was the most bandwidth-efficient launch
@@ -535,22 +629,25 @@ through the same Level Zero launch path ([01-hardware.md](01-hardware.md)). On
 those two constants the roofline is 26.34 ms/token = **37.97 t/s**, vLLM's 31.50
 is **83.0% MBU**, and b70-decode's 23.73 is **62.5%**. (That 62.5% is the
 `62bdd4d` row this paragraph sits under and is now historical: the current
-engine is the `ef6acb0` gate row at **27.54 t/s = 72.5% MBU**, the top
-b70-decode row above.)
+engine on this checkpoint is the **`647f2d0` record row at 27.52 t/s = 72.5%
+MBU** - see "The record rows" - with the `ef6acb0` gate row at 27.54 t/s
+beside it.)
 
 ## Notes
 
 - **An image tag is not a version. Read the vLLM version, not the tag.** The
   `vllm-xpu-env-next-p314-t214-vxkp0:latest` that produced the 31.50 t/s bar was
   vLLM `0.27.2rc1.dev365+g5ee84d3c5.d20260821`; the tag was rebuilt 2026-08-26
-  and now carries `0.27.2rc1.dev514+g0e30bd62f.d20260826` - **and a different
-  quantization backend**, `quantization=inc` (Intel Neural Compressor wNa16 with
-  `auto_round_kernel`) where the recorded run used `AutoGPTQLinearMethod` /
-  `XPUwNa16LinearKernel`. **Every vLLM row in this document was measured on the
-  older contents and none has been re-measured**; a fair re-baseline in the new
-  build is a named follow-on. The rebuild was verified correct on the published
+  and now carries `0.27.2rc1.dev514+g0e30bd62f.d20260826` - 149 commits apart
+  under one name. **Every vLLM row in this document was measured on the older
+  contents and none has been re-measured**; a fair re-baseline in the new build
+  is a named follow-on. The rebuild was verified *correct* on the published
   checkpoint (`vllm_check.py`, 96/96 element-exact - docs/14) but correctness is
-  not speed.
+  not speed. (A first version of this bullet also claimed the *quantization
+  backend* changed with the rebuild. **Withdrawn** - that comparison used two
+  different checkpoints, and vLLM picks the backend from `quant_method`. On the
+  new build the published checkpoint still takes
+  `XPUwNa16LinearKernel for AutoGPTQLinearMethod`, exactly as before. docs/14.)
 - The 3.12/2.13 row was run with `--depth 1 2` and no concurrency sweep, so only
   the `d2 c1` column is a like-for-like comparison.
 - Torch 2.14 enables Inductor's `batch_linear_lhs` pre-grad fusion on XPU. It

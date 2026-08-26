@@ -6,8 +6,9 @@ from scratch against a single GPU (Intel Arc Pro B70), specs 1-1.5,
 otherwise; the authoritative derivation for each lives in the doc cited.
 
 **The headline.** A ~15-kLOC engine (pure Level Zero + OpenCL C, no PyTorch,
-no vLLM) decodes a 27B W4A16 model at **27.54 t/s** measured (docs/BENCHMARKS)
-- 87% of vLLM's 31.50 on the same box/model - while reproducing a CPU-torch
+no vLLM) decodes a 27B W4A16 model at **27.52 t/s** measured (record grade -
+median of three on an idle box, docs/BENCHMARKS) - 87% of vLLM's 31.50 on the
+same box/model - while reproducing a CPU-torch
 oracle **96/96 greedy tokens exactly** (docs/14) and replaying **bitwise
 deterministically**. Projected ceiling with the two remaining identified
 items (attention tuning ~0.5 ms + int4 lm_head ≤3.26 ms, both bounded by
