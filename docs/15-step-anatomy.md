@@ -1628,9 +1628,15 @@ the int4 row for the same reason, one 3.7× shorter.
 
 ### The bench, and the honest conditions
 
-> **Superseded 2026-08-26 by record-grade rows - see "The record rows" below.**
-> The iterate rows are kept because they are what the lever was accepted on and
-> because the same-hour control is the evidence that the comparison was sound.
+> **Superseded 2026-08-26 by record-grade rows. THIS BANNER GOVERNS EVERY
+> NUMBER FROM HERE TO THE END OF §5.1** - this sub-section, "The memo's other
+> prediction", and "Where this leaves the bar". Wherever a figure below reads
+> 33.11 / 30.20 / 70.0% / 36.27 / 27.57, the **record-grade** measurement is
+> **33.29 / 30.04 / 69.6%** and **36.34 / 27.52** (idle box, medians of three,
+> `tg 256`, `647f2d0` - docs/BENCHMARKS.md, "The record rows"). The iterate
+> figures are kept because they are what the lever was accepted on and because
+> the same-hour control is the evidence that the comparison was sound; they are
+> **history, not the current reading**.
 
 `--bench --depth 4096 --tg 64`, **single runs, not medians of three**, on a
 loaded box. A record-grade row is deferred to a quiet window and named as a
@@ -1648,9 +1654,16 @@ decode step that is 99.7% inside the fence is not competing for the CPU the
 compile is using, and that is what licenses reading the paired rows as a
 comparison rather than as two anecdotes. It is still one run each.
 
-Against the standing gate row (36.32 / 27.54) the delta is **−3.21 ms, +2.66
-t/s**. The memo's §4 arithmetic projected 33.02 ms / 30.28 t/s from the measured
-step; the measurement is 33.11 / 30.20 - **0.09 ms apart**.
+Against the then-standing gate row (36.32 / 27.54) the delta is **−3.21 ms,
++2.66 t/s**. The memo's §4 arithmetic projected 33.02 ms / 30.28 t/s from the
+measured step; the iterate measurement is 33.11 / 30.20 - **0.09 ms apart**.
+
+> **At record grade the memo's projection is 0.27 ms out, not 0.09.** The
+> measured row is **33.29 / 30.04**, so 33.02 derived against 33.29 measured.
+> That is still a good projection - 0.8% on a 33 ms step, made before the work
+> started - but the 0.09 figure belongs to the iterate row and must not be
+> carried forward as the memo's accuracy. Corrected in the memo itself at
+> §4 and §6.
 
 ### The memo's other prediction, also confirmed
 
@@ -1672,31 +1685,39 @@ line prints the `W` it used.
 
 ### Where this leaves the bar
 
+**The record-grade rows govern this table.** The iterate rows are kept below
+them, labelled, because they are the history of how the lever was accepted.
+
 | | ms/token | t/s | kind |
 |---|---|---|---|
 | the bar (vLLM `p314-t214-vxkp0`, no speculation) | 31.746 | **31.50** | measured |
 | spec 1.5's gate, `ef6acb0` | 36.32 | 27.54 | measured, median of 3, idle |
-| **+ `lm_head` int4, `qwen38-27b-w4g64-rtn`** | **33.11** | **30.20** | **measured, 1 run, box under load** |
+| `Vishva007` at `647f2d0` | 36.34 | 27.52 | **measured, median of 3, idle** |
+| **+ `lm_head` int4 - `qwen38-27b-w4g64-rtn` AND `-tuned`, both** | **33.29** | **30.04** | **measured, median of 3, idle - THE RECORD ROW** |
+| the same lever, iterate grade (tg 64, loaded, 1 run) | 33.11 | 30.20 | measured, superseded |
 | the memo's projection for this row | 33.02 | 30.28 | derived, 2026-08-25 |
 | the new roofline (13.673 GB ÷ 590 GB/s) | 23.174 | 43.15 | measured / derived |
 
-> **Re-measured at record grade, 2026-08-26** (idle box, median of three,
-> `tg 256`, `647f2d0`): `Vishva007` **27.52 / 36.34**, `qwen38-27b-w4g64-rtn`
-> and `qwen38-27b-w4g64-tuned` **both 30.04 / 33.29**. Against the bar the gap
-> is **1.46 t/s (1.55 ms)**, not 1.30 - the iterate row was a single run at
-> `tg 64` on a loaded box, and `tg 64 → 256` alone is a named +0.086 ms/token
-> (mean KV depth 4127.5 → 4223.5, +2.33% of `attn_decode`'s 3.585 ms).
-> docs/BENCHMARKS.md, "The record rows", carries the triples and the
-> reconciliation. **The conclusion does not move; it hardens.**
+**Still short of the bar - by 1.54 ms (1.46 t/s) at record grade - and the memo
+said it would be.** §4's headline - "`lm_head` at int4 is necessary and NOT
+sufficient", and "it cannot clear 31.50 t/s even if it lands perfectly, because
+the bytes it still reads forbid it" - is now a measured statement rather than a
+derived one, and the properly-measured gap is the **larger** of the two, so the
+conclusion hardens rather than softens.
 
-**Still short of the bar by 1.36 ms (1.30 t/s), and the memo said it would be.**
-§4's headline - "`lm_head` at int4 is necessary and NOT sufficient", and "it
-cannot clear 31.50 t/s even if it lands perfectly, because the bytes it still
-reads forbid it" - is now a measured statement rather than a derived one. It
-landed at 98.3% of perfectly and the bar is still 1.30 t/s away.
+**How close to "perfectly" it landed depends on which instrument you ask, and
+the three do not agree.** The in-situ launch delta is 3.203 ms = **98.3%** of
+the memo's 3.26 ms ceiling; the record-grade bench lever is 3.05 ms = **93.6%**;
+the iterate-grade bench lever is 3.16 ms = 96.9%. The spread is 0.15 ms, it is
+larger than the 0.087% day-drift this instrument now has a same-checkpoint
+control for, and it is **not** reconciled. docs/BENCHMARKS.md, "Three values for
+one quantity, and they do not close", has the arithmetic and names the
+`--profile` run that would settle it. **Quote the percentage with its grade or
+do not quote it.**
 
 What that changes about the remaining work is the *shape* of it, not the size.
-The step is now 33.11 ms of which **zero** is a bytes lever: the memo's own
+The step is now 33.29 ms at record grade (33.11 as first measured) of which
+**zero** is a bytes lever: the memo's own
 sentence, "this is a bytes lever, not a kernel lever, and it is the only one of
 that kind left", has been spent. Everything remaining is in §5.2's territory -
 `attn_decode`'s 3.585 ms, the `prep` family's distance from its floor, and
@@ -1732,9 +1753,9 @@ each is closed by a measurement, not by a decision:
 |---|---|---|
 | **record-grade median-of-three on BOTH checkpoints, idle box** | **CLOSED** - `Vishva007` **27.52 / 36.34**, RTN **30.04 / 33.29**, spreads 0.15% / 0.07%, `647f2d0`, zero DRM fd holders before and after | docs/BENCHMARKS.md, "The record rows" |
 | **the tuned artifact's drop-in** (probe → oracle regen → gate → bench) | **CLOSED** - byte-verified (int4 g64 sym, packed head, `0x77777777`, 2015 tensors = 16.411 GiB of shards); `oracle-out-tuned/` regenerated in 18 min 16 s; gate **94/94 determined + 2 tie-agreements**; record row **30.04 / 33.29** | docs/14, "The tuned-checkpoint gate" |
-| **vLLM smoke test of the self-quantised artifacts** (upload preflight) | **CLOSED, and it is a NEGATIVE result** - vLLM cannot load a quantised `lm_head`: `AttributeError: Cannot determine in_features for layer.` The bf16-head control loads and returns 96/96 in the same container, which isolates it | docs/14, "The vLLM smoke test" |
+| **vLLM smoke test of the self-quantised artifacts** (upload preflight) | **CLOSED, and it is a NEGATIVE result** - neither artifact loads. vLLM routes them to its INC wNa16 path on their `quant_method: "auto-round"` and that path raises `AttributeError: Cannot determine in_features for layer.` after a clean weight load. **The failing module is not identified**; the quantised head is a plausible cause, not a proven one, and the bf16 control does not isolate it (it changes `quant_method`, hence the backend, as well) | docs/14, "What is proven, and what is not" |
 | **the parked gate guard** (empty argmax set → UB; the wrong `dump.py` comment) | **CLOSED** - `CHECK(!d.set.empty())` plus a corrected comment in `golden_decision()`; all three gates re-run after it and byte-identical, suite 40/40 | `tests/golden/golden_gate_test.cc` |
-| **vLLM fair re-baseline on the new checkpoint** | **STILL OPEN, and now bigger than it was** - the operator's rebuild carries the *same image tag* with a different vLLM (`dev514` vs `dev365`) and a **different quantization backend** (INC wNa16 vs AutoGPTQ). The 31.50 t/s bar was measured on the old contents and has not been re-measured | docs/14, "The backend changed under the same image tag" |
+| **vLLM fair re-baseline on the new checkpoint** | **STILL OPEN** - the operator's rebuild carries the *same image tag* over a vLLM 149 commits newer (`dev514` vs `dev365`). The 31.50 t/s bar was measured on the old contents and has not been re-measured. (A first draft of this row also claimed the quantization *backend* changed with the rebuild; **withdrawn** - that is checkpoint-driven, and the published checkpoint takes the same backend on both builds) | docs/14, "The version changed under the same image tag" |
 
 **The bar did not move and the conclusion did not soften.** At record grade the
 engine is **1.46 t/s (4.6%) short** of 31.50 rather than the 1.30 the iterate row

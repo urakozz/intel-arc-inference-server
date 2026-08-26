@@ -61,6 +61,14 @@ way.** Per token: 36.32 ms against vLLM's 31.75 and a 26.34 ms roofline; MBU
 was 0.01 t/s (0.04%). Full rows, the depth experiment and the exact command are
 in [BENCHMARKS.md](BENCHMARKS.md#b70-decode--this-project-phase-1).
 
+> **Current, 2026-08-26** (same checkpoint, same shape, same grade, `647f2d0`):
+> **27.52 t/s / 36.34 ms** - still **12.6% short** (12.63% against the dated
+> row's 12.57%; both round to 12.6). The −0.02 t/s against the dated row
+> above is inside this instrument's measured day-scale drift (≤0.09% on a
+> same-checkpoint control). On the **int4-`lm_head`** checkpoints the record row
+> is **30.04 t/s / 33.29 ms**, 4.6% short - a different `W`, so its MBU (69.6%)
+> is not comparable to the 72.5% here. docs/BENCHMARKS.md, "The record rows".
+
 **The phase-1 first measurement is kept, dated, because it is what spec 1.5 was
 scoped from: 23.73 t/s / 42.141 ms/token, 24.7% short, 62.5% MBU - 2026-08-25,
 `62bdd4d`, before any lever.** Nothing was tuned to produce *that* number and
