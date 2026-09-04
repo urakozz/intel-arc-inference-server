@@ -14,6 +14,7 @@
 #include <exception>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -118,9 +119,11 @@ using EpilogueOp = cutlass::epilogue::fusion::LinearCombination<
 using FusionCallbacks = cutlass::epilogue::fusion::FusionCallbacks<
     EpilogueDispatchPolicy, EpilogueOp, TileShape, decltype(tile_shape(TiledMma()))>;
 using CollectiveEpilogue = cutlass::epilogue::collective::CollectiveEpilogue<
-    EpilogueDispatchPolicy, TileShape, void, ElementAccumulator,
+    EpilogueDispatchPolicy, TileShape, void, void,
     cutlass::gemm::TagToStrideC_t<LayoutC>, ElementOutput,
     cutlass::gemm::TagToStrideC_t<LayoutD>, FusionCallbacks, void, void>;
+static_assert(std::is_void_v<typename CollectiveEpilogue::ElementC>,
+              "P2 is D = alpha*A*B: the epilogue must not read C");
 using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<
     GEMMDispatchPolicy, TileShape, ElementInputA, cutlass::gemm::TagToStrideA_t<LayoutA>,
     ElementInputB, cutlass::gemm::TagToStrideB_t<LayoutB>, TiledMma, GmemTiledCopyA, void,
@@ -152,6 +155,67 @@ Arguments make_arguments(uint32_t m, uint32_t k, uint32_t n, uint16_t* a, uint16
   return {cutlass::gemm::GemmUniversalMode::kGemm, problem,
           {reinterpret_cast<ElementInputA*>(a), stride_a, reinterpret_cast<ElementInputB*>(b), stride_b},
           {{1.f, 0.f}, c, stride_c, c, stride_d}, hw_info};
+}
+
+uint64_t dim3_count(const dim3& dims) {
+  return uint64_t(dims.x) * uint64_t(dims.y) * uint64_t(dims.z);
+}
+
+// This is the exact host-side path GemmUniversalAdapter::run() follows to
+// choose the SYCL nd_range.  Keep it in the probe: the diagnostic must report
+// the instantiated kernel's grid, not reconstruct one from the tile shape.
+void print_launch_geometry(const ProbeShape& shape, uint32_t m,
+                           const cutlass::KernelHardwareInfo& hw_info) {
+  const Arguments args = make_arguments(m, shape.K, shape.N, nullptr, nullptr, nullptr, hw_info);
+  const dim3 grid = Gemm::get_grid_shape(args);
+  const dim3 block = GemmKernel::get_block_shape();
+  const uint32_t expected_m = (m + 255) / 256;
+  const uint32_t expected_n = (shape.N + 255) / 256;
+  std::printf("| %s | %u | %u×%u = %llu | %u×%u×%u = %llu | %u×%u×%u = %llu |\n",
+              shape.name, m, expected_m, expected_n,
+              static_cast<unsigned long long>(uint64_t(expected_m) * expected_n), grid.x, grid.y,
+              grid.z, static_cast<unsigned long long>(dim3_count(grid)), block.x, block.y, block.z,
+              static_cast<unsigned long long>(dim3_count(block)));
+}
+
+void print_device_and_launch_diagnostic(l0::Context& l0ctx, runtime::prefill::Context& cx,
+                                        const cutlass::KernelHardwareInfo& hw_info) {
+  sycl::queue& queue = runtime::prefill::sycl_queue(cx);
+  const sycl::device dev = queue.get_device();
+  const uint32_t sycl_slices =
+      dev.get_info<sycl::ext::intel::info::device::gpu_slices>();
+  const uint32_t sycl_subslices =
+      dev.get_info<sycl::ext::intel::info::device::gpu_subslices_per_slice>();
+  const uint32_t sycl_eus_per_subslice =
+      dev.get_info<sycl::ext::intel::info::device::gpu_eu_count_per_subslice>();
+  const uint32_t sycl_eus =
+      dev.get_info<sycl::ext::intel::info::device::gpu_eu_count>();
+  const uint32_t sycl_max_compute_units =
+      dev.get_info<sycl::info::device::max_compute_units>();
+  const ze_device_properties_t& l0 = l0ctx.props();
+  const ze_device_compute_properties_t& l0_compute = l0ctx.compute();
+
+  std::printf("# grid diagnostic (reported, not inferred); ZE_AFFINITY_MASK=%s\n",
+              env_or_unset("ZE_AFFINITY_MASK"));
+  std::printf("# SYCL device: %s; max_compute_units=%u; slices=%u; subslices/slice=%u; "
+              "EUs/subslice=%u; EUs=%u; scheduler query sm_count=%d\n",
+              dev.get_info<sycl::info::device::name>().c_str(), sycl_max_compute_units, sycl_slices,
+              sycl_subslices, sycl_eus_per_subslice, sycl_eus, hw_info.sm_count);
+  std::printf("# Level Zero device: slices=%u; subslices/slice=%u; EUs/subslice=%u; "
+              "EUs=%u; threads/EU=%u; max_total_group_size=%u; max_group_size=%ux%ux%u\n",
+              l0.numSlices, l0.numSubslicesPerSlice, l0.numEUsPerSubslice, l0ctx.eu_count(),
+              l0.numThreadsPerEU, l0_compute.maxTotalGroupSize, l0_compute.maxGroupSizeX,
+              l0_compute.maxGroupSizeY, l0_compute.maxGroupSizeZ);
+  std::printf("# Level Zero exposes no max_compute_units field; its reported Xe-core analogue is "
+              "slices*subslices/slice = %u. The scheduler query is SYCL slices*subslices/slice.\n",
+              l0.numSlices * l0.numSubslicesPerSlice);
+  std::printf("# expected data-parallel grid is ceil(M/256)×ceil(N/256). GemmUniversal grid and "
+              "local size below are its exact get_grid_shape()/get_block_shape() launch values.\n\n");
+  std::printf("| shape | M | expected M×N work-groups | GemmUniversal grid x×y×z | local x×y×z |\n");
+  std::printf("|---|---:|---:|---:|---:|\n");
+  for (const ProbeShape& shape : kShapes)
+    for (uint32_t m : kMs) print_launch_geometry(shape, m, hw_info);
+  std::printf("\n");
 }
 
 PreparedGemm prepare(uint32_t m, uint32_t k, uint32_t n, uint16_t* a, uint16_t* b, float* c,
@@ -378,16 +442,28 @@ void print_header() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   try {
+    const bool grid_only = argc == 2 && std::strcmp(argv[1], "--grid-only") == 0;
+    const bool dump_one = argc == 2 && std::strcmp(argv[1], "--dump-one") == 0;
+    if (argc > 2 || (argc == 2 && !grid_only && !dump_one))
+      fail("usage: probe_prefill_gemm [--grid-only|--dump-one]");
     print_header();
     l0::Context l0ctx(0);
     std::printf("L0 device: %s\n", l0ctx.name().c_str());
     runtime::prefill::Context cx(l0ctx);
     cutlass::KernelHardwareInfo hw_info{};
     hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(0);
+    print_device_and_launch_diagnostic(l0ctx, cx, hw_info);
+    if (grid_only) return 0;
     const LayoutVerdict layout = settle_b_layout(l0ctx, cx, hw_info);
     std::printf("# B layout verdict: %s\n", layout.summary.c_str());
+    if (dump_one) {
+      // This is also the bounded execution path for an IGC shader-dump capture.
+      std::printf("# --dump-one: the exact GemmUniversal instantiation ran only the 16x16x16 "
+                  "layout control; no timed measurement was taken.\n");
+      return 0;
+    }
     std::printf("# workspace rule: every cell must report 0 bytes; no split-K atomics are instantiated.\n\n");
     std::printf("| shape | K×N | M | can_implement | ms | TFLOP/s | %% of 90 | max abs err | tol | bitwise |\n");
     std::printf("|---|---:|---:|---:|---:|---:|---:|---:|---:|---|\n");
