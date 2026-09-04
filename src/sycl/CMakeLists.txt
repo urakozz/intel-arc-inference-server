@@ -165,3 +165,20 @@ endfunction()
 b70_sycl_probe(probe_interop)
 b70_sycl_probe(probe_prefill_gemm sycl_tla)
 b70_sycl_probe(probe_prefill_attn sycl_tla)
+
+# P5: Intel's CuTe chunked GDN header is consumed from the controller-provided,
+# read-only vllm-xpu-kernels checkout. Its BMG path is C++20 and emits a large
+# device image, hence the matching compiler definition and link option.
+set(B70_VLLM_XPU_KERNELS_DIR "$ENV{HOME}/vllm-xpu-kernels"
+    CACHE PATH "read-only checkout supplying the CuTe chunked-GDN kernel")
+option(B70_P5_CUTE_GDN "Build the optional CuTe GDN probe (requires PyTorch headers)" OFF)
+if(B70_P5_CUTE_GDN)
+  b70_sycl_probe(probe_gdn_chunk sycl_tla)
+  target_include_directories(probe_gdn_chunk SYSTEM PRIVATE
+    ${B70_ROOT}/src/sycl/vllm_shim
+    ${B70_VLLM_XPU_KERNELS_DIR}
+    ${B70_VLLM_XPU_KERNELS_DIR}/csrc/xpu/gdn_attn
+    ${B70_VLLM_XPU_KERNELS_DIR}/csrc/xpu/gdn_attn/xe_2)
+  target_compile_definitions(probe_gdn_chunk PRIVATE VLLM_XPU_ENABLE_XE2)
+  target_link_options(probe_gdn_chunk PRIVATE -flink-huge-device-code)
+endif()
