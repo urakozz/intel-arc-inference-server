@@ -53,6 +53,19 @@ if(B70_PREFILL_ENABLED)
   add_test(NAME context_test COMMAND context_test)
 endif()
 
+# P3 is raw Level Zero/OpenCL C only: it requires a B70 and its kernels but
+# never the optional SYCL component, so it intentionally has no guard.
+add_executable(dequant_test prefill/dequant_test.cc)
+target_include_directories(dequant_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dequant_test PRIVATE b70_l0)
+b70_target_kernel_dir(dequant_test)
+add_dependencies(dequant_test
+  kernel_pf_dequant_tile_K256_N64_L0_T0
+  kernel_pf_dequant_tile_K256_N64_L0_T1
+  kernel_pf_dequant_tile_K256_N64_L1_T0
+  kernel_pf_dequant_tile_K256_N64_L1_T1)
+add_test(NAME dequant_test COMMAND dequant_test)
+
 add_executable(int4_test kernels/int4_test.cc)
 target_include_directories(int4_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME int4_test COMMAND int4_test)

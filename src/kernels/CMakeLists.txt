@@ -280,3 +280,5 @@ add_attn_reduce(1 4096)
 add_attn_prep(2)
 add_attn_decode(2 4096)
 add_attn_reduce(2 4096)
+
+add_subdirectory(prefill)
