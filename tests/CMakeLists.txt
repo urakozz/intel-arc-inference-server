@@ -40,6 +40,19 @@ target_include_directories(device_select_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${
 target_link_libraries(device_select_test PRIVATE b70_l0)
 add_test(NAME device_select_test COMMAND device_select_test)
 
+# The prefill execution context (spec 2 §3.6). Built only when the optional
+# SYCL component is on (cmake/prefill.cmake); with it off this block is
+# skipped entirely and the suite is exactly what it was.
+if(B70_PREFILL_ENABLED)
+  add_executable(context_test prefill/context_test.cc)
+  target_include_directories(context_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(context_test PRIVATE b70_l0)
+  b70_link_prefill(context_test)
+  b70_target_kernel_dir(context_test)
+  add_dependencies(context_test kernel_noop)
+  add_test(NAME context_test COMMAND context_test)
+endif()
+
 add_executable(int4_test kernels/int4_test.cc)
 target_include_directories(int4_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME int4_test COMMAND int4_test)
