@@ -1864,11 +1864,25 @@ there and no atomic, grid, reduction order, launch, or module changes.
 **One thing besides the order does move, and it is the barrier count.** Counted
 from the source at M = 1 (derived, exact): the base kernel executed
 `GQA · (2 staging + WAVES · 6 per wave)` = 6 × (2 + 24) = **156** work-group
-barriers per launch; register-packed GQA executes `1 staging + WAVES · GQA · 7`
-= 1 + 168 = **169**. The extra 13 are not free - `probe_attn`'s `nobar` row
-prices a work-group barrier at **0.242 µs** ((207.396 − 172.500) / 144, measured,
-derived per barrier) - and they are accounted for in the −1.075 ms/token the
-change measured net. The count is revisited immediately below.
+barriers per launch; register-packed GQA as first ported executed
+`1 staging + WAVES · GQA · 7` = 1 + 168 = **169**, because the head loop carried
+*two* fences closing the same `dot_red` write-after-read. One of the two was
+deleted immediately afterwards (below), leaving `1 + WAVES · GQA · 6` = **145** -
+11 below base. All three counts are derived exactly from the source.
+
+*What the redundant fence cost - measured, and it falsified the transfer.* The
+24 deleted instances were priced in advance at `probe_attn`'s `nobar` rate,
+**0.242 µs per barrier** ((207.396 − 172.500) / 144, measured, derived per
+barrier), predicting −5.82 µs/launch / −0.093 ms/token. In situ they measured
+**−2.295 µs/launch, −0.037 ms/token** - 39% of the prediction. So the marginal
+price of a *redundant* fence is **0.096 µs**, not 0.242: the deleted one sat two
+instructions before a surviving one, and most of the convergence cost is paid at
+the survivor either way. `nobar` removes all six per-wave fences at once and
+therefore prices the *average* barrier, which is the wrong number for removing
+one of seven. That is the fifth cost model to die on this kernel; the deletion is
+kept because it is free (byte-identical output, no arithmetic change) and −0.037
+still resolves at 3.75× this instrument's floor. Both profiles are in
+"Measured - the redundant fence" at the end of this chapter.
 
 *Why it pays.* The old q-head-outer walk issued the same K/V messages six times.
 The private-register inversion issues them once and reuses the retained values for
@@ -2835,3 +2849,49 @@ available**: `native_exp` is ruled out by the rounding discipline at the top of
 this chapter, and the barriers that remain after `sgtree` are what publish
 `dot_red` across subgroups. Nothing above has been taken - the memo's §5.3 rule
 is that no attention change should ship before the gate can see one at depth.
+
+> **Two amendments, Task 5 (2026-09-04).** (1) The memo's §5.3 rule was **lifted
+> in practice, not overruled**: register-packed GQA shipped and the gate *did*
+> see it - byte-identical output at depth, verified on two checkpoints. (2) The
+> "work-group barriers −0.600, not available" row was **partly wrong about
+> availability**: 24 of the 169 the ported kernel executed were a *redundant*
+> fence, and deleting one of two fences closing the same write-after-read is
+> available at zero arithmetic risk. What it is **not** worth is 0.600 × 24/144:
+> see the next section, where that transfer over-predicted by 2.5×.
+
+### Measured - the redundant fence: −0.037 ms/token, and the barrier price does not transfer
+
+Paired `--profile --depth 4096 --steps 32 --repeats 5` on the shared box,
+2026-09-04, card 1 (`ZE_AFFINITY_MASK=1`), Vishva007 snapshot `2a90776` held
+fixed, load average 0.46 → 1.01, 160 profiled replays per column, 774
+launches/step. **Iterate/relative grade**; the two binaries differ by exactly one
+deleted `barrier(CLK_LOCAL_MEM_FENCE)` and nothing else.
+
+| family | before, 169 barriers (µs/step) | after, 145 barriers (µs/step) | delta | sd% before → after | 2σ-resolvable |
+|---|---:|---:|---:|---|---:|
+| **`attn_decode`** | **2594.936** | **2558.217** | **−36.719** | 0.297% → 0.303% | 9.761 → 9.804 |
+| `attn_reduce` (untouched, drift control) | 189.059 | 187.408 | −1.651 | 0.584% → 0.364% | 1.397 → 0.863 |
+| `attn_prep` (untouched, drift control) | 54.497 | 54.591 | +0.094 | 2.160% → 1.282% | 1.489 → 0.885 |
+
+**−36.719 µs/step = −2.295 µs/launch = −0.037 ms/token** (measured, then divided
+by the fixed 16 launches). It resolves: 3.75× this instrument's own 2σ floor, and
+the two sessions' full ranges are **disjoint** (2590.111..2608.551 against
+2552.314..2571.709). The drift controls are quiet in this pair (−0.87% and
++0.17%), unlike the pair that measured the port itself.
+
+**The prediction and the falsification, both pre-registered.** Byte-identity was
+predicted to hold and **held** - the tie-aware golden gate returned the identical
+census (94/94 determined rows element-exact, 2 undetermined: 1 tie-agreement + 1
+other set member), `replay_determinism_test` was bitwise identical over 3 runs at
+774 kernels / 19 modules, and `attn_test` passed. The **timing** prediction was
+−5.82 µs/launch, transferring `nobar`'s 0.242 µs/barrier to 24 instances; measured
+**−2.295**, i.e. **39%**. The marginal price of the redundant fence is **0.096
+µs**, and the mechanism is not mysterious: it sat two instructions before a
+surviving fence, so the work-items that would have waited there wait at the
+survivor instead. `nobar` deletes all six per-wave fences and prices the
+**average** barrier - which is the wrong instrument for deleting one of seven.
+Add it to the list: this is the **fifth** cost model this kernel has falsified.
+
+Cumulative for Task 5, **derived from two separately-paired sessions** (and so not
+a single measurement): −1.075 for the port plus −0.037 for the fence =
+**−1.112 ms/token** on `attn_decode`.
