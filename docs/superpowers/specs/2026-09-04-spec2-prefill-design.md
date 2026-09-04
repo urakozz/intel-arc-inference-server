@@ -230,13 +230,20 @@ ingest-by-decode would have produced, up to rounding.
   two). Launch overhead is irrelevant at millisecond kernel scale
   (`docs/04-architecture.md:150-178` accepted this from day one). Stage 0
   measures the interop cost and requires it under 1% of chunk time.
-- **Chunk width `C`:** single-stream, so **the widest that fits** -
-  default target **4096** (one pass for the benchmark prompt; dequant
-  overhead halves vs 2048); fallback 2048. Memory at C=4096 (derived):
-  weights 13.7 GB + KV 1.07 GB (16k) + dequant scratch 0.36 GB +
-  activations ≤ 0.5 GB - fits. Prompts longer than `C` run in chunks; the
-  attention/GDN paths are written for multi-chunk from the start (§6 tests
-  it).
+- **Chunk width `C` = 2048 (operator ruling, 2026-09-05; was 4096).**
+  Measured basis: P2's corrected 256-GRF matrix has **four of six shapes at
+  their best rate at M=2048**, and every shape except out/o_proj is slower
+  at M=4096 than at M=2048 (e.g. gate‖up 150.19 → 119.73 TFLOP/s). The
+  counterweight is real and was weighed: the dequant scratch is written
+  once per chunk, so P3's measured overhead **doubles from 9.49% at C=4096
+  to 18.97% at C=2048**. Composed over a 4096-token prefill the two nearly
+  cancel - **≈1.74 s at C=4096 vs ≈1.71 s at C=2048 (derived from P2/P3,
+  crude shape-averaged; T6 composes it properly)** - so 2048 wins by ~2% on
+  time and, decisively, **halves the activation scratch**, which matters on
+  a part where the step already resides at 16.94-18.81 GB. 4096 remains
+  supported and is the documented alternative. Prompts longer than `C` run
+  in chunks; the attention/GDN paths are written for multi-chunk from the
+  start (§6 tests it).
 - **Buffers:** `DecodeBuffers` splits into a **persistent group**
   (`control`, `gdn_state`, `conv_ring`, `kv_k`, `kv_v` - shared) and
   per-path scratch (decode's at `kM`, prefill's at `C`). The explorer
