@@ -362,6 +362,71 @@ roofline and a different MBU denominator.** These rows are *not* continuations
 of the ladder above; they are the same engine reading 1.867 GB/token less.
 Spec 1.6 §5.1 - docs/15 has the derivation, docs/12 the launch.
 
+### The spec-1.7 gate rows - `2a7df0b`, 2026-09-04
+
+**The gate of spec 1.7, and it clears.** The operator's stop line for this spec
+was moved to **≥ 32.0 t/s** (spec §10 amendment); the engine measures
+**32.22 t/s / 31.03 ms/token** on the int4-`lm_head` checkpoint.
+
+| engine / checkpoint | depth | tg | runs (t/s) | **t/s** | **ms/token** | MBU | grade |
+|---|---|---|---|---|---|---|---|
+| **b70-decode `2a7df0b`, `qwen38-27b-w4g64-rtn`** (int4 `lm_head`) | 4096 | 256 | 32.24 / 32.22 / 32.22 | **32.22** | **31.03** | 74.7% of 13.673 GB | **near-idle**, median of 3 - see conditions |
+| vLLM `p314-t215-vxkp0` (`0.28.1rc1.dev396`), `urakozz/...-g64-AutoRound-GPTQ`, **no speculation**, fp8 KV | 1 † | 256 | 31.01 / 30.99 / 30.98 | **31.01** | 32.25 | - (bf16 `lm_head`, 15.540 GB class) | measured, 3 invocations |
+
+Spread 0.02 t/s (**0.06%**), which falls inside the 0.00-0.15% band the strict
+record triples define. **The grade is one notch below those rows and the reason
+is named:** docker was down and load average 0.74, but two desktop processes
+(`baobab` pid 285644, `ptyxis` pid 285678) held DRM file descriptors on both
+cards throughout, verified before and after the triple. Every prior record row
+in this document was taken with **no** DRM holder on the machine. The 0.06%
+spread is *evidence* those two were quiescent, not proof; the same-binary
+strict-idle re-run is a named follow-on. The relevant prior control:
+`Vishva007` under a 12-core compile read 36.27 against its idle median 36.32,
+**0.14% apart**, because the decode step is 99.7% inside the GPU fence.
+
+**Against vLLM, and what the comparison does and does not say.** 32.22 vs
+**31.01** is **+3.9%** - the first row in this document where b70-decode leads,
+on the same box and the same model weights. Two asymmetries, both in our
+favour and both stated rather than absorbed:
+
+- **`lm_head`**: ours is int4 (13.673 GB/token); vLLM cannot load a quantized
+  `lm_head` (measured, docs/14) and reads the bf16 tensor, 15.540 GB/token.
+  **1.867 GB/token of the difference is bytes, not kernels.**
+- **KV dtype**: vLLM ran `--kv-cache-dtype fp8`, half our bf16 KV traffic -
+  this one favours *vLLM*.
+
+**The byte-matched row separates those, and it reverses the verdict.** Same
+binary `2a7df0b`, same shape, same hour, `Vishva007` snapshot `2a90776` - so
+`W` = 15.540 GB/token, **the same bytes vLLM reads**:
+
+| engine / checkpoint | depth | tg | runs (t/s) | **t/s** | **ms/token** | MBU | grade |
+|---|---|---|---|---|---|---|---|
+| **b70-decode `2a7df0b`, `Vishva007`** (bf16 `lm_head`, byte-matched to vLLM) | 4096 | 256 | 29.33 / 29.33 / 29.34 | **29.33** | **34.09** | **77.2%** of 15.540 GB | near-idle, median of 3 |
+
+**On equal bytes vLLM is still ahead: 31.01 against our 29.33 - 5.7%, a factor
+of 1.057.** So both of these are true and neither may be quoted without the
+other:
+
+- **b70-decode is 3.9% faster end to end** (32.22 vs 31.01), because our
+  `lm_head` is int4 and vLLM's cannot be.
+- **vLLM's kernels are 5.7% faster on identical weight bytes** (31.01 vs
+  29.33). The lead is a *checkpoint* advantage, not a kernel one.
+
+**And MBU moves the opposite way from t/s across our own two rows** - 77.2% on
+the slower `Vishva007` row, 74.7% on the faster RTN row. That is not a
+contradiction and it was predicted before it was measured: bf16 `lm_head` was
+the most bandwidth-efficient launch in the step (98.4% of device), so deleting
+three quarters of its bytes *lowers the average efficiency of what remains*
+while raising throughput. Faster and less efficient at once, on one binary.
+
+vLLM's own MBU on its 15.540 GB is **81.7%** (482 of 590) - still the best
+number any software has posted on this silicon here.
+
+**MBU is 74.7%** (441 GB/s of the measured 590), against spec 1.7's **82%**
+success bar and the operator's original **90%** fold criterion. **Beating vLLM
+on t/s and clearing the efficiency bar are now different answers**, and the
+spec-1.7 closing memo carries the second one.
+
 ### The record rows - all three checkpoints, one idle box, 2026-08-26
 
 **The record-grade rows this section owed have been taken.** `647f2d0`, clean
