@@ -72,6 +72,20 @@ every format decision. From the `sycl-tla` mainloop dispatch policies
 | `MainloopIntelXeXMX16FP8Scaling` | FP8 → **upconverted** to XMX16 |
 | `MainloopIntelXeXMX16BlockScaled` | MX formats → **upconverted** to XMX16 |
 
+### What it actually delivers - measured 2026-09-05
+
+P2, `tools/probe/probe_prefill_gemm`, measures the stock BMG bf16 GEMM at the
+six production shapes with AOT 256 GRF and sycl-tla
+`91e5bd735517d8e79591b41e0d0cd37a7bacdca7`: **164.21 TFLOP/s** at down,
+M=2048 (measured, iterate grade; card 1 under `ZE_AFFINITY_MASK=1`). Full
+matrix: [P2](probe-prefill-gemm-2026-09-04.md).
+
+The derived 183.5 TFLOPS (vendor 367 TOPS INT8 / 2) remains a peak, while
+164.21 is an achieved production-shape rate: **89.5%** (derived). Use the
+derived figure only for a hardware peak and the measured figure for an
+achievable-rate argument; these are not competing values. The measured policy
+is `MainloopXeL1Staged<2>`, not the older `MainloopIntelXeXMX16` name.
+
 **With 16-bit activations, Xe2 XMX executes exactly two things natively: 16-bit
 float and int8×int8.** Every narrow format - int4, MXFP4, FP8 - is dequantised in
 the mainloop and the multiply happens at 16-bit.

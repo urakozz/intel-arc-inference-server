@@ -81,6 +81,12 @@ as explicit gates rather than templates.
 is the cheapest way to learn what this card cannot do, before discovering it in a
 benchmark.
 
+vLLM's XPU W4A16 prefill also reaches this readable Apache-2.0 stack rather
+than an opaque proprietary GEMM: `XPUwNa16LinearKernel.apply_weights` routes
+to `torch.ops._xpu_C.int4_gemm_w4a16`, then the vLLM XPU oneDNN matmul entry
+and its M-keyed primitive cache. This is additive: this document already called
+gemmstone Intel's JIT generator and had no contrary closed-source claim.
+
 ## Traps inherited from the vLLM XPU work
 
 Hard-won, expensive to rediscover. All of these were hit in production on this
