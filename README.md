@@ -35,6 +35,22 @@ on its own; they multiply to ~×1.4 at best (≈44 t/s) without speculation. Pha
 2 is where the larger numbers live. Doc 05 has the arithmetic; `W` is measured,
 not estimated.
 
+**Measured state, 2026-09-04 at the spec 1.7 gate: 32.22 t/s against vLLM's
+31.01 on the same box and the same model weights - the engine is now ahead by
+3.9%**, both without speculative decoding (median of 3, 31.03 ms/token,
+`2a7df0b`, docs/BENCHMARKS "spec-1.7 gate rows"). **Two caveats travel with
+that number and neither is small:** 1.867 GB/token of the margin is our int4
+`lm_head`, which vLLM cannot load at all (the byte-matched row is in
+BENCHMARKS), and **MBU is 74.7%** - under spec 1.7's 82% bar and well under the
+90% originally set as the fold criterion, so a quarter of the card's bandwidth
+still is not becoming tokens. The levers that got here after spec 1.5: a
+per-shape GEMV layout/S/dequant retune (**−1.20 ms/token**) and register-packed
+GQA reuse in `attn_decode` (**−1.075**, plus **−0.037** for a redundant fence
+the review caught), with the tie-aware golden gate element-exact on every
+determined row throughout.
+
+The spec-1.5-era paragraph below is kept as the record of how it read then.
+
 **Measured state, 2026-08-25 at the spec 1.5 gate: 27.54 t/s against vLLM's
 31.50 - still below it, 12.6% short.** MBU is **72.5%** (428 GB/s of the
 measured 590) against vLLM's **83.0%**, on a 37.97 t/s roofline. The first

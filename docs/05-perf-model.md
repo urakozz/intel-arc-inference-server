@@ -49,9 +49,47 @@ b70-decode ef6acb0   =                27.54 t/s  ->  428 GB/s  ->  72.5% MBU
 b70-decode 62bdd4d   =                23.73 t/s  ->  369 GB/s  ->  62.5% MBU
                                        (62bdd4d is phase 1 before spec 1.5's
                                         lever ladder; ef6acb0 is its gate)
+
+--- 2026-09-04, and note the DENOMINATOR CHANGES on the last row ---
+ceiling(int4 lm_head)= 590 / 13.673 = 43.15 t/s   (23.17 ms/token)
+vLLM dev396, fp8 KV  =                31.01 t/s  ->  482 GB/s  ->  81.7% MBU
+                                       (bf16 lm_head: W = 15.540, so this
+                                        row's MBU is on the 15.540 ceiling)
+b70-decode 2a7df0b   =                32.22 t/s  ->  441 GB/s  ->  74.7% MBU
+                                       (int4 lm_head: W = 13.673. FASTER in
+                                        t/s and LOWER in MBU than the vLLM
+                                        row above -- both true, because the
+                                        denominators differ by 1.867 GB)
 ```
 
 ## Phase 1, measured - the honest verdict
+
+> **Superseded 2026-09-04 at the spec 1.7 gate - the verdict below has
+> flipped, and it is the *speed* verdict that flipped, not the efficiency
+> one.** `2a7df0b`, median of three, `qwen38-27b-w4g64-rtn`:
+> **32.22 t/s / 31.03 ms/token** against the same-box, same-weights,
+> no-speculation vLLM row of **31.01 t/s / 32.25 ms** (vLLM
+> `0.28.1rc1.dev396`, measured the same day) - **b70-decode is ahead by 3.9%.**
+>
+> Read it with three qualifications, all measured:
+> 1. **Not byte-matched.** Our `lm_head` is int4 (`W` = 13.673 GB/token);
+>    vLLM cannot load a quantized `lm_head` and reads 15.540 GB. **1.867
+>    GB/token of the margin is bytes we removed, not kernels we improved.**
+>    The byte-matched `Vishva007` row is in docs/BENCHMARKS beside it.
+> 2. **Their KV was fp8**, ours bf16 - that asymmetry runs the other way.
+> 3. **MBU 74.7%** (441 of 590 GB/s) on this checkpoint's 43.15 t/s
+>    roofline - against spec 1.7's **82%** bar and the operator's original
+>    **90%** fold criterion. **Both are still missed.** Beating the
+>    reference implementation and using the silicon well are separate
+>    questions here, and only the first is now answered.
+>
+> The two levers between `647f2d0` and this row: the per-shape GEMV
+> layout/S/dequant retune (**−1.20 ms/token**) and register-packed GQA
+> reuse in `attn_decode` (**−1.075**, plus **−0.037** for a redundant fence).
+> Grade note: docker was down but two desktop processes held DRM fds, so the
+> row is **near-idle**, one notch below the strict-idle record rows; the
+> 0.06% spread is inside their band. docs/BENCHMARKS, "The spec-1.7 gate
+> rows".
 
 **b70-decode does not beat vLLM. Measured 2026-08-25 at the spec 1.5 gate
 (`ef6acb0`), median of three runs on an idle box: 27.54 t/s at tg256, depth
