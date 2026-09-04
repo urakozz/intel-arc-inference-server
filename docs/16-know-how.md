@@ -6,15 +6,26 @@ from scratch against a single GPU (Intel Arc Pro B70), specs 1-1.5,
 otherwise; the authoritative derivation for each lives in the doc cited.
 
 **The headline.** A ~15-kLOC engine (pure Level Zero + OpenCL C, no PyTorch,
-no vLLM) decodes a 27B W4A16 model at **27.52 t/s** measured (record grade -
-median of three on an idle box, docs/BENCHMARKS) - 87% of vLLM's 31.50 on the
-same box/model - while reproducing a CPU-torch
-oracle **96/96 greedy tokens exactly** (docs/14) and replaying **bitwise
-deterministically**. Projected ceiling with the two remaining identified
-items (attention tuning ~0.5 ms + int4 lm_head ≤3.26 ms, both bounded by
-measurement): ~31.1 t/s - still under vLLM's number, and the roofline is
-37.97 t/s. The silicon's own per-shape bandwidth ceilings, not host
-overhead, are the binding constraint (docs/15).
+no vLLM) decodes a 27B W4A16 model at **32.22 t/s** measured (median of three,
+31.03 ms/token, docs/BENCHMARKS "spec-1.7 gate rows") - **+3.9% over vLLM's
+31.01** on the same box and the same model weights, with no speculative
+decoding on either side - while reproducing a CPU-torch oracle **element-exact
+on every determined row** (docs/14) and replaying **bitwise deterministically**.
+
+**Two things that headline is not.** It is **not byte-matched**: 1.867 GB/token
+of the margin is our int4 `lm_head`, which vLLM cannot load at all - the
+byte-matched row is in docs/BENCHMARKS beside it. And it is **not efficient
+yet**: **MBU 74.7%** (441 of the measured 590 GB/s) against a 43.15 t/s
+roofline, so ~25% of the device's bandwidth is still not turning into tokens.
+Beating the reference implementation and using the silicon well turned out to
+be different questions, and only the first one is answered.
+
+The four days from 23.73 t/s to 32.22 (2026-08-22 → 09-04): +2.22 from
+splitting single-work-group kernels across subgroups, +1.25 from retiling
+attention's KV block, +2.52 from quantizing `lm_head` (bytes, not kernels),
++1.15 from a per-shape GEMV layout/S/dequant retune, and +1.08 from
+register-packed GQA reuse. Every one of those was chosen by a probe and
+several were chosen *against* the model that predicted them (§4).
 
 ## 1. The hardware (BMG-G31 / B70)
 
