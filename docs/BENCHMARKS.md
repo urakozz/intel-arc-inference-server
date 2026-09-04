@@ -99,14 +99,14 @@ docker run --rm -it \
   --served-model-name Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ \
   --host 0.0.0.0 --port 8000 \
   --tensor-parallel-size 1 --pipeline-parallel-size 1 \
-  --max-model-len 16k --kv-cache-dtype auto --max-num-seqs 2 \
+  --max-model-len 128k --kv-cache-dtype auto --max-num-seqs 2 \
   --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_xml \
   --language-model-only --trust-remote-code --enable-prefix-caching \
+  --gpu-memory-utilization 0.96 \
   --compilation-config '{"inductor_compile_config":{"pre_grad_fusion_options":{}}}' \
-  --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
+  --speculative-config '{"method":"mtp","num_speculative_tokens":2}'
   # speculative row adds:
   # --speculative-config '{"method":"dspark","model":"Doopeworld/Qwen3.8-27B-DSpark-vLLM","num_speculative_tokens":4,"draft_sample_method":"probabilistic"}'
-  # --speculative-config '{"method":"mtp","model":"Doopeworld/Qwen3.8-27B-DSpark-vLLM","num_speculative_tokens":4,"draft_sample_method":"probabilistic"}'
 ```
 
 ```bash
@@ -164,6 +164,86 @@ the HF cache is a symlink into `blobs/`, so edit the resolved path. Checkpoint
 bug, not vLLM or XPU.
 
 `tg256 c2` is aggregate over 2 streams; per-request is roughly half.
+
+### urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ - the self-quantised upload, image `p314-t215-vxkp0`, 2026-09-04
+
+**The checkpoint** is the tuned AutoRound artifact (`autoround_version`
+0.15.0, `iters` 400) re-exported for vLLM: `quant_method: gptq` and
+**`lm_head: false`** (verified from the served snapshot's `config.json`), so
+vLLM reads the **15.540 GB class** per token - same bytes as `Vishva007`, not
+the 13.673 GB the int4-`lm_head` local checkpoints read. Its config ships the
+`mtp` exclusion rules correctly (the `config.json` fix above is not needed).
+Same tuned nibbles as `qwen38-27b-w4g64-tuned`; different `lm_head` bytes.
+
+**The image** `vllm-xpu-env-next-p314-t215-vxkp0` carries vLLM
+`v0.28.1rc1.dev391+g29af8bd67.d20260904` - the third distinct build in this
+document (the version-not-tag note below applies). The linear layers take the
+same backend as every earlier row: `XPUwNa16LinearKernel for
+AutoGPTQLinearMethod` (log-verified 2026-09-04).
+
+Serve (the operator's command, 2026-09-04 - note `--kv-cache-dtype fp8` and
+`--max-model-len 200000`, both new against the blocks above):
+
+```bash
+docker run --rm -it \
+  --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
+  --device /dev/dri \
+  -v /dev/dri/by-path:/dev/dri/by-path:ro \
+  -v /sys/class/drm:/sys/class/drm:ro \
+  --group-add "$(getent group render | cut -d: -f3)" \
+  --group-add "$(getent group video | cut -d: -f3)" \
+  --ipc=host --pid=host --net=host --shm-size=16g \
+  -e VLLM_USE_V2_MODEL_RUNNER=1 \
+  -e CCL_ZE_IPC_EXCHANGE=sockets \
+  -e CCL_ATL_TRANSPORT=ofi \
+  -e CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0 \
+  -e VLLM_WORKER_MULTIPROC_METHOD=spawn \
+  -e ZE_FLAT_HIERARCHY=FLAT \
+  -e ONEAPI_DEVICE_SELECTOR='level_zero:*' \
+  -e VLLM_XPU_ENABLE_XPU_GRAPH=1 \
+  -e HF_HUB_ENABLE_HF_TRANSFER=0 \
+  -e HF_HUB_OFFLINE=1 \
+  -v ~/.cache/vllm:/root/.cache/vllm \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  vllm-xpu-env-next-p314-t215-vxkp0 urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
+  --served-model-name urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
+  --host 0.0.0.0 --port 8000 \
+  --tensor-parallel-size 1 --pipeline-parallel-size 1 \
+  --max-model-len 200000 \
+  --kv-cache-dtype fp8 \
+  --max-num-seqs 4 \
+  --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_xml \
+  --language-model-only --trust-remote-code \
+  --enable-prefix-caching --mamba-block-size 128 \
+  --gpu-memory-utilization 0.97 \
+  --compilation-config '{"inductor_compile_config":{"pre_grad_fusion_options":{}}}'
+  # production row below adds:
+  # --speculative-config '{"method":"mtp","num_speculative_tokens":2}'
+```
+
+Bench: the standing `llama-benchy` command (`pp 4096 --tg 256 --concurrency 1
+--depth 1 --no-cache --exact-tg --latency-mode generation`), run three times;
+each invocation is itself 3 runs and prints its own ±.
+
+| image           | vLLM                | spec             | kv  | pp4096 d1 | tg256 d1 (3 invocations)                       | median    |
+|-----------------|---------------------|------------------|-----|-----------|------------------------------------------------|-----------|
+| p314-t215-vxkp0 | 0.28.1rc1.dev391    | mtp, 2 draft tok | fp8 | 1870      | 46.13 ± 0.99 / 47.12 ± 2.46 / 45.84 ± 1.23     | **46.13** |
+
+Measured 2026-09-04, llama-benchy 0.4.0, server warm (graph capture done),
+box otherwise idle of GPU work. Two caveats, both from the server's own log:
+
+- **The MTP-2 row is not comparable to any non-speculative engine number**
+  (ours included) - it decodes ~2 tokens per target-model step when drafts
+  are accepted.
+- **`--enable-prefix-caching` is silently inert in this config**: with MTP
+  enabled, no KV-cache group is identified as the draft's, every group -
+  including the Mamba groups - is treated as a draft group, and the log
+  states "prefix-cache reuse across requests will be disabled".
+
+The **non-speculative row from the same command** (the bar the b70-decode
+section compares against) is a named follow-on for the operator's next server
+restart; `fp8` KV rides in it and must stay in its label - b70-decode holds
+KV in bf16.
 
 ## b70-decode - this project, phase 1
 
@@ -639,9 +719,10 @@ beside it.)
   `vllm-xpu-env-next-p314-t214-vxkp0:latest` that produced the 31.50 t/s bar was
   vLLM `0.27.2rc1.dev365+g5ee84d3c5.d20260821`; the tag was rebuilt 2026-08-26
   and now carries `0.27.2rc1.dev514+g0e30bd62f.d20260826` - 149 commits apart
-  under one name. **Every vLLM row in this document was measured on the older
-  contents and none has been re-measured**; a fair re-baseline in the new build
-  is a named follow-on. The rebuild was verified *correct* on the published
+  under one name. **Every vLLM row above the `urakozz` section was measured on
+  the older contents and none has been re-measured**; the 2026-09-04 `urakozz`
+  section runs a third build, `0.28.1rc1.dev391+g29af8bd67.d20260904`
+  (`p314-t215-vxkp0`), and carries its version in its own rows. The rebuild was verified *correct* on the published
   checkpoint (`vllm_check.py`, 96/96 element-exact - docs/14) but correctness is
   not speed. (A first version of this bullet also claimed the *quantization
   backend* changed with the rebuild. **Withdrawn** - that comparison used two
