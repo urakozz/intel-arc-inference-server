@@ -334,3 +334,39 @@ probe executable installed; an attempted `--grid-only` invocation therefore
 ran that old full battery with the four IGC variables unset. It was allowed to
 finish and is not quoted, graded, or used anywhere in this record. It does not
 alter either the original measurement or the one post-fix measurement above.
+
+## 2026-09-05 - P2 register-spill diagnostic: refuted
+
+The earlier DPAS shader dump was made before `c83609d` and therefore named the
+old `ElementC = float` epilogue. It is not used as the spill verdict. The
+current source was incrementally rebuilt on the box with an IGC dump enabled,
+then its bounded `--dump-one` path was run with `ZE_AFFINITY_MASK=1`; its
+emitted `GemmUniversal` name demangles to `CollectiveEpilogue<..., void, void,
+...>` (source/build-artifact verified, iterate grade). No timed GEMM cell was
+run for this diagnostic.
+
+The current GEMM kernel's own `.zeinfo` reports the following. A present value
+is measured from the compiler build artifact, iterate grade. An absent size
+field denotes the compiler's zero-allocation representation; the stated 0 B
+is derived from that artifact convention, iterate grade, which is the same
+convention used for P3's no-spill comparison.
+
+| field | result |
+|---|---:|
+| `grf_count` | 128 (measured, iterate grade) |
+| `spill_mem_size` | absent; 0 B (derived, iterate grade) |
+| `private_size` | absent; 0 B (derived, iterate grade) |
+| `simd_size` | 16 (measured, iterate grade) |
+| `intel_reqd_sub_group_size` | 16 (measured, iterate grade) |
+| `has_dpas` | true |
+
+Thus a 128-GRF compile of this exact post-fix 256×256×32 GEMM has **0 B
+reported spill memory** (derived from the compiler artifact, iterate grade).
+Register spilling is refuted as the explanation for the 3.58-11.17 TFLOP/s
+result (measured, iterate grade). This check does
+not establish that the four run-time IGC settings reach the AOT device compile:
+the freshly captured build had all four unset, and
+`src/sycl/CMakeLists.txt` passes no such option through `B70_SYCL_LINK`
+(source/build-artifact verified, iterate grade). Per the diagnostic stop rule,
+there was no alternative-option compile, no CMake change, and no further
+timed battery.
