@@ -370,3 +370,73 @@ the freshly captured build had all four unset, and
 (source/build-artifact verified, iterate grade). Per the diagnostic stop rule,
 there was no alternative-option compile, no CMake change, and no further
 timed battery.
+
+## 2026-09-05 - P2 AOT 256-GRF root cause confirmed and corrected
+
+Grade: iterate (card 1, `ZE_AFFINITY_MASK=1`, card 0 may be held). The
+corrected result below is **one complete battery run by the controller, not by
+this agent**, at iterate grade. It is additive: no earlier pre-registration or
+measurement is rewritten.
+
+### Root cause and reusable lesson
+
+The slow binary was AOT-compiled in **128-GRF mode**. The four IGC settings had
+been exported as **runtime** environment variables, but this probe uses
+`-fsycl-targets=spir64_gen`: its device image is compiled at **build time**.
+Until `src/sycl/CMakeLists.txt` passed
+`-options -cl-intel-256-GRF-per-thread` through `-Xsycl-target-backend`, the device
+compiler never received that request. `B70_SYCL_AOT_256_GRF` now supplies that
+AOT backend option and defaults to `ON`; the cache option remains available to
+disable it.
+
+This is the reusable AOT lesson: a runtime compiler environment variable does
+not configure an ahead-of-time device compile. For AOT evidence, record the
+actual backend flags and inspect the built artifact; do not infer device
+compiler state from the runtime environment.
+
+The prior spill refutation remains literally correct but was not a performance
+clearance: `spill_mem_size = 0 B` at 128 GRF meant IGC avoided spilling by
+emitting a **degenerate conservative schedule**. Zero reported spill therefore
+did not imply good code. The 128-to-256-GRF change and the measured up-to-33x
+rate change identify **128-GRF forced a conservative schedule**, not spilling,
+as the mechanism.
+
+### One corrected battery - before/after TFLOP/s matrix
+
+All cells are measured, iterate grade. Before is the post-epilogue-fix
+128-GRF-AOT battery; after is the controller's 256-GRF-AOT battery. Each cell
+is shown side by side as `before -> after`.
+
+| shape | M=512 | M=1024 | M=2048 | M=4096 |
+|---|---:|---:|---:|---:|
+| qkv‖z | 4.64 -> 127.43 | 4.14 -> 136.75 | 3.92 -> 158.94 | 3.75 -> 121.79 |
+| out/o_proj | 11.17 -> 47.60 | 4.47 -> 74.12 | 4.29 -> 89.03 | 3.98 -> 134.48 |
+| gate‖up | 4.02 -> 149.70 | 3.89 -> 160.68 | 3.72 -> 150.19 | 3.65 -> 119.73 |
+| down | 10.91 -> 88.42 | 4.48 -> 118.65 | 4.00 -> 164.21 | 3.76 -> 138.15 |
+| q‖k‖v | 4.51 -> 110.11 | 4.32 -> 141.05 | 3.93 -> 159.01 | 3.77 -> 131.98 |
+| lm_head | 3.81 -> 137.22 | 3.70 -> 130.69 | 3.63 -> 128.68 | 3.58 -> 117.29 |
+
+The corrected peak is **164.21 TFLOP/s** at down, M=2048 (measured, iterate
+grade), or **89.5%** of the 183.5 TFLOPS XMX bf16 peak (derived from
+164.21 / 183.5). Two corrected runs were bitwise equal in every cell
+(measured, iterate grade); there were no split-K atomics (source-verified
+configuration), and workspace was 0 B in every cell (measured, iterate grade).
+
+### Original pre-registration scored against the corrected battery
+
+| pre-registered claim | corrected outcome |
+|---|---|
+| Gate‖up at M=4096 is >=90 TFLOP/s | **Hit.** 119.73 TFLOP/s (measured, iterate grade), 29.73 TFLOP/s / 33.0% above the target (derived, iterate-grade input). |
+| Rate rises monotonically with M for every shape | **Miss.** No row is monotonic over all four widths (measured, iterate grade). |
+| Out/o_proj is the worst cell at every M | **Miss.** It is the lowest row at M=512/1024/2048 but not M=4096, where lm_head is lower (measured, iterate grade). |
+| Two runs of a cell are bitwise identical | **Hit.** Every corrected cell was bitwise equal across the two runs (measured, iterate grade). |
+| Workspace is 0 B | **Hit.** Every corrected cell reported 0 B (measured, iterate grade). |
+
+### Chunk-width signal - evidence for T6, no specification change
+
+At M=2048, qkv‖z, down, and q‖k‖v reach their row maxima (three of six in the
+raw corrected matrix; not four). Gate‖up instead peaks at M=1024 and lm_head at
+M=512; out/o_proj peaks at M=4096. Every shape except out/o_proj is slower at
+M=4096 than at M=2048 (measured, iterate grade). This is evidence bearing on
+spec §3.6's C=4096 default with C=2048 fallback; it does not change the spec.
+T6 must compose both widths and the controller rules the choice.
