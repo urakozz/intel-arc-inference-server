@@ -42,6 +42,10 @@ set(B70_SYCL_LINK ${B70_SYCL_COMPILE}
     -Xs "-device ${B70_OCLOC_DEVICE}"
     -Xspirv-translator
     -spirv-ext=+SPV_INTEL_split_barrier,+SPV_INTEL_2d_block_io,+SPV_INTEL_subgroup_matrix_multiply_accumulate)
+if(B70_SYCL_AOT_256_GRF)
+  list(APPEND B70_SYCL_LINK
+       -Xsycl-target-backend=spir64_gen "-options -cl-intel-256-GRF-per-thread")
+endif()
 
 # --- sycl-tla, pinned, HEADER-ONLY ----------------------------------------
 # We deliberately do NOT add_subdirectory() it. Its README says the library
