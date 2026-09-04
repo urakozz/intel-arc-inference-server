@@ -237,3 +237,100 @@ the probe source, without changing compiler flags:
 The local probe `Shape` table shadowed `cute::Shape`; qualifying the CuTe type
 fixed the probe. The final serial `-j1` SYCL target build and final battery
 both completed successfully (measured build/run outcome, iterate grade).
+
+## 2026-09-05 diagnostic - one confirmed epilogue defect, corrected once
+
+Grade: iterate. This section is additive: the 2026-09-04 pre-registration and
+its original P2 matrix above remain the record of that configuration.
+
+### 1. Grid and occupancy - clean
+
+Under `ZE_AFFINITY_MASK=1`, SYCL reported 8 slices × 4 subslices/slice × 8
+EUs/subslice = **256 EUs** (measured, iterate grade),
+`max_compute_units = 256` (measured, iterate grade), and the scheduler's
+`KernelHardwareInfo::query_device_multiprocessor_count(0)` returned **32**
+(measured, iterate grade). Level Zero independently reported the same
+8×4×8 = **256 EUs** (measured, iterate grade); it has no
+`max_compute_units` property, and its slices×subslices Xe-core analogue is
+**32** (derived from its measured properties). Thus the affinity mask did not
+reduce the part visible to the scheduler.
+
+`GemmUniversal::get_grid_shape(arguments)` and `GemmKernel::get_block_shape()`
+were printed from this instantiated probe for every cell. The physical grid
+equals the expected data-parallel grid in every case; the local size is
+512×1×1 = **512 work-items** (measured, iterate grade).
+
+| shape | N tiles | M=512 / 1024 / 2048 / 4096: expected grid = launched grid |
+|---|---:|---|
+| qkv‖z | 64 | 2×64 / 4×64 / 8×64 / 16×64 |
+| out/o_proj | 20 | 2×20 / 4×20 / 8×20 / 16×20 |
+| gate‖up | 136 | 2×136 / 4×136 / 8×136 / **16×136 = 2176** |
+| down | 20 | 2×20 / 4×20 / 8×20 / 16×20 |
+| q‖k‖v | 56 | 2×56 / 4×56 / 8×56 / 16×56 |
+| lm_head | 970 | 2×970 / 4×970 / 8×970 / 16×970 |
+
+Each number in the table is measured, iterate grade, except the equality to
+`ceil(M/256)×ceil(N/256)`, which is derived from the measured dimensions.
+There is no under-launch or masked-device defect.
+
+### 2. DPAS - clean
+
+The AOT build was repeated with IGC's shader dump enabled for this probe's
+`GemmUniversal` specialization. The emitted kernel's `.zeinfo` names the
+`MainloopXeL1Staged<2>` / `XE_DPAS_TT<8,float,bf16>` specialization and says
+`has_dpas: true` (source/build artifact verified, iterate grade). Its matching
+vISA dump contains repeated `dpas.bf.bf.8.8 (M1, 16)` instructions (source/build
+artifact verified, iterate grade). DPAS is therefore present in this binary's
+mainloop; it is not the defect.
+
+### 3. Epilogue C traffic - defect found and fixed
+
+The initial alias had the `CollectiveEpilogue` arguments shifted. In
+`IntelXeGeneric` the sequence after `WGTileMNK` is `EpilogueTile, ElementC,
+StrideC, ...`; the original `void, ElementAccumulator, ...` therefore made
+`ElementC = float` (source-verified, iterate grade), rather than making C
+void. This enabled the C-source type path even though the probe supplied
+`beta = 0`.
+
+The one-purpose fix changes that sequence to `void, void, ...`, making
+`ElementC = void`. A new `static_assert` enforces this exact property at
+compile time (source/build verified, iterate grade). `IntelXeGeneric` then
+sets `is_source_supported = false`, so its C-load block is compiled out;
+the output is `D = alpha·A·B` and has no beta/C read path (source-verified,
+iterate grade). No tile, scheduler, mainloop, or compiler setting changed.
+
+### One after-measurement
+
+One complete battery was re-run after that specific correction under the same
+four IGC settings and `ZE_AFFINITY_MASK=1`. All following rates are measured,
+iterate grade; they are a new result, not a replacement for the original
+matrix.
+
+| shape | M=512 | M=1024 | M=2048 | M=4096 |
+|---|---:|---:|---:|---:|
+| qkv‖z | 4.64 | 4.14 | 3.92 | 3.75 |
+| out/o_proj | 11.17 | 4.47 | 4.29 | 3.98 |
+| gate‖up | 4.02 | 3.89 | 3.72 | 3.65 |
+| down | 10.91 | 4.48 | 4.00 | 3.76 |
+| q‖k‖v | 4.51 | 4.32 | 3.93 | 3.77 |
+| lm_head | 3.81 | 3.70 | 3.63 | 3.58 |
+
+At the decisive gate‖up M=4096 cell, **400.331 ms / 3.65 TFLOP/s** before
+(measured, iterate grade) became **399.695 ms / 3.65 TFLOP/s** after
+(measured, iterate grade): −0.636 ms, or −0.159% (derived from
+iterate-grade measurements). All 24 post-fix output pairs were bitwise
+identical and all workspaces were 0 B (measured, iterate grade).
+
+The defect is real and is now prevented, but it does **not** explain the
+3.58-11.17 TFLOP/s result: the post-fix gate‖up rate remains 3.65 TFLOP/s
+(measured, iterate grade). Per the diagnostic rule, no tile or configuration
+sweep was started. The remaining unexplained issue is why an all-grid,
+DPAS-emitting, no-C-read stock GEMM still sustains only this rate.
+
+### Non-record execution note
+
+Before the explicit SYCL target was rebuilt, a top-level build left the old
+probe executable installed; an attempted `--grid-only` invocation therefore
+ran that old full battery with the four IGC variables unset. It was allowed to
+finish and is not quoted, graded, or used anywhere in this record. It does not
+alter either the original measurement or the one post-fix measurement above.
