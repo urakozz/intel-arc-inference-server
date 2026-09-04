@@ -1469,7 +1469,7 @@ fewer position-passes.
 
 | lever | what it is | ms/token | what it costs |
 |---|---|---|---|
-| **the locality ceiling** (`hotkv2`) | every KV access an L1/SLM hit | **−0.579** | a BOUND, not a design. SLM staging is the only mechanism and cannot beat it |
+| **the locality ceiling** (`hotkv2`) | every KV access an L1/SLM hit - a **same-message-count** bound | **−0.579** | a BOUND on locality substitutions only. **Not** a bound on message-eliminating reuse: Task 5's register-packed GQA measured **−1.075** in situ (docs/12) |
 | `exp` removed (`noexp`) | - | −0.553 | **not available.** `exp` is ruled by the rounding discipline and `native_exp` (−0.457) is ruled with it |
 | all wave barriers (`nobar`) | - | −0.600 | **not available.** The cross-subgroup ones are what publish `dot_red` |
 | **transposed KV cache + 64 B K messages** (`kvt_vec2`) | `[head][pos][dim]` and `ushort2` loads | **−0.407** | a cache-layout change in `attn_prep`/`attn_decode` and one reassociation of the K dot |
@@ -1493,6 +1493,24 @@ an eighth of it is, for one layout change, one reassociation and one barrier
 scope, and the remainder needs a different decomposition of the work rather than
 a better version of this one. That is a finding about what NOT to spend spec
 1.6 on, which is what the memo asked the probe to produce.
+
+> **SUPERSEDED - the first half of that diagnosis held and the verdict was
+> falsified, Task 5 (2026-09-04; docs/12, "Work assignment, and why").** "The
+> excess is a message-count problem" was right, and it was the *actionable* half:
+> message count is set by the (position × dim) decomposition **per pass**, and the
+> six GQA q-head passes were six copies of it. Register-packed GQA loads each
+> work-item's 16 K and 16 V wave values into private registers once and serves all
+> six heads from them - no layout change, no reassociation, no barrier-scope
+> change - and measured **−1.075 ms/token** on `attn_decode` in situ (measured,
+> iterate/relative, `--profile --repeats 5`). That is **more than twice** the
+> ~0.45 ms this section called reachable and it beats the `hotkv2` locality
+> ceiling in the table above, because it removes messages rather than making them
+> hit. What survives: message count *within* one pass is still structural, the
+> `hotkv2` row is still a valid bound on same-message-count locality attacks, and
+> the levers priced above are still unspent. What does not: the "**no**" - 1.075
+> of the ~3.1 ms was recoverable, and this section's error was reading "the
+> decomposition is the algorithm's shape" as covering the *number of times* that
+> shape is walked.
 
 **It also removes one candidate from §5.4's residual, without closing it.** The
 memo guessed that the cost outside the kernels grew +57% because "`attn_decode`

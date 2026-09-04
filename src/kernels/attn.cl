@@ -77,28 +77,25 @@
 // That reassociation is a real (last-ulp) change to `attn_part` and `attn_out`,
 // which is why the golden gate is run before and after (docs/14).
 //
-// The q-head loop is the OUTER one, so this kernel reads its block's K and V
-// **six times over** (once per q-head), not once. That is a real cost and it is
-// not hidden: at depth D a layer moves 6·M·D·4·1024 B instead of D·4·1024 B
-// (docs/12-kernels.md, "Traffic per token"). What the (kv-head, block) grid
-// buys against the obvious (q-head, block) alternative - which reads exactly
-// the same bytes - is that the six passes happen **inside one work-group, back
-// to back**, so passes 2..6 are L1/L2 hits by construction rather than by 24
-// independent work-groups happening to land on the same cache at the same time;
-// and it launches 6× fewer work-groups. Reading the block once outright needs
-// the wave's K and V staged in SLM with the q-head loop moved *inside* the wave
-// loop (16 positions × 256 × 2 B × 2 = 16 KB of SLM, six accumulators per
-// work-item). That is the main unmeasured lever on this kernel and it is
-// deferred to Task 9's measurement, not assumed (docs/12-kernels.md,
-// "Rejected, and what was not measured"). **Task 9 measured the retile instead,
-// and the retile is what shipped.** SLM staging stays un-built - and the
-// measurement now argues against it rather than merely deferring it. Fitting
-// the B256/B128 pair as `F + walk` puts the per-launch term that is NOT the
-// block walk at ~223 µs of 370, and the retile has since taken the whole launch
-// to 224 µs; whatever remains is dominated by a term neither the walk nor the
-// q-head reread explains, and SLM staging attacks only the reread. The
-// arithmetic is in docs/12's attn "Measured" section, with the caveat it
-// deserves: four models have died on this kernel already.
+// Register-packed GQA (Task 5) keeps the (kv-head, block) grid but inverts the
+// six q-head walks inside each work-group. For one token, all six q heads occupy
+// qpack (6 KB SLM); then each work-item loads its 16 K values and 16 V values for
+// one wave into private registers once and reuses them for six independent
+// (mx, sm, acc) states. The per-head score fma order, 16-lane tree, online
+// softmax order and V fma order remain exactly as stated below. qpack plus dot_red
+// is 7 KB SLM; K/V are deliberately private rather than staged through SLM. The
+// grid, launch count and module count do not move. docs/12 records the probe and
+// in-situ attribution.
+//
+// **Two separate claims, with separate evidence - do not merge them.**
+//   * *Replay determinism*: `replay_determinism_test` proves the captured list
+//     replays byte-identically. That is necessary but it is NOT evidence of
+//     order preservation - it passed before this change too, and would pass for
+//     any deterministic reassociation.
+//   * *Order preservation*: the evidence is the probe's byte-identity **to the
+//     base kernel's output** (`.superpowers/sdd/2026-08-26-plan5-spec1.7-mbu-push/
+//     task-5-codex-experiment.md:118` - the `greg6` row's "bytes: identical"),
+//     which is a comparison ACROSS the change and is the claim that matters.
 //
 // **attn_reduce: grid (24, M), work-group 256** - one work-group per (q-head,
 // token), work-item `d` owning dim `d` of the 256-wide output. The merge
@@ -402,9 +399,10 @@ __kernel void attn_prep(__global const uint* restrict ctrl,
 // owns accumulator dim `lid`; subgroup `lid/16` owns one position of the wave
 // and its lane `lid%16` sixteen elements of that position's dot.
 //
-// SLM is 2 KB: the q-head staged once per (q-head, token) - all 16 subgroups
-// read the same 256 floats, so staging turns 16 redundant global reads into one
-// - and the 256 lane partials of the score dot.
+// SLM is 7 KB: all six q-heads are staged once per token (6 × 1 KB), then the
+// 256 lane partials of the score dot. K/V never enter SLM: a work-item loads its
+// own 16 K elements and 16 V elements into private registers once per wave, then
+// runs the unchanged per-head dot, tree, online-softmax, and V-FMA sequences.
 // ---------------------------------------------------------------------------
 __attribute__((reqd_work_group_size(WG_DEC, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
@@ -418,7 +416,7 @@ __kernel void attn_decode(__global const uint* restrict ctrl,
   const uint lid = get_local_id(0);
   const uint sgid = lid / SG;                // owns this wave's position sgid
   const uint lane = lid % SG;                // owns 16 elements of that dot
-  __local float qs[HD];                      // the q-head, staged fp32
+  __local float qpack[GQA * HD];             // all six q-heads, staged fp32
   __local float dot_red[WG_DEC];             // [16 subgroups][16 lanes]
 
   const uint pos = ctrl[CTRL_POS];
@@ -426,34 +424,68 @@ __kernel void attn_decode(__global const uint* restrict ctrl,
   if (n_act > M) n_act = M;
   if (n_act == 0) return;
 
-  // **The early-out.** Uniform across the work-group, per BLOCK and not per
-  // token: a block live for any `m` runs for every `m`, and a position past a
-  // given `m`'s causal bound is masked inside the wave. Argued in the header.
+  // The early-out is uniform across the work-group, per block and not per token.
   const uint bstart = blk * ATTN_BLOCK;
   if (bstart >= pos + n_act) return;
 
-  for (uint qhl = 0; qhl < GQA; ++qhl) {
-    const uint qh = j * GQA + qhl;           // GQA 6:1 - q-head qh reads kv-head qh/6
-    for (uint m = 0; m < n_act; ++m) {
-      barrier(CLK_LOCAL_MEM_FENCE);          // the previous (q-head, token) is done with SLM
-      qs[lid] = attn_q[((size_t)m * Q_HEADS + qh) * HD + lid];
-      barrier(CLK_LOCAL_MEM_FENCE);
+  // Invert the former q-head-outer walk: one private K/V wave feeds all six
+  // heads of kv-head j. Each head retains the base kernel's arithmetic order.
+  for (uint m = 0; m < n_act; ++m) {
+    for (uint qhl = 0; qhl < GQA; ++qhl) {
+      const uint qh = j * GQA + qhl;
+      qpack[qhl * HD + lid] = attn_q[((size_t)m * Q_HEADS + qh) * HD + lid];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
 
-      const uint bound = pos + m;            // causal: position p contributes iff p <= bound
-      float mx = -INFINITY, sm = 0.0f, acc = 0.0f;
+    float mx[GQA];
+    float sm[GQA];
+    float acc[GQA];
+    for (uint qhl = 0; qhl < GQA; ++qhl) {
+      mx[qhl] = -INFINITY;
+      sm[qhl] = 0.0f;
+      acc[qhl] = 0.0f;
+    }
 
-      for (uint w = 0; w < WAVES; ++w) {
-        // --- the wave's 16 dots: subgroup sgid owns position `p` -------------
-        const uint p = bstart + w * WAVE_P + sgid;
+    const uint bound = pos + m;              // causal: position p contributes iff p <= bound
+    for (uint w = 0; w < WAVES; ++w) {
+      // Every work-item owns one slice of K and one accumulator dimension of
+      // all 16 V rows. These are exactly the base addresses, loaded once.
+      const uint p = bstart + w * WAVE_P + sgid;
+      ushort kreg[PER_LANE];
+      ushort vreg[WAVE_P];
+      for (uint t = 0; t < PER_LANE; ++t) {
+        const uint d = lane + SG * t;
+        const size_t kidx = ((size_t)p * KV_HEADS + j) * HD + d;
+        kreg[t] = p <= bound ? kv_k[kidx] : (ushort)0;
+      }
+      // The masked slot's weight is already 0; skipping the load as well is what
+      // stops an unwritten cache slot from turning 0·x into a NaN. The register
+      // form does not weaken that: the `(ushort)0` substitute widens through
+      // `bf16f` to exactly `+0.0f`, bit-identical to the base path's literal
+      // `0.0f`, so the V FMA below sees the same operand it always saw.
+      // **`vreg[s]` is consumed UNCONDITIONALLY** by that FMA (the base path's
+      // ternary was at the point of use; here it is at the point of load), so an
+      // editor who makes this load unconditional re-introduces the NaN.
+      // `tests/kernels/attn_ref.h:283-284` states the same invariant and
+      // `attn.cl:11-12` requires the two to be edited together.
+      for (uint s = 0; s < WAVE_P; ++s) {
+        const uint ps = bstart + w * WAVE_P + s;
+        const size_t vidx = ((size_t)ps * KV_HEADS + j) * HD + lid;
+        vreg[s] = ps <= bound ? kv_v[vidx] : (ushort)0;
+      }
+
+      for (uint qhl = 0; qhl < GQA; ++qhl) {
         float a = 0.0f;
         if (p <= bound) {                    // uniform within the subgroup
-          __global const ushort* restrict krow = kv_k + ((size_t)p * KV_HEADS + j) * HD;
           for (uint t = 0; t < PER_LANE; ++t) {          // ascending t, explicit fma
             const uint d = lane + SG * t;                // lanes read 16 consecutive dims
-            a = fma(qs[d], bf16f(krow[d]), a);
+            a = fma(qpack[qhl * HD + d], bf16f(kreg[t]), a);
           }
         }
-        barrier(CLK_LOCAL_MEM_FENCE);        // every read of last wave's dot_red is done
+        // Closes `dot_red` WAR for this head **and** `qpack` WAR across the `m`
+        // loop - at least one of this and the fence at the end of the head loop
+        // must survive.
+        barrier(CLK_LOCAL_MEM_FENCE);
         dot_red[lid] = a;
         barrier(CLK_LOCAL_MEM_FENCE);
         for (uint stride = SG / 2; stride > 0; stride >>= 1) {
@@ -462,50 +494,54 @@ __kernel void attn_decode(__global const uint* restrict ctrl,
         }
 
         // --- the online update, computed redundantly by all 256 work-items ---
-        // Same words, same ascending order, so every work-item holds the same
-        // bits of (mx, sm) and of the 16 weights; nothing is published and no
-        // work-item diverges. `sc` becomes the weights in place.
+        // Ordered exactly as the base path, and redundant for the same reason:
+        // same words, same ascending order, so every work-item holds the same
+        // bits of (mx[qhl], sm[qhl]) and of the 16 weights; nothing is published
+        // and no work-item diverges. `sc` becomes the weights in place. Register
+        // packing makes the six heads' states six private slots instead of one -
+        // it does not make any of them work-item-dependent.
         float sc[WAVE_P];
         for (uint s = 0; s < WAVE_P; ++s) {
           const uint ps = bstart + w * WAVE_P + s;
           sc[s] = ps <= bound ? dot_red[s * SG] * SCALE : -INFINITY;   // causal mask
         }
-        float nmx = mx;
+        float nmx = mx[qhl];
         for (uint s = 0; s < WAVE_P; ++s) nmx = fmax(nmx, sc[s]);
         float resc;
         if (nmx > -INFINITY) {
-          resc = exp(mx - nmx);              // mx = -INF -> 0; mx = nmx -> 1
+          resc = exp(mx[qhl] - nmx);          // mx = -INF -> 0; mx = nmx -> 1
           float ssum = 0.0f;
           for (uint s = 0; s < WAVE_P; ++s) {
-            sc[s] = exp(sc[s] - nmx);        // masked -> exp(-INF) = 0
+            sc[s] = exp(sc[s] - nmx);         // masked -> exp(-INF) = 0
             ssum += sc[s];
           }
-          sm = fma(sm, resc, ssum);
-          mx = nmx;
+          sm[qhl] = fma(sm[qhl], resc, ssum);
+          mx[qhl] = nmx;
         } else {
-          resc = 1.0f;                       // nothing valid yet: skip the wave whole,
+          resc = 1.0f;                        // nothing valid yet: skip the wave whole,
           for (uint s = 0; s < WAVE_P; ++s) sc[s] = 0.0f;   // exp(-INF - -INF) is a NaN
         }
 
-        // --- this work-item's accumulator dim -------------------------------
         float tsum = 0.0f;
         for (uint s = 0; s < WAVE_P; ++s) {   // ascending s, explicit fma
-          const uint ps = bstart + w * WAVE_P + s;
-          // The masked slot's weight is already 0; skipping the load as well is
-          // what stops an unwritten cache slot from turning 0·x into a NaN.
-          const float vf =
-              ps <= bound ? bf16f(kv_v[((size_t)ps * KV_HEADS + j) * HD + lid]) : 0.0f;
-          tsum = fma(sc[s], vf, tsum);
+          tsum = fma(sc[s], bf16f(vreg[s]), tsum);
         }
-        acc = fma(acc, resc, tsum);
-      }
+        acc[qhl] = fma(acc[qhl], resc, tsum);
 
+        // The next head overwrites dot_red. All work-items must finish reading
+        // this head's tree before that can happen.
+        barrier(CLK_LOCAL_MEM_FENCE);
+      }
+    }
+
+    for (uint qhl = 0; qhl < GQA; ++qhl) {
+      const uint qh = j * GQA + qhl;
       __global float* restrict out =
           attn_part + (((size_t)qh * NBLOCKS + blk) * M + m) * PART;
-      out[2 + lid] = acc;
+      out[2 + lid] = acc[qhl];
       if (lid == 0) {
-        out[0] = mx;
-        out[1] = sm;
+        out[0] = mx[qhl];
+        out[1] = sm[qhl];
       }
     }
   }
