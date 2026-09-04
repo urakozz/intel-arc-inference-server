@@ -170,12 +170,38 @@ target_include_directories(buffers_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_
 target_link_libraries(buffers_test PRIVATE b70_runtime b70_l0 b70_model)
 add_test(NAME buffers_test COMMAND buffers_test)
 
+# The five checkpoint-labelled tests below (loader::load, argv[1] or [3])
+# default with no argument to the HF repo id
+# "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ", which loader::resolve_snapshot
+# (src/loader/snapshot.cc) follows through the cache's refs/main pointer -
+# whatever revision the operator downloaded last, not necessarily one this
+# loader accepts: refs/main has pointed at a snapshot whose config.json carries
+# a broken non-exclusion dynamic-quant rule that src/loader/quant.cc correctly
+# refuses (see BENCHMARKS.md). A bare `ctest` must not depend on that pointer,
+# so every add_test below for these five passes a snapshot directory
+# explicitly - resolve_snapshot takes a directory verbatim, bypassing
+# refs/main entirely. Same spirit as tools/probe/run_vllm_gemv_bench.sh's
+# BENCH_SNAP (an overridable default rather than a hardcoded path): here a
+# CMake cache variable (B70_TEST_SNAPSHOT), defaulted to the known-good
+# snapshot 2a9077667e28aa53e61d91bdee5d7962e8674668, resolved against
+# $HF_HOME (or ~/.cache/huggingface) the same way the loader itself does.
+# Override with -DB70_TEST_SNAPSHOT=<dir> at configure time if the operator's
+# cache moves the working snapshot; this never mutates the HF cache itself.
+if(DEFINED ENV{HF_HOME})
+  set(_b70_hf_home "$ENV{HF_HOME}")
+else()
+  set(_b70_hf_home "$ENV{HOME}/.cache/huggingface")
+endif()
+set(B70_TEST_SNAPSHOT
+  "${_b70_hf_home}/hub/models--Vishva007--Qwen3.8-27B-W4A16-AutoRound-GPTQ/snapshots/2a9077667e28aa53e61d91bdee5d7962e8674668"
+  CACHE PATH "Checkpoint snapshot directory the checkpoint-labelled tests load (bypasses refs/main)")
+
 # Needs the real 19 GB checkpoint and a B70: label `checkpoint` so it can be
 # excluded (`ctest -LE checkpoint`) where the model or the card is absent.
 add_executable(load_checkpoint_test loader/load_checkpoint_test.cc)
 target_include_directories(load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(load_checkpoint_test PRIVATE b70_loader b70_model)
-add_test(NAME load_checkpoint_test COMMAND load_checkpoint_test)
+add_test(NAME load_checkpoint_test COMMAND load_checkpoint_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(load_checkpoint_test PROPERTIES LABELS checkpoint TIMEOUT 600)
 
 # Every variant runtime::build binds, by name: a missing .bin is a
@@ -208,7 +234,7 @@ add_executable(replay_determinism_test runtime/replay_determinism_test.cc)
 target_include_directories(replay_determinism_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(replay_determinism_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
 add_dependencies(replay_determinism_test ${B70_DECODE_LIST_KERNELS})
-add_test(NAME replay_determinism_test COMMAND replay_determinism_test)
+add_test(NAME replay_determinism_test COMMAND replay_determinism_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(replay_determinism_test PROPERTIES LABELS checkpoint TIMEOUT 900)
 
 # The same list driven through runtime::Engine - ingestion, greedy generation,
@@ -219,7 +245,7 @@ add_executable(engine_smoke_test runtime/engine_smoke_test.cc)
 target_include_directories(engine_smoke_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(engine_smoke_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
 add_dependencies(engine_smoke_test ${B70_DECODE_LIST_KERNELS})
-add_test(NAME engine_smoke_test COMMAND engine_smoke_test)
+add_test(NAME engine_smoke_test COMMAND engine_smoke_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(engine_smoke_test PROPERTIES LABELS checkpoint TIMEOUT 900)
 
 # The same list captured twice - plain and profiled (plan 4 spec §3.5). It is
@@ -231,7 +257,7 @@ add_executable(profile_capture_test runtime/profile_capture_test.cc)
 target_include_directories(profile_capture_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(profile_capture_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
 add_dependencies(profile_capture_test ${B70_DECODE_LIST_KERNELS})
-add_test(NAME profile_capture_test COMMAND profile_capture_test)
+add_test(NAME profile_capture_test COMMAND profile_capture_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(profile_capture_test PROPERTIES LABELS checkpoint TIMEOUT 900)
 
 # The golden gate (spec §11): the engine against the CPU oracle, 3 prompts x 32
@@ -247,7 +273,7 @@ target_include_directories(golden_gate_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CM
 target_link_libraries(golden_gate_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
 add_dependencies(golden_gate_test ${B70_DECODE_LIST_KERNELS})
 add_test(NAME golden_gate_test COMMAND golden_gate_test
-  ${CMAKE_SOURCE_DIR}/oracle-out ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
+  ${CMAKE_SOURCE_DIR}/oracle-out ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT})
 set_tests_properties(golden_gate_test PROPERTIES
   LABELS "checkpoint;golden" SKIP_RETURN_CODE 77 TIMEOUT 1800)
 
