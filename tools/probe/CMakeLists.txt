@@ -1,3 +1,5 @@
+# SYCL probes (including probe_interop) are built by the icpx-only sub-project
+# src/sycl/CMakeLists.txt, not in this g++-compiled probe target list.
 add_executable(probe_bw probe_bw.cc)
 target_include_directories(probe_bw PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(probe_bw PRIVATE b70_l0)

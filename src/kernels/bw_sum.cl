@@ -2,6 +2,7 @@
 // folds them with XOR; the result is written only if it equals a constant the
 // data almost surely never produces, which keeps the loads live without atomics.
 __attribute__((intel_reqd_sub_group_size(16)))
+__attribute__((reqd_work_group_size(256, 1, 1)))
 __kernel void bw_sum(__global const uint4* restrict in, ulong n_vec,
                      __global uint* restrict out) {
   uint acc = 0u;
