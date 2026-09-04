@@ -46,7 +46,12 @@ anyway.
 
 **What Intel already has, and what it lacks.** `sycl-tla`'s BMG GEMM
 (256×256×32 work-group tile, 32 subgroups, no SLM, 2D block loads, 2-stage
-prefetch) is the exact mainloop vLLM's W4A16 prefill runs. Its FMHA forward
+prefetch) is the same *family* as the mainloop vLLM's W4A16 prefill runs -
+**not the same mainloop**: vLLM takes a mixed-precision variant
+(`MainloopIntelXeXMX16MixedPrecision`, int4 upconverted in-register), while
+the stock bf16 GEMM at our pin is `MainloopXeL1Staged<2>` (plan 6a, read
+from the source at the pinned sha). We take the stock bf16 one because the
+dequant scratch (§3.1) does the upconversion. Its FMHA forward
 has varlen and paged-KV support; the shipped example is head_dim 128 -
 ours is **256**. **There is no chunked GDN kernel in sycl-tla**; vLLM on XPU
 falls through to the Triton reference (`fla_chunk_gated_delta_rule`,
@@ -62,10 +67,16 @@ sampling (`est_ppt = ttfr − probe latency`). A device-side number from this
 spec is therefore a **narrower quantity** and is labelled as such until
 spec 3's server exists.
 
-**One correction to our own record.** `docs/06-prior-art.md` calls oneDNN's
-int4 XPU GEMM closed. It is `gemmstone`, Apache-2.0, checked out at
-`~/PycharmProjects/oneDNN/src/gpu/intel/gemm/jit/`, with a readable
-cost-model kernel selector keyed on `m`. Fixed in §9.
+**An addition to our own record (not a correction - this spec's first
+version said otherwise and was wrong).** `docs/06-prior-art.md:59` already
+names oneDNN's JIT GEMM generator `gemmstone` and calls it "the most
+valuable checkout after `sycl-tla`"; there is no "closed" claim anywhere in
+that file (verified by grep, 2026-09-04). What is genuinely new is the
+**call chain**: vLLM's XPU int4 prefill goes
+`int4_gemm_w4a16` → `dnnl_matmul_w4a16_int4` → oneDNN → `gemmstone`, whose
+cost-model selector is keyed on `m` and therefore picks a different
+microkernel for prefill's M than for decode's M=1. §9 records that
+additively.
 
 ## 2. Goals, bar, stopping rule
 
@@ -366,9 +377,12 @@ which terms are Intel's code running at Intel's rate versus ours.
 interface, attention, GDN chunk mechanism); `docs/15-step-anatomy.md` gains
 the prefill-step anatomy; `docs/01-hardware.md` gains the **measured** XMX
 rate; `docs/04-architecture.md` updated: the SYCL prefill path is now
-real, and `docs/06-prior-art.md`'s "closed oneDNN" corrected to
-`gemmstone`; `docs/BENCHMARKS.md` pp rows with both labels; `docs/05`
-prefill verdict.
+real; `docs/06-prior-art.md` gains the vLLM→oneDNN→`gemmstone` call chain
+**additively** (its `gemmstone` entry is already correct - §1);
+`docs/BENCHMARKS.md` pp rows with both labels; `docs/05` prefill verdict.
+`docs/07-open-questions.md` gains one: the box's driver/IGC stack (26.27 /
+IGC 2.38) is **newer than `sycl-tla`'s validated Xe2 CI matrix** (26.01 /
+IGC 2.27) - found by plan 6a, unpriced.
 
 ## 10. Out of scope
 
