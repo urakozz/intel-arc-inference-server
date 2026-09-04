@@ -119,6 +119,14 @@ quoted against, so the two are comparable.
 
 ## 5. What is the per-kernel fixed cost inside a replayed command list?
 
+### P1 companion measurement (2026-09-05)
+
+This is a different execution model, not a contradiction of the captured-list
+rows below: P1 measured 8.319 µs for one L0 immediate launch, 2.149 µs at 1024,
+9.877 µs for one SYCL in-order launch, and 4.468 µs at 1024 (measured, iterate
+grade). Cross-queue SYCL→L0 wait was 8.569 µs and L0-event→SYCL was 14.797 µs;
+the 384-handoff C=2048 estimate is 3.290 ms (derived).
+
 Measured 2026-08-22 by `tools/probe/probe_replay`: one in-order regular list
 of N launches, closed once, replayed 1000 times behind a fence (median, after
 20 warm-ups).
@@ -285,6 +293,10 @@ Still unknown:
 Cheapest probe: benchmark oneDNN directly at prefill shapes, W4A16 vs W4A8, before
 building anything.
 
+Spec 2 §10 puts this out of scope for the current prefill stage. The atom is
+reachable but OpenCL C builtins compile without lowering on this driver; it is
+not a current work item.
+
 ## 10. Does MXFP4 need original kernel work on Battlemage?
 
 `sycl-tla`'s block-scaled examples are `50_xe35_*` / `51_xe35_*` - Xe3.5, not
@@ -415,3 +427,11 @@ BENCHMARKS.md. Open sub-question: the implied MTP acceptance rate on this
 model is unknown - vLLM's 42.56 / 45.23 at 1 / 2 drafts bounds it from below
 but does not separate acceptance from step cost. Log it from vLLM
 (`--speculative-config` metrics) before sizing the phase-2 ceiling.
+
+## 15. Is the box driver/IGC combination validated for these Xe2 templates?
+
+Open. Stage 0 ran on `libze_intel_gpu.so.1.15.39122`, IGC 2.38.x and ocloc
+26.27, newer than sycl-tla's Xe2 CI combination (Compute Runtime 26.01, IGC
+2.27). P2's AOT-256-GRF GEMM and P4's hdim-256 FMHA launch are the only
+iterate-grade evidence; P5's CuTe header remains blocked by missing PyTorch
+development headers rather than a device compile result.

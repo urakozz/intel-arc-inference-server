@@ -1758,7 +1758,46 @@ The 48 launches cost 35 µs of dispatch (0.733 µs each, derived in situ -
 docs/15), 4.8% of the kernel's own time and 0.08% of the step. Kernel count was
 never the question here either.
 
-## `attn` - decode attention in three kernels
++## Prefill - the Stage 0 probe matrix
+
+grade: iterate (card 1, `ZE_AFFINITY_MASK=1`, card 0 may be held). SYCL
+results use the content-verified `sycl-tla`
+`91e5bd735517d8e79591b41e0d0cd37a7bacdca7`; P5's vLLM checkout is separately
+identified in its record.
+
+| probe | headline result | grade / decision |
+|---|---|---|
+| P1 interop | USM round-trips bit-exact; 8.569 µs SYCL→L0 wait and 14.797 µs L0-event handoff | measured, iterate; interop is viable |
+| P2 GEMM | 164.21 TFLOP/s peak, 89.5% of derived 183.5 TFLOPS | measured / derived, iterate; AOT 256 GRF is mandatory |
+| P3 dequant | 210.116 ms/chunk for settled [K][N] input layout | derived from measured per-matrix times, iterate; write-allocate model |
+| P4 FMHA | VTiles=8: 576.544 ms at C=2048; 775.811 ms at C=4096 over 16 layers | measured host-wall, iterate; timing-only, correctness unfinished |
+| P5 CuTe GDN | torch header dependency blocks the direct header; own GDN estimate 15.365 / 30.474 ms at C=2048/4096 | blocked / estimated, iterate |
+
+### What each probe decided
+
+P1 establishes that the engine's L0 device allocations are usable from the
+in-order SYCL queue on the same context, with handoff cost below the 1% budget;
+see [P1](probe-interop-2026-09-04.md).
+
+P2 establishes the reusable AOT rule: runtime IGC variables did not configure
+the build-time image. Passing 256 GRF to the backend changed the schedule from
+the 128-GRF degenerate path to production-shape rates near the derived peak;
+see [P2](probe-prefill-gemm-2026-09-04.md).
+
+P3 establishes the bf16 scratch orientation the GEMM requires and prices its
+unavoidable dequant work; see [P3](probe-dequant-2026-09-04.md).
+
+P4 establishes that generic hdim-256 FMHA instantiates and launches with the
+engine cache strides. Its wall-time battery is a ceiling input, not a shipping
+selection: packed-cache bit equality and CPU-reference accuracy remain open;
+see [P4](probe-prefill-attn-2026-09-04.md).
+
+P5 establishes that the current Intel header is not a header-only dependency:
+it requires unavailable PyTorch development headers before the raw launcher can
+be compiled. The record prices an own fp32 implementation and retains its
+self-consistency gate; see [P5](probe-gdn-chunk-2026-09-04.md).
+
++## `attn` - decode attention in three kernels
 
 `src/kernels/attn.cl`, three entry points in one file. **16 of the model's 64
 layers** run all three, in order, per token: `attn_prep` → `attn_decode` →
