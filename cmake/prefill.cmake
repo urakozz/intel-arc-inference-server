@@ -23,6 +23,8 @@ set(B70_ICPX "/opt/intel/oneapi/compiler/2026.1/bin/icpx"
     CACHE FILEPATH "oneAPI C++ compiler for the prefill component (docs/10-the-box.md:42)")
 set(B70_PREFILL "AUTO" CACHE STRING "SYCL prefill component: AUTO, ON or OFF")
 set_property(CACHE B70_PREFILL PROPERTY STRINGS AUTO ON OFF)
+option(B70_SYCL_AOT_256_GRF
+       "Pass -cl-intel-256-GRF-per-thread to the SYCL AOT backend" OFF)
 set(B70_SYCL_TLA_SRC_DIR "$ENV{HOME}/sycl-tla"
     CACHE PATH "sycl-tla checkout (read-only); controller-rsynced on the box")
 # 91e5bd7 includes 87f68506, "FIX BMG GEMM Performance regression (#846)".
@@ -80,6 +82,7 @@ if(B70_PREFILL_ENABLED)
       -DB70_L0_LIB=$<TARGET_FILE:b70_l0>
       -DB70_SYCL_TLA_SRC_DIR=${B70_SYCL_TLA_SRC_DIR}
       -DB70_SYCL_TLA_REVISION=${B70_SYCL_TLA_REVISION}
+      -DB70_SYCL_AOT_256_GRF=${B70_SYCL_AOT_256_GRF}
     BUILD_ALWAYS 1
     BUILD_BYPRODUCTS "${B70_PREFILL_LIB}")
   add_library(b70_prefill INTERFACE)
