@@ -13,6 +13,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZE REQUIRED IMPORTED_TARGET level-zero)
 
 include(cmake/ocloc.cmake)
+include(cmake/prefill.cmake)
 
 # Adds -DB70_KERNEL_DIR="<abs path>" so tests and probes can find .bin files.
 function(b70_target_kernel_dir TARGET)
@@ -44,6 +45,13 @@ add_subdirectory(src/model)
 add_subdirectory(src/runtime)
 add_subdirectory(src/kernels)
 add_subdirectory(src/l0)
+# cmake/prefill.cmake is included before subdirectories so tests can consume
+# its helper, while b70_l0 is declared here. Add the ExternalProject dependency
+# only once both targets exist; ExternalProject_Add itself rejects a forward
+# target reference during configure.
+if(TARGET b70_prefill_ext)
+  add_dependencies(b70_prefill_ext b70_l0)
+endif()
 add_subdirectory(tools/probe)
 # After src/kernels: src/cli reads that directory's target list to depend on
 # every compiled device binary.
