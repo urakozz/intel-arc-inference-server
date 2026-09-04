@@ -50,7 +50,9 @@ add_subdirectory(src/l0)
 # only once both targets exist; ExternalProject_Add itself rejects a forward
 # target reference during configure.
 if(TARGET b70_prefill_ext)
-  add_dependencies(b70_prefill_ext b70_l0)
+  # P1 consumes these existing OpenCL binaries through kernels::path(); make
+  # their generation precede the separate icpx build as well as b70_l0.
+  add_dependencies(b70_prefill_ext b70_l0 kernel_noop kernel_ctrl_read kernel_bw_sum)
 endif()
 add_subdirectory(tools/probe)
 # After src/kernels: src/cli reads that directory's target list to depend on
