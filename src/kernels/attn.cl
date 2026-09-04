@@ -482,10 +482,6 @@ __kernel void attn_decode(__global const uint* restrict ctrl,
             a = fma(qpack[qhl * HD + d], bf16f(kreg[t]), a);
           }
         }
-        // Closes `dot_red` WAR for this head **and** `qpack` WAR across the `m`
-        // loop - at least one of this and the fence at the end of the head loop
-        // must survive.
-        barrier(CLK_LOCAL_MEM_FENCE);
         dot_red[lid] = a;
         barrier(CLK_LOCAL_MEM_FENCE);
         for (uint stride = SG / 2; stride > 0; stride >>= 1) {
@@ -528,8 +524,27 @@ __kernel void attn_decode(__global const uint* restrict ctrl,
         }
         acc[qhl] = fma(acc[qhl], resc, tsum);
 
-        // The next head overwrites dot_red. All work-items must finish reading
-        // this head's tree before that can happen.
+        // **The only fence closing the head loop's two write-after-reads, and
+        // it closes both.** (a) `dot_red`: the next head overwrites it, and all
+        // 256 work-items must finish reading this head's tree - including the
+        // cross-subgroup `dot_red[s·16]` reads above - before that happens.
+        // (b) `qpack` across the `m` loop: the last `qpack` read of token `m` is
+        // head 5's score dot, and the first `qpack` write of token `m+1` is the
+        // staging store at the top; this fence lies between them.
+        // A leading fence before `dot_red[lid] = a` closes exactly the same two
+        // and used to be here as well. **At least one of the two must survive.**
+        // The leading one was the one deleted, because it was the redundant
+        // copy: 24 instances per launch. Executed work-group barriers per launch
+        // at M = 1 are now `1 + WAVES·GQA·6` = **145**, against 169 with both and
+        // 156 in the pre-Task-5 kernel.
+        //   It bought **−2.295 µs/launch, −0.037 ms/token** (measured in situ,
+        // iterate/relative, byte-identical output). That is **39% of what
+        // `probe_attn`'s `nobar` row predicted** - 0.242 µs per barrier × 24 =
+        // 5.82 µs/launch - so the fifth model to die on this kernel is
+        // "barriers cost their average": the marginal price of the *redundant*
+        // fence is **0.096 µs**, because the deleted one sat two instructions
+        // before a surviving one and most of the convergence is paid there
+        // anyway. docs/12 records the pair.
         barrier(CLK_LOCAL_MEM_FENCE);
       }
     }
