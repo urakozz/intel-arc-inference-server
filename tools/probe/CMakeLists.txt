@@ -20,6 +20,17 @@ b70_target_kernel_dir(probe_gemv)
 get_property(ALL_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_gemv ${ALL_KERNELS})
 
+# P3 is a plain g++/Level Zero probe: no SYCL dependency and no prefill runtime
+# dependency. It consumes every prefill dequant binary, including both store
+# orientations, as an independent Stage-0 target.
+add_executable(probe_dequant probe_dequant.cc)
+target_include_directories(probe_dequant PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_dequant PRIVATE b70_l0)
+b70_target_kernel_dir(probe_dequant)
+get_property(PF_DEQUANT_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
+             PROPERTY BUILDSYSTEM_TARGETS)
+add_dependencies(probe_dequant ${PF_DEQUANT_KERNELS})
+
 # probe_attn - the memo's §5.2 item: `attn_decode` with one term removed at a
 # time, so what the 224 us/launch buys is a subtraction between measurements
 # rather than a fifth cost model (four have died on that kernel already).
