@@ -85,3 +85,54 @@ the scalar reference before recording timings for C=1024, 2048, and 4096.
 If the generic configuration cannot compile, its first diagnostic and a priced
 own-flash fallback are the complete planned deliverable; no timing sweep occurs.
 
+
+## 2026-09-05 result - generic head_dim 256 builds and launches
+
+Grade: iterate (card 1, `ZE_AFFINITY_MASK=1`, card 0 may be held). The
+source-line audit above was completed before the pre-registration, per ruling
+A11. The build used the AOT 256-GRF backend default and the run exported all
+four prescribed runtime IGC variables.
+
+The generic `FMHAConfigGenWithTileShape` instantiated and its concrete
+`FMHAKernel` compiled and launched on `Context`'s in-order interop queue.
+The real single-launch gate used C=64, depth=4096, 24/4 GQA, bf16 K/V in the
+engine layout, K stride `{1024,1,256,0}`, V stride `{1,1024,256,0}`, and
+the required `compat::set_default_queue`; `can_implement` passed and
+`wait_and_throw` returned (measured build/run outcome, iterate grade).
+
+The first standalone compile exposed a missing
+`cutlass/util/packed_stride.hpp` include and the CuTe host-`printf` macro.
+The example runner then exposed its optional oneMKL random-fill dependency,
+which is not installed on the box. The probe uses the source-verified direct
+FMHA launcher instead; no third-party checkout was changed.
+
+### Timed launch battery
+
+All values are measured, iterate grade. They are host wall time from enqueue to
+the in-order queue drain: eight launches per cell, discarded warm-up launch,
+first three samples discarded, median of the final five. This is **not** a
+device timestamp measurement.
+
+| config | VTiles | C | depth | us/launch | ms x 16 FA layers | % of corrected P2 GEMM chunk |
+|---|---:|---:|---:|---:|---:|---:|
+| 128x32x64 | 4 | 1024 | 4096 | 22903.267 | 366.452 | 97.2% |
+| 256x32x32 | 8 | 1024 | 4096 | 20658.295 | 330.533 | 87.7% |
+| 128x32x64 | 4 | 2048 | 4096 | 40317.177 | 645.075 | 94.9% |
+| 256x32x32 | 8 | 2048 | 4096 | 36034.011 | 576.544 | 84.8% |
+| 128x32x64 | 4 | 4096 | 4096 | 54780.824 | 876.493 | 55.3% |
+| 256x32x32 | 8 | 4096 | 4096 | 48488.216 | 775.811 | 48.9% |
+
+The percentages divide the 16-layer time by P2's corrected all-layer GEMM
+totals of 376.854, 680.062, and 1585.201 ms at C=1024/2048/4096 respectively
+(derived by summing the corrected P2 shape rows). The VTiles=8 control is
+faster in every timed cell (measured, iterate grade), but this is a comparison,
+not a tuning decision.
+
+### Scope limitation
+
+This probe has proved generic compilation, one in-place-stride launch, and the
+timing battery. It has **not yet** completed the required packed-cache
+bit-exact comparison or the scalar-reference error report at C=64/256. Its
+timings are therefore evidence for T6's ceiling only, not an inherited
+correctness decision for L1; the missing checks remain P4 work.
+
