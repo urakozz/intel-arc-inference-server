@@ -128,6 +128,12 @@ totals of 376.854, 680.062, and 1585.201 ms at C=1024/2048/4096 respectively
 faster in every timed cell (measured, iterate grade), but this is a comparison,
 not a tuning decision.
 
+The VTiles=8 build also emitted IGC's compiler warning that the instantiated
+SIMD16 kernel was allocated 256 registers and "spilled around 516" (measured
+build-artifact outcome, iterate grade). Thus its faster host-wall rows are not
+a clean no-spill choice; they must not select a production configuration before
+the missing correctness gates and a device-timestamp attribution are complete.
+
 ### Scope limitation
 
 This probe has proved generic compilation, one in-place-stride launch, and the
@@ -135,4 +141,3 @@ timing battery. It has **not yet** completed the required packed-cache
 bit-exact comparison or the scalar-reference error report at C=64/256. Its
 timings are therefore evidence for T6's ceiling only, not an inherited
 correctness decision for L1; the missing checks remain P4 work.
-
