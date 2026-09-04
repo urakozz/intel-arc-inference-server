@@ -53,8 +53,9 @@ overhead, are the binding constraint (docs/15).
   binary read 264 and 206 µs on consecutive invocations; from ~100 it locks to
   0.25%. `gemv_harness.h`'s 8-replays-drop-3 is the convention (spec-1.6
   stage 0).
-- **L2 absorbs the 6× KV reread** at depth 4096: ~740 GB/s effective over
-  live blocks (docs/12).
+- **L2 absorbed the 6× KV reread** (pre-Task-5; the reread is gone -
+  register-packed GQA, docs/12). ~740 GB/s effective was itself later corrected
+  down (docs/12 §probe finding 4).
 - **Idle (early-out) work-groups cost ~15 ns each** - fixed grids with
   device-side early-out beat context-bucketed command lists at every depth
   measured (docs/07 #12).

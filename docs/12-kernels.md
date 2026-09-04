@@ -1849,28 +1849,57 @@ tokens in flight. Work-item `lid` owns accumulator dim `lid`; within a wave, sub
 `lid/16` owns one KV position and its lane `lid%16` sixteen elements of that
 position's 256-dim dot.
 
-*Why the kv-head and not the q-head.* The q-head loop is the **outer** one, so a
-work-group reads its block's K and V six times over. A (q-head, block) grid
-reads exactly the same bytes - 24 work-groups per block instead of 4, each
-reading the block once - so the choice is not about byte count. It is about
-*when*: under the kv-head grid the six passes happen inside one work-group, back
-to back, so passes 2..6 are L1/L2 hits by construction instead of a bet on 24
-independent work-groups landing on the same cache at the same time. It also
-launches 6× fewer work-groups. What it costs is in "Traffic per token" below,
-and reading the block once outright is the first item in the not-measured list.
+*Why the kv-head and not the q-head.* The grid stays one work-group per
+(kv-head, block), with 4 × MAXLEN/ATTN_BLOCK groups and no extra launch. Production
+now applies register-packed GQA inside that work-group: for one token it stages the
+six q-heads in 6 KB of SLM, and for every 16-position wave each work-item loads its
+own 16 K elements plus its output-dimension V value from all 16 rows into private
+registers once. It then walks six independent (mx, sm, acc) states over that shared
+K/V wave. The per-head score FMA chain remains t = 0..15 ascending, the 16-way
+dot tree remains fixed, and the online-softmax and V FMA chains remain s = 0..15
+ascending; only the order in which independent heads consume an already-loaded wave
+moves. qpack (6 KB) plus dot_red (1 KB) is the kernel's SLM; K/V are not staged
+there and no atomic, grid, reduction order, launch, or module changes.
 
-> **Half of that paragraph is now measured, and the other half is corrected**
-> (`tools/probe/probe_attn`, 2026-08-25 - [15-step-anatomy.md](15-step-anatomy.md),
-> "Spec 1.6 §5.2"). Running 1, 2, 3 and 6 of the six passes and nothing else
-> measures **66.771 / 96.979 / 122.396 / 207.396 µs** per launch: a line through
-> those four points is 39.46 µs + **27.98 µs per pass** and predicts the sixth to
-> 0.04%. Subtracting the 4.167 µs the grid and the q staging genuinely cost
-> leaves the **first** pass at ≈ 62.6 µs against ≈ 28.0 µs for each of the other
-> five - a ratio of **2.24**, which is this paragraph's mechanism, measured for
-> the first time. What the paragraph got wrong is the implication: passes 2..6
-> being cache hits does not make them cheap. **They cost 5 × 27.98 = 139.9 µs,
-> 67% of the launch.** The reread is the largest thing in this kernel and the
-> (kv-head, block) grid makes it *cheaper*, not free.
+**One thing besides the order does move, and it is the barrier count.** Counted
+from the source at M = 1 (derived, exact): the base kernel executed
+`GQA · (2 staging + WAVES · 6 per wave)` = 6 × (2 + 24) = **156** work-group
+barriers per launch; register-packed GQA executes `1 staging + WAVES · GQA · 7`
+= 1 + 168 = **169**. The extra 13 are not free - `probe_attn`'s `nobar` row
+prices a work-group barrier at **0.242 µs** ((207.396 − 172.500) / 144, measured,
+derived per barrier) - and they are accounted for in the −1.075 ms/token the
+change measured net. The count is revisited immediately below.
+
+*Why it pays.* The old q-head-outer walk issued the same K/V messages six times.
+The private-register inversion issues them once and reuses the retained values for
+the other five heads, avoiding both six-pass message issue and an SLM K/V round
+trip. The controlled probe measured greg6 at 139.792 µs/launch versus 206.354 for
+base: **−66.562 µs/launch, −1.065 ms/token over 16 launches** (measured,
+device-clocked probe). The production transfer is **measured, iterate/relative
+grade** on the shared box with the fixed Vishva007 snapshot and
+`--profile --depth 4096 --steps 32 --repeats 5`: `attn_decode` **228.024 →
+160.829 µs/launch** (−67.195), which is **−1.075 ms/token** over the 16 launches
+(the acceptance quantity: 3.648 → 2.573 ms/token, clearing the 0.820 floor by
+0.255). The production launch saved 67.195 against the probe's 66.562 - a
+**0.633 µs/launch** difference, i.e. **0.28% of the launch**, against the
+±2.3-4.1% the untouched control kernels drifted between the same two runs (±5.2
+to ±9.4 µs on a 228 µs launch). Probe and production agree to the limit of this
+protocol.
+
+*Why the attribution is `attn_decode` alone, and not the family net.* The other
+two kernels of the trio are **byte-identical and untouched** by this change, and
+Task 5 moves neither `ATTN_BLOCK`, nor `nb`, nor the `attn_part` layout, so it
+cannot causally move work into or out of them. Their before/after rows are
+therefore a **drift control, not a saving**: `attn_reduce` 194.841 → 186.954
+(−7.887 µs/token, −4.1%) and `attn_prep` 52.839 → 54.078 (+1.239, +2.3%) -
+run-to-run noise of ±4% on kernels that did not change, against the 0.284%
+(10.4 µs/token) session σ the same profile reports for `attn_decode`. Banking the
+favourable one of those two would inflate the claim to 1.082 ms/token; the honest
+figure is **1.08 ms/token, ±0.01 run-to-run**. Lever L5's precedent of judging on
+the attn FAMILY's net (the `attn.cl` header) does **not** transfer: L5 causally
+moved work into `attn_reduce` by quartering the block (`nb` 17 → 65, and that
+kernel went 80.241 → 196.195 µs/step), so the family net was the only honest
+boundary there. Task 5 moves no work between kernels.
 
 *Why the lane index picks the dim within a position, and not the position.* At a
 fixed `t` the 16 lanes of a subgroup read `kv_k[p][j][lane + 16t]` - 16
@@ -1893,14 +1922,38 @@ inputs in an identical order give identical bits, so nothing has to be published
 and no work-item diverges. That is cheaper than electing one work-item to
 compute the scalars and broadcast them, which would cost a barrier per block.
 
-**`zeinfo`** (the compiler's own report, `-device bmg-g31`): `attn_prep`
-`simd_size 32, slm_size 2048, grf_count 128, barrier_count 1`; `attn_decode`
-`simd_size 16` (the `intel_reqd_sub_group_size(16)` in the source, honoured),
-`slm_size 2048, grf_count 128, barrier_count 1`; `attn_reduce` `simd_size 32,
-slm_size 512` (at `MAXLEN = 16384`: 64 blocks × 2 headers), `grf_count 128`.
-**None of the three has a `private_size` or a `spill_mem_size` entry** - the
-16-float `sc[]` array each `attn_decode` work-item carries through a wave stays
-in registers, which was this kernel's one real register risk.
+**`zeinfo`** (the compiler's own report, `-device bmg-g31`). **`attn_decode`'s row
+is withdrawn and re-measured; the other two rows stand, unchanged by Task 5** -
+`attn_prep` and `attn_reduce` are byte-identical across the change, and a
+controlled re-compile of the base source with the same ocloc invocation confirms
+their rows did not move. Both columns below are **measured** (one `ocloc compile`
+per column of `src/kernels/attn.cl`, no device time; `M=1, MAXLEN=16384,
+ATTN_BLOCK=64`, which is the binary the engine binds):
+
+| kernel | base (`7be8b6a`) | register-packed GQA |
+|---|---|---|
+| `attn_prep` | simd 32, slm 2048, grf 128, barrier 1 | **unchanged** |
+| `attn_decode` | simd 16, slm **2048**, grf 128, barrier 1, no `private_size` | simd 16, slm **7168**, grf 128, barrier 1, **`private_size: 1152`** |
+| `attn_reduce` | simd 32, slm **2048**, grf 128, barrier 1 | **unchanged** |
+
+Three things to read off it. **(1)** `attn_decode`'s `slm_size 7168` confirms the
+source arithmetic exactly - `GQA · HD · 4 + WG_DEC · 4` = 6144 + 1024 = 7168 B
+(six 256-float q heads plus the 256-float dot tree), against the 64 KB a
+work-group may have. **(2) There is no `spill_mem_size` entry on any of the three,
+in either column** - the register-pressure worry (`kreg[16]` + `vreg[16]` as
+ushorts, `sc[16]`, and `mx`/`sm`/`acc` × 6, which is 50-66 dwords per lane against
+64 at SIMD16/128 GRF) did **not** turn into spill, and `grf_count` stayed 128.
+**(3) But the base row's stronger claim does not carry:** `private_size: 1152`
+appears where the base had no entry at all, so something in the wave's private
+arrays is memory-backed rather than register-resident. 1152 B is per the
+compiler's own unit and this document does **not** claim to know whether that is
+per thread or per work-item, nor how much traffic it generates - only that
+"nothing is memory-backed" is no longer true, which is why the traffic floor in
+"Traffic per token" below carries an explicit exclusion for it. `attn_reduce`'s
+`slm_size` was quoted as **512** in this document until now; that was the
+pre-L5 value (`ATTN_BLOCK` 256 → NBLOCKS 64 → 64 blocks × 2 headers × 4 B). At
+the shipped block size it is 256 × 2 × 4 = **2048 B**, in both columns, so the
+512 was stale from lever L5 and not from Task 5.
 
 ### The early-out - the answer to a grid that cannot be re-sized
 
@@ -2176,15 +2229,21 @@ swept `ATTN_BLOCK` over four values. The two items that were *the* open levers
 measurement said, and the numbers themselves are in "Measured - lever L5".
 
 - **SLM-staged K/V tiles instead of direct loads - spec 1.5's lever L5 as the
-  plan wrote it. NOT BUILT, and the measurement now argues against it rather
-  than merely deferring it.** As built, the q-head loop is outer and a
-  work-group reads its block's K and V six times (next section). Moving the
-  q-head loop *inside* the wave loop and staging the wave's 16 K rows and 16 V
-  rows in SLM (16 × 256 × 2 B × 2 = 16 KB, plus six q-heads staged = 6 KB, plus
-  the existing 1 KB tree) would read them once outright, at the cost of six
-  accumulators and six `(mx, sm)` pairs per work-item instead of one. The
-  per-q-head arithmetic and every stated order would be unchanged, so the
-  reference would not move.
+  plan wrote it. PARTLY BUILT - as registers, not SLM.** L5's loop inversion and
+  its six-accumulator / six-`(mx, sm)` cost **shipped in Task 5**; what remains
+  unbuilt is only its 16 KB SLM K/V staging *medium*. And the `gpack6`-vs-`greg6`
+  probe pair now prices that medium directly: **9.687 µs/launch against SLM**
+  (149.479 for the SLM-staged form versus 139.792 for the private-register form,
+  measured, device-clocked probe). So the rejection below is a rejection of the
+  storage choice, not of the inversion. Task 5 keeps K/V private, removes the
+  five repeated global-message walks, and preserves the same per-head arithmetic;
+  it measured **−1.075 ms/token** on `attn_decode`, iterate/relative, in situ.
+  Before Task 5, the q-head loop was outer and a work-group read its block's K
+  and V six times. Moving it inside the wave loop and staging the wave's 16 K rows
+  and 16 V rows in SLM (16 × 256 × 2 B × 2 = 16 KB, plus six q-heads staged =
+  6 KB, plus the existing 1 KB tree) would have read them once outright, at the
+  cost of six accumulators and six (mx, sm) pairs per work-item instead of one -
+  and that is what shipped, minus the 16 KB.
 
   **What ruled it out was the block sweep below, not an argument.** Lever L5
   was executed as an `ATTN_BLOCK` retile - the cheaper half of the same attack
@@ -2202,29 +2261,34 @@ measurement said, and the numbers themselves are in "Measured - lever L5".
   and six `(mx, sm)` pairs per work-item. Worth revisiting only after a probe
   names what the other ~200 µs of the launch actually is.
 
-  > **The probe was run; this paragraph's BOUND was right and its reasoning was
-  > half wrong** (`probe_attn`, 2026-08-25;
-  > [15-step-anatomy.md](15-step-anatomy.md), "Spec 1.6 §5.2"). The 6× reread is
-  > **not** a fraction of a fraction: it is **139.9 µs of a 207.4 µs launch
-  > (67%)**, measured on the q-head axis. But staging cannot collect that, and
-  > the number that says so is `hotkv2` - the same kernel with the same
-  > **message count** and every KV access L1-resident, which is the best any
-  > staged version can be. It measures **173.750 µs, −16.2%**, so
-  > **0.579 ms/token is the ceiling for every locality attack on this kernel**,
-  > staging included, before staging's own 16 KB of SLM per work-group and 16 KB
-  > per wave of SLM writes are subtracted. **That lands inside the 0.3-0.6
-  > ms/token this paragraph bounded staging at off the block sweep** - the
-  > extrapolation was right and the probe confirms it.
+  > **Historical probe result - superseded for reuse mechanisms** (`probe_attn`,
+  > 2026-08-25; [15-step-anatomy.md](15-step-anatomy.md), "Spec 1.6 §5.2"). The
+  > 6× reread is **not** a fraction of a fraction: it is **139.9 µs of a 207.4
+  > µs launch (67%)**, measured on the q-head axis. `hotkv2` holds the kernel's
+  > existing **message count** while making every KV access L1-resident, and
+  > measures **173.750 µs, −16.2%**. Its **0.579 ms/token** extrapolation is
+  > therefore a ceiling only for cache-residency substitutions that retain that
+  > message count; it is not a ceiling for reuse mechanisms that remove the five
+  > duplicate global walks. **Mind the two derivation conventions in this
+  > sentence:** the 0.579 is a **share transfer** (16.2% × the 3.571 ms/token
+  > row, this section's stated convention), while the later probes `gpack6`
+  > (0.910) and `greg6` (**1.065**, both **probe-delta × 16 launches**, against
+  > `hotkv2`'s 0.538 on that same delta basis) invalidated that broader reading.
+  > Task 5 ports `greg6` as private-register reuse rather than SLM staging.
+  >
+  > **The 0.579 figure lands** inside the 0.3-0.6 ms/token this paragraph bounded
+  > the same-message-count locality substitute at off the block sweep. That
+  > historical bound does not govern the current message-eliminating port.
   >
   > The reason the reread is expensive is not that it misses: it is that
   > **39.2% of the launch is the load messages themselves** (`hotkv2` −
-  > `noloads` = 81.354 µs), and staging issues the same number of them from SLM
-  > instead of from L1. **The ruling is unchanged and its basis is now a
-  > measurement.**
+  > `noloads` = 81.354 µs). That explains the historical ruling only for the
+  > same-message-count substitute; the production register-packed path removes
+  > duplicate global messages instead.
   >
   > *A correction inside the correction, recorded because it changed the
   > answer:* the first version of this note quoted `hotkv` (−30.9%) and a
-  > 1.108 ms ceiling. `hotkv` holds the hot address **loop-invariant in the wave
+  > 1.108 ms same-message-count locality ceiling. `hotkv` holds the hot address **loop-invariant in the wave
   > index**, which IGC hoisted for the V load - `hotkv2`, whose row is a
   > function of `w`, measures 173.750 against `hotkv`'s 141.146. The
   > uncontrolled rows are withdrawn and the ceiling above is the controlled one.
@@ -2295,48 +2359,63 @@ measurement said, and the numbers themselves are in "Measured - lever L5".
 
 ### Traffic per token (arithmetic, not a measurement)
 
-At context depth `D`, per FA layer, M = 1. The KV cache is the whole story and
-the 6× is the q-head loop being outer:
+At context depth `D`, per FA layer, M = 1. Register-packed GQA makes the global
+K/V traffic equal to the unique-KV floor: the five old rereads are removed rather
+than merely made cache-resident.
 
 | item | per layer at `D` | at `D` = 4096 |
-|---|---|---|
-| `kv_k` + `kv_v` read by `attn_decode` (6 q-head passes) | `6·D·4·1024 B` | **100.7 MB** |
-| - of which *unique* (what a staged version would read) | `D·4·1024 B` | 16.8 MB |
+|---|---|---:|
+| `kv_k` + `kv_v` read by register-packed `attn_decode` | `D·4·1024 B` | **16.8 MB** |
+| - pre-`greg` q-head rereads removed | `5·D·4·1024 B` | **83.9 MB avoided** |
 | `attn_part` written then read | `2 · 24 · (D/64) · 258 · 4 B` | **3.17 MB** |
-| `attn_q` read by `attn_decode` (staged once per q-head per block) | `24 · (D/64) · 1 KB` | **1.57 MB** |
+| `attn_q` read by `attn_decode` (all six heads staged once per token/block) | `24 · (D/64) · 1 KB` | **1.57 MB** |
 | `attn_prep`: partials read, `attn_q`/`attn_gate`/KV written | ~110 KB | 0.11 MB |
 | `attn_reduce`: `attn_gate` read, `attn_out` written | ~37 KB | 0.04 MB |
 
-**≈ 102 MB per layer, 1.63 GB per token across the 16 FA layers** - against a
-*unique*-KV floor of 268 MB per token, which is the 1.7% of `W` doc 03 predicted
-("KV and state sizes at the benchmark shape"). The gap between those two numbers
-is the reread, and how much of it reaches DRAM is a cache question: **the card
-has 24 MB of L2** (doc 01), one FA layer's whole KV at `D` = 4096 is 16.8 MB, and
-at that depth **260** of the grid's work-groups survive the early-out, holding
-**64 KB** of block each - 16 MB resident, the same total, since the resident set
-is the live KV and the block size only decides how it is cut up. So at the
-benchmark depth the reread should be almost entirely L2-served, and at `max_len`
-16384 (64 MB of live blocks) it cannot be.
+**≈ 21.7 MB per layer, 346.7 MB per token across the 16 FA layers** - arithmetic,
+not a timing, and **it excludes any compiler private-memory traffic**. That
+exclusion is not hypothetical: the fresh `zeinfo` above reports
+`private_size: 1152` on register-packed `attn_decode` where the base kernel had no
+such entry, so some of the wave's private arrays are memory-backed. There is no
+`spill_mem_size` on any of the three kernels in either column, so this is not
+spill - but the 21.7 MB is a floor on the *addressed* buffers only, and this
+document does not claim to have measured what the private memory costs.
 
-**Resolved against, 2026-08-25 (spec 1.5 lever L5).** This paragraph closed by
-saying which regime the step lands in "is exactly what Task 9 has to measure
-before the staged variant above is worth building". Task 9 measured it, and the
-answer made the staged variant moot rather than justified: the L5 sweep bounds
-everything still walk-shaped in a launch at ~0.3-0.6 ms/token (see "Rejected"
-above), and staging attacks a subset of that. The 6× reread is real and it is
-mostly L2-served at this depth, exactly as this paragraph guessed - it is simply
-not where the time goes.
+The production change removes the 83.9 MB/layer read-message path, but its
+measured benefit is **not** derived from bytes: the fixed-checkpoint, five-repeat
+profile records **−1.075 ms/token on `attn_decode`** (measured, iterate/relative)
+in "Work assignment, and why" above.
 
-**Corrected on its last clause, 2026-08-25 (`probe_attn`).** The reread being
-cache-served is confirmed - the first q-head pass costs 2.24× the other five -
-but "not where the time goes" is wrong: **it is exactly where the time goes.**
-The five re-read passes are **139.9 µs of a 207.4 µs launch (67%, measured)**,
-and the KV load path as a whole is **55.4%** of it (`noloads`: 92.396 µs against
-207.396). What the paragraph should have said, and what the probe measures, is
-that the reread is expensive *despite* being cache-served, because the cost is
-the **32-byte load messages** - 3.19 M of them per launch, **39.2% of the launch
-on their own** - and a cache hit issues one just like a miss does. Full
-arithmetic in [15-step-anatomy.md](15-step-anatomy.md), "Spec 1.6 §5.2".
+> **Superseded in place, Task 5 - the measured analysis this section used to
+> carry.** Before register-packed GQA the top row was `6·D·4·1024 B` =
+> **100.7 MB per layer, 1.63 GB per token**, against the same *unique*-KV floor
+> of 268 MB per token (the 1.7% of `W` doc 03 predicted). The gap was the 6×
+> q-head reread, and the section's original question - how much of it reached
+> DRAM - was answered twice and is kept because the second answer is still the
+> live one about **message count**, which register packing is precisely what
+> removed:
+>
+> * *First answer (2026-08-25, lever L5).* The card has 24 MB of L2 (doc 01) and
+>   one FA layer's whole KV at `D` = 4096 is 16.8 MB, so at the benchmark depth
+>   the reread was almost entirely L2-served; at `max_len` 16384 (64 MB of live
+>   blocks) it could not be. The L5 sweep bounded everything still walk-shaped in
+>   a launch at ~0.3-0.6 ms/token, and the conclusion drawn was that the reread
+>   "is not where the time goes".
+> * *Second answer, and the correction that mattered (2026-08-25, `probe_attn`).*
+>   That last clause was **wrong**: the reread is exactly where the time went.
+>   The five re-read passes are **139.9 µs of a 207.4 µs launch (67%, measured)**
+>   and the KV load path as a whole is **55.4%** of it (`noloads`: 92.396 against
+>   207.396 µs). The reread was expensive *despite* being cache-served, because
+>   the cost is the **32-byte load messages** - **3.19 M of them per launch,
+>   39.2% of the launch on their own** - and a cache hit issues one just like a
+>   miss does. Full arithmetic in [15-step-anatomy.md](15-step-anatomy.md),
+>   "Spec 1.6 §5.2".
+>
+> Task 5 acts on the second answer rather than the first: it does not make the
+> duplicate messages cheaper, it stops issuing them. The 3.19 M / 55.4% / 39.2%
+> figures stand as the **pre-Task-5** measurement of the launch they were taken
+> on, and they are quoted identically at "`probe_attn` names the launch's
+> dominant term" below and in docs/15.
 
 Launches: **3 per FA layer × 16 layers = 48 per token**, ~25 µs at the measured
 0.52 µs floor (doc 07 #5) - the same order as `gdn_step`'s 48, and the reason
@@ -2365,9 +2444,11 @@ from depth `D` walks `pos = D … D+255`:
 | depth 64, `--max-len 4096` (4 × 16 grid) | 64…319 | same 1.25 | **1.25** | 39.951 |
 
 **1. A live 256-position block costs ≈ 0.1361 ms/token - estimated, from a
-two-point line.** (42.141 − 39.997) / (17.00 − 1.25) = 2.144 / 15.75. Across
+two-point line.** **Measured before Task 5, on the six-pass kernel.**
+(42.141 − 39.997) / (17.00 − 1.25) = 2.144 / 15.75. Across
 all 16 FA layers a block is 6.29 MB × 16 = 100.7 MB of KV reads (the 6× q-head
-reread in the table above), so 0.1361 ms implies **740 GB/s** - *above* the
+reread that Task 5 removed; 16.8 + 83.9 MB in the table above), so 0.1361 ms
+implies **740 GB/s** - *above* the
 590 GB/s `probe_bw` measures. That is the L2 question this section left open,
 answered in the direction it guessed: **the 6× reread is substantially
 cache-served**, as predicted for the depth-4096 regime where one layer's live
@@ -2440,6 +2521,12 @@ retile was predicted from and then falsified against** ("Measured - lever L5"):
 | depth 64, `--max-len 16384` | 1 | 4 | 65 | **153.608** | 2.458 |
 | depth 64, `--max-len 4096` | 1 | 4 | 65 | **153.665** | 2.459 |
 
+**The five findings below are the PRE-TASK-5 record**, measured on the six-pass
+q-head-outer kernel at `ATTN_BLOCK` 256, and every present-tense sentence about
+the 6× q-head reread in them describes a kernel that no longer rereads: Task 5's
+register-packed GQA removed the five duplicate walks ("Work assignment, and why").
+They are kept because what they *falsified* still stands.
+
 1. **The early-out is free, re-confirmed on the kernel itself.** Rows 3 and 4
    differ by 192 idle work-groups per layer and by **0.04%** - inside the noise
    of a run whose whole-step spread is 0.47%. Doc 07 #12 got this from a
@@ -2475,9 +2562,12 @@ retile was predicted from and then falsified against** ("Measured - lever L5"):
    > 32-byte load messages themselves.** `F ≈ 90.8 µs of fixed cost` is also
    > gone: everything genuinely fixed per launch measures **2.0%**.
 4. **It is not bandwidth-bound, and the L2 reading above needs correcting.**
-   The effective rate rises with depth: 10.4 GB/s at `nb` = 1, 74.5 at `nb` = 5,
+   (Pre-Task-5: every rate here counts the six-pass kernel's traffic.)
+   The effective rate rose with depth: 10.4 GB/s at `nb` = 1, 74.5 at `nb` = 5,
    **278.6 at `nb` = 17** (47% of the measured 590) counting the 6× q-head
-   reread; the *unique* 16.8 MB at depth 4096 is **46 GB/s**. The inference above
+   reread that Task 5 has since removed; the *unique* 16.8 MB at depth 4096 was
+   **46 GB/s**, and after register packing the unique figure is the *only* one.
+   The inference above
    ("0.1361 ms implies 740 GB/s … the 6× reread is substantially cache-served")
    had the right direction - 46 GB/s of unique traffic cannot be DRAM-limited -
    but the wrong magnitude, because the 0.1361 ms it rested on is 35% below the
@@ -2716,22 +2806,25 @@ the weakest of the four - it carries +32 floats per lane of register pressure.)
 > `hotkv2` reads **173.750**. `hotk`/`hotv`/`hotkv` are **withdrawn**, and with
 > them the 30.9% / 24.4% split an earlier draft of this section carried.
 
-Two consequences for this chapter's design notes, both folded into the sections
-above: the 6× q-head reread costs **139.9 µs, 67% of the launch** (it is
-cache-served and expensive anyway, because a hit issues a 32-byte message just
-like a miss does), and the **fixed** per-launch cost this project looked for
-since docs/15 §2 is **4.167 µs, 2.0%** - the 1024-work-group grid alone is
-1.667 µs, **1.63 ns per work-group**, nine times cheaper than the ~15 ns this
-chapter estimated for an early-outed work-group.
+**Historical probe consequence, before Task 5.** The six q-head rereads cost
+**139.9 µs, 67% of the 207.4 µs probe launch** despite cache service, because a
+cache hit still issues a 32-byte message. Register-packed GQA now removes those
+five repeat walks in production; its direct measured transfer is recorded in
+"Work assignment, and why", rather than inferred from this historical share. The
+fixed per-launch cost the probe found remains **4.167 µs, 2.0%**; the 1024-work-group
+grid alone was 1.667 µs, **1.63 ns per work-group**.
 
 **What is reachable, measured, and what it costs.** Shares are measured; the
 ms/token column is **derived and assumes the probe's share transfers to the live
 launch**, which sits 7.6% above the probe floor with that offset unplaced - read
-each row as "the probe's share × the 3.571 ms/token row", not as a promise.
+each row as "the probe's share × the 3.571 ms/token row", not as a promise. (That
+3.571 is the **2026-08-25 in-situ row**; the Task-5 before-profile on Vishva007
+reads **3.648**, a different session and a different checkpoint. Both are quoted
+in this chapter and they are not the same measurement.)
 
 | change | ms/token | arithmetic risk |
 |---|---|---|
-| every KV access an L1/SLM hit - the bound, not a design | −0.579 | - (a ceiling: SLM staging is the only mechanism and cannot beat it) |
+| every KV access an L1/SLM hit - a **same-message-count** bound (`hotkv2`) | −0.579 | - (**not** a bound on message-eliminating reuse: Task 5's register-packed GQA measured **−1.075** in situ) |
 | a `[head][pos][dim]` KV cache **and** 64 B K load messages | −0.407 | one reassociation of the K dot |
 | - the transposed cache alone | −0.268 | **none** |
 | - 64 B K messages alone | −0.386 | one reassociation of the K dot |
