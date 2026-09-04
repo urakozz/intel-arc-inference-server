@@ -56,3 +56,61 @@ If the header needs torch, cannot compile against the pinned headers, or cannot
 be adapted with O(state) relayout, P5 records the first diagnostic and the
 priced own implementation as its complete deliverable.
 
+
+## 2026-09-05 result - blocked by an unconditional PyTorch header
+
+Grade: iterate (card 1, `ZE_AFFINITY_MASK=1`, card 0 may be held). The
+compile-only target was attempted through `tools/box.sh build` against the
+actual box checkout `5085fddea4350d16426300f1b7467e24bf5e3f83`.
+
+The first diagnostic was:
+
+```text
+/home/user/vllm-xpu-kernels/csrc/xpu/gdn_attn/xe_2/chunk_gated_delta_rule_kernels_xe2.hpp:5:10:
+fatal error: 'torch/all.h' file not found
+#include <torch/all.h>
+         ^~~~~~~~~~~~~
+```
+
+This is Step 2 branch (b). The header's raw-pointer
+`gdn::kernel_launcher` is not separable from its torch-facing entry point in
+this revision: `torch/all.h` is unconditionally included before
+`gemm.hpp`, the raw launcher, or `csrc/utils.h`. Per the planned retry, a
+local, include-path-precedent `csrc/utils.h` shim supplying only
+`vllm::xpu::is_bmg()` was added. The second build produced the same first
+`torch/all.h` diagnostic. No PyTorch installation, checkout mutation, or
+header-copying workaround was attempted.
+
+The optional `probe_gdn_chunk` target is therefore gated by
+`B70_P5_CUTE_GDN=OFF` by default. Enabling it reproduces the diagnostic;
+leaving it off preserves the ordinary prefill build and test suite. This is a
+blocked P5 deliverable, not a throughput or numerics measurement.
+
+## Priced own implementation - estimate for the ruling request
+
+All costs in this section are estimated or derived, iterate grade; none is a
+P5 measurement.
+
+| term at C=4096 | price | grade |
+|---|---:|---|
+| batched depthwise 4-tap conv, 48 layers | 8.06 GB / 590 GB/s = 13.7 ms | derived lower bound |
+| one 64x128x128 bf16 GEMM per head/chunk across 48 layers | 6.442 GFLOP / 164.21 TFLOP/s = 0.039 ms | derived lower bound using corrected P2 peak cell |
+| three such GEMM-shaped passes (A/W/U lower-bound proxy) | 0.118 ms | derived estimate |
+| chunk-to-chunk state scan, one layer | 64 x 3.15 MB / 590 GB/s = 0.341 ms | derived lower bound |
+| chunk-to-chunk state scan, 48 layers | 16.4 ms | derived lower bound |
+| state transpose at one chunk boundary, all layers | 151 MB / 590 GB/s = 0.256 ms | derived lower bound |
+
+The intra-chunk price is explicitly a lower bound: the source's inverse and
+triangular work is not a count of exactly three GEMMs, and its vector-fp32
+component must be measured in an own kernel. The table is sufficient to show
+the design shape, not to promise a replacement rate.
+
+An own implementation needs: (1) batched causal depthwise conv seeded from the
+ring's final three values and writing the last three values back; (2) a
+64-token fp32 GDN block using cumulative gates, K·K^T, triangular solve, and
+W/U recompute; (3) a sequential 64-step chunk scan over the fp32
+`[48][128][128]` state; and (4) O(state) K-major/V-major transposes at the
+boundary. It remains a correctness problem first: the required acceptance
+measurement is the `gdn_ref::step` 4096-position state/output band. Estimate:
+8-12 engineer-days before that gate, then a separate performance measurement.
+
