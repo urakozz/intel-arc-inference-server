@@ -567,3 +567,176 @@ the last code commit: **774 kernels / 19 modules**, `kernel_table_test`,
 Box: `ZE_AFFINITY_MASK=1` for every piece of device work except the
 series-continuous `--pp` and decode bench rows; 84 GB free; any disk error stops
 the task.
+
+## 4. RESULT - the DPAS scan is 3.997× and its time bar is HIT; it is REVERTED on the token gate
+
+Everything in this section was measured after §3 was committed at `9de7783`.
+Kernel at `src/kernels/prefill/pf_gdn_scan.cl`, reference edited with it at
+`tests/prefill/gdn_chunk_ref.h`. **The mapping was not iterated: §3.3's text is
+what was built and every number below is that build's first and only
+measurement.**
+
+### 4.1 Time, and the decision-rule verdict on time
+
+`ZE_AFFINITY_MASK=1 B70_PREFILL_PROFILE=1 b70-decode <RTN> --bench --pp 4096
+--tg 8`, one run, **measured** (81.5 ms over 96 waits):
+
+| | measured | |
+|---|---:|---|
+| `pf_gdn_scan` (DPAS), ms per GDN layer per chunk | **0.8491** | |
+| the same before the rewrite, A27's own figure | 3.3273 | **3.919×** |
+| the same before the rewrite, this session's control (§0) | 3.3937 | **3.997×** |
+| **pre-registered bar** | ≤ 1.0 | **HIT** |
+| point estimate | 0.45 | missed by 1.89× |
+| rate on 9.66 GFLOP/layer/chunk (derived) | **11.38 TFLOP/s** | was 2.90 |
+
+**On time alone this is an adopt.** The 1.89× between 0.45 and 0.8491 is the
+latency/barrier term §3.6 named and priced but under-priced: at 34.5× fewer
+instructions between the same 3 barriers per sub-chunk, and with 32 serially
+dependent sub-chunks per work-group on a 1.5-wave launch, the kernel issues at
+an effective ~0.11 instructions/XVE/clock against A27's 0.52 (derived from
+365 × 32 × 3072 / 0.8491 ms = 4.22e10 /s against 7.17e11 XVE-clocks/s). The
+DPAS pipe itself accounts for 0.029 ms of the 0.8491 - **3.4%** - so this kernel
+is not compute-bound on DPAS and a further tile change would not help it.
+
+Nothing else moved by more than session drift (measured, same run): `pf_gdn_A`
+0.3317 (+0.8% vs the item-0 run), `pf_gdn_A2` 0.3482 (+0.7%), `pf_gdn_wu`
+0.9412 (+0.7%), `pf_gdn_conv` 0.3304 (+0.4%), `pf_gdn_solve` 0.8044 (+1.4%),
+`gemm` 2.7499 (+1.2%). Profiled walk **2860.0 → 2636.9 ms**; the same process's
+own plain companion figure was 2784.7 ms (one run, **not** a `--pp` row - no
+8-run median was taken for this kernel, because it does not ship).
+
+### 4.2 The assembly, confirmed
+
+`ocloc` on the committed `.cl` with `IGC_ShaderDumpEnable=1` (**measured**
+compiler artifact):
+
+| | `pf_gdn_scan` (DPAS) | `pf_gdn_scan_vec` (A27's) |
+|---|---|---|
+| `has_dpas` | **true** | absent |
+| `dpas.8x8 (16\|M0)` in the Xe2 ISA | **28 static instructions** | **0** |
+| `simd_size` | 16 | 16 |
+| `grf_count` | 128 | 128 |
+| `slm_size` | **22,400 B - exactly §3.3's budget** | 25,088 B |
+| `barrier_count` | 1 | 1 |
+| spill | **none** (`-abortOnSpill 4` is on the link line and the build succeeded) | none |
+
+The first emitted instruction is
+`dpas.8x8 (16|M0) r20:f null:f r46:bf r20.0:bf`, i.e. a real 8×8 systolic
+bf16 op with an fp32 destination - not a lowered vector sequence.
+
+### 4.3 The band: measured, against the prediction
+
+`gdn_chunk_test`, **measured**, all six cases green:
+
+| case 1 | A22's | §3.5 predicted | **measured** | pre-registered bar |
+|---|---:|---:|---:|---:|
+| `gdn_state` max rel | 3.506e-02 | ~5.3e-02 | **3.534e-02** (+0.8%) | ≤ 1.05e-01 ✓ |
+| `gdn_state` mean rel | 1.197e-03 | ~1.8e-03 | **1.457e-03** (+21.7%) | ≤ 3.6e-03 ✓ |
+| `gdn_o` max rel | 5.039e-02 | ~8e-02 | **5.143e-02** (+2.1%) | ≤ 1.5e-01 ✓ |
+| `y` max rel | 9.567e-02 | ~1.5e-01 | **1.317e-01** (+37.7%) | ≤ 2.2e-01 ✓ |
+
+| case 3 (`C = 1` × 4096) | A22's | §3.5 predicted | **measured** |
+|---|---:|---:|---:|
+| `gdn_state` max rel | 2.089e-02 | ~4e-02 | **3.161e-02** (+51.3%) |
+| `gdn_state` mean rel | 8.519e-04 | - | **1.192e-03** (+39.9%) |
+
+**Every band bar HELD, and the qualitative prediction that case 3 would show it
+most in proportion HIT** (+51% against case 1's +0.8% on the max). The
+quantitative prediction was 2-4× too pessimistic on the max and about right on
+the mean. Cases 4, 5 and 6 stayed **bit-identical** - multi-chunk == single
+chunk, the ragged `C = 100` == 64 + 36, and the same walk twice.
+
+### 4.4 The token gate: TWO pre-registered bars fell - this is the finding
+
+| gate | pre-registered | **measured on the DPAS build** | |
+|---|---|---|---|
+| `prefill_gate_test` (Vishva) determined rows exact | 94/94 | **94/94** | ✓ |
+| worst printed `gdn_state` cosine, Vishva | > 0.999 | **0.998499499** (`code`, L60) | **✗** |
+| `prefill_gate_rtn_test` determined rows exact | 93/93 | **92/93** | **✗** |
+| worst printed `gdn_state` cosine, RTN | > 0.999 | 0.999851577 (`code`, L49) | ✓ |
+| `prefill_determinism_test` | 9 × 3 bitwise | **9 × 3 bitwise** | ✓ |
+| `prefill_consistency_test` (A26) | 18/18 | **18/18**, 543 + 558 = **1101 determined rows exact, 0 mismatches** | ✓ |
+| `gdn_chunk_test` | 6/6 | **6/6** | ✓ |
+
+**The failing row, in full.** RTN, `prose` prompt, generated position **18**:
+engine **10932**, golden **11362**. The row is DETERMINED - the golden argmax is
+unique, so the tie rule does not reach it - and its logit cosine is a healthy
+0.999968099. The walk was already teacher-forced from position 15, where a
+genuine tie (`353` vs `271`, golden logits 19.75 vs 19.75) had gone the other
+way; positions 19-31 then match again, so this is one token, not a divergence.
+`code` 32/32 and `cjk` 32/32 on the same checkpoint.
+
+**The cosine bar fell harder than the token bar.** Vishva's `code` prompt reads
+`gdn_state` cosine **0.998499499** at L60 where task (b) printed
+**0.999896667** as its worst: `1 − cos` grew **14.5×**, i.e. the state's L2
+relative error grew **≈ 3.8×** - against §3.5's predicted 1.5×. RTN's worst
+moved only 1.28× on the same measure (1.160e-04 → 1.484e-04). So the real
+checkpoint's deep GDN layers are far more sensitive to R1/R3 than the synthetic
+fixture is, and **`gdn_chunk_test`'s band under-reports this design's cost by an
+order of magnitude** - the single most useful thing this measurement produced,
+and the reason the token gate is the arbiter and not the band.
+
+### 4.5 Verdict: REVERT, by the rule fixed in §3.6
+
+> "> 2.0, **or** any band or gate failure → **REVERT** to A27's kernel; the DPAS
+> kernel stays in-tree as `pf_gdn_scan_dpas`, launched only by tests; report."
+
+Two gate bars fell, so the rule fires. It is **not** a defect: the kernel is
+correct (three bit-identity structural cases, bitwise determinism, 18/18
+consistency, 1101 determined consistency rows exact, 94/94 + 92/93 + every band
+bar met), and what it costs is exactly the arithmetic §3.4 named before it was
+built. **D2 is measured and closed at this precision.**
+
+**The A2·vn term, priced separately as the brief asked.** R2 and R4 are its two
+roundings and they reach `gdn_o`/`y` only - the state's path never touches `A2`.
+The measurement bears that out: `gdn_o`'s max rel moved +2.1% and `y`'s +37.7%
+while `gdn_state`'s moved +0.8%, and the gate row that failed is downstream of
+the *state*, not of `o` (the state cosine at L60 is what collapsed, and `o` is
+consumed and discarded within a layer). **The A2·vn term does not dominate the
+band and it is not what cost the token.** Had only R2/R4 existed - i.e. had `S`
+and `D` stayed fp32 - the state would have been untouched; that is not a
+buildable variant, because stages 1 and 3 are where the FLOPs are.
+
+### 4.6 What would recover it, priced and NOT built
+
+**D3 - split-bf16.** Carry `S` and `D` as a bf16 hi/lo pair (`hi = rne(x)`,
+`lo = rne(x − hi)`) and issue two DPAS chains per contraction, so the operands
+hold ~16 mantissa bits instead of 8 and R1/R3 fall from 2⁻⁹ to ~2⁻¹⁷ -
+**below** Q1-Q4's own 2⁻⁹, i.e. invisible in the composed band. Cost, derived:
+
+| | D2 (measured) | D3 (derived) |
+|---|---:|---:|
+| `dpas.8x8` per work-item per sub-chunk | 26.5 | **50.5** (stage 1 and 2's `q·S` and stage 3 all doubled; the `A2·vn` term stays single) |
+| SLM | 22,400 B | **35,328 B** (`Sb` 17,408 + `VNb` 4,352 + `Dt` 8,448 + `A2b` 5,120) |
+| resident work-groups per Xe-core | 4 (thread-limited) | **3 (SLM-limited)** → 2 waves instead of 1.5 |
+| ms/layer/chunk | 0.8491 | **1.3-1.6 (estimated)** |
+
+That is inside A28's 1.0-2.0 adopt-and-attribute band and still ≈ **2.2×** the
+vector kernel, worth ≈ −180 ms on `--pp 4096` (derived). **It is a NEW design
+and therefore a new pre-registration, not an iteration of this one**, and it is
+not built here.
+
+## 5. The revert, and the proof that it is complete
+
+`pf_gdn_scan.cl` now holds two entry points, and §3.3's swap rule was followed:
+**`pf_gdn_scan` is A27's vector kernel and is what `gdn.cc` binds**;
+**`pf_gdn_scan_dpas` is the DPAS kernel, kept in-tree and launched by nothing**.
+The production kernel's body is **byte-identical** to `a89311f`'s (checked with
+`diff` over the extracted function: 149 lines, no difference), and
+`src/runtime/prefill/gdn.cc` is untouched.
+
+The proof that the revert is complete is the band coming back to the digit -
+`gdn_chunk_test`, **measured** at the reverted state:
+
+| case | tensor | max rel | mean rel | A22's / A27's / A28's / task (b)'s |
+|---|---|---:|---:|---|
+| 1 | `gdn_state` | **3.506e-02** | **1.197e-03** | 3.506e-02 / 1.197e-03 |
+| 1 | `gdn_o` | 5.039e-02 | 1.228e-03 | identical |
+| 1 | `y` | 9.567e-02 | 9.790e-04 | identical |
+| 2 | `gdn_state` | 3.506e-02 | 1.197e-03 | identical |
+| 3 | `gdn_state` | 2.089e-02 | 8.519e-04 | identical |
+
+Even the diagnostic counts return: 17,234 / 17,236 `gdn_o` words over 1e-2 in
+cases 1 / 2 and 237,692 / 237,664 for `y`, which are task (b)'s to the unit.
+Cases 4, 5 and 6 bit-identical as before.
