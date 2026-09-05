@@ -55,3 +55,10 @@ add_ocloc_kernel(pf_norm_finish_K5120_G20_W20 SOURCE ${PF_PREP_CL}
 add_ocloc_kernel(pf_silu_mul SOURCE ${PF_PREP_CL})
 add_ocloc_kernel(pf_embed_gather SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_embed.cl
                  DEFINES HIDDEN=5120 VOCAB=248320)
+
+# a||b, zero-padded 96 -> 128, at the measured {16, 16} tiling
+# (kernels::gemv_bf16_tiling) so that M = 1 is bit-identical to the binary
+# capture.cc binds. `pf_gemv_int4_M` (plan 6b Task 4's temporary int4 GEMV) is
+# deliberately NOT built: plan 6c lands sycl-tla's real GEMM in its place.
+add_ocloc_kernel(pf_ab_proj SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemv_bf16.cl
+                 DEFINES K=5120 N=128 COLS_PER_WG=16 KSPLIT=16)
