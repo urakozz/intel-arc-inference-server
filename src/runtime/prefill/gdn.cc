@@ -98,8 +98,9 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   cx.launch(kc(conv, "pf_gdn_gate"), heads, nch, 1,
             {PtrArg(ab_out), PtrArg(small), PtrArg(p_g), PtrArg(p_beta), arg_val(C)});
   profile_wait(cx, Phase::kGdnGate);
-  //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j.
-  cx.launch(kc(wy, "pf_gdn_A"), heads, nch, 1,
+  //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j. Grid.z is A28's
+  //      quadrant split, as step 8's.
+  cx.launch(kc(wy, "pf_gdn_A"), heads, nch, 4,
             {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_beta), PtrArg(p_A), arg_val(C)});
   profile_wait(cx, Phase::kGdnA);
   //  6 - T = (I - A)^-1, IN PLACE over A.
