@@ -365,3 +365,159 @@ taken with the **same unmodified `tools/bench_decode.sh`** the 978.07 and
 1304.06 rows were taken with - including its device-0 quirk (A27's harness
 note), which is **not** fixed here, because patching the harness would make the
 new row a measurement of a different thing.
+
+## 4. RESULT - `pf_gdn_wu` at 2.21×, bitwise
+
+Everything in this section was measured after §3 was committed at `696d50a`.
+
+### 4.1 Time, and the decision-rule verdict
+
+`ZE_AFFINITY_MASK=1 B70_PREFILL_PROFILE=1 b70-decode <RTN> --bench --pp 4096
+--tg 8`, one run, **measured** (89.3 ms over 96 waits):
+
+| | measured | |
+|---|---:|---|
+| `pf_gdn_wu`, ms per GDN layer per chunk | **0.9298** | |
+| the same before the rewrite, A27's (`bb5f1d5`) | 2.0595 | **2.21×** |
+| the same before the rewrite, this session's control (§0) | 2.0578 | 2.21× |
+| pre-registered bar | ≤ 0.6 (≥ 3.4×) | **MISS by 1.55×** |
+| point estimate | ~0.56 | missed by 1.66× |
+| rate on 1.636 GFLOP/layer/chunk (derived) | **1.76 TFLOP/s** | was 0.79 |
+
+**Decision-rule verdict: 2.21× falls in the 1.5-3× band → ADOPT, and attribute
+the shortfall from the assembly.** The mapping was not iterated: §3.2's mapping
+is what was built and 0.9298 is that build's first and only measurement.
+
+Per-chunk consequence: 48 × (2.0595 − 0.9298) = **−54.2 ms/chunk**, **−108.5 ms
+over a 4096-token prefill** (derived), against the −144 ms A27 derived from
+assuming the rewritten scan's 2.90 TFLOP/s.
+
+### 4.2 The shortfall, read off the Xe2 assembly
+
+`ocloc` was re-run on the committed `pf_gdn_wy.cl` with `IGC_ShaderDumpEnable=1`
+and the assembly of **both** entry points read - the tiled kernel and the legacy
+one in the same binary, which makes this a controlled comparison rather than a
+comparison against a remembered number. Nothing below is inferred from timing.
+
+**The tiling did exactly what it was designed to do.** No spill (`-abortOnSpill 4`
+is on the link line, so a spill would have failed the build), `grf_count 128`,
+`slm_size 50688` - exactly §3.2's budget - `barrier_count 1`, and the hot loops
+are the ones the mapping asked for:
+
+| block | instructions | `mad` | FMA density | SLM loads | widens (`shl`) |
+|---|---:|---:|---:|---:|---:|
+| legacy, the `j` loop | **16** | 2 | **12.5%** | 3 (2 × `d16u32`, 1 × `d32`) | 5 |
+| tiled, phase A (both blocks) | **45** | 32 | **71%** | 4 (2 × `d32x2`, 2 × `d32x4`) | **0** |
+| tiled, phase B (high block) | **26** | 16 | **62%** | 3 (1 × `d32x4`, 2 × `d32x2`) | **0** |
+
+The vector loads are the ones §3.2 fixed (`load.slm.d32x4` for the four `T`
+values of a block, `load.slm.d32x2` for a lane's two columns of `vb` and of
+`kb`), the widen is gone from the loop entirely, and the mirror pairing's
+balance is visible in the dynamic count: subgroup `b` issues
+`(4b+4)·45 + (60−8b)·26` loop instructions, i.e. **1740 at `b = 0` down to 1544
+at `b = 7`, a 1.06× spread** (derived) where a tile of 8 consecutive positions
+would have been 1.86×.
+
+**Per lane, the work fell 5.06×. The measured time fell 2.21×. The whole gap is
+two named terms, and the first is the larger:**
+
+1. **The tiled kernel compiles SIMD16 where the legacy compiles SIMD32.** The
+   `intel_reqd_sub_group_size(16)` attribute - copied from `pf_gdn_scan.cl`
+   without being priced, and **not** part of what §3.2 pre-registered - halves
+   the lanes an issued instruction covers. The machine's currency is issued
+   instructions, not lane-operations:
+
+   | | legacy | tiled |
+   |---|---:|---:|
+   | threads per layer per chunk | 12,288 (SIMD32) | 49,152 (SIMD16) |
+   | loop instructions per thread | 16,640 | 1,642 (mean over `b`) |
+   | **loop instructions issued** | **2.045e8** | **8.07e7** |
+   | ratio | | **2.53×** |
+   | per-lane instructions per `(i,x)` pair | 520 | 103 (**5.06×**) |
+
+   2.53× of issued instructions against a measured 2.21× of time is the whole
+   result. **The pre-registration's 3.7× was a count of lane-operations and
+   silently assumed the SIMD width would not change; it did.**
+
+2. **Issue rate is ~0.12-0.14 instructions per XVE per clock in BOTH kernels.**
+   2.045e8 in 2.0578 ms = 9.94e10 /s and 8.07e7 in 0.9298 ms = 8.68e10 /s,
+   against 256 XVEs × 2800 MHz = 7.17e11 XVE-clocks/s → **0.139 (legacy) and
+   0.121 (tiled)** (derived). Both are ~4× below the rewritten scan's 0.52
+   (`docs/prefill-gdn-scan-2026-09-05.md` §2.1), and the assembly says why:
+   **the scan's `k` loops have the compile-time bound 128 and IGC unrolls them
+   16-32×, while this kernel's `j` loops are bounded by the runtime `jl`/`jh`
+   and are not unrolled at all.** Each iteration is therefore
+   address → SLM load → dependent `mad` chain with a `goto` at the end, one
+   un-pipelined SLM round trip per iteration and only 26-45 issue slots to
+   cover it. This term did not get worse; it did not get better either, so the
+   rewrite bought its 2.21× entirely from term 1's 2.53× of instruction count.
+
+**What is left on this kernel, derived and NOT taken.** The sub-group attribute
+is one line and the mapping does not depend on it: everything is computed from
+`get_local_id(0)`, and at SIMD32 a thread's two 16-lane halves share the same
+`b` (so `il`/`ih` and the `T` loads stay thread-uniform) and cover the same 64
+contiguous columns (so `vbs`/`kbs` stay coalesced). At SIMD32 the same code
+issues 24,576 × 1642 = **4.03e7 instructions, and at the measured issue rate
+that is 0.465 ms** - under the pre-registered 0.6 bar. The estimate carries a
+named risk: 32 fp32 accumulators cost twice the registers at SIMD32, so IGC may
+refuse it at `grf_count 128` and fall back, and halving the thread count also
+halves what is available to hide term 2's SLM latency. **It is not taken here**,
+because the brief's rule is one defect, one fix, one measurement, and because
+"remove an attribute and re-measure" is exactly the iterate-until-it-looks-good
+the rule forbids. It is recorded as the next reader's cheapest lever, with
+unrolling the `j` loop by a fixed factor plus a remainder as the second.
+
+### 4.3 Numerics: bitwise, and therefore every gate is unchanged
+
+**`gdn_wy_test`, measured** (`ZE_AFFINITY_MASK=1`), at all three widths `main`
+runs, with the two kernels' outputs compared word for word:
+
+| width | bar | measured |
+|---|---|---|
+| C = 256 | `w` and `u` bit-identical to `pf_gdn_wu_legacy` | **1,572,864 words each, identical** |
+| C = 100 (ragged, L = 36) | the same | **614,400 words each, identical** |
+| C = 4096 | the same | **25,165,824 words each, identical** |
+
+The two runs are pre-filled with different patterns, so a word neither kernel
+wrote would fail the comparison rather than pass it - the 3-D grid's coverage is
+part of the same bar. The file's standing bars are unmoved: `u` **0 bf16 ulp,
+bit-identical** to `gdn_chunk_ref::wu` fed the device's own `T` at every width;
+`w` max **1 ulp** on `|ref| ≥ rms/4` at C = 256 and C = 100 and **2** at
+C = 4096, against the bar of 2.
+
+**`gdn_chunk_test`, measured, all six cases green** - and the band is identical
+to A22's and A27's to four significant figures, which is what bit equality
+predicts:
+
+| case | tensor | max rel | mean rel | pre-registered fallback |
+|---|---|---:|---:|---|
+| 1 - vs the CPU fp32 recurrent reference | `gdn_state` | **3.506e-02** | **1.197e-03** | ≤ 7.0e-02 / ≤ 2.4e-03 |
+| | `gdn_o` | 5.039e-02 | 1.228e-03 | |
+| | `y` | 9.567e-02 | 9.790e-04 | |
+| 2 - vs DEVICE `gdn_step` × 4096 | `gdn_state` | 3.506e-02 | 1.197e-03 | |
+| 3 - `C = 1` × 4096 vs that oracle | `gdn_state` | 2.089e-02 | 8.519e-04 | |
+
+Cases 4, 5 and 6 pass unchanged (2048 == 2 × 1024 == 32 × 64 bit-identical;
+`C = 100` == 64 + 36; the 2 × 2048 walk twice from a zeroed state bitwise
+identical in `gdn_state` / `conv_ring` / `gdn_o` / `y`). Even the diagnostic
+counts are A27's: 17,234 / 17,236 `gdn_o` words over 1e-2 in cases 1 / 2 and
+237,692 / 237,664 for `y`.
+
+### 4.4 The arbiter: all four gates, both checkpoints
+
+**Measured, `ZE_AFFINITY_MASK=1`, at the rewrite:**
+
+| gate | Vishva | RTN |
+|---|---|---|
+| `prefill_gate_test` determined rows exact | **94/94** | **93/93** |
+| undetermined | 2 (1 agree + 1 other member) | 3 (2 agree + 1 other member) |
+| worst printed `gdn_state` cosine (layers 0, 8 … 56) | **0.999896667** (L32) | **0.999884022** (L48) |
+| `prefill_consistency_test` (A26) | **9/9 cases**, 543 determined rows exact, 33 undetermined, 4 to the other member | **9/9 cases**, 558 determined rows exact, 18 undetermined, 8 to the other member |
+| `prefill_determinism_test` | **9 cases × 3 runs bitwise** (`gdn_state`, `conv_ring`, `kv_k`, `kv_v`, control, `cur_token`) | - |
+
+**18 of 18 consistency cases, 1101 determined rows across both checkpoints, zero
+mismatches** - row for row the same table A27 §6 recorded, including which
+divergence sits at which step (Vishva `code` at 41, `cjk` chunk 16 at 23; RTN
+`prose` at 15 and 25, `cjk` at 47). A re-tiling that re-associated anything would
+have re-tossed those sub-ulp coins, as A27 §6 observed the scan's did. **No
+golden regression, so there is nothing to diagnose.**
