@@ -154,6 +154,21 @@ if(B70_PREFILL_ENABLED)
     kernel_pf_gated_head kernel_gdn_step_M1 kernel_prep_gated_head_M1)
   add_test(NAME gdn_chunk_test COMMAND gdn_chunk_test)
   set_tests_properties(gdn_chunk_test PROPERTIES TIMEOUT 1800)
+
+  # The composed attention (ruling A14), end to end against decode's own
+  # reference. Same guard: it drives both the L0 list and sycl-tla's GEMM. No
+  # checkpoint -- one synthetic FA layer over a synthetic cache. The host
+  # reference is the expensive half (attn_ref::decode walks every block of a
+  # 4352-position cache twice, once per q dtype), hence the timeout.
+  add_executable(attn_chunk_test prefill/attn_chunk_test.cc)
+  target_include_directories(attn_chunk_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+                             ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(attn_chunk_test PRIVATE b70_prefill_host b70_runtime b70_l0)
+  b70_link_prefill(attn_chunk_test)
+  b70_target_kernel_dir(attn_chunk_test)
+  add_dependencies(attn_chunk_test kernel_pf_attn kernel_pf_attn_prep_q16)
+  add_test(NAME attn_chunk_test COMMAND attn_chunk_test)
+  set_tests_properties(attn_chunk_test PROPERTIES TIMEOUT 3600)
 endif()
 
 add_executable(int4_test kernels/int4_test.cc)

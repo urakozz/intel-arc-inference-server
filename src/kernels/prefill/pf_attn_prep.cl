@@ -38,6 +38,28 @@
 // plan 6d's composed attention (ruling A14) needs DPAS operands. That is a
 // change of consumer, not of this kernel's arithmetic: the value written is the
 // same fp32 `outv`, and A9's extra rounding is one `rne_bf16` at the store.
+//
+// **`Q_BF16` is that store, and it is a SECOND BINARY rather than an edit.**
+// `-D Q_BF16=1` builds `pf_attn_prep_q16`, which the composed path binds; the
+// unflagged `pf_attn_prep` keeps writing fp32 `attn_q` and fp32 `attn_gate` and
+// keeps its bit-identity to `attn_prep_M{M}` in tests/prefill/pf_attn_test.cc.
+// Two binaries rather than one edited kernel because that identity is the
+// evidence that the widening of `attn_prep` changed no arithmetic, and an edit
+// would delete the evidence to save a 40 KB binary. Everything above the store
+// -- the norm, its tree, the rstd, the RoPE -- is ONE piece of text and is
+// therefore provably the same in both.
+//
+// Two consequences of `Q_BF16` that are contract, not detail:
+//   * `attn_q` is a bf16 `[C][24][256]` buffer (`PrefillScratch::pf_q`), passed
+//     through the unchanged `__global float*` parameter and cast at the store.
+//     The pointer type in the signature is a lie the ABI cannot see (both are
+//     8-byte device pointers) and it keeps ONE argument list for both binaries;
+//     the cast is at the single line where the dtype is decided.
+//   * **the gate is not written at all.** `pf_attn_gate` (pf_attn.cl) reads it
+//     straight out of `qkv_partials`, which is still the qkv linear's output at
+//     that point in the walk, so `attn_gate` is dead weight on this path and
+//     `PrefillScratch` has no field for it. The argument stays in the signature
+//     (the caller passes a null pointer) so the two binaries keep one ABI.
 
 #ifndef CTRL_POS
 #error "pf_attn_prep: CTRL_POS must be defined (src/kernels/CMakeLists.txt)"
@@ -65,6 +87,12 @@
 #define QKV_S 1
 #if QKV_S != 1
 #error "pf_attn_prep: the prefill path folds ONE slice (plan 6b ruling R1)"
+#endif
+
+// Ruling A9: 0 = decode's fp32 `attn_q` + fp32 `attn_gate` (the identity
+// binary); 1 = the composed path's bf16 `attn_q` and no gate write.
+#ifndef Q_BF16
+#define Q_BF16 0
 #endif
 
 #define WG_PREP 256
@@ -144,9 +172,14 @@ __kernel void pf_attn_prep(__global const uint* restrict ctrl,
   }
 
   if (is_q) {
+#if Q_BF16
+    // Ruling A9's one extra rounding, at the store and nowhere else.
+    ((__global ushort*)attn_q)[((size_t)m * Q_HEADS + h) * HD + i] = rne_bf16(outv);
+#else
     attn_q[((size_t)m * Q_HEADS + h) * HD + i] = outv;
     attn_gate[((size_t)m * Q_HEADS + h) * HD + i] =
         bf16f(rne_bf16(qkv_sum(qkv_partials, m, base + HD + i)));
+#endif
   } else {
     const size_t slot = ((size_t)(pos + m) * KV_HEADS + h) * HD + i;
     kv_k[slot] = rne_bf16(outv);
