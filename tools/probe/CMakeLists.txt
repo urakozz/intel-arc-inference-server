@@ -31,6 +31,20 @@ get_property(PF_DEQUANT_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefil
              PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_dequant ${PF_DEQUANT_KERNELS})
 
+# The dequant-overlap lever (spec 2, plan 6c Task 4). Unlike P3 it needs BOTH
+# queues -- the L0 immediate list for pf_dequant_tile and the SYCL queue for
+# gemm_bf16 -- so it links libb70_prefill.so and lives under the same guard
+# every other prefill target uses. It contains no SYCL of its own, so it is a
+# plain g++ target here rather than one of src/sycl's icpx probes.
+if(B70_PREFILL_ENABLED)
+  add_executable(probe_dequant_overlap probe_dequant_overlap.cc)
+  target_include_directories(probe_dequant_overlap PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_dequant_overlap PRIVATE b70_l0)
+  b70_link_prefill(probe_dequant_overlap)
+  b70_target_kernel_dir(probe_dequant_overlap)
+  add_dependencies(probe_dequant_overlap kernel_pf_dequant_tile_K5120_N34816_L0_T0)
+endif()
+
 # T6's M=2048 small-kernel check. These are probe-only ocloc binaries: no
 # runtime variant helper names them, so the decode and future prefill bindings
 # cannot select them by accident.
