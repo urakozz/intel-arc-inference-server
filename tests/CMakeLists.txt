@@ -140,6 +140,20 @@ if(B70_PREFILL_ENABLED)
   add_dependencies(gdn_wy_test kernel_pf_gdn_wy)
   add_test(NAME gdn_wy_test COMMAND gdn_wy_test)
   set_tests_properties(gdn_wy_test PROPERTIES TIMEOUT 1800)
+
+  # gdn_chunk end to end. It links b70_runtime for PrefillScratch (2.264 GB of
+  # device scratch, the production allocation) and drives decode's own
+  # gdn_step_M1 / prep_gated_head_M1 as the self-consistency oracle.
+  add_executable(gdn_chunk_test prefill/gdn_chunk_test.cc)
+  target_include_directories(gdn_chunk_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+                             ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(gdn_chunk_test PRIVATE b70_prefill_host b70_runtime b70_l0)
+  b70_link_prefill(gdn_chunk_test)
+  b70_target_kernel_dir(gdn_chunk_test)
+  add_dependencies(gdn_chunk_test kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan
+    kernel_pf_gated_head kernel_gdn_step_M1 kernel_prep_gated_head_M1)
+  add_test(NAME gdn_chunk_test COMMAND gdn_chunk_test)
+  set_tests_properties(gdn_chunk_test PROPERTIES TIMEOUT 1800)
 endif()
 
 add_executable(int4_test kernels/int4_test.cc)
