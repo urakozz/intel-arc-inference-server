@@ -1,5 +1,18 @@
 # Prefill-only kernels (spec 2). None is bound by src/runtime/capture.cc and
 # none changes the decode list's 774 launches or 19 modules.
+#
+# **No `M` appears in any name or on any command line below**, and that is the
+# rule rather than an accident: interfaces.md fixes the row count as a runtime
+# kernel argument with grids of `ceil(M / tile)` and device-side masking, so one
+# binary serves every chunk width the CLI's `--pp-chunk` can ask for. `K`,
+# `S_PREV` and the norm's group counts stay in the names because they are
+# strides and grids the binary bakes -- the arrangement `prep_res_fold`'s `G`
+# uses one directory up, for the same reason: a host that disagrees names a file
+# that does not exist and throws instead of striding a buffer two ways.
+#
+# `S_PREV` is 0 or 1 and nothing else (plan 6b ruling R1: the prefill path runs
+# every linear unsplit). The decode variants of these same kernels fold 8 and 4
+# slices, which is what made their first M=2048 measurement 5x too expensive.
 set(PF_DEQUANT_CL ${CMAKE_CURRENT_SOURCE_DIR}/dequant.cl)
 
 function(add_pf_dequant K N L T)
@@ -28,3 +41,17 @@ foreach(row IN LISTS PF_SHAPES)
     endforeach()
   endforeach()
 endforeach()
+
+# --- The runtime-M small kernels (plan 6b Tasks 3-5) -------------------------
+set(PF_PREP_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_prep.cl)
+function(add_pf_res_fold K SP G)
+  add_ocloc_kernel(pf_res_fold_K${K}_SP${SP}_G${G} SOURCE ${PF_PREP_CL}
+                   DEFINES K=${K} S_PREV=${SP} FOLD_G=${G})
+endfunction()
+add_pf_res_fold(5120 0 20)   # layer 0's leading norm: nothing to fold
+add_pf_res_fold(5120 1 20)   # every other norm (ruling R1: S = 1)
+add_ocloc_kernel(pf_norm_finish_K5120_G20_W20 SOURCE ${PF_PREP_CL}
+                 DEFINES K=5120 NORM_G=20 NORM_WGS=20)
+add_ocloc_kernel(pf_silu_mul SOURCE ${PF_PREP_CL})
+add_ocloc_kernel(pf_embed_gather SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_embed.cl
+                 DEFINES HIDDEN=5120 VOCAB=248320)
