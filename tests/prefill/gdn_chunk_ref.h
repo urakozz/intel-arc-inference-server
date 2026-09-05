@@ -33,7 +33,15 @@
 //   v[i][x]   = f32(xb_v[p_i][x])              (bf16 in xb, conv+SiLU output)
 //
 //   A[i][j]   = beta[i] * (SUM_k k[i][k]*k[j][k]) * exp(gc[i] - gc[j])  for i > j, else 0
-//   T         = (I - A)^-1                                              unit lower triangular
+//   T         = (I + A)^-1                                              unit lower triangular
+//               ^^^ NOTE THE SIGN. FLA stores A positive
+//               (chunk_scaled_dot_kkt.py) and NEGATES it on the way into the
+//               solve (`solve_tril.py:82`: b_A = -tl.where(m_A, b_A, 0)).
+//               Plan 6b's algebra section writes (I - A)^-1, which is a
+//               transcription error in the plan: at L = 2 the recurrence needs
+//               the coefficient on Delta_0 inside vn_1 to be
+//               -beta_1 exp(g_1) (k_1 . k_0) = -A[1][0], and (I - A)^-1 gives
+//               +A[1][0]. Derived by hand, then confirmed against the FLA line.
 //   vb[j][x]  = rne( v[j][x] * beta[j] )                         Q1  bf16 (wy_fast:88)
 //   kb[j][k]  = rne( k[j][k] * beta[j] * exp(gc[j]) )            Q2  bf16 (wy_fast:110)
 //   u[i][x]   = rne( SUM_{j<=i} T[i][j] * f32(vb[j][x]) )        Q3  bf16 (wy_fast:89)
@@ -267,11 +275,13 @@ inline void mat_A(uint32_t C, const uint16_t* xb, const float* g_cum, const floa
 }
 
 // ---------------------------------------------------------------------------
-// Stage 5 - pf_gdn_solve.  T = (I - A)^-1, IN PLACE over A. Forward
-// substitution, `i` ascending: T[i][j] = A[i][j] + SUM_{j<l<i} A[i][l]*T[l][j],
-// `l` ascending with explicit fma. T[i][i] = 1, T[i][j] = 0 for j > i, and rows
-// >= L are left as mat_A wrote them (zero) - INCLUDING the diagonal, which the
-// kernel must not write past L. That convention is asserted by the test.
+// Stage 5 - pf_gdn_solve.  T = (I + A)^-1, IN PLACE over A. `A` is NEGATED at
+// staging, where FLA negates it (solve_tril.py:82) - see the sign note in the
+// algorithm block above. The substitution is then the plain one, `i` ascending:
+// T[i][j] = As[i][j] + SUM_{j<l<i} As[i][l]*T[l][j] with As = -A, `l` ascending
+// with explicit fma. T[i][i] = 1, T[i][j] = 0 for j > i, and rows >= L stay
+// zero - INCLUDING the diagonal, which the kernel must not write past L. That
+// convention is asserted by the test.
 // ---------------------------------------------------------------------------
 inline void solve(uint32_t C, float* A) {
   float row[kCT];
@@ -279,6 +289,10 @@ inline void solve(uint32_t C, float* A) {
     for (uint32_t h = 0; h < kHeads; ++h) {
       float* T = A + tri_base(t, h);
       const uint32_t L = std::min(kCT, C - t * kCT);
+      // -A on the strictly-lower half, +0.0f elsewhere (solve_tril.py:82).
+      for (uint32_t i = 0; i < kCT; ++i)
+        for (uint32_t j = 0; j < kCT; ++j)
+          T[size_t(i) * kCT + j] = i > j ? -T[size_t(i) * kCT + j] : 0.0f;
       for (uint32_t i = 0; i < L; ++i) {
         for (uint32_t j = 0; j < L; ++j) {
           row[j] = 0.0f;
