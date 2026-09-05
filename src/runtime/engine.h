@@ -16,6 +16,18 @@
 
 namespace runtime {
 
+// The prefill path's per-engine state: `runtime::prefill::Context` (the L0
+// immediate list and the SYCL queue) and its `KernelCache`. **Incomplete here
+// on purpose.** Everything that touches it -- `Engine::prefill`,
+// `prefill_launches`, and the deleter -- is compiled into `b70_prefill_host`
+// and linked only by a target that calls `b70_link_prefill()`. `b70_runtime`
+// is linked by every decode binary and test, and none of those may acquire a
+// dependency on libb70_prefill.so (cmake/prefill.cmake's whole argument), so
+// the member below is a `unique_ptr` with a FUNCTION-POINTER deleter: that
+// instantiation needs no complete type and emits no reference to any prefill
+// symbol in a translation unit that never calls `prefill()`.
+struct PrefillEngine;
+
 // The decode loop, and nothing else. It owns the weights, the buffers and the
 // one captured command list, and a token is a replay of that list: the host
 // writes at most four bytes of shared memory (the ingested id), submits, waits
@@ -49,6 +61,30 @@ class Engine {
   // for a freshly reset Engine - ingest is incremental, so it may be called
   // repeatedly to extend a session.
   void ingest(const std::vector<uint32_t>& ids);
+
+  // Prefill `ids` in chunks of at most `chunk` positions starting at the
+  // current pos; on return pos == old pos + ids.size(), the persistent state
+  // holds those positions, and control_->cur_token[0] is the argmax of the LAST
+  // position's logits (the first generated id) -- exactly as ingest() would
+  // have left it, which is what tests/prefill/prefill_consistency_test.cc
+  // grades. Default chunk = PrefillScratch::kC (ruling A7/A13, 2048).
+  //
+  // Throws if `ids` is empty, if `chunk > PrefillScratch::kC`, if any id is
+  // outside the vocabulary (`pf_embed_gather` has no `Control::debug_flag`
+  // channel, so the host is the only bound), or if pos + ids.size() > max_len.
+  // Allocates `PrefillScratch` and the prefill `Context` on the FIRST call
+  // (ruling R7): a decode-only Engine's device residency is unchanged.
+  //
+  // **Defined in b70_prefill_host, not in b70_runtime** -- see PrefillEngine
+  // above. A binary that never calls this links exactly what it linked before.
+  void prefill(const std::vector<uint32_t>& ids, uint32_t chunk = 0);
+
+  // Non-null only after the first prefill(); for the tests and the CLI report.
+  const PrefillScratch* prefill_scratch() const { return pf_.get(); }
+  // Context::launches() -- the L0 launches this engine's prefill path has
+  // appended since the first prefill(). 0 before it. The SYCL GEMMs are not on
+  // that list and are NOT counted; `runtime::prefill::step_chunk_gemms()` is.
+  size_t prefill_launches() const;
 
   // Greedy-generates n ids; on_token is called after each fence (host side,
   // overlaps nothing in v1). Returns the ids.
@@ -104,6 +140,9 @@ class Engine {
   DecodeScratch decode_scratch_;
   DecodeBuffers buffers_;
   std::unique_ptr<PrefillScratch> pf_;
+  // The function-pointer deleter is what keeps `PrefillEngine` incomplete here;
+  // both halves stay null until the first prefill().
+  std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)> pfx_{nullptr, nullptr};
   std::unique_ptr<l0::Mem> tap_;   // null unless debug_resid
   CapturedStep step_;
   l0::Queue queue_;
