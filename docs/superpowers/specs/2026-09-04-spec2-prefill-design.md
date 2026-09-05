@@ -107,7 +107,39 @@ ruling.
 
 ## 3. The design - D: decouple weights, inherit everything Intel ships, own only the gaps
 
-### 3.1 The one coupling, and how it is cut
+### 3.0 SUPERSEDING RULING A20 (2026-09-05) - the weight format pivots to MXFP4A16
+
+§3.1 and §3.2 below describe the bf16 dequant scratch and remain as the
+record of the design that was measured. **Stage 0 measured that scratch at
+210.116 ms per C=2048 chunk - 18.6% of the step - and the dequant-overlap
+probe rejected hiding it (0.127 recovered against ≥ 0.3 required; the two
+queues serialise on the device).** With every other term measured, the
+int4-g64 path's ceiling is **1808-1817 t/s, 92% of vLLM's 1973**, and no
+composition of measured numbers clears it.
+
+The third party's **2513 t/s** row (their own engine, same architecture) is
+an **MXFP4** checkpoint. `sycl-tla` at the pin ships a native block-scaled
+MXFP4 mainloop (`xe_mma_blockscaled_mxfp.hpp`: e2m1 weights, ue8m0 block-32
+scales, mixed with bf16 activations) that upconverts **in registers** - no
+scratch at all. Removing the 210 ms term alone projects the C=2048 ceiling
+to **~2190-2230 t/s (derived)**, above vLLM.
+
+**Ruling:** the engine's weight format becomes **MXFP4A16** - e2m1 weights,
+e8m0 scales per 32, **bf16 activations** (same quality class and identical
+4.25 bits/weight as int4-g64; **not** the W4A4 `MXFP4` preset, which also
+quantises activations - the trade the operator declined). Consequences:
+prefill's int4 linears take the mixed-dtype mainloop directly and
+`PrefillScratch::dequant` is freed; the loader gains a compressed-tensors
+MXFP4A16 reader (refusing W4A4); decode's `gemv.cl` gains an e2m1/e8m0
+unpack variant at block-32 tile geometry, with **Task 4's −1.20 ms per-shape
+retune re-measured, not assumed**; the oracle re-anchors to the new
+checkpoint; the int4-g64 path stays fully supported (the checkpoint
+decides). Everything L1 builds is format-agnostic and unaffected. The
+artifact is produced by `tools/quantize_qwen38_mxfp4.sh` (llm-compressor
+`model_free_ptq`, self-verifying). Plan 6f carries the stream; the bar in
+§2 is re-derived at Stage 0's close *on the new format*, from measurement.
+
+### 3.1 The one coupling, and how it is cut - *record of the int4 design; superseded by §3.0*
 
 Decode reads weights in per-shape tile layouts that Task 4 just tuned
 (−1.20 ms/token). `sycl-tla`'s mixed-precision mainloop reads int4 in *its*
