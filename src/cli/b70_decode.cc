@@ -43,6 +43,9 @@
 #include "runtime/capture.h"
 #include "runtime/control.h"
 #include "runtime/engine.h"
+#if B70_HAVE_PREFILL
+#include "runtime/prefill/profile.h"
+#endif
 
 namespace {
 using model::Qwen35;
@@ -757,6 +760,7 @@ int run(int argc, char** argv) {
   size_t pp_launches = 0;
   if (have_pp) {
 #if B70_HAVE_PREFILL
+    runtime::prefill::profile_reset();
     eng.prefill(ids, pp_chunk);
     pp_launches = eng.prefill_launches();
 #else
@@ -776,7 +780,10 @@ int run(int argc, char** argv) {
                  ids.size(), ingest_ms,
                  ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0,
                  pp_chunk ? pp_chunk : runtime::PrefillScratch::kC, pp_launches, eng.pos());
-  else
+#if B70_HAVE_PREFILL
+  if (have_pp) runtime::prefill::profile_report("--pp", ingest_ms);
+#endif
+  if (!have_pp)
     std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token), pos %u\n", ids.size(),
                  ingest_ms, ids.empty() ? 0.0 : ingest_ms / double(ids.size()), eng.pos());
 
