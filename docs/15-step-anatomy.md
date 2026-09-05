@@ -1831,6 +1831,9 @@ every width.
 Two chunks, depths 2048 and 4096. Full table and conditions:
 [the `--pp` attribution](prefill-pp-attribution-2026-09-05.md).
 
+**As first built (`a663f7b`), kept because it is what the two GDN rewrites were
+scoped from:**
+
 | phase | ms/chunk | share |
 |---|---:|---:|
 | `gdn_chunk` (of which `pf_gdn_scan` **723.4**) | **984.1** | 47.8% |
@@ -1846,12 +1849,47 @@ The sixth, GDN, was never measured before this stage and is **64×** its
 projected 15.4 ms - which is why the spec's "1808-1817 t/s, every term
 measured" ceiling does not survive contact with the walk.
 
+**As it stands at the gate (`e44c40c`; kernels last changed at `42921d2`)** -
+the profiled walk from
+[the conv + wu task](prefill-gdn-wu-conv-2026-09-05.md) §6, which is the final
+code state, ÷ 2 chunks:
+
+| phase | ms/chunk | share | vs the column above |
+|---|---:|---:|---|
+| `gemm_bf16`, the four int4 linears | **691.3** | 47.0% | +5.3% (session drift) |
+| `gdn_chunk` (of which `pf_gdn_scan` **163.1**) | **347.0** | 23.6% | **−64.7%** |
+| `pf_dequant_tile` | 206.7 | 14.1% | +0.8% |
+| small kernels + `pf_gated_head` | ~139 | 9.5% | +6% (drift) |
+| composed attention | ~83 | 5.6% | unchanged |
+| **profiled total** | **1469.4** | 100% | −28.7% |
+
+**GDN fell 984.1 → 347.0 ms/chunk across two pre-registered rewrites (2.84×)
+and is still 22.5× the 15.4 ms Stage 0 priced it at.** The +0.5-5.3% on every
+kernel neither task touched is this instrument's session-to-session drift on a
+box that is not idle; it is reported, never subtracted, and it is why the GEMM
+row reads 691.3 here and 656.3 above - **two labelled measurements of the same
+unchanged kernel, neither a correction of the other.** `gemm_bf16` is now the
+largest term in the walk at 47%, and A23/A24 closed every lever on it.
+
+The per-chunk composition implies a ceiling of **1393.8 t/s** (derived); the
+gate row measures **1377.20**, i.e. **98.8% of it**, the remaining 1.2% being
+the one-time module-load and `sycl-tla` first-launch cost amortised over two
+chunks (~170 ms derived at `a663f7b`, **not re-measured since**).
+
 Fixed and per-position costs, from a single-chunk sweep at C = 256/512/1024/2048
 (measured): **411.5 ms fixed per chunk** and **0.852 ms per position**
 (derived, two-point fit). At C = 256 the fixed term is 70% of the chunk, which
 is why `--pp 256 --pp-chunk 64` reads 161.76 t/s and `--pp 2048 --pp-chunk 2048`
 reads 949.87 - ruling A13's C = 2048 default is the right one and this
 measurement agrees with it.
+
+The gate re-measured that conclusion at the current code state, at a fixed 4096
+ids so the rows differ only in chunk count (one run each, iterate, device 1):
+**C = 2048 → 1330.82 t/s, C = 1024 → 1185.27, C = 512 → 899.36**, and
+`--pp-chunk 4096` is **refused by the build** (`chunk 4096 exceeds
+PrefillScratch::kC 2048`). Monotone in C over the whole available range, which
+is the fixed 411.5 ms/chunk showing up as twice the chunks; **2048 is the widest
+width this build runs**, and past it is a smaller `PrefillScratch`, not a flag.
 
 ### The bytes, and the card
 
@@ -1874,3 +1912,20 @@ RTN) - a **28.9× cut** - and vLLM's **1973 t/s pp4096**, which is
 HTTP-inclusive where this row is device-side, loader excluded, first prefill
 launch to the first generated id in `cur_token`. The same runs measured decode
 at 32.89 t/s against the recorded 32.22, so nothing here costs decode anything.
+
+**The gate row that supersedes it as the current number** (the 978.07 above is
+kept as this section's first measurement, and the ladder between them is
+978.07 → 1304.06 → 1375.65 → this):
+
+`| b70-decode e44c40c pp | 4096 | 2048 | 2974.2 | 1377.20 |` - **1377.20 t/s,
+median of 3, spread 0.29%, ITERATE grade, device 0**, RTN. The same prompt is
+**2.974 s** against the replay ingest's 121 s: a **40.7× cut**, measured. The
+byte-matched `Vishva007` row is 1374.87 - **0.17% away**, because prefill runs
+`lm_head` once per prompt rather than once per token, so the checkpoint
+asymmetry that decides every decode comparison does not reach this one. Against
+vLLM's 1973 the row is **69.8%**, and the decode controls taken beside it
+(32.21 / 29.31) sit inside the 0.09% drift rule, so prefill still costs decode
+nothing. Conditions, the chunk sweep and the measured 3.4% difference **between
+the box's two nominally identical cards** are in docs/BENCHMARKS, "The spec-2
+gate rows"; the verdict is
+[the spec-2 gate memo](superpowers/specs/2026-09-05-spec2-gate-memo.md).

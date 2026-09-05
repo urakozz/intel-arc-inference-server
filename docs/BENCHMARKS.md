@@ -278,6 +278,13 @@ replay per id - spec 2 owns prefill), so there is no `pp4096` number to put
 beside vLLM's 1973; the ingest rate is recorded instead, and it is the decode
 rate, because it *is* decode.
 
+> **Superseded 2026-09-05 - there is a `pp4096` number now.** Spec 2 built
+> `Engine::prefill`; the paragraph above describes the engine as it stood until
+> `a663f7b` and is kept because the ingest rows below were taken under it.
+> `pp4096` at `e44c40c` is **1377.20 t/s device-side** against vLLM's 1973
+> HTTP-inclusive, and 4096 ids now cost **2.974 s** where the replay ingest cost
+> **121 s**. See "The spec-2 gate rows" below.
+
 ```bash
 tools/bench_decode.sh                 # 3 runs at depth 4096, tg 256; median + spread
 tools/bench_decode.sh --depth 64      # the doc 07 #12 depth experiment
@@ -426,6 +433,120 @@ number any software has posted on this silicon here.
 success bar and the operator's original **90%** fold criterion. **Beating vLLM
 on t/s and clearing the efficiency bar are now different answers**, and the
 spec-1.7 closing memo carries the second one.
+
+### The spec-2 gate rows - `e44c40c`, 2026-09-05 - the first `pp4096` this engine has ever had
+
+**The gate of spec 2, and it does not clear.** The bar was vLLM's **1973 t/s**;
+the engine measures **1377.20 t/s device-side**, **69.8%**, and the spec's own
+§3.0c amendment (2026-09-05) had already ruled that bar unreachable by this
+design and restated the deliverable as 70-79% of vLLM. This row is that band's
+floor. The full arithmetic and what is queued behind it:
+[the spec-2 gate memo](superpowers/specs/2026-09-05-spec2-gate-memo.md).
+**This is gate row 1**; a strict-idle re-gate follows two more GDN tasks.
+
+```bash
+tools/bench_decode.sh --pp 4096 --tg 256 --runs 3         # the gate command
+ZE_AFFINITY_MASK=1 tools/bench_decode.sh --pp 4096 ...    # names the card, since e44c40c
+```
+
+| engine / checkpoint | device | ids | C | **pp t/s** | ms total | runs (t/s) | spread | grade |
+|---|---|---|---|---|---|---|---|---|
+| **b70-decode `e44c40c`, `qwen38-27b-w4g64-rtn`** (int4 `lm_head`) | **0** | 4096 | 2048 | **1377.20** | **2974.2** | 1379.72 / 1377.20 / 1375.71 | 0.29% | **iterate**, median of 3 |
+| b70-decode `e44c40c`, `qwen38-27b-w4g64-rtn` | 1 | 4096 | 2048 | 1330.82 | 3077.8 | 1331.43 / 1330.82 / 1328.62 | 0.21% | iterate, median of 3 |
+| **b70-decode `e44c40c`, `Vishva007`** (bf16 `lm_head`, byte-matched to vLLM) | **0** | 4096 | 2048 | **1374.87** | 2979.2 | 1376.01 / 1374.87 / 1373.14 | 0.21% | iterate, median of 3 |
+| b70-decode `e44c40c`, `Vishva007` | 1 | 4096 | 2048 | 1330.63 | 3078.2 | 1333.44 / 1330.63 / 1327.44 | 0.45% | iterate, median of 3 |
+| vLLM `p314-t214-vxkp0`, no speculation | - | 4096 | 2×2048 | **1973** | - | - | - | measured, external, **HTTP-inclusive** |
+
+Chunk-width sensitivity, **one run each, context and not the gate** (device 1):
+
+| C | pp t/s | ms / 4096 | vs 2048 |
+|---:|---:|---:|---|
+| 2048 (`PrefillScratch::kC`, the default) | 1330.82 | 3077.8 | - |
+| 1024 | 1185.27 | 3455.7 | −10.9% |
+| 512 | 899.36 | 4554.3 | −32.4% |
+| 4096 | - | - | **refused: `chunk 4096 exceeds PrefillScratch::kC 2048`** |
+
+Monotone in C across the whole available range, which is what the measured
+411.5 ms fixed cost per chunk predicts: halving C doubles the chunk count and
+therefore the fixed term. Ruling A13's 2048 is the widest this build runs.
+
+**Box conditions, and why no row here is record grade.** Zero containers, load
+0.45-0.88, 84 GB free before and after, verified before and after every row set.
+But `baobab` (285644) and `ptyxis` (285678) held DRM fds on both cards
+throughout - the same two processes the spec-1.7 gate rows named. New here, and
+it is why waiting does not help: **they re-acquire those fds periodically.** The
+box was verified clean at 19:55; the fds the gate ran under were opened at
+**19:58:59**, and another set on the GT 710's node at 20:01:41. Every one of
+those clients reports `drm-total-vram0: 0` and carries no per-engine busy-cycle
+line at all, so they have submitted nothing to either B70 - but zero DRM holders
+is what a record row means in this document, and this is not that. The 0.21-0.45%
+spreads are *evidence* they were quiescent, not proof. (docs/BENCHMARKS calls
+this condition **near-idle** on the spec-1.7 rows and the prefill docs call it
+**iterate**; it is one box state under two existing names, and neither is
+record.)
+
+**The two cards are not interchangeable, and only prefill sees it.** Same
+binary, same checkpoint, same ten minutes:
+
+| quantity | device 0 (`04:00.0`) | device 1 (`08:00.0`) | Δ |
+|---|---:|---:|---:|
+| pp4096 t/s, RTN | 1377.20 | 1330.82 | **−3.37%** |
+| pp4096 t/s, Vishva | 1374.87 | 1330.63 | −3.22% |
+| tg256 t/s, RTN | 32.37 | 32.31 | −0.19% |
+| tg256 t/s, Vishva | 29.42 | 29.31 | −0.37% |
+
+The separation is far outside the spreads and reproduces on both checkpoints:
+**prefill loses 3.2-3.4% on device 1, decode 0.2-0.4%** - a difference in
+sustained compute rather than in bandwidth, seen by the compute-bound workload
+and not by the bandwidth-bound one. Unattributed: neither B70 drives a display
+(the only connected connector on the box is `card0-HDMI-A-5`, on the GT 710),
+both report identical unprivileged PCIe link fields, and the `xe` frequency
+sysfs needs root. **The bolded rows are device 0** because every `--pp` row this
+spec has taken ran there - `tools/bench_decode.sh` silently dropped
+`ZE_AFFINITY_MASK` until `e44c40c` - and device 0's 1377.20 reproduces
+`42921d2`'s 1375.65 to **0.11%**, which is how we know the engine did not move.
+
+**Against vLLM, with the three labels that must travel with the number.**
+
+1. **Device-side vs HTTP-inclusive.** Ours spans the first prefill launch to the
+   first generated id present in `cur_token`, loader excluded. vLLM's `pp` is
+   `llama-benchy`'s `est_ppt = ttfr − probe latency` and contains HTTP receipt,
+   tokenization, scheduling and first-token sampling. **Ours is the narrower
+   quantity and is flattered by the comparison**; spec 3's server measures the
+   HTTP row and no equivalent is derived here.
+2. **Chunk width.** Ours is C = 2048; vLLM's 4096 is two chunked steps of 2048
+   (`max_num_batched_tokens` on a 32 GB card). The same width on both sides.
+3. **Checkpoint bytes.** 13.673 GB/token (RTN) against vLLM's 15.540 GB.
+
+**Label 3 does not matter for prefill, and that is new.** The byte-matched
+Vishva row measures **1374.87** against RTN's **1377.20** - **0.17% apart**,
+where the same two checkpoints are **9.9% apart on decode** (32.21 / 29.31).
+Prefill runs `lm_head` exactly once per prompt, for the last position
+(`step_head`, 0.35 ms/chunk measured), so the 1.867 GB/token asymmetry that
+decides the decode comparison is immaterial here. **The byte-matched row trails
+vLLM by 30.3% and the unmatched one by 30.2%**: on prefill there is no
+checkpoint advantage to subtract, and none to claim.
+
+**What the row replaces.** `Engine::ingest` replayed the decode list once per
+prompt id: **121 s for 4096 ids** (bench log `2a7df0b`, RTN, 29.5 ms/id). The
+same prompt is now **2.974 s** - **40.7×** (39.3× on device 1). That, and not
+the vLLM comparison, is what spec 2 set out to do.
+
+### The spec-2 decode control rows - `e44c40c`, 2026-09-05
+
+Spec §6 bar 5: decode re-measured once at the spec's final sha, on device 0
+where every historical row in this document was taken.
+
+| engine / checkpoint | depth | tg | runs (t/s) | **t/s** | **ms/token** | vs `2a7df0b` | grade |
+|---|---|---|---|---|---|---|---|
+| b70-decode `e44c40c`, `qwen38-27b-w4g64-rtn` | 4096 | 256 | 32.21 / 32.21 / 32.21 | **32.21** | **31.05** | 32.22 → **−0.031%** | iterate, median of 3 |
+| b70-decode `e44c40c`, `Vishva007` | 4096 | 256 | 29.32 / 29.31 / 29.28 | **29.31** | **34.12** | 29.33 → **−0.068%** | iterate, median of 3 |
+
+**Both inside the ≤ 0.09% day-scale drift this document measures**, so the
+spec-1.7 gate rows stand unchanged and prefill cost decode nothing. These are
+*not* new records - they are controls, and the recorded rows remain 32.22 and
+29.33 at `2a7df0b`. The RTN triple returned the identical row three times
+(spread 0.00%), the tightest this harness has read.
 
 ### The record rows - all three checkpoints, one idle box, 2026-08-26
 

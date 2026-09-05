@@ -91,6 +91,41 @@ b70-decode 2a7df0b   =                32.22 t/s  ->  441 GB/s  ->  74.7% MBU
 > 0.06% spread is inside their band. docs/BENCHMARKS, "The spec-1.7 gate
 > rows".
 
+> **The prefill verdict, 2026-09-05 at the spec-2 gate (`e44c40c`), gate row
+> 1 - SHORT, and the ceiling is the reason.** `pp4096` = **1377.20 t/s
+> device-side** (median of 3, spread 0.29%, iterate grade, RTN, C = 2048,
+> device 0) against vLLM's **1973 HTTP-inclusive** - **69.8%**. The same
+> three labels as the decode verdict, and one of them behaves differently:
+> 1. **Device-side vs HTTP-inclusive**, as above - ours is the narrower
+>    quantity, first prefill launch to the first id in `cur_token`, loader
+>    excluded. Spec 3 measures the HTTP row; none is derived here.
+> 2. **Chunk width** C = 2048 on both sides (vLLM's 4096 is 2 × 2048).
+> 3. **Checkpoint bytes are immaterial here.** Prefill runs `lm_head` once
+>    per prompt, so RTN and the byte-matched `Vishva007` measure **1377.20
+>    and 1374.87 - 0.17% apart**, where decode puts them 9.9% apart. There
+>    is no checkpoint advantage in this row to subtract, and none claimed.
+>
+> **The roofline arithmetic.** The forward pass is **48.97 GFLOP/token**
+> (derived, docs/03 shapes), so 4096 tokens in 2.974 s is **67.4 TFLOP/s
+> sustained** (derived) - **36.7% of the 183.5 TFLOP/s bf16 XMX rate this
+> project measured on the card**, and 1.47× the optimistic vector-only
+> ceiling (45.9 TFLOPS, estimated) that §1 of the spec said prefill could
+> not be reached from. vLLM's 1973 implies **~98 TFLOP/s (derived)**, 53%
+> of the same measured rate.
+>
+> **The implementation is at 98.8% of its own composed ceiling** (1393.8
+> t/s, derived from the profiled walk) **and the ceiling is at 70% of
+> vLLM.** Per chunk at C = 2048 the non-GDN terms alone - GEMM 656 +
+> dequant 205 + small kernels 131 + attention 83 = **1075 ms** - already
+> exceed the **1038 ms** that 1973 t/s allows for 2048 tokens, so **with GDN
+> at zero this design is still 3.6% slower than vLLM.** That is the "skill
+> or silicon" answer for prefill: the gap is the design, and the design is
+> a bf16 dequant scratch feeding `sycl-tla`'s stock bf16 mainloop, taken
+> because the int4 mixed-input mainloop measured 3.4× slower on this driver
+> (ruling A23). vLLM reaches 1973 on the mainloop we do not have.
+> [The spec-2 gate memo](superpowers/specs/2026-09-05-spec2-gate-memo.md);
+> two more GDN tasks and a strict-idle re-gate are queued behind it.
+
 **b70-decode does not beat vLLM. Measured 2026-08-25 at the spec 1.5 gate
 (`ef6acb0`), median of three runs on an idle box: 27.54 t/s at tg256, depth
 4096 - against vLLM's 31.50. That is 12.6% short, a factor of 1.144 the wrong
@@ -556,3 +591,12 @@ short of that baseline (it was 23.73 t/s / 24.7% short at `62bdd4d`, before the
 lever ladder). No `pp4096` figure exists yet: this engine has no prefill kernel
 (spec 2), so a prompt costs one decode replay per id - 4096 ids in 141.0 s,
 median **34.44 ms/token**, measured in the gate's own three runs.
+
+> **Superseded 2026-09-05 - `pp4096` exists.** The paragraph above describes
+> the engine before `Engine::prefill`, and its 141.0 s ingest is that engine's
+> own number at the spec-1.5 gate (the RTN figure quoted elsewhere, 121 s at
+> 29.5 ms/id, is a different checkpoint's ingest at `2a7df0b` - two
+> measurements of two checkpoints, not two values of one). At `e44c40c`
+> **`pp4096` = 1377.20 t/s device-side, 2.974 s for 4096 ids**, iterate grade,
+> against vLLM's 1973 HTTP-inclusive - the prefill verdict block at the top of
+> "Phase 1, measured" carries the labels and the ceiling arithmetic.
