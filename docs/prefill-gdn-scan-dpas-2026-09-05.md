@@ -897,3 +897,137 @@ ms/chunk) exceed the 1038 ms/chunk that 1973 t/s allows, so "beat vLLM on
 prefill" stays closed. This task moved the measured row from 70.9% to
 **71.4% of vLLM's 1973**, and the reverted DPAS scan would have taken it to
 about 78%.
+
+## 9. Invariants, and every deviation from the brief
+
+### 9.1 Suite
+
+`ctest` on the box, `ZE_AFFINITY_MASK=1`, at the reverted state: **60/60 pass,
+0 fail, 1 skip** (`prefill_gate_long_test` - `oracle-out-long` still needs the
+operator's `docker run`, so it skips cleanly with 77 as designed). Total
+422.57 s. No test binary was added and no test was changed: item 0's bar is
+`gdn_wy_test` case 7, which already existed.
+
+### 9.2 Numerics, all four gates, both checkpoints
+
+**Measured, `ZE_AFFINITY_MASK=1`, at the final code state:**
+
+| gate | Vishva | RTN |
+|---|---|---|
+| `prefill_gate_test` determined rows exact | **94/94** | **93/93** |
+| undetermined | 2 (1 agree + 1 other member) | 3 (2 agree + 1 other member) |
+| worst printed `gdn_state` cosine | **0.999780657** (L60, `code`) | **0.999847086** (L60, `code`) |
+| per-prompt `gdn_state` cosine | prose 0.999876346 (L60), code 0.999780657 (L60), cjk 0.999905334 (L33) | prose 0.999905880 (L60), code 0.999847086 (L60), cjk 0.999904818 (L33) |
+| `prefill_consistency_test` (A26) | **9/9**, 543 determined rows exact, 33 undetermined, 4 to the other member | **9/9**, 558 determined rows exact, 18 undetermined, 8 to the other member |
+| `prefill_determinism_test` | **9 cases × 3 runs bitwise** (`gdn_state`, `conv_ring`, `kv_k`, `kv_v`, control, `cur_token`) | - |
+
+**18 of 18 consistency cases, 1101 determined rows across both checkpoints, zero
+mismatches** - row for row task (b)'s table, including the undetermined and
+other-member counts, which is what bit equality predicts.
+
+`gdn_chunk_test`, **measured, all six cases green**, band identical to A22's,
+A27's, A28's and task (b)'s to four significant figures - and, this time, to
+every printed digit and every diagnostic count (§5).
+
+`gdn_wy_test`, **measured, case 7 green at C = 256 / 100 / 4096**: `pf_gdn_A2`
+bit-identical to `pf_gdn_A2_legacy` over 786,432 / 393,216 / 12,582,912 fp32
+entries, with the two differing buffer fills making it a coverage bar for the
+quadrant grid as well as an equality one. Cases 1-6 and 7a unchanged.
+
+### 9.3 Decode, re-proven after the last code commit
+
+| invariant | measured |
+|---|---|
+| kernel/module count | **774 kernels, 19 modules**, max_len 16384, persistent 1.24 GB |
+| kernel table | `kernel_table_test` OK |
+| replay determinism | `replay_determinism_test` OK - 8 tokens × 3 runs bitwise identical |
+| decode golden gate | `golden_gate_test` **94/94** determined rows exact, 2 undetermined (1 agree + 1 other member) |
+| prefill golden gate, Vishva / RTN | **94/94** / **93/93** |
+| prefill determinism | 9 cases × 3 runs bitwise |
+| prefill self-consistency (A26) | **18/18**, 1101 determined rows, 0 mismatches |
+| decode bench | **32.21 t/s** (31.04 ms/token), median of 3, min 32.19 max 32.22, spread **0.09%** |
+
+```
+| b70-decode cfcb4cb | 4096 | 256 | 32.21 | 31.04 |
+```
+
+**32.21 against `docs/BENCHMARKS.md`'s recorded 32.22 for this checkpoint is
+−0.031%**, inside that document's ≤ 0.09% day-scale drift band and equal to
+A28's and gate row 1's controls to the digit. Decode is untouched by
+construction - neither kernel this task edited is bound by
+`src/runtime/capture.cc`, the count is still 774/19 and the replay is still
+bitwise - and §7.2's tg-8 row (32.19 t/s, 0.50% spread) says the same from the
+other harness.
+
+### 9.4 Deviations
+
+1. **The DPAS scan is REVERTED, and the task therefore ships one change, not
+   two.** The pre-registration fixed "any gate failure → revert" in advance and
+   it fired (§4.4, §4.5). The DPAS kernel is kept in-tree as `pf_gdn_scan_dpas`
+   with its full design block; `src/runtime/prefill/gdn.cc` is untouched and
+   `pf_gdn_scan`'s body is byte-identical to `a89311f`'s.
+2. **`pf_gdn_scan_dpas` is launched by nothing, including tests.** The brief
+   says "kept in-tree as a test-only entry point". The literal reading would add
+   a test, but the only bars it could be held to are the band it passed and the
+   gate it failed, and wiring a reverted kernel into the suite would make the
+   suite depend on it and would double `gdn_chunk_test`'s runtime to re-measure
+   a number already recorded here. Cost of the choice: one entry point in a
+   module the runtime already loads, the same cost the four `_legacy` kernels
+   carry.
+3. **The DPAS fragment-layout probe is a standalone Level Zero program in
+   `/tmp/dpasprobe` on the box**, compiled there with `ocloc` + `g++` over plain
+   `ssh`/`scp` rather than through `tools/box.sh`. The Mac compiled nothing and
+   nothing in the repo references it. It is here because §3.1's three layouts are
+   an API fact: guessing them would have made the whole pre-registration rest on
+   a reading of cute's codomain convention, and the probe turned that into a
+   bit-exact measurement with two failing controls in ten minutes.
+4. **`tools/bench_decode.sh` was not modified, and both the `--pp 4096` row and
+   the decode bench row were taken with `ZE_AFFINITY_MASK` deliberately UNSET**
+   (device 0), which is what makes them series-continuous with 978.07, 1304.06,
+   1375.65, 1377.20 and 1398.00. **Every other piece of device work in this task
+   ran with `ZE_AFFINITY_MASK=1`**: all three profiled walks, `gdn_wy_test`,
+   `gdn_chunk_test`, all four gates on both checkpoints, both consistency runs,
+   the three decode structural tests, and the whole `ctest` suite.
+5. **Two published values existed for item 0's baseline** (task (b)'s 0.5889 and
+   0.5955). §0.1 fixes which one the bar uses and reports this session's control
+   beside it; no third value is coined.
+6. **Task (b)'s published worst `gdn_state` cosines do not reproduce in this
+   session; A27's do** (§4.4's note). Reported, not chased. It changes no
+   verdict.
+7. **The DPAS build has no `--pp` row.** Its whole-walk figure (2784.7 ms) is the
+   profiled binary's own single plain companion run and is labelled as such; no
+   8-run median was taken for a kernel that does not ship.
+8. **Per-kernel times are single profiled runs, not eight.** `--pp` is a
+   whole-process measurement with a cold 16 GB load; the per-kernel split comes
+   from `B70_PREFILL_PROFILE=1`, whose own cost the binary prints each time
+   (−4.6% / −4.9% / −5.3% on the three runs here). The eight-run median is
+   §7.2's row.
+9. **The `A2·vn` term was priced, not built as a variant** (§4.5). The brief
+   asked for a price; separating it would have meant a second DPAS build.
+10. **No mapping was iterated after its first measurement.** Item 0 is §1.2's
+    text and the DPAS kernel is §3.3's text; each was built once and each
+    number is that build's first.
+
+### 9.5 Box
+
+84 GB free at the start and 84 GB at the end; no disk error. No container was
+started, no process killed, nothing deleted, no server restarted. The only files
+written outside the repo are `/tmp/dpasprobe` (the layout probe) and
+`/tmp/gdnscandpas` (the IGC dump of §4.2) on the box.
+
+## 10. What this leaves for the controller
+
+* **Item 0 is adopted and the row is 1408.39 t/s = 71.4% of vLLM's 1973**, 0.06%
+  under its pre-registration.
+* **DPAS on this kernel is measured, not speculated.** 0.8491 ms/layer/chunk,
+  3.997×, 11.38 TFLOP/s, real `dpas.8x8`, no spill, every band bar met - and it
+  costs one determined golden token on RTN and 2.6× of one prompt's state L2
+  agreement on Vishva. A28's "(4) DPAS scan - a real task" is now answered: the
+  task was worth doing, the answer is that **plain bf16 DPAS is too coarse for
+  this recurrence**, and the ~1538 t/s it would have bought is priced.
+* **The one design that could still take it** is D3, split-bf16 hi/lo operands
+  for `S` and `D` (§4.6): ~2⁻¹⁷ instead of 2⁻⁹ on the state path, estimated
+  1.3-1.6 ms/layer/chunk, ~1500 t/s. It needs its own pre-registration and its
+  own band, and it is not built.
+* **A27's arithmetic still closes "beat vLLM on prefill"**: the non-GDN terms
+  alone exceed what 1973 t/s allows.
