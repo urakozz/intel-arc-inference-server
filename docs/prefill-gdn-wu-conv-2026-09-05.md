@@ -140,3 +140,67 @@ Full suite green (60 + the long gate, which may SKIP). Decode re-proven after
 the last commit: **774 kernels / 19 modules**, `replay_determinism_test`, golden
 **94/94 + 93/93**, and a decode bench row. Box: `ZE_AFFINITY_MASK=1`, 84 GB free
 at the start; any disk error stops the task.
+
+## 2. RESULT - `pf_gdn_conv` at 4.00×, bitwise
+
+Everything in this section was measured after §1 was committed at `c86a6ab`.
+Kernel at `src/kernels/prefill/pf_gdn_conv.cl`, grid decided in
+`src/runtime/prefill/gdn.cc`, bar asserted by `tests/prefill/gdn_conv_test.cc`
+case 7.
+
+### 2.1 Time, and the decision-rule verdict
+
+`ZE_AFFINITY_MASK=1 B70_PREFILL_PROFILE=1 b70-decode <RTN> --bench --pp 4096
+--tg 8`, one run, **measured** (31.6 ms over 96 waits):
+
+| | measured | |
+|---|---:|---|
+| `pf_gdn_conv`, ms per GDN layer per chunk | **0.3296** | |
+| the same before the rewrite, A27's (`bb5f1d5`) | 1.3182 | **4.00×** |
+| the same before the rewrite, this session's control (§0) | 1.3163 | 3.99× |
+| pre-registered bar | ≤ 0.45 (≥ 2.9×) | **HIT** |
+| point estimate | ~0.25 | missed by 32% |
+| rate on 125,829,120 B (derived) | **381.8 GB/s** | was 95.4 |
+
+**Decision-rule verdict: 4.00× ≥ 2× and bitwise identical → ADOPT.** The mapping
+was not iterated: 128 positions per block was fixed in §1.2 and the number above
+is that build's first and only measurement.
+
+Per-chunk consequence: 48 layers × (1.3182 − 0.3296) = **−47.45 ms/chunk**,
+**−94.9 ms over a 4096-token prefill** (derived), against the −84 ms A27 derived
+from an assumed 31% → ~93% occupancy alone.
+
+### 2.2 Where the remaining 35% of the bandwidth went
+
+381.8 GB/s is **64.7% of the 590 GB/s this device measures** (derived, on the
+same 125.83 MB of core traffic §1.1 priced; the three-position halo the blocking
+re-reads adds 1.90 MB = **1.5%**, so it is not the residue). What the number
+says plainly: the kernel has stopped being occupancy-bound - 640 work-groups is
+5 waves, and the pre-registered mechanism moved it 4× - and is now
+bandwidth-class on a 2:1 read/write mix. **The 1.5× that separates it from the
+device's pure-read figure is not attributed here**, because attributing it would
+mean a second mapping and a second measurement, which the brief's "one defect,
+one fix, one measurement" forbids. It is recorded as what is left on this
+kernel, and it is worth at most 0.12 ms/layer/chunk = 11 ms on a 4096-token
+prefill.
+
+### 2.3 Numerics: bitwise, as pre-registered
+
+`gdn_conv_test` at `ZE_AFFINITY_MASK=1`, **measured**, all seven cases green:
+
+| case | bar | measured |
+|---|---|---|
+| 7 - blocked vs `pf_gdn_conv_legacy`, C = 4096 (32 blocks) | bit equality | **41,943,040 `xb` words and 30,720 ring live words identical** |
+| 7 - the same two kernels over the 1 + 2 + 64 ragged walk | bit equality | **identical, `xb` and ring** |
+| 1 - vs `gdn_chunk_ref::conv` | ≤ 2 bf16 ulp | max **1** ulp, 41,942,899/41,943,040 exact (0.0003% differ) |
+| 1 - ring live slots vs the reference | bit-exact | **bit-exact**, 30,720 words |
+| 2 - 4 × 1024 vs 1 × 4096 | bit-identical | **bit-identical**, `xb` and ring |
+| 3 - 1 + 2 + 64 vs the first 67 rows | bit-identical | **bit-identical** |
+| 0, 4, 5, 6 | unchanged | unchanged and green |
+
+**No non-identical word, so there is no finding to report and the task
+continues to part 2.** Case 1's 141 words that differ from the *host* reference
+by one ulp are `silu`'s `exp` (3 ulp on the device, correctly rounded on the
+host) and are exactly the words that differed before the rewrite - case 7 is
+what says so, because it compares the two devices' outputs rather than either
+against the host.

@@ -38,6 +38,16 @@ constexpr uint32_t kConvGroups = kConvRows / 256;      // 40 work-groups of 256
 constexpr uint32_t kKHeads = Q::kGdnKHeads;            // 16
 constexpr uint32_t kStateColChunks = 4;                // gdn_step.cl's grid.y
 
+// Ruling A27: `pf_gdn_conv`'s position range is blocked, and this is the only
+// place the block count is decided. The kernel derives its own block WIDTH from
+// `get_num_groups(1)` rather than sharing this literal, so the two cannot
+// disagree about coverage; what this number buys is the grid. 128 positions per
+// block puts C = 2048 at 16 blocks = 640 work-groups = 10,240 threads (5 waves
+// of the 2048-slot machine, ~640 KB of loads in flight against the ~295 KB
+// Little's law asks for at 590 GB/s) while the three-position halo each block
+// re-reads stays at 2.3% of the block's work.
+constexpr uint32_t kConvBlock = 128;
+
 void require(bool ok, const std::string& what) {
   if (!ok) throw std::runtime_error("runtime::prefill::gdn_chunk: " + what);
 }
@@ -74,7 +84,10 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
             {PtrArg(conv_ring), PtrArg(p_seed), arg_val(pos)});
   profile_wait(cx, Phase::kGdnSeed);
   //  2 - the batched conv1d + SiLU over the chunk, and the ring writeback.
-  cx.launch(kc(conv, "pf_gdn_conv"), kConvGroups, 1, 1,
+  //      Grid.y is A27's position blocking; grid.x and the work-group are
+  //      unchanged.
+  const uint32_t conv_blocks = (C + kConvBlock - 1) / kConvBlock;
+  cx.launch(kc(conv, "pf_gdn_conv"), kConvGroups, conv_blocks, 1,
             {PtrArg(qkvz_partials), PtrArg(p_seed), PtrArg(small), PtrArg(p_xb),
              PtrArg(conv_ring), arg_val(pos), arg_val(C)});
   profile_wait(cx, Phase::kGdnConv);
