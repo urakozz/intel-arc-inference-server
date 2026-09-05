@@ -801,3 +801,99 @@ has been.
 scan passed its gates it would have been worth a further 96 × (3.3937 − 0.8491)
 = **−244.3 ms**, i.e. 2662.3 ms = **1538.5 t/s** (derived). That number is not a
 row and never will be; it is what the token cost.
+
+## 7. RESULT - the new `--pp 4096` row: 1408.39 t/s
+
+### 7.1 The grade, measured immediately before the row
+
+`/proc/*/fd` walked at **22:52:57**, **measured**:
+
+```
+285644 baobab  /dev/dri/renderD128 + renderD129 + renderD130
+285678 ptyxis  /dev/dri/renderD128 + renderD129 + renderD130
+```
+
+**Four holders on the two B70s, so the row is ITERATE grade**, by the rule fixed
+in §6. Load average 0.61, 84 GB free, no container, nothing killed.
+
+### 7.2 The row
+
+`tools/bench_decode.sh --pp 4096 --tg 8 --runs 8 --model <RTN>` at `e5d8250`,
+the unmodified harness with `ZE_AFFINITY_MASK` unset. **Measured:**
+
+```
+| b70-decode e5d8250 pp | 4096 | 2048 | 2908.3 | 1408.39 |
+| b70-decode e5d8250    | 4096 |    8 |   32.19 |  31.07 |
+```
+
+| row | median | min | max | spread |
+|---|---:|---:|---:|---:|
+| **pp 4096, C = 2048, device 0** | **1408.39 t/s** (2908.3 ms) | 1405.00 | 1417.09 | 12.09 (**0.86%**) |
+| tg 8 at depth 4096 | 32.19 t/s (31.07 ms/token) | 32.13 | 32.29 | 0.16 (0.50%) |
+
+Scored against §6:
+
+| | pre-registered (derived) | measured | |
+|---|---:|---:|---|
+| `--pp 4096` | 2906.6 ms | **2908.3 ms** | +1.7 ms |
+| | 1409.2 t/s | **1408.39 t/s** | **HIT, 0.06% under** |
+
+The tightest composition this project has recorded: task (b)'s was 0.89% under,
+A28's 2.4%, A27's within its band. That is what a single bitwise change with a
+clean per-kernel delta should look like, and it is the control that says the
+23.3 ms saving is real.
+
+Against task (b)'s row (`b2c42c7`, 1398.00 t/s / 2929.9 ms, same harness, same
+device 0, same iterate grade): **+0.74%, −21.6 ms.** The series, every row on
+device 0 and every one iterate:
+**978.07 → 1304.06 → 1375.65 → 1377.20 → 1398.00 → 1408.39 t/s**
+(49.6% → 66.1% → 69.7% → 69.8% → 70.9% → **71.4% of vLLM's 1973**).
+
+The 4096-id prefill is now **2.91 s** against the decode-replay ingest's
+**121 s** - a **41.6× cut**, measured, up from 41.3×.
+
+## 8. Where GDN's time goes after this task - priced, not fixed
+
+The profiled run that measured item 0 (§2.1), i.e. the final code state,
+`--pp 4096`, C = 2048, two chunks, `ZE_AFFINITY_MASK=1` (**measured**), with
+task (b)'s column beside it. `ms/layer/chunk` = the column ÷ 96.
+
+| launch | ms (2 chunks) | ms/layer/chunk | task (b)'s | Δ |
+|---|---:|---:|---:|---:|
+| `pf_gdn_seed` | 0.6 | 0.0058 | 0.0058 | 0.0% |
+| `pf_gdn_conv` | 31.6 | 0.3291 | 0.3296 | −0.2% |
+| `pf_gdn_l2norm` | 14.3 | 0.1492 | 0.1486 | +0.4% |
+| `pf_gdn_gate` | 2.0 | 0.0213 | 0.0213 | 0.0% |
+| `pf_gdn_A` | 31.6 | 0.3290 | 0.3281 | +0.3% |
+| `pf_gdn_solve` | 76.1 | 0.7932 | 0.7895 | +0.5% |
+| `pf_gdn_wu` | 89.7 | 0.9342 | 0.9314 | +0.3% |
+| **`pf_gdn_A2`** | **33.2** | **0.3459** | 0.5955 | **−41.9%** |
+| `pf_gdn_scan` | 327.1 | 3.4072 | 3.3935 | +0.4% |
+| GDN total (the nine above) | **606.2** | - | 628.2 | **−3.5%** |
+| `pf_gated_head` (outside the GDN total) | 30.7 | 0.3198 | 0.3189 | +0.3% |
+| whole profiled walk | **2860.0** | - | 2878.7 | −0.6% |
+
+Per chunk: GDN **303.1 ms** (was 314.1); GDN less the scan **139.5 ms** (was
+151.2). Per-chunk ceiling as now built (derived, 2860.0 / 2 = 1430.0 ms/chunk):
+**1432.2 t/s = 72.6% of vLLM's 1973**, against task (b)'s 1423.0 = 72.1%.
+
+The prefill's three largest terms are `gemm_bf16` **1391.6 ms (48.7%)**,
+`dequant` 412.7 (14.4%) and `pf_gdn_scan` 327.1 (11.4%). A23/A24 closed every
+lever on the first two.
+
+### 8.1 What this task leaves on the table, priced
+
+| lever | ms/layer/chunk | on `--pp 4096` | status |
+|---|---:|---:|---|
+| **`pf_gdn_scan` on DPAS** | 3.4072 → **0.8491** | −244.3 ms → ~1538 t/s | **MEASURED and REVERTED** - costs a determined token (§4.4). Kept as `pf_gdn_scan_dpas`. |
+| **D3, split-bf16 DPAS** | 3.4072 → **1.3-1.6 (estimated)** | ~−180 ms → ~1500 t/s | §4.6. A NEW pre-registration; not built. |
+| `pf_gdn_wu`'s un-unrolled `j` loop | 0.9342 | - | A28 §4.2 term 2; the width lever is dead (task (b) §2) |
+| `pf_gdn_solve` | 0.7932 | - | A28: sequential by algorithm (0.18 TFLOP/s), not a mapping problem |
+| `pf_gdn_conv`'s last 1.5× of bandwidth | 0.3291 | ≤ 11 ms | A28 §2.2, unattributed by choice |
+
+**A27's arithmetic is unchanged by this task**: the non-GDN terms alone
+(GEMM ~1392 + dequant 413 + small ~260 + attention ~165 per two chunks = 1115
+ms/chunk) exceed the 1038 ms/chunk that 1973 t/s allows, so "beat vLLM on
+prefill" stays closed. This task moved the measured row from 70.9% to
+**71.4% of vLLM's 1973**, and the reverted DPAS scan would have taken it to
+about 78%.
