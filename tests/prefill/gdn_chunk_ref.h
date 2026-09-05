@@ -94,6 +94,11 @@
 //     values. `gdn_wy_test` cases 7 and 7a hold both kernels **bit-identical**
 //     to `pf_gdn_A_legacy` / `pf_gdn_A2_legacy`, the pre-A28 text kept in the
 //     same `.cl`; docs/prefill-gdn-a2a-simd32-2026-09-05.md §3.2 and §5.2.
+//     **2026-09-05: `pf_gdn_A2`'s staging loop was replaced by `pf_gdn_A`'s
+//     (clamped row + `vload4`/`vstore4`) and, again, the order DID NOT CHANGE**
+//     - the staged value is still `bf16f(word) * Q_SCALE`, the same single fp32
+//     multiply of the same two values, so case 7 still holds bit equality.
+//     docs/prefill-gdn-scan-dpas-2026-09-05.md §1.
 //   * **the scan's two 128-term contractions (`w · S` and `q · S`) are ONE
 //     ascending-k `fma` chain per output** - `asc_dot` below, not `band_dot`.
 //     Ruling A25 rewrote `pf_gdn_scan` to give each work-item an output tile of

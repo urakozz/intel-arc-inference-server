@@ -359,6 +359,22 @@ __kernel void pf_gdn_A_legacy(__global const ushort* restrict xb,
 //       lanes store 32 contiguous fp32 of one A2 row -- a coalesced 128 B write.
 //       Four `fma` per four operand values takes the density to ~67%.
 //
+//     **A FIFTH change, 2026-09-05, item 0 of the DPAS-scan task: the staging
+//     loop above is now `pf_gdn_A`'s** (docs/prefill-gdn-scan-dpas-2026-09-05.md
+//     §1). As first built it was `for (p = lid; p < AQ*DIM; p += 256)` - one
+//     value per array per iteration with the `< L` test written as a ternary
+//     around a *load*, which IGC has to branch on - and the Xe2 ISA measured its
+//     body at **53 instructions per iteration, 848 per work-item, 47% of the
+//     kernel** (docs/prefill-gdn-a2a-simd32-2026-09-05.md §4.2). `pf_gdn_A`
+//     below was written the other way BEFORE it was built and measured 339.
+//     The back-port is exactly that text: clamp the ROW (`min(gi, L-1)` is
+//     always live, so the global read is unconditional and in bounds and the
+//     `< L` test becomes a select on the loaded value) and move four values at a
+//     time with one `vload4` of `ushort4` and one `vstore4` of `float4`, so the
+//     64-bit address arithmetic is paid once per four values instead of once per
+//     value. **The staged value is the same expression on the same word**, so
+//     this is still bit-identical to `pf_gdn_A2_legacy` - `gdn_wy_test` case 7.
+//
 //     **No rounding point moves and no sum is re-associated**: `tile_dot` above
 //     is `band_dot`'s expression, term for term. The bar is therefore bit
 //     equality against `pf_gdn_A2_legacy` below.
@@ -386,13 +402,21 @@ __kernel void pf_gdn_A2(__global const ushort* restrict xb,
   }
 
   __local float qs[AQ * DIM], ks[AQ * DIM];
-  for (uint p = lid; p < AQ * DIM; p += WG_TRI) {
-    const uint r = p / DIM, d = p % DIM;
+  const uint qbase = Q_OFF + kh * DIM, kbase = K_OFF + kh * DIM;
+  const float4 zero4 = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
+  for (uint p = lid; p < AQ * DIM / 4; p += WG_TRI) {
+    const uint r = p / (DIM / 4), d = (p % (DIM / 4)) * 4;
     const uint gi = iz * AQ + r, gj = jz * AQ + r;
-    qs[p] = gi < L
-                ? bf16f(xb[(size_t)(base_m + gi) * CONV_ROWS + Q_OFF + kh * DIM + d]) * Q_SCALE
-                : 0.0f;
-    ks[p] = gj < L ? bf16f(xb[(size_t)(base_m + gj) * CONV_ROWS + K_OFF + kh * DIM + d]) : 0.0f;
+    const ushort4 wq =
+        vload4(0, xb + (size_t)(base_m + min(gi, L - 1)) * CONV_ROWS + qbase + d);
+    vstore4(gi < L ? (float4)(bf16f(wq.s0) * Q_SCALE, bf16f(wq.s1) * Q_SCALE,
+                              bf16f(wq.s2) * Q_SCALE, bf16f(wq.s3) * Q_SCALE)
+                   : zero4,
+            0, qs + r * DIM + d);
+    const ushort4 wk =
+        vload4(0, xb + (size_t)(base_m + min(gj, L - 1)) * CONV_ROWS + kbase + d);
+    vstore4(gj < L ? (float4)(bf16f(wk.s0), bf16f(wk.s1), bf16f(wk.s2), bf16f(wk.s3)) : zero4,
+            0, ks + r * DIM + d);
   }
   barrier(CLK_LOCAL_MEM_FENCE);
 
