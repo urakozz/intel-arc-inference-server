@@ -77,6 +77,7 @@ add_ocloc_kernel(pf_ab_proj SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemv_bf16.cl
 add_ocloc_kernel(pf_gdn_conv SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_conv.cl
                  DEFINES NEGA_OFF=40960 DTBIAS_OFF=41008)
 add_ocloc_kernel(pf_gdn_wy SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_wy.cl)
+add_ocloc_kernel(pf_gdn_scan SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_scan.cl)
 
 # --- The execution-context probe (plan 6b Task 2) ---------------------------
 # Bound only by tests/prefill/context_test.cc; it proves the immediate list's
