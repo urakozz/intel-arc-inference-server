@@ -479,6 +479,29 @@ if(B70_PREFILL_ENABLED)
     LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   set_tests_properties(prefill_consistency_test prefill_determinism_test PROPERTIES
     LABELS "checkpoint;prefill" TIMEOUT 3600)
+
+  # Spec 2 §6.2: the multi-chunk golden gate. ONE oracle prompt of >= 2048 ids
+  # (`tools/oracle/make_long_prompt.sh` builds 2820 from the three committed id
+  # streams) gated at C = 1024, so every chunk boundary is crossed in
+  # attention-over-cache AND in the GDN state carry.
+  #
+  # **Plan 6b marked this row "expected-limited under L1" and that limitation is
+  # GONE.** It was the retired `PrefillScratch::kAttnC = 64` sub-chunk of ruling
+  # R5; ruling A14's composed attention runs the whole chunk in one pass, and
+  # `prefill_gate_test` at chunk 16 and 1024 already measures 62/62 determined
+  # rows exact on the short prompts. What is still untested here and nowhere
+  # else is DEPTH: 2820 positions of chunked GDN carry against 141.
+  #
+  # `oracle-out-long` does not exist yet: producing it is one CPU run inside the
+  # reference container, and the L1-engine stage is barred from starting
+  # containers (its brief's operational rules). The test SKIPs (77) until the
+  # directory is there, which is the same contract the other three golden
+  # registrations use, and tools/oracle/README.md carries the one command.
+  add_test(NAME prefill_gate_long_test COMMAND prefill_gate_test
+    ${CMAKE_SOURCE_DIR}/oracle-out-long ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+    ${B70_RTN_SNAPSHOT} long 1024)
+  set_tests_properties(prefill_gate_long_test PROPERTIES
+    LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
 endif()
 
 # --- b70-decode's host-side rejections ---------------------------------------
