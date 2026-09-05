@@ -1000,6 +1000,12 @@ bound by `src/runtime/capture.cc`, the count is still 774/19 and the replay is
 still bitwise - and §8.2's tg-8 row (32.19 t/s, 0.37% spread) says the same from
 the other harness.
 
+Everything in this table was measured at `b2c42c7`, the task's last **code**
+commit; the two commits after it change only a document and one comment block in
+`tests/prefill/gdn_chunk_ref.h`. The three structural decode tests -
+`kernel_table_test`, `replay_determinism_test` and `golden_gate_test` - were
+re-run on the synced tree at the final commit as well, and all three pass.
+
 ### 10.4 Deviations
 
 1. **The task delivers two changes, not three: item 1 was REVERTED.** SIMD32 on
