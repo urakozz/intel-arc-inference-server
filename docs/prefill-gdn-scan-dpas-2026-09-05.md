@@ -260,3 +260,310 @@ widths and every existing bar unmoved:
 Every host-side figure is task (b) §4.3's to the digit, which is what bit
 equality predicts. Cases 1, 2, 3, 6 and 7a unchanged and green (`A` and `w`/`u`
 still bit-identical to their own legacy kernels).
+
+---
+
+# PART 2 - the DPAS scan
+
+## 3. PRE-REGISTRATION (committed before the kernel was built)
+
+Everything in §3 was committed before a line of the DPAS kernel existed. §3.1 is
+the one thing measured before it: the operand layout the builtin expects, which
+is an API fact and not a design choice.
+
+### 3.1 The builtin, and its three fragment layouts - MEASURED, not read
+
+`intel_sub_group_bf16_bf16_matrix_mad_k16` is an unconditional IGC builtin
+(`.superpowers/.../explorer-3-dpas-prior-art.md` §1): bf16 × bf16 → fp32,
+`M ∈ {1,2,4,8}`, `K = 16`, `N = 16`, sub-group 16, and it lowers to a real
+`dpas.8x8`. Its signature at `M = 8` is
+`float8 (short8 a, int8 b, float8 acc)` (`~/sycl-tla/include/cute/arch/
+mma_xe_legacy_builtin.hpp:34`).
+
+The **fragment layouts** are the fact a design has to be built on, and reading
+`MMA_Traits<XE_DPAS_TT<...>>` (`~/sycl-tla/include/cute/atom/mma_traits_xe.hpp:
+86-95`) gives them only up to cute's codomain convention, which is exactly the
+kind of thing that is worth ten minutes and not worth guessing. A standalone
+probe (`/tmp/dpasprobe/dpas_probe.{cl,cc}` on the box: one `ocloc` binary, one
+120-line Level Zero host, nothing in the repo) computed one 8×16×16 product
+from small integers - every product and every 16-term sum exact in fp32, so the
+comparison is bit-exact and a layout error cannot hide in a rounding
+difference. **Measured, `ZE_AFFINITY_MASK=1`:**
+
+| hypothesis | result |
+|---|---|
+| **A: lane `l` holds `A[0..M-1][l]`** (one K column per lane, register index = m) | |
+| **B: lane `n` holds column `n`, VNNI pairs along K, `int r = (B[2r+1][n] << 16) \| B[2r][n]`** | |
+| **C: lane `n` holds `C[0..M-1][n]`** (one N column per lane, register index = m) | **0 of 128 entries mismatch - CONFIRMED** |
+| control: the same with the VNNI pair order swapped | 128/128 mismatch |
+| control: the same with A's fragment transposed | 127/128 mismatch |
+
+Both controls fail, so the pass is not an accident of the fixture. **Even `k`
+goes in the LOW half of each `int`, which is what a little-endian `uint` read of
+a k-contiguous bf16 row gives for free** - the fact the whole B-operand design
+below rests on.
+
+### 3.2 D1 is EMPTY, and this is stated plainly
+
+The brief's D1 - "DPAS only where both operands are already bf16" - **does not
+exist on this kernel.** Every one of the three stages has exactly one bf16
+operand and one fp32 one:
+
+| stage | matmul | bf16 today | fp32 today |
+|---|---|---|---|
+| 1 | `vn = u − W·S` | `W` (Q4, bf16 in memory), `u` (Q3) | **`S`** |
+| 2 | `o = (Q·S)·expg + A2·vn` | `Q` (`xb`, P6/P7) | **`S`**, **`A2`**, **`vn`** |
+| 3 | `S ← S·dl + Kᵀ·D` | `K` (`xb`, P7) | **`D = vn·exp(gl−gc)`** |
+
+`S` is the fp32 recurrent state, and `vn`/`D` are the fp32 intermediates the
+state is built from. D1 is therefore empty unless `S` is *carried* in bf16
+across sub-chunks, which is not a rounding at the DPAS input but a permanent
+truncation of the model's recurrent memory - a different kernel and a different
+model, not an optimisation. **The design is D2.**
+
+### 3.3 D2 - the design, fixed here before it is built
+
+**Grid: unchanged.** (48 heads, 4 state-column chunks) = **192 work-groups of
+256 = 16 subgroups × SIMD16**; work-group `(h, c)` owns state columns
+`[32c, 32c+32)`. The brief made the grid free; it is kept, and the reason is
+occupancy arithmetic rather than inertia: at 256 work-items an Xe-core holds
+**4 work-groups (64 of 64 thread slots)** and the launch needs 6 per core, so
+the wave structure is **1.5 waves - identical to A27's kernel**. Every grid that
+removes that factor (fewer, fatter work-groups) multiplies the per-lane
+accumulator count by 2 or 4; the state alone is already 16 fp32 per work-item,
+and `-abortOnSpill 4` turns a spill into a build failure. Holding the grid also
+keeps the two measurements comparable in the one variable that matters.
+
+**Orientation: stages 1 and 2 are computed TRANSPOSED, stage 3 is not.** This is
+the design's only non-obvious choice and it is what makes every fragment a
+single contiguous per-lane load:
+
+* stage 1 as `vnᵀ[32][64] = uᵀ − Sᵀ[32][128] · Wᵀ[128][64]`: `A = Sᵀ`
+  (M = 32 state columns, K = 128 kdim), `B = Wᵀ` (K = kdim, N = 64 positions).
+  The B fragment is then `W[position][16 consecutive kdim]` - **already VNNI
+  order in memory**, so it is one `vload8` of `uint` straight off `w`, with no
+  repack anywhere. The A fragment is 8 consecutive *columns* at one kdim row,
+  one `vload8` of `ushort` out of SLM.
+* stage 3 in the natural orientation `S[128][32] ← S·dl + Kᵀ[128][64]·D[64][32]`:
+  `A = Kᵀ` (M = kdim, K = position) is `xb`'s k row for one position, 8
+  consecutive kdim per lane - again one `vload8`; `B = D` (K = position,
+  N = column) needs D **transposed** in SLM, which costs 8 scattered 16-bit SLM
+  stores per work-item and buys a contiguous VNNI-ready `vload8` of `uint`.
+  The transposed orientation for stage 3 was priced and rejected: its B operand
+  would be `K` with positions on the K axis, which needs `k` staged transposed
+  in **16 KB** more SLM and drops residency to 3 work-groups per Xe-core = 2
+  waves.
+
+**Tile ownership.**
+
+| | C tile | M-tiles × N-tiles | per subgroup |
+|---|---|---|---|
+| stages 1-2 (`vnᵀ`, `oᵀ`) | 8 columns × 16 positions | 4 × 4 = 16 | **one** tile: `mt = sg >> 2` (columns `8mt..8mt+7`), `nt = sg & 3` (positions `16nt..16nt+15`); lane `n` ↔ position `16nt+n` |
+| stage 3 (`S`) | 8 kdim × 16 columns | 16 × 2 = 32 | **two** tiles: M-tile `sg` (kdim `8sg..8sg+7`), both N-tiles; lane `n` ↔ column `16nt+n` |
+
+Stage 3's C fragments **are the state**: 2 × `float8` = **16 fp32 per
+work-item**, exactly what A27's kernel already holds in registers, and the
+global `state` load/store is the same 16 coalesced 64 B lines it already is.
+
+**SLM, itemised (22,400 B):**
+
+| array | shape | bytes | why the stride |
+|---|---|---:|---|
+| `Sb` | `ushort[128][34]` - bf16 `S[k][x]` | 8,704 | 34 ushorts = 17 dwords, odd, so the 16 lanes' strided `vload8` hits 16 distinct banks |
+| `VNb` | `ushort[64][34]` - bf16 `vn[i][x]` | 4,352 | same |
+| `Dt` | `ushort[32][66]` - bf16 `D[i][x]`, **transposed** to `[x][i]` | 4,224 | 66 ushorts = 33 dwords, odd, same reason |
+| `A2b` | `uint[10][16][8]` - bf16 A2, VNNI-packed, the 10 live `(nt,kb)` blocks | 5,120 | 6 of the 16 blocks are entirely above the diagonal and are not stored |
+
+22,400 B is **below** A27's 25,088 B, so SLM is not the residency constraint at
+either kernel (threads are: 4 work-groups per Xe-core both times).
+
+**Barriers per sub-chunk: 3**, the same as A27's kernel - after staging
+(`Sb`, `A2b`), after stage 1 fills `VNb`/`Dt`, and at the end of the sub-chunk
+before the next one overwrites them.
+
+**DPAS count per work-item per sub-chunk: 26.5** - 8 (stage 1) + 8 (stage 2's
+`q·S`) + 2.5 average (stage 2's `A2·vn`; block `nt` needs `nt+1` of the 4
+K-blocks because `A2[i][j]` is exactly `0.0f` for `j > i`, so the blocks above
+the diagonal are skipped and the diagonal block's zeros contribute exact `+0`)
++ 8 (stage 3).
+
+**The short final sub-chunk.** Every global read whose row index could pass `L`
+is clamped with `min(pos, L-1)` - always a live row - and the results are simply
+not stored; `VNb` and `Dt` are written **exactly `0.0f`** for positions `≥ L`,
+which is what makes stage 3's clamped `Kᵀ` reads contribute exactly nothing.
+
+**The k-loops are written rolled.** If IGC's unrolling spills, the build fails
+under `-abortOnSpill 4` and the unroll factor is capped; that is a build fix,
+not a mapping change, and it is said here so it cannot be presented as one
+later.
+
+**Entry points.** `pf_gdn_scan` is the DPAS kernel and is what `gdn.cc` binds;
+**`pf_gdn_scan_vec` is A27's kernel kept verbatim in the same `.cl`**, launched
+by nothing - the fallback the decision rule names and the vector reference,
+exactly as `pf_gdn_wu_legacy` / `pf_gdn_A_legacy` / `pf_gdn_A2_legacy` /
+`pf_gdn_conv_legacy` are kept. **On a revert the two entry points swap names**,
+so the production kernel is always `pf_gdn_scan` and the test-only one is
+`pf_gdn_scan_dpas`.
+
+### 3.4 The FIVE new bf16 rounding points, named before they are measured
+
+D2's whole cost is here. `S` stays **fp32 as the master state** - stage 3's
+accumulation is fp32 out of DPAS and the register state, the global `gdn_state`
+and the chunk-to-chunk carry are all untouched fp32. What becomes bf16 is the
+**read** of `S` into the matmuls, and the intermediates on the DPAS inputs:
+
+| | rounding | reaches |
+|---|---|---|
+| **R1** | `S[k][x] → bf16` for stage 1's `w·S` | `vn` → `gdn_state` **and** `gdn_o` |
+| **R1′** | the same `Sb` for stage 2's `q·S` | `gdn_o` only |
+| **R2** | `vn[i][x] → bf16` as stage 2's A operand | `gdn_o` only |
+| **R3** | `vn[i][x]·exp(gl−gc[i]) → bf16` as stage 3's B operand | **`gdn_state` directly** |
+| **R4** | `A2[i][j] → bf16` as stage 2's B operand | `gdn_o` only |
+
+Decode has none of these and neither does the chunked CPU reference; they are
+new with this kernel, they are the reason A22's band is not this kernel's bar,
+and `tests/prefill/gdn_chunk_ref.h` is edited in the same commit to carry all
+five.
+
+**One rounding point MOVES and it moves in the safe direction.** P6 - the
+`1/√128` q-scale, "in fp32, after the l2norm's bf16 round" - is today applied
+**per term** (`bf16f(q) * Q_SCALE` inside the k-loop, 128 fp32 multiplies per
+output). On DPAS the A operand must be the bf16 word itself, so the scale is
+folded onto the **accumulated dot**: `o = (Σ q_raw·S)·(Q_SCALE·expg[i])`. That
+is one fp32 multiply where there were 128, it keeps P6 in fp32 and after the
+bf16 read exactly as A6 requires, and it **removes** roundings rather than
+adding them. It is still a change of order and it is recorded.
+
+### 3.5 The band: predicted, with the arithmetic, before it is measured
+
+bf16 keeps 8 mantissa bits, so RNE gives a relative error ≤ **2⁻⁹ = 1.95e-03**
+per rounded value. For a 128-term dot of random-sign terms the errors add in
+quadrature against a result that is itself a random walk of the same terms, so
+the *relative* error of `w·S` from R1 is **~2⁻⁹, not √128·2⁻⁹** - the √128
+amplification the brief names (2.2e-02) is the **worst-cancellation** case,
+where `|Σ|` is √128 below the term norm, and it is used below as the upper edge
+rather than the centre.
+
+The state already carries four 2⁻⁹ roundings with no twin in decode - Q1
+(`vb`), Q2 (`kb`), Q3 (`u`), Q4 (`w`), all in `pf_gdn_wu` - and they measure
+A22's **3.506e-02 max / 1.197e-03 mean** on `gdn_state`. R1 and R3 are two more
+of the same size on the same path (R3 is the sharpest of the five: it is a
+direct 2⁻⁹ relative rounding of the rank-1 update itself). Six independent
+equal sources instead of four is √(6/4) = **1.22×**; allowing R3 to count double
+gives **1.5×**. Predicted, therefore:
+
+| tensor (case 1) | A22's | **predicted** | **pre-registered bar** |
+|---|---:|---:|---:|
+| `gdn_state` max rel | 3.506e-02 | **~5.3e-02** | **≤ 1.05e-01** |
+| `gdn_state` mean rel | 1.197e-03 | **~1.8e-03** | **≤ 3.6e-03** |
+| `gdn_o` max rel | 5.039e-02 | ~8e-02 | ≤ 1.5e-01 |
+| `y` max rel | 9.567e-02 | ~1.5e-01 | ≤ 2.2e-01 |
+
+The bars are 3× A22's, i.e. twice the prediction. Justification, so they are not
+round numbers: the brief's worst-cancellation figure puts R1's contribution to
+`vn` at up to 2.2e-02 relative; added to A22's 3.506e-02 **linearly** (not in
+quadrature - the pessimistic composition) that is 5.7e-02, and 1.05e-01 leaves a
+further 1.8× on top of the pessimistic case.
+
+**Which case will show it, predicted now:** all three band cases compare against
+a reference with **no** bf16 state rounding - case 1 against the CPU fp32
+recurrent `gdn_ref::step`, cases 2 and 3 against decode's own `gdn_step_M1` on
+the device. **Case 3 (`C = 1` × 4096) is the sharpest and is predicted to grow
+the most in proportion**: there the chunk algebra collapses so that today's
+2.089e-02 is almost purely Q1/Q2, while the scan still rounds `S` and `vn` at
+every one of the 4096 single-position sub-chunks - the new roundings arrive
+undiluted. Predicted case 3 `gdn_state` max rel **~4e-02** (from 2.089e-02).
+
+**The `A2·vn` term, priced separately as the brief asks.** R2 and R4 are its
+two roundings. They reach **`gdn_o` and `y` only** - the state's path never
+touches `A2` - so **the A2·vn term cannot dominate `gdn_state`'s band, and the
+prediction is that it does not dominate `o`'s either**: it is a 2⁻⁹ relative
+perturbation of one of `o`'s two terms, against an `o` that already inherits the
+state's 3.5e-02. If `gdn_o`'s band grows materially more than `gdn_state`'s,
+that is this term and it will be named as such.
+
+**`gdn_chunk_test`'s own 2.5e-1 tripwire in `report()` is NOT moved**, and the
+named risk of this design is that `y` (9.567e-02 today) sits only **2.6×** below
+it: a 2.6× growth fails the test outright. That would be a finding and a revert,
+not a raised tripwire.
+
+**The arbiter is the token gate, whatever the band does:** `prefill_gate_test`
+**94/94 determined rows exact on Vishva and 93/93 on RTN**, every `gdn_state`
+cosine **> 0.999**; `prefill_determinism_test` 9 cases × 3 runs bitwise;
+`prefill_consistency_test` **18/18** under A26; `gdn_chunk_test` **6/6**,
+including cases 4, 5 and 6 - multi-chunk == single-chunk, the ragged
+`C = 100` == 64 + 36, and the same walk twice - which stay **bit-identical**
+because nothing in this design is order-dependent on the chunking or
+non-deterministic. Today's worst printed cosines are **0.999896667** (Vishva,
+L32) and **0.999884022** (RTN, L48), i.e. `1−cos ≈ 1.0e-04 / 1.2e-04; a 1.5×
+growth of the state's L2 error takes `1−cos` to ~2.3e-04 / 2.6e-04, so the
+prediction is **cosines stay above 0.9995**, with the 0.999 bar reached only at
+a 3× growth. **A golden regression is a finding**: diagnose which stage and
+which of R1-R4 moved, report it, revert. It is not a tolerance to loosen.
+
+### 3.6 Time, and the decision rule
+
+Instruction accounting per work-item per sub-chunk (SIMD16 instructions per
+thread; **derived**, and the point of it is that the DPAS pipe is not what this
+kernel will be limited by):
+
+| block | instructions |
+|---|---:|
+| `Sb` write: 16 `rne` + 16 `store.slm.d16` + addressing | ~45 |
+| `A2b` staging: 5 uints × (`vload2` + 2 `rne` + pack + store) + addressing | ~50 |
+| the gate: 1 gather of `g_cum`, `gl`, two `exp` | ~25 |
+| stage 1: 8 × (SLM `vload8` + global `vload8` + `dpas`) + addressing | ~50 |
+| stage 1 epilogue: `u` `vload8`, 8 widen, 8 sub, 8 `rne` + `vstore8` (`VNb`), 8 mul + 8 `rne` + 8 `store.slm.d16` (`Dt`) | ~65 |
+| stage 2 `q·S`: 8 × 3 + addressing | ~40 |
+| stage 2: scale, 2.5 × 3 for `A2·vn`, `o` `vstore8` | ~25 |
+| stage 3: 16 `mul` by `dl`, 4 A `vload8`, 8 B `vload8`, 8 `dpas`, addressing | ~50 |
+| barriers and loop overhead | ~15 |
+| **total** | **≈ 365** |
+
+against A27's measured **≈ 12,600** (`docs/prefill-gdn-scan-2026-09-05.md`
+§2.1) - **34.5× fewer instructions issued per thread**.
+
+* At A27's **measured** 0.52 instructions/XVE/clock: 3.3273 × 365/12,600 =
+  **0.096 ms**.
+* The DPAS pipe's own floor: 26.5 `dpas.8x8` × 32 sub-chunks × 3072 threads =
+  2.60e6 instructions × 8 clocks / 7.17e11 XVE-clocks/s = **0.029 ms**.
+* Neither is what will be measured, because with 34× fewer instructions between
+  the same 3 barriers per sub-chunk the kernel stops being issue-bound and
+  becomes latency- and barrier-bound, on a launch that is still 1.5 waves.
+
+**Point estimate 0.45 ms (derived)** - 4.7× the pure-issue figure, priced for
+exactly that. Sensitivity stated rather than hidden: at A27's issue rate 0.10 ms,
+at half of it 0.19 ms, at a fifth of it 0.48 ms. The bar does not depend on the
+estimate.
+
+Decision rule, fixed in advance (the brief's):
+
+| `pf_gdn_scan`, ms/layer/chunk | verdict |
+|---|---|
+| **≤ 1.0** | **adopt** |
+| 1.0 - 2.0 | adopt **if** the band and every gate hold; attribute the shortfall from the assembly |
+| > 2.0, **or** any band or gate failure | **REVERT** to A27's kernel; the DPAS kernel stays in-tree as `pf_gdn_scan_dpas`, launched only by tests; report |
+
+**`--pp 4096` consequence (derived)**, from task (b)'s measured row
+**2929.9 ms / 1398.00 t/s** (device 0, iterate), item 0's measured −23.3 ms, and
+96 × (3.3937 − t) with 3.3937 this session's control:
+
+| `t` | `--pp 4096` ms | t/s |
+|---|---:|---:|
+| 1.0 (the bar) | 2676.8 | **1529.8** |
+| 0.45 (point estimate) | 2624.0 | **1560.6** |
+
+So the pre-registered row is **1530-1561 t/s, point estimate 1561** (derived),
+taken **unmasked on device 0** for series continuity with 978.07 → 1304.06 →
+1375.65 → 1377.20 → 1398.00. A27's arithmetic is untouched by any of this: the
+non-GDN terms alone exceed what 1973 t/s allows, so "beat vLLM on prefill" stays
+closed.
+
+### 3.7 Invariants that must survive
+
+Full suite green (60 + the long gate, which may SKIP). Decode re-proven after
+the last code commit: **774 kernels / 19 modules**, `kernel_table_test`,
+`replay_determinism_test`, `golden_gate_test` 94/94, and a decode bench row.
+Box: `ZE_AFFINITY_MASK=1` for every piece of device work except the
+series-continuous `--pp` and decode bench rows; 84 GB free; any disk error stops
+the task.
