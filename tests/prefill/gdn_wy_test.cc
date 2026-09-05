@@ -180,7 +180,10 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
   l0::Mem d_u(d.ctx, l0::MemKind::Device, size_t(C) * R::kHeads * R::kDim * 2);
 
   // --- 1. pf_gdn_A ---------------------------------------------------------
-  d.cx.launch(d.k("pf_gdn_A"), R::kHeads, nch, 1,
+  // Filled before the launch for case 7's sake: the quadrant grid means an
+  // entry no quadrant wrote must fail the memcmp rather than pass it.
+  d.imm.fill(d_A.ptr(), 0x11111111u, d_A.size());
+  d.cx.launch(d.k("pf_gdn_A"), R::kHeads, nch, 4,
               {PtrArg(d_xb.ptr()), PtrArg(d_g.ptr()), PtrArg(d_beta.ptr()), PtrArg(d_A.ptr()),
                arg_val(C)});
   d.cx.wait();
@@ -213,6 +216,26 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
     CHECK_EQ(c.nonzero, expect_nz);
     CHECK_EQ(c.nonzero_got, expect_nz);   // the DEVICE's mask, not just the reference's
     CHECK(c.max_ulp <= 4);
+  }
+
+  // --- 7a. ruling A28's bar for pf_gdn_A: BITWISE IDENTITY -----------------
+  // Here rather than beside case 7's A2 half, because `pf_gdn_solve` overwrites
+  // `d_A` with T in place two lines below, so this is the only point at which
+  // the device's `A` still exists. Same argument as case 7: the re-tile
+  // re-associates nothing, so the bar is bit equality against `pf_gdn_A_legacy`
+  // and not a band, and the differing fills make it a coverage bar for the
+  // quadrant grid too.
+  {
+    l0::Mem d_AL(d.ctx, l0::MemKind::Device, tri * 4);
+    d.imm.fill(d_AL.ptr(), 0x22222222u, d_AL.size());
+    d.cx.launch(d.k("pf_gdn_A_legacy"), R::kHeads, nch, 1,
+                {PtrArg(d_xb.ptr()), PtrArg(d_g.ptr()), PtrArg(d_beta.ptr()), PtrArg(d_AL.ptr()),
+                 arg_val(C)});
+    d.cx.wait();
+    std::vector<float> leg(tri);
+    pf_harness::download(d.imm, leg, d_AL);
+    CHECK(std::memcmp(A_got.data(), leg.data(), tri * 4) == 0);
+    std::printf("  A   : tiled == legacy, BITWISE - %zu fp32 entries\n", tri);
   }
 
   // --- 2. pf_gdn_solve, graded by the algebraic identity -------------------

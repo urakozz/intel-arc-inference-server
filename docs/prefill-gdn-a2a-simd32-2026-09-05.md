@@ -687,3 +687,130 @@ reasons applied unchanged, with the same fallback:
 * **The arbiter:** `prefill_gate_test` 94/94 Vishva and 93/93 RTN,
   `prefill_determinism_test` 9 × 3 bitwise, `prefill_consistency_test` 18/18,
   `gdn_chunk_test` 6/6. A golden regression is a finding, not a tolerance.
+
+## 6. RESULT - `pf_gdn_A` at 1.870×, bitwise, bar HIT
+
+Everything in this section was measured after §5 was committed at `cb74f45`.
+
+### 6.1 Time, and the decision-rule verdict
+
+`ZE_AFFINITY_MASK=1 B70_PREFILL_PROFILE=1 b70-decode <RTN> --bench --pp 4096
+--tg 8`, one run, **measured** (31.5 ms over 96 waits):
+
+| | measured | |
+|---|---:|---|
+| `pf_gdn_A`, ms per GDN layer per chunk | **0.3281** | |
+| the same before the rewrite, A28's (`42921d2`) | 0.6136 | **1.870×** |
+| the same before the rewrite, this session's control (§0) | 0.6136 | 1.870× |
+| pre-registered bar | ≤ 0.4091 (≥ 1.5×) | **HIT** |
+| point estimate | 0.30 | missed by 9%, inside §5.3's 0.252-0.400 bracket |
+| rate on 0.793 GFLOP/layer/chunk (derived) | **2.417 TFLOP/s** | was 1.29 |
+
+**Decision-rule verdict: 1.870× ≥ 1.5× and bitwise identical → ADOPT.** The
+mapping was not iterated: §5.2's mapping is what was built and 0.3281 is that
+build's first and only measurement.
+
+Per-chunk consequence: 48 × (0.6136 − 0.3281) = **−13.7 ms/chunk**, **−27.4 ms
+over a 4096-token prefill** (derived).
+
+`pf_gdn_A2` reads **0.5955** in this run against **0.5889** in its own (§4.1) -
+1.1% apart, two labelled runs of the same code, and neither is a correction of
+the other. `pf_gdn_solve` reads 0.7895 against §0's 0.7458 (+5.9%) on code
+nobody has touched; that is the instrument's session drift and §7.2 reports it
+rather than subtracting it.
+
+### 6.2 Where it came from, off the Xe2 ISA
+
+`ocloc` on the committed `pf_gdn_wy.cl`, with `pf_gdn_A_legacy` in the same
+binary. **Measured:**
+
+| | legacy | tiled |
+|---|---:|---:|
+| `simd_size` / `grf_count` / `slm_size` | 16 / 128 / 16,896 | **16 / 128 / 32,768** |
+| resident work-groups × threads per Xe-core (derived) | 4 × 16 = **64 of 64** | 4 × 16 = **64 of 64** |
+| spill | none | **none** |
+| contraction block, instructions | 898 per output | **1099 for all four** |
+| `mad` in it | 130 | **520** |
+| **FMA density** | **14.5%** | **47%** |
+| operand reads | 131 × `load.slm.d32` | **128 × `load.slm.d32x4`** |
+| bf16 widen in the contraction | 516 instructions | **0** |
+| **staging, whole kernel** | (inside `stage_rows`) | **339 instructions, fully unrolled** |
+| - of which SLM writes | scalar | **8 × `store.slm.d32x4`** |
+| - of which global reads | scalar `d16u32` | **16 × `load.ugm.d32`** (2 per 4 words) |
+
+**§5.2's staging fix is the difference between this result and item 2's.** The
+clamped row plus a `select` and four values per `vload4`/`vstore4` put the whole
+staging at **339 instructions** where `pf_gdn_A2`'s measured **848** - and when
+`iz == jz` the `kjs` half is skipped, taking two of the three live quadrants to
+~180. What is left in it is the bf16 unpack itself (123 `mov` + 42 `shl` for 32
+values = 5.2 per value), which is irreducible while `xb` is bf16.
+
+**The arithmetic, composed (derived, per head per chunk):**
+
+| | legacy | tiled |
+|---|---:|---:|
+| work-groups × threads | 1 × 16 | 4 × 16 (3 live + 1 zero-writer) |
+| instructions per work-item | ~14,400 (10 of 16 iterations live) | **1,493** split / **~1,333** not |
+| instructions issued | **144,000** | **~67,200** |
+| ratio | | **2.14×** |
+| measured ms | 0.6136 | **0.3281** |
+| issue rate, instructions/XVE/clock (derived) | 0.502 | **0.439** |
+
+2.14× of instructions × 0.874 of issue rate = **1.87×**, the measured number.
+The issue rate fell 13% - a 47%-density block of dependent `mad` chains has less
+independent integer work to interleave than a 14.5%-density one did - and that
+is the whole residue; **the occupancy this kernel already had was kept, which is
+what §5.2 set out to do.**
+
+### 6.3 Numerics: bitwise, as pre-registered
+
+`gdn_wy_test` at `ZE_AFFINITY_MASK=1`, **measured**, case 7a green at all three
+widths, and every existing bar unmoved:
+
+| width | bar | measured |
+|---|---|---|
+| C = 256 | `A` bit-identical to `pf_gdn_A_legacy` | **786,432 fp32 entries identical** |
+| C = 100 (ragged, L = 36) | the same | **393,216 entries identical** |
+| C = 4096 | the same | **12,582,912 entries identical** |
+| case 1, C = 4096 | ≤ 4 fp32 ulp vs `gdn_chunk_ref::mat_A` | max **4** (max rel 2.851e-07), 10,076,159/12,582,912 exact |
+| case 1 | device non-zero count = `Σ 48·L(L−1)/2` | **6,193,152 = 6,193,152** |
+| case 1 | exactly `0.0f` on every `i <= j` entry (the **strict** mask) | 6,389,760 masked entries, all `0.0f` |
+| case 2 | `\|(I+A)T − I\| ≤ L·u·max\|T\|` on the device's own `A` and `T` | 3.595e-08 vs 7.629e-06 |
+| case 5 | `0.0f` outside `[0,L)²` at the ragged tail | green |
+
+The comparison is taken **before `pf_gdn_solve` overwrites `A` with `T` in
+place** - that is why case 7a sits next to case 1 in the file rather than beside
+case 7. The two buffers are pre-filled `0x11111111` and `0x22222222`, so the
+quadrant grid's coverage rides on the same `memcmp`. Every printed figure is
+A28's to the digit, which is what bit equality predicts.
+
+---
+
+# PART 4 - the composed result
+
+## 7. PRE-REGISTRATION of the `--pp 4096` row (committed before it was taken)
+
+Composed from the **measured** gate row - `docs/superpowers/specs/`'s spec 2
+gate, `e6da455`, RTN, **1377.20 t/s / 2974.2 ms**, 8-run median, device 0,
+iterate - and 96 = 48 GDN layers × 2 chunks:
+
+| term | ms | source |
+|---|---:|---|
+| baseline | 2974.2 | measured, gate row 1 |
+| `pf_gdn_wu` - SIMD32 reverted | **0** | §2.1: the change is not in the tree |
+| `pf_gdn_A2` 1.0313 → 0.5889 | **−42.5** | measured, §4.1 |
+| `pf_gdn_A` 0.6136 → 0.3281 | **−27.4** | measured, §6.1 |
+| **pre-registered** | **2904.3** | **1410.5 t/s** (derived) |
+
+**How it is taken, fixed before the run.** `tools/bench_decode.sh --pp 4096
+--tg 8 --runs 8 --model <RTN>`, unmodified, **with `ZE_AFFINITY_MASK` left
+unset** so the run lands on device 0. That is deliberate and it is the gate's
+finding: the two B70s are not interchangeable - device 1 is 3.37% slower on
+prefill - and every prior `--pp` row in this project (978.07, 1304.06, 1375.65,
+1377.20) ran on device 0 because the harness dropped the environment. The row
+below is therefore **series-continuous** with all four. Every other piece of
+device work in this task ran with `ZE_AFFINITY_MASK=1`.
+
+**Grade, fixed before the run:** the DRM holder count is measured on both render
+nodes immediately before the row. Zero holders on `renderD129` and `renderD130`
+would make it record grade; any holder makes it **iterate**, as gate row 1 was.
