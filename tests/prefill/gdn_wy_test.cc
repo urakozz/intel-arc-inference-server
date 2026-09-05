@@ -34,6 +34,14 @@
 //      `j >= L` is exactly 0.0f in `A`, `T` (**including the dead diagonal** -
 //      the kernel must not write the identity past L) and `A2`, and `w`/`u`
 //      rows >= L are untouched.
+//   6. **ruling A27's bar: `pf_gdn_wu` BITWISE IDENTICAL to
+//      `pf_gdn_wu_legacy`**, the kernel exactly as it stood before it was
+//      re-tiled. The rewrite re-associates nothing - every output is still one
+//      accumulator over `j` ascending with `fma` over the same `T` and the same
+//      Q1/Q2-rounded operands - so bit equality is the pre-registered outcome
+//      rather than a band, and device-vs-device is the only comparison that can
+//      carry it for `w` (whose Q2 factor is an `exp`). The two runs are filled
+//      with different patterns first, so the memcmp is a coverage bar too.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -260,7 +268,12 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
   }
 
   // --- 3. pf_gdn_wu, fed the device's own T --------------------------------
-  d.cx.launch(d.k("pf_gdn_wu"), R::kHeads, nch, 1,
+  // The fill is case 6's, not case 3's: a word neither kernel writes would
+  // otherwise compare equal there and hide a coverage gap. 0x1111 here and
+  // 0x2222 for the legacy run, so an unwritten word fails rather than passes.
+  d.imm.fill(d_w.ptr(), 0x11111111u, d_w.size());
+  d.imm.fill(d_u.ptr(), 0x11111111u, d_u.size());
+  d.cx.launch(d.k("pf_gdn_wu"), R::kHeads, nch, 2,
               {PtrArg(d_xb.ptr()), PtrArg(d_A.ptr()), PtrArg(d_g.ptr()), PtrArg(d_beta.ptr()),
                PtrArg(d_w.ptr()), PtrArg(d_u.ptr()), arg_val(C)});
   d.cx.wait();
@@ -343,6 +356,42 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
     // asserted: RMS is not the scale of a per-element quantity whose values
     // span three orders of magnitude.
     CHECK(gate_ulp[1] <= 2);   // >= rms/4
+  }
+
+  // --- 6. ruling A27's bar: BITWISE IDENTITY to the pre-rewrite kernel ------
+  // `pf_gdn_wu` was re-tiled (an 8 x 2 output tile on a mirror-paired position
+  // block, fp32 operands in SLM, T staged transposed, grid.z splitting the 128
+  // output columns) and **re-associates nothing**: every output is still one
+  // accumulator over `j` ascending with `fma`, over the same `T` and the same
+  // Q1/Q2-rounded operands. So the pre-registered bar is bit equality against
+  // `pf_gdn_wu_legacy` -- the kernel exactly as it stood -- and not a band.
+  //
+  // It is a device-vs-device comparison because that is the only one that can
+  // be bit-exact for `w`: Q2 carries `exp(gc[j])`, 3 ulp on the device and
+  // correctly rounded on the host, which is why case 3's host bar for `w` is
+  // 2 ulp on a gate while `u`'s is equality. Run at every width `main` asks
+  // for, so C = 100's ragged L = 36 tail is covered.
+  {
+    l0::Mem d_wL(d.ctx, l0::MemKind::Device, size_t(C) * R::kHeads * R::kDim * 2);
+    l0::Mem d_uL(d.ctx, l0::MemKind::Device, size_t(C) * R::kHeads * R::kDim * 2);
+    d.imm.fill(d_wL.ptr(), 0x22222222u, d_wL.size());
+    d.imm.fill(d_uL.ptr(), 0x22222222u, d_uL.size());
+    d.cx.launch(d.k("pf_gdn_wu_legacy"), R::kHeads, nch, 1,
+                {PtrArg(d_xb.ptr()), PtrArg(d_A.ptr()), PtrArg(d_g.ptr()), PtrArg(d_beta.ptr()),
+                 PtrArg(d_wL.ptr()), PtrArg(d_uL.ptr()), arg_val(C)});
+    d.cx.wait();
+    const size_t n = size_t(C) * R::kHeads * R::kDim;
+    std::vector<uint16_t> wN(n), uN(n), wL(n), uL(n);
+    pf_harness::download(d.imm, wN, d_w);
+    pf_harness::download(d.imm, uN, d_u);
+    pf_harness::download(d.imm, wL, d_wL);
+    pf_harness::download(d.imm, uL, d_uL);
+    // The two fills differ, so a word NEITHER kernel wrote fails the memcmp
+    // instead of passing it -- which makes this a coverage bar as well as an
+    // equality one, and matters because the tiled kernel's grid is 3-D.
+    CHECK(std::memcmp(wN.data(), wL.data(), n * 2) == 0);
+    CHECK(std::memcmp(uN.data(), uL.data(), n * 2) == 0);
+    std::printf("  w,u : tiled == legacy, BITWISE - %zu words each\n", n);
   }
 
   // --- 4. pf_gdn_A2 --------------------------------------------------------

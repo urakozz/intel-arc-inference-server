@@ -97,7 +97,23 @@
 //     The pre-registration for the re-measured band is
 //     docs/prefill-gdn-scan-2026-09-05.md §1.3.
 //   * every triangular sum (`u`, `w`, and o's A2 term) runs `j` ASCENDING with
-//     explicit `fma` and one accumulator.
+//     explicit `fma` and one accumulator. **Ruling A27 re-tiled `pf_gdn_wu`
+//     (an 8 x 2 output tile on a mirror-paired position block, `vb`/`kb` staged
+//     in SLM as fp32, `T` staged transposed, the 128 output columns split
+//     across grid.z) and this line did NOT have to change** - that is the fact
+//     worth recording here rather than a new order. The re-tiling changes which
+//     work-item owns which output and how many times each operand is loaded;
+//     it does not change that each output is one ascending-`j` `fma` chain over
+//     the same values, so `wu` below is bit-for-bit what the kernel computes and
+//     `gdn_wy_test` case 6 asserts kernel-vs-kernel bit equality on top. Note
+//     that this file already stages `vb`/`kb` as widened fp32 (`f32(rne(...))`
+//     below), which is exactly what the kernel's SLM now holds: the rounding
+//     point Q1/Q2 is unmoved, only the container changed.
+//     The tiled kernel's shared `j` range over-runs a block's triangle by 12 of
+//     260 `(i,j)` pairs; those terms are `fma(0.0f, vb, acc)` because
+//     `pf_gdn_solve` writes exactly `0.0f` above the diagonal, and adding `+0.0`
+//     to an accumulator that started at `+0.0` is the identity in fp32. This
+//     reference does not model them, and does not need to.
 //   * the cumulative gate is an ascending fp32 running sum inside a 64-chunk,
 //     restarting at every chunk boundary (`tl.cumsum`'s order).
 //   * `1.0f / sqrt(x)`, never `rsqrt`; explicit `fma`; plain `exp`, never

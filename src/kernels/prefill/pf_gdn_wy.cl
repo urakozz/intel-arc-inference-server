@@ -65,6 +65,13 @@
 #define WG_TRI 256        /* pf_gdn_A / pf_gdn_A2 / pf_gdn_wu */
 #define WG_SOLVE 64       /* one lane per column j */
 
+/* pf_gdn_wu's tiling after ruling A27 - see the header block above (4). */
+#define SG 16             /* SIMD16: 16 subgroups of 16 lanes */
+#define WU_COLS 64        /* output columns per work-group: 128 / 2 (grid.z) */
+#define TS_LD 68          /* TsT's row stride: 64 padded to a multiple of 4 */
+#define PB 4              /* positions per block; each subgroup owns two blocks */
+#define VPW 2             /* output columns per lane */
+
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
 inline ushort rne_bf16(float f) {
@@ -230,17 +237,189 @@ __kernel void pf_gdn_solve(__global float* restrict A, uint c_count) {
 
 // ---------------------------------------------------------------------------
 // (4) vb/kb (Q1/Q2), then u = T*vb and w = T*kb (Q3/Q4), stored bf16.
-//     Grid (48, nchunks), WG 256. SLM: Ts[64][64] fp32 (16 KB) + vbs and kbs
-//     [64][128] bf16 (16 KB each) = 48 KB.
+//
+//     REWRITTEN under ruling A27 (2026-09-05): an output tile, fp32 operands in
+//     SLM, and a MIRROR-PAIRED position block.
+//     ------------------------------------------------------------------------
+//     As delivered by L1-core this was `for (p = lid; p < L*DIM; p += 256)` -
+//     **one output `(i, x)` per work-item per step, with no tile**. Each output
+//     streamed its whole `j <= i` chain out of SLM: per `j`, `Ts[i*64+j]` plus
+//     `vbs[j*128+x]` and `kbs[j*128+x]` (bf16, each needing the `shl`/`mov`
+//     widen) for **2 FMAs**, with `Ts[i][j]` re-loaded for every `x` and
+//     `vb[j][x]` for every `i`. It measured **2.0595 ms per GDN layer per chunk
+//     = 0.79 TFLOP/s** on 1.636 GFLOP (docs/prefill-gdn-scan-2026-09-05.md
+//     §5.1), ~18% FMA density.
+//
+//     Four changes, and nothing else:
+//
+//     * **Grid (48 heads, nchunks, 2).** `get_group_id(2)` picks which 64 of the
+//       128 output columns this work-group owns. That halves the operand
+//       staging, which is what buys the fp32 staging below inside the same SLM
+//       budget class, and it doubles the launch to 3072 work-groups.
+//     * **`vbs`/`kbs` are staged as fp32**, holding `f32(rne(...))` - the SAME
+//       rounded bf16 value, widened once at staging instead of once per use, so
+//       **the widen leaves the inner loop entirely**. Q1 and Q2 are unmoved:
+//       what changed is the container, not the rounding, and a bf16 value is
+//       exact in fp32 by construction.
+//     * **`T` is staged TRANSPOSED**, `TsT[j][i] = T[i][j]`, at row stride
+//       TS_LD = 68 so that four consecutive `i` at one `j` are one 16 B aligned
+//       vector read. 68 rather than 65 (conflict-free writes, unaligned reads)
+//       or 64 (aligned reads, 16-way conflicted writes): it leaves a 4-way bank
+//       conflict on the 16 staging writes each work-item does, ~3% of compute.
+//     * **An 8 x 2 output tile per work-item, whose 8 positions are a MIRROR
+//       PAIR.** Subgroup `sgid` takes `cs = sgid & 1` (which 32 of the 64
+//       columns) and `b = sgid >> 1` (which pair of position blocks); lane `l`
+//       owns the two CONSECUTIVE columns `32*cs + 2l` and `+1`, so a subgroup
+//       reads 128 contiguous bytes of `vbs` and of `kbs` per `j`.
+//
+//       **Why mirrored, and not 8 consecutive positions.** The sum is
+//       triangular. A tile of `i = 56..63` would carry 484 of the work-group's
+//       2080 `(i,j)` pairs against a mean of 260 - 1.86x - and a work-group
+//       finishes when its slowest subgroup does. Pairing the low block `4b..4b+3`
+//       with its mirror `60-4b..63-4b` gives EVERY subgroup exactly
+//       `(16b+10) + (16(15-b)+10) = 260` pairs.
+//
+//     The loop runs in two phases so it is exactly as long as it must be: phase
+//     A over `j = 0 .. min(4b+3, L-1)` with both blocks, phase B over the rest
+//     of the high block's range with the high block alone. **Ascending `j`, one
+//     accumulator per output, contiguous across the two phases - so the
+//     association is the one `gdn_chunk_ref::wu` documents, unchanged, and the
+//     bar is bit equality against `pf_gdn_wu_legacy` below.**
+//
+//     No mask is needed on the triangle: `pf_gdn_solve` writes exactly `0.0f`
+//     for `j > i`, so the 12 of 260 pairs (4.6%) a block's shared `j` range
+//     over-runs cost `fma(0.0f, vb, acc)`, which is a bitwise no-op - `0*x` is
+//     `+/-0` for finite `x`, `acc` is never `-0.0f` (it starts at `+0.0f` and an
+//     exactly-cancelling sum returns `+0.0f` under round-to-nearest), and
+//     `acc + 0.0f` is `acc`. The `j` range is still clamped to `L-1`, so no
+//     work-item reads a `vbs`/`kbs` row the staging loop did not write.
+//
+//     SLM: TsT 64x68 fp32 (17,408 B) + vbs and kbs 64x64 fp32 (16,384 B each)
+//     + bts/egs (512 B) = **50,688 B**, against the previous 49,152 B.
 //       w, u  bf16 [C][48][128], indexed ((m * 48 + h) * 128 + x)
 // ---------------------------------------------------------------------------
 __attribute__((reqd_work_group_size(WG_TRI, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void pf_gdn_wu(__global const ushort* restrict xb,
                         __global const float* restrict T,
                         __global const float* restrict g_cum,
                         __global const float* restrict beta,
                         __global ushort* restrict w,
                         __global ushort* restrict u, uint c_count) {
+  const uint h = get_group_id(0), chunk = get_group_id(1), cxh = get_group_id(2);
+  const uint kh = h / 3;
+  const uint base_m = chunk * CT;
+  const uint L = min((uint)CT, c_count - base_m);
+  const uint lid = get_local_id(0);
+  const uint sgid = lid / SG, lane = lid % SG;
+  const uint cs = sgid & 1u;                 // which 32 of this group's 64 columns
+  const uint b = sgid >> 1;                  // which mirror pair of position blocks
+  const uint c0 = cs * (SG * VPW) + lane * VPW;   // first column inside the 64-wide half
+  const uint dcol = cxh * WU_COLS;                // the half's base in the 128-wide head dim
+
+  __local float TsT[CT * TS_LD];
+  __local float vbs[CT * WU_COLS], kbs[CT * WU_COLS];
+  __local float bts[CT], egs[CT];
+
+  __global const float* restrict Tt = T + ((size_t)(chunk * HEADS + h) * CT) * CT;
+  // TsT[j][i] = T[i][j]. The global read is coalesced; the SLM write strides by
+  // TS_LD, which is the 4-way conflict the header prices.
+  for (uint p = lid; p < CT * CT; p += WG_TRI) TsT[(p % CT) * TS_LD + (p / CT)] = Tt[p];
+  if (lid < L) {
+    const size_t idx = (size_t)(base_m + lid) * HEADS + h;
+    bts[lid] = beta[idx];
+    egs[lid] = exp(g_cum[idx]);                   // one exp per (j, head)
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  for (uint p = lid; p < L * WU_COLS; p += WG_TRI) {
+    const uint j = p / WU_COLS, d = p % WU_COLS;
+    const size_t row = (size_t)(base_m + j) * CONV_ROWS;
+    const float v = bf16f(xb[row + V_OFF + h * DIM + dcol + d]);
+    const float kv = bf16f(xb[row + K_OFF + kh * DIM + dcol + d]);
+    vbs[p] = bf16f(rne_bf16(v * bts[j]));                                       // Q1
+    kbs[p] = bf16f(rne_bf16(kv * bts[j] * egs[j]));                             // Q2
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  const uint il = b * PB;                    // the low block's first position
+  const uint ih = CT - PB - b * PB;          // 60 - 4b, its mirror
+  // A block that starts past L has no live output; its `j` range is empty and
+  // its accumulators are never stored.
+  const int jl = il < L ? (int)min(il + PB - 1, L - 1) : -1;
+  const int jh = ih < L ? (int)min(ih + PB - 1, L - 1) : -1;
+
+  float au[2 * PB][VPW], aw[2 * PB][VPW];
+#pragma unroll
+  for (uint p = 0; p < 2 * PB; ++p) {
+    au[p][0] = 0.0f; au[p][1] = 0.0f;
+    aw[p][0] = 0.0f; aw[p][1] = 0.0f;
+  }
+
+  // --- phase A: both blocks, j ascending -----------------------------------
+  for (int j = 0; j <= jl; ++j) {
+    const float2 vv = vload2(0, vbs + (uint)j * WU_COLS + c0);
+    const float2 kk = vload2(0, kbs + (uint)j * WU_COLS + c0);
+    const float4 tl = vload4(0, TsT + (uint)j * TS_LD + il);
+    const float4 th = vload4(0, TsT + (uint)j * TS_LD + ih);
+    const float tv[2 * PB] = {tl.s0, tl.s1, tl.s2, tl.s3, th.s0, th.s1, th.s2, th.s3};
+#pragma unroll
+    for (uint p = 0; p < 2 * PB; ++p) {
+      au[p][0] = fma(tv[p], vv.s0, au[p][0]);
+      au[p][1] = fma(tv[p], vv.s1, au[p][1]);
+      aw[p][0] = fma(tv[p], kk.s0, aw[p][0]);
+      aw[p][1] = fma(tv[p], kk.s1, aw[p][1]);
+    }
+  }
+
+  // --- phase B: the high block alone, j continuing to ascend ----------------
+  for (int j = jl + 1; j <= jh; ++j) {
+    const float2 vv = vload2(0, vbs + (uint)j * WU_COLS + c0);
+    const float2 kk = vload2(0, kbs + (uint)j * WU_COLS + c0);
+    const float4 th = vload4(0, TsT + (uint)j * TS_LD + ih);
+    const float tv[PB] = {th.s0, th.s1, th.s2, th.s3};
+#pragma unroll
+    for (uint t = 0; t < PB; ++t) {
+      const uint p = PB + t;
+      au[p][0] = fma(tv[t], vv.s0, au[p][0]);
+      au[p][1] = fma(tv[t], vv.s1, au[p][1]);
+      aw[p][0] = fma(tv[t], kk.s0, aw[p][0]);
+      aw[p][1] = fma(tv[t], kk.s1, aw[p][1]);
+    }
+  }
+
+#pragma unroll
+  for (uint p = 0; p < 2 * PB; ++p) {
+    const uint i = p < PB ? il + p : ih + (p - PB);
+    if (i < L) {
+      const size_t out = ((size_t)(base_m + i) * HEADS + h) * DIM + dcol + c0;
+      u[out + 0] = rne_bf16(au[p][0]);                                          // Q3
+      u[out + 1] = rne_bf16(au[p][1]);
+      w[out + 0] = rne_bf16(aw[p][0]);                                          // Q4
+      w[out + 1] = rne_bf16(aw[p][1]);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// (4b) `pf_gdn_wu` EXACTLY as it stood before ruling A27's rewrite, kept as the
+//      bitwise reference for `tests/prefill/gdn_wy_test.cc` and launched by
+//      nothing else - `src/runtime/prefill/gdn.cc` binds only the tiled kernel
+//      above. Its grid is (48, nchunks, 1): one work-item owns all 128 columns.
+//
+//      It is here for the same reason `pf_gdn_conv_legacy` is: the rewrite
+//      re-associates nothing, so the pre-registered bar is bit equality, and
+//      device-vs-device is the only comparison that can carry it for `w` (whose
+//      Q2 factor `exp(gc[j])` is 3 ulp on the device and correctly rounded on
+//      the host, which is why the standing host bar for `w` is <= 2 bf16 ulp).
+// ---------------------------------------------------------------------------
+__attribute__((reqd_work_group_size(WG_TRI, 1, 1)))
+__kernel void pf_gdn_wu_legacy(__global const ushort* restrict xb,
+                               __global const float* restrict T,
+                               __global const float* restrict g_cum,
+                               __global const float* restrict beta,
+                               __global ushort* restrict w,
+                               __global ushort* restrict u, uint c_count) {
   const uint h = get_group_id(0), chunk = get_group_id(1);
   const uint kh = h / 3;
   const uint base_m = chunk * CT;

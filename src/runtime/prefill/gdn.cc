@@ -105,8 +105,10 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   //  6 - T = (I - A)^-1, IN PLACE over A.
   cx.launch(kc(wy, "pf_gdn_solve"), heads, nch, 1, {PtrArg(p_A), arg_val(C)});
   profile_wait(cx, Phase::kGdnSolve);
-  //  7 - vb/kb, then u = T vb and w = T kb.
-  cx.launch(kc(wy, "pf_gdn_wu"), heads, nch, 1,
+  //  7 - vb/kb, then u = T vb and w = T kb. Grid.z is A27's column split: a
+  //      work-group owns 64 of the 128 output columns, which is what lets the
+  //      operands be staged fp32 in the same SLM budget class.
+  cx.launch(kc(wy, "pf_gdn_wu"), heads, nch, 2,
             {PtrArg(p_xb), PtrArg(p_A), PtrArg(p_g), PtrArg(p_beta), PtrArg(p_w), PtrArg(p_u),
              arg_val(C)});
   profile_wait(cx, Phase::kGdnWu);
