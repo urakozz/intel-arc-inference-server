@@ -37,15 +37,20 @@ VENVPY="$HOME/auto-round/.venv/bin/python" # torch-2.13+xpu venv; NOT modified
 PKG="$HOME/.cache/llmc-pkg"                 # llm-compressor + pure-python deps, installed once, beside the venv
 
 # --- isolated install (pure-python packages only; torch/transformers come from the venv) ---
-if [ ! -d "$PKG/llmcompressor" ]; then
-  UV=""
-  for c in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" uv; do
-    command -v "$c" >/dev/null 2>&1 && UV="$c" && break
-  done
-  [ -n "$UV" ] || { echo "uv not found; install it or set UV" >&2; exit 2; }
-  "$UV" pip install -q --python "$VENVPY" --target "$PKG" --no-deps \
-    llmcompressor compressed-tensors loguru pydantic pydantic-core annotated-types typing-inspection
-fi
+UV=""
+for c in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" uv; do
+  command -v "$c" >/dev/null 2>&1 && UV="$c" && break
+done
+[ -n "$UV" ] || { echo "uv not found; install it or set UV" >&2; exit 2; }
+# pydantic pins pydantic-core EXACTLY; installing the pair with --no-deps let uv
+# pick mismatched versions (2.48.0 vs the required 2.46.5 - seen 2026-09-05).
+# So pydantic is resolved WITH its deps (pydantic-core, typing-extensions,
+# annotated-types, typing-inspection - all small, none touch torch), and only
+# the llm-compressor packages go in --no-deps so torch/transformers stay the
+# venv's. Both lines are idempotent; re-running repairs a partial install.
+"$UV" pip install -q --python "$VENVPY" --target "$PKG" pydantic
+"$UV" pip install -q --python "$VENVPY" --target "$PKG" --no-deps \
+  llmcompressor compressed-tensors loguru
 PYTHONPATH="$PKG" "$VENVPY" - <<'PY'
 import importlib, sys
 missing = [m for m in ("llmcompressor", "compressed_tensors", "loguru", "pydantic", "safetensors", "transformers", "torch")
