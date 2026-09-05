@@ -78,3 +78,98 @@ Correctness is not re-litigated here - `dequant_test` and P3 hold
 battery's final GEMM output is **bitwise identical** to the serial battery's,
 because a lever that reorders queues and changes a bit is a race, not a
 speed-up.
+
+---
+
+## Measured (2026-09-05, card 1, `ZE_AFFINITY_MASK=1`; iterate grade)
+
+`tools/probe/probe_dequant_overlap` on Intel(R) Arc(TM) Pro B70 Graphics.
+8 replays, first 3 discarded, median of the last 5, one discarded warm-up.
+
+### Controls
+
+| control | measured ms/launch | rate | reference | Δ |
+|---|---:|---:|---|---:|
+| dequant gate‖up L0 `[K][N]` | **1.539** | 293.1 GB/s (r+w) | P3's 1.5393 ms / 293.1 GB/s | **+0.0%** |
+| `gemm_bf16` gate‖up M = 2048 | **5.554** | 131.47 TFLOP/s | P2's 150.19 TFLOP/s | **−12.5%** |
+
+The dequant control reproduces P3 **to the digit** through a different host
+path (`runtime::prefill::Context::launch` on the async immediate list, versus
+P3's recorded `l0::CmdList` + `Queue::execute`). The batteries are comparable.
+
+**The GEMM control is 12.5% below P2's cell for the same shape and M, and
+that is a deviation, reported rather than absorbed.** It is not the per-call
+`initialize`: `gemm_batched_test`'s single-head controls reproduce P2 at
++0.09% (QKᵀ) and +5.5% (PV) through exactly the same per-call path at
+0.078-0.100 ms/launch, where a host-side tax would be catastrophic and is not
+visible. Candidates, named and **not chased** (no tuning): this probe holds
+~1.31 GB resident (two 356.5 MB scratches, a 285 MB fp32 output, two 94.7 MB
+int4 sources) and runs control B immediately after a 174,080-work-group
+dequant, so the memory system is in a different state than in P2's isolated
+cell. It is an L2-stage item. **It does not weaken the verdict below: a
+*slower* GEMM gives the dequant *more* room to hide, so 0.127 is if anything
+generous.**
+
+### The batteries
+
+| battery | waits | ms total (8 linears) | ms/linear |
+|---|---:|---:|---:|
+| serial, one scratch (today's ordering) | 16 | 56.635 | 7.079 |
+| **double-buffered, two scratches** | 8 | **55.075** | **6.884** |
+| double-buffered, GEMM submitted first (diagnostic) | 8 | 55.137 | 6.892 |
+
+- dequant time inside a battery: 8 × 1.539 = **12.315 ms**
+- hidden: 56.635 − 55.075 = **1.560 ms**
+- **recovery = 1.560 / 12.315 = 0.127**
+- minus the 8 removed queue handoffs (8 × 8.569 µs = 0.069 ms, derived from
+  P1's measured figure): **0.121**
+- a replicate run of battery 2 earlier the same session gave **0.112**, so the
+  measured recovery is **0.11 - 0.13**.
+
+Serial matches the sum model to 0.2%: 8 × (1.539 + 5.554) = 56.746 ms
+measured 56.635. Perfect overlap would be 8 × max(1.539, 5.554) = **44.431 ms
+(derived)**; the double-buffered battery measured **55.075**.
+
+The overlapped battery's fp32 output is **bitwise identical** to the serial
+battery's, over two weight copies with deliberately *different* contents - so
+the sequence is correct and the number is not a race.
+
+## Verdict: MISS. The lever is rejected, and the dequant term is structural.
+
+| | value |
+|---|---|
+| pre-registered | recovers **0.6 - 0.9** of D |
+| acceptance bar | **≥ 0.3** |
+| **measured** | **0.11 - 0.13** |
+| ratio to the bar | **0.42×** - it misses the acceptance bar, not just the prediction |
+
+**The two queues serialise on the device, and the submission order does not
+change it.** The diagnostic battery - the same dependencies and the same two
+slots with only the SYCL submission moved ahead of the L0 append - measures
+**0.122**, indistinguishable from the pre-registered order's 0.127. Whichever
+kernel the driver sees first, the other one waits. The ~0.12 that *is*
+recovered is the tail: the GEMM's work-groups filling in as the dequant's
+174,080 retire.
+
+**Consequences, priced:**
+
+- `PrefillScratch::dequant` stays **one** slot. The second **356,515,840 B**
+  is **not spent**.
+- The best case the lever could buy on the whole chunk is
+  `0.127 × 210.116 = 26.7 ms/chunk (derived)` - about **2.4%** of a ~1130 ms
+  composed chunk, ~43 t/s - for 356.5 MB on a part already resident at
+  16.94-18.81 GB. Against a pre-registered 126-189 ms. It is not worth the
+  memory at that price and the acceptance bar already says so.
+- **The 210.116 ms/chunk dequant term is STRUCTURAL on this execution model**
+  and the composed ceiling must carry it whole. The row
+  "+ dequant hidden (plan 6c Task 4, unlanded)" in the T6 ledger is
+  **withdrawn**, not deferred.
+- P3's own corollary is now doubly confirmed: the dequant is irreducible by
+  tuning *and* by overlap, so **the only route past it is eliminating the
+  materialisation** - a register-only int4 unpack feeding DPAS, which spec §10
+  keeps out of scope. That is the honest place to file the 210 ms, and it is
+  now the largest single lever left on the prefill path after the GEMM itself.
+- **What this does NOT say:** it does not say the L0 list and the SYCL queue
+  cannot both be *used* - the composed attention path alternates them per
+  kv-group and depends only on ordering, not on concurrency. It says only that
+  submitting to both at once buys no wall-clock.
