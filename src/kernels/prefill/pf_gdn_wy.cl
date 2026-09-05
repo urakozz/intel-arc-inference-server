@@ -167,14 +167,120 @@ inline void stage_rows(__global const ushort* restrict xb, uint base_m, uint L, 
 
 // ---------------------------------------------------------------------------
 // (1) A[i][j] = beta[i] * (k_i . k_j) * exp(gc[i] - gc[j])   for i > j, else 0.
-//     Grid (48, nchunks), WG 256. Work-item `lid` walks pairs p = lid,
-//     lid+256, ... over CT*CT.
+//
+//     REWRITTEN under ruling A28 (2026-09-05), the same treatment as (2) below
+//     and for the same measured reason: as delivered this was
+//     `for (p = lid; p < CT*CT; p += 256)` -- one output per work-item per step,
+//     with no tile -- an 898-instruction hot loop at **14.5% FMA density**, 57%
+//     of which was the bf16 widen (docs/prefill-gdn-a2a-simd32-2026-09-05.md
+//     3.1 and 5.1). It measured **0.6136 ms per GDN layer per chunk**.
+//
+//     Its one advantage over `pf_gdn_A2` is what this rewrite had to KEEP: at
+//     SIMD16 it fit 4 work-groups x 16 threads = all 64 of an Xe-core's slots
+//     and issued at **0.502 instructions/XVE/clock**, the best rate any GDN
+//     kernel here has measured. 32,768 B of SLM keeps that.
+//
+//     Same quadrant grid, 2 x 2 tile, fp32 row-major staging and `tile_dot` as
+//     (2), and `ascale` is 1.0f here so the staged value is plainly
+//     `f32(k_word)`. Two things are its own:
+//       * **both operands are `k`**, from the quadrant's `i` rows and its `j`
+//         rows; when `iz == jz` those are the SAME rows, so `kjs` is not staged
+//         and the right-hand pointers aim at `kis`. The test is work-group
+//         uniform, so the barrier stays uniform.
+//       * **the staging loop clamps the ROW rather than guarding the LOAD, and
+//         moves four values at a time.** `ri = min(gi, L-1)` is always a live
+//         row, so the global read is unconditional and in bounds and the `< L`
+//         test is a select on the loaded value; one `vload4` of ushort4 and one
+//         `vstore4` of float4 pay the 64-bit global address once per four
+//         values. This is (2)'s measured shortfall -- 53 instructions per
+//         staging iteration, 47% of that kernel -- fixed here BEFORE the build,
+//         not back-ported there after one.
+//
+//     **No rounding point moves and no sum is re-associated**; the bar is bit
+//     equality against `pf_gdn_A_legacy` below.
 // ---------------------------------------------------------------------------
 __attribute__((reqd_work_group_size(WG_TRI, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(ASG)))
 __kernel void pf_gdn_A(__global const ushort* restrict xb,
                        __global const float* restrict g_cum,
                        __global const float* restrict beta,
                        __global float* restrict A, uint c_count) {
+  const uint h = get_group_id(0), chunk = get_group_id(1), z = get_group_id(2);
+  const uint iz = z >> 1, jz = z & 1u;
+  const uint kh = h / 3;                          // repeat_interleave(., 3)
+  const uint base_m = chunk * CT;
+  const uint L = min((uint)CT, c_count - base_m);
+  const uint lid = get_local_id(0);
+  const uint bi = lid / ASG, bj = lid % ASG;
+  const uint i0 = iz * AQ + bi * TI, j0 = jz * AQ + bj * TJ;
+
+  __global float* restrict At = A + ((size_t)(chunk * HEADS + h) * CT) * CT;
+  if (iz == 0 && jz == 1) {                       // wholly on the masked side
+#pragma unroll
+    for (uint a = 0; a < TI; ++a)
+      vstore2((float2)(0.0f, 0.0f), 0, At + (size_t)(i0 + a) * CT + j0);
+    return;
+  }
+
+  __local float kis[AQ * DIM], kjs[AQ * DIM];
+  const bool split = iz != jz;                    // work-group uniform
+  const uint kbase = K_OFF + kh * DIM;
+  const float4 zero4 = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
+  for (uint p = lid; p < AQ * DIM / 4; p += WG_TRI) {
+    const uint r = p / (DIM / 4), d = (p % (DIM / 4)) * 4;
+    const uint gi = iz * AQ + r;
+    const ushort4 wi =
+        vload4(0, xb + (size_t)(base_m + min(gi, L - 1)) * CONV_ROWS + kbase + d);
+    vstore4(gi < L ? (float4)(bf16f(wi.s0), bf16f(wi.s1), bf16f(wi.s2), bf16f(wi.s3)) : zero4,
+            0, kis + r * DIM + d);
+    if (split) {
+      const uint gj = jz * AQ + r;
+      const ushort4 wj =
+          vload4(0, xb + (size_t)(base_m + min(gj, L - 1)) * CONV_ROWS + kbase + d);
+      vstore4(gj < L ? (float4)(bf16f(wj.s0), bf16f(wj.s1), bf16f(wj.s2), bf16f(wj.s3)) : zero4,
+              0, kjs + r * DIM + d);
+    }
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  __local const float* restrict ksj = split ? kjs : kis;
+  const uint ir = bi * TI * DIM, jr = bj * TJ * DIM;
+  const float4 dot = tile_dot(kis + ir, kis + ir + DIM, ksj + jr, ksj + jr + DIM);
+  const float dv[4] = {dot.s0, dot.s1, dot.s2, dot.s3};
+
+  const float gi[TI] = {
+      i0 < L ? g_cum[(size_t)(base_m + i0) * HEADS + h] : 0.0f,
+      i0 + 1 < L ? g_cum[(size_t)(base_m + i0 + 1) * HEADS + h] : 0.0f};
+  const float gj[TJ] = {
+      j0 < L ? g_cum[(size_t)(base_m + j0) * HEADS + h] : 0.0f,
+      j0 + 1 < L ? g_cum[(size_t)(base_m + j0 + 1) * HEADS + h] : 0.0f};
+  const float bt[TI] = {
+      i0 < L ? beta[(size_t)(base_m + i0) * HEADS + h] : 0.0f,
+      i0 + 1 < L ? beta[(size_t)(base_m + i0 + 1) * HEADS + h] : 0.0f};
+
+#pragma unroll
+  for (uint a = 0; a < TI; ++a) {
+    const uint i = i0 + a;
+    // NOTE: strict `i > j` - see the mask pair in the header.
+    const float v0 =
+        (i < L && j0 < L && i > j0) ? bt[a] * dv[a * TJ] * exp(gi[a] - gj[0]) : 0.0f;
+    const float v1 = (i < L && j0 + 1 < L && i > j0 + 1)
+                         ? bt[a] * dv[a * TJ + 1] * exp(gi[a] - gj[1])
+                         : 0.0f;
+    vstore2((float2)(v0, v1), 0, At + (size_t)i * CT + j0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// (1b) `pf_gdn_A` EXACTLY as it stood before ruling A28's rewrite, kept as the
+//      bitwise reference for `tests/prefill/gdn_wy_test.cc` case 7 and launched
+//      by nothing else. Its grid is (48, nchunks, 1).
+// ---------------------------------------------------------------------------
+__attribute__((reqd_work_group_size(WG_TRI, 1, 1)))
+__kernel void pf_gdn_A_legacy(__global const ushort* restrict xb,
+                              __global const float* restrict g_cum,
+                              __global const float* restrict beta,
+                              __global float* restrict A, uint c_count) {
   const uint h = get_group_id(0), chunk = get_group_id(1);
   const uint kh = h / 3;                          // repeat_interleave(., 3)
   const uint base_m = chunk * CT;
