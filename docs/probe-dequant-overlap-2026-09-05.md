@@ -173,3 +173,90 @@ recovered is the tail: the GEMM's work-groups filling in as the dequant's
   cannot both be *used* - the composed attention path alternates them per
   kv-group and depends only on ordering, not on concurrency. It says only that
   submitting to both at once buys no wall-clock.
+
+---
+
+# PROBE B - a second L0 queue on another engine (extension, 2026-09-05)
+
+## Pre-registration - written BEFORE the probe is extended, built, enumerated or run
+
+Nothing in this section is a measurement. Every value is a **prediction** or is
+**derived** from a measurement already recorded above it.
+
+### What the first probe did NOT test
+
+The battery above ran the dequant on `runtime::prefill::Context`'s own
+immediate command list, which `src/sycl/context.cc:68-76` creates with
+`qd.ordinal = 0` and no `index` - i.e. **queue 0 of queue group 0**, whatever
+that group turns out to be - and the GEMM on a `sycl::queue` built over the
+same `ze_context`/`ze_device`, whose ordinal this project has never inspected.
+The verdict "the two queues serialise on the device" is therefore, strictly,
+"two queues *that may both be queue 0 of group 0* serialise". This extension
+asks the only remaining version of the question: **does the serialisation
+survive putting the dequant on a different hardware queue?**
+
+### Step 1 - enumerate (read-only; no assumption, no timing)
+
+`zeDeviceGetCommandQueueGroupProperties` on the masked device, printed
+verbatim: for every ordinal, its `flags`
+(`COMPUTE` / `COPY` / `COOPERATIVE_KERNELS` / `METRICS`), `numQueues`,
+`maxMemoryFillPatternSize`. Whatever the driver reports is the record; this
+probe does not assert in advance how many groups a B70 has.
+
+### Step 2 - the binding rule, fixed in advance
+
+The alternate list is one `zeCommandListCreateImmediate` with
+`ZE_COMMAND_QUEUE_FLAG_IN_ORDER` + `ASYNCHRONOUS` (the same shape
+`prefill::Context` builds), bound by this rule, applied to the enumeration
+without further choice:
+
+1. if a **second group with `ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE`**
+   exists → `ordinal` = that group, `index = 0`;
+2. else if the single compute group reports **`numQueues ≥ 2`** →
+   `ordinal` = the compute group, **`index = 1`**;
+3. else → there is exactly **one** compute queue on the device and the
+   alternate binding is impossible; the probe reports that and the lever is
+   dead by enumeration.
+
+Copy-only groups are recorded but are **not** candidates: they carry no
+`COMPUTE` flag, so `zeCommandListAppendLaunchKernel` has no engine there.
+
+### Step 3 - the pre-registered prediction, both branches
+
+The branch is selected by the enumeration, which is run and recorded **before**
+the battery.
+
+| enumeration outcome | pre-registered recovery |
+|---|---|
+| a second compute queue exists (rule 1 or rule 2) | **≥ 0.5 of `D`** |
+| only one compute queue exists (rule 3) | **≈ 0.12 again** - the serialisation is device-wide and this probe cannot move it |
+
+`D` is the dequant time inside the battery, `8 × t_dequant`, measured in the
+same run by control A.
+
+### Step 4 - the battery, unchanged
+
+The exact battery above - 8 gate‖up linears, K = 5120, N = 34816, M = 2048,
+serial vs double-buffered, 8 replays / drop 3 / median of 5 / one discarded
+warm-up, `ZE_AFFINITY_MASK=1`, iterate grade - with **only** the dequant's
+command list changed. Both batteries use the alternate list, so the serial
+baseline and the overlapped cell differ in nothing but the overlap. The
+per-iteration wait drains the SYCL queue **and** the alternate list
+(`zeCommandListHostSynchronize`), so nothing is left in flight at a boundary.
+The bitwise-identity check against the serial battery is kept: it is the only
+thing separating a speed-up from a race, and a second engine makes a race
+*more* plausible, not less.
+
+The no-argument invocation still runs the original single-list path
+unchanged, so the 2026-09-05 record above stays reproducible from the same
+binary.
+
+### Decision rule (plan 6c Task 4's original bar, restated)
+
+- **recovery ≥ 0.3** → the lever is real; `runtime::prefill::Context` gains a
+  second L0 immediate list on the alternate binding.
+- **recovery < 0.3** → dead, and **the overlap question is closed for this
+  device**: neither a second queue on the same engine nor a second engine
+  recovers the dequant, and the 210.116 ms/chunk stays structural.
+
+A clean miss is a valid result and will be reported as one.
