@@ -11,6 +11,7 @@
 #include "runtime/prefill/dequant.h"
 #include "runtime/prefill/gdn.h"
 #include "runtime/prefill/gemm.h"
+#include "runtime/prefill/profile.h"
 
 // The per-chunk walk: `capture.cc`'s decode order (`:472-591`), at runtime `M`,
 // at S = 1, with the int4 GEMVs replaced by the two-pass
@@ -61,9 +62,9 @@ void pf_linear(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWeig
   require(s.partials.size() >= size_t(M) * sh.N * 4,
           "`partials` is smaller than the [M][N] fp32 this linear writes");
   dequant_to_bf16(cx, kc, w, s.dequant.as<uint16_t>());
-  cx.wait();                              // L0 -> SYCL
+  timed_wait(cx, Phase::kDequant);        // L0 -> SYCL
   gemm_bf16(cx, GemmDims{M, sh.K, sh.N}, x, s.dequant.as<uint16_t>(), s.partials.as<float>());
-  cx.wait();                              // SYCL -> L0
+  timed_wait(cx, Phase::kGemm);           // SYCL -> L0
 }
 
 // The res_norm pair at `M` rows. `s_prev` is 0 for layer 0's leading norm --
@@ -76,6 +77,7 @@ void pf_res_norm(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t s_pre
             {PtrArg(partials), PtrArg(resid), PtrArg(s.norm_sumsq.ptr()), arg_val(M)});
   cx.launch(kc(kernels::pf_norm_finish_variant(Qwen35::kHidden, g, g), "pf_norm_finish"), g, M, 1,
             {PtrArg(s.norm_sumsq.ptr()), PtrArg(resid), PtrArg(norm_w), PtrArg(x), arg_val(M)});
+  profile_wait(cx, Phase::kNorm);
 }
 
 constexpr uint32_t kSiluChunk = 4096;
@@ -121,6 +123,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
         const DeviceWeight& w = m.linears.at({l, LinearId::AB});
         cx.launch(kc(kernels::pf_ab_proj_variant(), "pf_ab_proj"), w.shape.N / 16, (C + 7) / 8, 1,
                   {PtrArg(w.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(s.ab_out.ptr()), arg_val(C)});
+        profile_wait(cx, Phase::kAbGdn);
       }
       gdn_chunk(cx, kc, s, pos, C, s.partials.as<float>(), s.ab_out.as<float>(),
                 reinterpret_cast<float*>(at(gdn_state_mem, size_t(gdn) * gdn_state_stride)),
@@ -138,8 +141,10 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
       // ruling R5's, and ruling A14 retired it with the M = 64 route).
       attn_prep_chunk(cx, kc, s, C, ctrl, s.partials.as<float>(),
                       m.layer_small[l].gdn.as<float>(), m.rope.as<float>(), kk, vv);
+      profile_wait(cx, Phase::kAttnPrep);
       attn_chunk(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), kk, vv);
       attn_gate_chunk(cx, kc, s, C, s.partials.as<float>(), s.mixer_out.as<uint16_t>());
+      profile_wait(cx, Phase::kAttnGate);
       ++fa;
       pf_linear(cx, kc, s, m.linears.at({l, LinearId::OProj}), s.mixer_out.as<uint16_t>(), C);
     }
@@ -151,6 +156,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
     cx.launch(kc(kernels::pf_silu_mul_variant(), "pf_silu_mul"),
               (Qwen35::kIntermediate + kSiluChunk - 1) / kSiluChunk, C, 1,
               {PtrArg(s.partials.ptr()), PtrArg(s.x.ptr()), arg_val(C)});   // x stride 17408
+    profile_wait(cx, Phase::kSilu);
     pf_linear(cx, kc, s, m.linears.at({l, LinearId::Down}), s.x.as<uint16_t>(), C);
   }
   require(gdn == 48 && fa == 16, "the layer table did not give 48 GDN and 16 FA layers");
@@ -195,6 +201,7 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMode
             1, 1, {PtrArg(s.logits.ptr()), PtrArg(s.argmax_part.ptr())});
   cx.launch(kc(kernels::argmax_stage2_variant(), "argmax_stage2"), 1, 1, 1,
             {PtrArg(ctrl), PtrArg(s.argmax_part.ptr())});
+  profile_wait(cx, Phase::kHead);
 }
 
 // --- the launch arithmetic, derived from the walk above ---------------------

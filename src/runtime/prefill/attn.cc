@@ -5,6 +5,7 @@
 
 #include "kernels/prefill/pf_kernels.h"
 #include "runtime/prefill/gemm.h"
+#include "runtime/prefill/profile.h"
 
 namespace runtime::prefill {
 namespace {
@@ -85,12 +86,12 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     qk.strideC = stride_l;
     gemm_bf16_batched(cx, qk, q + size_t(j) * kGroup * kHeadDim,
                       kv_k + size_t(j) * kHeadDim, S, /*transB=*/true);
-    cx.wait();   // SYCL -> L0: one compute queue, no device-side dependency (A24)
+    timed_wait(cx, Phase::kAttnQk);   // SYCL -> L0: one compute queue (A24)
 
     cx.launch(kc(kernels::pf_attn_variant(), "pf_softmax_causal"), C, kGroup, 1,
               {PtrArg(S), PtrArg(P), arg_val(pos), arg_val(npad), arg_val(ld),
                arg_val(uint32_t(stride_l))});
-    cx.wait();   // L0 -> SYCL
+    timed_wait(cx, Phase::kAttnSm);   // L0 -> SYCL
 
     // O[l][m][d] = sum_n P[l][m][n] . v[n][j][d].  B is kv-head j's v slab,
     // [depth][256] row-major at pitch 1024 -- no transpose, and again shared.
@@ -105,7 +106,7 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     gemm_bf16_batched(cx, pv, P, kv_v + size_t(j) * kHeadDim,
                       O + size_t(j) * kGroup * stride_h, /*transB=*/false);
   }
-  cx.wait();     // SYCL -> L0, for the gate launch the caller makes next
+  timed_wait(cx, Phase::kAttnPv);   // SYCL -> L0, for the gate launch next
 }
 
 void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C,
