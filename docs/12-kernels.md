@@ -2954,3 +2954,152 @@ from device-timestamp measurements, iterate grade). With the retained 0.000-
 recomposed C=2048 ceiling is 1043.5-1106.9 t/s (derived), which does not clear
 vLLM's external measured 1973 t/s pp4096 reference. Full record:
 [T6](probe-prefill-small-2026-09-05.md).
+
+## Prefill kernels (spec 2, Stage 1 L1)
+
+Everything below runs **only** on `Engine::prefill`'s walk. None of it is bound
+by `src/runtime/capture.cc`, and the decode list is 774 launches / 19 modules
+with or without it. Two rules hold across the whole family and are not repeated
+per kernel:
+
+* **`M` is a runtime argument, never a `-D` and never in a variant name.** One
+  binary set serves every `--pp-chunk` width. What stays in a name is what the
+  binary bakes as a stride or a grid: `K`, the previous linear's split-K width
+  `S_PREV` (0 or 1 here), the norm's group counts, and a dequant shape.
+* **`S = 1` everywhere** (plan 6b ruling R1). Decode's split-K exists to buy
+  hardware threads at `M = 1`; at `M = C` the row axis already saturates the
+  grid. Stage 0 measured what forgetting this costs: the same kernels timed at
+  decode's `S` read 361-473 ms/chunk, and at `S = 1` they read 130.346.
+
+### `pf_res_fold` / `pf_norm_finish` / `pf_silu_mul` / `pf_embed_gather` / `pf_gated_head` / `pf_ab_proj`
+
+`src/kernels/prep.cl` and `embed.cl` transcribed at runtime `M`, with three
+classes of edit and nothing else: `M` becomes an `m_count` argument in every
+index expression (`sumsq[g * m_count + m]`), `SILU_S` / `QKV_S` become 1, and
+`m = get_group_id(1)` needs no mask because the grid's y extent **is** `M`.
+Every rounding, both bf16 RNE steps, the `fma` square-accumulate,
+`1.0f / sqrt(x)` (never `rsqrt`) and both reduction trees are the decode file's
+text, which is what lets `tests/prefill/pf_prep_test.cc` hold the `M = 1` output
+**bit-identical** to the decode binaries. `pf_embed_gather` loses decode's
+`Control::debug_flag` channel for an out-of-vocabulary id, so
+`Engine::prefill` bounds every id on the host instead and throws by name.
+
+**Measured** (Opus A, 2026-09-05, iterate grade, C = 2048): 130.346 ms/chunk for
+the family, of which 93.3 ms runs at 74-80% of the device's measured 590 GB/s.
+`pf_ab_proj` is the one row that is not bandwidth-shaped - 58.0 GB/s, 5.5× off
+its roofline - and it was **not tuned**: it is a GEMM shape at `M = 2048` and
+`gemm_bf16` is where it belongs. In situ this family re-measures at
+**131.1 ms/chunk**, +0.5% (`docs/prefill-pp-attribution-2026-09-05.md`).
+
+### `pf_dequant_tile` and the two-pass linear
+
+One int4 linear's tiles expanded into the bf16 `[K][N]` scratch, `ldb = N` -
+`gemm_bf16`'s B operand. One launch, grid `(N/16, K/64)`: a 16-lane subgroup
+owns one (N tile, K group), so each lane dequantises the 64 values of one
+column. The int4 contract is `gemv.cl`'s `GEMV_DEQ_SHIFT` path - `(q − 8) ×
+scale`, product in fp32, exactly one RNE cast to bf16 - so
+`tests/prefill/dequant_test.cc` holds it bit-exact against
+`tools/oracle/dequant.py`.
+
+**The host binding is `dequant_to_bf16` → `Context::wait()` → `gemm_bf16`, and
+that two-pass shape with a host boundary in the middle is THE GEMM path on this
+stack, by measurement rather than by preference.** Every alternative is dead and
+each died to a number: the int4 mixed-input mainloop runs gate‖up at `M = 2048`
+at **42.21 TFLOP/s against the bf16 scratch's 150.19** (ruling A23); the
+dequant/GEMM overlap recovers **0.127** of the dequant against a 0.3 bar,
+because `zeDeviceGetCommandQueueGroupProperties` reports exactly one COMPUTE
+group with `numQueues = 1` on this device (ruling A24, Probe B); the
+L2-resident slab is **−70.1 ms/chunk** because each slab needs a measured
+22.35 µs host handoff (ruling A24, Probe A). Do not interleave, slab or
+double-buffer them.
+
+**Measured**: 210.116 ms/chunk standalone (P3), **205.0 ms/chunk in situ**
+(−2.4%).
+
+### `pf_attn_prep` and `pf_attn_prep_q16`
+
+`attn.cl`'s `attn_prep` widened: q/k RMSNorm, partial RoPE over dims 0..63, and
+the chunk's K/V written into the cache at absolute positions `[pos, pos+C)`.
+Grid (24 q-heads + 4 kv-heads, C), work-group 256, so work-item `i` owns dim `i`
+and the norm's reduction domain is exactly the work-group.
+
+**Two binaries from one source, and the second `-D` is ruling A9.**
+`pf_attn_prep` writes fp32 `attn_q` and fp32 `attn_gate` and is held
+**bit-identical to `attn_prep_M1`** by `tests/prefill/pf_attn_test.cc`.
+`pf_attn_prep_q16` (`-D Q_BF16=1`) writes bf16 `attn_q` - DPAS needs bf16
+operands - and writes no gate at all, because `pf_attn_gate` reads the gate
+columns straight out of `qkv_partials`, which is still the qkv linear's output
+at that point in the walk. Everything above the store is one piece of text, so
+the identity test covers the norm, the tree, the rstd and the RoPE of both, and
+A9 is provably **one `rne_bf16` at the store and nothing else**:
+`attn_chunk_test` asserts `pf_q == rne_bf16(attn_ref::prep`'s fp32 `attn_q)`
+word for word, at every C and depth.
+
+### `pf_softmax_causal` and `pf_attn_gate` - the composed attention (ruling A14)
+
+Attention is two inherited GEMMs and one bandwidth-bound kernel of ours:
+`S = QKᵀ` (batched, L = one kv group of 6, `transB` so the `[pos][4][256]` cache
+is the operand in place at `ldb = 1024`, `strideB = 0` so all six q-heads share
+it), `P = softmax(S)` (this kernel), `O = PV` (batched, L = 6). GQA is a
+kv-head loop with the six sharing q-heads folded into the batch - bitwise
+identical to one GEMM at `M = 6C`, and it gives PV 48 work-groups instead of 8.
+
+`pf_softmax_causal`: grid (C rows, 6 head slots), work-group 256, **three passes
+over `S`** - the row max, the sum of exponentials, then the normalised store -
+with the scale `1/16 = 1/√256` applied before the max, one bf16 rounding at the
+store, and an exact `+0.0` in columns `[depth, npad)` so the PV GEMM's
+8-element `K` padding contributes nothing. Both reductions are pf_prep.cl's
+tree (`stride = 128 … 1`, a barrier per step). Three passes cost the same
+traffic as two-plus-a-rescale (14 B/element either way) and round once instead
+of twice.
+
+`pf_attn_gate`: `attn_reduce`'s tail and nothing else of it - the composed path
+has already divided by the denominator, so what is left is
+`rne_bf16(f32(rne_bf16(o)) · sigmoid_f32(gate))`, with `sigmoid` spelled as
+`1.0f / (1.0f + exp(-x))` exactly as `attn_ref` spells it.
+
+**Label, everywhere this is timed: L1 functional, untuned.** No head tiling
+beyond one kv group, no depth-adaptive `Lh`, no fusion of the three passes -
+plan 6d owns the tuned version. **Measured correctness** (`attn_chunk_test`,
+C ∈ {1, 64, 256} × depth ∈ {0, 4096}, against `attn_ref` driven with fp32 `q`
+and again with bf16 `q`): relative L2 **2.65-2.74e-03** against the bf16-q
+reference at every case, and **bit-identical at C = 1, depth 1**, where the
+single valid column makes `P` exactly 1.0 and the composition has nothing left
+to differ in. Max relative difference reaches 2.97e-02 on individual words and
+the mechanism is arithmetic, not a defect: bf16 attention weights perturb a
+**cancelling** sum `Σ pᵢ vᵢ`, so the worst word carries a `√n_eff` factor the
+L2 does not. Ruling A19's 3-ulp bar is scored and missed for that reason and is
+recorded as scored, not gated. **Measured cost** in situ: 82.8 ms/chunk
+averaged over depths 2048 and 4096 - inside plan 6d's 83.4-88.9 pre-registration
+for the *tuned* version, which is a pleasant surprise and not a claim that
+tuning is unnecessary.
+
+### `gdn_chunk` - and the one measurement that changes the spec's arithmetic
+
+The WY-representation chunked gated delta rule, ten launches per GDN layer, is
+plan 6b Tasks 6-8's and its algorithm, its FLA stage references and its numerics
+band are recorded with it. What L1-engine adds is the **time**, which nobody had
+measured:
+
+**`gdn_chunk` is 984.1 ms/chunk (measured in situ, C = 2048, iterate grade)
+against the ledger's 15.4 - a 64× miss - and `pf_gdn_scan` alone is 723.4
+ms/chunk, 35.1% of the entire prefill.** The 15.4 was never a measurement: it is
+Stage 0's T6 projection of decode's `gdn_step` widened to `M = 2048`, written
+before `gdn_chunk` existed.
+
+Mechanism, read off `pf_gdn_scan.cl` rather than guessed: it is **decode's
+`gdn_step` tile mapping, unchanged and deliberately so** - the file says so, and
+spec §6.3's numerics band is measured against exactly that choice. Grid
+(48 heads, 4 state-column chunks) = 192 work-groups, each walking `C/64`
+sub-chunks serially, which the recurrence requires. But **inside** a sub-chunk,
+stages 1 and 2 are not serial in `i`, and the kernel runs them as 64 sequential
+256-lane tree reductions each, five barriers per tree, with only `sgid == 0`
+(16 of 256 work-items) doing the epilogue - 20,480 barriers per work-group per
+layer, at 0.64 TFLOP/s on a kernel carrying ~2% of the forward's FLOPs. It is
+the same class of finding Stage 0 already made for the widened small kernels, on
+the family that stage did not reach. Full attribution:
+[the `--pp` attribution](prefill-pp-attribution-2026-09-05.md).
+
+Not fixed here: rewriting it moves both reduction orders and therefore the state
+band `gdn_chunk_test` records, which makes it a task with its own
+pre-registration rather than an adjustment.

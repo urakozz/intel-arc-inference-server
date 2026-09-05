@@ -1786,3 +1786,91 @@ identical tensor manifests and record **the same t/s to every printed digit**
 The quantisation *algorithm* is not a decode-speed variable on this engine; only
 the layout is. Whether it is an *accuracy* variable is doc 07 #6, and that is
 still unmeasured.
+
+## Spec 2 L1 - the prefill step's anatomy
+
+Decode's anatomy above is per-kernel device timestamps off an instrumented
+capture. **The prefill walk is not a capture**, so `--profile`'s
+`ProfileEvents` machinery cannot see it (doc 07 records that as the open
+question this stage opens). It needs none: rulings A23/A24 already put a host
+`Context::wait()` at every L0↔SYCL boundary - the B70 exposes one COMPUTE queue
+with `numQueues = 1` and there is no device-side cross-runtime dependency - so
+**the wall time of a wait is the device time of everything queued since the
+previous drain.** `B70_PREFILL_PROFILE=1` times those waits and adds one extra
+wait to close each L0-only phase. Its own cost is measured, not argued: 4119.1
+ms profiled against 4202.8 ms plain in the same binary, **−2.0%**, inside the
+run-to-run spread.
+
+### The launch arithmetic
+
+Derived from the walk in `src/runtime/prefill/step.cc`; asserted by
+`prefill_smoke_test` through `Context::launches()` rather than restated.
+
+| per | L0 launches | SYCL GEMMs | host `wait()`s |
+|---|---:|---:|---:|
+| GDN layer (48) | 20 | 4 | 8 |
+| FA layer (16) | 15 | 12 | 17 |
+| chunk boundary | 1 (embed) | 0 | 0 |
+| **one chunk** | **1201** | **384** | **656** |
+| `step_head`, once per `prefill()` | 5 | 0 | 0 |
+
+GDN layer: 2 norm + 1 dequant(qkv‖z) + 1 a‖b + 10 `gdn_chunk` + 1
+dequant(out_proj) + 2 norm + 1 dequant(gate‖up) + 1 silu + 1 dequant(down).
+FA layer: 2 norm + 1 dequant(qkv) + 1 `pf_attn_prep_q16` + 4
+`pf_softmax_causal` + 1 `pf_attn_gate` + 1 dequant(o_proj) + 2 norm + 1
+dequant(gate‖up) + 1 silu + 1 dequant(down).
+
+**None of the three columns depends on `C`.** That is the return on the
+runtime-`M` rule and on ruling A14 retiring the `C ≤ 64` attention sub-chunk:
+plan 6b's own table had the FA family growing as `3·⌈C/64⌉`, i.e. **4182**
+launches at C = 4096 against a 64-position chunk's 1158. This walk is 1201 at
+every width.
+
+### Where the time goes - measured, iterate grade, `--pp 4096` at C = 2048
+
+Two chunks, depths 2048 and 4096. Full table and conditions:
+[the `--pp` attribution](prefill-pp-attribution-2026-09-05.md).
+
+| phase | ms/chunk | share |
+|---|---:|---:|
+| `gdn_chunk` (of which `pf_gdn_scan` **723.4**) | **984.1** | 47.8% |
+| `gemm_bf16`, the four int4 linears | 656.3 | 31.9% |
+| `pf_dequant_tile` | 205.0 | 10.0% |
+| small kernels (norm, silu, a‖b, gated head) | 131.1 | 6.4% |
+| composed attention (prep + QKᵀ + softmax + PV + gate) | 82.8 | 4.0% |
+| `step_head` | 0.35 | 0.0% |
+| **total** | **2059.6** | 100% |
+
+Five of the six terms confirm the ledger's standalone probes to within 3.5%.
+The sixth, GDN, was never measured before this stage and is **64×** its
+projected 15.4 ms - which is why the spec's "1808-1817 t/s, every term
+measured" ceiling does not survive contact with the walk.
+
+Fixed and per-position costs, from a single-chunk sweep at C = 256/512/1024/2048
+(measured): **411.5 ms fixed per chunk** and **0.852 ms per position**
+(derived, two-point fit). At C = 256 the fixed term is 70% of the chunk, which
+is why `--pp 256 --pp-chunk 64` reads 161.76 t/s and `--pp 2048 --pp-chunk 2048`
+reads 949.87 - ruling A13's C = 2048 default is the right one and this
+measurement agrees with it.
+
+### The bytes, and the card
+
+Weights 13.673 GB (RTN) / 15.540 GB (Vishva), both **measured**
+(`LoadReport::read_per_token`'s two values), plus persistent 1.240 GB, decode
+scratch 0.069 GB and `PrefillScratch` **2.264 GB** (measured by `buffers_test`
+at kC = 2048) = **17.25 GB / 19.11 GB (derived)** against the card's 32,656 MB.
+Spec §3.6's "fits" claim, with the prefill scratch enumerated rather than
+assumed. `PrefillScratch` is allocated lazily on the first `prefill()` (ruling
+R7), so a decode-only engine's residency is byte-identical to what it was before
+the buffer split - `prefill_smoke_test` asserts both halves.
+
+### The row
+
+`| b70-decode a663f7b pp | 4096 | 2048 | 4187.9 | 978.07 |` - **978.07 t/s
+median of 8 runs, spread 0.56%, ITERATE grade** (two desktop processes hold DRM
+fds on every card, so no record row is claimable). Beside it: the decode-replay
+ingest baseline of **121 s for 4096 ids = 29.5 ms/id** (bench log `2a7df0b`,
+RTN) - a **28.9× cut** - and vLLM's **1973 t/s pp4096**, which is
+HTTP-inclusive where this row is device-side, loader excluded, first prefill
+launch to the first generated id in `cur_token`. The same runs measured decode
+at 32.89 t/s against the recorded 32.22, so nothing here costs decode anything.
