@@ -66,6 +66,27 @@ add_dependencies(dequant_test
   kernel_pf_dequant_tile_K256_N64_L1_T1)
 add_test(NAME dequant_test COMMAND dequant_test)
 
+# The runtime-`M`, S = 1 small kernels (spec 2, plan 6b Tasks 3-5). Like
+# dequant_test these are raw Level Zero and OpenCL C: they need a B70 and their
+# own binaries, never the optional SYCL component, so they carry no guard and no
+# label. Each also loads the DECODE binary it must be bit-identical to at M = 1,
+# which is why the dependency lists below name both sides.
+#
+# `tests/kernels` is on the include path because the prefill references are
+# mostly a redirection to the decode ones (tests/prefill/pf_ref.h says why).
+add_executable(pf_prep_test prefill/pf_prep_test.cc)
+target_include_directories(pf_prep_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+                           ${CMAKE_SOURCE_DIR}/tests/kernels)
+target_link_libraries(pf_prep_test PRIVATE b70_l0)
+b70_target_kernel_dir(pf_prep_test)
+add_dependencies(pf_prep_test
+  kernel_pf_embed_gather kernel_pf_res_fold_K5120_SP0_G20 kernel_pf_res_fold_K5120_SP1_G20
+  kernel_pf_norm_finish_K5120_G20_W20 kernel_pf_silu_mul
+  kernel_embed_gather_M1 kernel_prep_res_fold_M1_K5120_SP0_G20
+  kernel_prep_res_fold_M1_K5120_SP1_G20 kernel_prep_norm_finish_M1_K5120_G20_W20
+  kernel_prep_silu_mul_M1)
+add_test(NAME pf_prep_test COMMAND pf_prep_test)
+
 add_executable(int4_test kernels/int4_test.cc)
 target_include_directories(int4_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME int4_test COMMAND int4_test)

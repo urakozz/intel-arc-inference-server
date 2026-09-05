@@ -125,6 +125,11 @@ endfunction()
 add_prep_res_fold(1 5120 0 20)
 add_prep_res_fold(1 5120 4 20)     # Task 4 production mixer/down split
 add_prep_res_fold(1 5120 16 20)
+# Test-only: spec 2's prefill path folds ONE slice (plan 6b ruling R1), and
+# tests/prefill/pf_prep_test.cc grades `pf_res_fold` bit-identical to a decode
+# binary at M = 1. That control has to exist at S_PREV = 1, which no decode site
+# binds. Additive, never named by capture.cc, so the decode list stays 774/19.
+add_prep_res_fold(1 5120 1 20)
 add_prep_res_fold(2 5120 16 20)    # spec 1 §9: the M loop must compile at M=2
 add_prep_norm_finish(1 5120 20 20)
 add_prep_norm_finish(1 5120 20 1)  # the single-work-group finish, for the record
