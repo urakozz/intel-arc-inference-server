@@ -50,7 +50,14 @@ add_executable(probe_prefill_small probe_prefill_small.cc)
 target_include_directories(probe_prefill_small PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(probe_prefill_small PRIVATE b70_l0)
 b70_target_kernel_dir(probe_prefill_small)
-add_dependencies(probe_prefill_small ${PREFILL_SMALL_PROBE_TARGETS})
+# Both batteries: the probe-only decode-S binaries above AND the production
+# prefill ones from src/kernels/prefill. The second list is deliberately spelled
+# out rather than taken as that directory's whole BUILDSYSTEM_TARGETS (which
+# would also drag in every pf_dequant variant probe_dequant owns).
+add_dependencies(probe_prefill_small ${PREFILL_SMALL_PROBE_TARGETS}
+  kernel_pf_res_fold_K5120_SP1_G20 kernel_pf_norm_finish_K5120_G20_W20
+  kernel_pf_silu_mul kernel_pf_gated_head kernel_pf_attn_prep kernel_pf_ab_proj
+  kernel_pf_embed_gather)
 
 # probe_attn - the memo's §5.2 item: `attn_decode` with one term removed at a
 # time, so what the 224 us/launch buys is a subtraction between measurements
