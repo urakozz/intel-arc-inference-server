@@ -107,6 +107,20 @@ ruling.
 
 ## 3. The design - D: decouple weights, inherit everything Intel ships, own only the gaps
 
+### 3.0c AMENDMENT (2026-09-05, rulings A24-A28) - prefill runs; the bar in §2 is not reachable by this design; where the number stands
+
+**Measured, all iterate grade** (two desktop processes hold DRM fds; the strict-idle gate row is still owed), `--pp 4096`, C = 2048, device 0 via the unmodified `tools/bench_decode.sh --pp`:
+
+| commit | what changed | ms / 4096 | t/s | % of vLLM 1973 |
+|---|---|---:|---:|---:|
+| a663f7b | L1-engine: first device-side prefill | 4187.9 | 978.07 | 50 |
+| bb5f1d5 | `pf_gdn_scan` output tiles (A25/A27) | 3141.0 | 1304.06 | 66 |
+| 42921d2 | `pf_gdn_conv` blocking + `pf_gdn_wu` tiles (A28) | 2977.5 | 1375.65 | 70 |
+
+Correctness at every row: tie-aware golden gate 94/94 Vishva and 93/93 RTN (identical to decode's counts), determinism bitwise, prefill-vs-decode self-consistency 18/18 under the golden gate's tie rule (A26). The 4096-token prefill is 2.98 s against the 121 s decode-replay ingest this spec set out to replace.
+
+**The bar.** §2 set "beat vLLM's 1973 t/s". §3.0b's "92% ceiling, every term measured" carried one term that was never measured - the Stage-0 projection of decode's `gdn_step` widened (15 ms/chunk); in situ it was 984 (A25). With GDN now at 347 ms/chunk the non-GDN terms alone - GEMM ~656, dequant 205, small kernels 131, attention 83 - sum to **1075 ms/chunk, above the 1038 ms that 1973 t/s allows**. Every dequant lever is measured dead (A23: fused int4 3× slow; A24: one compute queue on the device, L2 slab −70 ms because of the cross-runtime handoff). **The §2 bar is not reachable with design D on this stack**, independent of how far GDN is driven. What remains priced and unbuilt: wu at SIMD32 (−45 ms/4096, derived), `pf_gdn_A2`/`pf_gdn_A` output tiles (−70 ms), a DPAS scan; together ≈ 1500-1550 t/s (76-79%). The spec's deliverable is therefore the 40× cut and a prefill at 70-79% of vLLM beside a decode that beats it (32.2 vs 31.0 t/s). §7's gate scores against this amendment, not against §2's number. Plans 6c (GEMM swap - landed inside L1-engine) and 6d (tuned attention - untuned already measures at the tuned pre-registration) are retired; plan 6e's gate stands.
+
 ### 3.0b RULING A23 (2026-09-05) - A21 falsified by measurement; the scratch + stock GEMM stands
 
 The probe A21 called for ran (`docs/probe-gemm-int4-mixed-2026-09-05.md`).
