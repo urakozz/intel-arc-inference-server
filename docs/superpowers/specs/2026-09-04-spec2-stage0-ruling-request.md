@@ -206,3 +206,121 @@ unavoidable:
    kernel to tune) and `pf_norm_finish`'s 17.617 ms at 308.5 GB/s. Those two are
    the only rows with a factor left in them, and together they are 36.9 ms -
    3.2% of a composed-attention chunk.
+
+## 2026-09-05 addendum 3 - the two load-bearing levers MEASURED; the ceiling recomposed
+
+The controller's probe-first ruling (progress.md, 2026-09-05) sent two levers
+to measurement before L1's plumbing spend. Both are now measured, and they
+went in opposite directions. Commits `31013b7..31de770`; records
+`docs/probe-gemm-batched-2026-09-05.md` and
+`docs/probe-dequant-overlap-2026-09-05.md`; suite 46/46, decode untouched.
+
+### Lever 1 - batched attention GEMM: pre-registration MOSTLY HIT
+
+| pre-registered | measured | ratio | verdict |
+|---|---:|---:|---|
+| P-1 PV M=2048, L=24, packed (192 WGs) ≥ 60 TFLOP/s | **107.72** | 1.80× | **HIT** |
+| P-2 PV M=2048, L=6, `strideB=0` (48 WGs) ≥ 90 TFLOP/s | **83.68** | 0.93× | MISS; stop bar 60 does not fire |
+| P-3 QKᵀ M=2048, L=6, `strideB=0` (768 WGs) ≥ 45 TFLOP/s | **51.25** | 1.14× | **HIT** |
+
+All measured, iterate-grade, card 1, `ZE_AFFINITY_MASK=1`. The single-head
+control cells reproduce P2 at **+0.09% (QKᵀ)** and **+5.5% (PV)**, so the
+batteries are comparable and the gain is not a harness artefact.
+`transB` - ruling A14's claim, withdrawn by A15 as unverified - is **settled
+affirmatively**: the ColumnMajor-B chain instantiates at the pin and is
+bitwise identical to the packed run, so `pf_k_transpose` is not built and its
+0.23 ms/chunk is not spent.
+
+Two mechanisms, both recorded because they bind later work: **PV at L=24 is
+bandwidth-bound** (525.9 GB/s = 89.1% of the card's measured 590 GB/s
+streaming reference), so 107.72 TFLOP/s is near this shape's ceiling and A14's
+fallback operand-role swap is not needed; and **QKᵀ's rate is capped by the
+fp32 `S` write** (91.4% of its DRAM traffic at L=24), which is why it barely
+moves with grid size - so QKᵀ's cost and `pf_softmax_causal`'s `S` read are
+**the same DRAM stream** and plan 6d's two price rows are not independent.
+
+**Composed attention with the two measured rows substituted:** plan 6d Task 6
+Step 2's table with QKᵀ = 64 launches × 0.503 ms = **32.19 ms** and
+PV = 64 × 0.308 = **19.71 ms**; softmax 27.3-32.8, `pf_attn_scale_pack` 2.0
+and 256 queue handoffs 2.19 unchanged (derived). `attn_chunk` total
+**83.4 - 88.9 ms/chunk (derived)**, against A14's pre-registered 85-100 -
+**the band holds, at its better end.**
+
+### Lever 2 - dequant overlap: pre-registration MISSED THE ACCEPTANCE BAR
+
+| pre-registered | acceptance bar | measured | verdict |
+|---|---|---:|---|
+| recovers **0.6-0.9** of the 210.116 ms dequant | **≥ 0.3** | **0.11 - 0.13** | **REJECTED (0.42× of the bar)** |
+
+Two 356,515,840 B scratches, `pf_dequant_tile` on the L0 immediate list
+against `gemm_bf16` on the SYCL queue, 8 gate‖up linears: 1.560 ms hidden out
+of 12.315 ms of dequant = **0.127** (0.121 after subtracting the 8 removed
+queue handoffs; a replicate gave 0.112). **The two queues serialise on the
+device, and submission order does not change it** - the same dependencies with
+the GEMM submitted first measure 0.122. The dequant control reproduces P3 to
+the digit (1.539 ms, 293.1 GB/s), and the overlapped battery's output is
+bitwise identical to the serial one's over two deliberately different weight
+copies, so this is a measurement and not a race.
+
+**Consequence: the 210.116 ms/chunk dequant is STRUCTURAL on this execution
+model.** The row "+ dequant hidden behind the GEMM" in the addendum-2 table is
+**withdrawn, not deferred**; the second slot's 356.5 MB is not spent; and P3's
+corollary now holds twice over - the only route past the dequant is
+eliminating the materialisation (register-only int4 unpack feeding DPAS),
+which spec §10 keeps out of scope.
+
+### Recomposed ceiling at C = 2048, with both levers measured
+
+Everything but attention is unchanged from addendum 2: GEMM 680.062 · dequant
+210.116 · small kernels 130.346 (measured) · GDN 15.365 · interop 3.290 ·
+lm_head 4.379 = **1043.558 ms**. `attn_prep_chunk` is already inside the
+measured small-kernel term; `attn_gate_chunk` (+2.7 ms, derived) is not, and
+is carried separately below.
+
+| composition | total ms | t/s | vs vLLM 1973 |
+|---|---:|---:|---:|
+| (a) FMHA as measured today | 1619.752 | 1264.4 | 64.1% |
+| (b) composed attention, A14 **pre-registered** 85-100 | 1128.558-1143.558 | 1790.9-1814.7 | 90.8-92.0% |
+| **(c) composed attention with the two GEMM rows MEASURED, 83.4-88.9** | **1126.958-1132.458** | **1808.5-1817.3** | **91.7-92.1%** |
+| (c) + `attn_gate_chunk` 2.7 (derived, not yet counted) | 1129.658-1135.158 | 1804.2-1813.0 | 91.4-91.9% |
+| (c) with the REJECTED overlap lever forced anyway at its measured 0.127 | 1100.28-1105.78 | 1852.1-1861.3 | 93.9-94.3% |
+
+### Does it clear vLLM's 1973 t/s? Plainly: NO - by 8%, and the gap no longer has a lever behind it.
+
+- **The composed ceiling is 1808.5-1817.3 t/s, 91.7-92.1% of the bar -
+  7.9-8.3% under.** That is *better* than addendum 2's (b) row, but only by
+  ~2 t/s at the midpoint: lever 1 hit and moved the attention band from
+  85-100 to 83.4-88.9, which is worth ~18 t/s at the pessimistic end and
+  nothing at the optimistic end.
+- **Addendum 2 said the bar "clears only if TWO unlanded levers hold at once".
+  One of them has now failed.** The 111-113% row is gone. There is no
+  composition of measured numbers in this document that reaches 1973.
+- **Even forcing the rejected lever does not clear it** (1852-1861 t/s,
+  93.9-94.3%), which is the cleanest statement of the situation: the two levers
+  the controller ruled load-bearing were, between them, worth ~7% and the gap
+  is ~8%.
+- The device-side versus HTTP-inclusive asymmetry documented above still
+  applies and still favours us; it is not quantified and is not claimed here.
+
+**Where the time now sits**, with composed attention at its 86.2 ms midpoint:
+**GEMM 60.2% · dequant 18.6% · our small kernels 11.5% · attention 7.6% ·
+GDN 1.4% · interop+lm_head 0.7%.** After this addendum, **60% of the chunk is
+an inherited GEMM already running at 89.5% of the derived XMX peak, and 19% is
+a format conversion that is now measured to be irreducible by both tuning and
+overlap.** Nearly four fifths of the budget has no lever left in it that this
+spec's scope permits.
+
+### One open risk, flagged and not asserted
+
+The overlap probe's own GEMM control measured **131.47 TFLOP/s at gate‖up
+M=2048 against P2's 150.19 (−12.5%)**, through the production `gemm_bf16`
+wrapper rather than P2's harness. It is **not** the wrapper's per-call
+`initialize` - `gemm_batched_test` reproduces P2 at +0.09% and +5.5% through
+the same path - and the candidates named in the probe record (a ~1.31 GB
+resident footprint, a control run immediately behind a 174,080-work-group
+dequant) were deliberately not chased, per the no-tuning rule. **If that 12.5%
+turned out to be real for the production path, the GEMM term would rise from
+680.062 to ~777 ms and the ceiling would fall to ~1665-1673 t/s (84-85% of
+vLLM, derived).** It is the single largest unresolved risk to this composition
+and it belongs to the L2 stage, which is where the production GEMM path is
+built and where the same shape can be measured under production conditions.
