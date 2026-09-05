@@ -814,3 +814,238 @@ device work in this task ran with `ZE_AFFINITY_MASK=1`.
 **Grade, fixed before the run:** the DRM holder count is measured on both render
 nodes immediately before the row. Zero holders on `renderD129` and `renderD130`
 would make it record grade; any holder makes it **iterate**, as gate row 1 was.
+
+## 8. RESULT - the new `--pp 4096` row: 1398.00 t/s
+
+### 8.1 The grade, measured immediately before the run
+
+`/proc/*/fd` walked at **21:17:04**, **measured**:
+
+```
+285644 baobab  /dev/dri/renderD129 + renderD130
+285678 ptyxis  /dev/dri/renderD129 + renderD130
+```
+
+**Four holders on the two B70s, so the row is ITERATE grade**, by the rule fixed
+in §7. Load average 0.27, 84 GB free, no container, nothing killed.
+
+### 8.2 The row
+
+`tools/bench_decode.sh --pp 4096 --tg 8 --runs 8 --model <RTN>` at `b2c42c7`,
+the unmodified harness with `ZE_AFFINITY_MASK` unset. **Measured:**
+
+```
+| b70-decode b2c42c7 pp | 4096 | 2048 | 2929.9 | 1398.00 |
+| b70-decode b2c42c7    | 4096 |    8 |   32.19 |  31.07 |
+```
+
+| row | median | min | max | spread |
+|---|---:|---:|---:|---:|
+| **pp 4096, C = 2048, device 0** | **1398.00 t/s** (2929.9 ms) | 1395.48 | 1405.94 | 10.46 (**0.75%**) |
+| tg 8 at depth 4096 | 32.19 t/s (31.07 ms/token) | 32.16 | 32.28 | 0.12 (0.37%) |
+
+Scored against §7:
+
+| | pre-registered (derived) | measured | |
+|---|---:|---:|---|
+| `--pp 4096` | 2904.3 ms | **2929.9 ms** | +25.6 ms |
+| | 1410.5 t/s | **1398.00 t/s** | **MISS, 0.89% under** |
+
+Against gate row 1 (`e6da455`, 1377.20 t/s / 2974.2 ms, same harness, same
+device 0, same iterate grade): **+1.51%, −44.3 ms.** The series, every row on
+device 0 and every one iterate: **978.07 → 1304.06 → 1375.65 → 1377.20 →
+1398.00 t/s** (49.6% → 66.1% → 69.7% → 69.8% → **70.9% of vLLM's 1973**).
+
+### 8.3 The 25.6 ms residual, reported and not subtracted
+
+Three measurements of the same change, on two devices and two instruments:
+
+| | ms | |
+|---|---:|---|
+| derived from the two per-kernel deltas (§4.1, §6.1) | **−69.9** | 96 × (0.4424 + 0.2855) |
+| the profiled walk, same session, same device 1, §0's control → §6.1's run | **−59.7** | 2938.4 → 2878.7 |
+| the `--pp` row, device 0, unprofiled, 8-run median | **−44.3** | 2974.2 → 2929.9 |
+
+The first gap (10.2 ms, 0.35%) is drift on kernels nobody touched inside the
+same instrument: `pf_gdn_solve` alone reads **0.7895 against §0's 0.7458
+(+4.9%)** = +3.5 ms, and the rest scatter ±0.3%. The second gap (15.4 ms) spans
+a device change (device 1 is 3.37% slower on prefill, so a saving measured there
+is worth ~3% less on device 0 - about 2.3 ms of it), an instrument change (a
+single `B70_PREFILL_PROFILE=1` run against an 8-run median of plain runs), and
+whatever the four DRM holders were doing. **None of it is subtracted from the
+row**; the row is 2929.9 ms and that is the number.
+
+A28 reported the same shape at a 39.9 ms (1.36%) residual on its own
+composition; this task's is 25.6 ms (0.86%).
+
+The 4096-id prefill is now **2.93 s** against the decode-replay ingest's
+**121 s** - a **41.3× cut**, measured, up from 40.7× at the gate.
+
+## 9. Where GDN's time goes after this task - priced, not fixed
+
+The profiled run that measured `pf_gdn_A` (§6.1), i.e. the final code state,
+`--pp 4096`, C = 2048, two chunks, `ZE_AFFINITY_MASK=1` (**measured**), with
+A28's column beside it. `ms/layer/chunk` = the column ÷ 96.
+
+| launch | ms (2 chunks) | ms/layer/chunk | A28's ms/layer/chunk | Δ |
+|---|---:|---:|---:|---:|
+| `pf_gdn_seed` | 0.6 | 0.0058 | 0.0057 | +1.8% |
+| `pf_gdn_conv` | 31.6 | 0.3296 | 0.3287 | +0.3% |
+| `pf_gdn_l2norm` | 14.3 | 0.1486 | 0.1482 | +0.3% |
+| `pf_gdn_gate` | 2.0 | 0.0213 | 0.0214 | −0.5% |
+| **`pf_gdn_A`** | **31.5** | **0.3281** | 0.6136 | **−46.5%** |
+| `pf_gdn_solve` | 75.8 | 0.7895 | 0.7528 | +4.9% |
+| `pf_gdn_wu` | 89.4 | 0.9314 | 0.9298 | +0.2% |
+| **`pf_gdn_A2`** | **57.2** | **0.5955** | 1.0313 | **−42.3%** |
+| `pf_gdn_scan` | 325.8 | 3.3935 | 3.3968 | −0.1% |
+| GDN total (the nine above) | **628.2** | - | 694.0 | **−9.5%** |
+| `pf_gated_head` (outside the GDN total) | 30.6 | 0.3189 | 0.3194 | −0.2% |
+| whole profiled walk | **2878.7** | - | 2938.7 | −2.0% |
+
+Per chunk: GDN **314.1 ms** (was 347.0); GDN less the scan **151.2 ms** (was
+184.0). Per-chunk ceiling as now built (derived, 2878.7 / 2 = 1439.35 ms/chunk):
+**1423.0 t/s = 72.1% of vLLM's 1973**, against A28's 1393.8 = 70.6%.
+
+The prefill's three largest terms are now `gemm_bf16` **1388.0 ms (48.2%)**,
+`dequant` 412.9 (14.3%) and `pf_gdn_scan` 325.8 (11.3%). A23/A24 closed every
+lever on the first two.
+
+### 9.1 What this task leaves on the table, priced
+
+| lever | ms/layer/chunk | on `--pp 4096` | status |
+|---|---:|---:|---|
+| **`pf_gdn_A2`'s staging loop** - item 3's fix, back-ported | 0.5955 → **~0.37** (derived) | **−43 ms** | measured on `pf_gdn_A` (§6.2), NOT applied to A2 (§4.2) |
+| `pf_gdn_scan` below ~1.5 ms needs DPAS | 3.3935 | - | A27; task (c)'s brief exists |
+| `pf_gdn_wu`'s un-unrolled `j` loop | 0.9314 | - | A28 §4.2 term 2; the width lever is now **dead** (§2) |
+| `pf_gdn_solve` | 0.7895 | - | A28: sequential by algorithm (0.18 TFLOP/s), not a mapping problem |
+| `pf_gdn_conv`'s last 1.5× of bandwidth | 0.3296 | ≤ 11 ms | A28 §2.2, unattributed by choice |
+
+The first row is the cheapest thing left anywhere in GDN and it is a **measured**
+price, not a projection: the identical loop, written the identical way, moved
+`pf_gdn_A` from 848-instruction staging to 339. It is not taken in this task
+because `pf_gdn_A2` has been measured, and A28's rule - one defect, one fix, one
+measurement - makes re-tuning a measured mapping out of bounds. It needs its own
+pre-registration, and it is worth ~1420 t/s → ~1442 t/s (derived).
+
+**A27's arithmetic is unchanged by this task**: the non-GDN terms alone exceed
+what 1973 t/s allows, so "beat vLLM on prefill" stays closed, and the reachable
+ceiling with GDN driven near zero is ~85-88%. This task moved the measured row
+from 69.8% to **70.9% of vLLM's 1973**.
+
+## 10. Invariants, and every deviation from the brief
+
+### 10.1 Suite
+
+`ctest` on the box, `ZE_AFFINITY_MASK=1`, at `b2c42c7`: **60/60 pass, 0 fail,
+1 skip** (`prefill_gate_long_test` - `oracle-out-long` still needs the
+operator's `docker run`, so it skips cleanly with 77 as designed). Total 416 s.
+No test binary was added; `gdn_wy_test` gained cases 7 and 7a.
+
+### 10.2 Numerics, all four gates, both checkpoints
+
+**Measured, `ZE_AFFINITY_MASK=1`, at the final code state:**
+
+| gate | Vishva | RTN |
+|---|---|---|
+| `prefill_gate_test` determined rows exact | **94/94** | **93/93** |
+| undetermined | 2 (1 agree + 1 other member) | 3 (2 agree + 1 other member) |
+| worst printed `gdn_state` cosine | **0.999896667** (L32) | **0.999884022** (L48) |
+| `prefill_consistency_test` (A26) | **9/9**, 543 determined rows exact, 33 undetermined, 4 to the other member | **9/9**, 558 determined rows exact, 18 undetermined, 8 to the other member |
+| `prefill_determinism_test` | **9 cases × 3 runs bitwise** (`gdn_state`, `conv_ring`, `kv_k`, `kv_v`, control, `cur_token`) | - |
+
+**18 of 18 consistency cases, 1101 determined rows across both checkpoints, zero
+mismatches** - row for row A28's table, including the worst cosines to nine
+digits, which is what bit equality predicts.
+
+`gdn_chunk_test`, **measured, all six cases green**, band identical to A22's,
+A27's and A28's to four significant figures:
+
+| case | tensor | max rel | mean rel | fallback bar |
+|---|---|---:|---:|---|
+| 1 - vs the CPU fp32 recurrent reference | `gdn_state` | **3.506e-02** | **1.197e-03** | ≤ 7.0e-02 / ≤ 2.4e-03 |
+| | `gdn_o` | 5.039e-02 | 1.228e-03 | |
+| | `y` | 9.567e-02 | 9.790e-04 | |
+| 2 - vs DEVICE `gdn_step` × 4096 | `gdn_state` | 3.506e-02 | 1.197e-03 | |
+| 3 - `C = 1` × 4096 vs that oracle | `gdn_state` | 2.089e-02 | 8.519e-04 | |
+
+Even the diagnostic counts are A28's: 17,234 / 17,236 `gdn_o` words over 1e-2 in
+cases 1 / 2 and 237,692 / 237,664 for `y`. Cases 4, 5 and 6 bit-identical as
+before. **The fallback band bar was never needed: all three items met the
+primary bitwise bar.**
+
+### 10.3 Decode, re-proven after the last code commit (`b2c42c7`)
+
+| invariant | measured |
+|---|---|
+| kernel/module count | **774 kernels, 19 modules**, max_len 16384, persistent 1.24 GB |
+| kernel table | `kernel_table_test` OK |
+| replay determinism | `replay_determinism_test` OK - 8 tokens × 3 runs bitwise identical |
+| decode golden gate | `golden_gate_test` **94/94** determined rows exact, 2 undetermined (1 agree + 1 other member) |
+| prefill golden gate, Vishva / RTN | **94/94** / **93/93** |
+| prefill determinism | 9 cases × 3 runs bitwise |
+| prefill self-consistency (A26) | **18/18**, 1101 determined rows, 0 mismatches |
+| decode bench | **32.19 t/s** (31.06 ms/token), median of 3, spread **0.00%** |
+
+```
+| b70-decode b2c42c7 | 4096 | 256 | 32.19 | 31.06 |
+```
+
+**32.19 against `docs/BENCHMARKS.md`'s recorded 32.22 for this checkpoint is
+−0.093%**, i.e. one unit in the last printed digit outside that document's
+≤ 0.09% day-scale drift band; against the two most recent same-checkpoint
+controls (32.21, both A28's and gate row 1's) it is **−0.062%**, inside it. It
+is reported at both baselines rather than at whichever one flatters it. Decode
+is untouched by construction - none of the three kernels this task edited is
+bound by `src/runtime/capture.cc`, the count is still 774/19 and the replay is
+still bitwise - and §8.2's tg-8 row (32.19 t/s, 0.37% spread) says the same from
+the other harness.
+
+### 10.4 Deviations
+
+1. **The task delivers two changes, not three: item 1 was REVERTED.** SIMD32 on
+   `pf_gdn_wu` measured 1.1505 ms against 0.9298 (§2). The pre-registration
+   fixed that branch in advance and it fired; the kernel file differs from
+   `e6da455` only by the comment block recording the measurement.
+2. **`tools/bench_decode.sh` was not modified, and the `--pp 4096` row was taken
+   with `ZE_AFFINITY_MASK` deliberately UNSET.** The gate added the pass-through
+   and found the two B70s are 3.37% apart on prefill; taking this row on device 0
+   is what makes it comparable to 978.07, 1304.06, 1375.65 and 1377.20. **Every
+   other piece of device work in this task ran with `ZE_AFFINITY_MASK=1`**: all
+   four profiled walks, `gdn_wy_test`, `gdn_chunk_test`, all four gates on both
+   checkpoints, the consistency run on RTN, and the whole `ctest` suite. The
+   decode bench row of §10.3 is unmasked for the same series-continuity reason.
+3. **Two more `_legacy` entry points are kept in the tree** -
+   `pf_gdn_A_legacy` and `pf_gdn_A2_legacy`, joining `pf_gdn_conv_legacy` and
+   `pf_gdn_wu_legacy` - launched by nothing but `gdn_wy_test`. `gdn.cc` binds
+   none of them and decode's 774/19 is untouched. Cost: two entry points in a
+   module the runtime already loads.
+4. **`pf_gdn_A`'s staging loop is written differently from `pf_gdn_A2`'s**, using
+   item 2's measured 53-instructions-per-iteration shortfall. That is a design
+   decision fixed in §5.2 **before** item 3 was built, not a re-tune of item 2
+   after its number; it is **not** back-ported to `pf_gdn_A2`, and §9.1 prices
+   what that costs.
+5. **`gcs` and `bts` left SLM** for per-work-item global reads. That is more than
+   the brief's "operands staged in SLM once", and it is what keeps SLM at exactly
+   32,768 B - 256 B more would cost the fourth resident work-group per Xe-core,
+   which §3.1 measured as the difference between issue rates of 0.502 and 0.257.
+6. **The subgroup width was chosen, and the choice is SIMD16 for both kernels**
+   (§3.2), against `pf_gdn_A2`'s inherited SIMD32. The brief asked for a
+   deliberate choice and a reason; the reason is residency at a fixed 32,768 B of
+   SLM, and item 1 measured the same trade from the other side on `pf_gdn_wu`.
+7. **`gdn_wy_test` gained cases 7 and 7a and three buffer fills.** Case 7a sits
+   beside case 1 rather than beside case 7 because `pf_gdn_solve` overwrites `A`
+   with `T` in place, so that is the only point at which the device's `A` exists.
+8. **Per-kernel times are single profiled runs, not eight.** `--pp` is a
+   whole-process measurement with a cold 16 GB load; the per-kernel split comes
+   from `B70_PREFILL_PROFILE=1`. The eight-run median is §8.2's row. The
+   instrument's own cost is printed by the binary each time (−4.6% on the
+   control, −2.7% / −5.1% / −4.8% on the three measurement runs).
+9. **No fix was attempted for any other priced GDN kernel** (§9.1), and no
+   mapping was iterated after its first measurement.
+
+### 10.5 Box
+
+84 GB free at the start and 84 GB at the end; no disk error. No container was
+started, no process killed, nothing deleted, no server restarted. The only files
+written outside the repo are the IGC dumps under `/tmp/gdnA2`, `/tmp/gdnwu32`,
+`/tmp/gdnA2b` and `/tmp/gdnAn`.
