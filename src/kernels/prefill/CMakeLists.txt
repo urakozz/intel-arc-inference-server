@@ -69,6 +69,14 @@ add_ocloc_kernel(pf_attn_prep SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
 add_ocloc_kernel(pf_ab_proj SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemv_bf16.cl
                  DEFINES K=5120 N=128 COLS_PER_WG=16 KSPLIT=16)
 
+# --- gdn_chunk's kernels (plan 6b Tasks 6-8) --------------------------------
+# NEGA_OFF / DTBIAS_OFF are the layer's GDN small-block offsets **in floats**,
+# the same two src/kernels/CMakeLists.txt:158 passes to gdn_step and owned by
+# loader/small_layout.h. No `M` and no `C`: every one of these takes the chunk
+# width as a runtime argument.
+add_ocloc_kernel(pf_gdn_conv SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_conv.cl
+                 DEFINES NEGA_OFF=40960 DTBIAS_OFF=41008)
+
 # --- The execution-context probe (plan 6b Task 2) ---------------------------
 # Bound only by tests/prefill/context_test.cc; it proves the immediate list's
 # in-order execution and per-launch argument binding empirically.
