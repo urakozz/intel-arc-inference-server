@@ -61,6 +61,17 @@ import llmcompressor, compressed_tensors
 print(f"llmcompressor {llmcompressor.__version__}  compressed-tensors {compressed_tensors.__version__}")
 PY
 
+# --- resolve the source to a local snapshot DIRECTORY ---------------------------
+# model_free_ptq's get_checkpoint_files() lists the repo tree over the network
+# when given a repo id - which HF_HUB_OFFLINE rightly refuses (seen 2026-09-05).
+# Given a directory it reads the shards directly. snapshot_download with
+# local_files_only=True returns the cached snapshot path without any request.
+if [ ! -d "$MODEL" ]; then
+  MODEL="$(HF_HUB_OFFLINE=1 "$VENVPY" -c 'import sys; from huggingface_hub import snapshot_download; print(snapshot_download(sys.argv[1], local_files_only=True))' "$MODEL")"
+fi
+[ -f "$MODEL/config.json" ] || { echo "no config.json under $MODEL" >&2; exit 2; }
+echo "source snapshot: $MODEL"
+
 # --- quantize (cd /tmp keeps any source checkout off sys.path) ---
 IGNORE='["model.embed_tokens", "re:.*visual.*", "re:.*mtp.*", "re:.*in_proj_a$", "re:.*in_proj_b$", "re:.*conv1d.*"]'
 [ "$LM_HEAD" = keep ] && IGNORE='["lm_head", "model.embed_tokens", "re:.*visual.*", "re:.*mtp.*", "re:.*in_proj_a$", "re:.*in_proj_b$", "re:.*conv1d.*"]'
