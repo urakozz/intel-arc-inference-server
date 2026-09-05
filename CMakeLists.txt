@@ -52,7 +52,10 @@ add_subdirectory(src/l0)
 if(TARGET b70_prefill_ext)
   # P1 consumes these existing OpenCL binaries through kernels::path(); make
   # their generation precede the separate icpx build as well as b70_l0.
-  add_dependencies(b70_prefill_ext b70_l0 kernel_noop kernel_ctrl_read kernel_bw_sum)
+  # b70_loader/b70_model join the list for the int4-mixed probe (ruling A21),
+  # the one icpx probe that reads the checkpoint.
+  add_dependencies(b70_prefill_ext b70_l0 b70_loader b70_model
+                   kernel_noop kernel_ctrl_read kernel_bw_sum)
 endif()
 add_subdirectory(tools/probe)
 # After src/kernels: src/cli reads that directory's target list to depend on
