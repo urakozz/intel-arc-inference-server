@@ -38,7 +38,15 @@
 #
 # The box must be otherwise idle - no vLLM container, no other GPU work - or
 # the number measures the contention instead. Env: BOX, REMOTE_DIR, JOBS (see
-# tools/box.sh), MODEL, DEPTH, TG, RUNS.
+# tools/box.sh), MODEL, DEPTH, TG, RUNS, ZE_AFFINITY_MASK.
+#
+# `ZE_AFFINITY_MASK` needs the same treatment as the sha and for the same
+# reason: `ssh` carries no environment, so until now every row this harness
+# took ran on the box's default device 0 no matter what the caller exported -
+# silently, which is the bad kind of wrong. Set it on the Mac and it is written
+# into the remote command line; leave it unset and nothing is added, which is
+# byte-for-byte the invocation every earlier row used. The device that ran is
+# printed in the bench header so it lands in the log beside the number.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -114,14 +122,21 @@ else
   tools/box.sh sync
 fi
 
+# An empty prefix when the caller sets nothing: the remote command line then
+# matches every row taken before this flag existed.
+AFFINITY=""
+if [ -n "${ZE_AFFINITY_MASK:-}" ]; then
+  AFFINITY="ZE_AFFINITY_MASK='$ZE_AFFINITY_MASK' "
+fi
+
 if [ -n "$PP" ]; then
   MODE_ARGS="--pp $PP"
   [ -n "$PP_CHUNK" ] && MODE_ARGS="$MODE_ARGS --pp-chunk $PP_CHUNK"
-  echo "bench: $MODEL, PREFILL $PP ids (chunk ${PP_CHUNK:-default kC}), tg $TG, $RUNS run(s), sha $SHA" >&2
+  echo "bench: $MODEL, PREFILL $PP ids (chunk ${PP_CHUNK:-default kC}), tg $TG, $RUNS run(s), sha $SHA, device ${ZE_AFFINITY_MASK:-unset (box default 0)}" >&2
   echo "       iterate grade unless the box is provably idle -- see this script's header" >&2
 else
   MODE_ARGS="--depth $DEPTH"
-  echo "bench: $MODEL, depth $DEPTH, tg $TG, $RUNS run(s), sha $SHA" >&2
+  echo "bench: $MODEL, depth $DEPTH, tg $TG, $RUNS run(s), sha $SHA, device ${ZE_AFFINITY_MASK:-unset (box default 0)}" >&2
 fi
 
 # `rows` is only ever expanded after at least one run, which the --runs guard
@@ -135,7 +150,7 @@ for i in $(seq 1 "$RUNS"); do
   # command prefix is what puts the Mac's sha in the remote process. Both stdout
   # rows come back together, so they are split on the ` pp |` marker the CLI
   # writes rather than on line order.
-  out="$(tools/box.sh run "B70_GIT_SHA='$SHA' ./build/src/cli/b70-decode '$MODEL' --bench $MODE_ARGS --tg $TG")"
+  out="$(tools/box.sh run "${AFFINITY}B70_GIT_SHA='$SHA' ./build/src/cli/b70-decode '$MODEL' --bench $MODE_ARGS --tg $TG")"
   echo "$out"
   while IFS= read -r line; do
     case "$line" in
