@@ -768,3 +768,36 @@ The proof that the revert is complete is the band coming back to the digit -
 Even the diagnostic counts return: 17,234 / 17,236 `gdn_o` words over 1e-2 in
 cases 1 / 2 and 237,692 / 237,664 for `y`, which are task (b)'s to the unit.
 Cases 4, 5 and 6 bit-identical as before.
+
+## 6. PRE-REGISTRATION of the `--pp 4096` row (committed before it was taken)
+
+The row is **item 0 alone**: §4.5 reverted the scan, so the only code change
+this task ships is `pf_gdn_A2`'s staging loop. Composed from task (b)'s
+**measured** row (`b2c42c7`, RTN, **2929.9 ms / 1398.00 t/s**, 8-run median,
+device 0, iterate) and 96 = 48 GDN layers × 2 chunks:
+
+| term | ms | source |
+|---|---:|---|
+| baseline | 2929.9 | measured, task (b) §8.2 |
+| `pf_gdn_A2` 0.5889 → 0.3459 | **−23.3** | measured, §2.1 |
+| `pf_gdn_scan` - DPAS reverted | **0** | §4.5: the change is not on the launch path |
+| **pre-registered** | **2906.6** | **1409.2 t/s** (derived) |
+
+**How it is taken, fixed before the run.** `tools/bench_decode.sh --pp 4096
+--tg 8 --runs 8 --model <RTN>`, unmodified, **with `ZE_AFFINITY_MASK` left
+unset** so the run lands on device 0. That is deliberate and it is the gate's
+finding: the two B70s are not interchangeable - device 1 is 3.37% slower on
+prefill - and every prior `--pp` row in this project (978.07, 1304.06, 1375.65,
+1377.20, 1398.00) ran on device 0. The row below is therefore
+**series-continuous** with all five. Every other piece of device work in this
+task ran with `ZE_AFFINITY_MASK=1`.
+
+**Grade, fixed before the run:** the DRM holder count is measured on both render
+nodes immediately before the row. Zero holders on `renderD129` and `renderD130`
+would make it record grade; any holder makes it **iterate**, as every prior row
+has been.
+
+**The counterfactual, stated so it is not confused with the row.** Had the DPAS
+scan passed its gates it would have been worth a further 96 × (3.3937 − 0.8491)
+= **−244.3 ms**, i.e. 2662.3 ms = **1538.5 t/s** (derived). That number is not a
+row and never will be; it is what the token cost.
