@@ -31,6 +31,27 @@ get_property(PF_DEQUANT_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefil
              PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_dequant ${PF_DEQUANT_KERNELS})
 
+# T6's M=2048 small-kernel check. These are probe-only ocloc binaries: no
+# runtime variant helper names them, so the decode and future prefill bindings
+# cannot select them by accident.
+set(PREFILL_SMALL_PROBE_CL ${CMAKE_SOURCE_DIR}/src/kernels/prep.cl)
+function(add_prefill_small_probe_kernel TAG)
+  add_ocloc_kernel(pfs_${TAG}_M2048 SOURCE ${PREFILL_SMALL_PROBE_CL}
+                   DEFINES M=2048 ${ARGN})
+  list(APPEND PREFILL_SMALL_PROBE_TARGETS kernel_pfs_${TAG}_M2048)
+  set(PREFILL_SMALL_PROBE_TARGETS ${PREFILL_SMALL_PROBE_TARGETS} PARENT_SCOPE)
+endfunction()
+add_prefill_small_probe_kernel(res_fold_sp4 S_PREV=4 FOLD_G=20)
+add_prefill_small_probe_kernel(norm_finish NORM_G=20 NORM_WGS=20)
+add_prefill_small_probe_kernel(silu_mul)
+add_prefill_small_probe_kernel(gated_head)
+
+add_executable(probe_prefill_small probe_prefill_small.cc)
+target_include_directories(probe_prefill_small PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_prefill_small PRIVATE b70_l0)
+b70_target_kernel_dir(probe_prefill_small)
+add_dependencies(probe_prefill_small ${PREFILL_SMALL_PROBE_TARGETS})
+
 # probe_attn - the memo's §5.2 item: `attn_decode` with one term removed at a
 # time, so what the 224 us/launch buys is a subtraction between measurements
 # rather than a fifth cost model (four have died on that kernel already).

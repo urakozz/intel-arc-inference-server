@@ -63,3 +63,41 @@ Please rule:
 
 No Stage 1 work begins until these are ruled.
 
+## 2026-09-05 addendum - P4 diagnosis and tightened C=2048 ceiling
+
+Grade: iterate (card 1, `ZE_AFFINITY_MASK=1`, card 0 may be held). This is an
+addendum: the original C=2048/C=4096 tables above remain the Stage-0 record.
+
+P4's selected hdim=256 FMHA route remains 576.194 ms across 16 FA layers at
+C=2048 (measured host-wall, correctness incomplete, iterate grade). The
+causal scheduler prunes future KV tiles; the generated image has DPAS and 2D
+block loads; and the same-tile hdim=128 comparison reaches 18.719 TFLOP/s,
+not the GEMM-like rate that would identify head dimension as the complete cause
+(measured time; derived rate, iterate grade). Details:
+[P4 diagnosis](../../probe-prefill-attn-2026-09-04.md).
+
+T6 replaced the four largest terms of the former 0.000-2532.002 ms
+small-kernel range with direct M=2048 device-timestamp measurements. The
+remaining `attn_prep` plus `embed_gather` interval is 0.000-112.333 ms
+(derived), so the residual uncertainty no longer controls the verdict. Details:
+[T6 small-kernel record](../../probe-prefill-small-2026-09-05.md).
+
+| term | C=2048 ms | how priced | grade |
+|---|---:|---|---|
+| GEMM | 680.062 | unchanged P2 sum | derived from measured P2, iterate |
+| dequant | 210.116 | unchanged P3 sum | derived from measured P3, iterate |
+| attention | 576.194 | P4 hdim=256 VTiles=8 host wall × 16 | measured host-wall, correctness incomplete, iterate |
+| GDN | 15.365 | unchanged P5 own-design price | estimated, iterate |
+| four direct small terms | 360.888 | `res_fold` + `norm_finish` + `silu_mul` + `gated_head` | derived sum of measured timestamps, iterate |
+| `attn_prep` + `embed_gather` | 0.000-112.333 | retained lower / literal decode upper bound | derived range, iterate |
+| interop | 3.290 | unchanged P1 wait path × 384 | derived from measured P1, iterate |
+| lm_head | 4.379 | unchanged once-per-chunk route | measured decode, iterate |
+| **total** | **1850.294-1962.627** | terms above | mixed, as labelled, iterate |
+| **throughput** | **1043.5-1106.9 t/s** | 2048 / total seconds | derived, iterate |
+
+This tightened device-side, loader-excluded ceiling does **not** clear vLLM's
+1973 t/s pp4096 result (external measured, HTTP-inclusive). Even its optimistic
+1106.9 t/s endpoint is 56.1% of that reference (derived). The comparison still
+has the documented device-side versus HTTP-inclusive asymmetry, but the ceiling
+is now below vLLM before the unmeasured residual, P4 correctness work, or P5's
+estimated term can improve its grade.

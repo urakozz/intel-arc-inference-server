@@ -2934,3 +2934,23 @@ Add it to the list: this is the **fifth** cost model this kernel has falsified.
 Cumulative for Task 5, **derived from two separately-paired sessions** (and so not
 a single measurement): −1.075 for the port plus −0.037 for the fence =
 **−1.112 ms/token** on `attn_decode`.
+
+## 2026-09-05 - Prefill Stage-0 P4/T6 follow-up
+
+At A13's C=2048, P4's model-required hdim=256 FMHA route costs 576.194 ms
+across 16 FA layers (measured host-wall, iterate grade; correctness remains
+open), or 5.725 TFLOP/s (derived). A same-tile hdim=128 control reaches 18.719
+TFLOP/s (measured time; derived rate), so head dimension is a structural
+penalty but not the whole attention-versus-GEMM gap. The selected generated
+image contains DPAS and 2D block loads, and the causal scheduler prunes future
+KV tiles (source/build-artifact verified, iterate grade). No FMHA tile tuning
+followed. Full record: [P4](probe-prefill-attn-2026-09-04.md).
+
+T6 directly measured M=2048 `prep_res_fold`, `prep_norm_finish`,
+`prep_silu_mul`, and `prep_gated_head`: 360.888 ms per chunk in total (derived
+from device-timestamp measurements, iterate grade). With the retained 0.000-
+112.333 ms derived `attn_prep`/`embed_gather` range, the small-kernel term is
+360.888-473.221 ms rather than 0.000-2532.002 ms (mixed, iterate grade). The
+recomposed C=2048 ceiling is 1043.5-1106.9 t/s (derived), which does not clear
+vLLM's external measured 1973 t/s pp4096 reference. Full record:
+[T6](probe-prefill-small-2026-09-05.md).
