@@ -454,3 +454,128 @@ container is not a rounding point). So:
 `tests/prefill/gdn_chunk_ref.h` documents this kernel's reduction order and the
 two files carry a standing "must be edited together" rule; **the order does not
 change**, and that is what gets recorded there.
+
+## 4. RESULT - `pf_gdn_A2` at 1.751×, bitwise
+
+Everything in this section was measured after §3 was committed at `07cb7a9`.
+Kernel at `src/kernels/prefill/pf_gdn_wy.cl` (entry `pf_gdn_A2`, helpers
+`band4`/`tile_dot`), grid in `src/runtime/prefill/gdn.cc`, bar asserted by
+`tests/prefill/gdn_wy_test.cc` case 7.
+
+### 4.1 Time, and the decision-rule verdict
+
+`ZE_AFFINITY_MASK=1 B70_PREFILL_PROFILE=1 b70-decode <RTN> --bench --pp 4096
+--tg 8`, one run, **measured** (56.5 ms over 96 waits):
+
+| | measured | |
+|---|---:|---|
+| `pf_gdn_A2`, ms per GDN layer per chunk | **0.5889** | |
+| the same before the rewrite, A28's (`42921d2`) | 1.0313 | **1.751×** |
+| the same before the rewrite, this session's control (§0) | 1.0314 | 1.751× |
+| pre-registered bar | ≤ 0.5157 (≥ 2×) | **MISS by 1.14×** |
+| point estimate | 0.23 | missed by 2.56× |
+| rate on 0.818 GFLOP/layer/chunk (derived) | **1.389 TFLOP/s** | was 0.79 |
+
+**Decision-rule verdict: 1.751× falls in the 1.2-2× band → ADOPT, and attribute
+the shortfall from the assembly.** The mapping was not iterated: §3.2's mapping
+is what was built and 0.5889 is that build's first and only measurement.
+
+Per-chunk consequence: 48 × (1.0313 − 0.5889) = **−21.2 ms/chunk**, **−42.5 ms
+over a 4096-token prefill** (derived), against the −35 ms/chunk A28 §6.1 derived
+for `A2` and `A` together.
+
+Nothing else moved (measured, same run): `pf_gdn_A` 0.6157, `pf_gdn_wu` 0.9310,
+`pf_gdn_scan` 3.3845, `pf_gdn_conv` 0.3289 - all within 0.4% of §0's control.
+
+### 4.2 What the rewrite bought, and where the shortfall is - off the Xe2 ISA
+
+`ocloc` on the committed `pf_gdn_wy.cl` with `IGC_ShaderDumpEnable=1`, with
+`pf_gdn_A2_legacy` in the same binary as the control. **Measured:**
+
+| | legacy | tiled |
+|---|---:|---:|
+| `simd_size` / `grf_count` / `slm_size` | 32 / 128 / 33,024 | **16 / 128 / 32,768** |
+| resident work-groups per Xe-core (derived) | 3 | **4** |
+| resident threads of the Xe-core's 64 (derived) | 24 (**37.5%**) | **64 (100%)** |
+| spill | none | **none** |
+| contraction block, instructions | 610 per 8 bands | **986 for all 16** |
+| `mad` in it | 64 | **520** |
+| **FMA density** | **10.5%** | **53%** |
+| operand reads | 64 × `load.slm.d32` (2 bf16 words) | **128 × `load.slm.d32x4`** |
+| bf16 widen in the loop | 288 instructions | **0** |
+| `* Q_SCALE` in the loop | 72 | **0** (folded into staging) |
+
+**Everything the tile was designed to do, it did.** The widen is gone from the
+contraction, `Q_SCALE` is gone with it, all 128 operand reads are the four-wide
+vector loads the 2 × 2 tile was for, and SLM landed at **exactly 32,768 B**, so
+the kernel now fills all 64 of an Xe-core's thread slots instead of 24.
+
+**The shortfall is the staging loop, and it is one number.** Its body is
+**53 instructions per iteration** (measured), run 16 times = **848 instructions
+per work-item**, against ~986 for the whole contraction. Per staged value that
+is **26.5 instructions**, and the pre-registration priced it at 13:
+
+| per staging iteration (one `q` value and one `k` value) | measured |
+|---|---:|
+| `load.ugm.d16u32` - one scalar 16-bit global load each | 2 |
+| `mach` + `mul` + `add3`/`or`/`add` - the 64-bit global address | ~14 |
+| `goto`/`join` - the `gi < L` and `gj < L` guards, as BRANCHES | **9** |
+| `shl`/`mov` - the bf16 widen, and `mul` by `Q_SCALE` | ~9 |
+| `store.slm.d32` | 2 |
+
+Two things make it expensive and both were foreseeable and not foreseen: the
+guard is written as a ternary around a *load*, so IGC has to branch rather than
+select; and the loop stages **one value per array per iteration**, so the 64-bit
+address arithmetic is paid per value instead of per four. On top of that the
+quadrant split stages 3 × (32 + 32) rows per (head, chunk) where the old kernel
+staged 1 × (64 + 64) - **1.5× more staged values in total**.
+
+**The arithmetic, composed (derived, per head per chunk):**
+
+| | legacy | tiled |
+|---|---:|---:|
+| work-groups | 1 | 4 (3 live + 1 zero-writer) |
+| threads | 8 (SIMD32) | 64 (SIMD16) |
+| staging instructions per work-item | ~640 | **848** |
+| contraction + epilogue per work-item | ~15,480 (12 of 16 live) | **~986** |
+| instructions issued | **123,700** | **~87,000** |
+| ratio | | **1.42×** |
+| measured ms | 1.0314 | **0.5889** |
+| issue rate, instructions/XVE/clock (derived) | 0.257 | **0.316** |
+
+1.42× of instructions × 1.23× of issue rate = **1.75×**, which is the measured
+number. The occupancy lever paid (0.257 → 0.316, toward `pf_gdn_A`'s 0.502) and
+the density lever paid (10.5% → 53%); **the staging spent 47% of the result.**
+
+**Priced, and NOT applied to this kernel:** clamping the row index and using a
+select instead of a branch, and staging four values per iteration with one
+vector global load and one `store.slm.d32x4`, would take the staging body from
+26.5 instructions per value to ~5. That is ~680 of the ~1800 instructions a
+work-item issues, i.e. **~1.6× more on this kernel, ≈ 0.37 ms/layer/chunk
+(derived)**. It is **not applied here**, because re-tuning a mapping after its
+first measurement is exactly what "one defect, one fix, one measurement"
+forbids. It is instead **pre-registered into item 3**, whose kernel has the same
+staging loop and has not been built yet - that is a design decision made before
+a build, not an iteration after a number, and §5.2 says so explicitly.
+
+### 4.3 Numerics: bitwise, as pre-registered
+
+`gdn_wy_test` at `ZE_AFFINITY_MASK=1`, **measured**, case 7 green at all three
+widths and every existing bar unmoved:
+
+| width | bar | measured |
+|---|---|---|
+| C = 256 | `A2` bit-identical to `pf_gdn_A2_legacy` | **786,432 fp32 entries identical** |
+| C = 100 (ragged, L = 36) | the same | **393,216 entries identical** |
+| C = 4096 | the same | **12,582,912 entries identical** |
+| case 4, C = 4096 | ≤ 4 fp32 ulp vs `gdn_chunk_ref::mat_A2` | max **4** (max rel 3.031e-07), 10,076,482/12,582,912 exact |
+| case 4 | device non-zero count = `Σ 48·L(L+1)/2` | **6,389,760 = 6,389,760** |
+| case 4 | diagonal non-zero on every row | **196,608 of 196,608** |
+| case 4 | exactly `0.0f` above the diagonal | asserted, green |
+| case 5 | `0.0f` outside `[0,L)²` at the ragged tail | green |
+
+The two runs are pre-filled `0x11111111` and `0x22222222`, so an entry **no
+quadrant wrote** would fail the `memcmp` rather than pass it - the 3-D grid's
+coverage is part of the same bar, including the `(iz = 0, jz = 1)` quadrant that
+writes only zeros. The host-side figures are A28's to the digit, which is what
+bit equality predicts. Cases 1, 2, 3 and 6 are unchanged and green.

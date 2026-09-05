@@ -113,7 +113,10 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
              arg_val(C)});
   profile_wait(cx, Phase::kGdnWu);
   //  8 - A2 = (q_i . k_j) exp(gc_i - gc_j), j <= i. NOTE the diagonal.
-  cx.launch(kc(wy, "pf_gdn_A2"), heads, nch, 1,
+  //      Grid.z is A28's quadrant split: a work-group owns a 32 x 32 block of
+  //      the 64 x 64 tile, which is what lets both operands be staged fp32 in
+  //      32,768 B = four resident work-groups per Xe-core.
+  cx.launch(kc(wy, "pf_gdn_A2"), heads, nch, 4,
             {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_A2), arg_val(C)});
   profile_wait(cx, Phase::kGdnA2);
   //  9 - the sequential chunk-to-chunk state scan; the only writer of gdn_state.
