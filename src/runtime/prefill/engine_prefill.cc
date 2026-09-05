@@ -1,0 +1,90 @@
+// `Engine::prefill` and its two accessors -- the ONLY members of
+// `runtime::Engine` that are not compiled into `b70_runtime`.
+//
+// **Why they live here.** `b70_runtime` is linked by every decode binary and
+// every decode test, and cmake/prefill.cmake's whole arrangement is that none
+// of those acquires a dependency on libb70_prefill.so. `Engine::prefill` calls
+// into `runtime::prefill::Context` (an icpx-built .so symbol) and into
+// `gemm_bf16` (sycl-tla). Defining it in this archive keeps the split exact: a
+// target that never calls `prefill()` links what it always linked, and a target
+// that does calls `b70_link_prefill()` and gets the .so and the two rpaths.
+// The member declarations stay in `runtime/engine.h`; only the definitions move.
+#include <algorithm>
+#include <cstring>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "model/qwen35.h"
+#include "runtime/control.h"
+#include "runtime/engine.h"
+#include "runtime/prefill/context.h"
+#include "runtime/prefill/kernels.h"
+#include "runtime/prefill/step.h"
+
+namespace runtime {
+
+struct PrefillEngine {
+  prefill::Context cx;
+  prefill::KernelCache kc;
+  explicit PrefillEngine(l0::Context& c) : cx(c), kc(c) {}
+};
+
+namespace {
+void destroy_prefill(PrefillEngine* p) { delete p; }
+}  // namespace
+
+size_t Engine::prefill_launches() const { return pfx_ ? pfx_->cx.launches() : 0; }
+
+void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
+  if (ids.empty()) throw std::runtime_error("runtime::Engine::prefill: no ids");
+  if (chunk == 0) chunk = PrefillScratch::kC;
+  if (chunk > PrefillScratch::kC)
+    throw std::runtime_error("runtime::Engine::prefill: chunk " + std::to_string(chunk) +
+                             " exceeds PrefillScratch::kC " +
+                             std::to_string(PrefillScratch::kC));
+  for (uint32_t id : ids)
+    if (id >= model::Qwen35::kVocab)
+      throw std::runtime_error(
+          "runtime::Engine::prefill: id " + std::to_string(id) +
+          " is outside the vocabulary (" + std::to_string(model::Qwen35::kVocab) +
+          " rows) -- pf_embed_gather has no debug_flag channel, so the host is the only bound");
+  const uint32_t base = control_->pos;
+  if (size_t(base) + ids.size() > size_t(buffers_.max_len))
+    throw std::runtime_error(
+        "runtime::Engine::prefill: pos " + std::to_string(base) + " + " +
+        std::to_string(ids.size()) + " ids exceeds max_len " +
+        std::to_string(buffers_.max_len) +
+        " -- the KV cache and the RoPE table stop there. Start a new session with reset(), or"
+        " load the model and the engine with a larger max_len.");
+
+  // Ruling R7: both allocations are lazy, so a decode-only Engine's device
+  // residency is byte-identical to what it was before the buffer split.
+  if (!pf_) pf_.reset(new PrefillScratch(ctx_, buffers_.max_len));
+  if (!pfx_)
+    pfx_ = std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)>(new PrefillEngine(ctx_),
+                                                                    &destroy_prefill);
+
+  for (size_t off = 0; off < ids.size(); off += chunk) {
+    const uint32_t C = uint32_t(std::min<size_t>(chunk, ids.size() - off));
+    pfx_->cx.wait();                       // before touching `ids` or `Control`
+    std::memcpy(pf_->ids.ptr(), ids.data() + off, size_t(C) * 4);
+    control_->pos = base + uint32_t(off);
+    control_->n_active = C;
+    prefill::step_chunk(pfx_->cx, pfx_->kc, *pf_, model_, buffers_.max_len, control_,
+                        base + uint32_t(off), C, persist_.gdn_state, persist_.conv_ring,
+                        persist_.kv_k, persist_.kv_v);
+    pfx_->cx.wait();                       // the chunk's state has landed
+  }
+
+  // The tail: pos = base + L - 1 and n_active = 1 make `argmax_stage2` leave
+  // pos = base + L and cur_token[0] = the first generated id.
+  const uint32_t last = uint32_t((ids.size() - 1) % chunk);
+  control_->pos = base + uint32_t(ids.size()) - 1;
+  control_->n_active = 1;
+  prefill::step_head(pfx_->cx, pfx_->kc, *pf_, model_, control_, last);
+  pfx_->cx.wait();
+}
+
+}  // namespace runtime
