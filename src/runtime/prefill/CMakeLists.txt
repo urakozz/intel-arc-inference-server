@@ -12,7 +12,12 @@
 # on libb70_prefill.so. A target that wants these symbols links
 # `b70_prefill_host` and calls `b70_link_prefill()`, which is what supplies the
 # .so and the two oneAPI rpaths.
-add_library(b70_prefill_host STATIC kernels.cc gdn.cc)
+# b70_loader is a new PUBLIC dependency: `dequant_to_bf16` takes a
+# `loader::DeviceWeight` and the walk reads `loader::LoadedModel`. It is the
+# same g++ static archive b70_runtime already links, so nothing about the .so
+# split changes.
+add_library(b70_prefill_host STATIC
+  kernels.cc gdn.cc dequant.cc attn.cc)
 target_include_directories(b70_prefill_host PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(b70_prefill_host PUBLIC b70_l0 b70_model)
+target_link_libraries(b70_prefill_host PUBLIC b70_l0 b70_model b70_loader b70_runtime)
 b70_target_kernel_dir(b70_prefill_host)

@@ -62,6 +62,17 @@ add_ocloc_kernel(pf_gated_head SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.
 # (0 B) and kFaOffKNorm (1024 B) in floats, exactly as ATTN_DEFINES sets them.
 add_ocloc_kernel(pf_attn_prep SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
                  DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256)
+# Ruling A9's bf16 `attn_q`, for the composed attention path (ruling A14). ONE
+# `-D` apart from the binary above, which is the point: everything before the
+# store is the same text, so pf_attn_test's bit-identity to `attn_prep_M1`
+# covers the norm, the tree, the rstd and the RoPE of BOTH.
+add_ocloc_kernel(pf_attn_prep_q16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
+                 DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1)
+# The composed attention path's two own kernels: the causal row softmax between
+# the inherited QK^T and PV GEMMs, and the output gate `attn_reduce` used to
+# carry. No `C`, no `L`, no depth in the name -- every extent is a runtime
+# argument or a grid dimension.
+add_ocloc_kernel(pf_attn SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn.cl)
 # a||b, zero-padded 96 -> 128, at the measured {16, 16} tiling
 # (kernels::gemv_bf16_tiling) so that M = 1 is bit-identical to the binary
 # capture.cc binds. `pf_gemv_int4_M` (plan 6b Task 4's temporary int4 GEMV) is
