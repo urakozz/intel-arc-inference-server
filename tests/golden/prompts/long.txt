@@ -1,0 +1,420 @@
+=== repetition 1, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 1, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 1, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 2, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 2, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 2, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 3, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 3, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 3, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 4, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 4, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 4, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 5, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 5, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 5, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 6, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 6, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 6, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 7, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 7, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 7, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 8, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 8, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 8, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 9, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 9, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 9, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 10, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 10, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 10, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 11, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 11, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 11, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 12, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 12, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 12, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 13, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 13, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 13, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 14, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 14, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 14, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 15, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 15, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 15, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 16, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 16, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 16, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 17, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 17, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 17, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 18, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 18, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 18, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 19, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 19, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 19, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+
+=== repetition 20, prose ===
+The harbour at dawn was quiet enough to hear the ropes creak against the bollards. Gulls traded places on the breakwater while the ferry warmed its engines. By seven the market would be loud again.
+
+
+=== repetition 20, code ===
+def clamp(values, lo, hi):
+    out = []
+    for v in values:
+        if v < lo:
+            out.append(lo)
+        elif v > hi:
+            out.append(hi)
+        else:
+            out.append(v)
+    return out
+
+
+=== repetition 20, cjk ===
+清晨的码头很安静，只能听见缆绳摩擦系缆桩的声音。海鸥在防波堤上换着位置，渡轮正在预热引擎。🌊⛴
+
+

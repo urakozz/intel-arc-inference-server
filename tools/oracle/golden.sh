@@ -27,7 +27,21 @@
 #     ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 \
 #     ORACLE_THREADS=28 tools/oracle/golden.sh
 #
-# Env: OUT_DIR, IDS_DIR, plus everything run_in_container.sh reads
+# **PROMPTS names which sets to build** (default: the three short ones). Spec
+# 2 §6.2's long prompt is one invocation of the same loop:
+#
+#   OUT_DIR=oracle-out-long PROMPTS=long \
+#   ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 \
+#   ORACLE_THREADS=28 setsid nohup tools/oracle/golden.sh \
+#     > oracle-out-long/golden.log 2>&1 </dev/null &
+#
+# `--max-prompt` below is the ceiling `PrefillScratch::kC` sets, not dump.py's
+# default 64: that default would abort at id 65 of a 2820-id prompt. It is
+# 4096 rather than 2048 because the ORACLE has no chunk width -- it runs the
+# whole prompt in one forward -- so the only thing the number bounds is a
+# typo'd ids file.
+#
+# Env: OUT_DIR, IDS_DIR, PROMPTS, plus everything run_in_container.sh reads
 # (ORACLE_SNAP / ORACLE_MODEL, ORACLE_THREADS, ORACLE_IMAGE).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -37,12 +51,12 @@ OUT_DIR="${OUT_DIR:-oracle-out}"
 # re-tokenizing would be a chance to change them by accident.
 IDS_DIR="${IDS_DIR:-tests/golden/prompts}"
 mkdir -p "$OUT_DIR"
-echo "=== golden set -> $OUT_DIR   ids <- $IDS_DIR   snap: ${ORACLE_SNAP:-HF cache/${ORACLE_MODEL:-default}}"
-for p in prose code cjk; do
+echo "=== golden set -> $OUT_DIR   ids <- $IDS_DIR   prompts: ${PROMPTS:-prose code cjk}   snap: ${ORACLE_SNAP:-HF cache/${ORACLE_MODEL:-default}}"
+for p in ${PROMPTS:-prose code cjk}; do
   echo "=== $p  start $(date -Is)"
   /usr/bin/time -v tools/oracle/run_in_container.sh \
     'python3 tools/oracle/dump.py "$SNAP" --prompt /ws/'"$IDS_DIR/$p"'.ids \
-       --out /ws/'"$OUT_DIR/$p"'.golden.safetensors --gen 32' \
+       --out /ws/'"$OUT_DIR/$p"'.golden.safetensors --gen 32 --max-prompt 4096' \
     > "$OUT_DIR/$p".log 2>&1
   echo "=== $p  done  $(date -Is)  rc=$?"
   tail -3 "$OUT_DIR/$p".log

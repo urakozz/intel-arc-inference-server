@@ -20,7 +20,8 @@ deliberately has **no `fla`**: the fallback path *is* the contract (doc 03).
 | `tokenize.py` | `encode` a prompt file to ids / `decode` ids back. Raw text, no chat template, no special tokens. |
 | `dump.py` | Builds `Qwen3_5ForCausalLM` from the config, loads a `dequant.py`-produced bf16 state dict `strict=True`, forwards the prompt with hooks, greedy-decodes, writes one safetensors file. |
 | `run_in_container.sh` | Wraps `docker run` for the box: read-only HF cache at `/hf`, repo at `/ws`, `$SNAP` resolved to the snapshot directory, **`-u $(id -u):$(id -g)`** so outputs are not root-owned, no memory limit. |
-| `golden.sh` | The production run: the three prompts, serially, `--gen 32`. This is the script that made the files plan 3 compares against - committed rather than retyped. |
+| `golden.sh` | The production run: the three prompts, serially, `--gen 32`. This is the script that made the files plan 3 compares against - committed rather than retyped. `PROMPTS` names which sets to build; `--max-prompt 4096` since spec 2. |
+| `make_long_prompt.sh` | Builds `tests/golden/prompts/long.ids` (2820 ids) and `long.txt` from the three committed prompts, on the Mac, with no model and no tokenizer. Spec 2 §6.2's ≥ 2048-id prompt. |
 | `check.sh` | Re-reads the three written files in a separate process and prints the block quoted under "Sanity checks" below. |
 | `vllm_check.py` | The third implementation: vLLM's own greedy 32 tokens on the same three prompt id files, compared against the golden `tokens`. Closes the trust chain's last link - run and recorded 2026-08-25, **96/96** (`docs/14-golden-gate.md` §cross-check). |
 
@@ -86,6 +87,7 @@ changes what the gate means. Since spec 1.6 §5.1 there are two:
 |---|---|---|
 | `oracle-out/` | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` (HF cache) | bf16 |
 | `oracle-out-rtn/` | `~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** |
+| `oracle-out-long/` | `~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** - the spec 2 §6.2 long prompt only, **NOT YET RUN** (below) |
 
 `golden.sh` takes `OUT_DIR` and neither default clobbers the other. It reads the
 **committed** `tests/golden/prompts/*.ids` rather than re-tokenizing: the two
@@ -156,6 +158,64 @@ per-prompt logs in `oracle-out/{prose,code,cjk}.log`.
 | prose | 42 | 314.5 s | 117.9 s | 14.8 s | 181.7 s | 61.4 GiB | 296.6 MiB (311,030,384 B) | 290 tensors |
 | code  | 61 | 324.9 s | 118.1 s | 19.0 s | 187.7 s | 61.5 GiB | 350.2 MiB (367,258,272 B) | 290 tensors |
 | cjk   | 38 | 316.1 s | 117.7 s | 13.9 s | 184.4 s | 61.4 GiB | 285.3 MiB (299,192,968 B) | 290 tensors |
+
+### The spec 2 §6.2 long prompt (`oracle-out-long`) - staged, NOT RUN
+
+`tools/oracle/make_long_prompt.sh` builds **`tests/golden/prompts/long.ids`,
+2820 ids** (20 repetitions of prose+code+cjk = 20 × 141), committed. It builds
+the ID stream, not the text: `dump.py --prompt` takes an ids file, and the
+tokenizer exists only inside the reference container. The readable
+`long.txt` beside it is for review and nothing consumes it. **The consequence,
+stated rather than glossed: `long.ids` is the concatenation of three id
+streams, which is not the tokenization of the concatenated text** - a real
+tokenizer would merge differently across each seam. That is irrelevant to the
+gate, which compares the engine against the oracle on the same ids.
+
+**The oracle run itself has not been taken.** It is one `docker run` inside the
+reference container, and the L1-engine stage that staged everything else here
+was operationally barred from starting containers. The command is one line and
+everything it needs is committed:
+
+```bash
+# on the box, from the repo root, detached so it outlives the ssh session
+mkdir -p oracle-out-long
+OUT_DIR=oracle-out-long PROMPTS=long \
+ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 \
+ORACLE_THREADS=28 \
+  setsid nohup tools/oracle/golden.sh > oracle-out-long/golden.log 2>&1 </dev/null &
+tail -f oracle-out-long/golden.log
+OUT_DIR=oracle-out-long PROMPTS=long \
+ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 tools/oracle/check.sh
+```
+
+**Pre-registered cost, so the run has something to be scored against**
+(plan 6b Task 13 Step 4; every line labelled):
+
+| term | figure | grade |
+|---|---:|---|
+| load + dequant | 118 s | **measured** (the table above; the three prompts are within 0.2 s of each other and it does not depend on `T`) |
+| prefill forward | ~900 s | **estimated** - 14.8 s at 42 ids scaled linearly in `T` (the MLP is 70% of the FLOPs and is linear) plus 10% for the quadratic attention term: 14.8 × (2820/42) × 1.1 ≈ 1093 s, and the fixed part of the 14.8 s is unknown, so this is an upper-ish bound |
+| 32 greedy | ~250 s | **estimated**, from ~5.8 s/token at 42 ids plus the deeper KV walk |
+| **total, one prompt** | **20-40 min** | **estimated**, plus ~18 s of container start (**measured**) |
+| peak RSS | ~70 GiB of the box's 121 GB | **estimated** - 61.4 GiB **measured** at 42 ids, plus the 192 hook activations (192 × 2820 × 5120 × 2 B = 5.54 GB, **derived**), `logits` ((2820+32) × 248320 × 4 B = 2.83 GB, **derived**) and the eager attention scores (24 × 2820² × 4 B = 763 MB, **derived**, transient) |
+| output file | ~8.5 GB | **estimated**, the three terms above plus 151 MB of GDN states and 4 MB of conv states |
+
+**Reconciliation with spec §6.2**, which said "hours-class - estimated from the
+18-minute 32-id runs": that estimate scaled the whole 16 m 48 s three-prompt run
+by prompt length; scaling the three terms separately (fixed load, linear
+prefill, 32 decodes) gives the 20-40 min above. Both are estimates and neither
+is measured yet; **the run's own `/usr/bin/time -v` is the number that goes in
+the record**, and whichever it lands on, this sentence stays. Check
+`df -h ~/b70-inference-server` first and give the container **no** memory limit.
+
+The RTN checkpoint is the one to run: it is the gate checkpoint (spec §7 records
+on RTN) and one CPU oracle run is what §6.2 budgets. A Vishva long set is the
+same command with `ORACLE_SNAP` unset and `OUT_DIR=oracle-out-long-vishva`;
+priced here, not run.
+
+`ctest -R prefill_gate_long_test` SKIPs (77) until `oracle-out-long/` exists,
+then gates the prefill path at **C = 1024** over 2820 ids - two chunk
+boundaries crossed in attention-over-cache and in the GDN state carry.
 
 Wall is `dump.py`'s own (`time.time()`); the `docker run` wrapper adds ~17.5 s of
 container start (5:32.0 / 5:42.4 / 5:33.7 measured by `/usr/bin/time`). Peak RSS
