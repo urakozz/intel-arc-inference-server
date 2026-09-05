@@ -197,3 +197,66 @@ the scan in §7; not taken as its own row.
 carries a standing "must be edited together" rule with the kernel; **the order
 does not change**, and the comment block records that this loop moved and the
 order did not.
+
+## 2. RESULT - `pf_gdn_A2` at 1.703×, bitwise, bar HIT
+
+Everything in this section was measured after §1 was committed at `60ccad1`.
+Kernel at `src/kernels/prefill/pf_gdn_wy.cl` (entry `pf_gdn_A2`, staging loop
+only); bar asserted by `tests/prefill/gdn_wy_test.cc` case 7, unchanged.
+
+### 2.1 Time, and the decision-rule verdict
+
+`ZE_AFFINITY_MASK=1 B70_PREFILL_PROFILE=1 b70-decode <RTN> --bench --pp 4096
+--tg 8`, one run, **measured** (33.2 ms over 96 waits):
+
+| | measured | |
+|---|---:|---|
+| `pf_gdn_A2`, ms per GDN layer per chunk | **0.3459** | |
+| the same before the back-port, task (b) §4.1's | 0.5889 | **1.703×** |
+| the same before the back-port, this session's control (§0) | 0.5962 | 1.724× |
+| **pre-registered bar** | ≤ 0.40 | **HIT** |
+| point estimate | 0.366 | beaten by 5.5% |
+| rate on 0.818 GFLOP/layer/chunk (derived) | **2.365 TFLOP/s** | was 1.389 |
+
+**Decision-rule verdict: ≤ 0.40 and bitwise → ADOPT.** The loop was not
+iterated: §1.2's text is what was built and 0.3459 is that build's first and
+only measurement.
+
+Per-chunk consequence: 48 × (0.5889 − 0.3459) = **−11.7 ms/chunk**, **−23.3 ms
+over a 4096-token prefill** (derived), against the −43 ms task (b) §9.1
+projected - that projection scaled the whole kernel by 1.61× from an
+instruction count, and the measured 1.70× arrives at 0.3459 rather than 0.366,
+so the *speed-up* beat its estimate while the *saving* is half of §9.1's
+because §9.1 mis-stated its own baseline as the walk figure 0.5955 minus 0.37
+times 96 ≈ 43 when the correct arithmetic on those two numbers is 96 ×
+(0.5955 − 0.37) = 21.9. The measured saving is 23.3 ms; the 43 ms figure was
+arithmetic, not measurement, and is superseded here.
+
+Nothing else moved (measured, same run): `pf_gdn_A` 0.3290 (+0.03% vs §0),
+`pf_gdn_wu` 0.9342 (−0.01%), `pf_gdn_scan` 3.4072 (+0.40%), `pf_gdn_conv`
+0.3291 (−0.09%), `pf_gdn_solve` 0.7932 (−0.43%), `pf_gated_head` 0.3198
+(−0.19%). Profiled walk **2882.7 → 2860.0 ms (−22.7)**, which is the −23.3 the
+per-kernel delta predicts to within 0.6 ms.
+
+`pf_gdn_A2` (0.3459) is now within 5% of `pf_gdn_A` (0.3290), which is what the
+two kernels' shapes predict: `A` stages one operand instead of two whenever
+`iz == jz` and is otherwise the same code.
+
+### 2.2 Numerics: bitwise, as pre-registered
+
+`gdn_wy_test` at `ZE_AFFINITY_MASK=1`, **measured**, case 7 green at all three
+widths and every existing bar unmoved:
+
+| width | bar | measured |
+|---|---|---|
+| C = 256 | `A2` bit-identical to `pf_gdn_A2_legacy` | **786,432 fp32 entries identical** |
+| C = 100 (ragged, L = 36) | the same | **393,216 entries identical** |
+| C = 4096 | the same | **12,582,912 entries identical** |
+| case 4, C = 4096 | ≤ 4 fp32 ulp vs `gdn_chunk_ref::mat_A2` | max **4** (max rel 3.031e-07), 10,076,482/12,582,912 exact |
+| case 4 | device non-zero count = `Σ 48·L(L+1)/2` | **6,389,760 = 6,389,760** |
+| case 4 | diagonal non-zero on every row | **196,608 of 196,608** |
+| case 4/5 | exactly `0.0f` above the diagonal and outside `[0,L)²` | asserted, green |
+
+Every host-side figure is task (b) §4.3's to the digit, which is what bit
+equality predicts. Cases 1, 2, 3, 6 and 7a unchanged and green (`A` and `w`/`u`
+still bit-identical to their own legacy kernels).
