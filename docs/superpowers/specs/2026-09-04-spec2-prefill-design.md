@@ -107,7 +107,38 @@ ruling.
 
 ## 3. The design - D: decouple weights, inherit everything Intel ships, own only the gaps
 
-### 3.0a RULING A21 (2026-09-05, same day) - A20's premise was false; the int4 mixed-input route is primary
+### 3.0b RULING A23 (2026-09-05) - A21 falsified by measurement; the scratch + stock GEMM stands
+
+The probe A21 called for ran (`docs/probe-gemm-int4-mixed-2026-09-05.md`).
+Correctness was perfect - **0 mismatches in 83.9 M weights** against the
+dequant oracle, after a one-time repack that is exactly a u32 transpose
+(a new layout: +12.16 GB second copy). Rate: **42.2 TFLOP/s at gate‖up
+M=2048 against ≥ 128 pre-registered - a 3× miss**, flat across every shape
+and M, not bandwidth-bound, 256-GRF confirmed. The in-register 4-bit path
+on BMG is slow: substituting it for the scratch would drop the C=2048
+ceiling from ~1810 to **~800 t/s**. Intel's own note that fused int4-DPAS
+"regressed below dequant-then-stock-GEMM on BMG" is confirmed on this
+part, and for the mainloop itself rather than for a workspace.
+
+**Consequences:** the int4 mixed-input route is **closed**; plan 6c's
+`dequant_to_bf16 → gemm_bf16` (680 + 210 ms/chunk, both measured) is the
+best GEMM path this stack has. **Plan 6f's MXFP4A16 projection is
+presumed dead** - it assumed the same 4-bit mainloop family runs at the
+bf16 rate; one e2m1 cell would settle it, but the prior is strongly
+against, and vLLM's only MXFP4 scheme class is W4A4, so the artifact may
+not even serve as a comparison. §3.0/§3.0a are kept as the record.
+
+**Where that leaves §2's bar, with every term measured:** the C=2048
+ceiling is **1808-1817 t/s = 92% of vLLM's 1973**. Every "free" lever has
+been tested and died: dequant overlap (queues serialise, 0.127 recovered),
+fused int4 (3× slow), MXFP4 (same family). Two unpriced probe candidates
+remain - an L2-resident slab dequant (the 210 ms is DRAM write-allocate;
+a ~21 MB bf16 slab fits the 24 MB L2, if it survives the launch boundary),
+and a second L0 queue on another engine ordinal. Neither is promised; the
+operator rules whether to probe them or accept 92% and ship - prefill at
+~1810 t/s is a **53× cut** from today's 121 s per 4096 tokens either way.
+
+### 3.0a RULING A21 (2026-09-05, same day) - SUPERSEDED BY §3.0b - A20's premise was false; the int4 mixed-input route is primary
 
 §3.0 below asserted that `sycl-tla` ships a native MXFP4 mainloop for BMG
 that "upconverts in registers - zero custom transform". **That was the
