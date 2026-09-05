@@ -579,3 +579,111 @@ quadrant wrote** would fail the `memcmp` rather than pass it - the 3-D grid's
 coverage is part of the same bar, including the `(iz = 0, jz = 1)` quadrant that
 writes only zeros. The host-side figures are A28's to the digit, which is what
 bit equality predicts. Cases 1, 2, 3 and 6 are unchanged and green.
+
+---
+
+# PART 3 - `pf_gdn_A`
+
+## 5. PRE-REGISTRATION (committed before the rewrite was built)
+
+### 5.1 The defect, already measured in §3.1
+
+`src/kernels/prefill/pf_gdn_wy.cl:116-144`, `A[i][j] = beta[i]·(k_i·k_j)·
+exp(gc[i]−gc[j])` for `i > j`. It is `pf_gdn_A2`'s code with one staged operand,
+no `beta` on the right, `ascale = 1.0f` and the **strict** mask, and §3.1
+measured it in the same ISA dump: `for (p = lid; p < CT*CT; p += 256)`, **one
+output per work-item per step, with no tile**, 898-instruction hot loop, 130
+`mad`, **FMA density 14.5%**, and 516 of those 898 instructions (57%) the bf16
+widen. Its one advantage over `pf_gdn_A2` is the one the rewrite must keep: at
+16,896 B of SLM and SIMD16 it is **4 work-groups × 16 threads = all 64 of an
+Xe-core's slots**, and it issues at **0.502 instructions/XVE/clock** - the
+highest rate measured anywhere in this project's GDN kernels. That is why it
+costs 0.6136 ms against `pf_gdn_A2`'s 1.0313 for the same 0.8 GFLOP.
+
+So the brief's "if reading the kernel shows it is not the no-tile mechanism,
+report what it is instead of rewriting" does not apply: **it is exactly the
+no-tile mechanism**, at 14.5% density, and the same treatment applies.
+
+### 5.2 The rewrite, fixed here before it is built
+
+`pf_gdn_A2`'s §3.2, with two changes and one thing deliberately kept.
+
+* **Identical: the quadrant grid (48, nch, 4)**, `iz = z >> 1` / `jz = z & 1`;
+  the `(iz = 0, jz = 1)` quadrant is entirely below the strict mask (`i < 32 ≤ j`
+  gives `i > j` false), writes its 1024 exact `0.0f`s and returns; a 2 × 2
+  output tile with `bi = lid >> 4`, `bj = lid & 15`; fp32 row-major staging;
+  `intel_reqd_sub_group_size(16)` for the same reason (32,768 B of SLM is 4
+  work-groups either way, and 4 × 16 = 64 resident threads against 4 × 8 = 32);
+  `gcs`/`bts` read from global rather than staged, so SLM stays at exactly
+  32,768 B; and `tile_dot`, the same band tree written as the same expression.
+  `ascale` is `1.0f` here, so the staged value is plainly `f32(k_word)`.
+* **Both operands are `k`, from different row ranges**, so the SLM is
+  `kis[32][128]` (the quadrant's `i` rows) and `kjs[32][128]` (its `j` rows).
+  **When `iz == jz` those are the same rows**, so `kjs` is not staged at all and
+  the right-hand row pointers are aimed at `kis`; the test is work-group-uniform,
+  so the barrier stays uniform. Two of the three live quadrants take that path.
+* **The staging loop is written the way §4.2 measured it should have been, and
+  this is a design decision made before a build rather than an iteration after a
+  number.** §4.2 measured `pf_gdn_A2`'s staging at **53 instructions per
+  iteration, 848 per work-item, 47% of the kernel**, and named the two causes:
+  a ternary wrapped around a *load*, which IGC must implement as a branch, and
+  one value staged per iteration, which pays the 64-bit global address per
+  value. Both are fixed here, before anything is built:
+  - **the row index is clamped, not the load** - `ri = min(gi, L−1)` is always a
+    live row, so the global read is unconditional and in bounds, and the `< L`
+    test becomes a `select` on the loaded fp32 value instead of a branch;
+  - **four consecutive `d` per iteration** - one `vload4` of `ushort4` from
+    global and one `vstore4` of `float4` into SLM, so 32 × 128 / 4 = 1024 groups
+    over 256 work-items is **4 iterations**, and the address arithmetic is paid
+    once per four values.
+  Derived: ~46 instructions per iteration × 4 = **~184 per work-item**, against
+  `pf_gdn_A2`'s measured 848.
+  **This is NOT back-ported to `pf_gdn_A2` in this task**: that kernel has been
+  measured and re-tuning it would be the iterate-until-it-looks-good the brief
+  forbids. Its price there is recorded in §4.2 and carried to §9.
+
+Nothing else changes. **No rounding point moves and no sum is re-associated.**
+
+### 5.3 Pre-registered outcomes
+
+**Time.** `pf_gdn_A` **≤ 0.4 ms per GDN layer per chunk** at C = 2048 (≥ 1.5×
+the measured 0.6136 - the brief's bar). Point estimate **0.30 ms**, derived:
+
+* per work-item: staging ~184, contraction + epilogue ~990 (`pf_gdn_A2`'s
+  measured 986 plus the `beta` multiply), prologue ~40 → **~1214**;
+* 3 live quadrants × 16 threads × 1214 + a zero-writing quadrant ≈ 58,900 per
+  head per chunk → **9.05e7 instructions issued** per GDN layer per chunk,
+  against the current 2.21e8;
+* the issue rate is bracketed by two **measured** figures rather than assumed:
+  the tiled `pf_gdn_A2`'s 0.316 (§4.2) and the current `pf_gdn_A`'s 0.502
+  (§3.1). At 0.316 that is 0.400 ms, at 0.502 it is 0.252, and the midpoint
+  0.42 gives **0.301 ms**. The bar sits at the pessimistic end of that bracket,
+  which is stated here rather than discovered later.
+
+Decision rule, fixed in advance (the brief's, with item 1's revert branch):
+
+| speed-up vs 0.6136 ms | verdict |
+|---|---|
+| ≥ 1.5× (≤ 0.4091 ms) | adopt |
+| 1.15-1.5× | adopt, and attribute the shortfall from the assembly |
+| 1.0-1.15× | report, do not tune |
+| slower than 0.6136 | **revert and report**, as item 1 was |
+
+**Numerics - the pre-registered outcome is BITWISE IDENTITY**, for §3.3's
+reasons applied unchanged, with the same fallback:
+
+* **Primary bar: `pf_gdn_A` bit-identical to `pf_gdn_A_legacy`** over every
+  `nchunks · 48 · 64 · 64` fp32 entry at C = 256, C = 100 (ragged) and C = 4096,
+  the two buffers pre-filled with different patterns so the `memcmp` is a
+  coverage bar for the quadrant grid as well as an equality one.
+* **Fallback bar:** `gdn_chunk_test` case 1's `gdn_state` max rel ≤ 7.0e-02 and
+  mean rel ≤ 2.4e-03, arbiter the token gate.
+* `gdn_wy_test`'s existing case-1 bars unchanged: ≤ 4 fp32 ulp against
+  `gdn_chunk_ref::mat_A`, device non-zero count `Σ 48·L(L−1)/2`, and exactly
+  `0.0f` on every `i <= j` entry - the **strict** mask, which is what
+  distinguishes this kernel from `pf_gdn_A2` and is the header block's mask
+  pair. Case 2 grades `pf_gdn_solve` on this kernel's `A`, so a wrong `A` fails
+  there too.
+* **The arbiter:** `prefill_gate_test` 94/94 Vishva and 93/93 RTN,
+  `prefill_determinism_test` 9 × 3 bitwise, `prefill_consistency_test` 18/18,
+  `gdn_chunk_test` 6/6. A golden regression is a finding, not a tolerance.
