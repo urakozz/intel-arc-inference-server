@@ -435,3 +435,42 @@ Open. Stage 0 ran on `libze_intel_gpu.so.1.15.39122`, IGC 2.38.x and ocloc
 2.27). P2's AOT-256-GRF GEMM and P4's hdim-256 FMHA launch are the only
 iterate-grade evidence; P5's CuTe header remains blocked by missing PyTorch
 development headers rather than a device compile result.
+
+## 16. Does the `M` dimension of the decode kernels reach a prefill width? - **resolved: no, and the answer is a second kernel family**
+
+Closed by spec 2 Stage 1 L1. Plan 6b ruling R1's arithmetic settled it before
+any of it was built: decode's split-K `S` exists to buy hardware threads at
+`M = 1`, and at `M = C` a `[S][M][N]` partials rectangle at gate‖up's
+`N = 34816` and `S = 8` is multi-terabyte. So the prefill path is `pf_*`, a
+**second** family compiled at `S = 1` with `M` as a runtime argument, and the
+decode binaries are untouched - 774 launches / 19 modules, byte for byte.
+
+Stage 0 measured what the alternative would have cost, which is the part worth
+keeping: the same kernels timed at decode's `S` read **361-473 ms/chunk** at
+`M = 2048`; at `S = 1` they read **130.346**, and in situ **131.1**. That 3×
+was not a kernel defect - it was a measurement taken at the wrong `S`, and
+naming it is why the small-kernel term is now the smallest in the composition
+rather than the second largest.
+
+## 17. The profiler cannot see the prefill walk - **opened by spec 2 Stage 1 L1, priced**
+
+`--profile` builds two `CapturedStep`s and grades one against the other; the
+prefill walk is not a capture and never will be, because its arguments are
+resolved per launch. So `ProfileEvents` has nothing to attach to.
+
+**Priced, and a cheap version already exists.** `B70_PREFILL_PROFILE=1`
+(`src/runtime/prefill/profile.h`) times every `Context::wait()` in the walk,
+which is a complete attribution *for free* - rulings A23/A24 already put a host
+wait at every L0↔SYCL boundary, so the wall time of a wait is the device time
+of everything queued since the previous drain. Its own overhead is measured at
+**−2.0%**, inside the run-to-run spread, and it is what produced
+`docs/prefill-pp-attribution-2026-09-05.md`. What it cannot do is separate two
+L0 kernels appended back to back without inserting a wait between them (which
+it does, in profile mode only, and which is why the profiled total is an upper
+bound).
+
+The full version - an optional `l0::Event` pool signalled per launch, giving
+device timestamps without extra waits - is **one task**, and it is L2's, where
+the numbers decide something. Recommended, not scheduled. What is NOT
+recommended is capturing the walk: arguments change per chunk and per layer, so
+there is nothing to capture.

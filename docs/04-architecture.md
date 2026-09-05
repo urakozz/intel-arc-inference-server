@@ -72,6 +72,44 @@ compute-bound).
 **Decode** - one token, fixed shapes, built **once** into a Level Zero command
 list and replayed. Between replays the host updates **nothing in the list**.
 
+### Prefill as built (spec 2, Stage 1) - dynamic dispatch on two runtimes
+
+The sketch above said "prefill runs through an ordinary SYCL queue". What it
+actually is, now that it exists:
+
+* **one in-order, asynchronous L0 immediate command list** for our OpenCL C
+  kernels (`ZE_COMMAND_QUEUE_FLAG_IN_ORDER`, `MODE_ASYNCHRONOUS`), with every
+  argument resolved **per launch** - no capture, because arguments change per
+  chunk and per layer;
+* **one in-order `sycl::queue`** built by interop from the SAME
+  `ze_context`/`ze_device`, so the engine's `zeMemAllocDevice` pointers are
+  valid USM inside sycl-tla's GEMM;
+* `runtime::prefill::Context::wait()` as the ONLY synchronisation, draining
+  both.
+
+**The two queues are not orderable against each other on this device, and that
+is a measurement, not a design choice.**
+`zeDeviceGetCommandQueueGroupProperties` on the B70 reports exactly two groups:
+ordinal 0 COMPUTE+COPY+COOPERATIVE with `numQueues = 1`, ordinal 1 COPY-only
+with `numQueues = 1`; `(0,1)` and `(1,1)` are refused with
+`ZE_RESULT_ERROR_INVALID_ARGUMENT` (ruling A24, Probe B). There is one compute
+queue, the two software queues share it, and no device-side cross-runtime
+dependency primitive exists. So every L0→SYCL and SYCL→L0 boundary in the walk
+is a **host `wait()`**: 656 of them per chunk, at a measured 22.35 µs each.
+`docs/15-step-anatomy.md` prices them.
+
+Two host-side rules follow and are stated once here rather than at each site:
+
+* **a host write to `Control` is always preceded by a `wait()`.** The list is
+  asynchronous; a write racing a launch that reads `pos` would be a bug no test
+  could reproduce. `Engine::prefill` waits before every chunk's `memcpy` of the
+  ids and before both `Control` writes.
+* **`Engine::prefill` is compiled into `b70_prefill_host`, not `b70_runtime`.**
+  b70_runtime is linked by every decode binary and test and must acquire no
+  dependency on `libb70_prefill.so`, so `PrefillEngine` is incomplete in
+  `engine.h` behind a function-pointer-deleter `unique_ptr` and a translation
+  unit that never calls `prefill()` emits no reference to any prefill symbol.
+
 The three values that change per token - KV write offset / position, sequence
 length, and the current token id - live in a small **device-resident control
 block** that every kernel reads and the sampler writes. The sampler stores its
@@ -178,6 +216,15 @@ meant to be linked statically. The decode path is static-linkable (L0 loader
 only); the prefill path is not until its kernels are also prebuilt with `ocloc`.
 Accept that for v1.
 
+**Updated, spec 2 Stage 1:** the prefill path's OWN kernels now ARE prebuilt
+with `ocloc` - the `pf_*` family in `src/kernels/prefill/`, the same
+`add_ocloc_kernel` rows the decode set uses. The remaining non-AOT term is
+sycl-tla's GEMM, which is `libb70_prefill.so`: an icpx-linked shared library,
+because `-fsycl` device code is only turned into a registered device image by
+the clang driver's LINK step and a g++ link of icpx objects drops the images
+silently. So the boundary moved from "the whole prefill path" to "the GEMM
+alone", and the .so links no project archive.
+
 ### What makes this hard
 
 Kernels must be **capture-safe**: no allocation, no host synchronisation, no
@@ -205,6 +252,26 @@ list is a bug, not a limitation.** Design for replay from the first kernel.
 | RoPE | write | trivial |
 | SiLU / gated MLP | write | trivial, fuse into GEMM epilogue |
 | Sampling (argmax / top-p) | write | trivial |
+
+### The prefill family, as built (spec 2, Stage 1 L1)
+
+Every row is a separate `add_ocloc_kernel` in `src/kernels/prefill/`, none is
+bound by `capture.cc`, and `M` is a runtime argument in all of them.
+
+| Kernel | What it is | Retired by |
+|---|---|---|
+| `pf_embed_gather`, `pf_res_fold`, `pf_norm_finish`, `pf_silu_mul`, `pf_gated_head` | decode's `prep`/`embed` family at runtime `M` and `S = 1` | - |
+| `pf_ab_proj` | the a‖b bf16 GEMV at the measured `{16, 16}` tiling | plan 6c, if `gemm_bf16` absorbs the shape |
+| `pf_dequant_tile` | one int4 linear → the bf16 `[K][N]` scratch | - (A23/A24: this IS the GEMM path) |
+| `pf_attn_prep` / `pf_attn_prep_q16` | q/k norm + RoPE + the KV write; the `_q16` build is ruling A9's bf16 `q` | - |
+| `pf_softmax_causal`, `pf_attn_gate` | the composed attention's own two kernels (ruling A14/A16) | plan 6d tunes, does not retire |
+| `pf_gdn_conv` (4 entries), `pf_gdn_wy` (4), `pf_gdn_scan` | `gdn_chunk`'s ten launches | - |
+| `pf_probe_chain` | the execution-context probe; bound only by `context_test` | - |
+
+Deliberately **absent**: `pf_gemv_int4_M` (plan 6b Task 4's temporary int4
+GEMV, skipped by ruling - `dequant_to_bf16` + `gemm_bf16` landed instead) and
+the `M = 64` `attn_decode`/`attn_reduce` variants of ruling A10 (retired by
+ruling A14 before they were built).
 
 Roughly **two-thirds borrowed, one-third original.** The original third (GDN)
 is the part that must be *correct*; the GEMV/GEMM is the part that decides the
