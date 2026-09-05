@@ -130,6 +130,16 @@ if(B70_PREFILL_ENABLED)
   add_dependencies(gdn_conv_test kernel_pf_gdn_conv)
   add_test(NAME gdn_conv_test COMMAND gdn_conv_test)
   set_tests_properties(gdn_conv_test PROPERTIES TIMEOUT 1800)
+
+  add_executable(gdn_wy_test prefill/gdn_wy_test.cc)
+  target_include_directories(gdn_wy_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+                             ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(gdn_wy_test PRIVATE b70_prefill_host b70_l0)
+  b70_link_prefill(gdn_wy_test)
+  b70_target_kernel_dir(gdn_wy_test)
+  add_dependencies(gdn_wy_test kernel_pf_gdn_wy)
+  add_test(NAME gdn_wy_test COMMAND gdn_wy_test)
+  set_tests_properties(gdn_wy_test PROPERTIES TIMEOUT 1800)
 endif()
 
 add_executable(int4_test kernels/int4_test.cc)
