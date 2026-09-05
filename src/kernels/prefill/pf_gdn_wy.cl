@@ -66,7 +66,7 @@
 #define WG_SOLVE 64       /* one lane per column j */
 
 /* pf_gdn_wu's tiling after ruling A27 - see the header block above (4). */
-#define SG 16             /* SIMD16: 16 subgroups of 16 lanes */
+#define SG 16             /* SIMD16: 16 subgroups of 16 lanes - MEASURED, see (4) */
 #define WU_COLS 64        /* output columns per work-group: 128 / 2 (grid.z) */
 #define TS_LD 68          /* TsT's row stride: 64 padded to a multiple of 4 */
 #define PB 4              /* positions per block; each subgroup owns two blocks */
@@ -297,6 +297,28 @@ __kernel void pf_gdn_solve(__global float* restrict A, uint c_count) {
 //     SLM: TsT 64x68 fp32 (17,408 B) + vbs and kbs 64x64 fp32 (16,384 B each)
 //     + bts/egs (512 B) = **50,688 B**, against the previous 49,152 B.
 //       w, u  bf16 [C][48][128], indexed ((m * 48 + h) * 128 + x)
+//
+//     **SIMD16 IS MEASURED, NOT INHERITED - do not "fix" this attribute.**
+//     A28 4.2 derived that dropping to SIMD32 (which is what the legacy entry
+//     point below compiles as) would cost 0.465 ms/layer/chunk against the
+//     tiled SIMD16 kernel's 0.9298, and named register pressure as its risk.
+//     Ruling A28 option (b) built it and MEASURED **1.1505 ms - 1.24x SLOWER**
+//     (docs/prefill-gdn-a2a-simd32-2026-09-05.md 2). It was reverted by the
+//     pre-registered decision rule. Both halves of the named risk fired:
+//       * no spill (`-abortOnSpill 4` would have failed the build), but the
+//         32 fp32 accumulators cost 64 of the 128 GRF at SIMD32 and IGC paid
+//         for it in register moves -- phase A's body went 45 instructions /
+//         32 mad / 71% FMA density at SIMD16 to **84 / 32 / 38%**, 34 of the
+//         39 added instructions being plain `mov`;
+//       * SLM is 50,688 B, so an Xe-core holds 2 work-groups either way: 32
+//         threads at SIMD16 but only **16 at SIMD32**, and the measured issue
+//         rate fell 0.121 -> 0.071 instructions/XVE/clock, which is more than
+//         the 1.38x of issued instructions the widening saved.
+//     The mapping itself IS width-agnostic (`b = (lid/16)>>1` is thread-uniform
+//     at SIMD32 and the two halves' `cs` cover the 64 columns exactly once);
+//     `w`/`u` came out bit-identical to the legacy kernel at all three widths.
+//     The width is not the free lever it looked like; the kernel's remaining
+//     lever is the un-unrolled runtime-bounded `j` loop (A28 4.2 term 2).
 // ---------------------------------------------------------------------------
 __attribute__((reqd_work_group_size(WG_TRI, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
