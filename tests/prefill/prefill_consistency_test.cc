@@ -14,11 +14,43 @@
 //      `generate(64)` -> ids_decode;
 //   2. `reset(); prefill(ids, chunk);` - snapshot again, `generate(64)`
 //      -> ids_prefill;
-//   3. **GATE**: ids_prefill == ids_decode, all 64, element-exact. On a
-//      mismatch the first differing position, both ids, and the logit-row
+//   3. **GATE**: ids_prefill == ids_decode on every row the reference
+//      DETERMINES, plus set-membership on the rows it does not - ruling A26.
+//      On a mismatch the first differing position, both ids, and the logit-row
 //      cosine at that row are printed - which is why the two walks are run
 //      INTERLEAVED one `generate(1)` at a time, so that row is available on
 //      both sides.
+//
+// **Ruling A26 (2026-09-05), and why it is not a loosened bar.** As written
+// this gate asserted 64 element-exact ids from two differently-rounded
+// implementations. It was red in 5 of 18 cases, and at every one of the four
+// distinct divergence rows **decode's own top-2 fp32-logit gap is 0.02-0.32
+// bf16 ulp** - the two candidates are the same bf16 word, two of the four rows
+// are ones the CPU oracle itself declares undetermined, and a greedy walk
+// resolves such a row by whichever path's last bit lands higher
+// (docs/prefill-consistency-finding-2026-09-05.md). That is precisely the
+// objection the controller settled for the GOLDEN gate on 2026-08-26, so A26
+// imports that gate's two mechanisms from `tests/golden/golden_common.h`:
+//
+//   (a) a row whose **decode-side** top-2 gap is under one bf16 ulp of the top
+//       value is UNDETERMINED - prefill's id must be a member of the set, and
+//       nothing more is asserted, because the reference does not contain an
+//       answer. On a row where the top is clear the gate is exactly as strict
+//       as it always was: one id, element-exact.
+//   (b) after the first divergence of EITHER kind the prefill walk is
+//       **teacher-forced on decode's token** (`eng.ingest({decode_id})`), so
+//       every later row is graded on a shared context instead of on a context
+//       the coin toss already split. `forced` is set BEFORE the advance, for
+//       the reason golden_gate_test measured and pinned: the replay at the
+//       divergence row is the one that writes the diverging token into the KV
+//       cache, the conv ring and the GDN state.
+//
+// One bf16 ulp is `|top| / 256` - the same unit this test already printed its
+// gaps in, and the conservative reading (an ulp is `|v|/128 .. |v|/256`).
+// `golden_common.h`'s `golden_decision` uses fp32 bit-equality because the
+// oracle's logits ARE bf16 widened to fp32; decode's are genuine fp32, so the
+// same idea has to be spelled as a one-ulp band. `golden_gate_test` and
+// `prefill_gate_test` are NOT touched.
 //   4. **DIAGNOSTICS, printed always, gating nothing** (spec §6.3: "tokens
 //      gate, tensors diagnose"): `gdn_state` (per GDN layer and overall),
 //      `conv_ring`, the chunk's `kv_k`/`kv_v` rows [0, T), and the last hidden.
@@ -127,11 +159,62 @@ Band band_bf16(const uint16_t* a, const uint16_t* b, size_t n) {
   return band_f32(fa.data(), fb.data(), n);
 }
 
+// --- ruling A26: the golden gate's tie rule, restated for an fp32 reference --
+// `golden_common.h`'s `golden_decision` collects every eligible id whose logit
+// is bit-equal to the maximum, because the oracle's logits are bf16 widened to
+// fp32 and two candidates there can literally be the same word. Decode's logits
+// are genuine fp32, so the same statement - "the reference does not distinguish
+// these two" - is a band: every id within ONE bf16 ulp (`|top| / 256`) of the
+// top value. `top` is kept separately because, unlike the golden case, the set
+// members are not equal and the lowest index in the band need not be the
+// argmax; the engine's own rule (an exact tie goes to the lower index,
+// src/kernels/argmax.cl) decides `top`.
+struct DecodeDecision {
+  std::vector<uint32_t> set;    // ascending, every id within one bf16 ulp of the top
+  uint32_t top = 0, second = 0;
+  double value = 0.0, gap = 0.0, ulp = 0.0;
+  bool determined() const { return set.size() == 1; }
+  bool contains(uint32_t id) const {
+    return std::find(set.begin(), set.end(), id) != set.end();
+  }
+};
+
+DecodeDecision decode_decision(const float* row, uint32_t n, uint32_t used) {
+  DecodeDecision d;
+  const uint32_t lim = n < used ? n : used;
+  float b0 = -INFINITY, b1 = -INFINITY;
+  uint32_t i0 = 0, i1 = 0;
+  for (uint32_t i = 0; i < lim; ++i) {
+    if (row[i] > b0) { b1 = b0; i1 = i0; b0 = row[i]; i0 = i; }
+    else if (row[i] > b1) { b1 = row[i]; i1 = i; }
+  }
+  d.top = i0;
+  d.second = i1;
+  d.value = double(b0);
+  d.gap = double(b0) - double(b1);
+  d.ulp = std::fabs(double(b0)) / 256.0;
+  const float lo = float(double(b0) - d.ulp);
+  for (uint32_t i = 0; i < lim; ++i)
+    if (row[i] > lo) d.set.push_back(i);
+  // `> lo` is a strict band around a finite maximum, so the argmax is always in
+  // it and the set is never empty. A row of all -inf/NaN would break that, and
+  // this walk's logits come off the device with no such row; the CHECK turns a
+  // future one into a named failure rather than an out-of-range index below.
+  CHECK(!d.set.empty());
+  CHECK(d.contains(d.top));
+  return d;
+}
+
 struct Row {
   std::string prompt;
   uint32_t chunk = 0, T = 0;
-  uint32_t identical = 0;      // leading identical generated ids
-  int first_diff = -1;
+  uint32_t identical = 0;      // leading identical generated ids, before any forcing
+  uint32_t exact = 0;          // ids equal to decode's over all 64 rows
+  uint32_t n_determined = 0, n_tie = 0;
+  uint32_t det_exact = 0, tie_agree = 0, tie_member = 0;
+  std::vector<uint32_t> tie_steps;
+  int first_bad = -1;          // the GATE: first determined mismatch / non-member
+  int first_diff = -1;         // the first divergence of either kind
   double diff_cos = 1.0;
   double gap_prefill = 0.0, gap_decode = 0.0;   // top-1 minus top-2 at the divergence
   Band gdn, ring, kk, vv;
@@ -234,13 +317,18 @@ int main(int argc, char** argv) {
       prow("kv_k[0,T)", r.kk);
       prow("kv_v[0,T)", r.vv);
       std::printf("  gdn_state's worst layer: L%u\n", r.gdn_worst_layer);
-      std::printf("  NAMED, EXPECTED CONTRIBUTORS (interfaces.md A22 / A9): gdn_chunk's chunked\n"
-                  "  -vs-recurrent algebra, measured at max rel 3.506e-02 / mean 1.197e-03 by\n"
-                  "  gdn_chunk_test; and ruling A9's bf16 q, which cannot move kv_k (k is bf16\n"
-                  "  on both paths) but does move the logits through the scores.\n");
+      std::printf("  NAMED, EXPECTED CONTRIBUTORS (interfaces.md A22 / A25 / A9): gdn_chunk's\n"
+                  "  chunked-vs-recurrent algebra, plus A25's ascending-k contraction inside\n"
+                  "  pf_gdn_scan, together measured by gdn_chunk_test at gdn_state max rel\n"
+                  "  3.506e-02 / mean 1.197e-03; and ruling A9's bf16 q, which cannot move\n"
+                  "  kv_k (k is bf16 on both paths) but does move the logits through the\n"
+                  "  scores.\n");
 
-      // ---- 3. the GATE: 64 ids, element-exact -----------------------------
+      // ---- 3. the GATE, ruling A26: determined rows exact, tie rows by
+      //         set-membership, teacher-forced after the first divergence ----
       std::vector<uint32_t> ids_prefill;
+      runtime::Control* ctrl = eng.buffers().control.as<runtime::Control>();
+      bool forced = false;
       for (uint32_t p = 0; p < kGen; ++p) {
         std::vector<float> lp(Qwen35::kVocab);
         // Step 0's decision row is the PREFILL scratch's (step_head's lm_head
@@ -249,25 +337,48 @@ int main(int argc, char** argv) {
         imm.copy(lp.data(),
                  p == 0 ? eng.prefill_scratch()->logits.ptr() : eng.buffers().logits.ptr(),
                  size_t(Qwen35::kVocab) * 4);
-        const uint32_t id = eng.generate(1)[0];
+        // The id the device has already sampled and is about to consume -- the
+        // same value `generate(1)` would return, read before the advance so the
+        // teacher-forcing branch below can replace what it consumes.
+        const uint32_t id = ctrl->cur_token[0];
         ids_prefill.push_back(id);
-        if (id == ids_decode[p] && r.first_diff < 0) {
-          ++r.identical;
-        } else if (r.first_diff < 0) {
+
+        const DecodeDecision dd =
+            decode_decision(logits_decode[p].data(), Qwen35::kVocab, Qwen35::kVocabUsed);
+        CHECK_EQ(dd.top, ids_decode[p]);
+        const bool ok = id == ids_decode[p];
+        if (ok) ++r.exact;
+        if (dd.determined()) {
+          ++r.n_determined;
+          if (ok) ++r.det_exact;
+          else if (r.first_bad < 0) r.first_bad = int(p);
+        } else {
+          ++r.n_tie;
+          r.tie_steps.push_back(p);
+          if (ok) ++r.tie_agree;
+          else if (dd.contains(id)) ++r.tie_member;
+          else if (r.first_bad < 0) r.first_bad = int(p);
+        }
+        if (!ok && r.first_diff < 0) {
+          r.identical = p;
           r.first_diff = int(p);
           const Metric m = compare_f32(lp.data(), logits_decode[p].data(), Qwen35::kVocab, sa, sb);
           r.diff_cos = m.cos;
           std::fprintf(stderr,
-                       "CONSISTENCY MISMATCH: %s at chunk %u, generated position %u:"
-                       " prefill %u, decode %u; logit-row cosine %.9f, relL2 %.3e\n",
-                       pname, r.chunk, p, id, ids_decode[p], m.cos, m.rel);
+                       "CONSISTENCY DIVERGENCE: %s at chunk %u, generated position %u:"
+                       " prefill %u, decode %u; decode's row is %s; logit-row cosine %.9f,"
+                       " relL2 %.3e\n",
+                       pname, r.chunk, p, id, ids_decode[p],
+                       dd.determined() ? "DETERMINED - GATE FAILURE"
+                                       : "a TIE (sub-ulp), set-membership only",
+                       m.cos, m.rel);
           // **Price the divergence rather than just report it.** A greedy walk
           // that diverges on a row where the top two logits are a hair apart is
           // a coin toss resolved differently by two differently-rounded but
           // equally correct paths; one where they are far apart is an error.
           // The number that separates those two readings is the top-2 GAP, on
           // each side, in units of the row's own scale -- so it is printed here
-          // and carried into the summary.
+          // and carried into the summary. Decode's is the one A26 rules on.
           auto gap = [&](const std::vector<float>& row, const char* who) {
             float b0 = -INFINITY, b1 = -INFINITY;
             uint32_t i0 = 0, i1 = 0;
@@ -285,65 +396,96 @@ int main(int argc, char** argv) {
           r.gap_prefill = gap(lp, "prefill");
           r.gap_decode = gap(logits_decode[p], "decode");
         }
+        // `forced` BEFORE the advance -- golden_gate_test measured and pinned
+        // this ordering: the replay at the divergence row is the one that
+        // writes the diverging token into the KV cache, the conv ring and the
+        // GDN state, so it must consume decode's id, not the engine's own.
+        if (!ok) forced = true;
+        if (forced) {
+          CHECK(ids_decode[p] < Qwen35::kVocabUsed);
+          eng.ingest({ids_decode[p]});
+        } else {
+          CHECK_EQ(eng.generate(1)[0], id);
+        }
       }
+      if (r.first_diff < 0) r.identical = kGen;
       std::printf("  prefill:");
       for (uint32_t id : ids_prefill) std::printf(" %u", id);
       std::printf("\n  decode :");
       for (uint32_t id : ids_decode) std::printf(" %u", id);
-      std::printf("\n  %u/%u leading ids identical%s\n", r.identical, kGen,
-                  r.first_diff < 0 ? "" : "   ** GATE FAILURE **");
+      std::printf("\n  undetermined rows (decode's top-2 gap under one bf16 ulp): %u of %u",
+                  r.n_tie, kGen);
+      if (r.n_tie == 0) {
+        std::printf(" (none)\n");
+      } else {
+        std::printf(" -");
+        for (uint32_t t : r.tie_steps) std::printf(" step %u", t);
+        std::printf("\n");
+      }
+      std::printf("  %u determined-exact / %u   %u tie-agreements / %u tie-set-members"
+                  "   (%u leading ids identical, %u/%u exact overall)%s\n",
+                  r.det_exact, r.n_determined, r.tie_agree, r.tie_member, r.identical,
+                  r.exact, kGen, r.first_bad < 0 ? "" : "   ** GATE FAILURE **");
+      CHECK_EQ(r.n_determined + r.n_tie, kGen);
       rows.push_back(r);
     }
   }
 
-  std::printf("\n================ prefill self-consistency ================\n");
-  std::printf("  prompt  chunk  ids  identical/64  first-diff  logit-cos    top2 gap"
-              "   gdn max rel   gdn mean rel   ring max rel   kv_k max rel\n");
+  std::printf("\n================ prefill self-consistency (ruling A26) ================\n");
+  std::printf("  the gate is the token columns alone; every band below is a diagnostic.\n"
+              "  prompt  chunk  ids  det-exact  tie-agree  tie-member  undet  lead  first"
+              "  logit-cos    decode gap   gdn max rel  gdn mean rel  ring max rel  kv_k max rel\n");
   for (const Row& r : rows)
-    std::printf("  %-7s %5u %4u      %2u/%u        %4d    %.9f  %.3e   %.4e     %.4e"
-                "     %.4e     %.4e\n",
-                r.prompt.c_str(), r.chunk, r.T, r.identical, kGen, r.first_diff, r.diff_cos,
-                r.gap_prefill, r.gdn.max_rel, r.gdn.mean_rel, r.ring.max_rel, r.kk.max_rel);
+    std::printf("  %-7s %5u %4u    %2u/%-3u      %2u         %2u        %2u    %2u/%u  %4d"
+                "  %.9f  %.4e   %.4e   %.4e    %.4e    %.4e\n",
+                r.prompt.c_str(), r.chunk, r.T, r.det_exact, r.n_determined, r.tie_agree,
+                r.tie_member, r.n_tie, r.identical, kGen, r.first_diff, r.diff_cos,
+                r.gap_decode, r.gdn.max_rel, r.gdn.mean_rel, r.ring.max_rel, r.kk.max_rel);
+  std::printf("  det-exact + tie-agree + tie-member = the graded rows; `undet` is how many of\n"
+              "  the 64 decode itself does not decide (top-2 gap under one bf16 ulp), and\n"
+              "  `lead` is the leading run of exact ids before the walk was teacher-forced.\n");
 
   bool bad = false;
   for (const Row& r : rows)
-    if (r.identical != kGen) bad = true;
+    if (r.first_bad >= 0) bad = true;
   if (bad) {
     std::fprintf(stderr,
-                 "\nGATE FAILED: prefill and decode-ingest do not generate the same 64 ids.\n"
-                 "Spec 2 §6.3's rule is that this is a FINDING to be priced and taken to the\n"
-                 "operator with the first divergence, its logit cosine and the state band above"
-                 " -\nnot a bar to widen, and it has NOT been widened. What the numbers say:\n");
+                 "\nGATE FAILED: on at least one row decode DETERMINES an id (its top-2 gap is\n"
+                 "at least one bf16 ulp) and prefill produced a different one, or an\n"
+                 "undetermined row's prefill id is outside decode's tie set. Ruling A26 made\n"
+                 "this gate tie-aware and teacher-forced; it did NOT widen it on determined\n"
+                 "rows, so what follows is a real finding to price and take to the operator -\n"
+                 "the first divergence, its logit cosine, both gaps and the state band above.\n");
     for (const Row& r : rows) {
-      if (r.identical == kGen) continue;
+      if (r.first_bad < 0) continue;
       std::fprintf(stderr,
-                   "  %s at chunk %u: first difference at generated row %d, where the two\n"
-                   "    logit rows have cosine %.9f and the TOP-2 GAP is %.3e on a value of\n"
-                   "    order 18 - i.e. the two candidates are the same bf16 word. A greedy\n"
-                   "    walk resolves that by coin toss, and after it the two walks free-run\n"
-                   "    apart, which is the whole of the %u/%u.\n",
-                   r.prompt.c_str(), r.chunk, r.first_diff, r.diff_cos, r.gap_prefill,
-                   r.identical, kGen);
+                   "  %s at chunk %u: first UNGRADED row is generated row %d; the walk's first\n"
+                   "    divergence of any kind is row %d, where the two logit rows have cosine\n"
+                   "    %.9f, decode's top-2 gap is %.3e and prefill's is %.3e.\n",
+                   r.prompt.c_str(), r.chunk, r.first_bad, r.first_diff, r.diff_cos,
+                   r.gap_decode, r.gap_prefill);
     }
     std::fprintf(stderr,
                  "  Three facts the controller needs beside that, all measured elsewhere in\n"
                  "  this suite and none of them assumed here:\n"
-                 "    * `prefill_gate_test` is GREEN on BOTH checkpoints and at chunk 16 as\n"
-                 "      well as at kC -- the prefilled engine matches the CPU oracle on every\n"
-                 "      determined row. The oracle is the arbiter; decode-ingest is not.\n"
+                 "    * `prefill_gate_test` grades the same engine against the CPU ORACLE on\n"
+                 "      both checkpoints and at chunk 16 as well as at kC. The oracle is the\n"
+                 "      arbiter; decode-ingest is a second reference, not the arbiter.\n"
                  "    * `prefill_determinism_test` and `replay_determinism_test` both pass, so\n"
                  "      neither walk is unstable; they are two deterministic walks that differ.\n"
-                 "    * the failure is NOT monotone in chunk width -- `code` is 64/64 at chunk\n"
-                 "      16 and 41/64 at 2048, `cjk` the other way round. A chunking defect gets\n"
-                 "      worse with more chunks; a coin toss does not care.\n"
-                 "  This bar, as literally written, asserts an answer neither reference\n"
-                 "  contains on such a row -- which is the same objection the controller's\n"
-                 "  2026-08-26 tie ruling settled for the GOLDEN gate (golden_common.h's\n"
-                 "  golden_decision comment). Applying that ruling here is a RULING REQUEST,\n"
-                 "  not a change this test may make for itself.\n");
+                 "    * a chunking defect gets worse with more chunks. Check the three chunk\n"
+                 "      widths of the failing prompt before blaming the chunked algebra.\n");
     return 1;
   }
-  std::printf("prefill_consistency_test OK: %zu (prompt, chunk) case(s), 64/64 generated ids"
-              " identical to decode-ingest in every one\n", rows.size());
+  uint32_t tot_det = 0, tot_tie = 0, tot_member = 0;
+  for (const Row& r : rows) {
+    tot_det += r.n_determined;
+    tot_tie += r.n_tie;
+    tot_member += r.tie_member;
+  }
+  std::printf("prefill_consistency_test OK: %zu (prompt, chunk) case(s); %u determined rows all\n"
+              " exact against decode-ingest, %u undetermined rows (decode's own top-2 gap under\n"
+              " one bf16 ulp) of which %u resolved to the other member of decode's tie set\n",
+              rows.size(), tot_det, tot_tie, tot_member);
   return 0;
 }
