@@ -7,6 +7,7 @@
 #include "kernels/prefill/pf_kernels.h"
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
+#include "runtime/prefill/profile.h"
 
 // The ten launches of one GDN layer's chunk, in order. Every one takes `C` as a
 // RUNTIME argument, so one binary set serves every chunk width `--pp-chunk` can
@@ -71,34 +72,44 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   //  1 - lift the ring's three older slots (pos-3..pos-1) into a flat seed.
   cx.launch(kc(conv, "pf_gdn_seed"), kConvGroups, 1, 1,
             {PtrArg(conv_ring), PtrArg(p_seed), arg_val(pos)});
+  profile_wait(cx, Phase::kGdnSeed);
   //  2 - the batched conv1d + SiLU over the chunk, and the ring writeback.
   cx.launch(kc(conv, "pf_gdn_conv"), kConvGroups, 1, 1,
             {PtrArg(qkvz_partials), PtrArg(p_seed), PtrArg(small), PtrArg(p_xb),
              PtrArg(conv_ring), arg_val(pos), arg_val(C)});
+  profile_wait(cx, Phase::kGdnConv);
   //  3 - l2norm q and k in place.
   cx.launch(kc(conv, "pf_gdn_l2norm"), 2 * kKHeads, C, 1, {PtrArg(p_xb), arg_val(C)});
+  profile_wait(cx, Phase::kGdnL2);
   //  4 - head scalars and the intra-chunk cumulative gate.
   cx.launch(kc(conv, "pf_gdn_gate"), heads, nch, 1,
             {PtrArg(ab_out), PtrArg(small), PtrArg(p_g), PtrArg(p_beta), arg_val(C)});
+  profile_wait(cx, Phase::kGdnGate);
   //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j.
   cx.launch(kc(wy, "pf_gdn_A"), heads, nch, 1,
             {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_beta), PtrArg(p_A), arg_val(C)});
+  profile_wait(cx, Phase::kGdnA);
   //  6 - T = (I - A)^-1, IN PLACE over A.
   cx.launch(kc(wy, "pf_gdn_solve"), heads, nch, 1, {PtrArg(p_A), arg_val(C)});
+  profile_wait(cx, Phase::kGdnSolve);
   //  7 - vb/kb, then u = T vb and w = T kb.
   cx.launch(kc(wy, "pf_gdn_wu"), heads, nch, 1,
             {PtrArg(p_xb), PtrArg(p_A), PtrArg(p_g), PtrArg(p_beta), PtrArg(p_w), PtrArg(p_u),
              arg_val(C)});
+  profile_wait(cx, Phase::kGdnWu);
   //  8 - A2 = (q_i . k_j) exp(gc_i - gc_j), j <= i. NOTE the diagonal.
   cx.launch(kc(wy, "pf_gdn_A2"), heads, nch, 1,
             {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_A2), arg_val(C)});
+  profile_wait(cx, Phase::kGdnA2);
   //  9 - the sequential chunk-to-chunk state scan; the only writer of gdn_state.
   cx.launch(kc(scan, "pf_gdn_scan"), heads, kStateColChunks, 1,
             {PtrArg(p_xb), PtrArg(p_w), PtrArg(p_u), PtrArg(p_A2), PtrArg(p_g),
              PtrArg(gdn_state), PtrArg(p_o), arg_val(C)});
+  profile_wait(cx, Phase::kGdnScan);
   // 10 - the gated head. Ruling R3: it belongs to the mixer, not to the caller.
   cx.launch(kc.get(kernels::pf_gated_head_variant(), "pf_gated_head"), heads, C, 1,
             {PtrArg(qkvz_partials), PtrArg(p_o), PtrArg(gated_w), PtrArg(y), arg_val(C)});
+  profile_wait(cx, Phase::kGdnHead);
 }
 
 }  // namespace runtime::prefill
