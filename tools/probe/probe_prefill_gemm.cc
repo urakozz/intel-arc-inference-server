@@ -61,6 +61,7 @@ constexpr ProbeShape kShapes[] = {
     {5120, 16384, "qkv‖z"},       {6144, 5120, "out/o_proj"},
     {5120, 34816, "gate‖up"},     {17408, 5120, "down"},
     {5120, 14336, "q‖k‖v"},       {5120, 248320, "lm_head"},
+    {256, 4096, "attn-QK^T K=256"}, {4096, 256, "attn-PV N=256"},
 };
 constexpr uint32_t kMs[] = {512, 1024, 2048, 4096};
 
