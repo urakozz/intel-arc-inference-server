@@ -667,15 +667,43 @@ genuine tie (`353` vs `271`, golden logits 19.75 vs 19.75) had gone the other
 way; positions 19-31 then match again, so this is one token, not a divergence.
 `code` 32/32 and `cjk` 32/32 on the same checkpoint.
 
-**The cosine bar fell harder than the token bar.** Vishva's `code` prompt reads
-`gdn_state` cosine **0.998499499** at L60 where task (b) printed
-**0.999896667** as its worst: `1 − cos` grew **14.5×**, i.e. the state's L2
-relative error grew **≈ 3.8×** - against §3.5's predicted 1.5×. RTN's worst
-moved only 1.28× on the same measure (1.160e-04 → 1.484e-04). So the real
-checkpoint's deep GDN layers are far more sensitive to R1/R3 than the synthetic
-fixture is, and **`gdn_chunk_test`'s band under-reports this design's cost by an
-order of magnitude** - the single most useful thing this measurement produced,
-and the reason the token gate is the arbiter and not the band.
+**The cosine bar fell harder than the token bar, and it fell in ONE place.**
+Scored against **this session's own reverted-state control** (§5.1, which is the
+only baseline that is same-code and same-session; see the note below):
+
+| worst printed `gdn_state` cosine, per prompt | reverted (control) | **DPAS** | `1−cos` ratio |
+|---|---:|---:|---:|
+| Vishva `prose` | 0.999876346 (L60) | 0.999857456 (L49) | 1.15× |
+| **Vishva `code`** | **0.999780657 (L60)** | **0.998499499 (L60)** | **6.84×** |
+| Vishva `cjk` | 0.999905334 (L33) | 0.999911193 (L33) | 0.94× |
+| RTN `prose` | 0.999905880 (L60) | 0.999904933 (L60) | 1.01× |
+| RTN `code` | 0.999847086 (L60) | 0.999851577 (L49) | 0.97× |
+| RTN `cjk` | 0.999904818 (L33) | 0.999908522 (L33) | 0.96× |
+
+Five of the six are unmoved. **One - Vishva's `code` prompt at L60 - loses
+6.84× of `1−cos`, i.e. ≈ 2.6× of the state's L2 relative error**, against §3.5's
+predicted 1.5×, and that is the one that crosses the pre-registered 0.999.
+The token flip is on the *other* checkpoint (RTN `prose`), so the two failures
+are two independent single-point sensitivities rather than one effect seen
+twice.
+
+**Note on the baseline, reported not resolved.** Task (b) §10.2 published
+0.999896667 (L32) / 0.999884022 (L48) as the worst Vishva / RTN cosines. This
+session's reverted tree - whose only difference from task (b)'s final commit is
+item 0's *bitwise* staging change - reproduces **A27's** published figures
+instead, 0.999780657 (L60) and 0.999847086 (L60), to all nine digits. The
+comparison above therefore uses this session's own control and not task (b)'s
+table. The discrepancy in task (b)'s table is recorded here and not chased.
+
+Either way the verdict is unchanged: `0.998499499 < 0.999` against every
+candidate baseline, and 92/93 is 92/93.
+
+The wider point stands and is the single most useful thing this measurement
+produced: **`gdn_chunk_test`'s synthetic band under-reports this design's cost.**
+Its state band moved +0.8% on the max and +21.7% on the mean while the real
+checkpoint's 60th GDN layer lost 2.6× of L2 agreement on one prompt and one
+token flipped on another. That is why the token gate is the arbiter and not the
+band.
 
 ### 4.5 Verdict: REVERT, by the rule fixed in §3.6
 
