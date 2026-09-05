@@ -79,13 +79,23 @@
 // ---------------------------------------------------------------------------
 // Reduction orders, stated once and mirrored by the kernels
 // ---------------------------------------------------------------------------
-//   * every 128-term dot over the head dim (A's k·k, A2's q·k, and both
-//     contractions inside the scan) uses gdn_step.cl:52-65's band tree: band
-//     `b` accumulates 8 terms in ASCENDING kk with explicit `fma`, then the 16
-//     band partials collapse with stride = 8, 4, 2, 1. Choosing the same tile
-//     and the same trees is deliberate: it is the closest the chunked form can
-//     sit to the recurrent one, and spec 2 §6.3's band is measured against
-//     exactly that choice.
+//   * `pf_gdn_A`'s k·k and `pf_gdn_A2`'s q·k use gdn_step.cl:52-65's band tree:
+//     band `b` accumulates 8 terms in ASCENDING kk with explicit `fma`, then
+//     the 16 band partials collapse with stride = 8, 4, 2, 1. Those two kernels
+//     keep decode's tile, so the reference keeps decode's tree.
+//   * **the scan's two 128-term contractions (`w · S` and `q · S`) are ONE
+//     ascending-k `fma` chain per output** - `asc_dot` below, not `band_dot`.
+//     Ruling A25 rewrote `pf_gdn_scan` to give each work-item an output tile of
+//     8 with a private ascending-k accumulation (the band tree cost 640
+//     barriers per 64-position sub-chunk and 0.64 TFLOP/s), and this file
+//     mirrors the kernel it is a reference for. **Consequence worth stating
+//     plainly: on these two sums the CPU reference's order is now closer to the
+//     chunked kernel's than to decode's `gdn_step`** - which is the right way
+//     round, because case 1 grades `gdn_chunk` against a same-order fp32
+//     reference while case 2 grades it against decode on the device, and
+//     keeping those two comparisons distinct is the whole point of having both.
+//     The pre-registration for the re-measured band is
+//     docs/prefill-gdn-scan-2026-09-05.md §1.3.
 //   * every triangular sum (`u`, `w`, and o's A2 term) runs `j` ASCENDING with
 //     explicit `fma` and one accumulator.
 //   * the cumulative gate is an ascending fp32 running sum inside a 64-chunk,
@@ -138,6 +148,15 @@ inline float band_dot(const float* a, const float* b_stride_base, size_t b_strid
   for (uint32_t stride = kBands / 2; stride > 0; stride >>= 1)
     for (uint32_t band = 0; band < stride; ++band) p[band] += p[band + stride];
   return p[0];
+}
+
+// pf_gdn_scan.cl's contraction after ruling A25: ONE accumulator, k ascending
+// over all 128, explicit `fma`. Used by `scan` below and by nothing else.
+inline float asc_dot(const float* a, const float* b_stride_base, size_t b_stride) {
+  float acc = 0.0f;
+  for (uint32_t k = 0; k < kDim; ++k)
+    acc = std::fma(a[k], b_stride_base[size_t(k) * b_stride], acc);
+  return acc;
 }
 
 // ---------------------------------------------------------------------------
@@ -371,9 +390,15 @@ inline void mat_A2(uint32_t C, const uint16_t* xb, const float* g_cum, float* A2
 //   state fp32 [48][128][128] k-major, updated in place
 //   o     fp32 [C][48][128]   written (P10: fp32; pf_gated_head rounds it)
 // `vn` and `o` are computed from the CHUNK-START state; only then is S touched.
-// The one reassociation relative to decode lives here: decode interleaves the
-// decay with the rank-1 update per position (gdn_step.cl:318-349); the chunk
-// applies exp(gl) once and adds SUM_i k_i (x) vs_i.
+// TWO reassociations relative to decode live here, both named and both
+// mirrored above:
+//   * decode interleaves the decay with the rank-1 update per position
+//     (gdn_step.cl:318-349); the chunk applies exp(gl) once and adds
+//     SUM_i k_i (x) vs_i.
+//   * ruling A25: `w · S` and `q · S` are ONE ascending-k fma chain
+//     (`asc_dot`), not decode's 16-band tree - the kernel gives each work-item
+//     an output tile of 8 with a private accumulator, which is what took the
+//     barrier count per 64-position sub-chunk from 640 to 3.
 // ---------------------------------------------------------------------------
 inline void scan(uint32_t C, const uint16_t* xb, const uint16_t* w, const uint16_t* u,
                  const float* A2, const float* g_cum, float* state, float* o) {
@@ -394,13 +419,13 @@ inline void scan(uint32_t C, const uint16_t* xb, const uint16_t* w, const uint16
           wf[d] = f32(w[(size_t(m) * kHeads + h) * kDim + d]);
         for (uint32_t x = 0; x < kDim; ++x)
           vn[size_t(i) * kDim + x] =
-              f32(u[(size_t(m) * kHeads + h) * kDim + x]) - band_dot(wf.data(), S + x, kDim);
+              f32(u[(size_t(m) * kHeads + h) * kDim + x]) - asc_dot(wf.data(), S + x, kDim);
       }
       // o[i][x] = (SUM_k q[i][k]*S[k][x]) * exp(gc[i]) + SUM_{j<=i} A2[i][j]*vn[j][x]
       for (uint32_t i = 0; i < s.L; ++i) {
         const uint32_t m = t * kCT + i;
         for (uint32_t x = 0; x < kDim; ++x) {
-          float acc = band_dot(s.q[i], S + x, kDim) * expg[i];
+          float acc = asc_dot(s.q[i], S + x, kDim) * expg[i];
           for (uint32_t j = 0; j <= i; ++j)                          // j ascending
             acc = std::fma(At[size_t(i) * kCT + j], vn[size_t(j) * kDim + x], acc);
           o[(size_t(m) * kHeads + h) * kDim + x] = acc;              // P10: fp32
