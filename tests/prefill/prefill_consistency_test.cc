@@ -169,12 +169,23 @@ Band band_bf16(const uint16_t* a, const uint16_t* b, size_t n) {
 // members are not equal and the lowest index in the band need not be the
 // argmax; the engine's own rule (an exact tie goes to the lower index,
 // src/kernels/argmax.cl) decides `top`.
+//
+// **The GATE is the narrower of the two readings.** A26 and the finding's
+// option 1 both say "prefill's id must be one of the TWO", so `graded_member`
+// is `{top, second}` and nothing wider. `set` - every eligible id inside the
+// band, which is the shape `golden_decision` has - is carried and printed as a
+// diagnostic only, so that a row where a THIRD id also falls within one ulp is
+// visible rather than silently either accepted or rejected. `determined()` is
+// the same predicate under both readings: a second member exists in the band
+// exactly when the top-2 gap is under one ulp.
 struct DecodeDecision {
   std::vector<uint32_t> set;    // ascending, every id within one bf16 ulp of the top
   uint32_t top = 0, second = 0;
   double value = 0.0, gap = 0.0, ulp = 0.0;
   bool determined() const { return set.size() == 1; }
-  bool contains(uint32_t id) const {
+  // The graded rule: one of the two the reference could not separate.
+  bool graded_member(uint32_t id) const { return id == top || id == second; }
+  bool in_band(uint32_t id) const {
     return std::find(set.begin(), set.end(), id) != set.end();
   }
 };
@@ -201,7 +212,7 @@ DecodeDecision decode_decision(const float* row, uint32_t n, uint32_t used) {
   // this walk's logits come off the device with no such row; the CHECK turns a
   // future one into a named failure rather than an out-of-range index below.
   CHECK(!d.set.empty());
-  CHECK(d.contains(d.top));
+  CHECK(d.in_band(d.top));
   return d;
 }
 
@@ -212,6 +223,7 @@ struct Row {
   uint32_t exact = 0;          // ids equal to decode's over all 64 rows
   uint32_t n_determined = 0, n_tie = 0;
   uint32_t det_exact = 0, tie_agree = 0, tie_member = 0;
+  uint32_t wide_band = 0;      // undetermined rows with a THIRD id inside one ulp
   std::vector<uint32_t> tie_steps;
   int first_bad = -1;          // the GATE: first determined mismatch / non-member
   int first_diff = -1;         // the first divergence of either kind
@@ -355,8 +367,17 @@ int main(int argc, char** argv) {
         } else {
           ++r.n_tie;
           r.tie_steps.push_back(p);
+          if (dd.set.size() > 2) {
+            // Not a failure by itself, but it is the one place where "one of
+            // the two" and "inside the band" could differ, so it is counted and
+            // named rather than left implicit.
+            ++r.wide_band;
+            std::printf("      step %u: %zu ids within one bf16 ulp of the top"
+                        " (gate grades on the top two: %u, %u)\n",
+                        p, dd.set.size(), dd.top, dd.second);
+          }
           if (ok) ++r.tie_agree;
-          else if (dd.contains(id)) ++r.tie_member;
+          else if (dd.graded_member(id)) ++r.tie_member;
           else if (r.first_bad < 0) r.first_bad = int(p);
         }
         if (!ok && r.first_diff < 0) {
