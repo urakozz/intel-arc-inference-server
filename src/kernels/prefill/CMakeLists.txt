@@ -68,3 +68,8 @@ add_ocloc_kernel(pf_attn_prep SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
 # deliberately NOT built: plan 6c lands sycl-tla's real GEMM in its place.
 add_ocloc_kernel(pf_ab_proj SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemv_bf16.cl
                  DEFINES K=5120 N=128 COLS_PER_WG=16 KSPLIT=16)
+
+# --- The execution-context probe (plan 6b Task 2) ---------------------------
+# Bound only by tests/prefill/context_test.cc; it proves the immediate list's
+# in-order execution and per-launch argument binding empirically.
+add_ocloc_kernel(pf_probe_chain SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_probe_chain.cl)

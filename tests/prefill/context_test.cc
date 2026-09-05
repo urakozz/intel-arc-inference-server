@@ -1,17 +1,71 @@
 // The prefill execution context: one ze_context, two queues (spec 2 §3.6).
-// Needs a B70 and the `noop` binary and nothing else -- no checkpoint, so no
-// ctest label. It is also the ABI check for the two-compiler build: this
-// translation unit is g++-compiled and calls into an icpx-linked .so across a
-// std::initializer_list and a std::runtime_error.
+// Needs a B70 and the `noop` / `pf_probe_chain` binaries and nothing else -- no
+// checkpoint, so no ctest label. It is also the ABI check for the two-compiler
+// build: this translation unit is g++-compiled and calls into an icpx-linked
+// .so across a std::initializer_list and a std::runtime_error.
+//
+// **The 1024-launch chain is the point of this file.** `gdn_chunk` appends ten
+// kernels that feed each other through device buffers with no events between
+// them, and `Engine::prefill()` will append thousands. Two properties have to
+// hold and neither is provable by reading the driver header:
+//
+//   (a) arguments are resolved at EACH append, not frozen at the first -- the
+//       whole reason this path exists instead of a captured list;
+//   (b) appended launches execute IN ORDER with no overlap -- what
+//       ZE_COMMAND_QUEUE_FLAG_IN_ORDER buys (ze_api.h:3450) and what replaces
+//       decode's `M + 3 <= RING` ring-ownership argument.
+//
+// `pf_chain_step(buf, n, step)` does `buf[i] += step`. Launched 1024 times with
+// `step = launch index`, every element must equal sum_{i<1024} i = 523776. A
+// frozen argument gives 0; a lost or duplicated increment gives anything else.
+//
+// **Where the teeth actually are, measured rather than assumed (2026-09-05,
+// card 1).** Two mutations were run and reverted:
+//
+//   * `arg_val(steps[i])` -> `arg_val(steps[0])` in `chain()`: FAILS at line
+//     "CHECK_EQ failed: host[i] != kExpected". Property (a) is covered.
+//   * `ZE_COMMAND_QUEUE_FLAG_IN_ORDER` removed from src/sycl/context.cc: still
+//     PASSES, 523776. This driver already dispatches a legacy immediate list to
+//     one hardware queue in submission order, so this test does NOT distinguish
+//     the flag being set from it being absent, and must not be cited as proof
+//     that it is. The flag stays for the documented guarantee; src/sycl/
+//     context.cc says so in the same words.
 #include <cstdint>
 #include <cstdio>
+#include <string>
+#include <vector>
 
 #include "check.h"
 #include "kernels/kernels.h"
+#include "kernels/prefill/pf_kernels.h"
+#include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/memory.h"
 #include "l0/module.h"
 #include "runtime/prefill/context.h"
+#include "runtime/prefill/kernels.h"
+
+namespace {
+constexpr uint32_t kN = 4096;        // elements in the chained buffer
+constexpr uint32_t kLaunches = 1024;
+constexpr uint32_t kExpected = kLaunches * (kLaunches - 1) / 2;  // 523776
+
+// One pass of `kLaunches` appends, each with its own `step` argument. Every
+// `step` lives in a vector that outlives the loop: `zeKernelSetArgumentValue`
+// copies at append time, so a loop variable would in fact be fine, but the
+// vector makes the lifetime rule visible rather than incidental.
+void chain(runtime::prefill::Context& cx, l0::Kernel& k, void* buf) {
+  using runtime::prefill::arg_val;
+  using runtime::prefill::PtrArg;
+  std::vector<uint32_t> steps(kLaunches);
+  const uint32_t n = kN;
+  for (uint32_t i = 0; i < kLaunches; ++i) {
+    steps[i] = i;
+    cx.launch(k, kN / 256, 1, 1, {PtrArg(buf), arg_val(n), arg_val(steps[i])});
+  }
+  cx.wait();
+}
+}  // namespace
 
 int main() {
   l0::Context ctx(0);
@@ -21,7 +75,9 @@ int main() {
   CHECK(cx.l0_list() != nullptr);
   CHECK(cx.sycl_queue_raw() != nullptr);
   CHECK(cx.sycl_context_raw() != nullptr);
+  CHECK_EQ(cx.launches(), size_t{0});
   cx.wait();
+
   l0::Module mod(ctx, kernels::path("noop"));
   l0::Kernel k = mod.kernel("noop");
   l0::Mem out(ctx, l0::MemKind::Shared, 64);
@@ -30,6 +86,77 @@ int main() {
   cx.launch(k, 1, 1, 1, {{&out_ptr, sizeof out_ptr}});
   cx.wait();
   CHECK_EQ(out.as<uint32_t>()[0], 42u);
+  CHECK_EQ(cx.launches(), size_t{1});
+
+  // --- the module/kernel cache ----------------------------------------------
+  runtime::prefill::KernelCache kc(ctx);
+  l0::Kernel& chain_k = kc.get(kernels::pf_probe_chain_variant(), "pf_chain_step");
+  CHECK_EQ(kc.modules(), size_t{1});
+  CHECK_EQ(kc.kernels(), size_t{1});
+  // Asking again returns THE SAME object: one binary load per variant for a
+  // chunk that runs the same ten kernels over 48 layers.
+  CHECK(&kc(kernels::pf_probe_chain_variant(), "pf_chain_step") == &chain_k);
+  CHECK_EQ(kc.modules(), size_t{1});
+  CHECK_EQ(kc.kernels(), size_t{1});
+
+  // --- (a) per-launch arguments and (b) in-order execution ------------------
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  l0::Mem buf(ctx, l0::MemKind::Device, size_t{kN} * sizeof(uint32_t));
+  imm.fill(buf.ptr(), 0u, buf.size());
+  std::vector<uint32_t> host(kN);
+
+  chain(cx, chain_k, buf.ptr());
+  imm.copy(host.data(), buf.ptr(), buf.size());
+  for (uint32_t i = 0; i < kN; ++i) CHECK_EQ(host[i], kExpected);
+  CHECK_EQ(cx.launches(), size_t{1} + kLaunches);
+  std::printf("chain pass 1: every element = %u (= sum_{i<%u} i)\n", kExpected, kLaunches);
+
+  // The same 1024 launches again on the same Context and the same cached
+  // Kernel: the value must DOUBLE, which proves the cache is reusable and that
+  // a second pass does not inherit the first pass's frozen arguments.
+  chain(cx, chain_k, buf.ptr());
+  imm.copy(host.data(), buf.ptr(), buf.size());
+  for (uint32_t i = 0; i < kN; ++i) CHECK_EQ(host[i], 2u * kExpected);
+  CHECK_EQ(cx.launches(), size_t{1} + 2 * kLaunches);
+  std::printf("chain pass 2: every element = %u\n", 2u * kExpected);
+
+  cx.reset_launches();
+  CHECK_EQ(cx.launches(), size_t{0});
+
+  // --- misuse is loud -------------------------------------------------------
+  // One argument too many: the driver rejects index 3 on a three-argument
+  // kernel and the throw names the kernel and the index, not just a hex code.
+  {
+    bool threw = false;
+    const uint32_t n = kN, step = 0, extra = 0;
+    try {
+      cx.launch(chain_k, kN / 256, 1, 1,
+                {runtime::prefill::PtrArg(buf.ptr()), runtime::prefill::arg_val(n),
+                 runtime::prefill::arg_val(step), runtime::prefill::arg_val(extra)});
+    } catch (const std::exception& e) {
+      threw = true;
+      const std::string m = e.what();
+      std::printf("expected throw: %s\n", m.c_str());
+      CHECK(m.find("pf_chain_step") != std::string::npos);
+      CHECK(m.find("argument 3") != std::string::npos);
+    }
+    CHECK(threw);
+  }
+  // A variant that was never compiled: the message carries the path, because
+  // the failure is always a missing add_ocloc_kernel row or a missing
+  // add_dependencies, never a run-time condition.
+  {
+    bool threw = false;
+    try {
+      kc.get("pf_no_such_variant", "nope");
+    } catch (const std::exception& e) {
+      threw = true;
+      const std::string m = e.what();
+      CHECK(m.find("pf_no_such_variant") != std::string::npos);
+    }
+    CHECK(threw);
+  }
+
   std::printf("context_test OK\n");
   return 0;
 }
