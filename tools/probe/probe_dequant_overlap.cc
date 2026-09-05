@@ -95,8 +95,10 @@ std::vector<ze_command_queue_group_properties_t> queue_groups(l0::Context& ctx) 
 
 std::string decode_flags(ze_command_queue_group_property_flags_t f) {
   std::string s;
+  // " + ", not " | ": this string is printed inside a markdown table cell and a
+  // pipe would split the row. The flags are still the driver's, verbatim.
   auto add = [&](ze_command_queue_group_property_flag_t bit, const char* name) {
-    if (f & bit) { if (!s.empty()) s += " | "; s += name; }
+    if (f & bit) { if (!s.empty()) s += " + "; s += name; }
   };
   add(ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE, "COMPUTE");
   add(ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY, "COPY");
@@ -147,6 +149,29 @@ int main(int argc, char** argv) {
   }
   std::printf("compute groups: %d; first compute ordinal: %d; second compute ordinal: %d\n",
               compute_groups, first_compute, second_compute);
+
+  // What the driver will actually let us BIND. Create-and-destroy only: no
+  // kernel is appended and nothing is submitted, so this asks the queue-level
+  // question without risking an engine that cannot run the kernel. It is the
+  // difference between reading `numQueues` and being told `numQueues`.
+  std::printf("\n## binding availability (create-and-destroy only; no append, no submit)\n");
+  std::printf("| ordinal | index | zeCommandListCreateImmediate |\n|---:|---:|---|\n");
+  for (uint32_t o = 0; o < groups.size(); ++o) {
+    for (uint32_t idx = 0; idx < 2; ++idx) {
+      ze_command_queue_desc_t qd{};
+      qd.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
+      qd.ordinal = o;
+      qd.index = idx;
+      qd.flags = ZE_COMMAND_QUEUE_FLAG_IN_ORDER;
+      qd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+      qd.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
+      ze_command_list_handle_t l = nullptr;
+      const ze_result_t r = zeCommandListCreateImmediate(ctx.handle(), ctx.device(), &qd, &l);
+      std::printf("| %u | %u | %s (0x%X) |\n", o, idx,
+                  r == ZE_RESULT_SUCCESS ? "SUCCESS" : "refused", unsigned(r));
+      if (r == ZE_RESULT_SUCCESS) zeCommandListDestroy(l);
+    }
+  }
 
   // --- PROBE B step 2: the binding rule, fixed in the pre-registration ------
   // 1. a second COMPUTE group  -> that ordinal, index 0

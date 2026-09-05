@@ -260,3 +260,124 @@ binary.
   recovers the dequant, and the 210.116 ms/chunk stays structural.
 
 A clean miss is a valid result and will be reported as one.
+
+---
+
+## Measured - PROBE B (2026-09-05, card 1, `ZE_AFFINITY_MASK=1`; iterate grade)
+
+Box state at every run below: **disk 83 GB free** (`/dev/nvme0n1p2 915G 786G
+83G 91% /`); **DRM holders = 2** - pid 285644 `baobab` and pid 285678 `ptyxis`,
+both desktop GUI processes holding `/dev/dri/card0` plus all three render
+nodes. Not a provably idle box, so these rows are **iterate grade**, which is
+what the probe is graded at; they are not record grade and are not offered as
+such.
+
+### Step 1 - the queue-group enumeration, verbatim
+
+`zeDeviceGetCommandQueueGroupProperties`, Intel(R) Arc(TM) Pro B70 Graphics,
+device 0 under `ZE_AFFINITY_MASK=1` (measured):
+
+| ordinal | flags | numQueues | maxMemoryFillPatternSize |
+|---:|---|---:|---:|
+| 0 | COMPUTE + COPY + COOPERATIVE_KERNELS | 1 | 18446744073709551615 |
+| 1 | COPY | 1 | 1 |
+
+`compute groups: 1; first compute ordinal: 0; second compute ordinal: -1`
+
+(The probe prints the flag names joined by `+` rather than `|`; the bits are
+the driver's, the separator is this document's, because a pipe would split the
+table row.)
+
+### The binding availability check - asked of the driver, not inferred
+
+Create-and-destroy only: one `zeCommandListCreateImmediate` per candidate,
+`IN_ORDER | ASYNCHRONOUS`, destroyed immediately. **No kernel was appended and
+nothing was submitted**, so this asks the queue-level question without putting
+a compute kernel on an engine that may not have one (measured):
+
+| ordinal | index | `zeCommandListCreateImmediate` |
+|---:|---:|---|
+| 0 | 0 | SUCCESS (0x0) |
+| 0 | 1 | **refused** (0x78000004 = `ZE_RESULT_ERROR_INVALID_ARGUMENT`) |
+| 1 | 0 | SUCCESS (0x0) |
+| 1 | 1 | **refused** (0x78000004) |
+
+`numQueues = 1` is therefore **enforced**, not merely advertised: index 1 is
+refused on both groups. And ordinal 1 carries **no `COMPUTE` flag**, so
+`zeCommandListAppendLaunchKernel` has no engine there - it is a copy engine and
+was never a candidate for `pf_dequant_tile`.
+
+### Step 2 - the binding rule resolves to rule 3
+
+The pre-registered rule, applied without further choice:
+
+1. a second COMPUTE group - **does not exist** (one compute group, ordinal 0);
+2. `numQueues ≥ 2` on the compute group - **false** (`numQueues = 1`, and the
+   driver refuses index 1);
+3. → **exactly ONE compute queue exists on this device.**
+
+`--auto` prints exactly that and stops:
+`binding rule 3: exactly ONE compute queue on this device. The alternate
+binding is impossible and the lever is DEAD BY ENUMERATION.`
+
+**The pre-registered branch selected by the enumeration is therefore the
+second one: "≈ 0.12 again - the serialisation is device-wide."** It was
+selected before any battery was run, by the rule written down before the
+enumeration.
+
+### Step 3 - the only binding that exists, re-measured in this session
+
+Since no alternate binding exists, the battery can only run on the one
+compute queue. It was re-run through the extended binary as a **regression
+control** - the claim "the no-argument path is unchanged" is verified rather
+than asserted (measured, iterate grade):
+
+| control | this session | 2026-09-05 record | Δ |
+|---|---:|---:|---:|
+| dequant gate‖up L0 `[K][N]` | 1.541 ms / 292.8 GB/s (r+w) | 1.539 / 293.1 | **+0.13%** |
+| `gemm_bf16` gate‖up M = 2048 | 5.570 ms / 131.08 TFLOP/s | 5.554 / 131.47 | **+0.29%** |
+
+| battery | waits | ms total | ms/linear |
+|---|---:|---:|---:|
+| serial, one scratch | 16 | 56.893 | 7.112 |
+| double-buffered, two scratches | 8 | 55.199 | 6.900 |
+| double-buffered, GEMM submitted first (diagnostic) | 8 | 55.158 | 6.895 |
+
+- dequant inside the battery: 8 × 1.541 = **12.329 ms**
+- hidden: 56.893 − 55.199 = **1.694 ms**
+- **recovery = 0.137**; diagnostic (GEMM-first) 0.141
+- output **bitwise identical** to the serial battery again, over the same two
+  deliberately different weight copies
+
+Three independent runs of this cell now read **0.112 / 0.127 / 0.137**. The
+pre-registered branch said **≈ 0.12**; the measurement is **0.137**, inside
+that band.
+
+## Verdict - PROBE B: MISS, and by the cleanest possible route
+
+| | value |
+|---|---|
+| pre-registered, branch "a second compute queue exists" | ≥ 0.5 of `D` |
+| pre-registered, branch "only one compute queue exists" | ≈ 0.12 |
+| **branch the enumeration selected** | **the second one** |
+| acceptance bar | ≥ 0.3 |
+| **measured on the only binding that exists** | **0.137** (0.46× of the bar) |
+
+**The B70 exposes exactly one compute queue.** There is no second engine
+ordinal and no second queue index to move the dequant to; the driver refuses
+both. The serialisation the first probe measured is therefore not an artifact
+of two queues landing on the same hardware queue by accident - **it is the
+only arrangement this device has**.
+
+**Consequences, priced:**
+
+- `runtime::prefill::Context` does **not** gain a second L0 immediate list.
+  There is nothing for it to bind to.
+- **The overlap question is CLOSED for this device**, exactly as the decision
+  rule said it would be at < 0.3. Neither double-buffering, nor submission
+  order, nor a second command list on another ordinal or index recovers the
+  dequant, because the hardware has one compute queue.
+- The **210.116 ms/chunk dequant term stays structural** and the composed
+  ceiling carries it whole. Nothing in the C = 2048 composition moves.
+- The controller's "multi-engine overlap, a cheap third candidate, unpriced"
+  is now priced: **cost one enumeration, value zero.**
