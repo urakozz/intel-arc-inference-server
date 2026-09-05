@@ -18,7 +18,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_compile_options(-Wall -Wextra -Werror)
 
 foreach(v B70_ROOT B70_KERNEL_DIR B70_OCLOC_DEVICE B70_ONEAPI_LIB B70_ONEAPI_UMF_LIB B70_L0_LIB
-          B70_SYCL_TLA_SRC_DIR B70_SYCL_TLA_REVISION)
+          B70_LOADER_LIB B70_MODEL_LIB B70_SYCL_TLA_SRC_DIR B70_SYCL_TLA_REVISION)
   if(NOT DEFINED ${v})
     message(FATAL_ERROR "${v} must be passed in by cmake/prefill.cmake")
   endif()
@@ -166,6 +166,15 @@ endfunction()
 b70_sycl_probe(probe_interop)
 b70_sycl_probe(probe_prefill_gemm sycl_tla)
 b70_sycl_probe(probe_prefill_attn sycl_tla)
+# Ruling A21's probe: int4-g64 through MainloopIntelXeXMX16MixedPrecision. It
+# is the only SYCL probe that reads the checkpoint, so it is the only one that
+# links the loader (and, through it, the model table). b70_sycl_probe puts
+# B70_L0_LIB BEFORE anything in ARGN, and b70_loader references b70_l0 and
+# b70_model, so the three archives go in an explicit --start-group rather than
+# relying on a single-pass order that would leave loader's references dangling.
+b70_sycl_probe(probe_gemm_int4_mixed sycl_tla)
+target_link_libraries(probe_gemm_int4_mixed PRIVATE
+  -Wl,--start-group "${B70_LOADER_LIB}" "${B70_MODEL_LIB}" "${B70_L0_LIB}" -Wl,--end-group)
 
 # P5: Intel's CuTe chunked GDN header is consumed from the controller-provided,
 # read-only vllm-xpu-kernels checkout. Its BMG path is C++20 and emits a large

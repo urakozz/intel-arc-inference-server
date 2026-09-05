@@ -80,6 +80,12 @@ if(B70_PREFILL_ENABLED)
       -DB70_ONEAPI_LIB=${B70_ONEAPI_LIB}
       -DB70_ONEAPI_UMF_LIB=${B70_ONEAPI_UMF_LIB}
       -DB70_L0_LIB=$<TARGET_FILE:b70_l0>
+      # The int4-mixed probe reads layout-0 weights THROUGH the loader, so the
+      # g++-built loader/model archives cross into the icpx executable link the
+      # same way b70_l0 already does (this changes nothing about the .so, which
+      # still links no project archive).
+      -DB70_LOADER_LIB=$<TARGET_FILE:b70_loader>
+      -DB70_MODEL_LIB=$<TARGET_FILE:b70_model>
       -DB70_SYCL_TLA_SRC_DIR=${B70_SYCL_TLA_SRC_DIR}
       -DB70_SYCL_TLA_REVISION=${B70_SYCL_TLA_REVISION}
       -DB70_SYCL_AOT_256_GRF=${B70_SYCL_AOT_256_GRF}
