@@ -95,7 +95,15 @@ class Engine {
 
   l0::Context& ctx_;
   loader::LoadedModel model_;
+  // The two owned groups, then the view over them. Declaration order is the
+  // construction order and `buffers_` binds references into the two above it,
+  // so this order is load-bearing, not stylistic. `pf_` stays null until the
+  // first prefill() (ruling R7): a decode-only Engine allocates exactly what
+  // it allocated before the split, byte for byte.
+  PersistentBuffers persist_;
+  DecodeScratch decode_scratch_;
   DecodeBuffers buffers_;
+  std::unique_ptr<PrefillScratch> pf_;
   std::unique_ptr<l0::Mem> tap_;   // null unless debug_resid
   CapturedStep step_;
   l0::Queue queue_;
