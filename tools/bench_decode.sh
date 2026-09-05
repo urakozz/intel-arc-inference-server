@@ -5,6 +5,21 @@
 #   tools/bench_decode.sh                        3 runs at depth 4096, tg 256
 #   tools/bench_decode.sh --depth 64             the doc 07 #12 experiment
 #   tools/bench_decode.sh --runs 1 --no-build    one run against what is already built
+#   tools/bench_decode.sh --pp 4096              3 runs of spec 2's PREFILL at kC = 2048
+#   tools/bench_decode.sh --pp 4096 --pp-chunk 1024
+#
+# `--pp N` replaces `--depth N` with `Engine::prefill` (spec 2, plan 6e Task 1)
+# and makes the binary print a SECOND markdown row -- `| ... pp | N | C | ms |
+# t/s |` -- beside the unchanged tg row. This script then medians BOTH: the tg
+# row on t/s as it always has, and the pp row on its own t/s. It is exclusive
+# with --depth for the same reason the CLI refuses the pair: the prefilled ids
+# ARE the depth.
+#
+# **The prefill rows this harness takes today are ITERATE grade, not record
+# grade**, and that is a property of the box rather than of the script: two
+# desktop processes (baobab, ptyxis) hold DRM fds on every card, so the "box
+# must be otherwise idle" condition below is not met. Say so in whatever the
+# number is quoted in.
 #
 # Three things it exists to get right, none of which a bare ssh line does:
 #
@@ -31,6 +46,8 @@ MODEL="${MODEL:-Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ}"
 DEPTH="${DEPTH:-4096}"
 TG="${TG:-256}"
 RUNS="${RUNS:-3}"
+PP="${PP:-}"
+PP_CHUNK="${PP_CHUNK:-}"
 BUILD=1
 
 # `set -u` is on, so a bare `--depth` at the end of the line would abort with
@@ -49,7 +66,9 @@ need_value() {
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --depth) need_value "$@"; DEPTH="$2"; shift 2 ;;
+    --depth) need_value "$@"; DEPTH="$2"; DEPTH_SET=1; shift 2 ;;
+    --pp)       need_value "$@"; PP="$2";       shift 2 ;;
+    --pp-chunk) need_value "$@"; PP_CHUNK="$2"; shift 2 ;;
     --tg)    need_value "$@"; TG="$2";    shift 2 ;;
     --runs)  need_value "$@"; RUNS="$2";  shift 2 ;;
     --model) need_value "$@"; MODEL="$2"; shift 2 ;;
@@ -67,6 +86,22 @@ if ! [ "$RUNS" -ge 1 ] 2>/dev/null; then
   echo "bench_decode.sh: --runs must be a positive integer, got '$RUNS'" >&2
   exit 2
 fi
+# The prefill arguments are validated here as well as in the CLI, for the same
+# reason --runs is: a rejection that costs a two-minute remote rebuild first is
+# a worse harness than one that costs nothing.
+if [ -n "$PP" ]; then
+  if ! [ "$PP" -ge 1 ] 2>/dev/null; then
+    echo "bench_decode.sh: --pp must be a positive integer, got '$PP'" >&2
+    exit 2
+  fi
+  if [ -n "${DEPTH_SET:-}" ]; then
+    echo "bench_decode.sh: --pp and --depth are exclusive (the prefilled ids ARE the depth)" >&2
+    exit 2
+  fi
+elif [ -n "$PP_CHUNK" ]; then
+  echo "bench_decode.sh: --pp-chunk belongs to --pp" >&2
+  exit 2
+fi
 
 SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if [ "$SHA" != unknown ] && ! git diff --quiet HEAD 2>/dev/null; then
@@ -79,20 +114,55 @@ else
   tools/box.sh sync
 fi
 
-echo "bench: $MODEL, depth $DEPTH, tg $TG, $RUNS run(s), sha $SHA" >&2
+if [ -n "$PP" ]; then
+  MODE_ARGS="--pp $PP"
+  [ -n "$PP_CHUNK" ] && MODE_ARGS="$MODE_ARGS --pp-chunk $PP_CHUNK"
+  echo "bench: $MODEL, PREFILL $PP ids (chunk ${PP_CHUNK:-default kC}), tg $TG, $RUNS run(s), sha $SHA" >&2
+  echo "       iterate grade unless the box is provably idle -- see this script's header" >&2
+else
+  MODE_ARGS="--depth $DEPTH"
+  echo "bench: $MODEL, depth $DEPTH, tg $TG, $RUNS run(s), sha $SHA" >&2
+fi
 
 # `rows` is only ever expanded after at least one run, which the --runs guard
 # (now above the build, so it costs nothing to trip) enforces -- an empty array
 # would trip `set -u` on older bash (3.2, which is what macOS ships).
 rows=()
+pp_rows=()
 for i in $(seq 1 "$RUNS"); do
   echo "=== run $i/$RUNS ===" >&2
   # box.sh run joins its arguments and executes them remotely; B70_GIT_SHA as a
-  # command prefix is what puts the Mac's sha in the remote process.
-  row="$(tools/box.sh run "B70_GIT_SHA='$SHA' ./build/src/cli/b70-decode '$MODEL' --bench --depth $DEPTH --tg $TG")"
-  echo "$row"
-  rows+=("$row")
+  # command prefix is what puts the Mac's sha in the remote process. Both stdout
+  # rows come back together, so they are split on the ` pp |` marker the CLI
+  # writes rather than on line order.
+  out="$(tools/box.sh run "B70_GIT_SHA='$SHA' ./build/src/cli/b70-decode '$MODEL' --bench $MODE_ARGS --tg $TG")"
+  echo "$out"
+  while IFS= read -r line; do
+    case "$line" in
+      *" pp |"*) pp_rows+=("$line") ;;
+      "| b70-decode "*) rows+=("$line") ;;
+    esac
+  done <<< "$out"
 done
+
+# The pp row first when there is one: it is what a --pp invocation was for.
+# Columns are `| b70-decode <sha> pp | <N ids> | <chunk> | <ms total> | <t/s> |`,
+# so $5 is the millisecond total and $6 the rate -- the same two positions the
+# tg row uses, which is why one awk shape serves both.
+if [ "${#pp_rows[@]}" -gt 0 ]; then
+  printf '%s\n' "${pp_rows[@]}" | awk -F'|' '
+    { ms[NR] = $5 + 0; ts[NR] = $6 + 0 }
+    END {
+      if (NR < 1) exit 0
+      for (i = 1; i <= NR; i++) for (j = i + 1; j <= NR; j++)
+        if (ts[j] < ts[i]) { t = ts[i]; ts[i] = ts[j]; ts[j] = t
+                             t = ms[i]; ms[i] = ms[j]; ms[j] = t }
+      mid = int((NR + 1) / 2)
+      pct = (ts[mid] > 0) ? (100 * (ts[NR] - ts[1]) / ts[mid]) : 0
+      printf "pp median %.2f t/s (%.1f ms total) over %d run(s); min %.2f, max %.2f, spread %.2f (%.2f%%) -- ITERATE grade\n",
+             ts[mid], ms[mid], NR, ts[1], ts[NR], ts[NR] - ts[1], pct
+    }' >&2
+fi
 
 printf '%s\n' "${rows[@]}" | awk -F'|' '
   { ts[NR] = $5 + 0; mspt[NR] = $6 + 0 }
