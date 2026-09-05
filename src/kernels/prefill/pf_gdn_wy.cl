@@ -170,17 +170,32 @@ __kernel void pf_gdn_A2(__global const ushort* restrict xb,
 }
 
 // ---------------------------------------------------------------------------
-// (3) T = (I - A)^-1, IN PLACE over A. Grid (48, nchunks), WG 64 = one lane per
-//     column j. Forward substitution, `i` ascending:
-//         T[i][j] = A[i][j] + SUM_{j<l<i} A[i][l] * T[l][j]
-//     `A[i][*]` is read at step i, BEFORE row i is overwritten; `T[l][*]` for
+// (3) **T = (I + A)^-1**, IN PLACE over A. Grid (48, nchunks), WG 64 = one lane
+//     per column j.
+//
+//     **THE SIGN.** FLA negates `A` on the way in - `solve_tril.py:82` is
+//     `b_A = -tl.where(m_A, b_A, 0)` - so with `A` stored positive by
+//     `pf_gdn_A` (as `chunk_scaled_dot_kkt.py` stores it), the object this
+//     kernel produces is `(I + A)^-1`. Plan 6b's algebra section writes
+//     `T = (I - A)^-1`, which is a **transcription error in the plan**: at
+//     L = 2 the recurrence needs the coefficient on `Delta_0` in `vn_1` to be
+//     `-beta_1 exp(g_1) (k_1 . k_0)`, i.e. exactly `-A[1][0]`, and
+//     `(I - A)^-1` supplies `+A[1][0]`. Derived by hand and then confirmed
+//     against the FLA line above; the end-to-end band in
+//     `tests/prefill/gdn_chunk_test.cc` is what surfaced it, because an
+//     `(I - A) T = I` identity check passes either way.
+//
+//     The negation is applied at staging, where FLA applies it, and the
+//     substitution below is then the plain one, `i` ascending:
+//         T[i][j] = As[i][j] + SUM_{j<l<i} As[i][l] * T[l][j],   As = -A
+//     `As[i][*]` is read at step i, BEFORE row i is overwritten; `T[l][*]` for
 //     l < i is already written. `l` ascending, explicit fma.
 //
 //     **The two barriers are the whole correctness argument for the in-place
-//     solve.** The first separates "every lane has READ row i's A values" from
+//     solve.** The first separates "every lane has READ row i's As values" from
 //     "row i becomes T"; the second separates that write from step i+1's reads.
-//     Rows >= L are left as pf_gdn_A wrote them (zero) - the kernel must NOT
-//     write the identity diagonal past L - and lanes j > i write nothing.
+//     Rows >= L stay zero - the kernel must NOT write the identity diagonal
+//     past L - and lanes j > i write nothing.
 // ---------------------------------------------------------------------------
 __attribute__((reqd_work_group_size(WG_SOLVE, 1, 1)))
 __kernel void pf_gdn_solve(__global float* restrict A, uint c_count) {
@@ -191,7 +206,10 @@ __kernel void pf_gdn_solve(__global float* restrict A, uint c_count) {
 
   __local float As[CT * CT];
   __global float* restrict At = A + ((size_t)(chunk * HEADS + h) * CT) * CT;
-  for (uint p = j; p < CT * CT; p += WG_SOLVE) As[p] = At[p];
+  for (uint p = j; p < CT * CT; p += WG_SOLVE) {
+    const uint pi = p / CT, pj = p % CT;
+    As[p] = pi > pj ? -At[p] : 0.0f;             // solve_tril.py:82
+  }
   barrier(CLK_LOCAL_MEM_FENCE);
 
   for (uint i = 0; i < L; ++i) {
