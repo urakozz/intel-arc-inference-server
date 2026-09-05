@@ -81,8 +81,19 @@
 // ---------------------------------------------------------------------------
 //   * `pf_gdn_A`'s k·k and `pf_gdn_A2`'s q·k use gdn_step.cl:52-65's band tree:
 //     band `b` accumulates 8 terms in ASCENDING kk with explicit `fma`, then
-//     the 16 band partials collapse with stride = 8, 4, 2, 1. Those two kernels
-//     keep decode's tile, so the reference keeps decode's tree.
+//     the 16 band partials collapse with stride = 8, 4, 2, 1.
+//     **Ruling A28 (2026-09-05) re-tiled BOTH kernels onto a quadrant grid with
+//     a 2 x 2 output tile and fp32 operands staged in SLM, and the order above
+//     DID NOT CHANGE** - that is the point worth recording here. The kernels'
+//     `tile_dot` writes the same collapse as its own expression,
+//         ((P0+P8)+(P4+P12)) + ((P2+P10)+(P6+P14))
+//       + ((P1+P9)+(P5+P13)) + ((P3+P11)+(P7+P15)),
+//     which is what the strided loop above expands to, so that the live set is
+//     four `float4` instead of sixteen. Q_SCALE moved from the point of use to
+//     the point of staging, which is the same fp32 multiply of the same two
+//     values. `gdn_wy_test` cases 7 and 7a hold both kernels **bit-identical**
+//     to `pf_gdn_A_legacy` / `pf_gdn_A2_legacy`, the pre-A28 text kept in the
+//     same `.cl`; docs/prefill-gdn-a2a-simd32-2026-09-05.md §3.2 and §5.2.
 //   * **the scan's two 128-term contractions (`w · S` and `q · S`) are ONE
 //     ascending-k `fma` chain per output** - `asc_dot` below, not `band_dot`.
 //     Ruling A25 rewrote `pf_gdn_scan` to give each work-item an output tile of
