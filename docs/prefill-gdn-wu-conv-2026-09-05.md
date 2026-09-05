@@ -521,3 +521,212 @@ divergence sits at which step (Vishva `code` at 41, `cjk` chunk 16 at 23; RTN
 `prose` at 15 and 25, `cjk` at 47). A re-tiling that re-associated anything would
 have re-tossed those sub-ulp coins, as A27 §6 observed the scan's did. **No
 golden regression, so there is nothing to diagnose.**
+
+---
+
+# PART 3 - the composed result
+
+## 5. The new `--pp 4096` row
+
+`tools/bench_decode.sh --pp 4096 --tg 8 --runs 8 --model <RTN>` at `42921d2`,
+the **same unmodified harness** the 978.07 and 1304.06 rows were taken with.
+**Measured, iterate grade:**
+
+```
+| b70-decode 42921d2 pp | 4096 | 2048 | 2977.5 | 1375.65 |
+| b70-decode 42921d2    | 4096 |    8 |   32.26 |  31.00 |
+```
+
+| row | median | min | max | spread |
+|---|---:|---:|---:|---:|
+| **pp 4096, C = 2048** | **1375.65 t/s** (2977.5 ms) | 1372.07 | 1377.42 | 5.35 (**0.39%**) |
+| tg 8 at depth 4096 | 32.26 t/s (31.00 ms/token) | 32.24 | 32.29 | 0.05 (0.15%) |
+
+Against A27's **1304.06 t/s / 3141.0 ms**: **+5.5%, −163.5 ms.** Scored against
+§3.4's pre-registration:
+
+| | pre-registered (derived) | measured | |
+|---|---:|---:|---|
+| `--pp 4096` | 2906.4-2902.6 ms | **2977.5 ms** | MISS |
+| | 1409-1411 t/s | **1375.65 t/s** | **MISS, 2.4% under the 1409 floor** |
+
+**The miss is `pf_gdn_wu`'s own miss and is not an additional finding.**
+Composing the two *measured* savings into the baseline gives
+`3141.0 − 94.9 − 108.5 = 2937.6 ms = 1394.4 t/s` (derived) against the measured
+2977.5 - a **39.9 ms (1.36%) residual**, which §6 attributes: every unchanged
+GDN kernel reads 0.5-4.6% higher in this session's profile than in A27's. That
+is a quarter of the 2.6% residual the scan task reported on the same
+composition, and it is reported rather than subtracted.
+
+**Per-chunk ceiling as now built** (derived, from §6's profiled total,
+2938.7 ms / 2 chunks = 1469.4 ms/chunk): **1393.8 t/s = 70.6% of vLLM's 1973**,
+against A27's 1322.4 = 67.0% before this task.
+
+The 4096-id prefill is now **2.98 s** against the decode-replay ingest's
+**121 s** - a **40.6× cut**, measured, up from 38.5×.
+
+## 6. Where GDN's time goes after this task - priced, not fixed
+
+The profiled run that measured `pf_gdn_wu` (§4.1), i.e. the final code state,
+`--pp 4096`, C = 2048, two chunks (**measured**), with A27's column beside it.
+`ms/layer/chunk` = the column ÷ 96.
+
+| launch | ms (2 chunks) | ms/layer/chunk | A27's ms/layer/chunk | Δ |
+|---|---:|---:|---:|---:|
+| `pf_gdn_seed` | 0.5 | 0.0057 | 0.0059 | −3.4% |
+| **`pf_gdn_conv`** | **31.6** | **0.3287** | 1.3182 | **−75.1%** |
+| `pf_gdn_l2norm` | 14.2 | 0.1482 | 0.1473 | +0.6% |
+| `pf_gdn_gate` | 2.1 | 0.0214 | 0.0215 | −0.5% |
+| `pf_gdn_A` | 58.9 | 0.6136 | 0.5995 | +2.4% |
+| `pf_gdn_solve` | 72.3 | 0.7528 | 0.7200 | +4.6% |
+| **`pf_gdn_wu`** | **89.3** | **0.9298** | 2.0595 | **−54.9%** |
+| `pf_gdn_A2` | 99.0 | 1.0313 | 1.0138 | +1.7% |
+| `pf_gdn_scan` | 326.1 | 3.3968 | 3.3273 | +2.1% |
+| GDN total (the nine above) | **694.0** | - | 884.4 | **−21.5%** |
+| `pf_gated_head` (outside the GDN total) | 30.7 | 0.3194 | 0.3148 | +1.5% |
+| whole profiled walk | **2938.7** | - | 3097.4 | −5.1% |
+
+Per chunk: GDN **347.0 ms** (was 442.2); GDN less the scan **184.0 ms** (was
+282.5). The +0.6 to +4.6% on every unchanged kernel is the instrument's
+session-to-session drift on a box that is not idle; A27 measured +4 to +10% for
+the same thing, so this session is the quieter of the two. `pf_gdn_conv` reads
+**0.3287** here against **0.3296** in §2.1's own measurement run - 0.3% apart,
+two labelled runs of the same code, and neither is a correction of the other.
+
+The prefill's three largest terms are now `gemm_bf16` **1382.6 ms (47.0%)**,
+`dequant` 413.3 (14.1%) and `pf_gdn_scan` 326.1 (11.1%). A23/A24 closed every
+lever on the first two.
+
+### 6.1 The GDN kernels this task did not touch, priced
+
+Rates are derived from each kernel's own flop count at C = 2048 and the measured
+column above. **None of these was built or fixed.**
+
+| kernel | ms/layer/chunk | work/layer/chunk (derived) | rate | mechanism |
+|---|---:|---|---:|---|
+| `pf_gdn_scan` | 3.3968 | 9.66 GFLOP | 2.84 TFLOP/s | A27: needs DPAS, not another vector mapping - 27% FMA density on bf16 operands. Its own task. |
+| `pf_gdn_A2` | 1.0313 | 0.818 GFLOP | **0.79 TFLOP/s** | `for (p = lid; p < CT*CT; p += 256)` - **the same no-tile pattern `pf_gdn_wu` had**, at the same 0.79 TFLOP/s: one `A2[i][j]` per work-item, both 128-wide operands re-staged out of bf16 SLM with the widen inside the band tree. |
+| `pf_gdn_A` | 0.6136 | 0.793 GFLOP | 1.29 TFLOP/s | the same pattern with one staged operand instead of two. |
+| `pf_gdn_solve` | 0.7528 | 0.134 GFLOP | 0.18 TFLOP/s | inherently sequential in `i`: 64 lanes, **two barriers per `i` = 128 per work-group**. A different problem from the other three - the algorithm, not the mapping. |
+| `pf_gated_head` | 0.3194 | - | - | small. |
+| `pf_gdn_l2norm` / `gate` / `seed` | 0.1482 / 0.0214 / 0.0057 | - | - | small. |
+
+**The one that rhymes with this task is `pf_gdn_A2`**: it is measured at exactly
+the 0.79 TFLOP/s `pf_gdn_wu` sat at before §4, for exactly the reason §3.1 gave,
+and the same treatment applies - except that both of its operands are read
+along the contraction axis, so an `(i, j)` output tile amortises `q_i` over
+several `j` and `k_j` over several `i` and the SLM staging can stay bf16. At the
+rate `pf_gdn_wu` now runs (1.76 TFLOP/s) `A2` and `A` together would cost
+0.915 ms instead of 1.645, i.e. **−0.73 ms/layer/chunk = −35 ms/chunk = −70 ms
+on `--pp 4096` → ~1409 t/s** (derived, **not built**). Their band question is
+the mirror of §4's: both are pure fp32 band-tree dots feeding `T` and the scan,
+so a re-tiling that preserves the band-tree order is bitwise, and one that
+does not needs its own pre-registration.
+
+## 7. Invariants, and every deviation from the brief
+
+### 7.1 Suite
+
+`ctest` on the box, `ZE_AFFINITY_MASK=1`, at `42921d2`: **60/60 pass, 0 fail,
+1 skip** (`prefill_gate_long_test` - `oracle-out-long` still needs the
+operator's `docker run`, so it skips cleanly with 77 as designed). Total 419 s.
+
+### 7.2 Decode, re-proven after the last code commit
+
+| invariant | measured |
+|---|---|
+| kernel/module count | **774 kernels, 19 modules**, max_len 16384, persistent 1.24 GB (`replay_determinism_test`'s banner) |
+| kernel table | `kernel_table_test` OK |
+| replay determinism | `replay_determinism_test` OK - 8 tokens × 3 runs bitwise identical |
+| decode golden gate | `golden_gate_test` **94/94** determined rows exact, 2 undetermined (1 agree + 1 other member) |
+| prefill golden gate, Vishva | `prefill_gate_test` **94/94**, 2 undetermined |
+| prefill golden gate, RTN | `prefill_gate_rtn_test` **93/93**, 3 undetermined |
+| prefill determinism | `prefill_determinism_test` OK - 9 (prompt, chunk) cases × 3 runs bitwise |
+| prefill self-consistency (A26) | **18/18** across both checkpoints, 1101 determined rows, 0 mismatches |
+| decode bench | **32.21 t/s** (31.04 ms/token), median of 3, min 32.20 max 32.22, spread 0.06% |
+
+The decode bench row, `tools/bench_decode.sh --depth 4096 --tg 256 --runs 3
+--model <RTN>` at `42921d2` (measured):
+
+```
+| b70-decode 42921d2 | 4096 | 256 | 32.21 | 31.04 |
+```
+
+**32.21 t/s against `docs/BENCHMARKS.md`'s recorded 32.22 for this checkpoint -
+0.03% apart**, and identical to the 32.21 the scan task measured. Decode is
+untouched, and §5's tg-8 row (32.26 t/s, 0.15% spread) says the same from the
+other harness.
+
+Everything in this table was measured at `42921d2`, the task's last **code**
+commit; the commit that carries this section changes no source. The three
+structural decode tests - `kernel_table_test`, `replay_determinism_test` and
+`golden_gate_test` - were re-run on the synced tree at the final commit as
+well, and all three pass.
+
+### 7.3 Deviations
+
+1. **`tools/bench_decode.sh` was not modified, so the `--pp` rows run on device
+   0.** A27's harness note; the 978.07, 1304.06 and 1375.65 rows are all the
+   same unmodified harness, which is what keeps them comparable, and patching
+   it would have made the new row a measurement of a different thing. **Every
+   other piece of device work in this task ran with `ZE_AFFINITY_MASK=1`**: both
+   profiled walks, `gdn_conv_test`, `gdn_wy_test`, `gdn_chunk_test`, all four
+   gates on both checkpoints, and the whole `ctest` suite.
+2. **The numerics bar for `pf_gdn_wu` was strengthened from the brief's band to
+   bitwise identity, before it was measured** (§3.3). The brief said "only the
+   dot-product association changes"; the mapping in §3.2 changes no association
+   at all, so a band would have been a weaker bar than the kernel could carry.
+   The band was kept as the fallback so the pre-registration could not move
+   after the fact, and it was not needed.
+3. **Two pre-rewrite kernels are kept in the tree**, `pf_gdn_conv_legacy` and
+   `pf_gdn_wu_legacy`, launched by nothing but their tests. The brief licensed
+   this shape for conv ("a two-kernel comparison or a golden dump - your
+   choice"); it is applied to `wu` as well, because deviation 2 made the same
+   comparison the right bar there. Cost: two entry points in modules the runtime
+   already loads; `gdn.cc` binds neither, and decode's 774/19 is untouched.
+4. **`pf_gdn_wu`'s grid gained a third dimension** (columns split 2 ways across
+   work-groups), which is more than the brief's "each work-item owns an output
+   tile". It is what lets `vb`/`kb` be staged fp32 - the brief's own "widen
+   hoisted out of the inner loop" - inside the same SLM budget class. Fixed in
+   §3.2 before anything was built.
+5. **`intel_reqd_sub_group_size(16)` was left on `pf_gdn_wu` and is the measured
+   cause of ~2× of its shortfall (§4.2), and it was deliberately NOT removed.**
+   The brief's rule is one defect, one fix, one measurement; removing an
+   attribute and re-measuring is the iterate-until-it-looks-good the rule
+   forbids. It is the single cheapest lever this task leaves, derived at
+   0.465 ms with its risk named.
+6. **Per-kernel times are single profiled runs, not eight.** `--pp` is a
+   whole-process measurement with a cold 16 GB load; the per-kernel split comes
+   from `B70_PREFILL_PROFILE=1`. The eight-run median is §5's `--pp` row. The
+   instrument's own cost is reported by the binary each time (−2.6% on the
+   control, −4.8% and −4.5% on the two measurement runs).
+7. **`pf_gdn_conv`'s block COUNT is a host constant** (`kConvBlock = 128` in
+   `gdn.cc`) while the kernel derives its block WIDTH from `get_num_groups(1)`.
+   The two therefore cannot disagree about coverage; only about how many
+   work-groups there are, which is a performance choice and not a correctness
+   one. `gdn_conv_test` carries the same literal so the test's grid is the
+   runtime's.
+8. **No fix was attempted for any priced GDN kernel** (§6.1), and neither
+   mapping was iterated after its first measurement.
+
+### 7.4 Box
+
+84 GB free at the start and 84 GB at the end; no disk error. No container was
+started, no process killed, nothing deleted, no server restarted. The only files
+written outside the repo are the IGC dumps of §4.2 under `/tmp/gdnwu`.
+
+## 8. What this leaves on the table
+
+* **`pf_gdn_wu`'s sub-group attribute**: one line, derived at 0.465 ms
+  (a further −0.46 ms/layer/chunk = −45 ms on `--pp 4096`), with the register
+  pressure at SIMD32 as its named risk. Not taken, per §7.3 deviation 5.
+* **`pf_gdn_A2` and `pf_gdn_A`**: measured at 0.79 and 1.29 TFLOP/s with the
+  identical no-tile mechanism §3.1 diagnosed, priced at −70 ms on `--pp 4096`
+  (§6.1). This is the same task twice more and it is now a well-understood one.
+* **`pf_gdn_scan` below ~1.5 ms needs DPAS** (A27), still the largest GDN term
+  at 3.3968 ms/layer/chunk and 11.1% of the profiled walk.
+* **The prefill is `gemm_bf16` again**, at 47.0% of the walk, and A23/A24 closed
+  every lever on it. A27's arithmetic is unchanged by this task: the non-GDN
+  terms alone exceed what 1973 t/s allows, so "beat vLLM on prefill" stays
+  closed, and the reachable ceiling with GDN driven near zero is ~85-88%.
+  This task moved the measured row from 66.1% to **69.7% of vLLM's 1973**.
