@@ -120,7 +120,7 @@ target_compile_definitions(sycl_tla INTERFACE CUTLASS_ENABLE_SYCL SYCL_INTEL_TAR
 target_compile_options(sycl_tla INTERFACE -ftemplate-backtrace-limit=0)
 
 # --- the component ---------------------------------------------------------
-add_library(b70_prefill SHARED context.cc)
+add_library(b70_prefill SHARED context.cc gemm_batched.cc)
 target_include_directories(b70_prefill PRIVATE ${B70_ROOT}/src)
 target_compile_options(b70_prefill PRIVATE ${B70_SYCL_COMPILE})
 target_link_options(b70_prefill PRIVATE ${B70_SYCL_LINK}
@@ -129,7 +129,8 @@ target_link_options(b70_prefill PRIVATE ${B70_SYCL_LINK}
 # libsycl discovers its Level Zero adapter with dlopen; make libumf a direct
 # dependency so that adapter can resolve it outside an interactive setvars.sh
 # environment. This remains a oneAPI runtime dependency, not a project archive.
-target_link_libraries(b70_prefill PRIVATE PkgConfig::ZE "${B70_ONEAPI_UMF_LIB}/libumf.so")
+target_link_libraries(b70_prefill PRIVATE PkgConfig::ZE "${B70_ONEAPI_UMF_LIB}/libumf.so"
+  sycl_tla)
 set_property(TARGET b70_prefill APPEND PROPERTY
   INSTALL_RPATH "${B70_ONEAPI_LIB}" "${B70_ONEAPI_UMF_LIB}")
 install(TARGETS b70_prefill LIBRARY DESTINATION lib)

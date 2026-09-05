@@ -51,6 +51,18 @@ if(B70_PREFILL_ENABLED)
   b70_target_kernel_dir(context_test)
   add_dependencies(context_test kernel_noop)
   add_test(NAME context_test COMMAND context_test)
+
+  # The batched Xe bf16 GEMM (rulings A14/A15, plan 6d-composed Task 1). Same
+  # guard as context_test: it calls into libb70_prefill.so, so with
+  # -DB70_PREFILL=OFF this block does not exist and the suite is what it was.
+  # No kernel binaries - the only device code it runs is sycl-tla's.
+  add_executable(gemm_batched_test prefill/gemm_batched_test.cc)
+  target_include_directories(gemm_batched_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+                             ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(gemm_batched_test PRIVATE b70_l0)
+  b70_link_prefill(gemm_batched_test)
+  add_test(NAME gemm_batched_test COMMAND gemm_batched_test)
+  set_tests_properties(gemm_batched_test PROPERTIES TIMEOUT 1800)
 endif()
 
 # P3 is raw Level Zero/OpenCL C only: it requires a B70 and its kernels but
