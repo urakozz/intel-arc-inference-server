@@ -158,3 +158,119 @@ re-proven after the last code commit: **774 kernels / 19 modules**,
 `ZE_AFFINITY_MASK=1` on every piece of device work except the `--pp 4096` row of
 §8, which is taken **unmasked** so that it is series-continuous with the gate's
 1377.20 t/s (device 0); 84 GB free at the start; any disk error stops the task.
+
+## 2. RESULT - `pf_gdn_wu` at SIMD32 is 1.24× SLOWER, bitwise, and is REVERTED
+
+Everything in this section was measured after §1 was committed at `37208a4`.
+The change built and ran; it is the *time* that decided it.
+
+### 2.1 Time, and the decision-rule verdict
+
+`ZE_AFFINITY_MASK=1 B70_PREFILL_PROFILE=1 b70-decode <RTN> --bench --pp 4096
+--tg 8`, one run, **measured** (110.5 ms over 96 waits):
+
+| | measured | |
+|---|---:|---|
+| `pf_gdn_wu` at SIMD32, ms per GDN layer per chunk | **1.1505** | |
+| the same at SIMD16, A28's (`42921d2`) | 0.9298 | **1.237× slower** |
+| the same at SIMD16, this session's control (§0) | 0.9315 | 1.235× slower |
+| pre-registered bar | ≤ 0.6 | **MISS by 1.92×** |
+| point estimate (A28 §4.2's derivation) | 0.465 | missed by 2.47× |
+| rate on 1.636 GFLOP/layer/chunk (derived) | **1.42 TFLOP/s** | was 1.76 |
+
+**Decision-rule verdict: > 0.6 ms and slower than 0.9298 → REVERT.** The
+attribute is back at `SG` (16) in `src/kernels/prefill/pf_gdn_wy.cl`; the file
+differs from `e6da455` only in the comment block that now records this
+measurement, so that the next reader does not re-derive the same lever. The
+mapping was not iterated: the one-line change was built once and measured once.
+
+Nothing else in the walk moved (measured, same run): `pf_gdn_A` 0.6145,
+`pf_gdn_A2` 1.0321, `pf_gdn_scan` 3.3989, `pf_gdn_conv` 0.3289 - all within
+0.3% of §0's control, so the +0.22 ms is `pf_gdn_wu`'s and nothing else's.
+
+### 2.2 Why the derivation was wrong, read off the Xe2 assembly
+
+`ocloc` was re-run on the SIMD32 `pf_gdn_wy.cl` with `IGC_ShaderDumpEnable=1`,
+and the numbers below are counted in the ISA, not inferred from the timing. The
+legacy entry point is in the same binary, so this is a controlled comparison.
+
+**No spill.** `-abortOnSpill 4` is on the link line and the build succeeded;
+`grf_count 128`, `slm_size 50688`, `barrier_count 1`, `simd_size 32` - the
+metadata says the kernel is exactly what was asked for. So the first half of
+§1.2's named risk did **not** fire in the form it was named.
+
+**It fired in a form the pre-registration did not name: register moves.**
+
+| loop body | SIMD16 (A28 §4.2) | SIMD32 (measured here) |
+|---|---:|---:|
+| phase A - instructions | 45 | **84** |
+| phase A - `mad` | 32 | 32 |
+| phase A - FMA density | 71% | **38%** |
+| phase A - added `mov` | 0 | **34** |
+| phase B - instructions | 26 | **27** |
+| phase B - `mad` | 16 | 17 |
+
+Phase B is untouched: 1 × `load.slm.d32x4` (the block's four `T` values),
+2 × `load.slm.d32x2` (the lane's two columns of `vb` and of `kb`), 16 `mad` - the
+vector shapes §3.2 of the previous document fixed, at the new width. **Phase A
+grew by 39 instructions, 34 of them plain `mov`.** At SIMD32 a fp32 vector value
+is 2 GRF, so the 32 accumulators alone hold 64 of the 128 registers and the
+eight `T` values another 16; IGC fits it without spilling by shuffling
+registers around the two 16-`mad` groups, and those shuffles are issued
+instructions like any other.
+
+**The arithmetic, with both terms:**
+
+| | SIMD16 | SIMD32 |
+|---|---:|---:|
+| threads per layer per chunk | 49,152 | 24,576 |
+| loop instructions per thread, mean over `b` (derived) | 1,642 | **2,376** |
+| loop instructions issued (derived) | 8.07e7 | **5.84e7** |
+| ratio | | **1.38×**, not 2× |
+| measured ms | 0.9298 | **1.1505** |
+| issue rate, instructions/XVE/clock (derived) | 0.121 | **0.071** |
+
+The per-thread count is `(4b+4)·A + (60−8b)·B` summed over the eight `b` values a
+work-group's threads take, with `A`/`B` the phase bodies above; at SIMD32 one
+thread covers two of the old `b`-pairs' lanes, so the thread count halves while
+each thread's body grows 1.45×. The widening therefore bought only **1.38×** of
+issued instructions where the pre-registration assumed 2×, and it **spent
+1.71× of issue rate** to get it.
+
+**The issue rate is the second half of the named risk, and it is the larger
+term.** `pf_gdn_wu`'s SLM is 50,688 B, so an Xe-core holds 2 work-groups at
+either width; that is **32 resident threads at SIMD16 and 16 at SIMD32** of the
+64 the Xe-core has - 4 threads per XVE against 2. A28 §4.2 term 2 measured that
+this kernel's `j` loops are **not unrolled** (their bounds `jl`/`jh` are runtime
+values), so every iteration is one un-pipelined SLM round trip with 27-84 issue
+slots to cover it, and halving the threads halves what is available to cover it
+with. 0.121 → 0.071 is that, measured.
+
+So the lever A28 priced at −45 ms/4096 is worth **+21 ms** instead, and the
+reason is not the one that was named as most likely.
+
+### 2.3 Numerics: bitwise, as pre-registered - which is why the revert is clean
+
+`gdn_wy_test` at `ZE_AFFINITY_MASK=1`, **measured on the SIMD32 build**, all
+five bars and case 6 green at all three widths:
+
+| width | bar | measured |
+|---|---|---|
+| C = 256 | `w`, `u` bit-identical to `pf_gdn_wu_legacy` | **1,572,864 words each, identical** |
+| C = 100 (ragged, L = 36) | the same | **614,400 words each, identical** |
+| C = 4096 | the same | **25,165,824 words each, identical** |
+
+`u` 0 bf16 ulp (bit-identical) against `gdn_chunk_ref::wu` at every width; `w`
+max 1 ulp on `|ref| ≥ rms/4` at C = 256 and C = 100 and 2 at C = 4096, against
+the bar of 2 - the same table A28 §4.3 recorded, to the word count. **The
+sub-group width moves no rounding point, and the measurement says so**, which is
+what makes the revert a pure performance decision with nothing to diagnose.
+
+### 2.4 What this leaves
+
+`pf_gdn_wu` stays at **0.9298 ms/layer/chunk** (A28's figure; §0's control
+re-measured 0.9315 in this session and neither corrects the other). The
+remaining named lever on this kernel is A28 §4.2's second: unrolling the `j`
+loop by a fixed factor plus a remainder, so that the SLM round trips pipeline.
+It is **not** attempted here - it is a different defect, and this task's budget
+goes to items 2 and 3.
