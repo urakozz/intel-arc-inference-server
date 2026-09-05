@@ -138,9 +138,37 @@ __kernel void pf_gdn_seed(__global const ushort* restrict conv_ring,
 // ---------------------------------------------------------------------------
 // (2) The batched depthwise 4-tap causal conv1d + SiLU over the whole chunk,
 //     AND the ring writeback for the chunk's last min(c_count, 3) positions.
-//     Grid (40, 1, 1). One work-item owns one channel for every position, so
-//     the window's newer slots are its own registers and the only ring traffic
-//     is (1)'s seed and this kernel's <= 3 stores.
+//
+//     REWRITTEN under ruling A27 (2026-09-05): the position range is BLOCKED.
+//     ------------------------------------------------------------------------
+//     As delivered by L1-core the grid was (40, 1, 1) and one work-item owned
+//     one channel for EVERY position, walking them serially. That is
+//     10,240 work-items = **640 threads on a 2048-slot machine (31%)**, and
+//     because consecutive iterations of the `m` loop are 64 KB apart, the bytes
+//     in flight at any instant were one iteration's worth of the whole grid =
+//     10,240 lanes x 4 B = **40 KB**, against the ~295 KB Little's law asks for
+//     at 590 GB/s and this part's ~500 ns latency. It measured **1.3182 ms per
+//     GDN layer per chunk = 95.4 GB/s on 125.8 MB** (docs/prefill-gdn-scan-
+//     2026-09-05.md §5.2), i.e. 16% of the device's bandwidth while being
+//     neither bandwidth- nor compute-bound.
+//
+//     The FIR is three deep and **every predecessor is readable straight out of
+//     `qkvz_partials`** -- `raw(m)` below is exactly what the ring stores (P1)
+//     and exactly what the serial walk carried in `win0..win2`. So the position
+//     range blocks with a three-position halo that costs three loads per block,
+//     and no recurrence crosses a block boundary.
+//
+//     Grid is now **(40, NB, 1)**, work-group 256 unchanged. The block width is
+//     derived from `get_num_groups(1)` rather than shared as a literal with the
+//     host, so the two cannot disagree about coverage; `gdn.cc` asks for
+//     `NB = ceil(C / kConvBlock)` with `kConvBlock = 128`, which at C = 2048 is
+//     640 work-groups = 10,240 threads = 5 waves.
+//
+//     **No rounding point moves and no sum is re-associated.** The per-position
+//     body is the same four ascending `fma`s (P2) over the same widened bf16
+//     words and the same `rne_bf16(silu_f32(acc))` store (P3); the output is a
+//     function of `(m, ch)` alone, so the bar is bitwise identity against
+//     `pf_gdn_conv_legacy` below, which `gdn_conv_test` case 7 asserts.
 // ---------------------------------------------------------------------------
 __attribute__((reqd_work_group_size(WG_CH, 1, 1)))
 __kernel void pf_gdn_conv(__global const float* restrict qkvz_partials,
@@ -148,16 +176,32 @@ __kernel void pf_gdn_conv(__global const float* restrict qkvz_partials,
                           __global const float* restrict conv_w,
                           __global ushort* restrict xb,
                           __global ushort* restrict conv_ring, uint pos, uint c_count) {
+  // The block this work-group owns. `blk * nb >= c_count` by construction, so
+  // the blocks tile [0, c_count) exactly and a trailing empty block returns.
+  const uint nb = get_num_groups(1);
+  const uint blk = (c_count + nb - 1) / nb;
+  const uint m0 = get_group_id(1) * blk;
+  if (m0 >= c_count) return;                      // uniform across the work-group
+  const uint m1 = min(m0 + blk, c_count);
+
   const uint stride = get_global_size(0);
   for (uint ch = get_global_id(0); ch < CONV_ROWS; ch += stride) {
     const __global float* restrict w = conv_w + (size_t)ch * CONV_TAPS;
     const float w0 = w[0], w1 = w[1], w2 = w[2], w3 = w[3];
 
-    float win0 = bf16f(seed[(size_t)0 * CONV_ROWS + ch]);
-    float win1 = bf16f(seed[(size_t)1 * CONV_ROWS + ch]);
-    float win2 = bf16f(seed[(size_t)2 * CONV_ROWS + ch]);
+    // The three-position halo. `seed[t]` holds chunk-relative position `t - 3`
+    // (pf_gdn_seed above), so a negative position indexes `seed` at `p + 3` and
+    // a non-negative one is the SAME `rne_bf16(qkvz_partials[...])` the serial
+    // walk carried in its registers -- which is why blocking is bit-exact.
+    float win[3];
+    for (uint t = 0; t < 3; ++t) {
+      const int p = (int)m0 - 3 + (int)t;
+      win[t] = p < 0 ? bf16f(seed[(size_t)(p + 3) * CONV_ROWS + ch])
+                     : bf16f(rne_bf16(qkvz_partials[(size_t)p * QKVZ_N + ch]));
+    }
+    float win0 = win[0], win1 = win[1], win2 = win[2];
 
-    for (uint m = 0; m < c_count; ++m) {
+    for (uint m = m0; m < m1; ++m) {
       const ushort raw_b = rne_bf16(qkvz_partials[(size_t)m * QKVZ_N + ch]);   // P1
       const float win3 = bf16f(raw_b);            // tap 3 is the current position
       float acc = 0.0f;                           // taps ascending, explicit fma (P2)
@@ -179,6 +223,64 @@ __kernel void pf_gdn_conv(__global const float* restrict qkvz_partials,
     // and the three that ARE written are exactly the three `gdn_step` will read
     // if decode resumes at pos+c_count. That is the whole prefill/decode
     // handoff for the conv state.
+    //
+    // With the position range blocked, each of those three positions belongs to
+    // exactly one block, so the `m0 <= m < m1` guard is what keeps every live
+    // slot written exactly once and by the same expression as before.
+    for (uint t = 0; t < 3; ++t) {
+      const int m = (int)c_count - 3 + (int)t;
+      if (m >= (int)m0 && m < (int)m1)
+        conv_ring[((size_t)((pos + (uint)m) % RING)) * CONV_ROWS + ch] =
+            rne_bf16(qkvz_partials[(size_t)m * QKVZ_N + ch]);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// (2b) `pf_gdn_conv` EXACTLY as it stood before ruling A27's rewrite, kept as
+//      the bitwise reference for `tests/prefill/gdn_conv_test.cc` case 7 and
+//      launched by nothing else -- `src/runtime/prefill/gdn.cc` binds only the
+//      blocked kernel above.
+//
+//      It is here rather than in a golden dump because the artefact would be
+//      41.9 MB per width, and rather than as a host comparison because
+//      `silu`'s `exp` is 3 ulp on the device and correctly rounded on the host
+//      (which is why case 1's bar against `gdn_chunk_ref` is <= 2 bf16 ulp and
+//      not equality). Device-vs-device is the only comparison that can be
+//      bit-exact, so this is the only shape the pre-registered bar could take.
+//      It is also a permanent regression bar: any future re-partition of this
+//      loop has to reproduce this kernel word for word.
+// ---------------------------------------------------------------------------
+__attribute__((reqd_work_group_size(WG_CH, 1, 1)))
+__kernel void pf_gdn_conv_legacy(__global const float* restrict qkvz_partials,
+                                 __global const ushort* restrict seed,
+                                 __global const float* restrict conv_w,
+                                 __global ushort* restrict xb,
+                                 __global ushort* restrict conv_ring, uint pos,
+                                 uint c_count) {
+  const uint stride = get_global_size(0);
+  for (uint ch = get_global_id(0); ch < CONV_ROWS; ch += stride) {
+    const __global float* restrict w = conv_w + (size_t)ch * CONV_TAPS;
+    const float w0 = w[0], w1 = w[1], w2 = w[2], w3 = w[3];
+
+    float win0 = bf16f(seed[(size_t)0 * CONV_ROWS + ch]);
+    float win1 = bf16f(seed[(size_t)1 * CONV_ROWS + ch]);
+    float win2 = bf16f(seed[(size_t)2 * CONV_ROWS + ch]);
+
+    for (uint m = 0; m < c_count; ++m) {
+      const ushort raw_b = rne_bf16(qkvz_partials[(size_t)m * QKVZ_N + ch]);   // P1
+      const float win3 = bf16f(raw_b);
+      float acc = 0.0f;
+      acc = fma(w0, win0, acc);
+      acc = fma(w1, win1, acc);
+      acc = fma(w2, win2, acc);
+      acc = fma(w3, win3, acc);
+      xb[(size_t)m * CONV_ROWS + ch] = rne_bf16(silu_f32(acc));                // P3
+      win0 = win1;
+      win1 = win2;
+      win2 = win3;
+    }
+
     for (uint t = 0; t < 3; ++t) {
       const int m = (int)c_count - 3 + (int)t;
       if (m >= 0)

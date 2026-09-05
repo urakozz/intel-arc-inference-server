@@ -30,6 +30,16 @@
 //   6. the chunk-boundary reset: `gc` restarts at every multiple of 64. A
 //      running cumsum across the whole call is the single most likely
 //      transcription error in this task, so it is asserted directly.
+//   7. **ruling A27's bar: `pf_gdn_conv` BITWISE IDENTICAL to
+//      `pf_gdn_conv_legacy`**, the kernel exactly as it stood before the
+//      position range was blocked. The rewrite moves no rounding point and
+//      re-associates no sum, so bit equality is the pre-registered outcome
+//      rather than a band; and device-vs-device is the only comparison that can
+//      be bit-exact, because case 1's `exp` gap makes the host reference a
+//      2-ulp bar. Two shapes: one chunk of 4096 (the halo at every block
+//      boundary, the ring writeback in the last block) and the 1 + 2 + 64
+//      ragged walk (fewer than three live slots; a chunk narrower than a
+//      block).
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -90,14 +100,28 @@ struct Dev {
   l0::Kernel& k(const char* entry) { return kc.get(kernels::pf_gdn_conv_variant(), entry); }
 };
 
-// One seed+conv pair at (pos, C), on device buffers the caller owns.
-void run_conv(Dev& d, void* ring, void* seed, void* qkvz, void* small, void* xb, uint32_t pos,
-              uint32_t C) {
+// `src/runtime/prefill/gdn.cc`'s kConvBlock - A27's position blocking. The test
+// asks for the same grid the runtime does, so what it measures and what the
+// engine runs are one kernel launch shape.
+constexpr uint32_t kConvBlock = 128;
+
+// One seed+conv pair at (pos, C), on device buffers the caller owns. `entry` is
+// `pf_gdn_conv` or, for case 7's bitwise bar, the pre-A27 `pf_gdn_conv_legacy`,
+// whose grid.y is 1 because it walks every position in one work-item.
+void run_conv_entry(Dev& d, const char* entry, void* ring, void* seed, void* qkvz, void* small,
+                    void* xb, uint32_t pos, uint32_t C) {
+  const bool blocked = std::strcmp(entry, "pf_gdn_conv") == 0;
+  const uint32_t nb = blocked ? (C + kConvBlock - 1) / kConvBlock : 1;
   d.cx.launch(d.k("pf_gdn_seed"), kConvGroups, 1, 1, {PtrArg(ring), PtrArg(seed), arg_val(pos)});
-  d.cx.launch(d.k("pf_gdn_conv"), kConvGroups, 1, 1,
+  d.cx.launch(d.k(entry), kConvGroups, nb, 1,
               {PtrArg(qkvz), PtrArg(seed), PtrArg(small), PtrArg(xb), PtrArg(ring),
                arg_val(pos), arg_val(C)});
   d.cx.wait();
+}
+
+void run_conv(Dev& d, void* ring, void* seed, void* qkvz, void* small, void* xb, uint32_t pos,
+              uint32_t C) {
+  run_conv_entry(d, "pf_gdn_conv", ring, seed, qkvz, small, xb, pos, C);
 }
 
 // The ring slots a chunk ending at `end` leaves live - the only ones the next
@@ -330,6 +354,62 @@ int main() {
         CHECK(std::fabs(double(first)) < std::fabs(double(prev_last)));
       }
     std::puts("case 6: gc restarts at every 64-boundary");
+  }
+
+  // --- 7. ruling A27's bar: BITWISE IDENTITY to the pre-rewrite kernel ------
+  // `pf_gdn_conv` was re-partitioned over the position range (grid.y = position
+  // blocks) and moves no rounding point, so the pre-registered bar is not a
+  // band but bit equality against `pf_gdn_conv_legacy`, which is the kernel
+  // exactly as it stood before. Device-vs-device is the only comparison that
+  // CAN be bit-exact here: `silu`'s `exp` is 3 ulp on the device and correctly
+  // rounded on the host, which is why case 1's bar is <= 2 bf16 ulp.
+  //
+  // Two shapes, because they exercise the two halves of the change: one chunk
+  // of 4096 (the halo re-read at every block boundary, and the ring writeback
+  // landing in the LAST block) and the 1 + 2 + 64 ragged walk (fewer than three
+  // ring slots written, and a chunk narrower than one block).
+  {
+    l0::Mem d_xbL(d.ctx, l0::MemKind::Device, size_t(kC) * R::kConvRows * 2);
+    d.imm.fill(d_ring.ptr(), 0u, d_ring.size());
+    run_conv_entry(d, "pf_gdn_conv_legacy", d_ring.ptr(), d_seed.ptr(), d_qkvz.ptr(),
+                   d_small.ptr(), d_xbL.ptr(), 0, kC);
+    std::vector<uint16_t> xbL(got_xb.size()), ringL(got_ring.size());
+    pf_harness::download(d.imm, xbL, d_xbL);
+    pf_harness::download(d.imm, ringL, d_ring);
+    // `got_xb` / `got_ring` are the BLOCKED kernel's, from case 1, same inputs.
+    CHECK(std::memcmp(xbL.data(), got_xb.data(), xbL.size() * 2) == 0);
+    const auto lL = live_slots(ringL, kC), lN = live_slots(got_ring, kC);
+    CHECK(std::memcmp(lL.data(), lN.data(), lL.size() * 2) == 0);
+    std::printf("case 7: blocked == legacy, BITWISE - %zu xb words and %zu ring live "
+                "words at C = %u (%u position blocks)\n",
+                xbL.size(), lL.size(), kC, (kC + kConvBlock - 1) / kConvBlock);
+
+    // The ragged walk, both kernels, from a zeroed ring each time.
+    l0::Mem d_xb7(d.ctx, l0::MemKind::Device, size_t(67) * R::kConvRows * 2);
+    l0::Mem d_xb7L(d.ctx, l0::MemKind::Device, size_t(67) * R::kConvRows * 2);
+    const uint32_t widths[] = {1, 2, 64};
+    std::vector<uint16_t> ragged[2], ring7[2];
+    for (int which = 0; which < 2; ++which) {
+      const char* entry = which == 0 ? "pf_gdn_conv" : "pf_gdn_conv_legacy";
+      void* dst = which == 0 ? d_xb7.ptr() : d_xb7L.ptr();
+      d.imm.fill(d_ring.ptr(), 0u, d_ring.size());
+      uint32_t p = 0;
+      for (uint32_t wdt : widths) {
+        run_conv_entry(d, entry, d_ring.ptr(), d_seed.ptr(),
+                       static_cast<uint8_t*>(d_qkvz.ptr()) + size_t(p) * R::kQkvzN * 4,
+                       d_small.ptr(),
+                       static_cast<uint8_t*>(dst) + size_t(p) * R::kConvRows * 2, p, wdt);
+        p += wdt;
+      }
+      ragged[which].resize(size_t(67) * R::kConvRows);
+      ring7[which].resize(got_ring.size());
+      pf_harness::download(d.imm, ragged[which], which == 0 ? d_xb7 : d_xb7L);
+      pf_harness::download(d.imm, ring7[which], d_ring);
+    }
+    CHECK(std::memcmp(ragged[0].data(), ragged[1].data(), ragged[0].size() * 2) == 0);
+    const auto r0 = live_slots(ring7[0], 67), r1 = live_slots(ring7[1], 67);
+    CHECK(std::memcmp(r0.data(), r1.data(), r0.size() * 2) == 0);
+    std::puts("case 7: blocked == legacy, BITWISE - the 1 + 2 + 64 ragged walk, xb and ring");
   }
 
   std::puts("gdn_conv_test OK");
