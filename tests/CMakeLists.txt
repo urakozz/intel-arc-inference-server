@@ -442,6 +442,43 @@ if(B70_PREFILL_ENABLED)
   add_dependencies(prefill_smoke_test ${B70_PREFILL_KERNELS})
   add_test(NAME prefill_smoke_test COMMAND prefill_smoke_test ${B70_TEST_SNAPSHOT})
   set_tests_properties(prefill_smoke_test PROPERTIES LABELS "checkpoint;prefill" TIMEOUT 1800)
+
+  # The int4-lm_head checkpoint (spec 1.6 §5.1, tools/quantize_qwen38_rtn.sh).
+  # It never went through `hf download`, so it is a plain path and not a cache
+  # lookup; the same override rule as B70_TEST_SNAPSHOT applies.
+  set(B70_RTN_SNAPSHOT "$ENV{HOME}/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64"
+    CACHE PATH "The int4-lm_head checkpoint the RTN-labelled gates load")
+
+  # The three spec 2 §6 gates. `tests/golden` is on the include path for
+  # golden_common.h -- the decode gate's machinery, extracted verbatim, so the
+  # prefill gate grades on the same code rather than on a copy of it.
+  foreach(t prefill_gate prefill_consistency prefill_determinism)
+    add_executable(${t}_test prefill/${t}_test.cc)
+    target_include_directories(${t}_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+      ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+    target_link_libraries(${t}_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0
+                          b70_model)
+    b70_link_prefill(${t}_test)
+    add_dependencies(${t}_test ${B70_PREFILL_KERNELS})
+  endforeach()
+
+  # Vishva (bf16 lm_head) and RTN (int4 lm_head) -- one golden set per
+  # checkpoint (tools/oracle/README.md, "One golden set per checkpoint"), so two
+  # registrations and never one that takes whichever directory is lying around.
+  add_test(NAME prefill_gate_test COMMAND prefill_gate_test
+    ${CMAKE_SOURCE_DIR}/oracle-out ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+    ${B70_TEST_SNAPSHOT})
+  add_test(NAME prefill_gate_rtn_test COMMAND prefill_gate_test
+    ${CMAKE_SOURCE_DIR}/oracle-out-rtn ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+    ${B70_RTN_SNAPSHOT})
+  add_test(NAME prefill_consistency_test COMMAND prefill_consistency_test
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT})
+  add_test(NAME prefill_determinism_test COMMAND prefill_determinism_test
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT})
+  set_tests_properties(prefill_gate_test prefill_gate_rtn_test PROPERTIES
+    LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  set_tests_properties(prefill_consistency_test prefill_determinism_test PROPERTIES
+    LABELS "checkpoint;prefill" TIMEOUT 3600)
 endif()
 
 # --- b70-decode's host-side rejections ---------------------------------------
