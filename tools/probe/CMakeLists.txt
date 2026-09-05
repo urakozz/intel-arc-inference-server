@@ -43,6 +43,31 @@ if(B70_PREFILL_ENABLED)
   b70_link_prefill(probe_dequant_overlap)
   b70_target_kernel_dir(probe_dequant_overlap)
   add_dependencies(probe_dequant_overlap kernel_pf_dequant_tile_K5120_N34816_L0_T0)
+
+  # The L2-resident slab lever. Same shape as the overlap probe (gate‖up,
+  # K=5120, N=34816, M=2048) and the same two queues, so it links the same way.
+  #
+  # `pds_*` are PROBE kernels: `src/kernels/prefill/dequant.cl` is not touched,
+  # no runtime path binds them, and at NS == N with n0 == 0 the source IS that
+  # kernel's layout-0 / [K][N] path -- which is what makes the probe's C1'
+  # equivalence cell a control rather than a paraphrase. The width list here and
+  # `kWidths` in probe_dequant_slab.cc are two lists nothing checks against each
+  # other; a width whose binary is missing is named and refused at `l0::Module`.
+  set(PROBE_SLAB_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_dequant_slab.cl)
+  set(PROBE_SLAB_TARGETS "")
+  foreach(NS 1024 2048 4096 34816)
+    add_ocloc_kernel(pds_K5120_N34816_NS${NS} SOURCE ${PROBE_SLAB_CL}
+                     DEFINES K=5120 N=34816 NS=${NS})
+    list(APPEND PROBE_SLAB_TARGETS kernel_pds_K5120_N34816_NS${NS})
+  endforeach()
+
+  add_executable(probe_dequant_slab probe_dequant_slab.cc)
+  target_include_directories(probe_dequant_slab PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_dequant_slab PRIVATE b70_l0)
+  b70_link_prefill(probe_dequant_slab)
+  b70_target_kernel_dir(probe_dequant_slab)
+  add_dependencies(probe_dequant_slab kernel_pf_dequant_tile_K5120_N34816_L0_T0
+                   ${PROBE_SLAB_TARGETS})
 endif()
 
 # T6's M=2048 small-kernel check. These are probe-only ocloc binaries: no
