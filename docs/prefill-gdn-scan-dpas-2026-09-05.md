@@ -902,11 +902,14 @@ about 78%.
 
 ### 9.1 Suite
 
-`ctest` on the box, `ZE_AFFINITY_MASK=1`, at the reverted state: **60/60 pass,
-0 fail, 1 skip** (`prefill_gate_long_test` - `oracle-out-long` still needs the
-operator's `docker run`, so it skips cleanly with 77 as designed). Total
-422.57 s. No test binary was added and no test was changed: item 0's bar is
-`gdn_wy_test` case 7, which already existed.
+`ctest` on the box, run twice and green both times: at the reverted code state
+with `ZE_AFFINITY_MASK=1` (**60/60 pass, 0 fail, 1 skip**, 422.57 s) and again
+at the final commit `af2203e` through `tools/box.sh test`, which does not set
+the variable and therefore ran on device 0 (**60/60 pass, 0 fail, 1 skip**,
+414.49 s). The skip is `prefill_gate_long_test` - `oracle-out-long` still needs
+the operator's `docker run`, so it skips cleanly with 77 as designed. No test
+binary was added and no test was changed: item 0's bar is `gdn_wy_test` case 7,
+which already existed.
 
 ### 9.2 Numerics, all four gates, both checkpoints
 
@@ -987,7 +990,10 @@ other harness.
    1375.65, 1377.20 and 1398.00. **Every other piece of device work in this task
    ran with `ZE_AFFINITY_MASK=1`**: all three profiled walks, `gdn_wy_test`,
    `gdn_chunk_test`, all four gates on both checkpoints, both consistency runs,
-   the three decode structural tests, and the whole `ctest` suite.
+   the three decode structural tests, and the `ctest` suite's masked run. The
+   second, confirming suite run at `af2203e` went through `tools/box.sh test`,
+   which does not pass the variable through, so it ran on device 0; both runs
+   are 60/60 (§9.1).
 5. **Two published values existed for item 0's baseline** (task (b)'s 0.5889 and
    0.5955). §0.1 fixes which one the bar uses and reports this session's control
    beside it; no third value is coined.
