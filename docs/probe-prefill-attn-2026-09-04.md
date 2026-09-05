@@ -141,3 +141,63 @@ timing battery. It has **not yet** completed the required packed-cache
 bit-exact comparison or the scalar-reference error report at C=64/256. Its
 timings are therefore evidence for T6's ceiling only, not an inherited
 correctness decision for L1; the missing checks remain P4 work.
+
+## 2026-09-05 - P4 attention-cost diagnosis at the A13 width
+
+Grade: iterate (card 1, `ZE_AFFINITY_MASK=1`, card 0 may be held).
+
+### A. Causal masking is active and prunes future KV work
+
+This probe instantiates all FMHA configurations with `Causal = true` and has
+compile-time assertions for that fact (source-verified, iterate grade). At the
+verified pin, `XeFMHAFwdKernel::operator()` derives `seq_len_new` from each Q
+tile's causal prefix and then derives `k_blocks` from that length; its mainloop
+therefore ends at that Q tile's causal KV prefix rather than executing a full
+C×D tile range and masking it afterward (source-verified, iterate grade). The
+final partial tile additionally writes `-INFINITY` into future score lanes
+before softmax (source-verified, iterate grade). Causal masking is not the
+unnecessary-full-matrix defect.
+
+### B. Same-route head-dimension comparison
+
+The bounded `--hd-compare` path holds the `256×32×32` work-group tiles and
+`16×32` subgroup tiles at C=2048 and depth=4096. It changes only head dimension
+and its required `1/sqrt(head_dim)` QK scale. Each timing is host wall time,
+eight replays with a warm-up launch and the first three samples dropped
+(measured, iterate grade); TFLOP/s is derived from QK^T plus PV across 16 FA
+layers.
+
+| head_dim | VTiles | us/launch | ms × 16 FA layers | work × 16 layers | TFLOP/s | grade |
+|---:|---:|---:|---:|---:|---:|---|
+| 256 | 8 | 36012.104 | 576.194 | 3.299 TFLOP | 5.725 | measured time; derived work/rate, iterate |
+| 128 | 4 | 5506.748 | 88.108 | 1.649 TFLOP | 18.719 | measured time; derived work/rate, iterate |
+
+Head dimension 256 is 3.27× less efficient than the otherwise fixed
+head-dimension-128 route (derived from the two measured rates). This is a real
+structural penalty, but the 128 route is still only 11.4% of P2's measured
+164.21 TFLOP/s GEMM peak, while the model's required 256 route is 3.5%
+(derived). Head dimension therefore does not explain the approximately 25×
+attention-versus-GEMM gap by itself.
+
+### C. Generated image: DPAS and block loads are present
+
+The AOT shader-dump rebuild emitted the selected 256-wide, VTiles=8 FMHA image.
+Its `.zeinfo` reports SIMD16, 256 GRFs, `has_dpas: true`, 33024 B spill storage
+and a 65536 B scratch allocation (measured compiler artifact, iterate grade).
+The spill value agrees with the already-recorded ~516-register IGC warning; it
+is recorded here only to identify the exact image, not reopened as a cause.
+
+Its inner vISA loop contains repeated `dpas.bf.bf.8.8 (M1, 16)` operations, and
+the matching ISA contains repeated `dpas.8x8 (16|M0)` operations (measured
+compiler artifact, iterate grade). The operand paths are `lsc_load_block2d.ugm`
+in vISA and `load_block2d.ugm` in ISA, including the QK/PV loop loads; they are
+not per-lane scattered gathers (measured compiler artifact, iterate grade).
+
+### Verdict
+
+No removable defect survived A-C. The 256-head path has a material structural
+efficiency penalty, but causal scheduling, DPAS generation, and block-load
+selection are all present. The model-required hdim=256 attention cost therefore
+survives this diagnosis at 576.194 ms per C=2048 chunk across 16 FA layers
+(measured host-wall, iterate grade, correctness still incomplete). No tile
+shape tuning was started.
