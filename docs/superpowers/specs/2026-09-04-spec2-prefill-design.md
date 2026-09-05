@@ -164,19 +164,31 @@ one head (derived, `docs/01-hardware.md:16`).
 - The chunk's K/V are written into the **existing cache layout** by a
   widened `attn_prep` (it is already M-parallel and indexes by `pos+m`),
   so decode continues from the same cache with no relayout.
-- **`sycl-tla` FMHA forward first, if it instantiates at head_dim 256** -
-  Stage 0 checks. It reads K/V from our cache (page size = whole cache,
-  cumulative-seqlen arrays of one entry) and handles causal masking by
-  tile trimming + diagonal masking.
-- **Fallback, ours, only if P4 fails:** a flash kernel - Q-tile per
-  work-group, online softmax, DPAS for both QKᵀ and PV - written in SYCL
-  on top of `sycl-tla`'s own copy/MMA atoms if that is the shorter path
-  (head_dim is a template parameter there), OpenCL C otherwise, with a
-  pre-registered price. Task 5's register-packed GQA (one K/V walk serves
-  six q-heads) transfers directly.
+- **SUPERSEDED 2026-09-05 (ruling A14) - the FMHA-first design below is
+  retired on measurement, kept as the record.** `sycl-tla`'s fused FMHA
+  *does* instantiate at head_dim 256 (P4), but measures **5.7 TFLOP/s -
+  576 ms per C=2048 chunk across 16 layers, 31% of the step for ~3% of its
+  FLOPs** - and every defect hunt came back clean (grid, DPAS emission,
+  256-GRF, causal trimming, timing region). At Intel's own tuned head_dim
+  128 the same route reaches only 18.7. It is structural, not a bug.
+- **The design now: attention COMPOSED from the inherited GEMM.** The same
+  library's unfused GEMM measures **54.8 TFLOP/s at the QKᵀ shape**
+  (M=2048, K=256, N=4096) and **40.6 single-head / 73.5 at 16 work-groups
+  at the PV shape** (N=256 is one tile - occupancy-bound alone, healthy
+  batched over 24 heads). So: `S = QKᵀ` (batched GEMM, `transB` against
+  the cache's `[pos][4][256]` rows), `P = softmax(S)` (ours, OpenCL C,
+  bandwidth-bound, causal mask by absolute position in-kernel), `O = PV`
+  (batched GEMM). Softmax/PV tile over heads so S/P scratch stays bounded
+  at long depth (A14). **Pre-registered: 85-100 ms/chunk (derived from the
+  measured cells + 1.2 GB/layer of softmax traffic at 590 GB/s) - a
+  5.8-6.8× cut on the second-largest term, with no hand-written DPAS.**
+  This is still "inherit what Intel ships": the part of it that works.
+- *Retired text, for the record:* FMHA forward first if it instantiates;
+  fallback a hand-written flash kernel. Neither is built.
 
-Attention is **~3% of prefill FLOPs at depth 4096 (derived)**; its risk is
-memory tiling and correctness, not throughput.
+Attention is **~3% of prefill FLOPs at depth 4096 (derived)** and was
+**31% of measured time** under the fused kernel; the composed path returns
+it to the memory-traffic-bound cost its FLOP share implies.
 
 ### 3.4 GDN chunked delta rule (48 linear-attention layers) - inherit first, own if it does not fit
 
