@@ -9,10 +9,22 @@
 //
 // Pre-registration: docs/probe-dequant-overlap-2026-09-05.md (recovers
 // 0.6-0.9 of the dequant time; accept at >= 0.3), committed before this file.
+//
+// 2026-09-05 EXTENSION (PROBE B, the same document's second dated section).
+// The battery below ran the dequant on prefill::Context's own immediate list --
+// src/sycl/context.cc creates it with `qd.ordinal = 0` and no `index` -- and
+// the GEMM on a sycl::queue whose ordinal this project has never inspected. So
+// the verdict "the two queues serialise" is strictly "two queues that may both
+// be queue 0 of group 0 serialise". `--ordinal O [--index I]` binds the
+// dequant to a DIFFERENT hardware queue and re-runs the identical battery;
+// `--enumerate-only` prints the queue groups and stops (no timing at all).
+// With no arguments the original single-list path runs unchanged, so the
+// record in that document stays reproducible from this same binary.
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -66,13 +78,128 @@ std::vector<uint32_t> host_words(const void* p, size_t bytes) {
   return out;
 }
 
+// --- PROBE B: the queue groups, read verbatim from the driver ---------------
+// This function creates nothing, submits nothing and times nothing. Whatever
+// zeDeviceGetCommandQueueGroupProperties reports IS the record; the probe does
+// not assert in advance how many groups a B70 has.
+std::vector<ze_command_queue_group_properties_t> queue_groups(l0::Context& ctx) {
+  uint32_t n = 0;
+  if (zeDeviceGetCommandQueueGroupProperties(ctx.device(), &n, nullptr) != ZE_RESULT_SUCCESS)
+    return {};
+  std::vector<ze_command_queue_group_properties_t> p(n);
+  for (auto& g : p) g.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
+  if (zeDeviceGetCommandQueueGroupProperties(ctx.device(), &n, p.data()) != ZE_RESULT_SUCCESS)
+    return {};
+  return p;
+}
+
+std::string decode_flags(ze_command_queue_group_property_flags_t f) {
+  std::string s;
+  auto add = [&](ze_command_queue_group_property_flag_t bit, const char* name) {
+    if (f & bit) { if (!s.empty()) s += " | "; s += name; }
+  };
+  add(ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE, "COMPUTE");
+  add(ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY, "COPY");
+  add(ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COOPERATIVE_KERNELS, "COOPERATIVE_KERNELS");
+  add(ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_METRICS, "METRICS");
+  if (s.empty()) s = "(none)";
+  return s;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  // --- PROBE B's arguments. No argument = the original battery, unchanged. ---
+  int opt_ordinal = -1;   // -1 = use prefill::Context's own list (the original)
+  uint32_t opt_index = 0;
+  bool enumerate_only = false;
+  bool auto_bind = false;  // apply the pre-registered binding rule
+  for (int i = 1; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "--enumerate-only") enumerate_only = true;
+    else if (a == "--auto") auto_bind = true;
+    else if (a == "--ordinal" && i + 1 < argc) opt_ordinal = std::atoi(argv[++i]);
+    else if (a == "--index" && i + 1 < argc) opt_index = uint32_t(std::atoi(argv[++i]));
+    else {
+      std::fprintf(stderr,
+                   "usage: %s [--enumerate-only] [--auto | --ordinal O [--index I]]\n", argv[0]);
+      return 2;
+    }
+  }
+
   l0::Context ctx(0);
-  runtime::prefill::Context cx(ctx);
   std::printf("# P-overlap: does the dequant hide behind the GEMM? (measured, iterate-grade)\n");
   std::printf("# L0 device: %s\n", ctx.name().c_str());
+
+  // --- PROBE B step 1: enumerate. Read-only, printed verbatim. --------------
+  const std::vector<ze_command_queue_group_properties_t> groups = queue_groups(ctx);
+  std::printf("\n## zeDeviceGetCommandQueueGroupProperties (measured, verbatim)\n");
+  std::printf("| ordinal | flags | numQueues | maxMemoryFillPatternSize |\n|---:|---|---:|---:|\n");
+  int compute_groups = 0, first_compute = -1, second_compute = -1;
+  for (uint32_t i = 0; i < groups.size(); ++i) {
+    std::printf("| %u | %s | %u | %zu |\n", i, decode_flags(groups[i].flags).c_str(),
+                groups[i].numQueues, size_t(groups[i].maxMemoryFillPatternSize));
+    if (groups[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE) {
+      ++compute_groups;
+      if (first_compute < 0) first_compute = int(i);
+      else if (second_compute < 0) second_compute = int(i);
+    }
+  }
+  std::printf("compute groups: %d; first compute ordinal: %d; second compute ordinal: %d\n",
+              compute_groups, first_compute, second_compute);
+
+  // --- PROBE B step 2: the binding rule, fixed in the pre-registration ------
+  // 1. a second COMPUTE group  -> that ordinal, index 0
+  // 2. else numQueues >= 2     -> the compute ordinal, index 1
+  // 3. else                    -> one compute queue on the device; dead by
+  //                               enumeration, and the probe says so.
+  if (auto_bind) {
+    if (second_compute >= 0) {
+      opt_ordinal = second_compute; opt_index = 0;
+      std::printf("binding rule 1: a second COMPUTE group exists -> ordinal %d index %u\n",
+                  opt_ordinal, opt_index);
+    } else if (first_compute >= 0 && groups[size_t(first_compute)].numQueues >= 2) {
+      opt_ordinal = first_compute; opt_index = 1;
+      std::printf("binding rule 2: one COMPUTE group with numQueues = %u -> ordinal %d index %u\n",
+                  groups[size_t(first_compute)].numQueues, opt_ordinal, opt_index);
+    } else {
+      std::printf("binding rule 3: exactly ONE compute queue on this device. The alternate "
+                  "binding is impossible and the lever is DEAD BY ENUMERATION.\n");
+      return 0;
+    }
+    std::printf("pre-registered branch: a second compute queue EXISTS -> predict recovery "
+                ">= 0.5 of D\n");
+  } else if (opt_ordinal < 0) {
+    std::printf("no --ordinal/--auto: the dequant runs on prefill::Context's own list "
+                "(ordinal 0, index 0) -- the original 2026-09-05 battery\n");
+  }
+  if (enumerate_only) return 0;
+
+  runtime::prefill::Context cx(ctx);
+
+  // The alternate immediate list: the same shape prefill::Context builds
+  // (IN_ORDER + ASYNCHRONOUS) on a different ordinal/index. Created here rather
+  // than through l0::CmdList::immediate because that helper is SYNCHRONOUS,
+  // which would serialise the host on every append and destroy the premise.
+  ze_command_list_handle_t alt = nullptr;
+  if (opt_ordinal >= 0) {
+    ze_command_queue_desc_t qd{};
+    qd.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
+    qd.ordinal = uint32_t(opt_ordinal);
+    qd.index = opt_index;
+    qd.flags = ZE_COMMAND_QUEUE_FLAG_IN_ORDER;
+    qd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+    qd.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
+    const ze_result_t r = zeCommandListCreateImmediate(ctx.handle(), ctx.device(), &qd, &alt);
+    if (r != ZE_RESULT_SUCCESS) {
+      std::printf("zeCommandListCreateImmediate(ordinal=%d, index=%u) FAILED: 0x%X -- the "
+                  "driver refuses this binding; reported, not worked around.\n",
+                  opt_ordinal, opt_index, unsigned(r));
+      return 3;
+    }
+    std::printf("alternate immediate list created on ordinal %d index %u "
+                "(IN_ORDER | ASYNCHRONOUS)\n", opt_ordinal, opt_index);
+  }
   std::printf("# shape: gate|up K=%u N=%u layout 0; GEMM at M=%u; scratch %zu B x 2\n", kK, kN, kM,
               kScratchBytes);
   std::printf("# %d replays, discard first %d, median of last %d; one discarded warm-up.\n",
@@ -121,22 +248,51 @@ int main() {
   // Appends one dequant of weight copy `i&1` into scratch slot `slot` on the L0
   // immediate list. Returns immediately: the list is ASYNCHRONOUS (context.cc),
   // which is the whole premise of the lever.
+  //
+  // PROBE B: when `alt` exists the append goes there instead. The two paths do
+  // exactly the same three things prefill::Context::launch does -- set three
+  // pointer arguments, set the kernel's own reqd_work_group_size, append the
+  // launch -- so the only difference between them is the command list, which is
+  // the whole point of the extension.
   auto append_dequant = [&](int i, int slot) {
     void* w = dq[i & 1].ptr();
     void* s = ds[i & 1].ptr();
     void* out = scratch[slot].ptr();
-    cx.launch(kernel, kN / 16, kK / 64, 1,
-              {{&w, sizeof w}, {&s, sizeof s}, {&out, sizeof out}});
+    if (!alt) {
+      cx.launch(kernel, kN / 16, kK / 64, 1,
+                {{&w, sizeof w}, {&s, sizeof s}, {&out, sizeof out}});
+      return;
+    }
+    ze_kernel_handle_t k = kernel.handle();
+    if (zeKernelSetArgumentValue(k, 0, sizeof w, &w) != ZE_RESULT_SUCCESS ||
+        zeKernelSetArgumentValue(k, 1, sizeof s, &s) != ZE_RESULT_SUCCESS ||
+        zeKernelSetArgumentValue(k, 2, sizeof out, &out) != ZE_RESULT_SUCCESS)
+      std::abort();
+    ze_kernel_properties_t kp{};
+    kp.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
+    if (zeKernelGetProperties(k, &kp) != ZE_RESULT_SUCCESS) std::abort();
+    if (zeKernelSetGroupSize(k, kp.requiredGroupSizeX, kp.requiredGroupSizeY,
+                             kp.requiredGroupSizeZ) != ZE_RESULT_SUCCESS)
+      std::abort();
+    ze_group_count_t g{kN / 16, kK / 64, 1};
+    if (zeCommandListAppendLaunchKernel(alt, k, &g, nullptr, 0, nullptr) != ZE_RESULT_SUCCESS)
+      std::abort();
   };
   auto submit_gemm = [&](int slot) {
     runtime::prefill::gemm_bf16(cx, {kM, kK, kN}, da.as<uint16_t>(),
                                 scratch[slot].as<uint16_t>(), dc.as<float>());
   };
+  // Drains BOTH queues. Context::wait() covers the SYCL queue and the Context's
+  // own list; the alternate list is this probe's and nothing else waits on it.
+  auto wait_all = [&] {
+    cx.wait();
+    if (alt && zeCommandListHostSynchronize(alt, UINT64_MAX) != ZE_RESULT_SUCCESS) std::abort();
+  };
 
   // --- control A: the dequant alone ----------------------------------------
   const double t_dequant = replay([&] {
                              for (int i = 0; i < kLinears; ++i) append_dequant(i, 0);
-                             cx.wait();
+                             wait_all();
                            }) /
                            kLinears;
   const size_t deq_read = w0.bytes();
@@ -145,7 +301,7 @@ int main() {
   // --- control B: the GEMM alone -------------------------------------------
   const double t_gemm = replay([&] {
                           for (int i = 0; i < kLinears; ++i) submit_gemm(0);
-                          cx.wait();
+                          wait_all();
                         }) /
                         kLinears;
   const double gemm_tflops = 2.0 * double(kM) * kK * kN / (t_gemm * 1e9);
@@ -161,9 +317,9 @@ int main() {
   const double t_serial = replay([&] {
     for (int i = 0; i < kLinears; ++i) {
       append_dequant(i, 0);
-      cx.wait();
+      wait_all();
       submit_gemm(0);
-      cx.wait();
+      wait_all();
     }
   });
   const std::vector<uint32_t> serial_c = [&] {
@@ -181,10 +337,10 @@ int main() {
     for (int i = 1; i < kLinears; ++i) {
       append_dequant(i, i & 1);
       submit_gemm((i - 1) & 1);
-      cx.wait();
+      wait_all();
     }
     submit_gemm((kLinears - 1) & 1);
-    cx.wait();
+    wait_all();
   });
   const std::vector<uint32_t> overlap_c = [&] {
     l0::Mem host(ctx, l0::MemKind::Host, c_bytes);
@@ -205,16 +361,22 @@ int main() {
     for (int i = 1; i < kLinears; ++i) {
       submit_gemm((i - 1) & 1);
       append_dequant(i, i & 1);
-      cx.wait();
+      wait_all();
     }
     submit_gemm((kLinears - 1) & 1);
-    cx.wait();
+    wait_all();
   });
 
   // --- the verdict ----------------------------------------------------------
   const double hidden = t_serial - t_overlap;
   const double recovery = hidden / (kLinears * t_dequant);
   std::printf("\n## batteries (%d linears each; measured, iterate-grade)\n", kLinears);
+  if (alt)
+    std::printf("dequant queue: **ordinal %d index %u** (alternate immediate list); "
+                "GEMM queue: the sycl::queue, as before\n", opt_ordinal, opt_index);
+  else
+    std::printf("dequant queue: prefill::Context's own list (ordinal 0, index 0) -- "
+                "the original battery\n");
   std::printf("| battery | waits | ms total | ms/linear |\n|---|---:|---:|---:|\n");
   std::printf("| serial, one scratch | %d | %.3f | %.3f |\n", 2 * kLinears, t_serial,
               t_serial / kLinears);
@@ -238,5 +400,6 @@ int main() {
               (t_serial - t_overlap_gemm_first) / (kLinears * t_dequant));
   std::printf("overlapped battery output vs serial: %s\n",
               bitwise ? "bitwise identical" : "**DIFFER -- this is a race, not a speed-up**");
+  if (alt) zeCommandListDestroy(alt);
   return bitwise ? 0 : 1;
 }
