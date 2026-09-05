@@ -1,3 +1,5 @@
+> **RETIRED 2026-09-05 by ruling A14 - superseded by `docs/superpowers/plans/2026-09-05-plan6d-spec2-L3-attention-composed.md`.** Both branches below (sycl-tla FMHA, and our own flash kernel) are retired on measurement, not on taste: the fused FMHA at head_dim 256 measures 5.725 TFLOP/s (576.194 ms per C=2048 chunk over 16 layers) and every defect hypothesis was refuted. This file stays as the record of the retired design and of the numbers that killed it; nothing in it is deleted, and its Task 1, Task 2, test harness, gates and house style are carried forward by name into the replacement.
+
 # Spec 2 - Stage 1 / L3: prefill attention (stream S3's landing)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
