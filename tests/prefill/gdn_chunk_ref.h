@@ -122,7 +122,7 @@
 //     takes bf16 operands, so it rounds `S`, `vn`, `D` and `A2` at the multiply
 //     (five new roundings, "R1-R4"), and `prefill_gate_rtn_test` fell to 92/93
 //     determined rows while Vishva's `code` prompt's `gdn_state` cosine fell to
-//     0.998499499. The kernel is kept as `pf_gdn_scan_dpas` in the same `.cl`,
+//     0.998499499 from 0.999780657. The kernel is kept as `pf_gdn_scan_dpas` in the same `.cl`,
 //     launched by nothing, and **this file mirrors `pf_gdn_scan`**, which has
 //     none of those roundings. docs/prefill-gdn-scan-dpas-2026-09-05.md §4-5.
 //   * every triangular sum (`u`, `w`, and o's A2 term) runs `j` ASCENDING with

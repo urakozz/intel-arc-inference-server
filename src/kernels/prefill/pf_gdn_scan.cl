@@ -26,8 +26,10 @@
 //     whose golden argmax is unique. Not a tie, not a judgement call.
 //   * the pre-registered "every `gdn_state` cosine > 0.999" - Vishva's `code`
 //     prompt reads **0.998499499 at L60**, where the vector kernel reads
-//     0.999896667. `1 - cos` grew 14.6x, i.e. the state's L2 relative error
-//     grew ~3.8x, against a predicted 1.5x.
+//     0.999780657 in the same session. `1 - cos` grew 6.84x, i.e. the state's
+//     L2 relative error ~2.6x, against a predicted 1.5x. Five of the six
+//     (prompt, checkpoint) cosines did not move at all; this is a single-point
+//     sensitivity, as is the token flip on the OTHER checkpoint.
 //
 // **The cause is D2's own arithmetic and not a defect.** DPAS takes bf16
 // operands, and the fp32 quantities this kernel contracts are the recurrent
@@ -38,8 +40,8 @@
 // exactly one bf16 operand and one fp32 one - so there is no cheaper variant of
 // the same idea. What the measurement adds to the pre-registration is that the
 // synthetic fixture under-reports the cost: `gdn_chunk_test`'s band barely moved
-// (max rel 3.506e-02 -> 3.534e-02) while the real checkpoint's 60th GDN layer
-// lost an order of magnitude of cosine agreement.
+// (max rel 3.506e-02 -> 3.534e-02, +0.8%) while one real prompt's 60th GDN layer
+// lost 6.84x of `1 - cos` and one token flipped on the other checkpoint.
 //
 // The named, priced and NOT built alternative is **split-bf16 (D3)**: carry `S`
 // and `D` as a bf16 hi/lo pair (`hi = rne(x)`, `lo = rne(x - hi)`) so the DPAS
@@ -322,7 +324,8 @@ __kernel void pf_gdn_scan(__global const ushort* restrict xb,
 //     bar of <= 1.0 - the time bar was HIT. `dpas.8x8` emitted (28 of them),
 //     SIMD16, 128 GRF, 22,400 B of SLM, no spill. It fell on the token gate:
 //     `prefill_gate_rtn_test` 92/93 determined rows and Vishva's `code` prompt
-//     at `gdn_state` cosine 0.998499499 (L60) against a pre-registered 0.999.
+//     at `gdn_state` cosine 0.998499499 (L60) against a pre-registered 0.999
+//     and this session's control of 0.999780657.
 //
 // --- the builtin, and its three fragment layouts (MEASURED) ----------------
 // `intel_sub_group_bf16_bf16_matrix_mad_k16(short8 a, int8 b, float8 acc)` is an
