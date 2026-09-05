@@ -55,7 +55,13 @@ add_ocloc_kernel(pf_norm_finish_K5120_G20_W20 SOURCE ${PF_PREP_CL}
 add_ocloc_kernel(pf_silu_mul SOURCE ${PF_PREP_CL})
 add_ocloc_kernel(pf_embed_gather SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_embed.cl
                  DEFINES HIDDEN=5120 VOCAB=248320)
-
+add_ocloc_kernel(pf_gated_head SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl)
+# CTRL_DEFINES is set in src/kernels/CMakeLists.txt, which adds this directory
+# AFTER that line, so the variable is in scope (add_subdirectory inherits the
+# parent scope). QNORM_OFF / KNORM_OFF are loader/small_layout.h's kFaOffQNorm
+# (0 B) and kFaOffKNorm (1024 B) in floats, exactly as ATTN_DEFINES sets them.
+add_ocloc_kernel(pf_attn_prep SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
+                 DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256)
 # a||b, zero-padded 96 -> 128, at the measured {16, 16} tiling
 # (kernels::gemv_bf16_tiling) so that M = 1 is bit-identical to the binary
 # capture.cc binds. `pf_gemv_int4_M` (plan 6b Task 4's temporary int4 GEMV) is

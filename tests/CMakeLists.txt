@@ -95,6 +95,15 @@ b70_target_kernel_dir(pf_gemv_test)
 add_dependencies(pf_gemv_test kernel_pf_ab_proj kernel_gemv_bf16_M1_K5120_N128_C16_S16)
 add_test(NAME pf_gemv_test COMMAND pf_gemv_test)
 
+add_executable(pf_attn_test prefill/pf_attn_test.cc)
+target_include_directories(pf_attn_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+                           ${CMAKE_SOURCE_DIR}/tests/kernels)
+target_link_libraries(pf_attn_test PRIVATE b70_l0)
+b70_target_kernel_dir(pf_attn_test)
+add_dependencies(pf_attn_test kernel_pf_gated_head kernel_pf_attn_prep
+  kernel_prep_gated_head_M1 kernel_attn_prep_M1)
+add_test(NAME pf_attn_test COMMAND pf_attn_test)
+
 add_executable(int4_test kernels/int4_test.cc)
 target_include_directories(int4_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME int4_test COMMAND int4_test)
