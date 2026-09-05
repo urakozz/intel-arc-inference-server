@@ -116,6 +116,22 @@ add_dependencies(pf_attn_test kernel_pf_gated_head kernel_pf_attn_prep
   kernel_prep_gated_head_M1 kernel_attn_prep_M1)
 add_test(NAME pf_attn_test COMMAND pf_attn_test)
 
+# gdn_chunk's kernels (plan 6b Tasks 6-8). These drive the prefill execution
+# context, so they carry the same B70_PREFILL_ENABLED guard context_test does:
+# with -DB70_PREFILL=OFF the whole gdn_chunk stream is absent and the suite is
+# exactly what it was. No checkpoint - one synthetic GDN layer.
+if(B70_PREFILL_ENABLED)
+  add_executable(gdn_conv_test prefill/gdn_conv_test.cc)
+  target_include_directories(gdn_conv_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+                             ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(gdn_conv_test PRIVATE b70_prefill_host b70_l0)
+  b70_link_prefill(gdn_conv_test)
+  b70_target_kernel_dir(gdn_conv_test)
+  add_dependencies(gdn_conv_test kernel_pf_gdn_conv)
+  add_test(NAME gdn_conv_test COMMAND gdn_conv_test)
+  set_tests_properties(gdn_conv_test PROPERTIES TIMEOUT 1800)
+endif()
+
 add_executable(int4_test kernels/int4_test.cc)
 target_include_directories(int4_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME int4_test COMMAND int4_test)
