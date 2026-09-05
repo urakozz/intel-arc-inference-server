@@ -42,6 +42,11 @@
 //      rather than a band, and device-vs-device is the only comparison that can
 //      carry it for `w` (whose Q2 factor is an `exp`). The two runs are filled
 //      with different patterns first, so the memcmp is a coverage bar too.
+//   7. **ruling A28's bar: `pf_gdn_A2` BITWISE IDENTICAL to `pf_gdn_A2_legacy`,
+//      and `pf_gdn_A` to `pf_gdn_A_legacy`** - both re-tiled onto a quadrant
+//      grid with fp32 operands in SLM, and `tile_dot` is `band_dot`'s tree
+//      written as its own expression, so neither moves a rounding point and
+//      neither re-associates. Same two-fill coverage trick as case 6.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -395,7 +400,11 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
   }
 
   // --- 4. pf_gdn_A2 --------------------------------------------------------
-  d.cx.launch(d.k("pf_gdn_A2"), R::kHeads, nch, 1,
+  // The fill is case 7's, not case 4's: the quadrant grid means a word no
+  // quadrant wrote would otherwise compare equal to the legacy run's and hide
+  // a coverage gap. 0x1111 here and 0x2222 for the legacy run.
+  d.imm.fill(d_A2.ptr(), 0x11111111u, d_A2.size());
+  d.cx.launch(d.k("pf_gdn_A2"), R::kHeads, nch, 4,
               {PtrArg(d_xb.ptr()), PtrArg(d_g.ptr()), PtrArg(d_A2.ptr()), arg_val(C)});
   d.cx.wait();
   {
@@ -423,6 +432,32 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
     CHECK_EQ(c.nonzero_got, expect_nz);   // the DEVICE's mask, not just the reference's
     CHECK_EQ(diag_nonzero, size_t(C) * R::kHeads);   // the `>` / `<=` mask pair
     CHECK(c.max_ulp <= 4);
+  }
+
+  // --- 7. ruling A28's bar: BITWISE IDENTITY to the pre-rewrite pf_gdn_A2 ---
+  // `pf_gdn_A2` was re-tiled (a 2 x 2 output tile on a quadrant grid, fp32
+  // operands in SLM with Q_SCALE folded into the staged q, SIMD16) and
+  // **re-associates nothing**: `tile_dot` is `band_dot`'s 16 x 8 band tree
+  // written as its own expression, term for term. So the pre-registered bar is
+  // bit equality against `pf_gdn_A2_legacy` -- the kernel exactly as it stood --
+  // and not a band, and it is a device-vs-device comparison because the host's
+  // `exp` is correctly rounded where the device's is 3 ulp (which is why case
+  // 4's host bar is 4 fp32 ulp and not equality). Run at every width `main`
+  // asks for, so C = 100's ragged L = 36 tail is covered.
+  {
+    l0::Mem d_A2L(d.ctx, l0::MemKind::Device, tri * 4);
+    d.imm.fill(d_A2L.ptr(), 0x22222222u, d_A2L.size());
+    d.cx.launch(d.k("pf_gdn_A2_legacy"), R::kHeads, nch, 1,
+                {PtrArg(d_xb.ptr()), PtrArg(d_g.ptr()), PtrArg(d_A2L.ptr()), arg_val(C)});
+    d.cx.wait();
+    std::vector<float> got(tri), leg(tri);
+    pf_harness::download(d.imm, got, d_A2);
+    pf_harness::download(d.imm, leg, d_A2L);
+    // The two fills differ, so an entry NEITHER kernel wrote fails the memcmp
+    // instead of passing it -- a coverage bar for the 3-D grid as well as an
+    // equality one.
+    CHECK(std::memcmp(got.data(), leg.data(), tri * 4) == 0);
+    std::printf("  A2  : tiled == legacy, BITWISE - %zu fp32 entries\n", tri);
   }
 
   // --- 5. the L < 64 tail ---------------------------------------------------

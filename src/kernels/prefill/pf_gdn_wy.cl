@@ -65,6 +65,12 @@
 #define WG_TRI 256        /* pf_gdn_A / pf_gdn_A2 / pf_gdn_wu */
 #define WG_SOLVE 64       /* one lane per column j */
 
+/* pf_gdn_A2's / pf_gdn_A's quadrant tiling after ruling A28 - see (2) below. */
+#define AQ 32             /* quadrant edge: CT / 2, so grid.z is 2 x 2 */
+#define ASG 16            /* SIMD16 - the deliberate width, see (2) */
+#define TI 2              /* output positions per work-item */
+#define TJ 2              /* output columns per work-item */
+
 /* pf_gdn_wu's tiling after ruling A27 - see the header block above (4). */
 #define SG 16             /* SIMD16: 16 subgroups of 16 lanes - MEASURED, see (4) */
 #define WU_COLS 64        /* output columns per work-group: 128 / 2 (grid.z) */
@@ -97,6 +103,57 @@ inline float band_dot(__local const ushort* restrict a, __local const ushort* re
     for (uint band = 0; band < stride; ++band) p[band] += p[band + stride];
   }
   return p[0];
+}
+
+// ---------------------------------------------------------------------------
+// `band_dot`'s tree, for a TI x TJ = 2 x 2 output TILE, over fp32 rows already
+// staged in SLM (ruling A28). `a0`/`a1` are the tile's two LEFT rows (already
+// carrying `ascale`, which is why there is no scale parameter here), `b0`/`b1`
+// its two RIGHT rows; the result is
+//     .s0 = a0.b0   .s1 = a0.b1   .s2 = a1.b0   .s3 = a1.b1
+// and each component is bit-for-bit `band_dot`'s value for that pair.
+// ---------------------------------------------------------------------------
+inline float4 band4(__local const float* restrict a0, __local const float* restrict a1,
+                    __local const float* restrict b0, __local const float* restrict b1,
+                    uint kb) {
+  float4 acc = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
+#pragma unroll
+  for (uint t = 0; t < BAND_K; ++t) {          // ascending within the band
+    const float x0 = a0[kb + t], x1 = a1[kb + t];
+    const float y0 = b0[kb + t], y1 = b1[kb + t];
+    acc.s0 = fma(x0, y0, acc.s0);
+    acc.s1 = fma(x0, y1, acc.s1);
+    acc.s2 = fma(x1, y0, acc.s2);
+    acc.s3 = fma(x1, y1, acc.s3);
+  }
+  return acc;
+}
+
+// The 16 band partials collapsed in EXACTLY `band_dot`'s order. Its loop
+//     for (stride = 8, 4, 2, 1) for (b < stride) p[b] += p[b + stride]
+// expands to the balanced tree
+//     ( ((P0+P8)+(P4+P12)) + ((P2+P10)+(P6+P14)) )
+//   + ( ((P1+P9)+(P5+P13)) + ((P3+P11)+(P7+P15)) )
+// -- the bands in bit-reversed order, paired. Written as the statements below
+// rather than as a `p[16]` array, the live set is FOUR float4 values instead of
+// sixteen, which is what lets the tile fit at SIMD16 with room to spare; the
+// expression is the same one, term for term and parenthesis for parenthesis,
+// and that is the whole reason the rewrite is bitwise.
+inline float4 tile_dot(__local const float* restrict a0, __local const float* restrict a1,
+                       __local const float* restrict b0, __local const float* restrict b1) {
+#define BD(b) band4(a0, a1, b0, b1, (b) * BAND_K)
+  float4 s0 = BD(0) + BD(8);                   // q[0]
+  s0 = s0 + (BD(4) + BD(12));                  // r[0] = q[0] + q[4]
+  float4 t2 = BD(2) + BD(10);                  // q[2]
+  t2 = t2 + (BD(6) + BD(14));                  // r[2] = q[2] + q[6]
+  s0 = s0 + t2;                                // s[0] = r[0] + r[2]
+  float4 s1 = BD(1) + BD(9);                   // q[1]
+  s1 = s1 + (BD(5) + BD(13));                  // r[1] = q[1] + q[5]
+  float4 t3 = BD(3) + BD(11);                  // q[3]
+  t3 = t3 + (BD(7) + BD(15));                  // r[3] = q[3] + q[7]
+  s1 = s1 + t3;                                // s[1] = r[1] + r[3]
+  return s0 + s1;
+#undef BD
 }
 
 // Stage L rows of one 128-wide slice of `xb` into SLM, row-major [L][DIM].
@@ -145,14 +202,134 @@ __kernel void pf_gdn_A(__global const ushort* restrict xb,
 
 // ---------------------------------------------------------------------------
 // (2) A2[i][j] = (q_i . k_j) * exp(gc[i] - gc[j])   for j <= i, else 0.
-//     Grid (48, nchunks), WG 256. Identical to (1) except: the left operand is
-//     q scaled by Q_SCALE, there is no beta[i] factor, and the mask INCLUDES
-//     the diagonal.
+//     Identical to (1) except: the left operand is q scaled by Q_SCALE, there
+//     is no beta[i] factor, and the mask INCLUDES the diagonal.
+//
+//     REWRITTEN under ruling A28 (2026-09-05): a QUADRANT grid, fp32 operands
+//     in SLM, and a 2 x 2 output tile.
+//     ------------------------------------------------------------------------
+//     As delivered this was `for (p = lid; p < CT*CT; p += 256)` -- one output
+//     per work-item per step, with no tile, exactly `pf_gdn_wu`'s old shape --
+//     and it measured **1.0313 ms per GDN layer per chunk = 0.79 TFLOP/s** on
+//     0.818 GFLOP (docs/prefill-gdn-wu-conv-2026-09-05.md 6.1). The Xe2
+//     assembly named TWO terms, not one
+//     (docs/prefill-gdn-a2a-simd32-2026-09-05.md 3.1):
+//       * FMA density **10.5%** -- 47% of the 610-instruction hot loop is the
+//         bf16 widen, and with one output per work-item no widened word is
+//         reused;
+//       * occupancy **37.5%** -- 33,024 B of SLM is 3 work-groups per 128 KB
+//         Xe-core, and at SIMD32 that is 24 of its 64 thread slots. `pf_gdn_A`,
+//         the same code with one staged operand, fits 4 groups x 16 threads and
+//         issues at **0.502** instructions/XVE/clock against this kernel's
+//         **0.257**. That ratio is the whole 1.68x between them.
+//
+//     Four changes, and nothing else:
+//
+//     * **Grid (48 heads, nchunks, 4).** `z` names a quadrant: `iz = z >> 1`
+//       owns `i in [32*iz, 32*iz+32)` and `jz = z & 1` owns the same range of
+//       `j`, so a work-group holds 1024 of the 4096 outputs and stages only the
+//       32 q rows and 32 k rows it needs. The quadrant (iz = 0, jz = 1) is
+//       **entirely above the diagonal** -- every entry has j >= 32 > i -- so it
+//       writes its 1024 exact `0.0f`s and returns without staging. The other
+//       three compute 3 x 1024 = 3072 dots, which is what the old kernel's
+//       predication already paid (12 of 16 iterations x 4096); the split makes
+//       it explicit instead of burning it in dead lanes.
+//     * **`qs`/`ks` staged as fp32**, holding `f32(q_word) * Q_SCALE` and
+//       `f32(k_word)` -- the same fp32 values the old kernel formed inside the
+//       `fma`'s first argument (IGC emits the `mul` and the `mad` separately,
+//       so the product was rounded to fp32 there too), widened once at staging
+//       instead of once per use. **SLM: 2 x 32 x 128 x 4 = exactly 32,768 B**,
+//       which is 4 work-groups per Xe-core. `gcs` therefore does NOT live in
+//       SLM -- 256 B more would drop that to 3 -- and is read from global.
+//     * **`intel_reqd_sub_group_size(16)`, chosen and not inherited.** At
+//       32,768 B an Xe-core holds 4 work-groups at either width, so the width
+//       decides residency: 4 x 16 = **64 threads at SIMD16**, the whole budget,
+//       against 4 x 8 = 32 at SIMD32. The measured price of that trade is in
+//       the two rows above, and item 1 of the same task measured the other side
+//       of it on `pf_gdn_wu`.
+//     * **A 2 x 2 output tile.** `bi = lid >> 4`, `bj = lid & 15`; the work-item
+//       owns i in {32iz+2bi, +1} and j in {32jz+2bj, +1}. `bi` is uniform
+//       inside a SIMD16 thread, so the `qs` reads broadcast and the thread's 16
+//       lanes store 32 contiguous fp32 of one A2 row -- a coalesced 128 B write.
+//       Four `fma` per four operand values takes the density to ~67%.
+//
+//     **No rounding point moves and no sum is re-associated**: `tile_dot` above
+//     is `band_dot`'s expression, term for term. The bar is therefore bit
+//     equality against `pf_gdn_A2_legacy` below.
 // ---------------------------------------------------------------------------
 __attribute__((reqd_work_group_size(WG_TRI, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(ASG)))
 __kernel void pf_gdn_A2(__global const ushort* restrict xb,
                         __global const float* restrict g_cum,
                         __global float* restrict A2, uint c_count) {
+  const uint h = get_group_id(0), chunk = get_group_id(1), z = get_group_id(2);
+  const uint iz = z >> 1, jz = z & 1u;
+  const uint kh = h / 3;
+  const uint base_m = chunk * CT;
+  const uint L = min((uint)CT, c_count - base_m);
+  const uint lid = get_local_id(0);
+  const uint bi = lid / ASG, bj = lid % ASG;    // a 16 x 16 grid of 2 x 2 tiles
+  const uint i0 = iz * AQ + bi * TI, j0 = jz * AQ + bj * TJ;
+
+  __global float* restrict At = A2 + ((size_t)(chunk * HEADS + h) * CT) * CT;
+  if (iz == 0 && jz == 1) {                     // wholly above the diagonal
+#pragma unroll
+    for (uint a = 0; a < TI; ++a)
+      vstore2((float2)(0.0f, 0.0f), 0, At + (size_t)(i0 + a) * CT + j0);
+    return;
+  }
+
+  __local float qs[AQ * DIM], ks[AQ * DIM];
+  for (uint p = lid; p < AQ * DIM; p += WG_TRI) {
+    const uint r = p / DIM, d = p % DIM;
+    const uint gi = iz * AQ + r, gj = jz * AQ + r;
+    qs[p] = gi < L
+                ? bf16f(xb[(size_t)(base_m + gi) * CONV_ROWS + Q_OFF + kh * DIM + d]) * Q_SCALE
+                : 0.0f;
+    ks[p] = gj < L ? bf16f(xb[(size_t)(base_m + gj) * CONV_ROWS + K_OFF + kh * DIM + d]) : 0.0f;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  const uint qr = bi * TI * DIM, kr = bj * TJ * DIM;
+  const float4 dot = tile_dot(qs + qr, qs + qr + DIM, ks + kr, ks + kr + DIM);
+  const float dv[4] = {dot.s0, dot.s1, dot.s2, dot.s3};
+
+  // `gcs` is read here rather than staged: 256 B of SLM would cost the fourth
+  // resident work-group. Rows past L read 0.0f and are masked away below.
+  const float gi[TI] = {
+      i0 < L ? g_cum[(size_t)(base_m + i0) * HEADS + h] : 0.0f,
+      i0 + 1 < L ? g_cum[(size_t)(base_m + i0 + 1) * HEADS + h] : 0.0f};
+  const float gj[TJ] = {
+      j0 < L ? g_cum[(size_t)(base_m + j0) * HEADS + h] : 0.0f,
+      j0 + 1 < L ? g_cum[(size_t)(base_m + j0 + 1) * HEADS + h] : 0.0f};
+
+#pragma unroll
+  for (uint a = 0; a < TI; ++a) {
+    const uint i = i0 + a;
+    const float v0 =
+        (i < L && j0 < L && j0 <= i) ? dv[a * TJ] * exp(gi[a] - gj[0]) : 0.0f;
+    const float v1 =
+        (i < L && j0 + 1 < L && j0 + 1 <= i) ? dv[a * TJ + 1] * exp(gi[a] - gj[1]) : 0.0f;
+    vstore2((float2)(v0, v1), 0, At + (size_t)i * CT + j0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// (2b) `pf_gdn_A2` EXACTLY as it stood before ruling A28's rewrite, kept as the
+//      bitwise reference for `tests/prefill/gdn_wy_test.cc` and launched by
+//      nothing else -- `src/runtime/prefill/gdn.cc` binds only the tiled kernel
+//      above. Its grid is (48, nchunks, 1).
+//
+//      It is here for the same reason `pf_gdn_wu_legacy` is: the rewrite
+//      re-associates nothing, so the pre-registered bar is bit equality, and
+//      device-vs-device is the only comparison that can carry it -- the host
+//      reference's `exp` is correctly rounded where the device's is 3 ulp,
+//      which is why case 4's host bar is <= 4 fp32 ulp and not equality.
+// ---------------------------------------------------------------------------
+__attribute__((reqd_work_group_size(WG_TRI, 1, 1)))
+__kernel void pf_gdn_A2_legacy(__global const ushort* restrict xb,
+                               __global const float* restrict g_cum,
+                               __global float* restrict A2, uint c_count) {
   const uint h = get_group_id(0), chunk = get_group_id(1);
   const uint kh = h / 3;
   const uint base_m = chunk * CT;
