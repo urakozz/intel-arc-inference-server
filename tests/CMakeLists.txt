@@ -554,3 +554,18 @@ b70_cli_reject(cli_reject_repeats_with_bench ${B70_NO_MODEL} --bench --repeats 5
   EXPECT "--repeats belongs to --profile")
 b70_cli_reject(cli_reject_repeats_zero ${B70_NO_MODEL} --profile --repeats 0
   EXPECT "--repeats 0 would profile nothing")
+# `--pp` / `--pp-chunk` (spec 2, interfaces.md's CLI contract and ruling A8).
+# These four are host-side argument validation and are compiled UNCONDITIONALLY
+# - with -DB70_PREFILL=OFF the flags still parse and still reject for these
+# reasons, so these cases grade the CLI's contract rather than the presence of
+# the SYCL component. Each names its message: "exit 1 before the device" is
+# also what an unknown flag does, and without EXPECT all four would pass on a
+# binary that had never heard of --pp.
+b70_cli_reject(cli_reject_pp_without_bench ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp 64
+  EXPECT "--pp belongs to --bench")
+b70_cli_reject(cli_reject_pp_and_depth ${B70_NO_MODEL} --bench --pp 64 --depth 64
+  EXPECT "--pp and --depth are exclusive")
+b70_cli_reject(cli_reject_pp_zero ${B70_NO_MODEL} --bench --pp 0
+  EXPECT "--pp 0 would prefill nothing")
+b70_cli_reject(cli_reject_pp_chunk_without_pp ${B70_NO_MODEL} --bench --pp-chunk 1024
+  EXPECT "--pp-chunk belongs to --pp")
