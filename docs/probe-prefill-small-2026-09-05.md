@@ -104,3 +104,101 @@ Two rows carry a stated uncertainty rather than a point:
 inherited **~60-80** (derived, progress.md). Both are recorded; the measurement
 scores both. A kernel that misses its figure by more than 2x is reported as a
 miss with its achieved GB/s and is **not** tuned in this pass.
+
+---
+
+## MEASURED: the S = 1 runtime-`M` kernels at M = 2048 (2026-09-05)
+
+Grade: iterate (card 1, `ZE_AFFINITY_MASK=1`, card 0 may be held). Device
+kernel timestamps, 8 replays with the first 3 dropped, median; finite
+incompressible random inputs. `tools/probe/probe_prefill_small` now runs **both
+batteries in one process**, so the comparison between them carries no
+session-to-session drift: the decode-S control re-measured at **361.319 ms**
+against the 360.888 ms recorded above, **+0.12%**, which is the same drift band
+the untouched launches showed in spec 1.5's lever runs.
+
+The prefill rows are the **production** binaries from `src/kernels/prefill/` --
+the objects `tests/prefill/pf_*_test.cc` grade bit-for-bit against decode at
+M = 1 -- not probe-only recompiles. No `M` is in any of their names or on any of
+their ocloc command lines.
+
+| kernel | grid work-groups | MB/launch | us/launch | GB/s | calls/chunk | ms/chunk |
+|---|---:|---:|---:|---:|---:|---:|
+| `pf_silu_mul` | 5 x 2048 = 10240 | 356.52 | 757.083 | 470.9 | 64 | 48.453 |
+| `pf_res_fold` SP1 | 20 x 2048 = 40960 | 84.05 | 178.750 | 470.2 | 129 | 23.059 |
+| `pf_norm_finish` | 20 x 2048 = 40960 | 42.13 | 136.562 | 308.5 | 129 | 17.617 |
+| `pf_gated_head` | 48 x 2048 = 98304 | 125.83 | 280.000 | 449.4 | 48 | 13.440 |
+| `pf_attn_prep` | 28 x 2048 = 57344 | 227.02 | 521.667 | 435.2 | 16 | 8.347 |
+| `pf_ab_proj` | 8 x 256 = 2048 | 23.33 | 402.500 | 58.0 | 48 | 19.320 |
+| `pf_embed_gather` | 1 x 2048 = 2048 | 41.94 | 110.833 | 378.4 | 1 | 0.111 |
+| **total** | | | | | | **130.346** |
+
+Control, same process, decode's split-K: `prep_res_fold` SP4 49.208 ·
+`prep_norm_finish` 17.079 · `prep_silu_mul` S8 281.607 · `prep_gated_head`
+13.425 = **361.319 ms/chunk**.
+
+**The small-kernel term is 130.346 ms/chunk, measured, with no residual range**
+-- `attn_prep` and `embed_gather` were the two kernels T6 had to bound at
+0.000-112.333 ms and both are now direct rows, so the interval is gone.
+
+### Scoring the pre-registration
+
+| kernel | inherited (graded) | own byte-derived | measured | verdict |
+|---|---:|---:|---:|---|
+| `pf_silu_mul` | ~39 | 38.68-42.59 | 48.453 | over by 1.14-1.25x |
+| `pf_res_fold` SP1 | ~13 | 18.38-19.70 | 23.059 | inherited MISS 1.77x; own over by 1.17-1.25x |
+| `pf_norm_finish` | ~6 | 9.21-17.20 | 17.617 | inherited MISS 2.94x; own **HIT** at its upper end |
+| `pf_gated_head` | ~3 | 10.24-13.38 | 13.440 | inherited MISS 4.48x; own **HIT** (13.38 vs 13.44, 0.4%) |
+| `pf_attn_prep` | -- | 6.16 | 8.347 | over by 1.36x |
+| `pf_ab_proj` | -- | 1.90-15.50 | 19.320 | over by 1.25x on the band's top, 10.2x on its roofline |
+| `pf_embed_gather` | -- | 0.07 | 0.111 | over by 1.59x (0.04 ms absolute) |
+| **total** | **~60-80** | **~85-110** | **130.346** | inherited MISS 1.63-2.17x; own MISS 1.19-1.53x |
+
+**Both pre-registrations are misses and the smaller one is mine.** Two specific
+things the pre-registration got right and one it got wrong:
+
+- **Right, and it was the load-bearing claim:** `norm_finish` and `gated_head`
+  could not improve, because neither reads `partials` at a split-K stride --
+  `norm_finish` never reads `partials` at all and `gated_head`'s `GATED_S` is
+  already 1 in decode. Measured: 17.079 -> 17.617 (+3.1%) and 13.425 -> 13.440
+  (+0.1%). The inherited ~6 and ~3 ms figures were 2.9x and 4.5x out, and they
+  are 22.1 ms of the 50.3 ms by which the inherited total misses.
+- **Right:** the two kernels the S = 1 correction *does* reach moved by close to
+  their traffic ratio -- `silu_mul` 281.607 -> 48.453 (**5.81x** of time against
+  **6.60x** of bytes: the reads fall 8x but the 71 MB write is unchanged) and
+  `res_fold` 49.208 -> 23.059 (**2.13x** against **2.50x**). Both fall short of
+  their traffic ratio for the same reason: a launch that moves less data
+  sustains a lower rate (534.8 -> 470.9 GB/s and 550.2 -> 470.2 GB/s), so
+  removing 6.60x of bytes buys 5.81x of time. That second-order effect was not
+  in the pre-registered arithmetic and it is the bulk of its miss.
+- **The `+3.1%` on `norm_finish` is the price of the runtime `M`** and is
+  reported rather than absorbed: `sumsq[(size_t)g * m_count + m]` is one runtime
+  multiply per lane where the decode binary folds a constant. It is above the
+  +0.12% drift this run measured, so it is real. It buys one binary for every
+  chunk width, which is what interfaces.md asks for.
+
+### The one row that is not bandwidth-bound: `pf_ab_proj`
+
+19.320 ms/chunk at **58.0 GB/s**, 9.8% of the device's measured 590 and 5.5x its
+own 1.90 ms roofline. Not tuned, per the brief's rule, and reported with the
+mechanism as a *hypothesis*, not a conclusion:
+
+- 2.684 GFLOP per launch in 402.500 us is **6.67 TFLOP/s** of scalar fp32 FMA,
+  and the inner loop issues two loads (one `intel_sub_group_block_read_us8`, one
+  `vload8`) per eight FMAs, so it is plausibly issue-bound rather than
+  DRAM-bound. Nothing here measures that.
+- Its tiling `{COLS_PER_WG 16, KSPLIT 16}` was bought for a shortage that no
+  longer exists: at M = 1 `a||b` had **8 subgroups for the whole launch**
+  (docs/15 SS L2), and KSPLIT 16 took it 48.774 -> 5.340 us. At M = 2048 the
+  grid is 2048 work-groups with 8 rows each; the K-split now costs an 8 KB SLM
+  tree and a four-level barrier chain to solve a problem that is gone.
+- **It is also the kernel most likely to be deleted rather than tuned.** `a||b`
+  is a GEMM shape at M = 2048 (2048 x 5120 x 128), and plan 6c's `gemm_bf16` is
+  what should run it -- the same argument that retires `pf_gemv_int4_M`. The
+  19.320 ms is therefore an upper bound on a term L2 may remove entirely.
+
+### What the composition should now carry
+
+**130.346 ms/chunk (measured, iterate)** for the whole small-kernel family at
+C = 2048, replacing 360.888-473.221. The recomposed ceiling is in
+`docs/superpowers/specs/2026-09-04-spec2-stage0-ruling-request.md`.
