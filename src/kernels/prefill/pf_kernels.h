@@ -38,4 +38,17 @@ inline std::string pf_attn_prep_variant() { return "pf_attn_prep"; }
 // tiling so that at M = 1 it is BIT-IDENTICAL to the binary capture.cc binds.
 inline std::string pf_ab_proj_variant() { return "pf_ab_proj"; }
 
+// --- gdn_chunk's nine kernels, three files (plan 6b Tasks 6-8) --------------
+// One variant per .cl file, several entry points each, because they share the
+// same literals (CONV_ROWS, HEADS, DIM, Q_OFF/K_OFF/V_OFF, RING) and a reader
+// checking `pf_gdn_A`'s `i > j` mask against `pf_gdn_A2`'s `j <= i` should see
+// both on one screen. `gdn_chunk`'s tenth launch is `pf_gated_head` above
+// (ruling R3: the gated head is the GDN mixer's, not the caller's).
+inline std::string pf_gdn_conv_variant() { return "pf_gdn_conv"; }
+inline std::string pf_gdn_wy_variant() { return "pf_gdn_wy"; }
+inline std::string pf_gdn_scan_variant() { return "pf_gdn_scan"; }
+
+// The execution-context probe (Task 2); bound by context_test.cc alone.
+inline std::string pf_probe_chain_variant() { return "pf_probe_chain"; }
+
 }  // namespace kernels

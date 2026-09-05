@@ -46,10 +46,10 @@ add_test(NAME device_select_test COMMAND device_select_test)
 if(B70_PREFILL_ENABLED)
   add_executable(context_test prefill/context_test.cc)
   target_include_directories(context_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(context_test PRIVATE b70_l0)
+  target_link_libraries(context_test PRIVATE b70_prefill_host b70_l0)
   b70_link_prefill(context_test)
   b70_target_kernel_dir(context_test)
-  add_dependencies(context_test kernel_noop)
+  add_dependencies(context_test kernel_noop kernel_pf_probe_chain)
   add_test(NAME context_test COMMAND context_test)
 
   # The batched Xe bf16 GEMM (rulings A14/A15, plan 6d-composed Task 1). Same
