@@ -82,7 +82,8 @@ void usage() {
       stderr,
       "usage:\n"
       "  b70-decode <snapshot-or-repo> --ids <file> --n <N> [--device N] [--max-len 16384]\n"
-      "  b70-decode <snapshot-or-repo> --bench [--depth 4096] [--tg 256] [--device N]\n"
+      "  b70-decode <snapshot-or-repo> --bench [--depth 4096 | --pp N [--pp-chunk C]]\n"
+      "                                        [--tg 256] [--device N]\n"
       "  b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--repeats 1]\n"
       "                                          [--device N]\n"
       "\n"
@@ -95,6 +96,13 @@ void usage() {
       "                 compiled per max_len, so only the compiled ones load)\n"
       "  --bench        ingest --depth synthetic ids, then time --tg generated ones and print\n"
       "                 a markdown row on stdout\n"
+      "  --pp N         --bench only, and exclusive with --depth: prefill N synthetic ids\n"
+      "                 through Engine::prefill instead of ingesting them one replay at a\n"
+      "                 time, and print a SECOND markdown row with the device-side prefill\n"
+      "                 time. The prefilled ids ARE the depth, which is why --depth is\n"
+      "                 refused beside it.\n"
+      "  --pp-chunk C   --pp only: positions per prefill chunk (default PrefillScratch::kC\n"
+      "                 = 2048, ruling A13). Spec 2 §6.2's multi-chunk gate runs at 1024.\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -566,8 +574,10 @@ int run(int argc, char** argv) {
   std::string path, ids_path;
   uint32_t n = 0, depth = 4096, tg = 256, steps = 32, repeats = 1, max_len = 16384;
   uint32_t device = l0::Context::kFromEnv;
+  uint32_t pp = 0, pp_chunk = 0;
   bool bench = false, profile = false, have_n = false;
   bool have_depth = false, have_tg = false, have_steps = false, have_repeats = false;
+  bool have_pp = false, have_pp_chunk = false;
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -598,6 +608,12 @@ int run(int argc, char** argv) {
     } else if (a == "--depth") {
       depth = parse_u32("--depth", value(i, "--depth"));
       have_depth = true;
+    } else if (a == "--pp") {
+      pp = parse_u32("--pp", value(i, "--pp"));
+      have_pp = true;
+    } else if (a == "--pp-chunk") {
+      pp_chunk = parse_u32("--pp-chunk", value(i, "--pp-chunk"));
+      have_pp_chunk = true;
     } else if (a == "--tg") {
       tg = parse_u32("--tg", value(i, "--tg"));
       have_tg = true;
@@ -646,6 +662,24 @@ int run(int argc, char** argv) {
   if (have_depth && !synthetic)
     throw std::runtime_error("--depth belongs to --bench and --profile; --ids sizes its run"
                              " with --n");
+  // The prefill flags (spec 2, interfaces.md's CLI contract). They are pure
+  // argument validation and are checked BEFORE l0::Context like every other
+  // rejection, so `b70_cli_reject` can grade them without a device - and so a
+  // build with -DB70_PREFILL=OFF still refuses them for the right reason
+  // rather than as an unknown flag.
+  if (have_pp && !bench)
+    throw std::runtime_error("--pp belongs to --bench; --ids sizes its run with --n and"
+                             " --profile with --depth and --steps");
+  if (have_pp && have_depth)
+    throw std::runtime_error("--pp and --depth are exclusive: the prefilled ids ARE the depth,"
+                             " so naming both would be two answers to one question");
+  if (have_pp && pp == 0) throw std::runtime_error("--pp 0 would prefill nothing");
+  if (have_pp_chunk && !have_pp)
+    throw std::runtime_error("--pp-chunk belongs to --pp; it is the prefill chunk width and"
+                             " nothing else has one");
+  if (have_pp_chunk && pp_chunk == 0)
+    throw std::runtime_error("--pp-chunk 0 is not a chunk width; omit it for the default"
+                             " PrefillScratch::kC");
   if (!synthetic && !have_n) {
     usage();
     throw std::runtime_error("--ids needs --n");
@@ -654,6 +688,11 @@ int run(int argc, char** argv) {
   if (bench && tg == 0) throw std::runtime_error("--tg 0 would time nothing");
   if (profile && steps == 0) throw std::runtime_error("--steps 0 would profile nothing");
   if (profile && repeats == 0) throw std::runtime_error("--repeats 0 would profile nothing");
+  // `--pp N` IS the depth (interfaces.md's CLI contract: "--depth is then
+  // ignored and the tg row's depth column reads N"). Making it `depth` here
+  // rather than threading a second variable means every downstream use - the
+  // max_len bound, the id vector, the tg row's depth column - is one number.
+  if (have_pp) depth = pp;
   // Both synthetic modes exist to measure a step at a context depth, and the
   // cost of a step depends on that depth (attention's live-block count is the
   // measured example - docs/15). Depth 0 measures a shape nobody runs.
@@ -708,14 +747,38 @@ int run(int argc, char** argv) {
                eng.step().kernel_count, eng.step().modules.size(), eng.max_len(),
                eng.buffers().persistent_bytes() / 1e9);
 
-  // Ingestion is one replay per prompt token: this plan has no prefill kernel
-  // (that is spec 2), so a long prompt costs decode time per id.
+  // Ingestion is one replay per prompt token unless `--pp` is given, in which
+  // case it is `Engine::prefill` - spec 2's whole point. The measured window is
+  // **the whole call**, and that needs no extra instrumentation to be the
+  // interface's "first prefill launch to the first generated id in cur_token":
+  // `prefill()` returns only after its final `Context::wait()`, and its last
+  // launch is `argmax_stage2`, which is the only writer of `cur_token`.
   const auto t0 = std::chrono::steady_clock::now();
-  eng.ingest(ids);
+  size_t pp_launches = 0;
+  if (have_pp) {
+#if B70_HAVE_PREFILL
+    eng.prefill(ids, pp_chunk);
+    pp_launches = eng.prefill_launches();
+#else
+    throw std::runtime_error("--pp needs the optional SYCL prefill component, and this build"
+                             " was configured with -DB70_PREFILL=OFF (cmake/prefill.cmake)");
+#endif
+  } else {
+    eng.ingest(ids);
+  }
   const double ingest_ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token), pos %u\n", ids.size(),
-               ingest_ms, ids.empty() ? 0.0 : ingest_ms / double(ids.size()), eng.pos());
+  if (have_pp)
+    std::fprintf(stderr,
+                 "pp: %zu ids in %.1f ms (%.2f t/s) -- device-side, loader excluded, first"
+                 " prefill launch to the first generated id in cur_token; chunk %u, %zu L0"
+                 " launches, pos %u\n",
+                 ids.size(), ingest_ms,
+                 ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0,
+                 pp_chunk ? pp_chunk : runtime::PrefillScratch::kC, pp_launches, eng.pos());
+  else
+    std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token), pos %u\n", ids.size(),
+                 ingest_ms, ids.empty() ? 0.0 : ingest_ms / double(ids.size()), eng.pos());
 
   if (!bench) {
     eng.generate(n, [](uint32_t id) {
@@ -770,6 +833,14 @@ int run(int argc, char** argv) {
   if (sha == nullptr || *sha == '\0') sha = "unknown";
   std::printf("| b70-decode %s | %u | %u | %.2f | %.2f |\n", sha, depth, tg, eng.last_tok_per_s(),
               ms_per_token);
+  // The tg row above is byte-identical to what it always was, and the pp row
+  // is a SECOND line rather than extra columns on it, so every existing parser
+  // of docs/BENCHMARKS.md's table keeps working (interfaces.md's CLI contract;
+  // tools/bench_decode.sh --pp reads both).
+  if (have_pp)
+    std::printf("| b70-decode %s pp | %u | %u | %.1f | %.2f |\n", sha, depth,
+                pp_chunk ? pp_chunk : runtime::PrefillScratch::kC, ingest_ms,
+                ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
   std::fprintf(stderr,
                "(measured, one run. docs/BENCHMARKS.md records the median of three on an idle box;\n"
                " tools/bench_decode.sh is that harness. B70_GIT_SHA unset prints `unknown`.)\n");
