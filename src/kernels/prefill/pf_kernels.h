@@ -22,6 +22,17 @@
 // their fp32 `[M][N]` partials at S = 1 by construction.
 namespace kernels {
 
+// One int4 linear expanded into the bf16 [K][N] scratch (P3's kernel).
+// `TRANSPOSED` is 0 on the production path: `gemm_bf16` takes B row-major
+// [K][N] with ldb = N (ruling A23/A24 keep the two-pass dequant->GEMM as THE
+// GEMM path, so this is the only orientation the walk ever asks for; T1 stays
+// built because the probe measures the contrast).
+inline std::string pf_dequant_variant(unsigned K, unsigned N, unsigned layout,
+                                      unsigned transposed = 0) {
+  return "pf_dequant_tile_K" + std::to_string(K) + "_N" + std::to_string(N) + "_L" +
+         std::to_string(layout) + "_T" + std::to_string(transposed);
+}
+
 inline std::string pf_embed_gather_variant() { return "pf_embed_gather"; }
 inline std::string pf_res_fold_variant(unsigned K, unsigned SP, unsigned G) {
   return "pf_res_fold_K" + std::to_string(K) + "_SP" + std::to_string(SP) + "_G" +
@@ -34,6 +45,14 @@ inline std::string pf_norm_finish_variant(unsigned K, unsigned G, unsigned W) {
 inline std::string pf_silu_mul_variant() { return "pf_silu_mul"; }
 inline std::string pf_gated_head_variant() { return "pf_gated_head"; }
 inline std::string pf_attn_prep_variant() { return "pf_attn_prep"; }
+// Ruling A9's bf16-`attn_q` build of the SAME source, bound by the composed
+// attention path (ruling A14). It writes no `attn_gate`: `pf_attn_gate` reads
+// the gate columns straight out of `qkv_partials`.
+inline std::string pf_attn_prep_q16_variant() { return "pf_attn_prep_q16"; }
+// The composed path's own two kernels, one binary: `pf_softmax_causal` (the
+// causal row softmax between the QK^T and PV GEMMs) and `pf_attn_gate` (the
+// output gate that lived in decode's `attn_reduce`, ruling A16).
+inline std::string pf_attn_variant() { return "pf_attn"; }
 // The a||b projection, mirroring gemv_bf16's {COLS_PER_WG 16, KSPLIT 16}
 // tiling so that at M = 1 it is BIT-IDENTICAL to the binary capture.cc binds.
 inline std::string pf_ab_proj_variant() { return "pf_ab_proj"; }
