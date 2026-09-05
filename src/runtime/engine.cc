@@ -42,7 +42,9 @@ uint32_t checked_max_len(const loader::LoadedModel& m, uint32_t max_len) {
 Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bool debug_resid)
     : ctx_(ctx),
       model_(std::move(model)),
-      buffers_(ctx, checked_max_len(model_, max_len)),
+      persist_(ctx, checked_max_len(model_, max_len)),
+      decode_scratch_(ctx, persist_.max_len),
+      buffers_(persist_, decode_scratch_),
       tap_(debug_resid ? std::unique_ptr<l0::Mem>(
                              new l0::Mem(ctx, l0::MemKind::Device, kTapBytes))
                        : nullptr),
@@ -55,11 +57,11 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
 }
 
 void Engine::reset() {
-  // Exactly DecodeBuffers' persistent group. Scratch is left alone on purpose
-  // - see the header.
-  for (l0::Mem* m : {&buffers_.control, &buffers_.gdn_state, &buffers_.conv_ring, &buffers_.kv_k,
-                     &buffers_.kv_v})
-    imm_.fill(m->ptr(), 0u, m->size());
+  // Exactly the persistent group, in exactly the order PersistentBuffers'
+  // constructor filled it - one function, so "reset writes what construction
+  // wrote" is a property of the code and not of two lists agreeing. Scratch is
+  // left alone on purpose - see the header.
+  persist_.zero(imm_);
 }
 
 void Engine::replay() {

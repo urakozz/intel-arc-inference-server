@@ -71,11 +71,90 @@
 #include "runtime/buffers.h"
 #include "runtime/control.h"
 
+// Prefill scratch @ kC = 2048, max_len = 16384 - ruling A13 (2048, not 4096;
+// every figure RECOMPUTED from model::Qwen35, not scaled) and ruling A14 (the
+// M = 64 attention route is retired, so plan 6b's attn_q / attn_gate /
+// attn_part are gone and plan 6d-composed's S/P scratch is here instead, sized
+// once so L3 does not resize this struct when it lands). The derivation and
+// the three cross-checks are docs/prefill-l1-preregistration-2026-09-05.md §1.
+//
+//   ids          2048 x 4 B                                    =         8,192
+//   resid        2048 x 5120 x 2 B                             =    20,971,520
+//   x            2048 x 17408 x 2 B  (largest GEMV K: down)     =    71,303,168
+//   partials     2048 x 34816 x 4 B  (S=1 max-N: gate||up, R1)  =   285,212,672
+//   ab_out       2048 x 128 x 4 B                               =     1,048,576
+//   norm_sumsq   20 x 2048 x 4 B                                =       163,840
+//   gdn_o        2048 x 48 x 128 x 4 B                          =    50,331,648
+//   mixer_out    2048 x 6144 x 2 B   (out_proj/o_proj input, R2) =   25,165,824
+//   logits       1 x 248320 x 4 B    (last position only)        =       993,280
+//   argmax_part  1 x 243 x 2 x 4 B                              =         1,944
+//   dequant      5120 x 34816 x 2 B  (chunk-independent)        =   356,515,840
+//   gdn_xb       2048 x 10240 x 2 B                             =    41,943,040
+//   gdn_seed     3 x 10240 x 2 B                                =        61,440
+//   gdn_g        2048 x 48 x 4 B                                =       393,216
+//   gdn_beta     same                                           =       393,216
+//   gdn_A        32 x 48 x 64 x 64 x 4 B                        =    25,165,824
+//   gdn_A2       same                                           =    25,165,824
+//   gdn_w        2048 x 48 x 128 x 2 B                          =    25,165,824
+//   gdn_u        same                                           =    25,165,824
+//   pf_q         2048 x 24 x 256 x 2 B  (bf16 - ruling A9)      =    25,165,824
+//   pf_attn      same                                           =    25,165,824
+//   pf_s         6 x 2048 x 16384 x 4 B (kSHeads = one GQA grp) =   805,306,368
+//   pf_p         6 x 2048 x 16384 x 2 B                         =   402,653,184
+//   pf_o         24 x 2048 x 256 x 4 B                          =    50,331,648
+//   pf_rowsum    24 x 2048 x 4 B                                =       196,608
+//                                                        total = 2,263,990,168
+//
+// Cross-checks, each of which fails loudly if a row above is wrong:
+//   * the 6b-owned rows alone (everything but the six pf_* ones) = 955,170,712;
+//   * the six pf_* rows = 1,308,819,456, plan 6d-composed's "total added" line
+//     exactly (pf_kt excluded: transB measured native and bitwise identical,
+//     commit 792e1dd, so the transpose fallback is not built);
+//   * 955,170,712 + 408,944,640 (6d's retired attn_part+attn_q+attn_gate) +
+//     899,874,816 (6d's stated net) = 2,263,990,168.
+static void check_prefill_scratch(l0::Context& ctx) {
+  runtime::PrefillScratch pf(ctx, 16384);
+  std::printf("prefill scratch %zu B (%.3f GB)\n", pf.bytes(), pf.bytes() / 1e9);
+  CHECK_EQ(pf.bytes(), size_t{2263990168});
+  CHECK_EQ(runtime::PrefillScratch::kC, 2048u);
+  CHECK_EQ(runtime::PrefillScratch::kGdnChunk, 64u);
+  CHECK_EQ(runtime::PrefillScratch::kSHeads, 6u);
+  CHECK_EQ(pf.max_len, 16384u);
+  // The six composed-attention rows, as one group, are 6d's own figure.
+  CHECK_EQ(pf.pf_q.size() + pf.pf_attn.size() + pf.pf_s.size() + pf.pf_p.size() +
+               pf.pf_o.size() + pf.pf_rowsum.size(),
+           size_t{1308819456});
+  CHECK_EQ(pf.pf_s_bytes(), pf.pf_s.size());
+  // `ids` is the one host-resident field: the host writes C ids per chunk.
+  CHECK(pf.ids.kind() == l0::MemKind::Host);
+  CHECK(pf.resid.kind() == l0::MemKind::Device);
+}
+
 int main() {
   CHECK_EQ(sizeof(runtime::Control), size_t{128});
 
   l0::Context ctx(0);
   std::printf("device: %s\n", ctx.name().c_str());
+
+  // The split must not move decode's numbers by a byte, and the view must
+  // alias the groups rather than copy them.
+  {
+    runtime::PersistentBuffers p(ctx, 16384);
+    runtime::DecodeScratch s(ctx, 16384);
+    CHECK_EQ(p.bytes(), size_t{1240465536});
+    CHECK_EQ(s.bytes(), size_t{68652864});
+    runtime::DecodeBuffers view(p, s);
+    CHECK_EQ(view.persistent_bytes(), p.bytes());
+    CHECK_EQ(view.scratch_bytes(), s.bytes());
+    CHECK_EQ(view.control.ptr(), p.control.ptr());
+    CHECK_EQ(view.gdn_state.ptr(), p.gdn_state.ptr());
+    CHECK_EQ(view.kv_v.ptr(), p.kv_v.ptr());
+    CHECK_EQ(view.attn_part.ptr(), s.attn_part.ptr());
+    CHECK_EQ(view.argmax_part.ptr(), s.argmax_part.ptr());
+    CHECK_EQ(view.max_len, 16384u);
+    check_prefill_scratch(ctx);
+  }
+
   runtime::DecodeBuffers b(ctx, 16384);
   std::printf("persistent %zu B, scratch %zu B\n", b.persistent_bytes(), b.scratch_bytes());
 
