@@ -274,3 +274,183 @@ remaining named lever on this kernel is A28 §4.2's second: unrolling the `j`
 loop by a fixed factor plus a remainder, so that the SLM round trips pipeline.
 It is **not** attempted here - it is a different defect, and this task's budget
 goes to items 2 and 3.
+
+---
+
+# PART 2 - `pf_gdn_A2`
+
+## 3. PRE-REGISTRATION (committed before the rewrite was built)
+
+### 3.1 The defect, read off the kernel AND off the Xe2 assembly
+
+`src/kernels/prefill/pf_gdn_wy.cl:152-177`. Grid (48 heads, nchunks) of 256, and
+the 64 × 64 triangular product is written `for (p = lid; p < CT*CT; p += 256)` -
+**one output `A2[i][j]` per work-item per step, with no tile.** Each output runs
+the whole 128-term `band_dot` out of bf16 SLM: per `k` a `qs` word and a `ks`
+word, each widened where it is used, one `* Q_SCALE` and one `fma`.
+`docs/prefill-gdn-wu-conv-2026-09-05.md` §6.1 already named it - *"the same
+no-tile pattern `pf_gdn_wu` had, at the same 0.79 TFLOP/s"* - and the assembly
+now says exactly where the time goes. `ocloc` on the unmodified `pf_gdn_wy.cl`
+with `IGC_ShaderDumpEnable=1`, **measured**:
+
+| | `pf_gdn_A2` | `pf_gdn_A` |
+|---|---:|---:|
+| `simd_size` / `grf_count` / `slm_size` | **32** / 128 / **33,024** | **16** / 128 / 16,896 |
+| hot-loop body, instructions | **610** (8 bands) | **898** (16 bands) |
+| `mad` in it | 64 | 130 |
+| **FMA density** | **10.5%** | **14.5%** |
+| bf16 widen (`mov` uw→d + `shl` 16) | 288 = **47%** | 516 = **57%** |
+| `* Q_SCALE` (`mul`) | 72 = 12% | 5 (folded: `ascale` is 1.0f) |
+| SLM `load.slm.d32` (2 words each) | 64 | 131 |
+| addressing (`or`/`add`/`add3`/`shl`) | ~111 = 18% | ~80 = 9% |
+
+Two mechanisms, both measurable, and the second is the one A28 did not have:
+
+1. **No output tile → the widen is 47% of the loop.** Every operand word is
+   widened at the point of use, and with one output per work-item nothing is
+   reused: `q_i[k]` is re-widened for every `j` and `k_j[k]` for every `i`.
+2. **`pf_gdn_A2` runs at 37.5% occupancy and `pf_gdn_A` at 100%.** SLM is
+   33,024 B (two 64 × 128 bf16 stagings plus `gcs`), so an Xe-core's 128 KB
+   holds **3** work-groups; at SIMD32 a 256-work-item group is 8 threads, so
+   **24 of the Xe-core's 64 thread slots are resident**. `pf_gdn_A` stages one
+   operand (16,896 B), is 4 work-groups × 16 threads at SIMD16, and fills all
+   64. That is the whole reason two kernels doing the same 0.8 GFLOP measure
+   1.0313 and 0.6136 ms.
+
+The two combine into an issue-rate figure that closes the arithmetic
+(**derived**, from the loop bodies above, the mask's live fraction, and the
+measured times):
+
+| | `pf_gdn_A2` | `pf_gdn_A` |
+|---|---:|---:|
+| threads per layer per chunk | 12,288 (SIMD32) | 24,576 (SIMD16) |
+| loop iterations executed per thread (mask, derived) | 12 of 16 | 10 of 16 |
+| instructions issued per layer per chunk | **1.90e8** | **2.21e8** |
+| measured ms | 1.0314 | 0.6136 |
+| **issue rate, instructions/XVE/clock** | **0.257** | **0.502** |
+
+`pf_gdn_A` at 100% occupancy issues at 0.502 - the highest rate any GDN kernel
+in this project has measured - and `pf_gdn_A2` at 37.5% issues at half of it.
+**Occupancy is a lever here, and the rewrite has to keep it, not spend it.**
+
+### 3.2 The rewrite, fixed here before it is built
+
+Unchanged: the algebra; the mask `j <= i` **including the diagonal** (the header
+block's mask pair); the `* Q_SCALE` applied to `q` in fp32 at read (P6); `k`
+unscaled (P7); the 16 × 8 band tree and its collapse order; `exp(gc[i]-gc[j])`
+as one device `exp` of one difference; the output layout `A2[i][j]` at
+`((chunk*48 + h)*64 + i)*64 + j` and its exact `0.0f` outside the mask.
+
+Changed:
+
+* **The grid gains a third dimension: (48 heads, nch, 4).** `z` names a
+  **quadrant** - `iz = z >> 1` picks `i ∈ [32·iz, 32·iz+32)`, `jz = z & 1` picks
+  `j ∈ [32·jz, 32·jz+32)`. A work-group therefore owns 1024 of the 4096 outputs
+  and stages only the 32 `q` rows and 32 `k` rows it needs.
+* **The quadrant `(iz = 0, jz = 1)` is entirely masked** - every one of its
+  outputs has `j ≥ 32 > i`, so `j <= i` is false - and it writes its 1024
+  `0.0f`s and returns without staging anything. The other three quadrants
+  compute 3 × 1024 = **3072 dots**, which is what the current kernel's
+  predication already costs (12 of 16 iterations × 4096 = 3072, §3.1); the
+  quadrant split makes that explicit instead of paying it in dead lanes.
+* **Operands staged as fp32, so the widen leaves the inner loop entirely.**
+  `qs[32][128]` holds `f32(q_word) * Q_SCALE` and `ks[32][128]` holds
+  `f32(k_word)` - the same fp32 values the current kernel forms inside the
+  `fma`'s first argument (the assembly shows the `mul` and the `mad` as separate
+  instructions, so the product is rounded to fp32 before the `fma` either way).
+  **SLM: 2 × 32 × 128 × 4 = exactly 32,768 B**, which is 4 work-groups per
+  128 KB Xe-core.
+* **`intel_reqd_sub_group_size(16)`, chosen deliberately** - the brief asks for
+  the reason and this is it. At 32,768 B of SLM an Xe-core holds 4 work-groups
+  either way, so the width decides residency: **4 × 16 = 64 threads at SIMD16,
+  the Xe-core's whole budget, against 4 × 8 = 32 at SIMD32.** §3.1 measured what
+  that is worth on this exact instruction mix - 0.502 against 0.257
+  instructions/XVE/clock - and item 1 measured the other side of the same trade
+  on `pf_gdn_wu`, where SIMD32 halved residency and cost 1.71× of issue rate for
+  1.38× of issued instructions (§2.2). SIMD16 also halves the register cost of
+  the band tree, which is what makes the tile fit with room to spare.
+* **`gcs` leaves SLM** and is read from global per work-item (2 `i` values and 2
+  `j` values, clamped to `< L`), because 32,768 + 256 B would be 3 work-groups
+  per Xe-core instead of 4 - the same cliff §3.1 measured on the current kernel.
+* **Output tile: 2 positions × 2 columns = 4 outputs per work-item.**
+  `bi = lid >> 4` and `bj = lid & 15`, so `i ∈ {32iz+2bi, +1}` and
+  `j ∈ {32jz+2bj, +1}`. `bi` is **uniform inside a SIMD16 thread**, so the `qs`
+  reads are a broadcast and the 16 lanes' stores cover 32 contiguous fp32 of one
+  `A2` row - a coalesced 128 B global write per position.
+* **The contraction reads four fp32 rows per band with `vload4`-shaped access**
+  (`qs[i0]`, `qs[i0+1]`, `ks[j0]`, `ks[j0+1]` at `k = 8b … 8b+7`), giving
+  4 `fma` per 4 operand values. Density rises 10.5% → **~67%** (derived).
+* **The band tree is written out as its own expression tree, not as an array.**
+  `p[b] += p[b+8]`, then `+= p[b+4]`, `+= p[b+2]`, `+= p[b+1]` is exactly
+  `((P0+P8)+(P4+P12)) + ((P2+P10)+(P6+P14))` plus
+  `((P1+P9)+(P5+P13)) + ((P3+P11)+(P7+P15))`, summed. Written in that order the
+  live set is **4 `float4` values**, i.e. 16 registers at SIMD16, instead of the
+  16 the array form would pin. **The expression is the same one, term for term
+  and parenthesis for parenthesis** - that is the whole numerics argument.
+
+Nothing else changes. The rounding points do not move and **no sum is
+re-associated**; this is a re-partition of a loop nest plus a change of
+container for two operands, and every output is the same function of the same
+inputs.
+
+### 3.3 Pre-registered outcomes
+
+**Time.** `pf_gdn_A2` **≤ 0.5 ms per GDN layer per chunk** at C = 2048 (≥ 2×
+the measured 1.0313 - the brief's bar, derived from the wu result). Point
+estimate **0.23 ms**, derived from the instruction count:
+
+* per work-item: staging 16 × ~13 ≈ 208, contraction 16 bands × (32 `fma` +
+  8 `vload4` + ~8 address) ≈ 828, tree 60, epilogue and prologue ≈ 70 →
+  **~1106 instructions**;
+* 4608 live work-groups (3 quadrants × 48 × 32) × 16 threads × 1106 =
+  **8.15e7 instructions issued**, against the current 1.90e8;
+* at `pf_gdn_A`'s **measured** 0.502 instructions/XVE/clock - the same 100%
+  occupancy and a denser mix - that is **0.227 ms**.
+
+The estimate's sensitivity is stated with it rather than hidden: at the current
+kernel's 0.257 issue rate it would be 0.44 ms, still inside the bar, so the bar
+does not depend on the issue rate improving.
+
+Decision rule, fixed in advance (the brief's):
+
+| speed-up vs 1.0313 ms | verdict |
+|---|---|
+| ≥ 2× (≤ 0.5157 ms) | adopt |
+| 1.2-2× | adopt, and attribute the shortfall from the assembly |
+| < 1.2× | report, do not tune |
+
+**Numerics - the pre-registered outcome is BITWISE IDENTITY, and the brief's
+band is kept as the fallback bar.** The brief allows a re-association if a tile
+forces one; **under §3.2's mapping no tile forces one.** Each output is still
+the same 16 × 8 band tree over the same fp32 operand values, in the same order,
+times the same `exp`; what changed is which work-item owns which output, how
+many times each operand is loaded, and whether the bf16→fp32 widen happens at
+staging or at use (a bf16 value is exact in fp32 by construction, so the
+container is not a rounding point). So:
+
+* **Primary bar: `pf_gdn_A2` bit-identical to `pf_gdn_A2_legacy`** - the kernel
+  exactly as it stands - over every one of the `nchunks · 48 · 64 · 64` fp32
+  entries, at C = 256, at the ragged C = 100 and at C = 4096. Proved the way
+  `pf_gdn_wu`'s was: the pre-rewrite kernel stays in the same `.cl`, launched by
+  nothing but `gdn_wy_test`, and the two output buffers are pre-filled with
+  **different** patterns so a word neither kernel wrote fails the `memcmp`
+  rather than passing it - which makes the bar a coverage bar for the new 3-D
+  grid as well as an equality one.
+* **Fallback bar, kept because a pre-registration is not allowed to move after
+  the fact:** if any word differs, `gdn_chunk_test` case 1's `gdn_state`
+  **max rel ≤ 7.0e-02 and mean rel ≤ 2.4e-03** (A22's is 3.506e-02 /
+  1.197e-03), and the arbiter is the token gate.
+* `gdn_wy_test`'s existing case-4 bars unchanged: ≤ 4 fp32 ulp against
+  `gdn_chunk_ref::mat_A2`, the device's non-zero count equal to
+  `Σ 48·L(L+1)/2`, the diagonal non-zero on every row, and exactly `0.0f`
+  everywhere above the diagonal and outside `[0,L)²`.
+* **The arbiter, whatever the band does:** `prefill_gate_test` **94/94 on Vishva
+  and 93/93 on RTN**, every `gdn_state` cosine > 0.999;
+  `prefill_determinism_test` 9 × 3 bitwise; `prefill_consistency_test` 18/18
+  under A26; `gdn_chunk_test` 6/6.
+* **A golden regression is a finding**: diagnose it, report it, stop. It is not
+  a tolerance to loosen.
+
+`tests/prefill/gdn_chunk_ref.h` documents this kernel's reduction order and the
+two files carry a standing "must be edited together" rule; **the order does not
+change**, and that is what gets recorded there.
