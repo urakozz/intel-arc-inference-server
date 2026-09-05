@@ -107,7 +107,36 @@ ruling.
 
 ## 3. The design - D: decouple weights, inherit everything Intel ships, own only the gaps
 
-### 3.0 SUPERSEDING RULING A20 (2026-09-05) - the weight format pivots to MXFP4A16
+### 3.0a RULING A21 (2026-09-05, same day) - A20's premise was false; the int4 mixed-input route is primary
+
+§3.0 below asserted that `sycl-tla` ships a native MXFP4 mainloop for BMG
+that "upconverts in registers - zero custom transform". **That was the
+controller's unverified reading of a file's existence.** Plan 6f read the
+file: `xe_mma_blockscaled_mxfp.hpp` is gated to **Xe3.5** (`SYCL_INTEL_TARGET
+== 35`; our `bmg-g31` build is `1`) and is MX × MX with no bf16 activation
+configuration. The MXFP4 route that exists on BMG is the mixed-dtype
+mainloop plus an owned scale path and a second native weight copy
+(+12.9 GB) - plan 6f prices it at 2220-2234 t/s.
+
+The same reading found the cheaper fact: **the BMG mixed-dtype mainloop
+(`xe_mma_mixed_input.hpp`, ungated) applies group scales natively when the
+source is an integer type** - `(data − zero) × scale`, `& 0xf` nibble
+extraction, group-wise scales N-contiguous, which is layout 0's scale plane.
+**int4-g64 → bf16 with scale and zero point is native on this card.** The
+210 ms scratch was this project's §3.1 design choice, not a library limit.
+
+**Ruling A21:** the primary route is `gemm_int4_mixed` over the **existing
+layout-0 weights** - no format change, no new checkpoint, no oracle
+re-anchor, decode untouched. One fact is unverified and goes to a probe
+with a pre-registered decision rule (`probe-int4-mixed-brief.md`): whether
+GPTQ's K-in-word nibble packing is consumable directly (bridge 0) or needs
+a one-time repack (second copy, +12.16 GB - the operator's call, same shape
+as plan 6f's R-b). Predicted rate ≥ 128 TFLOP/s at gate‖up M=2048.
+**MXFP4A16 is demoted to an optional same-architecture comparison and the
+fallback if the probe misses**; the quantization script and plan 6f stay.
+§3.0 below is kept as the record of the ruling it corrects.
+
+### 3.0 SUPERSEDED BY §3.0a - RULING A20 (2026-09-05) - the weight format pivots to MXFP4A16
 
 §3.1 and §3.2 below describe the bf16 dequant scratch and remain as the
 record of the design that was measured. **Stage 0 measured that scratch at
