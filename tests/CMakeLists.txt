@@ -651,3 +651,11 @@ b70_cli_reject(cli_reject_pp_zero ${B70_NO_MODEL} --bench --pp 0
   EXPECT "--pp 0 would prefill nothing")
 b70_cli_reject(cli_reject_pp_chunk_without_pp ${B70_NO_MODEL} --bench --pp-chunk 1024
   EXPECT "--pp-chunk belongs to --pp")
+
+# --- spec 3 T1: tokenizer (host-only; needs the checkpoint's tokenizer.json) ---
+if(B70_TOKENIZER_ENABLED)
+  add_executable(tokenizer_smoke_test tokenizer/tokenizer_smoke_test.cc)
+  target_include_directories(tokenizer_smoke_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(tokenizer_smoke_test PRIVATE b70_tokenizer)
+  add_test(NAME tokenizer_smoke_test COMMAND tokenizer_smoke_test)
+endif()
