@@ -140,17 +140,34 @@ or more UTF-8-complete strings.
   template rendering or exceeds `max_model_len` is rejected before
   touching the engine.
 
-### 3.4 Engine API additions (the only `src/runtime` change)
+### 3.4 Engine API - AMENDED 2026-09-06 (planning, after spec 2 landed): no `src/runtime` change at all
 
-```cpp
-// src/runtime/engine.h
-uint32_t Engine::step();                 // one replay; returns the sampled id (cur_token[0])
-void     Engine::reset();                // pos = 0; state considered empty (already exists in some form for --bench - reuse)
+What exists (`src/runtime/engine.h`, read 2026-09-06): `reset()` (zeroes the
+persistent group), `ingest(ids)` (one replay per id - spec 2 did **not**
+change its body), `prefill(ids, chunk)` (spec 2; compiled into
+`b70_prefill_host`, reachable only by a target that calls
+`b70_link_prefill()`; 1408 t/s iterate at C = 2048), and
+`generate(n, on_token)` - token *i* is read from `cur_token[0]` **before**
+replay *i*, so `generate(1)` is exactly the `step()` this spec asked for:
+it returns the id the previous fence sampled and runs one replay that
+samples the next. The server's loop is therefore
+
 ```
-`ingest(ids)` stays (spec 2 replaces its body with `prefill()`; the server
-calls `ingest` and gets the speed-up for free when that lands). The
-server's loop is: `reset → ingest(prompt ids) → repeat step() → push id to
-streamer → SSE`. Detokenise + write happen while the next replay runs.
+reset → prefill(prompt ids)   [ingest(ids) when B70_HAVE_PREFILL is 0]
+      → repeat: id = generate(1)[0]; streamer.push(id) → SSE frame; stop checks
+```
+
+and the `(n+1)`-th token that `generate` leaves pending in the control
+block is what the next `generate(1)` returns - two calls are one continuous
+stream (engine.h:89-97). **No engine method is added**; bar 6's "nothing in
+`src/runtime` changes" tightens to *nothing at all*. `b70-serve` links what
+`b70-decode` links, prefill component included, and is the second product
+binary that reaches `Engine::prefill`.
+
+Consequence for the gate (§4): the llama-benchy `pp` row is no longer
+"prefill = decode replay per id" - it is spec 2's device-side 1408 t/s
+re-taken **through HTTP**, and the delta between the two is this spec's
+measurement of the tokenizer + template + HTTP + first-frame path.
 
 ### 3.5 Sampling - greedy on device; temperature/top-k/top-p on the host, last
 
