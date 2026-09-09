@@ -34,3 +34,18 @@ get_property(ALL_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUIL
 get_property(PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
              PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(b70-decode ${ALL_KERNELS} ${PF_KERNELS})
+
+if(B70_TOKENIZER_ENABLED)
+  add_executable(b70-serve b70_serve.cc)
+  target_include_directories(b70-serve PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(b70-serve PRIVATE b70_runtime b70_loader b70_model b70_l0 b70_tokenizer b70_server)
+  b70_target_kernel_dir(b70-serve)
+  if(B70_PREFILL_ENABLED)
+    target_compile_definitions(b70-serve PRIVATE B70_HAVE_PREFILL=1)
+    target_link_libraries(b70-serve PRIVATE b70_prefill_host)
+    b70_link_prefill(b70-serve)
+  else()
+    target_compile_definitions(b70-serve PRIVATE B70_HAVE_PREFILL=0)
+  endif()
+  add_dependencies(b70-serve ${ALL_KERNELS} ${PF_KERNELS})
+endif()
