@@ -681,4 +681,13 @@ if(B70_TOKENIZER_ENABLED)
   target_include_directories(streamer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(streamer_test PRIVATE b70_tokenizer)
   add_test(NAME streamer_test COMMAND streamer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
+
+  add_executable(golden_server_test server/golden_server_test.cc)
+  target_include_directories(golden_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(golden_server_test PRIVATE b70_server)
+  add_dependencies(golden_server_test b70-serve b70-decode)
+  add_test(NAME golden_server_test COMMAND golden_server_test
+    $<TARGET_FILE:b70-serve> $<TARGET_FILE:b70-decode> ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+    /home/user/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d)
+  set_tests_properties(golden_server_test PROPERTIES TIMEOUT 300)
 endif()
