@@ -1,0 +1,6 @@
+[
+  {"role": "system", "content": "You are a terse assistant. Answer in one sentence."},
+  {"role": "user", "content": "What is the capital of France? 请用中文回答。"},
+  {"role": "assistant", "content": "法国的首都是巴黎。"},
+  {"role": "user", "content": "And Germany's? Reply with just the city - no punctuation."}
+]
