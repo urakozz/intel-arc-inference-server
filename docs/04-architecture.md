@@ -352,6 +352,15 @@ that an absent `temperature` means greedy sampling. The parser also accepts the
 `min_tokens`, `ignore_eos`, `return_token_ids`, and
 `stream_options.include_usage` extension fields.
 
+**T4 status (2026-09-09): blocked, not shipped.** `b70-serve` wires those
+interfaces to the real checkpoint tokenizer/template and to one
+`runtime::Engine`, using prefill for a request prompt. Its smoke and SSE path
+work, but the required direct-ID gate finds that cjk diverges after 22 generated
+tokens from `b70-decode --ids`, which uses decode-ingest rather than prefill.
+The two implementations are independently rounded; no engine path was changed
+or comparison relaxed. The operator must choose the serving correctness contract
+before benchmark rows, sampling, or a tag are allowed.
+
 Deferring batching is not a shortcut - it isolates the variable being tested
 (per-token host + kernel cost) and keeps the first milestone reachable.
 Concurrency is a phase-5 concern at the earliest.
