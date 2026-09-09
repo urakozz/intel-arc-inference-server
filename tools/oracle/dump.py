@@ -82,11 +82,48 @@ def map_name(name: str) -> str:
     return name
 
 
+def shard_paths(snapshot: str) -> list[str]:
+    """The shards this checkpoint's index names - NOT every *.safetensors present.
+
+    A snapshot may carry more than one complete shard set. `urakozz/
+    Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ@84575a1` (the gate checkpoint since
+    2026-09-09) holds a stale 4-shard set of 1,986 tensors beside the live
+    7-shard set of 2,384, overlapping in 1,983 names; its index names the
+    7-shard set plus `model_extra_tensors.safetensors`, 2,399 tensors in 8
+    files. Globbing opened both, which the duplicate check below caught -- but
+    the danger the check cannot see is the other order: had the sets not
+    overlapped, the oracle would have dequantised weights the ENGINE never
+    loads, since src/loader reads the index. The index is the authority for
+    both sides or the golden set means nothing.
+
+    No index (a locally produced checkpoint, e.g. tools/quantize_qwen38_rtn.sh's
+    output) falls back to the glob, which is what every set before 2026-09-09
+    was dumped with.
+    """
+    index = os.path.join(snapshot, "model.safetensors.index.json")
+    if not os.path.exists(index):
+        return sorted(glob.glob(os.path.join(snapshot, "*.safetensors")))
+    with open(index, encoding="utf-8") as f:
+        files = sorted(set(json.load(f)["weight_map"].values()))
+    paths = [os.path.join(snapshot, f) for f in files]
+    missing = [p for p in paths if not os.path.exists(p)]
+    if missing:
+        die(f"index names {len(files)} shards; {len(missing)} are missing or are "
+            f"dangling symlinks, first {missing[0]!r}. An HF-cache snapshot stores "
+            f"its shards as symlinks into ../../blobs/, so mounting the snapshot "
+            f"directory alone breaks them -- use ORACLE_MODEL (the whole cache is "
+            f"mounted) rather than ORACLE_SNAP for a downloaded checkpoint.")
+    print(f"shards: {len(files)} from model.safetensors.index.json "
+          f"({len(glob.glob(os.path.join(snapshot, '*.safetensors')))} .safetensors present)",
+          file=sys.stderr)
+    return paths
+
+
 def build_state_dict(snapshot: str, group_size: int) -> dict[str, torch.Tensor]:
     """Dequantise the checkpoint into a plain bf16 state dict for Qwen3_5ForCausalLM."""
     handles = {}
     where: dict[str, object] = {}
-    for path in sorted(glob.glob(os.path.join(snapshot, "*.safetensors"))):
+    for path in shard_paths(snapshot):
         h = safe_open(path, framework="pt", device="cpu")
         handles[path] = h
         for key in h.keys():
