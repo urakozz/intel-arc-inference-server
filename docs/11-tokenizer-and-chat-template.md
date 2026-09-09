@@ -130,6 +130,16 @@ Shipped: `tok::Streamer`, the hold-and-flush incremental detokeniser. On the
 10,240-case committed corpus it has zero concatenation mismatches and zero
 spurious U+FFFD emissions; the measured longest hold is 4 ids.
 
+### Integration status (spec 3 T4, 2026-09-09)
+
+`b70-serve` successfully consumes this tokenizer, template, and streamer on the
+real checkpoint. That integration is **blocked, not shipped**: its cjk raw-
+completion IDs diverge from `b70-decode --ids` after a 22-token exact prefix,
+because the server prefill path and the CLI decode-ingest path are independently
+rounded. Tokenizer and template parity remain met; the unfinished item is the
+operator-selected correctness comparator for those two engine paths, not a
+change to either host component.
+
 ## Chat template
 
 Qwen templates are real Jinja: loops over messages, `if` on roles, tool-call

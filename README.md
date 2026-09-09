@@ -136,10 +136,20 @@ never downloads anything.
 ## v1 definition of done
 
 OpenAI-compatible endpoint (`/v1/completions`, `/v1/chat/completions`, SSE),
-**single stream**, no continuous batching. Driven by the same `llama-benchy`
-command used for every number in these docs, so comparisons are apples-to-apples.
-The number to beat is in [docs/BENCHMARKS.md](docs/BENCHMARKS.md):
-`p314-t214-vxkp0`, no speculation, **pp4096 1973 / tg256 31.50**.
+**single stream**, no continuous batching. The `b70-serve` integration binary
+now wires the checkpoint tokenizer, chat template, `Engine::prefill`, and the
+server surface together; its device-1 smoke answered “The capital of France is
+Paris” and streamed per-token SSE frames. It is **not v1 done or tagged**:
+Task 2's real-engine gate is blocked because cjk generation diverges at token 23
+between server prefill and `b70-decode --ids` decode-ingest. The required
+comparator contract needs an operator ruling before performance claims resume.
+
+The intended endpoint is driven by the same `llama-benchy` command used for
+every number in these docs, so comparisons are apples-to-apples. No spec-3 HTTP
+row exists yet; the reference baseline in [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
+is vLLM, no speculation, **measured external HTTP-inclusive pp4096 1973 / tg256
+31.01**, beside b70's **measured RECORD device-side pp4096 1406.18 / tg256
+29.32** on the current gate checkpoint.
 
 ## Approach
 
