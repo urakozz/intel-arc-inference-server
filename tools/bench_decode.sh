@@ -15,11 +15,14 @@
 # with --depth for the same reason the CLI refuses the pair: the prefilled ids
 # ARE the depth.
 #
-# **The prefill rows this harness takes today are ITERATE grade, not record
-# grade**, and that is a property of the box rather than of the script: two
-# desktop processes (baobab, ptyxis) hold DRM fds on every card, so the "box
-# must be otherwise idle" condition below is not met. Say so in whatever the
-# number is quoted in.
+# **The grade is a property of the box, not of this script, so this script
+# measures it instead of asserting it.** Record grade needs a provably idle
+# box: zero containers and zero DRM fd holders on every card. From 2026-09-04
+# to 2026-09-09 that was never true - two desktop daemons (baobab, ptyxis)
+# re-acquired render-node fds every few minutes, and every row taken in that
+# window says ITERATE. They were killed and the box rebooted on 2026-09-09, and
+# the check below now prints RECORD when it finds nothing holding the GPU.
+# Quote whichever word it printed; never upgrade a row's grade after the fact.
 #
 # Three things it exists to get right, none of which a bare ssh line does:
 #
@@ -165,7 +168,19 @@ done
 # so $5 is the millisecond total and $6 the rate -- the same two positions the
 # tg row uses, which is why one awk shape serves both.
 if [ "${#pp_rows[@]}" -gt 0 ]; then
-  printf '%s\n' "${pp_rows[@]}" | awk -F'|' '
+  # The grade, measured on the box at the moment the rows were taken rather
+  # than asserted here. A holder that appears mid-run is exactly what this is
+  # meant to catch, so it is sampled AFTER the runs, not before.
+  # Same default and env name as tools/box.sh; this probe is a bare ssh rather
+  # than `box.sh run` because box.sh re-expands its arguments and would mangle
+  # the quoting in the loop below.
+  grade=$(ssh -o BatchMode=yes "${BOX:-user@box}" '
+    n=$(docker ps -q 2>/dev/null | wc -l)
+    for f in /proc/*/fdinfo/*; do
+      grep -l drm-driver "$f" >/dev/null 2>&1 && n=$((n+1))
+    done
+    [ "$n" -eq 0 ] && echo RECORD || echo ITERATE' 2>/dev/null) || grade=UNKNOWN
+  printf '%s\n' "${pp_rows[@]}" | awk -F'|' -v grade="${grade:-UNKNOWN}" '
     { ms[NR] = $5 + 0; ts[NR] = $6 + 0 }
     END {
       if (NR < 1) exit 0
@@ -174,8 +189,8 @@ if [ "${#pp_rows[@]}" -gt 0 ]; then
                              t = ms[i]; ms[i] = ms[j]; ms[j] = t }
       mid = int((NR + 1) / 2)
       pct = (ts[mid] > 0) ? (100 * (ts[NR] - ts[1]) / ts[mid]) : 0
-      printf "pp median %.2f t/s (%.1f ms total) over %d run(s); min %.2f, max %.2f, spread %.2f (%.2f%%) -- ITERATE grade\n",
-             ts[mid], ms[mid], NR, ts[1], ts[NR], ts[NR] - ts[1], pct
+      printf "pp median %.2f t/s (%.1f ms total) over %d run(s); min %.2f, max %.2f, spread %.2f (%.2f%%) -- %s grade\n",
+             ts[mid], ms[mid], NR, ts[1], ts[NR], ts[NR] - ts[1], pct, grade
     }' >&2
 fi
 
