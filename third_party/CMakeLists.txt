@@ -8,3 +8,7 @@ target_include_directories(b70_third_party_minja SYSTEM INTERFACE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/minja)
 target_link_libraries(b70_third_party_minja INTERFACE b70_third_party_json)
+
+add_library(b70_third_party_httplib INTERFACE)
+target_include_directories(b70_third_party_httplib SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/httplib)
+target_link_libraries(b70_third_party_httplib INTERFACE pthread)
