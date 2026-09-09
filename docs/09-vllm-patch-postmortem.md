@@ -142,6 +142,10 @@ MXFP4. Do not chase a 3% prefill "gain".
 - **ccache works on `-fsycl` TUs** (1292/1292 cacheable, ~99.5% hit warm), taking
   the host C++ phase from ~7.2h to ~5 min. Device codegen (ocloc, 2405 kernels,
   ~20 min) is **not** cacheable.
+- **The Rust tokenizer has its own Cargo cache.** `cmake/tokenizer.cmake` finds
+  `cargo` (preferring `~/.cargo/bin`) and builds the pinned `tokenizers` crate
+  into `build/tokenizer-rs`. `B70_TOKENIZER=AUTO` enables it when Cargo is
+  usable; set `ON` to require it or `OFF` to omit the component.
 - **Checkpoint metadata lies.** Published AutoRound checkpoints have declared MTP
   tensors quantised while shipping them unquantised, breaking load. Verify
   `block_name_to_quantize` / `extra_config` against the tensors actually present
