@@ -105,7 +105,29 @@ struct EngineAdapter : server::EngineIface {
   1. Read `<p>.txt` (strip trailing `\n`s exactly as `tools/oracle/tokenize.py` does) and `<p>.ids`.
   2. Spawn `b70-serve <snap> --port 0`? - no: pick a free port by binding a socket and closing it; spawn `b70-serve <snap> --port <P> --device` from `ZE_AFFINITY_MASK`-free env (the test inherits the env the suite runs with) via `posix_spawn`; poll `GET /v1/models` every 500 ms up to 120 s.
   3. `POST /v1/completions {"prompt": <txt>, "max_tokens": 32, "return_token_ids": true}` → `prompt_token_ids == <p>.ids` (**bar 1 meets bar 3**: our encode of the committed text reproduces the committed ids); `choices[0].token_ids` has 32 entries unless an EOS stopped it (then fewer, and the test records which).
-  4. Spawn `b70-decode <snap> --ids <p>.ids --n 32`, capture stdout (one id per line) → the reference ids. **Equality must be exact** on the first `min(len)` ids: same engine, same device, same replays - there is no tie question between an engine and itself. (If the server stopped early on EOS, compare the prefix and print it.)
+  4. Spawn the CLI reference and capture stdout (one id per line). **CORRECTION
+     (2026-09-09), the premise below was false and the implementer's clean block
+     found it:** an earlier revision said "spawn `b70-decode <snap> --ids <p>.ids
+     --n 32` … equality must be exact - same engine, same device, same replays,
+     there is no tie question between an engine and itself." That is wrong.
+     `b70-serve` prefills (`Engine::prefill`); `--ids` **ingests** (one replay
+     per id). Those are independently rounded paths - that is the whole subject
+     of ruling **A26**, which measured the divergence, found every one of it on
+     a row where decode's own top-2 logits sit inside one bf16 ulp, and settled
+     the grading: tie-aware plus teacher-forced. Measured here: `prose` and
+     `code` 32/32 exact, `cjk` exact for 22 ids then divergent - the same shape
+     A26 recorded for `cjk`.
+     **The fix is to compare like with like, so bar 3 tests the layer it is
+     for.** Give `b70-decode` a `--prefill` flag on `--ids` mode (route through
+     `Engine::prefill` instead of `ingest`; `src/cli` is not a protected
+     directory, `src/runtime` is untouched, and the flag is one branch beside
+     the existing `have_pp` one), and have this test use it. Then the two sides
+     run the same engine path and **exactness is a legitimate bar**: bar 3 is
+     about the tokenizer, template and HTTP layer, and the prefill-vs-ingest
+     question is already gated at 18/18 by `prefill_consistency_test`.
+     Do **not** import tie-aware semantics here instead - this test is
+     out-of-process and cannot see logits, so it could not apply them honestly.
+     (If the server stopped early on EOS, compare the prefix and print it.)
   5. `SIGTERM` the server child, `waitpid`.
   Spawn the server ONCE for all three prompts (one 13 s load), the decode reference three times (three loads, ~40 s, estimated from the recorded 13 s load).
 - [ ] **Step 2: Run** - `tools/box.sh test golden_server_test`. Expected: `3 prompts: prompt ids identical, 32/32 generated ids identical` ×3. A mismatch is a finding: print both id lists and stop.
