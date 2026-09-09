@@ -71,6 +71,11 @@ target_include_directories(openai_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_S
 target_link_libraries(openai_test PRIVATE b70_server)
 add_test(NAME openai_test COMMAND openai_test)
 
+add_executable(protocol_test server/protocol_test.cc)
+target_include_directories(protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(protocol_test PRIVATE b70_server)
+add_test(NAME protocol_test COMMAND protocol_test)
+
 # P3 is raw Level Zero/OpenCL C only: it requires a B70 and its kernels but
 # never the optional SYCL component, so it intentionally has no guard.
 add_executable(dequant_test prefill/dequant_test.cc)
