@@ -17,7 +17,7 @@
 - Never docker, never kill a process you did not start, never delete anything on the box, never restart the operator's server; stop on any disk error (84 GB free).
 - `src/tokenizer/` depends on nothing else in `src/` (spec §5, docs/04 component rule). Python only under `tools/`.
 - `-Wall -Wextra -Werror`; decode's 774 kernels / 19 modules and every existing test untouched - this stream adds files and one `add_subdirectory`.
-- Tokenizer file used by every test: `/home/user/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64/tokenizer.json` (RTN snapshot; `tokenizer_config.json` beside it). Tests take the path from `B70_TOKENIZER_JSON` (env) and default to that path.
+- Tokenizer file used by every test: `/home/user/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d/tokenizer.json` (urakozz snapshot 84575a1, the gate checkpoint since 2026-09-09; `tokenizer_config.json` beside it). Tests take the path from `B70_TOKENIZER_JSON` (env) and default to that path.
 - Every number labelled measured / derived / estimated.
 
 ---
@@ -427,7 +427,7 @@ std::optional<uint32_t> Tokenizer::token_to_id(std::string_view t) const {
 }
 std::string default_tokenizer_json() {
   if (const char* e = std::getenv("B70_TOKENIZER_JSON")) return e;
-  return "/home/user/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64/tokenizer.json";
+  return "/home/user/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d/tokenizer.json";
 }
 }  // namespace tok
 ```
@@ -469,7 +469,7 @@ print(f"tokenizers {tokenizers.__version__}: {len(src)} cases, {sum(len(o.split(
 sys.exit(1 if bad else 0)
 ```
 
-- [ ] **Step 3: Generate on the Mac, dump on the box** - `python3 tools/tokenizer/make_corpus.py && tools/box.sh sync && tools/box.sh run '~/auto-round/.venv/bin/python tools/tokenizer/dump_parity.py /home/user/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64/tokenizer.json' && tools/box.sh pull tests/tokenizer/corpus.ids`. Expected: `tokenizers 0.22.2: 10240 cases, N ids, 0 roundtrip failures`. If roundtrip failures are non-zero, list the cases: they are corpus lines the REFERENCE cannot round-trip (e.g. lone surrogates), and they leave the corpus, recorded - parity is against the reference, not beyond it.
+- [ ] **Step 3: Generate on the Mac, dump on the box** - `python3 tools/tokenizer/make_corpus.py && tools/box.sh sync && tools/box.sh run '~/auto-round/.venv/bin/python tools/tokenizer/dump_parity.py /home/user/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d/tokenizer.json' && tools/box.sh pull tests/tokenizer/corpus.ids`. Expected: `tokenizers 0.22.2: 10240 cases, N ids, 0 roundtrip failures`. If roundtrip failures are non-zero, list the cases: they are corpus lines the REFERENCE cannot round-trip (e.g. lone surrogates), and they leave the corpus, recorded - parity is against the reference, not beyond it.
 - [ ] **Step 4: Sizes** - record `wc -c tests/tokenizer/corpus.*` (estimated: 0.8 MB + 3 MB; the repo already carries a 4 MB safetensors fixture, so this is in range).
 - [ ] **Step 5: Commit** - `git add tools/tokenizer tests/tokenizer/corpus.txt tests/tokenizer/corpus.ids && git commit -m "test(tokenizer): 10k-line parity corpus + reference ids (tokenizers 0.22.2)"`.
 

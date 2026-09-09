@@ -92,14 +92,14 @@ struct EngineAdapter : server::EngineIface {
 
 - [ ] **Step 2: The binary** - `b70-serve <snapshot-or-repo> [--host 0.0.0.0] [--port 8000] [--max-len 16384] [--device N] [--served-name NAME] [--queue 4]`. Parse exactly as `b70_decode.cc` does (`parse_u32`, `value(i, flag)`, rejections before the device); resolve the snapshot directory; load: `l0::Context ctx(device); loader::LoadedModel model = loader::load(ctx, path, max_len); runtime::Engine eng(ctx, std::move(model), max_len);` (the same `StdoutToStderr` trick around the load so stdout stays clean); read `generation_config.json` → `eos_token_id` (array or int) into `Options::eos_ids`; construct the three adapters and `server::Server`; print one line to stderr: `b70-serve: <name> on http://<host>:<port>, max_len <N>, eos [..], prefill <on|off>`; `listen()`. `SIGTERM`/`SIGINT` → `stop()` and exit 0.
 - [ ] **Step 3: CMake** - copy `b70-decode`'s block: `add_executable(b70-serve b70_serve.cc)`, same includes, `target_link_libraries(b70-serve PRIVATE b70_runtime b70_loader b70_model b70_l0 b70_tokenizer b70_server)`, the same `B70_HAVE_PREFILL` / `b70_link_prefill` guard, `b70_target_kernel_dir`, the same `add_dependencies` on all kernels. Guard the whole target with `if(B70_TOKENIZER_ENABLED)`.
-- [ ] **Step 4: Smoke on the box** - `tools/box.sh build` then, on the box (via `tools/box.sh run`), start it in the background with the RTN snapshot on port 8123 and `ZE_AFFINITY_MASK=1` (`setsid nohup ./build/src/cli/b70-serve /home/user/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 --port 8123 > /tmp/b70-serve.log 2>&1 & echo $!` - record the pid), wait for `curl -s localhost:8123/v1/models`, then `curl -s localhost:8123/v1/chat/completions -d '{"model":"x","messages":[{"role":"user","content":"What is the capital of France?"}],"max_tokens":32}'`. Expected: a JSON with a sentence naming Paris. Then a streaming request with `-N` and watch frames arrive one per ~31 ms. Stop it: `kill <pid>`. Paste the two responses into the commit message body.
+- [ ] **Step 4: Smoke on the box** - `tools/box.sh build` then, on the box (via `tools/box.sh run`), start it in the background with the gate checkpoint (urakozz 84575a1) on port 8123 and `ZE_AFFINITY_MASK=1` (`setsid nohup ./build/src/cli/b70-serve /home/user/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d --port 8123 > /tmp/b70-serve.log 2>&1 & echo $!` - record the pid), wait for `curl -s localhost:8123/v1/models`, then `curl -s localhost:8123/v1/chat/completions -d '{"model":"x","messages":[{"role":"user","content":"What is the capital of France?"}],"max_tokens":32}'`. Expected: a JSON with a sentence naming Paris. Then a streaming request with `-N` and watch frames arrive one per ~31 ms. Stop it: `kill <pid>`. Paste the two responses into the commit message body.
 - [ ] **Step 5: Commit** - `git commit -m "feat(cli): b70-serve - the OpenAI server over runtime::Engine + prefill"`.
 
 ---
 
 ### Task 2: Golden through the server (bar 3)
 
-**Files:** Create `tests/server/golden_server_test.cc`; register in the T1 block of `tests/CMakeLists.txt` with `add_test(NAME golden_server_test COMMAND golden_server_test $<TARGET_FILE:b70-serve> $<TARGET_FILE:b70-decode> ${CMAKE_SOURCE_DIR}/tests/golden/prompts /home/user/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64)`.
+**Files:** Create `tests/server/golden_server_test.cc`; register in the T1 block of `tests/CMakeLists.txt` with `add_test(NAME golden_server_test COMMAND golden_server_test $<TARGET_FILE:b70-serve> $<TARGET_FILE:b70-decode> ${CMAKE_SOURCE_DIR}/tests/golden/prompts /home/user/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d)`.
 
 - [ ] **Step 1: The test** - for each of `prose`, `code`, `cjk`:
   1. Read `<p>.txt` (strip trailing `\n`s exactly as `tools/oracle/tokenize.py` does) and `<p>.ids`.
@@ -117,7 +117,7 @@ struct EngineAdapter : server::EngineIface {
 
 **Files:** Create `tools/serve_bench.sh`; results go to `docs/BENCHMARKS.md` in Task 6.
 
-- [ ] **Step 1: `tools/serve_bench.sh`** - on the box: starts `b70-serve <MODEL> --port 8000 --served-name b70` (env `MODEL`, default RTN; `ZE_AFFINITY_MASK` honoured if set) with `setsid nohup`, records the pid, waits for `/v1/models`, runs
+- [ ] **Step 1: `tools/serve_bench.sh`** - on the box: starts `b70-serve <MODEL> --port 8000 --served-name b70` (env `MODEL`, default the urakozz 84575a1 snapshot; `ZE_AFFINITY_MASK` honoured if set) with `setsid nohup`, records the pid, waits for `/v1/models`, runs
 
 ```bash
 ~/.local/bin/uvx llama-benchy --base-url http://127.0.0.1:8000/v1 --model b70 \
@@ -158,7 +158,7 @@ struct EngineAdapter : server::EngineIface {
 **Files:** Modify `docs/BENCHMARKS.md` (new section "The spec-3 gate rows - `<SHA>`, <date>": HTTP pp/tg rows ×3 invocations + median, the CLI control rows, the HTTP delta in ms/4096 and in % of tg, box conditions, grade), `README.md` (v1 definition-of-done rows: server, `/v1/completions`, tokenizer parity - with the numbers), `docs/04-architecture.md` (Server status), `docs/11` (status: shipped), `docs/superpowers/specs/2026-09-04-spec3-tokenizer-http-design.md` (status line); create the memo `docs/superpowers/specs/2026-09-09-spec3-gate-memo.md` (template: `2026-09-05-spec2-gate-memo.md`).
 
 - [ ] **Step 1: Score the six bars** - 1: `parity_test` + `streamer_test`; 2: `template_test`; 3: `golden_server_test`; 4: llama-benchy exit 0 with pp/tg rows; 5: `tg_http/tg_cli` vs 0.98; 6: full suite, `-Werror`, `git diff --stat spec2-done..HEAD -- src/runtime src/kernels` empty, decode invariants re-proven (774/19, replay determinism, golden 94/94 + 93/93, decode bench within 0.09% of 32.22).
-- [ ] **Step 2: Records** - every cell labelled measured / derived; grade stated; the pp row labelled "HTTP-inclusive, C = 2048, RTN" beside spec 2's device-side row and vLLM's 1973 with the three labels.
+- [ ] **Step 2: Records** - every cell labelled measured / derived; grade stated; the pp row labelled "HTTP-inclusive, C = 2048, urakozz 84575a1 (bf16 lm_head)" beside spec 2's device-side row and vLLM's 1973 with the three labels.
 - [ ] **Step 3: Memo** - verdict table; the HTTP cost; what each stream cost in wall time; falsified predictions (e.g. the sampling estimate); owed items (Vishva byte-matched HTTP row if not taken; prefix caching - docs/04 follow-on); ruling request for what comes next.
 - [ ] **Step 4: Commit and tag** - all bars met: `git commit -m "docs(spec3): record the gate - tg256 <X> t/s over HTTP (<Y>% of CLI), pp4096 <Z> t/s HTTP-inclusive"` and `git tag -a spec3-done -m "spec 3 gate: ..."`. Any bar short: commit the memo without the tag and STOP for the operator's ruling.
 

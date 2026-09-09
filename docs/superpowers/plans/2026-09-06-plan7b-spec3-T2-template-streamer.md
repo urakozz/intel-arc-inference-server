@@ -17,7 +17,7 @@
 - Never docker, never kill a process you did not start, never delete on the box; stop on disk errors.
 - `src/tokenizer/` stays a leaf. Python in `tools/` only. `-Wall -Wextra -Werror` - vendored headers are included with `-isystem` (`target_include_directories(... SYSTEM ...)`) so their warnings are not ours.
 - Pinned versions in `third_party/VERSIONS`: one line per header, `name  url  tag-or-commit  sha256`. The values are execution outputs (the latest release tag at pin time), recorded in that file and in the commit message.
-- Snapshot files: `/home/user/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64/{chat_template.jinja,tokenizer_config.json,generation_config.json}`; `B70_SNAPSHOT_DIR` env overrides in tests (default that path).
+- Snapshot files: `/home/user/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d/{chat_template.jinja,tokenizer_config.json,generation_config.json}`; `B70_SNAPSHOT_DIR` env overrides in tests (default that path).
 - Requires plan 7a landed (Task 4's `tok::Tokenizer`, Task 5's corpus) for Tasks 4-5 only; Tasks 1-3 build without it.
 
 ---
@@ -187,7 +187,7 @@ dump("template_tools.txt", tools=tools, enable_thinking=False)
 print("transformers", transformers.__version__)
 ```
 
-- [ ] **Step 3: Dump** - `tools/box.sh sync && tools/box.sh run '~/auto-round/.venv/bin/python tools/tokenizer/dump_template.py /home/user/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64'` then `tools/box.sh pull tests/tokenizer/template_think_on.txt` (and the other two). Record the byte counts and the transformers version in the commit message.
+- [ ] **Step 3: Dump** - `tools/box.sh sync && tools/box.sh run '~/auto-round/.venv/bin/python tools/tokenizer/dump_template.py /home/user/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d'` then `tools/box.sh pull tests/tokenizer/template_think_on.txt` (and the other two). Record the byte counts and the transformers version in the commit message.
 - [ ] **Step 4: The test**
 
 ```cpp
@@ -200,7 +200,7 @@ print("transformers", transformers.__version__)
 #include "tokenizer/chat_template.h"
 #include <nlohmann/json.hpp>
 static std::string slurp(const std::string& p) { std::ifstream f(p, std::ios::binary); CHECK(f.good()); std::stringstream s; s << f.rdbuf(); return s.str(); }
-static std::string snapshot() { const char* e = std::getenv("B70_SNAPSHOT_DIR"); return e ? e : "/home/user/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64"; }
+static std::string snapshot() { const char* e = std::getenv("B70_SNAPSHOT_DIR"); return e ? e : "/home/user/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d"; }
 static void diff_report(const char* name, const std::string& got, const std::string& want) {
   size_t i = 0; while (i < got.size() && i < want.size() && got[i] == want[i]) ++i;
   std::fprintf(stderr, "%s: differs at byte %zu of %zu/%zu\n  got : %s\n  want: %s\n", name, i, got.size(), want.size(),
