@@ -275,15 +275,23 @@ if(B70_TOKENIZER_ENABLED)
 endif()
 ```
 
-- [ ] **Step 2: `src/tokenizer/CMakeLists.txt`**
+- [ ] **Step 2: `src/tokenizer/CMakeLists.txt`** - the directory exists from
+  Task 2 (the crate lives under it), so `add_subdirectory` needs a file here
+  now; the C++ library itself arrives in Task 4 with its only source.
+  **CORRECTION (2026-09-09):** an earlier revision of this step declared
+  `add_library(b70_tokenizer STATIC tokenizer.cc)` here, which cannot
+  configure - `tokenizer.cc` is written in Task 4 Step 4, and CMake fails at
+  generate time with `Cannot find source file: tokenizer.cc`. Found by the
+  implementer, who stopped rather than reordering the plan on its own; the
+  defect is the plan's.
 
 ```cmake
 if(NOT B70_TOKENIZER_ENABLED)
   return()
 endif()
-add_library(b70_tokenizer STATIC tokenizer.cc)
-target_include_directories(b70_tokenizer PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(b70_tokenizer PUBLIC b70_tok_rs)
+# b70_tokenizer (the C++ wrapper) is added in Task 4, with tokenizer.cc - its
+# only source. Declaring it here would fail configure: CMake resolves a
+# target's sources at generate time, not at build time.
 ```
 
 - [ ] **Step 3: Confirm the native-static-libs line** - `tools/box.sh run '~/.cargo/bin/rustc --print native-static-libs --crate-type staticlib - </dev/null 2>&1 | grep native-static-libs'`. Expected a line naming `-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc` (the set varies by toolchain; add any that the link in Task 4 Step 5 reports missing, and record the line).
@@ -361,8 +369,18 @@ if(B70_TOKENIZER_ENABLED)
 endif()
 ```
 
-- [ ] **Step 3: Run it to see it fail** - `tools/box.sh test tokenizer_smoke` → expected: link error (no `tokenizer.cc` yet).
-- [ ] **Step 4: Implement the wrapper**
+- [ ] **Step 3: Run it to see it fail** - `tools/box.sh test tokenizer_smoke` → expected: a CMake error naming `b70_tokenizer` as an unknown target (Task 3 declared the component but not the C++ library - the library and its only source arrive together in Step 4). That is this task's red state.
+- [ ] **Step 4: Implement the wrapper AND declare its library** - the target and
+  its only source are one unit, so they land in one step (see Task 3 Step 2's
+  correction). Append to `src/tokenizer/CMakeLists.txt`:
+
+```cmake
+add_library(b70_tokenizer STATIC tokenizer.cc)
+target_include_directories(b70_tokenizer PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_tokenizer PUBLIC b70_tok_rs)
+```
+
+then write:
 
 ```cpp
 // src/tokenizer/tokenizer.h
