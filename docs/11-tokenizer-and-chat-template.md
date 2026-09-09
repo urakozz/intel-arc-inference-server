@@ -111,6 +111,25 @@ a hand-written BPE only once a parity test exists to prove the replacement -
 the parity test is the deliverable that makes the swap safe, so write it
 first and keep it forever.
 
+### Status (spec 3 T2, 2026-09-09)
+
+Shipped: `chat::Template` over `google/minja` commit
+`021c2293c187789ef13d56c6cfd89c9b134fd80f` and `nlohmann/json v3.12.0`.
+Their source URLs and header SHA-256s are pinned in `third_party/VERSIONS`.
+The `transformers 5.14.1` parity vectors for the gate checkpoint match
+byte-for-byte: thinking on is 565 bytes, thinking off is 367 bytes, and the
+one-function tools case is 1547 bytes.
+
+The checkpoint's `chat_template.jinja` SHA-256
+`c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041`
+uses Jinja's unsupported `is undefined` test. `chat::Template` selects a
+SHA-gated fallback only for that source; it changes that construct to minja's
+equivalent `is not defined` without changing the checkpoint template itself.
+
+Shipped: `tok::Streamer`, the hold-and-flush incremental detokeniser. On the
+10,240-case committed corpus it has zero concatenation mismatches and zero
+spurious U+FFFD emissions; the measured longest hold is 4 ids.
+
 ## Chat template
 
 Qwen templates are real Jinja: loops over messages, `if` on roles, tool-call
