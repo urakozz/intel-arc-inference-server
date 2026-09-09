@@ -13,6 +13,14 @@ Authority for what the checkpoint ships and for the tokenizer options is
 snapshot on the box); this spec adopts its recommendations and adds the
 server. Every number is measured unless marked derived/estimated.
 
+**Implementation status, 2026-09-09:** T1-T3 are shipped host-side. T4 added
+`b70-serve` and reached its real-engine gate, which is **blocked before
+performance measurement**: raw cjk completion IDs diverge after a 22-token
+prefix between server prefill and `b70-decode --ids` decode-ingest. No engine,
+kernel, loader, model, tokenizer, or server implementation was changed to work
+around it; see `2026-09-09-spec3-gate-memo.md` for the recorded finding and
+ruling request. No `spec3-done` tag exists.
+
 ## 1. Where we start
 
 - **No tokenizer, no server, no stop handling.** `b70-decode` is ids-in,

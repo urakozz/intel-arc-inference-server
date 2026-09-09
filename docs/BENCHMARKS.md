@@ -490,6 +490,25 @@ Chunk-width sensitivity, one run each, context and not the gate (device 0):
 oracle dump for `84575a1` does not exist yet. Rows without their correctness
 bars are numbers, not a gate - `spec2-done` waits for the dump.
 
+### The spec-3 gate attempt - `983e852`, 2026-09-09 - BLOCKED before performance rows
+
+**No new performance number is recorded in this section.** The box was available
+for a record-grade run, but Task 2's `golden_server_test` stopped the plan first:
+`prose` and `code` reproduce 32/32 greedy IDs through `b70-serve`; `cjk` has
+exact prompt IDs but diverges at generated ID 23 against `b70-decode --ids`.
+The server uses `Engine::prefill`; the CLI reference uses `Engine::ingest`, two
+intentionally differently rounded paths. This finding invalidates the plan's
+assumption that their direct ID comparison has no tie question.
+
+Accordingly, there are **no measured HTTP-inclusive pp4096/tg256 rows**, no
+measured CLI control rows, no derived HTTP cost, and no host-sampling cost for
+this attempt. The historical device-0 rows above remain the comparison baseline:
+**measured RECORD** pp4096 `1406.18 t/s` device-side and tg256 `29.32 t/s`; vLLM
+is **measured external HTTP-inclusive** at pp4096 `1973 t/s` and tg256 `31.01 t/s`.
+No historical value is superseded. See
+`docs/superpowers/specs/2026-09-09-spec3-gate-memo.md` for both cjk ID lists and
+the ruling request. No `spec3-done` tag was made.
+
 ### The spec-2 gate rows - `e44c40c`, 2026-09-05 - the first `pp4096` this engine has ever had
 
 **The gate of spec 2, and it does not clear.** The bar was vLLM's **1973 t/s**;
