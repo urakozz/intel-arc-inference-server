@@ -434,6 +434,62 @@ success bar and the operator's original **90%** fold criterion. **Beating vLLM
 on t/s and clearing the efficiency bar are now different answers**, and the
 spec-1.7 closing memo carries the second one.
 
+### The spec-2 re-gate rows - `977a31c`, 2026-09-09 - the first RECORD-grade rows this project has taken
+
+**The box was finally, provably idle.** Zero containers and **zero DRM fd
+holders**, verified before, midway and after (18:32, 18:34, 18:42; load 0.07 →
+1.01; the daemons named under gate row 1 were killed and the box rebooted on
+2026-09-09). These rows are therefore **record grade**, and they are the first
+in this document that are - every earlier prefill row says iterate or near-idle
+and keeps that word.
+
+**The checkpoint changed and that is not cosmetic.** Both gate checkpoints were
+deleted from the box overnight on 2026-09-09; the operator ruled the replacement
+is `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ` snapshot `84575a1` (GPTQ g64
+sym, **bf16 `lm_head`**). So the int4-`lm_head` decode class - the 32.22 t/s
+row that beat vLLM - is **not measurable at all right now**; it needs the RTN
+checkpoint re-quantized. What is measurable is the bf16-`lm_head` class, which
+is byte-matched to what vLLM serves.
+
+| engine / checkpoint | device | ids | C | **pp t/s** | ms total | runs (t/s) | spread | grade |
+|---|---|---|---|---|---|---|---|---|
+| **b70-decode `977a31c`, `urakozz` `84575a1`** (bf16 `lm_head`) | **0** | 4096 | 2048 | **1406.18** | **2912.9** | 1406.78 / 1406.18 / 1399.79 | 0.50% | **RECORD**, median of 3 |
+| vLLM `p314-t214-vxkp0`, no speculation | - | 4096 | 2×2048 | **1973** | - | - | - | measured, external, **HTTP-inclusive** |
+
+| engine / checkpoint | device | depth | **tg t/s** | ms/token | runs (t/s) | spread | grade |
+|---|---|---|---|---|---|---|---|
+| **b70-decode `977a31c`, `urakozz` `84575a1`** | **0** | 4096 | **29.32** | **34.11** | 29.33 / 29.32 / 29.32 | 0.03% | **RECORD**, median of 3 |
+| vLLM `dev396`, fp8 KV, no speculation, **same checkpoint** | - | ~4096 | **31.01** | - | - | - | measured, external, HTTP-inclusive |
+
+Chunk-width sensitivity, one run each, context and not the gate (device 0):
+
+| C | pp t/s | ms / 4096 | vs 2048 |
+|---:|---:|---:|---|
+| 2048 (the default) | 1406.18 | 2912.9 | - |
+| 1024 | 1221.90 | 3352.2 | −13.1% |
+| 512 | 932.37 | 4393.1 | −33.7% |
+
+**What the two numbers say.**
+
+- **Prefill 1406.18 = 71.3% of vLLM's 1973.** Against gate row 1's 1377.20 that
+  is +2.1%, which is the two GDN tasks (A29, A30) landing, not the checkpoint:
+  the last iterate row before them read 1408.39 on the *old* checkpoint and this
+  reads 1406.18 on the new one, **0.16% apart**. Prefill is checkpoint-blind, as
+  ruling A31 predicted - `lm_head` runs once per prompt.
+- **Decode 29.32 trails vLLM's 31.01 by 5.4%** on the same bytes. This
+  reproduces the recorded Vishva row (29.33) to **0.03%**, inside the 0.09%
+  drift rule, across a different checkpoint of the same class, a reboot and a
+  Level Zero update. The engine did not change; the available checkpoint did.
+  **The 32.22 t/s row that beat vLLM by 3.9% stands as recorded but cannot be
+  re-taken until an int4-`lm_head` checkpoint exists again.**
+- A 4096-token prompt now prefills in **2.913 s** against the 121 s the
+  decode-replay ingest took: **41.5×**.
+
+**Not a gate, and no tag.** The golden gates (`golden_gate_test`,
+`prefill_gate_test`) SKIP: a golden set belongs to its checkpoint, and the CPU
+oracle dump for `84575a1` does not exist yet. Rows without their correctness
+bars are numbers, not a gate - `spec2-done` waits for the dump.
+
 ### The spec-2 gate rows - `e44c40c`, 2026-09-05 - the first `pp4096` this engine has ever had
 
 **The gate of spec 2, and it does not clear.** The bar was vLLM's **1973 t/s**;
