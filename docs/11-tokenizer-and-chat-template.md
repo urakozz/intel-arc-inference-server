@@ -30,6 +30,29 @@ decoder is `ByteLevel`. This is the Qwen2 pattern - note `\p{N}` matches
 `(?i:…)` contraction group needs case-insensitive matching. A hand-written
 matcher must reproduce exactly this, including the `\s+(?!\S)` lookahead.
 
+
+### `pretokenize_regex` discrepancy
+
+The checkpoint's `tokenizer_config.json` `pretokenize_regex` (read 2026-09-09)
+contains `\p{M}` twice where `tokenizer.json` does not. Both patterns are
+verbatim:
+
+`tokenizer.json`:
+
+```
+(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+```
+
+`tokenizer_config.json`:
+
+```
+(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+```
+
+The crate reads `tokenizer.json`; the committed parity corpus is the arbiter.
+Any future hand-written BPE must match `tokenizer.json`'s pattern, not the
+config's.
+
 Added tokens: `<|endoftext|>`, `<|im_start|>`, `<|im_end|>`, `<think>`,
 `</think>`, `<tool_call>`, `</tool_call>`, `<tool_response>`,
 `</tool_response>`, the FIM set, and the vision/audio/TTS markers.
@@ -67,6 +90,19 @@ carries `cur_token` out; the host detokenises it while the next replay runs.
 | `tokenizers-cpp` (MLC) | exact - wraps the same Rust crate, adds SentencePiece | same Rust dep plus a C++ shim we'd only half use | yes | acceptable; buys little over the crate directly |
 | `openvino_tokenizers` | exact | drags in the OpenVINO runtime - the thing this project exists to not depend on | no | rejected |
 | **Hand-written byte-level BPE in C++** | must be *proven* - the pre-tokenizer regex and Unicode categories are where ports diverge | zero; needs a Unicode-aware regex (or a hand-compiled matcher for Qwen's fixed pattern) | yes | **the end state for goal 3**, not the starting point |
+
+
+### Status (spec 3 T1, 2026-09-06)
+
+Shipped: the first option, HF `tokenizers` (Rust) via C FFI, as the leaf
+`src/tokenizer/` library. The crate is pinned to `tokenizers 0.22.2`; its C++
+RAII wrapper is `tok::Tokenizer`. The committed Python-reference corpus has
+10,240 cases and reports zero encode and zero decode mismatches.
+
+Measured on the box, 2026-09-09: the release static archive is 16,217,384
+bytes, and a fresh Cargo build took 50.36 s. Normal CMake builds cache Cargo
+outputs in `build/tokenizer-rs`; `B70_TOKENIZER` is `AUTO` by default and may
+be set to `ON` or `OFF`.
 
 Recommendation: **start with the Rust crate behind a 4-function C interface**
 (`encode`, `decode`, `token_to_piece`, `free`), isolated in `src/tokenizer/`

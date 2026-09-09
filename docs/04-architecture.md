@@ -50,8 +50,8 @@ src/
   runtime/     L0 context, allocations, the captured decode command list,
                KV cache, sequence state
   server/      HTTP, OpenAI schema, SSE streaming
-  tokenizer/   byte-level BPE encode/decode, chat template, streaming
-               detokeniser - see docs/11. Host code, request path only
+  tokenizer/   leaf: HF `tokenizers` 0.22.2 BPE encode/decode (T1); chat template,
+               streaming detokeniser - see docs/11. Host code, request path only
 tools/         (python) weight conversion (incl. lm_head requantisation),
                probes, benchmark drivers, tokenizer golden vectors
 ```
