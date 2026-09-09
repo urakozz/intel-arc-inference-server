@@ -1,0 +1,19 @@
+[package]
+name = "b70_tok"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# = the box venv's `tokenizers` Python package version (0.22.2, measured
+# 2026-09-06). Default features keep `onig` - the regex engine the Python
+# wheels use - so the pre-tokenizer runs the same code path as the dumps.
+tokenizers = "=0.22.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
