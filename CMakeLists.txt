@@ -40,6 +40,7 @@ add_custom_target(golden
   VERBATIM)
 
 enable_testing()
+add_subdirectory(third_party)
 add_subdirectory(src/common)
 add_subdirectory(src/tokenizer)
 add_subdirectory(src/loader)
