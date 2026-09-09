@@ -10,6 +10,7 @@ endif()
 add_compile_options(-Wall -Wextra -Werror)
 
 find_package(PkgConfig REQUIRED)
+include(cmake/tokenizer.cmake)
 pkg_check_modules(ZE REQUIRED IMPORTED_TARGET level-zero)
 
 include(cmake/ocloc.cmake)
@@ -40,6 +41,7 @@ add_custom_target(golden
 
 enable_testing()
 add_subdirectory(src/common)
+add_subdirectory(src/tokenizer)
 add_subdirectory(src/loader)
 add_subdirectory(src/model)
 add_subdirectory(src/runtime)
