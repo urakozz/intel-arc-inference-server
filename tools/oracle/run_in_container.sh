@@ -18,7 +18,11 @@
 # default is "all of them". Leave it unset for the default.
 # Env: ORACLE_IMAGE, HF_CACHE, REPO_DIR, ORACLE_MODEL, ORACLE_SNAP, ORACLE_THREADS.
 set -euo pipefail
-IMAGE="${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t214-vxkp0:latest}"
+# t214 was the reference until 2026-09-09 and is no longer on the box; every
+# golden set dumped before that date was produced by it and its rows still say
+# so. A golden set records which image made it (doc 14) - so when this default
+# moves again, the sets made under the old one are not retroactively relabelled.
+IMAGE="${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 REPO_DIR="${REPO_DIR:-$HOME/b70-inference-server}"
 ORACLE_MODEL="${ORACLE_MODEL:-models--Vishva007--Qwen3.8-27B-W4A16-AutoRound-GPTQ}"
