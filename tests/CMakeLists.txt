@@ -313,19 +313,30 @@ add_test(NAME buffers_test COMMAND buffers_test)
 # explicitly - resolve_snapshot takes a directory verbatim, bypassing
 # refs/main entirely. Same spirit as tools/probe/run_vllm_gemv_bench.sh's
 # BENCH_SNAP (an overridable default rather than a hardcoded path): here a
-# CMake cache variable (B70_TEST_SNAPSHOT), defaulted to the known-good
-# snapshot 2a9077667e28aa53e61d91bdee5d7962e8674668, resolved against
-# $HF_HOME (or ~/.cache/huggingface) the same way the loader itself does.
-# Override with -DB70_TEST_SNAPSHOT=<dir> at configure time if the operator's
-# cache moves the working snapshot; this never mutates the HF cache itself.
+# CMake cache variable (B70_TEST_SNAPSHOT), defaulted to the gate checkpoint's
+# known-good snapshot, resolved against $HF_HOME (or ~/.cache/huggingface) the
+# same way the loader itself does. Override with -DB70_TEST_SNAPSHOT=<dir> at
+# configure time if the operator's cache moves the working snapshot; this never
+# mutates the HF cache itself.
+#
+# 2026-09-09 (ruling A31): the gate checkpoint is
+# urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ at snapshot 84575a1 (GPTQ g64
+# sym, bf16 lm_head, exclusion-only dynamic rules). The previous default,
+# Vishva007's 2a90776, was deleted from the box on 2026-09-09; its golden set in
+# `oracle-out/` belongs to THAT checkpoint's weights and is not reused - the
+# golden registrations below take B70_TEST_ORACLE_DIR, one golden set per
+# checkpoint (tools/oracle/README.md), and SKIP (77) until the operator has
+# dumped it.
 if(DEFINED ENV{HF_HOME})
   set(_b70_hf_home "$ENV{HF_HOME}")
 else()
   set(_b70_hf_home "$ENV{HOME}/.cache/huggingface")
 endif()
 set(B70_TEST_SNAPSHOT
-  "${_b70_hf_home}/hub/models--Vishva007--Qwen3.8-27B-W4A16-AutoRound-GPTQ/snapshots/2a9077667e28aa53e61d91bdee5d7962e8674668"
+  "${_b70_hf_home}/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d"
   CACHE PATH "Checkpoint snapshot directory the checkpoint-labelled tests load (bypasses refs/main)")
+set(B70_TEST_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-primary"
+  CACHE PATH "The CPU-oracle golden set dumped from B70_TEST_SNAPSHOT (tools/oracle/golden.sh OUT_DIR)")
 
 # Needs the real 19 GB checkpoint and a B70: label `checkpoint` so it can be
 # excluded (`ctest -LE checkpoint`) where the model or the card is absent.
@@ -404,7 +415,7 @@ target_include_directories(golden_gate_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CM
 target_link_libraries(golden_gate_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
 add_dependencies(golden_gate_test ${B70_DECODE_LIST_KERNELS})
 add_test(NAME golden_gate_test COMMAND golden_gate_test
-  ${CMAKE_SOURCE_DIR}/oracle-out ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT})
+  ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT})
 set_tests_properties(golden_gate_test PROPERTIES
   LABELS "checkpoint;golden" SKIP_RETURN_CODE 77 TIMEOUT 1800)
 
@@ -462,20 +473,29 @@ if(B70_PREFILL_ENABLED)
     add_dependencies(${t}_test ${B70_PREFILL_KERNELS})
   endforeach()
 
-  # Vishva (bf16 lm_head) and RTN (int4 lm_head) -- one golden set per
-  # checkpoint (tools/oracle/README.md, "One golden set per checkpoint"), so two
-  # registrations and never one that takes whichever directory is lying around.
+  # The gate checkpoint (bf16 lm_head) and RTN (int4 lm_head) -- one golden set
+  # per checkpoint (tools/oracle/README.md, "One golden set per checkpoint"), so
+  # two registrations and never one that takes whichever directory is lying
+  # around. The RTN registrations exist only while the RTN checkpoint does: it
+  # was deleted from the box on 2026-09-09 (ruling A31) and a missing snapshot
+  # is a load failure, not a golden-set SKIP.
   add_test(NAME prefill_gate_test COMMAND prefill_gate_test
-    ${CMAKE_SOURCE_DIR}/oracle-out ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+    ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts
     ${B70_TEST_SNAPSHOT})
-  add_test(NAME prefill_gate_rtn_test COMMAND prefill_gate_test
-    ${CMAKE_SOURCE_DIR}/oracle-out-rtn ${CMAKE_SOURCE_DIR}/tests/golden/prompts
-    ${B70_RTN_SNAPSHOT})
+  if(EXISTS "${B70_RTN_SNAPSHOT}/config.json")
+    add_test(NAME prefill_gate_rtn_test COMMAND prefill_gate_test
+      ${CMAKE_SOURCE_DIR}/oracle-out-rtn ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+      ${B70_RTN_SNAPSHOT})
+    set_tests_properties(prefill_gate_rtn_test PROPERTIES
+      LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  else()
+    message(STATUS "b70: RTN checkpoint absent (${B70_RTN_SNAPSHOT}) -- prefill_gate_rtn_test and prefill_gate_long_test not registered")
+  endif()
   add_test(NAME prefill_consistency_test COMMAND prefill_consistency_test
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT})
   add_test(NAME prefill_determinism_test COMMAND prefill_determinism_test
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT})
-  set_tests_properties(prefill_gate_test prefill_gate_rtn_test PROPERTIES
+  set_tests_properties(prefill_gate_test PROPERTIES
     LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   set_tests_properties(prefill_consistency_test prefill_determinism_test PROPERTIES
     LABELS "checkpoint;prefill" TIMEOUT 3600)
@@ -497,11 +517,13 @@ if(B70_PREFILL_ENABLED)
   # containers (its brief's operational rules). The test SKIPs (77) until the
   # directory is there, which is the same contract the other three golden
   # registrations use, and tools/oracle/README.md carries the one command.
-  add_test(NAME prefill_gate_long_test COMMAND prefill_gate_test
-    ${CMAKE_SOURCE_DIR}/oracle-out-long ${CMAKE_SOURCE_DIR}/tests/golden/prompts
-    ${B70_RTN_SNAPSHOT} long 1024)
-  set_tests_properties(prefill_gate_long_test PROPERTIES
-    LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
+  if(EXISTS "${B70_RTN_SNAPSHOT}/config.json")
+    add_test(NAME prefill_gate_long_test COMMAND prefill_gate_test
+      ${CMAKE_SOURCE_DIR}/oracle-out-long ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+      ${B70_RTN_SNAPSHOT} long 1024)
+    set_tests_properties(prefill_gate_long_test PROPERTIES
+      LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
+  endif()
 endif()
 
 # --- b70-decode's host-side rejections ---------------------------------------
