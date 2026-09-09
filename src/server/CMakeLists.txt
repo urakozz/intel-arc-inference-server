@@ -1,3 +1,3 @@
-add_library(b70_server INTERFACE)
-target_include_directories(b70_server INTERFACE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(b70_server INTERFACE b70_third_party_json b70_third_party_httplib)
+add_library(b70_server STATIC openai.cc)
+target_include_directories(b70_server PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_server PUBLIC b70_third_party_json b70_third_party_httplib)

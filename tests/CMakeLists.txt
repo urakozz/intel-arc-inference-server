@@ -65,6 +65,12 @@ if(B70_PREFILL_ENABLED)
   set_tests_properties(gemm_batched_test PROPERTIES TIMEOUT 1800)
 endif()
 
+# --- spec 3 T3: HTTP server (host-only mock tests) ---
+add_executable(openai_test server/openai_test.cc)
+target_include_directories(openai_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(openai_test PRIVATE b70_server)
+add_test(NAME openai_test COMMAND openai_test)
+
 # P3 is raw Level Zero/OpenCL C only: it requires a B70 and its kernels but
 # never the optional SYCL component, so it intentionally has no guard.
 add_executable(dequant_test prefill/dequant_test.cc)
