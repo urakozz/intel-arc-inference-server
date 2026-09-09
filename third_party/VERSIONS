@@ -2,3 +2,4 @@
 # json header: third_party/json/nlohmann/json.hpp (kept at the include path minja uses)
 json          https://github.com/nlohmann/json   v3.12.0                                  aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63
 minja         https://github.com/google/minja    021c2293c187789ef13d56c6cfd89c9b134fd80f  55df85289038d54566ac40903617725e82a9e07e60a21b38dc6de65f7b7e10b8 87db93c98fd215b70b6f8908f55015a696cd92564dd4fced19bb11f103d475d4
+httplib       https://github.com/yhirose/cpp-httplib v0.54.1                                 5933c14b2d0f45212925ed18ca579841f5fce717f431fc20cec712423e905b10
