@@ -1,0 +1,19 @@
+[
+  {
+    "function": {
+      "description": "Get the current weather for a location.",
+      "name": "get_weather",
+      "parameters": {
+        "properties": {
+          "location": {
+            "description": "The city and country, for example Paris, France.",
+            "type": "string"
+          }
+        },
+        "required": ["location"],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  }
+]

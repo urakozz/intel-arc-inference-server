@@ -1,0 +1,16 @@
+<|im_start|>system
+Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.
+
+You are a terse assistant. Answer in one sentence.<|im_end|>
+<|im_start|>user
+What is the capital of France? 请用中文回答。<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+法国的首都是巴黎。<|im_end|>
+<|im_start|>user
+And Germany's? Reply with just the city - no punctuation.<|im_end|>
+<|im_start|>assistant
+<think>
