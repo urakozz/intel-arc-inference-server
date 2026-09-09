@@ -52,6 +52,7 @@ src/
   server/      HTTP, OpenAI schema, SSE streaming
   tokenizer/   leaf: HF `tokenizers` 0.22.2 BPE encode/decode (T1); chat template,
                streaming detokeniser - see docs/11. Host code, request path only
+third_party/   pinned header-only minja and nlohmann/json dependencies
 tools/         (python) weight conversion (incl. lm_head requantisation),
                probes, benchmark drivers, tokenizer golden vectors
 ```
