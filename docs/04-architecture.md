@@ -343,6 +343,15 @@ OpenAI-compatible, single stream for v1. No scheduler, no paged KV, no
 continuous batching. A ring KV buffer sized to `max_model_len` is sufficient
 when there is exactly one sequence.
 
+**Status (spec 3 T3).** `src/server/` now provides `/v1/models`,
+`/v1/chat/completions`, and `/v1/completions`, including OpenAI-shaped errors
+and SSE responses, against the `TokIface`, `TemplateIface`, and `EngineIface`
+interfaces. Requests share one engine through a bounded FIFO; requests beyond
+the configured waiting depth receive 503. The intentional parsing deviation is
+that an absent `temperature` means greedy sampling. The parser also accepts the
+`min_tokens`, `ignore_eos`, `return_token_ids`, and
+`stream_options.include_usage` extension fields.
+
 Deferring batching is not a shortcut - it isolates the variable being tested
 (per-token host + kernel cost) and keeps the first milestone reachable.
 Concurrency is a phase-5 concern at the earliest.
