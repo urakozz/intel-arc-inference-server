@@ -101,8 +101,14 @@ differs (`quant_method: "gptq"` + `provider: "auto-round"` on Vishva007,
 
 | Image | Notes |
 |-------|-------|
-| `vllm-xpu-env-next-p314-t214-vxkp0` | **current reference.** Python 3.14, torch 2.14 RC, kernels source-built pristine (`PATCH_LEVEL=0`) |
-| `vllm-xpu-env-next-p314-t214-vxkp12` | same, with the full 12-patch stack - slower at decode, see [09](09-vllm-patch-postmortem.md) |
+| `vllm-xpu-env-next-p314-t215-vxkp0` | **current reference** (2026-09-09). Level Zero updated to 1.33.1 by the operator. It is the only vLLM image on the box; `tools/oracle/run_in_container.sh` and `tools/probe/run_vllm_gemv_bench.sh` default to it |
+| `vllm-xpu-env-next-p314-t214-vxkp0` | the reference until 2026-09-09, **no longer on the box**. Python 3.14, torch 2.14 RC, kernels source-built pristine (`PATCH_LEVEL=0`). Every measurement and every golden set taken before that date was produced by it and its rows say so - those labels are not rewritten |
+| `vllm-xpu-env-next-p314-t214-vxkp12` | same, with the full 12-patch stack - slower at decode, see [09](09-vllm-patch-postmortem.md); also gone |
+
+**A golden set belongs to its image as well as to its checkpoint.** The oracle
+is `transformers` running inside whichever image made the dump, so a set dumped
+under t215 and one dumped under t214 are not interchangeable evidence even for
+the same weights. `docs/14` records the image beside each set; keep doing that.
 
 Also on the box: the serving stack (`lmstack-router`, Grafana, VictoriaMetrics,
 Open WebUI) and unrelated `gigachad-grc-*` services. **Never `docker volume

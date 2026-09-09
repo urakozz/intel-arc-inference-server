@@ -2,7 +2,9 @@
 # Throwaway Spec 1.7 experiment wrapper. Run on the B70 box; no installs.
 set -euo pipefail
 
-BENCH_IMAGE="${BENCH_IMAGE:-vllm-xpu-env-next-p314-t214-vxkp0:latest}"
+# t214 is gone from the box since 2026-09-09; rows already recorded under it
+# keep their own label.
+BENCH_IMAGE="${BENCH_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
 BENCH_REPO_DIR="${BENCH_REPO_DIR:-/home/user/b70-inference-server}"
 BENCH_HF_CACHE="${BENCH_HF_CACHE:-/home/user/.cache/huggingface}"
 BENCH_SNAP="${BENCH_SNAP:-/hf/hub/models--Vishva007--Qwen3.8-27B-W4A16-AutoRound-GPTQ/snapshots/2a9077667e28aa53e61d91bdee5d7962e8674668}"
