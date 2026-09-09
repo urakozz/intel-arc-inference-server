@@ -7,6 +7,8 @@ endif()
 # target's sources at generate time, not at build time.
 
 
-add_library(b70_tokenizer STATIC tokenizer.cc)
+add_library(b70_tokenizer STATIC tokenizer.cc chat_template.cc)
 target_include_directories(b70_tokenizer PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(b70_tokenizer PUBLIC b70_tok_rs)
+target_link_libraries(b70_tokenizer PUBLIC b70_tok_rs b70_third_party_minja)
+target_compile_definitions(b70_tokenizer PRIVATE
+  B70_CHAT_TEMPLATE_FALLBACK_PATH="${CMAKE_CURRENT_SOURCE_DIR}/chat_template_fallback.jinja")
