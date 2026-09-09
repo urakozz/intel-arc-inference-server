@@ -155,3 +155,7 @@ ssh `PATH` - `export PATH="$HOME/.local/bin:$PATH"` first.
   `docker run --name X` can fail with exit 125; `docker rm -f X` first.
 - Model load for a 27B is ~2-4 minutes; graph capture and compile add another
   2-4. Budget ~8 minutes from launch to a servable endpoint.
+
+## Rust (spec 3, T1 - 2026-09-06)
+
+User-local `rustup` (`--profile minimal`, `--no-modify-path`): `~/.cargo/bin/{cargo,rustc}` = `cargo 1.98.1 (797e8a9bc 2026-08-05)`, `rustc 1.98.1 (48a229cea 2026-09-01)`, `/home/user/.rustup/toolchains/stable-x86_64-unknown-linux-gnu`. Nothing on PATH was changed; `cmake/tokenizer.cmake` looks in `~/.cargo/bin` first. Installed for the `tokenizers` crate (docs/11); it builds `oniguruma` from source through `cc`, so it needs `/usr/bin/cc` (gcc 15.2, present).
