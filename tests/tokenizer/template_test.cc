@@ -1,10 +1,24 @@
+// Spec 3 §2 bar 2: byte-for-byte against transformers.apply_chat_template.
+#include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 #include "check.h"
 #include "tokenizer/chat_template.h"
 
+#include <nlohmann/json.hpp>
+
 namespace {
+
+std::string slurp(const std::string& path) {
+  std::ifstream file(path, std::ios::binary);
+  CHECK(file.good());
+  std::stringstream contents;
+  contents << file.rdbuf();
+  return contents.str();
+}
 
 std::string snapshot() {
   const char* env = std::getenv("B70_SNAPSHOT_DIR");
@@ -13,20 +27,44 @@ std::string snapshot() {
                "snapshots/84575a18f209992ef96d819b31f924b489e3d55d";
 }
 
+void diff_report(const char* name, const std::string& got, const std::string& want) {
+  size_t index = 0;
+  while (index < got.size() && index < want.size() && got[index] == want[index]) ++index;
+  std::fprintf(stderr, "%s: differs at byte %zu of %zu/%zu\n  got : %s\n  want: %s\n", name,
+               index, got.size(), want.size(), got.substr(index, 80).c_str(),
+               want.substr(index, 80).c_str());
+}
+
 }  // namespace
 
-int main() {
-  chat::Template t(snapshot());
-  const auto text = t.render(nlohmann::json::array({{{"role", "user"}, {"content", "Hello"}}}),
-                             nullptr, false);
-  CHECK(text.rfind("<|im_start|>", 0) == 0);
-  const std::string bare = "<|im_start|>assistant\n";
-  const std::string with_think = bare + "<think>\n\n</think>\n\n";
-  const bool ends_bare = text.size() >= bare.size() &&
-                         text.compare(text.size() - bare.size(), bare.size(), bare) == 0;
-  const bool ends_with_think = text.size() >= with_think.size() &&
-                               text.compare(text.size() - with_think.size(), with_think.size(),
-                                            with_think) == 0;
-  CHECK(ends_bare || ends_with_think);
+int main(int argc, char** argv) {
+  const std::string dir = argc > 1 ? argv[1] : "tests/tokenizer";
+  chat::Template tmpl(snapshot());
+  CHECK_EQ(tmpl.eos_token(), std::string("<|im_end|>"));
+  const auto messages = nlohmann::json::parse(slurp(dir + "/template_messages.json"));
+  const auto tools = nlohmann::json::parse(slurp(dir + "/template_tools.json"));
+  struct Case {
+    const char* file;
+    nlohmann::json tools;
+    bool think;
+  };
+  const Case cases[] = {
+      {"template_think_on.txt", nullptr, true},
+      {"template_think_off.txt", nullptr, false},
+      {"template_tools.txt", tools, false},
+  };
+  int bad = 0;
+  for (const Case& test_case : cases) {
+    const std::string want = slurp(dir + "/" + test_case.file);
+    const std::string got = tmpl.render(messages, test_case.tools, test_case.think);
+    if (got != want) {
+      diff_report(test_case.file, got, want);
+      ++bad;
+    } else {
+      std::printf("%s: %zu bytes, identical\n", test_case.file, got.size());
+    }
+  }
+  CHECK_EQ(bad, 0);
+  std::printf("template_test OK\n");
   return 0;
 }
