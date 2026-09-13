@@ -67,6 +67,11 @@ b70-decode 2a7df0b   =                32.22 t/s  ->  441 GB/s  ->  74.7% MBU
 > **Superseded 2026-09-04 at the spec 1.7 gate - the verdict below has
 > flipped, and it is the *speed* verdict that flipped, not the efficiency
 > one.** `2a7df0b`, median of three, `qwen38-27b-w4g64-rtn`:
+> **[SUPERSEDED 2026-09-13 - the operator retired the int4-`lm_head`
+> comparison: vLLM would also be faster with one, so this margin measured the
+> comparison and not the engine. The standing decode number is the byte-matched
+> 29.32 vs 31.01, trailing 5.4%. The row below stays as measured.]**
+>
 > **32.22 t/s / 31.03 ms/token** against the same-box, same-weights,
 > no-speculation vLLM row of **31.01 t/s / 32.25 ms** (vLLM
 > `0.28.1rc1.dev396`, measured the same day) - **b70-decode is ahead by 3.9%.**

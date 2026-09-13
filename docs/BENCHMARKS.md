@@ -419,6 +419,16 @@ other:
 - **vLLM's kernels are 5.7% faster on identical weight bytes** (31.01 vs
   29.33). The lead is a *checkpoint* advantage, not a kernel one.
 
+> **OPERATOR RULING, 2026-09-13 - the int4-`lm_head` comparison is retired.**
+> Only the byte-matched line is quoted from here on: **bf16 `lm_head` on both
+> sides.** The reasoning is one sentence and it is decisive - *vLLM would be
+> faster with an int4 `lm_head` too*; it simply cannot load one, so the 3.9%
+> measured an inability of the comparison, not a property of the engine. The
+> rows above stay exactly as recorded (a measurement is never deleted), but the
+> **+3.9% is no longer a headline anywhere**, and the deleted RTN checkpoint is
+> **not being re-quantized** to restore it. The standing decode comparison is
+> the 2026-09-09 re-gate row: **29.32 against 31.01, trailing by 5.4%.**
+
 **And MBU moves the opposite way from t/s across our own two rows** - 77.2% on
 the slower `Vishva007` row, 74.7% on the faster RTN row. That is not a
 contradiction and it was predicted before it was measured: bf16 `lm_head` was
@@ -480,8 +490,11 @@ Chunk-width sensitivity, one run each, context and not the gate (device 0):
   reproduces the recorded Vishva row (29.33) to **0.03%**, inside the 0.09%
   drift rule, across a different checkpoint of the same class, a reboot and a
   Level Zero update. The engine did not change; the available checkpoint did.
-  **The 32.22 t/s row that beat vLLM by 3.9% stands as recorded but cannot be
-  re-taken until an int4-`lm_head` checkpoint exists again.**
+  **The 32.22 t/s row stands as recorded and is NOT being re-taken** - the
+  operator retired that comparison on 2026-09-13 (the ruling sits above the
+  spec-1.7 rows): vLLM would be faster with an int4 `lm_head` too, so the
+  margin measured the comparison's asymmetry rather than the engine. **29.32
+  against 31.01, on matched bytes, is the decode number this project quotes.**
 - A 4096-token prompt now prefills in **2.913 s** against the 121 s the
   decode-replay ingest took: **41.5×**.
 
