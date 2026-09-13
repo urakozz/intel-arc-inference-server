@@ -1,6 +1,6 @@
 // b70-decode - spec §12, plus spec 1.5 §3.4. Three modes:
 //
-//   b70-decode <snapshot-or-repo> --ids <file> --n <N> [--device N] [--max-len 16384]
+//   b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--pp-chunk C]] [--device N] [--max-len 16384]
 //   b70-decode <snapshot-or-repo> --bench [--depth 4096] [--tg 256] [--device N]
 //   b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--repeats 1]
 //                                           [--device N]
@@ -84,7 +84,8 @@ void usage() {
   std::fprintf(
       stderr,
       "usage:\n"
-      "  b70-decode <snapshot-or-repo> --ids <file> --n <N> [--device N] [--max-len 16384]\n"
+       "  b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--pp-chunk C]]\n"
+       "                                        [--device N] [--max-len 16384]\n"
       "  b70-decode <snapshot-or-repo> --bench [--depth 4096 | --pp N [--pp-chunk C]]\n"
       "                                        [--tg 256] [--device N]\n"
       "  b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--repeats 1]\n"
@@ -93,7 +94,9 @@ void usage() {
       "  <snapshot-or-repo>  a snapshot directory, or an HF repo id resolved against the local\n"
       "                      cache ($HF_HOME or ~/.cache/huggingface). Never downloads.\n"
       "  --ids <file>   whitespace-separated token ids (tools/oracle/tokenize.py writes them)\n"
-      "  --n <N>        ids to generate, greedily; one per line on stdout, t/s on stderr\n"
+       "  --n <N>        ids to generate, greedily; one per line on stdout, t/s on stderr\n"
+       "  --prefill      --ids only: run the prompt through Engine::prefill instead of one\n"
+       "                 Engine::ingest replay per id; needs the optional prefill component.\n"
       "  --device N     GPU index. Absent: ONEAPI_DEVICE_SELECTOR=level_zero:N, else device 0.\n"
       "  --max-len <L>  KV cache and RoPE capacity (default 16384; the attention kernels are\n"
       "                 compiled per max_len, so only the compiled ones load)\n"
@@ -104,8 +107,9 @@ void usage() {
       "                 time, and print a SECOND markdown row with the device-side prefill\n"
       "                 time. The prefilled ids ARE the depth, which is why --depth is\n"
       "                 refused beside it.\n"
-      "  --pp-chunk C   --pp only: positions per prefill chunk (default PrefillScratch::kC\n"
-      "                 = 2048, ruling A13). Spec 2 §6.2's multi-chunk gate runs at 1024.\n"
+       "  --pp-chunk C   --pp or --prefill: positions per prefill chunk (default\n"
+       "                 PrefillScratch::kC = 2048, ruling A13). Spec 2 §6.2's multi-chunk\n"
+       "                 gate runs at 1024.\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -578,7 +582,7 @@ int run(int argc, char** argv) {
   uint32_t n = 0, depth = 4096, tg = 256, steps = 32, repeats = 1, max_len = 16384;
   uint32_t device = l0::Context::kFromEnv;
   uint32_t pp = 0, pp_chunk = 0;
-  bool bench = false, profile = false, have_n = false;
+  bool bench = false, profile = false, have_n = false, prefill = false;
   bool have_depth = false, have_tg = false, have_steps = false, have_repeats = false;
   bool have_pp = false, have_pp_chunk = false;
 
@@ -596,6 +600,8 @@ int run(int argc, char** argv) {
     } else if (a == "--n") {
       n = parse_u32("--n", value(i, "--n"));
       have_n = true;
+    } else if (a == "--prefill") {
+      prefill = true;
     } else if (a == "--device") {
       device = parse_u32("--device", value(i, "--device"));
       // 0xFFFFFFFF is l0::Context's "ask the environment" sentinel, so it is
@@ -641,6 +647,9 @@ int run(int argc, char** argv) {
     usage();
     throw std::runtime_error("a snapshot directory or HF repo id is required");
   }
+  if (prefill && ids_path.empty())
+    throw std::runtime_error(
+        "--prefill belongs to --ids; --bench uses --pp and --profile has no prompt");
   // Three modes, exactly one of them. `--profile` is exclusive with `--bench`
   // for a reason that is not tidiness: a profiled list signals 774 host-visible
   // events per step, so it can never produce a bench row (spec 1.5 §3.3).
@@ -677,7 +686,7 @@ int run(int argc, char** argv) {
     throw std::runtime_error("--pp and --depth are exclusive: the prefilled ids ARE the depth,"
                              " so naming both would be two answers to one question");
   if (have_pp && pp == 0) throw std::runtime_error("--pp 0 would prefill nothing");
-  if (have_pp_chunk && !have_pp)
+  if (have_pp_chunk && !have_pp && !prefill)
     throw std::runtime_error("--pp-chunk belongs to --pp; it is the prefill chunk width and"
                              " nothing else has one");
   if (have_pp_chunk && pp_chunk == 0)
@@ -750,21 +759,24 @@ int run(int argc, char** argv) {
                eng.step().kernel_count, eng.step().modules.size(), eng.max_len(),
                eng.buffers().persistent_bytes() / 1e9);
 
-  // Ingestion is one replay per prompt token unless `--pp` is given, in which
-  // case it is `Engine::prefill` - spec 2's whole point. The measured window is
+  // Ingestion is one replay per prompt token unless `--pp` or `--prefill` is
+  // given, in which case it is `Engine::prefill`. The measured window is
   // **the whole call**, and that needs no extra instrumentation to be the
   // interface's "first prefill launch to the first generated id in cur_token":
   // `prefill()` returns only after its final `Context::wait()`, and its last
   // launch is `argmax_stage2`, which is the only writer of `cur_token`.
   const auto t0 = std::chrono::steady_clock::now();
   size_t pp_launches = 0;
-  if (have_pp) {
+  if (have_pp || prefill) {
 #if B70_HAVE_PREFILL
-    runtime::prefill::profile_reset();
+    if (have_pp) runtime::prefill::profile_reset();
     eng.prefill(ids, pp_chunk);
-    pp_launches = eng.prefill_launches();
+    if (have_pp) pp_launches = eng.prefill_launches();
 #else
-    throw std::runtime_error("--pp needs the optional SYCL prefill component, and this build"
+    if (have_pp)
+      throw std::runtime_error("--pp needs the optional SYCL prefill component, and this build"
+                               " was configured with -DB70_PREFILL=OFF (cmake/prefill.cmake)");
+    throw std::runtime_error("--prefill needs the optional SYCL prefill component, and this build"
                              " was configured with -DB70_PREFILL=OFF (cmake/prefill.cmake)");
 #endif
   } else {
@@ -783,9 +795,11 @@ int run(int argc, char** argv) {
 #if B70_HAVE_PREFILL
   if (have_pp) runtime::prefill::profile_report("--pp", ingest_ms);
 #endif
-  if (!have_pp)
+  if (!have_pp && !prefill)
     std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token), pos %u\n", ids.size(),
                  ingest_ms, ids.empty() ? 0.0 : ingest_ms / double(ids.size()), eng.pos());
+  if (prefill)
+    std::fprintf(stderr, "prefill: %zu ids, pos %u\n", ids.size(), eng.pos());
 
   if (!bench) {
     eng.generate(n, [](uint32_t id) {
