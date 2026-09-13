@@ -147,7 +147,7 @@ std::vector<uint32_t> run_decode(const std::string& decode, const std::string& s
     ::close(output[1]);
     fail("posix_spawn_file_actions setup failed");
   }
-  const pid_t pid = spawn({decode, snapshot, "--ids", ids_path, "--n", "32"}, &actions);
+  const pid_t pid = spawn({decode, snapshot, "--ids", ids_path, "--n", "32", "--prefill"}, &actions);
   posix_spawn_file_actions_destroy(&actions);
   ::close(output[1]);
   std::string text;
