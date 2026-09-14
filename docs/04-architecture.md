@@ -343,23 +343,41 @@ OpenAI-compatible, single stream for v1. No scheduler, no paged KV, no
 continuous batching. A ring KV buffer sized to `max_model_len` is sufficient
 when there is exactly one sequence.
 
-**Status (spec 3 T3).** `src/server/` now provides `/v1/models`,
-`/v1/chat/completions`, and `/v1/completions`, including OpenAI-shaped errors
-and SSE responses, against the `TokIface`, `TemplateIface`, and `EngineIface`
-interfaces. Requests share one engine through a bounded FIFO; requests beyond
-the configured waiting depth receive 503. The intentional parsing deviation is
-that an absent `temperature` means greedy sampling. The parser also accepts the
-`min_tokens`, `ignore_eos`, `return_token_ids`, and
-`stream_options.include_usage` extension fields.
+**Status (spec 3, closed 2026-09-14, tag `spec3-done`).** `src/server/`
+provides `/v1/models`, `/v1/chat/completions`, and `/v1/completions`,
+including OpenAI-shaped errors and SSE responses, against the `TokIface`,
+`TemplateIface`, and `EngineIface` interfaces. `b70-serve`
+(`src/cli/b70_serve.cc` + `src/cli/serve_adapters.h`) wires those interfaces
+to the real checkpoint tokenizer/template and to one `runtime::Engine`, using
+`Engine::prefill` for every request prompt. Requests share one engine through
+a bounded FIFO; requests beyond the configured waiting depth receive 503. The
+intentional parsing deviation is that an absent `temperature` means greedy
+sampling. The parser also accepts the `min_tokens`, `ignore_eos`,
+`return_token_ids`, `seed`, and `stream_options.include_usage` extension
+fields.
 
-**T4 status (2026-09-09): blocked, not shipped.** `b70-serve` wires those
-interfaces to the real checkpoint tokenizer/template and to one
-`runtime::Engine`, using prefill for a request prompt. Its smoke and SSE path
-work, but the required direct-ID gate finds that cjk diverges after 22 generated
-tokens from `b70-decode --ids`, which uses decode-ingest rather than prefill.
-The two implementations are independently rounded; no engine path was changed
-or comparison relaxed. The operator must choose the serving correctness contract
-before benchmark rows, sampling, or a tag are allowed.
+`golden_server_test` proves the server reproduces `b70-decode --ids
+--prefill`'s exact ids on the three golden prompts (32/32 generated, exact
+prompt ids), both sides on the same engine path. `tools/serve_bench.sh` runs
+the standing llama-benchy command against it: HTTP `tg256` measured
+**29.902 t/s**, **102.0% of the CLI control's 29.31 t/s** - HTTP's per-token
+host cost (detokenise + SSE write, overlapping the next replay) is not merely
+under the 2% bar, it is not measurably present. A direct HTTP `pp4096` probe
+(llama-benchy's own printed `pp4096` figure is a measurement artifact against
+this server's spec-compliant chat stream - see `docs/BENCHMARKS.md`) measured
+**1404.74 t/s** against the CLI control's device-side **1402.91 t/s**: the
+derived HTTP cost of prefill is **−3.77 ms per 4096 tokens**, within the
+~0.5-3 ms run-to-run spread both sides show.
+
+Host sampling (temperature/top-k/top-p, spec §3.5) is implemented in
+`EngineAdapter::sample_into_control` (`src/cli/serve_adapters.h`): the
+replay's fp32 logits row is read back once per sampled token via a reused
+immediate command list, masked to `vocab_used`, top-k/softmax/top-p sampled,
+and written into `cur_token[0]` - the same protocol `Control` already
+supports for ingest. Measured cost: **0.537 ms/token** (bar: ≤ 0.62 ms/token,
+pre-registered before measuring), so it ships on: any request with
+`temperature > 0` is sampled. Greedy is never slowed (the readback only runs
+when a request asks for sampling).
 
 Deferring batching is not a shortcut - it isolates the variable being tested
 (per-token host + kernel cost) and keeps the first milestone reachable.

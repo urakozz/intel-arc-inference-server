@@ -13,18 +13,20 @@ Authority for what the checkpoint ships and for the tokenizer options is
 snapshot on the box); this spec adopts its recommendations and adds the
 server. Every number is measured unless marked derived/estimated.
 
-**Implementation status, 2026-09-14:** T1-T3 are shipped host-side. T4 added
-`b70-serve`, and its real-engine gate - bar 3 - is **now met**: commit
-`0ce35c4` gave `b70-decode --ids` a `--prefill` flag that routes the CLI
-reference through `Engine::prefill`, putting it on the same engine path
-`b70-serve` uses. `golden_server_test` passes with exact prompt-id and
-32/32 generated-id equality on all three golden prompts (prose, code, cjk);
-see the 2026-09-14 addendum (§4) in `2026-09-09-spec3-gate-memo.md` for the
-run record, including the one transient `ZE_RESULT_ERROR_DEVICE_LOST` seen
-right after a box outage/reboot (resolved by an identical retry) and this
-task's confirming run on a fresh post-reboot build. Bars 4-5
-(llama-benchy coherence/rows; HTTP tg within 2% of CLI) and host sampling
-remain deferred by operator ruling. No `spec3-done` tag exists.
+**Implementation status, 2026-09-14 (closed, tag `spec3-done`):** T1-T4 are
+shipped. All six gate bars are met: tokenizer parity (10,240 cases, 0
+mismatches), template parity (byte-identical), the golden-through-server gate
+(`golden_server_test`, exact on all three prompts via `--prefill` on both
+sides - commit `0ce35c4` put the CLI reference on the same engine path
+`b70-serve` uses), llama-benchy end to end (coherence 3/3 PASSED, tg256
+rows), HTTP `tg256` within 2% of the CLI control (measured 102.0%, i.e. no
+measurable HTTP tg cost at all), and the full suite green (67/67, 0 failed)
+with `src/runtime`/`src/kernels`/`src/l0`/`src/loader`/`src/model` unchanged
+since before spec 3's first commit (`git diff --stat 6d80193..HEAD` over
+those five directories is empty). Host sampling (§3.5) measured
+0.537 ms/token against the pre-registered 0.62 ms bar and ships on by
+default. See `docs/BENCHMARKS.md` "The spec-3 gate rows" for every number and
+`docs/superpowers/specs/2026-09-09-spec3-gate-memo.md` §6 for the verdict.
 
 ## 1. Where we start
 
