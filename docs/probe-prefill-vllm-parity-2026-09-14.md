@@ -401,3 +401,511 @@ carried forward, not blocking:
   (§1.3/1.6) - not computable from source reading alone.
 - L2's torch-free shim is characterized as small but unbuilt - its actual
   size is a Phase-2 finding, not assumed here.
+
+---
+
+## Addendum - re-scope and Phase 2 pre-registration (2026-09-14)
+
+grade: source-reading + pre-registration (Mac only; no box contact; no code,
+no build). Everything below is labelled **measured** (cited from a prior
+record), **derived** (arithmetic on measured inputs, shown), or **estimated**
+(a stated guess with its reasoning). Nothing in this addendum is a new
+measurement, and nothing above it is deleted or altered - §1.5's prediction is
+quoted and marked superseded in place, here.
+
+### A0. The re-scope
+
+Operator ruling, 2026-09-14, quoted from the brief verbatim: **"if we can throw
+away something to get more low level and more performant - I'm hundred percent
+up for it."** This reverses spec 2's inherit-first ruling. The direction under
+test is now **dropping sycl-tla from the prefill path** in favour of our own
+OpenCL C DPAS GEMM on the same Level Zero immediate list every other prefill
+kernel already runs on (A22's in-order list). Consequences for §1-§4 above:
+L1 (oneDNN int4) and L2 (Intel's Xe2 GDN) are **measured as reference targets
+only - neither is a candidate for adoption**; the candidate is P-A + P-B. §1.3's
+residency work and §1.6's candidate-style decision rules for L1 are retired as
+decisions (the measurements they describe are kept, as P-C's protocol). This
+brief adopts nothing into the engine; a clean "no, and here is the measured
+reason" is a full deliverable.
+
+### A1. The superseded oneDNN prediction
+
+§1.5 above reads: **"Prediction: R will land below break-even (R < 114
+TFLOP/s), medium-high confidence."** - **SUPERSEDED** by this section. It was
+reasoned from sycl-tla's `gemm_int4_mixed` at 42 TFLOP/s (A23). sycl-tla and
+oneDNN's gemmstone are different kernel generators, and there is stronger
+evidence available: vLLM runs this exact oneDNN path (§1.1, §4) at **1973 t/s
+end to end on this box**. The replacement is reasoned from that measurement.
+
+**The linear work per chunk (derived, from `model::Qwen35`'s shapes; this is
+P2's own per-row sum, restated so the chunk figure has one source):**
+
+| linear | K × N | FLOP/row = 2·K·N | count |
+|---|---:|---:|---:|
+| qkv‖z | 5120 × 16384 | 167,772,160 | 48 |
+| out_proj | 6144 × 5120 | 62,914,560 | 48 |
+| gate‖up | 5120 × 34816 | 356,515,840 | 64 |
+| down | 17408 × 5120 | 178,257,920 | 64 |
+| q‖k‖v | 5120 × 14336 | 146,800,640 | 16 |
+| o_proj | 6144 × 5120 | 62,914,560 | 16 |
+| **Σ per row** | | **48.654 GFLOP** | |
+| **× 2048 rows = per chunk** | | **99.64 TFLOP** | |
+
+The brief's "~98 TFLOP" is the same quantity reached the other way round -
+656 ms × 150 TFLOP/s = 98.4 - i.e. the in-situ GEMM term times the rate it was
+priced at. The in-situ blended rate is therefore 99.64 / 0.6563 s =
+**151.8 TFLOP/s (derived)**, consistent with the brief's 150. This addendum
+uses 99.64 TFLOP for the chunk's linear work everywhere; the brief's rounding
+changes no threshold below (§A2 shows the check).
+
+**The bound from below (derived):**
+
+| step | value | grade |
+|---|---:|---|
+| vLLM pp4096, 2 × 2048, HTTP-inclusive | 1973 t/s = 2076 ms / 4096 | measured, external (docs/BENCHMARKS) |
+| per 2048-token chunk | **1038 ms** | derived |
+| if the GEMMs were the whole chunk: R = 99.64 / 1.038 | **≥ 96.0 TFLOP/s** | derived - a hard floor; the row is HTTP-inclusive, so the true device floor is higher |
+| GEMM time if oneDNN ran at the 183.5 peak: 99.64 / 183.5 | 543 ms | derived |
+| ⇒ vLLM's non-GEMM time per chunk | **≤ 495 ms** | derived upper bound |
+
+**What vLLM spends outside the GEMMs (estimated, each term labelled):**
+
+| term | estimate (ms/chunk) | basis |
+|---|---:|---|
+| GDN (Intel Xe2 chunked kernel, §2) | 150-300 | §2.3's 150-400 band, its top cut by the ≤ 495 bound above; ours is 303 measured |
+| attention (vLLM's XPU flash-attention) | 60-150 | must fit under the 495 bound with the other terms; ours is 83 measured on the composed path |
+| small ops (norms, SiLU·mul, gated norm, RoPE, conv, residual) | 80-150 | ours is 131 measured; vLLM's are fused-op library calls of the same shapes |
+| HTTP, tokenizer, Python scheduling, per chunk | 15-40 | vLLM's row is HTTP-inclusive; the two chunks share one request |
+| **sum** | **305-640 → clipped to 305-495** | the sum's top is impossible: it would need the GEMMs above peak |
+
+At the central estimate (380 ms non-GEMM) the GEMMs have 658 ms, so
+R = 99.64 / 0.658 = **151 TFLOP/s**. At the edges: 305 ms → 136; 495 ms → 183.5
+(peak). Nothing measured on this part exceeds 164.21, so the band's top is
+trimmed to 175.
+
+> **New pre-registered prediction for oneDNN's `bf16_int4` matmul (P-C):
+> R ≈ 150 TFLOP/s at gate‖up M = 2048, band 135-175, hard floor 96.0
+> (derived).** That is *sycl-tla's bf16 rate on int4 weights with no dequant
+> pass* - the opposite of §1.5's call. Falsifier, fixed now: a measured
+> R < 96 cannot be the path vLLM measured 1973 on (its GEMMs alone would
+> exceed the whole 1038 ms chunk); such a reading is a probe defect
+> (configuration, layout, or a 128-GRF-class build) to be fixed once, not a
+> finding. §1.6's `114 / 221` rules are retired with the prediction they
+> served: P-C is a reference target, and its decision rule is §A3.3's.
+
+### A2. The brief's P-A thresholds, checked (no arithmetic error found)
+
+The brief derives: sycl-tla costs ~656 ms/chunk at 150 TFLOP/s; a GEMM at rate
+R costs `656 × (150/R − 1)` ms more; removing the host handoffs recovers at most
+~112 ms (A24's Ns = 1024 counterfactual, derived, +112.1). Break-even:
+
+```
+656 × (150/R − 1) = 112.1   ⇒   R = 150 / (1 + 112.1/656) = 150 / 1.1709 = 128.1   ✓
+```
+
+With the exact in-situ inputs (656.3 ms, 151.8 TFLOP/s blended) the same
+equation gives 129.7. That is a rounding, not an error, and it is inside the
+0.5-0.9 % run-to-run spread of every `--pp` row on the record. **Pre-registered
+as the brief states: break-even 128; go at ≥ 140; stop below 128.** A reading
+in [128, 130) is reported as "at break-even" rather than "above" it.
+
+What each threshold buys, so the verdict is arithmetic (derived):
+
+| R at gate‖up M=2048 | GEMM delta vs today | net with +112.1 (Ns 1024) | net with +33.0 (Ns 2048) |
+|---:|---:|---:|---:|
+| 150 (parity) | 0 | **+112** | +33 |
+| 146 (this addendum's prediction, §A3.1) | −18.0 | **+94** | +15 |
+| 140 (go bar) | −46.9 | **+65** | −14 |
+| 128 (break-even) | −112.8 | **0** | −80 |
+
+Two things this table makes explicit before any number exists. First, the
+Ns = 2048 counterfactual does not survive any GEMM loss: **P-B's payoff lives
+at Ns = 1024**, which is why P-B measures both widths but its verdict is the
+Ns = 1024 row. Second, the ceiling of the whole candidate path: today's chunk
+is **1456 ms (measured: 2912.9 ms / 4096 × 2048)**; at parity and the full
+counterfactual it is 1456 − 112 = 1344 ms → **1524 t/s = 77 % of 1973
+(derived)**; at the predicted 146 it is 1362 ms → **1504 t/s (76 %)**. The
+pure-Level-Zero GEMM path **cannot by itself reach vLLM's 1038 ms** - the
+remaining ~306 ms is what P-C (in-kernel int4, removing the 205 ms scratch)
+and P-D (GDN at vendor time) are measured to price. Written now so that the
+Phase-2 recommendation is read against this arithmetic and not fitted to the
+numbers after the fact.
+
+### A3. Pre-registrations
+
+One protocol for every timed cell, P2's and the slab probe's: 8 replays, first
+3 discarded, median of the last 5, 4 enqueues per replay, one discarded
+warm-up; incompressible xorshift bf16 inputs; `ZE_AFFINITY_MASK=1`; iterate
+grade unless the DRM-holder check says otherwise; the sycl-tla C2 control
+(`gemm_bf16`, same shape, same harness) re-run beside every P-A cell so any
+harness-level difference cancels (the slab probe's convention). One defect,
+one fix, one measurement; the first correct build's number is the number.
+
+#### A3.1 P-A - our OpenCL C bf16 DPAS GEMM on the L0 list (CANDIDATE, go/no-go)
+
+| | pre-registered |
+|---|---|
+| **rate, gate‖up M = 2048** | **146 TFLOP/s**, band 135-155 (basis: §A4.9) |
+| rate, gate‖up M = 1024 / 4096 | 152 / 114 (sycl-tla's 160.68 / 119.73 × the same 0.95) |
+| rate, `down` M = 2048 | 156 (sycl-tla's 164.21 × 0.95) |
+| **correctness** | against `gemm_bf16` on identical inputs: **predicted bitwise identical** (same `dpas.8x8` instruction, same ascending 16-wide k order, single accumulator chain per output, alpha = 1 exact, beta = 0, no split-K). Bar if not bitwise: `gemm_batched_test.cc`'s own check - 4096 sampled outputs vs a `double` reference, `err ≤ 64 × 2⁻²⁴ × Σₖ|aₖbₖ| + 2⁻²⁴`. Determinism: two runs into two buffers bitwise equal. |
+| **build gate, before any timing counts** | `.zeinfo`: `grf_count 256`, `simd_size 16`, `has_dpas true`, no `spill_mem_size`, no `private_size`; Xe2 `.asm`: 32 `dpas.8x8` per k-tile body, 3 `lsc_load_block2d` + 2 prefetch-form `lsc_load_block2d` per k-tile, 16 `lsc_store_block2d` in the epilogue, no scatter/gather `send` and no register shuffles inside the k-loop (§A4.8). A build that fails this gate is a **defect fixed once** (the 256-GRF option or a spill), not a tuning pass. |
+| **decision rule (binding, from the brief)** | **≥ 140 → proceed to P-B. 128-140 → run P-B, report the margin as thin. < 128 → the pure-Level-Zero direction stops here; report and do not tune.** |
+
+#### A3.2 P-B - slab dequant + P-A's GEMM on ONE in-order L0 list (CANDIDATE payoff)
+
+Runs only if P-A ≥ 128. Re-runs A24's Probe A battery (gate‖up, dequant a
+`[K][Ns]` bf16 slab into L2, GEMM that slab, repeat) with **zero host waits**:
+`pf_dequant_tile`'s slab form already runs on the L0 list; with P-A the GEMM
+does too, so the in-order list is the only ordering. Baseline = today's two-pass
+(C1 + C2 with sycl-tla's GEMM, ~205 + ~656 ms/chunk).
+
+| | pre-registered |
+|---|---|
+| **saving, Ns = 1024** | `112.1 − 656 × (150/R_PA − 1)` ms/chunk-equivalent → **+94 at R_PA = 146**, +65 at 140, 0 at 128 (derived, §A2) |
+| saving, Ns = 2048 | `33.0 − 656 × (150/R_PA − 1)` → +15 at 146 (derived) |
+| **handoff gone - verified, not assumed** | L0 kernel-timestamp events on the last slab dequant and the first GEMM launch of each pair: device-side gap **≤ 5 µs** (vs the 22.35 µs host wait A24 measured); the timed region contains **zero** `zeCommandListHostSynchronize`/`sycl::queue::wait` calls by construction |
+| correctness | slab dequant bitwise vs production over the sampled slabs (the slab probe already measured this for the kernel); GEMM as P-A |
+| **decision rule** (the slab probe's own bands, applied to the *net* saving, which already contains P-A's GEMM delta because P-A's GEMM is what the battery runs) | **≥ 90 ms/chunk saved → recommend speccing the pure-Level-Zero prefill; 30-90 → priced, operator rules; < 30 → dead** |
+| derived consequence to print | chunk = 1456 − saving → t/s; compare against §A2's 1504-1524 ceiling |
+
+#### A3.3 P-C - oneDNN `bf16_int4` matmul (REFERENCE TARGET)
+
+| | pre-registered |
+|---|---|
+| **rate, gate‖up M = 2048** | **≈ 150 TFLOP/s, band 135-175, hard floor 96.0** (§A1) |
+| correctness | 0 mismatches vs `tools/oracle/dequant.py` on real layout-0 weights after the K-contiguous repack (A23's identity-extraction method, one full production matrix), modulo the IEEE `+0/−0` class A23 characterised (D2, 6.642 %); any other mismatch fails the probe |
+| **what it sets** | the rate an own in-kernel int4 GEMM must reach to beat the two-pass: break-even `R_int4 = 99.64 / (0.6563 + 0.205) = 115.7 TFLOP/s` (derived); at oneDNN's predicted 150 the four int4 linears cost 664 ms/chunk → **−197 ms/chunk vs today's 861** (derived) - the single largest term any design on the table can remove |
+| decision rule | none as a candidate (A0). Record R; if R < 96 → probe defect (§A1's falsifier), fix once. §1.3's residency arithmetic (+12.16 GB second copy) is recomputed against live headroom only if a future spec wants oneDNN's layout - not for this probe. |
+
+#### A3.4 P-D - Intel's Xe2 chunked GDN kernel (REFERENCE TARGET)
+
+| | pre-registered |
+|---|---|
+| **time per chunk, C = 2048, 48 GDN layers** | **150-300 ms**, central 220 (§2.3's 150-400 band, its top cut by §A1's ≤ 495 non-GEMM bound less attention and small ops); ours is **303 ms measured** (A30) |
+| numerics | band re-measured and recorded against our `gdn_chunk` on identical inputs; the **token gate** (golden + RTN + determinism) is the arbiter, not A22's 3.506e-02 / 1.197e-03 (A25/A26 precedent) |
+| shim | the torch-free wrapper §2.1 sized at ~130 lines; if torch reaches deeper than the 18 wrapper references, that is the finding and the probe stops |
+| **what it sets** | the delta `303 − t_Intel` is the prize for an own DPAS/vector GDN rewrite; **if t_Intel ≥ 303 ms, GDN is not where vLLM wins and the residual gap is entirely GEMM + dequant** - pre-registered interpretation, written before the number |
+| decision rule | none as a candidate; record and price |
+
+#### A3.5 The Phase-2 deliverable table (template, filled by measurement)
+
+| path | per-chunk ms | t/s | % of 1973 | source |
+|---|---:|---:|---:|---|
+| today | 1456 | 1406 | 71.3 | measured (RECORD) |
+| P-A + P-B (candidate) | 1456 − saving_PB | | | measured P-B net |
+| + own int4 in-kernel GEMM at P-C's rate (target) | − (861 − 99.64/R_PC · 1000) | | | derived from P-C |
+| + own GDN at P-D's time (target) | − (303 − t_PD) | | | derived from P-D |
+
+### A4. P-A kernel design - `pf_gemm_bf16`
+
+Concrete enough to implement from; every choice carries its reason and, where
+the record does not settle it, says so.
+
+#### A4.1 Contract and launch
+
+```
+C[M][N] fp32  =  A[M][K] bf16  ·  B[K][N] bf16          (lda = K, ldb = N, ldc = N)
+```
+
+This is `gemm_bf16`'s exact contract (`src/runtime/prefill/gemm.h`) and the
+layout the production walk already holds: `A` is the bf16 activation `x`
+(`step.cc:52`), `B` is `dequant_to_bf16`'s `[K][N]` scratch (`dequant.h:13`),
+i.e. the weight matrix `W[N][K]` stored transposed, so the product is
+`C = A · Wᵀ`. The brief's "`Bᵀ` for weights `[N][K]`" is this same product;
+the kernel consumes the scratch as it is written today. **No repack, no
+second copy, no producer changes.**
+
+```c
+#pragma OPENCL EXTENSION cl_intel_subgroups : enable
+#pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
+#pragma OPENCL EXTENSION cl_intel_split_work_group_barrier : enable
+__attribute__((reqd_work_group_size(512, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void pf_gemm_bf16(__global const ushort* restrict A,
+                           __global const ushort* restrict B,
+                           __global float* restrict C,
+                           uint M, uint K, uint N);
+```
+
+Launch through the prefill list: `cx.launch(k, M/256, N/256, 1, {PtrArg(A),
+PtrArg(B), PtrArg(C), arg_val(M), arg_val(K), arg_val(N)})`. `M` is a runtime
+argument (the family rule: no `M` in a name). Work-group `(gx, gy)` owns the
+output tile `m0 = 256·gx, n0 = 256·gy`; **x is the M axis** so consecutive
+dispatch ids share a B column-block (§A4.2's raster). Requirements, all met by
+every production shape (derived): `M % 256 == 0` (C = 2048, and the M cells
+1024/2048/4096), `N % 256 == 0` (34816 = 136·256, 5120 = 20·256, 16384,
+14336 = 56·256, 248320 = 970·256), `K % 32 == 0` (5120, 6144, 17408 = 544·32);
+bases 64-byte aligned and pitches multiples of 16 bytes (the 2D block IO
+rule `probe_gemv_loads.cl` records) - every pitch here is `K·2`, `N·2` or
+`N·4` bytes, all multiples of 64. A tail-masked variant for
+`M % 256 != 0` is a production item, not part of the probe.
+
+#### A4.2 Tiling across the memory hierarchy, and why those sizes
+
+**Work-group tile 256 (m) × 256 (n) × 32 (k); 32 subgroups in an 8 (m) × 4 (n)
+arrangement; subgroup tile 32 (m) × 64 (n) × 32 (k); DPAS atom 8 × 16 × 16.**
+These are sycl-tla's numbers (`xe_gemm_config.h`: `Shape<_256,_256,_32>`,
+`Shape<_8,_4,_1>`, `XE_DPAS_TT<8,float,bf16>`), kept deliberately: they are
+the only tile whose rate on this part is measured (153.69 at gate‖up M = 2048,
+164.21 at `down`), and every deviation would be an unmeasured variable in a
+one-build probe. The reasons they are right, argued rather than inherited:
+
+| level | what lives there | size | why |
+|---|---|---:|---|
+| **GRF (one thread = one subgroup)** | C accumulators 32×64 fp32 = 16 `float8` | **128 GRF** | 16 independent `dpas` chains per k-step hide the dpas latency; 32×64 is the largest tile whose accumulators plus one k-tile of operands fit 256 GRF |
+| | A fragments, 32 m × 32 k bf16 (4 m-atoms × 2 k-steps × `short8`) | 32 GRF | one 2D block load, §A4.5 |
+| | B fragments, 32 k × 64 n bf16 (4 n-atoms × 2 k-steps × `int8`) | 64 GRF | two 2D block loads, §A4.4 |
+| | **total live** | **224 of 256** | ~30 left for descriptors, loop, coordinates - the reason `-cl-intel-256-GRF-per-thread` is mandatory (§A4.8) and why 128 GRF gave P2 a 33× loss |
+| **L1 / Xe-core (no SLM)** | the WG's current k-tile of A (256×32×2 = 16 KB) and B (32×256×2 = 16 KB), plus two prefetched k-tiles | ≤ 96 KB in flight | every B line is read by the 8 m-subgroups and every A line by the 4 n-subgroups → 6× L1 request amplification (192 KB per k-tile per WG), identical to sycl-tla's; SLM staging is the CUDA idiom - on Xe the 2D block loads deliver fragments to GRF directly and the L1 provides the intra-WG reuse, so SLM would add barriers and copies for nothing |
+| **L2 (24 MB)** | per wave of 32 WGs = 8 m-blocks × 4 n-blocks: B 4 × 2.62 MB = 10.5 MB (read from DRAM once, from L2 by 7 more WGs), A 21.0 MB (all of it, every wave), C 8.4 MB written | ~40 MB touched per wave | the slab probe measured exactly this B-residency effect (Ns 1024 slab 10.5 MB → 158.91 TFLOP/s, faster than full width); A is partially resident - its re-read is the DRAM term below |
+| **DRAM** | A 21.0 MB, B 356.5 MB, C 285.2 MB (gate‖up M=2048) | min 663 MB; with A re-read per wave ≤ 34 × 21 + 356.5 + 285.2 = **1.36 GB** | at 4.75 ms → **≤ 285 GB/s = 48 % of the 590 GB/s reference (derived)** - DRAM is not the roofline; the XMX issue rate and latency hiding are |
+
+Arithmetic intensity at the subgroup: per k-tile 2·32·64·32 = 131 kFLOP on
+6 KB of fragments = **21.3 FLOP/B from L1 (derived)** - that is what lets four
+threads on one XVE keep one XMX pipe fed while each other's loads return.
+
+**Raster.** sycl-tla's scheduler picks `AlongM` when `tiles_n > tiles_m`
+(`tile_scheduler_params.h:337-339`), true for every production shape, so
+its measured rates were taken with m fastest - the wave composition above.
+`pf_gemm_bf16` makes that explicit (`gx` = M axis). Owning the raster is a
+lever sycl-tla does not give us: at M = 4096 (A = 42 MB > L2) a grouped
+raster that walks all N over m-blocks 0-7 first, then 8-15, halves A's
+re-read traffic (2.86 → 1.43 GB) at the cost of reading B twice (+356 MB) -
+**named, not built** in the probe (§A4.10 R6).
+
+#### A4.3 Subgroup size, grid, occupancy
+
+- **SIMD16.** `intel_sub_group_bf16_bf16_matrix_mad_k16` is defined for
+  sub-group 16 (docs/prefill-gdn-scan-dpas §3.1); the device offers 16 and 32.
+- **Work-group 512 work-items = 32 subgroups = 32 hardware threads.** With
+  `-cl-intel-256-GRF-per-thread` an XVE holds **4** threads (the 128-GRF file
+  split two ways instead of four), so an Xe-core's 8 XVEs hold **32 threads =
+  exactly one work-group**. Device-wide: 32 Xe-cores × 8 XVEs × 4 threads =
+  **1024 thread slots = 32 work-groups in flight**. (At 128 GRF the same
+  Xe-core holds 64 threads - the count the DPAS-scan doc measured with its
+  256-work-item groups.) P2 measured local size 512 at 256 GRF launching and
+  running on this driver.
+- **Waves (derived).** gate‖up M=2048: 8 × 136 = **1088 WGs = 34.0 waves, no
+  tail**; `down`: 8 × 20 = 160 = 5.0; M=1024: 544 = 17.0; M=4096: 2176 =
+  68.0. Per WG 2·256·256·5120 = 671 MFLOP; at the 183.5 peak an Xe-core does
+  5.73 TFLOP/s → 117 µs per WG; at 150 TFLOP/s → 143 µs; 34 waves × 143 µs =
+  4.86 ms, against C2's measured 4.751 ms at 153.69 - the model reproduces
+  the record to 2 %.
+- Subgroup `s` (0..31): `sm = s >> 2` owns rows `m0 + 32·sm .. +31`,
+  `sn = s & 3` owns columns `n0 + 64·sn .. +63` - sycl-tla's
+  `Stride<_4,_1,_0>` mapping, so the four subgroups sharing A rows are
+  adjacent.
+
+#### A4.4 B: packing and staging
+
+**B is not repacked and not staged. The VNNI pairing DPAS needs is done by
+the LSC in the load**, exactly as sycl-tla's `XE_LOAD_2D_VNNI` does (its
+`block_2d_transform_selector` picks the `V` message for N-contiguous B):
+
+```c
+uint bfrag[2][32];                       // [n-half][32 dwords] = 2 × 2 KB
+intel_sub_group_2d_block_read_transform_16b_32r16x2c(
+    (__global void*)B, (int)(N * 2u), (int)K, (int)(N * 2u),
+    (int2)((int)(n0 + 64u * sn + 32u * h), (int)k0), bfrag[h]);   // h = 0, 1
+```
+
+One message loads 32 k-rows × 32 n (2 KB, 32 full 64-byte lines) and returns,
+per lane `n`, `bfrag[h][c*16 + j] = (B[k0+2j+1][n0+64sn+32h+16c+lane] << 16)
+| B[k0+2j][…]` - even k in the low half, which is precisely the B fragment
+the scan probe measured bit-exactly (§3.1 of that doc: "int r = (B[2r+1][n]
+<< 16) | B[2r][n]"). The `int8` for (n-atom `b = 2h + c`, k-step `s`) is
+`bfrag[h][c*16 + 8s .. +7]` - a compile-time register slice, no `mov`.
+Memory cost: **zero** - no second copy, no per-launch pass, no dequant
+change. The builtin is declared in IGC's OpenCL headers
+(`opencl_cth_pre_release.h:3512`) and covered by its `ocloc` tests
+(`IGC/ocloc_tests/Builtins/cl_intel_subgroup_2d_block_io/…/block_reads.cl:330`);
+its 8-row `16b` siblings already compile and run in this tree
+(`gemv.cl:102`, `probe_attn.cl:527-533`).
+
+Two alternatives, considered and not taken, with the reason:
+
+- **`[N][K]` (K-contiguous) B with the transpose message**
+  `intel_sub_group_2d_block_read_transpose_32b_16r8x1c` - one 512-byte
+  message per fragment (16 rows × 32 B, half lines), i.e. 4× the messages
+  and 2× the line touches of the transform load for the same bytes; it is
+  the right tool for the attention K-cache (`gemm_bf16`'s `transB`), not for
+  a scratch we control.
+- **A pre-tiled `[N/16][K/2][16]`-dword scratch read with 1D
+  `intel_sub_group_block_read_ui8`** (the `gemv_bf16.cl` idiom, 512 B per
+  message): equal line efficiency, but it changes `pf_dequant_tile`'s write
+  pattern on a kernel P3 measured write-allocate-bound, for no gain over the
+  transform load. Recorded as the **fallback** if the transform variant
+  fails to compile on the box's IGC.
+
+#### A4.5 A: loads; C: accumulation and store
+
+```c
+ushort afrag[64];                        // 32 m × 32 k, 2 KB, one message
+intel_sub_group_2d_block_read_16b_32r16x2c(
+    (__global void*)A, (int)(K * 2u), (int)M, (int)(K * 2u),
+    (int2)((int)k0, (int)(m0 + 32u * sm)), afrag);
+```
+
+Row-major `[M][K]` as the producers write it; the message returns per lane
+`afrag[c*32 + r] = A[m0+32sm+r][k0+16c+lane]` - lane = k column, register =
+m row, the measured A fragment. The `short8` for (m-atom `a`, k-step `s`) is
+`afrag[s*32 + 8a .. +7]`. This is sycl-tla's `XE_LOAD_2D<16,32,32,16>`
+message and its `reorder` between copy and MMA fragments is the identity
+(`reorder_xe.hpp`: `dst0 = src0` for same-type) - so our design pays nothing
+sycl-tla does not, and saves nothing either.
+
+**C** accumulates in 16 `float8` (fp32) zero-initialised, k ascending in
+16-wide steps, one chain per output element; the k-step loop is fully unrolled
+(2 steps) and the 32 `dpas` per k-tile are issued **b-outer, a-inner** -
+consecutive `dpas` share the B operand (`src1`, the 8-GRF operand) and walk
+four accumulators, the pattern IGC fuses into its DPAS macro. The epilogue
+writes each atom with one message:
+
+```c
+intel_sub_group_2d_block_write_32b_8r16x1c(
+    (__global void*)C, (int)(N * 4u), (int)M, (int)(N * 4u),
+    (int2)((int)(n0 + 64u * sn + 16u * b), (int)(m0 + 32u * sm + 8u * a)),
+    (uint*)&acc[a][b]);                  // 16 stores per subgroup, 8 rows × 64 B each
+```
+
+- sycl-tla's `XE_STORE_2D<32,8,16>`. No C read (beta = 0), no SLM, fp32 out
+so the correctness bar against `gemm_bf16` is on identical bytes. (A bf16 C
+would halve the 285 MB epilogue traffic - a rounding-point change under A6,
+priced as a later item, not here.)
+
+#### A4.6 Prefetch
+
+Cooperative, **two k-tiles ahead** (sycl-tla's `MainloopXeL1Staged<2>`):
+the WG's A and B tiles for k-tile `t+2` are split across the 32 subgroups so
+each issues two small messages and the whole 32 KB lands in L1 once:
+
+```c
+// A: 256 rows × 32 k - subgroup s takes rows 8s..8s+7 (8 lines)
+intel_sub_group_2d_block_prefetch_16b_8r16x2c((__global void*)A, K*2, M, K*2,
+    (int2)(k_pf, m0 + 8u * s));
+// B: 32 k-rows × 256 n - subgroup s takes rows 8·(s>>3).., columns 32·(s&7).. (8 lines)
+intel_sub_group_2d_block_prefetch_16b_8r16x2c((__global void*)B, N*2, K, N*2,
+    (int2)(n0 + 32u * (s & 7u), k_pf + 8u * (s >> 3)));
+```
+
+Loop body, mirroring `xe_mma.hpp` line for line: prologue prefetches k-tiles
+0 and 1; then per k-tile `t`: `intel_work_group_barrier_arrive(CLK_LOCAL_MEM_FENCE)`;
+load A (1 message) and B (2 messages) for `t`; prefetch `t+2` if it exists;
+32 `dpas`; `intel_work_group_barrier_wait(CLK_LOCAL_MEM_FENCE)`. The split
+barrier keeps the 32 subgroups within one k-tile of each other so their L1
+requests for shared lines coincide and the cooperative prefetch is timed for
+everyone; it never waits on data. The extension is declared in IGC's
+`opencl-c-intel.h:1277-1289`; **if the box's driver does not report
+`cl_intel_split_work_group_barrier`, the fallback is one plain
+`barrier(CLK_LOCAL_MEM_FENCE)` at the loop top** (priced §A4.10 R3). Why two
+ahead and not more: at ~143 µs per WG over 160 k-tiles a k-tile is ~0.9 µs,
+so two tiles cover ~1.8 µs of DRAM latency plus contention; the loads probe
+measured `prefetch()` distance as a ≤ 2 % effect (pf1/pf2/pf4 on GEMV), and
+the record has no GEMM-side distance measurement - **distance is the first
+post-probe knob, not a probe variable**.
+
+#### A4.7 What the k-loop costs per thread, and why it can hit the rate
+
+Per k-tile per thread: 3 block loads (A 2 KB, B 2 × 2 KB), 2 prefetches, 32
+`dpas` (4096 FLOP each), ~2 barrier ops, a handful of coordinate adds. Four
+threads share one XVE's XMX, so per k-tile the XVE must issue 128 `dpas`; at
+the 183.5 peak that is one `dpas.8x8` per **5.7 ns per XVE (derived: 183.5 /
+256 XVEs / 4096 FLOP)** → ~730 ns of XMX work per k-tile-round, during which
+the 12 loads per XVE must return from L1 (prefetched) - hundreds of cycles,
+well inside the window. The steady state is XMX-bound provided (i) the
+prefetch keeps the loads L1 hits, (ii) the 16 accumulator chains keep the dpas
+pipe from stalling on its own latency, and (iii) IGC keeps everything in 256
+GRF. Those three are the design's load-bearing assumptions and §A4.8/§A4.10
+say how each is checked.
+
+#### A4.8 AOT requirements and the assembly gate
+
+- `add_ocloc_kernel(pf_gemm_bf16 SOURCE … OPTIONS -cl-intel-256-GRF-per-thread)`
+  - `cmake/ocloc.cmake`'s existing `OPTIONS` hook carries it into the `ocloc
+  compile -options` line at **build** time. This is P2's lesson applied where
+  it bit: a runtime `IGC_*` variable never reaches an AOT compile; the option
+  must be on the compiler's command line, and the built artifact is the
+  evidence. Every prefill kernel today builds at 128 GRF; this is the first at
+  256, so the probe adds the option for its target only (probe-only CMake).
+- **Dump and inspect on the box, before any timing counts**
+  (`IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=…` around the `ocloc` call -
+  the method §4.2 of the DPAS-scan doc used):
+  1. `.zeinfo`: `grf_count 256`, `simd_size 16`, `has_dpas true`,
+     `spill_mem_size` and `private_size` **absent**, `barrier_count 1`,
+     `slm_size 0`.
+  2. Xe2 `.asm`: **32 `dpas.8x8 (16|M0)` per unrolled k-tile body** (64 if
+     IGC unrolls two), in runs of four sharing `src1` and marked as a macro
+     (`{Atomic}`); **3 `lsc_load_block2d`** (one 32×32 `.d16`, two transform
+     `.d16 … t`) plus **2 prefetch-form `lsc_load_block2d … null`** per
+     k-tile; **16 `lsc_store_block2d`** in the epilogue; **no** `send` with a
+     per-lane address vector inside the loop, **no** `mov` between the loads'
+     destinations and the `dpas` sources (the fragments must alias the load
+     payloads directly), **no** scratch/stack access anywhere.
+  3. A 128-GRF build of the same source is **not** timed; the `.zeinfo`
+     check replaces P2's before/after. "Zero spill" alone is not clearance -
+     P2's 128-GRF binary also had zero spill and a degenerate schedule; the
+     `dpas`-per-k-tile and no-`mov` counts above are the schedule check.
+
+#### A4.9 Predicted TFLOP/s, with its basis
+
+Start: sycl-tla's **153.69 TFLOP/s** at gate‖up M = 2048 (C2, measured) =
+83.8 % of the 183.5 peak. The design above issues the **same LSC messages
+(`lsc_load_block2d` 32×32 d16 for A, two 32×32 d16-transform for B, 8×16 d32
+stores for C, 2-deep cooperative prefetch), the same `dpas.8x8` in the same
+count and order, the same 224-GRF budget, the same 512-thread work-group and
+raster, and the same split barrier**. Each structural difference, with its
+direction:
+
+| difference vs sycl-tla's mainloop | direction | estimate |
+|---|:---:|---:|
+| `dpas` and the 2D loads reach IGC as **intrinsics** (OpenCL builtins) instead of sycl-tla's **inline vISA `asm` blocks** (`mma_xe.hpp`, `copy_xe_2d.hpp`). IGC can schedule and macro-fuse intrinsics it understands; inline asm is opaque to its LLVM-level passes but scheduled identically by the vISA finalizer. Could go either way. | ± | −3 … +3 % |
+| the 2D descriptor payload (base, width, height, pitch, coord) is an argument of every builtin call; sycl-tla keeps one live payload per operand and increments its coordinate. If IGC rebuilds payloads per iteration that is ALU work co-issuing beside the dpas - cheap but not free; if it fails to hoist the uniform parts it is worse. | − | −2 … −6 % |
+| no `reorder` stage - sycl-tla's is the identity for bf16→bf16 | 0 | 0 |
+| own raster = sycl-tla's effective `AlongM` at every production shape | 0 | 0 (M ≤ 2048); potential + at M = 4096, not in this build |
+| first hand-written kernel: prologue/epilogue code quality, coordinate arithmetic, loop overhead | − | −1 … −3 % |
+| **net** | | **−5 % ± 5 %** |
+
+> **Pre-registered: 146 TFLOP/s at gate‖up M = 2048, band 135-155.** That is
+> above the 140 go bar with the band's lower edge above break-even; a reading
+> under 135 means one of §A4.10's named risks fired and the assembly will say
+> which. `down`: 156 (164.21 × 0.95); M = 1024: 152; M = 4096: 114 (both
+> sycl-tla's cells × 0.95). A 256-GRF failure is not inside this band - it is
+> P2's 33× class (~5 TFLOP/s) and is caught by §A4.8 before timing.
+
+#### A4.10 Risks, ranked, each with the measurement that detects it
+
+| # | risk | what it would cost | detector |
+|---|---|---|---|
+| **R1** | **Register allocation at 224 live GRF.** IGC must keep 16 `float8` accumulators, 64 + 32 fragment ushorts/uints and the descriptors in registers with no dynamic indexing; a private-memory fallback or a conservative schedule is P2's mechanism. | 33× class (P2), or a 10-30 % scheduling tax | §A4.8: `grf_count 256`, no `spill_mem_size`/`private_size`, 32 `dpas` per k-tile with no interleaved `mov`s or scratch `send`s |
+| **R2** | **2D descriptor overhead in the k-loop.** Per-call payload construction or failure to prove the payload uniform → ALU instructions or serialised sends between the dpas runs. | −2 … −6 %, possibly more | non-`dpas`, non-`send` instruction count per k-tile body in the `.asm` (target: a few dozen); if high, the fix is loop-carried coordinates - a second build, recorded as such |
+| **R3** | **Split barrier unavailable** (`cl_intel_split_work_group_barrier` not reported by the box's IGC/driver). | compile failure → fallback plain barrier, estimated −3 … −8 % (subgroups serialise the next tile's loads behind the slowest dpas run) | immediate at compile; in the `.asm` a single `sync.bar`/`nbarrier` pair vs arrive/wait forms |
+| **R4** | **Prefetch not landing** (wrong cache hints, wrong distance, L2-only). | loads become L2/DRAM latency-exposed; every XVE's 4 threads miss in lockstep → rate falls toward 100-120 | `.asm` shows 2 prefetch-form `lsc_load_block2d … null` per k-tile with `.ca` hints; symptom: rate < 135 with R1-R3 clean → distance/hints become the first post-probe knob |
+| **R5** | **Fragment order of the transform load differs from the measured dpas B layout** (or A's from the 32-row read). | correctness failure, not a rate; one compile-time index permutation | bitwise/tolerance check vs `gemm_bf16` fails; the identity-matrix probe of §3.1's method isolates which operand |
+| **R6** | **L2 behaviour at M = 4096** (A 42 MB > L2; the slab probe's cutoff sits exactly at the cache size). | sycl-tla shows it already: 119.73; ours 114 predicted | the M sweep itself; the grouped raster of §A4.2 is the named lever |
+| **R7** | **Occupancy assumption**: a 512-work-item WG at 256 GRF must be schedulable as one Xe-core's 32 threads. | launch failure or 2-wave serialisation | P2 measured local size 512 at 256 GRF running; a launch error is immediate; a rate near half of prediction with clean assembly points here |
+| **R8** | **Alignment** (2D block IO: 64 B base, 16 B pitch). | fault or `ZE_RESULT_ERROR_*` at launch | all production pitches are multiples of 64 (derived, §A4.1); USM allocations are ≥ 64 B aligned; a probe assert on the pointers |
+
+The top two are R1 and R2: both are properties of what IGC makes of a
+hand-written 224-GRF loop, both are invisible from the source and visible in
+the `.asm`, and both are the reason the assembly gate runs before the clock.
+
+#### A4.11 What the record does not settle, and the choice made
+
+- **Prefetch distance** (2): no GEMM-side measurement exists; 2 is sycl-tla's
+  measured configuration; kept.
+- **Barrier flavour** (split): the record has the DPAS scan at 3 plain
+  barriers per sub-chunk hitting its time bar, and no split-barrier
+  measurement; the split form is chosen because it is what sycl-tla's 153.69
+  used and it is declared in IGC's headers; fallback recorded.
+- **fp32 vs bf16 C**: fp32 kept so the correctness bar is on identical bytes
+  and no rounding point moves (A6); bf16 C priced later.
+- **Tile 256×256×32 with 32×64 subgroups**: kept because it is the only
+  measured point; a 256-GRF-bound design has no larger subgroup tile
+  available, and a smaller one lowers arithmetic intensity - so the choice is
+  also the arithmetic's, not only precedent's.
+- **Hardware dispatch order walks x fastest**: assumed for the raster (it is
+  what sycl-tla's `BlockIdxX` mapping relies on too); if the wave composition
+  differs, the C2 control in the same harness still gives a like-for-like
+  rate, and the DRAM headroom (48 %) means the raster is a few-% effect at
+  M ≤ 2048.
