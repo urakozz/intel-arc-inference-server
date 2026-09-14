@@ -13,13 +13,18 @@ Authority for what the checkpoint ships and for the tokenizer options is
 snapshot on the box); this spec adopts its recommendations and adds the
 server. Every number is measured unless marked derived/estimated.
 
-**Implementation status, 2026-09-09:** T1-T3 are shipped host-side. T4 added
-`b70-serve` and reached its real-engine gate, which is **blocked before
-performance measurement**: raw cjk completion IDs diverge after a 22-token
-prefix between server prefill and `b70-decode --ids` decode-ingest. No engine,
-kernel, loader, model, tokenizer, or server implementation was changed to work
-around it; see `2026-09-09-spec3-gate-memo.md` for the recorded finding and
-ruling request. No `spec3-done` tag exists.
+**Implementation status, 2026-09-14:** T1-T3 are shipped host-side. T4 added
+`b70-serve`, and its real-engine gate - bar 3 - is **now met**: commit
+`0ce35c4` gave `b70-decode --ids` a `--prefill` flag that routes the CLI
+reference through `Engine::prefill`, putting it on the same engine path
+`b70-serve` uses. `golden_server_test` passes with exact prompt-id and
+32/32 generated-id equality on all three golden prompts (prose, code, cjk);
+see the 2026-09-14 addendum (§4) in `2026-09-09-spec3-gate-memo.md` for the
+run record, including the one transient `ZE_RESULT_ERROR_DEVICE_LOST` seen
+right after a box outage/reboot (resolved by an identical retry) and this
+task's confirming run on a fresh post-reboot build. Bars 4-5
+(llama-benchy coherence/rows; HTTP tg within 2% of CLI) and host sampling
+remain deferred by operator ruling. No `spec3-done` tag exists.
 
 ## 1. Where we start
 

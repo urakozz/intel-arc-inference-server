@@ -11,6 +11,11 @@ terminated with SIGTERM and reaped; no server was left running. Tasks 3-5 were
 not run after that hard-bar failure, so this memo deliberately contains no
 HTTP, CLI-control, or host-sampling measurements.
 
+**Update 2026-09-14: bar 3 is now met - see §4.** The comparator question this
+memo raised in §2 was resolved by putting both sides on the same engine path
+(`--prefill`), not by relaxing the server test. §1-§3 below are kept as the
+historical record of the 2026-09-09 finding.
+
 ## 1. Bar score
 
 | bar | result | evidence |
@@ -77,3 +82,49 @@ only serving path.
 
 Requested ruling: choose the correctness comparator/path before any
 llama-benchy, HTTP-cost, or host-sampling work resumes.
+
+## 4. 2026-09-14 - bar 3 passed with `--prefill`
+
+Commit `0ce35c4` (`feat(cli): add --prefill to ids replay`) answered the
+ruling request in §3 by giving the CLI reference a way onto the server's own
+path instead of loosening the server test: `b70-decode --ids <file> --n N
+--prefill [--pp-chunk C]` now routes the prompt through `Engine::prefill`
+instead of `Engine::ingest`. `tests/server/golden_server_test.cc` passes
+`--prefill` to the CLI reference, so `b70-serve` (which prefills) and the CLI
+reference run the **same engine path** - the tie question in §2 no longer
+applies, and exact equality is the legitimate bar.
+
+A same-day attempt at bar 3 on this branch failed at startup with
+`ZE_RESULT_ERROR_DEVICE_LOST` on the first Level Zero memory copy, shortly
+after the box had lost its network and rebooted; one identical retry passed
+bar 3 in 115.52 s with exact prompt-id and 32/32 generated-id equality on all
+three golden prompts. That run was never committed - it exists only in a log.
+
+This is the committed confirmation, run after another box reboot (uptime
+~4h22m at run start, no other GPU work observed, load ~16 from an unrelated
+`clang` build left alone). Build: `tools/box.sh build`, 100% clean. Full
+suite: `ZE_AFFINITY_MASK=1 ctest --test-dir build --output-on-failure`, 66
+tests, **100% passed, 0 failed** (`golden_gate_test` and `prefill_gate_test`
+skipped - no CPU oracle dump for this checkpoint, a known missing input, not
+a regression). No `ZE_RESULT_ERROR_DEVICE_LOST` on this run. `golden_server_test`
+passed in 126.93 s:
+
+| prompt | prompt ids | generated ids |
+|---|---|---|
+| prose | exact | 32/32 exact |
+| code  | exact | 32/32 exact |
+| cjk   | exact | 32/32 exact |
+
+From `build/Testing/Temporary/LastTest.log`:
+
+```
+prose: prompt ids identical, 32/32 generated ids identical
+code: prompt ids identical, 32/32 generated ids identical
+cjk: prompt ids identical, 32/32 generated ids identical
+```
+
+**Bar 3 is met**, on both the transient-retry run and this clean post-reboot
+run, via the same engine path on both sides (`--prefill`). Bars 4-5
+(llama-benchy coherence/rows; HTTP tg within 2% of CLI) and host sampling
+remain deferred by operator ruling - not attempted here, per the task scope
+that produced this addendum. No `spec3-done` tag is created by this run.
