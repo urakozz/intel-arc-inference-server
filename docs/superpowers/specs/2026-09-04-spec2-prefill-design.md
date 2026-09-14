@@ -1,12 +1,14 @@
 # Spec 2 - Prefill
 
-Status: **Gate row 1 2026-09-05 at `e44c40c` (= `1cb79ae` + one harness-only
-commit): 1377.20 t/s pp4096 device-side vs bar 1973 - SHORT (69.8%), iterate
-grade; re-gate after GDN tasks (b)+(c).** Not closed, no tag; the memo is
-[`2026-09-05-spec2-gate-memo.md`](2026-09-05-spec2-gate-memo.md) and the rows are
-in docs/BENCHMARKS "The spec-2 gate rows". §6 bar 2 (the multi-chunk golden gate
-over a ≥ 2048-id prompt) is still **unmet** - the CPU oracle dump has not been
-run. Originally: design for review, 2026-09-04. Follows spec 1.7 (closed on the
+Status: **Closed 2026-09-14, tag `spec2-done`: `pp4096` 1406.18 t/s vs bar 1973
+- SHORT (71.3%), record grade (2026-09-09, `977a31c`); golden gates 93/93 +
+93/93 determined rows exact on `urakozz@84575a1` (2026-09-14, `a6ce30e`).**
+Correctness met, performance short, one correctness bar owed: **§6 bar 2** (the
+multi-chunk golden gate over the ≥ 2048-id prompt) is **not claimed** - it needs
+a long oracle dump for this checkpoint. The memo is
+[`2026-09-05-spec2-gate-memo.md`](2026-09-05-spec2-gate-memo.md) (§8 closes it);
+rows and gates are in docs/BENCHMARKS "The spec-2 re-gate rows". History: gate
+row 1 2026-09-05 at `e44c40c` read 1377.20 (69.8%), iterate grade. Originally: design for review, 2026-09-04. Follows spec 1.7 (closed on the
 operator's 32.0 t/s line; tag `spec1.7-done`). Phase 1's target has two
 halves - `tg256 > 31.50` and `pp4096 ≥ 1973` - and only the first is met.
 This spec is the second half: a real prefill for the same model, on the same

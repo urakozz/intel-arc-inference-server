@@ -498,10 +498,48 @@ Chunk-width sensitivity, one run each, context and not the gate (device 0):
 - A 4096-token prompt now prefills in **2.913 s** against the 121 s the
   decode-replay ingest took: **41.5×**.
 
-**Not a gate, and no tag.** The golden gates (`golden_gate_test`,
-`prefill_gate_test`) SKIP: a golden set belongs to its checkpoint, and the CPU
-oracle dump for `84575a1` does not exist yet. Rows without their correctness
-bars are numbers, not a gate - `spec2-done` waits for the dump.
+**~~Not a gate, and no tag.~~ Superseded 2026-09-14: the golden gates ran and
+are green, and spec 2 is closed (tag `spec2-done`).** The CPU oracle for
+`84575a1` was dumped 2026-09-14 20:40-21:20 under `vllm-xpu-env-next-p314-t215`
+(`oracle-out-primary/`: prose 311,030,392 B, code 367,258,272 B, cjk
+299,192,968 B - code and cjk byte-identical in size to the Vishva set, prose 8 B
+of header apart). It is the first set dumped after `tools/oracle/dump.py` was
+made to follow `model.safetensors.index.json`: every prompt logged `shards: 8
+from model.safetensors.index.json (12 .safetensors present)`, i.e. it read the
+7-shard set the engine loads and not the stale 4-shard set beside it.
+`tools/oracle/check.sh` ran clean on all three.
+
+Both gates, device 1 (`ZE_AFFINITY_MASK=1`), build at `a6ce30e`, ctest:
+
+| gate | path | prose | code | cjk | **determined rows** | undetermined | ctest |
+|---|---|---|---|---|---|---|---|
+| `golden_gate_test` | decode ingest, one id per replay | 31 exact + 1 tie-agree | 32 exact | 30 exact + 1 tie-agree + 1 tie-member | **93/93 exact** | 3, all inside the golden argmax set | Passed, 66.59 s |
+| `prefill_gate_test` | one `Engine::prefill` per prompt | 31 exact + 1 tie-agree | 32 exact | 30 exact + 2 tie-agree | **93/93 exact** | 3, all inside the golden argmax set | Passed, 21.26 s |
+
+**The one divergence is itself a cross-check.** On `cjk` the decode path emits
+4960 at generated position 22 where the oracle emits 271 - and the oracle's own
+logits mark that row undetermined (4960 is in its argmax set), so the gate's
+tie clause holds and the teacher-forced walk matches every remaining row. The
+prefill path takes 271 at the same row. **Position 22 of `cjk` is exactly where
+`b70-serve` and `b70-decode --ids` diverged on 2026-09-09 before `--prefill`
+existed** - so that divergence, which blocked spec 3's bar 3 for five days, sat
+on a row the CPU reference cannot decide either. Ruling A26's reading of it
+(sub-ulp ties between two independently rounded paths) is confirmed by the
+oracle on this checkpoint.
+
+The tensor diagnostics mark a run of `**LOW**` tap cosines on `code` (down to
+~0.989 at layers 52-57, positions 41 and 57) while all 32 of its tokens are
+exact. Per the standing `kBar` ruling in `golden_common.h` - tokens gate,
+tensors diagnose - that is recorded, not failed.
+
+**What is and is not met at close.** Correctness: both golden gates, the
+determinism gate and the prefill-vs-decode consistency gate (18/18 under A26)
+are green on the gate checkpoint. Performance: **SHORT** - `pp4096` 1406.18 t/s
+is **71.3%** of vLLM's 1973. **Still owed and not claimed: §6 bar 2**, the
+multi-chunk golden gate over the ≥ 2048-id `long.ids` prompt at C = 1024. Its
+test is registered only while the RTN checkpoint exists (deleted 2026-09-09),
+and no long oracle dump exists for `84575a1`; it needs `PROMPTS=long` dumped for
+this checkpoint and the registration re-pointed.
 
 ### The spec-3 gate attempt - `983e852`, 2026-09-09 - BLOCKED before performance rows
 
