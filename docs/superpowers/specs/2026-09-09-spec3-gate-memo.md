@@ -128,3 +128,25 @@ run, via the same engine path on both sides (`--prefill`). Bars 4-5
 (llama-benchy coherence/rows; HTTP tg within 2% of CLI) and host sampling
 remain deferred by operator ruling - not attempted here, per the task scope
 that produced this addendum. No `spec3-done` tag is created by this run.
+
+## 5. Task 5 pre-registration - host sampling cost bar (2026-09-14, committed before measurement)
+
+Recorded here, in its own commit, before `sample_into_control` is implemented
+or measured, per plan 7d Task 5 Step 1's rule that the bar precedes the
+number.
+
+- **Bar:** host sampling (temperature/top-k/top-p, read-back + partial sort +
+  `discrete_distribution`) must cost **≤ 2% of the 31.0 ms/token step, i.e.
+  ≤ 0.62 ms/token**, measured as `sampled ms/token − greedy ms/token` on
+  `b70-serve`, same box, same checkpoint (`urakozz` `84575a1`), 3 requests each
+  side, median.
+- **Derived estimate (pre-registered, not yet measured): 0.2-0.4 ms/token** -
+  993 KB logits readback over PCIe at ~10 GB/s ≈ 0.1 ms, plus a 248,320-element
+  top-k partial sort ≈ 0.1-0.3 ms.
+- **Ship rule:** if the measured cost is ≤ 0.62 ms/token, sampling ships on by
+  default (a request may still ask for greedy). If it measures over the bar,
+  the code stays but the server's own default remains greedy-only for now
+  (`--sampling off` default), and the number is recorded, not hidden. Greedy
+  itself is never slowed either way - the readback only runs when
+  `!sampling.greedy`.
+- Measurement to follow in this same document once taken.
