@@ -160,3 +160,32 @@ carried; the §2 bar is short by 30.2% for a reason that is arithmetic and
 recorded; §3.0c's band is met at its floor. The sequence the operator ruled
 stands - **(b), then (c), then a strict-idle re-gate**, and the long-prompt
 oracle whenever the operator starts it. No tag.
+
+## 8. Closed, 2026-09-14 - the operator ruled "run the spec 2 golden gates and tag it"
+
+Everything §7 queued has run:
+
+| item | outcome |
+|---|---|
+| (b) GDN wu SIMD32 + A2/A tiles | A2 1.75×, A 1.87× adopted; the SIMD32 lever measured 1.24× slower and died (A29) |
+| (c) DPAS scan | hit its time bar at 4.0×, flipped one determined golden token, reverted by its own rule (A30) |
+| strict-idle re-gate | **`pp4096` 1406.18 t/s, RECORD grade**, 2026-09-09 at `977a31c` - the first record-grade row this project took |
+| golden gates | **93/93 + 93/93 determined rows exact** on `urakozz@84575a1`, 2026-09-14 at `a6ce30e` |
+
+Two things changed underneath the gate and both are recorded where they
+happened: the gate checkpoint became `urakozz@84575a1` after both earlier
+checkpoints were deleted from the box (A31), and the int4-`lm_head` decode
+comparison was retired, since vLLM would also be faster with one (A33).
+
+**Verdict.** The §2 bar - beat vLLM's 1973 - is **not met: 71.3%**, and §3.0c
+had already shown it unreachable by this design (the non-GDN terms alone exceed
+the chunk budget 1973 t/s allows). The deliverable that is met is the one the
+spec set out to build: a real device-side prefill, **41.5× the decode-replay
+ingest it replaced** (121 s → 2.913 s per 4096 ids), correct against the CPU
+oracle on both code paths.
+
+**Owed, and not claimed by the tag:** §6 bar 2, the multi-chunk golden gate over
+`long.ids` at C = 1024. It needs a `PROMPTS=long` oracle dump for `84575a1` and
+its test registration re-pointed off the deleted RTN checkpoint.
+
+Tag `spec2-done` is placed on the commit that records the golden gates.
