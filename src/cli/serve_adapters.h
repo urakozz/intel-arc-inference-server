@@ -1,10 +1,17 @@
 #pragma once
 
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <memory>
+#include <random>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "model/qwen35.h"
 #include "runtime/engine.h"
 #include "server/deps.h"
 #include "tokenizer/chat_template.h"
@@ -43,30 +50,141 @@ struct TemplateAdapter : server::TemplateIface {
   chat::Template tmpl;
 };
 
+// Host sampling (spec §3.5, plan 7d Task 5): temperature/top-k/top-p over one
+// replay's logits row, seeded and reproducible. `logits` holds `vocab_used`
+// or more entries; only the first `vocab_used` are ever looked at, which is
+// the mask "ids >= vocab_used never sampled" the spec asks for -- there is no
+// separate masking step because the candidate set never includes them.
+//
+// - top-k: `std::partial_sort` picks the k highest-logit ids (k = min(top_k,
+//   vocab_used); top_k == 0 means "no cap", i.e. k = vocab_used).
+// - softmax over exactly those k, at `temperature` (<= 0 treated as 1.0, the
+//   checkpoint's own default, rather than dividing by zero).
+// - top-p: walk the (already logit-sorted, so probability-sorted) k in order,
+//   accumulate, cut after the first prefix whose cumulative mass >= top_p;
+//   always keeps at least one candidate.
+// - `std::discrete_distribution` draws the index inside the kept prefix.
+inline uint32_t sample(const float* logits, uint32_t vocab_used, const server::Sampling& s,
+                       std::mt19937_64& rng) {
+  const uint32_t k = std::min(s.top_k == 0 ? vocab_used : s.top_k, vocab_used);
+  std::vector<uint32_t> idx(vocab_used);
+  for (uint32_t i = 0; i < vocab_used; ++i) idx[i] = i;
+  std::partial_sort(idx.begin(), idx.begin() + k, idx.end(),
+                    [logits](uint32_t a, uint32_t b) { return logits[a] > logits[b]; });
+  idx.resize(k);
+
+  const float temperature = s.temperature > 0.0f ? s.temperature : 1.0f;
+  const float top_logit = logits[idx[0]];
+  std::vector<double> probs(k);
+  double sum = 0.0;
+  for (uint32_t i = 0; i < k; ++i) {
+    probs[i] = std::exp(static_cast<double>((logits[idx[i]] - top_logit) / temperature));
+    sum += probs[i];
+  }
+  for (double& p : probs) p /= sum;
+
+  double cumulative = 0.0;
+  uint32_t kept = k;
+  const double top_p = std::clamp(static_cast<double>(s.top_p), 0.0, 1.0);
+  for (uint32_t i = 0; i < k; ++i) {
+    cumulative += probs[i];
+    if (cumulative >= top_p) {
+      kept = i + 1;
+      break;
+    }
+  }
+  kept = std::max<uint32_t>(kept, 1);
+  probs.resize(kept);
+
+  std::discrete_distribution<uint32_t> draw(probs.begin(), probs.end());
+  return idx[draw(rng)];
+}
+
 struct EngineAdapter : server::EngineIface {
-  explicit EngineAdapter(runtime::Engine& engine, uint32_t vocab) : eng(engine), vocab_used(vocab) {}
+  // `imm` and `host_logits` are created ONCE here, not per token (Task 5
+  // Step 3): the immediate command list and the readback buffer are reused
+  // across every sampled step for the life of the adapter.
+  explicit EngineAdapter(runtime::Engine& engine, uint32_t vocab)
+      : eng(engine),
+        vocab_used(vocab),
+        imm(l0::CmdList::immediate(engine.context())),
+        host_logits(model::Qwen35::kVocab) {}
 
   void reset() override { eng.reset(); }
 
+  // Task 5 Step 4's measurement hook. `src/server` is protected (it has no
+  // "generation finished" callback in Deps), so the only place left to time
+  // just the generation loop -- prefill excluded, HTTP excluded -- is here,
+  // where every request's `prefill()` and `step()` calls actually land. A
+  // request's summary line is printed at the START of the NEXT request's
+  // prefill() (the earliest point at which this adapter knows the previous
+  // one's generation is over: nothing calls prefill() again until the
+  // previous request's last step() has returned to server.cc's loop and a
+  // new one has been accepted). One request is therefore always exactly one
+  // line, delayed by one request -- `tools/serve_bench.sh`'s host-sampling
+  // measurement sends one trailing no-op request to flush the last line.
   void prefill(const std::vector<uint32_t>& ids) override {
+    if (gen_tokens_ > 0) {
+      const double ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - gen_start_)
+                            .count();
+      std::fprintf(stderr, "gen: %u tokens, %.3f ms, %.4f ms/token\n", gen_tokens_, ms,
+                   ms / gen_tokens_);
+      std::fflush(stderr);
+    }
+    gen_tokens_ = 0;
 #if B70_HAVE_PREFILL
     eng.prefill(ids);
 #else
     eng.ingest(ids);
 #endif
+    gen_start_ = std::chrono::steady_clock::now();
   }
 
   uint32_t step(const server::Sampling& sampling) override {
     const uint32_t id = eng.generate(1)[0];
     if (!sampling.greedy) sample_into_control(sampling);
+    ++gen_tokens_;
     return id;
   }
 
   uint32_t max_len() override { return eng.max_len(); }
   uint32_t pos() override { return eng.pos(); }
 
-  void sample_into_control(const server::Sampling&) {}
+  // Reads back the replay's fp32 logits row (`eng.buffers().logits`, [1][
+  // model::Qwen35::kVocab] = 993 KB), samples over the first `vocab_used` of
+  // them, and writes the sampled id into `cur_token[0]` -- exactly the ingest
+  // protocol `Control` already supports (spec §3.5) -- so the NEXT
+  // `generate(1)` embeds it and returns it as the following step's pending
+  // id. `generate(1)` above already returned the id the *previous* step
+  // sampled; this call replaces the argmax the device just wrote for the
+  // step after this one.
+  //
+  // The RNG seeds itself once, lazily, on the first sampled token this
+  // adapter ever serves: from the request's `seed` if it gave one, else from
+  // `std::random_device`. It is not reseeded per request after that (the
+  // server is single-stream, so "per request" would mean "every token of
+  // every request after the first restarts the same draw", which is not what
+  // real sampling wants); a `seed`d request run first after server start is
+  // reproducible from that seed, which is what `sampling_test.cc` grades at
+  // the `sample()` level.
+  void sample_into_control(const server::Sampling& sampling) {
+    if (!rng_seeded) {
+      rng.seed(sampling.has_seed ? sampling.seed : std::random_device{}());
+      rng_seeded = true;
+    }
+    imm.copy(host_logits.data(), eng.buffers().logits.ptr(),
+             model::Qwen35::kVocab * sizeof(float));
+    const uint32_t id = sample(host_logits.data(), vocab_used, sampling, rng);
+    eng.buffers().control.as<runtime::Control>()->cur_token[0] = id;
+  }
 
   runtime::Engine& eng;
   uint32_t vocab_used;
+  l0::CmdList imm;
+  std::vector<float> host_logits;
+  std::mt19937_64 rng;
+  bool rng_seeded = false;
+  uint32_t gen_tokens_ = 0;
+  std::chrono::steady_clock::time_point gen_start_{};
 };
