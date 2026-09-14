@@ -130,15 +130,20 @@ Shipped: `tok::Streamer`, the hold-and-flush incremental detokeniser. On the
 10,240-case committed corpus it has zero concatenation mismatches and zero
 spurious U+FFFD emissions; the measured longest hold is 4 ids.
 
-### Integration status (spec 3 T4, 2026-09-09)
+### Integration status (spec 3 T4, closed 2026-09-14, tag `spec3-done`)
 
-`b70-serve` successfully consumes this tokenizer, template, and streamer on the
-real checkpoint. That integration is **blocked, not shipped**: its cjk raw-
-completion IDs diverge from `b70-decode --ids` after a 22-token exact prefix,
-because the server prefill path and the CLI decode-ingest path are independently
-rounded. Tokenizer and template parity remain met; the unfinished item is the
-operator-selected correctness comparator for those two engine paths, not a
-change to either host component.
+`b70-serve` consumes this tokenizer, template, and streamer on the real
+checkpoint and is **shipped**. Bar 3 (golden through the server) is met:
+`golden_server_test` reproduces `b70-decode --ids --prefill`'s exact ids on
+all three golden prompts, both sides on the same engine path
+(`Engine::prefill`). Bar 4 (llama-benchy end to end) and bar 5 (HTTP `tg256`
+within 2% of the CLI) are both met: `tg256` over HTTP measured 29.902 t/s
+against the CLI control's 29.31 t/s, 102.0% - HTTP's per-token cost is not
+merely under bar, it is not measurably present. Host sampling
+(temperature/top-k/top-p) measured 0.537 ms/token against a pre-registered
+0.62 ms bar and ships on by default. See `docs/BENCHMARKS.md` "The spec-3
+gate rows" for every number and its grade, and
+`docs/superpowers/specs/2026-09-09-spec3-gate-memo.md` for the full verdict.
 
 ## Chat template
 

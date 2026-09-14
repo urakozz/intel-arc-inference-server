@@ -147,20 +147,26 @@ never downloads anything.
 ## v1 definition of done
 
 OpenAI-compatible endpoint (`/v1/completions`, `/v1/chat/completions`, SSE),
-**single stream**, no continuous batching. The `b70-serve` integration binary
-now wires the checkpoint tokenizer, chat template, `Engine::prefill`, and the
-server surface together; its device-1 smoke answered “The capital of France is
-Paris” and streamed per-token SSE frames. It is **not v1 done or tagged**:
-Task 2's real-engine gate is blocked because cjk generation diverges at token 23
-between server prefill and `b70-decode --ids` decode-ingest. The required
-comparator contract needs an operator ruling before performance claims resume.
+**single stream**, no continuous batching. **Shipped and tagged `spec3-done`,
+2026-09-14.** The `b70-serve` integration binary wires the checkpoint
+tokenizer, chat template, `Engine::prefill`, and the server surface together.
+All six spec-3 gate bars are met: tokenizer parity (10,240 cases, 0
+mismatches), template parity (byte-identical vs `transformers`), the
+golden-through-server gate (`golden_server_test`: exact prompt ids and 32/32
+generated ids on all three golden prompts, both sides on the same engine path
+via `--prefill`), llama-benchy end to end (coherence 3/3 PASSED, “The capital
+of France is Paris.”), HTTP `tg256` within 2% of the CLI control (measured
+**102.0%** - not merely under bar, no HTTP tg cost is measurable at all), and
+the full suite green (67/67, 0 failed) with `src/runtime`, `src/kernels`,
+`src/l0`, `src/loader`, and `src/model` unchanged since before spec 3's first
+commit.
 
 The intended endpoint is driven by the same `llama-benchy` command used for
-every number in these docs, so comparisons are apples-to-apples. No spec-3 HTTP
-row exists yet; the reference baseline in [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
-is vLLM, no speculation, **measured external HTTP-inclusive pp4096 1973 / tg256
-31.01**, beside b70's **measured RECORD device-side pp4096 1406.18 / tg256
-29.32** on the current gate checkpoint.
+every number in these docs, so comparisons are apples-to-apples. See
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md) "The spec-3 gate rows" for the HTTP
+`tg256` **29.902 t/s** and a direct HTTP `pp4096` probe **1404.74 t/s** beside
+the CLI control (**29.31 / 1402.91**, both RECORD grade) and vLLM's
+**measured external HTTP-inclusive pp4096 1973 / tg256 31.01**.
 
 ## Approach
 
