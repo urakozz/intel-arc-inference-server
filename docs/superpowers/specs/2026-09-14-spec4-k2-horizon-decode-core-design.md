@@ -72,7 +72,7 @@ its performance measured and recorded.
 3. **Kernel tests:** every new kernel and variant green against its host reference.
 4. **Load test:** every checkpoint tensor accounted for; shapes asserted.
 5. **The 27B is untouched:** after the last commit its full suite, 774 kernels / 19 modules and both
-   golden gates are green. This is the proof that §3.1's loader refactor preserved behaviour.
+   golden gates are green. This is the proof that adding K2 beside the 27B changed nothing the 27B runs.
 
 **Performance is recorded, not gated:** a `b70-decode --bench` row at depth 4096, tg 256 (median of
 3, grade as the harness prints it), with t/s, ms/token, launches per token and the fence-time
@@ -91,7 +91,7 @@ already model-agnostic. The 27B's code paths keep their exact behaviour.
 | component | role | reuses |
 |---|---|---|
 | `src/model/k2_horizon.{h,cc}` - `model::K2Horizon` | the model as data: constants, layer kinds (`Dense`, `Sparse`), per-layer linear table, small-tensor table, **expert groups** | `GemvShape`, `WeightKind`, `Fuse` |
-| `src/loader` - `loader::load_k2()` → `K2LoadedModel` | executes the table; builds flat expert buffers | snapshot resolution, safetensors, layout-0 int4 packing - factored out of `load()` with its behaviour preserved (§2 bar 5 proves it) |
+| `src/loader` - `loader::load_k2()` → `K2LoadedModel` | executes the table; builds flat expert buffers | the loader's public pieces unchanged - `resolve_snapshot`, `SafetensorsSet`, `QuantConfig`, `assert_quant_invariants`, `LinearSrc::classify`, `common/repack.h`; `loader.cc` itself is not edited (revised while planning: nothing is factored out, so bar 5 has nothing to prove about the loader) |
 | `src/runtime/k2/` - `K2Engine`, `k2_capture.cc` | same `reset` / `ingest` / `generate` contract as `Engine`; builds and replays the K2 list | `l0`, `CapturedStep`, `Control`, the fence, argmax, and the RoPE table **builder** - K2 gets its own table, fp32 `[max_len][2][64]` for full 128-dim rotary (the 27B's is 64-dim partial rotary, `[max_len][2][32]`) |
 | `src/kernels/k2/` | new kernels (§3.3) and new shape variants of existing ones | the kernel-variant build system |
 | `tools/oracle/dump_k2.py` | CPU oracle for this checkpoint | `dequant.py`, `shard_paths()`, the golden file format |
@@ -161,21 +161,22 @@ frozen arguments. **The design:** fixed expert *slots*, the expert chosen inside
   only the active experts' bytes are read.
 - A **combine kernel** applies the weights and sums in ascending id order.
 
-Launches per token (**estimated**):
-
-| block | launches |
-|---|---|
-Norms are two launches (fold, then finish), as in the 27B.
+Launches per token (fixed by plan 8e and asserted at capture). Norms are two launches (fold, then
+finish), as in the 27B. The softplus gate is applied inside the attention reduce stage, the way the
+27B applies its sigmoid gate, so it is not a launch of its own:
 
 | block | launches |
 |---|---|
 | embed | 1 |
-| dense layer (×3): norm (2) · fused q‖k‖v‖gate GEMV (2560→10240) · RoPE+cache write · attention (2 stages) · softplus gate · o_proj · norm (2) · gate‖up · SiLU·mul · down | 13 each |
-| sparse layer (×45): norm (2) · fused q‖k‖gate‖**v_router** GEMV (2560→9280) · top-4 · 4 value slots · value combine · RoPE+cache write · attention (2) · gate · o_proj · norm (2) · MoE router (bf16, 2560→100, padded to 128) · top-8 · 8 × (gate‖up GEMV 2560→1536, SiLU·mul, down 768→2560) · combine · shared (3) | 46 each |
+| dense layer (×3): norm (2) · fused q‖k‖gate‖v GEMV (2560→10240) · RoPE+cache write · attention decode · attention reduce + softplus gate · o_proj · norm (2) · gate‖up · SiLU·mul · down | 12 each |
+| sparse layer (×45): norm (2) · fused q‖k‖gate‖**v_router** GEMV (2560→9280) · top-4 · 4 value slots · value combine · RoPE+cache write · attention decode · attention reduce + gate · o_proj · norm (2) · MoE router (bf16, 2560→100, padded to 128) · top-8 · 8 × (gate‖up GEMV 2560→1536, SiLU·mul, down 768→2560) · shared (3) · combine | 45 each |
 | head: final norm (2) · `lm_head` (bf16, 2560→250624) · argmax (2) | 5 |
-| **total** | **~2,115** (27B: 774) |
+| **total** | **2067** (27B: 774), 28 modules |
 
-**New kernels:** grouped RMSNorm (fold + finish, as the 27B's two-stage norm), softplus gate,
+(Revised 2026-09-14 while writing plans 8a-8e. The first draft of this table carried a separate gate
+launch per layer and read ~2,115.)
+
+**New kernels:** grouped RMSNorm (fold + finish, as the 27B's two-stage norm), softplus gate (inside the reduce stage),
 router top-k (k ∈ {4, 8}), int4 expert-slot GEMV (id indirection), expert combine.
 **New variants of existing kernels:** int4 GEMV at the fused and per-expert shapes above; bf16 GEMV
 for the MoE router and `lm_head`; GQA attention at ratio 4, head_dim 128, `max_len` 16384; RoPE and
@@ -285,7 +286,7 @@ losses (the router load-balancing term).
 
 | # | risk | how it shows | where caught |
 |---|---|---|---|
-| 1 | per-launch fixed cost dominates ~2,115 small launches; the row lands well below ~95 t/s | fence-time share; stage-0 launch probe | stage 0, stage 5 |
+| 1 | per-launch fixed cost dominates 2067 small launches; the row lands well below ~95 t/s | fence-time share; stage-0 launch probe | stage 0, stage 5 |
 | 2 | `torch.topk` tie order differs from ours | per-layer router-id diagnostic | stage 4 |
 | 3 | oracle runs out of memory (~87 GB estimated of 121) | dry run with `/usr/bin/time -v` | stage 0 |
 | 4 | the t215 image's transformers cannot import the model's remote code | import check | stage 0 |
