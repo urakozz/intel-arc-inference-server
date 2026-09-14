@@ -541,6 +541,162 @@ test is registered only while the RTN checkpoint exists (deleted 2026-09-09),
 and no long oracle dump exists for `84575a1`; it needs `PROMPTS=long` dumped for
 this checkpoint and the registration re-pointed.
 
+### The spec-3 gate rows - `a066c3c`, 2026-09-14 - bars 3-6 closed, tag `spec3-done`
+
+**Box conditions.** Idle proof (plan 6e Task 3 Step 1's command) taken before
+and after every row set below: `docker ps -q | wc -l` = 0 and zero DRM fd
+holders on every card, every time (verified around the llama-benchy runs, the
+CLI control runs, and after the sampling measurement). Series rows are device
+0 (unmasked, `ZE_AFFINITY_MASK` unset). Checkpoint
+`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ` snapshot
+`84575a18f209992ef96d819b31f924b489e3d55d` (bf16 `lm_head`), same as every
+gate row above.
+
+**llama-benchy, three invocations** (the standing command,
+`docs/BENCHMARKS.md:112-116`, `--served-name b70`, each invocation itself
+3 runs - llama-benchy's own `--runs` default):
+
+| invocation | tg256 t/s | coherence | llama-benchy's own `pp4096` figure |
+|---|---:|---|---|
+| 1 | 29.886 ± 0.018 | PASSED | 5,930,663 ± 1,099,651 t/s - **not usable, see below** |
+| 2 | 29.910 ± 0.004 | PASSED | 7,377,061 ± 322,292 t/s - not usable |
+| 3 | 29.902 ± 0.004 | PASSED | 7,610,732 ± 544,601 t/s - not usable |
+| **median** | **29.902** | 3/3 PASSED | - |
+
+**llama-benchy's printed `pp4096` figure is not usable against this server,
+structurally, not as a defect.** `pp_throughput = prompt_tokens / est_ppt`,
+`est_ppt = ttfr − latency`, and `ttfr` is the arrival time of the FIRST SSE
+frame carrying `choices` at all. `b70-serve`'s chat stream writes the
+role-delta frame *before* `generate()` starts - correct, spec-compliant,
+anti-buffering behaviour `protocol_test.cc` case 5 asserts on directly (first
+content frame at 51 ms, every frame ordered before the next engine step
+completes) - so `ttfr` measures time-to-role-frame, not time-to-first-token,
+and `est_ppt` comes out sub-millisecond. The figures above (millions of t/s,
+relative std 5-19%) are that artifact, not a measurement of anything real;
+they are recorded here rather than discarded so the number is not silently
+missing. `tg_throughput` is unaffected (it is derived from streamed content
+chunk timestamps and a token count, not from `ttfr`), and it is the number
+bar 5 is scored on.
+
+**Coherence answer** (non-streaming probe, `/v1/chat/completions`,
+`{"role":"user","content":"What is the capital of France?"}`, `max_tokens: 32`):
+
+> We need answer simple. Need final concise.
+> \</think\>
+>
+> The capital of France is Paris.
+
+**Direct `pp_http` probe** - because llama-benchy's own figure is unusable, pp
+over HTTP is measured directly instead: a non-streaming `/v1/completions`
+request with `max_tokens: 1` over a prompt this server's OWN tokenizer counts
+as exactly 4096 tokens (binary-searched via `usage.prompt_tokens`, not
+llama-benchy's local `gpt2`-fallback estimate - `llama-benchy` could not
+resolve `b70` as an HF tokenizer id and fell back to `gpt2`, whose token
+density differs from this checkpoint's; `--adapt-prompt` tries to correct for
+this from one warmup delta and evidently undershot it here, which is the root
+cause of the implausible `pp_throughput` figures above once the FIRST
+(chat-completions, template-included, `--adapt-prompt`-sized) attempt at this
+number is set aside). Wall time from request send to full response received,
+3 runs:
+
+| run | prompt tokens | wall ms | t/s |
+|---|---:|---:|---:|
+| 1 | 4096 | 2905.84 | 1409.57 |
+| 2 | 4096 | 2915.83 | 1404.74 |
+| 3 | 4096 | 2918.48 | 1403.47 |
+| **median** | 4096 | **2915.83** | **1404.74** |
+
+**CLI control, same session, same device (0), record grade both before and
+after** (`tools/bench_decode.sh`):
+
+| row | t/s | ms | runs | spread | grade |
+|---|---:|---:|---|---:|---|
+| tg256 @ depth 4096 (`--depth 4096 --tg 256`) | **29.31** | 34.12 ms/token | 29.30 / 29.31 / 29.32 | 0.07% | RECORD |
+| pp4096, device-side, first-token-inclusive (`--pp 4096 --tg 256`) | **1402.91** | 2919.6 ms total | 1402.91 / 1403.41 / 1402.83 | 0.04% | RECORD |
+
+**Bar 5 - `tg_http / tg_cli ≥ 0.98`:** 29.902 / 29.31 = **1.0202 (102.0%). MET**,
+with margin; HTTP's tg cost is not merely under 2%, it is not measurably
+present (the per-token host path - detokenise + SSE write - overlaps the next
+replay exactly as spec §3.4 designed it to).
+
+**Derived HTTP cost of prefill** (`4096/pp_http − 4096/pp_cli`, both
+first-token-inclusive so the two windows match): 2915.83 ms − 2919.6 ms =
+**−3.77 ms per 4096 tokens** - i.e. statistically indistinguishable from zero
+against the ~0.5-3 ms run-to-run spread both sides already show. Tokenizer
+encode of a raw `/v1/completions` prompt (no template) plus HTTP framing costs
+nothing measurable on top of the device-side prefill.
+
+**Task 4 - chat template smoke, `enable_thinking`.** The template test's
+3-turn conversation (system + user 中文 + assistant 中文 + user), streamed,
+`chat_template_kwargs.enable_thinking`:
+
+- **`true`**: first content chunk is `"User"` - a `<think>` reasoning trace
+  begins immediately (the opening `<think>` tag is part of the rendered
+  prompt, not generated text, so it is not itself an SSE frame; the model's
+  own `</think>` closes it before the final answer, as seen separately in the
+  coherence probe above).
+- **`false`**: first content chunk is `"Berlin"` - the direct answer, no
+  reasoning block, `finish_reason: "stop"` two frames later.
+
+Confirmed: `<think>` appears only when `enable_thinking` is on. Not a bar
+(Open WebUI / opencode itself is the operator's to point at port 8000).
+
+**Task 5 - host sampling.** Pre-registered 2026-09-14, before measuring
+(`2026-09-09-spec3-gate-memo.md` §5): bar ≤ 0.62 ms/token (2% of the 31.0 ms
+step), derived estimate 0.2-0.4 ms.
+
+**Measured: 0.537 ms/token - MET, ships on by default.** 3 greedy vs 3 sampled
+256-token requests (`min_tokens: 256, ignore_eos: true`; sampled adds
+`temperature: 1.0, top_k: 20, top_p: 0.95`), server-side generation-only
+timing (`b70-serve`'s own `gen: N tokens, X ms, Y ms/token` stderr line, added
+in `src/cli/serve_adapters.h`, timed from after `prefill()` to the next
+request's `prefill()` call):
+
+| | greedy ms/token | sampled ms/token |
+|---|---:|---:|
+| run 1 | 31.7671 | 32.2866 |
+| run 2 | 31.7766 | 32.3276 |
+| run 3 | 31.7974 | 32.3140 |
+| **median** | **31.7766** | **32.3140** |
+
+Delta = 32.3140 − 31.7766 = **0.5374 ms/token**, under the 0.62 ms bar.
+Cross-validated independently by curl's own round-trip differential over the
+same 3+3 requests (which cancels the identical prefill cost on both sides):
+(8616.7 ms − 8481.5 ms) / 256 = **0.528 ms/token** - the two independent
+methods agree to within 0.01 ms.
+
+**A first attempt at this measurement read 0.7408 ms/token - over the bar -
+and was a measurement artifact, not a code cost.** It ran each of the 6
+requests over its own freshly-connected ssh session; the SSH-handshake time
+preceding the sampled batch's requests happened to be larger than the greedy
+batch's, and because this measurement's window (from one request's
+`prefill()` to the next's) includes whatever gap sits between them, that
+connection-setup jitter landed in the reported numbers unevenly across the
+two batches. The clean measurement above reissues the identical 8 requests
+(warmup, 3 greedy, 3 sampled, 1 trailing flush to emit the last line) inside
+ONE persistent ssh session, curl looped remotely on the box - removing the
+per-request reconnect jitter - and is corroborated by the independent
+curl-side timing. Discarded, not reconciled: the 0.74 ms figure measured a
+network artifact, not the sampler.
+
+Greedy is unaffected either way, by construction (`sample_into_control` runs
+only when `!sampling.greedy`) and by measurement (31.78 ms/token here is
+consistent across all 3 runs, spread 0.03 ms).
+
+**Bar 6 - suite and protected directories.** Full suite (`ctest --test-dir
+build --output-on-failure`, `a066c3c`): **100% tests passed, 0 tests failed
+out of 67** - no skips (the two golden gates now run rather than skip; see
+below). `git diff --stat 6d80193..HEAD -- src/runtime src/kernels src/l0
+src/loader src/model` is empty. `replay_determinism_test`: `captured: 774
+kernels, 19 modules` and `replay_determinism_test OK (8 tokens x 3 runs
+bitwise identical)`. `golden_gate_test`: `TOTAL: 93/93 determined rows exact,
+3 undetermined (2 agree + 1 other member)`. `prefill_gate_test`: `TOTAL:
+93/93 determined rows exact, 3 undetermined (3 agree + 0 other member)`.
+`golden_server_test` (this run): `prose: prompt ids identical, 32/32
+generated ids identical`; `code:` and `cjk:` the same.
+
+**Verdict: all six bars met.** Tag `spec3-done`.
+
 ### The spec-3 gate attempt - `983e852`, 2026-09-09 - BLOCKED before performance rows
 
 **No new performance number is recorded in this section.** The box was available
