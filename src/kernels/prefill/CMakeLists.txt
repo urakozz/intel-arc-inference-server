@@ -103,3 +103,15 @@ foreach(T 0 1)
   add_ocloc_kernel(pf_gemm_T${T} SOURCE ${PF_GEMM_CL} DEFINES TRANSB=${T}
                    OPTIONS -cl-intel-256-GRF-per-thread)
 endforeach()
+
+# Spec 2.1 (plan 9a): the 1024-column slab dequant, one variant per production (K, N, layout)
+# -- the layouts the loader actually ships (qkv||z tiled, the rest GPTQ-native).
+set(PF_SLAB_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_dequant_slab.cl)
+foreach(row "5120 16384 1" "6144 5120 0" "5120 34816 0" "17408 5120 0" "5120 14336 0")
+  separate_arguments(f UNIX_COMMAND "${row}")
+  list(GET f 0 K)
+  list(GET f 1 N)
+  list(GET f 2 L)
+  add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L} SOURCE ${PF_SLAB_CL}
+                   DEFINES K=${K} N=${N} LAYOUT=${L})
+endforeach()

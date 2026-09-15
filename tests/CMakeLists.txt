@@ -99,6 +99,21 @@ add_dependencies(dequant_test
   kernel_pf_dequant_tile_K256_N64_L1_T1)
 add_test(NAME dequant_test COMMAND dequant_test)
 
+# Spec 2.1 S0: the slab dequant against the full one, every slab, production layouts.
+add_executable(pf_dequant_slab_test prefill/pf_dequant_slab_test.cc)
+target_include_directories(pf_dequant_slab_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(pf_dequant_slab_test PRIVATE b70_l0)
+b70_target_kernel_dir(pf_dequant_slab_test)
+add_dependencies(pf_dequant_slab_test
+  kernel_pf_dequant_slab_K5120_N16384_L1 kernel_pf_dequant_slab_K6144_N5120_L0
+  kernel_pf_dequant_slab_K5120_N34816_L0 kernel_pf_dequant_slab_K17408_N5120_L0
+  kernel_pf_dequant_slab_K5120_N14336_L0
+  kernel_pf_dequant_tile_K5120_N16384_L1_T0 kernel_pf_dequant_tile_K6144_N5120_L0_T0
+  kernel_pf_dequant_tile_K5120_N34816_L0_T0 kernel_pf_dequant_tile_K17408_N5120_L0_T0
+  kernel_pf_dequant_tile_K5120_N14336_L0_T0)
+add_test(NAME pf_dequant_slab_test COMMAND pf_dequant_slab_test)
+set_tests_properties(pf_dequant_slab_test PROPERTIES TIMEOUT 900)
+
 # The runtime-`M`, S = 1 small kernels (spec 2, plan 6b Tasks 3-5). Like
 # dequant_test these are raw Level Zero and OpenCL C: they need a B70 and their
 # own binaries, never the optional SYCL component, so they carry no guard and no
