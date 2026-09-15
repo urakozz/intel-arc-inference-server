@@ -40,26 +40,31 @@ target_include_directories(device_select_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${
 target_link_libraries(device_select_test PRIVATE b70_l0)
 add_test(NAME device_select_test COMMAND device_select_test)
 
-# The prefill execution context (spec 2 §3.6). Built only when the optional
-# SYCL component is on (cmake/prefill.cmake); with it off this block is
-# skipped entirely and the suite is exactly what it was.
+# The prefill execution context (spec 2.1 §3.5). `Context` is g++-only and
+# links only b70_l0 through b70_prefill_host, so this test is built and
+# registered in EVERY configuration (ruling B4). In the enabled build it ALSO
+# links libb70_prefill.so -- the test still proves !cx.has_sycl(), because
+# linking the .so creates no SYCL queue by itself.
+add_executable(context_test prefill/context_test.cc)
+target_include_directories(context_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(context_test PRIVATE b70_prefill_host b70_l0)
+b70_target_kernel_dir(context_test)
+add_dependencies(context_test kernel_noop kernel_pf_probe_chain)
+add_test(NAME context_test COMMAND context_test)
 if(B70_PREFILL_ENABLED)
-  add_executable(context_test prefill/context_test.cc)
-  target_include_directories(context_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(context_test PRIVATE b70_prefill_host b70_l0)
   b70_link_prefill(context_test)
-  b70_target_kernel_dir(context_test)
-  add_dependencies(context_test kernel_noop kernel_pf_probe_chain)
-  add_test(NAME context_test COMMAND context_test)
+endif()
 
+if(B70_PREFILL_ENABLED)
   # The batched Xe bf16 GEMM (rulings A14/A15, plan 6d-composed Task 1). Same
-  # guard as context_test: it calls into libb70_prefill.so, so with
-  # -DB70_PREFILL=OFF this block does not exist and the suite is what it was.
-  # No kernel binaries - the only device code it runs is sycl-tla's.
+  # guard: it calls into libb70_prefill.so, so with -DB70_PREFILL=OFF this
+  # block does not exist and the suite is what it was. No kernel binaries -
+  # the only device code it runs is sycl-tla's. `Context` and
+  # `gemm_bf16_batched*` now live in b70_prefill_host (ruling B5).
   add_executable(gemm_batched_test prefill/gemm_batched_test.cc)
   target_include_directories(gemm_batched_test PRIVATE ${CMAKE_SOURCE_DIR}/src
                              ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
-  target_link_libraries(gemm_batched_test PRIVATE b70_l0)
+  target_link_libraries(gemm_batched_test PRIVATE b70_prefill_host b70_l0)
   b70_link_prefill(gemm_batched_test)
   add_test(NAME gemm_batched_test COMMAND gemm_batched_test)
   set_tests_properties(gemm_batched_test PROPERTIES TIMEOUT 1800)

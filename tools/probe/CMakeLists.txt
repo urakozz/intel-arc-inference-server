@@ -37,9 +37,11 @@ add_dependencies(probe_dequant ${PF_DEQUANT_KERNELS})
 # every other prefill target uses. It contains no SYCL of its own, so it is a
 # plain g++ target here rather than one of src/sycl's icpx probes.
 if(B70_PREFILL_ENABLED)
+  # `runtime::prefill::Context` and `gemm_bf16*` now live in b70_prefill_host
+  # (spec 2.1 §3.5, ruling B5).
   add_executable(probe_dequant_overlap probe_dequant_overlap.cc)
   target_include_directories(probe_dequant_overlap PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(probe_dequant_overlap PRIVATE b70_l0)
+  target_link_libraries(probe_dequant_overlap PRIVATE b70_prefill_host b70_l0)
   b70_link_prefill(probe_dequant_overlap)
   b70_target_kernel_dir(probe_dequant_overlap)
   add_dependencies(probe_dequant_overlap kernel_pf_dequant_tile_K5120_N34816_L0_T0)
@@ -63,7 +65,7 @@ if(B70_PREFILL_ENABLED)
 
   add_executable(probe_dequant_slab probe_dequant_slab.cc)
   target_include_directories(probe_dequant_slab PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(probe_dequant_slab PRIVATE b70_l0)
+  target_link_libraries(probe_dequant_slab PRIVATE b70_prefill_host b70_l0)
   b70_link_prefill(probe_dequant_slab)
   b70_target_kernel_dir(probe_dequant_slab)
   add_dependencies(probe_dequant_slab kernel_pf_dequant_tile_K5120_N34816_L0_T0
@@ -82,7 +84,7 @@ if(B70_PREFILL_ENABLED)
 
   add_executable(probe_pf_gemm probe_pf_gemm.cc)
   target_include_directories(probe_pf_gemm PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(probe_pf_gemm PRIVATE b70_l0)
+  target_link_libraries(probe_pf_gemm PRIVATE b70_prefill_host b70_l0)
   b70_link_prefill(probe_pf_gemm)
   b70_target_kernel_dir(probe_pf_gemm)
   add_dependencies(probe_pf_gemm kernel_pf_gemm_bf16)
@@ -94,7 +96,7 @@ if(B70_PREFILL_ENABLED)
   # binary as P-A's already-gated kernel -- pf_gemm_bf16 itself is untouched.
   add_executable(probe_pf_gemm_slab probe_pf_gemm_slab.cc)
   target_include_directories(probe_pf_gemm_slab PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(probe_pf_gemm_slab PRIVATE b70_l0)
+  target_link_libraries(probe_pf_gemm_slab PRIVATE b70_prefill_host b70_l0)
   b70_link_prefill(probe_pf_gemm_slab)
   b70_target_kernel_dir(probe_pf_gemm_slab)
   add_dependencies(probe_pf_gemm_slab kernel_pf_dequant_tile_K5120_N34816_L0_T0

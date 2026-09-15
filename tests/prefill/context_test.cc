@@ -1,10 +1,12 @@
-// The prefill execution context: one ze_context, two queues (spec 2 §3.6).
-// Needs a B70 and the `noop` / `pf_probe_chain` binaries and nothing else -- no
-// checkpoint, so no ctest label. It is also the ABI check for the two-compiler
-// build: this translation unit is g++-compiled and calls into an icpx-linked
-// .so across a std::initializer_list and a std::runtime_error.
+// The prefill execution context: one ze_context, one lazy SYCL side (spec 2.1
+// §3.5). Needs a B70 and the `noop` / `pf_probe_chain` binaries and nothing
+// else -- no checkpoint, so no ctest label, and it is built and run in EVERY
+// configuration: `Context` itself is g++-compiled and links only b70_l0, and
+// nothing in this file ever calls `sycl()`, so linking libb70_prefill.so (when
+// the component is on) proves has_sycl() still reads false rather than
+// exercising the ABI boundary.
 //
-// **The 1024-launch chain is the point of this file.** `gdn_chunk` appends ten
+// **The 9,000-launch chain is the point of this file.** `gdn_chunk` appends ten
 // kernels that feed each other through device buffers with no events between
 // them, and `Engine::prefill()` will append thousands. Two properties have to
 // hold and neither is provable by reading the driver header:
@@ -47,8 +49,11 @@
 
 namespace {
 constexpr uint32_t kN = 4096;        // elements in the chained buffer
-constexpr uint32_t kLaunches = 1024;
-constexpr uint32_t kExpected = kLaunches * (kLaunches - 1) / 2;  // 523776
+// 9,000 is the margin (spec §8 risk 7): S3's finished L0 backend will append
+// 8,689 launches per chunk between two waits, and this chain has to cover that
+// without the pass-2 doubling (2 x kExpected = 80,991,000) overflowing uint32_t.
+constexpr uint32_t kLaunches = 9000;
+constexpr uint32_t kExpected = kLaunches * (kLaunches - 1) / 2;  // 40495500
 
 // One pass of `kLaunches` appends, each with its own `step` argument. Every
 // `step` lives in a vector that outlives the loop: `zeKernelSetArgumentValue`
@@ -73,10 +78,9 @@ int main() {
   CHECK(cx.ze_context() == ctx.handle());
   CHECK(cx.ze_device() == ctx.device());
   CHECK(cx.l0_list() != nullptr);
-  CHECK(cx.sycl_queue_raw() != nullptr);
-  CHECK(cx.sycl_context_raw() != nullptr);
   CHECK_EQ(cx.launches(), size_t{0});
   cx.wait();
+  CHECK(!cx.has_sycl());   // a pure-L0 Context never builds the SYCL side
 
   l0::Module mod(ctx, kernels::path("noop"));
   l0::Kernel k = mod.kernel("noop");
@@ -111,7 +115,7 @@ int main() {
   CHECK_EQ(cx.launches(), size_t{1} + kLaunches);
   std::printf("chain pass 1: every element = %u (= sum_{i<%u} i)\n", kExpected, kLaunches);
 
-  // The same 1024 launches again on the same Context and the same cached
+  // The same 9,000 launches again on the same Context and the same cached
   // Kernel: the value must DOUBLE, which proves the cache is reusable and that
   // a second pass does not inherit the first pass's frozen arguments.
   chain(cx, chain_k, buf.ptr());

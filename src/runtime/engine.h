@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "l0/cmdlist.h"
@@ -13,6 +14,7 @@
 #include "runtime/buffers.h"
 #include "runtime/capture.h"
 #include "runtime/control.h"
+#include "runtime/prefill_backend.h"
 
 namespace runtime {
 
@@ -86,6 +88,15 @@ class Engine {
   // that list and are NOT counted; `runtime::prefill::step_chunk_gemms()` is.
   size_t prefill_launches() const;
 
+  // Spec 2.1: the backend prefill() runs. Unset means the build's default
+  // (runtime::prefill::default_prefill_backend(), defined in b70_prefill_host). It may change
+  // between prefill() calls -- persistent state is shared, scratch is per backend.
+  void set_prefill_backend(PrefillBackend b) { pf_backend_ = b; }
+  PrefillBackend prefill_backend() const;          // defined in engine_prefill.cc
+  // True once this engine's prefill Context has built its SYCL side. The L0 backend never
+  // does; the equivalence test asserts it (spec §5 S3).
+  bool prefill_sycl_side_created() const;         // defined in engine_prefill.cc
+
   // Greedy-generates n ids; on_token is called after each fence (host side,
   // overlaps nothing in v1). Returns the ids.
   //
@@ -143,6 +154,7 @@ class Engine {
   // The function-pointer deleter is what keeps `PrefillEngine` incomplete here;
   // both halves stay null until the first prefill().
   std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)> pfx_{nullptr, nullptr};
+  std::optional<PrefillBackend> pf_backend_;   // unset = default_prefill_backend()
   std::unique_ptr<l0::Mem> tap_;   // null unless debug_resid
   CapturedStep step_;
   l0::Queue queue_;

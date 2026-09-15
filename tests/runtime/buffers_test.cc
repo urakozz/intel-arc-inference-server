@@ -78,6 +78,14 @@
 // once so L3 does not resize this struct when it lands). The derivation and
 // the three cross-checks are docs/prefill-l1-preregistration-2026-09-05.md §1.
 //
+// Spec 2.1 §3.3 (this file's S1): the bf16 dequant scratch (356,515,840 B,
+// [5120][34816]) is no longer a fixed member of this table -- it is
+// `dequant_buffer()`, allocated lazily on first use, same as the new
+// `slab_buffer()` (17408 x 1024 x 2 B = 35,651,584 B, the L0 backend's
+// expansion). `bytes()` below is therefore 356,515,840 B smaller than plan
+// 6c/6d's total; `lazy_bytes()` reports whichever of the two a session has
+// actually built.
+//
 //   ids          2048 x 4 B                                    =         8,192
 //   resid        2048 x 5120 x 2 B                             =    20,971,520
 //   x            2048 x 17408 x 2 B  (largest GEMV K: down)     =    71,303,168
@@ -88,7 +96,6 @@
 //   mixer_out    2048 x 6144 x 2 B   (out_proj/o_proj input, R2) =   25,165,824
 //   logits       1 x 248320 x 4 B    (last position only)        =       993,280
 //   argmax_part  1 x 243 x 2 x 4 B                              =         1,944
-//   dequant      5120 x 34816 x 2 B  (chunk-independent)        =   356,515,840
 //   gdn_xb       2048 x 10240 x 2 B                             =    41,943,040
 //   gdn_seed     3 x 10240 x 2 B                                =        61,440
 //   gdn_g        2048 x 48 x 4 B                                =       393,216
@@ -103,19 +110,25 @@
 //   pf_p         6 x 2048 x 16384 x 2 B                         =   402,653,184
 //   pf_o         24 x 2048 x 256 x 4 B                          =    50,331,648
 //   pf_rowsum    24 x 2048 x 4 B                                =       196,608
-//                                                        total = 2,263,990,168
+//                                                        total = 1,907,474,328
 //
 // Cross-checks, each of which fails loudly if a row above is wrong:
-//   * the 6b-owned rows alone (everything but the six pf_* ones) = 955,170,712;
+//   * the 6b-owned rows alone (everything but the six pf_* ones, and now also
+//     without the lazy dequant scratch) = 598,654,872;
 //   * the six pf_* rows = 1,308,819,456, plan 6d-composed's "total added" line
 //     exactly (pf_kt excluded: transB measured native and bitwise identical,
 //     commit 792e1dd, so the transpose fallback is not built);
-//   * 955,170,712 + 408,944,640 (6d's retired attn_part+attn_q+attn_gate) +
-//     899,874,816 (6d's stated net) = 2,263,990,168.
+//   * 598,654,872 + 1,308,819,456 = 1,907,474,328 (= plan 6c/6d's
+//     2,263,990,168 total minus the 356,515,840 B dequant scratch, spec 2.1).
 static void check_prefill_scratch(l0::Context& ctx) {
   runtime::PrefillScratch pf(ctx, 16384);
   std::printf("prefill scratch %zu B (%.3f GB)\n", pf.bytes(), pf.bytes() / 1e9);
-  CHECK_EQ(pf.bytes(), size_t{2263990168});
+  CHECK_EQ(pf.bytes(), size_t{1907474328});
+  CHECK_EQ(pf.lazy_bytes(), size_t{0});
+  CHECK_EQ(pf.dequant_buffer().size(), size_t{356515840});
+  // 17408 x 1024 x 2 B (measured from the formula: Q::kIntermediate * kPfSlabWidth * kBf16).
+  CHECK_EQ(pf.slab_buffer().size(), size_t{35651584});
+  CHECK_EQ(pf.lazy_bytes(), size_t{356515840 + 35651584});
   CHECK_EQ(runtime::PrefillScratch::kC, 2048u);
   CHECK_EQ(runtime::PrefillScratch::kGdnChunk, 64u);
   CHECK_EQ(runtime::PrefillScratch::kSHeads, 6u);
