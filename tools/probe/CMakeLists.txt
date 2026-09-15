@@ -86,6 +86,19 @@ if(B70_PREFILL_ENABLED)
   b70_link_prefill(probe_pf_gemm)
   b70_target_kernel_dir(probe_pf_gemm)
   add_dependencies(probe_pf_gemm kernel_pf_gemm_bf16)
+
+  # P-B (docs/probe-prefill-vllm-parity-2026-09-14.md §A3.2): slab dequant +
+  # P-A's GEMM on ONE in-order L0 list, zero host waits. Runs only because
+  # P-A measured >= 128 (committed: 156.53 TFLOP/s). `pf_gemm_bf16_slab` is a
+  # second entry point in the SAME pf_gemm_bf16.cl / kernel_pf_gemm_bf16
+  # binary as P-A's already-gated kernel -- pf_gemm_bf16 itself is untouched.
+  add_executable(probe_pf_gemm_slab probe_pf_gemm_slab.cc)
+  target_include_directories(probe_pf_gemm_slab PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_pf_gemm_slab PRIVATE b70_l0)
+  b70_link_prefill(probe_pf_gemm_slab)
+  b70_target_kernel_dir(probe_pf_gemm_slab)
+  add_dependencies(probe_pf_gemm_slab kernel_pf_dequant_tile_K5120_N34816_L0_T0
+                   kernel_pf_gemm_bf16 ${PROBE_SLAB_TARGETS})
 endif()
 
 # T6's M=2048 small-kernel check. These are probe-only ocloc binaries: no
