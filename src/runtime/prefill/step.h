@@ -7,6 +7,7 @@
 #include "runtime/buffers.h"
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/kernels.h"
+#include "runtime/prefill_backend.h"
 
 namespace runtime::prefill {
 
@@ -31,7 +32,7 @@ namespace runtime::prefill {
 void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m,
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C,
                 l0::Mem& gdn_state_mem, l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem,
-                l0::Mem& kv_v_mem);
+                l0::Mem& kv_v_mem, PrefillBackend backend);
 
 // The tail only the LAST chunk runs: the final norm on the last row, `lm_head`
 // at M = 1 through the EXISTING decode binary, and the two argmax stages --
@@ -43,9 +44,9 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Lo
 // The launch arithmetic, derived from the walk itself rather than restated:
 // what `Context::launches()` advances by. SYCL GEMMs are NOT on the L0 list and
 // therefore not counted here; `step_chunk_gemms()` reports those separately.
-size_t step_chunk_launches();          // per chunk, independent of C
-size_t step_chunk_gemms();             // SYCL GEMM calls per chunk
-size_t step_chunk_waits();             // host L0<->SYCL handoffs per chunk
+size_t step_chunk_launches(PrefillBackend b);   // per chunk, independent of C
+size_t step_chunk_gemms(PrefillBackend b);      // SYCL GEMM calls per chunk (0 on L0)
+size_t step_chunk_waits(PrefillBackend b);      // host L0<->SYCL handoffs per chunk (0 on L0)
 inline constexpr size_t kStepHeadLaunches = 5;   // 2 norm + lm_head + 2 argmax
 
 }  // namespace runtime::prefill

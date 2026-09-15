@@ -57,8 +57,10 @@ if(TARGET b70_prefill_ext)
   # P1 consumes these existing OpenCL binaries through kernels::path(); make
   # their generation precede the separate icpx build as well as b70_l0.
   # b70_loader/b70_model join the list for the int4-mixed probe (ruling A21),
-  # the one icpx probe that reads the checkpoint.
-  add_dependencies(b70_prefill_ext b70_l0 b70_loader b70_model
+  # the one icpx probe that reads the checkpoint. b70_prefill_host/b70_runtime
+  # join it because the ExternalProject must not start before the archives its
+  # probes link exist (spec 2.1 §3.5).
+  add_dependencies(b70_prefill_ext b70_l0 b70_loader b70_model b70_prefill_host b70_runtime
                    kernel_noop kernel_ctrl_read kernel_bw_sum)
 endif()
 add_subdirectory(tools/probe)

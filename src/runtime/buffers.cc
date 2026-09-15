@@ -147,11 +147,6 @@ PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len)
       // lm_head runs on the chunk's LAST position only (spec §3.5), so one row.
       logits(ctx, l0::MemKind::Device, size_t{Q::kVocab} * kFp32),
       argmax_part(ctx, l0::MemKind::Device, size_t{kArgmaxGroups} * 2 * kFp32),
-      // Plan 6c's bf16 dequant scratch: one buffer sized for the largest
-      // matrix (gate||up, K = 5120, N = 34816). Chunk-independent by
-      // construction - it is [K][N], not [C][N] - so A13's halving of kC does
-      // not touch it.
-      dequant(ctx, l0::MemKind::Device, size_t{Q::kHidden} * max_int4_n() * kBf16),
       gdn_xb(ctx, l0::MemKind::Device, size_t{kC} * kConvDim * kBf16),
       gdn_seed(ctx, l0::MemKind::Device, size_t{3} * kConvDim * kBf16),
       gdn_g(ctx, l0::MemKind::Device, size_t{kC} * Q::kGdnVHeads * kFp32),
@@ -168,7 +163,8 @@ PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len)
       pf_p(ctx, l0::MemKind::Device, size_t{kSHeads} * kC * max_len * kBf16),
       pf_o(ctx, l0::MemKind::Device, size_t{Q::kFaQHeads} * kC * Q::kFaHeadDim * kFp32),
       pf_rowsum(ctx, l0::MemKind::Device, size_t{Q::kFaQHeads} * kC * kFp32),
-      max_len(max_len) {
+      max_len(max_len),
+      ctx_(&ctx) {
   // Nothing is zero-filled: no prefill kernel reads scratch it has not first
   // written, and the prefill determinism gate is the standing proof of that -
   // the same rule, and the same reason, Engine::reset() gives for decode.
@@ -178,10 +174,26 @@ PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len)
 size_t PrefillScratch::bytes() const {
   return ids.size() + resid.size() + x.size() + partials.size() + ab_out.size() +
          norm_sumsq.size() + gdn_o.size() + mixer_out.size() + logits.size() +
-         argmax_part.size() + dequant.size() + gdn_xb.size() + gdn_seed.size() + gdn_g.size() +
+         argmax_part.size() + gdn_xb.size() + gdn_seed.size() + gdn_g.size() +
          gdn_beta.size() + gdn_A.size() + gdn_A2.size() + gdn_w.size() + gdn_u.size() +
          pf_q.size() + pf_attn.size() + pf_s.size() + pf_p.size() + pf_o.size() +
          pf_rowsum.size();
+}
+
+l0::Mem& PrefillScratch::dequant_buffer() {
+  if (!dequant_)
+    dequant_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device,
+                                         size_t{Q::kHidden} * max_int4_n() * kBf16);
+  return *dequant_;
+}
+l0::Mem& PrefillScratch::slab_buffer() {
+  if (!slab_)
+    slab_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device,
+                                      size_t{Q::kIntermediate} * 1024 * kBf16);
+  return *slab_;
+}
+size_t PrefillScratch::lazy_bytes() const {
+  return (dequant_ ? dequant_->size() : 0) + (slab_ ? slab_->size() : 0);
 }
 
 // --- DecodeBuffers, the view -------------------------------------------------

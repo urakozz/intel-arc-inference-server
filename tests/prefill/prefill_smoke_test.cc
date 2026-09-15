@@ -100,15 +100,19 @@ int main(int argc, char** argv) {
   // value at 1201 per chunk + 5 for the head, independent of C. If this ever
   // differs, print both and re-derive the arithmetic from the walk - the number
   // in the pre-registration is a prediction about the walk, not a target.
-  const size_t per_chunk = runtime::prefill::step_chunk_launches();
+  const size_t per_chunk = runtime::prefill::step_chunk_launches(runtime::PrefillBackend::SyclTla);
   const size_t head = runtime::prefill::kStepHeadLaunches;
   CHECK_EQ(per_chunk, size_t(1201));
   CHECK_EQ(head, size_t(5));
   CHECK_EQ(eng.prefill_launches(), per_chunk + head);
   std::printf("launch arithmetic: %zu L0 per chunk + %zu head = %zu for one chunk;"
               " %zu SYCL GEMMs and %zu host waits per chunk (neither on the L0 counter)\n",
-              per_chunk, head, eng.prefill_launches(), runtime::prefill::step_chunk_gemms(),
-              runtime::prefill::step_chunk_waits());
+              per_chunk, head, eng.prefill_launches(),
+              runtime::prefill::step_chunk_gemms(runtime::PrefillBackend::SyclTla),
+              runtime::prefill::step_chunk_waits(runtime::PrefillBackend::SyclTla));
+  // S1: the L0 backend has no linear/attention body yet, so its per-chunk count is just the
+  // embed launch; S2/S3 fill the GDN and FA layer terms in.
+  CHECK_EQ(runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0), size_t(1));
 
   // ---- 3. the Control handoff, exactly as argmax_stage2 leaves it ---------
   const runtime::Control* c = eng.buffers().control.as<runtime::Control>();

@@ -86,6 +86,10 @@ if(B70_PREFILL_ENABLED)
       # still links no project archive).
       -DB70_LOADER_LIB=$<TARGET_FILE:b70_loader>
       -DB70_MODEL_LIB=$<TARGET_FILE:b70_model>
+      # spec 2.1 §3.5: the probes construct `runtime::prefill::Context`, which now lives in
+      # the host archive, and the host archive pulls in b70_runtime.
+      -DB70_PREFILL_HOST_LIB=$<TARGET_FILE:b70_prefill_host>
+      -DB70_RUNTIME_LIB=$<TARGET_FILE:b70_runtime>
       -DB70_SYCL_TLA_SRC_DIR=${B70_SYCL_TLA_SRC_DIR}
       -DB70_SYCL_TLA_REVISION=${B70_SYCL_TLA_REVISION}
       -DB70_SYCL_AOT_256_GRF=${B70_SYCL_AOT_256_GRF}
