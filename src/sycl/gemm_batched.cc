@@ -12,9 +12,7 @@
 
 #include "sycl/xe_gemm_config.h"
 
-#include "runtime/prefill/context.h"
-#include "runtime/prefill/context_sycl.h"
-#include "runtime/prefill/gemm.h"
+#include "runtime/prefill/gemm_sycl.h"
 
 // Plan 6d Task 1 Step 3 settles whether the ColumnMajor-B chain instantiates at
 // the pin. It does; if a bump ever breaks it, define this to 0 and the fallback
@@ -68,7 +66,7 @@ typename G::GemmKernel::Arguments make_args(const GemmBatch& b, const uint16_t* 
 }
 
 template <class G>
-void launch(Context& cx, const GemmBatch& b, const uint16_t* A, const uint16_t* B, float* C,
+void launch(SyclSide* side, const GemmBatch& b, const uint16_t* A, const uint16_t* B, float* C,
             typename G::StrideB sB) {
   const auto args = make_args<G>(b, A, B, C, sB);
   require(G::Gemm::can_implement(args) == cutlass::Status::kSuccess,
@@ -82,7 +80,7 @@ void launch(Context& cx, const GemmBatch& b, const uint16_t* A, const uint16_t* 
   // uses it instead of compat::get_default_queue() whenever it is non-null.
   // That one line is the whole L0<->SYCL interop story for the GEMM: our queue,
   // built from the engine's own ze_context/ze_device, IS the launch queue.
-  sycl::queue& q = runtime::prefill::sycl_queue(cx);
+  sycl::queue& q = *static_cast<sycl::queue*>(sycl_side_queue(side));
   typename G::Gemm op;
   require(op.initialize(args, nullptr, &q) == cutlass::Status::kSuccess,
           "GemmUniversalAdapter::initialize failed");
@@ -101,8 +99,8 @@ xe::XeGemm::StrideB stride_b_rowmajor(const GemmBatch& b) {
 
 bool gemm_bf16_supports_transb() { return B70_PREFILL_TRANSB != 0; }
 
-void gemm_bf16_batched(Context& cx, GemmBatch b, const uint16_t* A, const uint16_t* B, float* C,
-                       bool transB) {
+void gemm_bf16_batched_on(SyclSide* side, GemmBatch b, const uint16_t* A, const uint16_t* B,
+                          float* C, bool transB) {
   require(b.M && b.K && b.N && b.L, "M, K, N and L must all be non-zero");
   require(b.K % 8 == 0, "K must be a multiple of 8 bf16 elements, got " + std::to_string(b.K));
   require(b.N % 8 == 0, "N must be a multiple of 8 bf16 elements, got " + std::to_string(b.N));
@@ -113,18 +111,14 @@ void gemm_bf16_batched(Context& cx, GemmBatch b, const uint16_t* A, const uint16
 #if B70_PREFILL_TRANSB
     // B is [N][K] row-major with row pitch ldb -> ColumnMajor from the GEMM's
     // view. StrideB over (N, K, L) is (ldb, 1, strideB).
-    launch<xe::XeGemmT>(cx, b, A, B, C,
+    launch<xe::XeGemmT>(side, b, A, B, C,
                         cute::make_stride(int64_t(b.ldb), cute::Int<1>{}, int64_t(b.strideB)));
 #else
     require(false, "this build has no ColumnMajor-B chain (B70_PREFILL_TRANSB=0)");
 #endif
   } else {
-    launch<xe::XeGemm>(cx, b, A, B, C, stride_b_rowmajor(b));
+    launch<xe::XeGemm>(side, b, A, B, C, stride_b_rowmajor(b));
   }
-}
-
-void gemm_bf16(Context& cx, GemmDims d, const uint16_t* A, const uint16_t* B, float* C) {
-  gemm_bf16_batched(cx, GemmBatch{d.M, d.K, d.N, 1, d.K, d.N, d.N, 0, 0, 0}, A, B, C, false);
 }
 
 void gemm_bf16_batched_grid(GemmBatch b, bool transB, uint32_t out_xyz[3]) {

@@ -8,6 +8,7 @@
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
 #include "runtime/prefill/attn.h"
+#include "runtime/prefill/backend.h"
 #include "runtime/prefill/dequant.h"
 #include "runtime/prefill/gdn.h"
 #include "runtime/prefill/gemm.h"
@@ -46,25 +47,15 @@ const void* at_const(const l0::Mem& m, size_t off) {
   return static_cast<const uint8_t*>(m.ptr()) + off;
 }
 
-// One int4 linear on the prefill path: expand its tiles into the bf16 scratch,
-// hand off, contract. THE path, by ruling A24 -- not a step to be fused.
-//
-//   A = `x` bf16 [M][K] (lda = K)   B = scratch bf16 [K][N] (ldb = N)
-//   C = `partials` fp32 [M][N] (ldc = N), which is S = 1 by construction and is
-//       therefore exactly what every `pf_*` consumer folds (ruling R1).
+// One int4 linear on the prefill path -- THE seam of spec 2.1 §3.2. The sycl-tla side is
+// spec 2's two-pass path unchanged (backend_sycl.cc); the L0 side is S2's slab walk.
 void pf_linear(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWeight& w,
-               const uint16_t* x, uint32_t M) {
-  const model::GemvShape& sh = w.shape;
-  require(w.kind == model::WeightKind::Int4,
-          "the prefill walk's linears are all int4; this one is not");
-  require(s.dequant.size() >= size_t(sh.K) * sh.N * 2,
-          "the bf16 dequant scratch is smaller than K x N for this linear");
-  require(s.partials.size() >= size_t(M) * sh.N * 4,
-          "`partials` is smaller than the [M][N] fp32 this linear writes");
-  dequant_to_bf16(cx, kc, w, s.dequant.as<uint16_t>());
-  timed_wait(cx, Phase::kDequant);        // L0 -> SYCL
-  gemm_bf16(cx, GemmDims{M, sh.K, sh.N}, x, s.dequant.as<uint16_t>(), s.partials.as<float>());
-  timed_wait(cx, Phase::kGemm);           // SYCL -> L0
+               const uint16_t* x, uint32_t M, PrefillBackend backend) {
+  if (backend == PrefillBackend::SyclTla) {
+    linear_sycl(cx, kc, s, w, x, M);
+    return;
+  }
+  throw std::runtime_error("runtime::prefill: the L0 backend's linears land in spec 2.1 S2");
 }
 
 // The res_norm pair at `M` rows. `s_prev` is 0 for layer 0's leading norm --
@@ -86,7 +77,8 @@ constexpr uint32_t kSiluChunk = 4096;
 
 void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C, l0::Mem& gdn_state_mem,
-                l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem) {
+                l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem,
+                PrefillBackend backend) {
   require(C > 0 && C <= PrefillScratch::kC,
           "C = " + std::to_string(C) + " is outside (0, PrefillScratch::kC]");
   require(size_t(pos) + C <= size_t(max_len), "pos + C exceeds max_len");
@@ -118,7 +110,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                 s.resid.ptr(), s.x.ptr(), C);                     // x stride 5120
 
     if (L.kind == model::LayerKind::GDN) {
-      pf_linear(cx, kc, s, m.linears.at({l, LinearId::QkvZ}), s.x.as<uint16_t>(), C);
+      pf_linear(cx, kc, s, m.linears.at({l, LinearId::QkvZ}), s.x.as<uint16_t>(), C, backend);
       {   // a||b: a bf16 GEMV, not a linear -- 128 columns is no DPAS shape.
         const DeviceWeight& w = m.linears.at({l, LinearId::AB});
         cx.launch(kc(kernels::pf_ab_proj_variant(), "pf_ab_proj"), w.shape.N / 16, (C + 7) / 8, 1,
@@ -130,9 +122,10 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                 reinterpret_cast<uint16_t*>(at(conv_ring_mem, size_t(gdn) * conv_ring_stride)),
                 m.layer_small[l].gdn.ptr(), s.mixer_out.as<uint16_t>());   // y stride 6144
       ++gdn;
-      pf_linear(cx, kc, s, m.linears.at({l, LinearId::OutProj}), s.mixer_out.as<uint16_t>(), C);
+      pf_linear(cx, kc, s, m.linears.at({l, LinearId::OutProj}), s.mixer_out.as<uint16_t>(), C,
+               backend);
     } else {
-      pf_linear(cx, kc, s, m.linears.at({l, LinearId::Qkv}), s.x.as<uint16_t>(), C);
+      pf_linear(cx, kc, s, m.linears.at({l, LinearId::Qkv}), s.x.as<uint16_t>(), C, backend);
       uint16_t* kk = reinterpret_cast<uint16_t*>(at(kv_k_mem, size_t(fa) * kv_stride));
       uint16_t* vv = reinterpret_cast<uint16_t*>(at(kv_v_mem, size_t(fa) * kv_stride));
       // `Control::{pos, n_active}` were set by the caller before this chunk and
@@ -142,22 +135,23 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
       attn_prep_chunk(cx, kc, s, C, ctrl, s.partials.as<float>(),
                       m.layer_small[l].gdn.as<float>(), m.rope.as<float>(), kk, vv);
       profile_wait(cx, Phase::kAttnPrep);
-      attn_chunk(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), kk, vv);
+      attn_chunk(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), kk, vv, backend);
       attn_gate_chunk(cx, kc, s, C, s.partials.as<float>(), s.mixer_out.as<uint16_t>());
       profile_wait(cx, Phase::kAttnGate);
       ++fa;
-      pf_linear(cx, kc, s, m.linears.at({l, LinearId::OProj}), s.mixer_out.as<uint16_t>(), C);
+      pf_linear(cx, kc, s, m.linears.at({l, LinearId::OProj}), s.mixer_out.as<uint16_t>(), C,
+               backend);
     }
 
     // The MLP half, identical in both layer kinds.
     pf_res_norm(cx, kc, s, 1u, at_const(m.layer_small[l].norms, loader::kNormsOffPost),
                 s.partials.ptr(), s.resid.ptr(), s.x.ptr(), C);   // x stride 5120
-    pf_linear(cx, kc, s, m.linears.at({l, LinearId::GateUp}), s.x.as<uint16_t>(), C);
+    pf_linear(cx, kc, s, m.linears.at({l, LinearId::GateUp}), s.x.as<uint16_t>(), C, backend);
     cx.launch(kc(kernels::pf_silu_mul_variant(), "pf_silu_mul"),
               (Qwen35::kIntermediate + kSiluChunk - 1) / kSiluChunk, C, 1,
               {PtrArg(s.partials.ptr()), PtrArg(s.x.ptr()), arg_val(C)});   // x stride 17408
     profile_wait(cx, Phase::kSilu);
-    pf_linear(cx, kc, s, m.linears.at({l, LinearId::Down}), s.x.as<uint16_t>(), C);
+    pf_linear(cx, kc, s, m.linears.at({l, LinearId::Down}), s.x.as<uint16_t>(), C, backend);
   }
   require(gdn == 48 && fa == 16, "the layer table did not give 48 GDN and 16 FA layers");
 }
@@ -218,20 +212,29 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMode
 // **None of these depends on C**, which is the whole point of the runtime-M
 // rule: one binary set serves every `--pp-chunk`.
 namespace {
+// sycl-tla, spec 2's arithmetic (unchanged): per GDN layer 20 L0 launches, 4 SYCL GEMMs,
+// 8 waits; per FA layer 15 launches, 4 + 2 x 4 GEMMs, 17 waits; 1 embed.
 constexpr size_t kGdnLayerLaunches = 2 + 1 + 1 + kGdnChunkLaunches + 1 + 2 + 1 + 1 + 1;
 constexpr size_t kFaLayerLaunches =
     2 + 1 + kAttnPrepLaunches + kAttnChunkLaunches + kAttnGateLaunches + 1 + 2 + 1 + 1 + 1;
-// SYCL GEMMs: 4 int4 linears per GDN layer; 4 per FA layer plus 2 per kv group.
 constexpr size_t kGdnLayerGemms = 4;
 constexpr size_t kFaLayerGemms = 4 + 2 * attn::kKvHeads;
-// Host handoffs: 2 per int4 linear (L0->SYCL, SYCL->L0), plus attention's 9
-// (2 per kv group + the one that closes attn_chunk).
 constexpr size_t kGdnLayerWaits = 2 * 4;
 constexpr size_t kFaLayerWaits = 2 * 4 + 2 * attn::kKvHeads + 1;
+// L0 (spec 2.1): no backend body exists in S1, so the counts are 0 here; S2 sets the linear
+// terms and S3 the attention terms (spec §3.3 derives 8,689 for the finished backend).
+constexpr size_t kL0GdnLayerLaunches = 0;
+constexpr size_t kL0FaLayerLaunches = 0;
 }  // namespace
-
-size_t step_chunk_launches() { return 1 + 48 * kGdnLayerLaunches + 16 * kFaLayerLaunches; }
-size_t step_chunk_gemms() { return 48 * kGdnLayerGemms + 16 * kFaLayerGemms; }
-size_t step_chunk_waits() { return 48 * kGdnLayerWaits + 16 * kFaLayerWaits; }
+size_t step_chunk_launches(PrefillBackend b) {
+  return b == PrefillBackend::SyclTla ? 1 + 48 * kGdnLayerLaunches + 16 * kFaLayerLaunches
+                                      : 1 + 48 * kL0GdnLayerLaunches + 16 * kL0FaLayerLaunches;
+}
+size_t step_chunk_gemms(PrefillBackend b) {
+  return b == PrefillBackend::SyclTla ? 48 * kGdnLayerGemms + 16 * kFaLayerGemms : 0;
+}
+size_t step_chunk_waits(PrefillBackend b) {
+  return b == PrefillBackend::SyclTla ? 48 * kGdnLayerWaits + 16 * kFaLayerWaits : 0;
+}
 
 }  // namespace runtime::prefill

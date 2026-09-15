@@ -4,6 +4,7 @@
 #include <string>
 
 #include "kernels/prefill/pf_kernels.h"
+#include "runtime/prefill/backend.h"
 #include "runtime/prefill/gemm.h"
 #include "runtime/prefill/profile.h"
 
@@ -38,7 +39,8 @@ void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 }
 
 void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
-                const uint16_t* q, const uint16_t* kv_k, const uint16_t* kv_v) {
+                const uint16_t* q, const uint16_t* kv_k, const uint16_t* kv_v,
+                PrefillBackend backend) {
   require(C > 0 && C <= PrefillScratch::kC, "C = " + std::to_string(C) + " is outside (0, kC]");
   const uint32_t depth = pos + C;
   require(depth <= s.max_len, "pos + C = " + std::to_string(depth) + " exceeds max_len " +
@@ -57,8 +59,9 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
   require(npad <= s.max_len,
           "the 8-element GEMM padding of depth " + std::to_string(depth) + " exceeds max_len " +
               std::to_string(s.max_len));
-  require(gemm_bf16_supports_transb(),
-          "this build has no ColumnMajor-B chain, so QK^T cannot read the KV cache in place");
+  if (backend == PrefillBackend::SyclTla)
+    require(gemm_bf16_supports_transb(),
+            "this build has no ColumnMajor-B chain, so QK^T cannot read the KV cache in place");
 
   const uint32_t ld = s.max_len;                       // pf_s / pf_p row pitch
   const size_t stride_l = size_t(C) * ld;              // one head slot of pf_s / pf_p
@@ -84,14 +87,16 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     qk.strideA = kHeadDim;       // the next q-head of the group
     qk.strideB = 0;              // GQA: one kv-head, six q-heads
     qk.strideC = stride_l;
-    gemm_bf16_batched(cx, qk, q + size_t(j) * kGroup * kHeadDim,
-                      kv_k + size_t(j) * kHeadDim, S, /*transB=*/true);
-    timed_wait(cx, Phase::kAttnQk);   // SYCL -> L0: one compute queue (A24)
+    if (backend == PrefillBackend::SyclTla) {
+      attn_qk_sycl(cx, qk, q + size_t(j) * kGroup * kHeadDim, kv_k + size_t(j) * kHeadDim, S);
+    } else {
+      throw std::runtime_error("runtime::prefill: the L0 backend's attention lands in spec 2.1 S3");
+    }
+    // (the timed_wait(cx, Phase::kAttnQk) line is now inside attn_qk_sycl)
 
     cx.launch(kc(kernels::pf_attn_variant(), "pf_softmax_causal"), C, kGroup, 1,
               {PtrArg(S), PtrArg(P), arg_val(pos), arg_val(npad), arg_val(ld),
                arg_val(uint32_t(stride_l))});
-    timed_wait(cx, Phase::kAttnSm);   // L0 -> SYCL
 
     // O[l][m][d] = sum_n P[l][m][n] . v[n][j][d].  B is kv-head j's v slab,
     // [depth][256] row-major at pitch 1024 -- no transpose, and again shared.
@@ -103,10 +108,14 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     pv.strideA = stride_l;
     pv.strideB = 0;
     pv.strideC = stride_h;
-    gemm_bf16_batched(cx, pv, P, kv_v + size_t(j) * kHeadDim,
-                      O + size_t(j) * kGroup * stride_h, /*transB=*/false);
+    if (backend == PrefillBackend::SyclTla) {
+      timed_wait(cx, Phase::kAttnSm);   // L0 -> SYCL
+      attn_pv_sycl(cx, pv, P, kv_v + size_t(j) * kHeadDim, O + size_t(j) * kGroup * stride_h);
+    } else {
+      throw std::runtime_error("runtime::prefill: the L0 backend's attention lands in spec 2.1 S3");
+    }
   }
-  timed_wait(cx, Phase::kAttnPv);   // SYCL -> L0, for the gate launch next
+  if (backend == PrefillBackend::SyclTla) timed_wait(cx, Phase::kAttnPv);  // SYCL -> L0, for the gate launch next
 }
 
 void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C,

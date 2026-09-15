@@ -169,7 +169,6 @@ struct PrefillScratch {
   l0::Mem mixer_out;    // bf16 [kC][6144]    (out_proj / o_proj input, R2)
   l0::Mem logits;       // fp32 [1][248320]   (last position only)
   l0::Mem argmax_part;  // fp32 [1][243][2]
-  l0::Mem dequant;      // bf16 [5120][34816] - plan 6c's, chunk-independent
   // gdn_chunk's own scratch (plan 6b Tasks 6-8)
   l0::Mem gdn_xb;       // bf16 [kC][10240]  conv+SiLU, then l2normed in place
   l0::Mem gdn_seed;     // bf16 [3][10240]   the ring's last 3 positions
@@ -192,6 +191,16 @@ struct PrefillScratch {
   // (plan 6d-composed Task 4 Step 3). One accessor, so the rule reads the
   // allocation instead of a second copy of the constant.
   size_t pf_s_bytes() const { return pf_s.size(); }
+
+  // Spec 2.1 §3.3: the two backend expansions, allocated on first use (ruling R7's pattern one
+  // level down) so a session pays only for the backend it runs.
+  l0::Mem& dequant_buffer();   // sycl-tla: bf16 [5120][34816] = 356,515,840 B
+  l0::Mem& slab_buffer();      // L0: bf16 [17408][1024] = 35,651,584 B (measured: 17408*1024*2)
+  size_t lazy_bytes() const;   // whichever of the two exist
+
+ private:
+  l0::Context* ctx_;
+  std::unique_ptr<l0::Mem> dequant_, slab_;
 };
 
 // The VIEW. Every public name capture.cc uses, with the same types as before

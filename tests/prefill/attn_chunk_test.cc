@@ -258,7 +258,7 @@ Row case_attn(Dev& d, uint32_t pos, uint32_t C) {
               " rounding at the store)\n", got_k.size(), got_q.size());
 
   attn_chunk(d.cx, d.kc, d.s, pos, C, d.s.pf_q.as<uint16_t>(), dk.as<uint16_t>(),
-             dv.as<uint16_t>());
+             dv.as<uint16_t>(), runtime::PrefillBackend::SyclTla);
   attn_gate_chunk(d.cx, d.kc, d.s, C, dp.as<float>(), dout.as<uint16_t>());
   d.cx.wait();
   std::vector<uint16_t> got(size_t(C) * kOutN);

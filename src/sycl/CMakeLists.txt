@@ -18,7 +18,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_compile_options(-Wall -Wextra -Werror)
 
 foreach(v B70_ROOT B70_KERNEL_DIR B70_OCLOC_DEVICE B70_ONEAPI_LIB B70_ONEAPI_UMF_LIB B70_L0_LIB
-          B70_LOADER_LIB B70_MODEL_LIB B70_SYCL_TLA_SRC_DIR B70_SYCL_TLA_REVISION)
+          B70_LOADER_LIB B70_MODEL_LIB B70_PREFILL_HOST_LIB B70_RUNTIME_LIB B70_SYCL_TLA_SRC_DIR
+          B70_SYCL_TLA_REVISION)
   if(NOT DEFINED ${v})
     message(FATAL_ERROR "${v} must be passed in by cmake/prefill.cmake")
   endif()
@@ -120,7 +121,7 @@ target_compile_definitions(sycl_tla INTERFACE CUTLASS_ENABLE_SYCL SYCL_INTEL_TAR
 target_compile_options(sycl_tla INTERFACE -ftemplate-backtrace-limit=0)
 
 # --- the component ---------------------------------------------------------
-add_library(b70_prefill SHARED context.cc gemm_batched.cc)
+add_library(b70_prefill SHARED sycl_side.cc gemm_batched.cc)
 target_include_directories(b70_prefill PRIVATE ${B70_ROOT}/src)
 target_compile_options(b70_prefill PRIVATE ${B70_SYCL_COMPILE})
 target_link_options(b70_prefill PRIVATE ${B70_SYCL_LINK}
@@ -158,7 +159,11 @@ function(b70_sycl_probe NAME)
   target_compile_options(${NAME} PRIVATE ${B70_SYCL_COMPILE})
   target_link_options(${NAME} PRIVATE ${B70_SYCL_LINK}
     -Wl,-rpath,${B70_ONEAPI_LIB} -Wl,-rpath,${B70_ONEAPI_UMF_LIB} -Wl,--disable-new-dtags)
-  target_link_libraries(${NAME} PRIVATE b70_prefill ${B70_L0_LIB} PkgConfig::ZE ${ARGN})
+  # The probes construct `Context`, which is now in the host archive, and the host archive
+  # pulls the runtime, loader and model archives (spec 2.1 §3.5).
+  target_link_libraries(${NAME} PRIVATE b70_prefill -Wl,--start-group "${B70_PREFILL_HOST_LIB}"
+    "${B70_RUNTIME_LIB}" "${B70_LOADER_LIB}" "${B70_MODEL_LIB}" "${B70_L0_LIB}" -Wl,--end-group
+    PkgConfig::ZE ${ARGN})
   set_property(TARGET ${NAME} APPEND PROPERTY INSTALL_RPATH
     "$ORIGIN/../lib" "${B70_ONEAPI_LIB}" "${B70_ONEAPI_UMF_LIB}")
   install(TARGETS ${NAME} RUNTIME DESTINATION bin)

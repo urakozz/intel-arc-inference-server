@@ -5,6 +5,7 @@
 #include "runtime/buffers.h"
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/kernels.h"
+#include "runtime/prefill_backend.h"
 
 namespace runtime::prefill {
 
@@ -56,7 +57,8 @@ void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 //     what `attn_gate_chunk` and the tests read it at. Four L0 launches (one
 //     softmax per kv group) and eight GEMMs; synchronises, see above.
 void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
-                const uint16_t* q, const uint16_t* kv_k, const uint16_t* kv_v);
+                const uint16_t* q, const uint16_t* kv_k, const uint16_t* kv_v,
+                PrefillBackend backend);
 
 // (3) The output gate (ruling A16): `out[m][h*256+d] =
 //     rne_bf16(f32(rne_bf16(o)) . sigmoid(f32(rne_bf16(gate))))`, with the gate

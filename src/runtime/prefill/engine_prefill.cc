@@ -19,6 +19,7 @@
 #include "model/qwen35.h"
 #include "runtime/control.h"
 #include "runtime/engine.h"
+#include "runtime/prefill/backend.h"
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/kernels.h"
 #include "runtime/prefill/step.h"
@@ -36,6 +37,12 @@ void destroy_prefill(PrefillEngine* p) { delete p; }
 }  // namespace
 
 size_t Engine::prefill_launches() const { return pfx_ ? pfx_->cx.launches() : 0; }
+
+PrefillBackend Engine::prefill_backend() const {
+  return pf_backend_ ? *pf_backend_ : prefill::default_prefill_backend();
+}
+
+bool Engine::prefill_sycl_side_created() const { return pfx_ && pfx_->cx.has_sycl(); }
 
 void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (ids.empty()) throw std::runtime_error("runtime::Engine::prefill: no ids");
@@ -66,6 +73,11 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     pfx_ = std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)>(new PrefillEngine(ctx_),
                                                                     &destroy_prefill);
 
+  const PrefillBackend backend = prefill_backend();
+  if (backend == PrefillBackend::SyclTla && !prefill::sycl_available())
+    throw std::runtime_error("runtime::Engine::prefill: the sycl-tla backend needs the SYCL"
+                             " component, and this build has none; set_prefill_backend(L0)");
+
   for (size_t off = 0; off < ids.size(); off += chunk) {
     const uint32_t C = uint32_t(std::min<size_t>(chunk, ids.size() - off));
     pfx_->cx.wait();                       // before touching `ids` or `Control`
@@ -74,7 +86,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     control_->n_active = C;
     prefill::step_chunk(pfx_->cx, pfx_->kc, *pf_, model_, buffers_.max_len, control_,
                         base + uint32_t(off), C, persist_.gdn_state, persist_.conv_ring,
-                        persist_.kv_k, persist_.kv_v);
+                        persist_.kv_k, persist_.kv_v, backend);
     pfx_->cx.wait();                       // the chunk's state has landed
   }
 

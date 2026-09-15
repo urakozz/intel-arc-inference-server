@@ -17,9 +17,7 @@ target_link_libraries(b70_runtime PUBLIC b70_l0 b70_model b70_loader)
 b70_target_kernel_dir(b70_runtime)
 
 # The prefill path's host half - its own archive, so nothing that links
-# b70_runtime acquires a dependency on libb70_prefill.so. Absent when the
-# optional SYCL component is off (cmake/prefill.cmake), which is the same
-# condition tests/CMakeLists.txt guards context_test with.
-if(B70_PREFILL_ENABLED)
-  add_subdirectory(prefill)
-endif()
+# b70_runtime acquires a dependency on libb70_prefill.so. Built in EVERY
+# configuration (spec 2.1 §3.5): only libb70_prefill.so itself - the SYCL
+# component - is optional (cmake/prefill.cmake).
+add_subdirectory(prefill)
