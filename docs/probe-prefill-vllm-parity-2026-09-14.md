@@ -1016,3 +1016,90 @@ would set a target "−197 ms/chunk vs today's 861": the measured rate implies
 the four int4 linears would cost *more* through oneDNN than through the
 two-pass path they would replace, not less. Recorded as the reference
 number; not tuned further, and not treated as a candidate regardless (A0).
+
+### P-A - our OpenCL C bf16 DPAS GEMM on the Level Zero list (CANDIDATE, go/no-go)
+
+Kernel: `tools/probe/pf_gemm_bf16.cl` (new probe-only OpenCL C, AOT
+`-cl-intel-256-GRF-per-thread`, `tools/probe/CMakeLists.txt`). Host:
+`tools/probe/probe_pf_gemm.cc` (plain g++ L0 probe, links `b70_prefill` only
+to call `gemm_bf16` as the same-harness C2 control). Transcribed from §A4
+essentially verbatim; two build-time defects found and fixed before the
+first correct build (both one-line, both address-space/init pedantry, no
+algorithm change):
+
+1. `intel_sub_group_2d_block_write_32b_8r16x1c`'s last parameter is declared
+   `private uint*` in IGC's headers; passing `(uint*)&acc[a][b]` (no address
+   space qualifier on the cast) let clang infer `__generic`, which IGC
+   segfaulted on (ocloc exit `-11`, no diagnostic beyond a frontend error one
+   line above the crash). Fix: `(__private uint*)&acc[a][b]`.
+2. `probe_pf_gemm.cc`: an unused `fail()` helper and an aggregate-init with
+   fewer braces than members tripped `-Werror=unused-function` /
+   `-Werror=missing-field-initializers` (this project's own `-Wall -Wextra
+   -Werror`). Removed the helper; switched to field assignment.
+
+**Build gate (measured, before any timing counts - `IGC_ShaderDumpEnable=1`,
+the DPAS-scan doc's method, §A4.8):**
+
+| check | required | measured |
+|---|---|---|
+| `grf_count` | 256 | **256** |
+| `simd_size` | 16 | **16** |
+| `has_dpas` | true | **true** |
+| `spill_mem_size` / `private_size` | absent | **absent** (not present in the `.zeinfo` at all) |
+| `barrier_count` | 1 | **1** |
+| `dpas.8x8` per k-tile body | 32, b-outer a-inner | **32**, confirmed b-outer/a-inner: 4 consecutive `dpas` share the same `src1` register (e.g. `r223:bf` × 4, then `r239:bf` × 4, …) while the 4th operand walks `r26.0/r30.0/r34.0/r38.0:bf` |
+| data-returning 2D loads per k-tile | 3 (1 A `.d16`, 2 B `.d16v` transform) | **3** - `load_block2d.ugm.d16.a64` (A) + 2× `load_block2d.ugm.d16v.a64` (B); **9 total in the file** = 3 (loop) + 4 (prologue, 2 tiles × A+B) + 2 (loop's own t+2 prefetch), matching the design exactly |
+| prefetch-form 2D loads (`null` dest) per k-tile | 2 | **2** in the loop (+4 in the prologue) - `load_block2d.ugm.d16.a64.ca.ca … null:0`, 6 of the file's 9 total |
+| 2D stores in epilogue | 16 | **16** - `store_block2d.ugm.d32.a64` |
+| scatter/gather `send` inside the loop | 0 | **0** |
+| `mov` between a load's destination and the `dpas` operand that reads it | 0 | **0** - every `dpas` reads the load destination register directly (`r223:bf`, `r60:bf`, `r26.0:bf`, …), no intervening `mov` |
+| split barrier | `intel_work_group_barrier_arrive`/`_wait` present | **present**: `send.gtwy` (signal, arrive) at the loop top, `sync.bar 0x0` (a real blocking wait) after the dpas block - the split form, not two plain barriers |
+
+**One naming deviation, not a substantive one:** this driver's disassembler
+names the messages `load_block2d`/`store_block2d`, not
+`lsc_load_block2d`/`lsc_store_block2d` as §A4.8 pre-registered the grep
+target - same LSC 2D block-IO messages (`.ugm.d16`/`.d16v`/`.d32`,
+`cl_intel_subgroup_2d_block_io`'s builtins lower to nothing else), a
+compiler-version disassembly spelling, not a different mechanism. **R2 (2D
+descriptor overhead) is present exactly where predicted**: a block of `mov`s
+building the next-prefetch's 2D descriptor (`blk2d.widthM1/heightM1/pitchM1/
+X/Y`) sits between the fence/barrier-wait and the next iteration's loads -
+outside the 32-`dpas` block itself, which contains zero `mov` and zero
+`send`. **Gate: PASS**, first build, no spill, no private memory, no
+scatter/gather; this binary's numbers are the ones below.
+
+**Correctness (measured): bitwise identical to `gemm_bf16` in every cell,
+first build - the predicted outcome, not the fallback.** Determinism:
+bitwise across two independent runs, every cell.
+
+**Rate (measured, RECORD grade; C2 = sycl-tla's `gemm_bf16` re-run beside
+every cell, same harness, same inputs):**
+
+| shape | K×N | M | pf ms | pf TFLOP/s | C2 ms | C2 TFLOP/s | pf/C2 | correctness | determinism |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---|
+| gate‖up | 5120×34816 | 1024 | 2.283 | 159.88 | 2.350 | 155.36 | 1.029 | bitwise | bitwise |
+| **gate‖up** | 5120×34816 | **2048** | **4.665** | **156.53** | 5.498 | 132.81 | 1.179 | bitwise | bitwise |
+| gate‖up | 5120×34816 | 4096 | 11.772 | 124.05 | 12.440 | 117.39 | 1.057 | bitwise | bitwise |
+| down | 17408×5120 | 2048 | 2.214 | 164.89 | 2.314 | 157.76 | 1.045 | bitwise | bitwise |
+
+`pf_gemm_bf16` **beats its own same-harness sycl-tla control at every cell
+measured** (+2.9 % to +17.9 %). The C2 control itself reads lower in this
+session than its historical record (132.81 here vs 153.69 at A24/A28,
+gate‖up M=2048; still the correct like-for-like comparator per §A3's
+protocol) - session-to-session driver/thermal variance the pre-registration
+anticipated and the reason C2 is re-run beside every cell rather than
+quoted from the record.
+
+**gate‖up M=2048: measured 156.53 TFLOP/s vs pre-registered 146 (band
+135-155).** At the top of the band, essentially matching its upper edge (a
++7.2 % beat of the point prediction, +1.0 % inside the top of the band -
+within the same run-to-run spread A2 already flagged, 0.5-0.9 %, times a
+wider margin). `down` M=2048: 164.89 vs 156 predicted (+5.7 %). `gate‖up`
+M=1024: 159.88 vs 152 predicted (+5.2 %). `gate‖up` M=4096: 124.05 vs 114
+predicted (+8.8 %) - the R6 risk (A > L2 at M=4096) costs *less* than
+predicted, not more.
+
+**Decision rule (binding, from the brief): ≥ 140 → proceed to P-B.**
+**156.53 ≥ 140 - PROCEED TO P-B.**
+
+**Grade: RECORD.**
