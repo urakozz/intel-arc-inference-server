@@ -126,7 +126,7 @@ static void check_prefill_scratch(l0::Context& ctx) {
   CHECK_EQ(pf.bytes(), size_t{1907474328});
   CHECK_EQ(pf.lazy_bytes(), size_t{0});
   CHECK_EQ(pf.dequant_buffer().size(), size_t{356515840});
-  // 17408 x 1024 x 2 B (measured from the formula: Q::kIntermediate * kPfSlabWidth * kBf16).
+  // 17408 x 1024 x 2 B (derived: Q::kIntermediate * 1024 * kBf16, the formula in PrefillScratch::slab_buffer()).
   CHECK_EQ(pf.slab_buffer().size(), size_t{35651584});
   CHECK_EQ(pf.lazy_bytes(), size_t{356515840 + 35651584});
   CHECK_EQ(runtime::PrefillScratch::kC, 2048u);
