@@ -214,3 +214,23 @@ if(B70_P5_CUTE_GDN)
   target_compile_definitions(probe_gdn_chunk PRIVATE VLLM_XPU_ENABLE_XE2)
   target_link_options(probe_gdn_chunk PRIVATE -flink-huge-device-code)
 endif()
+
+# P-D (docs/probe-prefill-vllm-parity-2026-09-14.md §A3.4): the torch-free
+# shim Phase 1 §2.1 characterised as small. Unlike P5 above (gated OFF,
+# "requires PyTorch headers"), this target calls `gdn::kernel_launcher<T,
+# StateT>` directly -- the torch-free template -- and never executes the
+# vendor header's torch-using OUTER wrapper, so it needs no real PyTorch: only
+# `src/sycl/vllm_shim/torch/all.h`'s stand-in, just complete enough for that
+# unused wrapper to typecheck (see the probe's own file header for the exact
+# enumeration). Always built when the read-only vllm-xpu-kernels checkout is
+# present, independent of B70_P5_CUTE_GDN.
+if(EXISTS "${B70_VLLM_XPU_KERNELS_DIR}/csrc/xpu/gdn_attn/xe_2/chunk_gated_delta_rule_kernels_xe2.hpp")
+  b70_sycl_probe(probe_pf_gdn_xe2 sycl_tla)
+  target_include_directories(probe_pf_gdn_xe2 SYSTEM PRIVATE
+    ${B70_ROOT}/src/sycl/vllm_shim
+    ${B70_VLLM_XPU_KERNELS_DIR}
+    ${B70_VLLM_XPU_KERNELS_DIR}/csrc/xpu/gdn_attn
+    ${B70_VLLM_XPU_KERNELS_DIR}/csrc/xpu/gdn_attn/xe_2)
+  target_compile_definitions(probe_pf_gdn_xe2 PRIVATE VLLM_XPU_ENABLE_XE2)
+  target_link_options(probe_pf_gdn_xe2 PRIVATE -flink-huge-device-code)
+endif()

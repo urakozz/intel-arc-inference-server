@@ -1200,3 +1200,164 @@ int4 dequant P-C already measured below its own break-even.
 
 **Grade: RECORD** (preflight clean; identical protocol to every other cell
 in this report).
+
+### P-D - Intel's Xe2 chunked GDN kernel (REFERENCE TARGET)
+
+*Concurrent operator build: buildkit vllm-xpu-kernels, 8 threads, ~80 GB
+host RAM* (operator ruling 2026-09-15: it uses only 8 of 44 CPU threads and
+~80 of the box's 121 GB host RAM, on neither GPU; graded from the DRM-holder
+and `docker ps` checks below, not waited for). DRM-holder sweep and
+`docker ps -q` both empty at this cell's preflight check; this probe's own
+host allocations are ~65 MB (the A/w/u scratch) plus a few MB of fixture
+data, well inside the ~40 GB the operator asked to keep free.
+
+Probe: `tools/probe/probe_pf_gdn_xe2.cc`, a new icpx SYCL target
+(`src/sycl/CMakeLists.txt`, always built when the read-only
+`vllm-xpu-kernels` checkout is present, independent of the existing
+`B70_P5_CUTE_GDN` option). Calls `gdn::kernel_launcher<T, StateT>` directly -
+the torch-free template Phase 1 §2.1 found confined to lines 1-1504 of
+`chunk_gated_delta_rule_kernels_xe2.hpp` - never executing the file's
+torch-using outer wrapper (`chunk_gated_delta_rule_impl_xe2`).
+
+**Two environment shims, both probe-side, neither touching vendor code:**
+
+1. `src/sycl/vllm_shim/torch/all.h` - the pre-registered torch-free shim
+   (§A3.4): a minimal `torch::`/`at::`/`TORCH_CHECK` stand-in, just complete
+   enough that the wrapper's UNUSED body still typechecks (it is never
+   called). One bug found and fixed before the first successful build: the
+   wrapper calls `torch::dtype(dtype)` where `dtype` is already a
+   `TensorOptions` (this stub's `Tensor::dtype()` return type) - real ATen
+   has a distinct `torch::dtype(TypeMeta)` overload for exactly this call
+   shape; added the missing overload (`TensorOptions dtype(const
+   TensorOptions&)`).
+2. **An unanticipated second shim, found only by attempting the build**:
+   `vllm-xpu-kernels`' own `gemm.hpp` (included by
+   `chunk_gated_delta_rule_kernels_xe2.hpp`, needed for the GEMM building
+   blocks the chunked kernel bodies use) declares `constexpr SPIRVScope
+   barrier_scope = ScopeWorkgroup;` and calls `barrier_arrive(barrier_scope)`
+   / `barrier_wait(barrier_scope)` (unqualified, via its own `using namespace
+   cute;`). On this box's icpx + the project's pinned sycl-tla, `gemm.hpp`
+   **fails to compile as shipped**: `barrier_scope`'s type at those call
+   sites is `int`, not `cute::SPIRVScope` (`cute::barrier_arrive`/
+   `barrier_wait` take the unscoped enum `SPIRVScope`; the overload-resolution
+   error names the passed argument's type as `const int`). Confirmed
+   reproducible by compiling the **unmodified vendor file alone** with the
+   project's exact include paths, independent of torch or this probe's own
+   code (isolated repro: `#include "gemm.hpp"` with the project's `-I`s,
+   `-fsycl` and `-fsycl-device-only` both, reproduces the same two errors at
+   the same lines). Root cause not fully isolated (an isolated hand-retyped
+   copy of the same function, includes, namespace and template shape did
+   *not* reproduce it - something about the real, complete file matters that
+   a byte-level reconstruction of its first 108 lines did not capture), but
+   the effect is exact and reproducible. **Fix, probe-side, not vendor-side**:
+   two `int`-argument overloads of `cute::barrier_arrive`/`barrier_wait`,
+   declared in `namespace cute` before including the vendor header, each
+   forwarding to the real enum-typed function via `static_cast<SPIRVScope>`
+   - an exact-match overload for the `int` argument the vendor code actually
+   passes, value-preserving (`ScopeWorkgroup == 2` either way). This is
+   *not* the "if it turns out not small" stop condition the brief
+   pre-registered for torch depth - it is a **separate, unrelated**
+   sycl-tla/vllm-xpu-kernels version mismatch, fixed the same way the torch
+   shim is: bridging an environment gap without editing either vendor tree.
+
+**One real numerics defect found and fixed, the hard way.** The first
+successful run (torch-free shim + barrier shim, everything else as first
+written) produced a **finite-but-astronomical state** (max rel 5.137e+24,
+mean rel `NaN`) - a real bug, not a rounding artifact. Root cause: this
+probe's initial design fed Intel's kernel **raw** (post-conv-SiLU,
+pre-L2-norm) Q/K, reasoning from three "l2norm for q, k" *comments* found
+inside `chunk_gated_delta_rule_kernels_xe2.hpp` that the kernel normalizes
+internally. **That reasoning was wrong**: grepping the entire 1634-line file
+for `rsqrt`, `sum_sq`, `l2norm_eps` or any sum-of-squares computation finds
+**nothing** - the comments are stale/descriptive (an input precondition
+being documented, not code being described), not evidence of internal
+normalization. Fix: L2-normalize Q and K per position per k-head before
+upload, replicating `gdn_ref::step`'s exact formula (`inv = 1/sqrt(Σx² +
+1e-6)`, `qf = rne(q·inv_q)·kQScale`, `kf = rne(k·inv_k)`, no scale) - one
+defect, one fix. This took the state from non-finite to finite.
+
+**Numerics after the fix (measured): still far outside a defensible band.**
+gdn_state vs the CPU reference (`gdn_ref::step`, same fixture, one call over
+all 2048 positions): **max rel 5.187e+01, mean rel 9.604e-01** - against
+A22's *unrelated* reference point of 3.506e-02 / 1.197e-03 (our own kernel,
+a different comparison, quoted only for scale). This is not a "reduction
+order" band (A25/A26's precedent is for a few-percent shift, not a mean
+relative error near 1.0): it means the two computations are still not
+computing the same values under this fixture. **Root cause not found within
+this probe's remaining scope.** Candidates named, none confirmed: a residual
+sign/order convention in the beta (`b`) or gate (`a`) mapping between the
+project's `[0,48)`/`[48,96)` `ab_out` slots and Intel's separate `[num_v_
+heads][seqlen]` `a`/`b` tensors; a scale convention on `v` or on the state
+update this probe assumed rather than verified against the ~1500 remaining
+lines of kernel body it did not hand-trace; or a state-layout transpose
+error beyond the one already applied (Intel's own comment gives `[...,
+head_v_dim, head_k_dim]`, ours `[k][v]` - transposed and corrected here, but
+unverified against the kernel's actual write order). **Reported as the
+finding, per the brief's own rule for depth found only by attempting the
+build - not tuned, not re-fit, not further chased against a probe budget
+that had already spent two rounds of shim debugging.**
+
+**Time (measured): 0.795 ms/chunk, C = 2048, 48 v-heads** - 8 replays, drop
+3, median of 5. Against the pre-registered 150-300 ms band (central 220)
+and our own measured 303 ms/chunk (A30), this is a **382× ratio**, which the
+numerics finding above means **cannot be reported with confidence as a
+valid apples-to-apples GDN time**: if the still-unexplained state divergence
+reflects the kernel taking a data-dependent short-circuit this fixture
+triggers (rather than running its full, intended chunked computation), the
+time would be an artifact of that, not of the algorithm. The measurement is
+recorded exactly as taken - finite, reproducible (0.794 ms and 0.795 ms
+across the two runs, before and after the L2-norm fix, consistent with
+fixed control flow regardless of input values, which argues mildly against
+a data-dependent short-circuit) - but **not adopted as P-D's headline
+number** given the accompanying correctness finding. The honest summary is:
+**P-D's build and torch-free/environment shims succeeded and are a real,
+reusable result; its numerics and therefore its timing's validity did not
+clear this probe's own bar, and are reported as an open finding rather than
+a trusted price.**
+
+**Grade: iterate** (a real defect was found and fixed, but the cell's
+correctness gate - implicit in "measure a valid comparison," not explicitly
+pre-registered as pass/fail since P-D has no decision rule - was not met;
+downgraded from RECORD on that basis, not on the preflight, which was
+clean). **Decision rule: none as a candidate (§A3.4); this probe does not
+establish t_Intel with the confidence needed to price an own GDN rewrite
+against it.**
+
+### Summary - the A3.5 deliverable table, filled, and the recommendation
+
+§A3.5's template, filled with this section's measurements (the addendum
+above it is unedited; this is the filled rendering, not a change to the
+template):
+
+| path | per-chunk ms | t/s | % of 1973 | source |
+|---|---:|---:|---:|---|
+| today | 1456 | 1406 | 71.3 | measured (RECORD, cited from the record) |
+| **P-A + P-B (candidate)** | **1339.3** (1456 − 116.7) | **1529** | **77.5** | measured: P-A's GEMM delta at R=156.53 (−27.4 ms, §A2's formula) + P-B's measured interleave saving at Ns=1024 (+89.29 ms/chunk-equivalent); both RECORD grade |
+| + own int4 in-kernel GEMM at oneDNN's measured rate (target) | **+152.8** (a cost, not a saving: 861 → 1013.8) | n/a | n/a | derived from P-C's measured 98.28 TFLOP/s - **below** the two-pass break-even (115.7); building an in-kernel int4 GEMM to match oneDNN's demonstrated rate would make the chunk slower, not faster |
+| + own GDN at P-D's time (target) | **not applied** | - | - | P-D's 0.795 ms measurement carries an unresolved correctness finding (max rel 51.87 vs the CPU reference, far outside a defensible band) and is not adopted as a trusted price; see P-D above |
+
+**Recommendation.** The pure-Level-Zero direction (P-A + P-B) is real,
+measured, and worth speccing on its own terms: **77.5 % of vLLM's rate**,
+up from today's 71.3 %, with every number in that combination at RECORD
+grade, bitwise or device-timestamp-verified correctness, and a decision
+rule that fired GO on the first correct build for both P-A and P-B. It does
+**not** close the gap to vLLM, and this Phase 2 measured *why* not, exactly
+as pre-registered: the two reference targets that would need to fire to
+close the remaining ≈23 % - an in-kernel int4 GEMM removing the dequant
+scratch, and an own GDN kernel at Intel's demonstrated rate - **do not
+support that path**. P-C measured oneDNN's own fused int4 W4A16 primitive
+*below* the rate a from-scratch design would need to clear break-even, on
+this box, with a real (if unexplained) correctness divergence from the
+oracle beyond the known IEEE class. P-D's kernel numerics did not clear
+this probe's own bar for a trusted time, despite two real, fixed defects
+along the way (a torch-free shim and a separate sycl-tla/vllm-xpu-kernels
+version mismatch, both fixed probe-side) and a third, unresolved one (the
+Q/K/V/A/B tensor-convention mapping into Intel's kernel) that this probe's
+remaining scope did not root-cause. **Spec the P-A + P-B GEMM-and-slab
+path; do not spec an in-kernel int4 GEMM against oneDNN's measured rate;
+treat P-D's GDN time as unpriced, not as a target, until its numerics are
+independently re-derived** (a follow-up probe, not this one, since it needs
+either a line-by-line trace of `chunk_compute_A_kernel` /
+`chunk_inverse_kernel` / `chunk_compute_wu_kernel` / `chunk_fwd_o_kernel`'s
+~1500 remaining lines or a from-first-principles derivation of Intel's own
+Q/K/A/B conventions neither this repo nor Phase 1's reading settled).
