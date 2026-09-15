@@ -68,6 +68,24 @@ if(B70_PREFILL_ENABLED)
   b70_target_kernel_dir(probe_dequant_slab)
   add_dependencies(probe_dequant_slab kernel_pf_dequant_tile_K5120_N34816_L0_T0
                    ${PROBE_SLAB_TARGETS})
+
+  # P-A (spec 2 addendum, docs/probe-prefill-vllm-parity-2026-09-14.md §A4):
+  # our own OpenCL C bf16 DPAS GEMM on the Level Zero list -- the go/no-go
+  # candidate for dropping sycl-tla from the prefill path. AOT at 256 GRF is
+  # MANDATORY (§A4.8): P2 measured a 33x loss without it, and zero spill does
+  # not mean good code. `pf_gemm_bf16.cl` is a probe-only kernel: no runtime
+  # path binds it and no existing kernel is touched. This target links
+  # b70_prefill (like probe_dequant_slab above) purely to call `gemm_bf16` as
+  # the C2 control beside every timed cell -- it contains no SYCL of its own.
+  add_ocloc_kernel(pf_gemm_bf16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_bf16.cl
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+
+  add_executable(probe_pf_gemm probe_pf_gemm.cc)
+  target_include_directories(probe_pf_gemm PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_pf_gemm PRIVATE b70_l0)
+  b70_link_prefill(probe_pf_gemm)
+  b70_target_kernel_dir(probe_pf_gemm)
+  add_dependencies(probe_pf_gemm kernel_pf_gemm_bf16)
 endif()
 
 # T6's M=2048 small-kernel check. These are probe-only ocloc binaries: no
