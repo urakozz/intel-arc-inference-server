@@ -1547,3 +1547,59 @@ unknown, not zero and not confirmed. The 98.28 TFLOP/s figure should be
 read as "oneAPI 2026.0's packaged gemmstone's rate for this primitive on
 this box," not as "oneDNN's real rate for vLLM's configuration" - those are
 not shown to be the same number.
+
+### Spec 2.1 S0 - assembly gate of the production variants (2026-09-15)
+
+`src/kernels/prefill/pf_gemm.cl` promotes P-A's `pf_gemm_bf16` (above) to a
+production kernel: `lda`/`ldb`/`ldc` and a batch stride become runtime
+arguments, and a `TRANSB` build reads B stored `[N][K]` (the KV cache) in
+place. AOT, `-cl-intel-256-GRF-per-thread`, both variants
+(`pf_gemm_T0`/`pf_gemm_T1`), gate procedure per §A4.8 above.
+
+**One build-time defect, fixed once (plan 9a Task 1 brief's anticipated
+contingency):** `pf_gemm_T1` failed to compile -
+`intel_sub_group_2d_block_read_transpose_32b_16r16x1c` is undeclared on this
+driver (`ocloc`: "did you mean
+`intel_sub_group_2d_block_read_transpose_32b_16r8x1c`?", confirmed against
+`opencl-c-intel.h`: only the 8-dword-wide transposed row is exposed, the
+16-dword row the design assumed is not). Fix: each n-atom's 16-dword B
+fragment is two 8-dword transposed loads (one per k half-tile `ks`) instead
+of one 16-dword load - same coverage, same lane, same k order, doubling
+TRANSB's B-load message count from 4 to 8. No other change.
+
+**Gate (measured, `IGC_ShaderDumpEnable=1`, both variants):**
+
+```
+== T0
+      barrier_count:   1
+      grf_count:       256
+      has_dpas:        true
+      simd_size:       16
+dpas 32 load2d 9 prefetch 6 store2d 16 gtwy 2 bar 1 scratch 1
+== T1
+      barrier_count:   1
+      grf_count:       256
+      has_dpas:        true
+      simd_size:       16
+dpas 32 load2d 15 prefetch 6 store2d 16 gtwy 2 bar 1 scratch 1
+```
+
+`spill_mem_size` / `private_size` / `slm_size`: absent from both `.zeinfo`s
+(not present at all, the same "absent means zero" reading §A4.8 uses).
+`scratch 1` in both is `//.declare %scratchloc (35) ... IsBuiltin` - the
+universal per-kernel ABI register declaration every kernel on this IGC
+build carries (present verbatim, same line number, in both `.asm` files),
+not a real scratch-surface access; the authoritative spill signal
+(`spill_mem_size`/`private_size`) is absent from both. **Gate: PASS** -
+256 GRF, no spill, `dpas` 32 (the unroll factor is 1, no outer k-loop
+unrolling here), `store2d` 16, split barrier present (`send.gtwy` signal +
+`sync.bar` wait) in both.
+
+T0's `load2d` 9 (3 data + 6 prefetch) matches P-A's own gate exactly. T1's
+`load2d` 15 (9 data + 6 prefetch) is higher than the brief's a-priori
+prediction of 11 (5 data + 6 prefetch) because of the defect above: T1's two
+extra data loads over T0 the brief anticipated (5 vs 3, the four transposed
+dword reads replacing the two transform reads) become **six** extra (9 vs
+3) once each of the four transposed reads is split into two 8-dword loads.
+Everything else - `dpas`, `store2d`, `gtwy`, `bar`, `grf_count`, absence of
+spill - matches P-A's gate exactly in both variants.
