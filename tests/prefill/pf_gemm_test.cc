@@ -152,11 +152,15 @@ void attention_case(Dev& d, uint32_t C, uint32_t depth) {
                         download(d.ctx, Oref.ptr(), size_t(kGroup) * o_ref), kGroup, C, kHd, o_pf,
                         kHd, o_ref, kHd), /*allow_sign_zero=*/npad256 != depth);
 
-  // Determinism: the same launch twice is bitwise. Restricted to the rectangle gemm_l0
-  // actually writes -- Mp rows x npad256 columns per batch entry (qk_pf's N is padded to
-  // npad256, same as PV's K padding above); ldc = kMaxLen leaves every column beyond
-  // npad256 untouched by either launch, so comparing the full kMaxLen-pitched buffer would
-  // memcmp two allocations' unrelated leftover device memory instead of the kernel's output.
+  // Determinism: the same launch twice is bitwise, for BOTH variants -- pf_gemm_T1
+  // (transB, QK^T above) and pf_gemm_T0 (untransposed, every linear and this P·V call).
+  // Each check is restricted to the rectangle gemm_l0 actually writes, never to the
+  // full pitched buffer: an unwritten tail holds each allocation's own unrelated
+  // leftover device memory, not kernel output, and comparing past what either launch
+  // wrote would memcmp that leftover instead.
+
+  // T1: Mp rows x npad256 columns per batch entry (qk_pf's N is padded to npad256, same
+  // as PV's K padding above); ldc = kMaxLen leaves every column beyond npad256 untouched.
   l0::Mem S2(d.ctx, l0::MemKind::Device, size_t(kGroup) * s_pf * 4);
   runtime::prefill::gemm_l0(d.cx, d.kc, qk_pf, qb, kb, S2.as<float>(), true);
   d.cx.wait();
@@ -165,6 +169,17 @@ void attention_case(Dev& d, uint32_t C, uint32_t depth) {
   const Diff dd = compare(s1, s2, kGroup, Mp, npad256, s_pf, kMaxLen, s_pf, kMaxLen);
   CHECK_EQ(dd.words, size_t(0));
   CHECK_EQ(dd.sign_zero, size_t(0));
+
+  // T0: Mp rows x kHd columns per batch entry, pitch kHd -- pv_pf's N = kHd is already a
+  // multiple of 256, so gemm_l0 does not pad it and this is exactly Opf's full extent.
+  l0::Mem O2(d.ctx, l0::MemKind::Device, size_t(kGroup) * o_pf * 4);
+  runtime::prefill::gemm_l0(d.cx, d.kc, pv_pf, P.as<uint16_t>(), vb, O2.as<float>(), false);
+  d.cx.wait();
+  const std::vector<float> o1 = download(d.ctx, Opf.ptr(), size_t(kGroup) * o_pf);
+  const std::vector<float> o2 = download(d.ctx, O2.ptr(), size_t(kGroup) * o_pf);
+  const Diff od = compare(o1, o2, kGroup, Mp, kHd, o_pf, kHd, o_pf, kHd);
+  CHECK_EQ(od.words, size_t(0));
+  CHECK_EQ(od.sign_zero, size_t(0));
 }
 }  // namespace
 
