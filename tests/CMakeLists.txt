@@ -63,6 +63,16 @@ if(B70_PREFILL_ENABLED)
   b70_link_prefill(gemm_batched_test)
   add_test(NAME gemm_batched_test COMMAND gemm_batched_test)
   set_tests_properties(gemm_batched_test PROPERTIES TIMEOUT 1800)
+
+  # Spec 2.1 S0: pf_gemm bitwise against sycl-tla at every prefill shape (bar 1).
+  add_executable(pf_gemm_test prefill/pf_gemm_test.cc)
+  target_include_directories(pf_gemm_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(pf_gemm_test PRIVATE b70_prefill_host b70_l0)
+  b70_link_prefill(pf_gemm_test)
+  b70_target_kernel_dir(pf_gemm_test)
+  add_dependencies(pf_gemm_test kernel_pf_gemm_T0 kernel_pf_gemm_T1)
+  add_test(NAME pf_gemm_test COMMAND pf_gemm_test)
+  set_tests_properties(pf_gemm_test PROPERTIES TIMEOUT 1800)
 endif()
 
 # --- spec 3 T3: HTTP server (host-only mock tests) ---
