@@ -909,3 +909,110 @@ the `.asm`, and both are the reason the assembly gate runs before the clock.
   differs, the C2 control in the same harness still gives a like-for-like
   rate, and the DRAM headroom (48 %) means the raster is a few-% effect at
   M ≤ 2048.
+
+---
+
+## Phase 2 results (2026-09-15)
+
+Box: `user@box`. Before every timed cell below, `uptime` and
+`pgrep -a -f "buildkitsandbox|build_wheel|ninja|cc1plus"` were checked (none
+running beyond the checking shell itself) and the DRM-holder / `docker ps -q`
+sweep was empty - every cell below is **RECORD grade** by that test. The
+operator's docker buildkit build referenced in the brief had already finished
+by dispatch; the box was otherwise idle (other logged-in shells, no GPU
+users). oneDNN 2026.0 confirmed at `/opt/intel/oneapi/dnnl/2026.0`; sycl-tla
+at the pinned `~/sycl-tla` (untouched); `~/vllm-xpu-kernels` present at
+`f8318f0…` (Phase 1's HEAD, read-only). Checkpoint resolved as
+`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ` in the HF hub cache (snapshot
+`84575a18…`) - the brief's literal default path
+(`/home/user/models/qwen38-27b-w4g64-rtn/…`) no longer exists on the box
+(another checkpoint, "Agnes", now occupies `~/models`; unrelated concurrent
+work, not touched). Protocol for every timed cell: 8 replays, first 3
+discarded, median of the last 5, 4 enqueues/replay, one discarded warm-up,
+incompressible xorshift bf16 inputs, `ZE_AFFINITY_MASK=1` - §A3's protocol,
+unchanged.
+
+### P-C - oneDNN's `bf16_int4` matmul (REFERENCE TARGET)
+
+Probe: `tools/probe/probe_gemm_onednn_int4.cc` (new icpx SYCL probe,
+`src/sycl/CMakeLists.txt`), calling oneDNN's plain C++ primitive API directly
+- `sycl_interop::make_engine/make_stream` over our own
+`runtime::prefill::Context`'s queue, `matmul::primitive_desc` with
+`set_scales`/`set_zero_points` exactly as `vllm-xpu-kernels`' own
+`int4_gemm_w4a16.h` calls them (`bf16_int4`: bf16 src, u4 weights, bf16 dst;
+group 64 scale on dim 0; scalar `s8` zero point 8; `fpmath_mode(bf16, true)`)
+- no vllm-xpu-kernels machinery (no `GpuEngineManager`, no primitive cache, no
+torch) links against this probe.
+
+**Rate (measured, RECORD grade):**
+
+| shape | K×N | M | ms | TFLOP/s |
+|---|---:|---:|---:|---:|
+| qkv‖z | 5120×16384 | 1024 | 1.567 | 109.66 |
+| qkv‖z | 5120×16384 | 2048 | 3.327 | 103.28 |
+| qkv‖z | 5120×16384 | 4096 | 6.470 | 106.22 |
+| out/o_proj | 6144×5120 | 1024 | 0.571 | 112.85 |
+| out/o_proj | 6144×5120 | 2048 | 1.182 | 109.02 |
+| out/o_proj | 6144×5120 | 4096 | 2.416 | 106.65 |
+| **gate‖up** | 5120×34816 | 1024 | 3.455 | 105.65 |
+| **gate‖up** | 5120×34816 | **2048** | **7.429** | **98.28** |
+| gate‖up | 5120×34816 | 4096 | 16.636 | 87.78 |
+| down | 17408×5120 | 1024 | 1.292 | 141.26 |
+| down | 17408×5120 | 2048 | 2.829 | 129.06 |
+| down | 17408×5120 | 4096 | 5.020 | 145.46 |
+| q‖k‖v | 5120×14336 | 1024 | 1.360 | 110.52 |
+| q‖k‖v | 5120×14336 | 2048 | 2.840 | 105.86 |
+| q‖k‖v | 5120×14336 | 4096 | 5.818 | 103.35 |
+
+**gate‖up M=2048: measured 98.28 TFLOP/s vs pre-registered ≈150 (band
+135-175, hard floor 96.0).** Below the band, but **above the 96.0 hard
+floor** - §A1's falsifier ("R < 96 cannot be the path vLLM measured 1973
+on… such a reading is a probe defect") does **not** fire, so this is
+reported as the measurement, not chased. `down` (141-145) and `gate‖up`
+(88-106) bracket the pre-registered central estimate on opposite sides,
+consistent with a real per-shape effect (weight-read-to-compute ratio) rather
+than a single systematic miscalibration.
+
+**Correctness (measured): FAILED the pre-registered bar.** Identity
+extraction (A23's method: `A = I`, `M = K`) against one real production
+matrix (layer 0's fused `in_proj_qkv‖in_proj_z`, K=5120, N=16384, the real
+checkpoint above, K-contiguous-per-N repacked, no XOR) vs
+`tools/oracle/dequant.py`'s formula transcribed in C++: **33,198,358 of
+83,886,080 weights (39.6 %) differ from the oracle**, far beyond the
+pre-registered "IEEE +0/−0 class" allowance (measured here at 5,372,359 =
+6.4 %, matching A23's 6.642 % reference almost exactly - that part of the
+bar holds). Every sampled mismatch is a **1-ULP bf16 neighbour** (e.g.
+`k=0,n=0`: oracle 0xbcac (−0.020996…) vs device 0xbcab (−0.020874…), adjacent
+bf16 values) - not a layout or index error (a wrong-group or wrong-column
+bug would produce large, structurally patterned errors, not a uniform
+one-bit-of-precision spread starting at the very first element).
+
+**One diagnostic run, to root-cause rather than to tune (not the measurement
+of record):** re-ran with `fpmath_mode(strict, false)` in place of the
+production `fpmath_mode(bf16, true)` - **identical mismatch count**
+(33,198,358), ruling out "oneDNN was permitted to drop precision" as the
+cause. The remaining, unconfirmed but consistent explanation: gemmstone's
+in-kernel dequant likely computes `q·scale − zp·scale` (two independently
+rounded fp32 multiplies then a subtract) rather than the oracle's
+`(q − zp)·scale` (one exact integer subtract then one fp32 multiply and a
+single bf16 round) - mathematically identical over the reals, a different
+rounding path over bf16, and exactly the "many elements diverge by one ULP"
+signature measured. This is reported as gemmstone's own numerics, a real
+difference from a different kernel generator (§1.5's competing hypothesis),
+not a probe defect fixed once - the diagnostic build is not adopted and the
+production `fpmath_mode(bf16, true)` config (the one actually built and
+shipped) is what the rate table above reports.
+
+**Grade: RECORD** (preflight clean; 8/3/5/4 protocol). **Decision rule: none
+as a candidate (A0).** What it sets: §A3.3 pre-registered the break-even an
+own in-kernel int4 GEMM would need to clear to beat today's two-pass
+(dequant 205 ms + bf16 GEMM 656.3 ms): **R_int4 = 115.7 TFLOP/s (derived,
+99.64 / (0.6563+0.205))**. oneDNN's *measured* gate‖up M=2048 rate, 98.28
+TFLOP/s, is **below that break-even** - the vendor's own fused int4 W4A16
+primitive, on this box, does not clear the bar a from-scratch in-kernel int4
+GEMM of our own would have to. That reverses §A3.3's prediction (built from
+vLLM's whole-pipeline 1973 t/s and an estimated non-GEMM share) that oneDNN
+would set a target "−197 ms/chunk vs today's 861": the measured rate implies
+the four int4 linears would cost *more* through oneDNN than through the
+two-pass path they would replace, not less. Recorded as the reference
+number; not tuned further, and not treated as a candidate regardless (A0).
