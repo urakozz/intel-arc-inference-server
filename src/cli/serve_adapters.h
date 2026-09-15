@@ -13,6 +13,7 @@
 
 #include "model/qwen35.h"
 #include "runtime/engine.h"
+#include "runtime/prefill/backend.h"
 #include "server/deps.h"
 #include "tokenizer/chat_template.h"
 #include "tokenizer/streamer.h"
@@ -133,11 +134,7 @@ struct EngineAdapter : server::EngineIface {
       std::fflush(stderr);
     }
     gen_tokens_ = 0;
-#if B70_HAVE_PREFILL
     eng.prefill(ids);
-#else
-    eng.ingest(ids);
-#endif
     gen_start_ = std::chrono::steady_clock::now();
   }
 

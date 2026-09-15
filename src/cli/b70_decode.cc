@@ -43,9 +43,8 @@
 #include "runtime/capture.h"
 #include "runtime/control.h"
 #include "runtime/engine.h"
-#if B70_HAVE_PREFILL
+#include "runtime/prefill/backend.h"
 #include "runtime/prefill/profile.h"
-#endif
 
 namespace {
 using model::Qwen35;
@@ -84,9 +83,11 @@ void usage() {
   std::fprintf(
       stderr,
       "usage:\n"
-       "  b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--pp-chunk C]]\n"
+       "  b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--pp-chunk C]\n"
+       "                                        [--pp-backend sycl-tla|l0]]\n"
        "                                        [--device N] [--max-len 16384]\n"
-      "  b70-decode <snapshot-or-repo> --bench [--depth 4096 | --pp N [--pp-chunk C]]\n"
+      "  b70-decode <snapshot-or-repo> --bench [--depth 4096 | --pp N [--pp-chunk C]\n"
+      "                                        [--pp-backend sycl-tla|l0]]\n"
       "                                        [--tg 256] [--device N]\n"
       "  b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--repeats 1]\n"
       "                                          [--device N]\n"
@@ -110,6 +111,8 @@ void usage() {
        "  --pp-chunk C   --pp or --prefill: positions per prefill chunk (default\n"
        "                 PrefillScratch::kC = 2048, ruling A13). Spec 2 §6.2's multi-chunk\n"
        "                 gate runs at 1024.\n"
+       "  --pp-backend B  --pp or --prefill: the GEMM backend, sycl-tla (spec 2) or l0 (spec 2.1,\n"
+       "                 every GEMM on the Level Zero list). Default: the build's.\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -585,6 +588,8 @@ int run(int argc, char** argv) {
   bool bench = false, profile = false, have_n = false, prefill = false;
   bool have_depth = false, have_tg = false, have_steps = false, have_repeats = false;
   bool have_pp = false, have_pp_chunk = false;
+  std::string pp_backend_arg;
+  bool have_pp_backend = false;
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -623,6 +628,9 @@ int run(int argc, char** argv) {
     } else if (a == "--pp-chunk") {
       pp_chunk = parse_u32("--pp-chunk", value(i, "--pp-chunk"));
       have_pp_chunk = true;
+    } else if (a == "--pp-backend") {
+      pp_backend_arg = value(i, "--pp-backend");
+      have_pp_backend = true;
     } else if (a == "--tg") {
       tg = parse_u32("--tg", value(i, "--tg"));
       have_tg = true;
@@ -692,6 +700,12 @@ int run(int argc, char** argv) {
   if (have_pp_chunk && pp_chunk == 0)
     throw std::runtime_error("--pp-chunk 0 is not a chunk width; omit it for the default"
                              " PrefillScratch::kC");
+  if (have_pp_backend && !have_pp && !prefill)
+    throw std::runtime_error("--pp-backend belongs to --pp and --prefill; the decode path has no"
+                             " GEMM backend");
+  runtime::PrefillBackend pp_backend{};
+  if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
+    throw std::runtime_error("--pp-backend expects sycl-tla or l0, got '" + pp_backend_arg + "'");
   if (!synthetic && !have_n) {
     usage();
     throw std::runtime_error("--ids needs --n");
@@ -768,17 +782,13 @@ int run(int argc, char** argv) {
   const auto t0 = std::chrono::steady_clock::now();
   size_t pp_launches = 0;
   if (have_pp || prefill) {
-#if B70_HAVE_PREFILL
+    if (have_pp_backend) eng.set_prefill_backend(pp_backend);
+    std::fprintf(stderr, "prefill backend: %s (SYCL component %s)\n",
+                 runtime::prefill_backend_name(eng.prefill_backend()),
+                 runtime::prefill::sycl_available() ? "on" : "off");
     if (have_pp) runtime::prefill::profile_reset();
     eng.prefill(ids, pp_chunk);
     if (have_pp) pp_launches = eng.prefill_launches();
-#else
-    if (have_pp)
-      throw std::runtime_error("--pp needs the optional SYCL prefill component, and this build"
-                               " was configured with -DB70_PREFILL=OFF (cmake/prefill.cmake)");
-    throw std::runtime_error("--prefill needs the optional SYCL prefill component, and this build"
-                             " was configured with -DB70_PREFILL=OFF (cmake/prefill.cmake)");
-#endif
   } else {
     eng.ingest(ids);
   }
@@ -792,9 +802,7 @@ int run(int argc, char** argv) {
                  ids.size(), ingest_ms,
                  ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0,
                  pp_chunk ? pp_chunk : runtime::PrefillScratch::kC, pp_launches, eng.pos());
-#if B70_HAVE_PREFILL
   if (have_pp) runtime::prefill::profile_report("--pp", ingest_ms);
-#endif
   if (!have_pp && !prefill)
     std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token), pos %u\n", ids.size(),
                  ingest_ms, ids.empty() ? 0.0 : ingest_ms / double(ids.size()), eng.pos());
@@ -859,7 +867,8 @@ int run(int argc, char** argv) {
   // of docs/BENCHMARKS.md's table keeps working (interfaces.md's CLI contract;
   // tools/bench_decode.sh --pp reads both).
   if (have_pp)
-    std::printf("| b70-decode %s pp | %u | %u | %.1f | %.2f |\n", sha, depth,
+    std::printf("| b70-decode %s %s pp | %u | %u | %.1f | %.2f |\n", sha,
+                runtime::prefill_backend_name(eng.prefill_backend()), depth,
                 pp_chunk ? pp_chunk : runtime::PrefillScratch::kC, ingest_ms,
                 ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
   std::fprintf(stderr,

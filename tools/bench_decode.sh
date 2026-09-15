@@ -7,13 +7,16 @@
 #   tools/bench_decode.sh --runs 1 --no-build    one run against what is already built
 #   tools/bench_decode.sh --pp 4096              3 runs of spec 2's PREFILL at kC = 2048
 #   tools/bench_decode.sh --pp 4096 --pp-chunk 1024
+#   tools/bench_decode.sh --pp 4096 --pp-backend l0    spec 2.1's L0 GEMM backend
 #
 # `--pp N` replaces `--depth N` with `Engine::prefill` (spec 2, plan 6e Task 1)
-# and makes the binary print a SECOND markdown row -- `| ... pp | N | C | ms |
-# t/s |` -- beside the unchanged tg row. This script then medians BOTH: the tg
-# row on t/s as it always has, and the pp row on its own t/s. It is exclusive
-# with --depth for the same reason the CLI refuses the pair: the prefilled ids
-# ARE the depth.
+# and makes the binary print a SECOND markdown row -- `| ... <backend> pp | N |
+# C | ms | t/s |` -- beside the unchanged tg row. This script then medians
+# BOTH: the tg row on t/s as it always has, and the pp row on its own t/s. It
+# is exclusive with --depth for the same reason the CLI refuses the pair: the
+# prefilled ids ARE the depth. `--pp-backend sycl-tla|l0` (spec 2.1 §3.5)
+# belongs to --pp the same way --pp-chunk does, and both PP_BACKEND (env) and
+# --pp-backend (flag) are refused without it.
 #
 # **The grade is a property of the box, not of this script, so this script
 # measures it instead of asserting it.** Record grade needs a provably idle
@@ -59,6 +62,7 @@ TG="${TG:-256}"
 RUNS="${RUNS:-3}"
 PP="${PP:-}"
 PP_CHUNK="${PP_CHUNK:-}"
+PP_BACKEND="${PP_BACKEND:-}"
 BUILD=1
 
 # `set -u` is on, so a bare `--depth` at the end of the line would abort with
@@ -80,6 +84,7 @@ while [ $# -gt 0 ]; do
     --depth) need_value "$@"; DEPTH="$2"; DEPTH_SET=1; shift 2 ;;
     --pp)       need_value "$@"; PP="$2";       shift 2 ;;
     --pp-chunk) need_value "$@"; PP_CHUNK="$2"; shift 2 ;;
+    --pp-backend) need_value "$@"; PP_BACKEND="$2"; shift 2 ;;
     --tg)    need_value "$@"; TG="$2";    shift 2 ;;
     --runs)  need_value "$@"; RUNS="$2";  shift 2 ;;
     --model) need_value "$@"; MODEL="$2"; shift 2 ;;
@@ -112,6 +117,9 @@ if [ -n "$PP" ]; then
 elif [ -n "$PP_CHUNK" ]; then
   echo "bench_decode.sh: --pp-chunk belongs to --pp" >&2
   exit 2
+elif [ -n "$PP_BACKEND" ]; then
+  echo "bench_decode.sh: --pp-backend belongs to --pp" >&2
+  exit 2
 fi
 
 SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -135,7 +143,8 @@ fi
 if [ -n "$PP" ]; then
   MODE_ARGS="--pp $PP"
   [ -n "$PP_CHUNK" ] && MODE_ARGS="$MODE_ARGS --pp-chunk $PP_CHUNK"
-  echo "bench: $MODEL, PREFILL $PP ids (chunk ${PP_CHUNK:-default kC}), tg $TG, $RUNS run(s), sha $SHA, device ${ZE_AFFINITY_MASK:-unset (box default 0)}" >&2
+  [ -n "$PP_BACKEND" ] && MODE_ARGS="$MODE_ARGS --pp-backend $PP_BACKEND"
+  echo "bench: $MODEL, PREFILL $PP ids (chunk ${PP_CHUNK:-default kC}), tg $TG, $RUNS run(s), sha $SHA, device ${ZE_AFFINITY_MASK:-unset (box default 0)}, backend ${PP_BACKEND:-build default}" >&2
   echo "       iterate grade unless the box is provably idle -- see this script's header" >&2
 else
   MODE_ARGS="--depth $DEPTH"
@@ -164,7 +173,7 @@ for i in $(seq 1 "$RUNS"); do
 done
 
 # The pp row first when there is one: it is what a --pp invocation was for.
-# Columns are `| b70-decode <sha> pp | <N ids> | <chunk> | <ms total> | <t/s> |`,
+# Columns are `| b70-decode <sha> <backend> pp | <N ids> | <chunk> | <ms total> | <t/s> |`,
 # so $5 is the millisecond total and $6 the rate -- the same two positions the
 # tg row uses, which is why one awk shape serves both.
 if [ "${#pp_rows[@]}" -gt 0 ]; then
