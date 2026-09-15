@@ -1103,3 +1103,87 @@ predicted, not more.
 **156.53 ≥ 140 - PROCEED TO P-B.**
 
 **Grade: RECORD.**
+
+### P-B - slab dequant + P-A's GEMM on ONE in-order L0 list (CANDIDATE payoff)
+
+Probe: `tools/probe/probe_pf_gemm_slab.cc`, `probe_dequant_slab.cc`'s protocol
+(C1/C2/C3/C4 naming, 8-replay/3-dropped-median harness) with ONE change: the
+GEMM everywhere is `pf_gemm_bf16`/`pf_gemm_bf16_slab` (P-A's kernel, raw L0),
+not sycl-tla's `gemm_bf16` - so the dequant and the GEMM are now both raw L0
+launches on the *same* in-order immediate list, and the lever's inner loop
+calls `slab_dequant(); gemm_slab();` with **no `cx.wait()` between them at
+all** (only one trailing wait after the whole battery). `pf_gemm_bf16_slab`
+is a second entry point added to the SAME `pf_gemm_bf16.cl` file (§A4's
+`pf_gemm_bf16` is byte-for-byte unchanged - the two dumped `.asm` files
+differ only in an embedded build hash, confirmed by diff - so P-A's gate and
+measurement above stand as recorded).
+
+**Correctness (measured): bitwise identical**, `pf_gemm_bf16_slab` (Ns=2048,
+n0=0) vs `pf_gemm_bf16` (full width) over the same 4,194,304-element column
+window.
+
+**Handoff verified, not assumed (measured, device timestamps):** last slab
+dequant's `kernelEnd` to the following GEMM's `kernelStart`, same in-order
+list, **1.667 µs** - against the pre-registered pass bar of ≤ 5 µs and A24's
+22.35 µs *host*-wait handoff this replaces. The device-side gap is what the
+decision rule asked to be checked, not merely "no wait() appears in the
+source": **verified**.
+
+**Controls, this probe's own harness (measured, RECORD grade):**
+
+| control | ms | note |
+|---|---:|---|
+| C1 full dequant (`pf_dequant_tile`) | 1.546 | |
+| C2 `pf_gemm_bf16` full width | 4.729 | 154.40 TFLOP/s |
+| C3 two-pass, host wait between (C1 then C2) | 6.294 | sum model 6.275, +0.29 % |
+
+**The lever, C4 (measured, zero host waits within a pair):**
+
+| Ns | slabs | C4 ms | overhead = C4−C2 | ratio = overhead/C1 | chunk-equiv = ratio × 210.116 | **saved = 210.116 − chunk-equiv** |
+|---:|---:|---:|---:|---:|---:|---:|
+| **1024** | 34 | 5.618 | 0.889 | 0.5750 | 120.82 | **+89.29** |
+| 2048 | 17 | 5.974 | 1.245 | 0.8053 | 169.21 | **+40.91** |
+
+(Same derivation `probe_dequant_slab.cc`'s own verdict table uses, applied to
+this probe's C1/C2/C4 so any harness-level GEMM difference cancels out of the
+ratio - the addendum's own instruction.)
+
+**Decision rule (binding, from A3.2): ≥ 90 → recommend speccing the
+pure-Level-Zero prefill; 30-90 → priced, operator rules; < 30 → dead.**
+**Ns = 1024 measures +89.29 ms/chunk-equivalent - 0.71 ms (0.8 %) under the
+90 ms "recommend" line, inside this project's own documented 0.5-0.9 %
+run-to-run spread (§A2).** Read exactly, not rounded either way: this lands
+in the **30-90, "priced, operator rules" band, at its very top edge** - a
+result close enough to "recommend" that a second run could land on either
+side of the line, and far enough from "dead" that the lever is real. Ns =
+2048 (+40.91) sits mid-band, confirming §A2's own note that "P-B's payoff
+lives at Ns = 1024."
+
+**Derived consequence (combining P-A's measured GEMM rate with P-B's
+measured interleave saving - the two effects are additive and were kept
+separable by design: C3 and C4 above both already run P-A's GEMM, so the
++89.29 above is the interleave effect ALONE, on top of P-A's GEMM speed
+already being P-A's own credit):**
+
+```
+GEMM effect (§A2's formula, measured R = 156.53):
+  656.3 × (150 / 156.53 − 1) = −27.4 ms/chunk (a saving: P-A's GEMM beats
+  the 150 TFLOP/s reference point)
+Interleave effect (P-B, measured, Ns = 1024): +89.29 ms/chunk-equivalent
+Combined saving: 27.4 + 89.29 = 116.7 ms
+New chunk: 1456 − 116.7 = 1339.3 ms → 2048 / 1.3393 s = 1529 t/s = 77.5 % of 1973
+```
+
+Against §A2's own pre-registered ceiling at "parity and the full
+counterfactual" (1456 − 112 = 1344 ms → 1524 t/s, 77 %): the measured
+combination (1339.3 ms → 1529 t/s, 77.5 %) lands **at, and fractionally
+above,** that ceiling - P-A's measured rate (156.53 > the 150 reference)
+buys back almost exactly what the interleave lever left short of its own
+112.1 ms theoretical maximum (89.29 vs 112.1). **The pure-Level-Zero GEMM +
+slab path still does not reach vLLM's 1973 t/s / 1038 ms** - by design and
+by the arithmetic §A2 wrote down before any of these numbers existed: the
+remaining ≈ 301 ms/chunk gap is GDN (P-D prices it next) and the in-kernel
+int4 dequant P-C already measured below its own break-even.
+
+**Grade: RECORD** (preflight clean; identical protocol to every other cell
+in this report).

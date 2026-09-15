@@ -138,3 +138,103 @@ __kernel void pf_gemm_bf16(__global const ushort* restrict A,
           (int2)((int)(n0 + 64u * sn + 16u * b), (int)(m0 + 32u * sm + 8u * a)),
           (__private uint*)&acc[a][b]);
 }
+
+// pf_gemm_bf16_slab (P-B). Byte-for-byte pf_gemm_bf16 above, with ONE
+// difference: `ldc` is a separate runtime argument from `N`, so a compact
+// `[K][Ns]` slab (B's own pitch, ldb = N = Ns) can be multiplied and its
+// result written into the correct N-column-block of a full-width `[M][kN]`
+// output (`C` pre-offset by the caller to `C_full + n0_global`, `ldc = kN`)
+// -- exactly `gemm_bf16_batched`'s ldb/ldc decoupling (GemmBatch), applied to
+// this kernel instead of sycl-tla's. `pf_gemm_bf16` itself is UNCHANGED
+// above (same source, same build, same gated binary as P-A's measurement);
+// this is an ADDITIONAL entry point in the same compilation unit, not an
+// edit to it.
+__attribute__((reqd_work_group_size(512, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void pf_gemm_bf16_slab(__global const ushort* restrict A,
+                                __global const ushort* restrict B,
+                                __global float* restrict C,
+                                uint M, uint K, uint N, uint ldc) {
+  const uint gx = get_group_id(0);
+  const uint gy = get_group_id(1);
+  const uint m0 = gx * WG_M;
+  const uint n0 = gy * WG_N;
+  const uint s = get_sub_group_id();
+  const uint sm = s >> 2;
+  const uint sn = s & 3u;
+
+  const uint lda2 = K * 2u, ldb2 = N * 2u, ldc4 = ldc * 4u;
+  const uint num_k_tiles = K / WG_K;
+
+  float8 acc[4][4];
+#pragma unroll
+  for (int a = 0; a < 4; ++a)
+#pragma unroll
+    for (int b = 0; b < 4; ++b) acc[a][b] = (float8)(0.0f);
+
+#pragma unroll
+  for (int pf = 0; pf < 2; ++pf) {
+    const int k_pf = pf * WG_K;
+    intel_sub_group_2d_block_prefetch_16b_8r16x2c(
+        (__global void*)A, (int)lda2, (int)M, (int)lda2,
+        (int2)(k_pf, (int)(m0 + 8u * s)));
+    intel_sub_group_2d_block_prefetch_16b_8r16x2c(
+        (__global void*)B, (int)ldb2, (int)K, (int)ldb2,
+        (int2)((int)(n0 + 32u * (s & 7u)), k_pf + (int)(8u * (s >> 3))));
+  }
+
+  for (uint t = 0; t < num_k_tiles; ++t) {
+    const uint k0 = t * WG_K;
+    intel_work_group_barrier_arrive(CLK_LOCAL_MEM_FENCE);
+
+    ushort afrag[64];
+    intel_sub_group_2d_block_read_16b_32r16x2c(
+        (__global void*)A, (int)lda2, (int)M, (int)lda2,
+        (int2)((int)k0, (int)(m0 + 32u * sm)), afrag);
+
+    uint bfrag[2][32];
+    intel_sub_group_2d_block_read_transform_16b_32r16x2c(
+        (__global void*)B, (int)ldb2, (int)K, (int)ldb2,
+        (int2)((int)(n0 + 64u * sn), (int)k0), bfrag[0]);
+    intel_sub_group_2d_block_read_transform_16b_32r16x2c(
+        (__global void*)B, (int)ldb2, (int)K, (int)ldb2,
+        (int2)((int)(n0 + 64u * sn + 32u), (int)k0), bfrag[1]);
+
+    if (t + 2 < num_k_tiles) {
+      const int k_pf = (int)((t + 2) * WG_K);
+      intel_sub_group_2d_block_prefetch_16b_8r16x2c(
+          (__global void*)A, (int)lda2, (int)M, (int)lda2,
+          (int2)(k_pf, (int)(m0 + 8u * s)));
+      intel_sub_group_2d_block_prefetch_16b_8r16x2c(
+          (__global void*)B, (int)ldb2, (int)K, (int)ldb2,
+          (int2)((int)(n0 + 32u * (s & 7u)), k_pf + (int)(8u * (s >> 3))));
+    }
+
+#pragma unroll
+    for (int ks = 0; ks < 2; ++ks) {
+      short8 af[4];
+#pragma unroll
+      for (int a = 0; a < 4; ++a)
+        af[a] = as_short8(vload8(0, afrag + (uint)(ks * 32 + 8 * a)));
+#pragma unroll
+      for (int b = 0; b < 4; ++b) {
+        const int h = b >> 1, c = b & 1;
+        const int8 bv = as_int8(vload8(0, bfrag[h] + (uint)(c * 16 + 8 * ks)));
+#pragma unroll
+        for (int a = 0; a < 4; ++a)
+          acc[a][b] = intel_sub_group_bf16_bf16_matrix_mad_k16(af[a], bv, acc[a][b]);
+      }
+    }
+
+    intel_work_group_barrier_wait(CLK_LOCAL_MEM_FENCE);
+  }
+
+#pragma unroll
+  for (int a = 0; a < 4; ++a)
+#pragma unroll
+    for (int b = 0; b < 4; ++b)
+      intel_sub_group_2d_block_write_32b_8r16x1c(
+          (__global void*)C, (int)ldc4, (int)M, (int)ldc4,
+          (int2)((int)(n0 + 64u * sn + 16u * b), (int)(m0 + 32u * sm + 8u * a)),
+          (__private uint*)&acc[a][b]);
+}
