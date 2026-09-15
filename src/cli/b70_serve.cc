@@ -17,6 +17,7 @@
 #include "loader/loader.h"
 #include "loader/snapshot.h"
 #include "runtime/engine.h"
+#include "runtime/prefill/backend.h"
 #include "server/server.h"
 
 namespace {
@@ -54,7 +55,8 @@ void stop_server(int) {
 void usage() {
   std::fprintf(stderr,
                "usage: b70-serve <snapshot-or-repo> [--host 0.0.0.0] [--port 8000]\n"
-               "                 [--max-len 16384] [--device N] [--served-name NAME] [--queue 4]\n");
+               "                 [--max-len 16384] [--device N] [--served-name NAME] [--queue 4]\n"
+               "                 [--pp-backend sycl-tla|l0]\n");
 }
 
 uint32_t parse_u32(const char* what, const std::string& value) {
@@ -111,6 +113,8 @@ int run(int argc, char** argv) {
   server::Options options;
   uint32_t max_len = 16384;
   uint32_t device = l0::Context::kFromEnv;
+  std::string pp_backend_arg;
+  bool have_pp_backend = false;
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -136,6 +140,9 @@ int run(int argc, char** argv) {
       options.served_model = value(i, "--served-name");
     } else if (arg == "--queue") {
       options.queue_depth = parse_u32("--queue", value(i, "--queue"));
+    } else if (arg == "--pp-backend") {
+      pp_backend_arg = value(i, "--pp-backend");
+      have_pp_backend = true;
     } else if (!arg.empty() && arg[0] == '-') {
       usage();
       throw std::runtime_error("unknown option '" + arg + "'");
@@ -153,6 +160,9 @@ int run(int argc, char** argv) {
   if (max_len == 0) throw std::runtime_error("--max-len 0 is not a model length");
   if (options.host.empty()) throw std::runtime_error("--host must not be empty");
   if (options.served_model.empty()) throw std::runtime_error("--served-name must not be empty");
+  runtime::PrefillBackend pp_backend{};
+  if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
+    throw std::runtime_error("--pp-backend expects sycl-tla or l0, got '" + pp_backend_arg + "'");
 
   const std::string snapshot_dir = loader::resolve_snapshot(path);
   const std::vector<uint32_t> eos = eos_ids(snapshot_dir);
@@ -164,6 +174,7 @@ int run(int argc, char** argv) {
     return loader::load(context, snapshot_dir, max_len);
   }();
   runtime::Engine engine(context, std::move(model), max_len);
+  if (have_pp_backend) engine.set_prefill_backend(pp_backend);
   TokAdapter tokenizer(snapshot_dir + "tokenizer.json");
   TemplateAdapter chat_template(snapshot_dir);
   EngineAdapter engine_adapter(engine, tokenizer.vocab_used());
@@ -173,7 +184,9 @@ int run(int argc, char** argv) {
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
                options.host.c_str(), options.port, max_len);
   print_eos(eos);
-  std::fprintf(stderr, ", prefill %s\n", B70_HAVE_PREFILL ? "on" : "off");
+  std::fprintf(stderr, ", prefill backend %s (SYCL component %s)\n",
+               runtime::prefill_backend_name(engine.prefill_backend()),
+               runtime::prefill::sycl_available() ? "on" : "off");
 
   g_server = &server;
   std::signal(SIGTERM, stop_server);

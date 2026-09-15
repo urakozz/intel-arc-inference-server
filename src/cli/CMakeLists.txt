@@ -9,23 +9,19 @@
 # would be a third copy of runtime::build's variant set to keep in step.
 #
 # `--pp` (spec 2) makes the CLI the one product binary that reaches
-# `Engine::prefill`, which lives in b70_prefill_host and calls into
-# libb70_prefill.so. That is guarded by B70_PREFILL_ENABLED and communicated to
-# the source as `B70_HAVE_PREFILL`: with the component off the binary is
-# byte-for-byte what it was, the two flags still PARSE (so their four
-# rejections still fire, before the device, for the right reason), and only the
-# prefill call itself is compiled out. The decode list is untouched either way
-# - nothing here changes runtime::build's 774 launches or its 19 modules.
+# `Engine::prefill`, which lives in b70_prefill_host. Since spec 2.1, the L0
+# backend's GEMMs are in b70_prefill_host itself, so that library is linked
+# unconditionally; only the sycl-tla backend needs libb70_prefill.so, guarded
+# by B70_PREFILL_ENABLED (`b70_link_prefill`). With the component off, sycl-tla
+# is refused at runtime (runtime::prefill::sycl_available() is false) rather
+# than compiled out - the decode list is untouched either way, nothing here
+# changes runtime::build's 774 launches or its 19 modules.
 add_executable(b70-decode b70_decode.cc)
 target_include_directories(b70-decode PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(b70-decode PRIVATE b70_runtime b70_loader b70_model b70_l0)
+target_link_libraries(b70-decode PRIVATE b70_runtime b70_loader b70_model b70_l0 b70_prefill_host)
 b70_target_kernel_dir(b70-decode)
 if(B70_PREFILL_ENABLED)
-  target_compile_definitions(b70-decode PRIVATE B70_HAVE_PREFILL=1)
-  target_link_libraries(b70-decode PRIVATE b70_prefill_host)
   b70_link_prefill(b70-decode)
-else()
-  target_compile_definitions(b70-decode PRIVATE B70_HAVE_PREFILL=0)
 endif()
 get_property(ALL_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
 # BUILDSYSTEM_TARGETS is per-directory and does not recurse, so the prefill
@@ -38,14 +34,10 @@ add_dependencies(b70-decode ${ALL_KERNELS} ${PF_KERNELS})
 if(B70_TOKENIZER_ENABLED)
   add_executable(b70-serve b70_serve.cc)
   target_include_directories(b70-serve PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(b70-serve PRIVATE b70_runtime b70_loader b70_model b70_l0 b70_tokenizer b70_server)
+  target_link_libraries(b70-serve PRIVATE b70_runtime b70_loader b70_model b70_l0 b70_tokenizer b70_server b70_prefill_host)
   b70_target_kernel_dir(b70-serve)
   if(B70_PREFILL_ENABLED)
-    target_compile_definitions(b70-serve PRIVATE B70_HAVE_PREFILL=1)
-    target_link_libraries(b70-serve PRIVATE b70_prefill_host)
     b70_link_prefill(b70-serve)
-  else()
-    target_compile_definitions(b70-serve PRIVATE B70_HAVE_PREFILL=0)
   endif()
   add_dependencies(b70-serve ${ALL_KERNELS} ${PF_KERNELS})
 endif()
