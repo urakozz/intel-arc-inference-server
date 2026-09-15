@@ -94,3 +94,12 @@ add_ocloc_kernel(pf_gdn_scan SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_scan.cl)
 # Bound only by tests/prefill/context_test.cc; it proves the immediate list's
 # in-order execution and per-launch argument binding empirically.
 add_ocloc_kernel(pf_probe_chain SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_probe_chain.cl)
+
+# Spec 2.1 (plan 9a): the production DPAS GEMM, promoted from probe P-A. 256 GRF is
+# mandatory (P2 measured a 33x loss without it) and is carried on the compile line, the
+# only place an AOT build honours it. T0: B is [K][N]; T1: B is [N][K] (the KV cache).
+set(PF_GEMM_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm.cl)
+foreach(T 0 1)
+  add_ocloc_kernel(pf_gemm_T${T} SOURCE ${PF_GEMM_CL} DEFINES TRANSB=${T}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+endforeach()

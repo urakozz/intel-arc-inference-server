@@ -23,7 +23,7 @@
 # same g++ static archive b70_runtime already links, so nothing about the .so
 # split changes.
 add_library(b70_prefill_host STATIC
-  kernels.cc gdn.cc dequant.cc attn.cc step.cc engine_prefill.cc profile.cc)
+  kernels.cc gdn.cc dequant.cc attn.cc step.cc engine_prefill.cc profile.cc gemm_l0.cc)
 target_include_directories(b70_prefill_host PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_prefill_host PUBLIC b70_l0 b70_model b70_loader b70_runtime)
 b70_target_kernel_dir(b70_prefill_host)
