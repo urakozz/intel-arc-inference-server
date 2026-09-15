@@ -934,6 +934,13 @@ unchanged.
 
 ### P-C - oneDNN's `bf16_int4` matmul (REFERENCE TARGET)
 
+*Concurrent operator build: none observed* - `pgrep -a -f
+"buildkitsandbox|build_wheel|ninja|cc1plus"` was empty at this cell's
+preflight check (before the operator's docker buildkit build had (re)started
+for the session; it was later confirmed to use only 8 of 44 CPU threads and
+~80 GB of the box's 121 GB host RAM, on neither GPU - operator ruling
+2026-09-15, not to be waited for once running).
+
 Probe: `tools/probe/probe_gemm_onednn_int4.cc` (new icpx SYCL probe,
 `src/sycl/CMakeLists.txt`), calling oneDNN's plain C++ primitive API directly
 - `sycl_interop::make_engine/make_stream` over our own
@@ -1018,6 +1025,9 @@ two-pass path they would replace, not less. Recorded as the reference
 number; not tuned further, and not treated as a candidate regardless (A0).
 
 ### P-A - our OpenCL C bf16 DPAS GEMM on the Level Zero list (CANDIDATE, go/no-go)
+
+*Concurrent operator build: none observed* at this cell's preflight check
+(same basis as P-C's note above).
 
 Kernel: `tools/probe/pf_gemm_bf16.cl` (new probe-only OpenCL C, AOT
 `-cl-intel-256-GRF-per-thread`, `tools/probe/CMakeLists.txt`). Host:
@@ -1105,6 +1115,9 @@ predicted, not more.
 **Grade: RECORD.**
 
 ### P-B - slab dequant + P-A's GEMM on ONE in-order L0 list (CANDIDATE payoff)
+
+*Concurrent operator build: none observed* at this cell's preflight check
+(same basis as P-C's note above).
 
 Probe: `tools/probe/probe_pf_gemm_slab.cc`, `probe_dequant_slab.cc`'s protocol
 (C1/C2/C3/C4 naming, 8-replay/3-dropped-median harness) with ONE change: the
