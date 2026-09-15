@@ -643,6 +643,12 @@ b70_cli_reject(cli_reject_n_with_bench ${B70_NO_MODEL} --bench --n 4)
 # "--depth and --tg belong to --bench" - the mirror of the case above.
 b70_cli_reject(cli_reject_depth_with_ids ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --depth 64)
 b70_cli_reject(cli_reject_tg_with_ids ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --tg 8)
+# "--pp-backend belongs to --pp and --prefill" (spec 2.1).
+b70_cli_reject(cli_reject_pp_backend_with_ids ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp-backend l0
+  EXPECT "--pp-backend belongs to --pp and --prefill")
+# "--pp-backend expects sycl-tla or l0".
+b70_cli_reject(cli_reject_pp_backend_value ${B70_NO_MODEL} --bench --pp 64 --pp-backend cuda
+  EXPECT "--pp-backend expects sycl-tla or l0")
 # "unknown option" - anything starting with '-' the parse loop does not know.
 b70_cli_reject(cli_reject_unknown_flag ${B70_NO_MODEL} --bench --frobnicate)
 # "a snapshot directory or HF repo id is required" - no positional argument.
@@ -728,18 +734,15 @@ if(B70_TOKENIZER_ENABLED)
   # Host sampling (spec 3.5, plan 7d Task 5): the sampler function alone, over
   # synthetic logits rows -- no device, no checkpoint, no Engine instantiated.
   # It includes serve_adapters.h (where `sample()` and `EngineAdapter` live),
-  # so it links what b70-serve links, same B70_HAVE_PREFILL guard, even though
-  # this test never constructs an EngineAdapter.
+  # so it links what b70-serve links -- b70_prefill_host unconditionally,
+  # b70_link_prefill under the same guard -- even though this test never
+  # constructs an EngineAdapter.
   add_executable(sampling_test server/sampling_test.cc)
   target_include_directories(sampling_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(sampling_test PRIVATE b70_server b70_tokenizer b70_runtime b70_loader
-    b70_model b70_l0)
+    b70_model b70_l0 b70_prefill_host)
   if(B70_PREFILL_ENABLED)
-    target_compile_definitions(sampling_test PRIVATE B70_HAVE_PREFILL=1)
-    target_link_libraries(sampling_test PRIVATE b70_prefill_host)
     b70_link_prefill(sampling_test)
-  else()
-    target_compile_definitions(sampling_test PRIVATE B70_HAVE_PREFILL=0)
   endif()
   add_test(NAME sampling_test COMMAND sampling_test)
 endif()
