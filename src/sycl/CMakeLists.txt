@@ -176,6 +176,28 @@ b70_sycl_probe(probe_gemm_int4_mixed sycl_tla)
 target_link_libraries(probe_gemm_int4_mixed PRIVATE
   -Wl,--start-group "${B70_LOADER_LIB}" "${B70_MODEL_LIB}" "${B70_L0_LIB}" -Wl,--end-group)
 
+# P-C (spec 2 addendum, docs/probe-prefill-vllm-parity-2026-09-14.md §A1/§A3.3):
+# oneDNN's bf16_int4 W4A16 matmul, the exact primitive vLLM's own prefill GEMM
+# path uses. REFERENCE TARGET, not a candidate (A0) -- this probe calls
+# oneDNN's plain C++ primitive API directly (no vllm-xpu-kernels machinery),
+# so it needs no sycl_tla, only the loader (like probe_gemm_int4_mixed above,
+# for the one real correctness matrix) and oneDNN itself. oneDNN 2026.0 is
+# installed on the box (docs/10-the-box.md); not part of this project's pin
+# set, so its location is a plain CACHE PATH, not a content-verified checkout.
+set(B70_ONEDNN_ROOT "/opt/intel/oneapi/dnnl/2026.0" CACHE PATH
+    "oneDNN install used by P-C (reference target, not a project dependency)")
+if(NOT EXISTS "${B70_ONEDNN_ROOT}/include/oneapi/dnnl/dnnl.hpp")
+  message(FATAL_ERROR "B70_ONEDNN_ROOT=${B70_ONEDNN_ROOT} has no oneDNN headers")
+endif()
+b70_sycl_probe(probe_gemm_onednn_int4)
+target_link_libraries(probe_gemm_onednn_int4 PRIVATE
+  -Wl,--start-group "${B70_LOADER_LIB}" "${B70_MODEL_LIB}" "${B70_L0_LIB}" -Wl,--end-group
+  "${B70_ONEDNN_ROOT}/lib/libdnnl.so")
+target_include_directories(probe_gemm_onednn_int4 SYSTEM PRIVATE "${B70_ONEDNN_ROOT}/include")
+set_property(TARGET probe_gemm_onednn_int4 APPEND PROPERTY
+             INSTALL_RPATH "${B70_ONEDNN_ROOT}/lib")
+target_link_options(probe_gemm_onednn_int4 PRIVATE "-Wl,-rpath,${B70_ONEDNN_ROOT}/lib")
+
 # P5: Intel's CuTe chunked GDN header is consumed from the controller-provided,
 # read-only vllm-xpu-kernels checkout. Its BMG path is C++20 and emits a large
 # device image, hence the matching compiler definition and link option.
