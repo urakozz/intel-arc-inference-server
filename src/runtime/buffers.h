@@ -195,7 +195,7 @@ struct PrefillScratch {
   // Spec 2.1 §3.3: the two backend expansions, allocated on first use (ruling R7's pattern one
   // level down) so a session pays only for the backend it runs.
   l0::Mem& dequant_buffer();   // sycl-tla: bf16 [5120][34816] = 356,515,840 B
-  l0::Mem& slab_buffer();      // L0: bf16 [17408][1024] = 35,651,584 B (measured: 17408*1024*2)
+  l0::Mem& slab_buffer();      // L0: bf16 [17408][1024] = 35,651,584 B (derived: 17408*1024*2)
   size_t lazy_bytes() const;   // whichever of the two exist
 
  private:
