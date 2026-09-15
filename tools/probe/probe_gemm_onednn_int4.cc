@@ -183,6 +183,12 @@ Prim make_matmul(engine& eng, uint32_t M, uint32_t K, uint32_t N) {
   attr.set_fpmath_mode(fpmath_mode::bf16, true);
 
   matmul::primitive_desc pd(eng, src_md, wei_md, dst_md, attr);
+  // P-C follow-up (docs/probe-prefill-vllm-parity-2026-09-14.md, "P-C
+  // follow-up" section): the original probe never recorded which oneDNN
+  // implementation was actually dispatched -- print it so a JIT gemmstone
+  // kernel can be told apart from a reference/fallback path.
+  std::printf("# impl_info_str M=%u K=%u N=%u: %s\n", M, K, N, pd.impl_info_str());
+  std::fflush(stdout);
   return {pd, matmul(pd)};
 }
 

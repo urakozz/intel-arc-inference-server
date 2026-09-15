@@ -1361,3 +1361,189 @@ either a line-by-line trace of `chunk_compute_A_kernel` /
 `chunk_inverse_kernel` / `chunk_compute_wu_kernel` / `chunk_fwd_o_kernel`'s
 ~1500 remaining lines or a from-first-principles derivation of Intel's own
 Q/K/A/B conventions neither this repo nor Phase 1's reading settled).
+
+---
+
+### P-C follow-up - which oneDNN path was measured (2026-09-15)
+
+Trigger: P-C's 98.28 TFLOP/s (gate‖up, M=2048) implies a chunk GEMM time
+(99.64/98.28 = **1013.8 ms, derived**) that leaves only **1038 − 1013.8 =
+24.2 ms/chunk for everything else** (GDN, attention, small ops, HTTP) if
+vLLM really ran at that rate end to end - far below the ≥305 ms this same
+addendum (§A1) already estimated those terms need. The probe never recorded
+*which* oneDNN implementation it dispatched, so that gap was unresolved.
+This follow-up answers it, box-only, no new pre-registration needed (P-C's
+§A3.3 decision rule already covers this reference target).
+
+**1. Implementation dispatched (measured).** `tools/probe/probe_gemm_onednn_int4.cc`
+was extended to print `pd.impl_info_str()` at every `matmul::primitive_desc`
+creation (the only edit made to the probe; no CMake change was needed).
+Rebuilt via `tools/box.sh build` (icpx, unchanged target). Re-run with
+`ZE_AFFINITY_MASK=1`, preflight clean (no DRM holders, no
+`buildkitsandbox|build_wheel|ninja|cc1plus`; the operator's docker container
+was running but untouched, matches Phase 2's own preflight bar) - **RECORD
+grade**.
+
+Every primitive the probe creates, across all 5 shapes × 3 M values plus the
+correctness cell (16 primitives total), dispatched to **`jit:gemm:any`** -
+oneDNN's real gemmstone JIT generator, not a reference/fallback path (`ref`,
+`ocl:ref`, or `any`-unresolved would read differently). This rules out "the
+probe silently fell back to a slow reference kernel" as the cause of the low
+rate.
+
+`DNNL_VERBOSE=1` (this oneDNN's env var; `ONEAPI_VERBOSE` had no effect) exec
+lines, verbatim, for the two cells named in the brief:
+
+```
+# gate‖up, M=2048 (one of 5 timed replays' 4 enqueues shown, all identical modulo timing):
+onednn_verbose,v1,primitive,exec,gpu,matmul,jit:gemm:any,undef,src:bf16::blocked:ab::f0 wei:u4::blocked:ba::f0 dst:bf16::blocked:ab::f0,attr-scratchpad:user attr-fpmath:bf16:true attr-scales:wei:3:f16:64x1 attr-zero-points:wei:0:s8,,2048x5120:5120x34816,7.04395
+
+# down, M=2048:
+onednn_verbose,v1,primitive,exec,gpu,matmul,jit:gemm:any,undef,src:bf16::blocked:ab::f0 wei:u4::blocked:ba::f0 dst:bf16::blocked:ab::f0,attr-scratchpad:user attr-fpmath:bf16:true attr-scales:wei:3:f16:64x1 attr-zero-points:wei:0:s8,,2048x17408:17408x5120,3.31006
+```
+
+A second re-run with `DNNL_VERBOSE=2` (diagnostic only, not RECORD-repeated)
+surfaced the `create` lines the outer `matmul` primitive delegates to
+internally (a nested `gemm` primitive, oneDNN's usual W4A16 implementation
+strategy) - also `jit:gemm:any` both times, confirming creation-time
+dispatch matches exec-time dispatch:
+
+```
+# gate‖up, M=2048, create (cache warm from an earlier shape's kernel build):
+onednn_verbose,v1,primitive,create:kernel_cache_hit,gpu,gemm,jit:gemm:any,undef,src_a:bf16::blocked:ab::f0 src_b:u4::blocked:ba::f0 dst:bf16::blocked:ab::f0,attr-fpmath:bf16:true attr-scales:wei:3:f16:64x1 attr-zero-points:wei:0:s8,,2048x5120:5120x34816,0.00390625
+onednn_verbose,v1,primitive,create:nested_primitive_cache_hit,gpu,matmul,jit:gemm:any,undef,src:bf16::blocked:ab::f0 wei:u4::blocked:ba::f0 dst:bf16::blocked:ab::f0,attr-scratchpad:user attr-fpmath:bf16:true attr-scales:wei:3:f16:64x1 attr-zero-points:wei:0:s8,,2048x5120:5120x34816,0.0187988
+
+# down, M=2048, create (cold -- 213.7 ms JIT compile, first time this shape's kernel is built):
+onednn_verbose,v1,primitive,create:cache_miss,gpu,gemm,jit:gemm:any,undef,src_a:bf16::blocked:ab::f0 src_b:u4::blocked:ba::f0 dst:bf16::blocked:ab::f0,attr-fpmath:bf16:true attr-scales:wei:3:f16:64x1 attr-zero-points:wei:0:s8,,2048x17408:17408x5120,213.723
+onednn_verbose,v1,primitive,create:nested_primitive_cache_hit,gpu,matmul,jit:gemm:any,undef,src:bf16::blocked:ab::f0 wei:u4::blocked:ba::f0 dst:bf16::blocked:ab::f0,attr-scratchpad:user attr-fpmath:bf16:true attr-scales:wei:3:f16:64x1 attr-zero-points:wei:0:s8,,2048x17408:17408x5120,0.0319824
+```
+
+Re-measured rate this session (diagnostic, not RECORD-of-record - the
+existing 98.28 stands as P-C's number): gate‖up M=2048 **97.00 TFLOP/s**,
+within the ≈1.3 % run-to-run spread the brief already tolerates elsewhere.
+**Answer to "JIT or fallback": JIT gemmstone, confirmed, both at creation
+and at every exec.**
+
+**2. Configuration parity with vLLM (read, `~/PycharmProjects/vllm-xpu-kernels`
+pulled to `1c7cbeee1c…`, 2026-09-15; box's read-only `~/vllm-xpu-kernels`
+unchanged at Phase 1's `f8318f0…`, no relevant file in the diff between the
+two HEADs).** Field by field, probe (`probe_gemm_onednn_int4.cc:174-187`)
+vs vLLM (`csrc/xpu/onednn/int4_gemm_w4a16.h:12-105`,
+`csrc/xpu/onednn/onednn_runtime.h:17-97`):
+
+| field | probe | vLLM | match? |
+|---|---|---|---|
+| joint dtype | `bf16_int4` (bf16 src, u4 weights, bf16 dst) | `bf16_int4` (`in_dtype == BFloat16` branch, `int4_gemm_w4a16.h:33-34`) | yes |
+| src dims/strides | `{M,K}`, `{K,1}` (row-major) | `mat1` row-major, `lda = mat1_strides[leading_dim]` - same for a 2D contiguous src | yes |
+| weight dims/strides | `{K,N}` u4, strides `{1,K}` (K-contiguous-per-N, `repack_k_contig`) | `ldb = mat2.strides()[dim-1]*8`; consumed only correct when the weight is already K-contiguous-per-N - Python (`_quantize_convert.py:211-214`, `xpu.py:69-74`) relayouts to exactly that stride order before the op runs | yes (same repack Phase 1 §1.3 already read) |
+| dst dims/strides | `{M,N}` bf16, `{N,1}` | row-major bf16 result | yes |
+| scale mask/group/dtype | `mask=(1<<0)+(1<<1)`, group `{64,1}`, `f16` | `mask=(1<<0)+(1<<1)`, group `{group_size,1}` (=64 for this g64 checkpoint), `get_onednn_dtype(scale)` = f16 for this checkpoint (Phase 1 §1.2/S3) | yes |
+| zero point mask/dims/dtype | scalar, `mask=0`, `s8` | `zp.dim()==1` branch: `mask=0`, `{}`, `s8` (our checkpoint is GPTQ g64 sym, Phase 1 §1.2/A28) | yes |
+| fpmath mode | `fpmath_mode(bf16, true)` | `set_fpmath_mode(f16,true)` then, for bf16 src, `set_fpmath_mode(bf16,true)` (`int4_gemm_w4a16.h:80-83`) - last call wins, net = bf16/true | yes |
+| scratchpad mode | `user` | `user` (`int4_gemm_w4a16.h:61`) | yes |
+| bias | none | none for this checkpoint's linear layers (no bias tensor in the GPTQ AutoRound Qwen3.8-27B linears; Phase 1 never flagged one) | yes (assumed from architecture, not independently re-verified this session) |
+| engine/stream construction | `sycl_interop::make_engine/make_stream` over probe's own `runtime::prefill::Context` queue | `sycl_interop::make_engine/make_stream` over `c10::xpu`'s device/context and current XPU stream, cached in `GpuEngineManager`/`GpuStreamManager` (`onednn_runtime.h:26-97`) | architecturally identical pattern (Phase 1 §1.4); different queue object, same L0 in-order semantics - not rate-affecting |
+| primitive caching | none (probe creates each shape's primitive once, reuses across the timed loop) | `matmul_primitive_create_and_cache`, keyed by shape/strides/dtypes | not rate-affecting once warm (both amortize JIT compile before the timed region) |
+| **oneDNN version/build** | **`/opt/intel/oneapi/dnnl/2026.0`, v3.11.4, commit `0291f89430882d350585d276cc0d0eda623906e9`** (`DNNL_VERBOSE` self-report, matches `dnnl_version.h`/`dnnl_version_hash.h` under that path) - Intel's prebuilt oneAPI package, shared `libdnnl.so`, linked by `src/sycl/CMakeLists.txt`'s plain `CACHE PATH` (not a project-pinned checkout) | **fetched from source**, `https://github.com/uxlfoundation/oneDNN.git` at commit `0e2a5bfeef1bfbffc3137464606540233086ce9b` (tag **v3.13**, `CMakeLists.txt:53-60`), built via `FetchContent` as **`STATIC`**, `DNNL_GPU_RUNTIME=SYCL`, `DNNL_CPU_RUNTIME=NONE`, `DNNL_ENABLE_PRIMITIVE_CACHE=TRUE`, `DNNL_ENABLE_CONCURRENT_EXEC=TRUE`, `DNNL_EXPERIMENTAL=TRUE` (`cmake/Modules/FindoneDNN.cmake:21-59`) | **no - different oneDNN release** |
+
+Every other field matches exactly; the one mismatch is which oneDNN the two
+sides actually run.
+
+**3. Which oneDNN vLLM actually links (confirmed by reading, not guessing).**
+vllm-xpu-kernels does **not** use the box's `/opt/intel/oneapi/dnnl`
+installation at all - `cmake/Modules/FindoneDNN.cmake` unconditionally
+`FetchContent`s its own oneDNN from `uxlfoundation/oneDNN.git` at the tag
+pinned in the top-level `CMakeLists.txt` (currently **v3.13**, commit
+`0e2a5bfeef1bfbffc3137464606540233086ce9b`, dated 2026-07-17). The box's
+oneAPI 2026.0 package ships **v3.11.4** (commit
+`0291f89430882d350585d276cc0d0eda623906e9`, dated 2026-07-01) - a real,
+confirmed, non-trivial version gap, not a probe misconfiguration. Between
+the two tags, on the same oneDNN repository (local clone
+`~/PycharmProjects/oneDNN`, `git log v3.11.4..v3.13`): **37 commits touch
+`src/gpu/intel/gemm/jit/include/gemmstone` or `src/gpu/intel/jit/gemm`**,
+of which **5 explicitly target the Xe int4 GEMM path** and are present in
+v3.13 but absent from v3.11.4's branch: `a19ed3ed18` "xe: ggemm: upconvert
+int4 to int8 for mixed dpas", `fb3c82091b` "xe: copy plan: re-use registers
+in int4 downconvert", `c0ba3dc265` "xe: ukernel: use block loads instead of
+vnni loads for int4", `d01e750409` "xe: gemm: jit: fixup int4 copy plan
+handling", `b27fab2773` "x64: matmul: bf16 with int4 zero points fix". This
+is evidence of a real, on-topic version gap in exactly the kernel family
+under test, on Xe - not proof of a specific speedup magnitude (no build of
+v3.13 was measured; see §4).
+
+Searched the box (read-only) for an already-built matching oneDNN before
+considering any fix:
+
+- `~/vllm-xpu-kernels/.deps/onednn-src`: present, but at commit `80afa71049…`
+  ("doc: added release notes for v3.12") - **stale**, does not match the
+  current pin (v3.13, `0e2a5bfeef1…`); a leftover `FetchContent_Populate`
+  from before the pin was last bumped (dated 2026-08-08 on disk).
+- `~/vllm-xpu-kernels/.deps/onednn-build`: exists but was **never
+  configured or built** - no `CMakeCache.txt`, no compiled object, no
+  `libdnnl.*` anywhere under it.
+- Box-wide (`find / -xdev -iname 'libdnnl*'`, `-iname '_xpu_C*.so'`,
+  single-filesystem box so this covers `/home` too): no compiled
+  vllm-xpu-kernels extension exists anywhere, and the only other oneDNN
+  present is Ubuntu's apt-packaged CPU-only `libdnnl.so.3.6`/`.so.3.9`
+  under `/usr/lib/x86_64-linux-gnu` - older than even the box's own oneAPI
+  package, no SYCL GPU runtime, not usable for this probe regardless of
+  version.
+- The operator's docker buildkit container (`414825506b24`, running,
+  untouched) may contain a v3.13 build inside its image layers, but per the
+  brief's hard rule this session does not exec into or otherwise inspect
+  containers.
+
+**No usable v3.13 (or any GPU-enabled, non-stale) oneDNN build exists on the
+box outside a container this session is not permitted to touch.** Per the
+brief's instruction, this stops here rather than building oneDNN from
+source: what a real fix would need is a **fresh** `git clone
+https://github.com/uxlfoundation/oneDNN.git` checked out at
+`0e2a5bfeef1bfbffc3137464606540233086ce9b` (tag v3.13) - the operator's
+`~/vllm-xpu-kernels/.deps/onednn-src` is the wrong tag (stale v3.12) and is
+the operator's tree regardless, not to be reused or touched - then `cmake
+-S <fresh v3.13 checkout> -B <new build dir> -DDNNL_GPU_RUNTIME=SYCL
+-DDNNL_CPU_RUNTIME=NONE -DCMAKE_CXX_COMPILER=icpx …` (an icpx/SYCL build,
+several minutes), then repointing
+`src/sycl/CMakeLists.txt`'s `B70_ONEDNN_ROOT` at that build's install
+prefix for one probe re-run - a multi-minute icpx/SYCL build this session
+was told not to perform unprompted.
+
+**4. Fix applied: none.** §3's mismatch (oneDNN version) is real and
+confirmed, but its remedy (building oneDNN v3.13 with the SYCL GPU runtime)
+is exactly the case the brief pre-empts ("If nothing usable exists, stop
+and report… rather than building oneDNN from source"). No second
+measurement was taken; **98.28 TFLOP/s (gate‖up, M=2048, from the table
+above) remains the only RECORD-grade number**, now confirmed to be a real
+gemmstone JIT rate rather than a fallback artifact, but measured against
+**oneAPI's packaged v3.11.4, not vLLM's pinned v3.13**.
+
+**5. Arithmetic (derived, unchanged from the trigger above, restated with
+its basis explicit).** At the RECORD rate: chunk GEMM time = 99.64 TFLOP /
+98.28 TFLOP/s = **1013.8 ms**. Against vLLM's measured, HTTP-inclusive
+1038 ms/chunk (§A1): implied non-GEMM time = 1038 − 1013.8 = **24.2 ms/chunk
+(derived)**. That is far below every term this addendum's own §A1 estimated
+non-GEMM needs (GDN alone 150-300 ms estimated, 303 ms measured on our own
+composed path; attention 60-150 estimated, 83 measured; small ops 80-150
+estimated, 131 measured; HTTP/scheduling 15-40 estimated) - **not
+plausible** as a reading of what vLLM's own GEMMs cost. §1's finding
+(genuine JIT dispatch, no fallback) rules out "the probe measured a broken
+kernel"; §2-§3's finding (a real, confirmed, unmeasured oneDNN version gap)
+is the remaining, unresolved explanation for why 98.28 TFLOP/s does not
+reconcile with vLLM's observed 1973 t/s.
+
+**Verdict.** "An int4 GEMM with no dequant pass cannot pay on this box" is
+**not established - it remains open**. What this follow-up settled: the
+98.28 TFLOP/s number is not a probe defect in the sense the pre-registration
+worried about (it is a genuine `jit:gemm:any` gemmstone dispatch, identical
+in every configured field - dtypes, layout, scale/zero-point attributes,
+fpmath, scratchpad, engine/stream pattern - to vLLM's own call into
+`int4_gemm_w4a16.h`). What it did not settle, and could not settle within
+this session's constraints: whether vLLM's actual, pinned oneDNN build
+(v3.13, fetched from source with the SYCL GPU runtime) reaches a
+materially different rate on this same hardware and this same primitive -
+a real, dated, on-topic set of Xe int4-gemm commits separates the two
+versions, but no build of v3.13 was measured, so its effect size is
+unknown, not zero and not confirmed. The 98.28 TFLOP/s figure should be
+read as "oneAPI 2026.0's packaged gemmstone's rate for this primitive on
+this box," not as "oneDNN's real rate for vLLM's configuration" - those are
+not shown to be the same number.
