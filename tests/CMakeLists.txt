@@ -514,6 +514,22 @@ if(B70_PREFILL_ENABLED)
     add_dependencies(${t}_test ${B70_PREFILL_KERNELS})
   endforeach()
 
+  # Spec 2.1 bar 2: the two backends leave identical state (sign of zero excepted).
+  add_executable(prefill_backend_equivalence_test prefill/prefill_backend_equivalence_test.cc)
+  target_include_directories(prefill_backend_equivalence_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(prefill_backend_equivalence_test PRIVATE b70_prefill_host b70_runtime
+                        b70_loader b70_l0 b70_model)
+  b70_link_prefill(prefill_backend_equivalence_test)
+  add_dependencies(prefill_backend_equivalence_test ${B70_PREFILL_KERNELS}
+    kernel_pf_gemm_T0 kernel_pf_gemm_T1
+    kernel_pf_dequant_slab_K5120_N16384_L1 kernel_pf_dequant_slab_K6144_N5120_L0
+    kernel_pf_dequant_slab_K5120_N34816_L0 kernel_pf_dequant_slab_K17408_N5120_L0
+    kernel_pf_dequant_slab_K5120_N14336_L0)
+  add_test(NAME prefill_backend_equivalence_test COMMAND prefill_backend_equivalence_test
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT})
+  set_tests_properties(prefill_backend_equivalence_test PROPERTIES LABELS "checkpoint;prefill" TIMEOUT 3600)
+
   # The gate checkpoint (bf16 lm_head) and RTN (int4 lm_head) -- one golden set
   # per checkpoint (tools/oracle/README.md, "One golden set per checkpoint"), so
   # two registrations and never one that takes whichever directory is lying
