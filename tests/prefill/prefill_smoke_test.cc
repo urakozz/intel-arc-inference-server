@@ -110,9 +110,9 @@ int main(int argc, char** argv) {
               per_chunk, head, eng.prefill_launches(),
               runtime::prefill::step_chunk_gemms(runtime::PrefillBackend::SyclTla),
               runtime::prefill::step_chunk_waits(runtime::PrefillBackend::SyclTla));
-  // S1: the L0 backend has no linear/attention body yet, so its per-chunk count is just the
-  // embed launch; S2/S3 fill the GDN and FA layer terms in.
-  CHECK_EQ(runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0), size_t(1));
+  // S2: the L0 backend's linears are the slab walk (2 x N/1024 launches each), and its
+  // attention is still sycl-tla's two GEMMs per kv group; S3 fills the attention term in.
+  CHECK_EQ(runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0), size_t(8561));   // S2: linears on L0, attention still sycl-tla
 
   // ---- 3. the Control handoff, exactly as argmax_stage2 leaves it ---------
   const runtime::Control* c = eng.buffers().control.as<runtime::Control>();

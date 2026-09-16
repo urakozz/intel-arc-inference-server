@@ -28,6 +28,7 @@ enum class Phase : uint32_t {
   kNorm,        // pf_res_fold + pf_norm_finish
   kDequant,     // pf_dequant_tile
   kGemm,        // the four int4 linears' gemm_bf16
+  kLinearL0,    // spec 2.1: pf_dequant_slab + pf_gemm, one linear
   kAbGdn,       // pf_ab_proj (gdn_chunk's ten launches are itemised below)
   // `gdn_chunk`'s ten launches, one bucket each. Itemised rather than lumped
   // because the ledger's GDN term (15.4 ms/chunk) predates `gdn_chunk` existing
