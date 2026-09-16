@@ -59,9 +59,10 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
   require(npad <= s.max_len,
           "the 8-element GEMM padding of depth " + std::to_string(depth) + " exceeds max_len " +
               std::to_string(s.max_len));
-  if (backend == PrefillBackend::SyclTla)
-    require(gemm_bf16_supports_transb(),
-            "this build has no ColumnMajor-B chain, so QK^T cannot read the KV cache in place");
+  // S2: attention still through sycl-tla on the L0 backend; spec 2.1 S3 replaces this.
+  // Both backends therefore need the transB chain (plan 9d re-gates this on SyclTla).
+  require(gemm_bf16_supports_transb(),
+          "this build has no ColumnMajor-B chain, so QK^T cannot read the KV cache in place");
 
   const uint32_t ld = s.max_len;                       // pf_s / pf_p row pitch
   const size_t stride_l = size_t(C) * ld;              // one head slot of pf_s / pf_p
@@ -90,7 +91,8 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     if (backend == PrefillBackend::SyclTla) {
       attn_qk_sycl(cx, qk, q + size_t(j) * kGroup * kHeadDim, kv_k + size_t(j) * kHeadDim, S);
     } else {
-      throw std::runtime_error("runtime::prefill: the L0 backend's attention lands in spec 2.1 S3");
+      // S2: attention still through sycl-tla on the L0 backend; spec 2.1 S3 replaces this.
+      attn_qk_sycl(cx, qk, q + size_t(j) * kGroup * kHeadDim, kv_k + size_t(j) * kHeadDim, S);
     }
     // (the timed_wait(cx, Phase::kAttnQk) line is now inside attn_qk_sycl)
 
@@ -112,10 +114,14 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
       timed_wait(cx, Phase::kAttnSm);   // L0 -> SYCL
       attn_pv_sycl(cx, pv, P, kv_v + size_t(j) * kHeadDim, O + size_t(j) * kGroup * stride_h);
     } else {
-      throw std::runtime_error("runtime::prefill: the L0 backend's attention lands in spec 2.1 S3");
+      // S2: attention still through sycl-tla on the L0 backend; spec 2.1 S3 replaces this.
+      timed_wait(cx, Phase::kAttnSm);   // L0 -> SYCL
+      attn_pv_sycl(cx, pv, P, kv_v + size_t(j) * kHeadDim, O + size_t(j) * kGroup * stride_h);
     }
   }
-  if (backend == PrefillBackend::SyclTla) timed_wait(cx, Phase::kAttnPv);  // SYCL -> L0, for the gate launch next
+  // S2: both backends run sycl-tla's P.V, so both pay this SYCL -> L0 wait before the gate
+  // launch reads pf_o; spec 2.1 S3 re-gates it on SyclTla when the L0 attention lands.
+  timed_wait(cx, Phase::kAttnPv);   // SYCL -> L0, for the gate launch next
 }
 
 void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C,

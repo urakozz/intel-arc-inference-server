@@ -12,10 +12,10 @@ using Clock = std::chrono::steady_clock;
 constexpr uint32_t kN = uint32_t(Phase::kCount);
 
 const char* const kName[kN] = {
-    "norm",       "dequant",     "gemm",        "ab_proj",     "gdn_seed",  "gdn_conv",
-    "gdn_l2norm", "gdn_gate",    "gdn_A",       "gdn_solve",   "gdn_wu",    "gdn_A2",
-    "gdn_scan",   "gdn_head",    "silu",        "attn_prep",   "attn_QK^T", "attn_softmax",
-    "attn_PV",    "attn_gate",   "head"};
+    "norm",       "dequant",     "gemm",        "linear_l0",   "ab_proj",   "gdn_seed",
+    "gdn_conv",   "gdn_l2norm",  "gdn_gate",    "gdn_A",       "gdn_solve", "gdn_wu",
+    "gdn_A2",     "gdn_scan",    "gdn_head",    "silu",        "attn_prep", "attn_QK^T",
+    "attn_softmax", "attn_PV",   "attn_gate",   "head"};
 
 struct Acc {
   double ms[kN] = {};

@@ -3,7 +3,7 @@
 # one of backend_sycl.cc / backend_sycl_absent.cc is compiled, so the walk never carries an
 # #ifdef and a build without icpx still has the L0 backend.
 set(B70_PREFILL_HOST_SRC context.cc kernels.cc gdn.cc dequant.cc attn.cc step.cc
-    engine_prefill.cc profile.cc gemm_l0.cc)
+    engine_prefill.cc profile.cc gemm_l0.cc linear_l0.cc)
 if(B70_PREFILL_ENABLED)
   list(APPEND B70_PREFILL_HOST_SRC backend_sycl.cc)
 else()
