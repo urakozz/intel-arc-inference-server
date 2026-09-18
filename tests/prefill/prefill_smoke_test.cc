@@ -110,9 +110,16 @@ int main(int argc, char** argv) {
               per_chunk, head, eng.prefill_launches(),
               runtime::prefill::step_chunk_gemms(runtime::PrefillBackend::SyclTla),
               runtime::prefill::step_chunk_waits(runtime::PrefillBackend::SyclTla));
-  // S2: the L0 backend's linears are the slab walk (2 x N/1024 launches each), and its
-  // attention is still sycl-tla's two GEMMs per kv group; S3 fills the attention term in.
-  CHECK_EQ(runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0), size_t(8561));   // S2: linears on L0, attention still sycl-tla
+  // S3: the L0 backend's linears are the slab walk (2 x N/1024 launches each) and its
+  // attention's two GEMMs per kv group are pf_gemm launches -- a chunk calls no SYCL and
+  // waits on the host nowhere (spec 2.1 §3.3 / §3.4).
+  CHECK_EQ(runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0), size_t(8689));
+  CHECK_EQ(runtime::prefill::step_chunk_gemms(runtime::PrefillBackend::L0), size_t(0));
+  CHECK_EQ(runtime::prefill::step_chunk_waits(runtime::PrefillBackend::L0), size_t(0));
+  std::printf("L0 backend: %zu launches per chunk, %zu SYCL GEMMs, %zu host waits\n",
+              runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0),
+              runtime::prefill::step_chunk_gemms(runtime::PrefillBackend::L0),
+              runtime::prefill::step_chunk_waits(runtime::PrefillBackend::L0));
 
   // ---- 3. the Control handoff, exactly as argmax_stage2 leaves it ---------
   const runtime::Control* c = eng.buffers().control.as<runtime::Control>();
