@@ -56,7 +56,7 @@ void usage() {
   std::fprintf(stderr,
                "usage: b70-serve <snapshot-or-repo> [--host 0.0.0.0] [--port 8000]\n"
                "                 [--max-len 16384] [--device N] [--served-name NAME] [--queue 4]\n"
-               "                 [--pp-backend sycl-tla|l0]\n");
+               "                 [--pp-backend sycl-tla|l0]   Default: l0.\n");
 }
 
 uint32_t parse_u32(const char* what, const std::string& value) {

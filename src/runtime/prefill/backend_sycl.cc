@@ -7,8 +7,8 @@
 #include "runtime/prefill/gemm_sycl.h"
 #include "runtime/prefill/profile.h"
 
-// The SYCL component is linked: sycl-tla is the default backend (spec 2.1 §3.5, until the
-// closing commit of S5 flips it), and the two seams run spec 2's bodies verbatim.
+// The SYCL component is linked, and the two seams run spec 2's bodies verbatim; the default
+// backend is no longer sycl-tla (spec 2.1 §3.5's flip, recorded below).
 namespace runtime::prefill {
 namespace {
 void require(bool ok, const std::string& what) {
@@ -16,7 +16,9 @@ void require(bool ok, const std::string& what) {
 }
 }  // namespace
 
-PrefillBackend default_prefill_backend() { return PrefillBackend::SyclTla; }
+// Spec 2.1's closing flip (2026-09-18): the L0 backend is the default in every build;
+// sycl-tla stays selectable as the reference (--pp-backend sycl-tla).
+PrefillBackend default_prefill_backend() { return PrefillBackend::L0; }
 bool sycl_available() { return true; }
 
 // gemm.h's public entry points, now wrappers over the .so's SyclSide-taking one.

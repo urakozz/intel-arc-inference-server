@@ -71,6 +71,12 @@ does not reach the bar; spec 2's §3.0c amendment had already shown why, and the
 Unlike the decode row, this one needs no byte-matching caveat: prefill runs
 `lm_head` once per prompt, so the two checkpoints measure 0.17% apart.
 
+**Since 2026-09-18 (spec 2.1) prefill runs on the Level Zero backend by default** -
+every prefill GEMM on our own `pf_gemm` DPAS kernel, no SYCL in a chunk - and
+`--pp-backend sycl-tla` keeps spec 2's reference path selectable; `pp4096` is
+**1502.83 t/s**, RECORD grade, against the sycl-tla control's 1407.63 in the same
+session (docs/BENCHMARKS "The spec-2.1 rows").
+
 The spec-1.5-era paragraph below is kept as the record of how it read then.
 
 **Measured state, 2026-08-25 at the spec 1.5 gate: 27.54 t/s against vLLM's

@@ -112,7 +112,7 @@ void usage() {
        "                 PrefillScratch::kC = 2048, ruling A13). Spec 2 §6.2's multi-chunk\n"
        "                 gate runs at 1024.\n"
        "  --pp-backend B  --pp or --prefill: the GEMM backend, sycl-tla (spec 2) or l0 (spec 2.1,\n"
-       "                 every GEMM on the Level Zero list). Default: the build's.\n"
+       "                 every GEMM on the Level Zero list). Default: l0.\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
