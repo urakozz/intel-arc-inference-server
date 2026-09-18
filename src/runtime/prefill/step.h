@@ -45,7 +45,7 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Lo
 // what `Context::launches()` advances by. SYCL GEMMs are NOT on the L0 list and
 // therefore not counted here; `step_chunk_gemms()` reports those separately.
 size_t step_chunk_launches(PrefillBackend b);   // per chunk, independent of C
-size_t step_chunk_gemms(PrefillBackend b);      // SYCL GEMM calls per chunk (S2: attention's, on both)
+size_t step_chunk_gemms(PrefillBackend b);      // SYCL GEMM calls per chunk (0 on L0 since S3)
 size_t step_chunk_waits(PrefillBackend b);      // host L0<->SYCL handoffs per chunk
 inline constexpr size_t kStepHeadLaunches = 5;   // 2 norm + lm_head + 2 argmax
 
