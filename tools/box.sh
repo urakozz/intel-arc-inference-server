@@ -29,12 +29,19 @@ configure_and_build() {
   ssh "$BOX" "cd '$REMOTE_DIR' && cmake -S . -B '$BUILD_DIR' -DCMAKE_BUILD_TYPE=Release $CMAKE_ARGS > /dev/null && cmake --build '$BUILD_DIR' -j$JOBS"
 }
 
+# ssh carries no environment of its own, so `ZE_AFFINITY_MASK=1 tools/box.sh test ...`
+# used to set the variable on the Mac and run the tests on the box's DEFAULT device
+# (device 0) -- silently, and against the standing rule that per-kernel work uses
+# device 1. Forward it explicitly when the caller set it.
+ZE_ENV=""
+if [ -n "${ZE_AFFINITY_MASK:-}" ]; then ZE_ENV="ZE_AFFINITY_MASK='$ZE_AFFINITY_MASK' "; fi
+
 case "${1:-}" in
   sync)  sync_tree ;;
   build) sync_tree; configure_and_build ;;
   test)  sync_tree; configure_and_build
-         ssh "$BOX" "cd '$REMOTE_DIR' && ctest --test-dir '$BUILD_DIR' --output-on-failure ${2:+-R \"$2\"}" ;;
-  run)   shift; ssh "$BOX" "cd '$REMOTE_DIR' && $*" ;;
+         ssh "$BOX" "cd '$REMOTE_DIR' && ${ZE_ENV}ctest --test-dir '$BUILD_DIR' --output-on-failure ${2:+-R \"$2\"}" ;;
+  run)   shift; ssh "$BOX" "cd '$REMOTE_DIR' && ${ZE_ENV}$*" ;;
   pull)  shift; rsync -az "$BOX:$REMOTE_DIR/$1" "$1" ;;
   *)     echo "usage: $0 sync|build|test [regex]|run <cmd...>|pull <path>" >&2; exit 2 ;;
 esac
