@@ -541,6 +541,81 @@ test is registered only while the RTN checkpoint exists (deleted 2026-09-09),
 and no long oracle dump exists for `84575a1`; it needs `PROMPTS=long` dumped for
 this checkpoint and the registration re-pointed.
 
+### The spec-2.1 rows - `df5f92a`, 2026-09-18 - prefill on the Level Zero backend
+
+**The box was provably idle, and both backends were measured in the same
+session.** Checked from the Mac at **18:02:12 CEST, immediately before the
+first timed row**: `docker ps -q | wc -l` = **0**, the `/proc/*/fdinfo/*`
+`drm-driver` scan printed **no holder lines at all**, `uptime` = `18:02:15 up 4
+days, 1:56, 10 users, load average: 0.38, 0.31, 0.33` (the three GUI processes
+that had held both render nodes were closed by the operator beforehand; this
+agent killed nothing). The harness re-samples the same two conditions *after*
+the runs and printed **`RECORD grade` for both backends** - quoted as printed,
+never upgraded. Device **0**, the series device, `ZE_AFFINITY_MASK` unset;
+checkpoint `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ` snapshot `84575a1`
+(GPTQ g64 sym, bf16 `lm_head`); `tools/bench_decode.sh --pp 4096`, three runs
+each, the control taken with `--no-build` against the identical binary.
+
+| engine / checkpoint | backend | device | ids | C | **pp t/s** | ms total | runs (t/s) | spread | grade |
+|---|---|---|---|---|---|---|---|---|---|
+| **b70-decode `df5f92a`, `urakozz` `84575a1`** | **l0** | 0 | 4096 | 2048 | **1502.83** | **2725.5** | 1504.63 / 1502.83 / 1500.01 | 0.31% | **RECORD**, median of 3 |
+| b70-decode `df5f92a`, `urakozz` `84575a1` | sycl-tla (control) | 0 | 4096 | 2048 | 1407.63 | 2909.8 | 1405.46 / 1408.20 / 1407.63 | 0.19% | RECORD, median of 3 |
+| b70-decode `977a31c` (the standing row) | sycl-tla | 0 | 4096 | 2048 | 1406.18 | 2912.9 | 1406.78 / 1406.18 / 1399.79 | 0.50% | RECORD, median of 3 |
+| vLLM `p314-t214-vxkp0` | - | - | 4096 | 2×2048 | 1973 | - | - | - | measured, external, HTTP-inclusive |
+
+Against the pre-registration (spec 2.1 §10, committed at `07d45b8` before the
+first row): expected **≈ 1498 t/s** (measured-only, 2734.3 ms) / **≈ 1529 t/s**
+(with the estimated GEMM credit, 2678 ms); gate **≥ 1480 t/s at RECORD grade**.
+The measured **1502.83 t/s (2725.5 ms)** lands **above the gate by +22.83 t/s
+(+1.54%)**, **above the measured-only expectation by +4.83 t/s (+0.32%)** - 8.8
+ms faster than the derived 2734.3 - and **below the GEMM-credit estimate by
+−26.17 t/s (−1.71%)**. P-B's slab saving is therefore fully realised and a
+little more; the extrapolated GEMM credit is not. Against the standing
+`977a31c` row it is **+96.65 t/s (+6.87%)**, and against the control taken in
+the same session **+95.20 t/s (+6.76%)** - the control reproduces the standing
+row to **0.10%**, so the margin is the backend and not the session. vLLM's 1973
+is now **76.2%** covered (was 71.3%).
+
+Launches per chunk **8689 (l0) vs 1201 (sycl-tla)**, host waits **0 vs 656**,
+SYCL GEMMs **0 vs 384**, prefill scratch **−320,864,256 B** (356,515,840 →
+35,651,584) - derived, and live-asserted by `prefill_smoke_test` (`L0 live: one
+chunk of 64 ids advanced the L0 counter by 8694 launches`). The decode tg
+medians from the same two runs: **29.40 t/s** (l0 session, 34.01 ms/token,
+spread 0.00%) and **29.43 t/s** (sycl-tla session, 33.98 ms/token, spread
+0.03%) against the standing **29.32** - +0.27% and +0.38%, inside the drift
+rule: **decode is untouched**, as it must be, since prefill selects the backend
+and the replayed decode list is byte-identical.
+
+Phase attribution (instrumented, **iterate grade by construction** - the extra
+waits are the instrument; device 1, `B70_PREFILL_PROFILE=1`, one run each,
+`--bench --pp 4096 --tg 4`):
+
+| phase | l0: ms | share | waits | sycl-tla: ms | share | waits |
+|---|---:|---:|---:|---:|---:|---:|
+| `dequant` | 0.0 | 0.0% | 0 | 413.3 | 14.3% | 512 |
+| `gemm` (sycl-tla) | 0.0 | 0.0% | 0 | 1403.2 | 48.7% | 512 |
+| `linear_l0` | **1668.9** | **61.2%** | 512 | 0.0 | 0.0% | 0 |
+| `attn_QK^T` | 84.6 | 3.1% | 128 | 83.0 | 2.9% | 128 |
+| `attn_softmax` | 60.5 | 2.2% | 128 | 60.6 | 2.1% | 128 |
+| `attn_PV` | 8.3 | 0.3% | 32 | 8.3 | 0.3% | 32 |
+| `gdn_scan` | 328.8 | 12.1% | 96 | 330.8 | 11.5% | 96 |
+| `norm` | 98.4 | 3.6% | 257 | 98.7 | 3.4% | 257 |
+| `silu` | 99.6 | 3.6% | 128 | 98.5 | 3.4% | 128 |
+| **TOTAL** | **2728.1** | 100.0% | **2306** | **2881.1** | 100.0% | **2818** |
+| plain (unprofiled) run of the same shape | 2796.7 | - | - | 2966.3 | - | - |
+| the instrument costs | −68.6 ms (−2.5%) | - | - | −85.2 ms (−2.9%) | - | - |
+
+**The linears are the whole of the win, measured.** `linear_l0`'s 1668.9 ms
+replaces `dequant` + `gemm`'s 1816.5 ms: **−147.6 ms, −8.1%**, and 512 host
+waits per run disappear with them. Every other phase moves by less than 2 ms -
+the three `attn_*` phases sum to 153.4 ms on l0 against 151.9 on sycl-tla,
+**+1.5 ms**, so risk 6 (256-padding the attention depth) is worth about 1% of
+attention and 0.05% of the walk at this shape, and risk 3 (8,689 launches
+costing host time in situ) does not appear at all: the l0 walk has *fewer* host
+waits than sycl-tla's, not more. Risk 2 is the one the table does price - the
+unmeasured shapes are inside `linear_l0`'s single number, which beat sycl-tla's
+pair but by less than the GEMM credit extrapolated.
+
 ### The spec-3 gate rows - `a066c3c`, 2026-09-14 - bars 3-6 closed, tag `spec3-done`
 
 **Box conditions.** Idle proof (plan 6e Task 3 Step 1's command) taken before
