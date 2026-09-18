@@ -21,9 +21,12 @@
 //
 // argv: [1] golden dir, [2] prompt dir, [3] snapshot,
 //       [4] comma-separated prompt names (default "prose,code,cjk"),
-//       [5] prefill chunk width (default 0 = PrefillScratch::kC).
+//       [5] prefill chunk width (default 0 = PrefillScratch::kC),
+//       [6] prefill backend, sycl-tla or l0 (default: the build's).
 // Arguments 4 and 5 are what make the >= 2048-id multi-chunk gate of spec §6.2
-// a registration rather than a second binary (plan 6b Task 13 Step 6).
+// a registration rather than a second binary (plan 6b Task 13 Step 6); argument
+// 6 is what makes spec 2.1 §2 bar 3 a second registration rather than a second
+// binary (plan 9e Task 1).
 //
 // Label `checkpoint golden prefill`: it needs the 19 GB checkpoint, a B70, and
 // the ~1 GB of oracle output that lives only on the box. Absent goldens are a
@@ -48,6 +51,8 @@
 #include "runtime/buffers.h"
 #include "runtime/control.h"
 #include "runtime/engine.h"
+#include "runtime/prefill/backend.h"
+#include "runtime/prefill_backend.h"
 
 namespace {
 using model::Qwen35;
@@ -102,6 +107,9 @@ int main(int argc, char** argv) {
   const std::string snap = argc > 3 ? argv[3] : "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ";
   const std::vector<std::string> prompts = split_commas(argc > 4 ? argv[4] : "prose,code,cjk");
   const uint32_t chunk = argc > 5 ? uint32_t(std::atoi(argv[5])) : 0u;
+  // argv[6]: the prefill backend (spec 2.1) -- sycl-tla or l0; default = the build's.
+  runtime::PrefillBackend backend = runtime::prefill::default_prefill_backend();
+  if (argc > 6) CHECK(runtime::parse_prefill_backend(argv[6], backend));
   CHECK(!prompts.empty());
 
   for (const std::string& p : prompts) {
@@ -121,6 +129,8 @@ int main(int argc, char** argv) {
   // there is nothing for it to fill and the 64 device copies a token would be
   // paid for nothing.
   runtime::Engine eng(ctx, std::move(model), kMaxLen);
+  eng.set_prefill_backend(backend);
+  std::printf("prefill backend: %s\n", runtime::prefill_backend_name(backend));
   CHECK_EQ(eng.step().kernel_count, size_t(774));   // decode is untouched
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   const size_t gdn_stride = kGdnElems * sizeof(float);

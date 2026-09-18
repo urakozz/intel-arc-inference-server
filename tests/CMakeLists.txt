@@ -460,31 +460,94 @@ add_test(NAME golden_gate_test COMMAND golden_gate_test
 set_tests_properties(golden_gate_test PROPERTIES
   LABELS "checkpoint;golden" SKIP_RETURN_CODE 77 TIMEOUT 1800)
 
-# --- the prefill path against the real checkpoint (spec 2, plan 6b Tasks 10-13)
+# --- the prefill gates (spec 2 §6; spec 2.1 §2 bar 3) -------------------------------------
 # Registered HERE rather than in the B70_PREFILL_ENABLED block above because
 # these need B70_TEST_SNAPSHOT and B70_DECODE_LIST_KERNELS, both defined between
-# there and here. Same guard, same reason: with -DB70_PREFILL=OFF the whole
-# prefill stream is absent and the suite is exactly what it was.
+# there and here.
+#
+# Built in EVERY configuration since spec 2.1 (b70_prefill_host always exists). The sycl-tla
+# registrations need libb70_prefill.so and stay under the guard; the l0 ones run everywhere,
+# which is how bar 3's "in a build without the SYCL component" is checked.
+#
+# Every binary the prefill walk opens. The decode list is part of it because
+# `step_head`'s lm_head and its two argmax stages ARE decode's own M = 1
+# binaries -- the prefill path re-uses them rather than compiling a second
+# copy, which is also why the module count below is not a new number. Since
+# spec 2.1 S2/S3 the L0 backend's own binaries are in the list too: pf_gemm IS
+# its linears' and its attention's GEMM, and the slab dequants feed them.
+set(B70_PREFILL_KERNELS
+  kernel_pf_embed_gather kernel_pf_res_fold_K5120_SP0_G20
+  kernel_pf_res_fold_K5120_SP1_G20 kernel_pf_norm_finish_K5120_G20_W20
+  kernel_pf_silu_mul kernel_pf_gated_head kernel_pf_ab_proj
+  kernel_pf_attn_prep_q16 kernel_pf_attn
+  kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan
+  kernel_pf_dequant_tile_K5120_N16384_L1_T0
+  kernel_pf_dequant_tile_K6144_N5120_L0_T0
+  kernel_pf_dequant_tile_K5120_N34816_L0_T0
+  kernel_pf_dequant_tile_K17408_N5120_L0_T0
+  kernel_pf_dequant_tile_K5120_N14336_L0_T0
+  kernel_pf_gemm_T0 kernel_pf_gemm_T1
+  kernel_pf_dequant_slab_K5120_N16384_L1 kernel_pf_dequant_slab_K6144_N5120_L0
+  kernel_pf_dequant_slab_K5120_N34816_L0 kernel_pf_dequant_slab_K17408_N5120_L0
+  kernel_pf_dequant_slab_K5120_N14336_L0
+  ${B70_DECODE_LIST_KERNELS})
+
+# The three spec 2 §6 gates. `tests/golden` is on the include path for
+# golden_common.h -- the decode gate's machinery, extracted verbatim, so the
+# prefill gate grades on the same code rather than on a copy of it. The three
+# BINARIES are built in every configuration; only `b70_link_prefill` (the
+# sycl-tla .so and its two rpaths) is conditional, which is plan 9b's ruling B4
+# pattern and what `context_test` above already does.
+foreach(t prefill_gate prefill_consistency prefill_determinism)
+  add_executable(${t}_test prefill/${t}_test.cc)
+  target_include_directories(${t}_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(${t}_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(${t}_test)
+  endif()
+  add_dependencies(${t}_test ${B70_PREFILL_KERNELS})
+endforeach()
+# l0, every build.
+add_test(NAME prefill_gate_l0_test COMMAND prefill_gate_test
+  ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
+  prose,code,cjk 0 l0)
+set_tests_properties(prefill_gate_l0_test PROPERTIES
+  LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+add_test(NAME prefill_consistency_l0_test COMMAND prefill_consistency_test
+  ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} l0)
+add_test(NAME prefill_determinism_l0_test COMMAND prefill_determinism_test
+  ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} l0)
+set_tests_properties(prefill_consistency_l0_test prefill_determinism_l0_test PROPERTIES
+  LABELS "checkpoint;prefill" TIMEOUT 3600)
+
 if(B70_PREFILL_ENABLED)
-  # Every binary the prefill walk opens. The decode list is part of it because
-  # `step_head`'s lm_head and its two argmax stages ARE decode's own M = 1
-  # binaries -- the prefill path re-uses them rather than compiling a second
-  # copy, which is also why the module count below is not a new number.
-  set(B70_PREFILL_KERNELS
-    kernel_pf_embed_gather kernel_pf_res_fold_K5120_SP0_G20
-    kernel_pf_res_fold_K5120_SP1_G20 kernel_pf_norm_finish_K5120_G20_W20
-    kernel_pf_silu_mul kernel_pf_gated_head kernel_pf_ab_proj
-    kernel_pf_attn_prep_q16 kernel_pf_attn
-    kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan
-    kernel_pf_dequant_tile_K5120_N16384_L1_T0
-    kernel_pf_dequant_tile_K6144_N5120_L0_T0
-    kernel_pf_dequant_tile_K5120_N34816_L0_T0
-    kernel_pf_dequant_tile_K17408_N5120_L0_T0
-    kernel_pf_dequant_tile_K5120_N14336_L0_T0
-    ${B70_DECODE_LIST_KERNELS})
+  # sycl-tla, the full build: the registrations exactly as before, the backend now
+  # explicit. `prose,code,cjk 0` are prefill_gate_test's own defaults for argv[4] and
+  # argv[5], spelled out because argv[6] cannot be reached past them.
+  #
+  # The gate checkpoint (bf16 lm_head) and RTN (int4 lm_head) -- one golden set
+  # per checkpoint (tools/oracle/README.md, "One golden set per checkpoint"), so
+  # two registrations and never one that takes whichever directory is lying
+  # around. The RTN registrations exist only while the RTN checkpoint does: it
+  # was deleted from the box on 2026-09-09 (ruling A31) and a missing snapshot
+  # is a load failure, not a golden-set SKIP.
+  add_test(NAME prefill_gate_test COMMAND prefill_gate_test
+    ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
+    prose,code,cjk 0 sycl-tla)
+  add_test(NAME prefill_consistency_test COMMAND prefill_consistency_test
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} sycl-tla)
+  add_test(NAME prefill_determinism_test COMMAND prefill_determinism_test
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} sycl-tla)
+  set_tests_properties(prefill_gate_test PROPERTIES
+    LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  set_tests_properties(prefill_consistency_test prefill_determinism_test PROPERTIES
+    LABELS "checkpoint;prefill" TIMEOUT 3600)
 
   # `Engine::prefill` end to end: the chunk walk, the Control handoff, the
-  # launch arithmetic and the rejections (plan 6b Task 10).
+  # launch arithmetic and the rejections (plan 6b Task 10). Its sections 2-7 are
+  # sycl-tla's arithmetic and pin the backend themselves; section 8 (ruling E1)
+  # measures the L0 chunk's live launch delta. Both backends, so: under the guard.
   add_executable(prefill_smoke_test prefill/prefill_smoke_test.cc)
   target_include_directories(prefill_smoke_test PRIVATE ${CMAKE_SOURCE_DIR}/src
                              ${CMAKE_SOURCE_DIR}/tests)
@@ -495,50 +558,25 @@ if(B70_PREFILL_ENABLED)
   add_test(NAME prefill_smoke_test COMMAND prefill_smoke_test ${B70_TEST_SNAPSHOT})
   set_tests_properties(prefill_smoke_test PROPERTIES LABELS "checkpoint;prefill" TIMEOUT 1800)
 
-  # The int4-lm_head checkpoint (spec 1.6 §5.1, tools/quantize_qwen38_rtn.sh).
-  # It never went through `hf download`, so it is a plain path and not a cache
-  # lookup; the same override rule as B70_TEST_SNAPSHOT applies.
-  set(B70_RTN_SNAPSHOT "$ENV{HOME}/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64"
-    CACHE PATH "The int4-lm_head checkpoint the RTN-labelled gates load")
-
-  # The three spec 2 §6 gates. `tests/golden` is on the include path for
-  # golden_common.h -- the decode gate's machinery, extracted verbatim, so the
-  # prefill gate grades on the same code rather than on a copy of it.
-  foreach(t prefill_gate prefill_consistency prefill_determinism)
-    add_executable(${t}_test prefill/${t}_test.cc)
-    target_include_directories(${t}_test PRIVATE ${CMAKE_SOURCE_DIR}/src
-      ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
-    target_link_libraries(${t}_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0
-                          b70_model)
-    b70_link_prefill(${t}_test)
-    add_dependencies(${t}_test ${B70_PREFILL_KERNELS})
-  endforeach()
-
   # Spec 2.1 bar 2: the two backends leave identical state (sign of zero excepted).
+  # Needs both backends, so it is registered only in the full build (spec 2.1 §4).
   add_executable(prefill_backend_equivalence_test prefill/prefill_backend_equivalence_test.cc)
   target_include_directories(prefill_backend_equivalence_test PRIVATE ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(prefill_backend_equivalence_test PRIVATE b70_prefill_host b70_runtime
                         b70_loader b70_l0 b70_model)
   b70_link_prefill(prefill_backend_equivalence_test)
-  add_dependencies(prefill_backend_equivalence_test ${B70_PREFILL_KERNELS}
-    kernel_pf_gemm_T0 kernel_pf_gemm_T1
-    kernel_pf_dequant_slab_K5120_N16384_L1 kernel_pf_dequant_slab_K6144_N5120_L0
-    kernel_pf_dequant_slab_K5120_N34816_L0 kernel_pf_dequant_slab_K17408_N5120_L0
-    kernel_pf_dequant_slab_K5120_N14336_L0)
+  add_dependencies(prefill_backend_equivalence_test ${B70_PREFILL_KERNELS})
   add_test(NAME prefill_backend_equivalence_test COMMAND prefill_backend_equivalence_test
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT})
   set_tests_properties(prefill_backend_equivalence_test PROPERTIES LABELS "checkpoint;prefill" TIMEOUT 3600)
 
-  # The gate checkpoint (bf16 lm_head) and RTN (int4 lm_head) -- one golden set
-  # per checkpoint (tools/oracle/README.md, "One golden set per checkpoint"), so
-  # two registrations and never one that takes whichever directory is lying
-  # around. The RTN registrations exist only while the RTN checkpoint does: it
-  # was deleted from the box on 2026-09-09 (ruling A31) and a missing snapshot
-  # is a load failure, not a golden-set SKIP.
-  add_test(NAME prefill_gate_test COMMAND prefill_gate_test
-    ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts
-    ${B70_TEST_SNAPSHOT})
+  # The int4-lm_head checkpoint (spec 1.6 §5.1, tools/quantize_qwen38_rtn.sh).
+  # It never went through `hf download`, so it is a plain path and not a cache
+  # lookup; the same override rule as B70_TEST_SNAPSHOT applies.
+  set(B70_RTN_SNAPSHOT "$ENV{HOME}/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64"
+    CACHE PATH "The int4-lm_head checkpoint the RTN-labelled gates load")
+
   if(EXISTS "${B70_RTN_SNAPSHOT}/config.json")
     add_test(NAME prefill_gate_rtn_test COMMAND prefill_gate_test
       ${CMAKE_SOURCE_DIR}/oracle-out-rtn ${CMAKE_SOURCE_DIR}/tests/golden/prompts
@@ -548,14 +586,6 @@ if(B70_PREFILL_ENABLED)
   else()
     message(STATUS "b70: RTN checkpoint absent (${B70_RTN_SNAPSHOT}) -- prefill_gate_rtn_test and prefill_gate_long_test not registered")
   endif()
-  add_test(NAME prefill_consistency_test COMMAND prefill_consistency_test
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT})
-  add_test(NAME prefill_determinism_test COMMAND prefill_determinism_test
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT})
-  set_tests_properties(prefill_gate_test PROPERTIES
-    LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  set_tests_properties(prefill_consistency_test prefill_determinism_test PROPERTIES
-    LABELS "checkpoint;prefill" TIMEOUT 3600)
 
   # Spec 2 §6.2: the multi-chunk golden gate. ONE oracle prompt of >= 2048 ids
   # (`tools/oracle/make_long_prompt.sh` builds 2820 from the three committed id
