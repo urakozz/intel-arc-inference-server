@@ -53,6 +53,13 @@ if(NOT B70_PREFILL STREQUAL "OFF")
   else()
     message(STATUS "b70: prefill component OFF -- icpx unusable (${_icpx_out})")
   endif()
+else()
+  # An explicit OFF used to configure in silence: the AUTO fallback above announces
+  # itself, and the one configuration spec 2.1 §2 bar 3 is about (`build-nosycl`,
+  # `-DB70_PREFILL=OFF`) left no evidence of itself in its own log. One line, so a
+  # build tree can be identified from its configure output rather than by grepping
+  # for the absence of something.
+  message(STATUS "b70: prefill component OFF -- B70_PREFILL=OFF")
 endif()
 
 if(B70_PREFILL_ENABLED)
