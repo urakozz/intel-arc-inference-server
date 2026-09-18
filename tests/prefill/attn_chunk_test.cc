@@ -259,7 +259,9 @@ Row case_attn(Dev& d, uint32_t pos, uint32_t C) {
 
   attn_chunk(d.cx, d.kc, d.s, pos, C, d.s.pf_q.as<uint16_t>(), dk.as<uint16_t>(),
              dv.as<uint16_t>(), runtime::PrefillBackend::SyclTla);
-  attn_gate_chunk(d.cx, d.kc, d.s, C, dp.as<float>(), dout.as<uint16_t>());
+  // `rows` is pf_o's per-head slot stride; this test pins spec 2's attention on the sycl-tla
+  // path, where attn_rows(C, SyclTla) == C (spec 2.1 §3.4, Ruling D1).
+  attn_gate_chunk(d.cx, d.kc, d.s, C, C, dp.as<float>(), dout.as<uint16_t>());
   d.cx.wait();
   std::vector<uint16_t> got(size_t(C) * kOutN);
   d.imm.copy(got.data(), dout.ptr(), got.size() * 2);

@@ -137,7 +137,8 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                       m.layer_small[l].gdn.as<float>(), m.rope.as<float>(), kk, vv);
       profile_wait(cx, Phase::kAttnPrep);
       attn_chunk(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), kk, vv, backend);
-      attn_gate_chunk(cx, kc, s, C, s.partials.as<float>(), s.mixer_out.as<uint16_t>());
+      attn_gate_chunk(cx, kc, s, C, attn_rows(C, backend), s.partials.as<float>(),
+                      s.mixer_out.as<uint16_t>());
       profile_wait(cx, Phase::kAttnGate);
       ++fa;
       pf_linear(cx, kc, s, m.linears.at({l, LinearId::OProj}), s.mixer_out.as<uint16_t>(), C,
@@ -224,24 +225,21 @@ constexpr size_t kGdnLayerWaits = 2 * 4;
 constexpr size_t kFaLayerWaits = 2 * 4 + 2 * attn::kKvHeads + 1;
 // L0 (spec 2.1 S2): the four dequant launches of a layer become 2 x (N / 1024) launches per
 // linear -- GDN: qkv||z 32 + out_proj 10 + gate||up 68 + down 10 = 120; FA: q||k||v 28 +
-// o_proj 10 + 68 + 10 = 116. Attention still runs sycl-tla's two GEMMs per kv group in S2
-// (S3 moves them), so the FA layer keeps 8 SYCL GEMMs and 9 waits on this backend.
-constexpr size_t kL0GdnLayerLaunches = kGdnLayerLaunches - 4 + 120;   // 136
-constexpr size_t kL0FaLayerLaunches = kFaLayerLaunches - 4 + 116;     // 127
-constexpr size_t kL0FaLayerGemms = 2 * attn::kKvHeads;                 // 8, S2 only
-constexpr size_t kL0FaLayerWaits = 2 * attn::kKvHeads + 1;             // 9, S2 only
+// o_proj 10 + 68 + 10 = 116.
+// L0 (spec 2.1 S3): attention's two GEMMs per kv group are L0 launches now, no SYCL GEMM and
+// no host wait remains -- 1 + 48 x 136 + 16 x 135 = 8689 (spec §3.3, derived).
+constexpr size_t kL0GdnLayerLaunches = kGdnLayerLaunches - 4 + 120;                    // 136
+constexpr size_t kL0FaLayerLaunches = kFaLayerLaunches - 4 + 116 + 2 * attn::kKvHeads; // 135
 }  // namespace
 size_t step_chunk_launches(PrefillBackend b) {
   return b == PrefillBackend::SyclTla ? 1 + 48 * kGdnLayerLaunches + 16 * kFaLayerLaunches
                                       : 1 + 48 * kL0GdnLayerLaunches + 16 * kL0FaLayerLaunches;
 }
 size_t step_chunk_gemms(PrefillBackend b) {
-  return b == PrefillBackend::SyclTla ? 48 * kGdnLayerGemms + 16 * kFaLayerGemms
-                                      : 16 * kL0FaLayerGemms;
+  return b == PrefillBackend::SyclTla ? 48 * kGdnLayerGemms + 16 * kFaLayerGemms : 0;
 }
 size_t step_chunk_waits(PrefillBackend b) {
-  return b == PrefillBackend::SyclTla ? 48 * kGdnLayerWaits + 16 * kFaLayerWaits
-                                      : 16 * kL0FaLayerWaits;
+  return b == PrefillBackend::SyclTla ? 48 * kGdnLayerWaits + 16 * kFaLayerWaits : 0;
 }
 
 }  // namespace runtime::prefill
