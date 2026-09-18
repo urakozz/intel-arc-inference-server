@@ -89,6 +89,8 @@ int main(int argc, char** argv) {
 
   // ---- 2. one chunk ------------------------------------------------------
   const uint32_t kShort = 64;
+  // its launch arithmetic is sycl-tla's; the default flips to l0 at spec 2.1's close
+  eng.set_prefill_backend(runtime::PrefillBackend::SyclTla);
   eng.reset();
   eng.prefill(ids(kShort));
   CHECK_EQ(eng.pos(), kShort);
@@ -159,6 +161,32 @@ int main(int argc, char** argv) {
   eng.reset();
   throws_naming([&] { eng.prefill(ids(size_t(kMaxLen) + 1)); }, "max_len",
                 "more ids than max_len");
+
+  // ---- 8. the L0 backend's launch arithmetic, MEASURED (ruling E1) --------
+  // Sections 2-7 assert sycl-tla's 1201 + 5 against the live counter and state the
+  // L0 formula; nothing ran it. One chunk on L0 from a reset must advance the SAME
+  // counter by `step_chunk_launches(L0) + kStepHeadLaunches` (8689 + 5 = 8694,
+  // derived from src/runtime/prefill/step.cc's closing block). The delta is taken
+  // rather than the absolute, because `prefill_launches()` is cumulative over the
+  // engine's whole life and sections 2-7 already spent some of it.
+  const size_t l0_before = eng.prefill_launches();
+  eng.set_prefill_backend(runtime::PrefillBackend::L0);
+  eng.reset();
+  eng.prefill(ids(kShort));
+  CHECK_EQ(eng.pos(), kShort);
+  const size_t l0_delta = eng.prefill_launches() - l0_before;
+  const size_t l0_want =
+      runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0) +
+      runtime::prefill::kStepHeadLaunches;
+  // Printed BEFORE the assertion so a mismatch shows both numbers rather than only
+  // the macro's text: the formula is a prediction about the walk, not a target.
+  std::printf("L0 live: one chunk of %u ids advanced the L0 counter by %zu launches;"
+              " the arithmetic says %zu (%zu per chunk + %zu head)\n",
+              kShort, l0_delta, l0_want,
+              runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0),
+              runtime::prefill::kStepHeadLaunches);
+  CHECK_EQ(l0_delta, l0_want);
+  CHECK_EQ(l0_want, size_t(8694));
 
   std::puts("prefill_smoke_test OK");
   return 0;

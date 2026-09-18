@@ -18,6 +18,10 @@
 // prefill kernel reads scratch it has not first written. The scratch is
 // therefore never zeroed here - zeroing it would mask exactly the regression
 // this case exists to catch.
+//
+// argv: [1] prompt dir, [2] snapshot,
+//       [3] prefill backend, sycl-tla or l0 (default: the build's) -- spec 2.1
+//       §2 bar 3 is this gate run on each backend (plan 9e Task 1).
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -33,6 +37,8 @@
 #include "runtime/buffers.h"
 #include "runtime/control.h"
 #include "runtime/engine.h"
+#include "runtime/prefill/backend.h"
+#include "runtime/prefill_backend.h"
 
 namespace {
 using golden::read_ids;
@@ -88,10 +94,15 @@ void compare(const State& a, const State& b, const char* what) {
 int main(int argc, char** argv) {
   const std::string pdir = argc > 1 ? argv[1] : "tests/golden/prompts";
   const std::string snap = argc > 2 ? argv[2] : "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ";
+  // argv[3]: the prefill backend (spec 2.1) -- sycl-tla or l0; default = the build's.
+  runtime::PrefillBackend backend = runtime::prefill::default_prefill_backend();
+  if (argc > 3) CHECK(runtime::parse_prefill_backend(argv[3], backend));
 
   l0::Context ctx(0);
   loader::LoadedModel model = loader::load(ctx, snap, kMaxLen);
   runtime::Engine eng(ctx, std::move(model), kMaxLen);
+  eng.set_prefill_backend(backend);
+  std::printf("prefill backend: %s\n", runtime::prefill_backend_name(backend));
   l0::CmdList imm = l0::CmdList::immediate(ctx);
 
   uint32_t cases = 0;
