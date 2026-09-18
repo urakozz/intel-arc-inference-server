@@ -6,6 +6,7 @@
 //
 // Order matters for S3's assertion: every L0 session runs BEFORE any sycl-tla session, so a
 // fresh engine's SYCL side is provably never built by the L0 backend.
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -115,6 +116,22 @@ Snap session(runtime::Engine& eng, l0::CmdList& imm, PrefillBackend b, const Cas
   CHECK_EQ(eng.pos(), uint32_t(c.ids.size()));
   return snapshot(eng, imm);
 }
+
+// Bar 2's third family: the prose prompt in 16-id slices, alternating backend slice by slice
+// (sycl-tla, l0, sycl-tla, ...), against the same slicing on sycl-tla alone. Both use one
+// prefill() call per slice, so the only variable is the backend.
+Snap sliced(runtime::Engine& eng, l0::CmdList& imm, const std::vector<uint32_t>& ids,
+            bool alternate) {
+  eng.reset();
+  for (size_t off = 0, k = 0; off < ids.size(); off += 16, ++k) {
+    eng.set_prefill_backend(alternate && (k % 2 == 1) ? PrefillBackend::L0
+                                                       : PrefillBackend::SyclTla);
+    const size_t n = std::min<size_t>(16, ids.size() - off);
+    eng.prefill(std::vector<uint32_t>(ids.begin() + off, ids.begin() + off + n), 16);
+  }
+  CHECK_EQ(eng.pos(), uint32_t(ids.size()));
+  return snapshot(eng, imm);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -132,13 +149,22 @@ int main(int argc, char** argv) {
   // Every L0 session first (S3 asserts the SYCL side is still absent here), then sycl-tla.
   std::vector<Snap> l0;
   for (const Case& c : cases) l0.push_back(session(eng, imm, PrefillBackend::L0, c));
+  // S3: the L0 backend never built the SYCL side. This must be checked BEFORE the first
+  // sycl-tla session, which builds it for the rest of the process.
+  CHECK(!eng.prefill_sycl_side_created());
+  std::puts("l0 sessions done: no SYCL side was created (spec 2.1 §3.5)");
   for (size_t i = 0; i < cases.size(); ++i) {
     std::printf("\n== %s: %zu ids at chunk %u, l0 vs sycl-tla\n", cases[i].name.c_str(),
                 cases[i].ids.size(), cases[i].chunk ? cases[i].chunk : runtime::PrefillScratch::kC);
     const Snap tla = session(eng, imm, PrefillBackend::SyclTla, cases[i]);
     compare(l0[i], tla);
   }
+  std::printf("\n== mixed: prose in 16-id slices, alternating backends, vs sycl-tla alone\n");
+  const Snap mixed = sliced(eng, imm, cases[0].ids, /*alternate=*/true);
+  const Snap plain = sliced(eng, imm, cases[0].ids, /*alternate=*/false);
+  compare(mixed, plain);
+
   std::printf("\nprefill_backend_equivalence_test OK: %zu cases, l0 == sycl-tla (sign of zero excepted)\n",
-              cases.size());
+              cases.size() + 1);
   return 0;
 }
