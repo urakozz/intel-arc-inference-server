@@ -616,6 +616,35 @@ waits than sycl-tla's, not more. Risk 2 is the one the table does price - the
 unmeasured shapes are inside `linear_l0`'s single number, which beat sycl-tla's
 pair but by less than the GEMM credit extrapolated.
 
+#### Re-measured on IGC 2.41.5 - `71da3b2`, 2026-09-19 - no change
+
+The operator upgraded `intel-igc-core-2` / `intel-igc-opencl-2` **2.38.2 → 2.41.5**;
+`intel-ocloc`, `intel-opencl-icd`, `libze-intel-gpu1` (26.35.39758.10-0) and `libigdgmm12`
+(22.10.0) were reinstalled at the same versions, so **only the kernel code generator
+changed**. The `.bin` kernels on the box dated 2026-08-25 and no source had changed, so a
+plain build would have reused them: all 23 `.cl` sources were touched and **139 kernel
+binaries recompiled** before measuring. `libb70_prefill.so` was NOT rebuilt, which makes the
+sycl-tla row a pure box-state control. Box idle at 17:20:43 CEST: **0** DRM holder fds, **0**
+containers (four `xe` holders - ptyxis, gnome-control-c, chrome, Xwayland - were killed by
+the operator first). Device 0, mask unset, median of 3, same session.
+
+| engine / checkpoint | backend | IGC | **pp t/s** | ms total | runs (t/s) | spread | grade |
+|---|---|---|---|---|---|---|---|
+| b70-decode `71da3b2`, `urakozz` `84575a1` | **l0** | 2.41.5 | **1498.97** | 2732.5 | 1502.58 / 1498.97 / 1496.17 | 0.43% | RECORD, median of 3 |
+| b70-decode `71da3b2`, `urakozz` `84575a1` | sycl-tla (control) | 2.41.5 | 1409.92 | 2905.1 | 1411.46 / 1409.92 / 1408.95 | 0.18% | RECORD, median of 3 |
+| b70-decode `df5f92a` (the closing rows, above) | l0 / sycl-tla | 2.38.2 | 1502.83 / 1407.63 | 2725.5 / 2909.8 | - | 0.31% / 0.19% | RECORD, median of 3 |
+
+**Verdict: the IGC bump changed nothing measurable.** l0 −3.86 t/s (−0.26%) and sycl-tla
++2.29 t/s (+0.16%), both inside the runs' own spreads; the control reproducing the closing
+row to 0.16% is what says the box is in the same state, and makes the l0 delta readable as
+noise rather than a regression. l0 over sycl-tla in this session: **+6.32%**. Decode tg
+median **29.41 t/s** on both backends (vs 29.40 / 29.43 at the close) - unmoved.
+
+Correctness under the new code generator: `pf_gemm_test` 31/31 cells bitwise equal to
+sycl-tla, `pf_dequant_slab_test` bit-exact, and the full suite green - `100% tests passed, 0
+tests failed out of 75`, `captured: 774 kernels, 19 modules`, `TOTAL: 93/93` three times
+(decode golden, prefill sycl-tla, prefill l0). The `spec2.1-done` tag stands.
+
 ### The spec-3 gate rows - `a066c3c`, 2026-09-14 - bars 3-6 closed, tag `spec3-done`
 
 **Box conditions.** Idle proof (plan 6e Task 3 Step 1's command) taken before
