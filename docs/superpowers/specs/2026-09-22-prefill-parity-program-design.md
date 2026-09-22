@@ -232,3 +232,51 @@ the group-64 quantisation already aligns with the int4 K depth. That is a
 integer, so it means W4A8 or W4A4 activations, a new accuracy study, and a new
 CPU oracle - every current gate compares against the bf16 path by construction.
 It is recorded here as the fork it is, not proposed.
+
+## 8. Amendment - 2026-09-22, after S3 landed
+
+**S3 delivered −14.8 ms, not −33.** Measured on device 1, diagnostic profile,
+4096 ids: `attn_QK^T` 59.0 → 44.2 ms, `attn_PV` unchanged at 31.7. Bitwise
+identical - `prefill_backend_equivalence_test` passes all five families with
+**0 words differing and 0 sign-of-zero** against the untouched sycl-tla path,
+and `prefill_gate_l0_test` is 93/93.
+
+The estimate was wrong in a way worth recording: −33 ms was read off the whole
+attention family (148.2 ms), but causal trimming only touches the QK^T half
+(59.0 ms), and the 256-row granularity caps the saving near the theoretical 25%
+for the second chunk. The measured 25% of QK^T is what the mechanism can give.
+
+**Ruling S3-a (deviation, accepted).** The stage as written blocked **both**
+GEMMs. Blocking P·V was measured at **+19.7 ms net loss** (31.9 → 66.3) and was
+rejected: P·V's N axis is a single 256-wide tile, so splitting M leaves six
+work-groups per launch and starves the machine. The implementer committed
+QK^T-only and reported the deviation with its measurement instead of shipping
+a regression. That is the behaviour the stopping rule is for.
+
+**Ruling S3-b (stopping rule, kept).** §2 makes a stage delivering below half
+its estimate an operator call. S3 is kept: it is **bitwise identical**, the
+saving is real, and nothing downstream depends on its size. Two qualifications
+travel with it:
+- it costs **+1,792 launches per request** and +4.0 ms of host submission,
+  against a walk that already spends ~86 ms outside kernels - so the GPU saving
+  is an upper bound on the wall saving;
+- **no whole-request ABBA has been taken** (device 0 was busy). Until one is, S3
+  counts as −14.8 ms of GPU time, not as a throughput result, and it does not
+  appear in any record as t/s.
+
+`step_chunk_launches` now takes `C`: 8689 at C ≤ 256, **9137** at C = 2048.
+
+**Revised program expectation.**
+
+| | conservative | optimistic |
+|---|---:|---:|
+| S2 epilogue fusion | −80 | −95 |
+| S3 causal QK^T (**measured, GPU**) | −14.8 | −14.8 |
+| S4 GDN solve | −40 | −45 |
+| S5 W/U DPAS (gated) | 0 | −60 |
+| **total** | **−134.8** | **−214.8** |
+| **wall** | 2444.7 ms | 2364.7 ms |
+| **throughput** | **1675 t/s** | **1732 t/s** |
+
+Parity (bar 1) still falls out of S2 alone. Bar 2 remains out of reach for this
+list, as §7 already recorded.
