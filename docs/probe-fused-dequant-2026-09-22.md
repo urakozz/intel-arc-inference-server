@@ -178,7 +178,10 @@ investigation found a vendor path that **truncated** instead of rounding. It
 does not happen here. **No hardware f32→bf16 conversion instruction appears in
 either binary** - there is no `mov … :bf` fed by an `:f` source anywhere. The
 word is built by the integer sequence `pf_dequant_slab.cl` specifies, and IGC
-emits it literally:
+emits it literally. The nine instructions below are transcribed from V2's
+`.asm` (the k-tile body around the `store.slm`); they are one weight's chain,
+and they are not contiguous lines in the dump because the scheduler
+interleaves sixteen such chains through each other:
 
 ```
 shl  (16|M0)  r11.0<1>:d   r12.0<1;1,0>:d  16:w      // (u << (28 - 4i)), i = 3 here
