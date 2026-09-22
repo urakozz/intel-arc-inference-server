@@ -630,6 +630,123 @@ __kernel void pf_gdn_solve_register(__global float* restrict A, uint c_count) {
 }
 
 // ---------------------------------------------------------------------------
+// (3c) **T = (I + A)^-1 with T in PRIVATE registers** - the design's original
+//      approach A, kept as (3b)'s attribution control rather than as a shipping
+//      entry. Nothing launches it; `gdn_wy_test` pins it bitwise and the
+//      results doc records what it measured.
+//
+//      Same arithmetic as (3) and (3b), operation for operation. The one
+//      structural difference from (3b) is where column `j` lives: in `float
+//      t[CT]` instead of a second 16 KiB SLM array, so SLM stays at 16 KiB and
+//      the occupancy (3b) gives up is kept. The risk it trades for that is
+//      spill: `t` is indexed by a runtime `l` whose bounds (`l < i`, `i < L`)
+//      are not compile-time known, which is the canonical pattern IGC lowers
+//      to scratch.
+//
+//      **The write-back goes through the now-dead `As`, not straight to
+//      global.** A per-lane column write is stride-`CT`; the coalesced
+//      `p += WG_SOLVE` copy (3) ends with is 64 lanes on 64 consecutive words.
+//      So the column is staged back into `As` -- which is dead once every lane
+//      has left the `i` loop -- and the copy is unchanged. That costs one more
+//      barrier than (3b) (three, against (3b)'s two and (3)'s 2 + 2L) and it
+//      is O(1) rather than O(L) either way.
+//
+//      Bit equality with (3) is again a property of the code: the entries the
+//      write-back does not touch are the staged values (3) also leaves alone,
+//      including the dead tail's `-0.0f`, and `t`'s unwritten entries are
+//      never read -- `t[l]` is read only for `j < l < i`, and lane `j` wrote
+//      `t[l]` at step `l`.
+// ---------------------------------------------------------------------------
+__attribute__((reqd_work_group_size(WG_SOLVE, 1, 1)))
+__kernel void pf_gdn_solve_private(__global float* restrict A, uint c_count) {
+  const uint h = get_group_id(0), chunk = get_group_id(1);
+  const uint base_m = chunk * CT;
+  const uint L = min((uint)CT, c_count - base_m);
+  const uint j = get_local_id(0);
+
+  __local float As[CT * CT];                     // 16 KiB, exactly as (3)
+  float t[CT];                                   // column j, private to lane j
+  __global float* restrict At = A + ((size_t)(chunk * HEADS + h) * CT) * CT;
+  for (uint p = j; p < CT * CT; p += WG_SOLVE) {
+    const uint pi = p / CT, pj = p % CT;
+    As[p] = pi > pj ? -At[p] : 0.0f;             // solve_tril.py:82, as in (3)
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  // No barrier in this loop: `As` is read-only and `t` is private.
+  for (uint i = 0; i < L; ++i) {
+    if (j < i) {
+      float acc = As[i * CT + j];
+      for (uint l = j + 1; l < i; ++l) acc = fma(As[i * CT + l], t[l], acc);
+      t[i] = acc;
+    } else if (j == i) {
+      t[i] = 1.0f;
+    }
+  }
+
+  barrier(CLK_LOCAL_MEM_FENCE);   // every lane has finished READING As
+  for (uint i = 0; i < L; ++i)
+    if (j <= i) As[i * CT + j] = t[i];
+  barrier(CLK_LOCAL_MEM_FENCE);   // As is T before the coalesced copy reads it
+  for (uint p = j; p < CT * CT; p += WG_SOLVE) At[p] = As[p];
+}
+
+// ---------------------------------------------------------------------------
+// (3d) **(3) with the SECOND barrier deleted and nothing else changed** - the
+//      variable-isolating control. Nothing launches it; `gdn_wy_test` pins it
+//      bitwise.
+//
+//      (3b) and (3c) each remove ALL the row barriers but pay storage for it
+//      -- 16 KiB more SLM, or 8 KiB per thread of scratch -- and both measured
+//      SLOWER than (3). That confounds two variables. This entry moves only
+//      one: same in-place 16 KiB `As`, same arithmetic, no scratch, one
+//      barrier per row instead of two.
+//
+//      **The deleted barrier was never load-bearing.** (3)'s second barrier is
+//      commented "row i is T before step i+1 reads it", and no lane other than
+//      the writer ever reads it. Lane `j` writes only `As[i*CT+j]`, i.e.
+//      column `j`; at step `i+1` it reads `As[(i+1)*CT+l]` -- row `i+1`, which
+//      nobody has written yet -- and `As[l*CT+j]` for `l < i+1`, which is its
+//      OWN column, including the `l = i` word it wrote a moment ago. Same
+//      work-item, same address space, program order: no synchronization is
+//      involved. What is left is the first barrier, which is real -- lane `j'`
+//      reads `As[i*CT+l]` for `l > j'` while lane `l` overwrites that very
+//      word at the same step -- and it separates row `i+1`'s reads from row
+//      `i+1`'s writes on the next iteration as well.
+// ---------------------------------------------------------------------------
+__attribute__((reqd_work_group_size(WG_SOLVE, 1, 1)))
+__kernel void pf_gdn_solve_1bar(__global float* restrict A, uint c_count) {
+  const uint h = get_group_id(0), chunk = get_group_id(1);
+  const uint base_m = chunk * CT;
+  const uint L = min((uint)CT, c_count - base_m);
+  const uint j = get_local_id(0);
+
+  __local float As[CT * CT];
+  __global float* restrict At = A + ((size_t)(chunk * HEADS + h) * CT) * CT;
+  for (uint p = j; p < CT * CT; p += WG_SOLVE) {
+    const uint pi = p / CT, pj = p % CT;
+    As[p] = pi > pj ? -At[p] : 0.0f;             // solve_tril.py:82
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  for (uint i = 0; i < L; ++i) {
+    float acc = 0.0f;
+    if (j < i) {
+      acc = As[i * CT + j];
+      for (uint l = j + 1; l < i; ++l) acc = fma(As[i * CT + l], As[l * CT + j], acc);
+    } else if (j == i) {
+      acc = 1.0f;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);   // every lane has READ row i's A values
+    if (j <= i) As[i * CT + j] = acc;
+    // NO second barrier: the only reader of `As[i*CT+j]` is lane `j` itself.
+  }
+
+  barrier(CLK_LOCAL_MEM_FENCE);   // the last row's writes, before the copy
+  for (uint p = j; p < CT * CT; p += WG_SOLVE) At[p] = As[p];
+}
+
+// ---------------------------------------------------------------------------
 // (4) vb/kb (Q1/Q2), then u = T*vb and w = T*kb (Q3/Q4), stored bf16.
 //
 //     REWRITTEN under ruling A27 (2026-09-05): an output tile, fp32 operands in
