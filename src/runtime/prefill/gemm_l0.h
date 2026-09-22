@@ -19,4 +19,14 @@ inline uint32_t pad256(uint32_t v) { return (v + kPfGemmTile - 1) / kPfGemmTile 
 void gemm_l0(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A,
              const uint16_t* B, float* C, bool transB);
 
+// Parity program S2(a): the same GEMM with `pf_silu_mul`'s chain fused into the
+// epilogue. `b` describes ONE 1024-column slab of gate||up (L = 1, B is [K][N]),
+// `X` is the x row base for that slab -- x + n0/2, since a 32-column gate||up
+// block becomes 16 x columns -- and `ldx` is the whole x row pitch (17408), NOT
+// the slab's. `b.ldc` is ignored: no fp32 C exists. The slab's GLOBAL column
+// base must be a multiple of 32 or the gate/up parity the kernel assumes flips;
+// `linear_l0_silu` is the only caller and walks 1024-column slabs.
+void gemm_l0_silu(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A,
+                  const uint16_t* B, uint16_t* X, uint32_t ldx);
+
 }  // namespace runtime::prefill
