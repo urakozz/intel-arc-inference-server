@@ -60,6 +60,19 @@ void require(bool ok, const std::string& what) {
 // supported configuration operation; compare selectors in separate processes.
 static const char* gdn_scan_entry() {
   static const char* const entry = [] {
+    // The default is the VECTOR scan. It was promoted to the split-BF16 entry on
+    // 2026-09-22 and reverted the same hour: under the current tree the split
+    // scan FAILS the gates it passed on 2026-09-21 -- `prefill_gate_l0_test`
+    // returned 92/93 determined rows with a `gdn_state` cosine of 0.996344994
+    // at L60 on the code prompt (bar: > 0.999; that prompt recorded 0.999189068
+    // in the original experiment), and `gdn_chunk_test`'s pre-registered band
+    // missed on both halves (rel L2 2.7395e-03 vs <= 2.0e-3, max rel 2.9650e-02
+    // vs <= 1.0e-2). Evidence: `$HOME/split-default-suite.log` on the box.
+    // What changed between the two runs is not yet known; S2a, S3 and S4 all
+    // landed in between, and each is bitwise-identical *between backends*, which
+    // is a property the equivalence test cannot use to catch a GDN change --
+    // both backends run the same GDN kernels, so a scan difference cancels.
+    // Do not promote this default again without re-running the gates.
     const char* const v = std::getenv("B70_PREFILL_GDN_SCAN");
     if (!v || !*v || std::string(v) == "vector") return "pf_gdn_scan";
     if (std::string(v) == "dpas_split") return "pf_gdn_scan_dpas_split";
