@@ -172,3 +172,63 @@ requests per process/mode, both wall median and t/s, the harness's grade word
 quoted verbatim, GPU 0, zero DRM holders and zero containers proven immediately
 before the first timed row. Profiled rows diagnose a stage and are never
 substituted into a whole-request result.
+
+## 7. Amendment - 2026-09-22, after the S1 probe
+
+**S1 is rejected on measurement.** `docs/probe-fused-dequant-2026-09-22.md`:
+both fused variants are bitwise identical to the two-pass path, and both are
+slower. On gate‖up at M = 2048 the control is 5.341 ms (136.72 TFLOP/s: dequant
+0.826 + GEMM 4.515); registers-only is 11.117 ms (65.68) and SLM-staged is
+7.274 ms (100.37). Fusion **adds 2.759 ms to the GEMM half to delete a 0.826 ms
+pass**, and that pass already runs at ~546 GB/s of the 608 GB/s peak. The
+dequant was never the expensive part - it was the *visible* part.
+
+The 274.5 ms in-situ figure stands as a measurement; what was wrong was the
+inference that removing the round-trip would recover it. Reading the weights is
+work the GEMM must do either way, and doing it inside the mainloop costs more
+than doing it once into memory the DPAS pipeline streams back efficiently.
+
+**What this does to the program.**
+
+| | conservative | optimistic |
+|---|---:|---:|
+| ~~S1 fused dequant~~ | **rejected** | **rejected** |
+| S2 epilogue fusion | −80 | −95 |
+| S3 causal attention | −33 | −33 |
+| S4 GDN solve | −40 | −45 |
+| S5 W/U DPAS (gated) | 0 | −60 |
+| **total** | **−153** | **−233** |
+| **wall** | 2426.5 ms | 2346.5 ms |
+| **throughput** | **1688 t/s** | **1745 t/s** |
+
+**Bar 1 (parity) still falls out of S2 alone** - 2499.5 ms, past the 2544.043 ms
+vLLM row. **Bar 2 (1900 t/s) is no longer reachable from this list**: it needs
+−424 ms and the list now tops out at −233. Saying so is the point of writing
+estimates down before measuring.
+
+**Where the remaining headroom actually is**, from the measured partition, after
+the designed stages take their share:
+
+| family | native | vLLM | claimed by S2-S5 | still unclaimed |
+|---|---:|---:|---:|---:|
+| GDN core (scan 127.2 of it, vs vendor forward 47.6) | 351.8 | 141.8 | ~100 | **~110** |
+| attention | 148.2 | 63.1 | 33 | **~52** |
+| pointwise + residual/norm | 202.9 | 125.3 | ~80 | **~0-40** |
+| non-kernel wall (17,383 launches) | ~86 | 23.6 | 0 | **~60** |
+
+Reaching 1800-1900 t/s therefore requires **new stages, not better versions of
+these**: a second pass at the GDN scan against the vendor's 47.6 ms rate, a real
+flash-attention rather than the causal row-block trim, and launch-count
+reduction. Each needs its own design and its own gates; none is in this spec yet.
+
+**And the linears are finished in bf16.** The probe's control measures
+`pf_gemm` at 161.7 TFLOP/s on its best shape - the bf16 DPAS rate, not a
+bandwidth limit, and the reason no memory-side trick can move it. The linear
+path is 1618.8 ms of a 2493.6 ms GPU total, so the single largest remaining
+lever in the engine is **lower-precision matrix math**: this driver exposes
+native `i8_i8` DPAS at K = 32 and `i4_i4` at K = 64 against bf16's K = 16, and
+the group-64 quantisation already aligns with the int4 K depth. That is a
+**quantisation project**, not a kernel optimisation: both DPAS operands must be
+integer, so it means W4A8 or W4A4 activations, a new accuracy study, and a new
+CPU oracle - every current gate compares against the bf16 path by construction.
+It is recorded here as the fork it is, not proposed.
