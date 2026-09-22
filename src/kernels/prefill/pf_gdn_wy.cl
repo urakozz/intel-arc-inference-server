@@ -1,6 +1,13 @@
 // pf_gdn_wy.cl - `gdn_chunk` part B: the intra-chunk WY representation.
-// `A`, the unit-lower-triangular solve `T = (I - A)^-1`, the `W`/`U` recompute,
-// and `A2`. Four entry points, one file.
+// `A`, the unit-lower-triangular solve `T = (I + A)^-1`, the `W`/`U` recompute,
+// and `A2`. Four stages, one file - plus the pre-rewrite `*_legacy` entries the
+// bitwise tests pin, and the opt-in `pf_gdn_solve_register`.
+//
+// **THE SIGN IS `(I + A)^-1`, not `(I - A)^-1`.** FLA stores `A` positive and
+// negates its strictly lower half when staging the solve (`solve_tril.py:82`),
+// so the object `pf_gdn_solve` produces inverts `I + A`. The long block above
+// entry (3) derives it. This header said `(I - A)^-1` until stage S4 of the
+// prefill parity program; the wording was stale, the arithmetic never was.
 //
 // The algorithm is transcribed once in `tests/prefill/gdn_chunk_ref.h` and
 // **that file and this one must be edited together**. FLA's stages, for the
@@ -540,6 +547,86 @@ __kernel void pf_gdn_solve(__global float* restrict A, uint c_count) {
   }
 
   for (uint p = j; p < CT * CT; p += WG_SOLVE) At[p] = As[p];
+}
+
+// ---------------------------------------------------------------------------
+// (3b) **T = (I + A)^-1 with A and T in SEPARATE SLM arrays** - stage S4 of the
+//      prefill parity program (`docs/superpowers/specs/2026-09-22-gdn-solve-
+//      register-design.md`, approach B as re-selected by that file's §9).
+//      Selected at runtime by `B70_PREFILL_GDN_SOLVE=register`; the default
+//      stays (3). Identical signature, identical grid, identical work-group.
+//
+//      **THE BAR IS BIT EQUALITY WITH (3), and it is a consequence of the code
+//      rather than a hope.** Every value this kernel writes is produced by the
+//      same expression, in the same order, from the same operands:
+//        * the staging conversion is character-for-character (3)'s, so the
+//          dead tail's strictly-lower entries carry `-0.0f` here exactly as
+//          they do there -- `pf_gdn_A` writes `+0.0f` outside [0,L)^2 and the
+//          negation at staging flips its sign bit. A memcmp sees that bit;
+//          a `== 0.0f` check does not, which is why `Ts` is SEEDED FROM THE
+//          SAME EXPRESSION rather than zeroed;
+//        * `acc = As[i*CT+j]` then `fma(As[i*CT+l], T[l][j], acc)` with `l`
+//          ascending, one fp32 accumulator, no reassociation;
+//        * the live diagonal is `1.0f`, lanes `j > i` write nothing, and rows
+//          `i >= L` are never touched.
+//
+//      **WHY THE ROW BARRIERS GO AWAY.** (3) carries two barriers per row and
+//      neither of them ever protected `T`. Lane `j` reads `As[l*CT+j]` at
+//      step `i` -- that is `T[l][j]`, the value THIS SAME LANE wrote at step
+//      `l`, since `As[i*CT+j] = acc` writes only column `j`. The `T`
+//      dependency is entirely intra-lane and needs no synchronization at all.
+//      Both barriers exist for the `A` read: lane `j` reads `As[i*CT+l]` for
+//      `l > j` while lane `l` is overwriting that very element with `T[i][l]`.
+//      Give `A` and `T` separate storage and the hazard is gone with them --
+//      `As` is immutable after staging and each lane's `Ts` column is private
+//      to it in everything but address space. What is left is one barrier
+//      after staging and one before the final copy, 2 instead of 128.
+//
+//      **WHY THE OUTPUT IS STILL STAGED THROUGH SLM.** The final copy is the
+//      coalesced `for (p = j; p < CT*CT; p += WG_SOLVE)` of (3) -- 64 lanes on
+//      64 consecutive words. Having each lane write its own column instead
+//      would be a stride-`CT` global write and would regress the store side to
+//      buy nothing, so the column lives in `Ts` and the copy is unchanged.
+//
+//      The cost is 16 KiB more SLM (32 KiB per work-group, not 16). The
+//      alternative -- a private `float t[CT]` indexed by a runtime `l` -- is
+//      the canonical pattern IGC lowers to scratch, and scratch would be
+//      slower than the SLM read it replaces. Which one is right is a
+//      compiler-evidence question, and §7's evidence gate answers it on
+//      measured spill; this entry is the one that cannot spill.
+// ---------------------------------------------------------------------------
+__attribute__((reqd_work_group_size(WG_SOLVE, 1, 1)))
+__kernel void pf_gdn_solve_register(__global float* restrict A, uint c_count) {
+  const uint h = get_group_id(0), chunk = get_group_id(1);
+  const uint base_m = chunk * CT;
+  const uint L = min((uint)CT, c_count - base_m);
+  const uint j = get_local_id(0);
+
+  __local float As[CT * CT];                     // immutable after staging
+  __local float Ts[CT * CT];                     // column j is lane j's alone
+  __global float* restrict At = A + ((size_t)(chunk * HEADS + h) * CT) * CT;
+  for (uint p = j; p < CT * CT; p += WG_SOLVE) {
+    const uint pi = p / CT, pj = p % CT;
+    const float v = pi > pj ? -At[p] : 0.0f;     // solve_tril.py:82, as in (3)
+    As[p] = v;
+    Ts[p] = v;                                   // the entries the loop never
+  }                                              // writes, bit for bit as (3)
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  // No barrier in this loop: `As` is read-only and lane `j` reads only column
+  // `j` of `Ts`, which no other lane writes.
+  for (uint i = 0; i < L; ++i) {
+    if (j < i) {
+      float acc = As[i * CT + j];
+      for (uint l = j + 1; l < i; ++l) acc = fma(As[i * CT + l], Ts[l * CT + j], acc);
+      Ts[i * CT + j] = acc;
+    } else if (j == i) {
+      Ts[i * CT + j] = 1.0f;
+    }
+  }
+
+  barrier(CLK_LOCAL_MEM_FENCE);   // every column is T before the copy reads it
+  for (uint p = j; p < CT * CT; p += WG_SOLVE) At[p] = Ts[p];
 }
 
 // ---------------------------------------------------------------------------

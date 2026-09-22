@@ -204,6 +204,25 @@ if(B70_PREFILL_ENABLED)
   set_tests_properties(gdn_scan_vector_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=vector")
   set_tests_properties(gdn_scan_split_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=dpas_split")
 
+  # Stage S4's solve selector, registered parallel to the scan's four rows.
+  # The dispatch rows observe `KernelCache::kernels()` rather than the output:
+  # the two solve entries are bit-identical by construction, so an output
+  # comparison could not tell which one ran (gdn_chunk_test.cc,
+  # `check_solve_dispatch`). The full end-to-end run is registered a second
+  # time under the register selector so every band, boundary and determinism
+  # bar in the file is carried under both.
+  add_test(NAME gdn_solve_invalid_selector_test COMMAND gdn_chunk_test --invalid-selector)
+  add_test(NAME gdn_solve_default_dispatch_test COMMAND gdn_chunk_test --dispatch-solve-vector)
+  add_test(NAME gdn_solve_vector_dispatch_test COMMAND gdn_chunk_test --dispatch-solve-vector)
+  add_test(NAME gdn_solve_register_dispatch_test COMMAND gdn_chunk_test --dispatch-solve-register)
+  add_test(NAME gdn_chunk_solve_register_test COMMAND gdn_chunk_test)
+  set_tests_properties(gdn_solve_invalid_selector_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=bad")
+  set_tests_properties(gdn_solve_default_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=")
+  set_tests_properties(gdn_solve_vector_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=vector")
+  set_tests_properties(gdn_solve_register_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=register")
+  set_tests_properties(gdn_chunk_solve_register_test PROPERTIES
+    ENVIRONMENT "B70_PREFILL_GDN_SOLVE=register" TIMEOUT 1800)
+
   # The composed attention (ruling A14), end to end against decode's own
   # reference. Same guard: it drives both the L0 list and sycl-tla's GEMM. No
   # checkpoint -- one synthetic FA layer over a synthetic cache. The host
