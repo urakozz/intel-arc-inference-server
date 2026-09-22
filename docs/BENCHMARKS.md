@@ -1,5 +1,8 @@
 # B70 image benchmarks
 
+Latest controlled prefill comparison: [2026-09-20 parity investigation](prefill-parity-2026-09-20.md)
+(same checkpoint/IDs/chunk, current vLLM trace, native replay experiment).
+
 Image names: `p<python>-t<torch>-vxkp<kernels patch level>`.
 
 Serve:

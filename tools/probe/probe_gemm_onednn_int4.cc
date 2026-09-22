@@ -285,6 +285,8 @@ int main(int argc, char** argv) {
       q.memcpy(got.data(), d_c, got.size() * 2).wait();
 
       size_t compared = 0, mismatched = 0, signed_zero = 0;
+      size_t trunc_matches = 0, rounded_scale_matches = 0, rounded_scale_trunc_matches = 0;
+      uint32_t max_bf16_ulp = 0;
       std::string first_mismatch;
       for (uint32_t k = 0; k < real.K; ++k) {
         for (uint32_t n = 0; n < real.N; ++n) {
@@ -292,6 +294,24 @@ int main(int argc, char** argv) {
           const uint32_t nibble = (word >> (4 * (k % 8))) & 0xFu;
           const uint16_t want = oracle_bf16(nibble, real.scales[size_t(k / kGroup) * real.N + n]);
           const uint16_t have = got[size_t(k) * real.N + n];
+          const float scale = common::f16_to_f32(real.scales[size_t(k / kGroup) * real.N + n]);
+          const float exact = (float(nibble) - 8.0f) * scale;
+          uint32_t exact_bits;
+          std::memcpy(&exact_bits, &exact, sizeof exact_bits);
+          const float rounded_scale = common::bf16_to_f32(common::f32_to_bf16(scale));
+          const float rounded_product = (float(nibble) - 8.0f) * rounded_scale;
+          uint32_t rounded_bits;
+          std::memcpy(&rounded_bits, &rounded_product, sizeof rounded_bits);
+          auto equal_zero = [](uint16_t a, uint16_t b) {
+            return a == b || ((a & 0x7fff) == 0 && (b & 0x7fff) == 0);
+          };
+          trunc_matches += equal_zero(have, uint16_t(exact_bits >> 16));
+          rounded_scale_matches += equal_zero(have, common::f32_to_bf16(rounded_product));
+          rounded_scale_trunc_matches += equal_zero(have, uint16_t(rounded_bits >> 16));
+          auto ordered = [](uint16_t value) {
+            return value & 0x8000 ? -int32_t(value & 0x7fff) : int32_t(value);
+          };
+          max_bf16_ulp = std::max(max_bf16_ulp, uint32_t(std::abs(ordered(have) - ordered(want))));
           ++compared;
           if (want != have) {
             // A23's D2 class: both zero, sign bit differs (q=8, negative scale).
@@ -299,9 +319,12 @@ int main(int argc, char** argv) {
               ++signed_zero;
             } else {
               ++mismatched;
-              if (first_mismatch.empty())
-                first_mismatch = "k=" + std::to_string(k) + " n=" + std::to_string(n) + " want=0x" +
-                                 std::to_string(want) + " have=0x" + std::to_string(have);
+              if (first_mismatch.empty()) {
+                char message[96];
+                std::snprintf(message, sizeof message, "k=%u n=%u want=0x%04x have=0x%04x",
+                              k, n, unsigned(want), unsigned(have));
+                first_mismatch = message;
+              }
             }
           }
         }
@@ -311,6 +334,10 @@ int main(int argc, char** argv) {
                   compared, mismatched, signed_zero, 100.0 * double(signed_zero) / double(compared),
                   mismatched ? (" first: " + first_mismatch).c_str() : "");
       correctness_ok = mismatched == 0;
+      std::printf("rounding diagnostics (zero signs ignored, not alternate acceptance gates): "
+                  "max_bf16_ulp=%u product_trunc=%zu scale_bf16_rne=%zu "
+                  "scale_bf16_product_trunc=%zu of %zu\n", max_bf16_ulp, trunc_matches,
+                  rounded_scale_matches, rounded_scale_trunc_matches, compared);
       sycl::free(d_a, q);
       sycl::free(d_b, q);
       sycl::free(d_s, q);

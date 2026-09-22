@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <functional>
+#include <memory>
 
 #include "l0/context.h"
 #include "l0/kernel.h"
@@ -54,6 +56,11 @@ inline KernelArg arg_val(const T& v) {
 
 class Context {
  public:
+  struct LaunchMetrics {
+    double gpu_ms = 0;
+    double host_submit_ms = 0;
+    size_t launches = 0;
+  };
   Context(ze_context_handle_t ze_ctx, ze_device_handle_t ze_dev);
   explicit Context(l0::Context& c) : Context(c.handle(), c.device()) {}
   ~Context();
@@ -84,6 +91,33 @@ class Context {
   // this counter rather than restated in prose.
   size_t launches() const;
   void reset_launches();
+
+  // Diagnostic only: timestamp L0 launches and measure host launch submission.
+  // GPU execution and host submission overlap; these times are not additive.
+  // Enabled by B70_PREFILL_PROFILE=1, or explicitly by tests. Changing mode
+  // drains the list. take_launch_metrics() drains timestamp results and clears
+  // the counters after the caller has waited; it does not synchronize itself.
+  void set_profiling(bool enabled);
+  LaunchMetrics take_launch_metrics();
+
+  // Opt-in pure-L0 recording. Capture resolves pointer/scalar arguments but
+  // executes nothing; replay reads current buffer contents and synchronizes
+  // before returning. Kernels and referenced allocations must outlive the
+  // recording. Waits, SYCL, profiling and nested captures are rejected.
+  class Recording {
+   public:
+    ~Recording();
+    Recording(const Recording&) = delete;
+    Recording& operator=(const Recording&) = delete;
+   private:
+    friend class Context;
+    explicit Recording(const Context* owner) : owner_(owner) {}
+    const Context* owner_;
+    ze_command_list_handle_t list_ = nullptr;
+    size_t launches_ = 0;
+  };
+  std::unique_ptr<Recording> capture(const std::function<void()>& encode);
+  void replay(const Recording& recording);
 
  private:
   struct Impl;
