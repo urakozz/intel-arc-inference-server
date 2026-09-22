@@ -372,3 +372,50 @@ what made the walk faster.
 stage - so S2(a) counts as −84.0 ms of GPU time and appears in no record as
 t/s. Bar 1 (parity, 2544.043 ms) still falls out of S2 alone on this arithmetic
 and still needs that row to be claimed.
+
+## 10. The split-scan verdict is VOID - device 1 was wedged (2026-09-23)
+
+§8's revert of the split-scan default rests on evidence that cannot be trusted.
+The card it was measured on had failed.
+
+**What was found.** Every binary in the tree segfaults with zero output when run
+with `ZE_AFFINITY_MASK=1`, and passes with the mask unset or `=0`:
+
+| mask | `buffers_test` |
+|---|---|
+| unset (device 0) | OK |
+| 0 | OK |
+| **1** | **SEGFAULT** |
+
+`gdb` puts the crash inside the driver, not our code: `l0::Context::Context` →
+`zeInit()` → `libze_intel_gpu.so.1` → SIGSEGV in a `pthread_once` init path.
+`clinfo` now enumerates **one** B70 where there are two, and `/dev/dri/card2`
+(08:00.0 = device 1) was recreated at **23:31 on 2026-09-22**. Both cards are
+still bound to `xe`; no package changed in two days; OpenCL and `sycl-ls` work on
+device 0. The device is present and dead.
+
+**Which results this invalidates.** The split-default suite ran on device 1
+between ~23:20 and ~23:31 - across the moment that node was recreated. So:
+
+- the segfault cascade in that run was **device 1 dying**, not the two concurrent
+  ctest runs the earlier note blamed;
+- `prefill_gate_l0_test`'s 92/93 and the `gdn_state` cosine of 0.996344994, and
+  `gdn_chunk_test`'s band miss, were produced **on a failing card**. A GPU
+  mid-reset does not produce trustworthy arithmetic.
+
+**The split scan is therefore not proven guilty.** Its −157.974 ms is back in
+play and needs a clean retest on a healthy device. The default stays `vector`
+until that retest exists - absence of evidence is not evidence of innocence
+either.
+
+**What is still trustworthy.** The 86/86 merged-tree suite (~22:50, device 1,
+before the failure) and every throughput row in `docs/BENCHMARKS.md`, which were
+taken on **device 0** with the mask unset - including the standing
+2625.0 ms / 1560.40 t/s.
+
+**Open and unanswered: what killed it.** The split-default suite was the workload
+running when the node was recreated, so "the split scan faults the device" is a
+live hypothesis and a much more serious one than a cosine miss. The alternative
+is that the card was left fragile by the processes killed earlier that evening.
+The retest must watch for a second reset, and should not be run on device 0 -
+the series card - until device 1 is back and has survived it.
