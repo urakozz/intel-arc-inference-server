@@ -248,3 +248,34 @@ still vector and no vendor adoption or default switch is proposed.  The
 remaining arithmetic concern is intentional scope: `A2*vn` is still
 single-BF16 and could affect later-layer outputs; it is not claimed harmless
 beyond the same-layer state path.
+
+## Contract amendment - 2026-09-22 (operator ruling)
+
+The both-model contract pre-registered in "Gates and decision" is amended: the
+only checkpoint this project gates on is
+`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`.  RTN/W4G64 is **retired** - not
+restored, not built, not used as a performance reference, and never grounds for
+relaxing a gate.  Ruling A31 deleted that checkpoint from the box on 2026-09-09;
+the contract, not the evidence, was the thing out of date.
+
+**What this changes about the result above: nothing that was measured.**  Every
+gate recorded in this file ran on the primary checkpoint, and that set is now
+the complete contract, so the experiment's correctness evidence is **closed
+rather than externally blocked**.  The "RTN availability" section and the
+"primary-model-only result, not completion of the pre-registered both-model
+contract" qualifier are superseded by this amendment; they are kept as the
+record of what was true when written.
+
+**What it costs, and is not yet decided.**  `prefill_gate_rtn_test` and
+`prefill_gate_long_test` are both registered only inside
+`if(EXISTS "${B70_RTN_SNAPSHOT}/config.json")` (`tests/CMakeLists.txt`), so
+retiring RTN also retires the only registration path for the **multi-chunk long
+gate** (spec 2 §6.2's 2820-id prompt).  Neither is registered today, because the
+snapshot is gone.  The long gate therefore needs either an AutoRound
+`oracle-out-long` set of its own or an explicit decision to drop it; this
+amendment does not decide that, and no gate elsewhere covers a >2048-id prompt
+against a CPU oracle.
+
+The production default is unchanged by this amendment: `vector` remains the
+shipped scan.  Whether the now-fully-gated `dpas_split` selector is promoted is
+a separate decision with its own record.
