@@ -648,6 +648,37 @@ sycl-tla, `pf_dequant_slab_test` bit-exact, and the full suite green - `100% tes
 tests failed out of 75`, `captured: 774 kernels, 19 modules`, `TOTAL: 93/93` three times
 (decode golden, prefill sycl-tla, prefill l0). The `spec2.1-done` tag stands.
 
+### The parity-program rows - `99cedc9`, 2026-09-22 - S2 + S3 on the L0 backend
+
+Device 0, `tools/bench_decode.sh --pp 4096`, median of 3, provably idle box
+(0 DRM holder fds, 0 containers, load 0.52), IGC 2.41.5 throughout, same harness
+for every row below, so each step isolates its own stage.
+
+| engine / checkpoint | stages in | **pp t/s** | ms total | runs (t/s) | spread | grade |
+|---|---|---:|---:|---|---:|---|
+| b70-decode `71da3b2` | spec 2.1 close | 1498.97 | 2732.5 | 1502.58 / 1498.97 / 1496.17 | 0.43% | RECORD |
+| b70-decode `779097a` | + S3 causal QK^T | 1505.16 | 2721.3 | 1504.59 / 1505.16 / 1505.87 | 0.09% | RECORD |
+| **b70-decode `99cedc9`** | **+ S2a SiLU epilogue** | **1560.40** | **2625.0** | 1565.98 / 1556.90 / 1560.40 | 0.58% | **RECORD** |
+| vLLM `0.29.1rc1.dev380`, matched | - | 1610.04 | 2544.043 | - | - | measured, external |
+
+**The day: −107.5 ms, +61.43 t/s (+4.1%).** Against the matched vLLM row we are
+**80.96 ms / 49.64 t/s short - 96.9% of it.**
+
+S2a's own profile measured −84.0 ms of L0 GPU time; the wall moved **−96.3 ms**.
+The difference is the 128 launches the fused epilogue deletes: less host
+submission, and one fewer kernel boundary per gate‖up slab. Decode is unmoved at
+29.41 t/s (29.40 / 29.41 at the two earlier rows).
+
+Both stages are **bitwise identical by construction** - `prefill_backend_equivalence_test`
+reports 0 words differing and 0 sign-of-zero on all five case families, against a
+sycl-tla path neither of them touches. The merged tree passes **86/86**, decode
+still captures 774 kernels / 19 modules, and all three golden tallies are 93/93.
+
+Two stages of the program were **rejected on measurement** and cost nothing but
+the probes that killed them: S1 (fusing the int4 dequant into the GEMM - slower,
+`docs/probe-fused-dequant-2026-09-22.md`) and S4 (the barrier-free GDN solve -
+slower, and its premise false by ~18x, `docs/prefill-gdn-solve-register-results.md`).
+
 ### The spec-3 gate rows - `a066c3c`, 2026-09-14 - bars 3-6 closed, tag `spec3-done`
 
 **Box conditions.** Idle proof (plan 6e Task 3 Step 1's command) taken before
