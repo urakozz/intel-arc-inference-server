@@ -37,8 +37,9 @@ namespace runtime::prefill {
 // waits per FA layer.
 //
 // **On the L0 backend they do not** (spec 2.1 S3): both GEMMs are `pf_gemm` on
-// the same in-order immediate list as the softmax, so the whole group is three
-// launches with no host wait between them and none after the loop. The timed
+// the same in-order immediate list as the softmax, so the whole group is
+// `blocks + 2` launches (parity-program S3 blocks QK^T by rows) with no host
+// wait between them and none after the loop. The timed
 // path pays zero waits per FA layer; `profile_wait` still inserts the
 // diagnostic ones when B70_PREFILL_PROFILE=1.
 namespace attn {
@@ -58,6 +59,15 @@ inline uint32_t attn_rows(uint32_t C, PrefillBackend b) {
   return b == PrefillBackend::L0 ? pad256(C) : C;
 }
 
+// Spec S3 (`docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md` §3): on the
+// L0 backend each kv group's QK^T is issued in row blocks of `kPfGemmTile`, so block b
+// computes only the columns causality can reach (`pad256(pos + r1)`) instead of the whole
+// padded depth. P·V is NOT blocked -- attn.cc records the occupancy measurement that
+// rejected it. sycl-tla is untouched and keeps its one GEMM per group, hence 1 here.
+inline uint32_t attn_row_blocks(uint32_t C, PrefillBackend b) {
+  return b == PrefillBackend::L0 ? attn_rows(C, b) / kPfGemmTile : 1;
+}
+
 // (1) q/k RMSNorm, partial RoPE, and the chunk's K/V written into the cache at
 //     absolute positions [pos, pos + C). Reads `pos` and `n_active` out of the
 //     shared `Control` block, which the caller has already set (and waited for).
@@ -71,8 +81,10 @@ void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 //     Writes `s.pf_o` -- fp32 [24][rows][256], per-head stride `rows * 256`
 //     with `rows = attn_rows(C, backend)`, which is what `attn_gate_chunk` and
 //     the tests read it at. On sycl-tla: four L0 launches (one softmax per kv
-//     group) and eight GEMMs; synchronises, see above. On L0: twelve L0
-//     launches (three per kv group) and no wait.
+//     group) and eight GEMMs; synchronises, see above. On L0, per kv group: one
+//     pf_gemm per QK^T ROW BLOCK (spec S3), one softmax, one P·V, and no wait --
+//     `attn_chunk_launches(C, backend)` below, the one term of the prefill
+//     launch arithmetic that depends on C.
 void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                 const uint16_t* q, const uint16_t* kv_k, const uint16_t* kv_v,
                 PrefillBackend backend);
@@ -90,5 +102,16 @@ void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 inline constexpr size_t kAttnPrepLaunches = 1;
 inline constexpr size_t kAttnChunkLaunches = attn::kKvHeads;   // one softmax per kv group
 inline constexpr size_t kAttnGateLaunches = 1;
+
+// What `attn_chunk` appends to the L0 list. sycl-tla: `kAttnChunkLaunches`, its two GEMMs
+// per group being SYCL calls off this counter. L0 (spec S3): per kv group one pf_gemm per
+// QK^T row block, one softmax and one P·V -- so this, and only this, makes the chunk's
+// launch count a function of C. At C <= 256 there is one block and the count is what it was
+// before S3.
+inline size_t attn_chunk_launches(uint32_t C, PrefillBackend b) {
+  return b == PrefillBackend::L0
+             ? size_t(attn::kKvHeads) * (2 + size_t(attn_row_blocks(C, b)))
+             : kAttnChunkLaunches;
+}
 
 }  // namespace runtime::prefill
