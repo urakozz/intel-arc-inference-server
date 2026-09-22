@@ -47,6 +47,12 @@
 //      grid with fp32 operands in SLM, and `tile_dot` is `band_dot`'s tree
 //      written as its own expression, so neither moves a rounding point and
 //      neither re-associates. Same two-fill coverage trick as case 6.
+//   8. **stage S4's bar: `pf_gdn_solve_register` BITWISE IDENTICAL to
+//      `pf_gdn_solve`** - the separate-A/T solve that drops the two per-row
+//      barriers. Same operands, same ascending `l`, same `fma`, so the bar is
+//      a full memcmp of `T` from two independently filled, memcmp-equal device
+//      `A` buffers. It is sharper than case 5's tail check because a memcmp
+//      sees the `-0.0f` that `CHECK_EQ(., 0.0f)` cannot.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -293,6 +299,52 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
                 "exactly 0.0f\n",
                 worst, heads, bound, maxT);
     CHECK(worst <= bound);
+  }
+
+  // --- 8. stage S4's bar: pf_gdn_solve_register BITWISE IDENTICAL ----------
+  // The register entry keeps `A` immutable in SLM and gives `T` its own array,
+  // which deletes the two per-row barriers. It re-associates nothing -- same
+  // staging expression, same initial accumulator, same ascending `l`, same
+  // `fma` -- so the pre-registered bar is a full memcmp of `T` and not a band.
+  //
+  // The two solves are fed from SEPARATE device buffers filled with DIFFERENT
+  // patterns and each written by its own `pf_gdn_A` launch, and the inputs are
+  // memcmp'd before the comparison is allowed to mean anything: a word neither
+  // solve wrote would otherwise compare equal and hide a coverage gap, and an
+  // `A` that differed would make an equal `T` an accident.
+  //
+  // **The dead tail is the sharp part.** `pf_gdn_A` writes `+0.0f` outside
+  // [0,L)^2, staging negates the strictly-lower half, and both kernels
+  // therefore leave `-0.0f` there. Case 5's `CHECK_EQ(Tt[p], 0.0f)` cannot see
+  // that sign bit; this memcmp can, which is why the register entry seeds its
+  // `Ts` from the staging expression instead of zeroing it.
+  {
+    l0::Mem d_AR(d.ctx, l0::MemKind::Device, tri * 4);
+    d.imm.fill(d_AR.ptr(), 0x33333333u, d_AR.size());
+    d.cx.launch(d.k("pf_gdn_A"), R::kHeads, nch, 4,
+                {PtrArg(d_xb.ptr()), PtrArg(d_g.ptr()), PtrArg(d_beta.ptr()), PtrArg(d_AR.ptr()),
+                 arg_val(C)});
+    d.cx.wait();
+    std::vector<float> A_reg(tri);
+    pf_harness::download(d.imm, A_reg, d_AR);
+    CHECK(std::memcmp(A_got.data(), A_reg.data(), tri * 4) == 0);   // the INPUTS agree
+
+    d.cx.launch(d.k("pf_gdn_solve_register"), R::kHeads, nch, 1,
+                {PtrArg(d_AR.ptr()), arg_val(C)});
+    d.cx.wait();
+    std::vector<float> T_reg(tri);
+    pf_harness::download(d.imm, T_reg, d_AR);
+    CHECK(std::memcmp(T_got.data(), T_reg.data(), tri * 4) == 0);
+    // Printed so the sign-of-zero claim above is checkable rather than asserted.
+    size_t neg_zero = 0;
+    for (float v : T_reg) {
+      uint32_t u;
+      std::memcpy(&u, &v, 4);
+      if (u == 0x80000000u) ++neg_zero;
+    }
+    std::printf("  T   : register == vector, BITWISE - %zu fp32 entries from identical "
+                "device A (%zu of them -0.0f, the dead tail's negated zeroes)\n",
+                tri, neg_zero);
   }
 
   // --- 3. pf_gdn_wu, fed the device's own T --------------------------------
