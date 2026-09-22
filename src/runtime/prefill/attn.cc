@@ -107,13 +107,16 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     float* oj = O + size_t(j) * kGroup * stride_h;
     if (l0) {
       gemm_l0(cx, kc, pv, P, vj, oj, /*transB=*/false);
+      profile_wait(cx, Phase::kAttnPv);
     } else {
       timed_wait(cx, Phase::kAttnSm);     // L0 -> SYCL
       attn_pv_sycl(cx, pv, P, vj, oj);
+      // Otherwise the next group's QK wait also consumes this group's PV.
+      // The final group is drained by the mandatory boundary below.
+      if (j + 1 < kKvHeads) profile_wait(cx, Phase::kAttnPv);
     }
   }
-  if (l0) profile_wait(cx, Phase::kAttnPv);
-  else timed_wait(cx, Phase::kAttnPv);    // SYCL -> L0, for the gate launch next
+  if (!l0) timed_wait(cx, Phase::kAttnPv); // SYCL -> L0, for the gate launch next
 }
 
 void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, uint32_t rows,

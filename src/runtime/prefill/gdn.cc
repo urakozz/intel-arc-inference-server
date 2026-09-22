@@ -1,5 +1,6 @@
 #include "runtime/prefill/gdn.h"
 
+#include <cstdlib>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -51,7 +52,23 @@ constexpr uint32_t kConvBlock = 128;
 void require(bool ok, const std::string& what) {
   if (!ok) throw std::runtime_error("runtime::prefill::gdn_chunk: " + what);
 }
+
 }  // namespace
+
+// This intentionally resolves once per process.  Captured replay may retain
+// the first kernel selection, so changing getenv between engine calls is not a
+// supported configuration operation; compare selectors in separate processes.
+static const char* gdn_scan_entry() {
+  static const char* const entry = [] {
+    const char* const v = std::getenv("B70_PREFILL_GDN_SCAN");
+    if (!v || !*v || std::string(v) == "vector") return "pf_gdn_scan";
+    if (std::string(v) == "dpas_split") return "pf_gdn_scan_dpas_split";
+    throw std::runtime_error("runtime::prefill::gdn_chunk: B70_PREFILL_GDN_SCAN must be "
+                             "unset, 'vector', or 'dpas_split' (got '" +
+                             std::string(v) + "')");
+  }();
+  return entry;
+}
 
 void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                const float* qkvz_partials, const float* ab_out, float* gdn_state,
@@ -60,6 +77,9 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   require(C <= PrefillScratch::kC,
           "C = " + std::to_string(C) + " exceeds PrefillScratch::kC = " +
               std::to_string(PrefillScratch::kC) + " - the scratch is sized for kC");
+  // Validate/cache the process selector before reading or launching any GDN
+  // buffer; an unsupported value therefore cannot mutate state or append work.
+  const char* const scan_entry = gdn_scan_entry();
 
   const uint32_t nch = (C + PrefillScratch::kGdnChunk - 1) / PrefillScratch::kGdnChunk;
   const uint32_t heads = Q::kGdnVHeads;                 // 48
@@ -121,7 +141,7 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
             {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_A2), arg_val(C)});
   profile_wait(cx, Phase::kGdnA2);
   //  9 - the sequential chunk-to-chunk state scan; the only writer of gdn_state.
-  cx.launch(kc(scan, "pf_gdn_scan"), heads, kStateColChunks, 1,
+  cx.launch(kc(scan, scan_entry), heads, kStateColChunks, 1,
             {PtrArg(p_xb), PtrArg(p_w), PtrArg(p_u), PtrArg(p_A2), PtrArg(p_g),
              PtrArg(gdn_state), PtrArg(p_o), arg_val(C)});
   profile_wait(cx, Phase::kGdnScan);

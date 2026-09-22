@@ -11,6 +11,7 @@
 // The member declarations stay in `runtime/engine.h`; only the definitions move.
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -29,6 +30,12 @@ namespace runtime {
 struct PrefillEngine {
   prefill::Context cx;
   prefill::KernelCache kc;
+  struct Chunk {
+    uint32_t pos, rows;
+    std::unique_ptr<prefill::Context::Recording> recording;
+  };
+  // Declared after kc/cx: recordings are destroyed before kernels/context.
+  std::vector<Chunk> chunks;
   explicit PrefillEngine(l0::Context& c) : cx(c), kc(c) {}
 };
 
@@ -77,6 +84,10 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (backend == PrefillBackend::SyclTla && !prefill::sycl_available())
     throw std::runtime_error("runtime::Engine::prefill: the sycl-tla backend needs the SYCL"
                              " component, and this build has none; set_prefill_backend(L0)");
+  const char* replay_env = std::getenv("B70_PREFILL_REPLAY");
+  const bool replay = pf_replay_.value_or(replay_env && std::strcmp(replay_env, "1") == 0);
+  if (replay && backend != PrefillBackend::L0)
+    throw std::runtime_error("runtime::Engine::prefill: replay requires the L0 backend");
 
   for (size_t off = 0; off < ids.size(); off += chunk) {
     const uint32_t C = uint32_t(std::min<size_t>(chunk, ids.size() - off));
@@ -84,9 +95,26 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     std::memcpy(pf_->ids.ptr(), ids.data() + off, size_t(C) * 4);
     control_->pos = base + uint32_t(off);
     control_->n_active = C;
-    prefill::step_chunk(pfx_->cx, pfx_->kc, *pf_, model_, buffers_.max_len, control_,
+    auto encode = [&] {
+      prefill::step_chunk(pfx_->cx, pfx_->kc, *pf_, model_, buffers_.max_len, control_,
                         base + uint32_t(off), C, persist_.gdn_state, persist_.conv_ring,
                         persist_.kv_k, persist_.kv_v, backend);
+    };
+    if (replay) {
+      const uint32_t pos = base + uint32_t(off);
+      auto it = std::find_if(pfx_->chunks.begin(), pfx_->chunks.end(), [&](const auto& entry) {
+        return entry.pos == pos && entry.rows == C;
+      });
+      if (it == pfx_->chunks.end()) {
+        // FIFO bound limits retained command storage for long/incremental sessions.
+        if (pfx_->chunks.size() == 8) pfx_->chunks.erase(pfx_->chunks.begin());
+        pfx_->chunks.push_back({pos, C, pfx_->cx.capture(encode)});
+        it = pfx_->chunks.end() - 1;
+      }
+      pfx_->cx.replay(*it->recording);
+    } else {
+      encode();
+    }
     pfx_->cx.wait();                       // the chunk's state has landed
   }
 

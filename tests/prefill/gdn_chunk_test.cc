@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "check.h"
@@ -225,9 +226,89 @@ Walk run_chunked(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz,
   d.imm.copy(r.ring.data(), d_ring.ptr(), d_ring.size());
   return r;
 }
+
+void check_invalid_selector(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz,
+                            l0::Mem& d_ab, l0::Mem& d_small, l0::Mem& d_state,
+                            l0::Mem& d_ring, l0::Mem& d_y) {
+  // `gdn_chunk` must reject before it reads/launches GDN work.  Deliberately
+  // nonzero sentinels make an accidental state/ring mutation observable.
+  d.imm.fill(d_state.ptr(), 0x3f810000u, d_state.size());
+  d.imm.fill(d_ring.ptr(), 0x7d7du, d_ring.size());
+  std::vector<float> state_before(kStateElems), state_after(kStateElems);
+  std::vector<uint16_t> ring_before(kRingElems), ring_after(kRingElems);
+  d.imm.copy(state_before.data(), d_state.ptr(), d_state.size());
+  d.imm.copy(ring_before.data(), d_ring.ptr(), d_ring.size());
+  d.cx.reset_launches();
+  bool threw = false;
+  try {
+    runtime::prefill::gdn_chunk(d.cx, d.kc, s, 0, 1, d_qkvz.as<float>(), d_ab.as<float>(),
+                                d_state.as<float>(), d_ring.as<uint16_t>(), d_small.ptr(),
+                                d_y.as<uint16_t>());
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  d.imm.copy(state_after.data(), d_state.ptr(), d_state.size());
+  d.imm.copy(ring_after.data(), d_ring.ptr(), d_ring.size());
+  CHECK(threw);
+  CHECK_EQ(d.cx.launches(), size_t(0));
+  CHECK(std::memcmp(state_before.data(), state_after.data(), d_state.size()) == 0);
+  CHECK(std::memcmp(ring_before.data(), ring_after.data(), d_ring.size()) == 0);
+  std::puts("invalid selector: real gdn_chunk threw before launches/state/ring mutation");
+}
+
+struct ScanOutput {
+  std::vector<float> state, o;
+};
+
+ScanOutput run_direct_scan(Dev& d, runtime::PrefillScratch& s, l0::Mem& state,
+                           uint32_t C, const char* entry) {
+  l0::Mem o(d.ctx, l0::MemKind::Device, size_t(C) * kMixerN * sizeof(float));
+  d.imm.fill(o.ptr(), 0x7fc00000u, o.size());
+  d.cx.launch(d.kc(kernels::pf_gdn_scan_variant(), entry), G::kHeads, 4, 1,
+              {PtrArg(s.gdn_xb.ptr()), PtrArg(s.gdn_w.ptr()), PtrArg(s.gdn_u.ptr()),
+               PtrArg(s.gdn_A2.ptr()), PtrArg(s.gdn_g.ptr()), PtrArg(state.ptr()), PtrArg(o.ptr()),
+               arg_val(C)});
+  d.cx.wait();
+  ScanOutput out{std::vector<float>(kStateElems), std::vector<float>(size_t(C) * kMixerN)};
+  d.imm.copy(out.state.data(), state.ptr(), state.size());
+  d.imm.copy(out.o.data(), o.ptr(), o.size());
+  return out;
+}
+
+void check_selected_dispatch(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz,
+                             l0::Mem& d_ab, l0::Mem& d_small, l0::Mem& d_state,
+                             l0::Mem& d_ring, l0::Mem& d_y, const char* selected,
+                             const char* opposite) {
+  // A nonzero state makes S's low chain live.  The normal fixture makes D's
+  // residual live; a hard-wired vector dispatch cannot match the split entry.
+  constexpr uint32_t C = 64;
+  std::vector<float> initial(kStateElems, 1.0f + 0x1p-8f);
+  d.imm.copy(d_state.ptr(), initial.data(), d_state.size());
+  d.imm.fill(d_ring.ptr(), 0u, d_ring.size());
+  l0::Mem expected_state = pf_harness::upload(d.ctx, d.imm, initial);
+  l0::Mem opposite_state = pf_harness::upload(d.ctx, d.imm, initial);
+
+  d.cx.reset_launches();
+  runtime::prefill::gdn_chunk(d.cx, d.kc, s, 0, C, d_qkvz.as<float>(), d_ab.as<float>(),
+                              d_state.as<float>(), d_ring.as<uint16_t>(), d_small.ptr(),
+                              d_y.as<uint16_t>());
+  d.cx.wait();
+  CHECK_EQ(d.cx.launches(), runtime::prefill::kGdnChunkLaunches);
+  ScanOutput actual{std::vector<float>(kStateElems), std::vector<float>(size_t(C) * kMixerN)};
+  d.imm.copy(actual.state.data(), d_state.ptr(), d_state.size());
+  d.imm.copy(actual.o.data(), s.gdn_o.ptr(), size_t(C) * kMixerN * sizeof(float));
+
+  const ScanOutput expected = run_direct_scan(d, s, expected_state, C, selected);
+  const ScanOutput other = run_direct_scan(d, s, opposite_state, C, opposite);
+  CHECK(std::memcmp(actual.state.data(), expected.state.data(), d_state.size()) == 0);
+  CHECK(std::memcmp(actual.o.data(), expected.o.data(), actual.o.size() * sizeof(float)) == 0);
+  CHECK(std::memcmp(actual.state.data(), other.state.data(), d_state.size()) != 0 ||
+        std::memcmp(actual.o.data(), other.o.data(), actual.o.size() * sizeof(float)) != 0);
+  std::printf("selector dispatch: gdn_chunk == %s and differs from %s\n", selected, opposite);
+}
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   Dev d;
   std::printf("device: %s\n", d.ctx.name().c_str());
   const Fixture f = make_fixture();
@@ -239,6 +320,22 @@ int main() {
   l0::Mem d_ring(d.ctx, l0::MemKind::Device, size_t(kRingElems) * 2);
   l0::Mem d_y(d.ctx, l0::MemKind::Device, size_t(kC) * kMixerN * 2);
   runtime::PrefillScratch s(d.ctx, 16384);
+
+  if (argc == 2 && std::string(argv[1]) == "--invalid-selector") {
+    check_invalid_selector(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y);
+    return 0;
+  }
+  if (argc == 2 && std::string(argv[1]) == "--dispatch-vector") {
+    check_selected_dispatch(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y,
+                            "pf_gdn_scan", "pf_gdn_scan_dpas_split");
+    return 0;
+  }
+  if (argc == 2 && std::string(argv[1]) == "--dispatch-split") {
+    check_selected_dispatch(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y,
+                            "pf_gdn_scan_dpas_split", "pf_gdn_scan");
+    return 0;
+  }
+  CHECK_EQ(argc, 1);
 
   // --- the chunked walk: 4096 positions as 2 x 2048 -------------------------
   const Walk got = run_chunked(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y,

@@ -195,6 +195,14 @@ if(B70_PREFILL_ENABLED)
     kernel_pf_gated_head kernel_gdn_step_M1 kernel_prep_gated_head_M1)
   add_test(NAME gdn_chunk_test COMMAND gdn_chunk_test)
   set_tests_properties(gdn_chunk_test PROPERTIES TIMEOUT 1800)
+  add_test(NAME gdn_scan_invalid_selector_test COMMAND gdn_chunk_test --invalid-selector)
+  add_test(NAME gdn_scan_default_dispatch_test COMMAND gdn_chunk_test --dispatch-vector)
+  add_test(NAME gdn_scan_vector_dispatch_test COMMAND gdn_chunk_test --dispatch-vector)
+  add_test(NAME gdn_scan_split_dispatch_test COMMAND gdn_chunk_test --dispatch-split)
+  set_tests_properties(gdn_scan_invalid_selector_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=bad")
+  set_tests_properties(gdn_scan_default_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=")
+  set_tests_properties(gdn_scan_vector_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=vector")
+  set_tests_properties(gdn_scan_split_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=dpas_split")
 
   # The composed attention (ruling A14), end to end against decode's own
   # reference. Same guard: it drives both the L0 list and sycl-tla's GEMM. No
@@ -211,6 +219,22 @@ if(B70_PREFILL_ENABLED)
   add_test(NAME attn_chunk_test COMMAND attn_chunk_test)
   set_tests_properties(attn_chunk_test PROPERTIES TIMEOUT 3600)
 endif()
+
+# D3's scan-only arithmetic discriminator is direct Level Zero/OpenCL C, so it
+# must run in both configurations.  The fixtures make removal of either BF16
+# low chain observable without re-implementing the scan.
+add_executable(gdn_scan_split_test prefill/gdn_scan_split_test.cc)
+target_include_directories(gdn_scan_split_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+                           ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+target_link_libraries(gdn_scan_split_test PRIVATE b70_prefill_host b70_l0)
+if(B70_PREFILL_ENABLED)
+  b70_link_prefill(gdn_scan_split_test)
+endif()
+b70_target_kernel_dir(gdn_scan_split_test)
+add_dependencies(gdn_scan_split_test kernel_pf_gdn_scan)
+add_test(NAME gdn_scan_split_test COMMAND gdn_scan_split_test)
+set_tests_properties(gdn_scan_split_test PROPERTIES TIMEOUT 1800)
+
 
 add_executable(int4_test kernels/int4_test.cc)
 target_include_directories(int4_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -498,7 +522,7 @@ set(B70_PREFILL_KERNELS
 # BINARIES are built in every configuration; only `b70_link_prefill` (the
 # sycl-tla .so and its two rpaths) is conditional, which is plan 9b's ruling B4
 # pattern and what `context_test` above already does.
-foreach(t prefill_gate prefill_consistency prefill_determinism)
+foreach(t prefill_gate prefill_consistency prefill_determinism prefill_replay)
   add_executable(${t}_test prefill/${t}_test.cc)
   target_include_directories(${t}_test PRIVATE ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
@@ -508,6 +532,9 @@ foreach(t prefill_gate prefill_consistency prefill_determinism)
   endif()
   add_dependencies(${t}_test ${B70_PREFILL_KERNELS})
 endforeach()
+add_test(NAME prefill_replay_test COMMAND prefill_replay_test ${B70_TEST_SNAPSHOT})
+set_tests_properties(prefill_replay_test PROPERTIES LABELS "checkpoint;prefill"
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
 # l0, every build.
 add_test(NAME prefill_gate_l0_test COMMAND prefill_gate_test
   ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}

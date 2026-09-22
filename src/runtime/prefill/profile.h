@@ -4,24 +4,18 @@
 
 #include "runtime/prefill/context.h"
 
-// A per-phase wall-clock attribution of the prefill walk, off unless
+// Per-phase diagnostic timing of the prefill walk, off unless
 // `B70_PREFILL_PROFILE=1` is in the environment.
 //
-// **Why a wall clock and not device timestamps.** The walk is already a strict
-// alternation of "append launches" and "drain both queues" - rulings A23/A24
-// put a host `Context::wait()` at every L0<->SYCL boundary because this device
-// has one compute queue and no cross-runtime dependency. So the wall time of a
-// `wait()` IS the device time of everything queued since the previous drain,
-// plus that boundary's own cost, and no event pool is needed to attribute it.
-// `--profile`'s `ProfileEvents` machinery cannot help here anyway: it belongs
-// to a captured list and the prefill walk is not one (docs/07 open question).
+// Context timestamps L0 kernels and records host launch submission separately.
+// A wait measures only residual synchronization after submission; the GPU can
+// already have executed while the host was submitting. SYCL kernels are not
+// covered by L0 events. None of these columns is interchangeable or additive.
 //
-// **The instrument perturbs, and by how much is reported rather than argued.**
-// In profile mode the walk closes each L0-only section with an EXTRA wait it
-// would not otherwise pay, so a profiled chunk is slower than a plain one. The
-// report prints the profiled total beside the plain one from the same binary's
-// unprofiled run; a term is only worth reading if the two agree to a few
-// percent.
+// Events and extra phase waits perturb the walk. The CLI supplies this SAME
+// instrumented call's wall time, not an independent plain run. The report must
+// not describe the sum of waits as a wall-time upper bound or its difference
+// from call wall as instrumentation overhead.
 namespace runtime::prefill {
 
 enum class Phase : uint32_t {
@@ -57,9 +51,8 @@ void profile_wait(Context& cx, Phase p);
 
 // Zero the accumulators (the CLI does this before the run it reports).
 void profile_reset();
-// Print the table to stderr: per phase, total ms, share, and the wait count.
-// `label` names the run; `plain_ms` is the same run's unprofiled wall time, or
-// 0 if there is none to compare against.
-void profile_report(const char* label, double plain_ms);
+// Print residual waits, L0 GPU timestamps and L0 host submission separately.
+// `wall_ms` is the actual instrumented call wall time, or 0 if unavailable.
+void profile_report(const char* label, double wall_ms);
 
 }  // namespace runtime::prefill
