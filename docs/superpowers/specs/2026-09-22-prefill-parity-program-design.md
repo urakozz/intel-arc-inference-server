@@ -298,3 +298,77 @@ against +4.0 ms of added host submission, i.e. −10.8 ms; the wall moved −11.
 Prediction and measurement agree to within a millisecond, which is the evidence
 that the +1,792 launches are priced correctly rather than merely acknowledged.
 Ruling S3-b stands: kept.
+
+## 10. Amendment - 2026-09-22, after S2 landed
+
+**S2(a) delivered −84.0 ms; S2(b) was rejected on measurement.** Device 1,
+diagnostic profile, 4096 ids in two 2048 chunks, both arms of each mechanism
+interleaved through a selector so one binary and one session separate them
+(`B70_PREFILL_SILU_FUSED`, and a `B70_PREFILL_BF16_PARTIALS` that did not
+survive). L0 GPU ms, medians:
+
+| phase | unfused (n = 10) | **S2(a) fused** (n = 13) | delta |
+|---|---:|---:|---:|
+| `slab_gemm` | 1375.6 | 1408.2 | **+32.6** |
+| `slab_dequant` | 272.0 | 252.4 | **−19.6** |
+| `silu` | 99.1 | **0.0** | **−99.1** |
+| `norm` | 105.3 | 105.7 | +0.4 |
+| **L0 GPU total** | **2668.6** | **2584.6** | **−84.0** |
+
+Inside §3's −80 to −95 band - from **one** of the two mechanisms. Bitwise:
+`prefill_backend_equivalence_test` passes all five families with 0 words
+differing and 0 sign-of-zero against the untouched sycl-tla path, and
+`pf_gemm_test` compares the fused epilogue to the GEMM + `pf_silu_mul` pair
+device-to-device at M = 2048 and M = 772, also 0. `prefill_gate_l0_test` 93/93.
+Unlike S3 this stage **removes** launches - 128 per request, one per layer per
+chunk - so the wall saving is not bounded below the GPU saving by host
+submission. `step_chunk_launches` is 9073 at C = 2048 and 8625 at C ≤ 256.
+
+**Ruling S2-a (the estimate was right for the wrong reason).** §3 expected the
+saving to be the deleted fp32 [2048][34816] traffic. It is not: the GEMM's own
+row went **up** 32.6 ms, because the epilogue now evaluates one `exp` and four
+`rne_bf16` per output element - 4.56 G of them per request - while the store is
+free either way (64 scalar ushort stores and eight 16b block messages were both
+built and measured against the same control, 1410.2 vs 1409.3 ms). What the
+stage actually banks is the whole `silu` row plus 19.6 ms of `slab_dequant`,
+which speeds up once 285 MB of dirty partials per layer stop competing with it.
+A second-order effect nobody predicted is 24% of the stage.
+
+**Ruling S2-b (rejected, and it cannot be tuned).** bf16 `partials` for
+out_proj / o_proj / down was built, gated bitwise (equivalence test green) and
+measured over five runs an arm: **−7.3 ms `slab_dequant`, −1.7 ms `norm`,
++9.3 ms `slab_gemm`; net zero** (TOTAL +1.3 on means, +8.9 on medians, both
+inside the arms' own spreads). The reason is a driver fact, not a tuning knob:
+`ocloc` declares no 16-bit 2D block write wider or taller than
+`..._16b_8r16x1c`, so a bf16 C tile needs exactly as **many** store messages as
+the fp32 one, each carrying half the bytes - and this epilogue is bound by the
+message count, not the bytes. Halving the rectangle buys nothing on the write
+side, and the read side is worth 1.7 ms of a 105 ms `norm` row, which says the
+pointwise kernels were never bandwidth-bound on `partials`.
+
+Extending it to qkv‖z and q‖k‖v was **not** built: those two write 3x the
+columns of the three above, so the GEMM-side cost scales to roughly +28 ms
+against consumer rows (`gdn_conv` 32.7, `attn_prep` 14.0, `attn_gate` 9.1) whose
+measured analogue gave back 1.6%. The code was reverted; the finding is recorded
+in `pf_gemm.cl` and `pf_prep.cl` so it is not re-derived.
+
+This is S1's shape a second time: the traffic was real, and removing it was not
+what made the walk faster.
+
+**Revised program expectation.**
+
+| | conservative | optimistic |
+|---|---:|---:|
+| S2(a) SiLU epilogue (**measured, GPU**) | −84.0 | −84.0 |
+| ~~S2(b) bf16 partials~~ | **rejected** | **rejected** |
+| S3 causal QK^T (**measured, wall**) | −11.2 | −11.2 |
+| S4 GDN solve | −40 | −45 |
+| S5 W/U DPAS (gated) | 0 | −60 |
+| **total** | **−135.2** | **−200.2** |
+| **wall** | 2444.3 ms | 2379.3 ms |
+| **throughput** | **1676 t/s** | **1721 t/s** |
+
+**No whole-request ABBA has been taken for S2** - device 0 belonged to another
+stage - so S2(a) counts as −84.0 ms of GPU time and appears in no record as
+t/s. Bar 1 (parity, 2544.043 ms) still falls out of S2 alone on this arithmetic
+and still needs that row to be claimed.
