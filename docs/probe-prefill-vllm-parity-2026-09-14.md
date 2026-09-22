@@ -1,5 +1,11 @@
 # Probe pre-registration - can Qwen3.8-27B prefill reach vLLM's 1973 t/s?
 
+**2026-09-20 correction:** [Follow-up measurements](prefill-parity-2026-09-20.md)
+repair the GDN probe's input/reset contract and invalid one-layer-vs-48-layer
+comparison, test the actual oneDNN 3.13 pin, and establish a current matched
+vLLM baseline/trace. Preserve the historical results below as history, not as
+current proof of vendor-kernel correctness or available end-to-end speedup.
+
 grade: source-reading (Mac only; no box measurement in this document)
 
 Brief: `.superpowers/sdd/2026-09-04-plan6-spec2-prefill/prefill-vllm-parity-brief.md`.

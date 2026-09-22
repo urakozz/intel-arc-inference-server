@@ -1,5 +1,10 @@
 # `pf_gdn_scan` on DPAS, and `pf_gdn_A2`'s staging back-port - ruling A28 option (c)
 
+> Historical record note (2026-09-21): the D2 measurements and revert below
+> remain unchanged.  A separately pre-registered, opt-in D3 split-BF16
+> experiment is recorded in `prefill-gdn-scan-split-2026-09-20.md`; it neither
+> adopts D2 nor changes the vector default.
+
 Ruling A28 named the DPAS scan as "a real task" and the operator's 2026-09-05
 ruling took **(b+c)**; task (b) (`docs/prefill-gdn-a2a-simd32-2026-09-05.md`)
 ran first and left one measured, un-taken lever behind (§9.1 of that document,

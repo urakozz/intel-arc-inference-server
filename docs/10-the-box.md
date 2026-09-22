@@ -4,6 +4,11 @@
 ssh user@box
 ```
 
+Current address confirmed by the operator on 2026-09-19. Older plans and
+measurement records refer to `box`; use `box` when running
+their commands today. The box and benchmark helpers default to this address;
+set `BOX=user@host` to override it.
+
 Dell T5810. The hostname still says `P620` in places - stale, ignore it.
 
 ## Hardware

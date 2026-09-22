@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -70,7 +71,7 @@ namespace {
 
 namespace G = gdn_ref;
 
-constexpr uint32_t kM = 2048;  // PrefillScratch::kC -- one full chunk
+uint32_t kM = 2048;  // CLI fixture length; defaults to PrefillScratch::kC
 constexpr uint32_t kNumKHeads = 16, kNumVHeads = 48, kHeadDim = 128;
 constexpr uint32_t kChunkSize = 64;  // gdn::chunk_size_xe2 (gdn_attn_utils.h)
 
@@ -217,14 +218,29 @@ Band band(const std::vector<float>& got, const std::vector<float>& ref) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   try {
+    if (argc > 1) {
+      const std::string arg = argv[1];
+      size_t consumed = 0;
+      const auto length = std::stoul(arg, &consumed);
+      if (consumed != arg.size() || length == 0 || length > 4096)
+        throw std::runtime_error("tokens must be in [1,4096]");
+      kM = uint32_t(length);
+    }
+    const bool initial = argc > 2 && std::string(argv[2]) == "--initial-state";
+    if (argc > 3 || (argc > 2 && !initial))
+      throw std::runtime_error("usage: probe_pf_gdn_xe2 [tokens] [--initial-state]");
+    const uint32_t virtual_m = (kM + kChunkSize - 1) / kChunkSize * kChunkSize;
     std::printf("# P-D: Intel's Xe2 chunked GDN kernel (chunk_gated_delta_rule_impl_xe2's own\n"
                 "#      kernel_launcher, called directly -- torch-free shim, no wrapper call)\n"
                 "# sycl-tla pin %s (%s)\n", B70_SYCL_TLA_PIN, B70_SYCL_TLA_SHA);
 
     const Fixture f = make_fixture();
-    const Packed p = conv_silu_pack(f);
+    Packed p = conv_silu_pack(f);
+    p.q.resize(size_t(virtual_m) * kNumKHeads * kHeadDim, 0);
+    p.k.resize(size_t(virtual_m) * kNumKHeads * kHeadDim, 0);
+    p.v.resize(size_t(virtual_m) * kNumVHeads * kHeadDim, 0);
 
     // --- the CPU reference: same fixture, gdn_ref::step, ONE call over the
     // whole chunk (the conv window is local state carried across `m` WITHIN
@@ -232,13 +248,22 @@ int main() {
     // 2048 calls at n_act=1 -- gdn_chunk_test.cc's own case-1 reference). ---
     std::vector<uint16_t> ring_cpu(size_t(G::kRing) * G::kConvRows, 0);
     std::vector<float> state_cpu(size_t(G::kHeads) * G::kDim * G::kDim, 0.0f);
+    if (initial)
+      for (size_t i = 0; i < state_cpu.size(); ++i)
+        state_cpu[i] = 0.002f * float(int(i % 37) - 18);
+    std::vector<float> initial_vmajor(state_cpu.size());
+    for (uint32_t h = 0; h < G::kHeads; ++h)
+      for (uint32_t k = 0; k < G::kDim; ++k)
+        for (uint32_t v = 0; v < G::kDim; ++v)
+          initial_vmajor[(size_t(h) * G::kDim + v) * G::kDim + k] =
+              state_cpu[(size_t(h) * G::kDim + k) * G::kDim + v];
     std::vector<float> o_cpu(size_t(kM) * G::kHeads * G::kDim);
     G::step(0, kM, kM, f.qkvz.data(), f.ab.data(), f.small.data(), ring_cpu.data(), state_cpu.data(),
             o_cpu.data());
     std::printf("# CPU reference (gdn_ref::step, one call, n_act=%u): state computed\n", kM);
 
     // --- device setup -----------------------------------------------------
-    sycl::queue queue{sycl::gpu_selector_v};
+    sycl::queue queue{sycl::gpu_selector_v, sycl::property::queue::in_order{}};
     std::printf("# SYCL device: %s\n", queue.get_device().get_info<sycl::info::device::name>().c_str());
 
     using T = cutlass::bfloat16_t;
@@ -247,19 +272,17 @@ int main() {
     void* d_q = usm_upload(queue, p.q);
     void* d_k = usm_upload(queue, p.k);
     void* d_v = usm_upload(queue, p.v);
-    void* d_core_out = usm_zeroed(queue, size_t(kM) * G::kHeads * G::kDim * sizeof(uint16_t));
+    void* d_core_out = usm_zeroed(queue, size_t(virtual_m) * G::kHeads * G::kDim * sizeof(uint16_t));
 
-    // b/a: Intel wants [num_v_heads][total_virtual_seqlen] fp32, RAW (pre-
-    // sigmoid/softplus -- chunk_prepare_kernel applies its own activation,
-    // §gemm.hpp's "l2norm for q,k" comment at three call sites confirms this
-    // kernel does its own internal q/k l2norm too, so Q/K above are fed PRE-
-    // norm on purpose, matching this kernel's internal "l2norm for q, k"
-    // stage rather than our own gdn_step's external qf/kf).
-    std::vector<float> b_host(size_t(G::kHeads) * kM), a_host(size_t(G::kHeads) * kM);
+    // Vendor conv/reorder produces sigmoid(b) but RAW a, in head-major fp32.
+    // chunk_prepare applies softplus/decay to a IN PLACE; compute_A/compute_wu
+    // consume b as beta without any activation. Q/K are normalized above.
+    std::vector<float> b_host(size_t(G::kHeads) * virtual_m), a_host(size_t(G::kHeads) * virtual_m);
     for (uint32_t h = 0; h < G::kHeads; ++h)
       for (uint32_t m = 0; m < kM; ++m) {
-        a_host[size_t(h) * kM + m] = f.ab[size_t(m) * G::kAbStride + h];
-        b_host[size_t(h) * kM + m] = f.ab[size_t(m) * G::kAbStride + G::kBOff + h];
+        a_host[size_t(h) * virtual_m + m] = G::f32(G::rne(f.ab[size_t(m) * G::kAbStride + h]));
+        const float raw_b = G::f32(G::rne(f.ab[size_t(m) * G::kAbStride + G::kBOff + h]));
+        b_host[size_t(h) * virtual_m + m] = 1.0f / (1.0f + std::exp(-raw_b));
       }
     void* d_b = usm_upload(queue, b_host);
     void* d_a = usm_upload(queue, a_host);
@@ -287,16 +310,19 @@ int main() {
 
     std::vector<int32_t> qsl_host = {0, int32_t(kM)};
     std::vector<int32_t> cache_idx_host = {0};
-    std::vector<uint8_t> has_init_host = {0};  // bool: false, this is a fresh chunk
+    std::vector<uint8_t> has_init_host = {uint8_t(initial)};
     void* d_qsl = usm_upload(queue, qsl_host);
     void* d_cache_idx = usm_upload(queue, cache_idx_host);
     void* d_has_init = usm_upload(queue, has_init_host);
 
-    auto run_once = [&] {
-      queue.memset(d_state, 0, size_t(G::kHeads) * G::kDim * G::kDim * sizeof(float)).wait();
+    auto reset = [&] {
+      queue.memcpy(d_a, a_host.data(), a_host.size() * sizeof(float));
+      queue.memcpy(d_state, initial_vmajor.data(), initial_vmajor.size() * sizeof(float));
       queue.memset(d_A, 0, A_elems * sizeof(uint16_t)).wait();
       queue.memset(d_w, 0, w_elems * sizeof(uint16_t)).wait();
       queue.memset(d_u, 0, u_elems * sizeof(uint16_t)).wait();
+    };
+    auto run_once = [&] {
       gdn::kernel_launcher<T, StateT>(
           queue, static_cast<T*>(d_core_out), static_cast<const T*>(d_q), static_cast<const T*>(d_k),
           static_cast<const T*>(d_v), static_cast<T*>(d_A), static_cast<T*>(d_w),
@@ -304,7 +330,7 @@ int main() {
           static_cast<const float*>(d_A_log), static_cast<const T*>(d_dt_bias),
           static_cast<StateT*>(d_state), ssm_state_stride_0, static_cast<const int*>(d_qsl),
           static_cast<const int*>(d_cache_idx), reinterpret_cast<const bool*>(d_has_init), nullptr,
-          batch_size, int(kM), int(kNumKHeads), int(kHeadDim), int(kNumVHeads), int(kHeadDim));
+          batch_size, int(virtual_m), int(kNumKHeads), int(kHeadDim), int(kNumVHeads), int(kHeadDim));
       queue.wait_and_throw();
     };
 
@@ -312,6 +338,7 @@ int main() {
     // for a reduction-order change): ssm_state [v][k] vs our state [k][v] --
     // TRANSPOSED conventions (Intel's own comment: "[.., head_v_dim,
     // head_k_dim]"; ours: "S[k*128+v] ... k-major"). ---
+    reset();
     run_once();
     std::vector<float> state_dev(size_t(G::kHeads) * G::kDim * G::kDim);
     queue.memcpy(state_dev.data(), d_state, state_dev.size() * sizeof(float)).wait();
@@ -331,30 +358,60 @@ int main() {
     bool finite_ok = true;
     for (float v : state_dev) if (!std::isfinite(v)) finite_ok = false;
     std::printf("finite: %s\n", finite_ok ? "yes" : "**NO -- NaN/Inf in state**");
+    if (!finite_ok || !(st_band.max_rel < 0.1 && st_band.mean_rel < 0.01))
+      throw std::runtime_error("GDN state correctness failed; refusing to time invalid output");
+    std::vector<uint16_t> output_bits(o_cpu.size());
+    queue.memcpy(output_bits.data(), d_core_out, output_bits.size() * sizeof(uint16_t)).wait();
+    std::vector<float> output(output_bits.size());
+    for (size_t i = 0; i < output.size(); ++i) output[i] = G::f32(output_bits[i]);
+    const Band out_band = band(output, o_cpu);
+    const bool output_finite = std::all_of(output.begin(), output.end(), [](float x) {
+      return std::isfinite(x);
+    });
+    std::printf("gdn_output: max rel %.3e, mean rel %.3e; tokens=%u virtual=%u initial=%d\n",
+                out_band.max_rel, out_band.mean_rel, kM, virtual_m, initial);
+    if (!output_finite || !(out_band.max_rel < 0.1 && out_band.mean_rel < 0.01))
+      throw std::runtime_error("GDN output correctness failed; refusing to time invalid output");
 
     // --- timing: 8 replays, drop 3, median of 5, this project's protocol ---
     constexpr int kReplays = 8, kDropped = 3;
     std::vector<double> samples;
     for (int r = 0; r < kReplays; ++r) {
+      reset();
       const auto t0 = std::chrono::steady_clock::now();
       run_once();
       const double ms = now_ms(t0);
+      // Outside the timed region: every independent repetition must reproduce
+      // both state and output, catching stale/mutated gate input and races.
+      std::vector<float> repeated_state(state_dev.size());
+      std::vector<uint16_t> repeated_output(output_bits.size());
+      queue.memcpy(repeated_state.data(), d_state, repeated_state.size() * sizeof(float)).wait();
+      queue.memcpy(repeated_output.data(), d_core_out,
+                   repeated_output.size() * sizeof(uint16_t)).wait();
+      size_t state_differences = 0, output_differences = 0;
+      for (size_t i = 0; i < state_dev.size(); ++i)
+        state_differences += std::memcmp(&repeated_state[i], &state_dev[i], sizeof(float)) != 0;
+      for (size_t i = 0; i < output_bits.size(); ++i)
+        output_differences += repeated_output[i] != output_bits[i];
+      if (state_differences || output_differences) {
+        std::fprintf(stderr, "GDN repetition %d: %zu state words, %zu output words changed\n",
+                     r, state_differences, output_differences);
+        throw std::runtime_error("GDN independent repetition changed state or output");
+      }
       if (r >= kDropped) samples.push_back(ms);
     }
     std::sort(samples.begin(), samples.end());
     const double median_ms = samples[samples.size() / 2];
-    std::printf("\n## time (measured, RECORD grade if preflight was clean; 8 replays, drop 3, "
-                "median of 5, one discarded warm-up folded into replay 0)\n");
+    std::printf("\n## time (diagnostic; 8 independent runs, drop 3, median of 5; "
+                "input/scratch reset excluded)\n");
     std::printf("chunk_gated_delta_rule_impl_xe2's kernel_launcher, C=%u, %u v-heads: **%.3f ms**\n",
                 kM, G::kHeads, median_ms);
-    std::printf("vs our own gdn_chunk's GDN total: 303 ms/chunk measured (A30). Pre-registered band: "
-                "150-300 ms, central 220.\n");
-    if (median_ms >= 303.0)
-      std::printf("t_Intel >= 303: GDN is not where vLLM wins; the residual gap is GEMM + dequant "
-                  "(pre-registered interpretation, §A3.4).\n");
-    else
-      std::printf("delta = 303 - %.3f = %.3f ms/chunk: the prize an own DPAS/vector GDN rewrite "
-                  "would need to price against.\n", median_ms, 303.0 - median_ms);
+    std::printf("48-layer core projection: %.3f ms/chunk; excludes conv, normalization, "
+                "packing and gated output norm. Not directly comparable to the old "
+                "303 ms all-layer GDN total.\n", 48.0 * median_ms);
+    for (void* allocation : {d_q, d_k, d_v, d_core_out, d_b, d_a, d_A_log, d_dt_bias,
+                             d_A, d_w, d_u, d_state, d_qsl, d_cache_idx, d_has_init})
+      sycl::free(allocation, queue);
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "probe_pf_gdn_xe2 FAILED: %s\n", e.what());

@@ -97,6 +97,11 @@ class Engine {
   // does; the equivalence test asserts it (spec §5 S3).
   bool prefill_sycl_side_created() const;         // defined in engine_prefill.cc
 
+  // Experimental pure-L0 whole-chunk replay. Off by default; an explicit
+  // setting overrides B70_PREFILL_REPLAY=1. Recordings retain frozen (pos,C)
+  // arguments, not input contents, and survive reset() with a bounded cache.
+  void set_prefill_replay(bool enabled) { pf_replay_ = enabled; }
+
   // Greedy-generates n ids; on_token is called after each fence (host side,
   // overlaps nothing in v1). Returns the ids.
   //
@@ -155,6 +160,7 @@ class Engine {
   // both halves stay null until the first prefill().
   std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)> pfx_{nullptr, nullptr};
   std::optional<PrefillBackend> pf_backend_;   // unset = default_prefill_backend()
+  std::optional<bool> pf_replay_;
   std::unique_ptr<l0::Mem> tap_;   // null unless debug_resid
   CapturedStep step_;
   l0::Queue queue_;

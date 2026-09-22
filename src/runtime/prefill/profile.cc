@@ -20,6 +20,7 @@ const char* const kName[kN] = {
 struct Acc {
   double ms[kN] = {};
   size_t waits[kN] = {};
+  Context::LaunchMetrics launch[kN] = {};
 };
 Acc g_acc;
 
@@ -43,6 +44,10 @@ void timed_wait(Context& cx, Phase p) {
   const uint32_t i = uint32_t(p);
   g_acc.ms[i] += std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
   ++g_acc.waits[i];
+  const auto metrics = cx.take_launch_metrics();
+  g_acc.launch[i].gpu_ms += metrics.gpu_ms;
+  g_acc.launch[i].host_submit_ms += metrics.host_submit_ms;
+  g_acc.launch[i].launches += metrics.launches;
 }
 
 void profile_wait(Context& cx, Phase p) {
@@ -52,29 +57,38 @@ void profile_wait(Context& cx, Phase p) {
 
 void profile_reset() { g_acc = Acc{}; }
 
-void profile_report(const char* label, double plain_ms) {
+void profile_report(const char* label, double wall_ms) {
   if (!profile_enabled()) return;
   double total = 0;
   size_t waits = 0;
+  Context::LaunchMetrics launch;
   for (uint32_t i = 0; i < kN; ++i) {
     total += g_acc.ms[i];
     waits += g_acc.waits[i];
+    launch.gpu_ms += g_acc.launch[i].gpu_ms;
+    launch.host_submit_ms += g_acc.launch[i].host_submit_ms;
+    launch.launches += g_acc.launch[i].launches;
   }
   std::fprintf(stderr,
-               "\nprefill phase attribution -- %s (INSTRUMENTED: extra waits close each\n"
-               "L0-only phase, so this total is an upper bound on the plain walk's)\n"
-               "  phase           ms      share   waits    ms/wait\n",
+               "\nprefill phase attribution -- %s (INSTRUMENTED: timestamp events and phase waits)\n"
+               "  phase          wait_ms   L0_gpu_ms  L0_submit_ms   waits  L0_launches\n",
                label);
   for (uint32_t i = 0; i < kN; ++i)
-    std::fprintf(stderr, "  %-13s %8.1f   %5.1f%%  %6zu   %8.4f\n", kName[i], g_acc.ms[i],
-                 total > 0 ? 100.0 * g_acc.ms[i] / total : 0.0, g_acc.waits[i],
-                 g_acc.waits[i] ? g_acc.ms[i] / double(g_acc.waits[i]) : 0.0);
-  std::fprintf(stderr, "  %-13s %8.1f   100.0%%  %6zu\n", "TOTAL", total, waits);
-  if (plain_ms > 0.0)
-    std::fprintf(stderr,
-                 "  plain (unprofiled) run of the same shape: %.1f ms -- the instrument costs"
-                 " %+.1f ms (%+.1f%%)\n",
-                 plain_ms, total - plain_ms, 100.0 * (total - plain_ms) / plain_ms);
+    std::fprintf(stderr, "  %-13s %8.1f   %9.1f   %11.1f  %6zu  %11zu\n", kName[i],
+                 g_acc.ms[i], g_acc.launch[i].gpu_ms, g_acc.launch[i].host_submit_ms,
+                 g_acc.waits[i], g_acc.launch[i].launches);
+  std::fprintf(stderr, "  %-13s %8.1f   %9.1f   %11.1f  %6zu  %11zu\n", "TOTAL",
+               total, launch.gpu_ms, launch.host_submit_ms, waits, launch.launches);
+  if (wall_ms > 0.0)
+    std::fprintf(stderr, "  instrumented prefill call wall: %.1f ms (includes setup and host work)\n",
+                 wall_ms);
+  std::fprintf(stderr,
+               "  wait_ms is residual host synchronization time, not phase execution time.\n"
+               "  L0_gpu_ms is kernel timestamp duration; SYCL kernels are not timestamped.\n"
+               "  L0_submit_ms covers Context::launch, including event creation on first use.\n"
+               "  GPU and host columns overlap: do not add them. Timestamp reads and other\n"
+               "  host work are included only in call wall. Compare an independent unprofiled\n"
+               "  run to measure instrumentation overhead. This table is diagnostic only.\n");
 }
 
 }  // namespace runtime::prefill
