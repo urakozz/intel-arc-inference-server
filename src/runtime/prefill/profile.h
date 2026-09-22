@@ -22,7 +22,15 @@ enum class Phase : uint32_t {
   kNorm,        // pf_res_fold + pf_norm_finish
   kDequant,     // pf_dequant_tile
   kGemm,        // the four int4 linears' gemm_bf16
-  kLinearL0,    // spec 2.1: pf_dequant_slab + pf_gemm, one linear
+  // Spec 2.1's L0 linear, itemised into its two kernels. Their sum is the row
+  // earlier records call `linear_l0`. Split because the GEMM's DPAS floor is
+  // derivable (2.M.SUM(K.N) / the measured rate) but the dequant round-trip's
+  // cost was not measured, and that residual is the largest unattributed block
+  // in the walk. Closing a phase per SLAB costs one wait per launch pair, so
+  // the wait column and the instrumented wall inflate heavily here; only the
+  // L0_gpu_ms column of these two rows is meant to be read.
+  kSlabDequant, // pf_dequant_slab, one 1024-column slab
+  kSlabGemm,    // pf_gemm over that slab
   kAbGdn,       // pf_ab_proj (gdn_chunk's ten launches are itemised below)
   // `gdn_chunk`'s ten launches, one bucket each. Itemised rather than lumped
   // because the ledger's GDN term (15.4 ms/chunk) predates `gdn_chunk` existing
