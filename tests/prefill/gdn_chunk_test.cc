@@ -306,6 +306,49 @@ void check_selected_dispatch(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz
         std::memcmp(actual.o.data(), other.o.data(), actual.o.size() * sizeof(float)) != 0);
   std::printf("selector dispatch: gdn_chunk == %s and differs from %s\n", selected, opposite);
 }
+
+// Stage S4's dispatch proof. **The scan's trick above cannot be reused here**:
+// `pf_gdn_solve` and `pf_gdn_solve_register` are bit-identical by construction,
+// so comparing `gdn_state`/`gdn_o` against a direct launch of either entry
+// passes whichever one `gdn_chunk` actually ran. The observable that does
+// distinguish them is which kernel the cache was made to build, and
+// `KernelCache::kernels()` reports exactly that without a test-only resolver
+// being exposed from `gdn.cc`.
+//
+// After a real `gdn_chunk` call the SELECTED entry is in the cache, so asking
+// for it again adds nothing; the OPPOSITE entry was never built, so asking for
+// it adds exactly one. Hard-wiring the register selector back to `pf_gdn_solve`
+// inverts both counts and fails here. The launch count is asserted in the same
+// call, so cache observation cannot hide a change to the ten-launch contract.
+void check_solve_dispatch(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz,
+                          l0::Mem& d_ab, l0::Mem& d_small, l0::Mem& d_state,
+                          l0::Mem& d_ring, l0::Mem& d_y, const char* selected,
+                          const char* opposite) {
+  constexpr uint32_t C = 64;
+  d.imm.fill(d_state.ptr(), 0u, d_state.size());
+  d.imm.fill(d_ring.ptr(), 0u, d_ring.size());
+  // Nothing may have touched the cache before this call, or "already present"
+  // would not mean "this call built it".
+  CHECK_EQ(d.kc.kernels(), size_t(0));
+
+  d.cx.reset_launches();
+  runtime::prefill::gdn_chunk(d.cx, d.kc, s, 0, C, d_qkvz.as<float>(), d_ab.as<float>(),
+                              d_state.as<float>(), d_ring.as<uint16_t>(), d_small.ptr(),
+                              d_y.as<uint16_t>());
+  d.cx.wait();
+  CHECK_EQ(d.cx.launches(), runtime::prefill::kGdnChunkLaunches);
+  const size_t built = d.kc.kernels();
+  CHECK_EQ(built, runtime::prefill::kGdnChunkLaunches);
+
+  d.kc.get(kernels::pf_gdn_wy_variant(), selected);
+  CHECK_EQ(d.kc.kernels(), built);            // the call already built it
+  d.kc.get(kernels::pf_gdn_wy_variant(), opposite);
+  CHECK_EQ(d.kc.kernels(), built + 1);        // the call never built it
+  std::printf("solve dispatch: gdn_chunk built %s (cache %zu -> %zu) and not %s "
+              "(%zu -> %zu); %zu launches\n",
+              selected, built, built, opposite, built, built + 1,
+              runtime::prefill::kGdnChunkLaunches);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -333,6 +376,16 @@ int main(int argc, char** argv) {
   if (argc == 2 && std::string(argv[1]) == "--dispatch-split") {
     check_selected_dispatch(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y,
                             "pf_gdn_scan_dpas_split", "pf_gdn_scan");
+    return 0;
+  }
+  if (argc == 2 && std::string(argv[1]) == "--dispatch-solve-vector") {
+    check_solve_dispatch(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y, "pf_gdn_solve",
+                         "pf_gdn_solve_register");
+    return 0;
+  }
+  if (argc == 2 && std::string(argv[1]) == "--dispatch-solve-register") {
+    check_solve_dispatch(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y,
+                         "pf_gdn_solve_register", "pf_gdn_solve");
     return 0;
   }
   CHECK_EQ(argc, 1);

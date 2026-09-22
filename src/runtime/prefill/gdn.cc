@@ -70,6 +70,28 @@ static const char* gdn_scan_entry() {
   return entry;
 }
 
+// Stage S4's selector, resolved exactly as `gdn_scan_entry()` is and for the
+// same reason: a recorded command list retains the kernel handle it was built
+// with, so changing the environment between engine calls is not a supported
+// configuration operation. Compare selectors in separate processes.
+//
+// Both entries are **bit-identical by construction** - the register entry keeps
+// `A` immutable in SLM and gives `T` its own array, which deletes the two
+// per-row barriers without moving a single rounding point. Identical bytes are
+// why the dispatch test in `tests/prefill/gdn_chunk_test.cc` observes
+// `KernelCache::kernels()` rather than the output.
+static const char* gdn_solve_entry() {
+  static const char* const entry = [] {
+    const char* const v = std::getenv("B70_PREFILL_GDN_SOLVE");
+    if (!v || !*v || std::string(v) == "vector") return "pf_gdn_solve";
+    if (std::string(v) == "register") return "pf_gdn_solve_register";
+    throw std::runtime_error("runtime::prefill::gdn_chunk: B70_PREFILL_GDN_SOLVE must be "
+                             "unset, 'vector', or 'register' (got '" +
+                             std::string(v) + "')");
+  }();
+  return entry;
+}
+
 void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                const float* qkvz_partials, const float* ab_out, float* gdn_state,
                uint16_t* conv_ring, const void* small, uint16_t* y) {
@@ -80,6 +102,7 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   // Validate/cache the process selector before reading or launching any GDN
   // buffer; an unsupported value therefore cannot mutate state or append work.
   const char* const scan_entry = gdn_scan_entry();
+  const char* const solve_entry = gdn_solve_entry();
 
   const uint32_t nch = (C + PrefillScratch::kGdnChunk - 1) / PrefillScratch::kGdnChunk;
   const uint32_t heads = Q::kGdnVHeads;                 // 48
@@ -123,8 +146,14 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   cx.launch(kc(wy, "pf_gdn_A"), heads, nch, 4,
             {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_beta), PtrArg(p_A), arg_val(C)});
   profile_wait(cx, Phase::kGdnA);
-  //  6 - T = (I - A)^-1, IN PLACE over A.
-  cx.launch(kc(wy, "pf_gdn_solve"), heads, nch, 1, {PtrArg(p_A), arg_val(C)});
+  //  6 - T = (I + A)^-1, IN PLACE over A. **`(I + A)`, not `(I - A)`**: FLA
+  //      negates A at staging (solve_tril.py:82), which `pf_gdn_wy.cl`'s entry
+  //      (3) derives at length and `gdn_wy_test`'s case 2 checks as an
+  //      identity. This comment said `(I - A)` until stage S4.
+  //      `B70_PREFILL_GDN_SOLVE=register` routes this one launch to the
+  //      separate-A/T entry; the two are bit-identical and the default is
+  //      `pf_gdn_solve`.
+  cx.launch(kc(wy, solve_entry), heads, nch, 1, {PtrArg(p_A), arg_val(C)});
   profile_wait(cx, Phase::kGdnSolve);
   //  7 - vb/kb, then u = T vb and w = T kb. Grid.z is A27's column split: a
   //      work-group owns 64 of the 128 output columns, which is what lets the
