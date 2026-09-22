@@ -1,5 +1,6 @@
 #include "runtime/prefill/attn.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
@@ -76,22 +77,67 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
   uint16_t* P = s.pf_p.as<uint16_t>();
   float* O = s.pf_o.as<float>();
 
+  // Spec S3 (`2026-09-22-prefill-parity-program-design.md` §3), L0 only: row `m`
+  // is the query at absolute position `pos + m`, so the causal bound puts every
+  // score it can use in columns [0, pos + m]. One GEMM of N = `npad` therefore
+  // computes, on the second chunk, roughly half its columns for the mask to
+  // discard. The rows are issued in blocks of `kPfGemmTile` instead, block b
+  // covering [r0, r1) with `N_b = pad256(pos + r1)` -- the causal limit of its
+  // LAST row, rounded up to the tile pf_gemm already works in.
+  //
+  // **QK^T only, and P·V deliberately whole -- that is a MEASUREMENT, not an
+  // oversight.** The stage as designed blocked both. Profiled at 4096 ids in two
+  // 2048 chunks (device 1, B70_PREFILL_PROFILE=1, one run each, diagnostic):
+  // QK^T 59.0 -> 44.3 ms of L0 GPU time, but P·V 31.9 -> 66.3 ms, a net loss of
+  // 19.7 ms on the two rows. The asymmetry is occupancy. P·V's N axis is ONE
+  // 256-wide tile (`kHeadDim`), so its whole grid is (M/256, 1, 6) = 48
+  // workgroups; blocking M to 256 leaves (1, 1, 6) = 6 workgroups per launch and
+  // the card idles through eight serialized launches to save 29% of the MACs.
+  // QK^T's N axis is `npad`/256 = 8..16 tiles, so a blocked launch still carries
+  // 48-96 workgroups and keeps the saving. Blocking P·V is therefore recorded as
+  // rejected on measurement; re-opening it needs a kernel that splits P·V's N or
+  // its K, which is not this stage (runtime only).
+  //
+  // **Bitwise identity, and where it comes from.** Each QK^T output column is an
+  // independent dot product, so dropping columns changes no surviving one, and
+  // the dropped ones are never READ: `pf_softmax_causal`'s pass 1 (max) and pass
+  // 2 (sum) both scan `j < nvalid = pos + m + 1` and nothing past it, and its
+  // pass 3 stores an exact +0.0 in [nvalid, npad) without reading `s` there.
+  // Every row of block b has `nvalid <= pos + r1 <= N_b`, so the columns the
+  // block no longer computes are exactly the columns no pass touches -- they now
+  // hold a stale `pf_s` value instead of a score computed from unwritten cache
+  // rows, and neither is reachable. `p` is still written over all of [0, npad),
+  // so P·V below contracts the identical operands it always did.
+  const uint32_t blocks = attn_row_blocks(C, backend);
   for (uint32_t j = 0; j < kKvHeads; ++j) {
     // S[l][m][n] = q_l[m] . k[n], the six q-heads of kv group j against its K cache rows,
-    // read in place (transB). N is the padded depth; the softmax reads only [0, pos+m].
-    GemmBatch qk{};
-    qk.M = C;  qk.K = kHeadDim;  qk.N = npad;  qk.L = kGroup;
-    qk.lda = kQRow;  qk.ldb = kKvRow;  qk.ldc = ld;
-    qk.strideA = kHeadDim;  qk.strideB = 0;  qk.strideC = stride_l;
+    // read in place (transB). N is the padded causal depth; the softmax reads only [0, pos+m].
     const uint16_t* qj = q + size_t(j) * kGroup * kHeadDim;
     const uint16_t* kj = kv_k + size_t(j) * kHeadDim;
     if (l0) {
-      gemm_l0(cx, kc, qk, qj, kj, S, /*transB=*/true);
-      profile_wait(cx, Phase::kAttnQk);   // diagnostic only; the timed path has no wait here
+      for (uint32_t b = 0; b < blocks; ++b) {
+        const uint32_t r0 = b * kPfGemmTile, r1 = std::min(r0 + kPfGemmTile, C);
+        GemmBatch qk{};
+        qk.M = r1 - r0;  qk.K = kHeadDim;  qk.N = std::min(npad, pad256(pos + r1));
+        qk.L = kGroup;
+        qk.lda = kQRow;  qk.ldb = kKvRow;  qk.ldc = ld;
+        qk.strideA = kHeadDim;  qk.strideB = 0;  qk.strideC = stride_l;
+        gemm_l0(cx, kc, qk, qj + size_t(r0) * kQRow, kj, S + size_t(r0) * ld, /*transB=*/true);
+      }
+      // Diagnostic only; the timed path has no wait here. One wait for the whole
+      // block loop, so the phase keeps its meaning and gains no perturbation:
+      // `take_launch_metrics` drains every block's GPU time into this row.
+      profile_wait(cx, Phase::kAttnQk);
     } else {
+      GemmBatch qk{};
+      qk.M = C;  qk.K = kHeadDim;  qk.N = npad;  qk.L = kGroup;
+      qk.lda = kQRow;  qk.ldb = kKvRow;  qk.ldc = ld;
+      qk.strideA = kHeadDim;  qk.strideB = 0;  qk.strideC = stride_l;
       attn_qk_sycl(cx, qk, qj, kj, S);    // includes the SYCL -> L0 wait (A24)
     }
 
+    // Unchanged, and deliberately so: the softmax sees the whole chunk at once,
+    // reads only the causal prefix of each row, and zero-fills to `npad`.
     cx.launch(kc(kernels::pf_attn_variant(), "pf_softmax_causal"), C, kGroup, 1,
               {PtrArg(S), PtrArg(P), arg_val(pos), arg_val(npad), arg_val(ld),
                arg_val(uint32_t(stride_l))});
@@ -99,6 +145,7 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
 
     // O[l][m][d] = sum_n P[l][m][n] . v[n][j][d]; K is the padded depth, whose extra P columns
     // the softmax wrote as exact +0.0 (spec §3.4's invariant on the KV rows they multiply).
+    // ONE launch on both backends -- see the occupancy measurement above.
     GemmBatch pv{};
     pv.M = C;  pv.K = npad;  pv.N = kHeadDim;  pv.L = kGroup;
     pv.lda = ld;  pv.ldb = kKvRow;  pv.ldc = kHeadDim;

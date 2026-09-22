@@ -44,7 +44,10 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Lo
 // The launch arithmetic, derived from the walk itself rather than restated:
 // what `Context::launches()` advances by. SYCL GEMMs are NOT on the L0 list and
 // therefore not counted here; `step_chunk_gemms()` reports those separately.
-size_t step_chunk_launches(PrefillBackend b);   // per chunk, independent of C
+// `C` is the chunk width: since the parity program's S3 the L0 backend issues
+// attention's QK^T GEMM per 256-row block, so a chunk's launch count depends on
+// it (8689 at C <= 256, 9137 at C = 2048). sycl-tla ignores the argument.
+size_t step_chunk_launches(PrefillBackend b, uint32_t C);
 size_t step_chunk_gemms(PrefillBackend b);      // SYCL GEMM calls per chunk (0 on L0 since S3)
 size_t step_chunk_waits(PrefillBackend b);      // host L0<->SYCL handoffs per chunk
 inline constexpr size_t kStepHeadLaunches = 5;   // 2 norm + lm_head + 2 argmax
