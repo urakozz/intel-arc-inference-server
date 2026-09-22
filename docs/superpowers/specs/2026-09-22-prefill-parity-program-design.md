@@ -280,3 +280,21 @@ travel with it:
 
 Parity (bar 1) still falls out of S2 alone. Bar 2 remains out of reach for this
 list, as §7 already recorded.
+
+## 9. S3's whole-request row - 2026-09-22, RECORD
+
+Taken after the S3 commit on a provably idle box (0 DRM holder fds, 0
+containers, load 0.43), device 0, `tools/bench_decode.sh --pp 4096`, median of 3,
+same harness and same IGC 2.41.5 as the morning's baseline, so S3 is the only
+variable.
+
+| | wall | throughput | spread | grade |
+|---|---:|---:|---:|---|
+| before S3 (`docs/BENCHMARKS.md`, IGC 2.41.5 re-measure) | 2732.5 ms | 1498.97 t/s | 0.43% | RECORD |
+| **with S3** (`779097a`) | **2721.3 ms** | **1505.16 t/s** | 0.09% | RECORD |
+
+**−11.2 ms, +6.19 t/s.** The stage's own profile predicted −14.8 ms of GPU time
+against +4.0 ms of added host submission, i.e. −10.8 ms; the wall moved −11.2.
+Prediction and measurement agree to within a millisecond, which is the evidence
+that the +1,792 launches are priced correctly rather than merely acknowledged.
+Ruling S3-b stands: kept.
