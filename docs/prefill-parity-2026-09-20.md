@@ -74,6 +74,37 @@ vendor probes, configure the probe build with the exact isolated oneDNN root
 `-DB70_VLLM_XPU_KERNELS_DIR=/home/user/b70-vllm-xpu-followup-d7c35d2`.
 Those are diagnostic build inputs only: no production dependency was changed.
 
+## The linear path, itemised (2026-09-22)
+
+`Phase::kLinearL0` was split into `kSlabDequant` and `kSlabGemm`, one wait per
+slab, so the dequant round-trip could be attributed rather than estimated. One
+instrumented GPU-0 run, same checkpoint and 4096 ids:
+
+| phase | L0 GPU ms | launches |
+|---|---:|---:|
+| `slab_dequant` | **274.5** | 7,616 |
+| `slab_gemm` | **1344.3** | 7,616 |
+| sum | 1618.8 | 15,232 |
+
+The sum reproduces the earlier single `linear_l0` row (1635.8 ms) within the
+run-to-run spread of an instrumented process, so the split is an attribution of
+the same work, not a change to it. Closing a phase per slab costs 15,232 extra
+waits; the `wait_ms` column and the instrumented wall (2872.8 ms) inflate
+accordingly and are not throughput figures.
+
+**Derived floor for the GEMM half.** Total linear FLOPs per request are
+2 x M x SUM(K.N) over 64 layers = 199 TFLOP (derived); at the 156.53 TFLOP/s
+P-A measured for this kernel that is **1278 ms**. Measured `slab_gemm` is
+1344.3 ms, about 5% above its own floor, so the matrix math is close to the
+rate we already demonstrated.
+
+**What this makes the dequant round-trip worth.** The slab pass writes about
+48.7 GB of bf16 weights per chunk and the GEMM reads them back (derived from
+SUM(K.N) = 24.3 G weights); a fused path would read about 12.2 GB of int4
+instead. The measured 274.5 ms is therefore the ceiling on a dequant-fusion
+win, less whatever the in-GEMM dequant ALU costs. It is the largest single
+attributed block in the walk that is not matrix multiplication.
+
 ## Where vLLM spends GPU time
 
 Separate diagnostic trace of one uncached 4096-ID request, same container and

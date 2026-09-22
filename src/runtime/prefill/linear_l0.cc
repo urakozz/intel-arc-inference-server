@@ -38,11 +38,12 @@ void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::De
   for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
     cx.launch(dq, kNs / 16, sh.K / 64, 1,
               {PtrArg(w.mem.ptr()), PtrArg(scales), PtrArg(slab.ptr()), arg_val(n0)});
+    profile_wait(cx, Phase::kSlabDequant);   // only when B70_PREFILL_PROFILE=1
     // B = the slab [K][1024] (ldb 1024); C = partials from column n0 (ldc N). gemm_l0 pads M.
     const GemmBatch b{M, sh.K, kNs, 1, sh.K, kNs, sh.N, 0, 0, 0};
     gemm_l0(cx, kc, b, x, slab.as<uint16_t>(), out + n0, /*transB=*/false);
+    profile_wait(cx, Phase::kSlabGemm);      // splits the old `linear_l0` row in two
   }
-  profile_wait(cx, Phase::kLinearL0);   // only when B70_PREFILL_PROFILE=1
 }
 
 }  // namespace runtime::prefill
