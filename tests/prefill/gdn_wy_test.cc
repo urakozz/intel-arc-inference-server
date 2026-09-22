@@ -345,6 +345,52 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
     std::printf("  T   : register == vector, BITWISE - %zu fp32 entries from identical "
                 "device A (%zu of them -0.0f, the dead tail's negated zeroes)\n",
                 tri, neg_zero);
+
+    // The design's approach A, pinned to the same bar. It is the attribution
+    // control for (3b)'s 32 KiB of SLM and nothing launches it, but a control
+    // whose arithmetic is unverified is not a control.
+    l0::Mem d_AP(d.ctx, l0::MemKind::Device, tri * 4);
+    d.imm.fill(d_AP.ptr(), 0x44444444u, d_AP.size());
+    d.cx.launch(d.k("pf_gdn_A"), R::kHeads, nch, 4,
+                {PtrArg(d_xb.ptr()), PtrArg(d_g.ptr()), PtrArg(d_beta.ptr()), PtrArg(d_AP.ptr()),
+                 arg_val(C)});
+    d.cx.wait();
+    std::vector<float> A_priv(tri);
+    pf_harness::download(d.imm, A_priv, d_AP);
+    CHECK(std::memcmp(A_got.data(), A_priv.data(), tri * 4) == 0);   // the INPUTS agree
+
+    d.cx.launch(d.k("pf_gdn_solve_private"), R::kHeads, nch, 1,
+                {PtrArg(d_AP.ptr()), arg_val(C)});
+    d.cx.wait();
+    std::vector<float> T_priv(tri);
+    pf_harness::download(d.imm, T_priv, d_AP);
+    CHECK(std::memcmp(T_got.data(), T_priv.data(), tri * 4) == 0);
+    std::printf("  T   : private == vector, BITWISE - %zu fp32 entries (approach A, the "
+                "SLM-occupancy control; not dispatched)\n",
+                tri);
+
+    // (3d): the in-place kernel with only the redundant second barrier gone.
+    // The variable-isolating control, and the one that has to be checked
+    // hardest -- a barrier deleted on a reasoning error shows up here as a
+    // race, which is why it is run at all three widths and memcmp'd whole.
+    l0::Mem d_AB(d.ctx, l0::MemKind::Device, tri * 4);
+    d.imm.fill(d_AB.ptr(), 0x55555555u, d_AB.size());
+    d.cx.launch(d.k("pf_gdn_A"), R::kHeads, nch, 4,
+                {PtrArg(d_xb.ptr()), PtrArg(d_g.ptr()), PtrArg(d_beta.ptr()), PtrArg(d_AB.ptr()),
+                 arg_val(C)});
+    d.cx.wait();
+    std::vector<float> A_1bar(tri);
+    pf_harness::download(d.imm, A_1bar, d_AB);
+    CHECK(std::memcmp(A_got.data(), A_1bar.data(), tri * 4) == 0);   // the INPUTS agree
+
+    d.cx.launch(d.k("pf_gdn_solve_1bar"), R::kHeads, nch, 1, {PtrArg(d_AB.ptr()), arg_val(C)});
+    d.cx.wait();
+    std::vector<float> T_1bar(tri);
+    pf_harness::download(d.imm, T_1bar, d_AB);
+    CHECK(std::memcmp(T_got.data(), T_1bar.data(), tri * 4) == 0);
+    std::printf("  T   : 1bar == vector, BITWISE - %zu fp32 entries (one row barrier "
+                "instead of two; not dispatched)\n",
+                tri);
   }
 
   // --- 3. pf_gdn_wu, fed the device's own T --------------------------------
