@@ -310,3 +310,43 @@ if(B70_PREFILL_ENABLED)
   add_dependencies(probe_fused_dequant_gemm kernel_pfd_gemm_v1 kernel_pfd_gemm_v2
                    kernel_pf_gemm_T0 kernel_pf_dequant_slab_K5120_N34816_L0)
 endif()
+
+# --- probe_dpas_rate: the per-type DPAS issue rate (2026-09-22) -------------
+# Record: docs/probe-dpas-rates-2026-09-22.md. `probe_dpas_rate.cl` is a PROBE
+# kernel -- no runtime path binds `dpas_rate`, no production file is touched,
+# and it computes a deliberately meaningless dot product. One binary per data
+# type; `kVariants` in probe_dpas_rate.cc and the tag list below are two lists
+# nothing checks against each other, so a tag whose binary is missing is named
+# and skipped at `l0::Module` (the probe prints NO BINARY rather than dying).
+#
+# 256 GRF is mandatory here for the same reason it is for pf_gemm: eight live
+# float8/int8 accumulators plus eight operand registers is ~112 GRF, which
+# spills at the 128-GRF default and would measure the spill, not the pipe.
+#
+# THE TYPES THAT ARE NOT HERE ARE NOT AN OVERSIGHT. On bmg-g31 with ocloc
+# 26.35.39758.10 the backend REFUSES them, and the record quotes the output:
+#   * every FP4 form (`e2m1_e2m1_matrix_mad_k64`, scaled or not) --
+#     "error: FP4 Dpas instruction is not supported on this device!";
+#   * every `*_scaled_matrix_mad_*` form (bf16, f16, hf8, bf8, e2m1) --
+#     "IGC: Internal Compiler Error: Abnormal termination", reproduced from a
+#     single-call kernel, so it is the builtin and not this loop;
+#   * `intel_sub_group_e4m3_e4m3_matrix_mad_k32` and every other unscaled FP8
+#     spelling -- undeclared identifier; the family exists in libigc's strings
+#     but this compiler declares no OpenCL C entry point for it.
+# Adding any of them back turns the whole build red, which is the point.
+set(PROBE_DPAS_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_dpas_rate.cl)
+set(PROBE_DPAS_TARGETS "")
+foreach(row IN ITEMS "bf16 1" "f16 2" "i8 3" "i4i8 4" "i4 5" "i2 6" "i8i4 11" "u4 12")
+  separate_arguments(f UNIX_COMMAND "${row}")
+  list(GET f 0 TAG)
+  list(GET f 1 DT)
+  add_ocloc_kernel(pdr_${TAG} SOURCE ${PROBE_DPAS_CL} DEFINES DT=${DT}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  list(APPEND PROBE_DPAS_TARGETS kernel_pdr_${TAG})
+endforeach()
+
+add_executable(probe_dpas_rate probe_dpas_rate.cc)
+target_include_directories(probe_dpas_rate PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(probe_dpas_rate PRIVATE b70_l0)
+b70_target_kernel_dir(probe_dpas_rate)
+add_dependencies(probe_dpas_rate ${PROBE_DPAS_TARGETS})
