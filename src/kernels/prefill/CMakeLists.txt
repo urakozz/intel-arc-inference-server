@@ -103,6 +103,13 @@ foreach(T 0 1)
   add_ocloc_kernel(pf_gemm_T${T} SOURCE ${PF_GEMM_CL} DEFINES TRANSB=${T}
                    OPTIONS -cl-intel-256-GRF-per-thread)
 endforeach()
+# Parity program S2(a): the gate||up variant whose epilogue runs pf_silu_mul's
+# chain out of the accumulators and stores bf16 x, so the fp32 [M][34816]
+# `partials` rectangle is never written. A THIRD binary and not a replacement --
+# the two above keep the exact command line and the exact source they had, which
+# is what makes "every other linear is untouched" a build fact.
+add_ocloc_kernel(pf_gemm_T0_SILU SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 SILU_EPI=1
+                 OPTIONS -cl-intel-256-GRF-per-thread)
 
 # Spec 2.1 (plan 9a): the 1024-column slab dequant, one variant per production (K, N, layout)
 # -- the layouts the loader actually ships (qkv||z tiled, the rest GPTQ-native).

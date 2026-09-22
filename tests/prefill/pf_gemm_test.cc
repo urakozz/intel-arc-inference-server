@@ -9,10 +9,12 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "check.h"
+#include "kernels/prefill/pf_kernels.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/memory.h"
@@ -37,6 +39,16 @@ l0::Mem upload(l0::Context& ctx, const std::vector<uint16_t>& h) {
   l0::Mem m(ctx, l0::MemKind::Device, h.size() * 2);
   l0::CmdList::immediate(ctx).copy(m.ptr(), h.data(), h.size() * 2);
   return m;
+}
+std::vector<uint16_t> download16(l0::Context& ctx, const void* src, size_t elems) {
+  std::vector<uint16_t> out(elems);
+  l0::Mem stage(ctx, l0::MemKind::Host, std::min(kStage, elems * 2));
+  for (size_t off = 0; off < elems * 2; off += kStage) {
+    const size_t now = std::min(kStage, elems * 2 - off);
+    l0::CmdList::immediate(ctx).copy(stage.ptr(), static_cast<const char*>(src) + off, now);
+    std::memcpy(reinterpret_cast<char*>(out.data()) + off, stage.ptr(), now);
+  }
+  return out;
 }
 std::vector<float> download(l0::Context& ctx, const void* src, size_t elems) {
   std::vector<float> out(elems);
@@ -105,6 +117,54 @@ void slab_case(Dev& d, uint32_t M, uint32_t K, uint32_t Nfull) {
   char name[96];
   std::snprintf(name, sizeof name, "slab M=%u K=%u N=%u @n0=%u", M, K, Nfull, n0);
   verdict(name, compare(got_slab, want, 1, M, kSlab, 0, kSlab, 0, kSlab), false);
+}
+
+// (d) Parity program S2(a): the gate||up slab walk with `pf_silu_mul` fused into each slab
+// GEMM's epilogue, against the unfused pair -- the same GEMM into fp32 `partials` followed
+// by `pf_silu_mul` -- on the SAME operands. Device against device, and bitwise: a host
+// reference would be grading the device's `exp` as well, which is not what is in question.
+// This is the cheap gate; `prefill_backend_equivalence_test` is the expensive one.
+void silu_case(Dev& d, uint32_t M) {
+  constexpr uint32_t kK = 5120, kN = 34816, kX = kN / 2;   // gate||up's own shape
+  constexpr uint32_t kSiluChunk = 4096;
+  const uint32_t Mp = pad256(M);
+  const std::vector<uint16_t> a = random_bf16(size_t(Mp) * kK, 41 + M);
+  // TWO slabs behind one [K][2048] buffer, alternated by slab index: B must not repeat
+  // with a period the x-column mapping could hide an offset error inside.
+  const std::vector<uint16_t> bb = random_bf16(size_t(kK) * 2 * kSlab, 43 + M);
+  l0::Mem A = upload(d.ctx, a), B = upload(d.ctx, bb);
+  l0::Mem Part(d.ctx, l0::MemKind::Device, size_t(Mp) * kN * 4);
+  l0::Mem Xfused(d.ctx, l0::MemKind::Device, size_t(Mp) * kX * 2);
+  l0::Mem Xref(d.ctx, l0::MemKind::Device, size_t(Mp) * kX * 2);
+  for (uint32_t n0 = 0; n0 < kN; n0 += kSlab) {
+    const uint16_t* bp = B.as<uint16_t>() + ((n0 / kSlab) & 1u) * kSlab;
+    const GemmBatch plain{M, kK, kSlab, 1, kK, 2 * kSlab, kN, 0, 0, 0};
+    runtime::prefill::gemm_l0(d.cx, d.kc, plain, A.as<uint16_t>(), bp,
+                              Part.as<float>() + n0, false);
+    const GemmBatch fused{M, kK, kSlab, 1, kK, 2 * kSlab, 0, 0, 0, 0};
+    runtime::prefill::gemm_l0_silu(d.cx, d.kc, fused, A.as<uint16_t>(), bp,
+                                   Xfused.as<uint16_t>() + n0 / 2, kX);
+  }
+  d.cx.launch(d.kc(kernels::pf_silu_mul_variant(), "pf_silu_mul"),
+              (kX + kSiluChunk - 1) / kSiluChunk, M, 1,
+              {runtime::prefill::PtrArg(Part.ptr()), runtime::prefill::PtrArg(Xref.ptr()),
+               runtime::prefill::arg_val(M)});
+  d.cx.wait();
+
+  // Rows [M, pad256(M)) only exist on the fused side -- pf_silu_mul's grid is M rows --
+  // and the walk never reads them, so the comparison is the logical rectangle.
+  const std::vector<uint16_t> got = download16(d.ctx, Xfused.ptr(), size_t(Mp) * kX);
+  const std::vector<uint16_t> want = download16(d.ctx, Xref.ptr(), size_t(Mp) * kX);
+  size_t words = 0, first = size_t(-1);
+  for (uint32_t m = 0; m < M; ++m)
+    for (uint32_t k = 0; k < kX; ++k) {
+      const size_t i = size_t(m) * kX + k;
+      if (got[i] != want[i] && words++ == 0) first = i;
+    }
+  std::printf("  %-44s %s (%zu words differ, first %zu)\n",
+              ("silu-fused gate||up M=" + std::to_string(M)).c_str(),
+              words == 0 ? "bitwise" : "**DIFFERS**", words, first);
+  CHECK_EQ(words, size_t(0));
 }
 
 // (b) Q·K^T: 6 q-heads of kv group 1 against the K cache in place (transB), N = depth.
@@ -195,6 +255,8 @@ int main() {
     for (uint32_t M : {2048u, 772u, 40u}) slab_case(d, M, K, N);
   for (uint32_t depth : {64u, 1000u, 4096u, 16384u})
     for (uint32_t C : {2048u, 40u}) attention_case(d, C, depth);
+  std::puts("pf_gemm's fused SiLU epilogue vs the GEMM + pf_silu_mul pair, bitwise:");
+  for (uint32_t M : {2048u, 772u}) silu_case(d, M);
   std::puts("pf_gemm_test OK");
   return 0;
 }

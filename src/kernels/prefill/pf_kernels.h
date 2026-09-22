@@ -72,6 +72,10 @@ inline std::string pf_probe_chain_variant() { return "pf_probe_chain"; }
 
 // Spec 2.1: the Level Zero prefill GEMM (pf_gemm.cl) and the slab dequant it pairs with.
 inline std::string pf_gemm_variant(bool transB) { return transB ? "pf_gemm_T1" : "pf_gemm_T0"; }
+// Parity program S2(a): the same GEMM with pf_silu_mul fused into its epilogue.
+// Only gate||up is ever launched with it -- the fusion is a statement about that
+// linear's INTERLEAVED gate/up column layout, not about the GEMM.
+inline std::string pf_gemm_silu_variant() { return "pf_gemm_T0_SILU"; }
 inline constexpr unsigned kPfSlabWidth = 1024;   // columns per pf_dequant_slab / slab GEMM
 inline std::string pf_dequant_slab_variant(unsigned K, unsigned N, unsigned layout) {
   return "pf_dequant_slab_K" + std::to_string(K) + "_N" + std::to_string(N) + "_L" +
