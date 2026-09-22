@@ -41,6 +41,14 @@
 #error "pf_prep: the prefill path is S = 1 by plan 6b ruling R1 -- a wider S_PREV means a producer that still emits decode's split-K rectangle, which at M = C would be a multi-TB buffer (R1's arithmetic). Fix the producer, not this guard."
 #endif
 
+// **Reading `partials` as bf16 was measured and rejected** (parity program
+// S2(b); `.superpowers/sdd/s2-epilogue-fusion-report.md`). At S_PREV = 1 this
+// kernel's first act on `partials` IS `rne_bf16`, so a producer that stored the
+// rounded word would be bitwise free here -- and it was, and it saved 1.7 ms on
+// the `norm` row while costing the producing GEMM 9.3. Left as a note rather
+// than a variant so that nobody re-derives it; the reason is on the producer's
+// side and is recorded in pf_gemm.cl.
+
 #ifndef FOLD_G
 #define FOLD_G 20
 #endif

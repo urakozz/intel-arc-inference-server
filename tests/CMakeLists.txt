@@ -75,7 +75,8 @@ if(B70_PREFILL_ENABLED)
   target_link_libraries(pf_gemm_test PRIVATE b70_prefill_host b70_l0)
   b70_link_prefill(pf_gemm_test)
   b70_target_kernel_dir(pf_gemm_test)
-  add_dependencies(pf_gemm_test kernel_pf_gemm_T0 kernel_pf_gemm_T1)
+  add_dependencies(pf_gemm_test kernel_pf_gemm_T0 kernel_pf_gemm_T1 kernel_pf_gemm_T0_SILU
+                   kernel_pf_silu_mul)
   add_test(NAME pf_gemm_test COMMAND pf_gemm_test)
   set_tests_properties(pf_gemm_test PROPERTIES TIMEOUT 1800)
 endif()
@@ -510,7 +511,7 @@ set(B70_PREFILL_KERNELS
   kernel_pf_dequant_tile_K5120_N34816_L0_T0
   kernel_pf_dequant_tile_K17408_N5120_L0_T0
   kernel_pf_dequant_tile_K5120_N14336_L0_T0
-  kernel_pf_gemm_T0 kernel_pf_gemm_T1
+  kernel_pf_gemm_T0 kernel_pf_gemm_T1 kernel_pf_gemm_T0_SILU
   kernel_pf_dequant_slab_K5120_N16384_L1 kernel_pf_dequant_slab_K6144_N5120_L0
   kernel_pf_dequant_slab_K5120_N34816_L0 kernel_pf_dequant_slab_K17408_N5120_L0
   kernel_pf_dequant_slab_K5120_N14336_L0

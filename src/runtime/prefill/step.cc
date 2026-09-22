@@ -1,5 +1,7 @@
 #include "runtime/prefill/step.h"
 
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -39,6 +41,29 @@ using model::Qwen35;
 
 void require(bool ok, const std::string& what) {
   if (!ok) throw std::runtime_error("runtime::prefill::step_chunk: " + what);
+}
+
+// **The pre-S2a fallback, opt-in through the environment.**
+// `B70_PREFILL_SILU_FUSED=0` makes the L0 backend run the old pair -- gate||up
+// into the fp32 [C][34816] `partials`, then `pf_silu_mul` -- instead of the
+// fused epilogue. It exists so that "before and after" is ONE binary and one
+// session rather than two builds, which is the role `B70_PREFILL_GDN_SCAN`
+// played for the scan experiment, and so the ABBA that prices this stage can be
+// taken without rebuilding between arms.
+//
+// The fused path is the DEFAULT and is what every gate runs. The two are
+// bitwise identical -- `pf_gemm_test`'s silu case compares them directly, on
+// device, at M = 2048 and M = 772 -- so this selector chooses a cost, never a
+// value. `step_chunk_launches` reads it too, so the launch arithmetic always
+// describes the walk that will actually run; `prefill_smoke_test`'s pinned
+// constants are the default path's and will fail loudly under `=0`, which is
+// the correct behaviour for a knob that changes the list.
+bool silu_fused() {
+  static const bool on = [] {
+    const char* v = std::getenv("B70_PREFILL_SILU_FUSED");
+    return v == nullptr || std::strcmp(v, "0") != 0;
+  }();
+  return on;
 }
 
 uint8_t* at(const l0::Mem& m, size_t off) {
@@ -103,6 +128,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   cx.launch(kc(kernels::pf_embed_gather_variant(), "pf_embed_gather"), 1, C, 1,
             {PtrArg(s.ids.ptr()), PtrArg(m.embed.ptr()), PtrArg(s.resid.ptr()), arg_val(C)});
 
+  const bool l0 = backend == PrefillBackend::L0;
   uint32_t gdn = 0, fa = 0;
   for (const model::LayerDesc& L : Qwen35::layers()) {
     const uint32_t l = L.index;
@@ -146,13 +172,33 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
     }
 
     // The MLP half, identical in both layer kinds.
+    //
+    // **Parity program S2(a), L0 only: the normed activations go to
+    // `mixer_out`, not `x`.** The fused gate||up GEMM reads its A operand row m
+    // at pitch 5120 and writes x row m at pitch 17408 in the SAME kernel, so the
+    // two cannot share a buffer: work-group 0's x rows would overwrite A rows
+    // the later work-groups have not read yet. (The unfused pair could share it,
+    // because the GEMM had fully retired before `pf_silu_mul` ran.) `mixer_out`
+    // is bf16 [kC][6144] and its last reader -- out_proj / o_proj -- is three
+    // launches back, so it is free and large enough for [pad256(C)][5120].
+    const bool fuse = l0 && silu_fused();
+    void* const mlp_x = fuse ? s.mixer_out.ptr() : s.x.ptr();
     pf_res_norm(cx, kc, s, 1u, at_const(m.layer_small[l].norms, loader::kNormsOffPost),
-                s.partials.ptr(), s.resid.ptr(), s.x.ptr(), C);   // x stride 5120
-    pf_linear(cx, kc, s, m.linears.at({l, LinearId::GateUp}), s.x.as<uint16_t>(), C, backend);
-    cx.launch(kc(kernels::pf_silu_mul_variant(), "pf_silu_mul"),
-              (Qwen35::kIntermediate + kSiluChunk - 1) / kSiluChunk, C, 1,
-              {PtrArg(s.partials.ptr()), PtrArg(s.x.ptr()), arg_val(C)});   // x stride 17408
-    profile_wait(cx, Phase::kSilu);
+                s.partials.ptr(), s.resid.ptr(), mlp_x, C);   // stride 5120
+    if (fuse) {
+      // One launch pair per slab and NO `pf_silu_mul`: the epilogue writes x
+      // directly, so the fp32 [C][34816] `partials` rectangle -- the largest on
+      // the walk -- is neither written nor read back (spec §3, S2).
+      linear_l0_silu(cx, kc, s, m.linears.at({l, LinearId::GateUp}),
+                     static_cast<const uint16_t*>(mlp_x), C, s.x.as<uint16_t>(),
+                     Qwen35::kIntermediate);
+    } else {
+      pf_linear(cx, kc, s, m.linears.at({l, LinearId::GateUp}), s.x.as<uint16_t>(), C, backend);
+      cx.launch(kc(kernels::pf_silu_mul_variant(), "pf_silu_mul"),
+                (Qwen35::kIntermediate + kSiluChunk - 1) / kSiluChunk, C, 1,
+                {PtrArg(s.partials.ptr()), PtrArg(s.x.ptr()), arg_val(C)});   // x stride 17408
+      profile_wait(cx, Phase::kSilu);
+    }
     pf_linear(cx, kc, s, m.linears.at({l, LinearId::Down}), s.x.as<uint16_t>(), C, backend);
   }
   require(gdn == 48 && fa == 16, "the layer table did not give 48 GDN and 16 FA layers");
@@ -235,16 +281,23 @@ constexpr size_t kFaLayerWaits = 2 * 4 + 2 * attn::kKvHeads + 1;
 // attn.cc), so an FA layer is 131 + 4 x blocks launches -- 135 at C <= 256, 163 at
 // C = 2048. A chunk is then 1 + 48 x 136 + 16 x (131 + 4 x blocks): 8689 at C <= 256 and
 // 9137 at C = 2048 (derived).
-constexpr size_t kL0GdnLayerLaunches = kGdnLayerLaunches - 4 + 120;                    // 136
+// L0 (parity program S2a): `pf_silu_mul` is fused into the gate||up slab GEMM's epilogue,
+// so EVERY layer loses exactly one launch -- 135 per GDN layer and 130 + 4 x blocks per FA
+// layer. A chunk is 8625 at C <= 256 and 9073 at C = 2048 (derived; -64 = -1 per layer).
+// sycl-tla keeps its own `pf_silu_mul` launch and its arithmetic is untouched.
+// `silu_fused()` is the one term that is not a property of the shape: it is a
+// diagnostic selector, and the arithmetic follows the walk rather than the
+// default so that a `=0` session's counter still matches its own prediction.
+size_t l0_gdn_layer_launches() { return kGdnLayerLaunches - 4 + 120 - (silu_fused() ? 1 : 0); }
 size_t l0_fa_layer_launches(uint32_t C) {
   return kFaLayerLaunches - 4 + 116 - kAttnChunkLaunches +
-         attn_chunk_launches(C, PrefillBackend::L0);
+         attn_chunk_launches(C, PrefillBackend::L0) - (silu_fused() ? 1 : 0);
 }
 }  // namespace
 size_t step_chunk_launches(PrefillBackend b, uint32_t C) {
   return b == PrefillBackend::SyclTla
              ? 1 + 48 * kGdnLayerLaunches + 16 * kFaLayerLaunches
-             : 1 + 48 * kL0GdnLayerLaunches + 16 * l0_fa_layer_launches(C);
+             : 1 + 48 * l0_gdn_layer_launches() + 16 * l0_fa_layer_launches(C);
 }
 size_t step_chunk_gemms(PrefillBackend b) {
   return b == PrefillBackend::SyclTla ? 48 * kGdnLayerGemms + 16 * kFaLayerGemms : 0;

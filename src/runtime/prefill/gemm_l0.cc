@@ -44,4 +44,31 @@ void gemm_l0(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A
              arg_val(lda), arg_val(ldb), arg_val(ldc), arg_val(sA), arg_val(sB), arg_val(sC)});
 }
 
+void gemm_l0_silu(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A,
+                  const uint16_t* B, uint16_t* X, uint32_t ldx) {
+  require(b.M > 0 && b.N > 0, "empty problem");
+  require(b.L == 1, "the fused-SiLU epilogue is one gate||up slab: L must be 1");
+  require(b.K >= 32 && b.K % 32 == 0, "K = " + std::to_string(b.K) + " is not a multiple of 32");
+  const uint32_t M = pad256(b.M);
+  const uint32_t N = uint32_t(b.N);
+  require(N % kPfGemmTile == 0, "N = " + std::to_string(N) + " is not a multiple of 256");
+  require(b.lda >= b.K, "lda < K");
+  require(b.ldb >= N, "ldb does not cover B");
+  // Two columns of C collapse into one of x, so the slab covers N/2 x columns
+  // and the row pitch must reach past them; the caller passes the WHOLE row.
+  require(ldx >= N / 2, "ldx = " + std::to_string(ldx) + " does not cover the slab's N/2 columns");
+  require((b.lda * 2) % 16 == 0 && (b.ldb * 2) % 16 == 0 && (size_t(ldx) * 2) % 16 == 0,
+          "a pitch is not a multiple of 16 bytes");
+  require(aligned64(A, 2, b.strideA, b.L), "A is not 64-byte aligned");
+  require(aligned64(B, 2, b.strideB, b.L), "B is not 64-byte aligned");
+  require(aligned64(X, 2, 0, 1), "X is not 64-byte aligned");
+
+  l0::Kernel& k = kc(kernels::pf_gemm_silu_variant(), "pf_gemm");
+  const uint32_t lda = uint32_t(b.lda), ldb = uint32_t(b.ldb);
+  const uint64_t sA = b.strideA, sB = b.strideB, sC = 0;
+  cx.launch(k, M / kPfGemmTile, N / kPfGemmTile, 1,
+            {PtrArg(A), PtrArg(B), PtrArg(X), arg_val(M), arg_val(b.K), arg_val(N),
+             arg_val(lda), arg_val(ldb), arg_val(ldx), arg_val(sA), arg_val(sB), arg_val(sC)});
+}
+
 }  // namespace runtime::prefill

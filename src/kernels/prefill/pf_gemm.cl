@@ -41,10 +41,63 @@
 #ifndef TRANSB
 #error "pf_gemm: TRANSB must be defined (0: B is [K][N]; 1: B is [N][K])"
 #endif
+
+// Parity-program S2(a): the gate||up epilogue. Built as a THIRD variant
+// (pf_gemm_T0_SILU) so the two production binaries stay the same text they
+// were -- at SILU_EPI = 0 the preprocessed source is character for character
+// what it was before this block existed.
+//
+// `pf_silu_mul` (pf_prep.cl) reads the fp32 [M][34816] `partials` this GEMM
+// writes and emits bf16 x [M][17408]. Its two operands are 16 columns apart --
+// `gflat = (k/16).32 + k%16`, `uflat = gflat + 16` -- and a subgroup's four
+// 16-wide n-atoms sit at n0 + 64.sn + 16.b with n0 a multiple of 256, so
+// (n0 + 64.sn + 16.b)/16 has the parity of b: **atom b = 2p is a gate block and
+// atom b = 2p+1 is its up block**, both already in this subgroup's registers,
+// one lane per column, with no cross-lane traffic and no SLM. The epilogue
+// therefore runs pf_silu_mul's whole chain itself and stores bf16, and the fp32
+// [2048][34816] intermediate is never written and never read.
+//
+// The x column of gate column `gflat` is (gflat/32).16 + gflat%16 = gflat/2 +
+// lane (lane < 16), so a subgroup's two pairs land on 16 CONTIGUOUS bf16 each.
+// The caller passes X = x + n0_slab/2 and carries `ldx` in the `ldc` slot; the
+// slab base is a multiple of 1024 and hence of 32, which is what makes the
+// parity above a property of the launch-local n0 as well as the global column.
+#ifndef SILU_EPI
+#define SILU_EPI 0
+#endif
+#if SILU_EPI && TRANSB
+#error "pf_gemm: the SiLU epilogue belongs to the gate||up slab GEMM, whose B is [K][N]"
+#endif
+//
+// **Storing `rne_bf16(acc)` for the OTHER linears was measured and rejected**
+// (S2(b); the report is `.superpowers/sdd/s2-epilogue-fusion-report.md`). Every
+// consumer opens with that same round, so it is bitwise free, but it does not
+// pay: this driver declares no 16-bit block write wider or taller than
+// `..._16b_8r16x1c`, so a bf16 C tile needs exactly as MANY store messages as
+// the fp32 one, each carrying half the bytes -- and this epilogue is bound by
+// the message count, not the bytes (the two SiLU store forms below measure the
+// same for the same reason). Measured +9.3 ms on `slab_gemm` against -7.3 on
+// `slab_dequant` and -1.7 on `norm`: a wash, five runs an arm. Recorded here so
+// the next reader does not re-derive the idea and re-measure it.
 #define SG 16
 #define WG_M 256
 #define WG_N 256
 #define WG_K 32
+
+#if SILU_EPI
+// **Copied verbatim from pf_prep.cl**, which is the numerics contract: both
+// bf16 RNE steps, plain `exp` (never `native_exp`), and silu kept as the LAST
+// factor so everything before it stays bit-comparable with the host. The two
+// files must be edited together -- pf_prep.cl's header already says that of
+// prep.cl, and this is the same relationship one level out.
+inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
+inline ushort rne_bf16(float f) {
+  uint u = as_uint(f);
+  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
+  return (ushort)((u + rounding) >> 16);
+}
+inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
+#endif
 
 __attribute__((reqd_work_group_size(512, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
@@ -58,7 +111,13 @@ __kernel void pf_gemm(__global const ushort* restrict A_base,
   const ulong l = get_group_id(2);   // batch
   __global const ushort* restrict A = A_base + l * strideA;
   __global const ushort* restrict B = B_base + l * strideB;
+#if SILU_EPI
+  // `C_base` carries x (bf16) and `ldc` carries `ldx`; nothing writes fp32 here.
+  __global ushort* restrict X = (__global ushort*)C_base + l * strideC;
+  const uint ldx = ldc;
+#else
   __global float* restrict C = C_base + l * strideC;
+#endif
   const uint m0 = gx * WG_M;
   const uint n0 = gy * WG_N;
   const uint s = get_sub_group_id();   // 0..31
@@ -72,7 +131,16 @@ __kernel void pf_gemm(__global const ushort* restrict A_base,
 #else
   const int b_w = (int)(N * 2u), b_h = (int)K, b_p = (int)(ldb * 2u);   // [K][N]
 #endif
+#if SILU_EPI
+  // The x window this LAUNCH owns: a slab's N interleaved columns are N/2 x
+  // columns, so the descriptor is N bytes wide from X (which the caller already
+  // offset to the slab's first x column) over a row pitch of ldx. Exactly the
+  // arrangement the fp32 `c_w` below has -- a 1024-column window inside a
+  // 34816-wide matrix -- one element size down.
+  const int x_w = (int)(N * 2u), x_h = (int)M, x_p = (int)(ldx * 2u);
+#else
   const int c_w = (int)(N * 4u), c_h = (int)M, c_p = (int)(ldc * 4u);
+#endif
   const uint num_k_tiles = K / WG_K;
 
   float8 acc[4][4];
@@ -172,6 +240,45 @@ __kernel void pf_gemm(__global const ushort* restrict A_base,
     intel_work_group_barrier_wait(CLK_LOCAL_MEM_FENCE);
   }
 
+#if SILU_EPI
+  // epilogue: pf_silu_mul's chain over the two gate||up atom pairs this subgroup
+  // already holds, then 16 contiguous bf16 per row. acc[a][b].sR is
+  // C[m0+32sm+8a+R][n0+64sn+16b+lane], lane being the subgroup-local id -- the
+  // 2D block write in the #else branch below states that mapping, and this
+  // reads the same registers before storing them.
+  // Eight stores per subgroup, 8 rows x 32 B each -- the SAME 2D block write
+  // shape the fp32 epilogue uses, one element size down.
+  //
+  // **The store is not what this epilogue costs.** Both forms were built and
+  // measured against the same control (device 1, 4096 ids, `slab_gemm` L0 GPU
+  // ms): 64 scalar ushort stores per subgroup gave a median of 1410.2 and these
+  // eight block messages 1409.3, against 1373.6 for the plain fp32 epilogue.
+  // The +36 ms is the ARITHMETIC -- one `exp` and four `rne_bf16` per output
+  // element, 4.56 G of them per request -- and it buys the 99.1 ms
+  // `pf_silu_mul` row outright, plus 19.6 ms off `slab_dequant`. The block form
+  // is kept because it is the file's own idiom, not because it was faster.
+#define PF_SILU_ROW(r)                                             \
+  do {                                                             \
+    const ushort g_b = rne_bf16(gv.s##r), u_b = rne_bf16(uv.s##r); \
+    const ushort s_b = rne_bf16(silu_f32(bf16f(g_b)));             \
+    xv[r] = rne_bf16(bf16f(s_b) * bf16f(u_b));                     \
+  } while (0)
+#pragma unroll
+  for (int a = 0; a < 4; ++a) {
+#pragma unroll
+    for (int p = 0; p < 2; ++p) {
+      const float8 gv = acc[a][2 * p], uv = acc[a][2 * p + 1];
+      const uint ng = n0 + 64u * sn + 32u * (uint)p;   // the GATE atom's column base
+      ushort xv[8];
+      PF_SILU_ROW(0); PF_SILU_ROW(1); PF_SILU_ROW(2); PF_SILU_ROW(3);
+      PF_SILU_ROW(4); PF_SILU_ROW(5); PF_SILU_ROW(6); PF_SILU_ROW(7);
+      intel_sub_group_2d_block_write_16b_8r16x1c(
+          (__global void*)X, x_w, x_h, x_p,
+          (int2)((int)(ng >> 1), (int)(m0 + 32u * sm + 8u * a)), xv);
+    }
+  }
+#undef PF_SILU_ROW
+#else
   // epilogue: 16 stores per subgroup, 8 rows x 64 B each, no C read.
 #pragma unroll
   for (int a = 0; a < 4; ++a)
@@ -181,4 +288,5 @@ __kernel void pf_gemm(__global const ushort* restrict A_base,
           (__global void*)C, c_w, c_h, c_p,
           (int2)((int)(n0 + 64u * sn + 16u * b), (int)(m0 + 32u * sm + 8u * a)),
           (__private uint*)&acc[a][b]);
+#endif
 }
