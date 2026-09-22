@@ -211,8 +211,11 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMode
 // Boundary: 1 (embed).  Chunk total: 1 + 48.20 + 16.15 = 1201.
 // `step_head` adds 5 once per prefill: 2 (final norm) + 1 (lm_head) + 2 (argmax).
 //
-// **None of these depends on C**, which is the whole point of the runtime-M
-// rule: one binary set serves every `--pp-chunk`.
+// **Only one term depends on C**, and it is new in spec S3: the L0 backend's
+// attention issues its QK^T GEMM per row block of 256 rows rather than once per
+// chunk, so an FA layer costs `attn_chunk_launches(C, L0)` there instead of a
+// constant. Everything else is still C-free -- the runtime-M rule, one binary
+// set for every `--pp-chunk` -- and sycl-tla's arithmetic is untouched.
 namespace {
 // sycl-tla, spec 2's arithmetic (unchanged): per GDN layer 20 L0 launches, 4 SYCL GEMMs,
 // 8 waits; per FA layer 15 launches, 4 + 2 x 4 GEMMs, 17 waits; 1 embed.
@@ -227,13 +230,21 @@ constexpr size_t kFaLayerWaits = 2 * 4 + 2 * attn::kKvHeads + 1;
 // linear -- GDN: qkv||z 32 + out_proj 10 + gate||up 68 + down 10 = 120; FA: q||k||v 28 +
 // o_proj 10 + 68 + 10 = 116.
 // L0 (spec 2.1 S3): attention's two GEMMs per kv group are L0 launches now, no SYCL GEMM and
-// no host wait remains -- 1 + 48 x 136 + 16 x 135 = 8689 (spec §3.3, derived).
+// no host wait remains -- 1 + 48 x 136 + 16 x 135 = 8689 at one row block (spec §3.3).
+// L0 (parity program S3): QK^T is issued per row block of 256 rows (P·V is not -- see
+// attn.cc), so an FA layer is 131 + 4 x blocks launches -- 135 at C <= 256, 163 at
+// C = 2048. A chunk is then 1 + 48 x 136 + 16 x (131 + 4 x blocks): 8689 at C <= 256 and
+// 9137 at C = 2048 (derived).
 constexpr size_t kL0GdnLayerLaunches = kGdnLayerLaunches - 4 + 120;                    // 136
-constexpr size_t kL0FaLayerLaunches = kFaLayerLaunches - 4 + 116 + 2 * attn::kKvHeads; // 135
+size_t l0_fa_layer_launches(uint32_t C) {
+  return kFaLayerLaunches - 4 + 116 - kAttnChunkLaunches +
+         attn_chunk_launches(C, PrefillBackend::L0);
+}
 }  // namespace
-size_t step_chunk_launches(PrefillBackend b) {
-  return b == PrefillBackend::SyclTla ? 1 + 48 * kGdnLayerLaunches + 16 * kFaLayerLaunches
-                                      : 1 + 48 * kL0GdnLayerLaunches + 16 * kL0FaLayerLaunches;
+size_t step_chunk_launches(PrefillBackend b, uint32_t C) {
+  return b == PrefillBackend::SyclTla
+             ? 1 + 48 * kGdnLayerLaunches + 16 * kFaLayerLaunches
+             : 1 + 48 * kL0GdnLayerLaunches + 16 * l0_fa_layer_launches(C);
 }
 size_t step_chunk_gemms(PrefillBackend b) {
   return b == PrefillBackend::SyclTla ? 48 * kGdnLayerGemms + 16 * kFaLayerGemms : 0;

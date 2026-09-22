@@ -102,7 +102,8 @@ int main(int argc, char** argv) {
   // value at 1201 per chunk + 5 for the head, independent of C. If this ever
   // differs, print both and re-derive the arithmetic from the walk - the number
   // in the pre-registration is a prediction about the walk, not a target.
-  const size_t per_chunk = runtime::prefill::step_chunk_launches(runtime::PrefillBackend::SyclTla);
+  const size_t per_chunk =
+      runtime::prefill::step_chunk_launches(runtime::PrefillBackend::SyclTla, kShort);
   const size_t head = runtime::prefill::kStepHeadLaunches;
   CHECK_EQ(per_chunk, size_t(1201));
   CHECK_EQ(head, size_t(5));
@@ -115,11 +116,22 @@ int main(int argc, char** argv) {
   // S3: the L0 backend's linears are the slab walk (2 x N/1024 launches each) and its
   // attention's two GEMMs per kv group are pf_gemm launches -- a chunk calls no SYCL and
   // waits on the host nowhere (spec 2.1 §3.3 / §3.4).
-  CHECK_EQ(runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0), size_t(8689));
+  //
+  // The parity program's S3 splits the QK^T GEMM into ROW BLOCKS of 256, so the count is
+  // a function of C for the first time: 8689 while one block covers the chunk (C <= 256,
+  // this test's own shape) and 9137 at the C = 2048 the bench and the server run
+  // (1 + 48 x 136 + 16 x (131 + 4 x 8), derived from src/runtime/prefill/step.cc's closing
+  // block). Both are asserted, because only the second one moved.
+  CHECK_EQ(runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0, kShort),
+           size_t(8689));
+  CHECK_EQ(runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0, 2048),
+           size_t(9137));
   CHECK_EQ(runtime::prefill::step_chunk_gemms(runtime::PrefillBackend::L0), size_t(0));
   CHECK_EQ(runtime::prefill::step_chunk_waits(runtime::PrefillBackend::L0), size_t(0));
-  std::printf("L0 backend: %zu launches per chunk, %zu SYCL GEMMs, %zu host waits\n",
-              runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0),
+  std::printf("L0 backend: %zu launches at C = %u and %zu at C = 2048 (8 QK^T row blocks),"
+              " %zu SYCL GEMMs, %zu host waits\n",
+              runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0, kShort), kShort,
+              runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0, 2048),
               runtime::prefill::step_chunk_gemms(runtime::PrefillBackend::L0),
               runtime::prefill::step_chunk_waits(runtime::PrefillBackend::L0));
 
@@ -165,10 +177,10 @@ int main(int argc, char** argv) {
   // ---- 8. the L0 backend's launch arithmetic, MEASURED (ruling E1) --------
   // Sections 2-7 assert sycl-tla's 1201 + 5 against the live counter and state the
   // L0 formula; nothing ran it. One chunk on L0 from a reset must advance the SAME
-  // counter by `step_chunk_launches(L0) + kStepHeadLaunches` (8689 + 5 = 8694,
-  // derived from src/runtime/prefill/step.cc's closing block). The delta is taken
-  // rather than the absolute, because `prefill_launches()` is cumulative over the
-  // engine's whole life and sections 2-7 already spent some of it.
+  // counter by `step_chunk_launches(L0, C) + kStepHeadLaunches` (8689 + 5 = 8694
+  // at this C, derived from src/runtime/prefill/step.cc's closing block). The delta
+  // is taken rather than the absolute, because `prefill_launches()` is cumulative
+  // over the engine's whole life and sections 2-7 already spent some of it.
   const size_t l0_before = eng.prefill_launches();
   eng.set_prefill_backend(runtime::PrefillBackend::L0);
   eng.reset();
@@ -176,17 +188,36 @@ int main(int argc, char** argv) {
   CHECK_EQ(eng.pos(), kShort);
   const size_t l0_delta = eng.prefill_launches() - l0_before;
   const size_t l0_want =
-      runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0) +
+      runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0, kShort) +
       runtime::prefill::kStepHeadLaunches;
   // Printed BEFORE the assertion so a mismatch shows both numbers rather than only
   // the macro's text: the formula is a prediction about the walk, not a target.
   std::printf("L0 live: one chunk of %u ids advanced the L0 counter by %zu launches;"
               " the arithmetic says %zu (%zu per chunk + %zu head)\n",
               kShort, l0_delta, l0_want,
-              runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0),
+              runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0, kShort),
               runtime::prefill::kStepHeadLaunches);
   CHECK_EQ(l0_delta, l0_want);
   CHECK_EQ(l0_want, size_t(8694));
+
+  // The shape that S3 actually changed: C = 2048 is eight QK^T row blocks, so the
+  // same counter must advance by 9137 + 5. One chunk, so the ragged-tail arithmetic is
+  // not in the way -- exactly the C = 64 measurement above at the bench's width.
+  const size_t wide_before = eng.prefill_launches();
+  eng.reset();
+  eng.prefill(ids(2048), /*chunk=*/2048);
+  CHECK_EQ(eng.pos(), uint32_t(2048));
+  const size_t wide_delta = eng.prefill_launches() - wide_before;
+  const size_t wide_want =
+      runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0, 2048) +
+      runtime::prefill::kStepHeadLaunches;
+  std::printf("L0 live: one chunk of 2048 ids advanced the L0 counter by %zu launches;"
+              " the arithmetic says %zu (%zu per chunk + %zu head)\n",
+              wide_delta, wide_want,
+              runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0, 2048),
+              runtime::prefill::kStepHeadLaunches);
+  CHECK_EQ(wide_delta, wide_want);
+  CHECK_EQ(wide_want, size_t(9142));
 
   std::puts("prefill_smoke_test OK");
   return 0;
