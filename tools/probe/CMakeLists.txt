@@ -285,3 +285,28 @@ foreach(row IN LISTS PGL_SHAPES)
   endif()
 endforeach()
 add_dependencies(probe_gemv ${PROBE_GEMV_LOADS_TARGETS})
+
+# --- S1: the fused int4 dequant probe (2026-09-22) --------------------------
+# Pre-registration: docs/superpowers/specs/2026-09-22-fused-dequant-gemm-probe-design.md.
+# `probe_fused_dequant_gemm.cl` is a PROBE kernel: no runtime path binds
+# `pfd_gemm`, and neither `src/kernels/prefill/pf_gemm.cl` nor
+# `pf_dequant_slab.cl` is touched -- the probe's CONTROL runs those two
+# production binaries themselves, which is what makes the memcmp a gate rather
+# than a paraphrase. 256 GRF is mandatory for anything sharing pf_gemm's tile
+# (P2 measured a 33x loss without it) and is carried on the compile line, the
+# only place an AOT build honours it.
+if(B70_PREFILL_ENABLED)
+  set(PROBE_FUSED_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_fused_dequant_gemm.cl)
+  add_ocloc_kernel(pfd_gemm_v1 SOURCE ${PROBE_FUSED_CL} DEFINES FUSED=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pfd_gemm_v2 SOURCE ${PROBE_FUSED_CL} DEFINES FUSED=2
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+
+  add_executable(probe_fused_dequant_gemm probe_fused_dequant_gemm.cc)
+  target_include_directories(probe_fused_dequant_gemm PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_fused_dequant_gemm PRIVATE b70_prefill_host b70_l0)
+  b70_link_prefill(probe_fused_dequant_gemm)
+  b70_target_kernel_dir(probe_fused_dequant_gemm)
+  add_dependencies(probe_fused_dequant_gemm kernel_pfd_gemm_v1 kernel_pfd_gemm_v2
+                   kernel_pf_gemm_T0 kernel_pf_dequant_slab_K5120_N34816_L0)
+endif()
