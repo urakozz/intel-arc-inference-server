@@ -419,3 +419,52 @@ live hypothesis and a much more serious one than a cosine miss. The alternative
 is that the card was left fragile by the processes killed earlier that evening.
 The retest must watch for a second reset, and should not be run on device 0 -
 the series card - until device 1 is back and has survived it.
+
+## 11. Correction to §10 - the split scan DOES fail the gate (2026-09-23)
+
+§10 said the verdict was void because the card had faulted. Half right: the card
+had faulted, and that explains the segfaults - but not the numbers. Re-run on a
+healthy device 0, the failure reproduces **to nine digits**.
+
+| run | scan | cosines: prose / code / cjk | tokens |
+|---|---|---|---|
+| 2026-09-18, IGC 2.38.2 | vector | 0.999903435 / 0.999189068 / 0.999903208 | 93/93 |
+| 2026-09-21, IGC 2.38.2 | "dpas_split" | **identical to the vector row** | 93/93 |
+| 2026-09-22 night, device 1 | dpas_split | 0.999910833 / 0.996344994 / 0.999892216 | 92/93 |
+| **2026-09-23, device 0** | **dpas_split** | **0.999910833 / 0.996344994 / 0.999892216** | **92/93** |
+| 2026-09-23, device 0 | vector | 0.999903435 / 0.999189068 / 0.999903208 | 93/93 |
+
+Three findings, in order of consequence.
+
+**1. The split scan fails `prefill_gate_l0_test`: 92/93, code's L60 `gdn_state`
+cosine 0.996344994 against a > 0.999 bar.** Deterministic - the device-1 and
+device-0 runs agree exactly, and `prefill_determinism_test` passes under it. The
+default stays `vector`, now on evidence rather than on a contaminated run.
+
+**2. The 2026-09-21 record that declared its gates green was measuring the
+VECTOR kernel.** Its cosines are bit-identical to the vector row from three days
+earlier; approximate split-BF16 arithmetic cannot reproduce fp32 vector code to
+nine digits across three prompts. Whatever that run selected, it was not
+`pf_gdn_scan_dpas_split`. `docs/prefill-gdn-scan-split-2026-09-20.md`'s
+"Available Vishva gates (split selector)" section is therefore **not evidence**,
+and the experiment's own decision - "the opt-in split implementation ... and
+available primary-model gates are green" - does not hold.
+
+**3. Kernel numerics are stable across the IGC 2.38.2 -> 2.41.5 upgrade.** The
+vector cosines are identical before and after the 139-kernel recompile. The
+compiler was a plausible suspect for the change and is now excluded.
+
+**What survives of the split experiment.** Its ABBA measured a real -157.974 ms:
+the two selectors produced different wall times, so the selector did take effect
+in `prefill_replay_test` run directly. So the kernel is genuinely faster **and**
+genuinely fails the golden gate - the same shape as the single-BF16 D2 attempt
+it was built to fix. It is a fast wrong answer, not a missed opportunity.
+
+**The process lesson, which is the expensive part.** That experiment built a
+mutation-sensitive dispatch test *precisely because* output comparison cannot
+prove which kernel ran - and then ran its model gates with no such proof,
+through a different launch path, and trusted the result. A selector's gate run
+needs the same dispatch evidence the unit test has: print the resolved entry
+name from inside the process under test, or assert it via `KernelCache::kernels()`
+in the gate itself. Without it, "the gates are green" can mean "the gates never
+ran your kernel".
