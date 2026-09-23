@@ -36,6 +36,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <string>
@@ -393,6 +394,14 @@ int main(int argc, char** argv) {
   // --- the chunked walk: 4096 positions as 2 x 2048 -------------------------
   const Walk got = run_chunked(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y,
                                kPositions, kC);
+  // The band below is graded against a selector-dependent kernel, so the run
+  // says which one it launched (parity-program design §11). The dispatch rows
+  // prove the mapping; this proves which mapping THIS band was measured under.
+  CHECK(runtime::prefill::gdn_scan_launched_entry() != nullptr);
+  std::printf("scan entry: B70_PREFILL_GDN_SCAN=%s -> LAUNCHED %s\n",
+              std::getenv("B70_PREFILL_GDN_SCAN") && *std::getenv("B70_PREFILL_GDN_SCAN")
+                  ? std::getenv("B70_PREFILL_GDN_SCAN") : "(unset)",
+              runtime::prefill::gdn_scan_launched_entry());
   CHECK_EQ(got.launches, 2 * runtime::prefill::kGdnChunkLaunches);
   std::printf("launches: %zu for 2 chunks (%zu per gdn_chunk, ruling R3's tenth included)\n",
               got.launches, runtime::prefill::kGdnChunkLaunches);
