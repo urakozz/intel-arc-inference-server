@@ -1,476 +1,177 @@
 # Open questions
 
-Ranked by how much the answer would change the design. Nothing here is settled -
-do not let an estimate from these docs become an assumption in a spec.
-
-## 1. What is `W`, the bytes read per decode token? - **resolved for phase 1**
-
-**15.52 GB per token** for `Vishva007/Qwen3.8-27B`, measured 2026-08-22 from
-the safetensors headers with the index as the manifest (doc 03): 12.163 GB
-int4 `qweight`, 0.760 GB f16 scales, 2.543 GB bf16 `lm_head`, 0.052 GB bf16
-small tensors. `qzeros` (0.190) and `g_idx` (0.012) are dropped at load; the
-embedding is gathered; the vision tower is skipped. The checkpoint has no
-duplicated tensor names, so header arithmetic is exact here - the
-dedup-by-name rule stays in the loader for checkpoints that do.
-
-Reproduce: `python3 tools/probe/checkpoint_bytes.py <snapshot>`.
-
-Consequence: vLLM's 31.50 t/s is **81% MBU**. The host-overhead thesis is
-nearly exhausted on this model (doc 05); it remains the main lever for the MoE
-phases, where `W` is still an estimate. Confirm resident bytes on first load.
-
-## 2. The phase-1 model does not currently load in vLLM - **resolved by re-scoping (#14)**
-
-Phase 1 is now the 27B, which loads and has a baseline. The loader
-requirements at the end of this entry still stand unchanged - the 27B ships
-the identical `model.language_model.*` / `model.visual.*` / top-level
-`lm_head.weight` layout. Kept for the record:
-
-`letechlead/Ornith-1.5-9B-INT4-W4A16-AutoRound` declares
-`architectures: ["Qwen3_5ForConditionalGeneration"]` and ships tensors named
-`model.language_model.*` (2177), `model.visual.*` (549), `lm_head.weight` (1).
-
-vLLM (`v0.27.2rc1.dev342+g0a5a55136`, image `p314-t214-vxkp0`) instantiates
-`Qwen3_5Model`, whose parameters are `layers.*`, and fails:
-
-```
-ValueError: There is no module or parameter named 'language_model' in Qwen3_5Model
-```
-
-Fails identically with and without `--language-model-only`.
-
-Two consequences:
-
-- **The "beat vLLM" baseline for phase 1 has no number yet.** Either fix the vLLM
-  side, or pick a phase-1 checkpoint that loads, or accept the 27B numbers as the
-  reference and re-scope phase 1.
-- **Our loader must handle this layout natively**: strip the
-  `model.language_model.` prefix, skip `model.visual.*` entirely, and treat
-  `lm_head.weight` as top-level. Design for it rather than requiring
-  re-exported checkpoints.
-
-## 3. Is GDN or GEMM the larger share of decode time? - **resolved: GEMM, 68.8%; GDN's own kernel is 1.7%**
-
-48 of 64 layers are linear attention, and GDN is the one kernel with no
-`sycl-tla` starting point. If GDN dominates, it should be the first kernel
-written and the first optimised. If GEMM dominates despite GDN being 48/64
-layers, the decode GEMV carries more of the outcome than the layer count
-suggests.
-
-Measure on the current stack with a profiler before choosing what to build first.
-
-**Estimate (2026-08-22):** GDN state is 2 MB per layer (doc 03), ~100 MB per
-token across 24 layers - ~2% of `W`. GDN should be a kernel-count problem, not
-a bandwidth one, and replay removes most of the kernel-count cost. Expect GEMM
-to dominate. If a vLLM profile says otherwise, the Triton launch path is the
-first suspect.
-
-**Half-answered on our own engine, 2026-08-25 - and the estimate above is
-wrong about *why*.** Of a measured 42.14 ms step (doc 05), GEMV is **28.35 ms
-(67.3%)** - measured per kernel by `probe_gemv` at the shapes the model table
-binds - and everything else is **13.795 ms (32.7%)**. So GEMM does dominate, as
-predicted. What was not predicted is that the non-GEMV third is **not** a
-kernel-count problem: 645 launches × 0.52 µs is 0.335 ms, 2.4% of that 13.795 ms.
-It is time spent *inside* `prep`, `gdn_step` and `attn`, and this measurement
-does **not** separate the three - that separation is spec 1.5's first job
-(doc 05, "What spec 1.5 is scoped to do"). Attention's share is bounded:
-2.31 ms of per-block work at depth 4096 - *estimated* by extrapolating the #12
-experiment's two points, not timed.
-
-**Resolved, 2026-08-25, per kernel in situ** (`b70-decode --profile`, the full
-anatomy in [15-step-anatomy.md](15-step-anatomy.md)). GEMM dominates and the
-margin is slightly larger than the transplant said: **29.005 ms, 68.8%**, with
-everything else at 13.136 ms. The three-way separation the paragraph above
-deferred:
-
-| | ms/token | share | |
-|---|---|---|---|
-| GEMV (257 launches) | 29.005 | 68.8% | measured, in situ |
-| `attn_decode` (16) | 5.782 | 13.7% | measured, in situ - 2.45× the 2.31 ms estimated above |
-| `prep` (241) | 3.573 | 8.5% | measured, in situ |
-| `a‖b` GEMV (48) | 2.335 | 5.5% | measured, in situ |
-| **`gdn_step` (48)** | **0.733** | **1.7%** | measured, in situ - 92% of device bandwidth |
-
-The 2026-08-22 estimate was right that GDN is a small share and wrong about the
-reason it would be small: not "kernel-count, and replay removes it" but *it is
-the best-occupied kernel in the engine* - 192 work-groups at 540 GB/s, 1.09× its
-own traffic floor (doc 12, `gdn_step` → Measured). The occupancy problem the
-estimate expected to find in GDN is real and lives in the kernels that were
-given one or two work-groups - but **the unit is the subgroup, not the
-work-group**: spec 1.5's lever L2 gave `a‖b` 4× the work-groups at an unchanged
-subgroup count and it bought nothing, and a 16-way K split (8 → 128 subgroups)
-took that run's row from 2.341 to **0.256 ms/token** (docs/15 §L2). The `a‖b`
-row above is the pre-lever number as *this* table's run measured it, 2.335 -
-0.3% from the L2 before-run's 2.341, which is the instrument's spread on this
-row and the reason the two are never mixed inside one sentence.
-
-## 4. What is vLLM's MBU on the phase-1 model? - **resolved: 81%**
-
-31.50 t/s × 15.52 GB = 489 GB/s of 600. The 50-63% figure was MoE-only. The
-projected headroom for phase 1 is therefore ×1.23 to the bf16-`lm_head`
-roofline and ~×1.35 with `lm_head` at int4 (doc 05) - not 1.4-1.5× from host
-work alone. The thesis survives; its weight shifts to the MoE phases and to
-phase 2.
-
-**On the loader-measured `W` and the Level Zero bandwidth (15.540 GB, 590 GB/s
-- the pair docs/05 and BENCHMARKS.md use from 2026-08-25 on): 489 GB/s of 590 =
-83.0%.** Same conclusion, and the denominator that b70-decode's own 62.5% is
-quoted against, so the two are comparable.
-
-## 5. What is the per-kernel fixed cost inside a replayed command list?
-
-### P1 companion measurement (2026-09-05)
-
-This is a different execution model, not a contradiction of the captured-list
-rows below: P1 measured 8.319 µs for one L0 immediate launch, 2.149 µs at 1024,
-9.877 µs for one SYCL in-order launch, and 4.468 µs at 1024 (measured, iterate
-grade). Cross-queue SYCL→L0 wait was 8.569 µs and L0-event→SYCL was 14.797 µs;
-the 384-handoff C=2048 estimate is 3.290 ms (derived).
-
-Measured 2026-08-22 by `tools/probe/probe_replay`: one in-order regular list
-of N launches, closed once, replayed 1000 times behind a fence (median, after
-20 warm-ups).
-
-| kernel | N | us/replay | us/kernel |
-|---|---|---|---|
-| (empty list) | 0 | 6.4 | - |
-| noop | 1 | 9.9 | 9.89 |
-| noop | 250 | 134.6 | 0.54 |
-| noop | 700 | 360.7 | 0.52 |
-| ctrl_read | 1 | 5.9 | 5.90 |
-| ctrl_read | 250 | 161.4 | 0.65 |
-| ctrl_read | 700 | 438.6 | 0.63 |
-
-Per-kernel cost is 0.52 µs (`noop`) and 0.63 µs (`ctrl_read`, which reads one
-dword of a shared-memory control block - the shape of every decode kernel's
-first instruction) → **< 1 µs, so fusion is not on the phase-1 critical path**
-(spec 1 §4.1 rule: ≥ 3 µs yes, < 1 µs no) and the unfused ~645-kernel list
-(spec 1 §9.1) ships first at 0.335 ms of a step **measured at 42.14 ms**
-2026-08-25 - **0.8%**, confirming the call (doc 05).
-
-The empty submit + fence round trip is **6.4 µs** - the floor no fusion
-removes, paid once per token. The N = 1 rows are that floor plus one kernel,
-not a per-kernel number.
-
-**Measured in situ, 2026-08-25, on the real 645-kernel decode list** - the
-numbers above are noop and `ctrl_read` lists; these are the engine's own step
-(`b70-decode --profile --depth 4096 --steps 32`, [15](15-step-anatomy.md)):
-
-| | µs/step | µs/launch | kind |
-|---|---|---|---|
-| profiled gap (fence wall − Σ kernel durations) | 851.4 | 1.320 | measured - **upper bound** |
-| **un-instrumented gap** | **473** | **0.733** | **derived** |
-| this table's `noop` floor × 645 | 335 | 0.52 | estimated |
-
-The profiled number is an upper bound because every launch in a profiled list
-signals a host-visible event, and that flush is inside the *gap* (it lands after
-`kernelEnd`, so it never touches a kernel's own duration). The **derived** row
-is the honest one and it is arithmetic over two instruments: the bench step is
-42.141 ms of which 0.097 ms is host outside the fence, so an un-instrumented
-fence is 42.044 ms; Σ of the in-situ kernel durations is 41.571 ms; the
-difference is 0.473 ms.
-
-**0.733 µs/launch lands between this table's `noop` (0.52) and `ctrl_read`
-(0.63) floors, a shade above both** - which is what 645 kernels that each read
-the shared control block should cost, and it confirms the probe's
-transplantability at the third decimal. The conclusion is unchanged and now
-rests on a measurement rather than an extrapolation: **0.473 ms is 1.1% of a
-42.141 ms step, so fusion for launch-count's sake is not a lever** (spec 1 §4.1's
-≥ 3 µs rule). A by-product: the profiler's own distortion is 0.379 ms/step,
-**0.587 µs per launch** (derived) - a profiled step is 0.9% longer than a real
-one, all of it in the gap.
-
-## 6. How much accuracy does quantising `lm_head` cost?
-
-On the 27B it is 2.54 GB → 0.66 GB per token at int4 (×1.14 on the ceiling)
-or 1.27 GB at int8 (×1.09) - doc 05, from the header arithmetic. **Measured
-since, from the loader's own byte report on a real int4 head: 2 542 796 800 B →
-675 430 400 B, i.e. 2.543 → 0.675 GB** (docs/13). The estimate was 0.015 GB low
-because it did not carry the f16 `scales` stream; the ×1.14 is unaffected. `lm_head` is known to be
-quantisation-sensitive and the checkpoint author chose not to (`lm_head:
-false` in `quantization_config`). Needs a perplexity or `lm_eval` comparison
-against the unquantised baseline before adoption. In phase 2 the same question
-applies to the 0.85 GB bf16 MTP head, and `lm_head` is read twice per step.
-
-**Still open - but as of 2026-08-26 there is finally something to run it on.**
-The *speed* half is measured and closed (`lm_head` int4 is worth −3.05 ms/token
-at record grade, docs/BENCHMARKS.md "The record rows"); this question is the
-*accuracy* half and **no eval has been run**. What changed is that
-`~/models/qwen38-27b-w4g64-tuned/Qwen3.8-27B-w4g64` now exists beside
-`-rtn`, and all three checkpoints load in this engine with green golden gates
-(docs/14).
-
-**Only one of the two available comparisons is controlled, and it is not the
-obvious one.**
-
-| pair | what varies | controlled? |
-|---|---|---|
-| **`rtn` vs `tuned`** | **the tuning algorithm alone** - one script, one pinned auto-round v0.14.2, one flag apart; byte-identical tensor manifests | **YES.** This prices *tuning*, at a fixed head treatment |
-| `tuned` vs `Vishva007` | `--quant_lm_head` **and much else** | **NO** |
-
-`tuned` vs `Vishva007` is the pair that would price *quantising the head*, and
-it is confounded. docs/13's checkpoint-difference table enumerates what else
-moves between them: `quant_method` (`"auto-round"` vs `"gptq"` + `provider`),
-`packing_format` (present vs absent), `desc_act` (absent vs declared `false`),
-**400 `.g_idx` tensors present vs none shipped**, exclusions expressed as
-`extra_config` objects vs `dynamic` regexes, 29 `mtp` tensors (8 int4) vs 15
-(all bf16), 1650 vs 2050 language-model tensors, and 1628 vs 1658 subnormal f16
-scales. On top of that the published checkpoint's own tuning hyper-parameters
-(iterations, sequence length, calibration set) are **not published**, so even
-the tuning is not held fixed.
-
-**So the eventual `lm_eval` should be read as two separate results**, and
-neither on its own answers the title question cleanly:
-
-1. `rtn` vs `tuned` - *what tuning buys*, controlled, both with int4 heads;
-2. `tuned` vs `Vishva007` - *the whole self-quantisation delta*, confounded, and
-   a difference here cannot be attributed to the head without a further run.
-
-The clean experiment for the title question does not exist yet: it is a pair
-quantised by **the same script and version, differing only in
-`--quant_lm_head`**. That is one more `tools/quantize_qwen38_tuned.sh` run with
-the flag dropped, and it is the cheapest way to make this question answerable
-rather than merely runnable.
-
-**Deliberately not run here.** The `lm_eval` comparison is a recorded next step
-for the operator, not something to slip into a measurement task: it is hours of
-GPU, it needs task selection and a seed policy decided up front, and - see
-below - the obvious vehicle for running it is currently blocked.
-
-> **Caveat on the vehicle.** vLLM in the current image **cannot load either
-> self-quantised artifact** (docs/14, "The vLLM smoke test"). It routes them to
-> its INC wNa16 path on their `quant_method: "auto-round"`, and that path raises
-> `AttributeError: Cannot determine in_features for layer.` after the weights
-> have loaded. *Which* module it fails on is not identified in the logs, so the
-> quantised head is a plausible cause and not a proven one. Either way an
-> `lm_eval` through vLLM would have to use the published checkpoint only, which
-> is the baseline and not the thing under test. Evaluating the int4 head today
-> means `transformers` on CPU (the oracle's own path, which does dequantise it -
-> `lm_head: int4 (dequantised here)`) or this engine.
-
-## 7. Can 24 MB of L2 be exploited deliberately?
-
-Unusually large. A 4096×4096 int4 tile is 8 MB. Whether multi-layer weight
-residency is achievable, or whether the replacement policy defeats it, is
-unknown. Measure before designing around it.
-
-## 8. Is `MainloopIntelW8A8` worth it for prefill?
-
-int8 XMX has roughly 2× bf16 throughput and prefill *is* compute-bound. But it
-requires int8 activations, i.e. dynamic activation quantisation and its accuracy
-cost. Out of scope for phase 1; revisit once decode is winning.
-
-**Largely superseded by #9.** W4A8 gets the same int8 systolic path while keeping
-weights at 4 bits - same compute win, half the memory traffic, and no need to
-re-quantise the checkpoint. Answer #9 first; if it holds, W8A8 is uninteresting.
-
-## 9. Is native mixed s8 × s4 DPAS reachable, and what does it cost?
-
-`oneDNN/src/gpu/intel/gemm/jit/pd.cpp:772` documents a **native int8 × int4 DPAS**
-on all pre-Xe3p hardware - Battlemage included - gated only on the int4 matrix
-having no zero points. Our checkpoints are all symmetric, so the gate opens.
-
-If real, a **W4A8 prefill** path gets int8 systolic throughput *and* zero
-dequantisation, which neither vLLM nor OpenVINO uses (both run W4A16). That would
-beat both rather than matching one.
-
-**Partly answered (2026-08-22):** `sycl-tla` *does* declare the atoms -
-`include/cute/arch/mma_xe.hpp:287-297`, `XE_DPAS_TT(d, s8, s4, d)` plus every
-u/s permutation, compiled out only for CRI. What it lacks is a mainloop that
-feeds them: `xe_mma_mixed_input.hpp` widens int4 to 16-bit. So the question is
-no longer "is it reachable" but "write a CuTe mainloop on an existing atom, and
-does it win".
-
-Still unknown:
-
-- Whether the s8×s4 DPAS runs at the int8 rate on a B70 (it might be
-  microcoded to the same cost as s8×s8 plus a widen - measure with a single
-  atom in a loop before writing a mainloop).
-- What dynamic int8 activation quantisation costs in output quality.
-- Whether the win survives the quantise-activations step, which is itself a pass
-  over the activations.
-
-Cheapest probe: benchmark oneDNN directly at prefill shapes, W4A16 vs W4A8, before
-building anything.
-
-Spec 2 §10 puts this out of scope for the current prefill stage. The atom is
-reachable but OpenCL C builtins compile without lowering on this driver; it is
-not a current work item.
-
-## 10. Does MXFP4 need original kernel work on Battlemage?
-
-`sycl-tla`'s block-scaled examples are `50_xe35_*` / `51_xe35_*` - Xe3.5, not
-BMG. Phase 3 may need to write or adapt block-scale handling rather than lift it.
-Confirm by attempting to instantiate the block-scaled mainloop for a BMG target
-before committing to the phase-3 schedule.
-
-## 11. Which tokenizer dependency, and what does it cost goal 3?
-
-Not mentioned in the first draft of these docs at all. Every request passes
-through BPE encode; every token through detokenise. Options and trade-offs in
-[11-tokenizer-and-chat-template.md](11-tokenizer-and-chat-template.md). The
-decision is between parity (HF `tokenizers` via FFI - exact, but a Rust
-toolchain in the build) and ownership (a hand-written byte-level BPE - no
-dependency, parity must be proven on a corpus). Resolve before the server
-milestone, not before the decode core.
-
-## 12. What does a fixed-grid attention kernel cost at short context? - **resolved: 0.046 ms/token, 0.11% of a step. Keep the fixed grid.**
-
-Under replay the attention grid is sized for `max_model_len` and idle
-work-groups exit early (doc 04, "Attention under replay"). The original test:
-measure the step at `seq_len = 64` vs `seq_len = 4096` with the same list, and
-if the difference exceeds ~2% of a step, capture context-bucketed lists
-instead.
-
-**Measured 2026-08-25**, `b70-decode --bench`, tg 256, three runs each on an
-idle box (BENCHMARKS.md carries every row):
-
-Live blocks are `nb = (pos + m)/ATTN_BLOCK + 1` (`attn.cl:551`; the divisor was
-a literal 256 when this was measured - see the L5 note at the end of this
-entry), counted over the 256 positions each `tg` walks:
-
-| shape | grid (`attn_decode`) | live blocks (`nb`) | t/s | ms/token |
-|---|---|---|---|---|
-| depth 4096, `--max-len 16384` | 4 × 64 | 17 throughout (`pos` 4096…4351) | 23.73 | 42.141 |
-| depth 64, `--max-len 16384` | 4 × 64 | mean 1.25 (1 for 192 tokens, 2 for 64) | 25.00 | 39.997 |
-| depth 64, `--max-len 4096` | 4 × 16 | mean 1.25, same as above | 25.03 | 39.951 |
-
-The first two rows are the experiment as written: **2.144 ms/token, 5.1% of the
-step**, well over the 2% bar. But that difference is not what the question was
-asking about - it is the *real* work of 15.75 more live 256-position blocks,
-which a bucketed list would still have to do. Reading it as the fixed grid's
-cost would have got the answer exactly backwards.
-
-The third row is the experiment the question actually needed, and it exists
-because `attn_decode`/`attn_reduce` are already compiled at `MAXLEN = 4096` as
-well as 16384: **same depth, same live blocks, same work, one quarter of the
-grid.** The difference is **0.046 ms/token - 0.11% of the step** for 48 extra
-idle blocks × 4 kv-heads × 16 layers = **3072 extra work-groups**, i.e. **~15 ns
-per early-outed work-group**. (`--max-len` also changes `attn_part`'s stride and
-the KV footprint, but `attn_reduce`'s merge loop is bounded by `nb` - 1.25 in
-both rows - so the early-out dominates the difference; doc 12's `attn` →
-Measured spells this out.) That is the number this entry wanted.
-
-The pair is also **thermally matched** - both runs follow the same 2.4 s ingest
-- which the 2.144 ms depth delta is not: its depth-4096 run follows 170 s of
-continuous replay. That asymmetry is one reason doc 05 labels the 2.31 ms of
-attention work it extrapolates from that delta *estimated* rather than
-measured.
-
-**Re-checked against a 4× larger grid, 2026-08-25 (spec 1.5 lever L5) - the
-resolution survives, and the margin is wider than it was.** Every number above
-was measured at `ATTN_BLOCK` 256, where `attn_decode`'s grid at `max_len` 16384
-was 4 × 64 = 256 work-groups. L5 took the block to **64**, so the grid is now
-4 × 256 = **1024** and the idle work-groups at depth 4096 went 188 → 764 per
-launch. That is exactly the input this entry's conclusion depends on, so it is
-worth saying explicitly what happened to it: **nothing bad.** The per-launch
-in-situ timing of the retiled kernel is 224.046 µs against 369.988 (docs/15
-§L5), i.e. the launch got **39% faster while quadrupling its grid** - which is a
-far stronger version of this entry's finding than the 0.11% it was resolved on.
-**The transplant, done once and properly** (an earlier version of this
-paragraph mixed two different rates and got it wrong by 47×). This entry's own
-rate is **0.046 ms/token / 3072 work-groups = 14.97 ns per early-outed
-work-group**. The retile adds 576 idle work-groups per launch, and there are 16
-`attn_decode` launches per token, so it adds **9216 per token**:
-
-    9216 x 14.97 ns = 138 us/token = 0.138 ms  ->  0.38% of the 36.32 ms step
-    per launch: 576 x 14.97 ns = 8.6 us        ->  3.8% of the retiled 224.046 us
-
-That is the **conservative** rate. docs/15 §2 measured the same experiment on the
-kernel itself rather than on a whole-step bench difference and got 0.04% of a
-153.608 µs launch for 192 work-groups = **0.32 ns/work-group**, 47× smaller,
-which would put the same 9216 at 0.003 ms/token. The two disagree because one is
-a bench delta carrying everything else that differs between two runs and the
-other is a kernel timing; this entry keeps its own, larger number so the bound is
-not flattered.
-
-**Neither figure is a term to add, and that is the point.** The retiled kernel's
-224.046 µs/launch was measured *with* all 764 of its idle work-groups in the
-grid, so whatever they cost is already inside the −2.219 ms/token the lever
-banked. The transplant only answers "did quadrupling the grid blow the early-out
-budget", and the direct measurement answers it better: **the launch got 39%
-faster while its grid grew 4×.** **The fixed grid is cheaper than this entry
-could prove in 2026-08's measurement, not more expensive.**
-
-**Resolution: the fixed grid stays.** Context-bucketed lists would buy 0.11% and
-cost a captured list per bucket, the memory for it, and a host-side branch on
-context length in the one loop that currently has no branches at all. The
-early-out (doc 12, "The early-out - the answer to a grid that cannot be
-re-sized") does its job. Attention is not on the phase-1 critical path - doc 05
-puts the phase-1 shortfall in `prep`/`gdn_step` instead.
-
-```bash
-tools/bench_decode.sh                     # row 1
-tools/bench_decode.sh --depth 64          # row 2
-# Row 3 has no --max-len flag in the harness, so it is a direct box.sh run. The
-# $(...) is deliberately substituted by the LOCAL shell: tools/box.sh syncs the
-# tree without .git, so the box cannot name the commit and the row would print
-# `unknown` (the run recorded above passed B70_GIT_SHA=62bdd4d this way).
-SHA=$(git rev-parse --short HEAD)
-tools/box.sh run "B70_GIT_SHA=$SHA ./build/src/cli/b70-decode <model> --bench --depth 64 --tg 256 --max-len 4096"
-```
-
-## 13. Can a `sycl-tla` kernel be appended to a raw L0 command list at all?
-
-Doc 04 recommends keeping `sycl-tla` out of the decode list, which sidesteps
-this. But phase 3's grouped GEMM may want a CuTe kernel at decode. Probe:
-take `00_bmg_gemm`, get its `ze_kernel_handle_t` via
-`sycl::get_native<backend::ext_oneapi_level_zero>` on a named kernel bundle,
-append it to a regular command list, replay twice, diff. Cheap, and it settles
-whether the two toolchains can ever share a list.
-
-## 14. Which checkpoint is phase 1? - **resolved: `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ`**
-
-No working 9B exists on the box (2026-08-22). Phases 1 and 2 share the 27B;
-its architecture, byte accounting and baseline are in doc 03 and
-BENCHMARKS.md. Open sub-question: the implied MTP acceptance rate on this
-model is unknown - vLLM's 42.56 / 45.23 at 1 / 2 drafts bounds it from below
-but does not separate acceptance from step cost. Log it from vLLM
-(`--speculative-config` metrics) before sizing the phase-2 ceiling.
-
-## 15. Is the box driver/IGC combination validated for these Xe2 templates?
-
-Open. Stage 0 ran on `libze_intel_gpu.so.1.15.39122`, IGC 2.38.x and ocloc
-26.27, newer than sycl-tla's Xe2 CI combination (Compute Runtime 26.01, IGC
-2.27). P2's AOT-256-GRF GEMM and P4's hdim-256 FMHA launch are the only
-iterate-grade evidence; P5's CuTe header remains blocked by missing PyTorch
-development headers rather than a device compile result.
-
-## 16. Does the `M` dimension of the decode kernels reach a prefill width? - **resolved: no, and the answer is a second kernel family**
-
-Closed by spec 2 Stage 1 L1. Plan 6b ruling R1's arithmetic settled it before
-any of it was built: decode's split-K `S` exists to buy hardware threads at
-`M = 1`, and at `M = C` a `[S][M][N]` partials rectangle at gate‖up's
-`N = 34816` and `S = 8` is multi-terabyte. So the prefill path is `pf_*`, a
-**second** family compiled at `S = 1` with `M` as a runtime argument, and the
-decode binaries are untouched - 774 launches / 19 modules, byte for byte.
-
-Stage 0 measured what the alternative would have cost, which is the part worth
-keeping: the same kernels timed at decode's `S` read **361-473 ms/chunk** at
-`M = 2048`; at `S = 1` they read **130.346**, and in situ **131.1**. That 3×
-was not a kernel defect - it was a measurement taken at the wrong `S`, and
-naming it is why the small-kernel term is now the smallest in the composition
-rather than the second largest.
-
-## 17. The profiler cannot see the prefill walk - **opened by spec 2 Stage 1 L1, priced**
-
-`--profile` builds two `CapturedStep`s and grades one against the other; the
+What is genuinely not known, ranked by how much the answer would change the
+design. Nothing here is settled, and nothing here should become an assumption in
+a design document without being measured first.
+
+Questions that have been answered are not listed. Their answers live where they
+are used: the DPAS rate landscape in [01-hardware.md](01-hardware.md), the
+format decisions in [02-formats.md](02-formats.md), the time decomposition and
+the rejected optimisations in [05-perf-model.md](05-perf-model.md), the
+execution model in [04-architecture.md](04-architecture.md).
+
+## 1. Why is decode still about 5% behind vLLM, on the same bytes?
+
+The standing rows are **29.45 t/s against 31.01**, byte-matched, on a roofline
+of 37.97. This is the project's largest open question and it has resisted the
+obvious answers.
+
+What is ruled out, each by measurement:
+
+- **Host overhead.** 99.77% of the step is inside the GPU fence and the host
+  spends 97 us per token. There is nothing left to delete.
+- **The linears.** They run at 89-97% of their per-shape bandwidth ceilings, and
+  `lm_head` alone runs at 98.5% of the measured 590 GB/s.
+- **`gdn_step`.** 1.7% of the step at 1.09x its own traffic floor, 92% of device
+  bandwidth.
+- **Launch count.** The in-situ dispatch gap is 0.473 ms, about 1.1% of a step.
+- **The attention grid's early-out.** 0.11% of a step for 3072 idle
+  work-groups.
+
+What remains is the attention kernel's unexplained per-launch term, below, plus
+the accumulation of several kernels each within a few percent of their own
+ceilings. A 5% gap made of ten 0.5% terms is a different problem from a 5% gap
+with one cause, and which of the two this is has not been established.
+
+## 2. The 224 us per-launch term in `attn_decode`
+
+**Four successive cost models have died on this kernel.** Two attention models
+died to a third depth point, a per-work-group occupancy ceiling died to a
+bit-identical rewrite, and a fill-fraction model and its refit died to a block
+sweep.
+
+What is measured: the retiled launch costs 224.046 us, its dominant named term
+is the **KV load path at 55.4%** - 39.2% the 32-byte load messages themselves,
+16.2% cache service - and the shape is throughput-bound rather than a latency
+chain. What is not measured is a model that predicts the launch time from the
+shape, which is what any further lever here would have to be designed against.
+
+A methodology warning that belongs with it: **a "hold the address constant"
+ablation is not a cache ablation.** A loop-invariant address over a `restrict`
+pointer is legally hoistable, IGC hoisted it, and that turned a cache-miss probe
+into a message-count probe and inverted the answer. Make the hot address a
+function of the loop variable.
+
+## 3. Is W4A4 reachable, and what does it cost in accuracy?
+
+`i4_i4_matrix_mad_k64` measures **733.80 TIOP/s, 4.000x bf16**, and the assembly
+shows `:s4` on both operands of a single `dpas.8x8`, so it is a genuine
+single-instruction rate and not an emulation. The unsigned form measures
+identically, so an asymmetric checkpoint's packing costs nothing.
+
+**It is the only DPAS lever on this device worth more than 2x.** Everything
+narrower buys nothing further, and FP4 is refused by the backend outright.
+
+Unknown, and in this order:
+
+- What 4-bit activations cost in output quality. The W4A8 probe already measured
+  **2.79% relative L2 error** from int8 activations alone, driven by outliers,
+  which is not encouraging for int4.
+- Whether a W4A4 kernel would keep the production GEMM's 88.1% efficiency. If it
+  did, the rate would be about 646 TIOP/s - an estimate by proportion with no
+  kernel written.
+- Whether the per-group rescale that sank W4A8 sinks this too. That cost was
+  3.0 to 3.4 ms of a 5.440 ms kernel, and it does not obviously get cheaper.
+
+The order matters: measure the accuracy on a probe before writing a mainloop.
+That is the mistake W4A8 made and it cost a kernel.
+
+## 4. Is W8A8 worth anything for prefill?
+
+int8 XMX has 2x bf16 throughput and prefill is compute-bound. The rate is now
+known exactly - `i8_i8_k32` at 366.90 TIOP/s - and it is **the same rate as the
+mixed 4-bit form**, so W8A8 and W4A8 share one ceiling.
+
+That makes W8A8 strictly worse than W4A8 on weight bytes for the same compute
+ceiling, and W4A8 already lost. The remaining argument for W8A8 is that it needs
+no per-group weight rescale, which is the term that sank W4A8 - but it would
+need the checkpoint re-quantised to int8, and it still pays the activation
+quantiser and the activation-outlier accuracy cost. Nobody has priced that
+combination.
+
+## 5. How much accuracy does quantising `lm_head` cost?
+
+**The speed half is closed and the accuracy half has never been run.**
+
+At int4 the head is 2.543 GB to 0.675 GB per token, worth a measured -3.05 ms
+per token at record grade. `lm_head` is known to be quantisation-sensitive and
+checkpoint authors routinely decline to quantise it, so this needs a perplexity
+or `lm_eval` comparison against the unquantised baseline before anyone adopts
+it.
+
+**The clean experiment does not exist yet**, and that is the useful part of this
+entry. Comparing a self-quantised checkpoint against a published one confounds
+the head with everything else that differs between two quantiser runs:
+`quant_method` spelling, `packing_format`, whether `g_idx` is shipped at all,
+whether exclusions are regexes or per-module objects, how many `mtp` tensors
+there are, and the published checkpoint's own unpublished tuning
+hyper-parameters. The experiment that answers the title question is **one pair
+quantised by the same script and version, differing only in whether the head is
+packed**.
+
+## 6. Can 24 MB of L2 be exploited deliberately?
+
+Unusually large for this class of card. A 4096x4096 int4 tile is 8 MB, so
+multi-layer weight residency is arguable. Whether it is achievable or whether
+the replacement policy defeats it is unknown. Measure before designing around
+it.
+
+One data point in the opposite direction: L2 did absorb a 6x KV reread in the
+attention kernel before register-packed GQA removed the reread. That says the
+cache helps when you do not plan for it, not that it can be planned around.
+
+## 7. The two cards are not interchangeable, and only prefill sees it
+
+Same binary, same checkpoint, same ten minutes: prefill loses 3.2% to 3.4% on
+the second card and decode loses 0.2% to 0.4%. The separation is far outside the
+spreads and reproduces on two checkpoints.
+
+That is a difference in sustained compute rather than in bandwidth, seen by the
+compute-bound workload and not by the bandwidth-bound one. **Unattributed**:
+neither card drives a display, both report identical unprivileged PCIe link
+fields, and the frequency interface needs root. Until it is explained, every
+series row in [BENCHMARKS.md](BENCHMARKS.md) is taken on one named card and says
+so.
+
+## 8. The split-BF16 scan's remaining single-precision operand
+
+The delta net scan is the one approximation in the default prefill path. It is
+gated on tokens and state cosines rather than bitwise, and it holds: 93 of 93
+determined rows exact, state cosines 0.9997 and better against a 0.999 bar.
+
+**One honest limit**: `vn` inside the A2 term is still a single BF16 operand,
+measured harmless on three prompts of one checkpoint and not proven in general.
+Whether a longer prompt, a different checkpoint or a different numerical regime
+reaches it is untested. Details in
+[prefill-gdn-scan-split-fix-2026-09-23.md](prefill-gdn-scan-split-fix-2026-09-23.md).
+
+## 9. The profiler cannot see inside the prefill walk
+
+`--profile` builds two captured steps and grades one against the other. The
 prefill walk is not a capture and never will be, because its arguments are
-resolved per launch. So `ProfileEvents` has nothing to attach to.
+resolved per launch, so the profile events have nothing to attach to.
 
-**Priced, and a cheap version already exists.** `B70_PREFILL_PROFILE=1`
-(`src/runtime/prefill/profile.h`) times every `Context::wait()` in the walk,
-which is a complete attribution *for free* - rulings A23/A24 already put a host
-wait at every L0↔SYCL boundary, so the wall time of a wait is the device time
-of everything queued since the previous drain. Its own overhead is measured at
-**−2.0%**, inside the run-to-run spread, and it is what produced
-`docs/prefill-pp-attribution-2026-09-05.md`. What it cannot do is separate two
-L0 kernels appended back to back without inserting a wait between them (which
-it does, in profile mode only, and which is why the profiled total is an upper
-bound).
+**A cheap version exists and is priced.** `B70_PREFILL_PROFILE=1` times every
+drain in the walk, which is a complete attribution when there is a drain at
+every boundary. Its own overhead measures -2.0%, inside the run-to-run spread.
+What it cannot do is separate two Level Zero kernels appended back to back
+without inserting a drain between them - which it does, in profile mode only,
+and which is why the profiled total is an upper bound.
 
-The full version - an optional `l0::Event` pool signalled per launch, giving
-device timestamps without extra waits - is **one task**, and it is L2's, where
-the numbers decide something. Recommended, not scheduled. What is NOT
-recommended is capturing the walk: arguments change per chunk and per layer, so
-there is nothing to capture.
+**The full version is one task and is not scheduled**: an optional event pool
+signalled per launch, giving device timestamps without extra drains. What is
+*not* recommended is capturing the walk. Arguments change per chunk and per
+layer, so there is nothing to capture.
+
+## 10. Can a SYCL kernel be appended to a raw Level Zero command list at all?
+
+The decode list deliberately contains no SYCL kernels, which sidesteps this, and
+prefill now runs its own GEMM on the Level Zero list rather than sycl-tla's,
+which sidesteps it again. So this is no longer on any critical path.
+
+It is kept because it is cheap and it settles a real architectural question:
+take a `sycl-tla` example, extract its `ze_kernel_handle_t` via
+`sycl::get_native<backend::ext_oneapi_level_zero>` on a named kernel bundle,
+append it to a regular command list, replay twice, diff. That would say whether
+the two toolchains can ever share one list, which matters the moment a kernel
+family exists that is genuinely easier to write in CuTe.
