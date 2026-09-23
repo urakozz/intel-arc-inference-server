@@ -20,11 +20,18 @@ std::string slurp(const std::string& path) {
   return contents.str();
 }
 
+// Same resolution as tok::default_tokenizer_json: no home directory baked in.
 std::string snapshot() {
-  const char* env = std::getenv("B70_SNAPSHOT_DIR");
-  return env ? env
-             : "/home/user/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/"
-               "snapshots/84575a18f209992ef96d819b31f924b489e3d55d";
+  if (const char* env = std::getenv("B70_SNAPSHOT_DIR")) return env;
+  std::string root;
+  if (const char* hf = std::getenv("HF_HOME")) {
+    root = hf;
+  } else if (const char* home = std::getenv("HOME")) {
+    root = std::string(home) + "/.cache/huggingface";
+  } else {
+    root = ".cache/huggingface";
+  }
+  return root + "/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d";
 }
 
 void diff_report(const char* name, const std::string& got, const std::string& want) {
