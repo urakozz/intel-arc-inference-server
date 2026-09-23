@@ -60,32 +60,34 @@ void require(bool ok, const std::string& what) {
 // supported configuration operation; compare selectors in separate processes.
 static const char* gdn_scan_entry() {
   static const char* const entry = [] {
-    // The default is the VECTOR scan. It was promoted to the split-BF16 entry on
-    // 2026-09-22 and reverted the same hour: under the current tree the split
-    // scan FAILS the gates it passed on 2026-09-21 -- `prefill_gate_l0_test`
-    // returned 92/93 determined rows with a `gdn_state` cosine of 0.996344994
-    // at L60 on the code prompt (bar: > 0.999; that prompt recorded 0.999189068
-    // in the original experiment), and `gdn_chunk_test`'s pre-registered band
-    // missed on both halves (rel L2 2.7395e-03 vs <= 2.0e-3, max rel 2.9650e-02
-    // vs <= 1.0e-2). Evidence: `$HOME/split-default-suite.log` on the box.
-    // What changed between the two runs is not yet known; S2a, S3 and S4 all
-    // landed in between, and each is bitwise-identical *between backends*, which
-    // is a property the equivalence test cannot use to catch a GDN change --
-    // both backends run the same GDN kernels, so a scan difference cancels.
-    // Do not promote this default again without re-running the gates.
+    // **The default is the VECTOR scan, and this commit does not change that.**
+    // The split entry was promoted to the default on 2026-09-22 and reverted the
+    // same hour because it FAILED `prefill_gate_l0_test`: 92/93 determined rows,
+    // the code prompt's L60 `gdn_state` cosine 0.996344994 against a > 0.999 bar
+    // (`$HOME/split-default-suite.log`, reproduced to nine digits on device 0 in
+    // `$HOME/split-dev0.log`). The cause was found on 2026-09-23 and fixed --
+    // `A2` was the last single-BF16 DPAS operand and it feeds `o` directly, so
+    // it now carries hi/lo limbs like `S` and `D` (pf_gdn_scan.cl entry (3), and
+    // docs/prefill-gdn-scan-split-fix-2026-09-23.md for the 2x2 that attributed
+    // it). The fixed entry passes the gate at 93/93 with every cosine over the
+    // bar, and it is 2.33x faster than the vector scan on the `gdn_scan` profile
+    // row -- but it is still approximate arithmetic behind an opt-in selector,
+    // and promoting it is a separate decision with its own evidence. The next
+    // person to try it re-runs the gates AND proves the dispatch (see gdn.h).
+    //
+    // **One claim in the reverted note was wrong and is corrected here.** It
+    // also blamed "`gdn_chunk_test`'s pre-registered band ... rel L2 2.7395e-03,
+    // max rel 2.9650e-02". Those two numbers are `attn_chunk_test`'s standing
+    // band MISS against the L1-engine pre-registration, not `gdn_chunk_test`'s
+    // and not the scan's: the identical pair is printed by
+    // `$HOME/spec21-suite.log` (2026-09-18) and `$HOME/suite-igc2415.log`
+    // (2026-09-19), both under the vector default, and attention runs no GDN
+    // kernel. `gdn_chunk_test` prints no rel L2 at all.
     const char* const v = std::getenv("B70_PREFILL_GDN_SCAN");
     if (!v || !*v || std::string(v) == "vector") return "pf_gdn_scan";
     if (std::string(v) == "dpas_split") return "pf_gdn_scan_dpas_split";
-    // THROWAWAY (2026-09-23, step 1 of the split-scan fix): the four fp32/bf16
-    // `A2*vn` diagnostic entries of pf_gdn_scan.cl. They ship nothing and are
-    // removed with that block once the diagnosis is recorded.
-    if (std::string(v) == "dpas_split_diag_bf16") return "pf_gdn_scan_dpas_split_diag_bf16";
-    if (std::string(v) == "dpas_split_diag_a2") return "pf_gdn_scan_dpas_split_diag_a2";
-    if (std::string(v) == "dpas_split_diag_vn") return "pf_gdn_scan_dpas_split_diag_vn";
-    if (std::string(v) == "dpas_split_diag_f32") return "pf_gdn_scan_dpas_split_diag_f32";
     throw std::runtime_error("runtime::prefill::gdn_chunk: B70_PREFILL_GDN_SCAN must be "
-                             "unset, 'vector', 'dpas_split' or one of the throwaway "
-                             "'dpas_split_diag_{bf16,a2,vn,f32}' (got '" +
+                             "unset, 'vector', or 'dpas_split' (got '" +
                              std::string(v) + "')");
   }();
   return entry;

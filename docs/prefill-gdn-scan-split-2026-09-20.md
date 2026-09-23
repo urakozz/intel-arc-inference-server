@@ -279,3 +279,24 @@ against a CPU oracle.
 The production default is unchanged by this amendment: `vector` remains the
 shipped scan.  Whether the now-fully-gated `dpas_split` selector is promoted is
 a separate decision with its own record.
+
+## Amendment - 2026-09-23 (the "Available Vishva gates" section is void, and the kernel is fixed)
+
+Two corrections, neither of which changes the vector default.
+
+**1. This record's green gates are not evidence.** Its cosines are bit-identical
+to the vector kernel's from three days earlier; that run was executing
+`pf_gdn_scan`, not the split entry
+(`docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md` §11). Run
+with its dispatch proven, the split entry as shipped on 2026-09-20 **fails**
+`prefill_gate_l0_test`: 92/93, code L60 `gdn_state` cosine 0.996344994.
+
+**2. The cause was `A2`, and it is fixed.** "`A2*vn` deliberately remains D2's
+single-BF16 controlled variable" was the whole failure - a 2x2 on the golden gate
+put all of it on `A2`'s rounding and none on `vn`'s. `A2` now carries hi/lo BF16
+limbs like `S` and `D`; the entry passes at 93/93 with every cosine over 0.999
+and keeps a measured 2.33x over the vector scan on the `gdn_scan` profile row.
+See `docs/prefill-gdn-scan-split-fix-2026-09-23.md`. The ABBA throughput table
+above was measured through `prefill_replay_test` run directly, where the two
+selectors did produce different wall times, so it stands as a selector
+comparison - but it was measured on the pre-fix kernel.
