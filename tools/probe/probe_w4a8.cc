@@ -247,6 +247,86 @@ int capture(const std::string& snap, const std::string& ids_path, const std::str
 }
 
 // --------------------------------------------------------------------------
+// capture-down: the same, for the LAST layer's down projection
+// --------------------------------------------------------------------------
+// After prefill, `PrefillScratch::x` still holds the last layer's down A
+// operand, silu(gate) * up, bf16 [C][17408] (runtime/prefill/step.cc). One
+// slice of it is gone: step_head writes the final norm's ONE output row into x
+// at element offset last_row * 5120, so the rows that range touches are
+// recorded in the header (`pad` = first clobbered row, `version` 2) for the
+// reader to drop. Only the last layer is reachable this way; other layers'
+// activations are overwritten by the walk.
+int capture_down(const std::string& snap, const std::string& ids_path,
+                 const std::string& out_path) {
+  constexpr uint32_t kDK = 17408, kDN = 5120, kLast = 63;
+  std::printf("# W4A8 probe -- capture-down (layer %u down projection)\n", kLast);
+  std::printf("# ZE_AFFINITY_MASK=%s\n", env_or_unset("ZE_AFFINITY_MASK"));
+
+  std::vector<uint32_t> ids;
+  {
+    std::ifstream f(ids_path);
+    if (!f) throw std::runtime_error("cannot open ids file: " + ids_path);
+    for (long long v; f >> v;) ids.push_back(uint32_t(v));
+  }
+  if (ids.size() < kM) throw std::runtime_error("prompt has only " + std::to_string(ids.size()) +
+                                                " ids; need " + std::to_string(kM));
+  ids.resize(kM);
+
+  l0::Context ctx(0);
+  constexpr uint32_t kMaxLen = 16384;
+  loader::LoadedModel model = loader::load(ctx, snap, kMaxLen);
+  runtime::Engine eng(ctx, std::move(model), kMaxLen);
+  eng.set_prefill_backend(runtime::PrefillBackend::L0);
+  eng.reset();
+  eng.prefill(ids, kM);
+  std::printf("# prefill done: pos = %u\n", eng.pos());
+
+  const runtime::PrefillScratch* pf = eng.prefill_scratch();
+  if (pf == nullptr) throw std::runtime_error("no prefill scratch after prefill()");
+  const loader::DeviceWeight& w = eng.model().linears.at({kLast, model::LinearId::Down});
+  if (w.shape.K != kDK || w.shape.N != kDN || w.shape.layout != 0 || w.scales == nullptr)
+    throw std::runtime_error("layer 63 down is not the expected K=17408 N=5120 layout-0 int4");
+
+  const size_t act_bytes = size_t(kM) * kDK * sizeof(uint16_t);
+  const size_t q_bytes = size_t(kDK / 8) * kDN * sizeof(uint32_t);
+  const size_t s_bytes = size_t(kDK / kGroup) * kDN * sizeof(uint16_t);
+  std::vector<uint16_t> act(size_t(kM) * kDK);
+  std::vector<uint32_t> qw(size_t(kDK / 8) * kDN);
+  std::vector<uint16_t> sc(size_t(kDK / kGroup) * kDN);
+  download(ctx, act.data(), pf->x.ptr(), act_bytes);
+  download(ctx, qw.data(), w.mem.ptr(), q_bytes);
+  download(ctx, sc.data(), w.scales->ptr(), s_bytes);
+
+  const uint32_t clobber_row = uint32_t((size_t(kM - 1) * 5120) / kDK);
+  double amax = 0.0, asum = 0.0;
+  size_t nz = 0;
+  for (uint16_t h : act) {
+    const double v = std::fabs(double(common::bf16_to_f32(h)));
+    amax = std::max(amax, v);
+    asum += v;
+    nz += (v != 0.0);
+  }
+  std::printf("# captured activations: max|x| %.6g, mean|x| %.6g, non-zero %zu/%zu; "
+              "rows from %u clobbered by step_head\n",
+              amax, asum / double(act.size()), nz, act.size(), clobber_row);
+  if (nz * 2 < act.size()) throw std::runtime_error("captured activations are mostly zero");
+
+  Header h{};
+  std::memcpy(h.magic, "B70W4A8", 8);
+  h.version = 2; h.layer = kLast; h.M = kM; h.K = kDK; h.N = kDN; h.group = kGroup;
+  h.pad = clobber_row;
+  std::ofstream f(out_path, std::ios::binary);
+  if (!f) throw std::runtime_error("cannot write " + out_path);
+  f.write(reinterpret_cast<const char*>(&h), sizeof h);
+  f.write(reinterpret_cast<const char*>(act.data()), std::streamsize(act_bytes));
+  f.write(reinterpret_cast<const char*>(qw.data()), std::streamsize(q_bytes));
+  f.write(reinterpret_cast<const char*>(sc.data()), std::streamsize(s_bytes));
+  std::printf("# wrote %s: layer %u down weights + the chunk's activations\n", out_path.c_str(),
+              kLast);
+  return 0;
+}
+
+// --------------------------------------------------------------------------
 // the error characterisation of design §5
 // --------------------------------------------------------------------------
 struct ErrStat {
@@ -328,9 +408,12 @@ int main(int argc, char** argv) {
       return capture(argv[2], argv[3], argv[4],
                      argc > 5 ? uint32_t(std::atoi(argv[5])) : kDefaultLayer);
     }
+    if (argc >= 5 && std::string(argv[1]) == "--capture-down")
+      return capture_down(argv[2], argv[3], argv[4]);
     if (argc < 2) {
       std::fprintf(stderr,
                    "usage: probe_w4a8 <capture-file>\n"
+                   "       probe_w4a8 --capture-down <snapshot> <ids-file> <out-file>\n"
                    "       probe_w4a8 --capture <snapshot> <ids-file> <out-file> [layer]\n");
       return 2;
     }
