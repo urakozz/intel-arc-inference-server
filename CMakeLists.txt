@@ -33,7 +33,7 @@ endfunction()
 add_custom_target(golden
   COMMAND ${CMAKE_COMMAND} -E echo "The oracle runs on the box, in the reference container (61 GiB peak, ~17 min):"
   COMMAND ${CMAKE_COMMAND} -E echo "  tools/box.sh sync                     # from the Mac"
-  COMMAND ${CMAKE_COMMAND} -E echo "  ssh user@box && cd ~/b70-inference-server"
+  COMMAND ${CMAKE_COMMAND} -E echo "  ssh \"$BOX\" && cd ~/b70-inference-server"
   COMMAND ${CMAKE_COMMAND} -E echo "  setsid nohup tools/oracle/golden.sh > oracle-out/golden.log 2>&1 </dev/null &"
   COMMAND ${CMAKE_COMMAND} -E echo "  tools/oracle/check.sh                 # re-read what was written"
   COMMAND ${CMAKE_COMMAND} -E echo "Prompt ids first, and the measured numbers: tools/oracle/README.md, 'Running it'."

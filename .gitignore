@@ -106,6 +106,8 @@ Thumbs.db
 .env
 *.local
 local.*
+# Machine address for the remote build/bench helpers. Copy box.env.example.
+tools/box.env
 
 # ---- Agent scaffolding -----------------------------------------------------
 # Session notes and per-plan working files from the agent harness. Useful while
