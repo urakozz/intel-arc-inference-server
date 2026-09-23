@@ -550,7 +550,9 @@ RateResult rate_cell(l0::Context& l0ctx, runtime::prefill::Context& cx, const vo
 int main(int argc, char** argv) {
   try {
     std::string stage = "all";
-    std::string snapshot = "/home/user/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64";
+    const char* home = std::getenv("HOME");
+    std::string snapshot =
+        std::string(home ? home : ".") + "/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64";
     for (int i = 1; i < argc; ++i) {
       const std::string arg = argv[i];
       if (arg.rfind("--stage=", 0) == 0) stage = arg.substr(8);

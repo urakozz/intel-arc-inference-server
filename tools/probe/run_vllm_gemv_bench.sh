@@ -5,8 +5,8 @@ set -euo pipefail
 # t214 is gone from the box since 2026-09-09; rows already recorded under it
 # keep their own label.
 BENCH_IMAGE="${BENCH_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
-BENCH_REPO_DIR="${BENCH_REPO_DIR:-/home/user/b70-inference-server}"
-BENCH_HF_CACHE="${BENCH_HF_CACHE:-/home/user/.cache/huggingface}"
+BENCH_REPO_DIR="${BENCH_REPO_DIR:-$HOME/b70-inference-server}"
+BENCH_HF_CACHE="${BENCH_HF_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}}"
 BENCH_SNAP="${BENCH_SNAP:-/hf/hub/models--Vishva007--Qwen3.8-27B-W4A16-AutoRound-GPTQ/snapshots/2a9077667e28aa53e61d91bdee5d7962e8674668}"
 BENCH_UID="$(id -u)"
 BENCH_GID="$(id -g)"

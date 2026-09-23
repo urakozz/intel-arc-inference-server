@@ -60,9 +60,22 @@ std::optional<uint32_t> Tokenizer::token_to_id(std::string_view t) const {
   return uint32_t(id);
 }
 
+// The gate checkpoint's tokenizer, resolved the way the Hugging Face cache
+// itself resolves: $HF_HOME, else $HOME/.cache/huggingface. No home directory
+// is baked in, so the same binary works for any user on any machine.
+// B70_TOKENIZER_JSON overrides the whole path.
 std::string default_tokenizer_json() {
   if (const char* e = std::getenv("B70_TOKENIZER_JSON")) return e;
-  return "/home/user/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d/tokenizer.json";
+  std::string root;
+  if (const char* hf = std::getenv("HF_HOME")) {
+    root = hf;
+  } else if (const char* home = std::getenv("HOME")) {
+    root = std::string(home) + "/.cache/huggingface";
+  } else {
+    root = ".cache/huggingface";
+  }
+  return root +
+         "/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d/tokenizer.json";
 }
 
 }  // namespace tok
