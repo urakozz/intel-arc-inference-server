@@ -17,7 +17,7 @@ server. Every number is measured unless marked derived/estimated.
 shipped. All six gate bars are met: tokenizer parity (10,240 cases, 0
 mismatches), template parity (byte-identical), the golden-through-server gate
 (`golden_server_test`, exact on all three prompts via `--prefill` on both
-sides - commit `0ce35c4` put the CLI reference on the same engine path
+sides; the CLI reference was moved onto the same engine path
 `b70-serve` uses), llama-benchy end to end (coherence 3/3 PASSED, tg256
 rows), HTTP `tg256` within 2% of the CLI control (measured 102.0%, i.e. no
 measurable HTTP tg cost at all), and the full suite green (67/67, 0 failed)
@@ -26,7 +26,7 @@ since before spec 3's first commit (`git diff --stat 6d80193..HEAD` over
 those five directories is empty). Host sampling (§3.5) measured
 0.537 ms/token against the pre-registered 0.62 ms bar and ships on by
 default. See `docs/BENCHMARKS.md` "The spec-3 gate rows" for every number and
-`docs/superpowers/specs/2026-09-09-spec3-gate-memo.md` §6 for the verdict.
+`docs/specs/2026-09-09-spec3-gate-memo.md` §6 for the verdict.
 
 ## 1. Where we start
 

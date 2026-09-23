@@ -551,7 +551,7 @@ __kernel void pf_gdn_solve(__global float* restrict A, uint c_count) {
 
 // ---------------------------------------------------------------------------
 // (3b) **T = (I + A)^-1 with A and T in SEPARATE SLM arrays** - stage S4 of the
-//      prefill parity program (`docs/superpowers/specs/2026-09-22-gdn-solve-
+//      prefill parity program (`docs/specs/2026-09-22-gdn-solve-
 //      register-design.md`, approach B as re-selected by that file's §9).
 //      Selected at runtime by `B70_PREFILL_GDN_SOLVE=register`; the default
 //      stays (3). Identical signature, identical grid, identical work-group.

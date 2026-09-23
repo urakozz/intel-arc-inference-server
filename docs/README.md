@@ -58,7 +58,9 @@ narrative, and the numbered guides cite them where they matter.
 - [probe-fused-dequant-2026-09-22.md](probe-fused-dequant-2026-09-22.md) -
   fusing int4 dequant into the GEMM: bitwise correct, slower, **rejected**
 - [probe-w4a8-2026-09-23.md](probe-w4a8-2026-09-23.md) - W4A8 on the mixed
-  4-by-8 DPAS: 0.965x the control and 2.79% relative error, **rejected**
+  4-by-8 DPAS: 0.965x the control and 2.79% relative error, **rejected**; the
+  group-size sweep in §13 shows why, and that per-channel scales would reach
+  1.752x while every group size a real int4 checkpoint uses does not
 - [probe-prefill-vllm-parity-2026-09-14.md](probe-prefill-vllm-parity-2026-09-14.md)
   - oneDNN's fused int4 matmul measured directly, and where it lands
 - [prefill-gdn-solve-register-results.md](prefill-gdn-solve-register-results.md)
@@ -72,6 +74,6 @@ narrative, and the numbered guides cite them where they matter.
 
 ## Designs
 
-[superpowers/specs/](superpowers/specs/) holds the design documents behind the
+[specs/](specs/) holds the design documents behind the
 larger changes: the decode core, the prefill path, the tokenizer and HTTP layer,
 the Level Zero prefill GEMM, and the prefill parity programme.

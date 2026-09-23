@@ -245,7 +245,7 @@ struct Row {
 
 int main(int argc, char** argv) {
   const std::string pdir = argc > 1 ? argv[1] : "tests/golden/prompts";
-  const std::string snap = argc > 2 ? argv[2] : "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ";
+  const std::string snap = argc > 2 ? argv[2] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   // argv[3]: the prefill backend (spec 2.1) -- sycl-tla or l0; default = the build's.
   runtime::PrefillBackend backend = runtime::prefill::default_prefill_backend();
   if (argc > 3) CHECK(runtime::parse_prefill_backend(argv[3], backend));

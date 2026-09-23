@@ -391,7 +391,7 @@ add_test(NAME buffers_test COMMAND buffers_test)
 
 # The five checkpoint-labelled tests below (loader::load, argv[1] or [3])
 # default with no argument to the HF repo id
-# "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ", which loader::resolve_snapshot
+# "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ", which loader::resolve_snapshot
 # (src/loader/snapshot.cc) follows through the cache's refs/main pointer -
 # whatever revision the operator downloaded last, not necessarily one this
 # loader accepts: refs/main has pointed at a snapshot whose config.json carries

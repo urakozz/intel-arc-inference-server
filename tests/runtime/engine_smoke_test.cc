@@ -68,7 +68,7 @@ double ms_since(std::chrono::steady_clock::time_point t0) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  const std::string arg = argc > 1 ? argv[1] : "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ";
+  const std::string arg = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   l0::Context ctx(0);
   std::vector<uint32_t> a;  // phase 1's generated ids, phase 2 must reproduce them
   double plain_ms_per_token = 0.0;

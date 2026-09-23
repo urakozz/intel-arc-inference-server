@@ -82,7 +82,7 @@ Raw raw_global(const l0::Event& e, uint64_t mask) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  const std::string arg = argc > 1 ? argv[1] : "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ";
+  const std::string arg = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   l0::Context ctx(0);
   loader::LoadedModel m = loader::load(ctx, arg);
   runtime::DecodeBuffers b(ctx, m.max_len);

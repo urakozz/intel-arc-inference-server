@@ -1,5 +1,5 @@
 // S1 probe - fused int4 dequant in pf_gemm.
-// Pre-registration: docs/superpowers/specs/2026-09-22-fused-dequant-gemm-probe-design.md,
+// Pre-registration: docs/specs/2026-09-22-fused-dequant-gemm-probe-design.md,
 // committed at 107e132 before this file was written or run. Program context:
 // 2026-09-22-prefill-parity-program-design.md §3, stage S1.
 //

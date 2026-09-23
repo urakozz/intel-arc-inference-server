@@ -112,6 +112,6 @@ tools/box.env
 # ---- Agent scaffolding -----------------------------------------------------
 # Session notes and per-plan working files from the agent harness. Useful while
 # a change is in flight, noise afterwards. The designs that matter live in
-# docs/superpowers/specs/.
+# docs/specs/.
 .superpowers/
 .claude/
