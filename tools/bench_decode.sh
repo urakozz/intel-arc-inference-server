@@ -54,6 +54,13 @@
 # byte-for-byte the invocation every earlier row used. The device that ran is
 # printed in the bench header so it lands in the log beside the number.
 set -euo pipefail
+# Machine address. Set BOX in the environment, or put it in tools/box.env
+# (untracked; copy tools/box.env.example). There is no default: a wrong
+# address should fail loudly rather than quietly talk to the wrong machine.
+_box_env="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/box.env"
+# shellcheck source=/dev/null
+[ -r "$_box_env" ] && . "$_box_env"
+: "${BOX:?set BOX=user@host in the environment or in tools/box.env (see tools/box.env.example)}"
 cd "$(dirname "$0")/.."
 
 MODEL="${MODEL:-Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ}"
@@ -183,7 +190,7 @@ if [ "${#pp_rows[@]}" -gt 0 ]; then
   # Same default and env name as tools/box.sh; this probe is a bare ssh rather
   # than `box.sh run` because box.sh re-expands its arguments and would mangle
   # the quoting in the loop below.
-  grade=$(ssh -o BatchMode=yes "${BOX:-user@box}" '
+  grade=$(ssh -o BatchMode=yes "$BOX" '
     n=$(docker ps -q 2>/dev/null | wc -l)
     for f in /proc/*/fdinfo/*; do
       grep -l drm-driver "$f" >/dev/null 2>&1 && n=$((n+1))
