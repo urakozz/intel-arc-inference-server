@@ -423,3 +423,32 @@ if(B70_PREFILL_ENABLED)
   add_dependencies(probe_w4a8_gsweep kernel_pw4a8 kernel_pw4a8s ${W4A8S_KERNELS}
                    ${W4A8S_PF_KERNELS})
 endif()
+
+# --- probe_w8a8: i8 x i8 k32 DPAS, per-channel int8 weights (2026-09-23) -----
+# Record: docs/probe-w4a8-2026-09-23.md, the appended i8 x i8 section.
+#
+# The one W4A8-family path the CPU accuracy study left standing: int4 g64
+# weights requantised per 1024-column slab to per-channel int8 (`pw8_requant`),
+# the i8 x i8 GEMM with the scales only in its epilogue (`pw8_gemm`), and the
+# per-token activation quantiser with and without a 1024-block Hadamard
+# (`pw8_quant`, `pw8_quant_had`). Speed probe; no runtime path binds any of it.
+# 256 GRF: 64 int32 accumulator registers plus two 16-dword B fragments per lane.
+if(B70_PREFILL_ENABLED)
+  add_ocloc_kernel(pw8a8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_w8a8.cl
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  # The same source again at the default 128 GRF: the helpers (requant,
+  # quantisers) do not need 256, and 256 halves the threads per EU.
+  add_ocloc_kernel(pw8a8_g128 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_w8a8.cl)
+
+  add_executable(probe_w8a8 probe_w8a8.cc)
+  target_include_directories(probe_w8a8 PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_w8a8 PRIVATE b70_prefill_host b70_runtime b70_loader
+                        b70_l0 b70_model)
+  b70_link_prefill(probe_w8a8)
+  b70_target_kernel_dir(probe_w8a8)
+  get_property(W8A8_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
+               PROPERTY BUILDSYSTEM_TARGETS)
+  get_property(W8A8_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
+               PROPERTY BUILDSYSTEM_TARGETS)
+  add_dependencies(probe_w8a8 kernel_pw8a8 kernel_pw8a8_g128 ${W8A8_KERNELS} ${W8A8_PF_KERNELS})
+endif()
