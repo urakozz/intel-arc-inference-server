@@ -824,7 +824,7 @@ if(B70_TOKENIZER_ENABLED)
   add_dependencies(golden_server_test b70-serve b70-decode)
   add_test(NAME golden_server_test COMMAND golden_server_test
     $<TARGET_FILE:b70-serve> $<TARGET_FILE:b70-decode> ${CMAKE_SOURCE_DIR}/tests/golden/prompts
-    /home/user/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d)
+    ${B70_TEST_SNAPSHOT})
   set_tests_properties(golden_server_test PROPERTIES TIMEOUT 300)
 
   # Host sampling (spec 3.5, plan 7d Task 5): the sampler function alone, over

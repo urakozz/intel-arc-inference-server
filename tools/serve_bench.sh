@@ -40,7 +40,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-MODEL="${MODEL:-/home/user/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d}"
+MODEL="${MODEL:-${HF_HOME:-$HOME/.cache/huggingface}/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d}"
 PORT="${PORT:-8000}"
 SERVED_NAME="${SERVED_NAME:-b70}"
 RUNS="${RUNS:-3}"
