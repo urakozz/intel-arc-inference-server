@@ -1,0 +1,182 @@
+{
+ "name": "t3_rename-rotation",
+ "expect": "edit",
+ "enable_thinking": false,
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a coding agent working in a local checkout of b70-inference-server, an LLM inference engine for the Intel Arc Pro B70 written in C++ with Level Zero kernels, plus Python and shell tooling. The repository is at /work.\n\nYou help the user with software engineering tasks: finding code, explaining it, editing it and running builds and tests. Use the tools you are given to inspect the repository; never guess the contents of a file you have not read. Prefer grep and glob to locate code, read to look at it, edit to change it (the oldString must match the file exactly, including indentation) and bash to run commands.\n\nGuidelines:\n- Be concise. Do not explain what you are about to do at length; act.\n- Make one tool call at a time and wait for its result.\n- Keep edits minimal and in the style of the surrounding code.\n- Paths passed to tools are absolute and start with /work.\n- The C++ tree builds with CMake into /work/build; tests are ctest targets named after their source file (for example tests/prefill/dequant_test.cc is dequant_test). The Python tools run with python3 and their tests with python3 -m pytest.\n- Do not commit, push or change git state unless the user asks."
+  },
+  {
+   "role": "user",
+   "content": "Rename `shp` to `shp_val` in /work/tools/rotate/rotation.py, only the one defined on line 50."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/tools/rotate/rotation.py",
+       "offset": 30,
+       "limit": 100
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "<file>\n00030|     rotated lm_head. Left byte-identical; an engine that uses it must un-rotate\n00031|     its inputs (x R^T) and feed lm_head x_mtp_normed * (1 + w_mtp) / (1 + w_final),\n00032|     rotated. Recorded in the config, not solved here.\n00033|   * the vision tower.\n00034| \"\"\"\n00035| import torch\n00036| \n00037| BLOCK = 1024\n00038| HIDDEN = 5120\n00039| SEED = 20260923\n00040| PREFIX = \"model.language_model.\"\n00041| \n00042| \n00043| def signs(n: int = HIDDEN, seed: int = SEED) -> torch.Tensor:\n00044|     g = torch.Generator().manual_seed(seed)\n00045|     return (torch.randint(0, 2, (n,), generator=g) * 2 - 1).to(torch.float32)\n00046| \n00047| \n00048| def _fwht(x: torch.Tensor) -> torch.Tensor:\n00049|     \"\"\"Unnormalised Walsh-Hadamard per 1024-block of the last dim, ascending stages.\"\"\"\n00050|     shp = x.shape\n00051|     n = shp[-1]\n00052|     assert n % BLOCK == 0, n\n00053|     y = x.reshape(-1, n // BLOCK, BLOCK)\n00054|     h = 1\n00055|     while h < BLOCK:\n00056|         y = y.reshape(-1, n // BLOCK, BLOCK // (2 * h), 2, h)\n00057|         a, b = y[..., 0, :], y[..., 1, :]\n00058|         y = torch.stack((a + b, a - b), dim=-2)\n00059|         h *= 2\n00060|     return y.reshape(shp)\n00061| \n00062| \n00063| def rot(x: torch.Tensor, d: torch.Tensor) -> torch.Tensor:\n00064|     \"\"\"x R, along the last dim.\"\"\"\n00065|     return _fwht(x * d) * (1.0 / 32.0)\n00066| \n00067| \n00068| def unrot(x: torch.Tensor, d: torch.Tensor) -> torch.Tensor:\n00069|     \"\"\"x R^T, along the last dim (R^T = blockdiag(H) D / 32).\"\"\"\n00070|     return _fwht(x) * (1.0 / 32.0) * d\n00071| \n00072| \n00073| READERS_IN = (\"linear_attn.in_proj_qkv\", \"linear_attn.in_proj_z\", \"linear_attn.in_proj_a\",\n00074|               \"linear_attn.in_proj_b\", \"self_attn.q_proj\", \"self_attn.k_proj\", \"self_attn.v_proj\")\n00075| READERS_POST = (\"mlp.gate_proj\", \"mlp.up_proj\")\n00076| WRITERS = (\"linear_attn.out_proj\", \"self_attn.o_proj\", \"mlp.down_proj\")\n00077| NORMS = (\"input_layernorm\", \"post_attention_layernorm\")\n00078| ROW_CHUNK = 16384   # rows per step for the 248320-row embed / lm_head\n00079| \n00080| \n00081| def norm_keys(n_layers: int) -> list[str]:\n00082|     ks = [f\"{PREFIX}layers.{i}.{n}.weight\" for i in range(n_layers) for n in NORMS]\n00083|     return ks + [f\"{PREFIX}norm.weight\"]\n00084| \n00085| \n00086| def classify(key: str):\n00087|     \"\"\"-> (kind, norm key or None). kind: embed | head | norm | read | write | copy.\"\"\"\n00088|     if key == f\"{PREFIX}embed_tokens.weight\":\n00089|         return \"embed\", None\n00090|     if key == \"lm_head.weight\":\n00091|         return \"head\", f\"{PREFIX}norm.weight\"\n00092|     if key == f\"{PREFIX}norm.weight\":\n00093|         return \"norm\", None\n00094|     if key.startswith(f\"{PREFIX}layers.\"):\n00095|         rest = key[len(f\"{PREFIX}layers.\"):]\n00096|         idx, _, tail = rest.partition(\".\")\n00097|         base = f\"{PREFIX}layers.{idx}.\"\n00098|         if tail in tuple(f\"{n}.weight\" for n in NORMS):\n00099|             return \"norm\", None\n00100|         if tail in tuple(f\"{r}.weight\" for r in READERS_IN):\n00101|             return \"read\", base + \"input_layernorm.weight\"\n00102|         if tail in tuple(f\"{r}.weight\" for r in READERS_POST):\n00103|             return \"read\", base + \"post_attention_layernorm.weight\"\n00104|         if tail in tuple(f\"{w}.weight\" for w in WRITERS):\n00105|             return \"write\", None\n00106|     return \"copy\", None\n00107| \n00108| \n00109| def _rows(fn, w: torch.Tensor) -> torch.Tensor:\n00110|     if w.shape[0] <= ROW_CHUNK:\n00111|         return fn(w)\n00112|     return torch.cat([fn(w[a:a + ROW_CHUNK]) for a in range(0, w.shape[0], ROW_CHUNK)])\n00113| \n00114| \n00115| def transform(key: str, w: torch.Tensor, norms: dict[str, torch.Tensor], d: torch.Tensor):\n00116|     \"\"\"The rotated tensor for `key`, in fp32; `w` is the original (any dtype).\n00117| \n00118|     Returns (kind, tensor). norms maps norm keys to their ORIGINAL weights.\n00119|     \"\"\"\n00120|     kind, nk = classify(key)\n00121|     if kind == \"copy\":\n00122|         return kind, w\n00123|     w = w.to(torch.float32)\n00124|     if kind == \"norm\":\n00125|         return kind, torch.zeros_like(w)                       # (1 + 0) = 1\n00126|     if kind == \"embed\":\n00127|         return kind, _rows(lambda t: rot(t, d), w)             # E R\n00128|     if kind in (\"read\", \"head\"):\n00129|         assert w.shape[1] == HIDDEN, (key, w.shape)\n\n(File has more lines. Use 'offset' parameter to read beyond line 129)\n</file>"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the local filesystem.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path to the file"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Line to start from"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Number of lines to read"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "Find files by glob pattern.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit",
+    "description": "Replace an exact string in a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "oldString": {
+       "type": "string"
+      },
+      "newString": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "oldString",
+      "newString"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "content"
+     ]
+    }
+   }
+  }
+ ]
+}
