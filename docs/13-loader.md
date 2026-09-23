@@ -8,18 +8,18 @@ converted, branched on, or discovered at run time.
 
 `src/loader/{snapshot,safetensors,quant,loader}.{h,cc}` plus
 `src/loader/small_layout.h` (the small-tensor block offsets, shared with the
-model description and plan 3's kernels), driven by the model description in
+model description and the device kernels), driven by the model description in
 `src/model/qwen35.{h,cc}` (doc 03) and the canonical layouts in
-`src/common/repack.h` (doc 12). Measured on the box **2026-08-24** against
-`Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ`; the byte accounting below
-re-measured **2026-08-25** after the fp32-RMSNorm ruling.
+`src/common/repack.h` (doc 12). Every figure below is measured against real
+checkpoint files.
 
-**Two checkpoints since 2026-08-26**, and the loader takes both without a
-conditional anywhere in the walk. The second is this project's own
-`qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` (tools/quantize_qwen38_rtn.sh), whose
-`lm_head` is packed. Everything in this document that differs between them says
-which one it is; the section **"The second checkpoint"** below is the delta
-list, and it is the list that was *measured against the files*, not assumed.
+**Two checkpoint shapes are supported and the loader takes both without a
+conditional anywhere in the walk**: a published checkpoint with a bf16
+`lm_head`, and a self-quantised one with the head packed at int4
+(`tools/quantize_qwen38_rtn.sh` produces the second). Everything in this
+document that differs between them says which one it is; the section **"The
+packed-head checkpoint"** below is the delta list, and it was measured against
+the files rather than assumed.
 
 ## Snapshot resolution - and why it never downloads
 
@@ -69,7 +69,7 @@ exist under its prefix, never by what `config.json` claims:
 | `<prefix>.weight` | bf16 | dtype `BF16` |
 | neither | - | throws naming the prefix |
 
-Doc 02's rule ("format plurality is a load-time problem") is why: the same
+Doc 02's rule, that format plurality is a load-time problem, is why: the same
 `quant_method: "gptq"` string covers checkpoints that ship different tensors,
 and the `dynamic` rules that decide *which* modules were skipped are a regex
 list that has already been observed to lie. This checkpoint carries **98
@@ -81,7 +81,7 @@ cannot read cannot mislead it.
 
 `QuantConfig::parse` additionally throws unless `bits == 4`,
 `group_size == 64`, `sym == true`, and `desc_act` is false **or absent** (see
-"The second checkpoint" below - absence is auto-round's spelling of false and is
+"The packed-head checkpoint" below - absence is auto-round's spelling of false and is
 proven from the shipped `g_idx` count, not taken on trust). It throws on any
 `+:` dynamic rule - the exact pattern that made a published MTP head unusable
 (BENCHMARKS.md); the published checkpoint's copy has been corrected to `-:`. It
@@ -97,19 +97,19 @@ scans every word of every `.qzeros`, `.g_idx` and `.scales` in the checkpoint
 
 - **Every `qzeros` word is `0x77777777`.** GPTQ v1 stores *zero point − 1*, so
   the packed nibble `7` means a zero point of 8 - symmetric. Measured over all
-  400 `qzeros` tensors of this checkpoint 2026-08-24: no other value occurs.
+  400 `qzeros` tensors of this checkpoint: no other value occurs.
   This is what licenses the dequant `w = (q − 8)·scale` with no zero-point
   stream in the kernel, and (doc 02) what keeps the native s8×s4 DPAS prefill
   path open.
 - **Every `g_idx[k] == k/64`.** `desc_act: false` means no activation-order
   permutation, so the group index must be the identity. Measured identical over
-  all 400 `g_idx` tensors 2026-08-24. This is what licenses the layout-1 repack
+  all 400 `g_idx` tensors. This is what licenses the layout-1 repack
   to compute a group index arithmetically instead of carrying a per-`k` table.
 
 - **Every `.scales` f16 is finite.** The dequant is `scale·(q − 8)` with no
   guard anywhere downstream, so one NaN or Inf scale poisons a group of 64
-  weights silently. This one is new on **2026-08-25**, and it immediately
-  found something: **1658 of the 380 108 800 scales in this checkpoint are
+  weights silently. This assert was added last and it immediately found
+  something: **1658 of the 380 108 800 scales in this checkpoint are
   subnormal f16** (the first is `layers.10.linear_attn.in_proj_qkv.scales[1444]
   = 0x00A8` ≈ 1.0e-5). Subnormals are *counted and reported, not rejected* -
   they are exact f16 values, the kernel reads the f16 word natively, and
@@ -118,7 +118,11 @@ scans every word of every `.qzeros`, `.g_idx` and `.scales` in the checkpoint
   only" comment allowed. Flushing would have made the host-side reference
   disagree with both the kernel and the oracle on 1658 groups.
 
-**Binding constraint for the kernels (plan 3):** because real group scales are subnormal f16, device kernels must never be compiled with `-cl-denorms-are-zero` (or any FP16 denorm-flushing option) - flushing would zero 1 658 real scales and silently diverge from both this loader's host reference and the oracle. Recorded 2026-08-25.
+**Binding constraint for every device kernel:** because real group scales are
+subnormal f16, kernels must never be compiled with `-cl-denorms-are-zero`, or
+any other FP16 denorm-flushing option. Flushing would zero 1 658 real scales and
+silently diverge from both this loader's host reference and the CPU oracle. The
+build makes that flag a fatal error rather than a convention.
 
 All three throw with tensor name, element index and the offending value.
 Neither `qzeros` nor `g_idx` is uploaded: **0.202 GB dropped at load**, and the
@@ -147,7 +151,7 @@ The checkpoint has three top-level namespaces. The loader builds a view of
   top-level counts separately instead of subtracting a hardcoded 1;
 - `model.visual.*` (333 tensors, 0.921 GB) is **skipped** - this is a
   vision-language checkpoint served text-only;
-- `mtp.*` is **skipped in v1** - MTP is phase 2 (doc 03). 15 tensors (0.849 GB)
+- `mtp.*` is **skipped** - this engine builds no draft path (doc 03). 15 tensors (0.849 GB)
   on the published checkpoint, 29 on the self-quantised one, which also packs 8
   of them; the skip is by name and does not care.
 
@@ -217,9 +221,8 @@ Gemma-style: `x·rsqrt(mean(x²)+ε) ⊙ (1 + w)`, and the `+1` is **not** in th
 checkpoint (doc 03, "Layer math"). Storing `1 + w` makes the kernel a plain
 RMSNorm - one multiply, no constant to materialise per element.
 
-The bake is **one fp32 add, stored as fp32 - no cast back to bf16**
-(controller ruling **2026-08-25**, changed from the original bf16 store). The
-reason is the reference: HF computes the whole of `x·rsqrt(…)·(1 + w)` in fp32
+The bake is **one fp32 add, stored as fp32, with no cast back to bf16.** The
+original design stored bf16 and was changed for this reason: the reference HF computes the whole of `x·rsqrt(…)·(1 + w)` in fp32
 and never rounds the multiplier. Storing `1 + w` as bf16 introduces a rounding
 the oracle does not have, and it lands where bf16 is weakest - `w` is small, so
 `1 + w` sits just above 1.0, where bf16's 8-bit mantissa steps by 2⁻⁸: up to
@@ -256,7 +259,7 @@ size and every field alignment - the assert is what fails if the layout is
 edited without the kernels being told. Three consumers read that header and
 none of them re-derives a number: the loader packs against it, the model
 description's small-tensor table (below) carries those constants as its
-destination offsets, and **plan 3's GDN / FA / norm kernel bindings include it**
+destination offsets, and **the GDN, FA and norm kernel bindings include it**
 to find each field inside the block they are handed.
 
 ```
@@ -273,8 +276,8 @@ FA     (2048 B)                  [0]      q_norm                (1+w) fp32 [256]
 ```
 
 One block per layer instead of six allocations per layer keeps the descriptor
-count down for plan 3's captured command list, and makes each layer's constants
-one contiguous read.
+count down for the captured command list, and makes each layer's constants one
+contiguous read.
 
 The one norm that belongs to no layer - `model.language_model.norm.weight`, the
 final RMSNorm before `lm_head` - gets its own 20 480 B allocation,
@@ -314,8 +317,7 @@ the report's buckets must account for every byte allocated.
 ## Layout and split-K come from the table, not from here
 
 The loader does not choose layouts. `model::Qwen35`'s per-linear row carries
-`(layout, S)` from the measured decision block of
-`docs/probe-gemv-2026-08-24.md`:
+`(layout, S)` from the measured per-shape decision recorded in doc 12:
 
 | Linear | K × N | layout | S |
 |---|---|---|---|
@@ -327,13 +329,12 @@ The loader does not choose layouts. `model::Qwen35`'s per-linear row carries
 | `AB`, `LmHead` (bf16) | - | n/a | - |
 | `LmHead` (int4, if the checkpoint packed it) | 5120 × 248320 | 1 | 1 |
 
-All rows are layout 1 today, and layout 1 **loses four of the five int4 shapes**
-(doc 12): it wins the sum only because `QkvZ` at `N = 16384` is the one
-power-of-two stride where layout 0 collapses from ~550 to 419 GB/s. The
-controller ruling of **2026-08-24** kept both repack paths rather than deleting
-the loser, because flipping individual rows to layout 0 is a measured +3.5%
-best-per-shape option - a phase-1 tuning knob to be measured end-to-end, not a
-decision to be relitigated in the loader.
+All rows are layout 1 today, and layout 1 **loses four of the five int4
+shapes** (doc 12): it wins the sum only because `QkvZ` at `N = 16384` is the one
+power-of-two stride where layout 0 collapses from about 550 to 419 GB/s. Both
+repack paths were kept rather than deleting the loser, because flipping
+individual rows to layout 0 is a measured +3.5% best-per-shape option - a tuning
+knob to be measured end to end, not a decision to relitigate in the loader.
 
 **Turning that knob is not a one-row edit, and the loader now says so.** Only
 the *kernel* side of layout 0 exists today: `gemv.cl` compiles it, and the probe
@@ -350,7 +351,7 @@ that was wrong, and the guard is what makes it stay corrected.) bf16 weights
 (`AB`, `LmHead`) have exactly one tiled layout and carry `layout 0` as a filler,
 which is why the guard is scoped to int4 rows.
 
-## Memory and the `W` cross-check - measured 2026-08-24
+## Memory and the `W` cross-check
 
 Repack is single-threaded, staged through one reused host buffer per kind
 (sized from the linears **this** load will repack - see "Staging is sized from
@@ -361,7 +362,7 @@ row per token, so row-major *is* its canonical layout and the mmap is copied
 verbatim.
 
 ```
-loader: .../snapshots/2a9077667e28aa53e61d91bdee5d7962e8674668/
+loader: .../snapshots/<revision>/
   quant     int4 g64 sym desc_act=false, 98 dynamic exclusion rules
   tensors   2050 language-model + lm_head; skipped 333 visual, 15 mtp;
             dropped 400 qzeros + 400 g_idx (invariants asserted), 0 unconsumed
@@ -402,7 +403,7 @@ loader's own itemised additions - never a widened tolerance:
 | FA `q_norm`, `k_norm` bf16→fp32 | 16 384 | 256 × 2 B × 2 norms × 16 FA layers |
 | final `norm` bf16→fp32 | 10 240 | 5120 × 2 B, once |
 
-The last three rows are the 2026-08-25 RMSNorm ruling: **1 337 344 B** in total,
+The last three rows are the fp32 RMSNorm store: **1 337 344 B** in total,
 which is what the report's `widen` line itemises as *"RMSNorm fp32 (1+w)"*
 against the GDN family's 3 941 376 B. Widening is a byte cost, never a
 tolerance: both sides of the cross-check move by exactly the same amount.
@@ -410,17 +411,17 @@ tolerance: both sides of the cross-check move by exactly the same amount.
 The RoPE table (4 194 304 B) is *not* in this list: it is resident but not
 streamed per token, so it is excluded from both sides rather than added to both.
 
-Measured delta: **−27 072 B, −0.00017%** - the loader is 27 KB *under* doc 03's
-figure, which is the rounding in "15.519". It is unchanged by the fp32-RMSNorm
-ruling, because the same 1 337 344 B are added to *both* sides. Note the three
+Measured delta: **-27 072 B, -0.00017%** - the loader is 27 KB *under* doc 03's
+figure, which is the rounding in "15.519". The fp32 RMSNorm store does not move
+it, because the same 1 337 344 B are added to *both* sides. Note the three
 totals the report prints and why they differ: **read/token 15.540 GB** is what
 the decode step streams; **total 18.087 GB** adds `embed_tokens` (gathered one
 row at a time, ~0 traffic) and the RoPE table (~256 B read per token). All three
 are printed, labelled.
 
-**Load time: 13.6 s** (warm page cache, 2026-08-25 - up ~0.4 s from 13.1 s
-before, which is the new full scan of 0.76 GB of `.scales`), against a 120 s
-target. No thread pool was built: the
+**Load time: 13.6 s** on a warm page cache, up about 0.4 s from before the
+`.scales` finiteness scan was added, against a 120 s budget. No thread pool was
+built: the
 known lever (a `std::async` pool over per-linear repack) is not worth its
 complexity at 13 s. On a cold page cache this is bounded below by reading 19 GB
 off the disk, and the figure should be re-measured before anyone calls it fast.
@@ -473,16 +474,15 @@ represented, and each check would fail if the block layout moved**:
 And `report.unconsumed == 0` is asserted, which is what makes the "nothing is
 skipped by accident" claim testable instead of rhetorical.
 
-## The second checkpoint - measured against the files, 2026-08-26
+## The packed-head checkpoint - measured against the files
 
-Spec 1.6 §5.1 needed an `lm_head` this project could read at int4, and
-`tools/quantize_qwen38_rtn.sh` produced one:
-`~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64`. The engine takes it and the
-published checkpoint with one code path. The deltas below were **probed off the
-real files before a line was written** - three of the five were not in the
-brief and two of those change what the loader has to check.
+A self-quantised checkpoint with an int4 `lm_head` exercises a second config
+vocabulary and a second `lm_head` classification, and the engine takes it and a
+published bf16-head checkpoint through **one code path**. The deltas below were
+probed off the real files before a line of loader code was written, and two of
+them change what the loader has to check.
 
-|                                   | `Vishva007/…-AutoRound-GPTQ`             | `qwen38-27b-w4g64-rtn`                                                                                               |
+|                                   | published, bf16 head                     | self-quantised, int4 head                                                                                            |
 |-----------------------------------|------------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `quant_method`                    | `"gptq"` (with `provider: "auto-round"`) | **`"auto-round"`**                                                                                                   |
 | `packing_format`                  | absent                                   | **`"auto_round:auto_gptq"`**                                                                                         |
@@ -496,8 +496,16 @@ brief and two of those change what the loader has to check.
 | **read/token `W`**                | **15.540 GB**                            | **13.673 GB**                                                                                                        |
 | roofline at the measured 590 GB/s | 37.97 t/s                                | **43.15 t/s**                                                                                                        |
 
-Both checkpoints are `int4 g64 sym`, GPTQ v1 `qzeros` (`0x77777777` over all 401
-of the second one's), the same 5120-wide model and the same tokenizer.
+Both are `int4 g64 sym`, GPTQ v1 `qzeros` (`0x77777777` over all 401 of the
+second one's), the same 5120-wide model and the same tokenizer.
+
+**Neither the int4 head nor the roofline it implies is quoted as a result
+anywhere in this project.** vLLM cannot load a quantised head at all, so a
+comparison against it would price an inability of the comparison rather than a
+difference in kernels. The standing numbers are byte-matched with bf16
+`lm_head` on both sides (doc 05). What the packed head buys the *loader* is the
+point of this section: one more format its classification has to be right
+about.
 
 ### The two config vocabularies, and the one that says nothing
 
@@ -563,7 +571,7 @@ padding and the fp32 widening follow - the 2% tolerance never moves:
 ```
 
 `−1.867 GB` is `675 430 400 − 2 542 796 800`. Measured delta **−0.000%** on both
-checkpoints, 2026-08-26.
+checkpoints.
 
 ### Staging is sized from the linears this load will repack
 
@@ -614,7 +622,7 @@ the index at it, so the shard is opened and its header parsed like any other -
 that is the dedup rule working, not a leak. The skip is by **name**, in
 `build_view`, before the shard is relevant: 29 tensors counted as `mtp`, none of
 them ever read, none of them able to reach `unconsumed`. Measured
-**`0 unconsumed`** on both checkpoints 2026-08-26.
+**`0 unconsumed`** on both checkpoints.
 
 **`unconsumed` is report-only at load - nothing throws on it.** `loader::load`
 counts it, names up to five, and prints it; the assertion that it is 0 lives in
@@ -633,11 +641,11 @@ One consequence worth stating because it is not obvious:
 `assert_quant_invariants` walks the whole `SafetensorsSet`, so it *does* scan
 the 8 int4 `mtp` modules' `qzeros` and `scales` - tensors the engine never
 loads. That is a deliberate over-approximation (the invariants hold for them,
-measured), and it is why the second checkpoint's `qzeros` count is **401**
+measured), and it is why the packed-head checkpoint's `qzeros` count is **401**
 (400 language-model + `lm_head`) while its subnormal-scale count includes
 `mtp`'s.
 
-### The report, both checkpoints, 2026-08-26
+### The report, both checkpoints
 
 ```
   quant     int4 g64 sym desc_act=false (declared), 98 dynamic exclusion rules
@@ -655,20 +663,20 @@ measured), and it is why the second checkpoint's `qzeros` count is **401**
   W check     13.673 GB vs 13.673 GB expected = … -1.867 lm_head  ->  -0.000%
 ```
 
-Load times that day are **not** comparable to the 13.6 s recorded above: the box
-was running a 12-core vLLM XPU kernel compile throughout, and a cold-cache load
-of the second checkpoint read 41.4 s against a warm 12.6 s. Nothing about load
-time was being measured.
+Load times from that session are **not** comparable to the 13.6 s recorded
+above: the machine was under a 12-core compile throughout, and a cold page cache
+read 41.4 s against a warm 12.6 s. Nothing about load time was being measured
+there.
 
 ## Deliberately not loaded
 
-- **`model.visual.*`** (333 tensors, 0.921 GB) - this checkpoint is a VLM; the
-  project serves text. Phase scope, doc 03.
+- **`model.visual.*`** (333 tensors, 0.921 GB) - this checkpoint is a
+  vision-language model and this project serves text only (doc 03).
 - **`mtp.*`** (15 tensors, 0.849 GB on the published checkpoint; 29 on the
-  self-quantised one) - speculative decoding is phase 2. The
-  head is shipped and correct in this checkpoint; v1 simply does not build a
-  draft path, and counting the skip in the report is how that stays a decision
-  rather than an oversight.
+  self-quantised one) - speculative decoding is not built. The head is shipped
+  and correct in this checkpoint; the engine simply does not have a draft path,
+  and counting the skip in the report is how that stays a decision rather than
+  an oversight.
 - **`*.qzeros`, `*.g_idx`** (800 tensors, 0.202 GB) - fully scanned to prove the
   invariants above, then dropped. They are constants; uploading them would cost
   0.2 GB of every token's bandwidth to re-read a value the kernel already knows.
