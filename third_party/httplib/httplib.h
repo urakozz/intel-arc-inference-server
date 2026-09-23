@@ -887,7 +887,7 @@ inline bool parse_url(const std::string &url, UrlComponents &uc) {
 
     // Without :// or //, the entire input must be consumed as host[:port].
     // If there is leftover (path, query, etc.), this is not a valid
-    // host[:port] string - clear and reparse as a plain path.
+    // host[:port] string — clear and reparse as a plain path.
     if (!has_authority_prefix && pos < url.size()) {
       uc.host.clear();
       uc.port.clear();
@@ -1294,7 +1294,7 @@ using UploadProgress = std::function<bool(size_t current, size_t total)>;
 
 /*
  * detail: type-erased storage used by UserData.
- * ABI-stable regardless of C++ standard - always uses this custom
+ * ABI-stable regardless of C++ standard — always uses this custom
  * implementation instead of std::any.
  */
 namespace detail {
@@ -1760,7 +1760,7 @@ struct Response {
   std::string body;
   std::string location; // Redirect location
 
-  // User-defined context - set by pre-routing/pre-request handlers and read
+  // User-defined context — set by pre-routing/pre-request handlers and read
   // by route handlers to pass arbitrary data (e.g. decoded auth tokens).
   UserData user_data;
 
@@ -7277,7 +7277,7 @@ inline void get_remote_ip_and_port(socket_t sock, std::string &ip, int &port) {
 
 // Recursive form retained so operator""_t below can compute hashes for
 // switch-case labels at compile time (C++11 constexpr forbids loops). Do not
-// call from runtime paths with arbitrary-length inputs - use str2tag()
+// call from runtime paths with arbitrary-length inputs — use str2tag()
 // instead, which is iterative and stack-safe.
 inline constexpr unsigned int str2tag_core(const char *s, size_t l,
                                            unsigned int h) {
@@ -12260,7 +12260,7 @@ inline bool parse_no_proxy_entry(const std::string &token, NoProxyEntry &out) {
   }
 
   // Bracketed entries can only be IPv6. If the IPv6 parse above failed,
-  // the entry is malformed - don't fall through to the hostname branch.
+  // the entry is malformed — don't fall through to the hostname branch.
   if (bracketed) { return false; }
 
   // A '/' on a non-IP token means a CIDR prefix without an address. Reject.
@@ -14423,7 +14423,7 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
   }
 
   // Drain any unconsumed framed body to prevent request smuggling on
-  // keep-alive. Without framing there is no body to drain - reading would
+  // keep-alive. Without framing there is no body to drain — reading would
   // consume the next request (issue #2450). If the response has committed the
   // connection to close, there is no next request to protect.
   if (!req.body_consumed_ && detail::has_framed_body(req)) {
@@ -14733,7 +14733,7 @@ inline bool ClientImpl::send_(Request &req, Response &res, Error &error) {
 #endif
 
       if (!is_alive) {
-        // Peer seems gone - non-graceful shutdown to avoid SIGPIPE.
+        // Peer seems gone — non-graceful shutdown to avoid SIGPIPE.
         disconnect(/*gracefully=*/false);
       }
     }
@@ -15519,7 +15519,7 @@ inline bool ClientImpl::write_request(Stream &strm, Request &req,
   }
 
   // Proxy-Authorization is only sent when the proxy is actually used for
-  // this target - otherwise NO_PROXY-matched requests would leak proxy
+  // this target — otherwise NO_PROXY-matched requests would leak proxy
   // credentials directly to the destination server.
   if (is_proxy_enabled_for_host(host_)) {
     if (!proxy_basic_auth_username_.empty() &&
@@ -20158,7 +20158,7 @@ inline bool set_client_cert_file(ctx_t ctx, const char *cert_path,
   }
 
   // Verify that the certificate and private key match.
-  // Mbed TLS 4.x: see set_client_cert() - skip the spurious check_pair.
+  // Mbed TLS 4.x: see set_client_cert() — skip the spurious check_pair.
 #ifndef CPPHTTPLIB_MBEDTLS_V4
 #ifdef CPPHTTPLIB_MBEDTLS_V3
   ret = mbedtls_pk_check_pair(&mctx->own_cert.pk, &mctx->own_key,
@@ -20489,7 +20489,7 @@ inline bool is_peer_closed(session_t session, socket_t sock) {
       detail::scope_exit([&]() { detail::set_nonblocking(sock, false); });
 
   // Probe with a 1-byte read (Mbed TLS has no peek API). If the probe lands
-  // on application data - e.g. a response that already arrived - push the
+  // on application data — e.g. a response that already arrived — push the
   // byte back so the next read() delivers it instead of losing it.
   unsigned char buf;
   int ret;
