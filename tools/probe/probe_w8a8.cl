@@ -376,6 +376,8 @@ __kernel void NAME(__global const ushort* restrict x, __global const float* rest
 
 PW8Q2(pw8_quant2_5,       5, 0)    // gate||up input, K = 5120
 PW8Q2(pw8_quant_had2_5,   5, 1)
+PW8Q2(pw8_quant2_6,       6, 0)    // o_proj / out_proj input, K = 6144
+PW8Q2(pw8_quant_had2_6,   6, 1)
 PW8Q2(pw8_quant2_17,     17, 0)    // down input, K = 17408
 PW8Q2(pw8_quant_had2_17, 17, 1)
 
