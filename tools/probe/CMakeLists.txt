@@ -350,3 +350,40 @@ target_include_directories(probe_dpas_rate PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMA
 target_link_libraries(probe_dpas_rate PRIVATE b70_l0)
 b70_target_kernel_dir(probe_dpas_rate)
 add_dependencies(probe_dpas_rate ${PROBE_DPAS_TARGETS})
+
+# --- probe_w4a8: W4A8 on the mixed 4-bit x 8-bit k32 DPAS (2026-09-23) -------
+# Pre-registration: docs/superpowers/specs/2026-09-22-w4a8-dpas-probe-design.md.
+# Record: docs/probe-w4a8-2026-09-23.md.
+#
+# `probe_w4a8.cl` is a PROBE kernel file with two entry points -- `pw4a8_gemm`
+# and `pw4a8_quant`. No runtime path binds either, and no production file is
+# touched: the probe's CONTROL runs the production `pf_dequant_slab` and
+# `pf_gemm_T0` binaries themselves, and its inputs are the real gate||up
+# weights and the real activations one prefill chunk fed them (the --capture
+# mode reaches those through `loader::load` and `runtime::Engine::prefill`).
+#
+# 256 GRF is mandatory, as for everything else that shares this tile shape:
+# `pw4a8_gemm` holds EIGHT int32 accumulators and EIGHT fp32 accumulators live
+# at once (the int32 one is reset at every g64 boundary, the fp32 one is not),
+# which is 128 GRF of accumulator before a single operand register. At the
+# 128-GRF default it would measure the spill instead of the pipe.
+if(B70_PREFILL_ENABLED)
+  add_ocloc_kernel(pw4a8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_w4a8.cl
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+
+  add_executable(probe_w4a8 probe_w4a8.cc)
+  target_include_directories(probe_w4a8 PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_w4a8 PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0
+                        b70_model)
+  b70_link_prefill(probe_w4a8)
+  b70_target_kernel_dir(probe_w4a8)
+  # --capture drives the whole engine, so it needs every kernel binary, not
+  # just this probe's three. Taken as the two kernel directories' own target
+  # lists (probe_dequant's pattern) because `B70_PREFILL_KERNELS` is defined in
+  # tests/, which CMake adds after this directory.
+  get_property(W4A8_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
+               PROPERTY BUILDSYSTEM_TARGETS)
+  get_property(W4A8_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
+               PROPERTY BUILDSYSTEM_TARGETS)
+  add_dependencies(probe_w4a8 kernel_pw4a8 ${W4A8_KERNELS} ${W4A8_PF_KERNELS})
+endif()
