@@ -45,11 +45,16 @@
 // (max rel 3.506e-02 -> 3.534e-02, +0.8%) while one real prompt's 60th GDN layer
 // lost 6.84x of `1 - cos` and one token flipped on the other checkpoint.
 //
-// The separately pre-registered D3 split-bf16 experiment carries `S` and `D`
-// as bf16 hi/lo pairs (`hi = rne(x)`, `lo = rne(x - hi)`) so the DPAS operands
-// retain residual information.  Its bounded opt-in arithmetic, gates and
-// evidence are in docs/prefill-gdn-scan-split-2026-09-20.md.  It does not alter
-// this D2 result or the vector default.
+// The separately pre-registered D3 split-bf16 experiment carries `S`, `D` and
+// (since the 2026-09-23 fix) `A2` as bf16 hi/lo pairs (`hi = rne(x)`,
+// `lo = rne(x - hi)`) so the DPAS operands retain residual information.  Its
+// bounded opt-in arithmetic, gates and evidence are in
+// docs/prefill-gdn-scan-split-2026-09-20.md and
+// docs/prefill-gdn-scan-split-fix-2026-09-23.md.  **R2, the single bf16
+// rounding of `vn` in the `A2*vn` term, is the one D2 rounding D3 keeps** - a
+// 2x2 on the golden gate measured its effect as nil while `A2`'s was the whole
+// failure (entry (3)'s block below).  None of this alters the D2 result or the
+// vector default, which is still what `gdn.cc` binds.
 //
 // ---------------------------------------------------------------------------
 // The tile mapping of `pf_gdn_scan` - ruling A25/A27, unchanged
@@ -162,14 +167,41 @@ inline ushort rne_bf16(float f) {
 }
 
 // ---------------------------------------------------------------------------
-// (3) `pf_gdn_scan_dpas_split` - D3's opt-in split-BF16 state-path probe.
+// (3) `pf_gdn_scan_dpas_split` - D3's opt-in split-BF16 probe.
 //
-// `S` and the update `D` have independent hi/lo BF16 DPAS chains, while their
-// master state and all chain combinations remain fp32.  `A2*vn` intentionally
-// stays D2's single-BF16 controlled variable.  This is approximate arithmetic,
-// not an fp32-equivalence implementation; see
-// docs/prefill-gdn-scan-split-2026-09-20.md for the fixed experiment gates.
-// SLM: SbHi/SbLo 17,408 + VNb 4,352 + DtHi/DtLo 8,448 + A2b 5,120 = 35,328 B.
+// `S`, the update `D` and (since 2026-09-23) the intra-chunk `A2` each have
+// independent hi/lo BF16 DPAS chains, while the master state and every chain
+// combination remain fp32.  This is approximate arithmetic, not an
+// fp32-equivalence implementation; see docs/prefill-gdn-scan-split-2026-09-20.md
+// for the original experiment and docs/prefill-gdn-scan-split-fix-2026-09-23.md
+// for the fix below.
+//
+// **Why `A2` is split and `vn` is not (MEASURED, not argued).**  As shipped on
+// 2026-09-20 this entry left `A2*vn` as D2's single-BF16 "controlled variable",
+// both operands rounded once.  That term is a DIRECT additive contributor to
+// `o` (the formula ~line 99), and `o` is what every later layer reads, so it
+// fails the golden gate: `prefill_gate_l0_test` 92/93 with the code prompt's
+// L60 `gdn_state` cosine at 0.996344994 against a > 0.999 bar (device 0,
+// 2026-09-23, `$HOME/split-dev0.log`).  Four throwaway diagnostic entries then
+// computed that one term in scalar fp32 with each operand independently either
+// fp32 or `bf16f(rne_bf16(.))`, changing nothing else - a 2x2 on the same gate:
+//
+//   A2 bf16, vn bf16   code L60 0.997517446   92/93   (control: reproduces it)
+//   A2 bf16, vn fp32   code L60 0.997517446   92/93   (vn changes NOTHING)
+//   A2 fp32, vn bf16   code L60 0.999189068   93/93
+//   A2 fp32, vn fp32   code L60 0.999189068   93/93
+//
+// The two fp32-`A2` rows are the vector kernel's own cosines to nine digits.
+// `A2`'s rounding is the entire error and `vn`'s is invisible in it, so `A2`
+// gets the limbs and `vn` keeps its single BF16 - two DPAS chains where the
+// prescribed both-operand split would have cost three, 4,352 B less SLM and
+// 2.5 fewer DPAS per work-item per sub-chunk.  `A2_hi*vn + A2_lo*vn` is exact
+// in each product (bf16 x bf16 -> fp32) and the two chains are combined once,
+// in fp32, after the last position block - the treatment `S` and `D` get.
+//
+// SLM: SbHi/SbLo 17,408 + VNb 4,352 + DtHi/DtLo 8,448 + A2bHi/A2bLo 10,240
+//      = 40,448 B.  DPAS per work-item per sub-chunk: 53.0 average (16 + 21 +
+//      16; stage 2's A2 chains are 2(nt+1), i.e. 2..8 by subgroup).
 // ---------------------------------------------------------------------------
 __attribute__((reqd_work_group_size(WG_SCAN, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
@@ -187,7 +219,7 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
   __local uint SbHiW[DIM * SB_LD], SbLoW[DIM * SB_LD];
   __local uint VNbW[CT * SB_LD];
   __local uint DtHiW[CHUNK_V * DT_LD], DtLoW[CHUNK_V * DT_LD];
-  __local uint A2bW[A2_BLKS * SG * DM];
+  __local uint A2bHiW[A2_BLKS * SG * DM], A2bLoW[A2_BLKS * SG * DM];
   __local ushort* const SbHi = (__local ushort*)SbHiW;
   __local ushort* const SbLo = (__local ushort*)SbLoW;
   __local ushort* const DtHi = (__local ushort*)DtHiW;
@@ -236,7 +268,10 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
         const uint bnt = blk < 1 ? 0u : (blk < 3 ? 1u : (blk < 6 ? 2u : 3u));
         const uint bkb = blk - ((bnt * (bnt + 1)) >> 1);
         const float2 v = vload2(0, At + (size_t)(bnt * DK + ln) * CT + bkb * DK + 2 * r);
-        A2bW[p] = ((uint)rne_bf16(v.s1) << 16) | (uint)rne_bf16(v.s0);
+        const ushort h0 = rne_bf16(v.s0), h1 = rne_bf16(v.s1);
+        A2bHiW[p] = ((uint)h1 << 16) | (uint)h0;
+        A2bLoW[p] = ((uint)rne_bf16(v.s1 - bf16f(h1)) << 16) |
+                    (uint)rne_bf16(v.s0 - bf16f(h0));
       }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
@@ -280,7 +315,9 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    // 2. Q.S is also a split pair; A2*vn intentionally remains D2 single BF16.
+    // 2. Q.S is a split pair, and so is A2 - the operand the 2026-09-23 2x2
+    //    above found responsible for the whole gate failure. `vn` stays single
+    //    BF16 because moving it to fp32 changed no printed cosine at all.
     {
       float8 hi = (float8)(0.0f), lo = (float8)(0.0f);
       __global const uint* restrict qp = (__global const uint*)(
@@ -293,12 +330,18 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
             as_short8(vload4(0, SbLoW + (kb * DK + lane) * SB_LD + mt * 4)), b, lo);
       }
       float8 o = (hi + lo) * (Q_SCALE * exp(gcp));
+      // The high chain accumulates on top of the q.S term; the low chain starts
+      // at zero so A2's residual is not swamped by it, and they meet once below.
+      float8 olo = (float8)(0.0f);
       const uint blk0 = (nt * (nt + 1)) >> 1;
       for (uint kb = 0; kb <= nt; ++kb) {
         const short8 a = as_short8(vload4(0, VNbW + (kb * DK + lane) * SB_LD + mt * 4));
-        const int8 b = as_int8(vload8(0, A2bW + (blk0 + kb) * (SG * DM) + lane * DM));
-        o = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b, o);
+        const int8 bh = as_int8(vload8(0, A2bHiW + (blk0 + kb) * (SG * DM) + lane * DM));
+        const int8 bl = as_int8(vload8(0, A2bLoW + (blk0 + kb) * (SG * DM) + lane * DM));
+        o = intel_sub_group_bf16_bf16_matrix_mad_k16(a, bh, o);
+        olo = intel_sub_group_bf16_bf16_matrix_mad_k16(a, bl, olo);
       }
+      o += olo;
       if (pos_l < L)
         vstore8(o, 0, gdn_o + ((size_t)(base_m + pos_l) * HEADS + h) * DIM +
                             c * CHUNK_V + col0);

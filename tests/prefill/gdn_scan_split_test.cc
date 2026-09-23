@@ -1,7 +1,7 @@
 // Opt-in D3 arithmetic discriminator.  These fixtures invoke only the scan
 // entry point: their expected values are hand-derived scalar recurrences, not
-// the scan implementation or the chunk reference.  Removing either low DPAS
-// chain changes a checked value by orders of magnitude.
+// the scan implementation or the chunk reference.  Removing any of the three
+// low DPAS chains (S, A2, D) changes a checked value by orders of magnitude.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -104,6 +104,31 @@ void check_split_s_residual(Dev& d) {
   finite(a.o);
 }
 
+void check_split_a2_residual(Dev& d) {
+  // The 2026-09-23 fix's own discriminator, in the two fixtures above's style.
+  // Same scalar recurrence - S=1+2^-8, W=U=Q=1, K=0, g=0, so vn=-2^-8 - but A2
+  // now carries a BF16 residual of its own: 22.65625 = 22.625 + 2^-5, whose
+  // high limb is 22.625 and low limb 2^-5, both BF16-exact.
+  //   o = (1+2^-8)/sqrt(128) - (22.625 + 2^-5)*2^-8 = 0.000232638
+  // A high-only A2 chain drops the 2^-5 limb and produces 0.000354708 instead,
+  // 1.221e-04 away - 24x this bar. That single-BF16 A2 is what failed
+  // `prefill_gate_l0_test` on 2026-09-23 (code L60 cosine 0.996344994).
+  Input in(1);
+  in.state[sk(0, 0, 0)] = 1.0f + 0x1p-8f;
+  in.w[cv(0, 0, 0)] = G::rne(1.0f);
+  in.u[cv(0, 0, 0)] = G::rne(1.0f);
+  in.xb[G::kQOff] = G::rne(1.0f);
+  in.a2[a2i(0, 0, 0)] = 22.65625f;  // 22.625 + 2^-5: NOT BF16 exact.
+  const Output a = run(d, in);
+  const Output b = run(d, in);
+  const float want = 0.000232638f;
+  CHECK(std::fabs(a.o[cv(0, 0, 0)] - want) < 5e-6f);
+  CHECK(std::memcmp(a.o.data(), b.o.data(), a.o.size() * sizeof(float)) == 0);
+  CHECK(std::memcmp(a.state.data(), b.state.data(), a.state.size() * sizeof(float)) == 0);
+  finite(a.state);
+  finite(a.o);
+}
+
 void check_split_d_residual(Dev& d) {
   // Scalar update: initial S=0, U0=1, K0=1, gc0=0, gc1=-2^-10.
   // At the sub-chunk end D0=exp(-2^-10), so the retained FP32 state is that
@@ -138,6 +163,7 @@ void check_zero_ragged(Dev& d) {
 int main() {
   Dev d;
   check_split_s_residual(d);
+  check_split_a2_residual(d);
   check_split_d_residual(d);
   check_zero_ragged(d);
   std::puts("gdn_scan_split_test OK");
