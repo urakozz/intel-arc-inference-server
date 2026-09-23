@@ -60,9 +60,24 @@ void require(bool ok, const std::string& what) {
 // supported configuration operation; compare selectors in separate processes.
 static const char* gdn_scan_entry() {
   static const char* const entry = [] {
-    // **The default is the VECTOR scan, and this commit does not change that.**
-    // The split entry was promoted to the default on 2026-09-22 and reverted the
-    // same hour because it FAILED `prefill_gate_l0_test`: 92/93 determined rows,
+    // **The default is the SPLIT-BF16 scan since 2026-09-23**, promoted on the
+    // evidence recorded in docs/prefill-gdn-scan-split-fix-2026-09-23.md and in
+    // the parity program's §12: `prefill_gate_l0_test` 93/93 with prose
+    // 0.999912369, code 0.999712545 and cjk 0.999901750 all over the > 0.999
+    // bar, determinism / consistency / replay green, the vector entry unchanged
+    // at 0.999903435 / 0.999189068 / 0.999903208, and every one of those runs
+    // carrying its own dispatch proof ("gdn scan entry LAUNCHED: ...") read back
+    // from the pointer `gdn_chunk` handed the launch.
+    //
+    // This is the ONE default in the prefill walk whose arithmetic is not
+    // bitwise equal to what it replaced. `vn` inside the A2 term is still a
+    // single BF16 operand -- measured harmless on three prompts of one
+    // checkpoint, not proven in general. `vector` keeps the old kernel.
+    //
+    // The history below is kept because it is the reason this default carries a
+    // dispatch proof at all. The split entry was promoted once before, on
+    // 2026-09-22, and reverted the same hour because it FAILED
+    // `prefill_gate_l0_test`: 92/93 determined rows,
     // the code prompt's L60 `gdn_state` cosine 0.996344994 against a > 0.999 bar
     // (`$HOME/split-default-suite.log`, reproduced to nine digits on device 0 in
     // `$HOME/split-dev0.log`). The cause was found on 2026-09-23 and fixed --
@@ -84,8 +99,8 @@ static const char* gdn_scan_entry() {
     // (2026-09-19), both under the vector default, and attention runs no GDN
     // kernel. `gdn_chunk_test` prints no rel L2 at all.
     const char* const v = std::getenv("B70_PREFILL_GDN_SCAN");
-    if (!v || !*v || std::string(v) == "vector") return "pf_gdn_scan";
-    if (std::string(v) == "dpas_split") return "pf_gdn_scan_dpas_split";
+    if (!v || !*v || std::string(v) == "dpas_split") return "pf_gdn_scan_dpas_split";
+    if (std::string(v) == "vector") return "pf_gdn_scan";
     throw std::runtime_error("runtime::prefill::gdn_chunk: B70_PREFILL_GDN_SCAN must be "
                              "unset, 'vector', or 'dpas_split' (got '" +
                              std::string(v) + "')");
