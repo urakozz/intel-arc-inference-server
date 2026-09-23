@@ -2,10 +2,10 @@
 
 **This document is the strongest argument for why this project exists.**
 
-Before writing a line of new code, understand what was already tried on this exact
-box, at what cost, and why it did not work. The failure was not incompetence - the
-patches were real optimisations, several of them upstream PRs. It was **optimising
-the wrong layer**.
+Before writing a line of new code, understand what was already tried on this
+exact hardware, at what cost, and why it did not work. The failure was not
+incompetence: the patches were real optimisations, several of them upstream PRs.
+It was **optimising the wrong layer**.
 
 ## What was done
 
@@ -129,16 +129,18 @@ MXFP4. Do not chase a 3% prefill "gain".
 - **ARK must be built from source.** The prebuilt `auto_round_kernel` wheel links
   `libsycl.so.8` (oneAPI 2025.2); the current stack is `libsycl.so.9`. A binary
   wheel cannot be relinked.
-- **BuildKit discards all completed work if the docker *client* dies** - even
+- **BuildKit discards all completed work if the docker *client* dies**, even
   finished layers. A plain `docker build` over ssh dies with the ssh session and
-  can silently lose 6+ hours. Use `setsid nohup`.
-- **`docker builder prune` deletes cache mounts** - the uv wheel cache, cargo, and
-  ccache. Use `docker buildx prune --filter type=regular` instead. Never
-  `docker volume prune` (it would eat the `open-webui` chat history volume).
-- **Build job count is a phase transition, not a dial.** On this 44T/121GB box:
-  8 jobs = 52GB peak, zero swap, fastest; 16 = 90-115GB swap, slower despite more
-  lanes; 32 = thrash livelock. Exceeding RAM stalls compilers mid-inflation so
-  fat template TUs linger and residency compounds.
+  can silently lose six hours or more. Detach it.
+- **`docker builder prune` deletes cache mounts**: the uv wheel cache, cargo and
+  ccache. Use `docker buildx prune --filter type=regular` instead, and never
+  `docker volume prune`, which takes unrelated named volumes with it.
+- **Build job count is a phase transition, not a dial.** On a 44-thread, 121 GB
+  host building this torch stack: 8 jobs peaks at 52 GB with zero swap and is
+  fastest; 16 swaps 90-115 GB and is slower despite the extra lanes; 32 is a
+  thrash livelock. Exceeding RAM stalls compilers mid-inflation, so fat template
+  translation units linger and residency compounds. Our own tree has no such
+  problem and builds happily at full width.
 - **ccache works on `-fsycl` TUs** (1292/1292 cacheable, ~99.5% hit warm), taking
   the host C++ phase from ~7.2h to ~5 min. Device codegen (ocloc, 2405 kernels,
   ~20 min) is **not** cacheable.

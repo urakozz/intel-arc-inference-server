@@ -1,14 +1,13 @@
 # Tokenizer and chat template
 
-The first draft of these docs did not mention tokenisation. It is not a
-detail: `/v1/chat/completions` cannot exist without a byte-level BPE encoder, a
-Jinja chat template, and a detokeniser that streams partial UTF-8 safely. All
-three are host code, and all three are places where "own the dependencies"
-(goal 3) and "ship something" (goal 4) pull in opposite directions.
+`/v1/chat/completions` cannot exist without a byte-level BPE encoder, a Jinja
+chat template, and a detokeniser that streams partial UTF-8 safely. All three
+are host code, and all three are places where owning the dependencies and
+shipping something that works pull in opposite directions.
 
 ## What the checkpoint ships
 
-Read from the phase-1 snapshot on the box (2026-08-22):
+Read from the checkpoint snapshot:
 
 | File | Contents |
 |---|---|
@@ -33,9 +32,8 @@ matcher must reproduce exactly this, including the `\s+(?!\S)` lookahead.
 
 ### `pretokenize_regex` discrepancy
 
-The checkpoint's `tokenizer_config.json` `pretokenize_regex` (read 2026-09-09)
-contains `\p{M}` twice where `tokenizer.json` does not. Both patterns are
-verbatim:
+The checkpoint's `tokenizer_config.json` `pretokenize_regex` contains `\p{M}`
+twice where `tokenizer.json` does not. Both patterns are verbatim:
 
 `tokenizer.json`:
 
@@ -86,64 +84,62 @@ carries `cur_token` out; the host detokenises it while the next replay runs.
 
 | Option | Parity with HF | Dependency cost | Static binary? | Verdict |
 |---|---|---|---|---|
-| **HF `tokenizers` (Rust) via C FFI** | exact - it *is* the reference | a Rust toolchain in the build; ~10 MB `.a` | yes (Rust static lib links fine) | **Recommended for v1** |
+| **HF `tokenizers` (Rust) via C FFI** | exact - it *is* the reference | a Rust toolchain in the build; a 16 MB static archive | yes (a Rust static lib links fine) | **what is built** |
 | `tokenizers-cpp` (MLC) | exact - wraps the same Rust crate, adds SentencePiece | same Rust dep plus a C++ shim we'd only half use | yes | acceptable; buys little over the crate directly |
-| `openvino_tokenizers` | exact | drags in the OpenVINO runtime - the thing this project exists to not depend on | no | rejected |
-| **Hand-written byte-level BPE in C++** | must be *proven* - the pre-tokenizer regex and Unicode categories are where ports diverge | zero; needs a Unicode-aware regex (or a hand-compiled matcher for Qwen's fixed pattern) | yes | **the end state for goal 3**, not the starting point |
+| `openvino_tokenizers` | exact | drags in the OpenVINO runtime, the thing this project exists to not depend on | no | rejected |
+| **Hand-written byte-level BPE in C++** | must be *proven* - the pre-tokenizer regex and Unicode categories are where ports diverge | zero; needs a Unicode-aware regex (or a hand-compiled matcher for Qwen's fixed pattern) | yes | **the end state if owning every dependency matters**, not the starting point |
 
 
-### Status (spec 3 T1, 2026-09-06)
+### What is built
 
-Shipped: the first option, HF `tokenizers` (Rust) via C FFI, as the leaf
-`src/tokenizer/` library. The crate is pinned to `tokenizers 0.22.2`; its C++
-RAII wrapper is `tok::Tokenizer`. The committed Python-reference corpus has
+**The first option**: HF `tokenizers` (Rust) via C FFI, as the leaf
+`src/tokenizer/` library, behind a four-function C interface (`encode`,
+`decode`, `token_to_piece`, `free`) so that nothing else knows which
+implementation is behind it. The crate is pinned to `tokenizers 0.22.2`; its
+C++ RAII wrapper is `tok::Tokenizer`. The committed Python-reference corpus has
 10,240 cases and reports zero encode and zero decode mismatches.
 
-Measured on the box, 2026-09-09: the release static archive is 16,217,384
-bytes, and a fresh Cargo build took 50.36 s. Normal CMake builds cache Cargo
-outputs in `build/tokenizer-rs`; `B70_TOKENIZER` is `AUTO` by default and may
-be set to `ON` or `OFF`.
+The release static archive is 16,217,384 bytes and a fresh Cargo build takes
+50.36 s. Normal CMake builds cache Cargo outputs in `build/tokenizer-rs`;
+`B70_TOKENIZER` is `AUTO` by default and may be set to `ON` to require the
+component or `OFF` to omit it.
 
-Recommendation: **start with the Rust crate behind a 4-function C interface**
-(`encode`, `decode`, `token_to_piece`, `free`), isolated in `src/tokenizer/`
-so that nothing else knows which implementation is behind it. Replace it with
-a hand-written BPE only once a parity test exists to prove the replacement -
-the parity test is the deliverable that makes the swap safe, so write it
-first and keep it forever.
+Replace it with a hand-written BPE only once the parity test proves the
+replacement. **The parity test is the deliverable that makes the swap safe**, so
+it was written first and it is kept forever.
 
-### Status (spec 3 T2, 2026-09-09)
-
-Shipped: `chat::Template` over `google/minja` commit
-`021c2293c187789ef13d56c6cfd89c9b134fd80f` and `nlohmann/json v3.12.0`.
-Their source URLs and header SHA-256s are pinned in `third_party/VERSIONS`.
-The `transformers 5.14.1` parity vectors for the gate checkpoint match
-byte-for-byte: thinking on is 565 bytes, thinking off is 367 bytes, and the
-one-function tools case is 1547 bytes.
+`chat::Template` runs over `google/minja` and `nlohmann/json v3.12.0`, both
+pinned by source URL and header SHA-256 in `third_party/VERSIONS`. The
+`transformers` parity vectors for the gate checkpoint match byte for byte:
+thinking on is 565 bytes, thinking off is 367 bytes, and the one-function tools
+case is 1547 bytes.
 
 The checkpoint's `chat_template.jinja` SHA-256
 `c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041`
 uses Jinja's unsupported `is undefined` test. `chat::Template` selects a
-SHA-gated fallback only for that source; it changes that construct to minja's
-equivalent `is not defined` without changing the checkpoint template itself.
+hash-gated fallback for exactly that source and no other; it changes that one
+construct to minja's equivalent `is not defined` without editing the
+checkpoint's template file.
 
-Shipped: `tok::Streamer`, the hold-and-flush incremental detokeniser. On the
-10,240-case committed corpus it has zero concatenation mismatches and zero
-spurious U+FFFD emissions; the measured longest hold is 4 ids.
+`tok::Streamer` is the hold-and-flush incremental detokeniser described under
+"Streaming detokenisation" below.
 
-### Integration status (spec 3 T4, closed 2026-09-14, tag `spec3-done`)
+### What it costs at run time
 
-`b70-serve` consumes this tokenizer, template, and streamer on the real
-checkpoint and is **shipped**. Bar 3 (golden through the server) is met:
-`golden_server_test` reproduces `b70-decode --ids --prefill`'s exact ids on
-all three golden prompts, both sides on the same engine path
-(`Engine::prefill`). Bar 4 (llama-benchy end to end) and bar 5 (HTTP `tg256`
-within 2% of the CLI) are both met: `tg256` over HTTP measured 29.902 t/s
-against the CLI control's 29.31 t/s, 102.0% - HTTP's per-token cost is not
-merely under bar, it is not measurably present. Host sampling
-(temperature/top-k/top-p) measured 0.537 ms/token against a pre-registered
-0.62 ms bar and ships on by default. See `docs/BENCHMARKS.md` "The spec-3
-gate rows" for every number and its grade, and
-`docs/superpowers/specs/2026-09-09-spec3-gate-memo.md` for the full verdict.
+`b70-serve` consumes this tokenizer, template and streamer on the real
+checkpoint. `golden_server_test` reproduces `b70-decode --ids --prefill`'s exact
+ids on all three golden prompts, both sides on the same engine path.
+
+The host cost is **not measurably present**. Decode over HTTP measured
+29.902 t/s against the same session's CLI control of 29.31, i.e. 102.0%, against
+a 2% bar registered before the measurement. Prefill over HTTP measured
+2915.83 ms for 4096 tokens against the CLI's 2919.6, a derived difference of
+-3.77 ms, indistinguishable from zero. Encode plus HTTP framing cost nothing on
+top of the device-side prefill, and detokenisation overlaps the next replay.
+
+Host sampling (temperature, top-k, top-p) measured 0.537 ms/token against a
+0.62 ms bar registered before the measurement, and ships on by default. Every
+row and its grade is in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Chat template
 
@@ -151,24 +147,21 @@ Qwen templates are real Jinja: loops over messages, `if` on roles, tool-call
 blocks, a thinking toggle. Hand-substituting `{role}\n{content}` will break on
 the first multi-turn request.
 
-Use **`google/minja`** - a header-only C++ Jinja subset built for exactly this.
-It is what `openvino.genai` uses (`src/cpp/src/tokenizer/tokenizer_impl.cpp:792`,
-fetched in `src/cpp/CMakeLists.txt:112-119`) and therefore what
-`model_server` uses (`src/llm/servable.hpp:78`). `llama.cpp` uses it too. One
-header, no runtime dependency, static-friendly. If Qwen3.5's template uses a
-construct minja lacks, `openvino.genai` keeps a per-model fallback map
-(`tokenizer/chat_template_fallback_map.hpp`) - copy the idea, not the file.
+Use **`google/minja`**, a header-only C++ Jinja subset built for exactly this.
+It is what `openvino.genai` uses, and therefore what OpenVINO Model Server uses;
+`llama.cpp` uses it too. One header, no runtime dependency, static-friendly. If
+a template uses a construct minja lacks, `openvino.genai` keeps a per-model
+fallback map - copy the idea, not the file, which is what the hash-gated
+fallback above is.
 
-Tool-call *parsing* of model output is out of scope for v1. Template
-*rendering* of tool definitions in the prompt is in scope only if the
-benchmark prompt needs it (it does not).
+Tool-call *parsing* of model output is not implemented. Template *rendering* of
+tool definitions in the prompt is, and has parity vectors.
 
 ## Streaming detokenisation
 
 Byte-level BPE tokens are byte sequences, not characters. A multi-byte
 code point (any CJK character, most emoji) can straddle two tokens, so decoding
-token-by-token emits U+FFFD replacement characters mid-character. The standard
-fix, verbatim from `openvino.genai/src/cpp/src/text_streamer.cpp:7-47`:
+token-by-token emits U+FFFD replacement characters mid-character. The standard fix, as `openvino.genai`'s text streamer implements it:
 
 1. keep the ids since the last flush;
 2. decode the whole pending run, not the last token;
@@ -176,10 +169,12 @@ fix, verbatim from `openvino.genai/src/cpp/src/text_streamer.cpp:7-47`:
 4. otherwise emit the suffix after `m_printed_len` and advance the cursor;
 5. flush on newline to bound the held run.
 
-`model_server` subclasses that streamer (`src/llm/ovms_text_streamer.hpp`).
-vLLM does the same thing with a prefix-diff over `(prefix_offset, read_offset)`.
-Implement it once in `src/tokenizer/streamer.*`; the SSE layer calls `push(id)`
-and receives zero or more UTF-8-complete strings.
+OpenVINO Model Server subclasses that streamer; vLLM does the same thing with a
+prefix-diff over `(prefix_offset, read_offset)`. It is implemented once in
+`src/tokenizer/streamer.*`: the SSE layer calls `push(id)` and receives zero or
+more UTF-8-complete strings. On the 10,240-case committed corpus `tok::Streamer`
+has zero concatenation mismatches and zero spurious U+FFFD emissions, and its
+measured longest hold is 4 ids.
 
 ## Acceptance test
 
@@ -194,7 +189,7 @@ Parity against Python `tokenizers` on a corpus, produced once by a script in
 - the chat template rendered for a 3-turn conversation equals
   `tokenizer.apply_chat_template(...)` from `transformers`, byte for byte.
 
-Any tokenizer implementation - the Rust one or a later hand-written one - must
+Any tokenizer implementation, the Rust one or a later hand-written one, must
 pass this before it is wired to the server. That is what makes the dependency
 swappable.
 
@@ -202,10 +197,10 @@ swappable.
 
 - `src/tokenizer/` is a leaf: it depends on nothing in `src/` and nothing in
   `src/` except `server/` depends on it. Keep it that way.
-- The build gains a Rust step for v1. Cache it like `ccache` (doc 09, build
-  notes) - it is one crate, compiled once.
+- The build gains a Rust step. Cache it the way `ccache` caches the C++ side
+  (doc 09); it is one crate, compiled once.
 - `tools/` gains a Python script that dumps golden vectors. Python appears in
-  `tools/` only, as doc 04 already requires.
-- Goal 3 is deferred for this component, explicitly, with the parity test as
-  the path back. That is a trade-off, named: shipping a correct server now
-  versus a dependency-free one later.
+  `tools/` only, as doc 04 requires.
+- Owning every dependency is deferred for this one component, explicitly, with
+  the parity test as the path back. That is a named trade-off: a correct server
+  now against a dependency-free one later.
