@@ -76,12 +76,28 @@ static const char* gdn_scan_entry() {
     const char* const v = std::getenv("B70_PREFILL_GDN_SCAN");
     if (!v || !*v || std::string(v) == "vector") return "pf_gdn_scan";
     if (std::string(v) == "dpas_split") return "pf_gdn_scan_dpas_split";
+    // THROWAWAY (2026-09-23, step 1 of the split-scan fix): the four fp32/bf16
+    // `A2*vn` diagnostic entries of pf_gdn_scan.cl. They ship nothing and are
+    // removed with that block once the diagnosis is recorded.
+    if (std::string(v) == "dpas_split_diag_bf16") return "pf_gdn_scan_dpas_split_diag_bf16";
+    if (std::string(v) == "dpas_split_diag_a2") return "pf_gdn_scan_dpas_split_diag_a2";
+    if (std::string(v) == "dpas_split_diag_vn") return "pf_gdn_scan_dpas_split_diag_vn";
+    if (std::string(v) == "dpas_split_diag_f32") return "pf_gdn_scan_dpas_split_diag_f32";
     throw std::runtime_error("runtime::prefill::gdn_chunk: B70_PREFILL_GDN_SCAN must be "
-                             "unset, 'vector', or 'dpas_split' (got '" +
+                             "unset, 'vector', 'dpas_split' or one of the throwaway "
+                             "'dpas_split_diag_{bf16,a2,vn,f32}' (got '" +
                              std::string(v) + "')");
   }();
   return entry;
 }
+
+// The entry the last scan launch was built with; see gdn.h for why it exists.
+// Written by `gdn_chunk` below, read by the gate/determinism/consistency/replay
+// tests so a selector run carries its own dispatch evidence.
+static const char* g_scan_launched = nullptr;
+
+const char* gdn_scan_entry_name() { return gdn_scan_entry(); }
+const char* gdn_scan_launched_entry() { return g_scan_launched; }
 
 // Stage S4's selector, resolved exactly as `gdn_scan_entry()` is and for the
 // same reason: a recorded command list retains the kernel handle it was built
@@ -186,6 +202,7 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   cx.launch(kc(scan, scan_entry), heads, kStateColChunks, 1,
             {PtrArg(p_xb), PtrArg(p_w), PtrArg(p_u), PtrArg(p_A2), PtrArg(p_g),
              PtrArg(gdn_state), PtrArg(p_o), arg_val(C)});
+  g_scan_launched = scan_entry;          // the dispatch proof, after the append
   profile_wait(cx, Phase::kGdnScan);
   // 10 - the gated head. Ruling R3: it belongs to the mixer, not to the caller.
   cx.launch(kc.get(kernels::pf_gated_head_variant(), "pf_gated_head"), heads, C, 1,
