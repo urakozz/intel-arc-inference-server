@@ -197,7 +197,10 @@ if(B70_PREFILL_ENABLED)
   add_test(NAME gdn_chunk_test COMMAND gdn_chunk_test)
   set_tests_properties(gdn_chunk_test PROPERTIES TIMEOUT 1800)
   add_test(NAME gdn_scan_invalid_selector_test COMMAND gdn_chunk_test --invalid-selector)
-  add_test(NAME gdn_scan_default_dispatch_test COMMAND gdn_chunk_test --dispatch-vector)
+  # Since 2026-09-23 an unset selector binds the SPLIT scan (gdn.cc's
+  # `gdn_scan_entry`). This row is what fails if that default moves without the
+  # record and the gate evidence moving with it.
+  add_test(NAME gdn_scan_default_dispatch_test COMMAND gdn_chunk_test --dispatch-split)
   add_test(NAME gdn_scan_vector_dispatch_test COMMAND gdn_chunk_test --dispatch-vector)
   add_test(NAME gdn_scan_split_dispatch_test COMMAND gdn_chunk_test --dispatch-split)
   set_tests_properties(gdn_scan_invalid_selector_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=bad")
