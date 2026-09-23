@@ -387,3 +387,39 @@ if(B70_PREFILL_ENABLED)
                PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_w4a8 kernel_pw4a8 ${W4A8_KERNELS} ${W4A8_PF_KERNELS})
 endif()
+
+# --- probe_w4a8_gsweep: the W4A8 group-size sweep (2026-09-23) ---------------
+# Record: docs/probe-w4a8-2026-09-23.md, the appended sweep section.
+#
+# `probe_w4a8_gsweep.cl` is a PROBE kernel file with four entry points --
+# `pw4a8s_g64`, `pw4a8s_g128`, `pw4a8s_g256`, `pw4a8s_gpc` -- one per scale
+# stride. They differ ONLY in how many 64-k chunks accumulate in int32 before
+# the fp32 rescale; the messages, the tile and the dpas are identical, and
+# `pw4a8s_g64` is bit-identical in output to `probe_w4a8.cl`'s `pw4a8_gemm`
+# (the harness checks all 71,303,168 words).
+#
+# No runtime path binds any of them, no production file is touched, and the
+# production `GROUP 64` in the dequant kernels stays where it is: the sweep is
+# a SPEED measurement made by synthesising coarser scale arrays on the host, not
+# a re-quantisation of anything.
+#
+# 256 GRF for the same reason `pw4a8` needs it: eight int32 accumulators and
+# eight fp32 accumulators live at once is 128 GRF of accumulator before a single
+# operand register, and the per-channel arm keeps both live over all 80 chunks.
+if(B70_PREFILL_ENABLED)
+  add_ocloc_kernel(pw4a8s SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_w4a8_gsweep.cl
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+
+  add_executable(probe_w4a8_gsweep probe_w4a8_gsweep.cc)
+  target_include_directories(probe_w4a8_gsweep PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_w4a8_gsweep PRIVATE b70_prefill_host b70_runtime b70_loader
+                        b70_l0 b70_model)
+  b70_link_prefill(probe_w4a8_gsweep)
+  b70_target_kernel_dir(probe_w4a8_gsweep)
+  get_property(W4A8S_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
+               PROPERTY BUILDSYSTEM_TARGETS)
+  get_property(W4A8S_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
+               PROPERTY BUILDSYSTEM_TARGETS)
+  add_dependencies(probe_w4a8_gsweep kernel_pw4a8 kernel_pw4a8s ${W4A8S_KERNELS}
+                   ${W4A8S_PF_KERNELS})
+endif()
