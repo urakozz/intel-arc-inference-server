@@ -1,0 +1,181 @@
+{
+ "name": "t5_test-rotation",
+ "expect": "bash",
+ "enable_thinking": false,
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a coding agent working in a local checkout of b70-inference-server, an LLM inference engine for the Intel Arc Pro B70 written in C++ with Level Zero kernels, plus Python and shell tooling. The repository is at /work.\n\nYou help the user with software engineering tasks: finding code, explaining it, editing it and running builds and tests. Use the tools you are given to inspect the repository; never guess the contents of a file you have not read. Prefer grep and glob to locate code, read to look at it, edit to change it (the oldString must match the file exactly, including indentation) and bash to run commands.\n\nGuidelines:\n- Be concise. Do not explain what you are about to do at length; act.\n- Make one tool call at a time and wait for its result.\n- Keep edits minimal and in the style of the surrounding code.\n- Paths passed to tools are absolute and start with /work.\n- The C++ tree builds with CMake into /work/build; tests are ctest targets named after their source file (for example tests/prefill/dequant_test.cc is dequant_test). The Python tools run with python3 and their tests with python3 -m pytest.\n- Do not commit, push or change git state unless the user asks."
+  },
+  {
+   "role": "user",
+   "content": "I just changed /work/tools/rotate/rotation.py. Run the tests for this file."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/tools/rotate/rotation.py",
+       "limit": 90
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "<file>\n00001| \"\"\"The residual-stream rotation for Qwen3.5 (model_type qwen3_5), shared by the\n00002| rotation writer and its check.\n00003| \n00004| R = D * blockdiag(H_1024) / 32 over the 5120-wide residual stream: random signs\n00005| D, then a Sylvester Walsh-Hadamard per 1024-block, orthonormal. The same\n00006| transform the W8A8 probe applies to activations (tools/probe/probe_w8a8.cl,\n00007| pw8_quant_had2_*; docs/probe-w4a8-2026-09-23.md section 14). A rotated model\n00008| carries h' = h R in its residual stream instead of h:\n00009| \n00010|     embed_tokens       E' = E R                         (rows)\n00011|     RMSNorm (1 + w)    folded into every linear that reads it, then w = 0,\n00012|                        because RMSNorm commutes with R only without its gain\n00013|     stream readers     W' = (W diag(1 + w)) R           q/k/v, in_proj_qkv/z/a/b,\n00014|                                                         gate/up, lm_head\n00015|     stream writers     W' = R^T W                       o_proj, out_proj, down_proj\n00016| \n00017| x' W'^T = x W^T for every linear, so the rotated model computes the same\n00018| function as the original, up to rounding, and needs NO runtime operation:\n00019| it is a plain Hugging Face checkpoint that transformers, AutoRound and vLLM\n00020| run unmodified. What it buys is that every stream reader sees rotated,\n00021| outlier-spread activations (per-channel int8 activations become accurate;\n00022| the section 14 study).\n00023| \n00024| Deliberately NOT rotated:\n00025|   * the down projection's own INPUT (silu(gate) * up): elementwise, so a\n00026|     rotation there cannot be folded into anything; it stays a runtime op in the\n00027|     engine (section 14's pw8_quant_had2_17 + rotating requant).\n00028|   * the MTP head (`mtp.*`): it shares embed_tokens and lm_head with the main\n00029|     model but has its own norms, so it cannot be made consistent with a folded,\n00030|     rotated lm_head. Left byte-identical; an engine that uses it must un-rotate\n00031|     its inputs (x R^T) and feed lm_head x_mtp_normed * (1 + w_mtp) / (1 + w_final),\n00032|     rotated. Recorded in the config, not solved here.\n00033|   * the vision tower.\n00034| \"\"\"\n00035| import torch\n00036| \n00037| BLOCK = 1024\n00038| HIDDEN = 5120\n00039| SEED = 20260923\n00040| PREFIX = \"model.language_model.\"\n00041| \n00042| \n00043| def signs(n: int = HIDDEN, seed: int = SEED) -> torch.Tensor:\n00044|     g = torch.Generator().manual_seed(seed)\n00045|     return (torch.randint(0, 2, (n,), generator=g) * 2 - 1).to(torch.float32)\n00046| \n00047| \n00048| def _fwht(x: torch.Tensor) -> torch.Tensor:\n00049|     \"\"\"Unnormalised Walsh-Hadamard per 1024-block of the last dim, ascending stages.\"\"\"\n00050|     shp = x.shape\n00051|     n = shp[-1]\n00052|     assert n % BLOCK == 0, n\n00053|     y = x.reshape(-1, n // BLOCK, BLOCK)\n00054|     h = 1\n00055|     while h < BLOCK:\n00056|         y = y.reshape(-1, n // BLOCK, BLOCK // (2 * h), 2, h)\n00057|         a, b = y[..., 0, :], y[..., 1, :]\n00058|         y = torch.stack((a + b, a - b), dim=-2)\n00059|         h *= 2\n00060|     return y.reshape(shp)\n00061| \n00062| \n00063| def rot(x: torch.Tensor, d: torch.Tensor) -> torch.Tensor:\n00064|     \"\"\"x R, along the last dim.\"\"\"\n00065|     return _fwht(x * d) * (1.0 / 32.0)\n00066| \n00067| \n00068| def unrot(x: torch.Tensor, d: torch.Tensor) -> torch.Tensor:\n00069|     \"\"\"x R^T, along the last dim (R^T = blockdiag(H) D / 32).\"\"\"\n00070|     return _fwht(x) * (1.0 / 32.0) * d\n00071| \n00072| \n00073| READERS_IN = (\"linear_attn.in_proj_qkv\", \"linear_attn.in_proj_z\", \"linear_attn.in_proj_a\",\n00074|               \"linear_attn.in_proj_b\", \"self_attn.q_proj\", \"self_attn.k_proj\", \"self_attn.v_proj\")\n00075| READERS_POST = (\"mlp.gate_proj\", \"mlp.up_proj\")\n00076| WRITERS = (\"linear_attn.out_proj\", \"self_attn.o_proj\", \"mlp.down_proj\")\n00077| NORMS = (\"input_layernorm\", \"post_attention_layernorm\")\n00078| ROW_CHUNK = 16384   # rows per step for the 248320-row embed / lm_head\n00079| \n00080| \n00081| def norm_keys(n_layers: int) -> list[str]:\n00082|     ks = [f\"{PREFIX}layers.{i}.{n}.weight\" for i in range(n_layers) for n in NORMS]\n00083|     return ks + [f\"{PREFIX}norm.weight\"]\n00084| \n00085| \n00086| def classify(key: str):\n00087|     \"\"\"-> (kind, norm key or None). kind: embed | head | norm | read | write | copy.\"\"\"\n00088|     if key == f\"{PREFIX}embed_tokens.weight\":\n00089|         return \"embed\", None\n00090|     if key == \"lm_head.weight\":\n\n(File has more lines. Use 'offset' parameter to read beyond line 90)\n</file>"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the local filesystem.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path to the file"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Line to start from"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Number of lines to read"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "Find files by glob pattern.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit",
+    "description": "Replace an exact string in a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "oldString": {
+       "type": "string"
+      },
+      "newString": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "oldString",
+      "newString"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "content"
+     ]
+    }
+   }
+  }
+ ]
+}
