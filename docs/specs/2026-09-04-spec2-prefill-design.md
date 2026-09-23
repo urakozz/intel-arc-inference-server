@@ -1,14 +1,15 @@
 # Spec 2 - Prefill
 
 Status: **Closed 2026-09-14, tag `spec2-done`: `pp4096` 1406.18 t/s vs bar 1973
-- SHORT (71.3%), record grade (2026-09-09, `977a31c`); golden gates 93/93 +
-93/93 determined rows exact on `urakozz@84575a1` (2026-09-14, `a6ce30e`).**
+- SHORT (71.3%), record grade; golden gates 93/93 + 93/93 determined rows exact
+on the gate checkpoint `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ` at
+snapshot `84575a18f209992ef96d819b31f924b489e3d55d`.**
 Correctness met, performance short, one correctness bar owed: **§6 bar 2** (the
 multi-chunk golden gate over the ≥ 2048-id prompt) is **not claimed** - it needs
-a long oracle dump for this checkpoint. The memo is
-[`2026-09-05-spec2-gate-memo.md`](2026-09-05-spec2-gate-memo.md) (§8 closes it);
-rows and gates are in docs/BENCHMARKS "The spec-2 re-gate rows". History: gate
-row 1 2026-09-05 at `e44c40c` read 1377.20 (69.8%), iterate grade. Originally: design for review, 2026-09-04. Follows spec 1.7 (closed on the
+a long oracle dump for this checkpoint. §8 closes that bar; rows and gates are
+in [BENCHMARKS.md](../BENCHMARKS.md), "The spec-2 re-gate rows". An earlier
+gate row read 1377.20 (69.8%) at iterate grade. Originally: design for review,
+2026-09-04. Follows spec 1.7 (closed on the
 operator's 32.0 t/s line; tag `spec1.7-done`). Phase 1's target has two
 halves - `tg256 > 31.50` and `pp4096 ≥ 1973` - and only the first is met.
 This spec is the second half: a real prefill for the same model, on the same
@@ -24,7 +25,7 @@ the spec-2 SDD workspace when the plan opens.
 
 **The engine has no prefill.** `Engine::ingest()` replays the decode list
 once per prompt id (`src/runtime/engine.cc:77-83`); a 4096-token prompt
-costs **121 s** (bench log, `2a7df0b`, RTN checkpoint) against vLLM's
+costs **121 s** (bench log, RTN checkpoint) against vLLM's
 **~2.1 s** on the same box. The `M` dimension that already exists is not a
 prefill dimension: it is capped at 8 by `Control` and at 13 by the GDN conv
 ring, it was built for MTP, and `gdn_step` is a genuine sequential
@@ -465,8 +466,8 @@ docs/12 mechanism in the same commit; miss → revert + priced record.
 4. **Determinism.** `prefill` twice from a reset state → bitwise-identical
    state buffers and tokens. No fp atomics anywhere in the path; any
    `sycl-tla` configuration that uses split-K atomics is disallowed.
-5. **Decode is untouched.** The decode gate rows (32.22 / 29.33 t/s at
-   `2a7df0b`) re-measured once at the spec's final sha: inside day drift
+5. **Decode is untouched.** The standing decode gate rows (32.22 / 29.33 t/s)
+   re-measured once at the end of the spec: inside day drift
    (≤ 0.09%) or the difference is explained.
 6. `-Wall -Wextra -Werror`; `-cl-denorms-are-zero` forbidden; correctly-
    rounded div/sqrt default; the launch/module-count invariants of the

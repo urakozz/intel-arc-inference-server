@@ -105,7 +105,7 @@ struct Verdict {
 int main(int argc, char** argv) {
   const std::string gdir = argc > 1 ? argv[1] : "oracle-out";
   const std::string pdir = argc > 2 ? argv[2] : "tests/golden/prompts";
-  const std::string snap = argc > 3 ? argv[3] : "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ";
+  const std::string snap = argc > 3 ? argv[3] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   const std::vector<std::string> prompts = split_commas(argc > 4 ? argv[4] : "prose,code,cjk");
   const uint32_t chunk = argc > 5 ? uint32_t(std::atoi(argv[5])) : 0u;
   // argv[6]: the prefill backend (spec 2.1) -- sycl-tla or l0; default = the build's.

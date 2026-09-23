@@ -1,5 +1,5 @@
 // probe_fused_dequant_gemm - the S1 probe's candidate kernels
-// (docs/superpowers/specs/2026-09-22-fused-dequant-gemm-probe-design.md §5).
+// (docs/specs/2026-09-22-fused-dequant-gemm-probe-design.md §5).
 //
 // PROBE-ONLY. `src/kernels/prefill/pf_gemm.cl` and `pf_dequant_slab.cl` are NOT
 // touched by this file; no runtime path binds these entry points.

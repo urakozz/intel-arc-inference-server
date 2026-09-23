@@ -136,7 +136,7 @@ struct Verdict {
 int main(int argc, char** argv) {
   const std::string gdir = argc > 1 ? argv[1] : "oracle-out";
   const std::string pdir = argc > 2 ? argv[2] : "tests/golden/prompts";
-  const std::string snap = argc > 3 ? argv[3] : "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ";
+  const std::string snap = argc > 3 ? argv[3] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
 
   for (const char* p : kPrompts) {
     const std::string g = gdir + "/" + p + ".golden.safetensors";

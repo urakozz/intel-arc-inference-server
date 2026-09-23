@@ -59,7 +59,7 @@ inline uint32_t attn_rows(uint32_t C, PrefillBackend b) {
   return b == PrefillBackend::L0 ? pad256(C) : C;
 }
 
-// Spec S3 (`docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md` §3): on the
+// Spec S3 (`docs/specs/2026-09-22-prefill-parity-program-design.md` §3): on the
 // L0 backend each kv group's QK^T is issued in row blocks of `kPfGemmTile`, so block b
 // computes only the columns causality can reach (`pad256(pos + r1)`) instead of the whole
 // padded depth. P·V is NOT blocked -- attn.cc records the occupancy measurement that

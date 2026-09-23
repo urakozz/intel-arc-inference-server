@@ -287,7 +287,7 @@ endforeach()
 add_dependencies(probe_gemv ${PROBE_GEMV_LOADS_TARGETS})
 
 # --- S1: the fused int4 dequant probe (2026-09-22) --------------------------
-# Pre-registration: docs/superpowers/specs/2026-09-22-fused-dequant-gemm-probe-design.md.
+# Pre-registration: docs/specs/2026-09-22-fused-dequant-gemm-probe-design.md.
 # `probe_fused_dequant_gemm.cl` is a PROBE kernel: no runtime path binds
 # `pfd_gemm`, and neither `src/kernels/prefill/pf_gemm.cl` nor
 # `pf_dequant_slab.cl` is touched -- the probe's CONTROL runs those two
@@ -352,7 +352,7 @@ b70_target_kernel_dir(probe_dpas_rate)
 add_dependencies(probe_dpas_rate ${PROBE_DPAS_TARGETS})
 
 # --- probe_w4a8: W4A8 on the mixed 4-bit x 8-bit k32 DPAS (2026-09-23) -------
-# Pre-registration: docs/superpowers/specs/2026-09-22-w4a8-dpas-probe-design.md.
+# Pre-registration: docs/specs/2026-09-22-w4a8-dpas-probe-design.md.
 # Record: docs/probe-w4a8-2026-09-23.md.
 #
 # `probe_w4a8.cl` is a PROBE kernel file with two entry points -- `pw4a8_gemm`

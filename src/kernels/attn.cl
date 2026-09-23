@@ -93,9 +93,9 @@
 //     order preservation - it passed before this change too, and would pass for
 //     any deterministic reassociation.
 //   * *Order preservation*: the evidence is the probe's byte-identity **to the
-//     base kernel's output** (`.superpowers/sdd/2026-08-26-plan5-spec1.7-mbu-push/
-//     task-5-codex-experiment.md:118` - the `greg6` row's "bytes: identical"),
-//     which is a comparison ACROSS the change and is the claim that matters.
+//     base kernel's output** (the register-GQA probe's `greg6` row reported
+//     "bytes: identical"), which is a comparison ACROSS the change and is the
+//     claim that matters.
 //
 // **attn_reduce: grid (24, M), work-group 256** - one work-group per (q-head,
 // token), work-item `d` owning dim `d` of the 256-wide output. The merge

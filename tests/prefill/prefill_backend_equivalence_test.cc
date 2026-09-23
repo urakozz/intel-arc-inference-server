@@ -136,7 +136,7 @@ Snap sliced(runtime::Engine& eng, l0::CmdList& imm, const std::vector<uint32_t>&
 
 int main(int argc, char** argv) {
   const std::string pdir = argc > 1 ? argv[1] : "tests/golden/prompts";
-  const std::string snap = argc > 2 ? argv[2] : "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ";
+  const std::string snap = argc > 2 ? argv[2] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   l0::Context ctx(0);
   loader::LoadedModel model = loader::load(ctx, snap, kMaxLen);
   runtime::Engine eng(ctx, std::move(model), kMaxLen);

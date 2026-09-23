@@ -128,12 +128,15 @@ work day to day. Set `BOX=user@host` before using it.
 
 ## Docs
 
+[docs/README.md](docs/README.md) is the index and says what to read first. The
+short list:
+
 - [docs/01-hardware.md](docs/01-hardware.md), [docs/12-kernels.md](docs/12-kernels.md) for the card and the kernels
 - [docs/04-architecture.md](docs/04-architecture.md) for the engine layout
 - [docs/05-perf-model.md](docs/05-perf-model.md) for where the time goes
 - [docs/14-golden-gate.md](docs/14-golden-gate.md) for how correctness is proven
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for every measured row and its grade
-- [docs/superpowers/specs/](docs/superpowers/specs/) for the designs behind the bigger changes
+- [docs/specs/](docs/specs/) for the designs behind the bigger changes
 
 ## Licence
 

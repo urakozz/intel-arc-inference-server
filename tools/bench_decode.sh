@@ -63,7 +63,7 @@ _box_env="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/box.env"
 : "${BOX:?set BOX=user@host in the environment or in tools/box.env (see tools/box.env.example)}"
 cd "$(dirname "$0")/.."
 
-MODEL="${MODEL:-Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ}"
+MODEL="${MODEL:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
 DEPTH="${DEPTH:-4096}"
 TG="${TG:-256}"
 RUNS="${RUNS:-3}"
