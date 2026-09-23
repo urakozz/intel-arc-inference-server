@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -13,6 +14,7 @@
 #include "l0/cmdlist.h"
 #include "loader/loader.h"
 #include "runtime/engine.h"
+#include "runtime/prefill/gdn.h"
 #include "runtime/prefill/step.h"
 
 namespace {
@@ -50,6 +52,14 @@ int main(int argc, char** argv) {
   auto model = loader::load(context, checkpoint, kMaxLen);
   runtime::Engine engine(context, std::move(model), kMaxLen);
   engine.set_prefill_backend(runtime::PrefillBackend::L0);
+  // The scan selector's DISPATCH PROOF (parity-program design §11). A gate run
+  // under `B70_PREFILL_GDN_SCAN` is not evidence unless it says which kernel it
+  // launched: the 2026-09-21 "green" split record was executing `pf_gdn_scan`.
+  {
+    const char* const sel = std::getenv("B70_PREFILL_GDN_SCAN");
+    std::printf("gdn scan selector: B70_PREFILL_GDN_SCAN=%s -> entry %s\n",
+                sel && *sel ? sel : "(unset)", runtime::prefill::gdn_scan_entry_name());
+  }
   l0::CmdList copy = l0::CmdList::immediate(context);
   const auto seed = golden::read_ids("tests/golden/prompts/prose.ids");
   std::vector<uint32_t> ids(bench ? 4096 : 4097);
@@ -113,5 +123,11 @@ int main(int argc, char** argv) {
     }
   }
   CHECK(!engine.prefill_sycl_side_created());
+  // The other half of the dispatch proof: the entry a scan launch was really
+  // built with, read back after the walk rather than before it.
+  CHECK(runtime::prefill::gdn_scan_launched_entry() != nullptr);
+  CHECK_EQ(std::string(runtime::prefill::gdn_scan_launched_entry()),
+           std::string(runtime::prefill::gdn_scan_entry_name()));
+  std::printf("gdn scan entry LAUNCHED: %s\n", runtime::prefill::gdn_scan_launched_entry());
   std::puts("prefill_replay_test OK");
 }

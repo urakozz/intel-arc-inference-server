@@ -51,6 +51,7 @@
 #include "runtime/buffers.h"
 #include "runtime/control.h"
 #include "runtime/engine.h"
+#include "runtime/prefill/gdn.h"
 #include "runtime/prefill/backend.h"
 #include "runtime/prefill_backend.h"
 
@@ -131,6 +132,14 @@ int main(int argc, char** argv) {
   runtime::Engine eng(ctx, std::move(model), kMaxLen);
   eng.set_prefill_backend(backend);
   std::printf("prefill backend: %s\n", runtime::prefill_backend_name(backend));
+  // The scan selector's DISPATCH PROOF (parity-program design §11). A gate run
+  // under `B70_PREFILL_GDN_SCAN` is not evidence unless it says which kernel it
+  // launched: the 2026-09-21 "green" split record was executing `pf_gdn_scan`.
+  {
+    const char* const sel = std::getenv("B70_PREFILL_GDN_SCAN");
+    std::printf("gdn scan selector: B70_PREFILL_GDN_SCAN=%s -> entry %s\n",
+                sel && *sel ? sel : "(unset)", runtime::prefill::gdn_scan_entry_name());
+  }
   CHECK_EQ(eng.step().kernel_count, size_t(774));   // decode is untouched
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   const size_t gdn_stride = kGdnElems * sizeof(float);
@@ -163,6 +172,13 @@ int main(int argc, char** argv) {
     CHECK_EQ(eng.pos(), uint32_t(0));
     eng.prefill(ids, chunk);
     CHECK_EQ(eng.pos(), T);
+    // The other half of the dispatch proof: the entry a scan launch was really
+    // built with, read back after the walk rather than before it.
+    CHECK(runtime::prefill::gdn_scan_launched_entry() != nullptr);
+    CHECK_EQ(std::string(runtime::prefill::gdn_scan_launched_entry()),
+             std::string(runtime::prefill::gdn_scan_entry_name()));
+    std::printf("gdn scan entry LAUNCHED: %s\n",
+                runtime::prefill::gdn_scan_launched_entry());
 
     // ---- 2. the ONE gdn_state comparison R6 leaves (diagnostic, not gating) -
     std::printf("  gdn_state after the prefill, per GDN layer (DIAGNOSTIC - the 2026-08-25\n"

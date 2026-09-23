@@ -72,6 +72,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -87,6 +88,7 @@
 #include "runtime/buffers.h"
 #include "runtime/control.h"
 #include "runtime/engine.h"
+#include "runtime/prefill/gdn.h"
 #include "runtime/prefill/backend.h"
 #include "runtime/prefill_backend.h"
 
@@ -253,6 +255,14 @@ int main(int argc, char** argv) {
   runtime::Engine eng(ctx, std::move(model), kMaxLen);
   eng.set_prefill_backend(backend);
   std::printf("prefill backend: %s\n", runtime::prefill_backend_name(backend));
+  // The scan selector's DISPATCH PROOF (parity-program design §11). A gate run
+  // under `B70_PREFILL_GDN_SCAN` is not evidence unless it says which kernel it
+  // launched: the 2026-09-21 "green" split record was executing `pf_gdn_scan`.
+  {
+    const char* const sel = std::getenv("B70_PREFILL_GDN_SCAN");
+    std::printf("gdn scan selector: B70_PREFILL_GDN_SCAN=%s -> entry %s\n",
+                sel && *sel ? sel : "(unset)", runtime::prefill::gdn_scan_entry_name());
+  }
   l0::CmdList imm = l0::CmdList::immediate(ctx);
 
   std::vector<Row> rows;
@@ -515,6 +525,12 @@ int main(int argc, char** argv) {
     tot_tie += r.n_tie;
     tot_member += r.tie_member;
   }
+  // The other half of the dispatch proof: the entry a scan launch was really
+  // built with, read back after the walk rather than before it.
+  CHECK(runtime::prefill::gdn_scan_launched_entry() != nullptr);
+  CHECK_EQ(std::string(runtime::prefill::gdn_scan_launched_entry()),
+           std::string(runtime::prefill::gdn_scan_entry_name()));
+  std::printf("gdn scan entry LAUNCHED: %s\n", runtime::prefill::gdn_scan_launched_entry());
   std::printf("prefill_consistency_test OK: %zu (prompt, chunk) case(s); %u determined rows all\n"
               " exact against decode-ingest, %u undetermined rows (decode's own top-2 gap under\n"
               " one bf16 ulp) of which %u resolved to the other member of decode's tie set\n",

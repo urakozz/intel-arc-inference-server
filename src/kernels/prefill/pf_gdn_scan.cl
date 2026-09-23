@@ -342,6 +342,188 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
   }
 }
 
+// ---------------------------------------------------------------------------
+// (3d) THROWAWAY DIAGNOSTIC - step 1 of the 2026-09-23 split-scan fix.
+//
+// The split entry fails `prefill_gate_l0_test` (92/93, code L60 `gdn_state`
+// cosine 0.996344994 against a > 0.999 bar).  The only remaining single-BF16
+// rounding in it is the intra-chunk term `SUM_{j<=i} A2[i][j]*vn[j][x]`, which
+// the formula at the top of this file makes a DIRECT additive contributor to
+// `o` - and `o` is what the rest of the model reads.  These four entries
+// isolate that term: the `A2*vn` product is computed in **plain fp32 scalar
+// arithmetic, no DPAS**, out of an fp32 `vn` staged in SLM and `A2` read fp32
+// from global, with each operand independently either left fp32 or put through
+// `bf16f(rne_bf16(.))` - the exact rounding the DPAS path applies to it.
+//
+//   _diag_bf16  A2 bf16, vn bf16  the CONTROL: same roundings as the shipped
+//                                 split entry, only the summation order differs,
+//                                 so it must reproduce the failure.
+//   _diag_a2    A2 fp32, vn bf16  what splitting A2's limbs alone would buy.
+//   _diag_vn    A2 bf16, vn fp32  what splitting vn's limbs alone would buy.
+//   _diag_f32   A2 fp32, vn fp32  what splitting BOTH would buy.
+//
+// Everything else - the fp32 masters, `S`'s and `D`'s hi/lo limbs, the RNE
+// conversions, the grid, the clamps - is the split entry's, unchanged.  These
+// are slow on purpose and ship nothing: they exist to decide whether the
+// diagnosis is right before any operand is split.  SLM 34,048 B (SbHi/SbLo
+// 17,408 + DtHi/DtLo 8,448 + the fp32 `VNf` 8,192; no `A2b`, no bf16 `VNb`).
+// ---------------------------------------------------------------------------
+#define PF_GDN_SCAN_SPLIT_DIAG(NAME, A2_F32, VN_F32)                                        \
+__attribute__((reqd_work_group_size(WG_SCAN, 1, 1)))                                        \
+__attribute__((intel_reqd_sub_group_size(SG)))                                              \
+__kernel void NAME(__global const ushort* restrict xb,                                      \
+                   __global const ushort* restrict w,                                       \
+                   __global const ushort* restrict u,                                       \
+                   __global const float* restrict A2,                                       \
+                   __global const float* restrict g_cum,                                    \
+                   __global float* restrict state,                                          \
+                   __global float* restrict gdn_o, uint c_count) {                          \
+  const uint h = get_group_id(0), c = get_group_id(1), lid = get_local_id(0);               \
+  const uint sg = lid / SG, lane = lid % SG, kh = h / 3;                                    \
+  const uint mt = sg >> 2, nt = sg & 3u, col0 = mt * DM, pos_l = nt * DK + lane;            \
+  __local uint SbHiW[DIM * SB_LD], SbLoW[DIM * SB_LD];                                      \
+  __local uint DtHiW[CHUNK_V * DT_LD], DtLoW[CHUNK_V * DT_LD];                              \
+  __local float VNf[CT * CHUNK_V];                                                          \
+  __local ushort* const SbHi = (__local ushort*)SbHiW;                                      \
+  __local ushort* const SbLo = (__local ushort*)SbLoW;                                      \
+  __local ushort* const DtHi = (__local ushort*)DtHiW;                                      \
+  __local ushort* const DtLo = (__local ushort*)DtLoW;                                      \
+  const size_t sbase =                                                                      \
+      (size_t)h * DIM * DIM + (size_t)(sg * DM) * DIM + c * CHUNK_V + lane;                 \
+  float8 S0, S1;                                                                            \
+  {                                                                                         \
+    float f0[DM], f1[DM];                                                                   \
+    for (uint m = 0; m < DM; ++m) {                                                         \
+      f0[m] = state[sbase + (size_t)m * DIM];                                               \
+      f1[m] = state[sbase + (size_t)m * DIM + SG];                                          \
+    }                                                                                       \
+    S0 = vload8(0, f0);                                                                     \
+    S1 = vload8(0, f1);                                                                     \
+  }                                                                                         \
+  const uint nch = (c_count + CT - 1) / CT;                                                 \
+  for (uint t = 0; t < nch; ++t) {                                                          \
+    const uint base_m = t * CT, L = min((uint)CT, c_count - base_m), ilast = L - 1;         \
+    const uint posc = min(pos_l, ilast);                                                    \
+    {                                                                                       \
+      float f0[DM], f1[DM];                                                                 \
+      vstore8(S0, 0, f0);                                                                   \
+      vstore8(S1, 0, f1);                                                                   \
+      __local ushort* restrict dhi = SbHi + (size_t)(sg * DM) * (2 * SB_LD) + lane;         \
+      __local ushort* restrict dlo = SbLo + (size_t)(sg * DM) * (2 * SB_LD) + lane;         \
+      for (uint m = 0; m < DM; ++m) {                                                       \
+        const ushort h0 = rne_bf16(f0[m]), h1 = rne_bf16(f1[m]);                            \
+        dhi[(size_t)m * (2 * SB_LD)] = h0;                                                  \
+        dhi[(size_t)m * (2 * SB_LD) + SG] = h1;                                             \
+        dlo[(size_t)m * (2 * SB_LD)] = rne_bf16(f0[m] - bf16f(h0));                         \
+        dlo[(size_t)m * (2 * SB_LD) + SG] = rne_bf16(f1[m] - bf16f(h1));                    \
+      }                                                                                     \
+    }                                                                                       \
+    barrier(CLK_LOCAL_MEM_FENCE);                                                           \
+    const float gcp = g_cum[(size_t)(base_m + posc) * HEADS + h];                           \
+    const float gl = g_cum[(size_t)(base_m + ilast) * HEADS + h];                           \
+    {                                                                                       \
+      float8 hi = (float8)(0.0f), lo = (float8)(0.0f);                                      \
+      __global const uint* restrict wp =                                                    \
+          (__global const uint*)(w + ((size_t)(base_m + posc) * HEADS + h) * DIM);          \
+      for (uint kb = 0; kb < KBLKS; ++kb) {                                                 \
+        const int8 b = as_int8(vload8(0, wp + kb * (DK / 2)));                              \
+        hi = intel_sub_group_bf16_bf16_matrix_mad_k16(                                      \
+            as_short8(vload4(0, SbHiW + (kb * DK + lane) * SB_LD + mt * 4)), b, hi);        \
+        lo = intel_sub_group_bf16_bf16_matrix_mad_k16(                                      \
+            as_short8(vload4(0, SbLoW + (kb * DK + lane) * SB_LD + mt * 4)), b, lo);        \
+      }                                                                                     \
+      const uint4 uw = vload4(0, (__global const uint*)(                                    \
+          u + ((size_t)(base_m + posc) * HEADS + h) * DIM + c * CHUNK_V + col0));           \
+      ushort ua[DM];                                                                        \
+      float hf[DM], lf[DM];                                                                 \
+      vstore8(as_ushort8(uw), 0, ua);                                                       \
+      vstore8(hi, 0, hf);                                                                   \
+      vstore8(lo, 0, lf);                                                                   \
+      const bool live = pos_l < L;                                                          \
+      const float sc = exp(gl - gcp);                                                       \
+      __local ushort* restrict dthi = DtHi + (size_t)col0 * (2 * DT_LD) + pos_l;            \
+      __local ushort* restrict dtlo = DtLo + (size_t)col0 * (2 * DT_LD) + pos_l;            \
+      for (uint m = 0; m < DM; ++m) {                                                       \
+        const float vnv = live ? (bf16f(ua[m]) - (hf[m] + lf[m])) : 0.0f;                   \
+        const float d = vnv * sc;                                                           \
+        const ushort dh = rne_bf16(d);                                                      \
+        dthi[(size_t)m * (2 * DT_LD)] = dh;                                                 \
+        dtlo[(size_t)m * (2 * DT_LD)] = rne_bf16(d - bf16f(dh));                            \
+        VNf[(size_t)pos_l * CHUNK_V + col0 + m] = vnv;                                      \
+      }                                                                                     \
+    }                                                                                       \
+    barrier(CLK_LOCAL_MEM_FENCE);                                                           \
+    {                                                                                       \
+      float8 hi = (float8)(0.0f), lo = (float8)(0.0f);                                      \
+      __global const uint* restrict qp = (__global const uint*)(                            \
+          xb + (size_t)(base_m + posc) * CONV_ROWS + Q_OFF + kh * DIM);                     \
+      for (uint kb = 0; kb < KBLKS; ++kb) {                                                 \
+        const int8 b = as_int8(vload8(0, qp + kb * (DK / 2)));                              \
+        hi = intel_sub_group_bf16_bf16_matrix_mad_k16(                                      \
+            as_short8(vload4(0, SbHiW + (kb * DK + lane) * SB_LD + mt * 4)), b, hi);        \
+        lo = intel_sub_group_bf16_bf16_matrix_mad_k16(                                      \
+            as_short8(vload4(0, SbLoW + (kb * DK + lane) * SB_LD + mt * 4)), b, lo);        \
+      }                                                                                     \
+      const float8 o = (hi + lo) * (Q_SCALE * exp(gcp));                                    \
+      if (pos_l < L) {                                                                      \
+        float of[DM];                                                                       \
+        vstore8(o, 0, of);                                                                  \
+        __global const float* restrict Ai =                                                 \
+            A2 + ((size_t)(t * HEADS + h) * CT) * CT + (size_t)pos_l * CT;                  \
+        for (uint j = 0; j <= pos_l; ++j) {                                                 \
+          const float ar = Ai[j];                                                           \
+          const float av = (A2_F32) ? ar : bf16f(rne_bf16(ar));                             \
+          for (uint m = 0; m < DM; ++m) {                                                   \
+            const float vr = VNf[(size_t)j * CHUNK_V + col0 + m];                           \
+            const float vv = (VN_F32) ? vr : bf16f(rne_bf16(vr));                           \
+            of[m] = fma(av, vv, of[m]);                                                     \
+          }                                                                                 \
+        }                                                                                   \
+        vstore8(vload8(0, of), 0, gdn_o + ((size_t)(base_m + pos_l) * HEADS + h) * DIM +    \
+                                      c * CHUNK_V + col0);                                  \
+      }                                                                                     \
+    }                                                                                       \
+    {                                                                                       \
+      const float dl = exp(gl);                                                             \
+      float8 lo0 = (float8)(0.0f), lo1 = (float8)(0.0f);                                    \
+      S0 *= dl;                                                                             \
+      S1 *= dl;                                                                             \
+      __global const ushort* restrict kp = xb + K_OFF + kh * DIM + sg * DM;                 \
+      for (uint kb = 0; kb < PBLKS; ++kb) {                                                 \
+        const uint p = min(kb * DK + lane, ilast);                                          \
+        const short8 a = as_short8(vload4(0, (__global const uint*)(                        \
+            kp + (size_t)(base_m + p) * CONV_ROWS)));                                       \
+        const int8 b0h = as_int8(vload8(0, DtHiW + (size_t)lane * DT_LD + kb * (DK / 2)));  \
+        const int8 b1h = as_int8(vload8(0, DtHiW + (size_t)(SG + lane) * DT_LD + kb * (DK / 2)));\
+        const int8 b0l = as_int8(vload8(0, DtLoW + (size_t)lane * DT_LD + kb * (DK / 2)));  \
+        const int8 b1l = as_int8(vload8(0, DtLoW + (size_t)(SG + lane) * DT_LD + kb * (DK / 2)));\
+        S0 = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b0h, S0);                          \
+        S1 = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b1h, S1);                          \
+        lo0 = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b0l, lo0);                        \
+        lo1 = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b1l, lo1);                        \
+      }                                                                                     \
+      S0 += lo0;                                                                            \
+      S1 += lo1;                                                                            \
+    }                                                                                       \
+    barrier(CLK_LOCAL_MEM_FENCE);                                                           \
+  }                                                                                         \
+  {                                                                                         \
+    float f0[DM], f1[DM];                                                                   \
+    vstore8(S0, 0, f0);                                                                     \
+    vstore8(S1, 0, f1);                                                                     \
+    for (uint m = 0; m < DM; ++m) {                                                         \
+      state[sbase + (size_t)m * DIM] = f0[m];                                               \
+      state[sbase + (size_t)m * DIM + SG] = f1[m];                                          \
+    }                                                                                       \
+  }                                                                                         \
+}
+
+PF_GDN_SCAN_SPLIT_DIAG(pf_gdn_scan_dpas_split_diag_bf16, 0, 0)
+PF_GDN_SCAN_SPLIT_DIAG(pf_gdn_scan_dpas_split_diag_a2, 1, 0)
+PF_GDN_SCAN_SPLIT_DIAG(pf_gdn_scan_dpas_split_diag_vn, 0, 1)
+PF_GDN_SCAN_SPLIT_DIAG(pf_gdn_scan_dpas_split_diag_f32, 1, 1)
+#undef PF_GDN_SCAN_SPLIT_DIAG
+
 __attribute__((reqd_work_group_size(WG_SCAN, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void pf_gdn_scan(__global const ushort* restrict xb,
