@@ -1,172 +1,138 @@
 # The box
 
-```bash
-ssh user@box
-```
+This engine is developed on a laptop and built, tested and benchmarked on a
+separate Linux machine with the cards in it - "the box" throughout these docs,
+and `$BOX` in every command. Nothing here requires that arrangement, but
+everything here assumes it, and a few of the consequences are worth writing
+down.
 
-Current address confirmed by the operator on 2026-09-19. Older plans and
-measurement records refer to `box`; use `box` when running
-their commands today. The box and benchmark helpers default to this address;
-set `BOX=user@host` to override it.
+The one this was developed on is a Dell T5810 workstation with two cards in it.
 
-Dell T5810. The hostname still says `P620` in places - stale, ignore it.
-
-## Hardware
+## What the box has to be
 
 | | |
 |---|---|
-| CPU | 44 threads |
-| RAM | 121 GB |
-| GPU | **2 × Intel Arc Pro B70**, 32 GB each |
-| Render nodes | `/dev/dri/renderD128`, `renderD129`, `renderD130` |
+| OS | Linux. Ubuntu is what this was developed against; no Windows or macOS runtime exists |
+| CPU / RAM | 44 threads, 121 GB. The engine's own build is comfortable at full width; the reference vLLM container's torch build is not (doc 09) |
+| GPU | **2 x Intel Arc Pro B70**, 32 GB each. One is enough; the second is useful as an idle control |
+| Driver | `libze_intel_gpu`, IGC and `intel-ocloc`. The B70 is `bmg-g31`, so kernels build with `ocloc -device bmg-g31` |
+| Level Zero | headers and loader from the distribution packages |
+| Host compilers | `g++` 15.2 and CMake 4.2 or later, plus `ccache` |
+| Rust | needed for the pinned `tokenizers` crate (doc 11). A user-local `rustup` with `--profile minimal` is enough; the build looks in `~/.cargo/bin` first and never changes `PATH`. The crate builds `oniguruma` from source through `cc`, so a working `/usr/bin/cc` is required |
+| oneAPI | only for the optional sycl-tla reference backend. `icpx` is usually **not** on `PATH` in a non-interactive shell, so source the environment script or use the full path |
 
-`card0`/`renderD128` is typically the display device; select a compute GPU with
-`ONEAPI_DEVICE_SELECTOR=level_zero:0` (or `:1` for the second card). Full device
-properties are in [01-hardware.md](01-hardware.md).
+The C++ side builds **natively on the host**. No container is needed for
+anything except the Python CPU oracle and the reference vLLM stack.
 
-Only **one** card is used in every measurement so far. XPU graphs are single-GPU
-only in vLLM, so TP=2 was never exercised under graphs.
+`tools/box.sh` and the benchmark helpers take the machine from
+`BOX=user@host`; there is no default address worth writing down.
 
-### Known hardware gotcha
+## Driving a remote build
 
-The NVMe (Crucial P1, PCH slot) drops out under APST. Kernel needs
-`nvme_core.default_ps_max_latency_us=0`. Fixed 2026-08-12 - if the box loses its
-disk after a kernel update, check this first.
+`tools/box.sh` syncs the tree, configures, builds and runs `ctest` over ssh.
+Set `BOX=user@host` before using it; `REMOTE_DIR`, `JOBS`, `BUILD_DIR` and
+`CMAKE_ARGS` override the rest.
 
-## Toolchain on the host (not in Docker)
-
-Probed 2026-08-22. The C++ side builds **natively on the host**; no container
-is needed for anything except the Python oracle.
-
-| | |
-|---|---|
-| OS / kernel | Ubuntu 26.04, kernel 7.2.0 |
-| GPUs as seen by `lspci` | 2 × `Battlemage G31` (04:00.0, 08:00.0) + an NVIDIA GT 710 for display → `ocloc -device bmg-g31` |
-| GPU driver | `libze_intel_gpu.so.1.15.39122`, IGC `2.38.x`, `intel-ocloc 26.27.39122` |
-| Level Zero | headers in `/usr/include/level_zero/`, loader in `/usr/lib/x86_64-linux-gnu/` |
-| oneAPI | `/opt/intel/oneapi/{2026.0,2026.1}`; `icpx` at `/opt/intel/oneapi/compiler/2026.1/bin/icpx` - **not on `PATH`** in a non-interactive shell; `source /opt/intel/oneapi/setvars.sh` or use the full path |
-| Host compilers | `g++ 15.2`, `cmake 4.2.3`, `ccache`; **no `ninja`** on the host (`apt install ninja-build`, or use the one in the image's venv) |
-| Python on host | 3.14, **no torch / transformers** |
-| Rust | none - the tokenizer dependency (doc 11) needs `rustup` or a prebuilt static lib |
-
-Inside `vllm-xpu-env-next-p314-t214-vxkp0`: `transformers 5.15.0` with
-`transformers/models/qwen3_5/modeling_qwen3_5.py` (`Qwen3_5GatedDeltaNet`,
-`Qwen3_5RMSNormGated`, `Qwen3_5ForConditionalGeneration`, …), `torch
-2.14.0+xpu`, `icpx` and `ocloc` also present. `fla`
-(**flash-linear-attention**, the Triton GDN kernel library; vLLM vendors its
-ops under `vllm/third_party/flash_linear_attention/`) is **not** installed -
-deliberately left out: without it transformers runs its pure-torch GDN loop,
-which is the reference math in doc 03 and the only one we want the oracle to
-speak. It is slow, which is fine for short golden prompts on CPU, and the
-dequantised 27B (~54 GB bf16) does not fit a B70 anyway. The container only
-sees the GPU with `--device /dev/dri`.
-
-`sycl-tla` targets this part as `-fsycl-targets=spir64_gen` with
-`-device bmg-g21,bmg-g31` (`cmake/FindDPCPP.cmake:78-95`); the B70 is G31.
-
-## Models in the HF cache
-
-`~/.cache/huggingface` - **117 GB total**, mounted into containers at
-`/root/.cache/huggingface`.
-
-| Size | Model | Notes |
-|------|-------|-------|
-| 28G | `urakozz/Ornith-1.0-35B-int4-AutoRound` | self-quantised |
-| 23G | `palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4` | **phase 4** - MoE + MTP |
-| 22G | `olka-fi/Ornith-1.0-35B-MXFP4` | **phase 3** - MoE, MXFP4 |
-| 19G | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` | **phase 1 and 2 target.** 64 layers (48 GDN + 16 FA), int4 g64 sym, bf16 `lm_head`, bf16 MTP head. Shipped a broken MTP config - **fixed in the cache** (see below) |
-| 14G | `letechlead/Ornith-1.5-9B-INT4-W4A16-AutoRound` | broken - does not load in vLLM and more; **no longer a target** |
-| 8.4G | `urakozz/Ornith-1.0-9B-MTP-int4-AutoRound` | self-quantised, g64, has MTP head - also not serviceable as of 2026-08-22 |
-| 2.6G | `Doopeworld/Qwen3.8-27B-DSpark-vLLM` | draft model for DSpark speculation |
-| 2.8M | `gpt2` | smoke tests |
-
-All int4 checkpoints are GPTQ-packed and symmetric; the metadata spelling
-differs (`quant_method: "gptq"` + `provider: "auto-round"` on Vishva007,
-`"auto-round"` + `packing_format` on the 9Bs - doc 02). Group size varies:
-128 (letechlead), 64 (Vishva007, urakozz), 32 (palmfuture 27B).
-
-### Checkpoint quirks that will bite the loader
-
-- **`letechlead/Ornith-1.5-9B`** declares `Qwen3_5ForConditionalGeneration` and
-  ships `model.language_model.*` (2177 tensors), `model.visual.*` (549), and
-  `lm_head.weight`. It **does not load in vLLM** - see
-  [07-open-questions.md](07-open-questions.md) #2. It also carries a
-  `model_extra_tensors.safetensors` that overlaps the sharded files, so tensor
-  accounting must deduplicate by name.
-- **`Vishva007/Qwen3.8-27B`** declared its 15 `mtp.*` tensors quantised via
-  AutoRound `dynamic` rules (`"+:.*mtp.*"`) while shipping them **unquantised**.
-  Fix is to flip both rules to exclusions (`"-:.*mtp.*"`, `"-:.*mtp\\.fc.*"`) in
-  the cached `config.json` - **already applied on the box** (verified
-  2026-08-22: the cached config reads `-:`). A fresh download would need it
-  again. Our loader trusts the tensor suffixes, not the rules, so it is immune. `palmfuture` ships its exclusion correctly.
-- **`Pilcothink/Qwen3.8-27B-MixedInt4`** (not currently cached) mixes widths:
-  97 layers bf16, 17 int8, rest int4. vLLM's XPU path rejects the int8 ones.
-
-## Docker images
-
-| Image | Notes |
-|-------|-------|
-| `vllm-xpu-env-next-p314-t215-vxkp0` | **current reference** (2026-09-09). Level Zero updated to 1.33.1 by the operator. It is the only vLLM image on the box; `tools/oracle/run_in_container.sh` and `tools/probe/run_vllm_gemv_bench.sh` default to it |
-| `vllm-xpu-env-next-p314-t214-vxkp0` | the reference until 2026-09-09, **no longer on the box**. Python 3.14, torch 2.14 RC, kernels source-built pristine (`PATCH_LEVEL=0`). Every measurement and every golden set taken before that date was produced by it and its rows say so - those labels are not rewritten |
-| `vllm-xpu-env-next-p314-t214-vxkp12` | same, with the full 12-patch stack - slower at decode, see [09](09-vllm-patch-postmortem.md); also gone |
-
-**A golden set belongs to its image as well as to its checkpoint.** The oracle
-is `transformers` running inside whichever image made the dump, so a set dumped
-under t215 and one dumped under t214 are not interchangeable evidence even for
-the same weights. `docs/14` records the image beside each set; keep doing that.
-
-Also on the box: the serving stack (`lmstack-router`, Grafana, VictoriaMetrics,
-Open WebUI) and unrelated `gigachad-grc-*` services. **Never `docker volume
-prune`** - it would delete the `open-webui` chat history.
-
-## Running the reference stack for comparison
-
-**The canonical serve and bench commands, and every baseline number, live in
-[BENCHMARKS.md](BENCHMARKS.md).** The command below is the short form; when
-they disagree, BENCHMARKS.md wins (it adds `--language-model-only`, the
-reasoning/tool parsers, and `--speculative-config` for the MTP rows).
-
-```bash
-docker run --rm --name ref --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
-  --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path:ro -v /sys/class/drm:/sys/class/drm:ro \
-  --group-add "$(getent group render | cut -d: -f3)" \
-  --group-add "$(getent group video | cut -d: -f3)" \
-  --ipc=host --pid=host --net=host --shm-size=16g \
-  -e VLLM_USE_V2_MODEL_RUNNER=1 -e ZE_FLAT_HIERARCHY=FLAT \
-  -e ONEAPI_DEVICE_SELECTOR=level_zero:0 -e VLLM_XPU_ENABLE_XPU_GRAPH=1 \
-  -e HF_HUB_OFFLINE=1 \
-  -v ~/.cache/vllm:/root/.cache/vllm -v ~/.cache/huggingface:/root/.cache/huggingface \
-  vllm-xpu-env-next-p314-t214-vxkp0 "$MODEL" \
-  --host 0.0.0.0 --port 8000 --max-model-len 16k --max-num-seqs 2 \
-  --trust-remote-code --enable-prefix-caching \
-  --compilation-config '{"inductor_compile_config":{"pre_grad_fusion_options":{}}}'
+```sh
+tools/box.sh sync                 # rsync the tree
+tools/box.sh build                # sync + cmake configure + build
+tools/box.sh test [regex]         # sync + build + ctest, optionally -R regex
+tools/box.sh run <cmd...>         # run a command in the remote tree
+tools/box.sh pull <path>          # copy a generated file back
 ```
 
-The `pre_grad_fusion_options: {}` override is **required**. torch 2.14 defaults it
-to an XPU-only `batch_linear_lhs` fusion that costs ~30% of decode on this
-workload.
+Two properties of that script are load-bearing rather than incidental.
 
-Benchmark against it with:
+- **It syncs without `.git`.** So the remote tree cannot name the commit it is
+  building. Anything that wants to record a revision has to be substituted by
+  the *local* shell before the command crosses the ssh boundary.
+- **A second build directory lives beside the first.** The no-SYCL
+  configuration (`cmake -DB70_PREFILL=OFF`) is a `BUILD_DIR` rather than a
+  hardcoded path, so one tree serves every configuration.
 
-```bash
-uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model "$MODEL" \
-  --pp 4096 --tg 256 --concurrency 1 --depth 1 \
-  --no-cache --exact-tg --latency-mode generation
-```
+**Long jobs must survive the ssh session.** Detach them
+(`setsid nohup <script> >/dev/null 2>&1 </dev/null &`) and poll the log. This is
+not fastidiousness: BuildKit discards *all* completed work, including finished
+layers, if the docker client dies, and a dropped connection can silently lose
+hours.
 
-`uvx` lives at `~/.local/bin/uvx` and is **not** on the default non-interactive
-ssh `PATH` - `export PATH="$HOME/.local/bin:$PATH"` first.
+## Device selection, and the gotcha
 
-## Operational notes
+A box with two cards will not hand you the same one twice unless you say which.
+Where one card also drives a display, the render nodes do not map to selector
+indices the way you would guess, and the display card is not the one you want
+under a benchmark.
 
-- **Long builds must survive ssh.** BuildKit discards all completed work if the
-  docker *client* dies. Use `setsid nohup <script> >/dev/null 2>&1 </dev/null &`
-  and poll the log.
+The contract is in [04-architecture.md](04-architecture.md) and it is worth
+repeating here because it is the thing that silently invalidates a measurement:
+
+1. `--device N` wins, and it governs **both** execution paths, so a SYCL
+   backend binds the same physical card by Level Zero handle rather than by a
+   second selector agreeing.
+2. `ONEAPI_DEVICE_SELECTOR=level_zero:N` is the fallback. The SYCL runtime
+   honours it natively; the raw Level Zero path parses it itself, because Level
+   Zero does not read it.
+3. `ZE_AFFINITY_MASK` sits underneath both as a driver-level filter on which
+   devices are enumerated at all. Under a mask, every index above refers to the
+   masked view.
+
+**The two cards are not interchangeable.** Same binary, same checkpoint, same
+ten minutes: prefill loses 3.2% to 3.4% on the second card while decode loses
+only 0.2% to 0.4%. That is a difference in sustained compute rather than in
+bandwidth, and it is unattributed (doc 07). Every series row in
+[BENCHMARKS.md](BENCHMARKS.md) is therefore taken on one named card and says
+which.
+
+## Why an idle box matters
+
+A benchmark row only counts as a record when the box is provably idle: zero
+containers and zero processes holding a DRM file descriptor on any card,
+verified before *and* after the run set. The harness measures that condition
+itself and prints the grade it earned; a grade is quoted as printed and never
+upgraded by hand. The grade ladder is in [BENCHMARKS.md](BENCHMARKS.md).
+
+Idleness matters **unevenly**, and both halves are measured:
+
+- **A CPU compile does not contend with decode.** Under a 12-core compile the
+  decode step read 36.27 ms/token against an idle median of 36.32, 0.14% apart,
+  because the step is 99.7% inside the GPU fence. That is why a loaded box
+  downgrades a row's grade without invalidating it.
+- **A CPU compile absolutely contends with the CPU oracle.** Regenerating one
+  golden set took 25 min 14 s under a 12-core compile against 18 min 16 s on an
+  idle box, 28% slower. Anything that runs on the CPU pays full price.
+
+Desktop session daemons routinely hold a DRM file descriptor without submitting
+any work. They still cost the row its record grade, because "submitted no work"
+is a corroboration and not a proof.
+
+## The reference stack
+
+The vLLM container that produces the baseline numbers, the exact serve command
+and the exact bench command all live in [BENCHMARKS.md](BENCHMARKS.md). Two
+things about running it are worth knowing before you do.
+
+- **Read the vLLM version string the server prints, never the image tag.** A tag
+  gets rebuilt. One tag in this project's history carried two builds 149 commits
+  apart under the same name, and a number attributed to the wrong one is
+  unrecoverable later.
+- **`--compilation-config '{"inductor_compile_config":{"pre_grad_fusion_options":{}}}'`
+  is required**, not optional. torch 2.14 defaults that option to an XPU-only
+  `batch_linear_lhs` fusion that costs about 30% of decode on this workload.
+
+A golden set belongs to its container as well as to its checkpoint: the oracle
+is `transformers` running inside whichever image made the dump, so two sets
+dumped under different images are not interchangeable evidence even for the same
+weights. Record the image beside each set.
+
+## Gotchas that cost time
+
 - **`docker stop` does not immediately free the container name.** A follow-up
   `docker run --name X` can fail with exit 125; `docker rm -f X` first.
-- Model load for a 27B is ~2-4 minutes; graph capture and compile add another
-  2-4. Budget ~8 minutes from launch to a servable endpoint.
-
-## Rust (spec 3, T1 - 2026-09-06)
-
-User-local `rustup` (`--profile minimal`, `--no-modify-path`): `~/.cargo/bin/{cargo,rustc}` = `cargo 1.98.1 (797e8a9bc 2026-08-05)`, `rustc 1.98.1 (48a229cea 2026-09-01)`, `/home/user/.rustup/toolchains/stable-x86_64-unknown-linux-gnu`. Nothing on PATH was changed; `cmake/tokenizer.cmake` looks in `~/.cargo/bin` first. Installed for the `tokenizers` crate (docs/11); it builds `oniguruma` from source through `cc`, so it needs `/usr/bin/cc` (gcc 15.2, present).
+- **Never `docker volume prune`** on a box that also runs anything else. It
+  takes unrelated named volumes with it.
+- **Model load for a 27B is 2 to 4 minutes in the reference stack**, and graph
+  capture plus compile adds another 2 to 4. Budget about 8 minutes from launch
+  to a servable endpoint. Our own loader takes 13.6 s on a warm page cache.
+- **A consumer NVMe can drop out under APST.** One did, and the fix was
+  `nvme_core.default_ps_max_latency_us=0` on the kernel command line. If the box
+  loses its disk after a kernel update, check that first.
