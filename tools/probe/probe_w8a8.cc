@@ -62,7 +62,8 @@ namespace {
 using runtime::prefill::arg_val;
 using runtime::prefill::PtrArg;
 
-constexpr uint32_t kM = 2048;
+constexpr uint32_t kFileM = 2048;          // rows in a capture file (one prefill chunk)
+uint32_t kM = 2048;                         // rows timed: B70_W8A8_M, a multiple of 256 <= 2048
 constexpr uint32_t kGroup = 64;
 constexpr uint32_t kNs = 1024;              // kernels::kPfSlabWidth
 constexpr uint32_t kTile = 256;             // pf_gemm WG_M / WG_N, pw8_gemm WG_M
@@ -155,7 +156,10 @@ int main(int argc, char** argv) {
     if (!f) throw std::runtime_error("cannot open " + in_path);
     Header h{};
     f.read(reinterpret_cast<char*>(&h), sizeof h);
-    if (std::memcmp(h.magic, "B70W4A8", 8) != 0 || h.M != kM || h.group != kGroup)
+    if (const char* mv = std::getenv("B70_W8A8_M")) kM = uint32_t(std::atoi(mv));
+    if (kM == 0 || kM > kFileM || kM % 256)
+      throw std::runtime_error("B70_W8A8_M must be a multiple of 256 in 256..2048");
+    if (std::memcmp(h.magic, "B70W4A8", 8) != 0 || h.M != kFileM || h.group != kGroup)
       throw std::runtime_error(in_path + " is not a W4A8 probe capture file");
     const uint32_t K = h.K, N = h.N;
     if (K % 1024 || N % kNs || K > 20480)
@@ -169,7 +173,9 @@ int main(int argc, char** argv) {
     std::vector<uint16_t> act(size_t(kM) * K);
     std::vector<uint32_t> qw(size_t(K / 8) * N);
     std::vector<uint16_t> sc(size_t(K / kGroup) * N);
+    // the first kM rows of the capture's kFileM: a shorter prompt's chunk
     f.read(reinterpret_cast<char*>(act.data()), std::streamsize(act_bytes));
+    f.seekg(std::streamoff(size_t(kFileM - kM) * K * 2), std::ios::cur);
     f.read(reinterpret_cast<char*>(qw.data()), std::streamsize(q_bytes));
     f.read(reinterpret_cast<char*>(sc.data()), std::streamsize(s_bytes));
     if (!f) throw std::runtime_error(in_path + " is truncated");
@@ -178,8 +184,8 @@ int main(int argc, char** argv) {
     std::printf("# ZE_AFFINITY_MASK=%s\n", env_or_unset("ZE_AFFINITY_MASK"));
     l0::Context ctx(0);
     std::printf("# L0 device: %s\n", ctx.name().c_str());
-    std::printf("# input %s: layer %u, K=%u N=%u M=%u, %.1f GFLOP per call, %u slabs\n",
-                in_path.c_str(), h.layer, K, N, kM, gflop, kSlabs);
+    std::printf("# input %s: layer %u, K=%u N=%u M=%u (of %u), %.1f GFLOP per call, %u slabs\n",
+                in_path.c_str(), h.layer, K, N, kM, kFileM, gflop, kSlabs);
 
     // --- host-side: the column scales (a load-time property of the weights),
     // the CPU requant the device must reproduce, the Hadamard signs ---------
@@ -288,7 +294,12 @@ int main(int argc, char** argv) {
       up.fill(sig.ptr(), 0u, 64);
     }
 
-    l0::Module m_dq(ctx, kernels::path(kernels::pf_dequant_slab_variant(K, N, 0)));
+    // The control's dequant in the layout production uses for this shape
+    // (B70_W8A8_CTL_LAYOUT; GDN qkv||z is layout 1). With synthetic weights the
+    // control's VALUES then mean nothing; its TIME is the production kernel's.
+    const unsigned ctl_layout = std::getenv("B70_W8A8_CTL_LAYOUT")
+                                    ? unsigned(std::atoi(std::getenv("B70_W8A8_CTL_LAYOUT"))) : 0u;
+    l0::Module m_dq(ctx, kernels::path(kernels::pf_dequant_slab_variant(K, N, ctl_layout)));
     l0::Kernel k_dq = m_dq.kernel("pf_dequant_slab");
     l0::Module m_gemm(ctx, kernels::path(kernels::pf_gemm_variant(false)));
     l0::Kernel k_gemm = m_gemm.kernel("pf_gemm");
@@ -298,7 +309,8 @@ int main(int argc, char** argv) {
     l0::Kernel k_q = m_w8.kernel("pw8_quant");
     l0::Kernel k_qh = m_w8.kernel("pw8_quant_had");
     const uint32_t nblk = K / 1024;
-    if (nblk != 5 && nblk != 17) throw std::runtime_error("v2 quantisers exist for K = 5120, 17408");
+    if (nblk != 5 && nblk != 6 && nblk != 17)
+      throw std::runtime_error("v2 quantisers exist for K = 5120, 6144, 17408");
     const std::string q2_name = "pw8_quant2_" + std::to_string(nblk);
     const std::string qh2_name = "pw8_quant_had2_" + std::to_string(nblk);
     // The helpers come from the 128-GRF build of the same source unless
