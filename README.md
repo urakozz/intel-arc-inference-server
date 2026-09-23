@@ -1,243 +1,142 @@
 # b70-inference-server
 
-An LLM inference server written from scratch for the **Intel Arc Pro B70**, talking
-to SYCL and Level Zero directly. No PyTorch, no vLLM, no `vllm-xpu-kernels`.
+An LLM inference engine I wrote from scratch for the Intel Arc Pro B70, talking
+straight to Level Zero and OpenCL C. No PyTorch, no vLLM, no vendor kernel
+library in the hot path.
 
-Scope is deliberately narrow: **one model family (`qwen3_5`), one math path (W4A16)**.
-Specialisation is the entire strategy - a general engine cannot make the choices
-this one can.
+I started it to learn what this silicon actually does, and to see whether a
+small specialised engine could beat a general one on the same box. It can, at
+least for prefill.
 
-## Goals, in priority order
+## Where it stands
 
-1. **Beat vLLM** on the same box, same model, same benchmark.
-2. **Learn the metal** - Level Zero, XMX, the real cost model of this silicon.
-3. **Own the dependencies** - a static binary that does not rot when a torch
-   nightly moves.
-4. **Share it** once it is good.
+Measured on one Arc Pro B70, same checkpoint and same prompt on both sides,
+median of three runs on an idle machine:
 
-## The four levers
+| | this engine | vLLM | |
+|---|---:|---:|---|
+| prefill, 4096 tokens | **1670.72 t/s** | 1610.04 t/s | we are 3.8% ahead |
+| decode, 256 tokens | 29.45 t/s | 31.01 t/s | we are 5% behind |
 
-"Beat vLLM" rests on four specialisations a general engine cannot take. They are
-independent of each other, and each is labelled by how well it is established.
+Prefill went from 1406 t/s to 1670 t/s over a couple of weeks of kernel work.
+Decode has been parked for a while and vLLM is still ahead there, so that is
+the honest picture: good prefill, decode still to do.
 
-| Lever | What it buys on the phase-1 model | Status |
-|---|---|---|
-| Fill the device at `M = 1` - GEMV, split-K, `M ∈ [1,8]` | the gap from vLLM's **81% MBU** to ~95%: ≤ ×1.2 | verified in source (doc 08); the only decode lever that is pure kernel work |
-| Byte-identical Level Zero replay | zero host work per token - but ~700 kernels per token means per-kernel fixed cost is the new host overhead; fusion is part of this lever | established on MoE (~55% MBU); on the 27B dense it shares the same ≤ ×1.2 with the row above (doc 05) |
-| Quantise `lm_head` (+ the MTP head) | 2.54 GB of 15.52 GB per token → ×1.14 at int4, ×1.09 at int8 | **measured** bytes; accuracy cost unmeasured (doc 07 #6). In situ the row is **4.376 ms of the measured 36.32 ms token** and int4 would cut ~3.3 (estimated) - the largest item left in the step, and **not sufficient on its own** to clear 31.50 (memo, doc 15) |
-| MTP on a weight-stationary `M ∈ [1,8]` verify | draft traffic shared with the verify step; ~55-70 t/s ceiling vs vLLM's 45 (estimate) | phase 2 (doc 05) |
-| W4A8 prefill on native s8×s4 DPAS | int8 systolic rate, zero dequantisation | atom exists in `sycl-tla`; no mainloop yet (doc 07 #9) |
+Checkpoint is `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`, int4 weights with
+group size 64, bf16 activations. vLLM serves the exact same files, which is what
+makes the comparison fair. Full protocol and every row is in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-On the 27B dense the roofline is **38.7 t/s** (600 GB/s ÷ 15.52 GB; 37.97 on
-the loader's measured 15.540 GB and the 590 GB/s a Level Zero launch actually
-gets) and vLLM already sits at 31.50. Every decode lever above is worth ×1.1-1.2
-on its own; they multiply to ~×1.4 at best (≈44 t/s) without speculation. Phase
-2 is where the larger numbers live. Doc 05 has the arithmetic; `W` is measured,
-not estimated.
+## Scope
 
-**Measured state, 2026-09-09, on matched bytes: `tg256` = 29.32 t/s against
-vLLM's 31.01 - the engine trails by 5.4% - and `pp4096` = 1406.18 t/s against
-vLLM's 1973, 71.3%.** Both record grade on a provably idle box, both on
-`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ@84575a1`, the checkpoint vLLM
-itself serves (docs/BENCHMARKS "The spec-2 re-gate rows").
+One model family and one math path, on purpose. Qwen3.8-27B is a hybrid: 48
+gated delta net layers and 16 full attention layers. Everything here is built
+around that shape and around W4A16. Specialisation is the whole strategy, since
+a general engine cannot hardcode the things this one hardcodes.
 
-**An earlier headline here claimed the engine was 3.9% ahead at decode, and
-that claim is withdrawn** (operator ruling, 2026-09-13). It rested on a
-32.22 t/s row measured with an **int4 `lm_head`**, which vLLM cannot load - so
-it compared our 13.673 GB/token against vLLM's 15.540 and read a 1.867 GB
-checkpoint advantage as an engine one. vLLM would be faster with that
-`lm_head` too. The byte-matched row beside it always said so (29.33 vs 31.01,
-"the lead is a *checkpoint* advantage, not a kernel one"), and that is now the
-only decode comparison this project quotes: **bf16 `lm_head` on both sides.**
-The 32.22 row stays in BENCHMARKS as a measurement, labelled; it is not a
-headline and it is not being re-taken.
+## How it works
 
-**MBU is 74.7%** - under spec 1.7's 82% bar and well under the
-90% originally set as the fold criterion, so a quarter of the card's bandwidth
-still is not becoming tokens. The levers that got here after spec 1.5: a
-per-shape GEMV layout/S/dequant retune (**−1.20 ms/token**) and register-packed
-GQA reuse in `attn_decode` (**−1.075**, plus **−0.037** for a redundant fence
-the review caught), with the tie-aware golden gate element-exact on every
-determined row throughout.
+**Decode** replays a Level Zero command list that was captured once, with frozen
+kernel arguments. 774 kernels and 19 modules per token, no host decisions in the
+loop.
 
-**And since 2026-09-05 there is a prefill, which is the other half of phase 1's
-target and it is SHORT.** `pp4096` measures **1377.20 t/s device-side** at
-`e44c40c` against vLLM's **1973** HTTP-inclusive - **69.8%** (median of 3,
-2.974 s for 4096 ids, iterate grade, docs/BENCHMARKS "spec-2 gate rows"). What
-it replaced was an ingest that replayed the decode list once per prompt id and
-cost **121 s** for the same prompt, so the engine gained **40.7×** and still
-does not reach the bar; spec 2's §3.0c amendment had already shown why, and the
-[gate memo](docs/superpowers/specs/2026-09-05-spec2-gate-memo.md) carries it.
-Unlike the decode row, this one needs no byte-matching caveat: prefill runs
-`lm_head` once per prompt, so the two checkpoints measure 0.17% apart.
+**Prefill** runs entirely on Level Zero with our own OpenCL C kernels. The int4
+weights are dequantised into 1024 column slabs and multiplied by a DPAS GEMM
+written for this card, interleaved on one in order command list. A prefill chunk
+makes no SYCL call and never waits on the host. Attention and the delta net
+scan are ours too.
 
-**Since 2026-09-18 (spec 2.1) prefill runs on the Level Zero backend by default** -
-every prefill GEMM on our own `pf_gemm` DPAS kernel, no SYCL in a chunk - and
-`--pp-backend sycl-tla` keeps spec 2's reference path selectable; `pp4096` is
-**1502.83 t/s**, RECORD grade, against the sycl-tla control's 1407.63 in the same
-session (docs/BENCHMARKS "The spec-2.1 rows").
+sycl-tla stays selectable as a reference backend with `--pp-backend sycl-tla`,
+and the whole thing also builds with no SYCL component at all.
 
-The spec-1.5-era paragraph below is kept as the record of how it read then.
+## Some hardware facts I measured along the way
 
-**Measured state, 2026-08-25 at the spec 1.5 gate: 27.54 t/s against vLLM's
-31.50 - still below it, 12.6% short.** MBU is **72.5%** (428 GB/s of the
-measured 590) against vLLM's **83.0%**, on a 37.97 t/s roofline. The first
-measurement of this engine was 23.73 t/s / 24.7% short (2026-08-25, `62bdd4d`);
-spec 1.5's lever ladder took it to 27.54 in three measured cuts - the `a‖b`
-GEMV K-split (−1.875 ms/token), the `prep_res_norm` two-stage reduction
-(−2.220) and the `ATTN_BLOCK` 256 → 64 attention retile (−1.726) - with the
-golden gate **96/96 element-exact** at every one. That closed **56% of the
-10.395 ms/token gap** it started with and **did not close the gate**: 4.574
-ms/token remain.
+Might save you a benchmark or two if you work on Xe2.
 
-Lever 2 of the four below delivered completely (0.3% of the step is host time)
-and lever 1 is 89-97% of roofline where it was probed; what the ladder found is
-that the rest of the token is neither. The levers are not wrong; they were not
-the whole cost model. Doc 05's "Phase 1, measured" section is the honest
-version, and
-[the spec 1.5 re-assessment memo](docs/superpowers/specs/2026-08-25-spec1.5-reassessment.md)
-is why the ladder stopped there and what a spec 1.6 would cost - its headline
-being that quantising `lm_head` (~3.3 ms, estimated, lever 3 below) is
-**necessary but not sufficient**: it lands at 30.62 t/s, 0.88 t/s under the
-bar, so a second item is required and none has a measured price yet.
+DPAS throughput on the B70, from a loop the assembly confirms is DPAS bound:
 
-## How this project is built - read this first
+| type | K per instruction | rate | vs bf16 |
+|---|---:|---:|---:|
+| bf16, fp16 | 16 | 183.45 TFLOP/s | 1.000x |
+| int8 | 32 | 366.90 TIOP/s | 2.000x |
+| int4 | 64 | 733.80 TIOP/s | 4.000x |
 
-**The point is to understand this stack, not to produce code that happens to run.**
-Speed is the scoreboard; comprehension is the product. A working kernel nobody can
-explain is a failure here, not a milestone.
+That bf16 number is 99.97% of the clock derived peak, so the ratios really are
+just the K depth. Our production GEMM sits at 161.7 TFLOP/s on the largest
+linear, about 88% of peak.
 
-Concretely:
+FP4 and FP8 matmul are a different story. The compiler exposes `e2m1` and FP8
+builtins, but the backend refuses them on this device: "FP4 Dpas instruction is
+not supported on this device". Every `scaled_matrix_mad` form, which is how
+hardware microscaling would work, crashes the compiler. So MXFP4 buys nothing
+here today, and int8 or int4 activations are the only lower precision paths
+that would actually run.
 
-- **No code lands without an explanation of why it is shaped that way** - which
-  call reaches it, what it hands to the next layer, what doing it differently
-  would cost. If that cannot be written down, it is not understood well enough
-  to keep.
-- **Every design choice names its trade-off.** "Faster" is not a reason. *Faster
-  at what, worse at what, measured how* is a reason. Alternatives get written
-  down and rejected explicitly, never silently skipped.
-- **Measure before claiming.** Every number in these docs is labelled measured or
-  estimated. An estimate never becomes an assumption without being measured -
-  see [docs/07-open-questions.md](docs/07-open-questions.md).
-- **Read the source; do not guess the behaviour.** The reference checkouts below
-  exist to be read. Claims drawn from source cite file and line. Claims that are
-  not are marked as hypotheses.
-- **Ask "who calls this, and why does it exist?"** before touching a component.
-  If a layer's purpose cannot be stated in one sentence, its boundary is wrong.
+Details in [docs/probe-dpas-rates-2026-09-22.md](docs/probe-dpas-rates-2026-09-22.md).
 
-Explanations of mechanism belong in these docs, not only in commit messages -
-they are part of the deliverable.
+## Things that did not work
 
-Start with [docs/08-decode-vs-prefill.md](docs/08-decode-vs-prefill.md). It is the
-one idea the whole design rests on.
+Kept because negative results saved more time than the wins did.
 
-## Phase ladder
+- **Fusing int4 dequant into the GEMM.** Both variants came out bitwise correct
+  and slower. The dequant pass already runs near memory bandwidth, and doing the
+  same work inside the mainloop costs more than the traffic it removes.
+- **Removing barriers from the triangular solve.** The design assumed
+  synchronisation dominated that kernel. Deleting 64 of 128 barriers bought
+  1.7 ms of a 73.5 ms row, so the premise was wrong by about 18x. The row is the
+  serialised recurrence itself.
+- **bf16 intermediate buffers.** Halving the bytes changed nothing, because
+  `ocloc` has no 16 bit block write wider than 8 rows, so the epilogue is bound
+  by store message count rather than by bytes.
 
-Each phase adds exactly one capability. Do not start a phase before the previous
-one beats vLLM on its own model.
+## Testing
 
-| # | Model | Adds |
-|---|-------|------|
-| 0 | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` | **done 2026-08-23** (GEMV re-measured 2026-08-24) - `W` ✅ 15.52 GB (doc 03), vLLM baseline ✅ 31.50 t/s (BENCHMARKS.md), replay floor ✅ 0.52 µs/kernel (doc 07 #5), GEMV ✅ 533 GB/s at N=5120 / 584 GB/s lm_head (doc 12), bandwidth ✅ 590 GB/s via L0 (doc 01) |
-| 1 | same | dense + hybrid attention (48 GDN + 16 full), int4 g64. **Target: > 31.50 t/s tg256, ≥ 1973 t/s pp4096.** Decode core **done 2026-08-25** (tag `decode-core-done`); the decode optimisation pass, spec 1.5, **closed short 2026-08-25** (tag `spec1.5-done`): 774-kernel replayed list, 96/96 golden tokens vs the CPU oracle at every step, `b70-decode --bench` and `--profile`. **Target NOT met: tg256 @ depth 4096 = 27.54 t/s measured at the spec 1.5 gate, 12.6% short of 31.50** (median of 3, spread 0.04%, `tools/bench_decode.sh`, BENCHMARKS.md) - it was 23.73 t/s / 24.7% short before the lever ladder. **72.5% MBU against vLLM's 83.0%**, on a 37.97 t/s roofline. 99.7% of the step is inside the fence - the gap is kernel time, not host time: **29.01 ms of the 36.32 ms token is GEMV** (79.9%, **measured per kernel in situ** - `b70-decode --profile`, doc 15 - and untouched by every lever; the `probe_gemv` transplant that read 28.35 was a floor and was right to 2.3%), and the non-GEMV remainder is ~7.3 ms, down from 13.14. The three levers, all measured on the bench: `a‖b` GEMV K-split **−1.875 ms**, `prep_res_norm` two-stage **−2.220**, `ATTN_BLOCK` 256 → 64 **−1.726**. Why the ladder stopped there and what a spec 1.6 would cost is [the re-assessment memo](docs/superpowers/specs/2026-08-25-spec1.5-reassessment.md), whose two information items are **done, 2026-08-25, and changed no engine code**: `b70-decode --profile --repeats R` measures the attribution floor at **0.051 ms/step including one unexplained outlier family (`attn_reduce`) and 0.011 ms without it** - both figures always quoted together, where it was an unmeasured "±0.1 ms" - and `tools/probe/probe_attn` names `attn_decode`'s dominant term: **the KV load path, 55.4% of the launch** (39.2% the 32-byte load messages, 16.2% cache service), throughput-shaped, with ~0.45 ms/token of the 3.571 reachable by tuning and the rest structural. Both were measured on a CPU-loaded box from device-clocked kernel timestamps, and neither recorded a wall-clock absolute (doc 15, "Spec 1.6 §5.2" and "§5.4"). No prefill kernel yet, so there is no pp4096 number. **Updated 2026-09-04 (spec 1.7, tag `spec1.7-done`): tg256 = 32.22 t/s on the int4-`lm_head` checkpoint; MBU 74.7% against the 82% bar is not met.** **Superseded 2026-09-13 (operator ruling): that row was read as "ahead of vLLM by 3.9%" and it is not a fair comparison - vLLM cannot load a quantized `lm_head` and would be faster with one, so the margin was 1.867 GB/token of checkpoint, not engine. The decode half is judged on matched bytes and is **NOT met**: **tg256 = 29.32 t/s against vLLM's 31.01, trailing 5.4%** (record grade, 2026-09-09, `urakozz@84575a1`).** **Updated 2026-09-05 (spec 2, gate row 1 at `e44c40c`): the pp half is SHORT - `pp4096` = 1377.20 t/s device-side, 69.8% of vLLM's 1973 HTTP-inclusive** (median of 3, spread 0.29%, iterate grade, `tools/bench_decode.sh --pp 4096`, BENCHMARKS.md). The prefill exists and is 40.7× the ingest it replaces (121 s → 2.974 s per 4096 ids), and the spec's own §3.0c amendment had already ruled the 1973 bar unreachable by this design: the non-GDN terms alone cost more per chunk than 1973 t/s allows. [The spec-2 gate memo](docs/superpowers/specs/2026-09-05-spec2-gate-memo.md); two more GDN tasks and a strict-idle re-gate are queued |
-| 2 | same | MTP speculative decoding on the shipped head. **Target: > 45.23 t/s** (vLLM, 2 draft tokens) |
-| 3 | `olka-fi/Ornith-1.0-35B-MXFP4` | MoE (grouped GEMM) + MXFP4 |
-| 4 | `palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4` | MoE **and** MTP together |
+Numerics are gated rather than eyeballed.
 
-## Platform
+- Every kernel that replaced another is compared **bitwise**, not by tolerance.
+- The golden gate replays three prompts against a CPU oracle and requires all 93
+  determined token rows to match element exactly.
+- Both backends must leave identical state: KV caches, delta net state,
+  convolution ring, logits and the control block, compared word for word.
+- Determinism is checked bitwise across runs from reset.
+- Benchmarks only count as a record when the box is provably idle, and the
+  harness measures that itself rather than taking your word for it.
 
-Linux (Ubuntu on the box) only. Models are fetched with `hf download` into the
-standard HuggingFace cache or pointed to by absolute path; the server itself
-never downloads anything.
+86 tests in the suite as of now.
 
-## v1 definition of done
+One honest exception: the delta net scan uses approximate split bf16 arithmetic,
+so it is gated on tokens and state cosines instead of bitwise equality. It is
+the only default in the prefill path that is not bit identical to what it
+replaced.
 
-OpenAI-compatible endpoint (`/v1/completions`, `/v1/chat/completions`, SSE),
-**single stream**, no continuous batching. **Shipped and tagged `spec3-done`,
-2026-09-14.** The `b70-serve` integration binary wires the checkpoint
-tokenizer, chat template, `Engine::prefill`, and the server surface together.
-All six spec-3 gate bars are met: tokenizer parity (10,240 cases, 0
-mismatches), template parity (byte-identical vs `transformers`), the
-golden-through-server gate (`golden_server_test`: exact prompt ids and 32/32
-generated ids on all three golden prompts, both sides on the same engine path
-via `--prefill`), llama-benchy end to end (coherence 3/3 PASSED, “The capital
-of France is Paris.”), HTTP `tg256` within 2% of the CLI control (measured
-**102.0%** - not merely under bar, no HTTP tg cost is measurable at all), and
-the full suite green (67/67, 0 failed) with `src/runtime`, `src/kernels`,
-`src/l0`, `src/loader`, and `src/model` unchanged since before spec 3's first
-commit.
+## Build and run
 
-The intended endpoint is driven by the same `llama-benchy` command used for
-every number in these docs, so comparisons are apples-to-apples. See
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md) "The spec-3 gate rows" for the HTTP
-`tg256` **29.902 t/s** and a direct HTTP `pp4096` probe **1404.74 t/s** beside
-the CLI control (**29.31 / 1402.91**, both RECORD grade) and vLLM's
-**measured external HTTP-inclusive pp4096 1973 / tg256 31.01**.
+The engine builds with g++ and CMake. The SYCL reference backend is optional and
+needs icpx.
 
-## Approach
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build
 
-**SYCL kernels + Level Zero replay for the decode step.** Kernels come from
-`sycl-tla` templates where they exist and are hand-written where they do not.
-The decode step is captured **once** into a Level Zero command list and replayed
-per token, updating only pointers and counters - no allocation, no dispatch, no
-host work in steady state.
-
-On the phase-1 model vLLM is already at 81% of the memory roofline, so the
-honest non-speculative headroom is ~×1.35 with every lever pulled, not 5×.
-See [docs/05-perf-model.md](docs/05-perf-model.md) for the arithmetic and
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the numbers it rests on. The
-host-bound story is true of the MoE models (phases 3-4), where it is worth
-~×2.
-
-## Documents
-
-| File | Contents |
-|------|----------|
-| [docs/01-hardware.md](docs/01-hardware.md) | Measured B70 / Xe2 facts and what they forbid |
-| [docs/02-formats.md](docs/02-formats.md) | Why int4 W4A16, why not FP8 or OpenVINO IR |
-| [docs/03-models.md](docs/03-models.md) | Architecture of each phase model |
-| [docs/04-architecture.md](docs/04-architecture.md) | Component design and the decode replay loop |
-| [docs/05-perf-model.md](docs/05-perf-model.md) | Roofline, headroom, what to measure |
-| [docs/06-prior-art.md](docs/06-prior-art.md) | What to borrow from `sycl-tla`; traps inherited from the vLLM stack |
-| [docs/07-open-questions.md](docs/07-open-questions.md) | Unverified claims, ranked by how much they'd change the design |
-| [docs/08-decode-vs-prefill.md](docs/08-decode-vs-prefill.md) | **Why decode and prefill want opposite kernels** - why vLLM leaves 20-50% on the floor, why OpenVINO wins decode without XMX, and the `M = 2..8` gap neither engine serves |
-| [docs/09-vllm-patch-postmortem.md](docs/09-vllm-patch-postmortem.md) | What months of patching vLLM's kernels actually bought (+9% prefill, −19% decode) and why - the evidence this project rests on |
-| [docs/10-the-box.md](docs/10-the-box.md) | Access, hardware, cached models and their quirks, images, how to run the reference stack |
-| [docs/11-tokenizer-and-chat-template.md](docs/11-tokenizer-and-chat-template.md) | The component the first draft forgot: BPE, chat template, streaming detokenisation, and what each option costs goal 3 |
-| [docs/12-kernels.md](docs/12-kernels.md) | The measured GEMV kernels: the two int4 layouts, split-K, and which won on which shape |
-| [docs/13-loader.md](docs/13-loader.md) | **Checkpoint → canonical device buffers**: snapshot rules, the index as manifest, every quantisation assert and what measured it, the fusion table, the `1+w` bake, and the resident-byte cross-check against `W` |
-| [docs/14-golden-gate.md](docs/14-golden-gate.md) | **The engine == the CPU oracle == vLLM**: 3 prompts × 32 greedy tokens element-exact all three ways, the named divergence classes and their measured magnitudes, and the closed trust chain |
-| [docs/15-step-anatomy.md](docs/15-step-anatomy.md) | **The decode step, launch by launch**: every kernel timed in situ (645 then, 774 now), the aggregate bucket finally split, the measured dispatch gap, the ranked lever ladder spec 1.5 executed, and the closing per-lever ledger |
-| [docs/16-know-how.md] - the distilled, transferable findings: hardware traps, L0 runtime, numerics discipline, measurement method, quantization taxonomy
-| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | **The baseline numbers and the exact commands that produced them.** Every vLLM figure quoted elsewhere traces back here |
-
-**Every number in these docs is labelled measured or estimated.** Estimates are
-not load-bearing until measured - see doc 07 before trusting one.
-
-## Reference checkouts
-
-Local clones used as source material (all fresh as of 2026-08):
-
-```
-~/PycharmProjects/sycl-tla                  CUTLASS fork for Intel GPUs - the kernel templates
-~/PycharmProjects/oneDNN                    Intel's JIT GEMM generator - what OpenVINO's prefill runs on,
-                                            and where hardware capability is encoded as explicit gates
-~/PycharmProjects/level-zero                L0 spec + loader
-~/PycharmProjects/compute-runtime           Intel NEO driver (L0/OpenCL implementation)
-~/PycharmProjects/intel-graphics-compiler   IGC - what ocloc runs
-~/PycharmProjects/openvino                  GPU plugin: the GEMV kernel that beats vLLM at decode
-~/PycharmProjects/openvino.genai            OpenVINO's C++ LLM pipeline
-~/PycharmProjects/model_server               OpenVINO Model Server - reference for the HTTP/SSE layer
-~/PycharmProjects/oneAPI-samples            SYCL/L0 idioms and working build recipes
-~/PycharmProjects/nncf                      Quantisation algorithms, comparison point for AutoRound
-~/PycharmProjects/auto-round                AutoRound quantiser + the ARK kernels we are replacing
-~/PycharmProjects/vllm{,-xpu-kernels}       The incumbent, and the baseline to beat
-~/PycharmProjects/{oneCCL,ucx,nixl}         Multi-GPU / disaggregated serving - NOT phases 1-4
+./build/src/cli/b70-decode <checkpoint> --bench --pp 4096 --tg 256
+./build/src/cli/b70-serve  <checkpoint>          # OpenAI compatible endpoint
 ```
 
-See [docs/06-prior-art.md](docs/06-prior-art.md) for what to read in each, and
-which files specifically.
+`tools/box.sh` builds and tests on a remote machine over ssh, which is how I
+work day to day. Set `BOX=user@host` before using it.
 
-## Box
+## Docs
 
-`ssh user@box` - Dell T5810, 44 threads / 121 GB, 2× Arc Pro B70.
+- [docs/01-hardware.md](docs/01-hardware.md), [docs/12-kernels.md](docs/12-kernels.md) for the card and the kernels
+- [docs/04-architecture.md](docs/04-architecture.md) for the engine layout
+- [docs/05-perf-model.md](docs/05-perf-model.md) for where the time goes
+- [docs/14-golden-gate.md](docs/14-golden-gate.md) for how correctness is proven
+- [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for every measured row and its grade
+- [docs/superpowers/specs/](docs/superpowers/specs/) for the designs behind the bigger changes
+
+## Licence
+
+Apache 2.0. See [LICENSE](LICENSE).
+
+Written by Jürgen Kozyrev.
