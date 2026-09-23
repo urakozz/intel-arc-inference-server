@@ -1,5 +1,5 @@
 // W4A8 probe kernels (pre-registration:
-// docs/superpowers/specs/2026-09-22-w4a8-dpas-probe-design.md).
+// docs/specs/2026-09-22-w4a8-dpas-probe-design.md).
 //
 // TWO entry points in one binary:
 //   pw4a8_quant  -- dynamic per-token symmetric int8 quantisation of the bf16

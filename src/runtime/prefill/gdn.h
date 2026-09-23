@@ -57,7 +57,7 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
 inline constexpr size_t kGdnChunkLaunches = 10;
 
 // --- the scan selector's DISPATCH PROOF -------------------------------------
-// `docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md` §11: a
+// `docs/specs/2026-09-22-prefill-parity-program-design.md` §11: a
 // gate run under a non-default `B70_PREFILL_GDN_SCAN` is not admissible
 // evidence unless the run itself says which entry it launched. The 2026-09-21
 // record that declared the split scan green was measuring `pf_gdn_scan`, and

@@ -71,7 +71,7 @@ void throws_naming(F&& f, const char* needle, const char* what) {
 
 int main(int argc, char** argv) {
   const std::string snap =
-      argc > 1 ? argv[1] : "Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ";
+      argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
 
   l0::Context ctx(0);
   loader::LoadedModel model = loader::load(ctx, snap, kMaxLen);

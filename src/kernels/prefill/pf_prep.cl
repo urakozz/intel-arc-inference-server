@@ -42,7 +42,8 @@
 #endif
 
 // **Reading `partials` as bf16 was measured and rejected** (parity program
-// S2(b); `.superpowers/sdd/s2-epilogue-fusion-report.md`). At S_PREV = 1 this
+// S2(b); docs/specs/2026-09-22-prefill-parity-program-design.md §8). At
+// S_PREV = 1 this
 // kernel's first act on `partials` IS `rne_bf16`, so a producer that stored the
 // rounded word would be bitwise free here -- and it was, and it saved 1.7 ms on
 // the `norm` row while costing the producing GEMM 9.3. Left as a note rather

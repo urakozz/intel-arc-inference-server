@@ -41,5 +41,5 @@ The loader asserts sym / g64 / gptq, so those are not optional. A fresh
 checkpoint needs its own `oracle-out-*` golden set before it can gate anything.
 
 Also present in 0.16.0 and relevant to the W4A8 probe
-(`docs/superpowers/specs/2026-09-22-w4a8-dpas-probe-design.md`): `--act_bits`,
+(`docs/specs/2026-09-22-w4a8-dpas-probe-design.md`): `--act_bits`,
 `--act_group_size`, `--act_data_type`, `--disable_act_dynamic`.

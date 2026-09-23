@@ -25,7 +25,7 @@ set -euo pipefail
 IMAGE="${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 REPO_DIR="${REPO_DIR:-$HOME/b70-inference-server}"
-ORACLE_MODEL="${ORACLE_MODEL:-models--Vishva007--Qwen3.8-27B-W4A16-AutoRound-GPTQ}"
+ORACLE_MODEL="${ORACLE_MODEL:-models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
 ORACLE_SNAP="${ORACLE_SNAP:-}"
 ORACLE_THREADS="${ORACLE_THREADS:-}"
 [ $# -ge 1 ] || { echo "usage: $0 '<command using \$SNAP>'" >&2; exit 2; }

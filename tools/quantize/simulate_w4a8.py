@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Simulate W4A8 on the checkpoint we actually ship, without re-quantising it.
 
-The engine's W4A8 design (docs/superpowers/specs/2026-09-22-w4a8-dpas-probe-design.md)
+The engine's W4A8 design (docs/specs/2026-09-22-w4a8-dpas-probe-design.md)
 keeps the existing int4 g64 weights untouched and quantises ACTIVATIONS to int8
 dynamically, per token, at runtime. So the accuracy question is not about a new
 checkpoint: it is about what per-token int8 activations do to *these* weights.
