@@ -1,0 +1,182 @@
+{
+ "name": "t4_comment-openai",
+ "expect": "edit",
+ "enable_thinking": false,
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a coding agent working in a local checkout of b70-inference-server, an LLM inference engine for the Intel Arc Pro B70 written in C++ with Level Zero kernels, plus Python and shell tooling. The repository is at /work.\n\nYou help the user with software engineering tasks: finding code, explaining it, editing it and running builds and tests. Use the tools you are given to inspect the repository; never guess the contents of a file you have not read. Prefer grep and glob to locate code, read to look at it, edit to change it (the oldString must match the file exactly, including indentation) and bash to run commands.\n\nGuidelines:\n- Be concise. Do not explain what you are about to do at length; act.\n- Make one tool call at a time and wait for its result.\n- Keep edits minimal and in the style of the surrounding code.\n- Paths passed to tools are absolute and start with /work.\n- The C++ tree builds with CMake into /work/build; tests are ctest targets named after their source file (for example tests/prefill/dequant_test.cc is dequant_test). The Python tools run with python3 and their tests with python3 -m pytest.\n- Do not commit, push or change git state unless the user asks."
+  },
+  {
+   "role": "user",
+   "content": "`parse_request` in /work/src/server/openai.cc (line 70) has no comment. Add a short comment above it saying what it validates and what it throws."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/src/server/openai.cc",
+       "offset": 60,
+       "limit": 110
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "<file>\n00060|       {\"model\", r.model},\n00061|   };\n00062| }\n00063| \n00064| std::string frame(json body) {\n00065|   return \"data: \" + body.dump() + \"\\n\\n\";\n00066| }\n00067| \n00068| }  // namespace\n00069| \n00070| Request parse_request(const std::string& body, bool chat) {\n00071|   json request;\n00072|   try {\n00073|     request = json::parse(body);\n00074|   } catch (const json::parse_error&) {\n00075|     invalid(\"invalid JSON body\");\n00076|   }\n00077|   if (!request.is_object()) invalid(\"request body must be an object\");\n00078| \n00079|   Request out;\n00080|   out.chat = chat;\n00081|   if (request.contains(\"model\")) {\n00082|     if (!request.at(\"model\").is_string()) invalid(\"model must be a string\");\n00083|     out.model = request.at(\"model\").get<std::string>();\n00084|   }\n00085| \n00086|   if (request.contains(\"n\")) {\n00087|     if (!is_uint(request.at(\"n\")) || request.at(\"n\").get<uint32_t>() != 1) {\n00088|       invalid(\"n must be 1\");\n00089|     }\n00090|   }\n00091| \n00092|   if (chat) {\n00093|     if (!request.contains(\"messages\")) invalid(\"missing messages\");\n00094|     const json& messages = request.at(\"messages\");\n00095|     if (!messages.is_array()) invalid(\"messages must be an array\");\n00096|     if (messages.empty()) invalid(\"messages must not be empty\");\n00097|     for (const json& message : messages) {\n00098|       if (!message.is_object()) invalid(\"messages entries must be objects\");\n00099|       if (!message.contains(\"role\") || !message.at(\"role\").is_string()) {\n00100|         invalid(\"message role must be a string\");\n00101|       }\n00102|       if (!message.contains(\"content\") || !message.at(\"content\").is_string()) {\n00103|         invalid(\"content must be a string\");\n00104|       }\n00105|     }\n00106|     out.messages = messages;\n00107|     out.tools = request.contains(\"tools\") ? request.at(\"tools\") : json(nullptr);\n00108|     if (request.contains(\"chat_template_kwargs\")) {\n00109|       const json& kwargs = request.at(\"chat_template_kwargs\");\n00110|       if (!kwargs.is_object()) invalid(\"chat_template_kwargs must be an object\");\n00111|       if (kwargs.contains(\"enable_thinking\")) {\n00112|         out.enable_thinking = bool_field(kwargs, \"enable_thinking\");\n00113|       }\n00114|     }\n00115|   } else {\n00116|     if (!request.contains(\"prompt\")) invalid(\"missing prompt\");\n00117|     if (!request.at(\"prompt\").is_string()) invalid(\"prompt must be a string\");\n00118|     out.prompt = request.at(\"prompt\").get<std::string>();\n00119|   }\n00120| \n00121|   if (request.contains(\"max_tokens\")) out.max_tokens = uint_field(request, \"max_tokens\", false);\n00122|   if (request.contains(\"min_tokens\")) out.min_tokens = uint_field(request, \"min_tokens\", true);\n00123|   if (request.contains(\"ignore_eos\")) out.ignore_eos = bool_field(request, \"ignore_eos\");\n00124|   if (request.contains(\"stream\")) out.stream = bool_field(request, \"stream\");\n00125|   if (request.contains(\"return_token_ids\")) {\n00126|     out.return_token_ids = bool_field(request, \"return_token_ids\");\n00127|   }\n00128| \n00129|   if (request.contains(\"stream_options\")) {\n00130|     const json& stream_options = request.at(\"stream_options\");\n00131|     if (!stream_options.is_object()) invalid(\"stream_options must be an object\");\n00132|     if (stream_options.contains(\"include_usage\")) {\n00133|       out.include_usage = bool_field(stream_options, \"include_usage\");\n00134|     }\n00135|   }\n00136| \n00137|   if (request.contains(\"stop\")) {\n00138|     const json& stop = request.at(\"stop\");\n00139|     if (stop.is_string()) {\n00140|       out.stop.push_back(stop.get<std::string>());\n00141|     } else if (stop.is_array()) {\n00142|       if (stop.size() > 4) invalid(\"stop must contain at most 4 strings\");\n00143|       for (const json& value : stop) {\n00144|         if (!value.is_string()) invalid(\"stop entries must be strings\");\n00145|         out.stop.push_back(value.get<std::string>());\n00146|       }\n00147|     } else {\n00148|       invalid(\"stop must be a string or array of strings\");\n00149|     }\n00150|   }\n00151| \n00152|   if (request.contains(\"temperature\")) {\n00153|     out.sampling.temperature = temperature_field(request);\n00154|     out.sampling.greedy = out.sampling.temperature == 0.0f;\n00155|   }\n00156|   if (request.contains(\"top_k\")) out.sampling.top_k = uint_field(request, \"top_k\", true);\n00157|   if (request.contains(\"top_p\")) out.sampling.top_p = probability_field(request, \"top_p\", false);\n00158|   if (request.contains(\"seed\")) {\n00159|     const json& seed = request.at(\"seed\");\n00160|     if (!seed.is_number_unsigned() && !(seed.is_number_integer() && seed.get<int64_t>() >= 0)) {\n00161|       invalid(\"seed must be a non-negative integer\");\n00162|     }\n00163|     out.sampling.seed = seed.get<uint64_t>();\n00164|     out.sampling.has_seed = true;\n00165|   }\n00166|   return out;\n00167| }\n00168| \n00169| std::string error_body(const std::string& message, const std::string& type) {\n\n(File has more lines. Use 'offset' parameter to read beyond line 169)\n</file>"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the local filesystem.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path to the file"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Line to start from"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Number of lines to read"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "Find files by glob pattern.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit",
+    "description": "Replace an exact string in a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "oldString": {
+       "type": "string"
+      },
+      "newString": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "oldString",
+      "newString"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "content"
+     ]
+    }
+   }
+  }
+ ]
+}

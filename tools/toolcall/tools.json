@@ -1,0 +1,24 @@
+[
+  {"type": "function", "function": {"name": "read", "description": "Read a file from the local filesystem.",
+    "parameters": {"type": "object", "properties": {
+      "filePath": {"type": "string", "description": "Absolute path to the file"},
+      "offset": {"type": "integer", "description": "Line to start from"},
+      "limit": {"type": "integer", "description": "Number of lines to read"}}, "required": ["filePath"]}}},
+  {"type": "function", "function": {"name": "grep", "description": "Search file contents with a regular expression.",
+    "parameters": {"type": "object", "properties": {
+      "pattern": {"type": "string"}, "path": {"type": "string"}, "include": {"type": "string"}},
+      "required": ["pattern"]}}},
+  {"type": "function", "function": {"name": "glob", "description": "Find files by glob pattern.",
+    "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}},
+      "required": ["pattern"]}}},
+  {"type": "function", "function": {"name": "bash", "description": "Run a shell command.",
+    "parameters": {"type": "object", "properties": {
+      "command": {"type": "string"}, "description": {"type": "string"}}, "required": ["command", "description"]}}},
+  {"type": "function", "function": {"name": "edit", "description": "Replace an exact string in a file.",
+    "parameters": {"type": "object", "properties": {
+      "filePath": {"type": "string"}, "oldString": {"type": "string"}, "newString": {"type": "string"}},
+      "required": ["filePath", "oldString", "newString"]}}},
+  {"type": "function", "function": {"name": "write", "description": "Write a file.",
+    "parameters": {"type": "object", "properties": {"filePath": {"type": "string"}, "content": {"type": "string"}},
+      "required": ["filePath", "content"]}}}
+]

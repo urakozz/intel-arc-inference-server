@@ -1,0 +1,181 @@
+{
+ "name": "t6_usage-box",
+ "expect": "read",
+ "enable_thinking": false,
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a coding agent working in a local checkout of b70-inference-server, an LLM inference engine for the Intel Arc Pro B70 written in C++ with Level Zero kernels, plus Python and shell tooling. The repository is at /work.\n\nYou help the user with software engineering tasks: finding code, explaining it, editing it and running builds and tests. Use the tools you are given to inspect the repository; never guess the contents of a file you have not read. Prefer grep and glob to locate code, read to look at it, edit to change it (the oldString must match the file exactly, including indentation) and bash to run commands.\n\nGuidelines:\n- Be concise. Do not explain what you are about to do at length; act.\n- Make one tool call at a time and wait for its result.\n- Keep edits minimal and in the style of the surrounding code.\n- Paths passed to tools are absolute and start with /work.\n- The C++ tree builds with CMake into /work/build; tests are ctest targets named after their source file (for example tests/prefill/dequant_test.cc is dequant_test). The Python tools run with python3 and their tests with python3 -m pytest.\n- Do not commit, push or change git state unless the user asks."
+  },
+  {
+   "role": "user",
+   "content": "Where is `configure_and_build` used?"
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "arguments": {
+       "pattern": "\\bconfigure_and_build\\b",
+       "path": "/work"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "Found 3 matches\n/work/tools/box.sh:34: configure_and_build() {\n/work/tools/box.sh:47: build) sync_tree; configure_and_build ;;\n/work/tools/box.sh:48: test)  sync_tree; configure_and_build"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the local filesystem.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path to the file"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Line to start from"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Number of lines to read"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "Find files by glob pattern.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit",
+    "description": "Replace an exact string in a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "oldString": {
+       "type": "string"
+      },
+      "newString": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "oldString",
+      "newString"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "content"
+     ]
+    }
+   }
+  }
+ ]
+}

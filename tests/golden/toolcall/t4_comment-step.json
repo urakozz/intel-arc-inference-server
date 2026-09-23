@@ -1,0 +1,182 @@
+{
+ "name": "t4_comment-step",
+ "expect": "edit",
+ "enable_thinking": false,
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a coding agent working in a local checkout of b70-inference-server, an LLM inference engine for the Intel Arc Pro B70 written in C++ with Level Zero kernels, plus Python and shell tooling. The repository is at /work.\n\nYou help the user with software engineering tasks: finding code, explaining it, editing it and running builds and tests. Use the tools you are given to inspect the repository; never guess the contents of a file you have not read. Prefer grep and glob to locate code, read to look at it, edit to change it (the oldString must match the file exactly, including indentation) and bash to run commands.\n\nGuidelines:\n- Be concise. Do not explain what you are about to do at length; act.\n- Make one tool call at a time and wait for its result.\n- Keep edits minimal and in the style of the surrounding code.\n- Paths passed to tools are absolute and start with /work.\n- The C++ tree builds with CMake into /work/build; tests are ctest targets named after their source file (for example tests/prefill/dequant_test.cc is dequant_test). The Python tools run with python3 and their tests with python3 -m pytest.\n- Do not commit, push or change git state unless the user asks."
+  },
+  {
+   "role": "user",
+   "content": "The comment above `pf_linear` in /work/src/runtime/prefill/step.cc (lines 76 to 77) is too long for what it says. Replace it with a single-line comment that keeps the essential point."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/src/runtime/prefill/step.cc",
+       "offset": 66,
+       "limit": 70
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "<file>\n00066|   return on;\n00067| }\n00068| \n00069| uint8_t* at(const l0::Mem& m, size_t off) {\n00070|   return static_cast<uint8_t*>(m.ptr()) + off;\n00071| }\n00072| const void* at_const(const l0::Mem& m, size_t off) {\n00073|   return static_cast<const uint8_t*>(m.ptr()) + off;\n00074| }\n00075| \n00076| // One int4 linear on the prefill path -- THE seam of spec 2.1 §3.2. The sycl-tla side is\n00077| // spec 2's two-pass path unchanged (backend_sycl.cc); the L0 side is S2's slab walk.\n00078| void pf_linear(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWeight& w,\n00079|                const uint16_t* x, uint32_t M, PrefillBackend backend) {\n00080|   if (backend == PrefillBackend::SyclTla) {\n00081|     linear_sycl(cx, kc, s, w, x, M);\n00082|     return;\n00083|   }\n00084|   linear_l0(cx, kc, s, w, x, M);\n00085| }\n00086| \n00087| // The res_norm pair at `M` rows. `s_prev` is 0 for layer 0's leading norm --\n00088| // nothing has been written into `partials` yet -- and 1 everywhere else, because\n00089| // every producer on this path is S = 1 (ruling R1).\n00090| void pf_res_norm(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t s_prev,\n00091|                  const void* norm_w, const void* partials, void* resid, void* x, uint32_t M) {\n00092|   const uint32_t g = PrefillScratch::kNormGroups;\n00093|   cx.launch(kc(kernels::pf_res_fold_variant(Qwen35::kHidden, s_prev, g), \"pf_res_fold\"), g, M, 1,\n00094|             {PtrArg(partials), PtrArg(resid), PtrArg(s.norm_sumsq.ptr()), arg_val(M)});\n00095|   cx.launch(kc(kernels::pf_norm_finish_variant(Qwen35::kHidden, g, g), \"pf_norm_finish\"), g, M, 1,\n00096|             {PtrArg(s.norm_sumsq.ptr()), PtrArg(resid), PtrArg(norm_w), PtrArg(x), arg_val(M)});\n00097|   profile_wait(cx, Phase::kNorm);\n00098| }\n00099| \n00100| constexpr uint32_t kSiluChunk = 4096;\n00101| \n00102| }  // namespace\n00103| \n00104| void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,\n00105|                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C, l0::Mem& gdn_state_mem,\n00106|                 l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem,\n00107|                 PrefillBackend backend) {\n00108|   require(C > 0 && C <= PrefillScratch::kC,\n00109|           \"C = \" + std::to_string(C) + \" is outside (0, PrefillScratch::kC]\");\n00110|   require(size_t(pos) + C <= size_t(max_len), \"pos + C exceeds max_len\");\n00111| \n00112|   // The per-layer slice strides, re-derived from `model::Qwen35` here rather\n00113|   // than shared with buffers.cc -- capture.cc:105-116's arrangement, and for\n00114|   // its reason: a divergence is then a throw from the three `require`s below,\n00115|   // not a wrong KV slot at position 3000.\n00116|   const size_t kv_stride = size_t(max_len) * Qwen35::kFaKvHeads * Qwen35::kFaHeadDim * 2;\n00117|   const size_t gdn_state_stride =\n00118|       size_t(Qwen35::kGdnVHeads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;\n00119|   const size_t conv_ring_stride = size_t(PersistentBuffers::kConvRing) * 10240 * 2;\n00120|   require(kv_stride * 16 == kv_k_mem.size(), \"kv_k stride x 16 FA layers != its allocation\");\n00121|   require(kv_stride * 16 == kv_v_mem.size(), \"kv_v stride x 16 FA layers != its allocation\");\n00122|   require(gdn_state_stride * 48 == gdn_state_mem.size(),\n00123|           \"gdn_state stride x 48 GDN layers != its allocation\");\n00124|   require(conv_ring_stride * 48 == conv_ring_mem.size(),\n00125|           \"conv_ring stride x 48 GDN layers != its allocation\");\n00126| \n00127|   // embed: ids -> resid, bf16 [C][5120].\n00128|   cx.launch(kc(kernels::pf_embed_gather_variant(), \"pf_embed_gather\"), 1, C, 1,\n00129|             {PtrArg(s.ids.ptr()), PtrArg(m.embed.ptr()), PtrArg(s.resid.ptr()), arg_val(C)});\n00130| \n00131|   const bool l0 = backend == PrefillBackend::L0;\n00132|   uint32_t gdn = 0, fa = 0;\n00133|   for (const model::LayerDesc& L : Qwen35::layers()) {\n00134|     const uint32_t l = L.index;\n00135|     pf_res_norm(cx, kc, s, l == 0 ? 0u : 1u,\n\n(File has more lines. Use 'offset' parameter to read beyond line 135)\n</file>"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the local filesystem.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path to the file"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Line to start from"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Number of lines to read"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "Find files by glob pattern.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit",
+    "description": "Replace an exact string in a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "oldString": {
+       "type": "string"
+      },
+      "newString": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "oldString",
+      "newString"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "content"
+     ]
+    }
+   }
+  }
+ ]
+}
