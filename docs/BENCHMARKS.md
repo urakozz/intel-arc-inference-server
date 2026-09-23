@@ -679,6 +679,35 @@ the probes that killed them: S1 (fusing the int4 dequant into the GEMM - slower,
 `docs/probe-fused-dequant-2026-09-22.md`) and S4 (the barrier-free GDN solve -
 slower, and its premise false by ~18x, `docs/prefill-gdn-solve-register-results.md`).
 
+### Past vLLM - `bb5ad88`, 2026-09-23 - the split-BF16 scan as the default
+
+Device 0, `tools/bench_decode.sh --pp 4096`, median of 3, idle box (0 DRM holder
+fds, 0 containers), IGC 2.41.5, same harness as every row in the section below.
+
+| engine / checkpoint | scan | **pp t/s** | ms total | runs (t/s) | spread | grade |
+|---|---|---:|---:|---|---:|---|
+| b70-decode `99cedc9` (previous standing) | vector | 1560.40 | 2625.0 | 1565.98 / 1556.90 / 1560.40 | 0.58% | RECORD |
+| vLLM `0.29.1rc1.dev380`, matched | - | 1610.04 | 2544.043 | - | - | measured, external |
+| **b70-decode `bb5ad88`** | **split-BF16** | **1670.72** | **2451.6** | 1671.67 / 1670.72 / 1669.97 | **0.10%** | **RECORD** |
+
+**−173.4 ms against our own previous row, and −92.4 ms against the matched vLLM
+row: 103.8% of vLLM, +60.68 t/s.** The day's arc is 1498.97 → 1670.72, **+11.5%**.
+Decode is unmoved at 29.45 t/s.
+
+The gain is the `gdn_scan` row: 297.5 / 297.7 ms under the vector entry against
+127.1 / 128.2 ms under the split entry (profiled ABBA, 96 launches each) - 2.33x,
+about −170 ms of GPU time, of which −173.4 ms reached the wall.
+
+**This row is the first in this file whose arithmetic is not bitwise equal to the
+row above it.** The split scan is approximate split-BF16, gated on tokens and
+state cosines rather than on `memcmp`: both golden gates 93/93 with prose
+0.999912369, code 0.999712545 and cjk 0.999901750 against a > 0.999 bar, and the
+suite 86/86 in a single run. Every gate run printed its own dispatch proof
+(`gdn scan entry LAUNCHED: pf_gdn_scan_dpas_split`), which the 2026-09-21
+attempt did not - that run measured the vector kernel while believing it had
+measured this one. `vn` inside the A2 term is still a single BF16 operand:
+measured harmless on three prompts of one checkpoint, not proven in general.
+
 ### The spec-3 gate rows - `a066c3c`, 2026-09-14 - bars 3-6 closed, tag `spec3-done`
 
 **Box conditions.** Idle proof (plan 6e Task 3 Step 1's command) taken before
