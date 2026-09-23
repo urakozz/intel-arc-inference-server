@@ -43,7 +43,7 @@ to get wrong.
 
 ```bash
 tools/box.sh sync                                  # on the Mac
-ssh user@box                          # everything below: on the box
+ssh "$BOX"                                         # everything below: on the box
 cd ~/b70-inference-server && mkdir -p oracle-out
 
 # ids: seconds, tokenizer only
@@ -149,7 +149,7 @@ other:
 
 ### Exact commands and measured numbers
 
-Run 2026-08-24 21:42-21:58 on the box (`box`, 121 GB),
+Run 2026-08-24 21:42-21:58 on the box (121 GB of RAM),
 image `vllm-xpu-env-next-p314-t214-vxkp0:latest`, serially, `--gen 32` for all
 three. The three commands were exactly the two-line `run_in_container.sh` form
 above with `prose` replaced by `code` / `cjk`. Every number below is from the

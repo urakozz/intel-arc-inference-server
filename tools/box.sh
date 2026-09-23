@@ -9,7 +9,13 @@
 #      BUILD_DIR (default build; e.g. build-nosycl), CMAKE_ARGS (extra -D flags for
 #      the configure step).
 set -euo pipefail
-BOX="${BOX:-user@box}"
+# Machine address. Set BOX in the environment, or put it in tools/box.env
+# (untracked; copy tools/box.env.example). There is no default: a wrong
+# address should fail loudly rather than quietly talk to the wrong machine.
+_box_env="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/box.env"
+# shellcheck source=/dev/null
+[ -r "$_box_env" ] && . "$_box_env"
+: "${BOX:?set BOX=user@host in the environment or in tools/box.env (see tools/box.env.example)}"
 REMOTE_DIR="${REMOTE_DIR:-b70-inference-server}"
 JOBS="${JOBS:-44}"
 # A second configuration lives beside the first on the box (spec 2.1 §4:
