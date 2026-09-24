@@ -142,6 +142,56 @@ of three, same checkpoint.
 arc from the last row before the kernel work started to here is 1498.97 to
 1670.72, **+11.5%**.
 
+### The int8 prefill linears (spec 5), opt-in and not the default
+
+`--pp-backend l0-int8` (spec 5, plan 5b) runs every int4 linear of the L0 walk
+on the rotated int8 ("h8") path: a Hadamard-rotating per-token int8 quantiser,
+then per 1024-column slab a rotated per-channel int8 requant and an i8 x i8
+DPAS GEMM. Attention, GDN, norms and the head are the L0 backend's. It is
+**not the default**: gate A3 failed on the golden set (spec 5 §7), so the
+default stays `l0`.
+
+2026-09-24, sha `04ce00c`, device 0, `tools/bench_decode.sh --pp 4096
+--pp-backend <b> --runs 3`, taken as four interleaved passes (l0, int8, l0,
+int8). No process held a render node; a CPU-only container of another job was
+running, so the script graded every pass **ITERATE**.
+
+| pass | backend | runs, pp t/s | median | ms total | spread | tg t/s (median) |
+|---|---|---|---:|---:|---:|---:|
+| 1 | l0 | 1671.78, 1672.51, 1671.48 | 1671.78 | 2450.1 | 0.06% | 29.44 |
+| 2 | l0-int8 | 1970.89, 1980.31, 1962.02 | **1970.89** | 2078.2 | 0.93% | 29.46 |
+| 3 | l0 | 1668.74, 1667.01, 1669.68 | 1668.74 | 2454.5 | 0.16% | 29.38 |
+| 4 | l0-int8 | 1952.93, 1971.09, 1972.82 | **1971.09** | 2078.0 | 1.01% | 29.47 |
+
+Paired ratios int8 / l0: **1.1789** (pass 2 / 1) and **1.1812** (pass 4 / 3).
+Against the 1670.72 record, 1971.09 is **1.1798x** (derived). Spec 5's bar B1
+is 1.20x, 2005 t/s: **B1 fails as measured, by about 34 t/s.**
+
+What the row contains. `b70-decode --bench --pp` times the **first** prefill
+of a fresh process, and on l0-int8 the first prefill also builds every int4
+linear's rotated column scales (256 `pf_colmax_rot` passes, each with a host
+wait, run before the first chunk so no recorded list holds one). Timed on a
+fresh engine, three 4096-id prefills each (`prefill_int8_test --first-cost`,
+host wall around `Engine::prefill`, two processes per backend, interleaved):
+
+| backend | call 0 ms | call 1 ms | call 2 ms | call 0 minus mean(1, 2) |
+|---|---:|---:|---:|---:|
+| l0 | 2455.7 / 2452.7 | 2477.2 / 2484.1 | 2491.4 / 2482.2 | -28.6 / -30.5 |
+| l0-int8 | 2072.1 / 2075.9 | 1932.9 / 1936.0 | 1931.5 / 1929.1 | **+139.9 / +143.3** |
+
+So a user's first l0-int8 request pays **about 140 ms** once (about 170 ms
+against l0's own first-call behaviour, derived), and the bench row carries it.
+A later prefill in the same process runs at 1930 ms, 2122 t/s, 1.27x the
+record (derived from host wall, not a bench row). Moving the scale pass to
+load time, where spec 5 §4 T2 put it, is what would take it out of the first
+request; that is not done here.
+
+Decode (B2): `tools/bench_decode.sh --runs 3` right after the four passes gave
+**29.40 t/s** (29.39 to 29.40), and the tg rows of the pp passes 29.38 to
+29.47, against the 29.45 record: within the day-scale drift this file records,
+and by construction, since the decode list is byte-identical on every prefill
+backend. **B2 passes.**
+
 ### The Level Zero backend, and what it was worth
 
 Before 2026-09-18 the prefill GEMM was sycl-tla's, called from SYCL, with a
