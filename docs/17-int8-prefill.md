@@ -95,11 +95,11 @@ The int8 GEMM itself runs at 264 to 297 TOP/s, 2.0x to 2.3x the bf16 GEMM.
 Part of that 2x is spent rebuilding the rotated int8 weights every chunk: the
 requant is the one cost here that is not matrix math.
 
-## Open
+## Open, and closed
 
-- **Gate A4, tool calls:** against the W4A16 path (`--pp-backend l0`), 30 of
-  33 calls are identical and the other 3 are valid alternatives. The formal
-  comparison against the unquantised bf16 model is pending its CPU baseline.
+- (closed) **Gate A4, tool calls**, 36 agentic prompts against the unquantised
+  bf16 model: `l0-int8` matches **25 / 36**, the W4A16 prefill `l0` 23 / 36
+  (spec 5 §9).
 - **The short-prompt floor:** about 0.7 s of prefill whatever the length
   (probe-w4a8 §15.6). It is separate from int8 and matters for every
   agentic turn once prefix caching lands.
