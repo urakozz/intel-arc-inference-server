@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <random>
 #include <vector>
 
 #include "check.h"
@@ -166,6 +167,235 @@ void colmax_case(pf_harness::Dev& d, uint32_t K, uint32_t N, uint32_t layout) {
               got[5]);
   CHECK(bad == 0);
 }
+
+uint16_t rne_bf16(float f) {
+  uint32_t u;
+  std::memcpy(&u, &f, 4);
+  u += ((u >> 16) & 1u) + 0x7FFFu;
+  return uint16_t(u >> 16);
+}
+float bf16f(uint16_t h) { return common::bf16_to_f32(h); }
+float silu_f32(float x) { return x / (1.0f + std::exp(-x)); }
+
+// One pf_gemm_i8 launch: grid (M / 256, N / 128), WG 512. `C` is fp32 [M][ldc],
+// or for the SiLU build bf16 x [M][ldc] (ldc = ldx).
+void run_gemm(pf_harness::Dev& d, bool silu, const l0::Mem& xq, const l0::Mem& xs,
+              const l0::Mem& w8, const l0::Mem& ws, const l0::Mem& C, uint32_t M, uint32_t K,
+              uint32_t N, uint32_t ldc) {
+  l0::Module mod(d.ctx, kernels::path(kernels::pf_gemm_i8_variant(silu)));
+  l0::Kernel k = mod.kernel("pf_gemm_i8");
+  k.group_size(512);
+  k.arg_ptr(0, xq.ptr());
+  k.arg_ptr(1, xs.ptr());
+  k.arg_ptr(2, w8.ptr());
+  k.arg_ptr(3, ws.ptr());
+  k.arg_ptr(4, C.ptr());
+  k.arg(5, M);
+  k.arg(6, K);
+  k.arg(7, N);
+  k.arg(8, K / 2);   // ldxq, in int8 pairs
+  k.arg(9, N);       // ldb
+  k.arg(10, ldc);
+  d.run(k, M / 256, N / 128);
+}
+
+// The exact int32 accumulators: acc[m][n] = sum_k x[m][k] w[k][n], w read out of
+// the VNNI-4 dwords (byte b of dword [k/4][n] is k = 4 (k/4) + b).
+std::vector<int32_t> acc_ref(const std::vector<int8_t>& x, const std::vector<uint32_t>& w8,
+                             uint32_t M, uint32_t K, uint32_t N) {
+  std::vector<int8_t> wt(size_t(N) * K);
+  for (uint32_t k = 0; k < K; ++k)
+    for (uint32_t n = 0; n < N; ++n)
+      wt[size_t(n) * K + k] = int8_t((w8[size_t(k / 4) * N + n] >> (8 * (k % 4))) & 0xFFu);
+  std::vector<int32_t> acc(size_t(M) * N);
+  for (uint32_t m = 0; m < M; ++m) {
+    const int8_t* xr = x.data() + size_t(m) * K;
+    for (uint32_t n = 0; n < N; ++n) {
+      const int8_t* wr = wt.data() + size_t(n) * K;
+      int32_t s = 0;
+      for (uint32_t k = 0; k < K; ++k) s += int32_t(xr[k]) * int32_t(wr[k]);
+      acc[size_t(m) * N + n] = s;
+    }
+  }
+  return acc;
+}
+
+struct GemmOperands {
+  std::vector<int8_t> x;
+  std::vector<uint32_t> w8;
+  std::vector<float> xs, ws;
+};
+
+GemmOperands random_operands(uint32_t K, uint32_t N, uint32_t M, uint32_t seed) {
+  std::mt19937 rng(seed);
+  GemmOperands o;
+  o.x.resize(size_t(M) * K);
+  for (int8_t& v : o.x) v = int8_t(uint8_t(rng() & 0xFFu));
+  o.w8.resize(size_t(K / 4) * N);
+  for (uint32_t& v : o.w8) v = rng();
+  std::uniform_real_distribution<float> sd(0.001f, 0.05f);
+  o.xs.resize(M);
+  for (float& v : o.xs) v = sd(rng);
+  o.ws.resize(N);
+  for (float& v : o.ws) v = sd(rng);
+  return o;
+}
+
+void gemm_case(pf_harness::Dev& d, uint32_t K, uint32_t N, uint32_t M) {
+  const GemmOperands o = random_operands(K, N, M, 41 + K + N + M);
+  l0::Mem dx = pf_harness::upload(d.ctx, d.imm, o.x);
+  l0::Mem dw = pf_harness::upload(d.ctx, d.imm, o.w8);
+  l0::Mem dxs = pf_harness::upload(d.ctx, d.imm, o.xs);
+  l0::Mem dws = pf_harness::upload(d.ctx, d.imm, o.ws);
+  l0::Mem dc(d.ctx, l0::MemKind::Device, size_t(M) * N * 4);
+  run_gemm(d, false, dx, dxs, dw, dws, dc, M, K, N, N);
+  std::vector<float> got(size_t(M) * N);
+  pf_harness::download(d.imm, got, dc);
+  const std::vector<int32_t> acc = acc_ref(o.x, o.w8, M, K, N);
+  size_t bad = 0;
+  for (uint32_t m = 0; m < M; ++m)
+    for (uint32_t n = 0; n < N; ++n) {
+      const float want = float(acc[size_t(m) * N + n]) * (o.ws[n] * o.xs[m]);
+      bad += std::memcmp(&want, &got[size_t(m) * N + n], 4) != 0;
+    }
+  std::printf("pf_gemm_i8 K=%u N=%u M=%u: %zu mismatches\n", K, N, M, bad);
+  CHECK(bad == 0);
+}
+
+void silu_case(pf_harness::Dev& d, uint32_t K, uint32_t N, uint32_t M) {
+  const GemmOperands o = random_operands(K, N, M, 43 + K + N + M);
+  l0::Mem dx = pf_harness::upload(d.ctx, d.imm, o.x);
+  l0::Mem dw = pf_harness::upload(d.ctx, d.imm, o.w8);
+  l0::Mem dxs = pf_harness::upload(d.ctx, d.imm, o.xs);
+  l0::Mem dws = pf_harness::upload(d.ctx, d.imm, o.ws);
+  const uint32_t ldx = N / 2;
+  l0::Mem dout(d.ctx, l0::MemKind::Device, size_t(M) * ldx * 2);
+  run_gemm(d, true, dx, dxs, dw, dws, dout, M, K, N, ldx);
+  std::vector<uint16_t> got(size_t(M) * ldx);
+  pf_harness::download(d.imm, got, dout);
+  const std::vector<int32_t> acc = acc_ref(o.x, o.w8, M, K, N);
+  size_t bad = 0;
+  for (uint32_t m = 0; m < M; ++m)
+    for (uint32_t n = 0; n < N; ++n) {
+      if ((n / 16) % 2 != 0) continue;   // gate columns; up is n + 16
+      const float g = float(acc[size_t(m) * N + n]) * (o.ws[n] * o.xs[m]);
+      const float u = float(acc[size_t(m) * N + n + 16]) * (o.ws[n + 16] * o.xs[m]);
+      const uint16_t want = rne_bf16(bf16f(rne_bf16(silu_f32(bf16f(rne_bf16(g))))) * bf16f(rne_bf16(u)));
+      bad += (want != got[size_t(m) * ldx + (n / 32) * 16 + n % 16]);
+    }
+  std::printf("pf_gemm_i8_SILU K=%u N=%u M=%u: %zu mismatches\n", K, N, M, bad);
+  CHECK(bad == 0);
+}
+
+// The whole h8 path on one layout-0 weight: pf_quant_had, pf_colmax_rot (host
+// finish), pf_requant_rot, pf_gemm_i8. Rows [real, M) of x are padding.
+std::vector<float> h8_run(pf_harness::Dev& d, const common::Int4Gptq& w,
+                          const std::vector<uint16_t>& x, uint32_t M) {
+  const uint32_t K = w.K, N = w.N;
+  l0::Mem dx = pf_harness::upload(d.ctx, d.imm, x);
+  l0::Mem dsg = pf_harness::upload(d.ctx, d.imm, runtime::prefill::int8_signs(K));
+  l0::Mem dbits = pf_harness::upload(d.ctx, d.imm, runtime::prefill::int8_sign_bits(K));
+  l0::Mem dqw = pf_harness::upload(d.ctx, d.imm, w.qweight);
+  l0::Mem dsc = pf_harness::upload(d.ctx, d.imm, w.scales);
+  l0::Mem dxq(d.ctx, l0::MemKind::Device, size_t(M) * K);
+  l0::Mem dxs(d.ctx, l0::MemKind::Device, size_t(M) * 4);
+  {
+    l0::Module mod(d.ctx, kernels::path(kernels::pf_quant_had_variant(K)));
+    l0::Kernel k = mod.kernel("pf_quant_had");
+    k.group_size(16 * (K / 1024));
+    k.arg_ptr(0, dx.ptr());
+    k.arg_ptr(1, dsg.ptr());
+    k.arg_ptr(2, dxq.ptr());
+    k.arg_ptr(3, dxs.ptr());
+    k.arg(4, K);
+    d.run(k, M, 1);
+  }
+  l0::Module rmod(d.ctx, kernels::path(kernels::pf_requant_rot_variant(0)));
+  l0::Mem dmax = pf_harness::upload(d.ctx, d.imm, std::vector<uint32_t>(N, 0u));
+  {
+    l0::Kernel k = rmod.kernel("pf_colmax_rot");
+    k.group_size(256);
+    k.arg_ptr(0, dqw.ptr());
+    k.arg_ptr(1, dsc.ptr());
+    k.arg_ptr(2, dbits.ptr());
+    k.arg_ptr(3, dmax.ptr());
+    k.arg(4, 0u);
+    k.arg(5, N);
+    k.arg(6, K);
+    d.run(k, N / 16, K / 1024);
+  }
+  std::vector<uint32_t> mx(N);
+  pf_harness::download(d.imm, mx, dmax);
+  std::vector<float> ws(N), inv(N);
+  for (uint32_t n = 0; n < N; ++n) {
+    float m;
+    std::memcpy(&m, &mx[n], 4);
+    ws[n] = m > 0.0f ? m / 127.0f : 1.0f;
+    inv[n] = 1.0f / ws[n];
+  }
+  l0::Mem dws = pf_harness::upload(d.ctx, d.imm, ws);
+  l0::Mem dinv = pf_harness::upload(d.ctx, d.imm, inv);
+  l0::Mem dw8(d.ctx, l0::MemKind::Device, size_t(K) * N);
+  {
+    l0::Kernel k = rmod.kernel("pf_requant_rot");
+    k.group_size(256);
+    k.arg_ptr(0, dqw.ptr());
+    k.arg_ptr(1, dsc.ptr());
+    k.arg_ptr(2, dbits.ptr());
+    k.arg_ptr(3, dinv.ptr());
+    k.arg_ptr(4, dw8.ptr());
+    k.arg(5, 0u);
+    k.arg(6, N);
+    k.arg(7, K);
+    k.arg(8, N);
+    d.run(k, N / 16, K / 1024);
+  }
+  l0::Mem dc(d.ctx, l0::MemKind::Device, size_t(M) * N * 4);
+  run_gemm(d, false, dxq, dxs, dw8, dws, dc, M, K, N, N);
+  std::vector<float> c(size_t(M) * N);
+  pf_harness::download(d.imm, c, dc);
+  return c;
+}
+
+void cross_case(pf_harness::Dev& d, uint32_t K, uint32_t N, uint32_t M, uint32_t real) {
+  const common::Int4Gptq w = common::Int4Gptq::random(K, N, 53 + K + N);
+  std::vector<uint16_t> x = pf_harness::random_bf16(size_t(M) * K, 59 + K, -1.0f, 1.0f);
+  std::vector<uint16_t> xz = x;
+  for (size_t i = size_t(real) * K; i < x.size(); ++i) {
+    x[i] = 0x7FC0u;   // NaN bf16: stale padding at its worst
+    xz[i] = 0u;
+  }
+  const std::vector<float> got = h8_run(d, w, x, M);
+  const std::vector<float> got_z = h8_run(d, w, xz, M);
+  // fp32 x W^T from the dequantised int4, accumulated in double.
+  std::vector<float> wt(size_t(N) * K);
+  for (uint32_t k = 0; k < K; ++k)
+    for (uint32_t n = 0; n < N; ++n) wt[size_t(n) * K + k] = w.at(k, n);
+  std::vector<float> xf(size_t(real) * K);
+  for (size_t i = 0; i < xf.size(); ++i) xf[i] = common::bf16_to_f32(x[i]);
+  double num = 0.0, den = 0.0;
+  size_t nan = 0, leak = 0;
+  for (uint32_t m = 0; m < real; ++m)
+    for (uint32_t n = 0; n < N; ++n) {
+      double ref = 0.0;
+      const float* xr = xf.data() + size_t(m) * K;
+      const float* wr = wt.data() + size_t(n) * K;
+      for (uint32_t k = 0; k < K; ++k) ref += double(xr[k]) * double(wr[k]);
+      const float g = got[size_t(m) * N + n];
+      nan += std::isnan(g) ? 1 : 0;
+      leak += std::memcmp(&g, &got_z[size_t(m) * N + n], 4) != 0;
+      num += (double(g) - ref) * (double(g) - ref);
+      den += ref * ref;
+    }
+  const double rel = std::sqrt(num / den);
+  std::printf("h8 cross K=%u N=%u M=%u (rows %u..%u padding): rel L2 %.4f %%, %zu NaN, %zu words "
+              "differ NaN vs zero padding\n",
+              K, N, M, real, M - 1, 100.0 * rel, nan, leak);
+  CHECK(nan == 0);
+  CHECK(leak == 0);
+  CHECK(rel <= 0.03);
+  std::printf("h8 cross: PASS, padding isolated\n");
+}
 }  // namespace
 
 int main() {
@@ -178,6 +408,10 @@ int main() {
   colmax_case(d, 5120, 1024, 0);
   colmax_case(d, 5120, 1024, 1);
   colmax_case(d, 17408, 1024, 0);
+  gemm_case(d, 5120, 1024, 256);
+  gemm_case(d, 17408, 1024, 512);
+  silu_case(d, 5120, 1024, 256);
+  cross_case(d, 5120, 1024, 256, 200);
   std::printf("pf_int8_test: PASS\n");
   return 0;
 }
