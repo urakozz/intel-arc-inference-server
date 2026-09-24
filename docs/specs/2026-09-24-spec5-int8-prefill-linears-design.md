@@ -275,3 +275,20 @@ bf16 is recorded when the baseline completes.
 **The default is now `l0-int8`** (`default_prefill_backend()` in both
 `backend_sycl.cc` and `backend_sycl_absent.cc`). `--pp-backend l0` keeps the
 bf16 walk, and every `l0` registration still runs it explicitly.
+
+## 9. Amendment - gate A4, formal (2026-09-24)
+
+The bf16 CPU baseline completed (36 of 36, `tools/toolcall/oracle_generate.py`,
+greedy, 192 new tokens). `tools/toolcall/score.py toolcall-out bf16 l0 l0-int8`:
+
+| run | first tool call matches bf16 (name and parameters) |
+|---|---:|
+| `l0` (W4A16 prefill) | 23 / 36 |
+| `l0-int8` (h8 prefill) | **25 / 36** |
+
+**A4 passes** (bar: `l0-int8` matches at least as often as `l0`). The same 3
+edit scenarios truncate at 192 tokens on all three runs. Most mismatches are
+shared by both engine paths, so they are the int4 checkpoint's differences from
+bf16, not the int8 prefill's. The two scenarios where the engine paths differ
+(t4_comment-linear_l0, t5_test-loader) both go to `l0-int8`. With A1 to A4, B1
+and B2 all passed (A3 under the §8 ruling), spec 5 is complete.
