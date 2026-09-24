@@ -561,7 +561,7 @@ git commit -m "kernels: pf_requant_rot, rotated per-channel int8 weights, layout
 - Consumes: `pf_rot_load` (Task 2).
 - Produces: kernel `pf_colmax_rot(const uint* qw, const half* sc, const uint* sbits, uint* colmax, uint n0, uint Nfull, uint K)`, WG 256, grid (width/16, K/1024). It writes `atomic_max` of `as_uint(max |v / 32|)` into `colmax[n]`, which the caller zero-fills first. ws = max / 127 (1.0 when max is 0), inv = 1 / ws, both on the host.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append, called from `main` for `(5120, 1024, 0)`, `(5120, 1024, 1)`, `(17408, 1024, 0)`. The weights get one all-zero column (n = 5) and one column forced negative-heavy (n = 7), the Review Focus lines:
 
@@ -607,12 +607,12 @@ void colmax_case(pf_harness::Dev& d, uint32_t K, uint32_t N, uint32_t layout) {
 }
 ```
 
-- [ ] **Step 2: Run it to see it fail**
+- [x] **Step 2: Run it to see it fail**
 
 Run: `tools/box.sh test pf_int8_test`
 Expected: FAIL: `pf_colmax_rot` is not an entry point of `pf_requant_rot_L0`.
 
-- [ ] **Step 3: The kernel**
+- [x] **Step 3: The kernel**
 
 Inside `#ifdef PF_REQUANT_ROT`, after `pf_requant_rot`:
 
@@ -641,12 +641,12 @@ __kernel void pf_colmax_rot(__global const uint* restrict qw, __global const hal
 }
 ```
 
-- [ ] **Step 4: Run the test to see it pass**
+- [x] **Step 4: Run the test to see it pass**
 
 Run: `tools/box.sh test pf_int8_test`
 Expected: three `pf_colmax_rot ... 0 mismatches (zero column max 0)` lines; PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/kernels/prefill/pf_int8.cl tests/prefill/pf_int8_test.cc
