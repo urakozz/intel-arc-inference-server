@@ -335,7 +335,7 @@ git commit -m "kernels: pf_quant_had, the rotating int8 activation quantiser (sp
 - Consumes: `int8_sign_bits(K)` (Task 1).
 - Produces: kernel `pf_requant_rot(const uint* qw, const half* sc, const uint* sbits, const float* inv, uint* out, uint n0, uint Nfull, uint K, uint ldo)`, WG 256, grid (width/16, K/1024); `out` is VNNI-4 `[K/4][ldo]` (byte b of dword [k/4][n] = k 4d + b); variant `kernels::pf_requant_rot_variant(layout)` returning `"pf_requant_rot_L" + layout`. For layout 1, `sc` is unread (the scales are inline).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `tests/prefill/pf_int8_test.cc` (inside the anonymous namespace), and call it from `main` for `(5120, 1024, L0)`, `(5120, 1024, L1)`, `(6144, 1024, L0)`, `(17408, 1024, L0)`. The same weights, packed both ways, must give identical output (the Review Focus layout-1 line):
 
@@ -399,12 +399,12 @@ void requant_case(pf_harness::Dev& d, uint32_t K, uint32_t N, uint32_t layout) {
 
 Add `kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1` to `pf_int8_test`'s `add_dependencies`.
 
-- [ ] **Step 2: Run it to see it fail**
+- [x] **Step 2: Run it to see it fail**
 
 Run: `tools/box.sh test pf_int8_test`
 Expected: FAIL at build (`kernel_pf_requant_rot_L0` missing).
 
-- [ ] **Step 3: The kernel**
+- [x] **Step 3: The kernel**
 
 Append to `pf_int8.cl`. The load is `pw8_requant_rot2`'s for layout 0, with a layout-1 branch reading the tile the WG's 16 columns form. `pf_rot_load` is shared with Task 3's `pf_colmax_rot`:
 
@@ -536,12 +536,12 @@ endforeach()
 inline std::string pf_requant_rot_variant(unsigned layout) { return "pf_requant_rot_L" + std::to_string(layout); }
 ```
 
-- [ ] **Step 4: Run the test to see it pass**
+- [x] **Step 4: Run the test to see it pass**
 
 Run: `tools/box.sh test pf_int8_test`
 Expected: four `pf_requant_rot ... 0 mismatches` lines, the L1 case included; PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/kernels/prefill/pf_int8.cl src/kernels/prefill/CMakeLists.txt src/kernels/prefill/pf_kernels.h \

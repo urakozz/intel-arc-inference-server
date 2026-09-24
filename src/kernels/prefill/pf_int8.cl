@@ -98,3 +98,115 @@ __kernel void pf_quant_had(__global const ushort* restrict x, __global const flo
   }
 }
 #endif  // PF_QUANT_HAD
+
+#ifdef PF_REQUANT_ROT
+#ifndef LAYOUT
+#error "pf_requant_rot: LAYOUT (0 GPTQ-native, 1 tiled) must be defined"
+#endif
+// One work-group = 16 columns x one 1024-k block; sub-group c owns column c,
+// lane l owns k = 64 l .. 64 l + 63 (one scale group). Stages h = 1..32 are
+// register butterflies, h = 64..512 lane shuffles, ascending. The int4 tile
+// goes through SLM column-major at pitch 129 (conflict-free); signs arrive as a
+// bitmask, applied as a sign-bit xor (bit-identical to multiplying by -1).
+inline void pf_rot_load(__global const uint* restrict qw, __global const half* restrict sc,
+                        __global const uint* restrict sbits, uint nbase, uint blk, uint Nfull,
+                        uint K, __local uint* tin, __local float* tsc, float* v) {
+  const uint lid = get_local_id(0);
+  const uint c = get_sub_group_id();
+  const uint l = get_sub_group_local_id();
+#if LAYOUT == 0
+#pragma unroll
+  for (uint i = 0; i < 8u; ++i) {
+    const uint t = lid + 256u * i;
+    tin[(t % 16u) * 129u + t / 16u] = qw[(size_t)(blk * 128u + t / 16u) * Nfull + nbase + (t % 16u)];
+  }
+  tsc[(lid % 16u) * 17u + lid / 16u] =
+      vload_half((size_t)(blk * 16u + lid / 16u) * Nfull + nbase + (lid % 16u), sc);
+#else
+  // The WG's 16 columns are exactly tile nt = nbase / 16. Tile (nt, group gi)
+  // is 136 u32 at (nt G + gi) 136: word j of lane c at j 16 + c, then 16 f16
+  // scales (common/repack.h, repack_int4_layout1). Row r of the block is
+  // group blk 16 + r / 8, word r % 8.
+  const uint G = K / 64u;
+  __global const uint* tiles = qw + (size_t)(nbase / 16u) * G * 136u;
+#pragma unroll
+  for (uint i = 0; i < 8u; ++i) {
+    const uint t = lid + 256u * i;
+    const uint r = t / 16u, cc = t % 16u;
+    tin[cc * 129u + r] = tiles[(size_t)(blk * 16u + r / 8u) * 136u + (r % 8u) * 16u + cc];
+  }
+  {
+    const uint g = lid / 16u, cc = lid % 16u;
+    const __global ushort* sp =
+        (const __global ushort*)(tiles + (size_t)(blk * 16u + g) * 136u + 128u);
+    tsc[cc * 17u + g] = (float)as_half(sp[cc]);
+  }
+#endif
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  const float s = tsc[c * 17u + l];
+  const uint2 sb = vload2(0, sbits + blk * 32u + 2u * l);
+#pragma unroll
+  for (uint i = 0; i < 8u; ++i) {
+    const uint word = tin[c * 129u + 8u * l + i];
+#pragma unroll
+    for (uint b = 0; b < 8u; ++b) {
+      const uint j = 8u * i + b;
+      const uint bit = ((j < 32u ? sb.x : sb.y) >> (j % 32u)) & 1u;
+      v[j] = as_float(as_uint((float)((int)((word >> (4u * b)) & 0xFu) - 8) * s) ^ (bit << 31));
+    }
+  }
+#pragma unroll
+  for (uint h = 1u; h < 64u; h <<= 1) {
+#pragma unroll
+    for (uint j = 0; j < 64u; ++j) {
+      if ((j & h) == 0u) {
+        const float a = v[j], e = v[j + h];
+        v[j] = a + e;
+        v[j + h] = a - e;
+      }
+    }
+  }
+#pragma unroll
+  for (uint h = 1u; h < 16u; h <<= 1) {
+#pragma unroll
+    for (uint j = 0; j < 64u; ++j) {
+      const float o = sub_group_shuffle_xor(v[j], h);
+      v[j] = (l & h) ? (o - v[j]) : (v[j] + o);
+    }
+  }
+}
+
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void pf_requant_rot(__global const uint* restrict qw, __global const half* restrict sc,
+                             __global const uint* restrict sbits, __global const float* restrict inv,
+                             __global uint* restrict out, uint n0, uint Nfull, uint K, uint ldo) {
+  const uint lid = get_local_id(0);
+  const uint c = get_sub_group_id();
+  const uint l = get_sub_group_local_id();
+  const uint blk = get_group_id(1);
+  const uint nc = get_group_id(0) * 16u;
+  const uint nbase = n0 + nc;
+  __local uint tin[16 * 129];
+  __local float tsc[16 * 17];
+  __local uint tout[16 * 257];
+  float v[64];
+  pf_rot_load(qw, sc, sbits, nbase, blk, Nfull, K, tin, tsc, v);
+  const float iv = inv[nbase + c];
+#pragma unroll
+  for (uint d = 0; d < 16u; ++d) {
+    uint w = 0u;
+#pragma unroll
+    for (uint b = 0; b < 4u; ++b)
+      w |= ((uint)(uchar)convert_char_sat_rte((v[4u * d + b] * (1.0f / 32.0f)) * iv)) << (8u * b);
+    tout[c * 257u + 16u * l + d] = w;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+#pragma unroll
+  for (uint i = 0; i < 16u; ++i) {
+    const uint t = lid + 256u * i;
+    out[(size_t)(blk * 256u + t / 16u) * ldo + nc + (t % 16u)] = tout[(t % 16u) * 257u + t / 16u];
+  }
+}
+#endif  // PF_REQUANT_ROT
