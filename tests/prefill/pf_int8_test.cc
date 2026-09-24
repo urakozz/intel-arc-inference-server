@@ -70,11 +70,71 @@ void quant_case(pf_harness::Dev& d, uint32_t K, uint32_t rows) {
   std::printf("pf_quant_had K=%u rows=%u: %zu mismatches\n", K, rows, bad);
   CHECK(bad == 0);
 }
+
+// W R_K per column on the CPU: dequant (q - 8) * s, signs, FWHT per 1024-block, * 1/32.
+std::vector<float> rotated_column(const common::Int4Gptq& w, uint32_t n, const std::vector<float>& sgn) {
+  std::vector<float> col(w.K);
+  for (uint32_t k = 0; k < w.K; ++k) {
+    const uint32_t word = w.qweight[size_t(k / 8) * w.N + n];
+    const float s = common::f16_to_f32(w.scales[size_t(k / 64) * w.N + n]);
+    col[k] = (float(int((word >> (4 * (k % 8))) & 0xFu) - 8) * s) * sgn[k];
+  }
+  fwht_blocks(col);
+  for (float& v : col) v *= 1.0f / 32.0f;
+  return col;
+}
+
+void requant_case(pf_harness::Dev& d, uint32_t K, uint32_t N, uint32_t layout) {
+  const common::Int4Gptq w = common::Int4Gptq::random(K, N, 23 + K + N);
+  const std::vector<float> sgn = runtime::prefill::int8_signs(K);
+  std::vector<float> inv(N);
+  std::vector<std::vector<float>> cols(N);
+  for (uint32_t n = 0; n < N; ++n) {
+    cols[n] = rotated_column(w, n, sgn);
+    float amax = 0.0f;
+    for (float v : cols[n]) amax = std::fmax(amax, std::fabs(v));
+    inv[n] = 1.0f / (amax > 0.0f ? amax / 127.0f : 1.0f);
+  }
+  const std::vector<uint32_t> words = layout == 0 ? w.qweight : w.tiled();
+  l0::Mem dw = pf_harness::upload(d.ctx, d.imm, words);
+  l0::Mem dsc = pf_harness::upload(d.ctx, d.imm, w.scales);
+  l0::Mem dbits = pf_harness::upload(d.ctx, d.imm, runtime::prefill::int8_sign_bits(K));
+  l0::Mem dinv = pf_harness::upload(d.ctx, d.imm, inv);
+  l0::Mem dout(d.ctx, l0::MemKind::Device, size_t(K) * N);
+  l0::Module mod(d.ctx, kernels::path(kernels::pf_requant_rot_variant(layout)));
+  l0::Kernel k = mod.kernel("pf_requant_rot");
+  k.group_size(256);
+  k.arg_ptr(0, dw.ptr());
+  k.arg_ptr(1, layout == 0 ? dsc.ptr() : nullptr);
+  k.arg_ptr(2, dbits.ptr());
+  k.arg_ptr(3, dinv.ptr());
+  k.arg_ptr(4, dout.ptr());
+  k.arg(5, 0u);   // n0
+  k.arg(6, N);    // Nfull
+  k.arg(7, K);
+  k.arg(8, N);    // ldo
+  d.run(k, N / 16, K / 1024);
+  std::vector<uint32_t> got(size_t(K / 4) * N);
+  pf_harness::download(d.imm, got, dout);
+  size_t bad = 0;
+  for (uint32_t n = 0; n < N; ++n)
+    for (uint32_t kk = 0; kk < K; ++kk) {
+      const int8_t want = sat_rte(cols[n][kk] * inv[n]);
+      const int8_t have = int8_t((got[size_t(kk / 4) * N + n] >> (8 * (kk % 4))) & 0xFFu);
+      bad += (want != have);
+    }
+  std::printf("pf_requant_rot K=%u N=%u L%u: %zu mismatches\n", K, N, layout, bad);
+  CHECK(bad == 0);
+}
 }  // namespace
 
 int main() {
   pf_harness::Dev d;
   for (uint32_t K : {5120u, 6144u, 17408u}) quant_case(d, K, 64);
+  requant_case(d, 5120, 1024, 0);
+  requant_case(d, 5120, 1024, 1);
+  requant_case(d, 6144, 1024, 0);
+  requant_case(d, 17408, 1024, 0);
   std::printf("pf_int8_test: PASS\n");
   return 0;
 }
