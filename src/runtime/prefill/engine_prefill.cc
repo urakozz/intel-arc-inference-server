@@ -22,6 +22,7 @@
 #include "runtime/engine.h"
 #include "runtime/prefill/backend.h"
 #include "runtime/prefill/context.h"
+#include "runtime/prefill/int8.h"
 #include "runtime/prefill/kernels.h"
 #include "runtime/prefill/step.h"
 
@@ -32,8 +33,13 @@ struct PrefillEngine {
   prefill::KernelCache kc;
   struct Chunk {
     uint32_t pos, rows;
+    PrefillBackend backend;   // a recording holds one backend's walk, never another's
     std::unique_ptr<prefill::Context::Recording> recording;
   };
+  // Spec 5's int8 state (signs, per-linear column scales, int8 scratch), created on the
+  // first l0-int8 prefill. Declared before `chunks`: recordings that name its buffers are
+  // destroyed first.
+  std::unique_ptr<prefill::Int8State> int8;
   // Declared after kc/cx: recordings are destroyed before kernels/context.
   std::vector<Chunk> chunks;
   explicit PrefillEngine(l0::Context& c) : cx(c), kc(c) {}
@@ -89,6 +95,18 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (replay && !is_l0(backend))
     throw std::runtime_error("runtime::Engine::prefill: replay requires the L0 or l0-int8 backend");
 
+  prefill::Int8State* q = nullptr;
+  if (backend == PrefillBackend::L0Int8) {
+    if (!pfx_->int8) pfx_->int8 = std::make_unique<prefill::Int8State>(ctx_);
+    q = pfx_->int8.get();
+    // Every int4 linear's rotated column scales, now, outside any chunk and any
+    // recording: the first int8 prefill pays this once (cached by weight after it),
+    // and no recorded list ever holds the host finish of pf_colmax_rot.
+    for (const auto& [key, w] : model_.linears)
+      if (key.second != model::LinearId::LmHead && w.kind == model::WeightKind::Int4)
+        q->scales(pfx_->cx, pfx_->kc, w);
+  }
+
   for (size_t off = 0; off < ids.size(); off += chunk) {
     const uint32_t C = uint32_t(std::min<size_t>(chunk, ids.size() - off));
     pfx_->cx.wait();                       // before touching `ids` or `Control`
@@ -98,17 +116,17 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     auto encode = [&] {
       prefill::step_chunk(pfx_->cx, pfx_->kc, *pf_, model_, buffers_.max_len, control_,
                         base + uint32_t(off), C, persist_.gdn_state, persist_.conv_ring,
-                        persist_.kv_k, persist_.kv_v, backend);
+                        persist_.kv_k, persist_.kv_v, backend, q);
     };
     if (replay) {
       const uint32_t pos = base + uint32_t(off);
       auto it = std::find_if(pfx_->chunks.begin(), pfx_->chunks.end(), [&](const auto& entry) {
-        return entry.pos == pos && entry.rows == C;
+        return entry.pos == pos && entry.rows == C && entry.backend == backend;
       });
       if (it == pfx_->chunks.end()) {
         // FIFO bound limits retained command storage for long/incremental sessions.
         if (pfx_->chunks.size() == 8) pfx_->chunks.erase(pfx_->chunks.begin());
-        pfx_->chunks.push_back({pos, C, pfx_->cx.capture(encode)});
+        pfx_->chunks.push_back({pos, C, backend, pfx_->cx.capture(encode)});
         it = pfx_->chunks.end() - 1;
       }
       pfx_->cx.replay(*it->recording);
