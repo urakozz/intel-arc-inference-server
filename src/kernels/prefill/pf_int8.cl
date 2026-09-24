@@ -233,3 +233,154 @@ __kernel void pf_colmax_rot(__global const uint* restrict qw, __global const hal
   if (l == 0u) atomic_max((volatile __global uint*)(colmax + nbase + c), as_uint(amax));
 }
 #endif  // PF_REQUANT_ROT
+
+#ifdef PF_GEMM_I8
+#ifndef SILU_EPI
+#define SILU_EPI 0
+#endif
+// pw8_gemm (tools/probe/probe_w8a8.cl), the gsweep tile: WG 256 x 128, 32
+// sub-groups 8 (m) x 4 (n), per sub-group 32 m x 32 n, B int8 VNNI-4, int32
+// accumulation over the whole K. Mainloop and plain epilogue copied verbatim
+// with only the probe's `sig` argument and its store removed.
+#define CHUNK 64
+#define WG_M 256
+#define WG_N 128
+#define SG_M 32
+#define SG_N 32
+#define NA 4
+#define NB 2
+#if SILU_EPI
+// pf_gemm.cl's chain, verbatim (the numerics contract with pf_prep.cl).
+inline ushort rne_bf16(float f) {
+  uint u = as_uint(f);
+  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
+  return (ushort)((u + rounding) >> 16);
+}
+inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
+#endif
+
+__attribute__((reqd_work_group_size(512, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void pf_gemm_i8(__global const ushort* restrict xq16, __global const float* restrict xs,
+                         __global const uint* restrict w8, __global const float* restrict ws,
+                         __global float* restrict C, uint M, uint K, uint N, uint ldxq, uint ldb,
+                         uint ldc) {
+  const uint m0 = get_group_id(0) * WG_M;
+  const uint n0 = get_group_id(1) * WG_N;
+  const uint s = get_sub_group_id();
+  const uint mb = m0 + SG_M * (s >> 2);
+  const uint nb = n0 + SG_N * (s & 3u);
+
+  const int x_w = (int)K, x_h = (int)M, x_p = (int)(ldxq * 2u);
+  const int b_w = (int)(N * 4u), b_h = (int)(K / 4u), b_p = (int)(ldb * 4u);
+  const int c_w = (int)(N * 4u), c_h = (int)M, c_p = (int)(ldc * 4u);
+  const uint NCH = K / CHUNK;
+
+  int8 acc[NA][NB];
+  #pragma unroll
+  for (int a = 0; a < NA; ++a)
+    #pragma unroll
+    for (int b = 0; b < NB; ++b) acc[a][b] = (int8)(0);
+
+  #pragma unroll
+  for (int pf = 0; pf < 2; ++pf) {
+    const int kpf = pf * CHUNK;
+    intel_sub_group_2d_block_prefetch_16b_8r16x2c((__global void*)xq16, x_w, x_h, x_p,
+                                                  (int2)(kpf / 2, (int)(m0 + 8u * s)));
+    intel_sub_group_2d_block_prefetch_32b_4r16x1c(
+        (__global void*)w8, b_w, b_h, b_p,
+        (int2)((int)(n0 + 16u * (s >> 2)), kpf / 4 + 4 * (int)(s & 3u)));
+  }
+
+  for (uint ch = 0; ch < NCH; ++ch) {
+    const uint k0 = ch * CHUNK;
+    intel_work_group_barrier_arrive(CLK_LOCAL_MEM_FENCE);
+
+    ushort afrag[64];
+    intel_sub_group_2d_block_read_16b_32r16x2c((__global void*)xq16, x_w, x_h, x_p,
+                                               (int2)((int)(k0 / 2u), (int)mb), afrag);
+    uint wv[NB][16];
+    #pragma unroll
+    for (int b = 0; b < NB; ++b)
+      intel_sub_group_2d_block_read_32b_16r16x1c((__global void*)w8, b_w, b_h, b_p,
+                                                 (int2)((int)(nb + 16u * (uint)b),
+                                                        (int)(k0 / 4u)),
+                                                 wv[b]);
+    if (ch + 2u < NCH) {
+      const int kpf = (int)((ch + 2u) * CHUNK);
+      intel_sub_group_2d_block_prefetch_16b_8r16x2c((__global void*)xq16, x_w, x_h, x_p,
+                                                    (int2)(kpf / 2, (int)(m0 + 8u * s)));
+      intel_sub_group_2d_block_prefetch_32b_4r16x1c(
+          (__global void*)w8, b_w, b_h, b_p,
+          (int2)((int)(n0 + 16u * (s >> 2)), kpf / 4 + 4 * (int)(s & 3u)));
+    }
+
+    #pragma unroll
+    for (int ks = 0; ks < 2; ++ks) {
+      short8 af[NA];
+      #pragma unroll
+      for (int a = 0; a < NA; ++a) af[a] = as_short8(vload8(0, afrag + (uint)(ks * 32 + 8 * a)));
+      #pragma unroll
+      for (int b = 0; b < NB; ++b) {
+        const int8 bv = as_int8(vload8(0, wv[b] + (uint)(8 * ks)));
+        #pragma unroll
+        for (int a = 0; a < NA; ++a)
+          acc[a][b] = intel_sub_group_i8_i8_matrix_mad_k32(af[a], bv, acc[a][b]);
+      }
+    }
+    intel_work_group_barrier_wait(CLK_LOCAL_MEM_FENCE);
+  }
+
+#if SILU_EPI
+  // A sub-group's two atoms are nb and nb + 16 with nb a multiple of 32, so
+  // atom 0 is a gate block and atom 1 its up block (gate||up's 16-column
+  // interleave). The x column of gate column nb + lane is nb / 2 + lane.
+  // `C` carries bf16 x and `ldc` carries ldx. The descriptor is o_* because the
+  // mainloop above already names the A operand's x_*.
+  __global ushort* restrict X = (__global ushort*)C;
+  const int o_w = (int)(N * 2u), o_h = (int)M, o_p = (int)(ldc * 2u);
+  const float wg = as_float(intel_sub_group_block_read((__global const uint*)(ws + nb)));
+  const float wu = as_float(intel_sub_group_block_read((__global const uint*)(ws + nb + 16u)));
+#define PF_SILU_ROW_I8(r)                                                     \
+  do {                                                                        \
+    const float xsr = xs[mb + 8u * (uint)a + r];                              \
+    const float g = (float)acc[a][0].s##r * (wg * xsr);                       \
+    const float u = (float)acc[a][1].s##r * (wu * xsr);                       \
+    const ushort g_b = rne_bf16(g), u_b = rne_bf16(u);                        \
+    const ushort s_b = rne_bf16(silu_f32(bf16f(g_b)));                        \
+    xv[r] = rne_bf16(bf16f(s_b) * bf16f(u_b));                                \
+  } while (0)
+#pragma unroll
+  for (int a = 0; a < NA; ++a) {
+    ushort xv[8];
+    PF_SILU_ROW_I8(0); PF_SILU_ROW_I8(1); PF_SILU_ROW_I8(2); PF_SILU_ROW_I8(3);
+    PF_SILU_ROW_I8(4); PF_SILU_ROW_I8(5); PF_SILU_ROW_I8(6); PF_SILU_ROW_I8(7);
+    intel_sub_group_2d_block_write_16b_8r16x1c((__global void*)X, o_w, o_h, o_p,
+                                               (int2)((int)(nb >> 1), (int)(mb + 8u * (uint)a)), xv);
+  }
+#undef PF_SILU_ROW_I8
+#else
+  // pw8_gemm's epilogue, unchanged.
+  // epilogue: out = (float)acc * (ws[n] * xs[m]); the column is the lane
+  #pragma unroll
+  for (int b = 0; b < NB; ++b) {
+    const float wsc = as_float(intel_sub_group_block_read((__global const uint*)(ws + nb + 16u * (uint)b)));
+    #pragma unroll
+    for (int a = 0; a < NA; ++a) {
+      float8 o;
+      o.s0 = (float)acc[a][b].s0 * (wsc * xs[mb + 8u * (uint)a + 0u]);
+      o.s1 = (float)acc[a][b].s1 * (wsc * xs[mb + 8u * (uint)a + 1u]);
+      o.s2 = (float)acc[a][b].s2 * (wsc * xs[mb + 8u * (uint)a + 2u]);
+      o.s3 = (float)acc[a][b].s3 * (wsc * xs[mb + 8u * (uint)a + 3u]);
+      o.s4 = (float)acc[a][b].s4 * (wsc * xs[mb + 8u * (uint)a + 4u]);
+      o.s5 = (float)acc[a][b].s5 * (wsc * xs[mb + 8u * (uint)a + 5u]);
+      o.s6 = (float)acc[a][b].s6 * (wsc * xs[mb + 8u * (uint)a + 6u]);
+      o.s7 = (float)acc[a][b].s7 * (wsc * xs[mb + 8u * (uint)a + 7u]);
+      intel_sub_group_2d_block_write_32b_8r16x1c(
+          (__global void*)C, c_w, c_h, c_p,
+          (int2)((int)(nb + 16u * (uint)b), (int)(mb + 8u * (uint)a)), (__private uint*)&o);
+    }
+  }
+#endif
+}
+#endif  // PF_GEMM_I8

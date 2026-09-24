@@ -134,3 +134,7 @@ endforeach()
 foreach(L 0 1)
   add_ocloc_kernel(pf_requant_rot_L${L} SOURCE ${PF_INT8_CL} DEFINES PF_REQUANT_ROT=1 LAYOUT=${L})
 endforeach()
+add_ocloc_kernel(pf_gemm_i8 SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1
+                 OPTIONS -cl-intel-256-GRF-per-thread)
+add_ocloc_kernel(pf_gemm_i8_SILU SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1 SILU_EPI=1
+                 OPTIONS -cl-intel-256-GRF-per-thread)
