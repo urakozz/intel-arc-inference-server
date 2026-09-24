@@ -165,3 +165,76 @@ check), device 0. Accuracy: `tools/rotate/eval_quantised.py` and
 `check_rotation.py` for the oracle side. The engine side needs a prompt-logits
 dump in the same golden format. Whether the golden-gate harness already exposes
 one is unchecked, so a CLI flag for it is part of T3 if not.
+
+## 7. Amendment - 2026-09-24, results (plan 5b)
+
+**Status after plan 5b: h8 is opt-in, the default stays `l0`. Gate A3 failed
+while every 5a kernel test passes, so the stopping rule (§3) applies: the
+numbers are recorded here and nothing was tuned.** A4 had not been run when
+this was written (its tool-call set is plan 5c's).
+
+### 7.1 What changed from the design
+
+- **The switch is `--pp-backend l0-int8`**, not `--pp-math w4a16|h8`. The
+  backend switch already reaches both CLIs, the engine and every test.
+  `PrefillBackend::L0Int8` is L0 for attention, GDN, norms, the head and replay;
+  only the int4 linears differ. Each adds one launch (the quantiser): +256 per
+  chunk, measured equal to the prediction (9334 at C = 2048 with the head).
+- **The column scales are built at the first l0-int8 prefill**, before its first
+  chunk, not at load (§4 T2). That keeps recordings free of the host finish and
+  the l0-only engine unchanged, and it puts about 140 ms into the first request
+  (7.4).
+- **A2 is redefined.** Prompt-logit relative L2 against the oracle needs an
+  all-positions logits dump the engine does not have. A2 as gated: per golden
+  prompt, over the 32 greedy decode steps after the prefill (each reads the KV
+  and GDN state the prefill wrote), logit cosine against the CPU oracle with
+  mean(int8) >= mean(l0) - 0.002 and min(int8) >= min(l0) - 0.01.
+- **A3 as gated:** per prompt, the int8 gate verdict is PASS wherever l0's is,
+  with the same determined-exact count (`tools/rotate/gate_compare.py`).
+- **The `long` golden gate did not run.** `prefill_gate_long_test` and
+  `prefill_gate_long_int8_test` are registered only while the RTN checkpoint and
+  `oracle-out-long` exist, and neither exists on the box. Multi-chunk coverage
+  stands in: a chunk-16 pair on the golden set (3 to 4 chunks per prompt).
+  The chunk-1000 registration is single-chunk on these prompts (38 to 61 ids),
+  so it repeats the default run's numbers exactly.
+
+### 7.2 A2 and A3 (measured, `gate_compare.py`)
+
+| run | prompt | l0 mean cos | l0 min | int8 mean | int8 min | l0 gate | int8 gate | A2 | A3 |
+|---|---|---:|---:|---:|---:|---|---|---|---|
+| chunk 0 (and 1000) | prose | 0.999971630 | 0.999909491 | 0.999949053 | 0.999795485 | 31/31, ties 1/1 | 31/31, ties 1/1 | PASS | PASS |
+| | code | 0.999946584 | 0.999593069 | 0.999898762 | 0.999418297 | 32/32 | 32/32 | PASS | PASS |
+| | cjk | 0.999961454 | 0.999839851 | 0.999947412 | 0.999785064 | 30/30, ties 2/2 | **29/30**, ties 2/2 | PASS | **FAIL** |
+| chunk 16 | prose | 0.999971259 | 0.999930196 | 0.999958267 | 0.999908266 | 31/31 | 31/31 | PASS | PASS |
+| | code | 0.999947747 | 0.999809837 | 0.999916840 | 0.999542875 | 32/32 | 32/32 | PASS | PASS |
+| | cjk | 0.999964049 | 0.999919725 | 0.999951292 | 0.999910716 | 30/30 | 30/30 | PASS | PASS |
+
+**A2 passes everywhere. A3 fails on cjk in the single-chunk run.** The failing
+row is cjk greedy step 9, a determined row: the oracle's top two are
+95895 at 13.9375 and 105874 at 13.875, one bf16 step apart; l0 picks 95895,
+and h8 has 105874 at 13.96331 over 95895 at 13.95635, a 0.007 reversal. The
+gate counts a determined row as not a judgement call, and so does A3 as
+written. Split into 16-id chunks the same prompt passes 30/30, which says the
+row sits inside h8's noise rather than beyond it, but the bar is the bar.
+
+### 7.3 Engine smoke (measured, `prefill_int8_test`)
+
+prose: same first id as l0, last-row logits cosine 0.99995. long[:2048]: same
+first id, cosine 0.941. Over 30 prefixes of `long` the l0 / h8 last-row cosine
+is 0.998 to 0.9999 on most and 0.88 to 0.95 on a scattered few, with the first
+id equal on all 30: position-dependent sensitivity to h8's noise, not a shape
+boundary (neighbouring lengths are good, the row is independent of padded
+scratch rows and of a split at 256). Replay on l0-int8 is bitwise the
+immediate run (logits, KV, GDN state, conv ring, Control).
+
+### 7.4 B1 and B2 (measured, ITERATE grade: a CPU-only container was running, no GPU holder)
+
+Interleaved on device 0: l0 1671.78 and 1668.74 t/s, l0-int8 1970.89 and
+1971.09 t/s, paired ratios 1.1789 and 1.1812, **1.1798x the 1670.72 record:
+B1 fails** (bar 1.20x, 2005 t/s). The bench row times a fresh process's first
+prefill, which on l0-int8 includes the one-time scale pass: first call 2072 to
+2076 ms, later calls 1929 to 1936 ms (+140 to +143 ms once; l0's first call is
+29 to 30 ms faster than its later ones). A warm l0-int8 prefill is 2122 t/s,
+1.27x (derived from host wall, not a bench row). Decode 29.40 t/s against
+29.45: **B2 passes.** Numbers and runs in `docs/BENCHMARKS.md`, "The int8
+prefill linears".
