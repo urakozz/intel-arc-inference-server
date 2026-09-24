@@ -837,16 +837,16 @@ size_t linear_i8_launches(const model::GemvShape& sh);   // 1 + 2 * N / 1024
 }
 ```
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `tests/prefill/linear_i8_test.cc`: one random layout-0 weight (K 5120, N 2048, two slabs) and one random layout-1 weight (K 5120, N 2048) in `loader::DeviceWeight` form (upload `qweight` or `tiled()` into `mem`; layout 0 also gets `scales`), `M = 300` (not a multiple of 256). Run `linear_i8` and compare `partials` rows 0..299 against the host oracle of Task 4's cross case, at the same ≤ 3 % bar. For the layout-1 weight, also require **bit-identity with the layout-0 weight built from the same `Int4Gptq`**. Then run `linear_i8_silu` on a gate‖up-shaped weight (N 2048, 16-column interleave) and require bit-identity with a host mirror assembled from `linear_i8`'s fp32 output through the `PF_SILU_ROW` chain. Assert `linear_i8_launches({K 5120, N 2048}) == 5`.
 
-- [ ] **Step 2: Run it to see it fail**
+- [x] **Step 2: Run it to see it fail**
 
 Run: `tools/box.sh test linear_i8_test`
 Expected: FAIL at build (`runtime/prefill/int8.h` missing).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `int8.cc`:
 
@@ -860,12 +860,12 @@ Expected: FAIL at build (`runtime/prefill/int8.h` missing).
 - `linear_i8_silu()`: the same, with `pf_gemm_i8_variant(true)`, `C = out + n0 / 2`, `ldc = ldx`, and the `require(ldx * 2 == N)` from `linear_l0_silu`.
 - `bytes()`: the three scratch buffers plus every cached scale pair.
 
-- [ ] **Step 4: Run the test to see it pass**
+- [x] **Step 4: Run the test to see it pass**
 
 Run: `tools/box.sh test linear_i8_test`
 Expected: PASS, printing the rel L2 per case and "layout 1 == layout 0 bitwise".
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/runtime/prefill/int8.h src/runtime/prefill/int8.cc src/runtime/prefill/CMakeLists.txt \
