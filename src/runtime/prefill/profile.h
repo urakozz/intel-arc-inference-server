@@ -31,6 +31,12 @@ enum class Phase : uint32_t {
   // L0_gpu_ms column of these two rows is meant to be read.
   kSlabDequant, // pf_dequant_slab, one 1024-column slab
   kSlabGemm,    // pf_gemm over that slab
+  // Spec 5's h8 linear (runtime/prefill/int8.cc), itemised the same way: the
+  // rotating activation quantiser once per linear, then per slab the rotating
+  // requant and the i8 x i8 GEMM.
+  kI8Quant,     // pf_quant_had
+  kI8Requant,   // pf_requant_rot, one 1024-column slab
+  kI8Gemm,      // pf_gemm_i8 (plain or SiLU) over that slab
   kAbGdn,       // pf_ab_proj (gdn_chunk's ten launches are itemised below)
   // `gdn_chunk`'s ten launches, one bucket each. Itemised rather than lumped
   // because the ledger's GDN term (15.4 ms/chunk) predates `gdn_chunk` existing
