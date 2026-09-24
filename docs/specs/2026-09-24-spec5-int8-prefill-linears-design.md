@@ -1,6 +1,6 @@
 # Spec 5 - int8 prefill linears: W4A16 checkpoint, i8 x i8 math
 
-**Status:** design, 2026-09-24, for operator review.
+**Status:** implemented 2026-09-24 (plans 5a, 5b); `l0-int8` is the default (§8).
 
 **Order, set by the operator:** this is the foundation. Flash attention,
 prefix caching and MTP are built **on top of it**, after its gates pass, and not
@@ -238,3 +238,40 @@ prefill, which on l0-int8 includes the one-time scale pass: first call 2072 to
 1.27x (derived from host wall, not a bench row). Decode 29.40 t/s against
 29.45: **B2 passes.** Numbers and runs in `docs/BENCHMARKS.md`, "The int8
 prefill linears".
+
+## 8. Amendment - 2026-09-24, the operator's ruling and the default
+
+**A3's near-tie is accepted (operator, 2026-09-24).** The cjk row 9 flip is a
+determined row whose oracle top-two margin is one bf16 ulp (0.0625 at 13.94),
+reversed by h8 by 0.007. `prefill_gate_test` gains argv[7]: near-tie flips
+accepted per prompt. A determined-row mismatch is accepted only if the engine
+chose the oracle's runner-up **and** the oracle's own margin is at most one
+bf16 ulp of its top logit, and it is printed as "near-tie ACCEPTED". The
+allowance is 1 on `l0-int8` (explicitly on its registrations, and by default
+when no argv[7] is given) and 0 on every other backend. `gate_compare.py`
+counts accepted near-ties as exact. Re-run with the rule: every gate
+registration passes, and `gate_compare.py` reports A2 PASS, A3 PASS for the
+default pair (cjk `29+1nt/30`) and the chunk-16 pair.
+
+**The scale pass moved to load, as §4 T2 said.** `Engine::prepare_prefill()`
+does the lazy prefill setup and, on `l0-int8`, builds every int4 linear's
+rotated column scales. `prefill()` calls it too (idempotent), and both CLIs call
+it right after loading, so no request pays the ~140 ms. Decode-only engines
+never call it, so ruling R7 stands.
+
+**B1, re-measured with that change** (BENCHMARKS.md, "The int8 prefill
+linears"): interleaved on an idle device 0, l0 1643.52 / 1639.56 t/s, l0-int8
+2104.50 / 2102.64 t/s, paired **1.2805x / 1.2824x. B1 passes.** B2 stands at
+29.40 t/s.
+
+**A4, provisional.** The bf16 CPU baseline is incomplete: 15 of 36, and a
+reboot interrupted it; it resumes where it stopped. Against W4A16 instead:
+`l0-int8` makes a well-formed call on all 33 scenarios where `l0` does,
+identical on 30. The other 3 are valid alternatives: grep against glob for
+finding tests (twice), and one extra word in a rewritten comment. The other 3
+scenarios truncate at 192 tokens on both backends. The formal A4 against
+bf16 is recorded when the baseline completes.
+
+**The default is now `l0-int8`** (`default_prefill_backend()` in both
+`backend_sycl.cc` and `backend_sycl_absent.cc`). `--pp-backend l0` keeps the
+bf16 walk, and every `l0` registration still runs it explicitly.
