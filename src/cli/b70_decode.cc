@@ -113,7 +113,7 @@ void usage() {
        "                 gate runs at 1024.\n"
        "  --pp-backend B  --pp or --prefill: the GEMM backend, sycl-tla (spec 2), l0 (spec 2.1,\n"
        "                 every GEMM on the Level Zero list) or l0-int8 (spec 5, l0 with every\n"
-       "                 int4 linear on the rotated int8 path). Default: l0.\n"
+       "                 int4 linear on the rotated int8 path). Default: l0-int8.\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -780,16 +780,23 @@ int run(int argc, char** argv) {
   // interface's "first prefill launch to the first generated id in cur_token":
   // `prefill()` returns only after its final `Context::wait()`, and its last
   // launch is `argmax_stage2`, which is the only writer of `cur_token`.
-  const auto t0 = std::chrono::steady_clock::now();
-  size_t pp_launches = 0;
+  // The prefill setup (scratch, Context, and on l0-int8 the one-time rotated
+  // column-scale pass, spec 5 T2) happens here, at load, outside the window.
+  size_t pp_launches_setup = 0;
   if (have_pp || prefill) {
     if (have_pp_backend) eng.set_prefill_backend(pp_backend);
     std::fprintf(stderr, "prefill backend: %s (SYCL component %s)\n",
                  runtime::prefill_backend_name(eng.prefill_backend()),
                  runtime::prefill::sycl_available() ? "on" : "off");
+    eng.prepare_prefill();
+    pp_launches_setup = eng.prefill_launches();
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  size_t pp_launches = 0;
+  if (have_pp || prefill) {
     if (have_pp) runtime::prefill::profile_reset();
     eng.prefill(ids, pp_chunk);
-    if (have_pp) pp_launches = eng.prefill_launches();
+    if (have_pp) pp_launches = eng.prefill_launches() - pp_launches_setup;
   } else {
     eng.ingest(ids);
   }
