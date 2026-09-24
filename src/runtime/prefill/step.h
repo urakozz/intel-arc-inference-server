@@ -11,6 +11,8 @@
 
 namespace runtime::prefill {
 
+class Int8State;   // runtime/prefill/int8.h, spec 5's h8 path
+
 // ONE chunk of at most `PrefillScratch::kC` positions, at absolute position
 // `pos`. The caller has already uploaded the chunk's ids into `s.ids` and set
 // `Control::{pos, n_active}` (after a `wait()`, because the L0 list is
@@ -29,10 +31,15 @@ namespace runtime::prefill {
 //
 // The four persistent `l0::Mem&` are passed rather than reached through an
 // `Engine`, so this function holds no engine reference and is unit-testable.
+//
+// `q` (spec 5) is the int8 path's state and must be non-null iff `backend` is
+// L0Int8. Every int4 linear's column scales must already be in it (`Engine::prefill`
+// builds them before the first chunk): `Int8State::scales` on a new weight waits on
+// the host, which a recorded chunk must never contain.
 void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m,
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C,
                 l0::Mem& gdn_state_mem, l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem,
-                l0::Mem& kv_v_mem, PrefillBackend backend);
+                l0::Mem& kv_v_mem, PrefillBackend backend, Int8State* q);
 
 // The tail only the LAST chunk runs: the final norm on the last row, `lm_head`
 // at M = 1 through the EXISTING decode binary, and the two argmax stages --
