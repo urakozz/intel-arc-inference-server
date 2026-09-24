@@ -79,6 +79,14 @@ if(B70_PREFILL_ENABLED)
                    kernel_pf_silu_mul)
   add_test(NAME pf_gemm_test COMMAND pf_gemm_test)
   set_tests_properties(pf_gemm_test PROPERTIES TIMEOUT 1800)
+
+  add_executable(pf_int8_test prefill/pf_int8_test.cc)
+  target_include_directories(pf_int8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(pf_int8_test PRIVATE b70_l0)
+  b70_target_kernel_dir(pf_int8_test)
+  add_dependencies(pf_int8_test kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144
+                   kernel_pf_quant_had_K17408)
+  add_test(NAME pf_int8_test COMMAND pf_int8_test)
 endif()
 
 # --- spec 3 T3: HTTP server (host-only mock tests) ---
