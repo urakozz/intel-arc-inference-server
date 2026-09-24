@@ -556,6 +556,10 @@ set(B70_PREFILL_KERNELS
   kernel_pf_dequant_slab_K5120_N16384_L1 kernel_pf_dequant_slab_K6144_N5120_L0
   kernel_pf_dequant_slab_K5120_N34816_L0 kernel_pf_dequant_slab_K17408_N5120_L0
   kernel_pf_dequant_slab_K5120_N14336_L0
+  # Spec 5's h8 path, which `--pp-backend l0-int8` runs (pf_colmax_rot is in the
+  # pf_requant_rot binaries).
+  kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144 kernel_pf_quant_had_K17408
+  kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1 kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU
   ${B70_DECODE_LIST_KERNELS})
 
 # The three spec 2 §6 gates. `tests/golden` is on the include path for
@@ -564,7 +568,7 @@ set(B70_PREFILL_KERNELS
 # BINARIES are built in every configuration; only `b70_link_prefill` (the
 # sycl-tla .so and its two rpaths) is conditional, which is plan 9b's ruling B4
 # pattern and what `context_test` above already does.
-foreach(t prefill_gate prefill_consistency prefill_determinism prefill_replay)
+foreach(t prefill_gate prefill_consistency prefill_determinism prefill_replay prefill_int8)
   add_executable(${t}_test prefill/${t}_test.cc)
   target_include_directories(${t}_test PRIVATE ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
@@ -577,6 +581,12 @@ endforeach()
 add_test(NAME prefill_replay_test COMMAND prefill_replay_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(prefill_replay_test PROPERTIES LABELS "checkpoint;prefill"
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+# Spec 5 T3 (plan 5b Task 2): l0-int8 on the engine - a smoke cosine against l0, replay
+# bitwise against immediate, and the l0 + 256 launch delta. The int8 kernels are in
+# B70_PREFILL_KERNELS above.
+add_test(NAME prefill_int8_test COMMAND prefill_int8_test ${B70_TEST_SNAPSHOT})
+set_tests_properties(prefill_int8_test PROPERTIES LABELS "checkpoint;prefill"
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 # l0, every build.
 add_test(NAME prefill_gate_l0_test COMMAND prefill_gate_test
   ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}

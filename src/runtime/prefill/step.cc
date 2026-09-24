@@ -14,6 +14,7 @@
 #include "runtime/prefill/dequant.h"
 #include "runtime/prefill/gdn.h"
 #include "runtime/prefill/gemm.h"
+#include "runtime/prefill/int8.h"
 #include "runtime/prefill/linear_l0.h"
 #include "runtime/prefill/profile.h"
 
@@ -74,11 +75,16 @@ const void* at_const(const l0::Mem& m, size_t off) {
 }
 
 // One int4 linear on the prefill path -- THE seam of spec 2.1 §3.2. The sycl-tla side is
-// spec 2's two-pass path unchanged (backend_sycl.cc); the L0 side is S2's slab walk.
+// spec 2's two-pass path unchanged (backend_sycl.cc); the L0 side is S2's slab walk; the
+// l0-int8 side is spec 5's h8 walk (quantiser, then requant + i8 GEMM per slab).
 void pf_linear(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWeight& w,
-               const uint16_t* x, uint32_t M, PrefillBackend backend) {
+               const uint16_t* x, uint32_t M, PrefillBackend backend, Int8State* q) {
   if (backend == PrefillBackend::SyclTla) {
     linear_sycl(cx, kc, s, w, x, M);
+    return;
+  }
+  if (backend == PrefillBackend::L0Int8) {
+    linear_i8(cx, kc, s, *q, w, x, M);
     return;
   }
   linear_l0(cx, kc, s, w, x, M);
@@ -104,7 +110,9 @@ constexpr uint32_t kSiluChunk = 4096;
 void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C, l0::Mem& gdn_state_mem,
                 l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem,
-                PrefillBackend backend) {
+                PrefillBackend backend, Int8State* q) {
+  require((q != nullptr) == (backend == PrefillBackend::L0Int8),
+          "the int8 state must be given iff the backend is l0-int8");
   require(C > 0 && C <= PrefillScratch::kC,
           "C = " + std::to_string(C) + " is outside (0, PrefillScratch::kC]");
   require(size_t(pos) + C <= size_t(max_len), "pos + C exceeds max_len");
@@ -137,7 +145,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                 s.resid.ptr(), s.x.ptr(), C);                     // x stride 5120
 
     if (L.kind == model::LayerKind::GDN) {
-      pf_linear(cx, kc, s, m.linears.at({l, LinearId::QkvZ}), s.x.as<uint16_t>(), C, backend);
+      pf_linear(cx, kc, s, m.linears.at({l, LinearId::QkvZ}), s.x.as<uint16_t>(), C, backend, q);
       {   // a||b: a bf16 GEMV, not a linear -- 128 columns is no DPAS shape.
         const DeviceWeight& w = m.linears.at({l, LinearId::AB});
         cx.launch(kc(kernels::pf_ab_proj_variant(), "pf_ab_proj"), w.shape.N / 16, (C + 7) / 8, 1,
@@ -150,9 +158,9 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                 m.layer_small[l].gdn.ptr(), s.mixer_out.as<uint16_t>());   // y stride 6144
       ++gdn;
       pf_linear(cx, kc, s, m.linears.at({l, LinearId::OutProj}), s.mixer_out.as<uint16_t>(), C,
-               backend);
+               backend, q);
     } else {
-      pf_linear(cx, kc, s, m.linears.at({l, LinearId::Qkv}), s.x.as<uint16_t>(), C, backend);
+      pf_linear(cx, kc, s, m.linears.at({l, LinearId::Qkv}), s.x.as<uint16_t>(), C, backend, q);
       uint16_t* kk = reinterpret_cast<uint16_t*>(at(kv_k_mem, size_t(fa) * kv_stride));
       uint16_t* vv = reinterpret_cast<uint16_t*>(at(kv_v_mem, size_t(fa) * kv_stride));
       // `Control::{pos, n_active}` were set by the caller before this chunk and
@@ -168,7 +176,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
       profile_wait(cx, Phase::kAttnGate);
       ++fa;
       pf_linear(cx, kc, s, m.linears.at({l, LinearId::OProj}), s.mixer_out.as<uint16_t>(), C,
-               backend);
+               backend, q);
     }
 
     // The MLP half, identical in both layer kinds.
@@ -181,7 +189,8 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
     // because the GEMM had fully retired before `pf_silu_mul` ran.) `mixer_out`
     // is bf16 [kC][6144] and its last reader -- out_proj / o_proj -- is three
     // launches back, so it is free and large enough for [pad256(C)][5120].
-    const bool fuse = l0 && silu_fused();
+    // spec 5: the int8 gate||up exists only in the fused form, whatever silu_fused() says.
+    const bool fuse = l0 && (backend == PrefillBackend::L0Int8 || silu_fused());
     void* const mlp_x = fuse ? s.mixer_out.ptr() : s.x.ptr();
     pf_res_norm(cx, kc, s, 1u, at_const(m.layer_small[l].norms, loader::kNormsOffPost),
                 s.partials.ptr(), s.resid.ptr(), mlp_x, C);   // stride 5120
@@ -189,17 +198,22 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
       // One launch pair per slab and NO `pf_silu_mul`: the epilogue writes x
       // directly, so the fp32 [C][34816] `partials` rectangle -- the largest on
       // the walk -- is neither written nor read back (spec §3, S2).
-      linear_l0_silu(cx, kc, s, m.linears.at({l, LinearId::GateUp}),
-                     static_cast<const uint16_t*>(mlp_x), C, s.x.as<uint16_t>(),
-                     Qwen35::kIntermediate);
+      if (backend == PrefillBackend::L0Int8)
+        linear_i8_silu(cx, kc, s, *q, m.linears.at({l, LinearId::GateUp}),
+                       static_cast<const uint16_t*>(mlp_x), C, s.x.as<uint16_t>(),
+                       Qwen35::kIntermediate);
+      else
+        linear_l0_silu(cx, kc, s, m.linears.at({l, LinearId::GateUp}),
+                       static_cast<const uint16_t*>(mlp_x), C, s.x.as<uint16_t>(),
+                       Qwen35::kIntermediate);
     } else {
-      pf_linear(cx, kc, s, m.linears.at({l, LinearId::GateUp}), s.x.as<uint16_t>(), C, backend);
+      pf_linear(cx, kc, s, m.linears.at({l, LinearId::GateUp}), s.x.as<uint16_t>(), C, backend, q);
       cx.launch(kc(kernels::pf_silu_mul_variant(), "pf_silu_mul"),
                 (Qwen35::kIntermediate + kSiluChunk - 1) / kSiluChunk, C, 1,
                 {PtrArg(s.partials.ptr()), PtrArg(s.x.ptr()), arg_val(C)});   // x stride 17408
       profile_wait(cx, Phase::kSilu);
     }
-    pf_linear(cx, kc, s, m.linears.at({l, LinearId::Down}), s.x.as<uint16_t>(), C, backend);
+    pf_linear(cx, kc, s, m.linears.at({l, LinearId::Down}), s.x.as<uint16_t>(), C, backend, q);
   }
   require(gdn == 48 && fa == 16, "the layer table did not give 48 GDN and 16 FA layers");
 }
