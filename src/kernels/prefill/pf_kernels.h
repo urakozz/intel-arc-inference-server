@@ -82,4 +82,7 @@ inline std::string pf_dequant_slab_variant(unsigned K, unsigned N, unsigned layo
          std::to_string(layout);
 }
 
+// Spec 5: the int8 prefill linears (pf_int8.cl).
+inline std::string pf_quant_had_variant(unsigned K) { return "pf_quant_had_K" + std::to_string(K); }
+
 }  // namespace kernels

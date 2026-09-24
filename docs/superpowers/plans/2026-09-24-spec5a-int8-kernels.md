@@ -43,7 +43,7 @@
 **Interfaces:**
 - Produces: kernel `pf_quant_had(const ushort* x, const float* sgn, char* xq, float* xs, uint ldx)`, WG 16*NBLK, grid = rows; variant `kernels::pf_quant_had_variant(K)` returning `"pf_quant_had_K" + K`; `runtime::prefill::int8_signs(uint32_t K) -> std::vector<float>` (±1) and `int8_sign_bits(uint32_t K) -> std::vector<uint32_t>` (bit k of word k/32 set means -1).
 
-- [ ] **Step 1: The sign generator**
+- [x] **Step 1: The sign generator**
 
 `src/runtime/prefill/int8_signs.h`:
 
@@ -76,7 +76,7 @@ inline std::vector<uint32_t> int8_sign_bits(uint32_t K) {
 }  // namespace runtime::prefill
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 `tests/prefill/pf_int8_test.cc`, the quantiser case. The CPU mirror is the one `tools/probe/probe_w8a8.cc` validated: canonical FWHT per 1024-block after the signs, `* (1/32)`, amax, `iv = 1/scale`, `sat_rte(v * iv)`.
 
@@ -175,12 +175,12 @@ int main() {
   add_test(NAME pf_int8_test COMMAND pf_int8_test)
 ```
 
-- [ ] **Step 3: Run it to see it fail**
+- [x] **Step 3: Run it to see it fail**
 
 Run: `tools/box.sh test pf_int8_test`
 Expected: FAIL at configure or build: `kernel_pf_quant_had_K5120` does not exist.
 
-- [ ] **Step 4: The kernel, the build rows and the variant name**
+- [x] **Step 4: The kernel, the build rows and the variant name**
 
 `src/kernels/prefill/pf_int8.cl` (the header and the quantiser section):
 
@@ -309,12 +309,12 @@ endforeach()
 inline std::string pf_quant_had_variant(unsigned K) { return "pf_quant_had_K" + std::to_string(K); }
 ```
 
-- [ ] **Step 5: Run the test to see it pass**
+- [x] **Step 5: Run the test to see it pass**
 
 Run: `tools/box.sh test pf_int8_test`
 Expected: `pf_quant_had K=5120 rows=64: 0 mismatches` (likewise 6144 and 17408), then `pf_int8_test: PASS`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/kernels/prefill/pf_int8.cl src/kernels/prefill/CMakeLists.txt src/kernels/prefill/pf_kernels.h \

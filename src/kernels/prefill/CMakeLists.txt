@@ -122,3 +122,12 @@ foreach(row "5120 16384 1" "6144 5120 0" "5120 34816 0" "17408 5120 0" "5120 143
   add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L} SOURCE ${PF_SLAB_CL}
                    DEFINES K=${K} N=${N} LAYOUT=${L})
 endforeach()
+
+# Spec 5 (plan 5a): the int8 prefill linears, one source, per-family defines.
+# The quantiser and requant run at the default 128 GRF (probe_w8a8 measured 256
+# halving their occupancy); the GEMM needs 256 for its 64 int32 accumulators.
+set(PF_INT8_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_int8.cl)
+foreach(K 5120 6144 17408)
+  math(EXPR NBLK "${K} / 1024")
+  add_ocloc_kernel(pf_quant_had_K${K} SOURCE ${PF_INT8_CL} DEFINES PF_QUANT_HAD=1 NBLK=${NBLK})
+endforeach()
