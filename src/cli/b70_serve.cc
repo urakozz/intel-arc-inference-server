@@ -56,7 +56,7 @@ void usage() {
   std::fprintf(stderr,
                "usage: b70-serve <snapshot-or-repo> [--host 0.0.0.0] [--port 8000]\n"
                "                 [--max-len 16384] [--device N] [--served-name NAME] [--queue 4]\n"
-               "                 [--pp-backend sycl-tla|l0|l0-int8]   Default: l0.\n");
+               "                 [--pp-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n");
 }
 
 uint32_t parse_u32(const char* what, const std::string& value) {
@@ -175,6 +175,9 @@ int run(int argc, char** argv) {
   }();
   runtime::Engine engine(context, std::move(model), max_len);
   if (have_pp_backend) engine.set_prefill_backend(pp_backend);
+  // Prefill setup at load, not in the first request: on l0-int8 this is the
+  // one-time rotated column-scale pass (spec 5 T2).
+  engine.prepare_prefill();
   TokAdapter tokenizer(snapshot_dir + "tokenizer.json");
   TemplateAdapter chat_template(snapshot_dir);
   EngineAdapter engine_adapter(engine, tokenizer.vocab_used());

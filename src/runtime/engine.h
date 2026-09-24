@@ -80,6 +80,13 @@ class Engine {
   // **Defined in b70_prefill_host, not in b70_runtime** -- see PrefillEngine
   // above. A binary that never calls this links exactly what it linked before.
   void prefill(const std::vector<uint32_t>& ids, uint32_t chunk = 0);
+  // Everything prefill() sets up before its first chunk, done now: the prefill
+  // scratch and Context, and on the l0-int8 backend every int4 linear's rotated
+  // column scales (spec 5 T2, one pf_colmax_rot pass per linear). Idempotent;
+  // prefill() calls it too. A CLI that serves prompts calls it right after
+  // load, so the one-time scale pass (about 140 ms) never lands inside a
+  // request. Decode-only engines never call it (ruling R7 stays true).
+  void prepare_prefill();
 
   // Non-null only after the first prefill(); for the tests and the CLI report.
   const PrefillScratch* prefill_scratch() const { return pf_.get(); }

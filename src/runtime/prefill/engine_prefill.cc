@@ -57,6 +57,24 @@ PrefillBackend Engine::prefill_backend() const {
 
 bool Engine::prefill_sycl_side_created() const { return pfx_ && pfx_->cx.has_sycl(); }
 
+void Engine::prepare_prefill() {
+  // Ruling R7: both allocations are lazy, so a decode-only Engine's device
+  // residency is byte-identical to what it was before the buffer split.
+  if (!pf_) pf_.reset(new PrefillScratch(ctx_, buffers_.max_len));
+  if (!pfx_)
+    pfx_ = std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)>(new PrefillEngine(ctx_),
+                                                                    &destroy_prefill);
+  if (prefill_backend() != PrefillBackend::L0Int8) return;
+  if (!pfx_->int8) pfx_->int8 = std::make_unique<prefill::Int8State>(ctx_);
+  // Every int4 linear's rotated column scales (spec 5 T2), outside any chunk and
+  // any recording: cached by weight, so after the first call this loop only
+  // looks them up, and no recorded list ever holds the host finish of
+  // pf_colmax_rot.
+  for (const auto& [key, w] : model_.linears)
+    if (key.second != model::LinearId::LmHead && w.kind == model::WeightKind::Int4)
+      pfx_->int8->scales(pfx_->cx, pfx_->kc, w);
+}
+
 void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (ids.empty()) throw std::runtime_error("runtime::Engine::prefill: no ids");
   if (chunk == 0) chunk = PrefillScratch::kC;
@@ -79,12 +97,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
         " -- the KV cache and the RoPE table stop there. Start a new session with reset(), or"
         " load the model and the engine with a larger max_len.");
 
-  // Ruling R7: both allocations are lazy, so a decode-only Engine's device
-  // residency is byte-identical to what it was before the buffer split.
-  if (!pf_) pf_.reset(new PrefillScratch(ctx_, buffers_.max_len));
-  if (!pfx_)
-    pfx_ = std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)>(new PrefillEngine(ctx_),
-                                                                    &destroy_prefill);
+  prepare_prefill();
 
   const PrefillBackend backend = prefill_backend();
   if (backend == PrefillBackend::SyclTla && !prefill::sycl_available())
@@ -95,17 +108,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (replay && !is_l0(backend))
     throw std::runtime_error("runtime::Engine::prefill: replay requires the L0 or l0-int8 backend");
 
-  prefill::Int8State* q = nullptr;
-  if (backend == PrefillBackend::L0Int8) {
-    if (!pfx_->int8) pfx_->int8 = std::make_unique<prefill::Int8State>(ctx_);
-    q = pfx_->int8.get();
-    // Every int4 linear's rotated column scales, now, outside any chunk and any
-    // recording: the first int8 prefill pays this once (cached by weight after it),
-    // and no recorded list ever holds the host finish of pf_colmax_rot.
-    for (const auto& [key, w] : model_.linears)
-      if (key.second != model::LinearId::LmHead && w.kind == model::WeightKind::Int4)
-        q->scales(pfx_->cx, pfx_->kc, w);
-  }
+  prefill::Int8State* q = backend == PrefillBackend::L0Int8 ? pfx_->int8.get() : nullptr;
 
   for (size_t off = 0; off < ids.size(); off += chunk) {
     const uint32_t C = uint32_t(std::min<size_t>(chunk, ids.size() - off));
