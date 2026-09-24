@@ -666,7 +666,7 @@ git commit -m "kernels: pf_colmax_rot, load-time rotated column scales (spec 5 T
 - Consumes: Tasks 1 to 3.
 - Produces: kernel `pf_gemm_i8(const ushort* xq16, const float* xs, const uint* w8, const float* ws, float* C, uint M, uint K, uint N, uint ldxq, uint ldb, uint ldc)`, WG 512, grid (M/256, N/128). With `SILU_EPI=1` the same signature, where `C` carries bf16 x and `ldc` carries `ldx`; x column (n/32) 16 + n % 16 for gate columns, which is gate‖up's 16-column interleave. Variants: `kernels::pf_gemm_i8_variant(bool silu)` returning `"pf_gemm_i8"` or `"pf_gemm_i8_SILU"`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append three cases:
 
@@ -692,12 +692,12 @@ float silu_f32(float x) { return x / (1.0f + std::exp(-x)); }
 
 Add `kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU` to the test's `add_dependencies`.
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `tools/box.sh test pf_int8_test`
 Expected: FAIL at build (`kernel_pf_gemm_i8` missing).
 
-- [ ] **Step 3: The kernel**
+- [x] **Step 3: The kernel**
 
 Append to `pf_int8.cl`. The mainloop is `pw8_gemm`'s (`tools/probe/probe_w8a8.cl`, `__kernel void pw8_gemm` through its `intel_work_group_barrier_wait`), copied without change except that the `sig` argument and its store are removed. Then the two epilogues:
 
@@ -782,12 +782,12 @@ add_ocloc_kernel(pf_gemm_i8_SILU SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1 SILU_
 inline std::string pf_gemm_i8_variant(bool silu) { return silu ? "pf_gemm_i8_SILU" : "pf_gemm_i8"; }
 ```
 
-- [ ] **Step 4: Run the tests to see them pass**
+- [x] **Step 4: Run the tests to see them pass**
 
 Run: `tools/box.sh test pf_int8_test`
 Expected: the gemm and silu cases `0 mismatches`, the cross case `rel L2 ... PASS, padding isolated`, and `pf_int8_test: PASS`. Also check the build log shows no `spilled` warning for `pf_gemm_i8` or `pf_gemm_i8_SILU`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/kernels/prefill/pf_int8.cl src/kernels/prefill/CMakeLists.txt src/kernels/prefill/pf_kernels.h \
