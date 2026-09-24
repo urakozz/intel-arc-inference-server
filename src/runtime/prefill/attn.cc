@@ -56,7 +56,7 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
   // unwritten cache rows cannot reach a number. `max_len` is a multiple of 8 on
   // every path that gets here (it is the KV allocation's own extent), and the
   // rounding therefore never leaves the allocation.
-  const bool l0 = backend == PrefillBackend::L0;
+  const bool l0 = is_l0(backend);
   if (!l0)
     require(gemm_bf16_supports_transb(),
             "this build has no ColumnMajor-B chain, so QK^T cannot read the KV cache in place");

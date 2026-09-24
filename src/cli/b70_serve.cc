@@ -56,7 +56,7 @@ void usage() {
   std::fprintf(stderr,
                "usage: b70-serve <snapshot-or-repo> [--host 0.0.0.0] [--port 8000]\n"
                "                 [--max-len 16384] [--device N] [--served-name NAME] [--queue 4]\n"
-               "                 [--pp-backend sycl-tla|l0]   Default: l0.\n");
+               "                 [--pp-backend sycl-tla|l0|l0-int8]   Default: l0.\n");
 }
 
 uint32_t parse_u32(const char* what, const std::string& value) {
@@ -162,7 +162,7 @@ int run(int argc, char** argv) {
   if (options.served_model.empty()) throw std::runtime_error("--served-name must not be empty");
   runtime::PrefillBackend pp_backend{};
   if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
-    throw std::runtime_error("--pp-backend expects sycl-tla or l0, got '" + pp_backend_arg + "'");
+    throw std::runtime_error("--pp-backend expects sycl-tla, l0 or l0-int8, got '" + pp_backend_arg + "'");
 
   const std::string snapshot_dir = loader::resolve_snapshot(path);
   const std::vector<uint32_t> eos = eos_ids(snapshot_dir);

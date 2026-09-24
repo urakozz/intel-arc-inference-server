@@ -761,9 +761,9 @@ b70_cli_reject(cli_reject_tg_with_ids ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 
 # "--pp-backend belongs to --pp and --prefill" (spec 2.1).
 b70_cli_reject(cli_reject_pp_backend_with_ids ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp-backend l0
   EXPECT "--pp-backend belongs to --pp and --prefill")
-# "--pp-backend expects sycl-tla or l0".
+# "--pp-backend expects sycl-tla, l0 or l0-int8".
 b70_cli_reject(cli_reject_pp_backend_value ${B70_NO_MODEL} --bench --pp 64 --pp-backend cuda
-  EXPECT "--pp-backend expects sycl-tla or l0")
+  EXPECT "--pp-backend expects sycl-tla, l0 or l0-int8")
 # "unknown option" - anything starting with '-' the parse loop does not know.
 b70_cli_reject(cli_reject_unknown_flag ${B70_NO_MODEL} --bench --frobnicate)
 # "a snapshot directory or HF repo id is required" - no positional argument.
