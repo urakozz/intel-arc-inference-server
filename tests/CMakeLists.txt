@@ -598,12 +598,12 @@ set_tests_properties(prefill_gate_l0_test PROPERTIES
 # token rule; A2/A3 are the comparison's.
 add_test(NAME prefill_gate_int8_test COMMAND prefill_gate_test
   ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
-  prose,code,cjk 0 l0-int8)
+  prose,code,cjk 0 l0-int8 1)
 set_tests_properties(prefill_gate_int8_test PROPERTIES
   LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 add_test(NAME prefill_gate_int8_c1000_test COMMAND prefill_gate_test
   ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
-  prose,code,cjk 1000 l0-int8)
+  prose,code,cjk 1000 l0-int8 1)
 set_tests_properties(prefill_gate_int8_c1000_test PROPERTIES
   LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 # Multi-chunk on the golden set: chunk 16 puts every prompt through 3 or 4 chunks (the
@@ -615,7 +615,7 @@ add_test(NAME prefill_gate_l0_c16_test COMMAND prefill_gate_test
   prose,code,cjk 16 l0)
 add_test(NAME prefill_gate_int8_c16_test COMMAND prefill_gate_test
   ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
-  prose,code,cjk 16 l0-int8)
+  prose,code,cjk 16 l0-int8 1)
 set_tests_properties(prefill_gate_l0_c16_test prefill_gate_int8_c16_test PROPERTIES
   LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 add_test(NAME prefill_consistency_l0_test COMMAND prefill_consistency_test
@@ -717,7 +717,7 @@ if(B70_PREFILL_ENABLED)
     # Spec 5 (plan 5b Task 3): the same 2820-id, two-chunk gate on l0-int8.
     add_test(NAME prefill_gate_long_int8_test COMMAND prefill_gate_test
       ${CMAKE_SOURCE_DIR}/oracle-out-long ${CMAKE_SOURCE_DIR}/tests/golden/prompts
-      ${B70_RTN_SNAPSHOT} long 1024 l0-int8)
+      ${B70_RTN_SNAPSHOT} long 1024 l0-int8 1)
     set_tests_properties(prefill_gate_long_int8_test PROPERTIES
       LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
   endif()
