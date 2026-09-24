@@ -18,7 +18,7 @@ void require(bool ok, const std::string& what) {
 
 // Spec 2.1's closing flip (2026-09-18): the L0 backend is the default in every build;
 // sycl-tla stays selectable as the reference (--pp-backend sycl-tla).
-PrefillBackend default_prefill_backend() { return PrefillBackend::L0; }
+PrefillBackend default_prefill_backend() { return PrefillBackend::L0Int8; }   // spec 5, 2026-09-24
 bool sycl_available() { return true; }
 
 // gemm.h's public entry points, now wrappers over the .so's SyclSide-taking one.

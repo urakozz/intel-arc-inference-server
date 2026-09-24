@@ -1,7 +1,8 @@
 # Benchmarks
 
 This file is the evidence behind the two numbers the README quotes: prefill
-1670.72 t/s against vLLM's 1610.04, and decode 29.45 t/s against vLLM's 31.01.
+2104.50 t/s (the int8 prefill linears of spec 5; 1670.72 on the bf16 walk)
+against vLLM's 1610.04, and decode 29.45 t/s against vLLM's 31.01.
 It records how each row was taken, what grade it earned, and the ladder of
 measurements that got there.
 
@@ -135,21 +136,43 @@ of three, same checkpoint.
 | 2026-09-19 | re-measured after an IGC 2.38.2 to 2.41.5 upgrade, all 139 kernel binaries recompiled | 1498.97 | 2732.5 | 0.43% | RECORD |
 | 2026-09-22 | causal QK^T: the attention kernel stops computing the masked half | 1505.16 | 2721.3 | 0.09% | RECORD |
 | 2026-09-22 | SiLU folded into the gate‖up GEMM epilogue | 1560.40 | 2625.0 | 0.58% | RECORD |
-| **2026-09-23** | **split-BF16 GDN scan becomes the default** | **1670.72** | **2451.6** | **0.10%** | **RECORD** |
+| 2026-09-23 | split-BF16 GDN scan becomes the default | 1670.72 | 2451.6 | 0.10% | RECORD |
+| **2026-09-24** | **int8 prefill linears (spec 5 h8) become the default, `l0-int8`** | **2104.50** | **1946.3** | **0.22%** | **RECORD, idle checked before the passes** |
 | | vLLM `0.29.1rc1.dev380`, matched | 1610.04 | 2544.043 | | measured, external |
 
-**1670.72 is 103.8% of the matched vLLM row, +60.68 t/s, 92.4 ms faster.** The
-arc from the last row before the kernel work started to here is 1498.97 to
-1670.72, **+11.5%**.
+**2104.50 is 130.7% of the matched vLLM row** (derived; vLLM was measured
+2026-09-20 and not re-run). The bf16 walk's record, 1670.72, was 103.8% of it.
+The arc from the last row before the kernel work started to here is 1498.97 to
+2104.50, **+40.4%**.
 
-### The int8 prefill linears (spec 5), opt-in and not the default
+### The int8 prefill linears (spec 5), the default since 2026-09-24
 
-`--pp-backend l0-int8` (spec 5, plan 5b) runs every int4 linear of the L0 walk
-on the rotated int8 ("h8") path: a Hadamard-rotating per-token int8 quantiser,
-then per 1024-column slab a rotated per-channel int8 requant and an i8 x i8
-DPAS GEMM. Attention, GDN, norms and the head are the L0 backend's. It is
-**not the default**: gate A3 failed on the golden set (spec 5 §7), so the
-default stays `l0`.
+`--pp-backend l0-int8` (spec 5, plans 5a/5b) runs every int4 linear of the L0
+walk on the rotated int8 ("h8") path: a Hadamard-rotating per-token int8
+quantiser, then per 1024-column slab a rotated per-channel int8 requant and an
+i8 x i8 DPAS GEMM. Attention, GDN, norms and the head are the L0 backend's.
+**It is the default** after the operator's 2026-09-24 ruling on gate A3's one
+bf16 near-tie (spec 5 §8); `--pp-backend l0` keeps the bf16 walk.
+
+**The row that counts (2026-09-24, after the scale pass moved to load):**
+`Engine::prepare_prefill()` builds the rotated column scales when the CLI
+loads the model, so the timed first prefill no longer carries them. Device 0,
+box idle at the start (no render-node holder, no container), four interleaved
+passes of `tools/bench_decode.sh --pp 4096 --pp-backend <b> --runs 3`:
+
+| pass | backend | runs, pp t/s | median | ms (median run) |
+|---|---|---|---:|---:|
+| 1 | l0 | 1646.74, 1643.52, 1641.66 | 1643.52 | 2492.2 |
+| 2 | l0-int8 | 2105.84, 2104.50, 2101.27 | **2104.50** | 1946.3 |
+| 3 | l0 | 1640.85, 1639.56, 1639.36 | 1639.56 | 2498.2 |
+| 4 | l0-int8 | 2102.64, 2103.03, 2100.61 | **2102.64** | 1948.0 |
+
+Paired ratios int8 / l0: **1.2805** and **1.2824** (derived). **B1 passes**
+(bar 1.20x). l0 itself ran 1.6 % under its 1670.72 record in this session,
+the first after a reboot; the paired ratio is the comparison that holds.
+
+The earlier measurement below is kept: it is what the one-time scale pass
+cost when it still ran inside the first request.
 
 2026-09-24, sha `04ce00c`, device 0, `tools/bench_decode.sh --pp 4096
 --pp-backend <b> --runs 3`, taken as four interleaved passes (l0, int8, l0,

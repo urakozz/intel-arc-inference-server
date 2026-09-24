@@ -17,7 +17,7 @@ namespace {
 }
 }  // namespace
 
-PrefillBackend default_prefill_backend() { return PrefillBackend::L0; }
+PrefillBackend default_prefill_backend() { return PrefillBackend::L0Int8; }   // spec 5, 2026-09-24
 bool sycl_available() { return false; }
 
 SyclSide* sycl_side_create(ze_context_handle_t, ze_device_handle_t) { absent("the SYCL side"); }
