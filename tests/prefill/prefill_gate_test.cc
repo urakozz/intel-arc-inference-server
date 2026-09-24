@@ -22,7 +22,8 @@
 // argv: [1] golden dir, [2] prompt dir, [3] snapshot,
 //       [4] comma-separated prompt names (default "prose,code,cjk"),
 //       [5] prefill chunk width (default 0 = PrefillScratch::kC),
-//       [6] prefill backend, sycl-tla or l0 (default: the build's).
+//       [6] prefill backend, sycl-tla, l0 or l0-int8 (default: the build's),
+//       [7] bf16 near-tie flips accepted per prompt (default 0; see main()).
 // Arguments 4 and 5 are what make the >= 2048-id multi-chunk gate of spec §6.2
 // a registration rather than a second binary (plan 6b Task 13 Step 6); argument
 // 6 is what makes spec 2.1 §2 bar 3 a second registration rather than a second
@@ -93,12 +94,27 @@ struct Verdict {
   std::string name;
   uint32_t n_prompt = 0, exact = 0;
   uint32_t n_determined = 0, det_exact = 0;
+  uint32_t near_tie = 0;   // determined rows accepted under argv[7]'s near-tie rule
   uint32_t n_tie = 0, tie_agree = 0, tie_member = 0;
   int first_bad = -1, first_diverge = -1;
   std::vector<uint32_t> tie_steps;
   double gdn_min_cos = 1.0, logit_min_cos = 1.0;
   uint32_t gdn_min_layer = 0;
 };
+
+// The oracle's masked runner-up and whether (top1 - top2) is within one bf16 ulp
+// of top1: the margin a single bf16 rounding of the logits can erase. Used only
+// by argv[7] (spec 5's accepted near-tie, 2026-09-24).
+bool bf16_near_tie(const float* row, uint32_t used, uint32_t top1, uint32_t* second) {
+  uint32_t s2 = top1 == 0 ? 1u : 0u;
+  for (uint32_t i = 0; i < used; ++i)
+    if (i != top1 && row[i] > row[s2]) s2 = i;
+  *second = s2;
+  int e = 0;
+  std::frexp(std::fabs(row[top1]), &e);             // |v| = m 2^e, m in [0.5, 1)
+  const double ulp = std::ldexp(1.0, e - 8);         // bf16: 8 significand bits
+  return double(row[top1]) - double(row[s2]) <= ulp;
+}
 
 }  // namespace
 
@@ -111,6 +127,17 @@ int main(int argc, char** argv) {
   // argv[6]: the prefill backend (spec 2.1) -- sycl-tla or l0; default = the build's.
   runtime::PrefillBackend backend = runtime::prefill::default_prefill_backend();
   if (argc > 6) CHECK(runtime::parse_prefill_backend(argv[6], backend));
+  // argv[7]: near-tie flips allowed per prompt (default 0: the gate as it always
+  // was). A DETERMINED row the engine gets wrong is accepted instead of failing
+  // only if the engine picked the oracle's runner-up AND the oracle's own top-2
+  // margin is at most one bf16 ulp of its top logit. Operator ruling 2026-09-24
+  // (spec 5 amendment): the l0-int8 path's one such flip, cjk row 9, margin
+  // 0.0625 at 13.94, is accepted. Absent argv[7], the allowance is 1 on l0-int8
+  // (the operator's ruling travels with the backend, so a registration that runs
+  // the build's default gets it) and 0 on every other backend, l0 included.
+  const uint32_t near_tie_allowed =
+      argc > 7 ? uint32_t(std::atoi(argv[7]))
+               : (backend == runtime::PrefillBackend::L0Int8 ? 1u : 0u);
   CHECK(!prompts.empty());
 
   for (const std::string& p : prompts) {
@@ -247,10 +274,19 @@ int main(int argc, char** argv) {
 
       const bool ok = id == uint32_t(gtok[p]);
       if (ok) ++v.exact;
+      bool accepted_near_tie = false;
       if (gd.determined()) {
         ++v.n_determined;
-        if (ok) ++v.det_exact;
-        else if (v.first_bad < 0) v.first_bad = int(p);
+        uint32_t second = 0;
+        if (ok) {
+          ++v.det_exact;
+        } else if (v.near_tie < near_tie_allowed &&
+                   bf16_near_tie(grow, Qwen35::kVocabUsed, gam, &second) && id == second) {
+          ++v.near_tie;
+          accepted_near_tie = true;
+        } else if (v.first_bad < 0) {
+          v.first_bad = int(p);
+        }
       } else {
         ++v.n_tie;
         v.tie_steps.push_back(p);
@@ -260,9 +296,12 @@ int main(int argc, char** argv) {
       }
       if (!ok && v.first_diverge < 0) v.first_diverge = int(p);
 
-      const char* mark = ok ? ""
-                            : (gd.determined() ? "  <== MISMATCH (determined - GATE)"
-                                               : "  <== differs, but the golden row is a TIE");
+      const char* mark =
+          ok ? ""
+             : accepted_near_tie
+                   ? "  <== near-tie ACCEPTED (engine = golden runner-up, margin <= 1 bf16 ulp)"
+                   : (gd.determined() ? "  <== MISMATCH (determined - GATE)"
+                                      : "  <== differs, but the golden row is a TIE");
       std::printf("            %4u  %6u  %6u  %-4s  %.9f   %6u %6u %6u %s%s%s\n", p, id,
                   uint32_t(gtok[p]), gd.determined() ? "yes" : "TIE", lm.cos, ea, gam, gaf, mark,
                   gam != gaf ? "  [golden argmax is a padding id]" : "",
@@ -299,6 +338,9 @@ int main(int argc, char** argv) {
                 "   (%u determined + %u undetermined = %u)%s\n",
                 pname.c_str(), v.det_exact, v.tie_agree, v.tie_member, v.n_determined, v.n_tie,
                 kGen, v.first_bad < 0 ? "" : "   ** GATE FAILURE **");
+    if (v.near_tie)
+      std::printf("  %s: %u determined row(s) accepted as bf16 near-ties (argv[7] allows %u)\n",
+                  pname.c_str(), v.near_tie, near_tie_allowed);
     std::printf("  engine:");
     for (uint32_t id : etok) std::printf(" %u", id);
     std::printf("\n  golden:");
@@ -324,7 +366,7 @@ int main(int argc, char** argv) {
     tot_tie += v.n_tie;
     tot_agree += v.tie_agree;
     tot_member += v.tie_member;
-    if (v.det_exact != v.n_determined) {
+    if (v.det_exact + v.near_tie != v.n_determined) {
       std::fprintf(stderr,
                    "GATE FAILED: %s got %u of %u DETERMINED rows exact (first bad row %d) - a row"
                    " whose golden argmax is unique is not a judgement call\n",

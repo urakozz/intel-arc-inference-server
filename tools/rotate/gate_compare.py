@@ -50,6 +50,7 @@ VERDICT = re.compile(
     r"^\s*(\S+): (\d+) determined-exact / (\d+) tie-agreements / (\d+) tie-set-members"
     r"\s+\((\d+) determined \+ (\d+) undetermined = (\d+)\)(.*)$")
 BACKEND = re.compile(r"^prefill backend: (\S+)$")
+NEAR = re.compile(r"^\s*(\S+): (\d+) determined row\(s\) accepted as bf16 near-ties")
 
 
 def die(path, msg):
@@ -85,6 +86,15 @@ def parse(path):
             order.append(name)
             in_table = False
             continue
+        m = NEAR.match(line)
+        if m and m.group(1) in prompts and prompts[m.group(1)].get("verdict"):
+            # prefill_gate_test argv[7]: determined rows accepted as bf16 near-ties
+            # (operator ruling 2026-09-24). They count toward A3 as exact.
+            v = prompts[m.group(1)]["verdict"]
+            v["near"] = int(m.group(2))
+            v["pass"] = (v["det_exact"] + v["near"] == v["n_det"] and v["tie_ok"] == v["n_tie"]
+                         and not v["failure_text"])
+            continue
         if cur is None:
             continue
         m = TABLE.match(line)
@@ -111,7 +121,8 @@ def parse(path):
                 die(path, f"line {n}: verdict counts do not add up to {cur['gen']}")
             cur["verdict"] = {
                 "det_exact": det_exact, "n_det": n_det, "n_tie": n_tie,
-                "tie_ok": tie_agree + tie_member,
+                "tie_ok": tie_agree + tie_member, "near": 0,
+                "failure_text": "GATE FAILURE" in m.group(8),
                 "pass": det_exact == n_det and tie_agree + tie_member == n_tie
                         and "GATE FAILURE" not in m.group(8),
             }
@@ -158,10 +169,11 @@ def main(argv):
         ma, mb = sum(a["cos"]) / len(a["cos"]), sum(b["cos"]) / len(b["cos"])
         na, nb = min(a["cos"]), min(b["cos"])
         a2 = mb >= ma - A2_MEAN_TOL and nb >= na - A2_MIN_TOL
-        a3 = (not va["pass"]) or (vb["pass"] and vb["det_exact"] == va["det_exact"])
+        a3 = (not va["pass"]) or (vb["pass"] and vb["det_exact"] + vb["near"] == va["det_exact"])
 
         def gate(v):
-            return (f"{'PASS' if v['pass'] else 'FAIL'} {v['det_exact']:2d}/{v['n_det']:2d}"
+            near = f"+{v['near']}nt" if v["near"] else ""
+            return (f"{'PASS' if v['pass'] else 'FAIL'} {v['det_exact']:2d}{near}/{v['n_det']:2d}"
                     f" t{v['tie_ok']}/{v['n_tie']}")
         print(f"  {name:7s} {a['ids']:5d} {a['chunk']:5d} {len(a['cos']):3d}"
               f"  {ma:.9f}  {na:.9f}  {mb:.9f}  {nb:.9f}  {gate(va):15s}  {gate(vb):15s}"
