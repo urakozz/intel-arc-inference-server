@@ -126,6 +126,46 @@ void requant_case(pf_harness::Dev& d, uint32_t K, uint32_t N, uint32_t layout) {
   std::printf("pf_requant_rot K=%u N=%u L%u: %zu mismatches\n", K, N, layout, bad);
   CHECK(bad == 0);
 }
+
+void colmax_case(pf_harness::Dev& d, uint32_t K, uint32_t N, uint32_t layout) {
+  common::Int4Gptq w = common::Int4Gptq::random(K, N, 31 + K + N);
+  for (uint32_t r = 0; r < K / 8; ++r) {
+    w.qweight[size_t(r) * N + 5] = 0x88888888u;   // q - 8 == 0 everywhere: an all-zero column
+    w.qweight[size_t(r) * N + 7] = 0x00000000u;   // q - 8 == -8 everywhere: negative-heavy
+  }
+  const std::vector<float> sgn = runtime::prefill::int8_signs(K);
+  const std::vector<uint32_t> words = layout == 0 ? w.qweight : w.tiled();
+  l0::Mem dw = pf_harness::upload(d.ctx, d.imm, words);
+  l0::Mem dsc = pf_harness::upload(d.ctx, d.imm, w.scales);
+  l0::Mem dbits = pf_harness::upload(d.ctx, d.imm, runtime::prefill::int8_sign_bits(K));
+  l0::Mem dmax = pf_harness::upload(d.ctx, d.imm, std::vector<uint32_t>(N, 0u));
+  l0::Module mod(d.ctx, kernels::path(kernels::pf_requant_rot_variant(layout)));
+  l0::Kernel k = mod.kernel("pf_colmax_rot");
+  k.group_size(256);
+  k.arg_ptr(0, dw.ptr());
+  k.arg_ptr(1, layout == 0 ? dsc.ptr() : nullptr);
+  k.arg_ptr(2, dbits.ptr());
+  k.arg_ptr(3, dmax.ptr());
+  k.arg(4, 0u);
+  k.arg(5, N);
+  k.arg(6, K);
+  d.run(k, N / 16, K / 1024);
+  std::vector<uint32_t> got(N);
+  pf_harness::download(d.imm, got, dmax);
+  size_t bad = 0;
+  for (uint32_t n = 0; n < N; ++n) {
+    const std::vector<float> col = rotated_column(w, n, sgn);
+    float amax = 0.0f;
+    for (float v : col) amax = std::fmax(amax, std::fabs(v));
+    uint32_t want;
+    std::memcpy(&want, &amax, 4);
+    bad += (want != got[n]);
+  }
+  CHECK(got[5] == 0u);
+  std::printf("pf_colmax_rot K=%u N=%u L%u: %zu mismatches (zero column max %u)\n", K, N, layout, bad,
+              got[5]);
+  CHECK(bad == 0);
+}
 }  // namespace
 
 int main() {
@@ -135,6 +175,9 @@ int main() {
   requant_case(d, 5120, 1024, 1);
   requant_case(d, 6144, 1024, 0);
   requant_case(d, 17408, 1024, 0);
+  colmax_case(d, 5120, 1024, 0);
+  colmax_case(d, 5120, 1024, 1);
+  colmax_case(d, 17408, 1024, 0);
   std::printf("pf_int8_test: PASS\n");
   return 0;
 }

@@ -209,4 +209,27 @@ __kernel void pf_requant_rot(__global const uint* restrict qw, __global const ha
     out[(size_t)(blk * 256u + t / 16u) * ldo + nc + (t % 16u)] = tout[(t % 16u) * 257u + t / 16u];
   }
 }
+
+// max |(W R_K)[k, n]| over one block, into colmax[n] as float bits (every value
+// is >= 0, so unsigned order is float order). The caller zero-fills colmax and
+// runs one launch over all blocks; ws and inv are derived on the host.
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void pf_colmax_rot(__global const uint* restrict qw, __global const half* restrict sc,
+                            __global const uint* restrict sbits, __global uint* restrict colmax,
+                            uint n0, uint Nfull, uint K) {
+  const uint c = get_sub_group_id();
+  const uint l = get_sub_group_local_id();
+  const uint blk = get_group_id(1);
+  const uint nbase = n0 + get_group_id(0) * 16u;
+  __local uint tin[16 * 129];
+  __local float tsc[16 * 17];
+  float v[64];
+  pf_rot_load(qw, sc, sbits, nbase, blk, Nfull, K, tin, tsc, v);
+  float amax = 0.0f;
+#pragma unroll
+  for (uint j = 0; j < 64u; ++j) amax = fmax(amax, fabs(v[j] * (1.0f / 32.0f)));
+  amax = sub_group_reduce_max(amax);
+  if (l == 0u) atomic_max((volatile __global uint*)(colmax + nbase + c), as_uint(amax));
+}
 #endif  // PF_REQUANT_ROT
