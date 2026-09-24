@@ -56,7 +56,7 @@ inline constexpr uint32_t kOutN = 6144;    // 24 x 256, the o_proj input row
 // 256-padded row count, never by C -- a batched pf_gemm launch computes every head's padded
 // rows at once, and a C-row stride would let head l's padding overwrite head l+1's rows.
 inline uint32_t attn_rows(uint32_t C, PrefillBackend b) {
-  return b == PrefillBackend::L0 ? pad256(C) : C;
+  return is_l0(b) ? pad256(C) : C;
 }
 
 // Spec S3 (`docs/specs/2026-09-22-prefill-parity-program-design.md` §3): on the
@@ -65,7 +65,7 @@ inline uint32_t attn_rows(uint32_t C, PrefillBackend b) {
 // padded depth. P·V is NOT blocked -- attn.cc records the occupancy measurement that
 // rejected it. sycl-tla is untouched and keeps its one GEMM per group, hence 1 here.
 inline uint32_t attn_row_blocks(uint32_t C, PrefillBackend b) {
-  return b == PrefillBackend::L0 ? attn_rows(C, b) / kPfGemmTile : 1;
+  return is_l0(b) ? attn_rows(C, b) / kPfGemmTile : 1;
 }
 
 // (1) q/k RMSNorm, partial RoPE, and the chunk's K/V written into the cache at
@@ -109,7 +109,7 @@ inline constexpr size_t kAttnGateLaunches = 1;
 // launch count a function of C. At C <= 256 there is one block and the count is what it was
 // before S3.
 inline size_t attn_chunk_launches(uint32_t C, PrefillBackend b) {
-  return b == PrefillBackend::L0
+  return is_l0(b)
              ? size_t(attn::kKvHeads) * (2 + size_t(attn_row_blocks(C, b)))
              : kAttnChunkLaunches;
 }

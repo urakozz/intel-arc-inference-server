@@ -128,7 +128,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   cx.launch(kc(kernels::pf_embed_gather_variant(), "pf_embed_gather"), 1, C, 1,
             {PtrArg(s.ids.ptr()), PtrArg(m.embed.ptr()), PtrArg(s.resid.ptr()), arg_val(C)});
 
-  const bool l0 = backend == PrefillBackend::L0;
+  const bool l0 = is_l0(backend);
   uint32_t gdn = 0, fa = 0;
   for (const model::LayerDesc& L : Qwen35::layers()) {
     const uint32_t l = L.index;
@@ -295,9 +295,14 @@ size_t l0_fa_layer_launches(uint32_t C) {
 }
 }  // namespace
 size_t step_chunk_launches(PrefillBackend b, uint32_t C) {
-  return b == PrefillBackend::SyclTla
-             ? 1 + 48 * kGdnLayerLaunches + 16 * kFaLayerLaunches
-             : 1 + 48 * l0_gdn_layer_launches() + 16 * l0_fa_layer_launches(C);
+  if (b == PrefillBackend::SyclTla) return 1 + 48 * kGdnLayerLaunches + 16 * kFaLayerLaunches;
+  const size_t base = 1 + 48 * l0_gdn_layer_launches() + 16 * l0_fa_layer_launches(C);
+  if (b != PrefillBackend::L0Int8) return base;
+  // spec 5: +1 launch (the activation quantiser, pf_quant_had) per int4 linear, 4 per
+  // layer, the slab walk being the same 2 x N/1024 launches. The int8 gate||up is ALWAYS
+  // the fused SiLU form, while `base` follows silu_fused(): an unfused session's base
+  // counts one pf_silu_mul per layer the int8 walk never issues.
+  return base + 64 * 4 - (silu_fused() ? 0 : 64);
 }
 size_t step_chunk_gemms(PrefillBackend b) {
   return b == PrefillBackend::SyclTla ? 48 * kGdnLayerGemms + 16 * kFaLayerGemms : 0;

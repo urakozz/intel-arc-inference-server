@@ -129,6 +129,23 @@ int main(int argc, char** argv) {
            size_t(9073));
   CHECK_EQ(runtime::prefill::step_chunk_gemms(runtime::PrefillBackend::L0), size_t(0));
   CHECK_EQ(runtime::prefill::step_chunk_waits(runtime::PrefillBackend::L0), size_t(0));
+  // Spec 5 (plan 5b Task 1): l0-int8 is L0 but for the int4 linears, and each of those
+  // adds exactly one launch (the activation quantiser): 4 per layer, +256 per chunk.
+  {
+    runtime::PrefillBackend b{};
+    CHECK(runtime::parse_prefill_backend("l0-int8", b) && b == runtime::PrefillBackend::L0Int8);
+    CHECK(std::string(runtime::prefill_backend_name(runtime::PrefillBackend::L0Int8)) ==
+          "l0-int8");
+    CHECK(runtime::is_l0(runtime::PrefillBackend::L0Int8) &&
+          runtime::is_l0(runtime::PrefillBackend::L0));
+    CHECK(!runtime::is_l0(runtime::PrefillBackend::SyclTla));
+    for (uint32_t C : {kShort, 1000u, 2048u})
+      CHECK_EQ(runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0Int8, C),
+               runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0, C) + 256);
+    std::printf("l0-int8 backend: %zu launches at C = %u and %zu at C = 2048 (L0 + 256)\n",
+                runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0Int8, kShort),
+                kShort, runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0Int8, 2048));
+  }
   std::printf("L0 backend: %zu launches at C = %u and %zu at C = 2048 (8 QK^T row blocks),"
               " %zu SYCL GEMMs, %zu host waits\n",
               runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0, kShort), kShort,

@@ -86,8 +86,8 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
                              " component, and this build has none; set_prefill_backend(L0)");
   const char* replay_env = std::getenv("B70_PREFILL_REPLAY");
   const bool replay = pf_replay_.value_or(replay_env && std::strcmp(replay_env, "1") == 0);
-  if (replay && backend != PrefillBackend::L0)
-    throw std::runtime_error("runtime::Engine::prefill: replay requires the L0 backend");
+  if (replay && !is_l0(backend))
+    throw std::runtime_error("runtime::Engine::prefill: replay requires the L0 or l0-int8 backend");
 
   for (size_t off = 0; off < ids.size(); off += chunk) {
     const uint32_t C = uint32_t(std::min<size_t>(chunk, ids.size() - off));

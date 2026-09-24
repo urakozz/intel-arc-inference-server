@@ -84,10 +84,10 @@ void usage() {
       stderr,
       "usage:\n"
        "  b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--pp-chunk C]\n"
-       "                                        [--pp-backend sycl-tla|l0]]\n"
+       "                                        [--pp-backend sycl-tla|l0|l0-int8]]\n"
        "                                        [--device N] [--max-len 16384]\n"
       "  b70-decode <snapshot-or-repo> --bench [--depth 4096 | --pp N [--pp-chunk C]\n"
-      "                                        [--pp-backend sycl-tla|l0]]\n"
+      "                                        [--pp-backend sycl-tla|l0|l0-int8]]\n"
       "                                        [--tg 256] [--device N]\n"
       "  b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--repeats 1]\n"
       "                                          [--device N]\n"
@@ -111,8 +111,9 @@ void usage() {
        "  --pp-chunk C   --pp or --prefill: positions per prefill chunk (default\n"
        "                 PrefillScratch::kC = 2048, ruling A13). Spec 2 §6.2's multi-chunk\n"
        "                 gate runs at 1024.\n"
-       "  --pp-backend B  --pp or --prefill: the GEMM backend, sycl-tla (spec 2) or l0 (spec 2.1,\n"
-       "                 every GEMM on the Level Zero list). Default: l0.\n"
+       "  --pp-backend B  --pp or --prefill: the GEMM backend, sycl-tla (spec 2), l0 (spec 2.1,\n"
+       "                 every GEMM on the Level Zero list) or l0-int8 (spec 5, l0 with every\n"
+       "                 int4 linear on the rotated int8 path). Default: l0.\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -705,7 +706,7 @@ int run(int argc, char** argv) {
                              " GEMM backend");
   runtime::PrefillBackend pp_backend{};
   if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
-    throw std::runtime_error("--pp-backend expects sycl-tla or l0, got '" + pp_backend_arg + "'");
+    throw std::runtime_error("--pp-backend expects sycl-tla, l0 or l0-int8, got '" + pp_backend_arg + "'");
   if (!synthetic && !have_n) {
     usage();
     throw std::runtime_error("--ids needs --n");
