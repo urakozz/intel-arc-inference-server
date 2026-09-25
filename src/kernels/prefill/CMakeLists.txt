@@ -138,3 +138,7 @@ add_ocloc_kernel(pf_gemm_i8 SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
 add_ocloc_kernel(pf_gemm_i8_SILU SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1 SILU_EPI=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
+
+# Spec 6 (plan 6b): the fused flash attention, plan 6a's winner pfa_KT64_R16_H6_Q0.
+add_ocloc_kernel(pf_flash_attn SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                 DEFINES KT=64 RPW=16 HPW=6 QREG=0 OPTIONS -cl-intel-256-GRF-per-thread)
