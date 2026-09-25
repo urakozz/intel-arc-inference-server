@@ -40,3 +40,24 @@ Reading: the attention phase of pp4096 is 131.7 ms against F1's 80 ms bar
 (vLLM: 63.1 ms). The softmax alone (57.2 ms) is the largest of the three. A
 2048-row chunk costs 142.6 ms more at depth 8k-14k than at 4k-8k (derived,
 1219.7 - 1077.1); attention is the only depth-dependent term in a chunk.
+
+## 2. The composed path against fp64
+
+`tools/probe/probe_flash_attn <pos> <C> --arms none`: random Q (bf16 N(0,1) x
+qscale) and a random K/V cache (bf16 N(0,1)) in the production layouts, the
+production `attn_chunk` on the L0 backend, and an fp64 CPU reference on 25
+sampled rows ({0, 1, 7, 8, 63, 64, C/2, C-2, C-1} plus 16 from
+`mt19937(pos + C)`) x 24 heads. Per-(row, head) cosine, worst of all pairs.
+
+| pos | C | qscale | composed worst cos | at (h, m) | max abs err |
+|---:|---:|---:|---:|---|---:|
+| 16384 | 2048 | 1 | 0.999997976 | (17, 695) | 9.16e-05 |
+| 777 | 300 | 1 | 0.999997720 | (21, 299) | 6.63e-04 |
+| 0 | 2048 | 30 | 0.999996452 | (8, 129) | 8.31e-03 |
+| 0 | 64 | 1 | 0.999996685 | (18, 63) | 5.92e-03 |
+
+All measured. **The composed path clears 0.99999 everywhere, so the flash bar
+stays at cosine >= 0.99999** (no calibration change). Its own margin is small,
+worst 0.9999965: the single bf16 rounding of the normalised P is the dominant
+error, and a flash kernel that rounds the unnormalised P should sit in the same
+band.

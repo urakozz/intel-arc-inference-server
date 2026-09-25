@@ -452,3 +452,24 @@ if(B70_PREFILL_ENABLED)
                PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_w8a8 kernel_pw8a8 kernel_pw8a8_g128 ${W8A8_KERNELS} ${W8A8_PF_KERNELS})
 endif()
+
+# --- probe_flash_attn: spec 6 P1, the flash-attention tile probe (2026-09-25) ---
+# Plan: docs/superpowers/plans/2026-09-25-spec6a-flash-attn-baseline-and-probe.md.
+# Record: docs/probe-flash-attn-2026-09-25.md.
+#
+# The control is the production composed path (`runtime::prefill::attn_chunk`, L0
+# backend) on the same inputs; every arm is checked against an fp64 CPU reference
+# before it is timed. Probe-only: no runtime path binds `pfa`.
+if(B70_PREFILL_ENABLED)
+  add_executable(probe_flash_attn probe_flash_attn.cc)
+  target_include_directories(probe_flash_attn PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_flash_attn PRIVATE b70_prefill_host b70_runtime b70_loader
+                        b70_l0 b70_model pthread)
+  b70_link_prefill(probe_flash_attn)
+  b70_target_kernel_dir(probe_flash_attn)
+  get_property(PFA_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
+               PROPERTY BUILDSYSTEM_TARGETS)
+  get_property(PFA_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
+               PROPERTY BUILDSYSTEM_TARGETS)
+  add_dependencies(probe_flash_attn ${PFA_KERNELS} ${PFA_PF_KERNELS})
+endif()
