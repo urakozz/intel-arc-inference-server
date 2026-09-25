@@ -56,6 +56,7 @@ void usage() {
   std::fprintf(stderr,
                "usage: b70-serve <snapshot-or-repo> [--host 0.0.0.0] [--port 8000]\n"
                "                 [--max-len 16384] [--device N] [--served-name NAME] [--queue 4]\n"
+               "                 --max-len: 16384 or 131072 (the compiled decode attention)\n"
                "                 [--pp-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n");
 }
 
@@ -178,6 +179,7 @@ int run(int argc, char** argv) {
   // Prefill setup at load, not in the first request: on l0-int8 this is the
   // one-time rotated column-scale pass (spec 5 T2).
   engine.prepare_prefill();
+  std::fprintf(stderr, "%s\n", engine.memory_line().c_str());   // spec 6
   TokAdapter tokenizer(snapshot_dir + "tokenizer.json");
   TemplateAdapter chat_template(snapshot_dir);
   EngineAdapter engine_adapter(engine, tokenizer.vocab_used());

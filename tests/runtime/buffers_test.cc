@@ -191,6 +191,22 @@ int main() {
     check_prefill_scratch(ctx);
   }
 
+  // Spec 6 (plan 6b Task 3): 128k context. The KV cache is bf16
+  // 16 FA layers x 131072 x 4 kv heads x 256 x 2 B, x 2 for K and V = 8,589,934,592 B, and
+  // attn_part is 24 x (131072 / 64 = 2048 blocks) x 8 x 258 x 4 B = 405,798,912 B.
+  {
+    runtime::PersistentBuffers p(ctx, 131072);
+    runtime::DecodeScratch s(ctx, 131072);
+    std::printf("max_len 131072: kv %zu B, attn_part %zu B, persistent %zu B, scratch %zu B\n",
+                p.kv_k.size() + p.kv_v.size(), s.attn_part.size(), p.bytes(), s.bytes());
+    CHECK_EQ(p.kv_k.size() + p.kv_v.size(), size_t{16} * 131072 * 4 * 256 * 2 * 2);
+    CHECK_EQ(p.kv_k.size() + p.kv_v.size(), size_t{8589934592});
+    CHECK_EQ(s.attn_part.size(), size_t{24} * 2048 * 8 * 258 * 4);
+    CHECK_EQ(s.attn_part.size(), size_t{405798912});
+    runtime::DecodeBuffers view(p, s);
+    CHECK_EQ(view.max_len, 131072u);
+  }
+
   runtime::DecodeBuffers b(ctx, 16384);
   std::printf("persistent %zu B, scratch %zu B\n", b.persistent_bytes(), b.scratch_bytes());
 
