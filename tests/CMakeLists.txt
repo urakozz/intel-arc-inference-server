@@ -588,6 +588,21 @@ foreach(t prefill_gate prefill_consistency prefill_determinism prefill_replay pr
   endif()
   add_dependencies(${t}_test ${B70_PREFILL_KERNELS})
 endforeach()
+# Spec 6 K3a (plan 6b Task 4): flash against composed end to end at 32k context, on the
+# committed 32768-id prompt (tools/probe/mk_long_ids.py). Its `--128k <ids>` mode (K3b,
+# determinism and replay at max_len 131072) is run by hand, not registered.
+add_executable(flash_long_test prefill/flash_long_test.cc)
+target_include_directories(flash_long_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+target_link_libraries(flash_long_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+if(B70_PREFILL_ENABLED)
+  b70_link_prefill(flash_long_test)
+endif()
+add_dependencies(flash_long_test ${B70_PREFILL_KERNELS})
+add_test(NAME flash_long_test COMMAND flash_long_test ${B70_TEST_SNAPSHOT}
+  ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids)
+set_tests_properties(flash_long_test PROPERTIES LABELS "checkpoint;prefill"
+  SKIP_RETURN_CODE 77 TIMEOUT 3600)
 add_test(NAME prefill_replay_test COMMAND prefill_replay_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(prefill_replay_test PROPERTIES LABELS "checkpoint;prefill"
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
