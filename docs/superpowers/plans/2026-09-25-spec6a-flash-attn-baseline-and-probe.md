@@ -34,7 +34,7 @@
 - Create: `tools/probe/attn_baseline.sh`
 - Create: `docs/probe-flash-attn-2026-09-25.md` (the record, first section)
 
-- [ ] **Step 1: The script**
+- [x] **Step 1: The script**
 
 `tools/probe/attn_baseline.sh`, run from the Mac. It uses `tools/bench_decode.sh` as BENCHMARKS.md does, with `B70_PREFILL_PROFILE=1` for the phase rows, which is diagnostic only: that run adds waits, so its total is not a bench row.
 
@@ -60,7 +60,7 @@ done
 
 If `bench_decode.sh` names its flags differently (read its usage block first), adjust the script to the real ones and note it in the record. The profiled phase names must match `src/runtime/prefill/profile.cc`.
 
-- [ ] **Step 2: Run it on an idle box and record**
+- [x] **Step 2: Run it on an idle box and record**
 
 Run: `tools/probe/attn_baseline.sh | tee /tmp/p0.txt` (after the DRM-holder check: no process may hold `/dev/dri/renderD*`).
 
@@ -72,7 +72,7 @@ In `docs/probe-flash-attn-2026-09-25.md`, write section "1. P0, the baselines" w
 
 Label every number measured or derived, as the repo's records do.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tools/probe/attn_baseline.sh docs/probe-flash-attn-2026-09-25.md
@@ -90,7 +90,7 @@ git commit -m "probe: attention baselines before flash attention (spec 6 P0)"
 **Interfaces:**
 - Produces: `probe_flash_attn <pos> <C> [--arms all|<name>] [--qscale S]`. It builds random Q (bf16, N(0, 1) times qscale) and a K/V cache of depth `pos + C` (bf16 N(0, 1)) in the production layouts. It runs the composed path through `runtime::prefill::attn_chunk` (backend L0) into a `PrefillScratch` with `max_len = pad256(pos + C)` rounded up to a multiple of 256. It computes the fp64 reference on sampled (row, head) pairs, prints each path's worst cosine and max abs error, and, from Task 4, the paired timings.
 
-- [ ] **Step 1: The reference and the composed control, failing on nothing yet**
+- [x] **Step 1: The reference and the composed control, failing on nothing yet**
 
 In `probe_flash_attn.cc`:
 - `ref_row(head h, row m)`: fp64. s_n = dot(q[m][h], k[n][h/6]) / 16 for n <= pos + m; softmax; o = sum_n p_n v[n][h/6]; returns 256 doubles.
@@ -98,12 +98,12 @@ In `probe_flash_attn.cc`:
 - The composed run: fill `pf_q` rows 0..C-1 (and rows C..pad256(C)-1 with 0) and the cache, call `attn_chunk(cx, kc, s, pos, C, pf_q, kv_k, kv_v, PrefillBackend::L0)`, `cx.wait()`, download `pf_o`.
 - Cosine and max abs error per sampled pair against the reference, reported as `composed: worst cos X at (h, m), max abs Y`.
 
-- [ ] **Step 2: Run the control**
+- [x] **Step 2: Run the control**
 
 Run: `tools/box.sh run 'ZE_AFFINITY_MASK=0 ./build/tools/probe/probe_flash_attn 16384 2048'` and `... 777 300` and `... 0 2048 --qscale 30`.
 Expected: the composed path prints a worst cosine. Record the three values in the probe doc, section "2. The composed path against fp64". **They calibrate the bar.** If the composed path itself is below 0.99999 anywhere, write down its value, and the flash bar becomes "no worse than the composed path's worst". Record this change in the doc before Task 3.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tools/probe/probe_flash_attn.cc tools/probe/CMakeLists.txt docs/probe-flash-attn-2026-09-25.md
@@ -121,13 +121,13 @@ git commit -m "probe: flash-attention harness, fp64 reference, composed path as 
 **Interfaces:**
 - Produces: kernel `pfa(const ushort* Q, const ushort* Kc, const ushort* Vc, float* O, uint pos, uint C, uint rows)`, grid (ceil(C / RPW), 4, 6 / HPW), WG `16 * HPW * RPW / 8`. Defines: `KT` (KV positions per tile, 32 or 64), `RPW` (query rows per work-group per head, a multiple of 8), `HPW` (q-heads per work-group: 6, 3 or 1), `QREG` (1 = Q kept in registers for the whole loop, 0 = re-read per KV tile). Variant name `pfa_KT<KT>_R<RPW>_H<HPW>_Q<QREG>`.
 
-- [ ] **Step 1: The failing case**
+- [x] **Step 1: The failing case**
 
 In the harness, add the `pfa` run for the first arm `pfa_KT32_R16_H6_Q1`: same inputs, output into a fresh `[24][pad256(C)][256]` fp32 buffer, the same sampled comparison, printed as `pfa_KT32_R16_H6_Q1: worst cos ...`, and a finiteness scan of rows [C, pad256(C)). The harness exits non-zero if the worst cosine is under the Task 2 bar.
 
 Run it before the kernel exists. Expected: FAIL at load, the variant binary missing.
 
-- [ ] **Step 2: The kernel**
+- [x] **Step 2: The kernel**
 
 `tools/probe/probe_flash_attn.cl`. Each sub-group owns **8 query rows of one head**. Its O accumulator is 16 `float8` (8 rows x 256 dims, 128 GRF). The QK^T accumulator for one KV tile is `KT / 16` `float8`s, laid out with row in the component and key position in the lane. That is exactly the bf16 DPAS A-operand layout (pf_gemm.cl: `af[a]` component r = row, lane = k), so P needs no data movement to become the PV operand. The K and V loads are pf_gemm.cl's two verified idioms:
 - **K^T, from the `TRANSB` branch:** `intel_sub_group_2d_block_read_transpose_32b_16r8x1c` over the cache viewed as `[pos][512 dwords]`, giving lane = key position and 8 dwords = 16 dims.
@@ -272,12 +272,12 @@ endforeach()
 
 (`R32 H6` would be 24 sub-groups, WG 384, which is allowed. No arm exceeds 32 sub-groups.)
 
-- [ ] **Step 3: Run it to pass**
+- [x] **Step 3: Run it to pass**
 
 Run the four Review Focus cases on `pfa_KT32_R16_H6_Q1`: `16384 2048`, `777 300`, `0 2048 --qscale 30`, `0 64`.
 Expected: the worst cosine is at or above the bar in all four, rows [C, pad256(C)) are finite, and the build log shows the arm's spill line (record it: a spill is a timing fact, not a correctness failure).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add tools/probe/probe_flash_attn.cl tools/probe/probe_flash_attn.cc tools/probe/CMakeLists.txt
@@ -291,11 +291,11 @@ git commit -m "probe: pfa, a fused bf16 flash-attention kernel, correct against 
 **Files:**
 - Modify: `tools/probe/probe_flash_attn.cc` (`--arms all`, the timing), `docs/probe-flash-attn-2026-09-25.md`
 
-- [ ] **Step 1: All arms correct**
+- [x] **Step 1: All arms correct**
 
 `--arms all` runs every built arm through the Task 3 check. Any arm under the bar is reported and excluded from timing.
 
-- [ ] **Step 2: Timing**
+- [x] **Step 2: Timing**
 
 For each surviving arm, in interleaved rounds (control = composed `attn_chunk` on L0; candidate = the arm), 11 rounds after a 20-iteration warm-up, L0 event timestamps summed over the arm's launches, median paired ratio and range. Shapes:
 - **pos 2048, C 2048:** the second chunk of pp4096, where F1 lives.
@@ -304,7 +304,7 @@ For each surviving arm, in interleaved rounds (control = composed `attn_chunk` o
 
 Also report each arm's achieved TFLOP/s on the 30720 shape, from its causal FLOP count 4 x 24 x 256 x sum_m(pos + m + 1) (derived), against the bf16 DPAS peak 183.45.
 
-- [ ] **Step 3: Record and pick**
+- [x] **Step 3: Record and pick**
 
 In the probe doc, section "3. The sweep": every arm's spill line, worst cosine, the three paired ratios, and TFLOP/s at depth. The **winner** is the fastest arm at pos 30720 among those at or above the bar, provided it is not slower than the composed control at pos 2048. If no arm beats the control at pos 2048, say so: that is spec 6's F1 in doubt, and 6b starts from that finding.
 
@@ -314,7 +314,7 @@ State the winner in one line at the top of the doc:
 
 If **no** arm passes the correctness bar, the spec's stopping rule applies: record the worst cosines and stop.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add tools/probe/probe_flash_attn.cc docs/probe-flash-attn-2026-09-25.md
