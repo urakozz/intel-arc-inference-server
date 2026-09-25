@@ -89,6 +89,15 @@ if(B70_PREFILL_ENABLED)
                    kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU)
   add_test(NAME pf_int8_test COMMAND pf_int8_test)
 
+  # Spec 6 K1 (plan 6b Task 1): pf_flash_attn against an fp64 reference.
+  add_executable(pf_flash_attn_test prefill/pf_flash_attn_test.cc)
+  target_include_directories(pf_flash_attn_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(pf_flash_attn_test PRIVATE b70_l0)
+  b70_target_kernel_dir(pf_flash_attn_test)
+  add_dependencies(pf_flash_attn_test kernel_pf_flash_attn)
+  add_test(NAME pf_flash_attn_test COMMAND pf_flash_attn_test)
+  set_tests_properties(pf_flash_attn_test PROPERTIES TIMEOUT 1800)
+
   add_executable(linear_i8_test prefill/linear_i8_test.cc)
   target_include_directories(linear_i8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(linear_i8_test PRIVATE b70_prefill_host b70_runtime b70_l0)
@@ -545,7 +554,7 @@ set(B70_PREFILL_KERNELS
   kernel_pf_embed_gather kernel_pf_res_fold_K5120_SP0_G20
   kernel_pf_res_fold_K5120_SP1_G20 kernel_pf_norm_finish_K5120_G20_W20
   kernel_pf_silu_mul kernel_pf_gated_head kernel_pf_ab_proj
-  kernel_pf_attn_prep_q16 kernel_pf_attn
+  kernel_pf_attn_prep_q16 kernel_pf_attn kernel_pf_flash_attn
   kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan
   kernel_pf_dequant_tile_K5120_N16384_L1_T0
   kernel_pf_dequant_tile_K6144_N5120_L0_T0

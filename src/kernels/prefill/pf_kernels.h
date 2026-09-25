@@ -53,6 +53,9 @@ inline std::string pf_attn_prep_q16_variant() { return "pf_attn_prep_q16"; }
 // causal row softmax between the QK^T and PV GEMMs) and `pf_attn_gate` (the
 // output gate that lived in decode's `attn_reduce`, ruling A16).
 inline std::string pf_attn_variant() { return "pf_attn"; }
+// Spec 6: the fused flash attention (plan 6a's pfa_KT64_R16_H6_Q0), the default prefill
+// attention on the L0 backends; the composed path above is B70_PREFILL_ATTN=composed.
+inline std::string pf_flash_attn_variant() { return "pf_flash_attn"; }
 // The a||b projection, mirroring gemv_bf16's {COLS_PER_WG 16, KSPLIT 16}
 // tiling so that at M = 1 it is BIT-IDENTICAL to the binary capture.cc binds.
 inline std::string pf_ab_proj_variant() { return "pf_ab_proj"; }
