@@ -461,6 +461,24 @@ endif()
 # backend) on the same inputs; every arm is checked against an fp64 CPU reference
 # before it is timed. Probe-only: no runtime path binds `pfa`.
 if(B70_PREFILL_ENABLED)
+  # One binary per arm: KT (KV positions per tile), RPW (query rows per work-group per
+  # head), HPW (q-heads per work-group), QREG (Q held in registers). 256 GRF: the O
+  # accumulator alone is 128 GRF per sub-group. The list and `kArms` in
+  # probe_flash_attn.cc are two lists nothing checks against each other; a missing
+  # binary is reported by name.
+  set(PFA_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_flash_attn.cl)
+  set(PFA_TARGETS "")
+  foreach(arm "32 16 6 1" "32 32 6 1" "64 16 6 1" "32 16 3 1" "32 16 1 1" "32 16 6 0" "64 16 6 0" "32 32 3 1")
+    separate_arguments(f UNIX_COMMAND "${arm}")
+    list(GET f 0 KT)
+    list(GET f 1 R)
+    list(GET f 2 H)
+    list(GET f 3 QR)
+    add_ocloc_kernel(pfa_KT${KT}_R${R}_H${H}_Q${QR} SOURCE ${PFA_CL}
+                     DEFINES KT=${KT} RPW=${R} HPW=${H} QREG=${QR} OPTIONS -cl-intel-256-GRF-per-thread)
+    list(APPEND PFA_TARGETS kernel_pfa_KT${KT}_R${R}_H${H}_Q${QR})
+  endforeach()
+
   add_executable(probe_flash_attn probe_flash_attn.cc)
   target_include_directories(probe_flash_attn PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(probe_flash_attn PRIVATE b70_prefill_host b70_runtime b70_loader
@@ -471,5 +489,5 @@ if(B70_PREFILL_ENABLED)
                PROPERTY BUILDSYSTEM_TARGETS)
   get_property(PFA_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
                PROPERTY BUILDSYSTEM_TARGETS)
-  add_dependencies(probe_flash_attn ${PFA_KERNELS} ${PFA_PF_KERNELS})
+  add_dependencies(probe_flash_attn ${PFA_TARGETS} ${PFA_KERNELS} ${PFA_PF_KERNELS})
 endif()
