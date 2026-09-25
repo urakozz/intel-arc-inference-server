@@ -10,6 +10,7 @@
 // that does calls `b70_link_prefill()` and gets the .so and the two rpaths.
 // The member declarations stay in `runtime/engine.h`; only the definitions move.
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <memory>
@@ -58,6 +59,29 @@ PrefillBackend Engine::prefill_backend() const {
 }
 
 bool Engine::prefill_sycl_side_created() const { return pfx_ && pfx_->cx.has_sycl(); }
+
+std::string Engine::memory_line() const {
+  const double gb = 1e9;
+  const size_t model = model_.report.total();
+  const size_t kv = persist_.kv_k.size() + persist_.kv_v.size();
+  const size_t decode = persist_.bytes() - kv + decode_scratch_.bytes();
+  const size_t pf = pf_ ? pf_->bytes() + pf_->lazy_bytes() : 0;
+  const size_t i8 = pfx_ && pfx_->int8 ? pfx_->int8->bytes() : 0;
+  const size_t total = model + kv + decode + pf + i8;
+  uint32_t n = 0;
+  zeDeviceGetMemoryProperties(ctx_.device(), &n, nullptr);
+  std::vector<ze_device_memory_properties_t> props(n);
+  for (auto& p : props) p.stype = ZE_STRUCTURE_TYPE_DEVICE_MEMORY_PROPERTIES;
+  if (n) zeDeviceGetMemoryProperties(ctx_.device(), &n, props.data());
+  size_t device = 0;
+  for (const auto& p : props) device += p.totalSize;
+  char buf[256];
+  std::snprintf(buf, sizeof buf,
+                "memory: model %.3f GB, kv %.3f GB, decode state %.3f GB, prefill scratch %.3f GB,"
+                " int8 %.3f GB, total %.3f GB of %.3f GB",
+                model / gb, kv / gb, decode / gb, pf / gb, i8 / gb, total / gb, device / gb);
+  return buf;
+}
 
 void Engine::prepare_prefill() {
   // Ruling R7: both allocations are lazy, so a decode-only Engine's device

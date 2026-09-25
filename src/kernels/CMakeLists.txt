@@ -270,6 +270,8 @@ endfunction()
 add_attn_prep(1)
 add_attn_decode(1 16384)   # the loader's default max_len (docs/13-loader.md)
 add_attn_reduce(1 16384)
+add_attn_decode(1 131072)  # spec 6: 128k context (--max-len 131072)
+add_attn_reduce(1 131072)
 add_attn_decode(1 4096)    # attn_test's buffers: 64 blocks, cheap to fill
 add_attn_reduce(1 4096)
 # M = 2 is compiled per spec 1 §9 (the M loop must compile); all three are also

@@ -88,7 +88,7 @@ void usage() {
        "                                        [--device N] [--max-len 16384]\n"
       "  b70-decode <snapshot-or-repo> --bench [--depth 4096 | --pp N [--pp-chunk C]\n"
       "                                        [--pp-backend sycl-tla|l0|l0-int8]]\n"
-      "                                        [--tg 256] [--device N]\n"
+      "                                        [--tg 256] [--device N] [--max-len 16384]\n"
       "  b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--repeats 1]\n"
       "                                          [--device N]\n"
       "\n"
@@ -99,8 +99,9 @@ void usage() {
        "  --prefill      --ids only: run the prompt through Engine::prefill instead of one\n"
        "                 Engine::ingest replay per id; needs the optional prefill component.\n"
       "  --device N     GPU index. Absent: ONEAPI_DEVICE_SELECTOR=level_zero:N, else device 0.\n"
-      "  --max-len <L>  KV cache and RoPE capacity (default 16384; the attention kernels are\n"
-      "                 compiled per max_len, so only the compiled ones load)\n"
+      "  --max-len <L>  KV cache and RoPE capacity (default 16384; the decode attention kernels\n"
+      "                 are compiled per max_len: 16384 and 131072 (spec 6), a multiple of 256\n"
+      "                 either way; any other value fails at capture naming the missing binary)\n"
       "  --bench        ingest --depth synthetic ids, then time --tg generated ones and print\n"
       "                 a markdown row on stdout\n"
       "  --pp N         --bench only, and exclusive with --depth: prefill N synthetic ids\n"
@@ -791,6 +792,8 @@ int run(int argc, char** argv) {
     eng.prepare_prefill();
     pp_launches_setup = eng.prefill_launches();
   }
+  // Spec 6: every device byte this engine holds, before the first prefill.
+  std::fprintf(stderr, "%s\n", eng.memory_line().c_str());
   const auto t0 = std::chrono::steady_clock::now();
   size_t pp_launches = 0;
   if (have_pp || prefill) {
