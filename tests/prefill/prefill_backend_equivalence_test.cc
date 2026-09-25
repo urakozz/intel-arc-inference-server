@@ -4,6 +4,10 @@
 // of an exact zero) and their count printed. Tokens are a consequence (cur_token is in the
 // control block), so this test IS the token gate across backends.
 //
+// Spec 6 (plan 6b): the L0 walk's default attention is pf_flash_attn, a different algorithm
+// sycl-tla cannot run; this bar is about the GEMM backends, so it pins the composed attention
+// on both sides (set_attn_mode_for_test), which is B70_PREFILL_ATTN=composed exactly.
+//
 // Order matters for S3's assertion: every L0 session runs BEFORE any sycl-tla session, so a
 // fresh engine's SYCL side is provably never built by the L0 backend.
 #include <algorithm>
@@ -23,6 +27,7 @@
 #include "runtime/buffers.h"
 #include "runtime/control.h"
 #include "runtime/engine.h"
+#include "runtime/prefill/attn.h"
 #include "runtime/prefill_backend.h"
 
 namespace {
@@ -137,6 +142,7 @@ Snap sliced(runtime::Engine& eng, l0::CmdList& imm, const std::vector<uint32_t>&
 int main(int argc, char** argv) {
   const std::string pdir = argc > 1 ? argv[1] : "tests/golden/prompts";
   const std::string snap = argc > 2 ? argv[2] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
+  runtime::prefill::set_attn_mode_for_test(runtime::prefill::AttnMode::Composed);
   l0::Context ctx(0);
   loader::LoadedModel model = loader::load(ctx, snap, kMaxLen);
   runtime::Engine eng(ctx, std::move(model), kMaxLen);
