@@ -5,6 +5,10 @@ Plan: `docs/superpowers/plans/2026-09-25-spec6a-flash-attn-baseline-and-probe.md
 
 Every number is **measured** unless marked **derived**.
 
+**Winner: pfa_KT64_R16_H6_Q0, 1.219x the composed path at depth 32k, 28.0 TFLOP/s.**
+(Derived TFLOP/s; 15.2 % of the 183.45 bf16 DPAS peak. At pos 2048 it only
+matches the composed path, 1.004x, so **F1 is in doubt** on this tiling: see §3.4.)
+
 ## 1. P0, the baselines
 
 Box: one B70 (device 0, `ZE_AFFINITY_MASK=0`), idle at dispatch (no render-node
@@ -58,6 +62,89 @@ sampled rows ({0, 1, 7, 8, 63, 64, C/2, C-2, C-1} plus 16 from
 
 All measured. **The composed path clears 0.99999 everywhere, so the flash bar
 stays at cosine >= 0.99999** (no calibration change). Its own margin is small,
-worst 0.9999965: the single bf16 rounding of the normalised P is the dominant
-error, and a flash kernel that rounds the unnormalised P should sit in the same
-band.
+worst 0.9999965. (Section 3: every flash arm lands at or above the composed
+path's own worst on every case.)
+
+## 3. The sweep
+
+`tools/probe/probe_flash_attn.cl`, kernel `pfa`, one binary per arm
+(`-DKT -DRPW -DHPW -DQREG`, 256 GRF). All arms from the plan's list; every arm
+passed the correctness bar before it was timed. Timing: `tools/probe/pfa_sweep.sh`
+(detached on the box), device 0, idle (no render-node holder, no container at
+dispatch), L0 kernel timestamps summed over each path's launches (Context's
+launch profiler; the composed path is 4 x (2 + 8) = 40 launches per call at
+C = 2048, an arm is 1), 20-iteration warm-up of every path, then 11 interleaved
+rounds (control, then every arm, each round). Ratio = composed / arm, so > 1 is
+the arm faster; median and range of the 11 paired ratios.
+
+### 3.1 Correctness, every arm
+
+| case (pos, C, qscale) | composed worst cos | every arm's worst cos | pad rows [C, pad256(C)) |
+|---|---:|---:|---|
+| 16384, 2048, 1 | 0.999997976 | 0.999998112 (all 8 arms) | finite |
+| 777, 300, 1 (depth 1077, partial last tile) | 0.999997720 | 0.999998227 (all 8) | finite (212 rows) |
+| 0, 2048, 30 (scores in the hundreds) | 0.999996452 | 0.999999009 (all 8) | finite |
+| 0, 64, 1 | 0.999996685 | 0.999998031 (all 8) | finite (192 rows) |
+| 2048, 2048, 1 | 0.999997778 | 0.999998232 (all 8) | finite |
+| 30720, 2048, 1 | 0.999997996 | 0.999998088 (KT64: 0.999998097) | finite |
+
+All measured. The arms differ only in scheduling, so their outputs are identical
+across RPW / HPW / QREG; KT changes the online-softmax tile order, which moves
+the max abs error in the fourth digit (KT64 at 16384: 9.412e-05 vs 9.423e-05).
+**No arm is under the bar; the stopping rule does not apply.**
+
+### 3.2 The table
+
+Spill: ocloc's "allocated 256 regs and spilled around N", each arm compiled
+alone (`tools/probe/pfa_spill.sh`; the parallel build log interleaves them).
+
+| arm | spill | worst cos | ratio pos 2048 | ratio pos 16384 | ratio pos 30720 | TFLOP/s at 30720 |
+|---|---:|---:|---:|---:|---:|---:|
+| composed (control) | - | 0.999996452 | 1 (5.001 ms) | 1 (28.173 ms) | 1 (69.617 ms) | 23.0 |
+| pfa_KT32_R16_H6_Q1 | 121 | 0.999998031 | 0.889x (0.872 .. 0.898) | 0.695x (0.597 .. 0.794) | 0.870x (0.815 .. 1.043) | 19.9 |
+| pfa_KT32_R32_H6_Q1 | 121 | 0.999998031 | 0.920x (0.905 .. 0.924) | 0.874x (0.865 .. 0.883) | 1.175x (1.165 .. 1.181) | 27.0 |
+| pfa_KT64_R16_H6_Q1 | 148 | 0.999998031 | 0.896x (0.886 .. 0.910) | 0.828x (0.822 .. 0.893) | 1.109x (1.098 .. 1.112) | 25.4 |
+| pfa_KT32_R16_H3_Q1 | 121 | 0.999998031 | 0.663x (0.654 .. 0.669) | 0.543x (0.536 .. 0.550) | 0.654x (0.649 .. 0.668) | 15.0 |
+| pfa_KT32_R16_H1_Q1 | 121 | 0.999998031 | 0.571x (0.566 .. 0.575) | 0.491x (0.490 .. 0.499) | 0.599x (0.587 .. 0.606) | 13.7 |
+| pfa_KT32_R16_H6_Q0 | 58 | 0.999998031 | 1.012x (0.992 .. 1.026) | 0.863x (0.859 .. 0.953) | 1.155x (1.150 .. 1.270) | 26.5 |
+| **pfa_KT64_R16_H6_Q0** | 77 | 0.999998031 | **1.004x** (0.979 .. 1.016) | **0.899x** (0.895 .. 0.998) | **1.219x** (1.203 .. 1.224) | **28.0** |
+| pfa_KT32_R32_H3_Q1 | 121 | 0.999998031 | 0.870x (0.843 .. 0.885) | 0.638x (0.622 .. 0.694) | 0.774x (0.733 .. 0.808) | 17.8 |
+
+Ratios measured (median of 11 paired rounds, range in brackets); worst cos is
+the worst over all six cases of §3.1 (measured); TFLOP/s derived from the causal
+FLOP count 4 x 24 x 256 x sum_m (pos + m + 1) = 1597.8 GFLOP at pos 30720 and
+the median ms. The composed row's worst cos is its own worst (0, 2048, qscale 30).
+
+### 3.3 The pick
+
+The rule: fastest at pos 30720 among the arms at or above the bar, provided it
+is not slower than the composed path at pos 2048. **pfa_KT64_R16_H6_Q0**:
+1.219x at pos 30720 (57.143 ms vs 69.617 ms), 28.0 TFLOP/s (derived); at pos
+2048 1.004x, a median at parity with a range (0.979 .. 1.016) that straddles 1.
+It qualifies on the median. The runner-up, pfa_KT32_R16_H6_Q0, is 1.155x at
+32k and 1.012x at 2048.
+
+### 3.4 What the sweep says (for 6b)
+
+- **Heads per work-group is the largest lever, and 6 wins.** H3 and H1 lose
+  35-50 % at every depth: the six q-heads of a kv group re-reading the same K/V
+  tile from one work-group is worth more than a halved per-WG footprint. (No arm
+  stages K/V in SLM yet; the six heads share it only through the cache.)
+- **Re-reading Q per KV tile (Q0) beats holding it (Q1)**: Q1 costs 64 GRF and
+  spills 121-148; Q0 spills 58-77 and is faster at 2048 and 32k. The spill is
+  a timing fact here, not a correctness one.
+- **F1 is in doubt on this kernel.** At pos 2048, the second chunk of pp4096,
+  the best arm is at parity with the composed path (5.0 ms per FA layer call,
+  measured), so this tiling would leave pp4096's 131.7 ms attention phase
+  (§1) roughly where it is, against F1's 80 ms. And at pos 16384 every arm is
+  slower than the composed path (best 0.899x).
+- **F2 is far off:** 28.0 TFLOP/s is 15.2 % of peak against F2's 60 %. The
+  composed path itself reaches 30.9-31.1 TFLOP/s at 2k and 16k (derived).
+- The one arm with a wide spread, pfa_KT32_R16_H6_Q1 (0.815 .. 1.043 at 32k,
+  0.597 .. 0.794 at 16k), is the most register-starved H6 shape; its median
+  ranks it last among the H6 arms either way.
+
+Plan 6b therefore starts from pfa_KT64_R16_H6_Q0 as the correct, fastest
+measured tiling, with the finding that it does not yet deliver F1: what 6b adds
+(SLM-staged K/V shared by the six heads, fewer spills, a longer KV tile) has
+to be measured against this row, not assumed.
