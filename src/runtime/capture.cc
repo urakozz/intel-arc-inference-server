@@ -196,7 +196,7 @@ class Capture {
             "max_len must be a multiple of DecodeBuffers::kAttnBlock (" +
                 std::to_string(DecodeBuffers::kAttnBlock) + ") - attn_decode's block grid");
     // Spec 6: MAXLEN is baked into both attention binaries, and only some max_lens are
-    // compiled (src/kernels/CMakeLists.txt: 16384 and 131072 at M = 1). Name the missing one
+    // compiled (src/kernels/CMakeLists.txt: 4096, 16384, 32768 and 131072 at M = 1). Name the missing one
     // here, before a single command is appended, rather than as a bare path later.
     for (const std::string& v :
          {kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),

@@ -56,7 +56,7 @@ void usage() {
   std::fprintf(stderr,
                "usage: b70-serve <snapshot-or-repo> [--host 0.0.0.0] [--port 8000]\n"
                "                 [--max-len 16384] [--device N] [--served-name NAME] [--queue 4]\n"
-               "                 --max-len: 16384 or 131072 (the compiled decode attention)\n"
+               "                 --max-len: 16384, 32768 or 131072 (the compiled decode attention)\n"
                "                 [--pp-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n");
 }
 
