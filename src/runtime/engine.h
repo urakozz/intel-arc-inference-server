@@ -3,6 +3,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "l0/cmdlist.h"
@@ -108,6 +109,15 @@ class Engine {
   // setting overrides B70_PREFILL_REPLAY=1. Recordings retain frozen (pos,C)
   // arguments, not input contents, and survive reset() with a bounded cache.
   void set_prefill_replay(bool enabled) { pf_replay_ = enabled; }
+
+  // Spec 6 (plan 6b): one line summing the device memory this engine holds --
+  //   memory: model <GB>, kv <GB>, decode state <GB>, prefill scratch <GB>, int8 <GB>,
+  //   total <GB> of <device GB>
+  // model = the loader report's total (RoPE included); kv = kv_k + kv_v; decode state =
+  // the rest of PersistentBuffers plus DecodeScratch; prefill scratch = PrefillScratch's
+  // bytes() + lazy_bytes() as allocated NOW; int8 = Int8State::bytes(). The CLIs print it
+  // after prepare_prefill(), before the first prefill. Defined in engine_prefill.cc.
+  std::string memory_line() const;
 
   // Greedy-generates n ids; on_token is called after each fence (host side,
   // overlaps nothing in v1). Returns the ids.

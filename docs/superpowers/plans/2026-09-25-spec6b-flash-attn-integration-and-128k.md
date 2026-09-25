@@ -150,18 +150,18 @@ git commit -m "prefill: attention runs pf_flash_attn; the composed path is lazy 
 **Interfaces:**
 - Produces: `--max-len 131072` works in both CLIs. The engine prints one line after load: `memory: model <GB>, kv <GB>, decode state <GB>, prefill scratch <GB>, int8 <GB>, total <GB> of <device GB>`, the sum of the loader report, `PersistentBuffers`, `DecodeScratch`, `PrefillScratch::bytes() + lazy_bytes()` and `Int8State::bytes()`.
 
-- [ ] **Step 1: The failing checks**
+- [x] **Step 1: The failing checks**
 
 - A CLI registration: `b70-decode <snap> --bench --depth 64 --max-len 65536` must exit non-zero with stderr containing `attn_decode_M1_L65536` (the missing variant named), not a crash.
 - `buffers_test.cc`: `PersistentBuffers` and `DecodeBuffers` at max_len 131072 report KV bytes = 16 x 131072 x 4 x 256 x 2 x 2 and `attn_part` = 24 x 2048 x 8 x 258 x 4.
 
 Expected: the registration FAILS today by crashing or with a different message (check which, and pin the message the fix produces).
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 Add the two variant rows. Make capture throw with the variant name when the module is missing. The `KernelCache` pattern already does this for prefill; do the same where `capture.cc` loads `attn_decode_variant`. Add the memory line. Forward `--max-len` in `bench_decode.sh` (`--max-len N` passes through to `b70-decode`).
 
-- [ ] **Step 3: 128k on the box**
+- [x] **Step 3: 128k on the box**
 
 Run: `tools/box.sh run 'ZE_AFFINITY_MASK=0 ./build/src/cli/b70-decode <snapshot> --bench --depth 4096 --max-len 131072'`
 Expected: loads, prints the memory line with total < 32 GB, and prints a decode row.
@@ -172,11 +172,11 @@ On an idle box:
 - **F4:** `tools/bench_decode.sh --depth 4096 --runs 3` at max_len 16384, then at `--max-len 131072`, interleaved twice. Bar: the 131072 median within 2 % of the 16384 median.
 - **F3:** `--depth` 32768, 65536 and 131000 at `--max-len 131072`, median of 3 each. Record t/s beside the bandwidth-derived rate: the decode bandwidth measured at depth 4096 (bytes per token over time per token), divided by the bytes one token reads at that depth (the weights, plus 64 KiB per cached position). Bar: >= 90 %.
 
-- [ ] **Step 5: If F4 fails, the indirect grid**
+- [x] (not needed: F4 measured 1.0003x) **Step 5: If F4 fails, the indirect grid**
 
 Only if F4 missed its bar. `attn_prep` writes `ze_group_count_t {ceil((pos + 1) / 64), 24, 1}` for `attn_decode`, and the reduce count likewise, into a device buffer each step. `capture.cc` records `zeCommandListAppendLaunchKernelIndirect` for both kernels against that buffer. `attn_reduce` must then walk only the blocks `attn_decode` wrote. Re-run F4, and the decode golden gates (`golden_gate_test` and its registrations) must stay green. If F4 passed, skip this step and record that it was not needed.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/kernels/CMakeLists.txt tools/bench_decode.sh src/cli/b70_decode.cc src/cli/b70_serve.cc \

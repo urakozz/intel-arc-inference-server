@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -194,6 +195,16 @@ class Capture {
     require(b_.max_len % DecodeBuffers::kAttnBlock == 0,
             "max_len must be a multiple of DecodeBuffers::kAttnBlock (" +
                 std::to_string(DecodeBuffers::kAttnBlock) + ") - attn_decode's block grid");
+    // Spec 6: MAXLEN is baked into both attention binaries, and only some max_lens are
+    // compiled (src/kernels/CMakeLists.txt: 16384 and 131072 at M = 1). Name the missing one
+    // here, before a single command is appended, rather than as a bare path later.
+    for (const std::string& v :
+         {kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
+          kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock)})
+      require(std::ifstream(kernels::path(v)).good(),
+              "no decode attention is compiled for max_len " + std::to_string(b_.max_len) +
+                  ": " + v + " is missing (" + kernels::path(v) +
+                  "); the compiled max_lens are listed in src/kernels/CMakeLists.txt");
 
     require(b_.gdn_state.size() == kGdnStateStride * kGdnLayers, "gdn_state is not 48 slices");
     require(b_.conv_ring.size() == kConvRingStride * kGdnLayers, "conv_ring is not 48 slices");

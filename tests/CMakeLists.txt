@@ -869,6 +869,21 @@ b70_cli_reject(cli_reject_pp_chunk_without_pp ${B70_NO_MODEL} --bench --pp-chunk
 b70_cli_reject(cli_reject_prefill_without_ids ${B70_NO_MODEL} --bench --prefill
   EXPECT "--prefill belongs to --ids")
 
+# Spec 6 (plan 6b Task 3): a max_len with no compiled decode attention. This one is NOT
+# host-side -- it needs the device and the checkpoint, because the variant is resolved at
+# capture -- so it is its own registration, labelled checkpoint: exit 1 (not a signal),
+# and the message names the missing binary, attn_decode_M1_L65536_B64.
+add_test(NAME cli_reject_maxlen_uncompiled COMMAND sh -c [==[
+out=$("$@" 2>&1)
+rc=$?
+printf '%s\n' "$out" >&2
+[ "$rc" -eq 1 ] || { echo "expected exit 1, got $rc" >&2; exit 1; }
+printf '%s\n' "$out" | grep -qF attn_decode_M1_L65536 ||
+  { echo "exit 1, but the missing variant is not named" >&2; exit 1; }
+]==] cli_reject_maxlen_uncompiled $<TARGET_FILE:b70-decode> ${B70_TEST_SNAPSHOT}
+  --bench --depth 64 --max-len 65536)
+set_tests_properties(cli_reject_maxlen_uncompiled PROPERTIES LABELS "checkpoint" TIMEOUT 600)
+
 # --- spec 3 T1: tokenizer (host-only; needs the checkpoint's tokenizer.json) ---
 if(B70_TOKENIZER_ENABLED)
   add_executable(tokenizer_smoke_test tokenizer/tokenizer_smoke_test.cc)
