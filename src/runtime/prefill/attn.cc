@@ -1,6 +1,9 @@
 #include "runtime/prefill/attn.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -25,7 +28,25 @@ void require(bool ok, const std::string& what) {
 constexpr size_t kQRow = size_t(kQHeads) * kHeadDim;    // pf_q  [C][24][256] = 6144
 constexpr size_t kKvRow = size_t(kKvHeads) * kHeadDim;  // cache [pos][4][256] = 1024
 
+std::atomic<int> g_mode{-1};   // -1: not yet read from the environment
+
 }  // namespace
+
+AttnMode attn_mode() {
+  int m = g_mode.load(std::memory_order_relaxed);
+  if (m < 0) {
+    const char* v = std::getenv("B70_PREFILL_ATTN");
+    m = int(v != nullptr && std::strcmp(v, "composed") == 0 ? AttnMode::Composed
+                                                             : AttnMode::Flash);
+    int expected = -1;
+    if (!g_mode.compare_exchange_strong(expected, m)) m = expected;
+  }
+  return AttnMode(m);
+}
+
+void set_attn_mode_for_test(AttnMode m) { g_mode.store(int(m)); }
+
+const char* attn_mode_name(AttnMode m) { return m == AttnMode::Flash ? "flash" : "composed"; }
 
 void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, void* ctrl,
                      const float* qkv_partials, const float* fa_small, const float* rope,
@@ -57,6 +78,22 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
   // every path that gets here (it is the KV allocation's own extent), and the
   // rounding therefore never leaves the allocation.
   const bool l0 = is_l0(backend);
+  if (l0 && attn_mode() == AttnMode::Flash) {
+    // Spec 6: one launch for all four kv groups, no score scratch. pf_o's layout is the
+    // composed path's ([24][rows][256], stride rows * 256, rows = pad256(C)), so
+    // pf_attn_gate is unchanged. The kernel reads the cache rows [0, pos + C) only and masks
+    // past `depth` itself, so neither max_len's padding nor stale cache rows can reach it.
+    // The WG size (192) comes from the kernel's reqd_work_group_size (Context::launch).
+    const uint32_t rows = attn_rows(C, backend);
+    require(s.pf_o.size() >= size_t(kQHeads) * rows * kHeadDim * sizeof(float),
+            "pf_o is undersized");
+    cx.launch(kc(kernels::pf_flash_attn_variant(), "pf_flash_attn"), (C + 15u) / 16u, kKvHeads,
+              1,
+              {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s.pf_o.ptr()), arg_val(pos),
+               arg_val(C), arg_val(rows)});
+    profile_wait(cx, Phase::kAttnFlash);
+    return;
+  }
   if (!l0)
     require(gemm_bf16_supports_transb(),
             "this build has no ColumnMajor-B chain, so QK^T cannot read the KV cache in place");
@@ -70,11 +107,14 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
   const uint32_t ld = s.max_len;                       // pf_s / pf_p row pitch
   const size_t stride_l = size_t(rows) * ld;           // one head slot of pf_s / pf_p
   const size_t stride_h = size_t(rows) * kHeadDim;     // one q-head of pf_o
-  require(s.pf_s.size() >= size_t(kGroup) * stride_l * sizeof(float), "pf_s is undersized");
-  require(s.pf_p.size() >= size_t(kGroup) * stride_l * sizeof(uint16_t), "pf_p is undersized");
+  // Spec 6: the score scratch is lazy -- allocated here, on the first composed call.
+  l0::Mem& pf_s = s.pf_s_buffer();
+  l0::Mem& pf_p = s.pf_p_buffer();
+  require(pf_s.size() >= size_t(kGroup) * stride_l * sizeof(float), "pf_s is undersized");
+  require(pf_p.size() >= size_t(kGroup) * stride_l * sizeof(uint16_t), "pf_p is undersized");
   require(s.pf_o.size() >= size_t(kQHeads) * stride_h * sizeof(float), "pf_o is undersized");
-  float* S = s.pf_s.as<float>();
-  uint16_t* P = s.pf_p.as<uint16_t>();
+  float* S = pf_s.as<float>();
+  uint16_t* P = pf_p.as<uint16_t>();
   float* O = s.pf_o.as<float>();
 
   // Spec S3 (`2026-09-22-prefill-parity-program-design.md` §3), L0 only: row `m`

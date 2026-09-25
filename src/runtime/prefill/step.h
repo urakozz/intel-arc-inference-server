@@ -54,6 +54,8 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Lo
 // `C` is the chunk width: since the parity program's S3 the L0 backend issues
 // attention's QK^T GEMM per 256-row block, so a chunk's launch count depends on
 // it (8689 at C <= 256, 9137 at C = 2048). sycl-tla ignores the argument.
+// Spec 6: the count follows `attn_mode()`; in Flash mode (the default) attention is one
+// launch per FA layer and the L0 count no longer depends on C (8449; step.cc).
 size_t step_chunk_launches(PrefillBackend b, uint32_t C);
 size_t step_chunk_gemms(PrefillBackend b);      // SYCL GEMM calls per chunk (0 on L0 since S3)
 size_t step_chunk_waits(PrefillBackend b);      // host L0<->SYCL handoffs per chunk

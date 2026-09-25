@@ -285,12 +285,90 @@ Row case_attn(Dev& d, uint32_t pos, uint32_t C) {
   return r;
 }
 
+// Spec 6 (plan 6b Task 2): on the L0 backend, `attn_chunk` in Flash mode (pf_flash_attn,
+// one launch) against the same call in Composed mode, on the same random Q and K/V cache.
+// Bar: per-(row, head) cosine of pf_o >= 0.99999 on every row [0, C) and every head, and
+// no non-finite value. The composed path is the reference here, as sycl-tla is for pf_gemm.
+bool case_flash_vs_composed(l0::Context& ctx, l0::CmdList& imm, uint32_t pos, uint32_t C) {
+  using runtime::prefill::AttnMode;
+  using runtime::prefill::attn_chunk;
+  const uint32_t depth = pos + C, rows = runtime::prefill::pad256(C);
+  const uint32_t max_len = runtime::prefill::pad256(depth);
+  runtime::prefill::Context cx(ctx);
+  runtime::prefill::KernelCache kc(ctx);
+  runtime::PrefillScratch s(ctx, max_len);
+  const std::vector<float> qf = random_f32(size_t(C) * kQH * kHD, 2100 + pos + C, 0.f, 1.f);
+  const std::vector<float> kvf =
+      random_f32(size_t(depth) * kKVH * kHD * 2, 2101 + pos + C, 0.f, 1.f);
+  std::vector<uint16_t> q(size_t(rows) * kQH * kHD, 0);
+  for (size_t i = 0; i < qf.size(); ++i) q[i] = rne(qf[i]);
+  std::vector<uint16_t> kk(size_t(max_len) * kKVH * kHD, 0), vv(kk.size(), 0);
+  for (size_t i = 0; i < size_t(depth) * kKVH * kHD; ++i) {
+    kk[i] = rne(kvf[i]);
+    vv[i] = rne(kvf[i + size_t(depth) * kKVH * kHD]);
+  }
+  imm.copy(s.pf_q.ptr(), q.data(), q.size() * 2);
+  l0::Mem dk(ctx, l0::MemKind::Device, kk.size() * 2), dv(ctx, l0::MemKind::Device, vv.size() * 2);
+  imm.copy(dk.ptr(), kk.data(), kk.size() * 2);
+  imm.copy(dv.ptr(), vv.data(), vv.size() * 2);
+  const size_t o_elems = size_t(kQH) * rows * kHD;
+  std::vector<float> o_flash(o_elems), o_comp(o_elems);
+  auto run = [&](AttnMode m, std::vector<float>& out) {
+    runtime::prefill::set_attn_mode_for_test(m);
+    const size_t before = cx.launches();
+    attn_chunk(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), dk.as<uint16_t>(), dv.as<uint16_t>(),
+               runtime::PrefillBackend::L0);
+    cx.wait();
+    CHECK_EQ(cx.launches() - before,
+             runtime::prefill::attn_chunk_launches(C, runtime::PrefillBackend::L0, m));
+    imm.copy(out.data(), s.pf_o.ptr(), o_elems * 4);
+  };
+  run(AttnMode::Flash, o_flash);
+  CHECK_EQ(s.pf_s_bytes(), size_t{0});   // flash never builds the score scratch
+  run(AttnMode::Composed, o_comp);
+  CHECK(s.pf_s_bytes() > 0);
+  double worst = 2.0, max_abs = 0.0;
+  uint32_t wh = 0, wm = 0;
+  size_t nonfinite = 0;
+  for (uint32_t h = 0; h < kQH; ++h)
+    for (uint32_t m = 0; m < C; ++m) {
+      const float* a = &o_flash[(size_t(h) * rows + m) * kHD];
+      const float* b = &o_comp[(size_t(h) * rows + m) * kHD];
+      double dot = 0, na = 0, nb = 0;
+      for (uint32_t d = 0; d < kHD; ++d) {
+        if (!std::isfinite(a[d])) ++nonfinite;
+        dot += double(a[d]) * b[d];
+        na += double(a[d]) * a[d];
+        nb += double(b[d]) * b[d];
+        max_abs = std::max(max_abs, std::fabs(double(a[d]) - b[d]));
+      }
+      const double cs = (na > 0 && nb > 0) ? dot / std::sqrt(na * nb) : 0.0;
+      const double csv = std::isfinite(cs) ? cs : -2.0;
+      if (csv < worst) { worst = csv; wh = h; wm = m; }
+    }
+  const bool ok = worst >= 0.99999 && nonfinite == 0;
+  std::printf("\n--- flash vs composed (L0), pos %u C %u: worst cos %.9f at (h %u, m %u) over"
+              " %u rows x 24 heads, max abs %.3e, non-finite %zu -- %s\n",
+              pos, C, worst, wh, wm, C, max_abs, nonfinite, ok ? "PASS" : "FAIL");
+  runtime::prefill::set_attn_mode_for_test(AttnMode::Flash);
+  return ok;
+}
+
 }  // namespace
 
 // Every case prints before anything is judged, so a failure leaves the whole
 // grid in the log (golden_gate_test's arrangement, and for its reason).
 int main() {
   Dev d;
+  // Spec 6: flash against composed on the L0 backend, before the sycl-tla grid below.
+  {
+    bool ok = case_flash_vs_composed(d.ctx, d.imm, 16384, 2048);
+    ok &= case_flash_vs_composed(d.ctx, d.imm, 777, 300);
+    if (!ok) {
+      std::fprintf(stderr, "GATE FAILED: flash vs composed under cosine 0.99999\n");
+      return 1;
+    }
+  }
   std::vector<Row> rows;
   for (uint32_t pos : {0u, 4096u})
     for (uint32_t C : {1u, 64u, 256u}) rows.push_back(case_attn(d, pos, C));

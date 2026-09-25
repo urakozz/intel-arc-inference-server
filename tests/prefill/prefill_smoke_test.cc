@@ -23,7 +23,9 @@
 #include "model/qwen35.h"
 #include "runtime/buffers.h"
 #include "runtime/control.h"
+#include "l0/cmdlist.h"
 #include "runtime/engine.h"
+#include "runtime/prefill/attn.h"
 #include "runtime/prefill/step.h"
 
 namespace {
@@ -67,13 +69,40 @@ void throws_naming(F&& f, const char* needle, const char* what) {
   CHECK(false);
 }
 
+// Spec 6 Review Focus: what one prefill leaves behind, for bitwise comparison.
+struct State {
+  std::vector<uint8_t> logits, gdn, control;
+  bool operator==(const State& o) const {
+    return logits == o.logits && gdn == o.gdn && control == o.control;
+  }
+};
+State grab(runtime::Engine& e, l0::Context& ctx) {
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  State st;
+  auto one = [&](std::vector<uint8_t>& v, const l0::Mem& m) {
+    v.resize(m.size());
+    imm.copy(v.data(), m.ptr(), m.size());
+  };
+  one(st.logits, e.prefill_scratch()->logits);
+  one(st.gdn, e.buffers().gdn_state);
+  one(st.control, e.buffers().control);
+  return st;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   const std::string snap =
       argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
 
+  using runtime::prefill::AttnMode;
+  // The mode the environment selected (B70_PREFILL_ATTN); the sections below that toggle it
+  // put it back, so the live measurements run in whatever mode the test was started in.
+  const AttnMode env_mode = runtime::prefill::attn_mode();
+  std::printf("attention mode: %s\n", runtime::prefill::attn_mode_name(env_mode));
+
   l0::Context ctx(0);
+  {
   loader::LoadedModel model = loader::load(ctx, snap, kMaxLen);
   runtime::Engine eng(ctx, std::move(model), kMaxLen);
 
@@ -123,10 +152,30 @@ int main(int argc, char** argv) {
   // (C <= 256, this test's own shape) and 9073 at the C = 2048 the bench and the server run
   // (1 + 48 x 135 + 16 x (130 + 4 x 8), derived from src/runtime/prefill/step.cc's closing
   // block).
+  runtime::prefill::set_attn_mode_for_test(AttnMode::Composed);
   CHECK_EQ(runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0, kShort),
            size_t(8625));
   CHECK_EQ(runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0, 2048),
            size_t(9073));
+  // Spec 6: in Flash mode attention is ONE launch per FA layer, so a chunk drops by
+  // 16 x (attn_chunk_launches_composed(C) - 1) and stops depending on C: 8449 on L0 and
+  // 8705 on l0-int8 at C = 64 (drop 176), 1000 (drop 368) and 2048 (drop 624). Derived:
+  // 1 + 48 x 135 + 16 x 123.
+  for (runtime::PrefillBackend b : {runtime::PrefillBackend::L0, runtime::PrefillBackend::L0Int8})
+    for (uint32_t C : {kShort, 1000u, 2048u}) {
+      runtime::prefill::set_attn_mode_for_test(AttnMode::Composed);
+      const size_t composed = runtime::prefill::step_chunk_launches(b, C);
+      runtime::prefill::set_attn_mode_for_test(AttnMode::Flash);
+      const size_t flash = runtime::prefill::step_chunk_launches(b, C);
+      const size_t drop =
+          16 * (runtime::prefill::attn_chunk_launches_composed(C, b) - 1);
+      std::printf("  %s C = %4u: composed %zu, flash %zu (drop %zu)\n",
+                  runtime::prefill_backend_name(b), C, composed, flash, drop);
+      CHECK_EQ(composed - flash, drop);
+      CHECK_EQ(flash, size_t(b == runtime::PrefillBackend::L0 ? 8449 : 8705));
+      CHECK_EQ(drop, size_t(C == kShort ? 176 : C == 1000u ? 368 : 624));
+    }
+  runtime::prefill::set_attn_mode_for_test(env_mode);
   CHECK_EQ(runtime::prefill::step_chunk_gemms(runtime::PrefillBackend::L0), size_t(0));
   CHECK_EQ(runtime::prefill::step_chunk_waits(runtime::PrefillBackend::L0), size_t(0));
   // Spec 5 (plan 5b Task 1): l0-int8 is L0 but for the int4 linears, and each of those
@@ -216,7 +265,7 @@ int main(int argc, char** argv) {
               runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0, kShort),
               runtime::prefill::kStepHeadLaunches);
   CHECK_EQ(l0_delta, l0_want);
-  CHECK_EQ(l0_want, size_t(8630));
+  CHECK_EQ(l0_want, size_t(env_mode == AttnMode::Flash ? 8454 : 8630));
 
   // The shape that S3 actually changed: C = 2048 is eight QK^T row blocks, so the
   // same counter must advance by 9073 + 5. One chunk, so the ragged-tail arithmetic is
@@ -235,7 +284,53 @@ int main(int argc, char** argv) {
               runtime::prefill::step_chunk_launches(runtime::PrefillBackend::L0, 2048),
               runtime::prefill::kStepHeadLaunches);
   CHECK_EQ(wide_delta, wide_want);
-  CHECK_EQ(wide_want, size_t(9078));
+  CHECK_EQ(wide_want, size_t(env_mode == AttnMode::Flash ? 8454 : 9078));
+  }   // the first engine is gone: the Review Focus below needs fresh ones
+
+  // ---- 9. spec 6 Review Focus: a composed session after a flash session ----
+  // The lazy pf_s / pf_p must be built on first composed use, not assumed. Engine 1, fresh:
+  // flash, then reset() and composed. Engine 2, fresh: composed, then reset() and flash.
+  // Each mode's two outputs (last logits, GDN state, Control) must be bitwise equal: the
+  // first-in-a-fresh-engine run against the run that follows the other mode.
+  {
+    const std::vector<uint32_t> prose(kSeed, kSeed + kSeedLen);
+    State flash1, comp1, comp2, flash2;
+    {
+      runtime::Engine e(ctx, loader::load(ctx, snap, kMaxLen), kMaxLen);
+      runtime::prefill::set_attn_mode_for_test(AttnMode::Flash);
+      e.reset();
+      e.prefill(prose);
+      CHECK_EQ(e.prefill_scratch()->pf_s_bytes(), size_t(0));
+      flash1 = grab(e, ctx);
+      runtime::prefill::set_attn_mode_for_test(AttnMode::Composed);
+      e.reset();
+      e.prefill(prose);
+      CHECK(e.prefill_scratch()->pf_s_bytes() > 0);
+      comp1 = grab(e, ctx);
+      std::printf("review focus, engine 1 (%s): flash then composed; pf_s built on first"
+                  " composed use (%zu B)\n", runtime::prefill_backend_name(e.prefill_backend()),
+                  e.prefill_scratch()->pf_s_bytes());
+    }
+    {
+      runtime::Engine e(ctx, loader::load(ctx, snap, kMaxLen), kMaxLen);
+      runtime::prefill::set_attn_mode_for_test(AttnMode::Composed);
+      e.reset();
+      e.prefill(prose);
+      comp2 = grab(e, ctx);
+      runtime::prefill::set_attn_mode_for_test(AttnMode::Flash);
+      e.reset();
+      e.prefill(prose);
+      flash2 = grab(e, ctx);
+    }
+    runtime::prefill::set_attn_mode_for_test(env_mode);
+    const bool fl = flash1 == flash2, co = comp1 == comp2;
+    std::printf("review focus: flash fresh == flash after composed: %s; composed fresh =="
+                " composed after flash: %s; flash != composed logits: %s\n",
+                fl ? "bitwise" : "DIFFER", co ? "bitwise" : "DIFFER",
+                flash1.logits != comp1.logits ? "yes (two paths)" : "no");
+    CHECK(fl);
+    CHECK(co);
+  }
 
   std::puts("prefill_smoke_test OK");
   return 0;

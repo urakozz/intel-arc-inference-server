@@ -180,8 +180,8 @@ struct PrefillScratch {
   // composed attention (plan 6d-composed Task 5's fields, allocated here)
   l0::Mem pf_q;         // bf16 [kC][24][256]  RoPE'd queries (ruling A9)
   l0::Mem pf_attn;      // bf16 [kC][24][256]  attn_chunk's output, pre-gate
-  l0::Mem pf_s;         // fp32 [kSHeads][kC][max_len]  S = QK^T
-  l0::Mem pf_p;         // bf16 [kSHeads][kC][max_len]  P = softmax(S)
+  // pf_s / pf_p (the composed path's S and P, [kSHeads][kC][max_len]) are lazy since
+  // spec 6: pf_s_buffer() / pf_p_buffer() below.
   l0::Mem pf_o;         // fp32 [24][kC][256]           O = PV, all heads
   l0::Mem pf_rowsum;    // fp32 [24][kC]
   uint32_t max_len;
@@ -190,17 +190,23 @@ struct PrefillScratch {
   // What `attn_chunk` divides by to pick its head tile at the actual depth
   // (plan 6d-composed Task 4 Step 3). One accessor, so the rule reads the
   // allocation instead of a second copy of the constant.
-  size_t pf_s_bytes() const { return pf_s.size(); }
+  // 0 until the composed path has run (spec 6).
+  size_t pf_s_bytes() const { return pf_s_ ? pf_s_->size() : 0; }
 
   // Spec 2.1 §3.3: the two backend expansions, allocated on first use (ruling R7's pattern one
   // level down) so a session pays only for the backend it runs.
   l0::Mem& dequant_buffer();   // sycl-tla: bf16 [5120][34816] = 356,515,840 B
   l0::Mem& slab_buffer();      // L0: bf16 [17408][1024] = 35,651,584 B (derived: 17408*1024*2)
-  size_t lazy_bytes() const;   // whichever of the two exist
+  // Spec 6 (plan 6b): the composed attention's score scratch, allocated on the first
+  // composed `attn_chunk` (sycl-tla, or L0 with B70_PREFILL_ATTN=composed). The default
+  // flash path never touches them, so prefill scratch no longer scales with max_len.
+  l0::Mem& pf_s_buffer();      // fp32 [kSHeads][kC][max_len]  S = QK^T
+  l0::Mem& pf_p_buffer();      // bf16 [kSHeads][kC][max_len]  P = softmax(S)
+  size_t lazy_bytes() const;   // whichever of the four exist
 
  private:
   l0::Context* ctx_;
-  std::unique_ptr<l0::Mem> dequant_, slab_;
+  std::unique_ptr<l0::Mem> dequant_, slab_, pf_s_, pf_p_;
 };
 
 // The VIEW. Every public name capture.cc uses, with the same types as before

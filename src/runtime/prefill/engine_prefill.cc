@@ -20,6 +20,7 @@
 #include "model/qwen35.h"
 #include "runtime/control.h"
 #include "runtime/engine.h"
+#include "runtime/prefill/attn.h"
 #include "runtime/prefill/backend.h"
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/int8.h"
@@ -34,6 +35,7 @@ struct PrefillEngine {
   struct Chunk {
     uint32_t pos, rows;
     PrefillBackend backend;   // a recording holds one backend's walk, never another's
+    prefill::AttnMode attn;   // ... and one attention path's (spec 6)
     std::unique_ptr<prefill::Context::Recording> recording;
   };
   // Spec 5's int8 state (signs, per-linear column scales, int8 scratch), created on the
@@ -109,6 +111,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     throw std::runtime_error("runtime::Engine::prefill: replay requires the L0 or l0-int8 backend");
 
   prefill::Int8State* q = backend == PrefillBackend::L0Int8 ? pfx_->int8.get() : nullptr;
+  const prefill::AttnMode attn = prefill::attn_mode();
 
   for (size_t off = 0; off < ids.size(); off += chunk) {
     const uint32_t C = uint32_t(std::min<size_t>(chunk, ids.size() - off));
@@ -124,12 +127,13 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     if (replay) {
       const uint32_t pos = base + uint32_t(off);
       auto it = std::find_if(pfx_->chunks.begin(), pfx_->chunks.end(), [&](const auto& entry) {
-        return entry.pos == pos && entry.rows == C && entry.backend == backend;
+        return entry.pos == pos && entry.rows == C && entry.backend == backend &&
+               entry.attn == attn;
       });
       if (it == pfx_->chunks.end()) {
         // FIFO bound limits retained command storage for long/incremental sessions.
         if (pfx_->chunks.size() == 8) pfx_->chunks.erase(pfx_->chunks.begin());
-        pfx_->chunks.push_back({pos, C, backend, pfx_->cx.capture(encode)});
+        pfx_->chunks.push_back({pos, C, backend, attn, pfx_->cx.capture(encode)});
         it = pfx_->chunks.end() - 1;
       }
       pfx_->cx.replay(*it->recording);
