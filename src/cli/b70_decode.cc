@@ -100,7 +100,7 @@ void usage() {
        "                 Engine::ingest replay per id; needs the optional prefill component.\n"
       "  --device N     GPU index. Absent: ONEAPI_DEVICE_SELECTOR=level_zero:N, else device 0.\n"
       "  --max-len <L>  KV cache and RoPE capacity (default 16384; the decode attention kernels\n"
-      "                 are compiled per max_len: 16384 and 131072 (spec 6), a multiple of 256\n"
+      "                 are compiled per max_len: 16384, 32768 and 131072 (spec 6), a multiple of 256\n"
       "                 either way; any other value fails at capture naming the missing binary)\n"
       "  --bench        ingest --depth synthetic ids, then time --tg generated ones and print\n"
       "                 a markdown row on stdout\n"

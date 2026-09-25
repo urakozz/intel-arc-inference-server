@@ -192,18 +192,18 @@ git commit -m "runtime: 131072-token context - decode variants, the memory repor
 - Create: `tests/prefill/flash_long_test.cc`, `tools/probe/mk_long_ids.py`
 - Modify: `tests/CMakeLists.txt`
 
-- [ ] **Step 1: The long prompt**
+- [x] **Step 1: The long prompt**
 
 `tools/probe/mk_long_ids.py <snapshot> <out.ids> <n>`: the concatenated text of `docs/*.md` and `src/**/*.cc` (sorted, repeated until long enough), tokenised with the snapshot's `tokenizer.json`, cut to n ids. Run it in the oracle container for n = 32768, and write the result to `tests/golden/prompts/long32k.ids`. That is about 200 KB; commit it, so the test needs no container.
 
-- [ ] **Step 2: The test**
+- [ ] **Step 2: The test** -- written and run; FAILS its bar (logits cos 0.999661844, first divergence at token 10), operator call pending
 
 `flash_long_test` (label `checkpoint;prefill`, SKIP 77 without the snapshot), max_len 32768 + 256: prefill `long32k.ids` minus its last 64 ids, in flash mode, then generate 64 greedy tokens and record them and the last-row logits. Repeat with `B70_PREFILL_ATTN=composed` in a fresh engine. Bars: the same 64 greedy tokens, and prefill last-row logits cosine >= 0.9999.
 
 Run: `tools/box.sh test flash_long_test`
 Expected: PASS, printing the cosine and the first divergence (none).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tests/prefill/flash_long_test.cc tools/probe/mk_long_ids.py tests/golden/prompts/long32k.ids tests/CMakeLists.txt
