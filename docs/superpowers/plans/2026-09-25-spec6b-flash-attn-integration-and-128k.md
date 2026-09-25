@@ -40,14 +40,14 @@
 **Interfaces:**
 - Produces: kernel `pf_flash_attn(const ushort* Q, const ushort* Kc, const ushort* Vc, float* O, uint pos, uint C, uint rows)`, WG 192 (12 sub-groups), grid `(ceil(C / 16), 4, 1)`; `kernels::pf_flash_attn_variant()` returning `"pf_flash_attn"`.
 
-- [ ] **Step 1: The failing test**
+- [x] **Step 1: The failing test**
 
 `tests/prefill/pf_flash_attn_test.cc`, ported from `tools/probe/probe_flash_attn.cc`'s fp64 reference and sampled-row check (same sampling, same cosine and max-abs report), for the cases `(16384, 2048)`, `(777, 300)`, `(0, 2048, qscale 30)` and `(0, 64)`. Bar: worst cosine >= 0.99999 against fp64; rows [C, pad256(C)) finite. Registered under `B70_PREFILL_ENABLED` with `add_dependencies(... kernel_pf_flash_attn)`, like `pf_int8_test`.
 
 Run: `tools/box.sh test pf_flash_attn_test`
 Expected: FAIL at build (`kernel_pf_flash_attn` missing).
 
-- [ ] **Step 2: The kernel and its build row**
+- [x] **Step 2: The kernel and its build row**
 
 Copy the file and rename the entry. In `CMakeLists.txt`:
 
@@ -59,12 +59,12 @@ add_ocloc_kernel(pf_flash_attn SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.
 
 `pf_kernels.h`: `inline std::string pf_flash_attn_variant() { return "pf_flash_attn"; }`.
 
-- [ ] **Step 3: Run it to pass**
+- [x] **Step 3: Run it to pass**
 
 Run: `tools/box.sh test pf_flash_attn_test`
 Expected: four cases printed, all worst cos >= 0.99999, pad rows finite, PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/kernels/prefill/pf_flash_attn.cl src/kernels/prefill/CMakeLists.txt src/kernels/prefill/pf_kernels.h \
