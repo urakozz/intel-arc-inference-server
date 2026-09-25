@@ -8,6 +8,8 @@
 #   tools/bench_decode.sh --pp 4096              3 runs of spec 2's PREFILL at kC = 2048
 #   tools/bench_decode.sh --pp 4096 --pp-chunk 1024
 #   tools/bench_decode.sh --pp 4096 --pp-backend l0    spec 2.1's L0 GEMM backend
+#   tools/bench_decode.sh --depth 4096 --max-len 131072 spec 6: the 128k decode variants
+#   B70_PREFILL_ATTN=composed tools/bench_decode.sh --pp 4096   spec 6's reference attention
 #
 # `--pp N` replaces `--depth N` with `Engine::prefill` (spec 2, plan 6e Task 1)
 # and makes the binary print a SECOND markdown row -- `| ... <backend> pp | N |
@@ -44,7 +46,12 @@
 #
 # The box must be otherwise idle - no vLLM container, no other GPU work - or
 # the number measures the contention instead. Env: BOX, REMOTE_DIR, JOBS (see
-# tools/box.sh), MODEL, DEPTH, TG, RUNS, ZE_AFFINITY_MASK.
+# tools/box.sh), MODEL, DEPTH, TG, RUNS, MAX_LEN, ZE_AFFINITY_MASK, B70_PREFILL_ATTN.
+#
+# `B70_PREFILL_ATTN` (spec 6: `flash`, the default, or `composed`) is forwarded exactly
+# like ZE_AFFINITY_MASK below, for the same reason: ssh carries no environment. `--max-len`
+# (or MAX_LEN) is passed through to b70-decode's own flag; unset adds nothing, so the
+# invocation is byte-for-byte the one every earlier row used.
 #
 # `ZE_AFFINITY_MASK` needs the same treatment as the sha and for the same
 # reason: `ssh` carries no environment, so until now every row this harness
@@ -70,6 +77,7 @@ RUNS="${RUNS:-3}"
 PP="${PP:-}"
 PP_CHUNK="${PP_CHUNK:-}"
 PP_BACKEND="${PP_BACKEND:-}"
+MAX_LEN="${MAX_LEN:-}"
 BUILD=1
 
 # `set -u` is on, so a bare `--depth` at the end of the line would abort with
@@ -95,6 +103,7 @@ while [ $# -gt 0 ]; do
     --tg)    need_value "$@"; TG="$2";    shift 2 ;;
     --runs)  need_value "$@"; RUNS="$2";  shift 2 ;;
     --model) need_value "$@"; MODEL="$2"; shift 2 ;;
+    --max-len) need_value "$@"; MAX_LEN="$2"; shift 2 ;;
     --no-build) BUILD=0; shift ;;
     -h|--help)
       awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
@@ -146,16 +155,21 @@ AFFINITY=""
 if [ -n "${ZE_AFFINITY_MASK:-}" ]; then
   AFFINITY="ZE_AFFINITY_MASK='$ZE_AFFINITY_MASK' "
 fi
+if [ -n "${B70_PREFILL_ATTN:-}" ]; then
+  AFFINITY="${AFFINITY}B70_PREFILL_ATTN='$B70_PREFILL_ATTN' "
+fi
+MAXLEN_ARGS=""
+[ -n "$MAX_LEN" ] && MAXLEN_ARGS=" --max-len $MAX_LEN"
 
 if [ -n "$PP" ]; then
   MODE_ARGS="--pp $PP"
   [ -n "$PP_CHUNK" ] && MODE_ARGS="$MODE_ARGS --pp-chunk $PP_CHUNK"
   [ -n "$PP_BACKEND" ] && MODE_ARGS="$MODE_ARGS --pp-backend $PP_BACKEND"
-  echo "bench: $MODEL, PREFILL $PP ids (chunk ${PP_CHUNK:-default kC}), tg $TG, $RUNS run(s), sha $SHA, device ${ZE_AFFINITY_MASK:-unset (box default 0)}, backend ${PP_BACKEND:-build default}" >&2
+  echo "bench: $MODEL, PREFILL $PP ids (chunk ${PP_CHUNK:-default kC}), tg $TG, $RUNS run(s), sha $SHA, device ${ZE_AFFINITY_MASK:-unset (box default 0)}, backend ${PP_BACKEND:-build default}, attention ${B70_PREFILL_ATTN:-default (flash)}, max_len ${MAX_LEN:-default}" >&2
   echo "       iterate grade unless the box is provably idle -- see this script's header" >&2
 else
   MODE_ARGS="--depth $DEPTH"
-  echo "bench: $MODEL, depth $DEPTH, tg $TG, $RUNS run(s), sha $SHA, device ${ZE_AFFINITY_MASK:-unset (box default 0)}" >&2
+  echo "bench: $MODEL, depth $DEPTH, tg $TG, $RUNS run(s), sha $SHA, device ${ZE_AFFINITY_MASK:-unset (box default 0)}, max_len ${MAX_LEN:-default}" >&2
 fi
 
 # `rows` is only ever expanded after at least one run, which the --runs guard
@@ -169,7 +183,7 @@ for i in $(seq 1 "$RUNS"); do
   # command prefix is what puts the Mac's sha in the remote process. Both stdout
   # rows come back together, so they are split on the ` pp |` marker the CLI
   # writes rather than on line order.
-  out="$(tools/box.sh run "${AFFINITY}B70_GIT_SHA='$SHA' ./build/src/cli/b70-decode '$MODEL' --bench $MODE_ARGS --tg $TG")"
+  out="$(tools/box.sh run "${AFFINITY}B70_GIT_SHA='$SHA' ./build/src/cli/b70-decode '$MODEL' --bench $MODE_ARGS --tg $TG$MAXLEN_ARGS")"
   echo "$out"
   while IFS= read -r line; do
     case "$line" in

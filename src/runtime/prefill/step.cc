@@ -299,6 +299,10 @@ constexpr size_t kFaLayerWaits = 2 * 4 + 2 * attn::kKvHeads + 1;
 // so EVERY layer loses exactly one launch -- 135 per GDN layer and 130 + 4 x blocks per FA
 // layer. A chunk is 8625 at C <= 256 and 9073 at C = 2048 (derived; -64 = -1 per layer).
 // sycl-tla keeps its own `pf_silu_mul` launch and its arithmetic is untouched.
+// L0 (spec 6, plan 6b): in Flash mode -- the default, `attn_mode()` -- attention is ONE
+// `pf_flash_attn` launch per FA layer in place of 4 x (2 + blocks), so an FA layer is
+// 123 launches whatever C is, and a chunk is 1 + 48 x 135 + 16 x 123 = 8449 at every C
+// (derived; l0-int8 8705). `B70_PREFILL_ATTN=composed` restores the counts above.
 // `silu_fused()` is the one term that is not a property of the shape: it is a
 // diagnostic selector, and the arithmetic follows the walk rather than the
 // default so that a `=0` session's counter still matches its own prediction.

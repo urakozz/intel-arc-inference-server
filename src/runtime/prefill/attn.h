@@ -68,6 +68,22 @@ inline uint32_t attn_row_blocks(uint32_t C, PrefillBackend b) {
   return is_l0(b) ? attn_rows(C, b) / kPfGemmTile : 1;
 }
 
+// Spec 6 (plan 6b): which prefill attention `attn_chunk` runs on the L0 backends.
+//   Flash    - `pf_flash_attn` (plan 6a's pfa_KT64_R16_H6_Q0), ONE launch per FA layer for
+//              all four kv groups, no score scratch. The default.
+//   Composed - the QK^T / softmax / PV path below (ruling A14), kept as the correctness
+//              reference, the role sycl-tla plays for the GEMM. `pf_s` / `pf_p` exist only
+//              once it has run (PrefillScratch::pf_s_buffer()).
+// `B70_PREFILL_ATTN=composed` selects Composed; unset, `flash` or anything else is Flash.
+// sycl-tla always runs Composed whatever this says.
+enum class AttnMode { Flash, Composed };
+// The process-wide mode: B70_PREFILL_ATTN, read once at first use, unless a test has set it.
+AttnMode attn_mode();
+// Test-only override (Review Focus: one engine prefills in both modes). A replay recording
+// is keyed by the mode it was captured in (engine_prefill.cc), so switching is safe.
+void set_attn_mode_for_test(AttnMode m);
+const char* attn_mode_name(AttnMode m);
+
 // (1) q/k RMSNorm, partial RoPE, and the chunk's K/V written into the cache at
 //     absolute positions [pos, pos + C). Reads `pos` and `n_active` out of the
 //     shared `Control` block, which the caller has already set (and waited for).
@@ -80,7 +96,9 @@ void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 // (2) Causal attention of the C queries over the cache rows [0, pos + C).
 //     Writes `s.pf_o` -- fp32 [24][rows][256], per-head stride `rows * 256`
 //     with `rows = attn_rows(C, backend)`, which is what `attn_gate_chunk` and
-//     the tests read it at. On sycl-tla: four L0 launches (one softmax per kv
+//     the tests read it at. On L0 in Flash mode (the default, spec 6): ONE
+//     `pf_flash_attn` launch, grid (ceil(C / 16), 4, 1), writing the same pf_o
+//     layout, so `attn_gate_chunk` is unchanged. Otherwise the composed path. On sycl-tla: four L0 launches (one softmax per kv
 //     group) and eight GEMMs; synchronises, see above. On L0, per kv group: one
 //     pf_gemm per QK^T ROW BLOCK (spec S3), one softmax, one P·V, and no wait --
 //     `attn_chunk_launches(C, backend)` below, the one term of the prefill
@@ -108,10 +126,20 @@ inline constexpr size_t kAttnGateLaunches = 1;
 // QK^T row block, one softmax and one P·V -- so this, and only this, makes the chunk's
 // launch count a function of C. At C <= 256 there is one block and the count is what it was
 // before S3.
-inline size_t attn_chunk_launches(uint32_t C, PrefillBackend b) {
+//
+// Spec 6: in Flash mode (L0 backends only) the whole thing is ONE `pf_flash_attn` launch and
+// the count stops depending on C. `attn_chunk_launches_composed` is the composed count
+// whatever the mode, for the arithmetic that states the difference.
+inline size_t attn_chunk_launches_composed(uint32_t C, PrefillBackend b) {
   return is_l0(b)
              ? size_t(attn::kKvHeads) * (2 + size_t(attn_row_blocks(C, b)))
              : kAttnChunkLaunches;
+}
+inline size_t attn_chunk_launches(uint32_t C, PrefillBackend b, AttnMode mode) {
+  return is_l0(b) && mode == AttnMode::Flash ? 1 : attn_chunk_launches_composed(C, b);
+}
+inline size_t attn_chunk_launches(uint32_t C, PrefillBackend b) {
+  return attn_chunk_launches(C, b, attn_mode());
 }
 
 }  // namespace runtime::prefill
