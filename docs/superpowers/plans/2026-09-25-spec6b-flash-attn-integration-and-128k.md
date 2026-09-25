@@ -218,18 +218,18 @@ git commit -m "tests: flash against composed end to end at 32k context (spec 6 K
 - Create: `tools/probe/passkey.py`, `tools/probe/passkey.sh`
 - Modify: `tests/prefill/flash_long_test.cc` (a `--128k` mode), `docs/BENCHMARKS.md`, `docs/specs/2026-09-25-spec6-flash-attention-128k-design.md`, `docs/17-int8-prefill.md` (a pointer), `docs/README.md` (the probe record's line)
 
-- [ ] **Step 1: 128k determinism and replay**
+- [x] **Step 1: 128k determinism and replay**
 
 `flash_long_test --128k` (not registered by default; run by hand): a 131000-id prompt (`mk_long_ids.py` at n = 131000, written to the box's scratch, not committed), prefilled twice in fresh engines. Bar: last-row logits bitwise equal and finite. Then once with `set_prefill_replay(true)` twice. Bar: bitwise equal to the immediate run.
 
-- [ ] **Step 2: Passkey retrieval**
+- [x] **Step 2: Passkey retrieval**
 
 `passkey.py <snapshot> <placement 0..1> <out.ids>`: filler text ("The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again." repeated), with `The pass key is 71432. Remember it. 71432 is the pass key.` inserted at the placement fraction. The prompt ends with `What is the pass key? The pass key is`, tokenised to about 120000 ids, with no chat template (base continuation). `passkey.sh` runs placements 0.05, 0.5 and 0.95 through `b70-decode --ids <f> --n 8 --prefill --max-len 131072`, decodes the 8 ids, and passes if `71432` appears in them. Also run it with `--pp-backend l0` as a control.
 
 Run: `tools/box.sh run 'tools/probe/passkey.sh'`
 Expected: 3 of 3 on `l0-int8` and on `l0`.
 
-- [ ] **Step 3: Depth rows (F2 as a measurement)**
+- [x] **Step 3: Depth rows (F2 as a measurement)**
 
 `tools/bench_decode.sh --pp N --max-len 131072 --runs 3` for N = 32768, 65536 and 131000, on an idle box. Record t/s, and the attention share from one profiled run at N = 65536.
 
