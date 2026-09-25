@@ -176,6 +176,9 @@ int main(int argc, char** argv) {
 
     runtime::prefill::Context cx(ctx);
     runtime::prefill::KernelCache kcache(ctx);
+    // Since plan 6b attn_chunk runs pf_flash_attn by default on L0; the control here is,
+    // and stays, the composed path.
+    runtime::prefill::set_attn_mode_for_test(runtime::prefill::AttnMode::Composed);
 
     // --- the fp64 reference on sampled (row, head) pairs ----------------------
     std::vector<uint32_t> srows = {0, 1, 7, 8, 63, 64, C / 2, C - 2, C - 1};

@@ -159,8 +159,6 @@ PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len)
       gdn_u(ctx, l0::MemKind::Device, size_t{kC} * kGdnValueDim * kBf16),
       pf_q(ctx, l0::MemKind::Device, size_t{kC} * kFaValueDim * kBf16),
       pf_attn(ctx, l0::MemKind::Device, size_t{kC} * kFaValueDim * kBf16),
-      pf_s(ctx, l0::MemKind::Device, size_t{kSHeads} * kC * max_len * kFp32),
-      pf_p(ctx, l0::MemKind::Device, size_t{kSHeads} * kC * max_len * kBf16),
       pf_o(ctx, l0::MemKind::Device, size_t{Q::kFaQHeads} * kC * Q::kFaHeadDim * kFp32),
       pf_rowsum(ctx, l0::MemKind::Device, size_t{Q::kFaQHeads} * kC * kFp32),
       max_len(max_len),
@@ -176,7 +174,7 @@ size_t PrefillScratch::bytes() const {
          norm_sumsq.size() + gdn_o.size() + mixer_out.size() + logits.size() +
          argmax_part.size() + gdn_xb.size() + gdn_seed.size() + gdn_g.size() +
          gdn_beta.size() + gdn_A.size() + gdn_A2.size() + gdn_w.size() + gdn_u.size() +
-         pf_q.size() + pf_attn.size() + pf_s.size() + pf_p.size() + pf_o.size() +
+         pf_q.size() + pf_attn.size() + pf_o.size() +
          pf_rowsum.size();
 }
 
@@ -192,8 +190,21 @@ l0::Mem& PrefillScratch::slab_buffer() {
                                       size_t{Q::kIntermediate} * 1024 * kBf16);
   return *slab_;
 }
+l0::Mem& PrefillScratch::pf_s_buffer() {
+  if (!pf_s_)
+    pf_s_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device,
+                                      size_t{kSHeads} * kC * max_len * kFp32);
+  return *pf_s_;
+}
+l0::Mem& PrefillScratch::pf_p_buffer() {
+  if (!pf_p_)
+    pf_p_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device,
+                                      size_t{kSHeads} * kC * max_len * kBf16);
+  return *pf_p_;
+}
 size_t PrefillScratch::lazy_bytes() const {
-  return (dequant_ ? dequant_->size() : 0) + (slab_ ? slab_->size() : 0);
+  return (dequant_ ? dequant_->size() : 0) + (slab_ ? slab_->size() : 0) +
+         (pf_s_ ? pf_s_->size() : 0) + (pf_p_ ? pf_p_->size() : 0);
 }
 
 // --- DecodeBuffers, the view -------------------------------------------------

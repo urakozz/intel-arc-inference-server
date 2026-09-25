@@ -50,6 +50,7 @@ enum class Phase : uint32_t {
   kAttnSm,      // pf_softmax_causal
   kAttnPv,      // the PV batched GEMM
   kAttnGate,    // pf_attn_gate
+  kAttnFlash,   // pf_flash_attn (spec 6), in place of QK^T + softmax + PV
   kHead,        // step_head: final norm, lm_head, both argmax stages
   kCount
 };

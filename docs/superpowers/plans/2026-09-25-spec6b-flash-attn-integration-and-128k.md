@@ -83,7 +83,7 @@ git commit -m "kernels: pf_flash_attn, plan 6a's winning fused attention, in pro
 **Interfaces:**
 - Produces: `enum class AttnMode { Flash, Composed }` and `AttnMode attn_mode()` in `attn.h` (reads `B70_PREFILL_ATTN` once; anything but `composed` is Flash); `attn_chunk_launches(C, b)` returns **1** on L0 backends in Flash mode, and the current formula otherwise; `PrefillScratch::pf_s_buffer()` / `pf_p_buffer()` (lazy, like `slab_buffer()`), with `pf_s` / `pf_p` removed as members and `lazy_bytes()` counting them.
 
-- [ ] **Step 1: The failing tests**
+- [x] **Step 1: The failing tests**
 
 - `attn_chunk_test.cc`: a new case runs `attn_chunk` at `(pos 16384, C 2048)` and `(777, 300)` in both modes on the same inputs (set `B70_PREFILL_ATTN` with `setenv` before the first call, or add a test-only override `set_attn_mode_for_test(AttnMode)`), and requires the flash `pf_o` to have per-(row, head) cosine >= 0.99999 against the composed `pf_o` on rows [0, C).
 - `buffers_test.cc`: `PrefillScratch` at max_len 131072 allocates **no** `pf_s` / `pf_p` (its `bytes()` excludes them and `lazy_bytes()` is 0 until `pf_s_buffer()` is called).
@@ -93,7 +93,7 @@ git commit -m "kernels: pf_flash_attn, plan 6a's winning fused attention, in pro
 Run: `tools/box.sh test "attn_chunk_test|buffers_test|prefill_smoke_test"`
 Expected: FAIL (no `AttnMode`, `pf_s` still eager).
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 In `attn.cc`, at the top of `attn_chunk` after the argument checks:
 
@@ -112,7 +112,7 @@ In `attn.cc`, at the top of `attn_chunk` after the argument checks:
 
 The composed body that follows reads `s.pf_s_buffer()` / `s.pf_p_buffer()` instead of the members. The WG size is fixed by the kernel's `reqd_work_group_size`, so check that `cx.launch` sets it from the kernel (as it does for `pf_gemm`); if not, set it explicitly. In `buffers.cc`, move `pf_s` / `pf_p` to `std::unique_ptr<l0::Mem>` built on first access, with the sizes they have today; `pf_s_bytes()` returns 0 until then. Update `attn_chunk_launches` and the `step.cc` launch-arithmetic comment.
 
-- [ ] **Step 3: Run the tests and the gates**
+- [x] **Step 3: Run the tests and the gates**
 
 Run: `tools/box.sh test "pf_flash_attn_test|attn_chunk_test|buffers_test|prefill_smoke_test|prefill_gate|prefill_consistency|prefill_determinism|prefill_replay|prefill_int8_test"`
 Expected: all PASS in the default (flash) mode.
@@ -125,11 +125,11 @@ tools/box.sh run 'cd build && B70_PREFILL_ATTN=composed ctest -R "prefill_gate_l
 
 Expected: PASS, the composed path unchanged.
 
-- [ ] **Step 4: pp4096, no regression (the re-baselined F1)**
+- [x] **Step 4: pp4096, no regression (the re-baselined F1)**
 
 Interleave `B70_PREFILL_ATTN=composed` and flash on `tools/bench_decode.sh --pp 4096 --runs 3` (composed, flash, composed, flash; `bench_decode.sh` must forward `B70_PREFILL_ATTN` to the box, so add it to its env pass-through as `ZE_AFFINITY_MASK` is). Bar: flash median >= 0.99 x the paired composed median. Also run one profiled flash pp4096 and record the `attn_flash` phase ms (F1 as a measurement).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/runtime/prefill/attn.h src/runtime/prefill/attn.cc src/runtime/buffers.h src/runtime/buffers.cc \
