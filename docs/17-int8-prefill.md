@@ -103,4 +103,6 @@ requant is the one cost here that is not matrix math.
 - **The short-prompt floor:** about 0.7 s of prefill whatever the length
   (probe-w4a8 §15.6). It is separate from int8 and matters for every
   agentic turn once prefix caching lands.
-- **Next, on top of this:** flash attention, prefix caching, MTP.
+- (done) **Flash attention and 128k context**, spec 6, on top of this path:
+  pp4096 2125.12 t/s (docs/BENCHMARKS.md, "Flash attention and 128k").
+- **Next:** prefix caching, MTP.
