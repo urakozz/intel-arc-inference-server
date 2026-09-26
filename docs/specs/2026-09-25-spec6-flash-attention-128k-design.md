@@ -1,6 +1,7 @@
 # Spec 6 - fused flash attention in prefill, and 128k context
 
-**Status:** design, 2026-09-25, for operator review.
+**Status:** design, 2026-09-25; implemented 2026-09-26 (plans 6a, 6b). Results and
+the operator's rulings are in §8.
 
 **Order, set by the operator:** spec 5 (int8 prefill linears) is the
 foundation, done 2026-09-24. This spec is the first feature on top of it.
@@ -169,3 +170,72 @@ work.
 - Prefix caching and session continuation, MTP: next, on top of this.
 - The ~0.7 s short-chunk floor of the linear path (probe-w4a8 §15.6).
 - max_len beyond 131072.
+
+## 8. Amendment - 2026-09-26, results
+
+Plans 6a (probe) and 6b (integration, 128k) are done on branch `spec6b-flash-128k`.
+Every number is **measured** unless marked **derived**; the rows are in
+`docs/BENCHMARKS.md` ("Flash attention and 128k (spec 6)") and
+`docs/probe-flash-attn-2026-09-25.md`.
+
+### 8.1 Corrections to the design
+
+- **§3.1's output is `pf_o`, not `pf_attn`.** `pf_flash_attn` writes fp32
+  `[24][pad256(C)][256]`, per-head stride `rows * 256`, exactly where the composed path
+  wrote it, so `pf_attn_gate` and everything after it are unchanged. `pf_attn` (bf16,
+  pre-gate) was never its output.
+- **The kernel is plan 6a's arm `pfa_KT64_R16_H6_Q0`, promoted with its text unchanged**
+  (`src/kernels/prefill/pf_flash_attn.cl`): 16 query rows and all six q-heads of a kv
+  group per work-group, 64-key KV tiles, Q re-read per tile, 256 GRF, no SLM staging.
+  One launch per FA layer, grid `(ceil(C / 16), 4, 1)`.
+- **The decode variants are L131072 and L32768**, beside L16384 and L4096. L32768 exists
+  for K3a's 32k engines: max_len 32768 + 256 has no binary, and 131072 has no room for the
+  composed path's score scratch at that depth. A max_len with no binary fails at capture
+  naming the variant (`attn_decode_M1_L65536_B64`), pinned by `cli_reject_maxlen_uncompiled`.
+
+### 8.2 Operator rulings
+
+- **Ruling A, 2026-09-25:** integrate this kernel now, optimise later. F1 and F2 are
+  recorded as measurements, not gates; the speed gate is pp4096 no regression (flash
+  >= 0.99x the paired composed run).
+- **K3a, 2026-09-26, redefined.** The original bar (flash against composed at 32k: logits
+  cosine >= 0.9999 and the same 64 greedy tokens) measured 0.999662 on `l0-int8`, with the
+  tokens splitting at step 10, and about 0.99988 on `l0`. The cause is §3.1's one
+  rounding point, the bf16 rounding of the unnormalised exp(s - m) against the normalised
+  P, amplified by the model: the same near-tie class as spec 5 §8. It is not depth: on
+  `l0` the gap is 0.99988 at 2048 ids (one chunk, pos 0) and at 32704. The new K3a: flash
+  is **no further from the CPU oracle than composed**, per backend (mean last-row logits
+  cosine against the oracle, flash >= composed - 1e-6), on `l0` and `l0-int8` at the 32k
+  prompt, plus the 128k behavioural checks. The old figures are measurements now.
+
+### 8.3 Gates
+
+| gate | bar | result |
+|---|---|---|
+| K1 kernel vs fp64 | cos >= 0.99999, pad rows finite | worst 0.999998112 / 0.999998227 / 0.999999009 / 0.999998031 on (16384, 2048), (777, 300), (0, 2048, qscale 30), (0, 64); pad rows finite. Against the composed path in `attn_chunk_test`: 0.999994971 and 0.999994768 on every row and head |
+| K2 golden gates | unchanged | all pass in flash mode; in composed mode all pass and the gate output is line-for-line identical to the pre-spec-6 build (`tools/probe/composed_vs_main.sh`) |
+| K3a | flash >= composed - 1e-6 vs the CPU oracle, per backend | **pass**, on the golden set's 96 decision rows (`flash_vs_oracle_test`): `l0` 0.999960061 vs 0.999959889, `l0-int8` 0.999934564 vs 0.999931742 (mean logit cosine, flash vs composed). At 32704 ids (`flash_long_test`) every logit is finite in both modes on both backends. **Not at the 32k capture itself:** the CPU oracle there (`tools/oracle/last_logits.py`, chunked through one cache, checked against one forward at 3000 ids: cos 0.999925) measured 3799 s to reach 4096 ids and 11359 s to reach 8192, so 32704 is a day-class run; the script keeps what it reaches and `flash_long_test <snap> <ids> <file>` applies the bar at depth when a file exists |
+| K3a (old bar, now a measurement) | | flash vs composed at 32704 ids: 0.999661844 on `l0-int8`, first differing greedy step 10 of 64; ~0.99988 on `l0` |
+| K3b 128k | determinism, replay bitwise, finite | two fresh engines on 131000 ids bitwise equal; replay x2 bitwise equal to immediate; logits finite |
+| passkey | 3/3 at 5 / 50 / 95% depth | 3/3 on `l0-int8`, 3/3 on `l0` (119939 ids; every generation " 71432.") |
+| K4 | launch counts, replay | `prefill_smoke_test` pins flash at 8449 launches per chunk at every C (8705 on `l0-int8`), and a composed session after a flash one bitwise equal to fresh runs of each; `prefill_replay_test` passes |
+
+### 8.4 Speed
+
+| bar | target | result |
+|---|---|---|
+| pp4096 no regression (the gate under ruling A) | flash >= 0.99x paired composed | 1.0095 and 1.0102 (2125.12 / 2105.02, 2125.30 / 2103.76 t/s); **pass** |
+| F1 | attention <= 80 ms per 4096 ids | 116.3 ms (`attn_flash`), composed 132.2 ms; **missed, recorded (ruling A)** |
+| F2 | >= 60% of bf16 peak at depth | 28.3 TFLOP/s, 15.4% of 183.45 at pp65536, where attention is 51.3% of GPU time (derived); **missed, recorded (ruling A)** |
+| F3 | decode >= 90% of the bandwidth-derived rate at depth | 78.7% at 32768, 66.2% at 65536, 53.1% at 130816 (20.60 / 15.46 / 10.19 t/s against 26.17 / 23.34 / 19.20 derived); **missed, recorded** |
+| F4 | decode at 4k, max_len 131072 within 2% of 16384 | 29.28 against 29.27 t/s, 1.0003; **pass, so §3.3's indirect grid was not built** |
+
+Memory at 128k (the load line both CLIs print): model 18.116 GB, KV 8.590 GB, decode
+state 0.590 GB, prefill scratch 0.700 GB, int8 0.085 GB, **28.081 GB of 32.530 GB**.
+Prefill at depth: 1499.37 t/s at 32768 ids, 1121.74 at 65536, 746.57 at 130816.
+
+### 8.5 What is next
+
+Attention is half the GPU time of a 64k prefill and decode falls to 53% of its
+bandwidth rate at 128k, so both attention kernels are the follow-up: a split-d or
+SLM-staged `pf_flash_attn` (F1, F2), and decode attention at depth (F3).

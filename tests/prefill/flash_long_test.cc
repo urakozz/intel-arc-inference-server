@@ -1,26 +1,37 @@
 // flash_long_test - spec 6 K3, long context end to end (plan 6b Tasks 4 and 5).
 //
-//   flash_long_test <snapshot> <long32k.ids>
-//       K3a: max_len 32768 (a compiled decode variant; the prompt plus 64 fills it exactly,
-//       and pad256 of the prefill depth, 32704, is 32768, so the composed path fits). Prefill the prompt minus its last 64 ids in FLASH mode
-//       (pf_flash_attn), generate 64 greedy tokens; then the same in a fresh engine in
-//       COMPOSED mode (B70_PREFILL_ATTN=composed's path, selected here through
-//       set_attn_mode_for_test). Bars: the same 64 greedy tokens, and the prefill's
-//       last-row logits cosine >= 0.9999. Prints the cosine and the first divergence.
+//   flash_long_test <snapshot> <long32k.ids> [<oracle last_logits.safetensors>]
+//       K3a, as redefined by the operator's 2026-09-26 ruling: at max_len 32768, on l0-int8
+//       and on l0, prefill each prefix length the oracle file holds (4096, 8192, 16384,
+//       32704; tools/oracle/last_logits.py, the CPU oracle chunked through one cache) in
+//       FLASH and in COMPOSED mode, and take the last-row logits cosine against the oracle.
+//       Bar, per backend: mean(flash) >= mean(composed) - 1e-6, i.e. flash is no further from
+//       the oracle than the composed reference. Every logit finite. Printed as INFORMATION,
+//       no longer a bar: the flash-vs-composed cosine at 32704 and the first differing step
+//       of 64 greedy tokens (the original K3a; measured 0.999662 on l0-int8, split at step
+//       10 -- the bf16 rounding of unnormalised exp(s - m) against normalised P, spec 6
+//       §3.1, amplified by the model, the near-tie class of spec 5 §8).
+//       WITHOUT the oracle file (the registered form): the 32704-id prefill in both modes on
+//       both backends, every logit finite, the flash-vs-composed figures printed. The 32k
+//       CPU oracle is not affordable on the box: tools/oracle/last_logits.py measured 3799 s
+//       to reach 4096 ids and 11359 s to reach 8192 (2026-09-26), so 32704 is a day-class
+//       run; the oracle bar is registered as flash_vs_oracle_test on the golden set instead.
 //   flash_long_test <snapshot> --128k <ids>
 //       K3b: max_len 131072, flash mode (not registered; run by hand). The prompt (131000
 //       ids, tools/probe/mk_long_ids.py) prefilled in two fresh engines: last-row logits
 //       bitwise equal and finite. Then prefill replay (set_prefill_replay(true)) twice:
 //       both bitwise equal to the immediate run.
 //
-// There is no CPU oracle at these depths; the composed path is the reference at 32k
-// (it still fits there) and determinism / replay carry the 128k gate.
+// The 32k CPU oracle is last-row logits only (tools/oracle/last_logits.py); at 128k there
+// is none, and determinism, replay and passkey retrieval carry the gate.
+//   flash_long_test <snapshot> --sweep <ids>   diagnostic: flash vs composed by depth.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -81,48 +92,106 @@ double cosine(const std::vector<float>& a, const std::vector<float>& b) {
   return dot / std::sqrt(na * nb);
 }
 
-int k3a(const std::string& snap, const std::string& ids_path) {
-  const std::vector<uint32_t> all = golden::read_ids(ids_path);
-  CHECK(all.size() > 64);
-  const std::vector<uint32_t> prompt(all.begin(), all.end() - 64);
-  const uint32_t max_len = 32768;
-  CHECK(prompt.size() + 64 <= max_len);
-  std::printf("K3a: %zu prompt ids (%s minus its last 64), 64 greedy tokens, max_len %u\n",
-              prompt.size(), ids_path.c_str(), max_len);
-  l0::Context ctx(0);
-  Run runs[2];
-  const AttnMode modes[2] = {AttnMode::Flash, AttnMode::Composed};
-  for (int i = 0; i < 2; ++i) {
-    runtime::prefill::set_attn_mode_for_test(modes[i]);
-    runtime::Engine e(ctx, loader::load(ctx, snap, max_len), max_len);
-    // generate(64) returns the prefill's own argmax (cur_token) first, then 63 more.
-    runs[i] = prefill_once(e, ctx, prompt, 64);
-    CHECK_EQ(runs[i].gen.size(), size_t(64));
-    CHECK_EQ(runs[i].gen[0], runs[i].first);
-    std::printf("  %-8s (%s): prefill %.1f ms, logits non-finite %zu, first token %u\n",
-                runtime::prefill::attn_mode_name(modes[i]),
-                runtime::prefill_backend_name(e.prefill_backend()), runs[i].prefill_ms,
-                nonfinite(runs[i].logits), runs[i].first);
-    std::fflush(stdout);
+int k3a(const std::string& snap, const std::string& ids_path, const std::string& oracle_path) {
+  // With no oracle file the 32k run checks what it can without one (every logit finite)
+  // and records flash-vs-composed as information; the oracle bar is then carried by
+  // flash_vs_oracle_test on the golden set (see tests/CMakeLists.txt).
+  bool have_oracle = false;
+  if (!oracle_path.empty()) {
+    std::FILE* f = std::fopen(oracle_path.c_str(), "rb");
+    if (!f) {
+      std::fprintf(stderr, "flash_long_test: cannot open oracle %s\n", oracle_path.c_str());
+      return 2;
+    }
+    std::fclose(f);
+    have_oracle = true;
   }
-  const double cs = cosine(runs[0].logits, runs[1].logits);
-  size_t div = runs[0].gen.size();
-  for (size_t i = 0; i < runs[0].gen.size(); ++i)
-    if (runs[0].gen[i] != runs[1].gen[i]) { div = i; break; }
-  std::printf("  last-row logits cosine flash vs composed: %.9f (bar 0.9999)\n", cs);
-  if (div == runs[0].gen.size())
-    std::printf("  greedy tokens: all 64 equal (first divergence: none)\n");
+  std::unique_ptr<golden::Golden> oracle_file;
+  size_t npts = 1, vocab = 0;
+  const int32_t* at = nullptr;
+  const float* orow = nullptr;
+  static const int32_t kDeepest[1] = {32704};
+  if (have_oracle) {
+    oracle_file = std::make_unique<golden::Golden>(oracle_path);
+    const golden::Golden& oracle = *oracle_file;
+    npts = oracle.dim("at", 1, 0);
+    vocab = oracle.dim("logits", 2, 1);
+    CHECK_EQ(oracle.dim("logits", 2, 0), npts);
+    at = oracle.i32("at", npts);
+    orow = oracle.f32("logits", npts * vocab);
+  } else {
+    at = kDeepest;
+  }
+  const std::vector<uint32_t> all = golden::read_ids(ids_path);
+  const uint32_t max_len = 32768;
+  CHECK(size_t(at[npts - 1]) + 64 <= max_len && size_t(at[npts - 1]) <= all.size());
+  if (have_oracle)
+    std::printf("K3a (2026-09-26 ruling): last-row logits cosine against the CPU oracle (%s) at"
+                " %zu prefix lengths of %s; bar per backend: mean(flash) >= mean(composed) - 1e-6\n",
+                oracle_path.c_str(), npts, ids_path.c_str());
   else
-    std::printf("  greedy tokens: FIRST DIVERGENCE at %zu: flash %u, composed %u\n", div,
-                runs[0].gen[div], runs[1].gen[div]);
-  std::printf("  flash tokens:");
-  for (uint32_t t : runs[0].gen) std::printf(" %u", t);
-  std::printf("\n");
-  CHECK_EQ(nonfinite(runs[0].logits), size_t(0));
-  CHECK_EQ(nonfinite(runs[1].logits), size_t(0));
-  CHECK(cs >= 0.9999);
-  CHECK_EQ(div, runs[0].gen.size());
-  std::puts("flash_long_test OK -- K3a: flash == composed at 32k (64 greedy tokens)");
+    std::printf("K3a at 32k without an oracle file: %d ids of %s, flash and composed on l0-int8 and"
+                " l0; bar: every logit finite. flash vs composed is INFORMATION (see header)\n",
+                at[0], ids_path.c_str());
+  l0::Context ctx(0);
+  // One engine; modes and backends switched in place (prefill_smoke_test pins a switched
+  // run bitwise equal to a fresh engine's).
+  runtime::Engine e(ctx, loader::load(ctx, snap, max_len), max_len);
+  using B = runtime::PrefillBackend;
+  bool ok = true;
+  for (B b : {B::L0Int8, B::L0}) {
+    e.set_prefill_backend(b);
+    double mean[2] = {0, 0};
+    Run last[2];
+    const AttnMode modes[2] = {AttnMode::Flash, AttnMode::Composed};
+    for (int k = 0; k < 2; ++k) {
+      runtime::prefill::set_attn_mode_for_test(modes[k]);
+      for (size_t i = 0; i < npts; ++i) {
+        const std::vector<uint32_t> ids(all.begin(), all.begin() + at[i]);
+        const bool deepest = i + 1 == npts;
+        Run r = prefill_once(e, ctx, ids, deepest ? 64 : 0);
+        CHECK_EQ(nonfinite(r.logits), size_t(0));
+        const size_t am =
+            size_t(std::max_element(r.logits.begin(), r.logits.end()) - r.logits.begin());
+        if (have_oracle) {
+          CHECK_EQ(r.logits.size(), vocab);
+          const std::vector<float> o(orow + i * vocab, orow + (i + 1) * vocab);
+          const double cs = cosine(r.logits, o);
+          mean[k] += cs / double(npts);
+          std::printf("  %-8s %-8s n %5d: cos vs oracle %.9f, argmax %zu (oracle %zu), prefill %.1f ms\n",
+                      runtime::prefill_backend_name(b), runtime::prefill::attn_mode_name(modes[k]),
+                      at[i], cs, am, size_t(std::max_element(o.begin(), o.end()) - o.begin()),
+                      r.prefill_ms);
+        } else {
+          std::printf("  %-8s %-8s n %5d: logits finite, argmax %zu, prefill %.1f ms\n",
+                      runtime::prefill_backend_name(b), runtime::prefill::attn_mode_name(modes[k]),
+                      at[i], am, r.prefill_ms);
+        }
+        std::fflush(stdout);
+        if (deepest) last[k] = std::move(r);
+      }
+    }
+    const bool pass = !have_oracle || mean[0] >= mean[1] - 1e-6;
+    if (have_oracle) std::printf("  %s: mean cos vs oracle flash %.9f, composed %.9f (flash - composed %+.3e) -- %s\n",
+                runtime::prefill_backend_name(b), mean[0], mean[1], mean[0] - mean[1],
+                pass ? "PASS" : "FAIL");
+    // Information, not a bar (dropped by the ruling): flash against composed directly.
+    size_t div = last[0].gen.size();
+    for (size_t i = 0; i < last[0].gen.size(); ++i)
+      if (last[0].gen[i] != last[1].gen[i]) { div = i; break; }
+    std::printf("  %s INFO at n %d: flash vs composed logits cos %.9f; 64 greedy tokens %s",
+                runtime::prefill_backend_name(b), at[npts - 1], cosine(last[0].logits, last[1].logits),
+                div == last[0].gen.size() ? "all equal\n" : "first differ at step ");
+    if (div != last[0].gen.size())
+      std::printf("%zu (flash %u, composed %u)\n", div, last[0].gen[div], last[1].gen[div]);
+    std::fflush(stdout);
+    ok &= pass;
+  }
+  runtime::prefill::set_attn_mode_for_test(AttnMode::Flash);
+  CHECK(ok);
+  std::puts(have_oracle
+                ? "flash_long_test OK -- K3a: flash no further from the oracle than composed, l0 and l0-int8"
+                : "flash_long_test OK -- 32k: flash and composed finite on l0 and l0-int8 (oracle bar: flash_vs_oracle_test)");
   return 0;
 }
 
@@ -231,5 +300,5 @@ int main(int argc, char** argv) {
     if (argc < 4) return 2;
     return k3b(snap, argv[3]);
   }
-  return k3a(snap, argv[2]);
+  return k3a(snap, argv[2], argc > 3 ? argv[3] : "");
 }
