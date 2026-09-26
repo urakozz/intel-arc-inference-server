@@ -58,6 +58,10 @@ narrative, and the numbered guides cite them where they matter.
   by data type, with the assembly that proves the loops are DPAS bound
 - [probe-fused-dequant-2026-09-22.md](probe-fused-dequant-2026-09-22.md) -
   fusing int4 dequant into the GEMM: bitwise correct, slower, **rejected**
+- [probe-flash-attn-2026-09-25.md](probe-flash-attn-2026-09-25.md) - the
+  fused flash-attention probe (spec 6 P0/P1): the attention baselines, the
+  composed path against fp64, and the tile sweep whose winner,
+  `pfa_KT64_R16_H6_Q0`, is the production `pf_flash_attn`
 - [probe-w4a8-2026-09-23.md](probe-w4a8-2026-09-23.md) - W4A8 on the mixed
   4-by-8 DPAS: 0.965x the control and 2.79% relative error, **rejected**; the
   group-size sweep in §13 shows why, and that per-channel scales would reach

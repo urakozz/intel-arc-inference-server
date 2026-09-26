@@ -26,6 +26,12 @@ docs/probe-w4a8-2026-09-23.md sections 14 and 15).
 Decode has been parked for a while and vLLM is still ahead there, so that is
 the honest picture: good prefill, decode still to do.
 
+Context now goes to 131072 tokens (`--max-len 131072`, 28.1 GB of the card's 32.5):
+prefill attention is a fused flash-attention kernel of our own, and a passkey
+stated once in 120k tokens of filler is found at 5, 50 and 95% depth (spec 6).
+Both attention kernels are still slow at depth: 747 t/s prefill and 10.2 t/s
+decode at 128k.
+
 Checkpoint is `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`, int4 weights with
 group size 64, bf16 activations. vLLM serves the exact same files, which is what
 makes the comparison fair. Full protocol and every row is in

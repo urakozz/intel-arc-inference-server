@@ -196,7 +196,7 @@ git commit -m "runtime: 131072-token context - decode variants, the memory repor
 
 `tools/probe/mk_long_ids.py <snapshot> <out.ids> <n>`: the concatenated text of `docs/*.md` and `src/**/*.cc` (sorted, repeated until long enough), tokenised with the snapshot's `tokenizer.json`, cut to n ids. Run it in the oracle container for n = 32768, and write the result to `tests/golden/prompts/long32k.ids`. That is about 200 KB; commit it, so the test needs no container.
 
-- [ ] **Step 2: The test** -- written and run; FAILS its bar (logits cos 0.999661844, first divergence at token 10), operator call pending
+- [x] **Step 2: The test** -- the original bar failed (logits cos 0.999661844, split at step 10); K3a redefined by the operator 2026-09-26, see spec 6 §8
 
 `flash_long_test` (label `checkpoint;prefill`, SKIP 77 without the snapshot), max_len 32768 + 256: prefill `long32k.ids` minus its last 64 ids, in flash mode, then generate 64 greedy tokens and record them and the last-row logits. Repeat with `B70_PREFILL_ATTN=composed` in a fresh engine. Bars: the same 64 greedy tokens, and prefill last-row logits cosine >= 0.9999.
 
@@ -233,13 +233,13 @@ Expected: 3 of 3 on `l0-int8` and on `l0`.
 
 `tools/bench_decode.sh --pp N --max-len 131072 --runs 3` for N = 32768, 65536 and 131000, on an idle box. Record t/s, and the attention share from one profiled run at N = 65536.
 
-- [ ] **Step 4: The record**
+- [x] **Step 4: The record**
 
 - `docs/BENCHMARKS.md`: a section "Flash attention and 128k (spec 6)" with the pp4096 pair, the F1 phase ms, the depth rows, and the decode rows F3/F4.
 - The spec: "## 8. Amendment - <date>, results": the pf_o correction, the operator's re-baselining of F1/F2 (ruling A, 2026-09-25), and every gate's number (K1 to K4, F1 to F4, passkey).
 - `docs/README.md`: a line for `probe-flash-attn-2026-09-25.md` under the measurement records.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tools/probe/passkey.py tools/probe/passkey.sh tests/prefill/flash_long_test.cc docs/BENCHMARKS.md \

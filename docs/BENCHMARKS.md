@@ -137,11 +137,13 @@ of three, same checkpoint.
 | 2026-09-22 | causal QK^T: the attention kernel stops computing the masked half | 1505.16 | 2721.3 | 0.09% | RECORD |
 | 2026-09-22 | SiLU folded into the gate‖up GEMM epilogue | 1560.40 | 2625.0 | 0.58% | RECORD |
 | 2026-09-23 | split-BF16 GDN scan becomes the default | 1670.72 | 2451.6 | 0.10% | RECORD |
-| **2026-09-24** | **int8 prefill linears (spec 5 h8) become the default, `l0-int8`** | **2104.50** | **1946.3** | **0.22%** | **RECORD, idle checked before the passes** |
+| 2026-09-24 | int8 prefill linears (spec 5 h8) become the default, `l0-int8` | 2104.50 | 1946.3 | 0.22% | RECORD, idle checked before the passes |
+| **2026-09-25** | **fused flash attention (spec 6) becomes the default; interleaved with the composed path's 2105.02 (below)** | **2125.12** | **1927.4** | **0.07%** | **RECORD** |
 | | vLLM `0.29.1rc1.dev380`, matched | 1610.04 | 2544.043 | | measured, external |
 
 **2104.50 is 130.7% of the matched vLLM row** (derived; vLLM was measured
-2026-09-20 and not re-run). The bf16 walk's record, 1670.72, was 103.8% of it.
+2026-09-20 and not re-run); spec 6's flash attention took it to 2125.12, 132.0%
+(derived; its own section below). The bf16 walk's record, 1670.72, was 103.8% of it.
 The arc from the last row before the kernel work started to here is 1498.97 to
 2104.50, **+40.4%**.
 
@@ -318,6 +320,87 @@ The derived HTTP cost is **-3.77 ms per 4096 tokens**, statistically
 indistinguishable from zero against the 0.5 to 3 ms run-to-run spread both
 sides show. Tokenizer encode plus HTTP framing cost nothing on top of the
 device-side prefill.
+
+## Flash attention and 128k (spec 6)
+
+Spec 6 (plans 6a and 6b, 2026-09-25): prefill attention is `pf_flash_attn`, one
+fused bf16 DPAS kernel per FA layer (plan 6a's winning tile, `pfa_KT64_R16_H6_Q0`,
+docs/probe-flash-attn-2026-09-25.md), in place of the composed QK^T GEMM, causal
+softmax and PV GEMM. The composed path stays selectable with
+`B70_PREFILL_ATTN=composed`, and its score scratch (`pf_s` / `pf_p`, which would be
+9.66 GB at 128k, derived) is only allocated when it runs. `--max-len 131072` works in
+both CLIs. Everything below is device 0 on an idle box, `l0-int8`, measured unless
+marked derived.
+
+**pp4096, interleaved composed / flash / composed / flash, median of 3 each:**
+
+| run | composed t/s | flash t/s | flash / composed (derived) |
+|---|---:|---:|---:|
+| round 1 | 2105.02 (1945.8 ms) | 2125.12 (1927.4 ms) | 1.0095 |
+| round 2 | 2103.76 (1947.0 ms) | 2125.30 (1927.3 ms) | 1.0102 |
+
+All four are RECORD grade, spreads 0.07 to 0.16%. Flash is the new pp4096 record,
+**2125.12 t/s** (the first flash row), 132.0% of the matched vLLM row (derived).
+The plan's gate was no regression (flash >= 0.99x); it is 1.01x.
+
+**The attention phase (F1), one profiled pp4096 each, L0 GPU ms (diagnostic):**
+`attn_flash` 116.3 ms, against the composed path's QK^T 43.4 + softmax 57.4 + PV
+31.4 = 132.2 ms in the same session. Spec 6's F1 target was 80 ms (vLLM's flash
+kernel: 63.1 ms); it is missed and recorded, per the operator's ruling A of
+2026-09-25 (integrate now, optimise later).
+
+**Prefill at depth, `--pp N --max-len 131072`, median of 3:**
+
+| ids | t/s | ms total | spread |
+|---:|---:|---:|---:|
+| 32768 | 1499.37 | 21854.5 | 0.22% |
+| 65536 | 1121.74 | 58423.5 | 0.02% |
+| 130816 | 746.57 | 175223.3 | 0.02% |
+
+At 65536 ids (one profiled run) `attn_flash` is 29852 ms of 58239 ms of L0 GPU
+time, **51.3%**, which is 28.3 TFLOP/s on its causal FLOP count, 15.4% of the
+183.45 TFLOP/s bf16 peak (derived). Spec 6's F2 asked for 60% of peak; missed and
+recorded under ruling A. The follow-up is a split-d / SLM-staged kernel.
+
+**Decode (F4): the 128k variants cost nothing at shallow depth.** Depth 4096, tg
+256, interleaved twice: max_len 16384 29.27 and 29.27 t/s, max_len 131072 29.28 and
+29.28 t/s, ratio 1.0003 (derived; the bar was within 2%). The captured list still
+launches `max_len / 64` attention blocks per head group every token and the idle
+ones cost nothing measurable, so the indirect grid spec 6 §3.3 held in reserve was
+not built.
+
+**Decode at depth (F3), `--pp N --max-len 131072`, tg 256, median of 3:**
+
+| depth | t/s | ms/token | bandwidth-derived rate | share |
+|---:|---:|---:|---:|---:|
+| 4096 | 29.28 | 34.15 | (the basis) | |
+| 32768 | 20.60 | 48.54 | 26.17 | 78.7% |
+| 65536 | 15.46 | 64.68 | 23.34 | 66.2% |
+| 130816 | 10.19 | 98.13 | 19.20 | 53.1% |
+
+The derived rate is the bandwidth decode achieves at depth 4096, 29.28 t/s x
+(15.540 GB of weights + 4096 x 64 KiB of KV) = 462.9 GB/s, divided by the bytes one
+token reads at the row's depth. Spec 6's F3 bar was 90%; missed and recorded:
+decode attention, not the weights, is what falls behind at depth. (The deepest row
+is 130816 so that 256 generated tokens fit in 131072.)
+
+**Memory at 128k**, the line both CLIs now print before the first prefill:
+`memory: model 18.116 GB, kv 8.590 GB, decode state 0.590 GB, prefill scratch
+0.700 GB, int8 0.085 GB, total 28.081 GB of 32.530 GB`.
+
+**Correctness.** Kernel against fp64: worst cosine 0.999998 on every case, at or
+above the composed path's own. Every golden gate passes in both modes, and the
+composed path is byte-identical to before in its gate output. At 32k (K3a, as the
+operator redefined it on 2026-09-26) flash is no further from the CPU oracle than
+composed on either backend. Mean logit cosine against the oracle over the golden set's 96
+decision rows: `l0` flash 0.999960061 vs composed 0.999959889, `l0-int8` flash 0.999934564
+vs composed 0.999931742 (`flash_vs_oracle_test`). Flash and composed measured directly
+against each other at 32704 ids is information now, not a bar: logits cosine 0.999662 on
+`l0-int8` with greedy tokens splitting at step 10 of 64, about 0.99988 on `l0`. A CPU
+oracle at 32k itself was tried and is day-class (11359 s to reach 8192 ids). At 128k: two fresh engines on a 131000-id
+prompt give bitwise-equal, finite last logits, prefill replay reproduces them
+bitwise twice, and passkey retrieval at 119939 ids finds the key at 5, 50 and 95%
+depth, 3/3 on `l0-int8` and 3/3 on `l0`.
 
 ## Decode
 
