@@ -166,7 +166,7 @@ Add the two variant rows. Make capture throw with the variant name when the modu
 Run: `tools/box.sh run 'ZE_AFFINITY_MASK=0 ./build/src/cli/b70-decode <snapshot> --bench --depth 4096 --max-len 131072'`
 Expected: loads, prints the memory line with total < 32 GB, and prints a decode row.
 
-- [ ] **Step 4: F3 and F4, measured**
+- [x] **Step 4: F3 and F4, measured**
 
 On an idle box:
 - **F4:** `tools/bench_decode.sh --depth 4096 --runs 3` at max_len 16384, then at `--max-len 131072`, interleaved twice. Bar: the 131072 median within 2 % of the 16384 median.
