@@ -224,6 +224,9 @@ class Engine {
   uint32_t max_verify_k() const;
   // Tests and the record: the MTP buffers and lists (null / throw when MTP is off).
   MtpBuffers* mtp_buffers() { return mtp_.get(); }
+  // The last prefill chunk's main hidden rows: bf16 [kC + 1][5120], row 1 + r = position
+  // (last chunk base + r) post-final-norm (step_mtp_kv). Null before an MTP prefill.
+  const l0::Mem* mtp_prefill_hidden() const { return mtp_pf_hid_.get(); }
   const CapturedStep& verify_step(uint32_t M) const;
   const CapturedStep& draft_step(uint32_t i) const;
 

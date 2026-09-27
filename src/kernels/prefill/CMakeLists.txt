@@ -144,3 +144,19 @@ add_ocloc_kernel(pf_gemm_i8_SILU SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1 SILU_
 # the operator enabled exp2 on 2026-09-27 accepting its 7.6e-6 K3a miss on l0 (spec 6 §9).
 add_ocloc_kernel(pf_flash_attn SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
                  DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 OPTIONS -cl-intel-256-GRF-per-thread)
+
+# Spec 8 (plan 8b Task 3): the MTP head's KV fill during prefill. The two pre-fc norms
+# write the two halves of one [C][10240] row (X_STRIDE), fc's output starts the head's
+# residual stream (ZERO_RESID), and the head's bf16 linears reach pf_gemm through an
+# untiling slab kernel (pf_bf16_slab) instead of pf_dequant_slab. All additive: no
+# existing binary's command line changes.
+if(B70_MTP)
+  add_ocloc_kernel(pf_res_fold_K5120_SP1_G20_Z SOURCE ${PF_PREP_CL}
+                   DEFINES K=5120 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
+  add_ocloc_kernel(pf_norm_finish_K5120_G20_W20_X10240 SOURCE ${PF_PREP_CL}
+                   DEFINES K=5120 NORM_G=20 NORM_WGS=20 X_STRIDE=10240)
+  foreach(K 10240 5120)
+    add_ocloc_kernel(pf_bf16_slab_K${K} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_bf16_slab.cl
+                     DEFINES K=${K})
+  endforeach()
+endif()

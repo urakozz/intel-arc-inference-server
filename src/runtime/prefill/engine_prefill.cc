@@ -64,7 +64,10 @@ std::string Engine::memory_line() const {
   const double gb = 1e9;
   const size_t model = model_.report.total();
   const size_t kv = persist_.kv_k.size() + persist_.kv_v.size();
-  const size_t decode = persist_.bytes() - kv + decode_scratch_.bytes();
+  // Spec 8: the MTP head's buffers (its KV, the GDN slots, hh/dh, draft logits) count as
+  // decode state; the head's weights are in `model` (LoadReport::mtp_bytes).
+  const size_t decode = persist_.bytes() - kv + decode_scratch_.bytes() +
+                        (mtp_ ? mtp_->bytes() : 0) + (mtp_pf_hid_ ? mtp_pf_hid_->size() : 0);
   const size_t pf = pf_ ? pf_->bytes() + pf_->lazy_bytes() : 0;
   const size_t i8 = pfx_ && pfx_->int8 ? pfx_->int8->bytes() : 0;
   const size_t total = model + kv + decode + pf + i8;
@@ -140,6 +143,24 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   // With a block hook (spec 7 §3.2) every chunk ends at a block end or at the prompt
   // end, so each completed block is a storable one; without one, uniform chunks.
   const bool hooked = static_cast<bool>(block_hook_);
+  // Spec 8: with the MTP head, every chunk also fills the head's KV (step_mtp_kv), which
+  // needs the chunk's post-final-norm hidden rows and h_{pos-1} (MtpBuffers::hh row 0).
+  // The prefill GDN path reads slot 0 directly, so a live slot left by a commit is
+  // copied there first.
+  uint16_t* hid = nullptr;
+  if (mtp_) {
+    if (!is_l0(backend))
+      throw std::runtime_error("runtime::Engine::prefill: the MTP head's prefill runs on the L0"
+                               " backends only (pf_gemm)");
+    mtp_normalise_live();
+    verify_k_ = kNoVerify;
+    if (!mtp_pf_hid_)
+      mtp_pf_hid_ = std::make_unique<l0::Mem>(
+          ctx_, l0::MemKind::Device,
+          size_t(PrefillScratch::kC + 1) * model::Qwen35::kHidden * 2);
+    hid = mtp_pf_hid_->as<uint16_t>();
+  }
+  const size_t hid_row = size_t(model::Qwen35::kHidden) * 2;
   uint32_t C = 0;
   for (size_t off = 0; off < ids.size(); off += C) {
     C = uint32_t(std::min<size_t>(chunk, ids.size() - off));
@@ -148,10 +169,19 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     std::memcpy(pf_->ids.ptr(), ids.data() + off, size_t(C) * 4);
     control_->pos = base + uint32_t(off);
     control_->n_active = C;
+    if (mtp_) {
+      const uint32_t pos = base + uint32_t(off);
+      hctl_->pos = pos == 0 ? 0 : pos - 1;
+      hctl_->n_active = prefill::mtp_kv_rows(pos, C);
+      imm_.copy(hid, mtp_->hh.ptr(), hid_row);   // h_{pos-1} into row 0
+    }
     auto encode = [&] {
       prefill::step_chunk(pfx_->cx, pfx_->kc, *pf_, model_, buffers_.max_len, control_,
                         base + uint32_t(off), C, persist_.gdn_state, persist_.conv_ring,
                         persist_.kv_k, persist_.kv_v, backend, q);
+      if (mtp_)
+        prefill::step_mtp_kv(pfx_->cx, pfx_->kc, *pf_, model_, hctl_, base + uint32_t(off), C,
+                             hid, mtp_->kv_k.as<uint16_t>(), mtp_->kv_v.as<uint16_t>());
     };
     if (replay) {
       const uint32_t pos = base + uint32_t(off);
@@ -170,6 +200,8 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       encode();
     }
     pfx_->cx.wait();                       // the chunk's state has landed
+    if (mtp_)   // h_{end-1}: the next chunk's row 0, a snapshot's hidden, the first draft's h
+      imm_.copy(mtp_->hh.ptr(), reinterpret_cast<uint8_t*>(hid) + size_t(C) * hid_row, hid_row);
     const uint32_t end = base + uint32_t(off) + C;
     if (hooked && off + C < ids.size() && end % kBlock == 0) {
       // Mid-prompt block end: the state is exactly at `end`; say so in Control before
@@ -186,7 +218,8 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   const uint32_t last = C - 1;
   control_->pos = base + uint32_t(ids.size()) - 1;
   control_->n_active = 1;
-  prefill::step_head(pfx_->cx, pfx_->kc, *pf_, model_, control_, last);
+  prefill::step_head(pfx_->cx, pfx_->kc, *pf_, model_, control_, last,
+                     mtp_ ? reinterpret_cast<uint8_t*>(hid) + size_t(C) * hid_row : nullptr);
   pfx_->cx.wait();
   if (hooked) {
     const uint32_t end = base + uint32_t(ids.size());
