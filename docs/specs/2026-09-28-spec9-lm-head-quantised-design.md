@@ -1,6 +1,6 @@
 # Spec 9 - a quantised `lm_head`, made at load from the bf16 checkpoint
 
-**Status:** design, 2026-09-28, for operator review.
+**Status:** design, 2026-09-28; **operator ruling the same day: int8, not int4** (§2).
 
 **Order:** after spec 8 (MTP) in the operator's queue; independent of it in
 code, but it pays twice under MTP (every draft step reads `lm_head` too).
@@ -36,11 +36,16 @@ fastest correct engine for agentic sessions (memory:
 target-workload-agentic-coding), so the serving default may differ from the
 comparison row, as long as both are reported and labelled.
 
-## 2. The decision (proposed)
+## 2. The decision
+
+**Operator ruling, 2026-09-28: int8, one scale per row (W8A16).** int4 is not pursued:
+the head's logits feed both sampling and every MTP draft, and 4 bits per weight is
+judged too coarse for them. The int4 rows below stay as the measured history only; P0
+gates int8 alone. The MTP head's own weights (`mtp.*`) stay bf16.
 
 **Quantise `lm_head` in the loader, from the checkpoint's bf16 tensor**, the
 way spec 5 builds its int8 column scales at load: no file on disk changes,
-`--lm-head bf16|int8|int4` picks the form, and the choice is gated on
+`--lm-head bf16|int8` picks the form, and the choice is gated on
 accuracy by P0 and the gates below.
 
 Candidates:
@@ -52,20 +57,20 @@ Candidates:
 | int4 g64, RTN, sym (as the old checkpoint) | 0.675 GB | 3.05-3.20 ms (measured) | existing `gemv`, layout 1 |
 | int4 g64 with an error-minimising rounding (GPTQ-style, one pass on calibration hiddens) | 0.675 GB | same | existing `gemv` |
 
-The default is the smallest form that passes every gate in §4; ties go to the
-simpler one. P0 decides which rows are worth building; the int4 RTN row needs
-no kernel, so it is measured end to end first.
+int8 becomes the `b70-serve` default if it passes every gate in §4; if it does
+not, the head stays bf16 and the result is recorded.
 
 ## 3. Design
 
 - **Loader:** `loader::load(..., LmHeadForm)` reads the bf16 `lm_head`,
   quantises on the host (or on the card with a one-off kernel if the host path
-  takes > 10 s: 1.27 G values), repacks to layout 1 for int4 (the one repack
-  `load_linear` implements) or to the int8 layout the new kernel reads, and
-  frees the bf16 copy. VRAM drops by 1.27 GB (int8) or 1.87 GB (int4), derived.
+  takes > 10 s: 1.27 G values) to int8 rows with one fp32 scale each, in the
+  layout the new kernel reads, and frees the bf16 copy. VRAM drops by 1.27 GB
+  (derived).
   The load report gains a line with the form, bytes and quantisation time.
-- **Capture:** unchanged for int4 (`Qwen35::lm_head(kind)` already routes it).
-  int8 adds one kernel variant and one `WeightKind`.
+- **Capture:** `Qwen35::lm_head(kind)` gains the int8 kind: one new kernel
+  variant (`gemv_i8w`, `gemv_bf16`'s structure with int8 weights and a per-row
+  scale) and one `WeightKind`.
 - **Prefill:** the last row's logits go through the same head (`step_head`
   already reuses the decode binary, `src/runtime/prefill/step.cc`), so the first
   generated token uses the same form as every later one.
@@ -97,19 +102,18 @@ no kernel, so it is measured end to end first.
 
 Idle box, device 0, interleaved pairs, median of 3.
 
-- **P0, first (CPU, then card).** For each candidate: L1 and L2 on the CPU
-  from dumped final hidden states (`tools/oracle`); the int4 RTN row end to end
-  on the card (no kernel work); load-time cost.
-- **H1.** Decode at 4k depth with the chosen form: >= 1.07x (int8) or
-  >= 1.10x (int4) plain decode (derived from §2's savings at 33.9 ms/step).
+- **P0, first (CPU).** int8 per-row: L1 and L2 on the CPU from dumped final
+  hidden states (`tools/oracle`); the host quantisation time.
+- **H1.** Decode at 4k depth with the int8 head: >= 1.06x plain decode
+  (derived: 2.15 ms of 33.9 ms per step, less the kernel's efficiency loss).
 - **H2.** MTP draft step time, recorded; spec 8's derived speedup recomputed.
 - **H3.** Prefill unchanged within 1 %.
 
 ## 6. Stages
 
-- **9a, probe:** P0; choose the form (or stop: if no quantised form passes
-  L1 and L2, record and keep bf16).
-- **9b, build:** the loader path, the int8 kernel only if chosen, the CLI
+- **9a, probe:** P0 (or stop: if int8 fails L1 or L2 on the CPU, record and
+  keep bf16).
+- **9b, build:** the loader path, the int8 kernel, the CLI
   flags, L1-L4, H1-H3, the record (BENCHMARKS rows with the head form named).
 
 ## 7. Out of scope
