@@ -1,8 +1,11 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -47,6 +50,28 @@ struct EngineIface {
   virtual uint32_t step(const Sampling& s) = 0;
   virtual uint32_t max_len() = 0;
   virtual uint32_t pos() = 0;
+
+  // Spec 7 (plan 7c): the prefix cache's engine calls, runtime::Engine's (plan 7b) behind
+  // EngineAdapter. Defaults throw, so an engine without them runs with the cache off only.
+  using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
+  virtual uint32_t block() { return 2048; }                  // runtime::Engine::kBlock
+  virtual size_t state_bytes() { return unsupported<size_t>(); }
+  virtual size_t kv_bytes(uint32_t) { return unsupported<size_t>(); }
+  virtual void save_state(void*) { unsupported<int>(); }
+  virtual void load_state(const void*, uint32_t) { unsupported<int>(); }
+  virtual void save_kv(uint32_t, uint32_t, void*) { unsupported<int>(); }
+  virtual void load_kv(uint32_t, uint32_t, const void*) { unsupported<int>(); }
+  virtual void set_block_hook(BlockHook) { unsupported<int>(); }
+  // The id the next step() returns (Control::cur_token[0]), and setting it: a restore at a
+  // prompt-end snapshot sets the first generated id it recorded.
+  virtual uint32_t pending() { return unsupported<uint32_t>(); }
+  virtual void set_pending(uint32_t) { unsupported<int>(); }
+
+ private:
+  template <class T>
+  static T unsupported() {
+    throw std::logic_error("EngineIface: this engine does not support the prefix cache");
+  }
 };
 
 struct Deps {
