@@ -1008,6 +1008,24 @@ if(B70_TOKENIZER_ENABLED)
   endif()
   add_test(NAME sampling_test COMMAND sampling_test)
 
+  # Spec 7 C2 (plan 7c Task 3): the prefix cache's request path on the card, cached against
+  # cold under the tie-aware rule, on both L0 backends. serve_adapters.h again, so it links
+  # what b70-serve links.
+  add_executable(prefix_gpu_test server/prefix_gpu_test.cc)
+  target_include_directories(prefix_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(prefix_gpu_test PRIVATE b70_server b70_tokenizer b70_runtime b70_loader
+    b70_model b70_l0 b70_prefill_host)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(prefix_gpu_test)
+  endif()
+  add_dependencies(prefix_gpu_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS})
+  add_test(NAME prefix_gpu_l0_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0)
+  add_test(NAME prefix_gpu_int8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0-int8)
+  set_tests_properties(prefix_gpu_l0_test prefix_gpu_int8_test PROPERTIES LABELS checkpoint
+    TIMEOUT 1800)
 endif()
 
 # --- spec 8 (plan 8b): MTP in the engine ------------------------------------------------
