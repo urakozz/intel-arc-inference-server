@@ -5,21 +5,22 @@ add_ocloc_kernel(ctrl_read SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/ctrl_read.cl)
 set(GEMV_CL ${CMAKE_CURRENT_SOURCE_DIR}/gemv.cl)
 function(add_gemv_variant M K N S L)
   set(extra_defs)
-  if(M EQUAL 1)
-    # Task 4's exact production cells, copied from probe_gemv_loads.cl. The
-    # variant names stay shape-only, so capture's 19-module topology is
-    # unchanged; only these binaries receive the measured arithmetic/geometry.
-    if(L EQUAL 0 AND K EQUAL 6144 AND N EQUAL 5120 AND S EQUAL 4)
-      list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
-    elseif(L EQUAL 0 AND K EQUAL 5120 AND N EQUAL 14336 AND S EQUAL 2)
-      list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
-    elseif(L EQUAL 0 AND K EQUAL 5120 AND N EQUAL 34816 AND S EQUAL 8)
-      list(APPEND extra_defs GEMV_DEQ_SHIFT=1)
-    elseif(L EQUAL 0 AND K EQUAL 17408 AND N EQUAL 5120 AND S EQUAL 4)
-      list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
-    elseif(L EQUAL 1 AND K EQUAL 5120 AND N EQUAL 248320 AND S EQUAL 1)
-      list(APPEND extra_defs GEMV_DEQ_SHIFT=1)
-    endif()
+  # Every M, not just M = 1 (spec 8a): the cells are per shape, the M loop is
+  # independent of the load geometry, and the only M > 1 variant built by
+  # default (M2 K6144 N5120 S1) matches no cell, so no default binary changes.
+  # Task 4's exact production cells, copied from probe_gemv_loads.cl. The
+  # variant names stay shape-only, so capture's 19-module topology is
+  # unchanged; only these binaries receive the measured arithmetic/geometry.
+  if(L EQUAL 0 AND K EQUAL 6144 AND N EQUAL 5120 AND S EQUAL 4)
+    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
+  elseif(L EQUAL 0 AND K EQUAL 5120 AND N EQUAL 14336 AND S EQUAL 2)
+    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
+  elseif(L EQUAL 0 AND K EQUAL 5120 AND N EQUAL 34816 AND S EQUAL 8)
+    list(APPEND extra_defs GEMV_DEQ_SHIFT=1)
+  elseif(L EQUAL 0 AND K EQUAL 17408 AND N EQUAL 5120 AND S EQUAL 4)
+    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
+  elseif(L EQUAL 1 AND K EQUAL 5120 AND N EQUAL 248320 AND S EQUAL 1)
+    list(APPEND extra_defs GEMV_DEQ_SHIFT=1)
   endif()
   add_ocloc_kernel(gemv_M${M}_K${K}_N${N}_S${S}_L${L} SOURCE ${GEMV_CL}
                    DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L} ${extra_defs})
@@ -289,5 +290,44 @@ add_attn_reduce(1 4096)
 add_attn_prep(2)
 add_attn_decode(2 4096)
 add_attn_reduce(2 4096)
+
+# Spec 8a (MTP probe): the whole decode list at M = 2, 3, 4 - every variant
+# runtime::build binds at max_len 16384 with the production checkpoint's bf16
+# lm_head - so tools/probe/probe_verify_m can capture the real list at M rows.
+# OFF by default: production builds compile exactly what they did before.
+option(B70_DECODE_EXTRA_M "build the M = 2..4 decode-list variants (spec 8a probe)" OFF)
+if(B70_DECODE_EXTRA_M)
+  foreach(MM 2 3 4)
+    add_gemv_variant(${MM} 5120 16384 1 1)     # qkv||z
+    add_gemv_variant(${MM} 6144 5120 4 0)      # out_proj, o_proj
+    add_gemv_variant(${MM} 5120 34816 8 0)     # gate||up
+    add_gemv_variant(${MM} 17408 5120 4 0)     # down
+    add_gemv_variant(${MM} 5120 14336 2 0)     # qkv
+    add_gemv_bf16_variant(${MM} 5120 248320 64 1)  # lm_head (bf16)
+    add_gemv_bf16_variant(${MM} 5120 128 16 16)    # a||b
+    add_prep_res_fold(${MM} 5120 0 20)
+    add_prep_res_fold(${MM} 5120 4 20)
+    add_ocloc_kernel(prep_silu_mul_M${MM} SOURCE ${PREP_CL} DEFINES M=${MM})
+    add_ocloc_kernel(prep_gated_head_M${MM} SOURCE ${PREP_CL} DEFINES M=${MM})
+    add_ocloc_kernel(embed_gather_M${MM} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} HIDDEN=5120 VOCAB=248320)
+    add_ocloc_kernel(argmax_stage1_M${MM} SOURCE ${ARGMAX_CL} DEFINES ${ARGMAX_DEFINES} M=${MM})
+    add_attn_decode(${MM} 16384)
+    add_attn_reduce(${MM} 16384)
+    if(NOT MM EQUAL 2)   # the M = 2 ones already exist above
+      add_prep_norm_finish(${MM} 5120 20 20)
+      add_ocloc_kernel(gdn_step_M${MM} SOURCE ${GDN_CL} DEFINES ${GDN_DEFINES} M=${MM})
+      add_attn_prep(${MM})
+    endif()
+  endforeach()
+  # The MTP head's own linears at M = 1, bf16 (draft-step cost, timed in
+  # isolation by probe_verify_m): fc, q||k||v, o, gate||up, down. All N >= 2048,
+  # so the default {64, 1} tiling (kernels::gemv_bf16_tiling).
+  add_gemv_bf16_variant(1 10240 5120 64 1)
+  add_gemv_bf16_variant(1 5120 14336 64 1)
+  add_gemv_bf16_variant(1 6144 5120 64 1)
+  add_gemv_bf16_variant(1 5120 34816 64 1)
+  add_gemv_bf16_variant(1 17408 5120 64 1)
+endif()
 
 add_subdirectory(prefill)
