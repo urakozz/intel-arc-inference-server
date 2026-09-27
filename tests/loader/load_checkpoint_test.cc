@@ -34,10 +34,17 @@ uint16_t u16_at(const std::vector<uint8_t>& b, size_t off) {
 }
 }  // namespace
 
+void check_mtp(l0::Context& ctx, const std::string& arg);
+
 int main(int argc, char** argv) {
   const std::string arg = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   l0::Context ctx(0);
+  {
   loader::LoadedModel m = loader::load(ctx, arg);
+  // Spec 8: without `mtp` the head is skipped, exactly as before.
+  CHECK(m.mtp == nullptr);
+  CHECK_EQ(m.report.mtp_bytes, size_t(0));
+  CHECK_EQ(m.report.mtp_tensors, size_t(0));
 
   // Counts: 64 layers x linears + lm_head.
   CHECK_EQ(m.layer_small.size(), size_t(64));
@@ -228,6 +235,90 @@ int main(int argc, char** argv) {
   CHECK_NEAR(rp[64], std::cos(1.0), 1e-6);
   CHECK_NEAR(rp[96], std::sin(1.0), 1e-6);
 
-  std::printf("load_checkpoint_test OK (%.1f s load)\n", m.report.seconds);
+  std::printf("main model OK (%.1f s load)\n", m.report.seconds);
+  }
+  check_mtp(ctx, arg);
+  std::printf("load_checkpoint_test OK\n");
   return 0;
+}
+
+// Spec 8 §3.1 (plan 8b Task 1): the MTP head, loaded on request. 15 bf16 tensors,
+// 0.849 GB in the checkpoint; every linear read back against a host repack of the
+// mmapped source at tiles that cross the fusion boundaries.
+void check_mtp(l0::Context& ctx, const std::string& arg) {
+  loader::LoadedModel m = loader::load(ctx, arg, 16384, /*mtp=*/true);
+  CHECK(m.mtp != nullptr);
+  CHECK_EQ(m.report.mtp_tensors, loader::kMtpTensors);
+  CHECK_EQ(m.report.mtp_checkpoint_bytes, size_t(849398784));
+  // device: the linears' bf16 bytes plus the five norms widened to fp32 and the FA block.
+  CHECK_EQ(m.report.mtp_bytes, size_t(424673280) * 2 + 5 * 5120 * 4 + loader::kFaBlockBytes);
+  CHECK_EQ(m.report.unconsumed, size_t(0));
+  const loader::MtpHead& h = *m.mtp;
+  struct Row { const loader::DeviceWeight* w; uint32_t K, N; };
+  for (const Row& r : {Row{&h.fc, 10240, 5120}, Row{&h.qkv, 5120, 14336}, Row{&h.o, 6144, 5120},
+                       Row{&h.gate_up, 5120, 34816}, Row{&h.down, 17408, 5120}}) {
+    CHECK(r.w->kind == model::WeightKind::Bf16);
+    CHECK_EQ(r.w->shape.K, r.K);
+    CHECK_EQ(r.w->shape.N, r.N);
+    CHECK_EQ(r.w->shape.S, uint32_t(1));
+    CHECK_EQ(r.w->mem.size(), size_t(r.K) * r.N * 2);
+  }
+  std::string snap = loader::resolve_snapshot(arg);
+  loader::SafetensorsSet set(snap);
+  auto src = [&](const std::string& n) {
+    return reinterpret_cast<const uint16_t*>(set.data(set.tensors().at(n)));
+  };
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  // Element (n, k) of a tiled weight (common::repack_bf16_tiled's index).
+  auto at = [&](const loader::DeviceWeight& w, uint32_t n, uint32_t k) {
+    const size_t K8 = w.shape.K / 8;
+    uint16_t v = 0;
+    imm.copy(&v, w.mem.as<uint16_t>() + ((size_t(n / 16) * K8 + k / 8) * 8 + k % 8) * 16 + n % 16,
+             2);
+    return v;
+  };
+  const std::string L = "mtp.layers.0.";
+  for (uint32_t n : {0u, 17u, 5119u})
+    for (uint32_t k : {0u, 5119u, 5120u, 10239u})
+      CHECK_EQ(at(h.fc, n, k), src("mtp.fc.weight")[size_t(n) * 10240 + k]);
+  // q || k || v: both part boundaries.
+  const uint16_t* q = src(L + "self_attn.q_proj.weight");
+  const uint16_t* kp = src(L + "self_attn.k_proj.weight");
+  const uint16_t* vp = src(L + "self_attn.v_proj.weight");
+  for (uint32_t k : {0u, 4095u, 5119u}) {
+    CHECK_EQ(at(h.qkv, 12287, k), q[size_t(12287) * 5120 + k]);
+    CHECK_EQ(at(h.qkv, 12288, k), kp[k]);
+    CHECK_EQ(at(h.qkv, 13311, k), kp[size_t(1023) * 5120 + k]);
+    CHECK_EQ(at(h.qkv, 13312, k), vp[k]);
+    CHECK_EQ(at(h.qkv, 14335, k), vp[size_t(1023) * 5120 + k]);
+  }
+  // gate/up interleaved in 16-column blocks (fused column c: block c/32, gate if c%32 < 16).
+  const uint16_t* g = src(L + "mlp.gate_proj.weight");
+  const uint16_t* u = src(L + "mlp.up_proj.weight");
+  for (uint32_t c : {0u, 15u, 16u, 31u, 32u, 34815u})
+    for (uint32_t k : {0u, 5119u}) {
+      const uint32_t row = (c / 32) * 16 + c % 16;
+      CHECK_EQ(at(h.gate_up, c, k), (c % 32 < 16 ? g : u)[size_t(row) * 5120 + k]);
+    }
+  CHECK_EQ(at(h.o, 5119, 6143), src(L + "self_attn.o_proj.weight")[size_t(5119) * 6144 + 6143]);
+  CHECK_EQ(at(h.down, 1, 17407), src(L + "mlp.down_proj.weight")[size_t(1) * 17408 + 17407]);
+  // The norms: fp32 (1 + w), the main model's bake.
+  std::vector<uint8_t> norms(loader::kMtpNormsBytes), fa(loader::kFaBlockBytes);
+  imm.copy(norms.data(), h.norms.ptr(), norms.size());
+  imm.copy(fa.data(), h.fa.ptr(), fa.size());
+  const std::pair<const char*, size_t> nrm[] = {
+      {"mtp.pre_fc_norm_embedding.weight", loader::kMtpNormPreE},
+      {"mtp.pre_fc_norm_hidden.weight", loader::kMtpNormPreH},
+      {"mtp.layers.0.input_layernorm.weight", loader::kMtpNormInput},
+      {"mtp.layers.0.post_attention_layernorm.weight", loader::kMtpNormPost},
+      {"mtp.norm.weight", loader::kMtpNormFinal}};
+  for (const auto& [name, off] : nrm)
+    for (uint32_t i : {0u, 5119u})
+      CHECK_EQ(f32_at(norms, off + size_t(i) * 4), 1.0f + common::bf16_to_f32(src(name)[i]));
+  CHECK_EQ(f32_at(fa, loader::kFaOffQNorm + 4),
+           1.0f + common::bf16_to_f32(src(L + "self_attn.q_norm.weight")[1]));
+  CHECK_EQ(f32_at(fa, loader::kFaOffKNorm + 1020),
+           1.0f + common::bf16_to_f32(src(L + "self_attn.k_norm.weight")[255]));
+  std::printf("mtp head OK: %zu tensors, %.3f GB checkpoint, %.3f GB device\n",
+              m.report.mtp_tensors, m.report.mtp_checkpoint_bytes / 1e9, m.report.mtp_bytes / 1e9);
 }
