@@ -52,7 +52,9 @@ _box_env="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/box.env"
 # shellcheck source=/dev/null
 [ -r "$_box_env" ] && . "$_box_env"
 : "${BOX:?set BOX=user@host in the environment or in tools/box.env (see tools/box.env.example)}"
-REMOTE_DIR="${REMOTE_DIR:-b70-inference-server}"
+# shellcheck source=tools/box_dir.sh
+. "$(dirname "${BASH_SOURCE[0]:-$0}")/box_dir.sh"
+REMOTE_DIR="$(b70_remote_dir "$(dirname "${BASH_SOURCE[0]:-$0}")/..")"
 SSH="ssh -n -o BatchMode=yes"
 
 while [ $# -gt 0 ]; do
