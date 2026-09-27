@@ -26,8 +26,8 @@
 // 2026-09-27: scores times ATTN_SCALE * log2(e), so s, the running max m and the masked
 // -INF all live in the log2 domain, and `exp2` (one base-2 math.exp in IGC; `exp`'s
 // range-split temporaries are what spill 77 GRF). EXP2=1 moves the rounding point and
-// measured K3a l0 0.999951245 < composed 0.999959889 (spec 6 §9), so it is off until
-// the operator rules. RPW 8 alone is bitwise neutral (K3a numbers identical to RPW 16).
+// measured K3a l0 0.999951245 < composed 0.999959889 (spec 6 §9); the operator enabled
+// it anyway (default EXP2=1, K3a tol 1e-5 on l0). RPW 8 alone is bitwise neutral (K3a numbers identical to RPW 16).
 // Rows past C in the last 8-row block are computed (finite); rows of blocks wholly past
 // C are not written.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable

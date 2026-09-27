@@ -6,7 +6,9 @@
 # The golden gate (prose, code, cjk; 32 greedy steps each = 96 decision rows) in both
 # attention modes on l0 and l0-int8. Per run: the mean and worst per-step logit cosine
 # against the oracle, and the mean GDN-state layer cosine after the prefill (diagnostic).
-# Bar, per backend: mean(flash) >= mean(composed) - 1e-6, and every gate run itself passes.
+# Bar, per backend: mean(flash) >= mean(composed) - tol, and every gate run itself passes.
+# tol is 1e-6, except l0 at 1e-5: the operator accepted exp2's 7.6e-6 miss there on
+# 2026-09-27 (spec 6 §9). l0-int8, the default, keeps 1e-6.
 # Exit 0 iff both hold on both backends.
 cd "$(dirname "$0")/../.."
 out=/tmp/flash_vs_oracle
@@ -14,6 +16,7 @@ mkdir -p $out
 rc=0
 for b in "l0" "l0-int8 1"; do
   bn=${b%% *}
+  tol=1e-6; [ "$bn" = l0 ] && tol=1e-5
   for m in composed flash; do
     # shellcheck disable=SC2086
     ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0} B70_PREFILL_ATTN=$m ./build/tests/prefill_gate_test \
@@ -30,10 +33,10 @@ for b in "l0" "l0-int8 1"; do
   if [ "${fn:-0}" -ne 96 ] || [ "${cn:-0}" -ne 96 ]; then
     echo "$bn: expected 96 decision rows per mode, got flash ${fn:-0} composed ${cn:-0}"; rc=1; continue
   fi
-  if awk -v f="$fm" -v c="$cm" 'BEGIN { exit !(f >= c - 1e-6) }'; then
-    echo "$bn: K3a PASS, mean flash $fm >= composed $cm - 1e-6"
+  if awk -v f="$fm" -v c="$cm" -v t="$tol" 'BEGIN { exit !(f >= c - t) }'; then
+    echo "$bn: K3a PASS, mean flash $fm >= composed $cm - $tol"
   else
-    echo "$bn: K3a FAIL, mean flash $fm < composed $cm - 1e-6"; rc=1
+    echo "$bn: K3a FAIL, mean flash $fm < composed $cm - $tol"; rc=1
   fi
 done
 exit $rc
