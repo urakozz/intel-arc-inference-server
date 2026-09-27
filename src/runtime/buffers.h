@@ -209,6 +209,42 @@ struct PrefillScratch {
   std::unique_ptr<l0::Mem> dequant_, slab_, pf_s_, pf_p_;
 };
 
+// Spec 8 (plan 8b): the MTP head's state, allocated ONLY when the model carries the
+// head (`loader::load(..., mtp = true)`); an Engine without it allocates none of this.
+//
+//   hctl       the head's own `Control` block (shared): its embed_gather, attention and
+//              argmax kernels read pos / n_active / cur_token from here, so the head runs
+//              at its own position (t for the pair (h_t, x[t+1])) and its argmax chains
+//              the drafts (cur_token <- draft, pos += 1) with the main kernels unchanged.
+//   gdn_spec   GDN state slots 1..kSlots-1 (slot 0 is PersistentBuffers::gdn_state), each
+//              [48][48][128][128] fp32 like gdn_state. The verify list's row m writes slot
+//              (live + m) % kSlots; `Control::gdn_live` names the live one (P0's commit
+//              mechanism: an index, not a 151 MB copy).
+//   kv_k/kv_v  the head's own KV cache, bf16 [max_len][4][256] each (the 17th KV layer).
+//   hh         bf16 [kM + 1][5120]: row 0 = h_{pos-1}, the main model's post-final-norm
+//              hidden at the last consumed position; rows 1..M = the verify rows' hidden.
+//   dh         bf16 [5120]: the draft chain's hidden (the head's own post-mtp.norm output).
+//   logits     fp32 [kMaxK][kVocab]: draft i's logits (q_i for the host sampler).
+struct MtpBuffers {
+  static constexpr uint32_t kSlots = 4;   // M <= 4: K <= 3 drafts + the pending token
+  static constexpr uint32_t kMaxK = kSlots - 1;
+
+  MtpBuffers(l0::Context& ctx, uint32_t max_len);
+
+  l0::Mem hctl;
+  l0::Mem gdn_spec;
+  l0::Mem kv_k, kv_v;
+  l0::Mem hh;
+  l0::Mem dh;
+  l0::Mem logits;
+  uint32_t max_len;
+
+  size_t bytes() const;
+  // What Engine::reset() zeroes when MTP is on (all of it: the head's KV rows are
+  // only ever read after being written, but a reset session must not depend on it).
+  void zero(l0::CmdList& imm);
+};
+
 // The VIEW. Every public name capture.cc uses, with the same types as before
 // except that the l0::Mem members are references into the two groups. The
 // (ctx, max_len) constructor still OWNS both groups.

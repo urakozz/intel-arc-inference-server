@@ -78,13 +78,15 @@ struct NameView {
   size_t top_level = 0;                      // names outside model.language_model.
 };
 
-NameView build_view(const SafetensorsSet& set) {
+NameView build_view(const SafetensorsSet& set, bool keep_mtp) {
   NameView v;
   for (const auto& [name, info] : set.tensors()) {
     (void)info;
     if (starts_with(name, "model.visual.")) {          // no vision tower in v1
       ++v.visual_skipped;
-    } else if (starts_with(name, "mtp.")) {            // no speculation in v1
+    } else if (starts_with(name, "mtp.") && keep_mtp) {   // spec 8: kept on request
+      v.names.emplace(name, name);                          // top-level, verbatim
+    } else if (starts_with(name, "mtp.")) {            // no speculation unless asked
       // The RTN checkpoint's `mtp.*` are 29 tensors in their own shard
       // (`model_extra_tensors.safetensors`, pointed at by the index like any
       // other) and 8 of them are int4 rather than the published checkpoint's
@@ -410,6 +412,112 @@ SmallTensors load_small(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet
           upload(ctx, imm, kind.data(), kind.size())};
 }
 
+// Spec 8 §3.1: the MTP head. The published checkpoint ships exactly 15 bf16
+// `mtp.*` tensors (docs/03-models.md); anything else (the RTN checkpoint's 29,
+// 8 of them int4) is refused by name rather than half-loaded. The linears are
+// laid out for gemv_bf16 (common::repack_bf16_tiled) with the main model's
+// fusions: q||k||v concatenated like the FA layers' Qkv, gate/up interleaved in
+// 16-column blocks like GateUp (prep_silu_mul's gflat/uflat).
+std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet& set,
+                                  NameView& view, LoadReport& rep, Widen& widen) {
+  size_t n_mtp = 0;
+  for (const auto& [name, info] : set.tensors()) {
+    (void)info;
+    n_mtp += starts_with(name, "mtp.");
+  }
+  if (n_mtp != kMtpTensors)
+    throw std::runtime_error("the MTP head must be the published checkpoint's " +
+                             std::to_string(kMtpTensors) + " bf16 mtp.* tensors; this one has " +
+                             std::to_string(n_mtp));
+  // One bf16 [rows][K] tensor, checked by name, dtype and shape.
+  auto tensor = [&](const std::string& name, uint32_t rows, uint32_t K) {
+    const TensorInfo info = take(view, set, name);
+    const bool ok = info.dtype == "BF16" &&
+                    (K == 0 ? info.shape.size() == 1 && info.shape[0] == rows
+                            : info.shape.size() == 2 && info.shape[0] == rows && info.shape[1] == K);
+    if (!ok)
+      throw std::runtime_error("MTP tensor '" + name + "': expected BF16 [" + std::to_string(rows) +
+                               (K ? "][" + std::to_string(K) : std::string()) + "], got " +
+                               info.dtype);
+    rep.mtp_checkpoint_bytes += set.bytes(info);
+    ++rep.mtp_tensors;
+    const uint8_t* p = set.data(info);
+    check_align(p, 2, name);
+    return reinterpret_cast<const uint16_t*>(p);
+  };
+  std::vector<uint16_t> rows_buf, tiled;
+  // parts stacked row-major ([N][K]), or interleaved in 16-row blocks, then tiled.
+  auto linear = [&](const std::vector<std::string>& parts, const std::vector<uint32_t>& ns,
+                    uint32_t K, bool interleave16) {
+    uint32_t N = 0;
+    for (uint32_t n : ns) N += n;
+    const size_t elems = size_t(N) * K;
+    rows_buf.assign(elems, 0);
+    tiled.resize(elems);
+    std::vector<const uint16_t*> src;
+    for (size_t i = 0; i < parts.size(); ++i) src.push_back(tensor(parts[i], ns[i], K));
+    if (interleave16) {
+      for (uint32_t r = 0; r < N; ++r) {
+        const uint32_t blk = r / 32, in = r % 32;
+        const uint16_t* s = src[in < 16 ? 0 : 1] + (size_t(blk) * 16 + in % 16) * K;
+        std::memcpy(rows_buf.data() + size_t(r) * K, s, size_t(K) * 2);
+      }
+    } else {
+      size_t row = 0;
+      for (size_t i = 0; i < src.size(); ++i) {
+        std::memcpy(rows_buf.data() + row * K, src[i], size_t(ns[i]) * K * 2);
+        row += ns[i];
+      }
+    }
+    common::repack_bf16_tiled(rows_buf.data(), K, N, tiled.data());
+    rep.mtp_bytes += elems * 2;
+    return DeviceWeight{upload(ctx, imm, tiled.data(), elems * 2), nullptr,
+                        model::GemvShape{K, N, 1, 0}, model::WeightKind::Bf16};
+  };
+  const std::string L = "mtp.layers.0.";
+  auto h = std::make_unique<MtpHead>(MtpHead{
+      linear({"mtp.fc.weight"}, {5120}, 10240, false),
+      linear({L + "self_attn.q_proj.weight", L + "self_attn.k_proj.weight",
+              L + "self_attn.v_proj.weight"},
+             {12288, 1024, 1024}, 5120, false),
+      linear({L + "self_attn.o_proj.weight"}, {5120}, 6144, false),
+      linear({L + "mlp.gate_proj.weight", L + "mlp.up_proj.weight"}, {17408, 17408}, 5120, true),
+      linear({L + "mlp.down_proj.weight"}, {5120}, 17408, false),
+      l0::Mem(ctx, l0::MemKind::Device, kMtpNormsBytes),
+      l0::Mem(ctx, l0::MemKind::Device, kFaBlockBytes)});
+  // The RMSNorms, baked like every other (1 + w) fp32 norm.
+  std::vector<uint8_t> norms(kMtpNormsBytes), fa(kFaBlockBytes);
+  const std::pair<const char*, size_t> nrm[] = {
+      {"mtp.pre_fc_norm_embedding.weight", kMtpNormPreE},
+      {"mtp.pre_fc_norm_hidden.weight", kMtpNormPreH},
+      {"mtp.layers.0.input_layernorm.weight", kMtpNormInput},
+      {"mtp.layers.0.post_attention_layernorm.weight", kMtpNormPost},
+      {"mtp.norm.weight", kMtpNormFinal}};
+  for (const auto& [name, off] : nrm) {
+    const model::SmallTensor d{name, model::Qwen35::kHidden, "BF16", model::SmallBlock::Norms,
+                               uint32_t(off), model::SmallBake::OnePlusWFp32};
+    bake_small(d, reinterpret_cast<const uint8_t*>(tensor(name, model::Qwen35::kHidden, 0)),
+               norms.data() + off, widen);
+  }
+  for (const auto& [name, off] :
+       {std::pair<std::string, size_t>{L + "self_attn.q_norm.weight", kFaOffQNorm},
+        std::pair<std::string, size_t>{L + "self_attn.k_norm.weight", kFaOffKNorm}}) {
+    const model::SmallTensor d{name, model::Qwen35::kFaHeadDim, "BF16", model::SmallBlock::Kind,
+                               uint32_t(off), model::SmallBake::OnePlusWFp32};
+    bake_small(d, reinterpret_cast<const uint8_t*>(tensor(name, model::Qwen35::kFaHeadDim, 0)),
+               fa.data() + off, widen);
+  }
+  imm.copy(h->norms.ptr(), norms.data(), norms.size());
+  imm.copy(h->fa.ptr(), fa.data(), fa.size());
+  rep.mtp_bytes += norms.size() + fa.size();
+  if (rep.mtp_tensors != kMtpTensors || rep.mtp_checkpoint_bytes != kMtpCheckpointBytes)
+    throw std::runtime_error("the MTP head consumed " + std::to_string(rep.mtp_tensors) +
+                             " tensors / " + std::to_string(rep.mtp_checkpoint_bytes) +
+                             " B, expected " + std::to_string(kMtpTensors) + " / " +
+                             std::to_string(kMtpCheckpointBytes));
+  return h;
+}
+
 // cos/sin[p][0..1][i] for the 64 rotary dims (partial_rotary_factor 0.25 of
 // head_dim 256), i < 32. Text-mode interleaved mRoPE copies one position id
 // onto every frequency stream, so this is plain RoPE (docs/03 "Layer math").
@@ -432,10 +540,11 @@ std::vector<float> rope_table(uint32_t max_len) {
 
 size_t LoadReport::total() const {
   return int4_bytes + scale_bytes + bf16_linear_bytes + embed_bytes + lm_head_bytes + small_bytes +
-         pad_bytes;
+         pad_bytes + mtp_bytes;
 }
 
-LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len) {
+LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len,
+                 bool mtp) {
   const auto t0 = std::chrono::steady_clock::now();
   const std::string snap = resolve_snapshot(snapshot_or_repo);
 
@@ -462,7 +571,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
         "ships " + std::to_string(scan.g_idx_tensors) +
         " g_idx tensors - refusing to infer that no activation-order permutation exists. Add "
         "\"desc_act\": false to quantization_config if that is what the quantiser meant.");
-  NameView view = build_view(set);
+  NameView view = build_view(set, mtp);
   Widen widen;
 
   // **`lm_head`'s kind is the checkpoint's to choose, and it is chosen by
@@ -504,7 +613,8 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                 l0::Mem(ctx, l0::MemKind::Device, fnorm.size()),
                 l0::Mem(ctx, l0::MemKind::Device, rope.size() * 4),
                 {},
-                max_len};
+                max_len,
+                nullptr};
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   imm.copy(m.embed.ptr(), set.data(emb), set.bytes(emb));
   m.report.embed_bytes += set.bytes(emb);
@@ -541,6 +651,10 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   }
   m.linears.emplace(std::make_pair(kTopLevel, model::LinearId::LmHead),
                     load_linear(ctx, imm, set, view, "", lm_row, st, m.report));
+  // The MTP head's widening goes into its own Widen: the W cross-check is over
+  // the main model's read-per-token bytes, which the head is not part of.
+  Widen mtp_widen;
+  if (mtp) m.mtp = load_mtp(ctx, imm, set, view, m.report, mtp_widen);
 
   // Up to five names, so a checkpoint that grew a family of tensors says which
   // family rather than making the reader re-run with a debugger.
@@ -556,6 +670,10 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
 
   const LoadReport& r = m.report;
   const double gb = 1e9;
+  char mtp_buf[160];
+  std::snprintf(mtp_buf, sizeof mtp_buf, "MTP head: %zu bf16 tensors, %.3f GB in the checkpoint",
+                r.mtp_tensors, r.mtp_checkpoint_bytes / 1e9);
+  const std::string mtp_line = mtp_buf;
   // The two vocabularies print as one line, naming whichever one this
   // checkpoint spoke - a report that always said "dynamic exclusion rules"
   // would be silently wrong about an auto-round config.
@@ -598,6 +716,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       "  read/token  %13zu B  %7.3f GB\n"
       "  embed       %13zu B  %7.3f GB   (resident, gathered - not per-token)\n"
       "  rope        %13zu B  %7.3f GB   (resident, ~256 B per token - not per-token)\n"
+      "  mtp         %13zu B  %7.3f GB   (%s)\n"
       "  total       %13zu B  %7.3f GB\n"
       "  W check     %.3f GB vs %.3f GB expected = %.3f doc-03 + %.3f pad + %.6f widen"
       " %+.3f lm_head\n"
@@ -612,7 +731,8 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       r.lm_head_bytes, r.lm_head_bytes / gb, lm_int4 ? "int4 g64" : "bf16",
       small_resident, small_resident / gb,
       r.pad_bytes, r.pad_bytes / gb, per_token, per_token / gb, r.embed_bytes, r.embed_bytes / gb,
-      rope_bytes, rope_bytes / gb, r.total(), r.total() / gb, per_token / gb, expected / gb,
+      rope_bytes, rope_bytes / gb, r.mtp_bytes, r.mtp_bytes / gb,
+      mtp ? mtp_line.c_str() : "not loaded; --mtp loads it", r.total(), r.total() / gb, per_token / gb, expected / gb,
       kDocW / gb, r.pad_bytes / gb, widen.total() / gb, lm_adjust / gb, widen.norm, widen.gdn,
       delta * 100.0, m.report.seconds);
 

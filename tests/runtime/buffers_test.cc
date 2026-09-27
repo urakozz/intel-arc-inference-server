@@ -63,6 +63,7 @@
 // per-field MB figure in the plan matches the table above exactly - the plan
 // simply predates `norm_sumsq`.
 #include <cstdint>
+#include <cstddef>
 #include <cstdio>
 #include "check.h"
 #include "l0/cmdlist.h"
@@ -255,6 +256,31 @@ int main() {
       const uint32_t* w = host.as<uint32_t>();
       for (size_t i = 0; i < probe / sizeof(uint32_t); ++i) CHECK_EQ(w[i], 0u);
     }
+  }
+
+  // Spec 8 (plan 8b): the MTP head's buffers, constructed only when the model
+  // carries the head (Engine), so none of the sizes above moved.
+  //   hctl       128 B (a second Control)                          =           128
+  //   gdn_spec   3 slots x 48 x 48 x 128 x 128 x 4 B               =   452,984,832
+  //   kv_k/kv_v  2 x 16384 x 4 x 256 x 2 B                         =    67,108,864
+  //   hh         (8 + 1) x 5120 x 2 B                              =        92,160
+  //   dh         5120 x 2 B                                        =        10,240
+  //   logits     3 x 248320 x 4 B                                  =     2,979,840
+  //                                                          total =   523,176,064
+  {
+    runtime::MtpBuffers mb(ctx, 16384);
+    CHECK_EQ(mb.gdn_spec.size(), size_t{3} * 150994944);
+    CHECK_EQ(mb.kv_k.size(), size_t{33554432});
+    CHECK_EQ(mb.kv_v.size(), size_t{33554432});
+    CHECK_EQ(mb.hh.size(), size_t{92160});
+    CHECK_EQ(mb.logits.size(), size_t{2979840});
+    CHECK_EQ(mb.bytes(), size_t{523176064});
+    const uint32_t* hw = mb.hctl.as<uint32_t>();
+    for (size_t i = 0; i < sizeof(runtime::Control) / sizeof(uint32_t); ++i) CHECK_EQ(hw[i], 0u);
+    CHECK_EQ(runtime::MtpBuffers::kSlots, 4u);
+    // The live-slot index sits in what was Control's padding: the persistent sizes
+    // above are what they were.
+    CHECK_EQ(offsetof(runtime::Control, gdn_live), size_t{76});
   }
 
   std::puts("buffers_test OK");

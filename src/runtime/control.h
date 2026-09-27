@@ -15,7 +15,11 @@ struct Control {
   uint32_t cur_token[8];   // input ids for this step
   uint32_t out_token[8];   // argmax outputs
   uint32_t debug_flag;     // check_finite writes first bad layer+1 here (debug builds)
-  uint32_t pad[13];        // pad to 128 B
+  // Spec 8 (plan 8b): the live GDN state slot, 0..MtpBuffers::kSlots-1. Only the
+  // SPEC_SLOTS gdn_step variants (the MTP verify lists) read it; everything else
+  // uses slot 0 (`gdn_state`) and never looks. 0 whenever MTP is off.
+  uint32_t gdn_live;
+  uint32_t pad[12];        // pad to 128 B
 };
 static_assert(sizeof(Control) == 128, "control block is two cache lines");
 }  // namespace runtime
