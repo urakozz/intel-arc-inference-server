@@ -155,7 +155,7 @@ Server::Outcome Server::generate(const Request& r,
   // Spec 7 §3.3: restart from the resident session or the deepest host snapshot, prefill
   // the tail (the block hook writes it through); with the cache off, reset() + prefill.
   PrefixSession& session = *impl_->prefix;
-  outcome.prefix = session.begin(outcome.prompt_ids);
+  outcome.prefix = session.begin(outcome.prompt_ids, r.chat && opts_.prefix_split_last);
   outcome.usage.cached_tokens = outcome.prefix.restart;
   if (session.enabled()) {
     std::fprintf(stderr,
