@@ -60,6 +60,15 @@
 #define NORM_WGS 20
 #endif
 
+// Spec 8 (plan 8b), both off by default (every existing binary unchanged): X_STRIDE is
+// pf_norm_finish's output row pitch, ZERO_RESID makes pf_res_fold start the residual at
+// the linear's output (prep.cl states both).
+#ifndef X_STRIDE
+#define X_STRIDE K
+#endif
+#ifndef ZERO_RESID
+#define ZERO_RESID 0
+#endif
 #define WG_FOLD 256
 #define WG_NORM 256
 #define FOLD_CHUNK ((K + FOLD_G - 1) / FOLD_G)
@@ -120,7 +129,11 @@ __kernel void pf_res_fold(__global const float* restrict partials,
 #else
     float acc = 0.f;
     for (uint s = 0; s < S_PREV; ++s) acc += partials[((size_t)s * m_count + m) * K + k];
+#if ZERO_RESID
+    const ushort r_b = rne_bf16(acc);
+#else
     const ushort r_b = rne_bf16(bf16f(rp[k]) + bf16f(rne_bf16(acc)));
+#endif
 #endif
     rp[k] = r_b;
     const float v = bf16f(r_b);
@@ -168,7 +181,7 @@ __kernel void pf_norm_finish(__global const float* restrict sumsq,
   uint k1 = k0 + NORM_CHUNK;
   if (k1 > K) k1 = K;
   for (uint k = k0 + lid; k < k1; k += WG_NORM)
-    x_out[(size_t)m * K + k] = rne_bf16(bf16f(rp[k]) * rstd * norm_w[k]);
+    x_out[(size_t)m * X_STRIDE + k] = rne_bf16(bf16f(rp[k]) * rstd * norm_w[k]);
 }
 
 // ---------------------------------------------------------------------------

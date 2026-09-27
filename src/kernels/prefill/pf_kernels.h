@@ -43,6 +43,14 @@ inline std::string pf_norm_finish_variant(unsigned K, unsigned G, unsigned W) {
          std::to_string(W);
 }
 inline std::string pf_silu_mul_variant() { return "pf_silu_mul"; }
+// Spec 8 (plan 8b Task 3): the MTP head's prefill KV fill (src/kernels/prefill/CMakeLists.txt).
+inline std::string pf_res_fold_zero_variant(unsigned K, unsigned G) {
+  return pf_res_fold_variant(K, 1, G) + "_Z";
+}
+inline std::string pf_norm_finish_strided_variant(unsigned K, unsigned G, unsigned W, unsigned X) {
+  return pf_norm_finish_variant(K, G, W) + "_X" + std::to_string(X);
+}
+inline std::string pf_bf16_slab_variant(unsigned K) { return "pf_bf16_slab_K" + std::to_string(K); }
 inline std::string pf_gated_head_variant() { return "pf_gated_head"; }
 inline std::string pf_attn_prep_variant() { return "pf_attn_prep"; }
 // Ruling A9's bf16-`attn_q` build of the SAME source, bound by the composed

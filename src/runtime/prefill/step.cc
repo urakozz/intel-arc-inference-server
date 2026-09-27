@@ -219,13 +219,14 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
 }
 
 void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m, void* ctrl,
-               uint32_t last_row) {
+               uint32_t last_row, const void* normed_row) {
   // The final norm, ONE row. `sumsq[g * 1 + 0] == sumsq[g]`, which is exactly
-  // what the M = 1 pair reads.
-  pf_res_norm(cx, kc, s, 1u, m.final_norm.ptr(),
-              at(s.partials, size_t(last_row) * Qwen35::kHidden * 4),
-              at(s.resid, size_t(last_row) * Qwen35::kHidden * 2),
-              at(s.x, size_t(last_row) * Qwen35::kHidden * 2), 1u);
+  // what the M = 1 pair reads. (Spec 8: skipped when step_mtp_kv already wrote it.)
+  if (!normed_row)
+    pf_res_norm(cx, kc, s, 1u, m.final_norm.ptr(),
+                at(s.partials, size_t(last_row) * Qwen35::kHidden * 4),
+                at(s.resid, size_t(last_row) * Qwen35::kHidden * 2),
+                at(s.x, size_t(last_row) * Qwen35::kHidden * 2), 1u);
 
   // lm_head at M = 1 through the EXISTING decode binary, chosen off the loaded
   // weight's kind exactly as capture.cc:625-631 chooses it. It writes straight
@@ -234,7 +235,7 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMode
   // the lm_head's [5120][248320] bf16 expansion is 2.54 GB, seven times the
   // dequant scratch, for one row of output.
   const DeviceWeight& lm = m.linears.at({loader::kTopLevel, LinearId::LmHead});
-  const void* xrow = at(s.x, size_t(last_row) * Qwen35::kHidden * 2);
+  const void* xrow = normed_row ? normed_row : at(s.x, size_t(last_row) * Qwen35::kHidden * 2);
   if (lm.kind == model::WeightKind::Int4) {
     cx.launch(kc(kernels::gemv_variant(1, lm.shape.K, lm.shape.N, lm.shape.S, lm.shape.layout),
                  "gemv"),
@@ -258,6 +259,86 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMode
   cx.launch(kc(kernels::argmax_stage2_variant(), "argmax_stage2"), 1, 1, 1,
             {PtrArg(ctrl), PtrArg(s.argmax_part.ptr())});
   profile_wait(cx, Phase::kHead);
+}
+
+// --- spec 8: the MTP head's K/V during prefill (plan 8b Task 3) --------------
+
+namespace {
+// One bf16 linear (the MTP head's; gemv_bf16's tiled layout) on pf_gemm: for each
+// 1024-column slab in [n_begin, n_end), pf_bf16_slab untiles it into the slab buffer and
+// pf_gemm multiplies x [M][K] (pitch K) by it into out + n0 (pitch ldc). linear_l0's
+// walk with the dequant replaced by a copy.
+void linear_bf16(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWeight& w,
+                 const uint16_t* x, uint32_t M, uint32_t n_begin, uint32_t n_end, float* out,
+                 uint32_t ldc) {
+  const model::GemvShape& sh = w.shape;
+  constexpr uint32_t kNs = kernels::kPfSlabWidth;
+  require(w.kind == model::WeightKind::Bf16, "linear_bf16 on an int4 weight");
+  require(n_begin % kNs == 0 && n_end % kNs == 0 && n_end <= sh.N, "slab range is not whole slabs");
+  require(M > 0 && pad256(M) <= PrefillScratch::kC, "M padded to 256 exceeds kC");
+  l0::Mem& slab = s.slab_buffer();
+  require(slab.size() >= size_t(sh.K) * kNs * 2, "the slab buffer is smaller than [K][1024]");
+  l0::Kernel& un = kc(kernels::pf_bf16_slab_variant(sh.K), "pf_bf16_slab");
+  for (uint32_t n0 = n_begin; n0 < n_end; n0 += kNs) {
+    cx.launch(un, kNs / 16, sh.K / 8, 1, {PtrArg(w.mem.ptr()), PtrArg(slab.ptr()), arg_val(n0)});
+    const GemmBatch b{M, sh.K, kNs, 1, sh.K, kNs, ldc, 0, 0, 0};
+    gemm_l0(cx, kc, b, x, slab.as<uint16_t>(), out + n0, /*transB=*/false);
+  }
+}
+constexpr uint32_t kMtpKvN0 = 12288;   // q||gate is [0, 12288); k||v is [12288, 14336)
+}  // namespace
+
+void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,
+                 void* hctl, uint32_t pos, uint32_t C, uint16_t* hid, uint16_t* kv_k,
+                 uint16_t* kv_v) {
+  require(m.mtp != nullptr, "step_mtp_kv without the MTP head");
+  require(C > 0 && C <= PrefillScratch::kC, "C is outside (0, kC]");
+  const loader::MtpHead& h = *m.mtp;
+  const uint32_t H = Qwen35::kHidden, G = PrefillScratch::kNormGroups;
+  // 1. The main model's final norm on every row (what decode's b.x holds after a
+  //    step), into hid rows 1..C. step_head's own single-row norm is then skipped.
+  pf_res_norm(cx, kc, s, 1u, m.final_norm.ptr(), s.partials.ptr(), s.resid.ptr(),
+              hid + H, C);
+  const uint32_t rows = mtp_kv_rows(pos, C);
+  if (rows == 0) return;
+  const uint32_t r0 = C - rows;   // 1 at pos 0 (no h_{-1}), else 0
+  // 2. embed(ids[r0 + r]) -> resid rows (the main residual is dead after step 1).
+  cx.launch(kc(kernels::pf_embed_gather_variant(), "pf_embed_gather"), 1, rows, 1,
+            {PtrArg(s.ids.as<uint32_t>() + r0), PtrArg(m.embed.ptr()), PtrArg(s.resid.ptr()),
+             arg_val(rows)});
+  // 3. The two pre-fc norms into one [rows][10240] row of x: embed first, hidden second.
+  const std::string fold0 = kernels::pf_res_fold_variant(H, 0, G);
+  const std::string cat = kernels::pf_norm_finish_strided_variant(H, G, G, 2 * H);
+  auto fold_norm = [&](const std::string& fv, const std::string& nv, const void* partials,
+                       void* resid, const void* w, void* out) {
+    cx.launch(kc(fv, "pf_res_fold"), G, rows, 1,
+              {PtrArg(partials), PtrArg(resid), PtrArg(s.norm_sumsq.ptr()), arg_val(rows)});
+    cx.launch(kc(nv, "pf_norm_finish"), G, rows, 1,
+              {PtrArg(s.norm_sumsq.ptr()), PtrArg(resid), PtrArg(w), PtrArg(out), arg_val(rows)});
+  };
+  fold_norm(fold0, cat, s.partials.ptr(), s.resid.ptr(), at_const(h.norms, loader::kMtpNormPreE),
+            s.x.ptr());
+  fold_norm(fold0, cat, s.partials.ptr(), hid + size_t(r0) * H,
+            at_const(h.norms, loader::kMtpNormPreH), s.x.as<uint16_t>() + H);
+  // 4. fc -> partials [rows][5120]; the head's residual starts at fc's output (ZERO_RESID),
+  //    input_layernorm -> x (pitch 5120).
+  linear_bf16(cx, kc, s, h.fc, s.x.as<uint16_t>(), rows, 0, H, s.partials.as<float>(), H);
+  fold_norm(kernels::pf_res_fold_zero_variant(H, G), kernels::pf_norm_finish_variant(H, G, G),
+            s.partials.ptr(), s.resid.ptr(), at_const(h.norms, loader::kMtpNormInput), s.x.ptr());
+  // 5. Only the k||v columns of q||k||v, then attn_prep writes K/V at hctl.pos + r. Its q
+  //    rows read unwritten partials columns into pf_q, which nothing reads.
+  linear_bf16(cx, kc, s, h.qkv, s.x.as<uint16_t>(), rows, kMtpKvN0, h.qkv.shape.N,
+              s.partials.as<float>(), h.qkv.shape.N);
+  attn_prep_chunk(cx, kc, s, rows, hctl, s.partials.as<float>(), h.fa.as<float>(),
+                  m.rope.as<float>(), kv_k, kv_v);
+  profile_wait(cx, Phase::kAttnPrep);
+}
+
+size_t step_mtp_kv_launches(uint32_t pos, uint32_t C) {
+  if (mtp_kv_rows(pos, C) == 0) return 2;
+  // final norm 2 + embed 1 + 2 x 2 pre-norms + fc (2 x 5) + fold/norm 2 + k||v (2 x 2)
+  // + attn_prep 1
+  return 2 + 1 + 4 + 10 + 2 + 4 + kAttnPrepLaunches;
 }
 
 // --- the launch arithmetic, derived from the walk above ---------------------

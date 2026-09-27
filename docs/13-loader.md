@@ -151,9 +151,14 @@ The checkpoint has three top-level namespaces. The loader builds a view of
   top-level counts separately instead of subtracting a hardcoded 1;
 - `model.visual.*` (333 tensors, 0.921 GB) is **skipped** - this is a
   vision-language checkpoint served text-only;
-- `mtp.*` is **skipped** - this engine builds no draft path (doc 03). 15 tensors (0.849 GB)
-  on the published checkpoint, 29 on the self-quantised one, which also packs 8
-  of them; the skip is by name and does not care.
+- `mtp.*` is **skipped** unless the caller asks for it (`load(..., mtp = true)`, spec 8
+  §3.1). 15 tensors (0.849 GB) on the published checkpoint, 29 on the self-quantised
+  one, which also packs 8 of them; the skip is by name and does not care. Asked for,
+  the published 15 are loaded into `LoadedModel::mtp` (bf16 in gemv_bf16's tiled
+  layout: fc, q||k||v concatenated like an FA layer's Qkv, gate/up interleaved in
+  16-column blocks like GateUp, o, down; the five RMSNorms and q/k norms baked fp32
+  `1 + w`), the report gains an `mtp` line, and any other shape of head - the RTN
+  checkpoint's 29 - is refused by name.
 
 Both skip counts are printed. So is the count of tensors the loader never
 consumed - **0**, and the test asserts it (`report.unconsumed`). Every name in
