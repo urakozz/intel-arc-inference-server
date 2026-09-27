@@ -288,6 +288,11 @@ one deep row (63488, C 2048, needs max_len 65536 in the harness).
 - **P1 - promote #1 + #2** (pfa_KT64_R8_H6 with `exp2`): the engine's pp4096 attention
   phase (`B70_PREFILL_PROFILE=1`, the `attn_flash` row), pp4096 / pp65536 / pp131072 t/s,
   K2-K4 and spec 6 K3a's flash-vs-oracle check. Expected ~82 ms and ~1.42x at depth.
+  **Done 2026-09-27 (spec 6c), half promoted.** In the engine (`l0-int8`, interleaved,
+  diagnostic grade): RPW 8 alone `attn_flash` 101 ms (from 117), pp65536 1.074x, pp130816
+  1.097x, shipped; RPW 8 + `exp2` 81 ms, 1.158x, 1.222x, **not shipped**: it fails spec 6
+  K3a on `l0` (flash 0.999951245 vs composed 0.999959889; K1 unchanged). Built behind
+  `EXP2`, off, awaiting a ruling (spec 6 §9).
 - **P2 - prefetch and barrier (#3)** on the P1 kernel: arms (a) next-K prefetch spread
   over the 6 SGs, (b) + current-V prefetch, (c) + `intel_work_group_barrier_arrive/wait`
   around each tile, (d) prefetch distance 2. Also re-sweep RPW 8 against the 12-SG shape

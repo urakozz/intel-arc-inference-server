@@ -402,6 +402,32 @@ prompt give bitwise-equal, finite last logits, prefill replay reproduces them
 bitwise twice, and passkey retrieval at 119939 ids finds the key at 5, 50 and 95%
 depth, 3/3 on `l0-int8` and 3/3 on `l0`.
 
+### Spec 6c: 8 rows per work-group (2026-09-27)
+
+`pf_flash_attn` now runs 8 query rows per work-group (6 sub-groups, grid `(ceil(C / 8), 4,
+1)`), research lever 2 of docs/research-flash-prefill-2026-09-27.md. Lever 1, `exp2` with
+the scale folded, is built behind `EXP2` and **off**: it fails spec 6 K3a on `l0` (below;
+spec 6 §9). Interleaved C / R / E triples after one warm-up each, device 0, `l0-int8`,
+`--max-len 131072` for the depth rows; C is main's build in the base tree (its prefill
+and decode sources are main's; it differs only in `src/server`), R and E are this
+branch's binary with the kernel file swapped. **Diagnostic grade: the load average was
+4.5 to 19.9 (other agents' CPU jobs) during every row**, so no RECORD row is written even
+where R beats 2125.12.
+
+| row | C: main (RPW 16, `exp`) | R: spec 6c as built (RPW 8, `exp`) | E: RPW 8 + `exp2` (not shipped) |
+|---|---:|---:|---:|
+| pp4096 t/s (2048 chunks, tg 256; r1 / r2 / r3) | 2129.41 / 2128.51 / 2128.81 | 2139.94 / 2136.68 / 2135.01 | 2160.57 / 2162.25 / 2152.75 |
+| pp4096 t/s, median (x C, derived) | 2128.81 | 2136.68 (1.0037) | 2160.57 (1.0149) |
+| `attn_flash` ms per pp4096 (profiled, p1 / p2) | 117.7 / 117.2 | 101.4 / 100.6 | 81.9 / 80.5 |
+| pp65536 t/s, median of 3 (x C) | 1123.47 | 1206.97 (1.0743) | 1301.26 (1.1582) |
+| pp130816 t/s, median of 3 (x C) | 748.88 | 821.37 (1.0968) | 915.33 (1.2223) |
+| decode at 4k (tg 256 after pp4096), median t/s | 29.25 | 29.24 | 29.24 |
+
+Load averages (1 min) at the rows: pp4096 5.2-12.3, profile 5.1-11.5, pp65536 5.3-19.9,
+pp130816 4.7-17.3. Spreads within an arm are <= 0.45%. F1 (80 ms): R 101 ms, missed;
+E would meet it (80.5-81.9 ms). RPW 8 alone does not change the numerics: K3a's cosines
+are bit-identical to main's (`l0` 0.999960061, `l0-int8` 0.999934564).
+
 ## Decode
 
 All rows: device 0, depth 4096, 256 generated tokens, median of three on an
