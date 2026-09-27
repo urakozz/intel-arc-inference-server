@@ -1,11 +1,18 @@
 // Spec 7 C1 (plan 7b): Engine::save_state / load_state / save_kv / load_kv restore a
-// session bitwise.
+// session bitwise, and (Task 2) the block hook fires at every block end and at the
+// prompt end, with block-aligned chunks.
 //   A: snapshot at 4395 (4096 + 299), overwrite with a 3000-id other prompt (a different
 //      pos % 16, stale KV above), restore, prefill id 4395, 64 greedy ids == straight run;
 //      device KV [0, 4395) after the restore == the saved copy.
 //   B: the same at 4096 (a block end).
 //   C: save_kv(4096, 4395) / load_kv round-trip into a zeroed cache, nothing written
 //      outside the range; an empty range copies nothing.
+//   D: hook set, prefill 5000 ids from 0 -> (2048,true), (4096,true), (5000,false).
+//   E: hook set, prefill 4000 ids from 300 -> chunks 1748, 2048, 204; calls (2048,true),
+//      (4096,true), (4300,false). A hook that throws at 2048 leaves pos == 2048.
+//   F: the hook saves the state and the new KV range at every call; restoring the 4096
+//      snapshot + KV [0,4096) and prefilling [4096,5000) gives the hooked run's first
+//      id and 64 greedy ids, bitwise.
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -129,5 +136,81 @@ int main(int argc, char** argv) {
     std::puts("case C OK");
   }
 
+  using Calls = std::vector<std::pair<uint32_t, bool>>;
+  Calls calls;
+  const auto record = [&](uint32_t end, bool block) { calls.emplace_back(end, block); };
+  // D
+  e.set_block_hook(record);
+  e.reset();
+  e.prefill(head(ids, 5000));
+  CHECK(calls == (Calls{{2048, true}, {4096, true}, {5000, false}}));
+  CHECK_EQ(e.pos(), 5000u);
+  std::puts("case D OK");
+  // E
+  calls.clear();
+  e.reset();
+  e.set_block_hook({});
+  e.prefill(head(ids, 300));
+  e.set_block_hook(record);
+  e.prefill(std::vector<uint32_t>(ids.begin() + 300, ids.begin() + 4300));
+  CHECK(calls == (Calls{{2048, true}, {4096, true}, {4300, false}}));
+  CHECK_EQ(e.pos(), 4300u);
+  e.reset();
+  e.set_block_hook([&](uint32_t end, bool) {
+    if (end == 2048) throw std::runtime_error("hook");
+  });
+  bool threw = false;
+  try {
+    e.prefill(head(ids, 5000));
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  CHECK(threw);
+  CHECK_EQ(e.pos(), 2048u);
+  std::puts("case E OK");
+  // F
+  {
+    std::vector<std::unique_ptr<l0::Mem>> states;
+    std::vector<uint32_t> ends;
+    // The KV of the whole run, gathered range by range into one [0, 5000) host layout:
+    // 32 runs (16 layers x K, V) of 5000 positions.
+    std::vector<uint8_t> kv_all(e.kv_bytes(5000));
+    const size_t full = e.kv_bytes(5000) / 32;
+    uint32_t prev = 0;
+    e.set_block_hook([&](uint32_t end, bool) {
+      states.emplace_back(new l0::Mem(ctx, l0::MemKind::Host, e.state_bytes()));
+      e.save_state(states.back()->ptr());
+      ends.push_back(end);
+      l0::Mem part(ctx, l0::MemKind::Host, e.kv_bytes(end - prev));
+      e.save_kv(prev, end, part.ptr());
+      const size_t run = e.kv_bytes(end - prev) / 32, at = e.kv_bytes(prev) / 32;
+      for (size_t r = 0; r < 32; ++r)
+        std::memcpy(kv_all.data() + r * full + at, part.as<uint8_t>() + r * run, run);
+      prev = end;
+    });
+    e.reset();
+    e.prefill(head(ids, 5000));
+    e.set_block_hook({});
+    const uint32_t first = e.buffers().control.as<runtime::Control>()->cur_token[0];
+    const auto x = e.generate(64);
+    CHECK((ends == std::vector<uint32_t>{2048, 4096, 5000}));
+    // Restore the 4096 snapshot and KV [0, 4096) over another prompt's state.
+    l0::Mem kv(ctx, l0::MemKind::Host, e.kv_bytes(4096));
+    const size_t run = e.kv_bytes(4096) / 32;
+    for (size_t r = 0; r < 32; ++r)
+      std::memcpy(kv.as<uint8_t>() + r * run, kv_all.data() + r * full, run);
+    e.reset();
+    e.prefill(other);
+    e.load_state(states[1]->ptr(), 4096);
+    e.load_kv(0, 4096, kv.ptr());
+    e.prefill(std::vector<uint32_t>(ids.begin() + 4096, ids.begin() + 5000));
+    const uint32_t first2 = e.buffers().control.as<runtime::Control>()->cur_token[0];
+    const auto y = e.generate(64);
+    std::printf("F: first id %u vs %u, 64 greedy ids %s\n", first, first2,
+                x == y ? "identical" : "differ");
+    CHECK_EQ(first, first2);
+    CHECK(x == y);
+    std::puts("case F OK");
+  }
   std::puts("snapshot_test OK");
 }

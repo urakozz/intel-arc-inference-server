@@ -142,6 +142,19 @@ class Engine {
   void save_kv(uint32_t begin, uint32_t end, void* host) const;
   void load_kv(uint32_t begin, uint32_t end, const void* host);
 
+  // Spec 7 §3.2: called on the host after every prefill chunk whose end position is a
+  // multiple of kBlock, with the device idle and the persistent state exactly at
+  // `end_pos` (control.pos == end_pos, n_active == 0; cur_token is not yet the argmax),
+  // and after the LAST chunk of every prefill (the prompt end), whatever its end, once
+  // the first generated id is in cur_token. `is_block_end` tells whether end_pos is a
+  // multiple of kBlock. A prompt that ends on a block end gets ONE call. With a hook set,
+  // every chunk ends at a block end or at the prompt end: chunk rows are
+  // min(chunk, kBlock - pos % kBlock, remaining). Without one (an empty function, the
+  // default), chunking is exactly as before. If the hook throws, the exception propagates
+  // with pos == end_pos: the state holds exactly the chunks written.
+  using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
+  void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
+
   // Greedy-generates n ids; on_token is called after each fence (host side,
   // overlaps nothing in v1). Returns the ids.
   //
@@ -201,6 +214,7 @@ class Engine {
   std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)> pfx_{nullptr, nullptr};
   std::optional<PrefillBackend> pf_backend_;   // unset = default_prefill_backend()
   std::optional<bool> pf_replay_;
+  BlockHook block_hook_;
   std::unique_ptr<l0::Mem> tap_;   // null unless debug_resid
   CapturedStep step_;
   l0::Queue queue_;
