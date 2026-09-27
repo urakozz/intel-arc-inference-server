@@ -41,8 +41,22 @@ struct MockTok : server::TokIface {
     return out;
   }
 
+  // Raw pieces decode byte-exact (no trailing space): scripted generated text.
+  std::map<uint32_t, std::string> raw_pieces;
+  std::vector<uint32_t> raw(const std::string& text, size_t piece_bytes) {
+    std::vector<uint32_t> out;
+    for (size_t at = 0; at < text.size(); at += piece_bytes) {
+      const uint32_t id = 200000 + static_cast<uint32_t>(raw_pieces.size());
+      raw_pieces[id] = text.substr(at, piece_bytes);
+      out.push_back(id);
+    }
+    return out;
+  }
+
   std::string piece(uint32_t id) {
     if (id == 248046) return "<|im_end|>";
+    const auto raw_it = raw_pieces.find(id);
+    if (raw_it != raw_pieces.end()) return raw_it->second;
     const std::string& word = vocab.at(id - 1000);
     return word == "\n" ? "\n" : word + " ";
   }
@@ -68,12 +82,14 @@ struct MockTok : server::TokIface {
 };
 
 struct MockTemplate : server::TemplateIface {
+  bool think_tag = false;  // end a thinking prompt in "<think>\n" as the real template does
   std::string render(const nlohmann::json& messages, const nlohmann::json&, bool think) override {
     std::string text;
     for (const auto& message : messages) {
       text += message.at("role").get<std::string>() + ": " +
               message.at("content").get<std::string>() + "\n";
     }
+    if (think_tag && think) return text + "assistant:\n<think>\n";
     return text + (think ? "assistant(think): " : "assistant: ");
   }
 };
