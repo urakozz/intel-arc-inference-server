@@ -105,3 +105,32 @@ and 48 GiB. **Not triggered: proceed to 7b.**
 
 Pending: plan 7a Task 4 (the operator records a session with
 `b70-serve --log-requests`) and Task 6 (`tools/prefix/analyze_log.py` on it).
+
+## 7. Write-through cost, S3
+
+Plan 7b Task 3, `tools/probe/probe_writethrough.cc`, branch `spec7b-engine-snapshots`
+(Release). Model at max_len 131072, default backend (l0-int8), device 0
+(`ZE_AFFINITY_MASK=0`), under the GPU lock with no other GPU job. Load average 1.45
+at the start, 1.11 at the end.
+
+Each run is a `reset()` and a cold `prefill` of N ids of `long32k.ids`, timed until it
+returns. **plain**: no block hook. **hooked**: `Engine::set_block_hook` with a hook that
+does what 7c's store will do at every call (`save_state` into a pinned host buffer, then
+`save_kv` of the positions since the previous call, into pinned host memory). From 0 the
+aligned chunks are the same 2048-row chunks as the plain run, so the only difference is
+the copies. One warm-up pair, then 3 interleaved pairs with the order alternating;
+the cost is the median of the per-pair ratios.
+
+| N | calls | plain ms (median) | hooked ms (median) | per-pair ratios | cost | copy time in the hook |
+|---|---|---|---|---|---|---|
+| 4096 | 2 | 1937.8 | 1976.7 | 1.0203, 1.0220, 1.0201 | **2.03 %** | 43.9 ms |
+| 32768 | 16 | 21931.5 | 22213.3 | 1.0122, 1.0129, 1.0124 | **1.24 %** | 349.4 ms |
+
+**S3 met: 2.03 % at pp4096 against the 3 % bar.** The time inside the hook, 22.0 ms
+per call (a 128 MiB KV block and a 166.7 MB state snapshot, device to host), matches
+§2's 9.46 + 11.78 = 21.2 ms (derived). It accounts for all of the difference: 39 ms of
+43.9 ms at N = 4096 and 282 ms of 349 ms at N = 32768 show up in the wall time, so a
+few ms per call overlap the host side of the next chunk. The fraction falls with depth
+because chunks at depth take longer while the copy stays fixed. The step 3 variant
+(copy only at multiples of 4096) was not needed, so it was not measured; the probe has
+it as `--every 4096`.
