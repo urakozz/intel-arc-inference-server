@@ -514,6 +514,17 @@ if(B70_PREFILL_ENABLED)
   b70_link_prefill(probe_writethrough)
   b70_target_kernel_dir(probe_writethrough)
   add_dependencies(probe_writethrough ${PT_KERNELS} ${PT_PF_KERNELS})
+  # --- spec 7 S1/S2 (plan 7c Task 4): time to first token at 60k through PrefixSession ---
+  # Record: docs/probe-prefix-cache-2026-09-27.md, "S1 and S2, measured".
+  if(TARGET b70_tokenizer)
+    add_executable(probe_prefix_s12 probe_prefix_s12.cc)
+    target_include_directories(probe_prefix_s12 PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(probe_prefix_s12 PRIVATE b70_server b70_tokenizer b70_prefill_host b70_runtime
+      b70_loader b70_model b70_l0 pthread)
+    b70_link_prefill(probe_prefix_s12)
+    b70_target_kernel_dir(probe_prefix_s12)
+    add_dependencies(probe_prefix_s12 ${PT_KERNELS} ${PT_PF_KERNELS})
+  endif()
 endif()
 # --- probe_verify_m: spec 8 P0, the MTP verify step at M = 1..4 (2026-09-27) ---
 # Plan: docs/superpowers/plans/2026-09-27-spec8a-mtp-probe.md, Task 3.
