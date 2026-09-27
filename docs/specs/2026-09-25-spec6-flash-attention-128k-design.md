@@ -243,9 +243,15 @@ SLM-staged `pf_flash_attn` (F1, F2), and decode attention at depth (F3).
 ## 9. Amendment - 2026-09-27, spec 6c (plan `2026-09-27-spec6c-flash-exp2-rows8.md`)
 
 **Shipped: 8 query rows per work-group** (`RPW=8`, 6 sub-groups, grid `(ceil(C / 8), 4,
-1)`), research lever 2. **Not shipped: `exp2`** (lever 1), although the operator approved
-it on 2026-09-27 in place of §3.1's "`exp`, never `native_exp`": it is in the kernel behind
-`EXP2` (default 0) because it fails K3a on `l0`.
+1)`), research lever 2, **and `exp2`** (lever 1, `EXP2=1`), in place of §3.1's "`exp`,
+never `native_exp`".
+
+**Operator ruling, 2026-09-27: `exp2` on, with its K3a miss on `l0` accepted.** Plan 6c
+first shipped `EXP2=0` because `exp2` misses K3a on `l0` by 7.6e-6 (below). The operator
+enabled it: `l0-int8`, the default backend, passes K3a; `l0` with `exp2` (0.999951) is
+still closer to the oracle than `l0-int8` has ever been (0.99993-0.99994). K3a's
+tolerance is therefore 1e-5 on `l0` and stays 1e-6 on `l0-int8`
+(`tools/probe/flash_vs_oracle.sh`). The `exp2` rows below are what ships.
 
 **The `exp2` finding.** K1 (fp64, random data) is bit-identical with `exp2`, as the
 research measured. The engine gate is not: with `exp2(s * ATTN_SCALE * log2e - m)`,
@@ -267,5 +273,5 @@ pass; the full suite is 97/97.
 **Speed** (docs/BENCHMARKS.md "Spec 6c", diagnostic grade, load 4.5-19.9): pp4096 1.0037x
 main (2136.68 vs 2128.81 t/s), `attn_flash` 101 ms against 117 (**F1 80 ms: missed**),
 pp65536 1.074x (1206.97), pp130816 1.097x (821.37), decode at 4k unchanged (29.24 vs 29.25).
-With `exp2` (not shipped): pp4096 1.015x, `attn_flash` 81 ms (F1 met within 1 ms),
+With `exp2` (shipped since the ruling above): pp4096 1.015x, `attn_flash` 81 ms (F1 met within 1 ms),
 pp65536 1.158x, pp130816 1.222x.

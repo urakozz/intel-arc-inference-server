@@ -406,15 +406,15 @@ depth, 3/3 on `l0-int8` and 3/3 on `l0`.
 
 `pf_flash_attn` now runs 8 query rows per work-group (6 sub-groups, grid `(ceil(C / 8), 4,
 1)`), research lever 2 of docs/research-flash-prefill-2026-09-27.md. Lever 1, `exp2` with
-the scale folded, is built behind `EXP2` and **off**: it fails spec 6 K3a on `l0` (below;
-spec 6 §9). Interleaved C / R / E triples after one warm-up each, device 0, `l0-int8`,
+the scale folded, was first held (`EXP2=0`: it misses spec 6 K3a on `l0` by 7.6e-6) and
+is **on** since the operator's ruling of 2026-09-27 (spec 6 §9): arm E below is what ships. Interleaved C / R / E triples after one warm-up each, device 0, `l0-int8`,
 `--max-len 131072` for the depth rows; C is main's build in the base tree (its prefill
 and decode sources are main's; it differs only in `src/server`), R and E are this
 branch's binary with the kernel file swapped. **Diagnostic grade: the load average was
 4.5 to 19.9 (other agents' CPU jobs) during every row**, so no RECORD row is written even
 where R beats 2125.12.
 
-| row | C: main (RPW 16, `exp`) | R: spec 6c as built (RPW 8, `exp`) | E: RPW 8 + `exp2` (not shipped) |
+| row | C: main (RPW 16, `exp`) | R: spec 6c as built (RPW 8, `exp`) | E: RPW 8 + `exp2` (shipped) |
 |---|---:|---:|---:|
 | pp4096 t/s (2048 chunks, tg 256; r1 / r2 / r3) | 2129.41 / 2128.51 / 2128.81 | 2139.94 / 2136.68 / 2135.01 | 2160.57 / 2162.25 / 2152.75 |
 | pp4096 t/s, median (x C, derived) | 2128.81 | 2136.68 (1.0037) | 2160.57 (1.0149) |
