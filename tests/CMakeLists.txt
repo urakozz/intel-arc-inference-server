@@ -346,6 +346,17 @@ target_link_libraries(gdn_step_test PRIVATE b70_l0)
 b70_target_kernel_dir(gdn_step_test)
 add_dependencies(gdn_step_test kernel_gdn_step_M1 kernel_gdn_step_M2)
 add_test(NAME gdn_step_test COMMAND gdn_step_test)
+# Spec 8 (plan 8b Task 4): the SPEC_SLOTS build's per-row state against M = 1 steps.
+if(B70_MTP)
+  add_executable(gdn_step_slots_test kernels/gdn_step_slots_test.cc)
+  target_include_directories(gdn_step_slots_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(gdn_step_slots_test PRIVATE b70_l0)
+  b70_target_kernel_dir(gdn_step_slots_test)
+  add_dependencies(gdn_step_slots_test kernel_gdn_step_M1 kernel_gdn_step_slots_M1
+    kernel_gdn_step_slots_M2 kernel_gdn_step_slots_M3 kernel_gdn_step_slots_M4)
+  add_test(NAME gdn_step_slots_test COMMAND gdn_step_slots_test)
+endif()
 
 # The decode-attention trio. Its reference (attn_ref.h) reproduces the kernels'
 # norm tree, score tree, wave order and block-merge order exactly, so the KV
@@ -979,7 +990,7 @@ if(B70_MTP)
                PROPERTY BUILDSYSTEM_TARGETS)
   get_property(_b70_mtp_pf_kernels DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
                PROPERTY BUILDSYSTEM_TARGETS)
-  foreach(t mtp_head mtp_prefill)
+  foreach(t mtp_head mtp_prefill mtp_verify)
     if(t STREQUAL "mtp_prefill")
       set(_src prefill/${t}_test.cc)
     else()
@@ -1003,5 +1014,9 @@ if(B70_MTP)
   # Task 3 / Review Focus 2: the head's KV after prefill against M = 1 fills.
   add_test(NAME mtp_prefill_test COMMAND mtp_prefill_test ${B70_TEST_SNAPSHOT})
   set_tests_properties(mtp_prefill_test PROPERTIES LABELS "checkpoint;prefill;mtp"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+  # M2 + Review Focus 1-5: verify at M = k + 1, per-row GDN slots, commit, snapshots, replay.
+  add_test(NAME mtp_verify_test COMMAND mtp_verify_test ${B70_TEST_SNAPSHOT})
+  set_tests_properties(mtp_verify_test PROPERTIES LABELS "checkpoint;mtp"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
 endif()
