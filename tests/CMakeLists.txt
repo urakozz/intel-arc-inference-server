@@ -115,6 +115,13 @@ target_include_directories(openai_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_S
 target_link_libraries(openai_test PRIVATE b70_server)
 add_test(NAME openai_test COMMAND openai_test)
 
+# Spec 7 C6: the Qwen XML tool-call parser over the golden tool-call outputs.
+add_executable(toolcall_test server/toolcall_test.cc)
+target_include_directories(toolcall_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(toolcall_test PRIVATE b70_server)
+add_test(NAME toolcall_test COMMAND toolcall_test ${CMAKE_SOURCE_DIR}/tests/server/toolcall_expected.json
+  ${CMAKE_SOURCE_DIR}/tests/golden/toolcall)
+
 add_executable(protocol_test server/protocol_test.cc)
 target_include_directories(protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(protocol_test PRIVATE b70_server)
