@@ -146,6 +146,23 @@ inline std::string attn_reduce_variant(unsigned M, unsigned MAXLEN, unsigned BLO
          std::to_string(BLOCK);
 }
 
+// Spec 8 (plan 8b): the MTP lists' variants (src/kernels/CMakeLists.txt, B70_MTP).
+// `_Z`: prep_res_fold with ZERO_RESID (the residual starts at the fold's partials);
+// `_X<stride>`: prep_norm_finish writing rows at that pitch; `_S1`: the kernel's baked
+// split-K of its producer is 1 (the MTP head's bf16 linears write [M][N] directly).
+inline std::string prep_res_fold_zero_variant(unsigned M, unsigned K, unsigned G) {
+  return prep_res_fold_variant(M, K, 1, G) + "_Z";
+}
+inline std::string prep_norm_finish_strided_variant(unsigned M, unsigned K, unsigned G,
+                                                    unsigned W, unsigned X) {
+  return prep_norm_finish_variant(M, K, G, W) + "_X" + std::to_string(X);
+}
+inline std::string prep_silu_mul_s1_variant(unsigned M) { return prep_silu_mul_variant(M) + "_S1"; }
+inline std::string attn_prep_s1_variant(unsigned M) { return attn_prep_variant(M) + "_S1"; }
+inline std::string gdn_step_slots_variant(unsigned M) {
+  return "gdn_step_slots_M" + std::to_string(M);
+}
+
 // The control block as the kernels see it: `runtime::Control`
 // (src/runtime/control.h) indexed as a flat `uint` array. The device side gets
 // these numbers from ONE place - the `CTRL_DEFINES` line in
@@ -158,6 +175,7 @@ inline constexpr unsigned kNActive = 1;     // Control::n_active
 inline constexpr unsigned kCurToken = 2;    // Control::cur_token[8]
 inline constexpr unsigned kOutToken = 10;   // Control::out_token[8]
 inline constexpr unsigned kDebugFlag = 18;  // Control::debug_flag
+inline constexpr unsigned kGdnLive = 19;    // Control::gdn_live (spec 8, SPEC_SLOTS only)
 }  // namespace ctrl_index
 
 // The token-boundary kernels (src/kernels/embed_gather.cl, argmax.cl). `M` is

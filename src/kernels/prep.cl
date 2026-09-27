@@ -63,6 +63,19 @@
 #define NORM_WGS 20
 #endif
 
+// Spec 8 (plan 8b), both off by default so every existing binary is unchanged:
+//   X_STRIDE    prep_norm_finish's output row pitch (default K). The MTP head writes its
+//               two pre-fc norms into the two halves of one [M][10240] row (fc's input).
+//   ZERO_RESID  prep_res_fold treats the residual as zero: `resid = rne(Σ partials)`, the
+//               linear's own bf16 output. The MTP head's residual stream STARTS at fc's
+//               output, so the fold that brings it in must not add the stale scratch.
+#ifndef X_STRIDE
+#define X_STRIDE K
+#endif
+#ifndef ZERO_RESID
+#define ZERO_RESID 0
+#endif
+
 #define WG_RES 256
 #define WG_FOLD 256
 #define WG_NORM 256
@@ -81,7 +94,9 @@
 // runtime::Capture::check_sizes (src/runtime/capture.cc) asserts the pair at
 // capture time, so a retune in model/qwen35.cc throws there rather than making
 // this loop sum the wrong number of slices in silence.
-#define SILU_S 8
+#ifndef SILU_S
+#define SILU_S 8          /* gate||up's split-K; spec 8's bf16 MTP gate||up is 1 */
+#endif
 #define SILU_N 17408
 #define SILU_FUSED_N 34816
 #define SILU_CHUNK 4096   /* 5 work-groups cover 17408; the last does 1024 */
@@ -240,7 +255,11 @@ __kernel void prep_res_fold(__global const float* restrict partials,
 #else
     float acc = 0.f;
     for (uint s = 0; s < S_PREV; ++s) acc += partials[((size_t)s * M + m) * K + k];
+#if ZERO_RESID
+    const ushort r_b = rne_bf16(acc);
+#else
     const ushort r_b = rne_bf16(bf16f(rp[k]) + bf16f(rne_bf16(acc)));
+#endif
 #endif
     rp[k] = r_b;
     const float v = bf16f(r_b);
@@ -296,7 +315,7 @@ __kernel void prep_norm_finish(__global const float* restrict sumsq,
   uint k1 = k0 + NORM_CHUNK;
   if (k1 > K) k1 = K;
   for (uint k = k0 + lid; k < k1; k += WG_NORM)
-    x_out[(size_t)m * K + k] = rne_bf16(bf16f(rp[k]) * rstd * norm_w[k]);
+    x_out[(size_t)m * X_STRIDE + k] = rne_bf16(bf16f(rp[k]) * rstd * norm_w[k]);
 }
 
 // ---------------------------------------------------------------------------

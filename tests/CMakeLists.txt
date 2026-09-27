@@ -970,3 +970,34 @@ if(B70_TOKENIZER_ENABLED)
   endif()
   add_test(NAME sampling_test COMMAND sampling_test)
 endif()
+
+# --- spec 8 (plan 8b): MTP in the engine ------------------------------------------------
+# Every kernel binary is an ALL target, so these depend on the whole kernel set the way the
+# CLIs do (src/cli/CMakeLists.txt) rather than on a hand-kept list of the MTP variants.
+if(B70_MTP)
+  get_property(_b70_mtp_kernels DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
+               PROPERTY BUILDSYSTEM_TARGETS)
+  get_property(_b70_mtp_pf_kernels DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
+               PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(t mtp_head)
+    if(t STREQUAL "mtp_prefill")
+      set(_src prefill/${t}_test.cc)
+    else()
+      set(_src runtime/${t}_test.cc)
+    endif()
+    add_executable(${t}_test ${_src})
+    target_include_directories(${t}_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+      ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+    target_link_libraries(${t}_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+    if(B70_PREFILL_ENABLED)
+      b70_link_prefill(${t}_test)
+    endif()
+    add_dependencies(${t}_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
+  endforeach()
+  # M1: the head's draft logits against tools/oracle/mtp_ref.py --dump (SKIP without it).
+  add_test(NAME mtp_head_test COMMAND mtp_head_test ${B70_TEST_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${CMAKE_SOURCE_DIR}/oracle-out-spec8b/m1
+    ${CMAKE_SOURCE_DIR}/oracle-out-spec8b)
+  set_tests_properties(mtp_head_test PROPERTIES LABELS "checkpoint;golden;mtp"
+    SKIP_RETURN_CODE 77 TIMEOUT 1800)
+endif()

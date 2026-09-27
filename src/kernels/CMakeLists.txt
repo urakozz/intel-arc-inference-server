@@ -296,7 +296,12 @@ add_attn_reduce(2 4096)
 # lm_head - so tools/probe/probe_verify_m can capture the real list at M rows.
 # OFF by default: production builds compile exactly what they did before.
 option(B70_DECODE_EXTRA_M "build the M = 2..4 decode-list variants (spec 8a probe)" OFF)
-if(B70_DECODE_EXTRA_M)
+# Spec 8 (plan 8b): MTP speculative decoding. ON by default - it only ADDS binaries
+# (the M = 2..4 verify lists at max_len 16384, the per-row GDN slot variants, the MTP
+# head's own); every existing binary's command line is unchanged, and an engine without
+# `--mtp` binds none of them.
+option(B70_MTP "build the MTP verify / draft variants (spec 8)" ON)
+if(B70_DECODE_EXTRA_M OR B70_MTP)
   foreach(MM 2 3 4)
     add_gemv_variant(${MM} 5120 16384 1 1)     # qkv||z
     add_gemv_variant(${MM} 6144 5120 4 0)      # out_proj, o_proj
@@ -328,6 +333,31 @@ if(B70_DECODE_EXTRA_M)
   add_gemv_bf16_variant(1 6144 5120 64 1)
   add_gemv_bf16_variant(1 5120 34816 64 1)
   add_gemv_bf16_variant(1 17408 5120 64 1)
+endif()
+
+# Spec 8 (plan 8b): what the MTP lists bind beyond the M = 2..4 decode list above.
+#   gdn_step_slots_M<M>   gdn_step with SPEC_SLOTS: the state after row m into slot
+#                         (live + m) % 4 (gdn_step.cl), M = 1..4. SPEC_SLOT_STRIDE is one
+#                         slot of MtpBuffers::gdn_spec in floats, 48 x 48 x 128 x 128.
+#   the head (draft at M = 1, the verify list's KV fill at M = 1..4): fc and q||k||v at
+#   every M; the two pre-fc norms into one [M][10240] row (X_STRIDE); the fold that starts
+#   the head's residual at fc's output (ZERO_RESID); attn_prep over an S = 1 bf16 qkv;
+#   and, at M = 1 only, the draft's o / gate||up (SILU_S = 1) / down.
+if(B70_MTP)
+  set(GDN_SLOT_DEFINES ${GDN_DEFINES} SPEC_SLOTS=1 CTRL_LIVE=19 SPEC_SLOT_STRIDE=37748736)
+  foreach(MM 1 2 3 4)
+    add_ocloc_kernel(gdn_step_slots_M${MM} SOURCE ${GDN_CL} DEFINES ${GDN_SLOT_DEFINES} M=${MM})
+    if(NOT MM EQUAL 1)
+      add_gemv_bf16_variant(${MM} 10240 5120 64 1)   # fc
+      add_gemv_bf16_variant(${MM} 5120 14336 64 1)   # q||k||v
+    endif()
+    add_ocloc_kernel(prep_norm_finish_M${MM}_K5120_G20_W20_X10240 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=5120 NORM_G=20 NORM_WGS=20 X_STRIDE=10240)
+    add_ocloc_kernel(prep_res_fold_M${MM}_K5120_SP1_G20_Z SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=5120 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
+    add_ocloc_kernel(attn_prep_M${MM}_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1)
+  endforeach()
+  add_ocloc_kernel(prep_silu_mul_M1_S1 SOURCE ${PREP_CL} DEFINES M=1 SILU_S=1)
 endif()
 
 add_subdirectory(prefill)

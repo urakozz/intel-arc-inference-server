@@ -128,16 +128,20 @@ class Engine {
   // place. Host pointers are l0::MemKind::Host allocations (device-visible). The caller
   // must not have a prefill or a replay in flight -- none of the public calls leaves one.
   static constexpr uint32_t kBlock = 2048;
-  size_t state_bytes() const;                 // gdn_state + conv_ring (166.72 MB)
-  size_t kv_bytes(uint32_t n_pos) const;      // n_pos * 16 * 4 * 256 * 2 B, K and V
-  // Layout: gdn_state then conv_ring. conv_ring is a ring indexed by pos % kConvRing;
-  // the whole ring is copied, so a restore at any pos % 16 is exact.
+  // Spec 8 §3.5 (plan 8b Review Focus 4): with MTP on, the state also carries the
+  // head's input hidden h_{pos-1} (MtpBuffers::hh row 0, 10240 B) and the KV the head's
+  // own layer (a 17th KV layer); both sizes grow accordingly.
+  size_t state_bytes() const;                 // gdn_state + conv_ring (166.72 MB) [+ hh0]
+  size_t kv_bytes(uint32_t n_pos) const;      // n_pos * (16 [+1]) * 4 * 256 * 2 B, K and V
+  // Layout: gdn_state (the LIVE slot) then conv_ring [then hh row 0]. conv_ring is a
+  // ring indexed by pos % kConvRing; the whole ring is copied, so a restore at any
+  // pos % 16 is exact.
   void save_state(void* host) const;
   // Writes both, then control.pos = pos, control.n_active = 0. cur_token is NOT
   // restored: prefill at least one id after a restore (spec 7 §3.3 step 4).
   void load_state(const void* host, uint32_t pos);
   // Positions [begin, end) of kv_k and kv_v. Host layout: K [16][end-begin][4][256]
-  // bf16, then V the same. begin == end copies nothing (host may be null). Throws
+  // bf16, then V the same; with MTP on, [17] layers each, the head's cache last. begin == end copies nothing (host may be null). Throws
   // unless begin <= end <= max_len.
   void save_kv(uint32_t begin, uint32_t end, void* host) const;
   void load_kv(uint32_t begin, uint32_t end, const void* host);
@@ -182,6 +186,47 @@ class Engine {
   std::vector<uint16_t> read_debug_resid();  // throws unless debug_resid
   bool debug_resid() const { return tap_ != nullptr; }
 
+  // --- spec 8: MTP speculative decoding (plan 8b) --------------------------------
+  //
+  // On iff the model was loaded with its MTP head (`loader::load(..., mtp = true)`).
+  // Off, none of this allocates or captures anything and every call below throws.
+  // On, the engine also captures three draft lists and a verify list per M = 1..4.
+  //
+  // One iteration at pos = n, pending id x_n in cur_token[0]:
+  //   draft(k)        the head drafts d_1..d_k (greedy, on the card) at positions
+  //                   n-1 .. n+k-2 from (h_{n-1}, x_n) and its own chained hidden.
+  //                   The ids go to cur_token[1..k] (the verify inputs) and draft_ids();
+  //                   draft i's logits (q_i) are row i of mtp_logits_device().
+  //                   A host sampler may overwrite cur_token[1..k] before verify().
+  //   verify(k)       the main model at M = k + 1 rows (x_n, d_1..d_k at n..n+k): row r's
+  //                   argmax in verify_ids()[r], logits in verify_logits_device() [k+1][V],
+  //                   the GDN state after every row kept (Control index, no copy), and the
+  //                   head's KV rewritten at n-1..n+k-1 from the main hidden.
+  //   commit(j, t)    j accepted drafts (0 <= j <= k): pos = n + j + 1, row j's GDN state
+  //                   and hidden become live, t is the pending id. Rows past j are stale
+  //                   and never read (the causal bound; the conv ring's positions).
+  // verify(0) + commit(0, verify_ids()[0]) is one plain token; with MTP on, ingest() and
+  // generate() run exactly that (at pos 0, the plain list), so the head's KV stays
+  // filled whatever mix of plain and speculative steps the caller runs.
+  //
+  // Positions: verify(k) needs 1 <= pos and pos + k + 1 <= max_len; max_verify_k() is the
+  // largest k allowed now (0 in the last positions: the M = 1 fallback). draft(k) needs
+  // the same k.
+  static constexpr uint32_t kMaxDraft = MtpBuffers::kMaxK;   // 3
+  bool mtp() const { return mtp_ != nullptr; }
+  void draft(uint32_t k);
+  const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
+  const float* mtp_logits_device() const;      // [kMaxDraft][kVocab] fp32, device memory
+  void verify(uint32_t k);
+  const uint32_t* verify_ids() const { return control_->out_token; }
+  const float* verify_logits_device() const;   // [k + 1][kVocab] fp32, device memory
+  void commit(uint32_t j, uint32_t next_token);
+  uint32_t max_verify_k() const;
+  // Tests and the record: the MTP buffers and lists (null / throw when MTP is off).
+  MtpBuffers* mtp_buffers() { return mtp_.get(); }
+  const CapturedStep& verify_step(uint32_t M) const;
+  const CapturedStep& draft_step(uint32_t i) const;
+
   l0::Context& context() const { return ctx_; }
   const loader::LoadedModel& model() const { return model_; }
   DecodeBuffers& buffers() { return buffers_; }
@@ -197,6 +242,13 @@ class Engine {
   // the check lives here permanently and throws rather than replaying past the
   // KV cache and the RoPE table.
   void replay();
+  // Spec 8: one plain token with MTP on (verify(0) + commit(0), or the plain list at
+  // pos 0 plus the hidden bookkeeping) - what ingest() and generate() run then.
+  void mtp_step1();
+  void require_mtp(const char* what) const;
+  // Spec 8: before anything that reads gdn_state directly (prefill, save_state's
+  // callers see the live slot): copy the live slot into slot 0 and make 0 live.
+  void mtp_normalise_live();
 
   l0::Context& ctx_;
   loader::LoadedModel model_;
@@ -216,13 +268,23 @@ class Engine {
   std::optional<bool> pf_replay_;
   BlockHook block_hook_;
   std::unique_ptr<l0::Mem> tap_;   // null unless debug_resid
+  // Spec 8: null unless the model carries the MTP head. Declared before step_ so it
+  // exists when the lists are captured (constructor body).
+  std::unique_ptr<MtpBuffers> mtp_;
   CapturedStep step_;
+  std::vector<CapturedStep> draft_steps_;    // [kMaxDraft], MTP on only
+  std::vector<CapturedStep> verify_steps_;   // [M - 1] for M = 1..kSlots
+  std::unique_ptr<l0::Mem> mtp_pf_hid_;      // prefill: bf16 [kC + 1][5120], lazy
+  std::vector<uint32_t> draft_ids_;
+  static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
+  uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;
   l0::Queue queue_;
   l0::Fence fence_;
   // Uploads, readbacks and snapshot copies only, never a token. `mutable`: the
   // save_* calls are const on the session and still append to it.
   mutable l0::CmdList imm_;
   Control* control_;               // shared memory, inside buffers_.control
+  Control* hctl_ = nullptr;        // spec 8: the head's control block (MtpBuffers::hctl)
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
 };
 
