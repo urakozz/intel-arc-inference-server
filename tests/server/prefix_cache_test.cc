@@ -46,8 +46,8 @@ uint64_t prefix_hash(const Ids& ids, uint32_t n) {
 }
 
 // What the engine would copy for a session holding `ids`: the store's call, filled.
-void store(PrefixCache& c, const Ids& ids, uint32_t end, int64_t first = -1) {
-  const PrefixCache::Slot s = c.reserve(ids, end, end % kB == 0, first);
+void store(PrefixCache& c, const Ids& ids, uint32_t end) {
+  const PrefixCache::Slot s = c.reserve(ids, end, end % kB == 0);
   if (s.state) {
     std::memset(s.state, 0, kState);
     const uint64_t h = prefix_hash(ids, end);
@@ -63,18 +63,17 @@ void store(PrefixCache& c, const Ids& ids, uint32_t end, int64_t first = -1) {
 }
 
 // A prefill of ids[from:] with the block hook: a call at every block end, then the end.
-void prefill(PrefixCache& c, const Ids& ids, uint32_t from, int64_t first = -1) {
+void prefill(PrefixCache& c, const Ids& ids, uint32_t from) {
   const uint32_t len = uint32_t(ids.size());
   for (uint32_t e = (from / kB + 1) * kB; e < len; e += kB) store(c, ids, e);
-  store(c, ids, len, first);
+  store(c, ids, len);
   c.release();
 }
 
 // The plan's state and runs hold exactly the prompt's data, and the runs cover
 // [kv_from, restart) contiguously.
 void check_plan(const PrefixCache::Plan& p, const Ids& prompt) {
-  CHECK(p.restart <= prompt.size());
-  if (p.restart == prompt.size()) CHECK(p.kind == PrefixCache::Plan::Restore && p.has_first);
+  CHECK(p.restart + 1 <= prompt.size());   // at least one id is always fed
   if (p.kind != PrefixCache::Plan::Restore) {
     CHECK(p.kv.empty());
     return;
@@ -125,7 +124,7 @@ void test_plans() {
   c.release();
 
   // Request A (10 ids): blocks [0,4) [4,8), snapshots at 4, 8 and the prompt end 10.
-  prefill(c, a, 0, 77);
+  prefill(c, a, 0);
   CHECK_EQ(c.bytes_used(), 2 * 4 * kKv + 3 * kState + 2 * kKv);
 
   // Restore at the prompt end, resident unknown: every KV run from 0.
@@ -133,15 +132,14 @@ void test_plans() {
   p = c.plan(b, {}, false);
   CHECK(p.kind == PrefixCache::Plan::Restore && p.restart == 10 && p.kv_from == 0);
   CHECK_EQ(p.kv.size(), size_t(3));
-  CHECK(!p.has_first);
   check_plan(p, b);
   c.release();
 
-  // The same prompt again: the prompt-end snapshot carries the first id; no prefill.
+  // C4: a prompt equal to a snapshot's position restores below it (here the block end
+  // at 8) and prefills; the server's own prompt-end snapshot sits at len - 1 for this.
   p = c.plan(a, cat(a, gen), true);
-  CHECK(p.kind == PrefixCache::Plan::Restore && p.restart == 10 && p.has_first);
-  CHECK_EQ(p.first_id, 77u);
-  CHECK(p.kv.empty() && p.kv_from == 10);   // the card holds A's KV already
+  CHECK(p.kind == PrefixCache::Plan::Restore && p.restart == 8);
+  CHECK(p.kv.empty() && p.kv_from == 8);   // the card holds A's KV already
   check_plan(p, a);
   c.release();
 
@@ -189,10 +187,20 @@ void test_plans() {
   // The request-end snapshot (generated ids included) serves the next turn.
   store(c, resident, 14);
   c.release();
+  // The request-end snapshot at 14 is the prompt's own length: restore below it.
+  p = c.plan(resident, {}, false);
+  CHECK(p.kind == PrefixCache::Plan::Restore && p.restart == 10);
+  check_plan(p, resident);
+  c.release();
   const Ids turn2 = cat(resident, seq(6, 1200));
   p = c.plan(turn2, {}, false);
   CHECK(p.kind == PrefixCache::Plan::Restore && p.restart == 14);
   check_plan(p, turn2);
+  c.release();
+  store(c, a, 9);                          // what the server stores: the snapshot at len - 1
+  c.release();
+  p = c.plan(a, cat(a, gen), true);
+  CHECK(p.kind == PrefixCache::Plan::Restore && p.restart == 9);   // Review Focus 5
   c.release();
   CHECK_EQ(m.bytes, c.bytes_used());
   std::printf("plans: cold, continue, restore at a prompt end / block end / request end,"
@@ -302,7 +310,7 @@ void test_stress() {
           CHECK(c.bytes_used() <= budget);
           check_plan(p, q);   // the pinned entries survive every store
         }
-        store(c, q, uint32_t(q.size()), 1);
+        store(c, q, uint32_t(q.size()));
       }
       c.release();
       CHECK(c.bytes_used() <= budget);

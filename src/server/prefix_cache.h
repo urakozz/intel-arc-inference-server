@@ -7,9 +7,7 @@
 //     engine's save_kv host layout. Its parent is the block before it (the root for b = 0).
 //   * a snapshot at position `end`: the recurrent state (save_state) plus the KV of
 //     [base, end), base = the last block boundary <= end. Its parent is the block that ends
-//     at base (the root when base = 0). A prompt-end snapshot also carries the first
-//     generated id (the argmax at end - 1), so an identical prompt restores at `end` with
-//     no prefill (amendment in spec 7 §8, Review Focus 5).
+//     at base (the root when base = 0).
 // Every entry stores the exact ids it covers and a 64-bit hash chain over them; a lookup
 // matches the hash and then compares the ids, so a collision never produces a wrong hit.
 // Eviction is LRU over leaves only (a block with a child is never evicted, so no snapshot
@@ -17,7 +15,11 @@
 // release().
 //
 // PrefixSession is the request path over server::EngineIface: plan, restore, tail
-// prefill with the block hook writing through, and the request-end snapshot.
+// prefill with the block hook writing through, and the request-end snapshot. It prefills
+// the tail up to len - 1 and feeds the last prompt id through one decode replay, so the
+// prompt-end snapshot sits at len - 1: the next turn's history usually diverges exactly
+// there (the template's "<think>\n" becomes "<think>\n\n</think>" when the client does not
+// send the reasoning back), and the same prompt again restores at len - 1 (Review Focus 5).
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -62,10 +64,8 @@ class PrefixCache {
   // The block hook's store call. `ids` are the session's ids, at least `end` of them; the
   // card holds exactly ids[0:end). Stores every block of ids[0:floor(end/block)*block) the
   // store lacks (as many as the budget fits, in order) and a snapshot at `end` (if it is
-  // not present and its blocks are). `first_id` (>= 0) is the pending first generated id,
-  // for a prompt-end snapshot. Entries reserved here are pinned until release().
-  Slot reserve(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end,
-               int64_t first_id = -1);
+  // not present and its blocks are). Entries reserved here are pinned until release().
+  Slot reserve(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end);
   void commit(const Slot& slot);         // after the engine has filled it
 
   struct Plan {
@@ -78,8 +78,6 @@ class PrefixCache {
       const void* host;
     };
     std::vector<Run> kv;                 // Restore: load_kv runs covering [kv_from, restart)
-    bool has_first = false;              // Restore at restart == prompt.size(): no prefill,
-    uint32_t first_id = 0;               //   the pending id is set to first_id
   };
   // `resident` = the ids whose state and KV the card holds (resident.size() == pos),
   // `resident_valid` false after a failure. Pins the entries it returns until release().
@@ -126,7 +124,8 @@ class PrefixSession {
     PrefixCache::Plan::Kind kind = PrefixCache::Plan::Cold;
     uint32_t restart = 0;                // usage.prompt_tokens_details.cached_tokens
     size_t kv_bytes = 0;                 // host to device for the restore
-    double restore_ms = 0, prefill_ms = 0, store_ms = 0;
+    double restore_ms = 0, prefill_ms = 0, store_ms = 0;   // prefill_ms: the tail to
+                                                            // len - 1 and the last id's replay
   };
   // Leaves the engine at pos == prompt.size() with the first generated id pending.
   // Throws what the engine throws; the resident session is then unknown.
@@ -141,7 +140,7 @@ class PrefixSession {
   bool resident_valid() const { return valid_; }
 
  private:
-  void store(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end, int64_t first);
+  void store(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end);
 
   EngineIface& engine_;
   std::unique_ptr<PrefixCache> cache_;

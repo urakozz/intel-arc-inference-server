@@ -139,7 +139,7 @@ struct StateMockEngine : server::EngineIface {
   uint32_t p = 0, cur = 0;
   BlockHook hook;
   uint64_t rng = 0;
-  size_t prefilled = 0, resets = 0, state_loads = 0, kv_loaded = 0;
+  size_t prefilled = 0, ingested = 0, resets = 0, state_loads = 0, kv_loaded = 0;
 
   static uint64_t mix(uint64_t h, uint64_t v) {
     h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
@@ -205,6 +205,12 @@ struct StateMockEngine : server::EngineIface {
     kv_loaded += e - b;
   }
   void set_block_hook(BlockHook h) override { hook = std::move(h); }
-  uint32_t pending() override { return cur; }
-  void set_pending(uint32_t id) override { cur = id; }
+  void ingest(const std::vector<uint32_t>& ids) override {
+    for (uint32_t id : ids) {
+      if (id == bad_id) throw std::runtime_error("mock: id out of vocabulary");
+      consume(id);
+      ++ingested;
+    }
+    cur = next();
+  }
 };
