@@ -239,3 +239,33 @@ Prefill at depth: 1499.37 t/s at 32768 ids, 1121.74 at 65536, 746.57 at 130816.
 Attention is half the GPU time of a 64k prefill and decode falls to 53% of its
 bandwidth rate at 128k, so both attention kernels are the follow-up: a split-d or
 SLM-staged `pf_flash_attn` (F1, F2), and decode attention at depth (F3).
+
+## 9. Amendment - 2026-09-27, spec 6c (plan `2026-09-27-spec6c-flash-exp2-rows8.md`)
+
+**Shipped: 8 query rows per work-group** (`RPW=8`, 6 sub-groups, grid `(ceil(C / 8), 4,
+1)`), research lever 2. **Not shipped: `exp2`** (lever 1), although the operator approved
+it on 2026-09-27 in place of §3.1's "`exp`, never `native_exp`": it is in the kernel behind
+`EXP2` (default 0) because it fails K3a on `l0`.
+
+**The `exp2` finding.** K1 (fp64, random data) is bit-identical with `exp2`, as the
+research measured. The engine gate is not: with `exp2(s * ATTN_SCALE * log2e - m)`,
+`flash_vs_oracle_test` measured `l0` flash 0.999951245 against composed 0.999959889
+(bar composed - 1e-6: **FAIL** by 7.6e-6), `l0-int8` 0.999938695 vs 0.999931742 (pass).
+Folding log2e after the subtraction instead (`exp2((s - m) * log2e)`) is worse: the `l0`
+golden gate itself fails (95 of 96 decision rows determined) and `l0-int8` falls to
+0.999904279 (FAIL). The same near-tie class as §8.2's K3a ruling: one ulp-level move in P's
+bf16 rounding point, amplified by the model. It needs a ruling (accept the K3a miss on
+`l0`, or a numerics change that keeps `exp`'s rounding) before E ships.
+
+**Gates (R, as committed):** K1 passes on all 7 cases, including the new (0, 1), (4096, 1)
+(the 4097-id tail chunk, 7 pad rows) and (0, 9): worst cosine 0.999998031 or better, pad
+rows finite; K2 all golden-labelled tests pass in flash mode (8/8); K3a passes and is
+bit-identical to main (`l0` 0.999960061 >= 0.999959889, `l0-int8` 0.999934564 >=
+0.999931742); K4 `prefill_smoke_test` (launch counts unchanged) and `prefill_replay_test`
+pass; the full suite is 97/97.
+
+**Speed** (docs/BENCHMARKS.md "Spec 6c", diagnostic grade, load 4.5-19.9): pp4096 1.0037x
+main (2136.68 vs 2128.81 t/s), `attn_flash` 101 ms against 117 (**F1 80 ms: missed**),
+pp65536 1.074x (1206.97), pp130816 1.097x (821.37), decode at 4k unchanged (29.24 vs 29.25).
+With `exp2` (not shipped): pp4096 1.015x, `attn_flash` 81 ms (F1 met within 1 ms),
+pp65536 1.158x, pp130816 1.222x.
