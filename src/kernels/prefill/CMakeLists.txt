@@ -140,7 +140,7 @@ add_ocloc_kernel(pf_gemm_i8_SILU SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1 SILU_
                  OPTIONS -cl-intel-256-GRF-per-thread)
 
 # Spec 6 (plan 6b): the fused flash attention, plan 6a's winner pfa_KT64_R16_H6_Q0;
-# spec 6c: RPW 8 (6 sub-groups per work-group). EXP2=1 (exp2 with the scale folded) is
-# built and measured but off: it misses K3a on l0 by 7.6e-6 (spec 6 §9), operator to rule.
+# spec 6c: RPW 8 (6 sub-groups per work-group) and EXP2=1 (exp2 with the scale folded):
+# the operator enabled exp2 on 2026-09-27 accepting its 7.6e-6 K3a miss on l0 (spec 6 §9).
 add_ocloc_kernel(pf_flash_attn SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
-                 DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=0 OPTIONS -cl-intel-256-GRF-per-thread)
+                 DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 OPTIONS -cl-intel-256-GRF-per-thread)
