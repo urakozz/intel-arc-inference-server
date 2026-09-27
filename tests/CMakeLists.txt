@@ -122,6 +122,12 @@ target_link_libraries(toolcall_test PRIVATE b70_server)
 add_test(NAME toolcall_test COMMAND toolcall_test ${CMAKE_SOURCE_DIR}/tests/server/toolcall_expected.json
   ${CMAKE_SOURCE_DIR}/tests/golden/toolcall)
 
+# Spec 7 C4 (plan 7c): the prefix cache store and plan, and the request path over a mock.
+add_executable(prefix_cache_test server/prefix_cache_test.cc)
+target_include_directories(prefix_cache_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(prefix_cache_test PRIVATE b70_server)
+add_test(NAME prefix_cache_test COMMAND prefix_cache_test)
+
 add_executable(protocol_test server/protocol_test.cc)
 target_include_directories(protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(protocol_test PRIVATE b70_server)
