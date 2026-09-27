@@ -137,8 +137,13 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   prefill::Int8State* q = backend == PrefillBackend::L0Int8 ? pfx_->int8.get() : nullptr;
   const prefill::AttnMode attn = prefill::attn_mode();
 
-  for (size_t off = 0; off < ids.size(); off += chunk) {
-    const uint32_t C = uint32_t(std::min<size_t>(chunk, ids.size() - off));
+  // With a block hook (spec 7 §3.2) every chunk ends at a block end or at the prompt
+  // end, so each completed block is a storable one; without one, uniform chunks.
+  const bool hooked = static_cast<bool>(block_hook_);
+  uint32_t C = 0;
+  for (size_t off = 0; off < ids.size(); off += C) {
+    C = uint32_t(std::min<size_t>(chunk, ids.size() - off));
+    if (hooked) C = std::min(C, kBlock - (base + uint32_t(off)) % kBlock);
     pfx_->cx.wait();                       // before touching `ids` or `Control`
     std::memcpy(pf_->ids.ptr(), ids.data() + off, size_t(C) * 4);
     control_->pos = base + uint32_t(off);
@@ -165,15 +170,28 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       encode();
     }
     pfx_->cx.wait();                       // the chunk's state has landed
+    const uint32_t end = base + uint32_t(off) + C;
+    if (hooked && off + C < ids.size() && end % kBlock == 0) {
+      // Mid-prompt block end: the state is exactly at `end`; say so in Control before
+      // the hook runs, so a hook that throws leaves pos matching the chunks written.
+      control_->pos = end;
+      control_->n_active = 0;
+      block_hook_(end, true);
+    }
   }
 
   // The tail: pos = base + L - 1 and n_active = 1 make `argmax_stage2` leave
-  // pos = base + L and cur_token[0] = the first generated id.
-  const uint32_t last = uint32_t((ids.size() - 1) % chunk);
+  // pos = base + L and cur_token[0] = the first generated id. `last` is the last
+  // row of the last chunk (C rows).
+  const uint32_t last = C - 1;
   control_->pos = base + uint32_t(ids.size()) - 1;
   control_->n_active = 1;
   prefill::step_head(pfx_->cx, pfx_->kc, *pf_, model_, control_, last);
   pfx_->cx.wait();
+  if (hooked) {
+    const uint32_t end = base + uint32_t(ids.size());
+    block_hook_(end, end % kBlock == 0);
+  }
 }
 
 }  // namespace runtime
