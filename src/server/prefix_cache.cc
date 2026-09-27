@@ -17,8 +17,6 @@ struct PrefixCache::Entry {
   void* state = nullptr;                 // snapshot only
   void* kv = nullptr;                    // KV [begin, end) in save_kv's layout (may be null)
   size_t bytes = 0;                      // one allocation: state then KV
-  bool has_first = false;
-  uint32_t first = 0;
   std::vector<Entry*> children;
   uint64_t lru = 0;
   int pins = 0;
@@ -132,7 +130,7 @@ void* PrefixCache::alloc(size_t bytes) {
 }
 
 PrefixCache::Slot PrefixCache::reserve(const std::vector<uint32_t>& ids, uint32_t end,
-                                       bool is_block_end, int64_t first_id) {
+                                       bool is_block_end) {
   Slot slot;
   if (end == 0 || ids.size() < end) return slot;
   if (is_block_end != (end % block_ == 0))
@@ -175,10 +173,6 @@ PrefixCache::Slot PrefixCache::reserve(const std::vector<uint32_t>& ids, uint32_
   // The snapshot at `end`, under the block that ends at base.
   if (Entry* s = find_snap(node, ids.data() + base, end)) {
     s->lru = ++clock_;
-    if (first_id >= 0 && !s->has_first && s->ready) {
-      s->has_first = true;
-      s->first = uint32_t(first_id);
-    }
     return slot;
   }
   const size_t kv = kv_per_pos_ * (end - base);
@@ -196,8 +190,6 @@ PrefixCache::Slot PrefixCache::reserve(const std::vector<uint32_t>& ids, uint32_
   e->kv = kv ? static_cast<uint8_t*>(p) + state_bytes_ : nullptr;
   e->bytes = bytes;
   e->lru = ++clock_;
-  e->has_first = first_id >= 0;
-  e->first = first_id >= 0 ? uint32_t(first_id) : 0;
   used_ += bytes;
   node->children.push_back(e.get());
   pin(e.get());
@@ -242,8 +234,7 @@ PrefixCache::Plan PrefixCache::plan(const std::vector<uint32_t>& prompt,
   const bool cont = resident_valid && !resident.empty() && resident.size() <= len - 1 &&
                     lcp == resident.size();
 
-  // The deepest snapshot whose ids are prompt[0:p], p <= len - 1, or p == len when it
-  // carries the first generated id.
+  // The deepest snapshot whose ids are prompt[0:p], p <= len - 1.
   std::vector<Entry*> chain;             // matched blocks, root excluded
   Entry* node = root_.get();
   Entry* best = nullptr;
@@ -251,13 +242,13 @@ PrefixCache::Plan PrefixCache::plan(const std::vector<uint32_t>& prompt,
     for (Entry* c : node->children) {
       if (c->is_block || !c->ready) continue;
       const uint32_t e = c->end;
-      if (!(e <= len - 1 || (e == len && c->has_first))) continue;
+      if (e > len - 1) continue;
       if (best != nullptr && e <= best->end) continue;
       if (c->hash != hash(node->hash, prompt.data() + node->end, e - node->end)) continue;
       if (!same_ids(c->ids, prompt.data() + node->end)) continue;
       best = c;
     }
-    if (node->end + block_ > len) break;
+    if (node->end + block_ > len - 1) break;
     Entry* b = find_block(node, prompt.data() + node->end);
     if (b == nullptr) break;
     chain.push_back(b);
@@ -268,8 +259,6 @@ PrefixCache::Plan PrefixCache::plan(const std::vector<uint32_t>& prompt,
     out.kind = Plan::Restore;
     out.restart = best->end;
     out.state = best->state;
-    out.has_first = best->has_first && best->end == len;
-    out.first_id = best->first;
     const uint32_t d = std::min(lcp, best->end);
     out.kv_from = best->end;
     for (Entry* b : chain) {
@@ -312,9 +301,7 @@ PrefixSession::PrefixSession(EngineIface& engine, size_t budget_bytes, HostAlloc
   cache_ = std::make_unique<PrefixCache>(budget_bytes, engine.state_bytes(), engine.kv_bytes(1),
                                          engine.block(), *alloc);
   engine_.set_block_hook([this](uint32_t end, bool is_block_end) {
-    if (prompt_ == nullptr) return;
-    const bool prompt_end = end == prompt_->size();
-    store(*prompt_, end, is_block_end, prompt_end ? int64_t(engine_.pending()) : -1);
+    if (prompt_ != nullptr) store(*prompt_, end, is_block_end);
   });
 }
 
@@ -322,10 +309,9 @@ PrefixSession::~PrefixSession() {
   if (cache_) engine_.set_block_hook({});
 }
 
-void PrefixSession::store(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end,
-                          int64_t first) {
+void PrefixSession::store(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end) {
   const auto t0 = std::chrono::steady_clock::now();
-  const PrefixCache::Slot slot = cache_->reserve(ids, end, is_block_end, first);
+  const PrefixCache::Slot slot = cache_->reserve(ids, end, is_block_end);
   if (!slot.empty()) {
     if (slot.state) engine_.save_state(slot.state);
     for (const auto& p : slot.kv) engine_.save_kv(p.begin, p.end, p.host);
@@ -359,13 +345,16 @@ PrefixSession::Report PrefixSession::begin(const std::vector<uint32_t>& prompt) 
     }
     r.restore_ms = ms_since(t0);
     const auto t1 = std::chrono::steady_clock::now();
-    if (plan.restart < prompt.size()) {
+    // The tail to len - 1 (its last hook call is the prompt-end snapshot, at len - 1),
+    // then the last id through one decode replay: pos == len, the first generated id
+    // pending. plan() keeps restart <= len - 1.
+    const size_t last = prompt.size() - 1;
+    if (plan.restart < last) {
       prompt_ = &prompt;
-      engine_.prefill(std::vector<uint32_t>(prompt.begin() + plan.restart, prompt.end()));
+      engine_.prefill(std::vector<uint32_t>(prompt.begin() + plan.restart, prompt.begin() + last));
       prompt_ = nullptr;
-    } else {
-      engine_.set_pending(plan.first_id);   // a prompt-end snapshot of the same ids
     }
+    engine_.ingest({prompt[last]});
     r.prefill_ms = ms_since(t1) - store_ms_;
   } catch (...) {
     prompt_ = nullptr;
@@ -396,7 +385,7 @@ double PrefixSession::end() {
   }
   store_ms_ = 0;
   try {
-    store(resident_, pos, pos % cache_->block() == 0, -1);
+    store(resident_, pos, pos % cache_->block() == 0);
   } catch (...) {
     valid_ = false;
     cache_->release();

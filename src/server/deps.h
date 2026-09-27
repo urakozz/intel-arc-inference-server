@@ -62,10 +62,9 @@ struct EngineIface {
   virtual void save_kv(uint32_t, uint32_t, void*) { unsupported<int>(); }
   virtual void load_kv(uint32_t, uint32_t, const void*) { unsupported<int>(); }
   virtual void set_block_hook(BlockHook) { unsupported<int>(); }
-  // The id the next step() returns (Control::cur_token[0]), and setting it: a restore at a
-  // prompt-end snapshot sets the first generated id it recorded.
-  virtual uint32_t pending() { return unsupported<uint32_t>(); }
-  virtual void set_pending(uint32_t) { unsupported<int>(); }
+  // runtime::Engine::ingest: ids through the decode replay, one each; the prefix cache
+  // feeds the last prompt id this way so that the prompt-end snapshot sits at len - 1.
+  virtual void ingest(const std::vector<uint32_t>&) { unsupported<int>(); }
 
  private:
   template <class T>
