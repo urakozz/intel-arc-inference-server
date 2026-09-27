@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "l0/cmdlist.h"
@@ -119,6 +120,28 @@ class Engine {
   // after prepare_prefill(), before the first prefill. Defined in engine_prefill.cc.
   std::string memory_line() const;
 
+  // Spec 7 §3.4: snapshots of the session for prefix caching. The GDN state and the
+  // conv ring are valid only at the exact position they were computed to, so a restore
+  // point needs both; the KV cache of positions [0, pos) is copied by range. Every call
+  // is blocking and runs on `imm_` (a synchronous immediate list) outside the captured
+  // decode list, which reads `pos` and the persistent buffers these calls write in
+  // place. Host pointers are l0::MemKind::Host allocations (device-visible). The caller
+  // must not have a prefill or a replay in flight -- none of the public calls leaves one.
+  static constexpr uint32_t kBlock = 2048;
+  size_t state_bytes() const;                 // gdn_state + conv_ring (166.72 MB)
+  size_t kv_bytes(uint32_t n_pos) const;      // n_pos * 16 * 4 * 256 * 2 B, K and V
+  // Layout: gdn_state then conv_ring. conv_ring is a ring indexed by pos % kConvRing;
+  // the whole ring is copied, so a restore at any pos % 16 is exact.
+  void save_state(void* host) const;
+  // Writes both, then control.pos = pos, control.n_active = 0. cur_token is NOT
+  // restored: prefill at least one id after a restore (spec 7 §3.3 step 4).
+  void load_state(const void* host, uint32_t pos);
+  // Positions [begin, end) of kv_k and kv_v. Host layout: K [16][end-begin][4][256]
+  // bf16, then V the same. begin == end copies nothing (host may be null). Throws
+  // unless begin <= end <= max_len.
+  void save_kv(uint32_t begin, uint32_t end, void* host) const;
+  void load_kv(uint32_t begin, uint32_t end, const void* host);
+
   // Greedy-generates n ids; on_token is called after each fence (host side,
   // overlaps nothing in v1). Returns the ids.
   //
@@ -182,7 +205,9 @@ class Engine {
   CapturedStep step_;
   l0::Queue queue_;
   l0::Fence fence_;
-  l0::CmdList imm_;                // uploads and readbacks only, never a token
+  // Uploads, readbacks and snapshot copies only, never a token. `mutable`: the
+  // save_* calls are const on the session and still append to it.
+  mutable l0::CmdList imm_;
   Control* control_;               // shared memory, inside buffers_.control
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
 };
