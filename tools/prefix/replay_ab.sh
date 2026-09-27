@@ -4,7 +4,9 @@
 # and compare the two runs.
 #   tools/prefix/replay_ab.sh <log dir> <out prefix>
 # e.g. tools/probe/detach.sh ~/c3.log tools/prefix/replay_ab.sh tests/golden/opencode/session1 ~/c3
-# Writes <out prefix>.on.json, .off.json, .on.serve.log, .off.serve.log. Env: MODEL, PORT
+# Writes <out prefix>.on.json, .off.json, .on.serve.log, .off.serve.log, the servers' request
+# logs <out prefix>.on.log/ and .off.log/, and judges every divergence by the tie rule
+# (<out prefix>.cases, tools/probe/probe_tie_judge). Env: MODEL, PORT
 # (8012), GB (the cache-on budget, 32), ARMS ("on off"), SERVE_ARGS (extra b70-serve flags,
 # e.g. "--log-requests DIR").
 set -euo pipefail
@@ -19,8 +21,10 @@ echo "waiting for the GPU lock"; flock 9; echo "lock held"
 for arm in ${ARMS:-on off}; do
   gb=$GB; [ "$arm" = off ] && gb=0
   echo "== cache $arm (--prefix-cache-gb $gb) =="; uptime
+  mkdir -p "$out.$arm.log"
   ZE_AFFINITY_MASK=0 build/src/cli/b70-serve "$MODEL" --max-len 131072 --port "$PORT" \
-    --served-name b70 --prefix-cache-gb "$gb" ${SERVE_ARGS:-} > "$out.$arm.serve.log" 2>&1 &
+    --served-name b70 --prefix-cache-gb "$gb" --log-requests "$out.$arm.log" ${SERVE_ARGS:-} \
+    > "$out.$arm.serve.log" 2>&1 &
   srv=$!
   for _ in $(seq 1 900); do
     curl -sf "http://127.0.0.1:$PORT/v1/models" > /dev/null && break
@@ -32,5 +36,7 @@ for arm in ${ARMS:-on off}; do
   uptime
 done
 if [ "${ARMS:-on off}" = "on off" ]; then
-  python3 tools/prefix/replay_log.py compare "$out.on.json" "$out.off.json"
+  python3 tools/prefix/replay_log.py compare "$out.on.json" "$out.off.json" || true
+  python3 tools/prefix/replay_log.py cases "$out.on.log" "$out.off.log" "$out.cases"
+  ZE_AFFINITY_MASK=0 build/tools/probe/probe_tie_judge "$MODEL" "$out.cases" 2>&1 | grep -v "^  \|^loader"
 fi
