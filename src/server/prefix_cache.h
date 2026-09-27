@@ -15,11 +15,15 @@
 // release().
 //
 // PrefixSession is the request path over server::EngineIface: plan, restore, tail
-// prefill with the block hook writing through, and the request-end snapshot. It prefills
-// the tail up to len - 1 and feeds the last prompt id through one decode replay, so the
-// prompt-end snapshot sits at len - 1: the next turn's history usually diverges exactly
-// there (the template's "<think>\n" becomes "<think>\n\n</think>" when the client does not
-// send the reasoning back), and the same prompt again restores at len - 1 (Review Focus 5).
+// prefill with the block hook writing through, and the request-end snapshot. With
+// `split_last` (the server sets it for chat requests) it prefills the tail up to len - 1
+// and feeds the last prompt id through one decode replay, so the prompt-end snapshot sits
+// at len - 1: the next turn's history usually diverges exactly there (the template's
+// "<think>\n" becomes "<think>\n\n</think>" when the client does not send the reasoning
+// back), and the same prompt again restores at len - 1 (Review Focus 5). The price: the
+// last prompt id goes through decode's kernels, not prefill's, so a near-tie first token
+// can differ from a cold run's. Without it the tail is one prefill and the prompt-end
+// snapshot is at len; a restore at a block end then reproduces a cold run bitwise.
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -129,7 +133,7 @@ class PrefixSession {
   };
   // Leaves the engine at pos == prompt.size() with the first generated id pending.
   // Throws what the engine throws; the resident session is then unknown.
-  Report begin(const std::vector<uint32_t>& prompt);
+  Report begin(const std::vector<uint32_t>& prompt, bool split_last = true);
   void fed(uint32_t id);                 // every id step() returned: its KV is written
   // After the last frame: the request-end snapshot. Returns the store time in ms.
   double end();
