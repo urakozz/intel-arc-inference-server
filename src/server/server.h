@@ -9,6 +9,7 @@
 
 #include "server/deps.h"
 #include "server/openai.h"
+#include "server/prefix_cache.h"
 #include "server/toolcall.h"
 
 namespace httplib {
@@ -28,6 +29,10 @@ struct Options {
   // Non-empty: write DIR/NNNNNN.json per served request (spec 7 P0): timings, the
   // request body, prompt and generated ids, the generated text.
   std::string log_requests_dir;
+  // Spec 7: the prefix cache's byte budget (0 = off: reset() and a full prefill per
+  // request, exactly the server before it) and the pinned host allocator it draws from.
+  size_t prefix_cache_bytes = 0;
+  HostAlloc* prefix_alloc = nullptr;
 };
 
 class Server {
@@ -50,15 +55,19 @@ class Server {
     ParsedOutput parsed;   // chat: reasoning, content and tool calls
     std::string raw_text;  // every generated piece, before any parsing or stop
     double t_first_token = 0;
+    PrefixSession::Report prefix;
   };
   struct Impl;
 
   Outcome generate(const Request& r, const std::function<void(const Delta&)>& emit);
+  void generate_tail(const Request& r, const std::string& prompt, uint32_t max_tokens,
+                     Outcome& outcome, const std::function<void(const Delta&)>& emit);
   bool acquire(uint64_t& ticket);
   void release();
   bool bind();
   void handle(const httplib::Request& request, httplib::Response& response, bool chat);
   void log_request(bool chat, const std::string& body, double t_start, const Outcome& outcome);
+  void finish_request();   // the request-end snapshot, after the last frame
 
   Deps deps_;
   Options opts_;
