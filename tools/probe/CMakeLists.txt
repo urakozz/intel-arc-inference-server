@@ -515,3 +515,19 @@ if(B70_PREFILL_ENABLED)
   b70_target_kernel_dir(probe_writethrough)
   add_dependencies(probe_writethrough ${PT_KERNELS} ${PT_PF_KERNELS})
 endif()
+# --- probe_verify_m: spec 8 P0, the MTP verify step at M = 1..4 (2026-09-27) ---
+# Plan: docs/superpowers/plans/2026-09-27-spec8a-mtp-probe.md, Task 3.
+# Record: docs/probe-mtp-2026-09-27.md. Needs -DB70_DECODE_EXTRA_M=ON (the M = 2..4
+# decode-list variants and the head's bf16 GEMV shapes, src/kernels/CMakeLists.txt).
+if(B70_DECODE_EXTRA_M)
+  add_executable(probe_verify_m probe_verify_m.cc)
+  target_include_directories(probe_verify_m PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(probe_verify_m PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(probe_verify_m)
+  endif()
+  b70_target_kernel_dir(probe_verify_m)
+  get_property(VM_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
+  get_property(VM_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
+  add_dependencies(probe_verify_m ${VM_KERNELS} ${VM_PF_KERNELS})
+endif()

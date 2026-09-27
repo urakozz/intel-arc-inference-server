@@ -64,14 +64,14 @@ static_assert(offsetof(Control, out_token) == 40 &&
 static_assert(offsetof(Control, debug_flag) == kernels::ctrl_index::kDebugFlag * 4,
               "CTRL_DEBUG moved");
 
-// The captured list's M. src/kernels/CMakeLists.txt compiles M = 1 only in this
-// plan (spec §9: the M loop exists in every kernel, M = 1 is what ships), while
-// `DecodeBuffers::kM` = 8 is the *allocation* capacity. Every kernel indexes
-// its buffers with its own compiled M, so this constant and the variant names
-// below must move together - and the M = 2 attention variants deliberately do
-// not exist at max_len 16384 (src/kernels/CMakeLists.txt), so raising this is
-// the MTP task's job, not a one-line edit.
-constexpr uint32_t kCapM = 1;
+// The captured list's M is `build`'s `M` argument (default 1, what ships). The
+// default build compiles M = 1 only (spec §9: the M loop exists in every
+// kernel, M = 1 is what ships), while `DecodeBuffers::kM` = 8 is the
+// *allocation* capacity. Every kernel indexes its buffers with its own compiled
+// M, so the argument and the variant names below move together. M = 2..4 at
+// max_len 16384 exist only under the CMake option B70_DECODE_EXTRA_M (spec 8a's
+// probe); any other M names a binary that does not exist and throws at
+// capture. The caller sets `Control::n_active` = M and `cur_token[0..M)`.
 
 constexpr size_t kBf16 = 2, kFp32 = 4;
 
@@ -129,8 +129,8 @@ void require(bool ok, const std::string& what) {
 class Capture {
  public:
   Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, l0::Mem* tap,
-          ProfileEvents* prof)
-      : ctx_(ctx), m_(m), b_(b), tap_(tap), prof_(prof),
+          ProfileEvents* prof, uint32_t cap_m)
+      : ctx_(ctx), m_(m), b_(b), tap_(tap), prof_(prof), kCapM(cap_m),
         step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
 
   CapturedStep run() {
@@ -619,7 +619,7 @@ class Capture {
   // direct-out variant of `gemv.cl`: the S = 1 that the shape needs for
   // occupancy reasons is the same S = 1 that makes this legal.
   //
-  // **The sizes, exactly.** This capture compiles `kCapM = 1`, so the launch
+  // **The sizes, exactly.** At the shipped `kCapM = 1` the launch
   // writes `S*kCapM*N*4` = 1*1*248320*4 = **993 280 B**. `logits` is allocated
   // for `DecodeBuffers::kM = 8` tokens in flight - 8*248320*4 = **7 946 240 B**
   // - so there is **8x headroom, not an exact fit**. The `require` in `gemv()`
@@ -669,6 +669,9 @@ class Capture {
   DecodeBuffers& b_;
   l0::Mem* tap_;
   ProfileEvents* prof_;
+  // The list's M (rows in flight). Named like the constant it replaced so the
+  // binding sites read unchanged; set once, before the walk.
+  const uint32_t kCapM;
   CapturedStep step_;
   size_t kv_stride_ = 0;
   int layer_ = kBoundary;
@@ -685,8 +688,11 @@ ProfileEvents::ProfileEvents(l0::Context& ctx) : pool(ctx, kProfileCapacity) {
 }
 
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                   l0::Mem* debug_resid, ProfileEvents* prof) {
-  return Capture(ctx, m, b, debug_resid, prof).run();
+                   l0::Mem* debug_resid, ProfileEvents* prof, uint32_t M) {
+  if (M == 0 || M > DecodeBuffers::kM)
+    throw std::runtime_error("runtime::build: M " + std::to_string(M) + " is outside [1, " +
+                             std::to_string(DecodeBuffers::kM) + "]");
+  return Capture(ctx, m, b, debug_resid, prof, M).run();
 }
 
 }  // namespace runtime
