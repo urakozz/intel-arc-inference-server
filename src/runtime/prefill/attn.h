@@ -69,7 +69,7 @@ inline uint32_t attn_row_blocks(uint32_t C, PrefillBackend b) {
 }
 
 // Spec 6 (plan 6b): which prefill attention `attn_chunk` runs on the L0 backends.
-//   Flash    - `pf_flash_attn` (plan 6a's pfa_KT64_R16_H6_Q0), ONE launch per FA layer for
+//   Flash    - `pf_flash_attn` (pfa_KT64_R8_H6 + exp2, spec 6c), ONE launch per FA layer for
 //              all four kv groups, no score scratch. The default.
 //   Composed - the QK^T / softmax / PV path below (ruling A14), kept as the correctness
 //              reference, the role sycl-tla plays for the GEMM. `pf_s` / `pf_p` exist only
@@ -97,7 +97,7 @@ void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 //     Writes `s.pf_o` -- fp32 [24][rows][256], per-head stride `rows * 256`
 //     with `rows = attn_rows(C, backend)`, which is what `attn_gate_chunk` and
 //     the tests read it at. On L0 in Flash mode (the default, spec 6): ONE
-//     `pf_flash_attn` launch, grid (ceil(C / 16), 4, 1), writing the same pf_o
+//     `pf_flash_attn` launch, grid (ceil(C / 8), 4, 1), writing the same pf_o
 //     layout, so `attn_gate_chunk` is unchanged. Otherwise the composed path. On sycl-tla: four L0 launches (one softmax per kv
 //     group) and eight GEMMs; synchronises, see above. On L0, per kv group: one
 //     pf_gemm per QK^T ROW BLOCK (spec S3), one softmax, one P·V, and no wait --
