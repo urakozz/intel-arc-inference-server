@@ -177,6 +177,40 @@
 #error "gdn_step: the conv ring must be at least M + 3 deep (plan 1 §9.4)"
 #endif
 
+// ---------------------------------------------------------------------------
+// SPEC_SLOTS (spec 8 §3.4, plan 8b): the MTP verify step's per-row state
+// ---------------------------------------------------------------------------
+// Undefined, this file is byte for byte the kernel above: the state is read from
+// `state` and written back once, after the last row. Defined, the kernel takes an
+// eighth argument `state_spec` and the state lives in N_SLOTS slots: slot 0 is
+// `state` (the layer's slice of PersistentBuffers::gdn_state), slot s > 0 is
+// `state_spec + (s - 1) * SPEC_SLOT_STRIDE` (MtpBuffers::gdn_spec, slot-major over the
+// 48 layers, so the stride is a whole slot). The tile is read from the LIVE slot
+// `ctrl[CTRL_LIVE]` and, after row m, written to slot `(live + m) % N_SLOTS` - so the
+// state after every verify row survives, and committing j accepted drafts is the host
+// setting live = (live + j) % N_SLOTS (P0's "Control index" mechanism; no copy).
+// At M = 1 row 0 writes the live slot itself: the in-place step, from any live slot.
+//
+// Safe without a cross-work-group barrier for the same reason the in-place kernel is:
+// every work-item reads its own 16 cells of the live slot in step 2, before any write,
+// and writes exactly those 16 offsets in the other slots - no work-item ever touches
+// another's cells, in any slot.
+#ifdef SPEC_SLOTS
+#ifndef CTRL_LIVE
+#error "gdn_step SPEC_SLOTS: CTRL_LIVE must be defined (Control::gdn_live)"
+#endif
+#ifndef SPEC_SLOT_STRIDE
+#error "gdn_step SPEC_SLOTS: SPEC_SLOT_STRIDE (floats per slot) must be defined"
+#endif
+#define N_SLOTS 4
+#if M > N_SLOTS
+#error "gdn_step SPEC_SLOTS: M rows need M slots"
+#endif
+inline __global float* slot_base(__global float* s0, __global float* spec, uint s) {
+  return s == 0 ? s0 : spec + (size_t)(s - 1) * SPEC_SLOT_STRIDE;
+}
+#endif
+
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
 // f32 -> bf16, round-to-nearest-even. Same add-and-shift as common::f32_to_bf16
@@ -202,7 +236,11 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
                        __global const float* restrict gdn_small,
                        __global ushort* restrict conv_ring,
                        __global float* restrict state,
-                       __global float* restrict gdn_o) {
+                       __global float* restrict gdn_o
+#ifdef SPEC_SLOTS
+                       , __global float* restrict state_spec
+#endif
+                       ) {
   const uint h = get_group_id(0);          // v-head
   const uint c = get_group_id(1);          // state-column chunk
   const uint lid = get_local_id(0);
@@ -272,9 +310,15 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   // -------------------------------------------------------------------------
   const size_t sbase = (size_t)h * DIM * DIM + (size_t)(sgid * BAND_K) * DIM + (c * CHUNK_V + lane);
   float S[BAND_K][VPW];
+#ifdef SPEC_SLOTS
+  const uint live = ctrl[CTRL_LIVE] % N_SLOTS;
+  const __global float* restrict src = slot_base(state, state_spec, live);
+#else
+  const __global float* restrict src = state;
+#endif
   for (uint kk = 0; kk < BAND_K; ++kk) {
-    S[kk][0] = state[sbase + (size_t)kk * DIM];
-    S[kk][1] = state[sbase + (size_t)kk * DIM + SG];
+    S[kk][0] = src[sbase + (size_t)kk * DIM];
+    S[kk][1] = src[sbase + (size_t)kk * DIM + SG];
   }
 
   const float negA = gdn_small[NEGA_OFF + h];      // the loader's -exp(A_log), fp32
@@ -369,14 +413,25 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
       op[lane] = o_red[0][lane];
       op[lane + SG] = o_red[0][lane + SG];
     }
+#ifdef SPEC_SLOTS
+    {   // the state after row m, into its slot (header, SPEC_SLOTS)
+      __global float* restrict dst = slot_base(state, state_spec, (live + m) % N_SLOTS);
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        dst[sbase + (size_t)kk * DIM] = S[kk][0];
+        dst[sbase + (size_t)kk * DIM + SG] = S[kk][1];
+      }
+    }
+#endif
     barrier(CLK_LOCAL_MEM_FENCE);   // the next token reuses rq/rk/kv_red/o_red
   }
 
   // -------------------------------------------------------------------------
   // 4. The tile goes back once, after every token of this step.
   // -------------------------------------------------------------------------
+#ifndef SPEC_SLOTS
   for (uint kk = 0; kk < BAND_K; ++kk) {
     state[sbase + (size_t)kk * DIM] = S[kk][0];
     state[sbase + (size_t)kk * DIM + SG] = S[kk][1];
   }
+#endif
 }

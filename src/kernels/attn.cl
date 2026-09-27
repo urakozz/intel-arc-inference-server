@@ -231,7 +231,9 @@
 // retunes it to S=2; attn_prep folds those slices in ascending order before the
 // linear's bf16 rounding. attn_ref.h mirrors that exact order. The other half
 // of the pairing is asserted by runtime::Capture::check_sizes.
-#define QKV_S 2
+#ifndef QKV_S
+#define QKV_S 2           /* the main FA layers' int4 qkv split-K; spec 8's bf16 MTP head is 1 */
+#endif
 
 // ATTN_BLOCK - KV positions per attn_decode work-group, and the ONE number
 // this kernel's blocking depends on. It is a `-D` rather than a literal
