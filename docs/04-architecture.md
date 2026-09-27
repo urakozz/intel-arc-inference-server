@@ -287,21 +287,19 @@ Deferring batching is not a shortcut. It isolates the variable being tested,
 which is per-token host and kernel cost, and keeps the first milestone
 reachable.
 
-### Not built: prefix caching
+### Prefix caching
 
-The benchmark runs `--no-cache`, and the KV ring and GDN state are already
-persistent device memory, which is the prerequisite. Two stages would follow, in
-this order:
-
-1. **Session continuation** - keep the last request's final state resident; if
-   the next prompt's token ids start with the previous prompt plus its generated
-   ids, continue from that state and prefill only the new tokens. Covers the
-   multi-turn chat case with no snapshot management at all: a prefix check and a
-   `pos` update.
-2. **Block snapshots** - a pool of `(token-hash-chain, position, GDN state + KV
-   slice)` entries at 1024-token boundaries, LRU, restored then tail-recomputed,
-   which is the vLLM scheme. It pays off only once several concurrent
-   conversations share system prompts, so it belongs with batching.
+Spec 7 ([specs/2026-09-27-spec7-prefix-caching-design.md](specs/2026-09-27-spec7-prefix-caching-design.md)):
+one resident session on the card and a write-through store in pinned host RAM
+(`--prefix-cache-gb`, default 32, `0` = off). The GDN state cannot be rewound, so
+reuse needs snapshots of it: the store (`src/server/prefix_cache.{h,cc}`) keeps KV
+blocks of 2048 positions and state snapshots (at every block end, at every prompt's
+`len - 1`, at every request's end) in a tree keyed by exact token ids, LRU over leaves.
+A request continues the resident session when its ids extend it, otherwise restores
+the deepest snapshot that is a prefix of the prompt (state plus the KV the card does
+not already hold), and prefills only the tail; `usage.prompt_tokens_details.cached_tokens`
+reports the restart point. opencode's side requests (titles, subagents) evict the card,
+not the store. Results: [BENCHMARKS.md](BENCHMARKS.md), "Prefix caching (spec 7)".
 
 The server owns the **tokenizer and chat template**. Both are host code on the
 request path: encode once per request, detokenise once per token, off the card's
