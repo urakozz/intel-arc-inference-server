@@ -24,7 +24,8 @@ set -euo pipefail
 # moves again, the sets made under the old one are not retroactively relabelled.
 IMAGE="${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
-REPO_DIR="${REPO_DIR:-$HOME/b70-inference-server}"
+# The tree this script lives in (per-plan trees: tools/box_dir.sh).
+REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)}"
 ORACLE_MODEL="${ORACLE_MODEL:-models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
 ORACLE_SNAP="${ORACLE_SNAP:-}"
 ORACLE_THREADS="${ORACLE_THREADS:-}"
