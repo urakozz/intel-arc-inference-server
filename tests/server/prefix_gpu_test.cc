@@ -11,16 +11,19 @@
 //
 // Sequences (L = long32k.ids, C = the golden code prompt's ids repeated):
 //   a  turn 2 = turn 1's prompt L[0:3000] + its 64 generated ids + L[3000:3700]: continue
-//   b  turn 2 = L[0:3000] + C[0:700] (turn 1's generated ids dropped): restore at 3000
+//   b  turn 2 = L[0:3000] + C[0:700] (turn 1's generated ids dropped): restore at 2999,
+//      the prompt-end snapshot (PrefixSession feeds a prompt's last id by one decode replay,
+//      so the snapshot sits at len - 1)
 //   c  turn 1 L[0:6000]; turn 2 = L[0:5000] + C[0:700]: mid-block, restore at 4096
 //   d  turn 1 L[0:6000]; turn 2 = L[0:4096] + C[0:700]: on the block boundary, 4096
 //   e  turn 1 L[0:5000] + 64 generated, a 300-id side request L[20000:20300], turn 2 =
 //      turn 1 + generated + L[5000:5700]: restore at 5064 with every KV block from the host
-//   f  turn 1 L[0:3500], a side request, turn 2 = turn 1's prompt again: restore at 3500
-//      from the prompt-end snapshot with its first id, no prefill -- the 32 tokens must be
-//      turn 1's own, bitwise (spec 7 §8 amendment).
-//   g  the control for b, no cache: b's final prompt prefilled as two calls split at 3000,
-//      against one call -- what the chunk boundary alone costs.
+//   f  turn 1 L[0:3500], a side request, turn 2 = turn 1's prompt again: restore at 3499
+//      and one id fed (Review Focus 5) -- the same path as turn 1's own, so its 32 tokens
+//      must be turn 1's, bitwise.
+//   g  the control for b, no cache: b's final prompt through b's cached path without the
+//      cache (prefill [0,2999), prefill [2999,3699), the last id by a replay), against the
+//      one full prefill -- what the split alone costs.
 // argv: [1] snapshot, [2] prompts dir, [3] backend l0 | l0-int8 (default: the build's),
 //       [4] near-tie flips allowed per sequence (default 1 on l0-int8, else 0).
 #include <chrono>
@@ -130,13 +133,14 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
     // The control for b: no cache, the same final prompt prefilled as two calls split at
     // 3000 -- the chunking difference alone, judged the same way.
     final_prompt = cat(slice(L, 0, 3000), slice(C, 0, 700));
-    rig.eng.prefill(slice(final_prompt, 0, 3000));
-    rig.eng.prefill(slice(final_prompt, 3000, final_prompt.size()));
+    rig.eng.prefill(slice(final_prompt, 0, 2999));
+    rig.eng.prefill(slice(final_prompt, 2999, final_prompt.size() - 1));
+    rig.eng.ingest({final_prompt.back()});
     rep.kind = want.kind;
     rep.restart = want.restart;
     server::Sampling greedy;
     for (uint32_t p = 0; p < kGen; ++p) {
-      cand_rows.push_back(rig.row(p == 0));
+      cand_rows.push_back(rig.row(false));   // the last prompt id was a decode replay
       cand_tok.push_back(rig.ad.step(greedy));
     }
   } else {
@@ -164,10 +168,9 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
     std::printf("    final turn of %zu ids: %s at %u, kv %.1f MB, restore %.1f ms, prefill %.1f"
                 " ms, store %.1f ms\n", final_prompt.size(), server::plan_kind_name(rep.kind),
                 rep.restart, rep.kv_bytes / 1e6, rep.restore_ms, rep.prefill_ms, rep.store_ms);
-    const bool prefilled = rep.restart < final_prompt.size();
     server::Sampling greedy;
     for (uint32_t p = 0; p < kGen; ++p) {
-      if (prefilled) cand_rows.push_back(rig.row(p == 0));
+      cand_rows.push_back(rig.row(false));   // the session fed the last prompt id by a replay
       cand_tok.push_back(rig.ad.step(greedy));
       s.fed(cand_tok.back());
     }
@@ -253,12 +256,12 @@ int main(int argc, char** argv) {
 
   using K = server::PrefixCache::Plan;
   const std::vector<Seq> seqs = {{"a continue", K::Continue, 3064},
-                                 {"b prompt end", K::Restore, 3000},
+                                 {"b prompt end", K::Restore, 2999},
                                  {"c mid-block", K::Restore, 4096},
                                  {"d block boundary", K::Restore, 4096},
                                  {"e side request", K::Restore, 5064},
-                                 {"f same prompt", K::Restore, 3500},
-                                 {"g control for b: no cache, prefill split at 3000", K::Cold, 0}};
+                                 {"f same prompt", K::Restore, 3499},
+                                 {"g control for b: its split, no cache", K::Cold, 0}};
   bool all = true;
   for (const Seq& s : seqs) all = run_seq(rig, s, L, C, allowed) && all;
   if (!all) {

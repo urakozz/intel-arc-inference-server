@@ -163,12 +163,7 @@ struct EngineAdapter : server::EngineIface {
   void save_kv(uint32_t b, uint32_t e, void* host) override { eng.save_kv(b, e, host); }
   void load_kv(uint32_t b, uint32_t e, const void* host) override { eng.load_kv(b, e, host); }
   void set_block_hook(BlockHook hook) override { eng.set_block_hook(std::move(hook)); }
-  uint32_t pending() override {
-    return eng.buffers().control.as<runtime::Control>()->cur_token[0];
-  }
-  void set_pending(uint32_t id) override {
-    eng.buffers().control.as<runtime::Control>()->cur_token[0] = id;
-  }
+  void ingest(const std::vector<uint32_t>& ids) override { eng.ingest(ids); }
 
   // Reads back the replay's fp32 logits row (`eng.buffers().logits`, [1][
   // model::Qwen35::kVocab] = 993 KB), samples over the first `vocab_used` of

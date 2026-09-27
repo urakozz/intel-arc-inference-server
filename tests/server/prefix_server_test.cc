@@ -202,24 +202,40 @@ void test_sampling() {
 }
 
 void test_same_prompt() {
-  // Review Focus 5 (amended, spec 7 §8): the same prompt twice. The prompt-end snapshot
-  // carries the first generated id, so the second restores at len with nothing to prefill,
-  // and generates exactly what the first did.
+  // Review Focus 5: the same prompt twice. The second restores at len - 1 from the
+  // prompt-end snapshot and feeds exactly one id; cached_tokens == len - 1.
   Pair t;
   const json conv = json::array({msg("system", words("sys", 13)), msg("user", "again")});
   const auto a = t.both(conv, 6);
-  const size_t prefilled = t.on.engine.prefilled;
+  const size_t prefilled = t.on.engine.prefilled, ingested = t.on.engine.ingested;
   const auto b = t.both(conv, 6);
   CHECK(a.content == b.content);
-  CHECK_EQ(b.cached, uint32_t(b.prompt_ids.size()));
+  CHECK_EQ(b.cached, uint32_t(b.prompt_ids.size() - 1));
   CHECK_EQ(t.on.engine.prefilled, prefilled);
+  CHECK_EQ(t.on.engine.ingested, ingested + 1);
   // After a side request: the same restore, with the KV from the host.
   (void)t.both(json::array({msg("user", "side")}), 2);
   const auto c = t.both(conv, 6);
   CHECK(c.content == a.content);
-  CHECK_EQ(c.cached, uint32_t(c.prompt_ids.size()));
-  std::printf("same prompt: the second restores at %u of %zu, 0 ids prefilled OK\n", b.cached,
-              b.prompt_ids.size());
+  CHECK_EQ(c.cached, uint32_t(c.prompt_ids.size() - 1));
+  std::printf("same prompt: the second restores at %u of %zu and feeds one id (Review Focus 5)"
+              " OK\n", b.cached, b.prompt_ids.size());
+}
+
+void test_history_drops_last_id() {
+  // The next turn's history does not carry the generated ids (a client that re-renders
+  // the answer): it diverges right after the previous prompt. After a side request the
+  // prompt-end snapshot at len - 1 is the deepest hit.
+  Pair t;
+  json conv = json::array({msg("system", words("sys", 25)), msg("user", "go")});
+  const auto a = t.both(conv, 5);
+  (void)t.both(json::array({msg("user", "side")}), 2);
+  conv.push_back(msg("assistant", "something else entirely"));
+  conv.push_back(msg("user", "next"));
+  const auto b = t.both(conv, 5);
+  CHECK_EQ(b.cached, uint32_t(a.prompt_ids.size() - 1));
+  std::printf("history diverging at the previous prompt's end restores at %u (len - 1) OK\n",
+              b.cached);
 }
 
 void test_small_budget() {
@@ -251,6 +267,7 @@ int main() {
   test_failure();
   test_sampling();
   test_same_prompt();
+  test_history_drops_last_id();
   test_small_budget();
   std::printf("prefix_server_test OK\n");
   return 0;
