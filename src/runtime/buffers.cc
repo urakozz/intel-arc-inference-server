@@ -207,6 +207,33 @@ size_t PrefillScratch::lazy_bytes() const {
          (pf_s_ ? pf_s_->size() : 0) + (pf_p_ ? pf_p_->size() : 0);
 }
 
+// --- MtpBuffers (spec 8) -----------------------------------------------------
+
+MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len)
+    : hctl(ctx, l0::MemKind::Shared, sizeof(Control)),
+      gdn_spec(ctx, l0::MemKind::Device,
+               size_t{kSlots - 1} * kGdnLayers * Q::kGdnVHeads * Q::kGdnHeadDim * Q::kGdnHeadDim *
+                   kFp32),
+      kv_k(ctx, l0::MemKind::Device, size_t{max_len} * Q::kFaKvHeads * Q::kFaHeadDim * kBf16),
+      kv_v(ctx, l0::MemKind::Device, size_t{max_len} * Q::kFaKvHeads * Q::kFaHeadDim * kBf16),
+      hh(ctx, l0::MemKind::Device, size_t{DecodeScratch::kM + 1} * Q::kHidden * kBf16),
+      dh(ctx, l0::MemKind::Device, size_t{Q::kHidden} * kBf16),
+      logits(ctx, l0::MemKind::Device, size_t{kMaxK} * Q::kVocab * kFp32),
+      max_len(max_len) {
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  zero(imm);
+}
+
+void MtpBuffers::zero(l0::CmdList& imm) {
+  for (l0::Mem* m : {&hctl, &gdn_spec, &kv_k, &kv_v, &hh, &dh, &logits})
+    imm.fill(m->ptr(), 0u, m->size());
+}
+
+size_t MtpBuffers::bytes() const {
+  return hctl.size() + gdn_spec.size() + kv_k.size() + kv_v.size() + hh.size() + dh.size() +
+         logits.size();
+}
+
 // --- DecodeBuffers, the view -------------------------------------------------
 
 DecodeBuffers::DecodeBuffers(l0::Context& ctx, uint32_t max_len)
