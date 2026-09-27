@@ -5,7 +5,9 @@
 #   tools/box.sh test [regex]    sync + build + ctest (optionally -R regex)
 #   tools/box.sh run <cmd...>    run a shell command in the remote tree
 #   tools/box.sh pull <path>     copy a generated file back from the box
-# Env: BOX (ssh target), REMOTE_DIR (relative to $HOME on the box), JOBS,
+#   tools/box.sh dir             print the remote tree this checkout uses
+# Env: BOX (ssh target), REMOTE_DIR (relative to $HOME on the box; default from
+#      the branch, see tools/box_dir.sh), BOX_SUFFIX, JOBS,
 #      BUILD_DIR (default build; e.g. build-nosycl), CMAKE_ARGS (extra -D flags for
 #      the configure step).
 set -euo pipefail
@@ -16,7 +18,9 @@ _box_env="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/box.env"
 # shellcheck source=/dev/null
 [ -r "$_box_env" ] && . "$_box_env"
 : "${BOX:?set BOX=user@host in the environment or in tools/box.env (see tools/box.env.example)}"
-REMOTE_DIR="${REMOTE_DIR:-b70-inference-server}"
+# shellcheck source=tools/box_dir.sh
+. "$(dirname "${BASH_SOURCE[0]:-$0}")/box_dir.sh"
+REMOTE_DIR="$(b70_remote_dir "$(dirname "${BASH_SOURCE[0]:-$0}")/..")"
 JOBS="${JOBS:-44}"
 # A second configuration lives beside the first on the box (spec 2.1 §4:
 # build-nosycl is `cmake -DB70_PREFILL=OFF`). Both are named here rather than
@@ -26,6 +30,7 @@ CMAKE_ARGS="${CMAKE_ARGS:-}"
 cd "$(dirname "$0")/.."
 
 sync_tree() {
+  echo "box: $BOX:$REMOTE_DIR" >&2
   rsync -az --delete \
     --exclude build --exclude 'build-*' --exclude .git --exclude 'cmake-build-*' --exclude .idea \
     --exclude oracle-out --exclude 'oracle-out-*' \
@@ -43,11 +48,12 @@ ZE_ENV=""
 if [ -n "${ZE_AFFINITY_MASK:-}" ]; then ZE_ENV="ZE_AFFINITY_MASK='$ZE_AFFINITY_MASK' "; fi
 
 case "${1:-}" in
+  dir)   echo "$REMOTE_DIR" ;;
   sync)  sync_tree ;;
   build) sync_tree; configure_and_build ;;
   test)  sync_tree; configure_and_build
          ssh "$BOX" "cd '$REMOTE_DIR' && ${ZE_ENV}ctest --test-dir '$BUILD_DIR' --output-on-failure ${2:+-R \"$2\"}" ;;
   run)   shift; ssh "$BOX" "cd '$REMOTE_DIR' && ${ZE_ENV}$*" ;;
   pull)  shift; rsync -az "$BOX:$REMOTE_DIR/$1" "$1" ;;
-  *)     echo "usage: $0 sync|build|test [regex]|run <cmd...>|pull <path>" >&2; exit 2 ;;
+  *)     echo "usage: $0 dir|sync|build|test [regex]|run <cmd...>|pull <path>" >&2; exit 2 ;;
 esac
