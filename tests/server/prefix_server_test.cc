@@ -238,6 +238,28 @@ void test_history_drops_last_id() {
               b.cached);
 }
 
+void test_completions_unsplit() {
+  // /v1/completions (and chat with --prefix-no-split) prefill the whole tail: no decode
+  // replay, the prompt-end snapshot at len; the same prompt again restores below it.
+  Pair t;
+  const json body = {{"model", "mock-model"}, {"prompt", words("p", 22)}, {"max_tokens", 4},
+                     {"return_token_ids", true}};
+  std::vector<std::string> texts;
+  for (Fixture* f : {&t.on, &t.off}) {
+    for (int i = 0; i < 2; ++i) {
+      httplib::Client client("127.0.0.1", f->server->bound_port());
+      const auto r = client.Post("/v1/completions", body.dump(), "application/json");
+      CHECK(r && r->status == 200);
+      const json j = json::parse(r->body);
+      texts.push_back(j.at("choices").at(0).at("text").get<std::string>());
+    }
+  }
+  CHECK(texts[0] == texts[2] && texts[1] == texts[3] && texts[0] == texts[1]);
+  CHECK_EQ(t.on.engine.ingested, size_t(0));
+  CHECK_EQ(t.on.engine.state_loads, size_t(1));   // the second restored (at the block end 20)
+  std::printf("completions: no split, the repeat restores below the prompt end OK\n");
+}
+
 void test_small_budget() {
   // A budget below one session's entries: requests still succeed and agree.
   Fixture tiny(96);
@@ -268,6 +290,7 @@ int main() {
   test_sampling();
   test_same_prompt();
   test_history_drops_last_id();
+  test_completions_unsplit();
   test_small_budget();
   std::printf("prefix_server_test OK\n");
   return 0;

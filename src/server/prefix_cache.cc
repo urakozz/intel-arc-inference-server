@@ -320,7 +320,8 @@ void PrefixSession::store(const std::vector<uint32_t>& ids, uint32_t end, bool i
   store_ms_ += ms_since(t0);
 }
 
-PrefixSession::Report PrefixSession::begin(const std::vector<uint32_t>& prompt) {
+PrefixSession::Report PrefixSession::begin(const std::vector<uint32_t>& prompt,
+                                           bool split_last) {
   Report r;
   if (!cache_) {
     engine_.reset();
@@ -345,16 +346,17 @@ PrefixSession::Report PrefixSession::begin(const std::vector<uint32_t>& prompt) 
     }
     r.restore_ms = ms_since(t0);
     const auto t1 = std::chrono::steady_clock::now();
-    // The tail to len - 1 (its last hook call is the prompt-end snapshot, at len - 1),
-    // then the last id through one decode replay: pos == len, the first generated id
-    // pending. plan() keeps restart <= len - 1.
-    const size_t last = prompt.size() - 1;
-    if (plan.restart < last) {
+    // split_last: the tail to len - 1 (its last hook call is the prompt-end snapshot, at
+    // len - 1), then the last id through one decode replay. Otherwise the whole tail in one
+    // prefill, the prompt-end snapshot at len. Either way pos == len with the first
+    // generated id pending; plan() keeps restart <= len - 1.
+    const size_t end = split_last ? prompt.size() - 1 : prompt.size();
+    if (plan.restart < end) {
       prompt_ = &prompt;
-      engine_.prefill(std::vector<uint32_t>(prompt.begin() + plan.restart, prompt.begin() + last));
+      engine_.prefill(std::vector<uint32_t>(prompt.begin() + plan.restart, prompt.begin() + end));
       prompt_ = nullptr;
     }
-    engine_.ingest({prompt[last]});
+    if (split_last) engine_.ingest({prompt.back()});
     r.prefill_ms = ms_since(t1) - store_ms_;
   } catch (...) {
     prompt_ = nullptr;
