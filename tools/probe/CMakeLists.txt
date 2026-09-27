@@ -506,4 +506,12 @@ if(B70_PREFILL_ENABLED)
   get_property(PT_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
   get_property(PT_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_tail ${PT_KERNELS} ${PT_PF_KERNELS})
+  # --- spec 7 S3 (plan 7b Task 3): the write-through cost of block snapshots ---
+  # Record: docs/probe-prefix-cache-2026-09-27.md, "Write-through cost, S3".
+  add_executable(probe_writethrough probe_writethrough.cc)
+  target_include_directories(probe_writethrough PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(probe_writethrough PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0 pthread)
+  b70_link_prefill(probe_writethrough)
+  b70_target_kernel_dir(probe_writethrough)
+  add_dependencies(probe_writethrough ${PT_KERNELS} ${PT_PF_KERNELS})
 endif()
