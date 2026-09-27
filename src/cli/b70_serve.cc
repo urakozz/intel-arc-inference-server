@@ -1,4 +1,5 @@
 // b70-serve -- the OpenAI-compatible server over the replayed runtime::Engine.
+#include <filesystem>
 #include <unistd.h>
 
 #include <csignal>
@@ -57,7 +58,8 @@ void usage() {
                "usage: b70-serve <snapshot-or-repo> [--host 0.0.0.0] [--port 8000]\n"
                "                 [--max-len 16384] [--device N] [--served-name NAME] [--queue 4]\n"
                "                 --max-len: 16384, 32768 or 131072 (the compiled decode attention)\n"
-               "                 [--pp-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n");
+               "                 [--pp-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n"
+               "                 [--log-requests DIR]   write DIR/NNNNNN.json per request\n");
 }
 
 uint32_t parse_u32(const char* what, const std::string& value) {
@@ -141,6 +143,8 @@ int run(int argc, char** argv) {
       options.served_model = value(i, "--served-name");
     } else if (arg == "--queue") {
       options.queue_depth = parse_u32("--queue", value(i, "--queue"));
+    } else if (arg == "--log-requests") {
+      options.log_requests_dir = value(i, "--log-requests");
     } else if (arg == "--pp-backend") {
       pp_backend_arg = value(i, "--pp-backend");
       have_pp_backend = true;
@@ -161,6 +165,7 @@ int run(int argc, char** argv) {
   if (max_len == 0) throw std::runtime_error("--max-len 0 is not a model length");
   if (options.host.empty()) throw std::runtime_error("--host must not be empty");
   if (options.served_model.empty()) throw std::runtime_error("--served-name must not be empty");
+  if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);
   runtime::PrefillBackend pp_backend{};
   if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
     throw std::runtime_error("--pp-backend expects sycl-tla, l0 or l0-int8, got '" + pp_backend_arg + "'");
