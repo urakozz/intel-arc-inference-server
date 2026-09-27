@@ -544,3 +544,46 @@ if(B70_MTP)
   get_property(MS_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_mtp_steps ${MS_KERNELS} ${MS_PF_KERNELS})
 endif()
+
+# --- probe_decode_attn: spec 10 P0/P1, decode attention at depth (2026-09-28) ---
+# Plan: docs/superpowers/plans/2026-09-28-spec10a-decode-attn-probe.md.
+# Record: docs/probe-decode-attn-2026-09-28.md. Arm 0 (`pda_v1_M<M>`) is
+# src/kernels/attn.cl ITSELF at max_len 131072 and the probe's M (no production build
+# compiles M = 4 at 131072); every other arm is probe_decode_attn.cl at one tag
+# P<ppw>_L<load>_D<dot>_F<prefetch>_R<reduce>. This list and the harness's --arms are two
+# lists nothing checks against each other: a missing binary is named and skipped.
+set(PDA_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_decode_attn.cl)
+set(PDA_TAGS
+    P64_L0_D0_F0_R0 P256_L0_D0_F0_R0 P512_L0_D0_F0_R0 P1024_L0_D0_F0_R0 P2048_L0_D0_F0_R0
+    P0_L0_D0_F0_R0
+    P64_L1_D0_F0_R0 P64_L2_D0_F0_R0 P64_L2_D1_F0_R0
+    P256_L1_D0_F0_R0 P256_L2_D0_F0_R0 P256_L2_D1_F0_R0 P256_L2_D1_F1_R0 P256_L2_D1_F0_R1
+    P512_L1_D0_F0_R0 P512_L2_D0_F0_R0 P512_L2_D1_F0_R0 P512_L2_D1_F1_R0 P512_L2_D1_F0_R1
+    P1024_L2_D0_F0_R0 P1024_L2_D1_F0_R0 P1024_L2_D1_F1_R0 P1024_L2_D1_F0_R1
+    P0_L1_D0_F0_R0 P0_L2_D0_F0_R0 P0_L2_D1_F0_R0 P0_L2_D1_F1_R0 P0_L2_D1_F0_R1
+    P0_L2_D1_F1_R1)
+set(PDA_TARGETS)
+foreach(MM 1 4)
+  add_ocloc_kernel(pda_v1_M${MM} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/attn.cl
+                   DEFINES CTRL_POS=0 CTRL_NACT=1 QNORM_OFF=0 KNORM_OFF=256 ATTN_BLOCK=64
+                           M=${MM} MAXLEN=131072)
+  list(APPEND PDA_TARGETS kernel_pda_v1_M${MM})
+  foreach(tag IN LISTS PDA_TAGS)
+    string(REGEX MATCH "^P([0-9]+)_L([0-9])_D([0-9])_F([0-9])_R([0-9])$" _m ${tag})
+    add_ocloc_kernel(pda_${tag}_M${MM} SOURCE ${PDA_CL}
+                     DEFINES M=${MM} MAXLEN=131072 PPW=${CMAKE_MATCH_1} LOAD=${CMAKE_MATCH_2}
+                             DOT=${CMAKE_MATCH_3} PREFETCH=${CMAKE_MATCH_4} REDUCE=${CMAKE_MATCH_5})
+    list(APPEND PDA_TARGETS kernel_pda_${tag}_M${MM})
+  endforeach()
+endforeach()
+add_executable(probe_decode_attn probe_decode_attn.cc)
+target_include_directories(probe_decode_attn PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(probe_decode_attn PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+b70_target_kernel_dir(probe_decode_attn)
+get_property(PDA_PROD_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
+add_dependencies(probe_decode_attn ${PDA_TARGETS} ${PDA_PROD_KERNELS})
+if(B70_PREFILL_ENABLED)
+  b70_link_prefill(probe_decode_attn)
+  get_property(PDA_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
+  add_dependencies(probe_decode_attn ${PDA_PF_KERNELS})
+endif()
