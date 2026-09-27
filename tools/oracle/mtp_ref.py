@@ -256,8 +256,52 @@ def wiring_inputs(pre, post, w):
     return pre if WIRINGS[w]["hidden"] == "pre" else post
 
 
+@torch.no_grad()
+def dump(snapshot: str, prompts_dir: str, cont_dir: str, out_dir: str, names, n_rows: int) -> None:
+    """Plan 8b M1's reference: per golden prompt, the head's depth-1 logits at the rows the
+    engine drafts from. With prompt length n and ids = prompt + cont[:n_rows + 1], row i
+    (i < n_rows) is the head on (post-norm h[n-1+i], ids[n+i]) at position n-1+i, attending
+    over depth-1 keys of every earlier row -- exactly what the engine's first draft sees
+    after prefilling prompt + cont[:i] (teacher forced). Written as one safetensors file per
+    prompt: `logits` fp32 [n_rows][V], `pos` int32 [n_rows], `next` int32 [n_rows]
+    (the token fed at each row)."""
+    from safetensors.torch import save_file
+    t0 = time.time()
+    model, tc = build_main(snapshot)
+    head = MtpHead.from_snapshot(snapshot, tc, model.model.embed_tokens.weight, model.lm_head.weight)
+    print(f"loaded {time.time() - t0:.0f}s", flush=True)
+    os.makedirs(out_dir, exist_ok=True)
+    for name in names:
+        prompt = [int(x) for x in open(os.path.join(prompts_dir, f"{name}.ids")).read().split()]
+        cont = [int(x) for x in open(os.path.join(cont_dir, f"{name}.cont256.ids")).read().split()]
+        ids = prompt + cont[: n_rows + 1]
+        n, T = len(prompt), len(ids)
+        _, _, post = main_forward(model, ids)
+        ids_t = torch.tensor(ids)
+        rows = torch.arange(0, T - 1)
+        (lg, _), = head.chain(post[: T - 1], ids_t[1:T], rows, 1)
+        sel = torch.arange(n - 1, n - 1 + n_rows)
+        save_file({"logits": lg[sel].float().contiguous(),
+                   "pos": sel.to(torch.int32).contiguous(),
+                   "next": ids_t[sel + 1].to(torch.int32).contiguous()},
+                  os.path.join(out_dir, f"{name}.mtp.safetensors"))
+        print(f"{name}: n={n} rows {n - 1}..{n - 2 + n_rows} dumped ({time.time() - t0:.0f}s)", flush=True)
+
+
 def main() -> None:
     import argparse
+    if len(sys.argv) > 1 and sys.argv[1] == "--dump":
+        ap = argparse.ArgumentParser(description="dump plan 8b M1's reference head logits")
+        ap.add_argument("--dump", action="store_true")
+        ap.add_argument("snapshot")
+        ap.add_argument("--prompts", required=True, help="dir with <name>.ids")
+        ap.add_argument("--cont", required=True, help="dir with <name>.cont256.ids (engine greedy)")
+        ap.add_argument("--out", required=True)
+        ap.add_argument("--names", default="code,prose,cjk")
+        ap.add_argument("--rows", type=int, default=32)
+        a = ap.parse_args()
+        dump(a.snapshot, a.prompts, a.cont, a.out, a.names.split(","), a.rows)
+        return
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("snapshot")
     ap.add_argument("--ids", required=True, help="prompt ids file")

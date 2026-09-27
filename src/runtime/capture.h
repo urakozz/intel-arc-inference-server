@@ -118,4 +118,24 @@ CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers
                    l0::Mem* debug_resid = nullptr, ProfileEvents* prof = nullptr,
                    uint32_t M = 1);
 
+// Spec 8 (plan 8b), MTP on only (`m.mtp` loaded, `mtp` allocated).
+//
+// build_verify: the decode list at M rows (positions pos .. pos + M - 1, ids
+// cur_token[0..M)) with gdn_step's SPEC_SLOTS build - row m's GDN state into slot
+// (gdn_live + m) % kSlots - then the rows' post-final-norm hidden into MtpBuffers::hh
+// rows 1..M and the MTP head's K/V fill of M rows at hctl.pos (the caller sets
+// hctl.pos = pos - 1, hctl.n_active = M, hctl.cur_token = cur_token): row r is the pair
+// (hh[r], cur_token[r]), i.e. (h_{pos-1+r}, x[pos+r]). argmax ids land in out_token[0..M),
+// logits in `logits` [M][kVocab]; argmax_stage2 advances pos by M (the caller rewinds it
+// at commit). 774 + 10 launches at every M.
+//
+// build_draft: the MTP head at M = 1 on (hctl.cur_token[0], MtpBuffers::dh) at hctl.pos;
+// its post-mtp.norm hidden back into dh, logits into MtpBuffers::logits row `i`, the
+// argmax into hctl.out_token[0] AND hctl.cur_token[0], hctl.pos += 1 - so replaying the
+// lists for i = 0, 1, ... chains the drafts.
+CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
+                          const MtpBuffers& mtp, uint32_t M);
+CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
+                         const MtpBuffers& mtp, uint32_t i);
+
 }  // namespace runtime

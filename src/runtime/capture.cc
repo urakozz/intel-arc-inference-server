@@ -63,6 +63,8 @@ static_assert(offsetof(Control, out_token) == 40 &&
               "CTRL_OUT moved");
 static_assert(offsetof(Control, debug_flag) == kernels::ctrl_index::kDebugFlag * 4,
               "CTRL_DEBUG moved");
+// Spec 8: CTRL_LIVE=19 in src/kernels/CMakeLists.txt's GDN_SLOT_DEFINES.
+static_assert(offsetof(Control, gdn_live) == kernels::ctrl_index::kGdnLive * 4, "CTRL_LIVE moved");
 
 // The captured list's M is `build`'s `M` argument (default 1, what ships). The
 // default build compiles M = 1 only (spec §9: the M loop exists in every
@@ -126,16 +128,31 @@ void require(bool ok, const std::string& what) {
 
 // The walk itself. One instance per `build` call; it owns the CapturedStep
 // under construction and hands it back closed.
+// What a walk captures (spec 8, plan 8b). `Plain` is the decode list, unchanged.
+// `Verify` is the same list at M rows with the per-row GDN slot variant, followed by
+// the MTP head's KV fill of those M rows. `Draft` is the MTP head alone at M = 1.
+enum class Mode { Plain, Verify, Draft };
+
 class Capture {
  public:
   Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, l0::Mem* tap,
-          ProfileEvents* prof, uint32_t cap_m)
-      : ctx_(ctx), m_(m), b_(b), tap_(tap), prof_(prof), kCapM(cap_m),
-        step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
+          ProfileEvents* prof, uint32_t cap_m, const MtpBuffers* mtp = nullptr,
+          Mode mode = Mode::Plain, uint32_t draft_i = 0)
+      : ctx_(ctx), m_(m), b_(b), tap_(tap), prof_(prof), kCapM(cap_m), mtp_(mtp), mode_(mode),
+        draft_i_(draft_i), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
 
   CapturedStep run() {
     kv_stride_ = size_t(b_.max_len) * Qwen35::kFaKvHeads * Qwen35::kFaHeadDim * kBf16;
     check_sizes();
+    if (mode_ != Mode::Plain) check_mtp();
+    if (mode_ == Mode::Draft) {
+      layer_ = kHeadLayer;
+      draft();
+      require(step_.kernels.size() == step_.kernel_count, "a Kernel was created but never launched");
+      require(step_.labels.size() == step_.kernel_count, "a launch went unlabelled");
+      step_.list.close();
+      return std::move(step_);
+    }
     // A ProfileEvents handed to a second build must describe that build, not
     // both. (The profiler's own test builds twice against one set of buffers.)
     //
@@ -166,6 +183,15 @@ class Capture {
     }
     layer_ = kBoundary;
     head();
+    if (mode_ == Mode::Verify) {
+      // The verify rows' post-final-norm hidden (`x`, what lm_head read) into hh rows
+      // 1..M; row 0 is h_{pos-1}, left by the previous commit or prefill. Then the
+      // head's KV fill over hh rows 0..M-1 (MtpBuffers).
+      const size_t row = size_t(Qwen35::kHidden) * kBf16;
+      step_.list.copy(at(mtp_->hh, row), b_.x.ptr(), row * kCapM);
+      layer_ = kHeadLayer;
+      head_kv_fill(mtp_->hh.ptr());
+    }
 
     require(gdn == kGdnLayers && fa == kFaLayers, "layer kind counts are not 48 GDN / 16 FA");
     // Every Kernel this walk made was launched exactly once, so kernels[i] is
@@ -247,6 +273,20 @@ class Capture {
     require(Qwen35::shape(LinearId::Qkv).S == 2,
             "qkv is no longer S=2, but attn.cl (QKV_S) bakes a 2-slice sum into every "
             "partials load");
+  }
+
+  // Spec 8: what the MTP walks need of the head and its buffers.
+  void check_mtp() {
+    require(mtp_ != nullptr && m_.mtp != nullptr, "an MTP list needs the loaded head and MtpBuffers");
+    require(mtp_->max_len == b_.max_len, "MtpBuffers max_len != buffers max_len");
+    require(kCapM <= MtpBuffers::kSlots, "an MTP verify list has at most kSlots rows");
+    require(mode_ != Mode::Draft || (kCapM == 1 && draft_i_ < MtpBuffers::kMaxK),
+            "a draft list is M = 1 with draft index < kMaxK");
+    require(mtp_->gdn_spec.size() == kGdnStateStride * kGdnLayers * (MtpBuffers::kSlots - 1),
+            "gdn_spec is not (kSlots - 1) x 48 slices");
+    require(mtp_->kv_k.size() == kv_stride_ && mtp_->kv_v.size() == kv_stride_,
+            "the head's KV is not one [max_len][4][256] layer");
+    require(mtp_->hh.size() >= size_t(kCapM + 1) * Qwen35::kHidden * kBf16, "hh is too small");
   }
 
   // One launch site: load (or reuse) the variant's device binary, make a fresh
@@ -495,7 +535,13 @@ class Capture {
     // kernel finds conv/negA/dt_bias inside it at loader/small_layout.h's
     // offsets, passed to ocloc as NEGA_OFF/DTBIAS_OFF).
     {
-      l0::Kernel& k = kernel(kernels::gdn_step_variant(kCapM), "gdn_step", kWgGdn);
+      // Spec 8: the verify list binds the SPEC_SLOTS build, whose eighth argument is
+      // this layer's slice of slot 1 (MtpBuffers::gdn_spec is slot-major, so slot s
+      // is that plus (s - 1) whole slots - gdn_step.cl, SPEC_SLOTS).
+      const bool slots = mode_ == Mode::Verify;
+      l0::Kernel& k = kernel(slots ? kernels::gdn_step_slots_variant(kCapM)
+                                   : kernels::gdn_step_variant(kCapM),
+                             "gdn_step", kWgGdn);
       k.arg_ptr(0, b_.control.ptr());
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, b_.ab_out.ptr());
@@ -503,6 +549,7 @@ class Capture {
       k.arg_ptr(4, at(b_.conv_ring, size_t(g) * kConvRingStride));
       k.arg_ptr(5, at(b_.gdn_state, size_t(g) * kGdnStateStride));
       k.arg_ptr(6, b_.gdn_o.ptr());
+      if (slots) k.arg_ptr(7, at(mtp_->gdn_spec, size_t(g) * kGdnStateStride));
       launch(k, Qwen35::kGdnVHeads, kGdnStateChunks);
     }
     // prep_gated_head(qkvz_partials, gdn_o, gated_w, x_out) - prep.cl (Task 2),
@@ -658,11 +705,176 @@ class Capture {
     }
   }
 
+  // --- spec 8: the MTP head (plan 8b) ---------------------------------------
+  //
+  // The head is one full-attention layer over fc(cat(pre_fc_norm_embedding(embed(x)),
+  // pre_fc_norm_hidden(h))) (docs/probe-mtp-2026-09-27.md §1). It runs on its OWN
+  // control block `hctl` (MtpBuffers): embed_gather reads the input ids from
+  // hctl.cur_token, the attention trio reads the head's position from hctl.pos, and in
+  // the draft list argmax_stage2 writes the draft into hctl.cur_token and advances
+  // hctl.pos - the chain, with every main-model kernel unchanged.
+  //
+  // Every head linear is bf16 and writes its [M][N] fp32 output straight into
+  // `partials` (gemv_bf16 has no split-K), so every consumer is an S = 1 build: the
+  // `_S1` attn_prep and prep_silu_mul, and the SP1 folds.
+
+  // A fold + norm pair on explicit buffers (res_norm() is the main walk's, on b_).
+  void fold_norm(const std::string& fold_v, const std::string& finish_v, const void* partials,
+                 void* resid, const void* norm_w, void* x_out) {
+    const uint32_t g = DecodeBuffers::kNormGroups;
+    {
+      l0::Kernel& k = kernel(fold_v, "prep_res_fold", kWgResFold);
+      k.arg_ptr(0, partials);
+      k.arg_ptr(1, resid);
+      k.arg_ptr(2, b_.norm_sumsq.ptr());
+      launch(k, g, kCapM);
+    }
+    {
+      l0::Kernel& k = kernel(finish_v, "prep_norm_finish", kWgNormFinish);
+      k.arg_ptr(0, b_.norm_sumsq.ptr());
+      k.arg_ptr(1, resid);
+      k.arg_ptr(2, norm_w);
+      k.arg_ptr(3, x_out);
+      launch(k, g, kCapM);
+    }
+  }
+
+  void head_gemv(const loader::DeviceWeight& w, const void* x, void* out) {
+    const model::GemvShape& s = w.shape;
+    require(w.kind == model::WeightKind::Bf16, "the MTP head's linears are bf16");
+    const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(s.N);
+    l0::Kernel& k =
+        kernel(kernels::gemv_bf16_variant(kCapM, s.K, s.N, t), "gemv_bf16", t.cols * t.ksplit);
+    k.arg_ptr(0, w.mem.ptr());
+    k.arg_ptr(1, x);
+    k.arg_ptr(2, out);
+    launch(k, s.N / t.cols);
+  }
+
+  // The head from its input to its K/V at M rows: embed(hctl.cur_token[m]) and hidden
+  // row m of `hidden` ([M][5120] bf16) -> the two pre-fc norms into one [M][10240] row
+  // of `x` -> fc -> the residual stream (ZERO_RESID fold) -> input_layernorm -> q||k||v
+  // -> attn_prep, which writes K/V at hctl.pos + m of the head's own cache. Leaves the
+  // queries in attn_q / attn_gate and the head's residual in `resid`.
+  void head_front(const void* hidden) {
+    const loader::MtpHead& h = *m_.mtp;
+    const uint32_t G = DecodeBuffers::kNormGroups, H = Qwen35::kHidden, X = 2 * H;
+    {
+      l0::Kernel& k = kernel(kernels::embed_gather_variant(kCapM), "embed_gather", kWgEmbed);
+      k.arg_ptr(0, mtp_->hctl.ptr());
+      k.arg_ptr(1, m_.embed.ptr());
+      k.arg_ptr(2, b_.resid.ptr());
+      launch(k, 1, kCapM);
+    }
+    const std::string fold0 = kernels::prep_res_fold_variant(kCapM, H, 0, G);
+    const std::string cat = kernels::prep_norm_finish_strided_variant(kCapM, H, G, G, X);
+    fold_norm(fold0, cat, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::kMtpNormPreE),
+              b_.x.ptr());
+    fold_norm(fold0, cat, b_.partials.ptr(), const_cast<void*>(hidden),
+              at(h.norms, loader::kMtpNormPreH), at(b_.x, size_t(H) * kBf16));
+    head_gemv(h.fc, b_.x.ptr(), b_.partials.ptr());
+    fold_norm(kernels::prep_res_fold_zero_variant(kCapM, H, G),
+              kernels::prep_norm_finish_variant(kCapM, H, G, G), b_.partials.ptr(),
+              b_.resid.ptr(), at(h.norms, loader::kMtpNormInput), b_.x.ptr());
+    head_gemv(h.qkv, b_.x.ptr(), b_.partials.ptr());
+    {
+      l0::Kernel& k = kernel(kernels::attn_prep_s1_variant(kCapM), "attn_prep", kWgAttn);
+      k.arg_ptr(0, mtp_->hctl.ptr());
+      k.arg_ptr(1, b_.partials.ptr());
+      k.arg_ptr(2, h.fa.ptr());
+      k.arg_ptr(3, m_.rope.ptr());
+      k.arg_ptr(4, b_.attn_q.ptr());
+      k.arg_ptr(5, b_.attn_gate.ptr());
+      k.arg_ptr(6, mtp_->kv_k.ptr());
+      k.arg_ptr(7, mtp_->kv_v.ptr());
+      launch(k, Qwen35::kFaQHeads + Qwen35::kFaKvHeads, kCapM);
+    }
+  }
+
+  // The verify list's tail: only the head's K/V of the M rows are needed (the next
+  // drafts attend over them); its output hidden and logits are not, so the walk stops
+  // at attn_prep. 10 launches.
+  void head_kv_fill(const void* hidden) { head_front(hidden); }
+
+  // The draft list: the whole head at M = 1 on (hctl.cur_token[0], dh) at hctl.pos,
+  // its post-mtp.norm hidden back into dh (the chain's next `h`), its logits into
+  // MtpBuffers::logits row draft_i_, the argmax into hctl. 23 launches and one copy.
+  void draft() {
+    const loader::MtpHead& h = *m_.mtp;
+    const uint32_t G = DecodeBuffers::kNormGroups, H = Qwen35::kHidden;
+    head_front(mtp_->dh.ptr());
+    {
+      l0::Kernel& k = kernel(
+          kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
+          "attn_decode", kWgAttn);
+      k.arg_ptr(0, mtp_->hctl.ptr());
+      k.arg_ptr(1, b_.attn_q.ptr());
+      k.arg_ptr(2, mtp_->kv_k.ptr());
+      k.arg_ptr(3, mtp_->kv_v.ptr());
+      k.arg_ptr(4, b_.attn_part.ptr());
+      launch(k, Qwen35::kFaKvHeads, b_.max_len / DecodeBuffers::kAttnBlock);
+    }
+    {
+      l0::Kernel& k =
+          kernel(kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
+                 "attn_reduce", kWgAttn);
+      k.arg_ptr(0, mtp_->hctl.ptr());
+      k.arg_ptr(1, b_.attn_part.ptr());
+      k.arg_ptr(2, b_.attn_gate.ptr());
+      k.arg_ptr(3, b_.attn_out.ptr());
+      launch(k, Qwen35::kFaQHeads, kCapM);
+    }
+    head_gemv(h.o, b_.attn_out.ptr(), b_.partials.ptr());
+    const std::string fold1 = kernels::prep_res_fold_variant(kCapM, H, 1, G);
+    const std::string fin = kernels::prep_norm_finish_variant(kCapM, H, G, G);
+    fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::kMtpNormPost),
+              b_.x.ptr());
+    head_gemv(h.gate_up, b_.x.ptr(), b_.partials.ptr());
+    {
+      l0::Kernel& k = kernel(kernels::prep_silu_mul_s1_variant(kCapM), "prep_silu_mul", kWgSilu);
+      k.arg_ptr(0, b_.partials.ptr());
+      k.arg_ptr(1, b_.x.ptr());
+      launch(k, (Qwen35::kIntermediate + kSiluChunk - 1) / kSiluChunk, kCapM);
+    }
+    head_gemv(h.down, b_.x.ptr(), b_.partials.ptr());
+    fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::kMtpNormFinal),
+              b_.x.ptr());
+    step_.list.copy(mtp_->dh.ptr(), b_.x.ptr(), size_t(H) * kBf16);
+    float* logits = mtp_->logits.as<float>() + size_t(draft_i_) * Qwen35::kVocab;
+    const loader::DeviceWeight& lm = m_.linears.at({loader::kTopLevel, LinearId::LmHead});
+    if (lm.kind == model::WeightKind::Int4) {
+      const model::GemvShape& s = lm.shape;
+      l0::Kernel& k =
+          kernel(kernels::gemv_variant(kCapM, s.K, s.N, s.S, s.layout), "gemv", kWgGemv);
+      k.arg_ptr(0, lm.mem.ptr());
+      k.arg_ptr(1, s.layout == 0 ? lm.scales->ptr() : lm.mem.ptr());
+      k.arg_ptr(2, b_.x.ptr());
+      k.arg_ptr(3, logits);
+      launch(k, s.N / kGemvColsPerWg, s.S);
+    } else {
+      head_gemv(lm, b_.x.ptr(), logits);
+    }
+    {
+      l0::Kernel& k = kernel(kernels::argmax_stage1_variant(kCapM), "argmax_stage1", kWgArgmax);
+      k.arg_ptr(0, logits);
+      k.arg_ptr(1, b_.argmax_part.ptr());
+      launch(k, (Qwen35::kVocab + kArgmaxChunk - 1) / kArgmaxChunk, kCapM);
+    }
+    {
+      l0::Kernel& k = kernel(kernels::argmax_stage2_variant(), "argmax_stage2", kWgArgmax);
+      k.arg_ptr(0, mtp_->hctl.ptr());
+      k.arg_ptr(1, b_.argmax_part.ptr());
+      launch(k, 1, 1);
+    }
+  }
+
   // The layer a launch belongs to, for its label. `kBoundary` is the six
   // launches outside the layer loop (embed_gather, the final norm's
   // prep_res_fold + prep_norm_finish, lm_head and the two argmax stages).
   // It was five until spec 1.5's lever L1 split that norm.
   static constexpr int kBoundary = -1;
+  // Spec 8: the MTP head's launches are labelled "L64" - the layer after the last.
+  static constexpr int kHeadLayer = 64;
 
   l0::Context& ctx_;
   const loader::LoadedModel& m_;
@@ -672,6 +884,9 @@ class Capture {
   // The list's M (rows in flight). Named like the constant it replaced so the
   // binding sites read unchanged; set once, before the walk.
   const uint32_t kCapM;
+  const MtpBuffers* mtp_;
+  const Mode mode_;
+  const uint32_t draft_i_;
   CapturedStep step_;
   size_t kv_stride_ = 0;
   int layer_ = kBoundary;
@@ -693,6 +908,19 @@ CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers
     throw std::runtime_error("runtime::build: M " + std::to_string(M) + " is outside [1, " +
                              std::to_string(DecodeBuffers::kM) + "]");
   return Capture(ctx, m, b, debug_resid, prof, M).run();
+}
+
+CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
+                          const MtpBuffers& mtp, uint32_t M) {
+  if (M == 0 || M > MtpBuffers::kSlots)
+    throw std::runtime_error("runtime::build_verify: M " + std::to_string(M) +
+                             " is outside [1, " + std::to_string(MtpBuffers::kSlots) + "]");
+  return Capture(ctx, m, b, nullptr, nullptr, M, &mtp, Mode::Verify).run();
+}
+
+CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
+                         const MtpBuffers& mtp, uint32_t i) {
+  return Capture(ctx, m, b, nullptr, nullptr, 1, &mtp, Mode::Draft, i).run();
 }
 
 }  // namespace runtime
