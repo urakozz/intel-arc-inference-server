@@ -312,9 +312,18 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
         const auto write = [&sink](const std::string& frame) {
           return sink.write(frame.data(), frame.size());
         };
-        if (parsed.chat) (void)write(stream_frame_role(parsed, id, created));
+        // The role frame goes out with the first delta, after prefill, as vLLM
+        // sends it: clients time prefill to the first chunk with `choices`
+        // (llama-benchy's est_ppt), so a frame before prefill reads as ~0 ms.
+        bool role_sent = !parsed.chat;
+        const auto send_role = [&] {
+          if (role_sent) return;
+          role_sent = true;
+          (void)write(stream_frame_role(parsed, id, created));
+        };
         try {
           const Outcome outcome = generate(parsed, [&](const Delta& d) {
+            if (!d.text.empty() || d.kind == Delta::Call) send_role();
             if (d.kind == Delta::Call) {
               (void)write(stream_frame_tool_call(parsed, id, created, d.call, d.index));
             } else if (d.text.empty()) {
@@ -324,6 +333,7 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
               (void)write(stream_frame_text(parsed, id, created, d.text));
             }
           });
+          send_role();
           (void)write(stream_frame_finish(parsed, id, created, outcome.finish_reason));
           if (parsed.include_usage) (void)write(stream_frame_usage(parsed, id, created, outcome.usage));
           log_request(parsed.chat, body, t_start, outcome);
