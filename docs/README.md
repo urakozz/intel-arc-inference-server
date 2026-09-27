@@ -54,6 +54,9 @@ short version; this is where the reasoning and the evidence live.
 Dated, self-contained records of one experiment each. They are evidence, not
 narrative, and the numbered guides cite them where they matter.
 
+- [probe-prefix-cache-2026-09-27.md](probe-prefix-cache-2026-09-27.md) - prefix
+  caching (spec 7): pinned host copies at 12-14 GB/s, the tail floor at depth, the
+  write-through cost (S3), S1/S2 at 60k and the replayed opencode-shaped session
 - [probe-dpas-rates-2026-09-22.md](probe-dpas-rates-2026-09-22.md) - DPAS rate
   by data type, with the assembly that proves the loops are DPAS bound
 - [probe-fused-dequant-2026-09-22.md](probe-fused-dequant-2026-09-22.md) -
