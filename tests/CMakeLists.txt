@@ -619,6 +619,18 @@ add_test(NAME flash_long_test COMMAND flash_long_test ${B70_TEST_SNAPSHOT}
   ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids)
 set_tests_properties(flash_long_test PROPERTIES LABELS "checkpoint;prefill"
   SKIP_RETURN_CODE 77 TIMEOUT 3600)
+# Spec 7 C1 (plan 7b): state and KV snapshots restore bitwise; the block hook.
+add_executable(snapshot_test runtime/snapshot_test.cc)
+target_include_directories(snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+target_link_libraries(snapshot_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+if(B70_PREFILL_ENABLED)
+  b70_link_prefill(snapshot_test)
+endif()
+add_dependencies(snapshot_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS})
+add_test(NAME snapshot_test COMMAND snapshot_test ${B70_TEST_SNAPSHOT})
+set_tests_properties(snapshot_test PROPERTIES LABELS checkpoint
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 900)
 add_test(NAME prefill_replay_test COMMAND prefill_replay_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(prefill_replay_test PROPERTIES LABELS "checkpoint;prefill"
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
