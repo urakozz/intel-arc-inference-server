@@ -3,8 +3,10 @@
 // Plan: docs/superpowers/plans/2026-09-25-spec6b-flash-attn-integration-and-128k.md.
 // Record: docs/probe-flash-attn-2026-09-25.md. This is plan 6a's winning arm
 // pfa_KT64_R16_H6_Q0 (tools/probe/probe_flash_attn.cl), promoted with its text
-// unchanged except for the entry name; built with KT=64 RPW=16 HPW=6 QREG=0 and
-// -cl-intel-256-GRF-per-thread. WG = 16 x 12 lanes, grid (ceil(C / 16), 4, 1).
+// unchanged except for the entry name, then (spec 6c, docs/research-flash-prefill-2026-09-27.md
+// levers 1-2) moved to 8 rows per work-group, with arm KT64_R8_Q2's `exp2` behind EXP2;
+// built with KT=64 RPW=8 HPW=6 QREG=0 EXP2=<see CMakeLists.txt> and
+// -cl-intel-256-GRF-per-thread. WG = 16 x 6 lanes, grid (ceil(C / 8), 4, 1).
 //
 //   Q   bf16 [C][24][256]    pf_q; q-head h = 6 j + l for kv head j
 //   Kc  bf16 [depth][4][256] one layer's K cache, depth = pos + C
@@ -18,10 +20,16 @@
 // via the !TRANSB VNNI-transform read, Q via the 16-bit A read (8 rows instead of 32).
 //
 // Numerics (not negotiable, the correctness bar depends on them): fp32 scores times
-// ATTN_SCALE; the mask covers key <= pos + row AND key < depth; fp32 online softmax
-// with `exp`, never `native_exp`; P = exp(s - m) rounded to bf16 as the PV operand;
-// O / l at the end. Rows past C in the last 16-row block are computed (finite); rows
-// of blocks wholly past C are not written.
+// ATTN_SCALE; the mask covers key <= pos + row AND key < depth; fp32 online softmax; P =
+// exp(s - m) rounded to bf16 as the PV operand; O / l at the end. EXP2=0 uses `exp`,
+// never `native_exp` (spec 6 §3.1). EXP2=1 is the research form the operator approved on
+// 2026-09-27: scores times ATTN_SCALE * log2(e), so s, the running max m and the masked
+// -INF all live in the log2 domain, and `exp2` (one base-2 math.exp in IGC; `exp`'s
+// range-split temporaries are what spill 77 GRF). EXP2=1 moves the rounding point and
+// measured K3a l0 0.999951245 < composed 0.999959889 (spec 6 §9), so it is off until
+// the operator rules. RPW 8 alone is bitwise neutral (K3a numbers identical to RPW 16).
+// Rows past C in the last 8-row block are computed (finite); rows of blocks wholly past
+// C are not written.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #pragma OPENCL EXTENSION cl_intel_split_work_group_barrier : enable
@@ -40,6 +48,16 @@
 #define NKA (KT / 16)                 /* key atoms of S per tile */
 #define SGS (HPW * RPW / 8)           /* sub-groups per work-group */
 #define ATTN_SCALE (1.0f / 16.0f)
+#ifndef EXP2
+#error "EXP2 (0: exp, 1: exp2 with ATTN_SCALE * log2(e) folded) must be defined"
+#endif
+#if EXP2
+#define SCORE_SCALE (ATTN_SCALE * M_LOG2E_F)   /* scores in the log2 domain */
+#define EXPF(x) exp2(x)
+#else
+#define SCORE_SCALE ATTN_SCALE
+#define EXPF(x) exp(x)
+#endif
 
 inline ushort rne_bf16(float f) {
   uint u = as_uint(f);
@@ -101,7 +119,7 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
 #pragma unroll
     for (uint b = 0; b < NKA; ++b) {
       const uint key = t0 + 16u * b + l;
-#define MASK(r) sacc[b].s##r = (key <= pos + r0 + r && key < depth) ? sacc[b].s##r * ATTN_SCALE : -INFINITY;
+#define MASK(r) sacc[b].s##r = (key <= pos + r0 + r && key < depth) ? sacc[b].s##r * SCORE_SCALE : -INFINITY;
       MASK(0) MASK(1) MASK(2) MASK(3) MASK(4) MASK(5) MASK(6) MASK(7)
 #undef MASK
       tmax = fmax(tmax, sacc[b]);
@@ -110,12 +128,12 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
 #define RED(r) mnew.s##r = fmax(m.s##r, sub_group_reduce_max(tmax.s##r));
     RED(0) RED(1) RED(2) RED(3) RED(4) RED(5) RED(6) RED(7)
 #undef RED
-    const float8 corr = exp(m - mnew);          // m = -INF on the first tile: exp(-INF) = 0
+    const float8 corr = EXPF(m - mnew);          // m = -INF on the first tile: EXPF(-INF) = 0
     float8 psum = (float8)(0.0f);
     short8 pa[NKA];
 #pragma unroll
     for (uint b = 0; b < NKA; ++b) {
-      const float8 p = exp(sacc[b] - mnew);     // masked: exp(-INF) = 0
+      const float8 p = EXPF(sacc[b] - mnew);     // masked: EXPF(-INF) = 0
       psum += p;
 #define CV(r) pa[b].s##r = as_short(rne_bf16(p.s##r));
       CV(0) CV(1) CV(2) CV(3) CV(4) CV(5) CV(6) CV(7)

@@ -83,11 +83,12 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     // composed path's ([24][rows][256], stride rows * 256, rows = pad256(C)), so
     // pf_attn_gate is unchanged. The kernel reads the cache rows [0, pos + C) only and masks
     // past `depth` itself, so neither max_len's padding nor stale cache rows can reach it.
-    // The WG size (192) comes from the kernel's reqd_work_group_size (Context::launch).
+    // Spec 6c: RPW 8, grid (ceil(C / 8), 4, 1).
+    // The WG size (96) comes from the kernel's reqd_work_group_size (Context::launch).
     const uint32_t rows = attn_rows(C, backend);
     require(s.pf_o.size() >= size_t(kQHeads) * rows * kHeadDim * sizeof(float),
             "pf_o is undersized");
-    cx.launch(kc(kernels::pf_flash_attn_variant(), "pf_flash_attn"), (C + 15u) / 16u, kKvHeads,
+    cx.launch(kc(kernels::pf_flash_attn_variant(), "pf_flash_attn"), (C + 7u) / 8u, kKvHeads,
               1,
               {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s.pf_o.ptr()), arg_val(pos),
                arg_val(C), arg_val(rows)});
