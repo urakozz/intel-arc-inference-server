@@ -126,6 +126,36 @@ previous prompt's end snapshot. Both are the same lookup.
 - **`b70_serve`:** `--prefix-cache-gb`. `b70_decode` and the benchmarks are
   unchanged.
 
+### 3.5 Tool calls and reasoning in the response (prerequisite)
+
+`b70_serve` returns the generated text as `content`, with no `tool_calls` and
+no `reasoning_content`, so opencode cannot drive it, and C3 needs opencode.
+The checkpoint emits the **Qwen XML tool-call format** (`<tool_call>` /
+`<function=NAME>` / `<parameter=KEY>` ... `</parameter>` / `</function>` /
+`</tool_call>`; `tools/toolcall/score.py`), the format vLLM's `qwen3_coder`
+and `qwen3_xml` parsers both read (two implementations of one format; the
+second is the streaming-robust one). `hermes` (JSON inside `<tool_call>`) is
+Qwen2.5's and wrong here.
+
+- A C++ parser in `src/server/toolcall.{h,cc}` with `qwen3_xml`'s
+  semantics: each parameter's text is converted by the tool's JSON schema
+  type (string: as is, one leading and one trailing newline stripped;
+  integer / number / boolean / object / array: parsed as JSON, falling back to
+  the string); an unterminated call at the end of generation is still emitted
+  if its function tag is complete.
+- Reasoning: with thinking on, the prompt ends in `<think>\n`, so the output
+  up to `</think>` is `reasoning_content`, the rest `content`.
+- Non-streaming: `message.reasoning_content`, `message.content` (null when
+  empty and there are tool calls), `message.tool_calls`, finish reason
+  `tool_calls` when there are any. Streaming: `reasoning_content` and
+  `content` deltas as text arrives; each tool call as one delta (id, name
+  and complete `arguments`) when its `</function>` arrives.
+- `/v1/completions` is unchanged (raw text).
+
+This matters to the cache as well: the template keeps earlier turns' thinking
+when the client sends `reasoning_content` back (`preserve_thinking`, default
+on), and then the resent history matches the generated ids further.
+
 ## 4. Correctness gates
 
 - **C1, bitwise restore.** Prefill 4096 + 300 ids and snapshot. `reset()`,
@@ -147,6 +177,10 @@ previous prompt's end snapshot. Both are the same lookup.
   its blocks; entries in use are not evicted; exact-ids comparison under a
   forced hash collision; a prompt equal to a snapshot position still prefills
   one token; `--prefix-cache-gb 0` equals today's behaviour.
+- **C6, tool-call output.** Host tests of the parser on the golden
+  tool-call outputs (`tests/golden/toolcall/`) and on partial and malformed
+  text, streamed and not; every call's name and arguments equal
+  `tools/toolcall/score.py`'s reading of the same text.
 - **C5.** Every existing registration passes unchanged, the full suite green.
 
 ## 5. Speed bars
@@ -169,7 +203,8 @@ Idle box, device 0, median of 3.
 
 ## 6. Stages
 
-- **7a, probe:** P0.
+- **7a, output and probe:** §3.5 and C6; a request log in `b70_serve`;
+  the recorded opencode session; P0.
 - **7b, engine:** snapshot, restore, KV-range copies, the per-block
   callback, aligned tail chunking; C1; S3.
 - **7c, server:** `prefix_cache`, the request path, `cached_tokens`,
