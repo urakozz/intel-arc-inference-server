@@ -45,8 +45,29 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::L
 // at M = 1 through the EXISTING decode binary, and the two argmax stages --
 // the `Control` handoff. `last_row` is the row of the last chunk that holds the
 // final position.
+//
+// `normed_row` (spec 8): non-null when the final norm of the last row has already been
+// written there (step_mtp_kv normalises every row); the two norm launches are skipped
+// and lm_head reads it. Null is the walk above, unchanged.
 void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m,
-               void* ctrl, uint32_t last_row);
+               void* ctrl, uint32_t last_row, const void* normed_row = nullptr);
+
+// Spec 8 §3.2 (plan 8b Task 3): after `step_chunk`, the MTP head's K/V for the chunk.
+// First the main model's final norm on EVERY row r into `hid` row 1 + r (bf16
+// [kC + 1][5120]; row 0 is h_{pos-1}, the caller's copy of MtpBuffers::hh row 0).
+// Then the head over the pairs (hid[r], ids[r]) = (h_{pos-1+r}, x[pos+r]) at positions
+// pos - 1 + r, r < C - the previous chunk's last position is filled here, the chunk's
+// own last position by the next chunk or the first draft/verify. At pos = 0 there is
+// no h_{-1}: rows 1..C-1 only, at positions 0..C-2. Only the K/V are computed (fc,
+// input_layernorm, the k||v slabs of q||k||v, attn_prep), which is all a later draft
+// reads. `hctl` must hold pos = max(pos, 1) - 1 and n_active = the row count (the
+// caller sets both, like Control before step_chunk). L0 backends only (pf_gemm).
+void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m,
+                 void* hctl, uint32_t pos, uint32_t C, uint16_t* hid, uint16_t* kv_k,
+                 uint16_t* kv_v);
+// Rows step_mtp_kv runs the head over, and its L0 launches (for the arithmetic).
+inline uint32_t mtp_kv_rows(uint32_t pos, uint32_t C) { return pos == 0 ? C - 1 : C; }
+size_t step_mtp_kv_launches(uint32_t pos, uint32_t C);
 
 // The launch arithmetic, derived from the walk itself rather than restated:
 // what `Context::launches()` advances by. SYCL GEMMs are NOT on the L0 list and

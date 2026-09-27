@@ -979,7 +979,7 @@ if(B70_MTP)
                PROPERTY BUILDSYSTEM_TARGETS)
   get_property(_b70_mtp_pf_kernels DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
                PROPERTY BUILDSYSTEM_TARGETS)
-  foreach(t mtp_head)
+  foreach(t mtp_head mtp_prefill)
     if(t STREQUAL "mtp_prefill")
       set(_src prefill/${t}_test.cc)
     else()
@@ -1000,4 +1000,8 @@ if(B70_MTP)
     ${CMAKE_SOURCE_DIR}/oracle-out-spec8b)
   set_tests_properties(mtp_head_test PROPERTIES LABELS "checkpoint;golden;mtp"
     SKIP_RETURN_CODE 77 TIMEOUT 1800)
+  # Task 3 / Review Focus 2: the head's KV after prefill against M = 1 fills.
+  add_test(NAME mtp_prefill_test COMMAND mtp_prefill_test ${B70_TEST_SNAPSHOT})
+  set_tests_properties(mtp_prefill_test PROPERTIES LABELS "checkpoint;prefill;mtp"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
 endif()
