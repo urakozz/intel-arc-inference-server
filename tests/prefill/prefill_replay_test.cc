@@ -92,16 +92,27 @@ int main(int argc, char** argv) {
                   replay ? "recorded" : "immediate", warm[1], 4096000.0 / warm[1]);
     }
   } else {
-    struct Case { std::vector<uint32_t> ids; uint32_t chunk; bool incremental; };
+    // `hooked`: spec 7's block hook set, prefill of 300 ids then 3700 more, so the
+    // aligned chunks (300 | 1748, 1952) put new (pos, rows) keys in the replay cache.
+    struct Case { std::vector<uint32_t> ids; uint32_t chunk; bool incremental; bool hooked = false; };
     auto changed = seed;
     std::reverse(changed.begin(), changed.end());
     const std::vector<Case> cases = {{seed, 16, false}, {changed, 16, false},
                                    {seed, 16, true}, {ids, 2048, false},
                                    {seed, 17, false}, {seed, 18, false},
-                                   {seed, 19, false}, {seed, 16, false}};
+                                   {seed, 19, false}, {seed, 16, false},
+                                   {std::vector<uint32_t>(ids.begin(), ids.begin() + 4000),
+                                    2048, false, true}};
     for (const auto& test : cases) {
       auto run = [&] {
-        if (test.incremental) {
+        if (test.hooked) {
+          std::vector<uint32_t> ends;
+          engine.set_block_hook([&](uint32_t end, bool) { ends.push_back(end); });
+          engine.prefill(std::vector<uint32_t>(test.ids.begin(), test.ids.begin() + 300));
+          engine.prefill(std::vector<uint32_t>(test.ids.begin() + 300, test.ids.end()));
+          engine.set_block_hook({});
+          CHECK((ends == std::vector<uint32_t>{300, 2048, 4000}));
+        } else if (test.incremental) {
           engine.prefill(std::vector<uint32_t>(test.ids.begin(), test.ids.begin() + 16), 16);
           engine.prefill(std::vector<uint32_t>(test.ids.begin() + 16, test.ids.end()), 16);
         } else engine.prefill(test.ids, test.chunk);
@@ -117,8 +128,8 @@ int main(int argc, char** argv) {
         run();
         equal(expected, snapshot(engine, copy));
       }
-      std::printf("replay exact: ids=%zu chunk=%u incremental=%d\n",
-                  test.ids.size(), test.chunk, test.incremental);
+      std::printf("replay exact: ids=%zu chunk=%u incremental=%d hooked=%d\n",
+                  test.ids.size(), test.chunk, test.incremental, test.hooked);
       std::fflush(stdout);
     }
   }
