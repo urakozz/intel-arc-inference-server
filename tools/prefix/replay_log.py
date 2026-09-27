@@ -3,6 +3,7 @@
 
     replay_log.py run <log dir> <base url> <out.json> [--seed 0] [--cap N]
     replay_log.py compare <a.json> <b.json>
+    replay_log.py cases <a log dir> <b log dir> <cases file>
 
 <log dir> is what `b70-serve --log-requests DIR` writes (NNNNNN.json, sorted by name), or
 tools/prefix/make_synth_log.py's synthetic one. `run` sends every logged request in order,
@@ -16,8 +17,11 @@ the first streamed chunk with choices (as llama-benchy and clients time it) and 
 text equal, or the first differing character with both sides' context; every tool call's
 arguments parse as JSON and the two runs have the same calls (names and arguments). The
 server exposes no logits, so a differing token cannot be judged against the tie rule here:
-a divergence is reported for the judge (C2 is the logits-level gate on the card). Exit 0
-when every request agrees, 1 otherwise.
+a divergence is reported for the judge. `cases` reads the two runs' server request logs
+(b70-serve --log-requests, prompt_ids and out_ids) and writes, per request whose generated
+ids differ, the prompt, the common generated prefix and the two ids at the first
+difference, for tools/probe/probe_tie_judge (the tie-aware rule against the cold run,
+B = the cache-off run). Exit 0 when every request agrees, 1 otherwise.
 """
 import argparse
 import json
@@ -160,6 +164,31 @@ def cmd_compare(a):
     return 0 if ok_all else 1
 
 
+def cmd_cases(a):
+    ra, rb = load_log(a.a), load_log(a.b)
+    n = 0
+    with open(a.out, "w", encoding="utf-8") as f:
+        for (name, x), (_, y) in zip(ra, rb):
+            if x["prompt_ids"] != y["prompt_ids"]:
+                print(f"{name}: prompts differ between the runs")
+                continue
+            ox, oy = x["out_ids"], y["out_ids"]
+            k = 0
+            while k < min(len(ox), len(oy)) and ox[k] == oy[k]:
+                k += 1
+            if k == len(ox) == len(oy):
+                continue
+            if k == min(len(ox), len(oy)):
+                print(f"{name}: one run stopped at {k} (end of sequence), the other did not")
+                continue
+            f.write("P " + " ".join(map(str, x["prompt_ids"])) + "\n")
+            f.write("G " + " ".join(map(str, ox[:k])) + "\n")
+            f.write(f"C {ox[k]} {oy[k]} {name}@{k}\n")
+            n += 1
+            print(f"{name}: first differing generated id at {k}: {ox[k]} vs {oy[k]}")
+    print(f"{n} case(s) in {a.out}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -172,7 +201,14 @@ def main():
     c = sub.add_parser("compare")
     c.add_argument("a")
     c.add_argument("b")
+    k = sub.add_parser("cases")
+    k.add_argument("a")
+    k.add_argument("b")
+    k.add_argument("out")
     a = ap.parse_args()
+    if a.cmd == "cases":
+        cmd_cases(a)
+        return 0
     if a.cmd == "run":
         cmd_run(a)
         return 0
