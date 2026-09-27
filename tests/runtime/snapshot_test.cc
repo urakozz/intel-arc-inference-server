@@ -5,6 +5,8 @@
 //      pos % 16, stale KV above), restore, prefill id 4395, 64 greedy ids == straight run;
 //      device KV [0, 4395) after the restore == the saved copy.
 //   B: the same at 4096 (a block end).
+//   A': A and B over a 6000-id other prompt: the restore goes below the current pos
+//      with stale KV above it.
 //   C: save_kv(4096, 4395) / load_kv round-trip into a zeroed cache, nothing written
 //      outside the range; an empty range copies nothing.
 //   D: hook set, prefill 5000 ids from 0 -> (2048,true), (4096,true), (5000,false).
@@ -98,6 +100,12 @@ int main(int argc, char** argv) {
   std::puts("case A OK");
   check_restore(ctx, e, ids, 4096, other);
   std::puts("case B OK");
+  // A': restore BELOW the current pos, stale KV of another prompt above the restore
+  // point (plan 7b review focus 1): 6000 other ids, restore at 4395 and at 4096.
+  const auto longer = repeat_to(golden::read_ids("tests/golden/prompts/code.ids"), 6000);
+  check_restore(ctx, e, ids, 4395, longer);
+  check_restore(ctx, e, ids, 4096, longer);
+  std::puts("case A' OK");
 
   // C: a range whose ends are not 2048-aligned at the top, into a zeroed cache.
   {
