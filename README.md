@@ -15,14 +15,15 @@ median of three runs on an idle machine:
 
 | | this engine | vLLM | |
 |---|---:|---:|---|
-| prefill, 4096 tokens | **2104.50 t/s** | 1610.04 t/s | we are 30.7% ahead |
+| prefill, 4096 tokens | **2125.12 t/s** | 1610.04 t/s | we are 32.0% ahead |
 | decode, 256 tokens | 29.45 t/s | 31.01 t/s | we are 5% behind |
 
 Prefill went from 1406 t/s to 1670 t/s over a couple of weeks of kernel work,
 then to 2104 t/s by moving every int4 linear onto the card's int8 matrix engines
 (spec 5: Hadamard-rotated int8 activations against per-channel int8 weights
 rebuilt on the fly from the int4 checkpoint, at W4A16 accuracy; see
-docs/probe-w4a8-2026-09-23.md sections 14 and 15).
+docs/probe-w4a8-2026-09-23.md sections 14 and 15), and to 2125 t/s with the
+fused flash attention of spec 6.
 Decode has been parked for a while and vLLM is still ahead there, so that is
 the honest picture: good prefill, decode still to do.
 
