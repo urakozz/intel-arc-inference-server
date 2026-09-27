@@ -61,6 +61,52 @@ json base(const Request& r, const std::string& id, uint64_t created, const char*
   };
 }
 
+json usage_json(const Request& r, Usage u) {
+  json usage = {{"prompt_tokens", u.prompt_tokens},
+                {"completion_tokens", u.completion_tokens},
+                {"total_tokens", u.prompt_tokens + u.completion_tokens}};
+  if (r.chat) usage["prompt_tokens_details"] = {{"cached_tokens", u.cached_tokens}};
+  return usage;
+}
+
+json tool_call_json(const ToolCall& call) {
+  return {{"id", call.id},
+          {"type", "function"},
+          {"function", {{"name", call.name}, {"arguments", call.arguments.dump()}}}};
+}
+
+// Messages as OpenAI clients send them: content may be null (an assistant turn
+// holding only tool calls) or a list of text parts; tool-call arguments arrive as a
+// JSON string and the chat template iterates them as an object.
+json normalize_message(const json& message) {
+  json out = message;
+  const json& content = message.at("content");
+  if (content.is_array()) {
+    for (const json& part : content) {
+      if (!part.is_object() || !part.contains("text") || !part.at("text").is_string()) {
+        invalid("content parts must be text parts");
+      }
+    }
+  } else if (!content.is_string() && !content.is_null()) {
+    invalid("content must be a string");
+  }
+  if (message.contains("tool_calls") && message.at("tool_calls").is_array()) {
+    for (json& call : out.at("tool_calls")) {
+      if (!call.is_object() || !call.contains("function") || !call.at("function").is_object()) continue;
+      json& fn = call.at("function");
+      if (fn.contains("arguments") && fn.at("arguments").is_string()) {
+        const std::string text = fn.at("arguments").get<std::string>();
+        json parsed = text.empty() ? json::object() : json::parse(text, nullptr, false);
+        if (parsed.is_discarded() || !parsed.is_object()) {
+          invalid("tool call arguments must be a JSON object");
+        }
+        fn["arguments"] = std::move(parsed);
+      }
+    }
+  }
+  return out;
+}
+
 std::string frame(json body) {
   return "data: " + body.dump() + "\n\n";
 }
@@ -99,11 +145,10 @@ Request parse_request(const std::string& body, bool chat) {
       if (!message.contains("role") || !message.at("role").is_string()) {
         invalid("message role must be a string");
       }
-      if (!message.contains("content") || !message.at("content").is_string()) {
-        invalid("content must be a string");
-      }
+      if (!message.contains("content")) invalid("content must be a string");
     }
-    out.messages = messages;
+    out.messages = json::array();
+    for (const json& message : messages) out.messages.push_back(normalize_message(message));
     out.tools = request.contains("tools") ? request.at("tools") : json(nullptr);
     if (request.contains("chat_template_kwargs")) {
       const json& kwargs = request.at("chat_template_kwargs");
@@ -174,10 +219,21 @@ std::string error_body(const std::string& message, const std::string& type) {
 std::string completion_body(const Request& r, const std::string& id, uint64_t created,
                             const std::string& text, const std::string& finish_reason, Usage u,
                             const std::vector<uint32_t>* prompt_ids,
-                            const std::vector<uint32_t>* out_ids) {
+                            const std::vector<uint32_t>* out_ids,
+                            const ParsedOutput* parsed) {
   json body = base(r, id, created, r.chat ? "chat.completion" : "text_completion");
   json choice = {{"index", 0}, {"finish_reason", finish_reason}};
-  if (r.chat) {
+  if (r.chat && parsed != nullptr) {
+    json message = {{"role", "assistant"}, {"content", parsed->content}};
+    if (parsed->content.empty() && !parsed->tool_calls.empty()) message["content"] = nullptr;
+    if (!parsed->reasoning.empty()) message["reasoning_content"] = parsed->reasoning;
+    if (!parsed->tool_calls.empty()) {
+      json calls = json::array();
+      for (const ToolCall& call : parsed->tool_calls) calls.push_back(tool_call_json(call));
+      message["tool_calls"] = std::move(calls);
+    }
+    choice["message"] = std::move(message);
+  } else if (r.chat) {
     choice["message"] = {{"role", "assistant"}, {"content", text}};
   } else {
     choice["text"] = text;
@@ -185,9 +241,7 @@ std::string completion_body(const Request& r, const std::string& id, uint64_t cr
   }
   if (r.return_token_ids && out_ids != nullptr) choice["token_ids"] = *out_ids;
   body["choices"] = json::array({std::move(choice)});
-  body["usage"] = {{"prompt_tokens", u.prompt_tokens},
-                   {"completion_tokens", u.completion_tokens},
-                   {"total_tokens", u.prompt_tokens + u.completion_tokens}};
+  body["usage"] = usage_json(r, u);
   if (r.return_token_ids && prompt_ids != nullptr) body["prompt_token_ids"] = *prompt_ids;
   return body.dump();
 }
@@ -213,6 +267,25 @@ std::string stream_frame_text(const Request& r, const std::string& id, uint64_t 
   return frame(std::move(body));
 }
 
+std::string stream_frame_reasoning(const Request& r, const std::string& id, uint64_t created,
+                                   const std::string& text) {
+  json body = base(r, id, created, "chat.completion.chunk");
+  body["choices"] = json::array(
+      {{{"index", 0}, {"delta", {{"reasoning_content", text}}}, {"finish_reason", nullptr}}});
+  return frame(std::move(body));
+}
+
+std::string stream_frame_tool_call(const Request& r, const std::string& id, uint64_t created,
+                                   const ToolCall& call, uint32_t index) {
+  json body = base(r, id, created, "chat.completion.chunk");
+  json entry = tool_call_json(call);
+  entry["index"] = index;
+  body["choices"] = json::array(
+      {{{"index", 0}, {"delta", {{"tool_calls", json::array({std::move(entry)})}}},
+        {"finish_reason", nullptr}}});
+  return frame(std::move(body));
+}
+
 std::string stream_frame_finish(const Request& r, const std::string& id, uint64_t created,
                                 const std::string& finish_reason) {
   json body = base(r, id, created, r.chat ? "chat.completion.chunk" : "text_completion");
@@ -229,9 +302,7 @@ std::string stream_frame_finish(const Request& r, const std::string& id, uint64_
 std::string stream_frame_usage(const Request& r, const std::string& id, uint64_t created, Usage u) {
   json body = base(r, id, created, r.chat ? "chat.completion.chunk" : "text_completion");
   body["choices"] = json::array();
-  body["usage"] = {{"prompt_tokens", u.prompt_tokens},
-                   {"completion_tokens", u.completion_tokens},
-                   {"total_tokens", u.prompt_tokens + u.completion_tokens}};
+  body["usage"] = usage_json(r, u);
   return frame(std::move(body));
 }
 

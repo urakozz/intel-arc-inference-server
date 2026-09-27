@@ -1,4 +1,7 @@
 #include <chrono>
+#include <fstream>
+#include <unistd.h>
+#include <cstdlib>
 #include <cstdio>
 #include <string>
 #include <thread>
@@ -18,16 +21,17 @@ using json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
 
 struct Fixture {
-  explicit Fixture(size_t queue_depth = 4)
-      : options(make_options(queue_depth)), server({tok, tmpl, engine}, options) {
+  explicit Fixture(size_t queue_depth = 4, const std::string& log_dir = "")
+      : options(make_options(queue_depth, log_dir)), server({tok, tmpl, engine}, options) {
     CHECK(server.start());
     CHECK(server.bound_port() > 0);
   }
 
   ~Fixture() { server.stop(); }
 
-  static server::Options make_options(size_t queue_depth) {
+  static server::Options make_options(size_t queue_depth, const std::string& log_dir = "") {
     server::Options result;
+    result.log_requests_dir = log_dir;
     result.host = "127.0.0.1";
     result.port = 0;
     result.served_model = "mock-model";
@@ -374,6 +378,127 @@ void case_unknown_fields() {
   CHECK_EQ(response->status, 200);
 }
 
+
+// Spec 7 §3.5: reasoning_content and tool_calls in chat responses; completions unchanged.
+const char* kToolText =
+    "plan it</think>\n\nI'll read it.\n<tool_call>\n<function=read>\n<parameter=filePath>\n"
+    "/w/x.cc\n</parameter>\n</function>\n</tool_call>";
+
+void check_call(const json& call, uint32_t index, bool streamed) {
+  if (streamed) CHECK_EQ(call.at("index"), index);
+  CHECK(call.at("id").get<std::string>().rfind("call_", 0) == 0);
+  CHECK_EQ(call.at("type"), std::string("function"));
+  CHECK_EQ(call.at("function").at("name"), std::string("read"));
+  CHECK_EQ(json::parse(call.at("function").at("arguments").get<std::string>()),
+           json({{"filePath", "/w/x.cc"}}));
+}
+
+void case_tool_calls() {
+  Fixture fixture;
+  fixture.tmpl.think_tag = true;
+  std::vector<uint32_t> script = fixture.tok.raw(kToolText, 3);
+  script.push_back(248046);
+  fixture.engine.script = script;
+  auto client = fixture.client();
+
+  // Thinking on, non-streaming.
+  auto response = client.Post("/v1/chat/completions", chat_body().dump(), "application/json");
+  CHECK(response);
+  CHECK_EQ(response->status, 200);
+  json body = json::parse(response->body);
+  json choice = body.at("choices").at(0);
+  CHECK_EQ(choice.at("finish_reason"), std::string("tool_calls"));
+  CHECK_EQ(choice.at("message").at("role"), std::string("assistant"));
+  CHECK_EQ(choice.at("message").at("reasoning_content"), std::string("plan it"));
+  CHECK_EQ(choice.at("message").at("content"), std::string("I'll read it.\n"));
+  CHECK_EQ(choice.at("message").at("tool_calls").size(), 1U);
+  check_call(choice.at("message").at("tool_calls").at(0), 0, false);
+  CHECK_EQ(body.at("usage").at("prompt_tokens_details").at("cached_tokens"), 0);
+
+  // Thinking off: no reasoning split, the call still parsed.
+  json off = chat_body();
+  off["chat_template_kwargs"] = {{"enable_thinking", false}};
+  response = client.Post("/v1/chat/completions", off.dump(), "application/json");
+  CHECK(response);
+  choice = json::parse(response->body).at("choices").at(0);
+  CHECK(!choice.at("message").contains("reasoning_content"));
+  CHECK_EQ(choice.at("message").at("content"), std::string("plan it</think>\n\nI'll read it.\n"));
+  check_call(choice.at("message").at("tool_calls").at(0), 0, false);
+  CHECK_EQ(choice.at("finish_reason"), std::string("tool_calls"));
+
+  // Streaming, thinking on.
+  json streamed = chat_body();
+  streamed["stream"] = true;
+  const StreamReply reply = stream(client, "/v1/chat/completions", streamed);
+  CHECK_EQ(reply.status, 200);
+  std::string reasoning, content, finish;
+  std::vector<json> calls;
+  for (const std::string& frame : sse_frames(reply.body)) {
+    if (frame == "data: [DONE]") continue;
+    const json c = frame_json(frame).at("choices").at(0);
+    const json& delta = c.at("delta");
+    if (delta.contains("reasoning_content")) reasoning += delta.at("reasoning_content").get<std::string>();
+    if (delta.contains("content")) content += delta.at("content").get<std::string>();
+    if (delta.contains("tool_calls")) {
+      CHECK_EQ(delta.at("tool_calls").size(), 1U);
+      calls.push_back(delta.at("tool_calls").at(0));
+    }
+    if (!c.at("finish_reason").is_null()) finish = c.at("finish_reason").get<std::string>();
+  }
+  CHECK_EQ(reasoning, std::string("plan it"));
+  CHECK_EQ(content, std::string("I'll read it.\n"));
+  CHECK_EQ(calls.size(), 1U);
+  check_call(calls[0], 0, true);
+  CHECK_EQ(finish, std::string("tool_calls"));
+
+  // /v1/completions: the raw text, as before.
+  const json completion = {{"model", "mock-model"}, {"prompt", "hi"}};
+  response = client.Post("/v1/completions", completion.dump(), "application/json");
+  CHECK(response);
+  body = json::parse(response->body);
+  choice = body.at("choices").at(0);
+  CHECK_EQ(choice.at("text"), std::string(kToolText));
+  CHECK_EQ(choice.at("finish_reason"), std::string("stop"));
+  CHECK(!choice.contains("message"));
+  CHECK(!body.at("usage").contains("prompt_tokens_details"));
+}
+
+// Spec 7 P0: --log-requests writes each request with its ids.
+void case_request_log() {
+  char dir_template[] = "/tmp/b70_reqlog_XXXXXX";
+  const char* dir = ::mkdtemp(dir_template);
+  CHECK(dir != nullptr);
+  {
+    Fixture fixture(4, dir);
+    fixture.engine.script = ids(fixture, "Paris is <|im_end|>");
+    auto client = fixture.client();
+    json streamed = chat_body();
+    streamed["stream"] = true;
+    CHECK_EQ(stream(client, "/v1/chat/completions", streamed).status, 200);
+    const json completion = {{"model", "mock-model"}, {"prompt", "hi there"}};
+    const auto response = client.Post("/v1/completions", completion.dump(), "application/json");
+    CHECK(response);
+    CHECK_EQ(response->status, 200);
+  }
+  const std::string first_path = std::string(dir) + "/000001.json";
+  const std::string second_path = std::string(dir) + "/000002.json";
+  std::ifstream first_in(first_path), second_in(second_path);
+  CHECK(first_in.good() && second_in.good());
+  const json first = json::parse(first_in), second = json::parse(second_in);
+  CHECK_EQ(first.at("endpoint"), std::string("/v1/chat/completions"));
+  CHECK_EQ(first.at("request").at("messages"), messages());
+  CHECK(first.at("request").at("stream").get<bool>());
+  CHECK_EQ(first.at("response_text"), std::string("Paris is "));
+  CHECK_EQ(first.at("out_ids").size(), 2U);
+  CHECK(!first.at("prompt_ids").empty());
+  const double t0 = first.at("t_start"), t1 = first.at("t_first_token"), t2 = first.at("t_end");
+  CHECK(t0 <= t1 && t1 <= t2);
+  CHECK_EQ(second.at("endpoint"), std::string("/v1/completions"));
+  CHECK_EQ(second.at("prompt_ids").get<std::vector<uint32_t>>().size(), 2U);
+  ::unlink(first_path.c_str());
+  ::unlink(second_path.c_str());
+  ::rmdir(dir);
+}
 }  // namespace
 
 int main() {
@@ -388,6 +513,8 @@ int main() {
   case_errors();
   case_fifo_and_overload();
   case_unknown_fields();
-  std::printf("protocol_test OK: 11 cases\n");
+  case_tool_calls();
+  case_request_log();
+  std::printf("protocol_test OK: 13 cases\n");
   return 0;
 }
