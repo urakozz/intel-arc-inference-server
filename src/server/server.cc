@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdint>
 #include <mutex>
 #include <set>
@@ -19,6 +20,10 @@ uint64_t unix_time() {
   return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
                                     std::chrono::system_clock::now().time_since_epoch())
                                     .count());
+}
+
+double steady_seconds() {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 std::string request_id(bool chat, uint64_t sequence) {
@@ -38,6 +43,7 @@ struct Server::Impl {
   int port = 0;
   std::thread thread;
   std::atomic<uint64_t> next_id{0};
+  std::atomic<uint64_t> next_log{0};
   uint64_t created = unix_time();
 };
 
@@ -124,7 +130,7 @@ void Server::release() {
 }
 
 Server::Outcome Server::generate(const Request& r,
-                                 const std::function<void(const std::string&)>& emit) {
+                                 const std::function<void(const Delta&)>& emit) {
   Outcome outcome;
   std::string prompt;
   try {
@@ -152,26 +158,59 @@ Server::Outcome Server::generate(const Request& r,
   for (const std::string& stop : r.stop) {
     hold = std::max(hold, stop.empty() ? 0U : stop.size() - 1);
   }
+  // Stop strings apply to content; `pending` holds content not yet emitted.
   std::string pending;
   const auto flush_pending = [&](bool final) {
     const size_t keep = final ? 0 : std::min(hold, pending.size());
     if (pending.size() <= keep) return;
-    const std::string piece = pending.substr(0, pending.size() - keep);
-    outcome.text += piece;
-    emit(piece);
-    pending.erase(0, piece.size());
+    Delta d;
+    d.kind = Delta::Content;
+    d.text = pending.substr(0, pending.size() - keep);
+    outcome.text += d.text;
+    outcome.parsed.content += d.text;
+    pending.erase(0, d.text.size());
+    emit(d);
+  };
+  // Chat: the text goes through the tool-call parser (spec 7 §3.5). With thinking
+  // on, the prompt ends in "<think>\n" and the output opens with reasoning.
+  std::unique_ptr<OutputStream> parser;
+  if (r.chat) {
+    const std::string tag = "<think>\n";
+    const bool thinking =
+        prompt.size() >= tag.size() && prompt.compare(prompt.size() - tag.size(), tag.size(), tag) == 0;
+    parser = std::make_unique<OutputStream>(thinking, r.tools);
+  }
+  const auto route = [&](const std::vector<Delta>& deltas) {
+    for (const Delta& d : deltas) {
+      if (d.kind == Delta::Content) {
+        pending += d.text;
+        continue;
+      }
+      flush_pending(true);
+      if (d.kind == Delta::Reasoning) outcome.parsed.reasoning += d.text;
+      else outcome.parsed.tool_calls.push_back(d.call);
+      emit(d);
+    }
+  };
+  const auto add_text = [&](const std::string& text) {
+    outcome.raw_text += text;
+    if (parser) route(parser->push(text));
+    else pending += text;
   };
 
   outcome.finish_reason = "length";
+  bool eos_stop = false;
   for (uint32_t generated = 0; generated < max_tokens; ++generated) {
     const uint32_t id = deps_.engine.step(r.sampling);
+    if (generated == 0) outcome.t_first_token = steady_seconds();
     const bool is_eos = impl_->eos.count(id) != 0;
     if (is_eos && !r.ignore_eos && outcome.out_ids.size() >= r.min_tokens) {
       outcome.finish_reason = "stop";
+      eos_stop = true;
       break;
     }
     outcome.out_ids.push_back(id);
-    if (!is_eos) pending += streamer->push(id);
+    if (!is_eos) add_text(streamer->push(id));
 
     bool stopped = false;
     for (const std::string& stop : r.stop) {
@@ -189,15 +228,43 @@ Server::Outcome Server::generate(const Request& r,
     }
     flush_pending(false);
   }
-  if (outcome.finish_reason == "length") {
-    pending += streamer->flush();
-    flush_pending(true);
-  }
+  if (outcome.finish_reason == "length") add_text(streamer->flush());
+  if (parser && (eos_stop || outcome.finish_reason == "length")) route(parser->finish());
+  flush_pending(true);
+  if (eos_stop && !outcome.parsed.tool_calls.empty()) outcome.finish_reason = "tool_calls";
   outcome.usage.completion_tokens = static_cast<uint32_t>(outcome.out_ids.size());
   return outcome;
 }
 
+void Server::log_request(bool chat, const std::string& body, double t_start,
+                         const Outcome& outcome) {
+  if (opts_.log_requests_dir.empty()) return;
+  nlohmann::json record = {
+      {"t_start", t_start},
+      {"t_first_token", outcome.t_first_token == 0 ? t_start : outcome.t_first_token},
+      {"t_end", steady_seconds()},
+      {"endpoint", chat ? "/v1/chat/completions" : "/v1/completions"},
+      {"request", nlohmann::json::parse(body, nullptr, false)},
+      {"prompt_ids", outcome.prompt_ids},
+      {"out_ids", outcome.out_ids},
+      {"response_text", outcome.raw_text},
+  };
+  char name[32];
+  std::snprintf(name, sizeof(name), "/%06llu.json",
+                static_cast<unsigned long long>(++impl_->next_log));
+  const std::string path = opts_.log_requests_dir + name;
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  if (f == nullptr) {
+    std::fprintf(stderr, "b70-serve: cannot write request log %s\n", path.c_str());
+    return;
+  }
+  const std::string text = record.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+  std::fwrite(text.data(), 1, text.size(), f);
+  std::fclose(f);
+}
+
 void Server::handle(const httplib::Request& request, httplib::Response& response, bool chat) {
+  const double t_start = steady_seconds();
   Request parsed;
   try {
     parsed = parse_request(request.body, chat);
@@ -218,12 +285,14 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
 
   if (!parsed.stream) {
     try {
-      const Outcome outcome = generate(parsed, [](const std::string&) {});
+      const Outcome outcome = generate(parsed, [](const Delta&) {});
+      log_request(parsed.chat, request.body, t_start, outcome);
       const auto* prompt_ids = parsed.return_token_ids ? &outcome.prompt_ids : nullptr;
       const auto* out_ids = parsed.return_token_ids ? &outcome.out_ids : nullptr;
       const std::string id = request_id(parsed.chat, ++impl_->next_id);
       response.set_content(completion_body(parsed, id, unix_time(), outcome.text,
-                                           outcome.finish_reason, outcome.usage, prompt_ids, out_ids),
+                                           outcome.finish_reason, outcome.usage, prompt_ids, out_ids,
+                                           parsed.chat ? &outcome.parsed : nullptr),
                            "application/json");
     } catch (const BadRequest& error) {
       response.status = 400;
@@ -237,7 +306,7 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
   response.set_header("X-Accel-Buffering", "no");
   response.set_chunked_content_provider(
       "text/event-stream",
-      [this, parsed](size_t, httplib::DataSink& sink) mutable {
+      [this, parsed, body = request.body, t_start](size_t, httplib::DataSink& sink) mutable {
         const std::string id = request_id(parsed.chat, ++impl_->next_id);
         const uint64_t created = unix_time();
         const auto write = [&sink](const std::string& frame) {
@@ -245,11 +314,19 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
         };
         if (parsed.chat) (void)write(stream_frame_role(parsed, id, created));
         try {
-          const Outcome outcome = generate(parsed, [&](const std::string& piece) {
-            if (!piece.empty()) (void)write(stream_frame_text(parsed, id, created, piece));
+          const Outcome outcome = generate(parsed, [&](const Delta& d) {
+            if (d.kind == Delta::Call) {
+              (void)write(stream_frame_tool_call(parsed, id, created, d.call, d.index));
+            } else if (d.text.empty()) {
+            } else if (d.kind == Delta::Reasoning) {
+              (void)write(stream_frame_reasoning(parsed, id, created, d.text));
+            } else {
+              (void)write(stream_frame_text(parsed, id, created, d.text));
+            }
           });
           (void)write(stream_frame_finish(parsed, id, created, outcome.finish_reason));
           if (parsed.include_usage) (void)write(stream_frame_usage(parsed, id, created, outcome.usage));
+          log_request(parsed.chat, body, t_start, outcome);
         } catch (const BadRequest& error) {
           (void)write(std::string("data: ") +
                       error_body(error.what(), "invalid_request_error") + "\n\n");
