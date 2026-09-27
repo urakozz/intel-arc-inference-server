@@ -127,6 +127,10 @@ add_executable(prefix_cache_test server/prefix_cache_test.cc)
 target_include_directories(prefix_cache_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(prefix_cache_test PRIVATE b70_server)
 add_test(NAME prefix_cache_test COMMAND prefix_cache_test)
+add_executable(prefix_server_test server/prefix_server_test.cc)
+target_include_directories(prefix_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(prefix_server_test PRIVATE b70_server)
+add_test(NAME prefix_server_test COMMAND prefix_server_test)
 
 add_executable(protocol_test server/protocol_test.cc)
 target_include_directories(protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -1003,6 +1007,7 @@ if(B70_TOKENIZER_ENABLED)
     b70_link_prefill(sampling_test)
   endif()
   add_test(NAME sampling_test COMMAND sampling_test)
+
 endif()
 
 # --- spec 8 (plan 8b): MTP in the engine ------------------------------------------------

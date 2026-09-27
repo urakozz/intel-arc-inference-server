@@ -5,6 +5,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <map>
+#include <iterator>
+#include <stdexcept>
+#include <utility>
 #include <memory>
 #include <random>
 #include <string>
@@ -15,6 +19,8 @@
 #include "runtime/engine.h"
 #include "runtime/prefill/backend.h"
 #include "server/deps.h"
+#include "server/prefix_cache.h"
+#include "l0/memory.h"
 #include "tokenizer/chat_template.h"
 #include "tokenizer/streamer.h"
 #include "tokenizer/tokenizer.h"
@@ -148,6 +154,22 @@ struct EngineAdapter : server::EngineIface {
   uint32_t max_len() override { return eng.max_len(); }
   uint32_t pos() override { return eng.pos(); }
 
+  // Spec 7 (plan 7c): plan 7b's snapshot calls, forwarded.
+  uint32_t block() override { return runtime::Engine::kBlock; }
+  size_t state_bytes() override { return eng.state_bytes(); }
+  size_t kv_bytes(uint32_t n) override { return eng.kv_bytes(n); }
+  void save_state(void* host) override { eng.save_state(host); }
+  void load_state(const void* host, uint32_t p) override { eng.load_state(host, p); }
+  void save_kv(uint32_t b, uint32_t e, void* host) override { eng.save_kv(b, e, host); }
+  void load_kv(uint32_t b, uint32_t e, const void* host) override { eng.load_kv(b, e, host); }
+  void set_block_hook(BlockHook hook) override { eng.set_block_hook(std::move(hook)); }
+  uint32_t pending() override {
+    return eng.buffers().control.as<runtime::Control>()->cur_token[0];
+  }
+  void set_pending(uint32_t id) override {
+    eng.buffers().control.as<runtime::Control>()->cur_token[0] = id;
+  }
+
   // Reads back the replay's fp32 logits row (`eng.buffers().logits`, [1][
   // model::Qwen35::kVocab] = 993 KB), samples over the first `vocab_used` of
   // them, and writes the sampled id into `cur_token[0]` -- exactly the ingest
@@ -184,4 +206,47 @@ struct EngineAdapter : server::EngineIface {
   bool rng_seeded = false;
   uint32_t gen_tokens_ = 0;
   std::chrono::steady_clock::time_point gen_start_{};
+};
+
+// Spec 7 §3.1: the prefix cache's pinned host memory. ONE l0::MemKind::Host allocation of
+// the whole budget at server start (the P0 probe measured ~100 ms per GiB to allocate, too
+// slow per entry), carved first-fit in 64 KiB units with coalescing frees. Host-resident
+// and device-visible, so the engine's snapshot copies run at the probe's 12-14 GB/s.
+struct PinnedAlloc : server::HostAlloc {
+  static constexpr size_t kUnit = size_t(64) << 10;
+  PinnedAlloc(l0::Context& ctx, size_t bytes)
+      : mem(ctx, l0::MemKind::Host, bytes / kUnit * kUnit, kUnit) {
+    free_[0] = mem.size();
+  }
+  void* alloc(size_t bytes) override {
+    const size_t n = (bytes + kUnit - 1) / kUnit * kUnit;
+    for (auto it = free_.begin(); it != free_.end(); ++it) {
+      if (it->second < n) continue;
+      const size_t off = it->first, len = it->second;
+      free_.erase(it);
+      if (len > n) free_[off + n] = len - n;
+      return mem.as<uint8_t>() + off;
+    }
+    return nullptr;
+  }
+  void free(void* p, size_t bytes) override {
+    const size_t n = (bytes + kUnit - 1) / kUnit * kUnit;
+    size_t off = size_t(static_cast<uint8_t*>(p) - mem.as<uint8_t>()), len = n;
+    auto next = free_.lower_bound(off);
+    if (next != free_.end() && next->first == off + len) {
+      len += next->second;
+      next = free_.erase(next);
+    }
+    if (next != free_.begin()) {
+      auto prev = std::prev(next);
+      if (prev->first + prev->second == off) {
+        off = prev->first;
+        len += prev->second;
+        free_.erase(prev);
+      }
+    }
+    free_[off] = len;
+  }
+  l0::Mem mem;
+  std::map<size_t, size_t> free_;   // offset -> length
 };
