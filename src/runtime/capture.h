@@ -110,7 +110,12 @@ struct CapturedStep {
 // not free, though - each signal carries a host-scope flush at kernel
 // completion - so a profiled list is never a bench list (spec §3.3): it prices
 // shares and per-kernel deltas, not the absolute step.
+//
+// M: the rows in flight (consecutive positions), default 1 - what ships. M > 1
+// binds the `_M<M>` variants, which a default build does not compile (spec 8a:
+// B70_DECODE_EXTRA_M builds M = 2..4 at max_len 16384 for the MTP probe).
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                   l0::Mem* debug_resid = nullptr, ProfileEvents* prof = nullptr);
+                   l0::Mem* debug_resid = nullptr, ProfileEvents* prof = nullptr,
+                   uint32_t M = 1);
 
 }  // namespace runtime
