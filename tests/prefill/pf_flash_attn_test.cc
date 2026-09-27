@@ -2,7 +2,7 @@
 //
 // Ported from tools/probe/probe_flash_attn.cc (plan 6a): random Q (bf16 N(0,1) x qscale)
 // and a random K/V cache (bf16 N(0,1)) in the production layouts, the kernel launched as
-// attn_chunk launches it (grid (ceil(C / 16), 4, 1), WG 192), and the fp64 reference on
+// attn_chunk launches it (grid (ceil(C / 8), 4, 1), WG 96; spec 6c), and the fp64 reference on
 // the same sampled rows ({0, 1, 7, 8, 63, 64, C/2, C-2, C-1} plus 16 drawn from
 // mt19937(pos + C)) x 24 heads. Bar: worst per-(row, head) cosine >= 0.99999, no
 // non-finite value in the sampled rows, and rows [C, pad256(C)) finite. The max abs
@@ -57,8 +57,8 @@ bool run_case(pf_harness::Dev& d, l0::Kernel& k, uint32_t pos, uint32_t C, doubl
   k.arg(4, pos);
   k.arg(5, C);
   k.arg(6, rows);
-  // Grid (ceil(C / 16), 4, 1): RPW 16 rows, one work-group per kv head, HPW 6 (gz = 1).
-  d.run(k, (C + 15u) / 16u, kKvH);
+  // Grid (ceil(C / 8), 4, 1): RPW 8 rows, one work-group per kv head, HPW 6 (gz = 1).
+  d.run(k, (C + 7u) / 8u, kKvH);
   std::vector<float> out(o_elems);
   pf_harness::download(d.imm, out, dout);
 
@@ -148,12 +148,17 @@ int main() {
   pf_harness::Dev d;
   l0::Module mod(d.ctx, kernels::path(kernels::pf_flash_attn_variant()));
   l0::Kernel k = mod.kernel("pf_flash_attn");
-  k.group_size(16 * 12);   // reqd_work_group_size: 12 sub-groups of 16 (HPW 6 x RPW 16 / 8)
+  k.group_size(16 * 6);    // reqd_work_group_size: 6 sub-groups of 16 (HPW 6 x RPW 8 / 8)
   bool ok = true;
   ok &= run_case(d, k, 16384, 2048, 1.0);
   ok &= run_case(d, k, 777, 300, 1.0);
   ok &= run_case(d, k, 0, 2048, 30.0);
   ok &= run_case(d, k, 0, 64, 1.0);
+  // Spec 6c: the log2-domain max on a lone row (first tile m = -INF, one key), and C = 1
+  // at depth -- the tail chunk of a 4097-id prompt -- where 7 of the 8 rows are padding.
+  ok &= run_case(d, k, 0, 1, 1.0);
+  ok &= run_case(d, k, 4096, 1, 1.0);
+  ok &= run_case(d, k, 0, 9, 1.0);
   CHECK(ok);
   std::printf("pf_flash_attn_test: PASS\n");
   return 0;
