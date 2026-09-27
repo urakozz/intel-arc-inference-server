@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -118,4 +120,91 @@ struct MockEngine : server::EngineIface {
 
   uint32_t max_len() override { return 1024; }
   uint32_t pos() override { return static_cast<uint32_t>(last_prompt.size() + at); }
+};
+
+// Spec 7 (plan 7c): an engine with a real session for the prefix cache tests. The state is
+// a hash of every id consumed so far, the KV cache is the ids per position, and the next
+// id is a function of BOTH (the state and a hash over KV [0, pos)), so a wrong state or a
+// stale KV position after a restore generates different ids. It follows runtime::Engine's
+// protocol: prefill leaves the first generated id pending, step() returns the pending id
+// and consumes it (its KV is written, pos advances), the block hook fires at every block
+// end inside a prefill and at its end.
+struct StateMockEngine : server::EngineIface {
+  uint32_t blk = 4;
+  uint32_t maxlen = 1024;
+  std::vector<uint32_t> words;   // what it generates: ids the MockTok knows
+  uint32_t bad_id = 0xFFFFFFFFu; // prefill throws when it meets it (after writing the ids before)
+  std::vector<uint32_t> kv = std::vector<uint32_t>(1024, 0);
+  uint64_t state = 0;
+  uint32_t p = 0, cur = 0;
+  BlockHook hook;
+  uint64_t rng = 0;
+  size_t prefilled = 0, resets = 0, state_loads = 0, kv_loaded = 0;
+
+  static uint64_t mix(uint64_t h, uint64_t v) {
+    h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+    return h * 0xBF58476D1CE4E5B9ull;
+  }
+  uint32_t next() const {
+    uint64_t h = state;
+    for (uint32_t i = 0; i < p; ++i) h = mix(h, kv[i]);
+    return words[h % words.size()];
+  }
+  void consume(uint32_t id) {
+    if (p >= maxlen) throw std::runtime_error("mock: past max_len");
+    kv[p++] = id;
+    state = mix(state, id);
+  }
+
+  void reset() override {
+    ++resets;
+    std::fill(kv.begin(), kv.end(), 0);
+    state = 0;
+    p = 0;
+    cur = 0;
+  }
+  void prefill(const std::vector<uint32_t>& ids) override {
+    if (ids.empty()) throw std::runtime_error("mock: empty prefill");
+    for (size_t i = 0; i < ids.size(); ++i) {
+      if (ids[i] == bad_id) throw std::runtime_error("mock: id out of vocabulary");
+      consume(ids[i]);
+      ++prefilled;
+      const bool last = i + 1 == ids.size();
+      if (last) cur = next();
+      if (hook && (last || p % blk == 0)) hook(p, p % blk == 0);
+    }
+  }
+  uint32_t step(const server::Sampling& s) override {
+    const uint32_t id = cur;
+    consume(id);
+    cur = next();
+    if (!s.greedy) {   // "sampling": a different pick than the argmax, seeded
+      if (rng == 0) rng = s.has_seed ? s.seed + 1 : 12345;
+      rng = mix(rng, 7);
+      cur = words[(rng >> 7) % words.size()];
+    }
+    return id;
+  }
+  uint32_t max_len() override { return maxlen; }
+  uint32_t pos() override { return p; }
+
+  uint32_t block() override { return blk; }
+  size_t state_bytes() override { return sizeof(uint64_t); }
+  size_t kv_bytes(uint32_t n) override { return size_t(n) * sizeof(uint32_t); }
+  void save_state(void* host) override { std::memcpy(host, &state, sizeof state); }
+  void load_state(const void* host, uint32_t at) override {
+    std::memcpy(&state, host, sizeof state);
+    p = at;
+    ++state_loads;
+  }
+  void save_kv(uint32_t b, uint32_t e, void* host) override {
+    std::memcpy(host, kv.data() + b, size_t(e - b) * 4);
+  }
+  void load_kv(uint32_t b, uint32_t e, const void* host) override {
+    std::memcpy(kv.data() + b, host, size_t(e - b) * 4);
+    kv_loaded += e - b;
+  }
+  void set_block_hook(BlockHook h) override { hook = std::move(h); }
+  uint32_t pending() override { return cur; }
+  void set_pending(uint32_t id) override { cur = id; }
 };

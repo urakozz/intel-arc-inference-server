@@ -45,11 +45,14 @@ struct Server::Impl {
   std::atomic<uint64_t> next_id{0};
   std::atomic<uint64_t> next_log{0};
   uint64_t created = unix_time();
+  std::unique_ptr<PrefixSession> prefix;
 };
 
 Server::Server(Deps deps, Options opts)
     : deps_(deps), opts_(std::move(opts)), impl_(std::make_unique<Impl>()) {
   impl_->eos.insert(opts_.eos_ids.begin(), opts_.eos_ids.end());
+  impl_->prefix = std::make_unique<PrefixSession>(deps_.engine, opts_.prefix_cache_bytes,
+                                                  opts_.prefix_alloc);
   impl_->svr.set_tcp_nodelay(opts_.tcp_nodelay);
   impl_->svr.Post("/v1/chat/completions",
                   [this](const httplib::Request& request, httplib::Response& response) {
@@ -149,8 +152,32 @@ Server::Outcome Server::generate(const Request& r,
   const uint32_t max_tokens = std::min(r.max_tokens.value_or(budget), budget);
   outcome.usage.prompt_tokens = static_cast<uint32_t>(outcome.prompt_ids.size());
 
-  deps_.engine.reset();
-  deps_.engine.prefill(outcome.prompt_ids);
+  // Spec 7 §3.3: restart from the resident session or the deepest host snapshot, prefill
+  // the tail (the block hook writes it through); with the cache off, reset() + prefill.
+  PrefixSession& session = *impl_->prefix;
+  outcome.prefix = session.begin(outcome.prompt_ids);
+  outcome.usage.cached_tokens = outcome.prefix.restart;
+  if (session.enabled()) {
+    std::fprintf(stderr,
+                 "prefix: kind %s restart %u of %zu kv_bytes %zu restore_ms %.1f prefill_ms %.1f"
+                 " store_ms %.1f\n",
+                 plan_kind_name(outcome.prefix.kind), outcome.prefix.restart,
+                 outcome.prompt_ids.size(), outcome.prefix.kv_bytes, outcome.prefix.restore_ms,
+                 outcome.prefix.prefill_ms, outcome.prefix.store_ms);
+    std::fflush(stderr);
+  }
+  try {
+    generate_tail(r, prompt, max_tokens, outcome, emit);
+  } catch (...) {
+    session.fail();
+    throw;
+  }
+  return outcome;
+}
+
+void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t max_tokens,
+                           Outcome& outcome, const std::function<void(const Delta&)>& emit) {
+  PrefixSession& session = *impl_->prefix;
   std::unique_ptr<StreamerIface> streamer = deps_.tok.streamer();
   if (!streamer) throw BadRequest("tokenizer did not provide a streamer");
 
@@ -202,6 +229,7 @@ Server::Outcome Server::generate(const Request& r,
   bool eos_stop = false;
   for (uint32_t generated = 0; generated < max_tokens; ++generated) {
     const uint32_t id = deps_.engine.step(r.sampling);
+    session.fed(id);
     if (generated == 0) outcome.t_first_token = steady_seconds();
     const bool is_eos = impl_->eos.count(id) != 0;
     if (is_eos && !r.ignore_eos && outcome.out_ids.size() >= r.min_tokens) {
@@ -233,7 +261,17 @@ Server::Outcome Server::generate(const Request& r,
   flush_pending(true);
   if (eos_stop && !outcome.parsed.tool_calls.empty()) outcome.finish_reason = "tool_calls";
   outcome.usage.completion_tokens = static_cast<uint32_t>(outcome.out_ids.size());
-  return outcome;
+}
+
+void Server::finish_request() {
+  if (!impl_->prefix->enabled()) return;
+  try {
+    const double ms = impl_->prefix->end();
+    std::fprintf(stderr, "prefix: request end, pos %u, store_ms %.1f\n", deps_.engine.pos(), ms);
+    std::fflush(stderr);
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "b70-serve: request-end snapshot failed: %s\n", error.what());
+  }
 }
 
 void Server::log_request(bool chat, const std::string& body, double t_start,
@@ -294,9 +332,13 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
                                            outcome.finish_reason, outcome.usage, prompt_ids, out_ids,
                                            parsed.chat ? &outcome.parsed : nullptr),
                            "application/json");
+      finish_request();
     } catch (const BadRequest& error) {
       response.status = 400;
       response.set_content(error_body(error.what(), "invalid_request_error"), "application/json");
+    } catch (const std::exception& error) {
+      response.status = 500;
+      response.set_content(error_body(error.what(), "server_error"), "application/json");
     }
     release();
     return;
@@ -316,6 +358,7 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
         // sends it: clients time prefill to the first chunk with `choices`
         // (llama-benchy's est_ppt), so a frame before prefill reads as ~0 ms.
         bool role_sent = !parsed.chat;
+        bool ok = false;
         const auto send_role = [&] {
           if (role_sent) return;
           role_sent = true;
@@ -337,11 +380,15 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
           (void)write(stream_frame_finish(parsed, id, created, outcome.finish_reason));
           if (parsed.include_usage) (void)write(stream_frame_usage(parsed, id, created, outcome.usage));
           log_request(parsed.chat, body, t_start, outcome);
+          ok = true;
         } catch (const BadRequest& error) {
           (void)write(std::string("data: ") +
                       error_body(error.what(), "invalid_request_error") + "\n\n");
+        } catch (const std::exception& error) {
+          (void)write(std::string("data: ") + error_body(error.what(), "server_error") + "\n\n");
         }
         (void)write(kDone);
+        if (ok) finish_request();
         sink.done();
         release();
         return true;

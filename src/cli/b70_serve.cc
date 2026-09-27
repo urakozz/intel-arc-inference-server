@@ -1,5 +1,7 @@
 // b70-serve -- the OpenAI-compatible server over the replayed runtime::Engine.
+#include <chrono>
 #include <filesystem>
+#include <memory>
 #include <unistd.h>
 
 #include <csignal>
@@ -59,7 +61,9 @@ void usage() {
                "                 [--max-len 16384] [--device N] [--served-name NAME] [--queue 4]\n"
                "                 --max-len: 16384, 32768 or 131072 (the compiled decode attention)\n"
                "                 [--pp-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n"
-               "                 [--log-requests DIR]   write DIR/NNNNNN.json per request\n");
+               "                 [--log-requests DIR]   write DIR/NNNNNN.json per request\n"
+               "                 [--prefix-cache-gb N]  pinned host prefix cache, GiB (default 32,\n"
+               "                                        0 = off: every request prefills in full)\n");
 }
 
 uint32_t parse_u32(const char* what, const std::string& value) {
@@ -118,6 +122,7 @@ int run(int argc, char** argv) {
   uint32_t device = l0::Context::kFromEnv;
   std::string pp_backend_arg;
   bool have_pp_backend = false;
+  uint32_t prefix_cache_gb = 32;
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -145,6 +150,8 @@ int run(int argc, char** argv) {
       options.queue_depth = parse_u32("--queue", value(i, "--queue"));
     } else if (arg == "--log-requests") {
       options.log_requests_dir = value(i, "--log-requests");
+    } else if (arg == "--prefix-cache-gb") {
+      prefix_cache_gb = parse_u32("--prefix-cache-gb", value(i, "--prefix-cache-gb"));
     } else if (arg == "--pp-backend") {
       pp_backend_arg = value(i, "--pp-backend");
       have_pp_backend = true;
@@ -189,6 +196,19 @@ int run(int argc, char** argv) {
   TemplateAdapter chat_template(snapshot_dir);
   EngineAdapter engine_adapter(engine, tokenizer.vocab_used());
   options.eos_ids = eos;
+  std::unique_ptr<PinnedAlloc> prefix_alloc;
+  if (prefix_cache_gb > 0) {
+    const auto t0 = std::chrono::steady_clock::now();
+    prefix_alloc = std::make_unique<PinnedAlloc>(context, size_t(prefix_cache_gb) << 30);
+    options.prefix_cache_bytes = prefix_alloc->mem.size();
+    options.prefix_alloc = prefix_alloc.get();
+    std::fprintf(stderr, "prefix cache: %u GiB pinned host, allocated in %.0f ms\n",
+                 prefix_cache_gb,
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                     .count());
+  } else {
+    std::fprintf(stderr, "prefix cache: off\n");
+  }
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
 
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
