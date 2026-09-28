@@ -231,9 +231,17 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
     } else if (!gd.contains(id)) {
       ++bad;
     }
-    if (id != gd.set[0] || p == 0)
-      std::printf("    row %2u: cached %6u cold %6u %s cos %.9f%s\n", p, id, gd.set[0],
-                  gd.determined() ? "det" : "TIE", c, id == gd.set[0] ? "" : "  <== differs");
+    if (id != gd.set[0] || p == 0) {
+      // The cold row's top-2 margin in bf16 ulps of its top logit (the near-tie rule's unit).
+      uint32_t s2 = 0;
+      (void)bf16_near_tie(ref.data(), Qwen35::kVocabUsed, gd.set[0], &s2);
+      int ex = 0;
+      std::frexp(std::fabs(ref[gd.set[0]]), &ex);
+      const double ulps = (double(ref[gd.set[0]]) - double(ref[s2])) / std::ldexp(1.0, ex - 8);
+      std::printf("    row %2u: cached %6u cold %6u (runner-up %u, margin %.3f bf16 ulp) %s cos"
+                  " %.9f%s\n", p, id, gd.set[0], s2, ulps, gd.determined() ? "det" : "TIE", c,
+                  id == gd.set[0] ? "" : "  <== differs");
+    }
     rig.eng.ingest({id});
   }
   std::printf("  %s: %s at %u of %zu | %u/%u exact, %u near-tie (allowed %u), %u bad, first"
