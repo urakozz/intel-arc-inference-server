@@ -678,10 +678,10 @@ there.
 - **`model.visual.*`** (333 tensors, 0.921 GB) - this checkpoint is a
   vision-language model and this project serves text only (doc 03).
 - **`mtp.*`** (15 tensors, 0.849 GB on the published checkpoint; 29 on the
-  self-quantised one) - speculative decoding is not built. The head is shipped
-  and correct in this checkpoint; the engine simply does not have a draft path,
-  and counting the skip in the report is how that stays a decision rather than
-  an oversight.
+  self-quantised one) - skipped unless the caller asks for the head
+  (`load(..., mtp = true)`; `b70-serve --mtp K`, spec 8). Without it the skip
+  is counted in the report, which is how that stays a decision rather than an
+  oversight. The self-quantised checkpoint's 29-tensor head is refused by name.
 - **`*.qzeros`, `*.g_idx`** (800 tensors, 0.202 GB) - fully scanned to prove the
   invariants above, then dropped. They are constants; uploading them would cost
   0.2 GB of every token's bandwidth to re-read a value the kernel already knows.

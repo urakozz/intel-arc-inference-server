@@ -86,8 +86,10 @@ The MTP head, all **bf16**, 0.85 GB: `mtp.fc` `[5120, 10240]` (fusing embedding
 ‖ hidden), `pre_fc_norm_embedding`, `pre_fc_norm_hidden`, one full transformer
 layer at the main model's shapes, `mtp.norm`. It shares `embed_tokens` and
 `lm_head` with the main model, so a draft step would read 0.85 + 2.54 GB and
-`lm_head` width would matter twice. This engine does not load it: speculative
-decoding is not built.
+`lm_head` width would matter twice. The engine loads it behind `--mtp K`
+(spec 8): `b70-serve --mtp K` drafts K tokens with it and verifies them in one
+step of K + 1 rows (docs/BENCHMARKS.md, "MTP speculative decoding"). Without
+the flag it is skipped, as before.
 
 ### Layer math, verified against the modeling file
 

@@ -535,6 +535,139 @@ reissues the identical eight requests inside one persistent session with curl
 looped on the box. Discarded, not reconciled: the 0.74 ms figure measured a
 network artifact.
 
+## MTP speculative decoding (spec 8)
+
+`b70-serve --mtp K` drafts K tokens with the checkpoint's MTP head, verifies
+them in one main-model step of M = K + 1 rows, and accepts on the host (greedy,
+or lossless sampling after Leviathan et al. 2023). Spec:
+`docs/specs/2026-09-27-spec8-mtp-speculative-decoding-design.md`, with its §8
+amendment. The probe and the engine are in `docs/probe-mtp-2026-09-27.md`.
+
+**Scope.** The MTP lists are compiled at max_len 16384 only (spec 8 §8 A9), so
+every row below runs at 16384. The spec's 32k and 64k rows cannot be measured
+yet. A 12k row stands in for depth.
+
+**Grade: iterate.** The box was shared with other agents during every run below
+(the 1-minute load is printed per round). Arms were interleaved per process,
+never run back to back. The seeded sampled runs draw the same tokens in every
+round, so the spread in each cell is timing only.
+
+### P0, acceptance and step costs (plan 8a/8b)
+
+- **Greedy depth-1 acceptance** on the CPU reference head: golden 0.820,
+  tool-call outputs 0.985.
+- **Verify step cost** at M = 2 / 3 / 4: 1.17 / 1.52 / 1.74 plain steps.
+- **Draft step cost:** 0.185 plain steps.
+- Full detail: `docs/probe-mtp-2026-09-27.md` §2, §3 and §6.
+
+### Acceptance in the server (M3 run, 256 greedy ids, 39 prompts)
+
+These come from `mtp_gpu_test`, using the engine's head over its own greedy
+output. There are three golden prompts and 36 A4 tool-call prompts.
+
+| K | acceptance, l0-int8 | ids per iteration | acceptance, l0 |
+|---|---:|---:|---:|
+| 1 | 0.9235 (4802/5200) | 1.920 | 0.9240 |
+| 2 | 0.8697 (6363/7316) | 2.729 | 0.8707 |
+| 3 | 0.8227 (7133/8670) | 3.455 | 0.8164 |
+
+Free text accepts less than the tool-call prompts:
+
+| prompt | K = 3 acceptance |
+|---|---:|
+| prose | 0.444 |
+| cjk | 0.489 |
+| code | 0.798 |
+| tool-call prompts | 0.707 to 1.000 |
+
+### D1, greedy decode (bar: >= 1.4x plain on the golden prompts and on the opencode replay)
+
+`tools/probe/mtp_d1.sh greedy 4096`, 2026-09-28 15:33-16:34, load 1.0-11.1.
+
+- **Setup:** each process runs one arm, 256 ids per prompt. Generation is timed
+  with prefill excluded, and the median of 3 rounds is shown.
+- **Rounds:** the order rotates between 0 3 1 2 and 2 1 3 0.
+- **K = 0 loads no head.** It is today's server.
+- **Golden prompts** sit at depth 4096 behind a prefix of `long32k.ids`.
+- **Tool-call prompts** are the four P0 scenarios, at their own depth (2.2k to 3k).
+
+| prompt | K=0 t/s | K=1 | K=2 | K=3 |
+|---|---:|---:|---:|---:|
+| golden/code@4096 | 29.30 | 40.92 (1.397x) | 42.44 (1.448x) | 43.93 (1.499x) |
+| golden/prose@4096 | 29.27 | 35.38 (1.209x) | 31.83 (1.087x) | 28.39 (0.970x) |
+| golden/cjk@4096 | 29.27 | 37.79 (1.291x) | 35.80 (1.223x) | 33.55 (1.146x) |
+| toolcall/t3_rename-openai | 29.98 | 43.24 (1.442x) | 45.54 (1.519x) | 49.94 (1.666x) |
+| toolcall/t4_comment-box | 30.14 | 42.97 (1.426x) | 45.95 (1.525x) | 46.97 (1.559x) |
+| toolcall/t4_comment-loader | 29.97 | 42.60 (1.422x) | 44.54 (1.486x) | 51.44 (1.716x) |
+| toolcall/t5_test-step | 30.01 | 42.65 (1.421x) | 45.62 (1.520x) | 47.88 (1.595x) |
+| **geomean, golden** | | **1.297x** | 1.244x | 1.186x |
+| **geomean, tool-call** | | 1.428x | 1.512x | **1.633x** |
+
+The same run at depth 12288 (`mtp_d1.sh greedy 12288`, 16:50-17:10, load
+1.0-5.8) gives these golden geomeans:
+
+| K | golden geomean @12288 |
+|---|---:|
+| 1 | 1.264x |
+| 2 | 1.179x |
+| 3 | 1.099x |
+
+- **K = 0 at 12288:** 26.07-26.09 t/s. The tool-call rows repeat the 4k rows
+  to within 0.1%.
+- **Verdict on the golden prompts: MISS.** The best K is 1, at 1.297x. At K = 3
+  prose falls below plain decode (0.970x).
+- **Tool-call proxy for agentic output: PASS** at every K. K = 3 gives 1.633x.
+- **Opencode replay: pending.** The log does not exist yet. Rerun once it does:
+  `tools/oracle/run_in_container.sh 'python3 tools/oracle/mtp_accept.py "$SNAP" --opencode /ws/tests/golden/opencode/session1 --out /ws/oracle-out-spec8a/accept_opencode.json'`
+  for acceptance, then `tools/prefix/replay_log.py` against
+  `b70-serve --mtp K` for the replay.
+- **Why golden misses:** spec 8 §1 assumed a verify step costs 1.05-1.15 plain
+  steps; it measures 1.17-1.74 (§8 A7). The two levers are the int4 GEMV at
+  M = 3/4 and `attn_decode`'s per-row KV walk.
+
+### D2, sampled decode at T 1.0, top-p 0.95, top-k 20 (bar: >= 1.25x)
+
+Setup:
+
+- `tools/probe/mtp_d1.sh sampled 4096`, 16:34-16:50, load 5.5-11.6.
+- The parameters are the checkpoint's `generation_config.json` (P0 §2). The
+  opencode log's own temperature is pending.
+- Seed 1234. K = 0 is today's host sampler.
+
+| prompt | K=0 t/s | K=1 | K=2 | K=3 |
+|---|---:|---:|---:|---:|
+| golden/code@4096 | 28.93 | 38.12 (1.318x) | 34.39 (1.189x) | 36.76 (1.271x) |
+| golden/prose@4096 | 28.89 | 41.66 (1.442x) | 33.20 (1.149x) | 48.16 (1.667x) |
+| golden/cjk@4096 | 28.89 | 35.82 (1.240x) | 36.86 (1.276x) | 35.08 (1.214x) |
+| toolcall/t3_rename-openai | 29.53 | 42.48 (1.438x) | 45.13 (1.528x) | 47.45 (1.607x) |
+| toolcall/t4_comment-box | 29.68 | 42.19 (1.421x) | 44.10 (1.486x) | 45.30 (1.526x) |
+| toolcall/t4_comment-loader | 29.52 | 41.52 (1.406x) | 42.31 (1.433x) | 44.27 (1.499x) |
+| toolcall/t5_test-step | 29.57 | 40.63 (1.374x) | 43.73 (1.479x) | 45.59 (1.542x) |
+| **geomean, golden** | | 1.330x | 1.203x | 1.370x |
+| **geomean, tool-call** | | 1.410x | 1.481x | **1.543x** |
+
+**Verdict: PASS**, with two caveats:
+
+- **Each cell is one sampled trajectory.** Each K draws a different text. The
+  sampled prose run at K = 1 and K = 3 accepts 1.000 and 0.975, which is the
+  signature of a repetitive continuation. So the golden sampled geomean is
+  noisier than the greedy one.
+- **Host sampling costs about 1.3%** of plain decode (28.9 t/s against 29.3
+  t/s greedy).
+
+### Correctness in the server
+
+| gate | result |
+|---|---|
+| M3, l0-int8 | greedy with `--mtp K` against `--mtp 0`, 256 ids, 39 prompts, K = 1, 2, 3: **0 divergences**. Identity, as plan 8b's bitwise M2 predicted. |
+| M3, l0 | the same run on l0: **0 divergences** |
+| RF1 on the card | a run truncated inside an accepted burst, then continued, equals the plain run (96 ids, 3 prompts, both backends) |
+| M5 | the same greedy K = 3 run twice: ids and the final logits row bitwise, on both backends |
+| M4, host | `spec_accept_test`: 1e6 draws of the full procedure, chi-square of the first id against filtered p_0 and of the second against p_1, unfiltered and at top-k 12 / top-p 0.8 / T 0.7. p-values 0.61, 0.62, 0.38, 0.10 (bar 0.01). One-candidate and q(d) = 0 guards. Seeded reproducibility. |
+| M4, card | a seeded sampled K = 3 run, twice: bitwise (3 prompts, both backends) |
+| server | `mtp_server_test`: EOS, stop strings and `max_tokens` inside a burst, and a streamed tool call in bursts of 1-4. Byte-identical to `--mtp 0` under 4 burst patterns, and the engine is left at the same position. |
+| M5, spec 7 C2 with MTP on | **pending** plan 7c's merge. `prefix_gpu_test` lives on `spec7c-server-prefix-cache` and loads no head. The merge adds an argv[6] = K there: `loader::load(..., K > 0)` and `EngineAdapter(eng, vocab, K)`. Then one command: `build/tests/prefix_gpu_test "$SNAP" tests/golden/prompts l0-int8 1 0 3`. |
+
 ## Correctness
 
 Numerics are gated, not eyeballed. The full protocol is in
