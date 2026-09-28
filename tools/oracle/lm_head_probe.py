@@ -119,6 +119,26 @@ def kl_filtered(pi, pp, qi, qp):
     return kl, bad
 
 
+def missing_mass(pi, pp, qi, qp):
+    """p's mass on the ids p keeps and q does not (0 where the supports agree)."""
+    m = pi[:, :, None] == qi[:, None, :]
+    qv = (m * qp[:, None, :]).sum(-1)
+    return torch.where((pp > 0) & (qv <= 0), pp, torch.zeros_like(pp)).sum(1)
+
+
+def top_diag(r, q):
+    """Where the top-20 sets differ: how many ids, the best ref rank that q drops, and the
+    reference's own logit gap between its rank 20 and rank 21 (how close the boundary was)."""
+    sv, si = torch.topk(r, TOPN + 1, dim=1)
+    t_q = torch.topk(q, TOPN, dim=1).indices
+    kept = (si[:, :TOPN, None] == t_q[:, None, :]).any(2)           # ref top-20 id also in q's top-20
+    ndiff = TOPN - kept.sum(1)
+    ranks = torch.arange(1, TOPN + 1).expand(kept.shape)
+    worst = torch.where(~kept, ranks, torch.full_like(ranks, 10**6)).min(1).values
+    worst[ndiff == 0] = 0
+    return ndiff, worst, sv[:, TOPN - 1] - sv[:, TOPN]
+
+
 def kl_full(ref, qnt, vocab_used, temp, rows=32):
     out = []
     for a in range(0, ref.shape[0], rows):
@@ -140,10 +160,17 @@ def row_metrics(ref: torch.Tensor, qnt: torch.Tensor, vocab_used: int, samplings
     t_q = torch.topk(q, TOPN, dim=1).indices.sort(1).values
     out = {"cos": cos, "argmax_ref": am_r, "argmax_q": am_q, "near_tie": near_tie & (am_r != am_q),
            "gap": gap, "top20_equal": (t_r == t_q).all(1)}
+    out["top20_ndiff"], out["top20_worst_rank"], out["gap20"] = top_diag(r, q)
+    # control: the SAME reference with only its output rounded to bf16 (what a bf16-out
+    # kernel would hand the sampler); a noise floor for the top-20 and support numbers
+    out["ctrl_top20_equal"] = (torch.topk(rb, TOPN, dim=1).indices.sort(1).values == t_r).all(1)
     for name, sp in samplings.items():
         pi, pp = filt(ref, vocab_used, **sp)
         qi, qp = filt(qnt, vocab_used, **sp)
         out[f"kl.{name}"], out[f"bad.{name}"] = kl_filtered(pi, pp, qi, qp)
+        out[f"miss.{name}"] = missing_mass(pi, pp, qi, qp)
+        ci, cp = filt(rb, vocab_used, **sp)
+        out[f"ctrlbad.{name}"] = kl_filtered(pi, pp, ci, cp)[1]
         out[f"klfull.{name}"] = kl_full(ref, qnt, vocab_used, sp["temp"])
     return out
 
@@ -156,13 +183,24 @@ def summarise(m: dict, samplings: dict) -> dict:
          "argmax_mismatch": int(mis.sum()), "argmax_mismatch_near_tie": int(m["near_tie"].sum()),
          "argmax_mismatch_gaps": [float(g) for g in m["gap"][mis]],
          "top20_equal": int(m["top20_equal"].sum()), "top20_equal_pct": 100.0 * float(m["top20_equal"].float().mean())}
+    tm = ~m["top20_equal"]
+    if bool(tm.any()):
+        nd, wr, g20 = m["top20_ndiff"][tm], m["top20_worst_rank"][tm], m["gap20"][tm]
+        d["top20_mismatch"] = {"ndiff_hist": {int(k): int((nd == k).sum()) for k in nd.unique()},
+                               "worst_rank_hist": {int(k): int((wr == k).sum()) for k in wr.unique()},
+                               "ref_gap20_max": float(g20.max()), "ref_gap20_median": float(g20.median()),
+                               "ref_gap20_all_rows_median": float(m["gap20"].median())}
+    d["ctrl_bf16out_top20_equal_pct"] = 100.0 * float(m["ctrl_top20_equal"].float().mean())
     for name in samplings:
         kl, bad, kf = m[f"kl.{name}"], m[f"bad.{name}"], m[f"klfull.{name}"]
         d[name] = {"kl_mean": float(kl.mean()), "kl_p99": float(torch.quantile(kl.clamp_max(1e300), 0.99)),
                    "kl_max": float(kl.max()), "support_mismatch": int(bad.sum()),
                    "kl_mean_finite": float(kl[~bad].mean()) if bool((~bad).any()) else None,
                    "klfull_mean": float(kf.mean()), "klfull_p99": float(torch.quantile(kf, 0.99)),
-                   "klfull_max": float(kf.max())}
+                   "klfull_max": float(kf.max()),
+                   "missing_mass_max": float(m[f"miss.{name}"].max()),
+                   "missing_mass_on_mismatch": [float(x) for x in m[f"miss.{name}"][bad]],
+                   "ctrl_bf16out_support_mismatch": int(m[f"ctrlbad.{name}"].sum())}
     return d
 
 
