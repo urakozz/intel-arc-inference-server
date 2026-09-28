@@ -151,9 +151,15 @@ int main(int argc, char** argv) {
   // Nothing else in the walk depends on the checkpoint, so if this ever fires
   // on one checkpoint and not the other, the swap is not one-for-one any more
   // and the reason belongs in the message, not in a widened number.
-  CHECK_EQ(cap.modules.size(), size_t(19));
+  // Spec 10 (plan 10b): decode attention v2 is ONE module (attn_decode_v2 and
+  // attn_reduce_v2 share attn_v2_M1_T32), so the v2 walk has 18; the kernel count is
+  // unchanged (two launches per FA layer either way).
   // Spec 9: the int8 head (`--lm-head int8`) is the same one-for-one swap, to
-  // `gemv_i8w_M1_K5120_N248320`, so the count stays 19 on every head form.
+  // `gemv_i8w_M1_K5120_N248320`, so the count stays 19 (v1) / 18 (v2) on every head form.
+  const bool attn_v2 = runtime::decode_attn() == runtime::DecodeAttn::V2;
+  std::printf("decode attention: %s\n", runtime::decode_attn_name(runtime::decode_attn()));
+  CHECK_EQ(cap.modules.size(), size_t(attn_v2 ? 18 : 19));
+  CHECK_EQ(cap.modules.count(attn_v2 ? "attn_v2_M1_T32" : "attn_decode_M1_L16384_B64"), size_t(1));
   {
     const model::WeightKind kind =
         m.linears.at({loader::kTopLevel, model::LinearId::LmHead}).kind;
