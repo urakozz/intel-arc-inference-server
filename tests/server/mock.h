@@ -120,6 +120,26 @@ struct MockEngine : server::EngineIface {
 
   uint32_t max_len() override { return 1024; }
   uint32_t pos() override { return static_cast<uint32_t>(last_prompt.size() + at); }
+
+  // Spec 8 (plan 8c): a scripted speculative engine. With mtp > 0, step_many()
+  // returns the next `bursts[i % bursts.size()]` ids of the script (clamped to
+  // 1..mtp + 1), and truncate_to() rewinds `at`; every truncation is recorded.
+  uint32_t mtp = 0;
+  std::vector<uint32_t> bursts{4};
+  size_t burst_calls = 0;
+  std::vector<uint32_t> truncations;
+  uint32_t mtp_k() override { return mtp; }
+  std::vector<uint32_t> step_many(const server::Sampling& s) override {
+    uint32_t n = bursts[burst_calls++ % bursts.size()];
+    n = std::max<uint32_t>(1, std::min<uint32_t>(n, mtp + 1));
+    std::vector<uint32_t> out;
+    for (uint32_t i = 0; i < n; ++i) out.push_back(step(s));
+    return out;
+  }
+  void truncate_to(uint32_t p) override {
+    truncations.push_back(p);
+    at = p - last_prompt.size();
+  }
 };
 
 // Spec 7 (plan 7c): an engine with a real session for the prefix cache tests. The state is
