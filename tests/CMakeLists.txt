@@ -343,6 +343,16 @@ add_dependencies(gemv_bf16_test kernel_gemv_bf16_M1_K5120_N128
   kernel_gemv_bf16_M1_K5120_N128_C16_S16 kernel_gemv_bf16_M1_K5120_N248320)
 add_test(NAME gemv_bf16_test COMMAND gemv_bf16_test)
 
+# Spec 9 (plan 9b Task 2): the int8 lm_head GEMV at its real shape, M = 1 and 4, against
+# an fp64 reference; prints the launch's GB/s.
+add_executable(gemv_i8w_test kernels/gemv_i8w_test.cc)
+target_include_directories(gemv_i8w_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+target_link_libraries(gemv_i8w_test PRIVATE b70_l0)
+b70_target_kernel_dir(gemv_i8w_test)
+add_dependencies(gemv_i8w_test kernel_gemv_i8w_M1_K5120_N248320 kernel_gemv_i8w_M4_K5120_N248320)
+add_test(NAME gemv_i8w_test COMMAND gemv_i8w_test)
+set_tests_properties(gemv_i8w_test PROPERTIES TIMEOUT 900)
+
 add_executable(prep_test kernels/prep_test.cc)
 target_include_directories(prep_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(prep_test PRIVATE b70_l0)
@@ -454,7 +464,8 @@ add_dependencies(kernel_table_test
   kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K6144_N5120_S4_L0
   kernel_gemv_M1_K5120_N34816_S8_L0 kernel_gemv_M1_K17408_N5120_S4_L0
   kernel_gemv_M1_K5120_N14336_S2_L0 kernel_gemv_M1_K5120_N248320_S1_L1
-  kernel_gemv_bf16_M1_K5120_N128_C16_S16 kernel_gemv_bf16_M1_K5120_N248320)
+  kernel_gemv_bf16_M1_K5120_N128_C16_S16 kernel_gemv_bf16_M1_K5120_N248320
+  kernel_gemv_i8w_M1_K5120_N248320)
 add_test(NAME kernel_table_test COMMAND kernel_table_test)
 
 # Every decode allocation, sized from the model constants: the two byte totals
@@ -530,7 +541,8 @@ set(B70_DECODE_LIST_KERNELS
   kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K5120_N14336_S2_L0
   kernel_gemv_M1_K6144_N5120_S4_L0 kernel_gemv_M1_K5120_N34816_S8_L0
   kernel_gemv_M1_K17408_N5120_S4_L0 kernel_gemv_M1_K5120_N248320_S1_L1
-  kernel_gemv_bf16_M1_K5120_N128_C16_S16 kernel_gemv_bf16_M1_K5120_N248320)
+  kernel_gemv_bf16_M1_K5120_N128_C16_S16 kernel_gemv_bf16_M1_K5120_N248320
+  kernel_gemv_i8w_M1_K5120_N248320)
 
 # The captured decode list, replayed: spec §8.7's determinism proof and the
 # acceptance for every kernel in plan 3. Needs the real checkpoint and a B70
