@@ -76,6 +76,13 @@ const FusedLinear& lm_head_int4() {
   return r;
 }
 
+// Spec 9: the int8 `lm_head` - quantised from the bf16 tensor at load, 1.272 GB.
+const FusedLinear& lm_head_int8() {
+  static const FusedLinear r = {LinearId::LmHead, {5120, 248320, 1, 0}, WeightKind::Int8,
+                                Fuse::Single,     {"lm_head"},          0};
+  return r;
+}
+
 std::vector<FusedLinear> pick(std::initializer_list<LinearId> ids) {
   std::vector<FusedLinear> v;
   v.reserve(ids.size());
@@ -152,6 +159,7 @@ const FusedLinear& Qwen35::linear(LinearId id) {
 }
 
 const FusedLinear& Qwen35::lm_head(WeightKind kind) {
+  if (kind == WeightKind::Int8) return lm_head_int8();
   return kind == WeightKind::Int4 ? lm_head_int4() : linear(LinearId::LmHead);
 }
 

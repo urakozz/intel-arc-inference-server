@@ -35,6 +35,7 @@ uint16_t u16_at(const std::vector<uint8_t>& b, size_t off) {
 }  // namespace
 
 void check_mtp(l0::Context& ctx, const std::string& arg);
+void check_lm_int8(l0::Context& ctx, const std::string& arg);
 
 int main(int argc, char** argv) {
   const std::string arg = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
@@ -238,6 +239,7 @@ int main(int argc, char** argv) {
   std::printf("main model OK (%.1f s load)\n", m.report.seconds);
   }
   check_mtp(ctx, arg);
+  check_lm_int8(ctx, arg);
   std::printf("load_checkpoint_test OK\n");
   return 0;
 }
@@ -321,4 +323,47 @@ void check_mtp(l0::Context& ctx, const std::string& arg) {
            1.0f + common::bf16_to_f32(src(L + "self_attn.k_norm.weight")[255]));
   std::printf("mtp head OK: %zu tensors, %.3f GB checkpoint, %.3f GB device\n",
               m.report.mtp_tensors, m.report.mtp_checkpoint_bytes / 1e9, m.report.mtp_bytes / 1e9);
+}
+
+// Spec 9 §3 (plan 9b Task 1): `--lm-head int8` - the bf16 head quantised on the host at
+// load. Bytes derived: 5120 x 248320 int8 = 1 271 398 400, plus 248320 fp32 scales =
+// 993 280. Rows read back against a host quantisation of the mmapped source, at tiles
+// that cross the first and last n-tile and a K-block edge; the quantisation time is
+// printed and held to spec 9 §3's 10 s.
+void check_lm_int8(l0::Context& ctx, const std::string& arg) {
+  loader::LoadedModel m =
+      loader::load(ctx, arg, 16384, /*mtp=*/false, loader::LmHeadForm::Int8);
+  const loader::DeviceWeight& lh = m.linears.at({loader::kTopLevel, model::LinearId::LmHead});
+  CHECK(lh.kind == model::WeightKind::Int8);
+  CHECK_EQ(lh.shape.K, uint32_t(5120));
+  CHECK_EQ(lh.shape.N, uint32_t(248320));
+  CHECK_EQ(lh.shape.S, uint32_t(1));
+  CHECK_EQ(m.report.lm_head_bytes, size_t(1271398400) + size_t(993280));
+  CHECK_EQ(lh.mem.size(), size_t(1271398400));
+  CHECK(lh.scales);
+  CHECK_EQ(lh.scales->size(), size_t(993280));
+  CHECK_EQ(m.report.unconsumed, size_t(0));
+  std::printf("lm_head int8: %.3f GB, host quantisation %.3f s\n", m.report.lm_head_bytes / 1e9,
+              m.report.lm_head_quant_seconds);
+  CHECK(m.report.lm_head_quant_seconds > 0.0 && m.report.lm_head_quant_seconds < 10.0);
+
+  const std::string snap = loader::resolve_snapshot(arg);
+  loader::SafetensorsSet set(snap);
+  const loader::LinearSrc src = loader::LinearSrc::classify(set, "lm_head");
+  const uint32_t K = 5120, N = 248320;
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  size_t diff = 0;
+  for (uint32_t n : {0u, 1u, 15u, 16u, 12345u, N - 17, N - 1}) {
+    std::vector<int8_t> want(K);
+    const float s = loader::quantise_row_int8(src.weight + size_t(n) * K, K, want.data());
+    float sgot = 0;
+    imm.copy(&sgot, lh.scales->as<float>() + n, 4);
+    CHECK_EQ(sgot, s);
+    for (uint32_t k : {0u, 15u, 16u, 2047u, K - 1}) {
+      int8_t got = 0;
+      imm.copy(&got, lh.mem.as<int8_t>() + loader::int8_tiled_index(K, k, n), 1);
+      diff += got != want[k];
+    }
+  }
+  CHECK_EQ(diff, size_t(0));
 }

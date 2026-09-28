@@ -232,6 +232,8 @@ const char* id_name(model::LinearId id) {
 // throws by name if a linear does not fit what it was given, which is what
 // turns a mis-sized buffer into a message instead of a heap overrun.
 struct Staging {
+  std::vector<int8_t> i8;           // spec 9: the int8 lm_head, tiled (lm_head_int8.h)
+  std::vector<float> i8_scales;     // its fp32 row scales
   std::vector<uint32_t> i4;
   std::vector<uint16_t> i4_scales;
   std::vector<uint16_t> bf_src;
@@ -346,6 +348,24 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
     if (sh.layout == 0)
       scales = std::make_unique<l0::Mem>(
           upload(ctx, imm, st.i4_scales.data(), scale_elems * sizeof(uint16_t)));
+    return {std::move(weight), std::move(scales), sh, fl.kind};
+  }
+
+  if (fl.kind == model::WeightKind::Int8) {
+    // Spec 9 §3: only `lm_head`, one bf16 part, quantised on the host into the
+    // tiled int8 layout gemv_i8w reads plus an fp32 scale per row.
+    if (fl.id != model::LinearId::LmHead || srcs.size() != 1 || n_sum != sh.N)
+      throw std::runtime_error(id + ": int8 is implemented for the unpadded lm_head only");
+    if (size_t(sh.N) * sh.K > st.i8.size() || sh.N > st.i8_scales.size())
+      throw std::runtime_error(id + ": exceeds the int8 staging buffer");
+    const auto q0 = std::chrono::steady_clock::now();
+    quantise_int8_tiled(srcs[0].weight, sh.K, sh.N, st.i8.data(), st.i8_scales.data());
+    rep.lm_head_quant_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - q0).count();
+    rep.lm_head_bytes += lm_head_int8_bytes(sh.K, sh.N);
+    l0::Mem weight = upload(ctx, imm, st.i8.data(), size_t(sh.N) * sh.K);
+    auto scales = std::make_unique<l0::Mem>(
+        upload(ctx, imm, st.i8_scales.data(), size_t(sh.N) * sizeof(float)));
     return {std::move(weight), std::move(scales), sh, fl.kind};
   }
 
@@ -544,7 +564,7 @@ size_t LoadReport::total() const {
 }
 
 LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len,
-                 bool mtp) {
+                 bool mtp, LmHeadForm lm_form) {
   const auto t0 = std::chrono::steady_clock::now();
   const std::string snap = resolve_snapshot(snapshot_or_repo);
 
@@ -582,10 +602,16 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // cross-check, the shape and layout the capture binds - follows from this
   // one line, so a checkpoint that packs the head and one that does not are
   // the same code path with a different row.
+  const bool ckpt_int4 = LinearSrc::classify(set, "lm_head").kind == WKind::Int4;
+  // Spec 9: the int8 form is made from the bf16 tensor, so it needs one.
+  if (lm_form == LmHeadForm::Int8 && ckpt_int4)
+    throw std::runtime_error(
+        "--lm-head int8 quantises a bf16 lm_head at load; this checkpoint ships it int4");
   const model::FusedLinear& lm_row = Qwen35::lm_head(
-      LinearSrc::classify(set, "lm_head").kind == WKind::Int4 ? model::WeightKind::Int4
-                                                              : model::WeightKind::Bf16);
+      ckpt_int4 ? model::WeightKind::Int4
+                : (lm_form == LmHeadForm::Int8 ? model::WeightKind::Int8 : model::WeightKind::Bf16));
   const bool lm_int4 = lm_row.kind == model::WeightKind::Int4;
+  const bool lm_int8 = lm_row.kind == model::WeightKind::Int8;
 
   // embed_tokens is uploaded row-major and verbatim: it is gathered one row per
   // token, so no tiling helps and the mmap is already the canonical layout.
@@ -639,7 +665,13 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   st.i4_scales.resize(max_i4_scales);
   st.bf_src.resize(size_t(ab.N) * ab.K);
   st.bf_tiled.resize(std::max(size_t(ab.N) * ab.K,
-                              lm_int4 ? size_t(0) : size_t(lm_row.shape.N) * lm_row.shape.K));
+                              lm_row.kind == model::WeightKind::Bf16
+                                  ? size_t(lm_row.shape.N) * lm_row.shape.K
+                                  : size_t(0)));
+  if (lm_int8) {
+    st.i8.resize(size_t(lm_row.shape.N) * lm_row.shape.K);
+    st.i8_scales.resize(lm_row.shape.N);
+  }
 
   m.layer_small.reserve(layers.size());
   for (const model::LayerDesc& ld : layers) {
@@ -670,6 +702,16 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
 
   const LoadReport& r = m.report;
   const double gb = 1e9;
+  // Spec 9 §3: the form, and for int8 the host quantisation time.
+  char lm_buf[160];
+  if (lm_int8)
+    std::snprintf(lm_buf, sizeof lm_buf,
+                  "int8 per row + fp32 scales, quantised at load from bf16 in %.0f ms",
+                  r.lm_head_quant_seconds * 1e3);
+  else
+    std::snprintf(lm_buf, sizeof lm_buf, "%s, by checkpoint content",
+                  lm_int4 ? "int4 g64" : "bf16");
+  const std::string lm_desc = lm_buf;
   char mtp_buf[160];
   std::snprintf(mtp_buf, sizeof mtp_buf, "MTP head: %zu bf16 tensors, %.3f GB in the checkpoint",
                 r.mtp_tensors, r.mtp_checkpoint_bytes / 1e9);
@@ -695,7 +737,10 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // expected side, exactly like the padding and the fp32 widening - the check
   // stays at 2%, and the two sides move together or the load fails.
   const double lm_adjust =
-      lm_int4 ? double(kLmHeadInt4Bytes) - double(kLmHeadBf16Bytes) : 0.0;
+      lm_int4   ? double(kLmHeadInt4Bytes) - double(kLmHeadBf16Bytes)
+      : lm_int8 ? double(lm_head_int8_bytes(lm_row.shape.K, lm_row.shape.N)) -
+                      double(kLmHeadBf16Bytes)
+                : 0.0;
   const double expected = kDocW + double(r.pad_bytes) + double(widen.total()) + lm_adjust;
   const double delta = (double(per_token) - expected) / expected;
   m.report.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -710,7 +755,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       "  int4        %13zu B  %7.3f GB\n"
       "  scales      %13zu B  %7.3f GB\n"
       "  bf16_linear %13zu B  %7.3f GB   (a‖b real rows; %.3f GB with padding)\n"
-      "  lm_head     %13zu B  %7.3f GB   (%s, by checkpoint content)\n"
+      "  lm_head     %13zu B  %7.3f GB   (%s)\n"
       "  small       %13zu B  %7.3f GB   (per-layer blocks + final norm)\n"
       "  pad         %13zu B  %7.3f GB\n"
       "  read/token  %13zu B  %7.3f GB\n"
@@ -728,7 +773,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       r.unconsumed ? " incl. " : "", unconsumed.c_str(), scan.subnormal_scales, m.linears.size(),
       m.layer_small.size(), r.int4_bytes, r.int4_bytes / gb, r.scale_bytes, r.scale_bytes / gb,
       r.bf16_linear_bytes, r.bf16_linear_bytes / gb, (r.bf16_linear_bytes + r.pad_bytes) / gb,
-      r.lm_head_bytes, r.lm_head_bytes / gb, lm_int4 ? "int4 g64" : "bf16",
+      r.lm_head_bytes, r.lm_head_bytes / gb, lm_desc.c_str(),
       small_resident, small_resident / gb,
       r.pad_bytes, r.pad_bytes / gb, per_token, per_token / gb, r.embed_bytes, r.embed_bytes / gb,
       rope_bytes, rope_bytes / gb, r.mtp_bytes, r.mtp_bytes / gb,
