@@ -46,16 +46,44 @@ default 32), so a turn at 60k tokens of history reaches its first token in 1.23 
 of re-prefilling for 45 s, and 1.58 s when a side request evicted the card in between.
 
 Checkpoint is `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`, int4 weights with
-group size 64, bf16 activations. vLLM serves the exact same files, which is what
-makes the comparison fair. Full protocol and every row is in
+group size 64, bf16 activations (why g64: see below). vLLM serves the exact same
+files, which is what makes the comparison fair. Full protocol and every row is in
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Scope
 
-One model family and one math path, on purpose. Qwen3.8-27B is a hybrid: 48
-gated delta net layers and 16 full attention layers. Everything here is built
-around that shape and around W4A16. Specialisation is the whole strategy, since
-a general engine cannot hardcode the things this one hardcodes.
+One model family and one math path, on purpose. **So far the engine is built and
+tuned for one model only: the dense Qwen3.8-27B** (no mixture of experts). It is a
+hybrid: 48 gated delta net layers and 16 full attention layers. Everything here
+is built around that shape and around W4A16: the kernel shapes, the captured
+decode list and the tuning tables are that model's. Other checkpoints of the
+same architecture load, but nothing is tuned for them, and MoE models (the next
+candidate is K2-Horizon) are not supported yet. Specialisation is the whole
+strategy, since a general engine cannot hardcode the things this one hardcodes.
+
+## The checkpoint, and why group size 64
+
+The engine is developed and gated against one checkpoint I quantised myself:
+[`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`](https://huggingface.co/urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ),
+AutoRound, int4 weights with one scale per 64 input channels, bf16 activations,
+GPTQ packing; the file keeps `lm_head` and the MTP head in bf16.
+
+Why 64 rather than the common 128, or a per-channel scale:
+
+- **Accuracy.** Finer groups track the weights' outliers better. Measured on
+  this model, a per-channel int4 checkpoint (AutoRound on the Hadamard-rotated
+  model) had about three times the logit error of g64: 22.9 % against 7.77 %
+  (docs/probe-w4a8-2026-09-23.md §15.2).
+- **Decode is bandwidth bound**, and g64 costs only a few percent more bytes
+  than g128 (one fp16 scale per 64 weights), so the finer grid is nearly free
+  where the time actually goes.
+- **Prefill speed does not depend on the group size any more.** Coarser groups
+  would help a mixed int4 x int8 matmul (g128 1.22x, g256 1.43x, per channel
+  1.75x over bf16, §13), but spec 5 does better without touching the file: it
+  rebuilds per-channel int8 weights from the g64 checkpoint on the fly and runs
+  int8 x int8 (docs/17-int8-prefill.md). So the checkpoint keeps g64's accuracy
+  and prefill still gets the int8 matrix engines.
+- **vLLM loads the same file**, which keeps the comparison above byte for byte.
 
 ## How it works
 
@@ -142,9 +170,16 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build
 
-./build/src/cli/b70-decode <checkpoint> --bench --pp 4096 --tg 256
-./build/src/cli/b70-serve  <checkpoint>          # OpenAI compatible endpoint
+# the engine never downloads; fetch the checkpoint into the Hugging Face cache once
+uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
+
+./build/src/cli/b70-decode urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --bench --pp 4096 --tg 256
+./build/src/cli/b70-serve  urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ   # OpenAI compatible endpoint
 ```
+
+Both CLIs take the repo id and resolve it through the local cache
+(`$HF_HOME` or `~/.cache/huggingface`, revision from `refs/main`); a snapshot
+directory path works too.
 
 `tools/box.sh` builds and tests on a remote machine over ssh, which is how I
 work day to day. Set `BOX=user@host` before using it.
