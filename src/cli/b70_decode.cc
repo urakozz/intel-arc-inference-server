@@ -115,6 +115,9 @@ void usage() {
        "  --pp-backend B  --pp or --prefill: the GEMM backend, sycl-tla (spec 2), l0 (spec 2.1,\n"
        "                 every GEMM on the Level Zero list) or l0-int8 (spec 5, l0 with every\n"
        "                 int4 linear on the rotated int8 path). Default: l0-int8.\n"
+      "  --lm-head H    bf16 (default: the checkpoint's own head, byte-matched with vLLM) or\n"
+      "                 int8 (spec 9: quantised per row at load). An int8 run's bench rows\n"
+      "                 carry `int8-head` after the sha.\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -592,6 +595,8 @@ int run(int argc, char** argv) {
   bool have_pp = false, have_pp_chunk = false;
   std::string pp_backend_arg;
   bool have_pp_backend = false;
+  // Spec 9 §3: bf16 by default, so BENCHMARKS rows stay byte-matched with vLLM.
+  loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -642,6 +647,10 @@ int run(int argc, char** argv) {
     } else if (a == "--repeats") {
       repeats = parse_u32("--repeats", value(i, "--repeats"));
       have_repeats = true;
+    } else if (a == "--lm-head") {
+      const std::string v = value(i, "--lm-head");
+      if (!loader::parse_lm_head_form(v, lm_head))
+        throw std::runtime_error("--lm-head expects bf16 or int8, got '" + v + "'");
     } else if (!a.empty() && a[0] == '-') {
       usage();
       throw std::runtime_error("unknown option '" + a + "'");
@@ -760,7 +769,7 @@ int run(int argc, char** argv) {
 
   loader::LoadedModel model = [&] {
     StdoutToStderr redirect;
-    return loader::load(ctx, path, max_len);
+    return loader::load(ctx, path, max_len, /*mtp=*/false, lm_head);
   }();
 
   // --profile forks here: it replays an instrumented capture and has to reset
@@ -871,14 +880,16 @@ int run(int argc, char** argv) {
   // sha in a recorded measurement.
   const char* sha = std::getenv("B70_GIT_SHA");
   if (sha == nullptr || *sha == '\0') sha = "unknown";
-  std::printf("| b70-decode %s | %u | %u | %.2f | %.2f |\n", sha, depth, tg, eng.last_tok_per_s(),
-              ms_per_token);
+  // Spec 9: an int8-head row names its head; a bf16 row is byte-identical to before.
+  const char* head_tag = lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "";
+  std::printf("| b70-decode %s%s | %u | %u | %.2f | %.2f |\n", sha, head_tag, depth, tg,
+              eng.last_tok_per_s(), ms_per_token);
   // The tg row above is byte-identical to what it always was, and the pp row
   // is a SECOND line rather than extra columns on it, so every existing parser
   // of docs/BENCHMARKS.md's table keeps working (interfaces.md's CLI contract;
   // tools/bench_decode.sh --pp reads both).
   if (have_pp)
-    std::printf("| b70-decode %s %s pp | %u | %u | %.1f | %.2f |\n", sha,
+    std::printf("| b70-decode %s%s %s pp | %u | %u | %.1f | %.2f |\n", sha, head_tag,
                 runtime::prefill_backend_name(eng.prefill_backend()), depth,
                 pp_chunk ? pp_chunk : runtime::PrefillScratch::kC, ingest_ms,
                 ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);

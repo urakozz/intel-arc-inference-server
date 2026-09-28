@@ -13,10 +13,17 @@
 # (ORACLE_IMAGE, as tools/oracle/run_in_container.sh), with only the output dir
 # and the resolved tokenizer.json mounted.
 # Env: B70_DECODE (default build/src/cli/b70-decode), PYTHON (default python3),
-#      ORACLE_IMAGE.
+#      ORACLE_IMAGE, LM_HEAD (spec 9: bf16 or int8, passed as --lm-head; an int8 run
+#      is saved as <name>.<backend>-i8head.* so it sits beside the bf16-head run).
 set -euo pipefail
 [ $# -eq 4 ] || { echo "usage: $0 <snapshot> <set dir> <out dir> <backend>" >&2; exit 2; }
 SNAP="$1" SET="$2" OUT="$3" BACKEND="$4"
+LM_HEAD="${LM_HEAD:-bf16}"
+case "$LM_HEAD" in
+  bf16) TAG="$BACKEND" ;;
+  int8) TAG="$BACKEND-i8head" ;;
+  *) echo "LM_HEAD must be bf16 or int8, got '$LM_HEAD'" >&2; exit 2 ;;
+esac
 DECODE="${B70_DECODE:-build/src/cli/b70-decode}"
 PY="${PYTHON:-python3}"
 [ -x "$DECODE" ] || { echo "no b70-decode at $DECODE" >&2; exit 2; }
@@ -48,14 +55,14 @@ while read -r name count sha; do
   ids="$SET/$name.ids"
   got=$(sha256sum "$ids" | cut -d' ' -f1)
   [ "$got" = "$sha" ] || { echo "FATAL: $name.ids SHA-256 $got != manifest $sha" >&2; exit 1; }
-  out_ids="$OUT/$name.$BACKEND.ids" out_txt="$OUT/$name.$BACKEND.txt"
+  out_ids="$OUT/$name.$TAG.ids" out_txt="$OUT/$name.$TAG.txt"
   if [ -s "$out_ids" ] && [ -f "$out_txt" ]; then
     echo "[$n] $name: done, skipped"; continue
   fi
   t0=$(date +%s)
-  "$DECODE" "$SNAP" --ids "$ids" --n 192 --prefill --pp-backend "$BACKEND" --max-len 16384 < /dev/null \
-    > "$out_ids.tmp" 2> "$OUT/$name.$BACKEND.log"
+  "$DECODE" "$SNAP" --ids "$ids" --n 192 --prefill --pp-backend "$BACKEND" --max-len 16384 \
+    --lm-head "$LM_HEAD" < /dev/null > "$out_ids.tmp" 2> "$OUT/$name.$TAG.log"
   mv "$out_ids.tmp" "$out_ids"
-  decode "$name.$BACKEND.ids" "$name.$BACKEND.txt" < /dev/null
+  decode "$name.$TAG.ids" "$name.$TAG.txt" < /dev/null
   echo "[$n] $name: $count prompt ids, $(( $(date +%s) - t0 ))s"
 done <<< "$entries"

@@ -116,8 +116,12 @@ bool bf16_finite(uint16_t w) { return (w & 0x7F80u) != 0x7F80u; }
 
 int main(int argc, char** argv) {
   const std::string arg = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
+  // argv[2] (spec 9): the lm_head form, bf16 (the checkpoint's; default) or int8.
+  loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
+  if (argc > 2) CHECK(loader::parse_lm_head_form(argv[2], lm_head));
+  std::printf("lm_head: %s\n", loader::lm_head_form_name(lm_head));
   l0::Context ctx(0);
-  loader::LoadedModel m = loader::load(ctx, arg);
+  loader::LoadedModel m = loader::load(ctx, arg, 16384, /*mtp=*/false, lm_head);
   runtime::DecodeBuffers b(ctx, m.max_len);
   l0::Mem tapmem(ctx, l0::MemKind::Device, kTapBytes);
 
@@ -148,15 +152,17 @@ int main(int argc, char** argv) {
   // on one checkpoint and not the other, the swap is not one-for-one any more
   // and the reason belongs in the message, not in a widened number.
   CHECK_EQ(cap.modules.size(), size_t(19));
+  // Spec 9: the int8 head (`--lm-head int8`) is the same one-for-one swap, to
+  // `gemv_i8w_M1_K5120_N248320`, so the count stays 19 on every head form.
   {
-    const bool lm_int4 =
-        m.linears.at({loader::kTopLevel, model::LinearId::LmHead}).kind ==
-        model::WeightKind::Int4;
-    const char* want = lm_int4 ? "gemv_M1_K5120_N248320_S1_L1" : "gemv_bf16_M1_K5120_N248320";
-    const char* nope = lm_int4 ? "gemv_bf16_M1_K5120_N248320" : "gemv_M1_K5120_N248320_S1_L1";
-    std::printf("lm_head: %s -> module %s\n", lm_int4 ? "int4 g64" : "bf16", want);
-    CHECK_EQ(cap.modules.count(want), size_t(1));
-    CHECK_EQ(cap.modules.count(nope), size_t(0));
+    const model::WeightKind kind =
+        m.linears.at({loader::kTopLevel, model::LinearId::LmHead}).kind;
+    const char* const all[] = {"gemv_M1_K5120_N248320_S1_L1", "gemv_bf16_M1_K5120_N248320",
+                               "gemv_i8w_M1_K5120_N248320"};
+    const size_t pick = kind == model::WeightKind::Int4 ? 0 : kind == model::WeightKind::Bf16 ? 1 : 2;
+    std::printf("lm_head: %s -> module %s\n",
+                pick == 0 ? "int4 g64" : pick == 1 ? "bf16" : "int8", all[pick]);
+    for (size_t i = 0; i < 3; ++i) CHECK_EQ(cap.modules.count(all[i]), size_t(i == pick ? 1 : 0));
   }
 
   l0::Queue q(ctx);
