@@ -29,6 +29,10 @@
 //       [5] split: 1 = PrefixSession's opt-in split_last (the plans above), 0 = the default
 //           (b restores at 3000, f at the block end 2048 and prefills the rest, g splits
 //           the prefill at 3000 with no replay).
+//       [6] K: 0 (default) = no MTP head; K > 0 loads the head (`loader::load(..., true)`)
+//           and builds EngineAdapter with --mtp K (spec 8 M5: C2 with MTP on). The turns
+//           still decode by step(), so the rows compared are the same; what changes is
+//           the engine: prefill fills the head's KV and the snapshots carry it.
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -262,17 +266,18 @@ int main(int argc, char** argv) {
   const uint32_t allowed = argc > 4 ? uint32_t(std::atoi(argv[4]))
                                     : (backend == runtime::PrefillBackend::L0Int8 ? 1u : 0u);
   g_split = argc > 5 && std::atoi(argv[5]) != 0;
+  const uint32_t mtp_k = argc > 6 ? uint32_t(std::atoi(argv[6])) : 0u;
   const Ids L = golden::read_ids(pdir + "/long32k.ids");
   const Ids C = repeat_to(golden::read_ids(pdir + "/code.ids"), 700);
   CHECK(L.size() >= 20300);
 
   l0::Context ctx(0);
-  runtime::Engine eng(ctx, loader::load(ctx, snap, kMaxLen), kMaxLen);
+  runtime::Engine eng(ctx, loader::load(ctx, snap, kMaxLen, mtp_k > 0), kMaxLen);
   eng.set_prefill_backend(backend);
   eng.prepare_prefill();
-  std::printf("prefix_gpu_test: backend %s, near-tie allowance %u, split_last %d\n",
-              runtime::prefill_backend_name(eng.prefill_backend()), allowed, int(g_split));
-  EngineAdapter ad(eng, Qwen35::kVocabUsed);
+  std::printf("prefix_gpu_test: backend %s, near-tie allowance %u, split_last %d, mtp K %u\n",
+              runtime::prefill_backend_name(eng.prefill_backend()), allowed, int(g_split), mtp_k);
+  EngineAdapter ad(eng, Qwen35::kVocabUsed, mtp_k);
   PinnedAlloc alloc(ctx, size_t(6) << 30);
   Rig rig{eng, ad, alloc, l0::CmdList::immediate(ctx)};
 
