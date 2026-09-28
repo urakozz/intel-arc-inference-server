@@ -630,6 +630,23 @@ add_test(NAME flash_long_test COMMAND flash_long_test ${B70_TEST_SNAPSHOT}
   ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids)
 set_tests_properties(flash_long_test PROPERTIES LABELS "checkpoint;prefill"
   SKIP_RETURN_CODE 77 TIMEOUT 3600)
+# Prefill continuation (fix-prefill-continuation): N ids in one prefill call against two
+# calls split at 1..2049 and against M = 1 decode; per-row KV cosine per FA layer, GDN
+# state, last-row logits. Bars in the source.
+add_executable(prefill_split_test prefill/prefill_split_test.cc)
+target_include_directories(prefill_split_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+target_link_libraries(prefill_split_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+if(B70_PREFILL_ENABLED)
+  b70_link_prefill(prefill_split_test)
+endif()
+add_dependencies(prefill_split_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS})
+foreach(b l0 l0-int8)
+  add_test(NAME prefill_split_${b}_test COMMAND prefill_split_test ${B70_TEST_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids ${b})
+  set_tests_properties(prefill_split_${b}_test PROPERTIES LABELS "checkpoint;prefill"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+endforeach()
 # Spec 7 C1 (plan 7b): state and KV snapshots restore bitwise; the block hook.
 add_executable(snapshot_test runtime/snapshot_test.cc)
 target_include_directories(snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/src
