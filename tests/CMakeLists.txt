@@ -1027,7 +1027,10 @@ printf '%s\n' "$out" | grep -qF attn_decode_M1_L65536 ||
   { echo "exit 1, but the missing variant is not named" >&2; exit 1; }
 ]==] cli_reject_maxlen_uncompiled $<TARGET_FILE:b70-decode> ${B70_TEST_SNAPSHOT}
   --bench --depth 64 --max-len 65536)
-set_tests_properties(cli_reject_maxlen_uncompiled PROPERTIES LABELS "checkpoint" TIMEOUT 600)
+# Spec 10: decode attention v2 bakes no MAXLEN, so the missing binary is v1's alone and
+# the test pins B70_DECODE_ATTN=v1 (v1 stays selectable; its guard must keep firing).
+set_tests_properties(cli_reject_maxlen_uncompiled PROPERTIES LABELS "checkpoint" TIMEOUT 600
+  ENVIRONMENT "B70_DECODE_ATTN=v1")
 
 # --- spec 3 T1: tokenizer (host-only; needs the checkpoint's tokenizer.json) ---
 if(B70_TOKENIZER_ENABLED)
