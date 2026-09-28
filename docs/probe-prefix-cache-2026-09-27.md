@@ -134,3 +134,95 @@ few ms per call overlap the host side of the next chunk. The fraction falls with
 because chunks at depth take longer while the copy stays fixed. The step 3 variant
 (copy only at multiples of 4096) was not needed, so it was not measured; the probe has
 it as `--every 4096`.
+
+## 8. S1 and S2, measured (plan 7c)
+
+`tools/probe/probe_prefix_s12.cc`, branch `spec7c-server-prefix-cache` rebased on main at
+b7368b2 (spec 6c's `pf_flash_attn` changes included), Release, `l0-int8`, max_len 131072,
+32 GiB pinned store, device 0 under the GPU lock. It drives the server's request path
+itself (`server::PrefixSession` over `EngineAdapter`, the code `b70-serve` runs, without
+HTTP or the tokenizer); a turn's time is `begin()` until it returns with the first
+generated id pending. History H = `long32k.ids` repeated to 60000 ids; turn A = H + 16
+generated ids; S1 = A + a 1000-id tail (continuation, nothing copied); S2 = the same after a
+300-id side request (restore of A's request-end snapshot: the state and the whole KV,
+3933.2 MB, from the host). One warm-up of each, then 3 runs, every run with its own tail.
+Load average 5.05 at the start, 2.40 at the end (other agents' CPU jobs; one GPU job).
+
+| | runs ms | median ms | bar |
+|---|---|---|---|
+| cold prefill of H (60000 ids) | 45340.1 (one run) | - | - |
+| **S1** time to first token | 1293.4, 1294.8, 1293.3 | **1293.4** | <= 1500: **met** |
+| S1 split: prefill of the tail 1273, store (write-through) 20 | | | |
+| **S2** restore (state + 3933 MB KV, host to device) | 345.2, 344.8, 346.7 | **345.2** | <= 1000: **met** |
+| S2 time to first token (restore + tail + store) | 1635.9, 1635.8, 1638.4 | 1635.9 | - |
+
+The table is PrefixSession's opt-in split (`--split 1`, the last prompt id by a decode
+replay). The default path (no split), same build, load 8.55 to 11.87: **S1 1233.4 ms**
+(1236.7, 1233.4, 1231.9), **S2 restore 347.7 ms** (352.1, 347.7, 345.0), S2 time to first
+token 1581.2 ms; the split costs about 60 ms of S1 (the extra decode replay at 60k).
+
+The same probe on the branch before the rebase (main at f170805, load 1.79 to 1.10)
+measured S1 1504.9 ms (1504.9, 1504.9, 1505.0: 5 ms over the bar) and S2 restore 343.5 ms,
+cold H 51.9 s: the difference is main's spec 6c attention change at depth, not this plan.
+The restore matches §4's derived 319 ms plus the snapshot's partial KV; S1 matches §3's
+1491 ms tail at 60k before 6c.
+
+## 9. C3's machinery on a synthetic opencode-shaped session (plan 7c)
+
+The recorded opencode session (`tests/golden/opencode/session1/`) does not exist yet; the
+C3 verdict on it is **pending the log**. The machinery was proven on a synthetic log
+(`tools/prefix/make_synth_log.py`): opencode's system prompt and tool set, 13 main
+requests resending the growing conversation (tool calls, real source files of this repo
+as tool results) and 2 interleaved side requests (title, summary) diverging at position 0;
+15 requests, 87208 prompt tokens, 86.1% reusable by a perfect prefix cache
+(`analyze_log.py`). Every request greedy, capped at the length the log records.
+`tools/prefix/replay_ab.sh` replays it on `b70-serve` with the cache on and off (same
+build, max_len 131072) and judges each divergence by the tie rule against the cold run
+(`tools/probe/probe_tie_judge`).
+
+Cache on (default, no split) against cache off, load 9.8 to 11.3 (other agents' CPU jobs):
+
+| # | prompt | cached | ttft on s | ttft off s | text | tool calls |
+|---|---|---|---|---|---|---|
+| 1 | 1703 | 0 | 0.946 | 0.906 | equal | 2, equal |
+| 2 | 1792 | 0 | 0.951 | 0.908 | equal | 2, equal |
+| 3 | 3435 | 0 | 1.851 | 1.798 | equal | 1, equal |
+| 4 (side) | 111 | 0 | 0.408 | 0.381 | equal | 0 |
+| 5 | 4982 | 2048 | 1.655 | 2.538 | equal | 1, equal |
+| 6 | 5108 | 4096 | 0.672 | 2.564 | equal | 2, equal |
+| 7 | 7076 | 4096 | 1.715 | 3.598 | equal | 1, equal |
+| 8 | 7931 | 6144 | 1.076 | 3.992 | equal | 1, equal |
+| 9 | 8040 | 6144 | 1.129 | 4.033 | equal | 1, equal |
+| 10 (side) | 98 | 0 | 0.409 | 0.381 | equal | 0 |
+| 11 | 8166 | 6144 | 1.185 | 4.064 | equal | 1, equal |
+| 12 | 8251 | 6144 | 1.533 | 4.424 | equal | 1, equal |
+| 13 | 8336 | 8192 | 0.490 | 4.455 | equal | 0 |
+| 14 | 10153 | 8192 | 1.175 | 5.161 | equal | 0 |
+| 15 | 12026 | 8192 | 2.265 | 6.233 | equal | 0 |
+
+**15/15 equal, every tool call parses with the same name and arguments; time to first
+token summed 17.46 s against 45.44 s (0.38x).** Every restart is a block end, where the
+block-aligned tail prefill reproduces the cold run's chunks, so the outputs are bitwise
+the cold run's. The synthetic history re-renders each answer, so each prompt diverges
+from the previous request at that prompt's last id (`analyze_log.py`: lcp = len - 1 on
+every main request) and the default path falls back to the last block end.
+
+With `--prefix-split-last` (the prompt-end snapshot at len - 1) the same replay restores
+at len - 1 of the previous prompt (cached 1702, 1791, 3434, 4981, ... 10152) and sums
+12.74 s of time to first token, but 4 of 15 requests differ from the cold run. Judged by
+`probe_tie_judge` against the reproduced cold row:
+
+| request @ first differing id | cold top-2 margin | verdict |
+|---|---|---|
+| 7 @ 0 | 0.148 bf16 ulp, cached = runner-up | near-tie, accepted |
+| 8 @ 13 | 0.733 ulp, cached = runner-up | near-tie, accepted |
+| 9 @ 0 | 0.201 ulp, cached = neither top-2 | **mismatch** |
+| 14 @ 11 | 1.483 ulp, cached = runner-up | **mismatch** |
+
+The split puts the last prompt id through decode's kernels, not prefill's, and that is
+enough to flip rows the cold run determines. **The split is therefore opt-in, off by
+default.**
+
+Rerun on the real session once it is recorded (one command, on the box):
+
+    tools/probe/detach.sh ~/c3.log tools/prefix/replay_ab.sh tests/golden/opencode/session1 ~/c3

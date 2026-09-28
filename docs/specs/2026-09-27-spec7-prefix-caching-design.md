@@ -221,3 +221,39 @@ record for the operator's call before 7b.
 - The ~0.7 s short-tail floor itself: measured here, fixed separately. With
   the cache it becomes most of a typical turn's time to first token.
 - MTP: next.
+
+## 8. Amendment: results (plan 7c, 2026-09-28)
+
+Built on branch `spec7c-server-prefix-cache` (rebased on main b7368b2). Records:
+`docs/probe-prefix-cache-2026-09-27.md` §8 (S1, S2) and §9 (C3 on a synthetic session),
+`docs/BENCHMARKS.md` "Prefix caching (spec 7)".
+
+- **As built.** `src/server/prefix_cache.{h,cc}`: `PrefixCache` (the store and `plan()`)
+  and `PrefixSession` (the request path over `EngineIface`); `b70-serve
+  --prefix-cache-gb N` (default 32, one pinned host allocation carved first-fit; `0` =
+  exactly the old server). A restore loads whole store entries, so `kv_from` is the
+  common prefix with the resident session rounded down to the entry start (at most one
+  extra block, ~10 ms). Missing blocks of a chain (positions crossed during generation)
+  are stored at the next store call, so a request-end snapshot's KV stays below one block.
+- **Review Focus 5 / C4 "prefills one token".** Holding a snapshot at `len - 1` needs the
+  last prompt id fed separately. Built as an opt-in (`--prefix-split-last`, chat only):
+  the tail prefills to `len - 1` and the last id goes through one decode replay. It is
+  **off by default** because it is not the cold run's arithmetic: `golden_server_test`
+  failed on `cjk` with it on (completions therefore never split), and on the synthetic C3
+  replay 2 of its 4 divergences fail the tie rule. Default: the prompt-end snapshot is at
+  `len`, restarts are `<= len - 1`, so the same prompt again restores at the block end below
+  it. Mock tests cover both paths.
+- **C1** (plan 7b) as recorded there. **C4**: `prefix_cache_test`, `prefix_server_test`
+  pass. **C2**: `prefix_gpu_{l0,int8}_test` (default) and `prefix_gpu_split_{l0,int8}_test`:
+  every sequence a-f passes on l0-int8 both ways and on l0 with the split; **on l0 without
+  the split, sequence e (restore at 5064 after a side request) misses one row: row 30 of
+  32, cached 1756 = the cold run's runner-up at 0.108 bf16 ulp, a near-tie the l0 rule
+  (allowance 0) does not accept.** Deterministic (twice). For the operator: accept the
+  near-tie allowance on l0 for C2, or not.
+- **C3**: the recorded opencode session does not exist yet; **pending the log**. On a
+  synthetic opencode-shaped log (15 requests, 2 side), default path: 15/15 bitwise equal to
+  the cold server, all tool calls equal, time to first token 17.46 s vs 45.44 s.
+- **C5**: full suite 104/105 (2026-09-28, load 1.0): only `prefix_gpu_l0_test` fails, the l0 near-tie above; every pre-existing registration passes unchanged.
+- **S1 met**: 1233.4 ms (default), 1294.0 ms (split), bar 1500. **S2 met**: restore
+  347.7 ms of a 3933 MB KV + the state, bar 1000; time to first token 1581.2 ms. **S3**
+  (7b): 2.03%.
