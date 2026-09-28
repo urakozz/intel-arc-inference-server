@@ -517,6 +517,169 @@ int run_arms(int argc, char** argv) {
   return all_ok ? 0 : 1;
 }
 
+// ============================================================================
+// ab: plan 10b Task 3 - the captured decode step with v1 against v2 at depth
+// ============================================================================
+// probe_decode_attn ab <snapshot> <ids> --max-len L [--depths a,b] [--steps 16]
+//                      [--rounds 3] [--M 1,2,3,4]
+// Loads at max_len L, prefills the ids (tiled) to the deepest depth, captures the
+// plain decode list at each M twice - B70_DECODE_ATTN=v1, then v2 - over the same
+// buffers, and per (depth, M): 2 warm-up steps per arm, then `rounds` interleaved pairs
+// (the order alternates per round) of `steps` steps each, pos rewound to the depth
+// before every step; ms/step = the mean wall of a chunk's steps; the median over
+// rounds, and the median paired ratio v1 / v2.
+int run_ab(int argc, char** argv) {
+  if (argc < 4) throw std::runtime_error("ab <snapshot> <ids> --max-len L ...");
+  const std::string snap = argv[2], ids_path = argv[3];
+  uint32_t L = 131072, steps = 16, rounds = 3;
+  std::vector<uint32_t> depths = {4096, 32768, 65536, 130816}, Ms = {1};
+  for (int i = 4; i + 1 < argc; i += 2) {
+    const std::string a = argv[i];
+    if (a == "--max-len") L = uint32_t(std::stoul(argv[i + 1]));
+    else if (a == "--depths") depths = parse_list(argv[i + 1]);
+    else if (a == "--steps") steps = uint32_t(std::stoul(argv[i + 1]));
+    else if (a == "--rounds") rounds = uint32_t(std::stoul(argv[i + 1]));
+    else if (a == "--M") Ms = parse_list(argv[i + 1]);
+    else throw std::runtime_error("unknown flag " + a);
+  }
+  const uint32_t deepest = *std::max_element(depths.begin(), depths.end());
+  if (deepest + 4 > L) throw std::runtime_error("depth + 4 exceeds max_len");
+  std::vector<uint32_t> base;
+  {
+    std::ifstream f(ids_path);
+    uint32_t v;
+    while (f >> v) base.push_back(v);
+    if (base.empty()) throw std::runtime_error("no ids in " + ids_path);
+  }
+  std::vector<uint32_t> ids(deepest);
+  for (uint32_t i = 0; i < deepest; ++i) ids[i] = base[i % base.size()];
+  l0::Context ctx(0);
+  const char* aff = std::getenv("ZE_AFFINITY_MASK");
+  std::printf("# ab: max_len %u, depths up to %u, %u steps x %u interleaved rounds, "
+              "ZE_AFFINITY_MASK=%s, device %s\n",
+              L, deepest, steps, rounds, aff ? aff : "(unset)", ctx.name().c_str());
+  loader::LoadedModel model = loader::load(ctx, snap, L);
+  runtime::Engine eng(ctx, std::move(model), L);
+  eng.prepare_prefill();
+  {
+    Timer t;
+    t.start();
+    eng.prefill(ids);
+    std::printf("# prefill %u ids: %.0f ms\n", deepest, t.ms());
+  }
+  runtime::DecodeBuffers& b = eng.buffers();
+  runtime::Control* c = b.control.as<runtime::Control>();
+  l0::Queue q(ctx);
+  l0::Fence fence(q);
+  std::printf("\n| max_len | M | depth | v1 ms/step | v2 ms/step | v1 t/s | v2 t/s | "
+              "paired v1/v2 | v2 - v1 |\n|---|---|---|---|---|---|---|---|---|\n");
+  for (uint32_t M : Ms) {
+    setenv("B70_DECODE_ATTN", "v1", 1);
+    runtime::CapturedStep s1 = runtime::build(ctx, eng.model(), b, nullptr, nullptr, M);
+    setenv("B70_DECODE_ATTN", "v2", 1);
+    runtime::CapturedStep s2 = runtime::build(ctx, eng.model(), b, nullptr, nullptr, M);
+    unsetenv("B70_DECODE_ATTN");
+    runtime::CapturedStep* arm[2] = {&s1, &s2};
+    for (uint32_t d : depths) {
+      auto chunk = [&](runtime::CapturedStep& s, uint32_t n) {
+        double tot = 0;
+        for (uint32_t k = 0; k < n; ++k) {
+          c->pos = d;
+          c->n_active = M;
+          Timer t;
+          t.start();
+          q.execute(s.list, &fence);
+          fence.wait();
+          tot += t.ms();
+        }
+        return tot / n;
+      };
+      chunk(s1, 2);
+      chunk(s2, 2);
+      std::vector<double> ms[2], ratio;
+      for (uint32_t r = 0; r < rounds; ++r) {
+        double x[2];
+        for (int k0 = 0; k0 < 2; ++k0) {
+          const int k = (k0 + int(r)) % 2;
+          x[k] = chunk(*arm[k], steps);
+          ms[k].push_back(x[k]);
+        }
+        ratio.push_back(x[0] / x[1]);
+      }
+      const double a = median(ms[0]), bb = median(ms[1]);
+      std::printf("| %u | %u | %u | %.3f | %.3f | %.2f | %.2f | %.3f | %+.2f%% |\n", L, M, d, a,
+                  bb, 1e3 / a, 1e3 / bb, median(ratio), 100.0 * (a / bb - 1.0));
+      std::fflush(stdout);
+    }
+  }
+  return 0;
+}
+
+// fork: plan 10b A3 - where a v1 and a v2 greedy run part, the step's top-3 logits under
+// both. probe_decode_attn fork <snapshot> <prompt ids> <v1's generated ids> <step> [max_len]
+// prefills the prompt, decodes <step> steps with the v1 list (v1's own chain), then runs
+// ONE plain step with each list from that state and prints the top 3 (id: logit) of each.
+int run_fork(int argc, char** argv) {
+  if (argc < 6) throw std::runtime_error("fork <snapshot> <prompt ids> <gen ids> <step> [max_len]");
+  auto read_ids = [](const std::string& p) {
+    std::vector<uint32_t> v;
+    std::ifstream f(p);
+    uint32_t x;
+    while (f >> x) v.push_back(x);
+    if (v.empty()) throw std::runtime_error("no ids in " + p);
+    return v;
+  };
+  const std::vector<uint32_t> prompt = read_ids(argv[3]), gen = read_ids(argv[4]);
+  const uint32_t step = uint32_t(std::stoul(argv[5]));
+  const uint32_t L = argc > 6 ? uint32_t(std::stoul(argv[6])) : 131072;
+  l0::Context ctx(0);
+  loader::LoadedModel model = loader::load(ctx, argv[2], L);
+  runtime::Engine eng(ctx, std::move(model), L);
+  eng.prepare_prefill();
+  eng.prefill(prompt);
+  runtime::DecodeBuffers& b = eng.buffers();
+  runtime::Control* c = b.control.as<runtime::Control>();
+  setenv("B70_DECODE_ATTN", "v1", 1);
+  runtime::CapturedStep s1 = runtime::build(ctx, eng.model(), b);
+  setenv("B70_DECODE_ATTN", "v2", 1);
+  runtime::CapturedStep s2 = runtime::build(ctx, eng.model(), b);
+  unsetenv("B70_DECODE_ATTN");
+  l0::Queue q(ctx);
+  l0::Fence fence(q);
+  // v1's own decode chain to the fork: `step` plain v1 steps (each writes its KV, emits
+  // cur_token and advances pos), checked against v1's recorded ids.
+  uint32_t same = 0;
+  for (uint32_t i = 0; i < step; ++i) {
+    same += c->cur_token[0] == gen[i];
+    q.execute(s1.list, &fence);
+    fence.wait();
+  }
+  std::printf("# replayed %u v1 steps, %u of %u emitted ids equal v1's run\n", step, same, step);
+  const uint32_t pos = c->pos, pending = c->cur_token[0];
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  constexpr size_t kV = 248320, kVU = 248077;
+  std::vector<float> lg(kV);
+  std::printf("# fork at decode step %u (pos %u, input id %u); v1 emitted %u there\n", step, pos,
+              pending, step + 1 < gen.size() ? gen[step + 1] : 0u);
+  for (int k = 0; k < 2; ++k) {
+    // A plain step writes KV at pos and advances pos; rewind so both see the same state.
+    c->pos = pos;
+    c->n_active = 1;
+    c->cur_token[0] = pending;
+    q.execute(k == 0 ? s1.list : s2.list, &fence);
+    fence.wait();
+    imm.copy(lg.data(), b.logits.ptr(), kV * 4);
+    std::vector<uint32_t> idx(kVU);
+    for (uint32_t i = 0; i < kVU; ++i) idx[i] = i;
+    std::partial_sort(idx.begin(), idx.begin() + 3, idx.end(),
+                      [&](uint32_t a, uint32_t bb) { return lg[a] > lg[bb]; });
+    std::printf("%s: %u:%.5f  %u:%.5f  %u:%.5f  (top-2 margin %.5f)\n", k == 0 ? "v1" : "v2",
+                idx[0], lg[idx[0]], idx[1], lg[idx[1]], idx[2], lg[idx[2]],
+                lg[idx[0]] - lg[idx[1]]);
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -528,6 +691,8 @@ int main(int argc, char** argv) {
     const std::string mode = argv[1];
     if (mode == "capture") return run_capture(argc, argv);
     if (mode == "arms") return run_arms(argc, argv);
+    if (mode == "ab") return run_ab(argc, argv);
+    if (mode == "fork") return run_fork(argc, argv);
     throw std::runtime_error("unknown mode " + mode);
   } catch (const std::exception& e) {
     std::fprintf(stderr, "probe_decode_attn: %s\n", e.what());

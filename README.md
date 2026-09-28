@@ -23,7 +23,9 @@ Rows above are byte-matched: both engines read the checkpoint's bf16 `lm_head`.
 `b70-serve` quantises that head to int8 per row at load (spec 9, gated on the golden
 prompts and the tool-call set), which is 31.21 t/s against 29.38 t/s for bf16 in the same
 interleaved run (docs/BENCHMARKS.md, "int8 lm_head"); vLLM cannot load that head, so the
-two are not compared.
+two are not compared. All three decode rows predate spec 10's decode attention v2 (they
+ran attn.cl's v1 pair); v2 is 5.9% faster per step at depth 4096 (docs/BENCHMARKS.md,
+"Decode attention at depth"), not yet re-measured in this table.
 
 Prefill went from 1406 t/s to 1670 t/s over a couple of weeks of kernel work,
 then to 2104 t/s by moving every int4 linear onto the card's int8 matrix engines
@@ -37,8 +39,9 @@ the honest picture: good prefill, decode still to do.
 Context now goes to 131072 tokens (`--max-len 131072`, 28.1 GB of the card's 32.5):
 prefill attention is a fused flash-attention kernel of our own, and a passkey
 stated once in 120k tokens of filler is found at 5, 50 and 95% depth (spec 6).
-Both attention kernels are still slow at depth: 747 t/s prefill and 10.2 t/s
-decode at 128k.
+Prefill attention is still slow at depth (747 t/s at 128k); decode attention
+was rebuilt for depth (spec 10): 20.1 t/s decode at 128k, from 10.2 (captured
+decode step, bf16 `lm_head`).
 
 Long agentic sessions reuse their history (spec 7): the server keeps the last session on
 the card and writes every prefill through to a pinned host store (`--prefix-cache-gb`,

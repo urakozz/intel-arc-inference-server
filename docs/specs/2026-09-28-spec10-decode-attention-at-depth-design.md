@@ -117,3 +117,61 @@ Idle box, device 0, interleaved pairs against v1, median of 3.
   against v2.
 - Prefill attention (spec 6's flash kernel and its research levers 3-5).
 - Changing the KV layout.
+
+## 8. Amendment - 2026-09-28, 10b results (plan `2026-09-28-spec10b-decode-attn-build.md`)
+
+**Operator rulings (2026-09-28).**
+1. **exp2 is approved** for decode attention (the E1 of 10a's winner, ~10 % over plain
+   `exp`), subject to the plan's gates. It failed the golden gate and does not ship (below).
+2. **The stride must not depend on `n_active`** (10a's open point), otherwise spec 8's M2
+   (verify rows bitwise equal to M = 1 decode) breaks; M2 must pass with v2 at every K.
+
+**How ruling 2 was met - a per-row stride.** A launch-wide stride that is a function of
+`pos` alone is still not enough: the verify at `pos` and the plain step at `pos + m` see
+different `pos`, and any stride that moves with depth moves between them at some `pos`.
+So v2's stride is per ROW, a function of that row's own key count `L = pos + m + 1`:
+`ppw(L) = max(64, roundup64(ceil(L / 32)))`. Row m of any launch then walks exactly the
+blocks, waves and orders of the M = 1 step at `pos + m`; positions past a row's bound
+(the longer walk of the verify's other rows) score `-INF`, weight exactly 0, and are
+neutral. `ppw` moves every 2048 keys, so the at most 4 rows of a launch have at most two
+strides; a work-group runs the two row groups one after the other (only for 3 positions
+in 2048). **Measured: M2a logits and GDN slots bitwise at k = 1, 2, 3 on both prompt
+lengths (n = 1998 crosses the 2048 step), M2b 0 differing ids, RF3-RF5 pass**
+(`mtp_verify_test` with v2); `attn_v2_test` checks the same property directly (every M =
+2..4 row bitwise the M = 1 row) at 27 synthetic positions and 4 real depths.
+
+**Other departures from the plan (rulings, 10b).**
+- No `Control` word: `attn_decode_v2` and `attn_reduce_v2` derive the stride from
+  `Control::pos` themselves (the probe's `pad[0]` is now spec 8's `gdn_live`). `attn_prep`
+  and `attn.cl` are untouched; nothing is cached, so spec 7's restores need nothing.
+- **Grid (4, 32) and partials `[24][32][M][258]`**, not `MAXLEN / 64` blocks: no row ever
+  needs more than 32 work-groups, so v2 has no MAXLEN and one binary per M
+  (`attn_v2_M<M>_T32`) serves every max_len; the V 2D block read takes its surface height
+  from the last written position. `attn_part` keeps v1's allocation (v1 stays selectable;
+  v2's partials fit inside it at every max_len >= 2048).
+- The selector is `B70_DECODE_ATTN=v1|v2`, read at each capture (decode, verify and draft
+  lists alike); the CLI's engine line names it.
+
+**exp2 failed the golden gate, so v2 ships with `exp` (ruling 1 applied "subject to the
+gates").** With exp2 (10a's `..._E1`) the golden gate fails on `cjk` row 9, a determined
+row: engine 105874 at 13.99905 against 95895 at 13.96513, the golden's 95895 13.9375 /
+105874 13.875 (one golden bf16 step apart); v1 and v2-with-`exp` both pass the same gate
+in the same session. v2 therefore ships as `P0_L2_D1_Q1` (attn.cl's `exp` and 1/16
+scale); the exp2 form stays buildable (`-DB70_ATTN_V2_EXP2=ON`) for a later look. The
+cost: 10a measured exp2 at +10 % of kernel time at M = 1; in the step it is 1.3 / 3.1 /
+4.5 % at 32768 / 65536 / 130816 (28.21 / 25.27 / 21.04 t/s with exp2, against the table
+below, same method, earlier session). A-F3 is met either way.
+
+**Gates (v2 as shipped, `exp`).**
+
+| gate | bar | result |
+|---|---|---|
+| A1 | cosine >= 0.99999 per (q head, m) vs v1 on real q/KV, 4k/32k/128k, M = 1..4; repeatable | 4096 / 32768 / 65536 / 130816: worst 0.999999998 / 0.999999988 / 0.999999491 / 0.999999761, max abs <= 0.0156 (1 bf16 ulp); bitwise repeatable; every M = 2..4 row bitwise = the M = 1 step; 27 synthetic positions (depth 0, block edges, the 2048 stride step, the cache end) likewise; **pass** |
+| A2 | golden gates, determinism, replay, flash_long_test, passkey 3/3, snapshots, spec 8 M2 | full suite with v2 the default: 104 passed, 0 failed (`mtp_head_test` skips as on main); passkey `l0-int8` 3/3 at 5 / 50 / 95 % of 119939 ids; M2 bitwise at k = 1..3; **pass** |
+| A3 | 256 greedy ids at 32k identical to v1 except at near-ties | identical for 133 ids, then one near-tie: at decode step 132 (pos 32900) v1's own state gives 28258 20.12565 vs 5639 20.04437 (margin 0.081, under one bf16 ulp at 20, 0.125) and v2 on the same state 5639 20.02276 vs 28258 20.01396 (margin 0.009); `probe_decode_attn fork`. **Pass as a near-tie** (the exp2 build happened to match all 256) |
+| A-F3 | >= 23.6 / 21.0 / 17.3 t/s at 32768 / 65536 / 130816 | **27.85 / 24.51 / 20.13** (v1 20.65 / 15.42 / 10.17); **pass** |
+| A-F4 | 4k within 1 % of v1 at max_len 131072 and 16384 | 31.41 vs 29.66 t/s (131072), 31.47 vs 29.67 (16384): v2 6 % faster; **pass** |
+| recorded | M = 2..4 verify-step times | max_len 16384 at depth 4096 / 12288: v2 1.09-1.11x / 1.23-1.28x faster than v1 (BENCHMARKS) |
+
+**v2 is the default** (`kDefaultDecodeAttn`); v1 stays selectable and bitwise unchanged.
+Numbers and conditions: docs/BENCHMARKS.md "Decode attention at depth (spec 10)".

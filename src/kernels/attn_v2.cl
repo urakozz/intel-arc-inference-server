@@ -5,7 +5,8 @@
 // and the same KV caches, and writes the same attn_out.
 //
 // It is plan 10a's winner `P0_L2_D1_Q1_E1` (tools/probe/probe_decode_attn.cl, record
-// docs/probe-decode-attn-2026-09-28.md), with two changes the probe did not have:
+// docs/probe-decode-attn-2026-09-28.md), shipped in its exp form `P0_L2_D1_Q1` (see EXP2
+// below), with two changes the probe did not have:
 //
 //  1. **The stride is per ROW and a function of that row's key count alone.** Row m of
 //     a step attends to L_m = pos + m + 1 positions and walks them in blocks of
@@ -37,8 +38,10 @@
 // barrier per wave publishes the raw dots (double-buffered SLM by a wave counter that
 // runs across the two row groups); lane s computes position s's weight and the weights
 // are broadcast in ascending s for the sum and the V fma (attn.cl's orders).
-// exp2 with 1/16 * log2(e) folded into the score scale (spec 10 lever 4, approved
-// 2026-09-28): the running max and every merge are in the log2 domain.
+// EXP2=1: exp2 with 1/16 * log2(e) folded into the score scale (spec 10 lever 4,
+// approved 2026-09-28 subject to the gates), max and merges in the log2 domain. It fails
+// the golden gate (cjk row 9 flips, spec 10 §8), so the shipped build is EXP2=0:
+// attn.cl's `exp` and 1/16 scale.
 //
 // Masking: row m's bound is pos + m. A position past it scores -INF, weight exactly 0,
 // which adds +-0 to the sums - so a longer walk (the verify's group end) is neutral to
@@ -46,7 +49,7 @@
 //
 //   attn_decode_v2(ctrl, attn_q, kv_k, kv_v, attn_part)   grid (4, TGT), WG 256
 //   attn_reduce_v2(ctrl, attn_part, attn_gate, attn_out)  grid (24, M),  WG 256
-//     attn_part  fp32 [24][TGT][M][258]  {mx (log2 domain), sm, acc[256]}
+//     attn_part  fp32 [24][TGT][M][258]  {mx (log2 domain if EXP2), sm, acc[256]}
 //     the rest as attn.cl's header.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
@@ -75,7 +78,16 @@
 #define PART 258
 #define WG 256
 #define NPR (M * GQA)
+#ifndef EXP2
+#error "attn_v2: EXP2 must be defined (src/kernels/CMakeLists.txt, B70_ATTN_V2_EXP2)"
+#endif
+#if EXP2
 #define SSCALE (0.0625f * M_LOG2E_F)   /* 1/sqrt(256) * log2(e) */
+#define EXPF(x) exp2(x)
+#else
+#define SSCALE 0.0625f
+#define EXPF(x) exp(x)
+#endif
 
 #if M < 1 || M > 4
 #error "attn_v2: M is 1..4"
@@ -211,8 +223,8 @@ __kernel void attn_decode_v2(__global const uint* restrict ctrl,
         const float nmx = fmax(mx[pr], sub_group_reduce_max(mine));   // max: exact in any order
         float resc, wl;
         if (nmx > -INFINITY) {
-          resc = exp2(mx[pr] - nmx);
-          wl = exp2(mine - nmx);
+          resc = EXPF(mx[pr] - nmx);
+          wl = EXPF(mine - nmx);
         } else {
           resc = 1.0f;
           wl = 0.0f;
@@ -248,7 +260,7 @@ __kernel void attn_decode_v2(__global const uint* restrict ctrl,
 
 // attn_reduce_v2 - grid (24 q heads, M), work-group 256, work-item d = dim d: attn.cl's
 // attn_reduce over row m's nb = (pos + m) / ppw(pos + m + 1) + 1 <= TGT partials,
-// ascending, merged in the log2 domain.
+// ascending, merged as the decode kernel's EXPF.
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __kernel void attn_reduce_v2(__global const uint* restrict ctrl,
                              __global const float* restrict attn_part,
@@ -275,8 +287,8 @@ __kernel void attn_reduce_v2(__global const uint* restrict ctrl,
     const float bmx = hmx[b], bsm = hsm[b];
     const float bacc = attn_part[(((size_t)h * TGT + b) * M + m) * PART + 2 + d];
     const float nmx = fmax(mx, bmx);         // finite: block b starts at or before pos + m
-    const float a = exp2(mx - nmx);          // mx = -INF on the first block -> 0
-    const float bs = exp2(bmx - nmx);
+    const float a = EXPF(mx - nmx);          // mx = -INF on the first block -> 0
+    const float bs = EXPF(bmx - nmx);
     sm = fma(sm, a, bsm * bs);
     acc = fma(acc, a, bacc * bs);
     mx = nmx;

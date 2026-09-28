@@ -120,7 +120,7 @@ struct CapturedStep {
 // default; any other value throws. Both pairs share attn_prep, the KV layout, attn_q /
 // attn_gate / attn_part / attn_out.
 enum class DecodeAttn { V1, V2 };
-inline constexpr DecodeAttn kDefaultDecodeAttn = DecodeAttn::V1;
+inline constexpr DecodeAttn kDefaultDecodeAttn = DecodeAttn::V2;   // spec 10 gates, 2026-09-28
 DecodeAttn decode_attn();
 const char* decode_attn_name(DecodeAttn a);
 

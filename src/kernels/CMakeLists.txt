@@ -304,9 +304,18 @@ add_attn_reduce(2 4096)
 # runtime::DecodeScratch::kAttnV2Blocks and is in the name (`_T32`), as ATTN_BLOCK is.
 set(ATTN_V2_TGT 32 CACHE INTERNAL
     "work-groups per kv head of attn_decode_v2; must equal runtime::DecodeScratch::kAttnV2Blocks")
+# exp2 with the scale folded (operator-approved 2026-09-28 subject to the gates) FAILS the
+# golden gate: cjk row 9, a determined row with a 0.0625 golden margin, flips (spec 10 §8).
+# So v2 ships with attn.cl's `exp`; the exp2 form stays buildable for the record.
+option(B70_ATTN_V2_EXP2 "decode attention v2 with exp2 (fails the golden gate; spec 10 §8)" OFF)
+if(B70_ATTN_V2_EXP2)
+  set(ATTN_V2_EXP2 1)
+else()
+  set(ATTN_V2_EXP2 0)
+endif()
 foreach(MM 1 2 3 4)
   add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
-                   DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT})
+                   DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2})
 endforeach()
 
 # Spec 8a (MTP probe): the whole decode list at M = 2, 3, 4 - every variant

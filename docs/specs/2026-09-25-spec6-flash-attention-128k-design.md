@@ -227,7 +227,7 @@ Every number is **measured** unless marked **derived**; the rows are in
 | pp4096 no regression (the gate under ruling A) | flash >= 0.99x paired composed | 1.0095 and 1.0102 (2125.12 / 2105.02, 2125.30 / 2103.76 t/s); **pass** |
 | F1 | attention <= 80 ms per 4096 ids | 116.3 ms (`attn_flash`), composed 132.2 ms; **missed, recorded (ruling A)** |
 | F2 | >= 60% of bf16 peak at depth | 28.3 TFLOP/s, 15.4% of 183.45 at pp65536, where attention is 51.3% of GPU time (derived); **missed, recorded (ruling A)** |
-| F3 | decode >= 90% of the bandwidth-derived rate at depth | 78.7% at 32768, 66.2% at 65536, 53.1% at 130816 (20.60 / 15.46 / 10.19 t/s against 26.17 / 23.34 / 19.20 derived); **missed, recorded** |
+| F3 | decode >= 90% of the bandwidth-derived rate at depth | 78.7% at 32768, 66.2% at 65536, 53.1% at 130816 (20.60 / 15.46 / 10.19 t/s against 26.17 / 23.34 / 19.20 derived); **missed, recorded**. Met by spec 10's decode attention v2 (2026-09-28): 27.85 / 24.51 / 20.13 t/s, spec 10 §8 |
 | F4 | decode at 4k, max_len 131072 within 2% of 16384 | 29.28 against 29.27 t/s, 1.0003; **pass, so §3.3's indirect grid was not built** |
 
 Memory at 128k (the load line both CLIs print): model 18.116 GB, KV 8.590 GB, decode
