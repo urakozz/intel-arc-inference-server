@@ -187,6 +187,12 @@ Reproduce: `python3 tools/probe/checkpoint_bytes.py <snapshot>`. It reads the
 index and the safetensors headers only, no tensor data, and prints this table,
 `W`, the `lm_head` int4/int8 variants and the MTP head.
 
+**`lm_head` forms (spec 9).** The engine reads the head in one of three forms: bf16 as
+shipped (2.543 GB), int4 g64 when a self-quantised checkpoint ships it packed (0.675 GB),
+or **int8 per row with one fp32 scale per row, quantised at load** from the bf16 tensor
+(`--lm-head int8`, 1,271,398,400 + 993,280 B = 1.272 GB, `W` 14.270 GB). `b70-serve`
+defaults to int8, `b70-decode` to the checkpoint's own head.
+
 ### Three facts that drive the design
 
 1. **No MoE.** The hardest kernel family in the larger models of this family is

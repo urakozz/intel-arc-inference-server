@@ -17,6 +17,13 @@ median of three runs on an idle machine:
 |---|---:|---:|---|
 | prefill, 4096 tokens | **2125.12 t/s** | 1610.04 t/s | we are 32.0% ahead |
 | decode, 256 tokens | 29.45 t/s | 31.01 t/s | we are 5% behind |
+| decode, int8 `lm_head` (our serving default) | 31.21 t/s | - | not byte-matched |
+
+Rows above are byte-matched: both engines read the checkpoint's bf16 `lm_head`.
+`b70-serve` quantises that head to int8 per row at load (spec 9, gated on the golden
+prompts and the tool-call set), which is 31.21 t/s against 29.38 t/s for bf16 in the same
+interleaved run (docs/BENCHMARKS.md, "int8 lm_head"); vLLM cannot load that head, so the
+two are not compared.
 
 Prefill went from 1406 t/s to 1670 t/s over a couple of weeks of kernel work,
 then to 2104 t/s by moving every int4 linear onto the card's int8 matrix engines

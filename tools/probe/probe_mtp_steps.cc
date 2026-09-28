@@ -1,6 +1,8 @@
 // probe_mtp_steps - spec 8 plan 8b: the production MTP lists' wall time per call.
 //
-//   probe_mtp_steps <snapshot> [depth = 4096] [calls = 32] [rounds = 3]
+//   probe_mtp_steps <snapshot> [depth = 4096] [calls = 32] [rounds = 3] [lm_head = bf16]
+//
+// `lm_head` (spec 9 H2): bf16 (the checkpoint's) or int8; the draft list reads it too.
 //
 // One engine with the head, `depth` ids of tests/golden/prompts/long32k.ids prefilled
 // (cwd = the source tree). Arms, timed as the engine API runs them (host writes, submit,
@@ -34,7 +36,7 @@ std::vector<uint32_t> read_ids(const std::string& p) {
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: %s <snapshot> [depth] [calls] [rounds]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <snapshot> [depth] [calls] [rounds] [bf16|int8]\n", argv[0]);
     return 2;
   }
   const uint32_t depth = argc > 2 ? std::stoul(argv[2]) : 4096;
@@ -44,7 +46,10 @@ int main(int argc, char** argv) {
   if (ids.size() < depth) return 2;
   ids.resize(depth);
   l0::Context ctx(0);
-  runtime::Engine e(ctx, loader::load(ctx, argv[1], 16384, /*mtp=*/true), 16384);
+  loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
+  if (argc > 5 && !loader::parse_lm_head_form(argv[5], lm_head)) return 2;
+  std::printf("lm_head: %s\n", loader::lm_head_form_name(lm_head));
+  runtime::Engine e(ctx, loader::load(ctx, argv[1], 16384, /*mtp=*/true, lm_head), 16384);
   e.prefill(ids);
   using Clock = std::chrono::steady_clock;
   struct Arm {
