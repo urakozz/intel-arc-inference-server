@@ -267,7 +267,9 @@ throughout, so every speed row is grade iterate. All runs are at max_len 16384.
   - M4 passes: host chi-square p-values 0.10-0.62, and the seeded sampled run is
     bitwise.
   - M5 passes for the repeated run.
-  - M5's spec 7 C2 with MTP on waits for plan 7c's merge.
+  - M5's spec 7 C2 with MTP on: after the 7c merge, `prefix_gpu_mtp_test` runs
+    `prefix_gpu_test` on l0-int8 with the head loaded and `EngineAdapter` at `--mtp 3`
+    (argv[6] = K); sequences a-g pass (2026-09-28).
 - **A12, D1 misses on the golden prompts and passes on the agentic proxy.**
   - At 4k, greedy golden geomeans are 1.297x / 1.244x / 1.186x at K = 1 / 2 / 3.
     Prose at K = 3 falls to 0.970x.
