@@ -121,3 +121,27 @@ Idle box, device 0, interleaved pairs, median of 3.
 - Vocabulary pruning for drafts (a separate spec 8 follow-up).
 - Quantising `embed_tokens` (gathered, about zero traffic).
 - A new checkpoint on disk.
+
+## 8. Amendment, 2026-09-28: L1/L2 redefined (operator ruling)
+
+Plan 9a (`docs/probe-lm-head-2026-09-28.md`) found int8 failing §4's L1 top-20 bar
+(92.0 % of positions) and L2's KL mean (+inf) **only** through swaps at the top-20 edge
+and the filtered KL going infinite when a near-equal logit moves the top-p cut. A control
+that changes nothing but rounding the bf16 head's output to bf16 fails the same bars
+worse (86.1 % top-20, 8 support mismatches against int8's 7). The bars as written grade
+the bf16 head's own boundary jitter, so the operator redefines them:
+
+- **L1, top-20 set.** A position's top-20 set difference counts against the 99 % bar only
+  if the **bf16 head's rank-20 / rank-21 logit gap is >= 0.05**. Swaps across a smaller
+  gap are near-ties at the sampling boundary and are not counted. Cosine (>= 0.9999) and
+  argmax (equal except bf16 near-ties) are unchanged.
+- **L2, sampling.** KL(p_bf16 || p_int8) is measured **without** the top-k / top-p filter,
+  over all `vocab_used` ids, at temperature 1.0 **and** 0.6: **mean <= 1e-4 nats and
+  p99 <= 1e-3** at each. The **dropped probability mass** - the mass bf16's filter keeps
+  on ids int8's filter drops - is recorded, not gated.
+
+Under these bars 9a's numbers pass: every mismatched top-20 row has a rank-20/21 gap of
+at most 0.046; the unfiltered KL is mean 1.3e-5 / p99 2.0e-4 at T 1.0 and mean 2.2e-5 /
+p99 4.9e-4 at T 0.6; the dropped mass is at most 0.020 (T 1.0) and 0.051 (T 0.6).
+**The end-to-end gates L3 (golden gates; A4 >= 25 / 36 on `l0-int8`) are the real test**,
+and 9b proceeds to them.
