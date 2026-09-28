@@ -19,7 +19,8 @@
 //
 // arms (P1): standalone, no checkpoint. Arm 0 is src/kernels/attn.cl's attn_decode +
 // attn_reduce compiled at the probe's M (pda_v1_M<M>); every other arm is
-// probe_decode_attn.cl at one -D set (pda_<tag>_M<M>, tag P<ppw>_L<load>_D<dot>_F<pf>_R<red>).
+// probe_decode_attn.cl at one -D set (pda_<tag>_M<M>, tag P<ppw>_L<load>_D<dot>_F<pf>_R<red>,
+// optionally _Q<qblk>_G<256-GRF>_E<exp2>).
 // Per arm and depth: output cosine per (q head, m) and max abs error against arm 0,
 // bitwise repeatability (two runs), arm 0's bitwise agreement with production's dumped
 // output, and (--time) interleaved rounds of --reps launches each, per-kernel L0
@@ -259,7 +260,7 @@ int run_capture(int argc, char** argv) {
 // ============================================================================
 struct ArmDef {
   std::string tag;   // "v1" or P<ppw>_L<load>_D<dot>_F<pf>_R<red>
-  uint32_t ppw = 64, load = 0, dot = 0, pf = 0, red = 0;
+  uint32_t ppw = 64, load = 0, dot = 0, pf = 0, red = 0, qblk = 0, grf = 0, exp2 = 0;
   bool v1 = false;
 };
 ArmDef parse_arm(const std::string& t) {
@@ -269,7 +270,10 @@ ArmDef parse_arm(const std::string& t) {
     a.v1 = true;
     return a;
   }
-  if (std::sscanf(t.c_str(), "P%u_L%u_D%u_F%u_R%u", &a.ppw, &a.load, &a.dot, &a.pf, &a.red) != 5)
+  // P<ppw>_L<load>_D<dot>_F<pf>_R<red>[_Q<qblk>_G<256grf>_E<exp2>]
+  const int n = std::sscanf(t.c_str(), "P%u_L%u_D%u_F%u_R%u_Q%u_G%u_E%u", &a.ppw, &a.load, &a.dot,
+                            &a.pf, &a.red, &a.qblk, &a.grf, &a.exp2);
+  if (n != 5 && n != 8)
     throw std::runtime_error("bad arm tag " + t);
   return a;
 }

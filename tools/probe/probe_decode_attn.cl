@@ -30,7 +30,14 @@
 //             1: the last work-group of each kv head to finish (a device counter) merges
 //             that head's 6 x M rows in the same fixed ascending order, so the result does
 //             not depend on which work-group is last; the counter is reset by that WG.
+//   QBLK      0/1 (DOT 1 only): the q operand of the score dot by two SLM sub-group block
+//             reads per row (lane l element i = dim l + 16 i, the same order) instead of
+//             16 scalar SLM reads.
+//   EXP2      0/1: exp2 with 1/16 * log2(e) folded into the score scale (spec 10 lever 4,
+//             spec 6c's approved form); mx and the merge are then in the log2 domain.
+//             Not bitwise attn.cl.
 //   M         rows in flight (1..4).
+// (256-GRF mode is a compile option, not a define: the tag's G field, CMakeLists.txt.)
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 
@@ -55,6 +62,19 @@
 #ifndef REDUCE
 #define REDUCE 0
 #endif
+#ifndef QBLK
+#define QBLK 0
+#endif
+#ifndef EXP2
+#define EXP2 0
+#endif
+#if EXP2
+#define SSCALE (0.0625f * M_LOG2E_F)
+#define EXPF(x) exp2(x)
+#else
+#define SSCALE 0.0625f
+#define EXPF(x) exp(x)
+#endif
 #define CTRL_POS 0
 #define CTRL_NACT 1
 #define CTRL_TGT 19   /* runtime::Control::pad[0]: the probe's target work-groups per kv head */
@@ -76,6 +96,9 @@
 
 #if PPW % 64 != 0
 #error "PPW must be 0 or a multiple of 64"
+#endif
+#if QBLK && !DOT
+#error "QBLK is a DOT 1 lever"
 #endif
 #if PREFETCH && !DOT
 #error "PREFETCH is a DOT 1 lever"
@@ -157,8 +180,8 @@ inline void merge_row(__global const float* restrict attn_part,
     const float bmx = hmx[b], bsm = hsm[b];
     const float bacc = attn_part[(((size_t)h * NBLOCKS + b) * M + m) * PART + 2 + d];
     const float nmx = fmax(mx, bmx);
-    const float a = exp(mx - nmx);
-    const float bs = exp(bmx - nmx);
+    const float a = EXPF(mx - nmx);
+    const float bs = EXPF(bmx - nmx);
     sm = fma(sm, a, bsm * bs);
     acc = fma(acc, a, bacc * bs);
     mx = nmx;
@@ -228,14 +251,14 @@ __kernel void pda_decode(__global const uint* restrict ctrl, __global const floa
         }
         float sc[WAVE_P];
         for (uint s = 0; s < WAVE_P; ++s)
-          sc[s] = p0 + s <= bound ? dot_red[s * SG] * SCALE : -INFINITY;
+          sc[s] = p0 + s <= bound ? dot_red[s * SG] * SSCALE : -INFINITY;
         float nmx = mx[qhl];
         for (uint s = 0; s < WAVE_P; ++s) nmx = fmax(nmx, sc[s]);
         float resc;
         if (nmx > -INFINITY) {
-          resc = exp(mx[qhl] - nmx);
+          resc = EXPF(mx[qhl] - nmx);
           float ssum = 0.0f;
-          for (uint s = 0; s < WAVE_P; ++s) { sc[s] = exp(sc[s] - nmx); ssum += sc[s]; }
+          for (uint s = 0; s < WAVE_P; ++s) { sc[s] = EXPF(sc[s] - nmx); ssum += sc[s]; }
           sm[qhl] = fma(sm[qhl], resc, ssum);
           mx[qhl] = nmx;
         } else {
@@ -285,8 +308,23 @@ __kernel void pda_decode(__global const uint* restrict ctrl, __global const floa
     // then its pairwise tree (stride 8, 4, 2, 1) by shuffles; lane 0 holds the dot.
     for (uint pr = 0; pr < NPR; ++pr) {
       float a = 0.0f;
+#if QBLK
+      float qv[PER_LANE];
+      {
+        const uint8 qa = intel_sub_group_block_read8((__local const uint*)&qpack[pr * HD]);
+        const uint8 qb = intel_sub_group_block_read8((__local const uint*)&qpack[pr * HD + 128]);
+        qv[0] = as_float(qa.s0); qv[1] = as_float(qa.s1); qv[2] = as_float(qa.s2);
+        qv[3] = as_float(qa.s3); qv[4] = as_float(qa.s4); qv[5] = as_float(qa.s5);
+        qv[6] = as_float(qa.s6); qv[7] = as_float(qa.s7);
+        qv[8] = as_float(qb.s0); qv[9] = as_float(qb.s1); qv[10] = as_float(qb.s2);
+        qv[11] = as_float(qb.s3); qv[12] = as_float(qb.s4); qv[13] = as_float(qb.s5);
+        qv[14] = as_float(qb.s6); qv[15] = as_float(qb.s7);
+      }
+      for (uint t = 0; t < PER_LANE; ++t) a = fma(qv[t], bf16f(kreg[t]), a);
+#else
       for (uint t = 0; t < PER_LANE; ++t)
         a = fma(qpack[pr * HD + lane + SG * t], bf16f(kreg[t]), a);
+#endif
       for (uint stride = SG / 2; stride > 0; stride >>= 1)
         a += intel_sub_group_shuffle_down(a, a, stride);
       if (lane == 0) sc_x[buf][pr][sgid] = a;
@@ -297,13 +335,13 @@ __kernel void pda_decode(__global const uint* restrict ctrl, __global const floa
       const uint m = pr / GQA;
       if (m >= n_act) break;                  // uniform
       const uint bound = pos + m;
-      const float mine = p0 + lane <= bound ? sc_x[buf][pr][lane] * SCALE : -INFINITY;
+      const float mine = p0 + lane <= bound ? sc_x[buf][pr][lane] * SSCALE : -INFINITY;
       float nmx = mx[pr];
       nmx = fmax(nmx, sub_group_reduce_max(mine));   // max is exact in any order
       float resc, wl;
       if (nmx > -INFINITY) {
-        resc = exp(mx[pr] - nmx);
-        wl = exp(mine - nmx);
+        resc = EXPF(mx[pr] - nmx);
+        wl = EXPF(mine - nmx);
       } else {
         resc = 1.0f;
         wl = 0.0f;

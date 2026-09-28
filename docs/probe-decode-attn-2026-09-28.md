@@ -42,3 +42,173 @@ was held by this job).
 - **M = 4 in the list: not available at max_len 131072.** Production M = 2..4 decode
   lists exist only at max_len 16384 behind `-DB70_DECODE_EXTRA_M=ON` (spec 8a); M = 4
   at depth is measured below as the probe's arm 0, attn.cl compiled at M = 4.
+
+## P1 - the lever sweep (Task 2)
+
+**Harness.** `probe_decode_attn arms` on the dumped real inputs: FA layer 15 (model layer
+63) K/V for positions [0, 130820) and, per depth d, the q / gate / production attn_out of
+4 consecutive plain steps from pos = d (rows m = 0..3 of an M = 4 verify at d). Arm 0 is
+`src/kernels/attn.cl` itself compiled at the probe's M and MAXLEN 131072
+(`pda_v1_M<M>`). Timing: L0 kernel timestamps, 10 launches (decode + reduce) per arm per
+round, one warm-up round, 5 rounds (7 in the final job) with the arm order rotated per
+round; median per arm, and the median **paired** ratio arm 0 / arm within a round. All
+arms of a table ran interleaved in one locked job.
+
+**Correctness (A1), every arm, every depth (4096 / 32768 / 130816, and 65536 in the
+final job), M = 1 and 4:** worst per-(q head, m) cosine against arm 0 >= 0.9999995
+(the bar is 0.99999), max abs error <= 0.0156 (one bf16 ulp at the output's scale), every
+arm run twice bitwise identical. Arm 0 is **bitwise identical to production's own dumped
+attn_out** at every depth and both M (so M = 4 row m equals the M = 1 step at pos + m).
+Every PPW-64 arm (LOAD 0/1/2, DOT 0/1) is **bitwise identical to arm 0**: the block reads
+and the shuffle tree keep attn.cl's exact arithmetic order. Arms with PPW > 64 differ
+from arm 0 only by the merge reassociation (fewer, longer online-softmax blocks), and at
+some depths are still bitwise equal. EXP2 arms change `exp` to `exp2` and are still
+>= 0.9999995 (the same worst row as the exp arms).
+
+**Arm 0 against production (Task 2 step 1):** arm 0's decode + reduce is 1039 / 4378 µs
+per launch at 32768 / 130816 against the profiled list's 1085 / 4205 µs (-4.2% / +4.1%;
+the bar was 3%). The probe re-reads one layer's KV each launch where the list walks 16
+layers, and the list's events add a host-scope flush per launch; every comparison below
+is therefore a **paired ratio against arm 0 in the same job**, and the derived t/s scale
+production's measured attention by that ratio rather than using the probe's absolute µs.
+
+Tags: `P<ppw>_L<load>_D<dot>_F<prefetch>_R<reduce>[_Q<qblk>_G<256grf>_E<exp2>]`
+(tools/probe/probe_decode_attn.cl header). P0 = ppw derived on the device from pos and
+the target work-groups per kv head `tgt` (control word), `tgt` 64 unless noted.
+
+### Lever 1 alone - positions per work-group (LOAD 0, DOT 0)
+
+µs per launch (decode + reduce), x = paired ratio arm 0 / arm. uptime (load average)
+12.41 at start, 12.30 at end (other agents' CPU builds; GPU held by this job).
+
+| arm | 32k M1 | x | 128k M1 | x | 32k M4 | x | 128k M4 | x |
+|---|---|---|---|---|---|---|---|---|
+| v1 (arm 0) | 1039.1 | 1.000 | 4377.5 | 1.000 | 3309.9 | 1.000 | 12608.0 | 1.000 |
+| P64 | 1040.8 | 1.004 | 4279.4 | 1.023 | 3296.1 | 1.009 | 12969.8 | 0.972 |
+| P256 | 981.3 | 1.050 | 3783.8 | 1.156 | 3484.8 | 0.947 | 14033.2 | 0.899 |
+| P512 | 963.1 | 1.083 | 3769.6 | 1.159 | 3497.0 | 0.946 | 14063.9 | 0.896 |
+| P1024 | 960.4 | 1.082 | 3744.1 | 1.169 | 3491.6 | 0.948 | 14021.2 | 0.899 |
+| P2048 | 1560.8 | 0.668 | 3551.6 | 1.231 | 6186.1 | 0.535 | 14023.2 | 0.899 |
+| P0 (tgt 64) | 1008.1 | 1.021 | 3568.4 | 1.227 | 3749.5 | 0.883 | 14029.3 | 0.899 |
+
+PPW alone removes the reduce (638 -> 18 µs at 128k M1) but not the decode: the decode's
+per-position cost is unchanged, and at M = 4 the longer walk per work-group loses
+(m-outer walks re-read the block 4 times with fewer work-groups to hide it). Lever 1 is
+necessary for the reduce and insufficient alone.
+
+### Lever 2 - loads, then DOT (on PPW 64 / 256 / 1024 / P0)
+
+| arm | 32k M1 | x | 128k M1 | x | 32k M4 | x | 128k M4 | x |
+|---|---|---|---|---|---|---|---|---|
+| P64_L1 (K block reads) | 1035.1 | 1.008 | 4120.3 | 1.062 | 3166.1 | 1.042 | 12870.9 | 0.979 |
+| P64_L2 (+ V 2D block reads) | 812.6 | 1.284 | 3346.4 | 1.307 | 2739.6 | 1.205 | 11391.8 | 1.107 |
+| P64_L2_D1 | 428.7 | 2.434 | 1835.1 | 2.385 | 1785.7 | 1.855 | 7366.4 | 1.711 |
+| P256_L2 | 713.1 | 1.461 | 2916.8 | 1.501 | 2763.5 | 1.199 | 11388.0 | 1.106 |
+| P256_L2_D1 | 305.5 | 3.416 | 1227.9 | 3.564 | 1537.7 | 2.157 | 6346.7 | 1.987 |
+| P1024_L2 | 685.9 | 1.521 | 2844.3 | 1.538 | 2810.3 | 1.178 | 11425.9 | 1.103 |
+| P1024_L2_D1 | 268.6 | 3.869 | 1126.0 | 3.884 | 1506.8 | 2.197 | 6075.1 | 2.075 |
+| P0_L2 | 785.3 | 1.325 | 2835.0 | 1.544 | 3115.5 | 1.064 | 11129.8 | 1.133 |
+| P0_L2_D1 | 310.0 | 3.352 | 1118.3 | 3.910 | 1646.7 | 2.015 | 5974.5 | 2.110 |
+
+The V 2D block read (one 512 B message per sub-group per wave, in place of 16 x 32 B)
+is the load lever that pays; K's 1D block reads alone buy little. **DOT 1 is the large
+lever**: m inner (K/V loaded once for all 6 x M rows), the tree by shuffles, one barrier
+per wave, one `exp` per lane per row - 2.4x at PPW 64, 3.9x combined with PPW, at
+**bitwise-identical output**.
+
+### Lever 2 cont. - prefetch, q block reads, 256 GRF, exp2 (P0, DOT 1)
+
+(second job; uptime load average 11.33 start, 13.91 end)
+
+| arm | 32k M1 | x | 128k M1 | x | 32k M4 | x | 128k M4 | x |
+|---|---|---|---|---|---|---|---|---|
+| v1 (arm 0) | 1005.3 | 1.000 | 4379.3 | 1.000 | 3311.5 | 1.000 | 13192.9 | 1.000 |
+| P0_L2_D1 | 303.6 | 3.324 | 1128.1 | 3.863 | 1615.4 | 2.043 | 6000.6 | 2.199 |
+| + F1 (prefetch) | 317.9 | 3.154 | 1179.9 | 3.698 | 1531.2 | 2.154 | 5781.8 | 2.283 |
+| + Q1 (q SLM block reads) | 292.6 | 3.438 | 1100.6 | 3.970 | 1441.0 | 2.294 | 5402.6 | 2.442 |
+| + Q1 F1 | 298.1 | 3.370 | 1120.6 | 3.909 | 1372.9 | 2.402 | 5133.0 | 2.570 |
+| + Q1 G1 (256 GRF) | 438.0 | 2.295 | 1701.6 | 2.575 | 1862.2 | 1.774 | 6785.2 | 1.946 |
+| + Q1 E1 (exp2) | 276.9 | 3.631 | 1001.1 | 4.378 | 1264.8 | 2.612 | 4484.5 | 2.942 |
+| P1024_L2_D1_Q1 | 254.9 | 3.942 | 1107.7 | 3.953 | 1276.5 | 2.592 | 5082.6 | 2.598 |
+
+Prefetch (a register double buffer) costs ~4% at M = 1 and buys ~5% at M = 4; 256-GRF
+mode halves occupancy and loses 35-50% everywhere (the kernel is latency-hidden by
+work-groups, not registers). exp2 buys 10% at M = 1 and 17% at M = 4: the M = 4 kernel is
+instruction-bound (119 GB/s at 128k), the M = 1 kernel is at the bandwidth wall (535
+GB/s at 128k, 90% of 590).
+
+### Lever 1 again - the device-derived stride (tgt, P0_L2_D1 and P0_L2_D1_Q1)
+
+| tgt | 32k M1 (Q1) | x | 128k M1 (Q1) | x | 32k M4 (Q1) | x | 128k M4 (Q1) | x |
+|---|---|---|---|---|---|---|---|---|
+| 32 | 270.2 | 3.704 | 1060.3 | 3.945 | 1279.6 | 2.489 | 5216.3 | 2.506 |
+| 64 | 292.6 | 3.438 | 1100.6 | 3.970 | 1441.0 | 2.294 | 5402.6 | 2.442 |
+| 128 | 333.1 | 3.006 | 1067.4 | 3.904 | 1491.8 | 2.111 | 5316.8 | 2.457 |
+
+tgt 32 (= 128 live work-groups, one per Xe-core slot of four) is best or tied at every
+point, and it is one binary for every depth: the stride is read from the control word.
+
+### Lever 3 - the fused reduce (REDUCE 1)
+
+| arm | 32k M1 | 128k M1 | 32k M4 | 128k M4 |
+|---|---|---|---|---|
+| P0_L2_D1 separate reduce | 310.0 | 1118.3 | 1646.7 | 5974.5 |
+| P0_L2_D1 fused (last WG) | 402.2 | 1233.0 | 2801.5 | 10921.7 |
+| P1024_L2_D1 separate | 268.6 | 1126.0 | 1506.8 | 6075.1 |
+| P1024_L2_D1 fused | 316.0 | 1333.1 | 1686.1 | 6889.6 |
+
+With the stride derived from depth the partial table is 64 blocks per row (3.17 MB per
+layer written + read at 128k M1, from 101.3 MB) and the separate `pda_reduce` costs
+18-20 µs; the fused reduce puts all 6 x M merges of a kv head on ONE work-group and loses
+by 10% (M1) to 83% (M4). **Keep the separate reduce launch.**
+
+**Partial-table traffic, measured:** the reduce's own counter (dbg[0] = nb) reads 2045
+partials per row for v1 at 130816 (101.30 MB per layer at M1 written + read, 405.2 MB at
+M4) against 64 for P0 tgt 32..64 (3.17 / 12.68 MB); v1's reduce launch is 618-638 µs per
+layer against 19-20 µs.
+
+### The final job - the winner against arm 0 at four depths (tgt 32)
+
+7 rounds x 10 launches, interleaved, one locked job; uptime load average 11.35 at start,
+9.99 at end. µs per launch (decode + reduce); x = paired median arm 0 / arm; all rows
+passed A1 (worst cosine 0.9999995 at 65536 M4, every arm repeatable, arm 0 = production
+dump bitwise at every depth).
+
+| arm | 4k M1 | x | 32k M1 | x | 64k M1 | x | 128k M1 | x |
+|---|---|---|---|---|---|---|---|---|
+| v1 (arm 0) | 121.9 | 1.000 | 1003.7 | 1.000 | 2134.9 | 1.000 | 4379.4 | 1.000 |
+| P0_L2_D1 | 46.0 | 2.650 | 277.5 | 3.612 | 556.4 | 3.834 | 1121.3 | 3.918 |
+| P0_L2_D1_Q1 | 44.5 | 2.738 | 270.6 | 3.711 | 538.9 | 3.957 | 1093.3 | 4.010 |
+| **P0_L2_D1_Q1_E1** | **41.0** | **2.974** | **254.1** | **3.944** | **498.8** | **4.275** | **992.3** | **4.417** |
+| P0_L2_D1_F1_Q1_E1 | 41.7 | 2.926 | 257.3 | 3.900 | 504.9 | 4.214 | 1001.2 | 4.380 |
+
+| arm | 4k M4 | x | 32k M4 | x | 64k M4 | x | 128k M4 | x |
+|---|---|---|---|---|---|---|---|---|
+| v1 (arm 0) | 456.3 | 1.000 | 3420.6 | 1.000 | 6875.5 | 1.000 | 13656.6 | 1.000 |
+| P0_L2_D1 | 261.7 | 1.742 | 1557.3 | 2.203 | 3035.2 | 2.263 | 5849.3 | 2.333 |
+| P0_L2_D1_Q1 | 234.7 | 1.946 | 1380.2 | 2.486 | 2699.8 | 2.547 | 5270.3 | 2.587 |
+| **P0_L2_D1_Q1_E1** | **211.4** | **2.161** | **1233.3** | **2.779** | **2423.1** | **2.836** | **4745.7** | **2.878** |
+| P0_L2_D1_F1_Q1_E1 | 213.4 | 2.138 | 1244.4 | 2.745 | 2459.2 | 2.807 | 4817.1 | 2.841 |
+
+The winner's KV stream at M1 is 409 / 528 / 538 / 540 GB/s (4k / 32k / 64k / 128k),
+against v1's 122-138; its partial table at 128k is 32 blocks per row, **1.59 MB per
+layer written + read (M1), from 101.30 MB**, and its reduce launch is 9 µs from 640.
+
+### Derived decode t/s (Task 2 step 3)
+
+Derived: production's plain step wall at the depth (P0) minus production's profiled
+`attn_decode` + `attn_reduce` (P0, Σ 16 layers), plus that attention divided by the
+winner's paired ratio from the final job. M = 1.
+
+| depth | step today ms | attention today ms | winner (E1) attention ms | derived step ms | **derived t/s** | exp-only (Q1, E0) t/s | today t/s | A-F3 bar |
+|---|---|---|---|---|---|---|---|---|
+| 4096 | 33.674 | 2.578 | 0.867 | 31.963 | **31.29** | 31.21 | 29.70 | (A-F4: no regression) |
+| 32768 | 48.279 | 17.364 | 4.403 | 35.318 | **28.31** | 28.09 | 20.71 | 23.6 |
+| 65536 | 64.543 | 33.690 | 7.881 | 38.734 | **25.82** | 25.40 | 15.49 | 21.0 |
+| 130816 | 98.045 | 67.277 | 15.231 | 46.000 | **21.74** | 21.03 | 10.20 | 17.3 |
+
+**M = 4 (recorded, spec 8's verify cost):** 16 launches of the winner are 3.38 / 19.73 /
+38.77 / 75.93 ms per verify step at 4k / 32k / 64k / 128k, against v1's 7.30 / 54.73 /
+110.01 / 218.51 ms (probe µs x 16; no production M = 4 list exists at max_len 131072 to
+calibrate against). At M = 4 the kernel is instruction-bound (113 GB/s at 128k): four
+rows cost 4.8x one row, so the KV read is not what M = 4 pays for.
