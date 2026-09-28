@@ -21,6 +21,14 @@ document that differs between them says which one it is; the section **"The
 packed-head checkpoint"** below is the delta list, and it was measured against
 the files rather than assumed.
 
+**A third head form is made, not shipped (spec 9).** `load(..., LmHeadForm::Int8)`
+reads the bf16 `lm_head`, quantises it on the host (`src/loader/lm_head_int8.h`:
+`s = max|row| / 127` in fp32, `q = rne(w / s)` clamped to [-127, 127], 44 threads,
+0.35-0.75 s) into `gemv_i8w`'s `[N/16][K/16][16 k][16 n]` int8 tiles, and puts the fp32
+`[N]` scales in `DeviceWeight::scales`. The report's `lm_head` line names the form and
+the quantisation time; the W cross-check itemises -1.270 GB. It refuses a checkpoint
+whose head is already int4.
+
 ## Snapshot resolution - and why it never downloads
 
 `resolve_snapshot(arg)`:

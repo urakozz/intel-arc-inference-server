@@ -623,3 +623,16 @@ if(B70_PREFILL_ENABLED)
   get_property(PDA_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_decode_attn ${PDA_PF_KERNELS})
 endif()
+
+# --- probe_lm_head_l1: spec 9 plan 9b, L1/L2 on the card (int8 head vs bf16 head, same
+# hidden, golden prompts teacher-forced). Record: docs/BENCHMARKS.md "int8 lm_head (spec 9)".
+add_executable(probe_lm_head_l1 probe_lm_head_l1.cc)
+target_include_directories(probe_lm_head_l1 PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+  ${CMAKE_SOURCE_DIR}/tests/golden)
+target_link_libraries(probe_lm_head_l1 PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+if(B70_PREFILL_ENABLED)
+  b70_link_prefill(probe_lm_head_l1)
+endif()
+b70_target_kernel_dir(probe_lm_head_l1)
+get_property(LH_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
+add_dependencies(probe_lm_head_l1 ${LH_KERNELS})

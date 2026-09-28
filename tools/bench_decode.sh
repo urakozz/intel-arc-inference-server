@@ -10,6 +10,7 @@
 #   tools/bench_decode.sh --pp 4096 --pp-backend l0    spec 2.1's L0 GEMM backend
 #   tools/bench_decode.sh --depth 4096 --max-len 131072 spec 6: the 128k decode variants
 #   B70_PREFILL_ATTN=composed tools/bench_decode.sh --pp 4096   spec 6's reference attention
+#   tools/bench_decode.sh --lm-head int8         spec 9: the int8 lm_head (rows say int8-head)
 #
 # `--pp N` replaces `--depth N` with `Engine::prefill` (spec 2, plan 6e Task 1)
 # and makes the binary print a SECOND markdown row -- `| ... <backend> pp | N |
@@ -78,6 +79,7 @@ PP="${PP:-}"
 PP_CHUNK="${PP_CHUNK:-}"
 PP_BACKEND="${PP_BACKEND:-}"
 MAX_LEN="${MAX_LEN:-}"
+LM_HEAD="${LM_HEAD:-}"
 BUILD=1
 
 # `set -u` is on, so a bare `--depth` at the end of the line would abort with
@@ -104,6 +106,7 @@ while [ $# -gt 0 ]; do
     --runs)  need_value "$@"; RUNS="$2";  shift 2 ;;
     --model) need_value "$@"; MODEL="$2"; shift 2 ;;
     --max-len) need_value "$@"; MAX_LEN="$2"; shift 2 ;;
+    --lm-head) need_value "$@"; LM_HEAD="$2"; shift 2 ;;
     --no-build) BUILD=0; shift ;;
     -h|--help)
       awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
@@ -160,6 +163,8 @@ if [ -n "${B70_PREFILL_ATTN:-}" ]; then
 fi
 MAXLEN_ARGS=""
 [ -n "$MAX_LEN" ] && MAXLEN_ARGS=" --max-len $MAX_LEN"
+# Spec 9: unset adds nothing (b70-decode's default is the checkpoint's bf16 head).
+[ -n "$LM_HEAD" ] && MAXLEN_ARGS="$MAXLEN_ARGS --lm-head $LM_HEAD"
 
 if [ -n "$PP" ]; then
   MODE_ARGS="--pp $PP"

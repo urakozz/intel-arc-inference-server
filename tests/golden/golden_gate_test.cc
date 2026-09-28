@@ -137,6 +137,10 @@ int main(int argc, char** argv) {
   const std::string gdir = argc > 1 ? argv[1] : "oracle-out";
   const std::string pdir = argc > 2 ? argv[2] : "tests/golden/prompts";
   const std::string snap = argc > 3 ? argv[3] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
+  // argv[4] (spec 9): the lm_head form, bf16 (the checkpoint's; default) or int8.
+  loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
+  if (argc > 4) CHECK(loader::parse_lm_head_form(argv[4], lm_head));
+  std::printf("lm_head: %s\n", loader::lm_head_form_name(lm_head));
 
   for (const char* p : kPrompts) {
     const std::string g = gdir + "/" + p + ".golden.safetensors";
@@ -153,7 +157,7 @@ int main(int argc, char** argv) {
   // One load, one Engine, three prompts: reset() zeroes exactly the persistent
   // group between them, which is what starting a fresh session means. Loading
   // 19 GB three times would cost ~6 minutes and prove nothing extra.
-  loader::LoadedModel model = loader::load(ctx, snap, kMaxLen);
+  loader::LoadedModel model = loader::load(ctx, snap, kMaxLen, /*mtp=*/false, lm_head);
   CHECK(model.embed.size() >= size_t(Qwen35::kVocab) * kHid * 2);
   runtime::Engine eng(ctx, std::move(model), kMaxLen, /*debug_resid=*/true);
   CHECK(eng.debug_resid());

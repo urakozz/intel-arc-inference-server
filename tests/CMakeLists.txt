@@ -553,6 +553,9 @@ target_link_libraries(replay_determinism_test PRIVATE b70_runtime b70_loader b70
 add_dependencies(replay_determinism_test ${B70_DECODE_LIST_KERNELS})
 add_test(NAME replay_determinism_test COMMAND replay_determinism_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(replay_determinism_test PROPERTIES LABELS checkpoint TIMEOUT 900)
+# Spec 9 L4: replay determinism with the int8 lm_head (quantised at load).
+add_test(NAME replay_determinism_i8head_test COMMAND replay_determinism_test ${B70_TEST_SNAPSHOT} int8)
+set_tests_properties(replay_determinism_i8head_test PROPERTIES LABELS checkpoint TIMEOUT 900)
 
 # The same list driven through runtime::Engine - ingestion, greedy generation,
 # reset, the max_len wall and the timing the CLI prints. Same checkpoint, same
@@ -592,6 +595,11 @@ add_dependencies(golden_gate_test ${B70_DECODE_LIST_KERNELS})
 add_test(NAME golden_gate_test COMMAND golden_gate_test
   ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT})
 set_tests_properties(golden_gate_test PROPERTIES
+  LABELS "checkpoint;golden" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+# Spec 9 L3: the same gate with the int8 lm_head (argv[4]); the oracle stays bf16.
+add_test(NAME golden_gate_i8head_test COMMAND golden_gate_test
+  ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} int8)
+set_tests_properties(golden_gate_i8head_test PROPERTIES
   LABELS "checkpoint;golden" SKIP_RETURN_CODE 77 TIMEOUT 1800)
 
 # --- the prefill gates (spec 2 §6; spec 2.1 §2 bar 3) -------------------------------------
@@ -721,6 +729,16 @@ add_test(NAME prefill_gate_int8_test COMMAND prefill_gate_test
   ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
   prose,code,cjk 0 l0-int8 1)
 set_tests_properties(prefill_gate_int8_test PROPERTIES
+  LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+# Spec 9 L3: the l0 and l0-int8 gates again with the int8 lm_head (argv[8]). argv[7] is
+# each backend's standing near-tie allowance (0 on l0, 1 on l0-int8), unchanged.
+add_test(NAME prefill_gate_l0_i8head_test COMMAND prefill_gate_test
+  ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
+  prose,code,cjk 0 l0 0 int8)
+add_test(NAME prefill_gate_int8_i8head_test COMMAND prefill_gate_test
+  ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
+  prose,code,cjk 0 l0-int8 1 int8)
+set_tests_properties(prefill_gate_l0_i8head_test prefill_gate_int8_i8head_test PROPERTIES
   LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 add_test(NAME prefill_gate_int8_c1000_test COMMAND prefill_gate_test
   ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}

@@ -69,7 +69,9 @@ void usage() {
                "                                        not bitwise with a cold run)\n"
                "                 [--mtp K]   speculative decoding with the MTP head, K drafts\n"
                "                             per step (1..3; 0 = off, the default). Loads the\n"
-               "                             head (+1.4 GB); max-len 16384 only (spec 8).\n");
+               "                             head (+1.4 GB); max-len 16384 only (spec 8).\n"
+               "                 [--lm-head bf16|int8]   Default: int8 (spec 9: quantised at load\n"
+               "                 from the bf16 head; bf16 is the checkpoint's own head)\n");
 }
 
 uint32_t parse_u32(const char* what, const std::string& value) {
@@ -130,6 +132,8 @@ int run(int argc, char** argv) {
   bool have_pp_backend = false;
   uint32_t prefix_cache_gb = 32;
   uint32_t mtp_k = 0;
+  // Spec 9 §3: the serving default is the gated int8 head (amendment §8, L3).
+  loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -167,6 +171,10 @@ int run(int argc, char** argv) {
     } else if (arg == "--pp-backend") {
       pp_backend_arg = value(i, "--pp-backend");
       have_pp_backend = true;
+    } else if (arg == "--lm-head") {
+      const std::string v = value(i, "--lm-head");
+      if (!loader::parse_lm_head_form(v, lm_head))
+        throw std::runtime_error("--lm-head expects bf16 or int8, got '" + v + "'");
     } else if (!arg.empty() && arg[0] == '-') {
       usage();
       throw std::runtime_error("unknown option '" + arg + "'");
@@ -196,7 +204,7 @@ int run(int argc, char** argv) {
                device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
   loader::LoadedModel model = [&] {
     StdoutToStderr redirect;
-    return loader::load(context, snapshot_dir, max_len, mtp_k > 0);
+    return loader::load(context, snapshot_dir, max_len, /*mtp=*/mtp_k > 0, lm_head);
   }();
   runtime::Engine engine(context, std::move(model), max_len);
   if (have_pp_backend) engine.set_prefill_backend(pp_backend);
@@ -226,9 +234,10 @@ int run(int argc, char** argv) {
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
                options.host.c_str(), options.port, max_len);
   print_eos(eos);
-  std::fprintf(stderr, ", prefill backend %s (SYCL component %s), mtp %u\n",
+  std::fprintf(stderr, ", prefill backend %s (SYCL component %s), mtp %u, lm_head %s\n",
                runtime::prefill_backend_name(engine.prefill_backend()),
-               runtime::prefill::sycl_available() ? "on" : "off", mtp_k);
+               runtime::prefill::sycl_available() ? "on" : "off", mtp_k,
+               loader::lm_head_form_name(lm_head));
 
   g_server = &server;
   std::signal(SIGTERM, stop_server);

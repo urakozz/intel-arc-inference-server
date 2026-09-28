@@ -482,6 +482,81 @@ arithmetic rather than absorbed into a rounding. The attention lever is the one
 that did not close: predicted -2.045 ms, measured -1.73 ms, **0.32 ms apart**,
 and the difference is recorded as unattributed rather than explained away.
 
+### int8 lm_head (spec 9)
+
+**Every row in this file names its head form. Rows without a form are bf16, the
+checkpoint's own head, byte-matched with vLLM; the vLLM comparison rows stay bf16.**
+`--lm-head int8` quantises the bf16 head at load to int8 rows with one fp32 scale per
+row (W8A16, `src/loader/lm_head_int8.h`) and reads it with `gemv_i8w`. It is
+`b70-serve`'s default. `b70-decode` defaults to bf16.
+
+Interleaved pairs after a warm-up, box 2026-09-28 17:12-17:16 (`uptime` load 0.25 at
+the start, 2.22 at the end; other agents share the box but run under the same GPU
+lock), device 0, `tools/probe/lm_head_pairs.sh`, sha `b7e8d52-dirty` (the plan 9b
+tree before its record commit). Each run is `b70-decode --bench --pp 4096 --tg 256`:
+
+| pair | head | decode t/s at 4096 | ms/token | pp4096 t/s (l0-int8) |
+|---|---|---:|---:|---:|
+| 1 | bf16 | 29.38 | 34.03 | 2166.10 |
+| 1 | int8 | 31.21 | 32.04 | 2164.00 |
+| 2 | int8 | 31.21 | 32.04 | 2160.43 |
+| 2 | bf16 | 29.38 | 34.04 | 2159.22 |
+| 3 | bf16 | 29.38 | 34.04 | 2162.26 |
+| 3 | int8 | 31.25 | 32.00 | 2155.51 |
+| **median** | **bf16** | **29.38** | 34.04 | **2162.26** |
+| **median** | **int8** | **31.21** | 32.04 | **2160.43** |
+
+- **H1, decode, pass:** 31.21 / 29.38 = **1.062x** (bar 1.06x), -2.00 ms per token.
+  vLLM's 31.01 t/s is bf16 and is not compared with the int8 row.
+- **H3, prefill, pass:** pp4096 -0.08 % (bar 1 %). Prefill reads the head once.
+- **The head launch in situ** (`b70-decode --profile --depth 512 --steps 32`, 32
+  replays): bf16 `gemv_bf16` 4387.992 us for 2,542,796,800 B = **579.5 GB/s**;
+  int8 `gemv_i8w` 2204.674 us for 1,272,391,680 B (1,271,398,400 weight + 993,280
+  scale) = **577.1 GB/s**, 99.6 % of the bf16 launch's rate. The kernel keeps the
+  saving whole: 2.183 ms per launch in the profile, 2.00 ms per token on the bench.
+  The kernel test's isolated figure is 581.1 GB/s at M = 1 and 558.6 GB/s at M = 4
+  (`gemv_i8w_test`, a loaded box).
+- **H2, MTP (spec 8's engine), recorded:** `probe_mtp_steps <snap> 4096 32 3 <head>`,
+  two interleaved pairs, medians agree to 0.1 %:
+
+  | list | bf16 head | int8 head | |
+  |---|---:|---:|---:|
+  | draft k=1 | 6.42 ms | 4.26 ms | -34 % |
+  | draft k=3 | 19.00 ms | 12.50 ms | -34 % |
+  | verify M=1 | 34.73 ms | 32.65 ms | -6.0 % |
+  | verify M=4 | 60.28 ms | 58.35 ms | -3.2 % |
+
+  A K = 3 iteration (three drafts + verify at M = 4) goes from 79.28 to 70.85 ms
+  (derived, -10.6 %). Acceptance is not re-measured here: the engine has no
+  acceptance loop until plan 8c. What the head changes in the draft's argmax is
+  what L1 measures (1 near-tie flip in 2790 rows).
+
+**Accuracy (spec 9 §4, as amended in §8):**
+
+- **L1/L2 on the card** (`tools/probe/probe_lm_head_l1`: the engine's int8-head logits
+  against its bf16-head logits from the same replay's hidden, teacher-forced on the
+  3 golden prompts + 32 golden tokens and all 36 A4 scenarios + the bf16 oracle's
+  output; 2790 rows): cosine min **0.9999147**; argmax 1 mismatch, a bf16 near-tie;
+  top-20 equal 91.1 % raw and **99.9 %** under the amended rule (4 rows differ across
+  a gap >= 0.05, max 0.064, all on A4 rows); unfiltered KL mean / p99 **8.6e-6 /
+  1.9e-4** at T 1.0 and **1.4e-5 / 4.0e-4** at T 0.6. Pass. Dropped mass under the
+  k 20 / p 0.95 filter, recorded: max 0.027 (T 1.0), 0.040 (T 0.6). The golden
+  prompts alone (99 rows) agree with plan 9a's CPU table (cosine min 0.9999147 here
+  and 0.9999148 in 9a; unfiltered KL 9.8e-5 / 5.3e-4 at T 1.0 and 1.7e-4 / 1.0e-3
+  at T 0.6, as in 9a's golden column). Alone, those 99 rows are inside the KL bars
+  at T 1.0 and above them at T 0.6; the bars are graded over the whole set, which
+  is how 9a's verdict and the amendment's numbers took them.
+- **L3, end to end, pass:** `golden_gate_i8head_test` (decode) and the prefill gates
+  on `l0` and `l0-int8` with the int8 head (`prefill_gate_{l0,int8}_i8head_test`):
+  **93/93 determined rows exact** each, the same 3 undetermined rows inside the
+  oracle's argmax set. **Gate A4:** `l0-int8` + int8 head **25 / 36** against the
+  bf16 model, the same as with the bf16 head (`LM_HEAD=int8
+  tools/toolcall/engine_generate.sh`, `score.py ... bf16 l0-int8 l0-int8-i8head`).
+- **L4, pass:** `replay_determinism_i8head_test` (774 kernels, 19 modules, 8 tokens x
+  3 runs bitwise); every bf16-head registration unchanged.
+- **Load:** the host quantisation takes 0.35-0.75 s on 44 threads, and the load is
+  13.6 s against 14.4 s for bf16 (fewer bytes to upload).
+
 ### The one thing on the decode path that was measured three ways and did not close
 
 The int4 `lm_head` lever was priced in situ at **3.203 ms**, at iterate-grade
@@ -679,6 +754,7 @@ Numerics are gated, not eyeballed. The full protocol is in
 | `prefill_gate_test` | One `Engine::prefill` per prompt, same oracle, same tally. |
 | `prefill_backend_equivalence_test` | The Level Zero and sycl-tla prefill paths agree **bitwise**: 0 words differing, 0 sign-of-zero differences, on all five case families. |
 | `replay_determinism_test` | 774 kernels, 19 modules captured; 8 tokens by 3 runs bitwise identical from reset. |
+| `*_i8head_test` (spec 9) | The same golden, prefill and replay gates with `--lm-head int8`: 93/93, bitwise replay. |
 | `prefill_replay_test` | Exact bytes of GDN state, convolution ring, both KV caches, control block and logits, across two full chunks plus a ragged tail. |
 
 Suite total: **86 tests**, all passing.

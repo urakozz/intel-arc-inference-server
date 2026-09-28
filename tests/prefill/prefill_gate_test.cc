@@ -138,6 +138,12 @@ int main(int argc, char** argv) {
   const uint32_t near_tie_allowed =
       argc > 7 ? uint32_t(std::atoi(argv[7]))
                : (backend == runtime::PrefillBackend::L0Int8 ? 1u : 0u);
+  // argv[8] (spec 9): the lm_head form, bf16 (the checkpoint's; default) or int8. The
+  // oracle is the bf16 CPU model either way, so an int8 run grades the head's error on
+  // top of the engine's (spec 9 §4 L3).
+  loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
+  if (argc > 8) CHECK(loader::parse_lm_head_form(argv[8], lm_head));
+  std::printf("lm_head: %s\n", loader::lm_head_form_name(lm_head));
   CHECK(!prompts.empty());
 
   for (const std::string& p : prompts) {
@@ -152,7 +158,7 @@ int main(int argc, char** argv) {
   }
 
   l0::Context ctx(0);
-  loader::LoadedModel model = loader::load(ctx, snap, kMaxLen);
+  loader::LoadedModel model = loader::load(ctx, snap, kMaxLen, /*mtp=*/false, lm_head);
   // debug_resid=false: ruling R6 gives the prefill walk no per-layer tap, so
   // there is nothing for it to fill and the 64 device copies a token would be
   // paid for nothing.
