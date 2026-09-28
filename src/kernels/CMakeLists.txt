@@ -298,6 +298,17 @@ add_attn_prep(2)
 add_attn_decode(2 4096)
 add_attn_reduce(2 4096)
 
+# Spec 10 (plan 10b): decode attention v2 (attn_v2.cl), M = 1..4, one binary per M
+# holding attn_decode_v2 + attn_reduce_v2. No MAXLEN (the grid is (4, TGT) and the
+# partials [24][TGT][M][258] at every max_len); TGT is the host's
+# runtime::DecodeScratch::kAttnV2Blocks and is in the name (`_T32`), as ATTN_BLOCK is.
+set(ATTN_V2_TGT 32 CACHE INTERNAL
+    "work-groups per kv head of attn_decode_v2; must equal runtime::DecodeScratch::kAttnV2Blocks")
+foreach(MM 1 2 3 4)
+  add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                   DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT})
+endforeach()
+
 # Spec 8a (MTP probe): the whole decode list at M = 2, 3, 4 - every variant
 # runtime::build binds at max_len 16384 with the production checkpoint's bf16
 # lm_head - so tools/probe/probe_verify_m can capture the real list at M rows.

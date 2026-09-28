@@ -155,6 +155,15 @@ inline std::string attn_reduce_variant(unsigned M, unsigned MAXLEN, unsigned BLO
          std::to_string(BLOCK);
 }
 
+// Spec 10 (plan 10b): decode attention v2 (src/kernels/attn_v2.cl) - `attn_decode_v2`
+// and `attn_reduce_v2` in ONE binary per M. No MAXLEN: the grid is (4, T) and
+// `attn_part` is strided [24][T][M][258] whatever max_len is. `T` (work-groups per kv
+// head, the stride target) is in the name for the reason `B` is above: the host's copy
+// is `runtime::DecodeScratch::kAttnV2Blocks`, the device's `-DTGT`.
+inline std::string attn_v2_variant(unsigned M, unsigned T) {
+  return "attn_v2_M" + std::to_string(M) + "_T" + std::to_string(T);
+}
+
 // Spec 8 (plan 8b): the MTP lists' variants (src/kernels/CMakeLists.txt, B70_MTP).
 // `_Z`: prep_res_fold with ZERO_RESID (the residual starts at the fold's partials);
 // `_X<stride>`: prep_norm_finish writing rows at that pitch; `_S1`: the kernel's baked

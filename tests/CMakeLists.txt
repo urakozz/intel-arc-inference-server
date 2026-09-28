@@ -406,6 +406,22 @@ add_dependencies(attn_test kernel_attn_prep_M1
   kernel_attn_decode_M1_L16384_B${ATTN_BLOCK} kernel_attn_reduce_M1_L16384_B${ATTN_BLOCK})
 add_test(NAME attn_test COMMAND attn_test)
 
+# Spec 10 A1 (plan 10b Task 1): decode attention v2 against v1. Part S (synthetic)
+# always; part D on plan 10a's real capture when B70_ATTN_V2_DUMP names it (the box
+# keeps it at ~/spec10a-dump).
+set(B70_ATTN_V2_DUMP "$ENV{HOME}/spec10a-dump" CACHE PATH "plan 10a's decode-attention capture")
+add_executable(attn_v2_test kernels/attn_v2_test.cc)
+target_include_directories(attn_v2_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(attn_v2_test PRIVATE b70_l0)
+b70_target_kernel_dir(attn_v2_test)
+add_dependencies(attn_v2_test
+  kernel_attn_decode_M1_L4096_B${ATTN_BLOCK} kernel_attn_reduce_M1_L4096_B${ATTN_BLOCK}
+  kernel_attn_decode_M1_L131072_B${ATTN_BLOCK} kernel_attn_reduce_M1_L131072_B${ATTN_BLOCK}
+  kernel_attn_v2_M1_T${ATTN_V2_TGT} kernel_attn_v2_M2_T${ATTN_V2_TGT}
+  kernel_attn_v2_M3_T${ATTN_V2_TGT} kernel_attn_v2_M4_T${ATTN_V2_TGT})
+add_test(NAME attn_v2_test COMMAND attn_v2_test ${B70_ATTN_V2_DUMP})
+set_tests_properties(attn_v2_test PROPERTIES TIMEOUT 900)
+
 # The two kernels at a token's boundary. Both read the shared control block at
 # *execution* time, which is what the replayed list needs and what a kernel
 # argument (captured at append - tests/l0/arg_capture_test.cc) could not give.
@@ -537,7 +553,7 @@ set(B70_DECODE_LIST_KERNELS
   kernel_prep_norm_finish_M1_K5120_G20_W20
   kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1 kernel_gdn_step_M1
   kernel_attn_prep_M1 kernel_attn_decode_M1_L16384_B${ATTN_BLOCK}
-  kernel_attn_reduce_M1_L16384_B${ATTN_BLOCK}
+  kernel_attn_reduce_M1_L16384_B${ATTN_BLOCK} kernel_attn_v2_M1_T${ATTN_V2_TGT}
   kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K5120_N14336_S2_L0
   kernel_gemv_M1_K6144_N5120_S4_L0 kernel_gemv_M1_K5120_N34816_S8_L0
   kernel_gemv_M1_K17408_N5120_S4_L0 kernel_gemv_M1_K5120_N248320_S1_L1
