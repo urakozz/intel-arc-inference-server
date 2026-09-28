@@ -294,7 +294,7 @@ one resident session on the card and a write-through store in pinned host RAM
 (`--prefix-cache-gb`, default 32, `0` = off). The GDN state cannot be rewound, so
 reuse needs snapshots of it: the store (`src/server/prefix_cache.{h,cc}`) keeps KV
 blocks of 2048 positions and state snapshots (at every block end, at every prompt's
-`len - 1`, at every request's end) in a tree keyed by exact token ids, LRU over leaves.
+end, at every request's end) in a tree keyed by exact token ids, LRU over leaves.
 A request continues the resident session when its ids extend it, otherwise restores
 the deepest snapshot that is a prefix of the prompt (state plus the KV the card does
 not already hold), and prefills only the tail; `usage.prompt_tokens_details.cached_tokens`
