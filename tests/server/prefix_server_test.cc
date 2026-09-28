@@ -34,7 +34,7 @@ struct MallocAlloc : server::HostAlloc {
 };
 
 struct Fixture {
-  explicit Fixture(size_t cache_bytes) {
+  explicit Fixture(size_t cache_bytes, bool split = true) {
     for (int i = 0; i < 24; ++i) engine.words.push_back(tok.id_of("w" + std::to_string(i)));
     options.host = "127.0.0.1";
     options.port = 0;
@@ -42,6 +42,7 @@ struct Fixture {
     options.eos_ids = {248046};
     options.prefix_cache_bytes = cache_bytes;
     options.prefix_alloc = &alloc;
+    options.prefix_split_last = split;   // the mechanism tests run the opt-in split
     server = std::make_unique<server::Server>(server::Deps{tok, tmpl, engine}, options);
     CHECK(server->start());
   }
@@ -260,6 +261,22 @@ void test_completions_unsplit() {
   std::printf("completions: no split, the repeat restores below the prompt end OK\n");
 }
 
+void test_chat_unsplit() {
+  // The default (no split): the same chat prompt again restores at the block end below it
+  // and prefills the rest; no decode replay of a prompt id.
+  Fixture on(size_t(1) << 20, false), off(0, false);
+  const json conv = json::array({msg("system", words("sys", 13)), msg("user", "again")});
+  const auto a = on.chat(conv, 6);
+  (void)off.chat(conv, 6);
+  const auto b = on.chat(conv, 6);
+  const auto c = off.chat(conv, 6);
+  CHECK(a.content == b.content && b.content == c.content);
+  const uint32_t len = uint32_t(b.prompt_ids.size());
+  CHECK_EQ(b.cached, (len - 1) / 4 * 4);
+  CHECK_EQ(on.engine.ingested, size_t(0));
+  std::printf("chat without the split: the repeat restores at %u of %u OK\n", b.cached, len);
+}
+
 void test_small_budget() {
   // A budget below one session's entries: requests still succeed and agree.
   Fixture tiny(96);
@@ -291,6 +308,7 @@ int main() {
   test_same_prompt();
   test_history_drops_last_id();
   test_completions_unsplit();
+  test_chat_unsplit();
   test_small_budget();
   std::printf("prefix_server_test OK\n");
   return 0;

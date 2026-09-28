@@ -11,6 +11,7 @@
 // Before each S1 run the resident session is re-made A (a restore at the last block end
 // and a short prefill, untimed).
 //   probe_prefix_s12 <snapshot> <long32k.ids> [--history 60000] [--tail 1000] [--gb 32]
+//                    [--split 0|1]   (1: PrefixSession's opt-in split_last)
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -78,13 +79,14 @@ int main(int argc, char** argv) {
                          " [--gb G]\n");
     return 2;
   }
-  uint32_t history = 60000, tail = 1000, gb = 32;
+  uint32_t history = 60000, tail = 1000, gb = 32, split = 0;
   for (int i = 3; i + 1 < argc; i += 2) {
     const std::string a = argv[i];
     const uint32_t v = uint32_t(std::stoul(argv[i + 1]));
     if (a == "--history") history = v;
     else if (a == "--tail") tail = v;
     else if (a == "--gb") gb = v;
+    else if (a == "--split") split = v;
   }
   const Ids L = read_ids(argv[2]);
   const Ids H = repeat_to(L, history);
@@ -95,10 +97,12 @@ int main(int argc, char** argv) {
   EngineAdapter ad(eng, model::Qwen35::kVocabUsed);
   PinnedAlloc alloc(ctx, size_t(gb) << 30);
   server::PrefixSession s(ad, alloc.mem.size(), &alloc);
-  std::printf("probe_prefix_s12: history %u, tail %u, cache %u GiB, backend %s\n", history, tail,
-              gb, runtime::prefill_backend_name(eng.prefill_backend()));
+  const bool sp = split != 0;
+  const auto begin = [&](const Ids& p) { return s.begin(p, sp); };
+  std::printf("probe_prefix_s12: history %u, tail %u, cache %u GiB, split_last %u, backend %s\n",
+              history, tail, gb, split, runtime::prefill_backend_name(eng.prefill_backend()));
 
-  auto r = s.begin(H);
+  auto r = begin(H);
   print("A (cold)", r, H.size());
   const Ids A = cat(H, gen(s, ad, 16));
   std::printf("  request end: store %.1f ms\n", s.end());
@@ -107,23 +111,23 @@ int main(int argc, char** argv) {
   std::vector<double> s1, s2, s2_restore;
   for (int run = 0; run < 4; ++run) {   // run 0 is the warm-up
     // S1: re-make the resident session A, then the continuation.
-    r = s.begin(A);
+    r = begin(A);
     print("re-make A", r, A.size());
     s.end();
     const Ids b1 = cat(A, slice(L, 2000 + 2 * tail * run, tail));
-    r = s.begin(b1);
+    r = begin(b1);
     print(run ? "S1" : "S1 warm", r, b1.size());
     if (r.kind != server::PrefixCache::Plan::Continue) std::printf("  ** S1 did not continue **\n");
     if (run) s1.push_back(r.restore_ms + r.prefill_ms + r.store_ms);
     (void)gen(s, ad, 4);
     s.end();
     // S2: a side request, then the main session back.
-    r = s.begin(side);
+    r = begin(side);
     print("side", r, side.size());
     (void)gen(s, ad, 8);
     s.end();
     const Ids b2 = cat(A, slice(L, 2000 + 2 * tail * run + tail, tail));
-    r = s.begin(b2);
+    r = begin(b2);
     print(run ? "S2" : "S2 warm", r, b2.size());
     if (r.kind != server::PrefixCache::Plan::Restore) std::printf("  ** S2 did not restore **\n");
     if (run) {
