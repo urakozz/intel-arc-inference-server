@@ -92,6 +92,13 @@ struct DecodeScratch {
   // again - 50.7 → 101.4 MB, per-step scratch 77.6 → 128.3 MB - to buy that
   // 0.070 ms. docs/12 `attn` → Measured carries the arithmetic.
   static constexpr uint32_t kAttnBlock = 64;
+  // Spec 10 (plan 10b): decode attention v2's work-groups per kv head, TGT in
+  // src/kernels/attn_v2.cl and `_T32` in its variant name. v2 walks a row of L keys in
+  // blocks of max(64, roundup64(ceil(L / 32))) positions, so no row has more than 32
+  // partials: v2 uses attn_part's first 24 x 32 x M x 258 floats, which fits inside
+  // v1's [24][max_len / kAttnBlock][M][258] allocation for every max_len >= 2048 -
+  // attn_part keeps v1's size while v1 stays selectable (buffers_test pins both).
+  static constexpr uint32_t kAttnV2Blocks = 32;
   // **prep_res_norm's two-stage grid** (spec 1.5 lever L1). Stage A
   // (`prep_res_fold`) runs this many work-groups over the hidden row and writes
   // one fp32 sum-of-squares each; stage B (`prep_norm_finish`) folds exactly
@@ -258,6 +265,7 @@ struct DecodeBuffers {
   static constexpr uint32_t kM = DecodeScratch::kM;
   static constexpr uint32_t kConvRing = PersistentBuffers::kConvRing;
   static constexpr uint32_t kAttnBlock = DecodeScratch::kAttnBlock;
+  static constexpr uint32_t kAttnV2Blocks = DecodeScratch::kAttnV2Blocks;
   static constexpr uint32_t kNormGroups = DecodeScratch::kNormGroups;
 
   DecodeBuffers(l0::Context& ctx, uint32_t max_len);        // owning
