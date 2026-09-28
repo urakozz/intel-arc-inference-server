@@ -33,9 +33,9 @@ struct Options {
   // request, exactly the server before it) and the pinned host allocator it draws from.
   size_t prefix_cache_bytes = 0;
   HostAlloc* prefix_alloc = nullptr;
-  // Chat requests feed the last prompt id by a decode replay so that the prompt-end
-  // snapshot sits at len - 1 (PrefixSession::begin). Completions never do.
-  bool prefix_split_last = true;
+  // Opt-in: chat requests feed the last prompt id by a decode replay so that the
+  // prompt-end snapshot sits at len - 1 (PrefixSession::begin). Completions never do.
+  bool prefix_split_last = false;
 };
 
 class Server {

@@ -25,7 +25,10 @@
 //      cache (prefill [0,2999), prefill [2999,3699), the last id by a replay), against the
 //      one full prefill -- what the split alone costs.
 // argv: [1] snapshot, [2] prompts dir, [3] backend l0 | l0-int8 (default: the build's),
-//       [4] near-tie flips allowed per sequence (default 1 on l0-int8, else 0).
+//       [4] near-tie flips allowed per sequence (default 1 on l0-int8, else 0),
+//       [5] split: 1 = PrefixSession's opt-in split_last (the plans above), 0 = the default
+//           (b restores at 3000, f at the block end 2048 and prefills the rest, g splits
+//           the prefill at 3000 with no replay).
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -51,6 +54,7 @@ using model::Qwen35;
 using Ids = std::vector<uint32_t>;
 constexpr uint32_t kMaxLen = 16384;
 constexpr uint32_t kGen = 32;
+bool g_split = false;   // argv[5]
 
 Ids slice(const Ids& v, size_t a, size_t b) { return Ids(v.begin() + a, v.begin() + b); }
 Ids cat(Ids a, const Ids& b) {
@@ -102,7 +106,7 @@ struct Rig {
 // One request through the cache: begin, n greedy steps, the request-end snapshot.
 Ids turn(server::PrefixSession& s, EngineAdapter& ad, const Ids& prompt, uint32_t n,
          server::PrefixSession::Report* rep = nullptr) {
-  const auto r = s.begin(prompt);
+  const auto r = s.begin(prompt, g_split);
   if (rep) *rep = r;
   std::printf("    turn of %zu ids: %s at %u, kv %.1f MB, restore %.1f ms, prefill %.1f ms,"
               " store %.1f ms\n", prompt.size(), server::plan_kind_name(r.kind), r.restart,
@@ -123,6 +127,8 @@ struct Seq {
   uint32_t restart;
 };
 
+
+
 bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t allowed) {
   std::printf("\n== sequence %s ==\n", want.name.c_str());
   rig.eng.reset();
@@ -133,14 +139,19 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
     // The control for b: no cache, the same final prompt prefilled as two calls split at
     // 3000 -- the chunking difference alone, judged the same way.
     final_prompt = cat(slice(L, 0, 3000), slice(C, 0, 700));
-    rig.eng.prefill(slice(final_prompt, 0, 2999));
-    rig.eng.prefill(slice(final_prompt, 2999, final_prompt.size() - 1));
-    rig.eng.ingest({final_prompt.back()});
+    if (g_split) {
+      rig.eng.prefill(slice(final_prompt, 0, 2999));
+      rig.eng.prefill(slice(final_prompt, 2999, final_prompt.size() - 1));
+      rig.eng.ingest({final_prompt.back()});
+    } else {
+      rig.eng.prefill(slice(final_prompt, 0, 3000));
+      rig.eng.prefill(slice(final_prompt, 3000, final_prompt.size()));
+    }
     rep.kind = want.kind;
     rep.restart = want.restart;
     server::Sampling greedy;
     for (uint32_t p = 0; p < kGen; ++p) {
-      cand_rows.push_back(rig.row(false));   // the last prompt id was a decode replay
+      cand_rows.push_back(rig.row(p == 0 && !g_split));
       cand_tok.push_back(rig.ad.step(greedy));
     }
   } else {
@@ -164,13 +175,15 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
       (void)turn(s, rig.ad, slice(L, 20000, 20300), 8);
       final_prompt = t1;
     }
-    rep = s.begin(final_prompt);
+    rep = s.begin(final_prompt, g_split);
     std::printf("    final turn of %zu ids: %s at %u, kv %.1f MB, restore %.1f ms, prefill %.1f"
                 " ms, store %.1f ms\n", final_prompt.size(), server::plan_kind_name(rep.kind),
                 rep.restart, rep.kv_bytes / 1e6, rep.restore_ms, rep.prefill_ms, rep.store_ms);
     server::Sampling greedy;
     for (uint32_t p = 0; p < kGen; ++p) {
-      cand_rows.push_back(rig.row(false));   // the session fed the last prompt id by a replay
+      // With the split the last prompt id was a decode replay; without it row 0 is the
+      // prefill's.
+      cand_rows.push_back(rig.row(p == 0 && !g_split));
       cand_tok.push_back(rig.ad.step(greedy));
       s.fed(cand_tok.back());
     }
@@ -240,6 +253,7 @@ int main(int argc, char** argv) {
   if (argc > 3) CHECK(runtime::parse_prefill_backend(argv[3], backend));
   const uint32_t allowed = argc > 4 ? uint32_t(std::atoi(argv[4]))
                                     : (backend == runtime::PrefillBackend::L0Int8 ? 1u : 0u);
+  g_split = argc > 5 && std::atoi(argv[5]) != 0;
   const Ids L = golden::read_ids(pdir + "/long32k.ids");
   const Ids C = repeat_to(golden::read_ids(pdir + "/code.ids"), 700);
   CHECK(L.size() >= 20300);
@@ -248,19 +262,19 @@ int main(int argc, char** argv) {
   runtime::Engine eng(ctx, loader::load(ctx, snap, kMaxLen), kMaxLen);
   eng.set_prefill_backend(backend);
   eng.prepare_prefill();
-  std::printf("prefix_gpu_test: backend %s, near-tie allowance %u\n",
-              runtime::prefill_backend_name(eng.prefill_backend()), allowed);
+  std::printf("prefix_gpu_test: backend %s, near-tie allowance %u, split_last %d\n",
+              runtime::prefill_backend_name(eng.prefill_backend()), allowed, int(g_split));
   EngineAdapter ad(eng, Qwen35::kVocabUsed);
   PinnedAlloc alloc(ctx, size_t(6) << 30);
   Rig rig{eng, ad, alloc, l0::CmdList::immediate(ctx)};
 
   using K = server::PrefixCache::Plan;
   const std::vector<Seq> seqs = {{"a continue", K::Continue, 3064},
-                                 {"b prompt end", K::Restore, 2999},
+                                 {"b prompt end", K::Restore, g_split ? 2999u : 3000u},
                                  {"c mid-block", K::Restore, 4096},
                                  {"d block boundary", K::Restore, 4096},
                                  {"e side request", K::Restore, 5064},
-                                 {"f same prompt", K::Restore, 3499},
+                                 {"f same prompt", K::Restore, g_split ? 3499u : 2048u},
                                  {"g control for b: its split, no cache", K::Cold, 0}};
   bool all = true;
   for (const Seq& s : seqs) all = run_seq(rig, s, L, C, allowed) && all;
