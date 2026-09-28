@@ -33,6 +33,11 @@ stated once in 120k tokens of filler is found at 5, 50 and 95% depth (spec 6).
 Both attention kernels are still slow at depth: 747 t/s prefill and 10.2 t/s
 decode at 128k.
 
+Long agentic sessions reuse their history (spec 7): the server keeps the last session on
+the card and writes every prefill through to a pinned host store (`--prefix-cache-gb`,
+default 32), so a turn at 60k tokens of history reaches its first token in 1.23 s instead
+of re-prefilling for 45 s, and 1.58 s when a side request evicted the card in between.
+
 Checkpoint is `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`, int4 weights with
 group size 64, bf16 activations. vLLM serves the exact same files, which is what
 makes the comparison fair. Full protocol and every row is in

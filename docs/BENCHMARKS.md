@@ -428,6 +428,31 @@ pp130816 4.7-17.3. Spreads within an arm are <= 0.45%. F1 (80 ms): R 101 ms, mis
 E would meet it (80.5-81.9 ms). RPW 8 alone does not change the numerics: K3a's cosines
 are bit-identical to main's (`l0` 0.999960061, `l0-int8` 0.999934564).
 
+## Prefix caching (spec 7)
+
+Spec 7 (plans 7a-7c, 2026-09-27/28): `b70-serve --prefix-cache-gb 32` (the default)
+continues the resident session or restores the deepest host snapshot and prefills only the
+tail. Device 0, `l0-int8`, max_len 131072. Records: docs/probe-prefix-cache-2026-09-27.md.
+
+- **P0**: pinned host copies at 14.2 GB/s device to host, 12.2-12.9 GB/s host to device;
+  48 GiB pinned allocation fine; tail floor 316 ms at depth 0, 505 ms at 60k (16 ids).
+- **S3** write-through: +2.03% on cold pp4096, +1.24% on pp32768 (bar 3%).
+- **S1** continuation, 60000 ids of history + a 1000-id tail, time to first token:
+  **1233.4 ms** (bar 1500; cold prefill of the history alone: 45.2 s). Load 8.6-11.9.
+- **S2** the same after a 300-id side request: restore **347.7 ms** (3933 MB of KV + the
+  state from host, bar 1000), time to first token 1581.2 ms.
+- **Replay** of a synthetic opencode-shaped session (15 requests, 2 side), cache on vs off:
+  outputs bitwise equal, time to first token per request:
+
+| request | 1 | 2 | 3 | 4s | 5 | 6 | 7 | 8 | 9 | 10s | 11 | 12 | 13 | 14 | 15 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| prompt ids | 1703 | 1792 | 3435 | 111 | 4982 | 5108 | 7076 | 7931 | 8040 | 98 | 8166 | 8251 | 8336 | 10153 | 12026 | |
+| on, s | 0.95 | 0.95 | 1.85 | 0.41 | 1.66 | 0.67 | 1.72 | 1.08 | 1.13 | 0.41 | 1.19 | 1.53 | 0.49 | 1.18 | 2.27 | 17.46 |
+| off, s | 0.91 | 0.91 | 1.80 | 0.38 | 2.54 | 2.56 | 3.60 | 3.99 | 4.03 | 0.38 | 4.06 | 4.42 | 4.46 | 5.16 | 6.23 | 45.44 |
+
+  The real recorded opencode session (C3) is pending; rerun with
+  `tools/prefix/replay_ab.sh tests/golden/opencode/session1 ~/c3`.
+
 ## Decode
 
 All rows: device 0, depth 4096, 256 generated tokens, median of three on an
