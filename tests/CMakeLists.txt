@@ -1046,6 +1046,12 @@ if(B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0-int8 1 1)
   set_tests_properties(prefix_gpu_l0_test prefix_gpu_int8_test prefix_gpu_split_l0_test
     prefix_gpu_split_int8_test PROPERTIES LABELS checkpoint TIMEOUT 1800)
+  # Spec 8 M5 (plan 8c): C2 with the MTP head loaded and the adapter at --mtp 3.
+  if(B70_MTP)
+    add_test(NAME prefix_gpu_mtp_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
+      ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0-int8 1 0 3)
+    set_tests_properties(prefix_gpu_mtp_test PROPERTIES LABELS checkpoint TIMEOUT 1800)
+  endif()
 endif()
 
 # --- spec 8 (plan 8b): MTP in the engine ------------------------------------------------
