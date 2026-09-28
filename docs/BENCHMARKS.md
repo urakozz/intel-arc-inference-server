@@ -457,7 +457,7 @@ tail. Device 0, `l0-int8`, max_len 131072. Records: docs/probe-prefix-cache-2026
 llama-benchy --pp 1024 --tg 64 --depth 0 4096 16384 32768 --enable-prefix-caching
 --exact-tg --latency-mode generation --runs 3` through `tools/probe/serve_benchy.sh`,
 `b70-serve --max-len 131072` (int8 `lm_head`, `--mtp 0`), `--prefix-cache-gb 0` against
-32, one after the other. `ctx_pp @ dN` loads N tokens of context; `pp1024 @ dN` is the
+32, one after the other (decode attention v1: main before spec 10). `ctx_pp @ dN` loads N tokens of context; `pp1024 @ dN` is the
 follow-up turn (the context plus a new 1024-token user message). Time to first response:
 
 | follow-up after | cache off | cache on | |
@@ -473,6 +473,63 @@ Decode is unchanged by the cache (tg64 30.78 / 25.79 / 21.26 t/s off, 30.79 / 25
 message, so the prompt diverges at the previous prompt's assistant header, a few ids
 before its end, and the restore falls back to the last 2048-id block snapshot, re-prefilling
 up to ~2000 extra ids. A snapshot at the generation prompt's start would close that.
+
+## Decode attention at depth (spec 10)
+
+Spec 10 (plans 10a and 10b, 2026-09-28): decode attention is `attn_decode_v2` +
+`attn_reduce_v2` (src/kernels/attn_v2.cl), the default since plan 10b; v1 (attn.cl's pair)
+stays selectable with `B70_DECODE_ATTN=v1`. Many positions per work-group with the stride
+derived per row from the row's key count (at most 32 partials per row, from 2045 at 128k),
+K by sub-group block reads and V by 2D block reads, one K/V wave feeding all 6 x M rows,
+one barrier per wave. It ships with attn.cl's `exp`: the approved exp2 form failed the
+golden gate (spec 10 §8). Design record: docs/probe-decode-attn-2026-09-28.md; gates:
+spec 10 §8.
+
+**The captured decode step, v1 against v2** (`probe_decode_attn ab`: one engine, both
+lists captured over the same buffers after prefilling `long32k.ids` tiled to the deepest
+depth; 2 warm-up steps per arm, then 3 interleaved rounds of 16 steps each with the order
+alternating, `pos` rewound to the depth before every step; median of the rounds and the
+median paired ratio). Device 0, `l0-int8` prefill, bf16 `lm_head` (the branch predates spec
+9's int8 head), every job under the GPU lock.
+
+max_len 131072 (uptime load average 1.24 at start, 1.01 at end):
+
+| depth | v1 ms/step | v2 ms/step | v1 t/s | v2 t/s | paired v1/v2 | A-F3 bar |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4096 | 33.718 | 31.842 | 29.66 | **31.41** | 1.059 | (A-F4: no regression) |
+| 32768 | 48.433 | 35.913 | 20.65 | **27.85** | 1.348 | 23.6 |
+| 65536 | 64.834 | 40.798 | 15.42 | **24.51** | 1.588 | 21.0 |
+| 130816 | 98.355 | 49.679 | 10.17 | **20.13** | 1.977 | 17.3 |
+
+v1's column reproduces spec 6's F3 rows (29.28 / 20.60 / 15.46 / 10.19 t/s, tg 256) within
+1.3%. 10a's derived prediction for the exp form was 28.09 / 25.40 / 21.03 t/s. The exp2
+build, same method in an earlier session (load 3.49 / 1.74), gave 31.49 / 28.21 / 25.27 /
+21.04 t/s.
+
+max_len 16384, the decode list at M = 1 and the M = 2..4 lists spec 8's verify uses (ms
+per step of M rows; uptime load average 1.01 at start, 1.03 at end):
+
+| M | depth | v1 ms/step | v2 ms/step | paired v1/v2 |
+|---:|---:|---:|---:|---:|
+| 1 | 4096 | 33.706 | 31.772 | 1.060 |
+| 1 | 12288 | 37.911 | 33.029 | 1.148 |
+| 2 | 4096 | 39.364 | 36.029 | 1.093 |
+| 2 | 12288 | 46.619 | 37.974 | 1.225 |
+| 3 | 4096 | 51.369 | 46.776 | 1.098 |
+| 3 | 12288 | 61.422 | 49.326 | 1.242 |
+| 4 | 4096 | 58.683 | 52.985 | 1.107 |
+| 4 | 12288 | 72.142 | 56.275 | 1.278 |
+
+The M = 2..4 lists exist at max_len 16384 only (spec 8), so verify-step times at 32k and
+beyond are not measured in the list; 10a's kernel-level M = 4 figures are the estimate
+there.
+
+**Correctness.** Against v1 on plan 10a's real layer-15 q/KV: worst cosine 0.999999491
+(65536), max abs 0.0156 (one bf16 ulp), bitwise repeatable; every M = 2..4 row bitwise
+equal to the M = 1 step at `pos + m` (the stride is a function of the row's own key count),
+so spec 8's M2 is bitwise with v2. Golden gate passes; 256 greedy ids from the 32704-id
+prompt at max_len 131072 match v1 for 133 ids and part at a near-tie (v1's margin 0.081 at
+a logit of 20); passkey `l0-int8` 3/3 at 119939 ids.
 
 ## Decode
 
