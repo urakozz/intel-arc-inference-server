@@ -147,7 +147,10 @@ std::vector<uint32_t> run_decode(const std::string& decode, const std::string& s
     ::close(output[1]);
     fail("posix_spawn_file_actions setup failed");
   }
-  const pid_t pid = spawn({decode, snapshot, "--ids", ids_path, "--n", "32", "--prefill"}, &actions);
+  // Spec 9: b70-serve defaults to the int8 lm_head, b70-decode to bf16; this test is
+  // server-vs-CLI equivalence, so the CLI runs the server's default head.
+  const pid_t pid = spawn(
+      {decode, snapshot, "--ids", ids_path, "--n", "32", "--prefill", "--lm-head", "int8"}, &actions);
   posix_spawn_file_actions_destroy(&actions);
   ::close(output[1]);
   std::string text;
