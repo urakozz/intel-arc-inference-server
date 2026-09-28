@@ -66,6 +66,11 @@ narrative, and the numbered guides cite them where they matter.
   head's reference wiring (post-norm hidden, embed first), draft acceptance by
   depth, the verify step at M = 1..4 (1.17 / 1.52 / 1.74 steps), K = 3
   provisional and the `Control` index for commit; opencode rows pending the log
+- [probe-lm-head-2026-09-28.md](probe-lm-head-2026-09-28.md) - spec 9 P0: an int8
+  per-row `lm_head` against bf16 on the CPU. Cosine and argmax pass. The top-20 set
+  (92.0 %) and the filtered KL mean fail as written, and bf16 output rounding fails
+  them too; the head stays bf16 pending the operator's ruling. Host quantisation
+  takes 3.3 s
 - [probe-w4a8-2026-09-23.md](probe-w4a8-2026-09-23.md) - W4A8 on the mixed
   4-by-8 DPAS: 0.965x the control and 2.79% relative error, **rejected**; the
   group-size sweep in §13 shows why, and that per-channel scales would reach
