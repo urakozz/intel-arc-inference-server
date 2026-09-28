@@ -85,6 +85,18 @@ def test_kl_and_filter():
     q_ids[0, 0] = 499
     kl2, bad2 = lp.kl_filtered(ids, p, q_ids, p)
     assert bool(bad2[0]) and not bool(bad2[1:].any())
+    mm = lp.missing_mass(ids, p, q_ids, p)
+    assert abs(float(mm[0]) - float(p[0, 0])) < 1e-12 and float(mm[1:].abs().max()) == 0.0
+
+
+def test_top_diag():
+    r = torch.arange(30, dtype=torch.float32).flip(0)[None].clone()   # id i has logit 29 - i
+    q = r.clone()
+    q[0, 19], q[0, 20] = r[0, 20], r[0, 19]                            # swap ranks 20 and 21
+    nd, worst, g20 = lp.top_diag(r, q)
+    assert int(nd[0]) == 1 and int(worst[0]) == 20 and float(g20[0]) == 1.0
+    nd, worst, _ = lp.top_diag(r, r)
+    assert int(nd[0]) == 0 and int(worst[0]) == 0
 
 
 def test_vocab_mask():
