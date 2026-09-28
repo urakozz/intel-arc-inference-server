@@ -453,6 +453,27 @@ tail. Device 0, `l0-int8`, max_len 131072. Records: docs/probe-prefix-cache-2026
   The real recorded opencode session (C3) is pending; rerun with
   `tools/prefix/replay_ab.sh tests/golden/opencode/session1 ~/c3`.
 
+**llama-benchy, merged main 5d76b13 (2026-09-28, 21:18-21:29, load 1.0-4.2).** `uvx
+llama-benchy --pp 1024 --tg 64 --depth 0 4096 16384 32768 --enable-prefix-caching
+--exact-tg --latency-mode generation --runs 3` through `tools/probe/serve_benchy.sh`,
+`b70-serve --max-len 131072` (int8 `lm_head`, `--mtp 0`), `--prefix-cache-gb 0` against
+32, one after the other. `ctx_pp @ dN` loads N tokens of context; `pp1024 @ dN` is the
+follow-up turn (the context plus a new 1024-token user message). Time to first response:
+
+| follow-up after | cache off | cache on | |
+|---:|---:|---:|---:|
+| 4096 | 2716.9 ms | 1703.1 ms | 1.6x |
+| 16384 | 9553.1 ms | 2165.2 ms | 4.4x |
+| 32768 | 21003.1 ms | 2663.4 ms | 7.9x |
+
+Decode is unchanged by the cache (tg64 30.78 / 25.79 / 21.26 t/s off, 30.79 / 25.82 /
+21.26 on), and the context load costs the write-through (ctx_pp 2112.6 → 2066.7 t/s at
+4096, 1631.5 → 1609.7 at 32768). The cached follow-up at 32k is 2.66 s rather than the
+~1.0 s a pure 1k-token continuation takes (P0): llama-benchy's follow-up is a new user
+message, so the prompt diverges at the previous prompt's assistant header, a few ids
+before its end, and the restore falls back to the last 2048-id block snapshot, re-prefilling
+up to ~2000 extra ids. A snapshot at the generation prompt's start would close that.
+
 ## Decode
 
 All rows: device 0, depth 4096, 256 generated tokens, median of three on an
