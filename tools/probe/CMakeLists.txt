@@ -561,7 +561,10 @@ set(PDA_TAGS
     P512_L1_D0_F0_R0 P512_L2_D0_F0_R0 P512_L2_D1_F0_R0 P512_L2_D1_F1_R0 P512_L2_D1_F0_R1
     P1024_L2_D0_F0_R0 P1024_L2_D1_F0_R0 P1024_L2_D1_F1_R0 P1024_L2_D1_F0_R1
     P0_L1_D0_F0_R0 P0_L2_D0_F0_R0 P0_L2_D1_F0_R0 P0_L2_D1_F1_R0 P0_L2_D1_F0_R1
-    P0_L2_D1_F1_R1)
+    P0_L2_D1_F1_R1
+    P0_L2_D1_F0_R0_Q1_G0_E0 P0_L2_D1_F1_R0_Q1_G0_E0 P0_L2_D1_F0_R0_Q1_G1_E0
+    P0_L2_D1_F1_R0_Q1_G1_E0 P0_L2_D1_F0_R0_Q1_G0_E1 P0_L2_D1_F1_R0_Q1_G1_E1
+    P1024_L2_D1_F0_R0_Q1_G0_E0 P0_L2_D1_F1_R0_Q1_G0_E1)
 set(PDA_TARGETS)
 foreach(MM 1 4)
   add_ocloc_kernel(pda_v1_M${MM} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/attn.cl
@@ -569,10 +572,25 @@ foreach(MM 1 4)
                            M=${MM} MAXLEN=131072)
   list(APPEND PDA_TARGETS kernel_pda_v1_M${MM})
   foreach(tag IN LISTS PDA_TAGS)
-    string(REGEX MATCH "^P([0-9]+)_L([0-9])_D([0-9])_F([0-9])_R([0-9])$" _m ${tag})
+    string(REGEX MATCH "^P([0-9]+)_L([0-9])_D([0-9])_F([0-9])_R([0-9])(_Q([0-9])_G([0-9])_E([0-9]))?$"
+           _m ${tag})
+    set(_q 0)
+    set(_g 0)
+    set(_e 0)
+    if(CMAKE_MATCH_6)
+      set(_q ${CMAKE_MATCH_7})
+      set(_g ${CMAKE_MATCH_8})
+      set(_e ${CMAKE_MATCH_9})
+    endif()
+    set(_opts)
+    if(_g)
+      set(_opts OPTIONS -cl-intel-256-GRF-per-thread)
+    endif()
     add_ocloc_kernel(pda_${tag}_M${MM} SOURCE ${PDA_CL}
                      DEFINES M=${MM} MAXLEN=131072 PPW=${CMAKE_MATCH_1} LOAD=${CMAKE_MATCH_2}
-                             DOT=${CMAKE_MATCH_3} PREFETCH=${CMAKE_MATCH_4} REDUCE=${CMAKE_MATCH_5})
+                             DOT=${CMAKE_MATCH_3} PREFETCH=${CMAKE_MATCH_4} REDUCE=${CMAKE_MATCH_5}
+                             QBLK=${_q} EXP2=${_e}
+                     ${_opts})
     list(APPEND PDA_TARGETS kernel_pda_${tag}_M${MM})
   endforeach()
 endforeach()
