@@ -1,10 +1,6 @@
 # Probe: an int8 `lm_head` against the bf16 head (spec 9 P0), 2026-09-28
 
-**Verdict: under the stopping rule, int8 per-row (W8A16) FAILS spec 9 §4 as written.**
-Two bars fail: the L1 top-20 set (92.0 % of positions, bar 99 %) and the L2 KL mean
-(+inf, because 7 of 1140 positions keep a token under bf16 that int8 drops). Cosine,
-argmax and the KL p99 pass. Plan 9a §6 says stop, so the head stays bf16 until the
-operator rules.
+**Verdict: int8 per-row (W8A16) PASSES spec 9 §4 as amended (§8, operator ruling 2026-09-28).** Under the bars as first written it failed two of them - the L1 top-20 set (92.0 % of positions, bar 99 %) and the L2 KL mean (+inf, because 7 of 1140 positions keep a token under bf16 that int8 drops) - and plan 9a §6 stopped there. The operator redefined L1's top-20 bar (a difference counts only across a bf16 rank-20/21 gap >= 0.05) and L2's KL (unfiltered, T 1.0 and 0.6, mean <= 1e-4, p99 <= 1e-3); 9a's numbers pass both, and plan 9b builds the head. The original analysis follows unchanged.
 
 **But the two failing bars are below bf16's own noise floor.** The control is the same
 fp32 bf16-head logits with nothing changed except that the output is rounded to bf16,
