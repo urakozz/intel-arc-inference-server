@@ -212,3 +212,63 @@ winner's paired ratio from the final job. M = 1.
 110.01 / 218.51 ms (probe µs x 16; no production M = 4 list exists at max_len 131072 to
 calibrate against). At M = 4 the kernel is instruction-bound (113 GB/s at 128k): four
 rows cost 4.8x one row, so the KV read is not what M = 4 pays for.
+
+## The v2 design verdict (Task 3)
+
+**Verdict: build v2 as `P0_L2_D1_Q1_E1` (spec 10b).** Every A-F3 bar is met in the
+derived step with margin - **28.31 / 25.82 / 21.74 t/s against 23.6 / 21.0 / 17.3** at
+32768 / 65536 / 130816 (+20% / +23% / +26% over the bars) - and the shallow step gets
+faster, not slower (4096: 31.29 against 29.70 t/s, A-F4 satisfied at max_len 131072;
+the kernel has no MAXLEN-dependent cost beyond its idle-grid size, so 16384 is expected
+to follow and is 10b's gate to measure). No stop condition applies.
+
+**The design.**
+- **`attn_decode_v2`**: grid (4 kv heads, MAXLEN / 64), work-group 256 = 16 sub-groups
+  of 16, `reqd_sub_group_size(16)`, 128 GRF (256 GRF measured 35-50% slower). Work-group
+  `(j, b)` owns positions `[b * ppw, min((b + 1) * ppw, pos + n_active))`; the rest exit
+  on their first instruction.
+  - **The stride**: `ppw = max(64, roundup64(ceil((pos + n_active) / tgt)))` with `tgt`
+    = 32 work-groups per kv head (128 live, the device's resident slots). For 10b it is
+    computed by `attn_prep` (work-group 0, one lane) into a new `Control` word
+    (`Control::pad[0]` -> `attn_stride`, CTRL index 19 as in the probe) so decode and
+    reduce read one value; the probe computed it in both kernels from the same words,
+    which is equivalent. tgt 32 was best or tied at every depth and M (tgt 64 / 128 up to
+    9% / 23% slower at 32k).
+  - **Loads**: K by two `intel_sub_group_block_read_us8` per row (lane l, element t = dim
+    l + 16 t, attn.cl's order); V by one `intel_sub_group_2d_block_read_16b_16r16x1c`
+    per sub-group per wave (16 positions x 16 dims, lane = dim = lid); masked positions
+    zeroed after the load. No prefetch (it costs 1-4% at M = 1).
+  - **The wave (DOT 1)**: m inner - one K/V wave feeds all 6 x M rows; q staged once in
+    SLM (6 KB x M) and read by SLM block reads; the score tree by shuffles (attn.cl's
+    pairwise adds); **one** barrier per wave publishing all 6 x M raw dots
+    (double-buffered SLM); lane s computes position s's weight, broadcast in ascending s
+    for the sum and the V FMA.
+  - **exp2** with 1/16 x log2(e) folded into the score scale (spec 10 lever 4; spec 6c's
+    approved form), `mx` and the merge in the log2 domain. It is worth 10% at M = 1 and
+    11% at M = 4 over the exp form; the exp form (`P0_L2_D1_Q1`) also clears every bar
+    (28.09 / 25.40 / 21.03 t/s) if the operator prefers attn.cl's `exp`.
+- **`attn_reduce_v2`**: the separate launch stays (grid (24, M)); `nb = (pos + m) / ppw
+  + 1`, at most 32-33 blocks for any depth at tgt 32, attn.cl's ascending merge in the
+  log2 domain. **The fused last-work-group reduce is rejected** (10-83% slower: it puts
+  every merge of a kv head on one work-group).
+- **Partials**: `attn_part` keeps its `[24][MAXLEN/64][M][258]` allocation; only the
+  first `nb` blocks are touched (1.59 MB per layer at 128k M1).
+
+**Correctness evidence for 10b's A1**: at PPW 64 the v2 wave is bitwise attn.cl; with the
+derived stride the only changes are the block boundaries (fewer, longer online-softmax
+runs) and exp2 - worst cosine 0.9999995 over 4 depths x M = 1, 4 x 24 heads, max abs
+0.0156, bitwise repeatable. A2/A3 (golden gates, passkey, spec 8's M2) are 10b's.
+
+**Determinism**: no atomics in the chosen design; every order is fixed by the stride,
+which is a function of `pos` and `n_active` only - so two replays are bitwise identical
+(measured), and M = 4 row m and the M = 1 step at pos + m see the same stride only when
+`ceil((pos + 4) / 32)` and `ceil((pos + m + 1) / 32)` round to the same multiple of 64 -
+**10b must make the stride a function of `pos` alone** (e.g. `ceil((pos + 4) / tgt)`
+for every M) if spec 8's M2 (verify rows bitwise against M = 1) is to hold.
+
+**What M = 4 still costs (recorded, spec 8)**: 75.9 ms of attention per verify step at
+128k (from 218.5), 19.7 at 32k. The M = 4 kernel is instruction-bound, not
+bandwidth-bound: per wave every sub-group recomputes the same 6 x M softmax weights (16x
+redundancy in `exp` and the broadcasts). The next lever for M > 1, if spec 8 needs it,
+is to compute each (row, position) weight once and publish it (a second barrier) or a
+DPAS score/PV path over the 6 x M rows - a 10b-or-later probe, not needed for the bars.
