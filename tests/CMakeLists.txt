@@ -132,6 +132,18 @@ target_include_directories(prefix_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${
 target_link_libraries(prefix_server_test PRIVATE b70_server)
 add_test(NAME prefix_server_test COMMAND prefix_server_test)
 
+# Spec 8 M4 (plan 8c): the speculative acceptance rule, host only.
+add_executable(spec_accept_test server/spec_accept_test.cc)
+target_include_directories(spec_accept_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(spec_accept_test PRIVATE b70_server)
+add_test(NAME spec_accept_test COMMAND spec_accept_test)
+
+# Spec 8 §3.6 (plan 8c): the server over a scripted speculative engine, host only.
+add_executable(mtp_server_test server/mtp_server_test.cc)
+target_include_directories(mtp_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(mtp_server_test PRIVATE b70_server)
+add_test(NAME mtp_server_test COMMAND mtp_server_test)
+
 add_executable(protocol_test server/protocol_test.cc)
 target_include_directories(protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(protocol_test PRIVATE b70_server)
@@ -1073,4 +1085,20 @@ if(B70_MTP)
   add_test(NAME mtp_verify_test COMMAND mtp_verify_test ${B70_TEST_SNAPSHOT})
   set_tests_properties(mtp_verify_test PROPERTIES LABELS "checkpoint;mtp"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+  # Plan 8c: M3 (greedy MTP is identical to plain), RF1 on the card, M5, M4 end to end,
+  # through EngineAdapter (the server's engine calls); and the D1/D2 bench (--bench K).
+  if(B70_TOKENIZER_ENABLED)
+    add_executable(mtp_gpu_test server/mtp_gpu_test.cc)
+    target_include_directories(mtp_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+      ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+    target_link_libraries(mtp_gpu_test PRIVATE b70_server b70_tokenizer b70_runtime b70_loader
+      b70_model b70_l0 b70_prefill_host)
+    if(B70_PREFILL_ENABLED)
+      b70_link_prefill(mtp_gpu_test)
+    endif()
+    add_dependencies(mtp_gpu_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
+    add_test(NAME mtp_gpu_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
+    set_tests_properties(mtp_gpu_test PROPERTIES LABELS "checkpoint;mtp"
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
+  endif()
 endif()

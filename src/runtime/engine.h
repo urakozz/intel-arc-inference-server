@@ -214,7 +214,10 @@ class Engine {
   // the same k.
   static constexpr uint32_t kMaxDraft = MtpBuffers::kMaxK;   // 3
   bool mtp() const { return mtp_ != nullptr; }
-  void draft(uint32_t k);
+  // `pick` (plan 8c, sampled drafting): called on the host after draft list i with the
+  // device idle and q_i in mtp_logits_device() row i; its return value replaces the
+  // on-card argmax as d_{i+1} (the next draft's input, cur_token[1 + i], draft_ids()).
+  void draft(uint32_t k, const std::function<uint32_t(uint32_t i)>& pick = {});
   const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
   const float* mtp_logits_device() const;      // [kMaxDraft][kVocab] fp32, device memory
   void verify(uint32_t k);
