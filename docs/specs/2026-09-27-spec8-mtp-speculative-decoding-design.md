@@ -196,3 +196,54 @@ is under 1.2x (derived); stop and record for the operator's call before 8b.
 - Quantising the head or pruning `lm_head`'s vocabulary for drafts (a later
   lever: `lm_head` is 75 % of a draft step's bytes, derived).
 - Batching several requests.
+
+## 8. Amendment: what plan 8b built (2026-09-28)
+
+Numbers: `docs/probe-mtp-2026-09-27.md` §6. Each item overrides the text above where
+they differ.
+
+- **A1, the head's wiring (§3.2, from P0).** The head's hidden input is the main model's
+  hidden **after** the final norm (the engine's `b.x`, what `lm_head` reads), not before;
+  fc's input is `cat(pre_fc_norm_embedding(embed(x[t+1])), pre_fc_norm_hidden(h_t))`,
+  embedding first; the head's layer runs at position t for the pair (h_t, x[t+1]), +1 per
+  chained draft, and chained drafts take the head's own post-`mtp.norm` hidden.
+- **A2, K is runtime-selectable 1..3.** P0's K = 3 is provisional until the opencode log
+  exists, so the engine captures verify lists at M = 1..4 and three draft lists (one per
+  draft index, each writing its own logits row), and M2 is gated at every K.
+- **A3, the prefill gate compares like inputs.** Plan 8b asked for the head's KV after
+  prefill against M = 1 decode fills at cosine >= 0.9999 per row. That comparison carries the
+  main model's own l0-int8-prefill-vs-decode difference (median 0.99971; 15 of 4095 rows
+  below 0.9, the main hidden at cosine 0.27 at one of them), which predates spec 8. The gate
+  is the M = 1 decode head on the prefill's own hidden rows (worst 0.9999965); the
+  end-to-end comparison is recorded.
+- **A4, the commit mechanism is the Control index (§3.4).** The 151 MB copy measured 1.66 %
+  of a step in P0. `gdn_state` is slot 0 and `MtpBuffers::gdn_spec` holds slots 1..3
+  (453 MB, not [M] slots of 604 MB); `Control::gdn_live` names the live slot; verify row m
+  writes slot (live + m) % 4, `commit(j)` sets live = (live + j) % 4, and M = 1 with slots is
+  in place. Paths that read `gdn_state` directly (prefill, `load_state`) first copy the live
+  slot into slot 0, once, only when it is not already 0.
+- **A5, the head's KV bookkeeping lives in the verify list (§3.3 step 4).** The verify
+  list's tail is a K/V-only fill of the head over its M rows at positions n-1 .. n+M-2, from
+  (h_{n-1}, x_n), (h_n, d_1), ... - the main hidden, so after commit(j) every head-KV row
+  below the new pos - 1 comes from the main model, and the chained drafts' own rows are
+  overwritten before they are read. verify(0) + commit(0) is the plain step with MTP on, so
+  the invariant holds under any mix of plain and speculative steps. Prefill does the same
+  per chunk (§3.2) and computes only K/V (fc, input norm, the k||v columns, attn_prep).
+  The head runs on its own control block, so its argmax chains the drafts with the main
+  model's kernels unchanged. Draft ids land in `Control::cur_token[1..k]` (the verify
+  inputs), verify ids in `Control::out_token[0..k]`.
+- **A6, M = k + 1 rows are bitwise equal to M = 1** (M2: logits and GDN slots, every K), so
+  §4 M3's caveat does not arise on decode; greedy MTP should be exactly lossless (8c's M3).
+- **A7, the verify step costs 1.17 / 1.52 / 1.74 plain steps at M = 2 / 3 / 4** in
+  production (P0: 1.171 / 1.519 / 1.743), not §1's assumed 1.05-1.15. verify(0) costs 1.3 %
+  over the plain list (the head's K/V fill). Two follow-up levers: the int4 GEMV at M = 3/4
+  and `attn_decode`'s per-row walk of the KV.
+- **A8, spec 7 interplay (§3.5).** With the head, `save_state`/`load_state` carry the LIVE GDN
+  slot, the conv ring and the head's input hidden h_{pos-1} (+10 240 B); `save_kv`/`load_kv`
+  carry 17 KV layers, the head's last. Spec 7b's C1 case A passes with MTP on, including
+  speculative iterations after the restore.
+- **A9, scope limits.** The head loads only as the published checkpoint's 15 bf16 tensors
+  (the RTN checkpoint's 29 are refused by name); the MTP prefill runs on the L0 backends
+  only; MTP lists are compiled at max_len 16384 (`B70_MTP`, default ON, adds binaries only).
+  Device memory with the head: +0.849 GB weights, +0.523 GB `MtpBuffers`, +21 MB prefill
+  hidden rows (lazy).
