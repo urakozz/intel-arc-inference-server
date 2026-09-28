@@ -502,6 +502,23 @@ class Capture {
     launch(k, s.N / t.cols);
   }
 
+  // gemv_i8w(w, scales, x, out) - src/kernels/gemv_i8w.cl (spec 9 §3), grid N/64, WG 64.
+  // The int8 `lm_head` only: int8 rows tiled [N/16][K/16][16][16] in `w.mem` and one
+  // fp32 scale per row in `w.scales`. Writes the fp32 [M][N] result straight at `out`.
+  void gemv_i8w(const loader::DeviceWeight& w, const void* x, const void* out) {
+    const model::GemvShape& s = w.shape;
+    require(w.kind == model::WeightKind::Int8, "gemv_i8w bound to a non-int8 weight");
+    require(bool(w.scales), "the int8 lm_head has no fp32 row-scale allocation");
+    require(s.N % kernels::kGemvI8wCols == 0, "gemv_i8w N is not a multiple of 64");
+    l0::Kernel& k =
+        kernel(kernels::gemv_i8w_variant(kCapM, s.K, s.N), "gemv_i8w", kernels::kGemvI8wCols);
+    k.arg_ptr(0, w.mem.ptr());
+    k.arg_ptr(1, w.scales->ptr());
+    k.arg_ptr(2, x);
+    k.arg_ptr(3, out);
+    launch(k, s.N / kernels::kGemvI8wCols);
+  }
+
   // The MLP half, identical in both layer kinds: post-norm folding the mixer's
   // partials, gate‖up, SiLU·mul, down. `mixer_s` is the split-K width of the
   // GEMV that produced those partials (out_proj / o_proj, both S = 4).
@@ -682,10 +699,17 @@ class Capture {
   // so `CapturedStep::modules.size()` is 19 on both checkpoints.
   void head() {
     res_norm(Qwen35::shape(LinearId::Down).S, m_.final_norm.ptr());
-    if (m_.linears.at({loader::kTopLevel, LinearId::LmHead}).kind == model::WeightKind::Int4)
+    // Spec 9: or an int8 head quantised at load (`--lm-head int8`), a `gemv_i8w`.
+    const loader::DeviceWeight& lm = m_.linears.at({loader::kTopLevel, LinearId::LmHead});
+    if (lm.kind == model::WeightKind::Int4) {
       gemv(loader::kTopLevel, LinearId::LmHead, b_.x.ptr(), b_.logits);
-    else
+    } else if (lm.kind == model::WeightKind::Int8) {
+      require(b_.logits.size() >= size_t(kCapM) * lm.shape.N * sizeof(float),
+              "logits is smaller than the int8 head's [M][N] fp32 result");
+      gemv_i8w(lm, b_.x.ptr(), b_.logits.ptr());
+    } else {
       gemv_bf16(loader::kTopLevel, LinearId::LmHead, b_.x.ptr(), b_.logits);
+    }
     // argmax_stage1(logits, part) - src/kernels/argmax.cl (Task 3), grid
     // (kVocab/1024 = 243, M), WG 256.
     {
@@ -851,6 +875,8 @@ class Capture {
       k.arg_ptr(2, b_.x.ptr());
       k.arg_ptr(3, logits);
       launch(k, s.N / kGemvColsPerWg, s.S);
+    } else if (lm.kind == model::WeightKind::Int8) {
+      gemv_i8w(lm, b_.x.ptr(), logits);   // spec 9: the draft reads the same int8 head
     } else {
       head_gemv(lm, b_.x.ptr(), logits);
     }

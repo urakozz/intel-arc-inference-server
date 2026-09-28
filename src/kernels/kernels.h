@@ -77,6 +77,15 @@ inline std::string gemv_bf16_variant(unsigned M, unsigned K, unsigned N, GemvBf1
          (t.ksplit == 1 ? "" : "_S" + std::to_string(t.ksplit));
 }
 
+// Spec 9 §3: the int8 `lm_head` GEMV (src/kernels/gemv_i8w.cl). One tiling, gemv_bf16's
+// lm_head one: 64 columns (four 16-lane subgroups) per work-group, no K split, grid
+// N / 64. Its binaries exist for the lm_head shape only, at M = 1 (decode, prefill's
+// step_head, the MTP draft) and M = 2..4 (the MTP verify lists).
+inline constexpr unsigned kGemvI8wCols = 64;
+inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
+  return "gemv_i8w_M" + std::to_string(M) + "_K" + std::to_string(K) + "_N" + std::to_string(N);
+}
+
 // The between-GEMV kernels (src/kernels/prep.cl). Only `prep_res_norm` varies
 // in shape: `prep_silu_mul` and `prep_gated_head` have the model's dimensions
 // (17408 / gate||up S=4, 48x128 / qkv||z S=1) baked into the source, so `M` is

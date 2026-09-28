@@ -243,6 +243,13 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMode
               {PtrArg(lm.mem.ptr()),
                PtrArg(lm.shape.layout == 0 ? lm.scales->ptr() : lm.mem.ptr()), PtrArg(xrow),
                PtrArg(s.logits.ptr())});
+  } else if (lm.kind == model::WeightKind::Int8) {
+    // Spec 9 §3: the int8 head, so the first generated token uses the same form as
+    // every later one.
+    cx.launch(kc(kernels::gemv_i8w_variant(1, lm.shape.K, lm.shape.N), "gemv_i8w"),
+              lm.shape.N / kernels::kGemvI8wCols, 1, 1,
+              {PtrArg(lm.mem.ptr()), PtrArg(lm.scales->ptr()), PtrArg(xrow),
+               PtrArg(s.logits.ptr())});
   } else {
     const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(lm.shape.N);
     cx.launch(kc(kernels::gemv_bf16_variant(1, lm.shape.K, lm.shape.N, t), "gemv_bf16"),
