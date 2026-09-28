@@ -66,7 +66,10 @@ void usage() {
                "                                        0 = off: every request prefills in full)\n"
                "                 [--prefix-split-last]  chat: the last prompt id by a decode replay,\n"
                "                                        the prompt-end snapshot at len - 1 (more hits,\n"
-               "                                        not bitwise with a cold run)\n");
+               "                                        not bitwise with a cold run)\n"
+               "                 [--mtp K]   speculative decoding with the MTP head, K drafts\n"
+               "                             per step (1..3; 0 = off, the default). Loads the\n"
+               "                             head (+1.4 GB); max-len 16384 only (spec 8).\n");
 }
 
 uint32_t parse_u32(const char* what, const std::string& value) {
@@ -126,6 +129,7 @@ int run(int argc, char** argv) {
   std::string pp_backend_arg;
   bool have_pp_backend = false;
   uint32_t prefix_cache_gb = 32;
+  uint32_t mtp_k = 0;
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -157,6 +161,9 @@ int run(int argc, char** argv) {
       prefix_cache_gb = parse_u32("--prefix-cache-gb", value(i, "--prefix-cache-gb"));
     } else if (arg == "--prefix-split-last") {
       options.prefix_split_last = true;
+    } else if (arg == "--mtp") {
+      mtp_k = parse_u32("--mtp", value(i, "--mtp"));
+      if (mtp_k > runtime::Engine::kMaxDraft) throw std::runtime_error("--mtp expects 0..3");
     } else if (arg == "--pp-backend") {
       pp_backend_arg = value(i, "--pp-backend");
       have_pp_backend = true;
@@ -189,7 +196,7 @@ int run(int argc, char** argv) {
                device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
   loader::LoadedModel model = [&] {
     StdoutToStderr redirect;
-    return loader::load(context, snapshot_dir, max_len);
+    return loader::load(context, snapshot_dir, max_len, mtp_k > 0);
   }();
   runtime::Engine engine(context, std::move(model), max_len);
   if (have_pp_backend) engine.set_prefill_backend(pp_backend);
@@ -199,7 +206,7 @@ int run(int argc, char** argv) {
   std::fprintf(stderr, "%s\n", engine.memory_line().c_str());   // spec 6
   TokAdapter tokenizer(snapshot_dir + "tokenizer.json");
   TemplateAdapter chat_template(snapshot_dir);
-  EngineAdapter engine_adapter(engine, tokenizer.vocab_used());
+  EngineAdapter engine_adapter(engine, tokenizer.vocab_used(), mtp_k);
   options.eos_ids = eos;
   std::unique_ptr<PinnedAlloc> prefix_alloc;
   if (prefix_cache_gb > 0) {
@@ -219,9 +226,9 @@ int run(int argc, char** argv) {
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
                options.host.c_str(), options.port, max_len);
   print_eos(eos);
-  std::fprintf(stderr, ", prefill backend %s (SYCL component %s)\n",
+  std::fprintf(stderr, ", prefill backend %s (SYCL component %s), mtp %u\n",
                runtime::prefill_backend_name(engine.prefill_backend()),
-               runtime::prefill::sycl_available() ? "on" : "off");
+               runtime::prefill::sycl_available() ? "on" : "off", mtp_k);
 
   g_server = &server;
   std::signal(SIGTERM, stop_server);

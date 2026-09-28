@@ -163,7 +163,7 @@ const CapturedStep& Engine::draft_step(uint32_t i) const {
   return draft_steps_.at(i);
 }
 
-void Engine::draft(uint32_t k) {
+void Engine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick) {
   require_mtp("draft");
   const uint32_t pos = control_->pos;
   if (k == 0 || k > kMaxDraft || k > max_verify_k())
@@ -180,7 +180,14 @@ void Engine::draft(uint32_t k) {
   for (uint32_t i = 0; i < k; ++i) {
     queue_.execute(draft_steps_[i].list, &fence_);
     fence_.wait();
-    const uint32_t d = hctl_->out_token[0];
+    uint32_t d = hctl_->out_token[0];
+    if (pick) {
+      d = pick(i);
+      if (d >= Qwen35::kVocab)
+        throw std::runtime_error("runtime::Engine::draft: picked id " + std::to_string(d) +
+                                 " is outside the vocabulary");
+      hctl_->cur_token[0] = d;   // the next draft list's input
+    }
     draft_ids_.push_back(d);
     control_->cur_token[1 + i] = d;
   }

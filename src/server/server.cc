@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -227,8 +228,22 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
 
   outcome.finish_reason = "length";
   bool eos_stop = false;
+  // Spec 8: with MTP a step yields a burst of ids; the loop below still sees them one
+  // at a time, and ids past a stop are handed back with truncate_to() after it.
+  const bool speculative = deps_.engine.mtp_k() > 0;
+  std::vector<uint32_t> burst;
+  size_t burst_at = 0;
+  const auto next_id = [&]() -> uint32_t {
+    if (!speculative) return deps_.engine.step(r.sampling);
+    if (burst_at == burst.size()) {
+      burst = deps_.engine.step_many(r.sampling);
+      burst_at = 0;
+      if (burst.empty()) throw std::runtime_error("EngineIface::step_many returned no ids");
+    }
+    return burst[burst_at++];
+  };
   for (uint32_t generated = 0; generated < max_tokens; ++generated) {
-    const uint32_t id = deps_.engine.step(r.sampling);
+    const uint32_t id = next_id();
     session.fed(id);
     if (generated == 0) outcome.t_first_token = steady_seconds();
     const bool is_eos = impl_->eos.count(id) != 0;
@@ -256,6 +271,8 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     }
     flush_pending(false);
   }
+  if (burst_at < burst.size())
+    deps_.engine.truncate_to(deps_.engine.pos() - static_cast<uint32_t>(burst.size() - burst_at));
   if (outcome.finish_reason == "length") add_text(streamer->flush());
   if (parser && (eos_stop || outcome.finish_reason == "length")) route(parser->finish());
   flush_pending(true);
