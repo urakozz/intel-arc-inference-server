@@ -250,6 +250,11 @@ Built on branch `spec7c-server-prefix-cache` (rebased on main b7368b2). Records:
   32, cached 1756 = the cold run's runner-up at 0.108 bf16 ulp, a near-tie the l0 rule
   (allowance 0) does not accept.** Deterministic (twice). For the operator: accept the
   near-tie allowance on l0 for C2, or not.
+  **Operator ruling (2026-09-28): accepted.** `prefix_gpu_l0_test` runs with a near-tie
+  allowance of 1, the same as l0-int8: the flip is the GDN-chunk-boundary rounding class
+  proven in `docs/probe-prefill-continuation-2026-09-28.md` (where a prefill's chunk
+  boundaries fall changes its rounding, and the model amplifies that at a few positions;
+  the CPU oracle shows the same from chunking alone; not a cache fault). The split registration `prefix_gpu_split_l0_test` keeps allowance 0.
 - **C3**: the recorded opencode session does not exist yet; **pending the log**. On a
   synthetic opencode-shaped log (15 requests, 2 side), default path: 15/15 bitwise equal to
   the cold server, all tool calls equal, time to first token 17.46 s vs 45.44 s.

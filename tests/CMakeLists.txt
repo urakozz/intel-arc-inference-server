@@ -1020,8 +1020,11 @@ if(B70_TOKENIZER_ENABLED)
     b70_link_prefill(prefix_gpu_test)
   endif()
   add_dependencies(prefix_gpu_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS})
+  # l0 takes the near-tie allowance of 1 too (operator ruling, spec 7 §8): sequence e's
+  # row 30 flip (0.108 bf16 ulp) is the GDN chunk-boundary rounding class of
+  # docs/probe-prefill-continuation-2026-09-28.md, not a cache fault.
   add_test(NAME prefix_gpu_l0_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0)
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0 1)
   add_test(NAME prefix_gpu_int8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0-int8)
   # The opt-in split_last path (b70-serve --prefix-split-last), same sequences.
