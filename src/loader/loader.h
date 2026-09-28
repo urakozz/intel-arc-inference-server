@@ -5,6 +5,7 @@
 #include <vector>
 #include "l0/context.h"
 #include "l0/memory.h"
+#include "loader/lm_head_int8.h"
 #include "loader/quant.h"
 #include "loader/small_layout.h"
 #include "loader/snapshot.h"
@@ -19,7 +20,8 @@ constexpr uint32_t kTopLevel = 65535;
 struct DeviceWeight {
   l0::Mem mem;                 // the canonical bytes on device
   // Layout 0's real, independent f16 [K/64][N] allocation. Null for layout 1
-  // (scales are inline in mem) and for bf16 weights.
+  // (scales are inline in mem) and for bf16 weights. For the int8 `lm_head`
+  // (spec 9) it is the fp32 [N] per-row scale allocation.
   std::unique_ptr<l0::Mem> scales;
   model::GemvShape shape;      // K, N, S, layout as the kernel variant needs
   model::WeightKind kind;
@@ -81,6 +83,8 @@ struct LoadReport {            // printed by load(); asserted by the checkpoint 
   // checkpoint's efficiency against another's denominator.
   size_t read_per_token = 0;
   size_t unconsumed = 0;            // checkpoint tensors nothing loaded (must be 0)
+  // Spec 9: the host quantisation of an int8 `lm_head` (0 unless LmHeadForm::Int8).
+  double lm_head_quant_seconds = 0;
   double seconds = 0;
 };
 
@@ -102,7 +106,10 @@ struct LoadedModel {
 // mismatch. max_len sizes the RoPE table only (default 16384).
 // `mtp` (spec 8 §3.1): also load the MTP head into LoadedModel::mtp. Without it the
 // head's tensors are skipped by name, counted, and never read - exactly as before.
+// `lm_head` (spec 9 §3): Checkpoint loads the head as shipped; Int8 quantises a bf16
+// head to int8 rows + fp32 row scales on the host (loader/lm_head_int8.h) and throws
+// if the checkpoint's head is not bf16.
 LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len = 16384,
-                 bool mtp = false);
+                 bool mtp = false, LmHeadForm lm_head = LmHeadForm::Checkpoint);
 
 }  // namespace loader
