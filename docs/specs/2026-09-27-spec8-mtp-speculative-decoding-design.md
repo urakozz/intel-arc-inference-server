@@ -247,3 +247,42 @@ they differ.
   only; MTP lists are compiled at max_len 16384 (`B70_MTP`, default ON, adds binaries only).
   Device memory with the head: +0.849 GB weights, +0.523 GB `MtpBuffers`, +21 MB prefill
   hidden rows (lazy).
+
+## 9. Amendment: what plan 8c measured (2026-09-28)
+
+Numbers: `docs/BENCHMARKS.md`, "MTP speculative decoding (spec 8)". The box was shared
+throughout, so every speed row is grade iterate. All runs are at max_len 16384.
+
+- **A10, the server (§3.6).** Acceptance runs on the host in `src/server/spec_accept`.
+  - The p/q filter is `server::filter_probs`, the one `sample()` now calls.
+  - `EngineIface` gains `mtp_k`, `step_many` and `truncate_to`. Their defaults keep
+    `--mtp 0` exactly today's loop.
+  - `EngineAdapter` defers `commit(j)` to its next engine call. When a stop, EOS or
+    `max_tokens` lands inside a burst, `truncate_to` commits fewer ids. The id that ends
+    the request stays consumed, as it does with `step()`, so the session holds exactly
+    what plain steps would have left.
+  - Sampled drafts use a host pick hook on `Engine::draft`. `--mtp` defaults to 0.
+- **A11, M3 is exact identity.** Greedy with `--mtp K` against `--mtp 0`: 256 ids on 39
+  prompts at K = 1..3, on l0-int8 and on l0. **0 divergences.**
+  - M4 passes: host chi-square p-values 0.10-0.62, and the seeded sampled run is
+    bitwise.
+  - M5 passes for the repeated run.
+  - M5's spec 7 C2 with MTP on waits for plan 7c's merge.
+- **A12, D1 misses on the golden prompts and passes on the agentic proxy.**
+  - At 4k, greedy golden geomeans are 1.297x / 1.244x / 1.186x at K = 1 / 2 / 3.
+    Prose at K = 3 falls to 0.970x.
+  - The four P0 tool-call scenarios give 1.428x / 1.512x / 1.633x.
+  - At 12k the golden rows fall to 1.264x / 1.179x / 1.099x.
+  - The cause is the verify cost (A7) on low-acceptance text.
+  - The opencode replay, which the bar names, is pending the log.
+  - 32k/64k cannot run until the MTP lists are compiled beyond 16384.
+- **A13, D2 passes.** Sampled at T 1.0, top-p 0.95, top-k 20 (the checkpoint's defaults;
+  the log's own temperature is pending):
+  - golden: 1.330x / 1.203x / 1.370x
+  - tool-call: 1.410x / 1.481x / 1.543x
+- **A14, choosing K is workload-dependent.**
+  - The rule is the same as P0's: pick K by the opencode log's acceptance once it
+    exists.
+  - Agentic output that copies context favours K = 3. Free text favours K = 1.
+  - A per-request adaptive K (drop K after rejections) is the cheap follow-up. The
+    M = 3/4 int4 GEMV lever (A7) is the structural one.
