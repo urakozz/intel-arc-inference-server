@@ -64,8 +64,9 @@ void usage() {
                "                 [--log-requests DIR]   write DIR/NNNNNN.json per request\n"
                "                 [--prefix-cache-gb N]  pinned host prefix cache, GiB (default 32,\n"
                "                                        0 = off: every request prefills in full)\n"
-               "                 [--prefix-no-split]    chat prompts prefill in full (the prompt-end\n"
-               "                                        snapshot at len, not len - 1)\n");
+               "                 [--prefix-split-last]  chat: the last prompt id by a decode replay,\n"
+               "                                        the prompt-end snapshot at len - 1 (more hits,\n"
+               "                                        not bitwise with a cold run)\n");
 }
 
 uint32_t parse_u32(const char* what, const std::string& value) {
@@ -154,8 +155,8 @@ int run(int argc, char** argv) {
       options.log_requests_dir = value(i, "--log-requests");
     } else if (arg == "--prefix-cache-gb") {
       prefix_cache_gb = parse_u32("--prefix-cache-gb", value(i, "--prefix-cache-gb"));
-    } else if (arg == "--prefix-no-split") {
-      options.prefix_split_last = false;
+    } else if (arg == "--prefix-split-last") {
+      options.prefix_split_last = true;
     } else if (arg == "--pp-backend") {
       pp_backend_arg = value(i, "--pp-backend");
       have_pp_backend = true;

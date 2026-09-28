@@ -1024,8 +1024,13 @@ if(B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0)
   add_test(NAME prefix_gpu_int8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0-int8)
-  set_tests_properties(prefix_gpu_l0_test prefix_gpu_int8_test PROPERTIES LABELS checkpoint
-    TIMEOUT 1800)
+  # The opt-in split_last path (b70-serve --prefix-split-last), same sequences.
+  add_test(NAME prefix_gpu_split_l0_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0 0 1)
+  add_test(NAME prefix_gpu_split_int8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0-int8 1 1)
+  set_tests_properties(prefix_gpu_l0_test prefix_gpu_int8_test prefix_gpu_split_l0_test
+    prefix_gpu_split_int8_test PROPERTIES LABELS checkpoint TIMEOUT 1800)
 endif()
 
 # --- spec 8 (plan 8b): MTP in the engine ------------------------------------------------
