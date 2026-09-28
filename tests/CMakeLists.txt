@@ -422,6 +422,12 @@ target_include_directories(safetensors_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CM
 target_link_libraries(safetensors_test PRIVATE b70_loader)
 add_test(NAME safetensors_test COMMAND safetensors_test)
 
+# Spec 9 (plan 9b Task 1): the int8 lm_head's host quantisation, on synthetic rows.
+add_executable(lm_head_int8_test loader/lm_head_int8_test.cc)
+target_include_directories(lm_head_int8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lm_head_int8_test PRIVATE b70_loader)
+add_test(NAME lm_head_int8_test COMMAND lm_head_int8_test)
+
 add_executable(quant_test loader/quant_test.cc)
 target_include_directories(quant_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(quant_test PRIVATE b70_loader)

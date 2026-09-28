@@ -28,7 +28,9 @@ enum class LinearId { QkvZ, AB, OutProj, GateUp, Down, Qkv, OProj, LmHead, kCoun
 
 // How a fused device weight is assembled from checkpoint tensors.
 enum class Fuse { Single, Concat, Interleave16 };
-enum class WeightKind { Int4, Bf16 };
+// Int8 exists for ONE row: `lm_head` quantised at load (spec 9 §3, int8 rows with an
+// fp32 scale per row, gemv_i8w). No checkpoint ships it and no per-layer row uses it.
+enum class WeightKind { Int4, Bf16, Int8 };
 
 struct FusedLinear {
   LinearId id;
@@ -116,6 +118,12 @@ struct Qwen35 {
   //     `logits`**: `gemv.cl` writes `out[(s*M + m)*N + n]`, which at S = 1 is
   //     exactly the `[M][N]` fp32 row `argmax_stage1` reads. Any S > 1 would
   //     need a fold kernel that does not exist.
+  //
+  // **The int8 row (spec 9)** is `{K 5120, N 248320, S 1, layout 0}`: not a checkpoint
+  // form but one the loader makes from the bf16 tensor on request
+  // (`loader::LmHeadForm::Int8`). S = 1 for the same reason as int4 (gemv_i8w writes
+  // `[M][N]` straight at `logits`); `layout` is a filler, the int8 tiling is fixed
+  // (loader/lm_head_int8.h).
   static const FusedLinear& lm_head(WeightKind kind);
   static const GemvShape& shape(LinearId id);         // the per-shape table
   static std::vector<LayerDesc> layers();             // all 64, fully populated
