@@ -73,6 +73,13 @@ function(add_gemv_bf16_variant M K N C S)
 endfunction()
 add_gemv_bf16_variant(1 5120 248320 64 1)  # lm_head: 3880 work-groups, device full
 add_gemv_bf16_variant(1 5120 128 64 1)     # a‖b (zero-padded 96 -> 128) as it shipped
+# Spec 9 §3: the int8 lm_head (W8A16, quantised at load; gemv_i8w.cl). gemv_bf16's
+# lm_head tiling, fixed in the source; M is the whole variant space (M = 2..4 below).
+set(GEMV_I8W_CL ${CMAKE_CURRENT_SOURCE_DIR}/gemv_i8w.cl)
+function(add_gemv_i8w_variant M K N)
+  add_ocloc_kernel(gemv_i8w_M${M}_K${K}_N${N} SOURCE ${GEMV_I8W_CL} DEFINES M=${M} K=${K} N=${N})
+endfunction()
+add_gemv_i8w_variant(1 5120 248320)
 # a‖b as the runtime binds it since spec 1.5's lever L2 (kernels::gemv_bf16_tiling):
 # 8 work-groups of 16 K-slice subgroups = 128 threads, against 8. `16` is
 # measured, not chosen: 1 / 4 / 16 read 48.774 / 13.115 / 5.340 us in situ
@@ -309,6 +316,7 @@ if(B70_DECODE_EXTRA_M OR B70_MTP)
     add_gemv_variant(${MM} 17408 5120 4 0)     # down
     add_gemv_variant(${MM} 5120 14336 2 0)     # qkv
     add_gemv_bf16_variant(${MM} 5120 248320 64 1)  # lm_head (bf16)
+    add_gemv_i8w_variant(${MM} 5120 248320)        # lm_head (int8, spec 9)
     add_gemv_bf16_variant(${MM} 5120 128 16 16)    # a||b
     add_prep_res_fold(${MM} 5120 0 20)
     add_prep_res_fold(${MM} 5120 4 20)

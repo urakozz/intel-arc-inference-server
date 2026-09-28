@@ -27,6 +27,7 @@ int main() {
     std::vector<model::FusedLinear> v;
     for (size_t i = 0; i < size_t(LinearId::kCount); ++i) v.push_back(Qwen35::linear(LinearId(i)));
     v.push_back(Qwen35::lm_head(model::WeightKind::Int4));
+    v.push_back(Qwen35::lm_head(model::WeightKind::Int8));   // spec 9: made at load
     return v;
   }();
   for (const model::FusedLinear& fl : rows) {
@@ -38,21 +39,24 @@ int main() {
     // goes through the same `gemv_bf16_tiling` the runtime binds with, so this
     // test checks the binary runtime::build will actually open, not a sibling.
     const std::string variant =
-        fl.kind == model::WeightKind::Int4
-            ? kernels::gemv_variant(1, s.K, s.N, s.S, s.layout)
-            : kernels::gemv_bf16_variant(1, s.K, s.N, kernels::gemv_bf16_tiling(s.N));
+        fl.kind == model::WeightKind::Int4   ? kernels::gemv_variant(1, s.K, s.N, s.S, s.layout)
+        : fl.kind == model::WeightKind::Int8 ? kernels::gemv_i8w_variant(1, s.K, s.N)
+                                             : kernels::gemv_bf16_variant(1, s.K, s.N, kernels::gemv_bf16_tiling(s.N));
     const std::string path = kernels::path(variant);
     if (!std::filesystem::exists(path)) {
       std::fprintf(stderr, "no device binary for table row %zu (%s, %s): %s\n", checked,
                    fl.parts[0].c_str(),
-                   fl.kind == model::WeightKind::Int4 ? "int4" : "bf16", path.c_str());
+                   fl.kind == model::WeightKind::Int4   ? "int4"
+                   : fl.kind == model::WeightKind::Int8 ? "int8"
+                                                        : "bf16",
+                   path.c_str());
       ++missing;
     }
     ++checked;
   }
   CHECK_EQ(missing, size_t(0));
-  CHECK_EQ(checked, size_t(9));   // 8 table rows + the int4 lm_head row
-  std::printf("kernel_table_test OK (%zu rows have a compiled binary: 8 table + int4 lm_head)\n",
+  CHECK_EQ(checked, size_t(10));   // 8 table rows + the int4 and int8 lm_head rows
+  std::printf("kernel_table_test OK (%zu rows have a compiled binary: 8 table + int4/int8 lm_head)\n",
               checked);
   return 0;
 }
