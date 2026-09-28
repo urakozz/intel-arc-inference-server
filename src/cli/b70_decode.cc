@@ -349,9 +349,9 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
   const size_t n = instr.kernel_count;
   std::fprintf(stderr,
                "engine: %zu kernels, %zu modules, max_len %u, %.2f GB of persistent state"
-               " (profiled list: %zu events)\n",
+               ", decode attention %s (profiled list: %zu events)\n",
                n, instr.modules.size(), buffers.max_len, buffers.persistent_bytes() / 1e9,
-               prof.events.size());
+               runtime::decode_attn_name(runtime::decode_attn()), prof.events.size());
 
   // One queue for both lists: the ingestion and the measured replays go through
   // the same ordering domain the Engine would use, so nothing about the
@@ -780,9 +780,12 @@ int run(int argc, char** argv) {
   // debug_resid off: the per-layer tap costs 64 device copies a token and only
   // the golden gate (Task 8) reads it.
   runtime::Engine eng(ctx, std::move(model), max_len);
-  std::fprintf(stderr, "engine: %zu kernels, %zu modules, max_len %u, %.2f GB of persistent state\n",
+  std::fprintf(stderr,
+               "engine: %zu kernels, %zu modules, max_len %u, %.2f GB of persistent state, "
+               "decode attention %s\n",
                eng.step().kernel_count, eng.step().modules.size(), eng.max_len(),
-               eng.buffers().persistent_bytes() / 1e9);
+               eng.buffers().persistent_bytes() / 1e9,
+               runtime::decode_attn_name(runtime::decode_attn()));
 
   // Ingestion is one replay per prompt token unless `--pp` or `--prefill` is
   // given, in which case it is `Engine::prefill`. The measured window is

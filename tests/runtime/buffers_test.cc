@@ -204,6 +204,11 @@ int main() {
     CHECK_EQ(p.kv_k.size() + p.kv_v.size(), size_t{8589934592});
     CHECK_EQ(s.attn_part.size(), size_t{24} * 2048 * 8 * 258 * 4);
     CHECK_EQ(s.attn_part.size(), size_t{405798912});
+    // Spec 10 (plan 10b): v2's partials are [24][kAttnV2Blocks = 32][M][258] fp32 at
+    // any max_len - 792,576 B per row, 3,170,304 B at M = 4 - inside v1's allocation.
+    CHECK_EQ(runtime::DecodeScratch::kAttnV2Blocks, 32u);
+    CHECK(size_t{24} * runtime::DecodeScratch::kAttnV2Blocks * runtime::DecodeScratch::kM * 258 * 4 <=
+          s.attn_part.size());
     runtime::DecodeBuffers view(p, s);
     CHECK_EQ(view.max_len, 131072u);
   }
@@ -212,6 +217,8 @@ int main() {
   std::printf("persistent %zu B, scratch %zu B\n", b.persistent_bytes(), b.scratch_bytes());
 
   CHECK_EQ(b.max_len, 16384u);
+  CHECK(size_t{24} * runtime::DecodeScratch::kAttnV2Blocks * runtime::DecodeScratch::kM * 258 * 4 <=
+        b.attn_part.size());
   CHECK_EQ(b.persistent_bytes(), size_t{1240465536});
   CHECK_EQ(b.scratch_bytes(), size_t{68652864});
 

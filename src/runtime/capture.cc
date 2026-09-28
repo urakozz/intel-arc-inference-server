@@ -2,10 +2,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "kernels/kernels.h"
 #include "loader/small_layout.h"
@@ -224,9 +227,14 @@ class Capture {
     // Spec 6: MAXLEN is baked into both attention binaries, and only some max_lens are
     // compiled (src/kernels/CMakeLists.txt: 4096, 16384, 32768 and 131072 at M = 1). Name the missing one
     // here, before a single command is appended, rather than as a bare path later.
-    for (const std::string& v :
-         {kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
-          kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock)})
+    // Spec 10: v2 bakes no MAXLEN (one binary per M, `_T<kAttnV2Blocks>`).
+    const std::vector<std::string> attn_bins =
+        attn_ == DecodeAttn::V2
+            ? std::vector<std::string>{kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks)}
+            : std::vector<std::string>{
+                  kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
+                  kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock)};
+    for (const std::string& v : attn_bins)
       require(std::ifstream(kernels::path(v)).good(),
               "no decode attention is compiled for max_len " + std::to_string(b_.max_len) +
                   ": " + v + " is missing (" + kernels::path(v) +
@@ -294,6 +302,65 @@ class Capture {
   // arguments are captured at append, so one object could serve many launches -
   // but it keeps the list auditable (kernels[i] is what launch i ran) for the
   // cost of 774 handles.
+  // Decode attention over one KV cache: attn.cl's attn_decode + attn_reduce (v1) or
+  // attn_v2.cl's pair (spec 10, plan 10b), whichever `attn_` names. `ctrl` is the list's
+  // control block (the head's `hctl` in the draft list); both read q from attn_q, write
+  // partials into attn_part and the gated bf16 rows into attn_out.
+  void attn_pair(void* ctrl, void* kk, void* vv) {
+    if (attn_ == DecodeAttn::V2) {
+      // attn_v2.cl: grid (4 kv-heads, kAttnV2Blocks), WG 256; the stride is derived per
+      // row from Control::pos on the device, so one list serves every depth.
+      const std::string v = kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks);
+      {
+        l0::Kernel& k = kernel(v, "attn_decode_v2", kWgAttn);
+        k.arg_ptr(0, ctrl);
+        k.arg_ptr(1, b_.attn_q.ptr());
+        k.arg_ptr(2, kk);
+        k.arg_ptr(3, vv);
+        k.arg_ptr(4, b_.attn_part.ptr());
+        launch(k, Qwen35::kFaKvHeads, DecodeBuffers::kAttnV2Blocks);
+      }
+      // attn_reduce_v2(ctrl, attn_part, attn_gate, attn_out), grid (24 q-heads, M).
+      {
+        l0::Kernel& k = kernel(v, "attn_reduce_v2", kWgAttn);
+        k.arg_ptr(0, ctrl);
+        k.arg_ptr(1, b_.attn_part.ptr());
+        k.arg_ptr(2, b_.attn_gate.ptr());
+        k.arg_ptr(3, b_.attn_out.ptr());
+        launch(k, Qwen35::kFaQHeads, kCapM);
+      }
+      return;
+    }
+    // attn_decode(ctrl, attn_q, kv_k, kv_v, attn_part) - attn.cl (Task 5), grid
+    // (4 kv-heads, max_len/kAttnBlock blocks), WG 256. The grid spans the whole
+    // cache because a captured list cannot resize; the work-groups past the
+    // context early-out on their first instruction (the grid's history and the
+    // idle work-groups' measured cost: docs/15 "Spec 1.6 §5.2", docs/12 `attn`).
+    {
+      l0::Kernel& k = kernel(
+          kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
+          "attn_decode", kWgAttn);
+      k.arg_ptr(0, ctrl);
+      k.arg_ptr(1, b_.attn_q.ptr());
+      k.arg_ptr(2, kk);
+      k.arg_ptr(3, vv);
+      k.arg_ptr(4, b_.attn_part.ptr());
+      launch(k, Qwen35::kFaKvHeads, b_.max_len / DecodeBuffers::kAttnBlock);
+    }
+    // attn_reduce(ctrl, attn_part, attn_gate, attn_out) - attn.cl (Task 5),
+    // grid (24 q-heads, M), WG 256.
+    {
+      l0::Kernel& k =
+          kernel(kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
+                 "attn_reduce", kWgAttn);
+      k.arg_ptr(0, ctrl);
+      k.arg_ptr(1, b_.attn_part.ptr());
+      k.arg_ptr(2, b_.attn_gate.ptr());
+      k.arg_ptr(3, b_.attn_out.ptr());
+      launch(k, Qwen35::kFaQHeads, kCapM);
+    }
+  }
+
   l0::Kernel& kernel(const std::string& variant, const char* entry, uint32_t wg) {
     auto it = step_.modules.find(variant);
     if (it == step_.modules.end())
@@ -635,29 +702,7 @@ class Capture {
     // it at 0.18 us -- and doc 07 #12 keeps the larger one so the bound is not
     // flattered. What is bought is a quartered per-work-group serial walk
     // (369.988 -> 224.046 us/launch, measured, grid growth included).
-    {
-      l0::Kernel& k = kernel(
-          kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
-          "attn_decode", kWgAttn);
-      k.arg_ptr(0, b_.control.ptr());
-      k.arg_ptr(1, b_.attn_q.ptr());
-      k.arg_ptr(2, kk);
-      k.arg_ptr(3, vv);
-      k.arg_ptr(4, b_.attn_part.ptr());
-      launch(k, Qwen35::kFaKvHeads, b_.max_len / DecodeBuffers::kAttnBlock);
-    }
-    // attn_reduce(ctrl, attn_part, attn_gate, attn_out) - attn.cl (Task 5),
-    // grid (24 q-heads, M), WG 256.
-    {
-      l0::Kernel& k =
-          kernel(kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
-                 "attn_reduce", kWgAttn);
-      k.arg_ptr(0, b_.control.ptr());
-      k.arg_ptr(1, b_.attn_part.ptr());
-      k.arg_ptr(2, b_.attn_gate.ptr());
-      k.arg_ptr(3, b_.attn_out.ptr());
-      launch(k, Qwen35::kFaQHeads, kCapM);
-    }
+    attn_pair(b_.control.ptr(), kk, vv);
     // o_proj is the one GEMV whose activations are not the shared `x` scratch:
     // attn_reduce writes bf16 [M][6144] into `attn_out`, which is exactly this
     // GEMV's K.
@@ -827,27 +872,7 @@ class Capture {
     const loader::MtpHead& h = *m_.mtp;
     const uint32_t G = DecodeBuffers::kNormGroups, H = Qwen35::kHidden;
     head_front(mtp_->dh.ptr());
-    {
-      l0::Kernel& k = kernel(
-          kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
-          "attn_decode", kWgAttn);
-      k.arg_ptr(0, mtp_->hctl.ptr());
-      k.arg_ptr(1, b_.attn_q.ptr());
-      k.arg_ptr(2, mtp_->kv_k.ptr());
-      k.arg_ptr(3, mtp_->kv_v.ptr());
-      k.arg_ptr(4, b_.attn_part.ptr());
-      launch(k, Qwen35::kFaKvHeads, b_.max_len / DecodeBuffers::kAttnBlock);
-    }
-    {
-      l0::Kernel& k =
-          kernel(kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
-                 "attn_reduce", kWgAttn);
-      k.arg_ptr(0, mtp_->hctl.ptr());
-      k.arg_ptr(1, b_.attn_part.ptr());
-      k.arg_ptr(2, b_.attn_gate.ptr());
-      k.arg_ptr(3, b_.attn_out.ptr());
-      launch(k, Qwen35::kFaQHeads, kCapM);
-    }
+    attn_pair(mtp_->hctl.ptr(), mtp_->kv_k.ptr(), mtp_->kv_v.ptr());
     head_gemv(h.o, b_.attn_out.ptr(), b_.partials.ptr());
     const std::string fold1 = kernels::prep_res_fold_variant(kCapM, H, 1, G);
     const std::string fin = kernels::prep_norm_finish_variant(kCapM, H, G, G);
@@ -913,6 +938,8 @@ class Capture {
   const MtpBuffers* mtp_;
   const Mode mode_;
   const uint32_t draft_i_;
+  // Spec 10: the decode-attention pair, read from B70_DECODE_ATTN once per build.
+  const DecodeAttn attn_ = decode_attn();
   CapturedStep step_;
   size_t kv_stride_ = 0;
   int layer_ = kBoundary;
@@ -927,6 +954,16 @@ ProfileEvents::ProfileEvents(l0::Context& ctx) : pool(ctx, kProfileCapacity) {
   // command list stable for the whole walk.
   events.reserve(kProfileCapacity);
 }
+
+DecodeAttn decode_attn() {
+  const char* v = std::getenv("B70_DECODE_ATTN");
+  if (v == nullptr || *v == '\0') return kDefaultDecodeAttn;
+  if (std::strcmp(v, "v1") == 0) return DecodeAttn::V1;
+  if (std::strcmp(v, "v2") == 0) return DecodeAttn::V2;
+  throw std::runtime_error(std::string("B70_DECODE_ATTN=") + v + ": expected v1 or v2");
+}
+
+const char* decode_attn_name(DecodeAttn a) { return a == DecodeAttn::V2 ? "v2" : "v1"; }
 
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                    l0::Mem* debug_resid, ProfileEvents* prof, uint32_t M) {
