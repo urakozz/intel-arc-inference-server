@@ -20,7 +20,7 @@
 
 ## Review Focus
 
-1. **The fold's packed indexing** matches 14a's proven CPU fold exactly (same row / group offsets: `qweight` row 2176 and `scales` group 272 at the down join); `g_idx` asserted identity.
+1. **The fold's packed indexing** matches 14a's proven CPU fold exactly (gate/up joined along N, the columns of GPTQ's `[K/8, N]` `qweight`; down joined along K at `qweight` row 2176 and `scales` row 272); `g_idx` asserted identity.
 2. **The GEMV tuning rows** for the two new shapes are measured, not copied: each picked config's GB/s against bytes is reported (the bf16 / int4 GEMVs run at ~590 GB/s; a new row much below that is a finding).
 3. **h8 (spec 5) column scales** (`pf_colmax_rot`, `Engine::prepare_prefill()`) cover 38 / 19 slabs for Agnes; `prepare_prefill` time recorded.
 4. **Memory at 65536** fits with MTP lists and the int8 head (load report line); the prefix cache's host budget unaffected.

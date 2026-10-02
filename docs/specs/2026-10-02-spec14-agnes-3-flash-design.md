@@ -45,9 +45,9 @@ Exact up to accumulation order. Alignment holds everywhere the engine tiles:
 - spec 5's 1024-column slabs and 1024-blocked Hadamard: 17408 = 17 x 1024, 19456 = 19 x 1024;
 - the fused gate‖up of the engine (`N` = 2 x intermediate) becomes 38912 = 38 x 1024.
 
-The fold is a loader operation on packed int4 (stacking GPTQ `qweight` / `scales` rows for
-gate and up; concatenating `qweight` / `scales` along the packed input dimension for down, at
-a group boundary). It is done at load, so the checkpoint stays as published.
+The fold is a loader operation on packed int4. GPTQ stores `qweight` as `[K/8, N]` and
+`scales` / `qzeros` as `[K/64, N]`: gate and up are concatenated along N (columns), down along
+the packed K (rows, at `qweight` row 2176 and `scales` row 272, a group boundary). It is done at load, so the checkpoint stays as published.
 
 Rejected: the parallel FFN as its own three launches per layer (+216 launches per token, small
 GEMVs at worse bandwidth than one wider one).

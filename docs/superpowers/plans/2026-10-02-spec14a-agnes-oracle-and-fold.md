@@ -21,7 +21,7 @@
 ## Review Focus
 
 1. **`modeling_agnes.py` is the ground truth**, our subclass the tool: compare logits on a 64-id prompt (cosine >= 0.99999, same argmax at every position) before dumping anything.
-2. **The fold on packed int4:** the CPU proof uses the GPTQ tensors exactly as the engine's loader will see them (stack `qweight`/`scales`/`qzeros` rows for gate and up; concatenate along the packed input dim for down at row 17408 / 8 = 2176 of `qweight`, group 272 of `scales`), dequantises the folded tensors, and compares the folded MLP output with the two-branch output on real layer inputs captured from the reference.
+2. **The fold on packed int4:** the CPU proof uses the GPTQ tensors exactly as the engine's loader will see them (GPTQ packs `qweight` as `[K/8, N]` and `scales` / `qzeros` as `[K/64, N]`: gate and up are concatenated along the output dimension N, i.e. columns; down is concatenated along the packed input dimension, rows, at `qweight` row 17408 / 8 = 2176 and `scales` row (group) 272), dequantises the folded tensors, and compares the folded MLP output with the two-branch output on real layer inputs captured from the reference.
 3. **`g_idx`** is present in the checkpoint: with `desc_act: false` it must be the identity grouping; assert it, because the fold relies on it.
 4. **The MTP head** (`mtp.*`, 15 tensors) loads unchanged; record its presence for 14c.
 5. The chat template (`chat_template.jinja`) is diffed against Qwen3.8's: tool-call format and `<think>` handling, for 14d.
@@ -41,7 +41,7 @@
 
 **Files:** `tools/oracle/agnes_fold.py`, `tools/oracle/test_agnes_fold.py`.
 
-- [ ] **Step 1:** test: on a synthetic GPTQ layer pair (random int4, g64), the packed fold dequantises to exactly `[W_gate ; W_gate_p]`, `[W_up ; W_up_p]`, `[W_down | W_down_p]`.
+- [ ] **Step 1:** test: on a synthetic GPTQ layer pair (random int4, g64), the packed fold (columns for gate/up, rows for down) dequantises to exactly `[W_gate ; W_gate_p]`, `[W_up ; W_up_p]`, `[W_down | W_down_p]`.
 - [ ] **Step 2:** on the real checkpoint, for layers 0, 3, 35, 71: capture each MLP's input from a reference forward on a golden prompt; folded MLP vs two-branch MLP output, cosine per row >= 0.999999 and max abs; Review Focus 2, 3.
 - [ ] **Step 3:** doc section; **Commit** `oracle: the parallel-FFN fold, proved on the checkpoint (spec 14 G1)`.
 
