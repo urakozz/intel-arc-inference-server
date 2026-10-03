@@ -1,6 +1,7 @@
 # Spec 14 - Agnes 3.0 Flash, the second model
 
-**Status:** design, 2026-10-02, operator approved approach 1 (§2) the same day.
+**Status:** design, 2026-10-02, operator approved approach 1 (§2) the same day; re-scoped
+2026-10-03 into write-now / validate-on-the-box (§6).
 
 **Checkpoint:** [`urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ`](https://huggingface.co/urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ)
 (the operator's quant of `Agnes-AI/Agnes-3.0-Flash`). Reference implementation: the
@@ -135,14 +136,26 @@ Idle box, device 0, interleaved pairs, median of 3.
 
 ## 6. Stages
 
-- **14a, oracle and fold (CPU):** the Agnes CPU reference (§3.4), its check against
-  `modeling_agnes.py`, G1 on the CPU, golden sets dumped; the Agnes tool-call reference
-  outputs. Needs the box's CPU and RAM only.
-- **14b, descriptor refactor:** `ModelDesc`, every hardcoded layer count and intermediate
-  size routed through it, Qwen3.8 only; G0 (bitwise).
-- **14c, Agnes in the engine:** the loader (names, fold), the new kernel variants and tuning
-  rows, buffers, MTP lists; G1 (card), G2, G4, G5; the speed rows.
-- **14d, serving:** chat template and tool calls, A4 (G3), the vLLM row, the record.
+**Re-scoped 2026-10-03 (operator): write first, validate on the box later.** The box is
+unavailable for a while, so the code is written now and checked as far as the Mac allows; every
+gate that needs the card runs in one validation session when the box is back.
+
+- **Phase 1, write (now, no box):** plan `2026-10-03-spec14-write-phase.md`. All of 14a-14d's code
+  on one branch `spec14-agnes`: the CPU reference and the fold (Python), `ModelDesc` (the
+  refactor first), the loader's name map and fold, the Agnes descriptor, kernel variants and
+  CMake, **provisional** GEMV tuning rows (copied from the nearest Qwen3.8 shapes, marked),
+  the chat template and tool-call check. Checked locally: host C++ compiled and its host-only
+  tests run on the Mac (Apple clang; Level Zero headers from the open-source loader repo for a
+  syntax check of the runtime); the Python tests and the fold proof (G1, CPU part) on the real
+  checkpoint in the Mac's HF cache; the template rendered against HF's `apply_chat_template`.
+- **Phase 2, validate (the box):** `2026-10-03-spec14-validation-checklist.md`, in order: build;
+  **G0 first** (Qwen3.8 bitwise, binaries byte-identical); kernel tests at the new shapes; GEMV
+  tuning measured and the provisional rows replaced; golden sets and tool-call references dumped
+  (bf16 Agnes on the box's RAM); G1 (card), G2, G4, G5, A4 (G3); speed and the vLLM row; the
+  record. The branch merges only after it.
+
+The earlier per-stage plans (`2026-10-02-spec14a`..`14d`) are superseded by these two and kept for
+their task detail, which the write plan points to.
 
 ## 7. Out of scope
 

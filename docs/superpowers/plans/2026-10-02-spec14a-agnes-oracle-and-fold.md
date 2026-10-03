@@ -1,5 +1,7 @@
 # Spec 14a - Agnes: the CPU reference, the fold proof, the golden sets
 
+> **Superseded 2026-10-03** by `2026-10-03-spec14-write-phase.md` and `2026-10-03-spec14-validation-checklist.md` (spec 14 §6). Kept for task detail.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** a CPU reference for Agnes 3.0 Flash in `tools/oracle/`, checked against the checkpoint's own `modeling_agnes.py`; the proof on real data that the folded MLP equals the two-branch MLP (G1, CPU); Agnes golden sets and tool-call reference outputs dumped.
