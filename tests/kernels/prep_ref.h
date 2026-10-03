@@ -178,19 +178,22 @@ inline void norm_finish(const float* sumsq, const uint16_t* resid, const float* 
 //   g_b = rne(Σ_s partials[s][m][gflat]) ;  u_b likewise
 //   s_b = rne(silu_f32(f32(g_b)))
 //   x_out[m][k] = rne(f32(s_b) · f32(u_b))
-inline void silu_mul(const float* partials, uint16_t* x_out, uint32_t M) {
+// `N` is the MLP intermediate: Qwen3.8's kSiluN by default, Agnes's 19456 (spec 14);
+// gate||up is 2N wide.
+inline void silu_mul(const float* partials, uint16_t* x_out, uint32_t M, uint32_t N = kSiluN) {
+  const size_t FN = size_t(2) * N;
   for (uint32_t m = 0; m < M; ++m)
-    for (uint32_t k = 0; k < kSiluN; ++k) {
+    for (uint32_t k = 0; k < N; ++k) {
       const size_t gflat = size_t(k / 16) * 32 + (k % 16), uflat = gflat + 16;
       float ga = 0.f, ua = 0.f;
       for (uint32_t s = 0; s < kSiluS; ++s) {
-        const size_t base = (size_t(s) * M + m) * kSiluFusedN;
+        const size_t base = (size_t(s) * M + m) * FN;
         ga += partials[base + gflat];
         ua += partials[base + uflat];
       }
       const uint16_t g_b = rne(ga), u_b = rne(ua);
       const uint16_t s_b = rne(silu_f32(f32(g_b)));
-      x_out[size_t(m) * kSiluN + k] = rne(f32(s_b) * f32(u_b));
+      x_out[size_t(m) * N + k] = rne(f32(s_b) * f32(u_b));
     }
 }
 
