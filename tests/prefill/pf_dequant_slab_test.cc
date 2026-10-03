@@ -63,6 +63,8 @@ int main() {
   shape_case(d, 5120, 34816, 0);
   shape_case(d, 17408, 5120, 0);
   shape_case(d, 5120, 14336, 0);
+  shape_case(d, 5120, 38912, 0);   // spec 14: Agnes gate'||up' (38 slabs)
+  shape_case(d, 19456, 5120, 0);   // spec 14: Agnes down' (K 19456)
   std::puts("pf_dequant_slab_test OK");
   return 0;
 }

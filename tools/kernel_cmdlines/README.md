@@ -1,0 +1,1 @@
+`tools/kernel_cmdlines` lists every kernel binary's ocloc command line without ocloc or a GPU (stubbed `add_ocloc_kernel`); diff two trees' lists to prove a change left the existing binaries' command lines untouched - usage in its CMakeLists.txt.

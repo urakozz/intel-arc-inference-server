@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
     CHECK(same(h1, h2, n));
     // Nothing outside [4096, 4395) was written: a whole-cache readback is zero there.
     const auto& b = e.buffers();
-    const size_t per_pos = b.kv_k.size() / 16 / kMaxLen;
+    const size_t per_pos = b.kv_k.size() / e.model().desc->fa_layers / kMaxLen;
     std::vector<uint8_t> full(b.kv_k.size());
     l0::CmdList copy = l0::CmdList::immediate(ctx);
     for (const l0::Mem* m : {&b.kv_k, &b.kv_v}) {
@@ -181,9 +181,9 @@ int main(int argc, char** argv) {
     std::vector<std::unique_ptr<l0::Mem>> states;
     std::vector<uint32_t> ends;
     // The KV of the whole run, gathered range by range into one [0, 5000) host layout:
-    // 32 runs (16 layers x K, V) of 5000 positions.
+    // 2 x fa_layers runs (K, V per FA layer; 32 on Qwen3.8, 36 on Agnes) of 5000 positions.
     std::vector<uint8_t> kv_all(e.kv_bytes(5000));
-    const size_t full = e.kv_bytes(5000) / 32;
+    const size_t full = e.kv_bytes(5000) / (2 * e.model().desc->fa_layers);
     uint32_t prev = 0;
     e.set_block_hook([&](uint32_t end, bool) {
       states.emplace_back(new l0::Mem(ctx, l0::MemKind::Host, e.state_bytes()));

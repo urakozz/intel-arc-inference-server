@@ -160,14 +160,16 @@ int main(int argc, char** argv) {
   loader::LoadedModel model = loader::load(ctx, snap, kMaxLen, /*mtp=*/false, lm_head);
   CHECK(model.embed.size() >= size_t(Qwen35::kVocab) * kHid * 2);
   // Spec 14: the layer count is the loaded model's (64 Qwen3.8, 72 Agnes).
-  const uint32_t kLayers = model.desc->layers;
+  const uint32_t kLayers = model.desc->layers, kGdnLayers = model.desc->gdn_layers;
   runtime::Engine eng(ctx, std::move(model), kMaxLen, /*debug_resid=*/true);
   CHECK(eng.debug_resid());
-  CHECK_EQ(eng.step().kernel_count, size_t(774));   // 645 + lever L1's 129
+  // The decode list is 12 launches per layer + 6 at the boundary: 774 on Qwen3.8
+  // (645 + lever L1's 129), 870 on Agnes's 72 layers (spec 14, derived).
+  CHECK_EQ(eng.step().kernel_count, size_t(12) * kLayers + 6);
   l0::CmdList imm = l0::CmdList::immediate(ctx);
 
   const size_t gdn_stride = kGdnElems * sizeof(float);
-  CHECK_EQ(eng.buffers().gdn_state.size(), gdn_stride * 48);
+  CHECK_EQ(eng.buffers().gdn_state.size(), gdn_stride * kGdnLayers);
 
   std::vector<Verdict> verdicts;
   std::vector<double> sa, sb;  // fp64 scratch, reused
@@ -269,8 +271,8 @@ int main(int argc, char** argv) {
         all += med_l[l];
         if (::model::ModelDesc::is_fa(l)) { fa += med_l[l]; ++nf; } else { gdn += med_l[l]; ++ng; }
       }
-      std::printf("  mean of the 64 per-layer upper-medians: %.9f   (GDN %u: %.9f, FA %u: %.9f)\n",
-                  all / kLayers, ng, gdn / ng, nf, fa / nf);
+      std::printf("  mean of the %u per-layer upper-medians: %.9f   (GDN %u: %.9f, FA %u: %.9f)\n",
+                  kLayers, all / kLayers, ng, gdn / ng, nf, fa / nf);
     }
     std::printf("  census: %u of the %u (layer, t) tap comparisons are below %.3f, on %zu of the"
                 " %u positions:", n_low_pairs, uint32_t(kLayers) * T, kBar, low_t.size(), T);
@@ -341,7 +343,8 @@ int main(int argc, char** argv) {
     }
 
     // ---- 3. the GDN recurrent state after the prompt ------------------------
-    std::printf("  gdn_state after the prompt (%zu fp32 per layer, 48 GDN layers):\n", kGdnElems);
+    std::printf("  gdn_state after the prompt (%zu fp32 per layer, %u GDN layers):\n", kGdnElems,
+                kGdnLayers);
     {
       std::vector<float> st(kGdnElems);
       uint32_t gi = 0, n_low = 0;

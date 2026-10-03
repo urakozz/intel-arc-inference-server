@@ -40,6 +40,15 @@ struct ModelDesc {
   // `model.language_model.*` and `mtp.*` name (vLLM PR #57003's WeightsMapper).
   std::vector<std::pair<std::string, std::string>> name_map;
   std::array<FusedLinear, kLinearCount> table{};   // indexed by LinearId ordinal
+  // `W` with a bf16 lm_head: the bytes a decode step streams (int4 qweight +
+  // scales + bf16 per-layer tensors + lm_head), the loader's 2% cross-check
+  // (docs/13). Qwen3.8: 15.519 GB, measured (docs/03). Agnes: 18.344 GB, summed
+  // from the checkpoint's safetensors headers over the same four categories
+  // (derived - not yet a load on the card; spec 14 validation checklist).
+  double doc_w = 0;
+  // True for a descriptor whose GEMV tuning rows were copied, not measured (spec
+  // 14 §6: Agnes's two new shapes until the box sweep replaces them).
+  bool provisional_tuning = false;
 
   bool has_parallel_ffn() const { return parallel_ffn != 0; }
   // [GDN, GDN, GDN, FA] repeating - both models (`global_attention_interval` 4).
@@ -67,6 +76,7 @@ struct ModelDesc {
 };
 
 const ModelDesc& qwen38();
+const ModelDesc& agnes();   // Agnes 3.0 Flash (spec 14)
 // The descriptor for config.json's `architectures[0]`; throws std::runtime_error
 // naming the architecture and the supported ones.
 const ModelDesc& desc_for_architecture(const std::string& architecture);

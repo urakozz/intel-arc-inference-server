@@ -86,7 +86,7 @@ if(B70_PREFILL_ENABLED)
   b70_target_kernel_dir(pf_int8_test)
   add_dependencies(pf_int8_test kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144
                    kernel_pf_quant_had_K17408 kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1
-                   kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU)
+                   kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU kernel_pf_quant_had_K19456)
   add_test(NAME pf_int8_test COMMAND pf_int8_test)
 
   # Spec 6 K1 (plan 6b Task 1): pf_flash_attn against an fp64 reference.
@@ -171,6 +171,8 @@ add_dependencies(pf_dequant_slab_test
   kernel_pf_dequant_slab_K5120_N16384_L1 kernel_pf_dequant_slab_K6144_N5120_L0
   kernel_pf_dequant_slab_K5120_N34816_L0 kernel_pf_dequant_slab_K17408_N5120_L0
   kernel_pf_dequant_slab_K5120_N14336_L0
+  kernel_pf_dequant_slab_K5120_N38912_L0 kernel_pf_dequant_slab_K19456_N5120_L0
+  kernel_pf_dequant_tile_K5120_N38912_L0_T0 kernel_pf_dequant_tile_K19456_N5120_L0_T0
   kernel_pf_dequant_tile_K5120_N16384_L1_T0 kernel_pf_dequant_tile_K6144_N5120_L0_T0
   kernel_pf_dequant_tile_K5120_N34816_L0_T0 kernel_pf_dequant_tile_K17408_N5120_L0_T0
   kernel_pf_dequant_tile_K5120_N14336_L0_T0)
@@ -329,7 +331,8 @@ add_dependencies(gemv_test
   kernel_gemv_control_M1_K6144_N5120_S4_L0
   kernel_gemv_M1_K6144_N5120_S4_L0 kernel_gemv_M1_K5120_N14336_S2_L0
   kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K5120_N34816_S8_L0
-  kernel_gemv_M1_K17408_N5120_S4_L0 kernel_gemv_M2_K6144_N5120_S1_L0)
+  kernel_gemv_M1_K17408_N5120_S4_L0 kernel_gemv_M2_K6144_N5120_S1_L0
+  kernel_gemv_M1_K5120_N38912_S8_L0 kernel_gemv_M1_K19456_N5120_S4_L0)   # spec 14
 add_test(NAME gemv_test COMMAND gemv_test)
 
 add_executable(gemv_bf16_test kernels/gemv_bf16_test.cc)
@@ -463,6 +466,14 @@ add_executable(dequant_fixture_test loader/dequant_fixture_test.cc)
 target_include_directories(dequant_fixture_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(dequant_fixture_test PRIVATE b70_loader)
 add_test(NAME dequant_fixture_test COMMAND dequant_fixture_test ${CMAKE_SOURCE_DIR}/tests/golden/dequant_fixture.safetensors)
+
+# Spec 14 §2: the loader's packed-int4 fold against tools/oracle/agnes_fold.py on a
+# shared synthetic fixture, byte for byte. Host only.
+add_executable(agnes_fold_test loader/agnes_fold_test.cc)
+target_include_directories(agnes_fold_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(agnes_fold_test PRIVATE b70_loader)
+add_test(NAME agnes_fold_test COMMAND agnes_fold_test
+  ${CMAKE_SOURCE_DIR}/tests/loader/agnes_fold_fixture.safetensors)
 
 add_executable(qwen35_test model/qwen35_test.cc)
 target_include_directories(qwen35_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -654,6 +665,8 @@ set(B70_PREFILL_KERNELS
   kernel_pf_dequant_slab_K5120_N16384_L1 kernel_pf_dequant_slab_K6144_N5120_L0
   kernel_pf_dequant_slab_K5120_N34816_L0 kernel_pf_dequant_slab_K17408_N5120_L0
   kernel_pf_dequant_slab_K5120_N14336_L0
+  kernel_pf_dequant_slab_K5120_N38912_L0 kernel_pf_dequant_slab_K19456_N5120_L0
+  kernel_pf_dequant_tile_K5120_N38912_L0_T0 kernel_pf_dequant_tile_K19456_N5120_L0_T0
   # Spec 5's h8 path, which `--pp-backend l0-int8` runs (pf_colmax_rot is in the
   # pf_requant_rot binaries).
   kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144 kernel_pf_quant_had_K17408
@@ -1167,5 +1180,69 @@ if(B70_MTP)
     add_test(NAME mtp_gpu_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
     set_tests_properties(mtp_gpu_test PROPERTIES LABELS "checkpoint;mtp"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
+  endif()
+endif()
+
+# --- Spec 14: Agnes 3.0 Flash ---------------------------------------------------------
+# The second model's gates (spec 14 §4): the loader and the fold on device (G1's loader
+# half), the golden gates on decode and on both prefill backends (G2), replay determinism,
+# prefill continuation, snapshots, prefix caching, MTP (G4). Same executables as Qwen3.8's,
+# pointed at the Agnes checkpoint and its golden set, label `agnes` beside the usual ones:
+# `ctest -L agnes` runs exactly these, `ctest -LE agnes` is a Qwen3.8 session as before.
+# The golden set `oracle-out-agnes` is dumped on the box (tools/oracle/README.md, spec 14);
+# the golden registrations SKIP (77) until it exists, as Qwen3.8's do.
+# Unvalidated on the card (docs/superpowers/plans/2026-10-03-spec14-validation-checklist.md).
+if(B70_AGNES)
+  set(B70_AGNES_SNAPSHOT "urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ"
+    CACHE STRING "Agnes checkpoint (repo id resolved in the HF cache, or a snapshot directory)")
+  set(B70_AGNES_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-agnes"
+    CACHE PATH "The CPU-oracle golden set dumped from B70_AGNES_SNAPSHOT")
+  set(_ag_prompts ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
+
+  add_executable(load_agnes_test loader/load_agnes_test.cc)
+  target_include_directories(load_agnes_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(load_agnes_test PRIVATE b70_loader b70_model)
+  add_test(NAME load_agnes_test COMMAND load_agnes_test ${B70_AGNES_SNAPSHOT})
+  set_tests_properties(load_agnes_test PROPERTIES LABELS "checkpoint;agnes" TIMEOUT 900)
+
+  # G2: decode (bf16 and int8 head) and prefill (l0, l0-int8) against oracle-out-agnes.
+  add_test(NAME golden_gate_agnes_test COMMAND golden_gate_test
+    ${B70_AGNES_ORACLE_DIR} ${_ag_prompts} ${B70_AGNES_SNAPSHOT})
+  add_test(NAME golden_gate_agnes_i8head_test COMMAND golden_gate_test
+    ${B70_AGNES_ORACLE_DIR} ${_ag_prompts} ${B70_AGNES_SNAPSHOT} int8)
+  add_test(NAME prefill_gate_agnes_l0_test COMMAND prefill_gate_test
+    ${B70_AGNES_ORACLE_DIR} ${_ag_prompts} ${B70_AGNES_SNAPSHOT} prose,code,cjk 0 l0)
+  add_test(NAME prefill_gate_agnes_int8_test COMMAND prefill_gate_test
+    ${B70_AGNES_ORACLE_DIR} ${_ag_prompts} ${B70_AGNES_SNAPSHOT} prose,code,cjk 0 l0-int8 1)
+  set_tests_properties(golden_gate_agnes_test golden_gate_agnes_i8head_test
+    prefill_gate_agnes_l0_test prefill_gate_agnes_int8_test PROPERTIES
+    LABELS "checkpoint;golden;agnes" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+
+  # Determinism, continuation, snapshots (G4 spec 7 C1), MTP verify (G4 spec 8 M2).
+  add_test(NAME replay_determinism_agnes_test COMMAND replay_determinism_test ${B70_AGNES_SNAPSHOT})
+  set_tests_properties(replay_determinism_agnes_test PROPERTIES LABELS "checkpoint;agnes" TIMEOUT 1200)
+  foreach(b l0 l0-int8)
+    add_test(NAME prefill_split_agnes_${b}_test COMMAND prefill_split_test ${B70_AGNES_SNAPSHOT}
+      ${_ag_prompts}/long32k.ids ${b})
+    set_tests_properties(prefill_split_agnes_${b}_test PROPERTIES LABELS "checkpoint;prefill;agnes"
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+  endforeach()
+  add_test(NAME snapshot_agnes_test COMMAND snapshot_test ${B70_AGNES_SNAPSHOT})
+  set_tests_properties(snapshot_agnes_test PROPERTIES LABELS "checkpoint;agnes"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1200)
+  if(TARGET prefix_gpu_test)   # G4 spec 7 C2
+    add_test(NAME prefix_gpu_agnes_int8_test COMMAND prefix_gpu_test ${B70_AGNES_SNAPSHOT}
+      ${_ag_prompts} l0-int8)
+    set_tests_properties(prefix_gpu_agnes_int8_test PROPERTIES LABELS "checkpoint;agnes" TIMEOUT 1800)
+  endif()
+  if(TARGET mtp_verify_test)
+    add_test(NAME mtp_verify_agnes_test COMMAND mtp_verify_test ${B70_AGNES_SNAPSHOT})
+    set_tests_properties(mtp_verify_agnes_test PROPERTIES LABELS "checkpoint;mtp;agnes"
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+    # M1: the head's draft logits against tools/oracle/mtp_ref.py --dump on Agnes.
+    add_test(NAME mtp_head_agnes_test COMMAND mtp_head_test ${B70_AGNES_SNAPSHOT} ${_ag_prompts}
+      ${CMAKE_SOURCE_DIR}/oracle-out-agnes-mtp/m1 ${CMAKE_SOURCE_DIR}/oracle-out-agnes-mtp)
+    set_tests_properties(mtp_head_agnes_test PROPERTIES LABELS "checkpoint;golden;mtp;agnes"
+      SKIP_RETURN_CODE 77 TIMEOUT 1800)
   endif()
 endif()

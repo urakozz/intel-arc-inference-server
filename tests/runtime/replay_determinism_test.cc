@@ -141,7 +141,7 @@ int main(int argc, char** argv) {
   // norm and the MLP's post norm) so it gains 2, and the boundary holds one
   // (the final norm) so it gains 1: 129 sites = 2 x 64 + 1.
   // 576 + 192 + 6 = 774 = 645 + 129.
-  CHECK_EQ(cap.kernel_count, size_t(774));
+  CHECK_EQ(cap.kernel_count, size_t(12) * kLayers + 6);   // 774 Qwen3.8, 870 Agnes (spec 14)
   // One Module per distinct variant: embed_gather, 2 prep_res_fold (SP0/SP16),
   // 1 prep_norm_finish (it does not read `partials`, so the two prep modes
   // share it), silu_mul, gated_head, gdn_step, 3 attn, 5 int4 gemv, 2 bf16

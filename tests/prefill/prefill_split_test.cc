@@ -57,7 +57,13 @@ using Ids = std::vector<uint32_t>;
 using model::Qwen35;
 constexpr uint32_t kMaxLen = 16384;   // a compiled decode max_len (src/kernels/CMakeLists.txt)
 constexpr size_t kRow = 4 * 256;      // one position of one FA layer's K (or V), bf16
-constexpr uint32_t kFa = 16, kGdn = 48;
+// Spec 14: the loaded model's FA / GDN layer counts (16 / 48 Qwen3.8, 18 / 54
+// Agnes), set from the descriptor when each engine is built.
+uint32_t kFa = 0, kGdn = 0;
+void set_counts(const runtime::Engine& e) {
+  kFa = e.model().desc->fa_layers;
+  kGdn = e.model().desc->gdn_layers;
+}
 constexpr uint32_t kShallow = 4;      // FA layers 0..3 = model layers 3, 7, 11, 15
 
 struct Snap {
@@ -183,6 +189,7 @@ int oracle_rows(const std::string& snapdir, const Ids& all, runtime::PrefillBack
   const float* orc = g.f32("logits", T * V);
   l0::Context ctx(0);
   runtime::Engine e(ctx, loader::load(ctx, snapdir, kMaxLen), kMaxLen);
+  set_counts(e);
   e.set_prefill_backend(backend);
   e.prepare_prefill();
   l0::CmdList imm = l0::CmdList::immediate(ctx);
@@ -248,6 +255,7 @@ int main(int argc, char** argv) {
 
   l0::Context ctx(0);
   runtime::Engine e(ctx, loader::load(ctx, snapdir, kMaxLen), kMaxLen);
+  set_counts(e);
   e.set_prefill_backend(backend);
   e.prepare_prefill();
   l0::CmdList imm = l0::CmdList::immediate(ctx);

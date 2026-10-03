@@ -400,7 +400,7 @@ void cross_case(pf_harness::Dev& d, uint32_t K, uint32_t N, uint32_t M, uint32_t
 
 int main() {
   pf_harness::Dev d;
-  for (uint32_t K : {5120u, 6144u, 17408u}) quant_case(d, K, 64);
+  for (uint32_t K : {5120u, 6144u, 17408u, 19456u}) quant_case(d, K, 64);   // 19456: spec 14
   requant_case(d, 5120, 1024, 0);
   requant_case(d, 5120, 1024, 1);
   requant_case(d, 6144, 1024, 0);
@@ -408,6 +408,9 @@ int main() {
   colmax_case(d, 5120, 1024, 0);
   colmax_case(d, 5120, 1024, 1);
   colmax_case(d, 17408, 1024, 0);
+  requant_case(d, 19456, 1024, 0);   // spec 14: Agnes down' (19 Hadamard blocks)
+  colmax_case(d, 19456, 1024, 0);
+  gemm_case(d, 19456, 1024, 512);
   gemm_case(d, 5120, 1024, 256);
   gemm_case(d, 17408, 1024, 512);
   silu_case(d, 5120, 1024, 256);
