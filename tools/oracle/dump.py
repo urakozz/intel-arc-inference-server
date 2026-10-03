@@ -9,6 +9,13 @@ weights. No `fla` is installed in the reference image on purpose: the pure-torch
 gated-delta-rule in modeling_qwen3_5.py IS the contract (doc 03).
 
     dump.py <snapshot> --prompt <ids-file> --out <out.safetensors> [--gen 32] [--max-prompt 64]
+            [--mlp-in <out.safetensors> --mlp-in-layers 0,3,35,71]
+
+Spec 14: an Agnes 3.0 Flash checkpoint (config.json `model_type: agnes`) is
+detected and built as tools/oracle/agnes.py's reference - the same
+Qwen3_5ForCausalLM, its names mapped (`delta_attn.`/`global_attn.`), the
+parallel FFN summed into each MLP, unfolded. `--mlp-in` also writes each listed
+layer's MLP INPUT (`mlp_in.L{i}`, bf16 [T, hidden]) for agnes_fold.py --inputs.
 
 Output tensors (batch dimension squeezed; batch is always 1):
     resid.L{i}      bf16 [T, hidden]   decoder layer i output, all prompt positions
@@ -56,6 +63,9 @@ _spec = importlib.util.spec_from_file_location("oracle_dequant", os.path.join(_H
 _dequant = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_dequant)
 dequant_gptq = _dequant.dequant_gptq
+_spec = importlib.util.spec_from_file_location("oracle_agnes", os.path.join(_HERE, "agnes.py"))
+_agnes = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_agnes)
 
 SKIP_PREFIXES = ("model.visual.", "mtp.")
 QUANT_SUFFIXES = (".scales", ".qzeros", ".g_idx")
@@ -76,7 +86,13 @@ def die(msg: str, code: int = 2) -> None:
 
 
 def map_name(name: str) -> str:
-    """Checkpoint name -> Qwen3_5ForCausalLM name."""
+    """Checkpoint name -> Qwen3_5ForCausalLM name.
+
+    Agnes's `delta_attn.`/`global_attn.` infixes are renamed too (agnes.map_name,
+    vLLM PR #57003's mapper). No Qwen3.8 name contains either infix, so on Qwen3.8
+    this is exactly the old prefix strip.
+    """
+    name = _agnes.map_name(name)
     if name.startswith("model.language_model."):
         return "model." + name[len("model.language_model.") :]
     return name
@@ -258,6 +274,8 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--gen", type=int, default=32)
     ap.add_argument("--max-prompt", type=int, default=64)
+    ap.add_argument("--mlp-in", help="also write the listed layers' MLP inputs here (spec 14 G1)")
+    ap.add_argument("--mlp-in-layers", default="0,3,35,71")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -279,13 +297,26 @@ def main() -> None:
     print(f"prompt: {len(ids)} ids from {args.prompt}")
 
     # 1. the model, from the config alone, on meta so we never hold two copies
-    cfg = AutoConfig.from_pretrained(args.snapshot)
-    tc = cfg.get_text_config()
+    with open(os.path.join(args.snapshot, "config.json"), encoding="utf-8") as f:
+        raw_cfg = json.load(f)
+    agnes = _agnes.is_agnes(raw_cfg)
+    if agnes:
+        # Spec 14 §3.4: Agnes as Qwen3.5 + the parallel FFN (agnes.py). Not
+        # AutoConfig: the checkpoint's config class is remote code.
+        from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+        kwargs, parallel = _agnes.translate_text_config(raw_cfg)
+        tc = Qwen3_5TextConfig(**kwargs)
+    else:
+        cfg = AutoConfig.from_pretrained(args.snapshot)
+        tc = cfg.get_text_config()
     if tc.tie_word_embeddings:
         die("tie_word_embeddings is true; this checkpoint ships a separate lm_head (doc 03)")
     tc._attn_implementation = "eager"  # fp32 softmax, the contract in doc 03
     with torch.device("meta"):
         model = Qwen3_5ForCausalLM(tc)
+        if agnes:
+            n_par = _agnes.attach_parallel_ffn(model, tc, parallel)
+            print(f"agnes: parallel FFN ({parallel}) attached to {n_par} layers, unfolded")
     n_layers = tc.num_hidden_layers
     layer_types = list(tc.layer_types)
     gdn_layers = [i for i, t in enumerate(layer_types) if t == "linear_attention"]
@@ -335,6 +366,17 @@ def main() -> None:
         handles += [layer.register_forward_hook(hook(f"resid.L{i}")),
                     mixer.register_forward_hook(hook(f"mixer.L{i}")),
                     layer.mlp.register_forward_hook(hook(f"mlp.L{i}"))]
+    # Spec 14 G1: the MLP inputs of the listed layers (post_attention_layernorm's
+    # output), for agnes_fold.py's proof on real activations. Prompt forward only.
+    mlp_in: dict[str, torch.Tensor] = {}
+    if args.mlp_in:
+        def pre_hook(name: str):
+            def fn(_mod, a):
+                if name not in mlp_in:
+                    mlp_in[name] = a[0].detach()[0].to(torch.bfloat16).clone()
+            return fn
+        for i in [int(x) for x in args.mlp_in_layers.split(",")]:
+            handles.append(model.model.layers[i].mlp.register_forward_pre_hook(pre_hook(f"mlp_in.L{i}")))
 
     input_ids = torch.tensor([ids], dtype=torch.long)
     t_fwd = time.time()
@@ -395,14 +437,20 @@ def main() -> None:
         print(f"WARNING: degenerate continuation, every token is {tokens[0]}", file=sys.stderr)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    save_file(tensors, args.out, metadata={
+    if args.mlp_in:
+        save_file(mlp_in, args.mlp_in, metadata={"snapshot": os.path.abspath(args.snapshot)})
+        print(f"wrote {args.mlp_in}: {sorted(mlp_in)}")
+    meta = {
         "snapshot": os.path.abspath(args.snapshot),
         "prompt_ids": " ".join(str(i) for i in ids),
         "n_prompt": str(len(ids)),
         "gen": str(args.gen),
         "attn_implementation": tc._attn_implementation,
         "group_size": str(group_size),
-    })
+    }
+    if agnes:   # Qwen3.8's metadata stays exactly as before
+        meta["model"] = "agnes (parallel FFN unfolded, tools/oracle/agnes.py)"
+    save_file(tensors, args.out, metadata=meta)
 
     total = 0
     for name in sorted(tensors, key=lambda n: (n.split(".L")[0], int(n.split(".L")[1]) if ".L" in n else 0)):

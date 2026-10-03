@@ -86,21 +86,41 @@ def weight_map(snapshot: str) -> dict[str, str]:
         return json.load(f)["weight_map"]
 
 
+def _checkpoint_name(wm: dict[str, str], n: str) -> str:
+    """Qwen3.5 name -> the name this checkpoint ships it under (spec 14: Agnes spells
+    `self_attn.` as `global_attn.`, agnes.NAME_MAP run backwards; Qwen3.8 is verbatim)."""
+    if n in wm:
+        return n
+    for ckpt, qwen in _load_module("agnes").NAME_MAP:
+        if qwen in n and n.replace(qwen, ckpt, 1) in wm:
+            return n.replace(qwen, ckpt, 1)
+    raise KeyError(n)
+
+
 def read_tensors(snapshot: str, names) -> dict[str, torch.Tensor]:
+    """By Qwen3.5 name, whatever the checkpoint calls it (returned under the Qwen name)."""
     wm = weight_map(snapshot)
     out = {}
-    by_file: dict[str, list[str]] = {}
+    by_file: dict[str, list[tuple[str, str]]] = {}
     for n in names:
-        by_file.setdefault(wm[n], []).append(n)
+        c = _checkpoint_name(wm, n)
+        by_file.setdefault(wm[c], []).append((n, c))
     for fn, ns in by_file.items():
         with safe_open(os.path.join(snapshot, fn), framework="pt", device="cpu") as h:
-            for n in ns:
-                out[n] = h.get_tensor(n)
+            for n, c in ns:
+                out[n] = h.get_tensor(c)
     return out
 
 
 def text_config(snapshot: str):
-    tc = AutoConfig.from_pretrained(snapshot).get_text_config()
+    with open(os.path.join(snapshot, "config.json"), encoding="utf-8") as f:
+        raw = json.load(f)
+    agnes = _load_module("agnes")
+    if agnes.is_agnes(raw):   # spec 14: the config class is remote code; translate it
+        from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+        tc = Qwen3_5TextConfig(**agnes.translate_text_config(raw)[0])
+    else:
+        tc = AutoConfig.from_pretrained(snapshot).get_text_config()
     tc._attn_implementation = "eager"
     return tc
 
@@ -227,8 +247,13 @@ def build_main(snapshot: str):
     dump = _load_module("dump")
     gs = dump.check_quant_config(snapshot)
     tc = text_config(snapshot)
+    with open(os.path.join(snapshot, "config.json"), encoding="utf-8") as f:
+        raw = json.load(f)
+    agnes = _load_module("agnes")
     with torch.device("meta"):
         model = dump.Qwen3_5ForCausalLM(tc)
+        if agnes.is_agnes(raw):   # spec 14: the parallel FFN, unfolded, as dump.py
+            agnes.attach_parallel_ffn(model, tc, agnes.translate_text_config(raw)[1])
     sd = dump.build_state_dict(snapshot, gs)
     model.load_state_dict(sd, strict=True, assign=True)
     del sd
