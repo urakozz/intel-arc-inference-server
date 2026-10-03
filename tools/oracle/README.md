@@ -90,6 +90,7 @@ changes what the gate means. Since spec 1.6 §5.1 there are two:
 | `oracle-out/` | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` (HF cache) | bf16 |
 | `oracle-out-rtn/` | `~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** |
 | `oracle-out-long/` | `~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** - the spec 2 §6.2 long prompt only, **NOT YET RUN** (below) |
+| `oracle-out-agnes/` | `urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ` (HF cache) | bf16 - spec 14; `dump.py` builds Agnes from `config.json` (`agnes.py`: Qwen3.5 + the parallel FFN, unfolded), **NOT YET RUN** (validation checklist) |
 
 `golden.sh` takes `OUT_DIR` and neither default clobbers the other. It reads the
 **committed** `tests/golden/prompts/*.ids` rather than re-tokenizing: the two

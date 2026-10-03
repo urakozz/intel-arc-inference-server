@@ -52,6 +52,7 @@ build.ninja
 *.safetensors
 # ...except small committed test fixtures (gitignore has no inline comments).
 !tests/golden/*.safetensors
+!tests/loader/*.safetensors
 *.gguf
 *.pt
 *.pth
