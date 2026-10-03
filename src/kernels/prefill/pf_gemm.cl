@@ -70,7 +70,7 @@
 #endif
 //
 // **Storing `rne_bf16(acc)` for the OTHER linears was measured and rejected**
-// (parity program S2(b); docs/specs/2026-09-22-prefill-parity-program-design.md
+// (parity program S2(b); docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md
 // §8). Every
 // consumer opens with that same round, so it is bitwise free, but it does not
 // pay: this driver declares no 16-bit block write wider or taller than

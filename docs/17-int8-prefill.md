@@ -2,7 +2,7 @@
 
 The short version of spec 5 and the two weeks of probes behind it. The
 evidence is `docs/probe-w4a8-2026-09-23.md` (sections 1 to 15), the design is
-`docs/specs/2026-09-24-spec5-int8-prefill-linears-design.md`, and the rows are
+`docs/superpowers/specs/2026-09-24-spec5-int8-prefill-linears-design.md`, and the rows are
 in `BENCHMARKS.md`. Every number is **measured** unless marked **derived**.
 
 ## What runs

@@ -14,7 +14,7 @@
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/kernels.h"
 
-// Spec 5's int8 prefill linears, the h8 path (docs/specs/2026-09-24-spec5-int8-
+// Spec 5's int8 prefill linears, the h8 path (docs/superpowers/specs/2026-09-24-spec5-int8-
 // prefill-linears-design.md, stages T1-T2): x' = x R_K per token in int8,
 // W' = per-channel int8 of (W R_K) built per 1024-column slab, i8 x i8 GEMM,
 // y = acc * xs[m] * ws[n]. The kernels are src/kernels/prefill/pf_int8.cl.

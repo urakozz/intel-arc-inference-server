@@ -289,7 +289,7 @@ reachable.
 
 ### Prefix caching
 
-Spec 7 ([specs/2026-09-27-spec7-prefix-caching-design.md](specs/2026-09-27-spec7-prefix-caching-design.md)):
+Spec 7 ([superpowers/specs/2026-09-27-spec7-prefix-caching-design.md](superpowers/specs/2026-09-27-spec7-prefix-caching-design.md)):
 one resident session on the card and a write-through store in pinned host RAM
 (`--prefix-cache-gb`, default 32, `0` = off). The GDN state cannot be rewound, so
 reuse needs snapshots of it: the store (`src/server/prefix_cache.{h,cc}`) keeps KV
