@@ -1,5 +1,7 @@
 # Spec 14b - the model descriptor (Qwen3.8 only, behaviour-neutral)
 
+> **Superseded 2026-10-03** by `2026-10-03-spec14-write-phase.md` and `2026-10-03-spec14-validation-checklist.md` (spec 14 §6). Kept for task detail.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** replace the hardcoded layer counts and intermediate size with a `ModelDesc` chosen at load, with Qwen3.8 as its only instance, and prove nothing moved (G0: golden gates and replay bitwise, Qwen3.8 kernel binaries byte-identical).

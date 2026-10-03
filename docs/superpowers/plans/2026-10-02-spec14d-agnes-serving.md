@@ -1,5 +1,7 @@
 # Spec 14d - Agnes in the server: chat template, tool calls, A4, the vLLM row
 
+> **Superseded 2026-10-03** by `2026-10-03-spec14-write-phase.md` and `2026-10-03-spec14-validation-checklist.md` (spec 14 §6). Kept for task detail.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `b70-serve urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ` serves chat with the checkpoint's template, reasoning and tool calls parsed (spec 7 §3.5 or an addition), A4 measured (G3), and one llama-benchy row against vLLM running the operator's PR #57003; the record.

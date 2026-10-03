@@ -1,5 +1,7 @@
 # Spec 14c - Agnes in the engine
 
+> **Superseded 2026-10-03** by `2026-10-03-spec14-write-phase.md` and `2026-10-03-spec14-validation-checklist.md` (spec 14 §6). Kept for task detail.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** load `urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ` and run it through decode, prefill (`l0`, `l0-int8`), MTP, the prefix cache and the int8 head: Agnes's `ModelDesc`, the loader's name map and the parallel-FFN fold, the new kernel variants and tuning rows; gates G1 (card), G2, G4, G5; speed rows.
