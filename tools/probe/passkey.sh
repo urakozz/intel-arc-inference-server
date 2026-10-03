@@ -6,22 +6,26 @@
 # greedily, the container decodes them, and the placement PASSES if "71432" is in the text.
 # Files go to /tmp/passkey (small: ~1 MB each). Prints one line per (backend, placement)
 # and a summary "passkey <backend>: k/3". Exit 0 iff every backend got 3/3.
-# Env: MODEL (default the gate checkpoint), ZE_AFFINITY_MASK (default 0).
+# Env: MODEL (default the gate checkpoint), ZE_AFFINITY_MASK (default 0); spec 14:
+# MAX_LEN (131072) and N_TARGET (prompt ids, 120000) - Agnes 3.0 Flash runs at
+# MAX_LEN=65536 N_TARGET=60000 (its max_len ceiling), with ORACLE_MODEL naming it too.
 cd "$(dirname "$0")/../.."
 MODEL="${MODEL:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
 export ZE_AFFINITY_MASK="${ZE_AFFINITY_MASK:-0}"
+MAX_LEN="${MAX_LEN:-131072}"
+N_TARGET="${N_TARGET:-120000}"
 backends=("$@")
 [ ${#backends[@]} -eq 0 ] && backends=(l0-int8 l0)
 dir=/tmp/passkey
 mkdir -p "$dir"
 places="0.05 0.5 0.95"
-tools/oracle/run_in_container.sh "for p in $places; do python3 tools/probe/passkey.py \"\$SNAP\" \$p /scratch/passkey/p\$p.ids; done" || exit 1
+tools/oracle/run_in_container.sh "for p in $places; do python3 tools/probe/passkey.py \"\$SNAP\" \$p /scratch/passkey/p\$p.ids $N_TARGET; done" || exit 1
 ok_all=1
 for b in "${backends[@]}"; do
   pass=0
   for p in $places; do
     ids=$(./build/src/cli/b70-decode "$MODEL" --ids "$dir/p$p.ids" --n 8 --prefill \
-          --pp-backend "$b" --max-len 131072 2> "$dir/p$p.$b.log" | tr '\n' ' ')
+          --pp-backend "$b" --max-len "$MAX_LEN" 2> "$dir/p$p.$b.log" | tr '\n' ' ')
     text=$(tools/oracle/run_in_container.sh "python3 -P tools/oracle/tokenize.py \"\$SNAP\" decode $ids" 2>/dev/null)
     if printf '%s' "$text" | grep -q 71432; then verdict=PASS; pass=$((pass+1)); else verdict=FAIL; fi
     prefill=$(grep -E "^prefill:|memory:" "$dir/p$p.$b.log" | tr '\n' ' ')
