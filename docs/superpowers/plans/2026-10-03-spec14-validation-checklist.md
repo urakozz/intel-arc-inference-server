@@ -8,25 +8,6 @@
 
 **Branch commits (phase 1, written on the Mac, nothing ran on a card):** `be21676` ModelDesc; `3aa5dbf` oracle + fold proof; `e5a71e9` Agnes descriptor, loader fold, kernel variants, test registrations; `061a6e5` template and tool calls; `42a41bf` box instruments (`probe_gemv --agnes`, passkey `MAX_LEN`, A4 reference); `2f8c994` Agnes `vocab_used` 248089.
 
-## Done on the Mac since (2026-10-04, Linux container, no box)
-
-CPU-only items closed in a `python:3.12-slim` container on the Mac (torch 2.14.1+cpu,
-transformers 5.15.0 - the box image's; the Agnes model **layer-streamed**,
-`tools/oracle/stream.py`, `dump.py --stream`; setup in `tools/oracle/README.md`, "The Mac
-path"). Record: `docs/probe-agnes-2026-10-03.md`, "Phase 1 continued on the Mac".
-
-| item | result |
-|---|---|
-| `test_agnes.py` (step 3) | **4/4** - check 4 found `attach_parallel_ffn` building `Qwen3_5MLP(config)` against 5.15's `(config, intermediate_size)`: fixed (`d13a8ef`); `test_agnes_fold.py` OK |
-| P6 template re-dump (step 3) | `dump_agnes_template.py` via `apply_chat_template` (5.15.0): `git diff tests/tokenizer` **empty** |
-| `modeling_agnes.py` vs `agnes.py` (step 6) | 64 ids (`long.ids[:64]`), both layer-streamed, eager, no cache: cos min **1.000000000**, argmax **64/64**, max\|d\| **0** - bit-identical logits; PASS (`agnes_remote_check.py`; `modeling_agnes.py` imports `LAYER_TYPE_CACHE_MAPPING`, absent from transformers 5.15-5.18 and main: shimmed as `{}`, unused without a cache) |
-| fold proof on real MLP inputs (step 6, G1 CPU) | layers 0, 3, 35, 71, 42 real rows each (prose): cos min **1.000000000**, max\|d\| **0** (bit-equal in fp32 on this MKL; also 0 on the synthetic rows, where torch 2.2 gave 1.5e-5) - PASS |
-| golden sets `oracle-out-agnes` (step 6) | prose / code / cjk dumped (`--gen 32`, unfolded, eager); **rsync to the box**: `rsync -a oracle-out-agnes oracle-out-agnes-mtp $BOX:<spec14 tree>/` |
-| prompt ids (P5 note) | Agnes's tokenizer gives the committed `tests/golden/prompts/{prose,code,cjk}.ids` **byte-identical** (42 / 61 / 38) - the golden gates use the same ids on both sides, as required |
-| MTP head reference (step 7) | `oracle-out-agnes-mtp/m1/{code,prose,cjk}.mtp.safetensors` (32 rows each) + `<name>.cont256.ids` = the **oracle's** greedy 33 ids, not the engine's 256 (the test needs > 32 and reads `next` from the same file) |
-| A4 ids (step 9) | `tests/golden/toolcall-agnes` (`make_set.py --from tests/golden/toolcall`): 36 scenarios, **36/36 ids identical** to Qwen3.8's set |
-| passkey ids (step 8) | `passkey.py` on Agnes at 60000: 59963 ids, needle at 3001 / 29953 / 56929 (built again by `passkey.sh` on the box) |
-
 ## Global constraints
 
 - Box workflow as always: `BOX` from `tools/box.env`; per-branch tree `tools/box.sh dir`; every GPU command under `flock ~/b70-gpu.lock`, detached (`tools/probe/detach.sh <log> <cmd>`), polled with a background until-loop; idle-box protocol (DRM-holder check) before any timing; device 0 for every timed row; interleaved control/candidate pairs after a warm-up, median of 3, `uptime` recorded.
@@ -54,11 +35,7 @@ path"). Record: `docs/probe-agnes-2026-10-03.md`, "Phase 1 continued on the Mac"
 ```
 tools/box.sh dir                                            # the spec14-agnes tree
 ssh $BOX 'df -h ~; free -g'
-# the Mac already holds the complete checkpoint (verified 2026-10-04): copy it over the LAN
-# instead of downloading again; fall back to `hf download` on the box only if this fails
-rsync -a --info=progress2 ~/.cache/huggingface/hub/models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ \
-  $BOX:~/.cache/huggingface/hub/
-ssh $BOX 'uvx --from huggingface_hub hf download urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ'   # no-op if the copy is complete
+ssh $BOX 'uvx --from huggingface_hub hf download urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ'   # 22.9 GB
 ssh $BOX 'uvx --from huggingface_hub hf download Agnes-AI/Agnes-3.0-Flash --dry-run'               # size first
 ```
 Pass: the Agnes snapshot complete (`model.safetensors.index.json` names 6 files, all present, no `.incomplete`); the bf16 `Agnes-AI/Agnes-3.0-Flash` downloaded if it fits (else A4's reference is the dequantised W4A16, labelled so). Qwen3.8 gate checkpoint and `oracle-out-primary` present as before.
@@ -85,11 +62,13 @@ Pass: the full Qwen3.8 suite green (`ctest -LE agnes`); `golden_gate_test`, `gol
 
 ```
 ctest -R 'model_desc_test|agnes_fold_test|kernel_table_test|template_agnes_test|template_test|qwen35_test'
-# done on the Mac (above): test_agnes.py 4/4, test_agnes_fold.py, the P6 re-dump (empty diff)
+tools/oracle/run_in_container.sh 'python3 tools/oracle/test_agnes.py "$SNAP"'           # ORACLE_MODEL=models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ
+tools/oracle/run_in_container.sh 'python3 tools/oracle/test_agnes_fold.py'
+tools/oracle/run_in_container.sh 'python3 tools/tokenizer/dump_agnes_template.py "$SNAP"' && git diff --exit-code tests/tokenizer   # P6
 ctest -R load_agnes_test                                     # device; under the lock
 build/tests/parity_test <dir with Agnes corpus ids>          # P5: re-make corpus.ids with Agnes's tokenizer.json first (tools/tokenizer/dump_parity.py)
 ```
-Pass: `load_agnes_test` OK (72 layers, folded shapes, join readbacks exact, MTP head bound, 131072 refused) and its loader report's W check within 2% (P4); the Rust tokenizer's parity on Agnes's `tokenizer.json`.
+Pass: `test_agnes.py` **4/4** (check 4: `build_reference` strict key match - pending on the Mac); `load_agnes_test` OK (72 layers, folded shapes, join readbacks exact, MTP head bound, 131072 refused) and its loader report's W check within 2% (P4); template re-dump empty diff (P6); the Rust tokenizer's parity on Agnes's `tokenizer.json`.
 
 ### 4. GEMV tuning of the two new shapes (P1-P3)
 
@@ -106,21 +85,29 @@ ctest -R 'gemv_test|prep_test|pf_dequant_slab_test|pf_int8_test|argmax_test'
 ```
 Pass: all green - `gemv_test` now includes `{1,5120,38912,8,0}` and `{1,19456,5120,4,0}`, `prep_test` the `_I19456` silu (random and exact cases), `pf_dequant_slab_test` 5120x38912 and 19456x5120, `pf_int8_test` K = 19456 (quant, requant, colmax, gemm).
 
-### 6. The golden gates (G2) - the oracle side is done on the Mac
+### 6. Oracle dumps, then the golden gates (G1 CPU on real inputs, G2)
 
 ```
-# the Mac dumped oracle-out-agnes (golden sets, layer-streamed) and ran the G1 CPU proof on
-# real MLP inputs and the modeling_agnes.py comparison (table above); copy the sets over:
-rsync -a oracle-out-agnes oracle-out-agnes-mtp $BOX:<spec14 tree>/      # from the Mac worktree
+# golden sets for Agnes, unfolded reference (agnes.py), detached, ~1 h, 61+ GiB peak - check free -g first
+ORACLE_MODEL=models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ OUT_DIR=oracle-out-agnes \
+  setsid nohup tools/oracle/golden.sh > oracle-out-agnes/golden.log 2>&1 </dev/null &
+# real MLP inputs for the fold proof (one prompt), then the proof on the snapshot
+tools/oracle/run_in_container.sh 'python3 tools/oracle/dump.py "$SNAP" --prompt tests/golden/prompts/prose.ids \
+  --out /scratch/agnes-prose.safetensors --mlp-in /ws/oracle-out-agnes/mlp_in.safetensors --gen 4'
+tools/oracle/run_in_container.sh 'python3 tools/oracle/agnes_fold.py --proof "$SNAP" --inputs /ws/oracle-out-agnes/mlp_in.safetensors'
+# modeling_agnes.py against our reference (Review Focus 1 of plan 14a): 64-id prompt, logits per position
+#   (write the 20-line comparison in the container: AutoModelForCausalLM trust_remote_code on the
+#    dequantised state dict vs agnes.build_reference; layer by layer if RAM is short)
 ctest -L agnes -R 'golden_gate_agnes|prefill_gate_agnes'
 ```
-Pass: `golden_gate_agnes_test`, `golden_gate_agnes_i8head_test`, `prefill_gate_agnes_l0_test`, `prefill_gate_agnes_int8_test` pass with the golden tie rule (P8 asserted there). The prompt ids are the committed `tests/golden/prompts` - Agnes's tokenizer gives the same ids (checked on the Mac), and the gate only needs both sides to see the same ids. If the box re-dumps a set itself (`golden.sh`, unstreamed, 61+ GiB peak), it must be bit-identical to the Mac's in `tokens` (the streamed path runs the same forward; not compared yet).
+Pass: G1 (CPU, real inputs) cosine >= 0.999999 on layers 0, 3, 35, 71; `modeling_agnes.py` vs our reference cosine >= 0.99999 and the same argmax at every position; `golden_gate_agnes_test`, `golden_gate_agnes_i8head_test`, `prefill_gate_agnes_l0_test`, `prefill_gate_agnes_int8_test` pass with the golden tie rule (P8 asserted there). Note the prompt ids are Qwen3.8's tokenisation (P5 note) - valid for the gate, which only needs both sides to see the same ids.
 
 ### 7. G4 - the features on Agnes
 
 ```
 ctest -L agnes -R 'replay_determinism_agnes|prefill_split_agnes|snapshot_agnes|prefix_gpu_agnes|mtp_verify_agnes'
-# oracle-out-agnes-mtp/m1 and its cont files were dumped on the Mac (rsync in step 6)
+tools/oracle/run_in_container.sh 'python3 tools/oracle/mtp_ref.py --dump "$SNAP" --prompts tests/golden/prompts \
+  --cont <engine greedy cont256 dir> --out /ws/oracle-out-agnes-mtp'      # as oracle-out-spec8b was made
 ctest -R mtp_head_agnes_test
 ```
 Pass: replay bitwise; prefill split l0 / l0-int8 within their bars; snapshot C1 bitwise; prefix C2 (`prefix_gpu_agnes_int8_test`); MTP M2 (`mtp_verify_agnes_test`, its routed sizes 54 / 18 layers) and M1 (`mtp_head_agnes_test` against `oracle-out-agnes-mtp`); spec 9 L3 is `golden_gate_agnes_i8head_test` (step 6); spec 10 v2 is the default decode attention every Agnes gate ran.
@@ -136,7 +123,8 @@ Pass: `passkey l0-int8: 3/3` and `passkey l0: 3/3` (ids from Agnes's own tokeniz
 ### 9. A4 (G3) and speed (P7)
 
 ```
-# A4: tests/golden/toolcall-agnes is committed (the Mac, make_set.py --from; ids identical to Qwen3.8's)
+# A4: re-make the set's ids with Agnes's tokenizer (make_set.py on the Agnes snapshot) into tests/golden/toolcall-agnes
+tools/oracle/run_in_container.sh 'python3 tools/toolcall/make_set.py "$SNAP" tests/golden/toolcall-agnes'
 tools/oracle/run_in_container.sh 'python3 tools/toolcall/oracle_generate.py <Agnes-AI/Agnes-3.0-Flash snapshot> tests/golden/toolcall-agnes /scratch/agnes-toolcall-ref'
 ZE_AFFINITY_MASK=0 tools/toolcall/engine_generate.sh <agnes snap> tests/golden/toolcall-agnes ~/agnes-toolcall-out l0-int8
 python3 tools/toolcall/score.py ...   (as spec 5's A4 rows)
@@ -171,5 +159,5 @@ Pass: three rows recorded, same checkpoint files, same max_len, never both serve
 
 - Host C++: compiled with Apple clang `-std=c++17 -Wall -Wextra -Werror` and run where host-only (16 tests - qwen35, model_desc, json, int4, safetensors, quant, dequant_fixture, lm_head_int8, agnes_fold, openai, toolcall, prefix_cache, prefix_server, spec_accept, mtp_server, protocol - plus template_test in both Agnes modes; its Qwen3.8-snapshot mode needs that snapshot, absent on the Mac); everything touching Level Zero only syntax-checked (`-fsyntax-only` against the open-source headers: 143/150 sources clean, the 7 SYCL-only probes as on main). Nothing linked against Level Zero, nothing ran on a GPU.
 - OpenCL: Agnes variants syntax-checked with clang's OpenCL front end (Intel built-ins aside); Qwen3.8's preprocessed `prep.cl` / `pf_prep.cl` identical to main at 8 define sets.
-- Python: on the Mac's own Python (torch 2.2) `test_agnes.py` 3/4, then **4/4** in the Linux container (2026-10-04), with the golden sets, the fold proof on real activations, the `modeling_agnes.py` comparison, the MTP reference and the re-tokenised A4 set - "Done on the Mac since" above.
-- Not attempted on the Mac: every device path; an unstreamed (resident) Agnes oracle run.
+- Python: `test_agnes.py` 3/4 (no transformers 5 on x86_64 macOS), `test_agnes_fold.py` OK, the fold proof on real packed layers with synthetic inputs.
+- Not attempted on the Mac: `modeling_agnes.py` (remote code, transformers 5), the full-model forward, every device path.
