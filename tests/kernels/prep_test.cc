@@ -302,8 +302,10 @@ void case_res_norm_two_stage(Dev& d, uint32_t M, uint32_t K, uint32_t S_PREV, ui
 
 // `exact_silu`: force every gate column to sum to 30.0f, making silu(gate)
 // provably 30.0f on host and device alike, so the whole chain is bit-exact.
-void case_silu_mul(Dev& d, uint32_t M, bool exact_silu) {
-  const uint32_t S = prep_ref::kSiluS, FN = prep_ref::kSiluFusedN, N = prep_ref::kSiluN;
+// `N`: the MLP intermediate - Qwen3.8's 17408, or Agnes's 19456 (spec 14, the
+// `_I19456` variant: 5 work-groups, the last covering 3072).
+void case_silu_mul(Dev& d, uint32_t M, bool exact_silu, uint32_t N = prep_ref::kSiluN) {
+  const uint32_t S = prep_ref::kSiluS, FN = 2 * N;
   std::vector<float> partials = random_f32(size_t(S) * M * FN, exact_silu ? 401 : 400, 0.f, 1.f);
   if (exact_silu)
     for (size_t s = 0; s < S; ++s)
@@ -313,11 +315,11 @@ void case_silu_mul(Dev& d, uint32_t M, bool exact_silu) {
             partials[(s * M + m) * FN + j] = 30.0f / float(S);  // all slices -> 30.0
 
   std::vector<uint16_t> x_ref(size_t(M) * N, 0);
-  prep_ref::silu_mul(partials.data(), x_ref.data(), M);
+  prep_ref::silu_mul(partials.data(), x_ref.data(), M, N);
 
   l0::Mem pbuf = upload(d.ctx, d.imm, partials);
   l0::Mem xbuf(d.ctx, l0::MemKind::Device, size_t(M) * N * 2);
-  l0::Module mod(d.ctx, kernels::path(kernels::prep_silu_mul_variant(M, prep_ref::kSiluN)));
+  l0::Module mod(d.ctx, kernels::path(kernels::prep_silu_mul_variant(M, N)));
   l0::Kernel k = mod.kernel("prep_silu_mul");
   k.group_size(256);
   k.arg_ptr(0, pbuf.ptr());
@@ -328,7 +330,7 @@ void case_silu_mul(Dev& d, uint32_t M, bool exact_silu) {
   download(d.imm, x_got, xbuf);
   Cmp c = compare(x_got, x_ref);
   const uint32_t tol = exact_silu ? 0 : 2;
-  std::printf("prep_silu_mul M=%u %s: %zu/%zu exact (max %u ulp, tol %u)\n", M,
+  std::printf("prep_silu_mul M=%u N=%u %s: %zu/%zu exact (max %u ulp, tol %u)\n", M, N,
               exact_silu ? "silu(30)=30 exact-case" : "random", c.exact, c.n, c.max_ulp, tol);
   require(c, tol, "prep_silu_mul x_out");
 }
@@ -383,6 +385,8 @@ int main() {
   case_res_norm_two_stage(d, 1, 5120, 4, 20, 1);
   case_silu_mul(d, 1, false);
   case_silu_mul(d, 1, true);
+  case_silu_mul(d, 1, false, 19456);   // spec 14: Agnes's folded intermediate
+  case_silu_mul(d, 1, true, 19456);
   case_gated_head(d, 1, false);
   case_gated_head(d, 1, true);
   std::puts("prep_test OK");

@@ -204,6 +204,60 @@ int run_loads(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
               all_ok ? "every row passed" : "**A ROW FAILED - see the WRONG/DIFFER cells above**");
   return all_ok ? 0 : 1;
 }
+// Spec 14: `probe_gemv --agnes` sweeps Agnes 3.0 Flash's two new int4 shapes - the
+// folded gate'||up' (5120x38912) and down' (19456x5120) - over both layouts and
+// S in {1,2,4,8,16} (needs -DB70_AGNES_SWEEP=ON), with the house rule per shape
+// (smallest S within 3% of the shape's best, at the better layout), and prints the
+// row model::agnes() should carry in place of its PROVISIONAL copy. A discarded
+// warm-up launch per shape first (the clock ramp, as `--loads`). The production
+// cells (S8 L0, S4 L0) carry the extra defines copied from Qwen3.8's cells; the
+// sweep's other cells carry none, exactly as the 2026-08-24 sweep's did.
+int run_agnes(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
+  struct Shape { uint32_t K, N, S_prov, L_prov; const char* name; };
+  const Shape shapes[] = {{5120, 38912, 8, 0, "gate'‖up' (Agnes)"}, {19456, 5120, 4, 0, "down' (Agnes)"}};
+  const uint32_t Ss[] = {1, 2, 4, 8, 16};
+  bool all_ok = true;
+  std::printf("| shape | K×N | L | S | µs | GB/s | %% of 600 | max abs err | tol |\n|---|---|---|---|---|---|---|---|---|\n");
+  std::map<std::pair<uint32_t, uint32_t>, std::map<uint32_t, double>> best;   // (L, shape) -> S -> GB/s
+  for (uint32_t si = 0; si < 2; ++si) {
+    const Shape& sh = shapes[si];
+    common::Int4Gptq w = common::Int4Gptq::random(sh.K, sh.N, 1400 + si);
+    std::vector<uint16_t> x = random_bf16(sh.K, 5);
+    std::vector<float> ref;
+    gemv_ref(w, x, 1, ref);
+    const double tol = tol_for(ref);
+    run_gemv(ctx, q, f, w, x, {1, sh.K, sh.N, sh.S_prov, sh.L_prov}, 40);   // warm-up, discarded
+    for (uint32_t L = 0; L < 2; ++L)
+      for (uint32_t S : Ss) {
+        GemvResult r = run_gemv(ctx, q, f, w, x, {1, sh.K, sh.N, S, L}, 40);
+        const double err = max_abs_err(r.out, ref);
+        if (err > tol) all_ok = false;
+        const double gbps = double(r.weight_bytes) / (r.us_per_launch * 1e3);
+        best[{L, si}][S] = gbps;
+        std::printf("| %s | %u×%u | %u | %u | %.1f | %.0f | %.0f%% | %.2g | %.2g |%s\n", sh.name, sh.K,
+                    sh.N, L, S, r.us_per_launch, gbps, 100.0 * gbps / kPeak, err, tol,
+                    err <= tol ? "" : "  **WRONG**");
+        std::fflush(stdout);
+      }
+  }
+  std::puts("\nDecision (per shape: the better layout, then the smallest S within 3% of its best):");
+  for (uint32_t si = 0; si < 2; ++si) {
+    double bl[2] = {0, 0};
+    for (uint32_t L = 0; L < 2; ++L)
+      for (auto& e : best[{L, si}]) bl[L] = std::max(bl[L], e.second);
+    const uint32_t L = bl[1] > bl[0] ? 1 : 0;
+    uint32_t pick = 16;
+    for (uint32_t S : Ss)
+      if (best[{L, si}][S] >= 0.97 * bl[L]) { pick = S; break; }
+    std::printf("- %s (%u×%u): L = %u, S = %u at %.0f GB/s (provisional L%u S%u: %.0f GB/s)%s\n",
+                shapes[si].name, shapes[si].K, shapes[si].N, L, pick, best[{L, si}][pick],
+                shapes[si].L_prov, shapes[si].S_prov, best[{shapes[si].L_prov, si}][shapes[si].S_prov],
+                L == shapes[si].L_prov && pick == shapes[si].S_prov ? "  = provisional, keep" : "  -> REPLACE");
+  }
+  std::puts("A gate'||up' S other than 8 also needs a prep_silu_mul SILU_S variant (capture asserts 8);"
+            "\na down' S other than 4 needs the matching prep_res_fold SP<S> variant.");
+  return all_ok ? 0 : 1;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -211,6 +265,7 @@ int main(int argc, char** argv) {
   l0::Queue q(ctx);
   l0::Fence f(q);
   if (argc > 1 && std::string(argv[1]) == "--loads") return run_loads(ctx, q, f);
+  if (argc > 1 && std::string(argv[1]) == "--agnes") return run_agnes(ctx, q, f);
   const double peak = kPeak;
   struct Shape { uint32_t K, N; const char* name; };
   // Names use U+2016 (‖), not '|': this table is pasted into docs/ as markdown.

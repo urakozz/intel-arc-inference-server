@@ -370,7 +370,8 @@ b70_target_kernel_dir(prep_test)
 add_dependencies(prep_test kernel_prep_res_norm_M1_K5120_SP0 kernel_prep_res_norm_M1_K5120_SP4
   kernel_prep_res_fold_M1_K5120_SP0_G20 kernel_prep_res_fold_M1_K5120_SP4_G20
   kernel_prep_norm_finish_M1_K5120_G20_W20 kernel_prep_norm_finish_M1_K5120_G20_W1
-  kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1)
+  kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1
+  kernel_prep_silu_mul_M1_I19456)   # spec 14: Agnes's intermediate
 add_test(NAME prep_test COMMAND prep_test)
 
 # The GDN decode step. Its reference (gdn_ref.h) reproduces the kernel's tree
