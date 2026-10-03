@@ -104,6 +104,7 @@ ModelDesc make_agnes() {
   d.max_len_ceiling = 65536;       // spec 14 §3.3: until spec 12's int8 KV
   d.name_map = {{"delta_attn.", "linear_attn."}, {"global_attn.", "self_attn."}};
   d.doc_w = 18.344234624e9;        // derived from the headers, see model_desc.h
+  d.vocab_used = 248089;           // tokenizer.json: 248077 + 12 Agnes specials
   d.provisional_tuning = true;
   d.table = qwen38_table();
   FusedLinear& gu = d.table[static_cast<size_t>(LinearId::GateUp)];
@@ -128,6 +129,7 @@ ModelDesc make_qwen38() {
   d.parallel_ffn = 0;
   d.max_len_ceiling = 0;
   d.doc_w = 15.519e9;   // docs/03-models.md, measured 2026-08-24
+  d.vocab_used = Qwen35::kVocabUsed;
   d.table = qwen38_table();
   return d;
 }

@@ -116,6 +116,20 @@ inputs; the rel L2 of ~2e-7 is fp32 accumulation order over K = 19456.
   tools, a tool call in history, two tool responses) identical to transformers'
   `render_jinja_template` (4.57.6; the Mac has no `tokenizer.json`, so not through
   `AutoTokenizer`) - 156 / 450 / 1492 / 1487 / 1739 bytes.
+- **The tokenizer is not Qwen3.8's.** `tokenizer.json` (19,991,676 B against Qwen3.8's
+  19,989,325) has the same vocab and merges but (a) 12 added specials at ids
+  248077..248088 (`<|agnes_bos|>`, `<|agnes_eos|>`, `<|agnes_system|>`, `<|agnes_user|>`,
+  `<|agnes_assistant|>`, `<|agnes_tool|>`, `<|agnes_think_start|>`, `<|agnes_think_end|>`,
+  `<|agnes_reserved_0..3|>`) - none used by the template, eos stays `<|im_end|>` 248046 /
+  `<|endoftext|>` 248044 (`generation_config.json`) - and (b) a pre-tokenizer regex with
+  `[\p{L}\p{M}]+` where Qwen3.8 has `\p{L}+` (combining marks join the letter run) and
+  ByteLevel decoder flags `add_prefix_space/trim_offsets/use_regex` false. Consequences
+  taken in this branch: `model::agnes().vocab_used` = 248089, so Agnes's greedy argmax
+  masks from 248089 (`argmax_stage1_*_V248089`) instead of Qwen3.8's 248077. Carried to the
+  box: the engine's Rust tokenizer reads the snapshot's `tokenizer.json` (regex included)
+  - `parity_test` on Agnes; the committed prompt ids (`tests/golden/prompts`, the A4 set)
+  were tokenised by Qwen3.8 and must be re-made for Agnes where tokenisation matters (A4,
+  passkey), while the golden gates only need the oracle and the engine to see the same ids.
 - Observed, not Agnes-specific: the engine holds requests as `nlohmann::json`, whose objects
   are key-sorted, so tool schemas reach the template key-sorted where transformers keeps the
   caller's order (the committed references are rendered from sorted objects, like

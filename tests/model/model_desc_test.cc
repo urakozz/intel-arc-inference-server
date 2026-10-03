@@ -69,6 +69,7 @@ int main() {
   CHECK(&model::desc_for_architecture("Qwen3_5ForConditionalGeneration") == &q);
 
   CHECK_EQ(q.doc_w, 15.519e9);
+  CHECK_EQ(q.vocab_used, model::Qwen35::kVocabUsed);
   CHECK(!q.provisional_tuning);
 
   // Spec 14: Agnes 3.0 Flash.
@@ -80,6 +81,7 @@ int main() {
   CHECK_EQ(a.parallel_ffn, uint32_t(2048));
   CHECK_EQ(a.intermediate, uint32_t(19456));
   CHECK_EQ(a.max_len_ceiling, uint32_t(65536));
+  CHECK_EQ(a.vocab_used, uint32_t(248089));   // 248077 + the 12 Agnes specials
   CHECK_EQ(a.intermediate_suffix(), std::string("_I19456"));
   CHECK(a.provisional_tuning);
   check_layers(a);
