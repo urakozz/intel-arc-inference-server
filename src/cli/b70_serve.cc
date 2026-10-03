@@ -60,6 +60,8 @@ void usage() {
                "usage: b70-serve <snapshot-or-repo> [--host 0.0.0.0] [--port 8000]\n"
                "                 [--max-len 16384] [--device N] [--served-name NAME] [--queue 4]\n"
                "                 --max-len: 16384, 32768 or 131072 (the compiled decode attention)\n"
+               "                 The model is picked from the checkpoint's config.json: Qwen3.8 or\n"
+               "                 Agnes 3.0 Flash (spec 14; --max-len at most 65536 for Agnes).\n"
                "                 [--pp-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n"
                "                 [--log-requests DIR]   write DIR/NNNNNN.json per request\n"
                "                 [--prefix-cache-gb N]  pinned host prefix cache, GiB (default 32,\n"

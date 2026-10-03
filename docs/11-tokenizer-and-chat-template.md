@@ -157,6 +157,14 @@ fallback above is.
 Tool-call *parsing* of model output is not implemented. Template *rendering* of
 tool definitions in the prompt is, and has parity vectors.
 
+**Agnes 3.0 Flash (spec 14, 2026-10-03).** Its `chat_template.jinja` is byte-identical
+to Qwen3.8's (the same sha256 above), so it takes the same fallback, renders the same
+Qwen XML tool-call format and needs no parser addition. `template_agnes_test` renders
+five message lists (`tests/tokenizer/agnes_template_cases.json`: plain, thinking, tools,
+a tool call in history, tool responses) through Agnes's snapshot against transformers'
+render (`tools/tokenizer/dump_agnes_template.py`); details in
+`docs/probe-agnes-2026-10-03.md`.
+
 ## Streaming detokenisation
 
 Byte-level BPE tokens are byte sequences, not characters. A multi-byte
