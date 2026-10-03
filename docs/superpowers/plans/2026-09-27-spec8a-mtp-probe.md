@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 + torch (CPU, the oracle container), C++20 + Level Zero probes, CMake.
 
-**Spec:** `docs/specs/2026-09-27-spec8-mtp-speculative-decoding-design.md` (§1, §3.2-3.4, §5 P0, §6 8a, the stopping rule).
+**Spec:** `docs/superpowers/specs/2026-09-27-spec8-mtp-speculative-decoding-design.md` (§1, §3.2-3.4, §5 P0, §6 8a, the stopping rule).
 
 ## Global Constraints
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** OpenCL C (ocloc), C++20, Level Zero, ctest.
 
-**Spec:** `docs/specs/2026-09-28-spec11-flash-prefill-levers-design.md` (§4 gates, §5 F1', F2'). Needs `docs/probe-flash-levers-2026-09-28.md` (11a's verdict).
+**Spec:** `docs/superpowers/specs/2026-09-28-spec11-flash-prefill-levers-design.md` (§4 gates, §5 F1', F2'). Needs `docs/probe-flash-levers-2026-09-28.md` (11a's verdict).
 
 ## Global Constraints
 

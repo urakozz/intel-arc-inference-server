@@ -8,7 +8,7 @@
 
 **Tech Stack:** OpenCL C via ocloc (AOT, bmg-g31), Level Zero, C++20, CMake/ctest, run on the box via `tools/box.sh`.
 
-**Spec:** `docs/specs/2026-09-24-spec5-int8-prefill-linears-design.md` (stages T1, T2). The evidence is `docs/probe-w4a8-2026-09-23.md` sections 14 and 15.
+**Spec:** `docs/superpowers/specs/2026-09-24-spec5-int8-prefill-linears-design.md` (stages T1, T2). The evidence is `docs/probe-w4a8-2026-09-23.md` sections 14 and 15.
 
 ## Global Constraints
 
@@ -186,7 +186,7 @@ Expected: FAIL at configure or build: `kernel_pf_quant_had_K5120` does not exist
 
 ```c
 // pf_int8 - spec 5's int8 prefill linears
-// (docs/specs/2026-09-24-spec5-int8-prefill-linears-design.md): the h8 path of
+// (docs/superpowers/specs/2026-09-24-spec5-int8-prefill-linears-design.md): the h8 path of
 // docs/probe-w4a8-2026-09-23.md sections 14-15, promoted from
 // tools/probe/probe_w8a8.cl with the arithmetic unchanged. One source, built
 // per family by a define:

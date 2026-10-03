@@ -7,7 +7,7 @@ snapshot `84575a18f209992ef96d819b31f924b489e3d55d`.**
 Correctness met, performance short, one correctness bar owed: **§6 bar 2** (the
 multi-chunk golden gate over the ≥ 2048-id prompt) is **not claimed** - it needs
 a long oracle dump for this checkpoint. §8 closes that bar; rows and gates are
-in [BENCHMARKS.md](../BENCHMARKS.md), "The spec-2 re-gate rows". An earlier
+in [BENCHMARKS.md](../../BENCHMARKS.md), "The spec-2 re-gate rows". An earlier
 gate row read 1377.20 (69.8%) at iterate grade. Originally: design for review,
 2026-09-04. Follows spec 1.7 (closed on the
 operator's 32.0 t/s line; tag `spec1.7-done`). Phase 1's target has two

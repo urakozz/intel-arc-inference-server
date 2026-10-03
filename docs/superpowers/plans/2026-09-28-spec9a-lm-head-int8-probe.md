@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 + torch (CPU, the oracle container).
 
-**Spec:** `docs/specs/2026-09-28-spec9-lm-head-quantised-design.md` (§2 ruling: int8 only; §4 L1, L2; §5 P0; §6 9a stopping rule).
+**Spec:** `docs/superpowers/specs/2026-09-28-spec9-lm-head-quantised-design.md` (§2 ruling: int8 only; §4 L1, L2; §5 P0; §6 9a stopping rule).
 
 ## Global Constraints
 

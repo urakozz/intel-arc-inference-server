@@ -260,7 +260,7 @@ void print_rollup(const char* title, const char* what, std::vector<Agg> rows, ui
 // then missed their in-situ→bench prediction in OPPOSITE directions (L1 by
 // +0.087 ms, L5 by −0.319), which is a resolution limit rather than a missing
 // constant, and every remaining candidate on the menu is smaller than it
-// (docs/specs/2026-08-25-spec1.5-reassessment.md §5.4).
+// (docs/superpowers/specs/2026-08-25-spec1.5-reassessment.md §5.4).
 //
 // A "session" here is `--steps` instrumented replays run after rewinding
 // `Control::pos` to the post-ingest value, so **every session profiles the

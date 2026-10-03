@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, nlohmann::json, Jinja (the engine's template renderer), Python (A4 tooling), uvx llama-benchy.
 
-**Spec:** `docs/specs/2026-10-02-spec14-agnes-3-flash-design.md` (§3.5, §4 G3, §5 vLLM row, §6 14d). Needs 14c merged, and 14a's A4 reference outputs (`~/agnes-toolcall-ref/` on the box).
+**Spec:** `docs/superpowers/specs/2026-10-02-spec14-agnes-3-flash-design.md` (§3.5, §4 G3, §5 vLLM row, §6 14d). Needs 14c merged, and 14a's A4 reference outputs (`~/agnes-toolcall-ref/` on the box).
 
 ## Global Constraints
 

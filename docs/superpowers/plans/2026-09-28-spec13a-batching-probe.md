@@ -8,7 +8,7 @@
 
 **Tech Stack:** OpenCL C (ocloc), C++20, Level Zero.
 
-**Spec:** `docs/specs/2026-09-28-spec13-batching-design.md` (§1 derived gains, §2 the B / context decision, §3 kernel changes, §6 13a).
+**Spec:** `docs/superpowers/specs/2026-09-28-spec13-batching-design.md` (§1 derived gains, §2 the B / context decision, §3 kernel changes, §6 13a).
 
 ## Global Constraints
 

@@ -1,7 +1,7 @@
 # Decode attention at depth - probe record (spec 10a)
 
 Plan: `docs/superpowers/plans/2026-09-28-spec10a-decode-attn-probe.md`. Spec:
-`docs/specs/2026-09-28-spec10-decode-attention-at-depth-design.md`. Tools:
+`docs/superpowers/specs/2026-09-28-spec10-decode-attention-at-depth-design.md`. Tools:
 `tools/probe/probe_decode_attn.{cc,cl}`, `tools/probe/decode_attn_probe.sh`.
 
 Every number is **measured** unless marked **derived**. Device 0 (`ZE_AFFINITY_MASK=0`),

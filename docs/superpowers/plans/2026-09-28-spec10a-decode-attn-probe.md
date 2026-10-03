@@ -8,7 +8,7 @@
 
 **Tech Stack:** OpenCL C (ocloc), C++20, Level Zero.
 
-**Spec:** `docs/specs/2026-09-28-spec10-decode-attention-at-depth-design.md` (§1 the derived budget, §2 levers, §3 constraints, §4 A1, §5 P0, §6 10a).
+**Spec:** `docs/superpowers/specs/2026-09-28-spec10-decode-attention-at-depth-design.md` (§1 the derived budget, §2 levers, §3 constraints, §4 A1, §5 P0, §6 10a).
 
 ## Global Constraints
 

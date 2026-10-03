@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, CMake, OpenCL C (defines only), ctest.
 
-**Spec:** `docs/specs/2026-10-02-spec14-agnes-3-flash-design.md` (§3.1, §4 G0, §6 14b).
+**Spec:** `docs/superpowers/specs/2026-10-02-spec14-agnes-3-flash-design.md` (§3.1, §4 G0, §6 14b).
 
 ## Global Constraints
 

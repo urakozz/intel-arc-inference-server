@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, Level Zero, CMake/ctest, the box.
 
-**Spec:** `docs/specs/2026-09-24-spec5-int8-prefill-linears-design.md` (stages T3, T4). **Requires plan 5a merged.** Gate A4 needs plan 5c's tool-call set.
+**Spec:** `docs/superpowers/specs/2026-09-24-spec5-int8-prefill-linears-design.md` (stages T3, T4). **Requires plan 5a merged.** Gate A4 needs plan 5c's tool-call set.
 
 ## Global Constraints
 
@@ -251,7 +251,7 @@ git commit -m "tests: the l0-int8 golden gates and the A2/A3 comparison (spec 5 
 ### Task 4: speed B1 and B2, first-prefill cost, A4, then the default
 
 **Files:**
-- Modify: `docs/BENCHMARKS.md`, `docs/specs/2026-09-24-spec5-int8-prefill-linears-design.md` (an amendment section), and only if every gate passes, `src/runtime/prefill/backend_sycl.cc` and `backend_sycl_absent.cc` (`default_prefill_backend`)
+- Modify: `docs/BENCHMARKS.md`, `docs/superpowers/specs/2026-09-24-spec5-int8-prefill-linears-design.md` (an amendment section), and only if every gate passes, `src/runtime/prefill/backend_sycl.cc` and `backend_sycl_absent.cc` (`default_prefill_backend`)
 
 - [ ] **Step 1: Measure**
 
@@ -280,7 +280,7 @@ Run plan 5c's `tools/toolcall/score.py` on the `l0` and `l0-int8` greedy outputs
 - [ ] **Step 5: Commit**
 
 ```bash
-git add docs/BENCHMARKS.md docs/specs/2026-09-24-spec5-int8-prefill-linears-design.md \
+git add docs/BENCHMARKS.md docs/superpowers/specs/2026-09-24-spec5-int8-prefill-linears-design.md \
         src/runtime/prefill/backend_sycl.cc src/runtime/prefill/backend_sycl_absent.cc
 git commit -m "prefill: l0-int8 results (spec 5 T4)"
 ```

@@ -8,7 +8,7 @@
 
 **Tech Stack:** OpenCL C (ocloc AOT, bmg-g31, 256 GRF), Level Zero, C++20, CMake; the box via `tools/box.sh`.
 
-**Spec:** `docs/specs/2026-09-25-spec6-flash-attention-128k-design.md` (§5 P0, §6 P1).
+**Spec:** `docs/superpowers/specs/2026-09-25-spec6-flash-attention-128k-design.md` (§5 P0, §6 P1).
 
 ## Global Constraints
 

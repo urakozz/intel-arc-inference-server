@@ -1,5 +1,5 @@
 // pf_flash_attn - spec 6: the fused bf16 flash attention of prefill.
-// Spec: docs/specs/2026-09-25-spec6-flash-attention-128k-design.md.
+// Spec: docs/superpowers/specs/2026-09-25-spec6-flash-attention-128k-design.md.
 // Plan: docs/superpowers/plans/2026-09-25-spec6b-flash-attn-integration-and-128k.md.
 // Record: docs/probe-flash-attn-2026-09-25.md. This is plan 6a's winning arm
 // pfa_KT64_R16_H6_Q0 (tools/probe/probe_flash_attn.cl), promoted with its text

@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, OpenCL C (ocloc), Level Zero, CMake/ctest.
 
-**Spec:** `docs/specs/2026-10-02-spec14-agnes-3-flash-design.md` (§2, §3.1-3.3, §4 G1, G2, G4, G5, §5). Needs 14a (CPU reference, `oracle-out-agnes/` on the box, fold proof) and 14b (`ModelDesc`) merged.
+**Spec:** `docs/superpowers/specs/2026-10-02-spec14-agnes-3-flash-design.md` (§2, §3.1-3.3, §4 G1, G2, G4, G5, §5). Needs 14a (CPU reference, `oracle-out-agnes/` on the box, fold proof) and 14b (`ModelDesc`) merged.
 
 ## Global Constraints
 

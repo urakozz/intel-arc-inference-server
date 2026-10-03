@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, cpp-httplib, nlohmann::json, ctest.
 
-**Spec:** `docs/specs/2026-09-28-spec13-batching-design.md` (§3 scheduling, §4 B2-B4, §5). Needs plan 13b (`Engine` slot API, `step_batch`).
+**Spec:** `docs/superpowers/specs/2026-09-28-spec13-batching-design.md` (§3 scheduling, §4 B2-B4, §5). Needs plan 13b (`Engine` slot API, `step_batch`).
 
 ## Global Constraints
 

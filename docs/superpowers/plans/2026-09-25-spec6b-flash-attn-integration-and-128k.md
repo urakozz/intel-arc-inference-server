@@ -8,7 +8,7 @@
 
 **Tech Stack:** OpenCL C (ocloc AOT, 256 GRF), Level Zero, C++20, CMake/ctest, Python 3 in the oracle container for tokenisation; the box.
 
-**Spec:** `docs/specs/2026-09-25-spec6-flash-attention-128k-design.md`. The measured basis is `docs/probe-flash-attn-2026-09-25.md`.
+**Spec:** `docs/superpowers/specs/2026-09-25-spec6-flash-attention-128k-design.md`. The measured basis is `docs/probe-flash-attn-2026-09-25.md`.
 
 ## Global Constraints
 
@@ -216,7 +216,7 @@ git commit -m "tests: flash against composed end to end at 32k context (spec 6 K
 
 **Files:**
 - Create: `tools/probe/passkey.py`, `tools/probe/passkey.sh`
-- Modify: `tests/prefill/flash_long_test.cc` (a `--128k` mode), `docs/BENCHMARKS.md`, `docs/specs/2026-09-25-spec6-flash-attention-128k-design.md`, `docs/17-int8-prefill.md` (a pointer), `docs/README.md` (the probe record's line)
+- Modify: `tests/prefill/flash_long_test.cc` (a `--128k` mode), `docs/BENCHMARKS.md`, `docs/superpowers/specs/2026-09-25-spec6-flash-attention-128k-design.md`, `docs/17-int8-prefill.md` (a pointer), `docs/README.md` (the probe record's line)
 
 - [x] **Step 1: 128k determinism and replay**
 
@@ -243,7 +243,7 @@ Expected: 3 of 3 on `l0-int8` and on `l0`.
 
 ```bash
 git add tools/probe/passkey.py tools/probe/passkey.sh tests/prefill/flash_long_test.cc docs/BENCHMARKS.md \
-        docs/specs/2026-09-25-spec6-flash-attention-128k-design.md docs/README.md
+        docs/superpowers/specs/2026-09-25-spec6-flash-attention-128k-design.md docs/README.md
 git commit -m "spec 6: 128k gates (determinism, replay, passkey), depth rows, results"
 ```
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** OpenCL C (ocloc), C++20, Level Zero, CMake/ctest.
 
-**Spec:** `docs/specs/2026-09-28-spec10-decode-attention-at-depth-design.md` (§3 constraints, §4 A1-A3, §5 A-F3, A-F4, §6 10b). Needs plan 10a's verdict (`docs/probe-decode-attn-2026-09-28.md`).
+**Spec:** `docs/superpowers/specs/2026-09-28-spec10-decode-attention-at-depth-design.md` (§3 constraints, §4 A1-A3, §5 A-F3, A-F4, §6 10b). Needs plan 10a's verdict (`docs/probe-decode-attn-2026-09-28.md`).
 
 ## Global Constraints
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** OpenCL C (ocloc), C++20, Level Zero, CMake/ctest.
 
-**Spec:** `docs/specs/2026-09-28-spec9-lm-head-quantised-design.md` (§2 ruling int8, §3, §4 L1-L4, §5 H1-H3). Needs plan 9a's verdict (`docs/probe-lm-head-2026-09-28.md`) to be a pass.
+**Spec:** `docs/superpowers/specs/2026-09-28-spec9-lm-head-quantised-design.md` (§2 ruling int8, §3, §4 L1-L4, §5 H1-H3). Needs plan 9a's verdict (`docs/probe-lm-head-2026-09-28.md`) to be a pass.
 
 ## Global Constraints
 

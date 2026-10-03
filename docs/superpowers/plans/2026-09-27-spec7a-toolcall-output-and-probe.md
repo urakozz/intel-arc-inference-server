@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, nlohmann::json, Level Zero (`l0::Mem`, `l0::CmdList`), CMake/ctest, Python 3 for the log analysis.
 
-**Spec:** `docs/specs/2026-09-27-spec7-prefix-caching-design.md` (§3.5, §4 C6, §5 P0, §6 7a, the stopping rule).
+**Spec:** `docs/superpowers/specs/2026-09-27-spec7-prefix-caching-design.md` (§3.5, §4 C6, §5 P0, §6 7a, the stopping rule).
 
 ## Global Constraints
 

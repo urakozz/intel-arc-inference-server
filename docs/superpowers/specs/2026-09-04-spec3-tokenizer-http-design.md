@@ -26,7 +26,7 @@ since before spec 3's first commit (`git diff --stat 6d80193..HEAD` over
 those five directories is empty). Host sampling (§3.5) measured
 0.537 ms/token against the pre-registered 0.62 ms bar and ships on by
 default. See `docs/BENCHMARKS.md` "The spec-3 gate rows" for every number and
-`docs/specs/2026-09-09-spec3-gate-memo.md` §6 for the verdict.
+`docs/superpowers/specs/2026-09-09-spec3-gate-memo.md` §6 for the verdict.
 
 ## 1. Where we start
 
