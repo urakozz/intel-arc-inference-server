@@ -63,7 +63,8 @@ int main() {
   // Spec 14: the per-model binaries that bake the MLP intermediate / GDN layer count.
   for (const std::string& v : {kernels::prep_silu_mul_variant(1, model::agnes().intermediate),
                                std::string("pf_silu_mul_I19456"),
-                               kernels::gdn_step_slots_variant(1, model::agnes().gdn_layers)}) {
+                               kernels::gdn_step_slots_variant(1, model::agnes().gdn_layers),
+                               kernels::argmax_stage1_variant(1, model::agnes().vocab_used)}) {
     if (!std::filesystem::exists(kernels::path(v))) {
       std::fprintf(stderr, "no device binary for Agnes: %s\n", kernels::path(v).c_str());
       ++missing;

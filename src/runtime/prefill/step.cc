@@ -267,7 +267,7 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMode
   // caller has set pos = base + L - 1 and n_active = 1, so stage 2 leaves
   // pos = base + L and the first generated id in cur_token[0] -- exactly what
   // the last ingest-by-decode replay would have left.
-  cx.launch(kc(kernels::argmax_stage1_variant(1), "argmax_stage1"), (Qwen35::kVocab + 1023) / 1024,
+  cx.launch(kc(kernels::argmax_stage1_variant(1, m.desc->vocab_used), "argmax_stage1"), (Qwen35::kVocab + 1023) / 1024,
             1, 1, {PtrArg(s.logits.ptr()), PtrArg(s.argmax_part.ptr())});
   cx.launch(kc(kernels::argmax_stage2_variant(), "argmax_stage2"), 1, 1, 1,
             {PtrArg(ctrl), PtrArg(s.argmax_part.ptr())});
