@@ -9,6 +9,7 @@
 #include "loader/quant.h"
 #include "loader/small_layout.h"
 #include "loader/snapshot.h"
+#include "model/model_desc.h"
 #include "model/qwen35.h"
 
 namespace loader {
@@ -90,13 +91,16 @@ struct LoadReport {            // printed by load(); asserted by the checkpoint 
 
 struct LoadedModel {
   std::map<std::pair<uint32_t, model::LinearId>, DeviceWeight> linears;  // layer kTopLevel = lm_head
-  std::vector<SmallTensors> layer_small;   // [64]
+  std::vector<SmallTensors> layer_small;   // [desc->layers]
   l0::Mem embed;                            // bf16 [248320][5120] row-major (gathered)
   l0::Mem final_norm;                       // pre-lm_head RMSNorm, (1+w) fp32 [5120]
   l0::Mem rope;                             // fp32 [max_len][2][32] cos/sin pairs
   LoadReport report;
   uint32_t max_len = 0;                     // the max_len this model was loaded with
   std::unique_ptr<MtpHead> mtp;             // null unless load(..., mtp = true) (spec 8)
+  // Spec 14 §3.1: the model this checkpoint is, chosen from config.json's
+  // architectures[0] (model::desc_for_architecture). A process-lifetime singleton.
+  const model::ModelDesc* desc = nullptr;
 };
 
 // Loads the qwen3_5 checkpoint at `snapshot_or_repo` (resolve_snapshot rules)

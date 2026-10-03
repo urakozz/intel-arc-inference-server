@@ -159,7 +159,7 @@ struct Dev {
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   runtime::prefill::Context cx{ctx};
   runtime::prefill::KernelCache kc{ctx};
-  runtime::PrefillScratch s{ctx, kMaxLen};
+  runtime::PrefillScratch s{ctx, kMaxLen, model::qwen38()};
 };
 
 struct Row {
@@ -296,7 +296,7 @@ bool case_flash_vs_composed(l0::Context& ctx, l0::CmdList& imm, uint32_t pos, ui
   const uint32_t max_len = runtime::prefill::pad256(depth);
   runtime::prefill::Context cx(ctx);
   runtime::prefill::KernelCache kc(ctx);
-  runtime::PrefillScratch s(ctx, max_len);
+  runtime::PrefillScratch s(ctx, max_len, model::qwen38());
   const std::vector<float> qf = random_f32(size_t(C) * kQH * kHD, 2100 + pos + C, 0.f, 1.f);
   const std::vector<float> kvf =
       random_f32(size_t(depth) * kKVH * kHD * 2, 2101 + pos + C, 0.f, 1.f);

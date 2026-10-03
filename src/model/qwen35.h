@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -25,9 +26,18 @@ struct GemvShape { uint32_t K, N, S, layout; };
 
 // kCount is the table size, not a linear: it bounds every ordinal lookup.
 enum class LinearId { QkvZ, AB, OutProj, GateUp, Down, Qkv, OProj, LmHead, kCount };
+constexpr size_t kLinearCount = static_cast<size_t>(LinearId::kCount);
 
 // How a fused device weight is assembled from checkpoint tensors.
 enum class Fuse { Single, Concat, Interleave16 };
+
+// Spec 14 §2: a second set of checkpoint tensors joined onto `parts` at load, on
+// packed int4 (loader/fold.h). `N`: each fold part is appended to the matching
+// part along the output columns (GPTQ `qweight [K/8][N]`, `scales [K/64][N]`),
+// before the Fuse map runs - gate' = [gate | gate_p], up' = [up | up_p]. `K`:
+// the single fold part is appended along the packed input rows - down' =
+// [down ; down_p] at `qweight` row K/8 and `scales` row K/64 of the first part.
+enum class Fold { None, N, K };
 // Int8 exists for ONE row: `lm_head` quantised at load (spec 9 §3, int8 rows with an
 // fp32 scale per row, gemv_i8w). No checkpoint ships it and no per-layer row uses it.
 enum class WeightKind { Int4, Bf16, Int8 };
@@ -39,6 +49,9 @@ struct FusedLinear {
   Fuse fuse;
   std::vector<std::string> parts;   // checkpoint prefixes, in order; layer-relative
   uint32_t pad_n = 0;               // zero-pad N to shape.N (a||b: 96 -> 128)
+  Fold fold = Fold::None;           // spec 14 §2; None on every Qwen3.8 row
+  std::vector<std::string> fold_parts;  // layer-relative, parallel to `parts` (Fold::N)
+                                        // or exactly one (Fold::K)
 };
 
 enum class LayerKind { GDN, FA };
@@ -76,57 +89,23 @@ struct LayerDesc {
   std::vector<SmallTensor> small_tensors;  // norms, conv1d, A_log, dt_bias, ...
 };
 
+// The shape every supported Qwen3.5-family checkpoint shares (spec 14 §3.1).
+// What differs between models - layer counts, the MLP intermediate, the GEMV
+// table rows that depend on it, tensor names - is `model::ModelDesc`
+// (model/model_desc.h), chosen by the loader from config.json.
 struct Qwen35 {
-  static constexpr uint32_t kLayers = 64, kHidden = 5120, kIntermediate = 17408;
+  static constexpr uint32_t kHidden = 5120;
   static constexpr uint32_t kVocab = 248320, kVocabUsed = 248077;
   static constexpr uint32_t kGdnKHeads = 16, kGdnVHeads = 48, kGdnHeadDim = 128;
   static constexpr uint32_t kFaQHeads = 24, kFaKvHeads = 4, kFaHeadDim = 256;
   static constexpr uint32_t kRotaryDim = 64;
   static constexpr double kRopeTheta = 1e7;
 
-  static bool is_fa(uint32_t layer) { return layer % 4 == 3; }
-  // The whole table row (LmHead appears in no layer's list; consumers bind it
-  // from here). Throws std::out_of_range on kCount or a bad cast.
-  //
-  // **`linear(LinearId::LmHead)` returns the bf16 row.** It is the historical
-  // row and the one every checkpoint before 2026-08-26 shipped, so keeping it
-  // as the default is what stops a silent change of meaning for callers that
-  // do not know about the second one. Callers that must honour the checkpoint
-  // (the loader, and through it the capture) use `lm_head(kind)` below.
-  static const FusedLinear& linear(LinearId id);
-  // **`lm_head` is the ONE linear whose kind is a property of the checkpoint,
-  // not of the model** - everything else is fixed by the architecture plus the
-  // quantiser's exclusion list, which is the same for every checkpoint this
-  // project accepts. `lm_head` is not: the shipped
-  // `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` leaves it bf16 (2.543 GB read
-  // per token), and the self-quantised `qwen38-27b-w4g64-rtn`
-  // (tools/quantize_qwen38_rtn.sh, `--quant_lm_head`) packs it int4 g64 sym
-  // (0.675 GB). Both rows live here; `loader::LinearSrc::classify` picks by
-  // which tensors the checkpoint actually ships, never by a config label
-  // (docs/02's rule, docs/13's "Classification" table).
-  //
-  // The int4 row is `{K 5120, N 248320, S 1, layout 1}`:
-  //   * **layout 1** because it is the only int4 repack the loader implements
-  //     (`load_linear` throws on any other), and it is the measured winner at
-  //     every large `N` (docs/probe-gemv-2026-08-24.md).
-  //   * **S = 1** for two independent reasons that agree. First, occupancy is
-  //     already saturated without a split: `N / 64 = 3880` work-groups of 4
-  //     subgroups = 15 520 subgroups against the 32 Xe-cores, which is the same
-  //     grid the bf16 kernel ran at 98.5% of measured device bandwidth. Split-K
-  //     buys threads, and there is nothing here to buy them with. Second, S = 1
-  //     is what lets the capture bind this GEMV's output **straight at
-  //     `logits`**: `gemv.cl` writes `out[(s*M + m)*N + n]`, which at S = 1 is
-  //     exactly the `[M][N]` fp32 row `argmax_stage1` reads. Any S > 1 would
-  //     need a fold kernel that does not exist.
-  //
-  // **The int8 row (spec 9)** is `{K 5120, N 248320, S 1, layout 0}`: not a checkpoint
-  // form but one the loader makes from the bf16 tensor on request
-  // (`loader::LmHeadForm::Int8`). S = 1 for the same reason as int4 (gemv_i8w writes
-  // `[M][N]` straight at `logits`); `layout` is a filler, the int8 tiling is fixed
-  // (loader/lm_head_int8.h).
-  static const FusedLinear& lm_head(WeightKind kind);
-  static const GemvShape& shape(LinearId id);         // the per-shape table
-  static std::vector<LayerDesc> layers();             // all 64, fully populated
+  // The per-layer non-GEMV tensors of one layer kind (the same for every
+  // supported model, in engine names) - the loader's single source of truth.
+  static const std::vector<SmallTensor>& small_tensors(LayerKind kind);
+  // The per-token execution order of one layer kind's linears.
+  static const std::vector<LinearId>& linear_order(LayerKind kind);
   // Checkpoint-name helpers ("model.language_model." prefix already stripped
   // by the loader's name mapping): e.g. layer_prefix(5) == "layers.5."
   static std::string layer_prefix(uint32_t layer);

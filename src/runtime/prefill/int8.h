@@ -24,7 +24,9 @@ namespace runtime::prefill {
 // column scales (built on first use of a weight, one GPU pass), int8 scratch.
 class Int8State {
  public:
-  explicit Int8State(l0::Context& ctx);
+  // `max_k`: the largest int4 linear K the scratch must hold - the model's MLP
+  // intermediate (down's K): 17408 on Qwen3.8, 19456 on Agnes (spec 14).
+  Int8State(l0::Context& ctx, uint32_t max_k);
   // ws/inv for this weight, computed on first call (pf_colmax_rot + host
   // finish), cached by the weight's device address. The first call waits on
   // cx, so it must run outside any recorded chunk (plan 5b calls it for every
@@ -33,15 +35,16 @@ class Int8State {
                                             const loader::DeviceWeight& w);
   const l0::Mem& signs_f32(uint32_t K);    // [K] +-1
   const l0::Mem& sign_bits(uint32_t K);    // [K/32]
-  l0::Mem& xq();                           // int8 [kC][17408]
+  l0::Mem& xq();                           // int8 [kC][max_k]
   l0::Mem& xs();                           // fp32 [kC]
-  l0::Mem& w8_slab();                      // u32 [17408/4][1024]
+  l0::Mem& w8_slab();                      // u32 [max_k/4][1024]
   size_t bytes() const;
 
-  static constexpr uint32_t kMaxK = 17408;
+  uint32_t max_k() const { return max_k_; }
 
  private:
   l0::Context& ctx_;
+  uint32_t max_k_;
   l0::CmdList imm_;
   l0::Mem xq_, xs_, w8_;
   std::map<uint32_t, l0::Mem> signs_, bits_;

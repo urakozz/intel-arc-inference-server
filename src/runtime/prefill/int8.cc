@@ -20,18 +20,19 @@ void require(bool ok, const std::string& what) {
 
 // What pf_colmax_rot / pf_requant_rot need of the weight: int4, either layout,
 // whole 1024-k rotation blocks up to the largest K the scratch holds.
-void check_weight(const loader::DeviceWeight& w) {
+void check_weight(const loader::DeviceWeight& w, uint32_t max_k) {
   const model::GemvShape& sh = w.shape;
   require(w.kind == model::WeightKind::Int4, "the h8 path's linears are all int4; this one is not");
   require(sh.K % kRotBlock == 0, "K = " + std::to_string(sh.K) + " is not a whole number of 1024-k rotation blocks");
-  require(sh.K <= Int8State::kMaxK, "K = " + std::to_string(sh.K) + " exceeds the int8 scratch's 17408");
+  require(sh.K <= max_k, "K = " + std::to_string(sh.K) + " exceeds the int8 scratch's " +
+                             std::to_string(max_k));
   require(sh.layout == 0 || sh.layout == 1, "layout " + std::to_string(sh.layout) + " is neither 0 nor 1");
   require(sh.layout != 0 || w.scales != nullptr, "layout 0 weight has no independent scales allocation");
 }
 
 // Everything linear_l0's walks require, on the h8 path.
-void check_walk(const loader::DeviceWeight& w, uint32_t M) {
-  check_weight(w);
+void check_walk(const loader::DeviceWeight& w, uint32_t M, uint32_t max_k) {
+  check_weight(w, max_k);
   const model::GemvShape& sh = w.shape;
   require(sh.N % kNs == 0, "N = " + std::to_string(sh.N) + " is not a whole number of 1024-column slabs");
   require(M > 0 && pad256(M) <= PrefillScratch::kC,
@@ -76,12 +77,13 @@ void walk(Context& cx, KernelCache& kc, Int8State& q, const loader::DeviceWeight
 }
 }  // namespace
 
-Int8State::Int8State(l0::Context& ctx)
+Int8State::Int8State(l0::Context& ctx, uint32_t max_k)
     : ctx_(ctx),
+      max_k_(max_k),
       imm_(l0::CmdList::immediate(ctx)),
-      xq_(ctx, l0::MemKind::Device, size_t{PrefillScratch::kC} * kMaxK),
+      xq_(ctx, l0::MemKind::Device, size_t{PrefillScratch::kC} * max_k),
       xs_(ctx, l0::MemKind::Device, size_t{PrefillScratch::kC} * 4),
-      w8_(ctx, l0::MemKind::Device, size_t{kMaxK / 4} * kNs * 4) {}
+      w8_(ctx, l0::MemKind::Device, size_t{max_k / 4} * kNs * 4) {}
 
 const l0::Mem& Int8State::signs_f32(uint32_t K) {
   auto it = signs_.find(K);
@@ -107,7 +109,7 @@ const std::pair<l0::Mem, l0::Mem>& Int8State::scales(Context& cx, KernelCache& k
                                                      const loader::DeviceWeight& w) {
   auto it = scales_.find(w.mem.ptr());
   if (it != scales_.end()) return it->second;
-  check_weight(w);
+  check_weight(w, max_k_);
   const model::GemvShape& sh = w.shape;
   require(sh.N % 16 == 0, "N = " + std::to_string(sh.N) + " is not a whole number of 16-column tiles");
   // colmax[n] = float bits of max_k |(W R_K)[k, n]|, by atomic_max over blocks
@@ -153,7 +155,7 @@ size_t linear_i8_launches(const model::GemvShape& sh) { return 1 + 2 * (size_t(s
 
 void linear_i8(Context& cx, KernelCache& kc, PrefillScratch& s, Int8State& q,
                const loader::DeviceWeight& w, const uint16_t* x, uint32_t M) {
-  check_walk(w, M);
+  check_walk(w, M, q.max_k());
   const model::GemvShape& sh = w.shape;
   require(s.partials.size() >= size_t(pad256(M)) * sh.N * 4,
           "`partials` is smaller than the [pad256(M)][N] fp32 this linear writes");
@@ -165,7 +167,7 @@ void linear_i8_silu(Context& cx, KernelCache& kc, PrefillScratch& s, Int8State& 
                     const loader::DeviceWeight& w, const uint16_t* x, uint32_t M,
                     uint16_t* out, uint32_t ldx) {
   (void)s;   // partials untouched: the epilogue writes bf16 x straight into `out`
-  check_walk(w, M);
+  check_walk(w, M, q.max_k());
   const model::GemvShape& sh = w.shape;
   require(size_t(ldx) * 2 == size_t(sh.N),
           "ldx = " + std::to_string(ldx) + " is not N/2 for N = " + std::to_string(sh.N));

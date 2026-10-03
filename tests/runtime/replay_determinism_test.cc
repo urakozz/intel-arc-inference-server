@@ -70,8 +70,9 @@ constexpr size_t kPromptLen = sizeof(kPrompt) / sizeof(kPrompt[0]);
 constexpr int kGen = 8;             // generated tokens per run
 constexpr uint32_t kCapM = 1;       // the captured list's M (only M = 1 compiles)
 // The residual tap: bf16 [64 layers][M][5120], one buffer per step.
-constexpr size_t kTapElems = size_t(Qwen35::kLayers) * kCapM * Qwen35::kHidden;
-constexpr size_t kTapBytes = kTapElems * 2;
+// Spec 14: the layer count is the loaded model's, set in main() before anything reads it.
+uint32_t kLayers = 0;
+size_t kTapElems = 0, kTapBytes = 0;
 
 // Everything that survives a token boundary (runtime::DecodeBuffers' first
 // group) - the whole of what a replay is allowed to depend on - plus the two
@@ -122,7 +123,10 @@ int main(int argc, char** argv) {
   std::printf("lm_head: %s\n", loader::lm_head_form_name(lm_head));
   l0::Context ctx(0);
   loader::LoadedModel m = loader::load(ctx, arg, 16384, /*mtp=*/false, lm_head);
-  runtime::DecodeBuffers b(ctx, m.max_len);
+  kLayers = m.desc->layers;
+  kTapElems = size_t(kLayers) * kCapM * Qwen35::kHidden;
+  kTapBytes = kTapElems * 2;
+  runtime::DecodeBuffers b(ctx, m.max_len, *m.desc);
   l0::Mem tapmem(ctx, l0::MemKind::Device, kTapBytes);
 
   runtime::CapturedStep cap = runtime::build(ctx, m, b, &tapmem);
@@ -264,9 +268,9 @@ int main(int argc, char** argv) {
   // And nothing in the residual stream may be NaN or Inf: the kernels' rounding
   // helpers do not handle either, so one would poison every later layer.
   for (int g = 0; g < kGen; ++g)
-    for (uint32_t l = 0; l < Qwen35::kLayers; ++l)
+    for (uint32_t l = 0; l < kLayers; ++l)
       for (uint32_t k = 0; k < Qwen35::kHidden; ++k) {
-        const uint16_t w = a.tap[(size_t(g) * Qwen35::kLayers + l) * Qwen35::kHidden + k];
+        const uint16_t w = a.tap[(size_t(g) * kLayers + l) * Qwen35::kHidden + k];
         if (!bf16_finite(w)) {
           std::fprintf(stderr, "non-finite resid: token %d layer %u element %u = 0x%04X\n", g, l, k,
                        w);
@@ -288,8 +292,8 @@ int main(int argc, char** argv) {
   // Bitwise on the tap, compared per (token, layer) so a failure names the
   // first layer that diverged - the diagnostic this tap exists for.
   for (int g = 0; g < kGen; ++g)
-    for (uint32_t l = 0; l < Qwen35::kLayers; ++l) {
-      const size_t off = (size_t(g) * Qwen35::kLayers + l) * Qwen35::kHidden;
+    for (uint32_t l = 0; l < kLayers; ++l) {
+      const size_t off = (size_t(g) * kLayers + l) * Qwen35::kHidden;
       if (std::memcmp(a.tap.data() + off, bb.tap.data() + off, Qwen35::kHidden * 2) != 0) {
         std::fprintf(stderr, "resid tap differs at generated token %d, layer %u\n", g, l);
         CHECK(false);
@@ -320,8 +324,8 @@ int main(int argc, char** argv) {
     CHECK_EQ(a.ids[g], cc.ids[g]);
   }
   for (int g = 0; g < kGen; ++g)
-    for (uint32_t l = 0; l < Qwen35::kLayers; ++l) {
-      const size_t off = (size_t(g) * Qwen35::kLayers + l) * Qwen35::kHidden;
+    for (uint32_t l = 0; l < kLayers; ++l) {
+      const size_t off = (size_t(g) * kLayers + l) * Qwen35::kHidden;
       if (std::memcmp(a.tap.data() + off, cc.tap.data() + off, Qwen35::kHidden * 2) != 0) {
         std::fprintf(stderr, "fresh-ingest resid differs at generated token %d, layer %u\n", g, l);
         CHECK(false);

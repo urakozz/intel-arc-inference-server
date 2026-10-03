@@ -317,7 +317,7 @@ void case_silu_mul(Dev& d, uint32_t M, bool exact_silu) {
 
   l0::Mem pbuf = upload(d.ctx, d.imm, partials);
   l0::Mem xbuf(d.ctx, l0::MemKind::Device, size_t(M) * N * 2);
-  l0::Module mod(d.ctx, kernels::path(kernels::prep_silu_mul_variant(M)));
+  l0::Module mod(d.ctx, kernels::path(kernels::prep_silu_mul_variant(M, prep_ref::kSiluN)));
   l0::Kernel k = mod.kernel("prep_silu_mul");
   k.group_size(256);
   k.arg_ptr(0, pbuf.ptr());

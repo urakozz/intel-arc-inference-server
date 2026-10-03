@@ -11,6 +11,7 @@
 #include "check.h"
 #include "common/bf16.h"
 #include "loader/lm_head_int8.h"
+#include "model/model_desc.h"
 #include "model/qwen35.h"
 
 namespace {
@@ -107,7 +108,7 @@ int main() {
     CHECK(loader::parse_lm_head_form("bf16", f) && f == loader::LmHeadForm::Checkpoint);
     CHECK(loader::parse_lm_head_form("int8", f) && f == loader::LmHeadForm::Int8);
     CHECK(!loader::parse_lm_head_form("int4", f));
-    const model::FusedLinear& r = model::Qwen35::lm_head(model::WeightKind::Int8);
+    const model::FusedLinear& r = model::qwen38().lm_head(model::WeightKind::Int8);
     CHECK(r.kind == model::WeightKind::Int8);
     CHECK_EQ(r.shape.K, uint32_t(5120));
     CHECK_EQ(r.shape.N, uint32_t(248320));

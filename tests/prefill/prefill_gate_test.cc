@@ -162,6 +162,7 @@ int main(int argc, char** argv) {
   // debug_resid=false: ruling R6 gives the prefill walk no per-layer tap, so
   // there is nothing for it to fill and the 64 device copies a token would be
   // paid for nothing.
+  const uint32_t kLayers = model.desc->layers;   // spec 14: 64 Qwen3.8, 72 Agnes
   runtime::Engine eng(ctx, std::move(model), kMaxLen);
   eng.set_prefill_backend(backend);
   std::printf("prefill backend: %s\n", runtime::prefill_backend_name(backend));
@@ -219,8 +220,8 @@ int main(int argc, char** argv) {
                 "    layer      cosine      relL2     |oracle|      |err|\n");
     {
       std::vector<float> got(kGdnElems);
-      for (uint32_t l = 0, gl = 0; l < Qwen35::kLayers; ++l) {
-        if (Qwen35::is_fa(l)) continue;
+      for (uint32_t l = 0, gl = 0; l < kLayers; ++l) {
+        if (::model::ModelDesc::is_fa(l)) continue;
         const float* ref = g.f32("gdn_state.L" + std::to_string(l), kGdnElems);
         imm.copy(got.data(), static_cast<const uint8_t*>(eng.buffers().gdn_state.ptr()) +
                                  size_t(gl) * gdn_stride,

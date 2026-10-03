@@ -69,6 +69,7 @@
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/memory.h"
+#include "model/model_desc.h"
 #include "runtime/buffers.h"
 #include "runtime/control.h"
 
@@ -130,14 +131,14 @@
 static void check_prefill_scratch(l0::Context& ctx) {
   // Spec 6: at max_len 131072 no score scratch exists until a composed call asks for it.
   {
-    runtime::PrefillScratch big(ctx, 131072);
+    runtime::PrefillScratch big(ctx, 131072, model::qwen38());
     std::printf("prefill scratch @131072: %zu B, lazy %zu B, pf_s %zu B\n", big.bytes(),
                 big.lazy_bytes(), big.pf_s_bytes());
     CHECK_EQ(big.bytes(), size_t{699514776});
     CHECK_EQ(big.lazy_bytes(), size_t{0});
     CHECK_EQ(big.pf_s_bytes(), size_t{0});
   }
-  runtime::PrefillScratch pf(ctx, 16384);
+  runtime::PrefillScratch pf(ctx, 16384, model::qwen38());
   std::printf("prefill scratch %zu B (%.3f GB)\n", pf.bytes(), pf.bytes() / 1e9);
   CHECK_EQ(pf.bytes(), size_t{699514776});
   CHECK_EQ(pf.lazy_bytes(), size_t{0});
@@ -151,7 +152,7 @@ static void check_prefill_scratch(l0::Context& ctx) {
   CHECK_EQ(pf.lazy_bytes(), size_t{805306368 + 402653184});
   CHECK_EQ(pf.bytes(), size_t{699514776});          // lazy buffers are not in bytes()
   CHECK_EQ(pf.dequant_buffer().size(), size_t{356515840});
-  // 17408 x 1024 x 2 B (derived: Q::kIntermediate * 1024 * kBf16, the formula in PrefillScratch::slab_buffer()).
+  // 17408 x 1024 x 2 B (derived: qwen38().intermediate * 1024 * kBf16, the formula in PrefillScratch::slab_buffer()).
   CHECK_EQ(pf.slab_buffer().size(), size_t{35651584});
   CHECK_EQ(pf.lazy_bytes(), size_t{805306368 + 402653184 + 356515840 + 35651584});
   CHECK_EQ(runtime::PrefillScratch::kC, 2048u);
@@ -176,8 +177,8 @@ int main() {
   // The split must not move decode's numbers by a byte, and the view must
   // alias the groups rather than copy them.
   {
-    runtime::PersistentBuffers p(ctx, 16384);
-    runtime::DecodeScratch s(ctx, 16384);
+    runtime::PersistentBuffers p(ctx, 16384, model::qwen38());
+    runtime::DecodeScratch s(ctx, 16384, model::qwen38());
     CHECK_EQ(p.bytes(), size_t{1240465536});
     CHECK_EQ(s.bytes(), size_t{68652864});
     runtime::DecodeBuffers view(p, s);
@@ -196,8 +197,8 @@ int main() {
   // 16 FA layers x 131072 x 4 kv heads x 256 x 2 B, x 2 for K and V = 8,589,934,592 B, and
   // attn_part is 24 x (131072 / 64 = 2048 blocks) x 8 x 258 x 4 B = 405,798,912 B.
   {
-    runtime::PersistentBuffers p(ctx, 131072);
-    runtime::DecodeScratch s(ctx, 131072);
+    runtime::PersistentBuffers p(ctx, 131072, model::qwen38());
+    runtime::DecodeScratch s(ctx, 131072, model::qwen38());
     std::printf("max_len 131072: kv %zu B, attn_part %zu B, persistent %zu B, scratch %zu B\n",
                 p.kv_k.size() + p.kv_v.size(), s.attn_part.size(), p.bytes(), s.bytes());
     CHECK_EQ(p.kv_k.size() + p.kv_v.size(), size_t{16} * 131072 * 4 * 256 * 2 * 2);
@@ -213,7 +214,7 @@ int main() {
     CHECK_EQ(view.max_len, 131072u);
   }
 
-  runtime::DecodeBuffers b(ctx, 16384);
+  runtime::DecodeBuffers b(ctx, 16384, model::qwen38());
   std::printf("persistent %zu B, scratch %zu B\n", b.persistent_bytes(), b.scratch_bytes());
 
   CHECK_EQ(b.max_len, 16384u);
@@ -275,7 +276,7 @@ int main() {
   //   logits     3 x 248320 x 4 B                                  =     2,979,840
   //                                                          total =   523,176,064
   {
-    runtime::MtpBuffers mb(ctx, 16384);
+    runtime::MtpBuffers mb(ctx, 16384, model::qwen38());
     CHECK_EQ(mb.gdn_spec.size(), size_t{3} * 150994944);
     CHECK_EQ(mb.kv_k.size(), size_t{33554432});
     CHECK_EQ(mb.kv_v.size(), size_t{33554432});
