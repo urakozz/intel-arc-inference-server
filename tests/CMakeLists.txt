@@ -1065,6 +1065,13 @@ if(B70_TOKENIZER_ENABLED)
   target_include_directories(template_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(template_test PRIVATE b70_tokenizer)
   add_test(NAME template_test COMMAND template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
+  # Spec 14: Agnes's template (byte-identical to Qwen3.8's) on five message lists - plain,
+  # thinking, tools, a tool call in history, tool responses - against transformers' render.
+  set(B70_AGNES_SNAPSHOT_DIR
+    "${_b70_hf_home}/hub/models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ/snapshots/946012d0e0b1b6df685c910adf3d68e351931306"
+    CACHE PATH "Agnes snapshot directory for the template test (tokenizer_config + chat_template.jinja)")
+  add_test(NAME template_agnes_test COMMAND template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${B70_AGNES_SNAPSHOT_DIR} agnes_template_cases.json)
   add_executable(streamer_test tokenizer/streamer_test.cc)
   target_include_directories(streamer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(streamer_test PRIVATE b70_tokenizer)
