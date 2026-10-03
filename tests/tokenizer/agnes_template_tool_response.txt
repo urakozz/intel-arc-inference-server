@@ -1,0 +1,58 @@
+<|im_start|>system
+Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.
+
+# Tools
+
+You have access to the following functions:
+
+<tools>
+{"function": {"description": "Run the test suite.", "name": "run_tests", "parameters": {"properties": {"filter": {"type": "string"}}, "required": [], "type": "object"}}, "type": "function"}
+</tools>
+
+If you choose to call a function ONLY reply in the following format with NO suffix:
+
+<tool_call>
+<function=example_function_name>
+<parameter=example_parameter_1>
+value_1
+</parameter>
+<parameter=example_parameter_2>
+This is the value for the second parameter
+that can span
+multiple lines
+</parameter>
+</function>
+</tool_call>
+
+<IMPORTANT>
+Reminder:
+- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags
+- Required parameters MUST be specified
+- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after
+- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls
+</IMPORTANT><|im_end|>
+<|im_start|>user
+Run the loader tests.<|im_end|>
+<|im_start|>assistant
+<think>
+The user wants the loader tests; filter on 'loader'.
+</think>
+
+I will run them.
+
+<tool_call>
+<function=run_tests>
+<parameter=filter>
+loader
+</parameter>
+</function>
+</tool_call><|im_end|>
+<|im_start|>user
+<tool_response>
+5 passed, 0 failed
+</tool_response>
+<tool_response>
+elapsed 2.1 s
+</tool_response><|im_end|>
+<|im_start|>assistant
+<think>

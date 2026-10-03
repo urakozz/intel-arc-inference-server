@@ -1,0 +1,67 @@
+[
+  {
+    "name": "plain",
+    "think": false,
+    "tools": null,
+    "messages": [
+      {"role": "system", "content": "You are a terse assistant."},
+      {"role": "user", "content": "Name one prime number above 90."}
+    ]
+  },
+  {
+    "name": "thinking",
+    "think": true,
+    "tools": null,
+    "messages": [
+      {"role": "user", "content": "What is 17 * 23?"},
+      {"role": "assistant", "content": "391", "reasoning_content": "17 * 23 = 17 * 20 + 17 * 3 = 340 + 51 = 391."},
+      {"role": "user", "content": "And 19 * 21?"}
+    ]
+  },
+  {
+    "name": "tools",
+    "think": false,
+    "tools": [
+      {"type": "function", "function": {"name": "read_file", "description": "Read a file from the workspace.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Workspace-relative path."}}, "required": ["path"]}}},
+      {"type": "function", "function": {"name": "run_tests", "description": "Run the test suite.",
+        "parameters": {"type": "object", "properties": {"filter": {"type": "string"}}, "required": []}}}
+    ],
+    "messages": [
+      {"role": "system", "content": "You are a coding agent."},
+      {"role": "user", "content": "Open src/main.cc and tell me what it does."}
+    ]
+  },
+  {
+    "name": "tool_call_history",
+    "think": false,
+    "tools": [
+      {"type": "function", "function": {"name": "read_file", "description": "Read a file from the workspace.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}}
+    ],
+    "messages": [
+      {"role": "user", "content": "Open src/main.cc."},
+      {"role": "assistant", "content": "", "tool_calls": [
+        {"type": "function", "function": {"name": "read_file", "arguments": {"path": "src/main.cc"}}}
+      ]},
+      {"role": "tool", "content": "int main() { return 0; }"},
+      {"role": "user", "content": "Is it correct?"}
+    ]
+  },
+  {
+    "name": "tool_response",
+    "think": true,
+    "tools": [
+      {"type": "function", "function": {"name": "run_tests", "description": "Run the test suite.",
+        "parameters": {"type": "object", "properties": {"filter": {"type": "string"}}, "required": []}}}
+    ],
+    "messages": [
+      {"role": "user", "content": "Run the loader tests."},
+      {"role": "assistant", "content": "I will run them.", "reasoning_content": "The user wants the loader tests; filter on 'loader'.", "tool_calls": [
+        {"type": "function", "function": {"name": "run_tests", "arguments": {"filter": "loader"}}}
+      ]},
+      {"role": "tool", "content": "5 passed, 0 failed"},
+      {"role": "tool", "content": "elapsed 2.1 s"}
+    ]
+  }
+]
