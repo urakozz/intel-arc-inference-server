@@ -81,6 +81,42 @@ const FusedLinear& lm_head_int8() {
   return r;
 }
 
+// Spec 14: Agnes 3.0 Flash. Qwen3.8's table with the two MLP rows widened by the
+// parallel FFN fold (§2): gate||up N = 2 x (17408 + 2048) = 38912, down K = 19456.
+//
+// **PROVISIONAL tuning (spec 14 §6).** `{S, layout}` of both rows are COPIED from
+// the nearest Qwen3.8 shapes - gate||up 5120x34816 L0 S8, down 17408x5120 L0 S4 -
+// not measured; and the gemv binaries at the new shapes take the copied cells'
+// extra defines (src/kernels/CMakeLists.txt). The box sweep
+// (docs/probe-gemv-2026-08-24.md's method) replaces both rows by name:
+// validation checklist "GEMV tuning". S must keep dividing K/64: 80 / 8 and 304 / 4.
+// The S = 8 of gate||up is ALSO baked into prep.cl's SILU_S, which
+// Capture::check_sizes asserts - a retune to another S needs a SILU_S variant.
+ModelDesc make_agnes() {
+  ModelDesc d;
+  d.name = "agnes-3.0-flash";
+  d.architecture = "AgnesForConditionalGeneration";
+  d.layers = 72;
+  d.fa_layers = 18;   // l % 4 == 3 (global_attention_interval 4)
+  d.gdn_layers = 54;
+  d.parallel_ffn = 2048;
+  d.intermediate = 17408 + 2048;   // 19456 = 19 x 1024 = 304 x 64
+  d.max_len_ceiling = 65536;       // spec 14 §3.3: until spec 12's int8 KV
+  d.name_map = {{"delta_attn.", "linear_attn."}, {"global_attn.", "self_attn."}};
+  d.doc_w = 18.344234624e9;        // derived from the headers, see model_desc.h
+  d.provisional_tuning = true;
+  d.table = qwen38_table();
+  FusedLinear& gu = d.table[static_cast<size_t>(LinearId::GateUp)];
+  gu.shape = {5120, 2 * d.intermediate, 8, 0};   // PROVISIONAL S8 L0 (copied)
+  gu.fold = Fold::N;
+  gu.fold_parts = {"mlp.parallel_ffn.gate_proj", "mlp.parallel_ffn.up_proj"};
+  FusedLinear& dn = d.table[static_cast<size_t>(LinearId::Down)];
+  dn.shape = {d.intermediate, 5120, 4, 0};       // PROVISIONAL S4 L0 (copied)
+  dn.fold = Fold::K;
+  dn.fold_parts = {"mlp.parallel_ffn.down_proj"};
+  return d;
+}
+
 ModelDesc make_qwen38() {
   ModelDesc d;
   d.name = "qwen3.8";
@@ -91,6 +127,7 @@ ModelDesc make_qwen38() {
   d.intermediate = 17408;
   d.parallel_ffn = 0;
   d.max_len_ceiling = 0;
+  d.doc_w = 15.519e9;   // docs/03-models.md, measured 2026-08-24
   d.table = qwen38_table();
   return d;
 }
@@ -149,11 +186,17 @@ const ModelDesc& qwen38() {
   return d;
 }
 
+const ModelDesc& agnes() {
+  static const ModelDesc d = make_agnes();
+  return d;
+}
+
 const ModelDesc& desc_for_architecture(const std::string& architecture) {
-  for (const ModelDesc* d : {&qwen38()})
+  for (const ModelDesc* d : {&qwen38(), &agnes()})
     if (d->architecture == architecture) return *d;
   throw std::runtime_error("config.json architectures[0] is '" + architecture +
-                           "'; this engine runs Qwen3_5ForConditionalGeneration (Qwen3.8)");
+                           "'; this engine runs Qwen3_5ForConditionalGeneration (Qwen3.8) and "
+                           "AgnesForConditionalGeneration (Agnes 3.0 Flash)");
 }
 
 }  // namespace model

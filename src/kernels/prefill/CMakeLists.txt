@@ -31,6 +31,9 @@ endforeach()
 # built so the probe measures rather than assumes either contrast.
 set(PF_SHAPES "5120 16384" "6144 5120" "5120 34816"
               "17408 5120" "5120 14336" "5120 248320")
+if(B70_AGNES)   # spec 14: Agnes's folded gate'||up' and down' (sycl-tla backend)
+  list(APPEND PF_SHAPES "5120 38912" "19456 5120")
+endif()
 foreach(row IN LISTS PF_SHAPES)
   separate_arguments(f UNIX_COMMAND "${row}")
   list(GET f 0 K)
@@ -53,6 +56,9 @@ add_pf_res_fold(5120 1 20)   # every other norm (ruling R1: S = 1)
 add_ocloc_kernel(pf_norm_finish_K5120_G20_W20 SOURCE ${PF_PREP_CL}
                  DEFINES K=5120 NORM_G=20 NORM_WGS=20)
 add_ocloc_kernel(pf_silu_mul SOURCE ${PF_PREP_CL})
+if(B70_AGNES)   # spec 14: SILU_N 19456 (kernels::pf_silu_mul_variant(19456))
+  add_ocloc_kernel(pf_silu_mul_I19456 SOURCE ${PF_PREP_CL} DEFINES INTERMEDIATE=19456)
+endif()
 add_ocloc_kernel(pf_embed_gather SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_embed.cl
                  DEFINES HIDDEN=5120 VOCAB=248320)
 add_ocloc_kernel(pf_gated_head SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl)
@@ -114,7 +120,11 @@ add_ocloc_kernel(pf_gemm_T0_SILU SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 SILU_EPI=
 # Spec 2.1 (plan 9a): the 1024-column slab dequant, one variant per production (K, N, layout)
 # -- the layouts the loader actually ships (qkv||z tiled, the rest GPTQ-native).
 set(PF_SLAB_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_dequant_slab.cl)
-foreach(row "5120 16384 1" "6144 5120 0" "5120 34816 0" "17408 5120 0" "5120 14336 0")
+set(PF_SLAB_ROWS "5120 16384 1" "6144 5120 0" "5120 34816 0" "17408 5120 0" "5120 14336 0")
+if(B70_AGNES)   # spec 14: gate'||up' is 38 slabs of 1024 columns; down's slab is [19456][1024]
+  list(APPEND PF_SLAB_ROWS "5120 38912 0" "19456 5120 0")
+endif()
+foreach(row IN LISTS PF_SLAB_ROWS)
   separate_arguments(f UNIX_COMMAND "${row}")
   list(GET f 0 K)
   list(GET f 1 N)
@@ -127,7 +137,11 @@ endforeach()
 # The quantiser and requant run at the default 128 GRF (probe_w8a8 measured 256
 # halving their occupancy); the GEMM needs 256 for its 64 int32 accumulators.
 set(PF_INT8_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_int8.cl)
-foreach(K 5120 6144 17408)
+set(PF_HAD_K 5120 6144 17408)
+if(B70_AGNES)   # spec 14: down' reads K = 19456 = 19 x 1024 (the 1024-blocked Hadamard)
+  list(APPEND PF_HAD_K 19456)
+endif()
+foreach(K IN LISTS PF_HAD_K)
   math(EXPR NBLK "${K} / 1024")
   add_ocloc_kernel(pf_quant_had_K${K} SOURCE ${PF_INT8_CL} DEFINES PF_QUANT_HAD=1 NBLK=${NBLK})
 endforeach()

@@ -16,6 +16,7 @@
 #include "common/json.h"
 #include "common/repack.h"
 #include "l0/cmdlist.h"
+#include "loader/fold.h"
 #include "loader/safetensors.h"
 #include "loader/small_layout.h"
 
@@ -30,9 +31,12 @@ using model::Qwen35;
 // offset or names a tensor: `load_small` executes the table, and both throw if
 // the table and the header disagree.
 
-// `W` from docs/03-models.md's byte accounting (measured 2026-08-24):
-// 12.163 qweight + 0.760 scales + 0.052 bf16 smalls + 2.543 lm_head.
-constexpr double kDocW = 15.519e9;
+// `W` - the read-per-token bytes with a bf16 lm_head - is the model
+// descriptor's `doc_w` (spec 14): Qwen3.8's is docs/03-models.md's byte
+// accounting (measured 2026-08-24): 12.163 qweight + 0.760 scales + 0.052 bf16
+// smalls + 2.543 lm_head = 15.519 GB. Agnes's 18.344 GB is the same four
+// categories summed from its safetensors headers (14.816 + 0.926 + 0.059 +
+// 2.543; the fold moves bytes, it adds none).
 
 // doc-03's `W` was measured over a checkpoint with a **bf16** `lm_head`. A
 // checkpoint that packs it (spec 1.6 §5.1) reads 0.675 GB there instead of
@@ -256,6 +260,42 @@ size_t int4_scale_elems(const model::GemvShape& s) {
   return s.layout == 0 ? size_t(s.K / 64) * s.N : 0;
 }
 
+// Spec 14 §2: join each part with its fold part (Fold::N: columns, part i with
+// fold part i; Fold::K: rows, the one part with the one fold part), on packed
+// int4 (loader/fold.h). The joined tensors live in `keep`; the returned sources
+// point into it. Every fold part must be int4 - the parallel FFN is quantised
+// exactly like the MLP it joins (the checkpoint's modules_in_block_to_quantize).
+std::vector<LinearSrc> apply_fold(const SafetensorsSet& set, NameView& view,
+                                  const model::ModelDesc& desc, const std::string& layer_prefix,
+                                  const model::FusedLinear& fl, std::vector<LinearSrc> srcs,
+                                  std::vector<PackedInt4>& keep, const std::string& id) {
+  const bool by_n = fl.fold == model::Fold::N;
+  if (fl.kind != model::WeightKind::Int4)
+    throw std::runtime_error(id + ": a fold is implemented for int4 linears only");
+  if (by_n ? fl.fold_parts.size() != srcs.size()
+           : (fl.fold_parts.size() != 1 || srcs.size() != 1))
+    throw std::runtime_error(id + ": " + std::to_string(fl.fold_parts.size()) + " fold parts for " +
+                             std::to_string(srcs.size()) + " parts (Fold::N pairs them, Fold::K "
+                             "joins one with one)");
+  keep.reserve(srcs.size());
+  for (size_t i = 0; i < srcs.size(); ++i) {
+    const std::string& fp = fl.fold_parts[i];
+    const LinearSrc f = LinearSrc::classify(set, ckpt_name(desc, layer_prefix + fp));
+    if (f.kind != WKind::Int4 || srcs[i].kind != WKind::Int4)
+      throw std::runtime_error(id + ": fold part '" + fp + "' or its partner is not int4");
+    view.consumed.insert(layer_prefix + fp + ".qweight");
+    view.consumed.insert(layer_prefix + fp + ".scales");
+    const PackedInt4View a{srcs[i].K, srcs[i].N, srcs[i].qweight, srcs[i].scales};
+    const PackedInt4View b{f.K, f.N, f.qweight, f.scales};
+    keep.push_back(by_n ? fold_n(a, b) : fold_k(a, b));
+    srcs[i].K = keep.back().K;
+    srcs[i].N = keep.back().N;
+    srcs[i].qweight = keep.back().qweight.data();
+    srcs[i].scales = keep.back().scales.data();
+  }
+  return srcs;
+}
+
 // One fused linear: classify every part, check the preconditions the repack
 // helpers document but cannot check (Task-3 review minor, closed here at the
 // first real consumer - these run in release too, load is one-shot), repack
@@ -276,7 +316,6 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
     throw std::runtime_error(id + ": unsupported int4 layout " + std::to_string(sh.layout));
 
   std::vector<LinearSrc> srcs;
-  uint32_t n_sum = 0;
   for (const std::string& part : fl.parts) {
     // classify() checks the alignment of every pointer it casts (M6).
     LinearSrc s = LinearSrc::classify(set, ckpt_name(desc, layer_prefix + part));
@@ -292,11 +331,19 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
     } else {
       view.consumed.insert(layer_prefix + part + ".weight");
     }
-    if (s.K != sh.K)
-      throw std::runtime_error(id + ": part '" + part + "' has K=" + std::to_string(s.K) +
-                               ", the shape table says " + std::to_string(sh.K));
-    n_sum += s.N;
     srcs.push_back(s);
+  }
+  // Spec 14 §2: Agnes's parallel FFN joined onto the parts on packed int4 BEFORE
+  // the column map, so gate'||up' interleaves exactly as gate||up does. `folded`
+  // owns the joined tensors for the rest of this call; srcs[i] then points at them.
+  std::vector<PackedInt4> folded;
+  if (fl.fold != model::Fold::None) srcs = apply_fold(set, view, desc, layer_prefix, fl, srcs, folded, id);
+  uint32_t n_sum = 0;
+  for (size_t i = 0; i < srcs.size(); ++i) {
+    if (srcs[i].K != sh.K)
+      throw std::runtime_error(id + ": part '" + fl.parts[i] + "' has K=" + std::to_string(srcs[i].K) +
+                               ", the shape table says " + std::to_string(sh.K));
+    n_sum += srcs[i].N;
   }
   // `pad_n` is the model description's *unpadded* N - the columns the checkpoint
   // actually ships; 0 means "no padding, the parts fill shape.N exactly".
@@ -591,6 +638,11 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   if (!archs || !archs->is_array() || archs->arr().empty() || !archs->arr()[0].is_string())
     throw std::runtime_error(snap + "config.json has no architectures[0] string");
   const model::ModelDesc& desc = model::desc_for_architecture(archs->arr()[0].str());
+  if (desc.max_len_ceiling != 0 && max_len > desc.max_len_ceiling)
+    throw std::runtime_error(
+        desc.name + ": max_len " + std::to_string(max_len) + " exceeds this model's ceiling " +
+        std::to_string(desc.max_len_ceiling) + " (spec 14 §3.3: its bf16 KV beyond that does not "
+        "fit beside the weights on 32 GB; spec 12's int8 KV lifts it)");
 
   SafetensorsSet set(snap);
   // Requirement 6: before a single byte is repacked. Returns what it counted
@@ -721,6 +773,11 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
 
   const LoadReport& r = m.report;
   const double gb = 1e9;
+  const std::string fold_note =
+      desc.has_parallel_ffn()
+          ? " (" + std::to_string(desc.intermediate - desc.parallel_ffn) + " + parallel FFN " +
+                std::to_string(desc.parallel_ffn) + ", folded at load)"
+          : std::string();
   // Spec 9 §3: the form, and for int8 the host quantisation time.
   char lm_buf[160];
   if (lm_int8)
@@ -760,12 +817,13 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       : lm_int8 ? double(lm_head_int8_bytes(lm_row.shape.K, lm_row.shape.N)) -
                       double(kLmHeadBf16Bytes)
                 : 0.0;
-  const double expected = kDocW + double(r.pad_bytes) + double(widen.total()) + lm_adjust;
+  const double expected = desc.doc_w + double(r.pad_bytes) + double(widen.total()) + lm_adjust;
   const double delta = (double(per_token) - expected) / expected;
   m.report.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
   std::printf(
       "loader: %s\n"
+      "  model     %s (%s): %u layers = %u GDN + %u FA, MLP intermediate %u%s\n"
       "  quant     int4 g%u sym desc_act=false (%s), %s\n"
       "  tensors   %zu language-model + %zu top-level; skipped %zu visual, %zu mtp;\n"
       "            dropped %zu qzeros + %zu g_idx (invariants asserted), %zu unconsumed%s%s\n"
@@ -786,7 +844,9 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       " %+.3f lm_head\n"
       "              widen = %zu B RMSNorm fp32 (1+w) + %zu B GDN fp32  ->  %+.3f%%\n"
       "  load        %.1f s\n",
-      snap.c_str(), qc.group_size, qc.desc_act_declared ? "declared" : "inferred, 0 g_idx",
+      snap.c_str(), desc.name.c_str(), desc.architecture.c_str(), desc.layers, desc.gdn_layers,
+      desc.fa_layers, desc.intermediate, fold_note.c_str(), qc.group_size,
+      qc.desc_act_declared ? "declared" : "inferred, 0 g_idx",
       rules.c_str(), view.names.size() - view.top_level, view.top_level,
       view.visual_skipped, view.mtp_skipped, view.qzeros, view.g_idx, r.unconsumed,
       r.unconsumed ? " incl. " : "", unconsumed.c_str(), scan.subnormal_scales, m.linears.size(),
@@ -797,7 +857,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       r.pad_bytes, r.pad_bytes / gb, per_token, per_token / gb, r.embed_bytes, r.embed_bytes / gb,
       rope_bytes, rope_bytes / gb, r.mtp_bytes, r.mtp_bytes / gb,
       mtp ? mtp_line.c_str() : "not loaded; --mtp loads it", r.total(), r.total() / gb, per_token / gb, expected / gb,
-      kDocW / gb, r.pad_bytes / gb, widen.total() / gb, lm_adjust / gb, widen.norm, widen.gdn,
+      desc.doc_w / gb, r.pad_bytes / gb, widen.total() / gb, lm_adjust / gb, widen.norm, widen.gdn,
       delta * 100.0, m.report.seconds);
 
   if (std::fabs(delta) > 0.02)

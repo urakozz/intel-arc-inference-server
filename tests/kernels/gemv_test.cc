@@ -54,6 +54,9 @@ int main() {
   run_case(ctx, q, f, {1, 5120, 34816, 8, 0});
   run_case(ctx, q, f, {1, 17408, 5120, 4, 0});
   run_case(ctx, q, f, {2, 6144, 5120, 1, 0});
+  // Spec 14 G1 (card): Agnes's folded gate'||up' and down' at their PROVISIONAL cells.
+  run_case(ctx, q, f, {1, 5120, 38912, 8, 0});
+  run_case(ctx, q, f, {1, 19456, 5120, 4, 0});
   std::puts("gemv_test OK");
   return 0;
 }
