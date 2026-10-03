@@ -132,7 +132,7 @@ class Engine {
   // head's input hidden h_{pos-1} (MtpBuffers::hh row 0, 10240 B) and the KV the head's
   // own layer (a 17th KV layer); both sizes grow accordingly.
   size_t state_bytes() const;                 // gdn_state + conv_ring (166.72 MB) [+ hh0]
-  size_t kv_bytes(uint32_t n_pos) const;      // n_pos * (16 [+1]) * 4 * 256 * 2 B, K and V
+  size_t kv_bytes(uint32_t n_pos) const;      // n_pos * (fa_layers [+1]) * 4 * 256 * 2 B, K and V
   // Layout: gdn_state (the LIVE slot) then conv_ring [then hh row 0]. conv_ring is a
   // ring indexed by pos % kConvRing; the whole ring is copied, so a restore at any
   // pos % 16 is exact.

@@ -42,7 +42,11 @@ inline std::string pf_norm_finish_variant(unsigned K, unsigned G, unsigned W) {
   return "pf_norm_finish_K" + std::to_string(K) + "_G" + std::to_string(G) + "_W" +
          std::to_string(W);
 }
-inline std::string pf_silu_mul_variant() { return "pf_silu_mul"; }
+// Spec 14: SILU_N is baked (pf_prep.cl); `_I<intermediate>` for any width but
+// Qwen3.8's 17408, exactly as kernels::prep_silu_mul_variant.
+inline std::string pf_silu_mul_variant(unsigned I) {
+  return std::string("pf_silu_mul") + (I == 17408 ? "" : "_I" + std::to_string(I));
+}
 // Spec 8 (plan 8b Task 3): the MTP head's prefill KV fill (src/kernels/prefill/CMakeLists.txt).
 inline std::string pf_res_fold_zero_variant(unsigned K, unsigned G) {
   return pf_res_fold_variant(K, 1, G) + "_Z";

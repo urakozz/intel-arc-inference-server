@@ -4,13 +4,15 @@
 #include <utility>
 #include "check.h"
 #include "loader/small_layout.h"
+#include "model/model_desc.h"
 #include "model/qwen35.h"
 
 int main() {
   using model::LayerKind;
   using model::LinearId;
   using model::Qwen35;
-  auto layers = Qwen35::layers();
+  const model::ModelDesc& q38 = model::qwen38();
+  auto layers = q38.layer_descs();
   CHECK_EQ(layers.size(), size_t(64));
   size_t gdn = 0, fa = 0;
   for (const auto& l : layers) (l.kind == LayerKind::GDN ? gdn : fa)++;
@@ -22,7 +24,7 @@ int main() {
   // Every GEMV shape is kernel-legal: N%64==0, K%64==0, S divides K/64.
   for (LinearId id : {LinearId::QkvZ, LinearId::AB, LinearId::OutProj, LinearId::GateUp,
                       LinearId::Down, LinearId::Qkv, LinearId::OProj, LinearId::LmHead}) {
-    const auto& s = Qwen35::shape(id);
+    const auto& s = q38.shape(id);
     CHECK_EQ(s.N % 64, uint32_t(0));
     CHECK_EQ(s.K % 64, uint32_t(0));
     CHECK_EQ((s.K / 64) % s.S, uint32_t(0));
@@ -38,13 +40,13 @@ int main() {
            ShapeWant{LinearId::GateUp, 5120, 34816, 8, 0},
            ShapeWant{LinearId::Down, 17408, 5120, 4, 0},
        }) {
-    const auto& s = Qwen35::shape(w.id);
+    const auto& s = q38.shape(w.id);
     CHECK_EQ(s.K, w.K);
     CHECK_EQ(s.N, w.N);
     CHECK_EQ(s.S, w.S);
     CHECK_EQ(s.layout, w.layout);
   }
-  const auto& int4_head = Qwen35::lm_head(model::WeightKind::Int4).shape;
+  const auto& int4_head = q38.lm_head(model::WeightKind::Int4).shape;
   CHECK_EQ(int4_head.K, uint32_t(5120));
   CHECK_EQ(int4_head.N, uint32_t(248320));
   CHECK_EQ(int4_head.S, uint32_t(1));
@@ -61,9 +63,9 @@ int main() {
 
   // T5: the table is exactly kCount rows and shape() refuses anything else.
   CHECK_EQ(size_t(LinearId::kCount), size_t(8));
-  CHECK(Qwen35::linear(LinearId::LmHead).kind == model::WeightKind::Bf16);
+  CHECK(q38.linear(LinearId::LmHead).kind == model::WeightKind::Bf16);
   bool threw = false;
-  try { Qwen35::shape(LinearId::kCount); } catch (const std::out_of_range&) { threw = true; }
+  try { q38.shape(LinearId::kCount); } catch (const std::out_of_range&) { threw = true; }
   CHECK(threw);
 
   // I3: LayerDesc::small_tensors is the loader's single source of truth, so it

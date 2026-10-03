@@ -165,7 +165,7 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < size_t(depth) * kKvRow; ++i) kc[i] = common::f32_to_bf16(nd(rng));
     for (size_t i = 0; i < size_t(depth) * kKvRow; ++i) vc[i] = common::f32_to_bf16(nd(rng));
 
-    PrefillScratch s(ctx, max_len);
+    PrefillScratch s(ctx, max_len, model::qwen38());
     l0::Mem dk(ctx, l0::MemKind::Device, kc.size() * 2);
     l0::Mem dv(ctx, l0::MemKind::Device, vc.size() * 2);
     const size_t o_elems = size_t(kQH) * rows * kHD;

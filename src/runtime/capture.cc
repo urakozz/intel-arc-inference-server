@@ -112,9 +112,8 @@ constexpr uint32_t kGdnStateChunks = Qwen35::kGdnHeadDim / 32;
 // The strides that runtime/buffers.cc sized these allocations with. They are
 // re-derived here from the same model constants rather than shared, and
 // `check_sizes()` below asserts stride x layers == allocation size - so a
-// divergence is a throw at capture, not a wrong KV slot at token 300.
-constexpr uint32_t kFaLayers = Qwen35::kLayers / 4;            // is_fa(l) == (l % 4 == 3)
-constexpr uint32_t kGdnLayers = Qwen35::kLayers - kFaLayers;   // 48
+// divergence is a throw at capture, not a wrong KV slot at token 300. The layer
+// COUNTS are the model descriptor's (spec 14: 48 / 16 on Qwen3.8, 54 / 18 on Agnes).
 constexpr uint32_t kConvDim =
     (2 * Qwen35::kGdnKHeads + Qwen35::kGdnVHeads) * Qwen35::kGdnHeadDim;  // 10240
 constexpr size_t kGdnStateStride =
@@ -149,7 +148,7 @@ class Capture {
     check_sizes();
     if (mode_ != Mode::Plain) check_mtp();
     if (mode_ == Mode::Draft) {
-      layer_ = kHeadLayer;
+      layer_ = head_layer();
       draft();
       require(step_.kernels.size() == step_.kernel_count, "a Kernel was created but never launched");
       require(step_.labels.size() == step_.kernel_count, "a launch went unlabelled");
@@ -176,7 +175,7 @@ class Capture {
     // outside the layer loop belong to the token boundary and get "--".
     embed_gather();
     uint32_t gdn = 0, fa = 0;   // the two per-kind index maps: GDN 0..47, FA 0..15
-    for (const model::LayerDesc& layer : Qwen35::layers()) {
+    for (const model::LayerDesc& layer : d_.layer_descs()) {
       layer_ = static_cast<int>(layer.index);
       if (layer.kind == model::LayerKind::GDN)
         gdn_layer(layer.index, gdn++);
@@ -192,11 +191,13 @@ class Capture {
       // head's KV fill over hh rows 0..M-1 (MtpBuffers).
       const size_t row = size_t(Qwen35::kHidden) * kBf16;
       step_.list.copy(at(mtp_->hh, row), b_.x.ptr(), row * kCapM);
-      layer_ = kHeadLayer;
+      layer_ = head_layer();
       head_kv_fill(mtp_->hh.ptr());
     }
 
-    require(gdn == kGdnLayers && fa == kFaLayers, "layer kind counts are not 48 GDN / 16 FA");
+    require(gdn == d_.gdn_layers && fa == d_.fa_layers,
+            "layer kind counts are not the descriptor's " + std::to_string(d_.gdn_layers) +
+                " GDN / " + std::to_string(d_.fa_layers) + " FA");
     // Every Kernel this walk made was launched exactly once, so kernels[i] is
     // what launch i ran - which is the property that makes the vector a usable
     // record of the list rather than a lifetime bag.
@@ -240,13 +241,16 @@ class Capture {
                   ": " + v + " is missing (" + kernels::path(v) +
                   "); the compiled max_lens are listed in src/kernels/CMakeLists.txt");
 
-    require(b_.gdn_state.size() == kGdnStateStride * kGdnLayers, "gdn_state is not 48 slices");
-    require(b_.conv_ring.size() == kConvRingStride * kGdnLayers, "conv_ring is not 48 slices");
-    require(b_.kv_k.size() == kv_stride_ * kFaLayers, "kv_k is not 16 slices");
-    require(b_.kv_v.size() == kv_stride_ * kFaLayers, "kv_v is not 16 slices");
+    const std::string gdn_n = std::to_string(d_.gdn_layers), fa_n = std::to_string(d_.fa_layers);
+    require(b_.gdn_state.size() == kGdnStateStride * d_.gdn_layers,
+            "gdn_state is not " + gdn_n + " slices");
+    require(b_.conv_ring.size() == kConvRingStride * d_.gdn_layers,
+            "conv_ring is not " + gdn_n + " slices");
+    require(b_.kv_k.size() == kv_stride_ * d_.fa_layers, "kv_k is not " + fa_n + " slices");
+    require(b_.kv_v.size() == kv_stride_ * d_.fa_layers, "kv_v is not " + fa_n + " slices");
     if (tap_)
-      require(tap_->size() >= size_t(Qwen35::kLayers) * kCapM * Qwen35::kHidden * kBf16,
-              "debug_resid is smaller than [64][M][5120] bf16");
+      require(tap_->size() >= size_t(d_.layers) * kCapM * Qwen35::kHidden * kBf16,
+              "debug_resid is smaller than [layers][M][5120] bf16");
     // The profiling precondition that IS knowable before the walk. The other
     // one - that the walk fits the pool - is not: `kernel_count` is 0 here and
     // only the walk itself produces it, so that bound is checked per launch in
@@ -273,12 +277,12 @@ class Capture {
     // pairing is asserted here, at capture, before a single command is
     // appended. If one of these fires, the fix is the kernel (loop `s`), not
     // the guard.
-    require(Qwen35::shape(LinearId::QkvZ).S == 1,
+    require(d_.shape(LinearId::QkvZ).S == 1,
             "qkv||z is no longer S=1, but gdn_step.cl (QKVZ_S) and prep.cl "
             "(GATED_S) bake S=1 into their partials indexing");
-    require(Qwen35::shape(LinearId::GateUp).S == 8,
+    require(d_.shape(LinearId::GateUp).S == 8,
             "gate||up is no longer S=8, but prep.cl (SILU_S) bakes an 8-slice sum");
-    require(Qwen35::shape(LinearId::Qkv).S == 2,
+    require(d_.shape(LinearId::Qkv).S == 2,
             "qkv is no longer S=2, but attn.cl (QKV_S) bakes a 2-slice sum into every "
             "partials load");
   }
@@ -290,8 +294,8 @@ class Capture {
     require(kCapM <= MtpBuffers::kSlots, "an MTP verify list has at most kSlots rows");
     require(mode_ != Mode::Draft || (kCapM == 1 && draft_i_ < MtpBuffers::kMaxK),
             "a draft list is M = 1 with draft index < kMaxK");
-    require(mtp_->gdn_spec.size() == kGdnStateStride * kGdnLayers * (MtpBuffers::kSlots - 1),
-            "gdn_spec is not (kSlots - 1) x 48 slices");
+    require(mtp_->gdn_spec.size() == kGdnStateStride * d_.gdn_layers * (MtpBuffers::kSlots - 1),
+            "gdn_spec is not (kSlots - 1) x " + std::to_string(d_.gdn_layers) + " slices");
     require(mtp_->kv_k.size() == kv_stride_ && mtp_->kv_v.size() == kv_stride_,
             "the head's KV is not one [max_len][4][256] layer");
     require(mtp_->hh.size() >= size_t(kCapM + 1) * Qwen35::kHidden * kBf16, "hh is too small");
@@ -592,23 +596,24 @@ class Capture {
   void mlp(uint32_t layer, uint32_t mixer_s) {
     res_norm(mixer_s, at(m_.layer_small[layer].norms, loader::kNormsOffPost));
     gemv(layer, LinearId::GateUp, b_.x.ptr());
-    // prep_silu_mul(partials, x_out) - prep.cl (Task 2), grid (N/4096, M) = (5, M),
-    // WG 256; the last work-group covers the ragged 1024.
+    // prep_silu_mul(partials, x_out) - prep.cl (Task 2), grid (I/4096, M) = (5, M)
+    // at both I = 17408 (ragged last chunk 1024) and Agnes's 19456 (3072), WG 256.
     {
-      l0::Kernel& k = kernel(kernels::prep_silu_mul_variant(kCapM), "prep_silu_mul", kWgSilu);
+      l0::Kernel& k = kernel(kernels::prep_silu_mul_variant(kCapM, d_.intermediate),
+                             "prep_silu_mul", kWgSilu);
       k.arg_ptr(0, b_.partials.ptr());
       k.arg_ptr(1, b_.x.ptr());
-      launch(k, (Qwen35::kIntermediate + kSiluChunk - 1) / kSiluChunk, kCapM);
+      launch(k, (d_.intermediate + kSiluChunk - 1) / kSiluChunk, kCapM);
     }
     gemv(layer, LinearId::Down, b_.x.ptr());
   }
 
-  // A gated-delta-net layer (48 of 64): 10 kernels.
+  // A gated-delta-net layer (48 of 64 on Qwen3.8, 54 of 72 on Agnes): 10 kernels.
   void gdn_layer(uint32_t layer, uint32_t g) {
     // Layer 0 leads the whole step, so there are no previous partials to fold
     // and `resid` is exactly embed_gather's output: the SP0 variant. Every
     // other layer folds the previous layer's `down` (S = 4).
-    res_norm(layer == 0 ? 0u : Qwen35::shape(LinearId::Down).S,
+    res_norm(layer == 0 ? 0u : d_.shape(LinearId::Down).S,
              at(m_.layer_small[layer].norms, loader::kNormsOffInput));
     gemv(layer, LinearId::QkvZ, b_.x.ptr());
     gemv_bf16(layer, LinearId::AB, b_.x.ptr(), b_.ab_out);
@@ -623,7 +628,7 @@ class Capture {
       // this layer's slice of slot 1 (MtpBuffers::gdn_spec is slot-major, so slot s
       // is that plus (s - 1) whole slots - gdn_step.cl, SPEC_SLOTS).
       const bool slots = mode_ == Mode::Verify;
-      l0::Kernel& k = kernel(slots ? kernels::gdn_step_slots_variant(kCapM)
+      l0::Kernel& k = kernel(slots ? kernels::gdn_step_slots_variant(kCapM, d_.gdn_layers)
                                    : kernels::gdn_step_variant(kCapM),
                              "gdn_step", kWgGdn);
       k.arg_ptr(0, b_.control.ptr());
@@ -649,12 +654,12 @@ class Capture {
       launch(k, Qwen35::kGdnVHeads, kCapM);
     }
     gemv(layer, LinearId::OutProj, b_.x.ptr());
-    mlp(layer, Qwen35::shape(LinearId::OutProj).S);
+    mlp(layer, d_.shape(LinearId::OutProj).S);
   }
 
-  // A full-attention layer (16 of 64): 10 kernels.
+  // A full-attention layer (16 of 64 on Qwen3.8, 18 of 72 on Agnes): 10 kernels.
   void fa_layer(uint32_t layer, uint32_t f) {
-    res_norm(Qwen35::shape(LinearId::Down).S,
+    res_norm(d_.shape(LinearId::Down).S,
              at(m_.layer_small[layer].norms, loader::kNormsOffInput));
     gemv(layer, LinearId::Qkv, b_.x.ptr());
     // This FA layer's KV cache slices - bf16 [max_len][4][256] each, indexed by
@@ -707,7 +712,7 @@ class Capture {
     // attn_reduce writes bf16 [M][6144] into `attn_out`, which is exactly this
     // GEMV's K.
     gemv(layer, LinearId::OProj, b_.attn_out.ptr());
-    mlp(layer, Qwen35::shape(LinearId::OProj).S);
+    mlp(layer, d_.shape(LinearId::OProj).S);
   }
 
   // The token boundary: fold layer 63's MLP into the residual stream under the
@@ -743,7 +748,7 @@ class Capture {
   // stops being opened and `gemv_M1_K5120_N248320_S1_L1` starts, one for one,
   // so `CapturedStep::modules.size()` is 19 on both checkpoints.
   void head() {
-    res_norm(Qwen35::shape(LinearId::Down).S, m_.final_norm.ptr());
+    res_norm(d_.shape(LinearId::Down).S, m_.final_norm.ptr());
     // Spec 9: or an int8 head quantised at load (`--lm-head int8`), a `gemv_i8w`.
     const loader::DeviceWeight& lm = m_.linears.at({loader::kTopLevel, LinearId::LmHead});
     if (lm.kind == model::WeightKind::Int4) {
@@ -880,10 +885,14 @@ class Capture {
               b_.x.ptr());
     head_gemv(h.gate_up, b_.x.ptr(), b_.partials.ptr());
     {
-      l0::Kernel& k = kernel(kernels::prep_silu_mul_s1_variant(kCapM), "prep_silu_mul", kWgSilu);
+      // The HEAD's intermediate (its down linear's K): 17408 on both supported
+      // checkpoints - Agnes's MTP block has no parallel FFN.
+      const uint32_t head_i = h.down.shape.K;
+      l0::Kernel& k =
+          kernel(kernels::prep_silu_mul_s1_variant(kCapM, head_i), "prep_silu_mul", kWgSilu);
       k.arg_ptr(0, b_.partials.ptr());
       k.arg_ptr(1, b_.x.ptr());
-      launch(k, (Qwen35::kIntermediate + kSiluChunk - 1) / kSiluChunk, kCapM);
+      launch(k, (head_i + kSiluChunk - 1) / kSiluChunk, kCapM);
     }
     head_gemv(h.down, b_.x.ptr(), b_.partials.ptr());
     fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::kMtpNormFinal),
@@ -924,11 +933,14 @@ class Capture {
   // prep_res_fold + prep_norm_finish, lm_head and the two argmax stages).
   // It was five until spec 1.5's lever L1 split that norm.
   static constexpr int kBoundary = -1;
-  // Spec 8: the MTP head's launches are labelled "L64" - the layer after the last.
-  static constexpr int kHeadLayer = 64;
+  // Spec 8: the MTP head's launches are labelled "L<layers>" - the layer after the
+  // last ("L64" on Qwen3.8, "L72" on Agnes).
+  int head_layer() const { return static_cast<int>(d_.layers); }
 
   l0::Context& ctx_;
   const loader::LoadedModel& m_;
+  // Spec 14: the model this list is for (layer counts, intermediate, GEMV rows).
+  const model::ModelDesc& d_ = *m_.desc;
   DecodeBuffers& b_;
   l0::Mem* tap_;
   ProfileEvents* prof_;

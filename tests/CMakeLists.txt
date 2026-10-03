@@ -469,6 +469,12 @@ target_include_directories(qwen35_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_S
 target_link_libraries(qwen35_test PRIVATE b70_model)
 add_test(NAME qwen35_test COMMAND qwen35_test)
 
+# Spec 14 §3.1: the model descriptor (host-only).
+add_executable(model_desc_test model/model_desc_test.cc)
+target_include_directories(model_desc_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(model_desc_test PRIVATE b70_model)
+add_test(NAME model_desc_test COMMAND model_desc_test)
+
 # The model table and src/kernels/CMakeLists.txt are two lists that have to
 # agree: every row's compiled variant must exist before plan 3 binds it. No
 # device, no checkpoint - just the filenames.

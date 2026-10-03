@@ -159,6 +159,8 @@ int main(int argc, char** argv) {
   // 19 GB three times would cost ~6 minutes and prove nothing extra.
   loader::LoadedModel model = loader::load(ctx, snap, kMaxLen, /*mtp=*/false, lm_head);
   CHECK(model.embed.size() >= size_t(Qwen35::kVocab) * kHid * 2);
+  // Spec 14: the layer count is the loaded model's (64 Qwen3.8, 72 Agnes).
+  const uint32_t kLayers = model.desc->layers;
   runtime::Engine eng(ctx, std::move(model), kMaxLen, /*debug_resid=*/true);
   CHECK(eng.debug_resid());
   CHECK_EQ(eng.step().kernel_count, size_t(774));   // 645 + lever L1's 129
@@ -203,7 +205,7 @@ int main(int argc, char** argv) {
     for (uint32_t t = 0; t < T; ++t) {
       eng.ingest({ids[t]});
       tap[t] = eng.read_debug_resid();
-      CHECK_EQ(tap[t].size(), size_t(Qwen35::kLayers) * kHid);
+      CHECK_EQ(tap[t].size(), size_t(kLayers) * kHid);
       tail[t].resize(kHid);
       imm.copy(tail[t].data(), eng.buffers().resid.ptr(), size_t(kHid) * 2);
       emb[t].resize(kHid);
@@ -220,11 +222,11 @@ int main(int argc, char** argv) {
                 "  the magnitude it divides by, so both are printed next to it.\n"
                 "    layer kind    min cos      at t   median cos   max relL2   |oracle|      |err|\n", T);
     std::vector<uint16_t> expect(kHid);
-    std::vector<double> cos_lt(size_t(Qwen35::kLayers) * T), nb_lt(size_t(Qwen35::kLayers) * T);
+    std::vector<double> cos_lt(size_t(kLayers) * T), nb_lt(size_t(kLayers) * T);
     uint32_t n_low_pairs = 0;
     std::vector<uint32_t> low_t;   // the distinct positions that go below the bar
-    std::vector<double> med_l(Qwen35::kLayers, 1.0);   // per-layer upper-median cosine
-    for (uint32_t l = 0; l < Qwen35::kLayers; ++l) {
+    std::vector<double> med_l(kLayers, 1.0);   // per-layer upper-median cosine
+    for (uint32_t l = 0; l < kLayers; ++l) {
       const std::string ls = std::to_string(l);
       const uint16_t* mix = g.bf16("mixer.L" + ls, size_t(T) * kHid);
       const uint16_t* prev =
@@ -254,7 +256,7 @@ int main(int argc, char** argv) {
       std::nth_element(row.begin(), row.begin() + T / 2, row.end());
       med_l[l] = row[T / 2];
       std::printf("      %2u  %-4s  %.9f   %4u   %.9f   %.3e   %9.3f  %9.3f%s\n", l,
-                  Qwen35::is_fa(l) ? "FA" : "GDN", lmin, at, med_l[l], lrel, lnb, lerr,
+                  ::model::ModelDesc::is_fa(l) ? "FA" : "GDN", lmin, at, med_l[l], lrel, lnb, lerr,
                   lmin < kBar ? "   **LOW**" : "");
     }
     // Printed rather than derived by hand afterwards: this is the number the
@@ -263,15 +265,15 @@ int main(int argc, char** argv) {
     {
       double all = 0, gdn = 0, fa = 0;
       uint32_t ng = 0, nf = 0;
-      for (uint32_t l = 0; l < Qwen35::kLayers; ++l) {
+      for (uint32_t l = 0; l < kLayers; ++l) {
         all += med_l[l];
-        if (Qwen35::is_fa(l)) { fa += med_l[l]; ++nf; } else { gdn += med_l[l]; ++ng; }
+        if (::model::ModelDesc::is_fa(l)) { fa += med_l[l]; ++nf; } else { gdn += med_l[l]; ++ng; }
       }
       std::printf("  mean of the 64 per-layer upper-medians: %.9f   (GDN %u: %.9f, FA %u: %.9f)\n",
-                  all / Qwen35::kLayers, ng, gdn / ng, nf, fa / nf);
+                  all / kLayers, ng, gdn / ng, nf, fa / nf);
     }
     std::printf("  census: %u of the %u (layer, t) tap comparisons are below %.3f, on %zu of the"
-                " %u positions:", n_low_pairs, uint32_t(Qwen35::kLayers) * T, kBar, low_t.size(), T);
+                " %u positions:", n_low_pairs, uint32_t(kLayers) * T, kBar, low_t.size(), T);
     std::sort(low_t.begin(), low_t.end());
     for (uint32_t t : low_t) std::printf(" %u", t);
     std::printf("%s\n", low_t.empty() ? " (none)" : "");
@@ -289,7 +291,7 @@ int main(int argc, char** argv) {
                   "    layer kind   tap cos     |tap err|   contrib cos  |contrib|  |contrib err|\n",
                   tw);
       std::vector<double> ce(kHid), co(kHid);
-      for (uint32_t l = 0; l < Qwen35::kLayers; ++l) {
+      for (uint32_t l = 0; l < kLayers; ++l) {
         const std::string ls = std::to_string(l);
         const uint16_t* mix = g.bf16("mixer.L" + ls, size_t(T) * kHid) + size_t(tw) * kHid;
         const uint16_t* prev =
@@ -310,7 +312,7 @@ int main(int argc, char** argv) {
         }
         const Metric mc = compare(ce.data(), co.data(), kHid);
         std::printf("      %2u  %-4s  %.9f  %9.3f   %.9f  %9.3f  %9.3f\n", l,
-                    Qwen35::is_fa(l) ? "FA" : "GDN", mt.cos, mt.err, mc.cos, mc.nb, mc.err);
+                    ::model::ModelDesc::is_fa(l) ? "FA" : "GDN", mt.cos, mt.err, mc.cos, mc.nb, mc.err);
       }
     }
     // The worst layer, position by position. A cosine that dips at two or three
@@ -344,8 +346,8 @@ int main(int argc, char** argv) {
       std::vector<float> st(kGdnElems);
       uint32_t gi = 0, n_low = 0;
       double gmin = 2.0, gmax = -2.0, relmax = 0.0;
-      for (uint32_t l = 0; l < Qwen35::kLayers; ++l) {
-        if (Qwen35::is_fa(l)) continue;
+      for (uint32_t l = 0; l < kLayers; ++l) {
+        if (::model::ModelDesc::is_fa(l)) continue;
         imm.copy(st.data(),
                  static_cast<const uint8_t*>(eng.buffers().gdn_state.ptr()) + size_t(gi) * gdn_stride,
                  gdn_stride);

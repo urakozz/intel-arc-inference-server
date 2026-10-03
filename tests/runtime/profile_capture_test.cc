@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
   const std::string arg = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   l0::Context ctx(0);
   loader::LoadedModel m = loader::load(ctx, arg);
-  runtime::DecodeBuffers b(ctx, m.max_len);
+  runtime::DecodeBuffers b(ctx, m.max_len, *m.desc);
 
   // Two lists over ONE set of buffers: the same allocations are baked into
   // both, so whichever one is replayed advances the same state. (The golden

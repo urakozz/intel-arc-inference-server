@@ -104,8 +104,8 @@ std::vector<uint16_t> run_silu(Dev& d, bool pf, uint32_t M, const std::vector<fl
   const uint32_t N = prep_ref::kSiluN;
   l0::Mem pbuf = upload(d.ctx, d.imm, partials);
   l0::Mem xbuf(d.ctx, l0::MemKind::Device, size_t(M) * N * sizeof(uint16_t));
-  l0::Module mod(d.ctx, kernels::path(pf ? kernels::pf_silu_mul_variant()
-                                         : kernels::prep_silu_mul_variant(M)));
+  l0::Module mod(d.ctx, kernels::path(pf ? kernels::pf_silu_mul_variant(17408)
+                                         : kernels::prep_silu_mul_variant(M, 17408)));
   l0::Kernel k = mod.kernel(pf ? "pf_silu_mul" : "prep_silu_mul");
   k.group_size(256);
   k.arg_ptr(0, pbuf.ptr());

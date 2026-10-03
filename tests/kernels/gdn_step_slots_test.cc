@@ -132,7 +132,7 @@ void run_case(Dev& d, l0::Mem& spec, uint32_t M, uint32_t live, uint32_t pos, ui
   d.imm.copy(ref_ring.data(), rb.ptr(), kRingElems * 2);
 
   // Candidate: the slots build over all M rows, state in slot `live`.
-  l0::Module ms(d.ctx, kernels::path(kernels::gdn_step_slots_variant(M)));
+  l0::Module ms(d.ctx, kernels::path(kernels::gdn_step_slots_variant(M, 48)));
   l0::Kernel ks(ms, "gdn_step");
   ks.group_size(256);
   auto slot = [&](uint32_t s) -> float* {

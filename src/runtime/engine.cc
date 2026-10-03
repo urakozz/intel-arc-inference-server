@@ -24,8 +24,8 @@ double ms_since(Clock::time_point t0) {
 // is the M the kernel *variants* were compiled for, not DecodeBuffers::kM,
 // which is the allocation capacity.)
 constexpr uint32_t kCapM = 1;
-constexpr size_t kTapElems = size_t(Qwen35::kLayers) * kCapM * Qwen35::kHidden;
-constexpr size_t kTapBytes = kTapElems * 2;  // bf16
+// The tap is bf16 [layers][kCapM][5120] - the descriptor's layer count (spec 14).
+size_t tap_elems(const model::ModelDesc& d) { return size_t(d.layers) * kCapM * Qwen35::kHidden; }
 
 // Checked in the member-initialiser list so it throws before DecodeBuffers
 // allocates ~1.2 GB. runtime::build() checks the same identity, but only after
@@ -44,13 +44,14 @@ uint32_t checked_max_len(const loader::LoadedModel& m, uint32_t max_len) {
 Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bool debug_resid)
     : ctx_(ctx),
       model_(std::move(model)),
-      persist_(ctx, checked_max_len(model_, max_len)),
-      decode_scratch_(ctx, persist_.max_len),
+      persist_(ctx, checked_max_len(model_, max_len), *model_.desc),
+      decode_scratch_(ctx, persist_.max_len, *model_.desc),
       buffers_(persist_, decode_scratch_),
       tap_(debug_resid ? std::unique_ptr<l0::Mem>(
-                             new l0::Mem(ctx, l0::MemKind::Device, kTapBytes))
+                             new l0::Mem(ctx, l0::MemKind::Device, tap_elems(*model_.desc) * 2))
                        : nullptr),
-      mtp_(model_.mtp ? std::make_unique<MtpBuffers>(ctx, persist_.max_len) : nullptr),
+      mtp_(model_.mtp ? std::make_unique<MtpBuffers>(ctx, persist_.max_len, *model_.desc)
+                      : nullptr),
       step_(build(ctx, model_, buffers_, tap_.get())),
       queue_(ctx),
       fence_(queue_),
@@ -263,7 +264,6 @@ void Engine::mtp_normalise_live() {
 // --- spec 7 snapshots -----------------------------------------------------------
 
 namespace {
-constexpr size_t kKvLayers = 16;
 void check_range(uint32_t begin, uint32_t end, uint32_t max_len, const char* what) {
   if (begin > end || end > max_len)
     throw std::runtime_error(std::string("runtime::Engine::") + what + ": range [" +
@@ -277,8 +277,9 @@ size_t Engine::state_bytes() const {
 }
 
 size_t Engine::kv_bytes(uint32_t n_pos) const {
-  const size_t per_layer_pos = persist_.kv_k.size() / kKvLayers / buffers_.max_len;
-  return 2 * per_layer_pos * (kKvLayers + (mtp_ ? 1 : 0)) * n_pos;   // K and V
+  const size_t fa = model_.desc->fa_layers;   // 16 on Qwen3.8, 18 on Agnes (spec 14)
+  const size_t per_layer_pos = persist_.kv_k.size() / fa / buffers_.max_len;
+  return 2 * per_layer_pos * (fa + (mtp_ ? 1 : 0)) * n_pos;   // K and V
 }
 
 void Engine::save_state(void* host) const {
@@ -312,11 +313,12 @@ void Engine::load_state(const void* host, uint32_t pos) {
   control_->n_active = 0;
 }
 
-// kv_k / kv_v are [16 layers][max_len][4][256]: a position range is one contiguous run
-// per layer, so 16 copies each for K and V.
+// kv_k / kv_v are [fa_layers][max_len][4][256]: a position range is one contiguous run
+// per layer, so fa_layers (16 on Qwen3.8, 18 on Agnes) copies each for K and V.
 void Engine::save_kv(uint32_t begin, uint32_t end, void* host) const {
   check_range(begin, end, buffers_.max_len, "save_kv");
   if (begin == end) return;
+  const size_t kKvLayers = model_.desc->fa_layers;
   const size_t per_pos = persist_.kv_k.size() / kKvLayers / buffers_.max_len;
   const size_t run = per_pos * (end - begin);
   auto* h = static_cast<uint8_t*>(host);
@@ -324,7 +326,7 @@ void Engine::save_kv(uint32_t begin, uint32_t end, void* host) const {
     const l0::Mem* m = kv == 0 ? &persist_.kv_k : &persist_.kv_v;
     for (size_t l = 0; l < kKvLayers; ++l, h += run)
       imm_.copy(h, m->as<uint8_t>() + (l * buffers_.max_len + begin) * per_pos, run);
-    if (mtp_) {   // the head's layer, 17th
+    if (mtp_) {   // the head's layer, after the last FA layer
       const l0::Mem& hm = kv == 0 ? mtp_->kv_k : mtp_->kv_v;
       imm_.copy(h, hm.as<uint8_t>() + size_t(begin) * per_pos, run);
       h += run;
@@ -335,6 +337,7 @@ void Engine::save_kv(uint32_t begin, uint32_t end, void* host) const {
 void Engine::load_kv(uint32_t begin, uint32_t end, const void* host) {
   check_range(begin, end, buffers_.max_len, "load_kv");
   if (begin == end) return;
+  const size_t kKvLayers = model_.desc->fa_layers;
   const size_t per_pos = persist_.kv_k.size() / kKvLayers / buffers_.max_len;
   const size_t run = per_pos * (end - begin);
   const auto* h = static_cast<const uint8_t*>(host);
@@ -355,8 +358,8 @@ std::vector<uint16_t> Engine::read_debug_resid() {
     throw std::runtime_error(
         "runtime::Engine::read_debug_resid: this engine was constructed with debug_resid=false,"
         " so no per-layer tap was captured");
-  std::vector<uint16_t> out(kTapElems);
-  imm_.copy(out.data(), tap_->ptr(), kTapBytes);
+  std::vector<uint16_t> out(tap_elems(*model_.desc));
+  imm_.copy(out.data(), tap_->ptr(), out.size() * 2);
   return out;
 }
 

@@ -333,7 +333,7 @@ void print_repeat_table(const char* title, const char* what, std::vector<Series>
 
 int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
                 const std::vector<uint32_t>& ids, uint32_t steps, uint32_t repeats) {
-  runtime::DecodeBuffers buffers(ctx, model.max_len);
+  runtime::DecodeBuffers buffers(ctx, model.max_len, *model.desc);
   // Two lists over ONE set of buffers - the pattern
   // tests/runtime/profile_capture_test.cc proved and the golden gate already
   // used. The plain list does the ingestion (an instrumented one would pay 774
@@ -495,7 +495,7 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
   // The three rollups. `family` is the entry point (what docs/12 has a section
   // for); `variant` is the compiled binary (what docs/12's per-shape tables and
   // the probe price); `layer kind` is the GDN / FA / token-boundary split.
-  std::vector<model::LayerDesc> layers = Qwen35::layers();
+  std::vector<model::LayerDesc> layers = model.desc->layer_descs();
   std::vector<Agg> by_family, by_variant, by_kind;
   for (size_t i = 0; i < n; ++i) {
     const Label lab = split_label(instr.labels[i]);
@@ -507,8 +507,10 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
     } else {
       const unsigned long idx = std::stoul(lab.layer.substr(1));
       if (idx >= layers.size()) throw std::runtime_error("profile: label names layer " + lab.layer);
-      accumulate(by_kind, layers[idx].kind == model::LayerKind::GDN ? "GDN layers (48)"
-                                                                    : "FA layers (16)",
+      accumulate(by_kind,
+                 layers[idx].kind == model::LayerKind::GDN
+                     ? "GDN layers (" + std::to_string(model.desc->gdn_layers) + ")"
+                     : "FA layers (" + std::to_string(model.desc->fa_layers) + ")",
                  us);
     }
   }

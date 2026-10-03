@@ -117,7 +117,16 @@ inline std::string prep_norm_finish_variant(unsigned M, unsigned K, unsigned G, 
   return "prep_norm_finish_M" + std::to_string(M) + "_K" + std::to_string(K) + "_G" +
          std::to_string(G) + "_W" + std::to_string(W);
 }
-inline std::string prep_silu_mul_variant(unsigned M) { return "prep_silu_mul_M" + std::to_string(M); }
+// Spec 14: the MLP intermediate size is baked into prep_silu_mul (prep.cl's
+// SILU_N). Qwen3.8's 17408 keeps the historical name and command line; any other
+// width is a separate binary named `_I<intermediate>` (model::ModelDesc::
+// intermediate_suffix() - the same rule), built with -DINTERMEDIATE=<I>.
+inline std::string intermediate_suffix(unsigned I) {
+  return I == 17408 ? std::string() : "_I" + std::to_string(I);
+}
+inline std::string prep_silu_mul_variant(unsigned M, unsigned I) {
+  return "prep_silu_mul_M" + std::to_string(M) + intermediate_suffix(I);
+}
 inline std::string prep_gated_head_variant(unsigned M) {
   return "prep_gated_head_M" + std::to_string(M);
 }
@@ -175,10 +184,18 @@ inline std::string prep_norm_finish_strided_variant(unsigned M, unsigned K, unsi
                                                     unsigned W, unsigned X) {
   return prep_norm_finish_variant(M, K, G, W) + "_X" + std::to_string(X);
 }
-inline std::string prep_silu_mul_s1_variant(unsigned M) { return prep_silu_mul_variant(M) + "_S1"; }
+// The MTP head's bf16 gate||up (SILU_S = 1). The head's own intermediate (17408 on
+// both supported checkpoints - Agnes's head has no parallel FFN).
+inline std::string prep_silu_mul_s1_variant(unsigned M, unsigned I) {
+  return prep_silu_mul_variant(M, I) + "_S1";
+}
 inline std::string attn_prep_s1_variant(unsigned M) { return attn_prep_variant(M) + "_S1"; }
-inline std::string gdn_step_slots_variant(unsigned M) {
-  return "gdn_step_slots_M" + std::to_string(M);
+// SPEC_SLOT_STRIDE (one slot of MtpBuffers::gdn_spec, gdn_layers x 48 x 128 x 128
+// floats) is baked, so a model with another GDN layer count is another binary:
+// Qwen3.8's 48 keeps the historical name, any other count is `_G<gdn_layers>`.
+inline std::string gdn_step_slots_variant(unsigned M, unsigned gdn_layers) {
+  return "gdn_step_slots_M" + std::to_string(M) +
+         (gdn_layers == 48 ? std::string() : "_G" + std::to_string(gdn_layers));
 }
 
 // The control block as the kernels see it: `runtime::Control`

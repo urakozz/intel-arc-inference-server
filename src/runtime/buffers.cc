@@ -4,7 +4,8 @@
 #include "l0/cmdlist.h"
 #include "runtime/control.h"
 
-// Every size here is derived from `model::Qwen35` and `max_len`; the only
+// Every size here is derived from `model::Qwen35`, the model descriptor
+// (spec 14: layer counts, intermediate, the GEMV table) and `max_len`; the only
 // literals are element sizes and the two shapes the kernels fix rather than
 // the model (the attention partial's `+2` and argmax's chunk), both named.
 // Sizes that disagree with the kernels are silent corruption on token 2 -
@@ -15,10 +16,6 @@ namespace {
 using Q = model::Qwen35;
 
 constexpr size_t kBf16 = 2, kFp32 = 4;
-
-// is_fa(l) == (l % 4 == 3): one FA layer in four, the rest GDN.
-constexpr uint32_t kFaLayers = Q::kLayers / 4;           // 16
-constexpr uint32_t kGdnLayers = Q::kLayers - kFaLayers;  // 48
 
 // GDN conv1d channels: q and k (kGdnKHeads each) plus v (kGdnVHeads), all at
 // kGdnHeadDim. The z half of the qkv||z GEMV does not go through the conv.
@@ -37,7 +34,7 @@ constexpr uint32_t kArgmaxGroups = (Q::kVocab + kArgmaxChunk - 1) / kArgmaxChunk
 
 // `partials` is the S-split accumulator every int4 GEMV writes before its prep
 // kernel sums it. It is the conservative max-S x max-N rectangle over the int4
-// rows of the model table (Task 4: [S_max=8][8][34816]), not the max of
+// rows of the model table (Qwen3.8, Task 4: [S_max=8][8][34816]), not the max of
 // S*N: one buffer has to fit whichever row is running. The bf16 rows are
 // excluded because they do not use it - a||b writes ab_out, lm_head writes
 // logits directly.
@@ -46,24 +43,24 @@ constexpr uint32_t kArgmaxGroups = (Q::kVocab + kArgmaxChunk - 1) / kArgmaxChunk
 // chunk width and **S = 1** (ruling R1): split-K exists to buy hardware
 // threads at M = 1, and at M = C the M tile axis already saturates the grid,
 // so an [S][C][N] rectangle at S = 8 would be 1.14 TB at C = 2048 for nothing.
-size_t max_int4_n() {
+size_t max_int4_n(const model::ModelDesc& desc) {
   uint32_t max_n = 0;
   for (uint32_t i = 0; i < static_cast<uint32_t>(model::LinearId::kCount); ++i) {
-    const model::FusedLinear& fl = Q::linear(static_cast<model::LinearId>(i));
+    const model::FusedLinear& fl = desc.linear(static_cast<model::LinearId>(i));
     if (fl.kind != model::WeightKind::Int4) continue;
     if (fl.shape.N > max_n) max_n = fl.shape.N;
   }
   return max_n;
 }
 
-size_t partials_bytes() {
+size_t partials_bytes(const model::ModelDesc& desc) {
   uint32_t max_s = 1;
   for (uint32_t i = 0; i < static_cast<uint32_t>(model::LinearId::kCount); ++i) {
-    const model::FusedLinear& fl = Q::linear(static_cast<model::LinearId>(i));
+    const model::FusedLinear& fl = desc.linear(static_cast<model::LinearId>(i));
     if (fl.kind != model::WeightKind::Int4) continue;
     if (fl.shape.S > max_s) max_s = fl.shape.S;
   }
-  return size_t{max_s} * DecodeScratch::kM * max_int4_n() * kFp32;
+  return size_t{max_s} * DecodeScratch::kM * max_int4_n(desc) * kFp32;
 }
 
 // KV blocks an attn_decode grid covers. Rounded up: a max_len that is not a
@@ -75,15 +72,17 @@ uint32_t attn_blocks(uint32_t max_len) {
 
 // --- PersistentBuffers -------------------------------------------------------
 
-PersistentBuffers::PersistentBuffers(l0::Context& ctx, uint32_t max_len)
+PersistentBuffers::PersistentBuffers(l0::Context& ctx, uint32_t max_len,
+                                     const model::ModelDesc& desc)
     : control(ctx, l0::MemKind::Shared, sizeof(Control)),
       gdn_state(ctx, l0::MemKind::Device,
-                size_t{kGdnLayers} * Q::kGdnVHeads * Q::kGdnHeadDim * Q::kGdnHeadDim * kFp32),
-      conv_ring(ctx, l0::MemKind::Device, size_t{kGdnLayers} * kConvRing * kConvDim * kBf16),
+                size_t{desc.gdn_layers} * Q::kGdnVHeads * Q::kGdnHeadDim * Q::kGdnHeadDim * kFp32),
+      conv_ring(ctx, l0::MemKind::Device,
+                size_t{desc.gdn_layers} * kConvRing * kConvDim * kBf16),
       kv_k(ctx, l0::MemKind::Device,
-           size_t{kFaLayers} * max_len * Q::kFaKvHeads * Q::kFaHeadDim * kBf16),
+           size_t{desc.fa_layers} * max_len * Q::kFaKvHeads * Q::kFaHeadDim * kBf16),
       kv_v(ctx, l0::MemKind::Device,
-           size_t{kFaLayers} * max_len * Q::kFaKvHeads * Q::kFaHeadDim * kBf16),
+           size_t{desc.fa_layers} * max_len * Q::kFaKvHeads * Q::kFaHeadDim * kBf16),
       max_len(max_len) {
   // A run starts from an empty GDN state, an empty conv ring, an empty KV
   // cache and pos = 0. Scratch is written before it is read every token, so
@@ -104,11 +103,11 @@ size_t PersistentBuffers::bytes() const {
 
 // --- DecodeScratch -----------------------------------------------------------
 
-DecodeScratch::DecodeScratch(l0::Context& ctx, uint32_t max_len)
+DecodeScratch::DecodeScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc)
     : resid(ctx, l0::MemKind::Device, size_t{kM} * Q::kHidden * kBf16),
-      x(ctx, l0::MemKind::Device, size_t{kM} * Q::kIntermediate * kBf16),
-      partials(ctx, l0::MemKind::Device, partials_bytes()),
-      ab_out(ctx, l0::MemKind::Device, size_t{kM} * Q::shape(model::LinearId::AB).N * kFp32),
+      x(ctx, l0::MemKind::Device, size_t{kM} * desc.intermediate * kBf16),
+      partials(ctx, l0::MemKind::Device, partials_bytes(desc)),
+      ab_out(ctx, l0::MemKind::Device, size_t{kM} * desc.shape(model::LinearId::AB).N * kFp32),
       // prep_res_fold's chunk sums-of-squares, one fp32 per (work-group,
       // token): 20 x 8 x 4 = 640 B, one allocation reused by all 129 sites
       // because the list is in-order and each site's stage B consumes what its
@@ -131,16 +130,16 @@ size_t DecodeScratch::bytes() const {
 
 // --- PrefillScratch ----------------------------------------------------------
 
-PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len)
+PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc)
     // `ids` is the one Host allocation: the host writes C ids per chunk and
     // the device gathers embeddings from them.
     : ids(ctx, l0::MemKind::Host, size_t{kC} * sizeof(uint32_t)),
       resid(ctx, l0::MemKind::Device, size_t{kC} * Q::kHidden * kBf16),
-      x(ctx, l0::MemKind::Device, size_t{kC} * Q::kIntermediate * kBf16),
+      x(ctx, l0::MemKind::Device, size_t{kC} * desc.intermediate * kBf16),
       // S = 1 (ruling R1), so the rectangle is [C][max int4 N] and not
       // [S][C][N] - the sole reason a 2048-row chunk fits at all.
-      partials(ctx, l0::MemKind::Device, size_t{kC} * max_int4_n() * kFp32),
-      ab_out(ctx, l0::MemKind::Device, size_t{kC} * Q::shape(model::LinearId::AB).N * kFp32),
+      partials(ctx, l0::MemKind::Device, size_t{kC} * max_int4_n(desc) * kFp32),
+      ab_out(ctx, l0::MemKind::Device, size_t{kC} * desc.shape(model::LinearId::AB).N * kFp32),
       norm_sumsq(ctx, l0::MemKind::Device, size_t{kNormGroups} * kC * kFp32),
       gdn_o(ctx, l0::MemKind::Device, size_t{kC} * kGdnValueDim * kFp32),
       mixer_out(ctx, l0::MemKind::Device, size_t{kC} * kGdnValueDim * kBf16),
@@ -162,7 +161,8 @@ PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len)
       pf_o(ctx, l0::MemKind::Device, size_t{Q::kFaQHeads} * kC * Q::kFaHeadDim * kFp32),
       pf_rowsum(ctx, l0::MemKind::Device, size_t{Q::kFaQHeads} * kC * kFp32),
       max_len(max_len),
-      ctx_(&ctx) {
+      ctx_(&ctx),
+      desc_(&desc) {
   // Nothing is zero-filled: no prefill kernel reads scratch it has not first
   // written, and the prefill determinism gate is the standing proof of that -
   // the same rule, and the same reason, Engine::reset() gives for decode.
@@ -181,13 +181,13 @@ size_t PrefillScratch::bytes() const {
 l0::Mem& PrefillScratch::dequant_buffer() {
   if (!dequant_)
     dequant_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device,
-                                         size_t{Q::kHidden} * max_int4_n() * kBf16);
+                                         size_t{Q::kHidden} * max_int4_n(*desc_) * kBf16);
   return *dequant_;
 }
 l0::Mem& PrefillScratch::slab_buffer() {
   if (!slab_)
     slab_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device,
-                                      size_t{Q::kIntermediate} * 1024 * kBf16);
+                                      size_t{desc_->intermediate} * 1024 * kBf16);
   return *slab_;
 }
 l0::Mem& PrefillScratch::pf_s_buffer() {
@@ -209,10 +209,10 @@ size_t PrefillScratch::lazy_bytes() const {
 
 // --- MtpBuffers (spec 8) -----------------------------------------------------
 
-MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len)
+MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc)
     : hctl(ctx, l0::MemKind::Shared, sizeof(Control)),
       gdn_spec(ctx, l0::MemKind::Device,
-               size_t{kSlots - 1} * kGdnLayers * Q::kGdnVHeads * Q::kGdnHeadDim * Q::kGdnHeadDim *
+               size_t{kSlots - 1} * desc.gdn_layers * Q::kGdnVHeads * Q::kGdnHeadDim * Q::kGdnHeadDim *
                    kFp32),
       kv_k(ctx, l0::MemKind::Device, size_t{max_len} * Q::kFaKvHeads * Q::kFaHeadDim * kBf16),
       kv_v(ctx, l0::MemKind::Device, size_t{max_len} * Q::kFaKvHeads * Q::kFaHeadDim * kBf16),
@@ -236,9 +236,9 @@ size_t MtpBuffers::bytes() const {
 
 // --- DecodeBuffers, the view -------------------------------------------------
 
-DecodeBuffers::DecodeBuffers(l0::Context& ctx, uint32_t max_len)
-    : own_p_(new PersistentBuffers(ctx, max_len)),
-      own_s_(new DecodeScratch(ctx, max_len)),
+DecodeBuffers::DecodeBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc)
+    : own_p_(new PersistentBuffers(ctx, max_len, desc)),
+      own_s_(new DecodeScratch(ctx, max_len, desc)),
       control(own_p_->control),
       gdn_state(own_p_->gdn_state),
       conv_ring(own_p_->conv_ring),

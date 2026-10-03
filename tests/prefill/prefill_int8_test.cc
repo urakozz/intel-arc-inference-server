@@ -20,7 +20,7 @@
 //      conv ring, KV) is BITWISE the non-replay int8 run's. This is the plan's Review
 //      Focus "scales built mid-recording": a recording holding one-time work (the host
 //      finish of pf_colmax_rot) would either fail to replay or diverge;
-//   4. the launch delta of the 2048-id int8 prefill is step_chunk_launches(L0Int8, 2048)
+//   4. the launch delta of the 2048-id int8 prefill is step_chunk_launches(model::qwen38(), L0Int8, 2048)
 //      + the head's 5, i.e. l0's + 256, which is the proof the walk really ran the h8
 //      linears (on the bf16 walk it would be 256 short).
 //
@@ -42,6 +42,7 @@
 #include <vector>
 
 #include "check.h"
+#include "model/model_desc.h"
 #include "golden_common.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -220,7 +221,7 @@ int main(int argc, char** argv) {
     if (c.cos_bar) CHECK(cos >= 0.99);
     if (c.ids->size() == 2048) {
       // One chunk, the scales already built by the prose case: nothing but the walk.
-      const size_t want = runtime::prefill::step_chunk_launches(PrefillBackend::L0Int8, 2048) +
+      const size_t want = runtime::prefill::step_chunk_launches(model::qwen38(), PrefillBackend::L0Int8, 2048) +
                           runtime::prefill::kStepHeadLaunches;
       std::printf("  launch delta %zu, predicted %zu (l0 + 256 + head)\n", delta, want);
       CHECK_EQ(delta, want);
