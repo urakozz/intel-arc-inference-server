@@ -77,9 +77,10 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C);
 // it (8689 at C <= 256, 9137 at C = 2048). sycl-tla ignores the argument.
 // Spec 6: the count follows `attn_mode()`; in Flash mode (the default) attention is one
 // launch per FA layer and the L0 count no longer depends on C (8449; step.cc).
-size_t step_chunk_launches(PrefillBackend b, uint32_t C);
-size_t step_chunk_gemms(PrefillBackend b);      // SYCL GEMM calls per chunk (0 on L0 since S3)
-size_t step_chunk_waits(PrefillBackend b);      // host L0<->SYCL handoffs per chunk
+// Spec 14: per model - the layer counts and the gate||up slab count are the descriptor's.
+size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C);
+size_t step_chunk_gemms(const model::ModelDesc& d, PrefillBackend b);   // SYCL GEMM calls per chunk (0 on L0 since S3)
+size_t step_chunk_waits(const model::ModelDesc& d, PrefillBackend b);   // host L0<->SYCL handoffs per chunk
 inline constexpr size_t kStepHeadLaunches = 5;   // 2 norm + lm_head + 2 argmax
 
 }  // namespace runtime::prefill

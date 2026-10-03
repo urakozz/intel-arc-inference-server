@@ -363,7 +363,7 @@ int main(int argc, char** argv) {
   l0::Mem d_state(d.ctx, l0::MemKind::Device, size_t(kStateElems) * 4);
   l0::Mem d_ring(d.ctx, l0::MemKind::Device, size_t(kRingElems) * 2);
   l0::Mem d_y(d.ctx, l0::MemKind::Device, size_t(kC) * kMixerN * 2);
-  runtime::PrefillScratch s(d.ctx, 16384);
+  runtime::PrefillScratch s(d.ctx, 16384, model::qwen38());
 
   if (argc == 2 && std::string(argv[1]) == "--invalid-selector") {
     check_invalid_selector(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y);

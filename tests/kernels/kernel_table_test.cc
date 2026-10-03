@@ -10,6 +10,7 @@
 #include <vector>
 #include "check.h"
 #include "kernels/kernels.h"
+#include "model/model_desc.h"
 #include "model/qwen35.h"
 
 int main() {
@@ -25,9 +26,9 @@ int main() {
   // engine to accept both checkpoints, and this is the list that says so.
   auto rows = [] {
     std::vector<model::FusedLinear> v;
-    for (size_t i = 0; i < size_t(LinearId::kCount); ++i) v.push_back(Qwen35::linear(LinearId(i)));
-    v.push_back(Qwen35::lm_head(model::WeightKind::Int4));
-    v.push_back(Qwen35::lm_head(model::WeightKind::Int8));   // spec 9: made at load
+    for (size_t i = 0; i < size_t(LinearId::kCount); ++i) v.push_back(model::qwen38().linear(LinearId(i)));
+    v.push_back(model::qwen38().lm_head(model::WeightKind::Int4));
+    v.push_back(model::qwen38().lm_head(model::WeightKind::Int8));   // spec 9: made at load
     return v;
   }();
   for (const model::FusedLinear& fl : rows) {

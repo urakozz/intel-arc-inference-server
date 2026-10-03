@@ -54,7 +54,9 @@ constexpr uint32_t kPrompt[] = {760, 72103, 506, 37119, 557, 11012, 3213, 310,
 constexpr uint32_t kGen = 8;
 constexpr uint32_t kMaxLen = 16384;
 // The tap as Engine::read_debug_resid() hands it back: bf16 [64][M=1][5120].
-constexpr size_t kTapElems = size_t(Qwen35::kLayers) * Qwen35::kHidden;
+// Spec 14: the layer count is the loaded model's (set before the debug engine is built).
+uint32_t kLayers = 0;
+size_t kTapElems = 0;
 
 std::vector<uint32_t> prompt() {
   return std::vector<uint32_t>(kPrompt, kPrompt + sizeof(kPrompt) / sizeof(kPrompt[0]));
@@ -148,6 +150,8 @@ int main(int argc, char** argv) {
   // --- phase 2: debug_resid on ----------------------------------------------
   {
     loader::LoadedModel m = loader::load(ctx, arg, kMaxLen);
+    kLayers = m.desc->layers;
+    kTapElems = size_t(kLayers) * Qwen35::kHidden;
     runtime::Engine eng(ctx, std::move(m), kMaxLen, /*debug_resid=*/true);
     CHECK(eng.debug_resid());
     eng.ingest(prompt());
@@ -165,7 +169,7 @@ int main(int argc, char** argv) {
 
     // Every layer's row is populated and finite. A layer that came back all
     // zero would be a tap bound to the wrong slice, not a residual.
-    for (uint32_t l = 0; l < Qwen35::kLayers; ++l) {
+    for (uint32_t l = 0; l < kLayers; ++l) {
       bool nonzero = false;
       for (uint32_t k = 0; k < Qwen35::kHidden; ++k) {
         const uint16_t w = tap0[size_t(l) * Qwen35::kHidden + k];

@@ -257,7 +257,7 @@ int main() {
          128, 48, kM, 48, b_gated},
     };
     const Case prefill_cases[] = {
-        {"pf_silu_mul", kernels::pf_silu_mul_variant(), "pf_silu_mul", Kind::Silu, true,
+        {"pf_silu_mul", kernels::pf_silu_mul_variant(17408), "pf_silu_mul", Kind::Silu, true,
          256, 5, kM, 64, b_silu_s1},
         {"pf_res_fold (SP1)", kernels::pf_res_fold_variant(kHidden, 1, kFoldGroups),
          "pf_res_fold", Kind::ResFold, true, 256, kFoldGroups, kM, 129, b_res_fold_s1},

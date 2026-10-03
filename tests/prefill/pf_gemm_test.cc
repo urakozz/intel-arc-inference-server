@@ -145,7 +145,7 @@ void silu_case(Dev& d, uint32_t M) {
     runtime::prefill::gemm_l0_silu(d.cx, d.kc, fused, A.as<uint16_t>(), bp,
                                    Xfused.as<uint16_t>() + n0 / 2, kX);
   }
-  d.cx.launch(d.kc(kernels::pf_silu_mul_variant(), "pf_silu_mul"),
+  d.cx.launch(d.kc(kernels::pf_silu_mul_variant(kX), "pf_silu_mul"),
               (kX + kSiluChunk - 1) / kSiluChunk, M, 1,
               {runtime::prefill::PtrArg(Part.ptr()), runtime::prefill::PtrArg(Xref.ptr()),
                runtime::prefill::arg_val(M)});

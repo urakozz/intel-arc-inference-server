@@ -89,12 +89,13 @@ std::string Engine::memory_line() const {
 void Engine::prepare_prefill() {
   // Ruling R7: both allocations are lazy, so a decode-only Engine's device
   // residency is byte-identical to what it was before the buffer split.
-  if (!pf_) pf_.reset(new PrefillScratch(ctx_, buffers_.max_len));
+  if (!pf_) pf_.reset(new PrefillScratch(ctx_, buffers_.max_len, *model_.desc));
   if (!pfx_)
     pfx_ = std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)>(new PrefillEngine(ctx_),
                                                                     &destroy_prefill);
   if (prefill_backend() != PrefillBackend::L0Int8) return;
-  if (!pfx_->int8) pfx_->int8 = std::make_unique<prefill::Int8State>(ctx_);
+  if (!pfx_->int8)   // the largest int4 K is down's: the MLP intermediate (spec 14)
+    pfx_->int8 = std::make_unique<prefill::Int8State>(ctx_, model_.desc->intermediate);
   // Every int4 linear's rotated column scales (spec 5 T2), outside any chunk and
   // any recording: cached by weight, so after the first call this loop only
   // looks them up, and no recorded list ever holds the host finish of

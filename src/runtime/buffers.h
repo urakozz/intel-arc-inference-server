@@ -4,6 +4,7 @@
 #include <vector>
 #include "l0/context.h"
 #include "l0/memory.h"
+#include "model/model_desc.h"
 #include "model/qwen35.h"
 
 namespace l0 {
@@ -35,12 +36,14 @@ namespace runtime {
 struct PersistentBuffers {
   static constexpr uint32_t kConvRing = 16;   // ring depth >= M + 3 (spec §9.4)
 
-  PersistentBuffers(l0::Context& ctx, uint32_t max_len);
+  // Spec 14: per-layer state is sized from the model descriptor (gdn_layers,
+  // fa_layers); there is no default - a caller has to say which model.
+  PersistentBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
 
   l0::Mem control;        // shared, sizeof(Control)
-  l0::Mem gdn_state;      // fp32 [48 layers][48 heads][128 k][128 v]  = 150.99 MB
-  l0::Mem conv_ring;      // bf16 [48 layers][16][10240]               = 15.73 MB
-  l0::Mem kv_k, kv_v;     // bf16 [16 layers][max_len][4][256] each    = 536.87 MB each @16384
+  l0::Mem gdn_state;      // fp32 [gdn_layers][48 heads][128 k][128 v]  = 150.99 MB (Qwen3.8: 48)
+  l0::Mem conv_ring;      // bf16 [gdn_layers][16][10240]               = 15.73 MB (Qwen3.8)
+  l0::Mem kv_k, kv_v;     // bf16 [fa_layers][max_len][4][256] each     = 536.87 MB each @16384 (Qwen3.8: 16)
   uint32_t max_len;
 
   size_t bytes() const;
@@ -113,11 +116,11 @@ struct DecodeScratch {
   // docs/15 §L2 measured as the one that pays.
   static constexpr uint32_t kNormGroups = 20;
 
-  DecodeScratch(l0::Context& ctx, uint32_t max_len);
+  DecodeScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
 
   l0::Mem resid;          // bf16 [M][5120]
-  l0::Mem x;              // bf16 [M][17408]  (prep output; largest K)
-  l0::Mem partials;       // fp32 [8][M][34816] (max S x max N)        = 8.91 MB
+  l0::Mem x;              // bf16 [M][intermediate]  (prep output; largest K; Qwen3.8 17408)
+  l0::Mem partials;       // fp32 [max S][M][max N] (Qwen3.8 [8][M][34816]) = 8.91 MB
   l0::Mem ab_out;         // fp32 [M][128]    (a||b GEMV output, S=1)
   l0::Mem norm_sumsq;     // fp32 [kNormGroups][M] (prep_res_fold -> prep_norm_finish)
   l0::Mem gdn_o;          // fp32 [M][48][128] (gdn_step output, pre gated-norm)
@@ -164,12 +167,12 @@ struct PrefillScratch {
   static constexpr uint32_t kSHeads = 6;
   static constexpr uint32_t kNormGroups = DecodeScratch::kNormGroups;
 
-  PrefillScratch(l0::Context& ctx, uint32_t max_len);
+  PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
 
   l0::Mem ids;          // uint32 [kC], Host  - pf_embed_gather's input
   l0::Mem resid;        // bf16 [kC][5120]
-  l0::Mem x;            // bf16 [kC][17408]
-  l0::Mem partials;     // fp32 [kC][34816]   (R1: one S = 1 rectangle)
+  l0::Mem x;            // bf16 [kC][intermediate]  (Qwen3.8 17408)
+  l0::Mem partials;     // fp32 [kC][max int4 N]    (R1: one S = 1 rectangle; Qwen3.8 34816)
   l0::Mem ab_out;       // fp32 [kC][128]
   l0::Mem norm_sumsq;   // fp32 [kNormGroups][kC]
   l0::Mem gdn_o;        // fp32 [kC][48][128]
@@ -202,8 +205,8 @@ struct PrefillScratch {
 
   // Spec 2.1 §3.3: the two backend expansions, allocated on first use (ruling R7's pattern one
   // level down) so a session pays only for the backend it runs.
-  l0::Mem& dequant_buffer();   // sycl-tla: bf16 [5120][34816] = 356,515,840 B
-  l0::Mem& slab_buffer();      // L0: bf16 [17408][1024] = 35,651,584 B (derived: 17408*1024*2)
+  l0::Mem& dequant_buffer();   // sycl-tla: bf16 [5120][max int4 N] (Qwen3.8 356,515,840 B)
+  l0::Mem& slab_buffer();      // L0: bf16 [intermediate][1024] (Qwen3.8 35,651,584 B = 17408*1024*2)
   // Spec 6 (plan 6b): the composed attention's score scratch, allocated on the first
   // composed `attn_chunk` (sycl-tla, or L0 with B70_PREFILL_ATTN=composed). The default
   // flash path never touches them, so prefill scratch no longer scales with max_len.
@@ -213,6 +216,7 @@ struct PrefillScratch {
 
  private:
   l0::Context* ctx_;
+  const model::ModelDesc* desc_;
   std::unique_ptr<l0::Mem> dequant_, slab_, pf_s_, pf_p_;
 };
 
@@ -236,7 +240,7 @@ struct MtpBuffers {
   static constexpr uint32_t kSlots = 4;   // M <= 4: K <= 3 drafts + the pending token
   static constexpr uint32_t kMaxK = kSlots - 1;
 
-  MtpBuffers(l0::Context& ctx, uint32_t max_len);
+  MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
 
   l0::Mem hctl;
   l0::Mem gdn_spec;
@@ -268,7 +272,7 @@ struct DecodeBuffers {
   static constexpr uint32_t kAttnV2Blocks = DecodeScratch::kAttnV2Blocks;
   static constexpr uint32_t kNormGroups = DecodeScratch::kNormGroups;
 
-  DecodeBuffers(l0::Context& ctx, uint32_t max_len);        // owning
+  DecodeBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);  // owning
   DecodeBuffers(PersistentBuffers& p, DecodeScratch& s);    // view (Engine's)
 
   // --- persistent state (survives across tokens) ---

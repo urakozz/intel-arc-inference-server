@@ -119,18 +119,23 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
 
   // The per-layer slice strides, re-derived from `model::Qwen35` here rather
   // than shared with buffers.cc -- capture.cc:105-116's arrangement, and for
-  // its reason: a divergence is then a throw from the three `require`s below,
-  // not a wrong KV slot at position 3000.
+  // its reason: a divergence is then a throw from the four `require`s below,
+  // not a wrong KV slot at position 3000. The layer COUNTS are the descriptor's.
+  const model::ModelDesc& d = *m.desc;
   const size_t kv_stride = size_t(max_len) * Qwen35::kFaKvHeads * Qwen35::kFaHeadDim * 2;
   const size_t gdn_state_stride =
       size_t(Qwen35::kGdnVHeads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;
+  // 10240 = the conv channels (2 x 16 k-heads + 48 v-heads) x 128.
   const size_t conv_ring_stride = size_t(PersistentBuffers::kConvRing) * 10240 * 2;
-  require(kv_stride * 16 == kv_k_mem.size(), "kv_k stride x 16 FA layers != its allocation");
-  require(kv_stride * 16 == kv_v_mem.size(), "kv_v stride x 16 FA layers != its allocation");
-  require(gdn_state_stride * 48 == gdn_state_mem.size(),
-          "gdn_state stride x 48 GDN layers != its allocation");
-  require(conv_ring_stride * 48 == conv_ring_mem.size(),
-          "conv_ring stride x 48 GDN layers != its allocation");
+  const std::string fa_n = std::to_string(d.fa_layers), gdn_n = std::to_string(d.gdn_layers);
+  require(kv_stride * d.fa_layers == kv_k_mem.size(),
+          "kv_k stride x " + fa_n + " FA layers != its allocation");
+  require(kv_stride * d.fa_layers == kv_v_mem.size(),
+          "kv_v stride x " + fa_n + " FA layers != its allocation");
+  require(gdn_state_stride * d.gdn_layers == gdn_state_mem.size(),
+          "gdn_state stride x " + gdn_n + " GDN layers != its allocation");
+  require(conv_ring_stride * d.gdn_layers == conv_ring_mem.size(),
+          "conv_ring stride x " + gdn_n + " GDN layers != its allocation");
 
   // embed: ids -> resid, bf16 [C][5120].
   cx.launch(kc(kernels::pf_embed_gather_variant(), "pf_embed_gather"), 1, C, 1,
@@ -138,7 +143,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
 
   const bool l0 = is_l0(backend);
   uint32_t gdn = 0, fa = 0;
-  for (const model::LayerDesc& L : Qwen35::layers()) {
+  for (const model::LayerDesc& L : d.layer_descs()) {
     const uint32_t l = L.index;
     pf_res_norm(cx, kc, s, l == 0 ? 0u : 1u,
                 at_const(m.layer_small[l].norms, loader::kNormsOffInput), s.partials.ptr(),
@@ -183,7 +188,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
     //
     // **Parity program S2(a), L0 only: the normed activations go to
     // `mixer_out`, not `x`.** The fused gate||up GEMM reads its A operand row m
-    // at pitch 5120 and writes x row m at pitch 17408 in the SAME kernel, so the
+    // at pitch 5120 and writes x row m at pitch I (17408 / 19456) in the SAME kernel, so the
     // two cannot share a buffer: work-group 0's x rows would overwrite A rows
     // the later work-groups have not read yet. (The unfused pair could share it,
     // because the GEMM had fully retired before `pf_silu_mul` ran.) `mixer_out`
@@ -196,26 +201,27 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                 s.partials.ptr(), s.resid.ptr(), mlp_x, C);   // stride 5120
     if (fuse) {
       // One launch pair per slab and NO `pf_silu_mul`: the epilogue writes x
-      // directly, so the fp32 [C][34816] `partials` rectangle -- the largest on
+      // directly, so the fp32 [C][2 x I] `partials` rectangle -- the largest on
       // the walk -- is neither written nor read back (spec §3, S2).
       if (backend == PrefillBackend::L0Int8)
         linear_i8_silu(cx, kc, s, *q, m.linears.at({l, LinearId::GateUp}),
                        static_cast<const uint16_t*>(mlp_x), C, s.x.as<uint16_t>(),
-                       Qwen35::kIntermediate);
+                       d.intermediate);
       else
         linear_l0_silu(cx, kc, s, m.linears.at({l, LinearId::GateUp}),
                        static_cast<const uint16_t*>(mlp_x), C, s.x.as<uint16_t>(),
-                       Qwen35::kIntermediate);
+                       d.intermediate);
     } else {
       pf_linear(cx, kc, s, m.linears.at({l, LinearId::GateUp}), s.x.as<uint16_t>(), C, backend, q);
-      cx.launch(kc(kernels::pf_silu_mul_variant(), "pf_silu_mul"),
-                (Qwen35::kIntermediate + kSiluChunk - 1) / kSiluChunk, C, 1,
-                {PtrArg(s.partials.ptr()), PtrArg(s.x.ptr()), arg_val(C)});   // x stride 17408
+      cx.launch(kc(kernels::pf_silu_mul_variant(d.intermediate), "pf_silu_mul"),
+                (d.intermediate + kSiluChunk - 1) / kSiluChunk, C, 1,
+                {PtrArg(s.partials.ptr()), PtrArg(s.x.ptr()), arg_val(C)});   // x stride I
       profile_wait(cx, Phase::kSilu);
     }
     pf_linear(cx, kc, s, m.linears.at({l, LinearId::Down}), s.x.as<uint16_t>(), C, backend, q);
   }
-  require(gdn == 48 && fa == 16, "the layer table did not give 48 GDN and 16 FA layers");
+  require(gdn == d.gdn_layers && fa == d.fa_layers,
+          "the layer table did not give " + gdn_n + " GDN and " + fa_n + " FA layers");
 }
 
 void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m, void* ctrl,
@@ -376,7 +382,8 @@ constexpr size_t kGdnLayerWaits = 2 * 4;
 constexpr size_t kFaLayerWaits = 2 * 4 + 2 * attn::kKvHeads + 1;
 // L0 (spec 2.1 S2): the four dequant launches of a layer become 2 x (N / 1024) launches per
 // linear -- GDN: qkv||z 32 + out_proj 10 + gate||up 68 + down 10 = 120; FA: q||k||v 28 +
-// o_proj 10 + 68 + 10 = 116.
+// o_proj 10 + 68 + 10 = 116 (Qwen3.8; spec 14: gate||up is 2 x 38 = 76 on Agnes, so 128 /
+// 124 - `slab_launches` reads the descriptor's rows).
 // L0 (spec 2.1 S3): attention's two GEMMs per kv group are L0 launches now, no SYCL GEMM and
 // no host wait remains -- 1 + 48 x 136 + 16 x 135 = 8689 at one row block (spec §3.3).
 // L0 (parity program S3): QK^T is issued per row block of 256 rows (P·V is not -- see
@@ -394,27 +401,41 @@ constexpr size_t kFaLayerWaits = 2 * 4 + 2 * attn::kKvHeads + 1;
 // `silu_fused()` is the one term that is not a property of the shape: it is a
 // diagnostic selector, and the arithmetic follows the walk rather than the
 // default so that a `=0` session's counter still matches its own prediction.
-size_t l0_gdn_layer_launches() { return kGdnLayerLaunches - 4 + 120 - (silu_fused() ? 1 : 0); }
-size_t l0_fa_layer_launches(uint32_t C) {
-  return kFaLayerLaunches - 4 + 116 - kAttnChunkLaunches +
+// The 2 x N / 1024 slab launches of one layer kind's four int4 linears.
+size_t slab_launches(const model::ModelDesc& d, model::LayerKind kind) {
+  size_t n = 0;
+  for (LinearId id : Qwen35::linear_order(kind))
+    if (d.linear(id).kind == model::WeightKind::Int4) n += 2 * (d.shape(id).N / 1024);
+  return n;
+}
+size_t l0_gdn_layer_launches(const model::ModelDesc& d) {
+  return kGdnLayerLaunches - 4 + slab_launches(d, model::LayerKind::GDN) -
+         (silu_fused() ? 1 : 0);
+}
+size_t l0_fa_layer_launches(const model::ModelDesc& d, uint32_t C) {
+  return kFaLayerLaunches - 4 + slab_launches(d, model::LayerKind::FA) - kAttnChunkLaunches +
          attn_chunk_launches(C, PrefillBackend::L0) - (silu_fused() ? 1 : 0);
 }
 }  // namespace
-size_t step_chunk_launches(PrefillBackend b, uint32_t C) {
-  if (b == PrefillBackend::SyclTla) return 1 + 48 * kGdnLayerLaunches + 16 * kFaLayerLaunches;
-  const size_t base = 1 + 48 * l0_gdn_layer_launches() + 16 * l0_fa_layer_launches(C);
+size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
+  if (b == PrefillBackend::SyclTla)
+    return 1 + d.gdn_layers * kGdnLayerLaunches + d.fa_layers * kFaLayerLaunches;
+  const size_t base =
+      1 + d.gdn_layers * l0_gdn_layer_launches(d) + d.fa_layers * l0_fa_layer_launches(d, C);
   if (b != PrefillBackend::L0Int8) return base;
   // spec 5: +1 launch (the activation quantiser, pf_quant_had) per int4 linear, 4 per
   // layer, the slab walk being the same 2 x N/1024 launches. The int8 gate||up is ALWAYS
   // the fused SiLU form, while `base` follows silu_fused(): an unfused session's base
   // counts one pf_silu_mul per layer the int8 walk never issues.
-  return base + 64 * 4 - (silu_fused() ? 0 : 64);
+  return base + size_t(d.layers) * 4 - (silu_fused() ? 0 : d.layers);
 }
-size_t step_chunk_gemms(PrefillBackend b) {
-  return b == PrefillBackend::SyclTla ? 48 * kGdnLayerGemms + 16 * kFaLayerGemms : 0;
+size_t step_chunk_gemms(const model::ModelDesc& d, PrefillBackend b) {
+  return b == PrefillBackend::SyclTla ? d.gdn_layers * kGdnLayerGemms + d.fa_layers * kFaLayerGemms
+                                      : 0;
 }
-size_t step_chunk_waits(PrefillBackend b) {
-  return b == PrefillBackend::SyclTla ? 48 * kGdnLayerWaits + 16 * kFaLayerWaits : 0;
+size_t step_chunk_waits(const model::ModelDesc& d, PrefillBackend b) {
+  return b == PrefillBackend::SyclTla ? d.gdn_layers * kGdnLayerWaits + d.fa_layers * kFaLayerWaits
+                                      : 0;
 }
 
 }  // namespace runtime::prefill

@@ -61,9 +61,11 @@ constexpr const char* kLmPrefix = "model.language_model.";
 
 bool starts_with(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
 
-// Rebuilds the checkpoint name of a stripped (model-description) name.
-std::string ckpt_name(const std::string& stripped) {
-  return starts_with(stripped, "lm_head") ? stripped : kLmPrefix + stripped;
+// Rebuilds the checkpoint name of a stripped (model-description) name: the
+// prefix back on, and the model's name map run backwards (spec 14 §3.2: an
+// engine `linear_attn.` is Agnes's `delta_attn.`; the identity on Qwen3.8).
+std::string ckpt_name(const model::ModelDesc& d, const std::string& stripped) {
+  return starts_with(stripped, "lm_head") ? stripped : kLmPrefix + d.to_checkpoint(stripped);
 }
 
 bool has_suffix(const std::string& s, const char* suf) {
@@ -78,14 +80,17 @@ struct NameView {
   size_t top_level = 0;                      // names outside model.language_model.
 };
 
-NameView build_view(const SafetensorsSet& set, bool keep_mtp) {
+// Every kept name is mapped to its ENGINE spelling here, once (spec 14 §3.2:
+// Agnes's `delta_attn.` / `global_attn.` -> `linear_attn.` / `self_attn.`, the
+// MTP head's included); everything downstream binds engine names only.
+NameView build_view(const SafetensorsSet& set, bool keep_mtp, const model::ModelDesc& d) {
   NameView v;
   for (const auto& [name, info] : set.tensors()) {
     (void)info;
     if (starts_with(name, "model.visual.")) {          // no vision tower in v1
       ++v.visual_skipped;
     } else if (starts_with(name, "mtp.") && keep_mtp) {   // spec 8: kept on request
-      v.names.emplace(name, name);                          // top-level, verbatim
+      v.names.emplace(d.to_engine(name), name);             // top-level, name-mapped
     } else if (starts_with(name, "mtp.")) {            // no speculation unless asked
       // The RTN checkpoint's `mtp.*` are 29 tensors in their own shard
       // (`model_extra_tensors.safetensors`, pointed at by the index like any
@@ -96,7 +101,7 @@ NameView build_view(const SafetensorsSet& set, bool keep_mtp) {
       // report's `mtp` figure and can never land in `unconsumed`.
       ++v.mtp_skipped;
     } else if (starts_with(name, kLmPrefix)) {
-      std::string stripped = name.substr(std::strlen(kLmPrefix));
+      std::string stripped = d.to_engine(name.substr(std::strlen(kLmPrefix)));
       if (has_suffix(stripped, ".qzeros")) ++v.qzeros;
       if (has_suffix(stripped, ".g_idx")) ++v.g_idx;
       v.names.emplace(std::move(stripped), name);
@@ -117,8 +122,8 @@ NameView build_view(const SafetensorsSet& set, bool keep_mtp) {
 const TensorInfo& take(NameView& v, const SafetensorsSet& set, const std::string& stripped) {
   auto it = v.names.find(stripped);
   if (it == v.names.end())
-    throw std::runtime_error("checkpoint has no tensor '" + stripped + "' (looked for '" +
-                             ckpt_name(stripped) + "')");
+    throw std::runtime_error("checkpoint has no tensor '" + stripped + "' (engine name; the " +
+                             "checkpoint spelling is the model's name map run backwards)");
   v.consumed.insert(stripped);
   return set.tensors().at(it->second);
 }
@@ -256,8 +261,9 @@ size_t int4_scale_elems(const model::GemvShape& s) {
 // first real consumer - these run in release too, load is one-shot), repack
 // into staging and upload with a single copy.
 DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet& set,
-                         NameView& view, const std::string& layer_prefix,
-                         const model::FusedLinear& fl, Staging& st, LoadReport& rep) {
+                         NameView& view, const model::ModelDesc& desc,
+                         const std::string& layer_prefix, const model::FusedLinear& fl,
+                         Staging& st, LoadReport& rep) {
   const model::GemvShape& sh = fl.shape;
   const std::string id = std::string(id_name(fl.id)) + " (" + layer_prefix + fl.parts[0] + ")";
   if (sh.K % 64 != 0 || sh.N % 16 != 0)
@@ -273,7 +279,7 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
   uint32_t n_sum = 0;
   for (const std::string& part : fl.parts) {
     // classify() checks the alignment of every pointer it casts (M6).
-    LinearSrc s = LinearSrc::classify(set, ckpt_name(layer_prefix + part));
+    LinearSrc s = LinearSrc::classify(set, ckpt_name(desc, layer_prefix + part));
     const bool int4 = s.kind == WKind::Int4;
     if (int4 != (fl.kind == model::WeightKind::Int4))
       throw std::runtime_error(id + ": part '" + part + "' is " + (int4 ? "int4" : "bf16") +
@@ -495,6 +501,11 @@ std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const Safe
                         model::GemvShape{K, N, 1, 0}, model::WeightKind::Bf16};
   };
   const std::string L = "mtp.layers.0.";
+  // The head's shapes are literal on purpose: they are the MTP block's own, the
+  // same 15 bf16 tensors on both supported checkpoints - its MLP is 17408 wide on
+  // Agnes too (no parallel FFN in the head; spec 14 §1), whatever the main
+  // model's folded intermediate is. Names are engine names (the view mapped
+  // Agnes's `global_attn.` already).
   auto h = std::make_unique<MtpHead>(MtpHead{
       linear({"mtp.fc.weight"}, {5120}, 10240, false),
       linear({L + "self_attn.q_proj.weight", L + "self_attn.k_proj.weight",
@@ -572,7 +583,14 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   if (!cf) throw std::runtime_error("cannot read " + snap + "config.json");
   std::stringstream cs;
   cs << cf.rdbuf();
-  const QuantConfig qc = QuantConfig::parse(common::json::parse(cs.str()));
+  const common::json::Value config = common::json::parse(cs.str());
+  const QuantConfig qc = QuantConfig::parse(config);
+  // Spec 14 §3.1: the model is picked from the checkpoint - no flag. An unknown
+  // architecture throws here, naming config.json's value.
+  const common::json::Value* archs = config.find("architectures");
+  if (!archs || !archs->is_array() || archs->arr().empty() || !archs->arr()[0].is_string())
+    throw std::runtime_error(snap + "config.json has no architectures[0] string");
+  const model::ModelDesc& desc = model::desc_for_architecture(archs->arr()[0].str());
 
   SafetensorsSet set(snap);
   // Requirement 6: before a single byte is repacked. Returns what it counted
@@ -591,7 +609,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
         "ships " + std::to_string(scan.g_idx_tensors) +
         " g_idx tensors - refusing to infer that no activation-order permutation exists. Add "
         "\"desc_act\": false to quantization_config if that is what the quantiser meant.");
-  NameView view = build_view(set, mtp);
+  NameView view = build_view(set, mtp, desc);
   Widen widen;
 
   // **`lm_head`'s kind is the checkpoint's to choose, and it is chosen by
@@ -602,12 +620,12 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // cross-check, the shape and layout the capture binds - follows from this
   // one line, so a checkpoint that packs the head and one that does not are
   // the same code path with a different row.
-  const bool ckpt_int4 = LinearSrc::classify(set, "lm_head").kind == WKind::Int4;
+  const bool ckpt_int4 = LinearSrc::classify(set, ckpt_name(desc, "lm_head")).kind == WKind::Int4;
   // Spec 9: the int8 form is made from the bf16 tensor, so it needs one.
   if (lm_form == LmHeadForm::Int8 && ckpt_int4)
     throw std::runtime_error(
         "--lm-head int8 quantises a bf16 lm_head at load; this checkpoint ships it int4");
-  const model::FusedLinear& lm_row = Qwen35::lm_head(
+  const model::FusedLinear& lm_row = desc.lm_head(
       ckpt_int4 ? model::WeightKind::Int4
                 : (lm_form == LmHeadForm::Int8 ? model::WeightKind::Int8 : model::WeightKind::Bf16));
   const bool lm_int4 = lm_row.kind == model::WeightKind::Int4;
@@ -640,7 +658,8 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                 l0::Mem(ctx, l0::MemKind::Device, rope.size() * 4),
                 {},
                 max_len,
-                nullptr};
+                nullptr,
+                &desc};
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   imm.copy(m.embed.ptr(), set.data(emb), set.bytes(emb));
   m.report.embed_bytes += set.bytes(emb);
@@ -650,9 +669,9 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   imm.copy(m.rope.ptr(), rope.data(), rope_bytes);
   m.report.small_bytes += rope_bytes;
 
-  const std::vector<model::LayerDesc> layers = Qwen35::layers();
+  const std::vector<model::LayerDesc> layers = desc.layer_descs();
   Staging st;
-  const model::GemvShape& ab = Qwen35::shape(model::LinearId::AB);
+  const model::GemvShape& ab = desc.shape(model::LinearId::AB);
   size_t max_i4_words = lm_int4 ? int4_words(lm_row.shape) : 0;
   size_t max_i4_scales = lm_int4 ? int4_scale_elems(lm_row.shape) : 0;
   for (const model::LayerDesc& ld : layers)
@@ -678,11 +697,11 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
     const std::string lp = Qwen35::layer_prefix(ld.index);
     for (const model::FusedLinear& fl : ld.linears)
       m.linears.emplace(std::make_pair(ld.index, fl.id),
-                        load_linear(ctx, imm, set, view, lp, fl, st, m.report));
+                        load_linear(ctx, imm, set, view, desc, lp, fl, st, m.report));
     m.layer_small.push_back(load_small(ctx, imm, set, view, ld, m.report, widen));
   }
   m.linears.emplace(std::make_pair(kTopLevel, model::LinearId::LmHead),
-                    load_linear(ctx, imm, set, view, "", lm_row, st, m.report));
+                    load_linear(ctx, imm, set, view, desc, "", lm_row, st, m.report));
   // The MTP head's widening goes into its own Widen: the W cross-check is over
   // the main model's read-per-token bytes, which the head is not part of.
   Widen mtp_widen;
