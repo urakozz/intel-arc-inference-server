@@ -29,6 +29,9 @@ int main() {
     for (size_t i = 0; i < size_t(LinearId::kCount); ++i) v.push_back(model::qwen38().linear(LinearId(i)));
     v.push_back(model::qwen38().lm_head(model::WeightKind::Int4));
     v.push_back(model::qwen38().lm_head(model::WeightKind::Int8));   // spec 9: made at load
+    // Spec 14: Agnes's two folded MLP rows (its other six are Qwen3.8's, checked above).
+    v.push_back(model::agnes().linear(LinearId::GateUp));
+    v.push_back(model::agnes().linear(LinearId::Down));
     return v;
   }();
   for (const model::FusedLinear& fl : rows) {
@@ -56,8 +59,19 @@ int main() {
     ++checked;
   }
   CHECK_EQ(missing, size_t(0));
-  CHECK_EQ(checked, size_t(10));   // 8 table rows + the int4 and int8 lm_head rows
-  std::printf("kernel_table_test OK (%zu rows have a compiled binary: 8 table + int4/int8 lm_head)\n",
+  CHECK_EQ(checked, size_t(12));   // 8 table rows + int4/int8 lm_head + Agnes's 2 MLP rows
+  // Spec 14: the per-model binaries that bake the MLP intermediate / GDN layer count.
+  for (const std::string& v : {kernels::prep_silu_mul_variant(1, model::agnes().intermediate),
+                               std::string("pf_silu_mul_I19456"),
+                               kernels::gdn_step_slots_variant(1, model::agnes().gdn_layers)}) {
+    if (!std::filesystem::exists(kernels::path(v))) {
+      std::fprintf(stderr, "no device binary for Agnes: %s\n", kernels::path(v).c_str());
+      ++missing;
+    }
+  }
+  CHECK_EQ(missing, size_t(0));
+  std::printf("kernel_table_test OK (%zu rows have a compiled binary: 8 table + int4/int8 lm_head"
+              " + Agnes's 2; Agnes's silu / slots variants present)\n",
               checked);
   return 0;
 }

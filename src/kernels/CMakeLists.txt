@@ -21,6 +21,15 @@ function(add_gemv_variant M K N S L)
     list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
   elseif(L EQUAL 1 AND K EQUAL 5120 AND N EQUAL 248320 AND S EQUAL 1)
     list(APPEND extra_defs GEMV_DEQ_SHIFT=1)
+  # Spec 14, Agnes 3.0 Flash: PROVISIONAL cells, COPIED from the nearest Qwen3.8
+  # production cells above (gate||up 5120x34816 S8, down 17408x5120 S4), not
+  # measured. The box sweep (B70_AGNES_SWEEP, docs/probe-gemv-2026-08-24.md's
+  # method) replaces them and model::agnes()'s {S, layout} together:
+  # docs/superpowers/plans/2026-10-03-spec14-validation-checklist.md, "GEMV tuning".
+  elseif(L EQUAL 0 AND K EQUAL 5120 AND N EQUAL 38912 AND S EQUAL 8)
+    list(APPEND extra_defs GEMV_DEQ_SHIFT=1)                    # PROVISIONAL
+  elseif(L EQUAL 0 AND K EQUAL 19456 AND N EQUAL 5120 AND S EQUAL 4)
+    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)     # PROVISIONAL
   endif()
   add_ocloc_kernel(gemv_M${M}_K${K}_N${N}_S${S}_L${L} SOURCE ${GEMV_CL}
                    DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L} ${extra_defs})
@@ -386,6 +395,53 @@ if(B70_MTP)
     add_ocloc_kernel(attn_prep_M${MM}_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1)
   endforeach()
   add_ocloc_kernel(prep_silu_mul_M1_S1 SOURCE ${PREP_CL} DEFINES M=1 SILU_S=1)
+endif()
+
+# --- Spec 14: Agnes 3.0 Flash (model::agnes()) ------------------------------
+# Additive only: every Qwen3.8 binary above keeps its name and its command line
+# (G0 compares their checksums against a main build). Agnes differs from Qwen3.8
+# in two baked numbers - the MLP intermediate (17408 + 2048 folded = 19456) and
+# the GDN layer count (54, which sizes the MTP slot stride) - and in the two GEMV
+# shapes that follow from the first.
+option(B70_AGNES "build the Agnes 3.0 Flash variants (spec 14)" ON)
+# The tuning sweep over the two new GEMV shapes, both layouts, S in {1,2,4,8,16}
+# (all divide K/64 = 80 and 304) - for the box session that replaces the
+# provisional rows. OFF by default: 20 ocloc compiles nobody binds.
+option(B70_AGNES_SWEEP "build the Agnes GEMV tuning matrix (spec 14 validation)" OFF)
+if(B70_AGNES)
+  set(AGNES_I 19456)
+  add_gemv_variant(1 5120 38912 8 0)    # gate'||up'  PROVISIONAL S8 L0
+  add_gemv_variant(1 19456 5120 4 0)    # down'       PROVISIONAL S4 L0
+  add_ocloc_kernel(prep_silu_mul_M1_I${AGNES_I} SOURCE ${PREP_CL} DEFINES M=1 INTERMEDIATE=${AGNES_I})
+  if(B70_AGNES_SWEEP)
+    foreach(L 0 1)
+      foreach(S 1 2 4 8 16)
+        if(NOT (L EQUAL 0 AND S EQUAL 8))
+          add_gemv_variant(1 5120 38912 ${S} ${L})
+        endif()
+        if(NOT (L EQUAL 0 AND S EQUAL 4))
+          add_gemv_variant(1 19456 5120 ${S} ${L})
+        endif()
+      endforeach()
+    endforeach()
+  endif()
+  if(B70_DECODE_EXTRA_M OR B70_MTP)
+    foreach(MM 2 3 4)   # the verify lists' M rows (spec 8), at Agnes's shapes
+      add_gemv_variant(${MM} 5120 38912 8 0)
+      add_gemv_variant(${MM} 19456 5120 4 0)
+      add_ocloc_kernel(prep_silu_mul_M${MM}_I${AGNES_I} SOURCE ${PREP_CL}
+                       DEFINES M=${MM} INTERMEDIATE=${AGNES_I})
+    endforeach()
+  endif()
+  if(B70_MTP)
+    # gdn_step_slots bakes one MtpBuffers::gdn_spec slot: 54 GDN layers x 48 x 128 x 128
+    # floats = 42467328 (kernels::gdn_step_slots_variant names it `_G54`).
+    foreach(MM 1 2 3 4)
+      add_ocloc_kernel(gdn_step_slots_M${MM}_G54 SOURCE ${GDN_CL}
+                       DEFINES ${GDN_DEFINES} SPEC_SLOTS=1 CTRL_LIVE=19 SPEC_SLOT_STRIDE=42467328
+                               M=${MM})
+    endforeach()
+  endif()
 endif()
 
 add_subdirectory(prefill)

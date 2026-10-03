@@ -681,6 +681,46 @@ above: the machine was under a 12-core compile throughout, and a cold page cache
 read 41.4 s against a warm 12.6 s. Nothing about load time was being measured
 there.
 
+## The second model: Agnes 3.0 Flash (spec 14)
+
+*Written 2026-10-03 without the box; unvalidated on the card - every number below
+that is not read from the checkpoint's headers is pending the validation checklist
+(`docs/superpowers/plans/2026-10-03-spec14-validation-checklist.md`).*
+
+The model is picked from `config.json`'s `architectures[0]` - no flag
+(`model::desc_for_architecture`; an unknown architecture throws, naming it). The
+descriptor (`src/model/model_desc.h`) carries what differs:
+
+| | Qwen3.8 | Agnes 3.0 Flash |
+|---|---|---|
+| `architectures[0]` | `Qwen3_5ForConditionalGeneration` | `AgnesForConditionalGeneration` |
+| layers | 64 = 48 GDN + 16 FA | 72 = 54 GDN + 18 FA (FA at `l % 4 == 3`) |
+| MLP intermediate (engine) | 17408 | 19456 = 17408 + the 2048-wide parallel FFN, folded |
+| name map | identity | `delta_attn.` -> `linear_attn.`, `global_attn.` -> `self_attn.` (the MTP head's too) |
+| `W` (bf16 `lm_head`) | 15.519 GB, measured | 18.344 GB, summed from the headers (14.816 qweight + 0.926 scales + 0.059 bf16 + 2.543 head) |
+| max_len ceiling | none | 65536 (spec 14 §3.3, until spec 12) |
+
+The name view maps every kept name to its engine spelling once; `ckpt_name` runs
+the map backwards for `LinearSrc::classify`. Everything downstream binds engine names.
+
+**Classification, the new rows.** Each layer ships `mlp.parallel_ffn.{gate,up,down}_proj`
+as int4 g64 sym (`qweight`/`scales`/`qzeros`/`g_idx`, 12 tensors, in the quantiser's
+`modules_in_block_to_quantize`). They are classified by suffix like every other linear
+and consumed by the fold; their `qzeros`/`g_idx` are scanned (identity asserted) and
+dropped. `in_proj_a/b` stay bf16 (the `dynamic` exclusions, as on Qwen3.8); `lm_head`,
+`mtp.*` (15 tensors, 0.849 GB) and the vision tower (0.921 GB) as on Qwen3.8.
+
+**The fold (spec 14 §2), `src/loader/fold.{h,cc}`.** On packed GPTQ int4, before the
+column map: gate' = [gate | gate_p] and up' = [up | up_p] along N (columns of
+`qweight [K/8][N]` and `scales [K/64][N]`), then gate'||up' interleaved in 16-column
+blocks exactly as gate||up; down' = [down ; down_p] along K, `qweight` row 2176 and
+`scales` row 272 - a g64 boundary. No nibble moves within a word and no scale is
+recomputed, so the folded tensors dequantise to the stacked dequantisations bit for bit;
+`y = down'(silu(gate' x) * up' x)` equals the two-branch sum up to accumulation order.
+`tests/loader/agnes_fold_test.cc` holds the C++ fold byte-identical to
+`tools/oracle/agnes_fold.py` on a shared fixture; `tests/loader/load_agnes_test.cc`
+reads the joins back from the device (box).
+
 ## Deliberately not loaded
 
 - **`model.visual.*`** (333 tensors, 0.921 GB) - this checkpoint is a

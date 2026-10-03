@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <vector>
 #include "check.h"
 #include "model/model_desc.h"
 
@@ -66,6 +67,62 @@ int main() {
   for (size_t i = 0; i < model::kLinearCount; ++i)
     CHECK(q.linear(static_cast<LinearId>(i)).fold == model::Fold::None);
   CHECK(&model::desc_for_architecture("Qwen3_5ForConditionalGeneration") == &q);
+
+  CHECK_EQ(q.doc_w, 15.519e9);
+  CHECK(!q.provisional_tuning);
+
+  // Spec 14: Agnes 3.0 Flash.
+  const ModelDesc& a = model::agnes();
+  CHECK(&model::desc_for_architecture("AgnesForConditionalGeneration") == &a);
+  CHECK_EQ(a.layers, uint32_t(72));
+  CHECK_EQ(a.gdn_layers, uint32_t(54));
+  CHECK_EQ(a.fa_layers, uint32_t(18));
+  CHECK_EQ(a.parallel_ffn, uint32_t(2048));
+  CHECK_EQ(a.intermediate, uint32_t(19456));
+  CHECK_EQ(a.max_len_ceiling, uint32_t(65536));
+  CHECK_EQ(a.intermediate_suffix(), std::string("_I19456"));
+  CHECK(a.provisional_tuning);
+  check_layers(a);
+  // The fold's alignment (spec 14 §2): g64 groups and 1024-column slabs / blocks.
+  CHECK_EQ(17408u % 64, 0u);
+  CHECK_EQ(a.intermediate % 1024, 0u);
+  CHECK_EQ(a.shape(LinearId::GateUp).N % 1024, 0u);
+  // The two folded rows and nothing else differ from Qwen3.8's table.
+  for (size_t i = 0; i < model::kLinearCount; ++i) {
+    const auto id = static_cast<LinearId>(i);
+    const model::FusedLinear& fa = a.linear(id);
+    const model::FusedLinear& fq = q.linear(id);
+    CHECK(fa.parts == fq.parts);
+    if (id == LinearId::GateUp || id == LinearId::Down) continue;
+    CHECK(fa.fold == model::Fold::None);
+    CHECK_EQ(fa.shape.K, fq.shape.K);
+    CHECK_EQ(fa.shape.N, fq.shape.N);
+    CHECK_EQ(fa.shape.S, fq.shape.S);
+    CHECK_EQ(fa.shape.layout, fq.shape.layout);
+  }
+  const model::FusedLinear& gu = a.linear(LinearId::GateUp);
+  CHECK(gu.fold == model::Fold::N);
+  CHECK_EQ(gu.shape.K, uint32_t(5120));
+  CHECK_EQ(gu.shape.N, uint32_t(38912));
+  CHECK_EQ(gu.shape.S, uint32_t(8));     // PROVISIONAL (copied from Qwen3.8's gate||up)
+  CHECK_EQ(gu.shape.layout, uint32_t(0));
+  CHECK(gu.fold_parts == std::vector<std::string>({"mlp.parallel_ffn.gate_proj",
+                                                   "mlp.parallel_ffn.up_proj"}));
+  const model::FusedLinear& dn = a.linear(LinearId::Down);
+  CHECK(dn.fold == model::Fold::K);
+  CHECK_EQ(dn.shape.K, uint32_t(19456));
+  CHECK_EQ(dn.shape.N, uint32_t(5120));
+  CHECK_EQ(dn.shape.S, uint32_t(4));     // PROVISIONAL (copied from Qwen3.8's down)
+  CHECK(dn.fold_parts == std::vector<std::string>({"mlp.parallel_ffn.down_proj"}));
+  // The name map, both directions, on real checkpoint spellings.
+  CHECK_EQ(a.to_engine("layers.0.delta_attn.in_proj_qkv.qweight"),
+           std::string("layers.0.linear_attn.in_proj_qkv.qweight"));
+  CHECK_EQ(a.to_engine("mtp.layers.0.global_attn.q_proj.weight"),
+           std::string("mtp.layers.0.self_attn.q_proj.weight"));
+  CHECK_EQ(a.to_engine("layers.0.mlp.parallel_ffn.down_proj.scales"),
+           std::string("layers.0.mlp.parallel_ffn.down_proj.scales"));
+  CHECK_EQ(a.to_checkpoint("layers.7.self_attn.o_proj"), std::string("layers.7.global_attn.o_proj"));
+  CHECK_EQ(a.to_checkpoint("layers.4.linear_attn.A_log"), std::string("layers.4.delta_attn.A_log"));
 
   // An unknown architecture throws, naming it.
   bool threw = false;
