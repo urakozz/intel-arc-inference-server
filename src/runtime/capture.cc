@@ -763,7 +763,8 @@ class Capture {
     // argmax_stage1(logits, part) - src/kernels/argmax.cl (Task 3), grid
     // (kVocab/1024 = 243, M), WG 256.
     {
-      l0::Kernel& k = kernel(kernels::argmax_stage1_variant(kCapM), "argmax_stage1", kWgArgmax);
+      l0::Kernel& k = kernel(kernels::argmax_stage1_variant(kCapM, d_.vocab_used), "argmax_stage1",
+                             kWgArgmax);
       k.arg_ptr(0, b_.logits.ptr());
       k.arg_ptr(1, b_.argmax_part.ptr());
       launch(k, (Qwen35::kVocab + kArgmaxChunk - 1) / kArgmaxChunk, kCapM);
@@ -915,7 +916,8 @@ class Capture {
       head_gemv(lm, b_.x.ptr(), logits);
     }
     {
-      l0::Kernel& k = kernel(kernels::argmax_stage1_variant(kCapM), "argmax_stage1", kWgArgmax);
+      l0::Kernel& k = kernel(kernels::argmax_stage1_variant(kCapM, d_.vocab_used), "argmax_stage1",
+                             kWgArgmax);
       k.arg_ptr(0, logits);
       k.arg_ptr(1, b_.argmax_part.ptr());
       launch(k, (Qwen35::kVocab + kArgmaxChunk - 1) / kArgmaxChunk, kCapM);

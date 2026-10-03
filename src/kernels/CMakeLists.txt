@@ -413,6 +413,10 @@ if(B70_AGNES)
   add_gemv_variant(1 5120 38912 8 0)    # gate'||up'  PROVISIONAL S8 L0
   add_gemv_variant(1 19456 5120 4 0)    # down'       PROVISIONAL S4 L0
   add_ocloc_kernel(prep_silu_mul_M1_I${AGNES_I} SOURCE ${PREP_CL} DEFINES M=1 INTERMEDIATE=${AGNES_I})
+  # Agnes's tokenizer defines 12 more ids (248077..248088, its specials), so its greedy
+  # argmax masks from 248089 (model::agnes().vocab_used, kernels::argmax_stage1_variant).
+  set(AGNES_ARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=248320 VOCAB_USED=248089)
+  add_ocloc_kernel(argmax_stage1_M1_V248089 SOURCE ${ARGMAX_CL} DEFINES ${AGNES_ARGMAX_DEFINES} M=1)
   if(B70_AGNES_SWEEP)
     foreach(L 0 1)
       foreach(S 1 2 4 8 16)
@@ -431,6 +435,8 @@ if(B70_AGNES)
       add_gemv_variant(${MM} 19456 5120 4 0)
       add_ocloc_kernel(prep_silu_mul_M${MM}_I${AGNES_I} SOURCE ${PREP_CL}
                        DEFINES M=${MM} INTERMEDIATE=${AGNES_I})
+      add_ocloc_kernel(argmax_stage1_M${MM}_V248089 SOURCE ${ARGMAX_CL}
+                       DEFINES ${AGNES_ARGMAX_DEFINES} M=${MM})
     endforeach()
   endif()
   if(B70_MTP)

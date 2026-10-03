@@ -220,8 +220,11 @@ inline constexpr unsigned kGdnLive = 19;    // Control::gdn_live (spec 8, SPEC_S
 inline std::string embed_gather_variant(unsigned M) {
   return "embed_gather_M" + std::to_string(M);
 }
-inline std::string argmax_stage1_variant(unsigned M) {
-  return "argmax_stage1_M" + std::to_string(M);
+// VOCAB_USED (the ids the tokenizer defines) is baked: Qwen3.8's 248077 keeps the
+// historical name, any other count is `_V<vocab_used>` (spec 14: Agnes's 248089).
+inline std::string argmax_stage1_variant(unsigned M, unsigned vocab_used) {
+  return "argmax_stage1_M" + std::to_string(M) +
+         (vocab_used == 248077 ? std::string() : "_V" + std::to_string(vocab_used));
 }
 // Stage 2 is a single work-group that loops m < ctrl.n_active internally: no
 // variants at all, so the binary is named after the entry point.

@@ -46,6 +46,11 @@ struct ModelDesc {
   // from the checkpoint's safetensors headers over the same four categories
   // (derived - not yet a load on the card; spec 14 validation checklist).
   double doc_w = 0;
+  // The ids the tokenizer defines - the greedy argmax masks every lm_head row at or
+  // above it (argmax.cl's VOCAB_USED). Qwen3.8: 248077 (Qwen35::kVocabUsed). Agnes's
+  // tokenizer.json adds 12 specials at 248077..248088 (<|agnes_bos|> .. <|agnes_reserved_3|>;
+  // same vocab and merges otherwise), so 248089 (spec 14).
+  uint32_t vocab_used = 0;
   // True for a descriptor whose GEMV tuning rows were copied, not measured (spec
   // 14 §6: Agnes's two new shapes until the box sweep replaces them).
   bool provisional_tuning = false;

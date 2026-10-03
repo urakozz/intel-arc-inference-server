@@ -165,7 +165,7 @@ int main() {
   l0::Mem ctrl_mem(d.ctx, l0::MemKind::Shared, sizeof(runtime::Control));
   runtime::Control* ctrl = ctrl_mem.as<runtime::Control>();
 
-  l0::Module mod1(d.ctx, kernels::path(kernels::argmax_stage1_variant(kM)));
+  l0::Module mod1(d.ctx, kernels::path(kernels::argmax_stage1_variant(kM, Q::kVocabUsed)));
   l0::Kernel k1 = mod1.kernel("argmax_stage1");
   k1.group_size(kWG);
   k1.arg_ptr(0, logits.ptr());
