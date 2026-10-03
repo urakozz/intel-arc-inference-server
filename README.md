@@ -197,7 +197,7 @@ short list:
 - [docs/05-perf-model.md](docs/05-perf-model.md) for where the time goes
 - [docs/14-golden-gate.md](docs/14-golden-gate.md) for how correctness is proven
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for every measured row and its grade
-- [docs/specs/](docs/specs/) for the designs behind the bigger changes
+- [docs/superpowers/specs/](docs/superpowers/specs/) for the designs behind the bigger changes
 
 ## Licence
 

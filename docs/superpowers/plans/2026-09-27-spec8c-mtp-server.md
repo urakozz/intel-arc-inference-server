@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, nlohmann::json, Level Zero readbacks, Python 3 for the replay comparison.
 
-**Spec:** `docs/specs/2026-09-27-spec8-mtp-speculative-decoding-design.md` (§3.3 step 3, §3.5, §3.6, §4 M3-M5, §5 D1-D2). Needs plan 8b (`Engine::draft/verify/commit`, `mtp_logits_device`, `verify_logits_device`) and spec 7 plan 7c merged (the prefix cache, `tools/prefix/replay_log.py`, `tests/golden/opencode/session1/`).
+**Spec:** `docs/superpowers/specs/2026-09-27-spec8-mtp-speculative-decoding-design.md` (§3.3 step 3, §3.5, §3.6, §4 M3-M5, §5 D1-D2). Needs plan 8b (`Engine::draft/verify/commit`, `mtp_logits_device`, `verify_logits_device`) and spec 7 plan 7c merged (the prefix cache, `tools/prefix/replay_log.py`, `tests/golden/opencode/session1/`).
 
 ## Global Constraints
 

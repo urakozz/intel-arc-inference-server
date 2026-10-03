@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 (transformers, tokenizers) in the oracle container, `b70-decode`, the box.
 
-**Spec:** `docs/specs/2026-09-24-spec5-int8-prefill-linears-design.md` (stage T0, bar A4). **Independent of plans 5a and 5b**; run it alongside them.
+**Spec:** `docs/superpowers/specs/2026-09-24-spec5-int8-prefill-linears-design.md` (stage T0, bar A4). **Independent of plans 5a and 5b**; run it alongside them.
 
 ## Global Constraints
 

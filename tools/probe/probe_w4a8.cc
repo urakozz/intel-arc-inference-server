@@ -1,5 +1,5 @@
 // The W4A8 probe (pre-registration:
-// docs/specs/2026-09-22-w4a8-dpas-probe-design.md; results:
+// docs/superpowers/specs/2026-09-22-w4a8-dpas-probe-design.md; results:
 // docs/probe-w4a8-2026-09-23.md).
 //
 // ONE shape, design §4: gate||up, K = 5120, N = 34816, M = 2048 -- 730.1 GFLOP,

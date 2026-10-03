@@ -1,5 +1,5 @@
 // pf_int8 - spec 5's int8 prefill linears
-// (docs/specs/2026-09-24-spec5-int8-prefill-linears-design.md): the h8 path of
+// (docs/superpowers/specs/2026-09-24-spec5-int8-prefill-linears-design.md): the h8 path of
 // docs/probe-w4a8-2026-09-23.md sections 14-15, promoted from
 // tools/probe/probe_w8a8.cl with the arithmetic unchanged. One source, built
 // per family by a define:

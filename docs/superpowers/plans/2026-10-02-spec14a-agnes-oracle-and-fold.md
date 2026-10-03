@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 + torch + transformers (CPU, the oracle container `tools/oracle/run_in_container.sh`).
 
-**Spec:** `docs/specs/2026-10-02-spec14-agnes-3-flash-design.md` (§1, §2 the fold, §3.4, §4 G1-G3, §6 14a).
+**Spec:** `docs/superpowers/specs/2026-10-02-spec14-agnes-3-flash-design.md` (§1, §2 the fold, §3.4, §4 G1-G3, §6 14a).
 
 ## Global Constraints
 

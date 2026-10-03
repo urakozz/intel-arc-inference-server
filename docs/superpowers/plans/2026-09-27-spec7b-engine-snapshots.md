@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, Level Zero, CMake/ctest.
 
-**Spec:** `docs/specs/2026-09-27-spec7-prefix-caching-design.md` (§3.1, §3.2, §3.4 first bullet, §4 C1, §5 S3). Plan 7a's P0 doc (`docs/probe-prefix-cache-2026-09-27.md`) has the measured copy rates.
+**Spec:** `docs/superpowers/specs/2026-09-27-spec7-prefix-caching-design.md` (§3.1, §3.2, §3.4 first bullet, §4 C1, §5 S3). Plan 7a's P0 doc (`docs/probe-prefix-cache-2026-09-27.md`) has the measured copy rates.
 
 ## Global Constraints
 

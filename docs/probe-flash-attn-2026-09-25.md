@@ -1,6 +1,6 @@
 # Probe: flash attention in prefill (spec 6 P0 and P1), 2026-09-25
 
-Spec: `docs/specs/2026-09-25-spec6-flash-attention-128k-design.md`.
+Spec: `docs/superpowers/specs/2026-09-25-spec6-flash-attention-128k-design.md`.
 Plan: `docs/superpowers/plans/2026-09-25-spec6a-flash-attn-baseline-and-probe.md`.
 
 Every number is **measured** unless marked **derived**.

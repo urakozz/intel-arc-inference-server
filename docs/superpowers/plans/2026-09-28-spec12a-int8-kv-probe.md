@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 + torch (CPU, the oracle container).
 
-**Spec:** `docs/specs/2026-09-28-spec12-int8-kv-cache-design.md` (§2 the three schemes, §4 Q1, §6 12a).
+**Spec:** `docs/superpowers/specs/2026-09-28-spec12-int8-kv-cache-design.md` (§2 the three schemes, §4 Q1, §6 12a).
 
 ## Global Constraints
 

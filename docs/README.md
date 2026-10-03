@@ -96,6 +96,6 @@ narrative, and the numbered guides cite them where they matter.
 
 ## Designs
 
-[specs/](specs/) holds the design documents behind the
+[superpowers/specs/](superpowers/specs/) holds the design documents behind the
 larger changes: the decode core, the prefill path, the tokenizer and HTTP layer,
 the Level Zero prefill GEMM, and the prefill parity programme.

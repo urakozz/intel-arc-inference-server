@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, OpenCL C kernels compiled with ocloc, Level Zero, CMake/ctest.
 
-**Spec:** `docs/specs/2026-09-27-spec8-mtp-speculative-decoding-design.md` (§3.1-3.5, §4 M1, M2, M5, §5 D3). Needs: plan 8a's doc (`docs/probe-mtp-2026-09-27.md`: the head's wiring, K, the commit mechanism), plan 8a's `capture.cc` M parameter and `tools/oracle/mtp_ref.py`; spec 7 plan 7b merged (`Engine::save_state/load_state/save_kv/load_kv`, `set_block_hook`).
+**Spec:** `docs/superpowers/specs/2026-09-27-spec8-mtp-speculative-decoding-design.md` (§3.1-3.5, §4 M1, M2, M5, §5 D3). Needs: plan 8a's doc (`docs/probe-mtp-2026-09-27.md`: the head's wiring, K, the commit mechanism), plan 8a's `capture.cc` M parameter and `tools/oracle/mtp_ref.py`; spec 7 plan 7b merged (`Engine::save_state/load_state/save_kv/load_kv`, `set_block_hook`).
 
 ## Global Constraints
 

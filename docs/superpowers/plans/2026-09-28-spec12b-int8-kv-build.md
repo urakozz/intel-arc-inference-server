@@ -12,7 +12,7 @@
 
 **Tech Stack:** OpenCL C (ocloc), C++20, Level Zero, ctest.
 
-**Spec:** `docs/specs/2026-09-28-spec12-int8-kv-cache-design.md` (§3, §4 Q2-Q5, §5). Needs plan 12a's verdict (`docs/probe-int8-kv-2026-09-28.md`).
+**Spec:** `docs/superpowers/specs/2026-09-28-spec12-int8-kv-cache-design.md` (§3, §4 Q2-Q5, §5). Needs plan 12a's verdict (`docs/probe-int8-kv-2026-09-28.md`).
 
 ## Global Constraints
 

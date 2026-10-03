@@ -8,7 +8,7 @@
 
 **Tech Stack:** OpenCL C (ocloc), C++20, Level Zero.
 
-**Spec:** `docs/specs/2026-09-28-spec11-flash-prefill-levers-design.md`. Evidence: `docs/research-flash-prefill-2026-09-27.md` (levers table, P0-P4), `tools/probe/pfa_levers_research.cl` (the research arms, including the failed 32-row K load).
+**Spec:** `docs/superpowers/specs/2026-09-28-spec11-flash-prefill-levers-design.md`. Evidence: `docs/research-flash-prefill-2026-09-27.md` (levers table, P0-P4), `tools/probe/pfa_levers_research.cl` (the research arms, including the failed 32-row K load).
 
 ## Global Constraints
 

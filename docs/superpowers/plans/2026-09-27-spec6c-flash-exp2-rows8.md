@@ -8,7 +8,7 @@
 
 **Tech Stack:** OpenCL C (ocloc), C++20, Level Zero, ctest.
 
-**Spec:** `docs/specs/2026-09-25-spec6-flash-attention-128k-design.md` (§3.1, §4 K1-K4, §5 F1/F2, §8). Evidence: `docs/research-flash-prefill-2026-09-27.md` (§0, the ranked table rows 1-2, P1). **Operator ruling (2026-09-27): `exp2` approved** in place of spec 6 §3.1's "`exp`, not `native_exp`".
+**Spec:** `docs/superpowers/specs/2026-09-25-spec6-flash-attention-128k-design.md` (§3.1, §4 K1-K4, §5 F1/F2, §8). Evidence: `docs/research-flash-prefill-2026-09-27.md` (§0, the ranked table rows 1-2, P1). **Operator ruling (2026-09-27): `exp2` approved** in place of spec 6 §3.1's "`exp`, not `native_exp`".
 
 ## Global Constraints
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** OpenCL C (ocloc), C++20, Level Zero, ctest.
 
-**Spec:** `docs/specs/2026-09-28-spec13-batching-design.md` (§3, §4 B1). Needs `docs/probe-batching-2026-09-28.md` and the operator's decision on B, layout and chunk size.
+**Spec:** `docs/superpowers/specs/2026-09-28-spec13-batching-design.md` (§3, §4 B1). Needs `docs/probe-batching-2026-09-28.md` and the operator's decision on B, layout and chunk size.
 
 ## Global Constraints
 

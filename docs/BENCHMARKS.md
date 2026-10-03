@@ -693,7 +693,7 @@ network artifact.
 `b70-serve --mtp K` drafts K tokens with the checkpoint's MTP head, verifies
 them in one main-model step of M = K + 1 rows, and accepts on the host (greedy,
 or lossless sampling after Leviathan et al. 2023). Spec:
-`docs/specs/2026-09-27-spec8-mtp-speculative-decoding-design.md`, with its §8
+`docs/superpowers/specs/2026-09-27-spec8-mtp-speculative-decoding-design.md`, with its §8
 amendment. The probe and the engine are in `docs/probe-mtp-2026-09-27.md`.
 
 **Scope.** The MTP lists are compiled at max_len 16384 only (spec 8 §8 A9), so

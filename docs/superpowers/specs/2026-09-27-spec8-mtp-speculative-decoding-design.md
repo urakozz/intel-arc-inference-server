@@ -32,7 +32,7 @@ The weights are read once for all M rows, so a verify step costs little
 more than a single-token step, and every accepted draft is a token for free.
 
 Phase 0 built for this: every decode kernel has an `M ∈ [1, 8]` loop over
-**consecutive positions** (`docs/specs/2026-08-22-phase0-decode-core-design.md`
+**consecutive positions** (`docs/superpowers/specs/2026-08-22-phase0-decode-core-design.md`
 §9: `gdn_step<M>` advances the recurrent state token by token, `attn_decode`
 applies the causal bound `position <= pos + m`), `DecodeScratch::kM` = 8 is
 allocated, and only M = 1 is compiled (`capture.cc`, `kCapM`).

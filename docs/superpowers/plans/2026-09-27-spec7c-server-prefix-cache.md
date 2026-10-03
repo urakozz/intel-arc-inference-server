@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, nlohmann::json, Level Zero host allocations, Python 3 for the replay tool.
 
-**Spec:** `docs/specs/2026-09-27-spec7-prefix-caching-design.md` (§3, §4 C2-C5, §5 S1-S2). Uses plan 7a (tool-call output, `--log-requests`, the recorded session in `tests/golden/opencode/session1/`, `docs/probe-prefix-cache-2026-09-27.md`) and plan 7b (`Engine::save_state`, `load_state`, `save_kv`, `load_kv`, `set_block_hook`, `kBlock`).
+**Spec:** `docs/superpowers/specs/2026-09-27-spec7-prefix-caching-design.md` (§3, §4 C2-C5, §5 S1-S2). Uses plan 7a (tool-call output, `--log-requests`, the recorded session in `tests/golden/opencode/session1/`, `docs/probe-prefix-cache-2026-09-27.md`) and plan 7b (`Engine::save_state`, `load_state`, `save_kv`, `load_kv`, `set_block_hook`, `kBlock`).
 
 ## Global Constraints
 
