@@ -242,8 +242,11 @@ class MtpHead:
         return out
 
 
-def build_main(snapshot: str):
-    """The main model exactly as dump.py builds it (dequantised, strict, eager)."""
+def build_main(snapshot: str, stream: bool = False):
+    """The main model exactly as dump.py builds it (dequantised, strict, eager).
+
+    stream: dump.py --stream's layer-streamed weights (stream.py), for a host with less
+    RAM than the bf16 model (Agnes on the Mac); the forward is the same."""
     dump = _load_module("dump")
     gs = dump.check_quant_config(snapshot)
     tc = text_config(snapshot)
@@ -254,6 +257,9 @@ def build_main(snapshot: str):
         model = dump.Qwen3_5ForCausalLM(tc)
         if agnes.is_agnes(raw):   # spec 14: the parallel FFN, unfolded, as dump.py
             agnes.attach_parallel_ffn(model, tc, agnes.translate_text_config(raw)[1])
+    if stream:
+        dump.stream_weights(model, snapshot, gs, tc)
+        return model.eval(), tc
     sd = dump.build_state_dict(snapshot, gs)
     model.load_state_dict(sd, strict=True, assign=True)
     del sd
@@ -282,7 +288,8 @@ def wiring_inputs(pre, post, w):
 
 
 @torch.no_grad()
-def dump(snapshot: str, prompts_dir: str, cont_dir: str, out_dir: str, names, n_rows: int) -> None:
+def dump(snapshot: str, prompts_dir: str, cont_dir: str, out_dir: str, names, n_rows: int,
+         stream: bool = False) -> None:
     """Plan 8b M1's reference: per golden prompt, the head's depth-1 logits at the rows the
     engine drafts from. With prompt length n and ids = prompt + cont[:n_rows + 1], row i
     (i < n_rows) is the head on (post-norm h[n-1+i], ids[n+i]) at position n-1+i, attending
@@ -292,7 +299,7 @@ def dump(snapshot: str, prompts_dir: str, cont_dir: str, out_dir: str, names, n_
     (the token fed at each row)."""
     from safetensors.torch import save_file
     t0 = time.time()
-    model, tc = build_main(snapshot)
+    model, tc = build_main(snapshot, stream)
     head = MtpHead.from_snapshot(snapshot, tc, model.model.embed_tokens.weight, model.lm_head.weight)
     print(f"loaded {time.time() - t0:.0f}s", flush=True)
     os.makedirs(out_dir, exist_ok=True)
@@ -324,8 +331,9 @@ def main() -> None:
         ap.add_argument("--out", required=True)
         ap.add_argument("--names", default="code,prose,cjk")
         ap.add_argument("--rows", type=int, default=32)
+        ap.add_argument("--stream", action="store_true", help="layer-streamed main model (dump.py --stream)")
         a = ap.parse_args()
-        dump(a.snapshot, a.prompts, a.cont, a.out, a.names.split(","), a.rows)
+        dump(a.snapshot, a.prompts, a.cont, a.out, a.names.split(","), a.rows, a.stream)
         return
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("snapshot")
