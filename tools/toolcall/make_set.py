@@ -2,6 +2,7 @@
 """Build the tool-call acceptance set (spec 5 T0, gate A4).
 
     make_set.py <snapshot> <out dir>
+    make_set.py --from <existing set dir> <snapshot> <out dir>   (same conversations, re-tokenised)
 
 36 multi-turn agentic-coding conversations, six templates times six real files
 of this repository, each ending where the assistant's next turn is a tool call.
@@ -254,12 +255,59 @@ def scenarios(corpus):
         yield (f"t6_usage-{slug}", "read", b6, False)
 
 
+def load_tokenizer(snap: str):
+    """AutoTokenizer on the snapshot. A checkpoint whose config.json names remote code
+    (Agnes 3.0 Flash, spec 14: `auto_map`) needs trust_remote_code just to read its config;
+    the tokenizer itself is tokenizer.json either way. Qwen3.8 loads exactly as before."""
+    from transformers import AutoTokenizer
+    with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:
+        remote = "auto_map" in json.load(f)
+    return AutoTokenizer.from_pretrained(snap, trust_remote_code=True) if remote \
+        else AutoTokenizer.from_pretrained(snap)
+
+
+def retokenise(snap: str, src: str, out: str) -> None:
+    """--from: the SAME conversations as an existing set (its <name>.json: messages and
+    tools as rendered then), re-rendered with another checkpoint's template and tokenizer.
+    Rescanning the repository would change the conversations with the tree."""
+    tok = load_tokenizer(snap)
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(src, "manifest.json"), encoding="utf-8") as f:
+        names = [m["name"] for m in json.load(f)]
+    manifest, same = [], 0
+    for name in names:
+        with open(os.path.join(src, f"{name}.json"), encoding="utf-8") as f:
+            sc = json.load(f)
+        r = tok.apply_chat_template(sc["messages"], tools=sc["tools"], add_generation_prompt=True,
+                                    enable_thinking=sc.get("enable_thinking", False), tokenize=True)
+        ids = [int(x) for x in (r["input_ids"] if hasattr(r, "keys") else r)]
+        if not MIN_IDS <= len(ids) <= MAX_IDS:
+            sys.exit(f"FATAL: {name} renders to {len(ids)} ids, outside {MIN_IDS} to {MAX_IDS}")
+        text = " ".join(map(str, ids)) + "\n"
+        with open(os.path.join(src, f"{name}.ids"), encoding="utf-8") as f:
+            same += f.read() == text
+        with open(os.path.join(out, f"{name}.json"), "w", encoding="utf-8") as f:
+            json.dump(sc, f, indent=1, ensure_ascii=False)
+            f.write("\n")
+        with open(os.path.join(out, f"{name}.ids"), "w", encoding="utf-8") as f:
+            f.write(text)
+        manifest.append({"name": name, "ids": len(ids),
+                         "sha256": hashlib.sha256(text.encode()).hexdigest()})
+    with open(os.path.join(out, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=1)
+        f.write("\n")
+    print(f"{len(manifest)} scenarios from {src} -> {out}; ids identical to the source set's: "
+          f"{same}/{len(manifest)}")
+
+
 def main() -> None:
+    if len(sys.argv) == 5 and sys.argv[1] == "--from":
+        retokenise(sys.argv[3], sys.argv[2], sys.argv[4])
+        return
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     snap, out = sys.argv[1], sys.argv[2]
-    from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(snap)
+    tok = load_tokenizer(snap)
     with open(os.path.join(HERE, "tools.json"), encoding="utf-8") as f:
         tools = json.load(f)
 
