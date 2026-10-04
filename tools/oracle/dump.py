@@ -66,6 +66,9 @@ dequant_gptq = _dequant.dequant_gptq
 _spec = importlib.util.spec_from_file_location("oracle_agnes", os.path.join(_HERE, "agnes.py"))
 _agnes = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_agnes)
+_spec = importlib.util.spec_from_file_location("oracle_stream", os.path.join(_HERE, "stream.py"))
+_stream = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_stream)
 
 SKIP_PREFIXES = ("model.visual.", "mtp.")
 QUANT_SUFFIXES = (".scales", ".qzeros", ".g_idx")
@@ -135,8 +138,8 @@ def shard_paths(snapshot: str) -> list[str]:
     return paths
 
 
-def build_state_dict(snapshot: str, group_size: int) -> dict[str, torch.Tensor]:
-    """Dequantise the checkpoint into a plain bf16 state dict for Qwen3_5ForCausalLM."""
+def open_shards(snapshot: str) -> dict[str, object]:
+    """Checkpoint name -> its shard's safe_open handle, duplicates refused."""
     handles = {}
     where: dict[str, object] = {}
     for path in shard_paths(snapshot):
@@ -146,11 +149,21 @@ def build_state_dict(snapshot: str, group_size: int) -> dict[str, torch.Tensor]:
             if key in where:
                 die(f"duplicate tensor name across shards: {key}")
             where[key] = h
+    return where
 
-    sd: dict[str, torch.Tensor] = {}
+
+_FAST_CHECKED: set[str] = set()
+
+
+def convert(where: dict, keys, group_size: int, sd: dict, fast: bool = False) -> tuple[int, str]:
+    """Dequantise / copy `keys` (checkpoint names) into `sd` under model names.
+
+    fast: stream.dequant_t (C++, bit-identical to dequant_gptq + transpose, spot-checked
+    per call) - the streamed path re-dequantises every layer per forward.
+    Returns (int4 tensors dequantised, the lm_head's kind if it was among them)."""
     n_quant = 0
     lm_head_kind = "absent"
-    for key in sorted(where):
+    for key in keys:
         # `mtp.*` lives in its own shard (`model_extra_tensors.safetensors`) on
         # both checkpoints and is skipped by NAME, so the shard is opened, its
         # header read, and nothing in it is ever materialised. The duplicate
@@ -165,12 +178,19 @@ def build_state_dict(snapshot: str, group_size: int) -> dict[str, torch.Tensor]:
             if scales_key not in where:
                 die(f"{key} has no {scales_key}")
             qw = where[key].get_tensor(key)
-            chunk = DEQUANT_CHUNK if qw.shape[1] > DEQUANT_CHUNK_ABOVE else 0
-            # dequant_gptq returns [K, N] = [in, out]; nn.Linear wants [out, in].
-            w = dequant_gptq(qw, where[scales_key].get_tensor(scales_key), group_size, chunk)
-            del qw
-            sd[map_name(base) + ".weight"] = w.t().contiguous()
-            del w
+            if fast:
+                sd[map_name(base) + ".weight"] = _stream.dequant_t(
+                    qw, where[scales_key].get_tensor(scales_key), group_size,
+                    check=key not in _FAST_CHECKED)
+                _FAST_CHECKED.add(key)
+                del qw
+            else:
+                chunk = DEQUANT_CHUNK if qw.shape[1] > DEQUANT_CHUNK_ABOVE else 0
+                # dequant_gptq returns [K, N] = [in, out]; nn.Linear wants [out, in].
+                w = dequant_gptq(qw, where[scales_key].get_tensor(scales_key), group_size, chunk)
+                del qw
+                sd[map_name(base) + ".weight"] = w.t().contiguous()
+                del w
             n_quant += 1
             if base == "lm_head":
                 lm_head_kind = "int4 (dequantised here)"
@@ -181,6 +201,14 @@ def build_state_dict(snapshot: str, group_size: int) -> dict[str, torch.Tensor]:
             sd[map_name(key)] = t
             if key == "lm_head.weight":
                 lm_head_kind = "bf16 (as shipped)"
+    return n_quant, lm_head_kind
+
+
+def build_state_dict(snapshot: str, group_size: int) -> dict[str, torch.Tensor]:
+    """Dequantise the checkpoint into a plain bf16 state dict for Qwen3_5ForCausalLM."""
+    where = open_shards(snapshot)
+    sd: dict[str, torch.Tensor] = {}
+    n_quant, lm_head_kind = convert(where, sorted(where), group_size, sd)
     if lm_head_kind == "absent":
         die("no lm_head.weight and no lm_head.qweight - this checkpoint has no head")
     # Printed because it is the one tensor whose FORMAT differs between the two
@@ -190,6 +218,42 @@ def build_state_dict(snapshot: str, group_size: int) -> dict[str, torch.Tensor]:
     print(f"state dict: {len(sd)} tensors, {n_quant} dequantised from int4, "
           f"{sum(t.numel() * t.element_size() for t in sd.values()) / 2**30:.2f} GiB")
     return sd
+
+
+def stream_weights(model, snapshot: str, group_size: int, tc, keep: int = 0):
+    """--stream: the layers' weights materialised per forward (stream.py), the rest resident.
+
+    The same `convert` (dequant_gptq, map_name) as the resident path, called per layer."""
+    import re
+    where = open_shards(snapshot)
+    n = tc.num_hidden_layers
+    per: dict[int, list[str]] = {i: [] for i in range(n)}
+    rest = []
+    for key in sorted(where):
+        m = re.match(r"model\.language_model\.layers\.(\d+)\.", key)
+        (per[int(m.group(1))] if m else rest).append(key)
+    resident: dict[str, torch.Tensor] = {}
+    _, lm_head_kind = convert(where, rest, group_size, resident)
+    if lm_head_kind == "absent":
+        die("no lm_head.weight and no lm_head.qweight - this checkpoint has no head")
+    print(f"lm_head: {lm_head_kind}")
+
+    def layer_sd(i: int) -> dict[str, torch.Tensor]:
+        sd: dict[str, torch.Tensor] = {}
+        convert(where, per[i], group_size, sd, fast=True)
+        pre = f"model.layers.{i}."
+        bad = [k for k in sd if not k.startswith(pre)]
+        if bad:
+            raise RuntimeError(f"layer {i}: {bad[:3]} outside {pre}")
+        return {k[len(pre):]: v for k, v in sd.items()}
+
+    pf = _stream.attach(model, list(model.model.layers), layer_sd, resident,
+                        rebuild=[(model.model, "rotary_emb", lambda: type(model.model.rotary_emb)(tc))],
+                        keep=range(min(keep, n)))
+    print(f"streamed: {n - min(keep, n)} layers per forward, {min(keep, n)} kept once loaded, "
+          f"{len(resident)} resident tensors "
+          f"{sum(t.numel() * t.element_size() for t in resident.values()) / 2**30:.2f} GiB")
+    return pf
 
 
 def check_quant_config(snapshot: str) -> int:
@@ -276,6 +340,11 @@ def main() -> None:
     ap.add_argument("--max-prompt", type=int, default=64)
     ap.add_argument("--mlp-in", help="also write the listed layers' MLP inputs here (spec 14 G1)")
     ap.add_argument("--mlp-in-layers", default="0,3,35,71")
+    ap.add_argument("--stream", action="store_true",
+                    help="layer-streamed weights (stream.py): one layer resident at a time, for "
+                         "hosts with less RAM than the bf16 model (Agnes on the Mac)")
+    ap.add_argument("--stream-keep", type=int, default=0,
+                    help="with --stream: layers 0..N-1 stay resident once loaded (~0.83 GB each on Agnes)")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -325,7 +394,16 @@ def main() -> None:
           f"hidden {tc.hidden_size}, vocab {tc.vocab_size}")
 
     # 2. the weights
-    sd = build_state_dict(args.snapshot, group_size)
+    pf = None
+    if args.stream:
+        # The strict key check up front, by name only (each layer's own load is strict too).
+        where = open_shards(args.snapshot)
+        names = {map_name(k[: -len(".qweight")] + ".weight" if k.endswith(".qweight") else k)
+                 for k in where if not k.startswith(SKIP_PREFIXES) and not k.endswith(QUANT_SUFFIXES)}
+        del where
+        sd = dict.fromkeys(names)
+    else:
+        sd = build_state_dict(args.snapshot, group_size)
     want = set(model.state_dict().keys())
     missing, unexpected = sorted(want - set(sd)), sorted(set(sd) - want)
     if missing or unexpected:
@@ -336,11 +414,16 @@ def main() -> None:
         for k in unexpected:
             print(f"  unexpected: {k}", file=sys.stderr)
         sys.exit(2)
-    model.load_state_dict(sd, strict=True, assign=True)  # assign: no second copy
-    del sd
-    # meta construction left non-persistent buffers (rope inv_freq) empty; rebuild on CPU.
-    model.model.rotary_emb = type(model.model.rotary_emb)(tc)
-    still_meta = [n for n, t in list(model.named_parameters()) + list(model.named_buffers()) if t.is_meta]
+    if args.stream:
+        del sd
+        pf = stream_weights(model, args.snapshot, group_size, tc, args.stream_keep)
+    else:
+        model.load_state_dict(sd, strict=True, assign=True)  # assign: no second copy
+        del sd
+        # meta construction left non-persistent buffers (rope inv_freq) empty; rebuild on CPU.
+        model.model.rotary_emb = type(model.model.rotary_emb)(tc)
+    still_meta = [n for n, t in list(model.named_parameters()) + list(model.named_buffers())
+                  if t.is_meta and not (args.stream and n.startswith("model.layers."))]
     if still_meta:
         die("meta tensors survived the load: " + ", ".join(still_meta[:20]))
     model.eval()
@@ -384,7 +467,8 @@ def main() -> None:
         out = model(input_ids=input_ids, use_cache=True)
     for h in handles:
         h.remove()
-    print(f"prompt forward: {time.time() - t_fwd:.1f}s")
+    print(f"prompt forward: {time.time() - t_fwd:.1f}s"
+          + (f" (dequant wait {pf.seconds:.1f}s)" if pf else ""))
 
     # 4. GDN cache state, read straight after the prompt (decode mutates it in place)
     cache = out.past_key_values
@@ -415,7 +499,10 @@ def main() -> None:
         cache = out.past_key_values
         rows.append(out.logits[0].to(torch.float32))
         cur = rows[-1][-1]
-    print(f"greedy {args.gen} tokens: {time.time() - t_gen:.1f}s -> {tokens}")
+        if pf and step == 0:
+            print(f"  first decode step {time.time() - t_gen:.1f}s", flush=True)
+    print(f"greedy {args.gen} tokens: {time.time() - t_gen:.1f}s -> {tokens}"
+          + (f" (dequant wait total {pf.seconds:.1f}s)" if pf else ""))
 
     tensors = dict(caps)
     tensors.update(states)
@@ -450,6 +537,8 @@ def main() -> None:
     }
     if agnes:   # Qwen3.8's metadata stays exactly as before
         meta["model"] = "agnes (parallel FFN unfolded, tools/oracle/agnes.py)"
+    if args.stream:
+        meta["weights"] = "layer-streamed (tools/oracle/stream.py)"
     save_file(tensors, args.out, metadata=meta)
 
     total = 0
