@@ -30,7 +30,9 @@ print("chat_template.jinja sha256", hashlib.sha256(source.encode("utf-8")).hexdi
 tokenizer = None
 if os.path.exists(os.path.join(snapshot, "tokenizer.json")):
     from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(snapshot)
+    # config.json names remote code (`auto_map`): AutoTokenizer needs trust_remote_code
+    # to read it; the tokenizer and template are tokenizer.json / chat_template.jinja.
+    tokenizer = AutoTokenizer.from_pretrained(snapshot, trust_remote_code=True)
 
 
 def render(case):
