@@ -35,7 +35,11 @@
 ```
 tools/box.sh dir                                            # the spec14-agnes tree
 ssh $BOX 'df -h ~; free -g'
-ssh $BOX 'uvx --from huggingface_hub hf download urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ'   # 22.9 GB
+# the Mac already holds the complete checkpoint (verified 2026-10-04): copy it over the LAN
+# instead of downloading again; fall back to `hf download` on the box only if this fails
+rsync -a --info=progress2 ~/.cache/huggingface/hub/models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ \
+  $BOX:~/.cache/huggingface/hub/
+ssh $BOX 'uvx --from huggingface_hub hf download urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ'   # no-op if the copy is complete
 ssh $BOX 'uvx --from huggingface_hub hf download Agnes-AI/Agnes-3.0-Flash --dry-run'               # size first
 ```
 Pass: the Agnes snapshot complete (`model.safetensors.index.json` names 6 files, all present, no `.incomplete`); the bf16 `Agnes-AI/Agnes-3.0-Flash` downloaded if it fits (else A4's reference is the dequantised W4A16, labelled so). Qwen3.8 gate checkpoint and `oracle-out-primary` present as before.
