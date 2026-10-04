@@ -142,3 +142,39 @@ inputs; the rel L2 of ~2e-7 is fp32 accumulation order over K = 19456.
   position), the fold proof on real MLP inputs, the golden sets `oracle-out-agnes`, the MTP
   head reference `oracle-out-agnes-mtp`, A4 references.
 - Every card gate (G0, G1 card, G2, G4, G5), the GEMV tuning of the two new shapes, speed.
+
+## Phase 1 continued on the Mac (2026-10-04, Linux container)
+
+The items above pending "for lack of transformers 5" ran in a `python:3.12-slim` container
+on the same Mac (Docker Desktop, 16 vCPUs, capped at 28 GB; torch 2.14.1+cpu,
+transformers 5.15.0 - the box image's version). Agnes in bf16 (~62 GB) never fits, so the
+model is **layer-streamed**: built on `meta`, each decoder layer dequantised by the same
+`dump.convert` rule when its forward starts and dropped after it (`tools/oracle/stream.py`,
+`dump.py --stream`; setup and caveats in `tools/oracle/README.md`, "The Mac path"). Still no
+card measurement.
+
+| item | result |
+|---|---|
+| `test_agnes.py` | **4/4**. Check 4 failed first: `attach_parallel_ffn` built `Qwen3_5MLP(config)`, 5.15's signature is `(config, intermediate_size)` - `dump.py` would have died on the box too. Fixed. |
+| `modeling_agnes.py` vs `agnes.py` | `long.ids[:64]`, eager, no cache, both streamed: per-position cos min 1.000000000, argmax 64/64, max\|d\| 0 - **bit-identical logits**. The remote file imports `transformers.cache_utils.LAYER_TYPE_CACHE_MAPPING`, which no released transformers (5.15-5.18) nor main has; shimmed as `{}` (it only registers cache layers, and no cache is used). |
+| fold proof, real MLP inputs | layers 0 / 3 / 35 / 71, the 42 prose rows captured by `dump.py --mlp-in`: cos min 1.000000000, max\|d\| 0, weights exact - PASS. fp32 folded = two-branch **bitwise** on this torch/MKL (also on the synthetic rows, where torch 2.2 gave max\|d\| 1.5e-5): its K blocking splits at 17408. |
+| golden sets `oracle-out-agnes` | prose / code / cjk, `--gen 32`, unfolded, eager. Continuations: prose " By eight the first trawlers would be back with the day's catch. By nine the whole town would be awake and arguing about something.\n\nI had"; code "\n\ndef clamp2(values, lo, hi):\n    return [min(max(v, lo), hi) for v in values]\n\ndef clamp3(values"; cjk "️\n\n我站在甲板上，看着对岸的轮廓一点点清晰起来。雾气还没散尽，远处的山像被水浸湿的墨迹。". 26 / 24 / 29 distinct of 32, `resid.L71` finite. |
+| wall time per prompt | prose 2379 s (prompt forward 263 s, 32 steps 2100 s); code 3118 s (895 s + 2208 s, the Mac busy with other work); cjk 1069 s (255 s + 803 s). Peak RSS 22.1-22.5 GiB. |
+| prompt ids | Agnes's `tokenizer.json` gives the committed `prose/code/cjk.ids` byte-identical (42 / 61 / 38); the golden gates keep `tests/golden/prompts`. |
+| MTP head reference | `oracle-out-agnes-mtp/m1`, 32 rows per prompt, 561 s for three; continuation = the oracle's greedy 33 ids (`<name>.cont256.ids`); head top-1 vs the main model's next greedy id 29/32, 22/32, 21/32. |
+| A4 set | `tests/golden/toolcall-agnes` (`make_set.py --from`, the same 36 conversations): 36/36 ids identical to Qwen3.8's. |
+| P6 template | `dump_agnes_template.py` through `apply_chat_template`: `git diff tests/tokenizer` empty. |
+| passkey | `passkey.py` at 60000: 59963 ids, needle at 3001 / 29953 / 56929. |
+
+Two Mac-only performance fixes, both bit-exact and both in `stream.py`: a C++ `dequant_t`
+(`dequant_gptq` + transpose, ~15x faster; every tensor's first dequant re-checked against
+`dequant.py` on 64 columns), and grouped bf16 `conv1d` on one thread (torch 2.14's depthwise
+bf16 conv is 50-4000x slower multi-threaded on this AVX2 CPU; outputs equal across thread
+counts). One operational lesson: uncapped, the VM grew to 60 GB and macOS swapped 38 GB
+(a decode step 360 s instead of 43 s) until Docker Desktop was restarted; the container
+is now capped at 28 GB.
+
+Left for the box: every device gate (G0, G1 card, G2 against these sets, G4 incl. M1 against
+`oracle-out-agnes-mtp`, G5), `load_agnes_test`, `parity_test` on Agnes's tokenizer, the GEMV
+tuning, A4 scoring and speed.
+
