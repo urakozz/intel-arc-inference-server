@@ -145,11 +145,12 @@ Idle box, device 0, interleaved pairs, median of 3. No bars before P0; the recor
 
 ## 7. Stages
 
-- **15a, reference and quantisation (no box: Docker on the Mac, the bf16 checkpoint layer-streamed):**
+- **15a, reference and quantisation (CPU; the box's oracle container, layer-streamed):**
   R1's reference and golden sets; router statistics (experts' load per layer on the golden prompts
   and two A4 prompts); the exact router formula; R5 for RTN g64 and, once the operator's quant
-  exists, AutoRound g64. Needs the bf16 checkpoint on the Mac (71.9 GB; the Mac has ~98 GB free
-  after Agnes).
+  exists, AutoRound g64. The bf16 checkpoint (71.9 GB) does not fit on the Mac (operator,
+  2026-10-04), so the model-dependent steps run on the box's CPU; the code, its unit tests on
+  synthetic tensors and the tensor-index checks are written on the Mac.
 - **15b, `ModelDesc` for every per-model shape** (writable without the box, validated on it): R0.
 - **15c, decode:** the MoE kernels (§4.1-4.2), the variants (§4.3), the loader (fused-expert
   repack, the quant format chosen in decision 1); P0; R2, R3 (decode path); decode speed.
