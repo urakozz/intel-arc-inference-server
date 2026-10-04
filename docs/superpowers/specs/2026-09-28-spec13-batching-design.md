@@ -90,3 +90,20 @@ A mixed layout (one long slot for the main thread, small slots for subagents, e.
 - MTP together with batching (a later spec).
 - More than one GPU; B > 4.
 - Prefix sharing between concurrent sequences (vLLM-style block tables).
+
+## 8. Amendment - 2026-10-04: admission and measurement
+
+- **§2 restated: never batch decode through the prefill path;** one captured decode list per
+  batch size, and a single-request list for B = 1, so a lone request never pays for batching.
+- **§3 scheduling, added: batched admission with a short burst hold.** Waiting prompts are admitted
+  together in one prefill, with a hold of a few milliseconds to catch requests that arrive in a
+  burst (opencode's subagents arrive like that). Trade-off against chunk interleaving: admission
+  stalls the rows already decoding, so 13a measures both (one admission prefill for the burst
+  against chunks interleaved with decode ticks) and the worst inter-token gap of a running request
+  for each; **(decide)** after 13a.
+- **For an MoE follow-on** (spec 15 batched): per-(token, expert) streaming at the decode kernels'
+  bandwidth may beat a grouped small-M kernel up to a handful of rows; measured, not assumed. For
+  dense Qwen3.8 the rows share weights and spec 8b's M-row step times apply as written.
+- **§5, measurement:** llama-benchy's total tg at concurrency counts staggered admission inside the
+  decode window as slow decode; every concurrency row states how admission was timed.
+
