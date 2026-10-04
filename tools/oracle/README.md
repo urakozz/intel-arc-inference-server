@@ -25,6 +25,8 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `golden.sh` | The production run: the three prompts, serially, `--gen 32`. This is the script that made the files plan 3 compares against - committed rather than retyped. `PROMPTS` names which sets to build; `--max-prompt 4096` since spec 2. |
 | `make_long_prompt.sh` | Builds `tests/golden/prompts/long.ids` (2820 ids) and `long.txt` from the three committed prompts, on the Mac, with no model and no tokenizer. Spec 2 §6.2's ≥ 2048-id prompt. |
 | `check.sh` | Re-reads the three written files in a separate process and prints the block quoted under "Sanity checks" below. |
+| `stream.py` | Layer-streamed weights for `dump.py --stream` / `mtp_ref.py --dump --stream` (spec 14, the Mac path below): the model on `meta`, embed/norm/lm_head resident, each decoder layer materialised by a forward pre-hook and dropped after its forward; plus a bit-exact C++ `dequant_t` and the single-thread grouped conv1d. |
+| `agnes_remote_check.py` | Agnes: our reference (`agnes.py`) against the checkpoint's own `modeling_agnes.py` (trust_remote_code), per-position logits on 64 ids, both streamed. |
 | `vllm_check.py` | The third implementation: vLLM's own greedy 32 tokens on the same three prompt id files, compared against the golden `tokens`. Closes the trust chain's last link - run and recorded 2026-08-25, **96/96** (`docs/14-golden-gate.md` §cross-check). |
 
 Prompts live in `tests/golden/prompts/`: `prose.txt` (plain English, **42 ids**),
@@ -90,7 +92,7 @@ changes what the gate means. Since spec 1.6 §5.1 there are two:
 | `oracle-out/` | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` (HF cache) | bf16 |
 | `oracle-out-rtn/` | `~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** |
 | `oracle-out-long/` | `~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** - the spec 2 §6.2 long prompt only, **NOT YET RUN** (below) |
-| `oracle-out-agnes/` | `urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ` (HF cache) | bf16 - spec 14; `dump.py` builds Agnes from `config.json` (`agnes.py`: Qwen3.5 + the parallel FFN, unfolded), **NOT YET RUN** (validation checklist) |
+| `oracle-out-agnes/` | `urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ` (HF cache) | bf16 - spec 14; `dump.py` builds Agnes from `config.json` (`agnes.py`: Qwen3.5 + the parallel FFN, unfolded); **dumped on the Mac 2026-10-04**, layer-streamed (the Mac path below) - rsync it to the box |
 
 `golden.sh` takes `OUT_DIR` and neither default clobbers the other. It reads the
 **committed** `tests/golden/prompts/*.ids` rather than re-tokenizing: the two
@@ -299,6 +301,63 @@ The three continuations as text:
 finite in all three. `dump.py`'s own aborts (strict load, no surviving meta
 tensor, `tokens` length, every GDN layer's state present, `resid.L63` finite)
 also passed inside each run, or nothing would have been written.
+
+### The Mac path: Agnes in a Linux container, layer-streamed (spec 14, 2026-10-04)
+
+Agnes 3.0 Flash dequantised to bf16 is ~62 GB, and the x86_64 Mac's own Python stops at
+torch 2.2 (no transformers 5). So the Agnes oracle runs on the Mac in a plain Linux
+container, with the weights **streamed one decoder layer at a time** (`stream.py`).
+The container (kept between sessions; `docker start agnes-ref` after a Docker restart):
+
+```bash
+# from the repo (or worktree) root on the Mac
+docker run -d --name agnes-ref -v ~/.cache/huggingface:/hf:ro -v "$PWD":/ws -e HF_HOME=/hf \
+  -w /ws python:3.12-slim sleep infinity
+docker update --memory 28g --memory-swap 28g agnes-ref      # see "memory" below
+docker exec agnes-ref pip install --index-url https://download.pytorch.org/whl/cpu torch==2.14.1
+docker exec agnes-ref pip install transformers==5.15.0 safetensors accelerate ninja py-spy
+docker exec agnes-ref sh -c 'apt-get update && apt-get install -y g++ procps'   # stream.py's C++ dequant
+```
+
+Install torch from the CPU index **first** and never let a later `pip install` pull it
+from PyPI (a bare `pip install accelerate` resolves torch to the 2.14.1+cu130 build);
+`transformers==5.15.0` is the box image's version. Then, e.g. one golden prompt:
+
+```bash
+docker exec -d -e HF_HUB_OFFLINE=1 -e PYTHONUNBUFFERED=1 -e TORCH_EXTENSIONS_DIR=/root/torch_ext \
+  agnes-ref sh -c 'S=$(ls -d /hf/hub/models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ/snapshots/*/);
+  python3 tools/oracle/dump.py "$S" --stream --prompt /ws/tests/golden/prompts/prose.ids \
+    --out /ws/oracle-out-agnes/prose.golden.safetensors --gen 32 --max-prompt 4096 \
+    --mlp-in /ws/oracle-out-agnes/mlp_in.safetensors > /ws/oracle-out-agnes/prose.log 2>&1'
+```
+
+(`HF_HOME=/tmp/hf` for anything that loads remote code or `AutoTokenizer` on Agnes:
+`/hf` is read-only and transformers copies `modeling_agnes.py` into `$HF_HOME/modules`.)
+
+What streaming changes, and what it does not:
+
+- **The computation is the resident one.** The model is built on `meta` exactly as
+  before; `dump.convert` (the same `dequant_gptq` rule, the same names) makes each
+  layer's tensors when a forward pre-hook asks, the layer runs, a forward hook returns
+  it to `meta`. The model's own forward, masks, rotary, cache and greedy loop are
+  untouched. A worker thread dequantises the next layer during the current one.
+- **`dequant_t`** (C++, built on first use by `torch.utils.cpp_extension`) is
+  `dequant_gptq(...).t().contiguous()` bit for bit (one fp32 product, one RNE cast; a
+  16-entry table per group and column); ~15x faster, and every tensor's first dequant
+  re-does 64 columns with `dequant.py` and must be equal.
+- **Grouped bf16 `conv1d` runs on one thread.** On the Mac's CPU (i9-9980HK, AVX2,
+  16 vCPUs) torch 2.14's depthwise bf16 conv is 50-4000x slower multi-threaded (Agnes's
+  10240-channel causal conv did not finish in 10 min); outputs are bitwise equal across
+  thread counts. A wrapper on `torch.nn.functional.conv1d` (both modeling files call it).
+- **Memory.** Cap the container at 28 GB. Uncapped (Docker Desktop at 64 GB), the guest
+  page cache over the 18 GB checkpoint plus kept layers grew the VM to 60 GB, macOS
+  swapped 38 GB, and a decode step took 360 s instead of 43 s; Docker Desktop had to be
+  restarted to give the memory back. Streamed, peak RSS is 22 GiB (embed + lm_head
+  4.7 GiB resident, two layers, the mmapped shards). `--stream-keep N` keeps layers
+  0..N-1 once loaded; on this Mac it does not pay.
+
+Measured (prose, 42 ids, `--gen 32`): prompt forward 263 s, 32 greedy steps 2100 s
+(~66 s each), wall 2379 s. Per-prompt times of the full set: the validation checklist.
 
 ## The gate: what these files are compared against, and what it proved
 
