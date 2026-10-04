@@ -36,7 +36,13 @@ def main() -> None:
     dec.add_argument("ids", nargs="+", type=int)
     args = ap.parse_args()
 
-    tok = AutoTokenizer.from_pretrained(args.snapshot)
+    # Agnes 3.0 Flash (spec 14): config.json names remote code (`auto_map`), which
+    # AutoTokenizer must be allowed to read; the tokenizer itself is tokenizer.json.
+    import json
+    with open(os.path.join(args.snapshot, "config.json"), encoding="utf-8") as f:
+        remote = "auto_map" in json.load(f)
+    tok = (AutoTokenizer.from_pretrained(args.snapshot, trust_remote_code=True) if remote
+           else AutoTokenizer.from_pretrained(args.snapshot))
 
     if args.cmd == "encode":
         with open(args.text_file, encoding="utf-8") as f:

@@ -1,0 +1,181 @@
+{
+ "name": "t5_test-openai",
+ "expect": "bash",
+ "enable_thinking": false,
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a coding agent working in a local checkout of b70-inference-server, an LLM inference engine for the Intel Arc Pro B70 written in C++ with Level Zero kernels, plus Python and shell tooling. The repository is at /work.\n\nYou help the user with software engineering tasks: finding code, explaining it, editing it and running builds and tests. Use the tools you are given to inspect the repository; never guess the contents of a file you have not read. Prefer grep and glob to locate code, read to look at it, edit to change it (the oldString must match the file exactly, including indentation) and bash to run commands.\n\nGuidelines:\n- Be concise. Do not explain what you are about to do at length; act.\n- Make one tool call at a time and wait for its result.\n- Keep edits minimal and in the style of the surrounding code.\n- Paths passed to tools are absolute and start with /work.\n- The C++ tree builds with CMake into /work/build; tests are ctest targets named after their source file (for example tests/prefill/dequant_test.cc is dequant_test). The Python tools run with python3 and their tests with python3 -m pytest.\n- Do not commit, push or change git state unless the user asks."
+  },
+  {
+   "role": "user",
+   "content": "I just changed /work/src/server/openai.cc. Run the tests for this file."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/src/server/openai.cc",
+       "limit": 120
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "<file>\n00001| #include \"server/openai.h\"\n00002| \n00003| #include <cmath>\n00004| #include <limits>\n00005| #include <utility>\n00006| \n00007| namespace server {\n00008| namespace {\n00009| \n00010| using json = nlohmann::json;\n00011| \n00012| [[noreturn]] void invalid(const std::string& message) {\n00013|   throw BadRequest(message);\n00014| }\n00015| \n00016| bool is_uint(const json& value) {\n00017|   if (value.is_number_unsigned()) return value.get<uint64_t>() <= UINT32_MAX;\n00018|   return value.is_number_integer() && value.get<int64_t>() >= 0 &&\n00019|          static_cast<uint64_t>(value.get<int64_t>()) <= UINT32_MAX;\n00020| }\n00021| \n00022| uint32_t uint_field(const json& object, const char* name, bool allow_zero) {\n00023|   const json& value = object.at(name);\n00024|   if (!is_uint(value) || (!allow_zero && value.get<uint64_t>() == 0)) {\n00025|     invalid(std::string(name) + (allow_zero ? \" must be a non-negative integer\"\n00026|                                              : \" must be a positive integer\"));\n00027|   }\n00028|   return value.get<uint32_t>();\n00029| }\n00030| \n00031| bool bool_field(const json& object, const char* name) {\n00032|   const json& value = object.at(name);\n00033|   if (!value.is_boolean()) invalid(std::string(name) + \" must be a boolean\");\n00034|   return value.get<bool>();\n00035| }\n00036| \n00037| float probability_field(const json& object, const char* name, bool allow_zero) {\n00038|   const json& value = object.at(name);\n00039|   if (!value.is_number()) invalid(std::string(name) + \" must be a number\");\n00040|   const double number = value.get<double>();\n00041|   if (!std::isfinite(number) || (allow_zero ? number < 0.0 : number <= 0.0) || number > 1.0) {\n00042|     invalid(std::string(name) + \" must be in (0, 1]\");\n00043|   }\n00044|   return static_cast<float>(number);\n00045| }\n00046| \n00047| float temperature_field(const json& object) {\n00048|   const json& value = object.at(\"temperature\");\n00049|   if (!value.is_number()) invalid(\"temperature must be a number\");\n00050|   const double number = value.get<double>();\n00051|   if (!std::isfinite(number) || number < 0.0) invalid(\"temperature must be non-negative\");\n00052|   return static_cast<float>(number);\n00053| }\n00054| \n00055| json base(const Request& r, const std::string& id, uint64_t created, const char* object) {\n00056|   return {\n00057|       {\"id\", id},\n00058|       {\"object\", object},\n00059|       {\"created\", created},\n00060|       {\"model\", r.model},\n00061|   };\n00062| }\n00063| \n00064| std::string frame(json body) {\n00065|   return \"data: \" + body.dump() + \"\\n\\n\";\n00066| }\n00067| \n00068| }  // namespace\n00069| \n00070| Request parse_request(const std::string& body, bool chat) {\n00071|   json request;\n00072|   try {\n00073|     request = json::parse(body);\n00074|   } catch (const json::parse_error&) {\n00075|     invalid(\"invalid JSON body\");\n00076|   }\n00077|   if (!request.is_object()) invalid(\"request body must be an object\");\n00078| \n00079|   Request out;\n00080|   out.chat = chat;\n00081|   if (request.contains(\"model\")) {\n00082|     if (!request.at(\"model\").is_string()) invalid(\"model must be a string\");\n00083|     out.model = request.at(\"model\").get<std::string>();\n00084|   }\n00085| \n00086|   if (request.contains(\"n\")) {\n00087|     if (!is_uint(request.at(\"n\")) || request.at(\"n\").get<uint32_t>() != 1) {\n00088|       invalid(\"n must be 1\");\n00089|     }\n00090|   }\n00091| \n00092|   if (chat) {\n00093|     if (!request.contains(\"messages\")) invalid(\"missing messages\");\n00094|     const json& messages = request.at(\"messages\");\n00095|     if (!messages.is_array()) invalid(\"messages must be an array\");\n00096|     if (messages.empty()) invalid(\"messages must not be empty\");\n00097|     for (const json& message : messages) {\n00098|       if (!message.is_object()) invalid(\"messages entries must be objects\");\n00099|       if (!message.contains(\"role\") || !message.at(\"role\").is_string()) {\n00100|         invalid(\"message role must be a string\");\n00101|       }\n00102|       if (!message.contains(\"content\") || !message.at(\"content\").is_string()) {\n00103|         invalid(\"content must be a string\");\n00104|       }\n00105|     }\n00106|     out.messages = messages;\n00107|     out.tools = request.contains(\"tools\") ? request.at(\"tools\") : json(nullptr);\n00108|     if (request.contains(\"chat_template_kwargs\")) {\n00109|       const json& kwargs = request.at(\"chat_template_kwargs\");\n00110|       if (!kwargs.is_object()) invalid(\"chat_template_kwargs must be an object\");\n00111|       if (kwargs.contains(\"enable_thinking\")) {\n00112|         out.enable_thinking = bool_field(kwargs, \"enable_thinking\");\n00113|       }\n00114|     }\n00115|   } else {\n00116|     if (!request.contains(\"prompt\")) invalid(\"missing prompt\");\n00117|     if (!request.at(\"prompt\").is_string()) invalid(\"prompt must be a string\");\n00118|     out.prompt = request.at(\"prompt\").get<std::string>();\n00119|   }\n00120| \n\n(File has more lines. Use 'offset' parameter to read beyond line 120)\n</file>"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the local filesystem.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path to the file"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Line to start from"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Number of lines to read"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "Find files by glob pattern.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit",
+    "description": "Replace an exact string in a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "oldString": {
+       "type": "string"
+      },
+      "newString": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "oldString",
+      "newString"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "content"
+     ]
+    }
+   }
+  }
+ ]
+}
