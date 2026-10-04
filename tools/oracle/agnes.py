@@ -92,15 +92,19 @@ class AgnesMLP(nn.Module):
 def attach_parallel_ffn(model: nn.Module, text_config, parallel: int) -> int:
     """Replace every decoder layer's `mlp` by an AgnesMLP; returns the layer count.
 
-    The branch is the layer's own MLP class at intermediate `parallel` (built from
-    a config copy, which works whether that class reads `intermediate_size` from
-    the config or takes it as an argument), on the device the model was built on.
+    The branch is the layer's own MLP class at intermediate `parallel`, on the
+    device the model was built on. transformers 5.15's `Qwen3_5MLP(config,
+    intermediate_size)` takes the width as an argument; a class that reads it from
+    the config alone gets a config copy with `intermediate_size = parallel`.
     """
+    import inspect
     pc = copy.copy(text_config)
     pc.intermediate_size = parallel
     n = 0
     for layer in model.model.layers:
-        branch = type(layer.mlp)(pc)
+        cls = type(layer.mlp)
+        takes_width = "intermediate_size" in inspect.signature(cls.__init__).parameters
+        branch = cls(text_config, parallel) if takes_width else cls(pc)
         layer.mlp = AgnesMLP(layer.mlp, branch)
         n += 1
     return n
