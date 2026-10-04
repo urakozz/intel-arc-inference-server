@@ -75,6 +75,11 @@ narrative, and the numbered guides cite them where they matter.
   (92.0 %) and the filtered KL mean fail as written, and bf16 output rounding fails
   them too; the head stays bf16 pending the operator's ruling. Host quantisation
   takes 3.3 s
+- [probe-int8-kv-2026-09-28.md](probe-int8-kv-2026-09-28.md) - spec 12a, **Agnes
+  stand-in** on the Mac: int8 KV schemes against bf16 KV, by attention replay (1k-32k
+  tiled) and end to end. Not a stop. Per-token K fails on outlier channels; KIVI and
+  rotated K tie; rotating V too (`rotkv`) is best and below the bf16 eager path's own
+  error. Proposed `rotkv` (decide), Q3 tolerances, and the Qwen3.8 repeats for the box
 - [probe-agnes-2026-10-03.md](probe-agnes-2026-10-03.md) - spec 14 phase 1, on the
   Mac: Agnes 3.0 Flash from its own files (72 layers, W 18.344 GB from the headers), the
   CPU reference, the parallel-FFN fold (bit-exact on the weights, C++ byte-identical to
