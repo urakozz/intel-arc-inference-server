@@ -4,8 +4,7 @@
 
 **Model:** [`ornith-ai/Ornith-1.5-35B-A3B`](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B)
 (MIT licence; built on Qwen3.5 by continued pre-, mid- and post-training). Published in bf16
-only (71.9 GB, 16 shards); GGUF builds exist (the MXFP4 numbers the operator heard about came
-from one of them, on other hardware).
+only (71.9 GB, 16 shards); GGUF builds exist.
 
 **Order:** after spec 14 merges: it reuses and extends spec 14's `ModelDesc`.
 
@@ -164,3 +163,31 @@ Idle box, device 0, interleaved pairs, median of 3. No bars before P0; the recor
   family, to be looked at after MTP works on Ornith).
 - Expert parallelism, offloading experts to host memory (everything fits on the card).
 - Ornith 1.5 9B (dense, a different shape set) and 397B (does not fit).
+
+## 9. Amendment - 2026-10-04: refinements and P0 arms
+
+- **Quantisation (decision 1) stands:** AutoRound g64 is the quality bar. A round-to-nearest
+  4-bit model is fast to produce but is not a quality reference; any such model is judged by R3
+  and R5 like everything else.
+- **§4.2 refined: the shared expert is the ninth slot** of the expert gate‖up launch, its sigmoid
+  gate computed by one extra work-group of that launch; down + the weighted sum run in fixed slot
+  order through SLM. Three to four launches per MoE block in total.
+- **Added to P0 (§6), each an arm measured against today's kernels at Ornith's shapes:**
+  - a decode GEMV with the activation slice held in registers and split into even / odd K, so
+    each half pairs with one nibble of a packed byte, 64-byte row loads and table-free dequant,
+    beside our int4 g64 GEMV at hidden 2048;
+  - router top-k in one sub-group with all 256 logits in registers;
+  - for the grouped GEMM, dequant staged into SLM once per work-group per K step **against** a
+    separate dequant pass: the "separate pass wins" rule (spec 2.1) was measured on dense shapes
+    and may not hold at ~64 rows per expert;
+  - a decode-attention arm that issues all K/V loads of a step before use, against spec 10's v2
+    at GQA 8 (v2 is bandwidth-bound at depth; the arm targets short contexts).
+- **§4.4 refined: prefill routing entirely on the device,** with a tile table padded with -1 so
+  the host never reads per-expert counts. Rows land in an expert's tile in arbitrary order, which
+  is harmless only if each row's GEMM result is independent of its neighbours: R3's bitwise replay
+  checks this for our GEMM instead of assuming it.
+- **lm_head:** int8 (spec 9) by default; a 4-bit head is evaluated under spec 9's gates (on
+  Ornith the head is ~28 % of a token's bytes at int8, derived), not adopted.
+- **Not adopted:** 4-bit round-to-nearest on attention and GDN projections; an unscaled FP8 KV
+  cache.
+
