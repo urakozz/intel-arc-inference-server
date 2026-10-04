@@ -357,7 +357,7 @@ What streaming changes, and what it does not:
   0..N-1 once loaded; on this Mac it does not pay.
 
 Measured (prose, 42 ids, `--gen 32`): prompt forward 263 s, 32 greedy steps 2100 s
-(~66 s each), wall 2379 s. Per-prompt times of the full set: the validation checklist.
+(~66 s each), wall 2379 s; code 3118 s, cjk 1069 s (the Mac's load varies). Record: `docs/probe-agnes-2026-10-03.md`.
 
 ## The gate: what these files are compared against, and what it proved
 
