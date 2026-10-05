@@ -142,7 +142,10 @@ class Capture {
         draft_i_(draft_i), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
 
   CapturedStep run() {
-    kv_stride_ = size_t(b_.max_len) * d_.fa_kv_heads * Qwen35::kFaHeadDim * kBf16;
+    // One layer's K (or V) rows; at int8 (spec 12b) the scales follow every layer's rows
+    // in the same allocation (KvLayout), and `kv8_` selects kv8.cl's binaries throughout.
+    kv_stride_ = size_t(b_.max_len) * d_.fa_kv_heads * Qwen35::kFaHeadDim *
+                 (kv8_ ? 1 : kBf16);
     check_sizes();
     if (mode_ != Mode::Plain) check_mtp();
     if (mode_ == Mode::Draft) {
@@ -232,8 +235,13 @@ class Capture {
     // compiled (src/kernels/CMakeLists.txt: 4096, 16384, 32768 and 131072 at M = 1). Name the missing one
     // here, before a single command is appended, rather than as a bare path later.
     // Spec 10: v2 bakes no MAXLEN (one binary per M, `_T<kAttnV2Blocks>`).
+    // Spec 12b: the int8 cache is read by v2's kv8 twin only; v1 stays a bf16-KV reference.
+    require(!kv8_ || attn_ == DecodeAttn::V2,
+            "--kv-cache int8 decodes through attention v2 only (src/kernels/kv8.cl); "
+            "B70_DECODE_ATTN=v1 reads a bf16 cache - unset it or use --kv-cache bf16");
     const std::vector<std::string> attn_bins =
-        attn_ == DecodeAttn::V2
+        kv8_ ? std::vector<std::string>{kernels::attn_v2_kv8_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads)}
+        : attn_ == DecodeAttn::V2
             ? std::vector<std::string>{kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads)}
             : std::vector<std::string>{
                   kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock, d_.fa_q_heads, d_.fa_kv_heads),
@@ -256,8 +264,16 @@ class Capture {
             "gdn_state is not " + gdn_n + " slices");
     require(b_.conv_ring.size() == conv_ring_stride() * d_.gdn_layers,
             "conv_ring is not " + gdn_n + " slices");
-    require(b_.kv_k.size() == kv_stride_ * d_.fa_layers, "kv_k is not " + fa_n + " slices");
-    require(b_.kv_v.size() == kv_stride_ * d_.fa_layers, "kv_v is not " + fa_n + " slices");
+    // The layout the buffers were allocated with must be this walk's: its rows stride, its
+    // layer count, and (spec 12b) the scales after them at int8.
+    const KvLayout& kl = b_.kv_lay;
+    require(kl.max_len == b_.max_len && kl.kv_heads == d_.fa_kv_heads &&
+                kl.head_dim == Qwen35::kFaHeadDim && kl.layers == d_.fa_layers &&
+                kl.layer_rows() == kv_stride_,
+            "the KV layout (" + std::string(kv_cache_name(kl.form)) + ", " +
+                std::to_string(kl.layers) + " layers) is not this model's " + fa_n + " FA layers");
+    require(b_.kv_k.size() == kl.bytes(), "kv_k is not " + fa_n + " slices");
+    require(b_.kv_v.size() == kl.bytes(), "kv_v is not " + fa_n + " slices");
     if (tap_)
       require(tap_->size() >= size_t(d_.layers) * kCapM * d_.hidden * kBf16,
               "debug_resid is smaller than [layers][M][hidden] bf16");
@@ -318,8 +334,10 @@ class Capture {
             "a draft list is M = 1 with draft index < kMaxK");
     require(mtp_->gdn_spec.size() == gdn_state_stride() * d_.gdn_layers * (MtpBuffers::kSlots - 1),
             "gdn_spec is not (kSlots - 1) x " + std::to_string(d_.gdn_layers) + " slices");
-    require(mtp_->kv_k.size() == kv_stride_ && mtp_->kv_v.size() == kv_stride_,
-            "the head's KV is not one [max_len][kv-heads][256] layer");
+    require(mtp_->kv_lay.form == b_.kv_lay.form && mtp_->kv_lay.layers == 1 &&
+                mtp_->kv_lay.layer_rows() == kv_stride_ && mtp_->kv_k.size() == mtp_->kv_lay.bytes() &&
+                mtp_->kv_v.size() == mtp_->kv_lay.bytes(),
+            "the head's KV is not one [max_len][kv-heads][256] layer in the main cache's form");
     require(mtp_->hh.size() >= size_t(kCapM + 1) * d_.hidden * kBf16, "hh is too small");
     // Spec 8 §11: the buffers were sized for the model's draft vocabulary, or for none.
     const uint32_t nv = m_.draft_vocab ? m_.draft_vocab->size() : 0;
@@ -338,7 +356,35 @@ class Capture {
   // attn_v2.cl's pair (spec 10, plan 10b), whichever `attn_` names. `ctrl` is the list's
   // control block (the head's `hctl` in the draft list); both read q from attn_q, write
   // partials into attn_part and the gated bf16 rows into attn_out.
-  void attn_pair(void* ctrl, void* kk, void* vv) {
+  void attn_pair(void* ctrl, const KvLayer& kv) {
+    void* kk = kv.k;
+    void* vv = kv.v;
+    if (kv8_) {
+      // Spec 12b: kv8.cl's attn_decode_v2_kv8 / attn_reduce_v2_kv8 - v2's grid, partials and
+      // stride, reading int8 K / V and their fp16 scales; the reduce un-rotates each head's
+      // output before the gate.
+      const std::string v = kernels::attn_v2_kv8_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads);
+      {
+        l0::Kernel& k = kernel(v, "attn_decode_v2_kv8", kWgAttn);
+        k.arg_ptr(0, ctrl);
+        k.arg_ptr(1, b_.attn_q.ptr());
+        k.arg_ptr(2, kv.k);
+        k.arg_ptr(3, kv.ks);
+        k.arg_ptr(4, kv.v);
+        k.arg_ptr(5, kv.vs);
+        k.arg_ptr(6, b_.attn_part.ptr());
+        launch(k, d_.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
+      }
+      {
+        l0::Kernel& k = kernel(v, "attn_reduce_v2_kv8", kWgAttn);
+        k.arg_ptr(0, ctrl);
+        k.arg_ptr(1, b_.attn_part.ptr());
+        k.arg_ptr(2, b_.attn_gate.ptr());
+        k.arg_ptr(3, b_.attn_out.ptr());
+        launch(k, d_.fa_q_heads, kCapM);
+      }
+      return;
+    }
     if (attn_ == DecodeAttn::V2) {
       // attn_v2.cl: grid (4 kv-heads, kAttnV2Blocks), WG 256; the stride is derived per
       // row from Control::pos on the device, so one list serves every depth.
@@ -749,14 +795,31 @@ class Capture {
     res_norm(d_.ffn_fold_s(), at(m_.layer_small[layer].norms, sl_.norms_off_input));
     gemv(layer, LinearId::Qkv, b_.x.ptr());
     // This FA layer's KV cache slices - bf16 [max_len][4][256] each, indexed by
-    // absolute position inside the kernels.
-    void* kk = at(b_.kv_k, size_t(f) * kv_stride_);
-    void* vv = at(b_.kv_v, size_t(f) * kv_stride_);
+    // absolute position inside the kernels; at int8 (spec 12b) the int8 rows and their
+    // fp16 scales [max_len][4] (KvLayout).
+    const KvLayer kv = b_.kv_lay.layer(b_.kv_k.ptr(), b_.kv_v.ptr(), f);
+    void* kk = kv.k;
+    void* vv = kv.v;
     // attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v)
     // - src/kernels/attn.cl (Task 5), grid (24 q-heads + 4 kv-heads, M), WG 256.
     // `fa_small` is the layer's FA block (q_norm ‖ k_norm, fp32 1+w) - the same
     // `SmallTensors::gdn` allocation the GDN layers use for their own block.
-    {
+    if (kv8_) {
+      // Spec 12b: kv8.cl's attn_prep_kv8 - attn_prep's chain, then q rotated (attn_q stays
+      // fp32) and K, V rotated and quantised into the int8 rows + scales. Two more args.
+      l0::Kernel& k = kernel(kernels::attn_prep_kv8_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads), "attn_prep_kv8", kWgAttn);
+      k.arg_ptr(0, b_.control.ptr());
+      k.arg_ptr(1, b_.partials.ptr());
+      k.arg_ptr(2, m_.layer_small[layer].gdn.ptr());
+      k.arg_ptr(3, m_.rope.ptr());
+      k.arg_ptr(4, b_.attn_q.ptr());
+      k.arg_ptr(5, b_.attn_gate.ptr());
+      k.arg_ptr(6, kv.k);
+      k.arg_ptr(7, kv.v);
+      k.arg_ptr(8, kv.ks);
+      k.arg_ptr(9, kv.vs);
+      launch(k, d_.fa_q_heads + d_.fa_kv_heads, kCapM);
+    } else {
       l0::Kernel& k = kernel(kernels::attn_prep_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads), "attn_prep", kWgAttn);
       k.arg_ptr(0, b_.control.ptr());
       k.arg_ptr(1, b_.partials.ptr());
@@ -793,7 +856,7 @@ class Capture {
     // it at 0.18 us -- and doc 07 #12 keeps the larger one so the bound is not
     // flattered. What is bought is a quartered per-work-group serial walk
     // (369.988 -> 224.046 us/launch, measured, grid growth included).
-    attn_pair(b_.control.ptr(), kk, vv);
+    attn_pair(b_.control.ptr(), kv);
     // o_proj is the one GEMV whose activations are not the shared `x` scratch:
     // attn_reduce writes bf16 [M][6144] into `attn_out`, which is exactly this
     // GEMV's K.
@@ -938,7 +1001,21 @@ class Capture {
               kernels::prep_norm_finish_variant(kCapM, H, G, G), b_.partials.ptr(),
               b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormInput)), b_.x.ptr());
     head_gemv(h.qkv, b_.x.ptr(), b_.partials.ptr());
-    {
+    const KvLayer kv = head_kv();
+    if (kv8_) {   // spec 12b: the head's KV in the main cache's form
+      l0::Kernel& k = kernel(kernels::attn_prep_s1_kv8_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads), "attn_prep_kv8", kWgAttn);
+      k.arg_ptr(0, mtp_->hctl.ptr());
+      k.arg_ptr(1, b_.partials.ptr());
+      k.arg_ptr(2, h.fa.ptr());
+      k.arg_ptr(3, m_.rope.ptr());
+      k.arg_ptr(4, b_.attn_q.ptr());
+      k.arg_ptr(5, b_.attn_gate.ptr());
+      k.arg_ptr(6, kv.k);
+      k.arg_ptr(7, kv.v);
+      k.arg_ptr(8, kv.ks);
+      k.arg_ptr(9, kv.vs);
+      launch(k, d_.fa_q_heads + d_.fa_kv_heads, kCapM);
+    } else {
       l0::Kernel& k = kernel(kernels::attn_prep_s1_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads), "attn_prep", kWgAttn);
       k.arg_ptr(0, mtp_->hctl.ptr());
       k.arg_ptr(1, b_.partials.ptr());
@@ -951,6 +1028,9 @@ class Capture {
       launch(k, d_.fa_q_heads + d_.fa_kv_heads, kCapM);
     }
   }
+
+  // The MTP head's one KV layer (MtpBuffers::kv_lay), either form.
+  KvLayer head_kv() const { return mtp_->kv_lay.layer(mtp_->kv_k.ptr(), mtp_->kv_v.ptr(), 0); }
 
   // The verify list's tail: only the head's K/V of the M rows are needed (the next
   // drafts attend over them); its output hidden and logits are not, so the walk stops
@@ -967,7 +1047,7 @@ class Capture {
     const loader::MtpHead& h = *m_.mtp;
     const uint32_t G = DecodeBuffers::kNormGroups, H = d_.hidden;
     head_front(mtp_->dh.ptr());
-    attn_pair(mtp_->hctl.ptr(), mtp_->kv_k.ptr(), mtp_->kv_v.ptr());
+    attn_pair(mtp_->hctl.ptr(), head_kv());
     head_gemv(h.o, b_.attn_out.ptr(), b_.partials.ptr());
     const std::string fold1 = kernels::prep_res_fold_variant(kCapM, H, 1, G);
     const std::string fin = kernels::prep_norm_finish_variant(kCapM, H, G, G);
@@ -1110,6 +1190,8 @@ class Capture {
   const uint32_t draft_i_;
   // Spec 10: the decode-attention pair, read from B70_DECODE_ATTN once per build.
   const DecodeAttn attn_ = decode_attn();
+  // Spec 12b: the buffers' KV form decides every KV writer and reader this walk binds.
+  const bool kv8_ = b_.kv_lay.form == KvCache::Int8;
   CapturedStep step_;
   size_t kv_stride_ = 0;
   int layer_ = kBoundary;
