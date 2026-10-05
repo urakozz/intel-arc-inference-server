@@ -268,3 +268,91 @@ head is dense-only and capture refuses the verify / draft lists on a MoE model: 
 the int8 head; `LoadReport::read_per_token` now counts only the active experts); the decode-only
 plan at the full 262144 context is 24.97 GB of 32.53 (`memory_plan_test`). The loader's W
 cross-check is skipped (doc_w 0) until a load on the card measures one.
+
+
+## 11. Amendment - 2026-10-05: 15d as built blind (Mac; box pending)
+
+Branch `spec15d-ornith-prefill` (plan 15d Tasks 2-3; Task 1 P0 and Task 4 speed are box work).
+Nothing here has run on the card. Validation: `box-validation-queue.md` entry 13.
+
+**The chunk's MoE block, one layer** (`runtime/prefill/moe.cc`; kernels
+`src/kernels/prefill/pf_moe.cl`, `pf_moe_gemm.cl`). No count is ever read back: every grid is a
+function of C alone.
+
+1. **Routing, decode's formula op for op.** The router || shared-gate GEMV over the chunk is
+   `pf_gemv_bf16.cl` at N 272 with decode's {16, 16} tiling (`pf_moe_router_K2048_N272`), so each
+   row is bit-identical to decode's `gemv_bf16` of the same x (pf_gemv_bf16.cl's tree argument);
+   then **decode's own `moe_route` binary** at grid (1, C) - it reads logits row m and writes route
+   row m and nothing else - so prefill and decode route by one kernel. The route rows are kept per
+   layer (`[layers][kC][32]`, 10.5 MB) for R2 and the prefill-vs-decode check.
+2. **The sort** (`pf_moe_sort`, one work-group of 256 lanes, lane = expert): the chunk's ids staged
+   into SLM as bytes, each lane counts its pairs, lane 0's prefix over the experts' tile counts,
+   then each lane walks (token, slot) ascending and gives each of its pairs the next row. Every
+   expert's rows are padded to whole TM = 32-row tiles (so a tile belongs to one expert and no 2D
+   block access needs out-of-surface semantics); the shared expert is block 256 with the C tokens
+   in order after the routed experts - a dense M = C GEMM inside the same grouped launch. The tile
+   table is padded to `tmax(C) = floor((8C + 256 x 31) / 32) + ceil(C / 32)` with NONE (824 at
+   C = 2048; the adversarial distribution - as many one-row experts as the pairs allow - uses 817).
+   No atomics: positions are a function of the route rows alone.
+3. **The A operand**: `pf_moe_gather` copies x rows into sorted order (padding rows zero); on
+   l0-int8 the chunk is quantised ONCE per token by spec 5's `pf_quant_had` and
+   `pf_moe_gather_i8` gathers the int8 rows and their scales.
+4. **The B operand, rebuilt per chunk (the "separate pass" arm):** l0-int8 - one
+   `pf_requant_rot_L1` launch over the layer's whole gate||up array (257 contiguous layout-1 blocks
+   read as one weight of K 2048, N 263,168; `Int8State::scales_layout1` caches its rotated column
+   scales, filled in `prepare_prefill`); l0 - `pf_moe_dequant_gu` in two batches (129 + 128
+   blocks); down - `pf_moe_dequant_dn`, all 257 blocks, bf16 on **both** backends: its K = 512 is
+   not whole 1024-k rotation blocks, so spec 5's h8 does not apply (a 512-block rotation is an
+   arm, not built). Experts with no row this chunk are skipped by the dequant (not by the requant,
+   which is spec 5's kernel unchanged).
+5. **The grouped GEMM** (`pf_moe_gemm`): one launch per (form, batch) over every tile; work-group
+   (tile, 256-column block) reads (block, first row) from the table and returns at once for NONE or
+   a block outside the batch. The mainloops are `pf_gemm.cl`'s bf16 (32 x 64 per sub-group, 4
+   sub-groups) and `pf_int8.cl`'s i8 (32 x 32, 8 sub-groups) with only the addressing changed;
+   epilogues: gate||up's SiLU chain (verbatim), down's `rne(acc)` into bf16 y. No prefetch and no
+   split barrier yet (P0 adds them if they pay).
+6. **The combine** (`pf_moe_combine`): moe_down's epilogue over the sorted rows - TOP_K terms
+   `rne(y . w_k)` summed in fp32 in **fixed slot order**, the shared expert by its gate, the bf16
+   sum, **the residual fold** - so the next norm folds nothing (S_PREV 0), as on decode.
+
+**Determinism and row independence.** The sort is a pure function of the route rows; gather and
+dequant are copies; DPAS reduces along K only, so a row's accumulator never meets another row's
+and the epilogue is per element (its scale is the row's own xs): a row's output does not depend
+on its tile neighbours, its position in the tile, or the chunk it rides in. The combine's order is
+fixed. Hence replay and chunking (at multiples of 64, where the GDN chunks agree) are bitwise. The
+only atomic on the path is spec 5's `pf_colmax_rot` (`atomic_max` on non-negative float bits, at
+load): a max, order-free. `pf_moe_ref_test` pins row independence on the host reference;
+`pf_moe_test` on the card (the reversed chunk, and grouped == dense bitwise).
+
+**Launches per chunk (derived):** MoE block 10 on l0-int8 (router, route, sort, quant, gather,
+requant, GEMM, dequant + GEMM for down, combine) and 11 on l0; with the mixer (GDN 2 + 24 + 1 + 10
++ 4, FA 2 + 18 + 3 + 4 on l0, +2 quantisers on l0-int8) and the post norm, **2061 per chunk on
+l0-int8, 2021 on l0** (`step_chunk_launches`), every C.
+
+**Memory (derived):** the MoE prefill scratch is 0.689 GB at kC 2048 (0.541 of it the weight
+batch, sized for the l0 gate||up half-array); the h8 scales of the expert arrays 84 MB; Ornith's
+262144 context still fits with the l0-int8 prefill (26.1 GB + the 1.5 GB reserve,
+`memory_plan_test`).
+
+**Bandwidth of the separate pass (derived, the number P0 must check):** per layer per chunk the
+int8 gate||up reads 0.29 GB of int4, writes and re-reads 0.54 GB of int8; the bf16 down reads
+0.14, writes and re-reads 0.54 - ~2.6 GB, ~104 GB per 2048-token chunk, ~0.19 s at ~550 GB/s: a
+ceiling near 10k t/s before any compute, so the fused-dequant arm (spec 15 §9) is the first lever
+if P0 shows the pass dominating.
+
+**Shape variants** (additive; `tools/kernel_cmdlines` 312 -> 334, no line moved):
+`GDN_K_HEADS / GDN_V_HEADS` in `pf_gdn_conv`, `pf_gdn_wy`, `pf_gdn_scan`, `pf_gated_head`;
+`FA_Q_HEADS / FA_KV_HEADS` in `pf_attn_prep`, `pf_attn`, `pf_flash_attn` (Ornith's flash at HPW 8 =
+GQA 8, grid.z 1). Unset, the clang -E output of all 8 existing variants of these files is identical
+to main's. Built for Ornith: the norm pair at K 2048 (SP0 / SP1), embed, a||b, the slab dequant at
+the descriptor's layouts (qkv||z L1, the rest L0), the quantiser at K 2048 / 4096, the GDN chain and
+the gated head, `pf_attn_prep_q16`, `pf_attn`, `pf_flash_attn`. On a MoE model the L0 slab and
+Int8State's K are the widest mixer linear's (4096); dense models' sizes are unchanged.
+
+**What changed in the refusals.** `model::require_prefill` passes Ornith (it refuses only a MoE
+shape the prefill kernels are not written for); `Engine::prepare_prefill` refuses sycl-tla for a
+MoE model by name. `b70-serve` still refuses a MoE model (serving is 15e); MTP stays refused.
+
+**Not built:** the SLM-fused dequant arm (plan Task 1), h8 for the experts' down, prefetch / split
+barriers in the grouped GEMM, the int8 KV cache's prefill at Ornith's shapes, the composed
+attention's fp32-q identity prep at Ornith's shapes.

@@ -1609,7 +1609,7 @@ if(B70_KV8)
 endif()
 
 # --- Spec 15d: Ornith 1.5 35B-A3B prefill (label `ornith`) ---------------------------------
-# Written blind on the Mac (docs/superpowers/plans/box-validation-queue.md row 12 is the
+# Written blind on the Mac (docs/superpowers/plans/box-validation-queue.md row 13 is the
 # order to run these in). The host reference test runs everywhere; the rest need a B70, and
 # the checkpoint ones SKIP (77) until the Ornith int4 checkpoint (15a) and its golden set
 # `oracle-out-ornith` are on the machine, as 15c's do.
