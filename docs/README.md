@@ -37,6 +37,7 @@ short version; this is where the reasoning and the evidence live.
 | | |
 |---|---|
 | [14-golden-gate.md](14-golden-gate.md) | the trust chain: engine against a CPU oracle against vLLM, and why tokens gate while tensors only diagnose |
+| [18-mac-checks.md](18-mac-checks.md) | `tools/mac_check.sh`: what a Mac can check without the box (host tests, Level Zero and OpenCL syntax, kernel command lines, indicative kernel runs) and what it cannot |
 
 ## Context and what is unresolved
 
