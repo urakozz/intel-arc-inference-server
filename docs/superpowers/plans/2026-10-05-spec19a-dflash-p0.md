@@ -48,3 +48,25 @@
 - [ ] Per corpus: tokens/s at the best K for DFlash (acceptance from Task 3, costs from Task 4) against `--mtp auto`'s (spec 8 §10 tables at the measured acceptance). Apply spec 19 §7's stopping rule (≥ 10 % over `--mtp auto` on the coding and reasoning sets). Spec 19 amendment with the verdict; if it stops, record spec 8 A7's M-row GEMV lever as the prerequisite and re-run Task 5 after it. **Commit** `spec 19: P0 verdict`.
 
 **Gate for the plan:** the verdict recorded with its numbers; 19b starts only on a "go". Tasks 1-3 run without the box.
+
+## Status (2026-10-06)
+
+- **Task 1** merged (`dflash_ref.py`).
+- **Tasks 2-3: the tools are in, the runs are not** (branch `spec19a-tasks23`). `dump_taps.py`,
+  `dflash_accept.py`, their tests on tiny models (Review Focus 1: a dumped tap is layer i's
+  output, bitwise, on a tiny Qwen3.5 checkpoint; Review Focus 2-4: the batched drafter equals
+  `dflash_ref.draft_block` per anchor; Review Focus 5: `select_draft_vocab` ported line for
+  line and checked on `draft_vocab_test.cc`'s cases) and the driver `tools/oracle/dflash_p0.sh`
+  (README "The DFlash P0"). The dumps need a 28 GB container and wait for the spec 12a repeat;
+  estimated ~5 h of dumps and ~0.4 h per drafter arm (dry run, assumed rates).
+- **The corpora on the Mac:** golden prose / code / cjk with the 32 greedy ids of the
+  2026-08-24 oracle (26 anchors each), A4 (34 scenarios, 2613 output ids, all tool calls). **No
+  prose / reasoning set with recorded greedy output exists here:** spec 8 P0's 256-id golden
+  continuations and the A4 bf16 ids are on the box, and a CPU decode of new continuations
+  costs ~6.5 min per token (streamed). `GOLDEN_CONT_DIR` / `EXTRA_SOURCES` take them when they
+  are copied over (or recorded by `b70-decode` on the box); until then the prose number rests
+  on 52 anchors.
+- **Tasks 4-5 open.** The projection needs, per corpus: E_K for K = 1..7 at the chosen arm
+  (Task 3), verify(M) for M = 1..8 on the int8 head (Task 4; M = 5..8 unmeasured), the draft
+  cost of one block at the arm's precision (Task 4's GEMV pass over the drafter + the head's
+  K rows), and `--mtp auto`'s tokens/s at the same corpora's MTP acceptance (spec 8 §10).
