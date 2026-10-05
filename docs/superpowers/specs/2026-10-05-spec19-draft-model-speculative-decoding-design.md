@@ -286,3 +286,41 @@ Every list is captured once and replayed. The host decides only j, exactly as sp
   path; trees multiply the verify rows, which is the cost this spec is bounded by.
 - Approach B for any model, unless a much cheaper compatible drafter appears.
 - Multimodal inputs.
+
+## 9. Amendment: 19e on the host (2026-10-05)
+
+Plan 19e Task 1 and the host half of Task 2, written on the Mac (branch
+`spec19e-prompt-lookup`). Numbers: `docs/probe-prompt-lookup-2026-10-05.md`.
+
+- **Task 1, on A4 only.** No request log exists, so the opencode recording (the deciding
+  corpus, D5) is still to come. On the A4 tool-call set (34 prompts, 2613 output ids, greedy,
+  the int8-head cost table; M = 5..8 verify costs estimated):
+  - lookup alone: **1.44x over plain** at n = 3, K <= 3 with spec 8 §10's policy and a free
+    draft (fixed K = 3: 3.10 tokens per verify, 1.45x); K > 3 does not pay at the estimated
+    verify costs;
+  - against `--mtp auto` projected at A11's 0.92 / 0.87 / 0.82 (1.556x): **0.92x**;
+  - combined (lookup when its match >= 6, else MTP K = 3): **1.058x** of `--mtp auto` - below
+    §6 D5's +10 % and an upper bound (it assumes MTP's average acceptance where lookup has no
+    match).
+  - So: for K2 (no MTP head, no drafter) lookup is the speculative option and is worth its
+    verify lists; for Qwen3.8 it does not replace MTP on A4, and `mtp+lookup` waits for the
+    recording.
+- **The matcher** (`server::PromptLookup`): the longest earlier match of the request's ids,
+  capped at 64, the most recent on ties, drafts copied forward (overlapping a repeat). Hash
+  chains at key lengths 2 / 4 / 8 / 16 / 32 / 64 (zlib's structure): O(1) amortised per
+  appended id (~0.23 us), a bounded walk per proposal (~8 us at 262144 ids), ~34 MB at
+  262144 ids; exact against a brute force whenever its walk caps (64 candidates, 1024 steps
+  per key length) are not reached, which on A4 is every position. A session's next request
+  reuses it from the common prefix (`truncate`).
+- **Lossless sampling with a point-mass proposal** (`server::accept_point_mass`): accept d
+  with probability p(d); on a rejection sample p without d, renormalised. 1e6 seeded draws
+  match p (chi-square p-values 0.09-0.78, D4's bar).
+- **Serving.** `b70-serve --spec off|mtp|lookup` (decision 3: `mtp` = `--mtp auto` unless
+  `--mtp` is given; `--spec` unset = today), `--spec-min-match N` (default 3), `--spec-max K`
+  (1..3), `--spec-cost`, `--spec-history N` (match the last N requests' generated ids).
+  `EngineIface::verify_k()` / `step_drafts(sampling, propose)` take external drafts; the
+  server's matcher holds exactly the prompt and the ids consumed. Qwen3.8 verifies through
+  the MTP verify lists (the head is loaded for them; `Engine::verify` reads the drafts from
+  `cur_token[1..k]`, which `EngineAdapter::step_drafts` writes) - unvalidated on the card.
+  Mock-tested: responses byte-identical to plain over EOS, stop, max_tokens and tool calls
+  inside accepted runs.
