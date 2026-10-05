@@ -190,8 +190,8 @@ const ModelDesc& desc_for_architecture(const std::string& architecture);
 // Throws std::runtime_error when the engine cannot run this descriptor: tied
 // embeddings, or a FfnKind::Moe shape src/kernels/moe.cl is not written for (a
 // shared expert with a sigmoid gate and the routed experts' width, top_k <= 8,
-// experts a multiple of 16 up to 256 - Ornith's is). The loader calls it right
-// after desc_for_architecture.
+// experts a power of two in [16, 256] - moe.cl's route work-group; Ornith's 256 is). The
+// loader calls it right after desc_for_architecture.
 void require_loadable(const ModelDesc& desc);
 // Throws std::runtime_error naming the reason when the prefill path cannot run this
 // model: from spec 15d a FfnKind::Moe model prefills through the grouped experts, so
