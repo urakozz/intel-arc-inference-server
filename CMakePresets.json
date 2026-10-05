@@ -1,0 +1,28 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 22, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "mac-host",
+      "displayName": "Mac: host tests only (no Level Zero runtime, ocloc or icpx)",
+      "description": "B70_HOST_ONLY=ON - cmake/host_only.cmake, docs/18-mac-checks.md. Needs L0_INCLUDE (Level Zero headers).",
+      "binaryDir": "${sourceDir}/build/mac-host",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "B70_HOST_ONLY": "ON",
+        "B70_PREFILL": "OFF",
+        "B70_L0_INCLUDE": "$env{L0_INCLUDE}"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "mac-host", "configurePreset": "mac-host" }
+  ],
+  "testPresets": [
+    {
+      "name": "mac-host",
+      "configurePreset": "mac-host",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
