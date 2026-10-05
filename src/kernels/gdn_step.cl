@@ -152,7 +152,13 @@
 #error "gdn_step assumes qkv||z runs S=1; the partials index must loop s otherwise"
 #endif
 
-// The model's dimensions (model::Qwen35); none of them is a variant.
+// The model's dimensions (model::ModelDesc). Unset GDN_K_HEADS / GDN_V_HEADS (every
+// Qwen3.8 and Agnes command line, unchanged) they are Qwen3.8's, spelled token for
+// token as they always were. Spec 15c: another model's heads come in as
+// -DGDN_K_HEADS / -DGDN_V_HEADS and the widths follow from them (Ornith 16 / 32:
+// conv rows 8192, qkv||z 12288, b at column 32, 2 v-heads per k-head) - the binary is
+// named `_GK<k>V<v>` (kernels::gdn_suffix).
+#ifndef GDN_V_HEADS
 #define HEADS 48          /* v-heads = the grid's x extent */
 #define DIM 128           /* head dim, k and v alike */
 #define QKVZ_N 16384      /* qkv‖z row width; z lives at 10240 and is not read here */
@@ -164,6 +170,27 @@
 #define RING 16           /* conv ring depth (runtime::DecodeBuffers::kConvRing) */
 #define AB_STRIDE 128     /* ab_out row: a at [0,48), b at [48,96), zero-padded to 128 */
 #define B_OFF 48
+#define V_PER_K 3         /* repeat_interleave(·, 48 / 16): v-heads per k-head */
+#else
+#ifndef GDN_K_HEADS
+#error "gdn_step: GDN_V_HEADS needs GDN_K_HEADS"
+#endif
+#define HEADS GDN_V_HEADS
+#define DIM 128
+#define CONV_ROWS ((2 * GDN_K_HEADS + GDN_V_HEADS) * DIM)
+#define QKVZ_N (CONV_ROWS + GDN_V_HEADS * DIM)
+#define CONV_TAPS 4
+#define Q_OFF 0
+#define K_OFF (GDN_K_HEADS * DIM)
+#define V_OFF (2 * GDN_K_HEADS * DIM)
+#define RING 16
+#define AB_STRIDE 128     /* the a||b GEMV's padded row (model_desc.cc kAbPaddedN) */
+#define B_OFF GDN_V_HEADS
+#define V_PER_K (GDN_V_HEADS / GDN_K_HEADS)
+#if GDN_V_HEADS % GDN_K_HEADS != 0 || 2 * GDN_V_HEADS > AB_STRIDE
+#error "gdn_step: v-heads must be a multiple of k-heads, and a||b must fit its 128-column row"
+#endif
+#endif
 
 #define WG_GDN 256
 #define SG 16             /* SIMD16: 16 subgroups of 16 lanes */
@@ -263,7 +290,7 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   // One work-item owns one channel for every token, so the window's newer slots
   // are its own registers and only the pre-step history touches the ring.
   // -------------------------------------------------------------------------
-  const uint kh = h / 3;                   // repeat_interleave(·, 3): v-head -> k-head
+  const uint kh = h / V_PER_K;             // repeat_interleave(·, V_PER_K): v-head -> k-head
   for (uint cid = lid; cid < CH_PER_WG; cid += WG_GDN) {
     const uint which = cid >> 7;           // 0 = q, 1 = k, 2 = v
     const uint i = cid & (DIM - 1);
@@ -273,7 +300,7 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
     const __global float* restrict w = gdn_small + (size_t)ch * CONV_TAPS;
     const float w0 = w[0], w1 = w[1], w2 = w[2], w3 = w[3];
     // Ring ownership, argued in the header.
-    const bool own_ring = (c == 0) && (which == 2 || (h % 3) == 0);
+    const bool own_ring = (c == 0) && (which == 2 || (h % V_PER_K) == 0);
 
     // The window's three older slots: absolute positions pos−3, pos−2, pos−1.
     // A position below zero contributes 0 - the reference's conv state is
