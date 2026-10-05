@@ -264,7 +264,9 @@ costs on your card (spec 8 §10).
 | `--device N` | `ONEAPI_DEVICE_SELECTOR`, else 0 | which GPU |
 
 `tools/box.sh` builds and tests on a remote machine over ssh, which is how I
-work day to day. Set `BOX=user@host` before using it.
+work day to day. Set `BOX=user@host` before using it. Without the box,
+`tools/mac_check.sh` runs the host tests and syntax-checks the device code and
+every kernel variant on a Mac ([docs/18-mac-checks.md](docs/18-mac-checks.md)).
 
 ## Docs
 
