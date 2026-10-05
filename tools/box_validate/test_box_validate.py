@@ -3,13 +3,16 @@
 
 The JUnit / test-list logic, G0's normalised comparison and binary checksum compare, the
 interleaved medians, the summary, the orchestrator's resume / redo / stop-the-line / needs /
-after rules (remote.sh over a stub stage file, with a stand-in flock), the driver's --list,
---dry-run and selection, and the registry's consistency. Runs on the Mac and on the box.
+after rules and need_ok (remote.sh over a stub stage file, with a stand-in flock), the server
+rows' client (serve_run.sh + serve_client.py against a stand-in b70-serve: run, table,
+compare), long_ids.py, k2_oracle.sh's RAM guard, the driver's --list, --dry-run and
+selection, and the registry's consistency. Runs on the Mac and on the box.
 """
 import json
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -214,13 +217,20 @@ class DataTest(Tmp):
             for f in files:
                 write(os.path.join(snap, f), "")
         env = dict(os.environ, HF_HOME=self.p("hf"), SNAP_QWEN="o/full", SNAP_AGNES="o/part",
-                   SNAP_ORNITH="o/absent")
+                   SNAP_ORNITH="o/absent", SNAP_K2="o/absent")
         r = subprocess.run([sh, "resolve", "o/full"], capture_output=True, text=True, env=env)
         self.assertEqual(r.stdout.strip(), os.path.join(hub, "models--o--full", "snapshots", "abc"))
         r = subprocess.run([sh, "have"], capture_output=True, text=True, env=env, cwd=self.p("tree"))
         self.assertIn("HAVE_qwen=1", r.stdout)
         self.assertIn("HAVE_agnes=0", r.stdout)
         self.assertIn("HAVE_ornith=0", r.stdout)
+        self.assertIn("HAVE_k2=0", r.stdout)
+        self.assertIn("HAVE_oracle_k2=0", r.stdout)
+        for p in ("prose", "code", "cjk"):                  # oracle_k2: all three prompts complete
+            write(self.p("tree", "oracle-out-k2", p + ".ids"), "0 1\n")
+            write(self.p("tree", "oracle-out-k2", p + ".golden.safetensors"), "x")
+        r = subprocess.run([sh, "have"], capture_output=True, text=True, env=env, cwd=self.p("tree"))
+        self.assertIn("HAVE_oracle_k2=1", r.stdout)
         self.assertIn("HAVE_oracle_qwen=1", r.stdout)      # the link made above
 
 
@@ -291,6 +301,10 @@ class OrchestratorTest(Tmp):
         st_r1_e() { skip "nothing to do"; finish; }
         stage r1.f 1 default cpu - r1.d "after a failure"
         st_r1_f() { chk true "fine"; finish; }
+        stage r1.g 1 default cpu - - "need_ok over a PASS and a SKIP"
+        st_r1_g() { need_ok r1.a r1.e r1.z; finish; }
+        stage r1.h 1 default cpu - - "need_ok over a FAIL"
+        st_r1_h() { need_ok r1.a r1.d; finish; }
         """)
 
     def setUp(self):
@@ -320,7 +334,7 @@ class OrchestratorTest(Tmp):
             return len(f.readlines())
 
     def test_run(self):
-        ids = ["pre", "g0.a", "r1.a", "r1.b", "r1.c", "r1.d", "r1.e", "r1.f"]
+        ids = ["pre", "g0.a", "r1.a", "r1.b", "r1.c", "r1.d", "r1.e", "r1.f", "r1.g", "r1.h"]
         self.run_remote(ids)
         self.assertEqual(self.status("g0.a")[1], "FAIL")
         self.assertIn("the g0 marker", self.status("g0.a")[6])
@@ -341,6 +355,13 @@ class OrchestratorTest(Tmp):
         self.assertIn("nothing to do", self.status("r1.e")[6])
         self.assertEqual(self.status("r1.f")[1], "SKIP")
         self.assertIn("r1.d=FAIL", self.status("r1.f")[6])
+        self.assertEqual(self.status("r1.g")[1], "PASS")    # a SKIP / not-run is noted, not failed
+        with open(os.path.join(self.state, "r1.g.log")) as f:
+            g = f.read()
+        self.assertIn("NOTE r1.e: SKIP - not evidence", g)
+        self.assertIn("NOTE r1.z: not run", g)
+        self.assertEqual(self.status("r1.h")[1], "FAIL")
+        self.assertIn("r1.d is FAIL", self.status("r1.h")[6])
         with open(os.path.join(self.state, "r1.a.log")) as f:
             self.assertIn("METRIC m\tvalue 42", f.read())
         self.assertEqual(self.count(), 1)
@@ -382,6 +403,145 @@ class OrchestratorTest(Tmp):
         self.assertIn("$ do it by hand", text)
 
 
+FAKE_SERVE = textwrap.dedent("""\
+    import json, os, sys, time
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    a = sys.argv[1:]
+    port = int(a[a.index("--port") + 1])
+    logdir = a[a.index("--log-requests") + 1] if "--log-requests" in a else None
+    drift = "--drift" in a              # an arm whose output differs from the others
+    n = [0]
+    sys.stderr.write("max_len: 16384, mtp: %s\\n" % (a[a.index("--mtp") + 1] if "--mtp" in a else "off"))
+    sys.stderr.flush()
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *x):
+            pass
+        def reply(self, obj):
+            b = json.dumps(obj).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+        def do_GET(self):
+            self.reply({"data": [{"id": "b70"}]})
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            chat = self.path.endswith("/chat/completions")
+            assert body["temperature"] == 0 and body["return_token_ids"] is True
+            ids = [(7 * i + (1 if drift and i == 5 else 0)) % 1000 for i in range(body["max_tokens"])]
+            t0 = time.monotonic(); time.sleep(0.01); t1 = time.monotonic(); time.sleep(0.02)
+            ch = {"index": 0, "finish_reason": "length", "token_ids": ids}
+            if chat:
+                assert body["chat_template_kwargs"] == {"enable_thinking": False} and body["tools"]
+                ch["message"] = {"role": "assistant", "content": "ok"}
+            else:
+                ch["text"] = "ok"
+            self.reply({"choices": [ch], "usage": {"prompt_tokens": 3, "completion_tokens": len(ids)},
+                        "prompt_token_ids": [1, 2, 3]})
+            if logdir:
+                n[0] += 1
+                with open(os.path.join(logdir, "%06d.json" % n[0]), "w") as f:
+                    json.dump({"t_start": t0, "t_first_token": t1, "t_end": time.monotonic(), "out_ids": ids}, f)
+    HTTPServer(("127.0.0.1", port), H).serve_forever()
+    """)
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class ServeClientTest(Tmp):
+    """serve_run.sh + serve_client.py against a stand-in b70-serve (no box, no model)."""
+
+    def setUp(self):
+        super().setUp()
+        write(self.p("fake-serve"), "#!/bin/sh\nexec " + sys.executable + " " + self.p("fake_serve.py") + ' "$@"\n', 0o755)
+        write(self.p("fake_serve.py"), FAKE_SERVE)
+        # a chat set: manifest + one scenario + the ids the server is expected to encode
+        write(self.p("set", "manifest.json"), json.dumps([{"name": "t1_x"}]))
+        write(self.p("set", "t1_x.json"), json.dumps({"name": "t1_x", "enable_thinking": False,
+              "messages": [{"role": "user", "content": "hi"}], "tools": [{"type": "function"}]}))
+        write(self.p("set", "t1_x.ids"), "1 2 3\n")
+
+    def arm(self, label, rnd, *serve_flags):
+        env = dict(os.environ, B70_SERVE=self.p("fake-serve"), PORT=str(free_port()), WAIT="30")
+        r = subprocess.run([os.path.join(HERE, "serve_run.sh"), self.p("runs", f"{label}.r{rnd}"), label, str(rnd),
+                            "/snap", *serve_flags, "--", "--set", "golden", "--set", self.p("set"),
+                            "--max-tokens", "8"], capture_output=True, text=True, env=env, timeout=120)
+        return r
+
+    def client(self, *a):
+        return subprocess.run([sys.executable, os.path.join(HERE, "serve_client.py"), *a],
+                              capture_output=True, text=True)
+
+    def test_arms_table_compare(self):
+        for rnd in (1, 2):
+            for label, flags in (("off", ["--mtp", "off"]), ("k3", ["--mtp", "3"])):
+                r = self.arm(label, rnd, *flags)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("SERVE_RUN [k3 r2] rc=0", r.stdout)
+        self.assertIn("max_len: 16384, mtp: 3", r.stdout)          # the server's startup lines
+        with open(self.p("runs", "k3.r2", "requests.jsonl")) as f:
+            recs = [json.loads(line) for line in f]
+        self.assertEqual([x["name"] for x in recs], ["prose", "code", "cjk", "t1_x"])
+        chat = recs[-1]
+        self.assertEqual(chat["endpoint"], "/v1/chat/completions")
+        self.assertIs(chat["prompt_ids_match"], True)
+        self.assertIs(recs[0]["prompt_ids_match"], False)          # golden .ids are not [1, 2, 3]
+        self.assertEqual(chat["out_ids"], [0, 7, 14, 21, 28, 35, 42, 49])
+        self.assertIsNotNone(chat["gen_tps"])                       # from the server's own record
+        self.assertGreater(chat["gen_s"], 0.0)
+        self.assertIsNone(chat["accepted"])
+        r = self.client("compare", "--dir", self.p("runs"), "--ref", "off")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("IDENTICAL k3 r1 vs off: 4/4", r.stdout)
+        r = self.client("table", "--dir", self.p("runs"), "--ref", "off", "--ratio", "k3/off")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("| golden/prose |", r.stdout)
+        self.assertRegex(r.stdout, r"RATIO k3/off golden geomean [0-9.]+ over 3 prompts")
+        r = self.arm("drift", 1, "--drift")                         # an arm that differs at index 5
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = self.client("compare", "--dir", self.p("runs"), "--ref", "off")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("DIFFER drift r1 vs off golden/prose at index 5", r.stdout)
+
+    def test_server_down(self):
+        env = dict(os.environ, B70_SERVE="/usr/bin/false", PORT=str(free_port()), WAIT="5")
+        r = subprocess.run([os.path.join(HERE, "serve_run.sh"), self.p("down"), "x", "1", "/snap", "--", "--set", "golden"],
+                           capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("the server did not come up", r.stdout)
+
+
+class LongIdsAndOracleTest(Tmp):
+    def test_long_ids(self):
+        out = self.p("long.ids")
+        r = subprocess.run([sys.executable, os.path.join(HERE, "long_ids.py"), "70000", out], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(out) as f:
+            ids = [int(x) for x in f.read().split()]
+        with open(os.path.join(ROOT, "tests", "golden", "prompts", "prose.ids")) as f:
+            tail = [int(x) for x in f.read().split()]
+        with open(os.path.join(ROOT, "tests", "golden", "prompts", "long32k.ids")) as f:
+            filler = [int(x) for x in f.read().split()]
+        self.assertEqual(len(ids), 70000)
+        self.assertEqual(ids[-len(tail):], tail)
+        self.assertEqual(ids[:len(filler)], filler)                  # the file, then the file again
+        self.assertEqual(ids[len(filler):2 * len(filler)][:100], filler[:100])
+
+    def test_k2_oracle_ram_guard(self):
+        if os.path.exists("/proc/meminfo"):
+            self.skipTest("a Linux box: the guard reads the real MemAvailable")
+        r = subprocess.run([os.path.join(HERE, "k2_oracle.sh"), self.p("data")], capture_output=True, text=True,
+                           env=dict(os.environ, K2_REF_MIN_GB="1"))
+        self.assertEqual(r.returncode, 77, r.stdout + r.stderr)
+        self.assertIn("SKIP_REASON k2_oracle: MemAvailable", r.stdout)
+        self.assertFalse(os.path.exists(self.p("data", "oracle-out-k2")))
+
+
 class DriverTest(unittest.TestCase):
     """tools/box_validate.sh without a box: --list, --dry-run, --registry, selection."""
 
@@ -409,6 +569,15 @@ class DriverTest(unittest.TestCase):
         self.assertIn("g0_compare.sh", out)
         self.assertIn("-j44", out)
         self.assertNotIn("--- r11.passkey262k", out)     # opt-in: not by default
+        self.assertNotIn("--- r14.oracle", out)
+        self.assertNotIn("--- r6.passkey120k", out)
+        # rows 13 and 14 (spec 15d, 18b): R0 / K0 first, the no-checkpoint kernels before the gates
+        self.assertIn("--- r13.kernels", out)
+        self.assertIn("--- r14.k1", out)
+        self.assertIn("env B70_LONGCTX_TESTS=1 ctest", out)             # r6.mtp_long's variants
+        self.assertIn("--mtp 3 > ", out)                                 # r6.greedy_long: b70-decode --mtp
+        self.assertIn("probe_mtp_steps", out)
+        self.assertIn(" 120000 32 3 int8 off 131072", out)
         addr = self.box_address()
         if addr:
             self.assertNotIn(addr, out)
@@ -417,12 +586,33 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(order[:5], ["pre", "g0.build", "g0.sha", "g0.bitwise", "g0.suite"])
         self.assertLess(order.index("r11.kernels"), order.index("r11.q2"))
         self.assertEqual(order[-1], "x.rest")
+        for first, later in (("r13.r0", "r13.kernels"), ("r13.kernels", "r13.prefill"), ("r13.kernels", "r13.gates"),
+                             ("r14.k0", "r14.k1"), ("r14.k1", "r14.load"), ("r14.load", "r14.k3"),
+                             ("r14.k3", "r14.golden"), ("r12.d2", "r12.a4")):
+            self.assertLess(order.index(first), order.index(later), (first, later))
+        # the server rows: one serve_run.sh per arm and round, round 2 in reversed order
+        arms = re.findall(r"serve_run\.sh \S+/r2\.auto_rows/(\S+) ", out)
+        self.assertEqual(arms, ["off.r1", "k1.r1", "k3.r1", "auto.r1", "auto.r2", "k3.r2", "k1.r2", "off.r2",
+                                "off.r3", "k1.r3", "k3.r3", "auto.r3"])
+        self.assertIn("serve_client.py compare --dir", out)
+        self.assertRegex(out, r"serve_run\.sh \S+/r12\.a4/lookup2\.r1 lookup2 1 \S+ --max-len 16384 --spec lookup --spec-min-match 2 -- ")
+        # Ornith prefills since 15d: row 10 no longer expects --pp to refuse
+        self.assertNotIn("printing /prefill of a mixture-of-experts model/", out)
 
     def test_selection(self):
         out = self.run_driver("--dry-run", "--only", "r11", "--with", "r11.passkey120k", "--skip", "r11.speed").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order, ["pre", "r11.bf16", "r11.kernels", "r11.q2", "r11.q5", "r11.memory",
                                  "r11.passkey120k"])
+        out = self.run_driver("--dry-run", "--only", "r14", "--with", "r14.oracle").stdout
+        order = re.findall(r"^--- (\S+)", out, re.M)
+        self.assertEqual(order, ["pre", "r14.k0", "r14.host", "r14.k1", "r14.load", "r14.k3", "r14.oracle",
+                                 "r14.golden", "r14.cli"])
+        self.assertIn("tools/box_validate/k2_oracle.sh $HOME/b70-inference-server", out)
+        out = self.run_driver("--dry-run", "--only", "r13").stdout
+        order = re.findall(r"^--- (\S+)", out, re.M)
+        self.assertEqual(order, ["pre", "r13.r0", "r13.host", "r13.kernels", "r13.prefill", "r13.gates", "r13.split",
+                                 "r13.cli"])
         r = self.run_driver("--dry-run", "--only", "r99", ok=False)
         self.assertEqual(r.returncode, 2)
         out = self.run_driver("--dry-run", "--redo", "r1").stdout

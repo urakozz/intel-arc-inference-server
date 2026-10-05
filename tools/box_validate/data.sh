@@ -10,8 +10,8 @@
 #       The stages' NEEDS name these keys (tools/box_validate/stages.sh).
 #   tools/box_validate/data.sh resolve <repo id | snapshot dir>
 #       the snapshot directory the CLIs would load (refs/main for a repo id).
-# Env: SNAP_QWEN, SNAP_AGNES, SNAP_ORNITH, HF_HOME, TOK_PYTHON, OPENCODE_LOG, A4_REF_DIR,
-#      ORACLE_IMAGE. Run from a tree root (the oracle-out* checks look there).
+# Env: SNAP_QWEN, SNAP_AGNES, SNAP_ORNITH, SNAP_K2, HF_HOME, TOK_PYTHON, OPENCODE_LOG,
+#      A4_REF_DIR, ORACLE_IMAGE. Run from a tree root (the oracle-out* checks look there).
 set -u
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
 
@@ -69,6 +69,10 @@ case "${1:-}" in
     have oracle_agnes_mtp "oracle-out-agnes-mtp/ (rsync from the Mac)" test -d oracle-out-agnes-mtp
     have ornith "Ornith int4 checkpoint ${SNAP_ORNITH:-?} (spec 15a)" complete "${SNAP_ORNITH:-/nonexistent}"
     have oracle_ornith "oracle-out-ornith/ with router_logits.L* (spec 15a)" test -d oracle-out-ornith
+    have k2 "K2-Horizon int4 checkpoint ${SNAP_K2:-?} (spec 18b; hf download, 21.8 GB)" \
+      complete "${SNAP_K2:-/nonexistent}"
+    have oracle_k2 "oracle-out-k2/{prose,code,cjk}.{ids,golden.safetensors} (spec 18a's real-weight run: --with r14.oracle)" \
+      bash -c 'for p in prose code cjk; do test -s oracle-out-k2/$p.ids && test -s oracle-out-k2/$p.golden.safetensors || exit 1; done'
     have oracle_image "the oracle container image (tools/oracle/run_in_container.sh; passkey ids)" \
       docker image inspect "${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
     have tok_python "a python with tokenizers (${TOK_PYTHON:-?})" "${TOK_PYTHON:-/nonexistent}" -c 'import tokenizers'

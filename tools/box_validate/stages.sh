@@ -6,12 +6,13 @@
 # Registry fields and helpers: tools/box_validate/lib.sh. A stage body runs ON THE BOX from
 # the tree under test ($TREE); in a dry-run on the Mac every helper prints instead of running.
 #
-# Adding a row (a branch that lands blind, e.g. spec 15d / 18b):
+# Adding a row (a branch that lands blind - rows 13 and 14 below are the latest examples):
 #   1. `row N "title"` and one `stage rN.<step> N <sel> <kind> <needs> <after> "title"` per
 #      step, after the last row (the order here is the run order);
 #   2. a body `st_rN_<step>() { ...; finish; }` - usually `run_tests '<ctest regex>' [labels]`
 #      for registered tests, `x "<command>"` / `chk` for anything else, `grab` for the numbers
-#      the row asks for, `interleave.sh` for timed arms;
+#      the row asks for, `interleave.sh` for timed arms, `serve_arms` + serve_client.py for
+#      rows that need b70-serve per request;
 #   3. `rownote N "..."` for what the row asks that no stage can run, and why;
 #   4. `tools/box_validate.sh --dry-run --only rN` prints what it will run;
 #      `python3 tools/box_validate/test_box_validate.py` checks the registry.
@@ -198,7 +199,8 @@ st_r1_vllm() {
 
 # ======================================================================================
 row 2 "spec 13c Task 1 (step_many signature) and spec 8 §10 (--mtp auto)"
-rownote 2 "D1-style rows for --mtp auto against fixed K = 1 / 3 need a client that drives b70-serve per request (AdaptiveK lives in the server; mtp_gpu_test --bench takes a fixed K): r2.auto_rows prints the hand commands."
+rownote 2 "r2.auto_rows reads each arm's decode t/s from the server's --log-requests records; b70-serve's usage reports no accepted-draft count, so per-request acceptance is not recorded there (mtp_gpu_test --bench K and b70-decode --ids --mtp print it)."
+rownote 2 "Updating MtpCost's defaults from r2.cost's table is an edit on a branch after the run."
 
 stage r2.suite 2 default gpu qwen,oracle_qwen - "the suite around the changed signature: mtp_gpu, mtp_server, golden_server, prefix_gpu_*, mtp_verify, scheduler, adaptive_k"
 st_r2_suite() {
@@ -217,13 +219,19 @@ st_r2_cost() {
   finish
 }
 
-stage r2.auto_rows 2 manual - qwen - "D1-style rows: b70-serve --mtp auto against --mtp 1 and --mtp 3 on the golden and A4 prompts"
+stage r2.auto_rows 2 default gpu qwen - "D1-style rows through b70-serve: --mtp auto against --mtp 1 / 3 and off on the golden and A4 prompts, 256 ids, greedy (decode t/s per request from the server's records, R2_ROUNDS = 3 rounds rotated); greedy output identical across the arms"
 st_r2_auto_rows() {
-  say "# one server per arm, under the lock, the same prompts and max_tokens 256, temperature 0:"
-  say "flock ~/b70-gpu.lock build/src/cli/b70-serve $SNAP_QWEN --max-len 16384 --port 8013 --served-name b70 --mtp auto --log-requests ~/mtp-auto-log"
-  say "flock ~/b70-gpu.lock build/src/cli/b70-serve $SNAP_QWEN --max-len 16384 --port 8013 --served-name b70 --mtp 1 --log-requests ~/mtp-k1-log"
-  say "flock ~/b70-gpu.lock build/src/cli/b70-serve $SNAP_QWEN --max-len 16384 --port 8013 --served-name b70 --mtp 3 --log-requests ~/mtp-k3-log"
-  say "# t/s per request from each log's t_first_token / t_end and out_ids; arms interleaved, median of 3"
+  idle before
+  serve_arms "$STATE/$STAGE" "${R2_ROUNDS:-3}" "$SNAP_QWEN" "--set golden --set toolcall --max-tokens 256" \
+    "off|--max-len 16384 --mtp off" "k1|--max-len 16384 --mtp 1" "k3|--max-len 16384 --mtp 3" \
+    "auto|--max-len 16384 --mtp auto"
+  idle after
+  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output identical to --mtp off in every arm"
+  x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref off --ratio auto/k1 --ratio auto/k3"
+  grab_all ratio '^RATIO ' 20
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 20
+  grab_all idle '^IDLE '
+  finish
 }
 
 stage r2.opencode 2 optin gpu-self qwen,opencode_log - "the opencode replay with --mtp auto (OPENCODE_LOG=<request log dir>), prefix cache on"
@@ -283,13 +291,60 @@ st_r5_r0() {
 
 # ======================================================================================
 row 6 "spec 8 §12 - MTP at every context length"
-rownote 6 "mtp_gpu_test and mtp_verify_test still run at max_len 16384 only (kMaxLen is a constexpr in tests/server/mtp_gpu_test.cc and tests/runtime/mtp_verify_test.cc): greedy equality and M2 at 32768 / 131072 need a --max-len argument there first."
-rownote 6 "probe_mtp_steps builds its engine at max_len 16384 (tools/probe/probe_mtp_steps.cc), so the cost table at 32k / 120k depth needs a max_len argument; A12's 32k / 64k rows (tools/probe/mtp_d1.sh) wait on mtp_gpu_test's for the same reason."
-rownote 6 "Passkey at 120k with --mtp auto and spec 7 C1 restore with MTP at 64k are server paths (b70-decode has no --mtp; snapshot_test runs at 16384): no harness exists for either."
+rownote 6 "Spec 7 C1 restore with MTP at 64k is mtp_verify_128k_test's RF4 at 69931 (max_len / 2 + 4395); snapshot_test itself stays at 16384."
+rownote 6 "The passkey at 120k with --mtp auto (r6.passkey120k) and A12's 32k / 64k rows (r6.d1) are opt-in: hours each."
 stage r6.memory 6 default gpu qwen - "the memory line at 131072 with MTP (~30.5 GB derived): memory_plan_box_test mtp 131072, plan == allocation"
 st_r6_memory() {
   chk "build/tests/memory_plan_box_test $SNAP_QWEN mtp 131072" "memory_plan_box_test mtp 131072"
   grab_all plan 'plan == allocation|memory:'
+  finish
+}
+stage r6.mtp_long 6 default gpu qwen r6.memory "M2 / RF3 / RF4 (C1 with MTP at ~70k) and M3 greedy equality at max_len 32768 and 131072: mtp_verify_{32k,128k}_test, mtp_gpu_{32k,128k}_test (label longctx, B70_LONGCTX_TESTS=1)"
+st_r6_mtp_long() {
+  run_tests '^(mtp_verify|mtp_gpu)_(32k|128k)_test$' longctx '' 'B70_LONGCTX_TESTS=1'
+  jgrab m2 'mtp_verify_(32k|128k)' '^M2:|^RF[345]|max_len'
+  jgrab m3 'mtp_gpu_(32k|128k)' 'M3:|M3 pooled|mtp_gpu_test .*(PASS|FAIL)|max_len'
+  finish
+}
+stage r6.greedy_long 6 default gpu qwen r6.memory "long-context MTP greedy equality without the server: b70-decode --ids (120000 ids) --prefill --max-len 131072 --lm-head int8, 256 ids plain / --mtp 3 / --mtp auto, the three outputs identical"
+st_r6_greedy_long() {
+  local arm f="$STATE/$STAGE.120k.ids"
+  chk "python3 tools/box_validate/long_ids.py 120000 $f" "the 120000-id prompt"
+  for arm in off 3 auto; do
+    chk "build/src/cli/b70-decode $SNAP_QWEN --ids $f --n 256 --prefill --max-len 131072 --lm-head int8 --mtp $arm > $STATE/$STAGE.mtp-$arm.out" "b70-decode --mtp $arm at 120k"
+  done
+  chk "cmp $STATE/$STAGE.mtp-off.out $STATE/$STAGE.mtp-3.out && cmp $STATE/$STAGE.mtp-off.out $STATE/$STAGE.mtp-auto.out && echo 'GREEDY identical: plain, --mtp 3, --mtp auto at 120k'" "greedy ids identical with and without MTP at 120k"
+  grab_all mtp '^mtp:|^generate:|GREEDY' 12
+  finish
+}
+stage r6.cost 6 default gpu qwen r6.memory "the cost table at depth: probe_mtp_steps at 32k (max_len 65536) and 120k (max_len 131072), int8 and bf16 heads (timed)"
+st_r6_cost() {
+  idle before
+  local h
+  for h in int8 bf16; do
+    chk "build/tools/probe/probe_mtp_steps $SNAP_QWEN 32768 32 3 $h off 65536" "probe_mtp_steps 32k, $h head"
+    chk "build/tools/probe/probe_mtp_steps $SNAP_QWEN 120000 32 3 $h off 131072" "probe_mtp_steps 120k, $h head"
+  done
+  idle after
+  grab_all cost-rows '^lm_head:|^max_len:|^probe_mtp_steps:|^\| ' 80
+  grab_all idle '^IDLE '
+  finish
+}
+stage r6.passkey120k 6 optin gpu qwen,oracle_image r6.memory "passkey 3/3 at 120k with b70-decode --mtp auto --lm-head int8 (l0-int8; passkey.sh DECODE_ARGS)"
+st_r6_passkey120k() {
+  chk "DECODE_ARGS='--mtp auto --lm-head int8' MODEL=$SNAP_QWEN tools/probe/passkey.sh l0-int8" "passkey 120k, --mtp auto (int8 head)"
+  grab_all passkey '^passkey [^ ]+: [0-9]/3'
+  grab_all mtp 'mtp: ' 6
+  finish
+}
+stage r6.d1 6 optin gpu-self qwen r6.memory "A12's rows at depth 32k and 64k: tools/probe/mtp_d1.sh greedy (mtp_gpu_test --bench K = 0..3, 3 rounds; MAX_LEN 65536 / 131072), the table (hours)"
+st_r6_d1() {
+  local d m
+  for d in 32768 65536; do
+    m=65536; [ "$d" = 65536 ] && m=131072
+    chk "SNAP=$SNAP_QWEN MAX_LEN=$m tools/probe/mtp_d1.sh greedy $d > $STATE/$STAGE.$d.log && python3 tools/probe/mtp_d1_table.py $STATE/$STAGE.$d.log" "mtp_d1.sh at depth $d"
+  done
+  grab_all d1 'geomean|^\| ' 40
   finish
 }
 
@@ -453,9 +508,19 @@ st_r8_m3_small() {
   grab_all m3 'mtp_gpu_test .*(PASS|FAIL)'
   finish
 }
-stage r8.auto_rows 8 manual - qwen - "--mtp auto rows at the chosen size against fixed K (server paths, as r2.auto_rows)"
+stage r8.auto_rows 8 optin gpu qwen - "--mtp auto rows at the chosen size (R8_DRAFT_VOCAB, default 128k) against fixed K = 1 / 3 and against --mtp auto without it, through b70-serve as r2.auto_rows"
 st_r8_auto_rows() {
-  say "# as r2.auto_rows, each server with --draft-vocab <chosen size> added; the default b70-serve --mtp auto applies MtpCost::with_draft_vocab"
+  local dv="${R8_DRAFT_VOCAB:-128k}"
+  idle before
+  serve_arms "$STATE/$STAGE" "${R2_ROUNDS:-3}" "$SNAP_QWEN" "--set golden --set toolcall --max-tokens 256" \
+    "auto|--max-len 16384 --mtp auto" "auto-dv|--max-len 16384 --mtp auto --draft-vocab $dv" \
+    "k1-dv|--max-len 16384 --mtp 1 --draft-vocab $dv" "k3-dv|--max-len 16384 --mtp 3 --draft-vocab $dv"
+  idle after
+  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref auto" "greedy output identical with the draft vocabulary"
+  x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref auto --ratio auto-dv/k1-dv --ratio auto-dv/k3-dv"
+  grab_all ratio '^RATIO ' 20
+  grab_all idle '^IDLE '
+  finish
 }
 
 # ======================================================================================
@@ -474,6 +539,7 @@ st_r9_auto() {
 row 10 "spec 15c - Ornith 1.5 35B-A3B decode (spec 15 §10)"
 rownote 10 "P0's build-variant sweeps (UP_KS 1/2/4/8, DN_KS 1/2/4, the {S, layout} sweeps of the four int4 shapes, spec 15 §9's arms, the 3-launch arm) each need a rebuild with other defines or a probe that does not exist yet: r10.p0_sweeps lists them."
 rownote 10 "Everything after the no-checkpoint tests waits on 15a: the int4 checkpoint (SNAP_ORNITH) and oracle-out-ornith with router_logits.L*; those stages SKIP with 'missing data' until both are on the box."
+rownote 10 "The --pp / --ids --prefill refusals are gone since 15d (Ornith prefills on l0 / l0-int8; row 13's r13.cli runs them); b70-serve still refuses a MoE model, now naming spec 15e."
 stage r10.r0 10 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the four edited sources included), the Qwen3.8 suite, Agnes's gates"
 st_r10_r0() {
   need_pass g0.sha g0.bitwise g0.suite r1.gates
@@ -496,11 +562,9 @@ st_r10_gates() {
   jgrab ornith 'ornith' 'launch|526|R2|R3|OK|PASS|FAIL'
   finish
 }
-stage r10.refusals 10 default gpu ornith - "what Ornith refuses, each with its message: --pp, --ids --prefill, b70-serve, --mtp, B70_DECODE_ATTN=v1"
+stage r10.refusals 10 default gpu ornith - "what Ornith refuses, each with its message: b70-serve (spec 15e), --mtp, B70_DECODE_ATTN=v1"
 st_r10_refusals() {
-  xfail "timeout 900 build/src/cli/b70-decode $SNAP_ORNITH --bench --pp 512 --tg 1" 'prefill of a mixture-of-experts model' "b70-decode --pp 512"
-  xfail "timeout 900 build/src/cli/b70-decode $SNAP_ORNITH --ids tests/golden/prompts/prose.ids --n 1 --prefill" 'prefill of a mixture-of-experts model' "b70-decode --ids --prefill"
-  xfail "timeout 900 build/src/cli/b70-serve $SNAP_ORNITH --port $PORT --max-len 16384" 'prefill of a mixture-of-experts model' "b70-serve"
+  xfail "timeout 900 build/src/cli/b70-serve $SNAP_ORNITH --port $PORT --max-len 16384" 'mixture-of-experts model is spec 15e|prefill of a mixture-of-experts model' "b70-serve"
   xfail "timeout 900 build/src/cli/b70-serve $SNAP_ORNITH --port $PORT --max-len 16384 --mtp 1" 'mixture-of-experts|MoE|spec 15e' "b70-serve --mtp 1"
   xfail "B70_DECODE_ATTN=v1 timeout 900 build/src/cli/b70-decode $SNAP_ORNITH --bench --depth 16 --tg 1" 'decode attention v1' "B70_DECODE_ATTN=v1"
   finish
@@ -624,7 +688,7 @@ st_r11_near_ties() {
 # ======================================================================================
 row 12 "spec 19e host side - --spec lookup, prompt lookup (plan 19e)"
 rownote 12 "'no kernel binary changes' is G0's g0.sha (every binary present in both builds identical)."
-rownote 12 "A4 through a --spec lookup server: tools/toolcall/engine_generate.sh drives b70-decode, which has no --spec; no client replays the A4 set through b70-serve yet (r12.a4 prints the commands)."
+rownote 12 "The per-request 'lookup:' stderr line the plan names is not printed by b70-serve as merged; r12.d2 / r12.a4 record whatever 'lookup' lines the server log has."
 stage r12.suite 12 default gpu qwen,oracle_qwen - "the suite unchanged with --spec unset: mtp_gpu_test, golden_server_test, prefix_gpu_*; the host tests prompt_lookup_test, lookup_server_test, spec_accept_test"
 st_r12_suite() {
   run_tests '^(mtp_gpu_test|golden_server_test|prefix_gpu_.*|prompt_lookup_test|lookup_server_test|spec_accept_test)$' '' 'kv8 agnes'
@@ -642,12 +706,17 @@ st_r12_d2() {
   grab_all lookup 'spec lookup:|lookup:|SEEDED' 12
   finish
 }
-stage r12.a4 12 manual - qwen - "D2 on A4: greedy through b70-serve --spec lookup identical to --spec off"
+stage r12.a4 12 default gpu qwen - "D2 on A4: the 36 tool-call scenarios (chat, with their tools) and the golden prompts through b70-serve --spec off / lookup n = 2 / lookup n = 3, greedy, max_tokens 192 - output identical to --spec off"
 st_r12_a4() {
-  say "# one server per arm (--spec off, then --spec lookup --spec-min-match 2 / 3), under the lock:"
-  say "flock ~/b70-gpu.lock build/src/cli/b70-serve $SNAP_QWEN --max-len 16384 --port 8013 --served-name b70 --spec lookup --log-requests ~/lookup-a4-log"
-  say "# send each tests/golden/toolcall scenario's prompt ids as a completion (temperature 0, max_tokens 192);"
-  say "# compare out_ids in the two --log-requests directories request by request"
+  serve_arms "$STATE/$STAGE" 1 "$SNAP_QWEN" "--set toolcall --set golden --max-tokens 192 --stop-at-eos" \
+    "off|--max-len 16384 --spec off" "lookup2|--max-len 16384 --spec lookup --spec-min-match 2" \
+    "lookup3|--max-len 16384 --spec lookup --spec-min-match 3"
+  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output through --spec lookup identical to --spec off"
+  x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref off --metric wall_tps"
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 20
+  grab_all ratio '^RATIO ' 10
+  grab_all lookup 'spec lookup:|lookup:' 12
+  finish
 }
 stage r12.d5 12 optin gpu-self qwen,opencode_log - "D5 on the opencode recording (OPENCODE_LOG): lookup_accept.py first, then --spec off / --mtp auto / --spec lookup replayed through b70-serve, 3 rounds in rotated order"
 st_r12_d5() {
@@ -665,9 +734,178 @@ st_r12_d5() {
 }
 
 # ======================================================================================
+row 13 "spec 15d - Ornith 1.5 prefill: device routing, grouped expert GEMMs (spec 15 §11, plan 15d)"
+rownote 13 "Everything after r13.kernels waits on 15a, as row 10: the int4 checkpoint (SNAP_ORNITH) and oracle-out-ornith with router_logits.L*; those stages SKIP with 'missing data' until both are on the box (ornith_prefill_* needs the checkpoint only; its R2 part reports itself SKIPPED without the golden set)."
+rownote 13 "Calibrating kConsistTieRel / kConsistWeightAbs from ornith_prefill_test's printed distribution and re-deriving prefill_split_ornith's non-64 bars (Qwen3.8's, PROVISIONAL) are edits on a branch after r13.prefill / r13.split record the numbers."
+rownote 13 "P0's SLM-fused dequant arm needs tools/probe/probe_moe_prefill.{cl,cc}, not written; it and the rebuild arms (TM, prefetch, a multi-work-group sort) are r13.p0_arms."
+
+stage r13.r0 13 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the seven edited prefill sources included), the Qwen3.8 suite incl. prefill_gate_* / prefill_split_* / prefill_replay / prefill_smoke bitwise (G0), Agnes's prefill gates"
+st_r13_r0() {
+  need_pass g0.sha g0.bitwise g0.suite r1.gates
+  jgrab prefill 'prefill_(gate_(l0|int8)|smoke)' 'golden_gate_test OK|TOTAL:|8449|8705|launch'
+  finish
+}
+stage r13.host 13 default cpu - - "host: pf_moe_ref_test (the sort's invariants and tile bound, row independence, combine == decode's, the chunk against decode's chain), memory_plan_test, model_desc_test"
+st_r13_host() {
+  run_tests '^(pf_moe_ref_test|memory_plan_test|model_desc_test)$'
+  finish
+}
+stage r13.kernels 13 default gpu - - "no checkpoint: pf_moe_test - router rows == decode's gemv_bf16 bitwise, sort / gathers / combine exact, grouped == dense bitwise for bf16 and int8 gate||up and bf16 down (a 1-ulp difference is a finding: read the epilogues), the reversed chunk, replay, C = 37"
+st_r13_kernels() {
+  run_tests '^pf_moe_test$' ornith
+  jgrab pf-moe '^pf_moe_test$' 'bitwise|exact|grouped|dense|ulp|C = 37|OK|PASS|FAIL'
+  finish
+}
+stage r13.prefill 13 default gpu ornith r13.kernels "ornith_prefill_{l0,l0-int8}_test: 2061 / 2021 launches per chunk, replay and chunking bitwise, prefill-vs-decode routes and tokens (the kConsist* distribution printed), R2 on the prefill path"
+st_r13_prefill() {
+  run_tests '^ornith_prefill_(l0|l0-int8)_test$' ornith
+  jgrab ornith-prefill 'ornith_prefill_' 'launch|2061|2021|bitwise|kConsist|tie|R2|SKIPPED|OK|FAIL'
+  finish
+}
+stage r13.gates 13 default gpu ornith,oracle_ornith r13.kernels "R3: prefill_gate_ornith_{l0,l0-int8}_test and _c16 (one chunk and chunks of 16) against oracle-out-ornith, the tie rule"
+st_r13_gates() {
+  run_tests '^prefill_gate_ornith_' ornith
+  jgrab r3 'prefill_gate_ornith' 'golden_gate_test OK|TOTAL:|determined|near-tie|PASS|FAIL'
+  finish
+}
+stage r13.split 13 default gpu ornith r13.kernels "prefill_split_ornith_{l0,l0-int8}_test: splits at multiples of 64 bitwise; the other bars are Qwen3.8's (PROVISIONAL) - the printed numbers re-derive them"
+st_r13_split() {
+  run_tests '^prefill_split_ornith_' ornith
+  jgrab split 'prefill_split_ornith' 'bitwise|cos|split|PASS|FAIL'
+  finish
+}
+stage r13.cli 13 default gpu ornith r13.kernels "b70-decode <ornith> --pp 512 runs on l0-int8 and l0 (--lm-head int8); --pp-backend sycl-tla stops naming the L0 backends; b70-serve <ornith> stops naming spec 15e"
+st_r13_cli() {
+  chk "$(bench_cmd "$SNAP_ORNITH" --pp 512 --tg 16 --lm-head int8)" "b70-decode --pp 512 (l0-int8)"
+  chk "$(bench_cmd "$SNAP_ORNITH" --pp 512 --tg 16 --lm-head int8 --pp-backend l0)" "b70-decode --pp 512 --pp-backend l0"
+  xfail "timeout 900 build/src/cli/b70-decode $SNAP_ORNITH --bench --pp 512 --tg 1 --pp-backend sycl-tla" 'prefills on the L0 backends only' "--pp-backend sycl-tla"
+  xfail "timeout 900 build/src/cli/b70-serve $SNAP_ORNITH --port $PORT --max-len 16384" 'mixture-of-experts model is spec 15e' "b70-serve"
+  grab_all rows '^\| b70-decode' 4
+  grab_all pp '^pp: ' 2
+  finish
+}
+stage r13.p0 13 optin gpu ornith r13.kernels "P0 (plan 15d Task 1), the runnable part: B70_PREFILL_PROFILE=1 b70-decode --pp 2048 on l0-int8 and l0 - the moe_* rows (router, route, sort, gather, requant / dequant, GEMM, combine) against the derived ~2.6 GB / layer / chunk of the separate pass"
+st_r13_p0() {
+  idle before
+  chk "B70_PREFILL_PROFILE=1 $(bench_cmd "$SNAP_ORNITH" --pp 2048 --tg 1 --lm-head int8)" "the l0-int8 prefill profile"
+  chk "B70_PREFILL_PROFILE=1 $(bench_cmd "$SNAP_ORNITH" --pp 2048 --tg 1 --lm-head int8 --pp-backend l0)" "the l0 prefill profile"
+  idle after
+  grab_all moe 'moe|MoE' 60
+  grab_all idle '^IDLE '
+  finish
+}
+stage r13.speed 13 optin gpu ornith r13.kernels "Task 4: pp4096, pp32768 and pp130816 (max_len 131072) on l0-int8 and l0, --lm-head int8, interleaved pairs, median of 3 - BENCHMARKS 'Ornith 1.5 MoE (spec 15)' prefill rows"
+st_r13_speed() {
+  idle before
+  local n arms="" ratios=""
+  for n in 4096 32768 130816; do
+    arms="$arms pp$n-int8 '$(bench_cmd "$SNAP_ORNITH" --pp $n --tg 256 --max-len 131072 --lm-head int8)'"
+    arms="$arms pp$n-l0 '$(bench_cmd "$SNAP_ORNITH" --pp $n --tg 256 --max-len 131072 --lm-head int8 --pp-backend l0)'"
+    ratios="$ratios --ratio pp$n-l0/pp$n-int8"
+  done
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "the Ornith prefill arms"
+  idle after
+  grab_all memory '^memory:' 6
+  grab_all ratio '^RATIO '
+  grab_all idle '^IDLE '
+  finish
+}
+stage r13.p0_arms 13 manual - ornith - "P0's arms that need a probe or a rebuild (plan 15d Task 1)"
+st_r13_p0_arms() {
+  say "# the SLM-fused dequant arm: tools/probe/probe_moe_prefill.{cl,cc} (not written) against the separate pass r13.p0 measured"
+  say "# the grouped GEMMs' TFLOP/s at the real row distribution (15a's router statistics); TM 16 / 32 / 64; prefetch + split barrier in pf_moe_gemm; a multi-work-group sort if moe_sort shows in r13.p0"
+  say "# each: rebuild with the define, pf_moe_test bitwise, then B70_PREFILL_PROFILE=1 build/src/cli/b70-decode $SNAP_ORNITH --bench --pp 2048 --tg 1 --lm-head int8"
+  say "# record: docs/probe-ornith-prefill-2026-10-04.md"
+}
+
+# ======================================================================================
+row 14 "spec 18b - K2-Horizon decode on one card (spec 18 §10, plan 18b)"
+rownote 14 "Load, K3, CLI and speed need the int4 checkpoint (SNAP_K2: hf download urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ, 21.8 GB); K2 also needs oracle-out-k2, which the opt-in r14.oracle makes on the box CPU (--with r14.oracle, ~20 min). Without them those stages SKIP with 'missing data'."
+rownote 14 "Setting the near-tie tolerance from the gap distribution r14.oracle prints (k2_golden_test.cc proposes 1e-3) is an edit after it; r14.golden runs at the proposal, or at B70_K2_TIE_TOL when the driver's environment sets it."
+rownote 14 "If K2's determined rows fail, the first suspect is decode attention's fp32 probabilities against the reference's eager bf16 scores / probabilities (spec 18 §10); an eager-mirroring reduce is the fix, on a branch."
+
+stage r14.k0 14 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (no existing .cl changed), the Qwen3.8 suite (G0); Agnes's and Ornith's gates not failed (a SKIP for missing data is noted, not counted)"
+st_r14_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  need_ok r1.gates r1.features r10.nockpt r10.gates r13.kernels r13.gates
+  finish
+}
+stage r14.host 14 default cpu - - "host: k2_horizon, k2_rope, k2_repack, k2_ref, k2_plan, k2_variant_names, model_desc (the power-of-two expert-count refusal)"
+st_r14_host() {
+  run_tests '^(k2_horizon_test|k2_rope_test|k2_repack_test|k2_ref_test|k2_plan_test|k2_variant_names_test|model_desc_test)$'
+  finish
+}
+stage r14.k1 14 default gpu - - "K1, no checkpoint: k2_kernels_test (norm / prep bit-exact, routers incl. ties and the padded lanes, MoE and MoVA within 2 ulps, attention at 6 / 300 / 3000 keys with softplus gates on both sides of 28.85, replay); cli_reject_k2_{prefill,pp,kv8}, cli_reject_mtp_k2"
+st_r14_k1() {
+  run_tests '^k2_kernels_test$' k2
+  run_tests '^cli_reject_(k2_.*|mtp_k2)$'
+  jgrab k1 '^k2_kernels_test$' 'ulp|bit-exact|bitwise|OK|PASS|FAIL'
+  finish
+}
+stage r14.load 14 default gpu k2 r14.k1 "k2_load_checkpoint_test and _i8head: every bucket = loader::k2_weight_bytes (21,801,501,440 / 21,160,906,496 B), read/token 3.786 / 3.145 GB, 0 unconsumed, readbacks (~5 min each)"
+st_r14_load() {
+  run_tests '^k2_load_checkpoint(_i8head)?_test$' k2
+  jgrab load 'k2_load_checkpoint' 'bytes|read/token|per token|unconsumed|OK|FAIL'
+  finish
+}
+stage r14.k3 14 default gpu k2 r14.load "K3: k2_decode_test and _i8head - 717 launches, plan == allocation, replay bitwise incl. route rows and KV"
+st_r14_k3() {
+  run_tests '^k2_decode(_i8head)?_test$' k2
+  jgrab k3 'k2_decode' '717|launch|plan|allocation|bitwise|OK|FAIL'
+  finish
+}
+stage r14.oracle 14 optin cpu k2,oracle_image - "18a's real-weight reference on the box CPU: tools/oracle/k2_ref.py run on the int4 checkpoint, 3 prompts x 32 ids + the routing dumps -> \$DATA/oracle-out-k2 (resumable per prompt, ~20 min; needs MemAvailable >= K2_REF_MIN_GB = 32), the gap distribution; then re-links oracle-out* and refreshes the data list for r14.golden"
+st_r14_oracle() {
+  chk "tools/box_validate/k2_oracle.sh $DATA" "the K2-Horizon reference run"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_(k2|oracle_k2)=' $STATE/have.env"
+  grab_all gap 'selection gap' 12
+  finish
+}
+stage r14.golden 14 default gpu k2,oracle_k2 r14.k3 "K2: k2_golden_test and _i8head against oracle-out-k2 - the tie-aware token gate and the per-layer routing diagnostic (a non-tie set difference fails; near-tie tolerance 1e-3 proposed, B70_K2_TIE_TOL overrides)"
+st_r14_golden() {
+  x "grep -h -E 'selection gap' oracle-out-k2/*.log 2>/dev/null || echo 'no gap lines in oracle-out-k2/*.log'"
+  run_tests '^k2_golden(_i8head)?_test$' k2 '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
+  jgrab k2-golden 'k2_golden' 'tie|routing|determined|differ|OK|PASS|FAIL'
+  finish
+}
+stage r14.cli 14 default gpu k2 r14.k1 "CLI: b70-decode <k2> --ids (oracle-out-k2/prose.ids, else the committed prose.ids) --n 32; --max-len auto -> ~46592 (bf16 head) / ~49920 (--lm-head int8), derived; b70-serve <k2> refuses naming 18c / 18d"
+st_r14_cli() {
+  chk "ids=oracle-out-k2/prose.ids; [ -s \$ids ] || ids=tests/golden/prompts/prose.ids; echo \"ids: \$ids\"; timeout 1800 build/src/cli/b70-decode $SNAP_K2 --ids \$ids --n 32 | tr '\\n' ' '; echo" "b70-decode --ids --n 32"
+  chk "n=\$(tools/box_validate/auto_len.sh $SNAP_K2) && echo \"K2 max_len auto, bf16 head: \$n\"" "--max-len auto, bf16 head"
+  chk "n=\$(tools/box_validate/auto_len.sh $SNAP_K2 --depth 16 --tg 1 --lm-head int8) && echo \"K2 max_len auto, int8 head: \$n\"" "--max-len auto, int8 head"
+  xfail "timeout 900 build/src/cli/b70-serve $SNAP_K2 --port $PORT --max-len 16384" 'spec 18c|spec 18d' "b70-serve"
+  grab_all generate '^generate:|^ids: ' 4
+  grab_all auto '^K2 max_len auto' 2
+  finish
+}
+stage r14.speed 14 optin gpu k2 r14.k3 "Task 4: decode at depth 4096 / 16384 / 32768, tg 256, bf16 and int8 heads (max_len 40960), interleaved pairs, median of 3, against the derived roofline (~190 t/s weights-only, int8 head); BENCHMARKS 'K2-Horizon (spec 18)'"
+st_r14_speed() {
+  idle before
+  local d arms="" ratios=""
+  for d in 4096 16384 32768; do
+    arms="$arms d$d '$(bench_cmd "$SNAP_K2" --depth $d --tg 256 --max-len 40960)'"
+    arms="$arms d$d-int8 '$(bench_cmd "$SNAP_K2" --depth $d --tg 256 --max-len 40960 --lm-head int8)'"
+    ratios="$ratios --ratio d$d-int8/d$d"
+  done
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "the K2 decode arms"
+  idle after
+  grab_all memory '^memory:' 6
+  grab_all ratio '^RATIO '
+  grab_all idle '^IDLE '
+  finish
+}
+stage r14.sweeps 14 manual - k2 - "Task 4's sweeps: the {S, layout} cells of the five int4 shapes and the expert kernels' K splits"
+st_r14_sweeps() {
+  say "# {S, layout} of 2560x10240, 2560x9280, 4096x2560, 2560x12288, 6144x2560 with their GEMV_* defines (probe_gemv rows, as spec 14 step 4)"
+  say "# UP_KS / DN_KS / MOVA_KS: rebuild k2_moe.cl's variants per value, k2_kernels_test, then build/src/cli/b70-decode $SNAP_K2 --bench --depth 4096 --tg 256 --lm-head int8 per value"
+  say "# --profile is refused on K2 until Task 4 builds it; record: docs/BENCHMARKS.md 'K2-Horizon (spec 18)'"
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
-stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 labels belong to their rows)"
+stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx labels belong to their rows)"
 st_x_rest() {
-  run_tests '.' '' 'agnes ornith kv8'
+  run_tests '.' '' 'agnes ornith kv8 k2 longctx'
   finish
 }
