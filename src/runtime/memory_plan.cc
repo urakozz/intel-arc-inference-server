@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include "loader/draft_vocab.h"
+#include "loader/moe_layout.h"
 #include "runtime/buffer_sizes.h"
 
 namespace runtime {
@@ -34,6 +35,10 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
   const PersistentSizes ps = PersistentDims::sizes(max_len, desc);
   p.kv = ps.kv_k + ps.kv_v;
   p.decode_state = ps.total() - p.kv + DecodeScratchDims::sizes(max_len, desc).total();
+  // Spec 15c: the MoE split (both already counted above - model_bytes is the loaded total,
+  // DecodeScratchSizes::moe is in decode_state).
+  p.moe_weights = loader::moe_bytes(desc);
+  p.moe_scratch = moe_scratch_layout(desc).total;
   if (mtp) {
     // With a draft vocabulary MtpBuffers also holds its compact logits (spec 8 §11).
     p.mtp_buffers = MtpDims::sizes(max_len, desc, dv.rows).total();
@@ -99,6 +104,10 @@ std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_by
   s += buf;
   if (p.mtp) {
     std::snprintf(buf, sizeof buf, ", MTP %.3f GB in decode state", (p.mtp_buffers + p.mtp_hidden) / gb);
+    s += buf;
+  }
+  if (p.moe_weights != 0) {
+    std::snprintf(buf, sizeof buf, ", MoE experts %.3f GB in model", p.moe_weights / gb);
     s += buf;
   }
   if (p.prefill_lazy != 0) {

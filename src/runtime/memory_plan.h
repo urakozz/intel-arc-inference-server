@@ -79,6 +79,11 @@ struct MemoryPlan : MemoryComponents {
   size_t mtp_buffers = 0;    // in decode_state: MtpBuffers
   size_t mtp_hidden = 0;     // in decode_state: Engine::prefill's MTP hidden rows
   size_t prefill_lazy = 0;   // in prefill_scratch: the lazy buffers `path` builds
+  // Spec 15c, a mixture-of-experts model: the loader's expert blocks, routers and shared
+  // experts (loader::moe_bytes - already inside `model_bytes`, the loaded total), and the
+  // decode MoE scratch (runtime::moe_scratch_layout - inside decode_state). 0 when dense.
+  size_t moe_weights = 0;    // in model
+  size_t moe_scratch = 0;    // in decode_state
 };
 
 // `model_bytes`: everything loader::load() allocated EXCEPT the RoPE table -

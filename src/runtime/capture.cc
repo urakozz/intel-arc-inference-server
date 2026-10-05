@@ -68,6 +68,8 @@ static_assert(offsetof(Control, debug_flag) == kernels::ctrl_index::kDebugFlag *
               "CTRL_DEBUG moved");
 // Spec 8: CTRL_LIVE=19 in src/kernels/CMakeLists.txt's GDN_SLOT_DEFINES.
 static_assert(offsetof(Control, gdn_live) == kernels::ctrl_index::kGdnLive * 4, "CTRL_LIVE moved");
+// Spec 15c: the MoE route row - buffer_sizes.h sizes it, moe.cl (RW) writes it.
+static_assert(kMoeRouteWords == kernels::moe_route::kWords, "the MoE route row's width moved");
 
 // The captured list's M is `build`'s `M` argument (default 1, what ships). The
 // default build compiles M = 1 only (spec §9: the M loop exists in every
@@ -194,6 +196,11 @@ class Capture {
     require(gdn == d_.gdn_layers && fa == d_.fa_layers,
             "layer kind counts are not the descriptor's " + std::to_string(d_.gdn_layers) +
                 " GDN / " + std::to_string(d_.fa_layers) + " FA");
+    // The plain list's length is a property of the model (decode_launches): 774 on
+    // Qwen3.8, 526 on Ornith (spec 15c). A walk that grew or lost a launch throws here.
+    require(mode_ != Mode::Plain || step_.kernel_count == decode_launches(d_),
+            "the decode list has " + std::to_string(step_.kernel_count) + " launches, not the " +
+                std::to_string(decode_launches(d_)) + " decode_launches() gives " + d_.name);
     // Every Kernel this walk made was launched exactly once, so kernels[i] is
     // what launch i ran - which is the property that makes the vector a usable
     // record of the list rather than a lifetime bag.
@@ -288,6 +295,18 @@ class Capture {
     require(d_.shape(LinearId::Qkv).S == 2,
             "qkv is no longer S=2, but attn.cl (QKV_S) bakes a 2-slice sum into every "
             "partials load");
+    // Spec 15c: a MoE model's block - its weights (one MoeLayer per layer), its scratch
+    // (runtime::moe_scratch_layout), and the lists that do not exist for it yet.
+    if (d_.is_moe()) {
+      require(m_.moe.size() == d_.layers,
+              "the loaded model has " + std::to_string(m_.moe.size()) + " MoE layers, not " +
+                  std::to_string(d_.layers));
+      require(b_.moe != nullptr && b_.moe->size() >= moe_scratch_layout(d_).total,
+              "the decode scratch has no MoE region of moe_scratch_layout()'s size");
+      require(mode_ == Mode::Plain, "MTP on a mixture-of-experts model is spec 15e");
+      require(attn_ == DecodeAttn::V2,
+              "decode attention v1 (B70_DECODE_ATTN=v1) is not built at " + d_.name + "'s heads");
+    }
   }
 
   // Spec 8: what the MTP walks need of the head and its buffers.
@@ -617,12 +636,71 @@ class Capture {
     gemv(layer, LinearId::Down, b_.x.ptr());
   }
 
+  // The layer's feed-forward half: the dense MLP, or (spec 15c) the MoE block.
+  void ffn(uint32_t layer, uint32_t mixer_s) {
+    if (d_.is_moe())
+      moe(layer, mixer_s);
+    else
+      mlp(layer, mixer_s);
+  }
+
+  // Spec 15c: the mixture-of-experts block (spec 15 §4.1-4.2, §9) - the post norm
+  // pair and FOUR launches, the expert ids produced and consumed on the device:
+  //
+  //   gemv_bf16(router, x, logits_l)                gemv_bf16.cl, router || shared gate,
+  //                                                 N = router_n (272), {16, 16}
+  //   moe_route(logits_l, route_l)                  moe.cl, grid (1, M), WG experts
+  //   moe_gate_up(route_l, x, gate_up, h)           moe.cl, grid (slots x 2I/64, M), WG 256
+  //   moe_down(route_l, h, down, resid)             moe.cl, grid (hidden / 16, M), WG 288
+  //
+  // `logits_l` / `route_l` are this layer's slices of the MoE scratch
+  // (moe_scratch_layout), so every layer's routing survives the step for R2's gate;
+  // `h` is one region every layer reuses (in-order list). moe_down folds the block's
+  // output into `resid` itself, so the next fold is SP0 (ModelDesc::ffn_fold_s). The
+  // shared expert is slot top_k, its weights the last block of `gate_up` / `down`.
+  void moe(uint32_t layer, uint32_t mixer_s) {
+    res_norm(mixer_s, at(m_.layer_small[layer].norms, sl_.norms_off_post));
+    const loader::MoeLayer& w = m_.moe.at(layer);
+    const model::MoeDesc& md = d_.moe;
+    const MoeScratchLayout ml = moe_scratch_layout(d_);
+    void* lg = at(*b_.moe, ml.logits_at(layer));
+    void* rt = at(*b_.moe, ml.route_at(layer));
+    void* h = at(*b_.moe, ml.h_off);
+    require(w.router.shape.N == md.router_n() && w.router.shape.K == d_.hidden,
+            "the MoE router weight is not [router_n][hidden]");
+    head_gemv(w.router, b_.x.ptr(), lg);   // gemv_bf16; the [M][router_n] fp32 logits
+    const std::string v =
+        kernels::moe_variant(kCapM, md.experts, md.top_k, d_.hidden, md.expert_intermediate);
+    {
+      l0::Kernel& k = kernel(v, "moe_route", md.experts);
+      k.arg_ptr(0, lg);
+      k.arg_ptr(1, rt);
+      launch(k, 1, kCapM);
+    }
+    {
+      l0::Kernel& k = kernel(v, "moe_gate_up", kernels::moe_gate_up_wg());
+      k.arg_ptr(0, rt);
+      k.arg_ptr(1, b_.x.ptr());
+      k.arg_ptr(2, w.gate_up.ptr());
+      k.arg_ptr(3, h);
+      launch(k, kernels::moe_gate_up_groups(md.top_k, md.expert_intermediate), kCapM);
+    }
+    {
+      l0::Kernel& k = kernel(v, "moe_down", kernels::moe_down_wg(md.top_k));
+      k.arg_ptr(0, rt);
+      k.arg_ptr(1, h);
+      k.arg_ptr(2, w.down.ptr());
+      k.arg_ptr(3, b_.resid.ptr());
+      launch(k, d_.hidden / 16, kCapM);
+    }
+  }
+
   // A gated-delta-net layer (48 of 64 on Qwen3.8, 54 of 72 on Agnes): 10 kernels.
   void gdn_layer(uint32_t layer, uint32_t g) {
     // Layer 0 leads the whole step, so there are no previous partials to fold
     // and `resid` is exactly embed_gather's output: the SP0 variant. Every
     // other layer folds the previous layer's `down` (S = 4).
-    res_norm(layer == 0 ? 0u : d_.shape(LinearId::Down).S,
+    res_norm(layer == 0 ? 0u : d_.ffn_fold_s(),
              at(m_.layer_small[layer].norms, sl_.norms_off_input));
     gemv(layer, LinearId::QkvZ, b_.x.ptr());
     gemv_bf16(layer, LinearId::AB, b_.x.ptr(), b_.ab_out);
@@ -663,13 +741,12 @@ class Capture {
       launch(k, d_.gdn_v_heads, kCapM);
     }
     gemv(layer, LinearId::OutProj, b_.x.ptr());
-    mlp(layer, d_.shape(LinearId::OutProj).S);
+    ffn(layer, d_.shape(LinearId::OutProj).S);
   }
 
   // A full-attention layer (16 of 64 on Qwen3.8, 18 of 72 on Agnes): 10 kernels.
   void fa_layer(uint32_t layer, uint32_t f) {
-    res_norm(d_.shape(LinearId::Down).S,
-             at(m_.layer_small[layer].norms, sl_.norms_off_input));
+    res_norm(d_.ffn_fold_s(), at(m_.layer_small[layer].norms, sl_.norms_off_input));
     gemv(layer, LinearId::Qkv, b_.x.ptr());
     // This FA layer's KV cache slices - bf16 [max_len][4][256] each, indexed by
     // absolute position inside the kernels.
@@ -721,7 +798,7 @@ class Capture {
     // attn_reduce writes bf16 [M][6144] into `attn_out`, which is exactly this
     // GEMV's K.
     gemv(layer, LinearId::OProj, b_.attn_out.ptr());
-    mlp(layer, d_.shape(LinearId::OProj).S);
+    ffn(layer, d_.shape(LinearId::OProj).S);
   }
 
   // The token boundary: fold layer 63's MLP into the residual stream under the
@@ -757,7 +834,7 @@ class Capture {
   // stops being opened and `gemv_M1_K5120_N248320_S1_L1` starts, one for one,
   // so `CapturedStep::modules.size()` is 19 on both checkpoints.
   void head() {
-    res_norm(d_.shape(LinearId::Down).S, m_.final_norm.ptr());
+    res_norm(d_.ffn_fold_s(), m_.final_norm.ptr());
     // Spec 9: or an int8 head quantised at load (`--lm-head int8`), a `gemv_i8w`.
     const loader::DeviceWeight& lm = m_.linears.at({loader::kTopLevel, LinearId::LmHead});
     if (lm.kind == model::WeightKind::Int4) {
@@ -1040,6 +1117,10 @@ class Capture {
 };
 
 }  // namespace
+
+size_t decode_launches(const model::ModelDesc& d) {
+  return 1 + size_t(d.layers) * (d.is_moe() ? 13 : 12) + 5;
+}
 
 ProfileEvents::ProfileEvents(l0::Context& ctx) : pool(ctx, kProfileCapacity) {
   // Reserve rather than let `build` grow it: 1024 events is 24 KB of host

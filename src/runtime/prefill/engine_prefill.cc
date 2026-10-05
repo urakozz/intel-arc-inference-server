@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "model/model_desc.h"
 #include "model/qwen35.h"
 #include "runtime/control.h"
 #include "runtime/engine.h"
@@ -82,6 +83,9 @@ std::string Engine::memory_line() const {
 }
 
 void Engine::prepare_prefill() {
+  // Spec 15c: a MoE model decodes only - its grouped-expert prefill is spec 15d. Refused
+  // here, before any prefill allocation, by name (Engine::prefill calls this first).
+  model::require_prefill(*model_.desc);
   // Ruling R7: both allocations are lazy, so a decode-only Engine's device
   // residency is byte-identical to what it was before the buffer split.
   if (!pf_) pf_.reset(new PrefillScratch(ctx_, buffers_.max_len, *model_.desc));
