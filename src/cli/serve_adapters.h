@@ -233,6 +233,7 @@ struct EngineAdapter : server::EngineIface {
   uint32_t block() override { return runtime::Engine::kBlock; }
   size_t state_bytes() override { return eng.state_bytes(); }
   size_t kv_bytes(uint32_t n) override { return eng.kv_bytes(n); }
+  uint64_t kv_form() override { return eng.kv_cache() == runtime::KvCache::Int8 ? 1 : 0; }
   void save_state(void* host) override {
     flush_commit();
     eng.save_state(host);

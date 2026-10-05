@@ -46,7 +46,7 @@ const char* plan_kind_name(PrefixCache::Plan::Kind k) {
 }
 
 PrefixCache::PrefixCache(size_t budget_bytes, size_t state_bytes, size_t kv_bytes_per_pos,
-                         uint32_t block, HostAlloc& alloc, HashFn hash)
+                         uint32_t block, HostAlloc& alloc, HashFn hash, uint64_t kv_form)
     : budget_(budget_bytes),
       state_bytes_(state_bytes),
       kv_per_pos_(kv_bytes_per_pos),
@@ -56,6 +56,7 @@ PrefixCache::PrefixCache(size_t budget_bytes, size_t state_bytes, size_t kv_byte
       root_(std::make_unique<Entry>()) {
   if (block_ == 0) throw std::invalid_argument("PrefixCache: block must be > 0");
   root_->ready = true;
+  root_->hash = kv_form;   // spec 12b: every chain starts from the KV form (0 = bf16)
 }
 
 PrefixCache::~PrefixCache() {
@@ -299,7 +300,8 @@ PrefixSession::PrefixSession(EngineIface& engine, size_t budget_bytes, HostAlloc
   if (budget_bytes == 0) return;
   if (alloc == nullptr) throw std::invalid_argument("PrefixSession: a budget needs an allocator");
   cache_ = std::make_unique<PrefixCache>(budget_bytes, engine.state_bytes(), engine.kv_bytes(1),
-                                         engine.block(), *alloc);
+                                         engine.block(), *alloc, PrefixCache::HashFn{},
+                                         engine.kv_form());
   engine_.set_block_hook([this](uint32_t end, bool is_block_end) {
     if (prompt_ != nullptr) store(*prompt_, end, is_block_end);
   });

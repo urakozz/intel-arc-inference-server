@@ -287,6 +287,31 @@ void test_collision() {
   std::printf("collision: a forced hash collision never matches different ids OK\n");
 }
 
+// Spec 12b: the engine's KV form is the root of every hash chain (an int8 engine's entries
+// are another key than a bf16 engine's for the same ids), and with it the cache works as
+// before.
+void test_kv_form() {
+  MallocAlloc m;
+  std::vector<uint64_t> parents;
+  PrefixCache c(1 << 20, kState, kKv, kB, m,
+                [&](uint64_t parent, const uint32_t* ids, size_t n) {
+                  parents.push_back(parent);
+                  uint64_t h = parent * 31 + n;
+                  for (size_t i = 0; i < n; ++i) h = h * 1000003 + ids[i];
+                  return h;
+                },
+                /*kv_form=*/1);
+  const Ids a = seq(10, 100);
+  prefill(c, a, 0);
+  CHECK(!parents.empty());
+  CHECK_EQ(parents.front(), uint64_t(1));   // the first block hangs off the root: the form
+  auto p = c.plan(cat(a, {5}), {}, false);
+  CHECK(p.kind == PrefixCache::Plan::Restore && p.restart == 10);
+  check_plan(p, cat(a, {5}));
+  c.release();
+  std::printf("kv form: the chain's root is the engine's KV form, plans unchanged OK\n");
+}
+
 void test_stress() {
   std::mt19937 rng(7);
   for (int round = 0; round < 40; ++round) {
@@ -333,6 +358,7 @@ int main() {
   test_plans();
   test_budget();
   test_collision();
+  test_kv_form();
   test_stress();
   std::printf("prefix_cache_test OK\n");
   return 0;
