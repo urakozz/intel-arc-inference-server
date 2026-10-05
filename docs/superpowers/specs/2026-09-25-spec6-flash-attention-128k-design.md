@@ -275,3 +275,65 @@ main (2136.68 vs 2128.81 t/s), `attn_flash` 101 ms against 117 (**F1 80 ms: miss
 pp65536 1.074x (1206.97), pp130816 1.097x (821.37), decode at 4k unchanged (29.24 vs 29.25).
 With `exp2` (shipped since the ruling above): pp4096 1.015x, `attn_flash` 81 ms (F1 met within 1 ms),
 pp65536 1.158x, pp130816 1.222x.
+
+## 10. Amendment - 2026-10-05, `--max-len auto` (branch `max-len-auto`)
+
+§3.3 sized the context by hand: 131072 was checked to fit and §8.4 measured it (28.081 of
+32.530 GB). Since spec 10 neither decode attention (v2) nor the MTP lists (spec 8 §12) bake a
+max_len, so the length is a property of the card's memory alone, and `b70-serve` now picks the
+largest one that fits. **`--max-len auto` is `b70-serve`'s default; `b70-decode` keeps 16384**
+(bench rows stay comparable) and accepts `auto`.
+
+**One source of truth for buffer sizes.** Every allocation that a model and a max_len decide
+is a device-free function in `runtime/buffer_sizes.h` (archive `b70_plan`, no Level Zero):
+`PersistentDims::sizes`, `DecodeScratchDims::sizes`, `PrefillScratchDims::sizes` (the eager
+members and the four lazy ones), `MtpDims::sizes`, `mtp_prefill_hidden_bytes`,
+`int8_scratch_sizes` and `int8_scale_bytes`. The buffer classes inherit their constants and
+`sizes()` from those bases and their constructors allocate exactly what `sizes()` returns, so
+a buffer change moves the plan with it. Allocations are byte-identical to before
+(`buffers_test`'s table, reproduced on the host by `memory_plan_test`).
+
+**The planner** (`runtime/memory_plan.h`): `plan(desc, max_len, mtp, model_bytes, path)`
+returns `memory_line()`'s five components - model (the loaded weights, `report.total() -
+report.rope_bytes`, plus the RoPE table at max_len, 256 B per position), KV, decode state
+(with MTP: the head's buffers and prefill hidden rows), prefill scratch (eager, plus the lazy
+buffers the backend builds: the slab on `l0` and on `l0-int8` with MTP, the dequant scratch on
+`sycl-tla`, pf_s / pf_p on the composed attention path - 73,728 B per position on Qwen3.8,
+the only prefill scratch that scales with max_len), int8 (Int8State and every int4 linear's
+column scales). It reproduces §8.4's line exactly where the formula covers it: KV
+8,589,934,592, decode state 590,450,624, prefill scratch 699,514,776, int8 84,680,704 B, and
+the model 18,116,331,520 B as docs/13's measured load total with its table re-sized to 131072.
+`max_len_that_fits(desc, mtp, model_bytes, device_bytes, reserve_bytes, cap, path)` bisects
+the largest multiple of 256 at most `cap` whose plan + reserve fits; 0 if not even 4096 does.
+`Engine::memory_use()` returns the allocated five, `memory_line()` formats them with the
+planner's formatter.
+
+**The bound is the trained context.** `loader::trained_context` reads config.json's
+`max_position_embeddings` (`text_config`, else top level: 262144 for Qwen3.8, Agnes and
+Ornith). `load()` refuses a max_len above it; it is auto's cap. Spec 14 §3.3's fixed 65536
+ceiling for Agnes (`ModelDesc::max_len_ceiling`) is removed: that was this plan, done once by
+hand for the bf16 head.
+
+**Loading order.** The plan needs the loaded bytes and `load()` needs a max_len, so auto loads
+at 4096, plans, and `loader::set_max_len` rebuilds the RoPE table at the chosen length before
+the Engine exists (nothing reads the table's length from the allocation; every kernel indexes
+it by position). An explicit `--max-len N` loads at N as before and is held to the same plan:
+if it does not fit, the CLI refuses before the Engine with the plan's breakdown and the
+largest length that would. With `B70_DECODE_ATTN=v1` auto takes the largest compiled v1
+length at or below the fit. `--mem-reserve-gb G` (default 1.5) is what the plan leaves free
+for what it does not count: the driver's own allocations, kernel modules, the captured
+command lists (decode, MTP draft / verify, prefill), the int8 sign tables, transient colmax
+buffers, allocator slack. **1.5 GB is an estimate; the box confirms or tunes it.**
+
+**Derived lengths** (default reserve, the 32.530 GB card, the int8 head; `memory_plan_test`
+prints them): Qwen3.8 192256 (31.025 GB planned), with MTP 162816; Qwen3.8 with the bf16 head
+173824; Agnes 134144, with MTP 109824; Qwen3.8 on the composed attention path 92672. Beyond
+131072 is unmeasured on the card: no kernel indexes the KV past a per-layer slice (at 262144 a
+layer's K is 2^28 bf16), but passkey and decode at depth are the gates.
+
+**Gates (box, `docs/superpowers/plans/box-validation-queue.md`):** P1 `memory_plan_box_test`
+(Qwen3.8, with `mtp`, Agnes): every planned component and every buffer equals the allocation at
+16384 and at auto, and the 131072 line again equals §8.4's; P2 `b70-serve` at auto starts and
+serves (`golden_server_test` now runs it at auto); P3 passkey 3/3 at 95% of the auto length;
+P4 decode t/s at a depth near the auto length; P5 the reserve: the device's free memory after
+a long session at auto, the 1.5 GB confirmed or tuned.

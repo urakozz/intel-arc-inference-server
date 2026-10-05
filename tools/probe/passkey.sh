@@ -7,8 +7,11 @@
 # Files go to /tmp/passkey (small: ~1 MB each). Prints one line per (backend, placement)
 # and a summary "passkey <backend>: k/3". Exit 0 iff every backend got 3/3.
 # Env: MODEL (default the gate checkpoint), ZE_AFFINITY_MASK (default 0); spec 14:
-# MAX_LEN (131072) and N_TARGET (prompt ids, 120000) - Agnes 3.0 Flash runs at
-# MAX_LEN=65536 N_TARGET=60000 (its max_len ceiling), with ORACLE_MODEL naming it too.
+# MAX_LEN (131072) and N_TARGET (prompt ids, 120000) - Agnes 3.0 Flash ran at
+# MAX_LEN=65536 N_TARGET=60000 (spec 14's ceiling), with ORACLE_MODEL naming it too.
+# Spec 6 §10: MAX_LEN=auto takes the largest length the memory plan fits (b70-decode
+# prints it as "max_len: auto -> N"; bf16 head, its default here); set N_TARGET to ~95%
+# of that N.
 cd "$(dirname "$0")/../.."
 MODEL="${MODEL:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
 export ZE_AFFINITY_MASK="${ZE_AFFINITY_MASK:-0}"
