@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -51,6 +52,44 @@ void quantise_int8_tiled(const uint16_t* w, uint32_t K, uint32_t N, int8_t* q_ti
         int8_t* dst = q_tiled + size_t(t) * K * 16 + j;
         for (uint32_t k = 0; k < K; ++k) dst[size_t(k) * 16] = row[k];
       }
+  };
+  std::vector<std::thread> pool;
+  const uint32_t per = (tiles + threads - 1) / threads;
+  for (unsigned i = 0; i < threads; ++i) {
+    const uint32_t t0 = i * per, t1 = std::min(tiles, t0 + per);
+    if (t0 >= t1) break;
+    pool.emplace_back(work, t0, t1);
+  }
+  for (std::thread& th : pool) th.join();
+}
+
+void gather_int8_tiled_rows(const int8_t* q_tiled, const float* scales, uint32_t K, uint32_t N,
+                            const uint32_t* ids, uint32_t n, int8_t* out_tiled,
+                            float* out_scales, unsigned threads) {
+  if (K % 16 != 0 || N % 16 != 0 || n % 16 != 0)
+    throw std::runtime_error("gather_int8_tiled_rows: K, N and n must be multiples of 16");
+  for (uint32_t j = 0; j < n; ++j)
+    if (ids[j] >= N)
+      throw std::runtime_error("gather_int8_tiled_rows: id " + std::to_string(ids[j]) +
+                               " is outside the head's " + std::to_string(N) + " rows");
+  if (threads == 0) threads = std::max(1u, std::thread::hardware_concurrency());
+  const uint32_t tiles = n / 16, K16 = K / 16;
+  threads = std::max(1u, std::min<unsigned>(threads, tiles));
+  // One output tile per step: lane l of each 256 B k16 block is compact row 16t + l,
+  // whose 16 k sit at bytes kk * 16 + l; the source row's sit at kk * 16 + id % 16 of
+  // ITS tile's block (int8_tiled_index).
+  auto work = [&](uint32_t t0, uint32_t t1) {
+    for (uint32_t t = t0; t < t1; ++t) {
+      int8_t* dst = out_tiled + size_t(t) * K16 * 256;
+      for (uint32_t l = 0; l < 16; ++l) {
+        const uint32_t id = ids[t * 16 + l];
+        out_scales[t * 16 + l] = scales[id];
+        const int8_t* src = q_tiled + size_t(id / 16) * K16 * 256 + id % 16;
+        for (uint32_t b = 0; b < K16; ++b)
+          for (uint32_t kk = 0; kk < 16; ++kk)
+            dst[size_t(b) * 256 + kk * 16 + l] = src[size_t(b) * 256 + kk * 16];
+      }
+    }
   };
   std::vector<std::thread> pool;
   const uint32_t per = (tiles + threads - 1) / threads;
