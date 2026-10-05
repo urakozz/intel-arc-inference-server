@@ -1154,6 +1154,14 @@ b70_cli_reject(cli_reject_max_len_word ${B70_NO_MODEL} --bench --max-len big
   EXPECT "--max-len expects auto or a positive integer")
 b70_cli_reject(cli_reject_mem_reserve ${B70_NO_MODEL} --bench --mem-reserve-gb -1
   EXPECT "--mem-reserve-gb expects a number of GB")
+# Spec 8: `--mtp K|auto` is --ids mode's greedy speculative decoding (queue row 6's
+# long-context checks without the server); parsed and placed before the device like the rest.
+b70_cli_reject(cli_reject_mtp_with_bench ${B70_NO_MODEL} --bench --mtp 1
+  EXPECT "--mtp belongs to --ids")
+b70_cli_reject(cli_reject_mtp_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --mtp 4
+  EXPECT "--mtp expects off, 0..3 or auto")
+b70_cli_reject(cli_reject_mtp_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS} --n 4
+  --mtp auto EXPECT "K2-Horizon has no MTP head")
 
 # Spec 6 (plan 6b Task 3): a max_len with no compiled decode attention. This one is NOT
 # host-side -- it needs the device and the checkpoint, because the variant is resolved at
