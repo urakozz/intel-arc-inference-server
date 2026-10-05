@@ -60,30 +60,21 @@ PrefillBackend Engine::prefill_backend() const {
 
 bool Engine::prefill_sycl_side_created() const { return pfx_ && pfx_->cx.has_sycl(); }
 
-std::string Engine::memory_line() const {
-  const double gb = 1e9;
-  const size_t model = model_.report.total();
-  const size_t kv = persist_.kv_k.size() + persist_.kv_v.size();
+MemoryComponents Engine::memory_use() const {
+  MemoryComponents c;
+  c.model = model_.report.total();
+  c.kv = persist_.kv_k.size() + persist_.kv_v.size();
   // Spec 8: the MTP head's buffers (its KV, the GDN slots, hh/dh, draft logits) count as
   // decode state; the head's weights are in `model` (LoadReport::mtp_bytes).
-  const size_t decode = persist_.bytes() - kv + decode_scratch_.bytes() +
-                        (mtp_ ? mtp_->bytes() : 0) + (mtp_pf_hid_ ? mtp_pf_hid_->size() : 0);
-  const size_t pf = pf_ ? pf_->bytes() + pf_->lazy_bytes() : 0;
-  const size_t i8 = pfx_ && pfx_->int8 ? pfx_->int8->bytes() : 0;
-  const size_t total = model + kv + decode + pf + i8;
-  uint32_t n = 0;
-  zeDeviceGetMemoryProperties(ctx_.device(), &n, nullptr);
-  std::vector<ze_device_memory_properties_t> props(n);
-  for (auto& p : props) p.stype = ZE_STRUCTURE_TYPE_DEVICE_MEMORY_PROPERTIES;
-  if (n) zeDeviceGetMemoryProperties(ctx_.device(), &n, props.data());
-  size_t device = 0;
-  for (const auto& p : props) device += p.totalSize;
-  char buf[256];
-  std::snprintf(buf, sizeof buf,
-                "memory: model %.3f GB, kv %.3f GB, decode state %.3f GB, prefill scratch %.3f GB,"
-                " int8 %.3f GB, total %.3f GB of %.3f GB",
-                model / gb, kv / gb, decode / gb, pf / gb, i8 / gb, total / gb, device / gb);
-  return buf;
+  c.decode_state = persist_.bytes() - c.kv + decode_scratch_.bytes() +
+                   (mtp_ ? mtp_->bytes() : 0) + (mtp_pf_hid_ ? mtp_pf_hid_->size() : 0);
+  c.prefill_scratch = pf_ ? pf_->bytes() + pf_->lazy_bytes() : 0;
+  c.int8 = pfx_ && pfx_->int8 ? pfx_->int8->bytes() : 0;
+  return c;
+}
+
+std::string Engine::memory_line() const {
+  return format_memory("memory", memory_use(), ctx_.memory_bytes());
 }
 
 void Engine::prepare_prefill() {

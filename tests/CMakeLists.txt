@@ -529,6 +529,14 @@ target_include_directories(buffers_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_
 target_link_libraries(buffers_test PRIVATE b70_runtime b70_l0 b70_model)
 add_test(NAME buffers_test COMMAND buffers_test)
 
+# Spec 6 §10 (max_len auto): the memory planner on the host - buffers_test's table
+# from the size functions alone, spec 6's measured 128k line, max_len_that_fits's
+# contract. No device, no checkpoint.
+add_executable(memory_plan_test runtime/memory_plan_test.cc)
+target_include_directories(memory_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(memory_plan_test PRIVATE b70_plan)
+add_test(NAME memory_plan_test COMMAND memory_plan_test)
+
 # The five checkpoint-labelled tests below (loader::load, argv[1] or [3])
 # default with no argument to the HF repo id
 # "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ", which loader::resolve_snapshot

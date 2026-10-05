@@ -81,4 +81,17 @@ Context::Context(uint32_t device_index) {
 Context::~Context() {
   if (ctx_) zeContextDestroy(ctx_);
 }
+
+size_t Context::memory_bytes() const {
+  // Moved from Engine::memory_line() (spec 6), unchanged: every memory the device
+  // reports, summed - one HBM/GDDR region on the B70 (32.530 GB).
+  uint32_t n = 0;
+  zeDeviceGetMemoryProperties(dev_, &n, nullptr);
+  std::vector<ze_device_memory_properties_t> props(n);
+  for (auto& p : props) p.stype = ZE_STRUCTURE_TYPE_DEVICE_MEMORY_PROPERTIES;
+  if (n) zeDeviceGetMemoryProperties(dev_, &n, props.data());
+  size_t total = 0;
+  for (const auto& p : props) total += p.totalSize;
+  return total;
+}
 }  // namespace l0
