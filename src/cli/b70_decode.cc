@@ -32,6 +32,7 @@
 #include <utility>
 #include <vector>
 
+#include "cli/k2_decode.h"
 #include "cli/max_len.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -765,6 +766,36 @@ int run(int argc, char** argv) {
   cli::check_kv_cache(kv_cache, pp_path);   // spec 12b
   if (profile && kv_cache == runtime::KvCache::Int8)
     throw std::runtime_error("--profile captures its own bf16-KV list; it has no --kv-cache int8");
+
+  // Spec 18b: dispatch on config.json's model_type. K2-Horizon runs runtime::k2::K2Engine (its
+  // own loader, list and planner); every flag validated above means the same there, and what
+  // K2 does not have yet is refused here by the stage that builds it. A path that does not
+  // resolve is not K2 - the Qwen flow below reports it, so every rejection keeps its order.
+  if (cli::k2::is_k2(path)) {
+    if (have_pp || prefill)
+      throw std::runtime_error("K2-Horizon's prefill is spec 18c (MoVA / MoE grouped paths, flash "
+                               "attention at head_dim 128) and not built yet; this engine decodes it "
+                               "- --ids without --prefill feeds the prompt one decode replay per id");
+    if (profile)
+      throw std::runtime_error("--profile is not built for K2-Horizon yet (spec 18b Task 4, the box's "
+                               "speed work); --bench times it");
+    if (kv_cache == runtime::KvCache::Int8)
+      throw std::runtime_error("K2-Horizon's int8 KV cache is spec 18e; --kv-cache bf16");
+    cli::k2::DecodeArgs ka;
+    ka.path = path;
+    ka.ids_path = ids_path;
+    ka.n = n;
+    ka.bench = bench;
+    ka.depth = depth;
+    ka.tg = tg;
+    ka.max_len = max_len_arg;
+    ka.reserve = mem_reserve;
+    ka.device = device;
+    ka.lm_head = lm_head;
+    ka.bench_prompt = kBenchPrompt;   // legal K2 ids too (all < 250624)
+    ka.bench_prompt_len = kBenchPromptLen;
+    return cli::k2::run_decode<StdoutToStderr>(ka);
+  }
 
   // Everything that can be judged without the device or the 19 GB checkpoint is
   // judged first: failing on a typo'd --ids path after a 13-second load is a

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -389,6 +390,20 @@ int run(int argc, char** argv) {
   cli::check_kv_cache(kv_cache, pp_path);   // spec 12b: before the device is touched
 
   const std::string snapshot_dir = loader::resolve_snapshot(path);
+  // Spec 18b: dispatch on config.json's model_type. K2-Horizon (`k2_horizon`) decodes through
+  // b70-decode from spec 18b; the server prefills every request, and K2's prefill is spec 18c
+  // and its serving (template, tool calls, int8 head by default) 18d - refused here by name,
+  // before the device, rather than as an unknown architecture inside the loader.
+  if (std::ifstream cf(snapshot_dir + "config.json"); cf) {
+    std::stringstream cs;
+    cs << cf.rdbuf();
+    const nlohmann::json cj = nlohmann::json::parse(cs.str(), nullptr, /*allow_exceptions=*/false);
+    if (cj.is_object() && cj.value("model_type", std::string()) == "k2_horizon")
+      throw std::runtime_error(
+          "K2-Horizon (model_type k2_horizon) is not served yet: its prefill is spec 18c and its "
+          "serving spec 18d. b70-decode decodes it (spec 18b): b70-decode " + path +
+          " --ids <file> --n <N>");
+  }
   const std::vector<uint32_t> eos = eos_ids(snapshot_dir);
   const uint32_t trained = loader::trained_context(snapshot_dir);
   cli::check_before_load(max_len_arg, trained, /*require_quantum=*/true);   // spec 6 §10

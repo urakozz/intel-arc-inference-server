@@ -1695,7 +1695,7 @@ set(B70_K2_SNAPSHOT "urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ"
 add_executable(k2_horizon_test model/k2_horizon_test.cc)
 target_include_directories(k2_horizon_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(k2_horizon_test PRIVATE b70_k2_model)
-add_test(NAME k2_horizon_test COMMAND k2_horizon_test ${CMAKE_SOURCE_DIR}/tests/model/k2_config.json)
+add_test(NAME k2_horizon_test COMMAND k2_horizon_test ${CMAKE_SOURCE_DIR}/tests/model/k2/config.json)
 add_executable(k2_rope_test loader/k2_rope_test.cc)
 target_include_directories(k2_rope_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(k2_rope_test PRIVATE b70_k2_loader)
@@ -1703,7 +1703,7 @@ add_test(NAME k2_rope_test COMMAND k2_rope_test)
 add_executable(k2_repack_test loader/k2_repack_test.cc)
 target_include_directories(k2_repack_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(k2_repack_test PRIVATE b70_k2_loader)
-add_test(NAME k2_repack_test COMMAND k2_repack_test ${CMAKE_SOURCE_DIR}/tests/model/k2_config.json)
+add_test(NAME k2_repack_test COMMAND k2_repack_test ${CMAKE_SOURCE_DIR}/tests/model/k2/config.json)
 # ... and the real checkpoint on the card: every bucket, readbacks (both head forms).
 add_executable(k2_load_checkpoint_test loader/k2_load_checkpoint_test.cc)
 target_include_directories(k2_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -1735,6 +1735,12 @@ if(B70_K2)
     kernel_gemv_M1_K4096_N2560_S4_L0 kernel_gemv_M1_K2560_N12288_S4_L0
     kernel_gemv_M1_K6144_N2560_S4_L0 kernel_gemv_bf16_M1_K2560_N128_C16_S16
     kernel_gemv_bf16_M1_K2560_N250624 kernel_gemv_i8w_M1_K2560_N250624)
+  # Host: the names the capture binds (kernels::k2::decode_variants) are exactly this list.
+  add_executable(k2_variant_names_test kernels/k2_variant_names_test.cc)
+  target_include_directories(k2_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(k2_variant_names_test PRIVATE b70_k2_model)
+  b70_target_kernel_dir(k2_variant_names_test)
+  add_test(NAME k2_variant_names_test COMMAND k2_variant_names_test ${B70_K2_DECODE_KERNELS})
   # K1 on the card: every K2 kernel at K2's real shapes against k2_ref.h (no checkpoint).
   add_executable(k2_kernels_test kernels/k2_kernels_test.cc)
   target_include_directories(k2_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -1744,4 +1750,45 @@ if(B70_K2)
   add_test(NAME k2_kernels_test COMMAND k2_kernels_test)
   set_tests_properties(k2_kernels_test PROPERTIES LABELS k2 TIMEOUT 900)
 endif()
+
+# Task 3: the runtime. The planner and the launch count on the host ...
+add_executable(k2_plan_test runtime/k2_plan_test.cc)
+target_include_directories(k2_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(k2_plan_test PRIVATE b70_k2_plan)
+add_test(NAME k2_plan_test COMMAND k2_plan_test)
+# ... and on the card with the real checkpoint: the list (717 launches, Review Focus 5), the
+# plan against the allocation, K3 replay determinism (k2_decode_test); K2, the golden gate
+# with the routing diagnostic against 18a's oracle-out-k2 (k2_golden_test, SKIP 77 until it
+# exists). Both head forms (`int8`: spec 9's head, b70-serve's default once 18d serves K2).
+if(B70_K2)
+  set(B70_K2_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-k2"
+    CACHE PATH "The CPU-oracle golden set of K2-Horizon (spec 18a): <prompt>.ids + .golden.safetensors")
+  foreach(t k2_decode_test k2_golden_test)
+    if(t STREQUAL "k2_decode_test")
+      add_executable(${t} runtime/${t}.cc)
+    else()
+      add_executable(${t} golden/${t}.cc)
+    endif()
+    target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+    target_link_libraries(${t} PRIVATE b70_k2_runtime b70_l0)
+    add_dependencies(${t} ${B70_K2_DECODE_KERNELS})
+  endforeach()
+  add_test(NAME k2_decode_test COMMAND k2_decode_test ${B70_K2_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/prose.ids)
+  add_test(NAME k2_decode_i8head_test COMMAND k2_decode_test ${B70_K2_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/prose.ids int8)
+  add_test(NAME k2_golden_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR})
+  add_test(NAME k2_golden_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} int8)
+  set_tests_properties(k2_decode_test k2_decode_i8head_test k2_golden_test k2_golden_i8head_test
+    PROPERTIES LABELS "checkpoint;golden;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+# b70-decode's model_type dispatch, before the device: tests/model/k2/ holds only the
+# checkpoint's config.json, which is all the dispatch reads, so these run on any box with the
+# binary (b70_cli_reject's "exit 1, no `device:` line, the message").
+b70_cli_reject(cli_reject_k2_prefill ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS} --n 4
+  --prefill EXPECT "K2-Horizon's prefill is spec 18c")
+b70_cli_reject(cli_reject_k2_pp ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --bench --pp 64
+  EXPECT "K2-Horizon's prefill is spec 18c")
+b70_cli_reject(cli_reject_k2_kv8 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --bench --kv-cache int8
+  EXPECT "int8 KV cache is spec 18e")
 # ==== Spec 18b: K2-Horizon decode ========================================== (end) ====

@@ -1,0 +1,167 @@
+#pragma once
+// Spec 18b: b70-decode's K2-Horizon path - the CLI dispatches on config.json's model_type
+// (loader::is_k2_checkpoint) and, for "k2_horizon", runs runtime::k2::K2Engine instead of
+// runtime::Engine. `--ids` and `--bench` exactly as the Qwen path prints them (ids on stdout,
+// one per line; the bench row on stdout); the prompt goes through the decode list one replay
+// per id (prefill is spec 18c, refused by the caller). `--max-len auto|N` plans with K2's own
+// planner (runtime/k2/k2_sizes.h) under the trained context (524288).
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "cli/max_len.h"
+#include "l0/context.h"
+#include "loader/k2_loader.h"
+#include "loader/lm_head_int8.h"
+#include "loader/snapshot.h"
+#include "loader/trained_context.h"
+#include "runtime/k2/k2_engine.h"
+#include "runtime/k2/k2_sizes.h"
+
+namespace cli::k2 {
+
+// True when `path` resolves to a snapshot whose config.json says model_type "k2_horizon".
+// A path that does not resolve is not K2: the caller's own flow then reports it (so every
+// argument rejection keeps its message and its order).
+inline bool is_k2(const std::string& path) {
+  try {
+    return loader::is_k2_checkpoint(loader::resolve_snapshot(path));
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
+struct DecodeArgs {
+  std::string path, ids_path;
+  uint32_t n = 0, depth = 4096, tg = 256;
+  bool bench = false;
+  MaxLenArg max_len{false, 16384};
+  size_t reserve = 0;
+  uint32_t device = l0::Context::kFromEnv;
+  loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
+  const uint32_t* bench_prompt = nullptr;   // cycled to --depth (b70_decode.cc's kBenchPrompt)
+  size_t bench_prompt_len = 0;
+};
+
+inline std::vector<uint32_t> read_ids(const std::string& path, uint32_t vocab) {
+  std::ifstream f(path);
+  if (!f) throw std::runtime_error("cannot open --ids file '" + path + "'");
+  std::vector<uint32_t> ids;
+  std::string w;
+  while (f >> w) {
+    if (w.empty() || w.find_first_not_of("0123456789") != std::string::npos || w.size() > 10)
+      throw std::runtime_error("--ids file '" + path + "' is not whitespace-separated ids");
+    const unsigned long long v = std::stoull(w);
+    if (v >= vocab)
+      throw std::runtime_error("--ids file '" + path + "': id " + w + " is outside K2-Horizon's " +
+                               "vocabulary (" + std::to_string(vocab) + " rows)");
+    ids.push_back(uint32_t(v));
+  }
+  if (ids.empty()) throw std::runtime_error("--ids file '" + path + "' is empty");
+  return ids;
+}
+
+// cli::settle for K2: auto plans the largest max_len that fits and re-tables the model; an
+// explicit N is held to the same plan.
+inline uint32_t settle(l0::Context& ctx, loader::K2LoadedModel& m, const MaxLenArg& a, size_t reserve) {
+  const model::K2Desc& d = *m.desc;
+  const size_t weights = m.report.bytes.total(), device = ctx.memory_bytes();
+  uint32_t len = a.value;
+  if (a.is_auto) {
+    const uint32_t fit = runtime::k2::max_len_that_fits(d, weights, device, reserve, m.trained_max_len);
+    if (fit == 0)
+      throw std::runtime_error("--max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) +
+                               " positions fit - " +
+                               runtime::k2::describe(runtime::k2::plan(d, runtime::kMinAutoMaxLen, weights),
+                                                     device, reserve));
+    len = fit;
+    loader::set_max_len_k2(ctx, m, len);
+    std::fprintf(stderr, "max_len: auto -> %u (K2-Horizon; the largest multiple of %u that fits %.3f GB "
+                 "with a %.3f GB reserve; trained context %u)\n", len, runtime::kMaxLenQuantum,
+                 device / 1e9, reserve / 1e9, m.trained_max_len);
+  } else {
+    const runtime::k2::Plan p = runtime::k2::plan(d, len, weights);
+    if (p.total() + reserve > device)
+      throw std::runtime_error("--max-len " + std::to_string(len) + " does not fit: " +
+                               runtime::k2::describe(p, device, reserve) + ". The largest that fits is " +
+                               std::to_string(runtime::k2::max_len_that_fits(
+                                   d, weights, device, reserve, m.trained_max_len ? m.trained_max_len : len)) +
+                               " (--max-len auto)");
+    std::fprintf(stderr, "max_len: %u (--max-len)\n", len);
+  }
+  std::fprintf(stderr, "%s\n",
+               runtime::k2::describe(runtime::k2::plan(d, len, weights), device, reserve).c_str());
+  return len;
+}
+
+// The loader prints its report to stdout (its convention); `redirect` is the caller's
+// StdoutToStderr so the report joins the diagnostics on stderr.
+template <class Redirect>
+int run_decode(const DecodeArgs& a) {
+  std::vector<uint32_t> ids;
+  if (!a.bench) ids = read_ids(a.ids_path, model::k2().vocab);
+  uint32_t trained = 0;
+  if (a.max_len.is_auto) {
+    trained = loader::trained_context(loader::resolve_snapshot(a.path));
+    check_before_load(a.max_len, trained, /*require_quantum=*/false);
+  }
+  const uint32_t after = a.bench ? a.tg : a.n;
+  const size_t need = (a.bench ? size_t(a.depth) : ids.size()) + after;
+  if (!a.max_len.is_auto && need > a.max_len.value)
+    throw std::runtime_error("the prompt / --depth plus " + std::to_string(after) +
+                             " generated ids exceeds --max-len " + std::to_string(a.max_len.value));
+  if (a.bench) {
+    ids.resize(a.depth);
+    for (uint32_t i = 0; i < a.depth; ++i) ids[i] = a.bench_prompt[i % a.bench_prompt_len];
+  }
+
+  l0::Context ctx(a.device);
+  std::fprintf(stderr, "device: %s (%u EUs)%s\n", ctx.name().c_str(), ctx.eu_count(),
+               a.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+  loader::K2LoadedModel model = [&] {
+    Redirect redirect;
+    return loader::load_k2(ctx, a.path, load_len(a.max_len, trained), a.lm_head);
+  }();
+  const uint32_t max_len = settle(ctx, model, a.max_len, a.reserve);
+  if (need > max_len)
+    throw std::runtime_error("the prompt / --depth plus " + std::to_string(after) +
+                             " generated ids exceeds max_len " + std::to_string(max_len));
+  runtime::k2::K2Engine eng(ctx, std::move(model), max_len);
+  std::fprintf(stderr, "engine: K2-Horizon, %zu kernels, %zu modules, max_len %u, %.2f GB of persistent "
+               "state (bf16 KV)\n%s\n", eng.step().kernel_count, eng.step().modules.size(), eng.max_len(),
+               eng.buffers().persistent_bytes() / 1e9, eng.memory_line().c_str());
+  const auto t0 = std::chrono::steady_clock::now();
+  eng.ingest(ids);
+  const double ingest_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token, one decode replay per id - prefill "
+               "is spec 18c), pos %u\n", ids.size(), ingest_ms, ingest_ms / double(ids.size()), eng.pos());
+  const uint32_t n = a.bench ? a.tg : a.n;
+  eng.generate(n, [&](uint32_t id) {
+    if (a.bench) return;
+    std::printf("%u\n", id);
+    std::fflush(stdout);
+  });
+  std::fprintf(stderr, "generate: %u ids, %.2f t/s, %.2f ms/token (%.1f%% of it inside the fence)\n", n,
+               eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
+               eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
+  if (!a.bench) return 0;
+  const double ms_per_token = eng.last_gen_ms() / double(a.tg);
+  const double gb = double(eng.model().report.read_per_token) / 1e9;
+  std::fprintf(stderr, "  MBU: %.2f t/s x %.3f GB = %.0f GB/s (W = this load's derived read/token: "
+               "top-8 + shared MoE, top-4 value experts); %zu launches/token\n",
+               eng.last_tok_per_s(), gb, eng.last_tok_per_s() * gb, eng.step().kernel_count);
+  const char* sha = std::getenv("B70_GIT_SHA");
+  if (sha == nullptr || *sha == '\0') sha = "unknown";
+  std::printf("| b70-decode %s k2%s | %u | %u | %.2f | %.2f |\n", sha,
+              a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "", a.depth, a.tg,
+              eng.last_tok_per_s(), ms_per_token);
+  return 0;
+}
+
+}  // namespace cli::k2
