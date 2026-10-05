@@ -24,7 +24,8 @@
 #                    commit starts a new state, `--state <old>` continues an old one
 #   --no-wait        launch and return (re-run the same command later to re-attach)
 #   --no-sync        do not rsync the tree (the box keeps what it has)
-#   --push-data      first rsync the Agnes checkpoint and oracle-out-agnes* from this Mac
+#   --push-data      first rsync the Agnes checkpoint, oracle-out-agnes* and (spec 15a, made on
+#                    the Mac from the int4 checkpoint) oracle-out-ornith* from this Mac
 #   --out FILE       summary path (default box-validation-<date>.md in the repo root)
 #   --poll SECONDS   poll interval (default 120)
 #
@@ -252,7 +253,7 @@ if [ "$MODE" = dry ]; then
   if [ "$PUSH" = 1 ]; then
     echo "== 1b. --push-data"
     echo "  rsync -a --info=progress2 ~/.cache/huggingface/hub/$AGNES_HF \$BOX:.cache/huggingface/hub/"
-    echo "  rsync -a $LOCAL_DATA/oracle-out-agnes $LOCAL_DATA/oracle-out-agnes-mtp \$BOX:$DATA_DIR/"
+    echo "  rsync -a $LOCAL_DATA/oracle-out-agnes $LOCAL_DATA/oracle-out-agnes-mtp $LOCAL_DATA/oracle-out-ornith $LOCAL_DATA/oracle-out-ornith-mtp \$BOX:$DATA_DIR/"
   fi
   echo "== 2. sync the tree under test"
   [ "$SYNC" = 1 ] && echo "  REMOTE_DIR=$REMOTE_DIR tools/box.sh sync" || echo "  (--no-sync)"
@@ -341,7 +342,7 @@ esac
 if [ "$PUSH" = 1 ]; then
   # spec 14 checklist steps 1 and 6: the Mac's complete Agnes checkpoint and golden sets
   rsync -a --info=progress2 "${HF_HOME:-$HOME/.cache/huggingface}/hub/$AGNES_HF" "$BOX:.cache/huggingface/hub/"
-  for d in oracle-out-agnes oracle-out-agnes-mtp; do
+  for d in oracle-out-agnes oracle-out-agnes-mtp oracle-out-ornith oracle-out-ornith-mtp; do
     if [ -d "$LOCAL_DATA/$d" ]; then rsync -a "$LOCAL_DATA/$d" "$BOX:$DATA_DIR/"; else echo "push-data: no $LOCAL_DATA/$d"; fi
   done
 fi

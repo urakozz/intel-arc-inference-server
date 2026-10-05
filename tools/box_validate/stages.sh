@@ -1182,6 +1182,29 @@ st_r18_ct() {
 }
 
 # ======================================================================================
+row 19 "the real Ornith int4 checkpoint - its int4 a||b, vocab_used 248077, doc_w (branch ornith-real-checkpoint; spec 15 §13)"
+rownote 19 "Rows 10, 13 and 16 run on this checkpoint (SNAP_ORNITH = urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ): their gates are where its a||b is exercised end to end (decode, prefill, the MTP verify lists). oracle-out-ornith / -mtp are made on the Mac from the int4 checkpoint (plan 15a Task 0, tools/oracle/ornith_golden.sh) and pushed with --push-data."
+rownote 19 "Speed: the int4 a||b is a PROVISIONAL S1 L1 cell (8 sub-groups); r10.p0's profile shows its share - an S > 1 form needs gdn_step to sum slices (a P0 arm, not built)."
+stage r19.host 19 default cpu - - "host: ab_int4_test (the int4 a||b repack exact with its zero padding, the prefill copy, the compressed-tensors form, the bf16 row untouched), model_desc_test, variant_names_test, ornith_mtp_names_test (both a||b forms bound), memory_plan_test, ornith_mtp_head_test"
+st_r19_host() {
+  run_tests '^(ab_int4_test|model_desc_test|variant_names_test|ornith_mtp_names_test|memory_plan_test|ornith_mtp_head_test)$'
+  finish
+}
+stage r19.r0 19 default cpu - g0.sha,g0.bitwise,g0.suite "R0: no .cl changed and every pre-existing binary identical (G0); the new int4 a||b binaries gemv_M{1..4}_K2048_N128_S1_L1 built, and Qwen3.8's argmax_stage1_M{1..4} Ornith now binds"
+st_r19_r0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  kbins gemv_M1_K2048_N128_S1_L1 gemv_M2_K2048_N128_S1_L1 gemv_M3_K2048_N128_S1_L1 gemv_M4_K2048_N128_S1_L1 \
+    argmax_stage1_M1 argmax_stage1_M2 argmax_stage1_M3 argmax_stage1_M4
+  finish
+}
+stage r19.load 19 default gpu ornith r19.r0 "the load on the card: in_proj_a/b classified int4 (the a||b line: 64 real columns, 15.7 MB prefill copy), 0 unconsumed, read/token and the W check against doc_w 2.345 GB (predicted delta 0.000%), a prefill + decode through both a||b paths"
+st_r19_load() {
+  chk "$(bench_cmd "$SNAP_ORNITH" --pp 512 --tg 16 --lm-head int8)" "b70-decode on Ornith: prefill (pf_ab_proj over the bf16 copy) and decode (gemv.cl int4 a||b)"
+  grab_all loader 'a‖b|unconsumed|W check|read/token|per token' 12
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx labels belong to their rows)"
 st_x_rest() {
