@@ -458,6 +458,25 @@ add_dependencies(attn_v2_test
 add_test(NAME attn_v2_test COMMAND attn_v2_test ${B70_ATTN_V2_DUMP})
 set_tests_properties(attn_v2_test PROPERTIES TIMEOUT 900)
 
+# Spec 15c: the MoE block's host reference (tests/kernels/moe_ref.h) against the
+# spec's formula and an independent double-precision MoE - top-k ties to the lower id,
+# the fixed slot order, SiLU x up, the layout-1 GEMV. Host only.
+add_executable(moe_ref_test kernels/moe_ref_test.cc)
+target_include_directories(moe_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME moe_ref_test COMMAND moe_ref_test)
+# ... and moe.cl on the card against it at Ornith's shape (needs a B70, no checkpoint):
+# the router GEMV + route, ties, every slot of gate||up against its own expert, down's
+# fixed-order sum + gate + residual fold, bitwise replay.
+if(B70_ORNITH)
+  add_executable(moe_test kernels/moe_test.cc)
+  target_include_directories(moe_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(moe_test PRIVATE b70_l0)
+  b70_target_kernel_dir(moe_test)
+  add_dependencies(moe_test kernel_moe_M1_E256_T8_D2048_I512 kernel_gemv_bf16_M1_K2048_N272_C16_S16)
+  add_test(NAME moe_test COMMAND moe_test)
+  set_tests_properties(moe_test PROPERTIES LABELS ornith TIMEOUT 900)
+endif()
+
 # The two kernels at a token's boundary. Both read the shared control block at
 # *execution* time, which is what the replayed list needs and what a kernel
 # argument (captured at append - tests/l0/arg_capture_test.cc) could not give.
