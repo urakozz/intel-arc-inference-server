@@ -5,8 +5,9 @@ The JUnit / test-list logic, G0's normalised comparison and binary checksum comp
 interleaved medians, the summary, the orchestrator's resume / redo / stop-the-line / needs /
 after rules and need_ok (remote.sh over a stub stage file, with a stand-in flock), the server
 rows' client (serve_run.sh + serve_client.py against a stand-in b70-serve: run, table,
-compare), long_ids.py, k2_oracle.sh's RAM guard, the driver's --list, --dry-run and
-selection, and the registry's consistency. Runs on the Mac and on the box.
+compare), long_ids.py, k2_oracle.sh's RAM guard, tok_diff.py, the driver's --list, --dry-run
+and selection (never printing the box address), and the registry's consistency. Runs on the
+Mac and on the box.
 """
 import json
 import os
@@ -226,6 +227,7 @@ class DataTest(Tmp):
         self.assertIn("HAVE_ornith=0", r.stdout)
         self.assertIn("HAVE_k2=0", r.stdout)
         self.assertIn("HAVE_oracle_k2=0", r.stdout)
+        self.assertIn("HAVE_oracle_ornith_mtp=0", r.stdout)
         for p in ("prose", "code", "cjk"):                  # oracle_k2: all three prompts complete
             write(self.p("tree", "oracle-out-k2", p + ".ids"), "0 1\n")
             write(self.p("tree", "oracle-out-k2", p + ".golden.safetensors"), "x")
@@ -542,6 +544,35 @@ class LongIdsAndOracleTest(Tmp):
         self.assertFalse(os.path.exists(self.p("data", "oracle-out-k2")))
 
 
+class TokDiffTest(Tmp):
+    """tok_diff.py: two tokenizer.json files beyond their added tokens (row 16, r16.tokdiff)."""
+
+    def tok(self, name, vocab, merges, added, decoder=None):
+        doc = {"model": {"type": "BPE", "vocab": vocab, "merges": merges}, "decoder": decoder or {"type": "ByteLevel"},
+               "added_tokens": [{"id": i, "content": c} for i, c in added]}
+        write(self.p(name, "tokenizer.json"), json.dumps(doc))
+        return self.p(name, "tokenizer.json")
+
+    def run_diff(self, a, b):
+        return subprocess.run([sys.executable, os.path.join(HERE, "tok_diff.py"), a, b], capture_output=True, text=True)
+
+    def test_added_only_and_beyond(self):
+        v = {"a": 0, "b": 1, "ab": 2}
+        a = self.tok("qwen", dict(v, **{"<x>": 3, "<y>": 4}), ["a b"], [(3, "<x>"), (4, "<y>")])
+        b = self.tok("ornith", dict(v, **{"<x>": 3}), [["a", "b"]], [(3, "<x>")])   # one added token fewer
+        r = self.run_diff(a, b)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("TOKDIFF model.merges: equal (1)", r.stdout)   # "a b" and ["a", "b"] are one merge
+        self.assertIn("only in a (4, '<y>')", r.stdout)
+        self.assertIn("TOKDIFF beyond the added tokens: none", r.stdout)
+        c = self.tok("other", {"a": 0, "b": 2, "ba": 1}, ["b a"], [(3, "<x>")], decoder={"type": "Metaspace"})
+        r = self.run_diff(a, c)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("only in a 1, only in b 1, at another id 1", r.stdout)
+        self.assertIn("TOKDIFF beyond the added tokens: model.vocab, model.merges, decoder", r.stdout)
+        self.assertEqual(self.run_diff(a, self.p("absent.json")).returncode, 2)
+
+
 class DriverTest(unittest.TestCase):
     """tools/box_validate.sh without a box: --list, --dry-run, --registry, selection."""
 
@@ -554,12 +585,18 @@ class DriverTest(unittest.TestCase):
         return r
 
     def box_address(self):
-        try:
-            with open(os.path.join(ROOT, "tools", "box.env")) as f:
-                m = re.search(r"^BOX=(\S+)", f.read(), re.M)
-                return m.group(1).strip("'\"") if m else None
-        except OSError:
-            return None
+        """BOX from tools/box.env - this tree's, else the main checkout's (a worktree has none)."""
+        common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                capture_output=True, text=True, cwd=ROOT).stdout.strip()
+        for d in (ROOT, os.path.dirname(common) if common else None):
+            try:
+                with open(os.path.join(d, "tools", "box.env")) as f:
+                    m = re.search(r"^\s*(?:export\s+)?BOX=(\S+)", f.read(), re.M)
+            except (OSError, TypeError):
+                continue
+            if m and m.group(1).strip("'\""):
+                return m.group(1).strip("'\"")
+        return None
 
     def test_dry_run_full(self):
         out = self.run_driver("--dry-run").stdout
@@ -581,6 +618,7 @@ class DriverTest(unittest.TestCase):
         addr = self.box_address()
         if addr:
             self.assertNotIn(addr, out)
+            self.assertNotIn(addr, self.run_driver("--dry-run", "--with", "optin").stdout)
         # G0 first, row 11's kernels before its gate twins
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order[:5], ["pre", "g0.build", "g0.sha", "g0.bitwise", "g0.suite"])
@@ -588,16 +626,40 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(order[-1], "x.rest")
         for first, later in (("r13.r0", "r13.kernels"), ("r13.kernels", "r13.prefill"), ("r13.kernels", "r13.gates"),
                              ("r14.k0", "r14.k1"), ("r14.k1", "r14.load"), ("r14.load", "r14.k3"),
-                             ("r14.k3", "r14.golden"), ("r12.d2", "r12.a4")):
+                             ("r14.k3", "r14.golden"), ("r12.d2", "r12.a4"),
+                             ("r14.cli", "r15.k0"), ("r15.k0", "r15.k1"), ("r15.k1", "r15.prefill"),
+                             ("r15.prefill", "r15.golden"), ("r15.golden", "r15.cli"), ("r15.cli", "r16.r0"),
+                             ("r16.r0", "r16.kernels"), ("r16.kernels", "r16.mtp"), ("r16.mtp", "r16.cost"),
+                             ("r16.tokdiff", "r17.host"), ("r17.k0", "x.rest")):
             self.assertLess(order.index(first), order.index(later), (first, later))
+        for optin in ("r15.p0", "r15.speed", "r15.golden_eager", "r16.mtp_rows", "r16.passkey", "r16.benchy"):
+            self.assertNotIn(optin, order)
         # the server rows: one serve_run.sh per arm and round, round 2 in reversed order
         arms = re.findall(r"serve_run\.sh \S+/r2\.auto_rows/(\S+) ", out)
         self.assertEqual(arms, ["off.r1", "k1.r1", "k3.r1", "auto.r1", "auto.r2", "k3.r2", "k1.r2", "off.r2",
                                 "off.r3", "k1.r3", "k3.r3", "auto.r3"])
         self.assertIn("serve_client.py compare --dir", out)
         self.assertRegex(out, r"serve_run\.sh \S+/r12\.a4/lookup2\.r1 lookup2 1 \S+ --max-len 16384 --spec lookup --spec-min-match 2 -- ")
-        # Ornith prefills since 15d: row 10 no longer expects --pp to refuse
+        # Ornith prefills since 15d and is served since 15e: nothing expects those refusals
         self.assertNotIn("printing /prefill of a mixture-of-experts model/", out)
+        self.assertNotIn("spec 15e/", out)
+        self.assertRegex(out, r"b70-serve \S+ --port \d+ --max-len 16384 --pp-backend sycl-tla\n"
+                              r" +\(must exit non-zero without a crash, printing /prefills on the L0 backends only/\)")
+        # K2: b70-serve's refusal as main prints it; 18c's CLI rejects in row 15, 18b's in row 14
+        self.assertIn("printing /is not served yet: spec 18d.s engine side/", out)
+        self.assertIn("--re '^cli_reject_(k2_kv8|mtp_k2)$'", out)
+        self.assertIn("--re '^cli_reject_k2_(pp_int8|prefill_sycl)$'", out)
+        self.assertNotIn("cli_reject_k2_prefill,", out)
+        # Ornith's greedy argmax binaries (66a8923) in the binary checks of rows 10, 13 and 16
+        for stage, names in (("r10.r0", ["argmax_stage1_M1_V248070", "moe_M1_E256_T8_D2048_I512"]),
+                             ("r13.r0", ["argmax_stage1_M1_V248070", "pf_moe_E256_T8_D2048_I512"]),
+                             ("r16.r0", ["argmax_stage1_M%d_V248070" % m for m in (1, 2, 3, 4)])):
+            body = out.split("--- " + stage + " ")[1].split("\n--- ")[0]
+            line = next(x for x in body.splitlines() if "build/kernels/" in x)
+            for n in names:
+                self.assertRegex(line, r" %s[ ;]" % n, (stage, n))
+        # row 16: the startup note that compared tokenizer and descriptor must stay silent for Ornith
+        self.assertIn("note: tokenizer[.]json defines", out)
 
     def test_selection(self):
         out = self.run_driver("--dry-run", "--only", "r11", "--with", "r11.passkey120k", "--skip", "r11.speed").stdout
@@ -613,6 +675,21 @@ class DriverTest(unittest.TestCase):
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order, ["pre", "r13.r0", "r13.host", "r13.kernels", "r13.prefill", "r13.gates", "r13.split",
                                  "r13.cli"])
+        out = self.run_driver("--dry-run", "--only", "r15", "--with", "r15.speed").stdout
+        order = re.findall(r"^--- (\S+)", out, re.M)
+        self.assertEqual(order, ["pre", "r15.k0", "r15.host", "r15.k1", "r15.prefill", "r15.split", "r15.golden",
+                                 "r15.cli", "r15.speed"])
+        self.assertIn("pp4096-eager 'B70_K2_ATTN=eager B70_GIT_SHA=", out)
+        out = self.run_driver("--dry-run", "--only", "r16").stdout
+        order = re.findall(r"^--- (\S+)", out, re.M)
+        self.assertEqual(order, ["pre", "r16.r0", "r16.host", "r16.kernels", "r16.mtp", "r16.m1", "r16.serve",
+                                 "r16.golden_server", "r16.prefix", "r16.cost", "r16.tokdiff"])
+        self.assertIn("build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode "
+                      "tests/golden/prompts urakozz/Ornith-", out)
+        self.assertIn("tools/box_validate/tok_diff.py", out)
+        out = self.run_driver("--dry-run", "--only", "r17").stdout
+        order = re.findall(r"^--- (\S+)", out, re.M)
+        self.assertEqual(order, ["pre", "r17.host", "r17.k0"])
         r = self.run_driver("--dry-run", "--only", "r99", ok=False)
         self.assertEqual(r.returncode, 2)
         out = self.run_driver("--dry-run", "--redo", "r1").stdout
