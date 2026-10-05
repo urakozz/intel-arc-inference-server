@@ -52,8 +52,16 @@ class Engine {
   // attention variants' baked MAXLEN are one number - runtime::build throws if
   // they disagree). The constructor captures the list and then reset()s, so a
   // fresh Engine starts from an explicitly zeroed state.
+  //
+  // `kv` (spec 12b, `--kv-cache`): the KV cache's form for the session's lifetime - bf16
+  // (today's engine, bit for bit) or int8 (rotkv: int8 rows + fp16 scales, the writers
+  // and readers of src/kernels/kv8.cl). The default is runtime::default_kv_cache()
+  // (B70_KV_CACHE, unset = bf16), which is how the gate tests run over the int8 cache.
+  // int8 needs decode attention v2 and, for prefill(), the L0 backends' flash attention;
+  // anything else throws (at capture, or at the first prefill) rather than reading int8
+  // rows as bf16.
   Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len,
-         bool debug_resid = false);
+         bool debug_resid = false, KvCache kv = default_kv_cache());
 
   // Zeroes exactly the persistent group - control, gdn_state, conv_ring, kv_k,
   // kv_v. Scratch is deliberately NOT zeroed: no step may read scratch it has
@@ -139,7 +147,9 @@ class Engine {
   // head's input hidden h_{pos-1} (MtpBuffers::hh row 0, 10240 B) and the KV the head's
   // own layer (a 17th KV layer); both sizes grow accordingly.
   size_t state_bytes() const;                 // gdn_state + conv_ring (166.72 MB) [+ hh0]
-  size_t kv_bytes(uint32_t n_pos) const;      // n_pos * (fa_layers [+1]) * 4 * 256 * 2 B, K and V
+  // n_pos * (fa_layers [+1]) * KvLayout::pos_bytes(), K and V: 4 x 256 x 2 B per layer and
+  // position at bf16; 4 x (256 + 2) B at int8 (spec 12b: the rows and their scales).
+  size_t kv_bytes(uint32_t n_pos) const;
   // Layout: gdn_state (the LIVE slot) then conv_ring [then hh row 0]. conv_ring is a
   // ring indexed by pos % kConvRing; the whole ring is copied, so a restore at any
   // pos % 16 is exact.
@@ -150,6 +160,10 @@ class Engine {
   // Positions [begin, end) of kv_k and kv_v. Host layout: K [16][end-begin][4][256]
   // bf16, then V the same; with MTP on, [17] layers each, the head's cache last. begin == end copies nothing (host may be null). Throws
   // unless begin <= end <= max_len.
+  // Spec 12b, int8: K is [layers][end-begin][4][256] int8 rows, then [layers][end-begin][4]
+  // fp16 scales (the head's layer last in both), then V the same - kv_bytes(end - begin)
+  // bytes. A store holds one form only: the bytes are not convertible, so the prefix cache
+  // keys its entries by the engine's form as well (server/prefix_cache.h).
   void save_kv(uint32_t begin, uint32_t end, void* host) const;
   void load_kv(uint32_t begin, uint32_t end, const void* host);
 
@@ -246,6 +260,7 @@ class Engine {
 
   l0::Context& context() const { return ctx_; }
   const loader::LoadedModel& model() const { return model_; }
+  KvCache kv_cache() const { return persist_.kv_lay.form; }   // spec 12b
   DecodeBuffers& buffers() { return buffers_; }
   const CapturedStep& step() const { return step_; }
   // Position of the next token, i.e. how many tokens this session has consumed.

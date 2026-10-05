@@ -43,14 +43,19 @@ namespace runtime {
 struct PersistentBuffers : PersistentDims {
   // Spec 14: per-layer state is sized from the model descriptor (gdn_layers,
   // fa_layers); there is no default - a caller has to say which model.
-  PersistentBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
+  // Spec 12b: `kv` is the KV cache's form (`--kv-cache`); kv_k / kv_v are laid out by
+  // `kv_lay` (runtime/buffer_sizes.h KvLayout) - at bf16 exactly today's allocation.
+  PersistentBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
+                    KvCache kv = default_kv_cache());
 
   l0::Mem control;        // shared, sizeof(Control)
   // Spec 15b: the widths are the descriptor's; the brackets give Qwen3.8's.
   l0::Mem gdn_state;      // fp32 [gdn_layers][v-heads 48][128 k][128 v] = 150.99 MB (Qwen3.8: 48)
   l0::Mem conv_ring;      // bf16 [gdn_layers][16][conv dim 10240]       = 15.73 MB (Qwen3.8)
   l0::Mem kv_k, kv_v;     // bf16 [fa_layers][max_len][kv-heads 4][256] each = 536.87 MB each @16384 (Qwen3.8: 16)
+                          // int8 (spec 12b): [fa_layers][max_len][4][256] int8 + [fa_layers][max_len][4] fp16
   uint32_t max_len;
+  KvLayout kv_lay;        // the form and the layout of kv_k / kv_v (fa_layers layers)
 
   size_t bytes() const;
   // The five fills Engine::reset() does, in the order the constructor does
@@ -59,8 +64,9 @@ struct PersistentBuffers : PersistentDims {
   void zero(l0::CmdList& imm);
 
  private:
-  // The public constructor delegates here with sizes(max_len, desc).
-  PersistentBuffers(l0::Context& ctx, uint32_t max_len, const PersistentSizes& s);
+  // The public constructor delegates here with sizes(max_len, desc, kv).
+  PersistentBuffers(l0::Context& ctx, uint32_t max_len, const PersistentSizes& s,
+                    const KvLayout& kv);
 };
 
 // Decode's per-step scratch. Field names, sizes and allocation order unchanged.
@@ -207,8 +213,9 @@ struct MtpBuffers : MtpDims {
 
   // `draft_vocab` = |V'| (spec 8 §11), 0 = the full head drafts (no dv_logits, and
   // `logits` is zeroed as before). Every size is MtpDims::sizes(max_len, desc, draft_vocab).
+  // `kv` (spec 12b): the head's KV is in the main cache's form - one layer of KvLayout.
   MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
-             uint32_t draft_vocab = 0);
+             uint32_t draft_vocab = 0, KvCache kv = default_kv_cache());
 
   l0::Mem hctl;
   l0::Mem gdn_spec;
@@ -219,6 +226,7 @@ struct MtpBuffers : MtpDims {
   std::unique_ptr<l0::Mem> dv_logits;   // null unless draft_vocab > 0
   uint32_t max_len;
   uint32_t draft_vocab = 0;
+  KvLayout kv_lay;   // the head's kv_k / kv_v: one layer, the engine's form
 
   size_t bytes() const;
   // What Engine::reset() zeroes when MTP is on (all of it: the head's KV rows are
@@ -231,7 +239,7 @@ struct MtpBuffers : MtpDims {
 
  private:
   MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
-             uint32_t draft_vocab);   // the delegate
+             uint32_t draft_vocab, const KvLayout& kv);   // the delegate
 };
 
 // The VIEW. Every public name capture.cc uses, with the same types as before
@@ -250,7 +258,8 @@ struct DecodeBuffers {
   static constexpr uint32_t kAttnV2Blocks = DecodeScratch::kAttnV2Blocks;
   static constexpr uint32_t kNormGroups = DecodeScratch::kNormGroups;
 
-  DecodeBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);  // owning
+  DecodeBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
+                KvCache kv = default_kv_cache());                         // owning
   DecodeBuffers(PersistentBuffers& p, DecodeScratch& s);    // view (Engine's)
 
   // --- persistent state (survives across tokens) ---
@@ -260,6 +269,7 @@ struct DecodeBuffers {
       &attn_part, &attn_out, &logits, &argmax_part;
   l0::Mem* moe;   // spec 15c: DecodeScratch::moe, null on a dense model
   uint32_t max_len;
+  KvLayout kv_lay;   // spec 12b: kv_k / kv_v's form and layout (PersistentBuffers::kv_lay)
 
   size_t persistent_bytes() const;   // printed at startup, asserted by the test
   size_t scratch_bytes() const;

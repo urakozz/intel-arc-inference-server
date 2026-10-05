@@ -90,18 +90,56 @@ uint32_t attn_blocks(uint32_t max_len) {
 size_t gdn_state_bytes(const model::ModelDesc& desc) {
   return size_t{desc.gdn_layers} * desc.gdn_v_heads * Q::kGdnHeadDim * Q::kGdnHeadDim * kFp32;
 }
-// One FA layer's K (or V) cache: bf16 [max_len][kv-heads][256].
-size_t kv_layer_bytes(uint32_t max_len, const model::ModelDesc& desc) {
-  return size_t{max_len} * desc.fa_kv_heads * Q::kFaHeadDim * kBf16;
-}
 }  // namespace
 
-PersistentSizes PersistentDims::sizes(uint32_t max_len, const model::ModelDesc& desc) {
+KvCache default_kv_cache() {
+  const char* v = std::getenv("B70_KV_CACHE");
+  if (v == nullptr || *v == '\0') return kDefaultKvCache;
+  return parse_kv_cache(v);
+}
+
+KvCache parse_kv_cache(const char* v) {
+  if (std::strcmp(v, "bf16") == 0) return KvCache::Bf16;
+  if (std::strcmp(v, "int8") == 0) return KvCache::Int8;
+  throw std::runtime_error(std::string("--kv-cache / B70_KV_CACHE ") + v +
+                           ": expected bf16 or int8");
+}
+
+const char* kv_cache_name(KvCache kv) { return kv == KvCache::Int8 ? "int8" : "bf16"; }
+
+KvLayer KvLayout::layer(void* k_base, void* v_base, uint32_t l) const {
+  auto at = [](void* base, size_t off) {
+    return static_cast<void*>(static_cast<uint8_t*>(base) + off);
+  };
+  KvLayer r;
+  r.k = at(k_base, rows_offset(l));
+  r.v = at(v_base, rows_offset(l));
+  if (form == KvCache::Int8) {
+    r.ks = at(k_base, scales_offset(l));
+    r.vs = at(v_base, scales_offset(l));
+  }
+  return r;
+}
+
+// One K (or V) allocation of `layers` FA layers in the given form (KvLayout).
+KvLayout kv_layout(uint32_t max_len, const model::ModelDesc& desc, uint32_t layers, KvCache kv) {
+  KvLayout l;
+  l.form = kv;
+  l.max_len = max_len;
+  l.kv_heads = desc.fa_kv_heads;
+  l.head_dim = Q::kFaHeadDim;
+  l.layers = layers;
+  return l;
+}
+
+PersistentSizes PersistentDims::sizes(uint32_t max_len, const model::ModelDesc& desc,
+                                      KvCache kv) {
   PersistentSizes s{};
   s.control = sizeof(Control);
   s.gdn_state = gdn_state_bytes(desc);
   s.conv_ring = size_t{desc.gdn_layers} * kConvRing * desc.gdn_conv_dim() * kBf16;
-  s.kv_k = size_t{desc.fa_layers} * kv_layer_bytes(max_len, desc);
+  // bf16 [fa_layers][max_len][kv-heads][256], or (spec 12b) the int8 rows + fp16 scales.
+  s.kv_k = kv_layout(max_len, desc, desc.fa_layers, kv).bytes();
   s.kv_v = s.kv_k;
   return s;
 }
@@ -199,11 +237,12 @@ PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::Mod
   return s;
 }
 
-MtpSizes MtpDims::sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t draft_vocab) {
+MtpSizes MtpDims::sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t draft_vocab,
+                        KvCache kv) {
   MtpSizes s{};
   s.hctl = sizeof(Control);
   s.gdn_spec = size_t{kSlots - 1} * gdn_state_bytes(desc);
-  s.kv_k = kv_layer_bytes(max_len, desc);   // the head's own (17th) KV layer
+  s.kv_k = kv_layout(max_len, desc, 1, kv).bytes();   // the head's own (17th) KV layer
   s.kv_v = s.kv_k;
   s.hh = size_t{DecodeScratchDims::kM + 1} * desc.hidden * kBf16;
   s.dh = size_t{desc.hidden} * kBf16;
