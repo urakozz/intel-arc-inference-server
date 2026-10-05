@@ -205,6 +205,77 @@ void check_quantise() {
   CHECK(e_rot < e_pt);
 }
 
+// The scheme end to end on one synthetic head, fp64 attention: bf16 K / V against rotkv
+// (q rotated, K and V rotated + int8, the output un-rotated) and against plain per-token
+// int8. K has outlier channels (x 20 on 4 of 256), as the real K does. rotkv must be the
+// closer of the two (the 12a ranking), and close: rel L2 < 2e-2 over 64 queries at depth 512.
+void check_attention() {
+  constexpr uint32_t D = 256, T = 512, Q = 64;
+  std::mt19937 rng(9);
+  std::normal_distribution<float> nd(0.0f, 1.0f);
+  auto bf = [](float x) { return common::bf16_to_f32(common::f32_to_bf16(x)); };
+  std::vector<float> K(size_t(T) * D), V(size_t(T) * D), q(size_t(Q) * D);
+  for (uint32_t t = 0; t < T; ++t)
+    for (uint32_t i = 0; i < D; ++i) {
+      K[size_t(t) * D + i] = bf(nd(rng) * (i % 64 == 5 ? 20.0f : 1.0f));
+      V[size_t(t) * D + i] = bf(nd(rng));
+    }
+  for (float& x : q) x = nd(rng) * 0.5f;
+  // The three caches as fp32 rows: bf16, rotkv (rotated basis), per token (plain basis).
+  std::vector<float> Kr(K.size()), Vr(V.size()), Kp(K.size()), Vp(V.size());
+  int8_t q8[D];
+  for (uint32_t t = 0; t < T; ++t) {
+    const uint16_t sk = kv8::encode(&K[size_t(t) * D], q8);
+    for (uint32_t i = 0; i < D; ++i) Kr[size_t(t) * D + i] = kv8::dequant(q8[i], sk);
+    const uint16_t sv = kv8::encode(&V[size_t(t) * D], q8);
+    for (uint32_t i = 0; i < D; ++i) Vr[size_t(t) * D + i] = kv8::dequant(q8[i], sv);
+    const uint16_t pk = kv8::quantise(&K[size_t(t) * D], q8);
+    for (uint32_t i = 0; i < D; ++i) Kp[size_t(t) * D + i] = kv8::dequant(q8[i], pk);
+    const uint16_t pv = kv8::quantise(&V[size_t(t) * D], q8);
+    for (uint32_t i = 0; i < D; ++i) Vp[size_t(t) * D + i] = kv8::dequant(q8[i], pv);
+  }
+  auto attend = [&](const float* qq, const std::vector<float>& Kc, const std::vector<float>& Vc,
+                    double* o) {
+    std::vector<double> s(T);
+    double mx = -1e300, sum = 0;
+    for (uint32_t t = 0; t < T; ++t) {
+      double a = 0;
+      for (uint32_t i = 0; i < D; ++i) a += double(qq[i]) * Kc[size_t(t) * D + i];
+      s[t] = a / 16.0;
+      mx = std::max(mx, s[t]);
+    }
+    for (uint32_t i = 0; i < D; ++i) o[i] = 0;
+    for (uint32_t t = 0; t < T; ++t) {
+      const double w = std::exp(s[t] - mx);
+      sum += w;
+      for (uint32_t i = 0; i < D; ++i) o[i] += w * Vc[size_t(t) * D + i];
+    }
+    for (uint32_t i = 0; i < D; ++i) o[i] /= sum;
+  };
+  double e_rot = 0, e_pt = 0, n2 = 0;
+  for (uint32_t k = 0; k < Q; ++k) {
+    const float* qq = &q[size_t(k) * D];
+    double ref[D], orot[D], opt[D];
+    attend(qq, K, V, ref);
+    float qr[D], o32[D], back[D];
+    kv8::rotate(qq, qr);
+    attend(qr, Kr, Vr, orot);
+    for (uint32_t i = 0; i < D; ++i) o32[i] = float(orot[i]);
+    kv8::unrotate(o32, back);
+    attend(qq, Kp, Vp, opt);
+    for (uint32_t i = 0; i < D; ++i) {
+      e_rot += (back[i] - ref[i]) * (back[i] - ref[i]);
+      e_pt += (opt[i] - ref[i]) * (opt[i] - ref[i]);
+      n2 += ref[i] * ref[i];
+    }
+  }
+  const double r_rot = std::sqrt(e_rot / n2), r_pt = std::sqrt(e_pt / n2);
+  std::printf("attention (synthetic, K outliers, depth %u): rel L2 vs bf16 KV - rotkv %.2e,"
+              " per token %.2e\n", T, r_rot, r_pt);
+  CHECK(r_rot < r_pt);
+  CHECK(r_rot < 2e-2);
+}
+
 }  // namespace
 
 int main() {
@@ -212,6 +283,7 @@ int main() {
   check_f16();
   check_rotation();
   check_quantise();
+  check_attention();
   std::printf("kv8_test: OK\n");
   return 0;
 }
