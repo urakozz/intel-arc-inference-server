@@ -559,7 +559,11 @@ int run_ab(int argc, char** argv) {
               "ZE_AFFINITY_MASK=%s, device %s\n",
               L, deepest, steps, rounds, aff ? aff : "(unset)", ctx.name().c_str());
   loader::LoadedModel model = loader::load(ctx, snap, L);
+  // Both pairs are captured over these buffers below, so they are built at v1's
+  // attn_part size, which also covers v2's (DecodeScratchDims::sizes).
+  setenv("B70_DECODE_ATTN", "v1", 1);
   runtime::Engine eng(ctx, std::move(model), L);
+  unsetenv("B70_DECODE_ATTN");
   eng.prepare_prefill();
   {
     Timer t;
@@ -634,7 +638,9 @@ int run_fork(int argc, char** argv) {
   const uint32_t L = argc > 6 ? uint32_t(std::stoul(argv[6])) : 131072;
   l0::Context ctx(0);
   loader::LoadedModel model = loader::load(ctx, argv[2], L);
+  setenv("B70_DECODE_ATTN", "v1", 1);   // v1-sized attn_part: both pairs are captured below
   runtime::Engine eng(ctx, std::move(model), L);
+  unsetenv("B70_DECODE_ATTN");
   eng.prepare_prefill();
   eng.prefill(prompt);
   runtime::DecodeBuffers& b = eng.buffers();

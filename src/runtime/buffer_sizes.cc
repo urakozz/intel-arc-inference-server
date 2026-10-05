@@ -1,6 +1,10 @@
 #include "runtime/buffer_sizes.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
+#include <string>
 #include "kernels/prefill/pf_kernels.h"
 #include "runtime/control.h"
 
@@ -102,7 +106,18 @@ PersistentSizes PersistentDims::sizes(uint32_t max_len, const model::ModelDesc& 
   return s;
 }
 
-DecodeScratchSizes DecodeScratchDims::sizes(uint32_t max_len, const model::ModelDesc& desc) {
+DecodeAttn decode_attn() {
+  const char* v = std::getenv("B70_DECODE_ATTN");
+  if (v == nullptr || *v == '\0') return kDefaultDecodeAttn;
+  if (std::strcmp(v, "v1") == 0) return DecodeAttn::V1;
+  if (std::strcmp(v, "v2") == 0) return DecodeAttn::V2;
+  throw std::runtime_error(std::string("B70_DECODE_ATTN=") + v + ": expected v1 or v2");
+}
+
+const char* decode_attn_name(DecodeAttn a) { return a == DecodeAttn::V2 ? "v2" : "v1"; }
+
+DecodeScratchSizes DecodeScratchDims::sizes(uint32_t max_len, const model::ModelDesc& desc,
+                                            DecodeAttn attn) {
   DecodeScratchSizes s{};
   s.resid = size_t{kM} * desc.hidden * kBf16;
   s.x = size_t{kM} * x_width(desc) * kBf16;
@@ -116,7 +131,12 @@ DecodeScratchSizes DecodeScratchDims::sizes(uint32_t max_len, const model::Model
   s.gdn_o = size_t{kM} * desc.gdn_value_dim() * kFp32;
   s.attn_q = size_t{kM} * desc.fa_value_dim() * kFp32;
   s.attn_gate = size_t{kM} * desc.fa_value_dim() * kFp32;
-  s.attn_part = size_t{desc.fa_q_heads} * attn_blocks(max_len) * kM * kAttnPartStride * kFp32;
+  // v1 strides its partials by every block of the cache, [q-heads][max_len / 64][M][258];
+  // v2 never has more than kAttnV2Blocks per row, [q-heads][32][M][258], whatever max_len
+  // is - 6.34 MB on Qwen3.8 against v1's 405.8 MB at 131072 (0.595 GB at 192k), which
+  // `--max-len auto` turns into context.
+  const size_t blocks = attn == DecodeAttn::V1 ? attn_blocks(max_len) : kAttnV2Blocks;
+  s.attn_part = size_t{desc.fa_q_heads} * blocks * kM * kAttnPartStride * kFp32;
   s.attn_out = size_t{kM} * desc.fa_value_dim() * kBf16;
   s.logits = size_t{kM} * Q::kVocab * kFp32;
   s.argmax_part = size_t{kM} * kArgmaxGroups * 2 * kFp32;

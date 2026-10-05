@@ -114,15 +114,9 @@ struct CapturedStep {
 // M: the rows in flight (consecutive positions), default 1 - what ships. M > 1
 // binds the `_M<M>` variants, which a default build does not compile (spec 8a:
 // B70_DECODE_EXTRA_M builds M = 2..4 at max_len 16384 for the MTP probe).
-// Spec 10 (plan 10b): which decode-attention pair every capture binds - attn.cl's
-// attn_decode + attn_reduce (v1) or attn_v2.cl's (v2). `B70_DECODE_ATTN=v1|v2`, read
-// at each build (so a test can set it between engines); unset or empty means the
-// default; any other value throws. Both pairs share attn_prep, the KV layout, attn_q /
-// attn_gate / attn_part / attn_out.
-enum class DecodeAttn { V1, V2 };
-inline constexpr DecodeAttn kDefaultDecodeAttn = DecodeAttn::V2;   // spec 10 gates, 2026-09-28
-DecodeAttn decode_attn();
-const char* decode_attn_name(DecodeAttn a);
+// Spec 10 (plan 10b): which decode-attention pair every capture binds - `DecodeAttn`,
+// `decode_attn()` and `B70_DECODE_ATTN` live in runtime/buffer_sizes.h, because the
+// pair also decides `attn_part`'s size.
 
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                    l0::Mem* debug_resid = nullptr, ProfileEvents* prof = nullptr,
