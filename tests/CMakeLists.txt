@@ -1408,3 +1408,50 @@ if(B70_AGNES)
   set_tests_properties(${_b70_plan_box_agnes} PROPERTIES LABELS "checkpoint;agnes"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)
 endif()
+
+# --- Spec 15c: Ornith 1.5 35B-A3B decode on the card (label `ornith`) ----------------
+# No int4 Ornith checkpoint exists yet (spec 15 decision 1; 15a decides the source -
+# AutoRound g64 proposed). B70_ORNITH_SNAPSHOT names where it will be; until it is on the
+# machine ornith_decode_test SKIPs (77), and the golden registrations SKIP on the absent
+# `oracle-out-ornith` (15a's golden set) before they load anything. If 15a writes Ornith
+# prompt ids beside the committed ones (its tokenizer differs), point
+# B70_ORNITH_PROMPTS_DIR at them.
+#   R3 (decode): golden_gate_test, descriptor-driven since 15c (the tap is the layer
+#       output when the FFN folds inside the layer), bf16 and int8 heads;
+#   R2 + the list + replay bitwise + the plan: ornith_decode_test.
+if(B70_ORNITH)
+  set(B70_ORNITH_SNAPSHOT "urakozz/Ornith-1.5-35B-A3B-W4A16-g64-AutoRound-GPTQ"
+    CACHE STRING "Ornith int4 checkpoint (repo id resolved in the HF cache, or a snapshot directory)")
+  set(B70_ORNITH_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith"
+    CACHE PATH "The CPU-oracle golden set of Ornith (spec 15a), with router_logits.L* for R2")
+  set(B70_ORNITH_PROMPTS_DIR "${CMAKE_SOURCE_DIR}/tests/golden/prompts"
+    CACHE PATH "Ornith's prompt ids (the committed ones unless 15a writes Ornith's beside them)")
+  set(B70_ORNITH_DECODE_KERNELS
+    kernel_embed_gather_M1_D2048 kernel_argmax_stage1_M1 kernel_argmax_stage2
+    kernel_prep_res_fold_M1_K2048_SP0_G20 kernel_prep_res_fold_M1_K2048_SP4_G20
+    kernel_prep_norm_finish_M1_K2048_G20_W20 kernel_prep_gated_head_M1_GK16V32
+    kernel_gdn_step_M1_GK16V32 kernel_attn_prep_M1_Q16KV2 kernel_attn_v2_M1_T${ATTN_V2_TGT}_Q16KV2
+    kernel_gemv_M1_K2048_N12288_S1_L1 kernel_gemv_M1_K4096_N2048_S4_L0
+    kernel_gemv_M1_K2048_N9216_S2_L0 kernel_gemv_M1_K2048_N248320_S1_L1
+    kernel_gemv_bf16_M1_K2048_N128_C16_S16 kernel_gemv_bf16_M1_K2048_N272_C16_S16
+    kernel_gemv_bf16_M1_K2048_N248320 kernel_gemv_i8w_M1_K2048_N248320
+    kernel_moe_M1_E256_T8_D2048_I512)
+  add_dependencies(golden_gate_test ${B70_ORNITH_DECODE_KERNELS})
+  add_test(NAME golden_gate_ornith_test COMMAND golden_gate_test
+    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT})
+  add_test(NAME golden_gate_ornith_i8head_test COMMAND golden_gate_test
+    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} int8)
+  set_tests_properties(golden_gate_ornith_test golden_gate_ornith_i8head_test PROPERTIES
+    LABELS "checkpoint;golden;ornith" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+
+  add_executable(ornith_decode_test golden/ornith_decode_test.cc)
+  target_include_directories(ornith_decode_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(ornith_decode_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
+  add_dependencies(ornith_decode_test ${B70_ORNITH_DECODE_KERNELS})
+  add_test(NAME ornith_decode_test COMMAND ornith_decode_test ${B70_ORNITH_SNAPSHOT}
+    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR})
+  add_test(NAME ornith_decode_i8head_test COMMAND ornith_decode_test ${B70_ORNITH_SNAPSHOT}
+    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} int8)
+  set_tests_properties(ornith_decode_test ornith_decode_i8head_test PROPERTIES
+    LABELS "checkpoint;golden;ornith" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()

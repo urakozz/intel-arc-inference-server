@@ -105,9 +105,15 @@ using golden::read_ids;
 
 constexpr uint32_t kMaxLen = 16384;
 constexpr uint32_t kGen = 32;
-const uint32_t kHid = model::qwen38().hidden;  // 5120, Agnes's too (spec 15b: the descriptor's)
-const size_t kGdnElems =
-    size_t(model::qwen38().gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;  // 48*128*128
+// The loaded model's widths (spec 15c: set from the descriptor right after the load -
+// 5120 and 48 x 128 x 128 on Qwen3.8 and Agnes, 2048 and 32 x 128 x 128 on Ornith).
+uint32_t kHid = 0;
+size_t kGdnElems = 0;
+// Spec 15c: true when the FFN folds into the residual inside its own layer (a MoE
+// model's moe_down, ModelDesc::ffn_fold_s() == 0). Then tap[i] is layer i's OUTPUT -
+// the oracle's resid.L{i} - and a layer's contribution between two taps is mixer.L{i} +
+// mlp.L{i}; on a dense model tap[i] still has layer i's MLP un-folded (see the header).
+bool kFfnInLayer = false;
 const char* const kPrompts[] = {"prose", "code", "cjk"};
 
 
@@ -158,14 +164,20 @@ int main(int argc, char** argv) {
   // group between them, which is what starting a fresh session means. Loading
   // 19 GB three times would cost ~6 minutes and prove nothing extra.
   loader::LoadedModel model = loader::load(ctx, snap, kMaxLen, /*mtp=*/false, lm_head);
+  kHid = model.desc->hidden;
+  kGdnElems = size_t(model.desc->gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
+  kFfnInLayer = model.desc->ffn_fold_s() == 0;
+  const ::model::ModelDesc& desc = *model.desc;
   CHECK(model.embed.size() >= size_t(Qwen35::kVocab) * kHid * 2);
   // Spec 14: the layer count is the loaded model's (64 Qwen3.8, 72 Agnes).
   const uint32_t kLayers = model.desc->layers, kGdnLayers = model.desc->gdn_layers;
   runtime::Engine eng(ctx, std::move(model), kMaxLen, /*debug_resid=*/true);
   CHECK(eng.debug_resid());
   // The decode list is 12 launches per layer + 6 at the boundary: 774 on Qwen3.8
-  // (645 + lever L1's 129), 870 on Agnes's 72 layers (spec 14, derived).
-  CHECK_EQ(eng.step().kernel_count, size_t(12) * kLayers + 6);
+  // (645 + lever L1's 129), 870 on Agnes's 72 layers (spec 14, derived); 13 per MoE
+  // layer, 526 on Ornith's 40 (spec 15c) - runtime::decode_launches.
+  CHECK_EQ(eng.step().kernel_count, (desc.is_moe() ? size_t(13) : size_t(12)) * kLayers + 6);
+  CHECK_EQ(eng.step().kernel_count, runtime::decode_launches(desc));
   l0::CmdList imm = l0::CmdList::immediate(ctx);
 
   const size_t gdn_stride = kGdnElems * sizeof(float);
@@ -233,13 +245,16 @@ int main(int argc, char** argv) {
       const uint16_t* mix = g.bf16("mixer.L" + ls, size_t(T) * kHid);
       const uint16_t* prev =
           l == 0 ? nullptr : g.bf16("resid.L" + std::to_string(l - 1), size_t(T) * kHid);
+      // Spec 15c: with the FFN folded inside the layer the tap IS the layer output.
+      const uint16_t* out = kFfnInLayer ? g.bf16("resid.L" + ls, size_t(T) * kHid) : nullptr;
       double lmin = 2.0, lrel = 0.0, lnb = 0.0, lerr = 0.0;
       uint32_t at = 0;
       for (uint32_t t = 0; t < T; ++t) {
         const uint16_t* base = prev ? prev + size_t(t) * kHid : emb[t].data();
         for (uint32_t k = 0; k < kHid; ++k)
-          expect[k] = common::f32_to_bf16(common::bf16_to_f32(base[k]) +
-                                          common::bf16_to_f32(mix[size_t(t) * kHid + k]));
+          expect[k] = out ? out[size_t(t) * kHid + k]
+                          : common::f32_to_bf16(common::bf16_to_f32(base[k]) +
+                                                common::bf16_to_f32(mix[size_t(t) * kHid + k]));
         const Metric m = compare_bf16(tap[t].data() + size_t(l) * kHid, expect.data(), kHid, sa, sb);
         cos_lt[size_t(l) * T + t] = m.cos;
         nb_lt[size_t(l) * T + t] = m.nb;
@@ -300,13 +315,21 @@ int main(int argc, char** argv) {
             l == 0 ? nullptr : g.bf16("resid.L" + std::to_string(l - 1), size_t(T) * kHid) +
                                    size_t(tw) * kHid;
         const uint16_t* base = prev ? prev : emb[tw].data();
+        const uint16_t* out =
+            kFfnInLayer ? g.bf16("resid.L" + ls, size_t(T) * kHid) + size_t(tw) * kHid : nullptr;
         for (uint32_t k = 0; k < kHid; ++k)
-          expect[k] = common::f32_to_bf16(common::bf16_to_f32(base[k]) + common::bf16_to_f32(mix[k]));
+          expect[k] = out ? out[k]
+                          : common::f32_to_bf16(common::bf16_to_f32(base[k]) +
+                                                common::bf16_to_f32(mix[k]));
         const Metric mt =
             compare_bf16(tap[tw].data() + size_t(l) * kHid, expect.data(), kHid, sa, sb);
+        // The MLP folded between the two taps: layer i-1's on a dense model, layer i's
+        // own when the FFN folds inside the layer (spec 15c).
         const uint16_t* pmlp =
-            l == 0 ? nullptr : g.bf16("mlp.L" + std::to_string(l - 1), size_t(T) * kHid) +
-                                   size_t(tw) * kHid;
+            kFfnInLayer ? g.bf16("mlp.L" + ls, size_t(T) * kHid) + size_t(tw) * kHid
+            : l == 0    ? nullptr
+                        : g.bf16("mlp.L" + std::to_string(l - 1), size_t(T) * kHid) +
+                           size_t(tw) * kHid;
         const uint16_t* eprev = l == 0 ? emb[tw].data() : tap[tw].data() + size_t(l - 1) * kHid;
         for (uint32_t k = 0; k < kHid; ++k) {
           ce[k] = common::bf16_to_f32(tap[tw][size_t(l) * kHid + k]) - common::bf16_to_f32(eprev[k]);
@@ -328,7 +351,8 @@ int main(int argc, char** argv) {
     // The tail the tap cannot reach: layer 63 post-MLP, which `b.resid` holds
     // after every fence (capture.h). There is no tap 64 and none is invented.
     {
-      const uint16_t* r63 = g.bf16("resid.L63", size_t(T) * kHid);
+      const std::string last = "resid.L" + std::to_string(kLayers - 1);   // L63 on Qwen3.8
+      const uint16_t* r63 = g.bf16(last, size_t(T) * kHid);
       double lmin = 2.0, lrel = 0.0, lnb = 0.0, lerr = 0.0;
       uint32_t at = 0;
       for (uint32_t t = 0; t < T; ++t) {
@@ -337,9 +361,10 @@ int main(int argc, char** argv) {
         lrel = std::max(lrel, m.rel);
       }
       v.tail_min_cos = lmin;
-      std::printf("      63+ MLP (b.resid vs resid.L63)  min cos %.9f at t=%u, max relL2 %.3e,"
+      std::printf("      %u+ MLP (b.resid vs %s)  min cos %.9f at t=%u, max relL2 %.3e,"
                   " |oracle| %.3f, |err| %.3f%s\n",
-                  lmin, at, lrel, lnb, lerr, lmin < kBar ? "   **LOW**" : "");
+                  kLayers - 1, last.c_str(), lmin, at, lrel, lnb, lerr,
+                  lmin < kBar ? "   **LOW**" : "");
     }
 
     // ---- 3. the GDN recurrent state after the prompt ------------------------
@@ -365,10 +390,10 @@ int main(int argc, char** argv) {
         }
         ++gi;
       }
-      CHECK_EQ(gi, uint32_t(48));
+      CHECK_EQ(gi, kGdnLayers);
       v.gdn_min_cos = gmin;
-      std::printf("      min cos %.9f (L%u), max cos %.9f, max relL2 %.3e, %u/48 below %.3f\n",
-                  gmin, v.gdn_min_layer, gmax, relmax, n_low, kBar);
+      std::printf("      min cos %.9f (L%u), max cos %.9f, max relL2 %.3e, %u/%u below %.3f\n",
+                  gmin, v.gdn_min_layer, gmax, relmax, n_low, kGdnLayers, kBar);
     }
 
     // ---- 4. THE GATE: 32 greedy ids, element-exact --------------------------
