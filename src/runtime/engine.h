@@ -180,7 +180,7 @@ class Engine {
   double last_fence_ms() const { return last_fence_ms_; }
 
   // Golden-gate accessors: the per-layer resid tap for the last replay, read
-  // back in debug buffer order [layer][m][5120] bf16. What tap[L] *means* is
+  // back in debug buffer order [layer][m][hidden] bf16. What tap[L] *means* is
   // documented in exactly one place - runtime/capture.h's `debug_resid`
   // paragraph - and is not restated here.
   std::vector<uint16_t> read_debug_resid();  // throws unless debug_resid
@@ -227,7 +227,7 @@ class Engine {
   uint32_t max_verify_k() const;
   // Tests and the record: the MTP buffers and lists (null / throw when MTP is off).
   MtpBuffers* mtp_buffers() { return mtp_.get(); }
-  // The last prefill chunk's main hidden rows: bf16 [kC + 1][5120], row 1 + r = position
+  // The last prefill chunk's main hidden rows: bf16 [kC + 1][hidden], row 1 + r = position
   // (last chunk base + r) post-final-norm (step_mtp_kv). Null before an MTP prefill.
   const l0::Mem* mtp_prefill_hidden() const { return mtp_pf_hid_.get(); }
   const CapturedStep& verify_step(uint32_t M) const;
@@ -280,7 +280,7 @@ class Engine {
   CapturedStep step_;
   std::vector<CapturedStep> draft_steps_;    // [kMaxDraft], MTP on only
   std::vector<CapturedStep> verify_steps_;   // [M - 1] for M = 1..kSlots
-  std::unique_ptr<l0::Mem> mtp_pf_hid_;      // prefill: bf16 [kC + 1][5120], lazy
+  std::unique_ptr<l0::Mem> mtp_pf_hid_;      // prefill: bf16 [kC + 1][hidden], lazy
   std::vector<uint32_t> draft_ids_;
   static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
   uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;

@@ -135,7 +135,7 @@ Result compare(const Snap& a, const Snap& b, uint32_t n, bool verbose) {
   std::sort(all.begin(), all.end());
   r.median = all[all.size() / 2];
   r.p01 = all[all.size() / 100];
-  const size_t gdn_layer = size_t(Qwen35::kGdnVHeads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
+  const size_t gdn_layer = size_t(model::qwen38().gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
   const float* sa = reinterpret_cast<const float*>(a.state.data());
   const float* sb = reinterpret_cast<const float*>(b.state.data());
   for (uint32_t g = 0; g < kGdn; ++g) {
@@ -284,7 +284,7 @@ int main(int argc, char** argv) {
   // The conv ring's slots other than the three live ones ((N-3..N-1) % 16) hold whatever
   // the last chunk that wrote them left, which nothing reads and which legitimately
   // differs with the chunking; the GDN state and the live slots must be equal.
-  const size_t gdn_bytes = size_t(kGdn) * Qwen35::kGdnVHeads * Qwen35::kGdnHeadDim *
+  const size_t gdn_bytes = size_t(kGdn) * model::qwen38().gdn_v_heads * Qwen35::kGdnHeadDim *
                            Qwen35::kGdnHeadDim * 4;
   constexpr size_t kRingSlot = 10240 * 2, kRingDepth = 16;
   auto bitwise = [&](const Snap& s) {

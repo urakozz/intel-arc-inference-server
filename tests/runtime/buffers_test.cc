@@ -157,7 +157,7 @@ static void check_prefill_scratch(l0::Context& ctx) {
   CHECK_EQ(pf.lazy_bytes(), size_t{805306368 + 402653184 + 356515840 + 35651584});
   CHECK_EQ(runtime::PrefillScratch::kC, 2048u);
   CHECK_EQ(runtime::PrefillScratch::kGdnChunk, 64u);
-  CHECK_EQ(runtime::PrefillScratch::kSHeads, 6u);
+  CHECK_EQ(pf.s_heads(), 6u);
   CHECK_EQ(pf.max_len, 16384u);
   // The six composed-attention rows, as one group, are 6d's own figure.
   CHECK_EQ(pf.pf_q.size() + pf.pf_attn.size() + pf.pf_s_buffer().size() +

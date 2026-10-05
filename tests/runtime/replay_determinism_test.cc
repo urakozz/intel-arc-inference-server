@@ -72,6 +72,7 @@ constexpr uint32_t kCapM = 1;       // the captured list's M (only M = 1 compile
 // The residual tap: bf16 [64 layers][M][5120], one buffer per step.
 // Spec 14: the layer count is the loaded model's, set in main() before anything reads it.
 uint32_t kLayers = 0;
+uint32_t kHidden = 0;   // the loaded descriptor's (spec 15b), set beside kLayers
 size_t kTapElems = 0, kTapBytes = 0;
 
 // Everything that survives a token boundary (runtime::DecodeBuffers' first
@@ -124,7 +125,8 @@ int main(int argc, char** argv) {
   l0::Context ctx(0);
   loader::LoadedModel m = loader::load(ctx, arg, 16384, /*mtp=*/false, lm_head);
   kLayers = m.desc->layers;
-  kTapElems = size_t(kLayers) * kCapM * Qwen35::kHidden;
+  kHidden = m.desc->hidden;
+  kTapElems = size_t(kLayers) * kCapM * kHidden;
   kTapBytes = kTapElems * 2;
   runtime::DecodeBuffers b(ctx, m.max_len, *m.desc);
   l0::Mem tapmem(ctx, l0::MemKind::Device, kTapBytes);
@@ -269,8 +271,8 @@ int main(int argc, char** argv) {
   // helpers do not handle either, so one would poison every later layer.
   for (int g = 0; g < kGen; ++g)
     for (uint32_t l = 0; l < kLayers; ++l)
-      for (uint32_t k = 0; k < Qwen35::kHidden; ++k) {
-        const uint16_t w = a.tap[(size_t(g) * kLayers + l) * Qwen35::kHidden + k];
+      for (uint32_t k = 0; k < kHidden; ++k) {
+        const uint16_t w = a.tap[(size_t(g) * kLayers + l) * kHidden + k];
         if (!bf16_finite(w)) {
           std::fprintf(stderr, "non-finite resid: token %d layer %u element %u = 0x%04X\n", g, l, k,
                        w);
@@ -293,8 +295,8 @@ int main(int argc, char** argv) {
   // first layer that diverged - the diagnostic this tap exists for.
   for (int g = 0; g < kGen; ++g)
     for (uint32_t l = 0; l < kLayers; ++l) {
-      const size_t off = (size_t(g) * kLayers + l) * Qwen35::kHidden;
-      if (std::memcmp(a.tap.data() + off, bb.tap.data() + off, Qwen35::kHidden * 2) != 0) {
+      const size_t off = (size_t(g) * kLayers + l) * kHidden;
+      if (std::memcmp(a.tap.data() + off, bb.tap.data() + off, kHidden * 2) != 0) {
         std::fprintf(stderr, "resid tap differs at generated token %d, layer %u\n", g, l);
         CHECK(false);
       }
@@ -325,8 +327,8 @@ int main(int argc, char** argv) {
   }
   for (int g = 0; g < kGen; ++g)
     for (uint32_t l = 0; l < kLayers; ++l) {
-      const size_t off = (size_t(g) * kLayers + l) * Qwen35::kHidden;
-      if (std::memcmp(a.tap.data() + off, cc.tap.data() + off, Qwen35::kHidden * 2) != 0) {
+      const size_t off = (size_t(g) * kLayers + l) * kHidden;
+      if (std::memcmp(a.tap.data() + off, cc.tap.data() + off, kHidden * 2) != 0) {
         std::fprintf(stderr, "fresh-ingest resid differs at generated token %d, layer %u\n", g, l);
         CHECK(false);
       }

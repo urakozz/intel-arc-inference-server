@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
   // The MTP head: Agnes's `mtp.layers.0.global_attn.*` bound as `self_attn.*`.
   CHECK(m.mtp != nullptr);
   CHECK_EQ(m.report.mtp_tensors, loader::kMtpTensors);
-  CHECK_EQ(m.report.mtp_checkpoint_bytes, loader::kMtpCheckpointBytes);
+  CHECK_EQ(m.report.mtp_checkpoint_bytes, model::agnes().mtp_checkpoint_bytes());
 
   // The folded shapes, on every layer.
   for (uint32_t l = 0; l < 72; ++l) {

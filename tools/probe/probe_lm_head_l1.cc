@@ -32,6 +32,7 @@
 
 #include "common/bf16.h"
 #include "kernels/kernels.h"
+#include "kernels/shape_suffix.h"   // kRefHidden: the lm_head binaries' K (Qwen3.8)
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/fence.h"
@@ -50,7 +51,7 @@
 
 namespace {
 using model::Qwen35;
-constexpr uint32_t kHid = Qwen35::kHidden, kV = Qwen35::kVocab, kUsed = Qwen35::kVocabUsed;
+constexpr uint32_t kHid = kernels::kRefHidden, kV = Qwen35::kVocab, kUsed = Qwen35::kVocabUsed;
 constexpr uint32_t kGen = 32;
 
 std::vector<uint32_t> read_ids(const std::string& path) {

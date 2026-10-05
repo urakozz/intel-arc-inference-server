@@ -96,9 +96,9 @@ void pf_linear(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWeig
 void pf_res_norm(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t s_prev,
                  const void* norm_w, const void* partials, void* resid, void* x, uint32_t M) {
   const uint32_t g = PrefillScratch::kNormGroups;
-  cx.launch(kc(kernels::pf_res_fold_variant(Qwen35::kHidden, s_prev, g), "pf_res_fold"), g, M, 1,
+  cx.launch(kc(kernels::pf_res_fold_variant(s.desc().hidden, s_prev, g), "pf_res_fold"), g, M, 1,
             {PtrArg(partials), PtrArg(resid), PtrArg(s.norm_sumsq.ptr()), arg_val(M)});
-  cx.launch(kc(kernels::pf_norm_finish_variant(Qwen35::kHidden, g, g), "pf_norm_finish"), g, M, 1,
+  cx.launch(kc(kernels::pf_norm_finish_variant(s.desc().hidden, g, g), "pf_norm_finish"), g, M, 1,
             {PtrArg(s.norm_sumsq.ptr()), PtrArg(resid), PtrArg(norm_w), PtrArg(x), arg_val(M)});
   profile_wait(cx, Phase::kNorm);
 }
@@ -117,16 +117,18 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
           "C = " + std::to_string(C) + " is outside (0, PrefillScratch::kC]");
   require(size_t(pos) + C <= size_t(max_len), "pos + C exceeds max_len");
 
-  // The per-layer slice strides, re-derived from `model::Qwen35` here rather
-  // than shared with buffers.cc -- capture.cc:105-116's arrangement, and for
-  // its reason: a divergence is then a throw from the four `require`s below,
-  // not a wrong KV slot at position 3000. The layer COUNTS are the descriptor's.
+  // The per-layer slice strides, re-derived from the descriptor here rather
+  // than shared with buffers.cc -- capture.cc's arrangement, and for its
+  // reason: a divergence is then a throw from the four `require`s below, not a
+  // wrong KV slot at position 3000. The layer COUNTS and (spec 15b) the head
+  // counts and widths are the descriptor's.
   const model::ModelDesc& d = *m.desc;
-  const size_t kv_stride = size_t(max_len) * Qwen35::kFaKvHeads * Qwen35::kFaHeadDim * 2;
+  require(&s.desc() == &d, "the prefill scratch was sized for another model");
+  const size_t kv_stride = size_t(max_len) * d.fa_kv_heads * Qwen35::kFaHeadDim * 2;
   const size_t gdn_state_stride =
-      size_t(Qwen35::kGdnVHeads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;
-  // 10240 = the conv channels (2 x 16 k-heads + 48 v-heads) x 128.
-  const size_t conv_ring_stride = size_t(PersistentBuffers::kConvRing) * 10240 * 2;
+      size_t(d.gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;
+  // The conv channels (Qwen3.8: 10240 = (2 x 16 k-heads + 48 v-heads) x 128).
+  const size_t conv_ring_stride = size_t(PersistentBuffers::kConvRing) * d.gdn_conv_dim() * 2;
   const std::string fa_n = std::to_string(d.fa_layers), gdn_n = std::to_string(d.gdn_layers);
   require(kv_stride * d.fa_layers == kv_k_mem.size(),
           "kv_k stride x " + fa_n + " FA layers != its allocation");
@@ -137,7 +139,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   require(conv_ring_stride * d.gdn_layers == conv_ring_mem.size(),
           "conv_ring stride x " + gdn_n + " GDN layers != its allocation");
 
-  // embed: ids -> resid, bf16 [C][5120].
+  // embed: ids -> resid, bf16 [C][hidden].
   cx.launch(kc(kernels::pf_embed_gather_variant(), "pf_embed_gather"), 1, C, 1,
             {PtrArg(s.ids.ptr()), PtrArg(m.embed.ptr()), PtrArg(s.resid.ptr()), arg_val(C)});
 
@@ -146,8 +148,8 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   for (const model::LayerDesc& L : d.layer_descs()) {
     const uint32_t l = L.index;
     pf_res_norm(cx, kc, s, l == 0 ? 0u : 1u,
-                at_const(m.layer_small[l].norms, loader::kNormsOffInput), s.partials.ptr(),
-                s.resid.ptr(), s.x.ptr(), C);                     // x stride 5120
+                at_const(m.layer_small[l].norms, s.desc().small_layout().norms_off_input), s.partials.ptr(),
+                s.resid.ptr(), s.x.ptr(), C);                     // x stride hidden
 
     if (L.kind == model::LayerKind::GDN) {
       pf_linear(cx, kc, s, m.linears.at({l, LinearId::QkvZ}), s.x.as<uint16_t>(), C, backend, q);
@@ -160,7 +162,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
       gdn_chunk(cx, kc, s, pos, C, s.partials.as<float>(), s.ab_out.as<float>(),
                 reinterpret_cast<float*>(at(gdn_state_mem, size_t(gdn) * gdn_state_stride)),
                 reinterpret_cast<uint16_t*>(at(conv_ring_mem, size_t(gdn) * conv_ring_stride)),
-                m.layer_small[l].gdn.ptr(), s.mixer_out.as<uint16_t>());   // y stride 6144
+                m.layer_small[l].gdn.ptr(), s.mixer_out.as<uint16_t>());   // y stride v-heads x 128
       ++gdn;
       pf_linear(cx, kc, s, m.linears.at({l, LinearId::OutProj}), s.mixer_out.as<uint16_t>(), C,
                backend, q);
@@ -197,8 +199,8 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
     // spec 5: the int8 gate||up exists only in the fused form, whatever silu_fused() says.
     const bool fuse = l0 && (backend == PrefillBackend::L0Int8 || silu_fused());
     void* const mlp_x = fuse ? s.mixer_out.ptr() : s.x.ptr();
-    pf_res_norm(cx, kc, s, 1u, at_const(m.layer_small[l].norms, loader::kNormsOffPost),
-                s.partials.ptr(), s.resid.ptr(), mlp_x, C);   // stride 5120
+    pf_res_norm(cx, kc, s, 1u, at_const(m.layer_small[l].norms, s.desc().small_layout().norms_off_post),
+                s.partials.ptr(), s.resid.ptr(), mlp_x, C);   // stride hidden
     if (fuse) {
       // One launch pair per slab and NO `pf_silu_mul`: the epilogue writes x
       // directly, so the fp32 [C][2 x I] `partials` rectangle -- the largest on
@@ -230,9 +232,9 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMode
   // what the M = 1 pair reads. (Spec 8: skipped when step_mtp_kv already wrote it.)
   if (!normed_row)
     pf_res_norm(cx, kc, s, 1u, m.final_norm.ptr(),
-                at(s.partials, size_t(last_row) * Qwen35::kHidden * 4),
-                at(s.resid, size_t(last_row) * Qwen35::kHidden * 2),
-                at(s.x, size_t(last_row) * Qwen35::kHidden * 2), 1u);
+                at(s.partials, size_t(last_row) * s.desc().hidden * 4),
+                at(s.resid, size_t(last_row) * s.desc().hidden * 2),
+                at(s.x, size_t(last_row) * s.desc().hidden * 2), 1u);
 
   // lm_head at M = 1 through the EXISTING decode binary, chosen off the loaded
   // weight's kind exactly as capture.cc:625-631 chooses it. It writes straight
@@ -241,7 +243,7 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMode
   // the lm_head's [5120][248320] bf16 expansion is 2.54 GB, seven times the
   // dequant scratch, for one row of output.
   const DeviceWeight& lm = m.linears.at({loader::kTopLevel, LinearId::LmHead});
-  const void* xrow = normed_row ? normed_row : at(s.x, size_t(last_row) * Qwen35::kHidden * 2);
+  const void* xrow = normed_row ? normed_row : at(s.x, size_t(last_row) * s.desc().hidden * 2);
   if (lm.kind == model::WeightKind::Int4) {
     cx.launch(kc(kernels::gemv_variant(1, lm.shape.K, lm.shape.N, lm.shape.S, lm.shape.layout),
                  "gemv"),
@@ -298,7 +300,6 @@ void linear_bf16(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWe
     gemm_l0(cx, kc, b, x, slab.as<uint16_t>(), out + n0, /*transB=*/false);
   }
 }
-constexpr uint32_t kMtpKvN0 = 12288;   // q||gate is [0, 12288); k||v is [12288, 14336)
 }  // namespace
 
 void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,
@@ -307,7 +308,11 @@ void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
   require(m.mtp != nullptr, "step_mtp_kv without the MTP head");
   require(C > 0 && C <= PrefillScratch::kC, "C is outside (0, kC]");
   const loader::MtpHead& h = *m.mtp;
-  const uint32_t H = Qwen35::kHidden, G = PrefillScratch::kNormGroups;
+  const uint32_t H = m.desc->hidden, G = PrefillScratch::kNormGroups;
+  // q||gate is [0, q_proj) and k||v [q_proj, qkv) (Qwen3.8 12288 / 14336); the
+  // slab walk below starts at q_proj, a whole number of 1024-column slabs.
+  const uint32_t kv_n0 = m.desc->fa_q_proj_n();
+  require(kv_n0 % kernels::kPfSlabWidth == 0, "q_proj is not a whole number of slabs");
   // 1. The main model's final norm on every row (what decode's b.x holds after a
   //    step), into hid rows 1..C. step_head's own single-row norm is then skipped.
   pf_res_norm(cx, kc, s, 1u, m.final_norm.ptr(), s.partials.ptr(), s.resid.ptr(),
@@ -319,7 +324,7 @@ void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
   cx.launch(kc(kernels::pf_embed_gather_variant(), "pf_embed_gather"), 1, rows, 1,
             {PtrArg(s.ids.as<uint32_t>() + r0), PtrArg(m.embed.ptr()), PtrArg(s.resid.ptr()),
              arg_val(rows)});
-  // 3. The two pre-fc norms into one [rows][10240] row of x: embed first, hidden second.
+  // 3. The two pre-fc norms into one [rows][2 x hidden] row of x: embed first, hidden second.
   const std::string fold0 = kernels::pf_res_fold_variant(H, 0, G);
   const std::string cat = kernels::pf_norm_finish_strided_variant(H, G, G, 2 * H);
   auto fold_norm = [&](const std::string& fv, const std::string& nv, const void* partials,
@@ -329,18 +334,18 @@ void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
     cx.launch(kc(nv, "pf_norm_finish"), G, rows, 1,
               {PtrArg(s.norm_sumsq.ptr()), PtrArg(resid), PtrArg(w), PtrArg(out), arg_val(rows)});
   };
-  fold_norm(fold0, cat, s.partials.ptr(), s.resid.ptr(), at_const(h.norms, loader::kMtpNormPreE),
+  fold_norm(fold0, cat, s.partials.ptr(), s.resid.ptr(), at_const(h.norms, loader::mtp_norm_off(*m.desc, loader::kMtpNormPreE)),
             s.x.ptr());
   fold_norm(fold0, cat, s.partials.ptr(), hid + size_t(r0) * H,
-            at_const(h.norms, loader::kMtpNormPreH), s.x.as<uint16_t>() + H);
-  // 4. fc -> partials [rows][5120]; the head's residual starts at fc's output (ZERO_RESID),
-  //    input_layernorm -> x (pitch 5120).
+            at_const(h.norms, loader::mtp_norm_off(*m.desc, loader::kMtpNormPreH)), s.x.as<uint16_t>() + H);
+  // 4. fc -> partials [rows][hidden]; the head's residual starts at fc's output
+  //    (ZERO_RESID), input_layernorm -> x (pitch hidden).
   linear_bf16(cx, kc, s, h.fc, s.x.as<uint16_t>(), rows, 0, H, s.partials.as<float>(), H);
   fold_norm(kernels::pf_res_fold_zero_variant(H, G), kernels::pf_norm_finish_variant(H, G, G),
-            s.partials.ptr(), s.resid.ptr(), at_const(h.norms, loader::kMtpNormInput), s.x.ptr());
+            s.partials.ptr(), s.resid.ptr(), at_const(h.norms, loader::mtp_norm_off(*m.desc, loader::kMtpNormInput)), s.x.ptr());
   // 5. Only the k||v columns of q||k||v, then attn_prep writes K/V at hctl.pos + r. Its q
   //    rows read unwritten partials columns into pf_q, which nothing reads.
-  linear_bf16(cx, kc, s, h.qkv, s.x.as<uint16_t>(), rows, kMtpKvN0, h.qkv.shape.N,
+  linear_bf16(cx, kc, s, h.qkv, s.x.as<uint16_t>(), rows, kv_n0, h.qkv.shape.N,
               s.partials.as<float>(), h.qkv.shape.N);
   attn_prep_chunk(cx, kc, s, rows, hctl, s.partials.as<float>(), h.fa.as<float>(),
                   m.rope.as<float>(), kv_k, kv_v);
@@ -374,12 +379,15 @@ namespace {
 // sycl-tla, spec 2's arithmetic (unchanged): per GDN layer 20 L0 launches, 4 SYCL GEMMs,
 // 8 waits; per FA layer 15 launches, 4 + 2 x 4 GEMMs, 17 waits; 1 embed.
 constexpr size_t kGdnLayerLaunches = 2 + 1 + 1 + kGdnChunkLaunches + 1 + 2 + 1 + 1 + 1;
-constexpr size_t kFaLayerLaunches =
-    2 + 1 + kAttnPrepLaunches + kAttnChunkLaunches + kAttnGateLaunches + 1 + 2 + 1 + 1 + 1;
+// Spec 15b: the FA terms are per kv-head (4 on Qwen3.8), so per descriptor.
+size_t fa_layer_launches(const model::ModelDesc& d) {
+  return 2 + 1 + kAttnPrepLaunches + attn_chunk_launches_sycl(d) + kAttnGateLaunches + 1 + 2 +
+         1 + 1 + 1;
+}
 constexpr size_t kGdnLayerGemms = 4;
-constexpr size_t kFaLayerGemms = 4 + 2 * attn::kKvHeads;
+size_t fa_layer_gemms(const model::ModelDesc& d) { return 4 + 2 * size_t(d.fa_kv_heads); }
 constexpr size_t kGdnLayerWaits = 2 * 4;
-constexpr size_t kFaLayerWaits = 2 * 4 + 2 * attn::kKvHeads + 1;
+size_t fa_layer_waits(const model::ModelDesc& d) { return 2 * 4 + 2 * size_t(d.fa_kv_heads) + 1; }
 // L0 (spec 2.1 S2): the four dequant launches of a layer become 2 x (N / 1024) launches per
 // linear -- GDN: qkv||z 32 + out_proj 10 + gate||up 68 + down 10 = 120; FA: q||k||v 28 +
 // o_proj 10 + 68 + 10 = 116 (Qwen3.8; spec 14: gate||up is 2 x 38 = 76 on Agnes, so 128 /
@@ -413,13 +421,14 @@ size_t l0_gdn_layer_launches(const model::ModelDesc& d) {
          (silu_fused() ? 1 : 0);
 }
 size_t l0_fa_layer_launches(const model::ModelDesc& d, uint32_t C) {
-  return kFaLayerLaunches - 4 + slab_launches(d, model::LayerKind::FA) - kAttnChunkLaunches +
-         attn_chunk_launches(C, PrefillBackend::L0) - (silu_fused() ? 1 : 0);
+  return fa_layer_launches(d) - 4 + slab_launches(d, model::LayerKind::FA) -
+         attn_chunk_launches_sycl(d) + attn_chunk_launches(d, C, PrefillBackend::L0) -
+         (silu_fused() ? 1 : 0);
 }
 }  // namespace
 size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
   if (b == PrefillBackend::SyclTla)
-    return 1 + d.gdn_layers * kGdnLayerLaunches + d.fa_layers * kFaLayerLaunches;
+    return 1 + d.gdn_layers * kGdnLayerLaunches + d.fa_layers * fa_layer_launches(d);
   const size_t base =
       1 + d.gdn_layers * l0_gdn_layer_launches(d) + d.fa_layers * l0_fa_layer_launches(d, C);
   if (b != PrefillBackend::L0Int8) return base;
@@ -430,11 +439,11 @@ size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
   return base + size_t(d.layers) * 4 - (silu_fused() ? 0 : d.layers);
 }
 size_t step_chunk_gemms(const model::ModelDesc& d, PrefillBackend b) {
-  return b == PrefillBackend::SyclTla ? d.gdn_layers * kGdnLayerGemms + d.fa_layers * kFaLayerGemms
+  return b == PrefillBackend::SyclTla ? d.gdn_layers * kGdnLayerGemms + d.fa_layers * fa_layer_gemms(d)
                                       : 0;
 }
 size_t step_chunk_waits(const model::ModelDesc& d, PrefillBackend b) {
-  return b == PrefillBackend::SyclTla ? d.gdn_layers * kGdnLayerWaits + d.fa_layers * kFaLayerWaits
+  return b == PrefillBackend::SyclTla ? d.gdn_layers * kGdnLayerWaits + d.fa_layers * fa_layer_waits(d)
                                       : 0;
 }
 

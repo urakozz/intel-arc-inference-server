@@ -72,9 +72,9 @@ using golden::read_ids;
 
 constexpr uint32_t kMaxLen = 16384;
 constexpr uint32_t kGen = 32;
-constexpr uint32_t kHid = Qwen35::kHidden;
-constexpr size_t kGdnElems =
-    size_t(Qwen35::kGdnVHeads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
+const uint32_t kHid = model::qwen38().hidden;  // 5120, Agnes's too (spec 15b)
+const size_t kGdnElems =
+    size_t(model::qwen38().gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
 
 std::vector<std::string> split_commas(const std::string& s) {
   std::vector<std::string> out;
