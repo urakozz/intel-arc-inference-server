@@ -193,3 +193,78 @@ if(B70_KV8)
                    OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_attn_gate_kv8 SOURCE ${KV8_CL} DEFINES KV8_GATE=1)
 endif()
+
+# --- Spec 15d: Ornith 1.5 35B-A3B prefill (model::ornith()) -------------------------------
+# Additive only: every binary above keeps its name and its command line (tools/kernel_cmdlines
+# diff), and the .cl edits that made the prefill head counts overridable (GDN_K_HEADS /
+# GDN_V_HEADS, FA_Q_HEADS / FA_KV_HEADS - the decode kernels' pair from spec 15c) leave the
+# default token stream untouched: the defines below are the only way into the new branches.
+# What Ornith's chunk binds (runtime/prefill/step.cc, moe.cc):
+#   norms     pf_res_fold at K 2048: SP0 after layer 0's embedding and after every MoE
+#             block (pf_moe_combine folds into the residual itself), SP1 after the mixer
+#   embed     pf_embed_gather at hidden 2048; a||b pf_ab_proj at K 2048 ({16, 16})
+#   linears   the slab dequant at the descriptor's provisional layouts - qkv||z 2048 x 12288
+#             L1, out_proj = o_proj 4096 x 2048 L0, q||k||v 2048 x 9216 L0 - and the h8
+#             quantiser at K 2048 / 4096 (pf_requant_rot / pf_gemm_i8 are shape-free)
+#   GDN       the pf_gdn_* chain and pf_gated_head at 16 k / 32 v heads; negA / dt_bias at
+#             32768 / 32800 floats (loader::make_small_layout(2048, 8192, 32))
+#   FA        pf_attn_prep_q16, pf_attn (softmax + gate) and pf_flash_attn at 16 q / 2 kv
+#             heads; flash at HPW 8 = the GQA group, so its grid.z stays 1
+#   MoE       the router GEMV over the chunk (N 272, {16, 16}), decode's moe_route binary
+#             (moe_M1_E256_T8_D2048_I512, grid (1, C)), pf_moe.cl (sort, gather, dequant,
+#             combine) and the grouped GEMMs: gate||up bf16 and int8 (h8) with the SiLU
+#             epilogue, down bf16 (its K 512 is not whole 1024-k rotation blocks)
+# Not built for Ornith: the composed attention's identity prep (pf_attn_prep, fp32 q), the
+# int8 KV cache's prefill (spec 12b, Qwen3.8's shapes), the MTP head's (spec 15e).
+if(B70_ORNITH)
+  set(PF_ORNITH_GDN GDN_K_HEADS=16 GDN_V_HEADS=32)
+  set(PF_ORNITH_FA FA_Q_HEADS=16 FA_KV_HEADS=2)
+  add_pf_res_fold(2048 0 20)
+  add_pf_res_fold(2048 1 20)
+  add_ocloc_kernel(pf_norm_finish_K2048_G20_W20 SOURCE ${PF_PREP_CL}
+                   DEFINES K=2048 NORM_G=20 NORM_WGS=20)
+  add_ocloc_kernel(pf_embed_gather_D2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_embed.cl
+                   DEFINES HIDDEN=2048 VOCAB=248320)
+  add_ocloc_kernel(pf_ab_proj_D2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemv_bf16.cl
+                   DEFINES K=2048 N=128 COLS_PER_WG=16 KSPLIT=16)
+  foreach(row "2048 12288 1" "4096 2048 0" "2048 9216 0")
+    separate_arguments(f UNIX_COMMAND "${row}")
+    list(GET f 0 K)
+    list(GET f 1 N)
+    list(GET f 2 L)
+    add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L} SOURCE ${PF_SLAB_CL}
+                     DEFINES K=${K} N=${N} LAYOUT=${L})
+  endforeach()
+  foreach(K 2048 4096)
+    math(EXPR NBLK "${K} / 1024")
+    add_ocloc_kernel(pf_quant_had_K${K} SOURCE ${PF_INT8_CL} DEFINES PF_QUANT_HAD=1 NBLK=${NBLK})
+  endforeach()
+  add_ocloc_kernel(pf_gdn_conv_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_conv.cl
+                   DEFINES NEGA_OFF=32768 DTBIAS_OFF=32800 ${PF_ORNITH_GDN})
+  add_ocloc_kernel(pf_gdn_wy_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_wy.cl
+                   DEFINES ${PF_ORNITH_GDN})
+  add_ocloc_kernel(pf_gdn_scan_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_scan.cl
+                   DEFINES ${PF_ORNITH_GDN})
+  add_ocloc_kernel(pf_gated_head_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl
+                   DEFINES ${PF_ORNITH_GDN})
+  add_ocloc_kernel(pf_attn_prep_q16_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
+                   DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 ${PF_ORNITH_FA})
+  add_ocloc_kernel(pf_attn_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn.cl
+                   DEFINES ${PF_ORNITH_FA})
+  add_ocloc_kernel(pf_flash_attn_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 ${PF_ORNITH_FA}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  # The MoE block. TM (the tile rows) and KC (PrefillScratch::kC, the sort's SLM staging)
+  # are mirrored by kernels::pf_moe::kTileM and runtime::PrefillScratchDims::kC.
+  add_ocloc_kernel(pf_moe_router_K2048_N272 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemv_bf16.cl
+                   DEFINES K=2048 N=272 COLS_PER_WG=16 KSPLIT=16)
+  add_ocloc_kernel(pf_moe_E256_T8_D2048_I512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe.cl
+                   DEFINES EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 TM=32 KC=2048)
+  set(PF_MOE_GEMM_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_gemm.cl)
+  add_ocloc_kernel(pf_moe_gemm_K2048_N1024_SILU SOURCE ${PF_MOE_GEMM_CL}
+                   DEFINES K=2048 N=1024 TM=32 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_moe_gemm_i8_K2048_N1024_SILU SOURCE ${PF_MOE_GEMM_CL}
+                   DEFINES K=2048 N=1024 TM=32 I8=1 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_moe_gemm_K512_N2048 SOURCE ${PF_MOE_GEMM_CL}
+                   DEFINES K=512 N=2048 TM=32 OPTIONS -cl-intel-256-GRF-per-thread)
+endif()
