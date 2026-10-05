@@ -1297,3 +1297,38 @@ if(B70_AGNES)
       SKIP_RETURN_CODE 77 TIMEOUT 1800)
   endif()
 endif()
+
+# Spec 6 §10 (max_len auto): the memory plan against the card - every planned component
+# and every buffer equal to what the engine allocated, at max_len 16384 and at `auto`
+# (the largest the plan fits with the default 1.5 GB reserve, reached as the CLIs reach
+# it). At `auto` the engine fills the card to the reserve, so this is also where a
+# too-small reserve shows up as an allocation failure. Depends on the whole kernel set,
+# like the CLIs: the MTP variant captures the draft and verify lists.
+get_property(_b70_plan_kernels DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
+get_property(_b70_plan_pf_kernels DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
+             PROPERTY BUILDSYSTEM_TARGETS)
+add_executable(memory_plan_box_test runtime/memory_plan_box_test.cc)
+target_include_directories(memory_plan_box_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(memory_plan_box_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+if(B70_PREFILL_ENABLED)
+  b70_link_prefill(memory_plan_box_test)
+endif()
+add_dependencies(memory_plan_box_test ${_b70_plan_kernels} ${_b70_plan_pf_kernels})
+add_test(NAME memory_plan_box_test COMMAND memory_plan_box_test ${B70_TEST_SNAPSHOT})
+set(_b70_plan_box_tests memory_plan_box_test)
+if(B70_MTP)
+  add_test(NAME memory_plan_box_mtp_test COMMAND memory_plan_box_test ${B70_TEST_SNAPSHOT} mtp)
+  list(APPEND _b70_plan_box_tests memory_plan_box_mtp_test)
+endif()
+set_tests_properties(${_b70_plan_box_tests} PROPERTIES LABELS checkpoint
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)
+if(B70_AGNES)
+  add_test(NAME memory_plan_box_agnes_test COMMAND memory_plan_box_test ${B70_AGNES_SNAPSHOT})
+  set(_b70_plan_box_agnes memory_plan_box_agnes_test)
+  if(B70_MTP)
+    add_test(NAME memory_plan_box_agnes_mtp_test COMMAND memory_plan_box_test ${B70_AGNES_SNAPSHOT} mtp)
+    list(APPEND _b70_plan_box_agnes memory_plan_box_agnes_mtp_test)
+  endif()
+  set_tests_properties(${_b70_plan_box_agnes} PROPERTIES LABELS "checkpoint;agnes"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)
+endif()
