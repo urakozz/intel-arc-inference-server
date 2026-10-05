@@ -286,9 +286,10 @@ void check_mtp(l0::Context& ctx, const std::string& arg) {
   CHECK_EQ(m.report.mtp_bytes, size_t(424673280) * 2 + 5 * 5120 * 4 + loader::kFaBlockBytes);
   CHECK_EQ(m.report.unconsumed, size_t(0));
   const loader::MtpHead& h = *m.mtp;
+  CHECK(h.gate_up && h.down && !h.moe);   // spec 15e: a dense head's FFN
   struct Row { const loader::DeviceWeight* w; uint32_t K, N; };
   for (const Row& r : {Row{&h.fc, 10240, 5120}, Row{&h.qkv, 5120, 14336}, Row{&h.o, 6144, 5120},
-                       Row{&h.gate_up, 5120, 34816}, Row{&h.down, 17408, 5120}}) {
+                       Row{h.gate_up.get(), 5120, 34816}, Row{h.down.get(), 17408, 5120}}) {
     CHECK(r.w->kind == model::WeightKind::Bf16);
     CHECK_EQ(r.w->shape.K, r.K);
     CHECK_EQ(r.w->shape.N, r.N);
@@ -330,10 +331,10 @@ void check_mtp(l0::Context& ctx, const std::string& arg) {
   for (uint32_t c : {0u, 15u, 16u, 31u, 32u, 34815u})
     for (uint32_t k : {0u, 5119u}) {
       const uint32_t row = (c / 32) * 16 + c % 16;
-      CHECK_EQ(at(h.gate_up, c, k), (c % 32 < 16 ? g : u)[size_t(row) * 5120 + k]);
+      CHECK_EQ(at(*h.gate_up, c, k), (c % 32 < 16 ? g : u)[size_t(row) * 5120 + k]);
     }
   CHECK_EQ(at(h.o, 5119, 6143), src(L + "self_attn.o_proj.weight")[size_t(5119) * 6144 + 6143]);
-  CHECK_EQ(at(h.down, 1, 17407), src(L + "mlp.down_proj.weight")[size_t(1) * 17408 + 17407]);
+  CHECK_EQ(at(*h.down, 1, 17407), src(L + "mlp.down_proj.weight")[size_t(1) * 17408 + 17407]);
   // The norms: fp32 (1 + w), the main model's bake.
   std::vector<uint8_t> norms(loader::mtp_norms_bytes(*m.desc)), fa(loader::kFaBlockBytes);
   imm.copy(norms.data(), h.norms.ptr(), norms.size());

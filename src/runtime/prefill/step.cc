@@ -336,7 +336,9 @@ void linear_bf16(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWe
 void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,
                  void* hctl, uint32_t pos, uint32_t C, uint16_t* hid, const KvLayer& kv) {
   require(m.mtp != nullptr, "step_mtp_kv without the MTP head");
-  require(!m.desc->is_moe(), "the MoE model's MTP head is spec 15e");
+  // Spec 15e: a MoE head (Ornith's) fills its KV through this same front - fc, the input
+  // norm, q||k||v, attn_prep; its MoE FFN never runs in prefill. The only MoE term is the
+  // final norm's fold below (nothing to fold after a MoE block, as step_head's).
   require(C > 0 && C <= PrefillScratch::kC, "C is outside (0, kC]");
   const loader::MtpHead& h = *m.mtp;
   const uint32_t H = m.desc->hidden, G = PrefillScratch::kNormGroups;
@@ -346,8 +348,8 @@ void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
   require(kv_n0 % kernels::kPfSlabWidth == 0, "q_proj is not a whole number of slabs");
   // 1. The main model's final norm on every row (what decode's b.x holds after a
   //    step), into hid rows 1..C. step_head's own single-row norm is then skipped.
-  pf_res_norm(cx, kc, s, 1u, m.final_norm.ptr(), s.partials.ptr(), s.resid.ptr(),
-              hid + H, C);
+  pf_res_norm(cx, kc, s, m.desc->ffn_fold_s() == 0 ? 0u : 1u, m.final_norm.ptr(),
+              s.partials.ptr(), s.resid.ptr(), hid + H, C);
   const uint32_t rows = mtp_kv_rows(pos, C);
   if (rows == 0) return;
   const uint32_t r0 = C - rows;   // 1 at pos 0 (no h_{-1}), else 0

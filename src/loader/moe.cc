@@ -2,8 +2,11 @@
 
 #include <cstring>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 #include "common/repack.h"
+#include "loader/rtn.h"
 
 namespace loader {
 namespace {
@@ -11,9 +14,8 @@ namespace {
 std::string kind_name(WKind k) { return k == WKind::Int4 ? "int4" : "bf16"; }
 
 // One int4 linear of the expected shape, or a throw naming it.
-LinearSrc int4_linear(const MoeSource& src, const std::string& part, uint32_t K, uint32_t N,
-                      const std::string& what) {
-  LinearSrc s = src.linear(part);
+LinearSrc check_int4(LinearSrc s, const std::string& part, uint32_t K, uint32_t N,
+                     const std::string& what) {
   if (s.kind != WKind::Int4)
     throw std::runtime_error(what + ": '" + part + "' is " + kind_name(s.kind) +
                              "; the MoE decode kernels read int4 g64 experts (spec 15 decision 1)");
@@ -22,6 +24,10 @@ LinearSrc int4_linear(const MoeSource& src, const std::string& part, uint32_t K,
                              std::to_string(s.N) + ", the descriptor says K=" + std::to_string(K) +
                              " N=" + std::to_string(N));
   return s;
+}
+LinearSrc int4_linear(const MoeSource& src, const std::string& part, uint32_t K, uint32_t N,
+                      const std::string& what) {
+  return check_int4(src.linear(part), part, K, N, what);
 }
 
 // One bf16 [rows][K] linear, or a throw naming it.
@@ -39,8 +45,46 @@ LinearSrc bf16_linear(const MoeSource& src, const std::string& part, uint32_t ro
   return s;
 }
 
+// Spec 15e: an expert linear quantised at load lives here while its block is repacked.
+struct RtnLinear {
+  std::vector<uint32_t> qweight;
+  std::vector<uint16_t> scales;
+};
+
+// An expert linear of the expected shape as int4: as shipped, or - when `rtn` is given
+// and the checkpoint ships it bf16 - quantised into `rtn` (loader/rtn.h).
+LinearSrc expert_linear(const MoeSource& src, const std::string& part, uint32_t K, uint32_t N,
+                        const std::string& what, RtnLinear* rtn, MoeHost& out) {
+  if (rtn == nullptr) return int4_linear(src, part, K, N, what);
+  LinearSrc s = src.linear(part);   // once: the loader's binding counts what it hands out
+  if (s.kind != WKind::Bf16) return check_int4(std::move(s), part, K, N, what);
+  if (s.K != K || s.N != N)
+    throw std::runtime_error(what + ": '" + part + "' is K=" + std::to_string(s.K) + " N=" +
+                             std::to_string(s.N) + ", the descriptor says K=" + std::to_string(K) +
+                             " N=" + std::to_string(N));
+  rtn->qweight.resize(size_t(K / 8) * N);
+  rtn->scales.resize(size_t(K / 64) * N);
+  rtn_int4_g64(s.weight, K, N, rtn->qweight.data(), rtn->scales.data());
+  out.bf16_src_bytes += size_t(K) * N * 2;
+  ++out.rtn_linears;
+  LinearSrc q;
+  q.kind = WKind::Int4;
+  q.K = K;
+  q.N = N;
+  q.qweight = rtn->qweight.data();
+  q.scales = rtn->scales.data();
+  q.group = 64;
+  q.name = s.name;
+  return q;
+}
+
 size_t int4_src_bytes(const LinearSrc& s) {
   return size_t(s.K / 8) * s.N * 4 + size_t(s.K / s.group) * s.N * 2;
+}
+// The int4 checkpoint bytes of an expert linear: 0 when it was quantised here from bf16
+// (expert_linear counted its bf16 bytes).
+size_t int4_src_bytes(const LinearSrc& s, const RtnLinear* rtn) {
+  return rtn != nullptr && s.qweight == rtn->qweight.data() ? 0 : int4_src_bytes(s);
 }
 
 // gate||up's column map, interleaved in 16-column blocks exactly as
@@ -62,7 +106,7 @@ std::vector<common::ColSource> gate_up_cols(const LinearSrc& g, uint32_t g_off, 
 }  // namespace
 
 void repack_moe_layer(const model::ModelDesc& d, const MoeSource& src, MoeHost& out,
-                      const std::string& what) {
+                      const std::string& what, bool rtn_bf16_experts) {
   if (!d.is_moe()) throw std::logic_error("loader::repack_moe_layer: " + d.name + " is not MoE");
   const model::MoeDesc& m = d.moe;
   const uint32_t H = d.hidden, I = m.expert_intermediate, E = m.experts;
@@ -75,6 +119,12 @@ void repack_moe_layer(const model::ModelDesc& d, const MoeSource& src, MoeHost& 
   out.gate_up.resize(b.gate_up() / 4);
   out.down.resize(b.down() / 4);
   out.int4_src_bytes = out.bf16_src_bytes = 0;
+  out.rtn_linears = 0;
+  // Spec 15e: one buffer per linear of a block (gate, up or fused gate_up, down), reused.
+  RtnLinear rg, ru, rd;
+  RtnLinear* const pg = rtn_bf16_experts ? &rg : nullptr;
+  RtnLinear* const pu = rtn_bf16_experts ? &ru : nullptr;
+  RtnLinear* const pd = rtn_bf16_experts ? &rd : nullptr;
 
   // --- the router || shared gate rows, zero-padded to router_n, then tiled --------
   {
@@ -102,27 +152,28 @@ void repack_moe_layer(const model::ModelDesc& d, const MoeSource& src, MoeHost& 
                                  "up_proj - one per-expert form per checkpoint");
       const std::string gp = shared ? sgu.parts.at(0) : moe_expert_part(blk, "gate_proj");
       const std::string up = shared ? sgu.parts.at(1) : moe_expert_part(blk, "up_proj");
-      const LinearSrc g = int4_linear(src, gp, H, I, what);
-      const LinearSrc u = int4_linear(src, up, H, I, what);
+      const LinearSrc g = expert_linear(src, gp, H, I, what, pg, out);
+      const LinearSrc u = expert_linear(src, up, H, I, what, pu, out);
       common::repack_int4_layout1_cols(H, 2 * I, gate_up_cols(g, 0, u, 0, I),
                                        out.gate_up.data() + blk * gu_words);
-      out.int4_src_bytes += int4_src_bytes(g) + int4_src_bytes(u);
+      out.int4_src_bytes += int4_src_bytes(g, pg) + int4_src_bytes(u, pu);
     } else {
       if (src.has(moe_expert_part(blk, "gate_proj")))
         throw std::runtime_error(what + ": expert " + std::to_string(blk) +
                                  " ships gate_proj while expert 0 ships a fused gate_up_proj - "
                                  "one per-expert form per checkpoint");
-      const LinearSrc gu = int4_linear(src, moe_expert_part(blk, "gate_up_proj"), H, 2 * I, what);
+      const LinearSrc gu =
+          expert_linear(src, moe_expert_part(blk, "gate_up_proj"), H, 2 * I, what, pg, out);
       common::repack_int4_layout1_cols(H, 2 * I, gate_up_cols(gu, 0, gu, I, I),
                                        out.gate_up.data() + blk * gu_words);
-      out.int4_src_bytes += int4_src_bytes(gu);
+      out.int4_src_bytes += int4_src_bytes(gu, pg);
     }
     // down
     const std::string dp = shared ? sdn.parts.at(0) : moe_expert_part(blk, "down_proj");
-    const LinearSrc dn = int4_linear(src, dp, I, H, what);
+    const LinearSrc dn = expert_linear(src, dp, I, H, what, pd, out);
     common::repack_int4_layout1_cols(I, H, common::cols_concat({{dn.qweight, dn.scales, dn.N}}),
                                      out.down.data() + blk * dn_words);
-    out.int4_src_bytes += int4_src_bytes(dn);
+    out.int4_src_bytes += int4_src_bytes(dn, pd);
   }
 }
 
