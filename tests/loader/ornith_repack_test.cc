@@ -17,7 +17,11 @@
 //   4. g128 scales on one expert are expanded onto g64 (LinearSrc::classify's rule);
 //   5. the refusals: a missing expert, an int4 router, mixed per-expert forms, a
 //      shape that is not the descriptor's;
-//   6. moe_layer_bytes at Ornith's real shape (the planner's and the loader's figure).
+//   6. moe_layer_bytes at Ornith's real shape (the planner's and the loader's figure);
+//   7. spec 20 §9: the same weights written as compressed-tensors pack-quantized
+//      (weight_packed [N][K/8] + weight_scale [N][K/g] + weight_shape, g128 on one
+//      expert) repack to the same bytes - the MoE experts go through LinearSrc::classify's
+//      one conversion point.
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -119,7 +123,23 @@ Packed random_packed(uint32_t K, uint32_t N, std::mt19937& rng, uint32_t group =
   for (uint16_t& s : p.scales) s = common::f32_to_f16(sd(rng));
   return p;
 }
+// Spec 20 §9: write int4 linears as compressed-tensors pack-quantized instead of GPTQ.
+bool g_ct = false;
+
 void add_packed(std::map<std::string, Tensor>& ts, const std::string& prefix, const Packed& p) {
+  if (g_ct) {   // the same words and scales, transposed: [N][K/8] and [N][K/group]
+    std::vector<uint32_t> wp(size_t(p.N) * (p.K / 8));
+    for (uint32_t r = 0; r < p.K / 8; ++r)
+      for (uint32_t n = 0; n < p.N; ++n) wp[size_t(n) * (p.K / 8) + r] = p.qweight[size_t(r) * p.N + n];
+    std::vector<uint16_t> ws(size_t(p.N) * (p.K / p.group));
+    for (uint32_t g = 0; g < p.K / p.group; ++g)
+      for (uint32_t n = 0; n < p.N; ++n)
+        ws[size_t(n) * (p.K / p.group) + g] = p.scales[size_t(g) * p.N + n];
+    ts[prefix + ".weight_packed"] = {"I32", {p.N, p.K / 8}, as_bytes(wp)};
+    ts[prefix + ".weight_scale"] = {"F16", {p.N, p.K / p.group}, as_bytes(ws)};
+    ts[prefix + ".weight_shape"] = {"I64", {2}, as_bytes(std::vector<int64_t>{p.N, p.K})};
+    return;
+  }
   ts[prefix + ".qweight"] = {"I32", {p.K / 8, p.N}, as_bytes(p.qweight)};
   ts[prefix + ".scales"] = {"F16", {p.K / p.group, p.N}, as_bytes(p.scales)};
   std::vector<uint32_t> qz(size_t(p.K / p.group) * (p.N / 8), 0x77777777u);
@@ -195,8 +215,9 @@ Layer make_fixture(const model::ModelDesc& d, const fs::path& dir, bool fused, u
 loader::MoeSource source_for(const loader::SafetensorsSet& set, std::vector<std::string>* asked) {
   loader::MoeSource src;
   src.has = [&set](const std::string& part) {
-    return set.tensors().count(kLp + part + ".qweight") != 0 ||
-           set.tensors().count(kLp + part + ".weight") != 0;
+    for (const std::string& m : loader::LinearSrc::marker_suffixes())
+      if (set.tensors().count(kLp + part + m) != 0) return true;
+    return false;
   };
   src.linear = [&set, asked](const std::string& part) {
     if (asked) asked->push_back(part);
@@ -323,6 +344,26 @@ int main() {
     loader::MoeHost hg;
     loader::repack_moe_layer(d, source_for(set, nullptr), hg, "layer 0");
     check_layer(d, hg, L);   // Packed::scale_g64 reads the g128 row of each g64 group
+  }
+  // 7: compressed-tensors, separate and fused forms, g128 on expert 5: the same bytes.
+  {
+    g_ct = true;
+    const fs::path ct = root / "ct";
+    for (bool fused : {false, true}) {
+      const Layer L = make_fixture(d, ct, fused, /*g128_expert=*/5);
+      {
+        loader::SafetensorsSet set(ct.string() + "/");
+        CHECK(set.tensors().count(kLp + "mlp.experts.0.down_proj.weight_packed") == 1);
+        CHECK(set.tensors().count(kLp + "mlp.experts.0.down_proj.qweight") == 0);
+        loader::MoeHost hc;
+        loader::repack_moe_layer(d, source_for(set, nullptr), hc, "layer 0");
+        CHECK_EQ(hc.fused_gate_up, fused);
+        check_layer(d, hc, L);
+      }
+      remove_fixture(ct);
+    }
+    g_ct = false;
+    std::puts("  compressed-tensors experts (separate and fused, g128 on one): same device bytes");
   }
   remove_fixture(sep);
   remove_fixture(fus);

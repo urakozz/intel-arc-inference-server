@@ -23,7 +23,11 @@
 //   7. refusals BY NAME: an unexpected tensor (a q_norm, an mtp.* tensor, an extra
 //      expert), a missing one, a wrong expert shape, an int4 lm_head;
 //   8. the checkpoint's real quantization_config (argv[1], tests/model/k2/config.json)
-//      parses as int4 g64 sym desc_act false with its dynamic exclusions.
+//      parses as int4 g64 sym desc_act false with its dynamic exclusions;
+//   9. spec 20 §9: the same checkpoint with every int4 linear written as compressed-
+//      tensors pack-quantized (weight_packed / weight_scale / weight_shape / identity
+//      weight_g_idx) passes check_names and repacks to the GPTQ fixture's bytes, layer by
+//      layer, with nothing unconsumed.
 #include <unistd.h>
 
 #include <cstdint>
@@ -145,6 +149,38 @@ void add_f16(Tensors& ts, const std::string& name, uint64_t n) {
   std::uniform_real_distribution<float> d(-0.5f, 0.5f);
   for (uint16_t& x : v) x = common::f32_to_f16(d(rng));
   ts[name] = {"F16", {n}, as_bytes(v)};
+}
+
+// Spec 20 §9: every GPTQ linear of `ts` rewritten as compressed-tensors pack-quantized -
+// the same words and scales transposed ([N][K/8], [N][K/64]), weight_shape [N, K], and
+// the g_idx kept as weight_g_idx; qzeros dropped (symmetric).
+Tensors to_compressed_tensors(const Tensors& ts) {
+  Tensors out;
+  for (const auto& [name, t] : ts) {
+    const size_t n = name.size();
+    if (n > 8 && name.compare(n - 8, 8, ".qweight") == 0) {
+      const std::string p = name.substr(0, n - 8);
+      const uint32_t R = uint32_t(t.shape[0]), N = uint32_t(t.shape[1]);
+      const uint32_t* qw = view<uint32_t>(ts, name);
+      const uint16_t* sc = view<uint16_t>(ts, p + ".scales");
+      const uint32_t G = R / 8;   // g64: K / 64 = R / 8
+      std::vector<uint32_t> wp(size_t(N) * R);
+      for (uint32_t r = 0; r < R; ++r)
+        for (uint32_t c = 0; c < N; ++c) wp[size_t(c) * R + r] = qw[size_t(r) * N + c];
+      std::vector<uint16_t> ws(size_t(N) * G);
+      for (uint32_t g = 0; g < G; ++g)
+        for (uint32_t c = 0; c < N; ++c) ws[size_t(c) * G + g] = sc[size_t(g) * N + c];
+      out[p + ".weight_packed"] = {"I32", {N, R}, as_bytes(wp)};
+      out[p + ".weight_scale"] = {"F16", {N, G}, as_bytes(ws)};
+      out[p + ".weight_shape"] = {"I64", {2}, as_bytes(std::vector<int64_t>{N, int64_t(R) * 8})};
+      out[p + ".weight_g_idx"] = ts.at(p + ".g_idx");
+    } else if (!(n > 7 && name.compare(n - 7, 7, ".scales") == 0) &&
+               !(n > 7 && name.compare(n - 7, 7, ".qzeros") == 0) &&
+               !(n > 6 && name.compare(n - 6, 6, ".g_idx") == 0)) {
+      out[name] = t;
+    }
+  }
+  return out;
 }
 
 // The small K2 the fixture is written at.
@@ -393,6 +429,48 @@ int main(int argc, char** argv) {
             add_int4(t, "lm_head", 128, 64);
           },
           "lm_head", "an int4 lm_head");
+
+  // 9. the compressed-tensors form of the same checkpoint: the same host bytes.
+  {
+    const Tensors ct = to_compressed_tensors(ts);
+    const fs::path dg = tmpdir("gptq"), dc = tmpdir("ct");
+    write_checkpoint(dg, ts);
+    write_checkpoint(dc, ct);
+    {
+      loader::SafetensorsSet sg(dg.string() + "/"), sc(dc.string() + "/");
+      const loader::QuantScan cs = loader::assert_quant_invariants(sc);
+      CHECK(cs.ct_linears > 0 && cs.gptq_linears == 0 && cs.ct_g_idx_tensors == cs.ct_linears);
+      CHECK(!loader::ct_conversion_note(cs).empty());
+      loader::K2Checkpoint cg(d, sg), cc(d, sc);
+      CHECK(cc.compressed_tensors() && !cg.compressed_tensors());
+      cc.check_names();
+      CHECK_EQ(cc.expected_names(false).size(), ct.size());
+      loader::K2HostLayer hg, hc;
+      for (uint32_t l = 0; l < d.layers; ++l) {
+        cg.repack_layer(l, hg);
+        cc.repack_layer(l, hc);
+        CHECK_EQ(hc.linears.size(), hg.linears.size());
+        for (size_t i = 0; i < hg.linears.size(); ++i)
+          CHECK(hc.linears[i].words == hg.linears[i].words &&
+                hc.linears[i].scales == hg.linears[i].scales);
+        CHECK(hc.value == hg.value && hc.gate_up == hg.gate_up && hc.down == hg.down);
+        CHECK(hc.router == hg.router && hc.norms == hg.norms && hc.route == hg.route);
+        CHECK_EQ(hc.src_int4_bytes, hg.src_int4_bytes);
+      }
+      (void)cc.embed();
+      (void)cc.final_norm();
+      (void)cc.lm_head();
+      std::string left;
+      CHECK_EQ(cc.unconsumed(&left), size_t(0));
+    }
+    for (const fs::path& dir : {dg, dc}) {   // the two files write_checkpoint made, then the dir
+      fs::remove(dir / "model-00001-of-00001.safetensors");
+      fs::remove(dir / "model.safetensors.index.json");
+      fs::remove(dir);
+    }
+    std::puts("compressed-tensors form: check_names ok, every layer's host bytes equal the GPTQ "
+              "form's, 0 unconsumed");
+  }
 
   // 8. the checkpoint's own quantization_config.
   {
