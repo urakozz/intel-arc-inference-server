@@ -1320,6 +1320,36 @@ if(B70_MTP)
     set_tests_properties(mtp_gpu_dv128k_test mtp_gpu_dv128k_bf16_test PROPERTIES
       LABELS "checkpoint;mtp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
   endif()
+  # Spec 8 §12 (MTP at every context length; box queue row 6): mtp_verify_test (M2, RF3 at
+  # max_len - 4, RF4 deep - spec 7 C1 with MTP at ~70k on the 131072 run) and mtp_gpu_test's
+  # M3 gate at max_len 32768 and 131072. Label `longctx`. Each exits 77 (SKIP) at once unless
+  # B70_LONGCTX_TESTS=1, so a plain `ctest` costs what it did; tools/box_validate (r6.mtp_long)
+  # sets it. The variable is read here, by the wrapper, not by the tests.
+  set(_b70_longctx_gate [==[
+if [ "${B70_LONGCTX_TESTS:-0}" != 1 ]
+then
+  echo "SKIP: a long-context MTP variant (box queue row 6); B70_LONGCTX_TESTS=1 runs it"
+  exit 77
+fi
+exec "$@"
+]==])
+  foreach(_len 32768 131072)
+    if(_len EQUAL 32768)
+      set(_tag 32k)
+    else()
+      set(_tag 128k)
+    endif()
+    add_test(NAME mtp_verify_${_tag}_test COMMAND sh -c "${_b70_longctx_gate}" b70_longctx
+      $<TARGET_FILE:mtp_verify_test> ${B70_TEST_SNAPSHOT} ${_len})
+    set_tests_properties(mtp_verify_${_tag}_test PROPERTIES LABELS "checkpoint;mtp;longctx"
+      SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
+    if(TARGET mtp_gpu_test)
+      add_test(NAME mtp_gpu_${_tag}_test COMMAND sh -c "${_b70_longctx_gate}" b70_longctx
+        $<TARGET_FILE:mtp_gpu_test> ${B70_TEST_SNAPSHOT} l0-int8 --max-len ${_len})
+      set_tests_properties(mtp_gpu_${_tag}_test PROPERTIES LABELS "checkpoint;mtp;longctx"
+        SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
+    endif()
+  endforeach()
 endif()
 
 # --- Spec 14: Agnes 3.0 Flash ---------------------------------------------------------
