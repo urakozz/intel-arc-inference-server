@@ -120,6 +120,14 @@ int main() {
   CHECK_EQ(o.gemv_ab, std::string("gemv_bf16_M1_K2048_N128_C16_S16"));
   CHECK_EQ(o.argmax, std::string("argmax_stage1_M1"));
 
+  // Spec 8 §11: the draft-vocabulary binaries (src/kernels/CMakeLists.txt, B70_MTP), the
+  // names capture.cc's draft list binds at each compiled |V'|.
+  CHECK_EQ(kernels::gemv_i8w_variant(1, 5120, 32768), std::string("gemv_i8w_M1_K5120_N32768"));
+  CHECK_EQ(kernels::gemv_i8w_variant(1, 5120, 131072), std::string("gemv_i8w_M1_K5120_N131072"));
+  CHECK_EQ(kernels::dv_argmax_variant(32768), std::string("dv_argmax_N32768"));
+  CHECK_EQ(kernels::dv_argmax_variant(65536), std::string("dv_argmax_N65536"));
+  CHECK_EQ(kernels::dv_argmax_variant(131072), std::string("dv_argmax_N131072"));
+
   std::puts("variant_names_test OK");
   return 0;
 }
