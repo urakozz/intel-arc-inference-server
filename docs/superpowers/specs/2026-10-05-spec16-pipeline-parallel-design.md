@@ -5,11 +5,10 @@
 **Scope, set by the operator (2026-10-05):** multi-GPU is **pipeline parallel only** for now; tensor
 parallel is not part of this spec.
 
-**Hardware:** the box has two Arc Pro B70s (device 0 at PCI 04:00.0, device 1 at 08:00.0, both on
-the single-socket Dell T5810's CPU root complex, PCIe 3.0; a kernel patch enables peer-to-peer, per
-the operator). The second card is unplugged while the operator travels; this spec is written now
-and probed when both are back. Device 1 is measured 3.2-3.4 % slower than device 0 on prefill and
-0.2-0.4 % on decode (docs/10-the-box.md).
+**Hardware:** the box has two Arc Pro B70s, extendable to four (docs/10-the-box.md), on one CPU
+root complex over PCIe; peer-to-peer between them is enabled at the OS level. The design is
+written for two devices and keeps the device count a parameter. The second card is measured
+3.2-3.4 % slower than the first on prefill and 0.2-0.4 % on decode (docs/10-the-box.md).
 
 Every number is **measured** unless marked **derived** or **estimated**.
 
@@ -22,7 +21,7 @@ Pipeline parallel (PP) splits the model's layers between the two cards: layers `
 |---|---|
 | **single-stream decode** | **not faster**: the layers still run one after the other; the hand-off adds one ~10 KB transfer per token (5120 bf16), a few microseconds over PCIe |
 | **memory** | **per card about halved**: ~9 GB of weights each instead of 18 (derived); room for Qwen3.8 at 262144 positions with bf16 KV (17.2 GB of KV split in two), Agnes 3.0 Flash at 128k without spec 12's int8 KV, larger models later |
-| **long prefill** | **up to ~2x**: chunk `c` runs layers `[s, 64)` on device 1 while chunk `c + 1` runs `[0, s)` on device 0. The hand-off is ~20 MB per 2048-row chunk (2048 x 5120 bf16), ~1.7 ms at ~12 GB/s, against ~1 s of compute per chunk (derived). This is the agentic case that matters: a prefix-cache miss on a long history |
+| **long prefill** | **up to ~2x**: chunk `c` runs layers `[s, 64)` on device 1 while chunk `c + 1` runs `[0, s)` on device 0. The hand-off is ~20 MB per 2048-row chunk (2048 x 5120 bf16), ~1.7 ms at ~12 GB/s (a PCIe 3.0 link; P0 measures it), against ~1 s of compute per chunk (derived). This is the agentic case that matters: a prefix-cache miss on a long history |
 | **concurrent requests** | ~2x aggregate once spec 13's batching exists (two micro-batches in flight); out of scope here |
 
 ## 2. The decisions
@@ -132,6 +131,7 @@ Idle box (both cards free of other DRM holders), interleaved pairs against one c
 ## 7. Out of scope
 
 - Tensor parallel (operator, 2026-10-05).
-- More than two devices.
+- More than two devices (the layout extends to four; the placement and hand-off generalise, but
+  this spec builds and gates two).
 - PP combined with batching (two micro-batches in flight): after spec 13.
 - Splitting one layer across cards.

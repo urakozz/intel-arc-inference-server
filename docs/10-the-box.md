@@ -6,15 +6,17 @@ and `$BOX` in every command. Nothing here requires that arrangement, but
 everything here assumes it, and a few of the consequences are worth writing
 down.
 
-The one this was developed on is a Dell T5810 workstation with two cards in it.
+The box is a Linux workstation with **two cards**, and the layout extends to four
+(spec 16's pipeline parallel is written for two and keeps the device count a
+parameter).
 
 ## What the box has to be
 
 | | |
 |---|---|
 | OS | Linux. Ubuntu is what this was developed against; no Windows or macOS runtime exists |
-| CPU / RAM | 44 threads, 121 GB. The engine's own build is comfortable at full width; the reference vLLM container's torch build is not (doc 09) |
-| GPU | **2 x Intel Arc Pro B70**, 32 GB each. One is enough; the second is useful as an idle control |
+| CPU / RAM | a many-core CPU and about 128 GB of RAM: the CPU oracle wants ~70 GB free for a layer-streamed 27B forward. The engine's own build is comfortable at full width; the reference vLLM container's torch build is not (doc 09) |
+| GPU | **2 x Intel Arc Pro B70**, 32 GB each, extendable to 4. One is enough for everything except pipeline parallel (spec 16); a second is also useful as an idle control |
 | Driver | `libze_intel_gpu`, IGC and `intel-ocloc`. The B70 is `bmg-g31`, so kernels build with `ocloc -device bmg-g31` |
 | Level Zero | headers and loader from the distribution packages |
 | Host compilers | `g++` 15.2 and CMake 4.2 or later, plus `ccache` |
@@ -133,6 +135,6 @@ weights. Record the image beside each set.
 - **Model load for a 27B is 2 to 4 minutes in the reference stack**, and graph
   capture plus compile adds another 2 to 4. Budget about 8 minutes from launch
   to a servable endpoint. Our own loader takes 13.6 s on a warm page cache.
-- **A consumer NVMe can drop out under APST.** One did, and the fix was
-  `nvme_core.default_ps_max_latency_us=0` on the kernel command line. If the box
-  loses its disk after a kernel update, check that first.
+- **A consumer NVMe can drop out under APST** (autonomous power state
+  transitions). `nvme_core.default_ps_max_latency_us=0` on the kernel command line
+  prevents it. If the box loses its disk after a kernel update, check that first.
