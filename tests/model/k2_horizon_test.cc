@@ -3,7 +3,7 @@
 // Every shape literal below is a safetensors HEADER shape of
 // urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ (fetched 2026-10-05 by range
 // request; spec 18 §1), not a derivation from the table under test: qweight [K/8][N] gives
-// the K and N each row must have. argv[1] is tests/model/k2_config.json - the checkpoint's
+// the K and N each row must have. argv[1] is tests/model/k2/config.json - the checkpoint's
 // config.json with `auto_map` dropped and quantization_config's 45 dynamic rules cut to two.
 #include <cstdio>
 #include <fstream>

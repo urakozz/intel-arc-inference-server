@@ -1,7 +1,9 @@
 #pragma once
 #include <string>
+#include <vector>
 
 #include "kernels/kernels.h"
+#include "model/k2_horizon.h"
 
 // Spec 18b: K2-Horizon's device binaries by name - the host half of the K2 block in
 // src/kernels/CMakeLists.txt, kept in its own header so kernels.h (shared with every other
@@ -90,5 +92,42 @@ inline std::string argmax2_variant(unsigned vocab) {
   return "k2_argmax_stage2_N" + std::to_string(vocab);
 }
 inline constexpr unsigned argmax_groups(unsigned vocab) { return (vocab + kArgmaxChunk - 1) / kArgmaxChunk; }
+
+// Every binary K2's M = 1 decode list binds (runtime/k2/k2_capture.cc forms the same names
+// at its binding sites), for a head form: capture checks each exists before appending a
+// command, and tests/kernels/k2_variant_names_test.cc holds the list to the CMake block's.
+inline std::vector<std::string> decode_variants(const model::K2Desc& d, bool int8_head) {
+  const auto lin = [&](model::K2LinearId id) {
+    const model::GemvShape s = d.linear(id).shape;
+    return gemv_variant(1, s.K, s.N, s.S, s.layout);
+  };
+  const auto bf16 = [&](unsigned K, unsigned N) {
+    return gemv_bf16_variant(1, K, N, gemv_bf16_tiling(N));
+  };
+  return {
+      embed_variant(1, d.hidden, d.vocab),
+      prep_res_fold_variant(1, d.hidden, 0, kNormG),
+      prep_res_fold_variant(1, d.hidden, d.down_s, kNormG),
+      prep_res_fold_variant(1, d.hidden, d.oproj_s, kNormG),
+      norm_variant(1, d.hidden, kNormG, kNormW, d.norm_groups),
+      lin(model::K2LinearId::AttnDense),
+      lin(model::K2LinearId::AttnSparse),
+      lin(model::K2LinearId::OProj),
+      lin(model::K2LinearId::DenseGateUp),
+      lin(model::K2LinearId::DenseDown),
+      silu_variant(1, d.dense_inter, d.gate_up_s),
+      attn_prep_variant(1, d.attn_dense_n(), d.attn_s, d.q_heads, d.kv_heads, true),
+      attn_prep_variant(1, d.attn_sparse_n(), d.attn_s, d.q_heads, d.kv_heads, false),
+      attn_variant(1, kAttnTgt, d.q_heads, d.kv_heads),
+      route_variant(1, d.value_experts, d.value_top_k, d.attn_sparse_n(), d.v_off(), d.attn_s),
+      mova_variant(1, d.value_experts, d.value_top_k, d.hidden, d.kv_n()),
+      bf16(d.hidden, d.router_n()),
+      route_variant(1, d.experts, d.top_k, d.router_n(), 0, 1),
+      moe_variant(1, d.experts, d.top_k, d.hidden, d.moe_inter),
+      int8_head ? gemv_i8w_variant(1, d.hidden, d.vocab) : bf16(d.hidden, d.vocab),
+      argmax1_variant(1, d.vocab, d.vocab_used),
+      argmax2_variant(d.vocab),
+  };
+}
 
 }  // namespace kernels::k2

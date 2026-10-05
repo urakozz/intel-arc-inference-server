@@ -41,3 +41,7 @@ if(B70_TOKENIZER_ENABLED)
   endif()
   add_dependencies(b70-serve ${ALL_KERNELS} ${PF_KERNELS})
 endif()
+
+# Spec 18b: b70-decode dispatches on config.json's model_type; K2-Horizon runs its own engine
+# (runtime/k2, src/cli/k2_decode.h). Appended, so the lines above are unchanged.
+target_link_libraries(b70-decode PRIVATE b70_k2_runtime)
