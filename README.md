@@ -214,13 +214,16 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
 | `--queue N` | `4` | requests waiting behind the running one before new ones are refused |
 | `--prefix-cache-gb N` | `32` | pinned host prefix cache in GiB; `0` = off, every request prefills in full (spec 7) |
 | `--prefix-split-last` | off | On/off, chat requests only. A thinking model's next turn repeats this prompt but diverges at its **last** id: the template ended this prompt with `<think>\n`, and the history re-renders that turn as `<think>\n\n</think>` when the client drops the reasoning (opencode does). By default the prompt-end snapshot sits one id past that point, so the next turn falls back to the 2048-id block below and re-prefills up to 2047 ids it already had (~1 s per turn). With the flag the prompt is prefilled to len - 1, snapshotted there, and the last id runs as one decode step, so the next turn (or a retry of the same prompt) restores exactly where it diverges. The cost: that one id goes through decode's kernels, so a near-tie first token can differ from a run without the cache (same quality, not bitwise reproducible). **On for agentic sessions; off for benchmarks and the golden gates.** |
-| `--mtp K` | `0` (off) | speculative decoding with the checkpoint's MTP head, K = 1..3 drafts per step; loads the head (+0.85 GB weights, plus its own KV and the state slots: ~1.4 GB at 16k, ~2.3 GB at 128k, derived); any `--max-len` (spec 8 §12) |
-| `--mtp auto` | - | K per iteration from each request's own acceptance (spec 8 §10) |
-| `--mtp-max K` | `3` | with `--mtp auto`: the largest K |
-| `--mtp-cost SPEC` | the `--lm-head` form's table | Only with `--mtp auto`, and only for calibration: the costs the policy weighs when it picks K. Each iteration with K drafts costs one verify of K + 1 rows plus K draft steps, in units of one plain decode step, and the policy picks the K with the most expected ids per unit of cost at the request's measured acceptance. `SPEC` is `verify=v1,v2,v3,v4;draft=d1,d2,d3`: `verify` lists the cost of a verify of 1, 2, 3, 4 rows (the first is the plain step, so 1), `draft` the cost of 1, 2, 3 drafts. Either part may be left out and keeps the default; values must be positive; the lists must reach K = `--mtp-max`. Defaults: int8 head `verify=1,1.18,1.56,1.79;draft=0.13,0.26,0.38` (derived from spec 9), bf16 head `verify=1,1.17,1.52,1.74;draft=0.19,0.37,0.55` (measured, spec 8). Change it only with numbers from `probe_mtp_steps` on your card; a higher verify cost makes the policy choose fewer drafts. |
+| `--mtp off\|1\|2\|3\|auto` | `off` | Speculative decoding with the model's built-in MTP head: the head guesses the next few tokens, the main model checks all the guesses in one pass, and every correct guess is a token for free (output is unchanged either way). A number is a fixed count of guesses per step. `auto` picks 0-3 per step from how often that request's guesses were right recently: about 3 on tool calls and code, 1 on prose, 0 when guessing does not pay. Loads the head (+1.4 GB at 16k context, ~2.3 GB at 128k, derived). `0` is the same as `off`. |
+| `--mtp-max N` | `3` | With `--mtp auto`: the most guesses it may pick (1-3). |
 | `--lm-head bf16\|int8` | `int8` | the output head: int8 per row, quantised at load (spec 9), or the checkpoint's bf16 |
-| `--pp-backend B` | `l0-int8` | prefill GEMMs: `l0-int8` (rotated int8, spec 5), `l0` (bf16 on the Level Zero list), `sycl-tla` (reference, optional component) |
+| `--pp-backend B` | `l0-int8` | prefill GEMMs: `l0-int8` (Hadamard rotated int8, spec 5), `l0` (bf16 on the Level Zero list), `sycl-tla` (reference, optional component) |
 | `--log-requests DIR` | off | write `DIR/NNNNNN.json` per request: timings, body, prompt and generated ids, text |
+
+Advanced, for calibration only: `--mtp-cost "verify=1,1.18,1.56,1.79;draft=0.13,0.26,0.38"` replaces the
+cost table `--mtp auto` decides with (a check of 1-4 tokens and 1-3 guesses, in units of one normal
+step; the defaults depend on `--lm-head`). Leave it alone unless `probe_mtp_steps` measured different
+costs on your card (spec 8 §10).
 
 ### Benchmarking and checking
 
