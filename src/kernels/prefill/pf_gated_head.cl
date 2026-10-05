@@ -27,10 +27,22 @@
 #if GATED_S != 1
 #error "pf_gated_head: the prefill path folds ONE slice (plan 6b ruling R1)"
 #endif
+// Unset GDN_K_HEADS / GDN_V_HEADS: Qwen3.8's, token for token. Spec 15d: another
+// model's heads (prep.cl's prep_gated_head pair, spec 15c), named `_GK<k>V<v>`.
+#ifndef GDN_V_HEADS
 #define GATED_HEADS 48
 #define HEAD_DIM 128
 #define QKVZ_N 16384
 #define Z_OFF 10240
+#else
+#ifndef GDN_K_HEADS
+#error "pf_gated_head: GDN_V_HEADS needs GDN_K_HEADS"
+#endif
+#define GATED_HEADS GDN_V_HEADS
+#define HEAD_DIM 128
+#define Z_OFF ((2 * GDN_K_HEADS + GDN_V_HEADS) * HEAD_DIM)   /* the conv channels */
+#define QKVZ_N (Z_OFF + GDN_V_HEADS * HEAD_DIM)
+#endif
 #define GATED_OUT_N (GATED_HEADS * HEAD_DIM)
 #define WG_GATED 128
 

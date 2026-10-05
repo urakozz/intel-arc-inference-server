@@ -42,6 +42,24 @@
 #if RPW % 8
 #error "RPW must be a multiple of 8"
 #endif
+// Unset FA_Q_HEADS / FA_KV_HEADS (every Qwen3.8 and Agnes command line): Qwen3.8's 24 q /
+// 4 kv heads, GQA 6, token for token. Spec 15d: another model's heads, named
+// `_Q<q>KV<kv>` (Ornith 16 / 2: GQA 8, built at HPW 8 so grid.z stays 1).
+#ifndef FA_Q_HEADS
+#define FA_QH 24
+#define FA_KVH 4
+#define FA_GQA 6u
+#else
+#ifndef FA_KV_HEADS
+#error "pf_flash_attn: FA_Q_HEADS needs FA_KV_HEADS"
+#endif
+#define FA_QH FA_Q_HEADS
+#define FA_KVH FA_KV_HEADS
+#define FA_GQA ((uint)(FA_Q_HEADS / FA_KV_HEADS))
+#if FA_Q_HEADS % FA_KV_HEADS != 0 || (FA_Q_HEADS / FA_KV_HEADS) % HPW != 0
+#error "pf_flash_attn: q-heads must be a multiple of kv-heads, and the GQA group of HPW"
+#endif
+#endif
 #define SG 16
 #define HD 256
 #define NDA (HD / 16)                 /* 16 dim-atoms of O */
@@ -71,13 +89,13 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
                   uint pos, uint C, uint rows) {
   const uint s = get_sub_group_id(), l = get_sub_group_local_id();
   const uint j = get_group_id(1);                                  // kv head
-  const uint h = j * 6u + get_group_id(2) * HPW + s / (RPW / 8u);  // q head
+  const uint h = j * FA_GQA + get_group_id(2) * HPW + s / (RPW / 8u);  // q head
   const uint r0 = get_group_id(0) * RPW + 8u * (s % (RPW / 8u));   // first of 8 rows
   if (r0 >= C) return;                                             // no barriers below
   const uint depth = pos + C;
-  const int q_w = 24 * HD * 2, q_h = (int)C, q_p = 24 * HD * 2;
-  const int kt_w = 4 * HD * 2, kt_h = (int)depth, kt_p = 4 * HD * 2;   // K as dwords: 512 wide
-  const int v_w = 4 * HD * 2, v_h = (int)depth, v_p = 4 * HD * 2;
+  const int q_w = FA_QH * HD * 2, q_h = (int)C, q_p = FA_QH * HD * 2;
+  const int kt_w = FA_KVH * HD * 2, kt_h = (int)depth, kt_p = FA_KVH * HD * 2;   // K as dwords: 512 wide
+  const int v_w = FA_KVH * HD * 2, v_h = (int)depth, v_p = FA_KVH * HD * 2;
 
   short8 qa[NDA];                      // Q, 8 rows x 256 dims, as 16 A operands
   // t[c*8 + r] = Q[r0 + r][h*256 + 16 (kk + c) + lane], the 8-row form of pf_gemm's A read.
