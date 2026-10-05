@@ -239,6 +239,61 @@ void check_max_len_that_fits() {
   // A trained context under 4096 still gets planned (the floor is min(4096, cap)).
   CHECK_EQ(runtime::max_len_that_fits(q, false, kQwenInt8Weights, kDevice, kReserve, 2048), 2048u);
 }
+
+// Spec 8 §11 (`--draft-vocab`): the compact draft head and its id table are the loader's,
+// outside LoadReport::total() (so outside the weights the CLI passes), and MtpBuffers
+// gains the compact logits. The plan's `draft_vocab` term is |V'| x 5120 x {1 B + a 4 B
+// row scale (int8), 2 B (bf16)} + 4 B ids per row; decode state grows by 4 B per row;
+// auto gives the context what is left.
+void check_draft_vocab() {
+  const model::ModelDesc& q = model::qwen38();
+  const size_t weights = kQwenInt8Weights + kMtpWeights;
+  const runtime::MemoryPlan off = runtime::plan(q, 65536, true, weights);
+  CHECK_EQ(off.draft_vocab, size_t{0});
+  for (uint32_t rows : {32768u, 65536u, 131072u}) {
+    for (bool int8 : {true, false}) {
+      const runtime::MemoryPlan p = runtime::plan(q, 65536, true, weights, {}, {rows, int8});
+      const size_t want = size_t(rows) * 5120 * (int8 ? 1 : 2) + (int8 ? size_t(rows) * 4 : 0) +
+                          size_t(rows) * 4;
+      CHECK_EQ(p.draft_vocab, want);
+      CHECK_EQ(p.mtp_buffers, off.mtp_buffers + size_t(rows) * 4);   // dv_logits fp32 [|V'|]
+      CHECK_EQ(runtime::MtpDims::sizes(65536, q, rows).dv_logits, size_t(rows) * 4);
+      CHECK_EQ(p.total(), off.total() + want + size_t(rows) * 4);
+      CHECK_EQ(p.model, off.model);   // not in the weights
+    }
+  }
+  // 128k int8: 671,088,640 + 524,288 + 524,288; bf16: 1,342,177,280 + 524,288.
+  CHECK_EQ(runtime::plan(q, 4096, true, weights, {}, {131072, true}).draft_vocab, size_t{672137216});
+  CHECK_EQ(runtime::plan(q, 4096, true, weights, {}, {131072, false}).draft_vocab, size_t{1342701568});
+  // The memory line names the term only when it is there.
+  const std::string line = runtime::format_memory(
+      "memory", runtime::plan(q, 65536, true, weights, {}, {131072, true}), kDevice);
+  CHECK(line.find(" draft vocab 0.672 GB, total ") != std::string::npos);
+  CHECK(runtime::format_memory("memory", off, kDevice).find("draft vocab") == std::string::npos);
+  // Auto under a draft vocabulary: shorter than without, and the plan at the chosen
+  // length (the draft-vocab term included) fits with the reserve.
+  const uint32_t base = runtime::max_len_that_fits(q, true, weights, kDevice, kReserve, kTrained);
+  const uint32_t qb = runtime::max_len_that_fits(q, true, kQwenBf16Weights + kMtpWeights, kDevice,
+                                                 kReserve, kTrained);
+  for (bool int8 : {true, false}) {
+    const size_t w = int8 ? weights : kQwenBf16Weights + kMtpWeights;
+    const runtime::DraftVocabPlan dv{131072, int8};
+    const uint32_t L = runtime::max_len_that_fits(q, true, w, kDevice, kReserve, kTrained, {}, dv);
+    CHECK(L != 0 && L < (int8 ? base : qb));
+    CHECK(runtime::plan(q, L, true, w, {}, dv).total() + kReserve <= kDevice);
+    CHECK(runtime::plan(q, L + runtime::kMaxLenQuantum, true, w, {}, dv).total() + kReserve > kDevice);
+    std::printf("auto qwen3.8 %s head + MTP + --draft-vocab 128k -> max_len %6u (without: %u)\n",
+                int8 ? "int8" : "bf16", L, int8 ? base : qb);
+  }
+  // A draft vocabulary without the MTP head is a caller error.
+  bool threw = false;
+  try {
+    runtime::plan(q, 4096, false, weights, {}, {32768, true});
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  CHECK(threw);
+}
 }  // namespace
 
 int main() {
@@ -247,6 +302,7 @@ int main() {
   check_spec6_line();
   check_paths();
   check_max_len_that_fits();
+  check_draft_vocab();
   std::puts("memory_plan_test OK");
   return 0;
 }
