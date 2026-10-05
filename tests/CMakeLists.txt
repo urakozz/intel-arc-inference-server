@@ -569,6 +569,14 @@ target_include_directories(ornith_repack_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${
 target_link_libraries(ornith_repack_test PRIVATE b70_loader)
 add_test(NAME ornith_repack_test COMMAND ornith_repack_test)
 
+# Spec 15 §13: the GDN a||b in the checkpoint's form (loader/ab.h) - the int4 checkpoint's
+# a||b repacked exactly with its zero padding, its bf16 prefill copy, the bf16 row
+# untouched - on a fixture the test writes at Ornith's real a/b shape. Host only.
+add_executable(ab_int4_test loader/ab_int4_test.cc)
+target_include_directories(ab_int4_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(ab_int4_test PRIVATE b70_loader)
+add_test(NAME ab_int4_test COMMAND ab_int4_test)
+
 # Spec 6 §10: config.json's max_position_embeddings (text_config or top level), the
 # bound of --max-len. Host only; inline JSON.
 # b70-serve --prefix-cache-gb auto: host-only, the size rule over /proc/meminfo text.
@@ -1475,29 +1483,34 @@ if(B70_AGNES)
 endif()
 
 # --- Spec 15c: Ornith 1.5 35B-A3B decode on the card (label `ornith`) ----------------
-# No int4 Ornith checkpoint exists yet (spec 15 decision 1; 15a decides the source -
-# AutoRound g64 proposed). B70_ORNITH_SNAPSHOT names where it will be; until it is on the
-# machine ornith_decode_test SKIPs (77), and the golden registrations SKIP on the absent
-# `oracle-out-ornith` (15a's golden set) before they load anything. If 15a writes Ornith
-# prompt ids beside the committed ones (its tokenizer differs), point
-# B70_ORNITH_PROMPTS_DIR at them.
+# The int4 checkpoint is the operator's AutoRound W4A16 g64 export,
+# urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ (spec 15 decision 1, settled in §13);
+# B70_ORNITH_SNAPSHOT names it (resolved in the HF cache). Until it is on the machine
+# ornith_decode_test SKIPs (77), and the golden registrations SKIP on the absent
+# `oracle-out-ornith` (15a's golden set, plan 15a) before they load anything. Its
+# tokenizer.json gives the committed tests/golden/prompts ids (checked, spec 15 §13), so
+# B70_ORNITH_PROMPTS_DIR stays the committed directory.
 #   R3 (decode): golden_gate_test, descriptor-driven since 15c (the tap is the layer
 #       output when the FFN folds inside the layer), bf16 and int8 heads;
 #   R2 + the list + replay bitwise + the plan: ornith_decode_test.
 if(B70_ORNITH)
-  set(B70_ORNITH_SNAPSHOT "urakozz/Ornith-1.5-35B-A3B-W4A16-g64-AutoRound-GPTQ"
+  set(B70_ORNITH_SNAPSHOT "urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ"
     CACHE STRING "Ornith int4 checkpoint (repo id resolved in the HF cache, or a snapshot directory)")
   set(B70_ORNITH_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith"
     CACHE PATH "The CPU-oracle golden set of Ornith (spec 15a), with router_logits.L* for R2")
   set(B70_ORNITH_PROMPTS_DIR "${CMAKE_SOURCE_DIR}/tests/golden/prompts"
-    CACHE PATH "Ornith's prompt ids (the committed ones unless 15a writes Ornith's beside them)")
+    CACHE PATH "Ornith's prompt ids (the committed ones: the int4 checkpoint's tokenizer gives them)")
+  # The greedy argmax is Qwen3.8's argmax_stage1_M1 (vocab_used 248077, spec 15 §13); a||b is
+  # the int4 checkpoint's gemv_M1_K2048_N128_S1_L1, its bf16 form kept for a checkpoint that
+  # ships a||b bf16.
   set(B70_ORNITH_DECODE_KERNELS
-    kernel_embed_gather_M1_D2048 kernel_argmax_stage1_M1_V248070 kernel_argmax_stage2
+    kernel_embed_gather_M1_D2048 kernel_argmax_stage1_M1 kernel_argmax_stage2
     kernel_prep_res_fold_M1_K2048_SP0_G20 kernel_prep_res_fold_M1_K2048_SP4_G20
     kernel_prep_norm_finish_M1_K2048_G20_W20 kernel_prep_gated_head_M1_GK16V32
     kernel_gdn_step_M1_GK16V32 kernel_attn_prep_M1_Q16KV2 kernel_attn_v2_M1_T${ATTN_V2_TGT}_Q16KV2
     kernel_gemv_M1_K2048_N12288_S1_L1 kernel_gemv_M1_K4096_N2048_S4_L0
     kernel_gemv_M1_K2048_N9216_S2_L0 kernel_gemv_M1_K2048_N248320_S1_L1
+    kernel_gemv_M1_K2048_N128_S1_L1
     kernel_gemv_bf16_M1_K2048_N128_C16_S16 kernel_gemv_bf16_M1_K2048_N272_C16_S16
     kernel_gemv_bf16_M1_K2048_N248320 kernel_gemv_i8w_M1_K2048_N248320
     kernel_moe_M1_E256_T8_D2048_I512)
@@ -1980,6 +1993,7 @@ if(B70_ORNITH AND B70_MTP)
     list(APPEND B70_ORNITH_MTP_KERNELS
       kernel_gemv_M${MM}_K2048_N12288_S1_L1 kernel_gemv_M${MM}_K4096_N2048_S4_L0
       kernel_gemv_M${MM}_K2048_N9216_S2_L0 kernel_gemv_bf16_M${MM}_K2048_N128_C16_S16
+      kernel_gemv_M${MM}_K2048_N128_S1_L1
       kernel_gemv_bf16_M${MM}_K2048_N272_C16_S16 kernel_gemv_bf16_M${MM}_K2048_N248320
       kernel_gemv_i8w_M${MM}_K2048_N248320 kernel_prep_res_fold_M${MM}_K2048_SP0_G20
       kernel_prep_res_fold_M${MM}_K2048_SP4_G20 kernel_prep_norm_finish_M${MM}_K2048_G20_W20
@@ -2001,7 +2015,7 @@ if(B70_ORNITH AND B70_MTP)
     kernel_pf_norm_finish_K2048_G20_W20_X4096 kernel_pf_bf16_slab_K4096 kernel_pf_bf16_slab_K2048)
   # What the lists reuse: 15c's decode list, 15d's prefill kernels, spec 8's shared ones.
   set(_o15e_reused ${B70_ORNITH_DECODE_KERNELS}
-    kernel_argmax_stage1_M2_V248070 kernel_argmax_stage1_M3_V248070 kernel_argmax_stage1_M4_V248070
+    kernel_argmax_stage1_M2 kernel_argmax_stage1_M3 kernel_argmax_stage1_M4
     kernel_dv_argmax_N32768 kernel_dv_argmax_N65536 kernel_dv_argmax_N131072
     kernel_pf_res_fold_K2048_SP0_G20 kernel_pf_res_fold_K2048_SP1_G20
     kernel_pf_norm_finish_K2048_G20_W20 kernel_pf_embed_gather_D2048

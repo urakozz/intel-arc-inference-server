@@ -140,7 +140,8 @@ struct LoadReport {            // printed by load(); asserted by the checkpoint 
   // linears, and the host time. 0 for a dense head or an int4-shipped one.
   size_t mtp_rtn_linears = 0;
   double mtp_rtn_seconds = 0;
-  size_t total() const;             // the eight byte fields above
+  size_t total() const;             // the eight byte fields above, + moe_bytes and
+                                    // ab_prefill_bytes below
   // **`W`, as this load actually measured it** - the bytes a decode step
   // streams: everything in total() except `embed_tokens` (gathered one row per
   // token) and the RoPE table (~256 B per token). It is a FIELD rather than a
@@ -169,6 +170,10 @@ struct LoadReport {            // printed by load(); asserted by the checkpoint 
   // per-token share (MoeLayerBytes::per_token) is in read_per_token.
   size_t moe_bytes = 0;
   double moe_repack_seconds = 0;
+  // Spec 15 §13: an int4 a||b's bf16 copy for prefill (LoadedModel::ab_prefill, loader/ab.h):
+  // resident, in total(), NOT in read_per_token - decode never reads it. 0 when the
+  // checkpoint ships a||b bf16 (prefill then reads the decode weight itself).
+  size_t ab_prefill_bytes = 0;
 };
 
 struct LoadedModel {
@@ -192,7 +197,19 @@ struct LoadedModel {
   // on a dense model. For a MoE model the table's GateUp / Down rows (the shared
   // expert, spec 15b) are NOT in `linears`: the shared expert is the last block here.
   std::vector<MoeLayer> moe;
+  // Spec 15 §13: when the checkpoint ships a||b int4 (the published Ornith export), the
+  // linears' (layer, AB) weight is that int4 row (decode binds gemv.cl) and this holds, per
+  // GDN layer index, its bf16 copy dequantised once at load by the prefill dequant's
+  // arithmetic (loader/ab.h) - what prefill's pf_ab_proj reads. Empty when a||b is bf16.
+  std::map<uint32_t, DeviceWeight> ab_prefill;
 };
+
+// The bf16 a||b weight prefill's pf_ab_proj reads for GDN layer `layer`: the int4
+// checkpoint's dequantised copy (LoadedModel::ab_prefill), or the bf16 decode weight itself.
+inline const DeviceWeight& prefill_ab(const LoadedModel& m, uint32_t layer) {
+  const DeviceWeight& w = m.linears.at({layer, model::LinearId::AB});
+  return w.kind == model::WeightKind::Int4 ? m.ab_prefill.at(layer) : w;
+}
 
 // Loads the qwen3_5 checkpoint at `snapshot_or_repo` (resolve_snapshot rules)
 // into ctx's device. Skips model.visual.* and (v1) mtp.*. Strips the

@@ -487,7 +487,11 @@ endif()
 # (runtime::build, capture.cc): 526 launches = embed + 40 x 13 + 5.
 #   linears   q||k||v / qkv||z / out_proj = o_proj at hidden 2048 - PROVISIONAL cells,
 #             model_desc.cc's copied {S, layout} (no extra GEMV_* defines: P0 measures)
-#   a||b      gemv_bf16 at {16, 16} (64 real columns, padded to 128 as Qwen3.8's 96)
+#   a||b      gemv_bf16 at {16, 16} (64 real columns, padded to 128 as Qwen3.8's 96) for a
+#             checkpoint that keeps in_proj_a / in_proj_b bf16; the published int4 checkpoint
+#             (urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ) quantised them, so its a||b is
+#             gemv.cl at K 2048, N 128 (the same zero padding), S 1 L1 - PROVISIONAL (spec 15
+#             §13; model::ModelDesc::ab picks by the checkpoint's content)
 #   router    gemv_bf16 over the 256 router rows || the shared gate, 272 columns
 #   lm_head   bf16, int8 (spec 9) or a checkpoint's int4, at K 2048
 #   the norm pair at K 2048: SP0 after layer 0's embedding and after every MoE block
@@ -498,14 +502,17 @@ endif()
 #   FA        attn_prep and decode attention v2 at 16 q / 2 kv heads (GQA 8); v1
 #             (B70_DECODE_ATTN=v1) is not built for Ornith
 #   MoE       moe.cl's three kernels: 256 experts, top-8, hidden 2048, expert 512
-# argmax_stage1_M1_V248070: Ornith masks from 248070 (tokenizer.json's last id is </think>
-# = 248069), not Qwen3.8's 248077 - the seven specials above it decode to nothing.
+# argmax_stage1_M1_V248070: built for the base checkpoint's tokenizer.json (its last id is
+# </think> = 248069). NOT BOUND since spec 15 §13: the int4 checkpoint's tokenizer.json
+# defines Qwen3.8's 248077 ids, so Ornith's greedy argmax is Qwen3.8's argmax_stage1_M<M>
+# (model::ornith().vocab_used). Kept so no command line disappears.
 option(B70_ORNITH "build the Ornith 1.5 35B-A3B decode variants (spec 15c)" ON)
 if(B70_ORNITH)
   add_gemv_variant(1 2048 12288 1 1)    # qkv||z      PROVISIONAL S1 L1
   add_gemv_variant(1 4096 2048 4 0)     # out_proj, o_proj  PROVISIONAL S4 L0
   add_gemv_variant(1 2048 9216 2 0)     # q||k||v     PROVISIONAL S2 L0
   add_gemv_variant(1 2048 248320 1 1)   # lm_head int4 (a --quant_lm_head checkpoint)
+  add_gemv_variant(1 2048 128 1 1)      # a||b int4 (the int4 checkpoint's)  PROVISIONAL S1 L1
   add_gemv_bf16_variant(1 2048 128 16 16)
   add_gemv_bf16_variant(1 2048 272 16 16)
   add_gemv_bf16_variant(1 2048 248320 64 1)
@@ -719,8 +726,12 @@ endif()
 #                      them depends on M but the grid, so row m of an M-row launch is the
 #                      M = 1 code on row m's inputs (tests/kernels/moe_m_ref_test.cc,
 #                      tools/mac/clrun/moe_run.cc and moe_m_test on the card pin it).
-#                      argmax_stage1_M<M>_V248070 is Ornith's own (it masks from 248070,
-#                      tokenizer.json's count), built beside moe_M<M> below.
+#                      argmax_stage1_M<M>_V248070 (masks from 248070, the base checkpoint's
+#                      tokenizer.json) is built beside moe_M<M> below but, since spec 15 §13,
+#                      not bound: the int4 checkpoint's tokenizer.json defines 248077 ids, so
+#                      the lists bind Qwen3.8's argmax_stage1_M<M>. a||b of the int4
+#                      checkpoint is gemv.cl at K 2048 N 128 S1 L1 (spec 15 §13), beside the
+#                      bf16 form a checkpoint that keeps it bf16 binds.
 #   verify, M = 1..4   gdn_step_slots at 30 GDN layers (`_G30`, SPEC_SLOT_STRIDE = 30 x 32
 #                      x 128 x 128 = 15728640 floats) and Ornith's heads; the head's KV fill:
 #                      fc (bf16 4096 -> 2048), q||k||v (bf16 2048 -> 9216), the two pre-fc
@@ -736,7 +747,8 @@ if(B70_ORNITH AND B70_MTP)
     add_gemv_variant(${MM} 2048 12288 1 1)       # qkv||z            PROVISIONAL S1 L1
     add_gemv_variant(${MM} 4096 2048 4 0)        # out_proj, o_proj  PROVISIONAL S4 L0
     add_gemv_variant(${MM} 2048 9216 2 0)        # q||k||v           PROVISIONAL S2 L0
-    add_gemv_bf16_variant(${MM} 2048 128 16 16)  # a||b
+    add_gemv_bf16_variant(${MM} 2048 128 16 16)  # a||b (a checkpoint that keeps it bf16)
+    add_gemv_variant(${MM} 2048 128 1 1)         # a||b int4 (spec 15 §13)  PROVISIONAL S1 L1
     add_gemv_bf16_variant(${MM} 2048 272 16 16)  # the router || shared gate
     add_gemv_bf16_variant(${MM} 2048 248320 64 1)   # lm_head (bf16)
     add_gemv_i8w_variant(${MM} 2048 248320)         # lm_head (int8, spec 9)
