@@ -45,7 +45,11 @@ void verify_names(const model::ModelDesc& d, unsigned M, bool int8, std::set<std
     const model::GemvShape& s = d.shape(id);
     out.insert(kernels::gemv_variant(M, s.K, s.N, s.S, s.layout));
   }
+  // a||b in either of the checkpoint's forms (spec 15 §13, ModelDesc::ab): bf16 for a
+  // checkpoint that keeps in_proj_a / in_proj_b bf16, gemv.cl for the int4 checkpoint's.
   out.insert(bf16(M, H, d.shape(model::LinearId::AB).N));
+  const model::GemvShape& ab4 = d.ab(model::WeightKind::Int4).shape;
+  out.insert(kernels::gemv_variant(M, ab4.K, ab4.N, ab4.S, ab4.layout));
   out.insert(kernels::gdn_step_slots_variant(M, d.gdn_layers, k, v));
   out.insert(kernels::prep_gated_head_variant(M, k, v));
   out.insert(kernels::attn_prep_variant(M, q, kv));
@@ -150,6 +154,9 @@ int main(int argc, char** argv) {
   CHECK(bound.count("prep_norm_finish_M3_K2048_G20_W20_X4096") &&
         bound.count("prep_res_fold_M1_K2048_SP1_G20_Z") && bound.count("gemv_bf16_M1_K4096_N2048"));
   CHECK(bound.count("pf_res_fold_K2048_SP1_G20_Z") && bound.count("pf_bf16_slab_K4096"));
+  // Spec 15 §13: the int4 checkpoint's a||b and Qwen3.8's argmax (vocab_used 248077).
+  CHECK(bound.count("gemv_M4_K2048_N128_S1_L1") && bound.count("gemv_bf16_M4_K2048_N128_C16_S16"));
+  CHECK(bound.count("argmax_stage1_M3") && !bound.count("argmax_stage1_M3_V248070"));
   std::printf("ornith_mtp_names_test OK: %zu names bound by Ornith's MTP lists, %zu built by the "
               "15e block, %zu given\n",
               bound.size(), block.size(), all.size());

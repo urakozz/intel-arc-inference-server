@@ -11,7 +11,8 @@ static_assert(kLinearCount == 8, "LinearId grew: add the row below and re-check 
 
 // a||b's device width: the source 2 x v-heads (96 on Qwen3.8, 64 on Ornith) is
 // zero-padded to the bf16 GEMV's 128-column tile, which is also gdn_step's
-// AB_STRIDE (b at column v-heads). One width for every model with <= 64 v-heads.
+// AB_STRIDE (b at column v-heads). One width for every model with <= 64 v-heads,
+// and for both of a||b's forms (bf16, or a checkpoint's int4 - make_ab_rows).
 constexpr uint32_t kAbPaddedN = 128;
 
 // One GEMV row's tuned configuration: the split-K count S and the int4 layout.
@@ -159,10 +160,25 @@ void make_lm_head_rows(ModelDesc& d) {
                Fuse::Single,     {"lm_head"},                    0, Fold::None, {}};
 }
 
+// Spec 15 §13: a||b's int4 row, for a checkpoint that quantised in_proj_a / in_proj_b
+// (the published Ornith int4 export; Qwen3.8's and Agnes's keep them bf16). The bf16 row's
+// contract kept whole: K hidden, the 2 x v-heads real columns zero-padded to kAbPaddedN, so
+// ab_out, gdn_step's AB_STRIDE and the prefill's pf_ab_proj (which reads a bf16 copy the
+// loader dequantises, loader/ab.h) see what they always saw. gemv.cl at S = 1 - its output
+// IS ab_out, [M][128] fp32, no partials for a fold to sum - and layout 1, qkv||z's (the
+// other int4 GEMV of the GDN mixer). PROVISIONAL like every Ornith cell until P0: 128
+// columns are 8 sub-groups at S 1 (gemv_bf16's L2 lesson, kernels.h), and an S > 1 form
+// would need gdn_step to sum the slices.
+void make_ab_rows(ModelDesc& d) {
+  d.ab_int4 = {LinearId::AB, {d.hidden, kAbPaddedN, 1, 1}, WeightKind::Int4, Fuse::Concat,
+               {"linear_attn.in_proj_a", "linear_attn.in_proj_b"}, d.gdn_ab_n(), Fold::None, {}};
+}
+
 void finish(ModelDesc& d, const TableTuning& t) {
   d.table = make_table(d, t);
   make_small_tables(d);
   make_lm_head_rows(d);
+  make_ab_rows(d);
 }
 
 // Qwen3.8 and Agnes share every width but the layer counts and the MLP.
@@ -235,11 +251,24 @@ ModelDesc make_qwen38() {
 // 32, num_experts 256, num_experts_per_tok 8, moe_intermediate_size 512,
 // shared_expert_intermediate_size 512 (+ `mlp.shared_expert_gate`), vocab 248320,
 // tie_word_embeddings false, mtp_num_hidden_layers 1 (a MoE layer). Tensor names
-// are Qwen3.5's (`linear_attn.` / `self_attn.`), so no name map. vocab_used 248070:
-// tokenizer.json defines ids 0..248069 (its added tokens stop at </think>); the seven
-// audio / vision specials tokenizer_config lists up to 248076 have no entry the text
-// engine can decode, so the greedy argmax masks them as the sampler already does
-// (argmax_stage1 `_V248070`, built in Ornith's block).
+// are Qwen3.5's (`linear_attn.` / `self_attn.`), so no name map.
+//
+// **The int4 checkpoint is `urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`** (AutoRound
+// 0.15.0, GPTQ packing, int4 g64 sym, desc_act false; spec 15 §13 has every fact read from
+// its index and shard headers). What it settles here:
+//   * vocab_used 248077 (Qwen35::kVocabUsed): its tokenizer.json defines ids 0..248076 -
+//     the base checkpoint's file stopped its added tokens at </think> (248069), which the
+//     descriptor masked from (248070) until this checkpoint was read; vocab, merges and
+//     the committed golden prompts' ids are the same. The greedy argmax binds Qwen3.8's
+//     argmax_stage1 binaries; the `_V248070` ones stay built, unbound.
+//   * in_proj_a / in_proj_b ship int4 (its dynamic rules exclude only the routers): the
+//     loader picks `ab_int4` by content (`ab()`, loader/ab.h).
+//   * doc_w 2,344,862,976 B: the read-per-token bytes with a bf16 head, summed from the
+//     shard headers - int4 qweight + f16 scales of the mixer linears (a||b's 2,088,960
+//     included) and the shared experts 748,544,000, 8 routed experts per layer
+//     534,773,760, the bf16 routers + shared gates 42,106,880, the bf16 small tensors
+//     2,319,616, lm_head 1,017,118,720. The device adds the cross-check's itemised terms:
+//     a||b's int4 padding, the fp32 widening and the router's 15 zero rows.
 //
 // **Loadable for decode from spec 15c, prefill from spec 15d** (the grouped experts on
 // the L0 backends). The int4 rows' tuning is PROVISIONAL - copied from Qwen3.8's map so every
@@ -248,8 +277,6 @@ ModelDesc make_qwen38() {
 // until 15c's P0 measures them. The GateUp / Down rows (the shared expert) are not
 // bound by the decode list: the loader puts the shared expert into the expert
 // blocks' last slot (MoeDesc), where moe.cl runs it as the ninth slot.
-// `doc_w` is 0: no int4 checkpoint exists yet (spec 15 decision 1, 15a), so the
-// loader's W cross-check is skipped with a note until the box measures one.
 ModelDesc make_ornith() {
   ModelDesc d;
   d.name = "ornith-1.5-35b-a3b";
@@ -268,8 +295,8 @@ ModelDesc make_ornith() {
   d.mtp_intermediate = 0;          // the MTP head is one MoE layer (spec 15e)
   d.intermediate = d.moe.shared_intermediate;
   d.parallel_ffn = 0;
-  d.doc_w = 0;
-  d.vocab_used = 248070;
+  d.doc_w = 2.344862976e9;            // the int4 checkpoint's headers (above), derived
+  d.vocab_used = Qwen35::kVocabUsed;  // 248077: the int4 checkpoint's tokenizer.json
   d.provisional_tuning = true;
   finish(d, kQwen38Tuning);        // PROVISIONAL (copied), see above
   return d;
@@ -288,6 +315,12 @@ const FusedLinear& ModelDesc::linear(LinearId id) const {
 const FusedLinear& ModelDesc::lm_head(WeightKind kind) const {
   if (kind == WeightKind::Int8) return lm_int8;
   return kind == WeightKind::Int4 ? lm_int4 : linear(LinearId::LmHead);
+}
+
+const FusedLinear& ModelDesc::ab(WeightKind kind) const {
+  if (kind == WeightKind::Int8)
+    throw std::invalid_argument(name + ": a||b has no int8 form (bf16, or a checkpoint's int4)");
+  return kind == WeightKind::Int4 ? ab_int4 : linear(LinearId::AB);
 }
 
 // Built per call rather than cached: layer_descs() returns by value, and the

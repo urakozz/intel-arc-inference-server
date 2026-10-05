@@ -49,6 +49,27 @@ void check_layers(const ModelDesc& d) {
   CHECK_EQ(d.shape(LinearId::AB).K, d.hidden);
   CHECK_EQ(d.linear(LinearId::AB).pad_n, d.gdn_ab_n());
   CHECK(d.shape(LinearId::AB).N >= d.gdn_ab_n());
+  // Spec 15 §13: a||b in the checkpoint's form. Bf16 is the table row itself (nothing about
+  // a bf16 a||b moved); the int4 row keeps its contract - K hidden, the same two parts, the
+  // same padded N (ab_out / AB_STRIDE) - as an S 1 GEMV writing ab_out directly.
+  CHECK(&d.ab(model::WeightKind::Bf16) == &d.linear(LinearId::AB));
+  CHECK(d.linear(LinearId::AB).kind == model::WeightKind::Bf16);
+  const model::FusedLinear& ab4 = d.ab(model::WeightKind::Int4);
+  CHECK(ab4.id == LinearId::AB && ab4.kind == model::WeightKind::Int4 &&
+        ab4.fuse == model::Fuse::Concat);
+  CHECK(ab4.parts == d.linear(LinearId::AB).parts);
+  CHECK_EQ(ab4.pad_n, d.gdn_ab_n());
+  CHECK_EQ(ab4.shape.K, d.hidden);
+  CHECK_EQ(ab4.shape.N, d.shape(LinearId::AB).N);
+  CHECK_EQ(ab4.shape.S, uint32_t(1));
+  CHECK_EQ(ab4.shape.layout, uint32_t(1));
+  bool int8_refused = false;
+  try {
+    (void)d.ab(model::WeightKind::Int8);
+  } catch (const std::invalid_argument&) {
+    int8_refused = true;
+  }
+  CHECK(int8_refused);
   CHECK_EQ(d.shape(LinearId::OutProj).K, d.gdn_value_dim());
   CHECK_EQ(d.shape(LinearId::OutProj).N, d.hidden);
   CHECK_EQ(d.shape(LinearId::GateUp).K, d.hidden);
@@ -248,7 +269,9 @@ int main() {
         std::vector<std::string>({"mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj"}));
   CHECK(o.linear(LinearId::Down).parts ==
         std::vector<std::string>({"mlp.shared_expert.down_proj"}));
-  CHECK_EQ(o.vocab_used, uint32_t(248070));   // tokenizer.json's ids end at </think> = 248069
+  // Spec 15 §13: the int4 checkpoint's tokenizer.json defines ids 0..248076, Qwen3.8's count
+  // (the base checkpoint's stopped at </think> = 248069, which 248070 was read from).
+  CHECK_EQ(o.vocab_used, uint32_t(248077));
   CHECK(!o.tied_embeddings);
   CHECK(o.name_map.empty());                  // linear_attn. / self_attn., as Qwen3.8
   CHECK_EQ(o.mtp_intermediate, uint32_t(0));  // its MTP head is one MoE layer (15e)
@@ -259,7 +282,11 @@ int main() {
   CHECK_EQ(o.mtp_checkpoint_bytes(), size_t(1689281536));
   CHECK_EQ(o.mtp_checkpoint_tensors(), size_t(785));
   CHECK(o.provisional_tuning);
-  CHECK_EQ(o.doc_w, 0.0);                     // no int4 checkpoint exists yet (15a)
+  // Spec 15 §13: W summed from the int4 checkpoint's shard headers (model_desc.cc): the
+  // mixer linears + shared experts 748,544,000, 8 routed experts x 40 layers 534,773,760,
+  // routers + shared gates 42,106,880, small tensors 2,319,616, lm_head 1,017,118,720.
+  CHECK_EQ(o.doc_w, double(748544000ull + 534773760ull + 42106880ull + 2319616ull + 1017118720ull));
+  CHECK_EQ(o.ab(model::WeightKind::Int4).shape.N, uint32_t(128));   // 64 real columns, padded
   check_layers(o);
   // Ornith's small blocks: norms 2 x 2048 fp32; GDN conv 8192 x 4 fp32, 32 + 32 fp32, 128 bf16.
   const loader::SmallLayout os = o.small_layout();

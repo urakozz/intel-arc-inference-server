@@ -16,6 +16,7 @@
 #include "common/json.h"
 #include "common/repack.h"
 #include "l0/cmdlist.h"
+#include "loader/ab.h"
 #include "loader/fold.h"
 #include "loader/moe.h"
 #include "loader/safetensors.h"
@@ -368,22 +369,10 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
                              std::to_string(sh.N));
 
   if (fl.kind == model::WeightKind::Int4) {
-    if (n_sum != sh.N)
-      throw std::runtime_error(id + ": int4 N-padding is not implemented (" +
-                               std::to_string(n_sum) + " -> " + std::to_string(sh.N) + ")");
-    std::vector<common::Part> parts;
-    for (const LinearSrc& s : srcs) parts.push_back({s.qweight, s.scales, s.N});
-    std::vector<common::ColSource> cols;
-    if (fl.fuse == model::Fuse::Interleave16) {
-      if (parts.size() != 2 || parts[0].N != parts[1].N || parts[0].N % 16 != 0)
-        throw std::runtime_error(id + ": interleave16 needs two parts of equal, 16-divisible N");
-      cols = common::cols_interleave16(parts[0], parts[1]);
-    } else {
-      cols = common::cols_concat(parts);
-    }
-    if (cols.size() != sh.N)
-      throw std::runtime_error(id + ": column map has " + std::to_string(cols.size()) +
-                               " entries, need " + std::to_string(sh.N));
+    // The column map (loader/ab.h): Concat or Interleave16 over the parts, and - spec 15
+    // §13, the one padded int4 row, a checkpoint's int4 a||b - zero columns to shape.N.
+    Int4Pad pad;
+    const std::vector<common::ColSource> cols = int4_row_cols(fl, srcs, pad, id);
     const size_t words = int4_words(sh);
     if (words > st.i4.size())
       throw std::runtime_error(id + ": " + std::to_string(words * 4) +
@@ -401,11 +390,14 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
     // OWN bucket in both kinds - it is the one row whose format the checkpoint
     // chooses, so the report has to show it separately for the two to be
     // comparable at all, and the W cross-check adjusts exactly this line.
+    // A padded row's zero columns (nibbles and scales) are `pad`, as a bf16 row's zero
+    // rows are; n_sum == sh.N on every other int4 row, so their buckets are unchanged.
     if (fl.id == model::LinearId::LmHead) {
       rep.lm_head_bytes += size_t(sh.K) * sh.N / 2 + size_t(sh.K) * sh.N / 32;
     } else {
-      rep.int4_bytes += size_t(sh.K) * sh.N / 2;
-      rep.scale_bytes += size_t(sh.K) * sh.N / 32;
+      rep.int4_bytes += size_t(sh.K) * n_sum / 2;
+      rep.scale_bytes += size_t(sh.K) * n_sum / 32;
+      rep.pad_bytes += size_t(sh.K) * (sh.N - n_sum) / 2 + size_t(sh.K) * (sh.N - n_sum) / 32;
     }
     l0::Mem weight = upload(ctx, imm, st.i4.data(), words * 4);
     std::unique_ptr<l0::Mem> scales;
@@ -458,6 +450,25 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
     rep.bf16_linear_bytes += size_t(n_sum) * sh.K * 2;
   rep.pad_bytes += size_t(sh.N - n_sum) * sh.K * 2;
   return {upload(ctx, imm, st.bf_tiled.data(), elems * 2), nullptr, sh, fl.kind};
+}
+
+// Spec 15 §13: an int4 a||b's bf16 copy for prefill (loader/ab.h) - the same parts
+// load_linear just repacked (it checked them), the same column map, dequantised by the
+// prefill dequant's arithmetic and tiled for pf_ab_proj. Read by nothing on decode.
+DeviceWeight load_ab_prefill(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet& set,
+                             const model::ModelDesc& desc, const std::string& layer_prefix,
+                             const model::FusedLinear& fl, LoadReport& rep) {
+  const std::string id = "AB prefill copy (" + layer_prefix + fl.parts[0] + ")";
+  std::vector<LinearSrc> srcs;
+  for (const std::string& part : fl.parts)
+    srcs.push_back(LinearSrc::classify(set, ckpt_name(desc, layer_prefix + part)));
+  Int4Pad pad;
+  const std::vector<common::ColSource> cols = int4_row_cols(fl, srcs, pad, id);
+  const model::GemvShape sh{fl.shape.K, fl.shape.N, 1, 0};
+  std::vector<uint16_t> tiled(size_t(sh.N) * sh.K);
+  dequant_int4_bf16_tiled(sh, cols, tiled.data());
+  rep.ab_prefill_bytes += tiled.size() * 2;
+  return {upload(ctx, imm, tiled.data(), tiled.size() * 2), nullptr, sh, model::WeightKind::Bf16};
 }
 
 // Everything in a layer that is not a GEMV weight, packed into the two blocks
@@ -739,7 +750,7 @@ void check_max_len(const model::ModelDesc& desc, uint32_t max_len, uint32_t trai
 
 size_t LoadReport::total() const {
   return int4_bytes + scale_bytes + bf16_linear_bytes + embed_bytes + lm_head_bytes + small_bytes +
-         pad_bytes + mtp_bytes + moe_bytes;
+         pad_bytes + mtp_bytes + moe_bytes + ab_prefill_bytes;
 }
 
 LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len,
@@ -862,6 +873,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                 nullptr,
                 &desc,
                 nullptr,
+                {},
                 {}};
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   m.report.quant_note = quant_note;
@@ -875,10 +887,26 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   m.report.rope_bytes = rope_bytes;
 
   const std::vector<model::LayerDesc> layers = desc.layer_descs();
+  // Spec 15 §13: a||b's kind is the checkpoint's too (loader/ab.h), classified by content
+  // from the first GDN layer's in_proj_a: the table's bf16 row, or the descriptor's int4
+  // row when the checkpoint quantised it (the published Ornith export). Every GDN layer
+  // loads with that row; one in the other form throws in load_linear by name.
+  const model::FusedLinear* ab_row = &desc.linear(model::LinearId::AB);
+  for (const model::LayerDesc& ld : layers)
+    if (ld.kind == model::LayerKind::GDN) {
+      const std::string a = ckpt_name(desc, Qwen35::layer_prefix(ld.index) + ab_row->parts[0]);
+      ab_row = &ab_row_for(desc, LinearSrc::kind_of(set, a));
+      break;
+    }
+  const bool ab_int4 = ab_row->kind == model::WeightKind::Int4;
   Staging st;
   const model::GemvShape& ab = desc.shape(model::LinearId::AB);
   size_t max_i4_words = lm_int4 ? int4_words(lm_row.shape) : 0;
   size_t max_i4_scales = lm_int4 ? int4_scale_elems(lm_row.shape) : 0;
+  if (ab_int4) {
+    max_i4_words = std::max(max_i4_words, int4_words(ab_row->shape));
+    max_i4_scales = std::max(max_i4_scales, int4_scale_elems(ab_row->shape));
+  }
   for (const model::LayerDesc& ld : layers)
     for (const model::FusedLinear& fl : ld.linears)
       if (fl.kind == model::WeightKind::Int4) {
@@ -908,8 +936,11 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       if (desc.is_moe() &&
           (fl.id == model::LinearId::GateUp || fl.id == model::LinearId::Down))
         continue;
+      const model::FusedLinear& row = fl.id == model::LinearId::AB ? *ab_row : fl;
       m.linears.emplace(std::make_pair(ld.index, fl.id),
-                        load_linear(ctx, imm, set, view, desc, lp, fl, st, m.report));
+                        load_linear(ctx, imm, set, view, desc, lp, row, st, m.report));
+      if (fl.id == model::LinearId::AB && ab_int4)
+        m.ab_prefill.emplace(ld.index, load_ab_prefill(ctx, imm, set, desc, lp, row, m.report));
     }
     m.layer_small.push_back(load_small(ctx, imm, set, view, desc, ld, m.report, widen));
     if (desc.is_moe()) {
@@ -1049,8 +1080,21 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       : lm_int8 ? double(lm_head_int8_bytes(lm_row.shape.K, lm_row.shape.N)) -
                       double(lm_head_bf16_bytes(desc))
                 : 0.0;
-  const double expected = desc.doc_w + double(r.pad_bytes) + double(widen.total()) + lm_adjust;
-  const bool have_w = desc.doc_w != 0;   // Ornith: none yet (spec 15c, below)
+  // Spec 15 §13: a MoE layer's router GEMV runs over router_n rows, the checkpoint ships
+  // experts + 1 (the router and the shared gate): the zero rows (15 per layer on Ornith)
+  // are the one more itemised device term; 0 on a dense model.
+  const double router_pad =
+      desc.is_moe() ? double(desc.layers) * (desc.moe.router_n() - desc.moe.experts - 1) *
+                          desc.hidden * 2
+                    : 0.0;
+  const double expected =
+      desc.doc_w + double(r.pad_bytes) + double(widen.total()) + lm_adjust + router_pad;
+  // An int4 a||b's zero columns are in pad_bytes; the bf16_linear line's "with padding"
+  // is the bf16 rows' alone.
+  const size_t ab_pad_elems =
+      ab_int4 ? size_t(ab_row->shape.K) * (ab_row->shape.N - ab_row->pad_n) : 0;
+  const size_t ab_i4_pad = size_t(desc.gdn_layers) * (ab_pad_elems / 2 + ab_pad_elems / 32);
+  const bool have_w = desc.doc_w != 0;   // every model the engine runs has one since spec 15 §13
   const double delta = have_w ? (double(per_token) - expected) / expected : 0.0;
   m.report.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
@@ -1084,7 +1128,8 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       view.visual_skipped, view.mtp_skipped, view.qzeros, view.g_idx, r.unconsumed,
       r.unconsumed ? " incl. " : "", unconsumed.c_str(), scan.subnormal_scales, m.linears.size(),
       m.layer_small.size(), r.int4_bytes, r.int4_bytes / gb, r.scale_bytes, r.scale_bytes / gb,
-      r.bf16_linear_bytes, r.bf16_linear_bytes / gb, (r.bf16_linear_bytes + r.pad_bytes) / gb,
+      r.bf16_linear_bytes, r.bf16_linear_bytes / gb,
+      (r.bf16_linear_bytes + r.pad_bytes - ab_i4_pad) / gb,
       r.lm_head_bytes, r.lm_head_bytes / gb, lm_desc.c_str(),
       small_resident, small_resident / gb,
       r.pad_bytes, r.pad_bytes / gb, per_token, per_token / gb, r.embed_bytes, r.embed_bytes / gb,
@@ -1111,13 +1156,19 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                 mb.gate_up_block, mb.down_block,
                 moe_host.fused_gate_up ? "gate_up_proj" : "gate_proj / up_proj",
                 moe_per_token / gb, desc.moe.top_k, r.moe_repack_seconds);
+    std::printf("  W check   %+.6f GB of it is the routers' zero rows (%u layers x %u rows), on the"
+                " expected side above\n",
+                router_pad / gb, desc.layers, desc.moe.router_n() - desc.moe.experts - 1);
   }
-  // doc_w 0: no measured W exists for this model yet (Ornith, spec 15a) - nothing to
-  // cross-check against, and a derived W would only restate the bytes above.
+  // Spec 15 §13: a checkpoint's int4 a||b (only then: a bf16 one prints nothing new).
+  if (ab_int4)
+    std::printf("  a‖b       int4 g64, the checkpoint's: %u real columns in int4/scales, %zu B of"
+                " zero columns in pad; prefill's bf16 copy %zu B %.3f GB (resident, in total,"
+                " not per-token)\n",
+                ab_row->pad_n, ab_i4_pad, r.ab_prefill_bytes, r.ab_prefill_bytes / gb);
+  // doc_w 0: no W exists for this model - nothing to cross-check against.
   if (!have_w) {
-    std::printf("  W check   skipped: %s has no measured W yet (model_desc.cc doc_w; the box "
-                "measures it, spec 15c)\n",
-                desc.name.c_str());
+    std::printf("  W check   skipped: %s has no W (model_desc.cc doc_w)\n", desc.name.c_str());
     return m;
   }
   if (std::fabs(delta) > 0.02)

@@ -347,9 +347,10 @@ void check_head_repack() {
 }
 
 // --- 3 + 4. the figures and the planner ---------------------------------------------
-// memory_plan_test's Ornith weights with the int8 head (derived from the descriptor).
-constexpr size_t kOrnithInt8Weights = 30ull * 18498048 + 10ull * 14501888 + 40ull * 430604288 +
-                                      1017118720ull + 509552640ull + 8192;   // 19,450,811,392
+// memory_plan_test's Ornith weights with the int8 head (derived from the descriptor and the
+// int4 checkpoint's a||b form, spec 15 §13: int4 a||b + its bf16 prefill copy per GDN layer).
+constexpr size_t kOrnithInt8Weights = 30ull * 18637312 + 10ull * 14501888 + 40ull * 430604288 +
+                                      1017118720ull + 509552640ull + 8192;   // 19,454,989,312
 constexpr size_t kDevice = 32530000000ull;
 constexpr size_t kReserve = size_t(runtime::kDefaultReserveGb * 1e9);
 
