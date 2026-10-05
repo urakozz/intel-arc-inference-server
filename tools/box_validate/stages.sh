@@ -622,6 +622,49 @@ st_r11_near_ties() {
 }
 
 # ======================================================================================
+row 12 "spec 19e host side - --spec lookup, prompt lookup (plan 19e)"
+rownote 12 "'no kernel binary changes' is G0's g0.sha (every binary present in both builds identical)."
+rownote 12 "A4 through a --spec lookup server: tools/toolcall/engine_generate.sh drives b70-decode, which has no --spec; no client replays the A4 set through b70-serve yet (r12.a4 prints the commands)."
+stage r12.suite 12 default gpu qwen,oracle_qwen - "the suite unchanged with --spec unset: mtp_gpu_test, golden_server_test, prefix_gpu_*; the host tests prompt_lookup_test, lookup_server_test, spec_accept_test"
+st_r12_suite() {
+  run_tests '^(mtp_gpu_test|golden_server_test|prefix_gpu_.*|prompt_lookup_test|lookup_server_test|spec_accept_test)$' '' 'kv8 agnes'
+  finish
+}
+stage r12.d2 12 default gpu qwen - "D2: golden_server_test against a --spec lookup server (min match n = 2 and 3) - greedy identical to the plain decode; a seeded sampled request bitwise reproducible; the 'spec lookup:' startup and per-request 'lookup:' lines"
+st_r12_d2() {
+  local n
+  for n in 2 3; do
+    chk "B70_SERVE_EXTRA='--spec lookup --spec-min-match $n' timeout 1800 build/tests/golden_server_test $TREE/tools/box_validate/serve_extra.sh build/src/cli/b70-decode tests/golden/prompts $SNAP_QWEN" \
+      "golden_server_test through --spec lookup, n = $n"
+  done
+  x "PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $SNAP_QWEN --max-len 16384 --spec lookup"
+  step_rc $? "b70-serve --spec lookup: serves; the seeded sampled request twice"
+  grab_all lookup 'spec lookup:|lookup:|SEEDED' 12
+  finish
+}
+stage r12.a4 12 manual - qwen - "D2 on A4: greedy through b70-serve --spec lookup identical to --spec off"
+st_r12_a4() {
+  say "# one server per arm (--spec off, then --spec lookup --spec-min-match 2 / 3), under the lock:"
+  say "flock ~/b70-gpu.lock build/src/cli/b70-serve $SNAP_QWEN --max-len 16384 --port 8013 --served-name b70 --spec lookup --log-requests ~/lookup-a4-log"
+  say "# send each tests/golden/toolcall scenario's prompt ids as a completion (temperature 0, max_tokens 192);"
+  say "# compare out_ids in the two --log-requests directories request by request"
+}
+stage r12.d5 12 optin gpu-self qwen,opencode_log - "D5 on the opencode recording (OPENCODE_LOG): lookup_accept.py first, then --spec off / --mtp auto / --spec lookup replayed through b70-serve, 3 rounds in rotated order"
+st_r12_d5() {
+  chk "python3 tools/spec/lookup_accept.py --log $OPENCODE_LOG | tee $STATE/r12.d5.accept.txt" "lookup_accept.py on the recording"
+  local r arm args order
+  for r in 1 2 3; do
+    order="off mtp lookup"; [ "$r" = 2 ] && order="lookup mtp off"
+    for arm in $order; do
+      case "$arm" in off) args="--spec off" ;; mtp) args="--mtp auto" ;; lookup) args="--spec lookup" ;; esac
+      chk "MODEL=$SNAP_QWEN ARMS=on SERVE_ARGS='$args' tools/prefix/replay_ab.sh $OPENCODE_LOG $STATE/r12.d5.r$r.$arm" "replay round $r, $arm"
+    done
+  done
+  grab_all replay 'tok/s|t/s|requests|ttft' 40
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 labels belong to their rows)"
 st_x_rest() {
