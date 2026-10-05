@@ -1,7 +1,7 @@
 // probe_mtp_steps - spec 8 plan 8b: the production MTP lists' wall time per call.
 //
 //   probe_mtp_steps <snapshot> [depth = 4096] [calls = 32] [rounds = 3] [lm_head = bf16]
-//                   [draft_vocab = off]
+//                   [draft_vocab = off] [max_len = 16384]
 //
 // `lm_head` (spec 9 H2): bf16 (the checkpoint's) or int8; the draft list reads it too.
 // `draft_vocab` (spec 8 §11): off, 32k, 64k or 128k (either head form) - the draft list reads
@@ -9,8 +9,12 @@
 // Qwen3.8 and Agnes) and the lowest ids, no ranked list (the step time depends on |V'|
 // only). The draft arms then price `--mtp-cost`'s draft row for that size (spec 8 §10).
 //
+// `max_len` (spec 8 §12, box queue row 6): the engine's length - 16384 as before by default;
+// the cost table at depth runs e.g. `... 32768 32 3 int8 off 65536` and `... 120000 32 3 int8
+// off 131072`. It must leave room for the drift below (depth + 1024 <= max_len).
+//
 // One engine with the head, `depth` ids of tests/golden/prompts/long32k.ids prefilled
-// (cwd = the source tree). Arms, timed as the engine API runs them (host writes, submit,
+// (the file repeated past its end; cwd = the source tree). Arms, timed as the engine API runs them (host writes, submit,
 // fence wait - what 8c's loop pays): verify(k) + commit(0) for k = 0..3, i.e. the verify
 // list at M = k + 1, and draft(k) for k = 1..3. Each round runs every arm `calls` times,
 // arms in a rotated order, after a warm-up pass; the median over rounds of each arm's
@@ -44,16 +48,24 @@ std::vector<uint32_t> read_ids(const std::string& p) {
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::fprintf(stderr,
-                 "usage: %s <snapshot> [depth] [calls] [rounds] [bf16|int8] [off|32k|64k|128k]\n",
+                 "usage: %s <snapshot> [depth] [calls] [rounds] [bf16|int8] [off|32k|64k|128k]"
+                 " [max_len]\n",
                  argv[0]);
     return 2;
   }
   const uint32_t depth = argc > 2 ? std::stoul(argv[2]) : 4096;
   const uint32_t calls = argc > 3 ? std::stoul(argv[3]) : 32;
   const uint32_t rounds = argc > 4 ? std::stoul(argv[4]) : 3;
+  const uint32_t max_len = argc > 7 ? std::stoul(argv[7]) : 16384;
   std::vector<uint32_t> ids = read_ids("tests/golden/prompts/long32k.ids");
-  if (ids.size() < depth) return 2;
+  if (ids.empty()) return 2;
+  const std::vector<uint32_t> file = ids;
+  while (ids.size() < depth) ids.insert(ids.end(), file.begin(), file.end());
   ids.resize(depth);
+  if (size_t(depth) + 1024 > max_len) {
+    std::fprintf(stderr, "depth %u leaves no room for the arms at max_len %u\n", depth, max_len);
+    return 2;
+  }
   l0::Context ctx(0);
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   if (argc > 5 && !loader::parse_lm_head_form(argv[5], lm_head)) return 2;
@@ -65,7 +77,8 @@ int main(int argc, char** argv) {
   }
   std::printf("lm_head: %s, draft vocab %s\n", loader::lm_head_form_name(lm_head),
               loader::draft_vocab_name(dv.size).c_str());
-  runtime::Engine e(ctx, loader::load(ctx, argv[1], 16384, /*mtp=*/true, lm_head, dv), 16384);
+  if (max_len != 16384) std::printf("max_len: %u\n", max_len);
+  runtime::Engine e(ctx, loader::load(ctx, argv[1], max_len, /*mtp=*/true, lm_head, dv), max_len);
   e.prefill(ids);
   using Clock = std::chrono::steady_clock;
   struct Arm {

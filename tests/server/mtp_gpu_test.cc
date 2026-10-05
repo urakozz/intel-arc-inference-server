@@ -28,7 +28,10 @@
 // still has 23 launches. Bench rows carry `dv=<size>` for §11's off / 32k / 64k / 128k
 // acceptance and t/s rows (run `--lm-head int8` alone for the off arm).
 //
-// MTP lists are compiled at max_len 16384 only (spec 8 §8 A9): every run here is 16384.
+// [--max-len L] (both modes; default 16384, the registrations' and every recorded row's
+// length): the engine's KV / RoPE capacity. Spec 8 §12 lifted A9's 16384-only MTP lists, so
+// mtp_gpu_{32k,128k}_test run the gate at 32768 / 131072 (box queue row 6) and a bench at
+// --depth past long32k.ids repeats that file as its filler.
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -79,7 +82,8 @@ loader::DraftVocabSpec draft_vocab_spec(const std::string& snap, const HeadOpts&
   return s;
 }
 
-constexpr uint32_t kMaxLen = 16384;
+constexpr uint32_t kDefaultMaxLen = 16384;
+uint32_t kMaxLen = kDefaultMaxLen;   // --max-len
 constexpr uint32_t kGen = 256;
 
 struct Prompt {
@@ -190,6 +194,7 @@ int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpt
                            EngineAdapter(L.eng, Qwen35::kVocabUsed, 3)};
   int divergences = 0;
   uint64_t tot_d[3] = {0, 0, 0}, tot_a[3] = {0, 0, 0}, tot_i[3] = {0, 0, 0};
+  if (kMaxLen != kDefaultMaxLen) std::printf("max_len %u (--max-len)\n", kMaxLen);
   std::printf("M3 (%s): greedy %u ids, --mtp K vs --mtp 0; bar: identical\n",
               runtime::prefill_backend_name(backend), kGen);
   std::printf("%-24s %6s | %-22s | %-22s | %-22s\n", "prompt", "ids", "K=1 same acc tok/it",
@@ -300,10 +305,17 @@ int bench(const std::string& snap, runtime::PrefillBackend backend, uint32_t k, 
   Loaded L(snap, backend, k > 0, head);
   const std::string dv = loader::draft_vocab_name(L.eng.mtp() ? L.eng.draft_vocab() : 0);
   const std::string src = ".";
-  const std::vector<uint32_t> filler = read_ids(src + "/tests/golden/prompts/long32k.ids");
+  std::vector<uint32_t> filler = read_ids(src + "/tests/golden/prompts/long32k.ids");
+  // Past long32k.ids (--depth 65536 at --max-len 131072) the file repeats; below it the
+  // filler is the file's prefix, as before.
+  const std::vector<uint32_t> file = filler;
+  while (filler.size() < depth)
+    filler.insert(filler.end(), file.begin(),
+                  file.begin() + std::min(file.size(), depth - filler.size()));
   std::vector<Prompt> prompts;
   for (Prompt p : golden_prompts(src)) {
     CHECK(depth > p.ids.size() && depth - p.ids.size() <= filler.size());
+    CHECK(depth + kGen + runtime::Engine::kMaxDraft + 1 <= kMaxLen);
     std::vector<uint32_t> ids(filler.begin(), filler.begin() + (depth - p.ids.size()));
     ids.insert(ids.end(), p.ids.begin(), p.ids.end());
     prompts.push_back({"golden/" + p.name + "@" + std::to_string(depth), ids});
@@ -341,7 +353,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
                  "usage: mtp_gpu_test <snapshot> <backend> [--bench K [--sampled] [--depth D]]\n"
                  "                    [--lm-head bf16|int8] [--draft-vocab 32k|64k|128k"
-                 " [--draft-vocab-ids FILE]]\n");
+                 " [--draft-vocab-ids FILE]] [--max-len L]\n");
     return 2;
   }
   runtime::PrefillBackend backend{};
@@ -358,7 +370,10 @@ int main(int argc, char** argv) {
     else if (a == "--lm-head" && i + 1 < argc) CHECK(loader::parse_lm_head_form(argv[++i], head.lm_head));
     else if (a == "--draft-vocab" && i + 1 < argc) CHECK(loader::parse_draft_vocab(argv[++i], head.draft_vocab));
     else if (a == "--draft-vocab-ids" && i + 1 < argc) head.draft_vocab_ids = argv[++i];
-    else {
+    else if (a == "--max-len" && i + 1 < argc) {
+      kMaxLen = uint32_t(std::atoi(argv[++i]));
+      CHECK(kMaxLen >= kDefaultMaxLen && kMaxLen % 256 == 0);
+    } else {
       std::fprintf(stderr, "unknown argument %s\n", a.c_str());
       return 2;
     }
