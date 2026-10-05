@@ -48,3 +48,6 @@ target_link_libraries(b70-decode PRIVATE b70_k2_runtime)
 # Spec 8: b70-decode --mtp auto runs b70-serve's per-request policy (server::AdaptiveK, host
 # code in b70_server); appended, as the K2 line above.
 target_link_libraries(b70-decode PRIVATE b70_server)
+# Spec 18c: and K2's prefill (b70_k2_prefill: K2Engine::prefill, its walk and scratch).
+# b70-decode already links the prefill component when it is built (b70_link_prefill above).
+target_link_libraries(b70-decode PRIVATE b70_k2_prefill)

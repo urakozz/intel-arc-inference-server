@@ -617,4 +617,85 @@ if(B70_K2)
 endif()
 # ==== Spec 18b: K2-Horizon decode ============================================ (end) ====
 
+# ==== Spec 18c: K2-Horizon prefill (model::k2()) ============================ (begin) ====
+# Additive only, as 18b's block: no existing source changes, so every binary above (and in
+# prefill/) keeps its name and command line. New K2-only sources in src/kernels/k2/
+# (k2_pf_linear.cl, k2_pf_moe.cl, k2_pf_attn.cl); reused sources at K2's shapes:
+#   prefill/pf_embed.cl     the chunk's embedding gather (K2's vocabulary in the name)
+#   prefill/pf_prep.cl      pf_res_fold at K 2560 (stage A of the grouped norm, runtime M)
+#   k2/k2_prep.cl           k2_norm_finish and k2_attn_prep at M = 2048 (kernels::k2::kPfC),
+#                           S 1: decode's chains, row for row, over the prefill GEMM's one slice
+#   k2/k2_moe.cl            k2_route over [C][ln] logits, grid (1, C): MoVA's from the fused
+#                           row's v_router columns at pitch 9472; the MoE's is decode's binary
+#   prefill/pf_gemv_bf16.cl the MoE router GEMV over the chunk at decode's {16, 16} tiling
+#   prefill/pf_moe_gemm.cl  the grouped expert GEMMs: gate||up 2560 x 1536 (SiLU epilogue),
+#                           down 768 x 2560, MoVA's value experts 2560 x 1024 (plain)
+#   prefill/pf_gemm.cl      the dense and attention linears over k2_pf_dequant_slab's slabs
+#                           (pf_gemm_T0 / pf_gemm_T0_SILU, shape-free: the existing binaries)
+# What K2's prefill chunk binds: runtime/k2/k2_prefill.cc (2392 launches at every C, derived in
+# runtime/k2/k2_sizes.cc); the head is decode's binaries.
+if(B70_K2)
+  set(K2_PF_SRC ${CMAKE_CURRENT_SOURCE_DIR}/k2)
+  set(K2_PF_REUSE ${CMAKE_CURRENT_SOURCE_DIR}/prefill)
+  add_ocloc_kernel(k2_pf_embed_gather_D2560_V250624 SOURCE ${K2_PF_REUSE}/pf_embed.cl
+                   DEFINES HIDDEN=2560 VOCAB=250624)
+  foreach(SP 0 1)
+    add_ocloc_kernel(pf_res_fold_K2560_SP${SP}_G20 SOURCE ${K2_PF_REUSE}/pf_prep.cl
+                     DEFINES K=2560 S_PREV=${SP} FOLD_G=20)
+  endforeach()
+  add_ocloc_kernel(k2_norm_M2048_K2560_G20_W20_NG2 SOURCE ${K2_PF_SRC}/k2_prep.cl
+                   DEFINES M=2048 K=2560 NORM_G=20 NORM_WGS=20 NORM_GROUPS=2)
+  # The int4 linears' slabs (layout 0): q||k||gate||v, q||k||gate||v_router (a 256-column
+  # tail holding the router's 64), o_proj, dense gate||up, dense down.
+  foreach(row "2560 10240" "2560 9280" "4096 2560" "2560 12288" "6144 2560")
+    separate_arguments(f UNIX_COMMAND "${row}")
+    list(GET f 0 K)
+    list(GET f 1 N)
+    add_ocloc_kernel(k2_pf_dequant_slab_K${K}_N${N} SOURCE ${K2_PF_SRC}/k2_pf_linear.cl
+                     DEFINES K=${K} N=${N})
+  endforeach()
+  set(K2_PF_PREP_DEFINES ${CTRL_DEFINES} M=2048 QKV_S=1 Q_HEADS=32 KV_HEADS=8 HD=128)
+  add_ocloc_kernel(k2_attn_prep_M2048_N10240_S1_Q32KV8_V SOURCE ${K2_PF_SRC}/k2_prep.cl
+                   DEFINES ${K2_PF_PREP_DEFINES} QKV_N=10240 V_FROM_PARTIALS=1)
+  add_ocloc_kernel(k2_attn_prep_M2048_N9472_S1_Q32KV8 SOURCE ${K2_PF_SRC}/k2_prep.cl
+                   DEFINES ${K2_PF_PREP_DEFINES} QKV_N=9472 V_FROM_PARTIALS=0)
+  # The flash attention at head_dim 128 / GQA 4: the default (fp32 scores and probabilities)
+  # and the eager-mirroring variant (B70_K2_ATTN=eager), each gated (the walk's) and ungated
+  # (_O, the K1 test's). Natural exp (EXP2 0) in both, as K2's decode attention and the
+  # reference - PROVISIONAL for the default, a speed knob for plan 18c Task 3. 256 GRF as
+  # pf_flash_attn.
+  foreach(EG 0 1)
+    foreach(GT 0 1)
+      set(_n k2_pf_flash_attn_Q32KV8)
+      set(_x2 0)
+      if(EG)
+        string(APPEND _n _EAGER)
+      endif()
+      if(NOT GT)
+        string(APPEND _n _O)
+      endif()
+      add_ocloc_kernel(${_n} SOURCE ${K2_PF_SRC}/k2_pf_attn.cl
+                       DEFINES KT=64 RPW=8 HPW=4 Q_HEADS=32 KV_HEADS=8 EXP2=${_x2} EAGER=${EG}
+                               GATE_EPI=${GT}
+                       OPTIONS -cl-intel-256-GRF-per-thread)
+    endforeach()
+  endforeach()
+  add_ocloc_kernel(k2_route_M1_E64_T4_N9472_O9216_S1 SOURCE ${K2_PF_SRC}/k2_moe.cl
+                   DEFINES M=1 ROUTE_E=64 ROUTE_K=4 ROUTE_WG=64 ROUTE_LN=9472 ROUTE_LOFF=9216
+                           ROUTE_LS=1 ROUTE_SCALE=2.5f)
+  add_ocloc_kernel(k2_pf_moe_E100_T8_D2560_I768 SOURCE ${K2_PF_SRC}/k2_pf_moe.cl
+                   DEFINES PF_E=100 PF_K=8 PF_WG=128 PF_SHARED=1 PF_D=2560 PF_INTER=768 TM=32 KC=2048)
+  add_ocloc_kernel(k2_pf_mova_E64_T4_D2560_N1024 SOURCE ${K2_PF_SRC}/k2_pf_moe.cl
+                   DEFINES PF_E=64 PF_K=4 PF_WG=64 PF_SHARED=0 PF_D=2560 PF_VN=1024 TM=32 KC=2048)
+  add_ocloc_kernel(pf_moe_router_K2560_N128 SOURCE ${K2_PF_REUSE}/pf_gemv_bf16.cl
+                   DEFINES K=2560 N=128 COLS_PER_WG=16 KSPLIT=16)
+  add_ocloc_kernel(pf_moe_gemm_K2560_N1536_SILU SOURCE ${K2_PF_REUSE}/pf_moe_gemm.cl
+                   DEFINES K=2560 N=1536 TM=32 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_moe_gemm_K768_N2560 SOURCE ${K2_PF_REUSE}/pf_moe_gemm.cl
+                   DEFINES K=768 N=2560 TM=32 OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_moe_gemm_K2560_N1024 SOURCE ${K2_PF_REUSE}/pf_moe_gemm.cl
+                   DEFINES K=2560 N=1024 TM=32 OPTIONS -cl-intel-256-GRF-per-thread)
+endif()
+# ==== Spec 18c: K2-Horizon prefill ============================================ (end) ====
+
 add_subdirectory(prefill)
