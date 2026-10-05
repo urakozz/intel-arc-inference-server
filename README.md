@@ -64,8 +64,14 @@ same architecture load, but nothing is tuned for them. The first mixture-of-expe
 model, Ornith 1.5 35B-A3B (spec 15: 256 experts, top-8, ~3 B active), decodes,
 prefills and is served by `b70-serve` with its own chat template, tool calls and
 MTP head (spec 15c-15e) - all written without the card and **not yet run on it**,
-and no int4 Ornith checkpoint is published yet (spec 15a). Specialisation is the whole
-strategy, since a general engine cannot hardcode the things this one hardcodes.
+and no int4 Ornith checkpoint is published yet (spec 15a). Weights load from our own
+AutoRound / GPTQ g64 format (recommended), from GPTQ g128, and from llm-compressor's
+**symmetric** compressed-tensors `pack-quantized` int4 (g64 / g128, e.g.
+RedHatAI/Qwen3.8-27B-INT4). The last is converted exactly at load with no kernel change, and
+the loader prints a note that it expects reduced quality compared to our recommended
+format, AutoRound GPTQ W4A16 g64 symmetric. Asymmetric checkpoints are refused (docs/13,
+spec 20 §9). Specialisation is the whole strategy, since a general engine cannot hardcode
+the things this one hardcodes.
 
 ## The checkpoint, and why group size 64
 

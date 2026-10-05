@@ -74,8 +74,9 @@ exist under its prefix, never by what `config.json` claims:
 | Found | Kind | Asserted |
 |---|---|---|
 | `<prefix>.qweight` | int4 GPTQ | `.scales` must exist; `qweight` dtype `I32`, `scales` dtype `F16`; `scales` shape exactly `[K/64][N]` |
+| `<prefix>.weight_packed` | int4 compressed-tensors, repacked to the GPTQ pair | `.weight_scale` + `.weight_shape` must exist, no `.weight_zero_point`; see "compressed-tensors symmetric checkpoints" |
 | `<prefix>.weight` | bf16 | dtype `BF16` |
-| neither | - | throws naming the prefix |
+| none of these | - | throws naming the prefix |
 
 Doc 02's rule, that format plurality is a load-time problem, is why: the same
 `quant_method: "gptq"` string covers checkpoints that ship different tensors,
@@ -745,6 +746,99 @@ reference and gates per checkpoint, and doubled binaries. The cheap half, if it 
 wanted, is the decode GEMV only (`gemv.cl` with `GROUP` a define), prefill keeping g64 by
 reading scale row `g >> 1`. Worth it only if a model we mainly serve exists only as g128;
 re-quantising such a model at g64 ourselves is the other answer.
+
+## compressed-tensors symmetric checkpoints
+
+llm-compressor writes its W4A16 releases (RedHatAI's `*-quantized.w4a16`, `*-INT4`) in
+compressed-tensors' `pack-quantized` format. For the **symmetric** int4 group scheme
+that format holds exactly what GPTQ's does, laid out the other way round, so the loader
+reads it with a repack and no kernel change (spec 20 §9, operator ruling 2026-10-05).
+
+**The format, per linear.** `weight_packed` int32 [N][K/8]: eight consecutive input
+columns per word, k = 8r in the low nibble, each stored as q + 8. `weight_scale` [N][K/g],
+f16 or bf16 (RedHatAI/Qwen3.8-27B-INT4 ships bf16). `weight_shape` [2] = [N, K], I64.
+Optional `weight_g_idx` [K] (activation ordering) and `weight_zero_point` (asymmetric).
+Confirmed against a real checkpoint by `tools/oracle/dflash_ref.py`'s
+`dequant_pack_quantized`. `config.json`: `quant_method: compressed-tensors`, `format:
+pack-quantized`, `config_groups.*.weights` {num_bits, type, symmetric, group_size,
+strategy, actorder}, and `ignore`: modules left in bf16, which ship `.weight` and are
+classified as bf16 anyway.
+
+**The conversion: one place, exact.** `LinearSrc::classify` finds `.weight_packed`
+(after `.qweight`, before `.weight`) and builds the GPTQ pair every loader path already
+consumes:
+
+```
+qweight[r][n] = weight_packed[n][r]              the int32 words verbatim, transposed
+scales[g][n]  = f16(weight_scale[n][g])          bf16 -> f16 only if exact, else refused
+then g128 -> g64 expansion (as for g128 checkpoints, above)
+```
+
+The nibble order and the + 8 offset are the same in both formats, so the words are copied,
+never re-packed. A bf16 scale has 8 significant bits and f16 has 11, so every bf16 value
+from 2^-17 to 65504 is an f16 exactly; anything outside that range is refused, naming the
+tensor and the index, because rounding a scale changes every weight in its group. Both
+buffers belong to the `LinearSrc` (`owned_qweight`, `expanded_scales`, shared pointers),
+one linear at a time. `LinearSrc::suffixes()` names the tensors read (`weight_packed`,
+`weight_scale`, `weight_shape`, and `weight_g_idx` if shipped), and every loader marks
+those consumed. So **dense linears, Agnes's fold, the MoE experts (main layers and the
+MTP head's MoE layer) and K2** all take compressed-tensors through the same function.
+K2's name check expects one packing per checkpoint: if any `.weight_packed` exists, every
+int4 linear must be in that form. The dense MTP head stays the published 15 bf16 tensors
+(RedHatAI's checkpoint `ignore`s `mtp.*`); a quantised dense head is refused by count, as
+before.
+
+**What proves it exact.** `tests/loader/ct_loader_test.cc` quantises known floats at g64
+and g128 with f16 and bf16 scales, writes them in both formats, and checks three things.
+Every converted weight, read through `common::Int4Gptq::at` (the kernels' host reference)
+and through the layout-1 tiles, equals the format's own dequant (u − 8) × s, which equals
+q × s of the quantisation. The converted qweight and scales are byte-equal to the GPTQ
+checkpoint of the same q and s. One group's scale is subnormal in f16. `ornith_repack_test`
+repacks a compressed-tensors MoE layer (separate and fused experts, g128 on one) to the GPTQ
+layer's device bytes. `k2_repack_test` does the same for a whole compressed-tensors K2
+checkpoint, layer by layer, with nothing unconsumed.
+
+**Refused, by field or by tensor.** `symmetric: false` and any `.weight_zero_point`
+(asymmetric, spec 20 §9: no zero-point kernels, and no exact conversion to symmetric int4);
+`num_bits` ≠ 4, `type` ≠ int, `strategy` ≠ group, `group_size` not 64 / 128 (in the config,
+and again from the scale shapes); `format` other than pack-quantized; quantised
+activations; `dynamic` weights; a `quantization_status` other than compressed; a non-empty
+`sparsity_config` or `transform_config` (rotations put the weights in another basis).
+`actorder` "weight" / "static" (static is an alias for weight) and null are accepted. They
+quantise in activation order but assign groups in stored column order, which is the
+identity k / group the kernels compute. "group" / "dynamic" (deprecated) is accepted only
+if every linear ships a `weight_g_idx` and each one is the identity. A non-identity
+`weight_g_idx` is refused under any `actorder`. A compressed-tensors config over `.qweight`
+tensors, or a GPTQ config over `.weight_packed`, is refused by `check_quant_scan`.
+`kv_cache_scheme` (fp8 KV calibration) is accepted: its `self_attn.{k,v}_scale` tensors are
+dropped by name and counted in the report line, because this engine's KV cache is bf16 or
+its own int8.
+
+**The startup note.** A compressed-tensors load prints one line to stderr (and keeps it in
+`LoadReport::quant_note` / `K2LoadReport::quant_note`; `ct_conversion_note` is the
+host-testable source):
+
+```
+loader: converting compressed-tensors pack-quantized (g128, 400 linears): weight_packed [N][K/8] -> our qweight
+[K/8][N], weight_scale [N][K/g] bf16 -> scales [K/g][N] f16 (exact) (g128 -> g64 scales expanded). The model
+is supported, but expect reduced quality compared to our recommended format: AutoRound GPTQ W4A16 g64 symmetric.
+```
+
+The figures are for RedHatAI/Qwen3.8-27B-INT4 (48 × 3 GDN + 64 × 3 MLP + 16 × 4 attention
+linears). A GPTQ or AutoRound checkpoint prints nothing. "Reduced quality" is relative to
+our own g64 AutoRound quantisation: llm-compressor's g128 group is twice as coarse, and its
+GPTQ calibration is not our recipe (spec 20 §3). The bytes on the card are g64's either
+way, so W and the speed match the g64 checkpoint.
+
+**Real repos checked (config.json only, 2026-10-05).** Accepted: RedHatAI/Qwen3.8-27B-INT4
+(the architecture this engine runs, `Qwen3_5ForConditionalGeneration`, hidden 5120, 64
+layers; sym int4 g128, actorder static, bf16 scales, fp8 `kv_cache_scheme`; its header
+matches the published checkpoint's structure: in_proj_a/b, lm_head, the visual tower and
+the 15-tensor MTP head in bf16) and RedHatAI/Qwen3-32B-quantized.w4a16 (sym g128 actorder
+weight; a `Qwen3ForCausalLM` the engine does not describe). Refused: Padakovec/Kolibri-1-
+W4A16-GPTQ and RedHatAI/Qwen3-8B-quantized.w4a16 (`symmetric = false`), and
+halt95/Qwen3.8-Flash-Next-W4A16-Merlin (an int8 channel group). The configs are fixtures
+in `tests/loader/ct/`.
 
 ## Deliberately not loaded
 
