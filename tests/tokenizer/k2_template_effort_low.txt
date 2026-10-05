@@ -1,0 +1,6 @@
+<|ifm|begin_of_text|><|ifm|im_start|>user
+Say hi.<|ifm|im_end|><|ifm|im_start|>assistant
+<ifm|think_faster>
+</ifm|think_faster>Hi.<|ifm|im_end|><|ifm|im_start|>user
+Again.<|ifm|im_end|><|ifm|im_start|>assistant
+<ifm|think_faster>

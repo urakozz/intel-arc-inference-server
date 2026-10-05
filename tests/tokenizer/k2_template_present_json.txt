@@ -1,0 +1,30 @@
+<|ifm|begin_of_text|><|ifm|im_start|>system
+# Tools
+You may call one or more tools to assist with the user query.
+
+Available tools are:
+
+<ifm|tools>
+{"function": {"description": "Read a file from the workspace.\nReturns the lines numbered from 1.", "name": "read", "parameters": {"properties": {"filePath": {"description": "Absolute path of the file.", "type": "string"}, "limit": {"default": 2000, "description": "Lines to read.", "type": "integer"}, "offset": {"description": "Line to start from (1-based).", "type": "integer"}}, "required": ["filePath"], "type": "object"}}, "type": "function"}
+{"function": {"description": "Replace text in a file.", "name": "edit", "parameters": {"properties": {"filePath": {"type": "string"}, "newString": {"type": "string"}, "oldString": {"description": "Text to replace; must be unique unless replaceAll.", "type": "string"}, "replaceAll": {"default": false, "type": "boolean"}}, "required": ["filePath", "oldString", "newString"], "type": "object"}}, "type": "function"}
+</ifm|tools>
+
+The complete set of callable tool names is: read, edit. Call one of these exact names. No other tool exists, whatever a task description, a skill file, or a previous turn may imply; a call to any other name fails and is not retried for you.
+
+When calling tools, you MUST follow the tool-call format below:
+
+Wrap all tool calls in a single <ifm|tool_calls></ifm|tool_calls> block. For each call, write the function name at the start of <ifm|tool_call>, followed by paired <ifm|arg_key> and <ifm|arg_value> tags for each argument:
+
+<ifm|tool_calls>
+<ifm|tool_call>$FUNCTION_NAME
+<ifm|arg_key>$PARAMETER_NAME</ifm|arg_key>
+<ifm|arg_value>$PARAMETER_VALUE</ifm|arg_value>
+...
+</ifm|tool_call>
+</ifm|tool_calls>
+
+String and scalar parameters should be written as plain text. Array and object parameters should be written as JSON literals.
+
+Answer in German.<|ifm|im_end|><|ifm|im_start|>user
+Lies die Datei.<|ifm|im_end|><|ifm|im_start|>assistant
+<ifm|think>

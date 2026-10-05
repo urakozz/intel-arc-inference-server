@@ -1,0 +1,4 @@
+<|ifm|begin_of_text|><|ifm|im_start|>system
+You are a terse assistant.<|ifm|im_end|><|ifm|im_start|>user
+Name one prime number above 90.<|ifm|im_end|><|ifm|im_start|>assistant
+<ifm|think>

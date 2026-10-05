@@ -1,0 +1,137 @@
+{
+  "comment": "Spec 18d: K2-Horizon's chat template (the int4 repo's, the one served) on message lists that exercise every branch the server reaches. tools/tokenizer/dump_k2.py renders each case through transformers' apply_chat_template into k2_template_<name>.txt; template_test renders it through the engine's renderer (src/tokenizer/chat_template.cc) and compares byte for byte. kwargs are chat_template_kwargs.",
+  "bos_token": "<|ifm|begin_of_text|>",
+  "eos_token": "<|ifm|endoftext|>",
+  "tools": {
+    "read": {"type": "function", "function": {"name": "read", "description": "Read a file from the workspace.\nReturns the lines numbered from 1.",
+      "parameters": {"type": "object", "properties": {
+        "filePath": {"type": "string", "description": "Absolute path of the file."},
+        "offset": {"type": "integer", "description": "Line to start from (1-based)."},
+        "limit": {"type": "integer", "description": "Lines to read.", "default": 2000}},
+        "required": ["filePath"]}}},
+    "edit": {"type": "function", "function": {"name": "edit", "description": "Replace text in a file.",
+      "parameters": {"type": "object", "properties": {
+        "filePath": {"type": "string"},
+        "oldString": {"type": "string", "description": "Text to replace; must be unique unless replaceAll."},
+        "newString": {"type": "string"},
+        "replaceAll": {"type": "boolean", "default": false}},
+        "required": ["filePath", "oldString", "newString"]}}},
+    "bash": {"type": "function", "function": {"name": "bash", "description": "Run a shell command in the workspace.",
+      "parameters": {"type": "object", "properties": {
+        "command": {"type": "string"},
+        "timeout": {"type": "number", "description": "Timeout in milliseconds."},
+        "description": {"type": "string", "description": "What the command does, in 5-10 words."}},
+        "required": ["command", "description"]}}},
+    "todowrite": {"type": "function", "function": {"name": "todowrite", "description": "Write the session's todo list.",
+      "parameters": {"type": "object", "properties": {
+        "todos": {"type": "array", "description": "The whole list.", "items": {"type": "object", "properties": {
+          "content": {"type": "string"},
+          "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+          "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+          "id": {"type": "string"}}, "required": ["content", "status", "priority", "id"]}}},
+        "required": ["todos"]}}},
+    "glob": {"type": "function", "function": {"name": "glob", "description": "Find files by pattern.",
+      "parameters": {"type": "object", "properties": {
+        "pattern": {"type": "string"},
+        "path": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "description": "Directory to search; the workspace when null."}},
+        "required": ["pattern"]}}},
+    "patch": {"type": "function", "function": {"name": "patch", "description": "Apply edits (pydantic-style schema).",
+      "parameters": {"type": "object", "$defs": {"Edit": {"type": "object", "properties": {
+          "path": {"type": "string"}, "line": {"type": "integer"}}, "required": ["path"]}},
+        "properties": {"edits": {"type": "array", "items": {"$ref": "#/$defs/Edit"}},
+          "first": {"$ref": "#/$defs/Edit", "description": "The edit applied first."}},
+        "required": ["edits"]}}},
+    "now": {"type": "function", "function": {"name": "now", "description": "The current time.",
+      "parameters": {"type": "object", "properties": {}}}}
+  },
+  "cases": [
+    {"name": "plain", "tools": null, "kwargs": {},
+     "messages": [
+       {"role": "system", "content": "You are a terse assistant."},
+       {"role": "user", "content": "Name one prime number above 90."}]},
+    {"name": "thinking", "tools": null, "kwargs": {},
+     "messages": [
+       {"role": "user", "content": "What is 17 * 23?"},
+       {"role": "assistant", "content": "391", "reasoning_content": "17 * 23 = 17 * 20 + 17 * 3 = 340 + 51 = 391."},
+       {"role": "user", "content": "And 19 * 21?"}]},
+    {"name": "effort_medium", "tools": null, "kwargs": {"reasoning_effort": "medium"},
+     "messages": [
+       {"role": "user", "content": "Capital of France?"},
+       {"role": "assistant", "content": "Paris.", "think_fast": "Known fact."},
+       {"role": "user", "content": "Of Italy?"}]},
+    {"name": "effort_low", "tools": null, "kwargs": {"reasoning_effort": "low"},
+     "messages": [
+       {"role": "user", "content": "Say hi."},
+       {"role": "assistant", "content": "Hi.", "think_faster": ""},
+       {"role": "user", "content": "Again."}]},
+    {"name": "no_thinking_field", "tools": null, "kwargs": {},
+     "messages": [
+       {"role": "user", "content": "Hello"},
+       {"role": "assistant", "content": "Hello! How can I help?"},
+       {"role": "user", "content": "Tell me a joke."}]},
+    {"name": "null_reasoning", "tools": null, "kwargs": {},
+     "messages": [
+       {"role": "user", "content": "Hello"},
+       {"role": "assistant", "content": "Hi there.", "reasoning_content": null},
+       {"role": "user", "content": "Bye."}]},
+    {"name": "list_content", "tools": null, "kwargs": {},
+     "messages": [
+       {"role": "system", "content": [{"type": "text", "text": "You are a coding agent. "}, {"type": "text", "text": "Be brief."}]},
+       {"role": "user", "content": [{"type": "text", "text": "Explain RAII"}, {"type": "text", "text": " in one line."}]}]},
+    {"name": "tools", "tools": ["read", "edit", "bash", "todowrite"], "kwargs": {},
+     "messages": [
+       {"role": "system", "content": "You are a coding agent working in /work."},
+       {"role": "user", "content": "Open src/main.cc and tell me what it does."}]},
+    {"name": "tools_no_system", "tools": ["read", "now"], "kwargs": {},
+     "messages": [
+       {"role": "user", "content": "What time is it?"}]},
+    {"name": "tool_call_history", "tools": ["read"], "kwargs": {},
+     "messages": [
+       {"role": "user", "content": "Open src/main.cc."},
+       {"role": "assistant", "content": "", "tool_calls": [
+         {"id": "call_1", "type": "function", "function": {"name": "read", "arguments": {"filePath": "/work/src/main.cc", "offset": 12}}}]},
+       {"role": "tool", "tool_call_id": "call_1", "content": "12\tint main() { return 0; }"},
+       {"role": "user", "content": "Is it correct?"}]},
+    {"name": "tool_response", "tools": ["read", "bash"], "kwargs": {},
+     "messages": [
+       {"role": "user", "content": "Run the loader tests and show the CMake file."},
+       {"role": "assistant", "content": "Running both.", "reasoning_content": "Two independent calls; issue them together.", "tool_calls": [
+         {"id": "call_a", "type": "function", "function": {"name": "bash", "arguments": {"command": "ctest -R loader", "description": "Run the loader tests"}}},
+         {"id": "call_b", "type": "function", "function": {"name": "read", "arguments": {"filePath": "/work/CMakeLists.txt"}}}]},
+       {"role": "tool", "tool_call_id": "call_a", "content": "5 passed, 0 failed"},
+       {"role": "tool", "tool_call_id": "call_b", "content": [{"type": "text", "text": "1\tcmake_minimum_required(VERSION 3.20)"}, {"type": "text", "text": "2\tproject(b70)"}]}]},
+    {"name": "calls_json", "tools": ["read", "edit"], "kwargs": {"tool_call_format": "json"},
+     "messages": [
+       {"role": "user", "content": "Fix the typo in README.md."},
+       {"role": "assistant", "content": "", "reasoning_content": "Edit it.", "tool_calls": [
+         {"id": "call_1", "type": "function", "function": {"name": "edit", "arguments": {"filePath": "/work/README.md", "oldString": "teh", "newString": "the", "replaceAll": true}}}]},
+       {"role": "tool", "tool_call_id": "call_1", "content": "Edit applied."},
+       {"role": "user", "content": "Now read lines 1-5."}]},
+    {"name": "calls_xml_typed", "tools": ["read", "todowrite", "glob"], "kwargs": {"tool_call_format": "xml_typed"},
+     "messages": [
+       {"role": "user", "content": "Plan the work."},
+       {"role": "assistant", "content": "", "reasoning_content": "Write the list, then look.", "tool_calls": [
+         {"id": "call_1", "type": "function", "function": {"name": "todowrite", "arguments": {"todos": [{"content": "Read main.cc", "id": "1", "priority": "high", "status": "pending"}]}}},
+         {"id": "call_2", "type": "function", "function": {"name": "read", "arguments": {"filePath": "/work/main.cc", "limit": 40}}},
+         {"id": "call_3", "type": "function", "function": {"name": "glob", "arguments": {"pattern": "**/*.cc", "path": null}}}]},
+       {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+       {"role": "tool", "tool_call_id": "call_2", "content": "1\t#include <cstdio>"},
+       {"role": "tool", "tool_call_id": "call_3", "content": "main.cc"}]},
+    {"name": "present_xml", "tools": ["read", "todowrite", "edit"], "kwargs": {"tool_presentation_format": "xml"},
+     "messages": [
+       {"role": "user", "content": "List the todo items."}]},
+    {"name": "present_json", "tools": ["read", "edit"], "kwargs": {"tool_presentation_format": "json"},
+     "messages": [
+       {"role": "system", "content": "Answer in German."},
+       {"role": "user", "content": "Lies die Datei."}]},
+    {"name": "null_default", "tools": ["glob"], "kwargs": {},
+     "messages": [
+       {"role": "user", "content": "Find the CMake files."}]},
+    {"name": "schema_ref", "tools": ["patch"], "kwargs": {},
+     "messages": [
+       {"role": "user", "content": "Apply the edits."}]},
+    {"name": "schema_ref_xml", "tools": ["patch", "glob"], "kwargs": {"tool_presentation_format": "xml"},
+     "messages": [
+       {"role": "user", "content": "Apply the edits."}]}
+  ]
+}

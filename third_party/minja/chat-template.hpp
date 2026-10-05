@@ -194,16 +194,22 @@ class chat_template {
         const json dummy_args_obj {{"argument_needle", "print('Hello, World!')"}};
 
         // Note: the arguments are rendered in both cases, but may be double-escaped, which we don't want.
+        // b70 patch (spec 18d): ">argument_needle<" too - an argument name between tags, as
+        // K2-Horizon's <ifm|arg_key>NAME</ifm|arg_key> writes it.
+        const auto renders_argument = [&](const std::string & s) {
+            return contains(s, "<parameter=argument_needle>") || contains(s, "\"argument_needle\":") ||
+                   contains(s, "'argument_needle':") || contains(s, ">argument_needle<");
+        };
         out = try_raw_render(json::array({
             dummy_user_msg,
             make_tool_calls_msg(json::array({make_tool_call("ipython", dummy_args_obj.dump())})),
         }), {}, false);
-        auto tool_call_renders_str_arguments = contains(out, "<parameter=argument_needle>") || contains(out, "\"argument_needle\":") || contains(out, "'argument_needle':");
+        auto tool_call_renders_str_arguments = renders_argument(out);
         out = try_raw_render(json::array({
             dummy_user_msg,
             make_tool_calls_msg(json::array({make_tool_call("ipython", dummy_args_obj)})),
         }), {}, false);
-        auto tool_call_renders_obj_arguments = contains(out, "<parameter=argument_needle>") || contains(out, "\"argument_needle\":") || contains(out, "'argument_needle':");
+        auto tool_call_renders_obj_arguments = renders_argument(out);
 
         caps_.supports_tool_calls = tool_call_renders_str_arguments || tool_call_renders_obj_arguments;
         caps_.requires_object_arguments = !tool_call_renders_str_arguments && tool_call_renders_obj_arguments;

@@ -151,14 +151,27 @@ Template::~Template() = default;
 
 std::string Template::render(const nlohmann::json& messages, const nlohmann::json& tools,
                              bool enable_thinking) const {
+  return render(messages, tools, enable_thinking, nlohmann::json());
+}
+
+std::string Template::render(const nlohmann::json& messages, const nlohmann::json& tools,
+                             bool enable_thinking, const nlohmann::json& kwargs) const {
+  if (!kwargs.is_null() && !kwargs.is_object())
+    throw std::invalid_argument("chat::Template::render: kwargs must be an object");
   minja::chat_template_inputs inputs;
   inputs.messages = messages;
   inputs.tools = tools.is_null() ? nlohmann::ordered_json() : nlohmann::ordered_json(tools);
   inputs.add_generation_prompt = true;
-  inputs.extra_context = nlohmann::ordered_json{{"enable_thinking", enable_thinking}};
+  inputs.extra_context = nlohmann::ordered_json::object();
+  if (kwargs.is_object()) {
+    for (const auto& [key, value] : kwargs.items()) inputs.extra_context[key] = value;
+  }
+  inputs.extra_context["enable_thinking"] = enable_thinking;
   minja::chat_template_options options;
   return impl_->tmpl->apply(inputs, options);
 }
+
+const std::string& Template::bos_token() const { return impl_->bos; }
 
 const std::string& Template::eos_token() const { return impl_->eos; }
 

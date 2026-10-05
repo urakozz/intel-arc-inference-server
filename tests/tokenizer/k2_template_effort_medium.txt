@@ -1,0 +1,6 @@
+<|ifm|begin_of_text|><|ifm|im_start|>user
+Capital of France?<|ifm|im_end|><|ifm|im_start|>assistant
+<ifm|think_fast>
+Known fact.</ifm|think_fast>Paris.<|ifm|im_end|><|ifm|im_start|>user
+Of Italy?<|ifm|im_end|><|ifm|im_start|>assistant
+<ifm|think_fast>

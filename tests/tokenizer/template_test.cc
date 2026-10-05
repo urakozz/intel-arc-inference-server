@@ -1,9 +1,11 @@
 // Spec 3 §2 bar 2: byte-for-byte against transformers.apply_chat_template.
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #include "check.h"
 #include "tokenizer/chat_template.h"
@@ -48,6 +50,11 @@ void diff_report(const char* name, const std::string& got, const std::string& wa
 // Spec 15e: an optional fifth argument names the reference files' prefix (`ornith` ->
 // <dir>/ornith_template_<name>.txt). A snapshot without its two template files is a
 // SKIP (77), not a failure - the test is about the renderer, not about the cache.
+// Spec 18d: the cases file may also be an object (k2_template_cases.json, prefix `k2`):
+// "bos_token" / "eos_token" the snapshot's tokenizer_config must name, "tools" a table of tool
+// objects by name, and "cases" whose "tools" lists names from it and whose "kwargs" are the
+// request's chat_template_kwargs (tool_call_format, reasoning_effort, ...); "think" defaults to
+// true (tools/tokenizer/dump_k2.py writes the references).
 int run_cases(const std::string& dir, const std::string& snap, const std::string& cases_file,
               const std::string& prefix) {
   for (const char* f : {"/tokenizer_config.json", "/chat_template.jinja"})
@@ -56,13 +63,39 @@ int run_cases(const std::string& dir, const std::string& snap, const std::string
       return 77;
     }
   chat::Template tmpl(snap);
-  CHECK_EQ(tmpl.eos_token(), std::string("<|im_end|>"));
-  const auto cases = nlohmann::json::parse(slurp(dir + "/" + cases_file));
+  const auto spec = nlohmann::json::parse(slurp(dir + "/" + cases_file));
+  const bool table = spec.is_object();
+  const auto& cases = table ? spec.at("cases") : spec;
+  if (table) {
+    CHECK_EQ(tmpl.bos_token(), spec.at("bos_token").get<std::string>());
+    CHECK_EQ(tmpl.eos_token(), spec.at("eos_token").get<std::string>());
+  } else {
+    CHECK_EQ(tmpl.eos_token(), std::string("<|im_end|>"));
+  }
   int bad = 0;
   for (const auto& c : cases) {
     const std::string file = prefix + "_template_" + c.at("name").get<std::string>() + ".txt";
     const std::string want = slurp(dir + "/" + file);
-    const std::string got = tmpl.render(c.at("messages"), c.at("tools"), c.at("think").get<bool>());
+    nlohmann::json tools = c.at("tools");
+    if (table && tools.is_array()) {
+      nlohmann::json named = nlohmann::json::array();
+      for (const auto& name : tools) named.push_back(spec.at("tools").at(name.get<std::string>()));
+      tools = std::move(named);
+    }
+    const bool think = c.contains("think") ? c.at("think").get<bool>() : true;
+    const nlohmann::json kwargs = c.contains("kwargs") ? c.at("kwargs") : nlohmann::json::object();
+    std::string got;
+    try {
+      got = tmpl.render(c.at("messages"), tools, think, kwargs);
+    } catch (const std::exception& error) {
+      // minja appends the template location of every enclosing node: the first lines say it.
+      const std::string what = error.what();
+      size_t cut = 0;
+      for (int line = 0; line < 4 && cut != std::string::npos; ++line) cut = what.find('\n', cut + 1);
+      std::fprintf(stderr, "%s: the render threw: %s\n", file.c_str(), what.substr(0, cut).c_str());
+      ++bad;
+      continue;
+    }
     if (got != want) {
       diff_report(file.c_str(), got, want);
       ++bad;
