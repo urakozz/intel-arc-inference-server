@@ -347,6 +347,53 @@ one K for the whole server.
 - **Pending on the box:** the int8 cost table (above); D1 rows for `--mtp auto` against
   K = 1 and K = 3 on the golden and tool-call prompts; the opencode replay.
 
+## 11. Amendment: a reduced draft vocabulary (2026-10-05)
+
+The MTP draft step reads the whole int8 `lm_head` (248,320 x 5120, 1.27 GB, ~2.2 ms) for every
+draft. Drafting from a subset V′ of the vocabulary reads proportionally less. **The verify stays
+full-vocabulary and bitwise (M2), so output never changes:** greedy output with the subset equals
+greedy output without it, and sampled output keeps the target's distribution (a draft can only be
+a subset id; q = 0 elsewhere, which the acceptance rule handles, M4). Only acceptance can drop,
+when the target's next id lies outside V′.
+
+- **The flag.** `b70-serve --draft-vocab off|32k|64k|128k` (default `off` until the box rows
+  below decide), meaning |V′| = 32768 / 65536 / 131072, the sizes the head GEMV is compiled for.
+  `--draft-vocab-ids FILE` (optional) supplies a ranked id list. Both need `--mtp`.
+- **Which ids (in this order, until |V′| is full, then sorted ascending):**
+  1. every added token of `tokenizer.json` (33 on Qwen3.8: the chat, tool-call and think tags and
+     the EOS ids), always; agentic output depends on these most;
+  2. the ids of `--draft-vocab-ids`, in file order: a frequency ranking, built by
+     `tools/draft_vocab/rank.py` from `--log-requests` logs (the operator's own traffic) or from
+     any tokenised corpus;
+  3. the lowest remaining base ids (byte-level BPE ids follow merge order, which tracks training
+     frequency).
+- **Coverage on our sets (measured, lowest-N ids + the 33 added tokens; the share of tokens a
+  subset head could never draft):**
+
+  | N | tool-call set | code | prose | long | long32k | cjk |
+  |---|---|---|---|---|---|---|
+  | 32k | 3.76 % | 3.28 % | 16.7 % | 26.2 % | 6.33 % | 73.7 % |
+  | 64k | 1.16 % | 1.64 % | 9.52 % | 23.4 % | 2.43 % | 73.7 % |
+  | 128k | **0.03 %** | **0 %** | 2.38 % | 1.42 % | 0.48 % | 2.63 % |
+
+  A head limited to the first 131,072 rows alone would miss every added token (all >= 248,044),
+  so every tool-call boundary would be a rejection; rule 1 exists for that.
+- **Design.** At load the chosen rows of the int8 head (rows and their fp32 row scales) are
+  gathered, ascending by id, into a compact [|V′|][5120] matrix (+168 / 336 / 671 MB) with an
+  id table [|V′|] u32. The draft list runs `gemv_i8w` at N = |V′| on it, argmax over the compact
+  logits (ties to the lowest index = the lowest id, because the table is ascending, as on the
+  full head), and the index is mapped through the table into `out_token` / `cur_token`. For
+  sampling, the compact logits are scattered into the draft's full-vocabulary row of
+  `mtp_logits` whose other entries hold -inf (written once at capture), so the host's
+  acceptance code is unchanged.
+- **Gates (box).** Greedy output with `--draft-vocab 128k` equals `--draft-vocab off` token for
+  token on the golden set and A4, every K (M3); the sampled acceptance test with q = 0 outside V′
+  (M4, host); D1-style rows: acceptance and t/s at off / 32k / 64k / 128k on the golden, A4 and
+  prose prompts, interleaved; the default becomes the best size if it beats `off` by >= 2 % on
+  A4 and loses nowhere. Expected (derived): ~1 ms less per draft at 128k, ~4-5 % per K = 3
+  iteration.
+- **Reuse.** Spec 19's drafter candidate head takes the same compact matrix and table.
+
 ## 12. Amendment: MTP at every context length (2026-10-05)
 
 A9's "MTP lists are compiled at max_len 16384" was true of v1 decode attention, whose
