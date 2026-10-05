@@ -12,7 +12,8 @@
 #   BASE   the baseline tree (G0's reference build)
 #   STATE  this run's state directory (logs, status lines, JUnit files)
 #   STAGE  the stage being run; LOG its log file
-#   B70_GIT_SHA, BV_BASE_SHA, JOBS, CMAKE_ARGS, SNAP_QWEN, SNAP_AGNES, SNAP_ORNITH, PORT, ...
+#   B70_GIT_SHA, BV_BASE_SHA, JOBS, CMAKE_ARGS, SNAP_QWEN, SNAP_AGNES, SNAP_ORNITH, SNAP_K2,
+#   PORT, ...
 
 # ---- the registry ---------------------------------------------------------------------
 BV_IDS=(); BV_ROWS=(); BV_SELS=(); BV_KINDS=(); BV_NEEDS=(); BV_AFTERS=(); BV_TITLES=()
@@ -64,13 +65,14 @@ bv_defaults() {
   : "${SNAP_QWEN:=$hf/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d}"
   : "${SNAP_AGNES:=urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ}"
   : "${SNAP_ORNITH:=urakozz/Ornith-1.5-35B-A3B-W4A16-g64-AutoRound-GPTQ}"
+  : "${SNAP_K2:=urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ}"   # B70_K2_SNAPSHOT
   : "${TOK_PYTHON:=$HOME_R/auto-round/.venv/bin/python}"
   : "${JOBS:=44}"
   : "${DEVICE:=0}"
   : "${PORT:=8013}"
   : "${CMAKE_ARGS:=}"
   : "${B70_GIT_SHA:=unknown}"
-  export SNAP_QWEN SNAP_AGNES SNAP_ORNITH TOK_PYTHON JOBS DEVICE PORT CMAKE_ARGS B70_GIT_SHA
+  export SNAP_QWEN SNAP_AGNES SNAP_ORNITH SNAP_K2 TOK_PYTHON JOBS DEVICE PORT CMAKE_ARGS B70_GIT_SHA
 }
 
 # status_of ID - this run's recorded result of a stage (empty if none)
@@ -86,6 +88,22 @@ need_pass() {
     if [ "${DRY:-0}" = 1 ]; then printf '    (requires %s PASS in this run)\n' "$s"; continue; fi
     if [ "$r" = PASS ]; then BV_OK=$((BV_OK + 1)); printf 'NOTE %s: PASS\n' "$s"
     else bad "$s is ${r:-not run}"; fi
+  done
+}
+# need_ok ID... - a recap stage over stages that may lack their data: PASS counts, FAIL fails,
+# a SKIP (missing data, blocked) or a stage not run in this state is noted - not evidence,
+# not a failure
+need_ok() {
+  local s r
+  for s in "$@"; do
+    r=$(status_of "$s")
+    if [ "${DRY:-0}" = 1 ]; then printf '    (requires %s not FAIL in this run; SKIP is noted)\n' "$s"; continue; fi
+    case "$r" in
+      PASS) BV_OK=$((BV_OK + 1)); printf 'NOTE %s: PASS\n' "$s" ;;
+      FAIL|RUNNING) bad "$s is $r" ;;
+      *) printf 'NOTE %s: %s - not evidence either way (%s)\n' "$s" "${r:-not run}" \
+           "$(cut -f7 "$STATE/$s.status" 2>/dev/null)" ;;
+    esac
   done
 }
 
@@ -173,20 +191,22 @@ BV_CTEST_FLAGS="--output-on-failure --no-tests=error --test-output-size-passed 2
 ctest_cmd() { echo "ctest --test-dir build $BV_CTEST_FLAGS --output-junit $STATE/$STAGE${1:-}.junit.xml"; }
 ctest_cmd_base() { echo "ctest --test-dir build $BV_CTEST_FLAGS --output-junit $STATE/$STAGE${1:-}.baseline.xml"; }
 
-# run_tests ERE [LABELS] [NOT_LABELS] - the registered tests whose names match ERE (and carry
-# every label of LABELS, none of NOT_LABELS). Tests that already have a result in this run
-# (the G0 suite ran most of the old ones) are taken from it; the rest run now. The verdict is
-# over all of them: a failure fails, a test with no result fails, all skipped is a skip.
+# run_tests ERE [LABELS] [NOT_LABELS] [ENV] - the registered tests whose names match ERE (and
+# carry every label of LABELS, none of NOT_LABELS); ENV (`VAR=value ...`) is set for the ctest
+# run (B70_LONGCTX_TESTS=1 for the `longctx` variants, which SKIP without it). Tests that
+# already have a result in this run (the G0 suite ran most of the old ones) are taken from it;
+# the rest run now. The verdict is over all of them: a failure fails, a test with no result
+# fails, all skipped is a skip.
 BV_CT_N=0
 run_tests() {
-  local re="$1" filt="" l sfx=""
+  local re="$1" filt="" l sfx="" envp="${4:+env $4 }"
   for l in ${2:-}; do filt="$filt --label $l"; done
   for l in ${3:-}; do filt="$filt --no-label $l"; done
   # one JUnit file per call: a second run_tests in the same stage must not overwrite the first
   BV_CT_N=$((BV_CT_N + 1))
   [ "$BV_CT_N" -gt 1 ] && sfx=".$BV_CT_N"
   x "ctest --test-dir build --show-only=json-v1 > $STATE/tests.json"
-  x "re=\$(python3 tools/box_validate/junit.py todo $STATE/tests.json --re '$re'$filt --done \"$STATE/*.junit.xml\"); if [ -z \"\$re\" ]; then echo 'every selected test already has a result in this run'; else $(ctest_cmd "$sfx") -R \"\$re\"; fi"
+  x "re=\$(python3 tools/box_validate/junit.py todo $STATE/tests.json --re '$re'$filt --done \"$STATE/*.junit.xml\"); if [ -z \"\$re\" ]; then echo 'every selected test already has a result in this run'; else $envp$(ctest_cmd "$sfx") -R \"\$re\"; fi"
   x "python3 tools/box_validate/junit.py pick $STATE/tests.json --re '$re'$filt --junit \"$STATE/*.junit.xml\""
   step_rc $? "tests /$re/$filt"
 }
@@ -210,6 +230,28 @@ xfail() {
 
 # serve PORT_ARGS... - start b70-serve, prove it serves one request, stop it (serve_probe.sh)
 serve() { x "PORT=$PORT tools/box_validate/serve_probe.sh $*"; step_rc $? "b70-serve $*"; }
+
+# serve_arms DIR ROUNDS SNAP "CLIENT ARGS" ARM... - a server row: one b70-serve per arm and
+# round (tools/box_validate/serve_run.sh: start, serve_client.py over the prompt sets, stop),
+# rounds in rotated order (odd rounds as given, even rounds reversed). ARM is
+# "label|b70-serve flags"; each arm-round's requests land in DIR/<label>.r<round>/.
+# serve_client.py table / compare read DIR afterwards.
+serve_arms() {
+  local dir="$1" rounds="$2" snap="$3" cargs="$4" r i n lab flags
+  shift 4
+  local arms=("$@") order=()
+  n=${#arms[@]}
+  for r in $(seq 1 "$rounds"); do
+    order=()
+    for i in $(seq 0 $((n - 1))); do
+      if [ $((r % 2)) = 1 ]; then order+=("${arms[$i]}"); else order+=("${arms[$((n - 1 - i))]}"); fi
+    done
+    for i in "${order[@]}"; do
+      lab="${i%%|*}"; flags="${i#*|}"
+      chk "PORT=$PORT tools/box_validate/serve_run.sh $dir/$lab.r$r $lab $r $snap $flags -- $cargs" "arm $lab, round $r"
+    done
+  done
+}
 
 # bench_cmd SNAP ARGS... - a b70-decode bench line carrying the Mac's sha into the row
 bench_cmd() { local s="$1"; shift; echo "B70_GIT_SHA=$B70_GIT_SHA build/src/cli/b70-decode $s --bench $*"; }
