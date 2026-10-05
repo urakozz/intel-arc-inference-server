@@ -1,5 +1,15 @@
 # Spec 18d - K2-Horizon in the server
 
+**Status (2026-10-05, branch `spec18d-k2-serving-host`, rebased on 18c):** Task 1's host half
+written on the Mac (the box unavailable, 18c not yet validated on the card): Review Focus 1 (K2's
+template byte-identical to `apply_chat_template` on 18 message lists, every `tool_call_format`; the
+renderer changes as patches to minja with their own test), 2 (K2's `xml` / `xml_typed` / `json`
+parser with spec 7a's streaming tests, the HF renders' round trip, a fuzz), 5 (EOS [1, 250019]
+through the model-dispatched `server::ChatFormat`, a mock-engine server test); K2's tokenizer equal
+to HF's. `b70-serve` still refuses K2. As built: spec 18 §12. Left: the K2 engine adapter (once 18c
+passes on the card) and lifting the refusal, Task 1's greedy chat through the server, Task 2
+(Review Focus 3, K4), Task 3.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `b70-serve` serves K2: its chat template and tool-call format, reasoning, KV-only prefix-cache snapshots (spec 7), int8 `lm_head` by default; K4 (A4, passkey); the comparison rows against vLLM; the record.
