@@ -367,10 +367,15 @@ void require_loadable(const ModelDesc& d) {
     // What src/kernels/moe.cl is written for (spec 15c): the shared expert is the
     // last slot of the same kernels, so it must exist, be gated and be one routed
     // expert's width; the route row holds at most 8 slots; the router kernel puts
-    // one expert per lane of a 256-lane work-group.
+    // one expert per lane of a work-group of `experts` lanes and sums the softmax by a
+    // pairwise tree - moe.cl's `#error`: a POWER OF TWO in [16, 256], checked here too
+    // (spec 18b) so another model fails at load naming its shape, not at capture naming
+    // a binary nobody could build. (K2-Horizon's 100 experts run K2's own route kernel,
+    // src/kernels/k2/k2_moe.cl, padded to 128 lanes; K2 is not a ModelDesc.)
     const MoeDesc& m = d.moe;
+    const bool pow2 = m.experts != 0 && (m.experts & (m.experts - 1)) == 0;
     if (!m.has_shared_gate || m.shared_intermediate != m.expert_intermediate || m.top_k == 0 ||
-        m.top_k > 8 || m.experts < m.top_k + 1 || m.experts % 16 != 0 || m.experts > 256 ||
+        m.top_k > 8 || m.experts < m.top_k + 1 || !pow2 || m.experts < 16 || m.experts > 256 ||
         m.expert_intermediate % 64 != 0 || d.hidden % 64 != 0)
       throw std::runtime_error(d.name + " (" + d.architecture + "): this MoE shape (" +
                                std::to_string(m.experts) + " experts, top-" +
@@ -380,7 +385,7 @@ void require_loadable(const ModelDesc& d) {
                                (m.has_shared_gate ? " gated" : " ungated") +
                                ") is not implemented: the decode kernels (spec 15c) take a gated "
                                "shared expert of the routed width, top-k <= 8, experts a "
-                               "multiple of 16 up to 256");
+                               "power of two in [16, 256] (moe.cl's route work-group)");
   }
   if (d.tied_embeddings)
     throw std::runtime_error(d.name + ": tied embeddings are not implemented");
