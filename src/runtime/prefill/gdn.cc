@@ -168,9 +168,9 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   void* p_u = s.gdn_u.ptr();
   void* p_o = s.gdn_o.ptr();
 
-  const std::string conv = kernels::pf_gdn_conv_variant();
-  const std::string wy = kernels::pf_gdn_wy_variant();
-  const std::string scan = kernels::pf_gdn_scan_variant();
+  const std::string conv = kernels::pf_gdn_conv_variant(k_heads, heads);
+  const std::string wy = kernels::pf_gdn_wy_variant(k_heads, heads);
+  const std::string scan = kernels::pf_gdn_scan_variant(k_heads, heads);
 
   //  1 - lift the ring's three older slots (pos-3..pos-1) into a flat seed.
   cx.launch(kc(conv, "pf_gdn_seed"), conv_groups, 1, 1,
@@ -226,7 +226,7 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   g_scan_launched = scan_entry;          // the dispatch proof, after the append
   profile_wait(cx, Phase::kGdnScan);
   // 10 - the gated head. Ruling R3: it belongs to the mixer, not to the caller.
-  cx.launch(kc.get(kernels::pf_gated_head_variant(), "pf_gated_head"), heads, C, 1,
+  cx.launch(kc.get(kernels::pf_gated_head_variant(k_heads, heads), "pf_gated_head"), heads, C, 1,
             {PtrArg(qkvz_partials), PtrArg(p_o), PtrArg(gated_w), PtrArg(y), arg_val(C)});
   profile_wait(cx, Phase::kGdnHead);
 }

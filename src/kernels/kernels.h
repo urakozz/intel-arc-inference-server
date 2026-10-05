@@ -1,6 +1,8 @@
 #pragma once
 #include <string>
 
+#include "kernels/shape_suffix.h"
+
 #ifndef B70_KERNEL_DIR
 #error "B70_KERNEL_DIR must be defined (use b70_target_kernel_dir in CMake)"
 #endif
@@ -127,14 +129,25 @@ inline std::string intermediate_suffix(unsigned I) {
 inline std::string prep_silu_mul_variant(unsigned M, unsigned I) {
   return "prep_silu_mul_M" + std::to_string(M) + intermediate_suffix(I);
 }
-inline std::string prep_gated_head_variant(unsigned M) {
-  return "prep_gated_head_M" + std::to_string(M);
+// Spec 15b: the kernels below that bake a MODEL shape their other parameters do
+// not name take it as trailing arguments - hidden for embed_gather, the GDN heads
+// for prep_gated_head / gdn_step*, the FA heads for the attention kernels - and
+// append kernels/shape_suffix.h's suffix: empty at Qwen3.8's shapes (Agnes
+// shares them), so no existing binary is renamed. The defaults are those
+// reference shapes, for the kernel tests that bind Qwen3.8's binaries; the
+// runtime always passes the model descriptor's.
+inline std::string prep_gated_head_variant(unsigned M, unsigned gdn_k = kRefGdnKHeads,
+                                           unsigned gdn_v = kRefGdnVHeads) {
+  return "prep_gated_head_M" + std::to_string(M) + gdn_suffix(gdn_k, gdn_v);
 }
 
 // The GDN decode step (src/kernels/gdn_step.cl). Grid (48 heads, 4 state-column
 // chunks), work-group 256; `M` is its whole variant space, every other
 // dimension being the model's and baked into the source.
-inline std::string gdn_step_variant(unsigned M) { return "gdn_step_M" + std::to_string(M); }
+inline std::string gdn_step_variant(unsigned M, unsigned gdn_k = kRefGdnKHeads,
+                                    unsigned gdn_v = kRefGdnVHeads) {
+  return "gdn_step_M" + std::to_string(M) + gdn_suffix(gdn_k, gdn_v);
+}
 
 // The decode-attention trio (src/kernels/attn.cl), the 16 full-attention
 // layers. `attn_prep` runs a grid of (28, M) - 24 q-heads then 4 kv-heads - and
@@ -154,14 +167,19 @@ inline std::string gdn_step_variant(unsigned M) { return "gdn_step_M" + std::to_
 // it in the name turns a disagreement into "no such binary" at capture instead
 // of a buffer strided one way and written another. Spec 1.5's lever L5 moved
 // it from 256 to 64 and is why it is a parameter at all.
-inline std::string attn_prep_variant(unsigned M) { return "attn_prep_M" + std::to_string(M); }
-inline std::string attn_decode_variant(unsigned M, unsigned MAXLEN, unsigned BLOCK) {
-  return "attn_decode_M" + std::to_string(M) + "_L" + std::to_string(MAXLEN) + "_B" +
-         std::to_string(BLOCK);
+inline std::string attn_prep_variant(unsigned M, unsigned q = kRefFaQHeads,
+                                     unsigned kv = kRefFaKvHeads) {
+  return "attn_prep_M" + std::to_string(M) + fa_suffix(q, kv);
 }
-inline std::string attn_reduce_variant(unsigned M, unsigned MAXLEN, unsigned BLOCK) {
+inline std::string attn_decode_variant(unsigned M, unsigned MAXLEN, unsigned BLOCK,
+                                       unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "attn_decode_M" + std::to_string(M) + "_L" + std::to_string(MAXLEN) + "_B" +
+         std::to_string(BLOCK) + fa_suffix(q, kv);
+}
+inline std::string attn_reduce_variant(unsigned M, unsigned MAXLEN, unsigned BLOCK,
+                                       unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
   return "attn_reduce_M" + std::to_string(M) + "_L" + std::to_string(MAXLEN) + "_B" +
-         std::to_string(BLOCK);
+         std::to_string(BLOCK) + fa_suffix(q, kv);
 }
 
 // Spec 10 (plan 10b): decode attention v2 (src/kernels/attn_v2.cl) - `attn_decode_v2`
@@ -169,8 +187,9 @@ inline std::string attn_reduce_variant(unsigned M, unsigned MAXLEN, unsigned BLO
 // `attn_part` is strided [24][T][M][258] whatever max_len is. `T` (work-groups per kv
 // head, the stride target) is in the name for the reason `B` is above: the host's copy
 // is `runtime::DecodeScratch::kAttnV2Blocks`, the device's `-DTGT`.
-inline std::string attn_v2_variant(unsigned M, unsigned T) {
-  return "attn_v2_M" + std::to_string(M) + "_T" + std::to_string(T);
+inline std::string attn_v2_variant(unsigned M, unsigned T, unsigned q = kRefFaQHeads,
+                                   unsigned kv = kRefFaKvHeads) {
+  return "attn_v2_M" + std::to_string(M) + "_T" + std::to_string(T) + fa_suffix(q, kv);
 }
 
 // Spec 8 (plan 8b): the MTP lists' variants (src/kernels/CMakeLists.txt, B70_MTP).
@@ -189,13 +208,20 @@ inline std::string prep_norm_finish_strided_variant(unsigned M, unsigned K, unsi
 inline std::string prep_silu_mul_s1_variant(unsigned M, unsigned I) {
   return prep_silu_mul_variant(M, I) + "_S1";
 }
-inline std::string attn_prep_s1_variant(unsigned M) { return attn_prep_variant(M) + "_S1"; }
+inline std::string attn_prep_s1_variant(unsigned M, unsigned q = kRefFaQHeads,
+                                        unsigned kv = kRefFaKvHeads) {
+  return attn_prep_variant(M, q, kv) + "_S1";
+}
 // SPEC_SLOT_STRIDE (one slot of MtpBuffers::gdn_spec, gdn_layers x 48 x 128 x 128
 // floats) is baked, so a model with another GDN layer count is another binary:
-// Qwen3.8's 48 keeps the historical name, any other count is `_G<gdn_layers>`.
-inline std::string gdn_step_slots_variant(unsigned M, unsigned gdn_layers) {
+// Qwen3.8's 48 keeps the historical name, any other count is `_G<gdn_layers>`; the
+// v-head count (in the stride too) and the k-heads follow as the GDN suffix (spec 15b).
+inline std::string gdn_step_slots_variant(unsigned M, unsigned gdn_layers,
+                                          unsigned gdn_k = kRefGdnKHeads,
+                                          unsigned gdn_v = kRefGdnVHeads) {
   return "gdn_step_slots_M" + std::to_string(M) +
-         (gdn_layers == 48 ? std::string() : "_G" + std::to_string(gdn_layers));
+         (gdn_layers == 48 ? std::string() : "_G" + std::to_string(gdn_layers)) +
+         gdn_suffix(gdn_k, gdn_v);
 }
 
 // The control block as the kernels see it: `runtime::Control`
@@ -217,8 +243,8 @@ inline constexpr unsigned kGdnLive = 19;    // Control::gdn_live (spec 8, SPEC_S
 // the launch grid's y extent, i.e. the tokens in flight; it appears in the name
 // because the runtime asks for kernels by (kernel, M), even though these two
 // generate M-independent code (M only bounds a compile-time assert).
-inline std::string embed_gather_variant(unsigned M) {
-  return "embed_gather_M" + std::to_string(M);
+inline std::string embed_gather_variant(unsigned M, unsigned hidden = kRefHidden) {
+  return "embed_gather_M" + std::to_string(M) + hidden_suffix(hidden);
 }
 // VOCAB_USED (the ids the tokenizer defines) is baked: Qwen3.8's 248077 keeps the
 // historical name, any other count is `_V<vocab_used>` (spec 14: Agnes's 248089).
