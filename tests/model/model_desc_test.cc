@@ -116,6 +116,8 @@ void check_qwen38_shapes(const ModelDesc& d) {
   CHECK(!d.tied_embeddings);
   CHECK_EQ(d.mtp_intermediate, uint32_t(17408));            // no parallel FFN in Agnes's head
   CHECK_EQ(d.mtp_checkpoint_bytes(), size_t(849398784));    // docs/03: 0.849 GB
+  CHECK(!d.mtp_head_moe());                                 // spec 15e: dense head
+  CHECK_EQ(d.mtp_checkpoint_tensors(), size_t(15));
   const loader::SmallLayout sl = d.small_layout();
   const loader::SmallLayout& q = loader::kQwen38Small;
   CHECK_EQ(sl.norms_off_post, q.norms_off_post);
@@ -250,7 +252,12 @@ int main() {
   CHECK(!o.tied_embeddings);
   CHECK(o.name_map.empty());                  // linear_attn. / self_attn., as Qwen3.8
   CHECK_EQ(o.mtp_intermediate, uint32_t(0));  // its MTP head is one MoE layer (15e)
-  CHECK_EQ(o.mtp_checkpoint_bytes(), size_t(0));
+  // Spec 15e: the head's 785 bf16 tensors, 1,689,281,536 B - the sum over the published
+  // checkpoint's shard 16 header (2026-10-05): fc, q/k/v/o, the five norms, q/k_norm,
+  // the router, the shared gate and 257 SwiGLU experts of 512.
+  CHECK(o.mtp_head_moe());
+  CHECK_EQ(o.mtp_checkpoint_bytes(), size_t(1689281536));
+  CHECK_EQ(o.mtp_checkpoint_tensors(), size_t(785));
   CHECK(o.provisional_tuning);
   CHECK_EQ(o.doc_w, 0.0);                     // no int4 checkpoint exists yet (15a)
   check_layers(o);

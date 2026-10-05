@@ -302,15 +302,26 @@ std::vector<LayerDesc> ModelDesc::layer_descs() const {
 }
 
 size_t ModelDesc::mtp_checkpoint_bytes() const {
-  if (mtp_intermediate == 0) return 0;
+  if (mtp_intermediate == 0 && !mtp_head_moe()) return 0;
   const size_t H = hidden;
+  // The FFN: the dense MLP, or (spec 15e) the router, the shared gate and experts + 1
+  // SwiGLU experts (the shared one included) of expert_intermediate.
+  const size_t ffn = mtp_head_moe()
+                         ? size_t(moe.experts) * H + H +
+                               size_t(moe.blocks()) * 3 * moe.expert_intermediate * H
+                         : 3 * size_t(mtp_intermediate) * H;   // gate, up, down
   const size_t elems = H * 2 * H                                   // fc
                        + size_t(fa_qkv_n()) * H                    // q_proj, k_proj, v_proj
                        + H * fa_value_dim()                        // o_proj
-                       + 3 * size_t(mtp_intermediate) * H          // gate, up, down
+                       + ffn
                        + 5 * H                                     // the five RMSNorms
                        + 2 * size_t(Qwen35::kFaHeadDim);           // q_norm, k_norm
   return elems * 2;                                                // all bf16
+}
+
+size_t ModelDesc::mtp_checkpoint_tensors() const {
+  if (mtp_head_moe()) return 14 + 3 * size_t(moe.blocks());   // + router, shared gate
+  return mtp_intermediate == 0 ? 0 : 15;
 }
 
 std::string ModelDesc::to_engine(const std::string& n) const {

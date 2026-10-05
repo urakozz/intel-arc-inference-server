@@ -151,6 +151,10 @@ class Capture {
     if (mode_ == Mode::Draft) {
       layer_ = head_layer();
       draft();
+      // Spec 15e: 23 launches with a dense head, 24 with a MoE head (draft_launches).
+      require(step_.kernel_count == draft_launches(d_),
+              "the draft list has " + std::to_string(step_.kernel_count) + " launches, not the " +
+                  std::to_string(draft_launches(d_)) + " draft_launches() gives " + d_.name);
       require(step_.kernels.size() == step_.kernel_count, "a Kernel was created but never launched");
       require(step_.labels.size() == step_.kernel_count, "a launch went unlabelled");
       step_.list.close();
@@ -204,6 +208,11 @@ class Capture {
     require(mode_ != Mode::Plain || step_.kernel_count == decode_launches(d_),
             "the decode list has " + std::to_string(step_.kernel_count) + " launches, not the " +
                 std::to_string(decode_launches(d_)) + " decode_launches() gives " + d_.name);
+    // Spec 15e: the verify list is the decode list at M rows plus the head's KV fill
+    // (verify_launches): Qwen3.8 784, Ornith 536, at every M.
+    require(mode_ != Mode::Verify || step_.kernel_count == verify_launches(d_),
+            "the verify list has " + std::to_string(step_.kernel_count) + " launches, not the " +
+                std::to_string(verify_launches(d_)) + " verify_launches() gives " + d_.name);
     // Every Kernel this walk made was launched exactly once, so kernels[i] is
     // what launch i ran - which is the property that makes the vector a usable
     // record of the list rather than a lifetime bag.
@@ -312,14 +321,14 @@ class Capture {
             "qkv is no longer S=2, but attn.cl (QKV_S) bakes a 2-slice sum into every "
             "partials load");
     // Spec 15c: a MoE model's block - its weights (one MoeLayer per layer), its scratch
-    // (runtime::moe_scratch_layout), and the lists that do not exist for it yet.
+    // (runtime::moe_scratch_layout), and the attention it is built for. Spec 15e: the
+    // verify and draft lists exist for it too (check_mtp holds the head to its form).
     if (d_.is_moe()) {
       require(m_.moe.size() == d_.layers,
               "the loaded model has " + std::to_string(m_.moe.size()) + " MoE layers, not " +
                   std::to_string(d_.layers));
       require(b_.moe != nullptr && b_.moe->size() >= moe_scratch_layout(d_).total,
               "the decode scratch has no MoE region of moe_scratch_layout()'s size");
-      require(mode_ == Mode::Plain, "MTP on a mixture-of-experts model is spec 15e");
       require(attn_ == DecodeAttn::V2,
               "decode attention v1 (B70_DECODE_ATTN=v1) is not built at " + d_.name + "'s heads");
     }
@@ -328,6 +337,14 @@ class Capture {
   // Spec 8: what the MTP walks need of the head and its buffers.
   void check_mtp() {
     require(mtp_ != nullptr && m_.mtp != nullptr, "an MTP list needs the loaded head and MtpBuffers");
+    // Spec 15e: the head's FFN in the descriptor's form - a dense head's two bf16 linears,
+    // or a MoE head's layer (its route row is the MoE scratch's last layer slot).
+    require(d_.mtp_head_moe() ? m_.mtp->moe != nullptr && !m_.mtp->gate_up
+                              : m_.mtp->gate_up != nullptr && m_.mtp->down != nullptr && !m_.mtp->moe,
+            std::string("the loaded MTP head's FFN is not ") +
+                (d_.mtp_head_moe() ? "the MoE layer" : "the dense MLP") + " " + d_.name + " has");
+    require(!d_.mtp_head_moe() || moe_scratch_layout(d_).layer_slots == d_.layers + 1,
+            "the MoE scratch has no layer slot for the MTP head's MoE layer");
     require(mtp_->max_len == b_.max_len, "MtpBuffers max_len != buffers max_len");
     require(kCapM <= MtpBuffers::kSlots, "an MTP verify list has at most kSlots rows");
     require(mode_ != Mode::Draft || (kCapM == 1 && draft_i_ < MtpBuffers::kMaxK),
@@ -706,11 +723,19 @@ class Capture {
   // shared expert is slot top_k, its weights the last block of `gate_up` / `down`.
   void moe(uint32_t layer, uint32_t mixer_s) {
     res_norm(mixer_s, at(m_.layer_small[layer].norms, sl_.norms_off_post));
-    const loader::MoeLayer& w = m_.moe.at(layer);
+    moe_block(m_.moe.at(layer), layer);
+  }
+
+  // The block's four launches on `x` (normed) into `resid`, for the weights `w` and the
+  // MoE scratch's layer slot `slot` - a main layer's index, or (spec 15e) `layers` for
+  // the MTP head's MoE layer, which runs exactly these binaries (moe_scratch_layout's
+  // last slot; its route row survives the draft for the M1 diagnostics).
+  void moe_block(const loader::MoeLayer& w, uint32_t slot) {
     const model::MoeDesc& md = d_.moe;
     const MoeScratchLayout ml = moe_scratch_layout(d_);
-    void* lg = at(*b_.moe, ml.logits_at(layer));
-    void* rt = at(*b_.moe, ml.route_at(layer));
+    require(slot < ml.layer_slots, "the MoE scratch has no layer slot " + std::to_string(slot));
+    void* lg = at(*b_.moe, ml.logits_at(slot));
+    void* rt = at(*b_.moe, ml.route_at(slot));
     void* h = at(*b_.moe, ml.h_off);
     require(w.router.shape.N == md.router_n() && w.router.shape.K == d_.hidden,
             "the MoE router weight is not [router_n][hidden]");
@@ -1042,7 +1067,8 @@ class Capture {
   // MtpBuffers::logits row draft_i_, the argmax into hctl. 23 launches and one copy -
   // with a draft vocabulary too (spec 8 §11: the compact GEMV and the two dv_argmax
   // stages replace lm_head and the two argmax stages one for one; mtp_gpu_test's gate
-  // checks 23 on whichever head it loaded, mtp_gpu_dv128k_test with V').
+  // checks 23 on whichever head it loaded, mtp_gpu_dv128k_test with V'). Spec 15e: a MoE
+  // head's FFN is the four-launch MoE block in place of gate||up, SiLU, down - 24.
   void draft() {
     const loader::MtpHead& h = *m_.mtp;
     const uint32_t G = DecodeBuffers::kNormGroups, H = d_.hidden;
@@ -1053,20 +1079,31 @@ class Capture {
     const std::string fin = kernels::prep_norm_finish_variant(kCapM, H, G, G);
     fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormPost)),
               b_.x.ptr());
-    head_gemv(h.gate_up, b_.x.ptr(), b_.partials.ptr());
-    {
-      // The HEAD's intermediate (its down linear's K): 17408 on both supported
-      // checkpoints - Agnes's MTP block has no parallel FFN.
-      const uint32_t head_i = h.down.shape.K;
-      l0::Kernel& k =
-          kernel(kernels::prep_silu_mul_s1_variant(kCapM, head_i), "prep_silu_mul", kWgSilu);
-      k.arg_ptr(0, b_.partials.ptr());
-      k.arg_ptr(1, b_.x.ptr());
-      launch(k, (head_i + kSiluChunk - 1) / kSiluChunk, kCapM);
+    if (h.moe) {
+      // Spec 15e: a MoE head's FFN is the main layers' block (moe.cl at M = 1) on the
+      // head's weights and the MoE scratch's last layer slot. moe_down folds the block
+      // into the head's residual itself, so the final norm folds nothing (SP0) - 24
+      // launches in all, one more than the dense head's 23.
+      moe_block(*h.moe, d_.layers);
+      fold_norm(kernels::prep_res_fold_variant(kCapM, H, 0, G), fin, b_.partials.ptr(),
+                b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormFinal)),
+                b_.x.ptr());
+    } else {
+      head_gemv(*h.gate_up, b_.x.ptr(), b_.partials.ptr());
+      {
+        // The HEAD's intermediate (its down linear's K): 17408 on both supported
+        // checkpoints - Agnes's MTP block has no parallel FFN.
+        const uint32_t head_i = h.down->shape.K;
+        l0::Kernel& k =
+            kernel(kernels::prep_silu_mul_s1_variant(kCapM, head_i), "prep_silu_mul", kWgSilu);
+        k.arg_ptr(0, b_.partials.ptr());
+        k.arg_ptr(1, b_.x.ptr());
+        launch(k, (head_i + kSiluChunk - 1) / kSiluChunk, kCapM);
+      }
+      head_gemv(*h.down, b_.x.ptr(), b_.partials.ptr());
+      fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormFinal)),
+                b_.x.ptr());
     }
-    head_gemv(h.down, b_.x.ptr(), b_.partials.ptr());
-    fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormFinal)),
-              b_.x.ptr());
     step_.list.copy(mtp_->dh.ptr(), b_.x.ptr(), size_t(H) * kBf16);
     float* logits = mtp_->logits.as<float>() + size_t(draft_i_) * Qwen35::kVocab;
     if (m_.draft_vocab) {
@@ -1202,6 +1239,17 @@ class Capture {
 
 size_t decode_launches(const model::ModelDesc& d) {
   return 1 + size_t(d.layers) * (d.is_moe() ? 13 : 12) + 5;
+}
+
+// Spec 15e: the head's KV fill (head_front: embed, the two pre-fc norm pairs, fc, the
+// zero-residual fold pair, q||k||v, attn_prep) after the decode list at M rows.
+size_t verify_launches(const model::ModelDesc& d) { return decode_launches(d) + 10; }
+
+// head_front 10, the attention pair 2, o 1, the post norm pair 2, the FFN (gate||up,
+// SiLU, down: 3; a MoE head's router, route, gate||up, down: 4), the final norm pair 2,
+// lm_head and the two argmax stages 3.
+size_t draft_launches(const model::ModelDesc& d) {
+  return 10 + 2 + 1 + 2 + (d.mtp_head_moe() ? 4 : 3) + 2 + 3;
 }
 
 ProfileEvents::ProfileEvents(l0::Context& ctx) : pool(ctx, kProfileCapacity) {

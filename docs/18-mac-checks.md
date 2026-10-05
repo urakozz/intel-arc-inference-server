@@ -124,7 +124,11 @@ empty expert skipped and the combine, all exact against `tests/kernels/pf_moe_re
 its grouped GEMMs are DPAS and stay on the box) and `k2_run` (spec 18b: K2-Horizon's
 portable kernels - the grouped norm, SiLU x up, both attention-prep builds, the sigmoid
 routers with their padded lanes, the MoE gate||up / down and MoVA's value experts - at
-K2's real shapes against `tests/kernels/k2_ref.h`; it also takes two host sources). A new
+K2's real shapes against `tests/kernels/k2_ref.h`; it also takes two host sources) and
+`moe_run` (spec 15e: the decode MoE block `moe.cl` at Ornith's shape against
+`tests/kernels/moe_ref.h` at M = 1, and at M = 4 - the MTP verify lists' rows - every
+row bitwise the M = 1 binary's on that row, in order and reversed; `moe_down` at DN_KS 1,
+the Mac's 256-lane work-group cap, as `k2_run` does). A new
 driver is a `tools/mac/clrun/<kernel>_run.cc` with a `main()` over `clrun::Device`,
 `Program` and `Buffer`, and its name in section 5's loop in `tools/mac_check.sh`, which
 builds the drivers into `build/mac-check/clrun/` with `src/` and `tests/` on the include

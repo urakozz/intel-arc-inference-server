@@ -28,8 +28,9 @@
 //   max_len           any multiple of 256 up to config.json's max_position_embeddings
 //                     (262144 for all three) that the memory plan fits on the card
 //                     (spec 6 §10; Agnes's fixed 65536 of spec 14 §3.3 is gone)
-//   loadable          yes                    yes                    decode (spec 15c) and
-//                                                                   prefill (15d); MTP 15e
+//   loadable          yes                    yes                    decode (spec 15c),
+//                                                                   prefill (15d), MTP and
+//                                                                   b70-serve (15e)
 //
 // Descriptors are process-lifetime singletons: hold them by reference/pointer.
 namespace model {
@@ -79,7 +80,7 @@ struct ModelDesc {
   bool tied_embeddings = false;       // lm_head shares embed_tokens (none supported does)
   // The MTP head's dense MLP width: 17408 on Qwen3.8 and on Agnes (no parallel FFN
   // in Agnes's head, spec 14 §1). 0 = the head's FFN is not dense (Ornith: one MoE
-  // layer, spec 15e).
+  // layer of the main model's shape, spec 15e - mtp_head_moe()).
   uint32_t mtp_intermediate = 0;
   // The MLP width the ENGINE runs: for Agnes the folded 17408 + 2048 (spec 14 §2).
   // For a MoE model, its shared expert's width - the dense GateUp / Down rows of
@@ -148,11 +149,22 @@ struct ModelDesc {
   const std::vector<SmallTensor>& small_tensors(LayerKind kind) const {
     return kind == LayerKind::FA ? small_fa : small_gdn;
   }
-  // The MTP head's 15 bf16 tensors' checkpoint bytes, from the shapes: fc
-  // [hidden][2 hidden], q/k/v/o, the dense MLP at mtp_intermediate, five hidden-wide
-  // norms and q_norm / k_norm. Qwen3.8 and Agnes 849,398,784 (docs/03). 0 when
-  // the head is not dense (mtp_intermediate == 0).
+  // Spec 15e: the MTP head's FFN is the main model's MoE block (one routed layer of
+  // `moe`'s shape: router, routed experts, the gated shared expert) - Ornith's
+  // `mtp.layers.0.mlp.experts.N.*` - rather than a dense MLP at mtp_intermediate.
+  bool mtp_head_moe() const { return is_moe() && mtp_intermediate == 0; }
+  // The MTP head's bf16 checkpoint bytes, from the shapes: fc [hidden][2 hidden],
+  // q/k/v/o, the FFN, five hidden-wide norms and q_norm / k_norm. The FFN is the dense
+  // MLP at mtp_intermediate (Qwen3.8 and Agnes: 15 tensors, 849,398,784 B, docs/03) or,
+  // on a MoE head (spec 15e), the router [experts][hidden], the shared gate [1][hidden]
+  // and experts + 1 SwiGLU experts of expert_intermediate (Ornith: 785 tensors,
+  // 1,689,281,536 B - the sum over its shard 16 header, 2026-10-05). An int4 export of
+  // the head's experts ships fewer bytes; the loader checks this figure only when every
+  // head tensor is bf16.
   size_t mtp_checkpoint_bytes() const;
+  // The head's checkpoint tensor count when every tensor is bf16: 15 dense, 14 + 3 x
+  // (experts + 1) on a MoE head (Ornith 785).
+  size_t mtp_checkpoint_tensors() const;
 
   // The table row. Throws std::out_of_range on kCount or a bad cast.
   // `linear(LmHead)` is the bf16 row (see Qwen35's history note); callers that

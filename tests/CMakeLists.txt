@@ -1940,4 +1940,101 @@ if(B70_TOKENIZER_ENABLED)
   add_test(NAME ornith_server_test COMMAND ornith_server_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
   set_tests_properties(ornith_server_test PROPERTIES LABELS ornith SKIP_RETURN_CODE 77 TIMEOUT 120)
 endif()
+#
+# Task 2: the MoE MTP head (spec 15e). Host, on the Mac too: the RTN quantiser and the
+# head's MoE layer repacked from a synthetic checkpoint in the published head's naming,
+# the head's byte figures and the memory planner with the head (ornith_mtp_head_test) ...
+add_executable(ornith_mtp_head_test loader/ornith_mtp_head_test.cc)
+target_include_directories(ornith_mtp_head_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(ornith_mtp_head_test PRIVATE b70_loader b70_plan)
+add_test(NAME ornith_mtp_head_test COMMAND ornith_mtp_head_test)
+set_tests_properties(ornith_mtp_head_test PROPERTIES LABELS ornith)
+if(B70_ORNITH AND B70_MTP)
+  # ... every binary Ornith's verify / draft lists and the prefill's head KV fill bind,
+  # formed as capture.cc / step.cc form them, against the kernels' spec 15e block (which
+  # must all be bound) and the binaries it reuses. A name missing from either kernel CMake
+  # block fails at configure time here (if(NOT TARGET)), the names test on any host.
+  set(B70_ORNITH_MTP_KERNELS)
+  foreach(MM 2 3 4)
+    list(APPEND B70_ORNITH_MTP_KERNELS
+      kernel_gemv_M${MM}_K2048_N12288_S1_L1 kernel_gemv_M${MM}_K4096_N2048_S4_L0
+      kernel_gemv_M${MM}_K2048_N9216_S2_L0 kernel_gemv_bf16_M${MM}_K2048_N128_C16_S16
+      kernel_gemv_bf16_M${MM}_K2048_N272_C16_S16 kernel_gemv_bf16_M${MM}_K2048_N248320
+      kernel_gemv_i8w_M${MM}_K2048_N248320 kernel_prep_res_fold_M${MM}_K2048_SP0_G20
+      kernel_prep_res_fold_M${MM}_K2048_SP4_G20 kernel_prep_norm_finish_M${MM}_K2048_G20_W20
+      kernel_embed_gather_M${MM}_D2048 kernel_prep_gated_head_M${MM}_GK16V32
+      kernel_attn_prep_M${MM}_Q16KV2 kernel_attn_v2_M${MM}_T${ATTN_V2_TGT}_Q16KV2
+      kernel_moe_M${MM}_E256_T8_D2048_I512)
+  endforeach()
+  foreach(MM 1 2 3 4)
+    list(APPEND B70_ORNITH_MTP_KERNELS
+      kernel_gdn_step_slots_M${MM}_G30_GK16V32 kernel_gemv_bf16_M${MM}_K4096_N2048
+      kernel_gemv_bf16_M${MM}_K2048_N9216 kernel_prep_norm_finish_M${MM}_K2048_G20_W20_X4096
+      kernel_prep_res_fold_M${MM}_K2048_SP1_G20_Z kernel_attn_prep_M${MM}_Q16KV2_S1)
+  endforeach()
+  list(APPEND B70_ORNITH_MTP_KERNELS kernel_prep_res_fold_M1_K2048_SP1_G20)
+  foreach(NV 32768 65536 131072)
+    list(APPEND B70_ORNITH_MTP_KERNELS kernel_gemv_i8w_M1_K2048_N${NV} kernel_gemv_bf16_M1_K2048_N${NV})
+  endforeach()
+  list(APPEND B70_ORNITH_MTP_KERNELS kernel_pf_res_fold_K2048_SP1_G20_Z
+    kernel_pf_norm_finish_K2048_G20_W20_X4096 kernel_pf_bf16_slab_K4096 kernel_pf_bf16_slab_K2048)
+  # What the lists reuse: 15c's decode list, 15d's prefill kernels, spec 8's shared ones.
+  set(_o15e_reused ${B70_ORNITH_DECODE_KERNELS}
+    kernel_argmax_stage1_M2 kernel_argmax_stage1_M3 kernel_argmax_stage1_M4
+    kernel_dv_argmax_N32768 kernel_dv_argmax_N65536 kernel_dv_argmax_N131072
+    kernel_pf_res_fold_K2048_SP0_G20 kernel_pf_res_fold_K2048_SP1_G20
+    kernel_pf_norm_finish_K2048_G20_W20 kernel_pf_embed_gather_D2048
+    kernel_pf_attn_prep_q16_Q16KV2)
+  foreach(t ${B70_ORNITH_MTP_KERNELS} ${_o15e_reused})
+    if(NOT TARGET ${t})
+      message(FATAL_ERROR "spec 15e: ${t} is not built (src/kernels/CMakeLists.txt)")
+    endif()
+  endforeach()
+  add_executable(ornith_mtp_names_test kernels/ornith_mtp_names_test.cc)
+  target_include_directories(ornith_mtp_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(ornith_mtp_names_test PRIVATE b70_model)
+  b70_target_kernel_dir(ornith_mtp_names_test)
+  add_test(NAME ornith_mtp_names_test COMMAND ornith_mtp_names_test ${B70_ORNITH_MTP_KERNELS} --
+    ${_o15e_reused})
+  set_tests_properties(ornith_mtp_names_test PROPERTIES LABELS ornith)
+
+  # On the card, no checkpoint: moe.cl at M = 2..4, every row bitwise M = 1's (the verify
+  # lists' MoE block, Review Focus 3).
+  add_executable(moe_m_test kernels/moe_m_test.cc)
+  target_include_directories(moe_m_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(moe_m_test PRIVATE b70_l0)
+  b70_target_kernel_dir(moe_m_test)
+  add_dependencies(moe_m_test kernel_moe_M1_E256_T8_D2048_I512 kernel_moe_M2_E256_T8_D2048_I512
+    kernel_moe_M3_E256_T8_D2048_I512 kernel_moe_M4_E256_T8_D2048_I512)
+  add_test(NAME moe_m_test COMMAND moe_m_test)
+  set_tests_properties(moe_m_test PROPERTIES LABELS "ornith;mtp" TIMEOUT 900)
+
+  # On the card with the checkpoint (SKIP 77 without it): the lists, M2 bitwise rows
+  # (logits, GDN slots, every layer's routes), M3 greedy --mtp K == --mtp 0 against a
+  # head-less engine, the head's route row; both lm_head forms. And M1 - the head's draft
+  # logits against tools/oracle/mtp_ref.py's dump on Ornith (oracle-out-ornith-mtp, spec
+  # 15a's; SKIP without it) - through spec 8's own mtp_head_test.
+  if(TARGET mtp_head_test)
+    get_property(_o15e_k DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
+    get_property(_o15e_pf DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
+    add_executable(ornith_mtp_test runtime/ornith_mtp_test.cc)
+    target_include_directories(ornith_mtp_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+      ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+    target_link_libraries(ornith_mtp_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+    if(B70_PREFILL_ENABLED)
+      b70_link_prefill(ornith_mtp_test)
+    endif()
+    add_dependencies(ornith_mtp_test ${_o15e_k} ${_o15e_pf})
+    add_test(NAME ornith_mtp_test COMMAND ornith_mtp_test ${B70_ORNITH_SNAPSHOT}
+      ${B70_ORNITH_PROMPTS_DIR} int8)
+    add_test(NAME ornith_mtp_bf16head_test COMMAND ornith_mtp_test ${B70_ORNITH_SNAPSHOT}
+      ${B70_ORNITH_PROMPTS_DIR} bf16)
+    add_test(NAME mtp_head_ornith_test COMMAND mtp_head_test ${B70_ORNITH_SNAPSHOT}
+      ${B70_ORNITH_PROMPTS_DIR} ${CMAKE_SOURCE_DIR}/oracle-out-ornith-mtp/m1
+      ${CMAKE_SOURCE_DIR}/oracle-out-ornith-mtp)
+    set_tests_properties(ornith_mtp_test ornith_mtp_bf16head_test mtp_head_ornith_test PROPERTIES
+      LABELS "checkpoint;mtp;ornith" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      TIMEOUT 3600)
+  endif()
+endif()
 # ==== Spec 15e ============================================================= (end) ====

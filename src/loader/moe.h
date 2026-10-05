@@ -37,13 +37,23 @@ struct MoeHost {
   // The checkpoint bytes this layer consumed (int4 qweight + f16 scales of every
   // expert and the shared expert, bf16 router and gate) - for the load report.
   size_t int4_src_bytes = 0, bf16_src_bytes = 0;
+  // Spec 15e: the expert linears (shared expert included) that arrived bf16 and were
+  // quantised here (loader/rtn.h) - their bf16 bytes are in bf16_src_bytes. 0 unless
+  // repack_moe_layer was asked to.
+  size_t rtn_linears = 0;
 };
 
 // Repacks layer `what` (a label for error messages, e.g. "layer 3") of the MoE model
 // `d`: the router || shared-gate rows, then every expert block (shared expert last).
 // Throws by name on a missing tensor, a wrong kind (an int4 router, a bf16 expert),
 // a shape that is not the descriptor's, or mixed per-expert forms.
+//
+// `rtn_bf16_experts` (spec 15e, the MTP head's MoE layer only): an expert linear - routed
+// or shared - that the checkpoint ships bf16 is quantised to int4 g64 sym on the host
+// (loader::rtn_int4_g64) and repacked from that, instead of refused; an int4 one is
+// repacked as shipped, linear by linear. The main layers keep the refusal: their experts
+// must be the quantiser's (spec 15 decision 1).
 void repack_moe_layer(const model::ModelDesc& d, const MoeSource& src, MoeHost& out,
-                      const std::string& what);
+                      const std::string& what, bool rtn_bf16_experts = false);
 
 }  // namespace loader

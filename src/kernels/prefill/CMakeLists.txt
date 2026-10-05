@@ -268,3 +268,21 @@ if(B70_ORNITH)
   add_ocloc_kernel(pf_moe_gemm_K512_N2048 SOURCE ${PF_MOE_GEMM_CL}
                    DEFINES K=512 N=2048 TM=32 OPTIONS -cl-intel-256-GRF-per-thread)
 endif()
+
+# ==== Spec 15e: Ornith's MTP head KV fill during prefill (runtime/prefill/step.cc) == (begin) ==
+# step_mtp_kv at Ornith's shapes - the head front only (its MoE FFN never runs in prefill):
+# the two pre-fc norms into one [C][4096] row (X_STRIDE), fc's output starting the head's
+# residual (ZERO_RESID), and the head's bf16 fc (K 4096) and q||k||v (K 2048) reaching
+# pf_gemm through pf_bf16_slab. attn_prep is 15d's pf_attn_prep_q16_Q16KV2 (it reads the
+# qkv at pitch N whatever produced it). Additive: no existing command line moves.
+if(B70_ORNITH AND B70_MTP)
+  add_ocloc_kernel(pf_res_fold_K2048_SP1_G20_Z SOURCE ${PF_PREP_CL}
+                   DEFINES K=2048 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
+  add_ocloc_kernel(pf_norm_finish_K2048_G20_W20_X4096 SOURCE ${PF_PREP_CL}
+                   DEFINES K=2048 NORM_G=20 NORM_WGS=20 X_STRIDE=4096)
+  foreach(K 4096 2048)
+    add_ocloc_kernel(pf_bf16_slab_K${K} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_bf16_slab.cl
+                     DEFINES K=${K})
+  endforeach()
+endif()
+# ==== Spec 15e ================================================================ (end) ====

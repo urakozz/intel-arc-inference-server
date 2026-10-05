@@ -510,6 +510,13 @@ int run(int argc, char** argv) {
     std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
     for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
     std::fprintf(stderr, " (plain steps)\n");
+    // Spec 15e Review Focus 2: the defaults are Qwen3.8's measured table. A MoE model's
+    // verify at M rows touches up to top_k x M distinct experts, so its costs are its own -
+    // unmeasured until the box records them; --mtp-cost replaces the table.
+    if (served.is_moe() && mtp_cost_arg.empty())
+      std::fprintf(stderr, "mtp auto: %s's own costs are not measured yet; the table above is "
+                           "Qwen3.8's (pass --mtp-cost once the box has them)\n",
+                   served.name.c_str());
   }
 
   g_server = &server;

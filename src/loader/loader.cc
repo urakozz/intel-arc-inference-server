@@ -493,23 +493,46 @@ SmallTensors load_small(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet
           upload(ctx, imm, kind.data(), kind.size())};
 }
 
+// Spec 15c: one MoE layer's host copy (loader/moe.h) onto the card as three allocations
+// (loader/moe_layout.h) - the main layers' and (spec 15e) the MTP head's.
+MoeLayer upload_moe_layer(l0::Context& ctx, l0::CmdList& imm, const model::ModelDesc& desc,
+                          const MoeHost& host) {
+  const MoeLayerBytes b = moe_layer_bytes(desc);
+  if (host.router.size() * 2 != b.router || host.gate_up.size() * 4 != b.gate_up() ||
+      host.down.size() * 4 != b.down())
+    throw std::logic_error("loader: the MoE host copy is not the moe_layer_bytes() layout");
+  return MoeLayer{{upload(ctx, imm, host.router.data(), b.router), nullptr,
+                   model::GemvShape{desc.hidden, desc.moe.router_n(), 1, 0},
+                   model::WeightKind::Bf16},
+                  upload(ctx, imm, host.gate_up.data(), b.gate_up()),
+                  upload(ctx, imm, host.down.data(), b.down())};
+}
+
 // Spec 8 §3.1: the MTP head. The published checkpoint ships exactly 15 bf16
 // `mtp.*` tensors (docs/03-models.md); anything else (the RTN checkpoint's 29,
 // 8 of them int4) is refused by name rather than half-loaded. The linears are
 // laid out for gemv_bf16 (common::repack_bf16_tiled) with the main model's
 // fusions: q||k||v concatenated like the FA layers' Qkv, gate/up interleaved in
 // 16-column blocks like GateUp (prep_silu_mul's gflat/uflat).
+//
+// Spec 15e: a MoE head (ModelDesc::mtp_head_moe - Ornith's 785 bf16 tensors) has the
+// same fc, attention and norms, and as its FFN one MoE layer of the main model's shape:
+// `mtp.layers.0.mlp.{gate, shared_expert_gate, experts.E.*, shared_expert.*}`, repacked
+// into the main layers' device form by loader::repack_moe_layer with its bf16 experts
+// quantised at load (loader/rtn.h; an int4-shipped expert is repacked as shipped). Every
+// name it reads is marked consumed, so an extra head tensor shows up in `unconsumed`.
 std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet& set,
                                   NameView& view, const model::ModelDesc& desc, LoadReport& rep,
                                   Widen& widen) {
-  if (desc.mtp_intermediate == 0)
-    throw std::runtime_error(desc.name + ": the MTP head is not a dense layer (spec 15e)");
+  const bool moe_head = desc.mtp_head_moe();
+  if (desc.mtp_intermediate == 0 && !moe_head)
+    throw std::runtime_error(desc.name + ": the descriptor names no MTP head FFN");
   size_t n_mtp = 0;
   for (const auto& [name, info] : set.tensors()) {
     (void)info;
     n_mtp += starts_with(name, "mtp.");
   }
-  if (n_mtp != kMtpTensors)
+  if (!moe_head && n_mtp != kMtpTensors)
     throw std::runtime_error("the MTP head must be the published checkpoint's " +
                              std::to_string(kMtpTensors) + " bf16 mtp.* tensors; this one has " +
                              std::to_string(n_mtp));
@@ -565,16 +588,53 @@ std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const Safe
   // attention follows the main model's heads. Qwen3.8's numbers in the comments.
   // Names are engine names (the view mapped Agnes's `global_attn.` already).
   const uint32_t H = desc.hidden, I = desc.mtp_intermediate, KV = desc.fa_kv_n();
+  DeviceWeight fc = linear({"mtp.fc.weight"}, {H}, 2 * H, false);          // 5120 x 10240
+  DeviceWeight qkv = linear({L + "self_attn.q_proj.weight", L + "self_attn.k_proj.weight",
+                             L + "self_attn.v_proj.weight"},
+                            {desc.fa_q_proj_n(), KV, KV}, H, false);        // 12288, 1024, 1024
+  DeviceWeight o =
+      linear({L + "self_attn.o_proj.weight"}, {H}, desc.fa_value_dim(), false);   // K 6144
+  std::unique_ptr<DeviceWeight> gate_up, down;
+  std::unique_ptr<MoeLayer> moe;
+  if (!moe_head) {
+    gate_up = std::make_unique<DeviceWeight>(
+        linear({L + "mlp.gate_proj.weight", L + "mlp.up_proj.weight"}, {I, I}, H, true));  // 17408
+    down = std::make_unique<DeviceWeight>(linear({L + "mlp.down_proj.weight"}, {H}, I, false));
+  } else {
+    // Spec 15e: the MoE layer, by the main layers' MoeSource binding with the head's
+    // prefix (`mtp.` names are not under model.language_model., and are already engine
+    // names in the view), counting what it reads into the head's report fields.
+    MoeSource src;
+    src.has = [&](const std::string& part) {
+      return view.names.count(L + part + ".qweight") != 0 ||
+             view.names.count(L + part + ".weight") != 0;
+    };
+    src.linear = [&](const std::string& part) {
+      const std::string eng = L + part;
+      LinearSrc s = LinearSrc::classify(set, desc.to_checkpoint(eng));
+      const std::vector<const char*> suffixes =
+          s.kind == WKind::Int4 ? std::vector<const char*>{".qweight", ".scales"}
+                                : std::vector<const char*>{".weight"};
+      for (const char* suffix : suffixes) {
+        const TensorInfo info = take(view, set, eng + suffix);
+        rep.mtp_checkpoint_bytes += set.bytes(info);
+        ++rep.mtp_tensors;
+      }
+      return s;
+    };
+    const auto r0 = std::chrono::steady_clock::now();
+    MoeHost host;
+    repack_moe_layer(desc, src, host, "the MTP head", /*rtn_bf16_experts=*/true);
+    rep.mtp_rtn_linears = host.rtn_linears;
+    rep.mtp_rtn_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - r0).count();
+    moe = std::make_unique<MoeLayer>(upload_moe_layer(ctx, imm, desc, host));
+    rep.mtp_bytes += moe_layer_bytes(desc).total();
+  }
   auto h = std::make_unique<MtpHead>(MtpHead{
-      linear({"mtp.fc.weight"}, {H}, 2 * H, false),                         // 5120 x 10240
-      linear({L + "self_attn.q_proj.weight", L + "self_attn.k_proj.weight",
-              L + "self_attn.v_proj.weight"},
-             {desc.fa_q_proj_n(), KV, KV}, H, false),                        // 12288, 1024, 1024
-      linear({L + "self_attn.o_proj.weight"}, {H}, desc.fa_value_dim(), false),   // K 6144
-      linear({L + "mlp.gate_proj.weight", L + "mlp.up_proj.weight"}, {I, I}, H, true),  // 17408
-      linear({L + "mlp.down_proj.weight"}, {H}, I, false),
+      std::move(fc), std::move(qkv), std::move(o), std::move(gate_up), std::move(down),
       l0::Mem(ctx, l0::MemKind::Device, mtp_norms_bytes(desc)),
-      l0::Mem(ctx, l0::MemKind::Device, kFaBlockBytes)});
+      l0::Mem(ctx, l0::MemKind::Device, kFaBlockBytes), std::move(moe)});
   // The RMSNorms, baked like every other (1 + w) fp32 norm.
   std::vector<uint8_t> norms(mtp_norms_bytes(desc)), fa(kFaBlockBytes);
   const std::pair<const char*, MtpNorm> nrm[] = {
@@ -601,11 +661,20 @@ std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const Safe
   imm.copy(h->norms.ptr(), norms.data(), norms.size());
   imm.copy(h->fa.ptr(), fa.data(), fa.size());
   rep.mtp_bytes += norms.size() + fa.size();
-  if (rep.mtp_tensors != kMtpTensors || rep.mtp_checkpoint_bytes != desc.mtp_checkpoint_bytes())
+  // What was read: a dense head is exactly the 15 bf16 tensors; a MoE head is held to the
+  // all-bf16 figures when every expert linear arrived bf16 (the published checkpoint), and
+  // otherwise to "every head tensor consumed" (load()'s unconsumed check).
+  const bool all_bf16 = !moe_head || rep.mtp_rtn_linears == 3 * size_t(desc.moe.blocks());
+  if (all_bf16 && (rep.mtp_tensors != desc.mtp_checkpoint_tensors() ||
+                   rep.mtp_checkpoint_bytes != desc.mtp_checkpoint_bytes()))
     throw std::runtime_error("the MTP head consumed " + std::to_string(rep.mtp_tensors) +
                              " tensors / " + std::to_string(rep.mtp_checkpoint_bytes) +
-                             " B, expected " + std::to_string(kMtpTensors) + " / " +
-                             std::to_string(desc.mtp_checkpoint_bytes()));
+                             " B, expected " + std::to_string(desc.mtp_checkpoint_tensors()) +
+                             " / " + std::to_string(desc.mtp_checkpoint_bytes()));
+  if (rep.mtp_bytes != mtp_head_bytes(desc))
+    throw std::logic_error("loader: the MTP head allocated " + std::to_string(rep.mtp_bytes) +
+                           " B, not the " + std::to_string(mtp_head_bytes(desc)) +
+                           " B loader::mtp_head_bytes() plans");
   return h;
 }
 
@@ -634,15 +703,8 @@ MoeLayer load_moe_layer(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet
     return s;
   };
   repack_moe_layer(desc, src, host, "layer " + std::to_string(layer));
-  const MoeLayerBytes b = moe_layer_bytes(desc);
-  if (host.router.size() * 2 != b.router || host.gate_up.size() * 4 != b.gate_up() ||
-      host.down.size() * 4 != b.down())
-    throw std::logic_error("loader: the MoE host copy is not the moe_layer_bytes() layout");
-  MoeLayer ml{{upload(ctx, imm, host.router.data(), b.router), nullptr,
-               model::GemvShape{desc.hidden, desc.moe.router_n(), 1, 0}, model::WeightKind::Bf16},
-              upload(ctx, imm, host.gate_up.data(), b.gate_up()),
-              upload(ctx, imm, host.down.data(), b.down())};
-  rep.moe_bytes += b.total();
+  MoeLayer ml = upload_moe_layer(ctx, imm, desc, host);
+  rep.moe_bytes += moe_layer_bytes(desc).total();
   return ml;
 }
 
@@ -934,10 +996,15 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
     std::snprintf(lm_buf, sizeof lm_buf, "%s, by checkpoint content",
                   lm_int4 ? "int4 g64" : "bf16");
   const std::string lm_desc = lm_buf;
-  char mtp_buf[160];
-  std::snprintf(mtp_buf, sizeof mtp_buf, "MTP head: %zu bf16 tensors, %.3f GB in the checkpoint",
+  char mtp_buf[240];
+  std::snprintf(mtp_buf, sizeof mtp_buf, "MTP head: %zu tensors, %.3f GB in the checkpoint",
                 r.mtp_tensors, r.mtp_checkpoint_bytes / 1e9);
-  const std::string mtp_line = mtp_buf;
+  std::string mtp_line = mtp_buf;
+  if (r.mtp_rtn_linears != 0) {   // spec 15e: a MoE head's bf16 experts, int4 g64 RTN at load
+    std::snprintf(mtp_buf, sizeof mtp_buf, "; %zu expert linears int4 g64 RTN at load in %.1f s",
+                  r.mtp_rtn_linears, r.mtp_rtn_seconds);
+    mtp_line += mtp_buf;
+  }
   // The two vocabularies print as one line, naming whichever one this
   // checkpoint spoke - a report that always said "dynamic exclusion rules"
   // would be silently wrong about an auto-round config.
