@@ -21,6 +21,7 @@
 #include "loader/loader.h"
 #include "loader/snapshot.h"
 #include "loader/trained_context.h"
+#include "model/qwen35.h"
 #include "runtime/engine.h"
 #include "runtime/prefill/backend.h"
 #include "server/server.h"
@@ -88,10 +89,12 @@ void usage() {
                "                 [--lm-head bf16|int8]   Default: int8 (spec 9: quantised at load\n"
                "                 from the bf16 head; bf16 is the checkpoint's own head)\n"
                "                 [--draft-vocab off|32k|64k|128k]   MTP drafts over a reduced\n"
-               "                             vocabulary (spec 8 §11; default off): the int8\n"
-               "                             head's rows for the added tokens, then\n"
+               "                             vocabulary (spec 8 §11; default off): the head's\n"
+               "                             rows for the added tokens, then\n"
                "                             --draft-vocab-ids, then the lowest ids. Output\n"
-               "                             unchanged (verify is full); needs --mtp, int8 head\n"
+               "                             unchanged (verify is full); needs --mtp. With\n"
+               "                             --mtp auto the draft costs scale with |V'|\n"
+               "                             (derived; an explicit --mtp-cost draft= wins)\n"
                "                 [--draft-vocab-ids FILE]   ranked ids, most frequent first\n"
                "                             (tools/draft_vocab/rank.py over --log-requests logs)\n");
 }
@@ -249,6 +252,14 @@ int run(int argc, char** argv) {
     options.mtp_adaptive.max_k = mtp_max;
     options.mtp_adaptive.cost = lm_head == loader::LmHeadForm::Int8 ? server::MtpCost::int8_head()
                                                                     : server::MtpCost::bf16_head();
+    // Spec 8 §11: a draft over V' reads |V'| / 248320 of the head, so the drafts' head
+    // share scales with it (derived; MtpCost::kInt8DraftHeadShare). Applied to the base
+    // --mtp-cost parses over, so an explicit draft= wins and a verify= alone keeps it.
+    if (draft_vocab != 0)
+      options.mtp_adaptive.cost = options.mtp_adaptive.cost.with_draft_vocab(
+          lm_head == loader::LmHeadForm::Int8 ? server::MtpCost::kInt8DraftHeadShare
+                                              : server::MtpCost::kBf16DraftHeadShare,
+          double(draft_vocab) / model::Qwen35::kVocab);
     if (!mtp_cost_arg.empty()) {
       try {
         options.mtp_adaptive.cost = server::MtpCost::parse(mtp_cost_arg, options.mtp_adaptive.cost);
@@ -262,15 +273,13 @@ int run(int argc, char** argv) {
                                ", below --mtp-max " + std::to_string(mtp_max));
   }
   // Spec 8 §11: the draft vocabulary narrows the MTP head's drafts, so both flags need
-  // --mtp (K or auto); the ranked list needs a size to fill; and the compact head is
-  // gathered from the int8 lm_head. Checked here, before the device is touched (the
-  // loader checks the same three).
+  // --mtp (K or auto), and the ranked list needs a size to fill. Checked here, before the
+  // device is touched. The compact head is gathered from the head in either --lm-head
+  // form; the loader refuses only a checkpoint that ships the head int4.
   if ((draft_vocab != 0 || !draft_vocab_ids.empty()) && mtp_k == 0)
     throw std::runtime_error("--draft-vocab and --draft-vocab-ids need --mtp (K or auto)");
   if (!draft_vocab_ids.empty() && draft_vocab == 0)
     throw std::runtime_error("--draft-vocab-ids needs --draft-vocab 32k, 64k or 128k");
-  if (draft_vocab != 0 && lm_head != loader::LmHeadForm::Int8)
-    throw std::runtime_error("--draft-vocab gathers rows of the int8 lm_head; it needs --lm-head int8");
   if (options.host.empty()) throw std::runtime_error("--host must not be empty");
   if (options.served_model.empty()) throw std::runtime_error("--served-name must not be empty");
   if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);

@@ -950,12 +950,16 @@ class Capture {
   // place of the full one - three launches for three:
   //
   //   gemv_i8w(w', s', x, dv_logits)                  gemv_i8w.cl at N = |V'|, grid |V'|/64
+  //     or gemv_bf16(w', x, dv_logits)                gemv_bf16.cl at N = |V'|, {64, 1}
   //   dv_argmax_stage1(dv_logits, ids, part, row_i)   draft_vocab.cl, grid |V'|/1024, WG 256
   //   dv_argmax_stage2(hctl, part, ids)               draft_vocab.cl, grid 1, WG 256
   //
-  // The first reads |V'| x 5120 int8 + 4|V'| B of scales instead of 248320 x 5120: 168 /
-  // 336 / 671 MB at 32k / 64k / 128k against 1.27 GB (derived). Stage 1 also scatters the
-  // compact logits into `row_i` (MtpBuffers::logits row draft_i_) at V''s ids, the rest of
+  // The GEMV is the head's own form (`--lm-head`): int8 reads |V'| x 5120 + 4|V'| B of
+  // scales instead of 248320 x 5120 - 168 / 336 / 671 MB at 32k / 64k / 128k against
+  // 1.27 GB; bf16 twice that against 2.54 GB (derived). The bf16 tiling is
+  // kernels::gemv_bf16_tiling(|V'|) = lm_head's {64, 1} at all three sizes (>= 512
+  // work-groups), so column j runs the full head's code for column ids[j]. Stage 1 also
+  // scatters the compact logits into `row_i` (MtpBuffers::logits row draft_i_) at V''s ids, the rest of
   // which MtpBuffers::zero() holds at -inf; stage 2 maps the winning compact index through
   // `ids` into hctl.out_token[0] and cur_token[0] and advances hctl.pos, as argmax_stage2
   // does for the full head. `part` is the decode scratch's argmax_part ([kM][243][2] fp32;
@@ -970,7 +974,14 @@ class Capture {
             "the draft vocabulary's head is not [|V'|][hidden] with a |V'| id table");
     require(b_.argmax_part.size() >= size_t(nv / kernels::kDraftVocabChunk) * 2 * kFp32,
             "argmax_part is smaller than the draft vocabulary's stage-1 pairs");
-    gemv_i8w(dv.head, b_.x.ptr(), mtp_->dv_logits->ptr());
+    if (dv.head.kind == model::WeightKind::Int8) {
+      gemv_i8w(dv.head, b_.x.ptr(), mtp_->dv_logits->ptr());
+    } else {
+      require(kernels::gemv_bf16_tiling(nv).ksplit == 1 &&
+                  kernels::gemv_bf16_tiling(nv).cols == kernels::kGemvBf16Cols,
+              "the bf16 draft head's tiling is not lm_head's {64, 1}");
+      head_gemv(dv.head, b_.x.ptr(), mtp_->dv_logits->ptr());   // requires kind Bf16
+    }
     const std::string v = kernels::dv_argmax_variant(nv);
     {
       l0::Kernel& k = kernel(v, "dv_argmax_stage1", kWgArgmax);

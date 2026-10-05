@@ -74,24 +74,27 @@ inline size_t mtp_norms_bytes(const model::ModelDesc& d) {
 constexpr size_t kMtpTensors = 15;
 
 // Spec 8 §11: the MTP draft's reduced vocabulary V' (`b70-serve --draft-vocab`), built
-// only when asked (`load(..., draft_vocab.size > 0)`, which needs the MTP head and the
-// int8 lm_head). The int8 head's rows ids[0..|V'|) and their fp32 scales, gathered at load
-// from the host copy the quantisation just made (loader::gather_int8_tiled_rows) into
-// gemv_i8w's tiled layout at N = |V'|, and the id table the draft's argmax maps its
-// compact index through. The verify list never reads any of it.
+// only when asked (`load(..., draft_vocab.size > 0)`, which needs the MTP head and an int8
+// or bf16 lm_head). The head's rows ids[0..|V'|) - and for int8 their fp32 scales -
+// gathered at load from the host copy the loader just made of the head (the int8
+// quantisation's, or the bf16 tiling's) into the same tiled layout at N = |V'|
+// (loader::gather_int8_tiled_rows / gather_bf16_tiled_rows), and the id table the draft's
+// argmax maps its compact index through. The verify list never reads any of it.
 //
-// **Why only the int8 head.** The compact head is a byte-exact subset of the head the
-// verify list reads, so the compact GEMV's column j is the full GEMV's column ids[j],
-// bitwise (draft_vocab_kernels_test). A bf16 head would need a bf16 gather and its own
-// test for the same property; the serving default is int8 (spec 9), so `--lm-head bf16`
-// with a draft vocabulary is refused at load rather than built untested.
+// **The compact head is the head's own form**, a byte-exact subset of what the verify
+// list reads, so the compact GEMV's column j is the full GEMV's column ids[j], bitwise
+// (draft_vocab_kernels_test, both forms): gemv_i8w or gemv_bf16 at N = |V'|. An int4
+// (`--quant_lm_head`) checkpoint head is refused - no int4 gather and no binaries for it.
 struct DraftVocab {
-  DeviceWeight head;              // int8 [|V'|/16][K/16][16][16] + fp32 scales [|V'|]; kind Int8,
-                                  // shape {K = hidden, N = |V'|, S = 1, layout 0}
+  // int8: [|V'|/16][K/16][16][16] + fp32 scales [|V'|]; bf16: [|V'|/16][K/8][8][16], no
+  // scales (2x the int8 bytes). Kind Int8 or Bf16, shape {K = hidden, N = |V'|, S 1, layout 0}.
+  DeviceWeight head;
   l0::Mem ids;                    // u32 [|V'|], ascending - the compact index -> id table
   std::vector<uint32_t> host_ids; // the same table on the host
   uint32_t size() const { return uint32_t(host_ids.size()); }
-  size_t bytes() const { return head.mem.size() + head.scales->size() + ids.size(); }
+  size_t bytes() const {
+    return head.mem.size() + (head.scales ? head.scales->size() : 0) + ids.size();
+  }
 };
 
 struct LoadReport {            // printed by load(); asserted by the checkpoint test
@@ -167,8 +170,9 @@ struct LoadedModel {
 // if the checkpoint's head is not bf16.
 // `draft_vocab` (spec 8 §11): size > 0 builds LoadedModel::draft_vocab - V' chosen by
 // loader::select_draft_vocab over the spec's lists at the model's vocab_used, gathered
-// from the int8 head. Throws before a byte is read unless `mtp` is on, `lm_head` is Int8
-// and the size is one the kernels are compiled for (kDraftVocabSizes).
+// from the head in its loaded form (int8 or bf16). Throws before a byte is read unless
+// `mtp` is on, the head is not the checkpoint's int4, and the size is one the kernels
+// are compiled for (kDraftVocabSizes).
 LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len = 16384,
                  bool mtp = false, LmHeadForm lm_head = LmHeadForm::Checkpoint,
                  const DraftVocabSpec& draft_vocab = DraftVocabSpec{});
