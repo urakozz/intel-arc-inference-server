@@ -607,7 +607,7 @@ class DriverTest(unittest.TestCase):
         out = self.run_driver("--dry-run", "--only", "r14", "--with", "r14.oracle").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order, ["pre", "r14.k0", "r14.host", "r14.k1", "r14.load", "r14.k3", "r14.oracle",
-                                 "r14.golden", "r14.cli"])
+                                 "r14.golden", "r14.golden_eager", "r14.cli"])
         self.assertIn("tools/box_validate/k2_oracle.sh $HOME/b70-inference-server", out)
         out = self.run_driver("--dry-run", "--only", "r13").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)

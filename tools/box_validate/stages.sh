@@ -822,7 +822,7 @@ st_r13_p0_arms() {
 row 14 "spec 18b - K2-Horizon decode on one card (spec 18 §10, plan 18b)"
 rownote 14 "Load, K3, CLI and speed need the int4 checkpoint (SNAP_K2: hf download urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ, 21.8 GB); K2 also needs oracle-out-k2, which the opt-in r14.oracle makes on the box CPU (--with r14.oracle, ~20 min). Without them those stages SKIP with 'missing data'."
 rownote 14 "Setting the near-tie tolerance from the gap distribution r14.oracle prints (k2_golden_test.cc proposes 1e-3) is an edit after it; r14.golden runs at the proposal, or at B70_K2_TIE_TOL when the driver's environment sets it."
-rownote 14 "If K2's determined rows fail, the first suspect is decode attention's fp32 probabilities against the reference's eager bf16 scores / probabilities (spec 18 §10); an eager-mirroring reduce is the fix, on a branch."
+rownote 14 "If K2's determined rows fail, the first suspect is decode attention's fp32 probabilities against the reference's eager bf16 scores / probabilities (spec 18 §10): r14.golden_eager runs the same gate through the eager variant (B70_K2_ATTN=eager, spec 18 §10.1); compare the two, and §10.1's rule decides the default."
 
 stage r14.k0 14 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (no existing .cl changed), the Qwen3.8 suite (G0); Agnes's and Ornith's gates not failed (a SKIP for missing data is noted, not counted)"
 st_r14_k0() {
@@ -830,12 +830,12 @@ st_r14_k0() {
   need_ok r1.gates r1.features r10.nockpt r10.gates r13.kernels r13.gates
   finish
 }
-stage r14.host 14 default cpu - - "host: k2_horizon, k2_rope, k2_repack, k2_ref, k2_plan, k2_variant_names, model_desc (the power-of-two expert-count refusal)"
+stage r14.host 14 default cpu - - "host: k2_horizon, k2_rope, k2_repack, k2_ref, k2_attn_eager_ref (the eager chain bitwise against torch), k2_plan, k2_variant_names, model_desc (the power-of-two expert-count refusal)"
 st_r14_host() {
-  run_tests '^(k2_horizon_test|k2_rope_test|k2_repack_test|k2_ref_test|k2_plan_test|k2_variant_names_test|model_desc_test)$'
+  run_tests '^(k2_horizon_test|k2_rope_test|k2_repack_test|k2_ref_test|k2_attn_eager_ref_test|k2_plan_test|k2_variant_names_test|model_desc_test)$'
   finish
 }
-stage r14.k1 14 default gpu - - "K1, no checkpoint: k2_kernels_test (norm / prep bit-exact, routers incl. ties and the padded lanes, MoE and MoVA within 2 ulps, attention at 6 / 300 / 3000 keys with softplus gates on both sides of 28.85, replay); cli_reject_k2_{prefill,pp,kv8}, cli_reject_mtp_k2"
+stage r14.k1 14 default gpu - - "K1, no checkpoint: k2_kernels_test (norm / prep bit-exact, routers incl. ties and the padded lanes, MoE and MoVA within 2 ulps, attention at 6 / 300 / 3000 keys with softplus gates on both sides of 28.85, replay; §9 the eager attention bitwise against k2_ref at 6 / 300 / 3000 / 4096 keys); cli_reject_k2_{prefill,pp,kv8}, cli_reject_mtp_k2"
 st_r14_k1() {
   run_tests '^k2_kernels_test$' k2
   run_tests '^cli_reject_(k2_.*|mtp_k2)$'
@@ -867,6 +867,12 @@ st_r14_golden() {
   x "grep -h -E 'selection gap' oracle-out-k2/*.log 2>/dev/null || echo 'no gap lines in oracle-out-k2/*.log'"
   run_tests '^k2_golden(_i8head)?_test$' k2 '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
   jgrab k2-golden 'k2_golden' 'tie|routing|determined|differ|OK|PASS|FAIL'
+  finish
+}
+stage r14.golden_eager 14 default gpu k2,oracle_k2 r14.k3 "K2 through the EAGER attention (B70_K2_ATTN=eager, spec 18 §10.1; 813 launches): k2_golden_eager_test and _i8head - compare with r14.golden (determined-row failures, non-tie / near-tie routing counts, first differing row per layer); §10.1's rule decides the default"
+st_r14_golden_eager() {
+  run_tests '^k2_golden_eager(_i8head)?_test$' k2 '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
+  jgrab k2-golden-eager 'k2_golden_eager' 'attention|tie|routing|determined|differ|OK|PASS|FAIL'
   finish
 }
 stage r14.cli 14 default gpu k2 r14.k1 "CLI: b70-decode <k2> --ids (oracle-out-k2/prose.ids, else the committed prose.ids) --n 32; --max-len auto -> ~46592 (bf16 head) / ~49920 (--lm-head int8), derived; b70-serve <k2> refuses naming 18c / 18d"
