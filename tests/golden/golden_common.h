@@ -66,6 +66,9 @@ class Golden {
     for (auto& e : loader::SafetensorsSet::parse_header(file_.data(), file_.size()))
       tensors_.emplace(e.first, e.second);
   }
+  // Spec 15c: whether the dump carries a tensor (an optional one, like a MoE model's
+  // router logits, is probed before it is read).
+  bool has(const std::string& n) const { return tensors_.count(n) != 0; }
   const loader::TensorInfo& info(const std::string& n) const {
     auto it = tensors_.find(n);
     if (it == tensors_.end()) {
