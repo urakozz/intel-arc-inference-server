@@ -315,15 +315,7 @@ size_t K2PrefillScratch::bytes() const {
          h.size() + w.size();
 }
 
-bool prefill_attn_eager() {
-  static const bool eager = [] {
-    const char* v = std::getenv("B70_K2_ATTN");
-    if (v == nullptr || *v == '\0' || std::strcmp(v, "flash") == 0) return false;
-    if (std::strcmp(v, "eager") == 0) return true;
-    throw std::runtime_error(std::string("B70_K2_ATTN expects flash or eager, got '") + v + "'");
-  }();
-  return eager;
-}
+bool prefill_attn_eager() { return k2_attn() == K2Attn::Eager; }   // one parser, k2_sizes.cc
 
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, K2PrefillScratch& s,
                    const loader::K2LoadedModel& m, K2Buffers& b, uint32_t pos, uint32_t C,

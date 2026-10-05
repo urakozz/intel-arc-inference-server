@@ -48,9 +48,10 @@ struct K2PrefillScratch {
   size_t bytes() const;
 };
 
-// B70_K2_ATTN=eager selects the reference-rounding attention (k2_pf_attn.cl EAGER), read
-// once; unset / `flash` is the default. Spec 18c's half of the switch 18b's review asked for
-// (the decode half is branch k2-attn-eager's).
+// B70_K2_ATTN=eager selects the reference-rounding attention (k2_pf_attn.cl EAGER); unset /
+// `flash` is the default. Spec 18c's half of the switch 18b's review asked for; the decode
+// half (k2_attn_eager.cl, spec 18 §10.1) reads the same variable through the same parser,
+// runtime::k2::k2_attn() (k2_sizes.h), at each call.
 bool prefill_attn_eager();
 
 // ONE chunk at absolute position `pos`, C rows. The caller has uploaded the ids into s.ids

@@ -24,6 +24,8 @@
 //                 argmax_stage1, argmax_stage2                                   5 launches
 //
 // 717 launches on K2 (runtime::k2::decode_launches), asserted at capture (Review Focus 5).
+// B70_K2_ATTN=eager (spec 18 §10.1) binds k2_attn_eager.cl's score / softmax / P·V / reduce in
+// place of every layer's decode + reduce: 813.
 //
 // The residual stream: a dense layer's down leaves its partials for the next layer's fold
 // (S_PREV = down's S); a MoE layer's k2_moe_down folds into `resid` itself, so the fold that
