@@ -1,9 +1,10 @@
-// Spec 14 §3.1: the model descriptor. Host-only (no device, no checkpoint).
+// Spec 14 §3.1 / spec 15b: the model descriptor. Host-only (no device, no checkpoint).
 #include <cstdio>
 #include <stdexcept>
 #include <string>
 #include <vector>
 #include "check.h"
+#include "loader/small_layout.h"
 #include "model/model_desc.h"
 
 namespace {
@@ -33,6 +34,56 @@ void check_layers(const ModelDesc& d) {
   // The MLP rows follow the intermediate size: gate||up is 2 x I wide, down reads I.
   CHECK_EQ(d.shape(LinearId::GateUp).N, 2 * d.intermediate);
   CHECK_EQ(d.shape(LinearId::Down).K, d.intermediate);
+  // Spec 15b: every other row follows the descriptor's shapes (Review Focus 2).
+  CHECK_EQ(d.gdn_conv_dim(), (2 * d.gdn_k_heads + d.gdn_v_heads) * 128u);
+  CHECK_EQ(d.gdn_value_dim(), d.gdn_v_heads * 128u);
+  CHECK_EQ(d.gdn_qkvz_n(), d.gdn_conv_dim() + d.gdn_value_dim());
+  CHECK_EQ(d.gdn_ab_n(), 2 * d.gdn_v_heads);
+  CHECK_EQ(d.fa_q_proj_n(), 2 * d.fa_q_heads * 256u);   // q || the output gate, per head
+  CHECK_EQ(d.fa_kv_n(), d.fa_kv_heads * 256u);
+  CHECK_EQ(d.fa_qkv_n(), d.fa_q_proj_n() + 2 * d.fa_kv_n());
+  CHECK_EQ(d.fa_value_dim(), d.fa_q_heads * 256u);
+  CHECK_EQ(d.fa_gqa() * d.fa_kv_heads, d.fa_q_heads);
+  CHECK_EQ(d.shape(LinearId::QkvZ).K, d.hidden);
+  CHECK_EQ(d.shape(LinearId::QkvZ).N, d.gdn_qkvz_n());
+  CHECK_EQ(d.shape(LinearId::AB).K, d.hidden);
+  CHECK_EQ(d.linear(LinearId::AB).pad_n, d.gdn_ab_n());
+  CHECK(d.shape(LinearId::AB).N >= d.gdn_ab_n());
+  CHECK_EQ(d.shape(LinearId::OutProj).K, d.gdn_value_dim());
+  CHECK_EQ(d.shape(LinearId::OutProj).N, d.hidden);
+  CHECK_EQ(d.shape(LinearId::GateUp).K, d.hidden);
+  CHECK_EQ(d.shape(LinearId::Down).N, d.hidden);
+  CHECK_EQ(d.shape(LinearId::Qkv).K, d.hidden);
+  CHECK_EQ(d.shape(LinearId::Qkv).N, d.fa_qkv_n());
+  CHECK_EQ(d.shape(LinearId::OProj).K, d.fa_value_dim());
+  CHECK_EQ(d.shape(LinearId::OProj).N, d.hidden);
+  CHECK_EQ(d.shape(LinearId::LmHead).K, d.hidden);
+  CHECK_EQ(d.shape(LinearId::LmHead).N, model::Qwen35::kVocab);
+  for (model::WeightKind k :
+       {model::WeightKind::Bf16, model::WeightKind::Int4, model::WeightKind::Int8})
+    CHECK_EQ(d.lm_head(k).shape.K, d.hidden);
+  // The small-tensor tables follow the shapes and tile the descriptor's blocks.
+  const loader::SmallLayout sl = d.small_layout();
+  CHECK_EQ(sl.norms_off_post, size_t(d.hidden) * 4);
+  CHECK_EQ(sl.gdn_off_nega, size_t(d.gdn_conv_dim()) * 4 * 4);
+  CHECK_EQ(sl.final_norm_bytes, size_t(d.hidden) * 4);
+  for (const model::LayerDesc& ld : {layers[0], layers[3]}) {
+    size_t norms_b = 0, kind_b = 0;
+    for (const auto& t : ld.small_tensors)
+      (t.block == model::SmallBlock::Norms ? norms_b : kind_b) +=
+          size_t(t.elems) * (t.bake == model::SmallBake::PlainBf16 ? 2 : 4);
+    CHECK_EQ(norms_b, sl.norms_block_bytes);
+    CHECK_EQ(kind_b, ld.kind == LayerKind::FA ? loader::kFaBlockBytes : sl.gdn_block_bytes);
+  }
+  CHECK_EQ(layers[0].small_tensors[0].elems, d.hidden);
+  CHECK_EQ(layers[0].small_tensors[1].offset, uint32_t(sl.norms_off_post));
+  CHECK_EQ(layers[0].small_tensors[2].elems, d.gdn_conv_dim() * 4u);   // conv1d [C][1][4]
+  CHECK_EQ(layers[0].small_tensors[3].elems, d.gdn_v_heads);            // A_log
+  CHECK_EQ(layers[0].small_tensors[3].offset, uint32_t(sl.gdn_off_nega));
+  CHECK_EQ(layers[0].small_tensors[4].elems, d.gdn_v_heads);            // dt_bias
+  CHECK_EQ(layers[0].small_tensors[4].offset, uint32_t(sl.gdn_off_dtbias));
+  CHECK_EQ(layers[0].small_tensors[5].offset, uint32_t(sl.gdn_off_gated_norm));
+  CHECK_EQ(layers[3].small_tensors[0].elems, d.hidden);
   // Every shape is kernel-legal: N%64, K%64, S | K/64; and the spec 5
   // 1024-column slab / 1024-blocked Hadamard alignment holds (spec 14 §2).
   for (size_t i = 0; i < model::kLinearCount; ++i) {
@@ -41,7 +92,43 @@ void check_layers(const ModelDesc& d) {
     CHECK_EQ(s.K % 64, uint32_t(0));
     CHECK_EQ((s.K / 64) % s.S, uint32_t(0));
   }
-  CHECK_EQ(d.intermediate % 1024, uint32_t(0));
+  // The prefill slab / 1024-blocked Hadamard alignment is a dense-MLP property.
+  if (d.ffn == model::FfnKind::Dense) CHECK_EQ(d.intermediate % 1024, uint32_t(0));
+}
+
+// Qwen3.8's shapes, which Agnes shares (spec 15b R0: both unchanged).
+void check_qwen38_shapes(const ModelDesc& d) {
+  CHECK_EQ(d.hidden, uint32_t(5120));
+  CHECK_EQ(d.fa_q_heads, uint32_t(24));
+  CHECK_EQ(d.fa_kv_heads, uint32_t(4));
+  CHECK_EQ(d.gdn_k_heads, uint32_t(16));
+  CHECK_EQ(d.gdn_v_heads, uint32_t(48));
+  CHECK_EQ(d.gdn_conv_dim(), uint32_t(10240));
+  CHECK_EQ(d.gdn_value_dim(), uint32_t(6144));
+  CHECK_EQ(d.gdn_qkvz_n(), uint32_t(16384));
+  CHECK_EQ(d.gdn_ab_n(), uint32_t(96));
+  CHECK_EQ(d.fa_q_proj_n(), uint32_t(12288));
+  CHECK_EQ(d.fa_qkv_n(), uint32_t(14336));
+  CHECK_EQ(d.fa_value_dim(), uint32_t(6144));
+  CHECK_EQ(d.fa_gqa(), uint32_t(6));
+  CHECK(d.ffn == model::FfnKind::Dense);
+  CHECK(!d.is_moe());
+  CHECK(!d.tied_embeddings);
+  CHECK_EQ(d.mtp_intermediate, uint32_t(17408));            // no parallel FFN in Agnes's head
+  CHECK_EQ(d.mtp_checkpoint_bytes(), size_t(849398784));    // docs/03: 0.849 GB
+  const loader::SmallLayout sl = d.small_layout();
+  const loader::SmallLayout& q = loader::kQwen38Small;
+  CHECK_EQ(sl.norms_off_post, q.norms_off_post);
+  CHECK_EQ(sl.norms_block_bytes, q.norms_block_bytes);
+  CHECK_EQ(sl.gdn_off_nega, q.gdn_off_nega);
+  CHECK_EQ(sl.gdn_off_dtbias, q.gdn_off_dtbias);
+  CHECK_EQ(sl.gdn_off_gated_norm, q.gdn_off_gated_norm);
+  CHECK_EQ(sl.gdn_block_bytes, q.gdn_block_bytes);
+  CHECK_EQ(sl.final_norm_bytes, q.final_norm_bytes);
+  // The kernel-name suffixes are empty: every Qwen3.8 / Agnes binary keeps its name.
+  CHECK_EQ(d.hidden_suffix(), std::string());
+  CHECK_EQ(d.gdn_suffix(), std::string());
+  CHECK_EQ(d.fa_suffix(), std::string());
 }
 
 }  // namespace
@@ -59,6 +146,7 @@ int main() {
   CHECK_EQ(q.to_engine("layers.0.linear_attn.A_log"), std::string("layers.0.linear_attn.A_log"));
   CHECK_EQ(q.to_checkpoint("layers.3.self_attn.q_proj"), std::string("layers.3.self_attn.q_proj"));
   check_layers(q);
+  check_qwen38_shapes(q);
   // Qwen3.8's MLP rows are exactly the measured production map, no fold.
   CHECK_EQ(q.shape(LinearId::GateUp).N, uint32_t(34816));
   CHECK_EQ(q.shape(LinearId::GateUp).S, uint32_t(8));
@@ -85,6 +173,7 @@ int main() {
   CHECK_EQ(a.intermediate_suffix(), std::string("_I19456"));
   CHECK(a.provisional_tuning);
   check_layers(a);
+  check_qwen38_shapes(a);
   // The fold's alignment (spec 14 §2): g64 groups and 1024-column slabs / blocks.
   CHECK_EQ(17408u % 64, 0u);
   CHECK_EQ(a.intermediate % 1024, 0u);
@@ -126,12 +215,82 @@ int main() {
   CHECK_EQ(a.to_checkpoint("layers.7.self_attn.o_proj"), std::string("layers.7.global_attn.o_proj"));
   CHECK_EQ(a.to_checkpoint("layers.4.linear_attn.A_log"), std::string("layers.4.delta_attn.A_log"));
 
-  // An unknown architecture throws, naming it.
+  // Spec 15b: Ornith 1.5 35B-A3B (spec 15 §1; its config.json and index).
+  const ModelDesc& o = model::ornith();
+  CHECK(&model::desc_for_architecture("Qwen3_5MoeForConditionalGeneration") == &o);
+  CHECK_EQ(o.name, std::string("ornith-1.5-35b-a3b"));
+  CHECK_EQ(o.layers, uint32_t(40));
+  CHECK_EQ(o.gdn_layers, uint32_t(30));
+  CHECK_EQ(o.fa_layers, uint32_t(10));
+  CHECK_EQ(o.hidden, uint32_t(2048));
+  CHECK_EQ(o.fa_q_heads, uint32_t(16));
+  CHECK_EQ(o.fa_kv_heads, uint32_t(2));
+  CHECK_EQ(o.fa_q_proj_n(), uint32_t(8192));   // 16 x 256 x (q || gate)
+  CHECK_EQ(o.fa_qkv_n(), uint32_t(9216));      // 8192 + 512 + 512
+  CHECK_EQ(o.fa_value_dim(), uint32_t(4096));
+  CHECK_EQ(o.fa_gqa(), uint32_t(8));
+  CHECK_EQ(o.gdn_k_heads, uint32_t(16));
+  CHECK_EQ(o.gdn_v_heads, uint32_t(32));
+  CHECK_EQ(o.gdn_conv_dim(), uint32_t(8192));
+  CHECK_EQ(o.gdn_value_dim(), uint32_t(4096));
+  CHECK_EQ(o.gdn_qkvz_n(), uint32_t(12288));
+  CHECK_EQ(o.gdn_ab_n(), uint32_t(64));
+  CHECK(o.ffn == model::FfnKind::Moe);
+  CHECK(o.is_moe());
+  CHECK_EQ(o.moe.experts, uint32_t(256));
+  CHECK_EQ(o.moe.top_k, uint32_t(8));
+  CHECK_EQ(o.moe.expert_intermediate, uint32_t(512));
+  CHECK_EQ(o.moe.shared_intermediate, uint32_t(512));
+  CHECK(o.moe.has_shared_gate);
+  // A MoE model's dense MLP rows describe its shared expert (one expert's shape).
+  CHECK_EQ(o.intermediate, o.moe.shared_intermediate);
+  CHECK(o.linear(LinearId::GateUp).parts ==
+        std::vector<std::string>({"mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj"}));
+  CHECK(o.linear(LinearId::Down).parts ==
+        std::vector<std::string>({"mlp.shared_expert.down_proj"}));
+  CHECK_EQ(o.vocab_used, uint32_t(248077));   // added tokens 248044..248076, as Qwen3.8
+  CHECK(!o.tied_embeddings);
+  CHECK(o.name_map.empty());                  // linear_attn. / self_attn., as Qwen3.8
+  CHECK_EQ(o.max_len_ceiling, uint32_t(0));   // KV is 20 KiB per position (spec 15 §2)
+  CHECK_EQ(o.mtp_intermediate, uint32_t(0));  // its MTP head is one MoE layer (15e)
+  CHECK_EQ(o.mtp_checkpoint_bytes(), size_t(0));
+  CHECK(o.provisional_tuning);
+  CHECK_EQ(o.doc_w, 0.0);                     // no int4 checkpoint exists yet (15a)
+  check_layers(o);
+  // Ornith's small blocks: norms 2 x 2048 fp32; GDN conv 8192 x 4 fp32, 32 + 32 fp32, 128 bf16.
+  const loader::SmallLayout os = o.small_layout();
+  CHECK_EQ(os.norms_off_post, size_t(8192));
+  CHECK_EQ(os.norms_block_bytes, size_t(16384));
+  CHECK_EQ(os.gdn_off_nega, size_t(131072));
+  CHECK_EQ(os.gdn_off_dtbias, size_t(131200));
+  CHECK_EQ(os.gdn_off_gated_norm, size_t(131328));
+  CHECK_EQ(os.gdn_block_bytes, size_t(131584));
+  CHECK_EQ(os.final_norm_bytes, size_t(8192));
+  // Its kernels carry shape suffixes (no binary is built for them until 15c).
+  CHECK_EQ(o.hidden_suffix(), std::string("_D2048"));
+  CHECK_EQ(o.gdn_suffix(), std::string("_GK16V32"));
+  CHECK_EQ(o.fa_suffix(), std::string("_Q16KV2"));
+  CHECK_EQ(o.intermediate_suffix(), std::string("_I512"));
+  // The loader's gate (loader::load calls it after picking the descriptor): Ornith's
+  // row exists, its load refuses until spec 15c; the dense models pass.
+  bool moe_threw = false;
+  try {
+    model::require_loadable(o);
+  } catch (const std::runtime_error& e) {
+    moe_threw = std::string(e.what()).find("MoE not implemented (spec 15c)") != std::string::npos;
+  }
+  CHECK(moe_threw);
+  model::require_loadable(q);
+  model::require_loadable(a);
+
+  // An unknown architecture throws, naming it and the three supported ones.
   bool threw = false;
   try {
     model::desc_for_architecture("LlamaForCausalLM");
   } catch (const std::runtime_error& e) {
-    threw = std::string(e.what()).find("LlamaForCausalLM") != std::string::npos;
+    const std::string w = e.what();
+    threw = w.find("LlamaForCausalLM") != std::string::npos &&
+            w.find("Qwen3_5MoeForConditionalGeneration") != std::string::npos;
   }
   CHECK(threw);
 

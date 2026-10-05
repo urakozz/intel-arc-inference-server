@@ -4,31 +4,69 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "loader/small_layout.h"
 #include "model/qwen35.h"
 
-// Spec 14 §3.1: the per-model shape as data. Everything the two supported
-// checkpoints share - hidden, heads, head dims, vocab, rotary, the small-tensor
-// tables, the per-layer linear order - stays `constexpr` in `model::Qwen35`.
-// What differs is here, chosen by the loader from `config.json`'s
-// `architectures[0]`:
+// Spec 14 §3.1 / spec 15b: the per-model shape as data. What the supported
+// checkpoints share - head dims, vocab, rotary, the per-layer linear order and
+// the small tensors' names - stays `constexpr` in `model::Qwen35`. What differs
+// is here, chosen by the loader from `config.json`'s `architectures[0]`:
 //
-//                       Qwen3.8-27B                      Agnes 3.0 Flash
-//   architecture        Qwen3_5ForConditionalGeneration  AgnesForConditionalGeneration
-//   layers              64 = 48 GDN + 16 FA              72 = 54 GDN + 18 FA
-//   FA layers           l % 4 == 3                       l % 4 == 3
-//   MLP intermediate    17408                            19456 = 17408 + 2048, the
-//                                                        parallel FFN folded in (§2)
-//   tensor names        linear_attn. / self_attn.        delta_attn. / global_attn.
-//   max_len ceiling     none                             65536 (§3.3, until spec 12)
+//                     Qwen3.8-27B            Agnes 3.0 Flash        Ornith 1.5 35B-A3B
+//   architecture      Qwen3_5ForCondi-       AgnesForCondi-         Qwen3_5MoeForCondi-
+//                     tionalGeneration       tionalGeneration       tionalGeneration
+//   layers            64 = 48 GDN + 16 FA    72 = 54 GDN + 18 FA    40 = 30 GDN + 10 FA
+//   FA layers         l % 4 == 3             l % 4 == 3             l % 4 == 3
+//   hidden            5120                   5120                   2048
+//   FA q / kv heads   24 / 4 (GQA 6)         24 / 4                 16 / 2 (GQA 8)
+//   GDN k / v heads   16 / 48 (conv 10240)   16 / 48                16 / 32 (conv 8192)
+//   FFN               dense 17408            dense 19456 = 17408 +  MoE: 256 experts, top-8,
+//                                            2048, the parallel     expert 512, shared
+//                                            FFN folded in (§2)     expert 512 + sigmoid gate
+//   tensor names      linear_attn. /         delta_attn. /          linear_attn. /
+//                     self_attn.             global_attn.           self_attn.
+//   max_len ceiling   none                   65536 (§3.3)           none
+//   loadable          yes                    yes                    no: "MoE not implemented
+//                                                                   (spec 15c)"
 //
 // Descriptors are process-lifetime singletons: hold them by reference/pointer.
 namespace model {
+
+// Spec 15b: the feed-forward block's kind. Dense is the SwiGLU MLP the table's
+// GateUp / Down rows run; Moe adds routed experts (`MoeDesc`), which nothing
+// in the engine runs before spec 15c.
+enum class FfnKind { Dense, Moe };
+
+// The routed-expert shape of a FfnKind::Moe model (spec 15 §1). Unused (zero) on
+// a dense model. Read by nothing but the descriptor test until spec 15c.
+struct MoeDesc {
+  uint32_t experts = 0;               // routed experts per layer
+  uint32_t top_k = 0;                 // experts per token
+  uint32_t expert_intermediate = 0;   // one routed expert's SwiGLU width
+  uint32_t shared_intermediate = 0;   // the always-on shared expert's width; 0 = none
+  bool has_shared_gate = false;       // the shared expert is scaled by sigmoid(x . g)
+};
 
 struct ModelDesc {
   std::string name;           // a short label for logs: "qwen3.8", "agnes-3.0-flash"
   std::string architecture;   // config.json's architectures[0]
   uint32_t layers = 0, gdn_layers = 0, fa_layers = 0;
+  // Spec 15b: the per-model widths (config.json hidden_size, num_attention_heads,
+  // num_key_value_heads, linear_num_key_heads, linear_num_value_heads). The head
+  // dims (256 FA, 128 GDN) are shared: model::Qwen35.
+  uint32_t hidden = 0;
+  uint32_t fa_q_heads = 0, fa_kv_heads = 0;
+  uint32_t gdn_k_heads = 0, gdn_v_heads = 0;
+  FfnKind ffn = FfnKind::Dense;
+  MoeDesc moe{};                      // FfnKind::Moe only
+  bool tied_embeddings = false;       // lm_head shares embed_tokens (none supported does)
+  // The MTP head's dense MLP width: 17408 on Qwen3.8 and on Agnes (no parallel FFN
+  // in Agnes's head, spec 14 §1). 0 = the head's FFN is not dense (Ornith: one MoE
+  // layer, spec 15e).
+  uint32_t mtp_intermediate = 0;
   // The MLP width the ENGINE runs: for Agnes the folded 17408 + 2048 (spec 14 §2).
+  // For a MoE model, its shared expert's width - the dense GateUp / Down rows of
+  // the table describe the shared expert (spec 15b; the routed experts are `moe`).
   uint32_t intermediate = 0;
   // The checkpoint's `mlp.parallel_ffn` width, folded at load; 0 = none.
   uint32_t parallel_ffn = 0;
@@ -40,6 +78,9 @@ struct ModelDesc {
   // `model.language_model.*` and `mtp.*` name (vLLM PR #57003's WeightsMapper).
   std::vector<std::pair<std::string, std::string>> name_map;
   std::array<FusedLinear, kLinearCount> table{};   // indexed by LinearId ordinal
+  // lm_head's int4 and int8 rows (the bf16 one is table[LmHead]); `lm_head(kind)`
+  // picks. Per descriptor because K is the model's hidden size (spec 15b).
+  FusedLinear lm_int4{}, lm_int8{};
   // `W` with a bf16 lm_head: the bytes a decode step streams (int4 qweight +
   // scales + bf16 per-layer tensors + lm_head), the loader's 2% cross-check
   // (docs/13). Qwen3.8: 15.519 GB, measured (docs/03). Agnes: 18.344 GB, summed
@@ -54,10 +95,45 @@ struct ModelDesc {
   // True for a descriptor whose GEMV tuning rows were copied, not measured (spec
   // 14 §6: Agnes's two new shapes until the box sweep replaces them).
   bool provisional_tuning = false;
+  // The per-layer non-GEMV tensors of each layer kind, in engine names - the
+  // loader's single source of truth (fix I3). Element counts and offsets follow
+  // this descriptor's shapes (`small_layout()`); built with the descriptor.
+  std::vector<SmallTensor> small_gdn, small_fa;
 
   bool has_parallel_ffn() const { return parallel_ffn != 0; }
-  // [GDN, GDN, GDN, FA] repeating - both models (`global_attention_interval` 4).
+  bool is_moe() const { return ffn == FfnKind::Moe; }
+  // [GDN, GDN, GDN, FA] repeating - every supported model (`full_attention_interval`
+  // / `global_attention_interval` 4).
   static bool is_fa(uint32_t layer) { return layer % 4 == 3; }
+
+  // --- derived widths (spec 15b Review Focus 2) -------------------------------
+  // GDN conv channels: q and k (k-heads each) plus v (v-heads), x 128. The z half
+  // of the qkv||z GEMV does not go through the conv. Qwen3.8 10240, Ornith 8192.
+  uint32_t gdn_conv_dim() const { return (2 * gdn_k_heads + gdn_v_heads) * Qwen35::kGdnHeadDim; }
+  // v-heads x 128: z's width, out_proj's K, one token's gdn_o row. Qwen3.8 6144.
+  uint32_t gdn_value_dim() const { return gdn_v_heads * Qwen35::kGdnHeadDim; }
+  uint32_t gdn_qkvz_n() const { return gdn_conv_dim() + gdn_value_dim(); }   // 16384
+  // a || b before the kernel's zero-pad: one decay and one beta per v-head. 96.
+  uint32_t gdn_ab_n() const { return 2 * gdn_v_heads; }
+  // q_proj with the output gate: q || gate per head, 2 x q-heads x 256. 12288.
+  uint32_t fa_q_proj_n() const { return 2 * fa_q_heads * Qwen35::kFaHeadDim; }
+  uint32_t fa_kv_n() const { return fa_kv_heads * Qwen35::kFaHeadDim; }      // k (or v): 1024
+  uint32_t fa_qkv_n() const { return fa_q_proj_n() + 2 * fa_kv_n(); }       // 14336
+  // q-heads x 256: o_proj's K, attn_out's row. Qwen3.8 6144, Ornith 4096.
+  uint32_t fa_value_dim() const { return fa_q_heads * Qwen35::kFaHeadDim; }
+  uint32_t fa_gqa() const { return fa_q_heads / fa_kv_heads; }   // q-heads per kv-head: 6 / 8
+  // The per-layer small blocks' byte layout (loader/small_layout.h).
+  loader::SmallLayout small_layout() const {
+    return loader::make_small_layout(hidden, gdn_conv_dim(), gdn_v_heads);
+  }
+  const std::vector<SmallTensor>& small_tensors(LayerKind kind) const {
+    return kind == LayerKind::FA ? small_fa : small_gdn;
+  }
+  // The MTP head's 15 bf16 tensors' checkpoint bytes, from the shapes: fc
+  // [hidden][2 hidden], q/k/v/o, the dense MLP at mtp_intermediate, five hidden-wide
+  // norms and q_norm / k_norm. Qwen3.8 and Agnes 849,398,784 (docs/03). 0 when
+  // the head is not dense (mtp_intermediate == 0).
+  size_t mtp_checkpoint_bytes() const;
 
   // The table row. Throws std::out_of_range on kCount or a bad cast.
   // `linear(LmHead)` is the bf16 row (see Qwen35's history note); callers that
@@ -78,12 +154,23 @@ struct ModelDesc {
   // names: "" at Qwen3.8's 17408 (so every Qwen3.8 binary keeps its name and its
   // command line), "_I<intermediate>" otherwise.
   std::string intermediate_suffix() const;
+  // Spec 15b: the suffixes of kernels that bake a model shape their name does not
+  // otherwise carry (kernels.h, kernels::hidden_suffix / gdn_suffix / fa_suffix).
+  // "" at Qwen3.8's shapes, which Agnes shares, so no existing binary is renamed.
+  std::string hidden_suffix() const;   // "_D<hidden>"
+  std::string gdn_suffix() const;      // "_GK<k-heads>V<v-heads>"
+  std::string fa_suffix() const;       // "_Q<q-heads>KV<kv-heads>"
 };
 
 const ModelDesc& qwen38();
-const ModelDesc& agnes();   // Agnes 3.0 Flash (spec 14)
+const ModelDesc& agnes();    // Agnes 3.0 Flash (spec 14)
+const ModelDesc& ornith();   // Ornith 1.5 35B-A3B (spec 15): described, not yet loadable
 // The descriptor for config.json's `architectures[0]`; throws std::runtime_error
 // naming the architecture and the supported ones.
 const ModelDesc& desc_for_architecture(const std::string& architecture);
+// Throws std::runtime_error when the engine cannot run this descriptor yet: a
+// FfnKind::Moe model ("MoE not implemented (spec 15c)"), tied embeddings. The
+// loader calls it right after desc_for_architecture.
+void require_loadable(const ModelDesc& desc);
 
 }  // namespace model

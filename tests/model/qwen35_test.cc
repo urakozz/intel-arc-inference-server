@@ -75,30 +75,31 @@ int main() {
   // the bake column has to say.
   using model::SmallBake;
   using model::SmallBlock;
+  const loader::SmallLayout L = q38.small_layout();   // Qwen3.8: loader::kQwen38Small
   const auto& g = layers[0].small_tensors;
   const auto& f = layers[3].small_tensors;
   CHECK_EQ(g.size(), size_t(6));
   CHECK_EQ(f.size(), size_t(4));
   CHECK_EQ(g[0].name, std::string("input_layernorm.weight"));
-  CHECK_EQ(g[0].elems, Qwen35::kHidden);
-  CHECK_EQ(g[0].offset, uint32_t(loader::kNormsOffInput));
+  CHECK_EQ(g[0].elems, uint32_t(5120));   // Qwen3.8 hidden
+  CHECK_EQ(g[0].offset, uint32_t(L.norms_off_input));
   CHECK(g[0].block == SmallBlock::Norms && g[0].bake == SmallBake::OnePlusWFp32);
   CHECK_EQ(g[1].name, std::string("post_attention_layernorm.weight"));
-  CHECK_EQ(g[1].offset, uint32_t(loader::kNormsOffPost));      // 20480: fp32 now
+  CHECK_EQ(g[1].offset, uint32_t(L.norms_off_post));      // 20480: fp32 now
   CHECK(g[1].bake == SmallBake::OnePlusWFp32);
   CHECK_EQ(g[2].name, std::string("linear_attn.conv1d.weight"));
   CHECK_EQ(g[2].elems, uint32_t(10240 * 4));
-  CHECK_EQ(g[2].offset, uint32_t(loader::kGdnOffConv));
+  CHECK_EQ(g[2].offset, uint32_t(L.gdn_off_conv));
   CHECK(g[2].block == SmallBlock::Kind && g[2].bake == SmallBake::RawFp32Widen);
   CHECK_EQ(g[3].name, std::string("linear_attn.A_log"));
-  CHECK_EQ(g[3].offset, uint32_t(loader::kGdnOffNegA));
+  CHECK_EQ(g[3].offset, uint32_t(L.gdn_off_nega));
   CHECK(g[3].bake == SmallBake::NegExpFp32);
   CHECK_EQ(g[4].name, std::string("linear_attn.dt_bias"));
-  CHECK_EQ(g[4].offset, uint32_t(loader::kGdnOffDtBias));
+  CHECK_EQ(g[4].offset, uint32_t(L.gdn_off_dtbias));
   CHECK(g[4].bake == SmallBake::RawFp32Widen);
   CHECK_EQ(g[5].name, std::string("linear_attn.norm.weight"));
   CHECK_EQ(g[5].elems, Qwen35::kGdnHeadDim);
-  CHECK_EQ(g[5].offset, uint32_t(loader::kGdnOffGatedNorm));
+  CHECK_EQ(g[5].offset, uint32_t(L.gdn_off_gated_norm));
   CHECK(g[5].bake == SmallBake::PlainBf16);   // RMSNormGated: no +1, stays bf16
   CHECK_EQ(f[2].name, std::string("self_attn.q_norm.weight"));
   CHECK_EQ(f[2].offset, uint32_t(loader::kFaOffQNorm));
@@ -108,13 +109,13 @@ int main() {
   CHECK_EQ(f[3].offset, uint32_t(loader::kFaOffKNorm));        // 1024: fp32 now
   CHECK(f[3].bake == SmallBake::OnePlusWFp32);
   // Every entry lands inside its block and the entries tile it exactly.
-  for (const auto& [ld, kind_bytes] : {std::make_pair(layers[0], loader::kGdnBlockBytes),
+  for (const auto& [ld, kind_bytes] : {std::make_pair(layers[0], L.gdn_block_bytes),
                                        std::make_pair(layers[3], loader::kFaBlockBytes)}) {
     size_t norms_b = 0, kind_b = 0;
     for (const auto& t : ld.small_tensors)
       (t.block == SmallBlock::Norms ? norms_b : kind_b) +=
           size_t(t.elems) * (t.bake == SmallBake::PlainBf16 ? 2 : 4);
-    CHECK_EQ(norms_b, loader::kNormsBlockBytes);
+    CHECK_EQ(norms_b, L.norms_block_bytes);
     CHECK_EQ(kind_b, kind_bytes);
   }
 

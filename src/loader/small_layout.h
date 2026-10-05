@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
 
 #include "model/qwen35.h"
 
@@ -19,6 +20,9 @@
 //
 // The `static_assert`s below pin every offset *and* every block size. Editing
 // this file without telling the kernels fails the build here, not at run time.
+//
+// The byte offsets below are Qwen3.8's (`kQwen38Small`); another model's
+// follow from its hidden size, conv channels and v-heads (`make_small_layout`).
 //
 // The dtypes are the *device* dtypes, which are deliberately not always the
 // checkpoint's - see "What the loader bakes in" in docs/13-loader.md:
@@ -45,41 +49,66 @@
 // had - up to 0.39% on a multiplier near 1, at ~130 sites.
 namespace loader {
 
-// qkv width x conv kernel dim - the GDN depthwise conv's device shape.
-constexpr size_t kConvRows = 10240, kConvTaps = 4;
+// Spec 15b: the norms and GDN blocks follow the model's hidden size, conv
+// channels and GDN v-heads, so their offsets are a function of the descriptor
+// (`model::ModelDesc::small_layout()`); the FA block depends only on the
+// shared head_dim and stays constant. Qwen3.8 and Agnes share every input, and
+// `kQwen38Small` below pins their numbers - the ones the kernels' NEGA_OFF /
+// DTBIAS_OFF defines (src/kernels/CMakeLists.txt) were derived from.
 
-// --- norms block: both layernorms, every layer -------------------------------
-constexpr size_t kNormsOffInput = 0;
-constexpr size_t kNormsOffPost = kNormsOffInput + size_t(model::Qwen35::kHidden) * 4;
-constexpr size_t kNormsBlockBytes = kNormsOffPost + size_t(model::Qwen35::kHidden) * 4;
-static_assert(kNormsOffInput == 0 && kNormsOffPost == 20480, "norms block offsets changed");
-static_assert(kNormsBlockBytes == 40960, "norms block size changed");
+// The depthwise conv's taps (linear_conv_kernel_dim, 4 on every supported model).
+constexpr size_t kConvTaps = 4;
 
-// --- GDN block ---------------------------------------------------------------
-constexpr size_t kGdnOffConv = 0;
-constexpr size_t kGdnOffNegA = kGdnOffConv + kConvRows * kConvTaps * 4;
-constexpr size_t kGdnOffDtBias = kGdnOffNegA + size_t(model::Qwen35::kGdnVHeads) * 4;
-constexpr size_t kGdnOffGatedNorm = kGdnOffDtBias + size_t(model::Qwen35::kGdnVHeads) * 4;
-constexpr size_t kGdnBlockBytes = kGdnOffGatedNorm + size_t(model::Qwen35::kGdnHeadDim) * 2;
-static_assert(kGdnOffConv == 0 && kGdnOffNegA == 163840 && kGdnOffDtBias == 164032 &&
-                  kGdnOffGatedNorm == 164224,
+struct SmallLayout {
+  // --- norms block: both layernorms, every layer ---------------------------
+  size_t norms_off_input, norms_off_post, norms_block_bytes;
+  // --- GDN block ------------------------------------------------------------
+  size_t gdn_off_conv, gdn_off_nega, gdn_off_dtbias, gdn_off_gated_norm, gdn_block_bytes;
+  // --- the one norm that belongs to no layer ----------------------------------
+  // `model.language_model.norm.weight`, before lm_head: its own allocation
+  // (`LoadedModel::final_norm`), same fp32 (1 + w) bake as the rest.
+  size_t final_norm_bytes;
+};
+
+// `conv_rows` is the GDN conv's channel count (q, k and v heads x 128).
+constexpr SmallLayout make_small_layout(uint32_t hidden, uint32_t conv_rows,
+                                        uint32_t gdn_v_heads) {
+  SmallLayout l{};
+  l.norms_off_input = 0;
+  l.norms_off_post = l.norms_off_input + size_t(hidden) * 4;
+  l.norms_block_bytes = l.norms_off_post + size_t(hidden) * 4;
+  l.gdn_off_conv = 0;
+  l.gdn_off_nega = l.gdn_off_conv + size_t(conv_rows) * kConvTaps * 4;
+  l.gdn_off_dtbias = l.gdn_off_nega + size_t(gdn_v_heads) * 4;
+  l.gdn_off_gated_norm = l.gdn_off_dtbias + size_t(gdn_v_heads) * 4;
+  l.gdn_block_bytes = l.gdn_off_gated_norm + size_t(model::Qwen35::kGdnHeadDim) * 2;
+  l.final_norm_bytes = size_t(hidden) * 4;
+  return l;
+}
+
+// Qwen3.8's (and Agnes's) layout: hidden 5120, conv 10240 = (16 + 16 + 48) x 128,
+// 48 v-heads. Pinned so an edit to the arithmetic above fails the build here.
+constexpr SmallLayout kQwen38Small = make_small_layout(5120, 10240, 48);
+static_assert(kQwen38Small.norms_off_input == 0 && kQwen38Small.norms_off_post == 20480,
+              "norms block offsets changed");
+static_assert(kQwen38Small.norms_block_bytes == 40960, "norms block size changed");
+static_assert(kQwen38Small.gdn_off_conv == 0 && kQwen38Small.gdn_off_nega == 163840 &&
+                  kQwen38Small.gdn_off_dtbias == 164032 &&
+                  kQwen38Small.gdn_off_gated_norm == 164224,
               "GDN block offsets changed");
-static_assert(kGdnOffNegA % 4 == 0 && kGdnOffDtBias % 4 == 0, "fp32 fields must be 4-aligned");
-static_assert(kGdnOffGatedNorm % 2 == 0, "bf16 field must be 2-aligned");
-static_assert(kGdnBlockBytes == 164480, "GDN block size changed");
+static_assert(kQwen38Small.gdn_block_bytes == 164480, "GDN block size changed");
+static_assert(kQwen38Small.final_norm_bytes == 20480, "final norm size changed");
+// Alignment holds for every model: offsets are sums of 4-byte (fp32) arrays,
+// and the gated norm (bf16) follows them.
+static_assert(kQwen38Small.gdn_off_nega % 4 == 0 && kQwen38Small.gdn_off_dtbias % 4 == 0,
+              "fp32 fields must be 4-aligned");
 
-// --- FA block ----------------------------------------------------------------
+// --- FA block (shared: head_dim 256 on every supported model) ---------------
 constexpr size_t kFaOffQNorm = 0;
 constexpr size_t kFaOffKNorm = kFaOffQNorm + size_t(model::Qwen35::kFaHeadDim) * 4;
 constexpr size_t kFaBlockBytes = kFaOffKNorm + size_t(model::Qwen35::kFaHeadDim) * 4;
 static_assert(kFaOffQNorm == 0 && kFaOffKNorm == 1024, "FA block offsets changed");
 static_assert(kFaOffQNorm % 4 == 0 && kFaOffKNorm % 4 == 0, "fp32 fields must be 4-aligned");
 static_assert(kFaBlockBytes == 2048, "FA block size changed");
-
-// --- the one norm that belongs to no layer -----------------------------------
-// `model.language_model.norm.weight`, before lm_head: its own allocation
-// (`LoadedModel::final_norm`), same fp32 (1 + w) bake as the rest.
-constexpr size_t kFinalNormBytes = size_t(model::Qwen35::kHidden) * 4;
-static_assert(kFinalNormBytes == 20480, "final norm size changed");
 
 }  // namespace loader

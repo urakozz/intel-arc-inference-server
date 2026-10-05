@@ -89,21 +89,23 @@ struct LayerDesc {
   std::vector<SmallTensor> small_tensors;  // norms, conv1d, A_log, dt_bias, ...
 };
 
-// The shape every supported Qwen3.5-family checkpoint shares (spec 14 §3.1).
-// What differs between models - layer counts, the MLP intermediate, the GEMV
-// table rows that depend on it, tensor names - is `model::ModelDesc`
-// (model/model_desc.h), chosen by the loader from config.json.
+// What every supported Qwen3.5-family checkpoint shares (spec 14 §3.1, spec
+// 15b): the head dims, the vocabulary, the rotary embedding, the per-layer
+// linear order and the small tensors' names. Qwen3.8, Agnes and Ornith all read
+// these values from their config.json (`head_dim` 256, `linear_key_head_dim` /
+// `linear_value_head_dim` 128, `vocab_size` 248320, `partial_rotary_factor` 0.25,
+// `rope_theta` 1e7). Every per-model shape - hidden, q/kv heads, GDN heads,
+// layer counts, the FFN - is `model::ModelDesc` (model/model_desc.h), chosen by
+// the loader from config.json.
 struct Qwen35 {
-  static constexpr uint32_t kHidden = 5120;
+  // lm_head / embed rows. kVocabUsed is Qwen3.8's tokenizer; the per-model value
+  // the argmax masks from is ModelDesc::vocab_used.
   static constexpr uint32_t kVocab = 248320, kVocabUsed = 248077;
-  static constexpr uint32_t kGdnKHeads = 16, kGdnVHeads = 48, kGdnHeadDim = 128;
-  static constexpr uint32_t kFaQHeads = 24, kFaKvHeads = 4, kFaHeadDim = 256;
+  static constexpr uint32_t kGdnHeadDim = 128;   // GDN k and v heads alike
+  static constexpr uint32_t kFaHeadDim = 256;    // FA q, k and v heads alike
   static constexpr uint32_t kRotaryDim = 64;
   static constexpr double kRopeTheta = 1e7;
 
-  // The per-layer non-GEMV tensors of one layer kind (the same for every
-  // supported model, in engine names) - the loader's single source of truth.
-  static const std::vector<SmallTensor>& small_tensors(LayerKind kind);
   // The per-token execution order of one layer kind's linears.
   static const std::vector<LinearId>& linear_order(LayerKind kind);
   // Checkpoint-name helpers ("model.language_model." prefix already stripped
