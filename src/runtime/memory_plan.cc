@@ -9,12 +9,14 @@ namespace runtime {
 
 std::string format_memory(const char* label, const MemoryComponents& c, size_t device_bytes) {
   const double gb = 1e9;
-  char buf[256];
+  char dv[48] = "";
+  if (c.draft_vocab) std::snprintf(dv, sizeof dv, " draft vocab %.3f GB,", c.draft_vocab / gb);
+  char buf[320];
   std::snprintf(buf, sizeof buf,
                 "%s: model %.3f GB, kv %.3f GB, decode state %.3f GB, prefill scratch %.3f GB,"
-                " int8 %.3f GB, total %.3f GB of %.3f GB",
+                " int8 %.3f GB,%s total %.3f GB of %.3f GB",
                 label, c.model / gb, c.kv / gb, c.decode_state / gb, c.prefill_scratch / gb,
-                c.int8 / gb, c.total() / gb, device_bytes / gb);
+                c.int8 / gb, dv, c.total() / gb, device_bytes / gb);
   return buf;
 }
 

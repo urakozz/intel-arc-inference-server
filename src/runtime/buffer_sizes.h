@@ -151,14 +151,19 @@ struct PrefillScratchDims {
 
 struct MtpSizes {
   size_t hctl, gdn_spec, kv_k, kv_v, hh, dh, logits;
-  size_t total() const { return hctl + gdn_spec + kv_k + kv_v + hh + dh + logits; }
+  size_t dv_logits;   // spec 8 §11: fp32 [|V'|], 0 without a draft vocabulary
+  size_t total() const { return hctl + gdn_spec + kv_k + kv_v + hh + dh + logits + dv_logits; }
 };
 
 struct MtpDims {
   static constexpr uint32_t kSlots = 4;   // M <= 4: K <= 3 drafts + the pending token
   static constexpr uint32_t kMaxK = kSlots - 1;
-  static MtpSizes sizes(uint32_t max_len, const model::ModelDesc& desc);
+  // `draft_vocab` = |V'| (spec 8 §11, `--draft-vocab`), 0 when the full head drafts.
+  static MtpSizes sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t draft_vocab = 0);
 };
+// The draft vocabulary's compact head and id table (spec 8 §11) are the LOADER's
+// allocations, sized by loader::draft_vocab_bytes (loader/draft_vocab.h, header-only
+// so this archive needs no loader); memory_plan.h adds them as their own term.
 
 // Spec 8 (plan 8b Task 3): `Engine::prefill`'s MTP hidden rows, bf16 [kC + 1][hidden],
 // allocated on the first prefill of an engine that carries the head.

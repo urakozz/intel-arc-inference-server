@@ -51,7 +51,9 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
       tap_(debug_resid ? std::unique_ptr<l0::Mem>(
                              new l0::Mem(ctx, l0::MemKind::Device, tap_elems(*model_.desc) * 2))
                        : nullptr),
-      mtp_(model_.mtp ? std::make_unique<MtpBuffers>(ctx, persist_.max_len, *model_.desc)
+      mtp_(model_.mtp ? std::make_unique<MtpBuffers>(
+                            ctx, persist_.max_len, *model_.desc,
+                            model_.draft_vocab ? model_.draft_vocab->size() : 0u)   // spec 8 §11
                       : nullptr),
       step_(build(ctx, model_, buffers_, tap_.get())),
       queue_(ctx),

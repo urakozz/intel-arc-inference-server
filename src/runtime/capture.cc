@@ -302,6 +302,12 @@ class Capture {
     require(mtp_->kv_k.size() == kv_stride_ && mtp_->kv_v.size() == kv_stride_,
             "the head's KV is not one [max_len][kv-heads][256] layer");
     require(mtp_->hh.size() >= size_t(kCapM + 1) * d_.hidden * kBf16, "hh is too small");
+    // Spec 8 §11: the buffers were sized for the model's draft vocabulary, or for none.
+    const uint32_t nv = m_.draft_vocab ? m_.draft_vocab->size() : 0;
+    require(mtp_->draft_vocab == nv && bool(mtp_->dv_logits) == (nv != 0) &&
+                (!mtp_->dv_logits || mtp_->dv_logits->size() >= size_t(nv) * kFp32),
+            "MtpBuffers' draft vocabulary (" + std::to_string(mtp_->draft_vocab) +
+                ") is not the loaded model's (" + std::to_string(nv) + ")");
   }
 
   // One launch site: load (or reuse) the variant's device binary, make a fresh
@@ -876,7 +882,10 @@ class Capture {
 
   // The draft list: the whole head at M = 1 on (hctl.cur_token[0], dh) at hctl.pos,
   // its post-mtp.norm hidden back into dh (the chain's next `h`), its logits into
-  // MtpBuffers::logits row draft_i_, the argmax into hctl. 23 launches and one copy.
+  // MtpBuffers::logits row draft_i_, the argmax into hctl. 23 launches and one copy -
+  // with a draft vocabulary too (spec 8 §11: the compact GEMV and the two dv_argmax
+  // stages replace lm_head and the two argmax stages one for one; mtp_head_test prints
+  // the count, the box queue records it).
   void draft() {
     const loader::MtpHead& h = *m_.mtp;
     const uint32_t G = DecodeBuffers::kNormGroups, H = d_.hidden;
@@ -903,6 +912,10 @@ class Capture {
               b_.x.ptr());
     step_.list.copy(mtp_->dh.ptr(), b_.x.ptr(), size_t(H) * kBf16);
     float* logits = mtp_->logits.as<float>() + size_t(draft_i_) * Qwen35::kVocab;
+    if (m_.draft_vocab) {
+      draft_vocab_head(logits);
+      return;
+    }
     const loader::DeviceWeight& lm = m_.linears.at({loader::kTopLevel, LinearId::LmHead});
     if (lm.kind == model::WeightKind::Int4) {
       const model::GemvShape& s = lm.shape;
@@ -929,6 +942,49 @@ class Capture {
       l0::Kernel& k = kernel(kernels::argmax_stage2_variant(), "argmax_stage2", kWgArgmax);
       k.arg_ptr(0, mtp_->hctl.ptr());
       k.arg_ptr(1, b_.argmax_part.ptr());
+      launch(k, 1, 1);
+    }
+  }
+
+  // Spec 8 §11: the draft's head over the reduced vocabulary V' (loader::DraftVocab) in
+  // place of the full one - three launches for three:
+  //
+  //   gemv_i8w(w', s', x, dv_logits)                  gemv_i8w.cl at N = |V'|, grid |V'|/64
+  //   dv_argmax_stage1(dv_logits, ids, part, row_i)   draft_vocab.cl, grid |V'|/1024, WG 256
+  //   dv_argmax_stage2(hctl, part, ids)               draft_vocab.cl, grid 1, WG 256
+  //
+  // The first reads |V'| x 5120 int8 + 4|V'| B of scales instead of 248320 x 5120: 168 /
+  // 336 / 671 MB at 32k / 64k / 128k against 1.27 GB (derived). Stage 1 also scatters the
+  // compact logits into `row_i` (MtpBuffers::logits row draft_i_) at V''s ids, the rest of
+  // which MtpBuffers::zero() holds at -inf; stage 2 maps the winning compact index through
+  // `ids` into hctl.out_token[0] and cur_token[0] and advances hctl.pos, as argmax_stage2
+  // does for the full head. `part` is the decode scratch's argmax_part ([kM][243][2] fp32;
+  // |V'|/1024 <= 128 pairs used), free here as in the full-head draft.
+  void draft_vocab_head(float* row_i) {
+    const loader::DraftVocab& dv = *m_.draft_vocab;
+    const uint32_t nv = dv.size();
+    require(nv % kernels::kDraftVocabChunk == 0 && nv / kernels::kDraftVocabChunk <= kWgArgmax,
+            "the draft vocabulary's size " + std::to_string(nv) +
+                " is not a multiple of 1024 up to 262144 (draft_vocab.cl's grid)");
+    require(dv.head.shape.N == nv && dv.head.shape.K == d_.hidden && dv.ids.size() >= size_t(nv) * 4,
+            "the draft vocabulary's head is not [|V'|][hidden] with a |V'| id table");
+    require(b_.argmax_part.size() >= size_t(nv / kernels::kDraftVocabChunk) * 2 * kFp32,
+            "argmax_part is smaller than the draft vocabulary's stage-1 pairs");
+    gemv_i8w(dv.head, b_.x.ptr(), mtp_->dv_logits->ptr());
+    const std::string v = kernels::dv_argmax_variant(nv);
+    {
+      l0::Kernel& k = kernel(v, "dv_argmax_stage1", kWgArgmax);
+      k.arg_ptr(0, mtp_->dv_logits->ptr());
+      k.arg_ptr(1, dv.ids.ptr());
+      k.arg_ptr(2, b_.argmax_part.ptr());
+      k.arg_ptr(3, row_i);
+      launch(k, nv / kernels::kDraftVocabChunk);
+    }
+    {
+      l0::Kernel& k = kernel(v, "dv_argmax_stage2", kWgArgmax);
+      k.arg_ptr(0, mtp_->hctl.ptr());
+      k.arg_ptr(1, b_.argmax_part.ptr());
+      k.arg_ptr(2, dv.ids.ptr());
       launch(k, 1, 1);
     }
   }

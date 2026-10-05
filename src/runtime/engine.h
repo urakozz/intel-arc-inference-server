@@ -117,7 +117,9 @@ class Engine {
   //   total <GB> of <device GB>
   // model = the loader report's total (RoPE included); kv = kv_k + kv_v; decode state =
   // the rest of PersistentBuffers plus DecodeScratch; prefill scratch = PrefillScratch's
-  // bytes() + lazy_bytes() as allocated NOW; int8 = Int8State::bytes(). The CLIs print it
+  // bytes() + lazy_bytes() as allocated NOW; int8 = Int8State::bytes(). With a draft
+  // vocabulary (spec 8 §11) a `draft vocab <GB>,` term (LoadReport::draft_vocab_bytes)
+  // precedes the total; without one the line is unchanged. The CLIs print it
   // after prepare_prefill(), before the first prefill. Defined in engine_prefill.cc.
   std::string memory_line() const;
   // The five figures memory_line() prints, in bytes (spec 6 §10): what
@@ -225,6 +227,10 @@ class Engine {
   void draft(uint32_t k, const std::function<uint32_t(uint32_t i)>& pick = {});
   const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
   const float* mtp_logits_device() const;      // [kMaxDraft][kVocab] fp32, device memory
+  // Spec 8 §11: |V'| when the model was loaded with a draft vocabulary (the draft lists
+  // then run the compact head and draft only V' ids; mtp_logits_device() rows hold -inf
+  // outside V'), 0 when the full head drafts. The verify lists are the same either way.
+  uint32_t draft_vocab() const { return model_.draft_vocab ? model_.draft_vocab->size() : 0; }
   void verify(uint32_t k);
   const uint32_t* verify_ids() const { return control_->out_token; }
   const float* verify_logits_device() const;   // [k + 1][kVocab] fp32, device memory

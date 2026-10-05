@@ -5,6 +5,7 @@
 #include <vector>
 #include "l0/context.h"
 #include "l0/memory.h"
+#include "loader/draft_vocab.h"
 #include "loader/lm_head_int8.h"
 #include "loader/quant.h"
 #include "loader/small_layout.h"
@@ -72,6 +73,27 @@ inline size_t mtp_norms_bytes(const model::ModelDesc& d) {
 // (849,398,784 on Qwen3.8 and Agnes, docs/03: 0.849 GB).
 constexpr size_t kMtpTensors = 15;
 
+// Spec 8 §11: the MTP draft's reduced vocabulary V' (`b70-serve --draft-vocab`), built
+// only when asked (`load(..., draft_vocab.size > 0)`, which needs the MTP head and the
+// int8 lm_head). The int8 head's rows ids[0..|V'|) and their fp32 scales, gathered at load
+// from the host copy the quantisation just made (loader::gather_int8_tiled_rows) into
+// gemv_i8w's tiled layout at N = |V'|, and the id table the draft's argmax maps its
+// compact index through. The verify list never reads any of it.
+//
+// **Why only the int8 head.** The compact head is a byte-exact subset of the head the
+// verify list reads, so the compact GEMV's column j is the full GEMV's column ids[j],
+// bitwise (draft_vocab_kernels_test). A bf16 head would need a bf16 gather and its own
+// test for the same property; the serving default is int8 (spec 9), so `--lm-head bf16`
+// with a draft vocabulary is refused at load rather than built untested.
+struct DraftVocab {
+  DeviceWeight head;              // int8 [|V'|/16][K/16][16][16] + fp32 scales [|V'|]; kind Int8,
+                                  // shape {K = hidden, N = |V'|, S = 1, layout 0}
+  l0::Mem ids;                    // u32 [|V'|], ascending - the compact index -> id table
+  std::vector<uint32_t> host_ids; // the same table on the host
+  uint32_t size() const { return uint32_t(host_ids.size()); }
+  size_t bytes() const { return head.mem.size() + head.scales->size() + ids.size(); }
+};
+
 struct LoadReport {            // printed by load(); asserted by the checkpoint test
   size_t int4_bytes = 0, scale_bytes = 0, bf16_linear_bytes = 0;
   size_t embed_bytes = 0, lm_head_bytes = 0, pad_bytes = 0;
@@ -101,6 +123,12 @@ struct LoadReport {            // printed by load(); asserted by the checkpoint 
   size_t unconsumed = 0;            // checkpoint tensors nothing loaded (must be 0)
   // Spec 9: the host quantisation of an int8 `lm_head` (0 unless LmHeadForm::Int8).
   double lm_head_quant_seconds = 0;
+  // Spec 8 §11: the draft vocabulary's device bytes (DraftVocab::bytes(), 0 when off) and
+  // where its ids came from. NOT in total(): those eight fields are the model as loaded
+  // before §11, and Engine::memory_line() prints this as its own term.
+  size_t draft_vocab_bytes = 0;
+  DraftVocabCounts draft_vocab_counts;
+  double draft_vocab_seconds = 0;
   double seconds = 0;
 };
 
@@ -118,6 +146,9 @@ struct LoadedModel {
   // Spec 14 §3.1: the model this checkpoint is, chosen from config.json's
   // architectures[0] (model::desc_for_architecture). A process-lifetime singleton.
   const model::ModelDesc* desc = nullptr;
+  // Spec 8 §11: null unless a draft vocabulary was asked for. Last, so load()'s
+  // aggregate initialiser of the members above is unchanged.
+  std::unique_ptr<DraftVocab> draft_vocab;
 };
 
 // Loads the qwen3_5 checkpoint at `snapshot_or_repo` (resolve_snapshot rules)
@@ -134,8 +165,13 @@ struct LoadedModel {
 // `lm_head` (spec 9 §3): Checkpoint loads the head as shipped; Int8 quantises a bf16
 // head to int8 rows + fp32 row scales on the host (loader/lm_head_int8.h) and throws
 // if the checkpoint's head is not bf16.
+// `draft_vocab` (spec 8 §11): size > 0 builds LoadedModel::draft_vocab - V' chosen by
+// loader::select_draft_vocab over the spec's lists at the model's vocab_used, gathered
+// from the int8 head. Throws before a byte is read unless `mtp` is on, `lm_head` is Int8
+// and the size is one the kernels are compiled for (kDraftVocabSizes).
 LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len = 16384,
-                 bool mtp = false, LmHeadForm lm_head = LmHeadForm::Checkpoint);
+                 bool mtp = false, LmHeadForm lm_head = LmHeadForm::Checkpoint,
+                 const DraftVocabSpec& draft_vocab = DraftVocabSpec{});
 
 // Spec 6 §10 (`--max-len auto`): the planner needs the loaded byte count, and load()
 // needs a max_len. So auto loads at a small max_len, plans, and then re-tables the
