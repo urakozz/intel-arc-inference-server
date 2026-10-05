@@ -81,9 +81,11 @@ Int8State::Int8State(l0::Context& ctx, uint32_t max_k)
     : ctx_(ctx),
       max_k_(max_k),
       imm_(l0::CmdList::immediate(ctx)),
-      xq_(ctx, l0::MemKind::Device, size_t{PrefillScratch::kC} * max_k),
-      xs_(ctx, l0::MemKind::Device, size_t{PrefillScratch::kC} * 4),
-      w8_(ctx, l0::MemKind::Device, size_t{max_k / 4} * kNs * 4) {}
+      // runtime/buffer_sizes.h (spec 6 §10): int8 [kC][max_k], fp32 [kC], u32
+      // [max_k / 4][kNs] - the sizes the memory planner adds up.
+      xq_(ctx, l0::MemKind::Device, int8_scratch_sizes(max_k).xq),
+      xs_(ctx, l0::MemKind::Device, int8_scratch_sizes(max_k).xs),
+      w8_(ctx, l0::MemKind::Device, int8_scratch_sizes(max_k).w8) {}
 
 const l0::Mem& Int8State::signs_f32(uint32_t K) {
   auto it = signs_.find(K);

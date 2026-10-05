@@ -11,9 +11,18 @@
 # engine.cc is the decode loop that owns a capture: ingestion, greedy
 # generation, reset and the max_len precondition. It adds no dependency - the
 # Engine is the three files above wired to a queue and a fence.
+#
+# Spec 6 §10 (max_len auto): every buffer size as device-free arithmetic
+# (buffer_sizes.cc) and the planner that adds them up (memory_plan.cc), in their own
+# archive with no Level Zero dependency - the allocations in buffers.cc and the plan
+# are the same functions, and the planner's test runs on any host.
+add_library(b70_plan STATIC buffer_sizes.cc)
+target_include_directories(b70_plan PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_plan PUBLIC b70_model)
+
 add_library(b70_runtime STATIC buffers.cc capture.cc engine.cc)
 target_include_directories(b70_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(b70_runtime PUBLIC b70_l0 b70_model b70_loader)
+target_link_libraries(b70_runtime PUBLIC b70_l0 b70_model b70_loader b70_plan)
 b70_target_kernel_dir(b70_runtime)
 
 # The prefill path's host half - its own archive, so nothing that links

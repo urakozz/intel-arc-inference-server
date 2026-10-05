@@ -156,9 +156,8 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     mtp_normalise_live();
     verify_k_ = kNoVerify;
     if (!mtp_pf_hid_)
-      mtp_pf_hid_ = std::make_unique<l0::Mem>(
-          ctx_, l0::MemKind::Device,
-          size_t(PrefillScratch::kC + 1) * model_.desc->hidden * 2);
+      mtp_pf_hid_ = std::make_unique<l0::Mem>(ctx_, l0::MemKind::Device,
+                                              mtp_prefill_hidden_bytes(*model_.desc));
     hid = mtp_pf_hid_->as<uint16_t>();
   }
   const size_t hid_row = size_t(model_.desc->hidden) * 2;
