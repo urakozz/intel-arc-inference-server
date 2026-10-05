@@ -448,10 +448,12 @@ int run(int argc, char** argv) {
   std::fprintf(stderr, "%s\n", engine.memory_line().c_str());   // spec 6
   TokAdapter tokenizer(snapshot_dir + "tokenizer.json");
   // Spec 15e: the sampler masks at the tokenizer's count, the greedy argmax at the
-  // descriptor's vocab_used (argmax.cl VOCAB_USED). They agree on Qwen3.8 (248077) and
-  // Agnes (248089); Ornith's tokenizer.json stops at </think> (248070 ids) while its
-  // tokenizer_config.json and the descriptor go to 248077 (seven audio specials the text
-  // engine never needs). Said once at startup rather than discovered as an undecodable id.
+  // descriptor's vocab_used (argmax.cl VOCAB_USED). They agree on every model served:
+  // Qwen3.8 248077, Agnes 248089, and Ornith 248070 - its tokenizer.json stops at </think>,
+  // and since 66a8923 its descriptor masks from there too (argmax_stage1 `_V248070`), not
+  // from tokenizer_config.json's 248077 (seven audio specials the text engine never needs).
+  // A checkpoint whose tokenizer.json and descriptor disagree is said once at startup
+  // rather than discovered as an undecodable id.
   const model::ModelDesc& served = *engine.model().desc;
   if (tokenizer.vocab_used() != served.vocab_used)
     std::fprintf(stderr,
