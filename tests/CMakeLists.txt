@@ -1484,7 +1484,7 @@ if(B70_ORNITH)
   set(B70_ORNITH_PROMPTS_DIR "${CMAKE_SOURCE_DIR}/tests/golden/prompts"
     CACHE PATH "Ornith's prompt ids (the committed ones unless 15a writes Ornith's beside them)")
   set(B70_ORNITH_DECODE_KERNELS
-    kernel_embed_gather_M1_D2048 kernel_argmax_stage1_M1 kernel_argmax_stage2
+    kernel_embed_gather_M1_D2048 kernel_argmax_stage1_M1_V248070 kernel_argmax_stage2
     kernel_prep_res_fold_M1_K2048_SP0_G20 kernel_prep_res_fold_M1_K2048_SP4_G20
     kernel_prep_norm_finish_M1_K2048_G20_W20 kernel_prep_gated_head_M1_GK16V32
     kernel_gdn_step_M1_GK16V32 kernel_attn_prep_M1_Q16KV2 kernel_attn_v2_M1_T${ATTN_V2_TGT}_Q16KV2
@@ -1993,7 +1993,7 @@ if(B70_ORNITH AND B70_MTP)
     kernel_pf_norm_finish_K2048_G20_W20_X4096 kernel_pf_bf16_slab_K4096 kernel_pf_bf16_slab_K2048)
   # What the lists reuse: 15c's decode list, 15d's prefill kernels, spec 8's shared ones.
   set(_o15e_reused ${B70_ORNITH_DECODE_KERNELS}
-    kernel_argmax_stage1_M2 kernel_argmax_stage1_M3 kernel_argmax_stage1_M4
+    kernel_argmax_stage1_M2_V248070 kernel_argmax_stage1_M3_V248070 kernel_argmax_stage1_M4_V248070
     kernel_dv_argmax_N32768 kernel_dv_argmax_N65536 kernel_dv_argmax_N131072
     kernel_pf_res_fold_K2048_SP0_G20 kernel_pf_res_fold_K2048_SP1_G20
     kernel_pf_norm_finish_K2048_G20_W20 kernel_pf_embed_gather_D2048
