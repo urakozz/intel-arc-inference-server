@@ -214,7 +214,12 @@
 #error "attn: KNORM_OFF must be defined (loader/small_layout.h kFaOffKNorm / 4)"
 #endif
 
-// The model's dimensions (model::Qwen35); none of them is a variant.
+// The model's dimensions (model::ModelDesc). Unset FA_Q_HEADS / FA_KV_HEADS (every
+// Qwen3.8 and Agnes command line, unchanged) they are Qwen3.8's, token for token.
+// Spec 15c: another model's heads come in as -DFA_Q_HEADS / -DFA_KV_HEADS and the
+// widths follow (Ornith 16 / 2: GQA 8, q||k||v 9216, out 4096); the binary is
+// `_Q<q>KV<kv>` (kernels::fa_suffix).
+#ifndef FA_Q_HEADS
 #define Q_HEADS 24        /* full-attention q-heads */
 #define KV_HEADS 4        /* k/v heads */
 #define GQA 6             /* q-heads per kv-head: 24 / 4 */
@@ -226,6 +231,25 @@
 #define ROT_DIM 64
 #define OUT_N 6144        /* 24 x 256 */
 #define SCALE 0.0625f     /* 1/sqrt(256) */
+#else
+#ifndef FA_KV_HEADS
+#error "attn: FA_Q_HEADS needs FA_KV_HEADS"
+#endif
+#define Q_HEADS FA_Q_HEADS
+#define KV_HEADS FA_KV_HEADS
+#define GQA (FA_Q_HEADS / FA_KV_HEADS)
+#define HD 256
+#define K_OFF (2 * FA_Q_HEADS * HD)                /* q||gate per head */
+#define V_OFF (K_OFF + FA_KV_HEADS * HD)
+#define QKV_N (V_OFF + FA_KV_HEADS * HD)
+#define ROT_HALF 32
+#define ROT_DIM 64
+#define OUT_N (FA_Q_HEADS * HD)
+#define SCALE 0.0625f
+#if FA_Q_HEADS % FA_KV_HEADS != 0
+#error "attn: q-heads must be a multiple of kv-heads"
+#endif
+#endif
 
 // The fused qkv GEMV's split-K slice count (model::Qwen35's table). Task 4
 // retunes it to S=2; attn_prep folds those slices in ascending order before the

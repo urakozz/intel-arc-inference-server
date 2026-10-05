@@ -67,11 +67,29 @@
 #error "attn_v2: TGT must be defined (src/kernels/CMakeLists.txt; runtime::DecodeScratch::kAttnV2Blocks)"
 #endif
 
+// Spec 15c: another model's heads come in as -DFA_Q_HEADS / -DFA_KV_HEADS (the binary
+// is `_Q<q>KV<kv>`, kernels::fa_suffix); unset, the five lines below are Qwen3.8's,
+// token for token. Ornith 16 / 2: GQA 8, so NPR = 8 x M (q, row) pairs per wave and
+// 8 KB x M of SLM for qpack.
+#ifndef FA_Q_HEADS
 #define Q_HEADS 24
 #define KV_HEADS 4
 #define GQA 6
 #define HD 256
 #define OUT_N 6144
+#else
+#ifndef FA_KV_HEADS
+#error "attn_v2: FA_Q_HEADS needs FA_KV_HEADS"
+#endif
+#define Q_HEADS FA_Q_HEADS
+#define KV_HEADS FA_KV_HEADS
+#define GQA (FA_Q_HEADS / FA_KV_HEADS)
+#define HD 256
+#define OUT_N (FA_Q_HEADS * HD)
+#if FA_Q_HEADS % FA_KV_HEADS != 0
+#error "attn_v2: q-heads must be a multiple of kv-heads"
+#endif
+#endif
 #define WAVE_P 16
 #define SG 16
 #define PER_LANE 16

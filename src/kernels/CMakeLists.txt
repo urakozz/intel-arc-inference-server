@@ -421,10 +421,10 @@ endif()
 # their name does not otherwise carry are suffixed `_D<hidden>` (embed_gather),
 # `_GK<k>V<v>` (gdn_step*, prep_gated_head) and `_Q<q>KV<kv>` (attn_prep,
 # attn_decode / attn_reduce, attn_v2); GEMV / prep_res_* names carry K and N
-# already. No such variant is built until a model can load: Ornith's
-# (model::ornith(), 2048 / 16 q 2 kv / 16 k 32 v) arrive with spec 15c, together
-# with the .cl defines that make those constants overridable; until then the
-# missing binary throws at capture, as for any unbuilt variant.
+# already. Ornith's (model::ornith(), 2048 / 16 q 2 kv / 16 k 32 v) are built by
+# the spec 15c block below, with the .cl defines that make those constants
+# overridable (GDN_K_HEADS / GDN_V_HEADS, FA_Q_HEADS / FA_KV_HEADS); any other
+# shape's missing binary throws at capture, as for any unbuilt variant.
 #
 # --- Spec 14: Agnes 3.0 Flash (model::agnes()) ------------------------------
 # Additive only: every Qwen3.8 binary above keeps its name and its command line
@@ -477,6 +477,56 @@ if(B70_AGNES)
                                M=${MM})
     endforeach()
   endif()
+endif()
+
+# --- Spec 15c: Ornith 1.5 35B-A3B (model::ornith()), the M = 1 decode list ------
+# Additive only, like the Agnes block: every binary above keeps its name and command
+# line (tools/kernel_cmdlines diff), and the .cl edits that made the head counts
+# overridable leave the default token stream untouched (the shape defines below are
+# the only way into the new branches). What Ornith's decode list binds
+# (runtime::build, capture.cc): 526 launches = embed + 40 x 13 + 5.
+#   linears   q||k||v / qkv||z / out_proj = o_proj at hidden 2048 - PROVISIONAL cells,
+#             model_desc.cc's copied {S, layout} (no extra GEMV_* defines: P0 measures)
+#   a||b      gemv_bf16 at {16, 16} (64 real columns, padded to 128 as Qwen3.8's 96)
+#   router    gemv_bf16 over the 256 router rows || the shared gate, 272 columns
+#   lm_head   bf16, int8 (spec 9) or a checkpoint's int4, at K 2048
+#   the norm pair at K 2048: SP0 after layer 0's embedding and after every MoE block
+#             (moe_down folds into the residual itself), SP4 after out_proj / o_proj
+#   GDN       gdn_step / prep_gated_head at 16 k / 32 v heads; the small block's
+#             negA / dt_bias at 131072 / 131200 B = 32768 / 32800 floats
+#             (loader::make_small_layout(2048, 8192, 32), checked by model_desc_test)
+#   FA        attn_prep and decode attention v2 at 16 q / 2 kv heads (GQA 8); v1
+#             (B70_DECODE_ATTN=v1) is not built for Ornith
+#   MoE       moe.cl's three kernels: 256 experts, top-8, hidden 2048, expert 512
+# argmax_stage1_M1 is Qwen3.8's binary (vocab_used 248077 on both).
+option(B70_ORNITH "build the Ornith 1.5 35B-A3B decode variants (spec 15c)" ON)
+if(B70_ORNITH)
+  add_gemv_variant(1 2048 12288 1 1)    # qkv||z      PROVISIONAL S1 L1
+  add_gemv_variant(1 4096 2048 4 0)     # out_proj, o_proj  PROVISIONAL S4 L0
+  add_gemv_variant(1 2048 9216 2 0)     # q||k||v     PROVISIONAL S2 L0
+  add_gemv_variant(1 2048 248320 1 1)   # lm_head int4 (a --quant_lm_head checkpoint)
+  add_gemv_bf16_variant(1 2048 128 16 16)
+  add_gemv_bf16_variant(1 2048 272 16 16)
+  add_gemv_bf16_variant(1 2048 248320 64 1)
+  add_gemv_i8w_variant(1 2048 248320)
+  add_prep_res_fold(1 2048 0 20)
+  add_prep_res_fold(1 2048 4 20)
+  add_prep_norm_finish(1 2048 20 20)
+  add_ocloc_kernel(embed_gather_M1_D2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                   DEFINES ${CTRL_DEFINES} M=1 HIDDEN=2048 VOCAB=248320)
+  set(ORNITH_GDN_HEADS GDN_K_HEADS=16 GDN_V_HEADS=32)
+  add_ocloc_kernel(gdn_step_M1_GK16V32 SOURCE ${GDN_CL}
+                   DEFINES ${CTRL_DEFINES} NEGA_OFF=32768 DTBIAS_OFF=32800 ${ORNITH_GDN_HEADS} M=1)
+  add_ocloc_kernel(prep_gated_head_M1_GK16V32 SOURCE ${PREP_CL} DEFINES M=1 ${ORNITH_GDN_HEADS})
+  set(ORNITH_FA_HEADS FA_Q_HEADS=16 FA_KV_HEADS=2)
+  add_ocloc_kernel(attn_prep_M1_Q16KV2 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=1 ${ORNITH_FA_HEADS})
+  add_ocloc_kernel(attn_v2_M1_T${ATTN_V2_TGT}_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} ${ORNITH_FA_HEADS})
+  # UP_KS / DN_KS: the in-work-group K splits, mirrored by kernels::kMoeUpKs / kMoeDnKs
+  # (they set the work-group sizes the capture binds). PROVISIONAL, for P0 to tune.
+  set(MOE_DEFINES UP_KS=4 DN_KS=2)
+  add_ocloc_kernel(moe_M1_E256_T8_D2048_I512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/moe.cl
+                   DEFINES ${MOE_DEFINES} M=1 EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 ROUTER_N=272)
 endif()
 
 add_subdirectory(prefill)

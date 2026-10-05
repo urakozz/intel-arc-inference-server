@@ -256,6 +256,39 @@ inline std::string argmax_stage1_variant(unsigned M, unsigned vocab_used) {
 // variants at all, so the binary is named after the entry point.
 inline std::string argmax_stage2_variant() { return "argmax_stage2"; }
 
+// Spec 15c: the mixture-of-experts block's three kernels (src/kernels/moe.cl) -
+// moe_route, moe_gate_up, moe_down - in ONE binary per (M, shape), as prep.cl's entry
+// points share theirs: `moe_M<M>_E<experts>_T<top_k>_D<hidden>_I<expert intermediate>`.
+// Before them the decode list runs gemv_bf16 over the router || shared-gate rows at
+// N = MoeDesc::router_n() (kernels::gemv_bf16_tiling: {16, 16} at 272).
+inline std::string moe_variant(unsigned M, unsigned experts, unsigned top_k, unsigned hidden,
+                               unsigned inter) {
+  return "moe_M" + std::to_string(M) + "_E" + std::to_string(experts) + "_T" +
+         std::to_string(top_k) + "_D" + std::to_string(hidden) + "_I" + std::to_string(inter);
+}
+// The two in-work-group K splits moe.cl is compiled with (its UP_KS / DN_KS, passed by
+// src/kernels/CMakeLists.txt's MOE_DEFINES - the device side's one home). They fix the
+// work-groups the capture sets: moe_gate_up 64 x UP_KS lanes, moe_down 16 x (top_k + 1)
+// x DN_KS lanes; moe_route is one lane per expert. A host/device disagreement is a
+// group-size error at capture, not a wrong sum.
+inline constexpr unsigned kMoeUpKs = 4, kMoeDnKs = 2;
+inline constexpr unsigned moe_gate_up_wg() { return 64 * kMoeUpKs; }
+inline constexpr unsigned moe_down_wg(unsigned top_k) { return 16 * (top_k + 1) * kMoeDnKs; }
+// moe_gate_up's grid x: (top_k + 1) slots x (2 I / 16 n-tiles / 4 per work-group).
+inline constexpr unsigned moe_gate_up_groups(unsigned top_k, unsigned inter) {
+  return (top_k + 1) * (2 * inter / 16 / 4);
+}
+// The route row moe_route writes and the two expert kernels read: u32 words per
+// (layer, token), moe.cl's R_* defines. tests/kernels/moe_test.cc reads each by name.
+namespace moe_route {
+inline constexpr unsigned kWords = 32;
+inline constexpr unsigned kIds = 0;          // u32 expert id of slot k, k < top_k
+inline constexpr unsigned kWeights = 8;      // fp32 bits: w_k, a bf16 value
+inline constexpr unsigned kSharedGate = 16;  // fp32 bits: s_b, a bf16 value
+inline constexpr unsigned kProbs = 17;       // fp32 bits: p_k before renormalisation
+inline constexpr unsigned kProb9 = 25;       // fp32 bits: p of rank top_k (first not taken)
+}  // namespace moe_route
+
 // Spec 8 §11: the draft's argmax over a reduced vocabulary of `nv` ids
 // (src/kernels/draft_vocab.cl) - `dv_argmax_stage1` (with the scatter into the full
 // row) and `dv_argmax_stage2` (the id-table mapping) in one binary per size, as prep.cl's

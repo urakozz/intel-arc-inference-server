@@ -117,11 +117,24 @@
 // column 10240, split-K S = 1; 48 v-heads of 128 (model::Qwen35).
 // GATED_S is a *copy* of QkvZ.S; runtime::Capture::check_sizes
 // (src/runtime/capture.cc) asserts the pair at capture time - see SILU_S above.
+// Spec 15c: another model's GDN heads come in as -DGDN_K_HEADS / -DGDN_V_HEADS (the
+// binary is `_GK<k>V<v>`, kernels::gdn_suffix); unset, the four lines below are
+// Qwen3.8's, token for token. Ornith 16 / 32: 32 heads, qkv||z 12288, z at 8192.
 #define GATED_S 1
+#ifndef GDN_V_HEADS
 #define GATED_HEADS 48
 #define HEAD_DIM 128
 #define QKVZ_N 16384
 #define Z_OFF 10240
+#else
+#ifndef GDN_K_HEADS
+#error "prep_gated_head: GDN_V_HEADS needs GDN_K_HEADS"
+#endif
+#define GATED_HEADS GDN_V_HEADS
+#define HEAD_DIM 128
+#define Z_OFF ((2 * GDN_K_HEADS + GDN_V_HEADS) * HEAD_DIM)
+#define QKVZ_N (Z_OFF + GDN_V_HEADS * HEAD_DIM)
+#endif
 #define GATED_OUT_N (GATED_HEADS * HEAD_DIM)
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
