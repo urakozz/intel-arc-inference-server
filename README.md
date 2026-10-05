@@ -191,8 +191,9 @@ directory path works too.
 ./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
     --host 0.0.0.0 --port 8000 --max-len 131072 --served-name qwen3.8
 
-# fastest decode at up to 16k context: MTP speculative decoding, K chosen per request
-./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --mtp auto
+# the same with MTP speculative decoding, K chosen per request
+./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \\
+    --max-len 131072 --served-name qwen3.8 --mtp auto
 
 # measure it the way the vLLM rows were measured
 uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
@@ -212,7 +213,7 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
 | `--queue N` | `4` | requests waiting behind the running one before new ones are refused |
 | `--prefix-cache-gb N` | `32` | pinned host prefix cache in GiB; `0` = off, every request prefills in full (spec 7) |
 | `--prefix-split-last` | off | chat: the last prompt id runs as a decode step so the prompt-end snapshot lands at len - 1 (more cache hits, not bitwise with a cold run) |
-| `--mtp K` | `0` (off) | speculative decoding with the checkpoint's MTP head, K = 1..3 drafts per step; loads the head (+1.4 GB); `--max-len 16384` only (spec 8) |
+| `--mtp K` | `0` (off) | speculative decoding with the checkpoint's MTP head, K = 1..3 drafts per step; loads the head (+0.85 GB weights, plus its own KV and the state slots: ~1.4 GB at 16k, ~2.3 GB at 128k, derived); any `--max-len` (spec 8 §12) |
 | `--mtp auto` | - | K per iteration from each request's own acceptance (spec 8 §10) |
 | `--mtp-max K` | `3` | with `--mtp auto`: the largest K |
 | `--mtp-cost SPEC` | the head form's table | with `--mtp auto`: step costs in plain-step units, e.g. `"verify=1,1.17,1.52,1.74;draft=0.19,0.37,0.55"` |
