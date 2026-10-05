@@ -21,7 +21,7 @@
 
 1. **Ring addressing:** context position p lives in slot p % 2048; the attention reads exactly positions max(0, p - 2048) .. p - 1 plus the block; a test crosses the wrap.
 2. **The block is non-causal** and its K/V are not written into the ring (only committed positions are, by 19c's projection).
-3. **Shared weights:** the drafter never owns a copy of the embedding or the head; with `--draft-vocab` its candidate head is the compact one, ids mapped through the table.
+3. **Shared weights:** the drafter never owns a copy of the embedding or the head. With `--draft-vocab` its candidate head is spec 8 §11's compact one, and the top-16 **indices are mapped to real token ids through the table before anything else reads them**: the selector's codebooks (`pred` / `succ`, indexed by token id), the walk's predecessor, the anchor of the next block and the q readback all see real ids, never compact indices. A test drafts the same block with and without the draft vocabulary and checks that, whenever all 16 full-head candidates are inside V′, the candidates, scores and walk are identical.
 4. **The mask embedding:** `mask_token_id`'s row of the target embedding, or the checkpoint's `mask_embedding.pt` when shipped (loaded as the row's replacement).
 5. **DFlash v1 vs 2 by config:** the convolutions and the selector exist only when `dflash_config` names them; Ornith's v1 drafter (one full-attention layer) loads on the same path once spec 15c is merged.
 
