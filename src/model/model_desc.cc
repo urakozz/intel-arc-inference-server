@@ -238,11 +238,15 @@ ModelDesc make_qwen38() {
 // are Qwen3.5's (`linear_attn.` / `self_attn.`), so no name map. tokenizer_config's
 // added tokens end at 248076: vocab_used 248077, as Qwen3.8's.
 //
-// **Not loadable before spec 15c** (`require_loadable` throws). The int4 rows'
-// tuning is PROVISIONAL - copied from Qwen3.8's map so every S divides K/64 (2048
-// / 64 = 32, 4096 / 64 = 64, 512 / 64 = 8) and Capture::check_sizes's baked S
-// pairings (qkv||z S1, gate||up S8, qkv S2) hold - until 15c's P0 measures them.
-// `doc_w` is 0: no int4 checkpoint exists yet (spec 15 decision 1, 15a).
+// **Loadable for decode from spec 15c** (`require_prefill` refuses prefill until
+// 15d). The int4 rows' tuning is PROVISIONAL - copied from Qwen3.8's map so every
+// S divides K/64 (2048 / 64 = 32, 4096 / 64 = 64, 512 / 64 = 8) and
+// Capture::check_sizes's baked S pairings (qkv||z S1, gate||up S8, qkv S2) hold -
+// until 15c's P0 measures them. The GateUp / Down rows (the shared expert) are not
+// bound by the decode list: the loader puts the shared expert into the expert
+// blocks' last slot (MoeDesc), where moe.cl runs it as the ninth slot.
+// `doc_w` is 0: no int4 checkpoint exists yet (spec 15 decision 1, 15a), so the
+// loader's W cross-check is skipped with a note until the box measures one.
 ModelDesc make_ornith() {
   ModelDesc d;
   d.name = "ornith-1.5-35b-a3b";
@@ -356,11 +360,39 @@ const ModelDesc& desc_for_architecture(const std::string& architecture) {
                            "Qwen3_5MoeForConditionalGeneration (Ornith, from spec 15c)");
 }
 
+uint32_t ModelDesc::ffn_fold_s() const { return is_moe() ? 0u : shape(LinearId::Down).S; }
+
 void require_loadable(const ModelDesc& d) {
-  if (d.ffn == FfnKind::Moe)
-    throw std::runtime_error(d.name + " (" + d.architecture + "): MoE not implemented (spec 15c)");
+  if (d.ffn == FfnKind::Moe) {
+    // What src/kernels/moe.cl is written for (spec 15c): the shared expert is the
+    // last slot of the same kernels, so it must exist, be gated and be one routed
+    // expert's width; the route row holds at most 8 slots; the router kernel puts
+    // one expert per lane of a 256-lane work-group.
+    const MoeDesc& m = d.moe;
+    if (!m.has_shared_gate || m.shared_intermediate != m.expert_intermediate || m.top_k == 0 ||
+        m.top_k > 8 || m.experts < m.top_k + 1 || m.experts % 16 != 0 || m.experts > 256 ||
+        m.expert_intermediate % 64 != 0 || d.hidden % 64 != 0)
+      throw std::runtime_error(d.name + " (" + d.architecture + "): this MoE shape (" +
+                               std::to_string(m.experts) + " experts, top-" +
+                               std::to_string(m.top_k) + ", expert " +
+                               std::to_string(m.expert_intermediate) + ", shared " +
+                               std::to_string(m.shared_intermediate) +
+                               (m.has_shared_gate ? " gated" : " ungated") +
+                               ") is not implemented: the decode kernels (spec 15c) take a gated "
+                               "shared expert of the routed width, top-k <= 8, experts a "
+                               "multiple of 16 up to 256");
+  }
   if (d.tied_embeddings)
     throw std::runtime_error(d.name + ": tied embeddings are not implemented");
+}
+
+void require_prefill(const ModelDesc& d) {
+  if (d.is_moe())
+    throw std::runtime_error(d.name + " (" + d.architecture +
+                             "): prefill of a mixture-of-experts model is spec 15d (grouped "
+                             "expert GEMMs) and not built yet; this engine decodes it - feed "
+                             "the prompt through the decode list (b70-decode --ids without "
+                             "--prefill, Engine::ingest)");
 }
 
 }  // namespace model

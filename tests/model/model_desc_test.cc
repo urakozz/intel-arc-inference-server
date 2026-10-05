@@ -268,17 +268,47 @@ int main() {
   CHECK_EQ(o.gdn_suffix(), std::string("_GK16V32"));
   CHECK_EQ(o.fa_suffix(), std::string("_Q16KV2"));
   CHECK_EQ(o.intermediate_suffix(), std::string("_I512"));
-  // The loader's gate (loader::load calls it after picking the descriptor): Ornith's
-  // row exists, its load refuses until spec 15c; the dense models pass.
-  bool moe_threw = false;
-  try {
-    model::require_loadable(o);
-  } catch (const std::runtime_error& e) {
-    moe_threw = std::string(e.what()).find("MoE not implemented (spec 15c)") != std::string::npos;
-  }
-  CHECK(moe_threw);
+  // Spec 15c: the device form of the MoE block (MoeDesc's derived numbers): 257
+  // weight blocks (the shared expert last), 9 slots per token, the router || shared
+  // gate GEMV at 256 + 1 rows padded to 272.
+  CHECK_EQ(o.moe.shared_block(), uint32_t(256));
+  CHECK_EQ(o.moe.blocks(), uint32_t(257));
+  CHECK_EQ(o.moe.slots(), uint32_t(9));
+  CHECK_EQ(o.moe.router_n(), uint32_t(272));
+  // The FFN's partials for the next residual fold: the dense down's S, none on a MoE
+  // model (moe_down folds into the residual stream itself).
+  CHECK_EQ(q.ffn_fold_s(), uint32_t(4));
+  CHECK_EQ(a.ffn_fold_s(), uint32_t(4));
+  CHECK_EQ(o.ffn_fold_s(), uint32_t(0));
+  // The loader's gate (loader::load calls it after picking the descriptor): from spec
+  // 15c Ornith loads (decode), and so do the dense models.
+  model::require_loadable(o);
   model::require_loadable(q);
   model::require_loadable(a);
+  // A MoE shape the kernels are not written for is refused by name (here: no shared
+  // expert gate; and top-k 9, past the 8-slot route row).
+  for (int variant = 0; variant < 2; ++variant) {
+    ModelDesc bad = o;
+    if (variant == 0) bad.moe.has_shared_gate = false;
+    else bad.moe.top_k = 9;
+    bool threw = false;
+    try {
+      model::require_loadable(bad);
+    } catch (const std::runtime_error& e) {
+      threw = std::string(e.what()).find("is not implemented") != std::string::npos;
+    }
+    CHECK(threw);
+  }
+  // Prefill: the dense models pass; Ornith's is spec 15d and refused by name.
+  model::require_prefill(q);
+  model::require_prefill(a);
+  bool pf_threw = false;
+  try {
+    model::require_prefill(o);
+  } catch (const std::runtime_error& e) {
+    pf_threw = std::string(e.what()).find("spec 15d") != std::string::npos;
+  }
+  CHECK(pf_threw);
 
   // An unknown architecture throws, naming it and the three supported ones.
   bool threw = false;
