@@ -119,6 +119,20 @@ int main() {
   CHECK_EQ(o.gemv_qkvz, std::string("gemv_M1_K2048_N12288_S1_L1"));
   CHECK_EQ(o.gemv_ab, std::string("gemv_bf16_M1_K2048_N128_C16_S16"));
   CHECK_EQ(o.argmax, std::string("argmax_stage1_M1"));
+  // Spec 15c: the MoE block's binaries (src/kernels/CMakeLists.txt's Ornith block) and the
+  // geometry capture.cc binds them with: the router || shared-gate GEMV at 272 columns,
+  // moe_gate_up over 9 slots x 16 work-groups of 256, moe_down over 128 n-tiles of 288.
+  const model::MoeDesc& om = model::ornith().moe;
+  CHECK_EQ(kernels::moe_variant(1, om.experts, om.top_k, model::ornith().hidden,
+                                om.expert_intermediate),
+           std::string("moe_M1_E256_T8_D2048_I512"));
+  CHECK_EQ(kernels::gemv_bf16_variant(1, 2048, om.router_n(), kernels::gemv_bf16_tiling(om.router_n())),
+           std::string("gemv_bf16_M1_K2048_N272_C16_S16"));
+  CHECK_EQ(kernels::moe_gate_up_wg(), 256u);
+  CHECK_EQ(kernels::moe_down_wg(om.top_k), 288u);
+  CHECK_EQ(kernels::moe_gate_up_groups(om.top_k, om.expert_intermediate), 144u);
+  CHECK_EQ(kernels::gemv_variant(1, 4096, 2048, 4, 0), std::string("gemv_M1_K4096_N2048_S4_L0"));
+  CHECK_EQ(kernels::prep_res_fold_variant(1, 2048, 0, 20), std::string("prep_res_fold_M1_K2048_SP0_G20"));
 
   // Spec 8 §11: the draft-vocabulary binaries (src/kernels/CMakeLists.txt, B70_MTP), the
   // names capture.cc's draft list binds at each compiled |V'|.
