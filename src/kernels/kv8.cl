@@ -339,24 +339,24 @@ inline uint v2_ppw(uint len) {
   return max(64u, p);
 }
 
+// K stays int8 in registers with its row's scale beside it (16 bytes + one float per lane,
+// where 16 dequantised floats would be 16 GRF); the score dot dequantises at use, and since
+// float(q8) * scale is exact the operand is the same value either way.
 inline void load_k8(__global const char* restrict kv_k, __global const ushort* restrict k_scale,
-                    uint p, uint j, bool ok, float* kreg) {
+                    uint p, uint j, bool ok, char* kq, float* ksc) {
   if (ok) {   // uniform within the sub-group
     const size_t r = (size_t)p * KV_HEADS + j;
     __global const uchar* row = (__global const uchar*)(kv_k + r * HD);
-    const float sk = kv8_f16f(k_scale[r]);
+    *ksc = kv8_f16f(k_scale[r]);
     const uchar8 a = intel_sub_group_block_read_uc8(row);
     const uchar8 b = intel_sub_group_block_read_uc8(row + 128);
-    kreg[0] = (float)as_char(a.s0) * sk;  kreg[1] = (float)as_char(a.s1) * sk;
-    kreg[2] = (float)as_char(a.s2) * sk;  kreg[3] = (float)as_char(a.s3) * sk;
-    kreg[4] = (float)as_char(a.s4) * sk;  kreg[5] = (float)as_char(a.s5) * sk;
-    kreg[6] = (float)as_char(a.s6) * sk;  kreg[7] = (float)as_char(a.s7) * sk;
-    kreg[8] = (float)as_char(b.s0) * sk;  kreg[9] = (float)as_char(b.s1) * sk;
-    kreg[10] = (float)as_char(b.s2) * sk; kreg[11] = (float)as_char(b.s3) * sk;
-    kreg[12] = (float)as_char(b.s4) * sk; kreg[13] = (float)as_char(b.s5) * sk;
-    kreg[14] = (float)as_char(b.s6) * sk; kreg[15] = (float)as_char(b.s7) * sk;
+    kq[0] = as_char(a.s0);  kq[1] = as_char(a.s1);  kq[2] = as_char(a.s2);  kq[3] = as_char(a.s3);
+    kq[4] = as_char(a.s4);  kq[5] = as_char(a.s5);  kq[6] = as_char(a.s6);  kq[7] = as_char(a.s7);
+    kq[8] = as_char(b.s0);  kq[9] = as_char(b.s1);  kq[10] = as_char(b.s2); kq[11] = as_char(b.s3);
+    kq[12] = as_char(b.s4); kq[13] = as_char(b.s5); kq[14] = as_char(b.s6); kq[15] = as_char(b.s7);
   } else {
-    for (uint t = 0; t < PER_LANE; ++t) kreg[t] = 0.0f;
+    for (uint t = 0; t < PER_LANE; ++t) kq[t] = 0;
+    *ksc = 0.0f;
   }
 }
 
@@ -425,8 +425,9 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
     const uint last = end - 1;
     const uint nwaves = (bend - bstart + WAVE_P - 1) / WAVE_P;
 
-    float kreg[PER_LANE], vreg[WAVE_P];
-    load_k8(kv_k, k_scale, bstart + sgid, j, bstart + sgid <= last, kreg);
+    char kq[PER_LANE];
+    float ksc, vreg[WAVE_P];
+    load_k8(kv_k, k_scale, bstart + sgid, j, bstart + sgid <= last, kq, &ksc);
     load_v8(kv_v, v_scale, bstart, j, lid, last, vreg);
     for (uint w = 0; w < nwaves; ++w, ++wc) {
       const uint p0 = bstart + w * WAVE_P;
@@ -445,7 +446,7 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
         qv[11] = as_float(qb.s3); qv[12] = as_float(qb.s4); qv[13] = as_float(qb.s5);
         qv[14] = as_float(qb.s6); qv[15] = as_float(qb.s7);
         float a = 0.0f;
-        for (uint t = 0; t < PER_LANE; ++t) a = fma(qv[t], kreg[t], a);
+        for (uint t = 0; t < PER_LANE; ++t) a = fma(qv[t], (float)kq[t] * ksc, a);   // exact operand
         for (uint stride = SG / 2; stride > 0; stride >>= 1)
           a += intel_sub_group_shuffle_down(a, a, stride);
         if (lane == 0) sc_x[buf][pr][sgid] = a;
@@ -479,7 +480,7 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
         acc[pr] = fma(acc[pr], resc, tsum);
       }
       if (w + 1 < nwaves) {
-        load_k8(kv_k, k_scale, p0 + WAVE_P + sgid, j, p0 + WAVE_P + sgid <= last, kreg);
+        load_k8(kv_k, k_scale, p0 + WAVE_P + sgid, j, p0 + WAVE_P + sgid <= last, kq, &ksc);
         load_v8(kv_v, v_scale, p0 + WAVE_P, j, lid, last, vreg);
       }
     }
