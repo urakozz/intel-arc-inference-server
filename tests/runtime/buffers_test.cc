@@ -302,6 +302,36 @@ int main() {
     CHECK_EQ(offsetof(runtime::Control, gdn_live), size_t{76});
   }
 
+  // Spec 12b (`--kv-cache int8`): the same groups in the int8 form. kv_k / kv_v are
+  // 16 x 16384 x 4 x 256 int8 rows + 16 x 16384 x 4 fp16 scales = 270,532,608 B each
+  // (32 KiB + 256 B per position for K and V together), zero-filled to the last byte (the
+  // scales are the tail); the MTP head's one layer is 16384 x 1032 B; everything else is
+  // the bf16 engine's, byte for byte.
+  {
+    const runtime::KvCache i8 = runtime::KvCache::Int8;
+    runtime::PersistentBuffers p(ctx, 16384, model::qwen38(), i8);
+    CHECK(p.kv_lay.form == i8);
+    CHECK_EQ(p.kv_k.size(), size_t{16} * 16384 * 4 * (256 + 2));
+    CHECK_EQ(p.kv_k.size(), size_t{270532608});
+    CHECK_EQ(p.kv_v.size(), p.kv_k.size());
+    CHECK_EQ(p.bytes() - p.kv_k.size() - p.kv_v.size(), size_t{1240465536} - 2 * size_t{536870912});
+    CHECK_EQ(p.kv_lay.scales_offset(0), size_t{16} * 16384 * 1024);
+    for (const l0::Mem* m : {&p.kv_k, &p.kv_v}) {
+      const size_t off = m->size() - probe;
+      imm.copy(host.ptr(), static_cast<const uint8_t*>(m->ptr()) + off, probe);
+      const uint32_t* w = host.as<uint32_t>();
+      for (size_t i = 0; i < probe / sizeof(uint32_t); ++i) CHECK_EQ(w[i], 0u);
+    }
+    runtime::DecodeScratch s(ctx, 16384, model::qwen38());
+    runtime::DecodeBuffers view(p, s);
+    CHECK(view.kv_lay.form == i8);
+    CHECK_EQ(view.kv_lay.bytes(), p.kv_k.size());
+    runtime::MtpBuffers mb(ctx, 16384, model::qwen38(), 0, i8);
+    CHECK_EQ(mb.kv_k.size(), size_t{16384} * 1032);
+    CHECK_EQ(mb.kv_lay.layers, 1u);
+    CHECK_EQ(mb.bytes(), size_t{523176064} - 2 * size_t{16384} * (2048 - 1032));
+  }
+
   std::puts("buffers_test OK");
   return 0;
 }

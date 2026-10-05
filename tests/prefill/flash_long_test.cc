@@ -25,6 +25,8 @@
 // The 32k CPU oracle is last-row logits only (tools/oracle/last_logits.py); at 128k there
 // is none, and determinism, replay and passkey retrieval carry the gate.
 //   flash_long_test <snapshot> --sweep <ids>   diagnostic: flash vs composed by depth.
+//   flash_long_test <snapshot> --kv8 <ids> [<oracle>]   spec 12b Q3: int8 KV against bf16
+//       KV at 32k (registered as flash_long_kv8_test; see kv8() below).
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -237,6 +239,97 @@ int k3b(const std::string& snap, const std::string& ids_path) {
   return 0;
 }
 
+// Spec 12b Q3 at 32k: the int8 KV cache against the bf16 one, flash mode (int8 has no
+// composed path), on l0-int8 and l0, at max_len 32768. Each prefix length (4096, 8192,
+// 16384, 32704, or the oracle file's) is prefilled in a bf16-KV engine and then in an
+// int8-KV engine - one engine at a time: two do not fit beside each other.
+//   bar (PROVISIONAL - plan 12a §5's Agnes-derived tolerance, to be re-derived from the
+//   Qwen3.8 repeat): last-row logits 1 - cos(int8, bf16) <= 5e-4 at every depth, every logit
+//   finite; with the oracle file, also mean cos vs oracle drop (bf16 - int8) <= 5e-4.
+//   Information: the argmax at each depth and the first differing step of 64 greedy ids.
+int kv8(const std::string& snap, const std::string& ids_path, const std::string& oracle_path) {
+  constexpr double kTol = 5e-4;   // PROVISIONAL (spec 12 §8, plan 12a §5)
+  std::unique_ptr<golden::Golden> oracle;
+  size_t vocab = 0;
+  std::vector<int32_t> at = {4096, 8192, 16384, 32704};
+  const float* orow = nullptr;
+  if (!oracle_path.empty()) {
+    oracle = std::make_unique<golden::Golden>(oracle_path);
+    const size_t npts = oracle->dim("at", 1, 0);
+    vocab = oracle->dim("logits", 2, 1);
+    const int32_t* a = oracle->i32("at", npts);
+    at.assign(a, a + npts);
+    orow = oracle->f32("logits", npts * vocab);
+  }
+  const std::vector<uint32_t> all = golden::read_ids(ids_path);
+  const uint32_t max_len = 32768;
+  CHECK(size_t(at.back()) + 64 <= max_len && size_t(at.back()) <= all.size());
+  std::printf("Q3 (spec 12b): int8 KV against bf16 KV at %zu prefix lengths of %s, flash, max_len %u;"
+              " bar 1 - cos <= %g (PROVISIONAL)%s\n",
+              at.size(), ids_path.c_str(), max_len, kTol, oracle ? ", and the oracle drop" : "");
+  l0::Context ctx(0);
+  using B = runtime::PrefillBackend;
+  const B backends[2] = {B::L0Int8, B::L0};
+  runtime::prefill::set_attn_mode_for_test(AttnMode::Flash);
+  // runs[form][backend][depth]
+  std::vector<Run> runs[2][2];
+  for (int f = 0; f < 2; ++f) {
+    const runtime::KvCache kv = f ? runtime::KvCache::Int8 : runtime::KvCache::Bf16;
+    runtime::Engine e(ctx, loader::load(ctx, snap, max_len), max_len, false, kv);
+    for (int bi = 0; bi < 2; ++bi) {
+      e.set_prefill_backend(backends[bi]);
+      for (size_t i = 0; i < at.size(); ++i) {
+        const std::vector<uint32_t> ids(all.begin(), all.begin() + at[i]);
+        Run r = prefill_once(e, ctx, ids, i + 1 == at.size() ? 64 : 0);
+        CHECK_EQ(nonfinite(r.logits), size_t(0));
+        std::printf("  kv %-4s %-8s n %5d: prefill %.1f ms\n", runtime::kv_cache_name(kv),
+                    runtime::prefill_backend_name(backends[bi]), at[i], r.prefill_ms);
+        std::fflush(stdout);
+        runs[f][bi].push_back(std::move(r));
+      }
+    }
+  }
+  bool ok = true;
+  auto argmax = [](const std::vector<float>& v) {
+    return size_t(std::max_element(v.begin(), v.end()) - v.begin());
+  };
+  for (int bi = 0; bi < 2; ++bi) {
+    double drop = 0;
+    for (size_t i = 0; i < at.size(); ++i) {
+      const Run &a = runs[0][bi][i], &b = runs[1][bi][i];
+      const double cs = cosine(a.logits, b.logits);
+      const bool pass = 1.0 - cs <= kTol;
+      ok &= pass;
+      std::printf("  %-8s n %5d: 1 - cos(int8 KV, bf16 KV) %.3e, argmax %zu / %zu -- %s\n",
+                  runtime::prefill_backend_name(backends[bi]), at[i], 1.0 - cs, argmax(b.logits),
+                  argmax(a.logits), pass ? "PASS" : "FAIL");
+      if (oracle) {
+        const std::vector<float> o(orow + i * vocab, orow + (i + 1) * vocab);
+        const double c16 = cosine(a.logits, o), c8 = cosine(b.logits, o);
+        drop += (c16 - c8) / double(at.size());
+        std::printf("            vs oracle: bf16 KV %.9f, int8 KV %.9f\n", c16, c8);
+      }
+    }
+    if (oracle) {
+      const bool pass = drop <= kTol;
+      ok &= pass;
+      std::printf("  %-8s mean oracle-cos drop %.3e -- %s\n",
+                  runtime::prefill_backend_name(backends[bi]), drop, pass ? "PASS" : "FAIL");
+    }
+    const Run &a = runs[0][bi].back(), &b = runs[1][bi].back();
+    size_t div = a.gen.size();
+    for (size_t i = 0; i < a.gen.size(); ++i)
+      if (a.gen[i] != b.gen[i]) { div = i; break; }
+    std::printf("  %-8s INFO at n %d: first id %u / %u, 64 greedy ids %s", runtime::prefill_backend_name(backends[bi]),
+                at.back(), b.first, a.first, div == a.gen.size() ? "all equal\n" : "first differ at step ");
+    if (div != a.gen.size()) std::printf("%zu (int8 %u, bf16 %u)\n", div, b.gen[div], a.gen[div]);
+    std::fflush(stdout);
+  }
+  CHECK(ok);
+  std::puts("flash_long_test OK -- Q3 (spec 12b): int8 KV within the PROVISIONAL tolerance of bf16 KV at 32k");
+  return 0;
+}
+
 // Diagnostic (not a gate): flash vs composed, and yardsticks for what a harmless
 // perturbation costs at the same depth. One engine at max_len 32768, modes switched in
 // place (prefill_smoke_test's Review Focus pins that as bitwise equal to fresh engines).
@@ -296,6 +389,7 @@ int main(int argc, char** argv) {
     return 77;
   }
   if (std::string(argv[2]) == "--sweep" && argc > 3) return sweep(snap, argv[3]);
+  if (std::string(argv[2]) == "--kv8" && argc > 3) return kv8(snap, argv[3], argc > 4 ? argv[4] : "");
   if (std::string(argv[2]) == "--128k") {
     if (argc < 4) return 2;
     return k3b(snap, argv[3]);
