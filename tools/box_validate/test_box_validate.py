@@ -650,14 +650,18 @@ class DriverTest(unittest.TestCase):
         self.assertIn("--re '^cli_reject_(k2_kv8|mtp_k2)$'", out)
         self.assertIn("--re '^cli_reject_k2_(pp_int8|prefill_sycl)$'", out)
         self.assertNotIn("cli_reject_k2_prefill,", out)
-        # Ornith's greedy argmax binaries (66a8923) in the binary checks of rows 10, 13 and 16
-        for stage, names in (("r10.r0", ["argmax_stage1_M1_V248070", "moe_M1_E256_T8_D2048_I512"]),
-                             ("r13.r0", ["argmax_stage1_M1_V248070", "pf_moe_E256_T8_D2048_I512"]),
-                             ("r16.r0", ["argmax_stage1_M%d_V248070" % m for m in (1, 2, 3, 4)])):
+        # Ornith's binaries since spec 15 §13 (the int4 checkpoint): Qwen3.8's greedy argmax
+        # (vocab_used 248077) and the int4 a||b, in the binary checks of rows 10, 13 and 16
+        for stage, names in (("r10.r0", ["argmax_stage1_M1", "gemv_M1_K2048_N128_S1_L1",
+                                         "moe_M1_E256_T8_D2048_I512"]),
+                             ("r13.r0", ["argmax_stage1_M1", "pf_moe_E256_T8_D2048_I512"]),
+                             ("r16.r0", ["argmax_stage1_M%d" % m for m in (1, 2, 3, 4)] +
+                                        ["gemv_M%d_K2048_N128_S1_L1" % m for m in (1, 2, 3, 4)])):
             body = out.split("--- " + stage + " ")[1].split("\n--- ")[0]
             line = next(x for x in body.splitlines() if "build/kernels/" in x)
             for n in names:
                 self.assertRegex(line, r" %s[ ;]" % n, (stage, n))
+            self.assertNotIn("V248070", line, stage)
         # row 16: the startup note that compared tokenizer and descriptor must stay silent for Ornith
         self.assertIn("note: tokenizer[.]json defines", out)
 
