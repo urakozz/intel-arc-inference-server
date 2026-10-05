@@ -108,6 +108,91 @@ void chi_square_case(const Sampling& s, const char* name) {
   CHECK(chi2_pvalue(second, server::filter_probs(p.data() + V, V, s), n1.c_str()) >= 0.01);
 }
 
+// Spec 8 §11: a draft vocabulary V'. The draft list writes q_i only at V''s ids; every
+// other entry of the row holds -inf (MtpBuffers::zero), i.e. q = 0 there. The rows here
+// are that: q = p + noise on V', -inf elsewhere, and p puts real mass outside V'.
+void draft_vocab_case(const Sampling& s, const char* name) {
+  constexpr uint32_t V = 50, K = 2;
+  constexpr int kDraws = 1000000;
+  std::vector<bool> in_v(V, false);
+  for (uint32_t id = 0; id < V; ++id) in_v[id] = id % 5 != 3 && id < 44;   // 35 of 50
+  const std::vector<float> p = random_rows(K + 1, V, 31, 1.5f);
+  std::vector<float> q = random_rows(K, V, 37, 0.8f);
+  for (uint32_t i = 0; i < K; ++i)
+    for (uint32_t id = 0; id < V; ++id)
+      q[i * V + id] = in_v[id] ? q[i * V + id] + p[i * V + id] : -INFINITY;
+  // The filter over a -inf row: finite probabilities, and exactly 0 outside V'.
+  for (uint32_t i = 0; i < K; ++i) {
+    const server::FilteredProbs f = server::filter_probs(q.data() + i * V, V, s);
+    CHECK(std::isfinite(f.mass) && f.mass > 0.0);
+    for (double pr : f.probs) CHECK(std::isfinite(pr) && pr >= 0.0);
+    for (uint32_t id = 0; id < V; ++id) {
+      const double pr = f.prob(id);
+      CHECK(std::isfinite(pr));
+      if (!in_v[id]) CHECK_EQ(pr, 0.0);
+    }
+  }
+  std::mt19937_64 rng(2027);
+  std::vector<uint64_t> first(V, 0), second(V, 0);
+  uint64_t outside_emitted = 0;
+  for (int it = 0; it < kDraws; ++it) {
+    uint32_t d[K];
+    for (uint32_t i = 0; i < K; ++i) {
+      d[i] = server::sample_draft(q.data() + i * V, V, s, rng);
+      CHECK(in_v[d[i]]);   // a draft is never an id outside V'
+    }
+    const server::AcceptResult r = server::accept_sampled(p.data(), q.data(), d, K, V, V, s, rng);
+    CHECK(r.accepted <= K && r.next_token < V);
+    const uint32_t t0 = r.accepted >= 1 ? d[0] : r.next_token;
+    ++first[t0];
+    outside_emitted += !in_v[t0];
+    if (r.accepted >= 1) ++second[r.accepted >= 2 ? d[1] : r.next_token];
+  }
+  // The output keeps p's distribution, mass outside V' included: those ids are reached
+  // through the residual after a rejection, never as drafts.
+  const std::string n0 = std::string(name) + " first token vs p_0";
+  const std::string n1 = std::string(name) + " second token | d_1 kept vs p_1";
+  CHECK(chi2_pvalue(first, server::filter_probs(p.data(), V, s), n0.c_str()) >= 0.01);
+  CHECK(chi2_pvalue(second, server::filter_probs(p.data() + V, V, s), n1.c_str()) >= 0.01);
+  const server::FilteredProbs f0 = server::filter_probs(p.data(), V, s);
+  double p_out = 0;
+  for (uint32_t id = 0; id < V; ++id)
+    if (!in_v[id]) p_out += f0.prob(id);
+  std::printf("%s: p_0 mass outside V' %.4f, emitted %.4f\n", name, p_out,
+              double(outside_emitted) / kDraws);
+  if (p_out > 0.01) CHECK(outside_emitted > 0);
+
+  // The math is the one a finite zero-probability logit gives: -1e30 instead of -inf
+  // filters to the same ids and probabilities, so the same seed accepts the same drafts
+  // and draws the same corrections, iteration for iteration.
+  std::vector<float> q_fin = q;
+  for (float& x : q_fin)
+    if (std::isinf(x)) x = -1e30f;
+  std::mt19937_64 ra(99), rb(99);
+  for (int it = 0; it < 20000; ++it) {
+    uint32_t da[K], db[K];
+    for (uint32_t i = 0; i < K; ++i) {
+      da[i] = server::sample_draft(q.data() + i * V, V, s, ra);
+      db[i] = server::sample_draft(q_fin.data() + i * V, V, s, rb);
+      CHECK_EQ(da[i], db[i]);
+    }
+    const server::AcceptResult a = server::accept_sampled(p.data(), q.data(), da, K, V, V, s, ra);
+    const server::AcceptResult b = server::accept_sampled(p.data(), q_fin.data(), db, K, V, V, s, rb);
+    CHECK(a.accepted == b.accepted && a.next_token == b.next_token);
+  }
+  // An id outside V' handed in as a draft (an engine bug) is refused, not divided by.
+  uint32_t outside = 0;
+  while (in_v[outside]) ++outside;
+  bool threw = false;
+  try {
+    const uint32_t d[1] = {outside};
+    (void)server::accept_sampled(p.data(), q.data(), d, 1, V, V, s, rng);
+  } catch (const std::logic_error&) {
+    threw = true;
+  }
+  CHECK(threw);
+}
+
 }  // namespace
 
 int main() {
@@ -228,6 +313,22 @@ int main() {
     CHECK(a != c);
     ++cases;
   }
-  std::printf("spec_accept_test: %d/5 cases passed\n", cases);
-  return cases == 5 ? 0 : 1;
+  // 6. Spec 8 §11: q = 0 (-inf logits) outside a draft vocabulary, without and with the
+  // filter: no draft outside V', the output still distributed as p, the same accept and
+  // residual arithmetic as a finite zero-probability logit, everything finite.
+  {
+    Sampling s;
+    s.greedy = false;
+    s.temperature = 1.0f;
+    s.top_k = 0;
+    s.top_p = 1.0f;
+    draft_vocab_case(s, "draft vocab, unfiltered");
+    s.temperature = 0.7f;
+    s.top_k = 12;
+    s.top_p = 0.8f;
+    draft_vocab_case(s, "draft vocab, top_k 12, top_p 0.8, T 0.7");
+    ++cases;
+  }
+  std::printf("spec_accept_test: %d/6 cases passed\n", cases);
+  return cases == 6 ? 0 : 1;
 }
