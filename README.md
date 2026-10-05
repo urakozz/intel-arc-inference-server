@@ -184,6 +184,75 @@ Both CLIs take the repo id and resolve it through the local cache
 (`$HF_HOME` or `~/.cache/huggingface`, revision from `refs/main`); a snapshot
 directory path works too.
 
+### Serving
+
+```sh
+# long agentic sessions (opencode and similar): 128k context, prefix cache on (default)
+./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
+    --host 0.0.0.0 --port 8000 --max-len 131072 --served-name qwen3.8
+
+# fastest decode at up to 16k context: MTP speculative decoding, K chosen per request
+./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --mtp auto
+
+# measure it the way the vLLM rows were measured
+uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
+    --pp 4096 --tg 256 --concurrency 1 --depth 1 --no-cache --exact-tg --latency-mode generation
+```
+
+`b70-serve` flags:
+
+| flag | default | what it does |
+|---|---|---|
+| `<snapshot-or-repo>` | required | HF repo id resolved in the local cache, or a snapshot directory; never downloads. The model (Qwen3.8 or Agnes 3.0 Flash) comes from its `config.json`. |
+| `--host H` | `0.0.0.0` | listen address |
+| `--port P` | `8000` | listen port |
+| `--served-name NAME` | `b70` | model name in the OpenAI API (`/v1/models`, the `model` field) |
+| `--max-len L` | `16384` | context capacity: 16384, 32768 or 131072 (the compiled decode attention); Agnes up to 65536 |
+| `--device N` | `ONEAPI_DEVICE_SELECTOR`, else 0 | which GPU |
+| `--queue N` | `4` | requests waiting behind the running one before new ones are refused |
+| `--prefix-cache-gb N` | `32` | pinned host prefix cache in GiB; `0` = off, every request prefills in full (spec 7) |
+| `--prefix-split-last` | off | chat: the last prompt id runs as a decode step so the prompt-end snapshot lands at len - 1 (more cache hits, not bitwise with a cold run) |
+| `--mtp K` | `0` (off) | speculative decoding with the checkpoint's MTP head, K = 1..3 drafts per step; loads the head (+1.4 GB); `--max-len 16384` only (spec 8) |
+| `--mtp auto` | - | K per iteration from each request's own acceptance (spec 8 §10) |
+| `--mtp-max K` | `3` | with `--mtp auto`: the largest K |
+| `--mtp-cost SPEC` | the head form's table | with `--mtp auto`: step costs in plain-step units, e.g. `"verify=1,1.17,1.52,1.74;draft=0.19,0.37,0.55"` |
+| `--lm-head bf16\|int8` | `int8` | the output head: int8 per row, quantised at load (spec 9), or the checkpoint's bf16 |
+| `--pp-backend B` | `l0-int8` | prefill GEMMs: `l0-int8` (rotated int8, spec 5), `l0` (bf16 on the Level Zero list), `sycl-tla` (reference, optional component) |
+| `--log-requests DIR` | off | write `DIR/NNNNNN.json` per request: timings, body, prompt and generated ids, text |
+
+### Benchmarking and checking
+
+```sh
+# the BENCHMARKS.md rows: prefill 4096 and decode 256 at the prefilled depth
+./build/src/cli/b70-decode urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --bench --pp 4096 --tg 256
+
+# greedy ids in, ids out (tools/oracle/tokenize.py writes the --ids file)
+./build/src/cli/b70-decode urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --ids prompt.ids --n 64 --prefill > out.ids
+
+# per-launch anatomy of the decode step
+./build/src/cli/b70-decode urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --profile --depth 4096 --steps 32 --repeats 5
+```
+
+`b70-decode` flags:
+
+| flag | default | what it does |
+|---|---|---|
+| `--bench` | - | ingest `--depth` synthetic ids (or prefill `--pp N`), time `--tg` generated ones, print a markdown row |
+| `--depth D` | `4096` | `--bench` / `--profile`: context length before decoding, ingested one replay per id |
+| `--pp N` | - | `--bench`: prefill N synthetic ids instead (exclusive with `--depth`) and print a second row with the prefill time |
+| `--tg N` | `256` | `--bench`: ids to generate |
+| `--ids FILE` | - | whitespace-separated prompt ids; generated ids go to stdout, one per line |
+| `--n N` | - | `--ids`: ids to generate, greedily |
+| `--prefill` | off | `--ids`: run the prompt through the chunked prefill instead of one replay per id |
+| `--pp-chunk C` | `2048` | positions per prefill chunk |
+| `--pp-backend B` | `l0-int8` | as for `b70-serve` |
+| `--lm-head bf16\|int8` | `bf16` | bf16 keeps the rows byte-matched with vLLM; int8 rows are marked `int8-head` |
+| `--profile` | - | replay `--steps` instrumented decode steps and print the per-launch anatomy (never a bench row) |
+| `--steps N` | `32` | `--profile`: steps per session |
+| `--repeats R` | `1` | `--profile`: independent sessions, for the spread (R >= 5 before claiming a delta under ~0.3 ms) |
+| `--max-len L` | `16384` | as for `b70-serve` |
+| `--device N` | `ONEAPI_DEVICE_SELECTOR`, else 0 | which GPU |
+
 `tools/box.sh` builds and tests on a remote machine over ssh, which is how I
 work day to day. Set `BOX=user@host` before using it.
 
