@@ -17,6 +17,17 @@
 //   Golden prompts are placed at depth D (default 4096) behind a prefix of long32k.ids;
 //   the four P0 tool-call scenarios run at their own depth. A driver interleaves arms.
 //
+// Head options (both modes): [--lm-head bf16|int8] (default bf16, the checkpoint's head,
+// as before) and, spec 8 §11, [--draft-vocab 32k|64k|128k [--draft-vocab-ids FILE]] - the
+// drafts over a reduced vocabulary V' (needs --lm-head int8; the loader builds V' from the
+// snapshot's tokenizer.json added tokens and generation_config.json EOS ids, as b70-serve
+// does). The gate then IS §11's M3 gate: greedy with V' against the plain step() loop of
+// the same engine, which the draft vocabulary does not touch (it runs no draft list) and
+// which A11 showed identical to `--draft-vocab off`'s MTP output - so identity here is
+// "128k equals off", token for token, at every K. It also checks that every draft list
+// still has 23 launches. Bench rows carry `dv=<size>` for §11's off / 32k / 64k / 128k
+// acceptance and t/s rows (run `--lm-head int8` alone for the off arm).
+//
 // MTP lists are compiled at max_len 16384 only (spec 8 §8 A9): every run here is 16384.
 #include <algorithm>
 #include <chrono>
@@ -32,12 +43,41 @@
 #include "cli/serve_adapters.h"
 #include "golden_common.h"
 #include "l0/context.h"
+#include "loader/draft_vocab.h"
 #include "loader/loader.h"
+#include "loader/snapshot.h"
 #include "runtime/engine.h"
 
 namespace {
 using model::Qwen35;
 using golden::read_ids;
+
+// The head the engine is loaded with (spec 9's form, spec 8 §11's draft vocabulary).
+struct HeadOpts {
+  loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
+  uint32_t draft_vocab = 0;
+  std::string draft_vocab_ids;
+};
+
+// What b70-serve builds V' from: tokenizer.json's added tokens, the EOS ids, the ranked file.
+loader::DraftVocabSpec draft_vocab_spec(const std::string& snap, const HeadOpts& h) {
+  loader::DraftVocabSpec s;
+  if (h.draft_vocab == 0) return s;
+  const std::string dir = loader::resolve_snapshot(snap);
+  s.size = h.draft_vocab;
+  s.added = loader::added_token_ids_file(dir + "tokenizer.json");
+  std::ifstream f(dir + "generation_config.json");
+  CHECK(f.good());
+  nlohmann::json gc;
+  f >> gc;
+  const nlohmann::json& e = gc.at("eos_token_id");
+  if (e.is_array())
+    for (const auto& id : e) s.eos.push_back(id.get<uint32_t>());
+  else
+    s.eos.push_back(e.get<uint32_t>());
+  if (!h.draft_vocab_ids.empty()) s.ranked = loader::read_ranked_ids(h.draft_vocab_ids);
+  return s;
+}
 
 constexpr uint32_t kMaxLen = 16384;
 constexpr uint32_t kGen = 256;
@@ -118,16 +158,28 @@ uint64_t fnv(const void* p, size_t n, uint64_t h = 1469598103934665603ull) {
 struct Loaded {
   l0::Context ctx;
   runtime::Engine eng;
-  Loaded(const std::string& snap, runtime::PrefillBackend b, bool mtp)
+  Loaded(const std::string& snap, runtime::PrefillBackend b, bool mtp, const HeadOpts& h)
       : ctx(l0::Context::kFromEnv),
-        eng(ctx, loader::load(ctx, snap, kMaxLen, mtp), kMaxLen) {
+        eng(ctx,
+            loader::load(ctx, snap, kMaxLen, mtp, h.lm_head,
+                         mtp ? draft_vocab_spec(snap, h) : loader::DraftVocabSpec{}),
+            kMaxLen) {
     eng.set_prefill_backend(b);
     eng.prepare_prefill();
+    std::printf("%s\n", eng.memory_line().c_str());
   }
 };
 
-int gate(const std::string& snap, runtime::PrefillBackend backend) {
-  Loaded L(snap, backend, true);
+int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpts& head) {
+  Loaded L(snap, backend, true, head);
+  // Spec 8 §11: the draft lists keep 23 launches with a draft vocabulary (the compact
+  // GEMV and the two dv_argmax stages replace lm_head and the two argmax stages).
+  int launch_fail = 0;
+  for (uint32_t i = 0; i < runtime::Engine::kMaxDraft; ++i)
+    if (L.eng.draft_step(i).kernel_count != 23) ++launch_fail;
+  std::printf("draft lists: %zu launches each (want 23), lm_head %s, draft vocab %s\n",
+              L.eng.draft_step(0).kernel_count, loader::lm_head_form_name(head.lm_head),
+              loader::draft_vocab_name(L.eng.draft_vocab()).c_str());
   const std::string src = ".";
   std::vector<Prompt> prompts = golden_prompts(src);
   for (Prompt& p : toolcall_prompts(src, false)) prompts.push_back(std::move(p));
@@ -236,15 +288,17 @@ int gate(const std::string& snap, runtime::PrefillBackend backend) {
                 acc, ok ? "bitwise" : "DIFFER");
     if (!ok) ++m4_fail;
   }
-  const bool pass = divergences == 0 && rf1_fail == 0 && m5_fail == 0 && m4_fail == 0;
+  const bool pass =
+      divergences == 0 && rf1_fail == 0 && m5_fail == 0 && m4_fail == 0 && launch_fail == 0;
   std::printf("mtp_gpu_test (%s): %s\n", runtime::prefill_backend_name(backend),
               pass ? "PASS" : "FAIL");
   return pass ? 0 : 1;
 }
 
 int bench(const std::string& snap, runtime::PrefillBackend backend, uint32_t k, bool sampled,
-          uint32_t depth) {
-  Loaded L(snap, backend, k > 0);
+          uint32_t depth, const HeadOpts& head) {
+  Loaded L(snap, backend, k > 0, head);
+  const std::string dv = loader::draft_vocab_name(L.eng.mtp() ? L.eng.draft_vocab() : 0);
   const std::string src = ".";
   const std::vector<uint32_t> filler = read_ids(src + "/tests/golden/prompts/long32k.ids");
   std::vector<Prompt> prompts;
@@ -268,9 +322,10 @@ int bench(const std::string& snap, runtime::PrefillBackend backend, uint32_t k, 
   (void)generate(a, prompts[0].ids, 32, s);   // warm-up
   for (const Prompt& p : prompts) {
     const Gen g = generate(a, p.ids, kGen, s);
-    std::printf("BENCH k=%u mode=%s prompt=%s depth=%zu ids=%zu ms=%.1f tps=%.3f acc=%.4f "
-                "per_iter=%.3f\n",
-                k, sampled ? "sampled" : "greedy", p.name.c_str(), p.ids.size(), g.ids.size(),
+    std::printf("BENCH k=%u mode=%s head=%s dv=%s prompt=%s depth=%zu ids=%zu ms=%.1f tps=%.3f "
+                "acc=%.4f per_iter=%.3f\n",
+                k, sampled ? "sampled" : "greedy", loader::lm_head_form_name(head.lm_head),
+                dv.c_str(), p.name.c_str(), p.ids.size(), g.ids.size(),
                 g.ms, 1000.0 * g.ids.size() / g.ms,
                 g.drafted ? double(g.accepted) / g.drafted : 0.0,
                 g.iters ? double(g.ids.size()) / g.iters : 1.0);
@@ -284,7 +339,9 @@ int bench(const std::string& snap, runtime::PrefillBackend backend, uint32_t k, 
 int main(int argc, char** argv) {
   if (argc < 3) {
     std::fprintf(stderr,
-                 "usage: mtp_gpu_test <snapshot> <backend> [--bench K [--sampled] [--depth D]]\n");
+                 "usage: mtp_gpu_test <snapshot> <backend> [--bench K [--sampled] [--depth D]]\n"
+                 "                    [--lm-head bf16|int8] [--draft-vocab 32k|64k|128k"
+                 " [--draft-vocab-ids FILE]]\n");
     return 2;
   }
   runtime::PrefillBackend backend{};
@@ -292,19 +349,27 @@ int main(int argc, char** argv) {
   int bench_k = -1;
   bool sampled = false;
   uint32_t depth = 4096;
+  HeadOpts head;
   for (int i = 3; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--bench" && i + 1 < argc) bench_k = std::atoi(argv[++i]);
     else if (a == "--sampled") sampled = true;
     else if (a == "--depth" && i + 1 < argc) depth = uint32_t(std::atoi(argv[++i]));
+    else if (a == "--lm-head" && i + 1 < argc) CHECK(loader::parse_lm_head_form(argv[++i], head.lm_head));
+    else if (a == "--draft-vocab" && i + 1 < argc) CHECK(loader::parse_draft_vocab(argv[++i], head.draft_vocab));
+    else if (a == "--draft-vocab-ids" && i + 1 < argc) head.draft_vocab_ids = argv[++i];
     else {
       std::fprintf(stderr, "unknown argument %s\n", a.c_str());
       return 2;
     }
   }
+  if (head.draft_vocab != 0 && head.lm_head != loader::LmHeadForm::Int8) {
+    std::fprintf(stderr, "mtp_gpu_test: --draft-vocab needs --lm-head int8\n");
+    return 2;
+  }
   try {
-    if (bench_k >= 0) return bench(argv[1], backend, uint32_t(bench_k), sampled, depth);
-    return gate(argv[1], backend);
+    if (bench_k >= 0) return bench(argv[1], backend, uint32_t(bench_k), sampled, depth, head);
+    return gate(argv[1], backend, head);
   } catch (const std::exception& e) {
     std::fprintf(stderr, "mtp_gpu_test: %s\n", e.what());
     return 1;

@@ -368,6 +368,24 @@ add_dependencies(gemv_i8w_test kernel_gemv_i8w_M1_K5120_N248320 kernel_gemv_i8w_
 add_test(NAME gemv_i8w_test COMMAND gemv_i8w_test)
 set_tests_properties(gemv_i8w_test PROPERTIES TIMEOUT 900)
 
+# Spec 8 §11: the draft vocabulary's kernels at every compiled |V'| - the compact
+# gemv_i8w bitwise equal to the full head's columns, the mapped argmax equal to the full
+# output's argmax restricted to V', the scatter row, planted ties / -inf / NaN. The
+# binaries are built with the MTP set (src/kernels/CMakeLists.txt, B70_MTP).
+if(B70_MTP)
+  add_executable(draft_vocab_kernels_test kernels/draft_vocab_kernels_test.cc)
+  target_include_directories(draft_vocab_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(draft_vocab_kernels_test PRIVATE b70_loader b70_l0)
+  b70_target_kernel_dir(draft_vocab_kernels_test)
+  add_dependencies(draft_vocab_kernels_test kernel_gemv_i8w_M1_K5120_N248320
+    kernel_gemv_i8w_M1_K5120_N32768 kernel_gemv_i8w_M1_K5120_N65536
+    kernel_gemv_i8w_M1_K5120_N131072 kernel_dv_argmax_N32768 kernel_dv_argmax_N65536
+    kernel_dv_argmax_N131072)
+  add_test(NAME draft_vocab_kernels_test COMMAND draft_vocab_kernels_test)
+  set_tests_properties(draft_vocab_kernels_test PROPERTIES TIMEOUT 900)
+endif()
+
 add_executable(prep_test kernels/prep_test.cc)
 target_include_directories(prep_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(prep_test PRIVATE b70_l0)
@@ -1237,6 +1255,13 @@ if(B70_MTP)
     add_dependencies(mtp_gpu_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
     add_test(NAME mtp_gpu_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
     set_tests_properties(mtp_gpu_test PROPERTIES LABELS "checkpoint;mtp"
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
+    # Spec 8 §11's M3 gate: drafts over a 128k draft vocabulary, greedy output identical to
+    # the plain loop (= --draft-vocab off) on the golden and A4 prompts at every K, and the
+    # sampled / replay checks with q = -inf outside V'. 32k / 64k run the same way by hand.
+    add_test(NAME mtp_gpu_dv128k_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8
+      --lm-head int8 --draft-vocab 128k)
+    set_tests_properties(mtp_gpu_dv128k_test PROPERTIES LABELS "checkpoint;mtp"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
   endif()
 endif()
