@@ -107,6 +107,9 @@ PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::
   // Nothing is zero-filled: no prefill kernel reads scratch it has not first
   // written, and the prefill determinism gate is the standing proof of that -
   // the same rule, and the same reason, Engine::reset() gives for decode.
+  // Spec 15d: a MoE model's prefill MoE scratch (runtime::moe_prefill_layout), one
+  // allocation, eager like the rest; none on a dense model.
+  if (s.moe) moe = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, s.moe);
 }
 
 size_t PrefillScratch::bytes() const {
@@ -115,7 +118,7 @@ size_t PrefillScratch::bytes() const {
          argmax_part.size() + gdn_xb.size() + gdn_seed.size() + gdn_g.size() +
          gdn_beta.size() + gdn_A.size() + gdn_A2.size() + gdn_w.size() + gdn_u.size() +
          pf_q.size() + pf_attn.size() + pf_o.size() +
-         pf_rowsum.size();
+         pf_rowsum.size() + (moe ? moe->size() : 0);
 }
 
 l0::Mem& PrefillScratch::dequant_buffer() {

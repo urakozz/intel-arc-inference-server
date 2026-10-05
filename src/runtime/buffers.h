@@ -151,6 +151,10 @@ struct PrefillScratch : PrefillScratchDims {
   // spec 6: pf_s_buffer() / pf_p_buffer() below.
   l0::Mem pf_o;         // fp32 [24][kC][256]           O = PV, all heads
   l0::Mem pf_rowsum;    // fp32 [24][kC]
+  // Spec 15d: a MoE model's routing, sorted rows, expert activations and the per-chunk
+  // expert weight batch - one allocation at runtime::moe_prefill_layout's offsets; null
+  // on a dense model (runtime/prefill/moe.cc).
+  std::unique_ptr<l0::Mem> moe;
   uint32_t max_len;
 
   size_t bytes() const;
@@ -171,7 +175,8 @@ struct PrefillScratch : PrefillScratchDims {
   // Spec 2.1 §3.3: the two backend expansions, allocated on first use (ruling R7's pattern one
   // level down) so a session pays only for the backend it runs.
   l0::Mem& dequant_buffer();   // sycl-tla: bf16 [5120][max int4 N] (Qwen3.8 356,515,840 B)
-  l0::Mem& slab_buffer();      // L0: bf16 [intermediate][1024] (Qwen3.8 35,651,584 B = 17408*1024*2)
+  l0::Mem& slab_buffer();      // L0: bf16 [widest int4 K][1024] (Qwen3.8 35,651,584 B = 17408*1024*2;
+                               // spec 15d: Ornith's 4096, out_proj / o_proj)
   // Spec 6 (plan 6b): the composed attention's score scratch, allocated on the first
   // composed `attn_chunk` (sycl-tla, or L0 with B70_PREFILL_ATTN=composed). The default
   // flash path never touches them, so prefill scratch no longer scales with max_len.

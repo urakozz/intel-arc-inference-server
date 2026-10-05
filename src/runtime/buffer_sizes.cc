@@ -40,6 +40,25 @@ uint32_t mixer_width(const model::ModelDesc& d) {
   return std::max({d.gdn_value_dim(), d.fa_value_dim(), d.hidden});
 }
 
+// Spec 15d: on a MoE model the table's GateUp / Down rows are the shared expert, which the
+// loader puts into the expert blocks (loader/moe_layout.h), not into a linear of its own:
+// nothing on the prefill walk runs them as a dense linear.
+bool moe_ffn_row(const model::ModelDesc& d, model::LinearId id) {
+  return d.is_moe() && (id == model::LinearId::GateUp || id == model::LinearId::Down);
+}
+// The widest K of a dense int4 linear the prefill walk runs - the L0 slab's rows: the MLP
+// intermediate (down's K) on a dense model, as before spec 15d; the widest of the four
+// mixer linears on a MoE model (Ornith: out_proj / o_proj's 4096).
+uint32_t slab_k(const model::ModelDesc& d) {
+  if (!d.is_moe()) return d.intermediate;
+  uint32_t k = 0;
+  for (uint32_t i = 0; i < static_cast<uint32_t>(model::LinearId::kCount); ++i) {
+    const model::FusedLinear& fl = d.linear(static_cast<model::LinearId>(i));
+    if (fl.kind == model::WeightKind::Int4 && !moe_ffn_row(d, fl.id)) k = std::max(k, fl.shape.K);
+  }
+  return k;
+}
+
 // attn_decode writes a running (m, l) pair plus the head accumulator for each
 // (q head, KV block, token); attn_reduce combines them.
 constexpr uint32_t kAttnPartStride = Q::kFaHeadDim + 2;  // 258
@@ -231,9 +250,10 @@ PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::Mod
   // attention's S and P, [one GQA group][kC][max_len] fp32 and bf16 - the only prefill
   // scratch that scales with max_len.
   s.dequant = size_t{desc.hidden} * max_int4_n(desc) * kBf16;
-  s.slab = size_t{desc.intermediate} * kernels::kPfSlabWidth * kBf16;
+  s.slab = size_t{slab_k(desc)} * kernels::kPfSlabWidth * kBf16;
   s.pf_s = size_t{desc.fa_gqa()} * kC * max_len * kFp32;
   s.pf_p = size_t{desc.fa_gqa()} * kC * max_len * kBf16;
+  s.moe = moe_prefill_layout(desc).total;   // spec 15d: 0 on a dense model
   return s;
 }
 
@@ -267,8 +287,80 @@ size_t int8_scale_bytes(const model::ModelDesc& desc) {
   size_t b = 0;
   for (const model::LayerDesc& ld : desc.layer_descs())
     for (const model::FusedLinear& fl : ld.linears)
-      if (fl.kind == model::WeightKind::Int4) b += 2 * size_t{fl.shape.N} * kFp32;   // ws, 1/ws
+      if (fl.kind == model::WeightKind::Int4 && !moe_ffn_row(desc, fl.id))
+        b += 2 * size_t{fl.shape.N} * kFp32;   // ws, 1/ws
+  // Spec 15d: a MoE layer's expert gate||up array (every block, the shared expert's too)
+  // is one h8 weight of blocks x 2 I columns (Int8State::scales_raw); its down is bf16.
+  if (desc.is_moe())
+    b += size_t{desc.layers} * 2 * size_t{desc.moe.blocks()} * 2 * desc.moe.expert_intermediate * kFp32;
   return b;
+}
+
+uint32_t prefill_int8_max_k(const model::ModelDesc& desc) {
+  return desc.is_moe() ? slab_k(desc) : desc.intermediate;
+}
+
+// --- spec 15d: the MoE prefill scratch ------------------------------------------------
+
+uint32_t moe_prefill_tiles(const model::ModelDesc& desc, uint32_t C) {
+  if (!desc.is_moe()) return 0;
+  const uint32_t tm = kernels::pf_moe::kTileM;
+  return (C * desc.moe.top_k + desc.moe.experts * (tm - 1)) / tm + (C + tm - 1) / tm;
+}
+
+namespace {
+// One expert weight block in each grouped-GEMM B form (pf_moe_gemm.cl).
+size_t moe_block_bytes(const model::ModelDesc& d, MoeWeightForm f) {
+  const size_t gu = size_t{d.hidden} * 2 * d.moe.expert_intermediate;   // elements
+  const size_t dn = size_t{d.moe.expert_intermediate} * d.hidden;
+  switch (f) {
+    case MoeWeightForm::GateUpInt8: return gu;            // int8 (VNNI-4 u32 words)
+    case MoeWeightForm::GateUpBf16: return gu * kBf16;
+    case MoeWeightForm::DownBf16: return dn * kBf16;
+  }
+  return 0;
+}
+size_t align256(size_t b) { return (b + 255) / 256 * 256; }
+}  // namespace
+
+MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc) {
+  MoePrefillLayout l;
+  if (!desc.is_moe()) return l;
+  const model::MoeDesc& m = desc.moe;
+  const size_t kC = PrefillScratchDims::kC;
+  l.tmax = moe_prefill_tiles(desc, PrefillScratchDims::kC);
+  l.rows = l.tmax * kernels::pf_moe::kTileM;
+  // The weight batch: every block in the int8 gate||up and bf16 down forms, half the
+  // blocks (rounded up) in the bf16 gate||up form - whichever is largest.
+  const uint32_t half = (m.blocks() + 1) / 2;
+  l.w = std::max({moe_block_bytes(desc, MoeWeightForm::GateUpInt8) * m.blocks(),
+                  moe_block_bytes(desc, MoeWeightForm::DownBf16) * m.blocks(),
+                  moe_block_bytes(desc, MoeWeightForm::GateUpBf16) * half});
+  size_t at = 0;
+  auto region = [&](size_t bytes) {
+    const size_t off = at;
+    at = align256(at + bytes);
+    return off;
+  };
+  l.logits_off = region(kC * m.router_n() * kFp32);
+  l.route_layer = kC * kMoeRouteWords * sizeof(uint32_t);
+  l.route_off = region(size_t{desc.layers} * l.route_layer);
+  l.hdr_off = region(size_t{kernels::pf_moe::hdr_words(m.experts)} * sizeof(uint32_t));
+  l.tiles_off = region(size_t{l.tmax} * 2 * sizeof(uint32_t));
+  l.row_tok_off = region(size_t{l.rows} * sizeof(uint32_t));
+  l.pair_row_off = region(kC * m.top_k * sizeof(uint32_t));
+  l.xs_off = region(size_t{l.rows} * kFp32);
+  l.h_off = region(size_t{l.rows} * m.expert_intermediate * kBf16);
+  l.xg_off = region(size_t{l.rows} * desc.hidden * kBf16);
+  l.w_off = region(l.w);
+  l.total = at;
+  return l;
+}
+
+uint32_t moe_prefill_batch_blocks(const model::ModelDesc& desc, MoeWeightForm f) {
+  if (!desc.is_moe()) return 0;
+  const size_t per = std::max<size_t>(moe_prefill_layout(desc).w / moe_block_bytes(desc, f), 1);
+  return uint32_t(std::min<size_t>(per, desc.moe.blocks()));
 }
 
 }  // namespace runtime
