@@ -110,7 +110,7 @@ constexpr uint32_t kSiluChunk = 4096;
 void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C, l0::Mem& gdn_state_mem,
                 l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem,
-                PrefillBackend backend, Int8State* q) {
+                const KvLayout& kv, PrefillBackend backend, Int8State* q) {
   require((q != nullptr) == (backend == PrefillBackend::L0Int8),
           "the int8 state must be given iff the backend is l0-int8");
   require(C > 0 && C <= PrefillScratch::kC,
@@ -124,16 +124,19 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   // counts and widths are the descriptor's.
   const model::ModelDesc& d = *m.desc;
   require(&s.desc() == &d, "the prefill scratch was sized for another model");
-  const size_t kv_stride = size_t(max_len) * d.fa_kv_heads * Qwen35::kFaHeadDim * 2;
+  // One layer's rows: bf16, or int8 with the scales after every layer's rows (spec 12b).
+  const bool kv8 = kv.form == KvCache::Int8;
+  const size_t kv_stride = size_t(max_len) * d.fa_kv_heads * Qwen35::kFaHeadDim * (kv8 ? 1 : 2);
   const size_t gdn_state_stride =
       size_t(d.gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;
   // The conv channels (Qwen3.8: 10240 = (2 x 16 k-heads + 48 v-heads) x 128).
   const size_t conv_ring_stride = size_t(PersistentBuffers::kConvRing) * d.gdn_conv_dim() * 2;
   const std::string fa_n = std::to_string(d.fa_layers), gdn_n = std::to_string(d.gdn_layers);
-  require(kv_stride * d.fa_layers == kv_k_mem.size(),
-          "kv_k stride x " + fa_n + " FA layers != its allocation");
-  require(kv_stride * d.fa_layers == kv_v_mem.size(),
-          "kv_v stride x " + fa_n + " FA layers != its allocation");
+  require(kv.max_len == max_len && kv.layers == d.fa_layers && kv.layer_rows() == kv_stride,
+          "the KV layout is not " + fa_n + " FA layers at this max_len");
+  require(kv.bytes() == kv_k_mem.size(), "kv_k stride x " + fa_n + " FA layers != its allocation");
+  require(kv.bytes() == kv_v_mem.size(), "kv_v stride x " + fa_n + " FA layers != its allocation");
+  if (kv8) require_kv8_path(backend);
   require(gdn_state_stride * d.gdn_layers == gdn_state_mem.size(),
           "gdn_state stride x " + gdn_n + " GDN layers != its allocation");
   require(conv_ring_stride * d.gdn_layers == conv_ring_mem.size(),
@@ -168,18 +171,28 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                backend, q);
     } else {
       pf_linear(cx, kc, s, m.linears.at({l, LinearId::Qkv}), s.x.as<uint16_t>(), C, backend, q);
-      uint16_t* kk = reinterpret_cast<uint16_t*>(at(kv_k_mem, size_t(fa) * kv_stride));
-      uint16_t* vv = reinterpret_cast<uint16_t*>(at(kv_v_mem, size_t(fa) * kv_stride));
+      const KvLayer lay = kv.layer(kv_k_mem.ptr(), kv_v_mem.ptr(), fa);
+      uint16_t* kk = static_cast<uint16_t*>(lay.k);
+      uint16_t* vv = static_cast<uint16_t*>(lay.v);
       // `Control::{pos, n_active}` were set by the caller before this chunk and
       // are what `pf_attn_prep` reads; the whole chunk is one attention pass, so
       // nothing here re-writes them (plan 6b's `kAttnC` sub-chunk loop was
       // ruling R5's, and ruling A14 retired it with the M = 64 route).
-      attn_prep_chunk(cx, kc, s, C, ctrl, s.partials.as<float>(),
-                      m.layer_small[l].gdn.as<float>(), m.rope.as<float>(), kk, vv);
-      profile_wait(cx, Phase::kAttnPrep);
-      attn_chunk(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), kk, vv, backend);
-      attn_gate_chunk(cx, kc, s, C, attn_rows(C, backend), s.partials.as<float>(),
-                      s.mixer_out.as<uint16_t>());
+      if (kv8) {   // spec 12b: the same three launches over the int8 cache
+        attn_prep_chunk_kv8(cx, kc, s, C, ctrl, s.partials.as<float>(),
+                            m.layer_small[l].gdn.as<float>(), m.rope.as<float>(), lay);
+        profile_wait(cx, Phase::kAttnPrep);
+        attn_chunk_kv8(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), lay, backend);
+        attn_gate_chunk_kv8(cx, kc, s, C, attn_rows(C, backend), s.partials.as<float>(),
+                            s.mixer_out.as<uint16_t>());
+      } else {
+        attn_prep_chunk(cx, kc, s, C, ctrl, s.partials.as<float>(),
+                        m.layer_small[l].gdn.as<float>(), m.rope.as<float>(), kk, vv);
+        profile_wait(cx, Phase::kAttnPrep);
+        attn_chunk(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), kk, vv, backend);
+        attn_gate_chunk(cx, kc, s, C, attn_rows(C, backend), s.partials.as<float>(),
+                        s.mixer_out.as<uint16_t>());
+      }
       profile_wait(cx, Phase::kAttnGate);
       ++fa;
       pf_linear(cx, kc, s, m.linears.at({l, LinearId::OProj}), s.mixer_out.as<uint16_t>(), C,
@@ -303,8 +316,7 @@ void linear_bf16(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWe
 }  // namespace
 
 void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,
-                 void* hctl, uint32_t pos, uint32_t C, uint16_t* hid, uint16_t* kv_k,
-                 uint16_t* kv_v) {
+                 void* hctl, uint32_t pos, uint32_t C, uint16_t* hid, const KvLayer& kv) {
   require(m.mtp != nullptr, "step_mtp_kv without the MTP head");
   require(C > 0 && C <= PrefillScratch::kC, "C is outside (0, kC]");
   const loader::MtpHead& h = *m.mtp;
@@ -347,8 +359,12 @@ void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
   //    rows read unwritten partials columns into pf_q, which nothing reads.
   linear_bf16(cx, kc, s, h.qkv, s.x.as<uint16_t>(), rows, kv_n0, h.qkv.shape.N,
               s.partials.as<float>(), h.qkv.shape.N);
-  attn_prep_chunk(cx, kc, s, rows, hctl, s.partials.as<float>(), h.fa.as<float>(),
-                  m.rope.as<float>(), kv_k, kv_v);
+  if (kv.int8())   // spec 12b: the head's KV in the main cache's form
+    attn_prep_chunk_kv8(cx, kc, s, rows, hctl, s.partials.as<float>(), h.fa.as<float>(),
+                        m.rope.as<float>(), kv);
+  else
+    attn_prep_chunk(cx, kc, s, rows, hctl, s.partials.as<float>(), h.fa.as<float>(),
+                    m.rope.as<float>(), static_cast<uint16_t*>(kv.k), static_cast<uint16_t*>(kv.v));
   profile_wait(cx, Phase::kAttnPrep);
 }
 

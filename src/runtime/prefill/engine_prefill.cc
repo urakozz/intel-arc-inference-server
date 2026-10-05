@@ -139,6 +139,9 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
 
   prefill::Int8State* q = backend == PrefillBackend::L0Int8 ? pfx_->int8.get() : nullptr;
   const prefill::AttnMode attn = prefill::attn_mode();
+  // Spec 12b: an int8 cache is written and read by the flash path's kv8 twins only; refuse
+  // the composed path and sycl-tla here, before a chunk writes anything.
+  if (persist_.kv_lay.form == KvCache::Int8) prefill::require_kv8_path(backend);
 
   // With a block hook (spec 7 §3.2) every chunk ends at a block end or at the prompt
   // end, so each completed block is a storable one; without one, uniform chunks.
@@ -177,10 +180,10 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     auto encode = [&] {
       prefill::step_chunk(pfx_->cx, pfx_->kc, *pf_, model_, buffers_.max_len, control_,
                         base + uint32_t(off), C, persist_.gdn_state, persist_.conv_ring,
-                        persist_.kv_k, persist_.kv_v, backend, q);
+                        persist_.kv_k, persist_.kv_v, persist_.kv_lay, backend, q);
       if (mtp_)
         prefill::step_mtp_kv(pfx_->cx, pfx_->kc, *pf_, model_, hctl_, base + uint32_t(off), C,
-                             hid, mtp_->kv_k.as<uint16_t>(), mtp_->kv_v.as<uint16_t>());
+                             hid, mtp_->kv_lay.layer(mtp_->kv_k.ptr(), mtp_->kv_v.ptr(), 0));
     };
     if (replay) {
       const uint32_t pos = base + uint32_t(off);
