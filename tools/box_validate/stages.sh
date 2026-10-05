@@ -22,13 +22,14 @@
 # the spec 14 and 15b checklists name as "bitwise identical to main's last record".
 : "${G0_BITWISE_RE:=^(golden_gate_test|golden_gate_i8head_test|prefill_gate_l0_test|prefill_gate_int8_test|prefill_gate_l0_i8head_test|prefill_gate_int8_i8head_test|replay_determinism_test|replay_determinism_i8head_test|buffers_test|prefill_smoke_test|load_checkpoint_test)$}"
 AGNES_ORACLE_MODEL=models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ
-ORNITH_ORACLE_MODEL=models--urakozz--Ornith-1.5-35B-A3B-W4A16-g64-AutoRound-GPTQ
+ORNITH_ORACLE_MODEL=models--urakozz--Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
 # Ornith's M = 1 decode list (tests/CMakeLists.txt B70_ORNITH_DECODE_KERNELS, ATTN_V2_TGT 32):
-# the greedy argmax is its own `_V248070` since 66a8923 (masks from tokenizer.json's count).
-ORNITH_DECODE_BINS="embed_gather_M1_D2048 argmax_stage1_M1_V248070 argmax_stage2 prep_res_fold_M1_K2048_SP0_G20
+# since spec 15 §13 (the int4 checkpoint read) the greedy argmax is Qwen3.8's argmax_stage1_M1
+# (its tokenizer.json defines 248077 ids) and a||b is int4: gemv_M1_K2048_N128_S1_L1.
+ORNITH_DECODE_BINS="embed_gather_M1_D2048 argmax_stage1_M1 argmax_stage2 prep_res_fold_M1_K2048_SP0_G20
   prep_res_fold_M1_K2048_SP4_G20 prep_norm_finish_M1_K2048_G20_W20 prep_gated_head_M1_GK16V32 gdn_step_M1_GK16V32
   attn_prep_M1_Q16KV2 attn_v2_M1_T32_Q16KV2 gemv_M1_K2048_N12288_S1_L1 gemv_M1_K4096_N2048_S4_L0
-  gemv_M1_K2048_N9216_S2_L0 gemv_M1_K2048_N248320_S1_L1 gemv_bf16_M1_K2048_N128_C16_S16
+  gemv_M1_K2048_N9216_S2_L0 gemv_M1_K2048_N248320_S1_L1 gemv_M1_K2048_N128_S1_L1 gemv_bf16_M1_K2048_N128_C16_S16
   gemv_bf16_M1_K2048_N272_C16_S16 gemv_bf16_M1_K2048_N248320 gemv_i8w_M1_K2048_N248320 moe_M1_E256_T8_D2048_I512"
 
 # ======================================================================================
@@ -548,21 +549,21 @@ row 10 "spec 15c - Ornith 1.5 35B-A3B decode (spec 15 §10)"
 rownote 10 "P0's build-variant sweeps (UP_KS 1/2/4/8, DN_KS 1/2/4, the {S, layout} sweeps of the four int4 shapes, spec 15 §9's arms, the 3-launch arm) each need a rebuild with other defines or a probe that does not exist yet: r10.p0_sweeps lists them."
 rownote 10 "Everything after the no-checkpoint tests waits on 15a: the int4 checkpoint (SNAP_ORNITH) and oracle-out-ornith with router_logits.L*; those stages SKIP with 'missing data' until both are on the box."
 rownote 10 "The --pp / --ids --prefill refusals are gone since 15d (Ornith prefills on l0 / l0-int8; row 13's r13.cli runs them), b70-serve's and --mtp's since 15e (Ornith is served, with its MoE MTP head: row 16); r10.refusals checks what remains."
-stage r10.r0 10 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the four edited sources included), the Qwen3.8 suite, Agnes's gates; Ornith's decode list built - its greedy argmax is argmax_stage1_M1_V248070 since 66a8923 (masks from 248070, tokenizer.json's count)"
+stage r10.r0 10 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the four edited sources included), the Qwen3.8 suite, Agnes's gates; Ornith's decode list built - since spec 15 §13 its greedy argmax is Qwen3.8's argmax_stage1_M1 (the int4 checkpoint's tokenizer.json: 248077 ids) and its a||b the int4 gemv_M1_K2048_N128_S1_L1"
 st_r10_r0() {
   need_pass g0.sha g0.bitwise g0.suite r1.gates
   kbins $ORNITH_DECODE_BINS
   finish
 }
-stage r10.nockpt 10 default gpu - - "no checkpoint needed: moe_test (the card's sub-group path, 288-lane moe_down), moe_ref_test, ornith_repack_test, variant_names_test, memory_plan_test, model_desc_test"
+stage r10.nockpt 10 default gpu - - "no checkpoint needed: moe_test (the card's sub-group path, 288-lane moe_down), moe_ref_test, ornith_repack_test, variant_names_test, memory_plan_test, model_desc_test, ab_int4_test"
 st_r10_nockpt() {
-  run_tests '^(moe_test|moe_ref_test|ornith_repack_test|variant_names_test|memory_plan_test|model_desc_test)$'
+  run_tests '^(moe_test|moe_ref_test|ornith_repack_test|variant_names_test|memory_plan_test|model_desc_test|ab_int4_test)$'
   finish
 }
-stage r10.load 10 default gpu ornith - "the loader printout on the int4 checkpoint: per-expert form, 0 unconsumed, the MoE line, read/token (set doc_w from it)"
+stage r10.load 10 default gpu ornith - "the loader printout on the int4 checkpoint: per-expert form, 0 unconsumed, the MoE line, the int4 a||b line (64 real columns, its 15.7 MB prefill copy), read/token and the W check against doc_w 2.345 GB (spec 15 §13: derived from the headers, expected delta 0.000%; a throw past 2% is a finding)"
 st_r10_load() {
   chk "$(bench_cmd "$SNAP_ORNITH" --depth 16 --tg 4 --lm-head int8)" "b70-decode on Ornith"
-  grab_all loader 'MoE|moe|unconsumed|W check|per token|expert' 20
+  grab_all loader 'MoE|moe|unconsumed|W check|per token|expert|a‖b' 20
   finish
 }
 stage r10.gates 10 default gpu ornith,oracle_ornith - "ornith_decode_test (+_i8head: 526 launches, plan == allocations, replay bitwise, R2) and golden_gate_ornith (+_i8head: R3)"
@@ -746,11 +747,11 @@ rownote 13 "Everything after r13.kernels waits on 15a, as row 10: the int4 check
 rownote 13 "Calibrating kConsistTieRel / kConsistWeightAbs from ornith_prefill_test's printed distribution and re-deriving prefill_split_ornith's non-64 bars (Qwen3.8's, PROVISIONAL) are edits on a branch after r13.prefill / r13.split record the numbers."
 rownote 13 "P0's SLM-fused dequant arm needs tools/probe/probe_moe_prefill.{cl,cc}, not written; it and the rebuild arms (TM, prefetch, a multi-work-group sort) are r13.p0_arms."
 
-stage r13.r0 13 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the seven edited prefill sources included), the Qwen3.8 suite incl. prefill_gate_* / prefill_split_* / prefill_replay / prefill_smoke bitwise (G0), Agnes's prefill gates; Ornith's prefill binaries built (the grouped experts, its flash attention, the last chunk's argmax_stage1_M1_V248070)"
+stage r13.r0 13 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the seven edited prefill sources included), the Qwen3.8 suite incl. prefill_gate_* / prefill_split_* / prefill_replay / prefill_smoke bitwise (G0), Agnes's prefill gates; Ornith's prefill binaries built (the grouped experts, its flash attention, the last chunk's argmax_stage1_M1 - Qwen3.8's since spec 15 §13)"
 st_r13_r0() {
   need_pass g0.sha g0.bitwise g0.suite r1.gates
   kbins pf_moe_E256_T8_D2048_I512 pf_moe_router_K2048_N272 pf_moe_gemm_K2048_N1024_SILU \
-    pf_moe_gemm_i8_K2048_N1024_SILU pf_moe_gemm_K512_N2048 pf_flash_attn_Q16KV2 argmax_stage1_M1_V248070
+    pf_moe_gemm_i8_K2048_N1024_SILU pf_moe_gemm_K512_N2048 pf_flash_attn_Q16KV2 argmax_stage1_M1
   jgrab prefill 'prefill_(gate_(l0|int8)|smoke)' 'golden_gate_test OK|TOTAL:|8449|8705|launch'
   finish
 }
@@ -1020,14 +1021,15 @@ st_r15_p0_arms() {
 # ======================================================================================
 row 16 "spec 15e - Ornith 1.5 served: template, tool calls, the MoE MTP head (spec 15 §12, plan 15e)"
 rownote 16 "Everything after r16.kernels needs the int4 checkpoint (SNAP_ORNITH, 15a) and should follow rows 10 and 13; mtp_head_ornith_test (M1) also needs 15a's oracle-out-ornith-mtp/. Without them those stages SKIP with 'missing data'."
-rownote 16 "Since 66a8923 Ornith's greedy argmax masks from 248070, tokenizer.json's count (argmax_stage1_M{1..4}_V248070; r16.r0 checks they are built), so b70-serve's startup note comparing the two no longer fires for Ornith: r16.serve checks it is absent."
+rownote 16 "Since spec 15 §13 Ornith's greedy argmax masks from 248077, the int4 checkpoint's tokenizer.json count (Qwen3.8's argmax_stage1_M{1..4}; the _V248070 binaries stay built, unbound), so b70-serve's startup note comparing the two does not fire for Ornith: r16.serve checks it is absent. Its a||b is int4 (gemv_M{1..4}_K2048_N128_S1_L1; r16.r0 checks they are built)."
 rownote 16 "An Ornith --mtp-cost default (and a default K) from r16.cost's table is an edit on a branch after the run."
 rownote 16 "A4 against bf16 Ornith needs an Ornith tool-call set rendered with its own template and 15a's bf16 reference run: r16.a4 lists the steps."
 
-stage r16.r0 16 default gpu qwen - "R0: every pre-existing binary identical (no .cl changed), the Qwen3.8 suite (G0); 15e's binaries built (moe_M{2,3,4}, gdn_step_slots_M{1..4}_G30_GK16V32, the prefill head-KV fill, argmax_stage1_M{1..4}_V248070); Qwen3.8's MTP suite unchanged (mtp_head, mtp_verify, mtp_gpu, load_checkpoint: the draft list's dense branch and the launch asserts are new code on that path)"
+stage r16.r0 16 default gpu qwen - "R0: every pre-existing binary identical (no .cl changed), the Qwen3.8 suite (G0); 15e's binaries built (moe_M{2,3,4}, gdn_step_slots_M{1..4}_G30_GK16V32, the prefill head-KV fill, the int4 a||b gemv_M{1..4}_K2048_N128_S1_L1 and Qwen3.8's argmax_stage1_M{1..4}, spec 15 §13); Qwen3.8's MTP suite unchanged (mtp_head, mtp_verify, mtp_gpu, load_checkpoint: the draft list's dense branch and the launch asserts are new code on that path)"
 st_r16_r0() {
   need_pass g0.sha g0.bitwise g0.suite
-  kbins argmax_stage1_M1_V248070 argmax_stage1_M2_V248070 argmax_stage1_M3_V248070 argmax_stage1_M4_V248070 \
+  kbins argmax_stage1_M1 argmax_stage1_M2 argmax_stage1_M3 argmax_stage1_M4 \
+    gemv_M1_K2048_N128_S1_L1 gemv_M2_K2048_N128_S1_L1 gemv_M3_K2048_N128_S1_L1 gemv_M4_K2048_N128_S1_L1 \
     moe_M2_E256_T8_D2048_I512 moe_M3_E256_T8_D2048_I512 moe_M4_E256_T8_D2048_I512 \
     gdn_step_slots_M1_G30_GK16V32 gdn_step_slots_M2_G30_GK16V32 gdn_step_slots_M3_G30_GK16V32 gdn_step_slots_M4_G30_GK16V32 \
     pf_res_fold_K2048_SP1_G20_Z pf_norm_finish_K2048_G20_W20_X4096 pf_bf16_slab_K4096 pf_bf16_slab_K2048
@@ -1035,9 +1037,9 @@ st_r16_r0() {
   jgrab mtp-bytes '^load_checkpoint_test$' '849|MTP'
   finish
 }
-stage r16.host 16 default cpu - - "host: template_ornith_test (six lists byte-identical to transformers 5.18.0), ornith_server_test, ornith_mtp_head_test, ornith_mtp_names_test (every bound name against the built ones, the _V248070 argmax included), model_desc_test (vocab_used 248070), variant_names_test, memory_plan_test"
+stage r16.host 16 default cpu - - "host: template_ornith_test (six lists byte-identical to transformers 5.18.0), ornith_server_test, ornith_mtp_head_test, ornith_mtp_names_test (every bound name against the built ones, both a||b forms included), model_desc_test (vocab_used 248077, doc_w, the int4 a||b row), variant_names_test, memory_plan_test, ab_int4_test"
 st_r16_host() {
-  run_tests '^(template_ornith_test|ornith_server_test|ornith_mtp_head_test|ornith_mtp_names_test|model_desc_test|variant_names_test|memory_plan_test)$'
+  run_tests '^(template_ornith_test|ornith_server_test|ornith_mtp_head_test|ornith_mtp_names_test|model_desc_test|variant_names_test|memory_plan_test|ab_int4_test)$'
   finish
 }
 stage r16.kernels 16 default gpu - - "no checkpoint: moe_m_test - moe.cl at M = 2..4, every row bitwise M = 1's, rows reversed (Review Focus 3)"
@@ -1058,7 +1060,7 @@ st_r16_m1() {
   jgrab m1 '^mtp_head_ornith_test$' 'cos|top|M1|OK|PASS|FAIL'
   finish
 }
-stage r16.serve 16 default gpu ornith r16.kernels "b70-serve <ornith> startup: --max-len auto -> 262144 with and without --mtp auto (derived), the --mtp auto cost note (Qwen3.8's table until r16.cost), the MTP head's load line; NO tokenizer / argmax vocab note (both 248070 since 66a8923); then the A4 set as chat requests with their tools, greedy, 192 ids (tool calls back as OpenAI tool calls)"
+stage r16.serve 16 default gpu ornith r16.kernels "b70-serve <ornith> startup: --max-len auto -> 262144 with and without --mtp auto (derived), the --mtp auto cost note (Qwen3.8's table until r16.cost), the MTP head's load line; NO tokenizer / argmax vocab note (both 248077 since spec 15 §13); then the A4 set as chat requests with their tools, greedy, 192 ids (tool calls back as OpenAI tool calls)"
 st_r16_serve() {
   serve "$SNAP_ORNITH"
   serve "$SNAP_ORNITH" --mtp auto

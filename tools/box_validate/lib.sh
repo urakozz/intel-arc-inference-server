@@ -64,7 +64,7 @@ bv_defaults() {
   # B70_TEST_SNAPSHOT default (ruling A31). Agnes and Ornith as their registrations name them.
   : "${SNAP_QWEN:=$hf/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d}"
   : "${SNAP_AGNES:=urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ}"
-  : "${SNAP_ORNITH:=urakozz/Ornith-1.5-35B-A3B-W4A16-g64-AutoRound-GPTQ}"
+  : "${SNAP_ORNITH:=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ}"
   : "${SNAP_K2:=urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ}"   # B70_K2_SNAPSHOT
   : "${TOK_PYTHON:=$HOME_R/auto-round/.venv/bin/python}"
   : "${JOBS:=44}"
@@ -231,7 +231,7 @@ xfail() {
 # kbins NAME... - these kernel binaries are in the build under test (cmake/ocloc.cmake:
 # build/kernels/<name>.bin), each printed with whether G0's g0.sha listed it as added (new
 # since the baseline); one missing fails the step. For a row whose list binds a binary by a
-# name the host tests only check as a string (e.g. Ornith's argmax_stage1_*_V248070).
+# name the host tests only check as a string (e.g. Ornith's int4 a||b gemv_M<M>_K2048_N128_S1_L1).
 kbins() {
   chk "miss=0; for b in $*; do if [ -s build/kernels/\$b.bin ]; then echo \"built \$b (\$(grep -cxF kernels/\$b.bin $STATE/g0-sha/added.txt 2>/dev/null) in the G0 added list)\"; else echo \"NOT BUILT \$b\"; miss=1; fi; done; [ \$miss = 0 ]" \
     "kernel binaries built ($# names)"
