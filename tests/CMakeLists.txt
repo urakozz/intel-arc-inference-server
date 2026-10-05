@@ -498,6 +498,12 @@ add_executable(json_test common/json_test.cc)
 target_include_directories(json_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME json_test COMMAND json_test)
 
+# Spec 12b: the int8 KV cache's rotkv arithmetic on the host (src/common/kv8.h) - the
+# probe's signs, binary16 RNE, the rotation and the quantiser. No device.
+add_executable(kv8_test common/kv8_test.cc)
+target_include_directories(kv8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME kv8_test COMMAND kv8_test)
+
 add_executable(safetensors_test loader/safetensors_test.cc)
 target_include_directories(safetensors_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(safetensors_test PRIVATE b70_loader)
