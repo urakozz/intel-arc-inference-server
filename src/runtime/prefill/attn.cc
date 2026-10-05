@@ -51,7 +51,7 @@ void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
   // is read from `qkv_partials` by `pf_attn_gate`). Null rather than a spare
   // buffer, so a build that DID write it would fault at once instead of
   // silently filling scratch nobody reads.
-  cx.launch(kc(kernels::pf_attn_prep_q16_variant(), "pf_attn_prep"), q_heads + kv_heads, C, 1,
+  cx.launch(kc(kernels::pf_attn_prep_q16_variant(q_heads, kv_heads), "pf_attn_prep"), q_heads + kv_heads, C, 1,
             {PtrArg(ctrl), PtrArg(qkv_partials), PtrArg(fa_small), PtrArg(rope),
              PtrArg(s.pf_q.ptr()), PtrArg(nullptr), PtrArg(kv_k), PtrArg(kv_v)});
 }
@@ -90,7 +90,7 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     const uint32_t rows = attn_rows(C, backend);
     require(s.pf_o.size() >= size_t(q_heads) * rows * kHeadDim * sizeof(float),
             "pf_o is undersized");
-    cx.launch(kc(kernels::pf_flash_attn_variant(), "pf_flash_attn"), (C + 7u) / 8u, kv_heads,
+    cx.launch(kc(kernels::pf_flash_attn_variant(s.desc().fa_q_heads, s.desc().fa_kv_heads), "pf_flash_attn"), (C + 7u) / 8u, kv_heads,
               1,
               {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s.pf_o.ptr()), arg_val(pos),
                arg_val(C), arg_val(rows)});
@@ -181,7 +181,7 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
 
     // Unchanged, and deliberately so: the softmax sees the whole chunk at once,
     // reads only the causal prefix of each row, and zero-fills to `npad`.
-    cx.launch(kc(kernels::pf_attn_variant(), "pf_softmax_causal"), C, group, 1,
+    cx.launch(kc(kernels::pf_attn_variant(q_heads, kv_heads), "pf_softmax_causal"), C, group, 1,
               {PtrArg(S), PtrArg(P), arg_val(pos), arg_val(npad), arg_val(ld),
                arg_val(uint32_t(stride_l))});
     if (l0) profile_wait(cx, Phase::kAttnSm);
@@ -213,7 +213,7 @@ void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
                      const float* qkv_partials, uint16_t* out) {
   const uint32_t stride_h = uint32_t(size_t(rows) * kHeadDim);   // pf_o's head slot (§3.4)
   const uint32_t q_heads = s.desc().fa_q_heads;                    // grid (q-heads, C)
-  cx.launch(kc(kernels::pf_attn_variant(), "pf_attn_gate"), q_heads, C, 1,
+  cx.launch(kc(kernels::pf_attn_variant(q_heads, s.desc().fa_kv_heads), "pf_attn_gate"), q_heads, C, 1,
             {PtrArg(s.pf_o.ptr()), PtrArg(qkv_partials), PtrArg(out), arg_val(stride_h)});
 }
 

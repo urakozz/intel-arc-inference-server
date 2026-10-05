@@ -499,6 +499,14 @@ target_include_directories(model_desc_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMA
 target_link_libraries(model_desc_test PRIVATE b70_model)
 add_test(NAME model_desc_test COMMAND model_desc_test)
 
+# Spec 15b: the kernel variant names built from a descriptor - main's names at
+# Qwen3.8's and Agnes's shapes, suffixed ones at Ornith's. Host only; names only.
+add_executable(variant_names_test kernels/variant_names_test.cc)
+target_include_directories(variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(variant_names_test PRIVATE b70_model)
+b70_target_kernel_dir(variant_names_test)
+add_test(NAME variant_names_test COMMAND variant_names_test)
+
 # The model table and src/kernels/CMakeLists.txt are two lists that have to
 # agree: every row's compiled variant must exist before plan 3 binds it. No
 # device, no checkpoint - just the filenames.

@@ -227,10 +227,10 @@ class Capture {
     // Spec 10: v2 bakes no MAXLEN (one binary per M, `_T<kAttnV2Blocks>`).
     const std::vector<std::string> attn_bins =
         attn_ == DecodeAttn::V2
-            ? std::vector<std::string>{kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks)}
+            ? std::vector<std::string>{kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads)}
             : std::vector<std::string>{
-                  kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
-                  kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock)};
+                  kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock, d_.fa_q_heads, d_.fa_kv_heads),
+                  kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock, d_.fa_q_heads, d_.fa_kv_heads)};
     for (const std::string& v : attn_bins)
       require(std::ifstream(kernels::path(v)).good(),
               "no decode attention is compiled for max_len " + std::to_string(b_.max_len) +
@@ -310,7 +310,7 @@ class Capture {
     if (attn_ == DecodeAttn::V2) {
       // attn_v2.cl: grid (4 kv-heads, kAttnV2Blocks), WG 256; the stride is derived per
       // row from Control::pos on the device, so one list serves every depth.
-      const std::string v = kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks);
+      const std::string v = kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads);
       {
         l0::Kernel& k = kernel(v, "attn_decode_v2", kWgAttn);
         k.arg_ptr(0, ctrl);
@@ -338,7 +338,7 @@ class Capture {
     // idle work-groups' measured cost: docs/15 "Spec 1.6 §5.2", docs/12 `attn`).
     {
       l0::Kernel& k = kernel(
-          kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
+          kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock, d_.fa_q_heads, d_.fa_kv_heads),
           "attn_decode", kWgAttn);
       k.arg_ptr(0, ctrl);
       k.arg_ptr(1, b_.attn_q.ptr());
@@ -351,7 +351,7 @@ class Capture {
     // grid (24 q-heads, M), WG 256.
     {
       l0::Kernel& k =
-          kernel(kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock),
+          kernel(kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock, d_.fa_q_heads, d_.fa_kv_heads),
                  "attn_reduce", kWgAttn);
       k.arg_ptr(0, ctrl);
       k.arg_ptr(1, b_.attn_part.ptr());
@@ -428,7 +428,7 @@ class Capture {
   // grid (1, M), WG 256. Reads the id from `ctrl` at execution time, which is
   // the whole reason the list can be captured once.
   void embed_gather() {
-    l0::Kernel& k = kernel(kernels::embed_gather_variant(kCapM), "embed_gather", kWgEmbed);
+    l0::Kernel& k = kernel(kernels::embed_gather_variant(kCapM, d_.hidden), "embed_gather", kWgEmbed);
     k.arg_ptr(0, b_.control.ptr());
     k.arg_ptr(1, m_.embed.ptr());
     k.arg_ptr(2, b_.resid.ptr());
@@ -624,8 +624,8 @@ class Capture {
       // this layer's slice of slot 1 (MtpBuffers::gdn_spec is slot-major, so slot s
       // is that plus (s - 1) whole slots - gdn_step.cl, SPEC_SLOTS).
       const bool slots = mode_ == Mode::Verify;
-      l0::Kernel& k = kernel(slots ? kernels::gdn_step_slots_variant(kCapM, d_.gdn_layers)
-                                   : kernels::gdn_step_variant(kCapM),
+      l0::Kernel& k = kernel(slots ? kernels::gdn_step_slots_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads, d_.gdn_v_heads)
+                                   : kernels::gdn_step_variant(kCapM, d_.gdn_k_heads, d_.gdn_v_heads),
                              "gdn_step", kWgGdn);
       k.arg_ptr(0, b_.control.ptr());
       k.arg_ptr(1, b_.partials.ptr());
@@ -642,7 +642,7 @@ class Capture {
     // weight: plain `w`, and bf16 - the kernel takes it as `const ushort*`, so
     // this is the one small-tensor binding that is not fp32.
     {
-      l0::Kernel& k = kernel(kernels::prep_gated_head_variant(kCapM), "prep_gated_head", kWgGated);
+      l0::Kernel& k = kernel(kernels::prep_gated_head_variant(kCapM, d_.gdn_k_heads, d_.gdn_v_heads), "prep_gated_head", kWgGated);
       k.arg_ptr(0, b_.partials.ptr());
       k.arg_ptr(1, b_.gdn_o.ptr());
       k.arg_ptr(2, at(m_.layer_small[layer].gdn, sl_.gdn_off_gated_norm));
@@ -667,7 +667,7 @@ class Capture {
     // `fa_small` is the layer's FA block (q_norm ‖ k_norm, fp32 1+w) - the same
     // `SmallTensors::gdn` allocation the GDN layers use for their own block.
     {
-      l0::Kernel& k = kernel(kernels::attn_prep_variant(kCapM), "attn_prep", kWgAttn);
+      l0::Kernel& k = kernel(kernels::attn_prep_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads), "attn_prep", kWgAttn);
       k.arg_ptr(0, b_.control.ptr());
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, m_.layer_small[layer].gdn.ptr());
@@ -831,7 +831,7 @@ class Capture {
     const loader::MtpHead& h = *m_.mtp;
     const uint32_t G = DecodeBuffers::kNormGroups, H = d_.hidden, X = 2 * H;
     {
-      l0::Kernel& k = kernel(kernels::embed_gather_variant(kCapM), "embed_gather", kWgEmbed);
+      l0::Kernel& k = kernel(kernels::embed_gather_variant(kCapM, d_.hidden), "embed_gather", kWgEmbed);
       k.arg_ptr(0, mtp_->hctl.ptr());
       k.arg_ptr(1, m_.embed.ptr());
       k.arg_ptr(2, b_.resid.ptr());
@@ -849,7 +849,7 @@ class Capture {
               b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormInput)), b_.x.ptr());
     head_gemv(h.qkv, b_.x.ptr(), b_.partials.ptr());
     {
-      l0::Kernel& k = kernel(kernels::attn_prep_s1_variant(kCapM), "attn_prep", kWgAttn);
+      l0::Kernel& k = kernel(kernels::attn_prep_s1_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads), "attn_prep", kWgAttn);
       k.arg_ptr(0, mtp_->hctl.ptr());
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, h.fa.ptr());
