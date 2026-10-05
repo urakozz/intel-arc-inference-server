@@ -97,6 +97,15 @@ struct DraftVocab {
   }
 };
 
+// Spec 15c: one mixture-of-experts layer on the card (loader/moe_layout.h has the
+// layouts, the sizes and the checkpoint naming). The decode list binds `router` with
+// gemv_bf16 and the two expert block arrays with src/kernels/moe.cl.
+struct MoeLayer {
+  DeviceWeight router;   // bf16 {K hidden, N router_n, S 1, layout 0}: router || shared gate
+  l0::Mem gate_up;       // int4 layout-1 [blocks][hidden x 2 I], shared expert last
+  l0::Mem down;          // int4 layout-1 [blocks][I x hidden]
+};
+
 struct LoadReport {            // printed by load(); asserted by the checkpoint test
   size_t int4_bytes = 0, scale_bytes = 0, bf16_linear_bytes = 0;
   size_t embed_bytes = 0, lm_head_bytes = 0, pad_bytes = 0;
@@ -133,6 +142,11 @@ struct LoadReport {            // printed by load(); asserted by the checkpoint 
   DraftVocabCounts draft_vocab_counts;
   double draft_vocab_seconds = 0;
   double seconds = 0;
+  // Spec 15c: every MoE layer's device bytes (loader::moe_bytes(desc): routers, all
+  // routed experts and the shared experts), in total(); 0 on a dense model. Only the
+  // per-token share (MoeLayerBytes::per_token) is in read_per_token.
+  size_t moe_bytes = 0;
+  double moe_repack_seconds = 0;
 };
 
 struct LoadedModel {
@@ -152,6 +166,10 @@ struct LoadedModel {
   // Spec 8 §11: null unless a draft vocabulary was asked for. Last, so load()'s
   // aggregate initialiser of the members above is unchanged.
   std::unique_ptr<DraftVocab> draft_vocab;
+  // Spec 15c: a MoE model's layers, indexed by layer (every layer of Ornith); empty
+  // on a dense model. For a MoE model the table's GateUp / Down rows (the shared
+  // expert, spec 15b) are NOT in `linears`: the shared expert is the last block here.
+  std::vector<MoeLayer> moe;
 };
 
 // Loads the qwen3_5 checkpoint at `snapshot_or_repo` (resolve_snapshot rules)

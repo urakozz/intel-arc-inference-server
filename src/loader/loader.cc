@@ -17,6 +17,7 @@
 #include "common/repack.h"
 #include "l0/cmdlist.h"
 #include "loader/fold.h"
+#include "loader/moe.h"
 #include "loader/safetensors.h"
 #include "loader/small_layout.h"
 #include "loader/trained_context.h"
@@ -608,6 +609,43 @@ std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const Safe
   return h;
 }
 
+// Spec 15c: one MoE layer - the router || shared gate, every routed expert and the
+// shared expert - repacked on the host (loader/moe.h, reusing `host` across layers)
+// and uploaded as three allocations (loader/moe_layout.h). Every name it reads is
+// marked consumed, so a checkpoint that ships an expert tensor this does not read
+// shows up in `unconsumed` by name.
+MoeLayer load_moe_layer(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet& set,
+                        NameView& view, const model::ModelDesc& desc, uint32_t layer,
+                        MoeHost& host, LoadReport& rep) {
+  const std::string lp = Qwen35::layer_prefix(layer);
+  MoeSource src;
+  src.has = [&](const std::string& part) {
+    return view.names.count(lp + part + ".qweight") != 0 ||
+           view.names.count(lp + part + ".weight") != 0;
+  };
+  src.linear = [&](const std::string& part) {
+    LinearSrc s = LinearSrc::classify(set, ckpt_name(desc, lp + part));
+    if (s.kind == WKind::Int4) {
+      view.consumed.insert(lp + part + ".qweight");
+      view.consumed.insert(lp + part + ".scales");
+    } else {
+      view.consumed.insert(lp + part + ".weight");
+    }
+    return s;
+  };
+  repack_moe_layer(desc, src, host, "layer " + std::to_string(layer));
+  const MoeLayerBytes b = moe_layer_bytes(desc);
+  if (host.router.size() * 2 != b.router || host.gate_up.size() * 4 != b.gate_up() ||
+      host.down.size() * 4 != b.down())
+    throw std::logic_error("loader: the MoE host copy is not the moe_layer_bytes() layout");
+  MoeLayer ml{{upload(ctx, imm, host.router.data(), b.router), nullptr,
+               model::GemvShape{desc.hidden, desc.moe.router_n(), 1, 0}, model::WeightKind::Bf16},
+              upload(ctx, imm, host.gate_up.data(), b.gate_up()),
+              upload(ctx, imm, host.down.data(), b.down())};
+  rep.moe_bytes += b.total();
+  return ml;
+}
+
 // cos/sin[p][0..1][i] for the 64 rotary dims (partial_rotary_factor 0.25 of
 // head_dim 256), i < 32. Text-mode interleaved mRoPE copies one position id
 // onto every frequency stream, so this is plain RoPE (docs/03 "Layer math").
@@ -641,7 +679,7 @@ void check_max_len(const model::ModelDesc& desc, uint32_t max_len, uint32_t trai
 
 size_t LoadReport::total() const {
   return int4_bytes + scale_bytes + bf16_linear_bytes + embed_bytes + lm_head_bytes + small_bytes +
-         pad_bytes + mtp_bytes;
+         pad_bytes + mtp_bytes + moe_bytes;
 }
 
 LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len,
@@ -756,7 +794,8 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                 trained,
                 nullptr,
                 &desc,
-                nullptr};
+                nullptr,
+                {}};
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   imm.copy(m.embed.ptr(), set.data(emb), set.bytes(emb));
   m.report.embed_bytes += set.bytes(emb);
@@ -791,13 +830,31 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   }
 
   m.layer_small.reserve(layers.size());
+  // Spec 15c: a MoE model's FFN is the MoE block - its GateUp / Down table rows (the
+  // shared expert) go into the expert blocks' last slot, not into `linears`.
+  MoeHost moe_host;
+  double moe_s = 0;
   for (const model::LayerDesc& ld : layers) {
     const std::string lp = Qwen35::layer_prefix(ld.index);
-    for (const model::FusedLinear& fl : ld.linears)
+    for (const model::FusedLinear& fl : ld.linears) {
+      if (desc.is_moe() &&
+          (fl.id == model::LinearId::GateUp || fl.id == model::LinearId::Down))
+        continue;
       m.linears.emplace(std::make_pair(ld.index, fl.id),
                         load_linear(ctx, imm, set, view, desc, lp, fl, st, m.report));
+    }
     m.layer_small.push_back(load_small(ctx, imm, set, view, desc, ld, m.report, widen));
+    if (desc.is_moe()) {
+      const auto r0 = std::chrono::steady_clock::now();
+      m.moe.push_back(load_moe_layer(ctx, imm, set, view, desc, ld.index, moe_host, m.report));
+      moe_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - r0).count();
+    }
   }
+  m.report.moe_repack_seconds = moe_s;
+  if (m.report.moe_bytes != moe_bytes(desc))
+    throw std::logic_error("loader: the MoE layers allocated " + std::to_string(m.report.moe_bytes) +
+                           " B, not the " + std::to_string(moe_bytes(desc)) +
+                           " B loader::moe_bytes() plans");
   m.linears.emplace(std::make_pair(kTopLevel, model::LinearId::LmHead),
                     load_linear(ctx, imm, set, view, desc, "", lm_row, st, m.report));
   // Spec 8 §11: V' and its compact head, gathered from the host copy of the head
@@ -895,8 +952,12 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // and outside `small` in the printout - but inside total(), because the
   // seven buckets must account for every byte allocated.
   const size_t small_resident = r.small_bytes - rope_bytes;
+  // Spec 15c: a MoE layer is read in part - the router, top_k experts and the shared
+  // expert (MoeLayerBytes::per_token, derived); the other experts are resident only.
+  const size_t moe_per_token =
+      desc.is_moe() ? size_t(desc.layers) * moe_layer_bytes(desc).per_token(desc.moe.top_k) : 0;
   const size_t per_token = r.int4_bytes + r.scale_bytes + r.bf16_linear_bytes + r.pad_bytes +
-                           r.lm_head_bytes + small_resident;
+                           r.lm_head_bytes + small_resident + moe_per_token;
   m.report.read_per_token = per_token;
   // doc-03's W measured a bf16 lm_head. A packed one is an itemised term on the
   // expected side, exactly like the padding and the fp32 widening - the check
@@ -907,7 +968,8 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                       double(lm_head_bf16_bytes(desc))
                 : 0.0;
   const double expected = desc.doc_w + double(r.pad_bytes) + double(widen.total()) + lm_adjust;
-  const double delta = (double(per_token) - expected) / expected;
+  const bool have_w = desc.doc_w != 0;   // Ornith: none yet (spec 15c, below)
+  const double delta = have_w ? (double(per_token) - expected) / expected : 0.0;
   m.report.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
   std::printf(
@@ -931,7 +993,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       "  total       %13zu B  %7.3f GB\n"
       "  W check     %.3f GB vs %.3f GB expected = %.3f doc-03 + %.3f pad + %.6f widen"
       " %+.3f lm_head\n"
-      "              widen = %zu B RMSNorm fp32 (1+w) + %zu B GDN fp32  ->  %+.3f%%\n"
+      "              widen = %zu B RMSNorm fp32 (1+w) + %zu B GDN fp32  ->  %+.3f%%%s\n"
       "  load        %.1f s\n",
       snap.c_str(), desc.name.c_str(), desc.architecture.c_str(), desc.layers, desc.gdn_layers,
       desc.fa_layers, desc.intermediate, fold_note.c_str(), qc.group_size,
@@ -947,7 +1009,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       rope_bytes, rope_bytes / gb, r.mtp_bytes, r.mtp_bytes / gb,
       mtp ? mtp_line.c_str() : "not loaded; --mtp loads it", r.total(), r.total() / gb, per_token / gb, expected / gb,
       desc.doc_w / gb, r.pad_bytes / gb, widen.total() / gb, lm_adjust / gb, widen.norm, widen.gdn,
-      delta * 100.0, m.report.seconds);
+      delta * 100.0, have_w ? "" : "   (void: no measured W for this model)", m.report.seconds);
   if (m.draft_vocab) {
     const DraftVocabCounts& c = r.draft_vocab_counts;
     std::printf("  draft vocab %s: %u ids (%u added/EOS + %u ranked + %u lowest), %zu B %.3f GB"
@@ -958,6 +1020,24 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                 r.draft_vocab_seconds * 1e3);
   }
 
+  if (desc.is_moe()) {
+    const MoeLayerBytes mb = moe_layer_bytes(desc);
+    std::printf("  moe       %13zu B  %7.3f GB   (%u layers x [router||gate %zu + %u x (gate||up %zu"
+                " + down %zu)], per-expert %s; %.3f GB read per token: top-%u + shared; repacked"
+                " in %.1f s; all of it in total, the per-token share in read/token)\n",
+                r.moe_bytes, r.moe_bytes / gb, desc.layers, mb.router, mb.blocks,
+                mb.gate_up_block, mb.down_block,
+                moe_host.fused_gate_up ? "gate_up_proj" : "gate_proj / up_proj",
+                moe_per_token / gb, desc.moe.top_k, r.moe_repack_seconds);
+  }
+  // doc_w 0: no measured W exists for this model yet (Ornith, spec 15a) - nothing to
+  // cross-check against, and a derived W would only restate the bytes above.
+  if (!have_w) {
+    std::printf("  W check   skipped: %s has no measured W yet (model_desc.cc doc_w; the box "
+                "measures it, spec 15c)\n",
+                desc.name.c_str());
+    return m;
+  }
   if (std::fabs(delta) > 0.02)
     throw std::runtime_error("resident read-per-token bytes " + std::to_string(per_token) +
                              " differ from docs/03-models.md's W plus itemised padding/widening " +
