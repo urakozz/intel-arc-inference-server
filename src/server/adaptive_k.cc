@@ -20,6 +20,15 @@ MtpCost MtpCost::int8_head() {
   return c;
 }
 
+MtpCost MtpCost::with_draft_vocab(double head_share, double fraction) const {
+  if (!(head_share >= 0 && head_share <= 1) || !(fraction > 0 && fraction <= 1))
+    throw std::invalid_argument("MtpCost::with_draft_vocab: head_share in [0, 1], fraction in (0, 1]");
+  MtpCost c = *this;
+  const double scale = (1.0 - head_share) + head_share * fraction;
+  for (double& d : c.draft) d *= scale;
+  return c;
+}
+
 namespace {
 
 std::vector<double> parse_list(const std::string& key, const std::string& text) {
