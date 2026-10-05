@@ -262,3 +262,13 @@ Built on branch `spec7c-server-prefix-cache` (rebased on main b7368b2). Records:
 - **S1 met**: 1233.4 ms (default), 1294.0 ms (split), bar 1500. **S2 met**: restore
   347.7 ms of a 3933 MB KV + the state, bar 1000; time to first token 1581.2 ms. **S3**
   (7b): 2.03%.
+
+## Amendment: `--prefix-cache-gb auto` (2026-10-05)
+
+The store is pinned **system RAM**, so its size is bounded by the machine, not the card, and an
+oversized pin cannot be swapped. `b70-serve --prefix-cache-gb` now defaults to `auto`
+(`src/cli/prefix_cache_size.h`): min(32 GiB, half of MemTotal, MemAvailable - 8 GiB), read
+after the model is loaded; below 4 GiB the cache is off. The startup line prints the choice
+and its inputs; an explicit N pins exactly N GiB and warns when that exceeds MemAvailable.
+`prefix_cache_size_test` (host) pins the rule. With at least 64 GiB of RAM and 40 GiB
+available, auto chooses 32, the old default, so behaviour on such a machine is unchanged.
