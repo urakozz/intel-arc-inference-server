@@ -11,11 +11,30 @@
 // only be a V' id and q = 0 elsewhere, which the acceptance rule handles, M4). What V'
 // can cost is acceptance, when the target's next id lies outside it - which is why the
 // added tokens (the chat, tool-call and think tags) are always in it.
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace loader {
+
+// The device bytes of a draft vocabulary of `rows` ids over a head of `hidden` columns -
+// the compact head in its form (int8: 1 B per weight plus a 4 B fp32 scale per row;
+// bf16: 2 B per weight) and the u32 id table. The ONE formula: loader.cc allocates
+// exactly these, and runtime::plan (memory_plan.h) counts exactly these, since they are
+// outside LoadReport::total(). Header-only so the planner's archive (b70_plan, no Level
+// Zero) can use it without linking the loader.
+struct DraftVocabBytes {
+  size_t head = 0, scales = 0, ids = 0;
+  size_t total() const { return head + scales + ids; }
+};
+inline DraftVocabBytes draft_vocab_bytes(uint32_t rows, uint32_t hidden, bool int8) {
+  DraftVocabBytes b;
+  b.head = size_t(rows) * hidden * (int8 ? 1 : 2);
+  b.scales = int8 ? size_t(rows) * sizeof(float) : 0;
+  b.ids = size_t(rows) * sizeof(uint32_t);
+  return b;
+}
 
 // The sizes the compact head's GEMV and argmax are compiled for
 // (src/kernels/CMakeLists.txt, spec 8 §11): 32768 / 65536 / 131072.

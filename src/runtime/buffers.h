@@ -194,10 +194,18 @@ struct PrefillScratch : PrefillScratchDims {
 //              hidden at the last consumed position; rows 1..M = the verify rows' hidden.
 //   dh         bf16 [5120]: the draft chain's hidden (the head's own post-mtp.norm output).
 //   logits     fp32 [kMaxK][kVocab]: draft i's logits (q_i for the host sampler).
+//   dv_logits  spec 8 §11, a draft vocabulary only: fp32 [|V'|], the compact head's
+//              logits (the draft argmax's input; draft_vocab.cl scatters them into
+//              `logits` row i at V''s ids).
 struct MtpBuffers : MtpDims {
   // kSlots = 4 (M <= 4: K <= 3 drafts + the pending token), kMaxK = 3: MtpDims.
+  // -inf as the fp32 bit pattern zero() fills `logits` with under a draft vocabulary.
+  static constexpr uint32_t kNegInfBits = 0xFF800000u;
 
-  MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
+  // `draft_vocab` = |V'| (spec 8 §11), 0 = the full head drafts (no dv_logits, and
+  // `logits` is zeroed as before). Every size is MtpDims::sizes(max_len, desc, draft_vocab).
+  MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
+             uint32_t draft_vocab = 0);
 
   l0::Mem hctl;
   l0::Mem gdn_spec;
@@ -205,15 +213,22 @@ struct MtpBuffers : MtpDims {
   l0::Mem hh;
   l0::Mem dh;
   l0::Mem logits;
+  std::unique_ptr<l0::Mem> dv_logits;   // null unless draft_vocab > 0
   uint32_t max_len;
+  uint32_t draft_vocab = 0;
 
   size_t bytes() const;
   // What Engine::reset() zeroes when MTP is on (all of it: the head's KV rows are
   // only ever read after being written, but a reset session must not depend on it).
+  // **Under a draft vocabulary `logits` is filled with -inf instead** (spec 8 §11): the
+  // draft list writes only V''s entries of its row, so every other entry must read as
+  // q = 0 to the host's acceptance - -inf, which filter_probs turns into probability 0 -
+  // and nothing else ever writes them, so once per construction and reset is enough.
   void zero(l0::CmdList& imm);
 
  private:
-  MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s);   // the delegate
+  MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
+             uint32_t draft_vocab);   // the delegate
 };
 
 // The VIEW. Every public name capture.cc uses, with the same types as before

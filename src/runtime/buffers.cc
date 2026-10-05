@@ -141,10 +141,12 @@ size_t PrefillScratch::lazy_bytes() const {
 
 // --- MtpBuffers (spec 8) -----------------------------------------------------
 
-MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc)
-    : MtpBuffers(ctx, max_len, sizes(max_len, desc)) {}
+MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
+                       uint32_t draft_vocab_size)
+    : MtpBuffers(ctx, max_len, sizes(max_len, desc, draft_vocab_size), draft_vocab_size) {}
 
-MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s)
+MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
+                       uint32_t draft_vocab_size)
     : hctl(ctx, l0::MemKind::Shared, s.hctl),
       gdn_spec(ctx, l0::MemKind::Device, s.gdn_spec),
       kv_k(ctx, l0::MemKind::Device, s.kv_k),
@@ -152,19 +154,25 @@ MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s)
       hh(ctx, l0::MemKind::Device, s.hh),
       dh(ctx, l0::MemKind::Device, s.dh),
       logits(ctx, l0::MemKind::Device, s.logits),
-      max_len(max_len) {
+      // Spec 8 §11: sized by MtpDims::sizes (0 bytes, so no allocation, when off).
+      dv_logits(s.dv_logits ? std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, s.dv_logits)
+                            : nullptr),
+      max_len(max_len),
+      draft_vocab(draft_vocab_size) {
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   zero(imm);
 }
 
 void MtpBuffers::zero(l0::CmdList& imm) {
-  for (l0::Mem* m : {&hctl, &gdn_spec, &kv_k, &kv_v, &hh, &dh, &logits})
+  for (l0::Mem* m : {&hctl, &gdn_spec, &kv_k, &kv_v, &hh, &dh})
     imm.fill(m->ptr(), 0u, m->size());
+  imm.fill(logits.ptr(), draft_vocab ? kNegInfBits : 0u, logits.size());   // spec 8 §11
+  if (dv_logits) imm.fill(dv_logits->ptr(), 0u, dv_logits->size());
 }
 
 size_t MtpBuffers::bytes() const {
   return hctl.size() + gdn_spec.size() + kv_k.size() + kv_v.size() + hh.size() + dh.size() +
-         logits.size();
+         logits.size() + (dv_logits ? dv_logits->size() : 0);
 }
 
 // --- DecodeBuffers, the view -------------------------------------------------

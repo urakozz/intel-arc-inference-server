@@ -22,14 +22,21 @@ namespace runtime {
 // PersistentBuffers, DecodeScratch, and with MTP the head's buffers and the prefill
 // hidden rows); `prefill_scratch` PrefillScratch, eager and lazy; `int8` the h8
 // path's Int8State.
+//
+// `draft_vocab` (spec 8 §11, `--draft-vocab`): the compact draft head and its id table,
+// which the loader allocates OUTSIDE LoadReport::total() (so `model` reads the same with
+// and without it), sized by loader::draft_vocab_bytes. 0 when off.
 struct MemoryComponents {
   size_t model = 0, kv = 0, decode_state = 0, prefill_scratch = 0, int8 = 0;
-  size_t total() const { return model + kv + decode_state + prefill_scratch + int8; }
+  size_t draft_vocab = 0;
+  size_t total() const { return model + kv + decode_state + prefill_scratch + int8 + draft_vocab; }
 };
 
 // "<label>: model 18.116 GB, kv 8.590 GB, decode state 0.590 GB, prefill scratch
 // 0.700 GB, int8 0.085 GB, total 28.081 GB of 32.530 GB" - memory_line()'s format
-// (GB = 1e9 B), one formatter for the measured line and the planned one.
+// (GB = 1e9 B), one formatter for the measured line and the planned one. With a draft
+// vocabulary a "draft vocab <GB>," term precedes the total; without one the line is
+// exactly the above.
 std::string format_memory(const char* label, const MemoryComponents& c, size_t device_bytes);
 
 // What a session's prefill allocates, which is a property of the backend and the

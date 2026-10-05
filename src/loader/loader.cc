@@ -645,7 +645,7 @@ size_t LoadReport::total() const {
 }
 
 LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len,
-                 bool mtp, LmHeadForm lm_form) {
+                 bool mtp, LmHeadForm lm_form, const DraftVocabSpec& draft_vocab) {
   const auto t0 = std::chrono::steady_clock::now();
   const std::string snap = resolve_snapshot(snapshot_or_repo);
 
@@ -711,6 +711,19 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                 : (lm_form == LmHeadForm::Int8 ? model::WeightKind::Int8 : model::WeightKind::Bf16));
   const bool lm_int4 = lm_row.kind == model::WeightKind::Int4;
   const bool lm_int8 = lm_row.kind == model::WeightKind::Int8;
+  // Spec 8 §11: a draft vocabulary is a subset of the MTP draft's int8 head, at a size the
+  // compact GEMV and argmax are compiled for - all knowable before a byte is read.
+  if (draft_vocab.size != 0) {
+    if (!mtp)
+      throw std::runtime_error("--draft-vocab drafts with the MTP head: it needs --mtp");
+    if (!lm_int8)
+      throw std::runtime_error(
+          "--draft-vocab gathers rows of the int8 lm_head (spec 8 §11); it needs --lm-head int8");
+    if (std::find(std::begin(kDraftVocabSizes), std::end(kDraftVocabSizes), draft_vocab.size) ==
+        std::end(kDraftVocabSizes))
+      throw std::runtime_error("--draft-vocab " + std::to_string(draft_vocab.size) +
+                               ": the compiled sizes are 32768, 65536 and 131072");
+  }
 
   // embed_tokens is uploaded row-major and verbatim: it is gathered one row per
   // token, so no tiling helps and the mmap is already the canonical layout.
@@ -741,7 +754,8 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                 max_len,
                 trained,
                 nullptr,
-                &desc};
+                &desc,
+                nullptr};
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   imm.copy(m.embed.ptr(), set.data(emb), set.bytes(emb));
   m.report.embed_bytes += set.bytes(emb);
@@ -785,6 +799,31 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   }
   m.linears.emplace(std::make_pair(kTopLevel, model::LinearId::LmHead),
                     load_linear(ctx, imm, set, view, desc, "", lm_row, st, m.report));
+  // Spec 8 §11: V' and its compact head, gathered from the host copy of the int8 head
+  // `load_linear` just quantised and uploaded (st.i8 / st.i8_scales still hold it), so no
+  // byte comes back from the device. The selection masks at the model's vocab_used, the
+  // same bound the main argmax masks at (argmax.cl VOCAB_USED).
+  if (draft_vocab.size != 0) {
+    const auto d0 = std::chrono::steady_clock::now();
+    const model::GemvShape& lm = lm_row.shape;
+    auto dv = std::make_unique<DraftVocab>(DraftVocab{
+        {l0::Mem(ctx, l0::MemKind::Device, size_t(draft_vocab.size) * lm.K), nullptr,
+         model::GemvShape{lm.K, draft_vocab.size, 1, 0}, model::WeightKind::Int8},
+        l0::Mem(ctx, l0::MemKind::Device, size_t(draft_vocab.size) * sizeof(uint32_t)),
+        select_draft_vocab(draft_vocab.added, draft_vocab.eos, draft_vocab.ranked, desc.vocab_used,
+                           draft_vocab.size, &m.report.draft_vocab_counts)});
+    std::vector<int8_t> rows(size_t(draft_vocab.size) * lm.K);
+    std::vector<float> scales(draft_vocab.size);
+    gather_int8_tiled_rows(st.i8.data(), st.i8_scales.data(), lm.K, lm.N, dv->host_ids.data(),
+                           draft_vocab.size, rows.data(), scales.data());
+    imm.copy(dv->head.mem.ptr(), rows.data(), rows.size());
+    dv->head.scales = std::make_unique<l0::Mem>(upload(ctx, imm, scales.data(), scales.size() * 4));
+    imm.copy(dv->ids.ptr(), dv->host_ids.data(), dv->host_ids.size() * sizeof(uint32_t));
+    m.report.draft_vocab_bytes = dv->bytes();
+    m.report.draft_vocab_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - d0).count();
+    m.draft_vocab = std::move(dv);
+  }
   // The MTP head's widening goes into its own Widen: the W cross-check is over
   // the main model's read-per-token bytes, which the head is not part of.
   Widen mtp_widen;
@@ -890,6 +929,15 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       mtp ? mtp_line.c_str() : "not loaded; --mtp loads it", r.total(), r.total() / gb, per_token / gb, expected / gb,
       desc.doc_w / gb, r.pad_bytes / gb, widen.total() / gb, lm_adjust / gb, widen.norm, widen.gdn,
       delta * 100.0, m.report.seconds);
+  if (m.draft_vocab) {
+    const DraftVocabCounts& c = r.draft_vocab_counts;
+    std::printf("  draft vocab %s: %u ids (%u added/EOS + %u ranked + %u lowest), %zu B %.3f GB"
+                " - int8 rows + fp32 scales + u32 ids, gathered from lm_head in %.0f ms"
+                " (spec 8 §11; not in total)\n",
+                draft_vocab_name(m.draft_vocab->size()).c_str(), m.draft_vocab->size(), c.forced,
+                c.ranked, c.lowest, r.draft_vocab_bytes, r.draft_vocab_bytes / gb,
+                r.draft_vocab_seconds * 1e3);
+  }
 
   if (std::fabs(delta) > 0.02)
     throw std::runtime_error("resident read-per-token bytes " + std::to_string(per_token) +
