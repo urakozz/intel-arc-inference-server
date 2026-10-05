@@ -483,6 +483,23 @@ void test_eos_rules_and_errors() {
 
 }  // namespace
 
+// Spec 12b: PrefixSlots keys its cache by the batched engine's KV form, as PrefixSession
+// does for EngineIface, so a bf16 entry is never restored into an int8 engine.
+void test_kv_form() {
+  struct Int8Engine : MockBatchEngine {
+    using MockBatchEngine::MockBatchEngine;
+    uint64_t kv_form() override { return 1; }
+  };
+  MallocAlloc alloc;
+  MockBatchEngine bf16(2);
+  configure(bf16);
+  CHECK_EQ(server::PrefixSlots(bf16, 1 << 20, alloc).cache().kv_form(), uint64_t(0));
+  Int8Engine int8(2);
+  configure(int8);
+  CHECK_EQ(server::PrefixSlots(int8, 1 << 20, alloc).cache().kv_form(), uint64_t(1));
+  std::printf("kv form: PrefixSlots keys by the engine's KV form OK\n");
+}
+
 int main() {
   test_batch_independence();
   test_per_row_stops();
@@ -491,6 +508,7 @@ int main() {
   test_batched_admission();
   test_fairness();
   test_eos_rules_and_errors();
+  test_kv_form();
   std::printf("scheduler_test: all cases passed\n");
   return 0;
 }

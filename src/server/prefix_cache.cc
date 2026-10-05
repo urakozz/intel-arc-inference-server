@@ -59,6 +59,8 @@ PrefixCache::PrefixCache(size_t budget_bytes, size_t state_bytes, size_t kv_byte
   root_->hash = kv_form;   // spec 12b: every chain starts from the KV form (0 = bf16)
 }
 
+uint64_t PrefixCache::kv_form() const { return root_->hash; }
+
 PrefixCache::~PrefixCache() {
   for (auto& e : all_)
     if (e->bytes) alloc_.free(e->state ? e->state : e->kv, e->bytes);
