@@ -28,25 +28,40 @@
 //   max_len           any multiple of 256 up to config.json's max_position_embeddings
 //                     (262144 for all three) that the memory plan fits on the card
 //                     (spec 6 §10; Agnes's fixed 65536 of spec 14 §3.3 is gone)
-//   loadable          yes                    yes                    no: "MoE not implemented
-//                                                                   (spec 15c)"
+//   loadable          yes                    yes                    decode only (spec 15c):
+//                                                                   prefill is 15d, MTP 15e
 //
 // Descriptors are process-lifetime singletons: hold them by reference/pointer.
 namespace model {
 
 // Spec 15b: the feed-forward block's kind. Dense is the SwiGLU MLP the table's
-// GateUp / Down rows run; Moe adds routed experts (`MoeDesc`), which nothing
-// in the engine runs before spec 15c.
+// GateUp / Down rows run; Moe adds routed experts (`MoeDesc`), run by spec 15c's
+// decode kernels (src/kernels/moe.cl).
 enum class FfnKind { Dense, Moe };
 
 // The routed-expert shape of a FfnKind::Moe model (spec 15 §1). Unused (zero) on
-// a dense model. Read by nothing but the descriptor test until spec 15c.
+// a dense model.
+//
+// Spec 15c: the device form, derived here so the loader, the buffer sizes, the
+// capture and the kernels' CMake defines read ONE set of numbers:
+//   * the expert weights of a layer are `blocks()` contiguous int4 g64 layout-1
+//     blocks (common/repack.h) addressed by block index - the routed experts at
+//     0..experts-1, the shared expert at `shared_block()` (= experts), so one
+//     kernel serves all `slots()` = top_k + 1 slots of a token (spec 15 §9);
+//   * the router and the shared expert's sigmoid gate are one bf16 GEMV of
+//     `router_n()` rows: the experts' rows, the gate's row at `experts`, zero rows
+//     to the next multiple of 16 (Ornith 256 + 1 -> 272).
 struct MoeDesc {
   uint32_t experts = 0;               // routed experts per layer
   uint32_t top_k = 0;                 // experts per token
   uint32_t expert_intermediate = 0;   // one routed expert's SwiGLU width
   uint32_t shared_intermediate = 0;   // the always-on shared expert's width; 0 = none
   bool has_shared_gate = false;       // the shared expert is scaled by sigmoid(x . g)
+
+  uint32_t shared_block() const { return experts; }
+  uint32_t blocks() const { return experts + 1; }       // routed + the shared expert
+  uint32_t slots() const { return top_k + 1; }          // per token: top_k routed + shared
+  uint32_t router_n() const { return (experts + 1 + 15) / 16 * 16; }
 };
 
 struct ModelDesc {
@@ -100,6 +115,12 @@ struct ModelDesc {
 
   bool has_parallel_ffn() const { return parallel_ffn != 0; }
   bool is_moe() const { return ffn == FfnKind::Moe; }
+  // Spec 15c: the split-K width of the partials the FFN leaves for the next
+  // residual fold (the next layer's input norm, or the final norm): the dense
+  // down GEMV's S, or 0 on a MoE model - its moe_down kernel folds the block's
+  // output into the residual stream itself (src/kernels/moe.cl), so the next
+  // prep_res_fold has nothing to fold (its SP0 variant).
+  uint32_t ffn_fold_s() const;
   // [GDN, GDN, GDN, FA] repeating - every supported model (`full_attention_interval`
   // / `global_attention_interval` 4).
   static bool is_fa(uint32_t layer) { return layer % 4 == 3; }
@@ -162,13 +183,20 @@ struct ModelDesc {
 
 const ModelDesc& qwen38();
 const ModelDesc& agnes();    // Agnes 3.0 Flash (spec 14)
-const ModelDesc& ornith();   // Ornith 1.5 35B-A3B (spec 15): described, not yet loadable
+const ModelDesc& ornith();   // Ornith 1.5 35B-A3B (spec 15): decode from spec 15c
 // The descriptor for config.json's `architectures[0]`; throws std::runtime_error
 // naming the architecture and the supported ones.
 const ModelDesc& desc_for_architecture(const std::string& architecture);
-// Throws std::runtime_error when the engine cannot run this descriptor yet: a
-// FfnKind::Moe model ("MoE not implemented (spec 15c)"), tied embeddings. The
-// loader calls it right after desc_for_architecture.
+// Throws std::runtime_error when the engine cannot run this descriptor: tied
+// embeddings, or a FfnKind::Moe shape src/kernels/moe.cl is not written for (a
+// shared expert with a sigmoid gate and the routed experts' width, top_k <= 8,
+// experts a multiple of 16 up to 256 - Ornith's is). The loader calls it right
+// after desc_for_architecture. A MoE model loads for DECODE only (spec 15c):
+// require_prefill below refuses the prefill path.
 void require_loadable(const ModelDesc& desc);
+// Throws std::runtime_error naming the stage when the prefill path cannot run this
+// model: a FfnKind::Moe model before spec 15d's grouped-expert prefill. Called by
+// Engine::prefill / prepare_prefill and by the CLIs before they plan a prefill.
+void require_prefill(const ModelDesc& desc);
 
 }  // namespace model
