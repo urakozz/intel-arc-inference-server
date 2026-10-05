@@ -255,4 +255,11 @@ inline std::string argmax_stage1_variant(unsigned M, unsigned vocab_used) {
 // Stage 2 is a single work-group that loops m < ctrl.n_active internally: no
 // variants at all, so the binary is named after the entry point.
 inline std::string argmax_stage2_variant() { return "argmax_stage2"; }
+
+// Spec 8 §11: the draft's argmax over a reduced vocabulary of `nv` ids
+// (src/kernels/draft_vocab.cl) - `dv_argmax_stage1` (with the scatter into the full
+// row) and `dv_argmax_stage2` (the id-table mapping) in one binary per size, as prep.cl's
+// entry points share theirs. The compact GEMV before it is `gemv_i8w_variant(1, K, nv)`.
+inline constexpr unsigned kDraftVocabChunk = 1024;   // draft_vocab.cl CHUNK: stage 1's grid is nv / 1024
+inline std::string dv_argmax_variant(unsigned nv) { return "dv_argmax_N" + std::to_string(nv); }
 }  // namespace kernels

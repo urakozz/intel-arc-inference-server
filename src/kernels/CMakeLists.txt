@@ -395,6 +395,18 @@ if(B70_MTP)
     add_ocloc_kernel(attn_prep_M${MM}_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1)
   endforeach()
   add_ocloc_kernel(prep_silu_mul_M1_S1 SOURCE ${PREP_CL} DEFINES M=1 SILU_S=1)
+
+  # Spec 8 §11: the draft over a reduced vocabulary V' (`b70-serve --draft-vocab`), at
+  # |V'| = 32768 / 65536 / 131072 - the M = 1 int8 GEMV over the compact head (gemv_i8w.cl
+  # unchanged, a new N only) and the mapped argmax + scatter (draft_vocab.cl), one binary
+  # per size holding both stages. Additive: no existing binary's command line moves, and
+  # an engine without a draft vocabulary binds none of them. The head's K is the model's
+  # hidden (5120 on Qwen3.8 and Agnes), so these serve both.
+  set(DRAFT_VOCAB_CL ${CMAKE_CURRENT_SOURCE_DIR}/draft_vocab.cl)
+  foreach(NV 32768 65536 131072)
+    add_gemv_i8w_variant(1 5120 ${NV})
+    add_ocloc_kernel(dv_argmax_N${NV} SOURCE ${DRAFT_VOCAB_CL} DEFINES ${CTRL_DEFINES} NV=${NV})
+  endforeach()
 endif()
 
 # --- Spec 15b: other models' shapes ------------------------------------------
