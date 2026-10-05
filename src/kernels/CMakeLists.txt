@@ -529,4 +529,30 @@ if(B70_ORNITH)
                    DEFINES ${MOE_DEFINES} M=1 EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 ROUTER_N=272)
 endif()
 
+# --- Spec 12b: the int8 KV cache (`--kv-cache int8`) -------------------------
+# The operator's rotkv scheme (spec 12 §8): every binary that writes or reads the int8
+# cache, from ONE new source (kv8.cl, per-family defines as pf_int8.cl). Additive only:
+# no existing source changes, so every existing binary keeps its name, its command line
+# and its bytes, and a `--kv-cache bf16` engine (the default) binds none of these.
+#   attn_prep_M<M>_KV8        the decode writer at M = 1..4 (QKV_S = 2: the main FA layers)
+#   attn_prep_M<M>_S1_KV8     the MTP head's writer (its bf16 qkv: QKV_S = 1), B70_MTP
+#   attn_v2_M<M>_T<TGT>_KV8   decode attention v2 over int8 + scales, the un-rotating reduce
+# The prefill three are in prefill/CMakeLists.txt. Shapes are Qwen3.8's (Agnes shares
+# them); another model's FA heads name a `_Q<q>KV<kv>` binary nothing builds yet.
+option(B70_KV8 "build the --kv-cache int8 variants (spec 12b)" ON)
+if(B70_KV8)
+  set(KV8_CL ${CMAKE_CURRENT_SOURCE_DIR}/kv8.cl)
+  set(KV8_PREP_DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 KV8_PREP=1)
+  foreach(MM 1 2 3 4)
+    add_ocloc_kernel(attn_prep_M${MM}_KV8 SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=2)
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_KV8 SOURCE ${KV8_CL}
+                     DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT})
+    if(B70_MTP)
+      add_ocloc_kernel(attn_prep_M${MM}_S1_KV8 SOURCE ${KV8_CL}
+                       DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=1)
+    endif()
+  endforeach()
+endif()
+
 add_subdirectory(prefill)

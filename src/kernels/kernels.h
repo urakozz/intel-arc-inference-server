@@ -212,6 +212,23 @@ inline std::string attn_prep_s1_variant(unsigned M, unsigned q = kRefFaQHeads,
                                         unsigned kv = kRefFaKvHeads) {
   return attn_prep_variant(M, q, kv) + "_S1";
 }
+
+// Spec 12b (`--kv-cache int8`, src/kernels/kv8.cl): the int8 KV cache's writer and
+// decode reader, each the `_KV8` twin of the bf16 binary it replaces - same grid, two
+// more arguments (the K and V scales). Additive: no existing binary's name or command
+// line moves, and a bf16 engine binds none of these.
+inline std::string attn_prep_kv8_variant(unsigned M, unsigned q = kRefFaQHeads,
+                                         unsigned kv = kRefFaKvHeads) {
+  return attn_prep_variant(M, q, kv) + "_KV8";
+}
+inline std::string attn_prep_s1_kv8_variant(unsigned M, unsigned q = kRefFaQHeads,
+                                            unsigned kv = kRefFaKvHeads) {
+  return attn_prep_s1_variant(M, q, kv) + "_KV8";
+}
+inline std::string attn_v2_kv8_variant(unsigned M, unsigned T, unsigned q = kRefFaQHeads,
+                                       unsigned kv = kRefFaKvHeads) {
+  return attn_v2_variant(M, T, q, kv) + "_KV8";
+}
 // SPEC_SLOT_STRIDE (one slot of MtpBuffers::gdn_spec, gdn_layers x 48 x 128 x 128
 // floats) is baked, so a model with another GDN layer count is another binary:
 // Qwen3.8's 48 keeps the historical name, any other count is `_G<gdn_layers>`; the

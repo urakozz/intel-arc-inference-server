@@ -92,6 +92,19 @@ inline std::string pf_attn_variant(unsigned q = kRefFaQHeads, unsigned kv = kRef
 inline std::string pf_flash_attn_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
   return "pf_flash_attn" + fa_suffix(q, kv);
 }
+// Spec 12b (`--kv-cache int8`, src/kernels/kv8.cl): the prefill path over the int8 KV
+// cache - the writer (pf_attn_prep_q16's chain, then rotate and quantise), the flash
+// attention reading int8 + scales, and the gate that un-rotates first. Additive.
+inline std::string pf_attn_prep_kv8_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_attn_prep_kv8" + fa_suffix(q, kv);
+}
+inline std::string pf_flash_attn_kv8_variant(unsigned q = kRefFaQHeads,
+                                             unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_attn_kv8" + fa_suffix(q, kv);
+}
+inline std::string pf_attn_gate_kv8_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_attn_gate_kv8" + fa_suffix(q, kv);
+}
 // The a||b projection, mirroring gemv_bf16's {COLS_PER_WG 16, KSPLIT 16}
 // tiling so that at M = 1 it is BIT-IDENTICAL to the binary capture.cc binds.
 inline std::string pf_ab_proj_variant(unsigned hidden = kRefHidden) {

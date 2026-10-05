@@ -179,3 +179,17 @@ if(B70_MTP)
                      DEFINES K=${K})
   endforeach()
 endif()
+
+# Spec 12b (`--kv-cache int8`): the prefill path over the int8 KV cache, from the same
+# kv8.cl as the decode variants (KV8_CL, set in the parent directory): the writer
+# (pf_attn_prep_q16's chain, PF = 1, then rotate + quantise), the flash attention reading
+# int8 + scales (pf_flash_attn's tiling and exp2, 256 GRF), and the gate that un-rotates
+# each head first. Additive: a bf16 engine binds none of them; the composed path and
+# sycl-tla have no int8 form and refuse --kv-cache int8 (runtime/prefill/attn.cc).
+if(B70_KV8)
+  add_ocloc_kernel(pf_attn_prep_kv8 SOURCE ${KV8_CL} DEFINES ${KV8_PREP_DEFINES} PF=1)
+  add_ocloc_kernel(pf_flash_attn_kv8 SOURCE ${KV8_CL}
+                   DEFINES KV8_FLASH=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_attn_gate_kv8 SOURCE ${KV8_CL} DEFINES KV8_GATE=1)
+endif()
