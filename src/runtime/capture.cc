@@ -884,8 +884,8 @@ class Capture {
   // its post-mtp.norm hidden back into dh (the chain's next `h`), its logits into
   // MtpBuffers::logits row draft_i_, the argmax into hctl. 23 launches and one copy -
   // with a draft vocabulary too (spec 8 §11: the compact GEMV and the two dv_argmax
-  // stages replace lm_head and the two argmax stages one for one; mtp_head_test prints
-  // the count, the box queue records it).
+  // stages replace lm_head and the two argmax stages one for one; mtp_gpu_test's gate
+  // checks 23 on whichever head it loaded, mtp_gpu_dv128k_test with V').
   void draft() {
     const loader::MtpHead& h = *m_.mtp;
     const uint32_t G = DecodeBuffers::kNormGroups, H = d_.hidden;
