@@ -211,3 +211,81 @@ for our engine at 32k-64k, and spec 16's PP for the long-context comparison at m
 
 Speculative decoding for K2 (no MTP head; a draft model would be its own spec); TP for K2; fp8 KV;
 contexts beyond what §4 decision 2 sets; training-only parts (the router's load-balancing loss).
+
+## 10. 18b as built blind (2026-10-05, branch `spec18b-k2-decode`)
+
+Written on the Mac with the box unavailable: plan 18b Tasks 1-3; Task 4 (speed) and every run on
+the card are the box's (`docs/superpowers/plans/box-validation-queue.md`, the K2 row). Rebased on
+18a's reference (`912210e`) and aligned with `docs/probe-k2-2026-10-05.md`.
+
+**Structure (§5.1).** `model::K2Desc` / `model::k2()` (`src/model/k2_horizon.{h,cc}`: every number
+from the int4 checkpoint's `config.json` and safetensors headers; `check_k2_config` holds
+config.json's structure to it), the loader beside `loader.cc` (`src/loader/k2_layout.h` sizes every
+allocation device-free, `k2_repack.{h,cc}` is the host half - names checked both ways and refused by
+name - `k2_rope.cc` the fp32-step RoPE table, `k2_loader.{h,cc}` uploads and holds every bucket to
+the layout's formula), `src/runtime/k2/` (`K2Buffers`, the capture, `K2Engine`, the planner), K2's
+kernels in `src/kernels/k2/` (`k2_prep.cl`, `k2_attn.cl`, `k2_moe.cl`; names in
+`src/kernels/k2_kernels.h`). No existing `.cl` changed: the reused sources (`gemv.cl`,
+`gemv_bf16.cl`, `gemv_i8w.cl`, `prep.cl`'s `prep_res_fold`, `embed_gather.cl`, `argmax.cl`) run at
+K2's shapes from new CMake lines, so every pre-existing binary keeps its command line (Mac
+`kernel_cmdlines`: additions only).
+
+**Device layouts.** Non-expert int4 linears GPTQ layout 0; the fused attention row is
+`q | k | gate | v` (dense, 10240) or `q | k | gate | v_router` (MoVA, 9280: the int4 router's 64
+logits ride in v's place); dense gate||up interleave16. Expert groups are flat per-layer layout-1
+block arrays addressed by id inside the kernels (decision 3): value 64 x 1,392,640 B, gate||up and
+down 101 blocks each (the shared expert is block 100) of 2,088,960 / 1,044,480 B - 405.6 MB per
+MoVA/MoE layer, 18.25 GB over 45. The MoE router is bf16 [128][2560], rows 100..127 zero (Review
+Focus 4). Norms fp32 plain `w`; the two selection-only biases fp32 (the F16 MoVA bias widened
+exactly). Totals (derived, `k2_horizon_test`): 21.802 GB of weights with the bf16 head, 21.161 GB
+with the int8 head; read per token 3.786 / 3.145 GB.
+
+**Kernels (§5.2).** The grouped norm is `prep_res_fold` (unchanged) + `k2_norm_finish` (each group
+of 1280 its own Σx², plain `w`). `k2_attn_prep` mirrors the reference's bf16 RoPE chain exactly
+(three roundings; the products of bf16 values are exact in fp32). `k2_route` is the sigmoid
+router: `fp32(sigmoid(fp32(bf16 logit))) + fp32(bias)` for selection, ties to the lower id, the
+100 real experts on 128 lanes with the padding never ranked, Σ s in rank order, `rne((s/Σ)·2.5)`,
+slots in ascending id. `k2_moe_gate_up` / `k2_moe_down` are moe.cl's kernels with the shared expert
+ungated and the reference's ascending-id bf16 `index_add_` chain (moe.cl's fp32 slot-order sum is
+another chain, so it is a new source and Ornith's binaries are untouched). `k2_mova_value` runs the
+4 value experts in one launch and writes v into the layer's V cache. `k2_attn_decode` /
+`k2_attn_reduce` are attn_v2.cl's structure at head_dim 128 / GQA 4 (8 sub-groups, two positions
+each) with the softplus gate (beta ln 2, threshold 20) in the reduce.
+
+**Launches (Review Focus 5): 717 per token** = embed + 3 dense x 12 + 45 MoVA/MoE x 15 + 5,
+asserted at capture - against §2's ~1000 estimate and spec 4's 2067. Per MoVA/MoE layer: fold +
+norm, fused GEMV, MoVA route, value experts, attention prep, decode + reduce, o_proj, fold + norm,
+router GEMV, MoE route, gate||up (8 + shared), down + combine + residual.
+
+**Memory (decision 2).** `--max-len auto` plans with `runtime::k2::plan`: at 32768 the engine holds
+28.263 GB (bf16 head) / 27.622 GB (int8 head) - decision 2 (A) fits; on a 32.53 GB card with the
+1.5 GB reserve auto gives 46592 / 49920 (derived). bf16 KV only (int8 KV is 18e).
+
+**CLIs.** `b70-decode` dispatches on config.json's `model_type`: `--ids` / `--bench` run
+`K2Engine` (`--lm-head bf16` default, `int8` available); `--prefill` / `--pp` are refused naming
+18c, `--kv-cache int8` naming 18e, `--profile` naming Task 4. `b70-serve` refuses K2 before the
+device naming 18c / 18d.
+
+**Gates as written.** Host (Mac): `k2_horizon_test`, `k2_rope_test`, `k2_repack_test` (a
+synthetic checkpoint in K2's naming), `k2_ref_test` (Review Focus 1, 2, 4 by independent
+formulas), `k2_plan_test`, `k2_variant_names_test`, and `tools/mac/clrun/k2_run` (the portable
+kernels on the Mac's GPU against `k2_ref.h`: bit-exact on the UHD 630, indicative). Box:
+`k2_kernels_test` (K1 at K2's real shapes), `k2_load_checkpoint_test`, `k2_decode_test` (the list,
+plan = allocation, K3 replay bitwise incl. route rows and KV), `k2_golden_test` (K2: the tie-aware
+token gate and the routing diagnostic against 18a's `route.{moe,mova}.{ids,w,gap}.L*`; SKIP until
+`oracle-out-k2/` exists), the `cli_reject_k2_*` dispatch cases.
+
+**Known deviations and risks, for the box.**
+- Decode attention computes the softmax in fp32 flash-style and does not round the scores or the
+  probabilities to bf16 as the reference's eager path does (scores bf16, x scale bf16, softmax
+  fp32 -> bf16). This is the engine's existing convention (attn.cl / attn_v2.cl); if the K2 golden
+  gate fails on determined rows, it is the first suspect, and an eager-mirroring reduce is the fix.
+- The router's Σ s is a sequential fp32 sum in rank order; torch's 8-element reduction may differ
+  by an fp32 ulp - after the bf16 rounding of `w` rarely visible (the diagnostic prints the worst
+  weight difference; it does not gate on it).
+- The routing diagnostic's near-tie tolerance (1e-3 on the reference's gap at the cut) is a
+  proposal until 18a's real-weight run prints the gap distribution; `B70_K2_TIE_TOL` overrides.
+- The int4 rows' `{S, layout}` (q||k||gate||v S2, o_proj / gate||up / down S4, layout 0) and the
+  expert kernels' K splits are PROVISIONAL (copied), for Task 4's sweep.
+- The int4 checkpoint's config.json says `"dtype": "float16"` (AutoRound's export); the engine and
+  18a's reference compute in bf16 (§3) - a reference run in fp16 would not be the gate's.

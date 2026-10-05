@@ -1,5 +1,12 @@
 # Spec 18b - K2-Horizon decode on one card
 
+**Status (2026-10-05, branch `spec18b-k2-decode`):** Tasks 1-3 written blind on the Mac (the box
+unavailable) and rebased on 18a's reference; Mac checks green (`tools/mac_check.sh`: host tests,
+Level Zero syntax, kernel command lines additions only, OpenCL syntax; `--kernels`: the portable K2
+kernels bit-exact on the Mac's GPU, indicative). As built: spec 18 §10. Everything on the card -
+K1 on ocloc's build, the checkpoint load, K2 (after 18a's `oracle-out-k2/`), K3, and Task 4 - is
+the box validation queue's K2 row.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** K2 decodes through a replayed Level Zero list on one B70: model table, loader with flat per-layer expert buffers, K2's own kernels, spec 15's MoE kernels with K2's router, `K2Engine`; K0, K1, K2 (decode), K3 (replay); the decode speed rows.
@@ -34,15 +41,15 @@
 
 ### Task 1: model table, RoPE table, loader (old plan 8b)
 
-- [ ] As old plan 8b Tasks 1-3, with flat per-layer expert buffers sized for spec 15's kernels; host tests on the Mac where they build; `k2_load_checkpoint_test` on the box. **Commit** `model: K2-Horizon table and loader (spec 18b)`.
+- [x] (blind; `k2_load_checkpoint_test` is the box's) As old plan 8b Tasks 1-3, with flat per-layer expert buffers sized for spec 15's kernels; host tests on the Mac where they build; `k2_load_checkpoint_test` on the box. **Commit** `model: K2-Horizon table and loader (spec 18b)`.
 
 ### Task 2: kernels (old plan 8c, revised)
 
-- [ ] Grouped norm, softplus gate in the attention reduce, MoVA value-expert launch + combine, spec 15's MoE kernels with K2's router and ascending-id combine, attention v2 / flash variants at head_dim 128 GQA 4; a host-reference test each (Review Focus 1, 2, 4). **Commit** `kernels: K2-Horizon decode kernels (spec 18b, K1)`.
+- [x] (blind; `k2_kernels_test` is the box's) Grouped norm, softplus gate in the attention reduce, MoVA value-expert launch + combine, spec 15's MoE kernels with K2's router and ascending-id combine, attention v2 / flash variants at head_dim 128 GQA 4; a host-reference test each (Review Focus 1, 2, 4). **Commit** `kernels: K2-Horizon decode kernels (spec 18b, K1)`.
 
 ### Task 3: `K2Engine`, capture, gates (old plan 8e, revised)
 
-- [ ] `K2Buffers`, the capture (Review Focus 5), `K2Engine` (`reset` / `ingest` / `generate`), replay determinism (K3), the golden gate with the routing diagnostic (K2, Review Focus 3), `b70-decode` dispatch on `model_type`; K0 (full suite). **Commit** `runtime: K2Engine decodes (spec 18b, K2-K3)`.
+- [x] (blind; the gates run on the box) `K2Buffers`, the capture (Review Focus 5), `K2Engine` (`reset` / `ingest` / `generate`), replay determinism (K3), the golden gate with the routing diagnostic (K2, Review Focus 3), `b70-decode` dispatch on `model_type`; K0 (full suite). **Commit** `runtime: K2Engine decodes (spec 18b, K2-K3)`.
 
 ### Task 4: speed
 
