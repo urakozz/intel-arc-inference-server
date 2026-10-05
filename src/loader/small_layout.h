@@ -12,7 +12,7 @@
 // it and none of them may re-derive a number:
 //
 //   * `src/loader/loader.cc` packs the blocks against these constants;
-//   * `src/model/qwen35.cc` builds `model::LayerDesc::small_tensors` - the
+//   * `src/model/model_desc.cc` builds `model::LayerDesc::small_tensors` - the
 //     table that names, types and *places* every small tensor - out of these
 //     very constants (fix I3, 2026-08-25), so the loader hardcodes nothing;
 //   * **plan 3's GDN / FA / RMSNorm kernel bindings include this header** to

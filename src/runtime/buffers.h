@@ -121,7 +121,7 @@ struct DecodeScratch {
 
   // Spec 15b: hidden, head counts and widths are the descriptor's (Qwen3.8 in brackets).
   l0::Mem resid;          // bf16 [M][hidden 5120]
-  l0::Mem x;              // bf16 [M][intermediate]  (prep output; largest K; Qwen3.8 17408)
+  l0::Mem x;              // bf16 [M][max(intermediate, 2 x hidden)]  (prep output; Qwen3.8 17408)
   l0::Mem partials;       // fp32 [max S][M][max N] (Qwen3.8 [8][M][34816]) = 8.91 MB
   l0::Mem ab_out;         // fp32 [M][128]    (a||b GEMV output, S=1)
   l0::Mem norm_sumsq;     // fp32 [kNormGroups][M] (prep_res_fold -> prep_norm_finish)
@@ -168,7 +168,7 @@ struct PrefillScratch {
 
   l0::Mem ids;          // uint32 [kC], Host  - pf_embed_gather's input
   l0::Mem resid;        // bf16 [kC][5120]
-  l0::Mem x;            // bf16 [kC][intermediate]  (Qwen3.8 17408)
+  l0::Mem x;            // bf16 [kC][max(intermediate, 2 x hidden)]  (Qwen3.8 17408)
   l0::Mem partials;     // fp32 [kC][max int4 N]    (R1: one S = 1 rectangle; Qwen3.8 34816)
   l0::Mem ab_out;       // fp32 [kC][128]
   l0::Mem norm_sumsq;   // fp32 [kNormGroups][kC]
