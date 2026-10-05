@@ -1,6 +1,6 @@
 // Spec 14: the Agnes 3.0 Flash checkpoint through the loader - descriptor,
 // name map, the parallel-FFN fold on device, the MTP head under Agnes's names,
-// the max_len ceiling. Device + checkpoint (label `checkpoint-agnes`).
+// the trained-context bound on max_len. Device + checkpoint (label `checkpoint-agnes`).
 //
 //   load_agnes_test [repo-or-snapshot]   (default urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ)
 //
@@ -22,12 +22,14 @@ int main(int argc, char** argv) {
   const std::string arg = argc > 1 ? argv[1] : "urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ";
   l0::Context ctx(0);
 
-  // The ceiling first: it throws after config.json, before a byte is uploaded.
+  // The trained-context bound first (spec 6 §10, which replaced spec 14 §3.3's fixed
+  // 65536 ceiling with the memory plan): one quantum past config.json's
+  // max_position_embeddings throws after config.json, before a byte is uploaded.
   bool refused = false;
   try {
-    loader::load(ctx, arg, 131072);
+    loader::load(ctx, arg, 262144 + 256);
   } catch (const std::runtime_error& e) {
-    refused = std::string(e.what()).find("65536") != std::string::npos;
+    refused = std::string(e.what()).find("trained context 262144") != std::string::npos;
   }
   CHECK(refused);
 
@@ -112,7 +114,7 @@ int main(int argc, char** argv) {
   }
   std::printf("load_agnes_test OK: 72 layers (54 GDN + 18 FA), folded gate||up 5120x38912 and "
               "down 19456x5120 on every layer, %zu join readbacks exact, MTP head bound, "
-              "max_len 131072 refused; read/token %.3f GB\n",
+              "max_len 262400 (past the trained context) refused; read/token %.3f GB\n",
               checked, m.report.read_per_token / 1e9);
   return 0;
 }

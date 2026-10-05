@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <utility>
 #include "l0/context.h"
 
 namespace l0 {
@@ -14,6 +15,16 @@ class Mem {
   Mem(Mem&& o) noexcept;
   Mem& operator=(Mem&&) = delete;
   Mem(const Mem&) = delete;
+  // Exchanges the two allocations. Spelled out rather than a move-assignment, which
+  // stays deleted: a captured command list bakes ptr(), so replacing an allocation in
+  // place is only ever correct before any capture, and a call site should say so
+  // (loader::set_max_len, the one user, re-tables RoPE before the Engine exists).
+  void swap(Mem& o) noexcept {
+    std::swap(ctx_, o.ctx_);
+    std::swap(kind_, o.kind_);
+    std::swap(bytes_, o.bytes_);
+    std::swap(ptr_, o.ptr_);
+  }
 
   void* ptr() const { return ptr_; }
   size_t size() const { return bytes_; }
