@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #include "cli/max_len.h"
+#include "cli/prefix_cache_size.h"
 #include "cli/serve_adapters.h"
 #include "l0/context.h"
 #include "loader/loader.h"
@@ -72,11 +73,21 @@ void usage() {
                "                 Agnes 3.0 Flash (spec 14).\n"
                "                 [--pp-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n"
                "                 [--log-requests DIR]   write DIR/NNNNNN.json per request\n"
-               "                 [--prefix-cache-gb N]  pinned host prefix cache, GiB (default 32,\n"
-               "                                        0 = off: every request prefills in full)\n"
-               "                 [--prefix-split-last]  chat: the last prompt id by a decode replay,\n"
-               "                                        the prompt-end snapshot at len - 1 (more hits,\n"
-               "                                        not bitwise with a cold run)\n"
+               "                 [--prefix-cache-gb auto|N]  the prefix cache, in SYSTEM RAM (pinned\n"
+               "                                        host memory, not VRAM), GiB. auto (default):\n"
+               "                                        min(32, half the RAM, available - 8), off\n"
+               "                                        below 4. 0 = off: every request prefills\n"
+               "                                        in full (spec 7)\n"
+               "                 [--prefix-split-last]  a flag (present = on), chat requests only.\n"
+               "                                        A thinking model's next turn diverges at this\n"
+               "                                        prompt's LAST id (<think>\\n re-rendered as\n"
+               "                                        <think>\\n\\n</think>); this prefills to len - 1,\n"
+               "                                        snapshots there and runs the last id as one\n"
+               "                                        decode step, so the next turn restores right\n"
+               "                                        there instead of up to 2047 ids earlier (~1 s).\n"
+               "                                        Cost: a near-tie first token may differ from an\n"
+               "                                        uncached run. On for agentic sessions; off for\n"
+               "                                        benchmarks and the golden gates.\n"
                "                 [--mtp off|1|2|3|auto]   speculative decoding with the MTP\n"
                "                             head: K guesses per step (off/0 = none, the default;\n"
                "                             auto = 0..3 per step from the request's own hit rate). Loads the\n"
@@ -156,7 +167,9 @@ int run(int argc, char** argv) {
   uint32_t device = l0::Context::kFromEnv;
   std::string pp_backend_arg;
   bool have_pp_backend = false;
-  uint32_t prefix_cache_gb = 32;
+  // Spec 7: system RAM, not VRAM; auto by default (cli/prefix_cache_size.h).
+  bool prefix_auto = true;
+  uint32_t prefix_cache_gb = 0;
   uint32_t mtp_k = 0;
   bool mtp_auto = false, have_mtp_tuning = false;   // spec 8 §10
   uint32_t mtp_max = 3;
@@ -196,7 +209,9 @@ int run(int argc, char** argv) {
     } else if (arg == "--log-requests") {
       options.log_requests_dir = value(i, "--log-requests");
     } else if (arg == "--prefix-cache-gb") {
-      prefix_cache_gb = parse_u32("--prefix-cache-gb", value(i, "--prefix-cache-gb"));
+      const std::string v = value(i, "--prefix-cache-gb");
+      prefix_auto = v == "auto";
+      if (!prefix_auto) prefix_cache_gb = parse_u32("--prefix-cache-gb", v);
     } else if (arg == "--prefix-split-last") {
       options.prefix_split_last = true;
     } else if (arg == "--mtp") {
@@ -324,17 +339,30 @@ int run(int argc, char** argv) {
   EngineAdapter engine_adapter(engine, tokenizer.vocab_used(), mtp_k);
   options.eos_ids = eos;
   std::unique_ptr<PinnedAlloc> prefix_alloc;
+  // Sized after the model is loaded, so "available" already excludes the process's own load.
+  const cli::HostMemory host = cli::host_memory();
+  std::string prefix_why = "explicit";
+  if (prefix_auto) {
+    const cli::PrefixCacheChoice c = cli::auto_prefix_cache(host);
+    prefix_cache_gb = c.gib;
+    prefix_why = c.why;
+  } else if (prefix_cache_gb > 0 && host.known && (uint64_t(prefix_cache_gb) << 30) > host.available) {
+    std::fprintf(stderr,
+                 "warning: --prefix-cache-gb %u pins more host RAM than is available (%.0f GiB);"
+                 " pinned pages cannot be swapped\n",
+                 prefix_cache_gb, double(host.available) / double(cli::kGiB));
+  }
   if (prefix_cache_gb > 0) {
     const auto t0 = std::chrono::steady_clock::now();
     prefix_alloc = std::make_unique<PinnedAlloc>(context, size_t(prefix_cache_gb) << 30);
     options.prefix_cache_bytes = prefix_alloc->mem.size();
     options.prefix_alloc = prefix_alloc.get();
-    std::fprintf(stderr, "prefix cache: %u GiB pinned host, allocated in %.0f ms\n",
-                 prefix_cache_gb,
+    std::fprintf(stderr, "prefix cache: %u GiB pinned system RAM (%s), allocated in %.0f ms\n",
+                 prefix_cache_gb, prefix_why.c_str(),
                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
                      .count());
   } else {
-    std::fprintf(stderr, "prefix cache: off\n");
+    std::fprintf(stderr, "prefix cache: off (%s)\n", prefix_why.c_str());
   }
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
 
