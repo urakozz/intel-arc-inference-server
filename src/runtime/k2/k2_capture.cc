@@ -51,9 +51,10 @@ class Walk {
     layer_ = -1;
     head();
     // Review Focus 5: the list's length is a property of the model.
-    require(step_.kernel_count == decode_launches(d_),
+    require(step_.kernel_count == decode_launches(d_, attn_),
             "the decode list has " + std::to_string(step_.kernel_count) + " launches, not the " +
-                std::to_string(decode_launches(d_)) + " runtime::k2::decode_launches gives");
+                std::to_string(decode_launches(d_, attn_)) + " runtime::k2::decode_launches gives (" +
+                k2_attn_name(attn_) + " attention)");
     require(step_.kernels.size() == step_.kernel_count, "a Kernel was created but never launched");
     require(step_.labels.size() == step_.kernel_count, "a launch went unlabelled");
     step_.list.close();
@@ -81,6 +82,12 @@ class Walk {
     require(ss.attn_part == size_t(d_.q_heads) * kk::kAttnTgt * kM * kk::kAttnPart * 4,
             "attn_part is not [q_heads][kAttnTgt][M][130]");
     require(d_.head_dim == kk::kAttnWg, "k2_attn.cl is written for head_dim 128");
+    // Spec 18 §10: eager attention's score row exists exactly when eager is bound, at
+    // max_len - binding eager over buffers built for flash would write through a null row.
+    require(bool(b_.attn_scores) == (attn_ == K2Attn::Eager) &&
+                (!b_.attn_scores || b_.attn_scores->size() >= attn_scores_bytes(d_, b_.max_len, attn_)),
+            std::string("the buffers were built for the other K2 attention than ") + k2_attn_name(attn_) +
+                " - set B70_K2_ATTN before the buffers are built");
     for (uint32_t l = 0; l < d_.layers; ++l) {
       const loader::K2Layer& L = m_.layers[l];
       require(L.linears.size() == d_.layer_linears(l).size() && L.norms,
@@ -90,7 +97,8 @@ class Walk {
                 "MoVA/MoE layer " + std::to_string(l) + " lacks its router or expert blocks");
     }
     // A missing binary is named here, before a command is appended (capture.cc's rule).
-    for (const std::string& v : kk::decode_variants(d_, m_.lm_head->kind == model::WeightKind::Int8))
+    for (const std::string& v : kk::decode_variants(d_, m_.lm_head->kind == model::WeightKind::Int8,
+                                                    attn_ == K2Attn::Eager))
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_K2=ON");
   }
@@ -223,8 +231,11 @@ class Walk {
       launch(k, d_.q_heads + d_.kv_heads, kM);
     }
     // k2_attn_decode(ctrl, attn_q, kv_k, kv_v, attn_part), grid (kv heads, TGT);
-    // k2_attn_reduce(ctrl, attn_part, attn_gate, attn_out), grid (q heads, M).
-    {
+    // k2_attn_reduce(ctrl, attn_part, attn_gate, attn_out), grid (q heads, M) - or, under
+    // B70_K2_ATTN=eager, k2_attn_eager.cl's four (attention_eager).
+    if (attn_ == K2Attn::Eager) {
+      attention_eager(kvk, kvv);
+    } else {
       const std::string v = kk::attn_variant(kM, kk::kAttnTgt, d_.q_heads, d_.kv_heads);
       {
         l0::Kernel& k = kernel(v, "k2_attn_decode", kk::kAttnWg);
@@ -292,6 +303,51 @@ class Walk {
     }
   }
 
+  // B70_K2_ATTN=eager (spec 18 §10): k2_attn_eager.cl's four kernels in flash's place, the
+  // same inputs (attn_q, the caches, attn_gate) and output (attn_out); the score row between.
+  //   k2_attn_eager_score  (ctrl, attn_q, kv_k, attn_s, stride)      grid (kv heads, TGT)
+  //   k2_attn_eager_softmax(ctrl, attn_s, stride)                    grid (q heads, M)
+  //   k2_attn_eager_pv     (ctrl, attn_s, kv_v, attn_part, stride)   grid (kv heads, TGT)
+  //   k2_attn_eager_reduce (ctrl, attn_part, attn_gate, attn_out)    grid (q heads, M)
+  void attention_eager(void* kvk, void* kvv) {
+    const std::string v = kk::attn_eager_variant(kM, kk::kAttnTgt, d_.q_heads, d_.kv_heads);
+    void* sc = b_.attn_scores->ptr();
+    const uint32_t stride = b_.max_len;   // attn_s's row: [M][q_heads][max_len]
+    {
+      l0::Kernel& k = kernel(v, "k2_attn_eager_score", kk::kAttnWg);
+      k.arg_ptr(0, b_.control.ptr());
+      k.arg_ptr(1, b_.attn_q.ptr());
+      k.arg_ptr(2, kvk);
+      k.arg_ptr(3, sc);
+      k.arg<uint32_t>(4, stride);
+      launch(k, d_.kv_heads, kk::kAttnTgt);
+    }
+    {
+      l0::Kernel& k = kernel(v, "k2_attn_eager_softmax", kk::kAttnWg);
+      k.arg_ptr(0, b_.control.ptr());
+      k.arg_ptr(1, sc);
+      k.arg<uint32_t>(2, stride);
+      launch(k, d_.q_heads, kM);
+    }
+    {
+      l0::Kernel& k = kernel(v, "k2_attn_eager_pv", kk::kAttnWg);
+      k.arg_ptr(0, b_.control.ptr());
+      k.arg_ptr(1, sc);
+      k.arg_ptr(2, kvv);
+      k.arg_ptr(3, b_.attn_part.ptr());
+      k.arg<uint32_t>(4, stride);
+      launch(k, d_.kv_heads, kk::kAttnTgt);
+    }
+    {
+      l0::Kernel& k = kernel(v, "k2_attn_eager_reduce", kk::kAttnWg);
+      k.arg_ptr(0, b_.control.ptr());
+      k.arg_ptr(1, b_.attn_part.ptr());
+      k.arg_ptr(2, b_.attn_gate.ptr());
+      k.arg_ptr(3, b_.attn_out.ptr());
+      launch(k, d_.q_heads, kM);
+    }
+  }
+
   void head() {
     const uint32_t last = d_.layers - 1;
     fold_norm(d_.is_dense(last) ? d_.down_s : 0, m_.final_norm->ptr());
@@ -333,6 +389,8 @@ class Walk {
   CapturedStep step_;
   int layer_ = -1;
   std::string pending_entry_, pending_variant_;
+  // Spec 18 §10: the decode attention, read from B70_K2_ATTN once per build.
+  const K2Attn attn_ = k2_attn();
 };
 
 }  // namespace

@@ -183,7 +183,8 @@ int main(int argc, char** argv) {
   runtime::k2::K2Engine eng(ctx, std::move(model), kMaxLen, /*debug_tap=*/true);
   CHECK_EQ(eng.step().kernel_count, runtime::k2::decode_launches(d));
   runtime::Control* ctl = eng.buffers().control.as<runtime::Control>();
-  std::printf("lm_head %s, %zu launches per token, near-tie tolerance %.1e, prompt by %s\n", int8 ? "int8" : "bf16",
+  std::printf("lm_head %s, %s attention (B70_K2_ATTN), %zu launches per token, near-tie tolerance "
+              "%.1e, prompt by %s\n", int8 ? "int8" : "bf16", runtime::k2::k2_attn_name(runtime::k2::k2_attn()),
               eng.step().kernel_count, double(tie_tol()), prefill ? "K2Engine::prefill" : "decode replays");
 
   bool gate_ok = true;

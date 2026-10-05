@@ -32,10 +32,11 @@
 //     gated: the multiples of 64 bitwise (plan 18c's bar), the others within the split test's
 //     bars (Qwen3.8's l0 numbers, PROVISIONAL for K2), each printed as bitwise or not.
 //
-// B70_K2_ATTN=eager runs the reference-rounding attention (k2_pf_attn.cl EAGER) in prefill;
-// the decode side follows the same variable once branch k2-attn-eager (the decode variant) is
-// merged - before that its decode attention is the flash one whatever the variable says, and
-// mode `all`'s comparison 4 / 5 / 6 is between unmatched variants (the run prints which).
+// B70_K2_ATTN=eager runs the reference-rounding attention in BOTH halves - prefill's
+// k2_pf_attn.cl EAGER and decode's k2_attn_eager.cl (spec 18 §10.1), one variable, one parser
+// (runtime::k2::k2_attn()) - so mode `all`'s comparison 4 / 5 / 6 is between matched variants
+// (the run prints both). Matched is not bitwise: the two eager forms share the rounding points,
+// not the softmax's exp / sum order (decode's is torch's own, prefill's its two-pass form).
 //
 // argv: <snapshot> <prompt ids> [all|split] [int8]. Exit 77 (SKIP) when the checkpoint is not
 // here. Any legal ids (< 250624) do for these gates: tests/golden/prompts/long*.ids.
@@ -357,8 +358,12 @@ int main(int argc, char** argv) {
                                           int8 ? loader::LmHeadForm::Int8 : loader::LmHeadForm::Checkpoint),
                           kMaxLen);
   l0::CmdList imm = l0::CmdList::immediate(ctx);
-  std::printf("k2_prefill_test %s: %zu ids, lm_head %s, prefill attention %s (B70_K2_ATTN)\n", mode.c_str(),
-              ids.size(), int8 ? "int8" : "bf16", runtime::k2::prefill_attn_eager() ? "eager" : "flash");
+  std::printf("k2_prefill_test %s: %zu ids, lm_head %s, prefill attention %s, decode attention %s "
+              "(B70_K2_ATTN; %zu decode launches)\n", mode.c_str(), ids.size(), int8 ? "int8" : "bf16",
+              runtime::k2::prefill_attn_eager() ? "eager" : "flash",
+              runtime::k2::k2_attn_name(runtime::k2::k2_attn()), e.step().kernel_count);
+  CHECK(runtime::k2::prefill_attn_eager() == (runtime::k2::k2_attn() == runtime::k2::K2Attn::Eager));
+  CHECK_EQ(e.step().kernel_count, runtime::k2::decode_launches(*e.model().desc));
   const int rc = mode == "split" ? run_split(e, imm, ids) : run_all(e, imm, Ids(ids.begin(), ids.begin() + std::min<size_t>(ids.size(), 2600)));
   std::printf("k2_prefill_test %s %s\n", mode.c_str(), rc == 0 ? "OK" : "FAILED");
   return rc;
