@@ -1,5 +1,11 @@
 # Spec 15c - Ornith decode: the MoE block, the shape variants, P0
 
+**Status (2026-10-05): Tasks 2 and 3 written blind on the Mac** (branch `spec15c-ornith-decode`;
+as built: spec 15 §10). Host tests pass; device code syntax-checked, `moe.cl` run indicatively
+on the Mac's OpenCL GPUs. **Pending the box:** Task 1 (P0), Task 4 (speed), and every card gate
+of Task 3 - `box-validation-queue.md` entry 10. R2 / R3 also wait for 15a (the int4 checkpoint
+and `oracle-out-ornith/` with router logits); the tests skip until both exist.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ornith decodes on the card: the loader repacks the experts, the router and the MoE block run in 3-4 launches per layer with expert ids consumed on the device, the GDN / attention / GEMV kernels run as Ornith-shape variants, P0 measures the floor and the arms of §9, and R2 / R3 (decode path) pass.

@@ -196,3 +196,75 @@ Idle box, device 0, interleaved pairs, median of 3. No bars before P0; the recor
 - **Not adopted:** 4-bit round-to-nearest on attention and GDN projections; an unscaled FP8 KV
   cache.
 
+
+## 10. Amendment - 2026-10-05: 15c as built blind (Mac; box pending)
+
+Branch `spec15c-ornith-decode` (plan 15c Tasks 2-3; Task 1 P0 and Task 4 speed are box work).
+Nothing here has run on the card. Validation: `box-validation-queue.md` entry 10.
+
+**Checkpoint naming (the assumption 15a confirms).** No int4 Ornith exists. The loader reads
+what an AutoRound W4A16 g64 sym export with GPTQ packing writes for this architecture:
+AutoRound quantises `nn.Linear` modules, so it unfuses transformers 5's 3D
+`mlp.experts.gate_up_proj [256, 1024, 2048]` / `down_proj [256, 2048, 512]` into one MLP per
+expert (`auto_round/modeling/fused_moe/qwen3_5_moe.py`: gate = rows [0, 512), up = rows
+[512, 1024) - **not interleaved**, which settles §1's open layout question for the export) and
+writes `layers.L.mlp.experts.E.{gate,up,down}_proj.{qweight,scales,qzeros}` - the per-expert
+names vLLM's `build_expert_params_mapping` loads. vLLM's per-expert fused form
+`experts.E.gate_up_proj` (gate the first half of the columns) is read too; one form per
+checkpoint. The router `mlp.gate.weight [256, 2048]` (a `Qwen3_5MoeTopKRouter` parameter, not
+an `nn.Linear`) and `mlp.shared_expert_gate.weight [1, 2048]` must be bf16; the shared expert's
+three linears are int4 under the table's GateUp / Down rows. Everything else is refused by name.
+A bf16 checkpoint has no `quantization_config` and is refused before this (decision 1's option
+B, RTN at load, is not built). `loader/moe_layout.h` carries the citations.
+
+**Device form (spec decision 3).** Per layer: `router` bf16 tiled [272][2048] (256 router rows,
+the shared gate's row at 256, zero rows to 272); `gate_up` 257 contiguous int4 layout-1 blocks
+of 2048 x 1024 (gate||up interleaved in 16-column blocks, as the dense gate||up), the shared
+expert as block 256; `down` 257 blocks of 512 x 2048. 430,604,288 B per layer, 17.224 GB per
+model (derived; `loader::moe_bytes`, which the loader asserts its allocations against). The
+table's GateUp / Down rows (the shared expert, 15b) are not bound by the decode list.
+
+**The formula, read from transformers 5.18.0** (`modeling_qwen3_5_moe.py`; 15a pins the oracle's
+version): `Qwen3_5MoeTopKRouter` takes softmax over the bf16 logits in fp32, `topk`, and
+renormalises **always** (the class has no `norm_topk_prob` switch), then rounds the weights to
+bf16. The default experts implementation is `grouped_mm` (`integrations/moe.py`): each expert
+term `proj_out * weight` is rounded to bf16 and the k terms are summed in fp32 in slot (topk)
+order, rounded once - the order moe.cl uses. The `eager` loop instead adds terms into a bf16
+accumulator in ascending expert-id order with a rounding per add; **15a must record which
+`experts_implementation` the oracle ran** (`grouped_mm` whenever torch can dispatch it). The
+shared expert: `rne(sigmoid(rne(gate . x))) x shared_out`, added to the routed sum in bf16,
+then the residual add. Top-k ties go to the lower expert id (rank = number of experts with a
+larger p, or an equal p and a lower id); torch's CPU `topk` order on exact ties is not
+specified, which R2's near-tie rule absorbs.
+
+**Launches: four per MoE block, 13 per layer, 526 per token** (Qwen3.8's 774): the post norm
+pair, then `gemv_bf16` over the 272 router || gate rows ({16, 16} tiling), `moe_route` (one
+work-group of 256, one expert per lane; max, a pairwise Σ tree, rank-based top-k in one barrier,
+renormalisation and the gate's sigmoid; writes ids, bf16 weights, the gate, the 8 p and the 9th
+p), `moe_gate_up` (9 slots x 16 work-groups of 4 n-tiles x 4 K slices, the expert id read once
+per work-group from the route row, SiLU x up fused; the shared expert is slot 8), `moe_down`
+(128 n-tiles, a work-group of 9 slots x 2 K slices; the weighted sum in fixed slot order, the
+shared expert by its gate, **the residual fold**). Because `moe_down` folds into `resid`
+itself, the next prep_res_fold folds nothing (`ModelDesc::ffn_fold_s()` = 0, its SP0 variant)
+and the per-layer tap is the layer's output (`golden_gate_test` builds its comparator
+accordingly). Not built: the 3-launch arm (every expert work-group recomputing the top-k from
+the logits instead of a route launch) - a P0 arm. The route row and the router logits are
+written per layer (0.47 MB of scratch with a slot for the MTP head's MoE layer), so R2 reads
+every layer's routing after a step with no debug list.
+
+**Shape variants.** gdn_step / prep_gated_head take `-DGDN_K_HEADS/-DGDN_V_HEADS`, attn_prep and
+attn_v2 `-DFA_Q_HEADS/-DFA_KV_HEADS`; unset, the defines are Qwen3.8's token for token (the
+preprocessed source of all 85 existing binaries of those files is identical, and
+`tools/kernel_cmdlines` shows additions only). Ornith's GEMV cells (q||k||v, qkv||z, out_proj =
+o_proj, the a||b / router / lm_head bf16 GEMVs, the int8 head) carry no tuning defines:
+PROVISIONAL until P0. Decode attention v1 is not built at Ornith's heads (capture refuses it).
+
+**What Ornith refuses.** Prefill (`model::require_prefill`, from `Engine::prepare_prefill`,
+`b70-decode --pp/--prefill`, `b70-serve` at startup): spec 15d. MTP (`--mtp`): the loader's
+head is dense-only and capture refuses the verify / draft lists on a MoE model: spec 15e.
+
+**Bytes (derived).** Weights with the int8 head 19.45 GB (MoE 17.22); read per token ~1.86 GB
+(router + 8 experts + the shared expert per layer = 16.15 MB x 40, the attention / GDN linears,
+the int8 head; `LoadReport::read_per_token` now counts only the active experts); the decode-only
+plan at the full 262144 context is 24.97 GB of 32.53 (`memory_plan_test`). The loader's W
+cross-check is skipped (doc_w 0) until a load on the card measures one.
