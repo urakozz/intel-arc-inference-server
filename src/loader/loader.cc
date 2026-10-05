@@ -43,9 +43,14 @@ using model::Qwen35;
 // 2.543, and that difference goes on the EXPECTED side of the cross-check as
 // an itemised term - never into a widened tolerance, which is the same rule
 // the padding and the fp32 widening follow.
-constexpr size_t kLmHeadBf16Bytes = size_t(5120) * 248320 * 2;                 // 2 542 796 800
-constexpr size_t kLmHeadInt4Bytes = size_t(5120) * 248320 / 2 +                // 635 699 200
-                                    size_t(5120) * 248320 / 32;               //  39 731 200
+// Spec 15b: per model, K = hidden (Qwen3.8 in the comments).
+size_t lm_head_bf16_bytes(const model::ModelDesc& d) {               // 2 542 796 800
+  return size_t(d.hidden) * Qwen35::kVocab * 2;
+}
+size_t lm_head_int4_bytes(const model::ModelDesc& d) {
+  return size_t(d.hidden) * Qwen35::kVocab / 2 +                     //   635 699 200
+         size_t(d.hidden) * Qwen35::kVocab / 32;                     //    39 731 200
+}
 
 // Bytes this loader adds over the checkpoint's own bf16 by widening a tensor to
 // fp32 at load. Itemised rather than hidden in a tolerance: the W cross-check
@@ -454,11 +459,12 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
 // it walks model::LayerDesc::small_tensors, which carries both (fix I3). The
 // two throws below are what fires if the table and the header disagree.
 SmallTensors load_small(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet& set,
-                        NameView& view, const model::LayerDesc& ld, LoadReport& rep,
-                        Widen& widen) {
+                        NameView& view, const model::ModelDesc& desc,
+                        const model::LayerDesc& ld, LoadReport& rep, Widen& widen) {
   const std::string lp = Qwen35::layer_prefix(ld.index);
-  const size_t kind_bytes = ld.kind == model::LayerKind::FA ? kFaBlockBytes : kGdnBlockBytes;
-  std::vector<uint8_t> norms(kNormsBlockBytes, 0), kind(kind_bytes, 0);
+  const SmallLayout sl = desc.small_layout();
+  const size_t kind_bytes = ld.kind == model::LayerKind::FA ? kFaBlockBytes : sl.gdn_block_bytes;
+  std::vector<uint8_t> norms(sl.norms_block_bytes, 0), kind(kind_bytes, 0);
   size_t filled_norms = 0, filled_kind = 0;
 
   for (const model::SmallTensor& t : ld.small_tensors) {
@@ -492,7 +498,10 @@ SmallTensors load_small(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet
 // fusions: q||k||v concatenated like the FA layers' Qkv, gate/up interleaved in
 // 16-column blocks like GateUp (prep_silu_mul's gflat/uflat).
 std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet& set,
-                                  NameView& view, LoadReport& rep, Widen& widen) {
+                                  NameView& view, const model::ModelDesc& desc, LoadReport& rep,
+                                  Widen& widen) {
+  if (desc.mtp_intermediate == 0)
+    throw std::runtime_error(desc.name + ": the MTP head is not a dense layer (spec 15e)");
   size_t n_mtp = 0;
   for (const auto& [name, info] : set.tensors()) {
     (void)info;
@@ -548,34 +557,36 @@ std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const Safe
                         model::GemvShape{K, N, 1, 0}, model::WeightKind::Bf16};
   };
   const std::string L = "mtp.layers.0.";
-  // The head's shapes are literal on purpose: they are the MTP block's own, the
-  // same 15 bf16 tensors on both supported checkpoints - its MLP is 17408 wide on
-  // Agnes too (no parallel FFN in the head; spec 14 §1), whatever the main
-  // model's folded intermediate is. Names are engine names (the view mapped
-  // Agnes's `global_attn.` already).
+  // The head's shapes are the descriptor's (spec 15b): its own MLP width
+  // `mtp_intermediate` is 17408 on Qwen3.8 AND on Agnes (no parallel FFN in the
+  // head; spec 14 §1), whatever the main model's folded intermediate is; the
+  // attention follows the main model's heads. Qwen3.8's numbers in the comments.
+  // Names are engine names (the view mapped Agnes's `global_attn.` already).
+  const uint32_t H = desc.hidden, I = desc.mtp_intermediate, KV = desc.fa_kv_n();
   auto h = std::make_unique<MtpHead>(MtpHead{
-      linear({"mtp.fc.weight"}, {5120}, 10240, false),
+      linear({"mtp.fc.weight"}, {H}, 2 * H, false),                         // 5120 x 10240
       linear({L + "self_attn.q_proj.weight", L + "self_attn.k_proj.weight",
               L + "self_attn.v_proj.weight"},
-             {12288, 1024, 1024}, 5120, false),
-      linear({L + "self_attn.o_proj.weight"}, {5120}, 6144, false),
-      linear({L + "mlp.gate_proj.weight", L + "mlp.up_proj.weight"}, {17408, 17408}, 5120, true),
-      linear({L + "mlp.down_proj.weight"}, {5120}, 17408, false),
-      l0::Mem(ctx, l0::MemKind::Device, kMtpNormsBytes),
+             {desc.fa_q_proj_n(), KV, KV}, H, false),                        // 12288, 1024, 1024
+      linear({L + "self_attn.o_proj.weight"}, {H}, desc.fa_value_dim(), false),   // K 6144
+      linear({L + "mlp.gate_proj.weight", L + "mlp.up_proj.weight"}, {I, I}, H, true),  // 17408
+      linear({L + "mlp.down_proj.weight"}, {H}, I, false),
+      l0::Mem(ctx, l0::MemKind::Device, mtp_norms_bytes(desc)),
       l0::Mem(ctx, l0::MemKind::Device, kFaBlockBytes)});
   // The RMSNorms, baked like every other (1 + w) fp32 norm.
-  std::vector<uint8_t> norms(kMtpNormsBytes), fa(kFaBlockBytes);
-  const std::pair<const char*, size_t> nrm[] = {
+  std::vector<uint8_t> norms(mtp_norms_bytes(desc)), fa(kFaBlockBytes);
+  const std::pair<const char*, MtpNorm> nrm[] = {
       {"mtp.pre_fc_norm_embedding.weight", kMtpNormPreE},
       {"mtp.pre_fc_norm_hidden.weight", kMtpNormPreH},
       {"mtp.layers.0.input_layernorm.weight", kMtpNormInput},
       {"mtp.layers.0.post_attention_layernorm.weight", kMtpNormPost},
       {"mtp.norm.weight", kMtpNormFinal}};
-  for (const auto& [name, off] : nrm) {
-    const model::SmallTensor d{name, model::Qwen35::kHidden, "BF16", model::SmallBlock::Norms,
+  for (const auto& [name, row] : nrm) {
+    const size_t off = mtp_norm_off(desc, row);
+    const model::SmallTensor d{name, H, "BF16", model::SmallBlock::Norms,
                                uint32_t(off), model::SmallBake::OnePlusWFp32};
-    bake_small(d, reinterpret_cast<const uint8_t*>(tensor(name, model::Qwen35::kHidden, 0)),
-               norms.data() + off, widen);
+    bake_small(d, reinterpret_cast<const uint8_t*>(tensor(name, H, 0)), norms.data() + off,
+               widen);
   }
   for (const auto& [name, off] :
        {std::pair<std::string, size_t>{L + "self_attn.q_norm.weight", kFaOffQNorm},
@@ -588,11 +599,11 @@ std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const Safe
   imm.copy(h->norms.ptr(), norms.data(), norms.size());
   imm.copy(h->fa.ptr(), fa.data(), fa.size());
   rep.mtp_bytes += norms.size() + fa.size();
-  if (rep.mtp_tensors != kMtpTensors || rep.mtp_checkpoint_bytes != kMtpCheckpointBytes)
+  if (rep.mtp_tensors != kMtpTensors || rep.mtp_checkpoint_bytes != desc.mtp_checkpoint_bytes())
     throw std::runtime_error("the MTP head consumed " + std::to_string(rep.mtp_tensors) +
                              " tensors / " + std::to_string(rep.mtp_checkpoint_bytes) +
                              " B, expected " + std::to_string(kMtpTensors) + " / " +
-                             std::to_string(kMtpCheckpointBytes));
+                             std::to_string(desc.mtp_checkpoint_bytes()));
   return h;
 }
 
@@ -638,6 +649,9 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   if (!archs || !archs->is_array() || archs->arr().empty() || !archs->arr()[0].is_string())
     throw std::runtime_error(snap + "config.json has no architectures[0] string");
   const model::ModelDesc& desc = model::desc_for_architecture(archs->arr()[0].str());
+  // Spec 15b: a described model the engine cannot run yet (Ornith: "MoE not
+  // implemented (spec 15c)") stops here, before a byte is read.
+  model::require_loadable(desc);
   if (desc.max_len_ceiling != 0 && max_len > desc.max_len_ceiling)
     throw std::runtime_error(
         desc.name + ": max_len " + std::to_string(max_len) + " exceeds this model's ceiling " +
@@ -689,17 +703,17 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // that the referent lives in the set's map, not in the temporary name.
   const TensorInfo emb = take(view, set, "embed_tokens.weight");
   if (emb.dtype != "BF16" || emb.shape.size() != 2 || emb.shape[0] != Qwen35::kVocab ||
-      emb.shape[1] != Qwen35::kHidden)
+      emb.shape[1] != desc.hidden)
     throw std::runtime_error("embed_tokens.weight: expected BF16 [" +
                              std::to_string(Qwen35::kVocab) + "][" +
-                             std::to_string(Qwen35::kHidden) + "], got " + emb.dtype);
+                             std::to_string(desc.hidden) + "], got " + emb.dtype);
   // The model's final pre-lm_head RMSNorm - the one norm that belongs to no
   // layer, so it is not in any LayerDesc's table; described here in the same
   // terms and baked by the same code, into its own allocation at offset 0.
-  const model::SmallTensor fnorm_desc{"norm.weight",        Qwen35::kHidden,
+  const model::SmallTensor fnorm_desc{"norm.weight",        desc.hidden,
                                       "BF16",               model::SmallBlock::Norms,
                                       0,                    model::SmallBake::OnePlusWFp32};
-  std::vector<uint8_t> fnorm(kFinalNormBytes);
+  std::vector<uint8_t> fnorm(desc.small_layout().final_norm_bytes);
   bake_small(fnorm_desc, small_src(view, set, fnorm_desc.name, fnorm_desc), fnorm.data(), widen);
   const std::vector<float> rope = rope_table(max_len);
 
@@ -750,14 +764,14 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
     for (const model::FusedLinear& fl : ld.linears)
       m.linears.emplace(std::make_pair(ld.index, fl.id),
                         load_linear(ctx, imm, set, view, desc, lp, fl, st, m.report));
-    m.layer_small.push_back(load_small(ctx, imm, set, view, ld, m.report, widen));
+    m.layer_small.push_back(load_small(ctx, imm, set, view, desc, ld, m.report, widen));
   }
   m.linears.emplace(std::make_pair(kTopLevel, model::LinearId::LmHead),
                     load_linear(ctx, imm, set, view, desc, "", lm_row, st, m.report));
   // The MTP head's widening goes into its own Widen: the W cross-check is over
   // the main model's read-per-token bytes, which the head is not part of.
   Widen mtp_widen;
-  if (mtp) m.mtp = load_mtp(ctx, imm, set, view, m.report, mtp_widen);
+  if (mtp) m.mtp = load_mtp(ctx, imm, set, view, desc, m.report, mtp_widen);
 
   // Up to five names, so a checkpoint that grew a family of tensors says which
   // family rather than making the reader re-run with a debugger.
@@ -813,9 +827,9 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // expected side, exactly like the padding and the fp32 widening - the check
   // stays at 2%, and the two sides move together or the load fails.
   const double lm_adjust =
-      lm_int4   ? double(kLmHeadInt4Bytes) - double(kLmHeadBf16Bytes)
+      lm_int4   ? double(lm_head_int4_bytes(desc)) - double(lm_head_bf16_bytes(desc))
       : lm_int8 ? double(lm_head_int8_bytes(lm_row.shape.K, lm_row.shape.N)) -
-                      double(kLmHeadBf16Bytes)
+                      double(lm_head_bf16_bytes(desc))
                 : 0.0;
   const double expected = desc.doc_w + double(r.pad_bytes) + double(widen.total()) + lm_adjust;
   const double delta = (double(per_token) - expected) / expected;

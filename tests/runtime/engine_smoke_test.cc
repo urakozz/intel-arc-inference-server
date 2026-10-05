@@ -56,6 +56,7 @@ constexpr uint32_t kMaxLen = 16384;
 // The tap as Engine::read_debug_resid() hands it back: bf16 [64][M=1][5120].
 // Spec 14: the layer count is the loaded model's (set before the debug engine is built).
 uint32_t kLayers = 0;
+uint32_t kHidden = 0;   // the loaded descriptor's (spec 15b), set beside kLayers
 size_t kTapElems = 0;
 
 std::vector<uint32_t> prompt() {
@@ -151,7 +152,8 @@ int main(int argc, char** argv) {
   {
     loader::LoadedModel m = loader::load(ctx, arg, kMaxLen);
     kLayers = m.desc->layers;
-    kTapElems = size_t(kLayers) * Qwen35::kHidden;
+    kHidden = m.desc->hidden;
+    kTapElems = size_t(kLayers) * kHidden;
     runtime::Engine eng(ctx, std::move(m), kMaxLen, /*debug_resid=*/true);
     CHECK(eng.debug_resid());
     eng.ingest(prompt());
@@ -171,8 +173,8 @@ int main(int argc, char** argv) {
     // zero would be a tap bound to the wrong slice, not a residual.
     for (uint32_t l = 0; l < kLayers; ++l) {
       bool nonzero = false;
-      for (uint32_t k = 0; k < Qwen35::kHidden; ++k) {
-        const uint16_t w = tap0[size_t(l) * Qwen35::kHidden + k];
+      for (uint32_t k = 0; k < kHidden; ++k) {
+        const uint16_t w = tap0[size_t(l) * kHidden + k];
         if (!bf16_finite(w)) {
           std::fprintf(stderr, "non-finite resid: layer %u element %u = 0x%04X\n", l, k, w);
           CHECK(false);

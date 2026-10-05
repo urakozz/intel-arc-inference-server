@@ -109,16 +109,12 @@ constexpr uint32_t kArgmaxChunk = 1024;
 constexpr uint32_t kGdnStateChunks = Qwen35::kGdnHeadDim / 32;
 
 // --- per-layer slices of the persistent state -------------------------------
-// The strides that runtime/buffers.cc sized these allocations with. They are
-// re-derived here from the same model constants rather than shared, and
-// `check_sizes()` below asserts stride x layers == allocation size - so a
-// divergence is a throw at capture, not a wrong KV slot at token 300. The layer
-// COUNTS are the model descriptor's (spec 14: 48 / 16 on Qwen3.8, 54 / 18 on Agnes).
-constexpr uint32_t kConvDim =
-    (2 * Qwen35::kGdnKHeads + Qwen35::kGdnVHeads) * Qwen35::kGdnHeadDim;  // 10240
-constexpr size_t kGdnStateStride =
-    size_t(Qwen35::kGdnVHeads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * kFp32;
-constexpr size_t kConvRingStride = size_t(DecodeBuffers::kConvRing) * kConvDim * kBf16;
+// The strides that runtime/buffers.cc sized these allocations with are
+// re-derived per walk (Capture::gdn_state_stride / conv_ring_stride, kv_stride_)
+// from the same descriptor rather than shared, and `check_sizes()` below asserts
+// stride x layers == allocation size - so a divergence is a throw at capture,
+// not a wrong KV slot at token 300. The layer COUNTS are the model descriptor's
+// (spec 14: 48 / 16 on Qwen3.8, 54 / 18 on Agnes); so are the widths (spec 15b).
 
 uint8_t* at(const l0::Mem& m, size_t byte_off) {
   return static_cast<uint8_t*>(m.ptr()) + byte_off;
@@ -144,7 +140,7 @@ class Capture {
         draft_i_(draft_i), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
 
   CapturedStep run() {
-    kv_stride_ = size_t(b_.max_len) * Qwen35::kFaKvHeads * Qwen35::kFaHeadDim * kBf16;
+    kv_stride_ = size_t(b_.max_len) * d_.fa_kv_heads * Qwen35::kFaHeadDim * kBf16;
     check_sizes();
     if (mode_ != Mode::Plain) check_mtp();
     if (mode_ == Mode::Draft) {
@@ -189,7 +185,7 @@ class Capture {
       // The verify rows' post-final-norm hidden (`x`, what lm_head read) into hh rows
       // 1..M; row 0 is h_{pos-1}, left by the previous commit or prefill. Then the
       // head's KV fill over hh rows 0..M-1 (MtpBuffers).
-      const size_t row = size_t(Qwen35::kHidden) * kBf16;
+      const size_t row = size_t(d_.hidden) * kBf16;
       step_.list.copy(at(mtp_->hh, row), b_.x.ptr(), row * kCapM);
       layer_ = head_layer();
       head_kv_fill(mtp_->hh.ptr());
@@ -242,15 +238,15 @@ class Capture {
                   "); the compiled max_lens are listed in src/kernels/CMakeLists.txt");
 
     const std::string gdn_n = std::to_string(d_.gdn_layers), fa_n = std::to_string(d_.fa_layers);
-    require(b_.gdn_state.size() == kGdnStateStride * d_.gdn_layers,
+    require(b_.gdn_state.size() == gdn_state_stride() * d_.gdn_layers,
             "gdn_state is not " + gdn_n + " slices");
-    require(b_.conv_ring.size() == kConvRingStride * d_.gdn_layers,
+    require(b_.conv_ring.size() == conv_ring_stride() * d_.gdn_layers,
             "conv_ring is not " + gdn_n + " slices");
     require(b_.kv_k.size() == kv_stride_ * d_.fa_layers, "kv_k is not " + fa_n + " slices");
     require(b_.kv_v.size() == kv_stride_ * d_.fa_layers, "kv_v is not " + fa_n + " slices");
     if (tap_)
-      require(tap_->size() >= size_t(d_.layers) * kCapM * Qwen35::kHidden * kBf16,
-              "debug_resid is smaller than [layers][M][5120] bf16");
+      require(tap_->size() >= size_t(d_.layers) * kCapM * d_.hidden * kBf16,
+              "debug_resid is smaller than [layers][M][hidden] bf16");
     // The profiling precondition that IS knowable before the walk. The other
     // one - that the walk fits the pool - is not: `kernel_count` is 0 here and
     // only the walk itself produces it, so that bound is checked per launch in
@@ -294,11 +290,11 @@ class Capture {
     require(kCapM <= MtpBuffers::kSlots, "an MTP verify list has at most kSlots rows");
     require(mode_ != Mode::Draft || (kCapM == 1 && draft_i_ < MtpBuffers::kMaxK),
             "a draft list is M = 1 with draft index < kMaxK");
-    require(mtp_->gdn_spec.size() == kGdnStateStride * d_.gdn_layers * (MtpBuffers::kSlots - 1),
+    require(mtp_->gdn_spec.size() == gdn_state_stride() * d_.gdn_layers * (MtpBuffers::kSlots - 1),
             "gdn_spec is not (kSlots - 1) x " + std::to_string(d_.gdn_layers) + " slices");
     require(mtp_->kv_k.size() == kv_stride_ && mtp_->kv_v.size() == kv_stride_,
-            "the head's KV is not one [max_len][4][256] layer");
-    require(mtp_->hh.size() >= size_t(kCapM + 1) * Qwen35::kHidden * kBf16, "hh is too small");
+            "the head's KV is not one [max_len][kv-heads][256] layer");
+    require(mtp_->hh.size() >= size_t(kCapM + 1) * d_.hidden * kBf16, "hh is too small");
   }
 
   // One launch site: load (or reuse) the variant's device binary, make a fresh
@@ -322,7 +318,7 @@ class Capture {
         k.arg_ptr(2, kk);
         k.arg_ptr(3, vv);
         k.arg_ptr(4, b_.attn_part.ptr());
-        launch(k, Qwen35::kFaKvHeads, DecodeBuffers::kAttnV2Blocks);
+        launch(k, d_.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
       }
       // attn_reduce_v2(ctrl, attn_part, attn_gate, attn_out), grid (24 q-heads, M).
       {
@@ -331,7 +327,7 @@ class Capture {
         k.arg_ptr(1, b_.attn_part.ptr());
         k.arg_ptr(2, b_.attn_gate.ptr());
         k.arg_ptr(3, b_.attn_out.ptr());
-        launch(k, Qwen35::kFaQHeads, kCapM);
+        launch(k, d_.fa_q_heads, kCapM);
       }
       return;
     }
@@ -349,7 +345,7 @@ class Capture {
       k.arg_ptr(2, kk);
       k.arg_ptr(3, vv);
       k.arg_ptr(4, b_.attn_part.ptr());
-      launch(k, Qwen35::kFaKvHeads, b_.max_len / DecodeBuffers::kAttnBlock);
+      launch(k, d_.fa_kv_heads, b_.max_len / DecodeBuffers::kAttnBlock);
     }
     // attn_reduce(ctrl, attn_part, attn_gate, attn_out) - attn.cl (Task 5),
     // grid (24 q-heads, M), WG 256.
@@ -361,7 +357,7 @@ class Capture {
       k.arg_ptr(1, b_.attn_part.ptr());
       k.arg_ptr(2, b_.attn_gate.ptr());
       k.arg_ptr(3, b_.attn_out.ptr());
-      launch(k, Qwen35::kFaQHeads, kCapM);
+      launch(k, d_.fa_q_heads, kCapM);
     }
   }
 
@@ -422,7 +418,7 @@ class Capture {
   // append on either list flavour - so it costs a command, not a kernel.
   void tap(uint32_t layer) {
     if (!tap_) return;
-    const size_t bytes = size_t(kCapM) * Qwen35::kHidden * kBf16;
+    const size_t bytes = size_t(kCapM) * d_.hidden * kBf16;
     step_.list.copy(at(*tap_, size_t(layer) * bytes), b_.resid.ptr(), bytes);
   }
 
@@ -479,7 +475,7 @@ class Capture {
     const uint32_t g = DecodeBuffers::kNormGroups;
     {
       l0::Kernel& k =
-          kernel(kernels::prep_res_fold_variant(kCapM, Qwen35::kHidden, s_prev, g),
+          kernel(kernels::prep_res_fold_variant(kCapM, d_.hidden, s_prev, g),
                  "prep_res_fold", kWgResFold);
       k.arg_ptr(0, b_.partials.ptr());
       k.arg_ptr(1, b_.resid.ptr());
@@ -488,7 +484,7 @@ class Capture {
     }
     {
       l0::Kernel& k =
-          kernel(kernels::prep_norm_finish_variant(kCapM, Qwen35::kHidden, g, g),
+          kernel(kernels::prep_norm_finish_variant(kCapM, d_.hidden, g, g),
                  "prep_norm_finish", kWgNormFinish);
       k.arg_ptr(0, b_.norm_sumsq.ptr());
       k.arg_ptr(1, b_.resid.ptr());
@@ -594,7 +590,7 @@ class Capture {
   // partials, gate‖up, SiLU·mul, down. `mixer_s` is the split-K width of the
   // GEMV that produced those partials (out_proj / o_proj, both S = 4).
   void mlp(uint32_t layer, uint32_t mixer_s) {
-    res_norm(mixer_s, at(m_.layer_small[layer].norms, loader::kNormsOffPost));
+    res_norm(mixer_s, at(m_.layer_small[layer].norms, sl_.norms_off_post));
     gemv(layer, LinearId::GateUp, b_.x.ptr());
     // prep_silu_mul(partials, x_out) - prep.cl (Task 2), grid (I/4096, M) = (5, M)
     // at both I = 17408 (ragged last chunk 1024) and Agnes's 19456 (3072), WG 256.
@@ -614,7 +610,7 @@ class Capture {
     // and `resid` is exactly embed_gather's output: the SP0 variant. Every
     // other layer folds the previous layer's `down` (S = 4).
     res_norm(layer == 0 ? 0u : d_.shape(LinearId::Down).S,
-             at(m_.layer_small[layer].norms, loader::kNormsOffInput));
+             at(m_.layer_small[layer].norms, sl_.norms_off_input));
     gemv(layer, LinearId::QkvZ, b_.x.ptr());
     gemv_bf16(layer, LinearId::AB, b_.x.ptr(), b_.ab_out);
     // gdn_step(ctrl, qkvz_partials, ab_out, gdn_small, conv_ring, state, gdn_o)
@@ -635,11 +631,11 @@ class Capture {
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, b_.ab_out.ptr());
       k.arg_ptr(3, m_.layer_small[layer].gdn.ptr());
-      k.arg_ptr(4, at(b_.conv_ring, size_t(g) * kConvRingStride));
-      k.arg_ptr(5, at(b_.gdn_state, size_t(g) * kGdnStateStride));
+      k.arg_ptr(4, at(b_.conv_ring, size_t(g) * conv_ring_stride()));
+      k.arg_ptr(5, at(b_.gdn_state, size_t(g) * gdn_state_stride()));
       k.arg_ptr(6, b_.gdn_o.ptr());
-      if (slots) k.arg_ptr(7, at(mtp_->gdn_spec, size_t(g) * kGdnStateStride));
-      launch(k, Qwen35::kGdnVHeads, kGdnStateChunks);
+      if (slots) k.arg_ptr(7, at(mtp_->gdn_spec, size_t(g) * gdn_state_stride()));
+      launch(k, d_.gdn_v_heads, kGdnStateChunks);
     }
     // prep_gated_head(qkvz_partials, gdn_o, gated_w, x_out) - prep.cl (Task 2),
     // grid (48 v-heads, M), WG 128. `gated_w` is the GDN block's RMSNormGated
@@ -649,9 +645,9 @@ class Capture {
       l0::Kernel& k = kernel(kernels::prep_gated_head_variant(kCapM), "prep_gated_head", kWgGated);
       k.arg_ptr(0, b_.partials.ptr());
       k.arg_ptr(1, b_.gdn_o.ptr());
-      k.arg_ptr(2, at(m_.layer_small[layer].gdn, loader::kGdnOffGatedNorm));
+      k.arg_ptr(2, at(m_.layer_small[layer].gdn, sl_.gdn_off_gated_norm));
       k.arg_ptr(3, b_.x.ptr());
-      launch(k, Qwen35::kGdnVHeads, kCapM);
+      launch(k, d_.gdn_v_heads, kCapM);
     }
     gemv(layer, LinearId::OutProj, b_.x.ptr());
     mlp(layer, d_.shape(LinearId::OutProj).S);
@@ -660,7 +656,7 @@ class Capture {
   // A full-attention layer (16 of 64 on Qwen3.8, 18 of 72 on Agnes): 10 kernels.
   void fa_layer(uint32_t layer, uint32_t f) {
     res_norm(d_.shape(LinearId::Down).S,
-             at(m_.layer_small[layer].norms, loader::kNormsOffInput));
+             at(m_.layer_small[layer].norms, sl_.norms_off_input));
     gemv(layer, LinearId::Qkv, b_.x.ptr());
     // This FA layer's KV cache slices - bf16 [max_len][4][256] each, indexed by
     // absolute position inside the kernels.
@@ -680,7 +676,7 @@ class Capture {
       k.arg_ptr(5, b_.attn_gate.ptr());
       k.arg_ptr(6, kk);
       k.arg_ptr(7, vv);
-      launch(k, Qwen35::kFaQHeads + Qwen35::kFaKvHeads, kCapM);
+      launch(k, d_.fa_q_heads + d_.fa_kv_heads, kCapM);
     }
     // attn_decode(ctrl, attn_q, kv_k, kv_v, attn_part) - attn.cl (Task 5), grid
     // (4 kv-heads, max_len/kAttnBlock blocks), WG 256. The grid spans the whole
@@ -833,7 +829,7 @@ class Capture {
   // queries in attn_q / attn_gate and the head's residual in `resid`.
   void head_front(const void* hidden) {
     const loader::MtpHead& h = *m_.mtp;
-    const uint32_t G = DecodeBuffers::kNormGroups, H = Qwen35::kHidden, X = 2 * H;
+    const uint32_t G = DecodeBuffers::kNormGroups, H = d_.hidden, X = 2 * H;
     {
       l0::Kernel& k = kernel(kernels::embed_gather_variant(kCapM), "embed_gather", kWgEmbed);
       k.arg_ptr(0, mtp_->hctl.ptr());
@@ -843,14 +839,14 @@ class Capture {
     }
     const std::string fold0 = kernels::prep_res_fold_variant(kCapM, H, 0, G);
     const std::string cat = kernels::prep_norm_finish_strided_variant(kCapM, H, G, G, X);
-    fold_norm(fold0, cat, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::kMtpNormPreE),
+    fold_norm(fold0, cat, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormPreE)),
               b_.x.ptr());
     fold_norm(fold0, cat, b_.partials.ptr(), const_cast<void*>(hidden),
-              at(h.norms, loader::kMtpNormPreH), at(b_.x, size_t(H) * kBf16));
+              at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormPreH)), at(b_.x, size_t(H) * kBf16));
     head_gemv(h.fc, b_.x.ptr(), b_.partials.ptr());
     fold_norm(kernels::prep_res_fold_zero_variant(kCapM, H, G),
               kernels::prep_norm_finish_variant(kCapM, H, G, G), b_.partials.ptr(),
-              b_.resid.ptr(), at(h.norms, loader::kMtpNormInput), b_.x.ptr());
+              b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormInput)), b_.x.ptr());
     head_gemv(h.qkv, b_.x.ptr(), b_.partials.ptr());
     {
       l0::Kernel& k = kernel(kernels::attn_prep_s1_variant(kCapM), "attn_prep", kWgAttn);
@@ -862,7 +858,7 @@ class Capture {
       k.arg_ptr(5, b_.attn_gate.ptr());
       k.arg_ptr(6, mtp_->kv_k.ptr());
       k.arg_ptr(7, mtp_->kv_v.ptr());
-      launch(k, Qwen35::kFaQHeads + Qwen35::kFaKvHeads, kCapM);
+      launch(k, d_.fa_q_heads + d_.fa_kv_heads, kCapM);
     }
   }
 
@@ -876,13 +872,13 @@ class Capture {
   // MtpBuffers::logits row draft_i_, the argmax into hctl. 23 launches and one copy.
   void draft() {
     const loader::MtpHead& h = *m_.mtp;
-    const uint32_t G = DecodeBuffers::kNormGroups, H = Qwen35::kHidden;
+    const uint32_t G = DecodeBuffers::kNormGroups, H = d_.hidden;
     head_front(mtp_->dh.ptr());
     attn_pair(mtp_->hctl.ptr(), mtp_->kv_k.ptr(), mtp_->kv_v.ptr());
     head_gemv(h.o, b_.attn_out.ptr(), b_.partials.ptr());
     const std::string fold1 = kernels::prep_res_fold_variant(kCapM, H, 1, G);
     const std::string fin = kernels::prep_norm_finish_variant(kCapM, H, G, G);
-    fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::kMtpNormPost),
+    fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormPost)),
               b_.x.ptr());
     head_gemv(h.gate_up, b_.x.ptr(), b_.partials.ptr());
     {
@@ -896,7 +892,7 @@ class Capture {
       launch(k, (head_i + kSiluChunk - 1) / kSiluChunk, kCapM);
     }
     head_gemv(h.down, b_.x.ptr(), b_.partials.ptr());
-    fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::kMtpNormFinal),
+    fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormFinal)),
               b_.x.ptr());
     step_.list.copy(mtp_->dh.ptr(), b_.x.ptr(), size_t(H) * kBf16);
     float* logits = mtp_->logits.as<float>() + size_t(draft_i_) * Qwen35::kVocab;
@@ -938,11 +934,20 @@ class Capture {
   // Spec 8: the MTP head's launches are labelled "L<layers>" - the layer after the
   // last ("L64" on Qwen3.8, "L72" on Agnes).
   int head_layer() const { return static_cast<int>(d_.layers); }
+  // One GDN layer's recurrent state, fp32 [v-heads][128][128] (Qwen3.8: 48 heads,
+  // 3,145,728 B), and its conv ring, bf16 [kConvRing][conv dim] (Qwen3.8 10240).
+  size_t gdn_state_stride() const {
+    return size_t(d_.gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * kFp32;
+  }
+  size_t conv_ring_stride() const {
+    return size_t(DecodeBuffers::kConvRing) * d_.gdn_conv_dim() * kBf16;
+  }
 
   l0::Context& ctx_;
   const loader::LoadedModel& m_;
   // Spec 14: the model this list is for (layer counts, intermediate, GEMV rows).
   const model::ModelDesc& d_ = *m_.desc;
+  const loader::SmallLayout sl_ = d_.small_layout();   // the small blocks' offsets (spec 15b)
   DecodeBuffers& b_;
   l0::Mem* tap_;
   ProfileEvents* prof_;

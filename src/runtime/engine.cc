@@ -24,8 +24,9 @@ double ms_since(Clock::time_point t0) {
 // is the M the kernel *variants* were compiled for, not DecodeBuffers::kM,
 // which is the allocation capacity.)
 constexpr uint32_t kCapM = 1;
-// The tap is bf16 [layers][kCapM][5120] - the descriptor's layer count (spec 14).
-size_t tap_elems(const model::ModelDesc& d) { return size_t(d.layers) * kCapM * Qwen35::kHidden; }
+// The tap is bf16 [layers][kCapM][hidden] - the descriptor's layer count (spec 14)
+// and hidden size (spec 15b; 5120 on Qwen3.8).
+size_t tap_elems(const model::ModelDesc& d) { return size_t(d.layers) * kCapM * d.hidden; }
 
 // Checked in the member-initialiser list so it throws before DecodeBuffers
 // allocates ~1.2 GB. runtime::build() checks the same identity, but only after
@@ -131,7 +132,8 @@ std::vector<uint32_t> Engine::generate(uint32_t n,
 // --- spec 8: MTP -------------------------------------------------------------------
 
 namespace {
-constexpr size_t kHidBytes = size_t(Qwen35::kHidden) * 2;   // one bf16 hidden row
+// One bf16 hidden row: the descriptor's hidden x 2 (spec 15b; 10240 B on Qwen3.8).
+size_t hid_bytes(const model::ModelDesc& d) { return size_t(d.hidden) * 2; }
 }  // namespace
 
 void Engine::require_mtp(const char* what) const {
@@ -173,7 +175,7 @@ void Engine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick) {
                              "] at pos " + std::to_string(pos));
   // The chain's first hidden is h_{pos-1} (hh row 0); each draft list writes its own
   // output hidden back into dh. Draft i runs at position pos - 1 + i (P0 §1).
-  imm_.copy(mtp_->dh.ptr(), mtp_->hh.ptr(), kHidBytes);
+  imm_.copy(mtp_->dh.ptr(), mtp_->hh.ptr(), hid_bytes(*model_.desc));
   hctl_->pos = pos - 1;
   hctl_->n_active = 1;
   hctl_->cur_token[0] = control_->cur_token[0];
@@ -232,7 +234,7 @@ void Engine::commit(uint32_t j, uint32_t next_token) {
   // Row j's GDN state is slot (live + j) % kSlots (gdn_step.cl SPEC_SLOTS): make it
   // live. Row j's hidden (hh row 1 + j) is the next iteration's h_{pos-1}.
   control_->gdn_live = (control_->gdn_live + j) % MtpBuffers::kSlots;
-  imm_.copy(mtp_->hh.ptr(), mtp_->hh.as<uint8_t>() + (1 + size_t(j)) * kHidBytes, kHidBytes);
+  imm_.copy(mtp_->hh.ptr(), mtp_->hh.as<uint8_t>() + (1 + size_t(j)) * hid_bytes(*model_.desc), hid_bytes(*model_.desc));
   control_->pos = verify_pos_ + j + 1;
   control_->n_active = 1;
   control_->cur_token[0] = next_token;
@@ -245,7 +247,7 @@ void Engine::mtp_step1() {
     // reset() and load_state() both leave it so), then its hidden into hh row 0.
     if (control_->gdn_live != 0) mtp_normalise_live();
     replay();
-    imm_.copy(mtp_->hh.ptr(), buffers_.x.ptr(), kHidBytes);
+    imm_.copy(mtp_->hh.ptr(), buffers_.x.ptr(), hid_bytes(*model_.desc));
     return;
   }
   verify(0);
@@ -273,7 +275,7 @@ void check_range(uint32_t begin, uint32_t end, uint32_t max_len, const char* wha
 }  // namespace
 
 size_t Engine::state_bytes() const {
-  return persist_.gdn_state.size() + persist_.conv_ring.size() + (mtp_ ? kHidBytes : 0);
+  return persist_.gdn_state.size() + persist_.conv_ring.size() + (mtp_ ? hid_bytes(*model_.desc) : 0);
 }
 
 size_t Engine::kv_bytes(uint32_t n_pos) const {
@@ -293,7 +295,7 @@ void Engine::save_state(void* host) const {
   imm_.copy(h + persist_.gdn_state.size(), persist_.conv_ring.ptr(), persist_.conv_ring.size());
   if (mtp_)
     imm_.copy(h + persist_.gdn_state.size() + persist_.conv_ring.size(), mtp_->hh.ptr(),
-              kHidBytes);
+              hid_bytes(*model_.desc));
 }
 
 void Engine::load_state(const void* host, uint32_t pos) {
@@ -305,7 +307,7 @@ void Engine::load_state(const void* host, uint32_t pos) {
   imm_.copy(persist_.conv_ring.ptr(), h + persist_.gdn_state.size(), persist_.conv_ring.size());
   if (mtp_) {
     imm_.copy(mtp_->hh.ptr(), h + persist_.gdn_state.size() + persist_.conv_ring.size(),
-              kHidBytes);
+              hid_bytes(*model_.desc));
     control_->gdn_live = 0;   // the state went into slot 0
     verify_k_ = kNoVerify;
   }

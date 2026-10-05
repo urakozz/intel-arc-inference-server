@@ -186,25 +186,26 @@ int main(int argc, char** argv) {
   // --- the norms block, fp32 (1 + w) at both halves --------------------------
   // Ruling 2026-08-25: fp32 add, STORED fp32 - no cast back to bf16, so the
   // multiplier carries no rounding the HF reference does not have.
-  std::vector<uint8_t> norms(loader::kNormsBlockBytes);
+  const loader::SmallLayout SL = m.desc->small_layout();   // Qwen3.8: loader::kQwen38Small
+  std::vector<uint8_t> norms(SL.norms_block_bytes);
   imm.copy(norms.data(), m.layer_small[0].norms.ptr(), norms.size());
-  CHECK_EQ(f32_at(norms, loader::kNormsOffInput),
+  CHECK_EQ(f32_at(norms, SL.norms_off_input),
            1.0f + common::bf16_to_f32(src16("layers.0.input_layernorm.weight")[0]));
-  CHECK_EQ(f32_at(norms, loader::kNormsOffPost),
+  CHECK_EQ(f32_at(norms, SL.norms_off_post),
            1.0f + common::bf16_to_f32(src16("layers.0.post_attention_layernorm.weight")[0]));
 
   // --- layer 0's GDN block: one field per bake, at its offset -----------------
-  std::vector<uint8_t> gdn(loader::kGdnBlockBytes);
+  std::vector<uint8_t> gdn(SL.gdn_block_bytes);
   imm.copy(gdn.data(), m.layer_small[0].gdn.ptr(), gdn.size());
-  CHECK_EQ(f32_at(gdn, loader::kGdnOffConv),
+  CHECK_EQ(f32_at(gdn, SL.gdn_off_conv),
            common::bf16_to_f32(src16("layers.0.linear_attn.conv1d.weight")[0]));
-  CHECK_EQ(f32_at(gdn, loader::kGdnOffNegA),
+  CHECK_EQ(f32_at(gdn, SL.gdn_off_nega),
            -std::exp(common::bf16_to_f32(src16("layers.0.linear_attn.A_log")[0])));
-  CHECK_EQ(f32_at(gdn, loader::kGdnOffDtBias),
+  CHECK_EQ(f32_at(gdn, SL.gdn_off_dtbias),
            common::bf16_to_f32(src16("layers.0.linear_attn.dt_bias")[0]));
   // RMSNormGated is the one norm without the +1 - and the one that stays bf16,
   // so this must be the checkpoint's raw word, NOT 1+w and NOT widened.
-  CHECK_EQ(u16_at(gdn, loader::kGdnOffGatedNorm), src16("layers.0.linear_attn.norm.weight")[0]);
+  CHECK_EQ(u16_at(gdn, SL.gdn_off_gated_norm), src16("layers.0.linear_attn.norm.weight")[0]);
 
   // --- an FA layer's k_norm, fp32 (1 + w) at its offset -----------------------
   std::vector<uint8_t> fa(loader::kFaBlockBytes);
@@ -213,7 +214,7 @@ int main(int argc, char** argv) {
            1.0f + common::bf16_to_f32(src16("layers.3.self_attn.k_norm.weight")[0]));
 
   // --- the final norm, the one that belongs to no layer ----------------------
-  std::vector<uint8_t> fnorm(loader::kFinalNormBytes);
+  std::vector<uint8_t> fnorm(SL.final_norm_bytes);
   imm.copy(fnorm.data(), m.final_norm.ptr(), fnorm.size());
   CHECK_EQ(f32_at(fnorm, 0), 1.0f + common::bf16_to_f32(src16("norm.weight")[0]));
 
@@ -305,15 +306,15 @@ void check_mtp(l0::Context& ctx, const std::string& arg) {
   CHECK_EQ(at(h.o, 5119, 6143), src(L + "self_attn.o_proj.weight")[size_t(5119) * 6144 + 6143]);
   CHECK_EQ(at(h.down, 1, 17407), src(L + "mlp.down_proj.weight")[size_t(1) * 17408 + 17407]);
   // The norms: fp32 (1 + w), the main model's bake.
-  std::vector<uint8_t> norms(loader::kMtpNormsBytes), fa(loader::kFaBlockBytes);
+  std::vector<uint8_t> norms(loader::mtp_norms_bytes(*m.desc)), fa(loader::kFaBlockBytes);
   imm.copy(norms.data(), h.norms.ptr(), norms.size());
   imm.copy(fa.data(), h.fa.ptr(), fa.size());
   const std::pair<const char*, size_t> nrm[] = {
-      {"mtp.pre_fc_norm_embedding.weight", loader::kMtpNormPreE},
-      {"mtp.pre_fc_norm_hidden.weight", loader::kMtpNormPreH},
-      {"mtp.layers.0.input_layernorm.weight", loader::kMtpNormInput},
-      {"mtp.layers.0.post_attention_layernorm.weight", loader::kMtpNormPost},
-      {"mtp.norm.weight", loader::kMtpNormFinal}};
+      {"mtp.pre_fc_norm_embedding.weight", loader::mtp_norm_off(*m.desc, loader::kMtpNormPreE)},
+      {"mtp.pre_fc_norm_hidden.weight", loader::mtp_norm_off(*m.desc, loader::kMtpNormPreH)},
+      {"mtp.layers.0.input_layernorm.weight", loader::mtp_norm_off(*m.desc, loader::kMtpNormInput)},
+      {"mtp.layers.0.post_attention_layernorm.weight", loader::mtp_norm_off(*m.desc, loader::kMtpNormPost)},
+      {"mtp.norm.weight", loader::mtp_norm_off(*m.desc, loader::kMtpNormFinal)}};
   for (const auto& [name, off] : nrm)
     for (uint32_t i : {0u, 5119u})
       CHECK_EQ(f32_at(norms, off + size_t(i) * 4), 1.0f + common::bf16_to_f32(src(name)[i]));

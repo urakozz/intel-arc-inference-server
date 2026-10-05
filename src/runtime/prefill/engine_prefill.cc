@@ -158,10 +158,10 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     if (!mtp_pf_hid_)
       mtp_pf_hid_ = std::make_unique<l0::Mem>(
           ctx_, l0::MemKind::Device,
-          size_t(PrefillScratch::kC + 1) * model::Qwen35::kHidden * 2);
+          size_t(PrefillScratch::kC + 1) * model_.desc->hidden * 2);
     hid = mtp_pf_hid_->as<uint16_t>();
   }
-  const size_t hid_row = size_t(model::Qwen35::kHidden) * 2;
+  const size_t hid_row = size_t(model_.desc->hidden) * 2;
   uint32_t C = 0;
   for (size_t off = 0; off < ids.size(); off += C) {
     C = uint32_t(std::min<size_t>(chunk, ids.size() - off));

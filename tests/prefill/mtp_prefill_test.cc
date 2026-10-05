@@ -40,7 +40,7 @@
 
 namespace {
 constexpr size_t kRow = 4 * 256;   // one position of the head's K (or V), bf16
-constexpr size_t H = model::Qwen35::kHidden;
+const size_t H = model::qwen38().hidden;   // spec 15b: the descriptor's (Agnes's too)
 
 double cos_bf16(const uint16_t* a, const uint16_t* b, size_t n) {
   double ab = 0, aa = 0, bb = 0;

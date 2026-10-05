@@ -320,7 +320,7 @@ bool case_flash_vs_composed(l0::Context& ctx, l0::CmdList& imm, uint32_t pos, ui
                runtime::PrefillBackend::L0);
     cx.wait();
     CHECK_EQ(cx.launches() - before,
-             runtime::prefill::attn_chunk_launches(C, runtime::PrefillBackend::L0, m));
+             runtime::prefill::attn_chunk_launches(model::qwen38(), C, runtime::PrefillBackend::L0, m));
     imm.copy(out.data(), s.pf_o.ptr(), o_elems * 4);
   };
   run(AttnMode::Flash, o_flash);
