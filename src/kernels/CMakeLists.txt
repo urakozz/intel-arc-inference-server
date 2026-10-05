@@ -719,7 +719,8 @@ endif()
 #                      them depends on M but the grid, so row m of an M-row launch is the
 #                      M = 1 code on row m's inputs (tests/kernels/moe_m_ref_test.cc,
 #                      tools/mac/clrun/moe_run.cc and moe_m_test on the card pin it).
-#                      argmax_stage1_M<M> is Qwen3.8's (vocab_used 248077 on both).
+#                      argmax_stage1_M<M>_V248070 is Ornith's own (it masks from 248070,
+#                      tokenizer.json's count), built beside moe_M<M> below.
 #   verify, M = 1..4   gdn_step_slots at 30 GDN layers (`_G30`, SPEC_SLOT_STRIDE = 30 x 32
 #                      x 128 x 128 = 15728640 floats) and Ornith's heads; the head's KV fill:
 #                      fc (bf16 4096 -> 2048), q||k||v (bf16 2048 -> 9216), the two pre-fc
