@@ -32,6 +32,9 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     enc = sub.add_parser("encode")
     enc.add_argument("text_file")
+    enc.add_argument("--bos", action="store_true",
+                     help="the tokenizer prepends its BOS (K2-Horizon, spec 18a: id 0); print the ids "
+                          "with it, after checking that BOS is the ONLY special token added")
     dec = sub.add_parser("decode")
     dec.add_argument("ids", nargs="+", type=int)
     args = ap.parse_args()
@@ -50,7 +53,12 @@ def main() -> None:
         ids = tok.encode(text)
         # Qwen2Tokenizer adds no BOS/EOS; say so loudly if a future tokenizer does.
         bare = tok.encode(text, add_special_tokens=False)
-        if ids != bare:
+        if args.bos:
+            if tok.bos_token_id is None or ids != [tok.bos_token_id] + bare:
+                print(f"--bos: expected [bos {tok.bos_token_id}] + {len(bare)} bare ids, got {len(ids)} ids "
+                      f"starting {ids[:3]}", file=sys.stderr)
+                sys.exit(1)
+        elif ids != bare:
             print(f"tokenizer added special tokens: {len(ids)} vs {len(bare)} bare ids", file=sys.stderr)
             sys.exit(1)
         print(f"{args.text_file}: {len(ids)} ids", file=sys.stderr)

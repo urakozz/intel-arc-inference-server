@@ -19,7 +19,7 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | File | What it is |
 |---|---|
 | `dequant.py` | The one meaning of the int4 GPTQ bits: `(q - 8) * scale`, product in fp32, one RNE cast to bf16. Also writes `tests/golden/dequant_fixture.safetensors`, which the C++ loader test matches bit-exactly. |
-| `tokenize.py` | `encode` a prompt file to ids / `decode` ids back. Raw text, no chat template, no special tokens. |
+| `tokenize.py` | `encode` a prompt file to ids / `decode` ids back. Raw text, no chat template, no special tokens - except `encode --bos` for a tokenizer that prepends its BOS (K2-Horizon, spec 18a), which checks that BOS is the only token added. |
 | `dump.py` | Builds `Qwen3_5ForCausalLM` from the config, loads a `dequant.py`-produced bf16 state dict `strict=True`, forwards the prompt with hooks, greedy-decodes, writes one safetensors file. |
 | `run_in_container.sh` | Wraps `docker run` for the box: read-only HF cache at `/hf`, repo at `/ws`, `$SNAP` resolved to the snapshot directory, **`-u $(id -u):$(id -g)`** so outputs are not root-owned, no memory limit. |
 | `golden.sh` | The production run: the three prompts, serially, `--gen 32`. This is the script that made the files plan 3 compares against - committed rather than retyped. `PROMPTS` names which sets to build; `--max-prompt 4096` since spec 2. |
@@ -27,6 +27,8 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `check.sh` | Re-reads the three written files in a separate process and prints the block quoted under "Sanity checks" below. |
 | `stream.py` | Layer-streamed weights for `dump.py --stream` / `mtp_ref.py --dump --stream` (spec 14, the Mac path below): the model on `meta`, embed/norm/lm_head resident, each decoder layer materialised by a forward pre-hook and dropped after its forward; plus a bit-exact C++ `dequant_t` and the single-thread grouped conv1d. |
 | `dflash_ref.py` | Spec 19a: the CPU reference of the DFlash / DFlash 2 drafters (config reader, drafter + target embed/head loader incl. the W4A16 drafter, `context_kv`, `draft_block`); `test_dflash_ref.py` checks it on tiny random weights. "The DFlash reference" below. |
+| `k2_ref.py` | Spec 18a: the K2-Horizon CPU reference - a plain-torch port of the checkpoint's `modeling_k2_horizon.py`, layer at a time, bf16 or int4 GPTQ checkpoints by name; `run` (golden file + MoE / MoVA routing dumps), `hfcheck` (against the vendored HF model, layer-streamed), `facts`. `test_k2_ref.py` checks it on tiny random weights. "The K2-Horizon reference" below. |
+| `third_party/k2_horizon/` | `modeling_k2_horizon.py`, `configuration_k2_horizon.py`, `config.json` from `IFM/K2-Horizon-MoVA-36B-A4B` @ `cca48b66`, unmodified (Apache-2.0, headers kept): the semantics source of truth, imported by the tests and `hfcheck` without network. |
 | `kv_int8_probe.py` | Spec 12a: int8 KV schemes (per token, KIVI, Hadamard-rotated K, and `rotkv`); `run` = one layer-streamed forward whose batch carries the variants through a patched eager attention (per-position logits metrics, q/K/V capture); `replay` = fp64 attention from a capture at real and tiled depths. Record: `docs/probe-int8-kv-2026-09-28.md`. |
 | `kv_int8_probe.py` | Spec 12a: int8 KV schemes (per token, KIVI, Hadamard-rotated K, and `rotkv`); `run` = one layer-streamed forward whose batch carries the variants through a patched eager attention (per-position logits metrics, q/K/V capture); `replay` = fp64 attention from a capture at real and tiled depths. Record: `docs/probe-int8-kv-2026-09-28.md`. Takes the bf16 base checkpoint too (no `quantization_config`) and `--cont-ids` (teacher-forced ids from a file). |
 | `kv8_qwen38_repeat.sh` | Spec 12 §8 "Before 12b" on the Mac: the 12a probe on `Qwen/Qwen3.8-27B` (bf16) in a 28 GB container, golden rows, A4, long32k[:4096] + replay, resumable; how to run and what decides the tolerances: plan 12b "Task A". |
@@ -401,6 +403,68 @@ docker run --rm --memory 28g --memory-swap 28g -v "$PWD":/ws -w /ws \
 On the box: `tools/oracle/run_in_container.sh 'HF_HUB_CACHE=/hf/hub python3 tools/oracle/test_dflash_ref.py'`
 (the script points `HF_HOME` at a scratch dir; `HF_HUB_CACHE` sends `find_snapshot` to the
 read-only cache mount). Not yet run there.
+
+### The K2-Horizon reference (spec 18a, 2026-10-05)
+
+`k2_ref.py` ports `modeling_k2_horizon.py` (vendored in `third_party/k2_horizon/`) to plain torch,
+one decoder layer at a time: stream.py's `_Prefetch` loads the next layer's attention, router,
+norm and dense / shared tensors on a worker thread, and the MoE / MoVA experts are read on first
+use and dropped with the layer - a decode step reads only the 8 + 4 experts it routes to. Mode
+`bf16` (default) rounds exactly where the HF model in bf16 rounds and uses torch's own bf16 GEMMs:
+on the same torch it is **bit-identical** to the vendored model (eager attention), prompt and
+cached decode. Mode `f32` never rounds. Ties at the top-k cut go to the lower expert id (HF's
+`torch.topk` leaves them unspecified). Semantics, rounding points, the HF-vs-vLLM differences and
+the checkpoint facts: `docs/probe-k2-2026-10-05.md`.
+
+Output (`run`): `dump.py`'s layout - `resid.L{i}` / `mixer.L{i}` / `mlp.L{i}` bf16 [T, 2560],
+`logits` f32 [T + gen, V], `tokens` i32 [gen] - plus plan 8d's routing records for every sparse
+layer and every forward (prompt rows, then one row per generated step): `route.moe.ids.L{i}` i32
+[T + gen, 8] and `route.mova.ids.L{i}` [T + gen, 4] (ascending id), `route.*.w.L{i}` bf16 (the
+multiplier each id gets), `route.*.gap.L{i}` f32 [T + gen] (selection score of the k-th minus the
+(k+1)-th: 0 = a tie at the cut), and `rope.cos` / `rope.sin` bf16 [T + gen, 128].
+
+The tests (tiny random weights; 18 tests, ~45 s of which ~30 s build stream.py's C++ dequant; `test_real_index` SKIPs unless
+`K2_INDEX_BF16` / `K2_INDEX_INT4` name directories holding a real `config.json` +
+`model.safetensors.index.json`):
+
+```bash
+# from the repo (or worktree) root on the Mac
+docker run --rm --memory 28g --memory-swap 28g -v "$PWD":/ws -w /ws \
+  -v ~/.cache/huggingface:/hf:ro -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 \
+  agnes-ref-img:latest python3 tools/oracle/test_k2_ref.py
+```
+
+**The real run (not yet done).** `run` needs torch + safetensors only (`hfcheck` also needs
+transformers >= 5.13 and huggingface_hub with `dataclasses.strict`, as in `agnes-ref-img`). Memory:
+embed + head 2.6 GB resident, one bf16 sparse layer 1.6 GB (two while prefetching), the experts a
+prompt touches; ~6-8 GiB RSS (estimated) plus the page cache over the shards. Which checkpoint:
+the **int4** one is what the engine runs (golden sets it can match token for token; 22.2 GB, fits
+the Mac's 28 GB container too); the **bf16** one (74.9 GB, the box) is the quantisation-damage
+reference. On the box, from the tree root, one prompt at a time, detached:
+
+```bash
+M=models--IFM--K2-Horizon-MoVA-36B-A4B          # or models--urakozz--IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ
+mkdir -p oracle-out-k2 && free -g               # >= 70 GB available for the bf16 page cache
+for p in prose code cjk; do                     # K2 prompts start with BOS 0 (docs/probe-k2-2026-10-05.md)
+  ORACLE_MODEL=$M tools/oracle/run_in_container.sh \
+    "python3 tools/oracle/tokenize.py \"\$SNAP\" encode --bos tests/golden/prompts/$p.txt > /ws/oracle-out-k2/$p.ids"
+done
+ORACLE_MODEL=$M setsid nohup tools/oracle/run_in_container.sh \
+  'for p in prose code cjk; do python3 tools/oracle/k2_ref.py run "$SNAP" --prompt /ws/oracle-out-k2/$p.ids \
+     --out /ws/oracle-out-k2/$p.golden.safetensors --gen 32 > /ws/oracle-out-k2/$p.log 2>&1; done;
+   python3 tools/oracle/k2_ref.py hfcheck "$SNAP" --prompt /ws/oracle-out-k2/prose.ids \
+     --against /ws/oracle-out-k2/prose.golden.safetensors > /ws/oracle-out-k2/hfcheck.log 2>&1' \
+  > ~/k2-ref.log 2>&1 < /dev/null &
+```
+
+Time (estimated from the 4-layer timing at real shapes on the Mac and the bytes read): bf16 - a
+decode step reads 10.6 GB of weights (8 + 1 + 4 experts per layer, all attention, the head),
+~4-6 s warm; the prompt touches ~55 of 100 experts per layer, ~1-2 min, plus the first cold read
+of the 75 GB shards; **~5 min per prompt warm, ~15-20 min for the three**. int4 - 3.8 GB read
+per step but dequantised on the fly (stream.py's C++ `dequant_t`, 1-3 GB/s of bf16 output on the
+Mac), ~7 s per step, ~5-6 min per prompt. `hfcheck` runs the vendored model layer-streamed with
+every expert of each layer resident (prompt forward only). The `run` log prints the gap
+distribution (`#==0` = ties at the cut).
 
 ## The gate: what these files are compared against, and what it proved
 
