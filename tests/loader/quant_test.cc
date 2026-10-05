@@ -78,13 +78,28 @@ int main() {
   CHECK_EQ(aq.extra_quantised, size_t(1));
 
   bool threw = false;
-  // An extra_config module quantised at a group size the kernels do not
+  // An extra_config module quantised at a group size the loader does not
   // implement is a hard stop naming the module - the failure mode `dynamic`'s
-  // regexes could only be approximated at.
-  try {
+  // regexes could only be approximated at. g128 is implemented (expanded to
+  // g64 at load); g256 is not.
+  {
     auto g128mod = parse(R"({"quantization_config":{"bits":4,"group_size":64,"sym":true,
         "quant_method":"auto-round","extra_config":{"lm_head":{"bits":4,"group_size":128,"sym":true}}}})");
-    loader::QuantConfig::parse(g128mod);
+    CHECK_EQ(loader::QuantConfig::parse(g128mod).extra_quantised, size_t(1));
+  }
+  try {
+    auto g256mod = parse(R"({"quantization_config":{"bits":4,"group_size":64,"sym":true,
+        "quant_method":"auto-round","extra_config":{"lm_head":{"bits":4,"group_size":256,"sym":true}}}})");
+    loader::QuantConfig::parse(g256mod);
+  } catch (const std::runtime_error& e) {
+    threw = std::string(e.what()).find("lm_head") != std::string::npos;
+  }
+  CHECK(threw);
+  threw = false;
+  try {
+    auto asym = parse(R"({"quantization_config":{"bits":4,"group_size":64,"sym":true,
+        "quant_method":"auto-round","extra_config":{"lm_head":{"bits":4,"group_size":128,"sym":false}}}})");
+    loader::QuantConfig::parse(asym);
   } catch (const std::runtime_error& e) {
     threw = std::string(e.what()).find("lm_head") != std::string::npos;
   }
@@ -126,11 +141,21 @@ int main() {
   } catch (const std::runtime_error&) { threw = true; }
   CHECK(threw);
   threw = false;
-  try {
+  {
+    // A whole-checkpoint g128 sym config (the common GPTQ export) is accepted.
     auto g128 = parse(R"({"quantization_config":{"bits":4,"group_size":128,"sym":true,"desc_act":false}})");
-    loader::QuantConfig::parse(g128);
-  } catch (const std::runtime_error&) { threw = true; }
-  CHECK(threw);
+    CHECK_EQ(loader::QuantConfig::parse(g128).group_size, uint32_t(128));
+  }
+  for (const char* g : {"32", "256"}) {
+    threw = false;
+    try {
+      auto bad_g = parse(std::string(R"({"quantization_config":{"bits":4,"group_size":)") + g +
+                         R"(,"sym":true,"desc_act":false}})");
+      loader::QuantConfig::parse(bad_g);
+    } catch (const std::runtime_error&) { threw = true; }
+    CHECK(threw);
+  }
+  threw = false;
 
   // repack_int4_layout1 == Int4Gptq::tiled() (after the refactor this is
   // one implementation; the check pins the wrapper wiring).
@@ -281,6 +306,90 @@ int main() {
       const std::string msg = e.what();
       threw = msg.find("blk.scales") != std::string::npos && msg.find("[3]") != std::string::npos &&
               msg.find("Inf") != std::string::npos;
+    }
+    CHECK(threw);
+  }
+
+  // g128 onto the g64 kernels. A K=256, N=16 linear packed at g128 (2 scale
+  // rows) is classified as g64 with 4 rows, rows 2j and 2j+1 equal to g128 row
+  // j, and every weight dequantises to the g128 value exactly. Its g_idx is
+  // the identity k/128 (checked against the module's own scales rows); a k/64
+  // g_idx beside g128 scales is the inconsistency the scan refuses.
+  {
+    const uint32_t K = 256, N = 16;
+    common::Int4Gptq w = common::Int4Gptq::random(K, N, 11);   // nibbles; its g64 scales unused
+    std::vector<uint16_t> s128(size_t(K / 128) * N);
+    for (size_t i = 0; i < s128.size(); ++i) s128[i] = uint16_t(0x3000u + 37u * i);  // distinct
+    std::vector<int32_t> gidx(K);
+    for (uint32_t k = 0; k < K; ++k) gidx[k] = int32_t(k / 128);
+    std::vector<uint8_t> bytes;
+    auto put = [&bytes](const void* p, size_t n) {
+      const uint8_t* b = static_cast<const uint8_t*>(p);
+      bytes.insert(bytes.end(), b, b + n);
+    };
+    put(w.qweight.data(), w.qweight.size() * 4);   // [0, 2048)
+    put(s128.data(), s128.size() * 2);             // [2048, 2112)
+    put(gidx.data(), gidx.size() * 4);             // [2112, 3136)
+    const std::string ghdr =
+        R"({"lin.qweight":{"dtype":"I32","shape":[32,16],"data_offsets":[0,2048]},)"
+        R"("lin.scales":{"dtype":"F16","shape":[2,16],"data_offsets":[2048,2112]},)"
+        R"("lin.g_idx":{"dtype":"I32","shape":[256],"data_offsets":[2112,3136]}})";
+    const std::string gix =
+        R"({"weight_map":{"lin.qweight":"g128.safetensors","lin.scales":"g128.safetensors",)"
+        R"("lin.g_idx":"g128.safetensors"}})";
+    write_st(dir + "/g128.safetensors", ghdr, bytes);
+    std::ofstream(dir + "/model.safetensors.index.json") << gix;
+    {
+      loader::SafetensorsSet set(dir + "/");
+      CHECK_EQ(loader::assert_quant_invariants(set).g_idx_tensors, size_t(1));
+      loader::LinearSrc ls = loader::LinearSrc::classify(set, "lin");
+      CHECK(ls.kind == loader::WKind::Int4);
+      CHECK_EQ(ls.K, K);
+      CHECK_EQ(ls.N, N);
+      CHECK_EQ(ls.group, uint32_t(128));
+      CHECK(ls.expanded_scales != nullptr);
+      CHECK_EQ(ls.expanded_scales->size(), size_t(K / 64) * N);
+      CHECK_EQ(ls.scales, ls.expanded_scales->data());
+      common::Int4Gptq got = w;   // same nibbles, the expanded g64 scales
+      got.scales.assign(ls.scales, ls.scales + size_t(K / 64) * N);
+      for (uint32_t k = 0; k < K; ++k)
+        for (uint32_t n = 0; n < N; ++n) {
+          const uint32_t word = w.qweight[size_t(k / 8) * N + n];
+          const int q = int((word >> (4 * (k % 8))) & 0xFu);
+          const float want = float(q - 8) * common::f16_to_f32(s128[size_t(k / 128) * N + n]);
+          CHECK_EQ(got.at(k, n), want);
+        }
+      // A copy shares the expansion, so the pointer outlives the original.
+      loader::LinearSrc copy = ls;
+      ls = loader::LinearSrc{};
+      CHECK_EQ(copy.scales, copy.expanded_scales->data());
+      CHECK_EQ(copy.scales[N], s128[0]);       // g64 row 1 == g128 row 0
+      CHECK_EQ(copy.scales[2 * N], s128[N]);   // g64 row 2 == g128 row 1
+    }
+    for (uint32_t k = 0; k < K; ++k) gidx[k] = int32_t(k / 64);
+    std::memcpy(bytes.data() + 2112, gidx.data(), gidx.size() * 4);
+    write_st(dir + "/g128.safetensors", ghdr, bytes);
+    threw = false;
+    try {
+      loader::assert_quant_invariants(loader::SafetensorsSet(dir + "/"));
+    } catch (const std::runtime_error& e) {
+      const std::string msg = e.what();
+      threw = msg.find("lin.g_idx") != std::string::npos && msg.find("[64]") != std::string::npos &&
+              msg.find("k/128") != std::string::npos;
+    }
+    CHECK(threw);
+    // Scales whose rows are neither K/64 nor K/128 are refused by classify.
+    const std::string bhdr =
+        R"({"lin.qweight":{"dtype":"I32","shape":[32,16],"data_offsets":[0,2048]},)"
+        R"("lin.scales":{"dtype":"F16","shape":[1,16],"data_offsets":[2048,2080]}})";
+    write_st(dir + "/g128.safetensors", bhdr, std::vector<uint8_t>(bytes.begin(), bytes.begin() + 2080));
+    std::ofstream(dir + "/model.safetensors.index.json")
+        << R"({"weight_map":{"lin.qweight":"g128.safetensors","lin.scales":"g128.safetensors"}})";
+    threw = false;
+    try {
+      loader::LinearSrc::classify(loader::SafetensorsSet(dir + "/"), "lin");
+    } catch (const std::runtime_error& e) {
+      threw = std::string(e.what()).find("matches neither") != std::string::npos;
     }
     CHECK(threw);
   }

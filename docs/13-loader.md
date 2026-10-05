@@ -721,6 +721,31 @@ recomputed, so the folded tensors dequantise to the stacked dequantisations bit 
 `tools/oracle/agnes_fold.py` on a shared fixture; `tests/loader/load_agnes_test.cc`
 reads the joins back from the device (box).
 
+## g128 checkpoints
+
+Common GPTQ exports quantise at group 128, symmetric. The loader accepts them (`quant.h`)
+and runs them on the g64 kernels unchanged: `LinearSrc::classify` reads the group from the
+`.scales` row count (K/64 is g64, K/128 is g128, anything else is refused) and, for g128,
+builds a [K/64][N] copy in which g64 rows 2j and 2j+1 both hold g128 row j. Every weight
+keeps its own scale, so the expanded tensor dequantises to the g128 checkpoint's weights
+exactly, and fold, repack, the GEMVs, the prefill dequant and h8 see an ordinary g64 linear.
+`assert_quant_invariants` checks a g_idx against the identity k/group with the group taken
+from the same module's `.scales`, so a g_idx and scales that disagree are refused.
+`tests/loader/quant_test.cc` pins the expansion against a direct g128 dequant.
+
+The cost: g64's bytes (4.25 bits per weight instead of g128's 4.125, docs/02), and host
+RAM for the expanded scales during the load. Asymmetric checkpoints (a zero point per
+group) and act-order (`desc_act`) stay refused.
+
+**Future idea, not scheduled: a dedicated g128 kernel.** Native g128 would read ~3 % fewer
+weight bytes, ~2.9 % faster decode if tuned as well as g64 (prefill gains nothing: h8
+rebuilds per-channel int8 per slab). The price is ongoing: a g128 variant and its own box
+sweep for every int4 shape and every new int4 kernel (MoE, K2, TP halves), a g128 golden
+reference and gates per checkpoint, and doubled binaries. The cheap half, if it is ever
+wanted, is the decode GEMV only (`gemv.cl` with `GROUP` a define), prefill keeping g64 by
+reading scale row `g >> 1`. Worth it only if a model we mainly serve exists only as g128;
+re-quantising such a model at g64 ourselves is the other answer.
+
 ## Deliberately not loaded
 
 - **`model.visual.*`** (333 tensors, 0.921 GB) - this checkpoint is a
