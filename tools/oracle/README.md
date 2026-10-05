@@ -31,6 +31,7 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `dflash_accept.py` | Spec 19a Task 3: teacher-forced acceptance of the DFlash 2 drafter on those dumps, K = 1..7, arms bf16 / int8 RTN / int8 + int8 head / W4A16, draft vocabularies 32k / 64k / 128k (`loader::select_draft_vocab`); batched over anchors. `test_dflash_accept.py`: the batch against `dflash_ref.draft_block`. |
 | `dflash_p0.sh` | The two above on the Mac in a 28 GB container, resumable, refusing to start beside the 12a repeat; `DRY_RUN=1` plans only. |
 | `k2_ref.py` | Spec 18a: the K2-Horizon CPU reference - a plain-torch port of the checkpoint's `modeling_k2_horizon.py`, layer at a time, bf16 or int4 GPTQ checkpoints by name; `run` (golden file + MoE / MoVA routing dumps), `hfcheck` (against the vendored HF model, layer-streamed), `facts`. `test_k2_ref.py` checks it on tiny random weights. "The K2-Horizon reference" below. |
+| `ornith_ref.py` | Spec 15a: Ornith 1.5 35B-A3B from its **int4** checkpoint - transformers' `Qwen3_5MoeForCausalLM`, layer-streamed, the routed experts dequantised on demand; `run` (golden file + every layer's router / shared-gate logits and routes, and with `--mtp-out` the MoE MTP head's M1 reference), `facts` (the checkpoint facts spec 15 §13 rests on). `test_ornith_ref.py` checks it on tiny random weights; `ornith_golden.sh` is the Mac run. "The Ornith reference" below. |
 | `k2_attn_eager_fixture.py` | Spec 18 §10.1: `k2_ref.py attention()` on hash inputs, written as `tests/kernels/k2_attn_eager_fixture.h` (scores, probabilities, output) for `k2_attn_eager_ref_test`; no checkpoint, seconds - the docker line is in its docstring. |
 | `third_party/k2_horizon/` | `modeling_k2_horizon.py`, `configuration_k2_horizon.py`, `config.json` from `IFM/K2-Horizon-MoVA-36B-A4B` @ `cca48b66`, unmodified (Apache-2.0, headers kept): the semantics source of truth, imported by the tests and `hfcheck` without network. |
 | `kv_int8_probe.py` | Spec 12a: int8 KV schemes (per token, KIVI, Hadamard-rotated K, and `rotkv`); `run` = one layer-streamed forward whose batch carries the variants through a patched eager attention (per-position logits metrics, q/K/V capture); `replay` = fp64 attention from a capture at real and tiled depths. Record: `docs/probe-int8-kv-2026-09-28.md`. |
@@ -510,6 +511,40 @@ per step but dequantised on the fly (stream.py's C++ `dequant_t`, 1-3 GB/s of bf
 Mac), ~7 s per step, ~5-6 min per prompt. `hfcheck` runs the vendored model layer-streamed with
 every expert of each layer resident (prompt forward only). The `run` log prints the gap
 distribution (`#==0` = ties at the cut).
+
+### The Ornith reference (spec 15a, from the int4 checkpoint, 2026-10-06)
+
+`ornith_ref.py` runs transformers 5.15's own `Qwen3_5MoeForCausalLM` (eager attention, the
+`grouped_mm` experts implementation unless `--experts eager`, bf16 - the checkpoint's top-level
+`dtype: float16` is AutoRound's export label; its text config and every unquantised tensor are
+bf16) on `urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ` dequantised by `dequant.py`'s rule
+(stream.py's C++ `dequant_t`), so the engine - which loads the same int4 weights - can match it
+token for token (spec 18a's argument for K2). Layer-streamed (`stream.attach`); the per-expert GPTQ
+tensors are stacked into the class's 3D `gate_up_proj` (gate rows first) / `down_proj` only for
+the experts a forward routes to, in one buffer pair shared by all layers - bitwise the fully
+materialised model (`test_ornith_ref.py`, both experts implementations), and a decode step
+dequantises 9 experts per layer instead of 257.
+
+Outputs: `oracle-out-ornith/<p>.golden.safetensors` - dump.py's tensors plus `router_logits.L*`
+bf16 [T + gen, 256], `shared_gate_logits.L*` [T + gen, 1] (what ornith_decode_test's R2 reads),
+`route.{ids,w,gap}.L*` (the reference's top-8, their weights, p8 - p9; the log prints the gap
+distribution for R2's tolerance) - and `oracle-out-ornith-mtp/m1/<p>.mtp.safetensors` +
+`<p>.cont256.ids` (mtp_head_ornith_test's M1: the head on this run's post-norm hidden, its 257
+experts RTN-quantised exactly as loader/rtn.h does at load; `--mtp-experts bf16` for the shipped
+weights). The committed `tests/golden/prompts/{prose,code,cjk}.ids` are this checkpoint's
+tokenisation too (checked, spec 15 §13).
+
+Tests (tiny random weights, ~1 min; run 2026-10-06, all pass):
+
+```bash
+# from the repo (or worktree) root on the Mac
+docker run --rm --cpus 2 --memory 6g -v "$PWD":/ws -w /ws -e HF_HOME=/tmp/hf \
+  -e TORCH_EXTENSIONS_DIR=/tmp/torch_ext agnes-ref-img:latest python3 tools/oracle/test_ornith_ref.py
+```
+
+The real run - download first (plan 15a has the disk / RAM / time figures), then
+`tools/oracle/ornith_golden.sh` (detached, resumable, 28 GB cap, `facts` first) and
+`tools/oracle/ornith_golden.sh --status`.
 
 ## The gate: what these files are compared against, and what it proved
 
