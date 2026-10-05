@@ -255,6 +255,7 @@ costs on your card (spec 8 §10).
 | `--ids FILE` | - | whitespace-separated prompt ids; generated ids go to stdout, one per line |
 | `--n N` | - | `--ids`: ids to generate, greedily |
 | `--prefill` | off | `--ids`: run the prompt through the chunked prefill instead of one replay per id |
+| `--mtp off\|1\|2\|3\|auto` | `off` | `--ids`: greedy decoding with the MTP head's guesses, as `b70-serve --mtp` (same ids as without it; stderr adds the acceptance). Not yet run on the card |
 | `--pp-chunk C` | `2048` | positions per prefill chunk |
 | `--pp-backend B` | `l0-int8` | as for `b70-serve` |
 | `--lm-head bf16\|int8` | `bf16` | bf16 keeps the rows byte-matched with vLLM; int8 rows are marked `int8-head` |
