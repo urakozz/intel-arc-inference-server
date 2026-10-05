@@ -44,8 +44,8 @@ was rebuilt for depth (spec 10): 20.1 t/s decode at 128k, from 10.2 (captured
 decode step, bf16 `lm_head`).
 
 Long agentic sessions reuse their history (spec 7): the server keeps the last session on
-the card and writes every prefill through to a pinned host store (`--prefix-cache-gb`,
-default 32), so a turn at 60k tokens of history reaches its first token in 1.23 s instead
+the card and writes every prefill through to a pinned host store in system RAM (`--prefix-cache-gb`,
+by default sized from the machine's RAM, up to 32 GiB), so a turn at 60k tokens of history reaches its first token in 1.23 s instead
 of re-prefilling for 45 s, and 1.58 s when a side request evicted the card in between.
 
 Checkpoint is `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`, int4 weights with
@@ -214,7 +214,7 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
 | `--mem-reserve-gb G` | `1.5` | device memory the plan leaves free for what it does not count: the driver, kernel modules and command lists, allocator slack (an estimate) |
 | `--device N` | `ONEAPI_DEVICE_SELECTOR`, else 0 | which GPU |
 | `--queue N` | `4` | requests waiting behind the running one before new ones are refused |
-| `--prefix-cache-gb N` | `32` | pinned host prefix cache in GiB; `0` = off, every request prefills in full (spec 7) |
+| `--prefix-cache-gb auto\|N` | `auto` | The prefix cache's size in GiB of **system RAM** (pinned host memory, not the card's VRAM): every prefill is written through to it so a later request with the same history restores instead of re-prefilling (spec 7). Pinned pages cannot be swapped, so `auto` takes the smallest of 32 GiB, half the machine's RAM, and the RAM available after the model is loaded minus 8 GiB, and turns the cache off below 4 GiB; the startup line says what it chose and why. `N` pins exactly N GiB (with a warning if that is more than is available); `0` = off, every request prefills in full. |
 | `--prefix-split-last` | off | `on`/`off`, chat requests only. A thinking model's next turn repeats this prompt but diverges at its **last** id: the template ended this prompt with `<think>\n`, and the history re-renders that turn as `<think>\n\n</think>` when the client drops the reasoning (opencode does). By default the prompt-end snapshot sits one id past that point, so the next turn falls back to the 2048-id block below and re-prefills up to 2047 ids it already had (~1 s per turn). With the flag the prompt is prefilled to len - 1, snapshotted there, and the last id runs as one decode step, so the next turn (or a retry of the same prompt) restores exactly where it diverges. The cost: that one id goes through decode's kernels, so a near-tie first token can differ from a run without the cache (same quality, not bitwise reproducible). **On for agentic sessions; off for benchmarks and the golden gates.** |
 | `--mtp off\|1\|2\|3\|auto` | `off` | Speculative decoding with the model's built-in MTP head: the head guesses the next few tokens, the main model checks all the guesses in one pass, and every correct guess is a token for free (output is unchanged either way). A number is a fixed count of guesses per step. `auto` picks 0-3 per step from how often that request's guesses were right recently: about 3 on tool calls and code, 1 on prose, 0 when guessing does not pay. Loads the head (+1.4 GB at 16k context, ~2.3 GB at 128k, derived). `0` is the same as `off`. |
 | `--mtp-max N` | `3` | With `--mtp auto`: the most guesses it may pick (1-3). |

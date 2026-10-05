@@ -517,6 +517,11 @@ add_test(NAME agnes_fold_test COMMAND agnes_fold_test
 
 # Spec 6 §10: config.json's max_position_embeddings (text_config or top level), the
 # bound of --max-len. Host only; inline JSON.
+# b70-serve --prefix-cache-gb auto: host-only, the size rule over /proc/meminfo text.
+add_executable(prefix_cache_size_test cli/prefix_cache_size_test.cc)
+target_include_directories(prefix_cache_size_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME prefix_cache_size_test COMMAND prefix_cache_size_test)
+
 add_executable(trained_context_test loader/trained_context_test.cc)
 target_include_directories(trained_context_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(trained_context_test PRIVATE b70_loader)
