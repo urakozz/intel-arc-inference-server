@@ -78,3 +78,26 @@ default bf16 until the gates pass.
 
 - int4 KV; fp8 KV (no FP8 hardware on the B70, spec 5).
 - 256k context (enabled by this, a separate change).
+
+## 8. Amendment - 2026-10-05: the scheme (12a, Agnes stand-in)
+
+**Operator ruling (2026-10-05): `rotkv`.** K and V are both rotated with the same 256-point
+Hadamard (random signs) per kv head and quantised to int8 with one fp16 scale per token per head;
+the attention output is un-rotated per head **before** the sigmoid output gate (the gate is
+channel-wise, so the inverse cannot be folded into `o_proj`). q gets the same rotation as K, which
+cancels in q·k.
+
+Evidence (`docs/probe-int8-kv-2026-09-28.md` on branch `spec12a-int8-kv-probe`, Agnes 3.0 Flash as
+the stand-in for Qwen3.8, layer-streamed CPU reference): attention-only relative L2 4.7e-3 against
+6.1e-3 (KIVI), 6.8e-3 (rotated K only) and 8.8e-3 (per token), below the reference's own bf16
+arithmetic (5.5e-3); flat with depth to 32k; end to end on the golden decision rows 1 - cos
+5.3e-5 and KL 1.9e-4, the closest to the fp32-attention control (4.0e-5). Per-token K fails on K's
+outlier channels; once K is fixed, per-token V is the largest remaining error, which rotating V
+removes.
+
+**Before 12b** (on the box, Qwen3.8 itself): the golden decision-row table for all schemes against
+the stop bar (`l0-int8`'s 0.999931742; rotkv was 0.9999467 on Agnes), the long32k capture at 8192
+and its replay, the two A4 prompts, and the Q3 tolerances re-derived from those (12a's proposal:
+golden mean logit cosine drop <= 1e-4, `flash_long_test` at 32k <= 5e-4, unfiltered KL mean
+<= 1e-3, argmax differences only at near-ties).
+
