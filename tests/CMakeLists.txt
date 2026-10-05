@@ -1355,7 +1355,14 @@ add_test(NAME memory_plan_box_test COMMAND memory_plan_box_test ${B70_TEST_SNAPS
 set(_b70_plan_box_tests memory_plan_box_test)
 if(B70_MTP)
   add_test(NAME memory_plan_box_mtp_test COMMAND memory_plan_box_test ${B70_TEST_SNAPSHOT} mtp)
-  list(APPEND _b70_plan_box_tests memory_plan_box_mtp_test)
+  # Spec 8 §11: the draft vocabulary's compact head + id table and compact logits are
+  # planned and allocated alike, for both head forms (16384 and auto).
+  add_test(NAME memory_plan_box_dv128k_test COMMAND memory_plan_box_test ${B70_TEST_SNAPSHOT} mtp
+    --lm-head int8 --draft-vocab 128k)
+  add_test(NAME memory_plan_box_dv128k_bf16_test COMMAND memory_plan_box_test ${B70_TEST_SNAPSHOT}
+    mtp --lm-head bf16 --draft-vocab 128k)
+  list(APPEND _b70_plan_box_tests memory_plan_box_mtp_test memory_plan_box_dv128k_test
+    memory_plan_box_dv128k_bf16_test)
 endif()
 set_tests_properties(${_b70_plan_box_tests} PROPERTIES LABELS checkpoint
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)

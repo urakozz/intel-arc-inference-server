@@ -808,12 +808,14 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   if (draft_vocab.size != 0) {
     const auto d0 = std::chrono::steady_clock::now();
     const model::GemvShape& lm = lm_row.shape;
-    const size_t elem = lm_int8 ? 1 : 2;   // int8 or bf16
+    // Every size from loader::draft_vocab_bytes - the formula runtime::plan counts with
+    // (spec 6 §10: the planner must see these, as they are outside LoadReport::total()).
+    const DraftVocabBytes nb = draft_vocab_bytes(draft_vocab.size, lm.K, lm_int8);
     auto dv = std::make_unique<DraftVocab>(DraftVocab{
-        {l0::Mem(ctx, l0::MemKind::Device, size_t(draft_vocab.size) * lm.K * elem), nullptr,
+        {l0::Mem(ctx, l0::MemKind::Device, nb.head), nullptr,
          model::GemvShape{lm.K, draft_vocab.size, 1, 0},
          lm_int8 ? model::WeightKind::Int8 : model::WeightKind::Bf16},
-        l0::Mem(ctx, l0::MemKind::Device, size_t(draft_vocab.size) * sizeof(uint32_t)),
+        l0::Mem(ctx, l0::MemKind::Device, nb.ids),
         select_draft_vocab(draft_vocab.added, draft_vocab.eos, draft_vocab.ranked, desc.vocab_used,
                            draft_vocab.size, &m.report.draft_vocab_counts)});
     if (lm_int8) {
@@ -821,19 +823,22 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       std::vector<float> scales(draft_vocab.size);
       gather_int8_tiled_rows(st.i8.data(), st.i8_scales.data(), lm.K, lm.N, dv->host_ids.data(),
                              draft_vocab.size, rows.data(), scales.data());
-      imm.copy(dv->head.mem.ptr(), rows.data(), rows.size());
-      dv->head.scales =
-          std::make_unique<l0::Mem>(upload(ctx, imm, scales.data(), scales.size() * 4));
+      imm.copy(dv->head.mem.ptr(), rows.data(), nb.head);
+      dv->head.scales = std::make_unique<l0::Mem>(upload(ctx, imm, scales.data(), nb.scales));
     } else {
       if (st.bf_tiled.size() < size_t(lm.N) * lm.K)
         throw std::runtime_error("--draft-vocab: the bf16 staging buffer does not hold lm_head");
       std::vector<uint16_t> rows(size_t(draft_vocab.size) * lm.K);
       gather_bf16_tiled_rows(st.bf_tiled.data(), lm.K, lm.N, dv->host_ids.data(),
                              draft_vocab.size, rows.data());
-      imm.copy(dv->head.mem.ptr(), rows.data(), rows.size() * 2);
+      imm.copy(dv->head.mem.ptr(), rows.data(), nb.head);
     }
-    imm.copy(dv->ids.ptr(), dv->host_ids.data(), dv->host_ids.size() * sizeof(uint32_t));
+    imm.copy(dv->ids.ptr(), dv->host_ids.data(), nb.ids);
     m.report.draft_vocab_bytes = dv->bytes();
+    if (m.report.draft_vocab_bytes != nb.total())
+      throw std::logic_error("loader: the draft vocabulary allocated " +
+                             std::to_string(m.report.draft_vocab_bytes) + " B, not the " +
+                             std::to_string(nb.total()) + " B draft_vocab_bytes() plans");
     m.report.draft_vocab_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - d0).count();
     m.draft_vocab = std::move(dv);
