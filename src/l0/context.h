@@ -1,5 +1,6 @@
 #pragma once
 #include <level_zero/ze_api.h>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -48,6 +49,9 @@ class Context {
   uint32_t eu_count() const {
     return props_.numSlices * props_.numSubslicesPerSlice * props_.numEUsPerSubslice;
   }
+  // The device's total memory (zeDeviceGetMemoryProperties' totalSize, summed): the
+  // "of <GB>" of Engine::memory_line() and the budget --max-len auto plans against.
+  size_t memory_bytes() const;
 
  private:
   ze_driver_handle_t driver_ = nullptr;

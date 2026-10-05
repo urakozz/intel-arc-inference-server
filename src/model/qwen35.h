@@ -105,6 +105,12 @@ struct Qwen35 {
   static constexpr uint32_t kFaHeadDim = 256;    // FA q, k and v heads alike
   static constexpr uint32_t kRotaryDim = 64;
   static constexpr double kRopeTheta = 1e7;
+  // The loader's RoPE table, fp32 cos/sin [max_len][2][kRotaryDim / 2]: 256 B per
+  // position, the one loaded allocation that scales with max_len (spec 6 §10's plan
+  // adds it to the weights; loader.cc's rope_table() builds it).
+  static constexpr size_t rope_table_bytes(uint32_t max_len) {
+    return size_t(max_len) * 2 * (kRotaryDim / 2) * sizeof(float);
+  }
 
   // The per-token execution order of one layer kind's linears.
   static const std::vector<LinearId>& linear_order(LayerKind kind);

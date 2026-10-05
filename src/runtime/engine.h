@@ -16,6 +16,7 @@
 #include "runtime/buffers.h"
 #include "runtime/capture.h"
 #include "runtime/control.h"
+#include "runtime/memory_plan.h"
 #include "runtime/prefill_backend.h"
 
 namespace runtime {
@@ -119,6 +120,10 @@ class Engine {
   // bytes() + lazy_bytes() as allocated NOW; int8 = Int8State::bytes(). The CLIs print it
   // after prepare_prefill(), before the first prefill. Defined in engine_prefill.cc.
   std::string memory_line() const;
+  // The five figures memory_line() prints, in bytes (spec 6 §10): what
+  // runtime::plan() predicts for this model, max_len and path, and what
+  // tests/runtime/memory_plan_box_test.cc holds it to. Defined in engine_prefill.cc.
+  MemoryComponents memory_use() const;
 
   // Spec 7 §3.4: snapshots of the session for prefix caching. The GDN state and the
   // conv ring are valid only at the exact position they were computed to, so a restore
