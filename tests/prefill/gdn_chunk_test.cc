@@ -70,8 +70,8 @@ constexpr uint32_t kStateElems = G::kHeads * G::kDim * G::kDim;   // 48*128*128
 constexpr uint32_t kRingElems = G::kRing * G::kConvRows;
 constexpr uint32_t kMixerN = G::kHeads * G::kDim;                 // 6144
 // The GDN small block: fp32 conv/negA/dt_bias, then the gated norm's 128 bf16
-// at loader::kGdnOffGatedNorm. Held as floats so the offsets are the loader's.
-constexpr size_t kSmallFloats = loader::kGdnBlockBytes / 4;       // 41120
+// at loader::kQwen38Small.gdn_off_gated_norm. Held as floats so the offsets are the loader's.
+constexpr size_t kSmallFloats = loader::kQwen38Small.gdn_block_bytes / 4;       // 41120
 
 // RMS-floored relative difference: `|got - ref| / max(|ref|, rms)`. The floor is
 // what makes "max relative difference" meaningful on a 786,432-element state
@@ -182,7 +182,7 @@ Fixture make_fixture() {
     f.small[G::kDtBiasOff + h] = -4.0f;
   }
   f.gated_w.resize(G::kDim);
-  uint16_t* gwp = reinterpret_cast<uint16_t*>(f.small.data()) + loader::kGdnOffGatedNorm / 2;
+  uint16_t* gwp = reinterpret_cast<uint16_t*>(f.small.data()) + loader::kQwen38Small.gdn_off_gated_norm / 2;
   for (uint32_t i = 0; i < G::kDim; ++i) {
     f.gated_w[i] = G::rne(gw(rng));
     gwp[i] = f.gated_w[i];
@@ -448,7 +448,7 @@ int main(int argc, char** argv) {
     l0::Module m_gh(d.ctx, kernels::path(kernels::prep_gated_head_variant(1)));
     l0::Kernel k_gh = m_gh.kernel("prep_gated_head");
     const void* gated_w_dev =
-        static_cast<const uint8_t*>(d_small.ptr()) + loader::kGdnOffGatedNorm;
+        static_cast<const uint8_t*>(d_small.ptr()) + loader::kQwen38Small.gdn_off_gated_norm;
 
     for (uint32_t p = 0; p < kPositions; ++p) {
       c->pos = p;

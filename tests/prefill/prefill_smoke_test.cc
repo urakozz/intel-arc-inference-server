@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
       runtime::prefill::set_attn_mode_for_test(AttnMode::Flash);
       const size_t flash = runtime::prefill::step_chunk_launches(model::qwen38(), b, C);
       const size_t drop =
-          16 * (runtime::prefill::attn_chunk_launches_composed(C, b) - 1);
+          16 * (runtime::prefill::attn_chunk_launches_composed(model::qwen38(), C, b) - 1);
       std::printf("  %s C = %4u: composed %zu, flash %zu (drop %zu)\n",
                   runtime::prefill_backend_name(b), C, composed, flash, drop);
       CHECK_EQ(composed - flash, drop);

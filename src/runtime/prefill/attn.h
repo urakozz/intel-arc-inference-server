@@ -42,14 +42,12 @@ namespace runtime::prefill {
 // wait between them and none after the loop. The timed
 // path pays zero waits per FA layer; `profile_wait` still inserts the
 // diagnostic ones when B70_PREFILL_PROFILE=1.
+// Spec 15b: the head counts are the model descriptor's (PrefillScratch::desc()):
+// q-heads (24 on Qwen3.8), kv-heads (4), and one GQA group - the q-heads that
+// share kv-head j, ruling A15's `Lh` - is PrefillScratch::s_heads() (6). The
+// head dim is shared.
 namespace attn {
-// One GQA group: the six q-heads that share kv-head j. Ruling A15's `Lh`.
-inline constexpr uint32_t kGroup = PrefillScratch::kSHeads;   // 6
-inline constexpr uint32_t kKvHeads = 4;
-inline constexpr uint32_t kQHeads = 24;
-inline constexpr uint32_t kHeadDim = 256;
-inline constexpr uint32_t kQkvN = 14336;   // q||gate (12288) || k (1024) || v (1024)
-inline constexpr uint32_t kOutN = 6144;    // 24 x 256, the o_proj input row
+inline constexpr uint32_t kHeadDim = model::Qwen35::kFaHeadDim;   // 256
 }  // namespace attn
 
 // Spec 2.1 §3.4: on the L0 backend every attention buffer's per-head slot is strided by the
@@ -118,10 +116,11 @@ void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 // The L0 launches each appends -- the SYCL GEMMs are not on the L0 list and do
 // not move `Context::launches()`. Task 14's launch arithmetic reads these.
 inline constexpr size_t kAttnPrepLaunches = 1;
-inline constexpr size_t kAttnChunkLaunches = attn::kKvHeads;   // one softmax per kv group
+// sycl-tla: one softmax per kv group (4 on Qwen3.8).
+inline size_t attn_chunk_launches_sycl(const model::ModelDesc& d) { return d.fa_kv_heads; }
 inline constexpr size_t kAttnGateLaunches = 1;
 
-// What `attn_chunk` appends to the L0 list. sycl-tla: `kAttnChunkLaunches`, its two GEMMs
+// What `attn_chunk` appends to the L0 list. sycl-tla: `attn_chunk_launches_sycl`, its two GEMMs
 // per group being SYCL calls off this counter. L0 (spec S3): per kv group one pf_gemm per
 // QK^T row block, one softmax and one P·V -- so this, and only this, makes the chunk's
 // launch count a function of C. At C <= 256 there is one block and the count is what it was
@@ -130,16 +129,17 @@ inline constexpr size_t kAttnGateLaunches = 1;
 // Spec 6: in Flash mode (L0 backends only) the whole thing is ONE `pf_flash_attn` launch and
 // the count stops depending on C. `attn_chunk_launches_composed` is the composed count
 // whatever the mode, for the arithmetic that states the difference.
-inline size_t attn_chunk_launches_composed(uint32_t C, PrefillBackend b) {
-  return is_l0(b)
-             ? size_t(attn::kKvHeads) * (2 + size_t(attn_row_blocks(C, b)))
-             : kAttnChunkLaunches;
+inline size_t attn_chunk_launches_composed(const model::ModelDesc& d, uint32_t C,
+                                           PrefillBackend b) {
+  return is_l0(b) ? size_t(d.fa_kv_heads) * (2 + size_t(attn_row_blocks(C, b)))
+                  : attn_chunk_launches_sycl(d);
 }
-inline size_t attn_chunk_launches(uint32_t C, PrefillBackend b, AttnMode mode) {
-  return is_l0(b) && mode == AttnMode::Flash ? 1 : attn_chunk_launches_composed(C, b);
+inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, PrefillBackend b,
+                                  AttnMode mode) {
+  return is_l0(b) && mode == AttnMode::Flash ? 1 : attn_chunk_launches_composed(d, C, b);
 }
-inline size_t attn_chunk_launches(uint32_t C, PrefillBackend b) {
-  return attn_chunk_launches(C, b, attn_mode());
+inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, PrefillBackend b) {
+  return attn_chunk_launches(d, C, b, attn_mode());
 }
 
 }  // namespace runtime::prefill

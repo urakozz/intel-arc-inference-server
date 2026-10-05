@@ -32,11 +32,10 @@
 // re-measure, not a refactor.
 namespace runtime::prefill {
 namespace {
-using Q = model::Qwen35;
-
-constexpr uint32_t kConvRows = 10240;
-constexpr uint32_t kConvGroups = kConvRows / 256;      // 40 work-groups of 256
-constexpr uint32_t kKHeads = Q::kGdnKHeads;            // 16
+// Spec 15b: the conv channels and head counts are the descriptor's
+// (PrefillScratch::desc()): conv rows 10240 on Qwen3.8 (40 work-groups of 256),
+// 16 k-heads, 48 v-heads.
+constexpr uint32_t kConvWg = 256;                      // pf_gdn_conv's channels per work-group
 constexpr uint32_t kStateColChunks = 4;                // gdn_step.cl's grid.y
 
 // Ruling A27: `pf_gdn_conv`'s position range is blocked, and this is the only
@@ -151,8 +150,13 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   const char* const solve_entry = gdn_solve_entry();
 
   const uint32_t nch = (C + PrefillScratch::kGdnChunk - 1) / PrefillScratch::kGdnChunk;
-  const uint32_t heads = Q::kGdnVHeads;                 // 48
-  const void* gated_w = static_cast<const uint8_t*>(small) + loader::kGdnOffGatedNorm;
+  const model::ModelDesc& d = s.desc();
+  const uint32_t heads = d.gdn_v_heads;                 // 48 on Qwen3.8
+  const uint32_t k_heads = d.gdn_k_heads;               // 16
+  require(d.gdn_conv_dim() % kConvWg == 0, "the conv channels are not whole work-groups");
+  const uint32_t conv_groups = d.gdn_conv_dim() / kConvWg;   // 40 on Qwen3.8
+  const void* gated_w =
+      static_cast<const uint8_t*>(small) + d.small_layout().gdn_off_gated_norm;
 
   void* p_xb = s.gdn_xb.ptr();
   void* p_seed = s.gdn_seed.ptr();
@@ -169,19 +173,19 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   const std::string scan = kernels::pf_gdn_scan_variant();
 
   //  1 - lift the ring's three older slots (pos-3..pos-1) into a flat seed.
-  cx.launch(kc(conv, "pf_gdn_seed"), kConvGroups, 1, 1,
+  cx.launch(kc(conv, "pf_gdn_seed"), conv_groups, 1, 1,
             {PtrArg(conv_ring), PtrArg(p_seed), arg_val(pos)});
   profile_wait(cx, Phase::kGdnSeed);
   //  2 - the batched conv1d + SiLU over the chunk, and the ring writeback.
   //      Grid.y is A27's position blocking; grid.x and the work-group are
   //      unchanged.
   const uint32_t conv_blocks = (C + kConvBlock - 1) / kConvBlock;
-  cx.launch(kc(conv, "pf_gdn_conv"), kConvGroups, conv_blocks, 1,
+  cx.launch(kc(conv, "pf_gdn_conv"), conv_groups, conv_blocks, 1,
             {PtrArg(qkvz_partials), PtrArg(p_seed), PtrArg(small), PtrArg(p_xb),
              PtrArg(conv_ring), arg_val(pos), arg_val(C)});
   profile_wait(cx, Phase::kGdnConv);
   //  3 - l2norm q and k in place.
-  cx.launch(kc(conv, "pf_gdn_l2norm"), 2 * kKHeads, C, 1, {PtrArg(p_xb), arg_val(C)});
+  cx.launch(kc(conv, "pf_gdn_l2norm"), 2 * k_heads, C, 1, {PtrArg(p_xb), arg_val(C)});
   profile_wait(cx, Phase::kGdnL2);
   //  4 - head scalars and the intra-chunk cumulative gate.
   cx.launch(kc(conv, "pf_gdn_gate"), heads, nch, 1,

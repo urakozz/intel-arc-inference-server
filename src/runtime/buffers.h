@@ -41,9 +41,10 @@ struct PersistentBuffers {
   PersistentBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
 
   l0::Mem control;        // shared, sizeof(Control)
-  l0::Mem gdn_state;      // fp32 [gdn_layers][48 heads][128 k][128 v]  = 150.99 MB (Qwen3.8: 48)
-  l0::Mem conv_ring;      // bf16 [gdn_layers][16][10240]               = 15.73 MB (Qwen3.8)
-  l0::Mem kv_k, kv_v;     // bf16 [fa_layers][max_len][4][256] each     = 536.87 MB each @16384 (Qwen3.8: 16)
+  // Spec 15b: the widths are the descriptor's; the brackets give Qwen3.8's.
+  l0::Mem gdn_state;      // fp32 [gdn_layers][v-heads 48][128 k][128 v] = 150.99 MB (Qwen3.8: 48)
+  l0::Mem conv_ring;      // bf16 [gdn_layers][16][conv dim 10240]       = 15.73 MB (Qwen3.8)
+  l0::Mem kv_k, kv_v;     // bf16 [fa_layers][max_len][kv-heads 4][256] each = 536.87 MB each @16384 (Qwen3.8: 16)
   uint32_t max_len;
 
   size_t bytes() const;
@@ -118,7 +119,8 @@ struct DecodeScratch {
 
   DecodeScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
 
-  l0::Mem resid;          // bf16 [M][5120]
+  // Spec 15b: hidden, head counts and widths are the descriptor's (Qwen3.8 in brackets).
+  l0::Mem resid;          // bf16 [M][hidden 5120]
   l0::Mem x;              // bf16 [M][intermediate]  (prep output; largest K; Qwen3.8 17408)
   l0::Mem partials;       // fp32 [max S][M][max N] (Qwen3.8 [8][M][34816]) = 8.91 MB
   l0::Mem ab_out;         // fp32 [M][128]    (a||b GEMV output, S=1)
@@ -135,7 +137,7 @@ struct DecodeScratch {
 };
 
 // The prefill path's per-chunk scratch. Every size is derived from
-// `model::Qwen35`, `kC` and `max_len`; the totals are pinned by
+// `model::Qwen35`, the model descriptor (spec 15b), `kC` and `max_len`; the totals are pinned by
 // tests/runtime/buffers_test.cc with the arithmetic spelled out there.
 //
 // **kC = 2048, not plan 6b's 4096 - ruling A13, and every byte was recomputed
@@ -160,11 +162,6 @@ struct DecodeScratch {
 struct PrefillScratch {
   static constexpr uint32_t kC = 2048;               // ruling A13 (was 4096)
   static constexpr uint32_t kGdnChunk = 64;          // the FLA intra-chunk size
-  // Heads that share one QKᵀ / softmax launch on the composed attention path:
-  // one GQA group. A tile spanning a group boundary would need two B pointers
-  // in one batched launch, which is why it is 6 and not A14's illustrative 4
-  // (plan 6d-composed, "The head tile Lh").
-  static constexpr uint32_t kSHeads = 6;
   static constexpr uint32_t kNormGroups = DecodeScratch::kNormGroups;
 
   PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
@@ -190,13 +187,21 @@ struct PrefillScratch {
   // composed attention (plan 6d-composed Task 5's fields, allocated here)
   l0::Mem pf_q;         // bf16 [kC][24][256]  RoPE'd queries (ruling A9)
   l0::Mem pf_attn;      // bf16 [kC][24][256]  attn_chunk's output, pre-gate
-  // pf_s / pf_p (the composed path's S and P, [kSHeads][kC][max_len]) are lazy since
+  // pf_s / pf_p (the composed path's S and P, [s_heads()][kC][max_len]) are lazy since
   // spec 6: pf_s_buffer() / pf_p_buffer() below.
   l0::Mem pf_o;         // fp32 [24][kC][256]           O = PV, all heads
   l0::Mem pf_rowsum;    // fp32 [24][kC]
   uint32_t max_len;
 
   size_t bytes() const;
+  // The model this scratch was sized for (spec 15b: its widths are the descriptor's).
+  const model::ModelDesc& desc() const { return *desc_; }
+  // Heads that share one QKᵀ / softmax launch on the composed attention path:
+  // one GQA group (6 on Qwen3.8, 8 on Ornith: ModelDesc::fa_gqa). A tile spanning
+  // a group boundary would need two B pointers in one batched launch, which is
+  // why it is the group and not A14's illustrative 4 (plan 6d-composed, "The
+  // head tile Lh").
+  uint32_t s_heads() const { return desc_->fa_gqa(); }
   // What `attn_chunk` divides by to pick its head tile at the actual depth
   // (plan 6d-composed Task 4 Step 3). One accessor, so the rule reads the
   // allocation instead of a second copy of the constant.
@@ -210,8 +215,8 @@ struct PrefillScratch {
   // Spec 6 (plan 6b): the composed attention's score scratch, allocated on the first
   // composed `attn_chunk` (sycl-tla, or L0 with B70_PREFILL_ATTN=composed). The default
   // flash path never touches them, so prefill scratch no longer scales with max_len.
-  l0::Mem& pf_s_buffer();      // fp32 [kSHeads][kC][max_len]  S = QK^T
-  l0::Mem& pf_p_buffer();      // bf16 [kSHeads][kC][max_len]  P = softmax(S)
+  l0::Mem& pf_s_buffer();      // fp32 [s_heads()][kC][max_len]  S = QK^T
+  l0::Mem& pf_p_buffer();      // bf16 [s_heads()][kC][max_len]  P = softmax(S)
   size_t lazy_bytes() const;   // whichever of the four exist
 
  private:

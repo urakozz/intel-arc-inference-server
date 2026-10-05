@@ -101,9 +101,9 @@ using golden::read_ids;
 
 constexpr uint32_t kMaxLen = 16384;
 constexpr uint32_t kGen = 64;
-constexpr uint32_t kHid = Qwen35::kHidden;
-constexpr size_t kGdnElems =
-    size_t(Qwen35::kGdnVHeads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
+const uint32_t kHid = model::qwen38().hidden;  // 5120, Agnes's too (spec 15b)
+const size_t kGdnElems =
+    size_t(model::qwen38().gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
 const char* const kPrompts[] = {"prose", "code", "cjk"};
 // One chunk (the prompts are 38-61 ids), then a width that makes three or four
 // chunks of them. The middle width is the one spec §6.2's multi-chunk gate
@@ -322,8 +322,8 @@ int main(int argc, char** argv) {
       // layers. Beyond T both sides are the zeros reset() left, so including
       // them would divide a band by 16384/T of exact agreement.
       {
-        const size_t layer_words = size_t(kMaxLen) * Qwen35::kFaKvHeads * Qwen35::kFaHeadDim;
-        const size_t live = size_t(T) * Qwen35::kFaKvHeads * Qwen35::kFaHeadDim;
+        const size_t layer_words = size_t(kMaxLen) * model::qwen38().fa_kv_heads * Qwen35::kFaHeadDim;
+        const size_t live = size_t(T) * model::qwen38().fa_kv_heads * Qwen35::kFaHeadDim;
         std::vector<uint16_t> ga, gb;
         auto gather = [&](const std::vector<uint8_t>& src, std::vector<uint16_t>& dst) {
           dst.clear();

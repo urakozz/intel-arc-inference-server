@@ -25,6 +25,7 @@
 #include "check.h"
 #include "common/bf16.h"
 #include "kernels/kernels.h"
+#include "kernels/shape_suffix.h"   // kRefHidden: embed_gather_M1 is built at HIDDEN 5120
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/fence.h"
@@ -72,7 +73,7 @@ double median_us(Dev& d, l0::CmdList& list, int iters) {
 
 int main() {
   Dev d;
-  std::vector<uint16_t> table(size_t{kRows} * Q::kHidden);
+  std::vector<uint16_t> table(size_t{kRows} * kernels::kRefHidden);
   {
     std::mt19937 rng(9);
     std::uniform_real_distribution<float> u(-2.f, 2.f);
@@ -81,7 +82,7 @@ int main() {
 
   l0::Mem embed(d.ctx, l0::MemKind::Device, table.size() * 2);
   d.imm.copy(embed.ptr(), table.data(), table.size() * 2);
-  l0::Mem resid(d.ctx, l0::MemKind::Device, size_t{kM} * Q::kHidden * 2);
+  l0::Mem resid(d.ctx, l0::MemKind::Device, size_t{kM} * kernels::kRefHidden * 2);
   l0::Mem ctrl_mem(d.ctx, l0::MemKind::Shared, sizeof(runtime::Control));
   runtime::Control* ctrl = ctrl_mem.as<runtime::Control>();
   *ctrl = runtime::Control{};
@@ -99,7 +100,7 @@ int main() {
   list.launch(k, 1, kM);
   list.close();
 
-  std::vector<uint16_t> got(size_t{kM} * Q::kHidden);
+  std::vector<uint16_t> got(size_t{kM} * kernels::kRefHidden);
   auto replay = [&](uint32_t row) {
     ctrl->cur_token[0] = row;
     ctrl->debug_flag = 0;
@@ -109,7 +110,7 @@ int main() {
     d.imm.copy(got.data(), resid.ptr(), got.size() * 2);
   };
   auto expect_row = [&](uint32_t row) {
-    for (uint32_t j = 0; j < Q::kHidden; ++j) CHECK_EQ(got[j], table[size_t{row} * Q::kHidden + j]);
+    for (uint32_t j = 0; j < kernels::kRefHidden; ++j) CHECK_EQ(got[j], table[size_t{row} * kernels::kRefHidden + j]);
     CHECK_EQ(ctrl->debug_flag, 0u);
     std::printf("embed_gather cur_token[0]=%u -> resid == embed row %u (5120 bf16 exact)\n", row,
                 row);
@@ -132,7 +133,7 @@ int main() {
   // prove is inside the table, writes nothing, and reports through debug_flag.
   for (uint32_t bad : {Q::kVocab, 0xFFFFFFFFu}) {
     replay(bad);
-    for (uint32_t j = 0; j < Q::kHidden; ++j) CHECK_EQ(got[j], kSentinel);
+    for (uint32_t j = 0; j < kernels::kRefHidden; ++j) CHECK_EQ(got[j], kSentinel);
     CHECK_EQ(ctrl->debug_flag, kBadRow);
     std::printf("embed_gather cur_token[0]=%u (out of range) -> resid untouched, debug_flag=%#x\n",
                 bad, ctrl->debug_flag);
