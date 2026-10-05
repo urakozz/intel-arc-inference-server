@@ -4,7 +4,7 @@
 //                   [draft_vocab = off]
 //
 // `lm_head` (spec 9 H2): bf16 (the checkpoint's) or int8; the draft list reads it too.
-// `draft_vocab` (spec 8 §11): off, 32k, 64k or 128k (needs int8) - the draft list reads
+// `draft_vocab` (spec 8 §11): off, 32k, 64k or 128k (either head form) - the draft list reads
 // the compact head instead; V' = tokenizer.json's added tokens (the EOS ids among them on
 // Qwen3.8 and Agnes) and the lowest ids, no ranked list (the step time depends on |V'|
 // only). The draft arms then price `--mtp-cost`'s draft row for that size (spec 8 §10).
