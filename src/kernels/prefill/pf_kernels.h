@@ -150,4 +150,37 @@ inline std::string pf_quant_had_variant(unsigned K) { return "pf_quant_had_K" + 
 inline std::string pf_requant_rot_variant(unsigned layout) { return "pf_requant_rot_L" + std::to_string(layout); }
 inline std::string pf_gemm_i8_variant(bool silu) { return silu ? "pf_gemm_i8_SILU" : "pf_gemm_i8"; }
 
+// --- Spec 15d: a mixture-of-experts model's prefill (Ornith) -----------------------------
+// The router || shared-gate GEMV over the chunk: pf_gemv_bf16.cl (entry `pf_ab_proj`) at
+// K = hidden, N = MoeDesc::router_n(), the {16, 16} tiling decode's gemv_bf16 binds there,
+// so each row is bit-identical to decode's router GEMV (pf_gemv_bf16.cl's header).
+inline std::string pf_moe_router_variant(unsigned hidden, unsigned router_n) {
+  return "pf_moe_router_K" + std::to_string(hidden) + "_N" + std::to_string(router_n);
+}
+// pf_moe.cl's five entry points (sort, gather, gather_i8, dequant_gu / _dn, combine), one
+// binary per shape, named as moe.cl's decode binary is (kernels::moe_variant).
+inline std::string pf_moe_variant(unsigned experts, unsigned top_k, unsigned hidden,
+                                  unsigned inter) {
+  return "pf_moe_E" + std::to_string(experts) + "_T" + std::to_string(top_k) + "_D" +
+         std::to_string(hidden) + "_I" + std::to_string(inter);
+}
+// pf_moe_gemm.cl at one expert block's K x N: bf16 or int8 (h8), SiLU epilogue (gate||up)
+// or the plain bf16 one (down). Entry `pf_moe_gemm`.
+inline std::string pf_moe_gemm_variant(unsigned K, unsigned N, bool i8, bool silu) {
+  return std::string("pf_moe_gemm") + (i8 ? "_i8" : "") + "_K" + std::to_string(K) + "_N" +
+         std::to_string(N) + (silu ? "_SILU" : "");
+}
+// The host's mirror of pf_moe.cl's constants (its #defines; src/kernels/prefill/CMakeLists.txt
+// passes TM and KC). tests/kernels/pf_moe_ref.h reads them by name.
+namespace pf_moe {
+inline constexpr unsigned kTileM = 32;           // TM: rows per grouped-GEMM tile
+inline constexpr unsigned kNone = 0xFFFFFFFFu;   // a padding tile's block / row's token
+inline constexpr unsigned kHdrTiles = 0, kHdrSharedRow = 1, kHdrRows = 2, kHdrC = 3,
+                          kHdrCount = 4;         // [kHdrCount + e]: expert e's rows
+inline constexpr unsigned kGemmWgN = 256;        // columns per pf_moe_gemm work-group
+inline constexpr unsigned kCombineWg = 256;      // pf_moe_combine's columns per work-group
+// Header words: H_COUNT + experts + 1 (the shared expert's C), padded to 16.
+inline constexpr unsigned hdr_words(unsigned experts) { return (kHdrCount + experts + 1 + 15) / 16 * 16; }
+}  // namespace pf_moe
+
 }  // namespace kernels
