@@ -86,7 +86,14 @@ void usage() {
                "                             SPEC: \"verify=1,1.17,1.52,1.74;draft=0.19,0.37,0.55\"\n"
                "                             (plain-step units; default: the --lm-head form's)\n"
                "                 [--lm-head bf16|int8]   Default: int8 (spec 9: quantised at load\n"
-               "                 from the bf16 head; bf16 is the checkpoint's own head)\n");
+               "                 from the bf16 head; bf16 is the checkpoint's own head)\n"
+               "                 [--draft-vocab off|32k|64k|128k]   MTP drafts over a reduced\n"
+               "                             vocabulary (spec 8 §11; default off): the int8\n"
+               "                             head's rows for the added tokens, then\n"
+               "                             --draft-vocab-ids, then the lowest ids. Output\n"
+               "                             unchanged (verify is full); needs --mtp, int8 head\n"
+               "                 [--draft-vocab-ids FILE]   ranked ids, most frequent first\n"
+               "                             (tools/draft_vocab/rank.py over --log-requests logs)\n");
 }
 
 uint32_t parse_u32(const char* what, const std::string& value) {
@@ -153,6 +160,9 @@ int run(int argc, char** argv) {
   std::string mtp_cost_arg;
   // Spec 9 §3: the serving default is the gated int8 head (amendment §8, L3).
   loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
+  // Spec 8 §11: off until the box rows decide (§11 "Gates").
+  uint32_t draft_vocab = 0;
+  std::string draft_vocab_ids;
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -209,6 +219,12 @@ int run(int argc, char** argv) {
       const std::string v = value(i, "--lm-head");
       if (!loader::parse_lm_head_form(v, lm_head))
         throw std::runtime_error("--lm-head expects bf16 or int8, got '" + v + "'");
+    } else if (arg == "--draft-vocab") {
+      const std::string v = value(i, "--draft-vocab");
+      if (!loader::parse_draft_vocab(v, draft_vocab))
+        throw std::runtime_error("--draft-vocab expects off, 32k, 64k or 128k, got '" + v + "'");
+    } else if (arg == "--draft-vocab-ids") {
+      draft_vocab_ids = value(i, "--draft-vocab-ids");
     } else if (!arg.empty() && arg[0] == '-') {
       usage();
       throw std::runtime_error("unknown option '" + arg + "'");
@@ -245,6 +261,16 @@ int run(int argc, char** argv) {
                                std::to_string(options.mtp_adaptive.cost.max_k()) +
                                ", below --mtp-max " + std::to_string(mtp_max));
   }
+  // Spec 8 §11: the draft vocabulary narrows the MTP head's drafts, so both flags need
+  // --mtp (K or auto); the ranked list needs a size to fill; and the compact head is
+  // gathered from the int8 lm_head. Checked here, before the device is touched (the
+  // loader checks the same three).
+  if ((draft_vocab != 0 || !draft_vocab_ids.empty()) && mtp_k == 0)
+    throw std::runtime_error("--draft-vocab and --draft-vocab-ids need --mtp (K or auto)");
+  if (!draft_vocab_ids.empty() && draft_vocab == 0)
+    throw std::runtime_error("--draft-vocab-ids needs --draft-vocab 32k, 64k or 128k");
+  if (draft_vocab != 0 && lm_head != loader::LmHeadForm::Int8)
+    throw std::runtime_error("--draft-vocab gathers rows of the int8 lm_head; it needs --lm-head int8");
   if (options.host.empty()) throw std::runtime_error("--host must not be empty");
   if (options.served_model.empty()) throw std::runtime_error("--served-name must not be empty");
   if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);
@@ -256,13 +282,22 @@ int run(int argc, char** argv) {
   const std::vector<uint32_t> eos = eos_ids(snapshot_dir);
   const uint32_t trained = loader::trained_context(snapshot_dir);
   cli::check_before_load(max_len_arg, trained, /*require_quantum=*/true);   // spec 6 §10
+  // Spec 8 §11: what V' is built from - tokenizer.json's added tokens, the EOS ids, the
+  // ranked file. Read before the device is touched, so a bad file fails fast.
+  loader::DraftVocabSpec dv_spec;
+  if (draft_vocab != 0) {
+    dv_spec.size = draft_vocab;
+    dv_spec.added = loader::added_token_ids_file(snapshot_dir + "tokenizer.json");
+    dv_spec.eos = eos;
+    if (!draft_vocab_ids.empty()) dv_spec.ranked = loader::read_ranked_ids(draft_vocab_ids);
+  }
   l0::Context context(device);
   std::fprintf(stderr, "device: %s (%u EUs)%s\n", context.name().c_str(), context.eu_count(),
                device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
   loader::LoadedModel model = [&] {
     StdoutToStderr redirect;
     return loader::load(context, snapshot_dir, cli::load_len(max_len_arg, trained),
-                        /*mtp=*/mtp_k > 0, lm_head);
+                        /*mtp=*/mtp_k > 0, lm_head, dv_spec);
   }();
   // Spec 6 §10: auto plans the largest max_len that fits and re-tables the model; an
   // explicit N is held to the same plan. Both print the plan's breakdown.
@@ -297,10 +332,12 @@ int run(int argc, char** argv) {
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
                options.host.c_str(), options.port, max_len);
   print_eos(eos);
-  std::fprintf(stderr, ", prefill backend %s (SYCL component %s), mtp %s%u, lm_head %s\n",
+  std::fprintf(stderr, ", prefill backend %s (SYCL component %s), mtp %s%u, lm_head %s%s%s\n",
                runtime::prefill_backend_name(engine.prefill_backend()),
                runtime::prefill::sycl_available() ? "on" : "off", mtp_auto ? "auto, max " : "",
-               mtp_k, loader::lm_head_form_name(lm_head));
+               mtp_k, loader::lm_head_form_name(lm_head),
+               engine.draft_vocab() ? ", draft vocab " : "",
+               engine.draft_vocab() ? loader::draft_vocab_name(engine.draft_vocab()).c_str() : "");
   if (mtp_auto) {
     const server::MtpCost& c = options.mtp_adaptive.cost;
     std::fprintf(stderr, "mtp auto: cost verify M=1..%zu", c.verify.size());
