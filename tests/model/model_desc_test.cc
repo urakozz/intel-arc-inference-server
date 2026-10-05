@@ -299,14 +299,19 @@ int main() {
     }
     CHECK(threw);
   }
-  // Prefill: the dense models pass; Ornith's is spec 15d and refused by name.
+  // Prefill: the dense models pass, and from spec 15d Ornith does too (the grouped
+  // experts); a MoE shape the prefill kernels are not written for is refused by name
+  // (here: a hidden size that is not whole 1024-k rotation blocks).
   model::require_prefill(q);
   model::require_prefill(a);
+  model::require_prefill(o);
   bool pf_threw = false;
   try {
-    model::require_prefill(o);
+    ModelDesc bad = o;
+    bad.hidden = 1536;
+    model::require_prefill(bad);
   } catch (const std::runtime_error& e) {
-    pf_threw = std::string(e.what()).find("spec 15d") != std::string::npos;
+    pf_threw = std::string(e.what()).find("not implemented on the prefill path") != std::string::npos;
   }
   CHECK(pf_threw);
 

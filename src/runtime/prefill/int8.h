@@ -33,6 +33,12 @@ class Int8State {
   // linear before the first one).
   const std::pair<l0::Mem, l0::Mem>& scales(Context& cx, KernelCache& kc,
                                             const loader::DeviceWeight& w);
+  // Spec 15d: the same for a layout-1 int4 array that is not a DeviceWeight - a MoE
+  // layer's expert gate||up blocks, contiguous, which read as ONE layout-1 weight of
+  // K = hidden and N = blocks x 2 I (loader/moe_layout.h: block b's tiles follow block
+  // b - 1's). Cached by the array's device address, like scales().
+  const std::pair<l0::Mem, l0::Mem>& scales_layout1(Context& cx, KernelCache& kc,
+                                                    const void* qw, uint32_t K, uint32_t N);
   const l0::Mem& signs_f32(uint32_t K);    // [K] +-1
   const l0::Mem& sign_bits(uint32_t K);    // [K/32]
   l0::Mem& xq();                           // int8 [kC][max_k]
@@ -49,6 +55,9 @@ class Int8State {
   l0::Mem xq_, xs_, w8_;
   std::map<uint32_t, l0::Mem> signs_, bits_;
   std::map<const void*, std::pair<l0::Mem, l0::Mem>> scales_;
+  const std::pair<l0::Mem, l0::Mem>& compute_scales(Context& cx, KernelCache& kc,
+                                                    const void* qw, const void* scales,
+                                                    const model::GemvShape& sh);
 };
 
 // linear_l0's contract (fp32 partials [pad256(M)][N]) on the h8 path.

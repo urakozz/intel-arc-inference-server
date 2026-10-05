@@ -16,7 +16,8 @@ const char* const kName[kN] = {
     "i8_requant", "i8_gemm",     "ab_proj",     "gdn_seed",
     "gdn_conv",   "gdn_l2norm",  "gdn_gate",    "gdn_A",       "gdn_solve", "gdn_wu",
     "gdn_A2",     "gdn_scan",    "gdn_head",    "silu",        "attn_prep", "attn_QK^T",
-    "attn_softmax", "attn_PV",   "attn_gate",   "attn_flash", "head"};
+    "attn_softmax", "attn_PV",   "attn_gate",   "attn_flash", "head",
+    "moe_route",  "moe_sort",    "moe_gather",  "moe_weights", "moe_gemm",  "moe_combine"};
 
 struct Acc {
   double ms[kN] = {};

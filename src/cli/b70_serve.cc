@@ -409,9 +409,15 @@ int run(int argc, char** argv) {
     return loader::load(context, snapshot_dir, cli::load_len(max_len_arg, trained),
                         /*mtp=*/mtp_k > 0 || spec_lookup, lm_head, dv_spec);
   }();
-  // Spec 15c: the server prefills every request; a model whose prefill is not built
-  // (Ornith: spec 15d, its serving 15e) is refused here by name.
+  // Spec 15c: the server prefills every request; a model whose prefill is not built is
+  // refused here by name. Spec 15d builds Ornith's prefill; its SERVING (chat template,
+  // tool calls, the prefix cache on a MoE model) is spec 15e, so a MoE model is still
+  // refused here until 15e lifts it.
   model::require_prefill(*model.desc);
+  if (model.desc->is_moe())
+    throw std::runtime_error(model.desc->name + " (" + model.desc->architecture +
+                             "): serving a mixture-of-experts model is spec 15e (chat template, "
+                             "tool calls, prefix cache); b70-decode --prefill runs it");
   // Spec 6 §10: auto plans the largest max_len that fits and re-tables the model; an
   // explicit N is held to the same plan. Both print the plan's breakdown.
   const uint32_t max_len = cli::settle(context, model, max_len_arg, mem_reserve, pp_path, kv_cache);

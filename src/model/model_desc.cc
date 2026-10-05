@@ -238,8 +238,8 @@ ModelDesc make_qwen38() {
 // are Qwen3.5's (`linear_attn.` / `self_attn.`), so no name map. tokenizer_config's
 // added tokens end at 248076: vocab_used 248077, as Qwen3.8's.
 //
-// **Loadable for decode from spec 15c** (`require_prefill` refuses prefill until
-// 15d). The int4 rows' tuning is PROVISIONAL - copied from Qwen3.8's map so every
+// **Loadable for decode from spec 15c, prefill from spec 15d** (the grouped experts on
+// the L0 backends). The int4 rows' tuning is PROVISIONAL - copied from Qwen3.8's map so every
 // S divides K/64 (2048 / 64 = 32, 4096 / 64 = 64, 512 / 64 = 8) and
 // Capture::check_sizes's baked S pairings (qkv||z S1, gate||up S8, qkv S2) hold -
 // until 15c's P0 measures them. The GateUp / Down rows (the shared expert) are not
@@ -387,12 +387,20 @@ void require_loadable(const ModelDesc& d) {
 }
 
 void require_prefill(const ModelDesc& d) {
-  if (d.is_moe())
-    throw std::runtime_error(d.name + " (" + d.architecture +
-                             "): prefill of a mixture-of-experts model is spec 15d (grouped "
-                             "expert GEMMs) and not built yet; this engine decodes it - feed "
-                             "the prompt through the decode list (b70-decode --ids without "
-                             "--prefill, Engine::ingest)");
+  if (!d.is_moe()) return;
+  // Spec 15d: what the prefill MoE kernels are written for (src/kernels/prefill/pf_moe.cl,
+  // pf_moe_gemm.cl) on top of require_loadable's shape: the hidden size whole 1024-k
+  // rotation blocks (the h8 gate||up) and 256-column work-groups (down, the combine), a
+  // block's gate||up whole 256-column work-groups, the expert width whole k-groups.
+  const MoeDesc& m = d.moe;
+  if (d.hidden % 1024 != 0 || (2 * m.expert_intermediate) % 256 != 0 ||
+      m.expert_intermediate % 64 != 0)
+    throw std::runtime_error(d.name + " (" + d.architecture + "): this MoE shape (hidden " +
+                             std::to_string(d.hidden) + ", expert " +
+                             std::to_string(m.expert_intermediate) +
+                             ") is not implemented on the prefill path: spec 15d's grouped "
+                             "GEMMs take a hidden size of whole 1024-k blocks and an expert "
+                             "width of whole 128-column pairs; decode it instead (Engine::ingest)");
 }
 
 }  // namespace model
