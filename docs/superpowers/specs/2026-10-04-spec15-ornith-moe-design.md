@@ -356,3 +356,91 @@ MoE model by name. `b70-serve` still refuses a MoE model (serving is 15e); MTP s
 **Not built:** the SLM-fused dequant arm (plan Task 1), h8 for the experts' down, prefetch / split
 barriers in the grouped GEMM, the int8 KV cache's prefill at Ornith's shapes, the composed
 attention's fp32-q identity prep at Ornith's shapes.
+
+
+## 12. Amendment - 2026-10-05: 15e as built blind (Mac; box pending)
+
+Branch `spec15e-ornith-serving` (plan 15e Tasks 1-2; Task 3 - A4, prefix caching on the card,
+passkey, the comparison rows, the record - is box work). Nothing here has run on the card.
+Validation: `box-validation-queue.md` entry 16.
+
+**The chat template (Review Focus 1).** Ornith's `chat_template.jinja` is **Qwen3.5's, not
+Qwen3.8's** (sha256 `182e77dd...`; Qwen3.8's / Agnes's is `c3cf9e34...`): no reasoning-effort
+block, every assistant turn renders its `<think>` block (Qwen3.8 drops it before the last user
+turn unless `preserve_thinking`), and `tool_call.arguments is defined` without the `!= ''` test.
+The tool-call format it advertises is the same Qwen XML (`<tool_call>\n<function=...>\n
+<parameter=...>`) that `src/server/toolcall.cc` parses: no parser change. Its
+`tokenizer_config.json` embeds an older template (with `preserve_thinking`); transformers loads
+`chat_template.jinja` over it, and so does the engine. The one `is undefined` test is spelled
+`is not defined` for minja (keyed by the source's sha256, like Qwen3.8's fallback). Rendered by
+the engine on six message lists (plain, thinking, tools, a tool call in history, tool responses,
+two calls in one turn) **byte-identical to transformers 5.18.0** (`template_ornith_test`; the two
+template files vendored at `tests/tokenizer/ornith/`, MIT, revision `10fbf86f`); the server over
+that template (`ornith_server_test`, mock engine): the engine's prompt is transformers' render,
+an Ornith-format tool call comes back as an OpenAI tool call buffered and streamed, reasoning
+splits at `</think>`. EOS: `generation_config.json`'s `[248046, 248044]`.
+
+**The tokenizer.** `tokenizer_config.json`'s added tokens are Qwen3.8's (248044..248076,
+identical), but Ornith's `tokenizer.json` (12,807,982 B against Qwen3.8's 12,809,320) stops its
+added tokens at `</think>` (248069): the seven audio specials 248070..248076 are missing, so the
+Rust tokenizer counts 248070 ids. The greedy argmax masks from the descriptor's 248077 (15c),
+sampling from the tokenizer's 248070; `b70-serve` says so at startup. Whether the merges / vocab
+differ beyond that was not checked (the file is 12.8 MB; a box-side diff is in the queue row).
+
+**`b70-serve` serves Ornith.** The MoE refusal is gone. `--max-len auto` and the memory plan carry
+the MoE terms since 15c / 15d and, with `--mtp`, the head's weights and buffers (below);
+`--prefix-cache-gb auto` is host-RAM only. Prefix-cache entries are in-process, sized from the
+engine (`state_bytes` 70,778,880 B + 4,096 with the head: 30 GDN states, conv rings, h; KV 20 KiB
+per position, 22 KiB with the head's layer), keyed by the id chain under the KV form - one model
+per process, so no model key is needed. `--kv-cache int8` is not built at Ornith's heads (12b's
+binaries are Qwen3.8's): capture names the missing binary.
+
+**The MTP head, as read** (the published checkpoint's shard 16 header, 2026-10-05): 785 bf16
+tensors, 1,689,281,536 B - `mtp.fc` [2048][4096], `pre_fc_norm_{embedding,hidden}`, one
+full-attention layer (q_proj [8192][2048] = 16 heads x (q || gate), k / v [512][2048], o
+[2048][4096], q_norm / k_norm, the two layer norms), `mtp.norm`, and as its FFN **one MoE layer
+of the main model's shape**: `mlp.gate` [256][2048], **per-expert** `mlp.experts.E.{gate,up}_proj`
+[512][2048] / `down_proj` [2048][512] (not the main layers' fused 3D tensors), the shared expert
+and `shared_expert_gate` [1][2048] - vLLM's `Qwen3_5MoeMTP` (a `Qwen3_5DecoderLayer` with the
+MoE block, `mtp_num_hidden_layers` 1). `ModelDesc::mtp_head_moe()`, `mtp_checkpoint_bytes()` /
+`_tensors()`.
+
+**Its device form.** fc, q||k||v and o bf16 as the dense head's; the MoE layer in exactly the
+main layers' form (`loader::MoeLayer`: router || gate rows, 257 int4 g64 layout-1 blocks of
+gate||up and down) so `moe.cl` runs it. **Decision: the head's bf16 experts are quantised at load,
+round to nearest, int4 g64 symmetric** (`loader/rtn.h`: GPTQ's formula, scale 2 amax / 15 stored
+as f16, q = clamp(rint(w / s) + 8, 0, 15) on the stored scale) - an AutoRound export of the main
+model leaves `mtp.*` as it found it, the kernels read int4, and the head only drafts: its
+quantisation can move acceptance, never output (verify decides every token, M3). An expert the
+checkpoint ships int4 is repacked as shipped, linear by linear; the main layers keep refusing bf16
+experts. 501,990,464 B on the card (`loader::mtp_head_bytes`); the 771 RTN linears are timed in
+the load report (derived: a few seconds of host time, unmeasured).
+
+**The lists.** The draft list runs the head's MoE layer through `moe_block()` on the MoE
+scratch's last layer slot (the slot 15c reserved): **24 launches** (the dense head's 23 with the
+4-launch MoE block for gate||up, SiLU, down; `draft_launches`). The verify lists are Ornith's
+decode list at M rows plus the head's KV fill: **536 launches at every M** (`verify_launches`);
+both counts are asserted by the walks. **`moe.cl` needed no change for M > 1**: every buffer is
+indexed by the row's own group id and nothing depends on M but the grid, so an M-row launch
+routes each row exactly as M = 1 does (Review Focus 3) - shown on the Mac's GPU at M = 4, in
+order and with the rows reversed, bitwise (`moe_run`, indicative), and gated on the card by
+`moe_m_test` and `ornith_mtp_test` (M2: logits rows, GDN slots and all 40 layers' route rows
+bitwise). New binaries only (kernels' 15e block, `tools/kernel_cmdlines` 378 -> 458 on this base,
+none moved): Ornith's decode list at M = 2..4 (`moe_M{2,3,4}`, the GEMVs, norms, attention, the
+lm_head forms), `gdn_step_slots_M{1..4}_G30_GK16V32` (SPEC_SLOT_STRIDE 15,728,640 floats), the
+head front at Ornith's shapes, the draft vocabulary's compact heads at K 2048; prefill's head KV
+fill (`step_mtp_kv` on a MoE model: its final norm folds nothing, SP0) with `pf_bf16_slab` at
+K 4096 / 2048. `ornith_mtp_names_test` holds every bound name against the built ones (host).
+
+**Memory (derived).** With `--mtp`, at 262144 and the int8 head: model 20.020 GB (the head
++0.502), decode state 0.824 (the head's buffers 0.729: three 62.9 MB GDN slots, one 2-kv-head KV
+layer 0.537 GB, rows), total 27.36 GB + the 1.5 GB reserve on the l0-int8 path - **the full
+trained context still fits with MTP** (`ornith_mtp_head_test`).
+
+**Not decided blind (Review Focus 2).** The verify cost at K = 1..3 on Ornith - up to 8 x (K + 1)
+distinct experts, on a launch-bound step - is unmeasured; `--mtp auto` uses Qwen3.8's cost table
+and says so at startup until the box records Ornith's (`ornith_mtp_test` prints acceptance and
+ms/id per K; `probe_mtp_steps` prices the table). No default K is chosen for Ornith.
+
+**Not built:** the int8 KV cache at Ornith's heads; an int4-checkpoint lm_head at M > 1 (as for
+Qwen3.8); `--spec lookup` is untouched (it works on Ornith wherever the verify lists do).
