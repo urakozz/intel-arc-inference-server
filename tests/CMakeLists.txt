@@ -1682,3 +1682,34 @@ if(B70_ORNITH)
   endforeach()
 
 endif()
+
+# ==== Spec 18b: K2-Horizon decode (label `k2`) ============================ (begin) ====
+# One delimited block for every K2 registration, so the branches in flight (spec 15d's
+# Ornith prefill beside it) never edit the same lines. Host tests first (they run on the
+# Mac: tools/mac_check.sh), then the card's (box only; docs/superpowers/plans/
+# box-validation-queue.md has the order).
+set(B70_K2_SNAPSHOT "urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ"
+  CACHE STRING "K2-Horizon int4 checkpoint (repo id resolved in the HF cache, or a snapshot directory)")
+
+# Task 1: the model table, the RoPE table, the loader's host half on a synthetic fixture.
+add_executable(k2_horizon_test model/k2_horizon_test.cc)
+target_include_directories(k2_horizon_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(k2_horizon_test PRIVATE b70_k2_model)
+add_test(NAME k2_horizon_test COMMAND k2_horizon_test ${CMAKE_SOURCE_DIR}/tests/model/k2_config.json)
+add_executable(k2_rope_test loader/k2_rope_test.cc)
+target_include_directories(k2_rope_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(k2_rope_test PRIVATE b70_k2_loader)
+add_test(NAME k2_rope_test COMMAND k2_rope_test)
+add_executable(k2_repack_test loader/k2_repack_test.cc)
+target_include_directories(k2_repack_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(k2_repack_test PRIVATE b70_k2_loader)
+add_test(NAME k2_repack_test COMMAND k2_repack_test ${CMAKE_SOURCE_DIR}/tests/model/k2_config.json)
+# ... and the real checkpoint on the card: every bucket, readbacks (both head forms).
+add_executable(k2_load_checkpoint_test loader/k2_load_checkpoint_test.cc)
+target_include_directories(k2_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(k2_load_checkpoint_test PRIVATE b70_k2_loader b70_l0)
+add_test(NAME k2_load_checkpoint_test COMMAND k2_load_checkpoint_test ${B70_K2_SNAPSHOT})
+add_test(NAME k2_load_checkpoint_i8head_test COMMAND k2_load_checkpoint_test ${B70_K2_SNAPSHOT} int8)
+set_tests_properties(k2_load_checkpoint_test k2_load_checkpoint_i8head_test PROPERTIES
+  LABELS "checkpoint;k2" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+# ==== Spec 18b: K2-Horizon decode ========================================== (end) ====
