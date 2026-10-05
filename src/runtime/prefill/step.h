@@ -36,10 +36,14 @@ class Int8State;   // runtime/prefill/int8.h, spec 5's h8 path
 // L0Int8. Every int4 linear's column scales must already be in it (`Engine::prefill`
 // builds them before the first chunk): `Int8State::scales` on a new weight waits on
 // the host, which a recorded chunk must never contain.
+//
+// `kv` (spec 12b) is kv_k_mem / kv_v_mem's layout (PersistentBuffers::kv_lay): at int8 the
+// FA layers write and read the int8 rows and scales through attn_*_kv8 (one launch each,
+// as the bf16 flash path), on the L0 backends' flash attention only.
 void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m,
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C,
                 l0::Mem& gdn_state_mem, l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem,
-                l0::Mem& kv_v_mem, PrefillBackend backend, Int8State* q);
+                l0::Mem& kv_v_mem, const KvLayout& kv, PrefillBackend backend, Int8State* q);
 
 // The tail only the LAST chunk runs: the final norm on the last row, `lm_head`
 // at M = 1 through the EXISTING decode binary, and the two argmax stages --
@@ -62,9 +66,10 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Lo
 // input_layernorm, the k||v slabs of q||k||v, attn_prep), which is all a later draft
 // reads. `hctl` must hold pos = max(pos, 1) - 1 and n_active = the row count (the
 // caller sets both, like Control before step_chunk). L0 backends only (pf_gemm).
+// `kv` is the head's one layer (MtpBuffers::kv_lay.layer(...)): bf16, or (spec 12b) the
+// int8 rows and scales, written by attn_prep_chunk_kv8.
 void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m,
-                 void* hctl, uint32_t pos, uint32_t C, uint16_t* hid, uint16_t* kv_k,
-                 uint16_t* kv_v);
+                 void* hctl, uint32_t pos, uint32_t C, uint16_t* hid, const KvLayer& kv);
 // Rows step_mtp_kv runs the head over, and its L0 launches (for the arithmetic).
 inline uint32_t mtp_kv_rows(uint32_t pos, uint32_t C) { return pos == 0 ? C - 1 : C; }
 size_t step_mtp_kv_launches(uint32_t pos, uint32_t C);

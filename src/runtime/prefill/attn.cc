@@ -217,4 +217,59 @@ void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
             {PtrArg(s.pf_o.ptr()), PtrArg(qkv_partials), PtrArg(out), arg_val(stride_h)});
 }
 
+// --- spec 12b: the int8 KV cache -------------------------------------------------------
+
+void require_kv8_path(PrefillBackend backend) {
+  if (!is_l0(backend))
+    throw std::runtime_error(
+        "runtime::prefill: --kv-cache int8 prefills on the L0 backends only (l0, l0-int8): "
+        "sycl-tla's attention is the composed bf16 path, which has no int8 form");
+  if (attn_mode() != AttnMode::Flash)
+    throw std::runtime_error(
+        "runtime::prefill: --kv-cache int8 prefills through the flash attention only: "
+        "B70_PREFILL_ATTN=composed is the bf16-KV reference - unset it or use --kv-cache bf16");
+}
+
+void attn_prep_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, void* ctrl,
+                         const float* qkv_partials, const float* fa_small, const float* rope,
+                         const KvLayer& kv) {
+  require(kv.int8(), "attn_prep_chunk_kv8 needs the int8 cache's scales");
+  const uint32_t q_heads = s.desc().fa_q_heads, kv_heads = s.desc().fa_kv_heads;
+  // kv8.cl's attn_prep_kv8 at PF = 1: grid (q-heads + kv-heads, C), no gate (null, as for
+  // pf_attn_prep_q16), bf16 rotated q into pf_q, the int8 rows and scales.
+  cx.launch(kc(kernels::pf_attn_prep_kv8_variant(q_heads, kv_heads), "attn_prep_kv8"),
+            q_heads + kv_heads, C, 1,
+            {PtrArg(ctrl), PtrArg(qkv_partials), PtrArg(fa_small), PtrArg(rope),
+             PtrArg(s.pf_q.ptr()), PtrArg(nullptr), PtrArg(kv.k), PtrArg(kv.v), PtrArg(kv.ks),
+             PtrArg(kv.vs)});
+}
+
+void attn_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
+                    const uint16_t* q, const KvLayer& kv, PrefillBackend backend) {
+  require(C > 0 && C <= PrefillScratch::kC, "C = " + std::to_string(C) + " is outside (0, kC]");
+  require(kv.int8(), "attn_chunk_kv8 needs the int8 cache's scales");
+  require_kv8_path(backend);
+  const uint32_t q_heads = s.desc().fa_q_heads, kv_heads = s.desc().fa_kv_heads;
+  require(pos + C <= s.max_len, "pos + C = " + std::to_string(pos + C) + " exceeds max_len " +
+                                    std::to_string(s.max_len));
+  // pf_flash_attn's launch, unchanged in shape: grid (ceil(C / 8), kv-heads, 1), pf_o's
+  // [q-heads][rows][256] at rows = pad256(C). The kernel reads cache rows [0, pos + C) only.
+  const uint32_t rows = attn_rows(C, backend);
+  require(s.pf_o.size() >= size_t(q_heads) * rows * kHeadDim * sizeof(float), "pf_o is undersized");
+  cx.launch(kc(kernels::pf_flash_attn_kv8_variant(q_heads, kv_heads), "pf_flash_attn_kv8"),
+            (C + 7u) / 8u, kv_heads, 1,
+            {PtrArg(q), PtrArg(kv.k), PtrArg(kv.ks), PtrArg(kv.v), PtrArg(kv.vs),
+             PtrArg(s.pf_o.ptr()), arg_val(pos), arg_val(C), arg_val(rows)});
+  profile_wait(cx, Phase::kAttnFlash);
+}
+
+void attn_gate_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C,
+                         uint32_t rows, const float* qkv_partials, uint16_t* out) {
+  const uint32_t stride_h = uint32_t(size_t(rows) * kHeadDim);
+  const uint32_t q_heads = s.desc().fa_q_heads;
+  cx.launch(kc(kernels::pf_attn_gate_kv8_variant(q_heads, s.desc().fa_kv_heads), "pf_attn_gate_kv8"),
+            q_heads, C, 1,
+            {PtrArg(s.pf_o.ptr()), PtrArg(qkv_partials), PtrArg(out), arg_val(stride_h)});
+}
+
 }  // namespace runtime::prefill

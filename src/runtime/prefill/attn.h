@@ -113,6 +113,22 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
 void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, uint32_t rows,
                      const float* qkv_partials, uint16_t* out);
 
+// Spec 12b (`--kv-cache int8`): the same three steps over the int8 KV cache, one launch
+// each, from src/kernels/kv8.cl. `kv` is one FA layer's int8 rows and fp16 scales
+// (KvLayout::layer). The writer is pf_attn_prep_q16's chain then rotkv's rotation and
+// quantiser (pf_q holds the ROTATED q); the attention is pf_flash_attn's over int8 + scales
+// (its output still rotated, in pf_o); the gate un-rotates each head first. There is no
+// int8 form of the composed path or of sycl-tla: `require_kv8_path` refuses them, so an
+// int8 cache is never read as bf16.
+void require_kv8_path(PrefillBackend backend);
+void attn_prep_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, void* ctrl,
+                         const float* qkv_partials, const float* fa_small, const float* rope,
+                         const KvLayer& kv);
+void attn_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
+                    const uint16_t* q, const KvLayer& kv, PrefillBackend backend);
+void attn_gate_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C,
+                         uint32_t rows, const float* qkv_partials, uint16_t* out);
+
 // The L0 launches each appends -- the SYCL GEMMs are not on the L0 list and do
 // not move `Context::launches()`. Task 14's launch arithmetic reads these.
 inline constexpr size_t kAttnPrepLaunches = 1;
