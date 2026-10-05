@@ -6,6 +6,7 @@
 #include "l0/memory.h"
 #include "model/model_desc.h"
 #include "model/qwen35.h"
+#include "runtime/buffer_sizes.h"
 
 namespace l0 {
 class CmdList;
@@ -31,11 +32,15 @@ namespace runtime {
 // `Engine::prefill()`. A decode-only Engine therefore has byte-identical device
 // residency to today's, which is what makes spec §6.5 ("decode is untouched")
 // checkable rather than argued.
+//
+// **The sizes come from runtime/buffer_sizes.h** (spec 6 §10, max_len auto): each
+// struct inherits its constants and a static `sizes(max_len, desc)` from a `*Dims`
+// base there, and its constructor allocates exactly what `sizes()` returns - the one
+// formula the memory planner (runtime/memory_plan.h) adds up before allocating.
 
 // Everything that survives a token boundary. Layouts are decode's, unchanged.
-struct PersistentBuffers {
-  static constexpr uint32_t kConvRing = 16;   // ring depth >= M + 3 (spec §9.4)
-
+// kConvRing = 16 (ring depth >= M + 3, spec §9.4): PersistentDims.
+struct PersistentBuffers : PersistentDims {
   // Spec 14: per-layer state is sized from the model descriptor (gdn_layers,
   // fa_layers); there is no default - a caller has to say which model.
   PersistentBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
@@ -52,71 +57,16 @@ struct PersistentBuffers {
   // them. It is one place, so "reset writes exactly what construction wrote"
   // is a property of the code rather than of two lists agreeing.
   void zero(l0::CmdList& imm);
+
+ private:
+  // The public constructor delegates here with sizes(max_len, desc).
+  PersistentBuffers(l0::Context& ctx, uint32_t max_len, const PersistentSizes& s);
 };
 
 // Decode's per-step scratch. Field names, sizes and allocation order unchanged.
-struct DecodeScratch {
-  static constexpr uint32_t kM = 8;
-  // KV positions per `attn_decode` work-group - spec 1.5's lever L5 took it
-  // from 256 to 64. It is the ONE home for the number on the host: `attn_part`
-  // below is strided by `max_len / kAttnBlock` blocks, capture.cc launches
-  // `attn_decode` with exactly that many, and it is the `_B64` half of both
-  // compiled variant names (`kernels::attn_decode_variant`), so a value here
-  // that no compiled binary matches throws at capture instead of striding
-  // `attn_part` at one size while the kernel writes it at another.
-  //
-  // **One home on the host, three in the tree - and the only thing binding them
-  // needs a GPU.** The same 64 also lives in `src/kernels/CMakeLists.txt`
-  // (`ATTN_BLOCK`, which compiles it into the kernel and into the binary's
-  // name) and in `tests/kernels/attn_ref.h` (`attn_ref::kBlock`, which the
-  // reference walks blocks with). Nothing checks the three against each other
-  // at compile time: the guard is the missing-binary throw described above, and
-  // that throw fires at CAPTURE - it needs a device, a loaded model and a
-  // built kernel set, so a CPU-only build or a host-side review sees a
-  // disagreement not at all. `kNormGroups` below has exactly the same shape
-  // (here, CMake's `FOLD_G`/`NORM_G`, and `prep.cl`'s own `#define FOLD_G 20`
-  // fallback). A device-free cross-check - a static_assert or a generated
-  // header - is recorded as spec-1.6 work and is deliberately NOT added here.
-  //
-  // **64 is measured, not derived - but it is not a knee either.** docs/15 §2's
-  // `F + fill·P` fit predicted 214.5 µs/launch at a 128-position block; the
-  // retile measured 296.684. So the block size was swept in situ at depth 4096
-  // instead - `attn_decode` µs/launch, then the attn family's ms/token:
-  //
-  //     B256 369.988 / 6.058   B128 296.684 / 4.931
-  //     B64  224.046 / 3.839   B32  203.837 / 3.769
-  //
-  // B32's family total is **0.070 ms/token better than B64**, so there is no
-  // crossover to point at: the step-Σ difference that once looked like one
-  // (+19.5 µs) is inside the +0.283% drift the untouched launches showed
-  // between those two runs. 64 is chosen because the marginal gain has
-  // collapsed (−1.127, −1.092, −0.070 ms/token for the three halvings, the last
-  // about a third of one run's drift), because `attn_reduce` is on a steep ramp
-  // (80 → 127 → 196 → 450 µs/step), and because B32 would double `attn_part`
-  // again - 50.7 → 101.4 MB, per-step scratch 77.6 → 128.3 MB - to buy that
-  // 0.070 ms. docs/12 `attn` → Measured carries the arithmetic.
-  static constexpr uint32_t kAttnBlock = 64;
-  // Spec 10 (plan 10b): decode attention v2's work-groups per kv head, TGT in
-  // src/kernels/attn_v2.cl and `_T32` in its variant name. v2 walks a row of L keys in
-  // blocks of max(64, roundup64(ceil(L / 32))) positions, so no row has more than 32
-  // partials: v2 uses attn_part's first 24 x 32 x M x 258 floats, which fits inside
-  // v1's [24][max_len / kAttnBlock][M][258] allocation for every max_len >= 2048 -
-  // attn_part keeps v1's size while v1 stays selectable (buffers_test pins both).
-  static constexpr uint32_t kAttnV2Blocks = 32;
-  // **prep_res_norm's two-stage grid** (spec 1.5 lever L1). Stage A
-  // (`prep_res_fold`) runs this many work-groups over the hidden row and writes
-  // one fp32 sum-of-squares each; stage B (`prep_norm_finish`) folds exactly
-  // these, in ascending index order, into the rms. It is the ONE home for the
-  // number: `norm_sumsq` below is sized from it, src/runtime/capture.cc
-  // launches both grids from it AND puts it in both variant names
-  // (`kernels::prep_res_fold_variant`), so a change here that no compiled
-  // binary matches throws at capture instead of reducing the wrong count.
-  //
-  // 20 at kHidden = 5120 is one element per lane in a 256-lane work-group:
-  // 320 subgroups against the single-work-group kernel's 16, which is the axis
-  // docs/15 §L2 measured as the one that pays.
-  static constexpr uint32_t kNormGroups = 20;
-
+struct DecodeScratch : DecodeScratchDims {
+  // kM, kAttnBlock, kAttnV2Blocks and kNormGroups - each with the measurement that
+  // chose it - are DecodeScratchDims's (runtime/buffer_sizes.h).
   DecodeScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
 
   // Spec 15b: hidden, head counts and widths are the descriptor's (Qwen3.8 in brackets).
@@ -134,6 +84,9 @@ struct DecodeScratch {
   l0::Mem argmax_part;    // fp32+idx pairs, stage-1 output: [M][243][2]
 
   size_t bytes() const;
+
+ private:
+  DecodeScratch(l0::Context& ctx, const DecodeScratchSizes& s);   // the delegate
 };
 
 // The prefill path's per-chunk scratch. Every size is derived from
@@ -159,10 +112,8 @@ struct DecodeScratch {
 // absent: the batched-GEMM probe (`docs/probe-gemm-batched-2026-09-05.md`)
 // measured `transB` native and bitwise identical to a packed operand, so the
 // transpose fallback is not built.
-struct PrefillScratch {
-  static constexpr uint32_t kC = 2048;               // ruling A13 (was 4096)
-  static constexpr uint32_t kGdnChunk = 64;          // the FLA intra-chunk size
-  static constexpr uint32_t kNormGroups = DecodeScratch::kNormGroups;
+struct PrefillScratch : PrefillScratchDims {
+  // kC = 2048 (ruling A13), kGdnChunk = 64 and kNormGroups: PrefillScratchDims.
 
   PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
 
@@ -220,6 +171,8 @@ struct PrefillScratch {
   size_t lazy_bytes() const;   // whichever of the four exist
 
  private:
+  PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
+                 const PrefillScratchSizes& s);   // the delegate
   l0::Context* ctx_;
   const model::ModelDesc* desc_;
   std::unique_ptr<l0::Mem> dequant_, slab_, pf_s_, pf_p_;
@@ -241,9 +194,8 @@ struct PrefillScratch {
 //              hidden at the last consumed position; rows 1..M = the verify rows' hidden.
 //   dh         bf16 [5120]: the draft chain's hidden (the head's own post-mtp.norm output).
 //   logits     fp32 [kMaxK][kVocab]: draft i's logits (q_i for the host sampler).
-struct MtpBuffers {
-  static constexpr uint32_t kSlots = 4;   // M <= 4: K <= 3 drafts + the pending token
-  static constexpr uint32_t kMaxK = kSlots - 1;
+struct MtpBuffers : MtpDims {
+  // kSlots = 4 (M <= 4: K <= 3 drafts + the pending token), kMaxK = 3: MtpDims.
 
   MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
 
@@ -259,6 +211,9 @@ struct MtpBuffers {
   // What Engine::reset() zeroes when MTP is on (all of it: the head's KV rows are
   // only ever read after being written, but a reset session must not depend on it).
   void zero(l0::CmdList& imm);
+
+ private:
+  MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s);   // the delegate
 };
 
 // The VIEW. Every public name capture.cc uses, with the same types as before

@@ -97,6 +97,8 @@ if(B70_PREFILL_ENABLED)
       # the host archive, and the host archive pulls in b70_runtime.
       -DB70_PREFILL_HOST_LIB=$<TARGET_FILE:b70_prefill_host>
       -DB70_RUNTIME_LIB=$<TARGET_FILE:b70_runtime>
+      # spec 6 §10: b70_runtime's buffer sizes live in the device-free b70_plan archive.
+      -DB70_PLAN_LIB=$<TARGET_FILE:b70_plan>
       -DB70_SYCL_TLA_SRC_DIR=${B70_SYCL_TLA_SRC_DIR}
       -DB70_SYCL_TLA_REVISION=${B70_SYCL_TLA_REVISION}
       -DB70_SYCL_AOT_256_GRF=${B70_SYCL_AOT_256_GRF}
