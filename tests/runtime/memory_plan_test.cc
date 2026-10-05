@@ -126,6 +126,58 @@ void check_sizes_agnes() {
            size_t{8} * (54 * (16384 + 5120 + 38912 + 5120) + 18 * (14336 + 5120 + 38912 + 5120)));
 }
 
+// Spec 15c: Ornith 1.5 35B-A3B with the int8 head, derived from the descriptor (no int4
+// checkpoint exists yet): 30 GDN layers x (qkv||z 2048 x 12288 int4 + scales 13,369,344,
+// out_proj 4096 x 2048 4,456,448, a||b bf16 128 x 2048 524,288 with its padding, norms
+// 16,384, GDN block 131,584) + 10 FA layers x (q||k||v 2048 x 9216 10,027,008, o_proj
+// 4,456,448, norms 16,384, FA block 2,048) + 40 MoE layers x 430,604,288
+// (loader::moe_layer_bytes) + embed 248320 x 2048 x 2 + the int8 head 2048 x 248320 +
+// 248320 x 4 + the final norm 8,192.
+constexpr size_t kOrnithInt8Weights = 30ull * 18498048 + 10ull * 14501888 + 40ull * 430604288 +
+                                      1017118720ull + 509552640ull + 8192;   // 19,450,811,392
+
+void check_sizes_ornith() {
+  const model::ModelDesc& o = model::ornith();
+  const runtime::PersistentSizes p = runtime::PersistentDims::sizes(16384, o);
+  CHECK_EQ(p.gdn_state, size_t{30} * 32 * 128 * 128 * 4);          //  62,914,560
+  CHECK_EQ(p.conv_ring, size_t{30} * 16 * 8192 * 2);               //   7,864,320
+  // 20 KiB of KV per position (spec 15 §2): 10 FA layers x 2 kv-heads x 256 x bf16, K and V.
+  CHECK_EQ(runtime::PersistentDims::sizes(1, o).kv_k * 2, size_t{20} * 1024);
+  // The MoE scratch (runtime::moe_scratch_layout): router logits and route rows per layer
+  // slot (40 + the MTP head's), the slots' SiLU x up rows once.
+  const runtime::MoeScratchLayout ml = runtime::moe_scratch_layout(o);
+  CHECK_EQ(ml.layer_slots, uint32_t(41));
+  CHECK_EQ(ml.logits_layer, size_t{8} * 272 * 4);                  // [kM][router_n] fp32
+  CHECK_EQ(ml.route_layer, size_t{8} * 32 * 4);                     // [kM][32] u32
+  CHECK_EQ(ml.route_off, size_t{41} * 8704);
+  CHECK_EQ(ml.h_off, size_t{41} * (8704 + 1024));
+  CHECK_EQ(ml.h, size_t{8} * 9 * 512 * 2);                          // [kM][slots][512] bf16
+  CHECK_EQ(ml.total, size_t{472576});
+  CHECK_EQ(ml.route_at(40), ml.route_off + 40 * size_t{1024});
+  const runtime::DecodeScratchSizes d = runtime::DecodeScratchDims::sizes(16384, o);
+  CHECK_EQ(d.moe, size_t{472576});
+  CHECK_EQ(d.x, size_t{8} * 4096 * 2);                              // 2 x hidden > 512
+  CHECK_EQ(d.attn_part, size_t{16} * 32 * 8 * 258 * 4);             // v2 at 16 q-heads
+  // Dense models carry no MoE scratch: their sizes are what they were.
+  CHECK_EQ(runtime::DecodeScratchDims::sizes(16384, model::qwen38()).moe, size_t{0});
+  CHECK_EQ(runtime::moe_scratch_layout(model::agnes()).total, size_t{0});
+  // The plan (decode only: Ornith's prefill is spec 15d) carries both MoE terms, and the
+  // full trained context fits the card with the default reserve (spec 15 §2: "262k
+  // context fits", derived).
+  runtime::PrefillPath decode_only;
+  decode_only.prefill = false;
+  const runtime::MemoryPlan pl = runtime::plan(o, 262144, false, kOrnithInt8Weights, decode_only);
+  CHECK_EQ(pl.moe_weights, size_t{17224171520ull});
+  CHECK_EQ(pl.moe_scratch, size_t{472576});
+  CHECK_EQ(pl.kv, size_t{262144} * 20 * 1024);
+  CHECK_EQ(pl.prefill_scratch, size_t{0});
+  CHECK_EQ(runtime::max_len_that_fits(o, false, kOrnithInt8Weights, kDevice, kReserve, kTrained,
+                                      decode_only),
+           kTrained);
+  std::printf("ornith (int8 head, decode only): %s\n",
+              runtime::describe(pl, kDevice, kReserve).c_str());
+}
+
 // Spec 6 §8.4, measured on the card at 131072 (bf16 head, l0-int8, no MTP, before the
 // first prefill): "memory: model 18.116 GB, kv 8.590 GB, decode state 0.590 GB,
 // prefill scratch 0.700 GB, int8 0.085 GB, total 28.081 GB of 32.530 GB".
@@ -299,6 +351,7 @@ void check_draft_vocab() {
 int main() {
   check_sizes_qwen38();
   check_sizes_agnes();
+  check_sizes_ornith();
   check_spec6_line();
   check_paths();
   check_max_len_that_fits();

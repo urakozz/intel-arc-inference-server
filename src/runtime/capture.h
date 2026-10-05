@@ -122,6 +122,14 @@ CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers
                    l0::Mem* debug_resid = nullptr, ProfileEvents* prof = nullptr,
                    uint32_t M = 1);
 
+// The decode list's launch count (`CapturedStep::kernel_count` of `build`), which the
+// walk asserts on itself: embed_gather, 12 per dense layer (the input norm pair, the
+// mixer's 5, the post norm pair, gate||up + SiLU + down) or 13 per MoE layer (spec 15c:
+// the router GEMV, moe_route, moe_gate_up, moe_down in place of the dense MLP's 3), and
+// 5 at the boundary (the final norm pair, lm_head, the two argmax stages). Qwen3.8 774,
+// Agnes 870, Ornith 526.
+size_t decode_launches(const model::ModelDesc& d);
+
 // Spec 8 (plan 8b), MTP on only (`m.mtp` loaded, `mtp` allocated).
 //
 // build_verify: the decode list at M rows (positions pos .. pos + M - 1, ids

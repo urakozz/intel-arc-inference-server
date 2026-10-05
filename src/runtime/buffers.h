@@ -82,6 +82,9 @@ struct DecodeScratch : DecodeScratchDims {
   l0::Mem attn_out;       // bf16 [M][6144]
   l0::Mem logits;         // fp32 [M][248320] = 7.95 MB
   l0::Mem argmax_part;    // fp32+idx pairs, stage-1 output: [M][243][2]
+  // Spec 15c: a MoE model's router logits, route rows and SiLU x up rows - one
+  // allocation at runtime::moe_scratch_layout's offsets; null on a dense model.
+  std::unique_ptr<l0::Mem> moe;
 
   size_t bytes() const;
 
@@ -255,6 +258,7 @@ struct DecodeBuffers {
   // --- per-step scratch (overwritten every token) ---
   l0::Mem &resid, &x, &partials, &ab_out, &norm_sumsq, &gdn_o, &attn_q, &attn_gate,
       &attn_part, &attn_out, &logits, &argmax_part;
+  l0::Mem* moe;   // spec 15c: DecodeScratch::moe, null on a dense model
   uint32_t max_len;
 
   size_t persistent_bytes() const;   // printed at startup, asserted by the test

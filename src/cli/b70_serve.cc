@@ -22,6 +22,7 @@
 #include "loader/loader.h"
 #include "loader/snapshot.h"
 #include "loader/trained_context.h"
+#include "model/model_desc.h"
 #include "model/qwen35.h"
 #include "runtime/engine.h"
 #include "runtime/prefill/backend.h"
@@ -323,6 +324,9 @@ int run(int argc, char** argv) {
     return loader::load(context, snapshot_dir, cli::load_len(max_len_arg, trained),
                         /*mtp=*/mtp_k > 0, lm_head, dv_spec);
   }();
+  // Spec 15c: the server prefills every request; a model whose prefill is not built
+  // (Ornith: spec 15d, its serving 15e) is refused here by name.
+  model::require_prefill(*model.desc);
   // Spec 6 §10: auto plans the largest max_len that fits and re-tables the model; an
   // explicit N is held to the same plan. Both print the plan's breakdown.
   const uint32_t max_len = cli::settle(
