@@ -10,6 +10,24 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-04-spec15-ornith-moe-design.md` (§4.5, §5 R4, §6 recorded rows, §7 15e). Needs 15c and 15d merged, 15a's MTP reference dump (`oracle-out-ornith-mtp/`).
 
+**Status (2026-10-05): Tasks 1 and 2 written blind on the Mac** (branch `spec15e-ornith-serving`;
+as built: spec 15 §12). Every card-side step - Task 2's M1 / M2 / acceptance / verify cost, the
+server's greedy chat against `b70-decode`, and all of Task 3 - is box work: box-validation-queue
+row 16. Mac-side: `tools/mac_check.sh --base main --kernels` green (host tests incl.
+`template_ornith_test`, `ornith_server_test`, `ornith_mtp_head_test`, `ornith_mtp_names_test`;
+every C++ source against the Level Zero headers; 80 added kernel command lines and none moved;
+every variant through clang; `moe.cl` at M = 4 bitwise M = 1's per row on the Mac's GPU,
+indicative). Deviations from the text below, each recorded in §12:
+- **Template**: Ornith's is Qwen3.5's, not Qwen3.8's; no parser addition (the same Qwen XML tool
+  calls). Rendered byte-identical to transformers on six lists; the tokenizer.json diff found its
+  added tokens stop at `</think>` (248070 ids, the descriptor masks from 248077).
+- **The MTP head's experts ship bf16**: quantised at load (RTN int4 g64 sym) so 15c's kernels run
+  them; no new MoE kernel. `moe.cl` needed no change for M > 1 - only new `_M2..4` binaries.
+- **No default K for Ornith**: `--mtp auto` keeps Qwen3.8's cost table and says so (Review Focus
+  2 is unmeasured).
+- **The short greedy chat through the server** is the existing `golden_server_test` pointed at
+  the Ornith checkpoint by hand (it does not skip without one, so it is not registered for Ornith).
+
 ## Global Constraints
 
 - Branch `spec15e-ornith-serving` from main; box tree `~/b70-inference-server-spec15e`. Copy `tools/box.env` if missing; never commit it. Symlink `oracle-out*` dirs.
