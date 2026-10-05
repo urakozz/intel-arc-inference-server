@@ -35,7 +35,8 @@ int main(int argc, char** argv) {
     for (const std::string& v : kernels::k2::prefill_test_variants(d)) wanted.push_back(v);
   } else {
     for (bool int8 : {false, true})
-      for (const std::string& v : kernels::k2::decode_variants(d, int8)) wanted.push_back(v);
+      for (bool eager : {false, true})   // B70_K2_ATTN=flash|eager (spec 18 §10.1)
+        for (const std::string& v : kernels::k2::decode_variants(d, int8, eager)) wanted.push_back(v);
   }
   for (const std::string& v : wanted)
     if (!built.count(v)) {

@@ -569,7 +569,8 @@ endif()
 #   prep.cl         prep_res_fold at K 2560 (stage A of the grouped norm, unchanged)
 #   embed_gather.cl / argmax.cl at K2's vocabulary 250624 (fully used)
 # What K2's decode list binds (runtime/k2/k2_capture.cc): 717 launches = embed + 3 dense
-# layers x 12 + 45 MoVA/MoE layers x 15 + 5.
+# layers x 12 + 45 MoVA/MoE layers x 15 + 5; 813 under B70_K2_ATTN=eager (4 attention launches
+# a layer for flash's 2).
 option(B70_K2 "build the K2-Horizon decode variants (spec 18b)" ON)
 if(B70_K2)
   set(K2_CL ${CMAKE_CURRENT_SOURCE_DIR}/k2)
@@ -601,6 +602,10 @@ if(B70_K2)
                    DEFINES ${K2_PREP_DEFINES} QKV_N=9280 V_FROM_PARTIALS=0)
   # k2_attn.cl: decode attention v2 at head_dim 128 / GQA 4 with the softplus gate.
   add_ocloc_kernel(k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8 SOURCE ${K2_CL}/k2_attn.cl
+                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} Q_HEADS=32 KV_HEADS=8)
+  # k2_attn_eager.cl: the reference's bf16 eager chain (B70_K2_ATTN=eager, spec 18 §10) - the
+  # same defines; a new source, so k2_attn.cl's binary keeps its bytes.
+  add_ocloc_kernel(k2_attn_eager_M1_T${ATTN_V2_TGT}_Q32KV8 SOURCE ${K2_CL}/k2_attn_eager.cl
                    DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} Q_HEADS=32 KV_HEADS=8)
   # k2_moe.cl: the sigmoid router (MoVA's over the fused GEMV's v_router columns, the MoE's
   # over its bf16 GEMV), the MoE block (100 + 1 shared, top-8), MoVA's value experts.
