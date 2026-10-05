@@ -77,8 +77,9 @@ narrative, and the numbered guides cite them where they matter.
 - [probe-agnes-2026-10-03.md](probe-agnes-2026-10-03.md) - spec 14 phase 1, on the
   Mac: Agnes 3.0 Flash from its own files (72 layers, W 18.344 GB from the headers), the
   CPU reference, the parallel-FFN fold (bit-exact on the weights, C++ byte-identical to
-  Python, real layers 0/3/35/71 with synthetic inputs), the chat template identical to
-  Qwen3.8's; what is pending for the box
+  Python, real layers 0/3/35/71 on real activations: max |d| 0), the reference bit-identical
+  to `modeling_agnes.py`, the golden and MTP dumps made layer-streamed in Docker, the
+  chat template identical to Qwen3.8's; what is pending for the box
 - [probe-decode-attn-2026-09-28.md](probe-decode-attn-2026-09-28.md) - spec
   10a: decode attention at depth. P0 (69% of the step at 128k, 149 GB/s), the
   lever sweep at M = 1 and 4 on real KV, and the v2 design: device-derived
