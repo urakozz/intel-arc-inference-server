@@ -515,6 +515,14 @@ target_link_libraries(agnes_fold_test PRIVATE b70_loader)
 add_test(NAME agnes_fold_test COMMAND agnes_fold_test
   ${CMAKE_SOURCE_DIR}/tests/loader/agnes_fold_fixture.safetensors)
 
+# Spec 15c: the MoE layer repack (loader/moe.h) on a synthetic per-expert GPTQ
+# checkpoint the test writes itself (both per-expert forms, g128, the refusals) and
+# Ornith's MoE byte figures. Host only.
+add_executable(ornith_repack_test loader/ornith_repack_test.cc)
+target_include_directories(ornith_repack_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(ornith_repack_test PRIVATE b70_loader)
+add_test(NAME ornith_repack_test COMMAND ornith_repack_test)
+
 # Spec 6 §10: config.json's max_position_embeddings (text_config or top level), the
 # bound of --max-len. Host only; inline JSON.
 # b70-serve --prefix-cache-gb auto: host-only, the size rule over /proc/meminfo text.
