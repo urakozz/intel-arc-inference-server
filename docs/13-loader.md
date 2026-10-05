@@ -88,6 +88,18 @@ and everything else int4, and `load_linear` throws if a part classifies the
 other way ("the checkpoint's dynamic exclusions moved"). A regex the loader
 cannot read cannot mislead it.
 
+**Since spec 15 §13, `a‖b`'s kind is the checkpoint's, like `lm_head`'s.** The published
+Ornith int4 checkpoint (`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`) quantised
+`in_proj_a` / `in_proj_b` (int4 g64), where Qwen3.8's and Agnes's exports keep them bf16. The
+loader classifies the first GDN layer's `in_proj_a` by content (`loader/ab.h`) and takes the
+table's bf16 `AB` row or the descriptor's `ab_int4` row - the same 128-column contract, the
+real columns zero-padded with the int4 zero (nibble 8, scale +0), an S 1 layout-1 GEMV through
+`gemv.cl` that writes `ab_out` exactly where `gemv_bf16` did. Every GDN layer must agree (a
+layer in the other form still throws, by name). For prefill the loader keeps a bf16 copy
+dequantised once with the prefill dequant's arithmetic (`LoadedModel::ab_prefill`, in
+`total()`, not per-token), which `pf_ab_proj` reads unchanged. The padded int4 columns are
+`pad` bytes, like the bf16 row's zero rows.
+
 `QuantConfig::parse` additionally throws unless `bits == 4`,
 `group_size == 64`, `sym == true`, and `desc_act` is false **or absent** (see
 "The packed-head checkpoint" below - absence is auto-round's spelling of false and is

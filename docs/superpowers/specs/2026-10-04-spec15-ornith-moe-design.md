@@ -26,7 +26,7 @@ read from the checkpoint's `config.json`, `model.safetensors.index.json` and sha
 | MTP head | one dense layer | one **MoE** layer (per-expert tensors `mtp.layers.0.mlp.experts.N.*`), `mtp.fc [2048, 4096]` |
 | vocab, embeddings | 248320, untied | 248320, untied (embed and `lm_head` 1.02 GB each in bf16) |
 | max positions | 262144 | 262144 |
-| quantisation | AutoRound W4A16 g64 (the operator's) | **none published: bf16 only** |
+| quantisation | AutoRound W4A16 g64 (the operator's) | the base: bf16 only; **the operator's AutoRound W4A16 g64, `urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ` (§13)** |
 
 **Parameters (derived from the shapes):** routed experts 32.21 B, GDN projections 1.01 B, FA
 projections 0.27 B, shared experts + routers 0.15 B, embeddings 1.02 B: **34.7 B total**.
@@ -54,7 +54,8 @@ Qwen3.8's ~54 G, so prefill could reach several thousand t/s if the grouped GEMM
 
 ## 3. The decisions
 
-**(decide) 1. Where the int4 weights come from.**
+**1. Where the int4 weights come from - decided (§13): (A). The operator's AutoRound checkpoint
+already existed: `urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ` (2026-08-30).**
 - **(A, proposed) The operator's AutoRound W4A16 g64 quant**, as for Qwen3.8 and Agnes: the
   engine's whole path is gated on AutoRound g64, and AutoRound beat RTN clearly on Qwen3.8
   (docs/probe-w4a8 §15). Its fused-expert export format is to be checked (AutoRound / GPTQ may
@@ -444,3 +445,91 @@ ms/id per K; `probe_mtp_steps` prices the table). No default K is chosen for Orn
 
 **Not built:** the int8 KV cache at Ornith's heads; an int4-checkpoint lm_head at M > 1 (as for
 Qwen3.8); `--spec lookup` is untouched (it works on Ornith wherever the verify lists do).
+
+
+## 13. Amendment - 2026-10-06: the real int4 checkpoint
+
+Branch `ornith-real-checkpoint`. The repo was written for a checkpoint assumed not to exist
+(placeholder `urakozz/Ornith-1.5-35B-A3B-W4A16-g64-AutoRound-GPTQ`). The operator's export
+already existed: **`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`** (revision `cb1aa7d5`,
+published 2026-08-30; AutoRound 0.15.0, `quant_method: gptq`, provider auto-round, bits 4,
+group_size 64, sym, desc_act false, iters 400, calibrated on `opencode-instruct`; 22.99 GB).
+Decision 1 is (A). Read 2026-10-06 from its config, index, all six shard headers (HTTP range
+requests, nothing downloaded) and range-fetched tensor data; not run on the card. Validation:
+`box-validation-queue.md` row 19.
+
+**What 15c / 15d / 15e assumed, checked.**
+
+| assumption | the checkpoint | |
+|---|---|---|
+| per-expert GPTQ `layers.L.mlp.experts.E.{gate,up,down}_proj.{qweight,qzeros,scales,g_idx}` (§10) | yes: 30,720 linears, gate / up qweight [256][512], down [64][2048] | holds |
+| shared expert `mlp.shared_expert.*` int4, router `mlp.gate.weight` [256][2048] and `mlp.shared_expert_gate.weight` [1][2048] bf16 | yes (`dynamic`: 80 `-:` rules, exactly the 40 routers and 40 shared gates) | holds |
+| attention q / k / v / o int4 (q_proj N 8192 = 16 x (q \|\| gate)) | yes | holds |
+| GDN in_proj_qkv / z / out_proj int4 | yes (qkv N 8192, z 4096, out_proj K 4096) | holds |
+| **GDN in_proj_a / in_proj_b bf16** (the descriptor's AB row) | **int4 g64**: qweight [256][32], scales [32][32] each | **did not hold - fixed below** |
+| scales f16 | F16 everywhere; signed (AutoRound's sym: a/b layer 0 [-0.0139, 0.0154]); subnormals present | holds (loader counts subnormals) |
+| qzeros 0x77777777, g_idx identity k / 64 | all 60 a/b linears and 160 random other linears range-fetched: all hold | holds (the loader asserts all) |
+| non-quantised tensors bf16 | yes: embed, lm_head, norms, conv1d, A_log, dt_bias, routers, MTP head, vision | holds; config.json's top-level `dtype: float16` is the export's label (text_config bf16) |
+| MTP head (15e, read from the bf16 base's shard 16) | `model_extra_tensors.safetensors`: the same 785 bf16 tensors, names and 1,689,281,536 B | holds (RTN at load as built) |
+| tokenizer.json defines 248070 ids (66a8923) | **248077**: re-serialised by transformers 5.14.1 (19,989,325 B), added tokens 248044..248076 incl. the seven audio specials; vocab and merges identical to the base's | **did not hold - vocab_used 248077** |
+| the committed golden prompt ids | prose / code / cjk tokenise to the committed ids (trailing newline stripped, as tokenize.py) with this tokenizer.json | holds (`B70_ORNITH_PROMPTS_DIR` unchanged) |
+| chat template (vendored, sha256 `182e77dd`) | `chat_template.jinja` byte-identical | holds; its tokenizer_config.json is a new 1,166 B one (no embedded template, same bos null / eos `<|im_end|>`) |
+| EOS from generation_config.json | `[248046, 248044]` | holds |
+| `doc_w` 0 (no W cross-check) | W = 2,344,862,976 B from the headers (below) | set |
+
+The pre-tokenizer of this tokenizer.json is Qwen's newer regex (`[\p{L}\p{M}]+`, as its
+tokenizer_config's `pretokenize_regex`), where the base's had `\p{L}+`: text with combining
+marks tokenises differently from the base checkpoint's file. The engine and the reference both
+read this file, so they agree.
+
+**The a||b design (operator rule: no lossy re-rounding, no new kernel family).** a||b's kind
+is the checkpoint's, as lm_head's already was: `ModelDesc::ab_int4` / `ab(kind)` beside the
+table's bf16 AB row (one `LinearId::AB` ordinal; every table walk - buffer sizes, the h8 scale
+pass, the variant names - keeps seeing the bf16 row). Argued against the alternative "Ornith's
+AB row is int4": the form is a property of the export, not of the model - Qwen3.8's and Agnes's
+AutoRound exports exclude in_proj_a/b, this one does not, and the operator's own
+re-quantisation (spec 20) may do either - so the loader classifies by content (the first GDN
+layer's in_proj_a, `loader/ab.h`) and the capture binds by the loaded weight's kind, exactly
+the lm_head mechanism. A compressed-tensors int4 a||b goes through the same
+`LinearSrc::classify` / `suffixes()` (spec 20 §9).
+- **Decode:** `{K 2048, N 128, S 1, layout 1}` through gemv.cl - the existing int4 GEMV,
+  new variants `gemv_M{1..4}_K2048_N128_S1_L1` only. The 64 real columns (a at [0, 32), b at
+  [32, 64)) are zero-padded to 128 with the int4 zero (nibble 8 under a +0 f16 scale: each
+  padded output exactly 0), so the pad-to-128 contract holds unchanged: gemv.cl at S = 1
+  writes `out[m x 128 + n]`, i.e. ab_out [M][128], where gemv_bf16 did, and gdn_step /
+  prefill's gate read it at AB_STRIDE as before. One launch either way: 526 / 536 / 24 launch
+  counts unchanged, the MTP verify lists at M = 2..4 included. The weights the GEMV multiplies
+  are the checkpoint's exactly (fp32 `(q - 8) x scale`). PROVISIONAL tuning: 128 columns at S 1
+  are 8 sub-groups (gemv_bf16's L2 lesson); an S > 1 form would need gdn_step to sum slices,
+  a P0 arm.
+- **Prefill:** `pf_ab_proj_D2048` (pf_gemv_bf16.cl) unchanged, over a bf16 copy the loader
+  makes once at load with the prefill dequant's own arithmetic (pf_dequant_slab:
+  `rne_bf16((q - 8) x scale)`, the rounding every int4 linear already takes on prefill). The
+  slab dequant itself does not apply (1024-column slabs, [K][NS] row-major, not the GEMV's
+  tiles); a per-chunk dequant launch would redo 0.13 MB per layer per chunk for nothing.
+  15.7 MB resident (`LoadedModel::ab_prefill`, in `LoadReport::total()`, not per-token); the
+  launches per chunk (2061 / 2021) are unchanged; the h8 scale pass skips AB.
+- **Planner:** the model bytes are the loaded total, so the plan follows: +139,264 B per GDN
+  layer (the int4 a||b with its padding) and the 524,288 B prefill copy in place of the bf16
+  a||b (memory_plan_test: 19,454,989,312 B with the int8 head; 262144 still fits).
+- **Qwen3.8 / Agnes:** their checkpoints ship a||b bf16 -> the table's row object itself; no
+  binary, command line or byte of theirs moves (`ab_int4_test` checks the object identity).
+
+**doc_w.** 2,344,862,976 B summed from the headers over the categories a decode step reads
+with a bf16 head: int4 qweight + scales of the mixer linears and shared experts 748,544,000
+(a||b 2,088,960 of it), 8 routed experts per layer x 40 = 534,773,760, bf16 routers + shared
+gates 42,106,880, bf16 small tensors 2,319,616, lm_head 1,017,118,720. The device side differs
+by itemised terms only: a||b's zero columns (`pad`), the fp32 widening, and - new on the
+expected side, MoE only - the routers' 15 zero rows per layer (2,457,600 B): the predicted delta
+is 0.000 %.
+
+**vocab_used 248077** (`Qwen35::kVocabUsed`): Ornith's lists bind Qwen3.8's
+`argmax_stage1_M{1..4}`; the `_V248070` binaries stay built (no command line disappears),
+unbound; `b70-serve`'s vocab note does not fire.
+
+**Comparison point:** the checkpoint's model card reports vLLM XPU on a B70: pp4096 7090 t/s
+(c1), tg256 99.8 t/s (c1) - the bar §6's record compares against.
+
+**15a's reference from this checkpoint** (plan 15a Task 0): `tools/oracle/ornith_ref.py` on the
+Mac (transformers 5.15's Qwen3_5MoeForCausalLM, layer-streamed, experts dequantised on demand),
+`tools/oracle/ornith_golden.sh`; the bf16-base reference stays box work (R5, A4).
