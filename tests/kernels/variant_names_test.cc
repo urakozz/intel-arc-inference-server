@@ -118,7 +118,7 @@ int main() {
   CHECK_EQ(o.norm_finish, std::string("prep_norm_finish_M1_K2048_G20_W20"));
   CHECK_EQ(o.gemv_qkvz, std::string("gemv_M1_K2048_N12288_S1_L1"));
   CHECK_EQ(o.gemv_ab, std::string("gemv_bf16_M1_K2048_N128_C16_S16"));
-  CHECK_EQ(o.argmax, std::string("argmax_stage1_M1"));
+  CHECK_EQ(o.argmax, std::string("argmax_stage1_M1_V248070"));
   // Spec 15c: the MoE block's binaries (src/kernels/CMakeLists.txt's Ornith block) and the
   // geometry capture.cc binds them with: the router || shared-gate GEMV at 272 columns,
   // moe_gate_up over 9 slots x 16 work-groups of 256, moe_down over 128 n-tiles of 288.

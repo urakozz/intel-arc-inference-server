@@ -498,7 +498,8 @@ endif()
 #   FA        attn_prep and decode attention v2 at 16 q / 2 kv heads (GQA 8); v1
 #             (B70_DECODE_ATTN=v1) is not built for Ornith
 #   MoE       moe.cl's three kernels: 256 experts, top-8, hidden 2048, expert 512
-# argmax_stage1_M1 is Qwen3.8's binary (vocab_used 248077 on both).
+# argmax_stage1_M1_V248070: Ornith masks from 248070 (tokenizer.json's last id is </think>
+# = 248069), not Qwen3.8's 248077 - the seven specials above it decode to nothing.
 option(B70_ORNITH "build the Ornith 1.5 35B-A3B decode variants (spec 15c)" ON)
 if(B70_ORNITH)
   add_gemv_variant(1 2048 12288 1 1)    # qkv||z      PROVISIONAL S1 L1
@@ -525,6 +526,8 @@ if(B70_ORNITH)
   # UP_KS / DN_KS: the in-work-group K splits, mirrored by kernels::kMoeUpKs / kMoeDnKs
   # (they set the work-group sizes the capture binds). PROVISIONAL, for P0 to tune.
   set(MOE_DEFINES UP_KS=4 DN_KS=2)
+  set(ORNITH_ARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=248320 VOCAB_USED=248070)
+  add_ocloc_kernel(argmax_stage1_M1_V248070 SOURCE ${ARGMAX_CL} DEFINES ${ORNITH_ARGMAX_DEFINES} M=1)
   add_ocloc_kernel(moe_M1_E256_T8_D2048_I512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/moe.cl
                    DEFINES ${MOE_DEFINES} M=1 EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 ROUTER_N=272)
 endif()
@@ -751,6 +754,8 @@ if(B70_ORNITH AND B70_MTP)
     add_ocloc_kernel(moe_M${MM}_E256_T8_D2048_I512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/moe.cl
                      DEFINES ${MOE_DEFINES} M=${MM} EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512
                              ROUTER_N=272)
+    add_ocloc_kernel(argmax_stage1_M${MM}_V248070 SOURCE ${ARGMAX_CL}
+                     DEFINES ${ORNITH_ARGMAX_DEFINES} M=${MM})
   endforeach()
   foreach(MM 1 2 3 4)
     add_ocloc_kernel(gdn_step_slots_M${MM}_G30_GK16V32 SOURCE ${GDN_CL}

@@ -248,7 +248,7 @@ int main() {
         std::vector<std::string>({"mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj"}));
   CHECK(o.linear(LinearId::Down).parts ==
         std::vector<std::string>({"mlp.shared_expert.down_proj"}));
-  CHECK_EQ(o.vocab_used, uint32_t(248077));   // added tokens 248044..248076, as Qwen3.8
+  CHECK_EQ(o.vocab_used, uint32_t(248070));   // tokenizer.json's ids end at </think> = 248069
   CHECK(!o.tied_embeddings);
   CHECK(o.name_map.empty());                  // linear_attn. / self_attn., as Qwen3.8
   CHECK_EQ(o.mtp_intermediate, uint32_t(0));  // its MTP head is one MoE layer (15e)

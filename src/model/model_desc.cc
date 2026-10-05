@@ -235,8 +235,11 @@ ModelDesc make_qwen38() {
 // 32, num_experts 256, num_experts_per_tok 8, moe_intermediate_size 512,
 // shared_expert_intermediate_size 512 (+ `mlp.shared_expert_gate`), vocab 248320,
 // tie_word_embeddings false, mtp_num_hidden_layers 1 (a MoE layer). Tensor names
-// are Qwen3.5's (`linear_attn.` / `self_attn.`), so no name map. tokenizer_config's
-// added tokens end at 248076: vocab_used 248077, as Qwen3.8's.
+// are Qwen3.5's (`linear_attn.` / `self_attn.`), so no name map. vocab_used 248070:
+// tokenizer.json defines ids 0..248069 (its added tokens stop at </think>); the seven
+// audio / vision specials tokenizer_config lists up to 248076 have no entry the text
+// engine can decode, so the greedy argmax masks them as the sampler already does
+// (argmax_stage1 `_V248070`, built in Ornith's block).
 //
 // **Loadable for decode from spec 15c, prefill from spec 15d** (the grouped experts on
 // the L0 backends). The int4 rows' tuning is PROVISIONAL - copied from Qwen3.8's map so every
@@ -266,7 +269,7 @@ ModelDesc make_ornith() {
   d.intermediate = d.moe.shared_intermediate;
   d.parallel_ffn = 0;
   d.doc_w = 0;
-  d.vocab_used = 248077;
+  d.vocab_used = 248070;
   d.provisional_tuning = true;
   finish(d, kQwen38Tuning);        // PROVISIONAL (copied), see above
   return d;
