@@ -182,7 +182,7 @@ PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::Mod
   return s;
 }
 
-MtpSizes MtpDims::sizes(uint32_t max_len, const model::ModelDesc& desc) {
+MtpSizes MtpDims::sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t draft_vocab) {
   MtpSizes s{};
   s.hctl = sizeof(Control);
   s.gdn_spec = size_t{kSlots - 1} * gdn_state_bytes(desc);
@@ -191,6 +191,7 @@ MtpSizes MtpDims::sizes(uint32_t max_len, const model::ModelDesc& desc) {
   s.hh = size_t{DecodeScratchDims::kM + 1} * desc.hidden * kBf16;
   s.dh = size_t{desc.hidden} * kBf16;
   s.logits = size_t{kMaxK} * Q::kVocab * kFp32;
+  s.dv_logits = size_t{draft_vocab} * kFp32;   // spec 8 §11: the compact head's logits
   return s;
 }
 
