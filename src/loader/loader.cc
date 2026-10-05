@@ -642,7 +642,6 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   std::stringstream cs;
   cs << cf.rdbuf();
   const common::json::Value config = common::json::parse(cs.str());
-  const QuantConfig qc = QuantConfig::parse(config);
   // Spec 14 §3.1: the model is picked from the checkpoint - no flag. An unknown
   // architecture throws here, naming config.json's value.
   const common::json::Value* archs = config.find("architectures");
@@ -650,8 +649,11 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
     throw std::runtime_error(snap + "config.json has no architectures[0] string");
   const model::ModelDesc& desc = model::desc_for_architecture(archs->arr()[0].str());
   // Spec 15b: a described model the engine cannot run yet (Ornith: "MoE not
-  // implemented (spec 15c)") stops here, before a byte is read.
+  // implemented (spec 15c)") stops here, before a byte is read - and before the
+  // quantisation config is parsed, so a bf16-only checkpoint (Ornith ships no
+  // quantization_config) gets this message rather than the quant parser's.
   model::require_loadable(desc);
+  const QuantConfig qc = QuantConfig::parse(config);
   if (desc.max_len_ceiling != 0 && max_len > desc.max_len_ceiling)
     throw std::runtime_error(
         desc.name + ": max_len " + std::to_string(max_len) + " exceeds this model's ceiling " +
