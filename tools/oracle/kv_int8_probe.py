@@ -360,15 +360,26 @@ def cmd_run(a) -> None:
         raise SystemExit("the first variant must be bf16 (the reference)")
     print(f"torch threads {torch.get_num_threads()}, variants {variants}, fp32 matmul {FP32_MATMUL}",
           flush=True)
-    group_size = D.check_quant_config(a.snapshot)
+    with open(os.path.join(a.snapshot, "config.json"), encoding="utf-8") as f:
+        quantised = bool(json.load(f).get("quantization_config"))
+    # Spec 12b's Qwen3.8 repeat runs on the bf16 base checkpoint (Qwen/Qwen3.8-27B): no
+    # quantization_config, every tensor shipped bf16 - dump.convert copies those as they are
+    # (the same streamed path; group_size is then never read).
+    group_size = D.check_quant_config(a.snapshot) if quantised else 0
+    if not quantised:
+        print("unquantised checkpoint: bf16 tensors streamed as shipped", flush=True)
     ids = _read_ids(a.ids)
     if a.n:
         ids = ids[:a.n]
     n_prompt = len(ids)
     golden = None
+    if a.cont and a.cont_ids:
+        raise SystemExit("--cont and --cont-ids are exclusive")
     if a.cont:
         golden = safe_open(a.cont, framework="pt", device="cpu")
         ids += golden.get_tensor("tokens")[:a.gen].tolist()
+    elif a.cont_ids:
+        ids += _read_ids(a.cont_ids)[:a.gen]
     print(f"ids: {n_prompt} prompt + {len(ids) - n_prompt} teacher-forced from {a.ids}", flush=True)
     with open(os.path.join(a.snapshot, "config.json"), encoding="utf-8") as f:
         raw = json.load(f)
@@ -584,6 +595,8 @@ def main() -> None:
     r.add_argument("--ids", required=True)
     r.add_argument("--n", type=int, default=0, help="use the first N ids (0: all)")
     r.add_argument("--cont", help="a golden .safetensors: append its `tokens`[:--gen] (teacher-forced)")
+    r.add_argument("--cont-ids", help="a whitespace ids file to append [:--gen] instead (teacher-forced;"
+                   " no golden logits to compare against)")
     r.add_argument("--gen", type=int, default=32)
     r.add_argument("--variants", default=",".join(E2E_VARIANTS))
     r.add_argument("--capture", help="write q/k/v of the bf16 element per FA layer here")
