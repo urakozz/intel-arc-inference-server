@@ -210,7 +210,9 @@ int main(int argc, char** argv) {
   // Qwen3.8: 166723584 + 10240 and 134217728 / 16 x 17 (the gdn_state + conv ring of
   // 48 GDN layers; 2048 positions of 16 FA layers' K and V); Agnes: 54 / 18.
   CHECK_EQ(e.state_bytes(), kGdnBytes + gdn_layers * 16 * 10240 * 2 + 10240);
-  CHECK_EQ(e.kv_bytes(2048), size_t(2048) * 4 * 256 * 2 * 2 * (fa_layers + 1));
+  // Spec 12b: 4 x 256 x 2 B per layer and position at bf16, 4 x (256 + 2) B at int8.
+  CHECK_EQ(e.kv_bytes(2048), size_t(2048) * 2 * (fa_layers + 1) *
+                                 (e.kv_cache() == runtime::KvCache::Int8 ? 4 * (256 + 2) : 4 * 256 * 2));
 
   // --- M2 at two prompt lengths ----------------------------------------------------
   for (uint32_t n : {1998u, 2053u}) {

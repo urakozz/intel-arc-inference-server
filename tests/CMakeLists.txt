@@ -1461,3 +1461,136 @@ if(B70_ORNITH)
   set_tests_properties(ornith_decode_test ornith_decode_i8head_test PROPERTIES
     LABELS "checkpoint;golden;ornith" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
+
+# --- Spec 12b: the int8 KV cache (`--kv-cache int8`, src/kernels/kv8.cl) ----------------
+# Written blind on the Mac; docs/superpowers/plans/box-validation-queue.md row 10 is the order
+# to run these in. `kv8` labels all of them: `ctest -L kv8`.
+if(B70_KV8)
+  set(B70_KV8_KERNELS
+    kernel_attn_prep_M1_KV8 kernel_attn_prep_M2_KV8 kernel_attn_prep_M3_KV8 kernel_attn_prep_M4_KV8
+    kernel_attn_v2_M1_T${ATTN_V2_TGT}_KV8 kernel_attn_v2_M2_T${ATTN_V2_TGT}_KV8
+    kernel_attn_v2_M3_T${ATTN_V2_TGT}_KV8 kernel_attn_v2_M4_T${ATTN_V2_TGT}_KV8
+    kernel_pf_attn_prep_kv8 kernel_pf_flash_attn_kv8 kernel_pf_attn_gate_kv8)
+  if(B70_MTP)
+    list(APPEND B70_KV8_KERNELS kernel_attn_prep_M1_S1_KV8 kernel_attn_prep_M2_S1_KV8
+      kernel_attn_prep_M3_S1_KV8 kernel_attn_prep_M4_S1_KV8)
+  endif()
+
+  # The kernels against tests/kernels/kv8_ref.h, no checkpoint: the writers BITWISE (decode
+  # M = 1..4, the MTP head's S1, prefill), decode v2 over int8 against the fp64 attention
+  # (cosine >= 0.99999 per head) with verify rows bitwise the M = 1 steps, the flash + gate
+  # (pf_o >= 0.99999; gated >= 0.9999, PROVISIONAL).
+  add_executable(kv8_kernels_test kernels/kv8_kernels_test.cc)
+  target_include_directories(kv8_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(kv8_kernels_test PRIVATE b70_l0)
+  b70_target_kernel_dir(kv8_kernels_test)
+  add_dependencies(kv8_kernels_test ${B70_KV8_KERNELS})
+  add_test(NAME kv8_kernels_test COMMAND kv8_kernels_test)
+  set_tests_properties(kv8_kernels_test PROPERTIES LABELS kv8 TIMEOUT 1800)
+
+  # The gates of spec 12 §4 over the int8 cache: the SAME binaries and command lines as the
+  # bf16 registrations they twin, with B70_KV_CACHE=int8 (runtime::default_kv_cache - the
+  # Engine's, the planner's and b70-decode's default). Bars unchanged unless named:
+  #   Q2   golden_gate_kv8 / _i8head_kv8 (decode), prefill_gate_{int8,l0}_kv8 - the tie
+  #        rule's allowance unchanged; kv8_vs_oracle_test - mean logit cos vs the oracle
+  #        within 1e-4 of bf16 KV's (PROVISIONAL, tools/probe/kv8_vs_oracle.sh).
+  #   Q3   flash_long_kv8_test - 1 - cos(int8 KV, bf16 KV) <= 5e-4 at 4k..32k (PROVISIONAL);
+  #        passkey 3/3 at 120k (and at 250k, which only int8 fits) is run by hand:
+  #        B70_KV_CACHE=int8 tools/probe/passkey.sh l0-int8.
+  #   Q4   A4 by hand: B70_KV_CACHE=int8 tools/toolcall/engine_generate.sh into its own dir.
+  #   Q5   replay / prefill determinism and replay bitwise; snapshot_kv8 (spec 7, int8 rows +
+  #        scales); mtp_verify_kv8 (spec 8 M2: verify rows bitwise the plain steps) and
+  #        mtp_gpu_kv8 (greedy MTP identical to plain); prefix_gpu_*_kv8; the planner against
+  #        the allocations (memory_plan_box_kv8).
+  set(_kv8_env "B70_KV_CACHE=int8")
+  macro(b70_kv8_twin name)
+    if(TEST ${name}_kv8_test)
+      set_tests_properties(${name}_kv8_test PROPERTIES ENVIRONMENT "${_kv8_env}")
+      get_test_property(${name}_test LABELS _kv8_labels)
+      if(NOT _kv8_labels)
+        set(_kv8_labels "")
+      endif()
+      list(APPEND _kv8_labels kv8)
+      set_tests_properties(${name}_kv8_test PROPERTIES LABELS "${_kv8_labels}")
+      get_test_property(${name}_test TIMEOUT _kv8_timeout)
+      if(_kv8_timeout)
+        set_tests_properties(${name}_kv8_test PROPERTIES TIMEOUT ${_kv8_timeout})
+      endif()
+      get_test_property(${name}_test SKIP_RETURN_CODE _kv8_skip)
+      if(_kv8_skip)
+        set_tests_properties(${name}_kv8_test PROPERTIES SKIP_RETURN_CODE ${_kv8_skip})
+      endif()
+      get_test_property(${name}_test WORKING_DIRECTORY _kv8_wd)
+      if(_kv8_wd)
+        set_tests_properties(${name}_kv8_test PROPERTIES WORKING_DIRECTORY ${_kv8_wd})
+      endif()
+    endif()
+  endmacro()
+
+  foreach(exe replay_determinism_test engine_smoke_test golden_gate_test prefill_gate_test
+              prefill_determinism_test prefill_consistency_test prefill_replay_test snapshot_test
+              flash_long_test memory_plan_box_test mtp_verify_test mtp_gpu_test prefix_gpu_test)
+    if(TARGET ${exe})
+      add_dependencies(${exe} ${B70_KV8_KERNELS})
+    endif()
+  endforeach()
+
+  add_test(NAME replay_determinism_kv8_test COMMAND replay_determinism_test ${B70_TEST_SNAPSHOT})
+  b70_kv8_twin(replay_determinism)
+  add_test(NAME engine_smoke_kv8_test COMMAND engine_smoke_test ${B70_TEST_SNAPSHOT})
+  b70_kv8_twin(engine_smoke)
+  add_test(NAME golden_gate_kv8_test COMMAND golden_gate_test
+    ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT})
+  b70_kv8_twin(golden_gate)
+  add_test(NAME golden_gate_i8head_kv8_test COMMAND golden_gate_test
+    ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} int8)
+  b70_kv8_twin(golden_gate_i8head)
+  add_test(NAME prefill_gate_int8_kv8_test COMMAND prefill_gate_test
+    ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
+    prose,code,cjk 0 l0-int8 1)
+  b70_kv8_twin(prefill_gate_int8)
+  add_test(NAME prefill_gate_l0_kv8_test COMMAND prefill_gate_test
+    ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
+    prose,code,cjk 0 l0)
+  b70_kv8_twin(prefill_gate_l0)
+  add_test(NAME kv8_vs_oracle_test COMMAND ${CMAKE_SOURCE_DIR}/tools/probe/kv8_vs_oracle.sh)
+  set_tests_properties(kv8_vs_oracle_test PROPERTIES LABELS "checkpoint;golden;prefill;kv8"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+  add_test(NAME flash_long_kv8_test COMMAND flash_long_test ${B70_TEST_SNAPSHOT} --kv8
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids)
+  set_tests_properties(flash_long_kv8_test PROPERTIES LABELS "checkpoint;prefill;kv8"
+    SKIP_RETURN_CODE 77 TIMEOUT 5400)
+  add_test(NAME prefill_determinism_l0_kv8_test COMMAND prefill_determinism_test
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} l0)
+  b70_kv8_twin(prefill_determinism_l0)
+  add_test(NAME prefill_consistency_l0_kv8_test COMMAND prefill_consistency_test
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} l0)
+  b70_kv8_twin(prefill_consistency_l0)
+  add_test(NAME prefill_replay_kv8_test COMMAND prefill_replay_test ${B70_TEST_SNAPSHOT})
+  b70_kv8_twin(prefill_replay)
+  add_test(NAME snapshot_kv8_test COMMAND snapshot_test ${B70_TEST_SNAPSHOT})
+  b70_kv8_twin(snapshot)
+  add_test(NAME memory_plan_box_kv8_test COMMAND memory_plan_box_test ${B70_TEST_SNAPSHOT})
+  b70_kv8_twin(memory_plan_box)
+  if(TEST mtp_verify_test)
+    add_test(NAME mtp_verify_kv8_test COMMAND mtp_verify_test ${B70_TEST_SNAPSHOT})
+    b70_kv8_twin(mtp_verify)
+    add_test(NAME memory_plan_box_mtp_kv8_test COMMAND memory_plan_box_test ${B70_TEST_SNAPSHOT} mtp)
+    b70_kv8_twin(memory_plan_box_mtp)
+  endif()
+  if(TEST mtp_gpu_test)
+    add_test(NAME mtp_gpu_kv8_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
+    b70_kv8_twin(mtp_gpu)
+  endif()
+  if(TEST prefix_gpu_int8_test)
+    add_test(NAME prefix_gpu_int8_kv8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
+      ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0-int8)
+    b70_kv8_twin(prefix_gpu_int8)
+  endif()
+  if(TEST prefix_gpu_mtp_test)
+    add_test(NAME prefix_gpu_mtp_kv8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
+      ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0-int8 1 0 3)
+    b70_kv8_twin(prefix_gpu_mtp)
+  endif()
+endif()
