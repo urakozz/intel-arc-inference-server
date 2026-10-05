@@ -32,12 +32,15 @@
 #include <utility>
 #include <vector>
 
+#include "cli/max_len.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/event.h"
 #include "l0/fence.h"
 #include "l0/queue.h"
 #include "loader/loader.h"
+#include "loader/snapshot.h"
+#include "loader/trained_context.h"
 #include "model/qwen35.h"
 #include "runtime/buffers.h"
 #include "runtime/capture.h"
@@ -85,10 +88,10 @@ void usage() {
       "usage:\n"
        "  b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--pp-chunk C]\n"
        "                                        [--pp-backend sycl-tla|l0|l0-int8]]\n"
-       "                                        [--device N] [--max-len 16384]\n"
+       "                                        [--device N] [--max-len 16384|auto]\n"
       "  b70-decode <snapshot-or-repo> --bench [--depth 4096 | --pp N [--pp-chunk C]\n"
       "                                        [--pp-backend sycl-tla|l0|l0-int8]]\n"
-      "                                        [--tg 256] [--device N] [--max-len 16384]\n"
+      "                                        [--tg 256] [--device N] [--max-len 16384|auto]\n"
       "  b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--repeats 1]\n"
       "                                          [--device N]\n"
       "\n"
@@ -99,9 +102,14 @@ void usage() {
        "  --prefill      --ids only: run the prompt through Engine::prefill instead of one\n"
        "                 Engine::ingest replay per id; needs the optional prefill component.\n"
       "  --device N     GPU index. Absent: ONEAPI_DEVICE_SELECTOR=level_zero:N, else device 0.\n"
-      "  --max-len <L>  KV cache and RoPE capacity (default 16384; the decode attention kernels\n"
-      "                 are compiled per max_len: 16384, 32768 and 131072 (spec 6), a multiple of 256\n"
-      "                 either way; any other value fails at capture naming the missing binary)\n"
+      "  --max-len <L>  KV cache and RoPE capacity: default 16384 (bench rows stay comparable);\n"
+      "                 any multiple of 256 up to the trained context (config.json\n"
+      "                 max_position_embeddings), refused before the engine if the memory plan\n"
+      "                 does not fit; `auto` = the largest that fits (spec 6 §10). Only\n"
+      "                 B70_DECODE_ATTN=v1 bakes max_len: 4096, 16384, 32768 and 131072 are compiled,\n"
+      "                 any other fails at capture naming the missing binary\n"
+      "  --mem-reserve-gb G  device memory the plan leaves free (default 1.5 GB: driver, kernels,\n"
+      "                 allocator slack - an estimate the box has to confirm)\n"
       "  --bench        ingest --depth synthetic ids, then time --tg generated ones and print\n"
       "                 a markdown row on stdout\n"
       "  --pp N         --bench only, and exclusive with --depth: prefill N synthetic ids\n"
@@ -590,6 +598,10 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
 int run(int argc, char** argv) {
   std::string path, ids_path;
   uint32_t n = 0, depth = 4096, tg = 256, steps = 32, repeats = 1, max_len = 16384;
+  // Spec 6 §10: 16384 stays the default here, so bench rows stay comparable; `auto`
+  // plans the largest max_len that fits, as b70-serve's default does.
+  cli::MaxLenArg max_len_arg{false, max_len};
+  size_t mem_reserve = size_t(runtime::kDefaultReserveGb * 1e9);
   uint32_t device = l0::Context::kFromEnv;
   uint32_t pp = 0, pp_chunk = 0;
   bool bench = false, profile = false, have_n = false, prefill = false;
@@ -623,7 +635,10 @@ int run(int argc, char** argv) {
       if (device == l0::Context::kFromEnv)
         throw std::runtime_error("--device is out of range");
     } else if (a == "--max-len") {
-      max_len = parse_u32("--max-len", value(i, "--max-len"));
+      max_len_arg = cli::parse_max_len(value(i, "--max-len"));
+      max_len = max_len_arg.value;   // 0 for auto until cli::settle
+    } else if (a == "--mem-reserve-gb") {
+      mem_reserve = cli::parse_reserve_gb(value(i, "--mem-reserve-gb"));
     } else if (a == "--bench") {
       bench = true;
     } else if (a == "--profile") {
@@ -741,26 +756,35 @@ int run(int argc, char** argv) {
 
   // Everything that can be judged without the device or the 19 GB checkpoint is
   // judged first: failing on a typo'd --ids path after a 13-second load is a
-  // worse CLI than failing in a millisecond.
+  // worse CLI than failing in a millisecond. (With --max-len auto the length is
+  // known only after the load and the plan, so the bound waits for it.)
   std::vector<uint32_t> ids;
-  if (!synthetic) {
-    ids = read_ids(ids_path);
-    if (ids.size() + size_t(n) > size_t(max_len))
+  // Both synthetic modes ingest to --depth and then replay: --tg generated
+  // tokens for --bench, --steps instrumented ones for --profile. Same bound
+  // either way - the KV cache and the RoPE table stop at max_len.
+  // `--repeats` does NOT enter this bound: every session rewinds `pos` to the
+  // post-ingest value, so R sessions reach exactly the same highest position
+  // one session does. That is the point of the rewind.
+  const uint32_t after = bench ? tg : steps;
+  const char* after_flag = bench ? "--tg " : "--steps ";
+  const auto check_len = [&](uint32_t len) {
+    if (!synthetic && ids.size() + size_t(n) > size_t(len))
       throw std::runtime_error("prompt (" + std::to_string(ids.size()) + " ids) + --n " +
-                               std::to_string(n) + " exceeds --max-len " + std::to_string(max_len));
-  } else {
-    // Both synthetic modes ingest to --depth and then replay: --tg generated
-    // tokens for --bench, --steps instrumented ones for --profile. Same bound
-    // either way - the KV cache and the RoPE table stop at max_len.
-    // `--repeats` does NOT enter this bound: every session rewinds `pos` to the
-    // post-ingest value, so R sessions reach exactly the same highest position
-    // one session does. That is the point of the rewind.
-    const uint32_t after = bench ? tg : steps;
-    const char* after_flag = bench ? "--tg " : "--steps ";
-    if (size_t(depth) + size_t(after) > size_t(max_len))
+                               std::to_string(n) + " exceeds --max-len " + std::to_string(len));
+    if (synthetic && size_t(depth) + size_t(after) > size_t(len))
       throw std::runtime_error("--depth " + std::to_string(depth) + " + " + after_flag +
                                std::to_string(after) + " exceeds --max-len " +
-                               std::to_string(max_len));
+                               std::to_string(len));
+  };
+  if (!synthetic) ids = read_ids(ids_path);
+  // Spec 6 §10: auto plans under the trained context, which bounds the run already.
+  uint32_t trained = 0;
+  if (max_len_arg.is_auto) {
+    trained = loader::trained_context(loader::resolve_snapshot(path));
+    cli::check_before_load(max_len_arg, trained, /*require_quantum=*/false);
+  }
+  check_len(max_len_arg.is_auto ? trained : max_len);
+  if (synthetic) {
     ids.resize(depth);
     for (uint32_t i = 0; i < depth; ++i) ids[i] = kBenchPrompt[i % kBenchPromptLen];
   }
@@ -771,8 +795,15 @@ int run(int argc, char** argv) {
 
   loader::LoadedModel model = [&] {
     StdoutToStderr redirect;
-    return loader::load(ctx, path, max_len, /*mtp=*/false, lm_head);
+    return loader::load(ctx, path, cli::load_len(max_len_arg, trained), /*mtp=*/false, lm_head);
   }();
+  // Spec 6 §10: auto plans and re-tables the model; an explicit length is held to the
+  // plan. The prefill scratch is planned only when this run prefills (ruling R7).
+  max_len = cli::settle(ctx, model, max_len_arg, mem_reserve,
+                        cli::prefill_path(have_pp || prefill,
+                                          have_pp_backend ? pp_backend
+                                                          : runtime::prefill::default_prefill_backend()));
+  if (max_len_arg.is_auto) check_len(max_len);
 
   // --profile forks here: it replays an instrumented capture and has to reset
   // 774 events before every replay, which is the caller's job by design
