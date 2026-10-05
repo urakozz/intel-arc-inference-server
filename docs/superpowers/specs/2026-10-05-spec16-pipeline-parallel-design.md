@@ -112,6 +112,12 @@ Idle box (both cards free of other DRM holders), interleaved pairs against one c
 
 - **P0 (first):** P2P capability and bandwidth both ways (copy engine and kernel peer writes), the
   three hand-off options' latency for 10 KB and 20 MB, and their cost inside a replayed list.
+  **Plus one arm for spec 17 (tensor parallel):** the "remote partial" pattern: a decode GEMV on
+  each card writes its split-K partial sums for a 5120-wide row both locally and into the peer's
+  buffer (peer write + system-scope flag), and a `prep_res_fold`-style kernel on each card waits for
+  the flag and folds local and remote partials in a fixed order; measured as the added latency per
+  fold inside a replayed list, against a separate all-reduce kernel. It is spec 17's key number,
+  taken here because the probe already has both cards and the peer-write machinery.
 - **S1, decode:** `--pp 2` within **2 %** of one card at 4k and 32k depth (the hand-off must not cost
   more than that).
 - **S2, long prefill:** pp32768 and pp65536 **>= 1.7x** one card; pp4096 (two chunks, so little
@@ -130,7 +136,9 @@ Idle box (both cards free of other DRM holders), interleaved pairs against one c
 
 ## 7. Out of scope
 
-- Tensor parallel (operator, 2026-10-05).
+- Tensor parallel (operator, 2026-10-05): **spec 17**, built on this spec's multi-device foundation
+  (one context with both cards, per-device buffers and capture, the peer-write rules) and P0's
+  remote-partial arm. PP and TP are alternatives over the same two cards (`--pp` or `--tp`).
 - More than two devices (the layout extends to four; the placement and hand-off generalise, but
   this spec builds and gates two).
 - PP combined with batching (two micro-batches in flight): after spec 13.
