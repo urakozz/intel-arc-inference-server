@@ -17,6 +17,20 @@ struct MtpCost {
 
   static MtpCost bf16_head();   // measured (spec 8 P0 / §8)
   static MtpCost int8_head();   // derived from spec 9 H2 (drafts -34 %, verify -~2 ms)
+
+  // Spec 8 §11: the share of ONE draft's cost that is its lm_head read, per head form -
+  // what a reduced draft vocabulary scales. **Derived, not measured:** the head's bytes at
+  // ~570 GB/s in units of that form's plain step, over the table's one-draft cost.
+  //   int8: 1.27 GB -> ~2.2 ms of the 32.65 ms int8 plain step = 0.067 of draft[0] 0.13
+  //   bf16: 2.54 GB -> ~4.4 ms of the ~34 ms bf16 plain step   = 0.129 of draft[0] 0.19
+  // The rest of a draft (the MTP head's own layer, its norms, the argmax) does not move.
+  // `probe_mtp_steps ... <form> <size>` on the box replaces the result (via --mtp-cost).
+  static constexpr double kInt8DraftHeadShare = 0.067 / 0.13;
+  static constexpr double kBf16DraftHeadShare = 0.129 / 0.19;
+  // This table with every draft[k - 1] scaled to draft[k - 1] * ((1 - head_share) +
+  // head_share * fraction), `fraction` = |V'| / 248320 (the rows a draft's head reads);
+  // verify is unchanged (it always reads the full head). fraction 1 returns the table.
+  MtpCost with_draft_vocab(double head_share, double fraction) const;
   // "verify=1,1.17,1.52,1.74;draft=0.19,0.37,0.55"; either part may be left out (it then
   // keeps `base`'s). Throws std::invalid_argument on anything else.
   static MtpCost parse(const std::string& text, const MtpCost& base);
