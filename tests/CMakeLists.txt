@@ -1068,6 +1068,14 @@ b70_cli_reject(cli_reject_pp_chunk_without_pp ${B70_NO_MODEL} --bench --pp-chunk
 # an unknown flag or leak as far as l0::Context.
 b70_cli_reject(cli_reject_prefill_without_ids ${B70_NO_MODEL} --bench --prefill
   EXPECT "--prefill belongs to --ids")
+# Spec 6 §10: --max-len is `auto` or a positive integer, --mem-reserve-gb a number of GB;
+# both are parsed host-side, before the snapshot or the device is touched.
+b70_cli_reject(cli_reject_max_len_zero ${B70_NO_MODEL} --bench --max-len 0
+  EXPECT "--max-len 0 is not a model length")
+b70_cli_reject(cli_reject_max_len_word ${B70_NO_MODEL} --bench --max-len big
+  EXPECT "--max-len expects auto or a positive integer")
+b70_cli_reject(cli_reject_mem_reserve ${B70_NO_MODEL} --bench --mem-reserve-gb -1
+  EXPECT "--mem-reserve-gb expects a number of GB")
 
 # Spec 6 (plan 6b Task 3): a max_len with no compiled decode attention. This one is NOT
 # host-side -- it needs the device and the checkpoint, because the variant is resolved at

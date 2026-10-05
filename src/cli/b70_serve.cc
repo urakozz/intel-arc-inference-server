@@ -15,10 +15,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include "cli/max_len.h"
 #include "cli/serve_adapters.h"
 #include "l0/context.h"
 #include "loader/loader.h"
 #include "loader/snapshot.h"
+#include "loader/trained_context.h"
 #include "runtime/engine.h"
 #include "runtime/prefill/backend.h"
 #include "server/server.h"
@@ -58,10 +60,15 @@ void stop_server(int) {
 void usage() {
   std::fprintf(stderr,
                "usage: b70-serve <snapshot-or-repo> [--host 0.0.0.0] [--port 8000]\n"
-               "                 [--max-len 16384] [--device N] [--served-name NAME] [--queue 4]\n"
-               "                 --max-len: 16384, 32768 or 131072 (the compiled decode attention)\n"
+               "                 [--max-len auto|N] [--device N] [--served-name NAME] [--queue 4]\n"
+               "                 --max-len: auto (default) = the largest context that fits the card\n"
+               "                 beside the weights (spec 6 §10); N = any multiple of 256 up to the\n"
+               "                 trained context (config.json max_position_embeddings), refused at\n"
+               "                 startup if it does not fit (B70_DECODE_ATTN=v1: the compiled lengths)\n"
+               "                 [--mem-reserve-gb G]   device memory the plan leaves free (default\n"
+               "                                        1.5: driver, kernels, slack; box-unconfirmed)\n"
                "                 The model is picked from the checkpoint's config.json: Qwen3.8 or\n"
-               "                 Agnes 3.0 Flash (spec 14; --max-len at most 65536 for Agnes).\n"
+               "                 Agnes 3.0 Flash (spec 14).\n"
                "                 [--pp-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n"
                "                 [--log-requests DIR]   write DIR/NNNNNN.json per request\n"
                "                 [--prefix-cache-gb N]  pinned host prefix cache, GiB (default 32,\n"
@@ -134,7 +141,8 @@ void print_eos(const std::vector<uint32_t>& ids) {
 int run(int argc, char** argv) {
   std::string path;
   server::Options options;
-  uint32_t max_len = 16384;
+  cli::MaxLenArg max_len_arg;   // spec 6 §10: auto unless --max-len N
+  size_t mem_reserve = size_t(runtime::kDefaultReserveGb * 1e9);
   uint32_t device = l0::Context::kFromEnv;
   std::string pp_backend_arg;
   bool have_pp_backend = false;
@@ -162,7 +170,9 @@ int run(int argc, char** argv) {
       if (port > 65535) throw std::runtime_error("--port is out of range");
       options.port = static_cast<int>(port);
     } else if (arg == "--max-len") {
-      max_len = parse_u32("--max-len", value(i, "--max-len"));
+      max_len_arg = cli::parse_max_len(value(i, "--max-len"));
+    } else if (arg == "--mem-reserve-gb") {
+      mem_reserve = cli::parse_reserve_gb(value(i, "--mem-reserve-gb"));
     } else if (arg == "--device") {
       device = parse_u32("--device", value(i, "--device"));
       if (device == l0::Context::kFromEnv) throw std::runtime_error("--device is out of range");
@@ -213,7 +223,6 @@ int run(int argc, char** argv) {
     usage();
     throw std::runtime_error("a snapshot directory or HF repo id is required");
   }
-  if (max_len == 0) throw std::runtime_error("--max-len 0 is not a model length");
   // Spec 8 §10: --mtp auto loads the head for --mtp-max drafts and chooses K per iteration;
   // the cost table defaults to the head form's, --mtp-cost overrides it.
   if (have_mtp_tuning && !mtp_auto)
@@ -245,13 +254,21 @@ int run(int argc, char** argv) {
 
   const std::string snapshot_dir = loader::resolve_snapshot(path);
   const std::vector<uint32_t> eos = eos_ids(snapshot_dir);
+  const uint32_t trained = loader::trained_context(snapshot_dir);
+  cli::check_before_load(max_len_arg, trained, /*require_quantum=*/true);   // spec 6 §10
   l0::Context context(device);
   std::fprintf(stderr, "device: %s (%u EUs)%s\n", context.name().c_str(), context.eu_count(),
                device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
   loader::LoadedModel model = [&] {
     StdoutToStderr redirect;
-    return loader::load(context, snapshot_dir, max_len, /*mtp=*/mtp_k > 0, lm_head);
+    return loader::load(context, snapshot_dir, cli::load_len(max_len_arg, trained),
+                        /*mtp=*/mtp_k > 0, lm_head);
   }();
+  // Spec 6 §10: auto plans the largest max_len that fits and re-tables the model; an
+  // explicit N is held to the same plan. Both print the plan's breakdown.
+  const uint32_t max_len = cli::settle(
+      context, model, max_len_arg, mem_reserve,
+      cli::prefill_path(true, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend()));
   runtime::Engine engine(context, std::move(model), max_len);
   if (have_pp_backend) engine.set_prefill_backend(pp_backend);
   // Prefill setup at load, not in the first request: on l0-int8 this is the
