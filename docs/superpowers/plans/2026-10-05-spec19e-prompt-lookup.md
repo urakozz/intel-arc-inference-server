@@ -8,7 +8,24 @@
 
 **Tech Stack:** C++17 (host), Level Zero for the verify path, Python for the replay analysis.
 
-**Spec:** spec 19 (§3 C, §4 decision 1, §7 19e). Operator decision 1 decides whether this stage runs; for K2 it needs spec 18b merged.
+**Spec:** spec 19 (§3 C, §4 decision 1, §7 19e, §9). Operator decision 1 decides whether this stage runs; for K2 it needs spec 18b merged.
+
+**Status (2026-10-05, branch `spec19e-prompt-lookup`, host side only, no box):**
+- Task 1 done **on A4 only** (`docs/probe-prompt-lookup-2026-10-05.md`): lookup alone 1.44x
+  over plain (n = 3, K <= 3), 0.92x of projected `--mtp auto`; combined with MTP +3-6 %. The
+  opencode recording, which decides, is not recorded yet: rerun the tool on it.
+- Task 2, host part done: `server::PromptLookup` (`src/server/prompt_lookup.h`, the matcher),
+  `server::accept_point_mass` (lossless sampling, 1e6-sample chi-square tests),
+  `EngineIface::verify_k` / `step_drafts`, `b70-serve --spec off|mtp|lookup`,
+  `--spec-min-match`, `--spec-max`, `--spec-cost`, `--spec-history`, AdaptiveK with free
+  drafts; mock-tested (`prompt_lookup_test`, `lookup_server_test`, `spec_accept_test`).
+  `EngineAdapter::step_drafts` is written (Qwen3.8: the MTP verify lists take the drafts in
+  `cur_token[1..k]`, which `Engine::verify` already reads) but **has never run**: D2 per
+  model is box queue row 12. A model without the MTP head (K2) needs its own verify lists
+  (TODO in `serve_adapters.h`).
+- `--spec mtp+lookup` not built: Task 1 does not show it paying on A4 (below spec 19's
+  +10 %); the recording decides.
+- Task 3 open (box).
 
 ## Global Constraints
 
@@ -28,7 +45,7 @@
 
 ### Task 1: offline acceptance on the recording (no box)
 
-- [ ] `tools/spec/lookup_accept.py`: replay the opencode recording's requests (ids from `--log-requests`), measure tokens per verify at K = 1..7 and n = 2..6, alone and combined with MTP's measured acceptance; record. **Commit** `probe: prompt-lookup acceptance on the opencode recording (spec 19e)`.
+- [x] (A4 only; the recording pending) `tools/spec/lookup_accept.py`: replay the opencode recording's requests (ids from `--log-requests`), measure tokens per verify at K = 1..7 and n = 2..6, alone and combined with MTP's measured acceptance; record. **Commit** `probe: prompt-lookup acceptance on the opencode recording (spec 19e)`.
 
 ### Task 2: the proposer and the loop
 
