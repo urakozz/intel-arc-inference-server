@@ -1916,3 +1916,28 @@ b70_cli_reject(cli_reject_k2_pp_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --benc
 b70_cli_reject(cli_reject_k2_prefill_sycl ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS} --n 4
   --prefill --pp-backend sycl-tla EXPECT "K2-Horizon prefills on the l0 backend only")
 # ==== Spec 18c: K2-Horizon prefill ========================================= (end) ====
+
+# ==== Spec 15e: Ornith 1.5 35B-A3B served, and its MoE MTP head (label `ornith`) == (begin) ==
+# One delimited block for every 15e registration (the branches in flight beside it edit
+# their own blocks). Host tests first - they run on the Mac (tools/mac_check.sh) - then the
+# card's, which SKIP (77) until the Ornith int4 checkpoint (15a) is on the machine.
+#
+# Task 1: the chat template. Ornith's chat_template.jinja is Qwen3.5's, not Qwen3.8's (no
+# reasoning-effort block; every assistant turn keeps its <think> block): rendered by the
+# engine on six message lists against transformers' render (tools/tokenizer/
+# dump_agnes_template.py with the checkpoint's two template files, vendored at
+# tests/tokenizer/ornith/ - MIT, ornith-ai/Ornith-1.5-35B-A3B at 10fbf86f) ...
+if(B70_TOKENIZER_ENABLED)
+  add_test(NAME template_ornith_test COMMAND template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${CMAKE_SOURCE_DIR}/tests/tokenizer/ornith ornith_template_cases.json ornith)
+  set_tests_properties(template_ornith_test PROPERTIES LABELS ornith SKIP_RETURN_CODE 77)
+  # ... and the server over that template (mock engine and tokenizer): the prompt is
+  # transformers' render, Ornith-format tool calls come back as OpenAI tool calls (buffered
+  # and streamed), reasoning splits at </think>.
+  add_executable(ornith_server_test server/ornith_server_test.cc)
+  target_include_directories(ornith_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(ornith_server_test PRIVATE b70_server b70_tokenizer)
+  add_test(NAME ornith_server_test COMMAND ornith_server_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
+  set_tests_properties(ornith_server_test PROPERTIES LABELS ornith SKIP_RETURN_CODE 77 TIMEOUT 120)
+endif()
+# ==== Spec 15e ============================================================= (end) ====

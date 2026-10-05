@@ -45,13 +45,22 @@ void diff_report(const char* name, const std::string& got, const std::string& wa
 // Spec 14: `template_test <dir> <snapshot> <cases.json>` renders every case of the JSON
 // file (name, messages, tools, think) through <snapshot>'s template and compares with
 // <dir>/agnes_template_<name>.txt (tools/tokenizer/dump_agnes_template.py, transformers).
-int run_cases(const std::string& dir, const std::string& snap, const std::string& cases_file) {
+// Spec 15e: an optional fifth argument names the reference files' prefix (`ornith` ->
+// <dir>/ornith_template_<name>.txt). A snapshot without its two template files is a
+// SKIP (77), not a failure - the test is about the renderer, not about the cache.
+int run_cases(const std::string& dir, const std::string& snap, const std::string& cases_file,
+              const std::string& prefix) {
+  for (const char* f : {"/tokenizer_config.json", "/chat_template.jinja"})
+    if (!std::ifstream(snap + f).good()) {
+      std::printf("SKIP: %s%s is absent\n", snap.c_str(), f);
+      return 77;
+    }
   chat::Template tmpl(snap);
   CHECK_EQ(tmpl.eos_token(), std::string("<|im_end|>"));
   const auto cases = nlohmann::json::parse(slurp(dir + "/" + cases_file));
   int bad = 0;
   for (const auto& c : cases) {
-    const std::string file = "agnes_template_" + c.at("name").get<std::string>() + ".txt";
+    const std::string file = prefix + "_template_" + c.at("name").get<std::string>() + ".txt";
     const std::string want = slurp(dir + "/" + file);
     const std::string got = tmpl.render(c.at("messages"), c.at("tools"), c.at("think").get<bool>());
     if (got != want) {
@@ -70,7 +79,7 @@ int run_cases(const std::string& dir, const std::string& snap, const std::string
 
 int main(int argc, char** argv) {
   const std::string dir = argc > 1 ? argv[1] : "tests/tokenizer";
-  if (argc > 3) return run_cases(dir, argv[2], argv[3]);
+  if (argc > 3) return run_cases(dir, argv[2], argv[3], argc > 4 ? argv[4] : "agnes");
   chat::Template tmpl(snapshot());
   CHECK_EQ(tmpl.eos_token(), std::string("<|im_end|>"));
   const auto messages = nlohmann::json::parse(slurp(dir + "/template_messages.json"));
