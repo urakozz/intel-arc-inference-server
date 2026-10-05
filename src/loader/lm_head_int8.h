@@ -45,4 +45,16 @@ float quantise_row_int8(const uint16_t* w, uint32_t K, int8_t* q);
 void quantise_int8_tiled(const uint16_t* w, uint32_t K, uint32_t N, int8_t* q_tiled,
                          float* scales, unsigned threads = 0);
 
+// Spec 8 §11: the draft vocabulary's compact head. Rows `ids[0..n)` of a tiled [N][K]
+// int8 head (the layout above) and their scales, gathered into the SAME tiled layout at
+// N' = n: compact row j is row ids[j], byte for byte, and out_scales[j] = scales[ids[j]].
+// So `gemv_i8w` at N = n over the result runs, for compact column j, the instruction
+// sequence it runs for column ids[j] over the full head - the bitwise property
+// draft_vocab_kernels_test checks on the card. n must be a multiple of 16 (whole tiles)
+// and every id < N. `threads` as above; the result does not depend on it (each output
+// tile is one thread's).
+void gather_int8_tiled_rows(const int8_t* q_tiled, const float* scales, uint32_t K, uint32_t N,
+                            const uint32_t* ids, uint32_t n, int8_t* out_tiled,
+                            float* out_scales, unsigned threads = 0);
+
 }  // namespace loader

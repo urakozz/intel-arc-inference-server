@@ -470,6 +470,13 @@ target_include_directories(lm_head_int8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${C
 target_link_libraries(lm_head_int8_test PRIVATE b70_loader)
 add_test(NAME lm_head_int8_test COMMAND lm_head_int8_test)
 
+# Spec 8 §11: the draft vocabulary's host half - which ids V' holds, the ranked-id file,
+# tokenizer.json's added tokens, and the compact head's gather from the int8 head.
+add_executable(draft_vocab_test loader/draft_vocab_test.cc)
+target_include_directories(draft_vocab_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(draft_vocab_test PRIVATE b70_loader)
+add_test(NAME draft_vocab_test COMMAND draft_vocab_test)
+
 add_executable(quant_test loader/quant_test.cc)
 target_include_directories(quant_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(quant_test PRIVATE b70_loader)
