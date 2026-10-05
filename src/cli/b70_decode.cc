@@ -1,6 +1,7 @@
 // b70-decode - spec §12, plus spec 1.5 §3.4. Three modes:
 //
 //   b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--pp-chunk C]] [--device N] [--max-len 16384]
+//                                         [--mtp off|1|2|3|auto]
 //   b70-decode <snapshot-or-repo> --bench [--depth 4096] [--tg 256] [--device N]
 //   b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--repeats 1]
 //                                           [--device N]
@@ -27,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -50,6 +52,7 @@
 #include "runtime/engine.h"
 #include "runtime/prefill/backend.h"
 #include "runtime/prefill/profile.h"
+#include "server/adaptive_k.h"
 
 namespace {
 using model::Qwen35;
@@ -91,6 +94,7 @@ void usage() {
        "  b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--pp-chunk C]\n"
        "                                        [--pp-backend sycl-tla|l0|l0-int8]]\n"
        "                                        [--device N] [--max-len 16384|auto]\n"
+      "                                        [--mtp off|1|2|3|auto]\n"
       "  b70-decode <snapshot-or-repo> --bench [--depth 4096 | --pp N [--pp-chunk C]\n"
       "                                        [--pp-backend sycl-tla|l0|l0-int8]]\n"
       "                                        [--tg 256] [--device N] [--max-len 16384|auto]\n"
@@ -103,6 +107,11 @@ void usage() {
        "  --n <N>        ids to generate, greedily; one per line on stdout, t/s on stderr\n"
        "  --prefill      --ids only: run the prompt through Engine::prefill instead of one\n"
        "                 Engine::ingest replay per id; needs the optional prefill component.\n"
+       "  --mtp K        --ids only (spec 8): greedy speculative decoding with the checkpoint's\n"
+       "                 MTP head - K drafts per iteration (1..3), or `auto` (b70-serve --mtp\n"
+       "                 auto's per-request policy, its default cost table for the --lm-head\n"
+       "                 form). Greedy, so the ids equal the plain run's; off / 0 = no head.\n"
+       "                 Stderr adds the iterations and the acceptance.\n"
       "  --device N     GPU index. Absent: ONEAPI_DEVICE_SELECTOR=level_zero:N, else device 0.\n"
       "  --max-len <L>  KV cache and RoPE capacity: default 16384 (bench rows stay comparable);\n"
       "                 any multiple of 256 up to the trained context (config.json\n"
@@ -600,6 +609,74 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
   return 0;
 }
 
+// --- --mtp: greedy speculative decoding in --ids mode (spec 8) ------------------
+//
+// What b70-serve's loop does for a greedy request, without the server: per iteration, K
+// drafts from the head (fixed, or AdaptiveK's choice under `auto` - one policy for the run,
+// fed by its own acceptance, as one request is), the verify list at M = K + 1, the longest
+// prefix of drafts the main model's argmax agrees with, then commit. The pending id and the
+// accepted drafts are this iteration's ids, printed one per line as the plain loop does;
+// greedy acceptance keeps them equal to the plain run's ids, which is what the box's
+// long-context checks diff (queue row 6). The last positions of max_len fall back to K = 0
+// (max_verify_k), and ids past --n are not printed.
+int generate_mtp(runtime::Engine& eng, uint32_t n, bool mtp_auto, uint32_t mtp_k,
+                 loader::LmHeadForm lm_head) {
+  std::optional<server::AdaptiveK> policy;
+  if (mtp_auto) {
+    server::AdaptiveKOptions o;
+    o.max_k = runtime::Engine::kMaxDraft;
+    o.cost = lm_head == loader::LmHeadForm::Int8 ? server::MtpCost::int8_head()
+                                                 : server::MtpCost::bf16_head();
+    policy.emplace(o);
+  }
+  runtime::Control* c = eng.buffers().control.as<runtime::Control>();
+  uint32_t printed = 0;
+  uint64_t iters = 0, drafted = 0, accepted = 0, at_k[runtime::Engine::kMaxDraft + 1] = {};
+  const auto emit = [&](uint32_t id) {
+    if (printed == n) return;
+    std::printf("%u\n", id);
+    std::fflush(stdout);
+    ++printed;
+  };
+  const auto t0 = std::chrono::steady_clock::now();
+  while (printed < n) {
+    const uint32_t want = policy ? policy->next() : mtp_k;
+    const uint32_t k = std::min(want, eng.max_verify_k());
+    const uint32_t x = c->cur_token[0];
+    uint32_t j = 0;
+    if (k == 0) {
+      eng.verify(0);
+      eng.commit(0, eng.verify_ids()[0]);
+      emit(x);
+    } else {
+      eng.draft(k);
+      eng.verify(k);
+      while (j < k && eng.draft_ids()[j] == eng.verify_ids()[j]) ++j;
+      emit(x);
+      for (uint32_t i = 0; i < j; ++i) emit(eng.draft_ids()[i]);
+      eng.commit(j, eng.verify_ids()[j]);
+    }
+    if (policy) policy->observe(want, j);
+    ++iters;
+    ++at_k[k];
+    drafted += k;
+    accepted += j;
+  }
+  const double ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  std::fprintf(stderr, "generate: %u ids, %.2f t/s, %.2f ms/token (--mtp %s, greedy)\n", n,
+               ms > 0.0 ? 1000.0 * n / ms : 0.0, n ? ms / n : 0.0,
+               mtp_auto ? "auto" : std::to_string(mtp_k).c_str());
+  std::fprintf(stderr,
+               "mtp: %llu iterations (K=0 %llu, K=1 %llu, K=2 %llu, K=3 %llu), acceptance %.4f"
+               " (%llu/%llu), %.3f ids per iteration, pos %u\n",
+               (unsigned long long)iters, (unsigned long long)at_k[0], (unsigned long long)at_k[1],
+               (unsigned long long)at_k[2], (unsigned long long)at_k[3],
+               drafted ? double(accepted) / double(drafted) : 0.0, (unsigned long long)accepted,
+               (unsigned long long)drafted, iters ? double(n) / double(iters) : 0.0, eng.pos());
+  return 0;
+}
+
 int run(int argc, char** argv) {
   std::string path, ids_path;
   uint32_t n = 0, depth = 4096, tg = 256, steps = 32, repeats = 1, max_len = 16384;
@@ -617,6 +694,9 @@ int run(int argc, char** argv) {
   // Spec 9 §3: bf16 by default, so BENCHMARKS rows stay byte-matched with vLLM.
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   runtime::KvCache kv_cache = runtime::default_kv_cache();   // spec 12b: --kv-cache
+  // Spec 8: --mtp K|auto in --ids mode (greedy); absent = no head, every path as before.
+  uint32_t mtp_k = 0;
+  bool mtp_auto = false, have_mtp = false;
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -670,6 +750,15 @@ int run(int argc, char** argv) {
     } else if (a == "--repeats") {
       repeats = parse_u32("--repeats", value(i, "--repeats"));
       have_repeats = true;
+    } else if (a == "--mtp") {   // spec 8, --ids mode
+      const std::string v = value(i, "--mtp");
+      have_mtp = true;
+      mtp_auto = v == "auto";
+      if (!mtp_auto) {
+        if (v != "off" && (v.size() != 1 || v[0] < '0' || v[0] > '3'))
+          throw std::runtime_error("--mtp expects off, 0..3 or auto, got '" + v + "'");
+        mtp_k = v == "off" ? 0 : uint32_t(v[0] - '0');
+      }
     } else if (a == "--kv-cache") {   // spec 12b
       kv_cache = cli::parse_kv_cache_arg(value(i, "--kv-cache"));
     } else if (a == "--lm-head") {
@@ -718,6 +807,10 @@ int run(int argc, char** argv) {
   if (have_depth && !synthetic)
     throw std::runtime_error("--depth belongs to --bench and --profile; --ids sizes its run"
                              " with --n");
+  if (have_mtp && synthetic)
+    throw std::runtime_error("--mtp belongs to --ids (greedy speculative decoding); --bench and"
+                             " --profile time the plain list (mtp_gpu_test --bench times MTP)");
+  const bool mtp_on = mtp_auto || mtp_k > 0;
   // The prefill flags (spec 2, interfaces.md's CLI contract). They are pure
   // argument validation and are checked BEFORE l0::Context like every other
   // rejection, so `b70_cli_reject` can grade them without a device - and so a
@@ -781,6 +874,8 @@ int run(int argc, char** argv) {
                                "speed work); --bench times it");
     if (kv_cache == runtime::KvCache::Int8)
       throw std::runtime_error("K2-Horizon's int8 KV cache is spec 18e; --kv-cache bf16");
+    if (mtp_on)
+      throw std::runtime_error("K2-Horizon has no MTP head (spec 18 §9); drop --mtp");
     cli::k2::DecodeArgs ka;
     ka.path = path;
     ka.ids_path = ids_path;
@@ -838,7 +933,7 @@ int run(int argc, char** argv) {
 
   loader::LoadedModel model = [&] {
     StdoutToStderr redirect;
-    return loader::load(ctx, path, cli::load_len(max_len_arg, trained), /*mtp=*/false, lm_head);
+    return loader::load(ctx, path, cli::load_len(max_len_arg, trained), /*mtp=*/mtp_on, lm_head);
   }();
   // Spec 15c: --pp / --prefill on a model whose prefill is not built stop here with the
   // reason, before a plan or an engine is made for it (spec 15d: Ornith's is built, on
@@ -910,6 +1005,7 @@ int run(int argc, char** argv) {
   if (prefill)
     std::fprintf(stderr, "prefill: %zu ids, pos %u\n", ids.size(), eng.pos());
 
+  if (!bench && mtp_on) return generate_mtp(eng, n, mtp_auto, mtp_k, lm_head);
   if (!bench) {
     eng.generate(n, [](uint32_t id) {
       std::printf("%u\n", id);
