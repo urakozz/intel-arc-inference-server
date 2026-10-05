@@ -138,11 +138,24 @@ target_include_directories(spec_accept_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CM
 target_link_libraries(spec_accept_test PRIVATE b70_server)
 add_test(NAME spec_accept_test COMMAND spec_accept_test)
 
+# Spec 19e (plan 19e Task 2): the prompt-lookup matcher against a brute force, host only.
+add_executable(prompt_lookup_test server/prompt_lookup_test.cc)
+target_include_directories(prompt_lookup_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(prompt_lookup_test PRIVATE b70_server)
+add_test(NAME prompt_lookup_test COMMAND prompt_lookup_test)
+
 # Spec 8 §3.6 (plan 8c): the server over a scripted speculative engine, host only.
 add_executable(mtp_server_test server/mtp_server_test.cc)
 target_include_directories(mtp_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(mtp_server_test PRIVATE b70_server)
 add_test(NAME mtp_server_test COMMAND mtp_server_test)
+
+# Spec 19e (plan 19e Task 2): the server with --spec lookup over a mock engine that verifies
+# external drafts, host only.
+add_executable(lookup_server_test server/lookup_server_test.cc)
+target_include_directories(lookup_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lookup_server_test PRIVATE b70_server)
+add_test(NAME lookup_server_test COMMAND lookup_server_test)
 
 # Spec 8 §10: the --mtp auto policy on synthetic acceptance sequences, host only.
 add_executable(adaptive_k_test server/adaptive_k_test.cc)

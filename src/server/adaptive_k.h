@@ -35,6 +35,11 @@ struct MtpCost {
   // keeps `base`'s). Throws std::invalid_argument on anything else.
   static MtpCost parse(const std::string& text, const MtpCost& base);
 
+  // Spec 19e: the same verify rows with a free draft - prompt lookup proposes on the host in
+  // microseconds (prompt_lookup.h), ~0 of a 32 ms plain step. draft[k - 1] = 0 for every K
+  // the verify list covers.
+  MtpCost with_free_drafts() const;
+
   uint32_t max_k() const;              // the deepest K both lists cover
   double cost(uint32_t k) const;       // K = 0: 1 (a plain step)
 };

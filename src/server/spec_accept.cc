@@ -98,4 +98,26 @@ AcceptResult accept_sampled(const float* p_rows, const float* q_rows, const uint
   return {k, draw(filter_probs(p_rows + k * row_stride, vocab_used, s), rng)};
 }
 
+AcceptResult accept_point_mass(const float* p_rows, const uint32_t* drafts, uint32_t k,
+                               uint32_t vocab_used, size_t row_stride, const Sampling& s,
+                               std::mt19937_64& rng) {
+  std::uniform_real_distribution<double> uniform(0.0, 1.0);
+  for (uint32_t i = 0; i < k; ++i) {
+    const FilteredProbs p = filter_probs(p_rows + i * row_stride, vocab_used, s);
+    const double pd = p.prob(drafts[i]);
+    if (uniform(rng) < pd) continue;   // accepted with probability p(d_i)
+    // Rejected: p without d_i, renormalised (max(0, p - q) with q the point mass on d_i).
+    std::vector<double> residual(p.ids.size());
+    double total = 0.0;
+    for (size_t r = 0; r < p.ids.size(); ++r) {
+      residual[r] = p.ids[r] == drafts[i] ? 0.0 : p.probs[r];
+      total += residual[r];
+    }
+    if (!(total > 0.0)) return {i, draw(p, rng)};   // p(d_i) == 1: cannot follow a rejection
+    std::discrete_distribution<uint32_t> d(residual.begin(), residual.end());
+    return {i, p.ids[d(rng)]};
+  }
+  return {k, draw(filter_probs(p_rows + k * row_stride, vocab_used, s), rng)};
+}
+
 }  // namespace server

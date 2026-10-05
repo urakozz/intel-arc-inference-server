@@ -1,5 +1,6 @@
 // Host-only (spec 8 M4, plan 8c Task 1): the speculative acceptance rule over
 // synthetic logits rows. No device.
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -193,6 +194,50 @@ void draft_vocab_case(const Sampling& s, const char* name) {
   CHECK(threw);
 }
 
+// Spec 19e (plan 19e Review Focus 1): deterministic drafts (prompt lookup, q a point mass).
+// 1e6 iterations whose drafts cycle through a likely id, an unlikely one, one the filter
+// drops (p = 0) and the argmax; the emitted tokens must be distributed as filtered p_0 and,
+// given d_1 kept, p_1 - the drafts never move the distribution. The kept rate of a draft d
+// is p(d).
+void point_mass_case(const Sampling& s, const char* name) {
+  constexpr uint32_t V = 50, K = 2;
+  constexpr int kDraws = 1000000;
+  const std::vector<float> p = random_rows(K + 1, V, 41, 1.5f);
+  const server::FilteredProbs f0 = server::filter_probs(p.data(), V, s);
+  const server::FilteredProbs f1 = server::filter_probs(p.data() + V, V, s);
+  // Draft choices per row: [argmax, the 2nd, the last kept, an id the filter drops (id V - 1
+  // when it drops none)].
+  uint32_t dropped0 = 0;
+  while (f0.prob(dropped0) > 0 && dropped0 + 1 < V) ++dropped0;
+  const uint32_t choice[4][K] = {{f0.ids[0], f1.ids[0]},
+                                 {f0.ids[std::min<size_t>(1, f0.ids.size() - 1)], f1.ids.back()},
+                                 {f0.ids.back(), f1.ids[0]},
+                                 {dropped0, f1.ids[std::min<size_t>(1, f1.ids.size() - 1)]}};
+  std::mt19937_64 rng(2028);
+  std::vector<uint64_t> first(V, 0), second(V, 0);
+  uint64_t tried[4] = {}, kept[4] = {};
+  for (int it = 0; it < kDraws; ++it) {
+    const uint32_t* d = choice[it % 4];
+    const server::AcceptResult r = server::accept_point_mass(p.data(), d, K, V, V, s, rng);
+    CHECK(r.accepted <= K && r.next_token < V);
+    ++tried[it % 4];
+    kept[it % 4] += r.accepted >= 1;
+    if (r.accepted == 0) CHECK(r.next_token != d[0]);   // the rejected id is never resampled
+    ++first[r.accepted >= 1 ? d[0] : r.next_token];
+    if (r.accepted >= 1) ++second[r.accepted >= 2 ? d[1] : r.next_token];
+  }
+  const std::string n0 = std::string(name) + " point mass: first token vs p_0";
+  const std::string n1 = std::string(name) + " point mass: second token | d_1 kept vs p_1";
+  CHECK(chi2_pvalue(first, f0, n0.c_str()) >= 0.01);
+  CHECK(chi2_pvalue(second, f1, n1.c_str()) >= 0.01);
+  for (int c = 0; c < 4; ++c) {
+    const double rate = double(kept[c]) / double(tried[c]);
+    const double want = f0.prob(choice[c][0]);
+    // 5 sigma of a binomial over 250000 tries (and exact 0 for a dropped id).
+    CHECK(std::fabs(rate - want) <= 5 * std::sqrt(want * (1 - want) / double(tried[c])) + 1e-12);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -329,6 +374,55 @@ int main() {
     draft_vocab_case(s, "draft vocab, top_k 12, top_p 0.8, T 0.7");
     ++cases;
   }
-  std::printf("spec_accept_test: %d/6 cases passed\n", cases);
-  return cases == 6 ? 0 : 1;
+  // 7. Spec 19e: a point-mass proposal (prompt lookup), without and with the filter; the
+  // one-hot edges; seeded reproducibility.
+  {
+    Sampling s;
+    s.greedy = false;
+    s.temperature = 1.0f;
+    s.top_k = 0;
+    s.top_p = 1.0f;
+    point_mass_case(s, "unfiltered");
+    s.temperature = 0.7f;
+    s.top_k = 12;
+    s.top_p = 0.8f;
+    point_mass_case(s, "top_k 12, top_p 0.8, T 0.7");
+    constexpr uint32_t V = 20;
+    std::vector<float> p(3 * V, 0.0f);
+    for (uint32_t r = 0; r < 3; ++r) p[r * V + 5] = 30.0f;   // p (numerically) one-hot on 5
+    s.top_k = 1;
+    std::mt19937_64 rng(3);
+    for (int it = 0; it < 1000; ++it) {
+      const uint32_t right[2] = {5, 5}, wrong[2] = {9, 5};
+      server::AcceptResult r = server::accept_point_mass(p.data(), right, 2, V, V, s, rng);
+      CHECK_EQ(r.accepted, 2u);
+      CHECK_EQ(r.next_token, 5u);
+      r = server::accept_point_mass(p.data(), wrong, 2, V, V, s, rng);
+      CHECK_EQ(r.accepted, 0u);
+      CHECK_EQ(r.next_token, 5u);
+    }
+    // k = 0 is a plain sampled step.
+    const server::AcceptResult r0 = server::accept_point_mass(p.data(), nullptr, 0, V, V, s, rng);
+    CHECK_EQ(r0.accepted, 0u);
+    CHECK_EQ(r0.next_token, 5u);
+    const std::vector<float> q = random_rows(4, 40, 79, 1.0f);
+    s.top_k = 20;
+    s.top_p = 0.95f;
+    const auto run = [&](uint64_t seed) {
+      std::mt19937_64 g(seed);
+      std::vector<uint32_t> out;
+      for (int it = 0; it < 2000; ++it) {
+        const uint32_t k = 1 + it % 3, d[3] = {uint32_t(it % 40), 7, 11};
+        const server::AcceptResult r = server::accept_point_mass(q.data(), d, k, 40, 40, s, g);
+        for (uint32_t i = 0; i < r.accepted; ++i) out.push_back(d[i]);
+        out.push_back(r.next_token);
+      }
+      return out;
+    };
+    CHECK(run(5) == run(5));
+    CHECK(run(5) != run(6));
+    ++cases;
+  }
+  std::printf("spec_accept_test: %d/7 cases passed\n", cases);
+  return cases == 7 ? 0 : 1;
 }

@@ -83,6 +83,24 @@ struct EngineIface {
   }
   virtual void truncate_to(uint32_t pos) { (void)pos; }
 
+  // Spec 19e (`--spec lookup`, spec 19 §3 C): verify drafts proposed OUTSIDE the engine
+  // (prompt lookup). verify_k() == 0 (the default) means the engine cannot, and the server
+  // never calls step_drafts(). Otherwise step_drafts(s, propose) runs one iteration:
+  //   1. it calls propose(x) exactly once, with x the pending id (what step() would return
+  //      now); the proposer answers d_1 .. d_k (k <= verify_k(), possibly 0) continuing x;
+  //   2. it verifies them at M = k + 1 rows (the engine may verify fewer, near max_len; k = 0
+  //      is one plain step) and keeps the longest acceptable prefix d_1 .. d_j - greedy: the
+  //      target's argmax equals the draft; sampled: server::accept_point_mass (the proposal is
+  //      a point mass, lossless);
+  //   3. it returns x, d_1 .. d_j (1 .. k + 1 ids); pos() counts all of them, and
+  //      truncate_to() shortens the run exactly as after step_many().
+  using Proposer = std::function<std::vector<uint32_t>(uint32_t pending)>;
+  virtual uint32_t verify_k() { return 0; }
+  virtual std::vector<uint32_t> step_drafts(const Sampling& s, const Proposer& propose) {
+    (void)propose;
+    return {step(s)};
+  }
+
  private:
   template <class T>
   static T unsupported() {
