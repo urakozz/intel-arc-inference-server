@@ -18,7 +18,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_compile_options(-Wall -Wextra -Werror)
 
 foreach(v B70_ROOT B70_KERNEL_DIR B70_OCLOC_DEVICE B70_ONEAPI_LIB B70_ONEAPI_UMF_LIB B70_L0_LIB
-          B70_LOADER_LIB B70_MODEL_LIB B70_PREFILL_HOST_LIB B70_RUNTIME_LIB B70_SYCL_TLA_SRC_DIR
+          B70_LOADER_LIB B70_MODEL_LIB B70_PREFILL_HOST_LIB B70_RUNTIME_LIB B70_PLAN_LIB B70_SYCL_TLA_SRC_DIR
           B70_SYCL_TLA_REVISION)
   if(NOT DEFINED ${v})
     message(FATAL_ERROR "${v} must be passed in by cmake/prefill.cmake")
@@ -160,9 +160,10 @@ function(b70_sycl_probe NAME)
   target_link_options(${NAME} PRIVATE ${B70_SYCL_LINK}
     -Wl,-rpath,${B70_ONEAPI_LIB} -Wl,-rpath,${B70_ONEAPI_UMF_LIB} -Wl,--disable-new-dtags)
   # The probes construct `Context`, which is now in the host archive, and the host archive
-  # pulls the runtime, loader and model archives (spec 2.1 §3.5).
+  # pulls the runtime (and its buffer sizes, b70_plan: spec 6 §10), loader and model
+  # archives (spec 2.1 §3.5).
   target_link_libraries(${NAME} PRIVATE b70_prefill -Wl,--start-group "${B70_PREFILL_HOST_LIB}"
-    "${B70_RUNTIME_LIB}" "${B70_LOADER_LIB}" "${B70_MODEL_LIB}" "${B70_L0_LIB}" -Wl,--end-group
+    "${B70_RUNTIME_LIB}" "${B70_PLAN_LIB}" "${B70_LOADER_LIB}" "${B70_MODEL_LIB}" "${B70_L0_LIB}" -Wl,--end-group
     PkgConfig::ZE ${ARGN})
   set_property(TARGET ${NAME} APPEND PROPERTY INSTALL_RPATH
     "$ORIGIN/../lib" "${B70_ONEAPI_LIB}" "${B70_ONEAPI_UMF_LIB}")

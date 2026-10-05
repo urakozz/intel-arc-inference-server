@@ -59,9 +59,10 @@ if(TARGET b70_prefill_ext)
   # b70_loader/b70_model join the list for the int4-mixed probe (ruling A21),
   # the one icpx probe that reads the checkpoint. b70_prefill_host/b70_runtime
   # join it because the ExternalProject must not start before the archives its
-  # probes link exist (spec 2.1 §3.5).
+  # probes link exist (spec 2.1 §3.5); b70_plan holds b70_runtime's buffer sizes
+  # (spec 6 §10).
   add_dependencies(b70_prefill_ext b70_l0 b70_loader b70_model b70_prefill_host b70_runtime
-                   kernel_noop kernel_ctrl_read kernel_bw_sum)
+                   b70_plan kernel_noop kernel_ctrl_read kernel_bw_sum)
 endif()
 add_subdirectory(tools/probe)
 # After src/kernels: src/cli reads that directory's target list to depend on
