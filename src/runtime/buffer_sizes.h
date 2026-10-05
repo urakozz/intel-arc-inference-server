@@ -28,6 +28,61 @@ inline constexpr DecodeAttn kDefaultDecodeAttn = DecodeAttn::V2;   // spec 10 ga
 DecodeAttn decode_attn();
 const char* decode_attn_name(DecodeAttn a);
 
+// --- the KV cache's form (spec 12b) --------------------------------------------------
+
+// `--kv-cache bf16|int8`. bf16 is today's cache, bit for bit. int8 is the operator's
+// `rotkv` scheme (spec 12 §8; src/common/kv8.h, src/kernels/kv8.cl): every K and V row
+// rotated by the same 256-point Hadamard and stored as int8 with one fp16 scale per
+// (position, kv head). `B70_KV_CACHE=bf16|int8` sets the default (as B70_DECODE_ATTN does
+// for the decode pair: read at each call, so a test can set it between engines; unset or
+// empty is bf16; anything else throws), which is how the gate tests run the same binaries
+// over the int8 cache; the CLIs pass their flag explicitly.
+enum class KvCache { Bf16, Int8 };
+inline constexpr KvCache kDefaultKvCache = KvCache::Bf16;   // until spec 12's gates pass
+KvCache default_kv_cache();
+KvCache parse_kv_cache(const char* v);   // "bf16" | "int8"; throws std::runtime_error
+const char* kv_cache_name(KvCache kv);
+
+// One FA layer's cache, either form: the K and V rows, and at int8 their scales (null at
+// bf16). Pointers only - device-free.
+struct KvLayer {
+  void* k = nullptr;
+  void* v = nullptr;
+  void* ks = nullptr;   // int8: fp16 bits [max_len][kv-heads]
+  void* vs = nullptr;
+  bool int8() const { return ks != nullptr; }
+};
+
+// The layout of ONE K (or V) allocation of `layers` FA layers - the main cache
+// (PersistentBuffers::kv_k, fa_layers) or the MTP head's (MtpBuffers::kv_k, 1):
+//
+//   rows    [layers][max_len][kv_heads][256]   bf16 (2 B) or int8 (1 B)
+//   scales  [layers][max_len][kv_heads]        fp16, int8 only, after EVERY layer's rows
+//
+// At bf16 the scale region is empty and the rows are exactly today's allocation, so a
+// layer's rows start where they always did. At int8 a position of one layer is
+// kv_heads x (256 + 2) B: 1032 B on Qwen3.8 against 2048.
+struct KvLayout {
+  KvCache form = KvCache::Bf16;
+  uint32_t max_len = 0, kv_heads = 0, head_dim = 0, layers = 0;
+
+  size_t row_bytes() const {   // one position of one layer's K (or V) rows
+    return size_t(kv_heads) * head_dim * (form == KvCache::Int8 ? 1 : 2);
+  }
+  size_t scale_row_bytes() const { return form == KvCache::Int8 ? size_t(kv_heads) * 2 : 0; }
+  size_t pos_bytes() const { return row_bytes() + scale_row_bytes(); }
+  size_t layer_rows() const { return size_t(max_len) * row_bytes(); }
+  size_t layer_scales() const { return size_t(max_len) * scale_row_bytes(); }
+  size_t rows_offset(uint32_t layer) const { return size_t(layer) * layer_rows(); }
+  size_t scales_offset(uint32_t layer) const {
+    return size_t(layers) * layer_rows() + size_t(layer) * layer_scales();
+  }
+  size_t bytes() const { return size_t(layers) * (layer_rows() + layer_scales()); }
+  // Layer `layer`'s pointers inside the K and V allocations at `k_base` / `v_base`.
+  KvLayer layer(void* k_base, void* v_base, uint32_t layer) const;
+};
+KvLayout kv_layout(uint32_t max_len, const model::ModelDesc& desc, uint32_t layers, KvCache kv);
+
 // --- PersistentBuffers ---------------------------------------------------------------
 
 struct PersistentSizes {
@@ -37,7 +92,9 @@ struct PersistentSizes {
 
 struct PersistentDims {
   static constexpr uint32_t kConvRing = 16;   // ring depth >= M + 3 (spec §9.4)
-  static PersistentSizes sizes(uint32_t max_len, const model::ModelDesc& desc);
+  // kv_k / kv_v are kv_layout(max_len, desc, fa_layers, kv).bytes() each (spec 12b).
+  static PersistentSizes sizes(uint32_t max_len, const model::ModelDesc& desc,
+                               KvCache kv = default_kv_cache());
 };
 
 // --- DecodeScratch -------------------------------------------------------------------
@@ -183,7 +240,9 @@ struct MtpDims {
   static constexpr uint32_t kSlots = 4;   // M <= 4: K <= 3 drafts + the pending token
   static constexpr uint32_t kMaxK = kSlots - 1;
   // `draft_vocab` = |V'| (spec 8 §11, `--draft-vocab`), 0 when the full head drafts.
-  static MtpSizes sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t draft_vocab = 0);
+  // `kv`: the head's KV follows the main cache's form (spec 12b), one layer.
+  static MtpSizes sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t draft_vocab = 0,
+                        KvCache kv = default_kv_cache());
 };
 // The draft vocabulary's compact head and id table (spec 8 §11) are the LOADER's
 // allocations, sized by loader::draft_vocab_bytes (loader/draft_vocab.h, header-only

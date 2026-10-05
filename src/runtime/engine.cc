@@ -42,10 +42,11 @@ uint32_t checked_max_len(const loader::LoadedModel& m, uint32_t max_len) {
 }
 }  // namespace
 
-Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bool debug_resid)
+Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bool debug_resid,
+               KvCache kv)
     : ctx_(ctx),
       model_(std::move(model)),
-      persist_(ctx, checked_max_len(model_, max_len), *model_.desc),
+      persist_(ctx, checked_max_len(model_, max_len), *model_.desc, kv),
       decode_scratch_(ctx, persist_.max_len, *model_.desc),
       buffers_(persist_, decode_scratch_),
       tap_(debug_resid ? std::unique_ptr<l0::Mem>(
@@ -53,7 +54,8 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
                        : nullptr),
       mtp_(model_.mtp ? std::make_unique<MtpBuffers>(
                             ctx, persist_.max_len, *model_.desc,
-                            model_.draft_vocab ? model_.draft_vocab->size() : 0u)   // spec 8 §11
+                            model_.draft_vocab ? model_.draft_vocab->size() : 0u,   // spec 8 §11
+                            kv)
                       : nullptr),
       step_(build(ctx, model_, buffers_, tap_.get())),
       queue_(ctx),
@@ -282,8 +284,8 @@ size_t Engine::state_bytes() const {
 
 size_t Engine::kv_bytes(uint32_t n_pos) const {
   const size_t fa = model_.desc->fa_layers;   // 16 on Qwen3.8, 18 on Agnes (spec 14)
-  const size_t per_layer_pos = persist_.kv_k.size() / fa / buffers_.max_len;
-  return 2 * per_layer_pos * (fa + (mtp_ ? 1 : 0)) * n_pos;   // K and V
+  // One position of one layer: the rows, and at int8 their scales (spec 12b).
+  return 2 * persist_.kv_lay.pos_bytes() * (fa + (mtp_ ? 1 : 0)) * n_pos;   // K and V
 }
 
 void Engine::save_state(void* host) const {
@@ -317,43 +319,59 @@ void Engine::load_state(const void* host, uint32_t pos) {
   control_->n_active = 0;
 }
 
-// kv_k / kv_v are [fa_layers][max_len][4][256]: a position range is one contiguous run
-// per layer, so fa_layers (16 on Qwen3.8, 18 on Agnes) copies each for K and V.
+// kv_k / kv_v are KvLayout's: [fa_layers][max_len][4][256] rows (bf16, or int8 then the
+// [fa_layers][max_len][4] fp16 scales). A position range is one contiguous run per layer,
+// so fa_layers (16 on Qwen3.8, 18 on Agnes) copies each for K and V, plus as many scale
+// runs at int8 (spec 12b). The two loops below walk the same (allocation, offset, bytes)
+// list in the same order, one copying out and the other in.
+namespace {
+struct KvRun {
+  uint8_t* dev;
+  size_t bytes;
+};
+// Every device run of positions [begin, end), in host order: per tensor (K, V), the rows of
+// every layer (the head's last), then at int8 the scales the same way.
+std::vector<KvRun> kv_runs(const PersistentBuffers& p, const MtpBuffers* mtp, uint32_t begin,
+                           uint32_t end) {
+  std::vector<KvRun> runs;
+  const KvLayout& L = p.kv_lay;
+  const size_t n = end - begin;
+  for (int kv = 0; kv < 2; ++kv) {
+    uint8_t* base = (kv == 0 ? p.kv_k : p.kv_v).as<uint8_t>();
+    uint8_t* hbase = mtp ? (kv == 0 ? mtp->kv_k : mtp->kv_v).as<uint8_t>() : nullptr;
+    for (uint32_t l = 0; l < L.layers; ++l)
+      runs.push_back({base + L.rows_offset(l) + begin * L.row_bytes(), n * L.row_bytes()});
+    if (mtp)   // the head's layer, after the last FA layer
+      runs.push_back({hbase + mtp->kv_lay.rows_offset(0) + begin * L.row_bytes(), n * L.row_bytes()});
+    if (L.scale_row_bytes() == 0) continue;
+    for (uint32_t l = 0; l < L.layers; ++l)
+      runs.push_back({base + L.scales_offset(l) + begin * L.scale_row_bytes(),
+                      n * L.scale_row_bytes()});
+    if (mtp)
+      runs.push_back({hbase + mtp->kv_lay.scales_offset(0) + begin * L.scale_row_bytes(),
+                      n * L.scale_row_bytes()});
+  }
+  return runs;
+}
+}  // namespace
+
 void Engine::save_kv(uint32_t begin, uint32_t end, void* host) const {
   check_range(begin, end, buffers_.max_len, "save_kv");
   if (begin == end) return;
-  const size_t kKvLayers = model_.desc->fa_layers;
-  const size_t per_pos = persist_.kv_k.size() / kKvLayers / buffers_.max_len;
-  const size_t run = per_pos * (end - begin);
   auto* h = static_cast<uint8_t*>(host);
-  for (int kv = 0; kv < 2; ++kv) {
-    const l0::Mem* m = kv == 0 ? &persist_.kv_k : &persist_.kv_v;
-    for (size_t l = 0; l < kKvLayers; ++l, h += run)
-      imm_.copy(h, m->as<uint8_t>() + (l * buffers_.max_len + begin) * per_pos, run);
-    if (mtp_) {   // the head's layer, after the last FA layer
-      const l0::Mem& hm = kv == 0 ? mtp_->kv_k : mtp_->kv_v;
-      imm_.copy(h, hm.as<uint8_t>() + size_t(begin) * per_pos, run);
-      h += run;
-    }
+  for (const KvRun& r : kv_runs(persist_, mtp_.get(), begin, end)) {
+    imm_.copy(h, r.dev, r.bytes);
+    h += r.bytes;
   }
 }
 
 void Engine::load_kv(uint32_t begin, uint32_t end, const void* host) {
   check_range(begin, end, buffers_.max_len, "load_kv");
   if (begin == end) return;
-  const size_t kKvLayers = model_.desc->fa_layers;
-  const size_t per_pos = persist_.kv_k.size() / kKvLayers / buffers_.max_len;
-  const size_t run = per_pos * (end - begin);
   const auto* h = static_cast<const uint8_t*>(host);
-  for (int kv = 0; kv < 2; ++kv) {
-    l0::Mem* m = kv == 0 ? &persist_.kv_k : &persist_.kv_v;
-    for (size_t l = 0; l < kKvLayers; ++l, h += run)
-      imm_.copy(m->as<uint8_t>() + (l * buffers_.max_len + begin) * per_pos, h, run);
-    if (mtp_) {
-      l0::Mem& hm = kv == 0 ? mtp_->kv_k : mtp_->kv_v;
-      imm_.copy(hm.as<uint8_t>() + size_t(begin) * per_pos, h, run);
-      h += run;
-    }
+  for (const KvRun& r : kv_runs(persist_, mtp_.get(), begin, end)) {
+    imm_.copy(r.dev, h, r.bytes);
+    h += r.bytes;
   }
 }
 
