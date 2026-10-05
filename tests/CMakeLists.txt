@@ -1823,10 +1823,96 @@ endif()
 # b70-decode's model_type dispatch, before the device: tests/model/k2/ holds only the
 # checkpoint's config.json, which is all the dispatch reads, so these run on any box with the
 # binary (b70_cli_reject's "exit 1, no `device:` line, the message").
-b70_cli_reject(cli_reject_k2_prefill ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS} --n 4
-  --prefill EXPECT "K2-Horizon's prefill is spec 18c")
-b70_cli_reject(cli_reject_k2_pp ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --bench --pp 64
-  EXPECT "K2-Horizon's prefill is spec 18c")
+# (cli_reject_k2_prefill / cli_reject_k2_pp lived here until spec 18c built K2's prefill; the
+# 18c block below rejects the backends K2 does not prefill on instead.)
 b70_cli_reject(cli_reject_k2_kv8 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --bench --kv-cache int8
   EXPECT "int8 KV cache is spec 18e")
 # ==== Spec 18b: K2-Horizon decode ========================================== (end) ====
+
+# ==== Spec 18c: K2-Horizon prefill (labels `k2;prefill`) =================== (begin) ====
+# Written blind on the Mac (docs/superpowers/plans/box-validation-queue.md, the K2 prefill row,
+# has the order to run these in). Host tests first (the Mac runs them: tools/mac_check.sh),
+# then the card's; the checkpoint ones SKIP (77) until the K2 int4 checkpoint and 18a's
+# oracle-out-k2/ are on the machine, as 18b's do.
+#   k2_pf_ref_test (host): the routing scatter with ties, the tile bound, grouped-GEMM row
+#       independence, the combines == decode's chains, the slab tail, the eager reference;
+#   k2_variant_names_test prefill (host): every name the walk binds is built, nothing dead;
+#   k2_pf_kernels_test (a B70, no checkpoint): K1 for every prefill kernel incl. the flash
+#       attention at depths 0 .. 62048 against fp64, grouped == dense, Review Focus 1-3;
+#   k2_prefill_test (checkpoint): the walk, K3 determinism / replay / chunking, prefill KV and
+#       routing against decode's fill, tokens; its `split` mode is prefill_split on K2;
+#   k2_golden_test prefill (checkpoint + oracle): K2 on prefill, the routing diagnostic.
+add_executable(k2_pf_ref_test kernels/k2_pf_ref_test.cc)
+target_include_directories(k2_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(k2_pf_ref_test PRIVATE b70_k2_plan)
+add_test(NAME k2_pf_ref_test COMMAND k2_pf_ref_test)
+set_tests_properties(k2_pf_ref_test PROPERTIES LABELS "k2;prefill")
+if(B70_K2)
+  # Every binary the prefill walk binds and the K1 test's ungated attention builds
+  # (src/kernels/CMakeLists.txt's spec 18c block; pf_gemm_T0 / _SILU are prefill/'s own).
+  set(B70_K2_PREFILL_KERNELS
+    kernel_k2_pf_embed_gather_D2560_V250624 kernel_pf_res_fold_K2560_SP0_G20
+    kernel_pf_res_fold_K2560_SP1_G20 kernel_k2_norm_M2048_K2560_G20_W20_NG2
+    kernel_k2_pf_dequant_slab_K2560_N10240 kernel_k2_pf_dequant_slab_K2560_N9280
+    kernel_k2_pf_dequant_slab_K4096_N2560 kernel_k2_pf_dequant_slab_K2560_N12288
+    kernel_k2_pf_dequant_slab_K6144_N2560 kernel_pf_gemm_T0 kernel_pf_gemm_T0_SILU
+    kernel_k2_attn_prep_M2048_N10240_S1_Q32KV8_V kernel_k2_attn_prep_M2048_N9472_S1_Q32KV8
+    kernel_k2_pf_flash_attn_Q32KV8 kernel_k2_pf_flash_attn_Q32KV8_EAGER
+    kernel_k2_pf_flash_attn_Q32KV8_O kernel_k2_pf_flash_attn_Q32KV8_EAGER_O
+    kernel_k2_route_M1_E64_T4_N9472_O9216_S1 kernel_k2_pf_mova_E64_T4_D2560_N1024
+    kernel_pf_moe_gemm_K2560_N1024 kernel_pf_moe_router_K2560_N128
+    kernel_k2_route_M1_E100_T8_N128_O0_S1 kernel_k2_pf_moe_E100_T8_D2560_I768
+    kernel_pf_moe_gemm_K2560_N1536_SILU kernel_pf_moe_gemm_K768_N2560)
+  add_test(NAME k2_pf_variant_names_test COMMAND k2_variant_names_test prefill ${B70_K2_PREFILL_KERNELS})
+  set_tests_properties(k2_pf_variant_names_test PROPERTIES LABELS "k2;prefill")
+
+  add_executable(k2_pf_kernels_test kernels/k2_pf_kernels_test.cc)
+  target_include_directories(k2_pf_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(k2_pf_kernels_test PRIVATE b70_prefill_host b70_k2_loader b70_k2_plan b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(k2_pf_kernels_test)
+  endif()
+  b70_target_kernel_dir(k2_pf_kernels_test)
+  add_dependencies(k2_pf_kernels_test ${B70_K2_PREFILL_KERNELS} ${B70_K2_DECODE_KERNELS})
+  add_test(NAME k2_pf_kernels_test COMMAND k2_pf_kernels_test)
+  set_tests_properties(k2_pf_kernels_test PROPERTIES LABELS "k2;prefill" TIMEOUT 1800)
+
+  add_executable(k2_prefill_test runtime/k2_prefill_test.cc)
+  target_include_directories(k2_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(k2_prefill_test PRIVATE b70_k2_prefill b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(k2_prefill_test)
+  endif()
+  add_dependencies(k2_prefill_test ${B70_K2_PREFILL_KERNELS} ${B70_K2_DECODE_KERNELS})
+  add_test(NAME k2_prefill_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all)
+  add_test(NAME k2_prefill_i8head_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all int8)
+  add_test(NAME k2_prefill_eager_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all)
+  set_tests_properties(k2_prefill_eager_test PROPERTIES ENVIRONMENT "B70_K2_ATTN=eager")
+  add_test(NAME prefill_split_k2_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids split)
+  set_tests_properties(k2_prefill_test k2_prefill_i8head_test k2_prefill_eager_test prefill_split_k2_test
+    PROPERTIES LABELS "checkpoint;prefill;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+
+  # K2 on prefill: 18b's golden test in its prefill mode (one chunk, and chunks of 16).
+  target_link_libraries(k2_golden_test PRIVATE b70_k2_prefill)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(k2_golden_test)
+  endif()
+  add_dependencies(k2_golden_test ${B70_K2_PREFILL_KERNELS})
+  add_test(NAME k2_golden_prefill_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} prefill)
+  add_test(NAME k2_golden_prefill_c16_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR}
+    prefill:16)
+  add_test(NAME k2_golden_prefill_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR}
+    int8 prefill)
+  set_tests_properties(k2_golden_prefill_test k2_golden_prefill_c16_test k2_golden_prefill_i8head_test
+    PROPERTIES LABELS "checkpoint;golden;prefill;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+# b70-decode's K2 prefill backends, before the device (tests/model/k2: config.json only).
+b70_cli_reject(cli_reject_k2_pp_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --bench --pp 64
+  --pp-backend l0-int8 EXPECT "K2-Horizon prefills on the l0 backend only")
+b70_cli_reject(cli_reject_k2_prefill_sycl ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS} --n 4
+  --prefill --pp-backend sycl-tla EXPECT "K2-Horizon prefills on the l0 backend only")
+# ==== Spec 18c: K2-Horizon prefill ========================================= (end) ====

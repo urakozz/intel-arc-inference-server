@@ -35,7 +35,13 @@
 // ids differ (tie or not), and the worst weight difference in bf16 ulps over the matching sets
 // (a diagnostic - the weights' fp32 sum order is torch's reduction against our rank order).
 //
-// argv: <snapshot> <oracle dir> [int8]. Exit 77 (SKIP) when the checkpoint or the golden set
+// **K2 on prefill (spec 18c)**: with `prefill` (or `prefill:<chunk>`) the prompt goes through
+// K2Engine::prefill instead of one replay per id; the gate is the same rule from row T - 1 on
+// (the prefill's head chooses the first token), and the routing diagnostic reads the prefill's
+// own route rows for the prompt positions its last chunk holds (all of them in one chunk;
+// plan 18c Review Focus 5). The tap diagnostic is decode's and is skipped there.
+//
+// argv: <snapshot> <oracle dir> [int8] [prefill | prefill:<chunk>]. Exit 77 (SKIP) when the checkpoint or the golden set
 // (18a's oracle-out-k2/) is not on this machine - the Mac never has them.
 #include <algorithm>
 #include <cmath>
@@ -139,7 +145,24 @@ void compare_route(const uint32_t* got_ids, const uint32_t* got_w_bits, const in
 int main(int argc, char** argv) {
   const std::string snap = argc > 1 ? argv[1] : "";
   const std::string gdir = argc > 2 ? argv[2] : "oracle-out-k2";
-  const bool int8 = argc > 3 && std::string(argv[3]) == "int8";
+  // Flags after the oracle dir, any order: `int8` (spec 9's head), `prefill` or
+  // `prefill:<chunk>` (spec 18c: the prompt through K2Engine::prefill).
+  bool int8 = false, prefill = false;
+  uint32_t chunk = 0;
+  for (int i = 3; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "int8") {
+      int8 = true;
+    } else if (a == "prefill") {
+      prefill = true;
+    } else if (a.rfind("prefill:", 0) == 0) {
+      prefill = true;
+      chunk = uint32_t(std::strtoul(a.c_str() + 8, nullptr, 10));
+    } else {
+      std::fprintf(stderr, "k2_golden_test: unknown flag %s (int8, prefill, prefill:<chunk>)\n", a.c_str());
+      return 2;
+    }
+  }
   try {
     (void)loader::resolve_snapshot(snap);
   } catch (const std::exception& e) {
@@ -160,8 +183,8 @@ int main(int argc, char** argv) {
   runtime::k2::K2Engine eng(ctx, std::move(model), kMaxLen, /*debug_tap=*/true);
   CHECK_EQ(eng.step().kernel_count, runtime::k2::decode_launches(d));
   runtime::Control* ctl = eng.buffers().control.as<runtime::Control>();
-  std::printf("lm_head %s, %zu launches per token, near-tie tolerance %.1e\n", int8 ? "int8" : "bf16",
-              eng.step().kernel_count, double(tie_tol()));
+  std::printf("lm_head %s, %zu launches per token, near-tie tolerance %.1e, prompt by %s\n", int8 ? "int8" : "bf16",
+              eng.step().kernel_count, double(tie_tol()), prefill ? "K2Engine::prefill" : "decode replays");
 
   bool gate_ok = true;
   RouteCount moe_c, mova_c;
@@ -182,9 +205,9 @@ int main(int argc, char** argv) {
 
     std::vector<char> moe_first(d.layers, 0), mova_first(d.layers, 0);
     std::vector<double> tap_min(d.layers, 1.0);
-    auto check_routes = [&](uint32_t row) {
+    // `route_row(l, which)`: the engine's route row of golden row `row` for (layer, router).
+    auto check_route_rows = [&](uint32_t row, const std::function<const uint32_t*(uint32_t, int)>& route_row) {
       if (!have_routes) return;
-      const std::vector<uint32_t> r = eng.read_routes();
       for (uint32_t l = d.dense_layers; l < d.layers; ++l) {
         const std::string ls = std::to_string(l);
         for (int which = 0; which < 2; ++which) {   // 0 MoVA, 1 MoE
@@ -193,16 +216,38 @@ int main(int argc, char** argv) {
           const int32_t* gi = g.i32(pre + "ids.L" + ls, size_t(rows) * K) + size_t(row) * K;
           const uint16_t* gw = g.bf16(pre + "w.L" + ls, size_t(rows) * K) + size_t(row) * K;
           const float gap = g.f32(pre + "gap.L" + ls, rows)[row];
-          const uint32_t* er = r.data() + (which ? runtime::k2::moe_route_at(l) : runtime::k2::mova_route_at(l)) / 4;
+          const uint32_t* er = route_row(l, which);
           compare_route(er + kernels::k2::route::kIds, er + kernels::k2::route::kWeights, gi, gw, gap, K,
                         which ? moe_c : mova_c, which ? moe_first[l] : mova_first[l],
                         which ? "MoE" : "MoVA", pname, row, l);
         }
       }
     };
+    // Decode's route rows of the last replay (K2Engine::read_routes).
+    auto check_routes = [&](uint32_t row) {
+      if (!have_routes) return;
+      const std::vector<uint32_t> r = eng.read_routes();
+      check_route_rows(row, [&](uint32_t l, int which) {
+        return r.data() + (which ? runtime::k2::moe_route_at(l) : runtime::k2::mova_route_at(l)) / 4;
+      });
+    };
 
     eng.reset();
-    for (uint32_t t = 0; t < T; ++t) {
+    // Spec 18c, K2 on prefill: the prompt in one K2Engine::prefill (chunks of `chunk`), the
+    // routing diagnostic on the rows the last chunk's route buffer holds (Review Focus 5: all
+    // of them in one chunk), then the 32 teacher-forced decode steps below exactly as decode.
+    if (prefill) {
+      eng.prefill(ids, chunk);
+      const uint32_t c = chunk ? chunk : runtime::k2::kPfC;
+      const uint32_t first = ((T - 1) / c) * c;   // the last chunk's first position
+      const std::vector<uint32_t> r = eng.read_prefill_routes();
+      for (uint32_t t = first; t < T; ++t)
+        check_route_rows(t, [&](uint32_t l, int which) {
+          return r.data() + runtime::k2::pf_route_at(l, uint32_t(which)) / 4 + size_t(t - first) * 32;
+        });
+      std::printf("  prefill: %u ids in chunks of %u, routing diagnostic on rows %u..%u\n", T, c, first, T - 1);
+    }
+    for (uint32_t t = 0; t < T && !prefill; ++t) {
       eng.ingest({ids[t]});
       check_routes(t);
       // The tap diagnostic on the MoE layers (their tap IS the layer output, k2_capture.h).
@@ -247,7 +292,7 @@ int main(int argc, char** argv) {
     std::printf("  gate: %u / %u determined rows exact, %u / %u tie rows in the argmax set%s; "
                 "logits worst cosine %.6f\n", det_ok, det, tie_ok, ties,
                 ok ? "" : (" - FIRST BAD STEP " + std::to_string(first_bad)).c_str(), logit_min);
-    if (g.has("resid.L" + std::to_string(d.layers - 1))) {
+    if (!prefill && g.has("resid.L" + std::to_string(d.layers - 1))) {
       std::printf("  tap (MoE layers, min cosine over the prompt):");
       for (uint32_t l = d.dense_layers; l < d.layers; ++l) std::printf(" %u:%.4f", l, tap_min[l]);
       std::printf("\n");

@@ -1,7 +1,8 @@
 // Spec 18b Task 3: K2's runtime sizes, launch count and memory planner (runtime/k2/
-// k2_sizes.h), host only. The numbers are derived here from the descriptor's shapes and the
-// kernels' constants, independently of the code under test; the box's k2_decode_test then
-// holds the plan to what a K2Engine actually allocates.
+// k2_sizes.h), host only; spec 18c, the prefill chunk's too (launches, scratch, the plan
+// term). The numbers are derived here from the descriptor's shapes and the kernels'
+// constants, independently of the code under test; the box's k2_decode_test /
+// k2_prefill_test then hold the plan to what a K2Engine actually allocates.
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -71,6 +72,33 @@ int main() {
   const std::string line = k2::describe(p, dev, res);
   CHECK(line.find("plan at max_len 32768") != std::string::npos);
   std::printf("%s\n", line.c_str());
+
+  // ---- spec 18c: the prefill chunk ------------------------------------------------------
+  // 1 + 3 x (2 + 20 + 2 + 6 + 2 + 24 + 6) + 45 x (2 + 20 + 6 + 2 + 6 + 2 + 11) = 2392.
+  CHECK_EQ(k2::pf_batches(d, k2::PfGroup::Value), 1u);
+  CHECK_EQ(k2::pf_batches(d, k2::PfGroup::GateUp), 2u);
+  CHECK_EQ(k2::pf_batches(d, k2::PfGroup::Down), 1u);
+  CHECK_EQ(k2::prefill_chunk_launches(d), size_t(2392));
+  CHECK_EQ(k2::pf_ld_max(d), 10240u);
+  const k2::PrefillSizes pf = k2::prefill_sizes(d);
+  CHECK_EQ(pf.partials, size_t(2048) * 10240 * 4);
+  CHECK_EQ(pf.slab, size_t(6144) * 1024 * 2);          // the dense down's K
+  CHECK_EQ(pf.routes, size_t(48) * 2 * 2048 * 32 * 4);
+  CHECK_EQ(pf.hdr, size_t(112) * 4);                    // 4 + 100 + 1 words, padded to 16
+  CHECK_EQ(pf.xg, size_t(672) * 32 * 2560 * 2);         // tmax(2048) = 672 MoE tiles
+  CHECK_EQ(pf.h, size_t(672) * 32 * 768 * 2);
+  CHECK_EQ(pf.w, size_t(51) * 2560 * 1536 * 2);         // half the gate||up blocks, the largest
+  CHECK_EQ(pf.total(), size_t(797247168));              // derived by hand, k2_sizes.h's table
+  const k2::Plan pp = k2::plan(d, 32768, w_bf16, false, true);
+  CHECK_EQ(pp.prefill_scratch, pf.total());
+  CHECK_EQ(pp.total(), p.total() + pf.total());
+  const uint32_t fit_pf = k2::max_len_that_fits(d, w_bf16, dev, res, 524288, true);
+  CHECK_EQ(fit_pf, 42752u);   // 3840 positions fewer than decode-only: 0.797 GB / 196,608 B (+ RoPE)
+  CHECK(k2::plan(d, fit_pf, w_bf16, false, true).total() + res <= dev);
+  CHECK(k2::plan(d, fit_pf + runtime::kMaxLenQuantum, w_bf16, false, true).total() + res > dev);
+  CHECK(k2::describe(pp, dev, res).find("prefill scratch planned") != std::string::npos);
+  std::printf("prefill: %zu launches per chunk + %zu, scratch %.3f GB; auto with prefill -> %u (bf16 head)\n",
+              k2::prefill_chunk_launches(d), k2::kPrefillHeadLaunches, pf.total() / 1e9, fit_pf);
   std::printf("k2_plan_test OK: 717 launches; auto -> %u (bf16 head) / %u (int8 head) on a %.2f GB "
               "card with a %.1f GB reserve\n", fit_b, fit_i, dev / 1e9, res / 1e9);
   return 0;

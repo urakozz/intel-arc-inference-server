@@ -13,3 +13,15 @@ add_library(b70_k2_runtime STATIC k2_buffers.cc k2_capture.cc k2_engine.cc)
 target_include_directories(b70_k2_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_k2_runtime PUBLIC b70_l0 b70_k2_loader b70_k2_plan b70_runtime)
 b70_target_kernel_dir(b70_k2_runtime)
+
+# Spec 18c: K2-Horizon's prefill (the chunk walk, its scratch, and K2Engine::prefill's
+# definitions) - its own archive, as b70_prefill_host is beside b70_runtime: a target that
+# never prefills K2 links what it always linked. It runs the prefill path's Level Zero half
+# only (runtime::prefill::Context, KernelCache, gemm_l0), but Context's object names the SYCL
+# side's entry points (libb70_prefill.so when the component is built), so an executable
+# linking this calls b70_link_prefill when B70_PREFILL_ENABLED, as every b70_prefill_host
+# user does.
+add_library(b70_k2_prefill STATIC k2_prefill.cc k2_prefill_engine.cc)
+target_include_directories(b70_k2_prefill PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_k2_prefill PUBLIC b70_k2_runtime b70_prefill_host)
+b70_target_kernel_dir(b70_k2_prefill)

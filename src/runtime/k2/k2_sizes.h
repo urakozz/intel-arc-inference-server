@@ -80,20 +80,105 @@ inline size_t tap_bytes(const model::K2Desc& d) { return size_t(d.layers) * kM *
 // 2067 (fixed slot launches).
 size_t decode_launches(const model::K2Desc& d);
 
+// --- Spec 18c: the prefill chunk ----------------------------------------------------------
+// One chunk of at most kPfC positions (= kernels::k2::kPfC, checked in k2_prefill.cc): every
+// allocation K2PrefillScratch makes, as device-free arithmetic. None depends on max_len (the
+// flash attention keeps no score scratch), so the prefill scratch is one constant per model.
+inline constexpr uint32_t kPfC = 2048;
+inline constexpr uint32_t kPfTm = 32;      // the grouped GEMM's tile rows (pf_moe_gemm TM)
+inline constexpr uint32_t kPfSlab = 1024;  // a whole slab of an int4 linear
+inline uint32_t pad256(uint32_t n) { return (n + 255) / 256 * 256; }
+
+// The prefill linear's slab walk over N columns: slabs of kPfSlab and one tail of
+// pad256(N - n0) (k2_pf_linear.cl zero-fills its padding). Its count, and the widest slab.
+inline uint32_t pf_slabs(uint32_t N) { return (N + kPfSlab - 1) / kPfSlab; }
+inline uint32_t pf_slab_width(uint32_t N, uint32_t n0) {
+  return N - n0 >= kPfSlab ? kPfSlab : pad256(N - n0);
+}
+// The partials row pitch of a linear's output: pad256(N) (the tail slab's padded columns are
+// written there, never into the next row). 10240 for the dense attention row, 9472 for MoVA's.
+inline uint32_t pf_ld(uint32_t N) { return pad256(N); }
+
+// The grouped GEMMs' padded tile count of a C-row chunk (k2_pf_moe.cl's header has the bound):
+//   floor((C x top_k + experts x (TM - 1)) / TM) + (shared ? ceil(C / TM) : 0)
+uint32_t pf_tiles(uint32_t experts, uint32_t top_k, bool shared, uint32_t C);
+uint32_t pf_moe_tiles(const model::K2Desc& d, uint32_t C);    // 100 + shared, top-8
+uint32_t pf_mova_tiles(const model::K2Desc& d, uint32_t C);   // 64, top-4, no shared expert
+
+// The bf16 expert-weight batch (the grouped GEMMs' B operand, dequantised per chunk): one
+// region holding every value block, every down block, or half the gate||up blocks (rounded
+// up) - whichever is largest - so gate||up runs in two batches and down / value in one.
+enum class PfGroup { Value, GateUp, Down };
+size_t pf_block_bf16(const model::K2Desc& d, PfGroup g);
+size_t pf_weight_batch_bytes(const model::K2Desc& d);
+uint32_t pf_batch_blocks(const model::K2Desc& d, PfGroup g);
+uint32_t pf_batches(const model::K2Desc& d, PfGroup g);
+
+// K2PrefillScratch's allocations (kPfC rows each):
+//   ids       u32  [kPfC]                       host memory: the chunk's ids
+//   resid     bf16 [kPfC][hidden]               the residual stream
+//   xn        bf16 [kPfC][hidden]               every grouped norm's output (the linears' A)
+//   xi        bf16 [kPfC][dense_inter]          the dense SiLU x up (down's A)
+//   partials  fp32 [kPfC][max pf_ld]            every slab GEMM's output (10240 at K2)
+//   slab      bf16 [K][kPfSlab], the largest K  one dequantised slab
+//   sumsq     fp32 [kNormG][kPfC]               pf_res_fold -> k2_norm_finish
+//   attn_q, attn_gate  fp32 [kPfC][q_n]         k2_attn_prep's q and gate
+//   attn_out  bf16 [kPfC][q_n]                  the gated attention, o_proj's A
+//   logits    fp32 [kPfC][router_n]             the MoE router GEMV
+//   routes    u32  [layers][2][kPfC][32]        every layer's MoVA (0) and MoE (1) route rows
+//                                               of the LAST chunk (the routing diagnostic)
+//   hdr       u32  [pf_hdr_words(max experts)]  the sort's header (one, reused)
+//   tiles     u32  [max tmax(kPfC)][2]          the tile table
+//   row_tok   u32  [max rows]                   the sorted rows' tokens
+//   pair_row  u32  [kPfC][max top_k]            every (token, slot)'s sorted row
+//   xg        bf16 [max rows][hidden]           the gathered A, then the MoE down's y
+//   h         bf16 max([moe rows][moe_inter], [mova rows][kv_n])   gate||up's SiLU h, MoVA's v
+//   w         bf16 pf_weight_batch_bytes        the expert weight batch
+struct PrefillSizes {
+  size_t ids = 0, resid = 0, xn = 0, xi = 0, partials = 0, slab = 0, sumsq = 0, attn_q = 0,
+         attn_gate = 0, attn_out = 0, logits = 0, routes = 0, hdr = 0, tiles = 0, row_tok = 0,
+         pair_row = 0, xg = 0, h = 0, w = 0;
+  size_t total() const {
+    return ids + resid + xn + xi + partials + slab + sumsq + attn_q + attn_gate + attn_out + logits +
+           routes + hdr + tiles + row_tok + pair_row + xg + h + w;
+  }
+};
+PrefillSizes prefill_sizes(const model::K2Desc& d);
+uint32_t pf_ld_max(const model::K2Desc& d);
+// A layer's route rows inside `routes` (bytes): which = 0 MoVA, 1 MoE.
+inline size_t pf_route_at(uint32_t layer, uint32_t which) {
+  return (size_t(layer) * 2 + which) * kPfC * kRouteWords * 4;
+}
+
+// The chunk's launch count (k2_prefill.cc asserts its walk against it), the same at every C:
+//   1 embed
+//   dense layer  2 (fold + norm) + 2 x slabs(q||k||gate||v) + attn prep + flash
+//                + 2 x slabs(o_proj) + 2 + 2 x slabs(gate||up, SiLU fused) + 2 x slabs(down)
+//   sparse layer 2 + 2 x slabs(q||k||gate||v_router) + MoVA [route, sort, gather,
+//                2 x value batches, combine] + attn prep + flash + 2 x slabs(o_proj) + 2
+//                + MoE [router GEMV, route, sort, gather, 2 x gate||up batches,
+//                2 x down batches, combine]
+// K2: 1 + 3 x 62 + 45 x 49 = 2392 (derived). The head adds kPrefillHeadLaunches once.
+size_t prefill_chunk_launches(const model::K2Desc& d);
+inline constexpr size_t kPrefillHeadLaunches = 5;   // fold + norm, lm_head, two argmax stages
+
 // --- the planner ------------------------------------------------------------------------
 // `model_bytes`: what load_k2 allocated except the RoPE table (K2LoadReport: bytes.total(),
 // = loader::k2_weight_bytes). The components are runtime::MemoryComponents' (memory_line's
-// format): model (+ the RoPE table at max_len), kv, decode state (control + scratch); a K2
-// engine has no prefill scratch (spec 18c) and no int8 prefill state.
+// format): model (+ the RoPE table at max_len), kv, decode state (control + scratch), and
+// with `prefill` (spec 18c: b70-decode --prefill / --pp) the prefill scratch - lazy on the
+// engine (allocated by the first prefill), so a decode-only plan leaves it out. No int8
+// prefill state (K2 prefills on the l0 backend only).
 struct Plan : MemoryComponents {
   uint32_t max_len = 0;
   size_t rope = 0;
 };
-Plan plan(const model::K2Desc& d, uint32_t max_len, size_t model_bytes, bool debug_tap = false);
+Plan plan(const model::K2Desc& d, uint32_t max_len, size_t model_bytes, bool debug_tap = false,
+          bool prefill = false);
 // The largest multiple of runtime::kMaxLenQuantum up to `cap` whose plan + reserve fits;
 // 0 when not even min(kMinAutoMaxLen, cap) does. Throws std::invalid_argument below a quantum.
 uint32_t max_len_that_fits(const model::K2Desc& d, size_t model_bytes, size_t device_bytes,
-                           size_t reserve_bytes, uint32_t cap);
+                           size_t reserve_bytes, uint32_t cap, bool prefill = false);
 std::string describe(const Plan& p, size_t device_bytes, size_t reserve_bytes);
 
 }  // namespace runtime::k2

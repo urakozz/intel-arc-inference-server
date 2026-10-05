@@ -104,6 +104,7 @@ MemoryComponents K2Engine::memory_use() const {
   c.model = model_.report.total();
   c.kv = buffers_.kv_k.size() + buffers_.kv_v.size();
   c.decode_state = buffers_.control.size() + buffers_.scratch_bytes() + (tap_ ? tap_->size() : 0);
+  c.prefill_scratch = pf_bytes_;   // spec 18c: 0 until the first prefill / prepare_prefill
   return c;
 }
 

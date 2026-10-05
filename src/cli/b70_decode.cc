@@ -865,10 +865,13 @@ int run(int argc, char** argv) {
   // K2 does not have yet is refused here by the stage that builds it. A path that does not
   // resolve is not K2 - the Qwen flow below reports it, so every rejection keeps its order.
   if (cli::k2::is_k2(path)) {
-    if (have_pp || prefill)
-      throw std::runtime_error("K2-Horizon's prefill is spec 18c (MoVA / MoE grouped paths, flash "
-                               "attention at head_dim 128) and not built yet; this engine decodes it "
-                               "- --ids without --prefill feeds the prompt one decode replay per id");
+    // Spec 18c: K2 prefills (--prefill / --pp) on the l0 backend only - the h8 path (l0-int8)
+    // rotates in 1024-k Hadamard blocks and K2's hidden is 2560; sycl-tla has no K2 walk.
+    if ((have_pp || prefill) && have_pp_backend && pp_backend != runtime::PrefillBackend::L0)
+      throw std::runtime_error(std::string("K2-Horizon prefills on the l0 backend only (spec 18c), not ") +
+                               runtime::prefill_backend_name(pp_backend) +
+                               ": l0-int8's h8 linears need K in whole 1024-k Hadamard blocks and K2's "
+                               "hidden is 2560; sycl-tla has no K2 walk - --pp-backend l0, or omit it");
     if (profile)
       throw std::runtime_error("--profile is not built for K2-Horizon yet (spec 18b Task 4, the box's "
                                "speed work); --bench times it");
@@ -889,6 +892,12 @@ int run(int argc, char** argv) {
     ka.lm_head = lm_head;
     ka.bench_prompt = kBenchPrompt;   // legal K2 ids too (all < 250624)
     ka.bench_prompt_len = kBenchPromptLen;
+    ka.prefill = prefill;   // spec 18c
+    ka.pp = have_pp;        // --pp N already set depth = N above
+    ka.pp_chunk = pp_chunk;
+    if (pp_chunk > runtime::k2::kPfC)
+      throw std::runtime_error("--pp-chunk " + std::to_string(pp_chunk) + " exceeds K2's prefill chunk " +
+                               std::to_string(runtime::k2::kPfC));
     return cli::k2::run_decode<StdoutToStderr>(ka);
   }
 
