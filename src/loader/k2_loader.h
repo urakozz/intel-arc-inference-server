@@ -42,6 +42,7 @@ struct K2LoadReport {
   size_t read_per_token = 0;
   size_t unconsumed = 0;        // must be 0
   size_t subnormal_scales = 0;
+  std::string quant_note;       // loader::ct_conversion_note (compressed-tensors only)
   double lm_head_quant_seconds = 0, seconds = 0;
   size_t total() const { return bytes.total() + rope_bytes; }
 };

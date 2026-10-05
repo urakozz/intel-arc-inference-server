@@ -540,6 +540,14 @@ target_include_directories(quant_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SO
 target_link_libraries(quant_test PRIVATE b70_loader)
 add_test(NAME quant_test COMMAND quant_test)
 
+# Spec 20 §9: the compressed-tensors symmetric pack-quantized loader - exact repack onto
+# the GPTQ layout (g64 / g128, f16 / bf16 scales), the startup note, the refusals, and
+# real repos' quantization_config (tests/loader/ct/). Host only.
+add_executable(ct_loader_test loader/ct_loader_test.cc)
+target_include_directories(ct_loader_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(ct_loader_test PRIVATE b70_loader)
+add_test(NAME ct_loader_test COMMAND ct_loader_test ${CMAKE_SOURCE_DIR}/tests/loader/ct)
+
 add_executable(dequant_fixture_test loader/dequant_fixture_test.cc)
 target_include_directories(dequant_fixture_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(dequant_fixture_test PRIVATE b70_loader)

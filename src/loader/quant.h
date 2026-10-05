@@ -58,10 +58,40 @@ struct QuantConfig {
   // dequantises to exactly the g128 checkpoint's weights; it costs g64's bytes
   // (4.25 bits, not 4.125). A dedicated g128 kernel is a recorded future idea
   // (docs/13-loader.md, "g128 checkpoints").
+  //
+  // **The third spelling: llm-compressor's compressed-tensors** (spec 20 §9, docs/13
+  // "compressed-tensors symmetric checkpoints"). `quant_method: compressed-tensors`,
+  // `format: pack-quantized`, and per `config_groups.*.weights` {num_bits 4, type int,
+  // symmetric true, strategy group, group_size 64 | 128, actorder}. Accepted only when
+  // every group is exactly that; refused, naming the field and its value: asymmetric
+  // (`symmetric: false`), any other num_bits / type / strategy / group_size, dynamic
+  // weights, quantised activations (W4A8 / W8A8), any `format` but pack-quantized, a
+  // `quantization_status` other than compressed, a non-empty `sparsity_config` or
+  // `transform_config` (rotations change the weights' basis). `actorder` null / false /
+  // "weight" / "static" keeps the groups contiguous in the stored column order (the
+  // identity k / group the kernels compute); "group" / "dynamic" / true is accepted only
+  // as far as the bytes prove it the identity: every linear must ship a `weight_g_idx`
+  // and each must be k / group (assert_quant_invariants, check_quant_scan).
   static QuantConfig parse(const common::json::Value& config_json);
+
+  // compressed-tensors only (all false / empty / 0 otherwise).
+  bool compressed_tensors = false;
+  std::string ct_actorder;          // the value as written ("" for null / false)
+  bool ct_actorder_group = false;   // "group" / "dynamic" / true: g_idx must prove identity
+  size_t ct_config_groups = 0;      // config_groups entries (each one checked)
+  size_t ct_ignore = 0;             // `ignore` entries: modules left in bf16 (`.weight`)
+  // `kv_cache_scheme` is set: the checkpoint ships `self_attn.{k,v}_scale` for an fp8 KV
+  // cache. This engine's KV cache is bf16 or its own int8, so they are dropped by name
+  // and counted (loader.cc), like qzeros.
+  bool ct_kv_cache_scheme = false;
 };
 
 enum class WKind { Int4, Bf16 };
+
+// Where an Int4 linear's bytes came from. Both end in the same GPTQ-layout pair below;
+// the packing only says which tensors were read (`suffixes`) and whether the qweight
+// is the mmap or a converted copy.
+enum class Int4Packing { Gptq, CompressedTensors };
 
 struct LinearSrc {
   WKind kind;
@@ -72,10 +102,32 @@ struct LinearSrc {
   // g64 expansion held by `expanded_scales` (QuantConfig::parse's comment).
   uint32_t group = 64;
   std::shared_ptr<const std::vector<uint16_t>> expanded_scales;
+  // compressed-tensors: `qweight` points into this - weight_packed [N][K/8] transposed
+  // to [K/8][N]. The words are copied unchanged: both formats hold k = 8r..8r+7 in one
+  // int32, k = 8r in the low nibble, each as q + 8 (symmetric). Likewise `scales`
+  // points into `expanded_scales` - weight_scale [N][K/g] transposed to [K/g][N], f16
+  // (bf16 converted exactly or refused), then g128 -> g64 as above. Shared, so a copy
+  // of the LinearSrc keeps the pointers valid.
+  std::shared_ptr<const std::vector<uint32_t>> owned_qweight;
+  Int4Packing packing = Int4Packing::Gptq;
+  bool ct_g_idx = false;              // compressed-tensors: a weight_g_idx was read (identity)
   const uint16_t* weight = nullptr;   // Bf16: [N][K] row-major
   std::string name;
-  // Suffix presence decides the kind; labels are never trusted (doc 02).
+  // Suffix presence decides the kind; labels are never trusted (doc 02). Int4 is
+  // `.qweight` + `.scales` (GPTQ v1) or `.weight_packed` + `.weight_scale` +
+  // `.weight_shape` (compressed-tensors pack-quantized, symmetric; converted here -
+  // the ONE conversion point every loader path goes through: dense, Agnes's fold,
+  // the MoE experts, the MTP head's MoE layer, K2); Bf16 is `.weight`.
   static LinearSrc classify(const SafetensorsSet& set, const std::string& prefix);
+  // The kind alone, from the same suffixes, without reading or converting a byte.
+  static WKind kind_of(const SafetensorsSet& set, const std::string& prefix);
+  // The checkpoint tensors (suffixes of `name`) this linear was read from - what a
+  // loader marks consumed: {.qweight, .scales}, {.weight_packed, .weight_scale,
+  // .weight_shape[, .weight_g_idx]} or {.weight}.
+  std::vector<std::string> suffixes() const;
+  // One of these after a linear's prefix means "the checkpoint has this linear" in
+  // some form (the MoE bindings' `has`).
+  static const std::vector<std::string>& marker_suffixes();
 };
 
 // What the scan counted but did not reject.
@@ -86,6 +138,14 @@ struct QuantScan {
   // here because this is the pass that already walks every tensor, and used by
   // `loader::load` to prove an undeclared `desc_act` really is false.
   size_t g_idx_tensors = 0;
+  // compressed-tensors (pack-quantized) linears, counted by their `.weight_packed`;
+  // their `.weight_g_idx` tensors (each proved the identity); which group sizes their
+  // scales declare (bit 0: g64, bit 1: g128); whether any scale tensor is bf16 (each
+  // value proved exactly representable in f16). `.qweight` tensors are counted too:
+  // check_quant_scan refuses a checkpoint whose tensors disagree with its config.
+  size_t ct_linears = 0, ct_g_idx_tensors = 0, gptq_linears = 0;
+  uint32_t ct_group_mask = 0;
+  bool ct_bf16_scales = false;
 };
 
 // Scans every .qzeros word (must be 0x77777777 - GPTQ v1 stores zero-1, i.e.
@@ -100,6 +160,27 @@ struct QuantScan {
 // has them (measured 2026-08-25). The device reads the f16 word natively and
 // common::f16_to_f32 decodes subnormals exactly, so they are reported rather
 // than treated as corruption.
+//
+// compressed-tensors tensors are held to the same rules: a `.weight_zero_point`
+// anywhere is a throw (asymmetric - spec 20 §9 refuses it); every `.weight_g_idx` must
+// be the identity k / group, the group read from the module's `.weight_scale` columns;
+// every `.weight_scale` value must be finite and, if bf16, exactly representable in f16
+// (the device reads f16 scales); the group must be 64 or 128. Subnormal-in-f16 values
+// are counted as above.
 QuantScan assert_quant_invariants(const SafetensorsSet& set);
+
+// The config against what the scan found, before a byte is repacked: a
+// compressed-tensors config over `.qweight` tensors (or a GPTQ / auto-round config over
+// `.weight_packed` ones) is refused - the label and the bytes disagree, and the reader
+// would be guessing which to believe; and `actorder` "group" needs every
+// compressed-tensors linear to ship its (identity) `weight_g_idx`, since a missing one
+// is a permutation the checkpoint did not write down.
+void check_quant_scan(const QuantConfig& qc, const QuantScan& scan);
+
+// The ONE startup note a compressed-tensors load prints (stderr, once per load) and
+// keeps in its report (operator requirement, 2026-10-05): what was converted, the group
+// size found, how many linears - and that the recommended format is our own AutoRound
+// g64. Empty for a checkpoint with no compressed-tensors linear.
+std::string ct_conversion_note(const QuantScan& scan);
 
 }  // namespace loader

@@ -76,6 +76,9 @@ K2LoadedModel load_k2(l0::Context& ctx, const std::string& snapshot_or_repo, uin
   if (!qc.desc_act_declared && scan.g_idx_tensors != 0)
     throw std::runtime_error("load_k2: config.json declares no desc_act but the checkpoint ships " +
                              std::to_string(scan.g_idx_tensors) + " g_idx tensors");
+  check_quant_scan(qc, scan);
+  const std::string quant_note = ct_conversion_note(scan);
+  if (!quant_note.empty()) std::fprintf(stderr, "load_k2: %s\n", quant_note.c_str());
   K2Checkpoint ck(d, set);
   ck.check_names();   // by name, both ways, before a byte is repacked
   const bool int8 = lm_form == LmHeadForm::Int8;
@@ -86,6 +89,7 @@ K2LoadedModel load_k2(l0::Context& ctx, const std::string& snapshot_or_repo, uin
   m.trained_max_len = trained;
   K2LoadReport& r = m.report;
   r.subnormal_scales = scan.subnormal_scales;
+  r.quant_note = quant_note;
   l0::CmdList imm = l0::CmdList::immediate(ctx);
 
   m.embed = upload_u(ctx, imm, ck.embed(), size_t(d.vocab) * d.hidden * 2);

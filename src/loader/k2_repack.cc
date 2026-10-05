@@ -17,8 +17,16 @@ bool ends_with(const std::string& s, const char* suf) {
   return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
 }
 
-// The four suffixes of a GPTQ linear; the first two are required.
-void add_int4(std::set<std::string>& s, const std::string& prefix, bool required_only) {
+// The four suffixes of a GPTQ linear, the first two required; or a compressed-tensors
+// linear's four, the first three required (K2Checkpoint's "two packings").
+void add_int4(std::set<std::string>& s, const std::string& prefix, bool required_only, bool ct) {
+  if (ct) {
+    s.insert(prefix + ".weight_packed");
+    s.insert(prefix + ".weight_scale");
+    s.insert(prefix + ".weight_shape");
+    if (!required_only) s.insert(prefix + ".weight_g_idx");
+    return;
+  }
   s.insert(prefix + ".qweight");
   s.insert(prefix + ".scales");
   if (!required_only) {
@@ -45,22 +53,31 @@ size_t int4_src_bytes(const LinearSrc& s) {
 
 }  // namespace
 
-K2Checkpoint::K2Checkpoint(const K2Desc& d, const SafetensorsSet& set) : d_(d), set_(set) {}
+K2Checkpoint::K2Checkpoint(const K2Desc& d, const SafetensorsSet& set) : d_(d), set_(set) {
+  for (const auto& [name, info] : set_.tensors()) {
+    (void)info;
+    if (ends_with(name, ".weight_packed")) {
+      ct_ = true;
+      break;
+    }
+  }
+}
 
 std::set<std::string> K2Checkpoint::expected_names(bool required_only) const {
   std::set<std::string> s;
   for (uint32_t l = 0; l < d_.layers; ++l) {
     const std::string lp = K2Desc::layer_prefix(l);
     for (model::K2LinearId id : d_.layer_linears(l))
-      for (const std::string& part : d_.linear(id).parts) add_int4(s, lp + part, required_only);
+      for (const std::string& part : d_.linear(id).parts) add_int4(s, lp + part, required_only, ct_);
     for (const model::K2SmallTensor& t : d_.small_tensors(l)) s.insert(lp + t.name);
     if (d_.is_dense(l)) continue;
     s.insert(lp + "mlp.gate.weight");
     for (const model::K2ExpertGroup& g : d_.expert_groups()) {
       const uint32_t routed = g.id == model::K2ExpertId::Value ? g.blocks : g.blocks - 1;
       for (uint32_t e = 0; e < routed; ++e)
-        for (const std::string& t : g.parts) add_int4(s, lp + K2Desc::expert_part(t, e), required_only);
-      for (const std::string& p : g.shared) add_int4(s, lp + p, required_only);
+        for (const std::string& t : g.parts)
+          add_int4(s, lp + K2Desc::expert_part(t, e), required_only, ct_);
+      for (const std::string& p : g.shared) add_int4(s, lp + p, required_only, ct_);
     }
   }
   s.insert("model.embed_tokens.weight");
@@ -99,8 +116,7 @@ LinearSrc K2Checkpoint::int4(const std::string& prefix, uint32_t K, uint32_t N) 
     throw std::runtime_error("load_k2: '" + prefix + "' is K=" + std::to_string(s.K) + " N=" +
                              std::to_string(s.N) + ", the descriptor says K=" + std::to_string(K) +
                              (N ? " N=" + std::to_string(N) : std::string()));
-  consumed_.insert(prefix + ".qweight");
-  consumed_.insert(prefix + ".scales");
+  for (const std::string& suffix : s.suffixes()) consumed_.insert(prefix + suffix);
   return s;
 }
 
