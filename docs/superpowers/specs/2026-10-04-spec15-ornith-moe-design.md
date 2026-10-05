@@ -183,6 +183,10 @@ Idle box, device 0, interleaved pairs, median of 3. No bars before P0; the recor
     and may not hold at ~64 rows per expert;
   - a decode-attention arm that issues all K/V loads of a step before use, against spec 10's v2
     at GQA 8 (v2 is bandwidth-bound at depth; the arm targets short contexts).
+- **Reference kernels:** the B70 W4A16 MoE kernels in the vLLM XPU stack (grouped W4A16 GEMV over
+  the selected experts, sparse expert dispatch, a fused gate‖up GEMV; Apache-2.0) are a measured
+  comparison point for the expert-kernel arms above, not a design to copy (they launch through
+  PyTorch, without our replayed list).
 - **§4.4 refined: prefill routing entirely on the device,** with a tile table padded with -1 so
   the host never reads per-expert counts. Rows land in an expert's tile in arbitrary order, which
   is harmless only if each row's GEMM result is independent of its neighbours: R3's bitwise replay

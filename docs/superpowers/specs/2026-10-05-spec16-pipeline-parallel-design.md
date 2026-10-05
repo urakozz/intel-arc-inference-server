@@ -35,7 +35,10 @@ handles.
 device 0, `lm_head` (2.54 GB bf16, 1.27 GB int8) and the MTP head (0.85 GB) on device 1; the FA
 layers (the KV holders) are every fourth layer, so any split near the middle gives each card 8 FA
 layers. Proposed: `s = 32` (16 FA layers split 8 / 8), revisited by P0 with device 1's 3 % slower
-prefill (a split of 33 / 31 may balance time better).
+prefill (a split of 33 / 31 may balance time better). The card holding `lm_head` is the heavier one:
+vLLM's PP = 2 run of K2-Horizon on these cards needed an uneven 25 / 23 layer partition to even the
+per-card weights, because total KV is set by the smaller remainder. The split is chosen on bytes
+(weights + KV per card) as well as time.
 
 **3. The hand-off mechanism is chosen by P0** among:
 - (a) a copy-engine copy of the residual row(s) from device 0 to a buffer on device 1, appended to
@@ -44,6 +47,12 @@ prefill (a split of 33 / 31 may balance time better).
 - (b) a peer write: device 0's last kernel writes the residual straight into device 1's buffer and
   raises a flag; device 1's first kernel polls it;
 - (c) host-orchestrated (submit list 0, wait, submit list 1): the baseline.
+
+**One more lesson from vLLM's PP on these cards:** with peer access enabled, a communication
+backend that silently falls back (vLLM's oneCCL with socket IPC exchange) can return from a receive
+having moved zero bytes, and the second card then decodes a stale buffer. Every hand-off is
+therefore checked end to end in P1 (bitwise equality) and in a debug mode that stamps a sequence
+number into the handed-off buffer.
 
 **Two rules from peer-to-peer work on this exact card pair, applied to (b):** a flag written by the
 peer over PCIe must be polled with **system-scope atomics** (a plain or `volatile` load spins on a

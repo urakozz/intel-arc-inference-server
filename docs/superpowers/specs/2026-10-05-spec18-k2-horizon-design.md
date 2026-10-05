@@ -6,6 +6,11 @@
 (the operator's AutoRound int4 g64 quant of `IFM/K2-Horizon-MoVA-36B-A4B`; 22.22 GB of safetensors;
 `K2HorizonForCausalLM`, remote code `modeling_k2_horizon.py`).
 
+**Kernel references:** the B70 W4A16 MoE kernels in the vLLM XPU stack (grouped GEMV over
+selected experts, sparse expert dispatch, fused gate‖up GEMV) are Apache-2.0 references for §5's
+expert kernels, read for their design and measured against in 18b; ours are written for the
+replayed-list model (no host round trip).
+
 **History:** this spec carries forward **spec 4** (*K2-Horizon decode core on one B70*, 2026-09-14,
 commits `45a3115` / `d307d0e`, removed from the docs tree in `c197fb0`), which was designed with the
 operator section by section and parked "before we get prefill to vLLM level". That condition is met
@@ -54,7 +59,7 @@ head** (derived).
 | spec 12 int8 KV (rotkv) | halves 192 KiB per position: the main lever for long context on one card |
 | spec 14 / 15 `ModelDesc` | K2 stays a **second engine beside qwen3_5** (spec 4 ruling 4: its layer structure has no GDN and a different norm); it shares the descriptor's shared pieces, not its Qwen layer plan |
 | spec 15 MoE machinery | reused: router + top-k on the device, expert slots by offset, fixed-order combine, the grouped prefill GEMM, device-side routing tables |
-| spec 16 / 17 multi-GPU | **PP is what gives K2 long context:** on two cards, ~64k with bf16 KV or ~128k with int8 KV (derived); TP is not planned for K2 |
+| spec 16 / 17 multi-GPU | **PP is what gives K2 long context:** on two cards, ~64k with bf16 KV or ~128k with int8 KV (derived); TP is not planned for K2. vLLM's PP run reached 390k only with fp8 KV and an uneven 25 / 23 split (the `lm_head` rank is heavier) |
 
 **Launch budget.** Spec 4's decode list was **2067 launches per token** (8 fixed slot launches per MoE
 layer, 4 per MoVA layer). Spec 15's design (one gate‖up launch over all selected experts plus the
@@ -172,9 +177,12 @@ K2's format if it differs from Qwen XML. Prefix cache: KV-only snapshots. No MTP
 
 Recorded, no bars before P0: decode at 4k / 16k / 32k depth (`--lm-head int8`), launches per token,
 pp4096 and pp at 32k; against the derived roofline (~190 t/s weights-only with the int8 head; spec 4
-§5's ~95 t/s estimate at the 27B's utilisation, before launch reduction). Comparison: vLLM serves K2
-on this box only with PP = 2, eager mode and fp8 KV (spec 4 §1): recorded beside ours where
-configurations match.
+§5's ~95 t/s estimate at the 27B's utilisation, before launch reduction). **The vLLM baseline** (vLLM with K2-Horizon support from
+[vllm-project/vllm#56637](https://github.com/vllm-project/vllm/pull/56637) and the project's local
+B70 patches for W4A16 MoE on XPU: grouped W4A16 GEMV for experts, sparse expert dispatch, a fused
+gate‖up GEMV, a dense W4A16 GEMV; measured 2026-09-16): **two B70s, PP = 2 (layer partition 25 / 23),
+fp8 KV, 390,016-token context, 44.43 t/s decode** (llama-benchy). That is the row to beat: one card
+for our engine at 32k-64k, and spec 16's PP for the long-context comparison at matched settings.
 
 ## 8. Stages
 
