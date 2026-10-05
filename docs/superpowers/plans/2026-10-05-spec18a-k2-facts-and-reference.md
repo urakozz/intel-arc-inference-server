@@ -1,5 +1,22 @@
 # Spec 18a - K2-Horizon: facts, the CPU reference, golden sets
 
+**Status (2026-10-05, branch `spec18a-k2-reference`):** the facts the small files decide and the
+reference are written and tested; nothing has run on real weights, the box or a card.
+- **Done:** `tools/oracle/k2_ref.py` + `test_k2_ref.py` (Task 3 Step 1, under these names rather
+  than `k2.py` / `test_k2.py`: a plain-torch port of `modeling_k2_horizon.py` - vendored in
+  `tools/oracle/third_party/k2_horizon/` - layer at a time with routing dumps, **bit-identical to
+  the vendored HF model in bf16** on tiny random weights, prompt and cached decode; 18 tests, all
+  pass in `agnes-ref-img`). The facts from config, both indexes, the shard headers, range-fetched
+  small tensors and the modeling code: `docs/probe-k2-2026-10-05.md` (Task 1 (a); (c)'s BOS
+  decision: K2 ids start with 0, `tokenize.py encode --bos`). Review Focus 1 (every §3 line, file:line)
+  is in that doc; the re-read found no semantic change, only rounding detail, and no HF-vs-vLLM
+  semantic disagreement.
+- **Pending:** Task 1 (b) and Task 2 (box / card); Task 3 Step 2 and Task 4 (the real-weight run:
+  golden sets, gap distribution, `hfcheck`, the template render) - commands in
+  `tools/oracle/README.md` "The K2-Horizon reference". Operator's call: the int4 checkpoint for the
+  gate's golden sets (what the engine runs; ~5-6 min per prompt, fits the Mac's 28 GB container),
+  the bf16 one on the box for quantisation damage (~5 min per prompt warm, 75 GB) - both estimated.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** the facts K2's build depends on, re-checked against today's engine; a layer-streamed CPU reference of `modeling_k2_horizon.py` with per-layer MoE and MoVA routing dumps; golden sets on K2's tokenisation; the chat-template check.
@@ -37,9 +54,9 @@
 
 ### Task 3: the reference
 
-**Files:** `tools/oracle/k2.py` (load glue for `modeling_k2_horizon.py` with `trust_remote_code`, routing hooks), `tools/oracle/test_k2.py`.
+**Files:** `tools/oracle/k2.py` (load glue for `modeling_k2_horizon.py` with `trust_remote_code`, routing hooks), `tools/oracle/test_k2.py`. **As built:** `tools/oracle/k2_ref.py` (a port of the modeling code, not load glue: the routing is recorded by the port's own router, and `hfcheck` runs the vendored modeling file layer-streamed against it), `tools/oracle/test_k2_ref.py`.
 
-- [ ] **Step 1:** tests on a tiny random K2 config (old plan 8d Task 1's approach): the streamed forward equals the full forward; routing dumps sorted by ascending id.
+- [x] **Step 1:** tests on a tiny random K2 config (old plan 8d Task 1's approach): the streamed forward equals the full forward; routing dumps sorted by ascending id. (2026-10-05: plus every §3 trap and bitwise equality with the vendored HF model.)
 - [ ] **Step 2:** Review Focus 1 and 3 on the real checkpoint; record in the doc. **Commit** `oracle: a layer-streamed K2-Horizon reference with routing dumps (spec 18a)`.
 
 ### Task 4: golden sets and the template
