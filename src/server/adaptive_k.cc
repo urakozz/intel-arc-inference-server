@@ -29,6 +29,12 @@ MtpCost MtpCost::with_draft_vocab(double head_share, double fraction) const {
   return c;
 }
 
+MtpCost MtpCost::with_free_drafts() const {
+  MtpCost c = *this;
+  c.draft.assign(verify.empty() ? 0 : verify.size() - 1, 0.0);
+  return c;
+}
+
 namespace {
 
 std::vector<double> parse_list(const std::string& key, const std::string& text) {

@@ -115,7 +115,23 @@ void usage() {
                "                             fp16 scale per token and head: half the KV memory,\n"
                "                             so --max-len auto reaches about twice the context\n"
                "                             (Qwen3.8: the trained 262144). Accuracy gates on\n"
-               "                             the card pending; needs the l0 / l0-int8 backends\n");
+               "                             the card pending; needs the l0 / l0-int8 backends\n"
+               "                 [--spec off|mtp|lookup]   the speculative proposer (spec 19\n"
+               "                             decision 3; default: --mtp's). mtp = --mtp auto unless\n"
+               "                             --mtp is given. lookup (spec 19e) = prompt lookup: the\n"
+               "                             drafts are the continuation of the longest earlier match\n"
+               "                             of the request's own ids, verified by the MTP verify lists\n"
+               "                             (loads the head for them; Qwen3.8 only so far); K per\n"
+               "                             iteration by --mtp auto's policy with a free draft.\n"
+               "                             Greedy output unchanged; sampled output lossless.\n"
+               "                             UNVALIDATED on the card (plan 19e Task 2)\n"
+               "                 [--spec-min-match N]   lookup drafts only after a match of >= N ids\n"
+               "                             (2..64, default 3)\n"
+               "                 [--spec-max K]   lookup's largest K (1..3, default 3)\n"
+               "                 [--spec-cost SPEC]   lookup's cost table, --mtp-cost's syntax\n"
+               "                             (default: the --lm-head form's verify rows, free drafts)\n"
+               "                 [--spec-history N]   also match the generated ids of the last N\n"
+               "                             requests (default 0)\n");
 }
 
 uint32_t parse_u32(const char* what, const std::string& value) {
@@ -183,6 +199,11 @@ int run(int argc, char** argv) {
   bool mtp_auto = false, have_mtp_tuning = false;   // spec 8 §10
   uint32_t mtp_max = 3;
   std::string mtp_cost_arg;
+  // Spec 19 decision 3 / spec 19e: --spec; unset keeps --mtp's meaning exactly.
+  std::string spec_arg;
+  bool have_mtp_arg = false, have_spec_tuning = false;
+  uint32_t spec_min_match = 3, spec_max = runtime::Engine::kMaxDraft, spec_history = 0;
+  std::string spec_cost_arg;
   // Spec 9 §3: the serving default is the gated int8 head (amendment §8, L3).
   loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
   // Spec 8 §11: off until the box rows decide (§11 "Gates").
@@ -225,6 +246,7 @@ int run(int argc, char** argv) {
       options.prefix_split_last = true;
     } else if (arg == "--mtp") {
       const std::string v = value(i, "--mtp");
+      have_mtp_arg = true;
       mtp_auto = v == "auto";
       if (!mtp_auto) {
         mtp_k = v == "off" ? 0 : parse_u32("--mtp", v);
@@ -239,6 +261,26 @@ int run(int argc, char** argv) {
     } else if (arg == "--mtp-cost") {
       mtp_cost_arg = value(i, "--mtp-cost");
       have_mtp_tuning = true;
+    } else if (arg == "--spec") {
+      spec_arg = value(i, "--spec");
+      if (spec_arg != "off" && spec_arg != "mtp" && spec_arg != "lookup")
+        throw std::runtime_error("--spec expects off, mtp or lookup, got '" + spec_arg + "'");
+    } else if (arg == "--spec-min-match") {
+      spec_min_match = parse_u32("--spec-min-match", value(i, "--spec-min-match"));
+      if (spec_min_match < 2 || spec_min_match > 64)
+        throw std::runtime_error("--spec-min-match expects 2..64");
+      have_spec_tuning = true;
+    } else if (arg == "--spec-max") {
+      spec_max = parse_u32("--spec-max", value(i, "--spec-max"));
+      if (spec_max == 0 || spec_max > runtime::Engine::kMaxDraft)
+        throw std::runtime_error("--spec-max expects 1..3");
+      have_spec_tuning = true;
+    } else if (arg == "--spec-cost") {
+      spec_cost_arg = value(i, "--spec-cost");
+      have_spec_tuning = true;
+    } else if (arg == "--spec-history") {
+      spec_history = parse_u32("--spec-history", value(i, "--spec-history"));
+      have_spec_tuning = true;
     } else if (arg == "--pp-backend") {
       pp_backend_arg = value(i, "--pp-backend");
       have_pp_backend = true;
@@ -267,6 +309,35 @@ int run(int argc, char** argv) {
   if (path.empty()) {
     usage();
     throw std::runtime_error("a snapshot directory or HF repo id is required");
+  }
+  // Spec 19 decision 3: --spec names the proposer; --mtp keeps its meaning (--spec mtp).
+  const bool spec_lookup = spec_arg == "lookup";
+  if (spec_arg == "mtp" && !have_mtp_arg) mtp_auto = true;
+  if ((spec_arg == "off" || spec_lookup) && have_mtp_arg && (mtp_auto || mtp_k > 0))
+    throw std::runtime_error("--spec " + spec_arg + " and --mtp: one proposer per server");
+  if (have_spec_tuning && !spec_lookup)
+    throw std::runtime_error("--spec-min-match, --spec-max, --spec-cost and --spec-history need "
+                             "--spec lookup");
+  if (spec_lookup) {
+    options.spec_lookup = true;
+    options.lookup_min_match = spec_min_match;
+    options.lookup_history = spec_history;
+    options.lookup_adaptive.max_k = spec_max;
+    options.lookup_adaptive.cost = (lm_head == loader::LmHeadForm::Int8 ? server::MtpCost::int8_head()
+                                                                       : server::MtpCost::bf16_head())
+                                       .with_free_drafts();
+    if (!spec_cost_arg.empty()) {
+      try {
+        options.lookup_adaptive.cost =
+            server::MtpCost::parse(spec_cost_arg, options.lookup_adaptive.cost);
+      } catch (const std::invalid_argument& error) {
+        throw std::runtime_error(std::string(error.what()) + " (--spec-cost)");
+      }
+    }
+    if (options.lookup_adaptive.cost.max_k() < spec_max)
+      throw std::runtime_error("--spec-cost covers K up to " +
+                               std::to_string(options.lookup_adaptive.cost.max_k()) +
+                               ", below --spec-max " + std::to_string(spec_max));
   }
   // Spec 8 §10: --mtp auto loads the head for --mtp-max drafts and chooses K per iteration;
   // the cost table defaults to the head form's, --mtp-cost overrides it.
@@ -336,7 +407,7 @@ int run(int argc, char** argv) {
   loader::LoadedModel model = [&] {
     StdoutToStderr redirect;
     return loader::load(context, snapshot_dir, cli::load_len(max_len_arg, trained),
-                        /*mtp=*/mtp_k > 0, lm_head, dv_spec);
+                        /*mtp=*/mtp_k > 0 || spec_lookup, lm_head, dv_spec);
   }();
   // Spec 15c: the server prefills every request; a model whose prefill is not built
   // (Ornith: spec 15d, its serving 15e) is refused here by name.
@@ -352,7 +423,7 @@ int run(int argc, char** argv) {
   std::fprintf(stderr, "%s\n", engine.memory_line().c_str());   // spec 6
   TokAdapter tokenizer(snapshot_dir + "tokenizer.json");
   TemplateAdapter chat_template(snapshot_dir);
-  EngineAdapter engine_adapter(engine, tokenizer.vocab_used(), mtp_k);
+  EngineAdapter engine_adapter(engine, tokenizer.vocab_used(), mtp_k, spec_lookup);
   options.eos_ids = eos;
   std::unique_ptr<PinnedAlloc> prefix_alloc;
   // Sized after the model is loaded, so "available" already excludes the process's own load.
@@ -392,6 +463,15 @@ int run(int argc, char** argv) {
                engine.draft_vocab() ? ", draft vocab " : "",
                engine.draft_vocab() ? loader::draft_vocab_name(engine.draft_vocab()).c_str() : "",
                runtime::kv_cache_name(engine.kv_cache()));
+  if (spec_lookup) {
+    const server::MtpCost& c = options.lookup_adaptive.cost;
+    std::fprintf(stderr, "spec lookup: min match %u, K <= %u, history %u, cost verify M=1..%zu",
+                 spec_min_match, spec_max, spec_history, c.verify.size());
+    for (double v : c.verify) std::fprintf(stderr, " %.3f", v);
+    std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
+    for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
+    std::fprintf(stderr, " (plain steps)\n");
+  }
   if (mtp_auto) {
     const server::MtpCost& c = options.mtp_adaptive.cost;
     std::fprintf(stderr, "mtp auto: cost verify M=1..%zu", c.verify.size());

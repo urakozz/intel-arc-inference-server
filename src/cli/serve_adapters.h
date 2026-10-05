@@ -74,16 +74,26 @@ struct EngineAdapter : server::EngineIface {
   // Step 3): the immediate command list and the readback buffer are reused
   // across every sampled step for the life of the adapter.
   // `mtp_k` > 0 (spec 8, `b70-serve --mtp K`) needs an engine with the head loaded.
-  explicit EngineAdapter(runtime::Engine& engine, uint32_t vocab, uint32_t mtp_k = 0)
+  // `lookup` (spec 19e, `b70-serve --spec lookup`) verifies the server's prompt-lookup drafts
+  // through the same verify lists, which the engine captures only with the head loaded.
+  explicit EngineAdapter(runtime::Engine& engine, uint32_t vocab, uint32_t mtp_k = 0,
+                         bool lookup = false)
       : eng(engine),
         vocab_used(vocab),
         imm(l0::CmdList::immediate(engine.context())),
         host_logits(model::Qwen35::kVocab),
-        k_(mtp_k) {
+        k_(mtp_k),
+        lookup_(lookup) {
     if (k_ > runtime::Engine::kMaxDraft)
       throw std::runtime_error("--mtp " + std::to_string(k_) + ": K is 0..3");
     if (k_ > 0 && !eng.mtp()) throw std::runtime_error("--mtp needs the model's MTP head loaded");
-    if (k_ > 0) {
+    if (lookup_ && k_ > 0) throw std::runtime_error("--spec lookup and --mtp: pick one proposer");
+    // TODO(spec 19e Task 2, engine part, box): a model without an MTP head (K2-Horizon, spec
+    // 18) has no verify lists today; it needs the M = 2..8 verify lists captured on their own.
+    if (lookup_ && !eng.mtp())
+      throw std::runtime_error("--spec lookup needs the verify lists, which runtime::Engine "
+                               "captures with the MTP head loaded (Qwen3.8); this model has none");
+    if (k_ > 0 || lookup_) {
       // Pinned readback rows (probe-mtp §3: pageable costs 2.5x): q [K][V], p [K+1][V].
       spec_logits_ = std::make_unique<l0::Mem>(
           engine.context(), l0::MemKind::Host,
@@ -116,11 +126,12 @@ struct EngineAdapter : server::EngineIface {
                    ms / gen_tokens_);
       std::fflush(stderr);
     }
-    if (k_ > 0 && mtp_iters > 0)
+    if ((k_ > 0 || lookup_) && mtp_iters > 0)
       std::fprintf(stderr,
-                   "mtp: K %u, %llu iterations, %llu/%llu drafts accepted (%.3f), iterations at "
+                   "%s: K %u, %llu iterations, %llu/%llu drafts accepted (%.3f), iterations at "
                    "K 0/1/2/3: %llu/%llu/%llu/%llu\n",
-                   k_, (unsigned long long)mtp_iters, (unsigned long long)mtp_accepted,
+                   lookup_ ? "lookup" : "mtp", lookup_ ? runtime::Engine::kMaxDraft : k_,
+                   (unsigned long long)mtp_iters, (unsigned long long)mtp_accepted,
                    (unsigned long long)mtp_drafted,
                    mtp_drafted ? double(mtp_accepted) / double(mtp_drafted) : 0.0,
                    (unsigned long long)mtp_iters_at_k[0], (unsigned long long)mtp_iters_at_k[1],
@@ -192,6 +203,52 @@ struct EngineAdapter : server::EngineIface {
     mtp_accepted += a.accepted;
     std::vector<uint32_t> out{x};
     out.insert(out.end(), pending_drafts_.begin(), pending_drafts_.begin() + a.accepted);
+    gen_tokens_ += static_cast<uint32_t>(out.size());
+    return out;
+  }
+
+  // --- spec 19e: one iteration over drafts proposed outside the engine (prompt lookup) -----
+  //
+  // At pos = n with x_n pending: propose(x_n) -> d_1..d_k written to cur_token[1..k] (the
+  // verify list's inputs; Engine::draft writes the same slots) -> verify(k) -> accept on the
+  // host (greedy: argmax; sampled: the point-mass rule) -> the commit deferred as above.
+  // **Unvalidated on the card** (written on the Mac): D2 (greedy output == --spec off on the
+  // golden set and A4) and the sampled run's reproducibility are box rows (plan 19e Task 2).
+  uint32_t verify_k() override { return lookup_ ? runtime::Engine::kMaxDraft : 0; }
+
+  std::vector<uint32_t> step_drafts(const server::Sampling& sampling,
+                                    const Proposer& propose) override {
+    flush_commit();
+    auto* control = eng.buffers().control.as<runtime::Control>();
+    const uint32_t x = control->cur_token[0];
+    const std::vector<uint32_t> d = propose(x);
+    const uint32_t k = std::min<uint32_t>({static_cast<uint32_t>(d.size()),
+                                           runtime::Engine::kMaxDraft, eng.max_verify_k()});
+    ++mtp_iters_at_k[k];
+    if (k == 0) return {step(sampling)};   // no match, or the last positions of max_len
+    const uint32_t n = eng.pos();
+    for (uint32_t i = 0; i < k; ++i) control->cur_token[1 + i] = d[i];
+    eng.verify(k);
+    server::AcceptResult a{};
+    if (sampling.greedy) {
+      a = server::accept_greedy(eng.verify_ids(), d.data(), k);
+    } else {
+      seed_rng(sampling);
+      constexpr size_t V = model::Qwen35::kVocab;
+      float* p = spec_logits_->as<float>() + runtime::Engine::kMaxDraft * V;
+      imm.copy(p, eng.verify_logits_device(), (k + 1) * V * sizeof(float));
+      a = server::accept_point_mass(p, d.data(), k, vocab_used, V, sampling, rng);
+    }
+    pending_ = true;
+    pending_pos_ = n;
+    pending_j_ = a.accepted;
+    pending_next_ = a.next_token;
+    pending_drafts_.assign(d.begin(), d.begin() + k);
+    ++mtp_iters;
+    mtp_drafted += k;
+    mtp_accepted += a.accepted;
+    std::vector<uint32_t> out{x};
+    out.insert(out.end(), d.begin(), d.begin() + a.accepted);
     gen_tokens_ += static_cast<uint32_t>(out.size());
     return out;
   }
@@ -288,7 +345,8 @@ struct EngineAdapter : server::EngineIface {
   std::chrono::steady_clock::time_point gen_start_{};
   // Spec 8.
   uint32_t k_ = 0;
-  std::unique_ptr<l0::Mem> spec_logits_;   // pinned q rows then p rows, MTP only
+  bool lookup_ = false;                    // spec 19e: step_drafts() on
+  std::unique_ptr<l0::Mem> spec_logits_;   // pinned q rows then p rows, MTP and lookup
   bool pending_ = false;
   uint32_t pending_pos_ = 0, pending_j_ = 0, pending_next_ = 0;
   std::vector<uint32_t> pending_drafts_;

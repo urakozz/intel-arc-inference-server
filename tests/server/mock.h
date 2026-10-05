@@ -145,6 +145,29 @@ struct MockEngine : server::EngineIface {
     truncations.push_back(p);
     at = p - last_prompt.size();
   }
+
+  // Spec 19e: a greedy target that verifies external drafts. The script is the target's
+  // output (EOS past its end); step_drafts() hands the proposer the pending id script[at],
+  // keeps the drafts while they equal the script's next ids (at most lookup_k), and returns
+  // the pending id and the kept drafts by step() calls, as a verify would. Every pending id
+  // handed out and every proposal (clamped to lookup_k) is recorded.
+  uint32_t lookup_k = 0;
+  std::vector<uint32_t> pendings;
+  std::vector<std::vector<uint32_t>> proposals;
+  uint32_t target(size_t i) const { return i < script.size() ? script[i] : 248046; }
+  uint32_t verify_k() override { return lookup_k; }
+  std::vector<uint32_t> step_drafts(const server::Sampling& s, const Proposer& propose) override {
+    if (lookup_k == 0) throw std::logic_error("mock: step_drafts with lookup_k 0");
+    pendings.push_back(target(at));
+    std::vector<uint32_t> d = propose(target(at));
+    if (d.size() > lookup_k) throw std::logic_error("mock: more drafts than verify_k()");
+    proposals.push_back(d);
+    size_t j = 0;
+    while (j < d.size() && d[j] == target(at + 1 + j)) ++j;
+    std::vector<uint32_t> out;
+    for (size_t i = 0; i <= j; ++i) out.push_back(step(s));
+    return out;
+  }
 };
 
 // Spec 7 (plan 7c): an engine with a real session for the prefix cache tests. The state is

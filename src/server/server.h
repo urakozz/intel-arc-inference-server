@@ -42,6 +42,21 @@ struct Options {
   // iteration drafts mtp_k(), as before.
   bool mtp_auto = false;
   AdaptiveKOptions mtp_adaptive;
+  // Spec 19e (`--spec lookup`): prompt-lookup speculative decoding. Each iteration's drafts
+  // are the continuation of the longest earlier match (>= lookup_min_match ids) of the
+  // request's own ids (server::PromptLookup over the prompt and every id kept so far),
+  // verified by EngineIface::step_drafts; K per iteration from a per-request
+  // server::AdaptiveK over lookup_adaptive (its cost table's drafts free: MtpCost::
+  // with_free_drafts). Needs an engine with verify_k() > 0 and mtp_k() == 0 (one proposer
+  // per server); the Server constructor refuses anything else. Off: nothing here runs.
+  bool spec_lookup = false;
+  uint32_t lookup_min_match = 3;
+  // Seed each request's matcher with the generated ids of this many earlier requests (each
+  // behind a PromptLookup::boundary(), before the prompt): what a client's re-rendered
+  // history drops (reasoning) stays matchable. 0: the matcher holds the prompt only and is
+  // reused across requests from the common prefix.
+  uint32_t lookup_history = 0;
+  AdaptiveKOptions lookup_adaptive;
 };
 
 class Server {
@@ -77,6 +92,8 @@ class Server {
   void handle(const httplib::Request& request, httplib::Response& response, bool chat);
   void log_request(bool chat, const std::string& body, double t_start, const Outcome& outcome);
   void finish_request();   // the request-end snapshot, after the last frame
+  void lookup_begin(const std::vector<uint32_t>& prompt_ids);   // spec 19e
+  void lookup_end(const std::vector<uint32_t>& out_ids);
 
   Deps deps_;
   Options opts_;
