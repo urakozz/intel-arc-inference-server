@@ -52,6 +52,13 @@ enum class Phase : uint32_t {
   kAttnGate,    // pf_attn_gate
   kAttnFlash,   // pf_flash_attn (spec 6), in place of QK^T + softmax + PV
   kHead,        // step_head: final norm, lm_head, both argmax stages
+  // Spec 15d: a MoE layer's FFN on the prefill path (runtime/prefill/moe.cc).
+  kMoeRoute,    // the router || shared-gate GEMV over the chunk + moe_route
+  kMoeSort,     // pf_moe_sort: histogram, prefix, scatter, tile table
+  kMoeGather,   // pf_moe_gather (bf16) / pf_moe_gather_i8 (+ the h8 quantiser)
+  kMoeWeights,  // the expert weights into the grouped GEMMs' B form (requant / dequant)
+  kMoeGemm,     // the grouped GEMMs, gate||up and down
+  kMoeCombine,  // pf_moe_combine (the weighted sum and the residual fold)
   kCount
 };
 

@@ -809,8 +809,9 @@ int run(int argc, char** argv) {
     StdoutToStderr redirect;
     return loader::load(ctx, path, cli::load_len(max_len_arg, trained), /*mtp=*/false, lm_head);
   }();
-  // Spec 15c: --pp / --prefill on a model whose prefill is not built (Ornith, spec 15d)
-  // stop here with the stage's name, before a plan or an engine is made for it.
+  // Spec 15c: --pp / --prefill on a model whose prefill is not built stop here with the
+  // reason, before a plan or an engine is made for it (spec 15d: Ornith's is built, on
+  // the L0 backends - Engine::prepare_prefill refuses sycl-tla by name).
   if (have_pp || prefill) model::require_prefill(*model.desc);
   // Spec 6 §10: auto plans and re-tables the model; an explicit length is held to the
   // plan. The prefill scratch is planned only when this run prefills (ruling R7).
