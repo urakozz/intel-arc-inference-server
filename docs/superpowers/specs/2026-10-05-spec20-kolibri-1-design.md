@@ -212,3 +212,22 @@ forward with the reference, so kernels and capture can be tested before spec 16 
   not the identity) and any group other than 64 / 128 are refused by name.
 - **For Kolibri:** our own AutoRound g64 symmetric quantisation (§3) is better on German than either
   route, and it is the format every kernel already serves.
+- **As built (2026-10-05, branch `ct-sym-loader`).** One conversion point:
+  `loader::LinearSrc::classify` finds `.weight_packed` and builds `qweight[r][n] =
+  weight_packed[n][r]` (the int32 words verbatim) and `scales[g][n] = f16(weight_scale[n][g])`.
+  A bf16 scale is converted only when f16 holds it exactly, otherwise the load is refused
+  naming the tensor and index. Then the existing g128 → g64 expansion runs. Dense linears,
+  Agnes's fold, the MoE experts (main layers and the MTP head's MoE layer) and K2 all go
+  through it; K2's name check takes either packing, one per checkpoint. Host tests:
+  `ct_loader_test` (every weight equals (u − 8) × s and q × s, byte-equal to the GPTQ form,
+  g64 / g128 × f16 / bf16; the refusals; the real configs in `tests/loader/ct/`), and
+  `ornith_repack_test` / `k2_repack_test` (a compressed-tensors MoE layer and K2 checkpoint
+  repack to the GPTQ form's bytes). A load prints one note naming the group, the linear
+  count and the recommended format (operator requirement). Refused by name: `symmetric:
+  false`, `.weight_zero_point`, a non-identity `weight_g_idx`, actorder "group" without g_idx,
+  group ≠ 64 / 128, bits ≠ 4, a format other than pack-quantized, quantised activations,
+  transforms. Real repos: RedHatAI/Qwen3.8-27B-INT4 (this engine's architecture, sym g128,
+  bf16 scales) and RedHatAI/Qwen3-32B-quantized.w4a16 are accepted;
+  Padakovec/Kolibri-1-W4A16-GPTQ and RedHatAI/Qwen3-8B-quantized.w4a16 (asymmetric) and
+  halt95/Qwen3.8-Flash-Next-W4A16-Merlin (an int8 group) are refused. Box validation: queue
+  row 18.
