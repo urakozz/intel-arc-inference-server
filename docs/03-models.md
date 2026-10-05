@@ -88,8 +88,9 @@ layer at the main model's shapes, `mtp.norm`. It shares `embed_tokens` and
 `lm_head` with the main model, so a draft step would read 0.85 + 2.54 GB and
 `lm_head` width would matter twice. The engine loads it behind `--mtp K`
 (spec 8): `b70-serve --mtp K` drafts K tokens with it and verifies them in one
-step of K + 1 rows (docs/BENCHMARKS.md, "MTP speculative decoding"). Without
-the flag it is skipped, as before.
+step of K + 1 rows (docs/BENCHMARKS.md, "MTP speculative decoding");
+`--mtp auto` chooses K per iteration from each request's own acceptance (spec 8
+§10). Without the flag it is skipped, as before.
 
 ### Layer math, verified against the modeling file
 

@@ -72,6 +72,10 @@ void usage() {
                "                 [--mtp K]   speculative decoding with the MTP head, K drafts\n"
                "                             per step (1..3; 0 = off, the default). Loads the\n"
                "                             head (+1.4 GB); max-len 16384 only (spec 8).\n"
+               "                 [--mtp auto [--mtp-max 3] [--mtp-cost SPEC]]   K per iteration\n"
+               "                             from each request's own acceptance (spec 8 §10).\n"
+               "                             SPEC: \"verify=1,1.17,1.52,1.74;draft=0.19,0.37,0.55\"\n"
+               "                             (plain-step units; default: the --lm-head form's)\n"
                "                 [--lm-head bf16|int8]   Default: int8 (spec 9: quantised at load\n"
                "                 from the bf16 head; bf16 is the checkpoint's own head)\n");
 }
@@ -134,6 +138,9 @@ int run(int argc, char** argv) {
   bool have_pp_backend = false;
   uint32_t prefix_cache_gb = 32;
   uint32_t mtp_k = 0;
+  bool mtp_auto = false, have_mtp_tuning = false;   // spec 8 §10
+  uint32_t mtp_max = 3;
+  std::string mtp_cost_arg;
   // Spec 9 §3: the serving default is the gated int8 head (amendment §8, L3).
   loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
 
@@ -168,8 +175,20 @@ int run(int argc, char** argv) {
     } else if (arg == "--prefix-split-last") {
       options.prefix_split_last = true;
     } else if (arg == "--mtp") {
-      mtp_k = parse_u32("--mtp", value(i, "--mtp"));
-      if (mtp_k > runtime::Engine::kMaxDraft) throw std::runtime_error("--mtp expects 0..3");
+      const std::string v = value(i, "--mtp");
+      mtp_auto = v == "auto";
+      if (!mtp_auto) {
+        mtp_k = parse_u32("--mtp", v);
+        if (mtp_k > runtime::Engine::kMaxDraft) throw std::runtime_error("--mtp expects 0..3 or auto");
+      }
+    } else if (arg == "--mtp-max") {
+      mtp_max = parse_u32("--mtp-max", value(i, "--mtp-max"));
+      if (mtp_max == 0 || mtp_max > runtime::Engine::kMaxDraft)
+        throw std::runtime_error("--mtp-max expects 1..3");
+      have_mtp_tuning = true;
+    } else if (arg == "--mtp-cost") {
+      mtp_cost_arg = value(i, "--mtp-cost");
+      have_mtp_tuning = true;
     } else if (arg == "--pp-backend") {
       pp_backend_arg = value(i, "--pp-backend");
       have_pp_backend = true;
@@ -192,6 +211,28 @@ int run(int argc, char** argv) {
     throw std::runtime_error("a snapshot directory or HF repo id is required");
   }
   if (max_len == 0) throw std::runtime_error("--max-len 0 is not a model length");
+  // Spec 8 §10: --mtp auto loads the head for --mtp-max drafts and chooses K per iteration;
+  // the cost table defaults to the head form's, --mtp-cost overrides it.
+  if (have_mtp_tuning && !mtp_auto)
+    throw std::runtime_error("--mtp-max and --mtp-cost need --mtp auto");
+  if (mtp_auto) {
+    mtp_k = mtp_max;
+    options.mtp_auto = true;
+    options.mtp_adaptive.max_k = mtp_max;
+    options.mtp_adaptive.cost = lm_head == loader::LmHeadForm::Int8 ? server::MtpCost::int8_head()
+                                                                    : server::MtpCost::bf16_head();
+    if (!mtp_cost_arg.empty()) {
+      try {
+        options.mtp_adaptive.cost = server::MtpCost::parse(mtp_cost_arg, options.mtp_adaptive.cost);
+      } catch (const std::invalid_argument& error) {
+        throw std::runtime_error(error.what());
+      }
+    }
+    if (options.mtp_adaptive.cost.max_k() < mtp_max)
+      throw std::runtime_error("--mtp-cost covers K up to " +
+                               std::to_string(options.mtp_adaptive.cost.max_k()) +
+                               ", below --mtp-max " + std::to_string(mtp_max));
+  }
   if (options.host.empty()) throw std::runtime_error("--host must not be empty");
   if (options.served_model.empty()) throw std::runtime_error("--served-name must not be empty");
   if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);
@@ -236,10 +277,18 @@ int run(int argc, char** argv) {
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
                options.host.c_str(), options.port, max_len);
   print_eos(eos);
-  std::fprintf(stderr, ", prefill backend %s (SYCL component %s), mtp %u, lm_head %s\n",
+  std::fprintf(stderr, ", prefill backend %s (SYCL component %s), mtp %s%u, lm_head %s\n",
                runtime::prefill_backend_name(engine.prefill_backend()),
-               runtime::prefill::sycl_available() ? "on" : "off", mtp_k,
-               loader::lm_head_form_name(lm_head));
+               runtime::prefill::sycl_available() ? "on" : "off", mtp_auto ? "auto, max " : "",
+               mtp_k, loader::lm_head_form_name(lm_head));
+  if (mtp_auto) {
+    const server::MtpCost& c = options.mtp_adaptive.cost;
+    std::fprintf(stderr, "mtp auto: cost verify M=1..%zu", c.verify.size());
+    for (double v : c.verify) std::fprintf(stderr, " %.3f", v);
+    std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
+    for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
+    std::fprintf(stderr, " (plain steps)\n");
+  }
 
   g_server = &server;
   std::signal(SIGTERM, stop_server);
