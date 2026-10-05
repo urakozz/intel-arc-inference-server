@@ -17,6 +17,17 @@
 // every call site has always spelled them, and this header needs no Level Zero.
 namespace runtime {
 
+// Spec 10 (plan 10b): which decode-attention pair every capture binds - attn.cl's
+// attn_decode + attn_reduce (v1) or attn_v2.cl's (v2). `B70_DECODE_ATTN=v1|v2`, read
+// at each call (so a test can set it between engines); unset or empty means the
+// default; any other value throws. Both pairs share attn_prep, the KV layout, attn_q /
+// attn_gate / attn_part / attn_out - but not attn_part's SIZE (DecodeScratchDims), which
+// is why the choice lives here, beside the sizes, rather than in capture.h.
+enum class DecodeAttn { V1, V2 };
+inline constexpr DecodeAttn kDefaultDecodeAttn = DecodeAttn::V2;   // spec 10 gates, 2026-09-28
+DecodeAttn decode_attn();
+const char* decode_attn_name(DecodeAttn a);
+
 // --- PersistentBuffers ---------------------------------------------------------------
 
 struct PersistentSizes {
@@ -84,9 +95,10 @@ struct DecodeScratchDims {
   // Spec 10 (plan 10b): decode attention v2's work-groups per kv head, TGT in
   // src/kernels/attn_v2.cl and `_T32` in its variant name. v2 walks a row of L keys in
   // blocks of max(64, roundup64(ceil(L / 32))) positions, so no row has more than 32
-  // partials: v2 uses attn_part's first 24 x 32 x M x 258 floats, which fits inside
-  // v1's [24][max_len / kAttnBlock][M][258] allocation for every max_len >= 2048 -
-  // attn_part keeps v1's size while v1 stays selectable (buffers_test pins both).
+  // partials: v2 needs [24][32][M][258] floats whatever max_len is, so `attn_part` is
+  // sized by the pair the engine binds (`sizes(..., attn)`): v1's
+  // [24][max_len / kAttnBlock][M][258] only under B70_DECODE_ATTN=v1 (buffers_test pins
+  // both).
   static constexpr uint32_t kAttnV2Blocks = 32;
   // **prep_res_norm's two-stage grid** (spec 1.5 lever L1). Stage A
   // (`prep_res_fold`) runs this many work-groups over the hidden row and writes
@@ -102,7 +114,11 @@ struct DecodeScratchDims {
   // docs/15 §L2 measured as the one that pays.
   static constexpr uint32_t kNormGroups = 20;
 
-  static DecodeScratchSizes sizes(uint32_t max_len, const model::ModelDesc& desc);
+  // `attn`: the decode-attention pair the engine will bind; by default the one
+  // `B70_DECODE_ATTN` selects, which is what capture binds, so a plan and an allocation
+  // made in the same process agree.
+  static DecodeScratchSizes sizes(uint32_t max_len, const model::ModelDesc& desc,
+                                  DecodeAttn attn = decode_attn());
 };
 
 // --- PrefillScratch ------------------------------------------------------------------
