@@ -289,3 +289,92 @@ token gate and the routing diagnostic against 18a's `route.{moe,mova}.{ids,w,gap
   expert kernels' K splits are PROVISIONAL (copied), for Task 4's sweep.
 - The int4 checkpoint's config.json says `"dtype": "float16"` (AutoRound's export); the engine and
   18a's reference compute in bf16 (§3) - a reference run in fp16 would not be the gate's.
+
+## 11. 18c as built blind (2026-10-05, branch `spec18c-k2-prefill`)
+
+Written on the Mac with the box unavailable: plan 18c Task 2 (kernels, the prefill step, the
+engine, the CLI, tests). Task 1 (P0 timings) and Task 3 (speed) and every run on the card are the
+box's (`docs/superpowers/plans/box-validation-queue.md`, the K2 prefill row).
+
+**Structure (§5.3).** K2-only kernels in `src/kernels/k2/` (`k2_pf_linear.cl`, `k2_pf_moe.cl`,
+`k2_pf_attn.cl`; names in `src/kernels/k2_kernels.h`'s spec 18c block), the walk and its scratch
+in `src/runtime/k2/k2_prefill.{h,cc}`, `K2Engine::prefill` in `k2_prefill_engine.cc` - a new
+archive `b70_k2_prefill` beside `b70_k2_runtime`, so a decode-only target links what it did
+(Engine::prefill's arrangement). No existing `.cl` changed: the reused sources run at K2's shapes
+from new CMake lines (`tools/kernel_cmdlines`: additions only).
+
+**The chunk (one Level Zero list, no host wait inside it):**
+
+| step | kernels | rounding chain |
+|---|---|---|
+| embed | `pf_embed.cl` at K2's hidden / vocabulary | a copy |
+| grouped norm | `pf_res_fold` (stage A, runtime M, one slice) + `k2_norm_finish` at M = kPfC (decode's stage B) | decode's, row for row |
+| int4 linears | `k2_pf_dequant_slab` (layout 0, slabs of 1024 and one zero-padded tail of pad256) + `pf_gemm` (unchanged); dense gate‖up through `pf_gemm_T0_SILU` | dequant then DPAS (spec 2.1's) |
+| attention prep | decode's `k2_attn_prep` built at M = kPfC, S = 1 over the partials row at pitch pad256(N) (10240 / 9472) | decode's bf16 RoPE chain, bit for bit |
+| MoVA | decode's `k2_route` on grid (1, C) over the v_router columns; `k2_pf_sort`, `k2_pf_gather`, `k2_pf_dequant_v` + `pf_moe_gemm` (2560 → 1024, plain epilogue), `k2_pf_mova_combine` into V at pos + t | `k2_mova_value`'s epilogue: SiLU, ascending-id bf16 chain |
+| attention | `k2_pf_flash_attn` (new: head_dim 128, GQA 4, HPW 4, RPW 8, KT 64), the softplus gate fused in the epilogue | see "precision" below |
+| MoE | `pf_gemv_bf16` router at decode's {16, 16} tiling (row m bitwise decode's GEMV), decode's `k2_route` binary on grid (1, C), sort / gather, gate‖up (`pf_moe_gemm` SiLU, 2 weight batches) and down (1 batch), `k2_pf_moe_combine` | `k2_moe_down`'s epilogue: ascending-id bf16 chain, the ungated shared expert, the residual fold |
+| head (last chunk) | decode's binaries over the last row: fold + norm, lm_head, argmax | decode's |
+
+**Launches: 2392 per chunk at every C** (1 + 3 x 62 + 45 x 49; `runtime::k2::prefill_chunk_launches`,
+asserted by the walk) plus 5 for the head. Per sparse layer: 2 norm, 20 attention-row slabs (9 + the
+tail), 6 MoVA, prep + flash, 6 o_proj slabs, 2 norm, 11 MoE.
+
+**Decisions taken blind.**
+- **l0 only.** spec 5's h8 (`l0-int8`) rotates in 1024-k Hadamard blocks and K2's hidden is 2560;
+  sycl-tla has no K2 walk. `b70-decode --pp-backend l0-int8 | sycl-tla` on K2 is refused by name.
+- **K2's own sort** (`k2_pf_sort`): pf_moe.cl's needs a multiple of 16 experts (K2's MoE has 100)
+  and always appends a shared expert (MoVA has none); the tile table, the padding to tmax, the
+  header and the determinism argument are pf_moe.cl's, and for the MoE shape the host reference
+  is checked equal to spec 15d's walk (`k2_pf_ref_test`). The grouped GEMM is `pf_moe_gemm.cl`
+  unchanged (row independence, Review Focus 2, is its argument).
+- **Every expert dequantised to bf16 per chunk** (the Ornith arrangement): one weight batch of
+  401 MB (half the gate‖up blocks; all down / value blocks), experts with no row skipped. It is
+  the largest term of a chunk (derived ~1.5 GB of bf16 per sparse layer written and read); an
+  SLM-fused dequant inside the grouped GEMM is plan 18c Task 3's first lever.
+- **The prefill scratch: 0.797 GB** (kPfC 2048: partials 84 MB, the weight batch 401 MB, the
+  sorted A / y 110 MB, ...; `runtime::k2::prefill_sizes`), lazy on the engine and planned only
+  when a run prefills: `--max-len auto` with `--prefill` / `--pp` gives 42752 positions (bf16 head,
+  32.53 GB card, 1.5 GB reserve; 46592 decode-only).
+- **Natural `exp` in the flash attention** (EXP2 0), as K2's decode and the reference - PROVISIONAL,
+  a Task 3 speed knob (spec 6c's exp2 was a register-pressure fix at head_dim 256).
+
+**Precision against the reference (18b review).** The reference's eager attention (bitwise HF in
+bf16, `tools/oracle/k2_ref.py attention()`) rounds four times: s_b = rne(q·k), s = rne(s_b x
+1/sqrt(128)), p = rne(softmax(s)) (fp32 inside), o = rne(Σ p v). The default prefill attention
+keeps the scaled scores in fp32, runs the softmax online in fp32 and rounds only the UNNORMALISED
+exp(s - m_running) to bf16 as P·V's DPAS operand, dividing by l in fp32 at the end; decode's v2
+does not round P at all (fp32 weights against bf16 V). So the two engine paths differ from each
+other and from the reference by those rounding points - small per layer, but K2's routers are
+tie-sensitive (biases 8-28 in steps up to 0.125) and the difference compounds over 45 layers. The
+opt-in **`B70_K2_ATTN=eager`** prefill variant (`k2_pf_flash_attn_*_EAGER`, two passes: max and
+Σ, then p = rne(exp(s - m) / l) and o = Σ p v rounded once) moves the rounding points to the
+reference's (not its sum orders); `k2_pf_ref::attention_eager` is its host model. The decode half
+of the switch is branch `k2-attn-eager`; Review Focus 1's comparison (`k2_prefill_eager_test`) is
+between matched variants only once both are merged.
+
+**Determinism and continuation.** No atomic anywhere; the sort is one work-group walking the
+chunk in (token, slot) order; the combines sum in ascending expert id; a grouped GEMM row is its
+own A row times its expert's block whatever tile it rides in; the flash attention's key tiles
+start at key 0 (a wholly masked tile adds exact zeros). Every kernel is row-local or keyed to
+absolute positions and K2 has no GDN chunking, so the argument predicts a split prefill bitwise
+equal to the one-call prefill at EVERY split; the gate (`prefill_split_k2_test`) holds the
+multiples of 64 bitwise and the rest to the split test's bars, printing which were bitwise.
+
+**Gates as written.** Host (Mac): `k2_pf_ref_test` (the routing scatter with exact ties at the cut,
+the tile bound and its adversary, row independence, the combines == decode's chains bit for bit,
+the slab tail, the eager reference), `k2_pf_variant_names_test`, `k2_plan_test` (2392 launches,
+0.797 GB, 42752), `tools/mac/clrun/k2_run` (the portable prefill kernels bit-exact on the Mac's
+GPU, indicative). Box: `k2_pf_kernels_test` (K1: everything above on the card, grouped == dense
+bitwise, flash attention against fp64 at depths 0 / 2k / 30k / 60k, a tail chunk and single rows,
+Review Focus 1-3 at kernel level), `k2_prefill_test` (the walk, K3 determinism / recorded replay /
+chunking bitwise, prefill KV and routing against decode's fill, tokens by ruling A26; `_i8head`,
+`_eager`), `prefill_split_k2_test`, `k2_golden_prefill_test` / `_c16` / `_i8head` (K2 on prefill
+with the routing diagnostic, Review Focus 5), `cli_reject_k2_pp_int8` / `cli_reject_k2_prefill_sycl`.
+The PROPOSED bars (KV vs decode: dense rows >= 0.999, median >= 0.9998, p01 >= 0.99; routing
+near-tie margin 2e-2, weights 1/32) are set from the box's first printed distributions.
+
+**Speed (derived, unmeasured).** ~9.3 GFLOP per token (45 sparse layers x 98 M MACs: the
+attention row, o_proj, 4 value experts, 8 + 1 MoE experts) - pp4096 ~38 TFLOP of DPAS (~0.3-0.4 s
+at spec 2.1's measured rates) plus the per-chunk expert dequant pass (~0.3 s per chunk) plus the
+flash attention (~0.05 s): ~1.2 s, ~3,400 t/s, the dequant pass the largest term. Task 3 measures.

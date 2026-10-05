@@ -1,5 +1,15 @@
 # Spec 18c - K2-Horizon prefill
 
+**Status (2026-10-05, branch `spec18c-k2-prefill`):** Task 2 written blind on the Mac (the box
+unavailable): the kernels, the prefill step, `K2Engine::prefill` and its continuation,
+`b70-decode --prefill` / `--pp` for K2 (l0 only), the planner's prefill term, host references
+and every gate registered. Mac checks green (`tools/mac_check.sh --base main --kernels`: host
+tests, Level Zero syntax, kernel command lines additions only, OpenCL syntax; the portable
+prefill kernels bit-exact on the Mac's GPU, indicative). As built: spec 18 §11. Task 1 (P0) and
+Task 3 (speed), and everything on the card (K1 on ocloc's build, K3, K2 on prefill after 18a's
+`oracle-out-k2/`), are the box validation queue's K2 prefill row. The decode half of
+`B70_K2_ATTN=eager` is branch `k2-attn-eager`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** K2 prefills in chunks: dense and attention linears through spec 5's path, MoVA and MoE through grouped expert GEMMs (spec 15d's routing and grouped kernels, MoVA added), flash attention at head_dim 128 / GQA 4; K2 and K3 on prefill; prefill speed.
@@ -32,7 +42,7 @@
 
 ### Task 2: kernels and the prefill step
 
-- [ ] MoVA routing + grouped value-expert GEMM + combine; MoE through spec 15d's path with K2's router; flash variants; the K2 prefill step; tests (Review Focus 1-5); golden gates on prefill (K2), split and replay tests (K3); K0 full suite. **Commit** `prefill: K2-Horizon chunks through grouped MoVA and MoE (spec 18c)`.
+- [x] (blind; the kernel and checkpoint gates are the box's) MoVA routing + grouped value-expert GEMM + combine; MoE through spec 15d's path with K2's router; flash variants; the K2 prefill step; tests (Review Focus 1-5); golden gates on prefill (K2), split and replay tests (K3); K0 full suite. **Commit** `prefill: K2-Horizon chunks through grouped MoVA and MoE (spec 18c)`.
 
 ### Task 3: speed
 
