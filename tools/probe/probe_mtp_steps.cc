@@ -1,8 +1,13 @@
 // probe_mtp_steps - spec 8 plan 8b: the production MTP lists' wall time per call.
 //
 //   probe_mtp_steps <snapshot> [depth = 4096] [calls = 32] [rounds = 3] [lm_head = bf16]
+//                   [draft_vocab = off]
 //
 // `lm_head` (spec 9 H2): bf16 (the checkpoint's) or int8; the draft list reads it too.
+// `draft_vocab` (spec 8 §11): off, 32k, 64k or 128k (needs int8) - the draft list reads
+// the compact head instead; V' = tokenizer.json's added tokens (the EOS ids among them on
+// Qwen3.8 and Agnes) and the lowest ids, no ranked list (the step time depends on |V'|
+// only). The draft arms then price `--mtp-cost`'s draft row for that size (spec 8 §10).
 //
 // One engine with the head, `depth` ids of tests/golden/prompts/long32k.ids prefilled
 // (cwd = the source tree). Arms, timed as the engine API runs them (host writes, submit,
@@ -19,7 +24,9 @@
 #include <vector>
 
 #include "l0/context.h"
+#include "loader/draft_vocab.h"
 #include "loader/loader.h"
+#include "loader/snapshot.h"
 #include "runtime/engine.h"
 
 namespace {
@@ -36,7 +43,9 @@ std::vector<uint32_t> read_ids(const std::string& p) {
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: %s <snapshot> [depth] [calls] [rounds] [bf16|int8]\n", argv[0]);
+    std::fprintf(stderr,
+                 "usage: %s <snapshot> [depth] [calls] [rounds] [bf16|int8] [off|32k|64k|128k]\n",
+                 argv[0]);
     return 2;
   }
   const uint32_t depth = argc > 2 ? std::stoul(argv[2]) : 4096;
@@ -48,8 +57,15 @@ int main(int argc, char** argv) {
   l0::Context ctx(0);
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   if (argc > 5 && !loader::parse_lm_head_form(argv[5], lm_head)) return 2;
-  std::printf("lm_head: %s\n", loader::lm_head_form_name(lm_head));
-  runtime::Engine e(ctx, loader::load(ctx, argv[1], 16384, /*mtp=*/true, lm_head), 16384);
+  loader::DraftVocabSpec dv;
+  if (argc > 6) {
+    if (!loader::parse_draft_vocab(argv[6], dv.size)) return 2;
+    if (dv.size != 0)
+      dv.added = loader::added_token_ids_file(loader::resolve_snapshot(argv[1]) + "tokenizer.json");
+  }
+  std::printf("lm_head: %s, draft vocab %s\n", loader::lm_head_form_name(lm_head),
+              loader::draft_vocab_name(dv.size).c_str());
+  runtime::Engine e(ctx, loader::load(ctx, argv[1], 16384, /*mtp=*/true, lm_head, dv), 16384);
   e.prefill(ids);
   using Clock = std::chrono::steady_clock;
   struct Arm {
