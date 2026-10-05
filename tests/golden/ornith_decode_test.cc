@@ -18,8 +18,8 @@
 //      beside the usual tensors; without them R2 is skipped with a message.
 //
 // argv: <snapshot> <oracle dir> <prompt ids dir> [lm_head form]. Exit 77 (SKIP) when
-// the Ornith int4 checkpoint is not on this machine (spec 15a decides its source;
-// none is published) - the Mac and a box without it skip, they do not fail.
+// the Ornith int4 checkpoint (urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ, spec 15 §13)
+// is not on this machine - the Mac and a box without it skip, they do not fail.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
