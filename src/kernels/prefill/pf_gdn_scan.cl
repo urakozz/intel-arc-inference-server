@@ -134,11 +134,30 @@
 // SLM: Ss[128][32] (16 KB) + vn[64][32] (8 KB) + gcv[64] / expg[64] (512 B)
 //      = 24.5 KB.
 
+// Unset GDN_K_HEADS / GDN_V_HEADS (every Qwen3.8 and Agnes command line) these are
+// Qwen3.8's, token for token; spec 15d: -DGDN_K_HEADS / -DGDN_V_HEADS give another
+// model's (Ornith 16 / 32), named `_GK<k>V<v>`.
+#ifndef GDN_V_HEADS
 #define HEADS 48
 #define DIM 128
 #define CONV_ROWS 10240
 #define Q_OFF 0
 #define K_OFF 2048
+#define V_PER_K 3         /* repeat_interleave(., 48 / 16) */
+#else
+#ifndef GDN_K_HEADS
+#error "pf_gdn_scan: GDN_V_HEADS needs GDN_K_HEADS"
+#endif
+#define HEADS GDN_V_HEADS
+#define DIM 128
+#define CONV_ROWS ((2 * GDN_K_HEADS + GDN_V_HEADS) * DIM)
+#define Q_OFF 0
+#define K_OFF (GDN_K_HEADS * DIM)
+#define V_PER_K (GDN_V_HEADS / GDN_K_HEADS)
+#if GDN_V_HEADS % GDN_K_HEADS != 0
+#error "pf_gdn_scan: v-heads must be a multiple of k-heads"
+#endif
+#endif
 #define CT 64             /* the FLA intra-chunk size (PrefillScratch::kGdnChunk) */
 #define SG 16             /* SIMD16: 16 subgroups of 16 lanes */
 #define BAND_K 8          /* k-rows per subgroup band: 128 / 16 */
@@ -214,7 +233,7 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
                                      __global float* restrict state,
                                      __global float* restrict gdn_o, uint c_count) {
   const uint h = get_group_id(0), c = get_group_id(1), lid = get_local_id(0);
-  const uint sg = lid / SG, lane = lid % SG, kh = h / 3;
+  const uint sg = lid / SG, lane = lid % SG, kh = h / V_PER_K;
   const uint mt = sg >> 2, nt = sg & 3u, col0 = mt * DM, pos_l = nt * DK + lane;
 
   __local uint SbHiW[DIM * SB_LD], SbLoW[DIM * SB_LD];
@@ -400,7 +419,7 @@ __kernel void pf_gdn_scan(__global const ushort* restrict xb,
   const uint lid = get_local_id(0);
   const uint sgid = lid / SG;              // owns k-rows [8*sgid, 8*sgid+8)
   const uint lane = lid % SG;              // owns columns 32c+lane and 32c+lane+16
-  const uint kh = h / 3;                   // repeat_interleave(., 3)
+  const uint kh = h / V_PER_K;             // repeat_interleave(., V_PER_K)
   const uint col0 = c * CHUNK_V + lane, col1 = col0 + SG;
   const uint i0 = sgid * PPW;              // this subgroup's four positions
 
@@ -676,7 +695,7 @@ __kernel void pf_gdn_scan_dpas(__global const ushort* restrict xb,
   const uint lid = get_local_id(0);
   const uint sg = lid / SG;
   const uint lane = lid % SG;
-  const uint kh = h / 3;                   // repeat_interleave(., 3)
+  const uint kh = h / V_PER_K;             // repeat_interleave(., V_PER_K)
 
   // Stages 1-2: this subgroup's 8-column x 16-position tile of vn^T / o^T.
   const uint mt = sg >> 2;                 // columns 8mt .. 8mt+7 of the WG's 32

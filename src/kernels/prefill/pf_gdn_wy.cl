@@ -58,12 +58,32 @@
 //   * `T` is **fp32**, deviating from FLA's `solve_tril(..., output_dtype =
 //     k.dtype)` (chunk.py:47-49) - plan 6b ruling R8, deliberate and recorded.
 
+// Unset GDN_K_HEADS / GDN_V_HEADS (every Qwen3.8 and Agnes command line) these are
+// Qwen3.8's, token for token; spec 15d: -DGDN_K_HEADS / -DGDN_V_HEADS give another
+// model's (Ornith 16 / 32: conv rows 8192, 2 v-heads per k-head), named `_GK<k>V<v>`.
+#ifndef GDN_V_HEADS
 #define HEADS 48
 #define DIM 128
 #define CONV_ROWS 10240
 #define Q_OFF 0
 #define K_OFF 2048
 #define V_OFF 4096
+#define V_PER_K 3         /* repeat_interleave(., 48 / 16): v-heads per k-head */
+#else
+#ifndef GDN_K_HEADS
+#error "pf_gdn_wy: GDN_V_HEADS needs GDN_K_HEADS"
+#endif
+#define HEADS GDN_V_HEADS
+#define DIM 128
+#define CONV_ROWS ((2 * GDN_K_HEADS + GDN_V_HEADS) * DIM)
+#define Q_OFF 0
+#define K_OFF (GDN_K_HEADS * DIM)
+#define V_OFF (2 * GDN_K_HEADS * DIM)
+#define V_PER_K (GDN_V_HEADS / GDN_K_HEADS)
+#if GDN_V_HEADS % GDN_K_HEADS != 0
+#error "pf_gdn_wy: v-heads must be a multiple of k-heads"
+#endif
+#endif
 #define CT 64             /* the FLA intra-chunk size (PrefillScratch::kGdnChunk) */
 #define BANDS 16
 #define BAND_K 8
@@ -214,7 +234,7 @@ __kernel void pf_gdn_A(__global const ushort* restrict xb,
                        __global float* restrict A, uint c_count) {
   const uint h = get_group_id(0), chunk = get_group_id(1), z = get_group_id(2);
   const uint iz = z >> 1, jz = z & 1u;
-  const uint kh = h / 3;                          // repeat_interleave(., 3)
+  const uint kh = h / V_PER_K;                    // repeat_interleave(., V_PER_K)
   const uint base_m = chunk * CT;
   const uint L = min((uint)CT, c_count - base_m);
   const uint lid = get_local_id(0);
@@ -289,7 +309,7 @@ __kernel void pf_gdn_A_legacy(__global const ushort* restrict xb,
                               __global const float* restrict beta,
                               __global float* restrict A, uint c_count) {
   const uint h = get_group_id(0), chunk = get_group_id(1);
-  const uint kh = h / 3;                          // repeat_interleave(., 3)
+  const uint kh = h / V_PER_K;                    // repeat_interleave(., V_PER_K)
   const uint base_m = chunk * CT;
   const uint L = min((uint)CT, c_count - base_m);
 
@@ -393,7 +413,7 @@ __kernel void pf_gdn_A2(__global const ushort* restrict xb,
                         __global float* restrict A2, uint c_count) {
   const uint h = get_group_id(0), chunk = get_group_id(1), z = get_group_id(2);
   const uint iz = z >> 1, jz = z & 1u;
-  const uint kh = h / 3;
+  const uint kh = h / V_PER_K;
   const uint base_m = chunk * CT;
   const uint L = min((uint)CT, c_count - base_m);
   const uint lid = get_local_id(0);
@@ -468,7 +488,7 @@ __kernel void pf_gdn_A2_legacy(__global const ushort* restrict xb,
                                __global const float* restrict g_cum,
                                __global float* restrict A2, uint c_count) {
   const uint h = get_group_id(0), chunk = get_group_id(1);
-  const uint kh = h / 3;
+  const uint kh = h / V_PER_K;
   const uint base_m = chunk * CT;
   const uint L = min((uint)CT, c_count - base_m);
 
@@ -840,7 +860,7 @@ __kernel void pf_gdn_wu(__global const ushort* restrict xb,
                         __global ushort* restrict w,
                         __global ushort* restrict u, uint c_count) {
   const uint h = get_group_id(0), chunk = get_group_id(1), cxh = get_group_id(2);
-  const uint kh = h / 3;
+  const uint kh = h / V_PER_K;
   const uint base_m = chunk * CT;
   const uint L = min((uint)CT, c_count - base_m);
   const uint lid = get_local_id(0);
@@ -954,7 +974,7 @@ __kernel void pf_gdn_wu_legacy(__global const ushort* restrict xb,
                                __global ushort* restrict w,
                                __global ushort* restrict u, uint c_count) {
   const uint h = get_group_id(0), chunk = get_group_id(1);
-  const uint kh = h / 3;
+  const uint kh = h / V_PER_K;
   const uint base_m = chunk * CT;
   const uint L = min((uint)CT, c_count - base_m);
   const uint lid = get_local_id(0);

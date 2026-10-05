@@ -79,7 +79,13 @@
 #error "pf_gdn_conv assumes qkv||z runs S=1; the partials index must loop s otherwise"
 #endif
 
-// model::Qwen35's dimensions; none of them is a variant.
+// model::Qwen35's dimensions. Unset GDN_K_HEADS / GDN_V_HEADS (every Qwen3.8 and
+// Agnes command line, unchanged) they are spelled token for token as they always
+// were. Spec 15d: another model's heads come in as -DGDN_K_HEADS / -DGDN_V_HEADS
+// (gdn_step.cl's pair, spec 15c) and the widths follow (Ornith 16 / 32: conv rows
+// 8192, qkv||z 12288, b at column 32); the binary is `_GK<k>V<v>`
+// (kernels::gdn_suffix).
+#ifndef GDN_V_HEADS
 #define HEADS 48          /* v-heads */
 #define DIM 128           /* head dim, k and v alike */
 #define QKVZ_N 16384      /* qkv‖z row width; z lives at 10240 */
@@ -93,6 +99,27 @@
 #define B_OFF 48
 #define CT 64             /* the FLA intra-chunk size (PrefillScratch::kGdnChunk) */
 #define K_HEADS 16        /* q and k heads: CONV_ROWS = (2*16 + 48) * 128 */
+#else
+#ifndef GDN_K_HEADS
+#error "pf_gdn_conv: GDN_V_HEADS needs GDN_K_HEADS"
+#endif
+#define HEADS GDN_V_HEADS
+#define DIM 128
+#define CONV_ROWS ((2 * GDN_K_HEADS + GDN_V_HEADS) * DIM)
+#define QKVZ_N (CONV_ROWS + GDN_V_HEADS * DIM)
+#define CONV_TAPS 4
+#define Q_OFF 0
+#define K_OFF (GDN_K_HEADS * DIM)
+#define V_OFF (2 * GDN_K_HEADS * DIM)
+#define RING 16
+#define AB_STRIDE 128     /* the a||b GEMV's padded row (model_desc.cc kAbPaddedN) */
+#define B_OFF GDN_V_HEADS
+#define CT 64
+#define K_HEADS GDN_K_HEADS
+#if GDN_V_HEADS % GDN_K_HEADS != 0 || 2 * GDN_V_HEADS > AB_STRIDE
+#error "pf_gdn_conv: v-heads must be a multiple of k-heads, and a||b must fit its 128-column row"
+#endif
+#endif
 
 #define WG_CH 256         /* channel-parallel kernels: 40 groups x 256 = 10240 */
 #define WG_NORM 128       /* one lane per head dim */
