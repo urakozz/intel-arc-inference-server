@@ -25,7 +25,9 @@
 //                                            FFN folded in (§2)     expert 512 + sigmoid gate
 //   tensor names      linear_attn. /         delta_attn. /          linear_attn. /
 //                     self_attn.             global_attn.           self_attn.
-//   max_len ceiling   none                   65536 (§3.3)           none
+//   max_len           any multiple of 256 up to config.json's max_position_embeddings
+//                     (262144 for all three) that the memory plan fits on the card
+//                     (spec 6 §10; Agnes's fixed 65536 of spec 14 §3.3 is gone)
 //   loadable          yes                    yes                    no: "MoE not implemented
 //                                                                   (spec 15c)"
 //
@@ -70,10 +72,6 @@ struct ModelDesc {
   uint32_t intermediate = 0;
   // The checkpoint's `mlp.parallel_ffn` width, folded at load; 0 = none.
   uint32_t parallel_ffn = 0;
-  // The largest max_len this model may be loaded at; 0 = no model-specific
-  // ceiling. Agnes: 65536 (spec 14 §3.3: 128k bf16 KV does not fit beside the
-  // weights until spec 12's int8 KV).
-  uint32_t max_len_ceiling = 0;
   // Checkpoint-name infix -> engine-name infix, applied to every
   // `model.language_model.*` and `mtp.*` name (vLLM PR #57003's WeightsMapper).
   std::vector<std::pair<std::string, std::string>> name_map;

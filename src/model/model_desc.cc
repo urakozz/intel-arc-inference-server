@@ -198,7 +198,6 @@ ModelDesc make_agnes() {
   set_qwen38_shapes(d);   // the head's MLP stays 17408: no parallel FFN in it (spec 14 §1)
   d.parallel_ffn = 2048;
   d.intermediate = 17408 + 2048;   // 19456 = 19 x 1024 = 304 x 64
-  d.max_len_ceiling = 65536;       // spec 14 §3.3: until spec 12's int8 KV
   d.name_map = {{"delta_attn.", "linear_attn."}, {"global_attn.", "self_attn."}};
   d.doc_w = 18.344234624e9;        // derived from the headers, see model_desc.h
   d.vocab_used = 248089;           // tokenizer.json: 248077 + 12 Agnes specials
@@ -223,7 +222,6 @@ ModelDesc make_qwen38() {
   set_qwen38_shapes(d);
   d.intermediate = 17408;
   d.parallel_ffn = 0;
-  d.max_len_ceiling = 0;
   d.doc_w = 15.519e9;   // docs/03-models.md, measured 2026-08-24
   d.vocab_used = Qwen35::kVocabUsed;
   finish(d, kQwen38Tuning);
@@ -263,7 +261,6 @@ ModelDesc make_ornith() {
   d.mtp_intermediate = 0;          // the MTP head is one MoE layer (spec 15e)
   d.intermediate = d.moe.shared_intermediate;
   d.parallel_ffn = 0;
-  d.max_len_ceiling = 0;           // 262144 fits: 20 KiB of KV per position (spec 15 §2)
   d.doc_w = 0;
   d.vocab_used = 248077;
   d.provisional_tuning = true;

@@ -79,6 +79,10 @@ struct LoadReport {            // printed by load(); asserted by the checkpoint 
   // `small` line nets rope out (it is resident but not per-token traffic) and
   // reports it on its own line; total() and this field do not.
   size_t small_bytes = 0;
+  // The RoPE table's share of small_bytes (model::Qwen35::rope_table_bytes(max_len)):
+  // `total() - rope_bytes` is what the memory planner calls the model's bytes, the
+  // part that does not scale with max_len (spec 6 §10).
+  size_t rope_bytes = 0;
   // Spec 8: the MTP head's device bytes (0 unless loaded) - in total(), not in
   // read_per_token (the main step never reads it).
   size_t mtp_bytes = 0;
@@ -107,7 +111,9 @@ struct LoadedModel {
   l0::Mem final_norm;                       // pre-lm_head RMSNorm, (1+w) fp32 [hidden]
   l0::Mem rope;                             // fp32 [max_len][2][32] cos/sin pairs
   LoadReport report;
-  uint32_t max_len = 0;                     // the max_len this model was loaded with
+  uint32_t max_len = 0;                     // the RoPE table's length (load, set_max_len)
+  // config.json's max_position_embeddings (loader/trained_context.h); 0 = not declared.
+  uint32_t trained_max_len = 0;
   std::unique_ptr<MtpHead> mtp;             // null unless load(..., mtp = true) (spec 8)
   // Spec 14 §3.1: the model this checkpoint is, chosen from config.json's
   // architectures[0] (model::desc_for_architecture). A process-lifetime singleton.
@@ -118,7 +124,11 @@ struct LoadedModel {
 // into ctx's device. Skips model.visual.* and (v1) mtp.*. Strips the
 // "model.language_model." prefix so model::Qwen35's layer-relative names bind.
 // Asserts quant invariants and the doc-03 shape table; throws by name on any
-// mismatch. max_len sizes the RoPE table only (default 16384).
+// mismatch. max_len sizes the RoPE table only (default 16384); it must be at least 1
+// and at most config.json's max_position_embeddings (spec 6 §10: positions the model
+// was never trained on are refused here, before a byte is read). Whether the KV cache
+// at that max_len FITS is not the loader's question - runtime/memory_plan.h answers it
+// from the loaded bytes (spec 14 §3.3's fixed Agnes ceiling is gone).
 // `mtp` (spec 8 §3.1): also load the MTP head into LoadedModel::mtp. Without it the
 // head's tensors are skipped by name, counted, and never read - exactly as before.
 // `lm_head` (spec 9 §3): Checkpoint loads the head as shipped; Int8 quantises a bf16
@@ -126,5 +136,15 @@ struct LoadedModel {
 // if the checkpoint's head is not bf16.
 LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len = 16384,
                  bool mtp = false, LmHeadForm lm_head = LmHeadForm::Checkpoint);
+
+// Spec 6 §10 (`--max-len auto`): the planner needs the loaded byte count, and load()
+// needs a max_len. So auto loads at a small max_len, plans, and then re-tables the
+// model here: a RoPE table of `max_len` positions is built and uploaded, the old one is
+// freed, and m.max_len / m.report (small_bytes, rope_bytes) say so - exactly what
+// load(..., max_len) would have produced. Same bound as load(): 1..trained_max_len.
+// **Only before anything has captured `m.rope.ptr()`** - before the Engine is built:
+// a captured list bakes the old pointer. Nothing reads the table's length from the
+// allocation; every kernel indexes it by position (capture.cc, prefill/step.cc).
+void set_max_len(l0::Context& ctx, LoadedModel& m, uint32_t max_len);
 
 }  // namespace loader

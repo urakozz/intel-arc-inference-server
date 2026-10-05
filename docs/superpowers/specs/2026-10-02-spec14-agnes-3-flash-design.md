@@ -93,6 +93,16 @@ stay `constexpr`. Users today: `src/model/qwen35.{h,cc}`, `src/runtime/{buffers,
 Agnes's ceiling** until spec 12 (int8 KV) lands; then 131072 fits (~4.8 GB of KV). The MTP lists
 (spec 8, compiled at 16384) get Agnes variants at the same max_len.
 
+> **Amendment 2026-10-05 (spec 6 §10, `--max-len auto`).** The fixed 65536 ceiling is gone:
+> `ModelDesc::max_len_ceiling` and the loader's check are removed. The loader now bounds
+> max_len by config.json's `max_position_embeddings` (262144 for Agnes), and the CLIs check the
+> memory plan (`runtime/memory_plan.h`) against the card before allocating - the question this
+> section answered once, by hand, for the bf16 head. With the int8 head (the serving default)
+> the plan fits Agnes at 134144 positions without MTP and 109824 with it, at the default 1.5 GB
+> reserve (derived; 32.530 GB card). The MTP lists bake no max_len (spec 8 §12). G5's passkey at
+> 60k stands; a passkey at 95% of the auto length is queued on the box
+> (`docs/superpowers/plans/box-validation-queue.md`).
+
 ### 3.4 The CPU reference
 
 `tools/oracle/dump.py` builds `transformers`' `Qwen3_5ForCausalLM`. For Agnes: the same model

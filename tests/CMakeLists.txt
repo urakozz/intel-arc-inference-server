@@ -488,6 +488,13 @@ target_link_libraries(agnes_fold_test PRIVATE b70_loader)
 add_test(NAME agnes_fold_test COMMAND agnes_fold_test
   ${CMAKE_SOURCE_DIR}/tests/loader/agnes_fold_fixture.safetensors)
 
+# Spec 6 §10: config.json's max_position_embeddings (text_config or top level), the
+# bound of --max-len. Host only; inline JSON.
+add_executable(trained_context_test loader/trained_context_test.cc)
+target_include_directories(trained_context_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(trained_context_test PRIVATE b70_loader)
+add_test(NAME trained_context_test COMMAND trained_context_test)
+
 add_executable(qwen35_test model/qwen35_test.cc)
 target_include_directories(qwen35_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(qwen35_test PRIVATE b70_model)

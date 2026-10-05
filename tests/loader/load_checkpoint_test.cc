@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <stdexcept>
 #include <vector>
 #include "check.h"
 #include "common/bf16.h"
@@ -236,6 +237,34 @@ int main(int argc, char** argv) {
   CHECK_EQ(rp[32], 0.0f);
   CHECK_NEAR(rp[64], std::cos(1.0), 1e-6);
   CHECK_NEAR(rp[96], std::sin(1.0), 1e-6);
+
+  // Spec 6 §10: the trained context (config.json text_config.max_position_embeddings)
+  // and the RoPE table's own bytes, which the memory planner nets out of the total.
+  CHECK_EQ(m.trained_max_len, uint32_t(262144));
+  CHECK_EQ(m.report.rope_bytes, size_t(16384) * 256);
+  CHECK_EQ(m.report.rope_bytes, model::Qwen35::rope_table_bytes(16384));
+  // set_max_len (--max-len auto's re-tabling): the table at 4096 is the first 4096 rows
+  // of the table at 16384, bit for bit, and the report moves with it.
+  {
+    std::vector<float> row_before(64), row_after(64);
+    imm.copy(row_before.data(), static_cast<const float*>(m.rope.ptr()) + size_t(4095) * 64, 256);
+    const size_t total_before = m.report.total();
+    loader::set_max_len(ctx, m, 4096);
+    CHECK_EQ(m.max_len, uint32_t(4096));
+    CHECK_EQ(m.rope.size(), size_t(4096) * 256);
+    CHECK_EQ(m.report.rope_bytes, size_t(4096) * 256);
+    CHECK_EQ(m.report.total(), total_before - size_t(12288) * 256);
+    imm.copy(row_after.data(), static_cast<const float*>(m.rope.ptr()) + size_t(4095) * 64, 256);
+    CHECK(row_before == row_after);
+    bool refused = false;
+    try {
+      loader::set_max_len(ctx, m, 262144 + 256);
+    } catch (const std::runtime_error&) {
+      refused = true;
+    }
+    CHECK(refused);
+    CHECK_EQ(m.max_len, uint32_t(4096));   // a refused call leaves the model as it was
+  }
 
   std::printf("main model OK (%.1f s load)\n", m.report.seconds);
   }
