@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -14,6 +15,8 @@
 #include <utility>
 
 #include <httplib.h>
+
+#include "server/prompt_lookup.h"
 
 namespace server {
 namespace {
@@ -48,11 +51,23 @@ struct Server::Impl {
   std::atomic<uint64_t> next_log{0};
   uint64_t created = unix_time();
   std::unique_ptr<PrefixSession> prefix;
+  // Spec 19e: the request's ids (and, with lookup_history, earlier requests' generated ids).
+  PromptLookup lookup;
+  std::deque<std::vector<uint32_t>> lookup_history;
 };
 
 Server::Server(Deps deps, Options opts)
     : deps_(deps), opts_(std::move(opts)), impl_(std::make_unique<Impl>()) {
   impl_->eos.insert(opts_.eos_ids.begin(), opts_.eos_ids.end());
+  if (opts_.spec_lookup) {
+    if (deps_.engine.verify_k() == 0)
+      throw std::invalid_argument("--spec lookup: this engine cannot verify external drafts");
+    if (deps_.engine.mtp_k() != 0)
+      throw std::invalid_argument("--spec lookup and --mtp are one proposer each; pick one");
+    if (opts_.lookup_min_match < PromptLookup::kMinMatch ||
+        opts_.lookup_min_match > impl_->lookup.options().max_match)
+      throw std::invalid_argument("--spec-min-match must be in [2, 64]");
+  }
   impl_->prefix = std::make_unique<PrefixSession>(deps_.engine, opts_.prefix_cache_bytes,
                                                   opts_.prefix_alloc);
   impl_->svr.set_tcp_nodelay(opts_.tcp_nodelay);
@@ -229,12 +244,23 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
 
   outcome.finish_reason = "length";
   bool eos_stop = false;
+  std::optional<AdaptiveK> policy;   // --mtp auto (spec 8 §10) or --spec lookup (spec 19e)
   // Spec 8: with MTP a step yields a burst of ids; the loop below still sees them one
   // at a time, and ids past a stop are handed back with truncate_to() after it.
   const bool speculative = deps_.engine.mtp_k() > 0;
+  // Spec 19e: with --spec lookup the burst comes from step_drafts(), its drafts from the
+  // matcher, which holds exactly the prompt and every id consumed so far (the pending id x
+  // is indexed when the engine hands it to the proposer: it is consumed next, always).
+  const bool lookup = opts_.spec_lookup;
+  if (lookup) {
+    lookup_begin(outcome.prompt_ids);
+    AdaptiveKOptions o = opts_.lookup_adaptive;
+    o.max_k = std::min(o.max_k, deps_.engine.verify_k());
+    policy.emplace(o);
+  }
+  bool burst_head_indexed = false;   // burst[0] went into the matcher in the proposer
   // Spec 8 §10: --mtp auto keeps one policy per request, fed only by this request's own
   // acceptance, so the K sequence (and a seeded request's output) is reproducible.
-  std::optional<AdaptiveK> policy;
   if (speculative && opts_.mtp_auto) {
     AdaptiveKOptions o = opts_.mtp_adaptive;
     o.max_k = std::min(o.max_k, deps_.engine.mtp_k());
@@ -242,7 +268,34 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   }
   std::vector<uint32_t> burst;
   size_t burst_at = 0;
+  PromptLookup& matcher = impl_->lookup;
+  const auto next_lookup = [&]() -> uint32_t {
+    if (burst_at == burst.size()) {
+      const uint32_t k = policy->next();
+      uint32_t proposed = 0;
+      burst_head_indexed = false;
+      burst = deps_.engine.step_drafts(r.sampling, [&](uint32_t pending) {
+        if (burst_head_indexed) throw std::logic_error("EngineIface::step_drafts: propose twice");
+        matcher.append(pending);
+        burst_head_indexed = true;
+        std::vector<uint32_t> d =
+            k > 0 ? matcher.propose(k, opts_.lookup_min_match) : std::vector<uint32_t>{};
+        proposed = static_cast<uint32_t>(d.size());
+        return d;
+      });
+      burst_at = 0;
+      if (burst.empty()) throw std::runtime_error("EngineIface::step_drafts returned no ids");
+      if (burst.size() > size_t(proposed) + 1)
+        throw std::runtime_error("EngineIface::step_drafts returned more ids than drafts + 1");
+      policy->observe(proposed, uint32_t(burst.size() - 1));
+    }
+    const uint32_t id = burst[burst_at];
+    if (burst_at > 0 || !burst_head_indexed) matcher.append(id);
+    ++burst_at;
+    return id;
+  };
   const auto next_id = [&]() -> uint32_t {
+    if (lookup) return next_lookup();
     if (!speculative) return deps_.engine.step(r.sampling);
     if (burst_at == burst.size()) {
       const uint32_t k = policy ? policy->next() : deps_.engine.mtp_k();
@@ -289,6 +342,37 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   flush_pending(true);
   if (eos_stop && !outcome.parsed.tool_calls.empty()) outcome.finish_reason = "tool_calls";
   outcome.usage.completion_tokens = static_cast<uint32_t>(outcome.out_ids.size());
+  if (lookup) lookup_end(outcome.out_ids);
+}
+
+// Spec 19e: index the request. Without history the matcher is reused from the longest
+// common prefix of what it holds (the previous request's prompt and kept ids) and this
+// prompt - an agentic turn re-sends the conversation, so the tail is all that is new. With
+// history it is rebuilt: the earlier requests' generated ids, each behind a boundary, then
+// the prompt (the prompt's matches are the more recent on ties).
+void Server::lookup_begin(const std::vector<uint32_t>& prompt_ids) {
+  PromptLookup& lk = impl_->lookup;
+  if (opts_.lookup_history == 0) {
+    const std::vector<uint32_t>& held = lk.ids();
+    size_t common = 0;
+    const size_t n = std::min(held.size(), prompt_ids.size());
+    while (common < n && held[common] == prompt_ids[common]) ++common;
+    lk.truncate(common);
+    for (size_t i = common; i < prompt_ids.size(); ++i) lk.append(prompt_ids[i]);
+    return;
+  }
+  lk.clear();
+  for (const std::vector<uint32_t>& earlier : impl_->lookup_history) {
+    lk.append(earlier);
+    lk.boundary();
+  }
+  lk.append(prompt_ids);
+}
+
+void Server::lookup_end(const std::vector<uint32_t>& out_ids) {
+  if (!opts_.spec_lookup || opts_.lookup_history == 0) return;
+  impl_->lookup_history.push_back(out_ids);
+  while (impl_->lookup_history.size() > opts_.lookup_history) impl_->lookup_history.pop_front();
 }
 
 void Server::finish_request() {

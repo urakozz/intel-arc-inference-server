@@ -63,6 +63,19 @@ AcceptResult accept_sampled(const float* p_rows /*[k+1][row_stride]*/,
                             uint32_t k, uint32_t vocab_used, size_t row_stride,
                             const Sampling& s, std::mt19937_64& rng);
 
+// Spec 19e (plan 19e Review Focus 1): lossless sampling when the drafts are DETERMINISTIC
+// (prompt lookup: the proposal is a point mass, q_i = 1 on d_i and 0 elsewhere). The rule
+// above with that q: accept d_i with probability min(1, p(d_i) / 1) = p(d_i) (the filtered,
+// renormalised p, so 0 when the filter dropped d_i); on the first rejection sample from
+// normalise(max(0, p - q)), which is p with d_i removed and renormalised; all k kept: the
+// bonus from p_k. The output is distributed exactly as p, whatever the drafts were.
+//
+// RNG order as accept_sampled's: one uniform per draft considered, in order, then exactly
+// one draw for the correction/bonus. No q rows: nothing was sampled to propose.
+AcceptResult accept_point_mass(const float* p_rows /*[k+1][row_stride]*/, const uint32_t* drafts,
+                               uint32_t k, uint32_t vocab_used, size_t row_stride,
+                               const Sampling& s, std::mt19937_64& rng);
+
 // A draft sampled from the head's row q_i, filtered like p.
 uint32_t sample_draft(const float* q_row, uint32_t vocab_used, const Sampling& s,
                       std::mt19937_64& rng);
