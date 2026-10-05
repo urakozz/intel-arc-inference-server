@@ -72,9 +72,11 @@ using golden::read_ids;
 
 constexpr uint32_t kMaxLen = 16384;
 constexpr uint32_t kGen = 32;
-const uint32_t kHid = model::qwen38().hidden;  // 5120, Agnes's too (spec 15b)
-const size_t kGdnElems =
-    size_t(model::qwen38().gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
+// The loaded model's widths, set from its descriptor right after the load (spec 15d, as
+// golden_gate_test since 15c): 5120 and 48 x 128 x 128 on Qwen3.8 and Agnes, 2048 and
+// 32 x 128 x 128 on Ornith.
+uint32_t kHid = 0;
+size_t kGdnElems = 0;
 
 std::vector<std::string> split_commas(const std::string& s) {
   std::vector<std::string> out;
@@ -162,8 +164,11 @@ int main(int argc, char** argv) {
   // debug_resid=false: ruling R6 gives the prefill walk no per-layer tap, so
   // there is nothing for it to fill and the 64 device copies a token would be
   // paid for nothing.
-  // spec 14: 64 / 48 on Qwen3.8, 72 / 54 on Agnes
+  // spec 14: 64 / 48 on Qwen3.8, 72 / 54 on Agnes (spec 15d: 40 / 30 on Ornith)
   const uint32_t kLayers = model.desc->layers, kGdnLayers = model.desc->gdn_layers;
+  kHid = model.desc->hidden;
+  kGdnElems = size_t(model.desc->gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
+  const bool kMoe = model.desc->is_moe();
   runtime::Engine eng(ctx, std::move(model), kMaxLen);
   eng.set_prefill_backend(backend);
   std::printf("prefill backend: %s\n", runtime::prefill_backend_name(backend));
@@ -176,8 +181,9 @@ int main(int argc, char** argv) {
                 sel && *sel ? sel : "(unset)", runtime::prefill::gdn_scan_entry_name());
   }
   // The decode list is 12 launches per layer + 6 at the boundary: 774 on Qwen3.8
-  // (645 + lever L1's 129), 870 on Agnes's 72 layers (spec 14, derived).
-  CHECK_EQ(eng.step().kernel_count, size_t(12) * kLayers + 6);   // decode is untouched
+  // (645 + lever L1's 129), 870 on Agnes's 72 layers (spec 14, derived); 13 per MoE
+  // layer, 526 on Ornith (spec 15c).
+  CHECK_EQ(eng.step().kernel_count, (kMoe ? size_t(13) : size_t(12)) * kLayers + 6);   // decode is untouched
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   const size_t gdn_stride = kGdnElems * sizeof(float);
   CHECK_EQ(eng.buffers().gdn_state.size(), gdn_stride * kGdnLayers);

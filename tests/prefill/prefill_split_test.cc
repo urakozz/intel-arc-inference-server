@@ -47,6 +47,8 @@
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "loader/loader.h"
+#include "loader/snapshot.h"
+#include "model/model_desc.h"
 #include "model/qwen35.h"
 #include "runtime/engine.h"
 #include "runtime/prefill/attn.h"
@@ -56,13 +58,20 @@ namespace {
 using Ids = std::vector<uint32_t>;
 using model::Qwen35;
 constexpr uint32_t kMaxLen = 16384;   // a compiled decode max_len (src/kernels/CMakeLists.txt)
-constexpr size_t kRow = 4 * 256;      // one position of one FA layer's K (or V), bf16
 // Spec 14: the loaded model's FA / GDN layer counts (16 / 48 Qwen3.8, 18 / 54
-// Agnes), set from the descriptor when each engine is built.
+// Agnes), set from the descriptor when each engine is built. Spec 15d: and its widths -
+// one position of one FA layer's K (or V) (kv-heads x 256: 1024 on Qwen3.8, 512 on
+// Ornith), one GDN layer's state (v-heads x 128 x 128) and one conv ring slot (bf16
+// [conv dim]).
 uint32_t kFa = 0, kGdn = 0;
+size_t kRow = 0, kGdnLayer = 0, kRingSlot = 0;
 void set_counts(const runtime::Engine& e) {
-  kFa = e.model().desc->fa_layers;
-  kGdn = e.model().desc->gdn_layers;
+  const model::ModelDesc& d = *e.model().desc;
+  kFa = d.fa_layers;
+  kGdn = d.gdn_layers;
+  kRow = size_t(d.fa_kv_heads) * Qwen35::kFaHeadDim;
+  kGdnLayer = size_t(d.gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
+  kRingSlot = size_t(d.gdn_conv_dim()) * 2;
 }
 constexpr uint32_t kShallow = 4;      // FA layers 0..3 = model layers 3, 7, 11, 15
 
@@ -135,7 +144,7 @@ Result compare(const Snap& a, const Snap& b, uint32_t n, bool verbose) {
   std::sort(all.begin(), all.end());
   r.median = all[all.size() / 2];
   r.p01 = all[all.size() / 100];
-  const size_t gdn_layer = size_t(model::qwen38().gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
+  const size_t gdn_layer = kGdnLayer;
   const float* sa = reinterpret_cast<const float*>(a.state.data());
   const float* sb = reinterpret_cast<const float*>(b.state.data());
   for (uint32_t g = 0; g < kGdn; ++g) {
@@ -252,6 +261,15 @@ int main(int argc, char** argv) {
   const Ids all = golden::read_ids(argv[2]);
   CHECK(all.size() >= N && N + 1 <= kMaxLen);
   const Ids ids(all.begin(), all.begin() + N);
+  // Spec 15d: a checkpoint that is not on this machine is a SKIP (77) - which only the
+  // registrations that declare SKIP_RETURN_CODE 77 (Ornith's: no int4 Ornith exists yet)
+  // accept; for every other one 77 is a failure, exactly as the load failure was.
+  try {
+    (void)loader::resolve_snapshot(snapdir);
+  } catch (const std::exception& e) {
+    std::printf("SKIP: no checkpoint at '%s' (%s)\n", snapdir.c_str(), e.what());
+    return 77;
+  }
 
   l0::Context ctx(0);
   runtime::Engine e(ctx, loader::load(ctx, snapdir, kMaxLen), kMaxLen);
@@ -284,9 +302,8 @@ int main(int argc, char** argv) {
   // The conv ring's slots other than the three live ones ((N-3..N-1) % 16) hold whatever
   // the last chunk that wrote them left, which nothing reads and which legitimately
   // differs with the chunking; the GDN state and the live slots must be equal.
-  const size_t gdn_bytes = size_t(kGdn) * model::qwen38().gdn_v_heads * Qwen35::kGdnHeadDim *
-                           Qwen35::kGdnHeadDim * 4;
-  constexpr size_t kRingSlot = 10240 * 2, kRingDepth = 16;
+  const size_t gdn_bytes = size_t(kGdn) * kGdnLayer * 4;
+  constexpr size_t kRingDepth = 16;
   auto bitwise = [&](const Snap& s) {
     if (s.logits != ref.logits || s.kv != ref.kv) return false;
     if (std::memcmp(s.state.data(), ref.state.data(), gdn_bytes) != 0) return false;
