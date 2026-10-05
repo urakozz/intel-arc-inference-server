@@ -56,6 +56,9 @@ struct BatchEngineIface {
   virtual uint32_t block() { return 2048; }
   virtual size_t state_bytes() { return unsupported<size_t>(); }
   virtual size_t kv_bytes(uint32_t) { return unsupported<size_t>(); }
+  // Spec 12b: the KV cache's form (0 = bf16, 1 = int8), which keys the prefix cache so a
+  // bf16 entry is never restored into an int8 engine (EngineIface::kv_form's twin).
+  virtual uint64_t kv_form() { return 0; }
   virtual void save_state(uint32_t /*slot*/, void*) { unsupported<int>(); }
   virtual void load_state(uint32_t /*slot*/, const void*, uint32_t /*pos*/) { unsupported<int>(); }
   virtual void save_kv(uint32_t /*slot*/, uint32_t, uint32_t, void*) { unsupported<int>(); }
