@@ -228,6 +228,15 @@ xfail() {
   fi
 }
 
+# kbins NAME... - these kernel binaries are in the build under test (cmake/ocloc.cmake:
+# build/kernels/<name>.bin), each printed with whether G0's g0.sha listed it as added (new
+# since the baseline); one missing fails the step. For a row whose list binds a binary by a
+# name the host tests only check as a string (e.g. Ornith's argmax_stage1_*_V248070).
+kbins() {
+  chk "miss=0; for b in $*; do if [ -s build/kernels/\$b.bin ]; then echo \"built \$b (\$(grep -cxF kernels/\$b.bin $STATE/g0-sha/added.txt 2>/dev/null) in the G0 added list)\"; else echo \"NOT BUILT \$b\"; miss=1; fi; done; [ \$miss = 0 ]" \
+    "kernel binaries built ($# names)"
+}
+
 # serve PORT_ARGS... - start b70-serve, prove it serves one request, stop it (serve_probe.sh)
 serve() { x "PORT=$PORT tools/box_validate/serve_probe.sh $*"; step_rc $? "b70-serve $*"; }
 

@@ -41,8 +41,8 @@
 # CMAKE_ARGS, SNAP_QWEN / SNAP_AGNES / SNAP_ORNITH / SNAP_K2, TOK_PYTHON, OPENCODE_LOG,
 # A4_REF_DIR, ORACLE_IMAGE, G0_BITWISE_RE, G0_ALLOW_REMOVED, R10_RUNS, R2_ROUNDS (the server
 # rows' rounds, 3), R8_DRAFT_VOCAB (r8.auto_rows' size, 128k), K2_ORACLE_MODEL /
-# K2_REF_MIN_GB / K2_HFCHECK (r14.oracle), B70_K2_TIE_TOL (r14.golden), LOCAL_DATA (for
-# --push-data).
+# K2_REF_MIN_GB / K2_HFCHECK (r14.oracle), B70_K2_TIE_TOL (r14.golden, r15.golden), LOCAL_DATA
+# (for --push-data).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.."
 ROOT="$PWD"
