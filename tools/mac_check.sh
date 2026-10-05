@@ -15,7 +15,7 @@
 #              command line must not change or disappear (additions are listed, and fine).
 #   4 opencl   every distinct kernel variant command line through clang -x cl -cl-std=CL3.0
 #              -fsyntax-only with the Intel-extension shim (tools/mac/cl_syntax.sh).
-#   5 kernels  (--kernels only) gemv_i8w and argmax built and run on the Mac's OpenCL GPU
+#   5 kernels  (--kernels only) gemv_i8w, argmax and pf_moe built and run on the Mac's OpenCL GPU
 #              against host references (tools/mac/clrun): INDICATIVE, not a B70 result.
 #
 #   --base REF              what section 3 compares against, and --quick's "changed" (main)
@@ -220,8 +220,8 @@ if [ $kernels = 1 ]; then
   bin=$out/clrun
   mkdir -p "$bin"
   ok=1 runs="" nfail=0 npass=0
-  for d in gemv_i8w argmax; do
-    if ! clang++ -std=c++17 -O2 -Wall -Wextra -Werror -DB70_CLRUN_ROOT="\"$root\"" \
+  for d in gemv_i8w argmax pf_moe; do
+    if ! clang++ -std=c++17 -O2 -Wall -Wextra -Werror -DB70_CLRUN_ROOT="\"$root\"" -I"$root/src" -I"$root/tests" \
          "$root/tools/mac/clrun/clrun.cc" "$root/tools/mac/clrun/${d}_run.cc" \
          -framework OpenCL -o "$bin/${d}_run" > "$out/clrun-$d-build.log" 2>&1; then
       ok=0; runs="$runs $d:build-failed"; continue
