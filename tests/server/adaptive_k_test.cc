@@ -1,6 +1,7 @@
 // Spec 8 §10: the --mtp auto policy (server::AdaptiveK) on synthetic acceptance sequences,
 // host only: the cost model, the cost table's parser, K up on high acceptance, down to
-// 0 / 1 on low, the K = 0 probe, hysteresis against flapping, determinism.
+// 0 / 1 on low, the K = 0 probe, hysteresis against flapping, determinism; and the cost
+// table under a draft vocabulary (spec 8 §11, MtpCost::with_draft_vocab).
 #include <cstdio>
 #include <random>
 #include <stdexcept>
@@ -228,11 +229,52 @@ void test_deterministic() {
   std::printf("determinism: the same history gives the same K sequence\n");
 }
 
+// Spec 8 §11: the cost table under a draft vocabulary - each draft's lm_head share scales
+// with |V'| / 248320, the rest of a draft and every verify stay (derived numbers).
+void test_draft_vocab_cost() {
+  const MtpCost i8 = MtpCost::int8_head(), bf = MtpCost::bf16_head();
+  const double h8 = MtpCost::kInt8DraftHeadShare, h16 = MtpCost::kBf16DraftHeadShare;
+  CHECK_NEAR(h8 * i8.draft[0], 0.067, 1e-12);   // the head's part of one int8 draft
+  CHECK_NEAR(h16 * bf.draft[0], 0.129, 1e-12);
+  const double want8[3] = {0.0718, 0.0807, 0.0984};   // 32k / 64k / 128k, one draft
+  const uint32_t sizes[3] = {32768, 65536, 131072};
+  for (int s = 0; s < 3; ++s) {
+    const double f = sizes[s] / 248320.0;
+    const MtpCost c = i8.with_draft_vocab(h8, f), b = bf.with_draft_vocab(h16, f);
+    CHECK_NEAR(c.draft[0], want8[s], 5e-4);
+    for (size_t k = 0; k < 3; ++k) {
+      CHECK_NEAR(c.draft[k] / i8.draft[k], c.draft[0] / i8.draft[0], 1e-12);   // one factor
+      CHECK(c.draft[k] < i8.draft[k] && b.draft[k] < bf.draft[k]);
+    }
+    CHECK(c.verify == i8.verify && b.verify == bf.verify);   // verify reads the full head
+    std::printf("draft vocab %6u: int8 drafts %.4f %.4f %.4f, bf16 drafts %.4f %.4f %.4f\n",
+                sizes[s], c.draft[0], c.draft[1], c.draft[2], b.draft[0], b.draft[1], b.draft[2]);
+  }
+  // Off (fraction 1) is the table itself; a share of 0 changes nothing either.
+  CHECK(i8.with_draft_vocab(h8, 1.0).draft == i8.draft);
+  CHECK(bf.with_draft_vocab(0.0, 0.5).draft == bf.draft);
+  // b70-serve's order: the scaled table is the base --mtp-cost parses over, so an explicit
+  // draft= wins and a verify= alone keeps the scaled drafts.
+  const MtpCost dv = i8.with_draft_vocab(h8, 131072 / 248320.0);
+  CHECK(MtpCost::parse("draft=0.2,0.4,0.6", dv).draft == (std::vector<double>{0.2, 0.4, 0.6}));
+  CHECK(MtpCost::parse("verify=1,1.2,1.5,1.8", dv).draft == dv.draft);
+  for (double bad_f : {0.0, -0.1, 1.5}) {
+    bool threw = false;
+    try {
+      (void)i8.with_draft_vocab(h8, bad_f);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    CHECK(threw);
+  }
+}
+
 }  // namespace
 
 int main() {
   test_model();
   test_cost_parse();
+  test_draft_vocab_cost();
   test_up_on_high_acceptance();
   test_down_on_low_acceptance();
   test_recovers();
