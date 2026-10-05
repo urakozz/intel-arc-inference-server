@@ -112,6 +112,15 @@ Rounding points to mirror: sigmoid in fp32; routing weights rounded to bf16; rou
 ascending expert id, then the shared expert added (the reference's `index_add_` order). The first
 stage re-reads `modeling_k2_horizon.py` and confirms each line before any kernel is written.
 
+**Re-read 2026-10-05 (18a, `docs/probe-k2-2026-10-05.md`):** every line above confirmed against the
+vendored modeling file (file:line there); the operator's vLLM fork agrees on semantics and differs
+only in rounding / summation order. Rounding detail the K1 references need: the router logits are
+a bf16 linear before the fp32 sigmoid; RoPE's cos/sin are bf16 and `q·cos`, `rotate_half(q)·sin`
+and their sum each round; the residual stream is bf16; MoVA normalises whenever top-k > 1. The
+router biases are large and coarse (8-28, bf16 ulp up to 0.125), so exact selection ties are
+plausible: ties go to the **lower id** (the reference's rule; `torch.topk` leaves them open). EOS:
+`config.json` has 1, `generation_config.json` [1, 250019]. BOS 0 leads every prompt.
+
 ## 4. The decisions
 
 **1. Scope: decode, prefill and serving** (spec 4 was decode only). Stages in §8.
