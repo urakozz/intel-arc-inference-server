@@ -11,7 +11,8 @@
 # MAX_LEN=65536 N_TARGET=60000 (spec 14's ceiling), with ORACLE_MODEL naming it too.
 # Spec 6 §10: MAX_LEN=auto takes the largest length the memory plan fits (b70-decode
 # prints it as "max_len: auto -> N"; bf16 head, its default here); set N_TARGET to ~95%
-# of that N.
+# of that N. DECODE_ARGS: extra b70-decode flags (word-split), e.g. DECODE_ARGS='--mtp auto'
+# for spec 8 §12's passkey at 120k with MTP (box queue row 6); unset, the runs are as before.
 cd "$(dirname "$0")/../.."
 MODEL="${MODEL:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
 export ZE_AFFINITY_MASK="${ZE_AFFINITY_MASK:-0}"
@@ -27,11 +28,12 @@ ok_all=1
 for b in "${backends[@]}"; do
   pass=0
   for p in $places; do
+    # shellcheck disable=SC2086 # DECODE_ARGS is a list of flags
     ids=$(./build/src/cli/b70-decode "$MODEL" --ids "$dir/p$p.ids" --n 8 --prefill \
-          --pp-backend "$b" --max-len "$MAX_LEN" 2> "$dir/p$p.$b.log" | tr '\n' ' ')
+          --pp-backend "$b" --max-len "$MAX_LEN" ${DECODE_ARGS:-} 2> "$dir/p$p.$b.log" | tr '\n' ' ')
     text=$(tools/oracle/run_in_container.sh "python3 -P tools/oracle/tokenize.py \"\$SNAP\" decode $ids" 2>/dev/null)
     if printf '%s' "$text" | grep -q 71432; then verdict=PASS; pass=$((pass+1)); else verdict=FAIL; fi
-    prefill=$(grep -E "^prefill:|memory:" "$dir/p$p.$b.log" | tr '\n' ' ')
+    prefill=$(grep -E "^prefill:|memory:|^mtp:" "$dir/p$p.$b.log" | tr '\n' ' ')
     echo "passkey $b placement $p: ids [$ids] -> \"$text\" -- $verdict  ($prefill)"
   done
   echo "passkey $b: $pass/3"

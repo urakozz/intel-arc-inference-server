@@ -23,7 +23,13 @@
 //        to pos 16384 without a throw and produce the plain run's ids; then verify and
 //        draft refuse.
 //
-// usage: mtp_verify_test <snapshot>   (cwd = the source tree)
+// usage: mtp_verify_test <snapshot> [max_len = 16384]   (cwd = the source tree)
+//
+// Spec 8 §12 (MTP at every context length; box queue row 6): with max_len above 16384
+// (mtp_verify_{32k,128k}_test) the same cases run at that length, plus M2 deep in the
+// cache (n = max_len - 1026, n % 16 = 14) and RF4 at max_len / 2 + 4395 (spec 7 C1 with
+// MTP at ~64k on the 131072 run); RF3 sits at max_len - 4. The prompt is long32k.ids
+// repeated as far as the run needs. At 16384 every case and line is as before.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -45,7 +51,7 @@
 
 namespace {
 using model::Qwen35;
-constexpr uint32_t kMaxLen = 16384;
+uint32_t kMaxLen = 16384;   // argv[2]
 constexpr size_t V = Qwen35::kVocab, VU = Qwen35::kVocabUsed;
 // One GDN state slot: gdn_layers x 48 x 128 x 128 fp32 (48 layers on Qwen3.8, 54 on
 // Agnes - spec 14), set from the loaded model's descriptor in main().
@@ -197,8 +203,18 @@ std::vector<uint32_t> iterate(Ctx& c, uint32_t k) {
 
 int main(int argc, char** argv) {
   const std::string snap = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
-  const auto ids = golden::read_ids("tests/golden/prompts/long32k.ids");
+  if (argc > 2) kMaxLen = uint32_t(std::stoul(argv[2]));
+  CHECK(kMaxLen >= 16384 && kMaxLen % 256 == 0);
+  const auto ids = [] {
+    std::vector<uint32_t> v = golden::read_ids("tests/golden/prompts/long32k.ids");
+    const std::vector<uint32_t> file = v;
+    while (v.size() <= kMaxLen) v.insert(v.end(), file.begin(), file.end());
+    return v;
+  }();
   CHECK(ids.size() > kMaxLen);
+  const bool deep = kMaxLen > 16384;
+  if (deep) std::printf("max_len %u: M2 also at n = %u, RF4 also at %u\n", kMaxLen, kMaxLen - 1026,
+                        kMaxLen / 2 + 4395);
   l0::Context ctx(0);
   runtime::Engine e(ctx, loader::load(ctx, snap, kMaxLen, /*mtp=*/true), kMaxLen);
   const size_t gdn_layers = e.model().desc->gdn_layers, fa_layers = e.model().desc->fa_layers;
@@ -215,7 +231,9 @@ int main(int argc, char** argv) {
                                  (e.kv_cache() == runtime::KvCache::Int8 ? 4 * (256 + 2) : 4 * 256 * 2));
 
   // --- M2 at two prompt lengths ----------------------------------------------------
-  for (uint32_t n : {1998u, 2053u}) {
+  std::vector<uint32_t> m2_at = {1998u, 2053u};
+  if (deep) m2_at.push_back(kMaxLen - 1026);
+  for (uint32_t n : m2_at) {
     e.reset();
     e.prefill(head(ids, n));
     std::printf("M2 at n = %u (n %% 16 = %u)\n", n, n % 16);
@@ -226,8 +244,9 @@ int main(int argc, char** argv) {
   std::printf("M2: %s\n", ok ? "PASS" : "FAIL");
 
   // --- Review Focus 4: spec 7b C1 case A with MTP on --------------------------------
-  {
-    const uint32_t p = 4395;
+  std::vector<uint32_t> rf4_at = {4395u};
+  if (deep) rf4_at.push_back(kMaxLen / 2 + 4395);
+  for (const uint32_t p : rf4_at) {
     const auto other = [&] {
       auto o = golden::read_ids("tests/golden/prompts/code.ids");
       std::vector<uint32_t> v;
@@ -308,7 +327,7 @@ int main(int argc, char** argv) {
 
   // --- Review Focus 3: the max_len edge ---------------------------------------------
   {
-    const uint32_t n = 16380;
+    const uint32_t n = kMaxLen - 4;
     e.reset();
     e.prefill(head(ids, n));
     const Snap s0(c);
