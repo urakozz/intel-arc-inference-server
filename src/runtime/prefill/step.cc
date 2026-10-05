@@ -16,6 +16,7 @@
 #include "runtime/prefill/gemm.h"
 #include "runtime/prefill/int8.h"
 #include "runtime/prefill/linear_l0.h"
+#include "runtime/prefill/moe.h"
 #include "runtime/prefill/profile.h"
 
 // The per-chunk walk: `capture.cc`'s decode order (`:472-591`), at runtime `M`,
@@ -137,6 +138,11 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   require(kv.bytes() == kv_k_mem.size(), "kv_k stride x " + fa_n + " FA layers != its allocation");
   require(kv.bytes() == kv_v_mem.size(), "kv_v stride x " + fa_n + " FA layers != its allocation");
   if (kv8) require_kv8_path(backend);
+  // Spec 15d: a MoE model's FFN is the grouped-expert block (moe.cc), L0 backends only.
+  if (d.is_moe())
+    require(is_l0(backend) && m.moe.size() == d.layers,
+            "a mixture-of-experts model prefills on the L0 backends (l0, l0-int8) with every "
+            "layer's expert blocks loaded");
   require(gdn_state_stride * d.gdn_layers == gdn_state_mem.size(),
           "gdn_state stride x " + gdn_n + " GDN layers != its allocation");
   require(conv_ring_stride * d.gdn_layers == conv_ring_mem.size(),
@@ -150,7 +156,9 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   uint32_t gdn = 0, fa = 0;
   for (const model::LayerDesc& L : d.layer_descs()) {
     const uint32_t l = L.index;
-    pf_res_norm(cx, kc, s, l == 0 ? 0u : 1u,
+    // S_PREV: nothing to fold before layer 0, and nothing after a MoE layer either - its
+    // combine folded the block's output into resid itself (ModelDesc::ffn_fold_s() == 0).
+    pf_res_norm(cx, kc, s, l == 0 || d.ffn_fold_s() == 0 ? 0u : 1u,
                 at_const(m.layer_small[l].norms, s.desc().small_layout().norms_off_input), s.partials.ptr(),
                 s.resid.ptr(), s.x.ptr(), C);                     // x stride hidden
 
@@ -199,6 +207,16 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                backend, q);
     }
 
+    // Spec 15d: a MoE model's FFN - the post-attention norm into x (pitch hidden), then
+    // the routed experts and the shared expert through the grouped GEMMs, folded into
+    // resid by the combine (runtime/prefill/moe.cc).
+    if (d.is_moe()) {
+      pf_res_norm(cx, kc, s, 1u, at_const(m.layer_small[l].norms, s.desc().small_layout().norms_off_post),
+                  s.partials.ptr(), s.resid.ptr(), s.x.ptr(), C);
+      moe_chunk(cx, kc, s, m.moe[l], l, C, backend, q);
+      continue;
+    }
+
     // The MLP half, identical in both layer kinds.
     //
     // **Parity program S2(a), L0 only: the normed activations go to
@@ -243,8 +261,8 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMode
                uint32_t last_row, const void* normed_row) {
   // The final norm, ONE row. `sumsq[g * 1 + 0] == sumsq[g]`, which is exactly
   // what the M = 1 pair reads. (Spec 8: skipped when step_mtp_kv already wrote it.)
-  if (!normed_row)
-    pf_res_norm(cx, kc, s, 1u, m.final_norm.ptr(),
+  if (!normed_row)   // S_PREV 0 after a MoE model's last layer (its combine folded)
+    pf_res_norm(cx, kc, s, m.desc->ffn_fold_s() == 0 ? 0u : 1u, m.final_norm.ptr(),
                 at(s.partials, size_t(last_row) * s.desc().hidden * 4),
                 at(s.resid, size_t(last_row) * s.desc().hidden * 2),
                 at(s.x, size_t(last_row) * s.desc().hidden * 2), 1u);
@@ -318,6 +336,7 @@ void linear_bf16(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWe
 void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,
                  void* hctl, uint32_t pos, uint32_t C, uint16_t* hid, const KvLayer& kv) {
   require(m.mtp != nullptr, "step_mtp_kv without the MTP head");
+  require(!m.desc->is_moe(), "the MoE model's MTP head is spec 15e");
   require(C > 0 && C <= PrefillScratch::kC, "C is outside (0, kC]");
   const loader::MtpHead& h = *m.mtp;
   const uint32_t H = m.desc->hidden, G = PrefillScratch::kNormGroups;
@@ -442,7 +461,28 @@ size_t l0_fa_layer_launches(const model::ModelDesc& d, uint32_t C) {
          (silu_fused() ? 1 : 0);
 }
 }  // namespace
+// Spec 15d, a MoE model on an L0 backend. Per layer: the input norm 2, the mixer's two
+// int4 linears (2 x N / 1024 slab launches each, plus the quantiser per linear on
+// l0-int8), the mixer itself (GDN: a||b + gdn_chunk; FA: attn_prep + attention + gate),
+// the post-attention norm 2 and moe_chunk_launches. Ornith at C <= 2048, flash:
+// GDN 2 + 24 + 1 + 10 + 4 + 2 + 11 = 54, FA 2 + 18 + 1 + 1 + 1 + 4 + 2 + 11 = 40 on l0,
+// so 1 + 30 x 54 + 10 x 40 = 2021; l0-int8 2 more per layer (the quantisers) and 1 fewer
+// (the MoE block's 10): 1 + 30 x 55 + 10 x 41 = 2061 (derived).
+namespace {
+size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
+  auto lin = [&](LinearId id) {
+    return 2 * size_t(d.shape(id).N / 1024) + (b == PrefillBackend::L0Int8 ? 1 : 0);
+  };
+  const size_t ffn = 2 + moe_chunk_launches(d, b);
+  const size_t gdn = 2 + lin(LinearId::QkvZ) + 1 + kGdnChunkLaunches + lin(LinearId::OutProj) + ffn;
+  const size_t fa = 2 + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b) +
+                    kAttnGateLaunches + lin(LinearId::OProj) + ffn;
+  return 1 + d.gdn_layers * gdn + d.fa_layers * fa;
+}
+}  // namespace
+
 size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
+  if (d.is_moe()) return is_l0(b) ? moe_step_chunk_launches(d, b, C) : 0;
   if (b == PrefillBackend::SyclTla)
     return 1 + d.gdn_layers * kGdnLayerLaunches + d.fa_layers * fa_layer_launches(d);
   const size_t base =

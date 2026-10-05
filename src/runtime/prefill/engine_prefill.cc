@@ -27,6 +27,7 @@
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/int8.h"
 #include "runtime/prefill/kernels.h"
+#include "runtime/prefill/moe.h"
 #include "runtime/prefill/step.h"
 
 namespace runtime {
@@ -83,9 +84,14 @@ std::string Engine::memory_line() const {
 }
 
 void Engine::prepare_prefill() {
-  // Spec 15c: a MoE model decodes only - its grouped-expert prefill is spec 15d. Refused
-  // here, before any prefill allocation, by name (Engine::prefill calls this first).
+  // A model the prefill path cannot run is refused here, before any prefill allocation,
+  // by name (Engine::prefill calls this first). Spec 15d: a MoE model prefills through the
+  // grouped experts on the L0 backends; sycl-tla has no MoE path.
   model::require_prefill(*model_.desc);
+  if (model_.desc->is_moe() && !is_l0(prefill_backend()))
+    throw std::runtime_error("runtime::Engine::prefill: " + model_.desc->name +
+                             " (mixture of experts) prefills on the L0 backends only (l0, "
+                             "l0-int8); set_prefill_backend / --pp-backend");
   // Ruling R7: both allocations are lazy, so a decode-only Engine's device
   // residency is byte-identical to what it was before the buffer split.
   if (!pf_) pf_.reset(new PrefillScratch(ctx_, buffers_.max_len, *model_.desc));
@@ -93,8 +99,9 @@ void Engine::prepare_prefill() {
     pfx_ = std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)>(new PrefillEngine(ctx_),
                                                                     &destroy_prefill);
   if (prefill_backend() != PrefillBackend::L0Int8) return;
-  if (!pfx_->int8)   // the largest int4 K is down's: the MLP intermediate (spec 14)
-    pfx_->int8 = std::make_unique<prefill::Int8State>(ctx_, model_.desc->intermediate);
+  if (!pfx_->int8)   // the largest int4 K the h8 walk runs: down's on a dense model (spec
+                     // 14), the widest mixer linear's on a MoE model (spec 15d)
+    pfx_->int8 = std::make_unique<prefill::Int8State>(ctx_, prefill_int8_max_k(*model_.desc));
   // Every int4 linear's rotated column scales (spec 5 T2), outside any chunk and
   // any recording: cached by weight, so after the first call this loop only
   // looks them up, and no recorded list ever holds the host finish of
@@ -102,6 +109,8 @@ void Engine::prepare_prefill() {
   for (const auto& [key, w] : model_.linears)
     if (key.second != model::LinearId::LmHead && w.kind == model::WeightKind::Int4)
       pfx_->int8->scales(pfx_->cx, pfx_->kc, w);
+  // Spec 15d: and every MoE layer's expert gate||up array, the same way.
+  prefill::moe_prepare_int8(pfx_->cx, pfx_->kc, *pfx_->int8, model_);
 }
 
 void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {

@@ -112,7 +112,24 @@ const std::pair<l0::Mem, l0::Mem>& Int8State::scales(Context& cx, KernelCache& k
   auto it = scales_.find(w.mem.ptr());
   if (it != scales_.end()) return it->second;
   check_weight(w, max_k_);
-  const model::GemvShape& sh = w.shape;
+  return compute_scales(cx, kc, w.mem.ptr(), w.shape.layout == 0 ? w.scales->ptr() : nullptr,
+                        w.shape);
+}
+
+const std::pair<l0::Mem, l0::Mem>& Int8State::scales_layout1(Context& cx, KernelCache& kc,
+                                                             const void* qw, uint32_t K,
+                                                             uint32_t N) {
+  auto it = scales_.find(qw);
+  if (it != scales_.end()) return it->second;
+  require(K % kRotBlock == 0 && K <= max_k_,
+          "the expert array's K = " + std::to_string(K) + " is not whole rotation blocks within " +
+              std::to_string(max_k_));
+  return compute_scales(cx, kc, qw, nullptr, model::GemvShape{K, N, 1, 1});
+}
+
+const std::pair<l0::Mem, l0::Mem>& Int8State::compute_scales(Context& cx, KernelCache& kc,
+                                                             const void* qw, const void* scales,
+                                                             const model::GemvShape& sh) {
   require(sh.N % 16 == 0, "N = " + std::to_string(sh.N) + " is not a whole number of 16-column tiles");
   // colmax[n] = float bits of max_k |(W R_K)[k, n]|, by atomic_max over blocks
   // from zero, then ws = max / 127 (1 for an all-zero column), inv = 1 / ws.
@@ -120,10 +137,9 @@ const std::pair<l0::Mem, l0::Mem>& Int8State::scales(Context& cx, KernelCache& k
   l0::Mem colmax(ctx_, l0::MemKind::Device, size_t{sh.N} * 4);
   imm_.copy(colmax.ptr(), zero.data(), zero.size() * 4);
   const l0::Mem& bits = sign_bits(sh.K);
-  const void* scales = sh.layout == 0 ? w.scales->ptr() : nullptr;
   cx.launch(kc(kernels::pf_requant_rot_variant(sh.layout), "pf_colmax_rot"), sh.N / 16,
             sh.K / kRotBlock, 1,
-            {PtrArg(w.mem.ptr()), PtrArg(scales), PtrArg(bits.ptr()), PtrArg(colmax.ptr()),
+            {PtrArg(qw), PtrArg(scales), PtrArg(bits.ptr()), PtrArg(colmax.ptr()),
              arg_val(0u), arg_val(sh.N), arg_val(sh.K)});
   cx.wait();
   std::vector<uint32_t> mx(sh.N);
@@ -139,7 +155,7 @@ const std::pair<l0::Mem, l0::Mem>& Int8State::scales(Context& cx, KernelCache& k
   l0::Mem dinv(ctx_, l0::MemKind::Device, inv.size() * 4);
   imm_.copy(dws.ptr(), ws.data(), ws.size() * 4);
   imm_.copy(dinv.ptr(), inv.data(), inv.size() * 4);
-  return scales_.emplace(w.mem.ptr(), std::pair<l0::Mem, l0::Mem>(std::move(dws), std::move(dinv)))
+  return scales_.emplace(qw, std::pair<l0::Mem, l0::Mem>(std::move(dws), std::move(dinv)))
       .first->second;
 }
 

@@ -28,8 +28,8 @@
 //   max_len           any multiple of 256 up to config.json's max_position_embeddings
 //                     (262144 for all three) that the memory plan fits on the card
 //                     (spec 6 §10; Agnes's fixed 65536 of spec 14 §3.3 is gone)
-//   loadable          yes                    yes                    decode only (spec 15c):
-//                                                                   prefill is 15d, MTP 15e
+//   loadable          yes                    yes                    decode (spec 15c) and
+//                                                                   prefill (15d); MTP 15e
 //
 // Descriptors are process-lifetime singletons: hold them by reference/pointer.
 namespace model {
@@ -191,12 +191,12 @@ const ModelDesc& desc_for_architecture(const std::string& architecture);
 // embeddings, or a FfnKind::Moe shape src/kernels/moe.cl is not written for (a
 // shared expert with a sigmoid gate and the routed experts' width, top_k <= 8,
 // experts a multiple of 16 up to 256 - Ornith's is). The loader calls it right
-// after desc_for_architecture. A MoE model loads for DECODE only (spec 15c):
-// require_prefill below refuses the prefill path.
+// after desc_for_architecture.
 void require_loadable(const ModelDesc& desc);
-// Throws std::runtime_error naming the stage when the prefill path cannot run this
-// model: a FfnKind::Moe model before spec 15d's grouped-expert prefill. Called by
-// Engine::prefill / prepare_prefill and by the CLIs before they plan a prefill.
+// Throws std::runtime_error naming the reason when the prefill path cannot run this
+// model: from spec 15d a FfnKind::Moe model prefills through the grouped experts, so
+// only a MoE shape those kernels are not written for is refused (Ornith's is not).
+// Called by Engine::prefill / prepare_prefill and by the CLIs before they plan a prefill.
 void require_prefill(const ModelDesc& desc);
 
 }  // namespace model
