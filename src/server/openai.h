@@ -18,6 +18,10 @@ struct Request {
   nlohmann::json messages;
   nlohmann::json tools;
   bool enable_thinking = true;
+  // Spec 18d: chat_template_kwargs as sent (an object; enable_thinking included). Which of
+  // them reach the template, and which the output parser reads, is the model's
+  // (server/chat_format.h).
+  nlohmann::json template_kwargs = nlohmann::json::object();
   std::string prompt;
   std::optional<uint32_t> max_tokens;
   uint32_t min_tokens = 0;

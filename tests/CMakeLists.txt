@@ -122,6 +122,17 @@ target_link_libraries(toolcall_test PRIVATE b70_server)
 add_test(NAME toolcall_test COMMAND toolcall_test ${CMAKE_SOURCE_DIR}/tests/server/toolcall_expected.json
   ${CMAKE_SOURCE_DIR}/tests/golden/toolcall)
 
+# Spec 18d: K2-Horizon's tool calls and reasoning (xml, xml_typed, json), in one piece and
+# streamed byte at a time; and the server's model dispatch over a mock engine.
+add_executable(toolcall_k2_test server/toolcall_k2_test.cc)
+target_include_directories(toolcall_k2_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(toolcall_k2_test PRIVATE b70_server)
+add_test(NAME toolcall_k2_test COMMAND toolcall_k2_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
+add_executable(k2_server_test server/k2_server_test.cc)
+target_include_directories(k2_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(k2_server_test PRIVATE b70_server)
+add_test(NAME k2_server_test COMMAND k2_server_test)
+
 # Spec 18d: the renderer extensions (third_party/minja's b70 patches) against Jinja2's renders.
 add_executable(minja_ext_test tokenizer/minja_ext_test.cc)
 target_include_directories(minja_ext_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)

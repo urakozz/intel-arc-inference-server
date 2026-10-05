@@ -54,6 +54,11 @@ struct TemplateAdapter : server::TemplateIface {
                      bool enable_thinking) override {
     return tmpl.render(messages, tools, enable_thinking);
   }
+  // Spec 18d: the request's chat_template_kwargs as template variables (K2-Horizon).
+  std::string render_with_kwargs(const nlohmann::json& messages, const nlohmann::json& tools,
+                                 bool enable_thinking, const nlohmann::json& kwargs) override {
+    return tmpl.render(messages, tools, enable_thinking, kwargs);
+  }
 
   chat::Template tmpl;
 };
