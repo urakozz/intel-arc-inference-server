@@ -127,6 +127,9 @@ void usage() {
       "  --lm-head H    bf16 (default: the checkpoint's own head, byte-matched with vLLM) or\n"
       "                 int8 (spec 9: quantised per row at load). An int8 run's bench rows\n"
       "                 carry `int8-head` after the sha.\n"
+      "  --kv-cache F   bf16 (default) or int8 (spec 12: rotated int8 rows + fp16 scales,\n"
+      "                 half the KV bytes; decode attention v2 and the l0 / l0-int8 flash\n"
+      "                 prefill only). An int8 run's bench rows carry `int8-kv`.\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -612,6 +615,7 @@ int run(int argc, char** argv) {
   bool have_pp_backend = false;
   // Spec 9 §3: bf16 by default, so BENCHMARKS rows stay byte-matched with vLLM.
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
+  runtime::KvCache kv_cache = runtime::default_kv_cache();   // spec 12b: --kv-cache
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -665,6 +669,8 @@ int run(int argc, char** argv) {
     } else if (a == "--repeats") {
       repeats = parse_u32("--repeats", value(i, "--repeats"));
       have_repeats = true;
+    } else if (a == "--kv-cache") {   // spec 12b
+      kv_cache = cli::parse_kv_cache_arg(value(i, "--kv-cache"));
     } else if (a == "--lm-head") {
       const std::string v = value(i, "--lm-head");
       if (!loader::parse_lm_head_form(v, lm_head))
@@ -754,6 +760,11 @@ int run(int argc, char** argv) {
   if (synthetic && depth == 0)
     throw std::runtime_error("--depth 0 would ingest nothing; --bench and --profile both measure"
                              " a step at a context depth");
+  const runtime::PrefillPath pp_path = cli::prefill_path(
+      have_pp || prefill, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
+  cli::check_kv_cache(kv_cache, pp_path);   // spec 12b
+  if (profile && kv_cache == runtime::KvCache::Int8)
+    throw std::runtime_error("--profile captures its own bf16-KV list; it has no --kv-cache int8");
 
   // Everything that can be judged without the device or the 19 GB checkpoint is
   // judged first: failing on a typo'd --ids path after a 13-second load is a
@@ -803,10 +814,7 @@ int run(int argc, char** argv) {
   if (have_pp || prefill) model::require_prefill(*model.desc);
   // Spec 6 §10: auto plans and re-tables the model; an explicit length is held to the
   // plan. The prefill scratch is planned only when this run prefills (ruling R7).
-  max_len = cli::settle(ctx, model, max_len_arg, mem_reserve,
-                        cli::prefill_path(have_pp || prefill,
-                                          have_pp_backend ? pp_backend
-                                                          : runtime::prefill::default_prefill_backend()));
+  max_len = cli::settle(ctx, model, max_len_arg, mem_reserve, pp_path, kv_cache);
   if (max_len_arg.is_auto) check_len(max_len);
 
   // --profile forks here: it replays an instrumented capture and has to reset
@@ -816,13 +824,14 @@ int run(int argc, char** argv) {
 
   // debug_resid off: the per-layer tap costs 64 device copies a token and only
   // the golden gate (Task 8) reads it.
-  runtime::Engine eng(ctx, std::move(model), max_len);
+  runtime::Engine eng(ctx, std::move(model), max_len, /*debug_resid=*/false, kv_cache);
   std::fprintf(stderr,
                "engine: %zu kernels, %zu modules, max_len %u, %.2f GB of persistent state, "
-               "decode attention %s\n",
+               "decode attention %s, kv cache %s\n",
                eng.step().kernel_count, eng.step().modules.size(), eng.max_len(),
                eng.buffers().persistent_bytes() / 1e9,
-               runtime::decode_attn_name(runtime::decode_attn()));
+               runtime::decode_attn_name(runtime::decode_attn()),
+               runtime::kv_cache_name(eng.kv_cache()));
 
   // Ingestion is one replay per prompt token unless `--pp` or `--prefill` is
   // given, in which case it is `Engine::prefill`. The measured window is
@@ -921,15 +930,17 @@ int run(int argc, char** argv) {
   const char* sha = std::getenv("B70_GIT_SHA");
   if (sha == nullptr || *sha == '\0') sha = "unknown";
   // Spec 9: an int8-head row names its head; a bf16 row is byte-identical to before.
-  const char* head_tag = lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "";
-  std::printf("| b70-decode %s%s | %u | %u | %.2f | %.2f |\n", sha, head_tag, depth, tg,
+  // Spec 12b: likewise an int8-KV row (`int8-kv`), so the interleaved pairs sort apart.
+  const std::string head_tag = std::string(lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "") +
+                               (kv_cache == runtime::KvCache::Int8 ? " int8-kv" : "");
+  std::printf("| b70-decode %s%s | %u | %u | %.2f | %.2f |\n", sha, head_tag.c_str(), depth, tg,
               eng.last_tok_per_s(), ms_per_token);
   // The tg row above is byte-identical to what it always was, and the pp row
   // is a SECOND line rather than extra columns on it, so every existing parser
   // of docs/BENCHMARKS.md's table keeps working (interfaces.md's CLI contract;
   // tools/bench_decode.sh --pp reads both).
   if (have_pp)
-    std::printf("| b70-decode %s%s %s pp | %u | %u | %.1f | %.2f |\n", sha, head_tag,
+    std::printf("| b70-decode %s%s %s pp | %u | %u | %.1f | %.2f |\n", sha, head_tag.c_str(),
                 runtime::prefill_backend_name(eng.prefill_backend()), depth,
                 pp_chunk ? pp_chunk : runtime::PrefillScratch::kC, ingest_ms,
                 ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);

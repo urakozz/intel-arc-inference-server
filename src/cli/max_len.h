@@ -91,6 +91,26 @@ inline runtime::PrefillPath prefill_path(bool prefill, runtime::PrefillBackend b
   return {prefill, backend, runtime::prefill::attn_mode() == runtime::prefill::AttnMode::Composed};
 }
 
+// Spec 12b: `--kv-cache bf16|int8` (default runtime::default_kv_cache(): B70_KV_CACHE, unset
+// = bf16). int8 decodes through attention v2's kv8 twin and prefills through the L0
+// backends' flash attention only; anything else is refused here, before the load, with
+// the reason, instead of at capture or at the first request.
+inline runtime::KvCache parse_kv_cache_arg(const std::string& v) {
+  return runtime::parse_kv_cache(v.c_str());
+}
+inline void check_kv_cache(runtime::KvCache kv, const runtime::PrefillPath& path) {
+  if (kv != runtime::KvCache::Int8) return;
+  if (runtime::decode_attn() == runtime::DecodeAttn::V1)
+    throw std::runtime_error("--kv-cache int8 decodes through attention v2 only;"
+                             " B70_DECODE_ATTN=v1 reads a bf16 cache");
+  if (path.prefill && !runtime::is_l0(path.backend))
+    throw std::runtime_error("--kv-cache int8 prefills on the l0 / l0-int8 backends only"
+                             " (sycl-tla's attention is the composed bf16 path)");
+  if (path.prefill && path.composed_attn)
+    throw std::runtime_error("--kv-cache int8 prefills through the flash attention only;"
+                             " B70_PREFILL_ATTN=composed reads a bf16 cache");
+}
+
 // Decode attention v1 (B70_DECODE_ATTN=v1) bakes MAXLEN into its binaries and only some
 // are compiled (src/kernels/CMakeLists.txt): auto then takes the largest compiled length
 // at or below what fits. v2, the default, serves any max_len (spec 10).
@@ -113,9 +133,12 @@ inline runtime::DraftVocabPlan draft_vocab_plan(const loader::LoadedModel& m) {
 }
 
 // Step 4. Returns the max_len the Engine is built with; `m` is re-tabled to it for auto.
-// Prints the choice and the plan's breakdown to stderr.
+// Prints the choice and the plan's breakdown to stderr. `kv` (spec 12b): the KV cache's
+// form - its KV term (and the MTP head's) is planned in it, so int8 roughly doubles what
+// auto can give the context.
 inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg& a,
-                       size_t reserve_bytes, const runtime::PrefillPath& path) {
+                       size_t reserve_bytes, const runtime::PrefillPath& path,
+                       runtime::KvCache kv = runtime::default_kv_cache()) {
   const model::ModelDesc& d = *m.desc;
   const bool mtp = m.mtp != nullptr;
   const runtime::DraftVocabPlan dv = draft_vocab_plan(m);
@@ -125,13 +148,13 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
   uint32_t len = a.value;
   if (a.is_auto) {
     const uint32_t fit = runtime::max_len_that_fits(d, mtp, weights, device, reserve_bytes,
-                                                    m.trained_max_len, path, dv);
+                                                    m.trained_max_len, path, dv, kv);
     if (fit == 0)
       throw std::runtime_error(
           "--max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) +
           " positions fit - " +
-          runtime::describe(runtime::plan(d, runtime::kMinAutoMaxLen, mtp, weights, path, dv), device,
-                            reserve_bytes));
+          runtime::describe(runtime::plan(d, runtime::kMinAutoMaxLen, mtp, weights, path, dv, kv),
+                            device, reserve_bytes));
     len = fit;
     if (runtime::decode_attn() == runtime::DecodeAttn::V1) {
       len = v1_compiled_at_most(fit, d);
@@ -146,13 +169,14 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
                  len, runtime::kMaxLenQuantum, device / gb, reserve_bytes / gb, m.trained_max_len,
                  len != fit ? ", v1 decode attention's largest compiled length" : "");
   } else {
-    const runtime::MemoryPlan p = runtime::plan(d, len, mtp, weights, path, dv);
+    const runtime::MemoryPlan p = runtime::plan(d, len, mtp, weights, path, dv, kv);
     if (p.total() + reserve_bytes > device) {
       const uint32_t cap = m.trained_max_len != 0 ? m.trained_max_len : len;
       const uint32_t fit =
           cap < runtime::kMaxLenQuantum
               ? 0
-              : runtime::max_len_that_fits(d, mtp, weights, device, reserve_bytes, cap, path, dv);
+              : runtime::max_len_that_fits(d, mtp, weights, device, reserve_bytes, cap, path, dv,
+                                           kv);
       throw std::runtime_error(
           "--max-len " + std::to_string(len) + " does not fit: " +
           runtime::describe(p, device, reserve_bytes) + ". The largest that fits is " +
@@ -161,7 +185,8 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
     std::fprintf(stderr, "max_len: %u (--max-len)\n", len);
   }
   std::fprintf(stderr, "%s\n",
-               runtime::describe(runtime::plan(d, len, mtp, weights, path, dv), device, reserve_bytes)
+               runtime::describe(runtime::plan(d, len, mtp, weights, path, dv, kv), device,
+                                 reserve_bytes)
                    .c_str());
   return len;
 }
