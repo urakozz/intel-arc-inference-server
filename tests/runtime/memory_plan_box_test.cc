@@ -4,9 +4,14 @@
 // beside the weights with the default reserve, reached the way the CLIs reach it:
 // load at 4096, plan, loader::set_max_len). Device + checkpoint.
 //
-//   memory_plan_box_test <snapshot-or-repo> [mtp] [max_len|auto ...]
+//   memory_plan_box_test <snapshot-or-repo> [mtp] [--lm-head int8|bf16]
+//                        [--draft-vocab 32k|64k|128k] [max_len|auto ...]
 //
-// `mtp` loads the MTP head (spec 8) and plans its buffers. The lengths default to
+// `mtp` loads the MTP head (spec 8) and plans its buffers. `--lm-head` picks the head
+// form (default int8, b70-serve's). `--draft-vocab` (spec 8 §11, needs `mtp`) loads a
+// draft vocabulary from the snapshot's added tokens and the lowest ids, as b70-serve
+// builds it: the plan's `draft_vocab` term must equal the loader's compact head + id
+// table, and MtpBuffers' compact logits its MtpDims size. The lengths default to
 // "16384 auto". The default l0-int8 backend and the attention mode of
 // B70_PREFILL_ATTN (flash unless set) are planned and run. One short prefill runs
 // first, so the lazy buffers (the MTP prefill hidden rows, the slab on an MTP engine)
@@ -30,7 +35,15 @@
 
 namespace {
 
-void check_engine(l0::Context& ctx, const std::string& arg, bool mtp, const std::string& len_arg) {
+struct Opts {
+  bool mtp = false;
+  loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;   // the serving default (spec 9)
+  uint32_t draft_vocab = 0;
+};
+
+void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
+                  const std::string& len_arg) {
+  const bool mtp = o.mtp;
   const std::string snap = loader::resolve_snapshot(arg);
   const uint32_t trained = loader::trained_context(snap);
   const bool is_auto = len_arg == "auto";
@@ -38,20 +51,38 @@ void check_engine(l0::Context& ctx, const std::string& arg, bool mtp, const std:
   const runtime::PrefillPath path{
       true, runtime::PrefillBackend::L0Int8,
       runtime::prefill::attn_mode() == runtime::prefill::AttnMode::Composed};
+  loader::DraftVocabSpec dvs;
+  if (o.draft_vocab != 0) {
+    dvs.size = o.draft_vocab;
+    dvs.added = loader::added_token_ids_file(snap + "tokenizer.json");
+  }
 
-  // The serving default head (spec 9: int8), as b70-serve loads it.
   loader::LoadedModel m = loader::load(ctx, snap, is_auto ? runtime::kMinAutoMaxLen
                                                           : uint32_t(std::stoul(len_arg)),
-                                       mtp, loader::LmHeadForm::Int8);
+                                       mtp, o.lm_head, dvs);
   const model::ModelDesc& d = *m.desc;
   const size_t weights = m.report.total() - m.report.rope_bytes;
+  // Spec 8 §11: what the planner is told about the draft vocabulary (cli::settle's rule).
+  runtime::DraftVocabPlan dv;
+  if (m.draft_vocab)
+    dv = {m.draft_vocab->size(), m.draft_vocab->head.kind == model::WeightKind::Int8};
+  CHECK_EQ(dv.rows, o.draft_vocab);
   uint32_t L = m.max_len;
   if (is_auto) {
-    L = runtime::max_len_that_fits(d, mtp, weights, ctx.memory_bytes(), reserve, trained, path);
+    L = runtime::max_len_that_fits(d, mtp, weights, ctx.memory_bytes(), reserve, trained, path, dv);
     CHECK(L != 0);
     loader::set_max_len(ctx, m, L);
   }
-  const runtime::MemoryPlan p = runtime::plan(d, L, mtp, weights, path);
+  const runtime::MemoryPlan p = runtime::plan(d, L, mtp, weights, path, dv);
+  // The loader's compact head + id table are the plan's draft_vocab term, byte for byte.
+  CHECK_EQ(m.report.draft_vocab_bytes, p.draft_vocab);
+  if (m.draft_vocab) {
+    const loader::DraftVocabBytes nb =
+        loader::draft_vocab_bytes(dv.rows, d.hidden, dv.int8);
+    CHECK_EQ(m.draft_vocab->head.mem.size(), nb.head);
+    CHECK_EQ(m.draft_vocab->head.scales ? m.draft_vocab->head.scales->size() : size_t{0}, nb.scales);
+    CHECK_EQ(m.draft_vocab->ids.size(), nb.ids);
+  }
   std::printf("%s\n", runtime::describe(p, ctx.memory_bytes(), reserve).c_str());
   // The table the loader holds is the planner's figure.
   CHECK_EQ(m.report.rope_bytes, p.rope);
@@ -73,6 +104,7 @@ void check_engine(l0::Context& ctx, const std::string& arg, bool mtp, const std:
   CHECK_EQ(u.decode_state, p.decode_state);
   CHECK_EQ(u.prefill_scratch, p.prefill_scratch);
   CHECK_EQ(u.int8, p.int8);
+  CHECK_EQ(u.draft_vocab, p.draft_vocab);
   CHECK_EQ(u.total(), p.total());
 
   // Buffer by buffer: every allocation is its size function's value.
@@ -105,7 +137,7 @@ void check_engine(l0::Context& ctx, const std::string& arg, bool mtp, const std:
   if (mtp) {
     const runtime::MtpBuffers* mb = eng.mtp_buffers();
     CHECK(mb != nullptr);
-    const runtime::MtpSizes ms = runtime::MtpDims::sizes(L, d);
+    const runtime::MtpSizes ms = runtime::MtpDims::sizes(L, d, dv.rows);
     CHECK_EQ(mb->hctl.size(), ms.hctl);
     CHECK_EQ(mb->gdn_spec.size(), ms.gdn_spec);
     CHECK_EQ(mb->kv_k.size(), ms.kv_k);
@@ -113,30 +145,39 @@ void check_engine(l0::Context& ctx, const std::string& arg, bool mtp, const std:
     CHECK_EQ(mb->hh.size(), ms.hh);
     CHECK_EQ(mb->dh.size(), ms.dh);
     CHECK_EQ(mb->logits.size(), ms.logits);
+    CHECK_EQ(mb->dv_logits ? mb->dv_logits->size() : size_t{0}, ms.dv_logits);   // spec 8 §11
     CHECK(eng.mtp_prefill_hidden() != nullptr);
     CHECK_EQ(eng.mtp_prefill_hidden()->size(), p.mtp_hidden);
   }
   // The engine decodes at this length: a few tokens after the prefill.
   const std::vector<uint32_t> out = eng.generate(4);
   CHECK_EQ(out.size(), size_t{4});
-  std::printf("%s %s at max_len %u: plan == allocation, %zu B (%.3f GB)\n", d.name.c_str(),
-              mtp ? "+ MTP" : "", L, p.total(), p.total() / 1e9);
+  std::printf("%s %s%s%s at max_len %u: plan == allocation, %zu B (%.3f GB)\n", d.name.c_str(),
+              mtp ? "+ MTP" : "", dv.rows ? " + draft vocab " : "",
+              dv.rows ? (loader::draft_vocab_name(dv.rows) + (dv.int8 ? " int8" : " bf16")).c_str()
+                      : "",
+              L, p.total(), p.total() / 1e9);
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
   const std::string arg = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
-  int i = 2;
-  const bool mtp = argc > i && std::string(argv[i]) == "mtp";
-  if (mtp) ++i;
+  Opts o;
   std::vector<std::string> lens;
-  for (; i < argc; ++i) lens.push_back(argv[i]);
+  for (int i = 2; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "mtp") o.mtp = true;
+    else if (a == "--lm-head" && i + 1 < argc) CHECK(loader::parse_lm_head_form(argv[++i], o.lm_head));
+    else if (a == "--draft-vocab" && i + 1 < argc) CHECK(loader::parse_draft_vocab(argv[++i], o.draft_vocab));
+    else lens.push_back(a);
+  }
+  CHECK(o.draft_vocab == 0 || o.mtp);
   if (lens.empty()) lens = {"16384", "auto"};
   l0::Context ctx(0);
   std::printf("device: %s, %zu B (%.3f GB)\n", ctx.name().c_str(), ctx.memory_bytes(),
               ctx.memory_bytes() / 1e9);
-  for (const std::string& len : lens) check_engine(ctx, arg, mtp, len);
+  for (const std::string& len : lens) check_engine(ctx, arg, o, len);
   std::puts("memory_plan_box_test OK");
   return 0;
 }

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <stdexcept>
+#include "loader/draft_vocab.h"
 #include "runtime/buffer_sizes.h"
 
 namespace runtime {
@@ -21,7 +22,9 @@ std::string format_memory(const char* label, const MemoryComponents& c, size_t d
 }
 
 MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t model_bytes,
-                const PrefillPath& path) {
+                const PrefillPath& path, const DraftVocabPlan& dv) {
+  if (dv.rows != 0 && !mtp)
+    throw std::invalid_argument("runtime::plan: a draft vocabulary drafts with the MTP head");
   MemoryPlan p;
   p.max_len = max_len;
   p.mtp = mtp;
@@ -32,7 +35,11 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
   p.kv = ps.kv_k + ps.kv_v;
   p.decode_state = ps.total() - p.kv + DecodeScratchDims::sizes(max_len, desc).total();
   if (mtp) {
-    p.mtp_buffers = MtpDims::sizes(max_len, desc).total();
+    // With a draft vocabulary MtpBuffers also holds its compact logits (spec 8 §11).
+    p.mtp_buffers = MtpDims::sizes(max_len, desc, dv.rows).total();
+    // The loader's compact head and id table, outside model_bytes (LoadReport::total()).
+    if (dv.rows != 0)
+      p.draft_vocab = loader::draft_vocab_bytes(dv.rows, desc.hidden, dv.int8).total();
     // Allocated on the first prefill of an engine with the head (engine_prefill.cc).
     p.mtp_hidden = path.prefill ? mtp_prefill_hidden_bytes(desc) : 0;
     p.decode_state += p.mtp_buffers + p.mtp_hidden;
@@ -58,13 +65,13 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
 
 uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,
                            size_t device_bytes, size_t reserve_bytes, uint32_t cap,
-                           const PrefillPath& path) {
+                           const PrefillPath& path, const DraftVocabPlan& dv) {
   if (cap < kMaxLenQuantum)
     throw std::invalid_argument("max_len_that_fits: the cap " + std::to_string(cap) +
                                 " is below one " + std::to_string(kMaxLenQuantum) +
                                 "-position quantum");
   const auto fits = [&](uint32_t len) {
-    return plan(desc, len, mtp, model_bytes, path).total() + reserve_bytes <= device_bytes;
+    return plan(desc, len, mtp, model_bytes, path, dv).total() + reserve_bytes <= device_bytes;
   };
   // Every term of the plan is non-decreasing in max_len (the KV, attn_part's block
   // count, the RoPE table, the MTP head's KV, the composed pf_s / pf_p), so the

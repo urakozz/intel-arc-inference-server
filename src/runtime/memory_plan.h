@@ -60,6 +60,17 @@ struct PrefillPath {
   bool composed_attn = false;
 };
 
+// Spec 8 §11 (`--draft-vocab`): a draft vocabulary of `rows` ids, its compact head in
+// the lm_head's form (`int8`, else bf16). `rows` = 0 is off. With MTP it adds the
+// loader's compact head + id table (`MemoryComponents::draft_vocab`,
+// loader::draft_vocab_bytes) and MtpBuffers' compact logits (in decode_state,
+// MtpDims::sizes). Neither depends on max_len, but both come out of what auto can give
+// the context. cli::draft_vocab_plan reads it off a loaded model.
+struct DraftVocabPlan {
+  uint32_t rows = 0;
+  bool int8 = true;
+};
+
 struct MemoryPlan : MemoryComponents {
   uint32_t max_len = 0;
   bool mtp = false;
@@ -76,7 +87,7 @@ struct MemoryPlan : MemoryComponents {
 // (`mtp`); its buffers are planned here. `plan.model` adds the table back at
 // `max_len`, so it equals memory_line()'s `model` once the table has that length.
 MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t model_bytes,
-                const PrefillPath& path = {});
+                const PrefillPath& path = {}, const DraftVocabPlan& dv = {});
 
 // The max_len grid: the L0 prefill backends need max_len % 256 == 0 (spec 2.1 §3.1,
 // prefill/attn.cc), which is also a whole number of decode attention blocks (64).
@@ -96,7 +107,7 @@ constexpr double kDefaultReserveGb = 1.5;
 // one quantum.
 uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,
                            size_t device_bytes, size_t reserve_bytes, uint32_t cap,
-                           const PrefillPath& path = {});
+                           const PrefillPath& path = {}, const DraftVocabPlan& dv = {});
 
 // One line for the startup log: the plan's five components, the finer split where it
 // is non-zero, the reserve and the device total.
