@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include "model/model_desc.h"
+#include "runtime/buffer_sizes.h"
 #include "runtime/prefill_backend.h"
 
 // Spec 6 §10 (max_len auto): the device memory an engine will hold at a max_len,
@@ -74,6 +75,7 @@ struct DraftVocabPlan {
 struct MemoryPlan : MemoryComponents {
   uint32_t max_len = 0;
   bool mtp = false;
+  KvCache kv_cache = KvCache::Bf16;   // spec 12b: the form `kv` (and the MTP head's KV) is in
   // The finer split, each already counted in one of the five above.
   size_t rope = 0;           // in model: Qwen35::rope_table_bytes(max_len)
   size_t mtp_buffers = 0;    // in decode_state: MtpBuffers
@@ -86,13 +88,19 @@ struct MemoryPlan : MemoryComponents {
   size_t moe_scratch = 0;    // in decode_state
 };
 
+// `kv` (spec 12b, `--kv-cache`): the KV cache's form - its term follows it (bf16: 64 KiB
+// per position on Qwen3.8; int8: 32 KiB of rows + 256 B of fp16 scales), and so does the
+// MTP head's own layer. The default is runtime::default_kv_cache(), what the engine
+// allocates when nobody passes one, so a plan and an allocation in one process agree.
+//
 // `model_bytes`: everything loader::load() allocated EXCEPT the RoPE table -
 // `report.total() - report.rope_bytes` - i.e. the weights, which do not depend on
 // max_len. The MTP head's weights are in it when the model was loaded with the head
 // (`mtp`); its buffers are planned here. `plan.model` adds the table back at
 // `max_len`, so it equals memory_line()'s `model` once the table has that length.
 MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t model_bytes,
-                const PrefillPath& path = {}, const DraftVocabPlan& dv = {});
+                const PrefillPath& path = {}, const DraftVocabPlan& dv = {},
+                KvCache kv = default_kv_cache());
 
 // The max_len grid: the L0 prefill backends need max_len % 256 == 0 (spec 2.1 §3.1,
 // prefill/attn.cc), which is also a whole number of decode attention blocks (64).
@@ -112,7 +120,8 @@ constexpr double kDefaultReserveGb = 1.5;
 // one quantum.
 uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,
                            size_t device_bytes, size_t reserve_bytes, uint32_t cap,
-                           const PrefillPath& path = {}, const DraftVocabPlan& dv = {});
+                           const PrefillPath& path = {}, const DraftVocabPlan& dv = {},
+                           KvCache kv = default_kv_cache());
 
 // One line for the startup log: the plan's five components, the finer split where it
 // is non-zero, the reserve and the device total.

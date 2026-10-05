@@ -346,6 +346,117 @@ void check_draft_vocab() {
   }
   CHECK(threw);
 }
+// Spec 12b (`--kv-cache int8`): the KV term follows the cache's form. One position of one
+// FA layer is 4 kv-heads x (256 int8 + one fp16 scale) = 1032 B for K and as much for V,
+// against 2048 + 2048 at bf16: 32 KiB + 256 B per position on Qwen3.8 (16 layers), 36 KiB
+// + 288 B on Agnes (18). The scales follow every layer's rows in the same allocation.
+void check_kv_int8() {
+  using runtime::KvCache;
+  const model::ModelDesc& q = model::qwen38();
+  const model::ModelDesc& a = model::agnes();
+  // bf16 is the allocation it always was, whatever B70_KV_CACHE says when it is explicit.
+  CHECK_EQ(runtime::PersistentDims::sizes(16384, q, KvCache::Bf16).kv_k, size_t{536870912});
+  const runtime::PersistentSizes p8 = runtime::PersistentDims::sizes(16384, q, KvCache::Int8);
+  CHECK_EQ(p8.kv_k, size_t{16} * 16384 * 4 * (256 + 2));   // 270,532,608
+  CHECK_EQ(p8.kv_v, p8.kv_k);
+  CHECK_EQ(p8.total() - p8.kv_k - p8.kv_v,
+           runtime::PersistentDims::sizes(16384, q, KvCache::Bf16).total() - 2 * size_t{536870912});
+  CHECK_EQ(runtime::PersistentDims::sizes(1, q, KvCache::Int8).kv_k * 2, size_t{32} * 1024 + 256);
+  CHECK_EQ(runtime::PersistentDims::sizes(1, a, KvCache::Int8).kv_k * 2, size_t{36} * 1024 + 288);
+  // 262144 (the trained context) at int8: 8,657,043,456 B - 0.8 % over bf16 at 131072.
+  CHECK_EQ(runtime::PersistentDims::sizes(262144, q, KvCache::Int8).kv_k * 2, size_t{8657043456ull});
+  // The MTP head's one layer in the same form.
+  CHECK_EQ(runtime::MtpDims::sizes(16384, q, 0, KvCache::Int8).kv_k, size_t{16384} * 1032);
+  CHECK_EQ(runtime::MtpDims::sizes(16384, q, 0, KvCache::Int8).total(),
+           runtime::MtpDims::sizes(16384, q, 0, KvCache::Bf16).total() - 2 * size_t{16384} * (2048 - 1032));
+
+  // The layout: rows where they always were, then every layer's scales.
+  const runtime::KvLayout l8 = runtime::kv_layout(16384, q, q.fa_layers, KvCache::Int8);
+  const runtime::KvLayout l16 = runtime::kv_layout(16384, q, q.fa_layers, KvCache::Bf16);
+  CHECK_EQ(l16.bytes(), size_t{536870912});
+  CHECK_EQ(l16.rows_offset(3), size_t{3} * 16384 * 2048);
+  CHECK_EQ(l16.scale_row_bytes(), size_t{0});
+  CHECK_EQ(l8.row_bytes(), size_t{1024});
+  CHECK_EQ(l8.scale_row_bytes(), size_t{8});
+  CHECK_EQ(l8.pos_bytes(), size_t{1032});
+  CHECK_EQ(l8.rows_offset(15) + l8.layer_rows(), l8.scales_offset(0));
+  CHECK_EQ(l8.scales_offset(0), size_t{16} * 16384 * 1024);
+  CHECK_EQ(l8.scales_offset(15) + l8.layer_scales(), l8.bytes());
+  CHECK_EQ(l8.bytes(), p8.kv_k);
+  {
+    char k[1], v[1];
+    const runtime::KvLayer L = l8.layer(k, v, 2);
+    CHECK(L.int8());
+    CHECK_EQ(static_cast<char*>(L.k) - k, std::ptrdiff_t(2 * 16384 * 1024));
+    CHECK_EQ(static_cast<char*>(L.vs) - v, std::ptrdiff_t(16 * 16384 * 1024 + 2 * 16384 * 8));
+    CHECK(!l16.layer(k, v, 2).int8());
+  }
+
+  // The plan's kv term and the MTP head's buffers follow the form; nothing else moves.
+  const runtime::MemoryPlan b16 = runtime::plan(q, 131072, true, kQwenInt8Weights + kMtpWeights, {}, {},
+                                                KvCache::Bf16);
+  const runtime::MemoryPlan b8 = runtime::plan(q, 131072, true, kQwenInt8Weights + kMtpWeights, {}, {},
+                                               KvCache::Int8);
+  CHECK_EQ(b16.kv, size_t{8589934592ull});
+  CHECK_EQ(b8.kv, size_t{131072} * 33024);
+  CHECK_EQ(b16.mtp_buffers - b8.mtp_buffers, size_t{2} * 131072 * (2048 - 1032));
+  CHECK_EQ(b16.model, b8.model);
+  CHECK_EQ(b16.prefill_scratch, b8.prefill_scratch);
+  CHECK_EQ(b16.int8, b8.int8);
+  CHECK(runtime::describe(b8, kDevice, kReserve).find(", int8 KV cache)") != std::string::npos);
+  CHECK(runtime::describe(b16, kDevice, kReserve).find("int8 KV") == std::string::npos);
+
+  // B70_KV_CACHE sets the default (as B70_DECODE_ATTN does for the decode pair).
+  setenv("B70_KV_CACHE", "int8", 1);
+  CHECK(runtime::default_kv_cache() == KvCache::Int8);
+  CHECK_EQ(runtime::PersistentDims::sizes(16384, q).kv_k, p8.kv_k);
+  CHECK_EQ(runtime::plan(q, 131072, true, kQwenInt8Weights + kMtpWeights).kv, b8.kv);
+  setenv("B70_KV_CACHE", "bf16", 1);
+  CHECK(runtime::default_kv_cache() == KvCache::Bf16);
+  unsetenv("B70_KV_CACHE");
+  CHECK(runtime::default_kv_cache() == KvCache::Bf16);
+  CHECK(runtime::parse_kv_cache("int8") == KvCache::Int8);
+  bool threw = false;
+  try {
+    runtime::parse_kv_cache("fp8");
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  CHECK(threw);
+
+  // --max-len auto with the int8 cache: the derived lengths the README quotes. Qwen3.8
+  // reaches its trained 262144 on one card with or without MTP; each is at least the bf16
+  // length, and the contract (fits, the next quantum does not) holds as for bf16.
+  struct Row {
+    const model::ModelDesc* d;
+    bool mtp;
+    size_t w;
+    const char* what;
+  };
+  const Row rows[] = {
+      {&q, false, kQwenInt8Weights, "qwen3.8 int8 head"},
+      {&q, true, kQwenInt8Weights + kMtpWeights, "qwen3.8 int8 head + MTP"},
+      {&q, false, kQwenBf16Weights, "qwen3.8 bf16 head"},
+      {&q, true, kQwenBf16Weights + kMtpWeights, "qwen3.8 bf16 head + MTP"},
+      {&a, false, kAgnesInt8Weights, "agnes int8 head"},
+      {&a, true, kAgnesInt8Weights + kMtpWeights, "agnes int8 head + MTP"},
+  };
+  for (const Row& r : rows) {
+    const uint32_t l16 = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, {},
+                                                    {}, KvCache::Bf16);
+    const uint32_t l8 = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, {},
+                                                   {}, KvCache::Int8);
+    CHECK(l8 >= l16 && l8 % runtime::kMaxLenQuantum == 0 && l8 <= kTrained);
+    const runtime::MemoryPlan p = runtime::plan(*r.d, l8, r.mtp, r.w, {}, {}, KvCache::Int8);
+    CHECK(p.total() + kReserve <= kDevice);
+    if (l8 < kTrained)
+      CHECK(runtime::plan(*r.d, l8 + runtime::kMaxLenQuantum, r.mtp, r.w, {}, {}, KvCache::Int8)
+                    .total() + kReserve > kDevice);
+    std::printf("auto --kv-cache int8 %-26s -> max_len %6u (bf16 KV: %6u)  (%s)\n", r.what, l8,
+                l16, runtime::describe(p, kDevice, kReserve).c_str());
+    if (r.d == &q) CHECK_EQ(l8, kTrained);
+  }
+}
 }  // namespace
 
 int main() {
@@ -356,6 +467,7 @@ int main() {
   check_paths();
   check_max_len_that_fits();
   check_draft_vocab();
+  check_kv_int8();
   std::puts("memory_plan_test OK");
   return 0;
 }

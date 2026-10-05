@@ -13,16 +13,19 @@ namespace runtime {
 // --- PersistentBuffers -------------------------------------------------------
 
 PersistentBuffers::PersistentBuffers(l0::Context& ctx, uint32_t max_len,
-                                     const model::ModelDesc& desc)
-    : PersistentBuffers(ctx, max_len, sizes(max_len, desc)) {}
+                                     const model::ModelDesc& desc, KvCache kv)
+    : PersistentBuffers(ctx, max_len, sizes(max_len, desc, kv),
+                        kv_layout(max_len, desc, desc.fa_layers, kv)) {}
 
-PersistentBuffers::PersistentBuffers(l0::Context& ctx, uint32_t max_len, const PersistentSizes& s)
+PersistentBuffers::PersistentBuffers(l0::Context& ctx, uint32_t max_len, const PersistentSizes& s,
+                                     const KvLayout& kv)
     : control(ctx, l0::MemKind::Shared, s.control),
       gdn_state(ctx, l0::MemKind::Device, s.gdn_state),
       conv_ring(ctx, l0::MemKind::Device, s.conv_ring),
       kv_k(ctx, l0::MemKind::Device, s.kv_k),
       kv_v(ctx, l0::MemKind::Device, s.kv_v),
-      max_len(max_len) {
+      max_len(max_len),
+      kv_lay(kv) {
   // A run starts from an empty GDN state, an empty conv ring, an empty KV
   // cache and pos = 0. Scratch is written before it is read every token, so
   // it is left alone. The immediate list is synchronous: the fills have
@@ -144,11 +147,12 @@ size_t PrefillScratch::lazy_bytes() const {
 // --- MtpBuffers (spec 8) -----------------------------------------------------
 
 MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
-                       uint32_t draft_vocab_size)
-    : MtpBuffers(ctx, max_len, sizes(max_len, desc, draft_vocab_size), draft_vocab_size) {}
+                       uint32_t draft_vocab_size, KvCache kv)
+    : MtpBuffers(ctx, max_len, sizes(max_len, desc, draft_vocab_size, kv), draft_vocab_size,
+                 kv_layout(max_len, desc, 1, kv)) {}
 
 MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
-                       uint32_t draft_vocab_size)
+                       uint32_t draft_vocab_size, const KvLayout& kv)
     : hctl(ctx, l0::MemKind::Shared, s.hctl),
       gdn_spec(ctx, l0::MemKind::Device, s.gdn_spec),
       kv_k(ctx, l0::MemKind::Device, s.kv_k),
@@ -160,7 +164,8 @@ MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
       dv_logits(s.dv_logits ? std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, s.dv_logits)
                             : nullptr),
       max_len(max_len),
-      draft_vocab(draft_vocab_size) {
+      draft_vocab(draft_vocab_size),
+      kv_lay(kv) {
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   zero(imm);
 }
@@ -179,8 +184,9 @@ size_t MtpBuffers::bytes() const {
 
 // --- DecodeBuffers, the view -------------------------------------------------
 
-DecodeBuffers::DecodeBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc)
-    : own_p_(new PersistentBuffers(ctx, max_len, desc)),
+DecodeBuffers::DecodeBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
+                             KvCache kv)
+    : own_p_(new PersistentBuffers(ctx, max_len, desc, kv)),
       own_s_(new DecodeScratch(ctx, max_len, desc)),
       control(own_p_->control),
       gdn_state(own_p_->gdn_state),
@@ -200,7 +206,8 @@ DecodeBuffers::DecodeBuffers(l0::Context& ctx, uint32_t max_len, const model::Mo
       logits(own_s_->logits),
       argmax_part(own_s_->argmax_part),
       moe(own_s_->moe.get()),
-      max_len(max_len) {}
+      max_len(max_len),
+      kv_lay(own_p_->kv_lay) {}
 
 DecodeBuffers::DecodeBuffers(PersistentBuffers& p, DecodeScratch& s)
     : control(p.control),
@@ -221,7 +228,8 @@ DecodeBuffers::DecodeBuffers(PersistentBuffers& p, DecodeScratch& s)
       logits(s.logits),
       argmax_part(s.argmax_part),
       moe(s.moe.get()),
-      max_len(p.max_len) {}
+      max_len(p.max_len),
+      kv_lay(p.kv_lay) {}
 
 size_t DecodeBuffers::persistent_bytes() const {
   return control.size() + gdn_state.size() + conv_ring.size() + kv_k.size() + kv_v.size();
