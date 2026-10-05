@@ -1,6 +1,6 @@
 // draft_vocab.cl - spec 8 §11: the MTP draft's argmax over a reduced vocabulary V',
-// |V'| = NV (32768 / 65536 / 131072), after `gemv_i8w` at N = NV over the compact head
-// (loader::DraftVocab: the int8 head's rows ids[0..NV), gathered ascending by id).
+// |V'| = NV (32768 / 65536 / 131072), after `gemv_i8w` or `gemv_bf16` at N = NV over the
+// compact head (loader::DraftVocab: the head's rows ids[0..NV), gathered ascending by id).
 //
 //   dv_argmax_stage1  grid (NV/1024), WG 256 - group g reduces compact logits
 //                     [g*1024, +1024) to one (value, compact index) pair in part[g],
