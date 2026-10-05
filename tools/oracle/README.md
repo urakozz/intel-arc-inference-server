@@ -26,6 +26,7 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `make_long_prompt.sh` | Builds `tests/golden/prompts/long.ids` (2820 ids) and `long.txt` from the three committed prompts, on the Mac, with no model and no tokenizer. Spec 2 §6.2's ≥ 2048-id prompt. |
 | `check.sh` | Re-reads the three written files in a separate process and prints the block quoted under "Sanity checks" below. |
 | `stream.py` | Layer-streamed weights for `dump.py --stream` / `mtp_ref.py --dump --stream` (spec 14, the Mac path below): the model on `meta`, embed/norm/lm_head resident, each decoder layer materialised by a forward pre-hook and dropped after its forward; plus a bit-exact C++ `dequant_t` and the single-thread grouped conv1d. |
+| `dflash_ref.py` | Spec 19a: the CPU reference of the DFlash / DFlash 2 drafters (config reader, drafter + target embed/head loader incl. the W4A16 drafter, `context_kv`, `draft_block`); `test_dflash_ref.py` checks it on tiny random weights. "The DFlash reference" below. |
 | `agnes_remote_check.py` | Agnes: our reference (`agnes.py`) against the checkpoint's own `modeling_agnes.py` (trust_remote_code), per-position logits on 64 ids, both streamed. |
 | `vllm_check.py` | The third implementation: vLLM's own greedy 32 tokens on the same three prompt id files, compared against the golden `tokens`. Closes the trust chain's last link - run and recorded 2026-08-25, **96/96** (`docs/14-golden-gate.md` §cross-check). |
 
@@ -358,6 +359,45 @@ What streaming changes, and what it does not:
 
 Measured (prose, 42 ids, `--gen 32`): prompt forward 263 s, 32 greedy steps 2100 s
 (~66 s each), wall 2379 s; code 3118 s, cjk 1069 s (the Mac's load varies). Record: `docs/probe-agnes-2026-10-03.md`.
+
+### The DFlash reference (spec 19a, 2026-10-05)
+
+`dflash_ref.py` is spec 19 §2 in plain torch: float32 compute, bf16 weights upcast (the drafter's
+linears once at load; the target's embedding / `lm_head` and the selector codebooks per use, in row
+chunks), deterministic. Semantics ported from vLLM's Apache-2.0 `qwen3_dflash.py`,
+`qwen3_dflash2.py` and the DFlash / DFlash 2 speculators (file header).
+
+```python
+d = load_drafter(drafter_snapshot, target_snapshot)        # Qwen/Qwen3.8-27B for embed + lm_head
+ctx = d.context_kv(taps_from_resid(golden, d.cfg.target_layer_ids), positions)
+out = d.draft_block(anchor_id, p, K, ctx, temperature=0.0)  # out.ids, cand_ids, unary, scores, q
+```
+
+- **Taps** are a dict keyed by exactly `target_layer_ids`; `taps[i]` is the residual AFTER target
+  layer i (`resid.L{i}` in our dumps, `hidden_states[i + 1]` in transformers; vLLM's i + 1).
+- **Block**: row 0 = the anchor (the token at p, no hidden state yet) at position p, rows 1..K =
+  the mask token at p + 1 .. p + K; mask row j drafts the token at p + j. Only context positions
+  < p are read. `1 <= K <= block_size - 1`.
+- **Sampling** (temperature > 0 needs a seed): Gumbel-max keyed like vLLM by (seed, P - 1 + 2^30,
+  token id); `q` is softmax(scores / T) on the row's 16 candidates (DFlash 2) or over the head (v1).
+- **Ornith's DFlash (v1)** resolves to 5 *causal* sliding layers + 1 non-causal full layer: vLLM's
+  rule when a config has `layer_types` and no `is_causal` (`_dflash_layer_causal`).
+
+The tests take ~10 s; the last one loads `z-lab/Qwen3.8-27B-DFlash2` (+ `syvai/...-W4A16`) and the
+`Qwen/Qwen3.8-27B` embedding / head from the HF cache (~16 GB RSS, estimated: not yet run) and prints SKIP when they are not
+there. On the Mac, in the image the Agnes container was committed to (torch 2.14.1+cpu,
+safetensors), capped at 28 GB:
+
+```bash
+# from the repo (or worktree) root on the Mac
+docker run --rm --memory 28g --memory-swap 28g -v "$PWD":/ws -w /ws \
+  -v ~/.cache/huggingface:/hf:ro -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 \
+  agnes-ref-img:latest python3 tools/oracle/test_dflash_ref.py
+```
+
+On the box: `tools/oracle/run_in_container.sh 'HF_HUB_CACHE=/hf/hub python3 tools/oracle/test_dflash_ref.py'`
+(the script points `HF_HOME` at a scratch dir; `HF_HUB_CACHE` sends `find_snapshot` to the
+read-only cache mount). Not yet run there.
 
 ## The gate: what these files are compared against, and what it proved
 
