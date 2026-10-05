@@ -1,0 +1,10 @@
+# Box validation queue
+
+Work merged into `main` without running on the card, in the order to validate it when the box is
+back. Each entry names its checklist or its tests. Remove an entry when it has passed on the box.
+
+| # | merged | what is unvalidated | how to validate |
+|---|---|---|---|
+| 1 | spec 14 (Agnes 3.0 Flash, `ModelDesc`), commit range ending `c104247` | everything that runs on the card; the descriptor refactor's bitwise neutrality for Qwen3.8 | `2026-10-03-spec14-validation-checklist.md`, **G0 first** (Qwen3.8 kernel binaries checksum-identical, full suite, golden and replay bitwise) |
+| 2 | spec 13c Task 1 (batching scheduler) and spec 8 §10 (`--mtp auto`), commits `6628218`, `da53c68` | the `EngineIface::step_many(sampling, k)` signature change in `EngineAdapter`, `b70_serve.cc`, `mtp_gpu_test`, `prefix_gpu_test`, `golden_server_test` (syntax-checked only); `--mtp auto` on the real engine | build; the full suite (especially `mtp_gpu_test`, `mtp_server_test`, `golden_server_test`, `prefix_gpu_*`); calibrate the int8-head cost table with `probe_mtp_steps` (M = 1..4, k = 1..3) and update `MtpCost`'s defaults; D1-style rows for `--mtp auto` against fixed K = 1 and K = 3 on the golden and A4 prompts |
+| 3 | README rows | the headline and depth rows were measured on v1 decode attention and the bf16 head | re-measure on current `main` (v2 attention, int8 head), idle box, RECORD grade |
