@@ -27,6 +27,9 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `check.sh` | Re-reads the three written files in a separate process and prints the block quoted under "Sanity checks" below. |
 | `stream.py` | Layer-streamed weights for `dump.py --stream` / `mtp_ref.py --dump --stream` (spec 14, the Mac path below): the model on `meta`, embed/norm/lm_head resident, each decoder layer materialised by a forward pre-hook and dropped after its forward; plus a bit-exact C++ `dequant_t` and the single-thread grouped conv1d. |
 | `dflash_ref.py` | Spec 19a: the CPU reference of the DFlash / DFlash 2 drafters (config reader, drafter + target embed/head loader incl. the W4A16 drafter, `context_kv`, `draft_block`); `test_dflash_ref.py` checks it on tiny random weights. "The DFlash reference" below. |
+| `dump_taps.py` | Spec 19a Task 2: the Qwen3.8 bf16 target (layer-streamed, as `kv_int8_probe.py run` builds it) over [prompt + recorded greedy continuation]; per source the residual after the drafter's tap layers (5, 19, 33, 47, 61), the greedy next ids and the top-64 logits. `test_dump_taps.py`: Review Focus 1 (tap i = layer i's OUTPUT) on a tiny checkpoint. "The DFlash P0" below. |
+| `dflash_accept.py` | Spec 19a Task 3: teacher-forced acceptance of the DFlash 2 drafter on those dumps, K = 1..7, arms bf16 / int8 RTN / int8 + int8 head / W4A16, draft vocabularies 32k / 64k / 128k (`loader::select_draft_vocab`); batched over anchors. `test_dflash_accept.py`: the batch against `dflash_ref.draft_block`. |
+| `dflash_p0.sh` | The two above on the Mac in a 28 GB container, resumable, refusing to start beside the 12a repeat; `DRY_RUN=1` plans only. |
 | `k2_ref.py` | Spec 18a: the K2-Horizon CPU reference - a plain-torch port of the checkpoint's `modeling_k2_horizon.py`, layer at a time, bf16 or int4 GPTQ checkpoints by name; `run` (golden file + MoE / MoVA routing dumps), `hfcheck` (against the vendored HF model, layer-streamed), `facts`. `test_k2_ref.py` checks it on tiny random weights. "The K2-Horizon reference" below. |
 | `k2_attn_eager_fixture.py` | Spec 18 §10.1: `k2_ref.py attention()` on hash inputs, written as `tests/kernels/k2_attn_eager_fixture.h` (scores, probabilities, output) for `k2_attn_eager_ref_test`; no checkpoint, seconds - the docker line is in its docstring. |
 | `third_party/k2_horizon/` | `modeling_k2_horizon.py`, `configuration_k2_horizon.py`, `config.json` from `IFM/K2-Horizon-MoVA-36B-A4B` @ `cca48b66`, unmodified (Apache-2.0, headers kept): the semantics source of truth, imported by the tests and `hfcheck` without network. |
@@ -404,6 +407,47 @@ docker run --rm --memory 28g --memory-swap 28g -v "$PWD":/ws -w /ws \
 On the box: `tools/oracle/run_in_container.sh 'HF_HUB_CACHE=/hf/hub python3 tools/oracle/test_dflash_ref.py'`
 (the script points `HF_HOME` at a scratch dir; `HF_HUB_CACHE` sends `find_snapshot` to the
 read-only cache mount). Not yet run there.
+
+### The DFlash P0 (spec 19a Tasks 2-3, 2026-10-06)
+
+Two scripts and a driver, on the Mac:
+
+```bash
+# from the repo (or worktree) root; detached, resumable, log in oracle-out-19a/p0.log
+DRY_RUN=1 tools/oracle/dflash_p0.sh                       # the plan, ~1 min, 6 GB container
+nohup tools/oracle/dflash_p0.sh > /dev/null 2>&1 &        # the run (28 GB container)
+```
+
+- **`dump_taps.py`** runs `Qwen/Qwen3.8-27B` (bf16, layer-streamed, fp32 matmuls as the 12a
+  repeat) over each source's [prompt + recorded continuation] and writes
+  `oracle-out-19a/dumps/<corpus>__<label>.taps.safetensors`: the residual after layers 5, 19,
+  33, 47, 61 (`resid.L{i}`, the drafter's `taps[i]`) from `n_prompt - 2048` on (the drafter's
+  window never reads older context from an anchor in the continuation), the bf16 greedy next id
+  per position (ids < 248077, ties to the lower id), the top-64 logits and the logsumexp (a
+  later sampled pass needs no re-dump). Sources are batched, right-padded, up to
+  `--batch-tokens` (8192): the padding is causal-safe (bitwise, tested), but a batch is not
+  bitwise a one-sequence forward - the GDN core's fp32 batched matmuls block differently with
+  the batch shape (a few bf16 ulps per layer; `test_dump_taps.py` says how much).
+- **`dflash_accept.py`** drafts at every anchor of the continuation (n_prompt <= p <= N - 7),
+  one block per K = 1..7, and keeps the longest prefix equal to the bf16 greedy ids. A row is
+  censored at the depth where the recorded text leaves the bf16 greedy path (the recorded
+  continuations come from the int4 engine / oracle, so they mostly - not always - agree).
+  Reports alpha per depth, `E_K = 1 + sum_i prod_{j<=i} alpha_j` tokens per verify, the
+  length histogram, per corpus (the source name's prefix) and arm.
+- **Sources:** the golden prompts with the 32 greedy ids of the 2026-08-24 oracle
+  (`GOLDEN_CONT_DIR` takes longer recorded continuations), the A4 set (34 scenarios, 2613
+  output ids: the reference text of `tests/server/toolcall_expected.json` re-encoded, bf16
+  backend first, via `tools/spec/lookup_accept.py`'s `load_a4`), and `EXTRA_SOURCES`.
+- **Cost (estimated by `DRY_RUN`, assumed rates):** dumps ~5 h on an idle Mac (12 streamed
+  forwards at ~6.5 min each + ~4 PFLOP), peak ~12.5 GiB; acceptance ~0.4 h per drafter arm
+  (2487 anchors x 35 drafter rows + 28 head rows), ~16-20 GiB.
+
+Tests (tiny models, a minute; `dflash_p0.sh`'s `check` step runs both):
+
+```bash
+docker run --rm --memory 6g -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/oracle/test_dump_taps.py
+docker run --rm --memory 6g -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/oracle/test_dflash_accept.py
+```
 
 ### The K2-Horizon reference (spec 18a, 2026-10-05)
 
