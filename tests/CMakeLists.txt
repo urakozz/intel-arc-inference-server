@@ -1758,6 +1758,12 @@ add_executable(k2_ref_test kernels/k2_ref_test.cc)
 target_include_directories(k2_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(k2_ref_test PRIVATE b70_k2_loader)
 add_test(NAME k2_ref_test COMMAND k2_ref_test)
+# Spec 18 §10: the eager attention's host chain (k2_ref.h attention_eager) against torch's own
+# scores, probabilities and output (tests/kernels/k2_attn_eager_fixture.h, generated in the
+# oracle container by tools/oracle/k2_attn_eager_fixture.py), and against flash. Host only.
+add_executable(k2_attn_eager_ref_test kernels/k2_attn_eager_ref_test.cc)
+target_include_directories(k2_attn_eager_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME k2_attn_eager_ref_test COMMAND k2_attn_eager_ref_test)
 if(B70_K2)
   # Every binary K2's decode list binds (src/kernels/CMakeLists.txt's K2 block).
   set(B70_K2_DECODE_KERNELS
@@ -1766,7 +1772,7 @@ if(B70_K2)
     kernel_prep_res_fold_M1_K2560_SP0_G20 kernel_prep_res_fold_M1_K2560_SP4_G20
     kernel_k2_norm_M1_K2560_G20_W20_NG2 kernel_k2_silu_M1_I6144_S4
     kernel_k2_attn_prep_M1_N10240_S2_Q32KV8_V kernel_k2_attn_prep_M1_N9280_S2_Q32KV8
-    kernel_k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8
+    kernel_k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8 kernel_k2_attn_eager_M1_T${ATTN_V2_TGT}_Q32KV8
     kernel_k2_route_M1_E64_T4_N9280_O9216_S2 kernel_k2_route_M1_E100_T8_N128_O0_S1
     kernel_k2_moe_M1_E100_T8_D2560_I768 kernel_k2_mova_M1_E64_T4_D2560_N1024
     kernel_gemv_M1_K2560_N10240_S2_L0 kernel_gemv_M1_K2560_N9280_S2_L0

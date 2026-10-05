@@ -11,6 +11,9 @@
 // k2_moe_down runs at DN_KS 1 here (144 lanes) because the Mac's GPUs cap a work-group at
 // 256 and the B70 build's DN_KS 2 is 288. k2_attn.cl is not run: its decode is shuffles,
 // sub-group reductions and 2D block reads, which the emulation leaves undeclared on purpose.
+// k2_attn_eager.cl (B70_K2_ATTN=eager, spec 18 §10.1) is plain OpenCL C and does run: its
+// scores bit-exact, its probabilities and outputs within 1 ulp (Apple's compiler is not told
+// -cl-fp32-correctly-rounded-divide-sqrt; measured on the UHD 630: 0 differences anywhere).
 //
 // Bars: the exp-free chains (the norm, the RoPE prep) bit-exact; the rest within 2 bf16
 // ulps (OpenCL's exp, the GEMVs' fma contraction), the route ids exact.
@@ -452,6 +455,74 @@ int main() {
       report("MoVA value experts into V[pos 5]", worst, 2, N);
     }
     prefill_checks(dev, m);   // spec 18c
+    // --- eager attention (B70_K2_ATTN=eager): k2_attn_eager.cl's four kernels --------------------
+    {
+      const uint32_t ML = 1024, QH = m.q_heads, KVH = m.kv_heads, TGT = 32, QN = m.q_n();
+      const std::vector<uint16_t> K = random_bf16(size_t(ML) * m.kv_n(), -1.f, 1.f, 60);
+      const std::vector<uint16_t> V = random_bf16(size_t(ML) * m.kv_n(), -1.f, 1.f, 61);
+      std::vector<float> q(QN), g(QN);
+      {
+        const std::vector<uint16_t> qb = random_bf16(QN, -4.f, 4.f, 62);
+        for (uint32_t i = 0; i < QN; ++i) q[i] = f32(qb[i]);
+        for (uint32_t i = 0; i < QN; ++i) g[i] = rf(32.0f + float(i % 9));   // softplus = g (no exp)
+      }
+      std::vector<uint32_t> ctrl(32, 0);
+      ctrl[1] = 1;
+      clrun::Program p(dev, "src/kernels/k2/k2_attn_eager.cl",
+                       {"CTRL_POS=0", "CTRL_NACT=1", "CTRL_CUR=2", "CTRL_OUT=10", "CTRL_DEBUG=18",
+                        "M=1", "TGT=32", "Q_HEADS=32", "KV_HEADS=8"});
+      clrun::Buffer cb(dev, ctrl), qb(dev, q), gb(dev, g), kb(dev, K), vb(dev, V);
+      clrun::Buffer sb(dev, size_t(QH) * ML * 4), part(dev, size_t(QH) * TGT * 130 * 4), ob(dev, size_t(QN) * 2);
+      for (uint32_t pos : {5u, 299u, 1023u}) {
+        ctrl[0] = pos;
+        cb.write(ctrl.data(), ctrl.size() * 4);
+        const uint32_t len = pos + 1, blk = k2_ref::eager_block(pos, 1, TGT);
+        p.run("k2_attn_eager_score", {size_t(KVH) * 128, TGT}, {128, 1}, cb, qb, kb, sb, ML);
+        const std::vector<float> s = sb.read<float>();
+        p.run("k2_attn_eager_softmax", {size_t(QH) * 128, 1}, {128, 1}, cb, sb, ML);
+        const std::vector<float> pr = sb.read<float>();
+        p.run("k2_attn_eager_pv", {size_t(KVH) * 128, TGT}, {128, 1}, cb, sb, vb, part, ML);
+        p.run("k2_attn_eager_reduce", {size_t(QH) * 128, 1}, {128, 1}, cb, part, gb, ob);
+        const std::vector<uint16_t> o = ob.read<uint16_t>();
+        size_t s_bad = 0, p_bad = 0, o_bad = 0, o_own = 0;
+        int p_worst = 0, o_worst = 0;
+        for (uint32_t h = 0; h < QH; ++h) {
+          const uint32_t j = h / (QH / KVH);
+          const k2_ref::EagerHead e = k2_ref::attention_eager(q.data() + size_t(h) * 128, K.data(), V.data(),
+                                                              len, j, KVH, 128, blk);
+          const float* srow = s.data() + size_t(h) * ML;
+          const float* prow = pr.data() + size_t(h) * ML;
+          for (uint32_t i = 0; i < len; ++i) {
+            s_bad += srow[i] != e.s[i];
+            if (prow[i] != e.p[i]) {
+              ++p_bad;
+              p_worst = std::max(p_worst, ulps(rne(prow[i]), rne(e.p[i])));
+            }
+          }
+          // The output from the DEVICE's probabilities (the P·V and gate stages alone) and from
+          // the host's (the whole chain).
+          const std::vector<float> dev_p(prow, prow + len);
+          for (uint32_t dd = 0; dd < 128; ++dd) {
+            const uint16_t got = o[size_t(h) * 128 + dd];
+            const float gate = g[size_t(h) * 128 + dd];
+            const uint16_t own = k2_ref::attn_gate(k2_ref::eager_pv(dev_p.data(), V.data(), len, j, KVH, 128, dd, blk), gate);
+            const uint16_t want = k2_ref::attn_gate(e.o[dd], gate);
+            o_own += got != own;
+            if (got != want) {
+              ++o_bad;
+              o_worst = std::max(o_worst, ulps(got, want));
+            }
+          }
+        }
+        std::printf("  eager attention at %4u keys: scores %zu, probabilities %zu (worst %d ulps), "
+                    "output %zu (worst %d) of the host's differ; output vs host P.V on the device's p: %zu\n",
+                    len, s_bad, p_bad, p_worst, o_bad, o_worst, o_own);
+        report_bool("eager scores bit-exact", s_bad == 0);
+        report("eager probabilities (Mac: 1/x not CR)", p_worst, 1, size_t(QH) * len);
+        report_bool("eager P.V + gate on the device's p bit-exact", o_own == 0);
+        report("eager output", o_worst, 1, QN);
+      }
+    }
   } catch (const clrun::Error& e) {
     std::fprintf(stderr, "k2_run: %s\n", e.what());
     return 1;

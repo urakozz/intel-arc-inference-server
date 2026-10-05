@@ -62,6 +62,11 @@ inline std::string attn_variant(unsigned M, unsigned T, unsigned q, unsigned kv)
   return "k2_attn_M" + std::to_string(M) + "_T" + std::to_string(T) + "_Q" + std::to_string(q) +
          "KV" + std::to_string(kv);
 }
+// k2_attn_eager.cl at the same defines (B70_K2_ATTN=eager; runtime::k2::K2Attn).
+inline std::string attn_eager_variant(unsigned M, unsigned T, unsigned q, unsigned kv) {
+  return "k2_attn_eager_M" + std::to_string(M) + "_T" + std::to_string(T) + "_Q" +
+         std::to_string(q) + "KV" + std::to_string(kv);
+}
 // The router over `experts` of `top_k`, reading `ls` slices of a [ls][M][ln] fp32 output
 // from column `loff`.
 inline std::string route_variant(unsigned M, unsigned experts, unsigned top_k, unsigned ln,
@@ -95,9 +100,12 @@ inline std::string argmax2_variant(unsigned vocab) {
 inline constexpr unsigned argmax_groups(unsigned vocab) { return (vocab + kArgmaxChunk - 1) / kArgmaxChunk; }
 
 // Every binary K2's M = 1 decode list binds (runtime/k2/k2_capture.cc forms the same names
-// at its binding sites), for a head form: capture checks each exists before appending a
-// command, and tests/kernels/k2_variant_names_test.cc holds the list to the CMake block's.
-inline std::vector<std::string> decode_variants(const model::K2Desc& d, bool int8_head) {
+// at its binding sites), for a head form and an attention form (`eager_attn`:
+// B70_K2_ATTN=eager binds k2_attn_eager.cl's four kernels for k2_attn.cl's two): capture
+// checks each exists before appending a command, and tests/kernels/k2_variant_names_test.cc
+// holds the list to the CMake block's.
+inline std::vector<std::string> decode_variants(const model::K2Desc& d, bool int8_head,
+                                                bool eager_attn = false) {
   const auto lin = [&](model::K2LinearId id) {
     const model::GemvShape s = d.linear(id).shape;
     return gemv_variant(1, s.K, s.N, s.S, s.layout);
@@ -119,7 +127,8 @@ inline std::vector<std::string> decode_variants(const model::K2Desc& d, bool int
       silu_variant(1, d.dense_inter, d.gate_up_s),
       attn_prep_variant(1, d.attn_dense_n(), d.attn_s, d.q_heads, d.kv_heads, true),
       attn_prep_variant(1, d.attn_sparse_n(), d.attn_s, d.q_heads, d.kv_heads, false),
-      attn_variant(1, kAttnTgt, d.q_heads, d.kv_heads),
+      eager_attn ? attn_eager_variant(1, kAttnTgt, d.q_heads, d.kv_heads)
+                 : attn_variant(1, kAttnTgt, d.q_heads, d.kv_heads),
       route_variant(1, d.value_experts, d.value_top_k, d.attn_sparse_n(), d.v_off(), d.attn_s),
       mova_variant(1, d.value_experts, d.value_top_k, d.hidden, d.kv_n()),
       bf16(d.hidden, d.router_n()),

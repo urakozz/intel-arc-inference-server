@@ -17,7 +17,12 @@
 //   6. k2_mova_value - the 4 value experts by id, SiLU, the combine, into the V cache at pos;
 //   7. k2_attn_decode / k2_attn_reduce at depths 6, 300 and 3000 (1, 5 and 24 blocks) against
 //      an fp64 softmax, with gates on both sides of softplus's threshold (Review Focus 2);
-//   8. bitwise replay of the MoE pair and the attention pair.
+//   8. bitwise replay of the MoE pair and the attention pair;
+//   9. the EAGER attention (B70_K2_ATTN=eager, k2_attn_eager.cl's four kernels) at depths 6,
+//      300, 3000 and 4096 against k2_ref.h attention_eager, BITWISE at every stage: the score
+//      row, the probabilities (exp_torch is the same lines on both sides; 1 / sum is correctly
+//      rounded), the output through gates above softplus's threshold (no exp on that path);
+//      below it within 1 ulp (softplus's OpenCL exp / log1p).
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -505,6 +510,83 @@ int main() {
       CHECK(d.read<uint16_t>(out, m.q_n()) == o_first);
     }
     std::puts("  replay: the MoE pair and the attention pair bitwise identical");
+  }
+  // ---- 9. eager attention (spec 18 §10) ---------------------------------------------------
+  {
+    l0::Module em(d.ctx, kernels::path(kk::attn_eager_variant(1, kk::kAttnTgt, m.q_heads, m.kv_heads)));
+    l0::Kernel es = em.kernel("k2_attn_eager_score");
+    l0::Kernel ex = em.kernel("k2_attn_eager_softmax");
+    l0::Kernel ev = em.kernel("k2_attn_eager_pv");
+    l0::Kernel er = em.kernel("k2_attn_eager_reduce");
+    for (l0::Kernel* k : {&es, &ex, &ev, &er}) k->group_size(kk::kAttnWg);
+    const std::vector<uint16_t> K = random_bf16(size_t(ML) * m.kv_n(), -1.f, 1.f, 70);
+    const std::vector<uint16_t> V = random_bf16(size_t(ML) * m.kv_n(), -1.f, 1.f, 71);
+    d.imm.copy(kvk.ptr(), K.data(), K.size() * 2);
+    d.imm.copy(kvv.ptr(), V.data(), V.size() * 2);
+    std::vector<float> q(m.q_n()), g(m.q_n());
+    std::mt19937 rng(72);
+    std::uniform_real_distribution<float> u(-4.f, 4.f);   // scores up to ~10: a peaked softmax
+    for (float& e : q) e = rf(u(rng));
+    for (uint32_t i = 0; i < m.q_n(); ++i)   // half above the threshold (exact path), half below
+      g[i] = rf((i / 128) % 2 == 0 ? 30.0f + float(i % 11) : u(rng));
+    d.imm.copy(aq.ptr(), q.data(), q.size() * 4);
+    d.imm.copy(ag.ptr(), g.data(), g.size() * 4);
+    l0::Mem sc = d.zeros(size_t(m.q_heads) * ML * 4);   // [M = 1][q_heads][ML]
+    es.arg_ptr(0, ctrl.ptr());
+    es.arg_ptr(1, aq.ptr());
+    es.arg_ptr(2, kvk.ptr());
+    es.arg_ptr(3, sc.ptr());
+    es.arg<uint32_t>(4, ML);
+    ex.arg_ptr(0, ctrl.ptr());
+    ex.arg_ptr(1, sc.ptr());
+    ex.arg<uint32_t>(2, ML);
+    ev.arg_ptr(0, ctrl.ptr());
+    ev.arg_ptr(1, sc.ptr());
+    ev.arg_ptr(2, kvv.ptr());
+    ev.arg_ptr(3, part.ptr());
+    ev.arg<uint32_t>(4, ML);
+    er.arg_ptr(0, ctrl.ptr());
+    er.arg_ptr(1, part.ptr());
+    er.arg_ptr(2, ag.ptr());
+    er.arg_ptr(3, out.ptr());
+    for (uint32_t pos : {5u, 299u, 2999u, ML - 1}) {
+      c->pos = pos;
+      const uint32_t len = pos + 1, blk = k2_ref::eager_block(pos, 1, kk::kAttnTgt);
+      d.run(es, m.kv_heads, kk::kAttnTgt);
+      const std::vector<float> s = d.read<float>(sc, size_t(m.q_heads) * ML);
+      d.run(ex, m.q_heads, 1);
+      const std::vector<float> pr = d.read<float>(sc, size_t(m.q_heads) * ML);
+      d.run(ev, m.kv_heads, kk::kAttnTgt);
+      d.run(er, m.q_heads, 1);
+      const std::vector<uint16_t> o = d.read<uint16_t>(out, m.q_n());
+      size_t s_bad = 0, p_bad = 0, o_exact_bad = 0, o_sp = 0;
+      int sp_worst = 0;
+      for (uint32_t h = 0; h < m.q_heads; ++h) {
+        const k2_ref::EagerHead e = k2_ref::attention_eager(q.data() + size_t(h) * 128, K.data(), V.data(),
+                                                            len, h / m.gqa(), m.kv_heads, 128, blk);
+        for (uint32_t i = 0; i < len; ++i) {
+          s_bad += s[size_t(h) * ML + i] != e.s[i];
+          p_bad += pr[size_t(h) * ML + i] != e.p[i];
+        }
+        for (uint32_t dd = 0; dd < 128; ++dd) {
+          const float gate = g[size_t(h) * 128 + dd];
+          const uint16_t got = o[size_t(h) * 128 + dd], want = k2_ref::attn_gate(e.o[dd], gate);
+          if (gate * k2_ref::kSpBeta > k2_ref::kSpThreshold) {
+            o_exact_bad += got != want;
+          } else {
+            o_sp += got != want;
+            sp_worst = std::max(sp_worst, ulps(got, want));
+          }
+        }
+      }
+      std::printf("  eager attention at %u keys (%u-key blocks): scores %zu, probabilities %zu, outputs "
+                  "(gate past the threshold) %zu differ from k2_ref; below it %zu within %d ulp\n",
+                  len, blk, s_bad, p_bad, o_exact_bad, o_sp, sp_worst);
+      CHECK_EQ(s_bad, size_t(0));
+      CHECK_EQ(p_bad, size_t(0));
+      CHECK_EQ(o_exact_bad, size_t(0));
+      CHECK(sp_worst <= 1);
+    }
   }
   std::puts("k2_kernels_test OK");
   return 0;
