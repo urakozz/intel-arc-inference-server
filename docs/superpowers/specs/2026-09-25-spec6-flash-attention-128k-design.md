@@ -337,3 +337,15 @@ layer's K is 2^28 bf16), but passkey and decode at depth are the gates.
 serves (`golden_server_test` now runs it at auto); P3 passkey 3/3 at 95% of the auto length;
 P4 decode t/s at a depth near the auto length; P5 the reserve: the device's free memory after
 a long session at auto, the 1.5 GB confirmed or tuned.
+
+**Amendment (2026-10-05): `attn_part` is sized for the decode-attention pair.** v1 strides its
+partials by every 64-position block of the cache ([24][max_len / 64][8][258] fp32: 405.8 MB at
+131072, 0.595 GB at 192k); v2, the default since spec 10, never has more than 32 per row
+([24][32][8][258]: 6.34 MB at any max_len). `DecodeScratchDims::sizes(max_len, desc, attn)`
+now sizes it by the pair `B70_DECODE_ATTN` selects (`DecodeAttn` and `decode_attn()` moved
+from capture.h to buffer_sizes.h for that), so the plan and the allocation follow the same
+switch; capture refuses to bind v1 over buffers sized for v2. The §8.4 line is reproduced
+under `B70_DECODE_ATTN=v1`; with v2 the same engine plans 0.399 GB less decode state. Auto
+lengths at the default reserve (derived): Qwen3.8 int8 head 201,216 (169,984 with MTP), bf16
+head 181,760; Agnes 139,520 (114,176 with MTP). `tools/probe/probe_decode_attn.cc` captures
+both pairs over one engine, so it builds that engine under v1.

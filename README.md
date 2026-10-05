@@ -188,12 +188,12 @@ directory path works too.
 
 ```sh
 # long agentic sessions (opencode and similar): the largest context that fits the card
-# (--max-len auto, the default: ~192k with the int8 head, derived), prefix cache on (default),
+# (--max-len auto, the default: ~201k with the int8 head, derived), prefix cache on (default),
 # the prompt-end snapshot one id early so each turn restores where the next one diverges
 ./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
     --host 0.0.0.0 --port 8000 --served-name qwen3.8 --prefix-split-last
 
-# the same with MTP speculative decoding, K chosen per request (auto context: ~163k, derived)
+# the same with MTP speculative decoding, K chosen per request (auto context: ~170k, derived)
 ./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
     --served-name qwen3.8 --mtp auto
 
@@ -210,7 +210,7 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
 | `--host H` | `0.0.0.0` | listen address |
 | `--port P` | `8000` | listen port |
 | `--served-name NAME` | `b70` | model name in the OpenAI API (`/v1/models`, the `model` field) |
-| `--max-len auto\|L` | `auto` | context capacity. `auto`: the largest multiple of 256 whose memory plan (weights + KV + decode state + prefill scratch, the MTP head's buffers when `--mtp` is on) fits the card with `--mem-reserve-gb` left over, capped by the checkpoint's trained context (`max_position_embeddings`, 262144); the chosen length and the plan are printed at startup (spec 6 §10). Derived at the default reserve with the int8 head: Qwen3.8 ~192k, ~163k with `--mtp`; Agnes ~134k, ~110k with `--mtp`. The full 262144 needs int8 KV (spec 12b) or two cards (spec 16). `L`: any multiple of 256 up to the trained context, refused at startup with the plan's breakdown if it does not fit. |
+| `--max-len auto\|L` | `auto` | context capacity. `auto`: the largest multiple of 256 whose memory plan (weights + KV + decode state + prefill scratch, the MTP head's buffers when `--mtp` is on) fits the card with `--mem-reserve-gb` left over, capped by the checkpoint's trained context (`max_position_embeddings`, 262144); the chosen length and the plan are printed at startup (spec 6 §10). Derived at the default reserve with the int8 head: Qwen3.8 ~201k, ~170k with `--mtp`; Agnes ~140k, ~114k with `--mtp`. The full 262144 needs int8 KV (spec 12b) or two cards (spec 16). `L`: any multiple of 256 up to the trained context, refused at startup with the plan's breakdown if it does not fit. |
 | `--mem-reserve-gb G` | `1.5` | device memory the plan leaves free for what it does not count: the driver, kernel modules and command lists, allocator slack (an estimate) |
 | `--device N` | `ONEAPI_DEVICE_SELECTOR`, else 0 | which GPU |
 | `--queue N` | `4` | requests waiting behind the running one before new ones are refused |

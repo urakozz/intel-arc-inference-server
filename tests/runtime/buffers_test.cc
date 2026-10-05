@@ -24,6 +24,8 @@
 //   attn_q       8 x 24 q-heads x 256 x 4 B                       =       196,608
 //   attn_gate    same                                             =       196,608
 //   attn_part    24 x (16384/64 = 256 blocks) x 8 x 258 x 4 B     =    50,724,864
+//                (v1, B70_DECODE_ATTN=v1; v2, the default since spec 10:
+//                 24 x 32 x 8 x 258 x 4 B = 6,340,608 at any max_len, total 24,268,608)
 //   attn_out     8 x 24 x 256 x 2 B                               =        98,304
 //   logits       8 x 248320 x 4 B                                 =     7,946,240
 //   argmax_part  8 x ceil(248320/1024) = 243 x 2 x 4 B            =        15,552
@@ -180,7 +182,9 @@ int main() {
     runtime::PersistentBuffers p(ctx, 16384, model::qwen38());
     runtime::DecodeScratch s(ctx, 16384, model::qwen38());
     CHECK_EQ(p.bytes(), size_t{1240465536});
-    CHECK_EQ(s.bytes(), size_t{68652864});
+    CHECK_EQ(s.bytes(), runtime::decode_attn() == runtime::DecodeAttn::V1
+                            ? size_t{68652864}
+                            : size_t{68652864 - 50724864 + 6340608});
     runtime::DecodeBuffers view(p, s);
     CHECK_EQ(view.persistent_bytes(), p.bytes());
     CHECK_EQ(view.scratch_bytes(), s.bytes());
@@ -203,13 +207,17 @@ int main() {
                 p.kv_k.size() + p.kv_v.size(), s.attn_part.size(), p.bytes(), s.bytes());
     CHECK_EQ(p.kv_k.size() + p.kv_v.size(), size_t{16} * 131072 * 4 * 256 * 2 * 2);
     CHECK_EQ(p.kv_k.size() + p.kv_v.size(), size_t{8589934592});
-    CHECK_EQ(s.attn_part.size(), size_t{24} * 2048 * 8 * 258 * 4);
-    CHECK_EQ(s.attn_part.size(), size_t{405798912});
-    // Spec 10 (plan 10b): v2's partials are [24][kAttnV2Blocks = 32][M][258] fp32 at
-    // any max_len - 792,576 B per row, 3,170,304 B at M = 4 - inside v1's allocation.
+    // attn_part follows the decode-attention pair (DecodeScratchDims::sizes): v1
+    // (B70_DECODE_ATTN=v1) strides every block, v2 (the default) a fixed
+    // [24][kAttnV2Blocks = 32][M = 8][258] fp32 = 6,340,608 B at any max_len.
     CHECK_EQ(runtime::DecodeScratch::kAttnV2Blocks, 32u);
-    CHECK(size_t{24} * runtime::DecodeScratch::kAttnV2Blocks * runtime::DecodeScratch::kM * 258 * 4 <=
-          s.attn_part.size());
+    if (runtime::decode_attn() == runtime::DecodeAttn::V1) {
+      CHECK_EQ(s.attn_part.size(), size_t{24} * 2048 * 8 * 258 * 4);
+      CHECK_EQ(s.attn_part.size(), size_t{405798912});
+    } else {
+      CHECK_EQ(s.attn_part.size(), size_t{24} * 32 * 8 * 258 * 4);
+      CHECK_EQ(s.attn_part.size(), size_t{6340608});
+    }
     runtime::DecodeBuffers view(p, s);
     CHECK_EQ(view.max_len, 131072u);
   }
@@ -221,7 +229,10 @@ int main() {
   CHECK(size_t{24} * runtime::DecodeScratch::kAttnV2Blocks * runtime::DecodeScratch::kM * 258 * 4 <=
         b.attn_part.size());
   CHECK_EQ(b.persistent_bytes(), size_t{1240465536});
-  CHECK_EQ(b.scratch_bytes(), size_t{68652864});
+  // 68,652,864 B with v1's attn_part (50,724,864 B at 16384); v2's is 6,340,608 B.
+  CHECK_EQ(b.scratch_bytes(), runtime::decode_attn() == runtime::DecodeAttn::V1
+                                  ? size_t{68652864}
+                                  : size_t{68652864 - 50724864 + 6340608});
 
   // The control block is shared memory: the host reads and writes it directly,
   // and the constructor left it zeroed - including the padding, which the

@@ -231,6 +231,13 @@ class Capture {
             : std::vector<std::string>{
                   kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock, d_.fa_q_heads, d_.fa_kv_heads),
                   kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock, d_.fa_q_heads, d_.fa_kv_heads)};
+    // attn_part is sized for one pair (DecodeScratchDims::sizes): v2's is a fixed 32 blocks
+    // per row, v1's every block of the cache. Binding v1 over buffers sized for v2 would
+    // write past the allocation, so refuse it here rather than corrupt memory on token 1.
+    require(b_.attn_part.size() >= DecodeScratchDims::sizes(b_.max_len, d_, attn_).attn_part,
+            std::string("attn_part (") + std::to_string(b_.attn_part.size()) +
+                " B) was sized for the other decode attention pair than " +
+                decode_attn_name(attn_) + " - set B70_DECODE_ATTN before the buffers are built");
     for (const std::string& v : attn_bins)
       require(std::ifstream(kernels::path(v)).good(),
               "no decode attention is compiled for max_len " + std::to_string(b_.max_len) +
@@ -973,16 +980,6 @@ ProfileEvents::ProfileEvents(l0::Context& ctx) : pool(ctx, kProfileCapacity) {
   // command list stable for the whole walk.
   events.reserve(kProfileCapacity);
 }
-
-DecodeAttn decode_attn() {
-  const char* v = std::getenv("B70_DECODE_ATTN");
-  if (v == nullptr || *v == '\0') return kDefaultDecodeAttn;
-  if (std::strcmp(v, "v1") == 0) return DecodeAttn::V1;
-  if (std::strcmp(v, "v2") == 0) return DecodeAttn::V2;
-  throw std::runtime_error(std::string("B70_DECODE_ATTN=") + v + ": expected v1 or v2");
-}
-
-const char* decode_attn_name(DecodeAttn a) { return a == DecodeAttn::V2 ? "v2" : "v1"; }
 
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                    l0::Mem* debug_resid, ProfileEvents* prof, uint32_t M) {

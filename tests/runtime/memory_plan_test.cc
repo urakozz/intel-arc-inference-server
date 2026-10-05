@@ -14,6 +14,7 @@
 // It also prints the derived auto lengths the README quotes.
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include "check.h"
@@ -58,14 +59,26 @@ void check_sizes_qwen38() {
   CHECK_EQ(p.kv_k, size_t{536870912});
   CHECK_EQ(p.kv_v, size_t{536870912});
   CHECK_EQ(p.total(), size_t{1240465536});
-  const runtime::DecodeScratchSizes d = runtime::DecodeScratchDims::sizes(16384, q);
+  // v1's attn_part strides every 64-position block of the cache (B70_DECODE_ATTN=v1).
+  const runtime::DecodeScratchSizes d =
+      runtime::DecodeScratchDims::sizes(16384, q, runtime::DecodeAttn::V1);
   CHECK_EQ(d.attn_part, size_t{50724864});
   CHECK_EQ(d.partials, size_t{8912896});
   CHECK_EQ(d.logits, size_t{7946240});
   CHECK_EQ(d.total(), size_t{68652864});
   // 128k (spec 6): KV 8,589,934,592, attn_part 24 x 2048 x 8 x 258 x 4.
   CHECK_EQ(runtime::PersistentDims::sizes(131072, q).kv_k * 2, size_t{8589934592ull});
-  CHECK_EQ(runtime::DecodeScratchDims::sizes(131072, q).attn_part, size_t{405798912});
+  CHECK_EQ(runtime::DecodeScratchDims::sizes(131072, q, runtime::DecodeAttn::V1).attn_part,
+           size_t{405798912});
+  // v2 (the default): [24][32][8][258] fp32 whatever max_len is, 6,340,608 B.
+  for (uint32_t L : {4096u, 16384u, 131072u, 262144u})
+    CHECK_EQ(runtime::DecodeScratchDims::sizes(L, q, runtime::DecodeAttn::V2).attn_part,
+             size_t{24} * 32 * 8 * 258 * 4);
+  CHECK_EQ(runtime::DecodeScratchDims::sizes(16384, q, runtime::DecodeAttn::V2).total(),
+           size_t{68652864 - 50724864 + 6340608});
+  // The default follows B70_DECODE_ATTN, as capture does.
+  unsetenv("B70_DECODE_ATTN");
+  CHECK_EQ(runtime::DecodeScratchDims::sizes(131072, q).attn_part, size_t{6340608});
   const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, q);
   CHECK_EQ(s.eager(), size_t{699514776});
   CHECK_EQ(runtime::PrefillScratchDims::sizes(131072, q).eager(), size_t{699514776});
@@ -117,7 +130,13 @@ void check_sizes_agnes() {
 // first prefill): "memory: model 18.116 GB, kv 8.590 GB, decode state 0.590 GB,
 // prefill scratch 0.700 GB, int8 0.085 GB, total 28.081 GB of 32.530 GB".
 void check_spec6_line() {
+  // Measured before spec 10, so with v1's attn_part: the plan reproduces it under v1.
+  setenv("B70_DECODE_ATTN", "v1", 1);
   const runtime::MemoryPlan p = runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights);
+  unsetenv("B70_DECODE_ATTN");
+  // With v2 (the default) the same engine plans 0.399 GB less decode state.
+  CHECK_EQ(runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights).decode_state,
+           size_t{590450624} - 405798912 + 6340608);
   CHECK_EQ(p.rope, size_t{131072} * 256);
   CHECK_EQ(p.model, size_t{18116331520ull});   // the 16384 load re-tabled to 131072
   CHECK_EQ(p.kv, size_t{8589934592ull});
