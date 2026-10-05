@@ -1,0 +1,6 @@
+<|ifm|begin_of_text|><|ifm|im_start|>user
+Hello<|ifm|im_end|><|ifm|im_start|>assistant
+<ifm|think>
+</ifm|think>Hi there.<|ifm|im_end|><|ifm|im_start|>user
+Bye.<|ifm|im_end|><|ifm|im_start|>assistant
+<ifm|think>
