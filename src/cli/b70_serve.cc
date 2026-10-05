@@ -391,13 +391,13 @@ int run(int argc, char** argv) {
   cli::check_kv_cache(kv_cache, pp_path);   // spec 12b: before the device is touched
 
   const std::string snapshot_dir = loader::resolve_snapshot(path);
-  // Spec 18b: dispatch on config.json's model_type. K2-Horizon (`k2_horizon`) decodes through
-  // b70-decode from spec 18b; the server prefills every request, and K2's prefill is spec 18c
-  // and its serving (template, tool calls, int8 head by default) 18d - refused here by name,
-  // before the device, rather than as an unknown architecture inside the loader.
-  // Spec 18d: the chat format (template variables, reasoning tags, tool-call syntax) follows
-  // model_type too; K2's is wired here (server/chat_format.h) and serves once 18c lifts the
-  // refusal below.
+  // Spec 18b: dispatch on config.json's model_type. K2-Horizon (`k2_horizon`) runs through
+  // b70-decode (decode spec 18b, prefill 18c); serving it needs spec 18d's engine side - a K2
+  // engine behind server::EngineIface, KV-only prefix-cache snapshots - which is not built, so
+  // it is refused here by name, before the device, rather than as an unknown architecture
+  // inside the loader. Spec 18d's host side is: the chat format (template variables, reasoning
+  // tags, tool-call syntax) follows model_type (server/chat_format.h; anything but k2_horizon
+  // is the Qwen path Qwen3.8, Agnes and Ornith share), set here for when the refusal goes.
   if (std::ifstream cf(snapshot_dir + "config.json"); cf) {
     std::stringstream cs;
     cs << cf.rdbuf();
@@ -406,9 +406,10 @@ int run(int argc, char** argv) {
       options.chat_format = server::ChatFormat::for_model_type(cj.value("model_type", std::string()));
     if (cj.is_object() && cj.value("model_type", std::string()) == "k2_horizon")
       throw std::runtime_error(
-          "K2-Horizon (model_type k2_horizon) is not served yet: its prefill is spec 18c and its "
-          "serving spec 18d. b70-decode decodes it (spec 18b): b70-decode " + path +
-          " --ids <file> --n <N>");
+          "K2-Horizon (model_type k2_horizon) is not served yet: spec 18d's engine side (a K2 "
+          "engine behind the server, KV-only prefix-cache snapshots) is not built; its chat "
+          "template, tool calls and EOS are (spec 18d host side). b70-decode runs it (specs "
+          "18b, 18c): b70-decode " + path + " --ids <file> --n <N> [--prefill]");
   }
   const std::vector<uint32_t> eos = eos_ids(snapshot_dir);
   const uint32_t trained = loader::trained_context(snapshot_dir);
