@@ -56,12 +56,15 @@ files, which is what makes the comparison fair. Full protocol and every row is i
 ## Scope
 
 One model family and one math path, on purpose. **So far the engine is built and
-tuned for one model only: the dense Qwen3.8-27B** (no mixture of experts). It is a
+tuned for one model only: the dense Qwen3.8-27B** (measured on the card). It is a
 hybrid: 48 gated delta net layers and 16 full attention layers. Everything here
 is built around that shape and around W4A16: the kernel shapes, the captured
 decode list and the tuning tables are that model's. Other checkpoints of the
-same architecture load, but nothing is tuned for them, and MoE models (the next
-candidate is K2-Horizon) are not supported yet. Specialisation is the whole
+same architecture load, but nothing is tuned for them. The first mixture-of-experts
+model, Ornith 1.5 35B-A3B (spec 15: 256 experts, top-8, ~3 B active), decodes,
+prefills and is served by `b70-serve` with its own chat template, tool calls and
+MTP head (spec 15c-15e) - all written without the card and **not yet run on it**,
+and no int4 Ornith checkpoint is published yet (spec 15a). Specialisation is the whole
 strategy, since a general engine cannot hardcode the things this one hardcodes.
 
 ## The checkpoint, and why group size 64
@@ -216,7 +219,7 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
 | `--queue N` | `4` | requests waiting behind the running one before new ones are refused |
 | `--prefix-cache-gb auto\|N` | `auto` | The prefix cache's size in GiB of **system RAM** (pinned host memory, not the card's VRAM): every prefill is written through to it so a later request with the same history restores instead of re-prefilling (spec 7). Pinned pages cannot be swapped, so `auto` takes the smallest of 32 GiB, half the machine's RAM, and the RAM available after the model is loaded minus 8 GiB, and turns the cache off below 4 GiB; the startup line says what it chose and why. `N` pins exactly N GiB (with a warning if that is more than is available); `0` = off, every request prefills in full. |
 | `--prefix-split-last` | off | `on`/`off`, chat requests only. A thinking model's next turn repeats this prompt but diverges at its **last** id: the template ended this prompt with `<think>\n`, and the history re-renders that turn as `<think>\n\n</think>` when the client drops the reasoning (opencode does). By default the prompt-end snapshot sits one id past that point, so the next turn falls back to the 2048-id block below and re-prefills up to 2047 ids it already had (~1 s per turn). With the flag the prompt is prefilled to len - 1, snapshotted there, and the last id runs as one decode step, so the next turn (or a retry of the same prompt) restores exactly where it diverges. The cost: that one id goes through decode's kernels, so a near-tie first token can differ from a run without the cache (same quality, not bitwise reproducible). **On for agentic sessions; off for benchmarks and the golden gates.** |
-| `--mtp off\|1\|2\|3\|auto` | `off` | Speculative decoding with the model's built-in MTP head: the head guesses the next few tokens, the main model checks all the guesses in one pass, and every correct guess is a token for free (output is unchanged either way). A number is a fixed count of guesses per step. `auto` picks 0-3 per step from how often that request's guesses were right recently: about 3 on tool calls and code, 1 on prose, 0 when guessing does not pay. Loads the head (+1.4 GB at 16k context, ~2.3 GB at 128k, derived). `0` is the same as `off`. |
+| `--mtp off\|1\|2\|3\|auto` | `off` | Speculative decoding with the model's built-in MTP head: the head guesses the next few tokens, the main model checks all the guesses in one pass, and every correct guess is a token for free (output is unchanged either way). A number is a fixed count of guesses per step. `auto` picks 0-3 per step from how often that request's guesses were right recently: about 3 on tool calls and code, 1 on prose, 0 when guessing does not pay. Loads the head (+1.4 GB at 16k context, ~2.3 GB at 128k, derived; Ornith's MoE head +0.5 GB of weights, its experts quantised to int4 at load, and the full 262144 context still fits with it). On Ornith `auto` uses Qwen3.8's cost table until the card measures Ornith's (spec 15e). `0` is the same as `off`. |
 | `--mtp-max N` | `3` | With `--mtp auto`: the most guesses it may pick (1-3). |
 | `--spec off\|mtp\|lookup` | `off` | Which speculative proposer guesses the next tokens. `mtp` is the MTP head above (`--mtp auto` unless `--mtp` says otherwise). `lookup` needs no extra model: the guesses are the continuation of the longest earlier repeat of the last few tokens in the request (agentic edits re-quote files and tool output). The main model still checks every guess, so output is unchanged. On the tool-call set it projects ~1.44x alone, below `--mtp auto` (spec 19e; the opencode recording decides); it is the only option for models without an MTP head. Not yet run on the card. `--spec-min-match N` (default 3) is the shortest repeat that counts. |
 | `--lm-head bf16\|int8` | `int8` | the output head: int8 per row, quantised at load (spec 9), or the checkpoint's bf16 |
