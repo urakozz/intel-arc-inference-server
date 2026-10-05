@@ -12,6 +12,7 @@ canonical on-device layout at load time.**
 | **MXFP4** | Rejected on this card. FP4 DPAS is refused by name by the backend and every microscaling entry point crashes the compiler, so MXFP4 would have to be emulated as int4 plus an ALU decode and out-of-instruction block scales. At 4.25 bits/weight effective it is also byte-identical to GPTQ g64, so it buys nothing for a bandwidth-bound decode either. |
 | **int4 GPTQ** | Supported - same tensor layout as AutoRound (below). |
 | **int4 AutoRound** | **Primary.** Best accuracy at 4 bits of the options we have checkpoints for. |
+| **int4 compressed-tensors** (llm-compressor `pack-quantized`) | Supported when **symmetric**, group 64 or 128: the same nibbles as GPTQ (q + 8, low nibble first) stored [N][K/8], with scales [N][K/g]. The loader transposes both into the GPTQ layout exactly and needs no kernel change ([13-loader.md](13-loader.md), "compressed-tensors symmetric checkpoints"). Asymmetric checkpoints, activation-order permutations and other group sizes are refused (spec 20 §9). Loading one prints a note that our AutoRound g64 is the recommended format. |
 
 ## AutoRound vs GPTQ: a config difference, not a layout difference
 

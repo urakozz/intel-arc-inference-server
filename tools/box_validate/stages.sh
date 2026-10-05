@@ -1157,6 +1157,29 @@ st_r17_k0() {
 }
 
 # ======================================================================================
+row 18 "compressed-tensors symmetric pack-quantized loader (branch ct-sym-loader; spec 20 §9 as built, docs/13)"
+rownote 18 "A real symmetric checkpoint on the card (r18.ct) needs RedHatAI/Qwen3.8-27B-INT4 downloaded (~20 GB); its golden prompts need its own CPU reference (tools/oracle/golden.sh with ORACLE_MODEL pointing at it). Both are manual."
+stage r18.host 18 default cpu - - "host: ct_loader_test (exact repack g64 / g128 x f16 / bf16, the note, the refusals, the real configs), quant_test, ornith_repack_test and k2_repack_test (compressed-tensors MoE layer and K2 checkpoint == the GPTQ bytes)"
+st_r18_host() {
+  run_tests '^(ct_loader_test|quant_test|ornith_repack_test|k2_repack_test)$'
+  finish
+}
+stage r18.g64 18 default gpu qwen,oracle_qwen - "the g64 checkpoint unchanged through the reworked classify / consumed sets: load_checkpoint_test (0 unconsumed, no compressed-tensors note) and golden_gate_test"
+st_r18_g64() {
+  run_tests '^(load_checkpoint_test|golden_gate_test)$'
+  jgrab g64 'load_checkpoint_test' 'unconsumed|compressed-tensors|W check|OK|FAIL'
+  finish
+}
+stage r18.ct 18 manual - - - "RedHatAI/Qwen3.8-27B-INT4 (sym int4 g128, bf16 scales): the load note, 0 unconsumed, the W check, decode, its golden prompts against its own CPU reference"
+st_r18_ct() {
+  say "uvx --from huggingface_hub hf download RedHatAI/Qwen3.8-27B-INT4"
+  say "flock ~/b70-gpu.lock build/src/cli/b70-decode RedHatAI/Qwen3.8-27B-INT4 --bench --tg 64 2>&1 | tee r18.ct.log   # the ONE 'converting compressed-tensors pack-quantized (g128, 400 linears)' note; 0 unconsumed; 32 fp8 KV scales dropped; W check within 2 % of the g64 checkpoint's"
+  say "flock ~/b70-gpu.lock build/src/cli/b70-decode RedHatAI/Qwen3.8-27B-INT4 --mtp 1 --bench --tg 64   # the bf16 MTP head (15 tensors) loads beside it"
+  say "ORACLE_MODEL=models--RedHatAI--Qwen3.8-27B-INT4 OUT_DIR=oracle-out-rh-int4 tools/oracle/golden.sh   # its own CPU reference (tools/oracle/README.md)"
+  say "flock ~/b70-gpu.lock build/tests/golden_gate_test oracle-out-rh-int4 tests/golden/prompts <its snapshot dir>"
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx labels belong to their rows)"
 st_x_rest() {
