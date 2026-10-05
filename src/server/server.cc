@@ -154,7 +154,14 @@ Server::Outcome Server::generate(const Request& r,
   Outcome outcome;
   std::string prompt;
   try {
-    prompt = r.chat ? deps_.tmpl.render(r.messages, r.tools, r.enable_thinking) : r.prompt;
+    if (!r.chat) {
+      prompt = r.prompt;
+    } else if (opts_.chat_format.template_kwargs()) {   // spec 18d (K2-Horizon)
+      check_template_kwargs(opts_.chat_format, r.template_kwargs);
+      prompt = deps_.tmpl.render_with_kwargs(r.messages, r.tools, r.enable_thinking, r.template_kwargs);
+    } else {
+      prompt = deps_.tmpl.render(r.messages, r.tools, r.enable_thinking);
+    }
   } catch (const std::exception& error) {
     throw BadRequest(error.what());
   }
@@ -215,15 +222,11 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     pending.erase(0, d.text.size());
     emit(d);
   };
-  // Chat: the text goes through the tool-call parser (spec 7 §3.5). With thinking
-  // on, the prompt ends in "<think>\n" and the output opens with reasoning.
-  std::unique_ptr<OutputStream> parser;
-  if (r.chat) {
-    const std::string tag = "<think>\n";
-    const bool thinking =
-        prompt.size() >= tag.size() && prompt.compare(prompt.size() - tag.size(), tag.size(), tag) == 0;
-    parser = std::make_unique<OutputStream>(thinking, r.tools);
-  }
+  // Chat: the text goes through the tool-call parser (spec 7 §3.5) of the model's format
+  // (spec 18d, server/chat_format.h). Qwen: with thinking on, the prompt ends in "<think>\n"
+  // and the output opens with reasoning; K2-Horizon: <ifm|think>\n and its own call syntax.
+  std::unique_ptr<OutputParser> parser;
+  if (r.chat) parser = make_output_parser(opts_.chat_format, prompt, r.template_kwargs, r.tools);
   const auto route = [&](const std::vector<Delta>& deltas) {
     for (const Delta& d : deltas) {
       if (d.kind == Delta::Content) {

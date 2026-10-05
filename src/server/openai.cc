@@ -156,6 +156,7 @@ Request parse_request(const std::string& body, bool chat) {
       if (kwargs.contains("enable_thinking")) {
         out.enable_thinking = bool_field(kwargs, "enable_thinking");
       }
+      out.template_kwargs = kwargs;
     }
   } else {
     if (!request.contains("prompt")) invalid("missing prompt");

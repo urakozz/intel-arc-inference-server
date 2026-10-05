@@ -37,14 +37,23 @@ struct Delta {
   uint32_t index = 0;  // Call: its position among this output's calls
 };
 
+// Spec 18d: what the server reads a chat request's generated text with - this file's Qwen
+// XML OutputStream, or K2-Horizon's (server/toolcall_k2.h); server/chat_format.h picks one
+// per model and request.
+struct OutputParser {
+  virtual ~OutputParser() = default;
+  virtual std::vector<Delta> push(const std::string& piece) = 0;  // a detokenised piece
+  virtual std::vector<Delta> finish() = 0;                         // end of generation
+};
+
 // Incremental form of parse_output: the concatenation of the deltas of any split of
 // a text equals parse_output of the whole text (call ids aside, which each stream
 // draws itself). Holds back only what may still be a tag.
-class OutputStream {
+class OutputStream : public OutputParser {
  public:
   OutputStream(bool thinking, nlohmann::json tools);
-  std::vector<Delta> push(const std::string& piece);  // a detokenised piece
-  std::vector<Delta> finish();                         // end of generation
+  std::vector<Delta> push(const std::string& piece) override;  // a detokenised piece
+  std::vector<Delta> finish() override;                         // end of generation
 
  private:
   enum class State { ReasoningStart, Reasoning, Body, Call };
@@ -65,5 +74,13 @@ class OutputStream {
 // A call's parameters converted by the tool's schema; exposed for tests.
 nlohmann::json convert_value(const std::string& value, const std::string& function,
                              const std::string& key, const nlohmann::json& tools);
+
+// Shared with the K2 parser (spec 18d): how the tool's schema types `key` of `function` -
+// 1 a string (or string | null), 0 another type, -1 no type (no such tool or key, or no
+// "type"); and the call ids, "call_" + 24 hex chars from a per-stream seed.
+int schema_string_type(const std::string& function, const std::string& key,
+                       const nlohmann::json& tools);
+uint64_t new_call_seed();
+std::string make_call_id(uint64_t seed, uint32_t index);
 
 }  // namespace server

@@ -159,6 +159,16 @@ json convert_value(const std::string& value, const std::string& function, const 
   return parsed;
 }
 
+int schema_string_type(const std::string& function, const std::string& key, const json& tools) {
+  const json* type = schema_type(function, key, tools);
+  if (type == nullptr) return -1;
+  return is_string_type(*type) ? 1 : 0;
+}
+
+uint64_t new_call_seed() { return next_seed(); }
+
+std::string make_call_id(uint64_t seed, uint32_t index) { return call_id(seed, index); }
+
 OutputStream::OutputStream(bool thinking, json tools)
     : state_(thinking ? State::ReasoningStart : State::Body),
       tools_(std::move(tools)),
