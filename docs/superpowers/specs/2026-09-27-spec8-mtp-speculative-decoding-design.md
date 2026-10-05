@@ -410,6 +410,17 @@ when the target's next id lies outside V′.
     launches.
   - The compact head's bytes are not in `LoadReport::total()`. The memory line gains a
     `draft vocab <GB>` term only when it is on.
+  - **Memory plan (spec 6 §10).** `runtime::plan` counts the compact head and id table as
+    `MemoryComponents::draft_vocab`. The size comes from `loader::draft_vocab_bytes`, the
+    formula the loader allocates with: |V′| × 5120 × {1 B plus a 4 B row scale for int8, 2 B
+    for bf16}, plus 4 B of id per row. `MtpDims::sizes` counts the compact logits (fp32
+    [|V′|]). `cli::settle` reads the vocabulary off the loaded model, so `--max-len auto`
+    plans around it. Derived on the 32.53 GB card at the default reserve, Qwen3.8 with MTP at
+    128k:
+    - int8 head: ~160k instead of ~170k;
+    - bf16 head: ~132k instead of ~152k.
+
+    `memory_plan_box_test --draft-vocab` holds allocation equal to plan.
   - `rank.py` weights generated ids 4x and the session-new part of each prompt 1x. That is a
     choice, not a measurement.
   - **`--mtp auto`'s cost table with V′ (derived).** A draft costs its body (the MTP head's
