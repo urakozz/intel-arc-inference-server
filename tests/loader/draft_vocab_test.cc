@@ -7,7 +7,8 @@
 //      added tokens;
 //   4. the compact head's gather (loader::gather_int8_tiled_rows): compact row j is the
 //      full head's row ids[j], byte for byte, in gemv_i8w's tiled layout - equal to
-//      quantising the selected bf16 rows directly - whatever the thread count.
+//      quantising the selected bf16 rows directly - whatever the thread count; and the
+//      bf16 head's gather (gemv_bf16's layout) equal to tiling the selected rows.
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -19,6 +20,7 @@
 
 #include "check.h"
 #include "common/bf16.h"
+#include "common/repack.h"
 #include "loader/draft_vocab.h"
 #include "loader/lm_head_int8.h"
 
@@ -229,6 +231,32 @@ void test_gather() {
   }));
 }
 
+// The bf16 head (`--lm-head bf16 --draft-vocab`): gathering rows of the tiled head equals
+// tiling the selected row-major rows (common::repack_bf16_tiled, the loader's layout).
+void test_gather_bf16() {
+  const uint32_t N = 96, K = 256;
+  const std::vector<uint16_t> w = random_rows(N, K, 78);
+  std::vector<uint16_t> full(size_t(N) * K);
+  common::repack_bf16_tiled(w.data(), K, N, full.data());
+  const std::vector<uint32_t> ids = loader::select_draft_vocab({95, 80}, {16}, {15, 47, 33}, N, 48);
+  const uint32_t n = 48;
+  std::vector<uint16_t> sel(size_t(n) * K);
+  for (uint32_t j = 0; j < n; ++j)
+    std::memcpy(&sel[size_t(j) * K], &w[size_t(ids[j]) * K], size_t(K) * 2);
+  std::vector<uint16_t> ref(size_t(n) * K);
+  common::repack_bf16_tiled(sel.data(), K, n, ref.data());
+  for (unsigned threads : {1u, 3u, 8u}) {
+    std::vector<uint16_t> out(size_t(n) * K, 0xABCD);
+    loader::gather_bf16_tiled_rows(full.data(), K, N, ids.data(), n, out.data(), threads);
+    CHECK(out == ref);
+  }
+  std::vector<uint16_t> out(size_t(n) * K);
+  std::vector<uint32_t> bad = ids;
+  bad[0] = N;
+  CHECK(throws([&] { loader::gather_bf16_tiled_rows(full.data(), K, N, bad.data(), n, out.data()); }));
+  CHECK(throws([&] { loader::gather_bf16_tiled_rows(full.data(), K, N, ids.data(), 40, out.data()); }));
+}
+
 }  // namespace
 
 int main() {
@@ -239,6 +267,7 @@ int main() {
   test_ranked_file();
   test_added_tokens();
   test_gather();
+  test_gather_bf16();
   std::puts("draft_vocab_test OK");
   return 0;
 }

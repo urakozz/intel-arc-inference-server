@@ -711,14 +711,15 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                 : (lm_form == LmHeadForm::Int8 ? model::WeightKind::Int8 : model::WeightKind::Bf16));
   const bool lm_int4 = lm_row.kind == model::WeightKind::Int4;
   const bool lm_int8 = lm_row.kind == model::WeightKind::Int8;
-  // Spec 8 §11: a draft vocabulary is a subset of the MTP draft's int8 head, at a size the
-  // compact GEMV and argmax are compiled for - all knowable before a byte is read.
+  // Spec 8 §11: a draft vocabulary is a subset of the MTP draft's head (int8 or bf16), at a
+  // size the compact GEMV and argmax are compiled for - all knowable before a byte is read.
   if (draft_vocab.size != 0) {
     if (!mtp)
       throw std::runtime_error("--draft-vocab drafts with the MTP head: it needs --mtp");
-    if (!lm_int8)
+    if (lm_int4)
       throw std::runtime_error(
-          "--draft-vocab gathers rows of the int8 lm_head (spec 8 §11); it needs --lm-head int8");
+          "--draft-vocab gathers rows of an int8 or bf16 lm_head (spec 8 §11); this "
+          "checkpoint ships it int4");
     if (std::find(std::begin(kDraftVocabSizes), std::end(kDraftVocabSizes), draft_vocab.size) ==
         std::end(kDraftVocabSizes))
       throw std::runtime_error("--draft-vocab " + std::to_string(draft_vocab.size) +
@@ -799,25 +800,38 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   }
   m.linears.emplace(std::make_pair(kTopLevel, model::LinearId::LmHead),
                     load_linear(ctx, imm, set, view, desc, "", lm_row, st, m.report));
-  // Spec 8 §11: V' and its compact head, gathered from the host copy of the int8 head
-  // `load_linear` just quantised and uploaded (st.i8 / st.i8_scales still hold it), so no
-  // byte comes back from the device. The selection masks at the model's vocab_used, the
-  // same bound the main argmax masks at (argmax.cl VOCAB_USED).
+  // Spec 8 §11: V' and its compact head, gathered from the host copy of the head
+  // `load_linear` just made and uploaded - st.i8 / st.i8_scales for int8 (the
+  // quantisation), st.bf_tiled for bf16 (the tiling) - so no byte comes back from the
+  // device and the compact rows are byte-for-byte the uploaded head's. The selection masks
+  // at the model's vocab_used, the bound the main argmax masks at (argmax.cl VOCAB_USED).
   if (draft_vocab.size != 0) {
     const auto d0 = std::chrono::steady_clock::now();
     const model::GemvShape& lm = lm_row.shape;
+    const size_t elem = lm_int8 ? 1 : 2;   // int8 or bf16
     auto dv = std::make_unique<DraftVocab>(DraftVocab{
-        {l0::Mem(ctx, l0::MemKind::Device, size_t(draft_vocab.size) * lm.K), nullptr,
-         model::GemvShape{lm.K, draft_vocab.size, 1, 0}, model::WeightKind::Int8},
+        {l0::Mem(ctx, l0::MemKind::Device, size_t(draft_vocab.size) * lm.K * elem), nullptr,
+         model::GemvShape{lm.K, draft_vocab.size, 1, 0},
+         lm_int8 ? model::WeightKind::Int8 : model::WeightKind::Bf16},
         l0::Mem(ctx, l0::MemKind::Device, size_t(draft_vocab.size) * sizeof(uint32_t)),
         select_draft_vocab(draft_vocab.added, draft_vocab.eos, draft_vocab.ranked, desc.vocab_used,
                            draft_vocab.size, &m.report.draft_vocab_counts)});
-    std::vector<int8_t> rows(size_t(draft_vocab.size) * lm.K);
-    std::vector<float> scales(draft_vocab.size);
-    gather_int8_tiled_rows(st.i8.data(), st.i8_scales.data(), lm.K, lm.N, dv->host_ids.data(),
-                           draft_vocab.size, rows.data(), scales.data());
-    imm.copy(dv->head.mem.ptr(), rows.data(), rows.size());
-    dv->head.scales = std::make_unique<l0::Mem>(upload(ctx, imm, scales.data(), scales.size() * 4));
+    if (lm_int8) {
+      std::vector<int8_t> rows(size_t(draft_vocab.size) * lm.K);
+      std::vector<float> scales(draft_vocab.size);
+      gather_int8_tiled_rows(st.i8.data(), st.i8_scales.data(), lm.K, lm.N, dv->host_ids.data(),
+                             draft_vocab.size, rows.data(), scales.data());
+      imm.copy(dv->head.mem.ptr(), rows.data(), rows.size());
+      dv->head.scales =
+          std::make_unique<l0::Mem>(upload(ctx, imm, scales.data(), scales.size() * 4));
+    } else {
+      if (st.bf_tiled.size() < size_t(lm.N) * lm.K)
+        throw std::runtime_error("--draft-vocab: the bf16 staging buffer does not hold lm_head");
+      std::vector<uint16_t> rows(size_t(draft_vocab.size) * lm.K);
+      gather_bf16_tiled_rows(st.bf_tiled.data(), lm.K, lm.N, dv->host_ids.data(),
+                             draft_vocab.size, rows.data());
+      imm.copy(dv->head.mem.ptr(), rows.data(), rows.size() * 2);
+    }
     imm.copy(dv->ids.ptr(), dv->host_ids.data(), dv->host_ids.size() * sizeof(uint32_t));
     m.report.draft_vocab_bytes = dv->bytes();
     m.report.draft_vocab_seconds =
@@ -932,10 +946,10 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   if (m.draft_vocab) {
     const DraftVocabCounts& c = r.draft_vocab_counts;
     std::printf("  draft vocab %s: %u ids (%u added/EOS + %u ranked + %u lowest), %zu B %.3f GB"
-                " - int8 rows + fp32 scales + u32 ids, gathered from lm_head in %.0f ms"
-                " (spec 8 §11; not in total)\n",
+                " - %s + u32 ids, gathered from lm_head in %.0f ms (spec 8 §11; not in total)\n",
                 draft_vocab_name(m.draft_vocab->size()).c_str(), m.draft_vocab->size(), c.forced,
                 c.ranked, c.lowest, r.draft_vocab_bytes, r.draft_vocab_bytes / gb,
+                lm_int8 ? "int8 rows + fp32 scales" : "bf16 rows",
                 r.draft_vocab_seconds * 1e3);
   }
 

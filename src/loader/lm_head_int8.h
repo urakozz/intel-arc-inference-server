@@ -57,4 +57,11 @@ void gather_int8_tiled_rows(const int8_t* q_tiled, const float* scales, uint32_t
                             const uint32_t* ids, uint32_t n, int8_t* out_tiled,
                             float* out_scales, unsigned threads = 0);
 
+// The same gather for a bf16 head in gemv_bf16's layout (common::repack_bf16_tiled,
+// [n_tile][k_octet][8 k][16 n]). That layout puts element (k, n) where the int8 one does,
+// counted in elements - (n / 16) * 16K + 16k + n % 16 - so the two gathers are one
+// algorithm over a 1- or 2-byte element; bf16 has no scales.
+void gather_bf16_tiled_rows(const uint16_t* w_tiled, uint32_t K, uint32_t N, const uint32_t* ids,
+                            uint32_t n, uint16_t* out_tiled, unsigned threads = 0);
+
 }  // namespace loader

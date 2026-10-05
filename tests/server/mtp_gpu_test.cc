@@ -19,9 +19,9 @@
 //
 // Head options (both modes): [--lm-head bf16|int8] (default bf16, the checkpoint's head,
 // as before) and, spec 8 §11, [--draft-vocab 32k|64k|128k [--draft-vocab-ids FILE]] - the
-// drafts over a reduced vocabulary V' (needs --lm-head int8; the loader builds V' from the
-// snapshot's tokenizer.json added tokens and generation_config.json EOS ids, as b70-serve
-// does). The gate then IS §11's M3 gate: greedy with V' against the plain step() loop of
+// drafts over a reduced vocabulary V', from the head in either form (the loader builds V'
+// from the snapshot's tokenizer.json added tokens and generation_config.json EOS ids, as
+// b70-serve does). The gate then IS §11's M3 gate: greedy with V' against the plain step() loop of
 // the same engine, which the draft vocabulary does not touch (it runs no draft list) and
 // which A11 showed identical to `--draft-vocab off`'s MTP output - so identity here is
 // "128k equals off", token for token, at every K. It also checks that every draft list
@@ -362,10 +362,6 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "unknown argument %s\n", a.c_str());
       return 2;
     }
-  }
-  if (head.draft_vocab != 0 && head.lm_head != loader::LmHeadForm::Int8) {
-    std::fprintf(stderr, "mtp_gpu_test: --draft-vocab needs --lm-head int8\n");
-    return 2;
   }
   try {
     if (bench_k >= 0) return bench(argv[1], backend, uint32_t(bench_k), sampled, depth, head);

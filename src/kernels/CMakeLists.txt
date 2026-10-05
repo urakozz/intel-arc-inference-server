@@ -397,14 +397,17 @@ if(B70_MTP)
   add_ocloc_kernel(prep_silu_mul_M1_S1 SOURCE ${PREP_CL} DEFINES M=1 SILU_S=1)
 
   # Spec 8 §11: the draft over a reduced vocabulary V' (`b70-serve --draft-vocab`), at
-  # |V'| = 32768 / 65536 / 131072 - the M = 1 int8 GEMV over the compact head (gemv_i8w.cl
-  # unchanged, a new N only) and the mapped argmax + scatter (draft_vocab.cl), one binary
-  # per size holding both stages. Additive: no existing binary's command line moves, and
-  # an engine without a draft vocabulary binds none of them. The head's K is the model's
-  # hidden (5120 on Qwen3.8 and Agnes), so these serve both.
+  # |V'| = 32768 / 65536 / 131072 - the M = 1 GEMV over the compact head in the head's
+  # form (gemv_i8w.cl / gemv_bf16.cl unchanged, a new N only; bf16 at lm_head's {64, 1}
+  # tiling, which kernels::gemv_bf16_tiling gives every N >= 2048) and the mapped argmax +
+  # scatter (draft_vocab.cl), one binary per size holding both stages. Additive: no
+  # existing binary's command line moves, and an engine without a draft vocabulary binds
+  # none of them. The head's K is the model's hidden (5120 on Qwen3.8 and Agnes), so these
+  # serve both.
   set(DRAFT_VOCAB_CL ${CMAKE_CURRENT_SOURCE_DIR}/draft_vocab.cl)
   foreach(NV 32768 65536 131072)
     add_gemv_i8w_variant(1 5120 ${NV})
+    add_gemv_bf16_variant(1 5120 ${NV} 64 1)
     add_ocloc_kernel(dv_argmax_N${NV} SOURCE ${DRAFT_VOCAB_CL} DEFINES ${CTRL_DEFINES} NV=${NV})
   endforeach()
 endif()
