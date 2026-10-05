@@ -48,8 +48,12 @@ class PrefixCache {
   // hash(parent_hash, ids, n): the hash chain step. Empty = the default (splitmix over the
   // ids); the tests inject a constant to force collisions.
   using HashFn = std::function<uint64_t(uint64_t, const uint32_t*, size_t)>;
+  // `kv_form` (spec 12b): the engine's KV cache form (EngineIface::kv_form, 0 = bf16), the
+  // root of every hash chain - an entry's bytes are save_kv's host layout IN THAT FORM, so
+  // the same ids under another form are another key and never a hit. 0 leaves every hash
+  // what it was.
   PrefixCache(size_t budget_bytes, size_t state_bytes, size_t kv_bytes_per_pos, uint32_t block,
-              HostAlloc& alloc, HashFn hash = {});
+              HostAlloc& alloc, HashFn hash = {}, uint64_t kv_form = 0);
   ~PrefixCache();
   PrefixCache(const PrefixCache&) = delete;
   PrefixCache& operator=(const PrefixCache&) = delete;

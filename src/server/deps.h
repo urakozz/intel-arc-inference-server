@@ -57,6 +57,8 @@ struct EngineIface {
   virtual uint32_t block() { return 2048; }                  // runtime::Engine::kBlock
   virtual size_t state_bytes() { return unsupported<size_t>(); }
   virtual size_t kv_bytes(uint32_t) { return unsupported<size_t>(); }
+  // Spec 12b: the KV cache's form (0 = bf16, 1 = int8), which keys the prefix cache.
+  virtual uint64_t kv_form() { return 0; }
   virtual void save_state(void*) { unsupported<int>(); }
   virtual void load_state(const void*, uint32_t) { unsupported<int>(); }
   virtual void save_kv(uint32_t, uint32_t, void*) { unsupported<int>(); }

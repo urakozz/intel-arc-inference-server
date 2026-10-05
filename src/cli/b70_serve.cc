@@ -108,7 +108,14 @@ void usage() {
                "                             --mtp auto the draft costs scale with |V'|\n"
                "                             (derived; an explicit --mtp-cost draft= wins)\n"
                "                 [--draft-vocab-ids FILE]   ranked ids, most frequent first\n"
-               "                             (tools/draft_vocab/rank.py over --log-requests logs)\n");
+               "                             (tools/draft_vocab/rank.py over --log-requests logs)\n"
+               "                 [--kv-cache bf16|int8]   the KV cache's storage (spec 12):\n"
+               "                             bf16 (default) or int8 - every K and V row rotated\n"
+               "                             (256-point Hadamard) and stored as int8 with one\n"
+               "                             fp16 scale per token and head: half the KV memory,\n"
+               "                             so --max-len auto reaches about twice the context\n"
+               "                             (Qwen3.8: the trained 262144). Accuracy gates on\n"
+               "                             the card pending; needs the l0 / l0-int8 backends\n");
 }
 
 uint32_t parse_u32(const char* what, const std::string& value) {
@@ -164,6 +171,7 @@ int run(int argc, char** argv) {
   std::string path;
   server::Options options;
   cli::MaxLenArg max_len_arg;   // spec 6 §10: auto unless --max-len N
+  runtime::KvCache kv_cache = runtime::default_kv_cache();   // spec 12b: --kv-cache
   size_t mem_reserve = size_t(runtime::kDefaultReserveGb * 1e9);
   uint32_t device = l0::Context::kFromEnv;
   std::string pp_backend_arg;
@@ -244,6 +252,8 @@ int run(int argc, char** argv) {
         throw std::runtime_error("--draft-vocab expects off, 32k, 64k or 128k, got '" + v + "'");
     } else if (arg == "--draft-vocab-ids") {
       draft_vocab_ids = value(i, "--draft-vocab-ids");
+    } else if (arg == "--kv-cache") {   // spec 12b
+      kv_cache = cli::parse_kv_cache_arg(value(i, "--kv-cache"));
     } else if (!arg.empty() && arg[0] == '-') {
       usage();
       throw std::runtime_error("unknown option '" + arg + "'");
@@ -303,6 +313,10 @@ int run(int argc, char** argv) {
   if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
     throw std::runtime_error("--pp-backend expects sycl-tla, l0 or l0-int8, got '" + pp_backend_arg + "'");
 
+  const runtime::PrefillPath pp_path = cli::prefill_path(
+      true, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
+  cli::check_kv_cache(kv_cache, pp_path);   // spec 12b: before the device is touched
+
   const std::string snapshot_dir = loader::resolve_snapshot(path);
   const std::vector<uint32_t> eos = eos_ids(snapshot_dir);
   const uint32_t trained = loader::trained_context(snapshot_dir);
@@ -329,10 +343,8 @@ int run(int argc, char** argv) {
   model::require_prefill(*model.desc);
   // Spec 6 §10: auto plans the largest max_len that fits and re-tables the model; an
   // explicit N is held to the same plan. Both print the plan's breakdown.
-  const uint32_t max_len = cli::settle(
-      context, model, max_len_arg, mem_reserve,
-      cli::prefill_path(true, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend()));
-  runtime::Engine engine(context, std::move(model), max_len);
+  const uint32_t max_len = cli::settle(context, model, max_len_arg, mem_reserve, pp_path, kv_cache);
+  runtime::Engine engine(context, std::move(model), max_len, /*debug_resid=*/false, kv_cache);
   if (have_pp_backend) engine.set_prefill_backend(pp_backend);
   // Prefill setup at load, not in the first request: on l0-int8 this is the
   // one-time rotated column-scale pass (spec 5 T2).
@@ -373,12 +385,13 @@ int run(int argc, char** argv) {
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
                options.host.c_str(), options.port, max_len);
   print_eos(eos);
-  std::fprintf(stderr, ", prefill backend %s (SYCL component %s), mtp %s%u, lm_head %s%s%s\n",
+  std::fprintf(stderr, ", prefill backend %s (SYCL component %s), mtp %s%u, lm_head %s%s%s, kv cache %s\n",
                runtime::prefill_backend_name(engine.prefill_backend()),
                runtime::prefill::sycl_available() ? "on" : "off", mtp_auto ? "auto, max " : "",
                mtp_k, loader::lm_head_form_name(lm_head),
                engine.draft_vocab() ? ", draft vocab " : "",
-               engine.draft_vocab() ? loader::draft_vocab_name(engine.draft_vocab()).c_str() : "");
+               engine.draft_vocab() ? loader::draft_vocab_name(engine.draft_vocab()).c_str() : "",
+               runtime::kv_cache_name(engine.kv_cache()));
   if (mtp_auto) {
     const server::MtpCost& c = options.mtp_adaptive.cost;
     std::fprintf(stderr, "mtp auto: cost verify M=1..%zu", c.verify.size());
