@@ -555,4 +555,66 @@ if(B70_KV8)
   endforeach()
 endif()
 
+# ==== Spec 18b: K2-Horizon decode (model::k2()) ============================= (begin) ====
+# Additive only: no existing source is edited, so every binary above keeps its name, its
+# command line and its bytes (tools/kernel_cmdlines' diff: additions only). K2-only
+# kernels live in src/kernels/k2/ and are named `k2_*` with every shape define in the name
+# (src/kernels/k2_kernels.h is the host half); the reused sources run at K2's shapes:
+#   gemv.cl         q||k||gate||v 2560x10240, q||k||gate||v_router 2560x9280 (S2 L0),
+#                   o_proj 4096x2560, gate||up 2560x12288, down 6144x2560 (S4 L0) - all
+#                   PROVISIONAL cells (model::K2Desc's {S, layout}, no GEMV_* tuning
+#                   defines) until 18b Task 4's sweep
+#   gemv_bf16.cl    the MoE router 2560 -> 128 rows ({16, 16}), lm_head 2560 -> 250624
+#   gemv_i8w.cl     the int8 lm_head (spec 9)
+#   prep.cl         prep_res_fold at K 2560 (stage A of the grouped norm, unchanged)
+#   embed_gather.cl / argmax.cl at K2's vocabulary 250624 (fully used)
+# What K2's decode list binds (runtime/k2/k2_capture.cc): 717 launches = embed + 3 dense
+# layers x 12 + 45 MoVA/MoE layers x 15 + 5.
+option(B70_K2 "build the K2-Horizon decode variants (spec 18b)" ON)
+if(B70_K2)
+  set(K2_CL ${CMAKE_CURRENT_SOURCE_DIR}/k2)
+  add_gemv_variant(1 2560 10240 2 0)    # q||k||gate||v        PROVISIONAL S2 L0
+  add_gemv_variant(1 2560 9280 2 0)     # q||k||gate||v_router PROVISIONAL S2 L0
+  add_gemv_variant(1 4096 2560 4 0)     # o_proj               PROVISIONAL S4 L0
+  add_gemv_variant(1 2560 12288 4 0)    # dense gate||up       PROVISIONAL S4 L0
+  add_gemv_variant(1 6144 2560 4 0)     # dense down           PROVISIONAL S4 L0
+  add_gemv_bf16_variant(1 2560 128 16 16)       # the MoE router, rows 100..127 zero
+  add_gemv_bf16_variant(1 2560 250624 64 1)     # lm_head bf16
+  add_gemv_i8w_variant(1 2560 250624)           # lm_head int8 (spec 9)
+  add_prep_res_fold(1 2560 0 20)        # after embed_gather and after every MoE block
+  add_prep_res_fold(1 2560 4 20)        # after o_proj and the dense down (S4)
+  add_ocloc_kernel(k2_embed_gather_M1_D2560_V250624 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                   DEFINES ${CTRL_DEFINES} M=1 HIDDEN=2560 VOCAB=250624)
+  set(K2_ARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=250624 VOCAB_USED=250624)
+  add_ocloc_kernel(k2_argmax_stage1_M1_N250624_V250624 SOURCE ${ARGMAX_CL}
+                   DEFINES ${K2_ARGMAX_DEFINES} M=1)
+  add_ocloc_kernel(k2_argmax_stage2_N250624 SOURCE ${ARGMAX_CL} DEFINES ${K2_ARGMAX_DEFINES})
+  # k2_prep.cl: the grouped norm's stage B (2 groups of 1280, plain w), the dense SiLU x up,
+  # and the attention prep (q / k RoPE over all 128 dims, the gate, the cache write).
+  add_ocloc_kernel(k2_norm_M1_K2560_G20_W20_NG2 SOURCE ${K2_CL}/k2_prep.cl
+                   DEFINES M=1 K=2560 NORM_G=20 NORM_WGS=20 NORM_GROUPS=2)
+  add_ocloc_kernel(k2_silu_M1_I6144_S4 SOURCE ${K2_CL}/k2_prep.cl DEFINES M=1 SILU_I=6144 SILU_S=4)
+  set(K2_PREP_DEFINES ${CTRL_DEFINES} M=1 QKV_S=2 Q_HEADS=32 KV_HEADS=8 HD=128)
+  add_ocloc_kernel(k2_attn_prep_M1_N10240_S2_Q32KV8_V SOURCE ${K2_CL}/k2_prep.cl
+                   DEFINES ${K2_PREP_DEFINES} QKV_N=10240 V_FROM_PARTIALS=1)
+  add_ocloc_kernel(k2_attn_prep_M1_N9280_S2_Q32KV8 SOURCE ${K2_CL}/k2_prep.cl
+                   DEFINES ${K2_PREP_DEFINES} QKV_N=9280 V_FROM_PARTIALS=0)
+  # k2_attn.cl: decode attention v2 at head_dim 128 / GQA 4 with the softplus gate.
+  add_ocloc_kernel(k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8 SOURCE ${K2_CL}/k2_attn.cl
+                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} Q_HEADS=32 KV_HEADS=8)
+  # k2_moe.cl: the sigmoid router (MoVA's over the fused GEMV's v_router columns, the MoE's
+  # over its bf16 GEMV), the MoE block (100 + 1 shared, top-8), MoVA's value experts.
+  add_ocloc_kernel(k2_route_M1_E64_T4_N9280_O9216_S2 SOURCE ${K2_CL}/k2_moe.cl
+                   DEFINES M=1 ROUTE_E=64 ROUTE_K=4 ROUTE_WG=64 ROUTE_LN=9280 ROUTE_LOFF=9216
+                           ROUTE_LS=2 ROUTE_SCALE=2.5f)
+  add_ocloc_kernel(k2_route_M1_E100_T8_N128_O0_S1 SOURCE ${K2_CL}/k2_moe.cl
+                   DEFINES M=1 ROUTE_E=100 ROUTE_K=8 ROUTE_WG=128 ROUTE_LN=128 ROUTE_LOFF=0
+                           ROUTE_LS=1 ROUTE_SCALE=2.5f)
+  add_ocloc_kernel(k2_moe_M1_E100_T8_D2560_I768 SOURCE ${K2_CL}/k2_moe.cl
+                   DEFINES M=1 MOE_E=100 MOE_K=8 HIDDEN=2560 INTER=768 UP_KS=4 DN_KS=2)
+  add_ocloc_kernel(k2_mova_M1_E64_T4_D2560_N1024 SOURCE ${K2_CL}/k2_moe.cl
+                   DEFINES ${CTRL_DEFINES} M=1 MOVA_E=64 MOVA_K=4 MOVA_D=2560 MOVA_N=1024 MOVA_KS=4)
+endif()
+# ==== Spec 18b: K2-Horizon decode ============================================ (end) ====
+
 add_subdirectory(prefill)

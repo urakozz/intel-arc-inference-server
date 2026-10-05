@@ -117,14 +117,17 @@ left undeclared there and fail the build by name rather than run on a wrong
 stand-in. Three drivers ship: `gemv_i8w_run [M K N]` (the int8 `lm_head`, against
 its formula at a K-scaled tolerance; it is bit-exact on the UHD 630),
 `argmax_run [M VOCAB VOCAB_USED]` (both stages and the control-block bookkeeping,
-exact, with a tie at the top of a row and a larger logit in the masked tail) and
+exact, with a tie at the top of a row and a larger logit in the masked tail),
 `pf_moe_run` (spec 15d: the prefill MoE block's sort at Ornith's shape on random,
 skewed and adversarial routes, the bf16 / int8 gathers, the expert dequant with an
 empty expert skipped and the combine, all exact against `tests/kernels/pf_moe_ref.h`;
-its grouped GEMMs are DPAS and stay on the box). A new driver is a
-`tools/mac/clrun/<kernel>_run.cc` with a `main()` over `clrun::Device`, `Program`
-and `Buffer`, and its name in section 5's loop in `tools/mac_check.sh`, which builds
-the drivers into `build/mac-check/clrun/` with `src/` and `tests/` on the include
+its grouped GEMMs are DPAS and stay on the box) and `k2_run` (spec 18b: K2-Horizon's
+portable kernels - the grouped norm, SiLU x up, both attention-prep builds, the sigmoid
+routers with their padded lanes, the MoE gate||up / down and MoVA's value experts - at
+K2's real shapes against `tests/kernels/k2_ref.h`; it also takes two host sources). A new
+driver is a `tools/mac/clrun/<kernel>_run.cc` with a `main()` over `clrun::Device`,
+`Program` and `Buffer`, and its name in section 5's loop in `tools/mac_check.sh`, which
+builds the drivers into `build/mac-check/clrun/` with `src/` and `tests/` on the include
 path (so a driver can use a test's host reference).
 `B70_MAC_CL_DEVICE=AMD` picks another device by name; the CPU device rejects
 argmax's 256-wide work-group.
