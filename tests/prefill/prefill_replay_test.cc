@@ -82,7 +82,8 @@ int main(int argc, char** argv) {
         CHECK_EQ(token, first_token);
         CHECK_EQ(engine.pos(), 4096u);
         CHECK_EQ(engine.prefill_launches() - count,
-                 2 * runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 2048) + 5);
+                 2 * runtime::prefill::step_chunk_launches(*engine.model().desc,
+                                                           runtime::PrefillBackend::L0, 2048) + 5);
         std::printf("mode=%s run=%d wall_ms=%.3f tokens_per_second=%.3f first_token=%u\n",
                     replay ? "recorded" : "immediate", run, ms, 4096000.0 / ms, token);
         std::fflush(stdout);

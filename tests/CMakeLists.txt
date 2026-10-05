@@ -1607,3 +1607,78 @@ if(B70_KV8)
     b70_kv8_twin(prefix_gpu_mtp)
   endif()
 endif()
+
+# --- Spec 15d: Ornith 1.5 35B-A3B prefill (label `ornith`) ---------------------------------
+# Written blind on the Mac (docs/superpowers/plans/box-validation-queue.md row 12 is the
+# order to run these in). The host reference test runs everywhere; the rest need a B70, and
+# the checkpoint ones SKIP (77) until the Ornith int4 checkpoint (15a) and its golden set
+# `oracle-out-ornith` are on the machine, as 15c's do.
+#   the reference itself: pf_moe_ref_test (host) - the sort's invariants and tile bound,
+#       row independence, the combine == decode's, the whole chunk against decode's chain;
+#   the kernels: pf_moe_test (a B70, no checkpoint) - sort / gathers / combine exact,
+#       grouped == dense GEMMs bitwise, row independence and replay on the card;
+#   R3 (prefill): prefill_gate_test on oracle-out-ornith, l0 and l0-int8, one chunk and
+#       chunks of 16;
+#   continuation: prefill_split_test on Ornith (splits at multiples of 64 bitwise; the other
+#       bars are Qwen3.8's, PROVISIONAL here until the box measures Ornith's);
+#   the walk, determinism + replay, chunking, prefill-vs-decode routes and tokens, R2 on the
+#       prefill path: ornith_prefill_test.
+add_executable(pf_moe_ref_test kernels/pf_moe_ref_test.cc)
+target_include_directories(pf_moe_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME pf_moe_ref_test COMMAND pf_moe_ref_test)
+if(B70_ORNITH)
+  set(B70_ORNITH_PREFILL_KERNELS
+    kernel_pf_res_fold_K2048_SP0_G20 kernel_pf_res_fold_K2048_SP1_G20
+    kernel_pf_norm_finish_K2048_G20_W20 kernel_pf_embed_gather_D2048 kernel_pf_ab_proj_D2048
+    kernel_pf_dequant_slab_K2048_N12288_L1 kernel_pf_dequant_slab_K4096_N2048_L0
+    kernel_pf_dequant_slab_K2048_N9216_L0 kernel_pf_quant_had_K2048 kernel_pf_quant_had_K4096
+    kernel_pf_gdn_conv_GK16V32 kernel_pf_gdn_wy_GK16V32 kernel_pf_gdn_scan_GK16V32
+    kernel_pf_gated_head_GK16V32 kernel_pf_attn_prep_q16_Q16KV2 kernel_pf_attn_Q16KV2
+    kernel_pf_flash_attn_Q16KV2 kernel_pf_moe_router_K2048_N272 kernel_pf_moe_E256_T8_D2048_I512
+    kernel_pf_moe_gemm_K2048_N1024_SILU kernel_pf_moe_gemm_i8_K2048_N1024_SILU
+    kernel_pf_moe_gemm_K512_N2048
+    kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1 kernel_pf_gemm_T0 kernel_pf_gemm_T0_SILU
+    kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU
+    ${B70_ORNITH_DECODE_KERNELS})
+
+  add_executable(pf_moe_test kernels/pf_moe_test.cc)
+  target_include_directories(pf_moe_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(pf_moe_test PRIVATE b70_l0)
+  b70_target_kernel_dir(pf_moe_test)
+  add_dependencies(pf_moe_test ${B70_ORNITH_PREFILL_KERNELS})
+  add_test(NAME pf_moe_test COMMAND pf_moe_test)
+  set_tests_properties(pf_moe_test PROPERTIES LABELS "ornith;prefill" TIMEOUT 1800)
+
+  add_executable(ornith_prefill_test golden/ornith_prefill_test.cc)
+  target_include_directories(ornith_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(ornith_prefill_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(ornith_prefill_test)
+  endif()
+  add_dependencies(ornith_prefill_test ${B70_ORNITH_PREFILL_KERNELS})
+  add_dependencies(prefill_gate_test ${B70_ORNITH_PREFILL_KERNELS})
+  add_dependencies(prefill_split_test ${B70_ORNITH_PREFILL_KERNELS})
+  foreach(b l0 l0-int8)
+    set(_near 0)
+    if(b STREQUAL "l0-int8")
+      set(_near 1)   # the l0-int8 gate's standing near-tie allowance (spec 5), as Qwen3.8's
+    endif()
+    add_test(NAME prefill_gate_ornith_${b}_test COMMAND prefill_gate_test
+      ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT}
+      prose,code,cjk 0 ${b} ${_near})
+    add_test(NAME prefill_gate_ornith_${b}_c16_test COMMAND prefill_gate_test
+      ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT}
+      prose,code,cjk 16 ${b} ${_near})
+    add_test(NAME prefill_split_ornith_${b}_test COMMAND prefill_split_test ${B70_ORNITH_SNAPSHOT}
+      ${B70_ORNITH_PROMPTS_DIR}/long32k.ids ${b})
+    add_test(NAME ornith_prefill_${b}_test COMMAND ornith_prefill_test ${B70_ORNITH_SNAPSHOT}
+      ${B70_ORNITH_PROMPTS_DIR} ${b} ${B70_ORNITH_ORACLE_DIR})
+    set_tests_properties(prefill_gate_ornith_${b}_test prefill_gate_ornith_${b}_c16_test
+      PROPERTIES LABELS "checkpoint;golden;prefill;ornith" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+    set_tests_properties(prefill_split_ornith_${b}_test ornith_prefill_${b}_test PROPERTIES
+      LABELS "checkpoint;prefill;ornith" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      TIMEOUT 3600)
+  endforeach()
+
+endif()
