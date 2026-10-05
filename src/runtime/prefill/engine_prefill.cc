@@ -106,8 +106,11 @@ void Engine::prepare_prefill() {
   // any recording: cached by weight, so after the first call this loop only
   // looks them up, and no recorded list ever holds the host finish of
   // pf_colmax_rot.
+  // Not a||b: prefill runs it as a bf16 GEMV (pf_ab_proj) on every backend, over the
+  // checkpoint's bf16 weight or (spec 15 §13) an int4 a||b's bf16 copy - never through h8.
   for (const auto& [key, w] : model_.linears)
-    if (key.second != model::LinearId::LmHead && w.kind == model::WeightKind::Int4)
+    if (key.second != model::LinearId::LmHead && key.second != model::LinearId::AB &&
+        w.kind == model::WeightKind::Int4)
       pfx_->int8->scales(pfx_->cx, pfx_->kc, w);
   // Spec 15d: and every MoE layer's expert gate||up array, the same way.
   prefill::moe_prepare_int8(pfx_->cx, pfx_->kc, *pfx_->int8, model_);

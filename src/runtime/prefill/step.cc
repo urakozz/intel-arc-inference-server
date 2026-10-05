@@ -164,8 +164,10 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
 
     if (L.kind == model::LayerKind::GDN) {
       pf_linear(cx, kc, s, m.linears.at({l, LinearId::QkvZ}), s.x.as<uint16_t>(), C, backend, q);
-      {   // a||b: a bf16 GEMV, not a linear -- 128 columns is no DPAS shape.
-        const DeviceWeight& w = m.linears.at({l, LinearId::AB});
+      {   // a||b: a bf16 GEMV, not a linear -- 128 columns is no DPAS shape. The bf16
+          // weight: the checkpoint's own, or (spec 15 §13) an int4 a||b's copy the loader
+          // dequantised with the prefill dequant's arithmetic (loader::prefill_ab).
+        const DeviceWeight& w = loader::prefill_ab(m, l);
         cx.launch(kc(kernels::pf_ab_proj_variant(d.hidden), "pf_ab_proj"), w.shape.N / 16, (C + 7) / 8, 1,
                   {PtrArg(w.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(s.ab_out.ptr()), arg_val(C)});
         profile_wait(cx, Phase::kAbGdn);

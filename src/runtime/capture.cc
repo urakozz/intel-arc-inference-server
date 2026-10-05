@@ -774,7 +774,18 @@ class Capture {
     res_norm(layer == 0 ? 0u : d_.ffn_fold_s(),
              at(m_.layer_small[layer].norms, sl_.norms_off_input));
     gemv(layer, LinearId::QkvZ, b_.x.ptr());
-    gemv_bf16(layer, LinearId::AB, b_.x.ptr(), b_.ab_out);
+    // a||b in the checkpoint's form (spec 15 §13, ModelDesc::ab): bf16 through gemv_bf16
+    // ({16, 16}), or - when the checkpoint quantised in_proj_a / in_proj_b, as the published
+    // Ornith int4 export does - int4 g64 through gemv.cl at S 1. Either writes fp32 [M][128]
+    // straight at ab_out (gemv.cl's out[(s*M + m)*N + n] at s = 0), the layout gdn_step
+    // reads at AB_STRIDE; one launch either way, so every launch count is unchanged.
+    if (m_.linears.at({layer, LinearId::AB}).kind == model::WeightKind::Int4) {
+      require(m_.linears.at({layer, LinearId::AB}).shape.S == 1,
+              "an int4 a||b must be an S = 1 GEMV: gdn_step reads ab_out, not partials");
+      gemv(layer, LinearId::AB, b_.x.ptr(), b_.ab_out);
+    } else {
+      gemv_bf16(layer, LinearId::AB, b_.x.ptr(), b_.ab_out);
+    }
     // gdn_step(ctrl, qkvz_partials, ab_out, gdn_small, conv_ring, state, gdn_o)
     // - src/kernels/gdn_step.cl (Task 4), grid (48 v-heads, 4 state-column
     // chunks), WG 256. `conv_ring` and `state` are this GDN layer's slices;

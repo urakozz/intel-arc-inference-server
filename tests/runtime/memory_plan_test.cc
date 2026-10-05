@@ -126,15 +126,16 @@ void check_sizes_agnes() {
            size_t{8} * (54 * (16384 + 5120 + 38912 + 5120) + 18 * (14336 + 5120 + 38912 + 5120)));
 }
 
-// Spec 15c: Ornith 1.5 35B-A3B with the int8 head, derived from the descriptor (no int4
-// checkpoint exists yet): 30 GDN layers x (qkv||z 2048 x 12288 int4 + scales 13,369,344,
-// out_proj 4096 x 2048 4,456,448, a||b bf16 128 x 2048 524,288 with its padding, norms
-// 16,384, GDN block 131,584) + 10 FA layers x (q||k||v 2048 x 9216 10,027,008, o_proj
-// 4,456,448, norms 16,384, FA block 2,048) + 40 MoE layers x 430,604,288
-// (loader::moe_layer_bytes) + embed 248320 x 2048 x 2 + the int8 head 2048 x 248320 +
-// 248320 x 4 + the final norm 8,192.
-constexpr size_t kOrnithInt8Weights = 30ull * 18498048 + 10ull * 14501888 + 40ull * 430604288 +
-                                      1017118720ull + 509552640ull + 8192;   // 19,450,811,392
+// Spec 15c: Ornith 1.5 35B-A3B with the int8 head, derived from the descriptor and - spec
+// 15 §13 - the int4 checkpoint's a||b form: 30 GDN layers x (qkv||z 2048 x 12288 int4 +
+// scales 13,369,344, out_proj 4096 x 2048 4,456,448, a||b int4 layout 1 at 128 columns
+// 139,264 with its zero padding + its bf16 prefill copy 128 x 2048 524,288, norms 16,384,
+// GDN block 131,584) + 10 FA layers x (q||k||v 2048 x 9216 10,027,008, o_proj 4,456,448,
+// norms 16,384, FA block 2,048) + 40 MoE layers x 430,604,288 (loader::moe_layer_bytes) +
+// embed 248320 x 2048 x 2 + the int8 head 2048 x 248320 + 248320 x 4 + the final norm 8,192.
+// (A checkpoint that kept a||b bf16 loads 139,264 B less per GDN layer: no int4 row.)
+constexpr size_t kOrnithInt8Weights = 30ull * 18637312 + 10ull * 14501888 + 40ull * 430604288 +
+                                      1017118720ull + 509552640ull + 8192;   // 19,454,989,312
 
 void check_sizes_ornith() {
   const model::ModelDesc& o = model::ornith();

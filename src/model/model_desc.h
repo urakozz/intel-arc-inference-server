@@ -95,16 +95,30 @@ struct ModelDesc {
   // lm_head's int4 and int8 rows (the bf16 one is table[LmHead]); `lm_head(kind)`
   // picks. Per descriptor because K is the model's hidden size (spec 15b).
   FusedLinear lm_int4{}, lm_int8{};
+  // The GDN a||b projection's int4 row (the bf16 one is table[AB]); `ab(kind)` picks.
+  // Like lm_head, a||b's kind is a property of the CHECKPOINT, not of the model: Qwen3.8's
+  // and Agnes's exports keep in_proj_a / in_proj_b bf16, the published Ornith int4
+  // checkpoint quantises them (int4 g64 sym, spec 15 §13). The loader classifies by
+  // content (loader/ab.h) and the capture binds by the loaded weight's kind: gemv_bf16 for
+  // the bf16 row, gemv.cl at S 1 for this one - both write fp32 [M][128] at ab_out, the
+  // real 2 x v-heads columns zero-padded to 128 (gdn_step's AB_STRIDE). A separate member,
+  // not a ninth table entry, for lm_int4's reason: LinearId::AB stays one ordinal and every
+  // table walk (buffer sizes, the h8 scales, the variant names) sees the bf16 row.
+  FusedLinear ab_int4{};
   // `W` with a bf16 lm_head: the bytes a decode step streams (int4 qweight +
   // scales + bf16 per-layer tensors + lm_head), the loader's 2% cross-check
   // (docs/13). Qwen3.8: 15.519 GB, measured (docs/03). Agnes: 18.344 GB, summed
   // from the checkpoint's safetensors headers over the same four categories
   // (derived - not yet a load on the card; spec 14 validation checklist).
+  // Ornith: 2.345 GB, summed from the int4 checkpoint's headers the same way, with a
+  // MoE layer's per-token share - the router and shared gate, the shared expert and
+  // top_k routed experts (all the same size) - in place of a dense MLP (spec 15 §13).
   double doc_w = 0;
   // The ids the tokenizer defines - the greedy argmax masks every lm_head row at or
   // above it (argmax.cl's VOCAB_USED). Qwen3.8: 248077 (Qwen35::kVocabUsed). Agnes's
   // tokenizer.json adds 12 specials at 248077..248088 (<|agnes_bos|> .. <|agnes_reserved_3|>;
-  // same vocab and merges otherwise), so 248089 (spec 14).
+  // same vocab and merges otherwise), so 248089 (spec 14). Ornith's int4 checkpoint's
+  // tokenizer.json defines Qwen3.8's 248077 (spec 15 §13).
   uint32_t vocab_used = 0;
   // True for a descriptor whose GEMV tuning rows were copied, not measured (spec
   // 14 §6: Agnes's two new shapes until the box sweep replaces them).
@@ -172,6 +186,9 @@ struct ModelDesc {
   const FusedLinear& linear(LinearId id) const;
   const GemvShape& shape(LinearId id) const { return linear(id).shape; }
   const FusedLinear& lm_head(WeightKind kind) const;
+  // a||b's row for a checkpoint that ships in_proj_a / in_proj_b in `kind`: Bf16 is
+  // table[AB] (the same object as linear(AB)), Int4 is ab_int4. Int8 throws.
+  const FusedLinear& ab(WeightKind kind) const;
   // All `layers` layer descriptors, fully populated, in index order.
   std::vector<LayerDesc> layer_descs() const;
 

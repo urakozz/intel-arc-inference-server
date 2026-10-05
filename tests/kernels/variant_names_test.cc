@@ -20,12 +20,16 @@ struct Names {
   std::string embed, gdn, gdn_slots, gated, attn_prep, attn_prep_s1, attn_dec, attn_red, attn_v2;
   std::string pf_embed, pf_ab, pf_gated, pf_conv, pf_wy, pf_scan, pf_prep_q16, pf_attn, pf_flash;
   std::string silu, res_fold, norm_finish, gemv_qkvz, gemv_ab, argmax;
+  // Spec 15 §13: a||b's int4 form, bound when the checkpoint quantised in_proj_a / in_proj_b
+  // (capture.cc gdn_layer picks by the loaded weight's kind).
+  std::string gemv_ab_int4;
 };
 
 Names names(const ModelDesc& d) {
   const unsigned k = d.gdn_k_heads, v = d.gdn_v_heads, q = d.fa_q_heads, kv = d.fa_kv_heads;
   const model::GemvShape& qz = d.shape(model::LinearId::QkvZ);
   const model::GemvShape& ab = d.shape(model::LinearId::AB);
+  const model::GemvShape& ab4 = d.ab(model::WeightKind::Int4).shape;
   return {kernels::embed_gather_variant(1, d.hidden),
           kernels::gdn_step_variant(1, k, v),
           kernels::gdn_step_slots_variant(2, d.gdn_layers, k, v),
@@ -49,7 +53,8 @@ Names names(const ModelDesc& d) {
           kernels::prep_norm_finish_variant(1, d.hidden, 20, 20),
           kernels::gemv_variant(1, qz.K, qz.N, qz.S, qz.layout),
           kernels::gemv_bf16_variant(1, ab.K, ab.N, kernels::gemv_bf16_tiling(ab.N)),
-          kernels::argmax_stage1_variant(1, d.vocab_used)};
+          kernels::argmax_stage1_variant(1, d.vocab_used),
+          kernels::gemv_variant(1, ab4.K, ab4.N, ab4.S, ab4.layout)};
 }
 
 // main's names (c104247), spelled out: the Qwen3.8 binaries every list binds.
@@ -118,7 +123,13 @@ int main() {
   CHECK_EQ(o.norm_finish, std::string("prep_norm_finish_M1_K2048_G20_W20"));
   CHECK_EQ(o.gemv_qkvz, std::string("gemv_M1_K2048_N12288_S1_L1"));
   CHECK_EQ(o.gemv_ab, std::string("gemv_bf16_M1_K2048_N128_C16_S16"));
-  CHECK_EQ(o.argmax, std::string("argmax_stage1_M1_V248070"));
+  // Spec 15 §13: the int4 checkpoint's a||b (the bf16 name above is a checkpoint that keeps
+  // in_proj_a / in_proj_b bf16), and its tokenizer's 248077 ids - Qwen3.8's argmax binary.
+  CHECK_EQ(o.gemv_ab_int4, std::string("gemv_M1_K2048_N128_S1_L1"));
+  CHECK_EQ(o.argmax, std::string("argmax_stage1_M1"));
+  // Qwen3.8's / Agnes's checkpoints ship a||b bf16: their int4 row exists in the descriptor
+  // (the same contract at K 5120) but no binary is built for it - a capture would name it.
+  CHECK_EQ(q.gemv_ab_int4, std::string("gemv_M1_K5120_N128_S1_L1"));
   // Spec 15c: the MoE block's binaries (src/kernels/CMakeLists.txt's Ornith block) and the
   // geometry capture.cc binds them with: the router || shared-gate GEMV at 272 columns,
   // moe_gate_up over 9 slots x 16 work-groups of 256, moe_down over 128 n-tiles of 288.
