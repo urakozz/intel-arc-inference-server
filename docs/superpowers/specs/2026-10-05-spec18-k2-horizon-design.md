@@ -459,3 +459,97 @@ near-tie margin 2e-2, weights 1/32) are set from the box's first printed distrib
 attention row, o_proj, 4 value experts, 8 + 1 MoE experts) - pp4096 ~38 TFLOP of DPAS (~0.3-0.4 s
 at spec 2.1's measured rates) plus the per-chunk expert dequant pass (~0.3 s per chunk) plus the
 flash attention (~0.05 s): ~1.2 s, ~3,400 t/s, the dequant pass the largest term. Task 3 measures.
+
+## 12. 18d host side as built (2026-10-05, branch `spec18d-k2-serving-host`)
+
+Written on the Mac without the box: plan 18d Task 1's host half - Review Focus 1 (template), 2
+(tool calls) and 5 (EOS); rebased on 18c (§11). The engine half of serving (a K2 engine behind
+`b70-serve`, Review Focus 3's KV-only snapshots, K4, the comparison rows, the record) is not built:
+it needs 18c's prefill validated on the card first, so `b70-serve` still refuses K2 before the
+device, now with K2's chat format wired behind the refusal.
+
+**Template (Review Focus 1).** The served (int4) repo's `chat_template.jinja` (`60c364d9…`,
+51,584 B, repo commit `0e38c26c`) renders **byte for byte** as transformers 5.15's
+`apply_chat_template` on 18 message lists (`tests/tokenizer/k2_template_cases.json`, renders by
+`tools/tokenizer/dump_k2.py` in `agnes-ref-img`): plain, thinking, `reasoning_effort` medium / low
+with `think_fast` / `think_faster` history, assistant history without a thinking field and with
+`reasoning_content: null`, list content (`extract_text`), tools in the default markdown
+presentation and in `xml` / `json` presentation, tools without a system message, tool-call
+history in each `tool_call_format` (`xml`, `xml_typed` - its `render_arg_type` over integer,
+array and `anyOf` arguments - and `json`), parallel calls with tool results (string and list
+content), a `"default": null` property and `$defs` / `$ref` schemas (markdown and xml).
+`template_k2_test` = `template_test` over that file (the cases file now may be an object: BOS /
+EOS expected, a tool table, per-case `kwargs`).
+
+It took **renderer changes, no K2 special case**: minja was not Jinja in eight places K2's template
+reaches, and each is now patched in `third_party/minja` (marked "b70 patch (spec 18d)", listed in
+`third_party/VERSIONS` with the old and new header hashes) and tested against Jinja2's own render
+by `minja_ext_test` (`tools/tokenizer/dump_minja_ext.py`): Undefined apart from None (`defined`
+holds for a JSON null - the `default: null` case), `is [not] sameas`, `str.split()` without a
+separator (Python's Unicode whitespace), the `replace` filter, the `dict` global, attribute getters
+whose all-digit parts index (`rejectattr('0', ...)` over `| items` pairs - the `$ref` merge), an
+empty mapping is falsy, the lower-case `none` literal. In `chat-template.hpp` the tool-call
+capability probe also accepts an argument name between tags (`>argument_needle<`): without it minja
+judged K2's template unable to render tool calls and polyfilled the history into JSON content. The
+Qwen3.8 and Agnes template tests stay byte-identical (run on the Mac against their snapshots'
+`chat_template.jinja` / `tokenizer_config.json`). Left as they were, outside every case here: a bare
+None prints as "" (Jinja "None"; changing it would move Qwen's renders), `is sequence` is false for
+strings and mappings, `default` also fires on None. And as for every model, the server holds a
+request in `nlohmann::json`, whose objects are key-sorted: tool schemas and call arguments render
+in sorted key order (the fixtures are rendered from sorted objects, as Agnes's were).
+
+**chat_template_kwargs.** `server::Request::template_kwargs` keeps the request's
+`chat_template_kwargs`; `TemplateIface::render_with_kwargs` / `chat::Template::render(..., kwargs)`
+pass them as template variables beside `enable_thinking` - for models whose `server::ChatFormat`
+reads them, K2 only (Qwen3.8 / Agnes keep reading `enable_thinking` alone, as before). K2's
+`tool_call_format` and `reasoning_effort` are checked first (a bad value is a 400 naming it).
+
+**Tokenizer.** The Rust `tokenizers` 0.22.2 crate loads K2's `tokenizer.json` unchanged (BPE
+250,000 + 626 added, NFC, Split + ByteLevel, the `TemplateProcessing` BOS). `k2_tokenizer_test`
+(`tools/tokenizer/dump_k2.py`'s `k2_tokenizer.json`): vocabulary 250,624 with the added tokens;
+the 22 chat / think / tool tags both ways; 26 texts (prose, code, CJK, Cyrillic, Arabic, emoji,
+NFD input, zero-width characters, digit runs, the tags inline, long runs, empty) - ids without
+and with special tokens (BOS 0 prepended, as HF does), decode with and without them, the
+streamer's pieces; `corpus.txt`'s 10,240 lines (145,440 ids) digest-equal in 10 chunks; three
+chat renders (29 / 330 / 649 ids) equal to `apply_chat_template(tokenize=True)` - the template
+writes the BOS, the server encodes without special tokens, one BOS. The IFM original's
+`tokenizer.json` (differs in `truncation` only) passes too. Registered as `B70_K2_SNAPSHOT_DIR`
+(default: the int4 repo's snapshot in the HF cache; only its small files are read),
+`B70_K2_TOKENIZER_JSON` overrides the tokenizer; absent, disabled on the Mac and SKIP (77)
+elsewhere.
+
+**Tool calls and reasoning (Review Focus 2).** K2's format is not Qwen XML (18a), so
+`server/toolcall_k2.{h,cc}` adds `K2OutputStream` beside the Qwen `OutputStream` (both now an
+`OutputParser`): `xml`, `xml_typed` and `json` in K2's tags; reasoning verbatim up to the close tag
+of the think tag the prompt ended in, or implicitly up to `<ifm|tool_calls>`; content verbatim,
+dropped when only whitespace; each call emitted at its `</ifm|tool_call>`; values typed by the
+tool schema as the Qwen path does (schema strings verbatim, otherwise the trimmed text as JSON),
+`xml_typed`'s stated type where the schema has none; a call that does not parse becomes content
+with its tags; a call cut by the end of generation with a complete name line keeps its complete
+arguments. Read against vLLM's `k2_horizon` tool and reasoning parsers (`vllm-project/vllm` main):
+the same tags, reasoning end, whitespace rule and value typing; ours streams each call at its close
+(vLLM: the whole block at its end), keeps the good calls of a block holding a bad one (vLLM: the
+block becomes content), does not check names against the tools (as our Qwen parser), and treats
+output with no close tag as reasoning (vLLM's streaming path; its non-streaming one says content).
+`toolcall_k2_test`: every split equal to the whole text (byte at a time and random 1-7 byte
+pieces, spec 7a's rule) on every case; the round trip - all 9 assistant turns of the HF renders
+above (7 calls, three formats) parse back to the messages the template rendered; the template's
+examples and the edges; a fuzz of 3000 generated outputs (2034 parse to their generated structure,
+966 cut at random points stream equal to whole). The 36 A4 outputs of Review Focus 2 do not exist
+yet (18a's bf16 A4 run is pending; `tools/toolcall/score.py` reads Qwen XML only).
+
+**Server dispatch (Review Focus 5).** `server::ChatFormat::for_model_type(config.json's
+model_type)` - `k2_horizon` -> K2, anything else -> the Qwen path, unchanged - is
+`server::Options::chat_format`; `make_output_parser` picks the parser and the reasoning tag from
+the rendered prompt's ending (`<ifm|think>\n`, `<ifm|think_fast>\n`, `<ifm|think_faster>\n`) and the
+call syntax from `tool_call_format`. `b70-serve` sets it from `model_type` before its K2 refusal.
+EOS is `generation_config.json`'s `[1, 250019]`, which `b70-serve` already reads for every model.
+`k2_server_test` (mock engine): kwargs reach the template, reasoning / content / typed calls and
+`finish_reason: tool_calls`, both EOS ids stop, streamed frames carry the same as the body, bad
+kwargs are 400s, and the default format renders without kwargs and leaves K2's tags as text.
+
+**What remains of 18d.** A K2 engine behind `server::EngineIface` (an adapter like
+`EngineAdapter`, which is `runtime::Engine`'s: 18c's prefill, step, sampling over 250,624 logits,
+the snapshot calls) and lifting `b70-serve`'s refusal; Review Focus 3 (KV-only snapshots, the store
+keyed by model); a short greedy chat through the server equal to `b70-decode`; K4 (A4 - with a K2
+reader in `tools/toolcall/score.py` - and passkey); the comparison rows; the record.
