@@ -187,14 +187,15 @@ directory path works too.
 ### Serving
 
 ```sh
-# long agentic sessions (opencode and similar): 128k context, prefix cache on (default),
+# long agentic sessions (opencode and similar): the largest context that fits the card
+# (--max-len auto, the default: ~192k with the int8 head, derived), prefix cache on (default),
 # the prompt-end snapshot one id early so each turn restores where the next one diverges
 ./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
-    --host 0.0.0.0 --port 8000 --max-len 131072 --served-name qwen3.8 --prefix-split-last
+    --host 0.0.0.0 --port 8000 --served-name qwen3.8 --prefix-split-last
 
-# the same with MTP speculative decoding, K chosen per request
-./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \\
-    --max-len 131072 --served-name qwen3.8 --mtp auto
+# the same with MTP speculative decoding, K chosen per request (auto context: ~163k, derived)
+./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
+    --served-name qwen3.8 --mtp auto
 
 # measure it the way the vLLM rows were measured
 uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
@@ -209,7 +210,8 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
 | `--host H` | `0.0.0.0` | listen address |
 | `--port P` | `8000` | listen port |
 | `--served-name NAME` | `b70` | model name in the OpenAI API (`/v1/models`, the `model` field) |
-| `--max-len L` | `16384` | context capacity: 16384, 32768 or 131072 (the compiled decode attention); Agnes up to 65536 |
+| `--max-len auto\|L` | `auto` | context capacity. `auto`: the largest multiple of 256 whose memory plan (weights + KV + decode state + prefill scratch, the MTP head's buffers when `--mtp` is on) fits the card with `--mem-reserve-gb` left over, capped by the checkpoint's trained context (`max_position_embeddings`, 262144); the chosen length and the plan are printed at startup (spec 6 §10). Derived at the default reserve with the int8 head: Qwen3.8 ~192k, ~163k with `--mtp`; Agnes ~134k, ~110k with `--mtp`. The full 262144 needs int8 KV (spec 12b) or two cards (spec 16). `L`: any multiple of 256 up to the trained context, refused at startup with the plan's breakdown if it does not fit. |
+| `--mem-reserve-gb G` | `1.5` | device memory the plan leaves free for what it does not count: the driver, kernel modules and command lists, allocator slack (an estimate, not yet confirmed on the box) |
 | `--device N` | `ONEAPI_DEVICE_SELECTOR`, else 0 | which GPU |
 | `--queue N` | `4` | requests waiting behind the running one before new ones are refused |
 | `--prefix-cache-gb N` | `32` | pinned host prefix cache in GiB; `0` = off, every request prefills in full (spec 7) |
@@ -255,7 +257,8 @@ costs on your card (spec 8 §10).
 | `--profile` | - | replay `--steps` instrumented decode steps and print the per-launch anatomy (never a bench row) |
 | `--steps N` | `32` | `--profile`: steps per session |
 | `--repeats R` | `1` | `--profile`: independent sessions, for the spread (R >= 5 before claiming a delta under ~0.3 ms) |
-| `--max-len L` | `16384` | as for `b70-serve` |
+| `--max-len L\|auto` | `16384` | as for `b70-serve`, but 16384 stays the default so bench rows stay comparable |
+| `--mem-reserve-gb G` | `1.5` | as for `b70-serve` |
 | `--device N` | `ONEAPI_DEVICE_SELECTOR`, else 0 | which GPU |
 
 `tools/box.sh` builds and tests on a remote machine over ssh, which is how I
