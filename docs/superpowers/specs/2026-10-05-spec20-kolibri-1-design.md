@@ -203,10 +203,12 @@ forward with the reference, so kernels and capture can be tested before spec 16 
   **int8** g128 (q - z lies in [-15, 15]), but that doubles the bytes, and Kolibri's experts would no
   longer fit two cards. Re-rounding to symmetric int4 adds a second rounding error, the kind of
   shortcut this project rejected.
-- **Not built either: a compressed-tensors symmetric loader.** It would be exact and cheap, but
-  **operator ruling (2026-10-05): the engine supports relevant models in one format, re-quantised by
-  us for the best quality on the B70 (AutoRound int4 g64 symmetric), not every published quant.**
-  Third-party formats are refused by name; a model worth serving gets its own recipe and script
-  (`tools/quantize_*.sh`), as Kolibri does here.
+- **Built: a loader for compressed-tensors symmetric `pack-quantized` checkpoints** (operator
+  ruling, 2026-10-05: exact, loader-only conversions are welcome; new kernel families are not).
+  `weight_packed` int32 [N][K/8] holds the same nibbles as GPTQ's `qweight` (q + 8, low nibble first)
+  transposed, `weight_scale` [N][K/g] is the scales transposed: a repack into the GPTQ layout plus
+  the existing g128 → g64 scale expansion, no kernel change. That covers the common symmetric W4A16
+  releases from llm-compressor. Asymmetric checkpoints, activation ordering (`weight_g_idx` that is
+  not the identity) and any group other than 64 / 128 are refused by name.
 - **For Kolibri:** our own AutoRound g64 symmetric quantisation (§3) is better on German than either
   route, and it is the format every kernel already serves.
