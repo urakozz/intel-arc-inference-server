@@ -89,7 +89,7 @@ ctest -R 'model_desc_test|agnes_fold_test|kernel_table_test|template_agnes_test|
 ctest -R load_agnes_test                                     # device; under the lock
 build/tests/parity_test <dir with Agnes corpus ids>          # P5: re-make corpus.ids with Agnes's tokenizer.json first (tools/tokenizer/dump_parity.py)
 ```
-Pass: `load_agnes_test` OK (72 layers, folded shapes, join readbacks exact, MTP head bound, 131072 refused) and its loader report's W check within 2% (P4); the Rust tokenizer's parity on Agnes's `tokenizer.json`.
+Pass: `load_agnes_test` OK (72 layers, folded shapes, join readbacks exact, MTP head bound, 262400 refused - the trained-context bound that replaced the 65536 ceiling, spec 6 §10) and its loader report's W check within 2% (P4); the Rust tokenizer's parity on Agnes's `tokenizer.json`.
 
 ### 4. GEMV tuning of the two new shapes (P1-P3)
 
