@@ -43,7 +43,8 @@ std::string format_memory(const char* label, const MemoryComponents& c, size_t d
 // What a session's prefill allocates, which is a property of the backend and the
 // attention path (PrefillScratch's lazy accessors, Engine::prepare_prefill):
 //
-//   l0-int8 (default)   Int8State (xq, xs, w8, every int4 linear's column scales); the L0
+//   l0-int8 (default)   Int8State (xq, xs, w8, every int4 linear's column scales - on a MoE
+//                       model also every layer's expert gate||up array, spec 15d); the L0
 //                       slab only with MTP (step_mtp_kv's bf16 linears walk it).
 //   l0                  the slab ([intermediate][1024] bf16), every int4 linear.
 //   sycl-tla            the bf16 dequant scratch and, its attention always being the
@@ -86,6 +87,9 @@ struct MemoryPlan : MemoryComponents {
   // decode MoE scratch (runtime::moe_scratch_layout - inside decode_state). 0 when dense.
   size_t moe_weights = 0;    // in model
   size_t moe_scratch = 0;    // in decode_state
+  // Spec 15d: the MoE prefill scratch (runtime::moe_prefill_layout: routing, sorted rows,
+  // expert activations, the per-chunk weight batch) - inside prefill_scratch. 0 when dense.
+  size_t moe_prefill = 0;
 };
 
 // `kv` (spec 12b, `--kv-cache`): the KV cache's form - its term follows it (bf16: 64 KiB

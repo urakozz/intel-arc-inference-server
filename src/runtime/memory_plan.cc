@@ -64,7 +64,8 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
     // Engine::prepare_prefill: Int8State for the MLP intermediate (down's K), then every
     // int4 linear's rotated column scales, all before the first chunk.
     if (path.backend == PrefillBackend::L0Int8)
-      p.int8 = int8_scratch_sizes(desc.intermediate).total() + int8_scale_bytes(desc);
+      p.int8 = int8_scratch_sizes(prefill_int8_max_k(desc)).total() + int8_scale_bytes(desc);
+    p.moe_prefill = s.moe;   // spec 15d: inside s.eager(), 0 when dense
   }
   return p;
 }
@@ -109,6 +110,10 @@ std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_by
   }
   if (p.moe_weights != 0) {
     std::snprintf(buf, sizeof buf, ", MoE experts %.3f GB in model", p.moe_weights / gb);
+    s += buf;
+  }
+  if (p.moe_prefill != 0) {
+    std::snprintf(buf, sizeof buf, ", MoE prefill %.3f GB in prefill scratch", p.moe_prefill / gb);
     s += buf;
   }
   if (p.prefill_lazy != 0) {
