@@ -223,6 +223,10 @@ __kernel void pf_moe_gemm(__global const uint* restrict tiles, __global const us
   }
 
   // pf_int8.cl's SILU epilogue: atom 0 at nb (a multiple of 32) is gate, atom 1 its up.
+  // The asymmetry with Bb above is deliberate: `B` is the weight BATCH (rebased at b0, hence
+  // e - b0), while `ws` is Int8State::scales_layout1's array over ALL blocks of the layer
+  // (runtime/prefill/moe.cc passes it unrebased), hence the global id e. Rebasing this one
+  // too would read another expert's scales the moment b0 != 0 (spec 15d review).
   __global const float* restrict wse = ws + (size_t)e * N;
   const float wg = as_float(intel_sub_group_block_read((__global const uint*)(wse + nb)));
   const float wu = as_float(intel_sub_group_block_read((__global const uint*)(wse + nb + 16u)));
