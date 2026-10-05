@@ -69,8 +69,9 @@ void usage() {
                "                 [--prefix-split-last]  chat: the last prompt id by a decode replay,\n"
                "                                        the prompt-end snapshot at len - 1 (more hits,\n"
                "                                        not bitwise with a cold run)\n"
-               "                 [--mtp K]   speculative decoding with the MTP head, K drafts\n"
-               "                             per step (1..3; 0 = off, the default). Loads the\n"
+               "                 [--mtp off|1|2|3|auto]   speculative decoding with the MTP\n"
+               "                             head: K guesses per step (off/0 = none, the default;\n"
+               "                             auto = 0..3 per step from the request's own hit rate). Loads the\n"
                "                             head (+0.85 GB weights, + its KV and state slots);\n"
                "                             any --max-len (spec 8 §12).\n"
                "                 [--mtp auto [--mtp-max 3] [--mtp-cost SPEC]]   K per iteration\n"
@@ -179,8 +180,9 @@ int run(int argc, char** argv) {
       const std::string v = value(i, "--mtp");
       mtp_auto = v == "auto";
       if (!mtp_auto) {
-        mtp_k = parse_u32("--mtp", v);
-        if (mtp_k > runtime::Engine::kMaxDraft) throw std::runtime_error("--mtp expects 0..3 or auto");
+        mtp_k = v == "off" ? 0 : parse_u32("--mtp", v);
+        if (mtp_k > runtime::Engine::kMaxDraft)
+          throw std::runtime_error("--mtp expects off, 0..3 or auto");
       }
     } else if (arg == "--mtp-max") {
       mtp_max = parse_u32("--mtp-max", value(i, "--mtp-max"));
