@@ -1,6 +1,8 @@
 #include "loader/quant.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -76,8 +78,9 @@ QuantConfig QuantConfig::parse(const common::json::Value& config_json) {
   // auto-round's `extra_config` replaces `dynamic`: a per-module object, not a
   // regex list, so it can be read exactly instead of approximately. `bits: 16`
   // is an exclusion; `bits: 4` is a module the quantiser claims it packed, and
-  // for those the group size and symmetry MUST match the kernels' - a module
-  // at g128 or asymmetric would dequantise wrong with no other warning. The
+  // for those the group size and symmetry MUST be one the loader implements -
+  // g64, or g128 expanded to g64 at load - since an asymmetric module or any
+  // other group would dequantise wrong with no other warning. The
   // `+:` hazard `dynamic` guards against has no analogue here: a claim that a
   // module is packed is checked against the shipped tensors by
   // `LinearSrc::classify` at every load site.
@@ -101,16 +104,16 @@ QuantConfig QuantConfig::parse(const common::json::Value& config_json) {
       const common::json::Value* sy = rule.find("sym");
       const uint32_t mg = gs ? uint32_t(gs->num()) : q.group_size;
       const bool ms = sy ? sy->boolean() : q.sym;
-      if (mg != 64 || !ms)
+      if ((mg != 64 && mg != 128) || !ms)
         throw std::runtime_error("quantization_config.extra_config['" + module +
                                  "'] is int4 g" + std::to_string(mg) + " sym=" +
                                  (ms ? "true" : "false") +
-                                 ", but the kernels implement g64 symmetric only");
+                                 ", but the loader implements g64 and g128 symmetric only");
       ++q.extra_quantised;
     }
   }
-  if (q.bits != 4 || q.group_size != 64 || !q.sym || q.desc_act)
-    throw std::runtime_error("unsupported quantization: need int4 g64 sym desc_act=false, got bits=" +
+  if (q.bits != 4 || (q.group_size != 64 && q.group_size != 128) || !q.sym || q.desc_act)
+    throw std::runtime_error("unsupported quantization: need int4 g64 or g128 sym desc_act=false, got bits=" +
                              std::to_string(q.bits) + " g=" + std::to_string(q.group_size) +
                              " sym=" + (q.sym ? "true" : "false") +
                              " desc_act=" + (q.desc_act ? "true" : "false"));
@@ -131,12 +134,32 @@ LinearSrc LinearSrc::classify(const SafetensorsSet& set, const std::string& pref
     s.kind = WKind::Int4;
     s.K = uint32_t(qw->second.shape[0]) * 8;
     s.N = uint32_t(qw->second.shape[1]);
-    if (sc->second.shape[0] != s.K / 64 || sc->second.shape[1] != s.N)
-      throw std::runtime_error(prefix + ".scales shape mismatch");
+    // The scales' row count names the group: K/64 rows is g64, K/128 rows is
+    // g128 (the two never coincide for K > 0). Anything else is refused.
+    const uint64_t rows = sc->second.shape[0];
+    if (s.K % 64 != 0 || sc->second.shape[1] != s.N ||
+        (rows != s.K / 64 && !(s.K % 128 == 0 && rows == s.K / 128)))
+      throw std::runtime_error(prefix + ".scales shape [" + std::to_string(rows) + "][" +
+                               std::to_string(sc->second.shape[1]) + "] matches neither g64 [" +
+                               std::to_string(s.K / 64) + "] nor g128 [" +
+                               std::to_string(s.K / 128) + "] rows of N=" + std::to_string(s.N));
     check_align(set.data(qw->second), alignof(uint32_t), prefix + ".qweight");
     check_align(set.data(sc->second), alignof(uint16_t), prefix + ".scales");
     s.qweight = reinterpret_cast<const uint32_t*>(set.data(qw->second));
     s.scales = reinterpret_cast<const uint16_t*>(set.data(sc->second));
+    if (rows != s.K / 64) {
+      // g128 onto the g64 kernels: g64 rows 2j and 2j+1 are g128 row j. Every
+      // weight keeps its own scale, so the dequant is exact; see quant.h.
+      auto e = std::make_shared<std::vector<uint16_t>>(size_t(s.K / 64) * s.N);
+      for (uint32_t j = 0; j < s.K / 128; ++j) {
+        const uint16_t* src = s.scales + size_t(j) * s.N;
+        std::copy_n(src, s.N, e->data() + size_t(2 * j) * s.N);
+        std::copy_n(src, s.N, e->data() + size_t(2 * j + 1) * s.N);
+      }
+      s.group = 128;
+      s.scales = e->data();
+      s.expanded_scales = std::move(e);
+    }
     s.name = prefix;
     return s;
   }
@@ -172,10 +195,19 @@ QuantScan assert_quant_invariants(const SafetensorsSet& set) {
       check_align(set.data(t), alignof(int32_t), name);
       const int32_t* p = reinterpret_cast<const int32_t*>(set.data(t));
       size_t n = set.bytes(t) / 4;
+      // The group comes from the module's own .scales rows (K = n entries
+      // here), the same rule `classify` dequantises by, so a g_idx that agrees
+      // with a different group than its scales is caught.
+      size_t group = 64;
+      const auto sc = set.tensors().find(name.substr(0, name.size() - 6) + ".scales");
+      if (sc != set.tensors().end() && !sc->second.shape.empty() && sc->second.shape[0] != 0 &&
+          n % sc->second.shape[0] == 0)
+        group = n / sc->second.shape[0];
       for (size_t i = 0; i < n; ++i)
-        if (p[i] != int32_t(i / 64))
+        if (p[i] != int32_t(i / group))
           throw std::runtime_error(name + "[" + std::to_string(i) + "] = " +
-                                   std::to_string(p[i]) + ", expected identity k/64");
+                                   std::to_string(p[i]) + ", expected identity k/" +
+                                   std::to_string(group));
     } else if (name.size() > 7 && name.compare(name.size() - 7, 7, ".scales") == 0) {
       // The dequant is scale * (q - 8) with no guard, so a NaN/Inf scale
       // poisons a whole group of 64 weights and there is nowhere downstream
