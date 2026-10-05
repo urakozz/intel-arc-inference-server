@@ -1712,4 +1712,36 @@ add_test(NAME k2_load_checkpoint_test COMMAND k2_load_checkpoint_test ${B70_K2_S
 add_test(NAME k2_load_checkpoint_i8head_test COMMAND k2_load_checkpoint_test ${B70_K2_SNAPSHOT} int8)
 set_tests_properties(k2_load_checkpoint_test k2_load_checkpoint_i8head_test PROPERTIES
   LABELS "checkpoint;k2" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+
+# Task 2: the K2 kernels' host reference (tests/kernels/k2_ref.h) against spec 18 §3 -
+# the norm traps, the softplus threshold, the router (padding never selected), the
+# ascending-id combine, the RoPE chain, MoVA. Host only.
+add_executable(k2_ref_test kernels/k2_ref_test.cc)
+target_include_directories(k2_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(k2_ref_test PRIVATE b70_k2_loader)
+add_test(NAME k2_ref_test COMMAND k2_ref_test)
+if(B70_K2)
+  # Every binary K2's decode list binds (src/kernels/CMakeLists.txt's K2 block).
+  set(B70_K2_DECODE_KERNELS
+    kernel_k2_embed_gather_M1_D2560_V250624 kernel_k2_argmax_stage1_M1_N250624_V250624
+    kernel_k2_argmax_stage2_N250624
+    kernel_prep_res_fold_M1_K2560_SP0_G20 kernel_prep_res_fold_M1_K2560_SP4_G20
+    kernel_k2_norm_M1_K2560_G20_W20_NG2 kernel_k2_silu_M1_I6144_S4
+    kernel_k2_attn_prep_M1_N10240_S2_Q32KV8_V kernel_k2_attn_prep_M1_N9280_S2_Q32KV8
+    kernel_k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8
+    kernel_k2_route_M1_E64_T4_N9280_O9216_S2 kernel_k2_route_M1_E100_T8_N128_O0_S1
+    kernel_k2_moe_M1_E100_T8_D2560_I768 kernel_k2_mova_M1_E64_T4_D2560_N1024
+    kernel_gemv_M1_K2560_N10240_S2_L0 kernel_gemv_M1_K2560_N9280_S2_L0
+    kernel_gemv_M1_K4096_N2560_S4_L0 kernel_gemv_M1_K2560_N12288_S4_L0
+    kernel_gemv_M1_K6144_N2560_S4_L0 kernel_gemv_bf16_M1_K2560_N128_C16_S16
+    kernel_gemv_bf16_M1_K2560_N250624 kernel_gemv_i8w_M1_K2560_N250624)
+  # K1 on the card: every K2 kernel at K2's real shapes against k2_ref.h (no checkpoint).
+  add_executable(k2_kernels_test kernels/k2_kernels_test.cc)
+  target_include_directories(k2_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(k2_kernels_test PRIVATE b70_l0 b70_k2_loader)
+  b70_target_kernel_dir(k2_kernels_test)
+  add_dependencies(k2_kernels_test ${B70_K2_DECODE_KERNELS})
+  add_test(NAME k2_kernels_test COMMAND k2_kernels_test)
+  set_tests_properties(k2_kernels_test PROPERTIES LABELS k2 TIMEOUT 900)
+endif()
 # ==== Spec 18b: K2-Horizon decode ========================================== (end) ====
