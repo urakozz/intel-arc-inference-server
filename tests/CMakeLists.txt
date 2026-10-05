@@ -144,6 +144,12 @@ target_include_directories(mtp_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMA
 target_link_libraries(mtp_server_test PRIVATE b70_server)
 add_test(NAME mtp_server_test COMMAND mtp_server_test)
 
+# Spec 13 B4 (plan 13c Task 1): the batching scheduler over a mock batched engine, host only.
+add_executable(scheduler_test server/scheduler_test.cc)
+target_include_directories(scheduler_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(scheduler_test PRIVATE b70_server)
+add_test(NAME scheduler_test COMMAND scheduler_test)
+
 add_executable(protocol_test server/protocol_test.cc)
 target_include_directories(protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(protocol_test PRIVATE b70_server)

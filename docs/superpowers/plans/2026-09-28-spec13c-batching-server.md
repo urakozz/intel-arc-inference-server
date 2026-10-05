@@ -28,7 +28,8 @@
 
 ### Task 1: the scheduler (host only)
 
-- [ ] `src/server/scheduler.{h,cc}` against a mock batched engine (`tests/server/mock.h` gains `step_batch`); tests: B4 fairness, cancellation, per-row stops, streaming order, Review Focus 1, 2, 4, 5. **Commit** `server: the batching scheduler, host only (spec 13)`.
+- [x] `src/server/scheduler.{h,cc}` against a mock batched engine (`tests/server/mock.h` gains `step_batch`); tests: B4 fairness, cancellation, per-row stops, streaming order, Review Focus 1, 2, 4, 5. **Commit** `server: the batching scheduler, host only (spec 13)`.
+  - Done 2026-10-05 on the Mac (commit `server: the batching scheduler against a mock batched engine (spec 13c Task 1)`). The engine side 13b implements is `server::BatchEngineIface` (`src/server/batch_engine.h`: `slots`, `max_len`, `pos(slot)`, `reset(slot)`, `prefill(chunks)`, `step_batch(rows)` with a per-request RNG per row, and spec 7's snapshot calls per slot); `MockBatchEngine` in `tests/server/mock.h`. Both §8 admission policies are behind `SchedulerOptions::admission` (default `Interleave`, chunk 512; `Batched` with `burst_hold_s` 5 ms). Spec 7 per slot is `PrefixSlots` (one host store, a resident session per slot, slot affinity by resident prefix; no `--prefix-split-last`). `scheduler_test` (7 cases) prints the fairness numbers in mock ticks (decode step 1, prefill 32 ids/tick, a 32768-id prompt arriving while a request decodes): worst inter-token gap 17 at chunk 512, 65 at chunk 2048, 1025 with batched admission. Not wired into `server.cc` (Task 2).
 
 ### Task 2: wiring and gates on the card
 
