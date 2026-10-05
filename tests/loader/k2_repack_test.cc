@@ -22,7 +22,7 @@
 //   6. nothing unconsumed after a full walk;
 //   7. refusals BY NAME: an unexpected tensor (a q_norm, an mtp.* tensor, an extra
 //      expert), a missing one, a wrong expert shape, an int4 lm_head;
-//   8. the checkpoint's real quantization_config (argv[1], tests/model/k2_config.json)
+//   8. the checkpoint's real quantization_config (argv[1], tests/model/k2/config.json)
 //      parses as int4 g64 sym desc_act false with its dynamic exclusions.
 #include <unistd.h>
 

@@ -30,3 +30,6 @@ b70_target_kernel_dir(b70_runtime)
 # configuration (spec 2.1 §3.5): only libb70_prefill.so itself - the SYCL
 # component - is optional (cmake/prefill.cmake).
 add_subdirectory(prefill)
+
+# Spec 18b: K2-Horizon's runtime (K2Engine, its capture and its planner) - its own directory.
+add_subdirectory(k2)
