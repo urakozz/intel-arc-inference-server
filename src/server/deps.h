@@ -32,6 +32,14 @@ struct TemplateIface {
   virtual ~TemplateIface() = default;
   virtual std::string render(const nlohmann::json& messages, const nlohmann::json& tools,
                              bool enable_thinking) = 0;
+  // Spec 18d: with the request's chat_template_kwargs as template variables beside
+  // enable_thinking (K2-Horizon's tool_call_format, reasoning_effort; server/chat_format.h says
+  // which models get them). The default ignores them.
+  virtual std::string render_with_kwargs(const nlohmann::json& messages, const nlohmann::json& tools,
+                                         bool enable_thinking, const nlohmann::json& kwargs) {
+    (void)kwargs;
+    return render(messages, tools, enable_thinking);
+  }
 };
 
 struct Sampling {

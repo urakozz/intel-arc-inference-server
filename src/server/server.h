@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "server/adaptive_k.h"
+#include "server/chat_format.h"
 #include "server/deps.h"
 #include "server/openai.h"
 #include "server/prefix_cache.h"
@@ -27,6 +28,9 @@ struct Options {
   size_t queue_depth = 4;
   bool tcp_nodelay = true;
   std::vector<uint32_t> eos_ids;
+  // Spec 18d: the model's chat format (template variables, reasoning tags, tool-call syntax);
+  // b70-serve sets it from config.json's model_type. The default is the Qwen path.
+  ChatFormat chat_format;
   // Non-empty: write DIR/NNNNNN.json per served request (spec 7 P0): timings, the
   // request body, prompt and generated ids, the generated text.
   std::string log_requests_dir;

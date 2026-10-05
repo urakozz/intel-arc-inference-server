@@ -395,10 +395,15 @@ int run(int argc, char** argv) {
   // b70-decode from spec 18b; the server prefills every request, and K2's prefill is spec 18c
   // and its serving (template, tool calls, int8 head by default) 18d - refused here by name,
   // before the device, rather than as an unknown architecture inside the loader.
+  // Spec 18d: the chat format (template variables, reasoning tags, tool-call syntax) follows
+  // model_type too; K2's is wired here (server/chat_format.h) and serves once 18c lifts the
+  // refusal below.
   if (std::ifstream cf(snapshot_dir + "config.json"); cf) {
     std::stringstream cs;
     cs << cf.rdbuf();
     const nlohmann::json cj = nlohmann::json::parse(cs.str(), nullptr, /*allow_exceptions=*/false);
+    if (cj.is_object())
+      options.chat_format = server::ChatFormat::for_model_type(cj.value("model_type", std::string()));
     if (cj.is_object() && cj.value("model_type", std::string()) == "k2_horizon")
       throw std::runtime_error(
           "K2-Horizon (model_type k2_horizon) is not served yet: its prefill is spec 18c and its "
