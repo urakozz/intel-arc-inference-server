@@ -3,6 +3,47 @@
 Work merged into `main` without running on the card, in the order to validate it when the box is
 back. Each entry names its checklist or its tests. Remove an entry when it has passed on the box.
 
+## How to run
+
+The rows below are a runbook, `tools/box_validate.sh` (stages: `tools/box_validate/stages.sh`).
+From the Mac, in the checkout to validate (main), with `tools/box.env` set:
+
+```sh
+tools/box_validate.sh --dry-run      # every command it will send and run - no ssh; read it first
+tools/box_validate.sh                # sync, build, run every default stage, wait, summarise
+```
+
+- **One detached run on the box.** The script syncs the tree to `~/b70-inference-server-validate`,
+  extracts the G0 baseline (default `b32aaaf`, main before the first blind code commit) into
+  `~/b70-inference-server-g0-<sha>`, and starts `tools/box_validate/remote.sh` through
+  `tools/probe/detach.sh`. The run survives a dropped ssh session or a closed laptop; the Mac only
+  polls. Every GPU stage holds `~/b70-gpu.lock`, builds use `-j44`, and timed stages run
+  interleaved rounds after a warm-up (median of 3, `uptime` and the idle grade recorded).
+- **G0 first, stop the line.** `g0.build`, `g0.sha` (sha256 of every kernel binary present in both
+  builds), `g0.bitwise` (the golden / prefill / replay gates on both builds, output compared line
+  for line with timings dropped) and `g0.suite` (the baseline's whole suite on the new build). Until
+  all four pass, every later stage is recorded SKIP "blocked"; `--force` runs past it.
+- **Resumable.** Results live in `~/b70-validate/<tree>/<sha>-vs-<baseline>/`: per stage a
+  `<id>.status` line (PASS / FAIL / SKIP, reason), `<id>.log`, JUnit files. Re-running the same
+  command re-attaches to a live run or resumes a finished one, skipping stages already PASS;
+  `--redo <id|row>` runs them again, `--only r11` runs one row, `--status` looks without
+  touching anything, `--summary` fetches and writes the summary only.
+- **The summary** is `box-validation-<date>.md` in the repo root: a table per row (result, reason,
+  log path), the numbers each row asks for, what no stage can run (with the reason), and the
+  commands of the opt-in and manual stages.
+- **Not run by default:** long hand runs and anything needing operator input are opt-in
+  (`--with r11.passkey120k,r11.passkey262k,r7.passkey`, `--with optin` for all) or manual (their
+  commands are printed in `--dry-run --with ...` and in the summary): passkey at 120k / 262k / 95% of
+  auto, decode at auto depth, A4 runs that need a reference dir, llama-benchy and vLLM rows, the
+  opencode replay, Ornith's P0 sweeps. Stages whose data is missing (Agnes checkpoint, the Ornith
+  checkpoint and golden set from 15a) are SKIP with the missing key; `--push-data` copies the
+  Agnes checkpoint and `oracle-out-agnes*` from this Mac first.
+
+**Adding a row** (a branch merged blind): add it to the table below **and** a `row N` block of
+stages to `tools/box_validate/stages.sh` (the header there says how; `--dry-run --only rN` shows
+it, `python3 tools/box_validate/test_box_validate.py` checks the registry). Remove both when the row
+has passed.
+
 | # | merged | what is unvalidated | how to validate |
 |---|---|---|---|
 | 1 | spec 14 (Agnes 3.0 Flash, `ModelDesc`), commit range ending `c104247` | everything that runs on the card; the descriptor refactor's bitwise neutrality for Qwen3.8 | `2026-10-03-spec14-validation-checklist.md`, **G0 first** (Qwen3.8 kernel binaries checksum-identical, full suite, golden and replay bitwise) |
