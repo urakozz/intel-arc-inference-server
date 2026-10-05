@@ -24,8 +24,8 @@
 //      kR2WeightRel - ornith_decode_test's R2, on the rows a prefill routed.
 //
 // argv: <snapshot> <prompt ids dir> <backend l0|l0-int8> [oracle dir] [lm_head form].
-// Exit 77 (SKIP) when the Ornith int4 checkpoint is not on this machine (spec 15a decides
-// its source; none is published); R2 is skipped with a message without 15a's dumps.
+// Exit 77 (SKIP) when the Ornith int4 checkpoint (urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-
+// GPTQ, spec 15 §13) is not on this machine; R2 is skipped with a message without 15a's dumps.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
