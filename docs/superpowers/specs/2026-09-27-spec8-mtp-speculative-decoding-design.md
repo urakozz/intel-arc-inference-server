@@ -393,6 +393,26 @@ when the target's next id lies outside V′.
   A4 and loses nowhere. Expected (derived): ~1 ms less per draft at 128k, ~4-5 % per K = 3
   iteration.
 - **Reuse.** Spec 19's drafter candidate head takes the same compact matrix and table.
+- **As built (2026-10-05, on the Mac; box pending, `box-validation-queue.md` entry 8).** Where the
+  build settles what the text above leaves open:
+  - V′ is `loader::select_draft_vocab`. Every source skips ids >= the model's `vocab_used` (the
+    main argmax masks them, so a draft of one could only be rejected), added tokens included.
+  - The gather runs in the loader from the host copy of the int8 head the quantisation just made
+    (`loader::gather_int8_tiled_rows`), so nothing is read back from the device. `--lm-head bf16`
+    with `--draft-vocab` is refused at load rather than given an untested bf16 gather.
+  - The scatter rides in the argmax's stage 1 (`draft_vocab.cl`), not a third kernel. The -inf
+    fill is `MtpBuffers::zero()`, at construction and every reset. The draft list keeps its 23
+    launches.
+  - The compact head's bytes are not in `LoadReport::total()`. The memory line gains a
+    `draft vocab <GB>` term only when it is on.
+  - `rank.py` weights generated ids 4x and the session-new part of each prompt 1x. That is a
+    choice, not a measurement.
+  - `--mtp auto`'s cost table does not know V′. Its draft row prices the full head, so it
+    over-states a V′ draft's cost until `probe_mtp_steps … int8 <size>` calibrates it.
+  - Mac-side evidence: the host tests; `draft_vocab.cl`, and `gemv_i8w.cl` at the new N with
+    its subgroup reads emulated, run on the Mac's OpenCL GPU. There the compact columns equal
+    the full head's bitwise, and the mapped argmax and the scatter match the host reference.
+    That is indicative only. IGC on the B70 is the arbiter (`draft_vocab_kernels_test`).
 
 ## 12. Amendment: MTP at every context length (2026-10-05)
 
