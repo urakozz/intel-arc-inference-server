@@ -10,6 +10,26 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-04-spec15-ornith-moe-design.md` (§2 prefill, §4.4, §5 R3, §6, §9). Needs 15c merged (loader repack, router kernel, MoE decode, Ornith variants) and 15a's router statistics (rows per expert per chunk).
 
+**Status (2026-10-05): Tasks 2 and 3 written blind on the Mac** (branch `spec15d-ornith-prefill`;
+as built: spec 15 §11). Task 1 (P0) and Task 4 (speed) are box work, as is every card-side check:
+box-validation-queue row 13. Mac-side: `tools/mac_check.sh --base main --kernels` green (host tests
+incl. `pf_moe_ref_test`, every C++ source against the Level Zero headers, 22 added kernel command
+lines and none moved, every variant through clang, `pf_moe.cl`'s sort / gathers / dequant /
+combine exact on the Mac's GPU - indicative). Deviations from the text below, each recorded in
+§11:
+- **The strategy was chosen without P0**: the separate pass (expert weights rebuilt into the
+  grouped GEMM's B form per chunk, one launch per form and batch), because it reuses spec 5's
+  `pf_requant_rot` and the dense GEMMs' verified mainloops unchanged; the SLM-fused arm stays
+  Task 1's to probe, with §11's bandwidth estimate as the number to beat.
+- **l0-int8 is built for the experts' gate||up** (h8, as the dense linears), by the operator's
+  brief, not gated on P0; down stays bf16 on both backends (K 512 is not whole rotation blocks).
+- **Files**: `pf_moe.cl` holds the sort (histogram, prefix, scatter, tile table), the gathers,
+  the dequant and the combine; `pf_moe_gemm.cl` the grouped GEMM; `runtime/prefill/moe.cc` the
+  block's walk; tests `pf_moe_ref_test` (host), `pf_moe_test` (card), `ornith_prefill_test`
+  (checkpoint: the walk, replay, chunking, prefill-vs-decode routes and tokens, R2 on prefill).
+- **Tiles of 32 rows** (TM, `kernels::pf_moe::kTileM`), each expert padded to whole tiles, the
+  shared expert as block 256 inside the same grouped launch rather than a separate dense GEMM.
+
 ## Global Constraints
 
 - Branch `spec15d-ornith-prefill` from main; box tree `~/b70-inference-server-spec15d`. Copy `tools/box.env` if missing; never commit it. Symlink `oracle-out*` dirs.
