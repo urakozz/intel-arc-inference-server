@@ -73,10 +73,22 @@
 #define WG_SM 256
 #define WG_GATE 256
 
+// Unset FA_Q_HEADS / FA_KV_HEADS: Qwen3.8's, token for token. Spec 15d: another
+// model's heads, named `_Q<q>KV<kv>` (Ornith 16 / 2: q||k||v 9216, o_proj input 4096).
+#ifndef FA_Q_HEADS
 #define Q_HEADS 24
 #define HD 256
 #define QKV_N 14336      /* q||gate (12288) || k (1024) || v (1024) */
 #define OUT_N 6144       /* 24 x 256, the o_proj input row */
+#else
+#ifndef FA_KV_HEADS
+#error "pf_attn: FA_Q_HEADS needs FA_KV_HEADS"
+#endif
+#define Q_HEADS FA_Q_HEADS
+#define HD 256
+#define QKV_N ((2 * FA_Q_HEADS + 2 * FA_KV_HEADS) * HD)
+#define OUT_N (FA_Q_HEADS * HD)
+#endif
 
 // 1/sqrt(head_dim) with head_dim = 256 (doc 03). attn.cl spells the same
 // constant `SCALE` and tests/kernels/attn_ref.h `kScale`.

@@ -74,7 +74,11 @@
 #error "pf_attn_prep: KNORM_OFF must be defined (loader/small_layout.h kFaOffKNorm / 4)"
 #endif
 
-// The model's dimensions (model::Qwen35); none of them is a variant.
+// The model's dimensions (model::Qwen35). Unset FA_Q_HEADS / FA_KV_HEADS (every
+// Qwen3.8 and Agnes command line) they are Qwen3.8's, token for token. Spec 15d:
+// another model's heads (attn.cl's pair, spec 15c), named `_Q<q>KV<kv>` (Ornith 16 / 2:
+// q||k||v 9216).
+#ifndef FA_Q_HEADS
 #define Q_HEADS 24        /* full-attention q-heads */
 #define KV_HEADS 4        /* k/v heads */
 #define HD 256            /* head dim, q, k and v alike */
@@ -83,6 +87,22 @@
 #define V_OFF 13312
 #define ROT_HALF 32       /* partial_rotary_factor 0.25 of 256 -> 64 dims, 32 pairs */
 #define ROT_DIM 64
+#else
+#ifndef FA_KV_HEADS
+#error "pf_attn_prep: FA_Q_HEADS needs FA_KV_HEADS"
+#endif
+#define Q_HEADS FA_Q_HEADS
+#define KV_HEADS FA_KV_HEADS
+#define HD 256
+#define K_OFF (2 * FA_Q_HEADS * HD)                /* q||gate per head */
+#define V_OFF (K_OFF + FA_KV_HEADS * HD)
+#define QKV_N (V_OFF + FA_KV_HEADS * HD)
+#define ROT_HALF 32
+#define ROT_DIM 64
+#if FA_Q_HEADS % FA_KV_HEADS != 0
+#error "pf_attn_prep: q-heads must be a multiple of kv-heads"
+#endif
+#endif
 
 #define QKV_S 1
 #if QKV_S != 1
