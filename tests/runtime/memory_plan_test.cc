@@ -176,6 +176,54 @@ void check_sizes_ornith() {
            kTrained);
   std::printf("ornith (int8 head, decode only): %s\n",
               runtime::describe(pl, kDevice, kReserve).c_str());
+
+  // Spec 15d: Ornith's prefill. The MoE prefill scratch (runtime::moe_prefill_layout) at
+  // kC 2048: tmax = (2048 x 8 + 256 x 31) / 32 + 2048 / 32 = 760 + 64 = 824 tiles, 26,368
+  // rows; regions 256-aligned.
+  const runtime::MoePrefillLayout ml2 = runtime::moe_prefill_layout(o);
+  CHECK_EQ(ml2.tmax, uint32_t(824));
+  CHECK_EQ(runtime::moe_prefill_tiles(o, 2048), uint32_t(824));
+  CHECK_EQ(runtime::moe_prefill_tiles(o, 1), uint32_t(248 + 1));   // (8 + 7936) / 32 + 1
+  CHECK_EQ(ml2.rows, uint32_t(26368));
+  CHECK_EQ(ml2.route_layer, size_t{2048} * 32 * 4);
+  CHECK_EQ(ml2.route_off, size_t{2048} * 272 * 4);                // after the logits
+  // The weight batch: the bf16 gate||up of ceil(257 / 2) = 129 blocks (2048 x 1024 x 2 B
+  // each) outgrows the int8 gate||up and the bf16 down of all 257 (2 MiB each).
+  CHECK_EQ(ml2.w, size_t{129} * 2048 * 1024 * 2);                  // 541,065,216
+  CHECK_EQ(ml2.total, size_t{2228224} + 10485760 + 1280 + 6656 + 105472 + 65536 + 105472 +
+                          27000832 + 108003328 + 541065216);       // 689,067,776
+  CHECK_EQ(runtime::moe_prefill_batch_blocks(o, runtime::MoeWeightForm::GateUpInt8), uint32_t(257));
+  CHECK_EQ(runtime::moe_prefill_batch_blocks(o, runtime::MoeWeightForm::DownBf16), uint32_t(257));
+  CHECK_EQ(runtime::moe_prefill_batch_blocks(o, runtime::MoeWeightForm::GateUpBf16), uint32_t(129));
+  const runtime::PrefillScratchSizes ps = runtime::PrefillScratchDims::sizes(16384, o);
+  CHECK_EQ(ps.moe, ml2.total);
+  CHECK_EQ(ps.slab, size_t{4096} * 1024 * 2);                       // out_proj / o_proj's K
+  CHECK_EQ(ps.partials, size_t{2048} * 12288 * 4);                  // qkv||z's N
+  // Dense models carry none, and their slab / int8 K are what they were.
+  CHECK_EQ(runtime::moe_prefill_layout(model::qwen38()).total, size_t{0});
+  CHECK_EQ(runtime::PrefillScratchDims::sizes(16384, model::qwen38()).moe, size_t{0});
+  CHECK_EQ(runtime::prefill_int8_max_k(model::qwen38()), uint32_t(17408));
+  CHECK_EQ(runtime::prefill_int8_max_k(model::agnes()), uint32_t(19456));
+  CHECK_EQ(runtime::prefill_int8_max_k(o), uint32_t(4096));
+  // h8's column scales: the four mixer linears (the shared expert's GateUp / Down rows are
+  // inside the expert blocks, not linears) + every layer's 257 x 1024-column gate||up array.
+  CHECK_EQ(runtime::int8_scale_bytes(o),
+           size_t{8} * (30 * (12288 + 2048) + 10 * (9216 + 2048)) + size_t{40} * 8 * 257 * 1024);
+  for (PrefillBackend b : {PrefillBackend::L0Int8, PrefillBackend::L0}) {
+    runtime::PrefillPath path;
+    path.backend = b;
+    const runtime::MemoryPlan pp = runtime::plan(o, 262144, false, kOrnithInt8Weights, path);
+    CHECK_EQ(pp.moe_prefill, ml2.total);
+    CHECK_EQ(pp.int8, b == PrefillBackend::L0Int8
+                          ? runtime::int8_scratch_sizes(4096).total() + runtime::int8_scale_bytes(o)
+                          : size_t{0});
+    // The full trained context still fits with the prefill scratch (derived).
+    CHECK_EQ(runtime::max_len_that_fits(o, false, kOrnithInt8Weights, kDevice, kReserve, kTrained,
+                                        path),
+             kTrained);
+    std::printf("ornith (int8 head, %s prefill): %s\n", runtime::prefill_backend_name(b),
+                runtime::describe(pp, kDevice, kReserve).c_str());
+  }
 }
 
 // Spec 6 §8.4, measured on the card at 131072 (bf16 head, l0-int8, no MTP, before the

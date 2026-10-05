@@ -213,12 +213,55 @@ struct PrefillScratchSizes {
       gdn_xb, gdn_seed, gdn_g, gdn_beta, gdn_A, gdn_A2, gdn_w, gdn_u, pf_q, pf_attn, pf_o,
       pf_rowsum;
   size_t dequant, slab, pf_s, pf_p;   // lazy
+  size_t moe = 0;   // spec 15d: MoePrefillLayout::total, eager on a MoE model, 0 when dense
   size_t eager() const {
     return ids + resid + x + partials + ab_out + norm_sumsq + gdn_o + mixer_out + logits +
            argmax_part + gdn_xb + gdn_seed + gdn_g + gdn_beta + gdn_A + gdn_A2 + gdn_w + gdn_u +
-           pf_q + pf_attn + pf_o + pf_rowsum;
+           pf_q + pf_attn + pf_o + pf_rowsum + moe;
   }
 };
+
+// Spec 15d: a mixture-of-experts model's PREFILL scratch - one allocation
+// (PrefillScratch::moe), regions at these offsets, sized here and nowhere else
+// (src/kernels/prefill/pf_moe.cl and pf_moe_gemm.cl say what each holds):
+//
+//   logits   fp32 [kC][router_n]            the router || shared-gate GEMV over the chunk
+//   route    u32  [layers][kC][32]          moe_route's rows, PER LAYER: after a prefill every
+//                                           layer's routing is still there for R2 and the
+//                                           prefill-vs-decode routing check to read back
+//   hdr      u32  [pf_moe::hdr_words]       pf_moe_sort's header (counts, tiles used, Rs)
+//   tiles    u32  [tmax][2]                 the padded tile table: (weight block, first row)
+//   row_tok  u32  [rows]                    the token of every sorted row (NONE: padding)
+//   pair_row u32  [kC][top_k]               the sorted row of every (token, slot)
+//   xs       fp32 [rows]                    l0-int8: the gathered per-token activation scales
+//   h        bf16 [rows][expert_intermediate]   SiLU(gate) x up of every sorted row
+//   xg       bf16 [rows][hidden]            the gathered activations (l0-int8: int8 [rows][hidden]
+//                                           in its first half), then - gate||up having consumed
+//                                           them - the down GEMM's rne'd output y
+//   w        the expert weights of one layer in the grouped GEMMs' B form, rebuilt per chunk:
+//            int8 VNNI-4 [hidden/4][blocks x 2I] (l0-int8 gate||up, every block at once), bf16
+//            [blocks][I][hidden] (down, every block at once) or bf16 [nb][hidden][2I] (l0's
+//            gate||up, nb = ceil(blocks / 2) blocks per batch) - sized for the largest
+//
+// rows = TM x tmax(kC), tmax(C) = floor((C x top_k + experts x (TM - 1)) / TM) + ceil(C / TM):
+// every expert's rows padded to whole TM-row tiles, the shared expert's C rows last
+// (moe_prefill_tiles). Ornith at kC 2048: 824 tiles, 26,368 rows; ~0.69 GB in all, 0.54 of
+// it the weight batch.
+struct MoePrefillLayout {
+  uint32_t tmax = 0, rows = 0;   // at kC
+  size_t logits_off = 0, route_off = 0, route_layer = 0, hdr_off = 0, tiles_off = 0,
+         row_tok_off = 0, pair_row_off = 0, xs_off = 0, h_off = 0, xg_off = 0, w_off = 0;
+  size_t w = 0;                  // the weight batch's bytes
+  size_t total = 0;
+  size_t route_at(uint32_t layer) const { return route_off + size_t(layer) * route_layer; }
+};
+MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc);   // all zero when dense
+// tmax(C): the tile table's fixed length for a C-row chunk - the grouped GEMMs' grid.
+uint32_t moe_prefill_tiles(const model::ModelDesc& desc, uint32_t C);
+// How many expert weight blocks one rebuild of `w` holds, for each B form (Ornith: 257,
+// 257, 129), so the host walks the blocks in ceil(blocks / that) batches.
+enum class MoeWeightForm { GateUpInt8, GateUpBf16, DownBf16 };
+uint32_t moe_prefill_batch_blocks(const model::ModelDesc& desc, MoeWeightForm f);
 
 struct PrefillScratchDims {
   static constexpr uint32_t kC = 2048;               // ruling A13 (was 4096)
@@ -267,5 +310,10 @@ struct Int8ScratchSizes {
 };
 Int8ScratchSizes int8_scratch_sizes(uint32_t max_k);
 size_t int8_scale_bytes(const model::ModelDesc& desc);
+// The `max_k` Engine::prepare_prefill builds Int8State with: the widest int4 K the h8
+// walk runs - the MLP intermediate (down's K) on a dense model, as since spec 14; on a
+// MoE model (spec 15d) the widest dense linear's K, out_proj / o_proj's 4096 on Ornith
+// (the experts' gate||up K is the hidden size; their down is not an h8 linear).
+uint32_t prefill_int8_max_k(const model::ModelDesc& desc);
 
 }  // namespace runtime
