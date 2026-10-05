@@ -4,6 +4,7 @@
 // constants, independently of the code under test; the box's k2_decode_test /
 // k2_prefill_test then hold the plan to what a K2Engine actually allocates.
 #include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -16,6 +17,7 @@
 int main() {
   namespace k2 = runtime::k2;
   const model::K2Desc& d = model::k2();
+  unsetenv("B70_K2_ATTN");   // the defaults below are flash's (spec 18 §10's switch is tested after)
 
   // Review Focus 5: 1 + 3 x 12 + 45 x 15 + 5 against spec 18 §2's ~1000 estimate.
   CHECK_EQ(k2::decode_launches(d), size_t(717));
@@ -50,6 +52,34 @@ int main() {
   CHECK_EQ(p.total(), size_t(28262548344ull));   // spec 18 decision 2 (A): 32k bf16 KV on one card
   CHECK_EQ(k2::plan(d, 32768, w_int8).total(), size_t(27621953400ull));
   CHECK_EQ(k2::plan(d, 32768, w_bf16, true).decode_state, p.decode_state + k2::tap_bytes(d));
+
+  // Spec 18 §10: B70_K2_ATTN. Flash is the default and changes nothing above; eager adds two
+  // launches a layer and a [M][q_heads][max_len] fp32 score row to the decode state.
+  unsetenv("B70_K2_ATTN");
+  CHECK(k2::k2_attn() == k2::K2Attn::Flash);
+  CHECK_EQ(k2::attn_scores_bytes(d, 32768), size_t(0));
+  CHECK_EQ(k2::decode_launches(d, k2::K2Attn::Eager), size_t(717 + 2 * 48));
+  CHECK_EQ(k2::attn_scores_bytes(d, 32768, k2::K2Attn::Eager), size_t(32) * 32768 * 4);   // 4 MiB
+  CHECK_EQ(k2::plan(d, 32768, w_bf16, false, false, k2::K2Attn::Eager).decode_state,
+           p.decode_state + size_t(32) * 32768 * 4);
+  setenv("B70_K2_ATTN", "eager", 1);
+  CHECK(k2::k2_attn() == k2::K2Attn::Eager);
+  CHECK_EQ(k2::decode_launches(d), size_t(813));   // the defaults follow the variable, as capture does
+  CHECK_EQ(k2::plan(d, 32768, w_bf16).decode_state, p.decode_state + size_t(32) * 32768 * 4);
+  setenv("B70_K2_ATTN", "flash", 1);
+  CHECK(k2::k2_attn() == k2::K2Attn::Flash);
+  setenv("B70_K2_ATTN", "", 1);
+  CHECK(k2::k2_attn() == k2::K2Attn::Flash);
+  setenv("B70_K2_ATTN", "fp32", 1);
+  bool bad = false;
+  try {
+    (void)k2::k2_attn();
+  } catch (const std::runtime_error& e) {
+    bad = std::string(e.what()).find("expected flash or eager") != std::string::npos;
+  }
+  CHECK(bad);
+  unsetenv("B70_K2_ATTN");
+  CHECK_EQ(std::string(k2::k2_attn_name(k2::K2Attn::Eager)), std::string("eager"));
 
   // --max-len auto on a 32.53 GB card with the default 1.5 GB reserve: the largest quantum
   // that fits, and one more quantum does not.
@@ -99,7 +129,7 @@ int main() {
   CHECK(k2::describe(pp, dev, res).find("prefill scratch planned") != std::string::npos);
   std::printf("prefill: %zu launches per chunk + %zu, scratch %.3f GB; auto with prefill -> %u (bf16 head)\n",
               k2::prefill_chunk_launches(d), k2::kPrefillHeadLaunches, pf.total() / 1e9, fit_pf);
-  std::printf("k2_plan_test OK: 717 launches; auto -> %u (bf16 head) / %u (int8 head) on a %.2f GB "
-              "card with a %.1f GB reserve\n", fit_b, fit_i, dev / 1e9, res / 1e9);
+  std::printf("k2_plan_test OK: 717 launches (813 eager); auto -> %u (bf16 head) / %u (int8 head) on "
+              "a %.2f GB card with a %.1f GB reserve\n", fit_b, fit_i, dev / 1e9, res / 1e9);
   return 0;
 }

@@ -1823,7 +1823,14 @@ if(B70_K2)
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/prose.ids int8)
   add_test(NAME k2_golden_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR})
   add_test(NAME k2_golden_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} int8)
+  # Spec 18 §10: the same gate through the EAGER attention (k2_attn_eager.cl, the reference's
+  # bf16 chain) - the box's first session runs both pairs and compares (box-validation-queue
+  # row 14).
+  add_test(NAME k2_golden_eager_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR})
+  add_test(NAME k2_golden_eager_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} int8)
+  set_tests_properties(k2_golden_eager_test k2_golden_eager_i8head_test PROPERTIES ENVIRONMENT "B70_K2_ATTN=eager")
   set_tests_properties(k2_decode_test k2_decode_i8head_test k2_golden_test k2_golden_i8head_test
+    k2_golden_eager_test k2_golden_eager_i8head_test
     PROPERTIES LABELS "checkpoint;golden;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # b70-decode's model_type dispatch, before the device: tests/model/k2/ holds only the

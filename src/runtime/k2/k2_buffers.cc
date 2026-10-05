@@ -4,7 +4,7 @@
 
 namespace runtime::k2 {
 
-K2Buffers::K2Buffers(l0::Context& ctx, const model::K2Desc& d, uint32_t len)
+K2Buffers::K2Buffers(l0::Context& ctx, const model::K2Desc& d, uint32_t len, K2Attn attn)
     : control(ctx, l0::MemKind::Shared, persistent_sizes(d, len).control),
       kv_k(ctx, l0::MemKind::Device, persistent_sizes(d, len).kv_k),
       kv_v(ctx, l0::MemKind::Device, persistent_sizes(d, len).kv_v),
@@ -21,6 +21,9 @@ K2Buffers::K2Buffers(l0::Context& ctx, const model::K2Desc& d, uint32_t len)
       moe_h(ctx, l0::MemKind::Device, scratch_sizes(d).moe_h),
       logits(ctx, l0::MemKind::Device, scratch_sizes(d).logits),
       argmax_part(ctx, l0::MemKind::Device, scratch_sizes(d).argmax_part),
+      attn_scores(attn == K2Attn::Eager
+                      ? std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, attn_scores_bytes(d, len, attn))
+                      : nullptr),
       desc(d),
       max_len(len) {}
 
@@ -34,7 +37,7 @@ void* K2Buffers::kv_v_layer(uint32_t layer) const {
 size_t K2Buffers::scratch_bytes() const {
   return resid.size() + x.size() + partials.size() + norm_sumsq.size() + attn_q.size() +
          attn_gate.size() + attn_part.size() + attn_out.size() + router.size() + routes.size() +
-         moe_h.size() + logits.size() + argmax_part.size();
+         moe_h.size() + logits.size() + argmax_part.size() + (attn_scores ? attn_scores->size() : 0);
 }
 
 void K2Buffers::zero(l0::CmdList& imm) {

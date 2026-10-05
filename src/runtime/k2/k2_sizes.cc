@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 
 #include "runtime/control.h"
@@ -13,6 +15,16 @@ namespace {
 // against it in k2_capture.cc).
 constexpr uint32_t kNormG = 20, kAttnTgt = 32, kAttnPart = 130, kArgmaxChunk = 1024;
 }  // namespace
+
+K2Attn k2_attn() {
+  const char* v = std::getenv("B70_K2_ATTN");
+  if (v == nullptr || *v == '\0') return kDefaultK2Attn;
+  if (std::strcmp(v, "flash") == 0) return K2Attn::Flash;
+  if (std::strcmp(v, "eager") == 0) return K2Attn::Eager;
+  throw std::runtime_error(std::string("B70_K2_ATTN=") + v + ": expected flash or eager");
+}
+
+const char* k2_attn_name(K2Attn a) { return a == K2Attn::Eager ? "eager" : "flash"; }
 
 PersistentSizes persistent_sizes(const model::K2Desc& d, uint32_t max_len) {
   PersistentSizes s;
@@ -49,8 +61,13 @@ ScratchSizes scratch_sizes(const model::K2Desc& d) {
   return s;
 }
 
-size_t decode_launches(const model::K2Desc& d) {
-  return 1 + size_t(d.dense_layers) * 12 + size_t(d.sparse_layers()) * 15 + 5;
+size_t attn_scores_bytes(const model::K2Desc& d, uint32_t max_len, K2Attn a) {
+  return a == K2Attn::Eager ? size_t(kM) * d.q_heads * max_len * 4 : 0;
+}
+
+size_t decode_launches(const model::K2Desc& d, K2Attn a) {
+  const size_t extra = a == K2Attn::Eager ? 2 : 0;   // score + softmax + P·V + reduce
+  return 1 + size_t(d.dense_layers) * (12 + extra) + size_t(d.sparse_layers()) * (15 + extra) + 5;
 }
 
 // --- Spec 18c: the prefill chunk --------------------------------------------------------
@@ -144,14 +161,15 @@ size_t prefill_chunk_launches(const model::K2Desc& d) {
 }
 
 Plan plan(const model::K2Desc& d, uint32_t max_len, size_t model_bytes, bool debug_tap,
-          bool prefill) {
+          bool prefill, K2Attn a) {
   Plan p;
   p.max_len = max_len;
   p.rope = d.rope_table_bytes(max_len);
   p.model = model_bytes + p.rope;
   const PersistentSizes ps = persistent_sizes(d, max_len);
   p.kv = ps.kv();
-  p.decode_state = ps.control + scratch_sizes(d).total() + (debug_tap ? tap_bytes(d) : 0);
+  p.decode_state = ps.control + scratch_sizes(d).total() + attn_scores_bytes(d, max_len, a) +
+                   (debug_tap ? tap_bytes(d) : 0);
   p.prefill_scratch = prefill ? prefill_sizes(d).total() : 0;
   return p;
 }
