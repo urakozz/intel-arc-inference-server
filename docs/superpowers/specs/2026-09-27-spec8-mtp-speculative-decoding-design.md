@@ -288,3 +288,61 @@ throughout, so every speed row is grade iterate. All runs are at max_len 16384.
   - Agentic output that copies context favours K = 3. Free text favours K = 1.
   - A per-request adaptive K (drop K after rejections) is the cheap follow-up. The
     M = 3/4 int4 GEMV lever (A7) is the structural one.
+
+## 10. Amendment: adaptive K per request (2026-10-05)
+
+A14's follow-up, written and tested on the host (no box). `b70-serve --mtp auto` chooses K
+before every iteration of a request from that request's own acceptance so far, instead of
+one K for the whole server.
+
+- **The model.** With a per-draft acceptance rate alpha, an iteration with K drafts emits
+  E(K) = (1 - alpha^(K+1)) / (1 - alpha) ids (K + 1 at alpha = 1) and costs
+  cost(K) = verify(K + 1) + draft(K) plain steps; K = 0 is a plain step (1 id, cost 1).
+  The policy picks the K in 0..max that maximises E(K) / cost(K).
+- **The cost table is data.** Defaults per head form (`--lm-head`):
+  - bf16 head, measured (P0 / §8): verify M = 1..4 **1.00 / 1.17 / 1.52 / 1.74**, draft
+    k = 1..3 **0.19 / 0.37 / 0.55**.
+  - int8 head (`b70-serve`'s default), **derived** from the spec 9 H2 rows (drafts -34 %,
+    ~2 ms less per verify, in units of the int8 plain step 32.65 ms): verify
+    **1.00 / 1.18 / 1.56 / 1.79**, draft **0.13 / 0.26 / 0.38**.
+  - `--mtp-cost "verify=1,1.17,1.52,1.74;draft=0.19,0.37,0.55"` replaces either part, so the
+    box can calibrate the table (pending: `probe_mtp_steps` at M = 1..4 and k = 1..3 on the
+    int8 head).
+- **The boundaries these tables give** (the best K by alpha): bf16 K = 0 below 0.36, K = 1
+  to 0.83, K = 3 above; int8 K = 0 below 0.31, K = 1 to 0.81, K = 3 above. K = 2 is never
+  the best on either table (it trails the better of K = 1 and K = 3 by >= 1.1 %). At the measured acceptances: tool-call output
+  (~0.97) K = 3, prose (0.44) K = 1, as A14 found by hand.
+- **The estimate.** alpha is an exponentially weighted ratio of accepted to tried drafts:
+  S <- lambda S + j, T <- lambda T + t per iteration (j accepted of K; t = j + 1 when a
+  draft was rejected, K when all were kept - the drafts after a rejection were never
+  tried), alpha = S / T, lambda = 0.9 (a window of ~10 iterations). The prior is
+  alpha = 0.8 at a weight of 4 drafts (S = 3.2, T = 4), decaying with the history.
+- **Warm-up and hysteresis.** The first 2 iterations run at K = max (they measure the most
+  drafts; agentic output, the target workload, wants max anyway). After that the current
+  K changes only when the best K's E/cost beats the current K's by 3 %, so an estimate
+  that hovers at a boundary does not flap.
+- **K = 0 must re-measure.** A request at K = 0 draws no drafts, so the policy runs one
+  K = 1 iteration after every 4 plain ones; a run of acceptances there lifts it back.
+- **Tuning (host simulation, the model's own units).** lambda, the probe interval and the
+  hysteresis were chosen on synthetic per-draft Bernoulli acceptance (8 seeds x 400
+  iterations at alpha 0.3 / 0.44 / 0.6 / 0.8 / 0.83 / 0.9 / 0.97, bf16 table): ids per
+  cost within 2.7 % of the best fixed K at every alpha; <= 25 policy switches per 400
+  iterations at the K = 1 / 3 boundary (816 / 5 x 400 without hysteresis and a 1.4-iteration
+  window, 136 with the defaults, `adaptive_k_test`); 0.44 -> 0.97 reaches K = 3 within ~31
+  iterations, 0.97 -> 0.3 reaches K = 0 within ~37. lambda 0.85 adapts faster but
+  flaps twice as often at the boundary; 0.95 halves the switches and doubles the lag.
+- **Determinism.** The choice is a pure function of the request's own (K, j) history and
+  the options: no clock, no other request, no global state. Greedy output is identical to
+  `--mtp 0` whatever K sequence is chosen (M3 holds per iteration for every K); a seeded
+  sampled request is reproducible, because its K sequence is a function of its own
+  accepted drafts, which a seed fixes.
+- **Interfaces.** `EngineIface::step_many(sampling, k)` takes the iteration's K
+  (0..`mtp_k()`; 0 is one plain step). `server::AdaptiveK` (`src/server/adaptive_k.h`) is
+  the policy; `server::Options::mtp_auto` turns it on, one instance per request.
+  `--mtp K` (fixed) behaves exactly as before. `--mtp-max K` (default 3) bounds auto.
+- **Known simplification.** Acceptance falls with draft depth (A11: 0.92 / 0.87 / 0.82
+  overall at K = 1 / 2 / 3), so one alpha for every depth over-rates deep drafts slightly;
+  near the K = 1 / 3 boundary the box measurement decides whether a depth-aware estimate is
+  worth it.
+- **Pending on the box:** the int8 cost table (above); D1 rows for `--mtp auto` against
+  K = 1 and K = 3 on the golden and tool-call prompts; the opencode replay.
