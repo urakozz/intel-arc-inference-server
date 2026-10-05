@@ -187,9 +187,10 @@ directory path works too.
 ### Serving
 
 ```sh
-# long agentic sessions (opencode and similar): 128k context, prefix cache on (default)
+# long agentic sessions (opencode and similar): 128k context, prefix cache on (default),
+# the prompt-end snapshot one id early so each turn restores where the next one diverges
 ./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
-    --host 0.0.0.0 --port 8000 --max-len 131072 --served-name qwen3.8
+    --host 0.0.0.0 --port 8000 --max-len 131072 --served-name qwen3.8 --prefix-split-last
 
 # the same with MTP speculative decoding, K chosen per request
 ./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \\
@@ -212,7 +213,7 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
 | `--device N` | `ONEAPI_DEVICE_SELECTOR`, else 0 | which GPU |
 | `--queue N` | `4` | requests waiting behind the running one before new ones are refused |
 | `--prefix-cache-gb N` | `32` | pinned host prefix cache in GiB; `0` = off, every request prefills in full (spec 7) |
-| `--prefix-split-last` | off | chat: the last prompt id runs as a decode step so the prompt-end snapshot lands at len - 1 (more cache hits, not bitwise with a cold run) |
+| `--prefix-split-last` | off | On/off, chat requests only. A thinking model's next turn repeats this prompt but diverges at its **last** id: the template ended this prompt with `<think>\n`, and the history re-renders that turn as `<think>\n\n</think>` when the client drops the reasoning (opencode does). By default the prompt-end snapshot sits one id past that point, so the next turn falls back to the 2048-id block below and re-prefills up to 2047 ids it already had (~1 s per turn). With the flag the prompt is prefilled to len - 1, snapshotted there, and the last id runs as one decode step, so the next turn (or a retry of the same prompt) restores exactly where it diverges. The cost: that one id goes through decode's kernels, so a near-tie first token can differ from a run without the cache (same quality, not bitwise reproducible). **On for agentic sessions; off for benchmarks and the golden gates.** |
 | `--mtp K` | `0` (off) | speculative decoding with the checkpoint's MTP head, K = 1..3 drafts per step; loads the head (+0.85 GB weights, plus its own KV and the state slots: ~1.4 GB at 16k, ~2.3 GB at 128k, derived); any `--max-len` (spec 8 §12) |
 | `--mtp auto` | - | K per iteration from each request's own acceptance (spec 8 §10) |
 | `--mtp-max K` | `3` | with `--mtp auto`: the largest K |
