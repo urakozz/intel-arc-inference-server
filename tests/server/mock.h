@@ -122,17 +122,21 @@ struct MockEngine : server::EngineIface {
   uint32_t max_len() override { return 1024; }
   uint32_t pos() override { return static_cast<uint32_t>(last_prompt.size() + at); }
 
-  // Spec 8 (plan 8c): a scripted speculative engine. With mtp > 0, step_many()
+  // Spec 8 (plan 8c): a scripted speculative engine. With mtp > 0, step_many(s, k)
   // returns the next `bursts[i % bursts.size()]` ids of the script (clamped to
-  // 1..mtp + 1), and truncate_to() rewinds `at`; every truncation is recorded.
+  // 1..k + 1: the burst is how many drafts the "head" would get right), and
+  // truncate_to() rewinds `at`; every truncation and every requested k is recorded.
   uint32_t mtp = 0;
   std::vector<uint32_t> bursts{4};
   size_t burst_calls = 0;
   std::vector<uint32_t> truncations;
+  std::vector<uint32_t> ks;
   uint32_t mtp_k() override { return mtp; }
-  std::vector<uint32_t> step_many(const server::Sampling& s) override {
+  std::vector<uint32_t> step_many(const server::Sampling& s, uint32_t k) override {
+    if (k > mtp) throw std::logic_error("mock: step_many past mtp_k()");
+    ks.push_back(k);
     uint32_t n = bursts[burst_calls++ % bursts.size()];
-    n = std::max<uint32_t>(1, std::min<uint32_t>(n, mtp + 1));
+    n = std::max<uint32_t>(1, std::min<uint32_t>(n, k + 1));
     std::vector<uint32_t> out;
     for (uint32_t i = 0; i < n; ++i) out.push_back(step(s));
     return out;

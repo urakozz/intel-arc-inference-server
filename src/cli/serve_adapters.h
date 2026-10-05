@@ -117,11 +117,16 @@ struct EngineAdapter : server::EngineIface {
       std::fflush(stderr);
     }
     if (k_ > 0 && mtp_iters > 0)
-      std::fprintf(stderr, "mtp: K %u, %llu iterations, %llu/%llu drafts accepted (%.3f)\n", k_,
-                   (unsigned long long)mtp_iters, (unsigned long long)mtp_accepted,
+      std::fprintf(stderr,
+                   "mtp: K %u, %llu iterations, %llu/%llu drafts accepted (%.3f), iterations at "
+                   "K 0/1/2/3: %llu/%llu/%llu/%llu\n",
+                   k_, (unsigned long long)mtp_iters, (unsigned long long)mtp_accepted,
                    (unsigned long long)mtp_drafted,
-                   mtp_drafted ? double(mtp_accepted) / double(mtp_drafted) : 0.0);
+                   mtp_drafted ? double(mtp_accepted) / double(mtp_drafted) : 0.0,
+                   (unsigned long long)mtp_iters_at_k[0], (unsigned long long)mtp_iters_at_k[1],
+                   (unsigned long long)mtp_iters_at_k[2], (unsigned long long)mtp_iters_at_k[3]);
     mtp_iters = mtp_drafted = mtp_accepted = 0;
+    for (auto& n : mtp_iters_at_k) n = 0;
     gen_tokens_ = 0;
     flush_commit();
     eng.prefill(ids);
@@ -147,10 +152,13 @@ struct EngineAdapter : server::EngineIface {
   // (the verify rows' GDN slots and hidden rows stay valid until the next verify).
   uint32_t mtp_k() override { return k_; }
 
-  std::vector<uint32_t> step_many(const server::Sampling& sampling) override {
+  // `k_req` (spec 8 §10): the iteration's K, <= mtp_k(); `--mtp auto` varies it per
+  // iteration, 0 is one plain step.
+  std::vector<uint32_t> step_many(const server::Sampling& sampling, uint32_t k_req) override {
     flush_commit();
-    const uint32_t k = std::min(k_, eng.max_verify_k());
-    if (k == 0) return {step(sampling)};   // the last positions of max_len: plain
+    const uint32_t k = std::min({k_req, k_, eng.max_verify_k()});
+    ++mtp_iters_at_k[k];
+    if (k == 0) return {step(sampling)};   // K = 0, or the last positions of max_len: plain
     const uint32_t n = eng.pos();
     auto* control = eng.buffers().control.as<runtime::Control>();
     const uint32_t x = control->cur_token[0];
@@ -284,6 +292,7 @@ struct EngineAdapter : server::EngineIface {
   uint32_t pending_pos_ = 0, pending_j_ = 0, pending_next_ = 0;
   std::vector<uint32_t> pending_drafts_;
   uint64_t mtp_iters = 0, mtp_drafted = 0, mtp_accepted = 0;   // since the last prefill
+  uint64_t mtp_iters_at_k[runtime::Engine::kMaxDraft + 1] = {};  // step_many calls per K
 };
 
 // Spec 7 §3.1: the prefix cache's pinned host memory. ONE l0::MemKind::Host allocation of

@@ -67,14 +67,18 @@ struct EngineIface {
   virtual void ingest(const std::vector<uint32_t>&) { unsupported<int>(); }
 
   // Spec 8 §3.6 (plan 8c): speculative decoding. mtp_k() == 0 (the default) means the
-  // server calls step() only, exactly as before. Otherwise step_many() runs one
-  // draft/verify/accept iteration and returns 1 .. mtp_k() + 1 ids in order, the first
-  // being what step() would have returned; pos() then counts all of them. When the
-  // server keeps fewer (a stop, EOS or max_tokens inside the run), truncate_to(pos)
-  // rewinds the engine to the last kept id, so the session holds exactly the prompt
-  // and the ids the server consumed - as a run of step() calls would.
+  // server calls step() only, exactly as before. Otherwise step_many(s, k) runs one
+  // draft/verify/accept iteration with k drafts (k <= mtp_k(); spec 8 §10: `--mtp auto`
+  // chooses k per iteration, k = 0 is one plain step) and returns 1 .. k + 1 ids in
+  // order, the first being what step() would have returned; pos() then counts all of
+  // them. When the server keeps fewer (a stop, EOS or max_tokens inside the run),
+  // truncate_to(pos) rewinds the engine to the last kept id, so the session holds exactly
+  // the prompt and the ids the server consumed - as a run of step() calls would.
   virtual uint32_t mtp_k() { return 0; }
-  virtual std::vector<uint32_t> step_many(const Sampling& s) { return {step(s)}; }
+  virtual std::vector<uint32_t> step_many(const Sampling& s, uint32_t k) {
+    (void)k;
+    return {step(s)};
+  }
   virtual void truncate_to(uint32_t pos) { (void)pos; }
 
  private:

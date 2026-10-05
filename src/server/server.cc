@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <thread>
@@ -231,14 +232,24 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   // Spec 8: with MTP a step yields a burst of ids; the loop below still sees them one
   // at a time, and ids past a stop are handed back with truncate_to() after it.
   const bool speculative = deps_.engine.mtp_k() > 0;
+  // Spec 8 §10: --mtp auto keeps one policy per request, fed only by this request's own
+  // acceptance, so the K sequence (and a seeded request's output) is reproducible.
+  std::optional<AdaptiveK> policy;
+  if (speculative && opts_.mtp_auto) {
+    AdaptiveKOptions o = opts_.mtp_adaptive;
+    o.max_k = std::min(o.max_k, deps_.engine.mtp_k());
+    policy.emplace(o);
+  }
   std::vector<uint32_t> burst;
   size_t burst_at = 0;
   const auto next_id = [&]() -> uint32_t {
     if (!speculative) return deps_.engine.step(r.sampling);
     if (burst_at == burst.size()) {
-      burst = deps_.engine.step_many(r.sampling);
+      const uint32_t k = policy ? policy->next() : deps_.engine.mtp_k();
+      burst = deps_.engine.step_many(r.sampling, k);
       burst_at = 0;
       if (burst.empty()) throw std::runtime_error("EngineIface::step_many returned no ids");
+      if (policy) policy->observe(k, std::min<uint32_t>(k, uint32_t(burst.size() - 1)));
     }
     return burst[burst_at++];
   };

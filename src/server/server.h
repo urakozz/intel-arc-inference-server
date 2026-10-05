@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "server/adaptive_k.h"
 #include "server/deps.h"
 #include "server/openai.h"
 #include "server/prefix_cache.h"
@@ -36,6 +37,11 @@ struct Options {
   // Opt-in: chat requests feed the last prompt id by a decode replay so that the
   // prompt-end snapshot sits at len - 1 (PrefixSession::begin). Completions never do.
   bool prefix_split_last = false;
+  // Spec 8 §10 (`--mtp auto`): with an MTP engine (mtp_k() > 0), choose each iteration's K
+  // per request (server::AdaptiveK, K <= min(mtp_adaptive.max_k, mtp_k())). Off: every
+  // iteration drafts mtp_k(), as before.
+  bool mtp_auto = false;
+  AdaptiveKOptions mtp_adaptive;
 };
 
 class Server {

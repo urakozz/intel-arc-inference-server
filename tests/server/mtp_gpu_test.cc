@@ -89,7 +89,7 @@ Gen generate(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32_t n,
       g.ids.push_back(a.step(s));
       continue;
     }
-    const std::vector<uint32_t> burst = a.step_many(s);
+    const std::vector<uint32_t> burst = a.step_many(s, a.mtp_k());
     const size_t keep = std::min<size_t>(burst.size(), n - g.ids.size());
     g.ids.insert(g.ids.end(), burst.begin(), burst.begin() + keep);
     if (keep < burst.size()) a.truncate_to(a.pos() - uint32_t(burst.size() - keep));
@@ -178,7 +178,7 @@ int gate(const std::string& snap, runtime::PrefillBackend backend) {
     std::vector<uint32_t> ids;
     bool cut = false;
     while (ids.size() < 96) {
-      std::vector<uint32_t> burst = a.step_many(greedy);
+      std::vector<uint32_t> burst = a.step_many(greedy, a.mtp_k());
       if (!cut && burst.size() >= 3) {
         a.truncate_to(a.pos() - uint32_t(burst.size() - 1));
         burst.resize(1);
