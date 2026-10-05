@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "server/batch_engine.h"
 #include "server/deps.h"
 
 struct MockTok : server::TokIface {
@@ -232,5 +233,127 @@ struct StateMockEngine : server::EngineIface {
       ++ingested;
     }
     cur = next();
+  }
+};
+
+// Spec 13 (plan 13c Task 1): a batched engine with `n_slots` independent sessions, each a
+// StateMockEngine: the next id is a function of the slot's state hash AND its KV ids, so a
+// wrong restore or a row mixed up with another slot's generates different ids. Sampled rows
+// draw from the row's own generator only. `clock` counts cost in mock ticks: a decode step
+// costs `step_cost` whatever its row count (decode is bandwidth-bound, spec 13 §1), a
+// prefill call costs its ids / `prefill_rate`. `events` logs the calls for ordering checks.
+struct MockBatchEngine : server::BatchEngineIface {
+  struct Slot {
+    std::vector<uint32_t> kv;
+    uint64_t state = 0;
+    uint32_t p = 0, cur = 0, prompt_end = 0;
+    bool pending = false;
+  };
+  explicit MockBatchEngine(uint32_t n_slots = 4, uint32_t len = 1024) : maxlen(len) {
+    slot.resize(n_slots);
+    for (auto& s : slot) s.kv.assign(maxlen, 0);
+    for (uint32_t i = 0; i < 24; ++i) words.push_back(1000 + i);
+  }
+  uint32_t maxlen;
+  uint32_t blk = 4;
+  std::vector<Slot> slot;
+  std::vector<uint32_t> words;
+  uint32_t eos = 248046;
+  // A session whose first id is `key` generates EOS as its n-th generated id (n >= 1).
+  std::map<uint32_t, uint32_t> eos_at;
+  uint32_t bad_id = 0xFFFFFFFFu;   // prefill throws when it meets it
+  double clock = 0, step_cost = 1, prefill_rate = 32;
+  int step_us = 0;                 // wall-clock sleep per step (threaded tests)
+  std::vector<std::string> events;
+  std::atomic<uint64_t> steps{0};
+
+  uint32_t next(const Slot& s) const {
+    const uint32_t generated = s.p - s.prompt_end + 1;   // the pending id's index, 1-based
+    const auto it = eos_at.find(s.kv[0]);
+    if (it != eos_at.end() && generated == it->second) return eos;
+    uint64_t h = s.state;
+    for (uint32_t i = 0; i < s.p; ++i) h = StateMockEngine::mix(h, s.kv[i]);
+    return words[h % words.size()];
+  }
+  void consume(Slot& s, uint32_t id) {
+    if (s.p >= maxlen) throw std::runtime_error("mock: past max_len");
+    s.kv[s.p++] = id;
+    s.state = StateMockEngine::mix(s.state, id);
+  }
+  static std::string ev(const std::string& what, uint32_t i, uint32_t at) {
+    return what + " " + std::to_string(i) + " @" + std::to_string(at);
+  }
+
+  uint32_t slots() override { return static_cast<uint32_t>(slot.size()); }
+  uint32_t max_len() override { return maxlen; }
+  uint32_t pos(uint32_t i) override { return slot.at(i).p; }
+  void reset(uint32_t i) override {
+    Slot& s = slot.at(i);
+    std::fill(s.kv.begin(), s.kv.end(), 0);
+    s.state = 0;
+    s.p = s.cur = s.prompt_end = 0;
+    s.pending = false;
+    events.push_back(ev("reset", i, 0));
+  }
+  void prefill(const std::vector<Chunk>& chunks) override {
+    std::string e = "prefill";
+    uint32_t total = 0;
+    for (const Chunk& c : chunks) {
+      if (c.n == 0) throw std::runtime_error("mock: empty chunk");
+      Slot& s = slot.at(c.slot);
+      e += " " + std::to_string(c.slot) + ":" + std::to_string(c.n);
+      for (uint32_t k = 0; k < c.n; ++k) {
+        if (c.ids[k] == bad_id) throw std::runtime_error("mock: id out of vocabulary");
+        consume(s, c.ids[k]);
+      }
+      total += c.n;
+      if (c.last) {
+        s.prompt_end = s.p;
+        s.cur = next(s);
+        s.pending = true;
+      }
+    }
+    clock += total / prefill_rate;
+    events.push_back(e);
+  }
+  std::vector<uint32_t> step_batch(const std::vector<Row>& rows) override {
+    if (step_us != 0) std::this_thread::sleep_for(std::chrono::microseconds(step_us));
+    std::vector<uint32_t> out;
+    std::string e = "step";
+    for (const Row& r : rows) {
+      Slot& s = slot.at(r.slot);
+      if (!s.pending) throw std::logic_error("mock: step on a slot with nothing pending");
+      e += " " + std::to_string(r.slot);
+      const uint32_t id = s.cur;
+      consume(s, id);
+      s.cur = next(s);
+      if (!r.sampling->greedy && s.cur != eos) s.cur = words[(*r.rng)() % words.size()];
+      out.push_back(id);
+    }
+    clock += step_cost;
+    events.push_back(e);
+    ++steps;
+    return out;
+  }
+
+  uint32_t block() override { return blk; }
+  size_t state_bytes() override { return sizeof(uint64_t); }
+  size_t kv_bytes(uint32_t n) override { return size_t(n) * sizeof(uint32_t); }
+  void save_state(uint32_t i, void* host) override {
+    std::memcpy(host, &slot.at(i).state, sizeof(uint64_t));
+    events.push_back(ev("save_state", i, slot[i].p));
+  }
+  void load_state(uint32_t i, const void* host, uint32_t at) override {
+    Slot& s = slot.at(i);
+    std::memcpy(&s.state, host, sizeof(uint64_t));
+    s.p = at;
+    s.pending = false;
+    events.push_back(ev("load_state", i, at));
+  }
+  void save_kv(uint32_t i, uint32_t b, uint32_t e, void* host) override {
+    std::memcpy(host, slot.at(i).kv.data() + b, size_t(e - b) * 4);
+  }
+  void load_kv(uint32_t i, uint32_t b, uint32_t e, const void* host) override {
+    std::memcpy(slot.at(i).kv.data() + b, host, size_t(e - b) * 4);
   }
 };
