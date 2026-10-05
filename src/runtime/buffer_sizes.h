@@ -45,11 +45,35 @@ struct PersistentDims {
 struct DecodeScratchSizes {
   size_t resid, x, partials, ab_out, norm_sumsq, gdn_o, attn_q, attn_gate, attn_part,
       attn_out, logits, argmax_part;
+  size_t moe;   // spec 15c: MoeScratchLayout::total, 0 on a dense model (no allocation)
   size_t total() const {
     return resid + x + partials + ab_out + norm_sumsq + gdn_o + attn_q + attn_gate + attn_part +
-           attn_out + logits + argmax_part;
+           attn_out + logits + argmax_part + moe;
   }
 };
+
+// Spec 15c: a mixture-of-experts model's decode scratch - ONE allocation
+// (DecodeScratch::moe), three regions, sized here and nowhere else:
+//
+//   logits  fp32 [layer slots][kM][router_n]   the router || shared-gate GEMV's output
+//   route   u32  [layer slots][kM][kMoeRouteWords]   moe_route's rows (ids, weights, gate)
+//   h       bf16 [kM][top_k + 1][expert_intermediate]   SiLU(gate) x up of every slot
+//
+// The first two are PER LAYER - a layer's MoE block writes its own slice - so after a
+// step every layer's routing is still on the card for R2's router gate to read back
+// (tests/golden/ornith_decode_test.cc) without a debug list; ~0.4 MB on Ornith. The
+// layer slots are layers + 1: the MTP head's MoE layer (spec 15e) gets the last one,
+// so no kernel or buffer assumes a layer index below `layers`.
+inline constexpr uint32_t kMoeRouteWords = 32;   // = kernels::moe_route::kWords (capture.cc)
+struct MoeScratchLayout {
+  uint32_t layer_slots = 0;
+  size_t logits_layer = 0, route_layer = 0;   // bytes per layer slot
+  size_t logits_off = 0, route_off = 0, h_off = 0, h = 0;
+  size_t total = 0;
+  size_t logits_at(uint32_t layer) const { return logits_off + size_t(layer) * logits_layer; }
+  size_t route_at(uint32_t layer) const { return route_off + size_t(layer) * route_layer; }
+};
+MoeScratchLayout moe_scratch_layout(const model::ModelDesc& desc);   // all zero when dense
 
 struct DecodeScratchDims {
   static constexpr uint32_t kM = 8;

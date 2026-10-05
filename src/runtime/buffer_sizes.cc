@@ -140,7 +140,24 @@ DecodeScratchSizes DecodeScratchDims::sizes(uint32_t max_len, const model::Model
   s.attn_out = size_t{kM} * desc.fa_value_dim() * kBf16;
   s.logits = size_t{kM} * Q::kVocab * kFp32;
   s.argmax_part = size_t{kM} * kArgmaxGroups * 2 * kFp32;
+  s.moe = moe_scratch_layout(desc).total;
   return s;
+}
+
+MoeScratchLayout moe_scratch_layout(const model::ModelDesc& desc) {
+  MoeScratchLayout l;
+  if (!desc.is_moe()) return l;
+  const model::MoeDesc& m = desc.moe;
+  const size_t kM = DecodeScratchDims::kM;
+  l.layer_slots = desc.layers + 1;
+  l.logits_layer = kM * m.router_n() * kFp32;
+  l.route_layer = kM * kMoeRouteWords * sizeof(uint32_t);
+  l.logits_off = 0;
+  l.route_off = l.logits_off + l.layer_slots * l.logits_layer;
+  l.h_off = l.route_off + l.layer_slots * l.route_layer;
+  l.h = kM * m.slots() * m.expert_intermediate * kBf16;
+  l.total = l.h_off + l.h;
+  return l;
 }
 
 PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::ModelDesc& desc) {

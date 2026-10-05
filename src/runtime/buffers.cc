@@ -57,12 +57,14 @@ DecodeScratch::DecodeScratch(l0::Context& ctx, const DecodeScratchSizes& s)
       attn_part(ctx, l0::MemKind::Device, s.attn_part),
       attn_out(ctx, l0::MemKind::Device, s.attn_out),
       logits(ctx, l0::MemKind::Device, s.logits),
-      argmax_part(ctx, l0::MemKind::Device, s.argmax_part) {}
+      argmax_part(ctx, l0::MemKind::Device, s.argmax_part),
+      // Spec 15c: sized by moe_scratch_layout (0 bytes, so no allocation, when dense).
+      moe(s.moe ? std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, s.moe) : nullptr) {}
 
 size_t DecodeScratch::bytes() const {
   return resid.size() + x.size() + partials.size() + ab_out.size() + norm_sumsq.size() +
          gdn_o.size() + attn_q.size() + attn_gate.size() + attn_part.size() + attn_out.size() +
-         logits.size() + argmax_part.size();
+         logits.size() + argmax_part.size() + (moe ? moe->size() : 0);
 }
 
 // --- PrefillScratch ----------------------------------------------------------
@@ -197,6 +199,7 @@ DecodeBuffers::DecodeBuffers(l0::Context& ctx, uint32_t max_len, const model::Mo
       attn_out(own_s_->attn_out),
       logits(own_s_->logits),
       argmax_part(own_s_->argmax_part),
+      moe(own_s_->moe.get()),
       max_len(max_len) {}
 
 DecodeBuffers::DecodeBuffers(PersistentBuffers& p, DecodeScratch& s)
@@ -217,6 +220,7 @@ DecodeBuffers::DecodeBuffers(PersistentBuffers& p, DecodeScratch& s)
       attn_out(s.attn_out),
       logits(s.logits),
       argmax_part(s.argmax_part),
+      moe(s.moe.get()),
       max_len(p.max_len) {}
 
 size_t DecodeBuffers::persistent_bytes() const {
@@ -226,6 +230,6 @@ size_t DecodeBuffers::persistent_bytes() const {
 size_t DecodeBuffers::scratch_bytes() const {
   return resid.size() + x.size() + partials.size() + ab_out.size() + norm_sumsq.size() +
          gdn_o.size() + attn_q.size() + attn_gate.size() + attn_part.size() + attn_out.size() +
-         logits.size() + argmax_part.size();
+         logits.size() + argmax_part.size() + (moe ? moe->size() : 0);
 }
 }  // namespace runtime
