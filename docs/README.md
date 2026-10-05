@@ -13,6 +13,9 @@ short version; this is where the reasoning and the evidence live.
   bandwidth, the DPAS rate by data type, and what is simply not available on it.
 - **[BENCHMARKS.md](BENCHMARKS.md)** - every measured row, how it was taken and
   what grade it earned.
+- **[19-running-models.md](19-running-models.md)** - the commands to download, serve,
+  decode and benchmark each model (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5, K2-Horizon),
+  what each supports, its limits, and which configurations have run on a B70.
 
 ## The design
 

@@ -187,6 +187,10 @@ Both CLIs take the repo id and resolve it through the local cache
 (`$HF_HOME` or `~/.cache/huggingface`, revision from `refs/main`); a snapshot
 directory path works too.
 
+Commands for each model (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5, K2-Horizon), what each
+one supports, its limits, and which configurations have actually run on a B70:
+[docs/19-running-models.md](docs/19-running-models.md).
+
 ### Serving
 
 ```sh
@@ -209,7 +213,7 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
 
 | flag | default | what it does |
 |---|---|---|
-| `<snapshot-or-repo>` | required | HF repo id resolved in the local cache, or a snapshot directory; never downloads. The model (Qwen3.8 or Agnes 3.0 Flash) comes from its `config.json`. |
+| `<snapshot-or-repo>` | required | HF repo id resolved in the local cache, or a snapshot directory; never downloads. The model (Qwen3.8, Agnes 3.0 Flash or Ornith 1.5) comes from its `config.json`; K2-Horizon is refused until its engine side is built (`b70-decode` runs it). |
 | `--host H` | `0.0.0.0` | listen address |
 | `--port P` | `8000` | listen port |
 | `--served-name NAME` | `b70` | model name in the OpenAI API (`/v1/models`, the `model` field) |
@@ -221,7 +225,7 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
 | `--prefix-split-last` | off | `on`/`off`, chat requests only. A thinking model's next turn repeats this prompt but diverges at its **last** id: the template ended this prompt with `<think>\n`, and the history re-renders that turn as `<think>\n\n</think>` when the client drops the reasoning (opencode does). By default the prompt-end snapshot sits one id past that point, so the next turn falls back to the 2048-id block below and re-prefills up to 2047 ids it already had (~1 s per turn). With the flag the prompt is prefilled to len - 1, snapshotted there, and the last id runs as one decode step, so the next turn (or a retry of the same prompt) restores exactly where it diverges. The cost: that one id goes through decode's kernels, so a near-tie first token can differ from a run without the cache (same quality, not bitwise reproducible). **On for agentic sessions; off for benchmarks and the golden gates.** |
 | `--mtp off\|1\|2\|3\|auto` | `off` | Speculative decoding with the model's built-in MTP head: the head guesses the next few tokens, the main model checks all the guesses in one pass, and every correct guess is a token for free (output is unchanged either way). A number is a fixed count of guesses per step. `auto` picks 0-3 per step from how often that request's guesses were right recently: about 3 on tool calls and code, 1 on prose, 0 when guessing does not pay. Loads the head (+1.4 GB at 16k context, ~2.3 GB at 128k, derived; Ornith's MoE head +0.5 GB of weights, its experts quantised to int4 at load, and the full 262144 context still fits with it). On Ornith `auto` uses Qwen3.8's cost table until the card measures Ornith's (spec 15e). `0` is the same as `off`. |
 | `--mtp-max N` | `3` | With `--mtp auto`: the most guesses it may pick (1-3). |
-| `--spec off\|mtp\|lookup` | `off` | Which speculative proposer guesses the next tokens. `mtp` is the MTP head above (`--mtp auto` unless `--mtp` says otherwise). `lookup` needs no extra model: the guesses are the continuation of the longest earlier repeat of the last few tokens in the request (agentic edits re-quote files and tool output). The main model still checks every guess, so output is unchanged. On the tool-call set it projects ~1.44x alone, below `--mtp auto` (spec 19e; the opencode recording decides); it is the only option for models without an MTP head. Not yet run on the card. `--spec-min-match N` (default 3) is the shortest repeat that counts. |
+| `--spec off\|mtp\|lookup` | `off` | Which speculative proposer guesses the next tokens. `mtp` is the MTP head above (`--mtp auto` unless `--mtp` says otherwise). `lookup` needs no extra model: the guesses are the continuation of the longest earlier repeat of the last few tokens in the request (agentic edits re-quote files and tool output). The main model still checks every guess, so output is unchanged. On the tool-call set it projects ~1.44x alone, below `--mtp auto` (spec 19e; the opencode recording decides). It is meant for models without an MTP head, but today it checks its guesses with the MTP head's verify lists, so it loads the head and works only on a model that has one (not K2-Horizon yet). Not yet run on the card. `--spec-min-match N` (default 3) is the shortest repeat that counts. |
 | `--lm-head bf16\|int8` | `int8` | the output head: int8 per row, quantised at load (spec 9), or the checkpoint's bf16 |
 | `--draft-vocab off\|32k\|64k\|128k` | `off` | With `--mtp`: the head only guesses from the 32k / 64k / 128k most useful tokens (the chat and tool-call tags always, then `--draft-vocab-ids`, then the most common ones), so each guess reads a fraction of the output head. The check still uses the full vocabulary, so output never changes; a guess the subset cannot make is simply a miss. About 4-5 % faster MTP steps at 128k (derived, not yet measured). Costs 0.17 / 0.34 / 0.67 GB of memory with the int8 head, twice that with bf16, and that memory comes out of the `--max-len auto` context: at 128k, Qwen3.8 with `--mtp` gets ~160k instead of ~170k with the int8 head and ~132k instead of ~152k with bf16 (derived). Spec 8 §11. |
 | `--draft-vocab-ids FILE` | - | With `--draft-vocab`: your own ranking of the most useful tokens, one id per line, most frequent first. Make it with `tools/draft_vocab/rank.py` from the logs `--log-requests` writes. |
@@ -274,6 +278,57 @@ costs on your card (spec 8 §10).
 work day to day. Set `BOX=user@host` before using it. Without the box,
 `tools/mac_check.sh` runs the host tests and syntax-checks the device code and
 every kernel variant on a Mac ([docs/18-mac-checks.md](docs/18-mac-checks.md)).
+
+### Environment variables
+
+Read by `b70-serve` and `b70-decode`. A command-line flag always wins over the variable
+that sets its default. The `B70_PREFILL_*` switches are for experiments and A/B timing;
+leave them unset to run what the gates ran.
+
+| variable | read by | default | what it does |
+|---|---|---|---|
+| `HF_HOME` | both CLIs | `~/.cache/huggingface` | where a repo id is looked up: `$HF_HOME/hub/models--<org>--<name>`, revision from `refs/main`. The same place `hf download` writes to. |
+| `ONEAPI_DEVICE_SELECTOR` | both CLIs | unset: device 0 | which GPU, when `--device` is not given: `level_zero:N`, or `level_zero:*` for device 0. Anything else (lists, other backends) is refused at startup rather than silently running on another card. |
+| `ZE_AFFINITY_MASK` | the Level Zero driver | unset: every card visible | hides cards from the process: `ZE_AFFINITY_MASK=1` leaves only the second card, which the engine then sees as device 0. `tools/box.sh` and `tools/bench_decode.sh` forward it to the box. |
+| `B70_KV_CACHE` | both CLIs | `bf16` | the default of `--kv-cache` (`bf16` or `int8`); any other value is refused. This is how the tests run the same binaries over the int8 cache. |
+| `B70_DECODE_ATTN` | both CLIs, Qwen-family models | `v2` | decode attention. `v1` is the pair from before spec 10: slower at depth, and it bakes the context length, so only the compiled lengths run (4096, 16384, 32768, 131072; `--max-len auto` takes the largest that fits), MTP only at 16384, no `--kv-cache int8`, not built for Ornith. |
+| `B70_PREFILL_ATTN` | both CLIs, Qwen-family models | `flash` | prefill attention. `composed` is the reference path from before spec 6 (separate QK, softmax and PV launches): its scratch grows with the context (73,728 B per position on Qwen3.8, so `--max-len auto` drops to ~92k, derived), it refuses `--kv-cache int8`, and it is not built for Ornith. Any other value means `flash`. Read once per process. |
+| `B70_PREFILL_GDN_SCAN` | prefill, Qwen-family models | `dpas_split` | the delta net scan. `dpas_split` is the split-bf16 DPAS scan, the one approximate step in the default path (gated on tokens and state cosines); `vector` is the older scan, 2.33x slower on that kernel (measured). Other values are refused. Read once per process. |
+| `B70_PREFILL_GDN_SOLVE` | prefill, Qwen-family models | `vector` | `register` runs a barrier-free triangular solve: bit-identical, and measured slower (docs/prefill-gdn-solve-register-results.md). Read once per process. |
+| `B70_PREFILL_SILU_FUSED` | prefill on `--pp-backend l0` | on | `0` runs gate‖up and SiLU as two launches instead of one fused GEMM: bitwise the same, slower. For before / after timing in one binary. |
+| `B70_PREFILL_REPLAY` | prefill (all models, Level Zero backends) | off | `1` records each prefill chunk's command list once and replays it from then on. Experimental; refused with `sycl-tla`. |
+| `B70_PREFILL_PROFILE` | prefill | off | `1` times every prefill phase; `b70-decode --bench --pp` prints the table on stderr (Qwen-family models; not yet for K2). It adds a host wait per phase, so never use it for a recorded row. |
+| `B70_K2_ATTN` | `b70-decode`, K2-Horizon | `flash` | K2's attention, decode and prefill both. `eager` rounds scores and probabilities to bf16 where the reference does (spec 18 §10.1): 813 launches per token instead of 717, plus a score row of 4 B x 32 heads x max_len. The first box session decides which becomes the default. Other values are refused. |
+| `B70_GIT_SHA` | `b70-decode --bench` | `unknown` | the commit printed in the bench row. The box's tree has no `.git`, so `tools/bench_decode.sh` sets it. |
+
+The scripts in `tools/`:
+
+| variable | read by | default | what it does |
+|---|---|---|---|
+| `BOX` | `box.sh`, `bench_decode.sh`, `serve_bench.sh`, `box_validate.sh` | none, required | ssh target (`user@host`) of the machine with the GPU. Set it in the environment or in the untracked `tools/box.env` (copy `tools/box.env.example`); the environment wins. |
+| `REMOTE_DIR` | the same | from the branch | the tree on the box, relative to its `$HOME`: `b70-inference-server`, `-spec7a` for a `spec7a-*` branch, `-research` for `research-*` (`tools/box_dir.sh`); `box_validate.sh` uses `-validate`. |
+| `BOX_SUFFIX` | the same | from the branch | overrides that suffix; `none` forces the base tree. |
+| `JOBS` | `box.sh` (and every script that builds through it) | `44` | parallelism of the remote build |
+| `BUILD_DIR`, `CMAKE_ARGS` | `box.sh` | `build`, empty | build directory on the box (e.g. `build-nosycl`) and extra `-D` flags for the configure step |
+| `MODEL`, `DEPTH`, `TG`, `RUNS`, `PP`, `PP_CHUNK`, `PP_BACKEND`, `MAX_LEN`, `LM_HEAD` | `bench_decode.sh` | Qwen3.8's repo id, `4096`, `256`, `3`, the rest unset | the same as its flags (`--model`, `--depth`, ...). Unset adds nothing to the command, so it stays the one every earlier row used. It also forwards `ZE_AFFINITY_MASK` and `B70_PREFILL_ATTN`. |
+| `MODEL`, `PORT`, `SERVED_NAME`, `RUNS` | `serve_bench.sh` | Qwen3.8's snapshot in the box's HF cache, `8000`, `b70`, `3` | the served checkpoint, its port and name, and the number of llama-benchy invocations |
+| `L0_INCLUDE` | `mac_check.sh` | a path in the script | directory holding Level Zero's `ze_api.h` (a `level-zero` checkout's `include/`); without it the host and syntax sections fail |
+| `B70_JOBS` | `mac_check.sh` | all cores | parallelism of the Mac checks |
+| `B70_MAC_CL_DEVICE` | `mac_check.sh --kernels` | the first Intel GPU, else the first GPU | the OpenCL device, by a substring of its name (e.g. `AMD`) |
+| `SNAP_QWEN`, `SNAP_AGNES`, `SNAP_ORNITH`, `SNAP_K2`, `DEVICE`, `PORT`, ... | `box_validate.sh` | the four checkpoints, `0`, `8013` | the checkpoints, card and port the validation run uses; the full list (rounds, baseline, data directories) is in `tools/box_validate.sh --help` |
+| `ORACLE_MODEL` / `ORACLE_SNAP`, `ORACLE_THREADS`, `ORACLE_IMAGE`, `HF_CACHE`, `REPO_DIR` | `tools/oracle/run_in_container.sh` and the scripts that call it (`golden.sh`, `check.sh`) | Qwen3.8 in the HF cache, all threads, the script's reference image, `~/.cache/huggingface`, this tree | the CPU reference's checkpoint (a repo directory in the cache, or an absolute snapshot path, which wins), its CPU threads, the container, and the two mounts. `golden.sh` adds `OUT_DIR` (`oracle-out`), `IDS_DIR` (`tests/golden/prompts`) and `PROMPTS` (`prose code cjk`). |
+
+Test-only (the checkpoint paths the tests load are CMake options, e.g. `-DB70_TEST_SNAPSHOT`,
+`-DB70_ORNITH_SNAPSHOT`, `-DB70_K2_SNAPSHOT`, not environment variables):
+
+| variable | read by | default | what it does |
+|---|---|---|---|
+| `B70_LONGCTX_TESTS` | the `longctx` tests | unset: SKIP | `1` runs the long-context MTP variants (`mtp_verify_{32k,128k}_test`, `mtp_gpu_{32k,128k}_test`) |
+| `B70_K2_TIE_TOL` | `k2_golden_test` | `1e-3` | the near-tie tolerance of K2's routing diagnostic, proposed until the reference run measures it |
+| `B70_TOKENIZER_JSON` | the Qwen3.8 tokenizer tests, `mac_check.sh`'s host section | Qwen3.8's snapshot under `$HF_HOME` | path to Qwen3.8's `tokenizer.json`; without it those tests are disabled on the Mac |
+| `B70_SNAPSHOT_DIR` | `template_test` | Qwen3.8's snapshot under `$HF_HOME` | the snapshot whose chat template it renders |
+| `B70_K2_TOKENIZER_JSON` | `k2_tokenizer_test` | the CMake option of that name | K2's `tokenizer.json`; absent, the test is skipped |
+| `B70_SPLIT_VERBOSE` | `prefill_split_test` | unset | set: also print the worst KV row per attention layer of each non-bitwise split |
 
 ## Docs
 
