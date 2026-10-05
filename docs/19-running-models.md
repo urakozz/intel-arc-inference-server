@@ -191,26 +191,28 @@ plus its buffers), which is where the ~114k comes from.
 ## Ornith 1.5 35B-A3B
 
 `ornith-ai/Ornith-1.5-35B-A3B` is published in bf16 only (71.9 GB), which the engine
-refuses: it loads int4 GPTQ (AutoRound W4A16 g64, symmetric, experts exported per expert
-as `experts.E.{gate,up,down}_proj`). **No such checkpoint is published yet; spec 15a
-makes it.** The commands below use the repo id the tests assume,
-`urakozz/Ornith-1.5-35B-A3B-W4A16-g64-AutoRound-GPTQ`, **as a placeholder**: substitute
-the real one, or a local snapshot directory of your own export.
+refuses: it loads int4 GPTQ. The checkpoint is the operator's AutoRound W4A16 export,
+[`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`](https://huggingface.co/urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ)
+(22.99 GB: int4 g64 symmetric, GPTQ packing, experts per expert as
+`experts.E.{gate,up,down}_proj`, the routers and the MTP head bf16, and - unlike Qwen3.8's
+export - `in_proj_a` / `in_proj_b` int4 too, which the engine loads as an int4 a||b; spec 15
+§13 lists every fact read from it).
 
 The first mixture-of-experts model (spec 15): 40 layers (30 delta net, 10 attention),
 hidden 2048, 256 experts with top-8 plus a shared expert, ~3 B parameters active per token.
 Decode (15c), prefill (15d) and serving with its own chat template (Qwen3.5's), Qwen XML
 tool calls and the MoE MTP head (15e) are built.
 
-**Status: never run on a B70** (queue rows 10, 13, 16), and nothing can run until the
-checkpoint exists. Expected (derived): ~1.86 GB read per token, so the bandwidth ceiling is
-far above Qwen3.8's (~270 t/s), and launches, not bytes, will set the decode rate; 526
-launches per token. Prefill estimated at 3-6k t/s. Weights 19.45 GB with the int8 head
-(derived), +0.50 GB for the MTP head.
+**Status: never run on a B70** (queue rows 10, 13, 16, 19). Expected (derived): ~1.86 GB
+read per token, so the bandwidth ceiling is far above Qwen3.8's (~270 t/s), and launches,
+not bytes, will set the decode rate; 526 launches per token. Prefill estimated at 3-6k t/s.
+Weights 19.45 GB with the int8 head (derived), +0.50 GB for the MTP head. For comparison,
+the checkpoint's model card reports vLLM XPU on a B70 at 99.8 t/s decode (tg256, c1) and
+7090 t/s prefill (pp4096, c1) - not measured here.
 
 ```sh
-O=urakozz/Ornith-1.5-35B-A3B-W4A16-g64-AutoRound-GPTQ   # PLACEHOLDER: not published yet (spec 15a)
-uvx --from huggingface_hub hf download $O
+O=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
+uvx --from huggingface_hub hf download $O                 # 22.99 GB
 
 # every command below: never run on a B70
 # agentic session: the full trained context, 262144, fits with or without MTP (derived)
@@ -234,11 +236,11 @@ uvx --from huggingface_hub hf download $O
 - `--mtp auto` decides with Qwen3.8's cost table until the card measures Ornith's (the
   startup line says so); no default K is chosen for Ornith. The head's bf16 experts are
   quantised to int4 at load (round to nearest), which can change acceptance, never output.
-- At startup `b70-serve` notes that Ornith's `tokenizer.json` defines 248070 ids while the
-  model masks from 248077. That is expected: seven audio tokens are missing from the
-  tokenizer, and the engine never needs them.
-- Whether Ornith's tokenizer gives the committed `tests/golden/prompts` ids is still to be
-  checked; make your own `--ids` file with `tokenize.py` against its snapshot.
+- The checkpoint's `tokenizer.json` defines Qwen3.8's 248077 ids, the count the greedy
+  argmax masks from, so `b70-serve` prints no vocabulary note. It tokenises the committed
+  `tests/golden/prompts` (prose, code, cjk) to the committed ids; its pre-tokenizer splits
+  combining marks differently from the bf16 base checkpoint's file (`\p{M}`), which only
+  text with combining marks sees.
 
 **Relevant variables:** `B70_KV_CACHE` must stay `bf16`; the `B70_PREFILL_*` switches apply.
 
