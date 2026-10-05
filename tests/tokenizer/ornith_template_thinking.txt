@@ -1,0 +1,12 @@
+<|im_start|>user
+What is 17 * 23?<|im_end|>
+<|im_start|>assistant
+<think>
+17 * 23 = 17 * 20 + 17 * 3 = 340 + 51 = 391.
+</think>
+
+391<|im_end|>
+<|im_start|>user
+And 19 * 21?<|im_end|>
+<|im_start|>assistant
+<think>

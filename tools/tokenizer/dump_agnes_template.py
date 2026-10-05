@@ -2,6 +2,7 @@
 """Reference renders of Agnes 3.0 Flash's chat template (spec 14, Review Focus 5).
 
     dump_agnes_template.py <agnes-snapshot-dir>
+    dump_agnes_template.py <snapshot-dir> <prefix> <cases.json>     (spec 15e)
 
 Renders every case of tests/tokenizer/agnes_template_cases.json through
 transformers' own Jinja path - `apply_chat_template` when the snapshot has a
@@ -12,6 +13,11 @@ tests/tokenizer/template_test.cc compares the engine's renderer against them.
 
 Note (2026-10-03): Agnes's chat_template.jinja is byte-identical to Qwen3.8's
 (sha256 c3cf9e34...), so the engine takes the same minja fallback for it.
+
+Spec 15e: the same renders for another model - `<prefix>_template_<name>.txt` from
+tests/tokenizer/<cases.json>. Ornith's: `dump_agnes_template.py tests/tokenizer/ornith
+ornith ornith_template_cases.json` (the two snapshot files vendored there, no
+tokenizer.json, so render_jinja_template).
 """
 import hashlib
 import json
@@ -21,8 +27,10 @@ import sys
 import transformers
 
 snapshot = sys.argv[1]
+prefix = sys.argv[2] if len(sys.argv) > 2 else "agnes"
+cases_file = sys.argv[3] if len(sys.argv) > 3 else "agnes_template_cases.json"
 here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tests", "tokenizer")
-cases = json.load(open(os.path.join(here, "agnes_template_cases.json"), encoding="utf-8"))
+cases = json.load(open(os.path.join(here, cases_file), encoding="utf-8"))
 source = open(os.path.join(snapshot, "chat_template.jinja"), encoding="utf-8").read()
 cfg = json.load(open(os.path.join(snapshot, "tokenizer_config.json"), encoding="utf-8"))
 print("chat_template.jinja sha256", hashlib.sha256(source.encode("utf-8")).hexdigest())
@@ -53,7 +61,7 @@ def render(case):
 
 for case in cases:
     text = render(case)
-    name = f"agnes_template_{case['name']}.txt"
+    name = f"{prefix}_template_{case['name']}.txt"
     open(os.path.join(here, name), "w", encoding="utf-8", newline="").write(text)
     print(f"{name}: {len(text.encode('utf-8'))} bytes")
 print("transformers", transformers.__version__, "via", "apply_chat_template" if tokenizer else "render_jinja_template")

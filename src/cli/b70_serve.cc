@@ -71,8 +71,8 @@ void usage() {
                "                 startup if it does not fit (B70_DECODE_ATTN=v1: the compiled lengths)\n"
                "                 [--mem-reserve-gb G]   device memory the plan leaves free (default\n"
                "                                        1.5: driver, kernels, slack; box-unconfirmed)\n"
-               "                 The model is picked from the checkpoint's config.json: Qwen3.8 or\n"
-               "                 Agnes 3.0 Flash (spec 14).\n"
+               "                 The model is picked from the checkpoint's config.json: Qwen3.8,\n"
+               "                 Agnes 3.0 Flash (spec 14) or Ornith 1.5 35B-A3B (spec 15, MoE).\n"
                "                 [--pp-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n"
                "                 [--log-requests DIR]   write DIR/NNNNNN.json per request\n"
                "                 [--prefix-cache-gb auto|N]  the prefix cache, in SYSTEM RAM (pinned\n"
@@ -93,7 +93,8 @@ void usage() {
                "                 [--mtp off|1|2|3|auto]   speculative decoding with the MTP\n"
                "                             head: K guesses per step (off/0 = none, the default;\n"
                "                             auto = 0..3 per step from the request's own hit rate). Loads the\n"
-               "                             head (+0.85 GB weights, + its KV and state slots);\n"
+               "                             head (+0.85 GB weights - Ornith's MoE head +0.50 GB -\n"
+               "                             + its KV and state slots);\n"
                "                             any --max-len (spec 8 §12).\n"
                "                 [--mtp auto [--mtp-max 3] [--mtp-cost SPEC]]   K per iteration\n"
                "                             from each request's own acceptance (spec 8 §10).\n"
@@ -425,14 +426,11 @@ int run(int argc, char** argv) {
                         /*mtp=*/mtp_k > 0 || spec_lookup, lm_head, dv_spec);
   }();
   // Spec 15c: the server prefills every request; a model whose prefill is not built is
-  // refused here by name. Spec 15d builds Ornith's prefill; its SERVING (chat template,
-  // tool calls, the prefix cache on a MoE model) is spec 15e, so a MoE model is still
-  // refused here until 15e lifts it.
+  // refused here by name. Spec 15e serves Ornith (a MoE model): its chat template is the
+  // checkpoint's (chat::Template, tests/tokenizer/ornith_*), its tool calls the Qwen XML
+  // format src/server/toolcall.cc parses, its EOS ids generation_config.json's, and the
+  // prefix cache, --max-len auto and MTP run on the descriptor like every model's.
   model::require_prefill(*model.desc);
-  if (model.desc->is_moe())
-    throw std::runtime_error(model.desc->name + " (" + model.desc->architecture +
-                             "): serving a mixture-of-experts model is spec 15e (chat template, "
-                             "tool calls, prefix cache); b70-decode --prefill runs it");
   // Spec 6 §10: auto plans the largest max_len that fits and re-tables the model; an
   // explicit N is held to the same plan. Both print the plan's breakdown.
   const uint32_t max_len = cli::settle(context, model, max_len_arg, mem_reserve, pp_path, kv_cache);
@@ -443,6 +441,18 @@ int run(int argc, char** argv) {
   engine.prepare_prefill();
   std::fprintf(stderr, "%s\n", engine.memory_line().c_str());   // spec 6
   TokAdapter tokenizer(snapshot_dir + "tokenizer.json");
+  // Spec 15e: the sampler masks at the tokenizer's count, the greedy argmax at the
+  // descriptor's vocab_used (argmax.cl VOCAB_USED). They agree on Qwen3.8 (248077) and
+  // Agnes (248089); Ornith's tokenizer.json stops at </think> (248070 ids) while its
+  // tokenizer_config.json and the descriptor go to 248077 (seven audio specials the text
+  // engine never needs). Said once at startup rather than discovered as an undecodable id.
+  const model::ModelDesc& served = *engine.model().desc;
+  if (tokenizer.vocab_used() != served.vocab_used)
+    std::fprintf(stderr,
+                 "note: tokenizer.json defines %u ids, %s's greedy argmax masks from %u; sampling "
+                 "masks from %u\n",
+                 tokenizer.vocab_used(), served.name.c_str(), served.vocab_used,
+                 tokenizer.vocab_used());
   TemplateAdapter chat_template(snapshot_dir);
   EngineAdapter engine_adapter(engine, tokenizer.vocab_used(), mtp_k, spec_lookup);
   options.eos_ids = eos;
