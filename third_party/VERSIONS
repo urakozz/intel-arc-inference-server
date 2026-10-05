@@ -1,5 +1,21 @@
 # name        source                              pin                                       sha256
 # json header: third_party/json/nlohmann/json.hpp (kept at the include path minja uses)
 json          https://github.com/nlohmann/json   v3.12.0                                  aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63
-minja         https://github.com/google/minja    021c2293c187789ef13d56c6cfd89c9b134fd80f  55df85289038d54566ac40903617725e82a9e07e60a21b38dc6de65f7b7e10b8 87db93c98fd215b70b6f8908f55015a696cd92564dd4fced19bb11f103d475d4
+minja         https://github.com/google/minja    021c2293c187789ef13d56c6cfd89c9b134fd80f  345e8dbac339c6a858dae6130dd52e1f0e32fd16fdf843bc5a83c3ad21f63482 bc04a3645a198b256172f1b762328671e7e823c867c0281e02d2c64c4c4bc249
 httplib       https://github.com/yhirose/cpp-httplib v0.54.1                                 5933c14b2d0f45212925ed18ca579841f5fce717f431fc20cec712423e905b10
+#
+# minja carries b70 patches (spec 18d; every one marked "b70 patch (spec 18d)" in the source,
+# each tested against Jinja2 by tests/tokenizer/minja_ext_test.cc). The sha256s above are the
+# patched minja.hpp and chat-template.hpp; upstream at the pin they were
+#   55df85289038d54566ac40903617725e82a9e07e60a21b38dc6de65f7b7e10b8 (minja.hpp)
+#   87db93c98fd215b70b6f8908f55015a696cd92564dd4fced19bb11f103d475d4 (chat-template.hpp)
+# The patches make K2-Horizon's chat template render as transformers' Jinja does:
+#   minja.hpp          Jinja's Undefined apart from None (`{"default": null}` is defined);
+#                      `is [not] sameas <value>`; str.split() with no separator (Unicode
+#                      whitespace); the `replace` filter; the `dict` global; attribute getters
+#                      whose all-digit parts index (rejectattr('0', ...) on `| items` pairs);
+#                      an empty mapping is falsy; the lower-case `none` literal.
+#   chat-template.hpp  the tool-call capability probe also accepts ">argument_needle<" (an
+#                      argument name between tags), so K2's tool-call history is rendered by
+#                      its template instead of being polyfilled into JSON content.
+# The Qwen3.8 / Agnes template tests are unchanged by them (byte-identical renders).

@@ -1,0 +1,45 @@
+<|ifm|begin_of_text|><|ifm|im_start|>system
+# Tools
+You may call one or more tools to assist with the user query.
+
+Available tools are:
+
+<ifm|tools>
+## read
+Read a file from the workspace.
+Returns the lines numbered from 1.
+
+**Parameters**
+- `filePath` *(string, required)* - Absolute path of the file.
+- `limit` *(integer)* - Lines to read.
+  - Default: `2000`
+- `offset` *(integer)* - Line to start from (1-based).
+
+## edit
+Replace text in a file.
+
+**Parameters**
+- `filePath` *(string, required)*
+- `newString` *(string, required)*
+- `oldString` *(string, required)* - Text to replace; must be unique unless replaceAll.
+- `replaceAll` *(boolean)*
+  - Default: `False`
+</ifm|tools>
+
+The complete set of callable tool names is: read, edit. Call one of these exact names. No other tool exists, whatever a task description, a skill file, or a previous turn may imply; a call to any other name fails and is not retried for you.
+
+When calling tools, you MUST follow the tool-call format below:
+
+Wrap all tool calls in a single <ifm|tool_calls></ifm|tool_calls> block. For each call, emit one JSON object with the function name and arguments on the same line inside <ifm|tool_call></ifm|tool_call> tags:
+
+<ifm|tool_calls>
+<ifm|tool_call>{"name": <function-name>, "arguments": <args-json-object>}</ifm|tool_call>
+</ifm|tool_calls><|ifm|im_end|><|ifm|im_start|>user
+Fix the typo in README.md.<|ifm|im_end|><|ifm|im_start|>assistant
+<ifm|think>
+Edit it.</ifm|think><ifm|tool_calls>
+<ifm|tool_call>{"name": "edit", "arguments": {"filePath": "/work/README.md", "newString": "the", "oldString": "teh", "replaceAll": true}}</ifm|tool_call>
+</ifm|tool_calls><|ifm|im_end|><|ifm|im_start|>tool
+Edit applied.<|ifm|im_end|><|ifm|im_start|>user
+Now read lines 1-5.<|ifm|im_end|><|ifm|im_start|>assistant
+<ifm|think>

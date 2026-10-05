@@ -122,6 +122,12 @@ target_link_libraries(toolcall_test PRIVATE b70_server)
 add_test(NAME toolcall_test COMMAND toolcall_test ${CMAKE_SOURCE_DIR}/tests/server/toolcall_expected.json
   ${CMAKE_SOURCE_DIR}/tests/golden/toolcall)
 
+# Spec 18d: the renderer extensions (third_party/minja's b70 patches) against Jinja2's renders.
+add_executable(minja_ext_test tokenizer/minja_ext_test.cc)
+target_include_directories(minja_ext_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(minja_ext_test PRIVATE b70_third_party_minja)
+add_test(NAME minja_ext_test COMMAND minja_ext_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
+
 # Spec 7 C4 (plan 7c): the prefix cache store and plan, and the request path over a mock.
 add_executable(prefix_cache_test server/prefix_cache_test.cc)
 target_include_directories(prefix_cache_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -1202,6 +1208,25 @@ if(B70_TOKENIZER_ENABLED)
     CACHE PATH "Agnes snapshot directory for the template test (tokenizer_config + chat_template.jinja)")
   add_test(NAME template_agnes_test COMMAND template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
     ${B70_AGNES_SNAPSHOT_DIR} agnes_template_cases.json)
+  # Spec 18d: K2-Horizon's chat template (the int4 repo's, the one served) on 18 message lists
+  # - every tool_call_format and tool_presentation_format, reasoning_effort, history with and
+  # without thinking, list content, tool results, null defaults, $ref schemas - against
+  # transformers' apply_chat_template (tools/tokenizer/dump_k2.py); and its tokenizer against
+  # HF's on a varied text set, the special tokens, corpus.txt's digests and three chat renders.
+  # The directory needs tokenizer.json, tokenizer_config.json, chat_template.jinja (small
+  # files; the weights are not read). Absent: disabled on the Mac (host_only), SKIP elsewhere.
+  set(B70_K2_SNAPSHOT_DIR
+    "${_b70_hf_home}/hub/models--urakozz--IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ/snapshots/0e38c26ca3ce5899a0cb93ae8d085669d9565720"
+    CACHE PATH "K2-Horizon snapshot directory for the template and tokenizer tests (tokenizer.json, tokenizer_config.json, chat_template.jinja)")
+  add_test(NAME template_k2_test COMMAND template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${B70_K2_SNAPSHOT_DIR} k2_template_cases.json k2)
+  set_tests_properties(template_k2_test PROPERTIES SKIP_RETURN_CODE 77)
+  add_executable(k2_tokenizer_test tokenizer/k2_tokenizer_test.cc)
+  target_include_directories(k2_tokenizer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(k2_tokenizer_test PRIVATE b70_tokenizer)
+  add_test(NAME k2_tokenizer_test COMMAND k2_tokenizer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${B70_K2_SNAPSHOT_DIR})
+  set_tests_properties(k2_tokenizer_test PROPERTIES SKIP_RETURN_CODE 77)
   add_executable(streamer_test tokenizer/streamer_test.cc)
   target_include_directories(streamer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(streamer_test PRIVATE b70_tokenizer)

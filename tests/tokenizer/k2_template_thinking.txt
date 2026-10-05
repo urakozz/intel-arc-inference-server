@@ -1,0 +1,6 @@
+<|ifm|begin_of_text|><|ifm|im_start|>user
+What is 17 * 23?<|ifm|im_end|><|ifm|im_start|>assistant
+<ifm|think>
+17 * 23 = 17 * 20 + 17 * 3 = 340 + 51 = 391.</ifm|think>391<|ifm|im_end|><|ifm|im_start|>user
+And 19 * 21?<|ifm|im_end|><|ifm|im_start|>assistant
+<ifm|think>

@@ -68,6 +68,10 @@ private:
   std::shared_ptr<ObjectType> object_;
   std::shared_ptr<CallableType> callable_;
   json primitive_;
+  // b70 patch (spec 18d): Jinja's Undefined - a missing variable, key or index - is not None.
+  // An undefined Value is null in every other respect (is_null() holds), so only the
+  // `defined` test tells the two apart, as Jinja's does: `{"default": null}` is defined.
+  bool undefined_ = false;
 
   Value(const std::shared_ptr<ArrayType> & array) : array_(array) {}
   Value(const std::shared_ptr<ObjectType> & object) : object_(object) {}
@@ -148,6 +152,13 @@ private:
 
 public:
   Value() {}
+  // b70 patch (spec 18d): see undefined_.
+  static Value undefined() {
+    Value v;
+    v.undefined_ = true;
+    return v;
+  }
+  bool is_undefined() const { return undefined_ && is_null(); }
   Value(const bool& v) : primitive_(v) {}
   Value(const int64_t & v) : primitive_(v) {}
   Value(const double& v) : primitive_(v) {}
@@ -248,17 +259,17 @@ public:
   Value get(const Value& key) {
     if (array_) {
       if (!key.is_number_integer()) {
-        return Value();
+        return Value::undefined();   // b70 patch (spec 18d): Undefined, as in Jinja
       }
       auto index = key.get<int>();
       return array_->at(index < 0 ? array_->size() + index : index);
     } else if (object_) {
       if (!key.is_hashable()) throw std::runtime_error("Unhashable type: " + dump());
       auto it = object_->find(key.primitive_);
-      if (it == object_->end()) return Value();
+      if (it == object_->end()) return Value::undefined();   // b70 patch (spec 18d)
       return it->second;
     }
-    return Value();
+    return Value::undefined();   // b70 patch (spec 18d)
   }
   void set(const Value& key, const Value& value) {
     if (!object_) throw std::runtime_error("Value is not an object: " + dump());
@@ -321,6 +332,8 @@ public:
     if (is_number()) return get<double>() != 0;
     if (is_string()) return !get<std::string>().empty();
     if (is_array()) return !empty();
+    // b70 patch (spec 18d): an empty mapping is falsy, as in Python (a callable is not a mapping).
+    if (is_object() && !is_callable()) return !empty();
     return true;
   }
 
@@ -629,7 +642,7 @@ class Context : public std::enable_shared_from_this<Context> {
     virtual Value get(const Value & key) {
         if (values_.contains(key)) return values_.at(key);
         if (parent_) return parent_->get(key);
-        return Value();
+        return Value::undefined();   // b70 patch (spec 18d)
     }
     virtual Value & at(const Value & key) {
         if (values_.contains(key)) return values_.at(key);
@@ -682,7 +695,7 @@ public:
     std::string get_name() const { return name; }
     Value do_evaluate(const std::shared_ptr<Context> & context) const override {
         if (!context->contains(name)) {
-            return Value();
+            return Value::undefined();   // b70 patch (spec 18d)
         }
         return context->at(name);
     }
@@ -1346,7 +1359,7 @@ public:
               if (name == "mapping") return l.is_object();
               if (name == "iterable") return l.is_iterable();
               if (name == "sequence") return l.is_array();
-              if (name == "defined") return !l.is_null();
+              if (name == "defined") return !l.is_undefined();   // b70 patch (spec 18d): None is defined
               if (name == "true") return l.to_bool();
               if (name == "false") return !l.to_bool();
               throw std::runtime_error("Unknown type for 'is' operator: " + name);
@@ -1394,6 +1407,31 @@ public:
         } else {
           return do_eval(l);
         }
+    }
+};
+
+// b70 patch (spec 18d): Jinja's `x is sameas y` / `x is not sameas y` (Python's identity).
+// The values a template holds are JSON-shaped, so identity is decided where Python's is
+// well defined: True, False and None are singletons; nothing else is the same object here.
+class SameAsExpr : public Expression {
+    std::shared_ptr<Expression> left;
+    std::shared_ptr<Expression> right;
+    bool negated;
+public:
+    SameAsExpr(const Location & loc, std::shared_ptr<Expression> && l, std::shared_ptr<Expression> && r, bool n)
+        : Expression(loc), left(std::move(l)), right(std::move(r)), negated(n) {}
+    Value do_evaluate(const std::shared_ptr<Context> & context) const override {
+        if (!left) throw std::runtime_error("SameAsExpr.left is null");
+        if (!right) throw std::runtime_error("SameAsExpr.right is null");
+        auto l = left->evaluate(context);
+        auto r = right->evaluate(context);
+        bool same = false;
+        if (l.is_boolean() && r.is_boolean()) {
+            same = l.get<bool>() == r.get<bool>();
+        } else if (l.is_null() && r.is_null()) {
+            same = !l.is_undefined() && !r.is_undefined();
+        }
+        return Value(negated ? !same : same);
     }
 };
 
@@ -1555,6 +1593,38 @@ public:
             vargs.expectArgs("rstrip method", {0, 1}, {0, 0});
             auto chars = vargs.args.empty() ? "" : vargs.args[0].get<std::string>();
             return Value(strip(str, chars, /* left= */ false, /* right= */ true));
+          } else if (method->get_name() == "split" &&
+                     (vargs.args.empty() || vargs.args[0].is_null())) {
+            // b70 patch (spec 18d): Python's str.split() / split(None): runs of whitespace
+            // (str.isspace: ASCII \t\n\v\f\r, \x1c-\x1f, space and the Unicode spaces)
+            // separate, leading / trailing whitespace yields no empty parts.
+            vargs.expectArgs("split method", {0, 1}, {0, 0});
+            // The byte length of the whitespace code point at s[i], or 0.
+            const auto space_at = [&str](size_t i) -> size_t {
+              const auto b = [&str](size_t k) { return static_cast<unsigned char>(str[k]); };
+              const unsigned char c = b(i);
+              if ((c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x20)) return 1;
+              if (c == 0xC2 && i + 1 < str.size() && (b(i + 1) == 0x85 || b(i + 1) == 0xA0)) return 2;
+              if (i + 2 >= str.size()) return 0;
+              const uint32_t cp = c == 0xE1 || c == 0xE2 || c == 0xE3
+                                      ? ((c & 0x0Fu) << 12) | ((b(i + 1) & 0x3Fu) << 6) | (b(i + 2) & 0x3Fu)
+                                      : 0;
+              if (cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 ||
+                  cp == 0x202F || cp == 0x205F || cp == 0x3000)
+                return 3;
+              return 0;
+            };
+            Value result = Value::array();
+            size_t i = 0;
+            while (i < str.size()) {
+              size_t n;
+              while (i < str.size() && (n = space_at(i)) != 0) i += n;
+              size_t j = i;
+              while (j < str.size() && space_at(j) == 0) ++j;
+              if (j > i) result.push_back(Value(str.substr(i, j - i)));
+              i = j;
+            }
+            return result;
           } else if (method->get_name() == "split") {
             vargs.expectArgs("split method", {1, 1}, {0, 0});
             auto sep = vargs.args[0].get<std::string>();
@@ -1808,12 +1878,13 @@ private:
         auto str = parseString();
         if (str) return std::make_shared<Value>(*str);
       }
-      static std::regex prim_tok(R"(true\b|True\b|false\b|False\b|None\b)");
+      // b70 patch (spec 18d): `none` too - Jinja's lower-case literal (K2's template writes it).
+      static std::regex prim_tok(R"(true\b|True\b|false\b|False\b|None\b|none\b)");
       auto token = consumeToken(prim_tok);
       if (!token.empty()) {
         if (token == "true" || token == "True") return std::make_shared<Value>(true);
         if (token == "false" || token == "False") return std::make_shared<Value>(false);
-        if (token == "None") return std::make_shared<Value>(nullptr);
+        if (token == "None" || token == "none") return std::make_shared<Value>(nullptr);
         throw std::runtime_error("Unknown constant token: " + token);
       }
 
@@ -1968,6 +2039,13 @@ private:
 
               auto identifier = parseIdentifier();
               if (!identifier) throw std::runtime_error("Expected identifier after 'is' keyword");
+
+              // b70 patch (spec 18d): `is sameas <value>`, the one test with an argument here.
+              if (identifier->get_name() == "sameas") {
+                auto arg = parseStringConcat();
+                if (!arg) throw std::runtime_error("Expected a value after 'is sameas'");
+                return std::make_shared<SameAsExpr>(left->location, std::move(left), std::move(arg), negated);
+              }
 
               return std::make_shared<BinaryOpExpr>(
                   left->location,
@@ -2841,6 +2919,48 @@ inline std::shared_ptr<Context> Context::builtins() {
     }
     return ns;
   }));
+  // b70 patch (spec 18d): Jinja's `replace` filter, `s | replace(old, new[, count])` (minja has
+  // only the string method). Every occurrence, left to right, unless count is given.
+  globals.set("replace", simple_function("replace", { "s", "old", "new", "count" }, [](const std::shared_ptr<Context> &, Value & args) -> Value {
+    auto str = args.at("s").to_str();
+    const auto before = args.at("old").to_str();
+    const auto after = args.at("new").to_str();
+    int64_t count = args.contains("count") && !args.at("count").is_null() ? args.at("count").get<int64_t>() : -1;
+    if (before.empty()) throw std::runtime_error("replace: an empty search string is not supported");
+    std::string out;
+    size_t pos = 0;
+    for (size_t at; count != 0 && (at = str.find(before, pos)) != std::string::npos; --count) {
+      out.append(str, pos, at - pos);
+      out += after;
+      pos = at + before.size();
+    }
+    out.append(str, pos, std::string::npos);
+    return Value(out);
+  }));
+  // b70 patch (spec 18d): Jinja's `dict` global (Python's dict): dict(), dict(mapping),
+  // dict(iterable of [key, value] pairs), each with keyword items after. A later duplicate
+  // key replaces the value and keeps the first position, as in Python.
+  globals.set("dict", Value::callable([=](const std::shared_ptr<Context> &, ArgumentsValue & args) {
+    args.expectArgs("dict", {0, 1}, {0, (std::numeric_limits<size_t>::max)()});
+    auto out = Value::object();
+    if (!args.args.empty()) {
+      auto & src = args.args[0];
+      if (src.is_object()) {
+        for (auto & key : src.keys()) out.set(key, src.at(key));
+      } else if (src.is_array()) {
+        for (size_t i = 0, n = src.size(); i < n; ++i) {
+          auto & pair = src.at(i);
+          if (!pair.is_array() || pair.size() != 2)
+            throw std::runtime_error("dict: sequence element " + std::to_string(i) + " is not a pair");
+          out.set(pair.at(0), pair.at(1));
+        }
+      } else if (!src.is_null()) {
+        throw std::runtime_error("dict: argument is not a mapping or a sequence of pairs");
+      }
+    }
+    for (auto & [name, value] : args.kwargs) out.set(name, value);
+    return out;
+  }));
   auto equalto = simple_function("equalto", { "expected", "actual" }, [](const std::shared_ptr<Context> &, Value & args) -> Value {
       return args.at("actual") == args.at("expected");
   });
@@ -2997,10 +3117,28 @@ inline std::shared_ptr<Context> Context::builtins() {
         test_args.kwargs = args.kwargs;
       }
 
+      // b70 patch (spec 18d): Jinja's attribute getter - a dotted path whose all-digit parts
+      // index (so rejectattr('0', ...) reads a pair's first element, as `| items` yields).
+      const auto get_attr = [&attr_name](Value item) {
+        size_t begin = 0;
+        for (;;) {
+          const size_t dot = attr_name.find('.', begin);
+          const std::string part = attr_name.substr(begin, dot == std::string::npos ? std::string::npos : dot - begin);
+          const bool digits = !part.empty() && part.find_first_not_of("0123456789") == std::string::npos;
+          if (digits && item.is_array()) {
+            const auto index = static_cast<size_t>(std::stoull(part));
+            item = index < item.size() ? item.at(index) : Value::undefined();
+          } else {
+            item = item.get(Value(part));
+          }
+          if (dot == std::string::npos) return item;
+          begin = dot + 1;
+        }
+      };
       auto res = Value::array();
       for (size_t i = 0, n = items.size(); i < n; i++) {
         auto & item = items.at(i);
-        auto attr = item.get(attr_name);
+        auto attr = get_attr(item);
         if (has_test) {
           test_args.args[0] = attr;
           if (test_fn.call(context, test_args).to_bool() == (is_select ? true : false)) {
