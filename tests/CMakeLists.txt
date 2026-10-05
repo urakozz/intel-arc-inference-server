@@ -1463,7 +1463,7 @@ if(B70_ORNITH)
 endif()
 
 # --- Spec 12b: the int8 KV cache (`--kv-cache int8`, src/kernels/kv8.cl) ----------------
-# Written blind on the Mac; docs/superpowers/plans/box-validation-queue.md row 10 is the order
+# Written blind on the Mac; docs/superpowers/plans/box-validation-queue.md row 11 is the order
 # to run these in. `kv8` labels all of them: `ctest -L kv8`.
 if(B70_KV8)
   set(B70_KV8_KERNELS

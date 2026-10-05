@@ -101,3 +101,75 @@ and its replay, the two A4 prompts, and the Q3 tolerances re-derived from those 
 golden mean logit cosine drop <= 1e-4, `flash_long_test` at 32k <= 5e-4, unfiltered KL mean
 <= 1e-3, argmax differences only at near-ties).
 
+
+## 9. Amendment - 2026-10-05: 12b as built, blind (the Mac; nothing has run on the card)
+
+The operator had 12b written before the Qwen3.8 repeat of 12a (plan 12b Review Focus 0 set
+aside); the repeat runs on the Mac CPU (`tools/oracle/kv8_qwen38_repeat.sh`, plan 12b
+"Task A") and its numbers replace the PROVISIONAL tolerances below. Branch `spec12b-int8-kv`.
+
+**The flag.** `--kv-cache bf16|int8` on `b70-serve` and `b70-decode`, default **bf16**, which
+is today's engine bit for bit: no existing kernel source changed (`tools/kernel_cmdlines`:
+the 280 existing command lines identical, 15 added), bf16 allocates and copies exactly what
+it did, and every bf16 code path is the old one. `B70_KV_CACHE=bf16|int8` sets the default
+(`runtime::default_kv_cache()`, read at each call as `B70_DECODE_ATTN` is), which is how the
+gate tests run their own binaries over the int8 cache. int8 is refused, with the reason,
+with decode attention v1 (at capture), with the composed prefill path or sycl-tla (at the
+first prefill; the CLIs before the load).
+
+**The scheme (§8's `rotkv`), bit-defined.** `src/common/kv8.h` (host) and
+`src/kernels/kv8.cl` (device) are one definition:
+
+- R = H_256 diag(s) / 16 with **the probe's own s** (`hadamard(256, 0)`, torch's generator
+  seeded 0; `kv8_test` pins the bit string). rotate(x)[j] = s[j] FWHT(x)[j] / 16;
+  unrotate(y)[i] = FWHT(s ⊙ y)[i] / 16; the FWHT in ascending stages.
+- What is rotated is what the bf16 cache would hold: K = rne_bf16(roped k), V = rne_bf16(v).
+  q is rotated from attn_prep's fp32 value (decode keeps fp32; prefill rounds to bf16 as
+  `pf_attn_prep_q16` does).
+- Per (position, kv head): s16 = fp16_rne(amax / 127) (subnormals kept, not flushed);
+  q8 = clamp(rint(y / f16(s16)), ±127) - divided by the ROUNDED scale; deq = q8 · f16(s16),
+  exact in fp32.
+- Readers: decode v2's kv8 twin dequantises K and V exactly in fp32 (the attention
+  arithmetic and every order are v2's); the flash kernel takes int8 as an exact bf16 DPAS
+  operand, multiplies each score by its key's K scale, and folds the V scale into P
+  (rne_bf16(p · s_v); the row sum stays Σ p). Both un-rotate each head's output in fp32
+  before the sigmoid gate (decode: in `attn_reduce_v2_kv8`; prefill: `pf_attn_gate_kv8`).
+
+**Layout (§3, refined).** One K and one V allocation as before: the int8 rows
+`[layers][max_len][4][256]` where the bf16 rows were, then every layer's fp16 scales
+`[layers][max_len][4]` (`runtime::KvLayout`; the MTP head's own layer the same at
+`layers` = 1). 32 KiB + 256 B per position on Qwen3.8 (16 FA layers), 36 KiB + 288 B on
+Agnes. Spec 7: `save_kv` / `load_kv` copy the int8 rows and then the scales per tensor
+(`kv_bytes` = n · 2 · layers · 4 · 258); the prefix cache's hash chains start from the
+engine's KV form, so a bf16 entry can never restore into an int8 engine (Review Focus 2).
+
+**Memory (derived, `memory_plan_test`; 1.5 GB reserve, 32.53 GB card).** `--max-len auto`
+with `--kv-cache int8`:
+
+| model / head | no MTP | `--mtp` |
+|---|---:|---:|
+| Qwen3.8, int8 head | **262144** (bf16 KV 201216) | **262144** (169984) |
+| Qwen3.8, bf16 head | **262144** (181760) | **262144** (151808) |
+| Agnes, int8 head | **262144** (139520) | **225792** (114176) |
+
+Qwen3.8 at 262144: KV 8.657 GB, total 26.51 GB + reserve (int8 head, no MTP).
+
+**Validated on the Mac (indicative, not the gates).** Host: `kv8_test` (the signs, every
+fp16, the rotation against fp64 R, the quantiser's bounds, a synthetic attention where
+rotkv beats per token), `memory_plan_test`, `prefix_cache_test`. Device code: every touched
+host file syntax-checked against the Level Zero headers; `kv8.cl` clang-checked per family;
+the writer (`attn_prep_kv8`, decode M = 2 / QKV_S = 2 and prefill PF = 1) and the gate
+(`pf_attn_gate_kv8`) RUN on the Mac's OpenCL GPU (UHD 630) bitwise equal to the host
+reference (q, gate, int8 rows, scales; the gate 18432/18432 exact). The decode and flash
+readers use Intel sub-group / DPAS built-ins and have not run anywhere.
+
+**Tolerances, PROVISIONAL until the Qwen3.8 repeat** (12a §5's proposal, as registered):
+golden mean logit cos drop ≤ 1e-4 (`kv8_vs_oracle_test`); 1 - cos(int8 KV, bf16 KV) ≤ 5e-4
+at 4k-32k (`flash_long_kv8_test`); the kernel test's gated flash rows ≥ 0.9999. The golden
+and prefill gates keep their tie rule unchanged (Q2).
+
+**Open for the box** (box-validation-queue row 11): every kernel binary's first ocloc
+compile and first run; Q2-Q5; the speed bars (§5) - the readers are written for
+correctness first: decode loads V a byte per lane per position and the flash loads K
+as 16-byte rows and V a byte per lane per key, where the bf16 kernels use 2D block reads,
+so the prefill-at-depth ≤ 3 % bar is at risk and is recorded, not assumed.
