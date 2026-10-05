@@ -58,6 +58,14 @@ not fastidiousness: BuildKit discards *all* completed work, including finished
 layers, if the docker client dies, and a dropped connection can silently lose
 hours.
 
+**Validating work merged without the box** is one command, `tools/box_validate.sh`
+(`--dry-run` first to read what it will do). It runs the rows of
+[box-validation-queue.md](superpowers/plans/box-validation-queue.md) as stages in one
+detached orchestrator on the box, under the GPU lock, G0 (kernel binaries and gate outputs
+identical to a baseline build) first and stop-the-line on a G0 failure, resumable after an ssh
+drop or a reboot, and writes `box-validation-<date>.md` when it is done. Its own tree is
+`~/b70-inference-server-validate`; its results are under `~/b70-validate/`.
+
 ## Device selection, and the gotcha
 
 A box with two cards will not hand you the same one twice unless you say which.
