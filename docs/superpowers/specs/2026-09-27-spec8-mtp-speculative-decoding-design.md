@@ -346,3 +346,23 @@ one K for the whole server.
   worth it.
 - **Pending on the box:** the int8 cost table (above); D1 rows for `--mtp auto` against
   K = 1 and K = 3 on the golden and tool-call prompts; the opencode replay.
+
+## 12. Amendment: MTP at every context length (2026-10-05)
+
+A9's "MTP lists are compiled at max_len 16384" was true of v1 decode attention, whose
+`attn_decode` / `attn_reduce` bake `MAXLEN` and were built at M = 2..4 only for 16384. Spec 10
+made v2 the default (`kDefaultDecodeAttn`, 2026-09-28): `attn_v2_M<M>_T32` bakes no max_len and
+is built for M = 1..4, and every other binary the draft and verify lists bind (GEMVs, folds, GDN
+slots, the head's bf16 linears) is independent of max_len. `MtpBuffers` sizes the head's KV
+from max_len at run time. So nothing limits MTP to 16384 any more except the old text, which is
+corrected here, in `b70-serve --help` and in the README. `B70_DECODE_ATTN=v1` with `--mtp` still
+needs 16384 (its binaries are the only v1 M > 1 ones).
+
+- **Memory at 131072 (derived):** the engine without MTP uses 28.1 GB (README, spec 6); the head
+  adds 0.85 GB of weights, its KV 1.07 GB (2 x 131072 x 4 x 256 x 2 B, 0.13 GB at 16384) and the
+  three GDN slots 0.45 GB, so ~30.5 GB of 32.5. It fits; the margin is ~2 GB.
+- **Pending on the box (unvalidated):** `mtp_gpu_test`'s greedy-equality and M2 cases at
+  max_len 131072 (and 32768); a passkey at 120k with `--mtp auto`; spec 7's C1 restore with MTP
+  at 64k; the memory line; A12's 32k / 64k rows that could not run before. The verify's
+  attention cost grows with depth (M rows over the whole KV), so the cost table at depth is
+  re-measured with `probe_mtp_steps` at 32k and 120k.
