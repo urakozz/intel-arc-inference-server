@@ -1,8 +1,9 @@
 // Spec 18d: K2-Horizon's tokenizer through the engine's (the Rust `tokenizers` crate behind
 // tok::Tokenizer) against Hugging Face's, from tools/tokenizer/dump_k2.py's facts:
-//   k2_tokenizer_test <tests/tokenizer> <k2-snapshot-dir>
-// tokenizer.json is <k2-snapshot-dir>/tokenizer.json unless B70_K2_TOKENIZER_JSON names it;
-// absent, the test SKIPs (77). Checked:
+//   k2_tokenizer_test <tests/tokenizer> <template dir> <tokenizer.json>
+// <template dir> holds the served repo's chat_template.jinja, tokenizer_config.json and
+// generation_config.json (tests/tokenizer/k2, vendored); the environment's
+// B70_K2_TOKENIZER_JSON replaces the third argument. No tokenizer.json: SKIP (77). Checked:
 //   - the vocabulary size with the added tokens, and every chat / tool tag's id both ways;
 //   - a varied text set (prose, code, CJK, Cyrillic, Arabic, emoji, NFD input, zero-width
 //     characters, digit runs, the special tokens inline, long runs, empty): encode without and
@@ -179,16 +180,15 @@ int check_renders(const tok::Tokenizer& t, const json& facts, const std::string&
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 3) {
-    std::fprintf(stderr, "usage: k2_tokenizer_test <tests/tokenizer> <k2-snapshot-dir>\n");
+  if (argc != 4) {
+    std::fprintf(stderr, "usage: k2_tokenizer_test <tests/tokenizer> <template dir> <tokenizer.json>\n");
     return 2;
   }
   const std::string dir = argv[1], snapshot = argv[2];
   const char* env = std::getenv("B70_K2_TOKENIZER_JSON");
-  const std::string path = env != nullptr ? env : snapshot + "/tokenizer.json";
+  const std::string path = env != nullptr ? env : argv[3];
   if (!exists(path)) {
-    std::printf("k2_tokenizer_test: SKIP (no %s; set B70_K2_TOKENIZER_JSON or -DB70_K2_SNAPSHOT_DIR)\n",
-                path.c_str());
+    std::printf("k2_tokenizer_test: SKIP (no %s; set B70_K2_TOKENIZER_JSON)\n", path.c_str());
     return 77;
   }
   const json facts = json::parse(slurp(dir + "/k2_tokenizer.json"));
