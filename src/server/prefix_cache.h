@@ -98,6 +98,7 @@ class PrefixCache {
   void release();
 
   size_t bytes_used() const { return used_; }
+  uint64_t kv_form() const;              // the root of every chain (spec 12b)
   size_t budget() const { return budget_; }
   size_t entries() const;
   uint32_t block() const { return block_; }
