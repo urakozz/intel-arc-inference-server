@@ -84,10 +84,19 @@ bool has_suffix(const std::string& s, const char* suf) {
   return s.size() > n && s.compare(s.size() - n, n, suf) == 0;
 }
 
+// `self_attn.k_scale` / `self_attn.v_scale`: an fp8 KV cache's calibration (NameView).
+bool is_kv_scale(const std::string& s) {
+  return has_suffix(s, "self_attn.k_scale") || has_suffix(s, "self_attn.v_scale");
+}
+
 struct NameView {
   std::map<std::string, std::string> names;  // stripped -> checkpoint name
   std::set<std::string> consumed;            // stripped names actually loaded
   size_t mtp_skipped = 0, visual_skipped = 0, qzeros = 0, g_idx = 0;
+  // compressed-tensors' fp8 KV-cache calibration (`self_attn.k_scale` / `v_scale`,
+  // QuantConfig::ct_kv_cache_scheme): dropped by name - this engine's KV cache is bf16
+  // or its own int8 - and counted, like qzeros.
+  size_t kv_scales = 0;
   size_t top_level = 0;                      // names outside model.language_model.
 };
 
@@ -115,6 +124,7 @@ NameView build_view(const SafetensorsSet& set, bool keep_mtp, const model::Model
       std::string stripped = d.to_engine(name.substr(std::strlen(kLmPrefix)));
       if (has_suffix(stripped, ".qzeros")) ++v.qzeros;
       if (has_suffix(stripped, ".g_idx")) ++v.g_idx;
+      if (is_kv_scale(stripped)) ++v.kv_scales;
       v.names.emplace(std::move(stripped), name);
     } else {
       // lm_head - `.weight` on the published checkpoint, `.qweight`/`.qzeros`/
@@ -290,8 +300,7 @@ std::vector<LinearSrc> apply_fold(const SafetensorsSet& set, NameView& view,
     const LinearSrc f = LinearSrc::classify(set, ckpt_name(desc, layer_prefix + fp));
     if (f.kind != WKind::Int4 || srcs[i].kind != WKind::Int4)
       throw std::runtime_error(id + ": fold part '" + fp + "' or its partner is not int4");
-    view.consumed.insert(layer_prefix + fp + ".qweight");
-    view.consumed.insert(layer_prefix + fp + ".scales");
+    for (const std::string& suffix : f.suffixes()) view.consumed.insert(layer_prefix + fp + suffix);
     const PackedInt4View a{srcs[i].K, srcs[i].N, srcs[i].qweight, srcs[i].scales};
     const PackedInt4View b{f.K, f.N, f.qweight, f.scales};
     keep.push_back(by_n ? fold_n(a, b) : fold_k(a, b));
@@ -332,12 +341,7 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
                                " but the model description says " +
                                (fl.kind == model::WeightKind::Int4 ? "int4" : "bf16") +
                                " - the checkpoint's dynamic exclusions moved");
-    if (int4) {
-      view.consumed.insert(layer_prefix + part + ".qweight");
-      view.consumed.insert(layer_prefix + part + ".scales");
-    } else {
-      view.consumed.insert(layer_prefix + part + ".weight");
-    }
+    for (const std::string& suffix : s.suffixes()) view.consumed.insert(layer_prefix + part + suffix);
     srcs.push_back(s);
   }
   // Spec 14 §2: Agnes's parallel FFN joined onto the parts on packed int4 BEFORE
@@ -606,16 +610,14 @@ std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const Safe
     // names in the view), counting what it reads into the head's report fields.
     MoeSource src;
     src.has = [&](const std::string& part) {
-      return view.names.count(L + part + ".qweight") != 0 ||
-             view.names.count(L + part + ".weight") != 0;
+      for (const std::string& m : LinearSrc::marker_suffixes())
+        if (view.names.count(L + part + m) != 0) return true;
+      return false;
     };
     src.linear = [&](const std::string& part) {
       const std::string eng = L + part;
       LinearSrc s = LinearSrc::classify(set, desc.to_checkpoint(eng));
-      const std::vector<const char*> suffixes =
-          s.kind == WKind::Int4 ? std::vector<const char*>{".qweight", ".scales"}
-                                : std::vector<const char*>{".weight"};
-      for (const char* suffix : suffixes) {
+      for (const std::string& suffix : s.suffixes()) {
         const TensorInfo info = take(view, set, eng + suffix);
         rep.mtp_checkpoint_bytes += set.bytes(info);
         ++rep.mtp_tensors;
@@ -689,17 +691,13 @@ MoeLayer load_moe_layer(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet
   const std::string lp = Qwen35::layer_prefix(layer);
   MoeSource src;
   src.has = [&](const std::string& part) {
-    return view.names.count(lp + part + ".qweight") != 0 ||
-           view.names.count(lp + part + ".weight") != 0;
+    for (const std::string& m : LinearSrc::marker_suffixes())
+      if (view.names.count(lp + part + m) != 0) return true;
+    return false;
   };
   src.linear = [&](const std::string& part) {
     LinearSrc s = LinearSrc::classify(set, ckpt_name(desc, lp + part));
-    if (s.kind == WKind::Int4) {
-      view.consumed.insert(lp + part + ".qweight");
-      view.consumed.insert(lp + part + ".scales");
-    } else {
-      view.consumed.insert(lp + part + ".weight");
-    }
+    for (const std::string& suffix : s.suffixes()) view.consumed.insert(lp + part + suffix);
     return s;
   };
   repack_moe_layer(desc, src, host, "layer " + std::to_string(layer));
@@ -790,6 +788,13 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
         "ships " + std::to_string(scan.g_idx_tensors) +
         " g_idx tensors - refusing to infer that no activation-order permutation exists. Add "
         "\"desc_act\": false to quantization_config if that is what the quantiser meant.");
+  // The label against the bytes (GPTQ vs compressed-tensors) and compressed-tensors'
+  // `actorder` "group" against its shipped g_idx (quant.h).
+  check_quant_scan(qc, scan);
+  // Operator requirement (2026-10-05): one note per load, not per tensor, when the
+  // checkpoint is compressed-tensors - what is converted, and the recommended format.
+  const std::string quant_note = ct_conversion_note(scan);
+  if (!quant_note.empty()) std::fprintf(stderr, "loader: %s\n", quant_note.c_str());
   NameView view = build_view(set, mtp, desc);
   Widen widen;
 
@@ -801,7 +806,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // cross-check, the shape and layout the capture binds - follows from this
   // one line, so a checkpoint that packs the head and one that does not are
   // the same code path with a different row.
-  const bool ckpt_int4 = LinearSrc::classify(set, ckpt_name(desc, "lm_head")).kind == WKind::Int4;
+  const bool ckpt_int4 = LinearSrc::kind_of(set, ckpt_name(desc, "lm_head")) == WKind::Int4;
   // Spec 9: the int8 form is made from the bf16 tensor, so it needs one.
   if (lm_form == LmHeadForm::Int8 && ckpt_int4)
     throw std::runtime_error(
@@ -859,6 +864,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                 nullptr,
                 {}};
   l0::CmdList imm = l0::CmdList::immediate(ctx);
+  m.report.quant_note = quant_note;
   imm.copy(m.embed.ptr(), set.data(emb), set.bytes(emb));
   m.report.embed_bytes += set.bytes(emb);
   imm.copy(m.final_norm.ptr(), fnorm.data(), fnorm.size());
@@ -975,6 +981,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
     if (view.consumed.count(stripped)) continue;
     if (has_suffix(stripped, ".qzeros")) continue;
     if (has_suffix(stripped, ".g_idx")) continue;
+    if (is_kv_scale(stripped)) continue;
     if (m.report.unconsumed++ < 5) unconsumed += (unconsumed.empty() ? "" : ", ") + stripped;
   }
   if (m.report.unconsumed > 5) unconsumed += ", …";
@@ -1009,7 +1016,15 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // checkpoint spoke - a report that always said "dynamic exclusion rules"
   // would be silently wrong about an auto-round config.
   const std::string rules =
-      qc.dynamic_rule_count != 0
+      qc.compressed_tensors
+          ? "compressed-tensors pack-quantized, actorder " +
+                (qc.ct_actorder.empty() ? std::string("none") : qc.ct_actorder) + ", " +
+                std::to_string(qc.ct_ignore) + " ignore entries, " +
+                std::to_string(scan.ct_linears) + " linears repacked to GPTQ layout" +
+                (view.kv_scales != 0 ? ", " + std::to_string(view.kv_scales) +
+                                             " fp8 KV scales dropped"
+                                       : std::string())
+      : qc.dynamic_rule_count != 0
           ? std::to_string(qc.dynamic_rule_count) + " dynamic exclusion rules"
           : std::to_string(qc.extra_excluded) + " extra_config exclusions + " +
                 std::to_string(qc.extra_quantised) + " explicit int4";

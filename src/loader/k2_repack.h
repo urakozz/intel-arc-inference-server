@@ -22,6 +22,12 @@
 // never read (assert_quant_invariants proves them the symmetric zero point and the
 // identity); every other tensor is read exactly once, and `unconsumed()` must be 0 at the
 // end of a load.
+//
+// **Two packings, one per checkpoint.** If any tensor is a compressed-tensors
+// `.weight_packed`, every int4 linear is expected in that form ({weight_packed,
+// weight_scale, weight_shape} required, weight_g_idx allowed) and converted by
+// LinearSrc::classify - the same exact repack the main loader uses (docs/13,
+// "compressed-tensors symmetric checkpoints"); otherwise the GPTQ names above.
 namespace loader {
 
 // One non-expert int4 linear as the device holds it: GPTQ layout 0.
@@ -52,7 +58,7 @@ class K2Checkpoint {
   // missing one. Call before any repack.
   void check_names() const;
   // The expected tensor names (full checkpoint names); `required` = must be present
-  // (everything but .qzeros / .g_idx).
+  // (everything but .qzeros / .g_idx, or .weight_g_idx for compressed-tensors).
   std::set<std::string> expected_names(bool required_only) const;
 
   void repack_layer(uint32_t layer, K2HostLayer& out);
@@ -62,6 +68,8 @@ class K2Checkpoint {
   const uint16_t* lm_head();                      // bf16 [vocab][hidden] row-major
 
   // Tensors nothing read (qzeros / g_idx excepted), with up to five names in `names`.
+  // compressed-tensors: the checkpoint's int4 linears are `.weight_packed` (constructor).
+  bool compressed_tensors() const { return ct_; }
   size_t unconsumed(std::string* names = nullptr) const;
   const SafetensorsSet& set() const { return set_; }
   const model::K2Desc& desc() const { return d_; }
@@ -74,6 +82,7 @@ class K2Checkpoint {
   const model::K2Desc& d_;
   const SafetensorsSet& set_;
   std::set<std::string> consumed_;
+  bool ct_ = false;
 };
 
 // K2's RoPE table: fp32 [max_len][2][head_dim / 2], cos at [p][0][i], sin at [p][1][i] -

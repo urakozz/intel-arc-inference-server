@@ -151,6 +151,10 @@ struct LoadReport {            // printed by load(); asserted by the checkpoint 
   // checkpoint's efficiency against another's denominator.
   size_t read_per_token = 0;
   size_t unconsumed = 0;            // checkpoint tensors nothing loaded (must be 0)
+  // compressed-tensors checkpoints only: the one conversion note load() printed to
+  // stderr (loader::ct_conversion_note - the group found, the linears converted, the
+  // recommended format). Empty for a GPTQ / auto-round checkpoint.
+  std::string quant_note;
   // Spec 9: the host quantisation of an int8 `lm_head` (0 unless LmHeadForm::Int8).
   double lm_head_quant_seconds = 0;
   // Spec 8 §11: the draft vocabulary's device bytes (DraftVocab::bytes(), 0 when off) and
