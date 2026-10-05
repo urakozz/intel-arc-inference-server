@@ -397,6 +397,20 @@ if(B70_MTP)
   add_ocloc_kernel(prep_silu_mul_M1_S1 SOURCE ${PREP_CL} DEFINES M=1 SILU_S=1)
 endif()
 
+# --- Spec 15b: other models' shapes ------------------------------------------
+# Every binary above is built at Qwen3.8's shapes - hidden 5120, FA 24 q / 4 kv
+# heads, GDN 16 k / 48 v heads - which the .cl sources bake by default. The
+# host names a binary from the model descriptor (src/kernels/shape_suffix.h):
+# Qwen3.8's shapes, and Agnes's (the same), carry no suffix, so every name and
+# command line here is unchanged. Another model's kernels that bake a shape
+# their name does not otherwise carry are suffixed `_D<hidden>` (embed_gather),
+# `_GK<k>V<v>` (gdn_step*, prep_gated_head) and `_Q<q>KV<kv>` (attn_prep,
+# attn_decode / attn_reduce, attn_v2); GEMV / prep_res_* names carry K and N
+# already. No such variant is built until a model can load: Ornith's
+# (model::ornith(), 2048 / 16 q 2 kv / 16 k 32 v) arrive with spec 15c, together
+# with the .cl defines that make those constants overridable; until then the
+# missing binary throws at capture, as for any unbuilt variant.
+#
 # --- Spec 14: Agnes 3.0 Flash (model::agnes()) ------------------------------
 # Additive only: every Qwen3.8 binary above keeps its name and its command line
 # (G0 compares their checksums against a main build). Agnes differs from Qwen3.8

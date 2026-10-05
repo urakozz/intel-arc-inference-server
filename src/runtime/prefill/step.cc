@@ -140,7 +140,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
           "conv_ring stride x " + gdn_n + " GDN layers != its allocation");
 
   // embed: ids -> resid, bf16 [C][hidden].
-  cx.launch(kc(kernels::pf_embed_gather_variant(), "pf_embed_gather"), 1, C, 1,
+  cx.launch(kc(kernels::pf_embed_gather_variant(s.desc().hidden), "pf_embed_gather"), 1, C, 1,
             {PtrArg(s.ids.ptr()), PtrArg(m.embed.ptr()), PtrArg(s.resid.ptr()), arg_val(C)});
 
   const bool l0 = is_l0(backend);
@@ -155,7 +155,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
       pf_linear(cx, kc, s, m.linears.at({l, LinearId::QkvZ}), s.x.as<uint16_t>(), C, backend, q);
       {   // a||b: a bf16 GEMV, not a linear -- 128 columns is no DPAS shape.
         const DeviceWeight& w = m.linears.at({l, LinearId::AB});
-        cx.launch(kc(kernels::pf_ab_proj_variant(), "pf_ab_proj"), w.shape.N / 16, (C + 7) / 8, 1,
+        cx.launch(kc(kernels::pf_ab_proj_variant(d.hidden), "pf_ab_proj"), w.shape.N / 16, (C + 7) / 8, 1,
                   {PtrArg(w.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(s.ab_out.ptr()), arg_val(C)});
         profile_wait(cx, Phase::kAbGdn);
       }
@@ -321,7 +321,7 @@ void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
   if (rows == 0) return;
   const uint32_t r0 = C - rows;   // 1 at pos 0 (no h_{-1}), else 0
   // 2. embed(ids[r0 + r]) -> resid rows (the main residual is dead after step 1).
-  cx.launch(kc(kernels::pf_embed_gather_variant(), "pf_embed_gather"), 1, rows, 1,
+  cx.launch(kc(kernels::pf_embed_gather_variant(s.desc().hidden), "pf_embed_gather"), 1, rows, 1,
             {PtrArg(s.ids.as<uint32_t>() + r0), PtrArg(m.embed.ptr()), PtrArg(s.resid.ptr()),
              arg_val(rows)});
   // 3. The two pre-fc norms into one [rows][2 x hidden] row of x: embed first, hidden second.

@@ -46,6 +46,11 @@ foreach(row IN LISTS PF_SHAPES)
 endforeach()
 
 # --- The runtime-M small kernels (plan 6b Tasks 3-5) -------------------------
+# Spec 15b: as in ../CMakeLists.txt, every binary here is at Qwen3.8's shapes and
+# keeps its name; another model's pf_embed_gather / pf_ab_proj (`_D<hidden>`),
+# pf_gated_head / pf_gdn_* (`_GK<k>V<v>`) and pf_attn_prep* / pf_attn /
+# pf_flash_attn (`_Q<q>KV<kv>`) are named by kernels/prefill/pf_kernels.h and
+# built from spec 15c on.
 set(PF_PREP_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_prep.cl)
 function(add_pf_res_fold K SP G)
   add_ocloc_kernel(pf_res_fold_K${K}_SP${SP}_G${G} SOURCE ${PF_PREP_CL}
