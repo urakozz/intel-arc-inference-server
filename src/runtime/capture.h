@@ -129,6 +129,13 @@ CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers
 // 5 at the boundary (the final norm pair, lm_head, the two argmax stages). Qwen3.8 774,
 // Agnes 870, Ornith 526.
 size_t decode_launches(const model::ModelDesc& d);
+// Spec 15e: the MTP lists' launch counts, which their walks assert on themselves too.
+// verify_launches: decode_launches + the head's 10-launch KV fill, at every M (Qwen3.8
+// 784, Agnes 880, Ornith 536). draft_launches: 23 with a dense head, 24 with a MoE head
+// (its FFN is the 4-launch MoE block in place of gate||up, SiLU, down) - a draft
+// vocabulary swaps 3 launches for 3.
+size_t verify_launches(const model::ModelDesc& d);
+size_t draft_launches(const model::ModelDesc& d);
 
 // Spec 8 (plan 8b), MTP on only (`m.mtp` loaded, `mtp` allocated).
 //
@@ -139,7 +146,8 @@ size_t decode_launches(const model::ModelDesc& d);
 // hctl.pos = pos - 1, hctl.n_active = M, hctl.cur_token = cur_token): row r is the pair
 // (hh[r], cur_token[r]), i.e. (h_{pos-1+r}, x[pos+r]). argmax ids land in out_token[0..M),
 // logits in `logits` [M][kVocab]; argmax_stage2 advances pos by M (the caller rewinds it
-// at commit). 774 + 10 launches at every M.
+// at commit). 774 + 10 launches at every M (verify_launches; Ornith 526 + 10, spec 15e:
+// its MoE blocks at M rows run moe.cl per row, routing every row independently).
 //
 // build_draft: the MTP head at M = 1 on (hctl.cur_token[0], MtpBuffers::dh) at hctl.pos;
 // its post-mtp.norm hidden back into dh, logits into MtpBuffers::logits row `i`, the

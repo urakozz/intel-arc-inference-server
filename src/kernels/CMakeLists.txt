@@ -698,4 +698,74 @@ if(B70_K2)
 endif()
 # ==== Spec 18c: K2-Horizon prefill ============================================ (end) ====
 
+# ==== Spec 15e: Ornith's MTP lists (model::ornith(), B70_ORNITH and B70_MTP) ===== (begin) ==
+# Additive only: no source changes and no existing variant's name or command line moves
+# (tools/kernel_cmdlines' diff: additions only). What the verify and draft lists bind on
+# Ornith (runtime/capture.cc build_verify / build_draft), beyond its M = 1 decode list:
+#   verify, M = 2..4   Ornith's decode list at M rows: the three int4 GEMVs (PROVISIONAL
+#                      cells, 15c's {S, layout}), a||b and the router (gemv_bf16 {16, 16}),
+#                      the norm pair at K 2048, embed, prep_gated_head, attn_prep and
+#                      decode attention v2 at 16 q / 2 kv, the bf16 / int8 lm_head, and
+#                      moe.cl at M rows - moe_route / moe_gate_up / moe_down index every
+#                      buffer by the row's own group id (get_group_id(1)) and nothing in
+#                      them depends on M but the grid, so row m of an M-row launch is the
+#                      M = 1 code on row m's inputs (tests/kernels/moe_m_ref_test.cc,
+#                      tools/mac/clrun/moe_run.cc and moe_m_test on the card pin it).
+#                      argmax_stage1_M<M> is Qwen3.8's (vocab_used 248077 on both).
+#   verify, M = 1..4   gdn_step_slots at 30 GDN layers (`_G30`, SPEC_SLOT_STRIDE = 30 x 32
+#                      x 128 x 128 = 15728640 floats) and Ornith's heads; the head's KV fill:
+#                      fc (bf16 4096 -> 2048), q||k||v (bf16 2048 -> 9216), the two pre-fc
+#                      norms into one [M][4096] row (X_STRIDE), the ZERO_RESID fold and
+#                      attn_prep over an S = 1 qkv (QKV_S = 1)
+#   draft, M = 1       o (bf16 4096 -> 2048, fc's binary), the post norm's SP1 fold; the
+#                      head's MoE layer runs 15c's moe_M1 and router binaries; with a draft
+#                      vocabulary (spec 8 §11) the compact head at K 2048
+# Not built for Ornith: the int8 KV cache's MTP writer (spec 12b's kv8 binaries are at
+# Qwen3.8's heads), an int4-checkpoint lm_head at M > 1 (as for Qwen3.8).
+if(B70_ORNITH AND B70_MTP)
+  foreach(MM 2 3 4)
+    add_gemv_variant(${MM} 2048 12288 1 1)       # qkv||z            PROVISIONAL S1 L1
+    add_gemv_variant(${MM} 4096 2048 4 0)        # out_proj, o_proj  PROVISIONAL S4 L0
+    add_gemv_variant(${MM} 2048 9216 2 0)        # q||k||v           PROVISIONAL S2 L0
+    add_gemv_bf16_variant(${MM} 2048 128 16 16)  # a||b
+    add_gemv_bf16_variant(${MM} 2048 272 16 16)  # the router || shared gate
+    add_gemv_bf16_variant(${MM} 2048 248320 64 1)   # lm_head (bf16)
+    add_gemv_i8w_variant(${MM} 2048 248320)         # lm_head (int8, spec 9)
+    add_prep_res_fold(${MM} 2048 0 20)
+    add_prep_res_fold(${MM} 2048 4 20)
+    add_prep_norm_finish(${MM} 2048 20 20)
+    add_ocloc_kernel(embed_gather_M${MM}_D2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} HIDDEN=2048 VOCAB=248320)
+    add_ocloc_kernel(prep_gated_head_M${MM}_GK16V32 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} ${ORNITH_GDN_HEADS})
+    add_ocloc_kernel(attn_prep_M${MM}_Q16KV2 SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} M=${MM} ${ORNITH_FA_HEADS})
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2}
+                             ${ORNITH_FA_HEADS})
+    add_ocloc_kernel(moe_M${MM}_E256_T8_D2048_I512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/moe.cl
+                     DEFINES ${MOE_DEFINES} M=${MM} EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512
+                             ROUTER_N=272)
+  endforeach()
+  foreach(MM 1 2 3 4)
+    add_ocloc_kernel(gdn_step_slots_M${MM}_G30_GK16V32 SOURCE ${GDN_CL}
+                     DEFINES ${CTRL_DEFINES} NEGA_OFF=32768 DTBIAS_OFF=32800 ${ORNITH_GDN_HEADS}
+                             SPEC_SLOTS=1 CTRL_LIVE=19 SPEC_SLOT_STRIDE=15728640 M=${MM})
+    add_gemv_bf16_variant(${MM} 4096 2048 64 1)    # fc (and, at M = 1, the draft's o)
+    add_gemv_bf16_variant(${MM} 2048 9216 64 1)    # q||k||v
+    add_ocloc_kernel(prep_norm_finish_M${MM}_K2048_G20_W20_X4096 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=2048 NORM_G=20 NORM_WGS=20 X_STRIDE=4096)
+    add_ocloc_kernel(prep_res_fold_M${MM}_K2048_SP1_G20_Z SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=2048 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
+    add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_S1 SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1 ${ORNITH_FA_HEADS})
+  endforeach()
+  add_prep_res_fold(1 2048 1 20)   # the draft's post-attention fold over o's S = 1 output
+  foreach(NV 32768 65536 131072)   # spec 8 §11's compact draft head at K 2048
+    add_gemv_i8w_variant(1 2048 ${NV})
+    add_gemv_bf16_variant(1 2048 ${NV} 64 1)
+  endforeach()
+endif()
+# ==== Spec 15e ================================================================ (end) ====
+
 add_subdirectory(prefill)

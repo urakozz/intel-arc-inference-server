@@ -39,19 +39,39 @@ struct SmallTensors {          // per layer: everything that is not a GEMV weigh
                                // Offsets: loader/small_layout.h (one place).
 };
 
+// Spec 15c: one mixture-of-experts layer on the card (loader/moe_layout.h has the
+// layouts, the sizes and the checkpoint naming). The decode list binds `router` with
+// gemv_bf16 and the two expert block arrays with src/kernels/moe.cl.
+struct MoeLayer {
+  DeviceWeight router;   // bf16 {K hidden, N router_n, S 1, layout 0}: router || shared gate
+  l0::Mem gate_up;       // int4 layout-1 [blocks][hidden x 2 I], shared expert last
+  l0::Mem down;          // int4 layout-1 [blocks][I x hidden]
+};
+
 // Spec 8 §3.1: the checkpoint's multi-token-prediction head, loaded only when asked
-// (`load(..., mtp = true)`). All bf16, in gemv_bf16's tiled layout
+// (`load(..., mtp = true)`). Its linears are bf16, in gemv_bf16's tiled layout
 // (common::repack_bf16_tiled), [N][K] logically, S = 1, layout 0 (a filler for bf16).
 // It shares `embed` and the `lm_head` linear with the main model.
+//
+// The FFN is the descriptor's (model::ModelDesc::mtp_head_moe): a dense head's bf16
+// gate||up and down (Qwen3.8, Agnes), or (spec 15e) one MoE layer of the main model's
+// shape in exactly the main layers' device form (MoeLayer, loader/moe_layout.h), so
+// moe.cl runs the head's block as it runs layer l's. The other pair is null.
 struct MtpHead {
-  // Shapes from the descriptor (spec 15b); Qwen3.8's and Agnes's in the comments.
-  DeviceWeight fc;        // K 2 x hidden 10240 -> N 5120, over cat(pre_fc_norm_embedding(e), pre_fc_norm_hidden(h))
-  DeviceWeight qkv;       // K 5120 -> N fa_qkv_n 14336: q_proj (q||gate per head) || k_proj || v_proj
-  DeviceWeight o;         // K fa_value_dim 6144 -> N 5120
-  DeviceWeight gate_up;   // K 5120 -> N 2 x mtp_intermediate 34816, gate/up in alternating 16-column blocks
-  DeviceWeight down;      // K mtp_intermediate 17408 -> N 5120
+  // Shapes from the descriptor (spec 15b); Qwen3.8's and Agnes's in the comments, then
+  // Ornith's.
+  DeviceWeight fc;        // K 2 x hidden 10240 -> N 5120, over cat(pre_fc_norm_embedding(e), pre_fc_norm_hidden(h)); Ornith 4096 -> 2048
+  DeviceWeight qkv;       // K 5120 -> N fa_qkv_n 14336: q_proj (q||gate per head) || k_proj || v_proj; Ornith 2048 -> 9216
+  DeviceWeight o;         // K fa_value_dim 6144 -> N 5120; Ornith 4096 -> 2048
+  // Dense head only: K 5120 -> N 2 x mtp_intermediate 34816, gate/up in alternating
+  // 16-column blocks; down K mtp_intermediate 17408 -> N 5120.
+  std::unique_ptr<DeviceWeight> gate_up, down;
   l0::Mem norms;          // fp32 (1 + w) [5][hidden], mtp_norm_off below
   l0::Mem fa;             // q_norm || k_norm fp32 (1 + w), the FA block (small_layout.h)
+  // MoE head only (spec 15e): router || shared gate, the experts + 1 int4 g64 blocks of
+  // gate||up and down. A bf16 expert (the published checkpoint's) is quantised at load to
+  // int4 g64 sym, round to nearest (loader/rtn.h); an int4 one is repacked as shipped.
+  std::unique_ptr<MoeLayer> moe;
 };
 // The five RMSNorms inside MtpHead::norms, in row order; row i sits at byte
 // i x hidden x 4 (spec 15b: hidden is the descriptor's, 5120 on Qwen3.8).
@@ -70,7 +90,8 @@ inline size_t mtp_norms_bytes(const model::ModelDesc& d) {
   return size_t(kMtpNormCount) * d.hidden * 4;
 }
 // A dense MTP head's tensor count; its bf16 bytes are ModelDesc::mtp_checkpoint_bytes()
-// (849,398,784 on Qwen3.8 and Agnes, docs/03: 0.849 GB).
+// (849,398,784 on Qwen3.8 and Agnes, docs/03: 0.849 GB). A MoE head's count is
+// ModelDesc::mtp_checkpoint_tensors() when every tensor is bf16 (Ornith 785).
 constexpr size_t kMtpTensors = 15;
 
 // Spec 8 §11: the MTP draft's reduced vocabulary V' (`b70-serve --draft-vocab`), built
@@ -97,15 +118,6 @@ struct DraftVocab {
   }
 };
 
-// Spec 15c: one mixture-of-experts layer on the card (loader/moe_layout.h has the
-// layouts, the sizes and the checkpoint naming). The decode list binds `router` with
-// gemv_bf16 and the two expert block arrays with src/kernels/moe.cl.
-struct MoeLayer {
-  DeviceWeight router;   // bf16 {K hidden, N router_n, S 1, layout 0}: router || shared gate
-  l0::Mem gate_up;       // int4 layout-1 [blocks][hidden x 2 I], shared expert last
-  l0::Mem down;          // int4 layout-1 [blocks][I x hidden]
-};
-
 struct LoadReport {            // printed by load(); asserted by the checkpoint test
   size_t int4_bytes = 0, scale_bytes = 0, bf16_linear_bytes = 0;
   size_t embed_bytes = 0, lm_head_bytes = 0, pad_bytes = 0;
@@ -121,7 +133,13 @@ struct LoadReport {            // printed by load(); asserted by the checkpoint 
   // read_per_token (the main step never reads it).
   size_t mtp_bytes = 0;
   size_t mtp_checkpoint_bytes = 0;  // what those came from: desc.mtp_checkpoint_bytes() when loaded
-  size_t mtp_tensors = 0;           // mtp.* tensors consumed (kMtpTensors when loaded)
+                                    // from an all-bf16 head
+  size_t mtp_tensors = 0;           // mtp.* tensors consumed (desc.mtp_checkpoint_tensors() when
+                                    // all bf16; an int4 linear counts its qweight and scales)
+  // Spec 15e: a MoE head's bf16 experts quantised at load (loader/rtn.h): how many
+  // linears, and the host time. 0 for a dense head or an int4-shipped one.
+  size_t mtp_rtn_linears = 0;
+  double mtp_rtn_seconds = 0;
   size_t total() const;             // the eight byte fields above
   // **`W`, as this load actually measured it** - the bytes a decode step
   // streams: everything in total() except `embed_tokens` (gathered one row per

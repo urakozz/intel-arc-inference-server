@@ -93,9 +93,28 @@ inline MoeLayerBytes moe_layer_bytes(const model::ModelDesc& d) {
   return b;
 }
 // Every MoE layer of the main model (all `layers` on Ornith; the MTP head's MoE layer
-// is spec 15e's and not counted).
+// is not counted here - it is in mtp_head_bytes, LoadReport::mtp_bytes).
 inline size_t moe_bytes(const model::ModelDesc& d) {
   return d.is_moe() ? size_t(d.layers) * moe_layer_bytes(d).total() : 0;
+}
+
+// Spec 15e: the MTP head's device bytes as loader::load_mtp allocates them (it asserts
+// its allocations against this, and the memory planner's tests read it): fc, q||k||v
+// and o in bf16 tiles; the five fp32 (1 + w) norms; the FA block (q_norm || k_norm); and
+// the FFN - a dense head's bf16 gate||up and down at mtp_intermediate, or a MoE head's
+// one layer in the main layers' device form (moe_layer_bytes). 0 for a descriptor with
+// no head. Qwen3.8 / Agnes 849,451,008 B; Ornith 501,990,464 B (16,777,216 fc +
+// 37,748,736 q||k||v + 16,777,216 o + 40,960 norms + 2,048 FA + 430,604,288 MoE).
+inline size_t mtp_head_bytes(const model::ModelDesc& d) {
+  if (d.mtp_intermediate == 0 && !d.mtp_head_moe()) return 0;
+  const size_t H = d.hidden;
+  size_t b = (2 * H * H + size_t(d.fa_qkv_n()) * H + size_t(d.fa_value_dim()) * H) * 2 +
+             5 * H * 4 + kFaBlockBytes;
+  if (d.mtp_head_moe())
+    b += moe_layer_bytes(d).total();
+  else
+    b += 3 * size_t(d.mtp_intermediate) * H * 2;
+  return b;
 }
 
 }  // namespace loader
