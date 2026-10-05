@@ -478,7 +478,7 @@ presentation and in `xml` / `json` presentation, tools without a system message,
 history in each `tool_call_format` (`xml`, `xml_typed` - its `render_arg_type` over integer,
 array and `anyOf` arguments - and `json`), parallel calls with tool results (string and list
 content), a `"default": null` property and `$defs` / `$ref` schemas (markdown and xml).
-`template_k2_test` = `template_test` over that file (the cases file now may be an object: BOS /
+`template_k2_test` = `template_test` over that file with prefix `k2` (the cases file may now be an object: BOS /
 EOS expected, a tool table, per-case `kwargs`).
 
 It took **renderer changes, no K2 special case**: minja was not Jinja in eight places K2's template
@@ -513,10 +513,13 @@ and with special tokens (BOS 0 prepended, as HF does), decode with and without t
 streamer's pieces; `corpus.txt`'s 10,240 lines (145,440 ids) digest-equal in 10 chunks; three
 chat renders (29 / 330 / 649 ids) equal to `apply_chat_template(tokenize=True)` - the template
 writes the BOS, the server encodes without special tokens, one BOS. The IFM original's
-`tokenizer.json` (differs in `truncation` only) passes too. Registered as `B70_K2_SNAPSHOT_DIR`
-(default: the int4 repo's snapshot in the HF cache; only its small files are read),
-`B70_K2_TOKENIZER_JSON` overrides the tokenizer; absent, disabled on the Mac and SKIP (77)
-elsewhere.
+`tokenizer.json` (differs in `truncation` only) passes too. As 15e did for Ornith, the served
+repo's small files (`chat_template.jinja`, `tokenizer_config.json`, `generation_config.json`;
+Apache-2.0) are vendored at `tests/tokenizer/k2/`, so `template_k2_test` runs everywhere;
+`tokenizer.json` (20.6 MB) is not: the CMake cache path `B70_K2_TOKENIZER_JSON` (default the
+int4 snapshot in the HF cache) or the environment variable of that name; absent, disabled on the
+Mac and SKIP (77) elsewhere. Every 18d registration is one delimited block at the end of
+`tests/CMakeLists.txt` (label `k2`).
 
 **Tool calls and reasoning (Review Focus 2).** K2's format is not Qwen XML (18a), so
 `server/toolcall_k2.{h,cc}` adds `K2OutputStream` beside the Qwen `OutputStream` (both now an
