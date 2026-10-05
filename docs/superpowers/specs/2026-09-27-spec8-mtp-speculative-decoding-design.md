@@ -397,9 +397,14 @@ when the target's next id lies outside V′.
   build settles what the text above leaves open:
   - V′ is `loader::select_draft_vocab`. Every source skips ids >= the model's `vocab_used` (the
     main argmax masks them, so a draft of one could only be rejected), added tokens included.
-  - The gather runs in the loader from the host copy of the int8 head the quantisation just made
-    (`loader::gather_int8_tiled_rows`), so nothing is read back from the device. `--lm-head bf16`
-    with `--draft-vocab` is refused at load rather than given an untested bf16 gather.
+  - The compact head takes the head's own form (operator, 2026-10-05: "bf16 can't be worse than
+    int8"). int8 runs `gemv_i8w` at N = |V′|. bf16 runs `gemv_bf16` at N = |V′|, at lm_head's
+    {64, 1} tiling, which `kernels::gemv_bf16_tiling` gives all three sizes. The bf16 head is
+    twice the bytes: +0.34 / 0.67 / 1.34 GB.
+  - The gather runs in the loader from the host copy the loader just made of the head
+    (`loader::gather_int8_tiled_rows` / `gather_bf16_tiled_rows`), so nothing is read back from
+    the device. The two tiled layouts index an element alike, so one algorithm serves both. A
+    checkpoint that ships its head int4 is refused.
   - The scatter rides in the argmax's stage 1 (`draft_vocab.cl`), not a third kernel. The -inf
     fill is `MtpBuffers::zero()`, at construction and every reset. The draft list keeps its 23
     launches.
@@ -407,12 +412,22 @@ when the target's next id lies outside V′.
     `draft vocab <GB>` term only when it is on.
   - `rank.py` weights generated ids 4x and the session-new part of each prompt 1x. That is a
     choice, not a measurement.
-  - `--mtp auto`'s cost table does not know V′. Its draft row prices the full head, so it
-    over-states a V′ draft's cost until `probe_mtp_steps … int8 <size>` calibrates it.
-  - Mac-side evidence: the host tests; `draft_vocab.cl`, and `gemv_i8w.cl` at the new N with
-    its subgroup reads emulated, run on the Mac's OpenCL GPU. There the compact columns equal
-    the full head's bitwise, and the mapped argmax and the scatter match the host reference.
-    That is indicative only. IGC on the B70 is the arbiter (`draft_vocab_kernels_test`).
+  - **`--mtp auto`'s cost table with V′ (derived).** A draft costs its body (the MTP head's
+    layer, unchanged) plus its lm_head read, which scales with |V′| / 248320. The head's share of
+    one draft is the head's bytes at ~570 GB/s in units of the form's plain step:
+    - int8: 1.27 GB ≈ 2.2 ms of 32.65 ms = 0.067 of the table's 0.13.
+    - bf16: 2.54 GB ≈ 4.4 ms of ~34 ms = 0.129 of 0.19.
+
+    `MtpCost::with_draft_vocab` scales every draft entry by (1 - share) + share × |V′| / 248320.
+    One int8 draft then costs 0.072 / 0.081 / 0.098 at 32k / 64k / 128k; bf16's are 0.078 /
+    0.095 / 0.129. `b70-serve` applies it under `--mtp auto` before parsing `--mtp-cost`, so an
+    explicit `draft=` wins. `probe_mtp_steps … <form> <size>` on the box replaces the derived
+    numbers.
+  - Mac-side evidence: the host tests; `draft_vocab.cl`, `gemv_i8w.cl` and `gemv_bf16.cl` at
+    the new N, with their subgroup reads emulated, run on the Mac's OpenCL GPU. There the
+    compact columns equal the full head's bitwise for both forms, and the mapped argmax and the
+    scatter match the host reference. That is indicative only. IGC on the B70 is the arbiter
+    (`draft_vocab_kernels_test`).
 
 ## 12. Amendment: MTP at every context length (2026-10-05)
 
