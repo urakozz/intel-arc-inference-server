@@ -19,6 +19,7 @@
 #include "loader/fold.h"
 #include "loader/safetensors.h"
 #include "loader/small_layout.h"
+#include "loader/trained_context.h"
 
 namespace loader {
 namespace {
@@ -625,6 +626,17 @@ std::vector<float> rope_table(uint32_t max_len) {
   return t;
 }
 
+// load() and set_max_len()'s one bound (spec 6 §10). `trained` 0 = config.json
+// declares no max_position_embeddings: nothing to hold max_len to.
+void check_max_len(const model::ModelDesc& desc, uint32_t max_len, uint32_t trained) {
+  if (max_len == 0) throw std::runtime_error(desc.name + ": max_len 0 is not a model length");
+  if (trained != 0 && max_len > trained)
+    throw std::runtime_error(
+        desc.name + ": max_len " + std::to_string(max_len) + " exceeds the trained context " +
+        std::to_string(trained) + " (config.json max_position_embeddings) - positions past it "
+        "are RoPE angles the model never saw");
+}
+
 }  // namespace
 
 size_t LoadReport::total() const {
@@ -654,11 +666,12 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // quantization_config) gets this message rather than the quant parser's.
   model::require_loadable(desc);
   const QuantConfig qc = QuantConfig::parse(config);
-  if (desc.max_len_ceiling != 0 && max_len > desc.max_len_ceiling)
-    throw std::runtime_error(
-        desc.name + ": max_len " + std::to_string(max_len) + " exceeds this model's ceiling " +
-        std::to_string(desc.max_len_ceiling) + " (spec 14 §3.3: its bf16 KV beyond that does not "
-        "fit beside the weights on 32 GB; spec 12's int8 KV lifts it)");
+  // Spec 6 §10: the trained context bounds max_len; whether it fits on the card is the
+  // memory plan's question (runtime/memory_plan.h), asked by the CLI once the weights'
+  // bytes are known. Spec 14 §3.3's fixed 65536 ceiling for Agnes was that question
+  // answered once, by hand, for one head form.
+  const uint32_t trained = trained_context(config);
+  check_max_len(desc, max_len, trained);
 
   SafetensorsSet set(snap);
   // Requirement 6: before a single byte is repacked. Returns what it counted
@@ -726,6 +739,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                 l0::Mem(ctx, l0::MemKind::Device, rope.size() * 4),
                 {},
                 max_len,
+                trained,
                 nullptr,
                 &desc};
   l0::CmdList imm = l0::CmdList::immediate(ctx);
@@ -736,6 +750,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   const size_t rope_bytes = rope.size() * 4;
   imm.copy(m.rope.ptr(), rope.data(), rope_bytes);
   m.report.small_bytes += rope_bytes;
+  m.report.rope_bytes = rope_bytes;
 
   const std::vector<model::LayerDesc> layers = desc.layer_descs();
   Staging st;
@@ -882,6 +897,26 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                              std::to_string(uint64_t(expected)) + " by " +
                              std::to_string(delta * 100.0) + "% (> 2%) - the table above is the breakdown");
   return m;
+}
+
+void set_max_len(l0::Context& ctx, LoadedModel& m, uint32_t max_len) {
+  check_max_len(*m.desc, max_len, m.trained_max_len);
+  const std::vector<float> rope = rope_table(max_len);
+  const size_t bytes = rope.size() * 4;
+  // The planner's figure for the same table (spec 6 §10) - one formula, checked here.
+  if (bytes != Qwen35::rope_table_bytes(max_len))
+    throw std::logic_error("loader::set_max_len: the RoPE table is " + std::to_string(bytes) +
+                           " B, model::Qwen35::rope_table_bytes says " +
+                           std::to_string(Qwen35::rope_table_bytes(max_len)));
+  // The new table is uploaded before the old one is freed: a failed allocation leaves
+  // the model as it was.
+  l0::Mem fresh(ctx, l0::MemKind::Device, bytes);
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  imm.copy(fresh.ptr(), rope.data(), bytes);
+  m.rope.swap(fresh);   // `fresh` now holds the old table and frees it on return
+  m.report.small_bytes = m.report.small_bytes - m.report.rope_bytes + bytes;
+  m.report.rope_bytes = bytes;
+  m.max_len = max_len;
 }
 
 }  // namespace loader

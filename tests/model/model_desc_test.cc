@@ -141,7 +141,6 @@ int main() {
   CHECK_EQ(q.fa_layers, uint32_t(16));
   CHECK_EQ(q.intermediate, uint32_t(17408));
   CHECK(!q.has_parallel_ffn());
-  CHECK_EQ(q.max_len_ceiling, uint32_t(0));
   CHECK_EQ(q.intermediate_suffix(), std::string());
   CHECK_EQ(q.to_engine("layers.0.linear_attn.A_log"), std::string("layers.0.linear_attn.A_log"));
   CHECK_EQ(q.to_checkpoint("layers.3.self_attn.q_proj"), std::string("layers.3.self_attn.q_proj"));
@@ -168,7 +167,6 @@ int main() {
   CHECK_EQ(a.fa_layers, uint32_t(18));
   CHECK_EQ(a.parallel_ffn, uint32_t(2048));
   CHECK_EQ(a.intermediate, uint32_t(19456));
-  CHECK_EQ(a.max_len_ceiling, uint32_t(65536));
   CHECK_EQ(a.vocab_used, uint32_t(248089));   // 248077 + the 12 Agnes specials
   CHECK_EQ(a.intermediate_suffix(), std::string("_I19456"));
   CHECK(a.provisional_tuning);
@@ -251,7 +249,6 @@ int main() {
   CHECK_EQ(o.vocab_used, uint32_t(248077));   // added tokens 248044..248076, as Qwen3.8
   CHECK(!o.tied_embeddings);
   CHECK(o.name_map.empty());                  // linear_attn. / self_attn., as Qwen3.8
-  CHECK_EQ(o.max_len_ceiling, uint32_t(0));   // KV is 20 KiB per position (spec 15 §2)
   CHECK_EQ(o.mtp_intermediate, uint32_t(0));  // its MTP head is one MoE layer (15e)
   CHECK_EQ(o.mtp_checkpoint_bytes(), size_t(0));
   CHECK(o.provisional_tuning);
