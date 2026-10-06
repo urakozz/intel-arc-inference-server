@@ -39,6 +39,15 @@ struct BadRequest : std::runtime_error {
 };
 
 Request parse_request(const std::string& body, bool chat);
+// Spec 20e: with the model's sampling defaults - what a request that names no temperature / top_p /
+// top_k samples with (b70-serve sets them for Kolibri-1 from generation_config.json; every other model
+// keeps Sampling{}: greedy unless the request says otherwise, exactly as before). The two-argument form
+// is this one with Sampling{}.
+Request parse_request(const std::string& body, bool chat, const Sampling& defaults);
+// generation_config.json's sampling fields as defaults: do_sample true -> sampled (greedy when it is
+// false or absent, or temperature is 0), temperature / top_p / top_k where present, the rest Sampling{}'s.
+// Throws std::invalid_argument naming a field of the wrong type or range.
+Sampling generation_sampling(const nlohmann::json& generation_config);
 
 std::string error_body(const std::string& message, const std::string& type);
 

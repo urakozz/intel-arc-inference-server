@@ -135,22 +135,6 @@ bool parse_xml(const std::string& body, bool complete, const json& tools, ToolCa
   }
 }
 
-bool parse_json(const std::string& body, const json& tools, ToolCall& call) {
-  const json j = json::parse(trim(body), nullptr, false);
-  if (j.is_discarded() || !j.is_object() || !j.contains("name") || !j.at("name").is_string()) return false;
-  call.name = j.at("name").get<std::string>();
-  if (!valid_name(call.name)) return false;
-  json args = j.contains("arguments") ? j.at("arguments") : json::object();
-  if (args.is_string()) args = json::parse(args.get<std::string>(), nullptr, false);
-  if (args.is_null()) args = json::object();
-  if (args.is_discarded() || !args.is_object()) return false;
-  for (auto& [key, value] : args.items()) {
-    if (!value.is_string() && schema_string_type(call.name, key, tools) == 1) value = value.dump();
-  }
-  call.arguments = std::move(args);
-  return true;
-}
-
 }  // namespace
 
 bool parse_k2_call_format(const std::string& name, K2CallFormat& out) {
@@ -206,7 +190,7 @@ void K2OutputStream::call(std::vector<Delta>& out, const std::string& body, bool
   // A JSON body is read as JSON whatever the configured format (the model wrote that one).
   const std::string trimmed = trim(body);
   const bool json_body = format_ == K2CallFormat::Json || (!trimmed.empty() && trimmed.front() == '{');
-  const bool ok = json_body ? complete && parse_json(body, tools_, c) : parse_xml(body, complete, tools_, c);
+  const bool ok = json_body ? complete && parse_json_call(body, tools_, c) : parse_xml(body, complete, tools_, c);
   if (!ok) {
     content(out, raw);
     return;

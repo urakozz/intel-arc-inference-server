@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,10 @@ struct Options {
   // Spec 18d: the model's chat format (template variables, reasoning tags, tool-call syntax);
   // b70-serve sets it from config.json's model_type. The default is the Qwen path.
   ChatFormat chat_format;
+  // Spec 20e: what a request that names no temperature / top_p / top_k samples with (parse_request's
+  // defaults). b70-serve sets it for Kolibri-1 only, from generation_config.json (T 1.0, top-p 0.97,
+  // top-k 128, sampled); unset = Sampling{} (greedy unless the request says otherwise), as before.
+  std::optional<Sampling> sampling_defaults;
   // Non-empty: write DIR/NNNNNN.json per served request (spec 7 P0): timings, the
   // request body, prompt and generated ids, the generated text.
   std::string log_requests_dir;

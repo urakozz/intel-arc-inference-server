@@ -113,7 +113,38 @@ std::string frame(json body) {
 
 }  // namespace
 
-Request parse_request(const std::string& body, bool chat) {
+Request parse_request(const std::string& body, bool chat) { return parse_request(body, chat, Sampling{}); }
+
+Sampling generation_sampling(const json& g) {
+  Sampling s;
+  if (!g.is_object()) throw std::invalid_argument("generation_config.json is not an object");
+  const auto number = [&](const char* key, double lo, double hi) {
+    const json& v = g.at(key);
+    if (!v.is_number() || !std::isfinite(v.get<double>()) || v.get<double>() < lo || v.get<double>() > hi)
+      throw std::invalid_argument(std::string("generation_config.json ") + key + " is not a number in [" +
+                                  std::to_string(lo) + ", " + std::to_string(hi) + "]");
+    return v.get<double>();
+  };
+  if (g.contains("temperature")) s.temperature = static_cast<float>(number("temperature", 0.0, 1e6));
+  if (g.contains("top_p")) {
+    s.top_p = static_cast<float>(number("top_p", 0.0, 1.0));
+    if (s.top_p <= 0.0f) throw std::invalid_argument("generation_config.json top_p must be in (0, 1]");
+  }
+  if (g.contains("top_k")) {
+    const json& v = g.at("top_k");
+    if (!is_uint(v)) throw std::invalid_argument("generation_config.json top_k is not a non-negative integer");
+    s.top_k = v.get<uint32_t>();
+  }
+  bool sample = false;
+  if (g.contains("do_sample")) {
+    if (!g.at("do_sample").is_boolean()) throw std::invalid_argument("generation_config.json do_sample is not a boolean");
+    sample = g.at("do_sample").get<bool>();
+  }
+  s.greedy = !sample || s.temperature == 0.0f;
+  return s;
+}
+
+Request parse_request(const std::string& body, bool chat, const Sampling& defaults) {
   json request;
   try {
     request = json::parse(body);
@@ -124,6 +155,9 @@ Request parse_request(const std::string& body, bool chat) {
 
   Request out;
   out.chat = chat;
+  out.sampling = defaults;
+  out.sampling.has_seed = false;
+  out.sampling.seed = 0;
   if (request.contains("model")) {
     if (!request.at("model").is_string()) invalid("model must be a string");
     out.model = request.at("model").get<std::string>();
