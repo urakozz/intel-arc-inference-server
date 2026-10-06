@@ -1,11 +1,16 @@
 #!/bin/bash
 # tools/toolcall/a4_ref.sh - the A4 tool-call set and its CPU reference run for a MoE model
-# (spec 15e Task 3: Ornith; spec 18d K4: K2-Horizon), from the repo (or worktree) root.
+# (spec 15e Task 3: Ornith; spec 18d K4: K2-Horizon; spec 20e KL4: Kolibri-1), from the repo (or
+# worktree) root.
 #
-#   tools/toolcall/a4_ref.sh <ornith|k2> set       the model's set: make_set.py --from
+#   tools/toolcall/a4_ref.sh <ornith|k2|kolibri> set   the model's set: make_set.py --from
 #                                                   tests/golden/toolcall (the 36 conversations of
 #                                                   Qwen3.8's set, re-rendered and re-tokenised by
-#                                                   the checkpoint's own template) -> $OUT/set
+#                                                   the checkpoint's own template) -> $OUT/set;
+#                                                   kolibri: the committed German set
+#                                                   tests/golden/toolcall-kolibri-de (make_set.py
+#                                                   --lang de, made from the release's tokenizer,
+#                                                   which 20b's export copies) copied to $OUT/set
 #   tools/toolcall/a4_ref.sh <ornith|k2> ref       the reference: oracle_generate.py over $OUT/set
 #                                                   -> $OUT/<name>.bf16.{ids,txt} (resumable)
 #   tools/toolcall/a4_ref.sh <ornith|k2> status    what is done
@@ -15,7 +20,12 @@
 #           checkpoint dequantised (15a: the engine's own weights), 192 new ids;
 #   k2      tools/oracle/k2_ref.py's port in bf16 mode on the int4 checkpoint dequantised (18a's
 #           reference; MODEL_DIR=<the bf16 original's snapshot> for the true bf16 model), 512 new
-#           ids (its replies open with reasoning; the set renders reasoning_effort low).
+#           ids (its replies open with reasoning; the set renders reasoning_effort low);
+#   kolibri tools/oracle/kolibri_ref.py's KolibriRef in bf16 mode (`--model kolibri`) on the 156 GB
+#           bf16 SOURCE (Aleph-Alpha/Kolibri-1-BF16 - KL4's reference; it runs wherever 20b runs,
+#           decision 1: MODEL_DIR, DEVICE=cuda|xpu where there is one), 192 new ids (the set renders
+#           thinking off). Score with `score.py --format hermes` (0 parse failures of the reference:
+#           the hard bar).
 # Then on the box: tools/toolcall/engine_generate.sh with the same set and N_NEW, and
 # tools/toolcall/score.py <dir> bf16 <engine runs> (box-validation-queue rows 16 / 25).
 #
@@ -33,7 +43,8 @@
 # reads every layer's dense weights from the page cache: 36 scenarios x up to 192 (Ornith) / 512
 # (K2) ids. Each scenario's prompt forward and per-step seconds are in $OUT/ref.log.
 #
-# Env: OUT (oracle-out-<model>-a4; git-ignored like every oracle-out*), MODEL_DIR (a snapshot
+# Env: OUT (oracle-out-<model>-a4; git-ignored like every oracle-out*), DEVICE (kolibri's
+# reference: cpu, cuda or xpu), MODEL_DIR (a snapshot
 # directory instead of the HF cache's), NEW_TOKENS, KWARGS (K2's template variables, JSON;
 # default make_set.py's {"tool_call_format": "xml", "reasoning_effort": "low"}), IMAGE, MEM,
 # ORACLE_THREADS (12), HF_CACHE, FORCE.
@@ -44,9 +55,10 @@ step=${2:-}
 case "$m" in
   ornith) repo=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-192} ;;
   k2) repo=urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-512} ;;
-  *) sed -n '2,40p' "$0" >&2; exit 2 ;;
+  kolibri) repo=Aleph-Alpha/Kolibri-1-BF16; new=${NEW_TOKENS:-192} ;;
+  *) sed -n '2,50p' "$0" >&2; exit 2 ;;
 esac
-case "$step" in set | ref | status) ;; *) sed -n '2,40p' "$0" >&2; exit 2 ;; esac
+case "$step" in set | ref | status) ;; *) sed -n '2,50p' "$0" >&2; exit 2 ;; esac
 cache_name="models--$(printf '%s' "$repo" | sed 's|/|--|g')"
 OUT=${OUT:-oracle-out-$m-a4}
 NAME=a4-ref-$m
@@ -76,7 +88,9 @@ else
     echo "a4_ref: the download of $repo is not complete ($HF/hub/$cache_name/blobs/*.incomplete)" >&2; exit 2
   fi
 fi
-for f in config.json generation_config.json tokenizer.json chat_template.jinja; do
+tmpl=chat_template.jinja
+[ "$m" = kolibri ] && tmpl=tokenizer_config.json   # Kolibri's template is tokenizer_config.json's string
+for f in config.json generation_config.json tokenizer.json $tmpl; do
   [ -e "$snap$f" ] || { echo "a4_ref: $snap$f is missing" >&2; exit 2; }
 done
 python3 - "$snap" << 'EOF' || exit 2
@@ -88,11 +102,18 @@ missing = [f for f in sorted(files) if not os.path.exists(os.path.join(d, f))]
 if missing:
     sys.exit(f"a4_ref: {d} lacks {len(missing)} shards, e.g. {missing[:2]}")
 EOF
+if [ "$step" = set ] && [ "$m" = kolibri ]; then   # the committed German set (spec 20e)
+  mkdir -p "$OUT/set"
+  cp tests/golden/toolcall-kolibri-de/* "$OUT/set/"
+  echo "a4_ref: kolibri set: tests/golden/toolcall-kolibri-de -> $OUT/set ($(ls "$OUT"/set/*.ids | wc -l | tr -d ' ') scenarios)"
+  exit 0
+fi
 if [ "$step" = set ]; then
   cmd_set="python3 tools/toolcall/make_set.py --from tests/golden/toolcall"
 else
   [ -s "$OUT/set/manifest.json" ] || { echo "a4_ref: no set in $OUT/set - run '$0 $m set' first" >&2; exit 2; }
   cmd_ref="python3 tools/toolcall/oracle_generate.py"
+  [ "$m" = kolibri ] && cmd_ref="$cmd_ref --model kolibri --device ${DEVICE:-cpu}"
 fi
 
 # The container sees this tree only (mounted at /ws): a run writes into a real directory inside

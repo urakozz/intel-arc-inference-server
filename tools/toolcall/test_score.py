@@ -1,11 +1,13 @@
-"""score.py's readers: Qwen XML, and K2-Horizon's three formats behind its reasoning (spec 18d).
+"""score.py's readers: Qwen XML, K2-Horizon's three formats behind its reasoning (spec 18d), and
+Kolibri-1's hermes JSON calls behind the reasoning the model opens (spec 20e, `--format hermes`).
 
     python3 tools/toolcall/test_score.py     (pytest also collects it, where installed)
 
 The K2 cases include every assistant turn with tool calls of the recorded HF renders
 (tests/tokenizer/k2_template_*.txt, transformers' apply_chat_template of
 tests/tokenizer/k2_template_cases.json - spec 18 §12): the first call read back must be the
-message's first call, in xml, xml_typed and json.
+message's first call, in xml, xml_typed and json. The hermes cases likewise read back every
+assistant turn with calls of tests/tokenizer/kolibri_template_*.txt (spec 20e Task 1).
 """
 import json
 import os
@@ -127,6 +129,59 @@ def test_k2_hf_renders_round_trip():
                 assert _same_value(params[k], v), (case["name"], k, params[k], v)
             seen.add(case["kwargs"].get("tool_call_format", "xml"))
     assert seen == {"xml", "xml_typed", "json"}, seen
+
+
+# ---- Kolibri-1: hermes JSON (spec 20e) --------------------------------------------------------
+
+def test_hermes_first_call():
+    t = '<tool_call>\n{"name": "grep", "arguments": {"pattern": "Schlüssel"}}\n</tool_call>'
+    assert parse_first_call(t, "hermes") == ("call", "grep", {"pattern": "Schlüssel"}, 1)
+
+
+def test_hermes_broken_and_none():
+    broken = '<tool_call>\n{"name": "f", "arguments": {"a": 1}\n</tool_call>'   # a missing brace
+    assert parse_first_call(broken, "hermes")[0] == "incomplete"
+    assert parse_first_call('<tool_call>\n{"name": "read", "argu', "hermes")[0] == "incomplete"
+    assert parse_first_call('<tool_call>{"name": "a b"}</tool_call>', "hermes")[0] == "incomplete"
+    assert parse_first_call("Die Antwort ist 4.", "hermes")[0] == "no call"
+
+
+def test_hermes_reasoning_string_arguments_values():
+    t = ('<think>\nIch lese sie.\n</think>\n\nOk.\n<tool_call>\n{"name": "read", "arguments": '
+         '"{\\"filePath\\": \\"/w/a.cc\\", \\"limit\\": 40}"}\n</tool_call>\n<tool_call>\n'
+         '{"name": "grep", "arguments": {}}\n</tool_call>')
+    assert parse_first_call(t, "hermes") == ("call", "read", {"filePath": "/w/a.cc", "limit": 40}, 2)
+    assert parse_first_call("<think>\nnoch nicht fertig <tool_call>", "hermes")[0] == "reasoning"
+    inside = '<think>\n<tool_call>{"name": "x"}</tool_call>\n</think>\n\nkeine'
+    assert parse_first_call(inside, "hermes")[0] == "no call"   # a call inside reasoning is not one
+
+
+def test_qwen_default_unchanged_on_hermes_text():
+    t = '<tool_call>\n{"name": "grep", "arguments": {"pattern": "x"}}\n</tool_call>'
+    assert parse_first_call(t)[0] == "incomplete"   # the default reads Qwen XML, as before
+
+
+def test_hermes_hf_renders_round_trip():
+    """Every Kolibri assistant turn with calls in the HF renders reads back as its first call."""
+    with open(os.path.join(TOK, "kolibri_template_cases.json"), encoding="utf-8") as f:
+        cases = json.load(f)["cases"]
+    n_turns = 0
+    for case in cases:
+        msgs = [m for m in case["messages"] if m["role"] == "assistant"]
+        if not any(m.get("tool_calls") for m in msgs):
+            continue
+        with open(os.path.join(TOK, f"kolibri_template_{case['name']}.txt"), encoding="utf-8") as f:
+            render = f.read()
+        turns = re.findall(r"<\|im_start\|>assistant\n(.*?)<\|im_end\|>", render, re.S)
+        assert len(turns) == len(msgs), case["name"]
+        for m, text in zip(msgs, turns):
+            if not m.get("tool_calls"):
+                continue
+            first = m["tool_calls"][0]["function"]
+            assert parse_first_call(text, "hermes") == ("call", first["name"], first["arguments"],
+                                                        len(m["tool_calls"])), case["name"]
+            n_turns += 1
+    assert n_turns == 4, n_turns
 
 
 if __name__ == "__main__":
