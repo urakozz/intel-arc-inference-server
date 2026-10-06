@@ -173,8 +173,11 @@ void check_serve() {
   c.model_type = "k2_horizon";
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "K2-Horizon runs its own engine"));
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "serve it on one card"));
+  // Spec 20e: Kolibri-1 is served by its own engine (two cards by default) - nothing refused here; its
+  // rules are cli::kolibri::check_args's (a --pipeline-split without --pp is Kolibri's default --pp 2).
   c.model_type = "kolibri1";
-  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "spec 20e"));
+  cli::check_serve_pipeline(two, c);
+  cli::check_serve_pipeline(split_only, c);
   c = {};
   c.device = true;
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "--device names one card"));
@@ -190,7 +193,7 @@ void check_serve() {
   c = {};
   c.prefill_profile = true;
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "B70_PREFILL_PROFILE=1"));
-  std::printf("b70-serve --pp: --pp 1 untouched, --pp 2 serves the Qwen family, 8 refusals by name\n");
+  std::printf("b70-serve --pp: --pp 1 untouched, --pp 2 serves the Qwen family, 7 refusals by name, Kolibri-1 its own\n");
 }
 }  // namespace
 

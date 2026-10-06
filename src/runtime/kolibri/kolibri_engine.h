@@ -22,7 +22,9 @@
 // or, spec 16b's pieces, two: it owns the weights (each layer on its device: loader::load_kolibri1's
 // parts), one KolibriBuffers and one captured list per device, and a token is a replay of the lists.
 // A prompt is fed one id per replay (`ingest`) or, spec 20d, in chunks (`prefill`, below). No MTP
-// (Kolibri has no head), no snapshots (spec 20e: the ring is part of the snapshot).
+// (Kolibri has no head). Spec 20e: spec 7's prefix-cache snapshots (the rings' last 512 positions as the
+// state, the full layers' KV as the blocks - runtime/kolibri/kolibri_sizes.h's layouts) and the server's
+// calls (pending, read_logits_into, vocab).
 //
 // **Two cards** (spec 16 §8's rules, PipelineEngine's, here for a model PipelineEngine cannot run):
 // layers [0, s) on device 0 with the embedding, [s, L) plus the head on device 1 (KolPlacement). The
@@ -63,6 +65,29 @@ class KolibriEngine {
   std::vector<uint32_t> generate(uint32_t n, const std::function<void(uint32_t)>& on_token = {});
   // The pending id, written where every device reads it (PipelineEngine::set_token's rule).
   void set_token(uint32_t id);
+  // Spec 20e: the pending id (the last device's cur_token[0]: the argmax of the last replay or prefill,
+  // or what set_token wrote) and the head's rows.
+  uint32_t pending() const;
+  uint32_t vocab() const { return model_.desc.vocab; }
+
+  // --- spec 20e: spec 7's prefix-cache snapshots ---------------------------------------------------
+  // Kolibri's "state" is the sliding rings' last state_positions (512) positions - what the next query's
+  // window reads - and its blocks are the full layers' KV: runtime/kolibri/kolibri_sizes.h's state_runs /
+  // kv_runs give both host layouts, which are the same under --pp 1 and --pp 2 (spec 16b's rule: layers in
+  // layer order, whichever device holds them). state_bytes() is 41,943,040 B and kv_bytes(n) n x 20,480 B
+  // at the real shapes (derived). save_state copies the rings' rows of [pos - 512, pos) (zeros for
+  // positions before 0); load_state writes them back into their slots (p & 4095, the zeros into the slots
+  // of positions before 0) and sets pos on every device (n_active 0; the cur_token is the prefill's that
+  // follows every restore, spec 7 §3.3 step 4). save_kv / load_kv copy positions [begin, end) of every full
+  // layer; begin == end copies nothing; throws unless begin <= end <= max_len. Every call runs on the
+  // devices' immediate lists with no step in flight (a hand-off that failed is reset by load_state, which
+  // overwrites everything a session reads).
+  size_t state_bytes() const;
+  size_t kv_bytes(uint32_t n_pos) const;
+  void save_state(void* host);
+  void load_state(const void* host, uint32_t pos);
+  void save_kv(uint32_t begin, uint32_t end, void* host);
+  void load_kv(uint32_t begin, uint32_t end, const void* host);
 
   double last_tok_per_s() const { return last_tok_per_s_; }
   double last_gen_ms() const { return last_gen_ms_; }
@@ -72,8 +97,9 @@ class KolibriEngine {
   std::vector<uint16_t> read_debug_resid();
   // u32 [layers][32]: every layer's route row of the last replay (kernels::kolibri::route).
   std::vector<uint32_t> read_routes();
-  // fp32 [vocab]: the last replay's logits (the last device's).
+  // fp32 [vocab]: the last replay's logits (the last device's) - or the last prefill's head row.
   std::vector<float> read_logits();
+  void read_logits_into(float* host);   // the same row into `host` (vocab floats), no allocation
   // bf16 [count][kv_heads][128] of layer `layer`'s K (or V) for absolute positions [first, first +
   // count): a full layer's rows, a sliding layer's through the ring (row p & (kRing - 1)) - the caller
   // asks only for positions the ring still holds.
@@ -144,6 +170,8 @@ class KolibriEngine {
   bool settle(uint32_t dev);
   [[noreturn]] void fail(const std::string& what);
   Stage& st(uint32_t dev) const;
+  l0::Mem& snap_mem(uint32_t dev, SnapTensor t) const;   // spec 20e: a snapshot run's allocation
+  void settle_all(const char* what);
 
   loader::KolLoadedModel model_;
   uint32_t max_len_;
