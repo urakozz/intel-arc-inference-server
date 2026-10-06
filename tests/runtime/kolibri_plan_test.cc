@@ -126,6 +126,74 @@ int main() {
   model::Kolibri1Desc s3 = d;
   s3.layers = 3;
   CHECK_EQ(rk::persistent_sizes(s3, model::KolPlacement::one(s3), 0, 4096).full_k, size_t(64));
+
+  // --- spec 20d: the prefill chunk -------------------------------------------------------------------
+  // launches: 45 a layer + embed + fold on device 0, the same sum on one card and on two
+  CHECK_EQ(rk::prefill_chunk_launches(d, one), size_t(2252));
+  CHECK_EQ(rk::prefill_chunk_launches(d, two), size_t(2252));
+  CHECK_EQ(rk::prefill_device_launches(d, two, 0), size_t(2 + 25 * 45));
+  CHECK_EQ(rk::prefill_device_launches(d, two, 1), size_t(25 * 45));
+  CHECK_EQ(rk::prefill_chunk_launches(s5, model::KolPlacement::one(s5)), size_t(2 + 5 * 45));
+  CHECK_EQ(rk::prefill_chunk_launches(s5, model::KolPlacement::two(s5, 3)), size_t(2 + 5 * 45));
+  CHECK_EQ(rk::kPrefillHeadLaunches, size_t(5));
+  // the weight batches: 385 blocks (384 + the bf16 shared expert) in 512 MiB
+  CHECK_EQ(rk::pf_block_gu_bytes(d), size_t(5242880));
+  CHECK_EQ(rk::pf_block_dn_bytes(d), size_t(2621440));
+  CHECK_EQ(rk::pf_batch_blocks_gu(d), 102u);
+  CHECK_EQ(rk::pf_batch_blocks_dn(d), 204u);
+  CHECK_EQ(rk::pf_batches_gu(d), 4u);
+  CHECK_EQ(rk::pf_batches_dn(d), 2u);
+  CHECK_EQ(rk::pf_tiles(d, 2048), 820u);
+  CHECK_EQ(rk::pf_slabs(7168), 7u);
+  CHECK_EQ(rk::pf_slabs(2560), 3u);
+  CHECK_EQ(rk::pf_slab_width(2560, 2048), 512u);
+  CHECK_EQ(rk::pf_ld(7168), 7168u);
+  // the scratch per device (derived: the formula, term by term)
+  {
+    const rk::PrefillSizes ps = rk::prefill_sizes(d);
+    const size_t C = 2048, R = size_t(820) * 32;
+    CHECK_EQ(ps.resid, C * 2560 * 2);
+    CHECK_EQ(ps.partials, C * 7168 * 4);
+    CHECK_EQ(ps.slab, size_t(6144) * 1024 * 2);
+    CHECK_EQ(ps.sumsq_r, size_t(20) * C * 4);
+    CHECK_EQ(ps.attn_q, C * 6144 * 4);
+    CHECK_EQ(ps.attn_out, C * 6144 * 2);
+    CHECK_EQ(ps.logits, C * 512 * 4);
+    CHECK_EQ(ps.routes, size_t(50) * C * 32 * 4);
+    CHECK_EQ(ps.hdr, size_t(400) * 4);
+    CHECK_EQ(ps.tiles, size_t(820) * 8);
+    CHECK_EQ(ps.row_tok, R * 4);
+    CHECK_EQ(ps.pair_row, C * 6 * 4);
+    CHECK_EQ(ps.xg, R * 2560 * 2);
+    CHECK_EQ(ps.h, R * 512 * 2);
+    CHECK_EQ(ps.w, size_t(512) << 20);
+    CHECK_EQ(ps.total(), size_t(904632800ull));
+    std::printf("prefill scratch per device: %.3f GB (the 512 MiB weight batch its largest term; derived)\n",
+                ps.total() / 1e9);
+    // the two-card hand-off at chunk size: 10.5 MB of rows + 160 KB of sums (16b's layout)
+    const runtime::PpLandingLayout ll = rk::pf_landing_layout(d);
+    CHECK_EQ(ll.resid_bytes, C * 2560 * 2);
+    CHECK_EQ(ll.sumsq_bytes, size_t(20) * C * 4);
+    CHECK(rk::pf_link_bytes(d, 1) > ll.resid_bytes + ll.sumsq_bytes && rk::pf_link_bytes(d, 0) < 4096);
+    // planned only when a run prefills, on both devices
+    const std::vector<rk::DevicePlan> pp = rk::plan(d, two, L, true, false, KolAttn::Flash, true);
+    CHECK_EQ(pp[0].prefill_scratch, ps.total() + rk::pf_link_bytes(d, 0));
+    CHECK_EQ(pp[1].prefill_scratch, ps.total() + rk::pf_link_bytes(d, 1));
+    CHECK_EQ(pl[0].prefill_scratch, size_t(0));
+    CHECK_EQ(rk::plan(s5, model::KolPlacement::one(s5), 4096, false, false, KolAttn::Flash, true)[0].prefill_scratch,
+             ps.total() - size_t(45) * C * 32 * 4);   // 5 layers' route rows, not 50; no link on one card
+  }
+  // max_len with the prefill scratch planned: still the trained context on two cards
+  CHECK_EQ(rk::max_len_that_fits(d, two, true, cards, reserve, 0, true), 262144u);
+  {
+    const runtime::PpChoice c = rk::pp_split_and_len(d, true, cards, reserve, 0, true);
+    CHECK(c.max_len == 262144u && c.split == 25u);
+    const runtime::PpBalance b = rk::pp_split(d, L, true, PpHandoff::Copy, KolAttn::Flash, true);
+    CHECK_EQ(b.split, 25u);
+    std::printf("with prefill planned: max_len 262144 on two cards, split 25 (device 0 %.3f GB, device 1 %.3f GB)\n",
+                b.dev0 / 1e9, b.dev1 / 1e9);
+  }
+  CHECK(rk::fits_one_card(s5, false, card, reserve, true));
   std::puts("kolibri_plan_test OK");
   return 0;
 }

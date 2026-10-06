@@ -167,7 +167,9 @@ void usage() {
       "  Kolibri-1 (model_type kolibri1, spec 20c): --pp defaults to 2 (the int4 model holds\n"
       "                 ~42.5 GB); --pp 1 only when the model fits one card (a synthetic\n"
       "                 checkpoint, or --layers N: load only its first N layers, development\n"
-      "                 mode). Decode only: --prefill*, --mtp, --kv-cache int8, --profile refused.\n"
+      "                 mode). Spec 20d: --prefill / --prefill-length N on the l0 backend only\n"
+      "                 (chunk <= 2048; two cards cross each chunk by copy); --mtp, --kv-cache\n"
+      "                 int8, --profile refused.\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -918,8 +920,11 @@ int run(int argc, char** argv) {
     ka.layers = layers;
     ka.pipe = pipe;
     ka.pp_given = pp_given;
-    ka.prefill = prefill;
-    ka.prefill_flags = have_prefill_len || have_pp_chunk || have_pp_backend;
+    ka.prefill = prefill;           // spec 20d: --ids through KolibriEngine::prefill
+    ka.pp = have_prefill_len;       // --prefill-length N already set depth = N above
+    ka.pp_chunk = pp_chunk;
+    ka.pp_backend_given = have_pp_backend;
+    ka.pp_backend = pp_backend;
     ka.mtp = mtp_on;
     ka.kv8 = kv_cache == runtime::KvCache::Int8;
     ka.profile = profile;
