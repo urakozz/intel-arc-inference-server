@@ -30,6 +30,13 @@
 
 - [ ] Review Focus 1, 2; the K2 golden gates and A4 with int8 KV; passkey at ~60k on one card. **Commit** `kv: rotkv int8 KV on K2-Horizon (spec 18e)`.
 
+**Status 2026-10-06: built blind** (branch `spec18e-k2-kv8`; spec 18 §13). Code, host tests, the
+kernels' Mac checks, the `_kv8` gate twins and K1 registered, Review Focus 2 built in (MoVA's mix
+quantised after the combine); the planner gives 83968 / 90368 positions with prefill (bf16 / int8
+head), not ~64k. Open: Review Focus 1 on real weights (`tools/oracle/kv8_k2_repeat.sh` after the
+checkpoint download), every card gate (box-validation-queue row 21), passkey near the new ceiling
+(`tools/probe/k2_passkey.sh`), A4 (needs 18d's K2 A4 tooling).
+
 ### Task 2: two cards
 
 - [ ] Review Focus 3, 4; spec 16's P1 (bitwise against one card at a context both fit) on K2; passkey at the two-card ceiling. **Commit** `pp: K2-Horizon across two cards (spec 18e)`.
