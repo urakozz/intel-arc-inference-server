@@ -70,6 +70,37 @@ class K2Engine {
   std::vector<uint32_t> read_prefill_routes();
   bool prefill_ready() const { return pf_bytes_ != 0; }
 
+  // --- spec 18d: the prefix cache's engine calls (spec 7, runtime::Engine's contract) -----
+  // K2 has no recurrent state, so a snapshot is KV only (runtime/k2/k2_sizes.h
+  // kv_snapshot_runs): state_bytes() is 0, save_state copies nothing and load_state restores
+  // `pos` alone (control.pos = pos, n_active = 0; cur_token is NOT restored - prefill at least
+  // one id after a restore, spec 7 §3.3 step 4). save_kv / load_kv copy positions [begin, end)
+  // of every layer's K and V (and at int8 their scales) in kv_snapshot_runs' host layout,
+  // kv_bytes(end - begin) bytes; begin == end copies nothing; throws unless begin <= end <=
+  // max_len. Every call is blocking on `imm_`, outside the decode list and the prefill
+  // Context; the caller has no replay or prefill in flight (no public call leaves one).
+  static constexpr uint32_t kBlock = 2048;   // runtime::Engine::kBlock: the store's block
+  using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
+  size_t state_bytes() const { return 0; }
+  size_t kv_bytes(uint32_t n_pos) const;
+  void save_state(void* host) const;
+  void load_state(const void* host, uint32_t pos);
+  void save_kv(uint32_t begin, uint32_t end, void* host) const;
+  void load_kv(uint32_t begin, uint32_t end, const void* host);
+  // runtime::Engine::set_block_hook's contract, on K2Engine::prefill: called on the host after
+  // every chunk whose end is a multiple of kBlock (device idle, control.pos == end_pos,
+  // n_active == 0) and after the prompt's last chunk once the first generated id is in
+  // cur_token; with a hook every chunk ends at a block end or at the prompt end
+  // (runtime::prefill_chunk_rows). Without one, chunking is exactly as before. A hook that
+  // throws propagates with pos == end_pos. ingest() (one replay per id) never calls it.
+  void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
+  // Host sampling (b70-serve, spec 18d): the id the next generate() embeds - cur_token[0], the
+  // ingest protocol Control already has - replacing the argmax the last replay wrote.
+  void set_pending(uint32_t id);
+  // The last replay's logits row into `host` (vocab floats) - read_logits() without the
+  // allocation, for the sampler's per-token readback.
+  void read_logits_into(float* host);
+
   double last_tok_per_s() const { return last_tok_per_s_; }
   double last_gen_ms() const { return last_gen_ms_; }
   double last_fence_ms() const { return last_fence_ms_; }
@@ -93,6 +124,7 @@ class K2Engine {
   const loader::K2LoadedModel& model() const { return model_; }
   uint32_t pos() const { return control_->pos; }
   uint32_t max_len() const { return buffers_.max_len; }
+  uint32_t vocab() const { return model_.desc->vocab; }   // the logits row's length (250,624)
   KvCache kv_cache() const { return buffers_.kv_cache(); }   // spec 18e
   l0::Context& context() const { return ctx_; }
 
@@ -109,6 +141,7 @@ class K2Engine {
   mutable l0::CmdList imm_;
   Control* control_;
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
+  BlockHook block_hook_;   // spec 18d: empty = no hook (prefill chunks as before)
   // Spec 18c: the prefill state, lazy; declared LAST so it (its Context, kernels and
   // recordings, which name the buffers and the weights) is destroyed first. The deleter is
   // set where the state is made (b70_k2_prefill), so this header names no prefill symbol.

@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "runtime/control.h"
 
@@ -34,6 +36,25 @@ KvLayout kv_layout(const model::K2Desc& d, uint32_t max_len, KvCache kv) {
   l.head_dim = d.head_dim;
   l.layers = d.layers;
   return l;
+}
+
+std::vector<SnapshotRun> kv_snapshot_runs(const KvLayout& lay, uint32_t begin, uint32_t end) {
+  if (begin > end || end > lay.max_len)
+    throw std::invalid_argument("runtime::k2::kv_snapshot_runs: range [" + std::to_string(begin) + ", " +
+                                std::to_string(end) + ") is not within [0, max_len " +
+                                std::to_string(lay.max_len) + ")");
+  std::vector<SnapshotRun> runs;
+  if (begin == end) return runs;
+  const size_t n = end - begin;
+  for (uint32_t t = 0; t < 2; ++t) {   // K, then V: one allocation each, the same layout
+    for (uint32_t l = 0; l < lay.layers; ++l)
+      runs.push_back({t, lay.rows_offset(l) + size_t(begin) * lay.row_bytes(), n * lay.row_bytes()});
+    if (lay.scale_row_bytes() == 0) continue;   // bf16: no scales
+    for (uint32_t l = 0; l < lay.layers; ++l)
+      runs.push_back({t, lay.scales_offset(l) + size_t(begin) * lay.scale_row_bytes(),
+                      n * lay.scale_row_bytes()});
+  }
+  return runs;
 }
 
 PersistentSizes persistent_sizes(const model::K2Desc& d, uint32_t max_len, KvCache kv) {

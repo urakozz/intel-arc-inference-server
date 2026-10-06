@@ -15,6 +15,7 @@
 #include "runtime/k2/k2_engine.h"
 #include "runtime/k2/k2_prefill.h"
 #include "runtime/k2/k2_sizes.h"
+#include "runtime/prefill_chunks.h"
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/kernels.h"
 
@@ -86,9 +87,13 @@ void K2Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   const char* env = std::getenv("B70_PREFILL_REPLAY");
   const bool replay = pf_replay_ >= 0 ? pf_replay_ == 1 : (env && std::strcmp(env, "1") == 0);
 
+  // Spec 18d: with a block hook (spec 7 §3.2) every chunk ends at a block end or at the
+  // prompt end - Engine::prefill's rule, one shared function - so each completed block is a
+  // storable one; without one, uniform chunks exactly as before.
+  const bool hooked = static_cast<bool>(block_hook_);
   uint32_t C = 0;
   for (size_t off = 0; off < ids.size(); off += C) {
-    C = uint32_t(std::min<size_t>(chunk, ids.size() - off));
+    C = prefill_chunk_rows(base + uint32_t(off), ids.size() - off, chunk, hooked, kBlock);
     const uint32_t pos = base + uint32_t(off);
     pf_->cx.wait();   // before touching the ids buffer or Control
     std::memcpy(pf_->s.ids.ptr(), ids.data() + off, size_t(C) * 4);
@@ -110,6 +115,14 @@ void K2Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       encode();
     }
     pf_->cx.wait();   // the chunk's KV rows have landed
+    const uint32_t end = pos + C;
+    if (hooked && off + C < ids.size() && end % kBlock == 0) {
+      // A mid-prompt block end: the KV holds exactly [0, end); say so in Control before the
+      // hook runs, so a hook that throws leaves pos matching the chunks written.
+      control_->pos = end;
+      control_->n_active = 0;
+      block_hook_(end, true);
+    }
   }
 
   // The tail: pos = base + L - 1 and n_active = 1 make argmax_stage2 leave pos = base + L
@@ -118,6 +131,10 @@ void K2Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   control_->n_active = 1;
   prefill_head(pf_->cx, pf_->kc, pf_->s, model_, buffers_, C - 1);
   pf_->cx.wait();
+  if (hooked) {   // the prompt end, the first generated id in cur_token
+    const uint32_t end = base + uint32_t(ids.size());
+    block_hook_(end, end % kBlock == 0);
+  }
 }
 
 }  // namespace runtime::k2

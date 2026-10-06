@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "model/k2_horizon.h"
 #include "runtime/buffer_sizes.h"   // spec 18e: KvCache, KvLayout, default_kv_cache
@@ -53,6 +54,31 @@ PersistentSizes persistent_sizes(const model::K2Desc& d, uint32_t max_len,
 // form's layer is kv_layout(...).layer_rows()).
 inline size_t kv_layer_bytes(const model::K2Desc& d, uint32_t max_len) {
   return size_t(max_len) * d.kv_n() * 2;
+}
+
+// --- spec 18d: KV-only snapshots (spec 7's prefix cache on K2) --------------------------
+// K2 has no recurrent state (no GDN, no conv ring, no MTP head): what a session leaves behind
+// between replays is its KV cache and `pos` (Control; cur_token is re-fed by the prefill that
+// follows every restore, spec 7 §3.3 step 4). MoVA needs nothing of its own: the routed value
+// mix IS the V row the cache holds (spec 18 §3; at int8 the mix rotated and quantised after
+// the combine, spec 18 §13), and the routes / RoPE table are per-step scratch / constants. So
+// a snapshot is K2Engine::kv_bytes(n) of KV and no state bytes (state_bytes() == 0).
+//
+// The host layout of positions [begin, end) is runtime::Engine::save_kv's without the MTP
+// head: K's rows of every layer [layers][n][kv_heads][head_dim] (bf16 or int8), then at int8
+// K's fp16 scales of every layer [layers][n][kv_heads]; then V the same. A run is one
+// contiguous device range of one allocation (`tensor` 0 = kv_k, 1 = kv_v, `offset` bytes from
+// its base), in host order; K2Engine::save_kv / load_kv walk this list, device-free here so
+// tests/server/k2_serve_test.cc holds it to the layout on host buffers.
+struct SnapshotRun {
+  uint32_t tensor = 0;   // 0: kv_k, 1: kv_v
+  size_t offset = 0, bytes = 0;
+};
+std::vector<SnapshotRun> kv_snapshot_runs(const KvLayout& lay, uint32_t begin, uint32_t end);
+// Bytes of a snapshot of n positions: 2 x layers x n x KvLayout::pos_bytes() - 196,608 B a
+// position at bf16, 99,840 B at int8 (48 layers x 8 heads x 128).
+inline size_t kv_snapshot_bytes(const KvLayout& lay, uint32_t n_pos) {
+  return 2 * size_t(lay.layers) * lay.pos_bytes() * n_pos;
 }
 
 // The decode scratch, sized for kM rows:
