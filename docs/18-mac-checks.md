@@ -136,6 +136,13 @@ path (so a driver can use a test's host reference).
 `B70_MAC_CL_DEVICE=AMD` picks another device by name; the CPU device rejects
 argmax's 256-wide work-group.
 
+**Beside the sections: the pipeline-parallel protocols under ThreadSanitizer.**
+`tools/mac/pp_prefill_tsan.sh` (after a host build) rebuilds `pp_prefill_protocol_test` (spec
+16c's prefill order on two host threads standing in for the cards) and `pp_protocol_test` (spec
+16b's peer hand-off) with `-fsanitize=thread` and runs them: the order hands every per-chunk
+buffer between the host and the "devices" through an event or a queue, or the sanitizer says
+where it does not. It proves the host protocol race-free, not the cards' events or PCIe.
+
 ## What it does not prove
 
 **Anything about the B70.** The section that runs kernels runs them on a different
