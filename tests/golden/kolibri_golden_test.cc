@@ -26,7 +26,13 @@
 // differ, the near-tie count, the worst weight difference in fp32 ulps over the matching sets (the
 // weights are sigmoid of the fp32 logit: OpenCL's exp against torch's).
 //
-// argv: <checkpoint> <oracle dir> [int8] [pp2 | pp2:<split>] [copy | peer]
+// **KL2 on prefill (spec 20d)**: with `prefill` (or `prefill:<chunk>`) the prompt goes through
+// KolibriEngine::prefill instead of one replay per id; the gate is the same rule from row T - 1 on (the
+// prefill's head chooses the first token), the routing diagnostic reads the prefill's route rows of the
+// last chunk (all of the prompt's in one chunk; the last <chunk> rows otherwise), and the tap is not read
+// (prefill writes no tap). The 32 teacher-forced steps after it are decode's, as before.
+//
+// argv: <checkpoint> <oracle dir> [int8] [pp2 | pp2:<split>] [copy | peer] [prefill | prefill:<chunk>]
 // (`pp2`: spec 20c Task 6 - the engine on two cards). Exit 77 (SKIP) when the checkpoint or the golden
 // set is absent, or the model does not fit the asked placement.
 #include <algorithm>
@@ -111,9 +117,16 @@ int main(int argc, char** argv) {
   kolibri_rig::Options o;
   o.max_len = kMaxLen;
   o.debug_tap = true;
+  bool prefill = false;   // spec 20d: the prompt through KolibriEngine::prefill
+  uint32_t chunk = 0;
   for (int i = 3; i < argc; ++i) {
     const std::string a = argv[i];
-    if (a == "int8") {
+    if (a == "prefill") {
+      prefill = true;
+    } else if (a.rfind("prefill:", 0) == 0) {
+      prefill = true;
+      chunk = uint32_t(std::strtoul(a.c_str() + 8, nullptr, 10));
+    } else if (a == "int8") {
       o.int8_head = true;
     } else if (a == "pp2") {
       o.devices = 2;
@@ -123,7 +136,8 @@ int main(int argc, char** argv) {
     } else if (a == "copy" || a == "peer") {
       o.handoff = a == "peer" ? runtime::PpHandoff::Peer : runtime::PpHandoff::Copy;
     } else {
-      std::fprintf(stderr, "kolibri_golden_test: unknown flag %s (int8, pp2[:split], copy, peer)\n", a.c_str());
+      std::fprintf(stderr, "kolibri_golden_test: unknown flag %s (int8, pp2[:split], copy, peer, prefill[:chunk])\n",
+                   a.c_str());
       return 2;
     }
   }
@@ -142,7 +156,8 @@ int main(int argc, char** argv) {
     return 77;
   }
   const model::Kolibri1Desc pre = loader::kolibri1_checkpoint_desc(snap);
-  if (o.devices == 1 && !runtime::kolibri::fits_one_card(pre, o.int8_head, size_t(32530000000ull), size_t(1.5e9))) {
+  if (o.devices == 1 &&
+      !runtime::kolibri::fits_one_card(pre, o.int8_head, size_t(32530000000ull), size_t(1.5e9), prefill)) {
     std::printf("SKIP: %s does not fit one card - run with pp2\n", snap.c_str());
     return 77;
   }
@@ -155,11 +170,12 @@ int main(int argc, char** argv) {
   runtime::kolibri::KolibriEngine& eng = *rig.eng;
   const model::Kolibri1Desc& d = eng.model().desc;
   std::printf("%s: %u layers, %s attention arm, lm_head %s, %s attention (B70_KOLIBRI_ATTN), %u device(s)%s, %zu "
-              "launches a token, near-tie tolerance %.1e\n", snap.c_str(), d.layers, model::kol_attn_form_name(d.attn),
+              "launches a token, near-tie tolerance %.1e, the prompt by %s\n", snap.c_str(), d.layers,
+              model::kol_attn_form_name(d.attn),
               o.int8_head ? "int8" : "bf16", runtime::kolibri::kol_attn_name(eng.attention()), eng.devices(),
               eng.devices() == 2 ? (std::string(", split ") + std::to_string(eng.split()) + " " +
                                     runtime::pp_handoff_name(eng.handoff())).c_str() : "",
-              eng.launches(), double(tie_tol()));
+              eng.launches(), double(tie_tol()), prefill ? "KolibriEngine::prefill" : "decode replays");
 
   bool gate_ok = true;
   RouteCount rc;
@@ -190,7 +206,27 @@ int main(int argc, char** argv) {
       }
     };
     eng.reset();
-    for (uint32_t t = 0; t < T; ++t) {
+    // Spec 20d, KL2 on prefill: the prompt in one KolibriEngine::prefill (chunks of `chunk`), the routing
+    // diagnostic on the rows the last chunk's route buffer holds, then the 32 teacher-forced decode steps.
+    if (prefill) {
+      eng.prefill(ids, chunk);
+      const uint32_t c = chunk ? chunk : runtime::kolibri::kPfC;
+      const uint32_t row0 = ((T - 1) / c) * c;   // the last chunk's first position
+      const std::vector<uint32_t> r = eng.read_prefill_routes();
+      for (uint32_t t = row0; t < T; ++t)
+        for (uint32_t l = 0; l < d.layers; ++l) {
+          const std::string ls = std::to_string(l);
+          if (!g.has("route.moe.ids.L" + ls)) continue;
+          const int32_t* gi = g.i32("route.moe.ids.L" + ls, size_t(rows) * d.top_k) + size_t(t) * d.top_k;
+          const float* gw = g.f32("route.moe.w.L" + ls, size_t(rows) * d.top_k) + size_t(t) * d.top_k;
+          const float gap = g.f32("route.moe.gap.L" + ls, rows)[t];
+          compare_route(r.data() + runtime::kolibri::pf_route_at(l) / 4 + size_t(t - row0) * runtime::kolibri::kRouteWords,
+                        gi, gw, gap, d.top_k, rc, first[l], pname.c_str(), t, l);
+        }
+      std::printf("  prefill: %u ids in chunks of %u (%zu launches), routing diagnostic on rows %u..%u\n", T, c,
+                  eng.prefill_launches(), row0, T - 1);
+    }
+    for (uint32_t t = 0; t < T && !prefill; ++t) {
       eng.ingest({ids[t]});
       check_routes(t);
       const std::vector<uint16_t> tap = eng.read_debug_resid();
@@ -232,9 +268,11 @@ int main(int argc, char** argv) {
     std::printf("  gate: %u / %u determined rows exact, %u / %u tie rows in the argmax set%s; logits worst cosine %.6f\n",
                 det_ok, det, tie_ok, ties, ok ? "" : (" - FIRST BAD STEP " + std::to_string(first_bad)).c_str(),
                 logit_min);
-    std::printf("  tap (min cosine over the prompt):");
-    for (uint32_t l = 0; l < d.layers; ++l) std::printf(" %u:%.4f", l, tap_min[l]);
-    std::printf("\n");
+    if (!prefill) {   // prefill writes no tap
+      std::printf("  tap (min cosine over the prompt):");
+      for (uint32_t l = 0; l < d.layers; ++l) std::printf(" %u:%.4f", l, tap_min[l]);
+      std::printf("\n");
+    }
   }
   std::printf("\nrouting: %llu rows (%llu exact, %llu near-ties, %llu differing; weights worst %lld fp32 ulps)\n",
               (unsigned long long)rc.rows, (unsigned long long)rc.exact, (unsigned long long)rc.ties,

@@ -107,33 +107,112 @@ size_t device_launches(const model::Kolibri1Desc& d, const model::KolPlacement& 
                        PpHandoff h);
 size_t decode_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, KolAttn a, PpHandoff h);
 
+// --- spec 20d: the prefill chunk ------------------------------------------------------------------
+// One chunk of at most kPfC positions (= kernels::kolibri::kPfC, checked in kolibri_prefill.cc): every
+// allocation KolibriPrefillScratch makes on a device, as device-free arithmetic. None depends on max_len
+// (the flash attention keeps no score scratch), so the prefill scratch is one constant per device.
+inline constexpr uint32_t kPfC = 2048;
+inline constexpr uint32_t kPfTm = 32;                          // the grouped GEMM's tile rows (pf_moe_gemm TM)
+inline constexpr uint32_t kPfSlab = 1024;                      // a whole slab of an attention linear
+inline constexpr size_t kPfBatchBytes = size_t(512) << 20;     // one weight batch of bf16 expert blocks
+inline uint32_t pad256(uint32_t n) { return (n + 255) / 256 * 256; }
+// The attention linears' slab walk over N columns: slabs of kPfSlab and one tail of pad256(N - n0)
+// (k2_pf_dequant_slab / kol_pf_bf16_slab zero-fill its padding); the partials row pitch pad256(N).
+inline uint32_t pf_slabs(uint32_t N) { return (N + kPfSlab - 1) / kPfSlab; }
+inline uint32_t pf_slab_width(uint32_t N, uint32_t n0) { return N - n0 >= kPfSlab ? kPfSlab : pad256(N - n0); }
+inline uint32_t pf_ld(uint32_t N) { return pad256(N); }
+// The grouped GEMMs' padded tile count of a C-row chunk (kol_pf_moe.cl's header has the bound):
+//   floor((C x top_k + experts x (TM - 1)) / TM) + ceil(C / TM)        820 at C = 2048
+uint32_t pf_tiles(const model::Kolibri1Desc& d, uint32_t C);
+// The weight batches: 385 blocks (384 experts + the bf16 shared expert, block 384) of bf16 [K][N] in
+// kPfBatchBytes regions - gate||up 5,242,880 B a block, 102 a batch, 4 batches; down 2,621,440 B, 204,
+// 2 batches.
+size_t pf_block_gu_bytes(const model::Kolibri1Desc& d);
+size_t pf_block_dn_bytes(const model::Kolibri1Desc& d);
+uint32_t pf_batch_blocks_gu(const model::Kolibri1Desc& d);
+uint32_t pf_batch_blocks_dn(const model::Kolibri1Desc& d);
+uint32_t pf_batches_gu(const model::Kolibri1Desc& d);
+uint32_t pf_batches_dn(const model::Kolibri1Desc& d);
+
+// KolibriPrefillScratch's allocations on one device (kPfC rows each; both devices hold the whole set -
+// the lists are per device):
+//   ids       u32  [kPfC]                       host memory: the chunk's ids (read by device 0's embed)
+//   resid     bf16 [kPfC][hidden]               the residual stream (crosses the cut on two cards)
+//   x, a, mo  bf16 [kPfC][hidden]               every norm's output, o_proj's own row, the MoE's output
+//   partials  fp32 [kPfC][pf_ld(7168)]          the slab GEMMs' output (q||k||v, then o_proj at 2560)
+//   slab      bf16 [6144][kPfSlab]              one slab of the widest-K attention linear
+//   sumsq_a/r fp32 [kNormG][kPfC]               a sub-block's Σ², the residual's (crosses with resid)
+//   attn_q    fp32 [kPfC][q_n]                  kol_attn_prep's q
+//   attn_out  bf16 [kPfC][q_n]                  the flash attention's output, o_proj's A
+//   logits    fp32 [kPfC][router_n]             the router GEMV
+//   routes    u32  [layers][kPfC][32]           every layer's route rows of the LAST chunk
+//   hdr       u32  [pf_hdr words]               the sort's header
+//   tiles     u32  [tmax(kPfC)][2]              the tile table
+//   row_tok   u32  [tmax x TM]                  the sorted rows' tokens
+//   pair_row  u32  [kPfC][top_k]                every (token, slot)'s sorted row
+//   xg        bf16 [tmax x TM][hidden]          the gathered A, then down's y
+//   h         bf16 [tmax x TM][moe_inter]       gate||up's SiLU h
+//   w         bf16 kPfBatchBytes                the expert weight batch
+struct PrefillSizes {
+  size_t ids = 0, resid = 0, x = 0, a = 0, mo = 0, partials = 0, slab = 0, sumsq_a = 0, sumsq_r = 0, attn_q = 0,
+         attn_out = 0, logits = 0, routes = 0, hdr = 0, tiles = 0, row_tok = 0, pair_row = 0, xg = 0, h = 0, w = 0;
+  size_t total() const {
+    return ids + resid + x + a + mo + partials + slab + sumsq_a + sumsq_r + attn_q + attn_out + logits + routes + hdr +
+           tiles + row_tok + pair_row + xg + h + w;
+  }
+};
+PrefillSizes prefill_sizes(const model::Kolibri1Desc& d);
+inline size_t pf_route_at(uint32_t layer) { return size_t(layer) * kPfC * kRouteWords * 4; }
+// The two-card prefill hand-off: a second runtime::PipelineLink in `copy` mode over spec 16b's layout at
+// chunk size - kPfC rows of the residual and the [kNormG][kPfC] sums (10.5 MB + 160 KB).
+PpLandingLayout pf_landing_layout(const model::Kolibri1Desc& d);
+size_t pf_link_bytes(const model::Kolibri1Desc& d, uint32_t dev);
+
+// The chunk's launches on one device and their sum, the same at every C (the hand-off's copies, the
+// event and the head excluded):
+//   device 0  pf_embed_gather + pf_res_fold SP0, then its layers
+//   a layer   45: kol_norm_finish, q||k||v 7 slabs x (dequant | copy + pf_gemm), kol_attn_prep,
+//             kol_pf_flash_attn, o_proj 3 slabs x 2, pf_res_fold _Z + kol_post_add, kol_norm_finish,
+//             the router GEMV, kol_route, sort, gather, gate||up 4 batches x (dequant + grouped GEMM),
+//             down 2 x 2, the combine, pf_res_fold SP0 + kol_post_add
+// 2252 at 50 layers on one card AND on two (the cut is 16b's: device 0 ends with layer s-1's
+// kol_post_add, whose rows and sums cross; device 1 starts at layer s's norm - nothing recomputed).
+size_t prefill_device_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev);
+size_t prefill_chunk_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p);
+inline constexpr size_t kPrefillHeadLaunches = 5;   // fold + norm over the last row, lm_head, argmax x 2
+
 // --- the split by bytes (16b's rule) -------------------------------------------------------------
 // layer_bytes[l] = kol_layer_bytes(d).total() + (is_sliding(l) ? ring_bytes_per_layer : max_len x 2 x kv_n x 2)
 std::vector<size_t> pp_layer_bytes(const model::Kolibri1Desc& d, uint32_t max_len);
 // dev0_fixed = embedding + RoPE + decode scratch + control + link (device 0); dev1_fixed = final norm +
-// lm_head + RoPE + decode scratch + control + link (device 1) - then runtime::pp_balance.
+// lm_head + RoPE + decode scratch + control + link (device 1) - then runtime::pp_balance. `prefill`
+// (spec 20d): both devices' fixed bytes also hold the prefill scratch and the prefill link.
 PpBalance pp_split(const model::Kolibri1Desc& d, uint32_t max_len, bool int8_head, PpHandoff h,
-                   KolAttn a = kolibri_attn());
+                   KolAttn a = kolibri_attn(), bool prefill = false);
 
 // --- the planner -----------------------------------------------------------------------------------
 // One device's plan in memory_line()'s components: model = its weights + its RoPE table; kv = its
-// full KV + its rings; decode_state = control + scratch (+ eager's score row) (+ the tap) + its link.
+// full KV + its rings; decode_state = control + scratch (+ eager's score row) (+ the tap) + its link;
+// prefill_scratch (spec 20d, `prefill`) = prefill_sizes + its prefill link.
 struct DevicePlan : MemoryComponents {
   uint32_t device = 0;
   size_t weights = 0, rope = 0, link = 0, full_kv = 0, rings = 0;
 };
 std::vector<DevicePlan> plan(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t max_len,
-                             bool int8_head, bool debug_tap = false, KolAttn a = kolibri_attn());
+                             bool int8_head, bool debug_tap = false, KolAttn a = kolibri_attn(), bool prefill = false);
 // The largest multiple of kMaxLenQuantum, at most min(cap, trained 262144), whose plan + reserve fits
 // EVERY device; 0 when not even min(kMinAutoMaxLen, cap) does.
 uint32_t max_len_that_fits(const model::Kolibri1Desc& d, const model::KolPlacement& p, bool int8_head,
-                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap = 0);
+                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap = 0,
+                           bool prefill = false);
 // `--pipeline-split auto` with `--max-len auto`: pp_auto_split_and_len's rule over pp_split - the split
 // whose min-over-devices max_len is the largest, ties broken by pp_balance at that length.
 PpChoice pp_split_and_len(const model::Kolibri1Desc& d, bool int8_head,
-                          const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap = 0);
+                          const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap = 0,
+                          bool prefill = false);
 // Whether `--pp 1` may run: the one-card plan at min(kMinAutoMaxLen, trained) fits device_bytes - reserve.
-bool fits_one_card(const model::Kolibri1Desc& d, bool int8_head, size_t device_bytes, size_t reserve);
+bool fits_one_card(const model::Kolibri1Desc& d, bool int8_head, size_t device_bytes, size_t reserve,
+                   bool prefill = false);
 // "pipeline plan at max_len N, split s (layers [0, s) | [s, L)):" + one line per device
 // (runtime::pp_describe's text; "plan at max_len N (one card):" for one device).
 std::string describe(const std::vector<DevicePlan>& p, const model::KolPlacement& pl, uint32_t max_len,

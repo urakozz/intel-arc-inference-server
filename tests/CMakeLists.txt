@@ -2591,7 +2591,6 @@ b70_cli_reject(cli_reject_kolibri_pp_device ${CMAKE_CURRENT_SOURCE_DIR}/model/ko
 # only the checkpoint's config.json, which is all the dispatch and the --pp 1 fit check read.
 set(_kol_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
 b70_cli_reject(cli_reject_kolibri_one_card ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --pp 1 EXPECT "--pp 2")
-b70_cli_reject(cli_reject_kolibri_prefill ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --prefill EXPECT "spec 20d")
 b70_cli_reject(cli_reject_kolibri_mtp ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "no MTP head")
 b70_cli_reject(cli_reject_kolibri_kv8 ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "bf16 only")
 b70_cli_reject(cli_reject_kolibri_layers_qwen ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --layers 3
@@ -2656,4 +2655,79 @@ if(B70_KOLIBRI)
   add_test(NAME kolibri_pf_kernels_test COMMAND kolibri_pf_kernels_test)
   set_tests_properties(kolibri_pf_kernels_test PROPERTIES LABELS "kolibri;prefill" TIMEOUT 1800)
 endif()
+# Task 3: the prefill walk on the card (box only; SKIP 77 without the synthetic sets / the real checkpoint).
+#   kolibri_prefill_test: the walk's launches and the plan, K3 (two prefills, recorded == replayed, chunks
+#       of 16 == chunks of 2048, all bitwise), Review Focus 4 (KV / rings / routes / tokens against decode's
+#       fill); its `split` mode is prefill_split_kolibri_test (Review Focus 5), its `pp` mode one card
+#       against two, bitwise (needs two GPUs);
+#   kolibri_golden_test's `prefill` mode: KL2 on prefill (the synthetic arms; the real checkpoint after 20b).
+if(B70_KOLIBRI)
+  add_executable(kolibri_prefill_test runtime/kolibri_prefill_test.cc)
+  target_include_directories(kolibri_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(kolibri_prefill_test PRIVATE b70_kolibri_prefill b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(kolibri_prefill_test)
+  endif()
+  add_dependencies(kolibri_prefill_test ${B70_KOLIBRI_PREFILL_KERNELS} ${B70_KOLIBRI_DECODE_KERNELS} kernel_pp_handoff)
+  set(_kol_synth ${B70_KOLIBRI_SYNTH_DIR})
+  set(_kol_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
+  add_test(NAME kolibri_prefill_synth_int4attn_test COMMAND kolibri_prefill_test ${_kol_synth}/int4attn/ckpt ${_kol_ids} all)
+  add_test(NAME kolibri_prefill_synth_bf16attn_test COMMAND kolibri_prefill_test ${_kol_synth}/bf16attn/ckpt ${_kol_ids} all)
+  add_test(NAME kolibri_prefill_synth_eager_test COMMAND kolibri_prefill_test ${_kol_synth}/int4attn/ckpt ${_kol_ids} all)
+  set_tests_properties(kolibri_prefill_synth_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
+  add_test(NAME prefill_split_kolibri_test COMMAND kolibri_prefill_test ${_kol_synth}/int4attn/ckpt ${_kol_ids} split)
+  set_tests_properties(kolibri_prefill_synth_int4attn_test kolibri_prefill_synth_bf16attn_test
+    kolibri_prefill_synth_eager_test prefill_split_kolibri_test
+    PROPERTIES LABELS "checkpoint;kolibri;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # two cards (16b's pieces): one card against --pp 2 --pipeline-split 3 bitwise on the synthetic checkpoint,
+  # the split test across two cards; the real checkpoint on two cards (needs spec 20b)
+  add_test(NAME kolibri_prefill_pp_test COMMAND kolibri_prefill_test ${_kol_synth}/int4attn/ckpt ${_kol_ids} pp pp2:3)
+  add_test(NAME prefill_split_kolibri_pp_test COMMAND kolibri_prefill_test ${_kol_synth}/int4attn/ckpt ${_kol_ids}
+    split pp2:3)
+  add_test(NAME kolibri_prefill_test COMMAND kolibri_prefill_test ${B70_KOLIBRI_SNAPSHOT} ${_kol_ids} all pp2)
+  add_test(NAME prefill_split_kolibri_real_test COMMAND kolibri_prefill_test ${B70_KOLIBRI_SNAPSHOT} ${_kol_ids} split pp2)
+  set_tests_properties(kolibri_prefill_pp_test prefill_split_kolibri_pp_test kolibri_prefill_test
+    prefill_split_kolibri_real_test PROPERTIES LABELS "checkpoint;kolibri;prefill;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # KL2 on prefill: 20c's golden test in its prefill mode (one chunk, and chunks of 16), both synthetic arms,
+  # eager, the int8 head; the real checkpoint on two cards after 20b.
+  target_link_libraries(kolibri_golden_test PRIVATE b70_kolibri_prefill)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(kolibri_golden_test)
+  endif()
+  add_dependencies(kolibri_golden_test ${B70_KOLIBRI_PREFILL_KERNELS})
+  add_test(NAME kolibri_golden_prefill_synth_int4attn_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn prefill)
+  add_test(NAME kolibri_golden_prefill_synth_bf16attn_test COMMAND kolibri_golden_test ${_kol_synth}/bf16attn/ckpt
+    ${_kol_synth}/bf16attn prefill)
+  add_test(NAME kolibri_golden_prefill_synth_c16_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn prefill:16)
+  add_test(NAME kolibri_golden_prefill_synth_i8head_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn int8 prefill)
+  add_test(NAME kolibri_golden_prefill_synth_eager_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn prefill)
+  set_tests_properties(kolibri_golden_prefill_synth_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
+  add_test(NAME kolibri_golden_prefill_synth_pp_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn pp2:3 prefill)
+  set_tests_properties(kolibri_golden_prefill_synth_int4attn_test kolibri_golden_prefill_synth_bf16attn_test
+    kolibri_golden_prefill_synth_c16_test kolibri_golden_prefill_synth_i8head_test
+    kolibri_golden_prefill_synth_eager_test kolibri_golden_prefill_synth_pp_test
+    PROPERTIES LABELS "checkpoint;golden;kolibri;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  add_test(NAME kolibri_golden_prefill_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR}
+    pp2 prefill)
+  add_test(NAME kolibri_golden_prefill_c16_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT}
+    ${B70_KOLIBRI_ORACLE_DIR} pp2 prefill:16)
+  add_test(NAME kolibri_golden_prefill_i8head_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT}
+    ${B70_KOLIBRI_ORACLE_DIR} int8 pp2 prefill)
+  set_tests_properties(kolibri_golden_prefill_test kolibri_golden_prefill_c16_test kolibri_golden_prefill_i8head_test
+    PROPERTIES LABELS "checkpoint;golden;kolibri;prefill;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+# Task 3: b70-decode's Kolibri prefill backends and chunk, before the device (tests/model/kolibri1: config.json
+# only). 20c's cli_reject_kolibri_prefill (--prefill naming spec 20d) is gone: Kolibri prefills now.
+b70_cli_reject(cli_reject_kolibri_prefill_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --bench --prefill-length 64
+  --prefill-backend l0-int8 EXPECT "1024-k Hadamard blocks")
+b70_cli_reject(cli_reject_kolibri_prefill_sycl ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
+  --prefill --prefill-backend sycl-tla EXPECT "sycl-tla has no Kolibri walk")
+b70_cli_reject(cli_reject_kolibri_prefill_chunk ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
+  --prefill --prefill-chunk 4096 EXPECT "exceeds Kolibri-1's prefill chunk 2048")
 # ==== Spec 20d: Kolibri-1 prefill ==== (end) ====

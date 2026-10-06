@@ -2,7 +2,14 @@
 // Spec 20c: b70-decode's Kolibri-1 path - the CLI dispatches on config.json's model_type
 // (loader::is_kolibri1_checkpoint) and, for "kolibri1", runs runtime::kolibri::KolibriEngine on one or
 // two cards. `--ids` and `--bench` exactly as the Qwen path prints them (ids on stdout, one per line;
-// the bench row on stdout); the prompt goes through the decode list one replay per id.
+// the bench row on stdout); the prompt goes through the decode list one replay per id - or, spec 20d,
+// through KolibriEngine::prefill in chunks:
+//
+//   --prefill          (--ids) the prompt prefilled, then --n greedy ids
+//   --prefill-length N (--bench) depth N prefilled and timed (the pp row), then --tg decoded
+//   --prefill-chunk C  the chunk width, <= 2048 (kernels::kolibri::kPfC; the default)
+//   --prefill-backend l0  the only backend: l0-int8 (its h8 linears rotate in 1024-k Hadamard blocks and
+//                      Kolibri's hidden is 2560) and sycl-tla (no Kolibri walk) are refused by name
 //
 //   --pp N / --pipeline-parallel-size N   2 (Kolibri's DEFAULT: the real model holds ~42.5 GB of
 //                      weights at int4, one card 32.5 GB) or 1 - accepted only when the planner says the
@@ -12,9 +19,10 @@
 //                      runtime::pp_balance over Kolibri's per-layer bytes at the session's max_len
 //   --layers N         development mode (spec 20 §4): load only layers [0, N) of the checkpoint
 //   --lm-head bf16|int8, --max-len N|auto (under the trained 262144; above it is spec 20 decision 3)
-// Refused before the device, each by name: --prefill / --prefill-length / --prefill-chunk /
-// --prefill-backend (spec 20d), --mtp (Kolibri has no MTP head), --kv-cache int8 (20 KiB a position:
-// bf16 only), --profile (Task 8), --device N with --pp 2 (16b's rule: GPUs 0 and 1).
+// Refused before the device, each by name: --prefill-backend l0-int8 / sycl-tla, --prefill-chunk above
+// 2048 (spec 20d), --mtp (Kolibri has no MTP head), --kv-cache int8 (20 KiB a position: bf16 only),
+// --profile (Task 8), --device N with --pp 2 (16b's rule: GPUs 0 and 1). A prefilling run plans the
+// prefill scratch (and, on two cards, the prefill hand-off) into --max-len and the fit.
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -35,6 +43,7 @@
 #include "loader/trained_context.h"
 #include "runtime/kolibri/kolibri_engine.h"
 #include "runtime/kolibri/kolibri_sizes.h"
+#include "runtime/prefill_backend.h"
 
 namespace cli::kolibri {
 
@@ -73,8 +82,14 @@ struct DecodeArgs {
   uint32_t layers = 0;          // --layers N (0: the checkpoint's)
   PipelineArgs pipe;            // devices as parsed (1 when --pp was not given)
   bool pp_given = false;        // --pp / --pipeline-parallel-size on the command line
+  // Spec 20d: --prefill (--ids), --prefill-length N (--bench at depth N: the pp row), --prefill-chunk C
+  // (0 = kPfC), --prefill-backend as parsed (l0 only).
+  bool prefill = false, pp = false, pp_backend_given = false;
+  uint32_t pp_chunk = 0;
+  runtime::PrefillBackend pp_backend = runtime::PrefillBackend::L0;
   // What else was asked for, for the refusals.
-  bool prefill = false, prefill_flags = false, mtp = false, kv8 = false, profile = false;
+  bool mtp = false, kv8 = false, profile = false;
+  bool prefills() const { return prefill || pp; }
 };
 
 // Kolibri's device count: --pp as given, else 2.
@@ -84,10 +99,17 @@ inline uint32_t devices_of(const DecodeArgs& a) { return a.pp_given ? a.pipe.dev
 // cli_reject_kolibri_*). `d` is the checkpoint's descriptor (kolibri1_checkpoint_desc: config.json
 // and the index's names only).
 inline void check_args(const DecodeArgs& a, const model::Kolibri1Desc& d) {
-  if (a.prefill || a.prefill_flags)
-    throw std::runtime_error("Kolibri-1 decodes only in spec 20c: its prefill (grouped MoE, windowed flash "
-                             "attention) is spec 20d; --ids ingests the prompt one replay per id, --bench takes "
-                             "--depth");
+  if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::L0Int8)
+    throw std::runtime_error("Kolibri-1 prefills on the l0 backend only (spec 20d), not l0-int8: its h8 linears "
+                             "rotate in whole 1024-k Hadamard blocks and Kolibri's hidden is 2560 - "
+                             "--prefill-backend l0, or omit it");
+  if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::SyclTla)
+    throw std::runtime_error("Kolibri-1 prefills on the l0 backend only (spec 20d), not sycl-tla: sycl-tla has no "
+                             "Kolibri walk - --prefill-backend l0, or omit it");
+  if (a.pp_chunk > runtime::kolibri::kPfC)
+    throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " exceeds Kolibri-1's prefill chunk " +
+                             std::to_string(runtime::kolibri::kPfC) + " (the scratch and the 4096-slot ring's "
+                             "headroom are sized for it)");
   if (a.mtp) throw std::runtime_error("Kolibri-1 has no MTP head (spec 20 §1); drop --mtp");
   if (a.kv8)
     throw std::runtime_error("--kv-cache int8: Kolibri-1's KV is bf16 only - 20 KiB a position on its 10 full "
@@ -102,7 +124,7 @@ inline void check_args(const DecodeArgs& a, const model::Kolibri1Desc& d) {
       throw std::runtime_error("--pipeline-split belongs to --pp 2 (the layer device 1 starts at)");
     if (a.pipe.have_handoff)
       throw std::runtime_error("--pipeline-handoff belongs to --pp 2 (how the residual crosses)");
-    if (!runtime::kolibri::fits_one_card(d, int8, kB70Bytes, a.reserve)) {
+    if (!runtime::kolibri::fits_one_card(d, int8, kB70Bytes, a.reserve, a.prefills())) {
       const size_t w = loader::kol_device_weight_bytes(d, model::KolPlacement::one(d), 0, int8);
       char msg[400];
       std::snprintf(msg, sizeof msg,
@@ -146,27 +168,29 @@ inline std::vector<uint32_t> read_ids(const std::string& path, uint32_t vocab) {
 // straight onto its device). Prints the choice and the plan to stderr.
 inline std::pair<model::KolPlacement, uint32_t> settle(const model::Kolibri1Desc& d, const DecodeArgs& a,
                                                        const std::array<size_t, runtime::kPpDevices>& dev) {
-  const bool int8 = a.lm_head == loader::LmHeadForm::Int8;
+  const bool int8 = a.lm_head == loader::LmHeadForm::Int8, pf = a.prefills();
   const uint32_t devs = devices_of(a), cap = d.trained_max_len;
   namespace rk = runtime::kolibri;
+  const rk::KolAttn at = rk::kolibri_attn();
   model::KolPlacement p = devs == 1 ? model::KolPlacement::one(d) : model::KolPlacement::two(d, a.pipe.split ? a.pipe.split : 1);
   uint32_t len = a.max_len.value;
   if (a.max_len.is_auto) {
     if (devs == 2 && a.pipe.split_auto) {
-      const runtime::PpChoice c = rk::pp_split_and_len(d, int8, dev, a.reserve, cap);
+      const runtime::PpChoice c = rk::pp_split_and_len(d, int8, dev, a.reserve, cap, pf);
       if (c.max_len == 0)
         throw std::runtime_error("--max-len auto: no split fits " + std::to_string(runtime::kMinAutoMaxLen) +
                                  " positions on both cards - " +
-                                 rk::describe(rk::plan(d, model::KolPlacement::two(d, d.layers / 2), runtime::kMinAutoMaxLen, int8),
+                                 rk::describe(rk::plan(d, model::KolPlacement::two(d, d.layers / 2), runtime::kMinAutoMaxLen, int8,
+                                                       false, at, pf),
                                               model::KolPlacement::two(d, d.layers / 2), runtime::kMinAutoMaxLen, dev, a.reserve));
       p = model::KolPlacement::two(d, c.split);
       len = c.max_len;
     } else {
-      len = rk::max_len_that_fits(d, p, int8, dev, a.reserve, cap);
+      len = rk::max_len_that_fits(d, p, int8, dev, a.reserve, cap, pf);
       if (len == 0)
         throw std::runtime_error("--max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) +
                                  " positions fit - " +
-                                 rk::describe(rk::plan(d, p, runtime::kMinAutoMaxLen, int8), p,
+                                 rk::describe(rk::plan(d, p, runtime::kMinAutoMaxLen, int8, false, at, pf), p,
                                               runtime::kMinAutoMaxLen, dev, a.reserve));
     }
     std::fprintf(stderr, "max_len: auto -> %u (the largest multiple of %u that fits every card with a %.3f GB "
@@ -175,20 +199,21 @@ inline std::pair<model::KolPlacement, uint32_t> settle(const model::Kolibri1Desc
     if (len > cap)
       throw std::runtime_error("--max-len " + std::to_string(len) + " exceeds Kolibri-1's trained context " +
                                std::to_string(cap) + " - a longer context is spec 20 decision 3");
-    if (devs == 2 && a.pipe.split_auto) p = model::KolPlacement::two(d, rk::pp_split(d, len, int8, a.pipe.handoff).split);
-    const std::vector<rk::DevicePlan> pl = rk::plan(d, p, len, int8);
+    if (devs == 2 && a.pipe.split_auto)
+      p = model::KolPlacement::two(d, rk::pp_split(d, len, int8, a.pipe.handoff, at, pf).split);
+    const std::vector<rk::DevicePlan> pl = rk::plan(d, p, len, int8, false, at, pf);
     for (uint32_t i = 0; i < p.devices; ++i)
       if (pl[i].total() + a.reserve > dev[i])
         throw std::runtime_error("--max-len " + std::to_string(len) + " does not fit device " + std::to_string(i) +
                                  ": " + rk::describe(pl, p, len, dev, a.reserve) + ". The largest that fits is " +
-                                 std::to_string(rk::max_len_that_fits(d, p, int8, dev, a.reserve, cap)) +
+                                 std::to_string(rk::max_len_that_fits(d, p, int8, dev, a.reserve, cap, pf)) +
                                  " (--max-len auto)");
     std::fprintf(stderr, "max_len: %u (--max-len)\n", len);
   }
   if (devs == 2)
     std::fprintf(stderr, "split: %s%u (layers [0, %u) on device 0, [%u, %u) and the head on device 1)\n",
                  a.pipe.split_auto ? "auto -> " : "", p.split, p.split, p.split, d.layers);
-  std::fprintf(stderr, "%s\n", rk::describe(rk::plan(d, p, len, int8), p, len, dev, a.reserve).c_str());
+  std::fprintf(stderr, "%s\n", rk::describe(rk::plan(d, p, len, int8, false, at, pf), p, len, dev, a.reserve).c_str());
   return {p, len};
 }
 
@@ -248,12 +273,35 @@ int run_decode(const DecodeArgs& a) {
                devs == 2 ? (std::string(", split ") + std::to_string(eng.split()) + ", hand-off " +
                             runtime::pp_handoff_name(eng.handoff())).c_str() : "",
                eng.launches(), runtime::kolibri::kol_attn_name(eng.attention()), eng.max_len());
+  // Spec 20d: the prefill setup (every device's scratch, Context, the prefill hand-off, the binaries' check)
+  // happens here, outside the timed window, which is then the whole prefill() call: first launch to the
+  // first generated id in cur_token (argmax_stage2 is its last launch).
+  const uint32_t chunk = a.pp_chunk ? a.pp_chunk : runtime::kolibri::kPfC;
+  size_t pp_launches0 = 0;
+  if (a.prefills()) {
+    eng.prepare_prefill();
+    pp_launches0 = eng.prefill_launches();
+    std::fprintf(stderr, "prefill: l0 backend, chunk %u, attention %s (B70_KOLIBRI_ATTN), %zu launches per chunk "
+                 "(%s) + %zu for the head%s\n", chunk, runtime::kolibri::kol_attn_name(eng.attention()),
+                 runtime::kolibri::prefill_chunk_launches(eng.model().desc, eng.model().placement),
+                 devs == 2 ? "both cards" : "one card", runtime::kolibri::kPrefillHeadLaunches,
+                 devs == 2 ? "; the chunk crosses by copy, sequentially (spec 16c's overlap is a later lever)" : "");
+  }
   std::fprintf(stderr, "%s\n", eng.memory_line().c_str());
   const auto t0 = std::chrono::steady_clock::now();
-  eng.ingest(ids);
+  if (a.prefills())
+    eng.prefill(ids, chunk);
+  else
+    eng.ingest(ids);
   const double ingest_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token, one decode replay per id), pos %u\n", ids.size(),
-               ingest_ms, ingest_ms / double(ids.size()), eng.pos());
+  if (a.prefills())
+    std::fprintf(stderr, "%s: %zu ids in %.1f ms (%.2f t/s) - device-side, loader excluded, first prefill launch to "
+                 "the first generated id; chunk %u, %zu L0 launches, pos %u\n", a.pp ? "pp" : "prefill", ids.size(),
+                 ingest_ms, ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0, chunk,
+                 eng.prefill_launches() - pp_launches0, eng.pos());
+  else
+    std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token, one decode replay per id), pos %u\n", ids.size(),
+                 ingest_ms, ingest_ms / double(ids.size()), eng.pos());
   const uint32_t n = a.bench ? a.tg : a.n;
   eng.generate(n, [&](uint32_t id) {
     if (a.bench) return;
@@ -277,6 +325,13 @@ int run_decode(const DecodeArgs& a) {
               devs == 2 ? (std::string(" pipeline2-") + runtime::pp_handoff_name(eng.handoff()) + "-s" +
                            std::to_string(eng.split())).c_str() : "",
               a.depth, a.tg, eng.last_tok_per_s(), ms_per_token);
+  // Spec 20d: the pp row, a second line as the K2 / Qwen paths print it (depth, chunk, ms, t/s).
+  if (a.pp)
+    std::printf("| b70-decode %s kolibri%s%s%s l0 pp | %u | %u | %.1f | %.2f |\n", sha,
+                a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "",
+                eng.model().desc.attn == model::KolAttnForm::Bf16 ? " bf16-attn" : "",
+                devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "", a.depth,
+                chunk, ingest_ms, ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
   return 0;
 }
 
