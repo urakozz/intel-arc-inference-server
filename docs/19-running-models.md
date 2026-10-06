@@ -26,14 +26,14 @@ has to run is [superpowers/plans/box-validation-queue.md](superpowers/plans/box-
 |---|---|---|---|---|---|
 | checkpoint | published | published | published (spec 15 §13) | published | **not made** (spec 20b) |
 | `b70-serve` | yes | yes | yes | yes (spec 18d, box gates pending) | **refused** (spec 20e) |
-| `b70-decode` | yes | yes | yes | yes | decode only, **two cards** (`--pp 2`, the default) |
+| `b70-decode` | yes | yes | yes | yes | decode and prefill (spec 20d), **two cards** (`--pp 2`, the default) |
 | ran on a B70 | yes (see above) | no | no | no | no |
 | MTP head (`--mtp`) | yes | yes | yes (MoE head) | none | none |
 | `--spec lookup` | yes | yes (needs the head) | yes (needs the head) | no | no |
 | `--kv-cache int8` | yes, gates pending | yes, gates pending | not built | yes, gates pending (spec 18e) | refused (bf16 only) |
-| prefill backends | `l0-int8` (default), `l0`, `sycl-tla` | `l0-int8`, `l0` | `l0-int8`, `l0` (`sycl-tla` refused) | `l0` only | none yet (spec 20d) |
+| prefill backends | `l0-int8` (default), `l0`, `sycl-tla` | `l0-int8`, `l0` | `l0-int8`, `l0` (`sycl-tla` refused) | `l0` only | `l0` only (spec 20d) |
 | KV per position (bf16) | 64 KiB | 72 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) |
-| `--max-len auto`, int8 head (derived) | ~201k; ~170k with `--mtp` | ~140k; ~114k with `--mtp` | 262144, with or without `--mtp` | ~46k served (the prefill planned); `b70-decode` ~50k decode-only | 262144 on two cards (split 25) |
+| `--max-len auto`, int8 head (derived) | ~201k; ~170k with `--mtp` | ~140k; ~114k with `--mtp` | 262144, with or without `--mtp` | ~46k served (the prefill planned); `b70-decode` ~50k decode-only | 262144 on two cards (split 25), the prefill planned or not |
 | with `--kv-cache int8` (derived) | 262144, with or without `--mtp` | 262144; ~226k with `--mtp` | - | ~90k served; `b70-decode` ~98k decode-only | - |
 
 The `--max-len auto` lengths are the planner's at the default 1.5 GB reserve on the
@@ -314,13 +314,17 @@ layers, sandwich norms, a 128000-id vocabulary, trained context 262144. **Our in
 `urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ` does not exist yet** (spec 20b, decision 1 open): every
 command below needs it, except on a synthetic checkpoint (`tools/quantize/kolibri/make_synth.py`).
 
-**Status: never run on a B70** (queue row 24). Decode only (spec 20c), through `b70-decode`, on
-**two cards**: at int4 the model holds ~42.5 GB of weights, so `--pp 2` is Kolibri's default and
-`--pp 1` is refused unless the model fits one card (a synthetic checkpoint, or `--layers N`:
-development mode, the first N layers only - e.g. 30, ~26 GB). Prefill is spec 20d; serving
-(tokenizer, ChatML template, reasoning, hermes JSON tool calls) is 20e - `b70-serve` refuses it.
-Expected (derived): 756 launches per token (856 with `B70_KOLIBRI_ATTN=eager`), ~2.39 GB read per
-token with int4 attention and the int8 head - a roofline near 250 t/s on two cards.
+**Status: never run on a B70** (queue rows 24 and 26). Decode (spec 20c) and prefill (spec 20d), through
+`b70-decode`, on **two cards**: at int4 the model holds ~42.5 GB of weights, so `--pp 2` is Kolibri's
+default and `--pp 1` is refused unless the model fits one card (a synthetic checkpoint, or `--layers N`:
+development mode, the first N layers only - e.g. 30, ~26 GB). Serving (tokenizer, ChatML template,
+reasoning, hermes JSON tool calls) is 20e - `b70-serve` refuses it. Expected (derived): 756 launches per
+token (856 with `B70_KOLIBRI_ATTN=eager`), ~2.39 GB read per token with int4 attention and the int8 head -
+a roofline near 250 t/s on two cards. Prefill (`--prefill`, `--prefill-length N`) runs chunks of up to
+2048 positions on the `l0` backend only: 2252 launches per chunk (45 a layer: the attention linears as
+bf16 slabs + `pf_gemm`, the windowed flash attention over the 4096-slot ring, the 384 experts sorted and
+dequantised to bf16 in 512 MiB weight batches for the grouped GEMMs) + 5 for the head, ~0.9 GB of prefill
+scratch a card; on two cards each chunk crosses once, by copy, and the cards take turns (no overlap yet).
 
 ```sh
 K=urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ          # spec 20b - not made yet
@@ -331,11 +335,18 @@ K=urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ          # spec 20b - not made yet
 ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256 --lm-head int8 --max-len 40960
 ./build/src/cli/b70-decode $K --pp 1 --layers 30 --ids k.ids --n 8                # one card, 30 layers
 B70_KOLIBRI_ATTN=eager ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256 --lm-head int8
+./build/src/cli/b70-decode $K --ids k.ids --n 32 --prefill                        # spec 20d: prefilled
+./build/src/cli/b70-decode $K --bench --prefill-length 32768 --tg 16 --lm-head int8 --max-len 40960   # the pp row
+./build/src/cli/b70-decode $K --ids k.ids --n 32 --prefill --prefill-chunk 1000
 ```
 
-**Limits.** No prefill (`--prefill*` refused, spec 20d), no `--mtp` (no head), `--kv-cache int8`
-refused (20 KiB a position: bf16 only), no `--profile`, `--device` refused with `--pp 2` (GPUs 0 and
-1, `ZE_AFFINITY_MASK` picks them), context capped at the trained 262144 (decision 3). The bench prompt
-ids are placeholders until the box's reference run tokenizes them (row 24).
+**Limits.** Prefill on `--prefill-backend l0` only (`l0-int8` refused: its h8 linears rotate in
+1024-k Hadamard blocks and the hidden is 2560; `sycl-tla` refused: no Kolibri walk), `--prefill-chunk`
+at most 2048; no `--mtp` (no head), `--kv-cache int8` refused (20 KiB a position: bf16 only), no
+`--profile`, `--device` refused with `--pp 2` (GPUs 0 and 1, `ZE_AFFINITY_MASK` picks them), context
+capped at the trained 262144 (decision 3). The bench prompt ids are placeholders until the box's
+reference run tokenizes them (row 24).
 
-**Relevant variables:** `B70_KOLIBRI_ATTN` (`flash` | `eager`), `B70_KOL_TIE_TOL` (the golden test).
+**Relevant variables:** `B70_KOLIBRI_ATTN` (`flash` | `eager`, decode and prefill alike),
+`B70_PREFILL_REPLAY` (record each prefill chunk's lists once and replay them), `B70_KOL_TIE_TOL` (the
+golden test).
