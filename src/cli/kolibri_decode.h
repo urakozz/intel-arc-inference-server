@@ -47,14 +47,16 @@
 
 namespace cli::kolibri {
 
-// The bench prompt, cycled to --depth: tests/golden/prompts/kolibri_bench.ids. PLACEHOLDER legal ids
-// (every id < 127900, no special token) until tools/box_validate/kolibri_oracle.sh synth tokenizes
-// de_prose with Kolibri's tokenizer and prints its first 42 ids (box queue row 24): a timing run
-// needs fixed, legal ids, not meaningful ones - decode reads every weight per token regardless.
+// The bench prompt, cycled to --depth: tests/golden/prompts/kolibri_bench.ids - the first 42 ids of
+// tests/golden/prompts/de_prose.txt through Kolibri-1's own tokenizer (tools/oracle/tokenize.py on
+// Aleph-Alpha/Kolibri-1-BF16 at 8c8b3489's tokenizer.json, which 20b's export copies unchanged; spec 20e
+// replaced 20c's placeholder ids). "Als im Frühjahr 1871 die ersten Vermessungstrupps in das Tal von
+// Rabenhausen kamen, glaubte kaum jemand im Ort, dass hier je ein Zug halten würde. Die Gemeinde lebte vom
+// Holz". tools/box_validate/kolibri_oracle.sh synth prints the same 42 and diffs them against the file.
 inline constexpr uint32_t kKolibriBenchPrompt[] = {
-    760,   72103, 506,   37119, 557,   11012, 3213,  310,   6512,  279,  61789, 272,  1072, 2272,
-    279,   69716, 2271,  13,    469,   68042, 29123, 7247,  383,   279,  1387,  12615, 1345, 279,
-    49813, 78911, 1141,  20459, 13,    3113,  7840,  279,   2981,  1000, 381,   16850, 1495, 13};
+    27498, 2625,  19919, 32,    49,    56,    55,    49,    346,   7524, 744,   38897, 573,  122340,
+    622,   518,   23578, 493,   18022, 266,   22233, 20353, 44,    64304, 14358, 11536, 2625, 6565,
+    44,    1469,  2618,  3408,  922,   5958,  7737,  4325,  46,    1047,  8190,  65429, 4561, 7462};
 inline constexpr size_t kKolibriBenchPromptLen = sizeof(kKolibriBenchPrompt) / sizeof(kKolibriBenchPrompt[0]);
 
 // The B70's device memory as Level Zero reports it (32.530 GB, l0/context.cc): the --pp 1 fit check
