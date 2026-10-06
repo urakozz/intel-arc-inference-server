@@ -26,7 +26,7 @@ waits for that run.**
 
 ## Review Focus
 
-1. **The embedding for MTP drafts on device 1** (spec 16 decision): implement the operator's choice (replicate, 2.54 GB, or gather rows over P2P); the memory report shows it.
+1. **The embedding for MTP drafts on device 1** (spec 16 decision): the operator chose **replicate** (2.54 GB on device 1, 2026-10-07; built); the memory report shows it.
 2. **Spec 7 under PP:** `snapshot_test` and `prefix_gpu_*` with `--pp 2`; a host-store entry saved under `--pp 2` refused when restored under `--pp 1` (and vice versa), with a clear message.
 3. **Spec 8 M2 under PP:** verify rows bitwise equal to M = 1 decode across the split; commit moves `pos` on both devices.
 4. **262144:** the RoPE table, attention variants (spec 10's v2 needs no max_len binary; v1 does) and the memory per device at max_len 262144; passkey at 5 / 50 / 95 % of ~250k.
