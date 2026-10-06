@@ -13,7 +13,12 @@ Checked against `origin/main` on 2026-09-22 (36 commits ahead of the box's
 - **`calib_dataset.py`** - resets `os_cnt, have_bos, have_eos` per sample instead
   of once before the loop, in both `get_opencode_instruct_dataset` and
   `_get_dataset_impl`. Without it the BOS/EOS bookkeeping accumulates across
-  calibration samples.
+  calibration samples: every sample that starts with BOS or ends with EOS adds one
+  to a counter that is never reset, so every later concatenated row reserves more
+  room for markers it does not carry and is cut short. Dormant when the samples
+  carry no BOS/EOS (Qwen on pile-10k); active on chat-formatted data ending in
+  `<|im_end|>`, Qwen's EOS (e.g. opencode-instruct). Kolibri's script passes
+  pre-tokenised rows (`AutoRound(dataset=rows)`) and never reaches this code.
 - **`wrapper.py`** - gives `WrapperLinear` `in_features` / `out_features`
   properties forwarding to the wrapped layer, which the pipeline queries and
   upstream does not expose.
@@ -22,24 +27,29 @@ Apply with `git apply tools/quantize/auto-round-local.patch` in an auto-round
 checkout, or keep them on a local branch and rebase. Re-checked against 0.17.0 @ `6afaecdb`
 (2026-10-06): still not upstream (the `os_cnt` reset is still outside the loop, `WrapperLinear`
 still has no `in_features`), and the patch still applies cleanly (`git apply --check`, offsets
-only). No script in this directory applies it; the published checkpoints below say which build
-made them.
+only). **Both Qwen3.8 scripts apply it since 2026-10-06** (`tools/quantize/ar_pin.sh`,
+`AR_PATCH=1`, the default; `AR_PATCH=0` builds the commit as is, into its own package directory);
+`quantize_kolibri1.sh` does not (see above). The published checkpoints below say which build made
+them.
 
 ## AutoRound version (all scripts)
 
 | script | auto-round | why |
 |---|---|---|
-| `quantize_qwen38_tuned.sh` | **0.17.0, intel/auto-round main `6afaecdbe4092dc803f3e91026fe81a65b64b372`** (`AR_COMMIT`) | the calibrated path packs `lm_head` on 0.17.0 (checked below) |
-| `quantize_qwen38_rtn.sh` | **0.14.2** (PyPI wheel), still pinned | 0.17.0 still drops the `lm_head` packing on the RTN path (below) |
+| `quantize_qwen38_tuned.sh` | **0.17.0, intel/auto-round main `6afaecdbe4092dc803f3e91026fe81a65b64b372`** (`AR_COMMIT`) + `auto-round-local.patch` | the calibrated path packs `lm_head` on 0.17.0 (checked below) |
+| `quantize_qwen38_rtn.sh` | **0.17.0 @ `6afaecdb` + `auto-round-local.patch`, with `--disable_low_cpu_mem_usage`** (since 2026-10-06; 0.14.2 before) | that flag takes the path that packs `lm_head`; the default low-CPU-memory RTN path still drops it on 0.17.0 (below). Holds the whole bf16 model in RAM: refuses below `RTN_MIN_RAM_GB` (64) available |
 | `quantize_kolibri1.sh` | 0.17.0 @ `6afaecdb` | the operator's ruling of 2026-10-05; Kolibri keeps lm_head bf16, so the bug is not exercised |
 | `quantize_qwen38_mxfp4.sh` | none - llm-compressor `model_free_ptq` | only borrows the auto-round venv's python |
 
-**Install.** The 0.17.0 scripts install `AR_SRC` - default the pip URL
-`git+https://github.com/intel/auto-round@6afaecdb...`, or a clean checkout at that commit (refused
-otherwise) - with `--no-deps --target` into `~/.cache/auto-round-6afaecdb-pkg` beside the venv, and
-run with `PYTHONPATH` pointing at it, so the venv itself is not modified (`git` is needed: setup.py
-runs `git describe`; the wheel says `0.17.0.dev209+g6afaecdb`, `auto_round.__version__` says
-`0.17.0`). They assert `auto_round.__version__ >= 0.17.0`, python >= 3.11 (0.17's floor; 0.14.2's
+**Install (Qwen3.8 scripts, `tools/quantize/ar_pin.sh`).** Clones `AR_REPO` (default
+`https://github.com/intel/auto-round`, or any local clone that contains the commit) into
+`~/.cache/auto-round-src`, checks out `AR_COMMIT`, applies `auto-round-local.patch` (`AR_PATCH=1`,
+the default), and installs it with `--no-deps --target` into
+`~/.cache/auto-round-6afaecdb-p<patch sha256[:8]>-pkg` (or `-plain-pkg` for `AR_PATCH=0`) beside
+the venv, once per (commit, patch); the scripts run with `PYTHONPATH` pointing at it, so the venv
+itself is not modified (`git` is needed: setup.py runs `git describe`; `auto_round.__version__`
+says `0.17.0`). The check after the install also asserts the patch state
+(`WrapperLinear.in_features` is a property iff `AR_PATCH=1`). They assert `auto_round.__version__ >= 0.17.0`, python >= 3.11 (0.17's floor; 0.14.2's
 was 3.10) and that `datasets`, `py-cpuinfo`, `pydantic`, `accelerate` are importable (the same
 requirement list as 0.14.2). Every Qwen3.8 export is refused unless
 `check_gptq_export.py` passes, and gets a provenance section appended to its `README.md`
@@ -79,7 +89,15 @@ layers, hidden 128, vocab 512, **untied** lm_head) quantised with the scripts' e
 | tuned (4 iters, 8 x 64 local samples), LLaMA | packed, VERIFIED | packed, VERIFIED; **byte-identical to 0.14.2** (51/51) |
 | tuned, Qwen3 | - | packed, VERIFIED |
 
-The two scripts as committed also ran end to end on the tiny Qwen3 (`MODEL`, `DEVICE=cpu`, fresh
+**With the patch (2026-10-06).** Both scripts on `ar_pin.sh`, the tiny Qwen3, the same container,
+`AR_REPO` = the local checkout: tuned (patched) VERIFIED; RTN (patched, 0.17.0,
+`--disable_low_cpu_mem_usage`) VERIFIED and **byte-identical to the 0.14.2 RTN export (55/55
+tensors)**; the RTN RAM guard refused at `RTN_MIN_RAM_GB=9999`; tuned with `AR_PATCH=0` VERIFIED
+from its own package directory; a rerun reused the patched package. Patched and unpatched tuned
+exports are byte-identical here, as expected: the local calibration samples carry no BOS/EOS, so
+the counter fix has nothing to change, and the `WrapperLinear` properties do not alter tuning.
+
+The two scripts as committed before the patch step also ran end to end on the tiny Qwen3 (`MODEL`, `DEVICE=cpu`, fresh
 `HOME`, `EXTRA` for a 4-iteration tune on local samples): tuned installed 0.17.0 from a clean
 checkout at `AR_COMMIT` and VERIFIED, rtn installed 0.14.2 from PyPI and VERIFIED, both wrote the
 provenance section; the tuned script forced onto RTN (`EXTRA="--iters 0 --disable_opt_rtn"`)
@@ -93,10 +111,10 @@ immediately; it quantises `lm_head` as a "remaining layer" (`compressors/orchest
 `Quantizing remaining layer ...`) **without the `immediate_pack` call** the calibrated loop makes,
 so `ShardWriter.finalize` writes the plain `lm_head.weight` from the state dict. The calibrated
 path turns immediate packing off when a quantised layer lives outside the blocks and packs every
-layer at export. Hence: the tuned script moved to 0.17.0, the RTN script keeps 0.14.2.
-`--disable_low_cpu_mem_usage` is a working 0.17.0 RTN recipe on the tiny models, but it holds the
-whole model in RAM (~54 GB bf16 for the 27B) and has not been run on it - adopt it only after a
-box run passes the checker. Not exercised on CPU: XPU; the 27B's GDN layers and MTP head (the
+layer at export. Hence: the tuned script moved to 0.17.0, and the RTN script moved with `--disable_low_cpu_mem_usage`
+(operator, 2026-10-06), which packs at export like the calibrated path. It holds the whole model in
+RAM (~54 GB bf16 for the 27B; the box has ~128 GB) and has not run on the 27B yet - the checker
+refuses the export if `lm_head` comes out unpacked. Not exercised on CPU: XPU; the 27B's GDN layers and MTP head (the
 scripts' checker guards the real run). On a CPU without bf16, both versions write unpacked tensors
 as F32 (the checker WARNs with `--source`); on the box's XPU they stay bf16.
 
@@ -177,10 +195,9 @@ tools/quantize_kolibri1.sh --dry-run          # the exact commands, nothing run
 **AutoRound for Kolibri is NOT the Qwen3.8 pin.** The operator's ruling (2026-10-05): intel/auto-round
 main at `6afaecdbe4092dc803f3e91026fe81a65b64b372` (0.17.0), the `AR_COMMIT` in the script, installed
 into `VENVPY` on first use from `AR_SRC` (a clean checkout at that commit - verified - or the pip
-git URL); `kolibri_recipe.json` and the card record it. Of the Qwen3.8 scripts,
-`quantize_qwen38_tuned.sh` uses the same commit since 2026-10-06 and `quantize_qwen38_rtn.sh`
-keeps **v0.14.2** pinned, because 0.17.0's RTN path still drops the int4 lm_head (see "AutoRound
-version" above). Checked for Kolibri on a tiny random Kolibri (below): the 0.17.0 API names
+git URL); `kolibri_recipe.json` and the card record it. Both Qwen3.8 scripts use the same commit
+since 2026-10-06, with `auto-round-local.patch` applied (see "AutoRound version" above); Kolibri's
+does not need the patch's dataset fix (it passes pre-tokenised rows). Checked for Kolibri on a tiny random Kolibri (below): the 0.17.0 API names
 (`scheme`, `group_size`, `sym` - the CLI has only `--asym` -, `iters`, `nsamples`, `seqlen`,
 `low_gpu_mem_usage`, `device_map`/`--device`, `ignore_layers`/`--fp_layers` substring match,
 `model_dtype`, `disable_opt_rtn`, `disable_model_free`); its fused-MoE unfusing only touches 3-D

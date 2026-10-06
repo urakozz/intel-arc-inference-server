@@ -11,7 +11,9 @@
 #     calibrated one - packs lm_head and its export is byte-identical to
 #     0.14.2's on tiny random LLaMA / Qwen3 models; the RTN path
 #     (--iters 0 --disable_opt_rtn) still drops it on 0.17.0, so
-#     quantize_qwen38_rtn.sh keeps the v0.14.2 pin.
+#     quantize_qwen38_rtn.sh works around it (--disable_low_cpu_mem_usage).
+#   - tools/quantize/auto-round-local.patch is applied on top (AR_PATCH=1, the
+#     default; tools/quantize/ar_pin.sh): neither fix is upstream in 0.17.0.
 #   - W4A16, group_size 64, symmetric  -> matches the b70 kernels' g64 tiles
 #     and the dequant contract w = (q-8)*scale, qzeros 0x77777777.
 #   - --quant_lm_head + format auto_round:auto_gptq -> int4 lm_head, the
@@ -25,7 +27,7 @@
 #
 # Usage (on the box, from the repo):  bash tools/quantize_qwen38_tuned.sh
 #   overridables: MODEL, OUT, DEVICE (default 1 = second B70), VENVPY,
-#                 AR_SRC (a clean auto-round checkout at AR_COMMIT, or a pip URL),
+#                 AR_REPO (git URL or local clone containing AR_COMMIT), AR_PATCH (1 / 0),
 #                 EXTRA (more auto_round flags, e.g. "--nsamples 512"; recorded in the README)
 set -euo pipefail
 
@@ -45,52 +47,11 @@ CHECK="$HERE/quantize/check_gptq_export.py"
 MODEL="${MODEL:-Qwen/Qwen3.8-27B}"
 DEVICE="${DEVICE:-1}"
 VENVPY="${VENVPY:-$HOME/auto-round/.venv/bin/python}"   # torch-2.13+xpu venv; NOT modified
-AR_VERSION=0.17.0
-AR_COMMIT=6afaecdbe4092dc803f3e91026fe81a65b64b372      # intel/auto-round main, 2026-09-30, version 0.17.0
-AR_SRC="${AR_SRC:-git+https://github.com/intel/auto-round@$AR_COMMIT}"
-PKG="$HOME/.cache/auto-round-${AR_COMMIT:0:8}-pkg"      # pinned auto-round, installed once, beside the venv
 OUT="${OUT:-$HOME/models/qwen38-27b-w4g64-tuned}"
 MODE_FLAGS=""                               # tuned sign-SGD (200 iters, 128 x 2048 pile-10k): hours, best accuracy
 
-# --- pin auto-round at AR_COMMIT beside the venv (one-time) -----------------
-# --no-deps --target: torch/transformers/accelerate/datasets stay the venv's.
-# Building from git needs `git` (setup.py runs `git describe`).
-if [ "$(cat "$PKG/.ar_commit" 2>/dev/null || true)" != "$AR_COMMIT" ]; then
-  if [ -d "$AR_SRC" ]; then
-    head=$(git -C "$AR_SRC" rev-parse HEAD)
-    [ "$head" = "$AR_COMMIT" ] || { echo "AR_SRC $AR_SRC is at $head, the recipe pins $AR_COMMIT" >&2; exit 2; }
-    [ -z "$(git -C "$AR_SRC" status --porcelain --untracked-files=no)" ] ||
-      { echo "AR_SRC $AR_SRC has local changes; the recipe needs $AR_COMMIT as committed" >&2; exit 2; }
-  fi
-  UV=""
-  for c in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" uv; do
-    command -v "$c" >/dev/null 2>&1 && UV="$c" && break
-  done
-  mkdir -p "$PKG"
-  if [ -n "$UV" ]; then
-    "$UV" pip install -q --python "$VENVPY" --no-deps --target "$PKG" "$AR_SRC"
-  else
-    "$VENVPY" -m pip install -q --no-deps --target "$PKG" "$AR_SRC"
-  fi
-  echo "$AR_COMMIT" > "$PKG/.ar_commit"
-fi
-# cd /tmp before any python: `python -` puts the cwd ahead of PYTHONPATH, so an
-# auto-round checkout as cwd would shadow the pinned package.
-cd /tmp
-PYTHONPATH="$PKG" "$VENVPY" - "$AR_VERSION" "$PKG" <<'PY'
-import importlib.util, sys
-assert sys.version_info >= (3, 11), f"auto-round 0.17 needs python >= 3.11, the venv has {sys.version}"
-missing = [m for m in ("torch", "transformers", "accelerate", "datasets", "cpuinfo", "pydantic", "numpy")
-           if importlib.util.find_spec(m) is None]
-if missing:
-    sys.exit(f"the venv lacks {missing}: pip install datasets py-cpuinfo pydantic accelerate into it")
-import auto_round
-v = tuple(int(x) for x in auto_round.__version__.split(".")[:3])
-want = tuple(int(x) for x in sys.argv[1].split("."))
-assert v >= want, f"auto-round {auto_round.__version__} < {sys.argv[1]}"
-assert auto_round.__file__.startswith(sys.argv[2]), f"auto_round imported from {auto_round.__file__}, not {sys.argv[2]}"
-print(f"auto-round {auto_round.__version__} from {auto_round.__file__}")
-PY
+# --- auto-round 0.17.0 @ AR_COMMIT + the local patch, beside the venv (one-time); cd /tmp
+. "$HERE/quantize/ar_pin.sh"
 
 # --- quantize (from /tmp, so no source checkout is on sys.path) -------------
 PYTHONPATH="$PKG" "$VENVPY" -m auto_round "$MODEL" \
@@ -109,7 +70,7 @@ cat >> "$D/README.md" <<EOF
 
 ## Quantisation provenance
 
-- tool: auto-round $AR_VERSION, intel/auto-round commit \`$AR_COMMIT\` (\`$AR_SRC\`)
+- tool: $AR_DESC
 - recipe: \`tools/quantize_qwen38_tuned.sh\` - \`--scheme W4A16 --group_size 64 --quant_lm_head
   --format auto_round:auto_gptq --low_gpu_mem_usage ${EXTRA:-}\`, defaults otherwise (200 iters,
   128 x 2048 samples of NeelNanda/pile-10k)

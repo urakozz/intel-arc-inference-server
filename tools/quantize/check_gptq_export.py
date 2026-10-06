@@ -17,8 +17,8 @@ matter (every .qzeros word, every .scales f16, every .g_idx):
            (GPTQ v1 zeros, symmetric zero point 8), g_idx absent or the identity
            k / g.
   lm_head  --lm-head quant: lm_head.{qweight,qzeros,scales} shipped and declared
-           (extra_config["lm_head"] bits 4) - the 0.14.2 pin existed because a
-           later auto-round main dropped exactly this packing; --lm-head keep:
+           (extra_config["lm_head"] bits 4) - auto-round after 0.14.2 drops
+           exactly this packing on its default RTN path; --lm-head keep:
            lm_head.weight shipped, no lm_head.qweight.
   coverage --source DIR (the unquantised model): every 2-D `.weight` of the
            source except the embeddings is either packed in the export or

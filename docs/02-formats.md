@@ -67,9 +67,9 @@ round-to-nearest. Keep using it, or consume checkpoints others produced with it.
 What this project drops is **ARK** (`auto_round_kernel`), its runtime `woqgemm`
 library. We write that ourselves.
 
-Which AutoRound build each quantise script pins (0.17.0 @ `6afaecdb` for the
-calibrated runs, 0.14.2 still for the Qwen3.8 RTN script with its int4
-`lm_head`), why, and which version made each published checkpoint:
+Which AutoRound build each quantise script pins (0.17.0 @ `6afaecdb` for every
+script since 2026-10-06, with `auto-round-local.patch` on the Qwen3.8 ones and
+`--disable_low_cpu_mem_usage` on the RTN one for its int4 `lm_head`), why, and which version made each published checkpoint:
 `tools/quantize/README.md`, "AutoRound version". The `auto_round:auto_gptq`
 config keys and packing above are the same in 0.14.2 and 0.17.0.
 
