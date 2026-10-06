@@ -163,6 +163,17 @@ PersistentSizes PersistentDims::sizes(uint32_t max_len, const model::ModelDesc& 
   return s;
 }
 
+PersistentSizes PersistentDims::stage_sizes(uint32_t max_len, const model::ModelDesc& desc,
+                                            KvCache kv, uint32_t gdn_layers, uint32_t fa_layers) {
+  PersistentSizes s{};
+  s.control = sizeof(Control);
+  s.gdn_state = size_t{gdn_layers} * desc.gdn_v_heads * Q::kGdnHeadDim * Q::kGdnHeadDim * kFp32;
+  s.conv_ring = size_t{gdn_layers} * kConvRing * desc.gdn_conv_dim() * kBf16;
+  s.kv_k = kv_layout(max_len, desc, fa_layers, kv).bytes();
+  s.kv_v = s.kv_k;
+  return s;
+}
+
 DecodeAttn decode_attn() {
   const char* v = std::getenv("B70_DECODE_ATTN");
   if (v == nullptr || *v == '\0') return kDefaultDecodeAttn;

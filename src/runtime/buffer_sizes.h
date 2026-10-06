@@ -95,6 +95,11 @@ struct PersistentDims {
   // kv_k / kv_v are kv_layout(max_len, desc, fa_layers, kv).bytes() each (spec 12b).
   static PersistentSizes sizes(uint32_t max_len, const model::ModelDesc& desc,
                                KvCache kv = default_kv_cache());
+  // Spec 16b (pipeline parallel): one stage's persistent state - the same formulas over
+  // `gdn_layers` GDN and `fa_layers` FA layers instead of the model's. At the descriptor's
+  // own counts it equals sizes() (tests/runtime/pipeline_plan_test.cc pins that).
+  static PersistentSizes stage_sizes(uint32_t max_len, const model::ModelDesc& desc, KvCache kv,
+                                     uint32_t gdn_layers, uint32_t fa_layers);
 };
 
 // --- DecodeScratch -------------------------------------------------------------------
