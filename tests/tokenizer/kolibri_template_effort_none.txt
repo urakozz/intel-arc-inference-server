@@ -1,0 +1,11 @@
+<|im_start|>system
+# Reasoning effort
+
+Reasoning is disabled. Proceed straight to answering according to the user's instructions.<|im_end|>
+<|im_start|>user
+How many r are in strawberry?<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+

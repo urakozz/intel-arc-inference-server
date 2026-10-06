@@ -1,0 +1,7 @@
+<|im_start|>system
+# Reasoning effort
+
+Reasoning effort is set to medium. Think through the task methodically in the user's language, check key assumptions, and provide a well-supported answer.<|im_end|>
+<|im_start|>user
+How many r are in strawberry?<|im_end|>
+<|im_start|>assistant

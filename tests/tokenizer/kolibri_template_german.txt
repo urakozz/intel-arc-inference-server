@@ -1,0 +1,35 @@
+<|im_start|>system
+Du bist ein sorgfältiger Assistent für Softwareentwicklung.
+
+# Reasoning effort
+
+Reasoning effort is set to high. Think carefully through the task in the user's language, validate key assumptions, consider plausible alternatives, and prioritize correctness and clarity.
+
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{"function": {"description": "Durchsucht Dateien nach einem regulären Ausdruck (Groß-/Kleinschreibung beachten).", "name": "grep", "parameters": {"properties": {"include": {"type": ["string", "null"]}, "path": {"type": "string"}, "pattern": {"description": "Der Ausdruck, z. B. „Straße“", "type": "string"}}, "required": ["pattern"], "type": "object"}}, "type": "function"}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": <function-name>, "arguments": <args-json-object>}
+</tool_call><|im_end|>
+<|im_start|>user
+Suche „Größe“ und „Straße“ im Code. Was macht die Donaudampfschifffahrtsgesellschaftskapitän?<|im_end|>
+<|im_start|>assistant
+<think>
+Ich suche zuerst nach „Größe“.
+</think>
+
+<tool_call>
+{"name": "grep", "arguments": {"path": "/work/ü", "pattern": "Größe|Straße"}}
+</tool_call><|im_end|>
+<|im_start|>user
+<tool_response>
+src/maß.cc:3: // Größe der Straße in Fuß
+</tool_response><|im_end|>
+<|im_start|>assistant

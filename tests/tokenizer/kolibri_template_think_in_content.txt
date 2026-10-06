@@ -1,0 +1,13 @@
+<|im_start|>system
+# Reasoning effort
+
+Reasoning effort is set to high. Think carefully through the task in the user's language, validate key assumptions, consider plausible alternatives, and prioritize correctness and clarity.<|im_end|>
+<|im_start|>user
+Pick a number.<|im_end|>
+<|im_start|>assistant
+<think>
+Seven is fine.
+</think>
+
+Seven.<|im_end|>
+<|im_start|>assistant

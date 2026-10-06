@@ -2832,3 +2832,29 @@ b70_cli_reject(cli_reject_kolibri_prefill_sycl ${CMAKE_CURRENT_SOURCE_DIR}/model
 b70_cli_reject(cli_reject_kolibri_prefill_chunk ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
   --prefill --prefill-chunk 4096 EXPECT "exceeds Kolibri-1's prefill chunk 2048")
 # ==== Spec 20d: Kolibri-1 prefill ==== (end) ====
+# ==== Spec 20e: Kolibri-1 served (label kolibri) ==== (begin) ====
+if(B70_TOKENIZER_ENABLED)
+  # Kolibri-1's chat template - Aleph-Alpha/Kolibri-1-BF16 at 8c8b3489's tokenizer_config.json "chat_template"
+  # (the release ships no chat_template.jinja; chat::Template reads the string), vendored with its
+  # generation_config at tests/tokenizer/kolibri/ (Apache-2.0) - on 16 message lists (every reasoning_effort,
+  # enable_thinking off, tools with and without a system turn, call history, parallel calls and their tool
+  # results, reasoning before and after the last query, the `reasoning` field, <think> inside content, German)
+  # against transformers' apply_chat_template (tools/tokenizer/dump_kolibri.py).
+  add_test(NAME template_kolibri_test COMMAND template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${CMAKE_SOURCE_DIR}/tests/tokenizer/kolibri kolibri_template_cases.json kolibri)
+  # ... and its 128k tokenizer against HF's (the id count and the two ids the head has but the tokenizer does
+  # not define, every tag, a German-heavy text set, corpus.txt's digests, three chat renders' ids).
+  # tokenizer.json (9.5 MB) is not vendored: the BF16 release's in the HF cache (20b's export copies it
+  # unchanged), or -DB70_KOLIBRI_TOKENIZER_JSON / the environment variable of the same name. Absent:
+  # disabled on the Mac (host_only), SKIP (77) elsewhere.
+  set(B70_KOLIBRI_TOKENIZER_JSON
+    "${_b70_hf_home}/hub/models--Aleph-Alpha--Kolibri-1-BF16/snapshots/8c8b34899c7bc77b349f7916b07158e3ba29456a/tokenizer.json"
+    CACHE FILEPATH "Kolibri-1's tokenizer.json for kolibri_tokenizer_test (-D or the environment variable)")
+  add_executable(kolibri_tokenizer_test tokenizer/kolibri_tokenizer_test.cc)
+  target_include_directories(kolibri_tokenizer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(kolibri_tokenizer_test PRIVATE b70_tokenizer)
+  add_test(NAME kolibri_tokenizer_test COMMAND kolibri_tokenizer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${CMAKE_SOURCE_DIR}/tests/tokenizer/kolibri ${B70_KOLIBRI_TOKENIZER_JSON})
+  set_tests_properties(template_kolibri_test kolibri_tokenizer_test PROPERTIES LABELS kolibri SKIP_RETURN_CODE 77)
+endif()
+# ==== Spec 20e: Kolibri-1 served ==== (end) ====

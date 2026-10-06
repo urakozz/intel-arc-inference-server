@@ -57,11 +57,18 @@ void diff_report(const char* name, const std::string& got, const std::string& wa
 // true (tools/tokenizer/dump_k2.py writes the references).
 int run_cases(const std::string& dir, const std::string& snap, const std::string& cases_file,
               const std::string& prefix) {
-  for (const char* f : {"/tokenizer_config.json", "/chat_template.jinja"})
-    if (!std::ifstream(snap + f).good()) {
-      std::printf("SKIP: %s%s is absent\n", snap.c_str(), f);
-      return 77;
-    }
+  if (!std::ifstream(snap + "/tokenizer_config.json").good()) {
+    std::printf("SKIP: %s/tokenizer_config.json is absent\n", snap.c_str());
+    return 77;
+  }
+  // Spec 20e: the template is chat_template.jinja or, without it, tokenizer_config.json's
+  // "chat_template" string (Kolibri-1's layout; chat::Template reads either).
+  if (!std::ifstream(snap + "/chat_template.jinja").good() &&
+      !nlohmann::json::parse(slurp(snap + "/tokenizer_config.json"), nullptr, false)
+           .contains("chat_template")) {
+    std::printf("SKIP: %s has no chat template\n", snap.c_str());
+    return 77;
+  }
   chat::Template tmpl(snap);
   const auto spec = nlohmann::json::parse(slurp(dir + "/" + cases_file));
   const bool table = spec.is_object();
