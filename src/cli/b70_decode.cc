@@ -36,6 +36,8 @@
 
 #include "cli/k2_decode.h"
 #include "cli/max_len.h"
+#include "cli/pipeline_args.h"
+#include "cli/pipeline_decode.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/event.h"
@@ -141,6 +143,15 @@ void usage() {
       "                 half the KV bytes; decode attention v2 and the l0 / l0-int8 flash\n"
       "                 prefill only). An int8 run's bench rows carry `int8-kv`. K2-Horizon:\n"
       "                 spec 18e's rotkv at head_dim 128, decode (flash / eager) and prefill.\n"
+      "  --pipeline P  1 (default) or 2 (spec 16b): split the model's layers over GPUs 0 and 1\n"
+      "                 of what Level Zero shows, decode only (--ids ingests one replay per id;\n"
+      "                 --bench takes --depth). Refused with --prefill, --pp, --mtp, --profile,\n"
+      "                 --device. Both cards' memory lines on stderr; --max-len auto fits both.\n"
+      "  --pipeline-split S  auto (default: the split whose heavier card holds the fewest bytes)\n"
+      "                 or N: device 0 runs layers [0, N), device 1 the rest\n"
+      "  --pipeline-handoff H  copy (default: a device-to-device copy and a cross-device event)\n"
+      "                 or peer (device 0's last kernel writes device 1's buffer and raises a\n"
+      "                 flag device 1's first kernel polls, bounded)\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -698,6 +709,7 @@ int run(int argc, char** argv) {
   // Spec 8: --mtp K|auto in --ids mode (greedy); absent = no head, every path as before.
   uint32_t mtp_k = 0;
   bool mtp_auto = false, have_mtp = false;
+  cli::PipelineArgs pipe;   // spec 16b: --pipeline, --pipeline-split, --pipeline-handoff
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -762,6 +774,12 @@ int run(int argc, char** argv) {
       }
     } else if (a == "--kv-cache") {   // spec 12b
       kv_cache = cli::parse_kv_cache_arg(value(i, "--kv-cache"));
+    } else if (a == "--pipeline") {   // spec 16b
+      pipe.devices = cli::parse_pipeline_devices(value(i, "--pipeline"));
+    } else if (a == "--pipeline-split") {
+      cli::parse_pipeline_split(value(i, "--pipeline-split"), pipe);
+    } else if (a == "--pipeline-handoff") {
+      cli::parse_pipeline_handoff(value(i, "--pipeline-handoff"), pipe);
     } else if (a == "--lm-head") {
       const std::string v = value(i, "--lm-head");
       if (!loader::parse_lm_head_form(v, lm_head))
@@ -860,6 +878,8 @@ int run(int argc, char** argv) {
   cli::check_kv_cache(kv_cache, pp_path);   // spec 12b
   if (profile && kv_cache == runtime::KvCache::Int8)
     throw std::runtime_error("--profile captures its own bf16-KV list; it has no --kv-cache int8");
+  // Spec 16b: --pipeline's refusals are argument-only, so they come before the device too.
+  cli::check_pipeline(pipe, {prefill, have_pp, mtp_on, profile, device != l0::Context::kFromEnv});
 
   // Spec 18b: dispatch on config.json's model_type. K2-Horizon runs runtime::k2::K2Engine (its
   // own loader, list and planner); every flag validated above means the same there, and what
@@ -878,6 +898,10 @@ int run(int argc, char** argv) {
                                "speed work); --bench times it");
     if (mtp_on)
       throw std::runtime_error("K2-Horizon has no MTP head (spec 18 §9); drop --mtp");
+    if (pipe.on())
+      throw std::runtime_error("K2-Horizon runs its own engine (runtime/k2); --pipeline 2 is built "
+                               "for the Qwen3.5 family's (spec 16b) - K2 across two cards is "
+                               "future work");
     cli::k2::DecodeArgs ka;
     ka.path = path;
     ka.ids_path = ids_path;
@@ -934,6 +958,25 @@ int run(int argc, char** argv) {
   if (synthetic) {
     ids.resize(depth);
     for (uint32_t i = 0; i < depth; ++i) ids[i] = kBenchPrompt[i % kBenchPromptLen];
+  }
+
+  // Spec 16b: two devices, its own flow (cli/pipeline_decode.h); --pipeline 1 goes on below.
+  if (pipe.on()) {
+    cli::PipelineDecodeArgs pa;
+    pa.path = path;
+    pa.ids = ids;
+    pa.bench = bench;
+    pa.n = n;
+    pa.depth = depth;
+    pa.tg = tg;
+    pa.max_len = max_len_arg;
+    pa.trained = trained;
+    pa.reserve = mem_reserve;
+    pa.lm_head = lm_head;
+    pa.kv = kv_cache;
+    pa.pipe = pipe;
+    pa.check_len = check_len;
+    return cli::run_pipeline_decode<StdoutToStderr>(pa);
   }
 
   l0::Context ctx(device);
