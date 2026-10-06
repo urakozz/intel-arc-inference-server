@@ -260,8 +260,41 @@ def test_prompt_lists():
     print("  " + ", ".join(f"{n} {len(v)}" for n, v in P.items()) + "; splits and tool results consistent")
 
 
+def test_synth_pack_roundtrip():
+    # make_synth's RTN packer against dequant.py's rule: w_hat = (q - 8) * scale (spec 20c Task 1)
+    import make_synth as S
+    g = torch.Generator().manual_seed(0)
+    w = torch.randn(128, 256, generator=g).to(torch.bfloat16)          # [N, K]
+    qw, sc, qz = S.pack_rtn_g64(w)                                     # I32 [K/8, N], F16 [K/64, N], I32
+    assert qw.shape == (32, 128) and sc.shape == (4, 128) and (qz == 0x77777777).all()
+    assert qw.dtype == torch.int32 and sc.dtype == torch.float16 and qz.dtype == torch.int32
+    deq = S.dequant(qw, sc)                                            # [N, K] fp32, dequant.py's rule
+    rel = (deq - w.float()).norm() / w.float().norm()
+    assert rel < 0.15
+    # nibble order: element k of a column sits in word k // 8, bits 4 (k % 8) - dequant.py's rule
+    assert torch.equal(S.dequant(qw, sc)[:, 0], (((qw[0] & 0xF) - 8).float() * sc[0].float()))
+    # ... and the same bits as dequant.py itself (its bf16 output, transposed)
+    assert torch.equal(ref._dequant.dequant_gptq(qw, sc, 64).t().float(), deq.to(torch.bfloat16).float())
+    print(f"  RTN g64 round trip: relative error {float(rel):.4f}; nibble order and dequant.py agree")
+
+
+def test_synth_config_prefix():
+    import make_synth as S
+    d = S.synth_config(layers=5, attn="bf16")
+    assert d["num_hidden_layers"] == 5 and d["layer_types"][4] == "full_attention"
+    assert d["layer_types"][:4] == ["sliding_attention"] * 4 and d["hidden_size"] == 2560
+    assert d["quantization_config"]["packing_format"] == "auto_round:auto_gptq"
+    assert all(d["quantization_config"]["extra_config"][f"model.layers.{i}.self_attn.q_proj"]["bits"] == 16
+               for i in range(5))
+    i4 = S.synth_config(layers=1, attn="int4")
+    assert i4["layer_types"] == ["sliding_attention"] and not any("self_attn" in k for k in
+                                                                    i4["quantization_config"]["extra_config"])
+    ref.KConfig.from_dict({k: v for k, v in d.items() if k != "quantization_config"})   # the reference reads it
+    print("  5 layers = 4 sliding + full layer 4; auto_round:auto_gptq; bf16 attention excluded per layer")
+
+
 TESTS = [test_pack, test_tool_calls, test_greedy_topup, test_restore_and_check, test_restore_refuses_changed_tensor,
-         test_eval_metrics, test_card_pick, test_prompt_lists]
+         test_eval_metrics, test_card_pick, test_prompt_lists, test_synth_pack_roundtrip, test_synth_config_prefix]
 
 
 def main() -> None:
