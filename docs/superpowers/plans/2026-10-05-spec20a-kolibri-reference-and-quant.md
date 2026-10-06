@@ -12,7 +12,7 @@ small files (config, tokenizer, index, shard headers by range request).
 | 2. Model class | `tools/oracle/third_party/kolibri1/` | names = checkpoint, per-expert `nn.Linear`, `trust_remote_code` via `auto_map`, cached `generate()` | done |
 | 3. Reference + KL0 | `tools/oracle/kolibri_ref.py`, `test_kolibri_ref.py` | 21 tests in `agnes-ref-img`; port == reference bitwise (bf16 eager, fp32) | done (tiny); real-model perplexity pending |
 | 4. Quantisation script | `tools/quantize_kolibri1.sh`, `tools/quantize/kolibri/` | `--dry-run` prints every stage; tiny end to end calib -> card; `test_kolibri_quant.py` | done |
-| 5. Docs | `tools/quantize/README.md`, spec 20 §3.1 tool row + §10, this plan, box queue row 20 | - | done |
+| 5. Docs | `tools/quantize/README.md`, spec 20 §3.1 tool row + §10, this plan, box queue row 20 (manual) | - | done |
 
 Run the checks (repo root, Mac):
 
