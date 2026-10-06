@@ -2,7 +2,8 @@
 """Build the tool-call acceptance set (spec 5 T0, gate A4).
 
     make_set.py <snapshot> <out dir>
-    make_set.py --from <existing set dir> <snapshot> <out dir>   (same conversations, re-tokenised)
+    make_set.py --from <existing set dir> <snapshot> <out dir> [--kwargs JSON]
+                                          (same conversations, re-tokenised)
 
 36 multi-turn agentic-coding conversations, six templates times six real files
 of this repository, each ending where the assistant's next turn is a tool call.
@@ -15,6 +16,17 @@ tool results are shortened until it fits.
 The repository is read from this script's tree (/ws in the reference
 container); the prompts call it /work. Run inside the reference container
 (tools/oracle/run_in_container.sh) so the tokenizer is the pinned one.
+
+--from with another model's checkpoint (Agnes, Ornith, K2-Horizon) renders the SAME
+conversations with that checkpoint's template and tokenizer. `--kwargs JSON` passes
+template variables (chat_template_kwargs) to every render and records them in each
+<name>.json as "chat_template_kwargs" (serve_client.py sends them with the request).
+K2-Horizon (config.json model_type k2_horizon, spec 18d) defaults to
+{"tool_call_format": "xml", "reasoning_effort": "low"} - its template always opens the
+reply with reasoning, and `low` (<ifm|think_faster>) keeps it short inside the token
+budget - and renders from KEY-SORTED messages and tools: b70-serve holds a request in
+nlohmann::json, whose objects are sorted, so the server's render of the same request is
+these ids (tools/tokenizer/dump_k2.py's rule).
 """
 import hashlib
 import json
@@ -266,11 +278,25 @@ def load_tokenizer(snap: str):
         else AutoTokenizer.from_pretrained(snap)
 
 
-def retokenise(snap: str, src: str, out: str) -> None:
+K2_KWARGS = {"tool_call_format": "xml", "reasoning_effort": "low"}
+
+
+def model_type(snap: str) -> str:
+    with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:
+        return json.load(f).get("model_type", "")
+
+
+def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=None,
+               mtype: str | None = None) -> None:
     """--from: the SAME conversations as an existing set (its <name>.json: messages and
     tools as rendered then), re-rendered with another checkpoint's template and tokenizer.
-    Rescanning the repository would change the conversations with the tree."""
-    tok = load_tokenizer(snap)
+    Rescanning the repository would change the conversations with the tree. `kwargs`: the
+    template variables (K2-Horizon's default K2_KWARGS); `tok` / `mtype` for the tests."""
+    mtype = model_type(snap) if mtype is None else mtype
+    k2 = mtype == "k2_horizon"
+    if kwargs is None:
+        kwargs = dict(K2_KWARGS) if k2 else {}
+    tok = load_tokenizer(snap) if tok is None else tok
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(src, "manifest.json"), encoding="utf-8") as f:
         names = [m["name"] for m in json.load(f)]
@@ -278,14 +304,20 @@ def retokenise(snap: str, src: str, out: str) -> None:
     for name in names:
         with open(os.path.join(src, f"{name}.json"), encoding="utf-8") as f:
             sc = json.load(f)
-        r = tok.apply_chat_template(sc["messages"], tools=sc["tools"], add_generation_prompt=True,
-                                    enable_thinking=sc.get("enable_thinking", False), tokenize=True)
+        msgs, tools = sc["messages"], sc["tools"]
+        if k2:   # the server's (nlohmann::json) key order, dump_k2.py's rule
+            msgs, tools = json.loads(json.dumps([msgs, tools], sort_keys=True))
+        r = tok.apply_chat_template(msgs, tools=tools, add_generation_prompt=True,
+                                    enable_thinking=sc.get("enable_thinking", False), tokenize=True,
+                                    **kwargs)
         ids = [int(x) for x in (r["input_ids"] if hasattr(r, "keys") else r)]
         if not MIN_IDS <= len(ids) <= MAX_IDS:
             sys.exit(f"FATAL: {name} renders to {len(ids)} ids, outside {MIN_IDS} to {MAX_IDS}")
         text = " ".join(map(str, ids)) + "\n"
         with open(os.path.join(src, f"{name}.ids"), encoding="utf-8") as f:
             same += f.read() == text
+        if kwargs:
+            sc = dict(sc, chat_template_kwargs=kwargs)
         with open(os.path.join(out, f"{name}.json"), "w", encoding="utf-8") as f:
             json.dump(sc, f, indent=1, ensure_ascii=False)
             f.write("\n")
@@ -297,12 +329,19 @@ def retokenise(snap: str, src: str, out: str) -> None:
         json.dump(manifest, f, indent=1)
         f.write("\n")
     print(f"{len(manifest)} scenarios from {src} -> {out}; ids identical to the source set's: "
-          f"{same}/{len(manifest)}")
+          f"{same}/{len(manifest)}" + (f"; template kwargs {json.dumps(kwargs, sort_keys=True)}" if kwargs else ""))
 
 
 def main() -> None:
-    if len(sys.argv) == 5 and sys.argv[1] == "--from":
-        retokenise(sys.argv[3], sys.argv[2], sys.argv[4])
+    if len(sys.argv) in (5, 7) and sys.argv[1] == "--from":
+        kwargs = None
+        if len(sys.argv) == 7:
+            if sys.argv[5] != "--kwargs":
+                sys.exit(__doc__)
+            kwargs = json.loads(sys.argv[6])
+            if not isinstance(kwargs, dict):
+                sys.exit("--kwargs expects a JSON object")
+        retokenise(sys.argv[3], sys.argv[2], sys.argv[4], kwargs)
         return
     if len(sys.argv) != 3:
         sys.exit(__doc__)
