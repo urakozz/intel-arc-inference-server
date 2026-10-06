@@ -1,4 +1,4 @@
-// prefill_int8_test - plan 5b Task 2: `--pp-backend l0-int8` on the real engine.
+// prefill_int8_test - plan 5b Task 2: `--prefill-backend l0-int8` on the real engine.
 //
 // For `prose` (one short chunk) and the first 2048 ids of `long` (one full chunk):
 //

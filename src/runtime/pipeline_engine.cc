@@ -111,7 +111,7 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
   // pp_send's stores). Refused here, by name, rather than as a fault on the first token.
   if (!d0.can_access_peer(d1))
     throw std::runtime_error(
-        "--pipeline 2: device 0 (" + d0.name() + ") cannot access device 1's memory "
+        "--pp 2: device 0 (" + d0.name() + ") cannot access device 1's memory "
         "(zeDeviceCanAccessPeer is false), and both hand-offs write it. Peer access needs "
         "the P2P-capable kernel and both cards under one root complex (docs/10-the-box.md)");
   const model::ModelDesc* desc = stages[0].desc;

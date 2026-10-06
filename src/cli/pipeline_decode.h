@@ -1,5 +1,5 @@
 #pragma once
-// Spec 16b: `b70-decode --pipeline 2` - the model's layers over two B70s, decode only
+// Spec 16b: `b70-decode --pp 2` - the model's layers over two B70s, decode only
 // (runtime::PipelineEngine). b70_decode.cc validates every flag first (cli/pipeline_args.h)
 // and hands over here before it opens a device; the flow is b70-decode's own, per device:
 //
@@ -55,11 +55,11 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
   require_two_devices(l0::Context::gpu_count());
   l0::Context d0(0u);
   l0::Context d1(d0, 1u);
-  std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--pipeline 2: one context]\n",
+  std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--pp 2: one context]\n",
                d0.name().c_str(), d0.eu_count(), d1.name().c_str(), d1.eu_count());
   if (!d0.can_access_peer(d1))
     throw std::runtime_error(
-        "--pipeline 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer 0 -> 1 "
+        "--pp 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer 0 -> 1 "
         "is false), and both hand-offs write it. Peer access needs the P2P-capable kernel and "
         "both cards under one root complex (docs/10-the-box.md)");
 
@@ -137,7 +137,7 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
   opt.handoff = a.pipe.handoff;
   runtime::PipelineEngine eng(d0, d1, std::move(stages), len, opt, a.kv);
   std::fprintf(stderr,
-               "engine: --pipeline 2, hand-off %s, split %u; device 0 layers [0, %u): %zu launches,"
+               "engine: --pp 2, hand-off %s, split %u; device 0 layers [0, %u): %zu launches,"
                " %zu modules; device 1 layers [%u, %u): %zu launches, %zu modules; max_len %u,"
                " decode attention %s, kv cache %s\n",
                runtime::pp_handoff_name(eng.handoff()), eng.split(), eng.split(),
@@ -175,7 +175,7 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
   const char* sha = std::getenv("B70_GIT_SHA");
   if (sha == nullptr || *sha == '\0') sha = "unknown";
   // The single-card row's columns; the tag names the configuration, so the rows of an
-  // interleaved one-card / --pipeline 2 pair sort apart (spec 16b S1).
+  // interleaved one-card / --pp 2 pair sort apart (spec 16b S1).
   const std::string tags = std::string(a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "") +
                            (a.kv == runtime::KvCache::Int8 ? " int8-kv" : "") + " pipeline2-" +
                            runtime::pp_handoff_name(eng.handoff()) + "-s" +

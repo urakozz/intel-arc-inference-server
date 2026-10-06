@@ -91,7 +91,7 @@ void Engine::prepare_prefill() {
   if (model_.desc->is_moe() && !is_l0(prefill_backend()))
     throw std::runtime_error("runtime::Engine::prefill: " + model_.desc->name +
                              " (mixture of experts) prefills on the L0 backends only (l0, "
-                             "l0-int8); set_prefill_backend / --pp-backend");
+                             "l0-int8); set_prefill_backend / --prefill-backend");
   // Ruling R7: both allocations are lazy, so a decode-only Engine's device
   // residency is byte-identical to what it was before the buffer split.
   if (!pf_) pf_.reset(new PrefillScratch(ctx_, buffers_.max_len, *model_.desc));
