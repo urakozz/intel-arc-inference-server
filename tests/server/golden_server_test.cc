@@ -4,8 +4,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cerrno>
+#include <cstdlib>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -183,9 +185,29 @@ std::vector<uint32_t> run_decode(const std::string& decode, const std::string& s
 
 }  // namespace
 
+// Spec 18d: `--chat` (a 5th argument) sends each prompt's text as one user message to
+// /v1/chat/completions instead (the checkpoint's own chat template renders it - K2-Horizon's
+// writes its BOS and ends in its think tag), and runs b70-decode on the response's
+// prompt_token_ids, written to a temporary file under $TMPDIR. The prompt ids are not compared
+// with <name>.ids (another model's tokenisation); the generated ids are, as in the default
+// mode. This is
+// "a short greedy chat through the server equal to b70-decode on the same ids" for a model
+// whose golden .ids are not its own (K2-Horizon, box stage r25.chat).
+std::string write_ids_file(const std::string& name, const std::vector<uint32_t>& ids) {
+  const char* dir = std::getenv("TMPDIR");
+  const std::string path = std::string(dir && *dir ? dir : "/tmp") + "/golden_server_test." +
+                           std::to_string(::getpid()) + "." + name + ".ids";
+  std::ofstream out(path);
+  if (!out) fail("cannot write '" + path + "'");
+  for (uint32_t id : ids) out << id << '\n';
+  if (!out) fail("cannot write '" + path + "'");
+  return path;
+}
+
 int main(int argc, char** argv) {
-  if (argc != 5) {
-    std::fprintf(stderr, "usage: golden_server_test <b70-serve> <b70-decode> <prompts-dir> <snapshot>\n");
+  const bool chat = argc == 6 && std::string(argv[5]) == "--chat";
+  if (argc != 5 && !chat) {
+    std::fprintf(stderr, "usage: golden_server_test <b70-serve> <b70-decode> <prompts-dir> <snapshot> [--chat]\n");
     return 2;
   }
 
@@ -202,6 +224,35 @@ int main(int argc, char** argv) {
 
     for (const char* prompt_name : kPrompts) {
       const std::string name = prompt_name;
+      if (chat) {
+        const json request = {{"messages", json::array({{{"role", "user"},
+                                                          {"content", read_text(prompts + "/" + name + ".txt")}}})},
+                              {"max_tokens", kGenerated},
+                              {"temperature", 0},
+                              {"return_token_ids", true}};
+        const auto response = client.Post("/v1/chat/completions", request.dump(), "application/json");
+        if (!response) fail(name + " /v1/chat/completions did not return a response");
+        if (response->status != 200)
+          fail(name + " /v1/chat/completions status " + std::to_string(response->status) + ": " + response->body);
+        const json body = json::parse(response->body);
+        const std::vector<uint32_t> prompt_ids = body.at("prompt_token_ids").get<std::vector<uint32_t>>();
+        const std::vector<uint32_t> served_ids =
+            body.at("choices").at(0).at("token_ids").get<std::vector<uint32_t>>();
+        if (served_ids.size() > kGenerated) fail(name + " server returned more than 32 generated ids");
+        const std::string ids_path = write_ids_file(name, prompt_ids);
+        const std::vector<uint32_t> decoded_ids = run_decode(decode, snapshot, ids_path);
+        std::remove(ids_path.c_str());
+        if (decoded_ids.size() != kGenerated)
+          fail(name + " b70-decode returned " + std::to_string(decoded_ids.size()) + " ids, expected 32");
+        const size_t compared = std::min(served_ids.size(), decoded_ids.size());
+        require_equal(name, "chat generated ids",
+                      std::vector<uint32_t>(served_ids.begin(), served_ids.begin() + compared),
+                      std::vector<uint32_t>(decoded_ids.begin(), decoded_ids.begin() + compared));
+        std::printf("%s: chat of %zu prompt ids (first %u), %zu/%u generated ids identical to b70-decode\n",
+                    name.c_str(), prompt_ids.size(), prompt_ids.empty() ? 0u : prompt_ids[0], compared,
+                    kGenerated);
+        continue;
+      }
       const std::string ids_path = prompts + "/" + name + ".ids";
       const std::vector<uint32_t> expected_prompt = read_ids(ids_path);
       const json request = {{"prompt", read_text(prompts + "/" + name + ".txt")},

@@ -100,6 +100,50 @@ std::vector<float> K2Engine::read_logits() {
   return v;
 }
 
+// --- spec 18d: KV-only snapshots ---------------------------------------------------------
+
+size_t K2Engine::kv_bytes(uint32_t n_pos) const { return kv_snapshot_bytes(buffers_.kv_lay, n_pos); }
+
+void K2Engine::save_state(void* host) const { (void)host; }   // no recurrent state (k2_sizes.h)
+
+void K2Engine::load_state(const void* host, uint32_t pos) {
+  (void)host;
+  if (pos > buffers_.max_len)
+    throw std::runtime_error("runtime::k2::K2Engine::load_state: pos " + std::to_string(pos) +
+                             " exceeds max_len " + std::to_string(buffers_.max_len));
+  control_->pos = pos;
+  control_->n_active = 0;
+}
+
+void K2Engine::save_kv(uint32_t begin, uint32_t end, void* host) const {
+  auto* h = static_cast<uint8_t*>(host);
+  for (const SnapshotRun& r : kv_snapshot_runs(buffers_.kv_lay, begin, end)) {
+    const l0::Mem& m = r.tensor == 0 ? buffers_.kv_k : buffers_.kv_v;
+    imm_.copy(h, static_cast<const uint8_t*>(m.ptr()) + r.offset, r.bytes);
+    h += r.bytes;
+  }
+}
+
+void K2Engine::load_kv(uint32_t begin, uint32_t end, const void* host) {
+  const auto* h = static_cast<const uint8_t*>(host);
+  for (const SnapshotRun& r : kv_snapshot_runs(buffers_.kv_lay, begin, end)) {
+    l0::Mem& m = r.tensor == 0 ? buffers_.kv_k : buffers_.kv_v;
+    imm_.copy(static_cast<uint8_t*>(m.ptr()) + r.offset, h, r.bytes);
+    h += r.bytes;
+  }
+}
+
+void K2Engine::set_pending(uint32_t id) {
+  if (id >= model_.desc->vocab)
+    throw std::runtime_error("runtime::k2::K2Engine::set_pending: id " + std::to_string(id) +
+                             " is outside the vocabulary (" + std::to_string(model_.desc->vocab) + ")");
+  control_->cur_token[0] = id;
+}
+
+void K2Engine::read_logits_into(float* host) {
+  imm_.copy(host, buffers_.logits.ptr(), size_t(model_.desc->vocab) * 4);
+}
+
 MemoryComponents K2Engine::memory_use() const {
   MemoryComponents c;
   c.model = model_.report.total();
