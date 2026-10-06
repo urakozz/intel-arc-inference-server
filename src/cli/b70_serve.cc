@@ -1,5 +1,7 @@
 // b70-serve -- the OpenAI-compatible server over the replayed runtime::Engine (Qwen3.8, Agnes,
-// Ornith) or runtime::k2::K2Engine (K2-Horizon, spec 18d), picked by config.json's model_type.
+// Ornith) or runtime::k2::K2Engine (K2-Horizon, spec 18d), picked by config.json's model_type;
+// with --pp 2 (spec 16d) over runtime::PipelineEngine, the Qwen-family model split over two
+// B70s (cli/pipeline_serve.h has what it serves and refuses).
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -20,6 +22,10 @@
 #include "cli/k2_decode.h"
 #include "cli/k2_serve_adapter.h"
 #include "cli/max_len.h"
+#include "cli/pipeline_args.h"
+#include "cli/pipeline_serve.h"
+#include "cli/pipeline_serve_adapter.h"
+#include "cli/pipeline_settle.h"
 #include "cli/prefix_cache_size.h"
 #include "cli/renamed_flags.h"
 #include "cli/serve_adapters.h"
@@ -30,6 +36,10 @@
 #include "model/model_desc.h"
 #include "model/qwen35.h"
 #include "runtime/engine.h"
+#include "runtime/pipeline_engine.h"
+#include "runtime/pipeline_place.h"
+#include "runtime/pipeline_plan.h"
+#include "runtime/prefill/attn.h"
 #include "runtime/prefill/backend.h"
 #include "server/server.h"
 
@@ -80,7 +90,19 @@ void usage() {
                "                 K2-Horizon MoVA 36B-A4B (spec 18: its own engine, prefill on l0\n"
                "                 only, no MTP head - --mtp, --spec mtp|lookup and --draft-vocab are\n"
                "                 refused; its chat_template_kwargs tool_call_format / reasoning_effort\n"
-               "                 reach the template). One card: --pp N is b70-decode's (spec 16).\n"
+               "                 reach the template).\n"
+               "                 [--pp 1|2] [--pipeline-parallel-size 1|2]   2 (spec 16d): the model's\n"
+               "                             layers over GPUs 0 and 1 of what Level Zero shows (Qwen3.8,\n"
+               "                             Agnes, Ornith; K2-Horizon and Kolibri-1 are refused).\n"
+               "                             --max-len auto fits both cards; the prefix cache, --mtp /\n"
+               "                             --spec (the MTP head on device 1), --kv-cache int8 and\n"
+               "                             --lm-head work as on one card. Not with --device or a\n"
+               "                             sycl-tla prefill. UNVALIDATED on the cards (queue row 27)\n"
+               "                 [--pipeline-split auto|N]   --pp 2: device 0 runs layers [0, N)\n"
+               "                             (auto, the default: the split whose heavier card holds the\n"
+               "                             fewest bytes, with the MTP head and the cache's shadows)\n"
+               "                 [--pipeline-handoff copy|peer]   --pp 2: how the residual crosses\n"
+               "                             (copy, the default: a device copy and a cross-device event)\n"
                "                 [--prefill-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n"
                "                 [--log-requests DIR]   write DIR/NNNNNN.json per request\n"
                "                 [--prefix-cache-gb auto|N]  the prefix cache, in SYSTEM RAM (pinned\n"
@@ -291,6 +313,139 @@ int serve_k2(const K2Serve& a, server::Options options) {
   return listen_until_stopped(server, options);
 }
 
+// The speculative proposer's startup lines (spec 19e's lookup, spec 8 §10's auto policy) -
+// one card's and --pp 2's.
+void print_proposer(const server::Options& options, bool spec_lookup, uint32_t spec_min_match,
+                    uint32_t spec_max, uint32_t spec_history, bool mtp_auto, bool moe_default_costs,
+                    const std::string& model_name) {
+  if (spec_lookup) {
+    const server::MtpCost& c = options.lookup_adaptive.cost;
+    std::fprintf(stderr, "spec lookup: min match %u, K <= %u, history %u, cost verify M=1..%zu",
+                 spec_min_match, spec_max, spec_history, c.verify.size());
+    for (double v : c.verify) std::fprintf(stderr, " %.3f", v);
+    std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
+    for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
+    std::fprintf(stderr, " (plain steps)\n");
+  }
+  if (mtp_auto) {
+    const server::MtpCost& c = options.mtp_adaptive.cost;
+    std::fprintf(stderr, "mtp auto: cost verify M=1..%zu", c.verify.size());
+    for (double v : c.verify) std::fprintf(stderr, " %.3f", v);
+    std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
+    for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
+    std::fprintf(stderr, " (plain steps)\n");
+    // Spec 15e Review Focus 2: the defaults are Qwen3.8's measured table. A MoE model's
+    // verify at M rows touches up to top_k x M distinct experts, so its costs are its own -
+    // unmeasured until the box records them; --mtp-cost replaces the table.
+    if (moe_default_costs)
+      std::fprintf(stderr, "mtp auto: %s's own costs are not measured yet; the table above is "
+                           "Qwen3.8's (pass --mtp-cost once the box has them)\n",
+                   model_name.c_str());
+  }
+}
+
+// Spec 16d: b70-serve --pp 2 - the Qwen-family model over two B70s (runtime::PipelineEngine
+// behind cli::pp::PipelineEngineAdapterT). b70-decode --pp 2's flow (cli/pipeline_decode.h):
+// both cards in one Level Zero context and peer access, the whole checkpoint (with the MTP
+// head when a proposer needs it) loaded onto device 0, the split and max_len planned over the
+// loaded bytes with the server's terms (the prefill scratch per card; the MTP head, its
+// embedding replica and buffers on device 1; the prefix cache's block shadows when the cache
+// may be on - cli/pipeline_settle.h), then placed, then the two-card prefill prepared before
+// the first request. --pp's refusals ran before this (cli/pipeline_serve.h).
+struct PipeServe {
+  std::string snapshot_dir;
+  cli::MaxLenArg max_len_arg;
+  uint32_t trained = 0;
+  size_t mem_reserve = 0;
+  runtime::KvCache kv_cache = runtime::KvCache::Bf16;
+  loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
+  loader::DraftVocabSpec dv_spec;
+  uint32_t mtp_k = 0;
+  bool mtp_auto = false, spec_lookup = false, default_mtp_costs = true;
+  uint32_t spec_min_match = 3, spec_max = 3, spec_history = 0;
+  bool have_pp_backend = false;
+  runtime::PrefillBackend pp_backend = runtime::PrefillBackend::L0Int8;
+  runtime::PrefillPath pp_path;
+  bool prefix_auto = true;
+  uint32_t prefix_cache_gb = 0;
+  cli::PipelineArgs pipe;
+  std::vector<uint32_t> eos;
+};
+
+int serve_pipeline(const PipeServe& a, server::Options options) {
+  cli::require_two_devices(l0::Context::gpu_count());
+  l0::Context d0(0u);
+  l0::Context d1(d0, 1u);
+  std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--pp 2: one context]\n",
+               d0.name().c_str(), d0.eu_count(), d1.name().c_str(), d1.eu_count());
+  if (!d0.can_access_peer(d1))
+    throw std::runtime_error(
+        "--pp 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer 0 -> 1 is false), "
+        "and both hand-offs write it. Peer access needs the P2P-capable kernel and both cards "
+        "under one root complex (docs/10-the-box.md)");
+  loader::LoadedModel full = [&] {
+    StdoutToStderr redirect;
+    return loader::load(d0, a.snapshot_dir, cli::load_len(a.max_len_arg, a.trained),
+                        /*mtp=*/a.mtp_k > 0 || a.spec_lookup, a.lm_head, a.dv_spec);
+  }();
+  model::require_prefill(*full.desc);   // spec 15c, as on one card
+  const model::ModelDesc& d = *full.desc;
+  const runtime::PpWeights w = runtime::pp_weights(full);
+  const std::array<size_t, runtime::kPpDevices> dev{d0.memory_bytes(), d1.memory_bytes()};
+  // The block hook's shadows are planned whenever the cache may be on: auto decides from the
+  // host's RAM only after the load (make_prefix_alloc), and an unplanned shadow would be an
+  // allocation in the first request.
+  const bool hook = a.prefix_auto || a.prefix_cache_gb > 0;
+  const cli::PpSettled settled = cli::pp_settle(d, w, dev, a.max_len_arg, full.trained_max_len,
+                                                a.mem_reserve, a.kv_cache, a.pp_path,
+                                                cli::pp_extras(full, hook), a.pipe);
+  std::vector<loader::LoadedModel> stages = runtime::place_stages(d0, d1, std::move(full), settled.split);
+  if (stages[0].max_len != settled.max_len) {   // auto loaded at a small length: re-table both
+    loader::set_max_len(d0, stages[0], settled.max_len);
+    loader::set_max_len(d1, stages[1], settled.max_len);
+  }
+  runtime::PipelineOptions opt;
+  opt.handoff = a.pipe.handoff;
+  runtime::PipelineEngine engine(d0, d1, std::move(stages), settled.max_len, opt, a.kv_cache);
+  if (a.have_pp_backend) engine.set_prefill_backend(a.pp_backend);
+  // The two-card prefill set up at load, not in a request (each card's scratch, context and
+  // l0-int8 column scales; with the head, its prefill rows on device 1).
+  engine.prepare_prefill();
+  for (uint32_t i = 0; i < runtime::kPpDevices; ++i)
+    std::fprintf(stderr, "%s\n", engine.memory_line(i).c_str());
+  TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
+  const model::ModelDesc& served = *engine.model(0).desc;
+  if (tokenizer.vocab_used() != served.vocab_used)
+    std::fprintf(stderr,
+                 "note: tokenizer.json defines %u ids, %s's greedy argmax masks from %u; sampling "
+                 "masks from %u\n",
+                 tokenizer.vocab_used(), served.name.c_str(), served.vocab_used, tokenizer.vocab_used());
+  TemplateAdapter chat_template(a.snapshot_dir);
+  cli::pp::PipelineEngineAdapterT<runtime::PipelineEngine> engine_adapter(
+      engine, tokenizer.vocab_used(), model::Qwen35::kVocab, a.mtp_k, a.spec_lookup);
+  options.eos_ids = a.eos;
+  // Pinned host memory of the one context both cards share: either device's copies reach it.
+  const std::unique_ptr<PinnedAlloc> prefix_alloc =
+      make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options);
+  server::Server server({tokenizer, chat_template, engine_adapter}, options);
+  std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
+               options.host.c_str(), options.port, settled.max_len);
+  print_eos(a.eos);
+  std::fprintf(stderr,
+               ", --pp 2 (hand-off %s, split %u: device 0 layers [0, %u), device 1 [%u, %u)), prefill "
+               "backend %s, mtp %s%u%s, lm_head %s%s%s, kv cache %s\n",
+               runtime::pp_handoff_name(engine.handoff()), engine.split(), engine.split(),
+               engine.stage(1).first, engine.stage(1).last,
+               runtime::prefill_backend_name(engine.prefill_backend()), a.mtp_auto ? "auto, max " : "",
+               a.mtp_k, engine.mtp() ? " (the head on device 1)" : "", loader::lm_head_form_name(a.lm_head),
+               engine.draft_vocab() ? ", draft vocab " : "",
+               engine.draft_vocab() ? loader::draft_vocab_name(engine.draft_vocab()).c_str() : "",
+               runtime::kv_cache_name(engine.kv_cache()));
+  print_proposer(options, a.spec_lookup, a.spec_min_match, a.spec_max, a.spec_history, a.mtp_auto,
+                 served.is_moe() && a.default_mtp_costs, served.name);
+  return listen_until_stopped(server, options);
+}
+
 int run(int argc, char** argv) {
   std::string path;
   server::Options options;
@@ -317,6 +472,7 @@ int run(int argc, char** argv) {
   // Spec 8 §11: off until the box rows decide (§11 "Gates").
   uint32_t draft_vocab = 0;
   std::string draft_vocab_ids;
+  cli::PipelineArgs pipe;   // spec 16d: --pp, --pipeline-split, --pipeline-handoff
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -404,9 +560,12 @@ int run(int argc, char** argv) {
       draft_vocab_ids = value(i, "--draft-vocab-ids");
     } else if (arg == "--kv-cache") {   // spec 12b
       kv_cache = cli::parse_kv_cache_arg(value(i, "--kv-cache"));
-    } else if (arg == "--pp" || arg == "--pipeline-parallel-size") {
-      throw std::runtime_error(arg + ": b70-serve serves on one card; pipeline parallel is "
-                               "b70-decode's (spec 16b / 16c), not the server's yet");
+    } else if (arg == "--pp" || arg == "--pipeline-parallel-size") {   // spec 16d
+      pipe.devices = cli::parse_pipeline_devices(arg, value(i, arg.c_str()));
+    } else if (arg == "--pipeline-split") {
+      cli::parse_pipeline_split(value(i, "--pipeline-split"), pipe);
+    } else if (arg == "--pipeline-handoff") {
+      cli::parse_pipeline_handoff(value(i, "--pipeline-handoff"), pipe);
     } else if (!arg.empty() && arg[0] == '-') {
       usage();
       throw std::runtime_error(cli::unknown_option(arg));
@@ -500,6 +659,21 @@ int run(int argc, char** argv) {
       true, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
   cli::check_kv_cache(kv_cache, pp_path);   // spec 12b: before the device is touched
 
+  // Spec 16d: --pp's refusals that need no checkpoint (cli/pipeline_serve.h) - the sub-flags
+  // without --pp 2, --device, a sycl-tla prefill, the composed attention, prefill replay and
+  // profiling - before the snapshot is even resolved; the model's own follow below.
+  cli::ServePipelineContext pipe_ctx;
+  pipe_ctx.device = device != l0::Context::kFromEnv;
+  pipe_ctx.mtp = mtp_k > 0 || mtp_auto || spec_lookup;
+  pipe_ctx.prefill_backend = pp_path.backend;
+  pipe_ctx.composed_attn = pp_path.composed_attn;
+  {
+    const char* replay = std::getenv("B70_PREFILL_REPLAY");
+    const char* profile = std::getenv("B70_PREFILL_PROFILE");
+    pipe_ctx.prefill_replay = replay != nullptr && std::string(replay) == "1";
+    pipe_ctx.prefill_profile = profile != nullptr && std::string(profile) == "1";
+  }
+  cli::check_serve_pipeline(pipe, pipe_ctx);
   const std::string snapshot_dir = loader::resolve_snapshot(path);
   // Spec 18b / 18d: dispatch on config.json's model_type. The chat format (template variables,
   // reasoning tags, tool-call syntax) follows it (server/chat_format.h: anything but
@@ -514,6 +688,10 @@ int run(int argc, char** argv) {
     if (cj.is_object()) model_type = cj.value("model_type", std::string());
   }
   options.chat_format = server::ChatFormat::for_model_type(model_type);
+  // Spec 16d: the model's --pp refusals, before the model dispatch below - so K2 and Kolibri-1
+  // under --pp 2 are refused by name rather than served on one card.
+  pipe_ctx.model_type = model_type;
+  cli::check_serve_pipeline(pipe, pipe_ctx);
   // Spec 20c: Kolibri-1 decodes through b70-decode only; serving it (the tokenizer, the ChatML
   // template, reasoning and hermes JSON tool calls, ring snapshots) is spec 20e.
   if (model_type == "kolibri1")
@@ -557,6 +735,31 @@ int run(int argc, char** argv) {
     dv_spec.added = loader::added_token_ids_file(snapshot_dir + "tokenizer.json");
     dv_spec.eos = eos;
     if (!draft_vocab_ids.empty()) dv_spec.ranked = loader::read_ranked_ids(draft_vocab_ids);
+  }
+  if (pipe.on()) {   // spec 16d: two cards, serve_pipeline's own flow
+    PipeServe ps;
+    ps.snapshot_dir = snapshot_dir;
+    ps.max_len_arg = max_len_arg;
+    ps.trained = trained;
+    ps.mem_reserve = mem_reserve;
+    ps.kv_cache = kv_cache;
+    ps.lm_head = lm_head;
+    ps.dv_spec = dv_spec;
+    ps.mtp_k = mtp_k;
+    ps.mtp_auto = mtp_auto;
+    ps.spec_lookup = spec_lookup;
+    ps.spec_min_match = spec_min_match;
+    ps.spec_max = spec_max;
+    ps.spec_history = spec_history;
+    ps.default_mtp_costs = mtp_cost_arg.empty();
+    ps.have_pp_backend = have_pp_backend;
+    ps.pp_backend = pp_backend;
+    ps.pp_path = pp_path;
+    ps.prefix_auto = prefix_auto;
+    ps.prefix_cache_gb = prefix_cache_gb;
+    ps.pipe = pipe;
+    ps.eos = eos;
+    return serve_pipeline(ps, options);
   }
   l0::Context context(device);
   std::fprintf(stderr, "device: %s (%u EUs)%s\n", context.name().c_str(), context.eu_count(),
@@ -614,30 +817,8 @@ int run(int argc, char** argv) {
                engine.draft_vocab() ? ", draft vocab " : "",
                engine.draft_vocab() ? loader::draft_vocab_name(engine.draft_vocab()).c_str() : "",
                runtime::kv_cache_name(engine.kv_cache()));
-  if (spec_lookup) {
-    const server::MtpCost& c = options.lookup_adaptive.cost;
-    std::fprintf(stderr, "spec lookup: min match %u, K <= %u, history %u, cost verify M=1..%zu",
-                 spec_min_match, spec_max, spec_history, c.verify.size());
-    for (double v : c.verify) std::fprintf(stderr, " %.3f", v);
-    std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
-    for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
-    std::fprintf(stderr, " (plain steps)\n");
-  }
-  if (mtp_auto) {
-    const server::MtpCost& c = options.mtp_adaptive.cost;
-    std::fprintf(stderr, "mtp auto: cost verify M=1..%zu", c.verify.size());
-    for (double v : c.verify) std::fprintf(stderr, " %.3f", v);
-    std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
-    for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
-    std::fprintf(stderr, " (plain steps)\n");
-    // Spec 15e Review Focus 2: the defaults are Qwen3.8's measured table. A MoE model's
-    // verify at M rows touches up to top_k x M distinct experts, so its costs are its own -
-    // unmeasured until the box records them; --mtp-cost replaces the table.
-    if (served.is_moe() && mtp_cost_arg.empty())
-      std::fprintf(stderr, "mtp auto: %s's own costs are not measured yet; the table above is "
-                           "Qwen3.8's (pass --mtp-cost once the box has them)\n",
-                   served.name.c_str());
-  }
+  print_proposer(options, spec_lookup, spec_min_match, spec_max, spec_history, mtp_auto,
+                 served.is_moe() && mtp_cost_arg.empty(), served.name);
 
   return listen_until_stopped(server, options);
 }

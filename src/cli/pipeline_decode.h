@@ -14,6 +14,10 @@
 //   5. the prompt: with --prefill / --bench --prefill-length the two-card prefill (spec 16c;
 //      each device's prefill scratch planned in step 3), else one decode replay per id; then
 //      generate (--ids) or time --tg ids (--bench).
+//
+// Spec 16d: steps 3 and 4 are cli/pipeline_settle.h's (shared with b70-serve --pp 2), and
+// --mtp K|auto (--ids, greedy) loads the head, plans it on device 1 (PpExtras) and runs
+// b70-decode's own speculative loop over the pipeline (`run_mtp`).
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -28,6 +32,7 @@
 
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
+#include "cli/pipeline_settle.h"
 #include "l0/context.h"
 #include "loader/loader.h"
 #include "runtime/pipeline_engine.h"
@@ -54,11 +59,14 @@ struct PipelineDecodeArgs {
   bool prefill = false, bench_prefill = false;
   uint32_t chunk = 0;
   runtime::PrefillPath pf = runtime::pp_no_prefill();
+  // Spec 16d: --mtp K|auto (--ids only): the head is loaded and placed on device 1, and
+  // run_mtp (b70-decode's greedy speculative loop) generates instead of the plain loop.
+  bool mtp = false;
+  std::function<int(runtime::PipelineEngine&)> run_mtp;
 };
 
 template <class Redirect>
 int run_pipeline_decode(const PipelineDecodeArgs& a) {
-  const double gb = 1e9;
   require_two_devices(l0::Context::gpu_count());
   l0::Context d0(0u);
   l0::Context d1(d0, 1u);
@@ -72,67 +80,15 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
 
   loader::LoadedModel full = [&] {
     Redirect redirect;
-    return loader::load(d0, a.path, load_len(a.max_len, a.trained), /*mtp=*/false, a.lm_head);
+    return loader::load(d0, a.path, load_len(a.max_len, a.trained), /*mtp=*/a.mtp, a.lm_head);
   }();
   const model::ModelDesc& d = *full.desc;
   const runtime::PpWeights w = runtime::pp_weights(full);
   const std::array<size_t, runtime::kPpDevices> dev{d0.memory_bytes(), d1.memory_bytes()};
-  uint32_t split = a.pipe.split, len = a.max_len.value;
-  if (!a.pipe.split_auto) runtime::require_split(d, split);
-
-  if (a.max_len.is_auto) {
-    const uint32_t cap = full.trained_max_len;
-    if (a.pipe.split_auto) {
-      const runtime::PpChoice c = runtime::pp_auto_split_and_len(d, w, dev, a.reserve, cap, a.kv, a.pf);
-      split = c.split;
-      len = c.max_len;
-    } else {
-      len = runtime::pp_max_len_that_fits(d, split, w, dev, a.reserve, cap, a.kv, a.pf);
-    }
-    if (len == 0) {
-      const uint32_t at = std::min(runtime::kMinAutoMaxLen, cap);
-      const uint32_t s = split != 0 ? split : runtime::pp_auto_split(d, w, at, a.kv, a.pf);
-      throw std::runtime_error("--max-len auto: not even " + std::to_string(at) +
-                               " positions fit on both devices - " +
-                               runtime::pp_describe(runtime::pp_plan(d, s, at, w, a.kv, a.pf), dev, a.reserve));
-    }
-    const uint32_t fit = len;
-    if (runtime::decode_attn() == runtime::DecodeAttn::V1) {
-      len = v1_compiled_at_most(fit, d);
-      if (len == 0)
-        throw std::runtime_error("--max-len auto with B70_DECODE_ATTN=v1: no compiled v1 decode"
-                                 " attention at or below " + std::to_string(fit));
-    }
-    std::fprintf(stderr,
-                 "max_len: auto -> %u (the largest multiple of %u that fits BOTH devices, %.3f and"
-                 " %.3f GB, with a %.3f GB reserve each; trained context %u%s)\n",
-                 len, runtime::kMaxLenQuantum, dev[0] / gb, dev[1] / gb, a.reserve / gb, cap,
-                 len != fit ? ", v1 decode attention's largest compiled length" : "");
-  } else {
-    if (a.pipe.split_auto) split = runtime::pp_auto_split(d, w, len, a.kv, a.pf);
-    const runtime::PpPlan p = runtime::pp_plan(d, split, len, w, a.kv, a.pf);
-    for (uint32_t i = 0; i < runtime::kPpDevices; ++i)
-      if (p.dev[i].total() + a.reserve > dev[i]) {
-        const uint32_t cap = full.trained_max_len != 0 ? full.trained_max_len : len;
-        const uint32_t best =
-            cap < runtime::kMaxLenQuantum
-                ? 0
-                : runtime::pp_max_len_that_fits(d, split, w, dev, a.reserve, cap, a.kv, a.pf);
-        throw std::runtime_error("--max-len " + std::to_string(len) + " does not fit on device " +
-                                 std::to_string(i) + ": " + runtime::pp_describe(p, dev, a.reserve) +
-                                 ". The largest that fits at split " + std::to_string(split) +
-                                 " is " + std::to_string(best) +
-                                 " (--max-len auto); --mem-reserve-gb lowers the reserve");
-      }
-    std::fprintf(stderr, "max_len: %u (--max-len)\n", len);
-  }
-  if (a.pipe.split_auto)
-    std::fprintf(stderr, "split: auto -> %u (the split whose heavier device holds the fewest bytes"
-                 " at max_len %u)\n", split, len);
-  else
-    std::fprintf(stderr, "split: %u (--pipeline-split)\n", split);
-  std::fprintf(stderr, "%s\n",
-               runtime::pp_describe(runtime::pp_plan(d, split, len, w, a.kv, a.pf), dev, a.reserve).c_str());
+  // Steps 3 and 4 (cli/pipeline_settle.h): no hook here - b70-decode has no prefix cache.
+  const PpSettled settled = pp_settle(d, w, dev, a.max_len, full.trained_max_len, a.reserve, a.kv,
+                                      a.pf, pp_extras(full, /*hook=*/false), a.pipe);
+  const uint32_t split = settled.split, len = settled.max_len;
   a.check_len(len);
 
   std::vector<loader::LoadedModel> stages = runtime::place_stages(d0, d1, std::move(full), split);
@@ -152,6 +108,13 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
                eng.stage(1).last, eng.step(1).kernel_count, eng.step(1).modules.size(),
                eng.max_len(), runtime::decode_attn_name(runtime::decode_attn()),
                runtime::kv_cache_name(eng.kv_cache()));
+  if (eng.mtp())   // spec 16d: the head on device 1, the verify lists on both
+    std::fprintf(stderr,
+                 "mtp: the head on device 1; verify lists M = 1..%u (%zu + %zu launches at every M),"
+                 " %u draft lists of %zu launches on device 1\n",
+                 runtime::MtpBuffers::kSlots, eng.verify_step(0, 1).kernel_count,
+                 eng.verify_step(1, 1).kernel_count, runtime::PipelineEngine::kMaxDraft,
+                 eng.draft_step(0).kernel_count);
   // Spec 16c: the prefill set up before the window (each device's scratch and context, the
   // l0-int8 column scales), so the memory lines below hold it, as one card's do.
   const bool prefill = a.prefill || a.bench_prefill;
@@ -200,6 +163,7 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
                  eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
                  eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
   };
+  if (!a.bench && a.mtp && a.run_mtp) return a.run_mtp(eng);   // spec 16d
   if (!a.bench) {
     eng.generate(a.n, [](uint32_t id) {
       std::printf("%u\n", id);
