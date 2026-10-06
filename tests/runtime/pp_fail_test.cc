@@ -68,10 +68,11 @@ int main(int argc, char** argv) {
     runtime::PipelineOptions opt;
     opt.handoff = h;
     // copy: the host's fence bound is the only one. peer: the device's spin bound must give
-    // up first - 2^20 system-scope loads (unmeasured: 16a would have; ~1 s at 1 us a load)
-    // against a 30 s fence bound, and still far above a clean step's wait for device 0.
-    opt.timeout_ms = h == runtime::PpHandoff::Copy ? 3000 : 30000;
-    opt.spin_limit = 1u << 20;
+    // up first, yet outlast a clean step's wait for device 0's half (~18 ms on Qwen3.8) - the
+    // engine's default 2^24 system-scope loads (the per-load time is unmeasured, 16a would
+    // have: 0.17 s at 10 ns a load, 17 s at 1 us) against a 120 s fence bound.
+    opt.timeout_ms = h == runtime::PpHandoff::Copy ? 3000 : 120000;
+    opt.spin_limit = 1u << 24;
     runtime::PipelineEngine e(d0, d1, runtime::place_stages(d0, d1, std::move(full), split),
                               kMaxLen, opt);
     const char* name = runtime::pp_handoff_name(h);
