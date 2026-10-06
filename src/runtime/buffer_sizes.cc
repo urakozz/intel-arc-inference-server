@@ -295,15 +295,21 @@ Int8ScratchSizes int8_scratch_sizes(uint32_t max_k) {
 }
 
 size_t int8_scale_bytes(const model::ModelDesc& desc) {
+  return int8_scale_bytes(desc, 0, desc.layers);
+}
+
+size_t int8_scale_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t last) {
   size_t b = 0;
-  for (const model::LayerDesc& ld : desc.layer_descs())
+  for (const model::LayerDesc& ld : desc.layer_descs()) {
+    if (ld.index < first || ld.index >= last) continue;
     for (const model::FusedLinear& fl : ld.linears)
       if (fl.kind == model::WeightKind::Int4 && !moe_ffn_row(desc, fl.id))
         b += 2 * size_t{fl.shape.N} * kFp32;   // ws, 1/ws
+  }
   // Spec 15d: a MoE layer's expert gate||up array (every block, the shared expert's too)
   // is one h8 weight of blocks x 2 I columns (Int8State::scales_raw); its down is bf16.
   if (desc.is_moe())
-    b += size_t{desc.layers} * 2 * size_t{desc.moe.blocks()} * 2 * desc.moe.expert_intermediate * kFp32;
+    b += size_t{last - first} * 2 * size_t{desc.moe.blocks()} * 2 * desc.moe.expert_intermediate * kFp32;
   return b;
 }
 

@@ -114,20 +114,34 @@ size_t pp_link_bytes(const model::ModelDesc& d, uint32_t device);
 // table (both devices hold one: every FA layer's attn_prep reads it); kv = its FA layers'
 // K and V; decode_state = control + its GDN state + conv ring + the decode scratch (each
 // device has the whole DecodeScratch: the lists are per device and scratch is per list) +
-// the hand-off buffers. No prefill scratch (spec 16b refuses prefill under PP; 16c), no
-// int8 prefill state, no MTP (16d).
+// the hand-off buffers. No MTP (16d).
+//
+// Spec 16c, with a prefill path (`pf.prefill`): each device also holds a whole
+// PrefillScratch (eager, and the l0 backend's slab) in prefill_scratch, its own Int8State
+// on l0-int8 (the scratch for the model's widest h8 K, and the column scales of ITS layers'
+// linears only) in int8, and the prefill hand-off (runtime/pipeline_prefill_plan.h:
+// pp_prefill_link_bytes - device 1's two landing slots) in decode_state, as `prefill_link`.
+// The block-end shadows a prefix cache's hook needs are not planned (b70-serve's pipeline is
+// spec 16d). The composed attention and sycl-tla have no pipeline walk: refused.
+// `pp_no_prefill()` (the default everywhere) is spec 16b's decode-only plan, unchanged.
+inline PrefillPath pp_no_prefill() {
+  PrefillPath p;
+  p.prefill = false;
+  return p;
+}
 struct PpDevicePlan : MemoryComponents {
   PpStage stage;
-  size_t weights = 0, rope = 0, link = 0;
+  size_t weights = 0, rope = 0, link = 0, prefill_link = 0;
 };
 struct PpPlan {
   uint32_t max_len = 0, split = 0;
   KvCache kv_cache = KvCache::Bf16;
+  PrefillPath prefill = pp_no_prefill();
   std::array<PpDevicePlan, kPpDevices> dev{};
   size_t max_total() const;
 };
 PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, const PpWeights& w,
-               KvCache kv = default_kv_cache());
+               KvCache kv = default_kv_cache(), const PrefillPath& pf = pp_no_prefill());
 
 // The descriptor-free core of the balance: `layer_bytes[l]` is everything layer l puts on
 // its device (weights + its state at the session's length), `dev0_fixed` / `dev1_fixed`
@@ -145,14 +159,15 @@ PpBalance pp_balance(const std::vector<size_t>& layer_bytes, size_t dev0_fixed, 
 // `--pipeline-split auto` at an explicit max_len: the split whose heavier device holds the
 // fewest bytes; ties go to the smaller difference between the two, then to the smaller s.
 uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len,
-                       KvCache kv = default_kv_cache());
+                       KvCache kv = default_kv_cache(), const PrefillPath& pf = pp_no_prefill());
 
 // `--max-len auto` under a split: the largest multiple of kMaxLenQuantum up to `cap` whose
 // plan + `reserve` fits EACH device (the min over the devices); 0 when not even
 // min(kMinAutoMaxLen, cap) fits. Throws std::invalid_argument when cap < one quantum.
 uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const PpWeights& w,
                               const std::array<size_t, kPpDevices>& device_bytes,
-                              size_t reserve, uint32_t cap, KvCache kv = default_kv_cache());
+                              size_t reserve, uint32_t cap, KvCache kv = default_kv_cache(),
+                              const PrefillPath& pf = pp_no_prefill());
 
 // Both auto: the split whose min-over-devices max_len is the largest, ties broken as
 // pp_auto_split breaks them at that length. {0, 0} when no split fits min(4096, cap).
@@ -161,7 +176,8 @@ struct PpChoice {
 };
 PpChoice pp_auto_split_and_len(const model::ModelDesc& d, const PpWeights& w,
                                const std::array<size_t, kPpDevices>& device_bytes,
-                               size_t reserve, uint32_t cap, KvCache kv = default_kv_cache());
+                               size_t reserve, uint32_t cap, KvCache kv = default_kv_cache(),
+                               const PrefillPath& pf = pp_no_prefill());
 
 // "pipeline plan at max_len N, split s (layers [0, s) | [s, L)):" and one memory_line()-style
 // line per device ("device 0: model ... total ... of ...; + reserve").

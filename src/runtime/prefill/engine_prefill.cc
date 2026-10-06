@@ -22,6 +22,7 @@
 #include "model/qwen35.h"
 #include "runtime/control.h"
 #include "runtime/engine.h"
+#include "runtime/prefill_chunks.h"
 #include "runtime/prefill/attn.h"
 #include "runtime/prefill/backend.h"
 #include "runtime/prefill/context.h"
@@ -177,8 +178,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   const size_t hid_row = size_t(model_.desc->hidden) * 2;
   uint32_t C = 0;
   for (size_t off = 0; off < ids.size(); off += C) {
-    C = uint32_t(std::min<size_t>(chunk, ids.size() - off));
-    if (hooked) C = std::min(C, kBlock - (base + uint32_t(off)) % kBlock);
+    C = prefill_chunk_rows(base + uint32_t(off), ids.size() - off, chunk, hooked, kBlock);
     pfx_->cx.wait();                       // before touching `ids` or `Control`
     std::memcpy(pf_->ids.ptr(), ids.data() + off, size_t(C) * 4);
     control_->pos = base + uint32_t(off);

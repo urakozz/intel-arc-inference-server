@@ -6,6 +6,7 @@
 #include "loader/moe_layout.h"
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
+#include "runtime/pipeline_prefill_plan.h"
 
 namespace runtime {
 namespace {
@@ -172,11 +173,17 @@ size_t PpPlan::max_total() const {
 }
 
 PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, const PpWeights& w,
-               KvCache kv) {
+               KvCache kv, const PrefillPath& pf) {
+  if (pf.prefill && (pf.composed_attn || !is_l0(pf.backend)))
+    throw std::invalid_argument(std::string("runtime::pp_plan: the two-card prefill runs the L0 "
+                                            "backends' flash attention only, not ") +
+                                (pf.composed_attn ? "the composed attention"
+                                                  : prefill_backend_name(pf.backend)));
   PpPlan p;
   p.max_len = max_len;
   p.split = split;
   p.kv_cache = kv;
+  p.prefill = pf;
   const std::array<PpStage, kPpDevices> st = pp_stages(d, split);
   // The decode scratch is max_len-dependent only through v1's attn_part; the planner
   // follows B70_DECODE_ATTN as runtime::plan does.
@@ -191,6 +198,15 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
     const PersistentSizes ps = PersistentDims::stage_sizes(max_len, d, kv, st[i].gdn, st[i].fa);
     dp.kv = ps.kv_k + ps.kv_v;
     dp.decode_state = ps.total() - dp.kv + scratch + dp.link;
+    if (pf.prefill) {   // spec 16c: memory_plan.cc's prefill terms, per device
+      const PrefillScratchSizes s = PrefillScratchDims::sizes(max_len, d);
+      dp.prefill_scratch = s.eager() + (pf.backend == PrefillBackend::L0 ? s.slab : 0);
+      if (pf.backend == PrefillBackend::L0Int8)
+        dp.int8 = int8_scratch_sizes(prefill_int8_max_k(d)).total() +
+                  int8_scale_bytes(d, st[i].first, st[i].last);
+      dp.prefill_link = pp_prefill_link_bytes(d, i);
+      dp.decode_state += dp.prefill_link;
+    }
   }
   return p;
 }
@@ -208,11 +224,11 @@ bool split_ok(const model::ModelDesc& d, uint32_t s) {
 // The split choice at one length: the heavier device as small as possible, then the two as
 // even as possible, then the smaller s. `allowed` filters candidates (all when empty).
 uint32_t best_split_at(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len, KvCache kv,
-                       const std::vector<uint32_t>& allowed) {
+                       const PrefillPath& pf, const std::vector<uint32_t>& allowed) {
   uint32_t best = 0;
   size_t best_max = 0, best_diff = 0;
   const auto consider = [&](uint32_t s) {
-    const PpPlan p = pp_plan(d, s, max_len, w, kv);
+    const PpPlan p = pp_plan(d, s, max_len, w, kv, pf);
     const size_t a = p.dev[0].total(), b = p.dev[1].total();
     const size_t mx = std::max(a, b), diff = a > b ? a - b : b - a;
     if (best == 0 || mx < best_max || (mx == best_max && diff < best_diff)) {
@@ -248,10 +264,11 @@ PpBalance pp_balance(const std::vector<size_t>& layer_bytes, size_t dev0_fixed, 
   return best;
 }
 
-uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len, KvCache kv) {
+uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len, KvCache kv,
+                       const PrefillPath& pf) {
   if (d.layers < 2)
     throw std::invalid_argument(d.name + " has fewer than two layers: nothing to split");
-  const uint32_t s = best_split_at(d, w, max_len, kv, {});
+  const uint32_t s = best_split_at(d, w, max_len, kv, pf, {});
   if (s == 0)
     throw std::invalid_argument(d.name + ": no split leaves each device a GDN and an FA layer");
   return s;
@@ -259,14 +276,14 @@ uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t m
 
 uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const PpWeights& w,
                               const std::array<size_t, kPpDevices>& device_bytes, size_t reserve,
-                              uint32_t cap, KvCache kv) {
+                              uint32_t cap, KvCache kv, const PrefillPath& pf) {
   if (cap < kMaxLenQuantum)
     throw std::invalid_argument("pp_max_len_that_fits: the cap " + std::to_string(cap) +
                                 " is below one " + std::to_string(kMaxLenQuantum) +
                                 "-position quantum");
   require_split(d, split);
   const auto fits = [&](uint32_t len) {
-    const PpPlan p = pp_plan(d, split, len, w, kv);
+    const PpPlan p = pp_plan(d, split, len, w, kv, pf);
     for (uint32_t i = 0; i < kPpDevices; ++i)
       if (p.dev[i].total() + reserve > device_bytes[i]) return false;
     return true;
@@ -288,12 +305,12 @@ uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const P
 
 PpChoice pp_auto_split_and_len(const model::ModelDesc& d, const PpWeights& w,
                                const std::array<size_t, kPpDevices>& device_bytes, size_t reserve,
-                               uint32_t cap, KvCache kv) {
+                               uint32_t cap, KvCache kv, const PrefillPath& pf) {
   uint32_t best_len = 0;
   std::vector<uint32_t> at_best;
   for (uint32_t s = 1; s < d.layers; ++s) {
     if (!split_ok(d, s)) continue;
-    const uint32_t len = pp_max_len_that_fits(d, s, w, device_bytes, reserve, cap, kv);
+    const uint32_t len = pp_max_len_that_fits(d, s, w, device_bytes, reserve, cap, kv, pf);
     if (len == 0) continue;
     if (len > best_len) {
       best_len = len;
@@ -302,7 +319,7 @@ PpChoice pp_auto_split_and_len(const model::ModelDesc& d, const PpWeights& w,
     if (len == best_len) at_best.push_back(s);
   }
   if (best_len == 0) return {};
-  return {best_split_at(d, w, best_len, kv, at_best), best_len};
+  return {best_split_at(d, w, best_len, kv, pf, at_best), best_len};
 }
 
 std::string pp_describe(const PpPlan& p, const std::array<size_t, kPpDevices>& device_bytes,
@@ -313,19 +330,25 @@ std::string pp_describe(const PpPlan& p, const std::array<size_t, kPpDevices>& d
   char head[256];
   std::snprintf(head, sizeof head,
                 "pipeline plan at max_len %u, split %u (device 0 layers [0, %u): %u GDN + %u FA, "
-                "device 1 layers [%u, %u): %u GDN + %u FA)%s",
+                "device 1 layers [%u, %u): %u GDN + %u FA)%s%s%s",
                 p.max_len, p.split, s0.last, s0.gdn, s0.fa, s1.first, s1.last, s1.gdn, s1.fa,
-                p.kv_cache == KvCache::Int8 ? ", int8 KV cache" : "");
+                p.kv_cache == KvCache::Int8 ? ", int8 KV cache" : "",
+                p.prefill.prefill ? ", prefill " : "",
+                p.prefill.prefill ? prefill_backend_name(p.prefill.backend) : "");
   std::string out = head;
   for (uint32_t i = 0; i < kPpDevices; ++i) {
     const std::string label = "\n  device " + std::to_string(i);
     out += format_memory(label.c_str(), p.dev[i], device_bytes[i]);
-    char tail[160];
+    char tail[224];
     std::snprintf(tail, sizeof tail, "; + reserve %.3f GB = %.3f GB (weights %.3f GB, RoPE %.3f GB, "
                   "hand-off %zu B)",
                   reserve / gb, (p.dev[i].total() + reserve) / gb, p.dev[i].weights / gb,
                   p.dev[i].rope / gb, p.dev[i].link);
     out += tail;
+    if (p.dev[i].prefill_link != 0) {   // spec 16c; 16b's line is unchanged without it
+      std::snprintf(tail, sizeof tail, " + prefill hand-off %zu B", p.dev[i].prefill_link);
+      out += tail;
+    }
   }
   return out;
 }
