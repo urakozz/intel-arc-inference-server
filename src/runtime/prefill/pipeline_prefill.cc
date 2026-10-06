@@ -202,11 +202,17 @@ struct PipelinePrefill final : PipelinePrefillBase {
     for (auto& e : ready) e->host_signal();
     for (auto& e : hold) e->host_signal();
   }
-  bool settle(uint32_t timeout_ms) override {
-    if (in_flight) release();
+  // Both lists idle within the bound, nothing released: everything appended completes.
+  bool drain(uint32_t timeout_ms) {
     const bool ok = dev[0]->cx.wait_for(ns(timeout_ms)) && dev[1]->cx.wait_for(ns(timeout_ms));
     if (ok) in_flight = false;
     return ok;
+  }
+  // After a failure (or at teardown): release device 1 first if a prefill may have left it
+  // waiting on a hand-off that will not come, then drain.
+  bool settle(uint32_t timeout_ms) override {
+    if (in_flight) release();
+    return drain(timeout_ms);
   }
   void zero() override {
     imm1.fill(landing.ptr(), 0u, landing.size());
@@ -407,8 +413,9 @@ struct PipelineEngine::PrefillDriver {
       e.snap_gdn_ = {};
       e.snap_conv_ = {};
       // As on one card, the state is exactly at the block end: let what was appended after it
-      // finish, then put the shadows back.
-      if (!p.settle(e.opt_.prefill_timeout_ms))
+      // finish - on its own, nothing is released early (every ready event it waits on is
+      // signalled by device 0's half, already appended) - then put the shadows back.
+      if (!p.drain(e.opt_.prefill_timeout_ms))
         throw PrefillFailure("the block hook at " + std::to_string(c.end()) +
                              " threw, and the lists did not drain within " +
                              std::to_string(e.opt_.prefill_timeout_ms) + " ms");
