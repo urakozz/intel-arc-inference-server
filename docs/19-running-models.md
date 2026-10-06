@@ -77,7 +77,7 @@ Read its `tg` figure. Its own `pp` figure is meaningless against `b70-serve`: th
 sends the role frame before it starts generating, so llama-benchy times the role frame
 and reports millions of tokens per second (docs/BENCHMARKS.md, "Why llama-benchy's own pp
 figure is unusable"). Use `e2e_ttft` instead, as `tools/serve_bench.sh` does, or
-`b70-decode --bench --pp` for the device-side prefill time.
+`b70-decode --bench --prefill-length` for the device-side prefill time.
 
 **Token ids for `b70-decode --ids`** are whitespace-separated, made with the checkpoint's
 own tokenizer (needs `transformers`; `<snapshot>` is the snapshot directory in the cache):
@@ -130,8 +130,8 @@ Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 
 ```sh
 # the BENCHMARKS.md rows: prefill 4096, then decode 256 at that depth (bf16 head, byte-matched with vLLM)
-./build/src/cli/b70-decode $Q --bench --pp 4096 --tg 256
-./build/src/cli/b70-decode $Q --bench --pp 4096 --tg 256 --lm-head int8        # the serving head
+./build/src/cli/b70-decode $Q --bench --prefill-length 4096 --tg 256
+./build/src/cli/b70-decode $Q --bench --prefill-length 4096 --tg 256 --lm-head int8        # the serving head
 ./build/src/cli/b70-decode $Q --bench --depth 4096 --tg 256 --max-len 131072  # decode at a deep cache
 
 # greedy ids in, ids out
@@ -176,7 +176,7 @@ A=urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ
 # the full 262144 needs the int8 KV cache (~226k with --mtp auto, derived)
 ./build/src/cli/b70-serve $A --served-name agnes --prefix-split-last --kv-cache int8
 
-./build/src/cli/b70-decode $A --bench --pp 4096 --tg 256
+./build/src/cli/b70-decode $A --bench --prefill-length 4096 --tg 256
 ./build/src/cli/b70-decode $A --bench --depth 4096 --tg 256 --lm-head int8
 ./build/src/cli/b70-decode $A --ids tests/golden/prompts/prose.ids --n 64 --prefill > out.ids
 ```
@@ -220,8 +220,8 @@ uvx --from huggingface_hub hf download $O                 # 22.99 GB
     --prefix-split-last --mtp auto
 
 ./build/src/cli/b70-decode $O --bench --depth 4096 --tg 256 --lm-head int8
-./build/src/cli/b70-decode $O --bench --pp 4096 --tg 256
-./build/src/cli/b70-decode $O --bench --pp 4096 --tg 256 --pp-backend l0
+./build/src/cli/b70-decode $O --bench --prefill-length 4096 --tg 256
+./build/src/cli/b70-decode $O --bench --prefill-length 4096 --tg 256 --prefill-backend l0
 ./build/src/cli/b70-decode $O --ids prompt.ids --n 64 --prefill > out.ids
 ./build/src/cli/b70-decode $O --profile --depth 4096
 ```
@@ -271,7 +271,7 @@ python3 tools/oracle/tokenize.py <k2-snapshot> encode --bos prompt.txt > k2.ids
 ./build/src/cli/b70-decode $K --ids k2.ids --n 32                    # decode only, one replay per id
 ./build/src/cli/b70-decode $K --ids k2.ids --n 32 --prefill          # prefill on l0
 ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256 --lm-head int8
-./build/src/cli/b70-decode $K --bench --pp 4096 --tg 256
+./build/src/cli/b70-decode $K --bench --prefill-length 4096 --tg 256
 ./build/src/cli/b70-decode $K --ids k2.ids --n 32 --prefill --max-len auto   # ~43k, derived
 
 # the reference-rounding attention, for the A/B the box will run
@@ -285,8 +285,8 @@ B70_K2_ATTN=eager ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256
   decode-only with the bf16 head, ~49.9k with `--lm-head int8`, ~42.8k when the run
   prefills (bf16 head) - all derived. `b70-decode`'s default is 16384. Long context needs
   int8 KV or two cards (spec 18e, not built).
-- Prefill runs on `l0` only: `--pp-backend l0-int8` and `sycl-tla` are refused by name.
-  Omitting `--pp-backend` is fine.
+- Prefill runs on `l0` only: `--prefill-backend l0-int8` and `sycl-tla` are refused by name.
+  Omitting `--prefill-backend` is fine.
 - Refused: `--kv-cache int8` (spec 18e), `--mtp` (no head), `--profile` (not built yet).
   `--spec lookup` has nothing to run on: it needs verify lists, which only an MTP head
   provides today.

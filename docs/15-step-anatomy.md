@@ -1015,7 +1015,7 @@ layer is the same skeleton with `pf_attn_prep`, one softmax per kv group,
 same list. **Only one term depends on `C`**: QKᵀ is issued per row block of 256
 rows so the kernel stops computing the masked half. Everything else is C-free,
 which is the return on the runtime-`M` rule, and one binary set serves every
-`--pp-chunk` width.
+`--prefill-chunk` width.
 
 The `sycl-tla` backend, kept selectable as a control, is 1201 L0 launches, 384
 SYCL GEMMs and **656 host waits** per chunk, and its scratch is ten times
@@ -1061,7 +1061,7 @@ the fixed term is 70% of the chunk, which is why prefill throughput is monotone
 in the chunk width across the whole available range: 2048 reads 1406.18 t/s
 where 1024 reads 1221.90 and 512 reads 932.37 (2026-09-09). **2048 is the widest
 width this build runs**, and past it is a smaller `PrefillScratch`, not a flag:
-`--pp-chunk 4096` is refused by the build.
+`--prefill-chunk 4096` is refused by the build.
 
 ### The bytes, and the card
 

@@ -31,7 +31,7 @@ PREFILL, per linear layer, per chunk, on the fly:
   Applied to both sides, x R and R^T W, it cancels: (x R)(R^T W) = x W.
 - **The weight scales** (one per output column of the rotated weights) are a
   property of the weights. They are computed once, when the model loads.
-- **`--pp-backend l0-int8`** is the default. `--pp-backend l0` keeps the bf16
+- **`--prefill-backend l0-int8`** is the default. `--prefill-backend l0` keeps the bf16
   prefill.
 
 **Result:** pp4096 **2104.50 t/s**, against 1643.52 for the bf16 prefill in the
