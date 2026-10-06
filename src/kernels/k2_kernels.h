@@ -85,6 +85,23 @@ inline std::string mova_variant(unsigned M, unsigned experts, unsigned top_k, un
   return "k2_mova_M" + std::to_string(M) + "_E" + std::to_string(experts) + "_T" +
          std::to_string(top_k) + "_D" + std::to_string(hidden) + "_N" + std::to_string(n);
 }
+// Spec 18e: the int8 KV cache's binaries (src/kernels/k2/k2_kv8.cl; the CMake spec 18e block).
+// spec 12b's `_KV8` suffix on the bf16 binary's name (whose `Q32KV8` is the heads); MoVA's
+// staged value experts are k2_moe.cl at MOVA_STAGE 1.
+inline std::string attn_prep_kv8_variant(unsigned M, unsigned n, unsigned S, unsigned q, unsigned kv,
+                                         bool v) {
+  return attn_prep_variant(M, n, S, q, kv, v) + "_KV8";
+}
+inline std::string attn_kv8_variant(unsigned M, unsigned T, unsigned q, unsigned kv) {
+  return attn_variant(M, T, q, kv) + "_KV8";
+}
+inline std::string attn_eager_kv8_variant(unsigned M, unsigned T, unsigned q, unsigned kv) {
+  return attn_eager_variant(M, T, q, kv) + "_KV8";
+}
+inline std::string mova_stage_variant(unsigned M, unsigned experts, unsigned top_k, unsigned hidden,
+                                      unsigned n) {
+  return mova_variant(M, experts, top_k, hidden, n) + "_STAGE";
+}
 // embed_gather.cl / argmax.cl at K2's vocabulary (their names elsewhere do not carry VOCAB).
 inline std::string embed_variant(unsigned M, unsigned hidden, unsigned vocab) {
   return "k2_embed_gather_M" + std::to_string(M) + "_D" + std::to_string(hidden) + "_V" +
@@ -103,9 +120,11 @@ inline constexpr unsigned argmax_groups(unsigned vocab) { return (vocab + kArgma
 // at its binding sites), for a head form and an attention form (`eager_attn`:
 // B70_K2_ATTN=eager binds k2_attn_eager.cl's four kernels for k2_attn.cl's two): capture
 // checks each exists before appending a command, and tests/kernels/k2_variant_names_test.cc
-// holds the list to the CMake block's.
+// holds the list to the CMake block's. `kv8` (spec 18e, --kv-cache int8): the int8 cache's
+// writer, MoVA's staged experts and the int8 readers in place of their bf16 binaries (eager
+// keeps k2_attn_eager.cl's binary for its softmax, which never reads the cache).
 inline std::vector<std::string> decode_variants(const model::K2Desc& d, bool int8_head,
-                                                bool eager_attn = false) {
+                                                bool eager_attn = false, bool kv8 = false) {
   const auto lin = [&](model::K2LinearId id) {
     const model::GemvShape s = d.linear(id).shape;
     return gemv_variant(1, s.K, s.N, s.S, s.layout);
@@ -113,7 +132,8 @@ inline std::vector<std::string> decode_variants(const model::K2Desc& d, bool int
   const auto bf16 = [&](unsigned K, unsigned N) {
     return gemv_bf16_variant(1, K, N, gemv_bf16_tiling(N));
   };
-  return {
+  const auto prep = kv8 ? attn_prep_kv8_variant : attn_prep_variant;
+  std::vector<std::string> v = {
       embed_variant(1, d.hidden, d.vocab),
       prep_res_fold_variant(1, d.hidden, 0, kNormG),
       prep_res_fold_variant(1, d.hidden, d.down_s, kNormG),
@@ -125,12 +145,12 @@ inline std::vector<std::string> decode_variants(const model::K2Desc& d, bool int
       lin(model::K2LinearId::DenseGateUp),
       lin(model::K2LinearId::DenseDown),
       silu_variant(1, d.dense_inter, d.gate_up_s),
-      attn_prep_variant(1, d.attn_dense_n(), d.attn_s, d.q_heads, d.kv_heads, true),
-      attn_prep_variant(1, d.attn_sparse_n(), d.attn_s, d.q_heads, d.kv_heads, false),
+      prep(1, d.attn_dense_n(), d.attn_s, d.q_heads, d.kv_heads, true),
+      prep(1, d.attn_sparse_n(), d.attn_s, d.q_heads, d.kv_heads, false),
       eager_attn ? attn_eager_variant(1, kAttnTgt, d.q_heads, d.kv_heads)
-                 : attn_variant(1, kAttnTgt, d.q_heads, d.kv_heads),
+                 : (kv8 ? attn_kv8_variant : attn_variant)(1, kAttnTgt, d.q_heads, d.kv_heads),
       route_variant(1, d.value_experts, d.value_top_k, d.attn_sparse_n(), d.v_off(), d.attn_s),
-      mova_variant(1, d.value_experts, d.value_top_k, d.hidden, d.kv_n()),
+      (kv8 ? mova_stage_variant : mova_variant)(1, d.value_experts, d.value_top_k, d.hidden, d.kv_n()),
       bf16(d.hidden, d.router_n()),
       route_variant(1, d.experts, d.top_k, d.router_n(), 0, 1),
       moe_variant(1, d.experts, d.top_k, d.hidden, d.moe_inter),
@@ -138,6 +158,8 @@ inline std::vector<std::string> decode_variants(const model::K2Desc& d, bool int
       argmax1_variant(1, d.vocab, d.vocab_used),
       argmax2_variant(d.vocab),
   };
+  if (kv8 && eager_attn) v.push_back(attn_eager_kv8_variant(1, kAttnTgt, d.q_heads, d.kv_heads));
+  return v;
 }
 
 // ==== Spec 18c: K2-Horizon prefill ==========================================================
@@ -194,6 +216,14 @@ inline std::string pf_flash_variant(unsigned q, unsigned kv, bool eager, bool ga
   return "k2_pf_flash_attn_Q" + std::to_string(q) + "KV" + std::to_string(kv) +
          (eager ? "_EAGER" : "") + (gated ? "" : "_O");
 }
+// Spec 18e: the int8 cache's prefill writer and flash attention (k2_kv8.cl), `_KV8` on the
+// bf16 binary's name; MoVA's combine is k2_pf_mova's binary (pos 0, into the staging row).
+inline std::string pf_attn_prep_kv8_variant(unsigned ld, unsigned q, unsigned kv, bool v) {
+  return pf_attn_prep_variant(ld, q, kv, v) + "_KV8";
+}
+inline std::string pf_flash_kv8_variant(unsigned q, unsigned kv, bool eager, bool gated) {
+  return pf_flash_variant(q, kv, eager, gated) + "_KV8";
+}
 inline constexpr unsigned pf_flash_wg(unsigned q, unsigned kv) {
   return 16 * (q / kv) * kPfFlashRpw / 8;   // HPW = the GQA group
 }
@@ -205,12 +235,15 @@ inline constexpr unsigned pad256(unsigned n) { return (n + 255) / 256 * 256; }
 
 // Every binary the prefill walk binds (runtime/k2/k2_prefill.cc forms the same names at its
 // binding sites) plus the head's (decode's own binaries, decode_variants), in one list for
-// the variant-names test and the walk's pre-check. Both attention variants are listed.
-inline std::vector<std::string> prefill_variants(const model::K2Desc& d) {
+// the variant-names test and the walk's pre-check. Both attention variants are listed. `kv8`
+// (spec 18e): the int8 cache's writer and flash attention in place of the bf16 ones.
+inline std::vector<std::string> prefill_variants(const model::K2Desc& d, bool kv8 = false) {
   const auto slab = [&](model::K2LinearId id) {
     const model::GemvShape s = d.linear(id).shape;
     return pf_slab_variant(s.K, s.N);
   };
+  const auto prep = kv8 ? pf_attn_prep_kv8_variant : pf_attn_prep_variant;
+  const auto flash = kv8 ? pf_flash_kv8_variant : pf_flash_variant;
   return {
       pf_embed_variant(d.hidden, d.vocab),
       pf_res_fold_variant(d.hidden, 0, kNormG),
@@ -223,10 +256,10 @@ inline std::vector<std::string> prefill_variants(const model::K2Desc& d) {
       slab(model::K2LinearId::DenseDown),
       pf_gemm_variant(false),
       pf_gemm_silu_variant(),
-      pf_attn_prep_variant(pad256(d.attn_dense_n()), d.q_heads, d.kv_heads, true),
-      pf_attn_prep_variant(pad256(d.attn_sparse_n()), d.q_heads, d.kv_heads, false),
-      pf_flash_variant(d.q_heads, d.kv_heads, false, true),
-      pf_flash_variant(d.q_heads, d.kv_heads, true, true),
+      prep(pad256(d.attn_dense_n()), d.q_heads, d.kv_heads, true),
+      prep(pad256(d.attn_sparse_n()), d.q_heads, d.kv_heads, false),
+      flash(d.q_heads, d.kv_heads, false, true),
+      flash(d.q_heads, d.kv_heads, true, true),
       pf_route_variant(d.value_experts, d.value_top_k, pad256(d.attn_sparse_n()), d.v_off()),
       pf_mova_variant(d.value_experts, d.value_top_k, d.hidden, d.kv_n()),
       pf_moe_gemm_variant(d.hidden, d.kv_n(), false, false),
@@ -238,9 +271,9 @@ inline std::vector<std::string> prefill_variants(const model::K2Desc& d) {
   };
 }
 // The K1 test's extra builds (not bound by the walk): the ungated attention, both variants.
-inline std::vector<std::string> prefill_test_variants(const model::K2Desc& d) {
-  return {pf_flash_variant(d.q_heads, d.kv_heads, false, false),
-          pf_flash_variant(d.q_heads, d.kv_heads, true, false)};
+inline std::vector<std::string> prefill_test_variants(const model::K2Desc& d, bool kv8 = false) {
+  const auto flash = kv8 ? pf_flash_kv8_variant : pf_flash_variant;
+  return {flash(d.q_heads, d.kv_heads, false, false), flash(d.q_heads, d.kv_heads, true, false)};
 }
 // ==== Spec 18c: K2-Horizon prefill (end) ====================================================
 

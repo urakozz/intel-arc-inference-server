@@ -336,6 +336,14 @@ __kernel void k2_moe_down(__global const uint* restrict route, __global const us
 //   a_e  = rne(silu(f32(v_e)))            activation=F.silu, bf16
 //   acc  = 0;  for e ascending:  acc = f32(rne(acc + f32(rne(f32(a_e) · w_e))))
 //   kv_v[pos + m][n] = rne(acc)
+//
+// MOVA_STAGE 1 (spec 18e, `--kv-cache int8`): the same v written to row m of a staging row
+// kv_v[m][n] (bf16 [M][MOVA_N]) instead of the cache - k2_kv8.cl's writer rotates and quantises
+// it with the layer's K, so the int8 cache holds the routed mix AFTER the combine. Default 0:
+// the line every existing binary was built from.
+#ifndef MOVA_STAGE
+#define MOVA_STAGE 0
+#endif
 #ifdef MOVA_E
 #if !defined(MOVA_K) || !defined(MOVA_D) || !defined(MOVA_N) || !defined(MOVA_KS)
 #error "k2_mova: MOVA_K, MOVA_D (hidden), MOVA_N (kv heads x head dim) and MOVA_KS must be defined"
@@ -389,7 +397,12 @@ __kernel void k2_mova_value(__global const uint* restrict ctrl, __global const u
       const ushort t_b = rne_bf16(bf16f(a_b) * as_float(rr[R_W + j]));
       acc = bf16f(rne_bf16(acc + bf16f(t_b)));
     }
+#if MOVA_STAGE
+    (void)pos;
+    kv_v[(size_t)m * MOVA_N + n_tile * SG + lane] = rne_bf16(acc);
+#else
     kv_v[(size_t)(pos + m) * MOVA_N + n_tile * SG + lane] = rne_bf16(acc);
+#endif
   }
 }
 #endif  // MOVA_E
