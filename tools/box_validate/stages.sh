@@ -1686,11 +1686,7 @@ st_r24_sweeps() {
   say "# record: docs/BENCHMARKS.md 'Kolibri-1 (spec 20)'"
 }
 
-# ===============================================================================row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
-stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri labels belong to their rows)"
-st_x_rest() {
-  run_tests '.' '' 'agnes ornith kv8 k2 longctx kolibri'
-=======
+# ======================================================================================
 row 25 "spec 18d engine side - K2-Horizon served: K2Engine behind b70-serve, KV-only prefix snapshots, K4 (A4, passkey), the comparison rows (spec 18 §14, plan 18d)"
 rownote 25 "After rows 14 / 15 (K2's decode and prefill on the card) and 21 (its int8 KV); 17 is the host half. 18d adds no kernel: G0's g0.sha is the 'nothing moved' check. Everything after r25.reject needs SNAP_K2; the A4 stages need oracle-out-k2-a4 (r25.a4_ref makes it on the box CPU: hours)."
 rownote 25 "A4 has no bar (spec 18 K4): the engine against 18a's reference (k2_ref.py, bf16 mode, on the int4 checkpoint dequantised) on K2's own set (xml calls, reasoning_effort low, 512 ids) is recorded; 'reasoning' cells (the budget ran out inside the reasoning) are read, not failed."
@@ -1788,8 +1784,8 @@ st_r25_benchy() {
 
 # ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
-stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx labels belong to their rows)"
+stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri labels belong to their rows)"
 st_x_rest() {
-  run_tests '.' '' 'agnes ornith kv8 k2 longctx'
+  run_tests '.' '' 'agnes ornith kv8 k2 longctx kolibri'
   finish
 }
