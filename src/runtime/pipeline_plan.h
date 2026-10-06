@@ -107,6 +107,10 @@ struct PpLandingLayout {
   size_t total = 0;
 };
 PpLandingLayout pp_landing_layout(const model::ModelDesc& d);
+// Spec 20c: the same layout from the two regions' sizes alone - the form a model without a
+// ModelDesc (Kolibri-1, its own engine) builds its hand-off with. The ModelDesc form above is
+// this one at (kM rows x hidden bf16, norm_sumsq's size), byte for byte.
+PpLandingLayout pp_landing_layout(size_t resid_bytes, size_t sumsq_bytes);
 // Device d's hand-off bytes: device 0 its send counter, device 1 the landing + state words.
 size_t pp_link_bytes(const model::ModelDesc& d, uint32_t device);
 
