@@ -754,6 +754,24 @@ class DriverTest(unittest.TestCase):
         self.assertIn("kol_pf_flash_attn_Q48KV4_W513_R4096_EAGER", out)
         self.assertIn("--prefill-length 131072 --tg 16 --max-len 140000 --lm-head int8", out)
         self.assertNotIn("r26.speed", re.findall(r"^--- (\S+)", self.run_driver("--dry-run", "--only", "r26").stdout, re.M))
+        # row 27 (spec 16d): host, K0 and the refusals first, the engine gates before the server,
+        # the server before the long-context rows; P3 with MTP and the benchy rows opt-in
+        out = self.run_driver("--dry-run", "--only", "r27").stdout
+        order = re.findall(r"^--- (\S+)", out, re.M)
+        self.assertEqual(order, ["pre", "r27.host", "r27.k0", "r27.reject", "r27.mtp", "r27.mtp_kv8", "r27.prefix",
+                                 "r27.prefix_kv8", "r27.cli_mtp", "r27.serve", "r27.golden", "r27.agnes",
+                                 "r27.ornith", "r27.s3", "r27.p3"])
+        self.assertIn("--re '^(pp_serve_plan_test|pp_serve_test|pipeline_args_test|pipeline_plan_test)$'", out)
+        self.assertIn("--re '^cli_reject_serve_pp(_kolibri|_value|_device|_sycl|_split_alone|_handoff_value)?$'", out)
+        self.assertIn("env ZE_AFFINITY_MASK=0,1 ctest", out)
+        self.assertIn("ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='--pp 2 --mtp 3' timeout 3600 build/tests/golden_server_test", out)
+        self.assertRegex(out, r"ZE_AFFINITY_MASK=0,1 PORT=\d+ SEEDED=1 tools/box_validate/serve_probe\.sh \S+ --pp 2 --mtp auto --prefix-split-last")
+        self.assertIn("MAX_LEN=262144 N_TARGET=250000 DECODE_ARGS='--pp 2' tools/probe/passkey.sh l0-int8", out)
+        self.assertIn("--mtp auto --pp 2 --pipeline-handoff peer", out)
+        out = self.run_driver("--dry-run", "--only", "r27", "--with", "r27.p3_mtp,r27.benchy").stdout
+        order = re.findall(r"^--- (\S+)", out, re.M)
+        self.assertEqual(order[-2:], ["r27.p3_mtp", "r27.benchy"])
+        self.assertIn("SERVE_AFFINITY=0,1 SERVE_ARGS='--pp 2' tools/probe/serve_benchy.sh", out)
         # row 16's A4 on Ornith's own set (made on the Mac), opt-in; the Mac steps manual
         out = self.run_driver("--dry-run", "--only", "r16.a4").stdout
         self.assertIn("oracle-out-ornith-a4/set", out)
