@@ -1,6 +1,6 @@
 #!/bin/bash
 # Spec 6 K3: passkey retrieval at ~120k context, run ON THE BOX from the repo root.
-#   tools/probe/passkey.sh [pp-backend ...]      default: l0-int8 l0
+#   tools/probe/passkey.sh [prefill-backend ...] default: l0-int8 l0
 # For each placement (0.05, 0.5, 0.95): tools/probe/passkey.py builds the prompt in the
 # oracle container, b70-decode prefills it at --max-len 131072 and generates 8 ids
 # greedily, the container decodes them, and the placement PASSES if "71432" is in the text.
@@ -30,7 +30,7 @@ for b in "${backends[@]}"; do
   for p in $places; do
     # shellcheck disable=SC2086 # DECODE_ARGS is a list of flags
     ids=$(./build/src/cli/b70-decode "$MODEL" --ids "$dir/p$p.ids" --n 8 --prefill \
-          --pp-backend "$b" --max-len "$MAX_LEN" ${DECODE_ARGS:-} 2> "$dir/p$p.$b.log" | tr '\n' ' ')
+          --prefill-backend "$b" --max-len "$MAX_LEN" ${DECODE_ARGS:-} 2> "$dir/p$p.$b.log" | tr '\n' ' ')
     text=$(tools/oracle/run_in_container.sh "python3 -P tools/oracle/tokenize.py \"\$SNAP\" decode $ids" 2>/dev/null)
     if printf '%s' "$text" | grep -q 71432; then verdict=PASS; pass=$((pass+1)); else verdict=FAIL; fi
     prefill=$(grep -E "^prefill:|memory:|^mtp:" "$dir/p$p.$b.log" | tr '\n' ' ')

@@ -3,7 +3,8 @@
 # GPU lock: prints N alone (b70-decode's "max_len: auto -> N" line).
 #   tools/box_validate/auto_len.sh <snapshot> [b70-decode flags...]
 # Default flags `--depth 16 --tg 1` (decode only). The plan counts the prefill scratch only
-# when the run prefills (spec 6 §10, ruling R7), so pass `--pp 256 --tg 1 --pp-backend B` to
+# when the run prefills (spec 6 §10, ruling R7), so pass
+# `--prefill-length 256 --tg 1 --prefill-backend B` to
 # get the length a `--prefill` run (passkey.sh) is planned at.
 cd "$(dirname "$0")/../.." || exit 2
 [ $# -ge 1 ] || { echo "usage: $0 <snapshot> [b70-decode flags...]" >&2; exit 2; }

@@ -643,12 +643,12 @@ class DriverTest(unittest.TestCase):
         # Ornith prefills since 15d and is served since 15e: nothing expects those refusals
         self.assertNotIn("printing /prefill of a mixture-of-experts model/", out)
         self.assertNotIn("spec 15e/", out)
-        self.assertRegex(out, r"b70-serve \S+ --port \d+ --max-len 16384 --pp-backend sycl-tla\n"
+        self.assertRegex(out, r"b70-serve \S+ --port \d+ --max-len 16384 --prefill-backend sycl-tla\n"
                               r" +\(must exit non-zero without a crash, printing /prefills on the L0 backends only/\)")
         # K2: b70-serve's refusal as main prints it; 18c's CLI rejects in row 15, 18b's in row 14
         self.assertIn("printing /is not served yet: spec 18d.s engine side/", out)
         self.assertIn("--re '^cli_reject_mtp_k2$'", out)
-        self.assertIn("--re '^cli_reject_k2_(pp_int8|prefill_sycl)$'", out)
+        self.assertIn("--re '^cli_reject_k2_(prefill_length_int8|prefill_sycl)$'", out)
         self.assertNotIn("cli_reject_k2_prefill,", out)
         # Ornith's binaries since spec 15 §13 (the int4 checkpoint): Qwen3.8's greedy argmax
         # (vocab_used 248077) and the int4 a||b, in the binary checks of rows 10, 13 and 16

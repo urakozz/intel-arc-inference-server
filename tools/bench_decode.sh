@@ -5,21 +5,23 @@
 #   tools/bench_decode.sh                        3 runs at depth 4096, tg 256
 #   tools/bench_decode.sh --depth 64             the doc 07 #12 experiment
 #   tools/bench_decode.sh --runs 1 --no-build    one run against what is already built
-#   tools/bench_decode.sh --pp 4096              3 runs of spec 2's PREFILL at kC = 2048
-#   tools/bench_decode.sh --pp 4096 --pp-chunk 1024
-#   tools/bench_decode.sh --pp 4096 --pp-backend l0    spec 2.1's L0 GEMM backend
+#   tools/bench_decode.sh --prefill-length 4096  3 runs of spec 2's PREFILL at kC = 2048
+#   tools/bench_decode.sh --prefill-length 4096 --prefill-chunk 1024
+#   tools/bench_decode.sh --prefill-length 4096 --prefill-backend l0    spec 2.1's L0 GEMM backend
 #   tools/bench_decode.sh --depth 4096 --max-len 131072 spec 6: the 128k decode variants
-#   B70_PREFILL_ATTN=composed tools/bench_decode.sh --pp 4096   spec 6's reference attention
+#   B70_PREFILL_ATTN=composed tools/bench_decode.sh --prefill-length 4096   spec 6's reference attention
 #   tools/bench_decode.sh --lm-head int8         spec 9: the int8 lm_head (rows say int8-head)
 #
-# `--pp N` replaces `--depth N` with `Engine::prefill` (spec 2, plan 6e Task 1)
+# `--prefill-length N` replaces `--depth N` with `Engine::prefill` (spec 2, plan 6e Task 1)
 # and makes the binary print a SECOND markdown row -- `| ... <backend> pp | N |
 # C | ms | t/s |` -- beside the unchanged tg row. This script then medians
 # BOTH: the tg row on t/s as it always has, and the pp row on its own t/s. It
 # is exclusive with --depth for the same reason the CLI refuses the pair: the
-# prefilled ids ARE the depth. `--pp-backend sycl-tla|l0|l0-int8` (spec 2.1 §3.5, spec 5)
-# belongs to --pp the same way --pp-chunk does, and both PP_BACKEND (env) and
-# --pp-backend (flag) are refused without it.
+# prefilled ids ARE the depth. `--prefill-backend sycl-tla|l0|l0-int8` (spec 2.1 §3.5, spec 5)
+# belongs to --prefill-length the same way --prefill-chunk does, and both PP_BACKEND (env) and
+# --prefill-backend (flag) are refused without it. (These were --pp, --pp-chunk and --pp-backend
+# until 2026-10-06, when b70-decode's --pp became vLLM's pipeline-parallel size; the old
+# spellings are refused here naming the new ones.)
 #
 # **The grade is a property of the box, not of this script, so this script
 # measures it instead of asserting it.** Record grade needs a provably idle
@@ -99,9 +101,17 @@ need_value() {
 while [ $# -gt 0 ]; do
   case "$1" in
     --depth) need_value "$@"; DEPTH="$2"; DEPTH_SET=1; shift 2 ;;
-    --pp)       need_value "$@"; PP="$2";       shift 2 ;;
-    --pp-chunk) need_value "$@"; PP_CHUNK="$2"; shift 2 ;;
-    --pp-backend) need_value "$@"; PP_BACKEND="$2"; shift 2 ;;
+    --prefill-length)  need_value "$@"; PP="$2";       shift 2 ;;
+    --prefill-chunk)   need_value "$@"; PP_CHUNK="$2"; shift 2 ;;
+    --prefill-backend) need_value "$@"; PP_BACKEND="$2"; shift 2 ;;
+    --pp|--pp-chunk|--pp-backend)
+      case "$1" in
+        --pp) new="--prefill-length N (b70-decode's --pp is the pipeline-parallel size now)" ;;
+        --pp-chunk) new="--prefill-chunk C" ;;
+        *) new="--prefill-backend B" ;;
+      esac
+      echo "bench_decode.sh: $1 was renamed on 2026-10-06: $new" >&2
+      exit 2 ;;
     --tg)    need_value "$@"; TG="$2";    shift 2 ;;
     --runs)  need_value "$@"; RUNS="$2";  shift 2 ;;
     --model) need_value "$@"; MODEL="$2"; shift 2 ;;
@@ -126,18 +136,18 @@ fi
 # a worse harness than one that costs nothing.
 if [ -n "$PP" ]; then
   if ! [ "$PP" -ge 1 ] 2>/dev/null; then
-    echo "bench_decode.sh: --pp must be a positive integer, got '$PP'" >&2
+    echo "bench_decode.sh: --prefill-length must be a positive integer, got '$PP'" >&2
     exit 2
   fi
   if [ -n "${DEPTH_SET:-}" ]; then
-    echo "bench_decode.sh: --pp and --depth are exclusive (the prefilled ids ARE the depth)" >&2
+    echo "bench_decode.sh: --prefill-length and --depth are exclusive (the prefilled ids ARE the depth)" >&2
     exit 2
   fi
 elif [ -n "$PP_CHUNK" ]; then
-  echo "bench_decode.sh: --pp-chunk belongs to --pp" >&2
+  echo "bench_decode.sh: --prefill-chunk belongs to --prefill-length" >&2
   exit 2
 elif [ -n "$PP_BACKEND" ]; then
-  echo "bench_decode.sh: --pp-backend belongs to --pp" >&2
+  echo "bench_decode.sh: --prefill-backend belongs to --prefill-length" >&2
   exit 2
 fi
 
@@ -167,9 +177,9 @@ MAXLEN_ARGS=""
 [ -n "$LM_HEAD" ] && MAXLEN_ARGS="$MAXLEN_ARGS --lm-head $LM_HEAD"
 
 if [ -n "$PP" ]; then
-  MODE_ARGS="--pp $PP"
-  [ -n "$PP_CHUNK" ] && MODE_ARGS="$MODE_ARGS --pp-chunk $PP_CHUNK"
-  [ -n "$PP_BACKEND" ] && MODE_ARGS="$MODE_ARGS --pp-backend $PP_BACKEND"
+  MODE_ARGS="--prefill-length $PP"
+  [ -n "$PP_CHUNK" ] && MODE_ARGS="$MODE_ARGS --prefill-chunk $PP_CHUNK"
+  [ -n "$PP_BACKEND" ] && MODE_ARGS="$MODE_ARGS --prefill-backend $PP_BACKEND"
   echo "bench: $MODEL, PREFILL $PP ids (chunk ${PP_CHUNK:-default kC}), tg $TG, $RUNS run(s), sha $SHA, device ${ZE_AFFINITY_MASK:-unset (box default 0)}, backend ${PP_BACKEND:-build default}, attention ${B70_PREFILL_ATTN:-default (flash)}, max_len ${MAX_LEN:-default}" >&2
   echo "       iterate grade unless the box is provably idle -- see this script's header" >&2
 else
@@ -198,7 +208,7 @@ for i in $(seq 1 "$RUNS"); do
   done <<< "$out"
 done
 
-# The pp row first when there is one: it is what a --pp invocation was for.
+# The pp row first when there is one: it is what a --prefill-length invocation was for.
 # Columns are `| b70-decode <sha> <backend> pp | <N ids> | <chunk> | <ms total> | <t/s> |`,
 # so $5 is the millisecond total and $6 the rate -- the same two positions the
 # tg row uses, which is why one awk shape serves both.
