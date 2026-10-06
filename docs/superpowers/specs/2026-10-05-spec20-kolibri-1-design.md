@@ -1,6 +1,7 @@
 # Spec 20 - Kolibri-1 (Aleph Alpha), German and English, on two B70s
 
-**Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**.
+**Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**. 20a built
+2026-10-06 (§10).
 
 **Why this model:** Aleph Alpha's Kolibri-1 is a German- and English-focused reasoning MoE with tool
 calling, Apache-2.0, released 2026-10-03. Spec 20 serves it in this engine's own format (int4 g64
@@ -103,8 +104,8 @@ This is the checklist 20b executes. Nothing here is left to the executor's taste
 |---|---|---|
 | source | `Aleph-Alpha/Kolibri-1-BF16` (bf16, 156 GB) | never the FP8 release: no double rounding |
 | model class | 20a's transformers-compatible `Kolibri1ForCausalLM`, checked against the vLLM plugin (KL0) | AutoRound loads the model through transformers |
-| tool | AutoRound, the version pinned in `tools/quantize_qwen38_tuned.sh` (v0.14.2), upgraded only if it cannot handle 384 per-expert linears, and then re-checked for the shard-writer bug that script documents | the export format our loader reads |
-| scheme | `--scheme W4A16 --group_size 64` symmetric | the engine's int4 g64 kernels; `w = (q - 8) * scale`, `qzeros` 0x77777777 |
+| tool | AutoRound, intel/auto-round main at commit `6afaecdbe4092dc803f3e91026fe81a65b64b372` (0.17.0) - the operator's ruling of 2026-10-05, replacing the v0.14.2 pin of `tools/quantize_qwen38_tuned.sh` (which stays pinned for the Qwen3.8 checkpoints); recorded in the script (`AR_COMMIT`), `kolibri_recipe.json` and the card; re-checked on a tiny Kolibri: complete per-expert `qweight` / `scales` / `qzeros` in the `auto_round:auto_gptq` form, accepted by `check` (the 0.14.2-era lm_head shard-writer bug cannot apply: lm_head stays bf16) | the export format our loader reads |
+| scheme | `--scheme W4A16 --group_size 64` symmetric (AutoRound's default; 0.17.0 has `--asym`, no `--sym`) | the engine's int4 g64 kernels; `w = (q - 8) * scale`, `qzeros` 0x77777777 |
 | format | `--format auto_round:auto_gptq` | what `loader::QuantConfig::parse` accepts (docs/13) |
 | quantised | every routed expert's `gate_proj` / `up_proj` / `down_proj`; attention `q/k/v/o_proj` only if decision 2 says int4 | the bytes |
 | left in bf16 | `mlp.gate` (router), `moe.router.expert_bias`, `shared_experts.*`, all norms, `embed_tokens`, `lm_head` (no `--quant_lm_head`) | every token reads them; routing must not move; the engine builds the int8 head at load (spec 9) |
@@ -231,3 +232,32 @@ forward with the reference, so kernels and capture can be tested before spec 16 
   Padakovec/Kolibri-1-W4A16-GPTQ and RedHatAI/Qwen3-8B-quantized.w4a16 (asymmetric) and
   halt95/Qwen3.8-Flash-Next-W4A16-Merlin (an int8 group) are refused. Box validation: queue
   row 18.
+
+## 10. 20a as built (2026-10-06)
+
+Plan: `docs/superpowers/plans/2026-10-05-spec20a-kolibri-reference-and-quant.md`. Facts:
+`docs/probe-kolibri-2026-10-05.md`. No card, no weights: small files and range-fetched headers.
+
+- **The model class:** `tools/oracle/third_party/kolibri1/{modeling,configuration}_kolibri1.py`,
+  `Kolibri1ForCausalLM` for transformers 5.x (Apache-2.0 header naming the plugin), names = the
+  checkpoint's (58353), per-expert `nn.Linear`, the router not an `nn.Linear`, masks built per layer
+  (AutoRound replays block 0's kwargs - a sliding layer - into every block), KV-cached `generate()`.
+- **The reference:** `tools/oracle/kolibri_ref.py` (bf16 / int4 by name, `run` / `ppl` / `hfcheck` /
+  `facts`, layer-major `run_batch`). **KL0 (tiny weights): passed** - `test_kolibri_ref.py`, 21
+  tests, one per trap of §1, and the port == the reference **bitwise** in bf16 eager (prompt and
+  cached decode, window 5 and 513) and in fp32. KL0's real-model perplexity is pending (weights).
+- **Pinned by 20a** (§4's open points): `head_dtype: float32` = vLLM's fp32 lm_head (bf16 operands,
+  fp32 accumulation and logits); the window is 513 keys **including** the query (i - 513 < j <= i);
+  tool calls are **hermes JSON** inside `<tool_call>` (the plugin registers `Hermes2ProToolParser`) -
+  20e reuses the JSON parser; EOS {127906, 127901}; no BOS; the router's logits are fp32, never
+  bf16-rounded; ties to the lower id; the combine is ascending-id fp32 + shared, one rounding.
+- **The quantisation (20b's tool):** `tools/quantize_kolibri1.sh` + `tools/quantize/kolibri/`, §3.1
+  stage by stage (calib, coverage, rtn, tune, eval, check, card), resumable, `--dry-run`; ran end
+  to end on a tiny random Kolibri on the Mac (`tools/quantize/README.md`). Additions to §3.1 found
+  on the way: AutoRound's iters 0 is "optimised RTN" unless `disable_opt_rtn` - the baseline uses
+  plain RTN; on a CPU without bf16 AutoRound writes the unquantised tensors in fp32 - the script
+  restores the source's bf16 bytes after a bitwise check; the held-out German documents are a
+  different Wikipedia shard (00019) from the calibration ones (00000), revision pinned.
+- **Open:** decision 1 (where 20b runs; the script prints the first block's tuning time - x 50 is
+  the estimate), decision 2 (from 20b's table).
+
