@@ -637,8 +637,15 @@ class DriverTest(unittest.TestCase):
                              ("r21.k3", "r21.golden"), ("r21.k1", "r21.prefill"), ("r21.prefill", "r21.golden_prefill"),
                              ("r21.cli", "r22.host")):
             self.assertLess(order.index(first), order.index(later), (first, later))
+        # row 25 (spec 18d's engine side): after rows 21 / 23, K0 first, the host and the refusals
+        # before the card, the snapshots and the server before the chat and K4
+        for first, later in (("r23.s2_64k", "r25.k0"), ("r25.k0", "r25.host"), ("r25.host", "r25.reject"),
+                             ("r25.reject", "r25.snapshot"), ("r25.snapshot", "r25.snapshot_kv8"),
+                             ("r25.serve", "r25.chat"), ("r25.chat", "r25.passkey"), ("r25.passkey", "r25.toolcall"),
+                             ("r25.toolcall", "x.rest")):
+            self.assertLess(order.index(first), order.index(later), (first, later))
         for optin in ("r15.p0", "r15.speed", "r15.golden_eager", "r16.mtp_rows", "r16.passkey", "r16.benchy",
-                      "r21.passkey", "r21.speed"):
+                      "r16.a4", "r21.passkey", "r21.speed", "r25.a4_ref", "r25.a4", "r25.benchy"):
             self.assertNotIn(optin, order)
         # the server rows: one serve_run.sh per arm and round, round 2 in reversed order
         arms = re.findall(r"serve_run\.sh \S+/r2\.auto_rows/(\S+) ", out)
@@ -651,8 +658,10 @@ class DriverTest(unittest.TestCase):
         self.assertNotIn("spec 15e/", out)
         self.assertRegex(out, r"b70-serve \S+ --port \d+ --max-len 16384 --prefill-backend sycl-tla\n"
                               r" +\(must exit non-zero without a crash, printing /prefills on the L0 backends only/\)")
-        # K2: b70-serve's refusal as main prints it; 18c's CLI rejects in row 15, 18b's in row 14
-        self.assertIn("printing /is not served yet: spec 18d.s engine side/", out)
+        # K2: b70-serve serves it since 18d (row 25) and refuses --mtp before the device; 18c's CLI
+        # rejects in row 15, 18b's in row 14
+        self.assertIn("--mtp 1\n      (must exit non-zero without a crash, printing /K2-Horizon has no MTP head/)", out)
+        self.assertNotIn("is not served yet", out)
         self.assertIn("--re '^cli_reject_mtp_k2$'", out)
         self.assertIn("--re '^cli_reject_k2_(prefill_length_int8|prefill_sycl)$'", out)
         self.assertNotIn("cli_reject_k2_prefill,", out)
@@ -716,6 +725,30 @@ class DriverTest(unittest.TestCase):
         out = self.run_driver("--dry-run", "--only", "r17").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order, ["pre", "r17.host", "r17.k0"])
+        # row 25 (spec 18d's engine side): the default stages, then K4's A4 and the comparison rows
+        out = self.run_driver("--dry-run", "--only", "r25", "--with", "r25.a4_ref,r25.a4,r25.benchy").stdout
+        order = re.findall(r"^--- (\S+)", out, re.M)
+        self.assertEqual(order, ["pre", "r25.k0", "r25.host", "r25.reject", "r25.snapshot", "r25.snapshot_kv8",
+                                 "r25.serve", "r25.chat", "r25.passkey", "r25.toolcall", "r25.a4_ref", "r25.a4",
+                                 "r25.benchy"])
+        self.assertIn("--re '^(k2_serve_test|k2_server_test|toolcall_k2_test)$'", out)
+        self.assertIn("--re '^cli_reject_serve_(k2_mtp|k2_spec_mtp|k2_lookup|k2_prefill_int8|pp)$'", out)
+        self.assertIn("--re '^k2_prefix_gpu(_split)?_test$' --label k2", out)
+        self.assertIn("--re '^k2_prefix_gpu_kv8_test$' --label k2", out)
+        self.assertIn("build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode "
+                      "tests/golden/prompts urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ --chat", out)
+        self.assertIn("MAX_LEN=32768 N_TARGET=31000 tools/probe/k2_passkey.sh bf16", out)
+        self.assertIn("SEEDED=1 tools/box_validate/serve_probe.sh urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ "
+                      "--kv-cache int8", out)
+        self.assertIn("tools/toolcall/a4_ref.sh k2 ref", out)
+        self.assertIn("N_NEW=512 LM_HEAD=int8 tools/toolcall/engine_generate.sh", out)
+        self.assertIn("score.py $HOME/", out)
+        # row 16's A4 on Ornith's own set (made on the Mac), opt-in; the Mac steps manual
+        out = self.run_driver("--dry-run", "--only", "r16.a4").stdout
+        self.assertIn("oracle-out-ornith-a4/set", out)
+        self.assertIn("l0-int8 l0-int8-i8head l0", out)
+        out = self.run_driver("--dry-run", "--with", "r16.a4_ref").stdout
+        self.assertNotIn("--- r16.a4_ref", out)   # manual: printed in the summary, never run
         r = self.run_driver("--dry-run", "--only", "r99", ok=False)
         self.assertEqual(r.returncode, 2)
         out = self.run_driver("--dry-run", "--redo", "r1").stdout
