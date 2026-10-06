@@ -43,4 +43,10 @@ bool SyncEvent::signalled() const {
   ZE_CHECK(r);
   return true;
 }
+bool SyncEvent::host_wait(uint64_t timeout_ns) const {
+  const ze_result_t r = zeEventHostSynchronize(e_, timeout_ns);
+  if (r == ZE_RESULT_NOT_READY) return false;
+  ZE_CHECK(r);
+  return true;
+}
 }  // namespace l0

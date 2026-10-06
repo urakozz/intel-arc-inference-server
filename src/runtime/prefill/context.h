@@ -85,6 +85,24 @@ class Context {
   ze_device_handle_t ze_device() const;
   ze_command_list_handle_t l0_list() const;
 
+  // Spec 16c (the two-card prefill pipeline, runtime/prefill/pipeline_prefill.cc): appended
+  // on the immediate list in order with the launches; never inside a recording.
+  //   copy       zeCommandListAppendMemoryCopy (the hand-off's rows, a block-end shadow)
+  //   signal     a barrier that signals `e` once everything appended before it has completed
+  //   wait_event everything appended after it waits until `e` is signalled
+  //   timestamp  the device's global timestamp, written to `dst` when the list reaches it
+  void copy(void* dst, const void* src, size_t bytes);
+  void signal(ze_event_handle_t e);
+  void wait_event(ze_event_handle_t e);
+  void timestamp(uint64_t* dst);
+  // wait() with a bound: true once everything appended has completed, false when
+  // `timeout_ns` passed first (the list keeps running). L0 only: a session with a SYCL side
+  // has no bounded wait and throws.
+  bool wait_for(uint64_t timeout_ns);
+  // Two of timestamp()'s values as milliseconds (the device's timer frequency and its
+  // timestamp width, read once).
+  double timestamp_ms(uint64_t begin, uint64_t end) const;
+
   // Launches appended to the L0 list since construction (or the last
   // reset_launches()). The prefill step's anatomy report is launch arithmetic,
   // and `gdn_chunk`'s ten-launches-per-GDN-layer contract is asserted through
