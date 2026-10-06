@@ -86,6 +86,8 @@ case "${1:-}" in
       test -s oracle-out-k2-a4/set/manifest.json
     have oracle_k2_a4 "oracle-out-k2-a4/ with K2's set and 36 <name>.bf16.txt (18a's reference on it: --with r25.a4_ref)" \
       bash -c 'test -s oracle-out-k2-a4/set/manifest.json && test "$(ls oracle-out-k2-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
+    have oracle_kolibri_a4 "oracle-out-kolibri-a4/ with 36 <name>.bf16.txt (spec 20e KL4: the bf16 source's reference on tests/golden/toolcall-kolibri-de, made wherever 20b runs - tools/toolcall/a4_ref.sh kolibri ref - then --push-data)" \
+      bash -c 'test "$(ls oracle-out-kolibri-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     have oracle_ornith_a4 "oracle-out-ornith-a4/ with Ornith's set and 36 <name>.bf16.txt (spec 15e Task 3: tools/toolcall/a4_ref.sh ornith set / ref on the Mac, then --push-data)" \
       bash -c 'test -s oracle-out-ornith-a4/set/manifest.json && test "$(ls oracle-out-ornith-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     have oracle_image "the oracle container image (tools/oracle/run_in_container.sh; passkey ids)" \
