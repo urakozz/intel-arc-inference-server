@@ -446,6 +446,25 @@ ms/id per K; `probe_mtp_steps` prices the table). No default K is chosen for Orn
 **Not built:** the int8 KV cache at Ornith's heads; an int4-checkpoint lm_head at M > 1 (as for
 Qwen3.8); `--spec lookup` is untouched (it works on Ornith wherever the verify lists do).
 
+**Task 3's Mac side (2026-10-06, branch `serving-18d-15e`).** Everything plan 15e Task 3 needs
+before the card, written and host-tested; nothing run on weights (the Mac's one oracle container
+slot was taken). **A4 on Ornith**: its calls are Qwen XML, so `tools/toolcall/score.py` reads them
+on its unchanged path. The set is Ornith's own: `make_set.py --from tests/golden/toolcall` with
+Ornith's template and tokenizer (the 36 conversations of Qwen3.8's set, `enable_thinking` false,
+no template kwargs). The reference is the **int4 checkpoint's** (15a's rule: the engine's own
+weights, so a mismatch is the engine's and not the quantisation's): `oracle_generate.py` on a
+`qwen3_5_moe` checkpoint runs `tools/oracle/ornith_ref.py`'s layer-streamed
+`Qwen3_5MoeForCausalLM` (experts dequantised on demand), greedy through its KV cache, 192 new ids,
+stopping after an EOS id (`[248046, 248044]`). `tools/toolcall/a4_ref.sh ornith set` /
+`ornith ref` run both on the Mac (agnes-ref-img, 28 GB cap, `ref` detached; refused while another
+container of the image runs) into `oracle-out-ornith-a4/`, which `box_validate.sh --push-data`
+copies to the box; there r16.a4 (opt-in) runs `engine_generate.sh` on the set (l0-int8 with the
+bf16 and the int8 head, l0), scores it and sends the set through `b70-serve`. **Prefix caching C2**
+on Ornith is r16.prefix (`prefix_gpu_test` on l0-int8, l0 and with `--mtp 3`); **passkey** at 120k
+and 250k r16.passkey (opt-in); determinism and replay are rows 10 / 13's gates; the comparison rows
+r16.benchy (opt-in). **The record's skeleton**: `docs/BENCHMARKS.md` "Ornith 1.5 MoE (spec 15)",
+every cell pending its stage. No bar is set blind (A4: recorded beside Qwen3.8's 25/36).
+
 
 ## 13. Amendment - 2026-10-06: the real int4 checkpoint
 

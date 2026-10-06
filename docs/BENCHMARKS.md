@@ -821,6 +821,44 @@ Setup:
 | server | `mtp_server_test`: EOS, stop strings and `max_tokens` inside a burst, and a streamed tool call in bursts of 1-4. Byte-identical to `--mtp 0` under 4 burst patterns, and the engine is left at the same position. |
 | M5, spec 7 C2 with MTP on | **pending** plan 7c's merge. `prefix_gpu_test` lives on `spec7c-server-prefix-cache` and loads no head. The merge adds an argv[6] = K there: `loader::load(..., K > 0)` and `EngineAdapter(eng, vocab, K)`. Then one command: `build/tests/prefix_gpu_test "$SNAP" tests/golden/prompts l0-int8 1 0 3`. |
 
+## Ornith 1.5 MoE (spec 15)
+
+**Nothing here is measured yet.** Ornith 1.5 35B-A3B (`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`,
+the int4 checkpoint, spec 15 §13) was built without the card (specs 15c-15e); this section is the
+record's skeleton (plan 15e Task 3 Step 3), each cell filled from the box-validation-queue stage
+named beside it. Every row will state the card, the clocks if known, the quant and the `lm_head`
+form (plan 15e Review Focus 5).
+
+| what | configuration | number | stage |
+|---|---|---|---|
+| decode at depth 4k / 32k / 128k / 250k | one B70, int8 head, `--max-len auto` | pending | r10.speed |
+| prefill pp4096 / pp32768 / pp130816 | one B70, l0-int8 and l0, int8 head | pending | r13.speed |
+| A4 tool calls, scenarios matching the reference's first call | Ornith's own set (36), the int4 checkpoint's CPU reference (`ornith_ref.py`), 192 ids; l0-int8 bf16 / int8 head, l0 | pending (Qwen3.8: 25/36) | r16.a4 |
+| prefix caching C2 | `prefix_gpu_test` l0-int8, l0, l0-int8 `--mtp 3` | pending | r16.prefix |
+| passkey | 120k (l0-int8, l0), 250k (l0-int8, max_len 262144) | pending | r16.passkey |
+| MTP `--mtp off / 1 / 3 / auto` | b70-serve, golden + A4 prompts, 256 ids | pending | r16.mtp_rows |
+| llama-benchy pp4096 tg256 depth 1 | b70-serve, `--no-cache --exact-tg --latency-mode generation` | pending | r16.benchy |
+| llama-benchy prefix caching, follow-up after 4k / 16k / 32k | cache on vs off | pending | r16.benchy |
+| vLLM / llama.cpp on the same card | if either serves Ornith on XPU / SYCL | not run | - |
+
+## K2-Horizon (spec 18)
+
+**Nothing here is measured yet.** K2-Horizon MoVA 36B-A4B
+(`urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ`) runs its own engine (specs 18b-18e,
+built without the card). The skeleton of plan 18d Task 3's record; the configurations differ from
+the vLLM baseline's and every row says how (spec 18 Review Focus 4).
+
+| what | configuration | number | stage |
+|---|---|---|---|
+| decode tg256 at depth 4096 / 16384 / 32768 | one B70, bf16 and int8 head, bf16 KV | pending (roofline ~190 t/s, derived) | r14.speed |
+| prefill pp4096 / pp16384 / pp32768 | one B70, l0, flash and eager attention | pending (~3,400 t/s at 4096, derived) | r15.speed |
+| int8 KV against bf16 KV | depth 4096 / 32768 / 65536 | pending | r21.speed |
+| A4 tool calls | K2's own set (xml, reasoning_effort low, 512 ids) against 18a's reference; bf16 / int8 head | pending (no bar) | r25.a4 |
+| passkey 5 / 50 / 95 % | 32k and the bf16-KV auto length (bf16 KV); the int8-KV ceiling | pending | r25.passkey, r21.passkey |
+| llama-benchy pp4096 tg256 depth 1 | b70-serve on ONE card, 32k bf16 KV; int8 KV at auto | pending | r25.benchy |
+| llama-benchy prefix caching, follow-up after 4k / 16k / 32k | cache on vs off | pending | r25.benchy |
+| **vLLM baseline** | **two** B70s, PP = 2 (layers 25 / 23), fp8 KV, 390,016-token context | **44.43 t/s decode** (measured 2026-09-16, spec 18 §7) | - |
+
 ## Correctness
 
 Numerics are gated, not eyeballed. The full protocol is in
