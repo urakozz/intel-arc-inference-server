@@ -196,10 +196,16 @@ void KolibriEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       require(rows <= L.layout.resid_bytes && sums == L.layout.sumsq_bytes,
               "the prefill landing buffer does not hold the chunk's rows and exactly its norm sums");
       L.event->host_reset();
-      run_dev(0, pos, C);
-      D0.cx.copy(land, D0.s.resid.ptr(), rows);
-      D0.cx.copy(land + L.layout.sumsq_off, D0.s.sumsq_r.ptr(), sums);
-      D0.cx.signal(L.event->handle());
+      // P4's test hook (drop_next_handoff, decode's): device 0's half of this chunk is not appended - a
+      // hand-off that never arrives. Not under replay (device 1's replay waits without a bound).
+      const bool send = !drop_next_ || replay;
+      drop_next_ = false;
+      if (send) {
+        run_dev(0, pos, C);
+        D0.cx.copy(land, D0.s.resid.ptr(), rows);
+        D0.cx.copy(land + L.layout.sumsq_off, D0.s.sumsq_r.ptr(), sums);
+        D0.cx.signal(L.event->handle());
+      }
       D1.cx.wait_event(L.event->handle());
       D1.cx.copy(D1.s.resid.ptr(), land, rows);
       D1.cx.copy(D1.s.sumsq_r.ptr(), land + L.layout.sumsq_off, sums);
@@ -213,7 +219,8 @@ void KolibriEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
         fail("device 1's prefill chunk at " + std::to_string(pos) + " (" + std::to_string(C) +
              " rows) did not finish within " + std::to_string(opt_.prefill_timeout_ms) + " ms - " +
              (d0 ? "device 0 finished but its rows never released device 1" : "device 0 did not finish either") +
-             " (the prefill link's cross-device event; device 1 " + (drained ? "released" : "did not drain") + ")");
+             " (the prefill link's cross-device event; device 1 " + (drained ? "released" : "did not drain") + ")" +
+             (send ? "" : " [device 0's half was not appended: drop_next_handoff()]"));
       }
       if (!D0.cx.wait_for(tmo))
         fail("device 0's prefill chunk at " + std::to_string(pos) + " did not finish within " +
