@@ -1,5 +1,12 @@
 # Spec 20c - Kolibri-1 decode (one card for development, two cards for the model)
 
+**Status (2026-10-06): built blind on branch `spec20c-kolibri-decode`, on main after 16c** - spec 20
+§11 has what was built and where the build departs from this plan (`KolPlacement` carries the layer
+count; the bench ids are placeholders until `kolibri_oracle.sh synth`; the box row is 24, not 23).
+Tasks 1-7 done on the Mac (host tests, `kolibri_run` exact on the Mac GPU, every syntax check); Task 8
+is box-only: its stages are row 24's `r24.speed` / `r24.sweeps`. Every real-checkpoint gate SKIPs (77)
+until spec 20b's checkpoint exists.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Kolibri-1 decodes through replayed Level Zero lists: its own model table, loader, kernels and engine (K2's pattern, spec 18 §5.1), first on one card (a real-width synthetic checkpoint, or the real checkpoint truncated to its first N layers), then across two cards with spec 16b's hand-off; KL2 and KL3 on the decode path; the decode speed rows.

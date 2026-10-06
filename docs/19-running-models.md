@@ -22,19 +22,19 @@ has to run is [superpowers/plans/box-validation-queue.md](superpowers/plans/box-
 - Commands marked `# never run on a B70` have not run on the card at all. They are
   written to work, and host-tested, but the first run may fail.
 
-| | Qwen3.8-27B | Agnes 3.0 Flash | Ornith 1.5 35B-A3B | K2-Horizon MoVA-36B-A4B |
-|---|---|---|---|---|
-| checkpoint | published | published | **not published** (spec 15a) | published |
-| `b70-serve` | yes | yes | yes | **refused** (spec 18d's engine side) |
-| `b70-decode` | yes | yes | yes | yes |
-| ran on a B70 | yes (see above) | no | no | no |
-| MTP head (`--mtp`) | yes | yes | yes (MoE head) | none |
-| `--spec lookup` | yes | yes (needs the head) | yes (needs the head) | no |
-| `--kv-cache int8` | yes, gates pending | yes, gates pending | not built | refused (spec 18e) |
-| prefill backends | `l0-int8` (default), `l0`, `sycl-tla` | `l0-int8`, `l0` | `l0-int8`, `l0` (`sycl-tla` refused) | `l0` only |
-| KV per position (bf16) | 64 KiB | 72 KiB | 20 KiB | 192 KiB |
-| `--max-len auto`, int8 head (derived) | ~201k; ~170k with `--mtp` | ~140k; ~114k with `--mtp` | 262144, with or without `--mtp` | `b70-decode` only: ~47k decode-only (bf16 head), ~43k with prefill |
-| with `--kv-cache int8` (derived) | 262144, with or without `--mtp` | 262144; ~226k with `--mtp` | - | - |
+| | Qwen3.8-27B | Agnes 3.0 Flash | Ornith 1.5 35B-A3B | K2-Horizon MoVA-36B-A4B | Kolibri-1 (spec 20) |
+|---|---|---|---|---|---|
+| checkpoint | published | published | **not published** (spec 15a) | published | **not made** (spec 20b) |
+| `b70-serve` | yes | yes | yes | **refused** (spec 18d's engine side) | **refused** (spec 20e) |
+| `b70-decode` | yes | yes | yes | yes | decode only, **two cards** (`--pp 2`, the default) |
+| ran on a B70 | yes (see above) | no | no | no | no |
+| MTP head (`--mtp`) | yes | yes | yes (MoE head) | none | none |
+| `--spec lookup` | yes | yes (needs the head) | yes (needs the head) | no | no |
+| `--kv-cache int8` | yes, gates pending | yes, gates pending | not built | refused (spec 18e) | refused (bf16 only) |
+| prefill backends | `l0-int8` (default), `l0`, `sycl-tla` | `l0-int8`, `l0` | `l0-int8`, `l0` (`sycl-tla` refused) | `l0` only | none yet (spec 20d) |
+| KV per position (bf16) | 64 KiB | 72 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) |
+| `--max-len auto`, int8 head (derived) | ~201k; ~170k with `--mtp` | ~140k; ~114k with `--mtp` | 262144, with or without `--mtp` | `b70-decode` only: ~47k decode-only (bf16 head), ~43k with prefill | 262144 on two cards (split 25) |
+| with `--kv-cache int8` (derived) | 262144, with or without `--mtp` | 262144; ~226k with `--mtp` | - | - | - |
 
 The `--max-len auto` lengths are the planner's at the default 1.5 GB reserve on the
 32.53 GB card; the reserve itself is an estimate the box has not confirmed, and nothing
@@ -297,3 +297,37 @@ B70_K2_ATTN=eager ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256
 `B70_PREFILL_PROFILE` times K2's prefill phases but `b70-decode` does not print the table
 for K2 yet. `B70_KV_CACHE`, `B70_DECODE_ATTN`, `B70_PREFILL_ATTN` and the GDN switches do
 not apply to K2.
+
+## Kolibri-1 (spec 20)
+
+Aleph Alpha's Kolibri-1 (`model_type kolibri1`): 50 MoE layers (384 experts top 6 + an ungated shared
+expert), hidden 2560, 48 / 4 heads x 128, 40 sliding-window layers (513 keys, RoPE) and 10 full NoPE
+layers, sandwich norms, a 128000-id vocabulary, trained context 262144. **Our int4 checkpoint
+`urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ` does not exist yet** (spec 20b, decision 1 open): every
+command below needs it, except on a synthetic checkpoint (`tools/quantize/kolibri/make_synth.py`).
+
+**Status: never run on a B70** (queue row 24). Decode only (spec 20c), through `b70-decode`, on
+**two cards**: at int4 the model holds ~42.5 GB of weights, so `--pp 2` is Kolibri's default and
+`--pp 1` is refused unless the model fits one card (a synthetic checkpoint, or `--layers N`:
+development mode, the first N layers only - e.g. 30, ~26 GB). Prefill is spec 20d; serving
+(tokenizer, ChatML template, reasoning, hermes JSON tool calls) is 20e - `b70-serve` refuses it.
+Expected (derived): 756 launches per token (856 with `B70_KOLIBRI_ATTN=eager`), ~2.39 GB read per
+token with int4 attention and the int8 head - a roofline near 250 t/s on two cards.
+
+```sh
+K=urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ          # spec 20b - not made yet
+
+# every command below: never run on a B70; needs 20b's checkpoint and two cards
+./build/src/cli/b70-decode $K --ids k.ids --n 32                                  # --pp 2, split by bytes
+./build/src/cli/b70-decode $K --ids k.ids --n 32 --pipeline-handoff peer --pipeline-split 25
+./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256 --lm-head int8 --max-len 40960
+./build/src/cli/b70-decode $K --pp 1 --layers 30 --ids k.ids --n 8                # one card, 30 layers
+B70_KOLIBRI_ATTN=eager ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256 --lm-head int8
+```
+
+**Limits.** No prefill (`--prefill*` refused, spec 20d), no `--mtp` (no head), `--kv-cache int8`
+refused (20 KiB a position: bf16 only), no `--profile`, `--device` refused with `--pp 2` (GPUs 0 and
+1, `ZE_AFFINITY_MASK` picks them), context capped at the trained 262144 (decision 3). The bench prompt
+ids are placeholders until the box's reference run tokenizes them (row 24).
+
+**Relevant variables:** `B70_KOLIBRI_ATTN` (`flash` | `eager`), `B70_KOL_TIE_TOL` (the golden test).

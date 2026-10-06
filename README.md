@@ -193,7 +193,8 @@ Both CLIs take the repo id and resolve it through the local cache
 (`$HF_HOME` or `~/.cache/huggingface`, revision from `refs/main`); a snapshot
 directory path works too.
 
-Commands for each model (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5, K2-Horizon), what each
+Commands for each model (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5, K2-Horizon, and Kolibri-1 - decode on two
+cards, built blind, needs spec 20b's checkpoint), what each
 one supports, its limits, and which configurations have actually run on a B70:
 [docs/19-running-models.md](docs/19-running-models.md).
 
@@ -219,7 +220,7 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
 
 | flag | default | what it does |
 |---|---|---|
-| `<snapshot-or-repo>` | required | HF repo id resolved in the local cache, or a snapshot directory; never downloads. The model (Qwen3.8, Agnes 3.0 Flash or Ornith 1.5) comes from its `config.json`; K2-Horizon is refused until its engine side is built (`b70-decode` runs it). |
+| `<snapshot-or-repo>` | required | HF repo id resolved in the local cache, or a snapshot directory; never downloads. The model (Qwen3.8, Agnes 3.0 Flash or Ornith 1.5) comes from its `config.json`; K2-Horizon is refused until its engine side is built (`b70-decode` runs it); Kolibri-1 likewise (spec 20e; `b70-decode` runs it on two cards, spec 20c). |
 | `--host H` | `0.0.0.0` | listen address |
 | `--port P` | `8000` | listen port |
 | `--served-name NAME` | `b70` | model name in the OpenAI API (`/v1/models`, the `model` field) |
@@ -308,6 +309,7 @@ leave them unset to run what the gates ran.
 | `B70_PREFILL_REPLAY` | prefill (all models, Level Zero backends) | off | `1` records each prefill chunk's command list once and replays it from then on. Experimental; refused with `sycl-tla`. |
 | `B70_PREFILL_PROFILE` | prefill | off | `1` times every prefill phase; `b70-decode --bench --prefill-length` prints the table on stderr (Qwen-family models; not yet for K2). It adds a host wait per phase, so never use it for a recorded row. |
 | `B70_K2_ATTN` | `b70-decode`, K2-Horizon | `flash` | K2's attention, decode and prefill both. `eager` rounds scores and probabilities to bf16 where the reference does (spec 18 §10.1): 813 launches per token instead of 717, plus a score row of 4 B x 32 heads x max_len. The first box session decides which becomes the default. Other values are refused. |
+| `B70_KOLIBRI_ATTN` | `b70-decode`, Kolibri-1 | `flash` | Kolibri-1's decode attention. `eager` is the reference's bf16 chain (spec 18 §10.1's switch, spec 20 §11): 856 launches per token instead of 756, plus a score row of 4 B x 48 heads x max_len. Other values are refused. |
 | `B70_GIT_SHA` | `b70-decode --bench` | `unknown` | the commit printed in the bench row. The box's tree has no `.git`, so `tools/bench_decode.sh` sets it. |
 
 The scripts in `tools/`:
@@ -324,7 +326,7 @@ The scripts in `tools/`:
 | `L0_INCLUDE` | `mac_check.sh` | a path in the script | directory holding Level Zero's `ze_api.h` (a `level-zero` checkout's `include/`); without it the host and syntax sections fail |
 | `B70_JOBS` | `mac_check.sh` | all cores | parallelism of the Mac checks |
 | `B70_MAC_CL_DEVICE` | `mac_check.sh --kernels` | the first Intel GPU, else the first GPU | the OpenCL device, by a substring of its name (e.g. `AMD`) |
-| `SNAP_QWEN`, `SNAP_AGNES`, `SNAP_ORNITH`, `SNAP_K2`, `DEVICE`, `PORT`, ... | `box_validate.sh` | the four checkpoints, `0`, `8013` | the checkpoints, card and port the validation run uses; the full list (rounds, baseline, data directories) is in `tools/box_validate.sh --help` |
+| `SNAP_QWEN`, `SNAP_AGNES`, `SNAP_ORNITH`, `SNAP_K2`, `SNAP_KOLIBRI`, `DEVICE`, `PORT`, ... | `box_validate.sh` | the five checkpoints, `0`, `8013` | the checkpoints, card and port the validation run uses; the full list (rounds, baseline, data directories) is in `tools/box_validate.sh --help` |
 | `ORACLE_MODEL` / `ORACLE_SNAP`, `ORACLE_THREADS`, `ORACLE_IMAGE`, `HF_CACHE`, `REPO_DIR` | `tools/oracle/run_in_container.sh` and the scripts that call it (`golden.sh`, `check.sh`) | Qwen3.8 in the HF cache, all threads, the script's reference image, `~/.cache/huggingface`, this tree | the CPU reference's checkpoint (a repo directory in the cache, or an absolute snapshot path, which wins), its CPU threads, the container, and the two mounts. `golden.sh` adds `OUT_DIR` (`oracle-out`), `IDS_DIR` (`tests/golden/prompts`) and `PROMPTS` (`prose code cjk`). |
 
 Test-only (the checkpoint paths the tests load are CMake options, e.g. `-DB70_TEST_SNAPSHOT`,
@@ -334,6 +336,7 @@ Test-only (the checkpoint paths the tests load are CMake options, e.g. `-DB70_TE
 |---|---|---|---|
 | `B70_LONGCTX_TESTS` | the `longctx` tests | unset: SKIP | `1` runs the long-context MTP variants (`mtp_verify_{32k,128k}_test`, `mtp_gpu_{32k,128k}_test`) |
 | `B70_K2_TIE_TOL` | `k2_golden_test` | `1e-3` | the near-tie tolerance of K2's routing diagnostic, proposed until the reference run measures it |
+| `B70_KOL_TIE_TOL` | `kolibri_golden_test`, `kolibri_partial_test` | `1e-2` | the same for Kolibri-1 (spec 20c), proposed until `kolibri_oracle.sh` prints the gap distribution |
 | `B70_TOKENIZER_JSON` | the Qwen3.8 tokenizer tests, `mac_check.sh`'s host section | Qwen3.8's snapshot under `$HF_HOME` | path to Qwen3.8's `tokenizer.json`; without it those tests are disabled on the Mac |
 | `B70_SNAPSHOT_DIR` | `template_test` | Qwen3.8's snapshot under `$HF_HOME` | the snapshot whose chat template it renders |
 | `B70_K2_TOKENIZER_JSON` | `k2_tokenizer_test` | the CMake option of that name | K2's `tokenizer.json`; absent, the test is skipped |

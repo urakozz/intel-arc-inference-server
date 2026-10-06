@@ -1538,9 +1538,145 @@ st_r23_split_sweep() {
 }
 
 # ======================================================================================
+row 24 "spec 20c - Kolibri-1 decode, one card then two (spec 20 §11, plan 20c)"
+rownote 24 "Written blind: no Kolibri binary was ever compiled by ocloc, nothing ran on a card. The synthetic checkpoints and their golden sets (oracle-out-kolibri-synth: two 5-layer real-width checkpoints, int4 and bf16 attention, ~6.2 GB each) are made on the box CPU by the opt-in r24.oracle_synth (--with r24.oracle_synth: make_synth.py, then kolibri_ref.py run on prose and de_prose, ~1 h; needs Aleph-Alpha/Kolibri-1-BF16's tokenizer.json in the HF cache - a few MB, not the weights). Without them r24.load / k3 / golden / pp / cli SKIP with 'missing data'."
+rownote 24 "Everything on the REAL checkpoint (r24.oracle_real, r24.partial, r24.pp_real, r24.speed) needs spec 20b's urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ (SNAP_KOLIBRI) and oracle-out-kolibri (--with r24.oracle_real, ~48 GB RAM): SKIP 'missing data' until spec 20 decision 1 is made and 20b has run."
+rownote 24 "Set B70_KOL_TIE_TOL from the gap distribution r24.oracle_synth / r24.oracle_real print (kolibri_golden_test.cc proposes 1e-2); the partial-forward bars (median cosine 0.9998, min 0.99) are proposals too - r24.partial prints them per layer."
+rownote 24 "tests/golden/prompts/kolibri_bench.ids (and cli/kolibri_decode.h's kKolibriBenchPrompt) are PLACEHOLDER legal ids: r24.oracle_synth writes the first 42 ids of de_prose (kolibri_bench.ids in oracle-out-kolibri-synth) - re-bake both before r24.speed's rows are recorded."
+rownote 24 "If determined rows fail under flash, the first suspect is flash's fp32 probabilities against the reference's eager bf16 chain: r24.golden_eager runs the eager variant (B70_KOLIBRI_ATTN=eager, 856 launches at 50 layers); spec 18 §10.1's rule decides the default. Two cards (r24.pp) need row 22's hand-offs proven first."
+stage r24.k0 24 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (no existing .cl edited; kernel_cmdlines +23 / -0 / ~0 with K2 on), the Qwen3.8 suite (G0); the two descriptor-free overloads in 16b's files leave pipeline_plan_test / pp_decode_test unchanged"
+st_r24_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r24.host 24 default cpu - - "host: kolibri1_test, kolibri1_repack_test, kolibri1_rope_test (bitwise torch's cos / sin), kolibri_ref_test (the kernels' twin bitwise against kolibri_ref.py's fixture), kolibri_variant_names_test, kolibri_plan_test (756 / 856 launches, the split 25 by pp_balance), pipeline_plan_test (the overload == the ModelDesc form)"
+st_r24_host() {
+  run_tests '^(kolibri1_test|kolibri1_repack_test|kolibri1_rope_test|kolibri_ref_test|kolibri_variant_names_test|kolibri_plan_test|pipeline_plan_test)$'
+  jgrab plan '^kolibri_plan_test$' 'split 25|plan at|OK'
+  finish
+}
+stage r24.k1 24 default gpu - - "K1, no checkpoint: the 23 new binaries built (kbins) and kolibri_kernels_test - the norm and the sandwich (prep_res_fold _Z + kol_post_add) bitwise, kol_attn_prep bitwise (ring row 1 at 4097; NoPE position-free), the route (ids exact, a tie at the cut, all -1e30, padded slots +80), the MoE block within 2 ulps (6 routed + the bf16 shared slot, each alone), eager attention bitwise (5 / 512 / 513 / 4103 / 9000 sliding, 30000 full), flash within cosine 0.99999, flash at 9000 == 808 (the ring is addressing)"
+st_r24_k1() {
+  kbins kol_embed_gather_M1_D2560_V128000 kol_argmax_stage1_M1_N128000_V128000 kol_argmax_stage2_N128000 \
+    prep_res_fold_M1_K2560_SP1_G20_Z prep_res_fold_M1_K2560_SP4_G20_Z kol_norm_M1_K2560_G20_W20 kol_post_add_M1_K2560_G20 \
+    kol_attn_prep_M1_N7168_S2_Q48KV4_R4096 kol_attn_prep_M1_N7168_S2_Q48KV4_F kol_attn_prep_M1_N7168_S1_Q48KV4_R4096 \
+    kol_attn_prep_M1_N7168_S1_Q48KV4_F kol_attn_M1_T32_Q48KV4_W513_R4096 kol_attn_M1_T32_Q48KV4_F \
+    kol_attn_eager_M1_T32_Q48KV4_W513_R4096 kol_attn_eager_M1_T32_Q48KV4_F kol_route_M1_E384_T6_N512_L256 \
+    kol_moe_M1_E384_T6_D2560_I512_SH gemv_M1_K2560_N7168_S2_L0 gemv_bf16_M1_K2560_N7168 gemv_bf16_M1_K6144_N2560 \
+    gemv_bf16_M1_K2560_N512_C16_S16 gemv_bf16_M1_K2560_N128000 gemv_i8w_M1_K2560_N128000
+  run_tests '^kolibri_kernels_test$' kolibri
+  jgrab k1 '^kolibri_kernels_test$' 'bitwise|ulp|cosine|differ|OK'
+  finish
+}
+stage r24.reject 24 default gpu - - "the refusals before the device: cli_reject_kolibri_* (--pp 1 on the real model naming --pp 2, --prefill naming spec 20d, --mtp, --kv-cache int8, --device with --pp 2, --layers on a Qwen checkpoint, b70-serve naming spec 20e)"
+st_r24_reject() {
+  run_tests '^cli_reject_kolibri_' '' '' 'ZE_AFFINITY_MASK=0,1'
+  finish
+}
+stage r24.oracle_synth 24 optin cpu oracle_image - "the synthetic golden sets on the box CPU: kolibri_oracle.sh synth - make_synth.py --layers 5 (int4 and bf16 attention) + check.py, kolibri_ref.py run on prose and de_prose -> \$DATA/oracle-out-kolibri-synth (resumable; MemAvailable >= 24 GB); the gap distribution and kolibri_bench.ids; then re-links oracle-out*"
+st_r24_oracle_synth() {
+  chk "tools/box_validate/kolibri_oracle.sh $DATA synth" "the Kolibri-1 synthetic reference runs"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_(kolibri|oracle_kolibri)' $STATE/have.env"
+  grab_all gap 'selection gap' 8
+  grab_all bench 'kolibri_bench.ids|re-bake' 4
+  finish
+}
+stage r24.load 24 default gpu oracle_kolibri_synth r24.k1 "the loader on the card: kolibri1_load_synth_int4attn_test and _bf16attn_test (int8 head) - every part's bytes = kol_device_weight_bytes, 0 unconsumed, the last expert's block / the router's padded rows / the bias tail read back"
+st_r24_load() {
+  run_tests '^kolibri1_load_synth_(int4attn|bf16attn)_test$'
+  jgrab load '^kolibri1_load_synth' 'device 0|read/token|unconsumed|OK'
+  finish
+}
+stage r24.k3 24 default gpu oracle_kolibri_synth r24.load "K3 on one card: kolibri_decode_synth_test - plan == allocation, 2 + 5 x 15 + 4 = 81 launches, two runs bitwise (logits, routes, full KV, rings), the ring at 600 holds 88..599"
+st_r24_k3() {
+  run_tests '^kolibri_decode_synth_test$'
+  jgrab k3 '^kolibri_decode_synth_test$' 'plan ==|K3|ring|OK'
+  finish
+}
+stage r24.golden 24 default gpu oracle_kolibri_synth r24.k3 "KL2 on the synthetic checkpoints: kolibri_golden_synth_int4attn_test, _bf16attn_test, _i8head_test - the tie-aware token gate over prose / de_prose x 32 and the routing diagnostic (a non-tie set difference fails; B70_KOL_TIE_TOL 1e-2 proposed)"
+st_r24_golden() {
+  run_tests '^kolibri_golden_synth_(int4attn|bf16attn|i8head)_test$'
+  jgrab golden '^kolibri_golden_synth' 'gate:|routing:|tap|OK'
+  finish
+}
+stage r24.golden_eager 24 default gpu oracle_kolibri_synth r24.k3 "KL2 through the EAGER attention (B70_KOLIBRI_ATTN=eager, 2 + 5 x 17 + 4 = 91 launches): kolibri_golden_synth_int4attn_eager_test and _bf16attn_eager_test - compare with r24.golden"
+st_r24_golden_eager() {
+  run_tests '^kolibri_golden_synth_(int4attn|bf16attn)_eager_test$'
+  jgrab golden '^kolibri_golden_synth' 'gate:|routing:|OK'
+  finish
+}
+stage r24.pp 24 default gpu oracle_kolibri_synth r24.k3,r22.p1 "two cards (Review Focus 5): kolibri_pp_test - --pp 1 against --pp 2 --pipeline-split 3 on the synthetic checkpoint under copy and peer: tokens, logits, routes, full KV and rings bitwise, both Control blocks equal; P4 (a lost hand-off throws within 5 s, reset recovers); replay; the real checkpoint's split 25 vs 20 when present"
+st_r24_pp() {
+  run_tests '^kolibri_pp_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab pp '^kolibri_pp_test$' 'device|P4|SKIP|OK'
+  finish
+}
+stage r24.cli 24 default gpu oracle_kolibri_synth r24.pp "CLI: b70-decode <synthetic int4attn> --pp 1 --ids prose.ids --n 32 against --pp 2 (the default; copy, peer, --pipeline-split 3): the same ids; --max-len auto plans both cards; the plan and both memory lines"
+st_r24_cli() {
+  local ck="oracle-out-kolibri-synth/int4attn/ckpt" ids="oracle-out-kolibri-synth/int4attn/prose.ids" h
+  chk "build/src/cli/b70-decode $ck --pp 1 --ids $ids --n 32 > $STATE/r24-one.ids" "one card"
+  for h in copy peer; do
+    chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --ids $ids --n 32 --pipeline-handoff $h > $STATE/r24-$h.ids && cmp $STATE/r24-one.ids $STATE/r24-$h.ids" \
+      "--pp 2 (the default), $h: the one-card ids"
+  done
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --ids $ids --n 32 --pipeline-split 3 > $STATE/r24-s3.ids && cmp $STATE/r24-one.ids $STATE/r24-s3.ids" \
+    "--pipeline-split 3: the one-card ids"
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --ids $ids --n 8 --max-len auto > /dev/null" "--max-len auto on two cards"
+  grab_all plan 'max_len: auto ->|split: |pipeline plan at|^engine:' 8
+  grab_all memory '^memory' 6
+  finish
+}
+stage r24.oracle_real 24 optin cpu kolibri,oracle_image - "the real golden set on the box CPU (needs spec 20b): kolibri_oracle.sh real - prose, code, de_prose, de_chat (the chat template's ids) x 32 -> \$DATA/oracle-out-kolibri (MemAvailable >= 48 GB); the gap distribution"
+st_r24_oracle_real() {
+  chk "tools/box_validate/kolibri_oracle.sh $DATA real" "the Kolibri-1 reference runs on the real checkpoint"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_(kolibri|oracle_kolibri)' $STATE/have.env"
+  grab_all gap 'selection gap' 8
+  finish
+}
+stage r24.partial 24 default gpu kolibri,oracle_kolibri r24.k3 "development mode on the real checkpoint, one card (needs spec 20b): kolibri1_load_partial_test (30 layers, bf16 head) and kolibri_partial_test / _eager - the residual tap of layers 0..29 against resid.L* per layer (median cosine >= 0.9998, min >= 0.99, proposed) and the routing diagnostic"
+st_r24_partial() {
+  run_tests '^(kolibri1_load_partial_test|kolibri_partial_test|kolibri_partial_eager_test)$'
+  jgrab partial 'kolibri_partial' 'layer|BELOW|routing:|OK'
+  finish
+}
+stage r24.pp_real 24 default gpu kolibri,oracle_kolibri r24.pp "KL2 / K3 on the real checkpoint across two cards (needs spec 20b): kolibri_golden_test (flash, copy), _i8head, _eager, _peer and kolibri_decode_test (pp2: plan == allocation per device, replay bitwise)"
+st_r24_pp_real() {
+  run_tests '^(kolibri_golden_test|kolibri_golden_i8head_test|kolibri_golden_eager_test|kolibri_golden_peer_test|kolibri_decode_test)$' \
+    '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab golden '^kolibri_(golden|decode)' 'gate:|routing:|plan ==|K3|OK'
+  finish
+}
+stage r24.speed 24 optin gpu kolibri r24.pp_real "Task 8 (needs spec 20b): decode on two cards at depth 4096 / 32768, tg 256, max_len 40960 - bf16 and int8 heads, copy and peer, flash and eager - interleaved, median of 3; launches per token, each card's memory; against the derived roofline (~250 t/s int4 attention + int8 head at ~600 GB/s; ~120 t/s bf16 attention)"
+st_r24_speed() {
+  idle before
+  local d arms="" ratios="" k="ZE_AFFINITY_MASK=0,1"
+  for d in 4096 32768; do
+    arms="$arms d$d '$k $(bench_cmd "$SNAP_KOLIBRI" --depth $d --tg 256 --max-len 40960)'"
+    arms="$arms d$d-int8 '$k $(bench_cmd "$SNAP_KOLIBRI" --depth $d --tg 256 --max-len 40960 --lm-head int8)'"
+    arms="$arms d$d-int8-peer '$k $(bench_cmd "$SNAP_KOLIBRI" --depth $d --tg 256 --max-len 40960 --lm-head int8 --pipeline-handoff peer)'"
+    arms="$arms d$d-int8-eager '$k B70_KOLIBRI_ATTN=eager $(bench_cmd "$SNAP_KOLIBRI" --depth $d --tg 256 --max-len 40960 --lm-head int8)'"
+    ratios="$ratios --ratio d$d-int8/d$d --ratio d$d-int8-peer/d$d-int8 --ratio d$d-int8-eager/d$d-int8"
+  done
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "the Kolibri-1 decode arms"
+  idle after
+  grab_all memory '^memory, device' 8
+  grab_all ratio '^RATIO '
+  grab_all idle '^IDLE '
+  finish
+}
+stage r24.sweeps 24 manual - kolibri - "Task 8's sweeps: the int4 attention arm's {S, layout} cells (q||k||v 2560x7168, o_proj 6144x2560: S 1 / 2 / 4, L 0 / 1) and the MoE kernels' UP_KS / DN_KS"
+st_r24_sweeps() {
+  say "# {S, layout} of 2560x7168 and 6144x2560 with their GEMV_* defines (probe_gemv rows, spec 14 step 4's method); model::kolibri1()'s qkv_s / oproj_s and kernels::kolibri's names move together"
+  say "# UP_KS / DN_KS: rebuild kol_moe.cl's variant per value, kolibri_kernels_test, then ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_KOLIBRI --bench --depth 4096 --tg 256 --lm-head int8 per value"
+  say "# record: docs/BENCHMARKS.md 'Kolibri-1 (spec 20)'"
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
-stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx labels belong to their rows)"
+stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri labels belong to their rows)"
 st_x_rest() {
-  run_tests '.' '' 'agnes ornith kv8 k2 longctx'
+  run_tests '.' '' 'agnes ornith kv8 k2 longctx kolibri'
   finish
 }

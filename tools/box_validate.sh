@@ -39,7 +39,7 @@
 # Env: BOX (tools/box.env), REMOTE_DIR / BOX_SUFFIX (default suffix `validate`: the tree
 # ~/b70-inference-server-validate), BASE_DIR (~/b70-inference-server-g0-<sha>), DATA_DIR
 # (the tree holding oracle-out*, default b70-inference-server), JOBS, DEVICE (0), PORT,
-# CMAKE_ARGS, SNAP_QWEN / SNAP_AGNES / SNAP_ORNITH / SNAP_K2, TOK_PYTHON, OPENCODE_LOG,
+# CMAKE_ARGS, SNAP_QWEN / SNAP_AGNES / SNAP_ORNITH / SNAP_K2 / SNAP_KOLIBRI, TOK_PYTHON, OPENCODE_LOG,
 # A4_REF_DIR, ORACLE_IMAGE, G0_BITWISE_RE, G0_ALLOW_REMOVED, R10_RUNS, R2_ROUNDS (the server
 # rows' rounds, 3), R8_DRAFT_VOCAB (r8.auto_rows' size, 128k), K2_ORACLE_MODEL /
 # K2_REF_MIN_GB / K2_HFCHECK (r14.oracle), B70_K2_TIE_TOL (r14.golden, r15.golden), LOCAL_DATA
@@ -155,7 +155,7 @@ remote_env() {
   s="B70_GIT_SHA=$(q "$SHA") BV_BASE_SHA=$BASE_SHA BV_BASE_REF=$(q "$BASELINE_REF")"
   s="$s BV_BASE=\"\$HOME/$BASE_DIR\" BV_DATA=\"\$HOME/$DATA_DIR\" BV_FORCE=$FORCE BV_REDO=$(q "$REDO_IDS")"
   local v
-  for v in JOBS DEVICE PORT CMAKE_ARGS SNAP_QWEN SNAP_AGNES SNAP_ORNITH SNAP_K2 TOK_PYTHON OPENCODE_LOG \
+  for v in JOBS DEVICE PORT CMAKE_ARGS SNAP_QWEN SNAP_AGNES SNAP_ORNITH SNAP_K2 SNAP_KOLIBRI TOK_PYTHON OPENCODE_LOG \
            A4_REF_DIR ORACLE_IMAGE G0_BITWISE_RE G0_ALLOW_REMOVED R10_RUNS R2_ROUNDS R8_DRAFT_VOCAB \
            K2_ORACLE_MODEL K2_REF_MIN_GB K2_HFCHECK B70_K2_TIE_TOL; do
     if [ -n "${!v:-}" ]; then s="$s $v=$(q "${!v}")"; fi
