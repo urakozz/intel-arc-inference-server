@@ -2610,3 +2610,16 @@ exit 0
   set_tests_properties(cli_reject_kolibri_serve PROPERTIES TIMEOUT 60)
 endif()
 # ==== Spec 20c: Kolibri-1 decode ==== (end) ====
+
+# ==== Spec 20d: Kolibri-1 prefill (labels kolibri;prefill) ==== (begin) ====
+# One delimited block for every 20d registration, after 20c's. Written blind on the Mac (box queue row
+# 26): host tests first (tools/mac_check.sh runs them), then the card's; the checkpoint ones SKIP (77)
+# until the synthetic sets (kolibri_oracle.sh synth) or, for the real checkpoint, spec 20b exist.
+# Task 1: the prefill kernels' host twin (tests/kernels/kolibri_pf_ref.h) - the 384-expert sort and its
+# adversaries, the combine == 20c's decode chain and torch's fixture row, the windowed flash walk over
+# the ring in fp64, eager_window against the fixture's eager rows, the bf16 slab tail. Headers only.
+add_executable(kolibri_pf_ref_test kernels/kolibri_pf_ref_test.cc)
+target_include_directories(kolibri_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME kolibri_pf_ref_test COMMAND kolibri_pf_ref_test)
+set_tests_properties(kolibri_pf_ref_test PROPERTIES LABELS "kolibri;prefill")
+# ==== Spec 20d: Kolibri-1 prefill ==== (end) ====
