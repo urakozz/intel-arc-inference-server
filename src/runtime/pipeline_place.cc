@@ -73,6 +73,7 @@ PpWeights pp_weights(const loader::LoadedModel& m) {
     w.layer[l] += m.layer_small[l].norms.size() + m.layer_small[l].gdn.size();
     if (!m.moe.empty()) w.layer[l] += moe_layer_device_bytes(m.moe[l]);
   }
+  for (const auto& [layer, dw] : m.ab_prefill) w.layer.at(layer) += weight_bytes(dw);
   w.embed = m.embed.size();
   w.head += m.final_norm.size();
   return w;
@@ -83,6 +84,7 @@ size_t model_device_bytes(const loader::LoadedModel& m) {
   for (const auto& kv : m.linears) t += weight_bytes(kv.second);
   for (const loader::SmallTensors& s : m.layer_small) t += s.norms.size() + s.gdn.size();
   for (const loader::MoeLayer& l : m.moe) t += moe_layer_device_bytes(l);
+  for (const auto& kv : m.ab_prefill) t += weight_bytes(kv.second);
   if (m.draft_vocab) t += m.draft_vocab->bytes();
   return t;
 }
@@ -118,6 +120,7 @@ std::vector<loader::LoadedModel> place_stages(l0::Context& d0, l0::Context& d1,
                          nullptr,
                          full.desc,
                          nullptr,
+                         {},
                          {}};
   // Layers [split, layers) and the top-level linears (lm_head): moved, then freed on
   // device 0 as each one goes, so device 0's peak is the whole model and no more.
@@ -141,6 +144,16 @@ std::vector<loader::LoadedModel> place_stages(l0::Context& d0, l0::Context& d1,
       s1.moe.push_back(loader::MoeLayer{mv.move(src.router), mv.move(src.gate_up), mv.move(src.down)});
     }
     while (full.moe.size() > split) full.moe.pop_back();
+  }
+  // Spec 15 §13: an int4 a||b's bf16 prefill copies (keyed by layer) go with their layers.
+  // Decode never reads them (16b refuses prefill); 16c's per-device prefill will.
+  for (auto it = full.ab_prefill.begin(); it != full.ab_prefill.end();) {
+    if (it->first >= split) {
+      s1.ab_prefill.emplace(it->first, mv.move(it->second));
+      it = full.ab_prefill.erase(it);
+    } else {
+      ++it;
+    }
   }
   // What loader::set_max_len reads to re-table the RoPE later (its other fields describe the
   // load, which stage 0's report keeps).
