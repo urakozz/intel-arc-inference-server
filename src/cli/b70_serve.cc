@@ -406,6 +406,13 @@ int run(int argc, char** argv) {
     const nlohmann::json cj = nlohmann::json::parse(cs.str(), nullptr, /*allow_exceptions=*/false);
     if (cj.is_object())
       options.chat_format = server::ChatFormat::for_model_type(cj.value("model_type", std::string()));
+    // Spec 20c: Kolibri-1 decodes through b70-decode only; serving it (the tokenizer, the ChatML
+    // template, reasoning and hermes JSON tool calls, ring snapshots) is spec 20e.
+    if (cj.is_object() && cj.value("model_type", std::string()) == "kolibri1")
+      throw std::runtime_error(
+          "Kolibri-1 (model_type kolibri1) is not served yet: serving it is spec 20e (its tokenizer and ChatML "
+          "template, reasoning and hermes JSON tool calls, prefix-cache snapshots with the sliding rings). "
+          "b70-decode runs it (spec 20c): b70-decode " + path + " --ids <file> --n <N>");
     if (cj.is_object() && cj.value("model_type", std::string()) == "k2_horizon")
       throw std::runtime_error(
           "K2-Horizon (model_type k2_horizon) is not served yet: spec 18d's engine side (a K2 "

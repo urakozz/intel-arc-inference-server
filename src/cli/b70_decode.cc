@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "cli/k2_decode.h"
+#include "cli/kolibri_decode.h"
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
 #include "cli/pipeline_decode.h"
@@ -163,6 +164,10 @@ void usage() {
       "  --pipeline-handoff H  copy (default: a device-to-device copy and a cross-device event)\n"
       "                 or peer (device 0's last kernel writes device 1's buffer and raises a\n"
       "                 flag device 1's first kernel polls, bounded)\n"
+      "  Kolibri-1 (model_type kolibri1, spec 20c): --pp defaults to 2 (the int4 model holds\n"
+      "                 ~42.5 GB); --pp 1 only when the model fits one card (a synthetic\n"
+      "                 checkpoint, or --layers N: load only its first N layers, development\n"
+      "                 mode). Decode only: --prefill*, --mtp, --kv-cache int8, --profile refused.\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -721,6 +726,9 @@ int run(int argc, char** argv) {
   uint32_t mtp_k = 0;
   bool mtp_auto = false, have_mtp = false;
   cli::PipelineArgs pipe;   // spec 16b: --pp, --pipeline-split, --pipeline-handoff
+  bool pp_given = false;    // spec 20c: Kolibri-1's --pp defaults to 2, so "given" matters
+  uint32_t layers = 0;      // spec 20c: --layers N (Kolibri-1's development mode)
+  bool have_layers = false;
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -787,6 +795,11 @@ int run(int argc, char** argv) {
       kv_cache = cli::parse_kv_cache_arg(value(i, "--kv-cache"));
     } else if (a == "--pp" || a == "--pipeline-parallel-size") {   // spec 16b, vLLM's spelling
       pipe.devices = cli::parse_pipeline_devices(a, value(i, a.c_str()));
+      pp_given = true;
+    } else if (a == "--layers") {   // spec 20c, Kolibri-1 only
+      layers = parse_u32("--layers", value(i, "--layers"));
+      have_layers = true;
+      if (layers == 0) throw std::runtime_error("--layers 0 would load no layer");
     } else if (a == "--pipeline-split") {
       cli::parse_pipeline_split(value(i, "--pipeline-split"), pipe);
     } else if (a == "--pipeline-handoff") {
@@ -886,6 +899,35 @@ int run(int argc, char** argv) {
   if (synthetic && depth == 0)
     throw std::runtime_error("--depth 0 would ingest nothing; --bench and --profile both measure"
                              " a step at a context depth");
+  // Spec 20c: Kolibri-1 (model_type kolibri1) runs runtime::kolibri::KolibriEngine on one or two
+  // cards - dispatched here, before the Qwen engine's pipeline and kv-cache rules (its own refusals,
+  // cli/kolibri_decode.h, replace them: --pp defaults to 2 there). A path that does not resolve is
+  // not Kolibri - the flows below report it, so every rejection keeps its order.
+  if (cli::kolibri::is_kolibri(path)) {
+    cli::kolibri::DecodeArgs ka;
+    ka.path = path;
+    ka.ids_path = ids_path;
+    ka.n = n;
+    ka.bench = bench;
+    ka.depth = depth;
+    ka.tg = tg;
+    ka.max_len = max_len_arg;
+    ka.reserve = mem_reserve;
+    ka.device = device;
+    ka.lm_head = lm_head;
+    ka.layers = layers;
+    ka.pipe = pipe;
+    ka.pp_given = pp_given;
+    ka.prefill = prefill;
+    ka.prefill_flags = have_prefill_len || have_pp_chunk || have_pp_backend;
+    ka.mtp = mtp_on;
+    ka.kv8 = kv_cache == runtime::KvCache::Int8;
+    ka.profile = profile;
+    return cli::kolibri::run_decode<StdoutToStderr>(ka);
+  }
+  if (have_layers)
+    throw std::runtime_error("--layers belongs to Kolibri-1's development mode (spec 20c: load only its first N "
+                             "layers); this checkpoint is not model_type kolibri1");
   const runtime::PrefillPath pp_path = cli::prefill_path(
       have_prefill_len || prefill,
       have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());

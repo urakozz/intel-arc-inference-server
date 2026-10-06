@@ -2433,4 +2433,73 @@ if(B70_KOLIBRI)
   add_test(NAME kolibri_kernels_test COMMAND kolibri_kernels_test)
   set_tests_properties(kolibri_kernels_test PROPERTIES LABELS kolibri TIMEOUT 900)
 endif()
+# Task 5: the runtime. The planner, the launch counts and the split by bytes on the host ...
+add_executable(kolibri_plan_test runtime/kolibri_plan_test.cc)
+target_include_directories(kolibri_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kolibri_plan_test PRIVATE b70_kolibri_plan)
+add_test(NAME kolibri_plan_test COMMAND kolibri_plan_test)
+set_tests_properties(kolibri_plan_test PROPERTIES LABELS kolibri)
+# ... and on the card: plan == allocation, K3 replay determinism and the ring (kolibri_decode_test); KL2,
+# the tie-aware gate with the routing diagnostic (kolibri_golden_test) on both synthetic arms, flash and
+# eager, and the int8 head; the real checkpoint truncated to 30 layers on one card (kolibri_partial_test,
+# development mode; needs spec 20b). SKIP 77 without the data (tools/box_validate/kolibri_oracle.sh).
+if(B70_KOLIBRI)
+  set(B70_KOLIBRI_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri"
+    CACHE PATH "The real checkpoint's golden set (kolibri_oracle.sh real): <prompt>.ids + .golden.safetensors")
+  foreach(t kolibri_decode_test kolibri_golden_test kolibri_partial_test)
+    if(t STREQUAL "kolibri_decode_test")
+      add_executable(${t} runtime/${t}.cc)
+    else()
+      add_executable(${t} golden/${t}.cc)
+    endif()
+    target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+      ${CMAKE_SOURCE_DIR}/tests/runtime)
+    target_link_libraries(${t} PRIVATE b70_kolibri_runtime b70_l0)
+    add_dependencies(${t} ${B70_KOLIBRI_DECODE_KERNELS} kernel_pp_handoff)
+  endforeach()
+  set(_kol_synth ${B70_KOLIBRI_SYNTH_DIR})
+  add_test(NAME kolibri_decode_synth_test COMMAND kolibri_decode_test ${_kol_synth}/int4attn/ckpt
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
+  add_test(NAME kolibri_golden_synth_int4attn_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn)
+  add_test(NAME kolibri_golden_synth_bf16attn_test COMMAND kolibri_golden_test ${_kol_synth}/bf16attn/ckpt
+    ${_kol_synth}/bf16attn)
+  add_test(NAME kolibri_golden_synth_int4attn_eager_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn)
+  add_test(NAME kolibri_golden_synth_bf16attn_eager_test COMMAND kolibri_golden_test ${_kol_synth}/bf16attn/ckpt
+    ${_kol_synth}/bf16attn)
+  set_tests_properties(kolibri_golden_synth_int4attn_eager_test kolibri_golden_synth_bf16attn_eager_test
+    PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
+  add_test(NAME kolibri_golden_synth_i8head_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn int8)
+  add_test(NAME kolibri_partial_test COMMAND kolibri_partial_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} 30)
+  add_test(NAME kolibri_partial_eager_test COMMAND kolibri_partial_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} 30)
+  set_tests_properties(kolibri_partial_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
+  set_tests_properties(kolibri_decode_synth_test kolibri_golden_synth_int4attn_test kolibri_golden_synth_bf16attn_test
+    kolibri_golden_synth_int4attn_eager_test kolibri_golden_synth_bf16attn_eager_test kolibri_golden_synth_i8head_test
+    kolibri_partial_test kolibri_partial_eager_test
+    PROPERTIES LABELS "checkpoint;golden;kolibri" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+# b70-decode's model_type dispatch and Kolibri's refusals, before the device: tests/model/kolibri1/ holds
+# only the checkpoint's config.json, which is all the dispatch and the --pp 1 fit check read.
+set(_kol_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
+b70_cli_reject(cli_reject_kolibri_one_card ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --pp 1 EXPECT "--pp 2")
+b70_cli_reject(cli_reject_kolibri_prefill ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --prefill EXPECT "spec 20d")
+b70_cli_reject(cli_reject_kolibri_mtp ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "no MTP head")
+b70_cli_reject(cli_reject_kolibri_kv8 ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "bf16 only")
+b70_cli_reject(cli_reject_kolibri_layers_qwen ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --layers 3
+  EXPECT "--layers belongs to Kolibri-1")
+if(TARGET b70-serve)
+  # b70-serve refuses kolibri1 before the device, naming spec 20e (b70_cli_reject's checks on b70-serve).
+  add_test(NAME cli_reject_kolibri_serve COMMAND sh -c [==[
+out=$("$@" 2>&1)
+rc=$?
+printf '%s\n' "$out" >&2
+[ "$rc" -eq 1 ] || { echo "expected exit 1, got $rc" >&2; exit 1; }
+if printf '%s\n' "$out" | grep -q '^device:'; then echo "a device was opened" >&2; exit 1; fi
+printf '%s\n' "$out" | grep -qF 'spec 20e' || { echo "the refusal does not name spec 20e" >&2; exit 1; }
+exit 0
+]==] cli_reject_kolibri_serve $<TARGET_FILE:b70-serve> ${_kol_cfg})
+  set_tests_properties(cli_reject_kolibri_serve PROPERTIES TIMEOUT 60)
+endif()
 # ==== Spec 20c: Kolibri-1 decode ==== (end) ====
