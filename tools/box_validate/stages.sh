@@ -1307,6 +1307,125 @@ st_r22_s1_32k() {
 }
 
 # ======================================================================================
+row 23 "spec 16c - pipeline parallel PREFILL across two B70s (--pp 2 --prefill / --prefill-length; spec 16 §9, plan 16c)"
+rownote 23 "After row 22: 16c's prefill hands off at 16b's cut (layer s's fold on device 0) through 16b's two hand-offs, so r22.devices and r22.p1 must pass first. Every GPU stage needs BOTH cards (ZE_AFFINITY_MASK=0,1 in its commands, the one GPU lock); both cards free of other DRM holders for the speed stages."
+rownote 23 "S2 (spec 16 §5): pp32768 and pp65536 >= 1.7x one card, pp4096 >= 1.2x (estimates). Each --pp 2 arm prints each card's busy time ('pp: device N busy ...'): the pipeline runs at the slower card's rate, so the busy line says whether the byte-balanced auto split also balances time (the second card is ~3 % slower on prefill, docs/10); r23.split_sweep (opt-in) times the neighbouring splits."
+rownote 23 "pp131072 is opt-in (r23.s2_128k): one card at --max-len 131328 (the most it holds with the bf16 head at that length), --pp 2 at --max-len 262144 (the P3 / S3 configuration only two cards hold); ~2.5 min per one-card run."
+stage r23.host 23 default cpu - - "host: pipeline_prefill_plan_test (the chunks = Engine::prefill's, the host's order and every rule it keeps - each single-step drop of it caught -, the landing slots, the per-device plan with a prefill path), pp_prefill_protocol_test (that order run by its one executor over two host threads: copy and peer, a slowed device 1, spec 7 hooks from the shadows, a throwing hook, a lost hand-off; TSan-clean on the Mac), pipeline_args_test (the lifted refusal; sycl-tla / composed refused)"
+st_r23_host() {
+  run_tests '^(pipeline_prefill_plan_test|pp_prefill_protocol_test|pipeline_args_test)$'
+  jgrab plan '^pipeline_prefill_plan_test$' 'chunks:|schedule:|landing:|split'
+  jgrab protocol '^pp_prefill_protocol_test$' 'chunks:|threw|hook|OK'
+  finish
+}
+stage r23.r0 23 default cpu - g0.sha,g0.bitwise,g0.suite "--pp 1 is today's engine: 16c adds no kernel binary (pp_send / pp_recv are 16b's), every pre-existing binary identical and the suite bitwise (G0) - Engine::prefill's chunk rule now comes from runtime/prefill_chunks.h and step_chunk walks through walk_layers, both meant to be the same launches in the same order"
+st_r23_r0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r23.reject 23 default gpu - r22.devices "the refusals before the device: --pp 2 with a sycl-tla prefill (--prefill and --prefill-length), cli_reject_pipeline_*_sycl"
+st_r23_reject() {
+  run_tests '^cli_reject_pipeline_(prefill|bench_prefill)_sycl$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  finish
+}
+stage r23.p1 23 default gpu qwen r22.p1 "P1 / P2 (Review Focus 1-4): pp_prefill_test, _l0 and _i8head - 4103 ids (3 chunks), 32768 (16), 2 ids, a prefill_split continuation (2500 | 1603, chunk 1000), spec 7's hooks at 2048 / 4096 (from the shadows, the next chunk running) and 5000, a hook throwing at 2048, a one-card snapshot at 3000 continued on two cards - logits row, every layer's GDN state / conv ring / KV, both Control blocks and 16 decoded ids bitwise one card on device 0; copy and peer at the auto split, and the cuts at 5 and 62; each card's launches = step_stage_launches' arithmetic"
+st_r23_p1() {
+  run_tests '^(pp_prefill_test|pp_prefill_l0_test|pp_prefill_i8head_test)$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab p1 '^pp_prefill' 'bitwise|hooks|throws|busy|differs|memory, device|OK'
+  finish
+}
+stage r23.p1_kv8 23 default gpu qwen r23.p1 "P1 over the int8 KV cache: pp_prefill_kv8_test (B70_KV_CACHE=int8; the flash path's kv8 twins per device)"
+st_r23_p1_kv8() {
+  run_tests '^pp_prefill_kv8_test$' kv8 '' 'ZE_AFFINITY_MASK=0,1'
+  finish
+}
+stage r23.p4 23 default gpu qwen r22.devices "Back-pressure and P4 (Review Focus 2): pp_prefill_fail_test - device 1 held back 150 ms a chunk (a host thread releases its event): bitwise the clean run, the wall >= the holds; a lost hand-off (no ready signal) throws within the 5 s bound naming the chunk, device 1 is released and drains, the next prefill says reset() first, after reset() bitwise again; copy and peer"
+st_r23_p4() {
+  run_tests '^pp_prefill_fail_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab p4 '^pp_prefill_fail_test$' 'held|threw after|recovered|bitwise|OK'
+  finish
+}
+stage r23.cli 23 default gpu qwen r23.p1 "b70-decode --pp 2 --prefill on Qwen3.8: --ids prose.ids --n 64 under copy and peer, l0-int8 and l0, and --prefill-chunk 1000, equal the one-card --prefill ids; --max-len auto with --prefill plans each card's prefill scratch; the pp lines (each card's busy time) and both memory lines"
+st_r23_cli() {
+  local b h
+  for b in l0-int8 l0; do
+    chk "build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 64 --prefill --prefill-backend $b > $STATE/r23-one-$b.ids" "one card, --prefill, $b"
+    for h in copy peer; do
+      chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 64 --prefill --prefill-backend $b --pp 2 --pipeline-handoff $h > $STATE/r23-$h-$b.ids && cmp $STATE/r23-one-$b.ids $STATE/r23-$h-$b.ids" \
+        "--pp 2 --prefill $b, $h: the one-card ids"
+    done
+  done
+  chk "build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 32 --prefill --prefill-chunk 1000 > $STATE/r23-one-c1000.ids" "one card, --prefill-chunk 1000"
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 32 --prefill --prefill-chunk 1000 --pp 2 > $STATE/r23-pp-c1000.ids && cmp $STATE/r23-one-c1000.ids $STATE/r23-pp-c1000.ids" \
+    "--pp 2 --prefill-chunk 1000: the one-card ids"
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 16 --prefill --pp 2 --max-len auto > /dev/null" \
+    "--max-len auto with --prefill across two cards"
+  grab_all auto 'max_len: auto ->|split: auto ->|pipeline plan at'
+  grab_all pp '^pp: ' 12
+  grab_all memory '^memory, device' 8
+  finish
+}
+stage r23.agnes 23 default gpu agnes r23.p1 "Review Focus 1 on Agnes (72 layers): --ids prose.ids --n 32 --lm-head int8 --prefill under --pp 2 gives the one-card --prefill ids"
+st_r23_agnes() {
+  chk "build/src/cli/b70-decode $SNAP_AGNES --ids tests/golden/prompts/prose.ids --n 32 --lm-head int8 --prefill > $STATE/r23-agnes-one.ids" "Agnes, one card, --prefill"
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_AGNES --ids tests/golden/prompts/prose.ids --n 32 --lm-head int8 --prefill --pp 2 > $STATE/r23-agnes-pp.ids && cmp $STATE/r23-agnes-one.ids $STATE/r23-agnes-pp.ids" \
+    "Agnes, --pp 2 --prefill: the one-card ids"
+  grab_all pp '^pp: |split: auto ->' 6
+  finish
+}
+stage r23.ornith 23 default gpu ornith r23.p1 "Review Focus 1 on a MoE model: Ornith (40 layers; the cut's fold SP0, the grouped experts per device) --ids prose.ids --n 32 --lm-head int8 --prefill under --pp 2 (l0-int8 and l0) gives the one-card --prefill ids"
+st_r23_ornith() {
+  local b
+  for b in l0-int8 l0; do
+    chk "build/src/cli/b70-decode $SNAP_ORNITH --ids tests/golden/prompts/prose.ids --n 32 --lm-head int8 --prefill --prefill-backend $b > $STATE/r23-ornith-one-$b.ids" "Ornith, one card, --prefill $b"
+    chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_ORNITH --ids tests/golden/prompts/prose.ids --n 32 --lm-head int8 --prefill --prefill-backend $b --pp 2 > $STATE/r23-ornith-pp-$b.ids && cmp $STATE/r23-ornith-one-$b.ids $STATE/r23-ornith-pp-$b.ids" \
+      "Ornith, --pp 2 --prefill $b: the one-card ids"
+  done
+  grab_all pp '^pp: |split: auto ->' 6
+  finish
+}
+# S2: one prefill length per stage - one card against --pp 2 copy and peer, interleaved after a
+# warm-up, median of 3 (tools/box_validate/interleave.sh), the pp t/s ratio per arm.
+s2_arms() {   # s2_arms LEN MAXLEN_ONE MAXLEN_PP
+  local n="$1" one="$2" pp="$3"
+  printf " one@%s '%s'" "$n" "$(bench_cmd "$SNAP_QWEN" --prefill-length "$n" --tg 16 --max-len "$one")"
+  printf " copy@%s 'ZE_AFFINITY_MASK=0,1 %s'" "$n" "$(bench_cmd "$SNAP_QWEN" --prefill-length "$n" --tg 16 --max-len "$pp" --pp 2)"
+  printf " peer@%s 'ZE_AFFINITY_MASK=0,1 %s'" "$n" "$(bench_cmd "$SNAP_QWEN" --prefill-length "$n" --tg 16 --max-len "$pp" --pp 2 --pipeline-handoff peer)"
+}
+s2_stage() {   # s2_stage LEN MAXLEN_ONE MAXLEN_PP
+  idle before
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 --ratio copy@$1/one@$1 --ratio peer@$1/one@$1 --$(s2_arms "$1" "$2" "$3")" \
+    "the S2 arms at pp$1"
+  idle after
+  grab_all ratio '^RATIO '
+  grab_all busy '^pp: device' 12
+  grab_all idle '^IDLE '
+  finish
+}
+stage r23.s2_4k 23 default gpu qwen r23.p1 "S2 at pp4096 (two chunks: little overlap; bar >= 1.2x): one card vs --pp 2 copy and peer, --tg 16, max_len 16384, interleaved, median of 3; each card's busy time"
+st_r23_s2_4k() { s2_stage 4096 16384 16384; }
+stage r23.s2_32k 23 default gpu qwen r23.p1 "S2 at pp32768 (16 chunks; bar >= 1.7x): one card vs --pp 2 copy and peer, max_len 40960, interleaved, median of 3; each card's busy time"
+st_r23_s2_32k() { s2_stage 32768 40960 40960; }
+stage r23.s2_64k 23 default gpu qwen r23.p1 "S2 at pp65536 (32 chunks; bar >= 1.7x): one card vs --pp 2 copy and peer, max_len 69632, interleaved, median of 3; each card's busy time"
+st_r23_s2_64k() { s2_stage 65536 69632 69632; }
+stage r23.s2_128k 23 optin gpu qwen r23.p1 "S2 at pp131072 (64 chunks): one card at max_len 131328 vs --pp 2 copy and peer at max_len 262144 (the length only two cards hold, spec 16 P3 / S3), interleaved, median of 3"
+st_r23_s2_128k() { s2_stage 131072 131328 262144; }
+stage r23.split_sweep 23 optin gpu qwen r23.p1 "Review Focus 5: pp32768 --pp 2 copy at the splits 30 / 32 / 34 (and auto), interleaved, median of 3 - each card's busy time per split, to see where the second card's ~3 % slower prefill puts the time-balanced cut"
+st_r23_split_sweep() {
+  idle before
+  local arms="" s
+  for s in 30 32 34; do
+    arms="$arms s$s 'ZE_AFFINITY_MASK=0,1 $(bench_cmd "$SNAP_QWEN" --prefill-length 32768 --tg 16 --max-len 40960 --pp 2 --pipeline-split $s)'"
+  done
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 --ratio s30/s32 --ratio s34/s32 --$arms" \
+    "pp32768 at three splits"
+  idle after
+  grab_all ratio '^RATIO '
+  grab_all busy '^pp: device' 18
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx labels belong to their rows)"
 st_x_rest() {
