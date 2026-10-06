@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Greedy bf16 baseline for the tool-call set (spec 5 T0, gate A4), on CPU.
 
-    oracle_generate.py <bf16 snapshot> <set dir> <out dir> [--new-tokens N]
+    oracle_generate.py [--model kolibri] [--device cpu|cuda|xpu] <snapshot> <set dir> <out dir>
+                       [--new-tokens N]
 
 Builds transformers' Qwen3_5ForCausalLM the way tools/rotate/check_rotation.py
 does (text_config, load_sd in bf16, eager attention), then for every scenario
@@ -28,7 +29,12 @@ The model follows config.json's model_type:
                     modeling_k2_horizon.py, layer at a time, mode bf16 (bitwise the vendored
                     model in bf16, eager attention), on the checkpoint given - the int4 one
                     (dequantised, 18a's reference) or the bf16 original - greedy through its
-                    own cache.
+                    own cache;
+  kolibri1          Kolibri-1 (spec 20e, KL4; `--model kolibri` says so and checks it):
+                    tools/oracle/kolibri_ref.py's KolibriRef, layer at a time, mode bf16, on the
+                    checkpoint given - the 156 GB bf16 source (the KL4 reference, wherever 20b
+                    runs: `--device` cuda / xpu where there is one) or the int4 export
+                    (dequantised) - greedy through its own cache, the head's 128000 rows.
 The MoE paths stop after an EOS id of generation_config.json (kept, as HF generate keeps it)
 or --new-tokens ids (default 192; K2's A4 run uses 512: its replies open with reasoning).
 """
@@ -83,8 +89,9 @@ def greedy(step, prompt: list[int], n: int, eos: set[int], argmax) -> list[int]:
     return out
 
 
-def moe_runner(snap: str, mtype: str):
-    """-> generate(ids, n, eos) for Ornith (qwen3_5_moe) or K2-Horizon (k2_horizon)."""
+def moe_runner(snap: str, mtype: str, device: str = "cpu"):
+    """-> generate(ids, n, eos) for Ornith (qwen3_5_moe), K2-Horizon (k2_horizon) or Kolibri-1
+    (kolibri1; `device` is its reference's)."""
     import torch
 
     def load(name: str):
@@ -96,6 +103,18 @@ def moe_runner(snap: str, mtype: str):
 
     def argmax(row):
         return int(torch.argmax(row).item())
+
+    if mtype == "kolibri1":
+        KR = load("kolibri_ref")
+        src = KR.Checkpoint(snap)
+        ref = KR.KolibriRef(src.cfg, src, mode="bf16", device=device)
+        print(f"Kolibri-1 reference: kolibri_ref.py, {src.cfg.num_hidden_layers} layers, mode bf16, "
+              f"device {device}", flush=True)
+
+        def generate(ids, n, eos):
+            cache = ref.new_cache()
+            return greedy(lambda chunk, pos: ref.forward(chunk, pos, cache)[-1], ids, n, eos, argmax)
+        return generate
 
     if mtype == "k2_horizon":
         K2 = load("k2_ref")
@@ -126,15 +145,42 @@ def moe_runner(snap: str, mtype: str):
     return generate
 
 
-def main() -> None:
-    args = sys.argv[1:]
-    new_tokens = NEW_TOKENS
-    if len(args) == 5 and args[3] == "--new-tokens":
-        new_tokens = int(args[4])
-        args = args[:3]
-    if len(args) != 3:
+MOE_TYPES = ("qwen3_5_moe", "k2_horizon", "kolibri1")
+MODELS = {"kolibri": "kolibri1"}   # --model NAME -> the model_type it must be
+
+
+def parse_args(argv: list[str]) -> dict:
+    """[--model kolibri] [--device D] <snapshot> <set dir> <out dir> [--new-tokens N] -> a dict."""
+    a = {"model": None, "device": "cpu", "new_tokens": NEW_TOKENS}
+    pos: list[str] = []
+    i = 0
+    while i < len(argv):
+        x = argv[i]
+        if x in ("--model", "--device", "--new-tokens"):
+            if i + 1 >= len(argv):
+                sys.exit(f"{x} needs a value")
+            v = argv[i + 1]
+            if x == "--model":
+                if v not in MODELS:
+                    sys.exit(f"--model expects one of {', '.join(MODELS)}, got {v!r}")
+                a["model"] = v
+            elif x == "--device":
+                a["device"] = v
+            else:
+                a["new_tokens"] = int(v)
+            i += 2
+            continue
+        pos.append(x)
+        i += 1
+    if len(pos) != 3:
         sys.exit(__doc__)
-    snap, set_dir, out = args
+    a["snapshot"], a["set_dir"], a["out"] = pos
+    return a
+
+
+def main() -> None:
+    a = parse_args(sys.argv[1:])
+    snap, set_dir, out, new_tokens = a["snapshot"], a["set_dir"], a["out"], a["new_tokens"]
     os.makedirs(out, exist_ok=True)
     manifest = load_manifest(set_dir)
     todo = [e for e in manifest
@@ -148,8 +194,10 @@ def main() -> None:
 
     with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:
         mtype = json.load(f).get("model_type", "")
-    if mtype in ("qwen3_5_moe", "k2_horizon"):
-        moe_main(snap, out, todo, prompts, new_tokens, mtype)
+    if a["model"] is not None and mtype != MODELS[a["model"]]:
+        sys.exit(f"--model {a['model']}: {snap} is model_type {mtype!r}, not {MODELS[a['model']]}")
+    if mtype in MOE_TYPES:
+        moe_main(snap, out, todo, prompts, new_tokens, mtype, a["device"])
         return
 
     import torch
@@ -223,7 +271,8 @@ def save(out: str, name: str, new: list[int], text: str, i: int, n: int, n_promp
           flush=True)
 
 
-def moe_main(snap: str, out: str, todo: list[dict], prompts: dict, new_tokens: int, mtype: str) -> None:
+def moe_main(snap: str, out: str, todo: list[dict], prompts: dict, new_tokens: int, mtype: str,
+             device: str = "cpu") -> None:
     import torch
     from tokenizers import Tokenizer
     with open(os.path.join(snap, "generation_config.json"), encoding="utf-8") as f:
@@ -233,7 +282,7 @@ def moe_main(snap: str, out: str, todo: list[dict], prompts: dict, new_tokens: i
     print(f"torch {torch.__version__}, threads {torch.get_num_threads()}, eos {sorted(eos)}, "
           f"model_type {mtype}, {new_tokens} new tokens", flush=True)
     t = time.time()
-    generate = moe_runner(snap, mtype)
+    generate = moe_runner(snap, mtype, device)
     print(f"ready in {time.time() - t:.0f}s", flush=True)
     for i, e in enumerate(todo, 1):
         name = e["name"]

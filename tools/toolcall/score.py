@@ -1,6 +1,6 @@
 """Score tool calls: the first tool call of each output against a reference run.
 
-    score.py <out dir> <reference run> <candidate run>...
+    score.py [--format qwen|hermes] <out dir> <reference run> <candidate run>...
 
 Reads <out dir>/<scenario>.<run>.txt (the generated text, special tokens kept) and compares
 each candidate's first call - its name and raw argument strings - with the reference's.
@@ -20,8 +20,14 @@ Two call syntaxes, told apart by their tags (the two sets share none):
       'reasoning'. xml values are the raw text; json values are kept as strings when they are
       strings and as their JSON text otherwise, so two runs in one format compare like for like.
 
+  hermes (Kolibri-1, spec 20e; `--format hermes`: its tags are Qwen's, so it is never detected):
+      <tool_call>\n{"name": NAME, "arguments": {...}}\n</tool_call> - the body JSON ("arguments"
+      may be a JSON string holding an object), the first block wins; reasoning the MODEL opens
+      (optional whitespace, then <think> ... </think>) is skipped first, and an output that ends
+      inside it is 'reasoning'. Arguments are kept as JSON values and compared as such.
+
 Kinds: 'call', 'no call', 'incomplete' (a call opened and not closed, or one that does not
-parse), 'reasoning' (K2: generation ended inside the reasoning).
+parse), 'reasoning' (K2 / hermes: generation ended inside the reasoning).
 """
 import json
 import os
@@ -109,9 +115,54 @@ def parse_first_call_k2(text: str):
     return ("call", got[0], got[1], len(calls))
 
 
-def parse_first_call(text: str):
-    """-> (kind, name, params, n_calls); kind is 'call', 'no call', 'incomplete' or (K2)
-    'reasoning'."""
+HERMES_CALL = re.compile(r"<tool_call>(.*?)</tool_call>", re.S)
+
+
+def hermes_parse_call(body: str):
+    """One hermes call body -> (name, arguments) or None (server::parse_json_call's rule)."""
+    try:
+        obj = json.loads(body.strip())
+    except ValueError:
+        return None
+    if not isinstance(obj, dict) or not isinstance(obj.get("name"), str) or not obj["name"].strip() \
+            or any(c.isspace() for c in obj["name"]):
+        return None
+    args = obj.get("arguments", {})
+    if args is None:
+        args = {}
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return None
+    if not isinstance(args, dict):
+        return None
+    return obj["name"], args
+
+
+def parse_first_call_hermes(text: str):
+    """-> (kind, name, arguments, n_calls) for Kolibri-1's output (hermes JSON calls)."""
+    rest = text.lstrip()
+    if rest.startswith("<think>"):
+        end = rest.find("</think>")
+        if end < 0:
+            return ("reasoning", None, {}, 0)
+        rest = rest[end + len("</think>"):]
+    calls = HERMES_CALL.findall(rest)
+    if not calls:
+        return ("incomplete" if "<tool_call>" in rest else "no call", None, {}, 0)
+    got = hermes_parse_call(calls[0])
+    if got is None:
+        return ("incomplete", None, {}, len(calls))
+    return ("call", got[0], got[1], len(calls))
+
+
+def parse_first_call(text: str, fmt: str = "auto"):
+    """-> (kind, name, params, n_calls); kind is 'call', 'no call', 'incomplete' or (K2, hermes)
+    'reasoning'. fmt 'hermes' reads Kolibri-1's calls; 'auto' (and 'qwen') K2's tags when present,
+    else Qwen XML."""
+    if fmt == "hermes":
+        return parse_first_call_hermes(text)
     if is_k2(text):
         return parse_first_call_k2(text)
     calls = CALL.findall(text)
@@ -125,20 +176,28 @@ def parse_first_call(text: str):
 
 
 def main() -> None:
-    out, ref, cands = sys.argv[1], sys.argv[2], sys.argv[3:]
+    args = sys.argv[1:]
+    fmt = "auto"
+    if args[:1] == ["--format"]:
+        if len(args) < 2 or args[1] not in ("qwen", "hermes"):
+            sys.exit("--format expects qwen or hermes")
+        fmt, args = args[1], args[2:]
+    if len(args) < 3:
+        sys.exit(__doc__)
+    out, ref, cands = args[0], args[1], args[2:]
     names = sorted(n[: -len(f".{ref}.txt")] for n in os.listdir(out) if n.endswith(f".{ref}.txt"))
     matches = {c: 0 for c in cands}
     print(f"| scenario | {ref} | " + " | ".join(cands) + " |")
     print("|---|---|" + "---|" * len(cands))
     for n in names:
-        r = parse_first_call(open(os.path.join(out, f"{n}.{ref}.txt"), encoding="utf-8").read())
+        r = parse_first_call(open(os.path.join(out, f"{n}.{ref}.txt"), encoding="utf-8").read(), fmt)
         cells = []
         for c in cands:
             p = os.path.join(out, f"{n}.{c}.txt")
             if not os.path.exists(p):
                 cells.append("missing")
                 continue
-            got = parse_first_call(open(p, encoding="utf-8").read())
+            got = parse_first_call(open(p, encoding="utf-8").read(), fmt)
             if got[0] != "call":
                 cells.append(got[0])
             elif r[0] == "call" and got[1:3] == r[1:3]:
@@ -151,6 +210,10 @@ def main() -> None:
     print()
     for c in cands:
         print(f"{c}: {matches[c]} / {len(names)} match {ref}")
+    if fmt == "hermes":   # KL4's hard bar: the parser reads every call the reference wrote
+        bad = [n for n in names if parse_first_call(
+            open(os.path.join(out, f"{n}.{ref}.txt"), encoding="utf-8").read(), fmt)[0] == "incomplete"]
+        print(f"{ref}: {len(bad)} parse failure(s)" + (f": {', '.join(bad)}" if bad else ""))
 
 
 if __name__ == "__main__":

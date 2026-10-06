@@ -1,4 +1,5 @@
-"""make_set.py --from: the re-tokenised set's template variables and key order (spec 18d).
+"""make_set.py --from: the re-tokenised set's template variables and key order (spec 18d); --lang de:
+Kolibri-1's German set (spec 20e, KL4) - the German table, key-sorted renders, thinking off.
 
     python3 tools/toolcall/test_make_set.py     (pytest also collects it, where installed)
 
@@ -97,6 +98,44 @@ def test_qwen_path_unchanged():
         assert c["kwargs"] == {} and c["enable_thinking"] is False
         assert not keys_sorted(c["tools"])   # rendered as the set holds them, unsorted
     assert "chat_template_kwargs" not in json.load(open(os.path.join(out, "t1_a.json"), encoding="utf-8"))
+
+
+def test_german_set_for_kolibri():
+    corpus = make_set.scan_repo()
+    out = tempfile.TemporaryDirectory()
+    _TMP.append(out)
+    tok = FakeTok()
+    man = make_set.build_set("unused", out.name, "de", tok=tok, mtype="kolibri1", corpus=corpus)
+    assert len(man) == 36 and len(tok.calls) == 36
+    for c in tok.calls:
+        assert c["enable_thinking"] is False and c["kwargs"] == {}
+        assert keys_sorted(c["msgs"]) and keys_sorted(c["tools"])   # b70-serve's render order
+        assert c["msgs"][0]["content"] == make_set.SYSTEM_DE
+    # Every user turn is the German table's, none the English one's.
+    de = [v for k, v in make_set.TEXT["de"].items() if k != "system"]
+    en = [v for k, v in make_set.TEXT["en"].items() if k != "system"]
+    stems = lambda table: [t.split("{")[0] for t in table]   # noqa: E731
+    users = [m["content"] for c in tok.calls for m in c["msgs"] if m["role"] == "user"]
+    assert all(any(u.startswith(st) for st in stems(de)) for u in users)
+    assert not any(u.startswith(st) for u in users for st in stems(en) if len(st) > 3)
+    sc = json.load(open(os.path.join(out.name, "t1_define-linear_l0.json"), encoding="utf-8"))
+    assert sc["lang"] == "de" and sc["enable_thinking"] is False
+    assert sc["messages"][1]["content"].startswith("Finde heraus, wo `")
+    assert set(make_set.TEXT["de"]) == set(make_set.TEXT["en"])
+
+
+def test_english_set_unchanged_by_the_table():
+    """The English table renders the original set's strings (Qwen's path: no key sorting, no lang)."""
+    corpus = make_set.scan_repo()
+    out = tempfile.TemporaryDirectory()
+    _TMP.append(out)
+    tok = FakeTok()
+    make_set.build_set("unused", out.name, "en", tok=tok, mtype="qwen3_5", corpus=corpus)
+    assert tok.calls[0]["msgs"][0]["content"] == make_set.SYSTEM
+    assert not keys_sorted(tok.calls[0]["tools"])
+    sc = json.load(open(os.path.join(out.name, "t5_test-step.json"), encoding="utf-8"))
+    assert "lang" not in sc
+    assert sc["messages"][1]["content"] == "I just changed /work/src/runtime/prefill/step.cc. Run the tests for this file."
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the tool-call acceptance set (spec 5 T0, gate A4).
 
-    make_set.py <snapshot> <out dir>
+    make_set.py [--lang en|de] <snapshot> <out dir>
     make_set.py --from <existing set dir> <snapshot> <out dir> [--kwargs JSON]
                                           (same conversations, re-tokenised)
 
@@ -27,6 +27,13 @@ reply with reasoning, and `low` (<ifm|think_faster>) keeps it short inside the t
 budget - and renders from KEY-SORTED messages and tools: b70-serve holds a request in
 nlohmann::json, whose objects are sorted, so the server's render of the same request is
 these ids (tools/tokenizer/dump_k2.py's rule).
+
+--lang de (spec 20e, KL4: Kolibri-1's German A4-style set): the same six templates over the same
+six files with the system prompt and the user turns in German (the DE table below); the tool
+results stay what the tools print. Kolibri-1 (model_type kolibri1) renders from KEY-SORTED
+messages and tools as K2 does (b70-serve's nlohmann::json), with enable_thinking=False (its
+template's prompt then ends in "<think>\n\n</think>\n\n": the reply is the call). Each
+<name>.json records "lang".
 """
 import hashlib
 import json
@@ -48,7 +55,7 @@ FILES = [
     "tools/box.sh",
 ]
 
-SYSTEM = """You are a coding agent working in a local checkout of b70-inference-server, an LLM inference engine for the Intel Arc Pro B70 written in C++ with Level Zero kernels, plus Python and shell tooling. The repository is at /work.
+SYSTEM_EN = """You are a coding agent working in a local checkout of b70-inference-server, an LLM inference engine for the Intel Arc Pro B70 written in C++ with Level Zero kernels, plus Python and shell tooling. The repository is at /work.
 
 You help the user with software engineering tasks: finding code, explaining it, editing it and running builds and tests. Use the tools you are given to inspect the repository; never guess the contents of a file you have not read. Prefer grep and glob to locate code, read to look at it, edit to change it (the oldString must match the file exactly, including indentation) and bash to run commands.
 
@@ -59,6 +66,54 @@ Guidelines:
 - Paths passed to tools are absolute and start with /work.
 - The C++ tree builds with CMake into /work/build; tests are ctest targets named after their source file (for example tests/prefill/dequant_test.cc is dequant_test). The Python tools run with python3 and their tests with python3 -m pytest.
 - Do not commit, push or change git state unless the user asks."""
+SYSTEM = SYSTEM_EN   # the name the set and its tests always used
+
+# Spec 20e: the German set's text (KL4). The English strings are the original set's, unchanged.
+SYSTEM_DE = """Du bist ein Coding-Agent und arbeitest in einem lokalen Checkout von b70-inference-server, einer LLM-Inferenz-Engine für die Intel Arc Pro B70, geschrieben in C++ mit Level-Zero-Kernels, dazu Werkzeuge in Python und Shell. Das Repository liegt unter /work.
+
+Du hilfst bei Aufgaben der Softwareentwicklung: Code finden, ihn erklären, ihn ändern sowie Builds und Tests ausführen. Nutze die Werkzeuge, die dir zur Verfügung stehen, um das Repository zu untersuchen; rate niemals den Inhalt einer Datei, die du nicht gelesen hast. Suche Code bevorzugt mit grep und glob, lies ihn mit read, ändere ihn mit edit (der oldString muss exakt mit der Datei übereinstimmen, einschließlich der Einrückung) und führe Befehle mit bash aus.
+
+Richtlinien:
+- Fasse dich kurz. Erkläre nicht lang und breit, was du vorhast; handle.
+- Rufe jeweils nur ein Werkzeug auf und warte auf sein Ergebnis.
+- Halte Änderungen minimal und im Stil des umgebenden Codes.
+- Pfade, die du an Werkzeuge übergibst, sind absolut und beginnen mit /work.
+- Der C++-Baum wird mit CMake nach /work/build gebaut; Tests sind ctest-Ziele, benannt nach ihrer Quelldatei (zum Beispiel ist tests/prefill/dequant_test.cc der Test dequant_test). Die Python-Werkzeuge laufen mit python3, ihre Tests mit python3 -m pytest.
+- Committe, pushe oder ändere den Git-Zustand nur, wenn du ausdrücklich darum gebeten wirst."""
+
+TEXT = {
+    "en": {
+        "system": SYSTEM_EN,
+        "t1": "Find where `{fn}` is defined.",
+        "t2": "Explain `{fn}` in {base}.",
+        "t3": "Rename `{local}` to `{new}` in {path}, only the one defined on line {ll}.",
+        "t4_comment": ("The comment above `{target}` in {path} (lines {c0} to {c1}) is too long for what it "
+                       "says. Replace it with a single-line comment that keeps the essential point."),
+        "t4_none": ("`{target}` in {path} (line {c0}) has no comment. Add a short comment above it saying "
+                    "what it validates and what it throws."),
+        "t4_docstring": ("Fix the docstring of `{target}` in {path} (line {c0}): it does not say what the "
+                         "function returns. Rewrite it as a summary line followed by a sentence about the "
+                         "return value."),
+        "t5": "I just changed {path}. Run the tests for this file.",
+        "t6": "Where is `{sym}` used?",
+    },
+    "de": {
+        "system": SYSTEM_DE,
+        "t1": "Finde heraus, wo `{fn}` definiert ist.",
+        "t2": "Erkläre `{fn}` in {base}.",
+        "t3": "Benenne `{local}` in {path} in `{new}` um, nur die Variable, die in Zeile {ll} definiert wird.",
+        "t4_comment": ("Der Kommentar über `{target}` in {path} (Zeilen {c0} bis {c1}) ist zu lang für das, "
+                       "was er sagt. Ersetze ihn durch einen einzeiligen Kommentar, der den wesentlichen "
+                       "Punkt behält."),
+        "t4_none": ("`{target}` in {path} (Zeile {c0}) hat keinen Kommentar. Füge darüber einen kurzen "
+                    "Kommentar hinzu, der sagt, was die Funktion prüft und was sie wirft."),
+        "t4_docstring": ("Korrigiere den Docstring von `{target}` in {path} (Zeile {c0}): Er sagt nicht, was "
+                         "die Funktion zurückgibt. Schreibe ihn als Zusammenfassungszeile, gefolgt von einem "
+                         "Satz über den Rückgabewert."),
+        "t5": "Ich habe gerade {path} geändert. Führe die Tests für diese Datei aus.",
+        "t6": "Wo wird `{sym}` verwendet?",
+    },
+}
 
 FUNC_RE = {
     "cc": re.compile(r"^(?!\s)(?!return\b|if\b|namespace\b|using\b|static_assert\b)"
@@ -184,8 +239,9 @@ def tool(i: int, content: str) -> dict:
     return {"role": "tool", "tool_call_id": f"call_{i}", "content": content}
 
 
-def scenarios(corpus):
-    """Yield (name, expect, builder(limit) -> messages, sizable)."""
+def scenarios(corpus, lang: str = "en"):
+    """Yield (name, expect, builder(limit) -> messages, sizable). `lang` picks TEXT's table."""
+    T = TEXT[lang]
     for rel in FILES:
         with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
             text = f.read()
@@ -200,17 +256,17 @@ def scenarios(corpus):
         sym = next((n for n, _ in used if n != fn), used[0][0] if used else fn)
         local, local_line = first_local(rel, text)
         ckind, ctarget, c0, c1 = comment_target(rel, text)
-        sys_msg = {"role": "system", "content": SYSTEM}
+        sys_msg = {"role": "system", "content": T["system"]}
 
         # 1: find a definition; no history.
         yield (f"t1_define-{slug}", "grep", lambda lim, fn=fn: [
-            sys_msg, {"role": "user", "content": f"Find where `{fn}` is defined."}], False)
+            sys_msg, {"role": "user", "content": T["t1"].format(fn=fn)}], False)
 
         # 2: explain a function; glob gave the path.
         def b2(lim, fn=fn, rel=rel, path=path):
             base = os.path.basename(rel)
             return [sys_msg,
-                    {"role": "user", "content": f"Explain `{fn}` in {base}."},
+                    {"role": "user", "content": T["t2"].format(fn=fn, base=base)},
                     call(1, "glob", {"pattern": f"**/{base}", "path": WORK}), tool(1, path)]
         yield (f"t2_explain-{slug}", "read", b2, False)
 
@@ -220,24 +276,14 @@ def scenarios(corpus):
         def b3(lim, local=local, new=new, path=path, text=text, ll=local_line):
             off = max(1, ll - 20)
             return [sys_msg,
-                    {"role": "user", "content": f"Rename `{local}` to `{new}` in {path}, "
-                                                f"only the one defined on line {ll}."},
+                    {"role": "user", "content": T["t3"].format(local=local, new=new, path=path, ll=ll)},
                     call(1, "read", {"filePath": path, "offset": off, "limit": lim}),
                     tool(1, read_result(text, off, lim))]
         yield (f"t3_rename-{slug}", "edit", b3, True)
 
         # 4: fix a multi-line comment (Python: a docstring); a read of the file.
-        if ckind == "comment":
-            task = (f"The comment above `{ctarget}` in {path} (lines {c0} to {c1}) is too long "
-                    f"for what it says. Replace it with a single-line comment that keeps the "
-                    f"essential point.")
-        elif ckind == "none":
-            task = (f"`{ctarget}` in {path} (line {c0}) has no comment. Add a short comment above "
-                    f"it saying what it validates and what it throws.")
-        else:
-            task = (f"Fix the docstring of `{ctarget}` in {path} (line {c0}): it does not say what "
-                    f"the function returns. Rewrite it as a summary line followed by a sentence "
-                    f"about the return value.")
+        task = T["t4_" + ("docstring" if ckind not in ("comment", "none") else ckind)].format(
+            target=ctarget, path=path, c0=c0, c1=c1)
 
         def b4(lim, task=task, path=path, text=text, c0=c0):
             off = max(1, c0 - 10)
@@ -249,7 +295,7 @@ def scenarios(corpus):
         # 5: run the tests; a read of the file from the top.
         def b5(lim, path=path, text=text):
             return [sys_msg,
-                    {"role": "user", "content": f"I just changed {path}. Run the tests for this file."},
+                    {"role": "user", "content": T["t5"].format(path=path)},
                     call(1, "read", {"filePath": path, "limit": lim}),
                     tool(1, read_result(text, 1, lim))]
         yield (f"t5_test-{slug}", "bash", b5, True)
@@ -261,7 +307,7 @@ def scenarios(corpus):
 
         def b6(lim, sym=sym, shown=shown, more=more, n=min(3, len(hs))):
             return [sys_msg,
-                    {"role": "user", "content": f"Where is `{sym}` used?"},
+                    {"role": "user", "content": T["t6"].format(sym=sym)},
                     call(1, "grep", {"pattern": rf"\b{sym}\b", "path": WORK}),
                     tool(1, f"Found {n} matches\n{shown}{more}")]
         yield (f"t6_usage-{slug}", "read", b6, False)
@@ -279,6 +325,8 @@ def load_tokenizer(snap: str):
 
 
 K2_KWARGS = {"tool_call_format": "xml", "reasoning_effort": "low"}
+# Models whose server render is of key-sorted objects (their template tests are recorded that way).
+SORTED_MODELS = ("k2_horizon", "kolibri1")
 
 
 def model_type(snap: str) -> str:
@@ -294,6 +342,7 @@ def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=No
     template variables (K2-Horizon's default K2_KWARGS); `tok` / `mtype` for the tests."""
     mtype = model_type(snap) if mtype is None else mtype
     k2 = mtype == "k2_horizon"
+    sort = mtype in SORTED_MODELS
     if kwargs is None:
         kwargs = dict(K2_KWARGS) if k2 else {}
     tok = load_tokenizer(snap) if tok is None else tok
@@ -305,7 +354,7 @@ def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=No
         with open(os.path.join(src, f"{name}.json"), encoding="utf-8") as f:
             sc = json.load(f)
         msgs, tools = sc["messages"], sc["tools"]
-        if k2:   # the server's (nlohmann::json) key order, dump_k2.py's rule
+        if sort:   # the server's (nlohmann::json) key order, dump_k2.py's rule
             msgs, tools = json.loads(json.dumps([msgs, tools], sort_keys=True))
         r = tok.apply_chat_template(msgs, tools=tools, add_generation_prompt=True,
                                     enable_thinking=sc.get("enable_thinking", False), tokenize=True,
@@ -332,6 +381,60 @@ def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=No
           f"{same}/{len(manifest)}" + (f"; template kwargs {json.dumps(kwargs, sort_keys=True)}" if kwargs else ""))
 
 
+def build_set(snap: str, out: str, lang: str = "en", tok=None, mtype: str | None = None,
+              corpus=None) -> list[dict]:
+    """The set from this tree: TEXT[lang]'s conversations rendered with the snapshot's template
+    (enable_thinking False; key-sorted for SORTED_MODELS). `tok` / `mtype` / `corpus` for the
+    tests. Returns the manifest."""
+    tok = load_tokenizer(snap) if tok is None else tok
+    mtype = model_type(snap) if mtype is None else mtype
+    with open(os.path.join(HERE, "tools.json"), encoding="utf-8") as f:
+        tools = json.load(f)
+
+    def render(msgs) -> list[int]:
+        m, t = msgs, tools
+        if mtype in SORTED_MODELS:
+            m, t = json.loads(json.dumps([msgs, tools], sort_keys=True))
+        r = tok.apply_chat_template(m, tools=t, add_generation_prompt=True,
+                                    enable_thinking=False, tokenize=True)
+        if hasattr(r, "keys"):          # transformers 5 returns a BatchEncoding
+            r = r["input_ids"]
+        return [int(x) for x in r]
+
+    os.makedirs(out, exist_ok=True)
+    corpus = scan_repo() if corpus is None else corpus
+    manifest = []
+    print("| scenario | expect | ids |\n|---|---|---:|")
+    for name, expect, build, sizable in scenarios(corpus, lang):
+        lim = 160
+        msgs = build(lim)
+        ids = render(msgs)
+        while sizable and len(ids) > MAX_IDS and lim > 10:
+            lim -= 10
+            msgs = build(lim)
+            ids = render(msgs)
+        if not MIN_IDS <= len(ids) <= MAX_IDS:
+            sys.exit(f"FATAL: {name} renders to {len(ids)} ids, outside {MIN_IDS} to {MAX_IDS}")
+        text = " ".join(map(str, ids)) + "\n"
+        rec = {"name": name, "expect": expect, "enable_thinking": False, "messages": msgs, "tools": tools}
+        if lang != "en":
+            rec["lang"] = lang
+        with open(os.path.join(out, f"{name}.json"), "w", encoding="utf-8") as f:
+            json.dump(rec, f, indent=1, ensure_ascii=False)
+            f.write("\n")
+        with open(os.path.join(out, f"{name}.ids"), "w", encoding="utf-8") as f:
+            f.write(text)
+        manifest.append({"name": name, "ids": len(ids),
+                         "sha256": hashlib.sha256(text.encode()).hexdigest()})
+        print(f"| {name} | {expect} | {len(ids)} |", flush=True)
+    with open(os.path.join(out, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=1)
+        f.write("\n")
+    n = [m["ids"] for m in manifest]
+    print(f"\n{len(manifest)} scenarios ({lang}), ids min {min(n)} max {max(n)} total {sum(n)}")
+    return manifest
+
+
 def main() -> None:
     if len(sys.argv) in (5, 7) and sys.argv[1] == "--from":
         kwargs = None
@@ -343,49 +446,15 @@ def main() -> None:
                 sys.exit("--kwargs expects a JSON object")
         retokenise(sys.argv[3], sys.argv[2], sys.argv[4], kwargs)
         return
-    if len(sys.argv) != 3:
+    args = sys.argv[1:]
+    lang = "en"
+    if args[:1] == ["--lang"]:
+        if len(args) < 2 or args[1] not in TEXT:
+            sys.exit(f"--lang expects one of {', '.join(sorted(TEXT))}")
+        lang, args = args[1], args[2:]
+    if len(args) != 2:
         sys.exit(__doc__)
-    snap, out = sys.argv[1], sys.argv[2]
-    tok = load_tokenizer(snap)
-    with open(os.path.join(HERE, "tools.json"), encoding="utf-8") as f:
-        tools = json.load(f)
-
-    def render(msgs) -> list[int]:
-        r = tok.apply_chat_template(msgs, tools=tools, add_generation_prompt=True,
-                                    enable_thinking=False, tokenize=True)
-        if hasattr(r, "keys"):          # transformers 5 returns a BatchEncoding
-            r = r["input_ids"]
-        return [int(x) for x in r]
-
-    os.makedirs(out, exist_ok=True)
-    corpus = scan_repo()
-    manifest = []
-    print("| scenario | expect | ids |\n|---|---|---:|")
-    for name, expect, build, sizable in scenarios(corpus):
-        lim = 160
-        msgs = build(lim)
-        ids = render(msgs)
-        while sizable and len(ids) > MAX_IDS and lim > 10:
-            lim -= 10
-            msgs = build(lim)
-            ids = render(msgs)
-        if not MIN_IDS <= len(ids) <= MAX_IDS:
-            sys.exit(f"FATAL: {name} renders to {len(ids)} ids, outside {MIN_IDS} to {MAX_IDS}")
-        text = " ".join(map(str, ids)) + "\n"
-        with open(os.path.join(out, f"{name}.json"), "w", encoding="utf-8") as f:
-            json.dump({"name": name, "expect": expect, "enable_thinking": False,
-                       "messages": msgs, "tools": tools}, f, indent=1, ensure_ascii=False)
-            f.write("\n")
-        with open(os.path.join(out, f"{name}.ids"), "w", encoding="utf-8") as f:
-            f.write(text)
-        manifest.append({"name": name, "ids": len(ids),
-                         "sha256": hashlib.sha256(text.encode()).hexdigest()})
-        print(f"| {name} | {expect} | {len(ids)} |", flush=True)
-    with open(os.path.join(out, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=1)
-        f.write("\n")
-    n = [m["ids"] for m in manifest]
-    print(f"\n{len(manifest)} scenarios, ids min {min(n)} max {max(n)} total {sum(n)}")
+    build_set(args[0], args[1], lang)
 
 
 if __name__ == "__main__":
