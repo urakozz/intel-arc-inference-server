@@ -151,11 +151,13 @@ void usage() {
       "                 prefill only). An int8 run's bench rows carry `int8-kv`. K2-Horizon:\n"
       "                 spec 18e's rotkv at head_dim 128, decode (flash / eager) and prefill.\n"
       "  --pp N, --pipeline-parallel-size N  1 (default) or 2 (spec 16b, vLLM's flag): split the\n"
-      "                 model's layers over GPUs 0 and 1 of what Level Zero shows, decode only\n"
-      "                 (--ids ingests one replay per id; --bench takes --depth). Refused with\n"
-      "                 --prefill, --prefill-length, --mtp, --profile, --device. Both cards'\n"
-      "                 memory lines on stderr; --max-len auto fits both. (Before 2026-10-06\n"
-      "                 --pp was the bench's prefill length: that is --prefill-length now.)\n"
+      "                 model's layers over GPUs 0 and 1 of what Level Zero shows. --prefill and\n"
+      "                 --prefill-length run the two-card chunk pipeline (spec 16c: l0 / l0-int8,\n"
+      "                 flash attention; each card's busy time on stderr); without them --ids\n"
+      "                 ingests one replay per id. Refused with --mtp, --profile, --device and\n"
+      "                 a sycl-tla prefill. Both cards' memory lines on stderr; --max-len auto\n"
+      "                 fits both. (Before 2026-10-06 --pp was the bench's prefill length: that\n"
+      "                 is --prefill-length now.)\n"
       "  --pipeline-split S  auto (default: the split whose heavier card holds the fewest bytes)\n"
       "                 or N: device 0 runs layers [0, N), device 1 the rest\n"
       "  --pipeline-handoff H  copy (default: a device-to-device copy and a cross-device event)\n"
@@ -892,7 +894,8 @@ int run(int argc, char** argv) {
     throw std::runtime_error("--profile captures its own bf16-KV list; it has no --kv-cache int8");
   // Spec 16b: --pp's refusals are argument-only, so they come before the device too.
   cli::check_pipeline(pipe, {prefill, have_prefill_len, mtp_on, profile,
-                             device != l0::Context::kFromEnv});
+                             device != l0::Context::kFromEnv, pp_path.backend,
+                             pp_path.composed_attn});
 
   // Spec 18b: dispatch on config.json's model_type. K2-Horizon runs runtime::k2::K2Engine (its
   // own loader, list and planner); every flag validated above means the same there, and what
@@ -990,6 +993,10 @@ int run(int argc, char** argv) {
     pa.kv = kv_cache;
     pa.pipe = pipe;
     pa.check_len = check_len;
+    pa.prefill = prefill;                  // spec 16c
+    pa.bench_prefill = have_prefill_len;   // --prefill-length N already set depth = N
+    pa.chunk = pp_chunk;
+    pa.pf = pp_path;
     return cli::run_pipeline_decode<StdoutToStderr>(pa);
   }
 
