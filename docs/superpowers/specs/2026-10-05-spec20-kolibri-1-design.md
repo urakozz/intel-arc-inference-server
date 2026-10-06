@@ -2,6 +2,7 @@
 
 **Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**. 20a built
 2026-10-06 (§10).
+Plans 20c-20e written 2026-10-06: `docs/superpowers/plans/2026-10-06-spec20c-kolibri-decode.md`, `...-spec20d-kolibri-prefill.md`, `...-spec20e-kolibri-serving.md` (20c's two-card task needs spec 16b).
 
 **Why this model:** Aleph Alpha's Kolibri-1 is a German- and English-focused reasoning MoE with tool
 calling, Apache-2.0, released 2026-10-03. Spec 20 serves it in this engine's own format (int4 g64
