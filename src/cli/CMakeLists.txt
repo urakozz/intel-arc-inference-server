@@ -51,3 +51,5 @@ target_link_libraries(b70-decode PRIVATE b70_server)
 # Spec 18c: and K2's prefill (b70_k2_prefill: K2Engine::prefill, its walk and scratch).
 # b70-decode already links the prefill component when it is built (b70_link_prefill above).
 target_link_libraries(b70-decode PRIVATE b70_k2_prefill)
+# Spec 20c: and Kolibri-1's engine (runtime/kolibri, src/cli/kolibri_decode.h), dispatched on model_type.
+target_link_libraries(b70-decode PRIVATE b70_kolibri_runtime)
