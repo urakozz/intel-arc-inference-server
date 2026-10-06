@@ -262,7 +262,7 @@ router GEMV, MoE route, gate||up (8 + shared), down + combine + residual.
 1.5 GB reserve auto gives 46592 / 49920 (derived). bf16 KV only (int8 KV is 18e).
 
 **CLIs.** `b70-decode` dispatches on config.json's `model_type`: `--ids` / `--bench` run
-`K2Engine` (`--lm-head bf16` default, `int8` available); `--prefill` / `--pp` are refused naming
+`K2Engine` (`--lm-head bf16` default, `int8` available); `--prefill` / `--prefill-length` are refused naming
 18c, `--kv-cache int8` naming 18e, `--profile` naming Task 4. `b70-serve` refuses K2 before the
 device naming 18c / 18d.
 
@@ -403,7 +403,7 @@ tail), 6 MoVA, prep + flash, 6 o_proj slabs, 2 norm, 11 MoE.
 
 **Decisions taken blind.**
 - **l0 only.** spec 5's h8 (`l0-int8`) rotates in 1024-k Hadamard blocks and K2's hidden is 2560;
-  sycl-tla has no K2 walk. `b70-decode --pp-backend l0-int8 | sycl-tla` on K2 is refused by name.
+  sycl-tla has no K2 walk. `b70-decode --prefill-backend l0-int8 | sycl-tla` on K2 is refused by name.
 - **K2's own sort** (`k2_pf_sort`): pf_moe.cl's needs a multiple of 16 experts (K2's MoE has 100)
   and always appends a shared expert (MoVA has none); the tile table, the padding to tmax, the
   header and the determinism argument are pf_moe.cl's, and for the MoE shape the host reference
@@ -415,7 +415,7 @@ tail), 6 MoVA, prep + flash, 6 o_proj slabs, 2 norm, 11 MoE.
   SLM-fused dequant inside the grouped GEMM is plan 18c Task 3's first lever.
 - **The prefill scratch: 0.797 GB** (kPfC 2048: partials 84 MB, the weight batch 401 MB, the
   sorted A / y 110 MB, ...; `runtime::k2::prefill_sizes`), lazy on the engine and planned only
-  when a run prefills: `--max-len auto` with `--prefill` / `--pp` gives 42752 positions (bf16 head,
+  when a run prefills: `--max-len auto` with `--prefill` / `--prefill-length` gives 42752 positions (bf16 head,
   32.53 GB card, 1.5 GB reserve; 46592 decode-only).
 - **Natural `exp` in the flash attention** (EXP2 0), as K2's decode and the reference - PROVISIONAL,
   a Task 3 speed knob (spec 6c's exp2 was a register-pressure fix at head_dim 256).
@@ -451,7 +451,7 @@ bitwise, flash attention against fp64 at depths 0 / 2k / 30k / 60k, a tail chunk
 Review Focus 1-3 at kernel level), `k2_prefill_test` (the walk, K3 determinism / recorded replay /
 chunking bitwise, prefill KV and routing against decode's fill, tokens by ruling A26; `_i8head`,
 `_eager`), `prefill_split_k2_test`, `k2_golden_prefill_test` / `_c16` / `_i8head` (K2 on prefill
-with the routing diagnostic, Review Focus 5), `cli_reject_k2_pp_int8` / `cli_reject_k2_prefill_sycl`.
+with the routing diagnostic, Review Focus 5), `cli_reject_k2_prefill_length_int8` / `cli_reject_k2_prefill_sycl`.
 The PROPOSED bars (KV vs decode: dense rows >= 0.999, median >= 0.9998, p01 >= 0.99; routing
 near-tie margin 2e-2, weights 1/32) are set from the box's first printed distributions.
 

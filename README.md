@@ -109,7 +109,7 @@ written for this card, interleaved on one in order command list. A prefill chunk
 makes no SYCL call and never waits on the host. Attention and the delta net
 scan are ours too.
 
-sycl-tla stays selectable as a reference backend with `--pp-backend sycl-tla`,
+sycl-tla stays selectable as a reference backend with `--prefill-backend sycl-tla`,
 and the whole thing also builds with no SYCL component at all.
 
 ## Some hardware facts I measured along the way
@@ -185,7 +185,7 @@ ctest --test-dir build
 # the engine never downloads; fetch the checkpoint into the Hugging Face cache once
 uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 
-./build/src/cli/b70-decode urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --bench --pp 4096 --tg 256
+./build/src/cli/b70-decode urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --bench --prefill-length 4096 --tg 256
 ./build/src/cli/b70-serve  urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ   # OpenAI compatible endpoint
 ```
 
@@ -235,8 +235,8 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
 | `--lm-head bf16\|int8` | `int8` | the output head: int8 per row, quantised at load (spec 9), or the checkpoint's bf16 |
 | `--draft-vocab off\|32k\|64k\|128k` | `off` | With `--mtp`: the head only guesses from the 32k / 64k / 128k most useful tokens (the chat and tool-call tags always, then `--draft-vocab-ids`, then the most common ones), so each guess reads a fraction of the output head. The check still uses the full vocabulary, so output never changes; a guess the subset cannot make is simply a miss. About 4-5 % faster MTP steps at 128k (derived, not yet measured). Costs 0.17 / 0.34 / 0.67 GB of memory with the int8 head, twice that with bf16, and that memory comes out of the `--max-len auto` context: at 128k, Qwen3.8 with `--mtp` gets ~160k instead of ~170k with the int8 head and ~132k instead of ~152k with bf16 (derived). Spec 8 §11. |
 | `--draft-vocab-ids FILE` | - | With `--draft-vocab`: your own ranking of the most useful tokens, one id per line, most frequent first. Make it with `tools/draft_vocab/rank.py` from the logs `--log-requests` writes. |
-| `--pp-backend B` | `l0-int8` | prefill GEMMs: `l0-int8` (Hadamard rotated int8, spec 5), `l0` (bf16 on the Level Zero list), `sycl-tla` (reference, optional component) |
-| `--kv-cache bf16\|int8` | `bf16` | How the context (the KV cache) is stored. `int8` keeps every cached key and value as 8-bit numbers plus one small scale per token and head, after mixing each row with a fixed rotation that spreads out the few very large values (the 12a probe's `rotkv`, spec 12 §8); attention mixes it back. That halves the cache: 32 KiB + 256 B per token on Qwen3.8 instead of 64 KiB, so `--max-len auto` reaches the full trained context, 262144 tokens, with or without `--mtp` (Agnes: 262144, ~226k with `--mtp`; derived), and the prefix cache's KV blocks halve too (more history fits in the same RAM). Accuracy: on Agnes (the stand-in) its error was below bf16 attention's own rounding error; the gates on Qwen3.8 and on the card are **pending** (spec 12 Q2-Q5), which is why the default stays `bf16`. Needs `--pp-backend l0` or `l0-int8` (refused with `sycl-tla`). Spec 12b. |
+| `--prefill-backend B` | `l0-int8` | prefill GEMMs: `l0-int8` (Hadamard rotated int8, spec 5), `l0` (bf16 on the Level Zero list), `sycl-tla` (reference, optional component). `--pp-backend` until 2026-10-06 |
+| `--kv-cache bf16\|int8` | `bf16` | How the context (the KV cache) is stored. `int8` keeps every cached key and value as 8-bit numbers plus one small scale per token and head, after mixing each row with a fixed rotation that spreads out the few very large values (the 12a probe's `rotkv`, spec 12 §8); attention mixes it back. That halves the cache: 32 KiB + 256 B per token on Qwen3.8 instead of 64 KiB, so `--max-len auto` reaches the full trained context, 262144 tokens, with or without `--mtp` (Agnes: 262144, ~226k with `--mtp`; derived), and the prefix cache's KV blocks halve too (more history fits in the same RAM). Accuracy: on Agnes (the stand-in) its error was below bf16 attention's own rounding error; the gates on Qwen3.8 and on the card are **pending** (spec 12 Q2-Q5), which is why the default stays `bf16`. Needs `--prefill-backend l0` or `l0-int8` (refused with `sycl-tla`). Spec 12b. |
 | `--log-requests DIR` | off | write `DIR/NNNNNN.json` per request: timings, body, prompt and generated ids, text |
 
 Advanced, for calibration only: `--mtp-cost "verify=1,1.18,1.56,1.79;draft=0.13,0.26,0.38"` replaces the
@@ -248,7 +248,7 @@ costs on your card (spec 8 §10).
 
 ```sh
 # the BENCHMARKS.md rows: prefill 4096 and decode 256 at the prefilled depth
-./build/src/cli/b70-decode urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --bench --pp 4096 --tg 256
+./build/src/cli/b70-decode urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --bench --prefill-length 4096 --tg 256
 
 # greedy ids in, ids out (tools/oracle/tokenize.py writes the --ids file)
 ./build/src/cli/b70-decode urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --ids prompt.ids --n 64 --prefill > out.ids
@@ -261,16 +261,16 @@ costs on your card (spec 8 §10).
 
 | flag | default | what it does |
 |---|---|---|
-| `--bench` | - | ingest `--depth` synthetic ids (or prefill `--pp N`), time `--tg` generated ones, print a markdown row |
+| `--bench` | - | ingest `--depth` synthetic ids (or prefill `--prefill-length N`), time `--tg` generated ones, print a markdown row |
 | `--depth D` | `4096` | `--bench` / `--profile`: context length before decoding, ingested one replay per id |
-| `--pp N` | - | `--bench`: prefill N synthetic ids instead (exclusive with `--depth`) and print a second row with the prefill time |
+| `--prefill-length N` | - | `--bench`: prefill N synthetic ids instead (exclusive with `--depth`) and print a second row with the prefill time. `--pp N` until 2026-10-06 (`--pp` is the pipeline-parallel size now, below) |
 | `--tg N` | `256` | `--bench`: ids to generate |
 | `--ids FILE` | - | whitespace-separated prompt ids; generated ids go to stdout, one per line |
 | `--n N` | - | `--ids`: ids to generate, greedily |
 | `--prefill` | off | `--ids`: run the prompt through the chunked prefill instead of one replay per id |
 | `--mtp off\|1\|2\|3\|auto` | `off` | `--ids`: greedy decoding with the MTP head's guesses, as `b70-serve --mtp` (same ids as without it; stderr adds the acceptance). Not yet run on the card |
-| `--pp-chunk C` | `2048` | positions per prefill chunk |
-| `--pp-backend B` | `l0-int8` | as for `b70-serve` |
+| `--prefill-chunk C` | `2048` | positions per prefill chunk (`--pp-chunk` until 2026-10-06) |
+| `--prefill-backend B` | `l0-int8` | as for `b70-serve` (`--pp-backend` until 2026-10-06) |
 | `--lm-head bf16\|int8` | `bf16` | bf16 keeps the rows byte-matched with vLLM; int8 rows are marked `int8-head` |
 | `--kv-cache bf16\|int8` | `bf16` | as for `b70-serve`; int8 rows are marked `int8-kv`. **K2-Horizon too** (spec 18e, built blind, on-card gates pending): the same scheme at head_dim 128 - 97.5 KiB per token instead of 192 KiB, so `--max-len auto` gives ~92k (bf16 head) / ~98k (`--lm-head int8`) decode-only and ~84k / ~90k with `--prefill` (bf16 KV: ~47k / ~50k and ~43k / ~46k; derived) |
 | `--profile` | - | replay `--steps` instrumented decode steps and print the per-launch anatomy (never a bench row) |
@@ -279,9 +279,9 @@ costs on your card (spec 8 §10).
 | `--max-len L\|auto` | `16384` | as for `b70-serve`, but 16384 stays the default so bench rows stay comparable |
 | `--mem-reserve-gb G` | `1.5` | as for `b70-serve` |
 | `--device N` | `ONEAPI_DEVICE_SELECTOR`, else 0 | which GPU |
-| `--pipeline 1\|2` | `1` | `2` splits the model's layers over two cards: the first card runs the first part of the layers with the embedding, the second card the rest with the output head, and each token's hidden state crosses once per step. One answer is not faster this way (the layers still run one after the other), but each card holds about half the model, so the context can be longer: Qwen3.8 reaches its full 262144 tokens with the bf16 KV cache (derived). Decode only: `--ids` reads the prompt one id at a time, `--bench` takes `--depth`; `--prefill`, `--pp`, `--mtp`, `--profile` and `--device` are refused with it. Uses GPUs 0 and 1 of what `ZE_AFFINITY_MASK` shows. Spec 16b, built without the cards: not yet run on them. (Not `--pp 2`: `--pp` is already the bench's prefill length.) |
-| `--pipeline-split auto\|N` | `auto` | With `--pipeline 2`: where the layers are cut. `auto` picks the cut that leaves both cards holding about the same number of bytes (weights, context, buffers) - not the same number of layers, because the output head's card can be heavier; Qwen3.8 cuts at 32 of 64 with the bf16 head and at 29 with the int8 head (derived). `N`: the first card runs layers 0 to N-1. Each card needs at least one layer of each kind. |
-| `--pipeline-handoff copy\|peer` | `copy` | With `--pipeline 2`: how the hidden state crosses. `copy`: the first card copies it to the second and signals it; `peer`: the first card's last kernel writes it straight into the second card's memory and raises a flag the second card waits on, with a time limit. Same results either way; which is faster is not yet measured. |
+| `--pp N`, `--pipeline-parallel-size N` | `1` | Pipeline parallel, vLLM's flag and meaning; N is 1 or 2. `2` splits the model's layers over two cards: the first card runs the first part of the layers with the embedding, the second card the rest with the output head, and each token's hidden state crosses once per step. One answer is not faster this way (the layers still run one after the other), but each card holds about half the model, so the context can be longer: Qwen3.8 reaches its full 262144 tokens with the bf16 KV cache (derived). Decode only: `--ids` reads the prompt one id at a time, `--bench` takes `--depth`; `--prefill`, `--prefill-length`, `--mtp`, `--profile` and `--device` are refused with it. Uses GPUs 0 and 1 of what `ZE_AFFINITY_MASK` shows. Spec 16b, built without the cards: not yet run on them. Any other N is refused, so a pre-2026-10-06 `--pp 4096` (then the bench's prefill length, now `--prefill-length`) fails instead of asking for 4096 cards. |
+| `--pipeline-split auto\|N` | `auto` | With `--pp 2`: where the layers are cut. `auto` picks the cut that leaves both cards holding about the same number of bytes (weights, context, buffers) - not the same number of layers, because the output head's card can be heavier; Qwen3.8 cuts at 32 of 64 with the bf16 head and at 29 with the int8 head (derived). `N`: the first card runs layers 0 to N-1. Each card needs at least one layer of each kind. |
+| `--pipeline-handoff copy\|peer` | `copy` | With `--pp 2`: how the hidden state crosses. `copy`: the first card copies it to the second and signals it; `peer`: the first card's last kernel writes it straight into the second card's memory and raises a flag the second card waits on, with a time limit. Same results either way; which is faster is not yet measured. |
 
 `tools/box.sh` builds and tests on a remote machine over ssh, which is how I
 work day to day. Set `BOX=user@host` before using it. Without the box,
@@ -304,9 +304,9 @@ leave them unset to run what the gates ran.
 | `B70_PREFILL_ATTN` | both CLIs, Qwen-family models | `flash` | prefill attention. `composed` is the reference path from before spec 6 (separate QK, softmax and PV launches): its scratch grows with the context (73,728 B per position on Qwen3.8, so `--max-len auto` drops to ~92k, derived), it refuses `--kv-cache int8`, and it is not built for Ornith. Any other value means `flash`. Read once per process. |
 | `B70_PREFILL_GDN_SCAN` | prefill, Qwen-family models | `dpas_split` | the delta net scan. `dpas_split` is the split-bf16 DPAS scan, the one approximate step in the default path (gated on tokens and state cosines); `vector` is the older scan, 2.33x slower on that kernel (measured). Other values are refused. Read once per process. |
 | `B70_PREFILL_GDN_SOLVE` | prefill, Qwen-family models | `vector` | `register` runs a barrier-free triangular solve: bit-identical, and measured slower (docs/prefill-gdn-solve-register-results.md). Read once per process. |
-| `B70_PREFILL_SILU_FUSED` | prefill on `--pp-backend l0` | on | `0` runs gate‖up and SiLU as two launches instead of one fused GEMM: bitwise the same, slower. For before / after timing in one binary. |
+| `B70_PREFILL_SILU_FUSED` | prefill on `--prefill-backend l0` | on | `0` runs gate‖up and SiLU as two launches instead of one fused GEMM: bitwise the same, slower. For before / after timing in one binary. |
 | `B70_PREFILL_REPLAY` | prefill (all models, Level Zero backends) | off | `1` records each prefill chunk's command list once and replays it from then on. Experimental; refused with `sycl-tla`. |
-| `B70_PREFILL_PROFILE` | prefill | off | `1` times every prefill phase; `b70-decode --bench --pp` prints the table on stderr (Qwen-family models; not yet for K2). It adds a host wait per phase, so never use it for a recorded row. |
+| `B70_PREFILL_PROFILE` | prefill | off | `1` times every prefill phase; `b70-decode --bench --prefill-length` prints the table on stderr (Qwen-family models; not yet for K2). It adds a host wait per phase, so never use it for a recorded row. |
 | `B70_K2_ATTN` | `b70-decode`, K2-Horizon | `flash` | K2's attention, decode and prefill both. `eager` rounds scores and probabilities to bf16 where the reference does (spec 18 §10.1): 813 launches per token instead of 717, plus a score row of 4 B x 32 heads x max_len. The first box session decides which becomes the default. Other values are refused. |
 | `B70_GIT_SHA` | `b70-decode --bench` | `unknown` | the commit printed in the bench row. The box's tree has no `.git`, so `tools/bench_decode.sh` sets it. |
 

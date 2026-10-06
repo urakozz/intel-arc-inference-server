@@ -99,7 +99,8 @@ attention) are unchanged per device.
   block's last layer is done.
 - **Spec 9 / 10 / 14 / 15:** per-device kernel variants are the same binaries; `ModelDesc` gains the
   split (`layers_on(device)`).
-- **CLI:** `--pp 2` (default 1) and `--pp-split s`; `ZE_AFFINITY_MASK` must expose both cards.
+- **CLI:** `--pp N` / `--pipeline-parallel-size N` (vLLM's flag; N = 1, the default, or 2) and
+  `--pipeline-split auto|N`; `ZE_AFFINITY_MASK` must expose both cards.
 - **The box's GPU lock** (`~/b70-gpu.lock`) is taken once for both cards by a PP job.
 
 ## 4. Correctness gates
@@ -161,11 +162,14 @@ validated by host tests, syntax checks and reasoning only. **16a has not run**, 
 choices it would have made are open and 16b builds both sides of each. Box queue row 22 is the
 order to prove it on the cards.
 
-**The CLI is `--pipeline 2`, not `--pp 2`.** b70-decode has had `--pp N` since spec 2 (the
-bench's prefill length, llama-bench's "pp"), beside `--pp-chunk` and `--pp-backend`, and every
-bench script uses it; `--pp 2` would silently mean "prefill 2 ids". So: `--pipeline 1|2`,
-`--pipeline-split auto|N`, `--pipeline-handoff copy|peer` (b70-decode; b70-serve is 16d).
-This text keeps "PP" for the concept.
+**The CLI is `--pp N` / `--pipeline-parallel-size N`, vLLM's spelling** (the operator's
+ruling, 2026-10-06). 16b was built as `--pipeline 1|2`, because b70-decode's `--pp N` was then
+the bench's prefill length (llama-bench's "pp") beside `--pp-chunk` and `--pp-backend`. The
+rename moved those to `--prefill-length N`, `--prefill-chunk C` and `--prefill-backend B` (no
+aliases) and gave `--pp` vLLM's meaning; an old `--pp 4096` is refused naming
+`--prefill-length` (any N but 1 or 2 is), never read as a 4096-way pipeline. So: `--pp N`
+(N = 1 or 2), `--pipeline-split auto|N`, `--pipeline-handoff copy|peer` (b70-decode; b70-serve
+is 16d). This text keeps "PP" for the concept.
 
 **What 16a would have decided, and the defaults chosen.**
 
@@ -228,13 +232,13 @@ host-signals the event so device 1 drains, then throws naming the event; `peer` 
 pp_recv's record. A failed step marks the engine; every later step throws until `reset()`. A
 missing second card and no peer access are refused before the load, by name.
 
-**Spec 7 snapshots are in** (planned for 16d): `save_state` / `save_kv` under `--pipeline 2`
+**Spec 7 snapshots are in** (planned for 16d): `save_state` / `save_kv` under `--pp 2`
 write the one-card host layouts byte for byte, so a snapshot moves between one card and two
 unchanged - the refusal 16d planned between the two is not needed. P1 uses it: a one-card
 prefill's snapshot is restored into the pipeline and decoded on.
 
-**Not in 16b:** prefill across two cards (16c; `--pipeline 2` ingests one replay per id), MTP and
-`b70-serve --pipeline 2` (16d), per-device step times (S1 records the total), K2-Horizon (its own
+**Not in 16b:** prefill across two cards (16c; `--pp 2` ingests one replay per id), MTP and
+`b70-serve --pp 2` (16d), per-device step times (S1 records the total), K2-Horizon (its own
 engine, `runtime/k2`; `pipeline_plan_test` gives its bytes per card through the descriptor-free
 `pp_balance` - 24 + 24 layers - but K2 across two cards is future work).
 
