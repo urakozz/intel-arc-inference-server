@@ -2,7 +2,8 @@
 
 **Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**.
 16b (decode) built blind 2026-10-06, before 16a's probe: §8. 16c (the prefill chunk pipeline) built
-blind 2026-10-06 on top of it: §9.
+blind 2026-10-06 on top of it: §9. 16d (b70-serve --pp 2, MTP across the split, P3 / S3 as box
+stages) built blind 2026-10-06 on both: §10.
 
 **Scope, set by the operator (2026-10-05):** multi-GPU is **pipeline parallel only** for now; tensor
 parallel is not part of this spec.
@@ -341,3 +342,60 @@ multi-group peer copy, more than two chunks in flight per card.
 `pipeline_args_test`; on the cards P1 / P2 `pp_prefill_test` (+ `_l0`, `_i8head`, `_kv8`),
 back-pressure and P4 `pp_prefill_fail_test`, `cli_reject_pipeline_*_sycl`, row 23's CLI stages
 (Qwen3.8, Agnes, Ornith) and S2 (`r23.s2_4k` / `_32k` / `_64k`; 128k and the split sweep opt-in).
+
+## 10. 16d as built blind (2026-10-06)
+
+Written on the Mac like 16b and 16c, on top of both; box queue row 27 is the order to prove it on
+the cards (`tools/box_validate.sh --only r27`). Nothing here has run on a B70: P2, P3 and S3 are
+stages of that row, not results. **What works under `--pp 2` now** (by construction and host
+tests): `b70-serve --pp 2` for Qwen3.8, Agnes and Ornith with `--max-len auto|N`,
+`--mem-reserve-gb`, `--prefill-backend l0|l0-int8`, `--kv-cache bf16|int8`, `--lm-head`, the
+prefix cache (`--prefix-cache-gb auto|N`, `--prefix-split-last`), `--mtp K|auto` / `--spec mtp`,
+`--draft-vocab`, `--spec lookup`, `--pipeline-split`, `--pipeline-handoff`; and
+`b70-decode --pp 2 --mtp K|auto` (16b's refusal lifted). **Refused by name, before any device**
+(`cli/pipeline_serve.h`): K2-Horizon (its own engine; two-card K2 is future work - serve it on
+one card), Kolibri-1 (not served at all; its serving, two cards included, is spec 20e),
+`--device N`, a sycl-tla prefill, `B70_PREFILL_ATTN=composed`, `B70_PREFILL_REPLAY=1`,
+`B70_PREFILL_PROFILE=1`; `--pipeline-split` / `--pipeline-handoff` without `--pp 2`. `--pp 1`
+is today's engine and server: no binary added, the one-card paths untouched apart from the
+verify walk binding its slots through one accessor (the same pointer) - G0 is the check.
+
+**Where 16b / 16c's build overrides plan 16d** (the as-built code wins; the plan predates it):
+
+| plan 16d | as built, and why |
+|---|---|
+| Review Focus 2: a snapshot saved under `--pp 2` refused when restored under `--pp 1` and vice versa | **moot**: 16b made the snapshots the one-card host layouts byte for byte, and 16d keeps that with MTP (the live verify slot per device in GDN order, the conv rings, the head's hidden row last; the KV per tensor with the head's layer after the last FA layer - `runtime::pp_kv_runs`, host-tested against Engine's order). An entry is the same bytes whichever wrote it, so the store keys stay 0 / 1 and nothing is refused (the store is per process anyway). `pp_serve_test` moves snapshots between a one-device and a two-device engine; `pp_mtp_test` continues one card's snapshot on two |
+| Review Focus 1: the operator's choice - replicate the embedding (2.54 GB) or gather rows over P2P | the choice is still open; 16d builds **replicate**, as 16b's placement already anticipated (`place_stages` moved the head's weights and lm_head's companion there): the head's draft lists and its KV fill (verify and prefill) gather embedding rows of ids device 1 produced. The plan and the memory lines name it ("MTP: head 0.849 GB + embedding replica 2.543 GB in model"). A gather over P2P would save 2.54 GB on device 1 for one 10 KB peer read per row - worth it only if device 1's bytes ever bind (`--max-len auto` reaches 262144 either way on Qwen3.8, below) |
+| "MTP head on device 1, verify across both with M = K + 1 rows handed off together" | as planned: `build_stage_verify` is `build_verify` cut at 16b's cut (layer s's fold on device 0, M rows + the norm sums through the landing buffer, which always held kM rows), and the head's KV fill appended on device 1; `build_stage_draft` is `build_draft` on device 1. **The per-row GDN slots need no new binary**: `gdn_step_slots` bakes one slot's stride as the whole model's (SPEC_SLOT_STRIDE), so each card's slots are an allocation of (kSlots - 2) whole slots + its own layers (`pp_gdn_spec_bytes`; device 1 uses its MtpBuffers' full slots) and binds its slice g as every stage buffer does. The gaps cost 0.151 GB a card on Qwen3.8 at the even split; a stage-stride variant would save them (one binary per split - a box decision, not built) |
+| commit moves `pos` on both devices | and `gdn_live` (each card's verify slots hold its own layers, so the live index is one number for both); `verify` mirrors device 1's Control into device 0's as a step does; `pp_mtp_test` checks the two blocks equal after every call |
+| (not in the plan) the head's KV during a two-card prefill | Engine::prefill fills the head's KV after each chunk (`step_mtp_kv`). On two cards it runs on device 1's list after the chunk's layers, in order: the chunk's ids copied into device 1's scratch (step_mtp_kv's embed reads them there), h_{pos-1} into the hidden rows' row 0, `step_mtp_kv` over a head Control block per chunk parity (16c's rule: the host writes chunk j + 1's while chunk j runs), the last row back into hh. A hooked chunk also shadows that row; `save_state` inside a mid-prompt hook reads it. One subtlety, named so it is not rediscovered: the head's KV row at `end - 1` is written by the NEXT chunk (it pairs h_{end-1} with x_end), which on two cards may already run while the hook copies `[0, end)`. That row is rewritten before anything reads it after a restore (the next prefill chunk or verify fills it first), so the bytes there are don't-care; `pp_mtp_test` blanks it in both records |
+| Review Focus 4: 262144 - the RoPE table, the attention variants, the memory per device; passkey | decode attention v2 (the default) bakes no max_len; v1 under `--pp 2` takes its largest compiled length (`v1_compiled_at_most`, as one card). The memory per device is the planner's below; P3 is `r27.p3` (passkey at 5 / 50 / 95 % of 250000 ids at 262144, l0-int8), S3 `r27.s3` (both memory lines at 262144 with the bf16 head, and with `--mtp 3 --lm-head int8`) |
+| Review Focus 5: `--pp 2` with the prefix cache and `--mtp` both on; one request end to end | `cli::pp::PipelineEngineAdapterT` is EngineAdapter's logic over the pipeline's host calls (`pending`, `set_token`, `set_draft_input`, `read_logits_into`, `read_draft_logits_into`, `host_rows` - pinned rows in the shared context); its host twin runs over a two-device fake through `PrefixSession` and the HTTP server (`pp_serve_test`); on the cards `pp_prefix_gpu_test` (C2's sequences, two cards bitwise one card, +- MTP) and `golden_server_test` with `B70_SERVE_ARGS='--pp 2 ...'` against one-card `b70-decode` (r27.golden). The prefix cache's block shadows (two per device, 0.167 GB a card on Qwen3.8 at split 32) are planned whenever the cache may be on (`auto` decides from host RAM only after the load) |
+| Task 2's llama-benchy rows; Task 3, the record | stages (`r27.benchy`, opt-in; `serve_benchy.sh` gained `SERVE_AFFINITY`); the record (BENCHMARKS "Pipeline parallel (spec 16)", this spec's amendment with every gate's number, docs/10's two-card lock) is an edit after the box run |
+
+**The planner's numbers** (derived, `pp_serve_plan_test`: b70-serve's terms - prefill l0-int8,
+the prefix cache's shadows, 1.5 GB reserve a card; the dense MTP head at its checkpoint bytes):
+
+| model, flags | `--pp 2` split, max_len | one card's auto | device 0 / device 1 |
+|---|---|---|---|
+| Qwen3.8, int8 head | 32, 262144 | 201216 | 18.741 / 17.513 GB |
+| Qwen3.8, int8 head, `--mtp` | 36, 262144 | 169984 | 21.048 / 20.573 GB |
+| Qwen3.8, int8 head, `--mtp`, `--kv-cache int8` | 36, 262144 | 262144 | 16.253 / 16.311 GB |
+| Qwen3.8, bf16 head, `--mtp` | 38, 262144 | 151808 | 21.485 / 21.412 GB |
+| Agnes, int8 head | 36, 262144 | 139520 | 21.313 / 20.085 GB |
+| Agnes, int8 head, `--mtp` | 40, 262144 | 114176 | 23.733 / 23.138 GB |
+| Ornith, int8 head | 20, 262144 | 262144 | 13.946 / 13.456 GB |
+
+At 16384 with MTP, Qwen3.8 split 32: device 0 holds its verify slots (0.377 GB), device 1 the head
+(0.849 GB), the replica (2.543 GB) and MtpBuffers (0.544 GB with the prefill rows).
+
+**Gates as built:** host `pp_serve_plan_test`, `pp_serve_test`, `pipeline_args_test` (b70-serve's
+refusals); on the cards `pp_mtp_test` (+ `_i8head`, `_kv8`: Review Focus 1-3, M2 across the
+split, bitwise one card), `pp_prefix_gpu_test` (+ `_peer`, `_split`, `_mtp`, `_kv8`: P2's C2,
+bitwise one card), `cli_reject_serve_pp*`, row 27's CLI, server, golden, Agnes / Ornith, S3 and
+P3 stages; opt-in P3 with MTP and the llama-benchy rows.
+
+**Not in 16d:** K2-Horizon and Kolibri-1 on two cards in the server (K2: its own engine, future
+work; Kolibri: spec 20e), a stage-stride `gdn_step_slots` variant, the P2P embedding gather,
+per-device step times in decode, more than two cards, concurrent requests (after spec 13), the
+record (after row 27).
