@@ -60,3 +60,8 @@ target_link_libraries(b70-decode PRIVATE b70_kolibri_prefill)
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_k2_runtime b70_k2_prefill)
 endif()
+# Spec 20e: b70-serve serves Kolibri-1 through its own engine (cli/kolibri_serve.h over
+# runtime::kolibri::KolibriEngine, whose prefill every request runs). Appended, as the lines above.
+if(TARGET b70-serve)
+  target_link_libraries(b70-serve PRIVATE b70_kolibri_runtime b70_kolibri_prefill)
+endif()

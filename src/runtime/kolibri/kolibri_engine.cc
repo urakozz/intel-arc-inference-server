@@ -250,6 +250,82 @@ std::vector<float> KolibriEngine::read_logits() {
   return v;
 }
 
+void KolibriEngine::read_logits_into(float* host) {
+  Stage& s = st(uint32_t(st_.size()) - 1);
+  s.imm.copy(host, s.buffers.logits.ptr(), size_t(model_.desc.vocab) * 4);
+}
+
+uint32_t KolibriEngine::pending() const { return st(uint32_t(st_.size()) - 1).ctl->cur_token[0]; }
+
+// --- spec 20e: prefix-cache snapshots ----------------------------------------------------------------
+l0::Mem& KolibriEngine::snap_mem(uint32_t dev, SnapTensor t) const {
+  KolibriBuffers& b = st(dev).buffers;
+  switch (t) {
+    case SnapTensor::FullK: return b.full_k;
+    case SnapTensor::FullV: return b.full_v;
+    case SnapTensor::RingK: return b.ring_k;
+    default: return b.ring_v;
+  }
+}
+
+void KolibriEngine::settle_all(const char* what) {
+  for (uint32_t i = 0; i < st_.size(); ++i)
+    if (!settle(i))
+      throw std::runtime_error(std::string("runtime::kolibri::KolibriEngine::") + what + ": device " +
+                               std::to_string(i) + "'s last step is still running after " +
+                               std::to_string(opt_.timeout_ms) + " ms");
+}
+
+size_t KolibriEngine::state_bytes() const { return state_snapshot_bytes(model_.desc); }
+size_t KolibriEngine::kv_bytes(uint32_t n_pos) const { return kv_snapshot_bytes(model_.desc, n_pos); }
+
+void KolibriEngine::save_state(void* host) {
+  settle_all("save_state");
+  auto* h = static_cast<uint8_t*>(host);
+  for (const SnapRun& r : state_runs(model_.desc, model_.placement, pos())) {
+    if (r.zero)
+      std::memset(h, 0, r.bytes);   // positions before 0: never read, zero on the host
+    else
+      st(r.device).imm.copy(h, static_cast<const uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, r.bytes);
+    h += r.bytes;
+  }
+}
+
+void KolibriEngine::load_state(const void* host, uint32_t p) {
+  if (p > max_len_)
+    throw std::runtime_error("runtime::kolibri::KolibriEngine::load_state: pos " + std::to_string(p) +
+                             " exceeds max_len " + std::to_string(max_len_));
+  if (broken_) reset();   // a failed hand-off: the restore below rewrites what the session reads
+  settle_all("load_state");
+  const auto* h = static_cast<const uint8_t*>(host);
+  for (const SnapRun& r : state_runs(model_.desc, model_.placement, p)) {
+    st(r.device).imm.copy(static_cast<uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, h, r.bytes);
+    h += r.bytes;
+  }
+  for (auto& s : st_) {
+    s->ctl->pos = p;
+    s->ctl->n_active = 0;
+  }
+}
+
+void KolibriEngine::save_kv(uint32_t begin, uint32_t end, void* host) {
+  settle_all("save_kv");
+  auto* h = static_cast<uint8_t*>(host);
+  for (const SnapRun& r : kv_runs(model_.desc, model_.placement, max_len_, begin, end)) {
+    st(r.device).imm.copy(h, static_cast<const uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, r.bytes);
+    h += r.bytes;
+  }
+}
+
+void KolibriEngine::load_kv(uint32_t begin, uint32_t end, const void* host) {
+  settle_all("load_kv");
+  const auto* h = static_cast<const uint8_t*>(host);
+  for (const SnapRun& r : kv_runs(model_.desc, model_.placement, max_len_, begin, end)) {
+    st(r.device).imm.copy(static_cast<uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, h, r.bytes);
+    h += r.bytes;
+  }
+}
+
 std::vector<uint16_t> KolibriEngine::read_kv(uint32_t layer, uint32_t first, uint32_t count, bool v) {
   const model::Kolibri1Desc& d = model_.desc;
   if (layer >= d.layers) throw std::out_of_range("read_kv: layer " + std::to_string(layer));

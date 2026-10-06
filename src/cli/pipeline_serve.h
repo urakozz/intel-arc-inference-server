@@ -15,11 +15,13 @@
 //            one-card layouts, the block hook from the pipeline's shadows), --mtp K|auto /
 //            --spec mtp (the head on device 1), --draft-vocab, --spec lookup;
 //   refused  K2-Horizon (its own engine, runtime/k2: two-card K2 is future work - serve it on
-//            one card), Kolibri-1 (not served at all yet; its serving, two cards included, is
-//            spec 20e), --device N (names one card: ZE_AFFINITY_MASK picks the two), a
+//            one card), --device N (names one card: ZE_AFFINITY_MASK picks the two), a
 //            sycl-tla prefill and B70_PREFILL_ATTN=composed (no two-card walk, spec 16c),
 //            B70_PREFILL_REPLAY=1 (the recordings are one card's walk) and
 //            B70_PREFILL_PROFILE=1 (its phase waits would serialise the pipeline).
+//   Kolibri-1 (spec 20e) is not this path: b70-serve dispatches it to its own engine before these
+//            checks (cli/kolibri_serve.h, runtime::kolibri::KolibriEngine on two cards by default), and
+//            cli::kolibri::check_args holds its --pp rules; for model_type kolibri1 this refuses nothing.
 #include <stdexcept>
 #include <string>
 
@@ -46,6 +48,7 @@ inline void check_serve_pipeline(const PipelineArgs& a, const ServePipelineConte
   pc.device = c.device;
   pc.prefill_backend = c.prefill_backend;
   pc.composed_attn = c.composed_attn;
+  if (c.model_type == "kolibri1") return;   // its own engine and rules (cli::kolibri::check_args)
   if (!a.on()) {
     check_pipeline(a, {});
     return;
@@ -54,9 +57,6 @@ inline void check_serve_pipeline(const PipelineArgs& a, const ServePipelineConte
     throw std::runtime_error("--pp 2: K2-Horizon runs its own engine (runtime/k2), which has no "
                              "two-card path yet (spec 16 §8: K2 across two cards is future work) - "
                              "serve it on one card (drop --pp)");
-  if (c.model_type == "kolibri1")
-    throw std::runtime_error("--pp 2: Kolibri-1 (model_type kolibri1) is not served yet - its serving, "
-                             "on two cards included, is spec 20e; b70-decode --pp 2 runs it (spec 20c)");
   check_pipeline(a, pc);   // sycl-tla, composed attention, --device - by name
   if (c.prefill_replay)
     throw std::runtime_error("--pp 2 has no prefill replay (B70_PREFILL_REPLAY=1): the recordings "
