@@ -1,0 +1,12 @@
+{"id": "doc000", "prompt": "Fasse den folgenden Artikel in fünf Sätzen zusammen.", "split": "calib"}
+{"id": "doc001", "prompt": "Erstelle aus dem folgenden Text fünf Quizfragen mit Antworten.", "split": "calib"}
+{"id": "doc002", "prompt": "Nenne die drei wichtigsten Aussagen des folgenden Textes und begründe deine Auswahl.", "split": "calib"}
+{"id": "doc003", "prompt": "Erkläre den folgenden Text so, dass ihn ein Schüler der achten Klasse versteht.", "split": "calib"}
+{"id": "doc004", "prompt": "Schreibe eine kurze, sachliche Inhaltsangabe des folgenden Artikels in der dritten Person.", "split": "calib"}
+{"id": "doc005", "prompt": "Welche Begriffe aus dem folgenden Text sollten in einem Glossar erklärt werden? Gib jeweils eine Definition.", "split": "calib"}
+{"id": "doc006", "prompt": "Prüfe den folgenden Text auf mögliche Widersprüche oder unklare Stellen.", "split": "calib"}
+{"id": "doc007", "prompt": "Formuliere aus dem folgenden Artikel einen Social-Media-Beitrag mit höchstens 280 Zeichen und einen längeren Newsletter-Absatz.", "split": "calib"}
+{"id": "doc008", "prompt": "Extrahiere alle Jahreszahlen, Orte und Personen aus dem folgenden Text als Tabelle.", "split": "calib"}
+{"id": "doc009", "prompt": "Schreibe eine kritische Würdigung des folgenden Textes: Was fehlt, was ist gut dargestellt?", "split": "calib"}
+{"id": "doc010", "prompt": "Übersetze den ersten Absatz des folgenden Textes ins Englische und fasse den Rest auf Deutsch zusammen.", "split": "calib"}
+{"id": "doc011", "prompt": "Leite aus dem folgenden Text drei offene Forschungsfragen ab.", "split": "calib"}

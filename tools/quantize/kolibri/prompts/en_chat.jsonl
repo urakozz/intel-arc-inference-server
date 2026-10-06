@@ -1,0 +1,60 @@
+{"id": "en000", "prompt": "Explain the difference between a Roth IRA and a traditional IRA, including tax treatment and withdrawal rules.", "split": "calib"}
+{"id": "en001", "prompt": "Write a polite but firm email to a landlord asking for a broken heater to be repaired within a week.", "split": "calib"}
+{"id": "en002", "prompt": "A train leaves at 9:12 and arrives at 12:47 after covering 425 km. What is its average speed? Show your work.", "split": "calib"}
+{"id": "en003", "prompt": "Summarize the main causes of the First World War in one paragraph.", "split": "calib"}
+{"id": "en004", "prompt": "Explain to a ten-year-old why the sky is blue.", "split": "eval"}
+{"id": "en005", "prompt": "What are the pros and cons of using a heat pump versus a gas furnace in a cold climate?", "split": "calib"}
+{"id": "en006", "prompt": "Write a short poem about autumn in New England in the style of Robert Frost.", "split": "calib"}
+{"id": "en007", "prompt": "How does the transformer architecture work in machine learning? Explain without equations but accurately.", "split": "calib"}
+{"id": "en008", "prompt": "Give me a step-by-step plan to prepare for a half marathon in twelve weeks as a beginner.", "split": "calib"}
+{"id": "en009", "prompt": "What is the difference between affect and effect? Give examples and a memory trick.", "split": "eval"}
+{"id": "en010", "prompt": "Explain how vaccines train the immune system, using the example of mRNA vaccines.", "split": "calib"}
+{"id": "en011", "prompt": "Write a cover letter for a junior data analyst position at a logistics company.", "split": "calib"}
+{"id": "en012", "prompt": "Solve: a father is 30 years older than his son; in 5 years he will be three times as old. How old are they now?", "split": "calib"}
+{"id": "en013", "prompt": "Explain inflation and how central banks respond to it with interest rates.", "split": "calib"}
+{"id": "en014", "prompt": "What should I check before buying a used electric car, especially regarding the battery?", "split": "eval"}
+{"id": "en015", "prompt": "Draft meeting minutes covering: project status, budget overrun, a new deadline, and vacation planning.", "split": "calib"}
+{"id": "en016", "prompt": "Explain the Pythagorean theorem and give an intuitive proof.", "split": "calib"}
+{"id": "en017", "prompt": "How do I negotiate a higher salary in a job offer without seeming greedy?", "split": "calib"}
+{"id": "en018", "prompt": "Describe the difference between weather and climate, and why one cold winter does not disprove climate change.", "split": "calib"}
+{"id": "en019", "prompt": "Write a short story about a lighthouse keeper who discovers a message in a bottle from the future.", "split": "eval"}
+{"id": "en020", "prompt": "What is the GDPR and how does it affect a small online shop based outside the EU?", "split": "calib"}
+{"id": "en021", "prompt": "Explain compound interest with an example of $10,000 at 3.5% annually over 12 years.", "split": "calib"}
+{"id": "en022", "prompt": "How do I take care of a fiddle leaf fig, and why are its leaves turning brown?", "split": "calib"}
+{"id": "en023", "prompt": "What are the key differences between modernism and postmodernism in literature?", "split": "calib"}
+{"id": "en024", "prompt": "Create a one-week meal plan for a family of four on a tight budget, with 30-minute dinners.", "split": "eval"}
+{"id": "en025", "prompt": "Explain how a refrigerator works using the terms evaporator, compressor, and condenser.", "split": "calib"}
+{"id": "en026", "prompt": "How should I respond to a colleague who keeps taking credit for my work?", "split": "calib"}
+{"id": "en027", "prompt": "Explain the separation of powers in the US Constitution and how checks and balances work.", "split": "calib"}
+{"id": "en028", "prompt": "What are the symptoms of burnout, and what practical steps can help recovery?", "split": "calib"}
+{"id": "en029", "prompt": "Write a product description for a handmade leather bag from a small workshop.", "split": "eval"}
+{"id": "en030", "prompt": "Compare renting versus buying a home in terms of long-term costs and flexibility.", "split": "calib"}
+{"id": "en031", "prompt": "Explain the difference between viruses and bacteria and why antibiotics do not work on colds.", "split": "calib"}
+{"id": "en032", "prompt": "Give me tips to give a presentation to 200 people without losing my train of thought.", "split": "calib"}
+{"id": "en033", "prompt": "Analyze the argument: 'All birds can fly. Penguins are birds. So penguins can fly.' What is wrong?", "split": "calib"}
+{"id": "en034", "prompt": "How does photosynthesis work? Explain light-dependent and light-independent reactions.", "split": "eval"}
+{"id": "en035", "prompt": "Write a heartfelt three-minute speech for my sister's wedding with a bit of humor.", "split": "calib"}
+{"id": "en036", "prompt": "What is a blockchain and why might it matter for supply chains?", "split": "calib"}
+{"id": "en037", "prompt": "Explain mean, median, and standard deviation using salary data as an example.", "split": "calib"}
+{"id": "en038", "prompt": "Plan a five-day road trip through the Scottish Highlands with stops and sights.", "split": "calib"}
+{"id": "en039", "prompt": "How do I paint a wall cleanly without smudging the edges? Step by step.", "split": "eval"}
+{"id": "en040", "prompt": "Explain special relativity basics: time dilation, the speed of light, and E = mc^2.", "split": "calib"}
+{"id": "en041", "prompt": "How can I talk to my teenager about screen time without starting a fight?", "split": "calib"}
+{"id": "en042", "prompt": "What are good strategies for learning a new language with only 20 minutes a day?", "split": "calib"}
+{"id": "en043", "prompt": "Explain what a profit and loss statement is using a small carpentry business as an example.", "split": "calib"}
+{"id": "en044", "prompt": "Write three variants of a customer service greeting: formal, neutral, and casual.", "split": "eval"}
+{"id": "en045", "prompt": "What should a ten-day emergency supply kit contain?", "split": "calib"}
+{"id": "en046", "prompt": "Explain how thunderstorms form and how to stay safe outdoors during one.", "split": "calib"}
+{"id": "en047", "prompt": "Summarize the plot of Shakespeare's Hamlet in ten sentences.", "split": "calib"}
+{"id": "en048", "prompt": "What are the main arguments for and against a universal basic income?", "split": "calib"}
+{"id": "en049", "prompt": "How does the electoral college work, and why is it controversial?", "split": "eval"}
+{"id": "en050", "prompt": "Translate into natural English: 'Wir bedauern, Ihnen mitteilen zu müssen, dass sich Ihre Bestellung verzögert.'", "split": "calib"}
+{"id": "en051", "prompt": "Explain the difference between nuclear fission and fusion and why fusion is so hard.", "split": "calib"}
+{"id": "en052", "prompt": "Help me resolve a noise conflict with my neighbor. How do I start the conversation?", "split": "calib"}
+{"id": "en053", "prompt": "What is the difference between gross and net salary, and what deductions are common?", "split": "calib"}
+{"id": "en054", "prompt": "Explain the stylistic devices in: 'The city slept, but its lights kept watch like tired eyes over the river.'", "split": "eval"}
+{"id": "en055", "prompt": "How do I write a strong introduction for an undergraduate thesis in economics?", "split": "calib"}
+{"id": "en056", "prompt": "Explain what happens legally when you receive a speeding ticket by camera in most US states.", "split": "calib"}
+{"id": "en057", "prompt": "Describe how a bill becomes law in the United Kingdom.", "split": "calib"}
+{"id": "en058", "prompt": "My laptop overheats and the fan is loud. What could cause this and what can I check myself?", "split": "calib"}
+{"id": "en059", "prompt": "Write a dialogue between two coworkers arguing about a new software rollout, and resolve it constructively.", "split": "eval"}
