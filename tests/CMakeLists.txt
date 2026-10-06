@@ -797,7 +797,7 @@ set(B70_PREFILL_KERNELS
   kernel_pf_dequant_slab_K5120_N14336_L0
   kernel_pf_dequant_slab_K5120_N38912_L0 kernel_pf_dequant_slab_K19456_N5120_L0
   kernel_pf_dequant_tile_K5120_N38912_L0_T0 kernel_pf_dequant_tile_K19456_N5120_L0_T0
-  # Spec 5's h8 path, which `--pp-backend l0-int8` runs (pf_colmax_rot is in the
+  # Spec 5's h8 path, which `--prefill-backend l0-int8` runs (pf_colmax_rot is in the
   # pf_requant_rot binaries).
   kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144 kernel_pf_quant_had_K17408
   kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1 kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU
@@ -1103,12 +1103,12 @@ b70_cli_reject(cli_reject_n_with_bench ${B70_NO_MODEL} --bench --n 4)
 # "--depth and --tg belong to --bench" - the mirror of the case above.
 b70_cli_reject(cli_reject_depth_with_ids ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --depth 64)
 b70_cli_reject(cli_reject_tg_with_ids ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --tg 8)
-# "--pp-backend belongs to --pp and --prefill" (spec 2.1).
-b70_cli_reject(cli_reject_pp_backend_with_ids ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp-backend l0
-  EXPECT "--pp-backend belongs to --pp and --prefill")
-# "--pp-backend expects sycl-tla, l0 or l0-int8".
-b70_cli_reject(cli_reject_pp_backend_value ${B70_NO_MODEL} --bench --pp 64 --pp-backend cuda
-  EXPECT "--pp-backend expects sycl-tla, l0 or l0-int8")
+# "--prefill-backend belongs to --prefill-length and --prefill" (spec 2.1).
+b70_cli_reject(cli_reject_prefill_backend_with_ids ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4
+  --prefill-backend l0 EXPECT "--prefill-backend belongs to --prefill-length and --prefill")
+# "--prefill-backend expects sycl-tla, l0 or l0-int8".
+b70_cli_reject(cli_reject_prefill_backend_value ${B70_NO_MODEL} --bench --prefill-length 64
+  --prefill-backend cuda EXPECT "--prefill-backend expects sycl-tla, l0 or l0-int8")
 # "unknown option" - anything starting with '-' the parse loop does not know.
 b70_cli_reject(cli_reject_unknown_flag ${B70_NO_MODEL} --bench --frobnicate)
 # "a snapshot directory or HF repo id is required" - no positional argument.
@@ -1143,22 +1143,39 @@ b70_cli_reject(cli_reject_repeats_with_bench ${B70_NO_MODEL} --bench --repeats 5
   EXPECT "--repeats belongs to --profile")
 b70_cli_reject(cli_reject_repeats_zero ${B70_NO_MODEL} --profile --repeats 0
   EXPECT "--repeats 0 would profile nothing")
-# `--pp` / `--pp-chunk` / `--prefill` (spec 2, interfaces.md's CLI contract and ruling A8).
+# `--prefill-length` / `--prefill-chunk` / `--prefill` (spec 2, interfaces.md's CLI contract and
+# ruling A8; `--pp` / `--pp-chunk` until the 2026-10-06 rename).
 # These five are host-side argument validation and are compiled UNCONDITIONALLY
 # - with -DB70_PREFILL=OFF the flags still parse and still reject for these
 # reasons, so these cases grade the CLI's contract rather than the presence of
 # the SYCL component. Each names its message: "exit 1 before the device" is
 # also what an unknown flag does, and without EXPECT these cases would pass on a
 # binary that had never heard of the flag.
-b70_cli_reject(cli_reject_pp_without_bench ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp 64
-  EXPECT "--pp belongs to --bench")
-b70_cli_reject(cli_reject_pp_and_depth ${B70_NO_MODEL} --bench --pp 64 --depth 64
-  EXPECT "--pp and --depth are exclusive")
-b70_cli_reject(cli_reject_pp_zero ${B70_NO_MODEL} --bench --pp 0
-  EXPECT "--pp 0 would prefill nothing")
-b70_cli_reject(cli_reject_pp_chunk_without_pp ${B70_NO_MODEL} --bench --pp-chunk 1024
-  EXPECT "--pp-chunk belongs to --pp")
-# `--prefill` is the ids-mode equivalent of `--pp`; it must not be accepted as
+b70_cli_reject(cli_reject_prefill_length_without_bench ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4
+  --prefill-length 64 EXPECT "--prefill-length belongs to --bench")
+b70_cli_reject(cli_reject_prefill_length_and_depth ${B70_NO_MODEL} --bench --prefill-length 64
+  --depth 64 EXPECT "--prefill-length and --depth are exclusive")
+b70_cli_reject(cli_reject_prefill_length_zero ${B70_NO_MODEL} --bench --prefill-length 0
+  EXPECT "--prefill-length 0 would prefill nothing")
+b70_cli_reject(cli_reject_prefill_chunk_without_length ${B70_NO_MODEL} --bench --prefill-chunk 1024
+  EXPECT "--prefill-chunk belongs to --prefill-length")
+# The 2026-10-06 rename (cli/renamed_flags.h): `--pp` is vLLM's pipeline-parallel size now, so
+# an old `--bench --pp 4096` must not request a 4096-way pipeline - any value but 1 or 2 is
+# refused naming --prefill-length - and the old prefill flags are unknown options that name
+# their new spelling (no aliases).
+b70_cli_reject(cli_reject_pp_old_prefill_length ${B70_NO_MODEL} --bench --pp 4096
+  EXPECT "--pp is the pipeline-parallel size, 1 or 2")
+b70_cli_reject(cli_reject_pp_old_prefill_length_hint ${B70_NO_MODEL} --bench --pp 4096
+  EXPECT "the bench's prefill length is --prefill-length N")
+b70_cli_reject(cli_reject_pipeline_parallel_size_value ${B70_NO_MODEL} --bench
+  --pipeline-parallel-size 512 EXPECT "--pipeline-parallel-size is the pipeline-parallel size, 1 or 2")
+b70_cli_reject(cli_reject_renamed_pp_chunk ${B70_NO_MODEL} --bench --prefill-length 64 --pp-chunk 1024
+  EXPECT "unknown option '--pp-chunk' (renamed: --prefill-chunk C)")
+b70_cli_reject(cli_reject_renamed_pp_backend ${B70_NO_MODEL} --bench --prefill-length 64
+  --pp-backend l0 EXPECT "unknown option '--pp-backend' (renamed: --prefill-backend B)")
+b70_cli_reject(cli_reject_renamed_pipeline ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pipeline 2
+  EXPECT "unknown option '--pipeline' (renamed: --pp N, or --pipeline-parallel-size N)")
+# `--prefill` is the ids-mode equivalent of `--prefill-length`; it must not be accepted as
 # an unknown flag or leak as far as l0::Context.
 b70_cli_reject(cli_reject_prefill_without_ids ${B70_NO_MODEL} --bench --prefill
   EXPECT "--prefill belongs to --ids")
@@ -1945,10 +1962,10 @@ if(B70_K2)
     PROPERTIES LABELS "checkpoint;golden;prefill;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # b70-decode's K2 prefill backends, before the device (tests/model/k2: config.json only).
-b70_cli_reject(cli_reject_k2_pp_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --bench --pp 64
-  --pp-backend l0-int8 EXPECT "K2-Horizon prefills on the l0 backend only")
+b70_cli_reject(cli_reject_k2_prefill_length_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --bench
+  --prefill-length 64 --prefill-backend l0-int8 EXPECT "K2-Horizon prefills on the l0 backend only")
 b70_cli_reject(cli_reject_k2_prefill_sycl ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS} --n 4
-  --prefill --pp-backend sycl-tla EXPECT "K2-Horizon prefills on the l0 backend only")
+  --prefill --prefill-backend sycl-tla EXPECT "K2-Horizon prefills on the l0 backend only")
 # ==== Spec 18c: K2-Horizon prefill ========================================= (end) ====
 
 # ==== Spec 15e: Ornith 1.5 35B-A3B served, and its MoE MTP head (label `ornith`) == (begin) ==
@@ -2204,7 +2221,7 @@ endif()
 # Host, no device: the planner (stages, weights by device, the per-device plan, auto split
 # and auto length for Qwen3.8 / Agnes / Ornith, K2-Horizon's bytes per card), the peer
 # hand-off's protocol on two threads (runtime/pipeline_protocol.h, pp_handoff.cl's mirror),
-# and b70-decode's --pipeline flags.
+# and b70-decode's --pp / --pipeline-parallel-size flags (and the 2026-10-06 rename's refusals).
 add_executable(pipeline_plan_test runtime/pipeline_plan_test.cc)
 target_include_directories(pipeline_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(pipeline_plan_test PRIVATE b70_plan b70_k2_plan)
@@ -2221,7 +2238,7 @@ add_test(NAME pipeline_args_test COMMAND pipeline_args_test)
 
 # On the box, both cards and the checkpoint; SKIP (77) with fewer than two GPUs or without
 # peer access. P1 (pp_decode_test): ingest + 64 greedy ids and a spec 7 restore at 4395,
-# --pipeline 2 with copy and peer, the auto split and the cuts at 5 and 62 - ids, logits,
+# --pp 2 with copy and peer, the auto split and the cuts at 5 and 62 - ids, logits,
 # every layer's GDN state / conv ring / KV and both Control blocks BITWISE the single card on
 # device 0; a reset and the whole run again, bitwise. P4 (pp_fail_test): a lost hand-off under
 # copy and under peer throws within its bound, never hangs, and reset() recovers.
@@ -2249,25 +2266,25 @@ if(B70_KV8 AND COMMAND b70_kv8_twin)
   b70_kv8_twin(pp_decode)
 endif()
 
-# b70-decode's --pipeline refusals, before any device (cli/pipeline_args.h), and P4's missing
-# card: with ZE_AFFINITY_MASK=0 the driver shows one GPU and --pipeline 2 must stop with the
+# b70-decode's --pp refusals, before any device (cli/pipeline_args.h), and P4's missing
+# card: with ZE_AFFINITY_MASK=0 the driver shows one GPU and --pp 2 must stop with the
 # count, before the load (the model path does not exist).
-b70_cli_reject(cli_reject_pipeline_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pipeline 3
-  EXPECT "--pipeline expects 1 or 2")
-b70_cli_reject(cli_reject_pipeline_prefill ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pipeline 2
+b70_cli_reject(cli_reject_pipeline_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp 3
+  EXPECT "--pp is the pipeline-parallel size, 1 or 2")
+b70_cli_reject(cli_reject_pipeline_prefill ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp 2
   --prefill EXPECT "spec 16c")
-b70_cli_reject(cli_reject_pipeline_bench_pp ${B70_NO_MODEL} --bench --pp 64 --pipeline 2
-  EXPECT "--bench takes --depth, not --pp")
-b70_cli_reject(cli_reject_pipeline_mtp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pipeline 2
-  --mtp 1 EXPECT "spec 16d")
-b70_cli_reject(cli_reject_pipeline_device ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pipeline 2
+b70_cli_reject(cli_reject_pipeline_bench_prefill_length ${B70_NO_MODEL} --bench --prefill-length 64
+  --pp 2 EXPECT "--bench takes --depth, not --prefill-length")
+b70_cli_reject(cli_reject_pipeline_mtp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4
+  --pipeline-parallel-size 2 --mtp 1 EXPECT "spec 16d")
+b70_cli_reject(cli_reject_pipeline_device ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp 2
   --device 1 EXPECT "--device names one card")
 b70_cli_reject(cli_reject_pipeline_split_alone ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4
-  --pipeline-split 32 EXPECT "--pipeline-split belongs to --pipeline 2")
+  --pipeline-split 32 EXPECT "--pipeline-split belongs to --pp 2")
 b70_cli_reject(cli_reject_pipeline_handoff_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4
-  --pipeline 2 --pipeline-handoff p2p EXPECT "--pipeline-handoff expects copy or peer")
+  --pp 2 --pipeline-handoff p2p EXPECT "--pipeline-handoff expects copy or peer")
 b70_cli_reject(cli_reject_pipeline_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS}
-  --n 4 --pipeline 2 EXPECT "K2 across two cards is future work")
+  --n 4 --pp 2 EXPECT "K2 across two cards is future work")
 add_test(NAME cli_reject_pipeline_one_gpu COMMAND sh -c [==[
 out=$(ZE_AFFINITY_MASK=0 "$@" 2>&1)
 rc=$?
@@ -2278,6 +2295,6 @@ printf '%s\n' "$out" | grep -qF 'needs two GPUs and Level Zero shows 1' ||
 if printf '%s\n' "$out" | grep -q '^devices:'; then echo "a device was opened" >&2; exit 1; fi
 exit 0
 ]==] cli_reject_pipeline_one_gpu $<TARGET_FILE:b70-decode> ${B70_NO_MODEL} --ids ${B70_OK_IDS}
-  --n 4 --pipeline 2)
+  --n 4 --pp 2)
 set_tests_properties(cli_reject_pipeline_one_gpu PROPERTIES LABELS pp TIMEOUT 60)
 # ==== Spec 16b ============================================================= (end) ====

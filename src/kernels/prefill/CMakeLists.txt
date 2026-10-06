@@ -4,7 +4,7 @@
 # **No `M` appears in any name or on any command line below**, and that is the
 # rule rather than an accident: interfaces.md fixes the row count as a runtime
 # kernel argument with grids of `ceil(M / tile)` and device-side masking, so one
-# binary serves every chunk width the CLI's `--pp-chunk` can ask for. `K`,
+# binary serves every chunk width the CLI's `--prefill-chunk` can ask for. `K`,
 # `S_PREV` and the norm's group counts stay in the names because they are
 # strides and grids the binary bakes -- the arrangement `prep_res_fold`'s `G`
 # uses one directory up, for the same reason: a host that disagrees names a file

@@ -8,7 +8,7 @@
 # product, it must be rebuilt whenever any kernel changes, and a list here
 # would be a third copy of runtime::build's variant set to keep in step.
 #
-# `--pp` (spec 2) makes the CLI the one product binary that reaches
+# `--prefill-length` (spec 2) makes the CLI the one product binary that reaches
 # `Engine::prefill`, which lives in b70_prefill_host. Since spec 2.1, the L0
 # backend's GEMMs are in b70_prefill_host itself, so that library is linked
 # unconditionally; only the sycl-tla backend needs libb70_prefill.so, guarded

@@ -413,7 +413,7 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C) {
 // attention issues its QK^T GEMM per row block of 256 rows rather than once per
 // chunk, so an FA layer costs `attn_chunk_launches(C, L0)` there instead of a
 // constant. Everything else is still C-free -- the runtime-M rule, one binary
-// set for every `--pp-chunk` -- and sycl-tla's arithmetic is untouched.
+// set for every `--prefill-chunk` -- and sycl-tla's arithmetic is untouched.
 namespace {
 // sycl-tla, spec 2's arithmetic (unchanged): per GDN layer 20 L0 launches, 4 SYCL GEMMs,
 // 8 waits; per FA layer 15 launches, 4 + 2 x 4 GEMMs, 17 waits; 1 embed.

@@ -3,10 +3,11 @@
 // (loader::is_k2_checkpoint) and, for "k2_horizon", runs runtime::k2::K2Engine instead of
 // runtime::Engine. `--ids` and `--bench` exactly as the Qwen path prints them (ids on stdout,
 // one per line; the bench row on stdout); the prompt goes through the decode list one replay
-// per id, or (spec 18c, `--prefill` / `--pp N`) through K2Engine::prefill in chunks of
-// `--pp-chunk` (default kPfC = 2048) on the l0 backend. `--max-len auto|N` plans with K2's own
-// planner (runtime/k2/k2_sizes.h) under the trained context (524288), the prefill scratch
-// included when this run prefills (it is lazy on the engine, as Qwen's ruling R7). Spec 18e:
+// per id, or (spec 18c, `--prefill` / `--prefill-length N`) through K2Engine::prefill in
+// chunks of `--prefill-chunk` (default kPfC = 2048) on the l0 backend. `--max-len auto|N` plans
+// with K2's own planner (runtime/k2/k2_sizes.h) under the trained context (524288), the
+// prefill scratch included when this run prefills (it is lazy on the engine, as Qwen's ruling
+// R7). Spec 18e:
 // `--kv-cache int8` (or B70_KV_CACHE=int8) plans and builds the int8 rotkv cache.
 #include <chrono>
 #include <cstdint>
@@ -50,8 +51,8 @@ struct DecodeArgs {
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   const uint32_t* bench_prompt = nullptr;   // cycled to --depth (b70_decode.cc's kBenchPrompt)
   size_t bench_prompt_len = 0;
-  // Spec 18c: `--prefill` (ingest by K2Engine::prefill) or `--pp N` (--bench at depth N,
-  // prefilled and timed - the pp row); pp_chunk 0 = kPfC.
+  // Spec 18c: `--prefill` (ingest by K2Engine::prefill) or `--prefill-length N` (--bench at
+  // depth N, prefilled and timed - the pp row); pp_chunk 0 = kPfC.
   bool prefill = false, pp = false;
   uint32_t pp_chunk = 0;
   // Spec 18e: `--kv-cache bf16|int8` (B70_KV_CACHE's default) - planned and built in that form.

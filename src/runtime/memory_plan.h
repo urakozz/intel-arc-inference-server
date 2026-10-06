@@ -54,7 +54,7 @@ std::string format_memory(const char* label, const MemoryComponents& c, size_t d
 //                       on Qwen3.8, the only prefill scratch that scales with max_len.
 //                       The default flash path builds neither.
 //
-// `prefill = false` is a decode-only engine (b70-decode without --pp / --prefill):
+// `prefill = false` is a decode-only engine (b70-decode without --prefill-length / --prefill):
 // ruling R7 keeps every prefill allocation lazy, so it plans none of them.
 struct PrefillPath {
   bool prefill = true;

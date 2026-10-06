@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
       argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   const uint32_t gpus = l0::Context::gpu_count();
   if (gpus < 2) {
-    std::printf("SKIP: --pipeline 2 needs two GPUs, Level Zero shows %u\n", gpus);
+    std::printf("SKIP: --pp 2 needs two GPUs, Level Zero shows %u\n", gpus);
     return 77;
   }
   l0::Context d0(0u);

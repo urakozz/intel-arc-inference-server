@@ -196,7 +196,7 @@ inline constexpr size_t kPrefillHeadLaunches = 5;   // fold + norm, lm_head, two
 // `model_bytes`: what load_k2 allocated except the RoPE table (K2LoadReport: bytes.total(),
 // = loader::k2_weight_bytes). The components are runtime::MemoryComponents' (memory_line's
 // format): model (+ the RoPE table at max_len), kv, decode state (control + scratch), and
-// with `prefill` (spec 18c: b70-decode --prefill / --pp) the prefill scratch - lazy on the
+// with `prefill` (spec 18c: b70-decode --prefill / --prefill-length) the prefill scratch - lazy on the
 // engine (allocated by the first prefill), so a decode-only plan leaves it out. No int8
 // prefill state (K2 prefills on the l0 backend only). `kv` (spec 18e): the cache's form - its
 // KV term is planned in it, so int8 about doubles what auto can give the context (no other term

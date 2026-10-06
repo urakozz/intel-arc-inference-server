@@ -17,7 +17,7 @@ void require(bool ok, const std::string& what) {
 }  // namespace
 
 // Spec 2.1's closing flip (2026-09-18): the L0 backend is the default in every build;
-// sycl-tla stays selectable as the reference (--pp-backend sycl-tla).
+// sycl-tla stays selectable as the reference (--prefill-backend sycl-tla).
 PrefillBackend default_prefill_backend() { return PrefillBackend::L0Int8; }   // spec 5, 2026-09-24
 bool sycl_available() { return true; }
 
