@@ -1,5 +1,14 @@
 # Spec 16c - pipeline parallel: the prefill chunk pipeline
 
+**Status (2026-10-06): built blind on branch `spec16c-pp-prefill`, on top of 16b** - spec 16 §9
+has what was built and where 16b's build overrides this plan (16b's cut and hand-offs, the
+byte-balanced split, the spec 7 hook from per-device shadows, the back-pressure rule as "both
+devices finished chunk j - 2"). CLI: `--pp 2 --prefill`, `--bench --prefill-length N --pp 2`
+(`--prefill-chunk`, `--prefill-backend l0|l0-int8`). Task 1 is written and host-checked (the
+order, its rules and the protocol on two threads, TSan clean; planner; CLI); its on-card half -
+`pp_prefill_test` / `pp_prefill_fail_test` - and Task 2's S2 rows are box queue row 23.
+`docs/BENCHMARKS.md`'s pp rows wait for row 23.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** prefill overlaps across the two cards: chunk `c` runs layers `[s, L)` on device 1 while chunk `c + 1` runs `[0, s)` on device 0, with double-buffered hand-off buffers; P1 (bitwise) on prefill; S2 (>= 1.7x on pp32768 / pp65536).
