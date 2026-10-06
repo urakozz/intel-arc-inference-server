@@ -18,6 +18,7 @@
 
 #include "cli/max_len.h"
 #include "cli/prefix_cache_size.h"
+#include "cli/renamed_flags.h"
 #include "cli/serve_adapters.h"
 #include "l0/context.h"
 #include "loader/loader.h"
@@ -73,7 +74,7 @@ void usage() {
                "                                        1.5: driver, kernels, slack; box-unconfirmed)\n"
                "                 The model is picked from the checkpoint's config.json: Qwen3.8,\n"
                "                 Agnes 3.0 Flash (spec 14) or Ornith 1.5 35B-A3B (spec 15, MoE).\n"
-               "                 [--pp-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n"
+               "                 [--prefill-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n"
                "                 [--log-requests DIR]   write DIR/NNNNNN.json per request\n"
                "                 [--prefix-cache-gb auto|N]  the prefix cache, in SYSTEM RAM (pinned\n"
                "                                        host memory, not VRAM), GiB. auto (default):\n"
@@ -283,8 +284,8 @@ int run(int argc, char** argv) {
     } else if (arg == "--spec-history") {
       spec_history = parse_u32("--spec-history", value(i, "--spec-history"));
       have_spec_tuning = true;
-    } else if (arg == "--pp-backend") {
-      pp_backend_arg = value(i, "--pp-backend");
+    } else if (arg == "--prefill-backend") {
+      pp_backend_arg = value(i, "--prefill-backend");
       have_pp_backend = true;
     } else if (arg == "--lm-head") {
       const std::string v = value(i, "--lm-head");
@@ -300,7 +301,7 @@ int run(int argc, char** argv) {
       kv_cache = cli::parse_kv_cache_arg(value(i, "--kv-cache"));
     } else if (!arg.empty() && arg[0] == '-') {
       usage();
-      throw std::runtime_error("unknown option '" + arg + "'");
+      throw std::runtime_error(cli::unknown_option(arg));
     } else if (path.empty()) {
       path = arg;
     } else {
@@ -384,7 +385,8 @@ int run(int argc, char** argv) {
   if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);
   runtime::PrefillBackend pp_backend{};
   if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
-    throw std::runtime_error("--pp-backend expects sycl-tla, l0 or l0-int8, got '" + pp_backend_arg + "'");
+    throw std::runtime_error("--prefill-backend expects sycl-tla, l0 or l0-int8, got '" + pp_backend_arg +
+                             "'");
 
   const runtime::PrefillPath pp_path = cli::prefill_path(
       true, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());

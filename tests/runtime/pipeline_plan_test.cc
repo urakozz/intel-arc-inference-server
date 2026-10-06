@@ -185,7 +185,7 @@ void check_auto_len() {
   const uint32_t one = runtime::max_len_that_fits(q, false, w.total(), kDevice, kReserve, kTrained,
                                                   runtime::PrefillPath{false});
   CHECK(one < kTrained);
-  std::printf("qwen3.8 bf16 head auto: one card %u, --pipeline 2 %u at split %u\n", one,
+  std::printf("qwen3.8 bf16 head auto: one card %u, --pp 2 %u at split %u\n", one,
               c.max_len, c.split);
   // The min over devices: a length that fits both, the next quantum not, at a fixed split;
   // a smaller device 1 sets the length.

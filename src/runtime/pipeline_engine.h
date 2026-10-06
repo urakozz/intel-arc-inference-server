@@ -20,7 +20,7 @@
 #include "runtime/memory_plan.h"
 #include "runtime/pipeline_plan.h"
 
-// Spec 16b: decode with the model's layers split over two B70s (`b70-decode --pipeline 2`).
+// Spec 16b: decode with the model's layers split over two B70s (`b70-decode --pp 2`).
 //
 //   device 0  embedding, layers [0, s), their GDN state / conv ring / KV, decode list 0
 //   device 1  layers [s, L), their state, final norm, lm_head, argmax, decode list 1
@@ -52,7 +52,7 @@
 //
 // Not here (spec 16b scope): prefill (16c - b70-decode ingests through the decode lists),
 // MTP and the server (16d), the residual tap, profiling. Snapshots (spec 7) ARE here, in
-// the single-card host layout, so a snapshot moves between --pipeline 1 and 2 unchanged.
+// the single-card host layout, so a snapshot moves between --pp 1 and 2 unchanged.
 namespace runtime {
 
 struct PipelineOptions {

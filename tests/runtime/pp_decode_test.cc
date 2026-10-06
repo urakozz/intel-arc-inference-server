@@ -8,13 +8,13 @@
 //              (save_state), every FA layer's KV over [0, pos) (save_kv) and the Control
 //              block. And a spec 7 restore: a 4395-id prefill, the snapshot at 4395, one id
 //              ingested after it, 64 greedy ids - the same five things.
-//   each configuration  --pipeline 2 with copy and peer, the auto split, and two uneven
+//   each configuration  --pp 2 with copy and peer, the auto split, and two uneven
 //              cuts (s = 5: one FA layer on device 0; s = 62: one FA layer on device 1):
 //              the same ingest + 64 ids, everything above bitwise, both Controls equal after
 //              every phase (pos in step); then the restore - the SAME snapshot bytes loaded
 //              into the pipeline (the host layouts are the single card's), one id, 64 ids,
 //              bitwise; then (first configuration) a reset and the whole run again, bitwise
-//              (replay determinism with --pipeline 2).
+//              (replay determinism with --pp 2).
 //
 // argv: [1] the checkpoint, [2] `int8` for the int8 lm_head. B70_KV_CACHE selects the KV form
 // (pp_decode_kv8_test). Exits 77 (SKIP) with fewer than two GPUs or without peer access.
@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
   const runtime::KvCache kv = runtime::default_kv_cache();
   const uint32_t gpus = l0::Context::gpu_count();
   if (gpus < 2) {
-    std::printf("SKIP: --pipeline 2 needs two GPUs, Level Zero shows %u\n", gpus);
+    std::printf("SKIP: --pp 2 needs two GPUs, Level Zero shows %u\n", gpus);
     return 77;
   }
   l0::Context d0(0u);
@@ -197,7 +197,7 @@ int main(int argc, char** argv) {
     opt.handoff = c.handoff;
     runtime::PipelineEngine e(d0, d1, runtime::place_stages(d0, d1, std::move(full), split), kMaxLen,
                               opt, kv);
-    const std::string what = std::string("--pipeline 2, ") + runtime::pp_handoff_name(c.handoff) +
+    const std::string what = std::string("--pp 2, ") + runtime::pp_handoff_name(c.handoff) +
                              ", split " + std::to_string(split) + (c.split ? "" : " (auto)");
     // Review Focus 5: the split is the descriptor's, the launches the single card's.
     CHECK_EQ(e.split(), split);

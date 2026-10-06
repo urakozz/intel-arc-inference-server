@@ -11,7 +11,7 @@
 #include "runtime/prefill/profile.h"
 
 // The ten launches of one GDN layer's chunk, in order. Every one takes `C` as a
-// RUNTIME argument, so one binary set serves every chunk width `--pp-chunk` can
+// RUNTIME argument, so one binary set serves every chunk width `--prefill-chunk` can
 // ask for (interfaces.md, "Layout conventions").
 //
 // **Ordering is the in-order immediate list and nothing else.** Launch 2 reads

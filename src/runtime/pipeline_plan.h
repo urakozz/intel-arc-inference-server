@@ -46,7 +46,7 @@ inline constexpr uint32_t kPpDevices = 2;   // spec 16 builds and gates two (§7
 // order (the index the persistent state is sliced by: GDN 0..gdn_layers-1, FA
 // 0..fa_layers-1). A stage's state holds exactly its own layers, kind-major as the
 // single-card buffers are, so stage 0's slices followed by stage 1's ARE the single-card
-// layout - which is what makes save_state / save_kv identical across --pipeline 1 and 2.
+// layout - which is what makes save_state / save_kv identical across --pp 1 and 2.
 struct PpStage {
   uint32_t first = 0, last = 0;      // layers [first, last)
   uint32_t gdn_first = 0, gdn = 0;   // its GDN layers: [gdn_first, gdn_first + gdn)

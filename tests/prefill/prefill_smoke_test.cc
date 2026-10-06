@@ -37,7 +37,7 @@ constexpr uint32_t kMaxLen = 16384;
 // `b70_decode.cc`'s `kBenchPrompt`, cycled - the 42 ids of the committed
 // golden prompt `tests/golden/prompts/prose.ids`. Copied rather than included
 // because this test must not depend on the CLI's translation unit; using the
-// same ids means the smoke test and `--bench --pp` drive the same tokens.
+// same ids means the smoke test and `--bench --prefill-length` drive the same tokens.
 constexpr uint32_t kSeed[] = {
     760,   72103,  506,  37119, 557,   11012, 3213,  310,  6512, 279, 61789, 272, 1072, 2272,
     279,   197616, 2271, 13,    469,   68042, 29123, 7247, 383,  279, 1387,  12615, 1345, 279,

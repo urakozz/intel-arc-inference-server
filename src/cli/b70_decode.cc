@@ -1,6 +1,7 @@
 // b70-decode - spec §12, plus spec 1.5 §3.4. Three modes:
 //
-//   b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--pp-chunk C]] [--device N] [--max-len 16384]
+//   b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--prefill-chunk C]] [--device N]
+//                                         [--max-len 16384]
 //                                         [--mtp off|1|2|3|auto]
 //   b70-decode <snapshot-or-repo> --bench [--depth 4096] [--tg 256] [--device N]
 //   b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--repeats 1]
@@ -38,6 +39,7 @@
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
 #include "cli/pipeline_decode.h"
+#include "cli/renamed_flags.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/event.h"
@@ -93,13 +95,18 @@ void usage() {
   std::fprintf(
       stderr,
       "usage:\n"
-       "  b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--pp-chunk C]\n"
-       "                                        [--pp-backend sycl-tla|l0|l0-int8]]\n"
+       "  b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--prefill-chunk C]\n"
+       "                                        [--prefill-backend sycl-tla|l0|l0-int8]]\n"
        "                                        [--device N] [--max-len 16384|auto]\n"
       "                                        [--mtp off|1|2|3|auto]\n"
-      "  b70-decode <snapshot-or-repo> --bench [--depth 4096 | --pp N [--pp-chunk C]\n"
-      "                                        [--pp-backend sycl-tla|l0|l0-int8]]\n"
+      "                                        [--pp 1|2 [--pipeline-split S]\n"
+      "                                        [--pipeline-handoff H]]\n"
+      "  b70-decode <snapshot-or-repo> --bench [--depth 4096 | --prefill-length N\n"
+      "                                        [--prefill-chunk C]\n"
+      "                                        [--prefill-backend sycl-tla|l0|l0-int8]]\n"
       "                                        [--tg 256] [--device N] [--max-len 16384|auto]\n"
+      "                                        [--pp 1|2 [--pipeline-split S]\n"
+      "                                        [--pipeline-handoff H]]\n"
       "  b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--repeats 1]\n"
       "                                          [--device N]\n"
       "\n"
@@ -125,17 +132,17 @@ void usage() {
       "                 allocator slack - an estimate the box has to confirm)\n"
       "  --bench        ingest --depth synthetic ids, then time --tg generated ones and print\n"
       "                 a markdown row on stdout\n"
-      "  --pp N         --bench only, and exclusive with --depth: prefill N synthetic ids\n"
+      "  --prefill-length N  --bench only, and exclusive with --depth: prefill N synthetic ids\n"
       "                 through Engine::prefill instead of ingesting them one replay at a\n"
       "                 time, and print a SECOND markdown row with the device-side prefill\n"
       "                 time. The prefilled ids ARE the depth, which is why --depth is\n"
       "                 refused beside it.\n"
-       "  --pp-chunk C   --pp or --prefill: positions per prefill chunk (default\n"
+       "  --prefill-chunk C  --prefill-length or --prefill: positions per prefill chunk (default\n"
        "                 PrefillScratch::kC = 2048, ruling A13). Spec 2 §6.2's multi-chunk\n"
        "                 gate runs at 1024.\n"
-       "  --pp-backend B  --pp or --prefill: the GEMM backend, sycl-tla (spec 2), l0 (spec 2.1,\n"
-       "                 every GEMM on the Level Zero list) or l0-int8 (spec 5, l0 with every\n"
-       "                 int4 linear on the rotated int8 path). Default: l0-int8.\n"
+       "  --prefill-backend B  --prefill-length or --prefill: the GEMM backend, sycl-tla (spec 2),\n"
+       "                 l0 (spec 2.1, every GEMM on the Level Zero list) or l0-int8 (spec 5,\n"
+       "                 l0 with every int4 linear on the rotated int8 path). Default: l0-int8.\n"
       "  --lm-head H    bf16 (default: the checkpoint's own head, byte-matched with vLLM) or\n"
       "                 int8 (spec 9: quantised per row at load). An int8 run's bench rows\n"
       "                 carry `int8-head` after the sha.\n"
@@ -143,10 +150,12 @@ void usage() {
       "                 half the KV bytes; decode attention v2 and the l0 / l0-int8 flash\n"
       "                 prefill only). An int8 run's bench rows carry `int8-kv`. K2-Horizon:\n"
       "                 spec 18e's rotkv at head_dim 128, decode (flash / eager) and prefill.\n"
-      "  --pipeline P  1 (default) or 2 (spec 16b): split the model's layers over GPUs 0 and 1\n"
-      "                 of what Level Zero shows, decode only (--ids ingests one replay per id;\n"
-      "                 --bench takes --depth). Refused with --prefill, --pp, --mtp, --profile,\n"
-      "                 --device. Both cards' memory lines on stderr; --max-len auto fits both.\n"
+      "  --pp N, --pipeline-parallel-size N  1 (default) or 2 (spec 16b, vLLM's flag): split the\n"
+      "                 model's layers over GPUs 0 and 1 of what Level Zero shows, decode only\n"
+      "                 (--ids ingests one replay per id; --bench takes --depth). Refused with\n"
+      "                 --prefill, --prefill-length, --mtp, --profile, --device. Both cards'\n"
+      "                 memory lines on stderr; --max-len auto fits both. (Before 2026-10-06\n"
+      "                 --pp was the bench's prefill length: that is --prefill-length now.)\n"
       "  --pipeline-split S  auto (default: the split whose heavier card holds the fewest bytes)\n"
       "                 or N: device 0 runs layers [0, N), device 1 the rest\n"
       "  --pipeline-handoff H  copy (default: a device-to-device copy and a cross-device event)\n"
@@ -697,10 +706,10 @@ int run(int argc, char** argv) {
   cli::MaxLenArg max_len_arg{false, max_len};
   size_t mem_reserve = size_t(runtime::kDefaultReserveGb * 1e9);
   uint32_t device = l0::Context::kFromEnv;
-  uint32_t pp = 0, pp_chunk = 0;
+  uint32_t prefill_len = 0, pp_chunk = 0;
   bool bench = false, profile = false, have_n = false, prefill = false;
   bool have_depth = false, have_tg = false, have_steps = false, have_repeats = false;
-  bool have_pp = false, have_pp_chunk = false;
+  bool have_prefill_len = false, have_pp_chunk = false;
   std::string pp_backend_arg;
   bool have_pp_backend = false;
   // Spec 9 §3: bf16 by default, so BENCHMARKS rows stay byte-matched with vLLM.
@@ -709,7 +718,7 @@ int run(int argc, char** argv) {
   // Spec 8: --mtp K|auto in --ids mode (greedy); absent = no head, every path as before.
   uint32_t mtp_k = 0;
   bool mtp_auto = false, have_mtp = false;
-  cli::PipelineArgs pipe;   // spec 16b: --pipeline, --pipeline-split, --pipeline-handoff
+  cli::PipelineArgs pipe;   // spec 16b: --pp, --pipeline-split, --pipeline-handoff
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -745,14 +754,14 @@ int run(int argc, char** argv) {
     } else if (a == "--depth") {
       depth = parse_u32("--depth", value(i, "--depth"));
       have_depth = true;
-    } else if (a == "--pp") {
-      pp = parse_u32("--pp", value(i, "--pp"));
-      have_pp = true;
-    } else if (a == "--pp-chunk") {
-      pp_chunk = parse_u32("--pp-chunk", value(i, "--pp-chunk"));
+    } else if (a == "--prefill-length") {
+      prefill_len = parse_u32("--prefill-length", value(i, "--prefill-length"));
+      have_prefill_len = true;
+    } else if (a == "--prefill-chunk") {
+      pp_chunk = parse_u32("--prefill-chunk", value(i, "--prefill-chunk"));
       have_pp_chunk = true;
-    } else if (a == "--pp-backend") {
-      pp_backend_arg = value(i, "--pp-backend");
+    } else if (a == "--prefill-backend") {
+      pp_backend_arg = value(i, "--prefill-backend");
       have_pp_backend = true;
     } else if (a == "--tg") {
       tg = parse_u32("--tg", value(i, "--tg"));
@@ -774,8 +783,8 @@ int run(int argc, char** argv) {
       }
     } else if (a == "--kv-cache") {   // spec 12b
       kv_cache = cli::parse_kv_cache_arg(value(i, "--kv-cache"));
-    } else if (a == "--pipeline") {   // spec 16b
-      pipe.devices = cli::parse_pipeline_devices(value(i, "--pipeline"));
+    } else if (a == "--pp" || a == "--pipeline-parallel-size") {   // spec 16b, vLLM's spelling
+      pipe.devices = cli::parse_pipeline_devices(a, value(i, a.c_str()));
     } else if (a == "--pipeline-split") {
       cli::parse_pipeline_split(value(i, "--pipeline-split"), pipe);
     } else if (a == "--pipeline-handoff") {
@@ -786,7 +795,7 @@ int run(int argc, char** argv) {
         throw std::runtime_error("--lm-head expects bf16 or int8, got '" + v + "'");
     } else if (!a.empty() && a[0] == '-') {
       usage();
-      throw std::runtime_error("unknown option '" + a + "'");
+      throw std::runtime_error(cli::unknown_option(a));
     } else if (path.empty()) {
       path = a;
     } else {
@@ -801,7 +810,7 @@ int run(int argc, char** argv) {
   }
   if (prefill && ids_path.empty())
     throw std::runtime_error(
-        "--prefill belongs to --ids; --bench uses --pp and --profile has no prompt");
+        "--prefill belongs to --ids; --bench uses --prefill-length and --profile has no prompt");
   // Three modes, exactly one of them. `--profile` is exclusive with `--bench`
   // for a reason that is not tidiness: a profiled list signals 774 host-visible
   // events per step, so it can never produce a bench row (spec 1.5 §3.3).
@@ -835,25 +844,27 @@ int run(int argc, char** argv) {
   // rejection, so `b70_cli_reject` can grade them without a device - and so a
   // build with -DB70_PREFILL=OFF still refuses them for the right reason
   // rather than as an unknown flag.
-  if (have_pp && !bench)
-    throw std::runtime_error("--pp belongs to --bench; --ids sizes its run with --n and"
+  if (have_prefill_len && !bench)
+    throw std::runtime_error("--prefill-length belongs to --bench; --ids sizes its run with --n and"
                              " --profile with --depth and --steps");
-  if (have_pp && have_depth)
-    throw std::runtime_error("--pp and --depth are exclusive: the prefilled ids ARE the depth,"
-                             " so naming both would be two answers to one question");
-  if (have_pp && pp == 0) throw std::runtime_error("--pp 0 would prefill nothing");
-  if (have_pp_chunk && !have_pp && !prefill)
-    throw std::runtime_error("--pp-chunk belongs to --pp; it is the prefill chunk width and"
-                             " nothing else has one");
+  if (have_prefill_len && have_depth)
+    throw std::runtime_error("--prefill-length and --depth are exclusive: the prefilled ids ARE the"
+                             " depth, so naming both would be two answers to one question");
+  if (have_prefill_len && prefill_len == 0)
+    throw std::runtime_error("--prefill-length 0 would prefill nothing");
+  if (have_pp_chunk && !have_prefill_len && !prefill)
+    throw std::runtime_error("--prefill-chunk belongs to --prefill-length and --prefill; it is the"
+                             " prefill chunk width and nothing else has one");
   if (have_pp_chunk && pp_chunk == 0)
-    throw std::runtime_error("--pp-chunk 0 is not a chunk width; omit it for the default"
+    throw std::runtime_error("--prefill-chunk 0 is not a chunk width; omit it for the default"
                              " PrefillScratch::kC");
-  if (have_pp_backend && !have_pp && !prefill)
-    throw std::runtime_error("--pp-backend belongs to --pp and --prefill; the decode path has no"
-                             " GEMM backend");
+  if (have_pp_backend && !have_prefill_len && !prefill)
+    throw std::runtime_error("--prefill-backend belongs to --prefill-length and --prefill; the"
+                             " decode path has no GEMM backend");
   runtime::PrefillBackend pp_backend{};
   if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
-    throw std::runtime_error("--pp-backend expects sycl-tla, l0 or l0-int8, got '" + pp_backend_arg + "'");
+    throw std::runtime_error("--prefill-backend expects sycl-tla, l0 or l0-int8, got '" +
+                             pp_backend_arg + "'");
   if (!synthetic && !have_n) {
     usage();
     throw std::runtime_error("--ids needs --n");
@@ -862,11 +873,11 @@ int run(int argc, char** argv) {
   if (bench && tg == 0) throw std::runtime_error("--tg 0 would time nothing");
   if (profile && steps == 0) throw std::runtime_error("--steps 0 would profile nothing");
   if (profile && repeats == 0) throw std::runtime_error("--repeats 0 would profile nothing");
-  // `--pp N` IS the depth (interfaces.md's CLI contract: "--depth is then
+  // `--prefill-length N` IS the depth (interfaces.md's CLI contract: "--depth is then
   // ignored and the tg row's depth column reads N"). Making it `depth` here
   // rather than threading a second variable means every downstream use - the
   // max_len bound, the id vector, the tg row's depth column - is one number.
-  if (have_pp) depth = pp;
+  if (have_prefill_len) depth = prefill_len;
   // Both synthetic modes exist to measure a step at a context depth, and the
   // cost of a step depends on that depth (attention's live-block count is the
   // measured example - docs/15). Depth 0 measures a shape nobody runs.
@@ -874,32 +885,35 @@ int run(int argc, char** argv) {
     throw std::runtime_error("--depth 0 would ingest nothing; --bench and --profile both measure"
                              " a step at a context depth");
   const runtime::PrefillPath pp_path = cli::prefill_path(
-      have_pp || prefill, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
+      have_prefill_len || prefill,
+      have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
   cli::check_kv_cache(kv_cache, pp_path);   // spec 12b
   if (profile && kv_cache == runtime::KvCache::Int8)
     throw std::runtime_error("--profile captures its own bf16-KV list; it has no --kv-cache int8");
-  // Spec 16b: --pipeline's refusals are argument-only, so they come before the device too.
-  cli::check_pipeline(pipe, {prefill, have_pp, mtp_on, profile, device != l0::Context::kFromEnv});
+  // Spec 16b: --pp's refusals are argument-only, so they come before the device too.
+  cli::check_pipeline(pipe, {prefill, have_prefill_len, mtp_on, profile,
+                             device != l0::Context::kFromEnv});
 
   // Spec 18b: dispatch on config.json's model_type. K2-Horizon runs runtime::k2::K2Engine (its
   // own loader, list and planner); every flag validated above means the same there, and what
   // K2 does not have yet is refused here by the stage that builds it. A path that does not
   // resolve is not K2 - the Qwen flow below reports it, so every rejection keeps its order.
   if (cli::k2::is_k2(path)) {
-    // Spec 18c: K2 prefills (--prefill / --pp) on the l0 backend only - the h8 path (l0-int8)
+    // Spec 18c: K2 prefills (--prefill / --prefill-length) on the l0 backend only - the h8 path (l0-int8)
     // rotates in 1024-k Hadamard blocks and K2's hidden is 2560; sycl-tla has no K2 walk.
-    if ((have_pp || prefill) && have_pp_backend && pp_backend != runtime::PrefillBackend::L0)
+    if ((have_prefill_len || prefill) && have_pp_backend && pp_backend != runtime::PrefillBackend::L0)
       throw std::runtime_error(std::string("K2-Horizon prefills on the l0 backend only (spec 18c), not ") +
                                runtime::prefill_backend_name(pp_backend) +
                                ": l0-int8's h8 linears need K in whole 1024-k Hadamard blocks and K2's "
-                               "hidden is 2560; sycl-tla has no K2 walk - --pp-backend l0, or omit it");
+                               "hidden is 2560; sycl-tla has no K2 walk - --prefill-backend l0, or "
+                               "omit it");
     if (profile)
       throw std::runtime_error("--profile is not built for K2-Horizon yet (spec 18b Task 4, the box's "
                                "speed work); --bench times it");
     if (mtp_on)
       throw std::runtime_error("K2-Horizon has no MTP head (spec 18 §9); drop --mtp");
     if (pipe.on())
-      throw std::runtime_error("K2-Horizon runs its own engine (runtime/k2); --pipeline 2 is built "
+      throw std::runtime_error("K2-Horizon runs its own engine (runtime/k2); --pp 2 is built "
                                "for the Qwen3.5 family's (spec 16b) - K2 across two cards is "
                                "future work");
     cli::k2::DecodeArgs ka;
@@ -916,12 +930,12 @@ int run(int argc, char** argv) {
     ka.bench_prompt = kBenchPrompt;   // legal K2 ids too (all < 250624)
     ka.bench_prompt_len = kBenchPromptLen;
     ka.prefill = prefill;   // spec 18c
-    ka.pp = have_pp;        // --pp N already set depth = N above
+    ka.pp = have_prefill_len;   // --prefill-length N already set depth = N above
     ka.pp_chunk = pp_chunk;
     ka.kv = kv_cache;       // spec 18e: rotkv at head_dim 128, planned and built in that form
     if (pp_chunk > runtime::k2::kPfC)
-      throw std::runtime_error("--pp-chunk " + std::to_string(pp_chunk) + " exceeds K2's prefill chunk " +
-                               std::to_string(runtime::k2::kPfC));
+      throw std::runtime_error("--prefill-chunk " + std::to_string(pp_chunk) +
+                               " exceeds K2's prefill chunk " + std::to_string(runtime::k2::kPfC));
     return cli::k2::run_decode<StdoutToStderr>(ka);
   }
 
@@ -960,7 +974,7 @@ int run(int argc, char** argv) {
     for (uint32_t i = 0; i < depth; ++i) ids[i] = kBenchPrompt[i % kBenchPromptLen];
   }
 
-  // Spec 16b: two devices, its own flow (cli/pipeline_decode.h); --pipeline 1 goes on below.
+  // Spec 16b: two devices, its own flow (cli/pipeline_decode.h); --pp 1 goes on below.
   if (pipe.on()) {
     cli::PipelineDecodeArgs pa;
     pa.path = path;
@@ -987,10 +1001,10 @@ int run(int argc, char** argv) {
     StdoutToStderr redirect;
     return loader::load(ctx, path, cli::load_len(max_len_arg, trained), /*mtp=*/mtp_on, lm_head);
   }();
-  // Spec 15c: --pp / --prefill on a model whose prefill is not built stop here with the
+  // Spec 15c: --prefill-length / --prefill on a model whose prefill is not built stop here with the
   // reason, before a plan or an engine is made for it (spec 15d: Ornith's is built, on
   // the L0 backends - Engine::prepare_prefill refuses sycl-tla by name).
-  if (have_pp || prefill) model::require_prefill(*model.desc);
+  if (have_prefill_len || prefill) model::require_prefill(*model.desc);
   // Spec 6 §10: auto plans and re-tables the model; an explicit length is held to the
   // plan. The prefill scratch is planned only when this run prefills (ruling R7).
   max_len = cli::settle(ctx, model, max_len_arg, mem_reserve, pp_path, kv_cache);
@@ -1012,7 +1026,7 @@ int run(int argc, char** argv) {
                runtime::decode_attn_name(runtime::decode_attn()),
                runtime::kv_cache_name(eng.kv_cache()));
 
-  // Ingestion is one replay per prompt token unless `--pp` or `--prefill` is
+  // Ingestion is one replay per prompt token unless `--prefill-length` or `--prefill` is
   // given, in which case it is `Engine::prefill`. The measured window is
   // **the whole call**, and that needs no extra instrumentation to be the
   // interface's "first prefill launch to the first generated id in cur_token":
@@ -1021,7 +1035,7 @@ int run(int argc, char** argv) {
   // The prefill setup (scratch, Context, and on l0-int8 the one-time rotated
   // column-scale pass, spec 5 T2) happens here, at load, outside the window.
   size_t pp_launches_setup = 0;
-  if (have_pp || prefill) {
+  if (have_prefill_len || prefill) {
     if (have_pp_backend) eng.set_prefill_backend(pp_backend);
     std::fprintf(stderr, "prefill backend: %s (SYCL component %s)\n",
                  runtime::prefill_backend_name(eng.prefill_backend()),
@@ -1033,16 +1047,16 @@ int run(int argc, char** argv) {
   std::fprintf(stderr, "%s\n", eng.memory_line().c_str());
   const auto t0 = std::chrono::steady_clock::now();
   size_t pp_launches = 0;
-  if (have_pp || prefill) {
-    if (have_pp) runtime::prefill::profile_reset();
+  if (have_prefill_len || prefill) {
+    if (have_prefill_len) runtime::prefill::profile_reset();
     eng.prefill(ids, pp_chunk);
-    if (have_pp) pp_launches = eng.prefill_launches() - pp_launches_setup;
+    if (have_prefill_len) pp_launches = eng.prefill_launches() - pp_launches_setup;
   } else {
     eng.ingest(ids);
   }
   const double ingest_ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  if (have_pp)
+  if (have_prefill_len)
     std::fprintf(stderr,
                  "pp: %zu ids in %.1f ms (%.2f t/s) -- device-side, loader excluded, first"
                  " prefill launch to the first generated id in cur_token; chunk %u, %zu L0"
@@ -1050,8 +1064,8 @@ int run(int argc, char** argv) {
                  ids.size(), ingest_ms,
                  ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0,
                  pp_chunk ? pp_chunk : runtime::PrefillScratch::kC, pp_launches, eng.pos());
-  if (have_pp) runtime::prefill::profile_report("--pp", ingest_ms);
-  if (!have_pp && !prefill)
+  if (have_prefill_len) runtime::prefill::profile_report("--prefill-length", ingest_ms);
+  if (!have_prefill_len && !prefill)
     std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token), pos %u\n", ids.size(),
                  ingest_ms, ids.empty() ? 0.0 : ingest_ms / double(ids.size()), eng.pos());
   if (prefill)
@@ -1118,8 +1132,8 @@ int run(int argc, char** argv) {
   // The tg row above is byte-identical to what it always was, and the pp row
   // is a SECOND line rather than extra columns on it, so every existing parser
   // of docs/BENCHMARKS.md's table keeps working (interfaces.md's CLI contract;
-  // tools/bench_decode.sh --pp reads both).
-  if (have_pp)
+  // tools/bench_decode.sh --prefill-length reads both).
+  if (have_prefill_len)
     std::printf("| b70-decode %s%s %s pp | %u | %u | %.1f | %.2f |\n", sha, head_tag.c_str(),
                 runtime::prefill_backend_name(eng.prefill_backend()), depth,
                 pp_chunk ? pp_chunk : runtime::PrefillScratch::kC, ingest_ms,
