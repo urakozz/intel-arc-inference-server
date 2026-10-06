@@ -1,0 +1,37 @@
+<|im_start|>system
+# Reasoning effort
+
+Reasoning effort is set to high. Think carefully through the task in the user's language, validate key assumptions, consider plausible alternatives, and prioritize correctness and clarity.
+
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{"function": {"description": "Run a shell command.", "name": "bash", "parameters": {"properties": {"command": {"type": "string"}, "env": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["command"], "type": "object"}}, "type": "function"}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": <function-name>, "arguments": <args-json-object>}
+</tool_call><|im_end|>
+<|im_start|>user
+What is 6 x 7?<|im_end|>
+<|im_start|>assistant
+42.<|im_end|>
+<|im_start|>user
+Now check the file count in /tmp.<|im_end|>
+<|im_start|>assistant
+<think>
+I need a shell.
+</think>
+
+<tool_call>
+{"name": "bash", "arguments": {"command": "ls /tmp | wc -l", "timeout": 10}}
+</tool_call><|im_end|>
+<|im_start|>user
+<tool_response>
+17
+</tool_response><|im_end|>
+<|im_start|>assistant

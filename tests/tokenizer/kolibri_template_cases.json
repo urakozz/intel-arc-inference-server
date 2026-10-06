@@ -1,0 +1,445 @@
+{
+ "comment": "Kolibri-1's chat template cases (spec 20e): tools/tokenizer/dump_kolibri.py renders each through transformers' apply_chat_template into kolibri_template_<name>.txt; template_kolibri_test compares the engine's render",
+ "bos_token": "",
+ "eos_token": "<|im_end|>",
+ "tools": {
+  "read": {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the workspace.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "First line, 1-based"
+      },
+      "limit": {
+       "type": "integer"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  "grep": {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Durchsucht Dateien nach einem regulären Ausdruck (Groß-/Kleinschreibung beachten).",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string",
+       "description": "Der Ausdruck, z. B. „Straße“"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  "bash": {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "timeout": {
+       "type": "integer"
+      },
+      "env": {
+       "type": "object"
+      }
+     },
+     "required": [
+      "command"
+     ]
+    }
+   }
+  }
+ },
+ "cases": [
+  {
+   "name": "plain",
+   "tools": null,
+   "kwargs": {},
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Name one prime number above 90."
+    }
+   ]
+  },
+  {
+   "name": "effort_none",
+   "tools": null,
+   "kwargs": {
+    "reasoning_effort": "none"
+   },
+   "messages": [
+    {
+     "role": "user",
+     "content": "How many r are in strawberry?"
+    }
+   ]
+  },
+  {
+   "name": "effort_minimal",
+   "tools": null,
+   "kwargs": {
+    "reasoning_effort": "minimal"
+   },
+   "messages": [
+    {
+     "role": "user",
+     "content": "How many r are in strawberry?"
+    }
+   ]
+  },
+  {
+   "name": "effort_low",
+   "tools": null,
+   "kwargs": {
+    "reasoning_effort": "low"
+   },
+   "messages": [
+    {
+     "role": "user",
+     "content": "How many r are in strawberry?"
+    }
+   ]
+  },
+  {
+   "name": "effort_medium",
+   "tools": null,
+   "kwargs": {
+    "reasoning_effort": "medium"
+   },
+   "messages": [
+    {
+     "role": "user",
+     "content": "How many r are in strawberry?"
+    }
+   ]
+  },
+  {
+   "name": "effort_xhigh",
+   "tools": null,
+   "kwargs": {
+    "reasoning_effort": "xhigh"
+   },
+   "messages": [
+    {
+     "role": "user",
+     "content": "How many r are in strawberry?"
+    }
+   ]
+  },
+  {
+   "name": "effort_max",
+   "tools": null,
+   "kwargs": {
+    "reasoning_effort": "max"
+   },
+   "messages": [
+    {
+     "role": "user",
+     "content": "How many r are in strawberry?"
+    }
+   ]
+  },
+  {
+   "name": "thinking_off",
+   "tools": null,
+   "kwargs": {
+    "enable_thinking": false
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Say hi."
+    }
+   ],
+   "think": false
+  },
+  {
+   "name": "system_tools",
+   "tools": [
+    "read",
+    "grep"
+   ],
+   "kwargs": {},
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Where is main() defined?"
+    }
+   ]
+  },
+  {
+   "name": "tools_no_system",
+   "tools": [
+    "read",
+    "grep",
+    "bash"
+   ],
+   "kwargs": {},
+   "messages": [
+    {
+     "role": "user",
+     "content": "List the build directory."
+    }
+   ]
+  },
+  {
+   "name": "tool_call_history",
+   "tools": [
+    "read",
+    "grep"
+   ],
+   "kwargs": {},
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "What does src/server/server.cc start with?"
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "I should read the file first.",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read",
+        "arguments": {
+         "filePath": "/work/src/server/server.cc",
+         "limit": 3
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "#include \"server/server.h\"\n\n#include <algorithm>"
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "The first line is an include.",
+     "content": "It starts with `#include \"server/server.h\"`."
+    }
+   ]
+  },
+  {
+   "name": "parallel_calls",
+   "tools": [
+    "read",
+    "grep"
+   ],
+   "kwargs": {},
+   "messages": [
+    {
+     "role": "user",
+     "content": "Find TODOs and show the README."
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "Two independent lookups.",
+     "content": "I'll look at both.",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": {
+         "pattern": "TODO",
+         "path": "/work/src"
+        }
+       }
+      },
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "read",
+        "arguments": {
+         "filePath": "/work/README.md"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "src/a.cc:12: // TODO: tighten"
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "# b70\nAn inference server."
+    }
+   ]
+  },
+  {
+   "name": "reasoning_history",
+   "tools": [
+    "bash"
+   ],
+   "kwargs": {},
+   "messages": [
+    {
+     "role": "user",
+     "content": "What is 6 x 7?"
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "6 x 7 = 42.",
+     "content": "42."
+    },
+    {
+     "role": "user",
+     "content": "Now check the file count in /tmp."
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "\nI need a shell.\n",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": {
+         "command": "ls /tmp | wc -l",
+         "timeout": 10
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "17"
+    }
+   ]
+  },
+  {
+   "name": "reasoning_field",
+   "tools": null,
+   "kwargs": {},
+   "messages": [
+    {
+     "role": "user",
+     "content": "Pick a colour."
+    },
+    {
+     "role": "assistant",
+     "reasoning": "Blue is common.",
+     "content": "Blue."
+    }
+   ]
+  },
+  {
+   "name": "think_in_content",
+   "tools": null,
+   "kwargs": {},
+   "messages": [
+    {
+     "role": "user",
+     "content": "Pick a number."
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nSeven is fine.\n</think>\n\nSeven."
+    }
+   ]
+  },
+  {
+   "name": "german",
+   "tools": [
+    "grep"
+   ],
+   "kwargs": {},
+   "messages": [
+    {
+     "role": "system",
+     "content": "Du bist ein sorgfältiger Assistent für Softwareentwicklung."
+    },
+    {
+     "role": "user",
+     "content": "Suche „Größe“ und „Straße“ im Code. Was macht die Donaudampfschifffahrtsgesellschaftskapitän?"
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "Ich suche zuerst nach „Größe“.",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_4",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": {
+         "pattern": "Größe|Straße",
+         "path": "/work/ü"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_4",
+     "content": "src/maß.cc:3: // Größe der Straße in Fuß"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,23 @@
+<|im_start|>system
+# Reasoning effort
+
+Reasoning effort is set to high. Think carefully through the task in the user's language, validate key assumptions, consider plausible alternatives, and prioritize correctness and clarity.
+
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{"function": {"description": "Read a file from the workspace.", "name": "read", "parameters": {"properties": {"filePath": {"description": "Absolute path", "type": "string"}, "limit": {"type": "integer"}, "offset": {"description": "First line, 1-based", "type": "integer"}}, "required": ["filePath"], "type": "object"}}, "type": "function"}
+{"function": {"description": "Durchsucht Dateien nach einem regulären Ausdruck (Groß-/Kleinschreibung beachten).", "name": "grep", "parameters": {"properties": {"include": {"type": ["string", "null"]}, "path": {"type": "string"}, "pattern": {"description": "Der Ausdruck, z. B. „Straße“", "type": "string"}}, "required": ["pattern"], "type": "object"}}, "type": "function"}
+{"function": {"description": "Run a shell command.", "name": "bash", "parameters": {"properties": {"command": {"type": "string"}, "env": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["command"], "type": "object"}}, "type": "function"}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": <function-name>, "arguments": <args-json-object>}
+</tool_call><|im_end|>
+<|im_start|>user
+List the build directory.<|im_end|>
+<|im_start|>assistant

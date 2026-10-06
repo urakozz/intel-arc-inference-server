@@ -1,0 +1,44 @@
+<|im_start|>system
+You are a careful coding assistant.
+
+# Reasoning effort
+
+Reasoning effort is set to high. Think carefully through the task in the user's language, validate key assumptions, consider plausible alternatives, and prioritize correctness and clarity.
+
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{"function": {"description": "Read a file from the workspace.", "name": "read", "parameters": {"properties": {"filePath": {"description": "Absolute path", "type": "string"}, "limit": {"type": "integer"}, "offset": {"description": "First line, 1-based", "type": "integer"}}, "required": ["filePath"], "type": "object"}}, "type": "function"}
+{"function": {"description": "Durchsucht Dateien nach einem regulären Ausdruck (Groß-/Kleinschreibung beachten).", "name": "grep", "parameters": {"properties": {"include": {"type": ["string", "null"]}, "path": {"type": "string"}, "pattern": {"description": "Der Ausdruck, z. B. „Straße“", "type": "string"}}, "required": ["pattern"], "type": "object"}}, "type": "function"}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": <function-name>, "arguments": <args-json-object>}
+</tool_call><|im_end|>
+<|im_start|>user
+What does src/server/server.cc start with?<|im_end|>
+<|im_start|>assistant
+<think>
+I should read the file first.
+</think>
+
+<tool_call>
+{"name": "read", "arguments": {"filePath": "/work/src/server/server.cc", "limit": 3}}
+</tool_call><|im_end|>
+<|im_start|>user
+<tool_response>
+#include "server/server.h"
+
+#include <algorithm>
+</tool_response><|im_end|>
+<|im_start|>assistant
+<think>
+The first line is an include.
+</think>
+
+It starts with `#include "server/server.h"`.<|im_end|>
+<|im_start|>assistant

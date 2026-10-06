@@ -1,0 +1,7 @@
+<|im_start|>system
+# Reasoning effort
+
+Reasoning effort is set to low. Think briefly through only the essential steps in the user's language, then proceed directly to the answer.<|im_end|>
+<|im_start|>user
+How many r are in strawberry?<|im_end|>
+<|im_start|>assistant
