@@ -22,10 +22,11 @@ uint32_t checked_max_len(const loader::K2LoadedModel& m, uint32_t max_len) {
 }
 }  // namespace
 
-K2Engine::K2Engine(l0::Context& ctx, loader::K2LoadedModel model, uint32_t max_len, bool debug_tap)
+K2Engine::K2Engine(l0::Context& ctx, loader::K2LoadedModel model, uint32_t max_len, bool debug_tap,
+                   KvCache kv)
     : ctx_(ctx),
       model_(std::move(model)),
-      buffers_(ctx, *model_.desc, checked_max_len(model_, max_len)),
+      buffers_(ctx, *model_.desc, checked_max_len(model_, max_len), k2_attn(), kv),
       tap_(debug_tap ? std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, tap_bytes(*model_.desc))
                      : nullptr),
       step_(build(ctx, model_, buffers_, tap_.get())),

@@ -6,7 +6,8 @@
 // per id, or (spec 18c, `--prefill` / `--pp N`) through K2Engine::prefill in chunks of
 // `--pp-chunk` (default kPfC = 2048) on the l0 backend. `--max-len auto|N` plans with K2's own
 // planner (runtime/k2/k2_sizes.h) under the trained context (524288), the prefill scratch
-// included when this run prefills (it is lazy on the engine, as Qwen's ruling R7).
+// included when this run prefills (it is lazy on the engine, as Qwen's ruling R7). Spec 18e:
+// `--kv-cache int8` (or B70_KV_CACHE=int8) plans and builds the int8 rotkv cache.
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -53,6 +54,8 @@ struct DecodeArgs {
   // prefilled and timed - the pp row); pp_chunk 0 = kPfC.
   bool prefill = false, pp = false;
   uint32_t pp_chunk = 0;
+  // Spec 18e: `--kv-cache bf16|int8` (B70_KV_CACHE's default) - planned and built in that form.
+  runtime::KvCache kv = runtime::KvCache::Bf16;
 };
 
 inline std::vector<uint32_t> read_ids(const std::string& path, uint32_t vocab) {
@@ -75,40 +78,39 @@ inline std::vector<uint32_t> read_ids(const std::string& path, uint32_t vocab) {
 
 // cli::settle for K2: auto plans the largest max_len that fits and re-tables the model; an
 // explicit N is held to the same plan. `prefill` (spec 18c): the plan carries the prefill
-// scratch this run will allocate.
+// scratch this run will allocate. `kv` (spec 18e): the KV term in the cache's form.
 inline uint32_t settle(l0::Context& ctx, loader::K2LoadedModel& m, const MaxLenArg& a, size_t reserve,
-                       bool prefill = false) {
+                       bool prefill = false, runtime::KvCache kv = runtime::KvCache::Bf16) {
   const model::K2Desc& d = *m.desc;
   const size_t weights = m.report.bytes.total(), device = ctx.memory_bytes();
+  const auto plan_at = [&](uint32_t n) {
+    return runtime::k2::plan(d, n, weights, false, prefill, runtime::k2::k2_attn(), kv);
+  };
   uint32_t len = a.value;
   if (a.is_auto) {
     const uint32_t fit =
-        runtime::k2::max_len_that_fits(d, weights, device, reserve, m.trained_max_len, prefill);
+        runtime::k2::max_len_that_fits(d, weights, device, reserve, m.trained_max_len, prefill, kv);
     if (fit == 0)
       throw std::runtime_error("--max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) +
                                " positions fit - " +
-                               runtime::k2::describe(runtime::k2::plan(d, runtime::kMinAutoMaxLen, weights,
-                                                                       false, prefill),
-                                                     device, reserve));
+                               runtime::k2::describe(plan_at(runtime::kMinAutoMaxLen), device, reserve));
     len = fit;
     loader::set_max_len_k2(ctx, m, len);
-    std::fprintf(stderr, "max_len: auto -> %u (K2-Horizon; the largest multiple of %u that fits %.3f GB "
-                 "with a %.3f GB reserve; trained context %u)\n", len, runtime::kMaxLenQuantum,
-                 device / 1e9, reserve / 1e9, m.trained_max_len);
+    std::fprintf(stderr, "max_len: auto -> %u (K2-Horizon, %s KV; the largest multiple of %u that fits "
+                 "%.3f GB with a %.3f GB reserve; trained context %u)\n", len, runtime::kv_cache_name(kv),
+                 runtime::kMaxLenQuantum, device / 1e9, reserve / 1e9, m.trained_max_len);
   } else {
-    const runtime::k2::Plan p = runtime::k2::plan(d, len, weights, false, prefill);
+    const runtime::k2::Plan p = plan_at(len);
     if (p.total() + reserve > device)
       throw std::runtime_error("--max-len " + std::to_string(len) + " does not fit: " +
                                runtime::k2::describe(p, device, reserve) + ". The largest that fits is " +
                                std::to_string(runtime::k2::max_len_that_fits(
                                    d, weights, device, reserve, m.trained_max_len ? m.trained_max_len : len,
-                                   prefill)) +
+                                   prefill, kv)) +
                                " (--max-len auto)");
     std::fprintf(stderr, "max_len: %u (--max-len)\n", len);
   }
-  std::fprintf(stderr, "%s\n",
-               runtime::k2::describe(runtime::k2::plan(d, len, weights, false, prefill), device, reserve)
-                   .c_str());
+  std::fprintf(stderr, "%s\n", runtime::k2::describe(plan_at(len), device, reserve).c_str());
   return len;
 }
 
@@ -141,14 +143,15 @@ int run_decode(const DecodeArgs& a) {
     return loader::load_k2(ctx, a.path, load_len(a.max_len, trained), a.lm_head);
   }();
   const bool prefill = a.prefill || a.pp;
-  const uint32_t max_len = settle(ctx, model, a.max_len, a.reserve, prefill);
+  const uint32_t max_len = settle(ctx, model, a.max_len, a.reserve, prefill, a.kv);
   if (need > max_len)
     throw std::runtime_error("the prompt / --depth plus " + std::to_string(after) +
                              " generated ids exceeds max_len " + std::to_string(max_len));
-  runtime::k2::K2Engine eng(ctx, std::move(model), max_len);
+  runtime::k2::K2Engine eng(ctx, std::move(model), max_len, /*debug_tap=*/false, a.kv);
   std::fprintf(stderr, "engine: K2-Horizon, %zu kernels, %zu modules, max_len %u, %.2f GB of persistent "
-               "state (bf16 KV)\n", eng.step().kernel_count, eng.step().modules.size(), eng.max_len(),
-               eng.buffers().persistent_bytes() / 1e9);
+               "state (%s KV%s)\n", eng.step().kernel_count, eng.step().modules.size(), eng.max_len(),
+               eng.buffers().persistent_bytes() / 1e9, runtime::kv_cache_name(eng.kv_cache()),
+               eng.kv_cache() == runtime::KvCache::Int8 ? ", rotkv at head_dim 128, spec 18e" : "");
   // Spec 18c: the prefill setup (scratch, Context, the binaries' check) happens here, outside
   // the timed window, which is then the whole prefill() call: first launch to the first
   // generated id in cur_token (argmax_stage2 is its last launch).
@@ -195,13 +198,15 @@ int run_decode(const DecodeArgs& a) {
                eng.last_tok_per_s(), gb, eng.last_tok_per_s() * gb, eng.step().kernel_count);
   const char* sha = std::getenv("B70_GIT_SHA");
   if (sha == nullptr || *sha == '\0') sha = "unknown";
-  std::printf("| b70-decode %s k2%s | %u | %u | %.2f | %.2f |\n", sha,
-              a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "", a.depth, a.tg,
+  // Spec 18e: an int8-KV run's rows carry `int8-kv`, as the Qwen path's do.
+  const char* kvtag = eng.kv_cache() == runtime::KvCache::Int8 ? " int8-kv" : "";
+  std::printf("| b70-decode %s k2%s%s | %u | %u | %.2f | %.2f |\n", sha,
+              a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "", kvtag, a.depth, a.tg,
               eng.last_tok_per_s(), ms_per_token);
   // Spec 18c: the pp row, a second line as the Qwen path prints it (depth, chunk, ms, t/s).
   if (a.pp)
-    std::printf("| b70-decode %s k2%s l0 pp | %u | %u | %.1f | %.2f |\n", sha,
-                a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "", a.depth,
+    std::printf("| b70-decode %s k2%s%s l0 pp | %u | %u | %.1f | %.2f |\n", sha,
+                a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "", kvtag, a.depth,
                 a.pp_chunk ? a.pp_chunk : runtime::k2::kPfC, ingest_ms,
                 ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
   return 0;

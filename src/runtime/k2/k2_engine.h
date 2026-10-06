@@ -20,7 +20,7 @@
 // the weights, the buffers and the one captured list, and a token is a replay of that list
 // (the host writes the ingested id, submits, waits, reads the sampled id back). A prompt is
 // fed one id per replay (`ingest`) or, spec 18c, in chunks (`prefill`). No MTP (K2 has no
-// head, spec 18 §2), bf16 KV only (int8 KV is 18e).
+// head, spec 18 §2). The KV cache is bf16 or, spec 18e, int8 (rotkv at head_dim 128).
 //
 // Spec 18c: prefill() and its accessors are DEFINED in b70_k2_prefill
 // (runtime/k2/k2_prefill_engine.cc), not in b70_k2_runtime - Engine::prefill's arrangement
@@ -34,8 +34,11 @@ struct K2PrefillState;   // runtime/k2/k2_prefill_engine.cc
 class K2Engine {
  public:
   // `max_len` must be the one the model was loaded with (its RoPE table). debug_tap: the
-  // per-layer resid copy the golden gate reads (48 copies a token - off for speed).
-  K2Engine(l0::Context& ctx, loader::K2LoadedModel model, uint32_t max_len, bool debug_tap = false);
+  // per-layer resid copy the golden gate reads (48 copies a token - off for speed). `kv`
+  // (spec 18e): the KV cache's form, default runtime::default_kv_cache() (B70_KV_CACHE, unset =
+  // bf16) - the decode list and the prefill walk bind the form's binaries.
+  K2Engine(l0::Context& ctx, loader::K2LoadedModel model, uint32_t max_len, bool debug_tap = false,
+           KvCache kv = default_kv_cache());
 
   // Zeroes the persistent group (control, kv_k, kv_v); scratch is never zeroed (no step
   // reads scratch it has not written first; the replay test's second run is the proof).
@@ -90,6 +93,7 @@ class K2Engine {
   const loader::K2LoadedModel& model() const { return model_; }
   uint32_t pos() const { return control_->pos; }
   uint32_t max_len() const { return buffers_.max_len; }
+  KvCache kv_cache() const { return buffers_.kv_cache(); }   // spec 18e
   l0::Context& context() const { return ctx_; }
 
  private:

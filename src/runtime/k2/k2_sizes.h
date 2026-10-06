@@ -4,6 +4,7 @@
 #include <string>
 
 #include "model/k2_horizon.h"
+#include "runtime/buffer_sizes.h"   // spec 18e: KvCache, KvLayout, default_kv_cache
 #include "runtime/memory_plan.h"
 
 // Spec 18b: K2-Horizon's runtime allocations as device-free arithmetic, and the memory
@@ -32,14 +33,24 @@ const char* k2_attn_name(K2Attn a);
 // The persistent group: what survives a token boundary and Engine reset() zeroes.
 //   control   runtime::Control, shared memory (the host writes cur_token, reads out_token)
 //   kv_k/kv_v bf16 [layers][max_len][kv_heads][head_dim] each: 192 KiB per position for K and
-//             V together on K2 (48 x 8 x 128 x 2 B x 2), 6.44 GB at 32k (spec 18 §1)
+//             V together on K2 (48 x 8 x 128 x 2 B x 2), 6.44 GB at 32k (spec 18 §1).
+//             Spec 18e (`--kv-cache int8`, rotkv at head_dim 128): runtime::KvLayout at K2's
+//             heads - int8 rows [layers][max_len][8][128], then every layer's fp16 scales
+//             [layers][max_len][8] - 97.5 KiB per position (48 x 2 x (1024 + 16) B).
 struct PersistentSizes {
   size_t control = 0, kv_k = 0, kv_v = 0;
   size_t kv() const { return kv_k + kv_v; }
   size_t total() const { return control + kv_k + kv_v; }
 };
-PersistentSizes persistent_sizes(const model::K2Desc& d, uint32_t max_len);
-// One layer's K (or V) rows: max_len x kv_heads x head_dim bf16.
+// Spec 18e: K2's cache in either form, every layer (runtime::KvLayout: at bf16 exactly the
+// allocation above, a layer's rows at layer x max_len x kv_n x 2 B).
+KvLayout kv_layout(const model::K2Desc& d, uint32_t max_len, KvCache kv);
+// `kv`: the cache's form - default runtime::default_kv_cache() (B70_KV_CACHE, unset = bf16), what
+// K2Buffers and K2Engine default to, so a gate test's B70_KV_CACHE=int8 twin plans what it builds.
+PersistentSizes persistent_sizes(const model::K2Desc& d, uint32_t max_len,
+                                 KvCache kv = default_kv_cache());
+// One layer's K (or V) rows: max_len x kv_heads x head_dim bf16 (the bf16 form's; the int8
+// form's layer is kv_layout(...).layer_rows()).
 inline size_t kv_layer_bytes(const model::K2Desc& d, uint32_t max_len) {
   return size_t(max_len) * d.kv_n() * 2;
 }
@@ -187,17 +198,21 @@ inline constexpr size_t kPrefillHeadLaunches = 5;   // fold + norm, lm_head, two
 // format): model (+ the RoPE table at max_len), kv, decode state (control + scratch), and
 // with `prefill` (spec 18c: b70-decode --prefill / --pp) the prefill scratch - lazy on the
 // engine (allocated by the first prefill), so a decode-only plan leaves it out. No int8
-// prefill state (K2 prefills on the l0 backend only).
+// prefill state (K2 prefills on the l0 backend only). `kv` (spec 18e): the cache's form - its
+// KV term is planned in it, so int8 about doubles what auto can give the context (no other term
+// moves: MoVA's staged row and the writer's scratch reuse attn_out, k2_capture.cc).
 struct Plan : MemoryComponents {
   uint32_t max_len = 0;
   size_t rope = 0;
+  KvCache kv_form = KvCache::Bf16;   // the cache's form (MemoryComponents::kv is its bytes)
 };
 Plan plan(const model::K2Desc& d, uint32_t max_len, size_t model_bytes, bool debug_tap = false,
-          bool prefill = false, K2Attn a = k2_attn());
+          bool prefill = false, K2Attn a = k2_attn(), KvCache kv = default_kv_cache());
 // The largest multiple of runtime::kMaxLenQuantum up to `cap` whose plan + reserve fits;
 // 0 when not even min(kMinAutoMaxLen, cap) does. Throws std::invalid_argument below a quantum.
 uint32_t max_len_that_fits(const model::K2Desc& d, size_t model_bytes, size_t device_bytes,
-                           size_t reserve_bytes, uint32_t cap, bool prefill = false);
+                           size_t reserve_bytes, uint32_t cap, bool prefill = false,
+                           KvCache kv = default_kv_cache());
 std::string describe(const Plan& p, size_t device_bytes, size_t reserve_bytes);
 
 }  // namespace runtime::k2

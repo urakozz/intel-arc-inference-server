@@ -70,8 +70,12 @@ class Walk {
                                                " layers, the descriptor " + std::to_string(d_.layers));
     require(m_.rope && m_.rope->size() >= d_.rope_table_bytes(b_.max_len),
             "the RoPE table is shorter than max_len");
-    const PersistentSizes ps = persistent_sizes(d_, b_.max_len);
+    const PersistentSizes ps = persistent_sizes(d_, b_.max_len, b_.kv_cache());
     require(b_.kv_k.size() == ps.kv_k && b_.kv_v.size() == ps.kv_v, "the KV cache is not layers x max_len");
+    // Spec 18e: under int8 MoVA's routed mix is staged in attn_out (row m, kv_n bf16) for the
+    // writer, which reads it before the attention overwrites attn_out (the list is in order).
+    require(!kv8_ || (b_.kv_lay.head_dim == 128 && b_.attn_out.size() >= size_t(kM) * d_.kv_n() * 2),
+            "the int8 KV cache needs head_dim 128 and attn_out to hold MoVA's staged [M][kv_n] row");
     const ScratchSizes ss = scratch_sizes(d_);
     require(b_.partials.size() == ss.partials && b_.routes.size() == ss.routes &&
                 b_.attn_part.size() == ss.attn_part && b_.logits.size() == ss.logits,
@@ -98,9 +102,10 @@ class Walk {
     }
     // A missing binary is named here, before a command is appended (capture.cc's rule).
     for (const std::string& v : kk::decode_variants(d_, m_.lm_head->kind == model::WeightKind::Int8,
-                                                    attn_ == K2Attn::Eager))
+                                                    attn_ == K2Attn::Eager, kv8_))
       require(std::ifstream(kernels::path(v)).good(),
-              v + " is not compiled (" + kernels::path(v) + "): build with B70_K2=ON");
+              v + " is not compiled (" + kernels::path(v) + "): build with B70_K2=ON" +
+                  (kv8_ ? " and B70_KV8=ON (spec 18e)" : ""));
   }
 
   l0::Kernel& kernel(const std::string& variant, const char* entry, uint32_t wg) {
@@ -191,10 +196,13 @@ class Walk {
     gemv(L.linears[0], b_.x.ptr());   // q || k || gate || (v | v_router)
     void* kvk = b_.kv_k_layer(l);
     void* kvv = b_.kv_v_layer(l);
+    const KvLayer kl = b_.kv_layer(l);   // spec 18e: + the scales at int8
     const uint32_t attn_n = L.linears[0].shape.N;
     if (!dense) {
       // MoVA: route over the v_router columns of the fused row, then the 4 value experts
-      // straight into this layer's V cache at pos.
+      // straight into this layer's V cache at pos - or, with the int8 cache (spec 18e), into
+      // the staging row attn_out[m][kv_n] (MOVA_STAGE), which the writer below rotates and
+      // quantises: the cache holds the routed mix AFTER the combine (Review Focus 2).
       void* rt = at(b_.routes, mova_route_at(l));
       {
         l0::Kernel& k = kernel(kk::route_variant(kM, d_.value_experts, d_.value_top_k, attn_n,
@@ -206,18 +214,37 @@ class Walk {
         launch(k, 1, kM);
       }
       {
-        l0::Kernel& k = kernel(kk::mova_variant(kM, d_.value_experts, d_.value_top_k, d_.hidden, d_.kv_n()),
+        l0::Kernel& k = kernel((kv8_ ? kk::mova_stage_variant : kk::mova_variant)(
+                                   kM, d_.value_experts, d_.value_top_k, d_.hidden, d_.kv_n()),
                                "k2_mova_value", kk::mova_wg(d_.value_top_k));
         k.arg_ptr(0, b_.control.ptr());
         k.arg_ptr(1, rt);
         k.arg_ptr(2, b_.x.ptr());
         k.arg_ptr(3, L.value->ptr());
-        k.arg_ptr(4, kvv);
+        k.arg_ptr(4, kv8_ ? b_.attn_out.ptr() : kvv);
         launch(k, d_.kv_n() / 16, kM);
       }
     }
-    // k2_attn_prep(ctrl, partials, rope, attn_q, attn_gate, kv_k, kv_v), grid (q + kv heads, M).
-    {
+    if (kv8_) {
+      // Spec 18e: k2_attn_prep_kv8(ctrl, partials, rope, attn_q, attn_gate, kv_k, kv_v, k_scale,
+      // v_scale, v_rows), grid (q + kv heads, M): q rotated, K and V rotated and quantised (V from
+      // the fused row on the dense layers, from the staged attn_out on MoVA's).
+      l0::Kernel& k = kernel(kk::attn_prep_kv8_variant(kM, attn_n, L.linears[0].shape.S, d_.q_heads,
+                                                       d_.kv_heads, dense),
+                             "k2_attn_prep_kv8", d_.head_dim);
+      k.arg_ptr(0, b_.control.ptr());
+      k.arg_ptr(1, b_.partials.ptr());
+      k.arg_ptr(2, m_.rope->ptr());
+      k.arg_ptr(3, b_.attn_q.ptr());
+      k.arg_ptr(4, b_.attn_gate.ptr());
+      k.arg_ptr(5, kl.k);
+      k.arg_ptr(6, kl.v);
+      k.arg_ptr(7, kl.ks);
+      k.arg_ptr(8, kl.vs);
+      k.arg_ptr(9, b_.attn_out.ptr());
+      launch(k, d_.q_heads + d_.kv_heads, kM);
+    } else {
+      // k2_attn_prep(ctrl, partials, rope, attn_q, attn_gate, kv_k, kv_v), grid (q + kv heads, M).
       l0::Kernel& k = kernel(kk::attn_prep_variant(kM, attn_n, L.linears[0].shape.S, d_.q_heads,
                                                    d_.kv_heads, dense),
                              "k2_attn_prep", d_.head_dim);
@@ -232,8 +259,13 @@ class Walk {
     }
     // k2_attn_decode(ctrl, attn_q, kv_k, kv_v, attn_part), grid (kv heads, TGT);
     // k2_attn_reduce(ctrl, attn_part, attn_gate, attn_out), grid (q heads, M) - or, under
-    // B70_K2_ATTN=eager, k2_attn_eager.cl's four (attention_eager).
-    if (attn_ == K2Attn::Eager) {
+    // B70_K2_ATTN=eager, k2_attn_eager.cl's four (attention_eager); with the int8 cache their
+    // k2_kv8.cl twins (attention_kv8 / attention_eager_kv8).
+    if (kv8_ && attn_ == K2Attn::Eager) {
+      attention_eager_kv8(kl);
+    } else if (kv8_) {
+      attention_kv8(kl);
+    } else if (attn_ == K2Attn::Eager) {
       attention_eager(kvk, kvv);
     } else {
       const std::string v = kk::attn_variant(kM, kk::kAttnTgt, d_.q_heads, d_.kv_heads);
@@ -348,6 +380,82 @@ class Walk {
     }
   }
 
+  // Spec 18e, the int8 cache, flash (k2_kv8.cl K2KV8_DEC): k2_attn.cl's pair reading the int8
+  // rows + scales, the reduce un-rotating each head before the gate.
+  //   k2_attn_decode_kv8(ctrl, attn_q, kv_k, k_scale, kv_v, v_scale, attn_part)  grid (kv heads, TGT)
+  //   k2_attn_reduce_kv8(ctrl, attn_part, attn_gate, attn_out)                   grid (q heads, M)
+  void attention_kv8(const KvLayer& kl) {
+    const std::string v = kk::attn_kv8_variant(kM, kk::kAttnTgt, d_.q_heads, d_.kv_heads);
+    {
+      l0::Kernel& k = kernel(v, "k2_attn_decode_kv8", kk::kAttnWg);
+      k.arg_ptr(0, b_.control.ptr());
+      k.arg_ptr(1, b_.attn_q.ptr());
+      k.arg_ptr(2, kl.k);
+      k.arg_ptr(3, kl.ks);
+      k.arg_ptr(4, kl.v);
+      k.arg_ptr(5, kl.vs);
+      k.arg_ptr(6, b_.attn_part.ptr());
+      launch(k, d_.kv_heads, kk::kAttnTgt);
+    }
+    {
+      l0::Kernel& k = kernel(v, "k2_attn_reduce_kv8", kk::kAttnWg);
+      k.arg_ptr(0, b_.control.ptr());
+      k.arg_ptr(1, b_.attn_part.ptr());
+      k.arg_ptr(2, b_.attn_gate.ptr());
+      k.arg_ptr(3, b_.attn_out.ptr());
+      launch(k, d_.q_heads, kM);
+    }
+  }
+
+  // Spec 18e, the int8 cache, eager (k2_kv8.cl K2KV8_EAGER): the score, P·V and reduce over the
+  // int8 rows; the softmax between them is k2_attn_eager.cl's own kernel (it reads the score row
+  // only), so four launches as bf16 eager.
+  //   k2_attn_eager_score_kv8 (ctrl, attn_q, kv_k, k_scale, attn_s, stride)    grid (kv heads, TGT)
+  //   k2_attn_eager_softmax   (ctrl, attn_s, stride)                           grid (q heads, M)
+  //   k2_attn_eager_pv_kv8    (ctrl, attn_s, kv_v, v_scale, attn_part, stride) grid (kv heads, TGT)
+  //   k2_attn_eager_reduce_kv8(ctrl, attn_part, attn_gate, attn_out)           grid (q heads, M)
+  void attention_eager_kv8(const KvLayer& kl) {
+    const std::string v8 = kk::attn_eager_kv8_variant(kM, kk::kAttnTgt, d_.q_heads, d_.kv_heads);
+    const std::string vs = kk::attn_eager_variant(kM, kk::kAttnTgt, d_.q_heads, d_.kv_heads);
+    void* sc = b_.attn_scores->ptr();
+    const uint32_t stride = b_.max_len;
+    {
+      l0::Kernel& k = kernel(v8, "k2_attn_eager_score_kv8", kk::kAttnWg);
+      k.arg_ptr(0, b_.control.ptr());
+      k.arg_ptr(1, b_.attn_q.ptr());
+      k.arg_ptr(2, kl.k);
+      k.arg_ptr(3, kl.ks);
+      k.arg_ptr(4, sc);
+      k.arg<uint32_t>(5, stride);
+      launch(k, d_.kv_heads, kk::kAttnTgt);
+    }
+    {
+      l0::Kernel& k = kernel(vs, "k2_attn_eager_softmax", kk::kAttnWg);
+      k.arg_ptr(0, b_.control.ptr());
+      k.arg_ptr(1, sc);
+      k.arg<uint32_t>(2, stride);
+      launch(k, d_.q_heads, kM);
+    }
+    {
+      l0::Kernel& k = kernel(v8, "k2_attn_eager_pv_kv8", kk::kAttnWg);
+      k.arg_ptr(0, b_.control.ptr());
+      k.arg_ptr(1, sc);
+      k.arg_ptr(2, kl.v);
+      k.arg_ptr(3, kl.vs);
+      k.arg_ptr(4, b_.attn_part.ptr());
+      k.arg<uint32_t>(5, stride);
+      launch(k, d_.kv_heads, kk::kAttnTgt);
+    }
+    {
+      l0::Kernel& k = kernel(v8, "k2_attn_eager_reduce_kv8", kk::kAttnWg);
+      k.arg_ptr(0, b_.control.ptr());
+      k.arg_ptr(1, b_.attn_part.ptr());
+      k.arg_ptr(2, b_.attn_gate.ptr());
+      k.arg_ptr(3, b_.attn_out.ptr());
+      launch(k, d_.q_heads, kM);
+    }
+  }
+
   void head() {
     const uint32_t last = d_.layers - 1;
     fold_norm(d_.is_dense(last) ? d_.down_s : 0, m_.final_norm->ptr());
@@ -391,6 +499,8 @@ class Walk {
   std::string pending_entry_, pending_variant_;
   // Spec 18 §10: the decode attention, read from B70_K2_ATTN once per build.
   const K2Attn attn_ = k2_attn();
+  // Spec 18e: the KV cache's form is the buffers' (K2Buffers::kv_lay), never re-read.
+  const bool kv8_ = b_.kv_cache() == KvCache::Int8;
 };
 
 }  // namespace

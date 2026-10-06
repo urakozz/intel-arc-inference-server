@@ -10,6 +10,9 @@
 //      reset between - the ids, the final logits row, every layer's MoVA and MoE route rows
 //      and the whole KV cache identical. No sum anywhere is atomic or completion-ordered.
 //
+// Spec 18e: the `_kv8` twin runs all three under B70_KV_CACHE=int8 (the int8 rotkv cache: the
+// same 717 launches, the plan's int8 KV term, the int8 rows and scales bitwise across runs).
+//
 // argv: <snapshot> <prompt ids> [int8]. Exit 77 (SKIP) when the checkpoint is not here.
 // The prompt only has to be legal ids (< 250624): tests/golden/prompts/prose.ids (Qwen3.8's
 // ids) is, and 18a's K2 ids are too.
@@ -59,13 +62,21 @@ Snap run_once(runtime::k2::K2Engine& eng, l0::CmdList& imm, const std::vector<ui
   s.tokens = eng.generate(kGen);
   s.logits = eng.read_logits();
   s.routes = eng.read_routes();
-  // The KV positions this session wrote, every layer (K then V).
+  // The KV positions this session wrote, every layer (K then V) - in the cache's form: the bf16
+  // rows, or (spec 18e, B70_KV_CACHE=int8) the int8 rows and their fp16 scales.
   const runtime::k2::K2Buffers& b = eng.buffers();
-  const size_t row = size_t(b.desc.kv_n()) * 2, used = size_t(eng.pos()) * row;
-  s.kv.resize(size_t(b.desc.layers) * used * 2);
+  const runtime::KvLayout& lay = b.kv_lay;
+  const size_t rows = size_t(eng.pos()) * lay.row_bytes(), sc = size_t(eng.pos()) * lay.scale_row_bytes();
+  s.kv.resize(size_t(b.desc.layers) * 2 * (rows + sc));
   for (uint32_t l = 0; l < b.desc.layers; ++l) {
-    imm.copy(s.kv.data() + size_t(l) * used * 2, b.kv_k_layer(l), used);
-    imm.copy(s.kv.data() + size_t(l) * used * 2 + used, b.kv_v_layer(l), used);
+    const runtime::KvLayer L = b.kv_layer(l);
+    uint8_t* dst = s.kv.data() + size_t(l) * 2 * (rows + sc);
+    imm.copy(dst, L.k, rows);
+    imm.copy(dst + rows, L.v, rows);
+    if (L.int8()) {
+      imm.copy(dst + 2 * rows, L.ks, sc);
+      imm.copy(dst + 2 * rows + sc, L.vs, sc);
+    }
   }
   return s;
 }
@@ -104,7 +115,8 @@ int main(int argc, char** argv) {
   CHECK_EQ(moe_down, size_t(45));
   CHECK_EQ(mova, size_t(45));
   std::printf("list: %zu launches per token (spec 18 §2 estimated ~1000; spec 4's slot design 2067), "
-              "%zu modules\n", eng.step().kernel_count, eng.step().modules.size());
+              "%zu modules, %s KV (B70_KV_CACHE)\n", eng.step().kernel_count, eng.step().modules.size(),
+              runtime::kv_cache_name(eng.kv_cache()));
 
   // ---- 2. the plan against the allocation ---------------------------------------------------
   {

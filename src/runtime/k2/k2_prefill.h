@@ -28,6 +28,11 @@
 // 2392 launches per chunk on K2 at every C (runtime::k2::prefill_chunk_launches, asserted
 // by the walk). The tail (prefill_head) is decode's binaries over the last row: 5.
 //
+// Spec 18e, buffers with the int8 KV cache: the same walk and launch count - MoVA's combine
+// writes the routed mix to staging rows (attn_out, pos 0), k2_attn_prep_kv8 rotates q and
+// rotates + quantises K and V into the int8 rows and scales, and k2_pf_flash_attn_kv8 reads
+// int8 and un-rotates each row's head in its epilogue before the gate.
+//
 // The rounding chain, everywhere a decode kernel's twin exists, IS that kernel's (the
 // norm's stage B, the attention prep, the router and the routing kernel are decode's
 // sources; the combines are their epilogues over sorted rows); what differs from decode is

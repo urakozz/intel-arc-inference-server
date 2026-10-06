@@ -38,6 +38,10 @@
 // (the run prints both). Matched is not bitwise: the two eager forms share the rounding points,
 // not the softmax's exp / sum order (decode's is torch's own, prefill's its two-pass form).
 //
+// Spec 18e: under B70_KV_CACHE=int8 (the `_kv8` twins) the engine holds the int8 rotkv cache;
+// the bitwise comparisons compare its int8 rows and fp16 scales byte for byte, the cosines its
+// dequantised rows (snap()), so every gate above reads the same in either form.
+//
 // argv: <snapshot> <prompt ids> [all|split] [int8]. Exit 77 (SKIP) when the checkpoint is not
 // here. Any legal ids (< 250624) do for these gates: tests/golden/prompts/long*.ids.
 #include <algorithm>
@@ -53,6 +57,7 @@
 
 #include "check.h"
 #include "common/bf16.h"
+#include "common/kv8.h"   // spec 18e: the int8 cache dequantised for the comparisons
 #include "kernels/k2_kernels.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -107,20 +112,46 @@ double cos_f32(const float* a, const float* b, size_t n) {
 }
 
 struct Snap {
-  std::vector<uint16_t> kv;       // [layer][K rows [0, n) | V rows [0, n)]
+  std::vector<uint16_t> kv;       // [layer][K rows [0, n) | V rows [0, n)] as bf16 values
+  std::vector<uint8_t> raw;       // spec 18e, int8 cache: [layer][K rows, K scales | V rows, V scales]
   std::vector<float> logits;
   std::vector<uint32_t> routes;   // the last chunk's (prefill) - empty for decode
-  bool operator==(const Snap& o) const { return kv == o.kv && logits == o.logits && routes == o.routes; }
+  bool operator==(const Snap& o) const {
+    return kv == o.kv && raw == o.raw && logits == o.logits && routes == o.routes;
+  }
 };
 
+// The KV rows [0, n) of every layer. bf16 cache: the rows as stored. Spec 18e, int8 cache
+// (B70_KV_CACHE=int8 twins): the int8 rows and fp16 scales byte for byte in `raw` (the bitwise
+// comparisons), and in `kv` each value dequantised (rotated basis, the same rotation in every
+// run) and rounded to bf16 - for the cosine comparisons, whose bars are far above bf16's 2^-9.
 Snap snap(runtime::k2::K2Engine& e, l0::CmdList& imm, uint32_t n, bool routes) {
   Snap s;
   const runtime::k2::K2Buffers& b = e.buffers();
   const size_t row = b.desc.kv_n(), used = size_t(n) * row;
   s.kv.resize(size_t(b.desc.layers) * used * 2);
-  for (uint32_t l = 0; l < b.desc.layers; ++l) {
-    imm.copy(s.kv.data() + size_t(l) * used * 2, b.kv_k_layer(l), used * 2);
-    imm.copy(s.kv.data() + size_t(l) * used * 2 + used, b.kv_v_layer(l), used * 2);
+  if (b.kv_cache() == runtime::KvCache::Int8) {
+    const runtime::KvLayout& lay = b.kv_lay;
+    const size_t rb = size_t(n) * lay.row_bytes(), sb = size_t(n) * lay.scale_row_bytes();
+    s.raw.resize(size_t(b.desc.layers) * 2 * (rb + sb));
+    for (uint32_t l = 0; l < b.desc.layers; ++l) {
+      const runtime::KvLayer L = b.kv_layer(l);
+      for (uint32_t t = 0; t < 2; ++t) {
+        uint8_t* dst = s.raw.data() + (size_t(l) * 2 + t) * (rb + sb);
+        imm.copy(dst, t ? L.v : L.k, rb);
+        imm.copy(dst + rb, t ? L.vs : L.ks, sb);
+        std::vector<uint16_t> sc(sb / 2);
+        std::memcpy(sc.data(), dst + rb, sb);
+        uint16_t* out = s.kv.data() + size_t(l) * used * 2 + t * used;
+        for (size_t i = 0; i < used; ++i)
+          out[i] = common::f32_to_bf16(common::kv8::dequant(int8_t(dst[i]), sc[i / 128]));
+      }
+    }
+  } else {
+    for (uint32_t l = 0; l < b.desc.layers; ++l) {
+      imm.copy(s.kv.data() + size_t(l) * used * 2, b.kv_k_layer(l), used * 2);
+      imm.copy(s.kv.data() + size_t(l) * used * 2 + used, b.kv_v_layer(l), used * 2);
+    }
   }
   s.logits = e.read_logits();
   if (routes) s.routes = e.read_prefill_routes();
@@ -210,7 +241,7 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
           routes_same = routes_same && std::equal(pf_route(c.routes, l, w, p - (n - last64)),
                                                   pf_route(c.routes, l, w, p - (n - last64)) + 32,
                                                   pf_route(a.routes, l, w, p - (n - lastd)));
-    const bool kv_same = c.kv == a.kv && c.logits == a.logits;
+    const bool kv_same = c.kv == a.kv && c.raw == a.raw && c.logits == a.logits;
     std::printf("3. chunks of 64 vs %u: KV + logits %s, shared route rows %s\n", runtime::k2::kPfC,
                 kv_same ? "bitwise" : "DIFFER", routes_same ? "bitwise" : "DIFFER");
     ok = ok && kv_same && routes_same;
@@ -359,9 +390,10 @@ int main(int argc, char** argv) {
                           kMaxLen);
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   std::printf("k2_prefill_test %s: %zu ids, lm_head %s, prefill attention %s, decode attention %s "
-              "(B70_K2_ATTN; %zu decode launches)\n", mode.c_str(), ids.size(), int8 ? "int8" : "bf16",
-              runtime::k2::prefill_attn_eager() ? "eager" : "flash",
-              runtime::k2::k2_attn_name(runtime::k2::k2_attn()), e.step().kernel_count);
+              "(B70_K2_ATTN; %zu decode launches), %s KV (B70_KV_CACHE)\n", mode.c_str(), ids.size(),
+              int8 ? "int8" : "bf16", runtime::k2::prefill_attn_eager() ? "eager" : "flash",
+              runtime::k2::k2_attn_name(runtime::k2::k2_attn()), e.step().kernel_count,
+              runtime::kv_cache_name(e.kv_cache()));
   CHECK(runtime::k2::prefill_attn_eager() == (runtime::k2::k2_attn() == runtime::k2::K2Attn::Eager));
   CHECK_EQ(e.step().kernel_count, runtime::k2::decode_launches(*e.model().desc));
   const int rc = mode == "split" ? run_split(e, imm, ids) : run_all(e, imm, Ids(ids.begin(), ids.begin() + std::min<size_t>(ids.size(), 2600)));
