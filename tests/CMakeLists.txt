@@ -1859,9 +1859,8 @@ endif()
 # checkpoint's config.json, which is all the dispatch reads, so these run on any box with the
 # binary (b70_cli_reject's "exit 1, no `device:` line, the message").
 # (cli_reject_k2_prefill / cli_reject_k2_pp lived here until spec 18c built K2's prefill; the
-# 18c block below rejects the backends K2 does not prefill on instead.)
-b70_cli_reject(cli_reject_k2_kv8 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --bench --kv-cache int8
-  EXPECT "int8 KV cache is spec 18e")
+# 18c block below rejects the backends K2 does not prefill on instead. cli_reject_k2_kv8 lived
+# here until spec 18e built K2's int8 KV cache: `--kv-cache int8` is accepted for K2 now.)
 # ==== Spec 18b: K2-Horizon decode ========================================== (end) ====
 
 # ==== Spec 18c: K2-Horizon prefill (labels `k2;prefill`) =================== (begin) ====
@@ -2122,3 +2121,77 @@ if(B70_TOKENIZER_ENABLED)
   set_tests_properties(k2_tokenizer_test PROPERTIES LABELS k2 SKIP_RETURN_CODE 77)
 endif()
 # ==== Spec 18d ============================================================= (end) ====
+
+# ==== Spec 18e: K2-Horizon's int8 KV cache (labels `k2;kv8`) =============== (begin) ====
+# rotkv at head_dim 128 (spec 12 §8 carried to K2: src/common/kv8.h hd128, src/kernels/k2/
+# k2_kv8.cl), written blind on the Mac (docs/superpowers/plans/box-validation-queue.md, the K2
+# int8 KV row). Host tests first (the Mac runs them), then the card's; the checkpoint ones SKIP
+# (77) without the K2 int4 checkpoint / 18a's oracle-out-k2, as 18b's and 18c's do.
+#   kv8_test (host, spec 12b's, extended): the 128-point scheme - torch's hadamard(128, 0) signs
+#       pinned, the rotations against fp64, the quantiser, rotkv beating per token at K2's shape;
+#   k2_kv8_ref_test (host): the references - the flash epilogue's FWHT decomposition == unrotate
+#       bitwise, the writer, Review Focus 2 (MoVA's mix quantised after the combine), the readers;
+#   k2_kv8_variant_names_test (host): every int8 binary the walks bind is built, nothing dead;
+#   k2_kv8_kernels_test (a B70, no checkpoint): K1 for every int8 kernel;
+#   the `_kv8` twins (checkpoint): the SAME binaries and command lines as the bf16 registrations
+#       of 18b / 18c with B70_KV_CACHE=int8 (K2Engine's default form) - K3 replay and the plan,
+#       the golden gate with its routing diagnostic (flash, eager, int8 head, prefill), the
+#       prefill walk / determinism / chunking / prefill-vs-decode and the split test.
+add_executable(k2_kv8_ref_test kernels/k2_kv8_ref_test.cc)
+target_include_directories(k2_kv8_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(k2_kv8_ref_test PRIVATE b70_k2_loader)
+add_test(NAME k2_kv8_ref_test COMMAND k2_kv8_ref_test)
+set_tests_properties(k2_kv8_ref_test PROPERTIES LABELS "k2;kv8")
+if(B70_K2 AND B70_KV8)
+  # Every binary the int8 cache adds (src/kernels/CMakeLists.txt's spec 18e block).
+  set(B70_K2_KV8_KERNELS
+    kernel_k2_attn_prep_M1_N10240_S2_Q32KV8_V_KV8 kernel_k2_attn_prep_M1_N9280_S2_Q32KV8_KV8
+    kernel_k2_mova_M1_E64_T4_D2560_N1024_STAGE kernel_k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8_KV8
+    kernel_k2_attn_eager_M1_T${ATTN_V2_TGT}_Q32KV8_KV8
+    kernel_k2_attn_prep_M2048_N10240_S1_Q32KV8_V_KV8 kernel_k2_attn_prep_M2048_N9472_S1_Q32KV8_KV8
+    kernel_k2_pf_flash_attn_Q32KV8_KV8 kernel_k2_pf_flash_attn_Q32KV8_EAGER_KV8
+    kernel_k2_pf_flash_attn_Q32KV8_O_KV8 kernel_k2_pf_flash_attn_Q32KV8_EAGER_O_KV8)
+  add_test(NAME k2_kv8_variant_names_test COMMAND k2_variant_names_test kv8 ${B70_K2_KV8_KERNELS})
+  set_tests_properties(k2_kv8_variant_names_test PROPERTIES LABELS "k2;kv8")
+
+  # K1 on the card: the writers bitwise, MoVA's staged row bitwise the bf16 binary's, the decode
+  # flash pair within 2 ulps of fp64, eager bitwise k2_kv8_ref, the prefill flash vs fp64.
+  add_executable(k2_kv8_kernels_test kernels/k2_kv8_kernels_test.cc)
+  target_include_directories(k2_kv8_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(k2_kv8_kernels_test PRIVATE b70_prefill_host b70_k2_loader b70_k2_plan b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(k2_kv8_kernels_test)
+  endif()
+  b70_target_kernel_dir(k2_kv8_kernels_test)
+  add_dependencies(k2_kv8_kernels_test ${B70_K2_KV8_KERNELS} ${B70_K2_DECODE_KERNELS})
+  add_test(NAME k2_kv8_kernels_test COMMAND k2_kv8_kernels_test)
+  set_tests_properties(k2_kv8_kernels_test PROPERTIES LABELS "k2;kv8" TIMEOUT 1800)
+
+  # The twins: B70_KV_CACHE=int8 (B70_K2_ATTN=eager on the eager ones), the bf16 tests' argv.
+  foreach(t k2_decode_test k2_golden_test k2_prefill_test)
+    add_dependencies(${t} ${B70_K2_KV8_KERNELS})
+  endforeach()
+  add_test(NAME k2_decode_kv8_test COMMAND k2_decode_test ${B70_K2_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/prose.ids)
+  add_test(NAME k2_golden_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR})
+  add_test(NAME k2_golden_i8head_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} int8)
+  add_test(NAME k2_golden_eager_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR})
+  add_test(NAME k2_golden_prefill_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} prefill)
+  add_test(NAME k2_golden_prefill_c16_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR}
+    prefill:16)
+  add_test(NAME k2_prefill_kv8_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all)
+  add_test(NAME k2_prefill_eager_kv8_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all)
+  add_test(NAME prefill_split_k2_kv8_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids split)
+  set(_k2kv8_flash k2_decode_kv8_test k2_golden_kv8_test k2_golden_i8head_kv8_test k2_golden_prefill_kv8_test
+    k2_golden_prefill_c16_kv8_test k2_prefill_kv8_test prefill_split_k2_kv8_test)
+  set(_k2kv8_eager k2_golden_eager_kv8_test k2_prefill_eager_kv8_test)
+  set_tests_properties(${_k2kv8_flash} PROPERTIES ENVIRONMENT "B70_KV_CACHE=int8")
+  set_tests_properties(${_k2kv8_eager} PROPERTIES ENVIRONMENT "B70_KV_CACHE=int8;B70_K2_ATTN=eager")
+  set_tests_properties(${_k2kv8_flash} ${_k2kv8_eager} PROPERTIES
+    LABELS "checkpoint;golden;k2;kv8" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+# Passkey near the one-card int8 ceiling (opt-in, box, by hand): tools/probe/k2_passkey.sh.
+# ==== Spec 18e: K2-Horizon's int8 KV cache ================================ (end) ====

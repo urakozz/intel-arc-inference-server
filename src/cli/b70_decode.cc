@@ -139,7 +139,8 @@ void usage() {
       "                 carry `int8-head` after the sha.\n"
       "  --kv-cache F   bf16 (default) or int8 (spec 12: rotated int8 rows + fp16 scales,\n"
       "                 half the KV bytes; decode attention v2 and the l0 / l0-int8 flash\n"
-      "                 prefill only). An int8 run's bench rows carry `int8-kv`.\n"
+      "                 prefill only). An int8 run's bench rows carry `int8-kv`. K2-Horizon:\n"
+      "                 spec 18e's rotkv at head_dim 128, decode (flash / eager) and prefill.\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -875,8 +876,6 @@ int run(int argc, char** argv) {
     if (profile)
       throw std::runtime_error("--profile is not built for K2-Horizon yet (spec 18b Task 4, the box's "
                                "speed work); --bench times it");
-    if (kv_cache == runtime::KvCache::Int8)
-      throw std::runtime_error("K2-Horizon's int8 KV cache is spec 18e; --kv-cache bf16");
     if (mtp_on)
       throw std::runtime_error("K2-Horizon has no MTP head (spec 18 §9); drop --mtp");
     cli::k2::DecodeArgs ka;
@@ -895,6 +894,7 @@ int run(int argc, char** argv) {
     ka.prefill = prefill;   // spec 18c
     ka.pp = have_pp;        // --pp N already set depth = N above
     ka.pp_chunk = pp_chunk;
+    ka.kv = kv_cache;       // spec 18e: rotkv at head_dim 128, planned and built in that form
     if (pp_chunk > runtime::k2::kPfC)
       throw std::runtime_error("--pp-chunk " + std::to_string(pp_chunk) + " exceeds K2's prefill chunk " +
                                std::to_string(runtime::k2::kPfC));

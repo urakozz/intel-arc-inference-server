@@ -129,6 +129,65 @@ int main() {
   CHECK(k2::describe(pp, dev, res).find("prefill scratch planned") != std::string::npos);
   std::printf("prefill: %zu launches per chunk + %zu, scratch %.3f GB; auto with prefill -> %u (bf16 head)\n",
               k2::prefill_chunk_launches(d), k2::kPrefillHeadLaunches, pf.total() / 1e9, fit_pf);
+
+  // ---- spec 18e: the int8 KV cache (rotkv at head_dim 128) ----------------------------------
+  // runtime::KvLayout at K2's heads: int8 rows [48][L][8][128], then the fp16 scales [48][L][8];
+  // 48 x 2 x (1024 + 16) = 99,840 B per position against bf16's 196,608 (0.508). The bf16 form
+  // is unchanged, and so is every other term (the staging rows reuse attn_out): the launch
+  // counts too (the int8 binaries replace the bf16 ones one for one).
+  using runtime::KvCache;
+  unsetenv("B70_KV_CACHE");
+  CHECK(runtime::default_kv_cache() == KvCache::Bf16);
+  CHECK_EQ(k2::persistent_sizes(d, 32768).kv_k, ps.kv_k);   // the default is bf16, as before
+  const k2::PersistentSizes p8 = k2::persistent_sizes(d, 32768, KvCache::Int8);
+  CHECK_EQ(p8.kv_k, size_t(48) * 32768 * (1024 + 16));
+  CHECK_EQ(p8.kv(), size_t(32768) * 99840);
+  {
+    const runtime::KvLayout lb = k2::kv_layout(d, 32768, KvCache::Bf16), l8 = k2::kv_layout(d, 32768, KvCache::Int8);
+    CHECK_EQ(lb.bytes(), ps.kv_k);
+    for (uint32_t l : {0u, 3u, 47u}) CHECK_EQ(lb.rows_offset(l), size_t(l) * k2::kv_layer_bytes(d, 32768));
+    CHECK_EQ(l8.rows_offset(1), size_t(32768) * 1024);
+    CHECK_EQ(l8.scales_offset(0), size_t(48) * 32768 * 1024);   // after every layer's rows
+    CHECK_EQ(l8.scales_offset(47) + l8.layer_scales(), p8.kv_k);
+  }
+  const k2::Plan p8p = k2::plan(d, 32768, w_bf16, false, false, k2::K2Attn::Flash, KvCache::Int8);
+  CHECK_EQ(p8p.kv, p8.kv());
+  CHECK_EQ(p8p.decode_state, p.decode_state);
+  CHECK_EQ(p8p.total(), p.total() - p.kv + p8.kv());
+  CHECK(k2::describe(p8p, dev, res).find("KV int8 rotkv") != std::string::npos);
+  CHECK(k2::describe(p, dev, res).find("KV int8") == std::string::npos);
+  setenv("B70_KV_CACHE", "int8", 1);   // the gate tests' twins: the defaults follow the variable
+  CHECK_EQ(k2::persistent_sizes(d, 32768).kv_k, p8.kv_k);
+  CHECK_EQ(k2::plan(d, 32768, w_bf16).total(), p8p.total());
+  unsetenv("B70_KV_CACHE");
+  // --max-len auto with the int8 cache (the trained context 524288 is the cap): decode-only and
+  // with the prefill scratch, both heads, and eager's score row (4 B x 32 heads a position).
+  uint32_t fit8[2][2];   // [int8 head][prefill]
+  for (int h = 0; h < 2; ++h)
+    for (int pfl = 0; pfl < 2; ++pfl) {
+      const size_t w = h ? w_int8 : w_bf16;
+      fit8[h][pfl] = k2::max_len_that_fits(d, w, dev, res, 524288, pfl == 1, KvCache::Int8);
+      CHECK(k2::plan(d, fit8[h][pfl], w, false, pfl == 1, k2::K2Attn::Flash, KvCache::Int8).total() + res <= dev);
+      CHECK(k2::plan(d, fit8[h][pfl] + runtime::kMaxLenQuantum, w, false, pfl == 1, k2::K2Attn::Flash,
+                     KvCache::Int8).total() + res > dev);
+    }
+  const uint32_t fit8_pf_i8 = fit8[1][1];
+  setenv("B70_K2_ATTN", "eager", 1);
+  const uint32_t fit8_eager = k2::max_len_that_fits(d, w_bf16, dev, res, 524288, false, KvCache::Int8);
+  unsetenv("B70_K2_ATTN");
+  const uint32_t fit_pf_i8 = k2::max_len_that_fits(d, w_int8, dev, res, 524288, true);
+  // Derived on this 32.53 GB / 1.5 GB-reserve card: spec 18 §2 / plan 18e said ~64k for one
+  // card with int8 KV; the planner gives 1.9-2.0x bf16 KV's lengths.
+  CHECK_EQ(fit8[0][0], 91904u);
+  CHECK_EQ(fit8[1][0], 98304u);
+  CHECK_EQ(fit8[0][1], 83968u);
+  CHECK_EQ(fit8[1][1], 90368u);
+  CHECK_EQ(fit8_eager, 91648u);
+  CHECK_EQ(fit_pf_i8, 45824u);
+  std::printf("int8 KV (spec 18e): %zu B / position (bf16 %zu); auto -> decode-only %u (bf16 head) / %u "
+              "(int8 head), with prefill %u / %u; eager decode-only %u (bf16 head) - against bf16 KV's "
+              "%u / %u and %u / %u\n", p8.kv() / 32768, ps.kv() / 32768, fit8[0][0], fit8[1][0], fit8[0][1],
+              fit8_pf_i8, fit8_eager, fit_b, fit_i, fit_pf, fit_pf_i8);
   std::printf("k2_plan_test OK: 717 launches (813 eager); auto -> %u (bf16 head) / %u (int8 head) on "
               "a %.2f GB card with a %.1f GB reserve\n", fit_b, fit_i, dev / 1e9, res / 1e9);
   return 0;

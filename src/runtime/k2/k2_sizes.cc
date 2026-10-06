@@ -26,10 +26,20 @@ K2Attn k2_attn() {
 
 const char* k2_attn_name(K2Attn a) { return a == K2Attn::Eager ? "eager" : "flash"; }
 
-PersistentSizes persistent_sizes(const model::K2Desc& d, uint32_t max_len) {
+KvLayout kv_layout(const model::K2Desc& d, uint32_t max_len, KvCache kv) {
+  KvLayout l;
+  l.form = kv;
+  l.max_len = max_len;
+  l.kv_heads = d.kv_heads;
+  l.head_dim = d.head_dim;
+  l.layers = d.layers;
+  return l;
+}
+
+PersistentSizes persistent_sizes(const model::K2Desc& d, uint32_t max_len, KvCache kv) {
   PersistentSizes s;
   s.control = sizeof(Control);
-  s.kv_k = s.kv_v = size_t(d.layers) * kv_layer_bytes(d, max_len);
+  s.kv_k = s.kv_v = kv_layout(d, max_len, kv).bytes();   // bf16: layers x kv_layer_bytes, as before
   return s;
 }
 
@@ -161,12 +171,13 @@ size_t prefill_chunk_launches(const model::K2Desc& d) {
 }
 
 Plan plan(const model::K2Desc& d, uint32_t max_len, size_t model_bytes, bool debug_tap,
-          bool prefill, K2Attn a) {
+          bool prefill, K2Attn a, KvCache kv) {
   Plan p;
   p.max_len = max_len;
+  p.kv_form = kv;
   p.rope = d.rope_table_bytes(max_len);
   p.model = model_bytes + p.rope;
-  const PersistentSizes ps = persistent_sizes(d, max_len);
+  const PersistentSizes ps = persistent_sizes(d, max_len, kv);
   p.kv = ps.kv();
   p.decode_state = ps.control + scratch_sizes(d).total() + attn_scores_bytes(d, max_len, a) +
                    (debug_tap ? tap_bytes(d) : 0);
@@ -175,13 +186,13 @@ Plan plan(const model::K2Desc& d, uint32_t max_len, size_t model_bytes, bool deb
 }
 
 uint32_t max_len_that_fits(const model::K2Desc& d, size_t model_bytes, size_t device_bytes,
-                           size_t reserve_bytes, uint32_t cap, bool prefill) {
+                           size_t reserve_bytes, uint32_t cap, bool prefill, KvCache kv) {
   if (cap < kMaxLenQuantum)
     throw std::invalid_argument("k2::max_len_that_fits: the cap " + std::to_string(cap) +
                                 " is below one " + std::to_string(kMaxLenQuantum) +
                                 "-position quantum");
   const auto fits = [&](uint32_t len) {
-    return plan(d, len, model_bytes, false, prefill).total() + reserve_bytes <= device_bytes;
+    return plan(d, len, model_bytes, false, prefill, k2_attn(), kv).total() + reserve_bytes <= device_bytes;
   };
   // Every term is non-decreasing in max_len (the KV, the RoPE table): the quanta that fit
   // are a prefix, and a bisection finds its end (memory_plan.cc's argument).
@@ -201,11 +212,12 @@ uint32_t max_len_that_fits(const model::K2Desc& d, size_t model_bytes, size_t de
 std::string describe(const Plan& p, size_t device_bytes, size_t reserve_bytes) {
   const std::string label = "plan at max_len " + std::to_string(p.max_len);
   std::string s = format_memory(label.c_str(), p, device_bytes);
-  char buf[192];
-  std::snprintf(buf, sizeof buf, "; + reserve %.3f GB = %.3f GB (RoPE %.3f GB in model; %s)",
+  char buf[256];
+  std::snprintf(buf, sizeof buf, "; + reserve %.3f GB = %.3f GB (RoPE %.3f GB in model; %s%s)",
                 reserve_bytes / 1e9, (p.total() + reserve_bytes) / 1e9, p.rope / 1e9,
                 p.prefill_scratch ? "the K2 prefill scratch planned, spec 18c"
-                                  : "decode only: no prefill scratch");
+                                  : "decode only: no prefill scratch",
+                p.kv_form == KvCache::Int8 ? "; KV int8 rotkv, spec 18e" : "");
   return s + buf;
 }
 

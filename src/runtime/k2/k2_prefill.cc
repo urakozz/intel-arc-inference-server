@@ -73,6 +73,10 @@ class Walk {
     require(s_.partials.size() == ps.partials && s_.xg.size() == ps.xg && s_.w.size() == ps.w &&
                 s_.routes.size() == ps.routes && s_.attn_q.size() == ps.attn_q,
             "the prefill scratch is not runtime::k2::prefill_sizes'");
+    // Spec 18e: under int8 MoVA's combine stages the routed mix in attn_out ([C][kv_n] bf16)
+    // for the writer, before the flash attention overwrites attn_out.
+    require(!kv8_ || s_.attn_out.size() >= size_t(kPfC) * d_.kv_n() * 2,
+            "attn_out cannot hold MoVA's staged [kPfC][kv_n] rows");
   }
 
   void launch(l0::Kernel& k, uint32_t gx, uint32_t gy, uint32_t gz,
@@ -146,6 +150,7 @@ class Walk {
 
   // k2_attn_prep (decode's chain at M = kPfC, S 1) then the flash attention with the gate.
   void attention(uint32_t l, bool dense, uint32_t ld) {
+    if (kv8_) return attention_kv8(l, dense, ld);
     void* kvk = b_.kv_k_layer(l);
     void* kvv = b_.kv_v_layer(l);
     // k2_attn_prep(ctrl, partials, rope, attn_q, attn_gate, kv_k, kv_v) - grid (q + kv heads, C)
@@ -159,6 +164,28 @@ class Walk {
            (C_ + kk::kPfFlashRpw - 1) / kk::kPfFlashRpw, d_.kv_heads, 1,
            {PtrArg(s_.attn_q.ptr()), PtrArg(kvk), PtrArg(kvv), PtrArg(s_.attn_gate.ptr()),
             PtrArg(s_.attn_out.ptr()), arg_val(pos_), arg_val(C_)});
+    prefill::profile_wait(cx_, Phase::kAttnFlash);
+  }
+
+  // Spec 18e, the int8 cache: k2_attn_prep_kv8 at M = kPfC (q rotated; K, and V from the fused
+  // row or MoVA's staged rows in attn_out, rotated + quantised at pos + t), then the flash
+  // attention over int8 with the un-rotation and the gate in its epilogue. Two launches, as bf16.
+  void attention_kv8(uint32_t l, bool dense, uint32_t ld) {
+    const KvLayer kl = b_.kv_layer(l);
+    // k2_attn_prep_kv8(ctrl, partials, rope, attn_q, attn_gate, kv_k, kv_v, k_scale, v_scale,
+    // v_rows) - grid (q + kv heads, C)
+    launch(kc_(kk::pf_attn_prep_kv8_variant(ld, d_.q_heads, d_.kv_heads, dense), "k2_attn_prep_kv8"),
+           d_.q_heads + d_.kv_heads, C_, 1,
+           {PtrArg(b_.control.ptr()), PtrArg(s_.partials.ptr()), PtrArg(m_.rope->ptr()),
+            PtrArg(s_.attn_q.ptr()), PtrArg(s_.attn_gate.ptr()), PtrArg(kl.k), PtrArg(kl.v),
+            PtrArg(kl.ks), PtrArg(kl.vs), PtrArg(s_.attn_out.ptr())});
+    prefill::profile_wait(cx_, Phase::kAttnPrep);
+    // k2_pf_flash_attn_kv8(q, kv_k, k_scale, kv_v, v_scale, gate, out, pos, C) - grid
+    // (ceil(C / 8), kv heads, 1)
+    launch(kc_(kk::pf_flash_kv8_variant(d_.q_heads, d_.kv_heads, eager_, true), "k2_pf_flash_attn_kv8"),
+           (C_ + kk::kPfFlashRpw - 1) / kk::kPfFlashRpw, d_.kv_heads, 1,
+           {PtrArg(s_.attn_q.ptr()), PtrArg(kl.k), PtrArg(kl.ks), PtrArg(kl.v), PtrArg(kl.vs),
+            PtrArg(s_.attn_gate.ptr()), PtrArg(s_.attn_out.ptr()), arg_val(pos_), arg_val(C_)});
     prefill::profile_wait(cx_, Phase::kAttnFlash);
   }
 
@@ -207,10 +234,12 @@ class Walk {
     sort_gather(v, rt, tmax);
     grouped(v, "k2_pf_dequant_v", L.value->ptr(), d_.value_experts, pf_batch_blocks(d_, PfGroup::Value),
             d_.hidden, d_.kv_n(), false, s_.xg.ptr(), s_.h.ptr(), tmax);
-    // k2_pf_mova_combine(route, pair_row, y, kv_v, pos, C) - grid (kv_n / 256, C)
+    // k2_pf_mova_combine(route, pair_row, y, kv_v, pos, C) - grid (kv_n / 256, C). Spec 18e: with
+    // the int8 cache the same binary writes row t of the staging rows (attn_out at pos 0), which
+    // k2_attn_prep_kv8 then rotates and quantises - the routed mix after the combine.
     launch(kc_(v, "k2_pf_mova_combine"), d_.kv_n() / kk::kPfCombineWg, C_, 1,
-           {PtrArg(rt), PtrArg(s_.pair_row.ptr()), PtrArg(s_.h.ptr()), PtrArg(b_.kv_v_layer(l)),
-            arg_val(pos_), arg_val(C_)});
+           {PtrArg(rt), PtrArg(s_.pair_row.ptr()), PtrArg(s_.h.ptr()),
+            PtrArg(kv8_ ? s_.attn_out.ptr() : b_.kv_v_layer(l)), arg_val(kv8_ ? 0u : pos_), arg_val(C_)});
     prefill::profile_wait(cx_, Phase::kMoeCombine);
   }
 
@@ -281,6 +310,7 @@ class Walk {
   K2Buffers& b_;
   const uint32_t pos_, C_;
   const bool eager_;
+  const bool kv8_ = b_.kv_cache() == KvCache::Int8;   // spec 18e: the buffers' form
   size_t n_ = 0;
 };
 

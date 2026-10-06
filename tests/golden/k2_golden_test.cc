@@ -41,6 +41,10 @@
 // own route rows for the prompt positions its last chunk holds (all of them in one chunk;
 // plan 18c Review Focus 5). The tap diagnostic is decode's and is skipped there.
 //
+// **Spec 18e (the `_kv8` twins)**: under B70_KV_CACHE=int8 the engine holds the int8 rotkv cache
+// (K2Engine's default form) and the same gate, the same tie rule and the same routing diagnostic
+// run unchanged - spec 12 Q2's rule; the logits' worst cosine is printed per prompt beside bf16's.
+//
 // argv: <snapshot> <oracle dir> [int8] [prefill | prefill:<chunk>]. Exit 77 (SKIP) when the checkpoint or the golden set
 // (18a's oracle-out-k2/) is not on this machine - the Mac never has them.
 #include <algorithm>
@@ -183,8 +187,9 @@ int main(int argc, char** argv) {
   runtime::k2::K2Engine eng(ctx, std::move(model), kMaxLen, /*debug_tap=*/true);
   CHECK_EQ(eng.step().kernel_count, runtime::k2::decode_launches(d));
   runtime::Control* ctl = eng.buffers().control.as<runtime::Control>();
-  std::printf("lm_head %s, %s attention (B70_K2_ATTN), %zu launches per token, near-tie tolerance "
-              "%.1e, prompt by %s\n", int8 ? "int8" : "bf16", runtime::k2::k2_attn_name(runtime::k2::k2_attn()),
+  std::printf("lm_head %s, %s attention (B70_K2_ATTN), %s KV (B70_KV_CACHE), %zu launches per token, "
+              "near-tie tolerance %.1e, prompt by %s\n", int8 ? "int8" : "bf16",
+              runtime::k2::k2_attn_name(runtime::k2::k2_attn()), runtime::kv_cache_name(eng.kv_cache()),
               eng.step().kernel_count, double(tie_tol()), prefill ? "K2Engine::prefill" : "decode replays");
 
   bool gate_ok = true;
