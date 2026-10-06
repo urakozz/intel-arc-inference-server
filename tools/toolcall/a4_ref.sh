@@ -88,8 +88,6 @@ missing = [f for f in sorted(files) if not os.path.exists(os.path.join(d, f))]
 if missing:
     sys.exit(f"a4_ref: {d} lacks {len(missing)} shards, e.g. {missing[:2]}")
 EOF
-mkdir -p "$OUT/set"
-
 if [ "$step" = set ]; then
   cmd_set="python3 tools/toolcall/make_set.py --from tests/golden/toolcall"
 else
@@ -97,19 +95,37 @@ else
   cmd_ref="python3 tools/toolcall/oracle_generate.py"
 fi
 
+# The container sees this tree only (mounted at /ws): a run writes into a real directory inside
+# it. On the box OUT may be elsewhere (the runbook keeps data in the data tree, linked into the
+# trees): the run then works in oracle-out-<model>-a4.partial/, seeded with what OUT already
+# holds (so it resumes), and copies everything to OUT when the container exits.
+case "$OUT" in /*) inside=0 ;; *) inside=1 ;; esac
+[ -L "$OUT" ] && inside=0
 if [ $mac = 0 ]; then   # the box: the reference image, foreground
+  work=$OUT
+  if [ $inside = 0 ]; then
+    work=oracle-out-$m-a4.partial
+    mkdir -p "$work" "$OUT"
+    cp -R "$OUT/." "$work/"
+  fi
+  mkdir -p "$work/set"
   if [ -n "${MODEL_DIR:-}" ]; then export ORACLE_SNAP="${MODEL_DIR%/}"; else export ORACLE_MODEL="$cache_name"; fi
   [ -n "${ORACLE_THREADS:-}" ] && export ORACLE_THREADS
+  rc=0
   if [ "$step" = set ]; then
-    exec tools/oracle/run_in_container.sh "$cmd_set \"\$SNAP\" /ws/$OUT/set ${kw[*]+$(printf "'%s' " "${kw[@]}")}"
+    tools/oracle/run_in_container.sh "$cmd_set \"\$SNAP\" /ws/$work/set ${kw[*]+$(printf "'%s' " "${kw[@]}")}" || rc=$?
+  else
+    tools/oracle/run_in_container.sh "$cmd_ref \"\$SNAP\" /ws/$work/set /ws/$work --new-tokens $new" 2>&1 | tee -a "$work/ref.log"
+    rc=${PIPESTATUS[0]}
+    [ "$rc" = 0 ] && echo done > "$work/DONE"
   fi
-  tools/oracle/run_in_container.sh "$cmd_ref \"\$SNAP\" /ws/$OUT/set /ws/$OUT --new-tokens $new" 2>&1 | tee -a "$OUT/ref.log"
-  rc=${PIPESTATUS[0]}
-  [ "$rc" = 0 ] && echo done > "$OUT/DONE"
+  if [ "$work" != "$OUT" ]; then cp -R "$work/." "$OUT/"; echo "a4_ref: copied $work -> $OUT"; fi
   exit "$rc"
 fi
 
-# The Mac: agnes-ref-img, capped, one oracle container at a time.
+# The Mac: agnes-ref-img, capped, one oracle container at a time; OUT inside this tree.
+[ $inside = 1 ] || { echo "a4_ref: on the Mac OUT must be a directory inside this tree (got $OUT)" >&2; exit 2; }
+mkdir -p "$OUT/set"
 IMAGE=${IMAGE:-agnes-ref-img:latest}
 MEM=${MEM:-28g}
 others=$(docker ps --filter "ancestor=$IMAGE" --format '{{.Names}}' | grep -vx "$NAME" || true)
