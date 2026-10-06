@@ -218,7 +218,16 @@ int main(int argc, char** argv) {
     const std::string prompts = argv[3];
     const std::string snapshot = argv[4];
     const uint16_t port = free_port();
-    server = spawn({serve, snapshot, "--host", "127.0.0.1", "--port", std::to_string(port)});
+    // Spec 16d: B70_SERVE_ARGS (whitespace-separated) are appended to b70-serve's command line -
+    // box stage r27.golden runs `--pp 2` (two cards) against b70-decode on ONE card. Unset: as
+    // before.
+    std::vector<std::string> serve_args{serve, snapshot, "--host", "127.0.0.1", "--port", std::to_string(port)};
+    if (const char* extra = std::getenv("B70_SERVE_ARGS")) {
+      std::istringstream words(extra);
+      std::string w;
+      while (words >> w) serve_args.push_back(w);
+    }
+    server = spawn(serve_args);
     wait_ready(port);
     httplib::Client client("127.0.0.1", port);
 

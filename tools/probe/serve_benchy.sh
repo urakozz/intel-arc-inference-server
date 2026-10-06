@@ -4,7 +4,8 @@
 #   tools/probe/serve_benchy.sh [llama-benchy args...]
 # e.g. tools/probe/detach.sh ~/benchy.log tools/probe/serve_benchy.sh --pp 4096 --tg 256
 # Env: MODEL (repo id or snapshot; default the W4A16 g64 checkpoint), MAX_LEN
-# (16384), PORT (8011), SERVE_ARGS (extra b70-serve flags).
+# (16384), PORT (8011), SERVE_ARGS (extra b70-serve flags), SERVE_AFFINITY (the server's
+# ZE_AFFINITY_MASK, default 0; spec 16d's `SERVE_ARGS='--pp 2'` needs 0,1).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 MODEL="${MODEL:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
@@ -14,7 +15,7 @@ export PATH="$HOME/.local/bin:$PATH"
 exec 9>"$HOME/b70-gpu.lock"
 echo "waiting for the GPU lock"; flock 9; echo "lock held"
 uptime
-ZE_AFFINITY_MASK=0 build/src/cli/b70-serve "$MODEL" --max-len "$MAX_LEN" --port "$PORT" \
+ZE_AFFINITY_MASK="${SERVE_AFFINITY:-0}" build/src/cli/b70-serve "$MODEL" --max-len "$MAX_LEN" --port "$PORT" \
   --served-name b70 ${SERVE_ARGS:-} > "$HOME/benchy-serve.log" 2>&1 &
 srv=$!
 trap 'kill $srv 2>/dev/null; wait $srv 2>/dev/null || true' EXIT
