@@ -125,7 +125,7 @@ a prompt our own tokenizer counts as exactly 4096 tokens.
 
 ## Prefill
 
-All rows: device 0, `tools/bench_decode.sh --pp 4096`, chunk width 2048, median
+All rows: device 0, `tools/bench_decode.sh --prefill-length 4096`, chunk width 2048, median
 of three, same checkpoint.
 
 | date | what changed | pp t/s | ms total | spread | grade |
@@ -149,18 +149,18 @@ The arc from the last row before the kernel work started to here is 1498.97 to
 
 ### The int8 prefill linears (spec 5), the default since 2026-09-24
 
-`--pp-backend l0-int8` (spec 5, plans 5a/5b) runs every int4 linear of the L0
+`--prefill-backend l0-int8` (spec 5, plans 5a/5b) runs every int4 linear of the L0
 walk on the rotated int8 ("h8") path: a Hadamard-rotating per-token int8
 quantiser, then per 1024-column slab a rotated per-channel int8 requant and an
 i8 x i8 DPAS GEMM. Attention, GDN, norms and the head are the L0 backend's.
 **It is the default** after the operator's 2026-09-24 ruling on gate A3's one
-bf16 near-tie (spec 5 §8); `--pp-backend l0` keeps the bf16 walk.
+bf16 near-tie (spec 5 §8); `--prefill-backend l0` keeps the bf16 walk.
 
 **The row that counts (2026-09-24, after the scale pass moved to load):**
 `Engine::prepare_prefill()` builds the rotated column scales when the CLI
 loads the model, so the timed first prefill no longer carries them. Device 0,
 box idle at the start (no render-node holder, no container), four interleaved
-passes of `tools/bench_decode.sh --pp 4096 --pp-backend <b> --runs 3`:
+passes of `tools/bench_decode.sh --prefill-length 4096 --prefill-backend <b> --runs 3`:
 
 | pass | backend | runs, pp t/s | median | ms (median run) |
 |---|---|---|---:|---:|
@@ -176,8 +176,8 @@ the first after a reboot; the paired ratio is the comparison that holds.
 The earlier measurement below is kept: it is what the one-time scale pass
 cost when it still ran inside the first request.
 
-2026-09-24, sha `04ce00c`, device 0, `tools/bench_decode.sh --pp 4096
---pp-backend <b> --runs 3`, taken as four interleaved passes (l0, int8, l0,
+2026-09-24, sha `04ce00c`, device 0, `tools/bench_decode.sh --prefill-length 4096
+--prefill-backend <b> --runs 3`, taken as four interleaved passes (l0, int8, l0,
 int8). No process held a render node; a CPU-only container of another job was
 running, so the script graded every pass **ITERATE**.
 
@@ -192,7 +192,7 @@ Paired ratios int8 / l0: **1.1789** (pass 2 / 1) and **1.1812** (pass 4 / 3).
 Against the 1670.72 record, 1971.09 is **1.1798x** (derived). Spec 5's bar B1
 is 1.20x, 2005 t/s: **B1 fails as measured, by about 34 t/s.**
 
-What the row contains. `b70-decode --bench --pp` times the **first** prefill
+What the row contains. `b70-decode --bench --prefill-length` times the **first** prefill
 of a fresh process, and on l0-int8 the first prefill also builds every int4
 linear's rotated column scales (256 `pf_colmax_rot` passes, each with a host
 wait, run before the first chunk so no recorded list holds one). Timed on a
@@ -349,7 +349,7 @@ The plan's gate was no regression (flash >= 0.99x); it is 1.01x.
 kernel: 63.1 ms); it is missed and recorded, per the operator's ruling A of
 2026-09-25 (integrate now, optimise later).
 
-**Prefill at depth, `--pp N --max-len 131072`, median of 3:**
+**Prefill at depth, `--prefill-length N --max-len 131072`, median of 3:**
 
 | ids | t/s | ms total | spread |
 |---:|---:|---:|---:|
@@ -369,7 +369,7 @@ launches `max_len / 64` attention blocks per head group every token and the idle
 ones cost nothing measurable, so the indirect grid spec 6 §3.3 held in reserve was
 not built.
 
-**Decode at depth (F3), `--pp N --max-len 131072`, tg 256, median of 3:**
+**Decode at depth (F3), `--prefill-length N --max-len 131072`, tg 256, median of 3:**
 
 | depth | t/s | ms/token | bandwidth-derived rate | share |
 |---:|---:|---:|---:|---:|
@@ -571,7 +571,7 @@ row (W8A16, `src/loader/lm_head_int8.h`) and reads it with `gemv_i8w`. It is
 Interleaved pairs after a warm-up, box 2026-09-28 17:12-17:16 (`uptime` load 0.25 at
 the start, 2.22 at the end; other agents share the box but run under the same GPU
 lock), device 0, `tools/probe/lm_head_pairs.sh`, sha `b7e8d52-dirty` (the plan 9b
-tree before its record commit). Each run is `b70-decode --bench --pp 4096 --tg 256`:
+tree before its record commit). Each run is `b70-decode --bench --prefill-length 4096 --tg 256`:
 
 | pair | head | decode t/s at 4096 | ms/token | pp4096 t/s (l0-int8) |
 |---|---|---:|---:|---:|
@@ -934,8 +934,8 @@ device 1 and say so.
 
 ```bash
 tools/bench_decode.sh                        # 3 runs at depth 4096, tg 256
-tools/bench_decode.sh --pp 4096              # the prefill row
-tools/bench_decode.sh --pp 4096 --tg 256 --runs 3
+tools/bench_decode.sh --prefill-length 4096  # the prefill row
+tools/bench_decode.sh --prefill-length 4096 --tg 256 --runs 3
 ZE_AFFINITY_MASK=1 tools/bench_decode.sh ... # names the card explicitly
 ```
 

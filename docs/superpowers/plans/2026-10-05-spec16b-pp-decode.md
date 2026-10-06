@@ -3,7 +3,9 @@
 **Status (2026-10-06): built blind on branch `spec16b-pp-decode`, before 16a** - spec 16 §8 has
 what was built and the defaults chosen in 16a's place (both hand-offs behind
 `--pipeline-handoff copy|peer`, copy default; the split by bytes, `--pipeline-split auto`). The
-CLI spelling is `--pipeline 2` (`--pp` is the bench's prefill length). Tasks 1 and 2 are written
+CLI spelling is `--pp N` / `--pipeline-parallel-size N`, N = 1 or 2 (vLLM's; built as
+`--pipeline 1|2` and renamed 2026-10-06, when the bench's prefill length became
+`--prefill-length`). Tasks 1 and 2 are written
 and host-checked (planner, protocol, CLI); their on-card halves, P1 / P4 and Task 3's S1 are box
 queue row 22. `docs/BENCHMARKS.md`'s "Pipeline parallel (spec 16)" section waits for row 22's
 S1 numbers.

@@ -2135,7 +2135,7 @@ with or without it. Sources are `src/kernels/prefill/`.
 Two rules hold across the whole family and are not repeated per kernel:
 
 - **`M` is a runtime argument, never a `-D` and never in a variant name.** One
-  binary set serves every `--pp-chunk` width. What stays in a name is what the
+  binary set serves every `--prefill-chunk` width. What stays in a name is what the
   binary bakes as a stride or a grid: `K`, the previous linear's split-K width
   `S_PREV`, the norm's group counts, and a dequant shape.
 - **`S = 1` everywhere.** Decode's split-K exists to buy hardware threads at
@@ -2145,7 +2145,7 @@ Two rules hold across the whole family and are not repeated per kernel:
 
 The prefill path runs entirely on Level Zero. A chunk makes **no SYCL call and
 never waits on the host**; `sycl-tla` stays selectable as a reference backend
-with `--pp-backend sycl-tla`, and the build also works with no SYCL component at
+with `--prefill-backend sycl-tla`, and the build also works with no SYCL component at
 all. Derived from the walk in `src/runtime/prefill/step.cc` and asserted by
 `prefill_smoke_test` through `Context::launches()`, a chunk at C = 2048 is
 **9073 L0 launches, 0 SYCL GEMMs and 0 host waits**; `step_head` adds 5 once per

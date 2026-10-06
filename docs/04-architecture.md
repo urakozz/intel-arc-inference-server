@@ -139,7 +139,7 @@ Note the direction of the launch count: the Level Zero walk issues seven times
 as many launches and has *fewer* host stalls, not more. The worry that 8,689
 launches would cost host time in situ does not appear at all.
 
-sycl-tla stays selectable with `--pp-backend sycl-tla` so the control can be
+sycl-tla stays selectable with `--prefill-backend sycl-tla` so the control can be
 re-run at any time, and `tests/prefill/prefill_backend_equivalence_test` holds
 the two paths **bitwise equal** on all five case families. The whole project
 also builds with no SYCL component at all.
