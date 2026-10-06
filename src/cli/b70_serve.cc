@@ -1,4 +1,5 @@
-// b70-serve -- the OpenAI-compatible server over the replayed runtime::Engine.
+// b70-serve -- the OpenAI-compatible server over the replayed runtime::Engine (Qwen3.8, Agnes,
+// Ornith) or runtime::k2::K2Engine (K2-Horizon, spec 18d), picked by config.json's model_type.
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -16,6 +17,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "cli/k2_decode.h"
+#include "cli/k2_serve_adapter.h"
 #include "cli/max_len.h"
 #include "cli/prefix_cache_size.h"
 #include "cli/renamed_flags.h"
@@ -73,7 +76,11 @@ void usage() {
                "                 [--mem-reserve-gb G]   device memory the plan leaves free (default\n"
                "                                        1.5: driver, kernels, slack; box-unconfirmed)\n"
                "                 The model is picked from the checkpoint's config.json: Qwen3.8,\n"
-               "                 Agnes 3.0 Flash (spec 14) or Ornith 1.5 35B-A3B (spec 15, MoE).\n"
+               "                 Agnes 3.0 Flash (spec 14), Ornith 1.5 35B-A3B (spec 15, MoE) or\n"
+               "                 K2-Horizon MoVA 36B-A4B (spec 18: its own engine, prefill on l0\n"
+               "                 only, no MTP head - --mtp, --spec mtp|lookup and --draft-vocab are\n"
+               "                 refused; its chat_template_kwargs tool_call_format / reasoning_effort\n"
+               "                 reach the template). One card: --pp N is b70-decode's (spec 16).\n"
                "                 [--prefill-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n"
                "                 [--log-requests DIR]   write DIR/NNNNNN.json per request\n"
                "                 [--prefix-cache-gb auto|N]  the prefix cache, in SYSTEM RAM (pinned\n"
@@ -184,6 +191,104 @@ void print_eos(const std::vector<uint32_t>& ids) {
     std::fprintf(stderr, "%u", ids[i]);
   }
   std::fputc(']', stderr);
+}
+
+// Spec 7: the prefix cache's pinned system RAM, sized after the model is loaded (so
+// "available" already excludes the process's own load) - shared by the Qwen-family and the
+// K2 paths. Returns null when the cache is off; sets options.prefix_cache_bytes / prefix_alloc.
+std::unique_ptr<PinnedAlloc> make_prefix_alloc(l0::Context& context, bool prefix_auto,
+                                               uint32_t prefix_cache_gb, server::Options& options) {
+  std::unique_ptr<PinnedAlloc> prefix_alloc;
+  const cli::HostMemory host = cli::host_memory();
+  std::string prefix_why = "explicit";
+  if (prefix_auto) {
+    const cli::PrefixCacheChoice c = cli::auto_prefix_cache(host);
+    prefix_cache_gb = c.gib;
+    prefix_why = c.why;
+  } else if (prefix_cache_gb > 0 && host.known && (uint64_t(prefix_cache_gb) << 30) > host.available) {
+    std::fprintf(stderr,
+                 "warning: --prefix-cache-gb %u pins more host RAM than is available (%.0f GiB);"
+                 " pinned pages cannot be swapped\n",
+                 prefix_cache_gb, double(host.available) / double(cli::kGiB));
+  }
+  if (prefix_cache_gb > 0) {
+    const auto t0 = std::chrono::steady_clock::now();
+    prefix_alloc = std::make_unique<PinnedAlloc>(context, size_t(prefix_cache_gb) << 30);
+    options.prefix_cache_bytes = prefix_alloc->mem.size();
+    options.prefix_alloc = prefix_alloc.get();
+    std::fprintf(stderr, "prefix cache: %u GiB pinned system RAM (%s), allocated in %.0f ms\n",
+                 prefix_cache_gb, prefix_why.c_str(),
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                     .count());
+  } else {
+    std::fprintf(stderr, "prefix cache: off (%s)\n", prefix_why.c_str());
+  }
+  return prefix_alloc;
+}
+
+int listen_until_stopped(server::Server& server, const server::Options& options) {
+  g_server = &server;
+  std::signal(SIGTERM, stop_server);
+  std::signal(SIGINT, stop_server);
+  const bool listened = server.listen();
+  g_server = nullptr;
+  if (!listened)
+    throw std::runtime_error("failed to bind http://" + options.host + ":" +
+                             std::to_string(options.port));
+  return 0;
+}
+
+// Spec 18d: K2-Horizon served - runtime::k2::K2Engine behind cli::k2::K2EngineAdapterT (KV-only
+// prefix-cache snapshots, host sampling), K2's chat format (server::ChatFormat, set by run()
+// from model_type), its EOS [1, 250019] from generation_config.json. The refusals are run()'s,
+// before this is called (before the device).
+struct K2Serve {
+  std::string path, snapshot_dir;
+  cli::MaxLenArg max_len_arg;
+  size_t mem_reserve = 0;
+  uint32_t device = l0::Context::kFromEnv;
+  runtime::KvCache kv_cache = runtime::KvCache::Bf16;
+  loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
+  bool prefix_auto = true;
+  uint32_t prefix_cache_gb = 0;
+};
+
+int serve_k2(const K2Serve& a, server::Options options) {
+  const std::vector<uint32_t> eos = eos_ids(a.snapshot_dir);
+  const uint32_t trained = loader::trained_context(a.snapshot_dir);
+  cli::check_before_load(a.max_len_arg, trained, /*require_quantum=*/true);   // spec 6 §10
+  l0::Context context(a.device);
+  std::fprintf(stderr, "device: %s (%u EUs)%s\n", context.name().c_str(), context.eu_count(),
+               a.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+  loader::K2LoadedModel model = [&] {
+    StdoutToStderr redirect;
+    return loader::load_k2(context, a.path, cli::load_len(a.max_len_arg, trained), a.lm_head);
+  }();
+  // The server prefills every request: the plan carries K2's prefill scratch (spec 18c).
+  const uint32_t max_len =
+      cli::k2::settle(context, model, a.max_len_arg, a.mem_reserve, /*prefill=*/true, a.kv_cache);
+  runtime::k2::K2Engine engine(context, std::move(model), max_len, /*debug_tap=*/false, a.kv_cache);
+  engine.prepare_prefill();   // the scratch and the binaries' check at load, not in a request
+  std::fprintf(stderr, "%s\n", engine.memory_line().c_str());
+  TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
+  if (tokenizer.vocab_used() != engine.vocab())
+    std::fprintf(stderr, "note: tokenizer.json defines %u ids, K2-Horizon's vocabulary is %u; "
+                         "sampling masks from %u\n",
+                 tokenizer.vocab_used(), engine.vocab(), tokenizer.vocab_used());
+  TemplateAdapter chat_template(a.snapshot_dir);
+  cli::k2::K2EngineAdapterT<runtime::k2::K2Engine> engine_adapter(engine, tokenizer.vocab_used());
+  options.eos_ids = eos;
+  const std::unique_ptr<PinnedAlloc> prefix_alloc =
+      make_prefix_alloc(context, a.prefix_auto, a.prefix_cache_gb, options);
+  server::Server server({tokenizer, chat_template, engine_adapter}, options);
+  std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
+               options.host.c_str(), options.port, max_len);
+  print_eos(eos);
+  std::fprintf(stderr, ", K2-Horizon (%s chat format), prefill backend l0, attention %s "
+                       "(B70_K2_ATTN), mtp none, lm_head %s, kv cache %s, prefix snapshots KV-only\n",
+               options.chat_format.name(), runtime::k2::k2_attn_name(runtime::k2::k2_attn()),
+               loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engine.kv_cache()));
+  return listen_until_stopped(server, options);
 }
 
 int run(int argc, char** argv) {
@@ -299,6 +404,9 @@ int run(int argc, char** argv) {
       draft_vocab_ids = value(i, "--draft-vocab-ids");
     } else if (arg == "--kv-cache") {   // spec 12b
       kv_cache = cli::parse_kv_cache_arg(value(i, "--kv-cache"));
+    } else if (arg == "--pp" || arg == "--pipeline-parallel-size") {
+      throw std::runtime_error(arg + ": b70-serve serves on one card; pipeline parallel is "
+                               "b70-decode's (spec 16b / 16c), not the server's yet");
     } else if (!arg.empty() && arg[0] == '-') {
       usage();
       throw std::runtime_error(cli::unknown_option(arg));
@@ -393,32 +501,50 @@ int run(int argc, char** argv) {
   cli::check_kv_cache(kv_cache, pp_path);   // spec 12b: before the device is touched
 
   const std::string snapshot_dir = loader::resolve_snapshot(path);
-  // Spec 18b: dispatch on config.json's model_type. K2-Horizon (`k2_horizon`) runs through
-  // b70-decode (decode spec 18b, prefill 18c); serving it needs spec 18d's engine side - a K2
-  // engine behind server::EngineIface, KV-only prefix-cache snapshots - which is not built, so
-  // it is refused here by name, before the device, rather than as an unknown architecture
-  // inside the loader. Spec 18d's host side is: the chat format (template variables, reasoning
-  // tags, tool-call syntax) follows model_type (server/chat_format.h; anything but k2_horizon
-  // is the Qwen path Qwen3.8, Agnes and Ornith share), set here for when the refusal goes.
+  // Spec 18b / 18d: dispatch on config.json's model_type. The chat format (template variables,
+  // reasoning tags, tool-call syntax) follows it (server/chat_format.h: anything but
+  // k2_horizon is the Qwen path Qwen3.8, Agnes and Ornith share); K2-Horizon runs its own
+  // engine (runtime/k2, cli::k2::K2EngineAdapterT) - what that engine does not have is refused
+  // here by name, before the device.
+  std::string model_type;
   if (std::ifstream cf(snapshot_dir + "config.json"); cf) {
     std::stringstream cs;
     cs << cf.rdbuf();
     const nlohmann::json cj = nlohmann::json::parse(cs.str(), nullptr, /*allow_exceptions=*/false);
-    if (cj.is_object())
-      options.chat_format = server::ChatFormat::for_model_type(cj.value("model_type", std::string()));
-    // Spec 20c: Kolibri-1 decodes through b70-decode only; serving it (the tokenizer, the ChatML
-    // template, reasoning and hermes JSON tool calls, ring snapshots) is spec 20e.
-    if (cj.is_object() && cj.value("model_type", std::string()) == "kolibri1")
-      throw std::runtime_error(
-          "Kolibri-1 (model_type kolibri1) is not served yet: serving it is spec 20e (its tokenizer and ChatML "
-          "template, reasoning and hermes JSON tool calls, prefix-cache snapshots with the sliding rings). "
-          "b70-decode runs it (spec 20c): b70-decode " + path + " --ids <file> --n <N>");
-    if (cj.is_object() && cj.value("model_type", std::string()) == "k2_horizon")
-      throw std::runtime_error(
-          "K2-Horizon (model_type k2_horizon) is not served yet: spec 18d's engine side (a K2 "
-          "engine behind the server, KV-only prefix-cache snapshots) is not built; its chat "
-          "template, tool calls and EOS are (spec 18d host side). b70-decode runs it (specs "
-          "18b, 18c): b70-decode " + path + " --ids <file> --n <N> [--prefill]");
+    if (cj.is_object()) model_type = cj.value("model_type", std::string());
+  }
+  options.chat_format = server::ChatFormat::for_model_type(model_type);
+  // Spec 20c: Kolibri-1 decodes through b70-decode only; serving it (the tokenizer, the ChatML
+  // template, reasoning and hermes JSON tool calls, ring snapshots) is spec 20e.
+  if (model_type == "kolibri1")
+    throw std::runtime_error(
+        "Kolibri-1 (model_type kolibri1) is not served yet: serving it is spec 20e (its tokenizer and ChatML "
+        "template, reasoning and hermes JSON tool calls, prefix-cache snapshots with the sliding rings). "
+        "b70-decode runs it (spec 20c): b70-decode " + path + " --ids <file> --n <N>");
+  if (model_type == "k2_horizon") {
+    if (mtp_k > 0 || mtp_auto)
+      throw std::runtime_error("K2-Horizon has no MTP head (spec 18 §9): drop --mtp / --spec mtp");
+    if (spec_lookup)
+      throw std::runtime_error("--spec lookup verifies its drafts through the MTP verify lists, "
+                               "which K2-Horizon's engine does not capture (no head, spec 18 §9; "
+                               "plan 19e Task 2's engine part): drop --spec lookup");
+    if (have_pp_backend && pp_backend != runtime::PrefillBackend::L0)
+      throw std::runtime_error(std::string("K2-Horizon prefills on the l0 backend only (spec 18c), "
+                                           "not ") + runtime::prefill_backend_name(pp_backend) +
+                               ": l0-int8's h8 linears need K in whole 1024-k Hadamard blocks and "
+                               "K2's hidden is 2560; sycl-tla has no K2 walk - --prefill-backend "
+                               "l0, or omit it");
+    K2Serve k2;
+    k2.path = path;
+    k2.snapshot_dir = snapshot_dir;
+    k2.max_len_arg = max_len_arg;
+    k2.mem_reserve = mem_reserve;
+    k2.device = device;
+    k2.kv_cache = kv_cache;
+    k2.lm_head = lm_head;
+    k2.prefix_auto = prefix_auto;
+    k2.prefix_cache_gb = prefix_cache_gb;
+    return serve_k2(k2, options);
   }
   const std::vector<uint32_t> eos = eos_ids(snapshot_dir);
   const uint32_t trained = loader::trained_context(snapshot_dir);
@@ -473,32 +599,9 @@ int run(int argc, char** argv) {
   TemplateAdapter chat_template(snapshot_dir);
   EngineAdapter engine_adapter(engine, tokenizer.vocab_used(), mtp_k, spec_lookup);
   options.eos_ids = eos;
-  std::unique_ptr<PinnedAlloc> prefix_alloc;
   // Sized after the model is loaded, so "available" already excludes the process's own load.
-  const cli::HostMemory host = cli::host_memory();
-  std::string prefix_why = "explicit";
-  if (prefix_auto) {
-    const cli::PrefixCacheChoice c = cli::auto_prefix_cache(host);
-    prefix_cache_gb = c.gib;
-    prefix_why = c.why;
-  } else if (prefix_cache_gb > 0 && host.known && (uint64_t(prefix_cache_gb) << 30) > host.available) {
-    std::fprintf(stderr,
-                 "warning: --prefix-cache-gb %u pins more host RAM than is available (%.0f GiB);"
-                 " pinned pages cannot be swapped\n",
-                 prefix_cache_gb, double(host.available) / double(cli::kGiB));
-  }
-  if (prefix_cache_gb > 0) {
-    const auto t0 = std::chrono::steady_clock::now();
-    prefix_alloc = std::make_unique<PinnedAlloc>(context, size_t(prefix_cache_gb) << 30);
-    options.prefix_cache_bytes = prefix_alloc->mem.size();
-    options.prefix_alloc = prefix_alloc.get();
-    std::fprintf(stderr, "prefix cache: %u GiB pinned system RAM (%s), allocated in %.0f ms\n",
-                 prefix_cache_gb, prefix_why.c_str(),
-                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
-                     .count());
-  } else {
-    std::fprintf(stderr, "prefix cache: off (%s)\n", prefix_why.c_str());
-  }
+  const std::unique_ptr<PinnedAlloc> prefix_alloc =
+      make_prefix_alloc(context, prefix_auto, prefix_cache_gb, options);
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
 
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
@@ -536,15 +639,7 @@ int run(int argc, char** argv) {
                    served.name.c_str());
   }
 
-  g_server = &server;
-  std::signal(SIGTERM, stop_server);
-  std::signal(SIGINT, stop_server);
-  const bool listened = server.listen();
-  g_server = nullptr;
-  if (!listened)
-    throw std::runtime_error("failed to bind http://" + options.host + ":" +
-                             std::to_string(options.port));
-  return 0;
+  return listen_until_stopped(server, options);
 }
 
 }  // namespace

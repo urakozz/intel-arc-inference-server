@@ -31,6 +31,9 @@ uint64_t splitmix(uint64_t x) {
   return x ^ (x >> 31);
 }
 
+// The marker of a zero-byte snapshot's storage (reserve()); never read or written.
+uint8_t kNoBytes = 0;
+
 bool same_ids(const std::vector<uint32_t>& a, const uint32_t* b) {
   return std::memcmp(a.data(), b, a.size() * sizeof(uint32_t)) == 0;
 }
@@ -180,7 +183,12 @@ PrefixCache::Slot PrefixCache::reserve(const std::vector<uint32_t>& ids, uint32_
   }
   const size_t kv = kv_per_pos_ * (end - base);
   const size_t bytes = state_bytes_ + kv;
-  void* p = alloc(bytes);
+  // Spec 18d: an engine without recurrent state (K2-Horizon: state_bytes() == 0) has an
+  // empty snapshot at a block end - a restore point that costs nothing. It gets no
+  // allocation (a HostAlloc need not hand out zero bytes) and a non-null marker, so the
+  // slot is still filled (save_state of zero bytes) and plan() still hands it to
+  // load_state, which restores pos alone; remove() and the destructor free only bytes > 0.
+  void* p = bytes != 0 ? alloc(bytes) : static_cast<void*>(&kNoBytes);
   if (p == nullptr) return slot;
   auto e = std::make_unique<Entry>();
   e->is_block = false;

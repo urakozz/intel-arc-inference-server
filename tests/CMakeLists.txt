@@ -2091,9 +2091,11 @@ if(B70_ORNITH AND B70_MTP)
 endif()
 # ==== Spec 15e ============================================================= (end) ====
 
-# ==== Spec 18d: K2-Horizon served, the host side (label `k2`) ============== (begin) ==
-# One delimited block for every 18d registration; host tests only - they run on the Mac
-# (tools/mac_check.sh). The engine side of serving is not built (spec 18 §12).
+# ==== Spec 18d: K2-Horizon served (label `k2`) ============================== (begin) ==
+# One delimited block for every 18d registration. Host tests first - they run on the Mac
+# (tools/mac_check.sh) - then the card's (box-validation-queue row 25), which SKIP (77)
+# without the K2 int4 checkpoint. The host side as built: spec 18 §12; the engine side
+# (K2Engine behind b70-serve, KV-only snapshots): spec 18 §14.
 #
 # The renderer extensions - third_party/minja's b70 patches (third_party/VERSIONS) - each
 # against Jinja2's own render (tools/tokenizer/dump_minja_ext.py).
@@ -2136,6 +2138,81 @@ if(B70_TOKENIZER_ENABLED)
   add_test(NAME k2_tokenizer_test COMMAND k2_tokenizer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
     ${CMAKE_SOURCE_DIR}/tests/tokenizer/k2 ${B70_K2_TOKENIZER_JSON})
   set_tests_properties(k2_tokenizer_test PROPERTIES LABELS k2 SKIP_RETURN_CODE 77)
+endif()
+# The engine side, on the host: cli::k2::K2EngineAdapterT (b70-serve's adapter) over a
+# device-free engine with K2's real KV layout - the snapshot runs on K2's shapes (bf16 and
+# int8), save / load on host buffers, Review Focus 3 through spec 7's request path (KV-only
+# snapshots, every cached turn bitwise a cold run's, K2's own store key), and the server: a
+# greedy chat's ids = the decode run on its prompt_token_ids, a cached second turn, seeded
+# sampling reproducible.
+add_executable(k2_serve_test server/k2_serve_test.cc)
+target_include_directories(k2_serve_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(k2_serve_test PRIVATE b70_server b70_k2_plan)
+add_test(NAME k2_serve_test COMMAND k2_serve_test)
+set_tests_properties(k2_serve_test PROPERTIES LABELS k2)
+# On the card (row 25), checkpoint: K2Engine's snapshot calls byte-exact, C1 bitwise at a block
+# end, C2 (prefix_gpu_test's sequences a-g through PrefixSession over the adapter) - bf16 KV,
+# and the `_kv8` twin under B70_KV_CACHE=int8 (spec 18e's cache).
+if(B70_K2 AND TARGET b70_k2_prefill)
+  add_executable(k2_prefix_gpu_test server/k2_prefix_gpu_test.cc)
+  target_include_directories(k2_prefix_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(k2_prefix_gpu_test PRIVATE b70_server b70_k2_prefill b70_runtime b70_loader b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(k2_prefix_gpu_test)
+  endif()
+  add_dependencies(k2_prefix_gpu_test ${B70_K2_PREFILL_KERNELS} ${B70_K2_DECODE_KERNELS})
+  add_test(NAME k2_prefix_gpu_test COMMAND k2_prefix_gpu_test ${B70_K2_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
+  add_test(NAME k2_prefix_gpu_split_test COMMAND k2_prefix_gpu_test ${B70_K2_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts 0 1)
+  set_tests_properties(k2_prefix_gpu_test k2_prefix_gpu_split_test PROPERTIES
+    LABELS "checkpoint;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  if(B70_KV8)
+    add_test(NAME k2_prefix_gpu_kv8_test COMMAND k2_prefix_gpu_test ${B70_K2_SNAPSHOT}
+      ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
+    set_tests_properties(k2_prefix_gpu_kv8_test PROPERTIES ENVIRONMENT "B70_KV_CACHE=int8"
+      LABELS "checkpoint;k2;kv8" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  endif()
+endif()
+# b70-serve's K2 refusals, before the device (tests/model/k2: config.json only) - what K2's
+# engine does not have, by name - and the one-card refusal of --pp (any model).
+if(TARGET b70-serve)
+  function(b70_serve_reject name)
+    cmake_parse_arguments(R "" "EXPECT" "" ${ARGN})
+    add_test(NAME ${name} COMMAND sh -c [==[
+expect=$1
+shift
+out=$("$@" 2>&1)
+rc=$?
+printf '%s\n' "$out" >&2
+if [ "$rc" -ne 1 ]
+then
+  echo "b70_serve_reject: expected exit 1, got $rc" >&2
+  exit 1
+fi
+if printf '%s\n' "$out" | grep -q '^device:'
+then
+  echo "b70_serve_reject: the rejection happened after l0::Context was built" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$out" | grep -qF -- "$expect"
+then
+  echo "b70_serve_reject: exit 1, but the message does not contain '$expect'" >&2
+  exit 1
+fi
+]==] b70_serve_reject "${R_EXPECT}" $<TARGET_FILE:b70-serve> ${R_UNPARSED_ARGUMENTS})
+    set_tests_properties(${name} PROPERTIES TIMEOUT 60 LABELS k2)
+  endfunction()
+  b70_serve_reject(cli_reject_serve_k2_mtp ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --mtp 1
+    EXPECT "K2-Horizon has no MTP head")
+  b70_serve_reject(cli_reject_serve_k2_spec_mtp ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --spec mtp
+    EXPECT "K2-Horizon has no MTP head")
+  b70_serve_reject(cli_reject_serve_k2_lookup ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --spec lookup
+    EXPECT "K2-Horizon's engine does not capture")
+  b70_serve_reject(cli_reject_serve_k2_prefill_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2
+    --prefill-backend l0-int8 EXPECT "K2-Horizon prefills on the l0 backend only")
+  b70_serve_reject(cli_reject_serve_pp ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --pp 2
+    EXPECT "b70-serve serves on one card")
 endif()
 # ==== Spec 18d ============================================================= (end) ====
 

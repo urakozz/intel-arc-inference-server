@@ -1,6 +1,7 @@
 // Spec 18d: the server's K2-Horizon dispatch over a mock engine (no device, no checkpoint).
-// b70-serve still refuses K2 before the device (prefill is spec 18c); this checks the wiring
-// it will use: Options::chat_format = ChatFormat::for_model_type("k2_horizon") makes
+// The chat-format half of the wiring b70-serve uses for K2 (the engine half - K2Engine behind
+// cli::k2::K2EngineAdapterT - is k2_serve_test's):
+// Options::chat_format = ChatFormat::for_model_type("k2_horizon") makes
 //   - the request's chat_template_kwargs reach the template (render_with_kwargs), checked
 //     first (a bad tool_call_format / reasoning_effort is a 400);
 //   - the output parsed as K2's: reasoning up to </ifm|think...> by the prompt's think tag,
