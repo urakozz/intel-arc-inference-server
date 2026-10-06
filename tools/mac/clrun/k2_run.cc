@@ -26,6 +26,14 @@
 // y: the grouped GEMMs pf_moe_gemm and the flash attention k2_pf_attn are DPAS, box only).
 // Bars: the sort, gather, dequant, norm and prep exact; the MoE combine exact (no exp); the
 // MoVA combine within 2 ulps (SiLU's exp).
+//
+// Spec 18e adds the portable int8 KV kernels (kv8_checks, against tests/kernels/k2_kv8_ref.h):
+// k2_kv8.cl's writer (decode M 1 / S 2 and prefill M 2048 over 37 rows, dense and MoVA's staged V)
+// - q, gate and the fp16 scales bitwise, the int8 codes bitwise but at 1-2 of ~38k places one code
+// apart (measured on the UHD 630: Apple's compiler has no -cl-fp32-correctly-rounded-divide-sqrt,
+// so y / scale can miss an exact half; the card is held to bitwise) -, k2_moe.cl's MOVA_STAGE build against its
+// bf16 build's V row, and the eager readers (score / k2_attn_eager.cl's softmax / P·V / un-rotating
+// reduce): scores bitwise, the rest within 1 ulp. The flash readers are sub-group / DPAS: box only.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -37,6 +45,7 @@
 
 #include "clrun.h"
 #include "common/bf16.h"
+#include "kernels/k2_kv8_ref.h"   // spec 18e
 #include "kernels/k2_pf_ref.h"
 #include "kernels/k2_ref.h"
 #include "kernels/pf_moe_ref.h"
@@ -259,6 +268,186 @@ void prefill_checks(clrun::Device& dev, const model::K2Desc& m) {
           worst = std::max(worst, ulps(got[size_t(pos + t) * 1024 + n],
                                        k2_pf_ref::mova_combine(st, rows.data() + size_t(t) * 32, y.data(), 1024, K, t, n)));
       report("prefill MoVA combine into V[pos + t]", worst, 2, size_t(C) * 1024);
+    }
+  }
+}
+
+// Spec 18e: the portable int8 KV kernels (src/kernels/k2/k2_kv8.cl's PREP and EAGER families, and
+// k2_moe.cl's MOVA_STAGE build) against tests/kernels/k2_kv8_ref.h. The DEC and FLASH families are
+// sub-group shuffles / DPAS: box only.
+const std::vector<std::string> kCtrlDefs = {"CTRL_POS=0", "CTRL_NACT=1", "CTRL_CUR=2", "CTRL_OUT=10",
+                                            "CTRL_DEBUG=18"};
+std::vector<std::string> with(std::vector<std::string> a, const std::vector<std::string>& b) {
+  a.insert(a.end(), b.begin(), b.end());
+  return a;
+}
+
+void kv8_checks(clrun::Device& dev, const model::K2Desc& m) {
+  namespace kr = k2_kv8_ref;
+  const uint32_t L = 256, pos = 37;
+  const std::vector<float> rope = loader::k2_rope_table(m, L);
+  // --- the writer, decode (M 1, S 2) and prefill (M 2048, S 1, a chunk of 37 rows) ----------------
+  for (int pf = 0; pf <= 1; ++pf)
+    for (int dense = 1; dense >= 0; --dense) {
+      const uint32_t N = dense ? m.attn_dense_n() : m.attn_sparse_n();
+      const uint32_t M = pf ? 2048 : 1, S = pf ? 1 : 2, C = pf ? 37 : 1, ld = pf ? (N + 255) / 256 * 256 : N;
+      std::vector<float> part = random_f32(size_t(S) * M * ld, -1.f, 1.f, 70 + dense + 2 * pf);
+      for (uint32_t s = 0; s < S; ++s)
+        for (uint32_t r = 0; r < C; ++r)
+          for (uint32_t j = 0; j < m.kv_heads; ++j)
+            part[(size_t(s) * M + r) * ld + m.q_n() + j * 128 + 9] *= 30.0f;   // K's outlier channel
+      const std::vector<uint16_t> staged = random_bf16(size_t(M) * m.kv_n(), -0.5f, 0.5f, 74);
+      std::vector<uint32_t> ctrl(32, 0);
+      ctrl[0] = pos;
+      ctrl[1] = C;
+      clrun::Program p(dev, "src/kernels/k2/k2_kv8.cl",
+                       with(kCtrlDefs, {"K2KV8_PREP=1", "M=" + std::to_string(M), "QKV_S=" + std::to_string(S),
+                                        "Q_HEADS=32", "KV_HEADS=8", "QKV_N=" + std::to_string(ld),
+                                        std::string("V_FROM_PARTIALS=") + (dense ? "1" : "0")}));
+      clrun::Buffer cb(dev, ctrl), pb(dev, part), rb(dev, rope), sb(dev, staged);
+      clrun::Buffer aq(dev, size_t(M) * m.q_n() * 4), ag(dev, size_t(M) * m.q_n() * 4);
+      clrun::Buffer kb(dev, size_t(L) * m.kv_n()), vb(dev, size_t(L) * m.kv_n()), ksb(dev, size_t(L) * 8 * 2),
+          vsb(dev, size_t(L) * 8 * 2);
+      p.run("k2_attn_prep_kv8", {size_t(m.q_heads + m.kv_heads) * 128, C}, {128, 1}, cb, pb, rb, aq, ag, kb, vb, ksb,
+            vsb, sb);
+      const std::vector<float> q = aq.read<float>(), g = ag.read<float>();
+      kr::Cache want(L, m.kv_heads);
+      size_t qbad = 0, gbad = 0;
+      for (uint32_t r = 0; r < C; ++r) {
+        const kr::Prep pr = kr::prep(part.data(), M, r, ld, S, rope.data() + size_t(pos + r) * 128, m.q_heads,
+                                     m.kv_heads, pos, dense ? nullptr : staged.data() + size_t(r) * m.kv_n(), want);
+        for (uint32_t i = 0; i < m.q_n(); ++i) {
+          qbad += pr.q[i] != q[size_t(r) * m.q_n() + i];
+          gbad += pr.gate[i] != g[size_t(r) * m.q_n() + i];
+        }
+      }
+      int code_worst = 0;
+      const auto diff = [&](const auto& a, const auto& b) {
+        size_t n = 0;
+        for (size_t i = 0; i < a.size(); ++i)
+          if (a[i] != b[i]) {
+            ++n;
+            code_worst = std::max(code_worst, std::abs(int(a[i]) - int(b[i])));
+          }
+        return n;
+      };
+      const size_t ksbad = diff(ksb.read<uint16_t>(), want.ks), vsbad = diff(vsb.read<uint16_t>(), want.vs);
+      code_worst = 0;
+      const size_t kbad = diff(kb.read<int8_t>(), want.k), vbad = diff(vb.read<int8_t>(), want.v);
+      // Apple's OpenCL is not given -cl-fp32-correctly-rounded-divide-sqrt (the B70 build is), so
+      // y / scale can land a ulp off and rint flip a code at an exact half: the Mac bar is q, gate
+      // and scales bitwise and the int8 codes within 1 at a handful of places (k2_kv8_kernels_test
+      // holds the card to bitwise).
+      const bool ok = qbad + gbad + ksbad + vsbad == 0 && code_worst <= 1 && kbad + vbad <= 4;
+      if (kbad + vbad + qbad + gbad + ksbad + vsbad)
+        std::printf("    differ: q %zu, gate %zu, K %zu, V %zu (codes off by <= %d), K scales %zu, V scales %zu\n",
+                    qbad, gbad, kbad, vbad, code_worst, ksbad, vsbad);
+      const std::string what = std::string("kv8 writer, ") + (pf ? "prefill" : "decode") +
+                               (dense ? ", dense" : ", MoVA staged V");
+      report_bool(what.c_str(), ok);
+    }
+  // --- MoVA's staged value experts: the staging row == the bf16 binary's V[pos] row ---------------
+  {
+    const uint32_t H = m.hidden, N = m.kv_n();
+    const size_t vblk = size_t(N / 16) * (H / 64) * 136;
+    const std::vector<uint32_t> vw = random_blocks(vblk * 64, 75);
+    const std::vector<uint16_t> xs = random_bf16(H, -0.1f, 0.1f, 76);
+    std::vector<uint32_t> vrow(32, 0);
+    const uint32_t vids[4] = {2, 31, 32, 63};
+    const float vws[4] = {0.625f, 0.75f, 0.5f, 0.625f};
+    for (uint32_t j = 0; j < 4; ++j) {
+      vrow[j] = vids[j];
+      std::memcpy(&vrow[8 + j], &vws[j], 4);
+    }
+    std::vector<uint32_t> ctrl(32, 0);
+    ctrl[0] = 5;
+    ctrl[1] = 1;
+    const std::vector<std::string> mova = {"M=1", "MOVA_E=64", "MOVA_K=4", "MOVA_D=2560", "MOVA_N=1024", "MOVA_KS=4"};
+    clrun::Program pb(dev, "src/kernels/k2/k2_moe.cl", with(kCtrlDefs, mova));
+    clrun::Program ps(dev, "src/kernels/k2/k2_moe.cl", with(with(kCtrlDefs, mova), {"MOVA_STAGE=1"}));
+    clrun::Buffer cb(dev, ctrl), vrb(dev, vrow), xb(dev, xs), vwb(dev, vw), kv(dev, size_t(8) * N * 2), st(dev, size_t(N) * 2);
+    pb.run("k2_mova_value", {size_t(N / 16) * 256, 1}, {256, 1}, cb, vrb, xb, vwb, kv);
+    ps.run("k2_mova_value", {size_t(N / 16) * 256, 1}, {256, 1}, cb, vrb, xb, vwb, st);
+    const std::vector<uint16_t> a = kv.read<uint16_t>(), b = st.read<uint16_t>();
+    report_bool("MoVA staged row == the bf16 build's V[pos]", std::equal(b.begin(), b.end(), a.begin() + size_t(5) * N));
+  }
+  // --- eager over int8: score_kv8, k2_attn_eager's softmax, pv_kv8, reduce_kv8 ----------------------
+  {
+    const uint32_t ML = 1024, QH = m.q_heads, KVH = m.kv_heads, TGT = 32, QN = m.q_n();
+    kr::Cache c(ML, KVH);
+    {
+      const std::vector<uint16_t> K = random_bf16(size_t(ML) * m.kv_n(), -1.f, 1.f, 80);
+      const std::vector<uint16_t> V = random_bf16(size_t(ML) * m.kv_n(), -1.f, 1.f, 81);
+      for (uint32_t r = 0; r < ML * KVH; ++r) {
+        c.put_k(r, &K[size_t(r) * 128]);
+        c.put_v(r, &V[size_t(r) * 128]);
+      }
+    }
+    std::vector<float> q(QN), g(QN);
+    {
+      const std::vector<uint16_t> qb = random_bf16(QN, -4.f, 4.f, 82);
+      for (uint32_t h = 0; h < QH; ++h) {
+        float x[128];
+        for (uint32_t i = 0; i < 128; ++i) x[i] = f32(qb[size_t(h) * 128 + i]);
+        common::kv8::hd128::rotate_q(x, &q[size_t(h) * 128]);
+      }
+      for (uint32_t i = 0; i < QN; ++i) g[i] = rf(32.0f + float(i % 9));   // softplus = g (no exp)
+    }
+    std::vector<uint32_t> ctrl(32, 0);
+    ctrl[1] = 1;
+    const std::vector<std::string> d = with(kCtrlDefs, {"M=1", "TGT=32", "Q_HEADS=32", "KV_HEADS=8"});
+    clrun::Program p8(dev, "src/kernels/k2/k2_kv8.cl", with(d, {"K2KV8_EAGER=1"}));
+    clrun::Program pe(dev, "src/kernels/k2/k2_attn_eager.cl", d);
+    clrun::Buffer cb(dev, ctrl), qb(dev, q), gb(dev, g), kb(dev, c.k), ksb(dev, c.ks), vb(dev, c.v), vsb(dev, c.vs);
+    clrun::Buffer sb(dev, size_t(QH) * ML * 4), part(dev, size_t(QH) * TGT * 130 * 4), ob(dev, size_t(QN) * 2);
+    for (uint32_t pos2 : {5u, 299u, 1023u}) {
+      ctrl[0] = pos2;
+      cb.write(ctrl.data(), ctrl.size() * 4);
+      const uint32_t len = pos2 + 1, blk = k2_ref::eager_block(pos2, 1, TGT);
+      p8.run("k2_attn_eager_score_kv8", {size_t(KVH) * 128, TGT}, {128, 1}, cb, qb, kb, ksb, sb, ML);
+      const std::vector<float> s = sb.read<float>();
+      pe.run("k2_attn_eager_softmax", {size_t(QH) * 128, 1}, {128, 1}, cb, sb, ML);
+      const std::vector<float> pr = sb.read<float>();
+      p8.run("k2_attn_eager_pv_kv8", {size_t(KVH) * 128, TGT}, {128, 1}, cb, sb, vb, vsb, part, ML);
+      p8.run("k2_attn_eager_reduce_kv8", {size_t(QH) * 128, 1}, {128, 1}, cb, part, gb, ob);
+      const std::vector<uint16_t> o = ob.read<uint16_t>();
+      size_t s_bad = 0, o_own = 0;
+      int p_worst = 0, o_worst = 0;
+      for (uint32_t h = 0; h < QH; ++h) {
+        const uint32_t j = h / (QH / KVH);
+        const kr::EagerHead e = kr::eager_head(q.data() + size_t(h) * 128, c, len, j, blk);
+        const float* srow = s.data() + size_t(h) * ML;
+        const float* prow = pr.data() + size_t(h) * ML;
+        for (uint32_t i = 0; i < len; ++i) {
+          s_bad += srow[i] != e.s[i];
+          p_worst = std::max(p_worst, ulps(rne(prow[i]), rne(e.p[i])));
+        }
+        // The P·V, un-rotation and gate on the DEVICE's probabilities, host side.
+        float orot[128], own[128];
+        for (uint32_t dd = 0; dd < 128; ++dd) {
+          float acc = 0.0f;
+          for (uint32_t b0 = 0; b0 < len; b0 += blk) {
+            float a = 0.0f;
+            for (uint32_t pp = b0; pp < std::min(len, b0 + blk); ++pp) a = std::fma(prow[pp], c.vd(c.row(pp, j), dd), a);
+            acc += a;
+          }
+          orot[dd] = acc;
+        }
+        common::kv8::hd128::unrotate(orot, own);
+        for (uint32_t dd = 0; dd < 128; ++dd) {
+          const float gate = g[size_t(h) * 128 + dd];
+          const uint16_t got = o[size_t(h) * 128 + dd];
+          o_own += got != k2_ref::attn_gate(own[dd], gate);
+          o_worst = std::max(o_worst, ulps(got, k2_ref::attn_gate(e.o[dd], gate)));
+        }
+      }
+      std::printf("  eager over int8 at %4u keys: scores %zu differ; probabilities worst %d ulps; output on "
+                  "the device's p %zu differ, against the host chain worst %d ulps\n", len, s_bad, p_worst,
+                  o_own, o_worst);
+      report_bool("kv8 eager scores bit-exact", s_bad == 0);
+      report("kv8 eager probabilities (Mac: 1/x not CR)", p_worst, 1, size_t(QH) * len);
+      report_bool("kv8 eager P.V + unrotate + gate on the device's p", o_own == 0);
+      report("kv8 eager output", o_worst, 1, QN);
     }
   }
 }
@@ -523,6 +712,7 @@ int main() {
         report("eager output", o_worst, 1, QN);
       }
     }
+    kv8_checks(dev, m);   // spec 18e
   } catch (const clrun::Error& e) {
     std::fprintf(stderr, "k2_run: %s\n", e.what());
     return 1;
