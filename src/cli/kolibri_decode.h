@@ -114,9 +114,6 @@ inline void check_args(const DecodeArgs& a, const model::Kolibri1Desc& d) {
     }
     return;
   }
-  // TASK6-GATE: removed by spec 20c Task 6 (the two-card engine's gates).
-  throw std::runtime_error("--pp 2: Kolibri-1 across two cards is spec 20c Task 6 (not landed in this build); "
-                           "--pp 1 runs a synthetic checkpoint or --layers N");
   if (a.device != l0::Context::kFromEnv)
     throw std::runtime_error("--pp 2 runs on GPUs 0 and 1 of what Level Zero shows (ZE_AFFINITY_MASK picks which "
                              "two); --device names one card - drop it");
