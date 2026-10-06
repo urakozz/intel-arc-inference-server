@@ -75,6 +75,11 @@ case "${1:-}" in
       complete "${SNAP_K2:-/nonexistent}"
     have oracle_k2 "oracle-out-k2/{prose,code,cjk}.{ids,golden.safetensors} (spec 18a's real-weight run: --with r14.oracle)" \
       bash -c 'for p in prose code cjk; do test -s oracle-out-k2/$p.ids && test -s oracle-out-k2/$p.golden.safetensors || exit 1; done'
+    # Spec 20c: Kolibri-1's golden sets (tools/box_validate/kolibri_oracle.sh <data tree> synth|real).
+    have oracle_kolibri "oracle-out-kolibri/{prose,code,de_prose,de_chat}.{ids,golden.safetensors} (spec 20c, needs 20b's checkpoint: kolibri_oracle.sh real)" \
+      bash -c 'for p in prose code de_prose de_chat; do test -s oracle-out-kolibri/$p.ids && test -s oracle-out-kolibri/$p.golden.safetensors || exit 1; done'
+    have oracle_kolibri_synth "oracle-out-kolibri-synth/{int4attn,bf16attn}/{ckpt/,prose,de_prose} (spec 20c: kolibri_oracle.sh synth)" \
+      bash -c 'for a in int4attn bf16attn; do test -s oracle-out-kolibri-synth/$a/ckpt/model.safetensors.index.json || exit 1; for p in prose de_prose; do test -s oracle-out-kolibri-synth/$a/$p.golden.safetensors || exit 1; done; done'
     have oracle_image "the oracle container image (tools/oracle/run_in_container.sh; passkey ids)" \
       docker image inspect "${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
     have tok_python "a python with tokenizers (${TOK_PYTHON:-?})" "${TOK_PYTHON:-/nonexistent}" -c 'import tokenizers'

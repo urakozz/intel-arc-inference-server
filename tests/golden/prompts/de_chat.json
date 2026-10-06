@@ -1,0 +1,23 @@
+{
+  "messages": [
+    {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
+    {"role": "user", "content": "Wie ist das Wetter in Heidelberg?"}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Das aktuelle Wetter in einer Stadt.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {"type": "string", "description": "Der Name der Stadt."}
+          },
+          "required": ["city"]
+        }
+      }
+    }
+  ],
+  "reasoning_effort": "high"
+}
