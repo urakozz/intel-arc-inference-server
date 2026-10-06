@@ -1205,6 +1205,118 @@ st_r19_load() {
 }
 
 # ======================================================================================
+# Spec 18e's 11 int8-KV binaries (src/kernels/CMakeLists.txt's 18e block, tests/CMakeLists.txt
+# B70_K2_KV8_KERNELS; ATTN_V2_TGT 32) and k2_moe.cl's binaries from before 18e (18b's four, 18c's
+# MoVA route): 18e gave k2_moe.cl a defaulted define (MOVA_STAGE), so those must keep their bytes.
+K2_KV8_BINS="k2_attn_prep_M1_N10240_S2_Q32KV8_V_KV8 k2_attn_prep_M1_N9280_S2_Q32KV8_KV8 k2_attn_M1_T32_Q32KV8_KV8
+  k2_attn_eager_M1_T32_Q32KV8_KV8 k2_attn_prep_M2048_N10240_S1_Q32KV8_V_KV8 k2_attn_prep_M2048_N9472_S1_Q32KV8_KV8
+  k2_pf_flash_attn_Q32KV8_KV8 k2_pf_flash_attn_Q32KV8_EAGER_KV8 k2_pf_flash_attn_Q32KV8_O_KV8
+  k2_pf_flash_attn_Q32KV8_EAGER_O_KV8 k2_mova_M1_E64_T4_D2560_N1024_STAGE"
+K2_MOE_PRE18E_BINS="k2_route_M1_E64_T4_N9280_O9216_S2 k2_route_M1_E100_T8_N128_O0_S1 k2_moe_M1_E100_T8_D2560_I768
+  k2_mova_M1_E64_T4_D2560_N1024 k2_route_M1_E64_T4_N9472_O9216_S1"
+row 21 "spec 18e Task 1 - K2-Horizon's int8 KV cache, rotkv at head_dim 128 (--kv-cache int8; spec 18 §13, plan 18e)"
+rownote 21 "After rows 14 and 15: each GPU stage waits for its bf16 sibling's PASS in this state (r14.k1 / r15.k1, r14.k3, r14.golden, r14.golden_eager, r15.prefill, r15.split, r15.golden). The twins need SNAP_K2, the golden ones oracle-out-k2 as well (--with r14.oracle makes it on the box CPU); without them those stages SKIP with 'missing data'."
+rownote 21 "K0's binary half is G0's g0.sha: a pre-existing binary that differs fails G0 and stops the line. k2_moe.cl's pre-18e binaries are compared only against a baseline that builds them: the default b32aaaf predates K2, so r21.k0 lists them as not compared - --baseline 6ee1d59 (main just before 18e) compares them."
+rownote 21 "Review Focus 1 (tools/oracle/kv8_k2_repeat.sh: 12a's probe on K2's real weights, Mac or box CPU, ~4-8 h) is not a stage; the K2 int8 tolerances (PROPOSED in k2_kv8_kernels_test) are re-derived from it, so r21.k1 runs at the proposals. A4 with int8 KV needs 18d's K2 A4 tooling (plan 18e): not built."
+rownote 21 "Passkey (r21.passkey) and speed (r21.speed) are opt-in; speed is a record with no bar - int8 against bf16 KV at depth 4096 / 32768 (both fit at max_len 40960), int8 alone at 65536 (max_len 69632: bf16 KV holds 46592)."
+stage r21.k0 21 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (G0) - k2_moe.cl's pre-18e binaries named (MOVA_STAGE defaults to the old line); the K2 bf16 suite not failed (rows 14 / 15: k2_decode_test, k2_golden_test, k2_prefill_test; a SKIP for missing data is noted, not counted); the 11 int8 binaries built"
+st_r21_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  need_ok r14.k1 r14.k3 r14.golden r14.golden_eager r15.k1 r15.prefill r15.split r15.golden
+  # shellcheck disable=SC2086 # the names, one word each, onto one line
+  set -- $K2_MOE_PRE18E_BINS
+  chk "bad=0; for b in $*; do f=kernels/\$b.bin; a=\$(awk -v f=\$f '\$2 == f { print \$1 }' $STATE/g0-sha/baseline.sha 2>/dev/null); u=\$(awk -v f=\$f '\$2 == f { print \$1 }' $STATE/g0-sha/under-test.sha 2>/dev/null); if [ -z \"\$u\" ]; then echo \"K0 k2_moe.cl \$b: NOT BUILT (not in g0.sha's list)\"; bad=1; elif [ -z \"\$a\" ]; then echo \"K0 k2_moe.cl \$b: not in the baseline build (the baseline predates K2) - not compared; --baseline 6ee1d59 compares it\"; elif [ \"\$a\" = \"\$u\" ]; then echo \"K0 k2_moe.cl \$b: identical to the baseline build\"; else echo \"K0 k2_moe.cl \$b: DIFFERS from the baseline build\"; bad=1; fi; done; [ \$bad = 0 ]" \
+    "k2_moe.cl's pre-18e binaries against the baseline"
+  kbins $K2_KV8_BINS
+  grab_all k2-moe '^K0 k2_moe[.]cl' 6
+  finish
+}
+stage r21.host 21 default cpu - - "host: kv8_test (hd128: torch's hadamard(128, 0) signs, the rotations against fp64), k2_kv8_ref_test (the flash epilogue's FWHT decomposition == unrotate bitwise, the writer, MoVA's mix quantised after the combine), k2_plan_test (the int8 auto lengths), k2_kv8_variant_names_test (every int8 binary the walks bind is built, nothing dead)"
+st_r21_host() {
+  run_tests '^(kv8_test|k2_kv8_ref_test|k2_plan_test|k2_kv8_variant_names_test)$'
+  finish
+}
+stage r21.k1 21 default gpu - r14.k1,r15.k1 "K1, no checkpoint: k2_kv8_kernels_test - the writers (decode, prefill, dense and MoVA-staged) bitwise k2_kv8_ref, the staged MoVA row bitwise the bf16 build's V row, decode flash within 2 bf16 ulps of the fp64 int8 attention (6 / 300 / 3000 keys) + replay, eager bitwise past softplus's threshold (6 / 300 / 3000 / 4096), prefill flash default >= 0.9999 / eager >= 0.999 against fp64 at depths 1 .. 32048, gated within 1 ulp (PROPOSED bars)"
+st_r21_k1() {
+  run_tests '^k2_kv8_kernels_test$' 'k2 kv8'
+  jgrab k1-kv8 '^k2_kv8_kernels_test$' 'bitwise|ulps|worst|bar|differ|OK|FAIL'
+  finish
+}
+stage r21.k3 21 default gpu k2 r21.k1,r14.k3 "K3 on the int8 cache: k2_decode_kv8_test (B70_KV_CACHE=int8) - 717 launches, plan == allocation with the int8 KV term, replay bitwise incl. route rows, int8 KV rows and scales"
+st_r21_k3() {
+  run_tests '^k2_decode_kv8_test$' 'k2 kv8'
+  jgrab k3-kv8 '^k2_decode_kv8_test$' '717|KV \(B70_KV_CACHE\)|plan|allocation|bitwise|OK|FAIL'
+  finish
+}
+stage r21.golden 21 default gpu k2,oracle_k2 r21.k3,r14.golden "K2 on the int8 cache: k2_golden_kv8_test and k2_golden_i8head_kv8_test against oracle-out-k2 - the tie-aware gate and the routing diagnostic unchanged (B70_K2_TIE_TOL as r14.golden); the non-tie / near-tie counts recorded beside r14.golden's bf16 runs"
+st_r21_golden() {
+  run_tests '^k2_golden(_i8head)?_kv8_test$' 'k2 kv8' '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
+  jgrab k2-golden-vs-bf16 '^k2_golden(_i8head)?(_kv8)?_test$' 'KV \(B70_KV_CACHE\)|tie|routing|determined|differ|OK|PASS|FAIL'
+  finish
+}
+stage r21.golden_eager 21 default gpu k2,oracle_k2 r21.k3,r14.golden_eager "K2 through the eager attention on the int8 cache: k2_golden_eager_kv8_test (B70_KV_CACHE=int8, B70_K2_ATTN=eager; 813 launches) - compared with r14.golden_eager's bf16 run"
+st_r21_golden_eager() {
+  run_tests '^k2_golden_eager_kv8_test$' 'k2 kv8' '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
+  jgrab k2-golden-eager-vs-bf16 '^k2_golden_eager(_kv8)?_test$' 'KV \(B70_KV_CACHE\)|attention|tie|routing|determined|differ|OK|PASS|FAIL'
+  finish
+}
+stage r21.prefill 21 default gpu k2 r21.k1,r15.prefill "K3 on prefill over the int8 cache: k2_prefill_kv8_test (2392 / chunk + 5 launches, plan == allocation, immediate / recorded / replayed bitwise, chunks of 64 bitwise; prefill KV and routes against decode's int8 fill) and k2_prefill_eager_kv8_test (B70_K2_ATTN=eager: the EAGER flash over int8 and decode's eager kv8 attention agree)"
+st_r21_prefill() {
+  run_tests '^k2_prefill(_eager)?_kv8_test$' 'k2 kv8'
+  jgrab k3-prefill-kv8 '^k2_prefill(_eager)?_kv8_test$' '2392|KV \(B70_KV_CACHE\)|launch|plan|allocation|bitwise|cos|median|p01|tie|agree|OK|FAIL'
+  finish
+}
+stage r21.split 21 default gpu k2 r21.k1,r15.split "prefill_split_k2_kv8_test: splits at multiples of 64 bitwise over the int8 cache (as r15.split's bf16 run)"
+st_r21_split() {
+  run_tests '^prefill_split_k2_kv8_test$' 'k2 kv8'
+  jgrab split-kv8 '^prefill_split_k2_kv8_test$' 'KV \(B70_KV_CACHE\)|bitwise|cos|split|PASS|FAIL'
+  finish
+}
+stage r21.golden_prefill 21 default gpu k2,oracle_k2 r21.prefill,r15.golden "K2 on prefill over the int8 cache: k2_golden_prefill_kv8_test and _c16_kv8 (chunks of 16) against oracle-out-k2 - the tie rule and the routing diagnostic on the prompt rows, the counts beside r15.golden's bf16 runs"
+st_r21_golden_prefill() {
+  run_tests '^k2_golden_prefill(_c16)?_kv8_test$' 'k2 kv8' '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
+  jgrab k2-golden-prefill-vs-bf16 '^k2_golden_prefill(_c16)?(_kv8)?_test$' 'KV \(B70_KV_CACHE\)|tie|routing|determined|differ|OK|PASS|FAIL'
+  finish
+}
+stage r21.cli 21 default gpu k2 r21.k1 "CLI: b70-decode <k2> --kv-cache int8 --max-len auto -> 91904 (bf16 head) / 98304 (--lm-head int8); with a prefill planned 83968 / 90368 (spec 18 §13, derived; recorded against the derived numbers)"
+r21_auto() {   # r21_auto WHAT DERIVED FLAGS... - the int8-KV auto length, recorded against the derived one
+  local what="$1" d="$2"; shift 2
+  chk "n=\$(tools/box_validate/auto_len.sh $SNAP_K2 $* --kv-cache int8) && echo \"K2 max_len auto, int8 KV, $what: \$n (derived $d\$([ \"\$n\" = $d ] || echo ', DIFFERS'))\"" \
+    "--kv-cache int8 --max-len auto, $what"
+}
+st_r21_cli() {
+  r21_auto "bf16 head" 91904 --depth 16 --tg 1
+  r21_auto "int8 head" 98304 --depth 16 --tg 1 --lm-head int8
+  r21_auto "prefill planned, bf16 head" 83968 --prefill-length 256 --tg 1
+  r21_auto "prefill planned, int8 head" 90368 --prefill-length 256 --tg 1 --lm-head int8
+  grab_all auto '^K2 max_len auto, int8 KV' 4
+  finish
+}
+stage r21.passkey 21 optin gpu k2,oracle_image r21.prefill "passkey near the one-card int8 ceiling: tools/probe/k2_passkey.sh int8 (--max-len auto -> 83968 with the prefill planned, N_TARGET 79000; 3/3 at placements 0.05 / 0.5 / 0.95)"
+st_r21_passkey() {
+  chk "MODEL=$SNAP_K2 tools/probe/k2_passkey.sh int8" "passkey near the int8 ceiling"
+  grab_all passkey '^passkey k2 [^ ]+( placement [0-9.]+)?: ' 4
+  finish
+}
+stage r21.speed 21 optin gpu k2 r21.k3 "speed, a record (no bar): decode at depth 4096 / 32768 with int8 against bf16 KV (max_len 40960), int8 alone at 65536 (max_len 69632), tg 256, bf16 head, interleaved, median of 3"
+st_r21_speed() {
+  idle before
+  local d arms="" ratios=""
+  for d in 4096 32768; do
+    arms="$arms bf16-kv@$d '$(bench_cmd "$SNAP_K2" --depth $d --tg 256 --max-len 40960)'"
+    arms="$arms int8-kv@$d '$(bench_cmd "$SNAP_K2" --depth $d --tg 256 --max-len 40960 --kv-cache int8)'"
+    ratios="$ratios --ratio int8-kv@$d/bf16-kv@$d"
+  done
+  arms="$arms int8-kv@65536 '$(bench_cmd "$SNAP_K2" --depth 65536 --tg 256 --max-len 69632 --kv-cache int8)'"
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "the K2 KV-form arms"
+  idle after
+  grab_all memory '^memory:' 6
+  grab_all ratio '^RATIO '
+  grab_all idle '^IDLE '
+  finish
+}
+
+# ======================================================================================
 row 22 "spec 16b - pipeline parallel decode across two B70s (--pp 2; spec 16 §8, plan 16b)"
 rownote 22 "Every GPU stage of this row needs BOTH cards: its commands set ZE_AFFINITY_MASK=0,1 themselves (the run exports DEVICE's one card); the GPU lock is the one lock for both. Both cards must be free of other DRM holders for r22.s1."
 rownote 22 "16a's probe (P0: peer bandwidth both ways, the three hand-offs at 10 KB / 20 MB, the TP remote-partial arm) has not run - it is plan 16a's own probe, not a stage. 16b ships both hand-offs behind --pipeline-handoff (copy default) and the split by bytes; r22.s1 is where the two hand-offs are first compared."
