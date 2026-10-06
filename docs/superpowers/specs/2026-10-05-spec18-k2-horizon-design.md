@@ -556,3 +556,80 @@ kwargs are 400s, and the default format renders without kwargs and leaves K2's t
 the snapshot calls) and lifting `b70-serve`'s refusal; Review Focus 3 (KV-only snapshots, the store
 keyed by model); a short greedy chat through the server equal to `b70-decode`; K4 (A4 - with a K2
 reader in `tools/toolcall/score.py` - and passkey); the comparison rows; the record.
+
+## 13. 18e Task 1 as built blind: int8 KV on K2 (2026-10-06, branch `spec18e-k2-kv8`)
+
+Written on the Mac with the box unavailable: plan 18e Task 1's code, tests and the accuracy probe's
+tooling. Nothing has run on the card, and the probe has not run on real weights (the checkpoint is
+not downloaded; Docker was busy). Defaults unchanged: `--kv-cache bf16` binds exactly the binaries
+it did (`tools/kernel_cmdlines`: +11 / -0 / ~0).
+
+**The scheme at head_dim 128 (Review Focus 1's object).** Spec 12 §8's `rotkv`, carried over:
+`src/common/kv8.h` namespace `hd128` (host) and `src/kernels/k2/k2_kv8.cl` (device) are one definition.
+
+- R = H_128 diag(s) / sqrt(128), **s = torch's `hadamard(128, 0)`** - derived as 12a derived the 256
+  (`randint(0, 2, (128,), Generator().manual_seed(0)) * 2 - 1`), which is the first 128 of 12a's
+  256 signs (the CPU generator draws one word per element, in order; checked with torch 2.2.2:
+  58 of 128 negative). `kv8_test` and `test_k2_kv8_probe.py` pin it.
+- 1 / sqrt(128) is not a power of two, so R is carried with exact scales: **K and V rows
+  `rotate_kv(x) = s ⊙ FWHT(x) / 8` (= sqrt(2) x R), q `rotate_q(x) = s ⊙ FWHT(x) / 16`
+  (= x R / sqrt(2)), the output `unrotate(y) = FWHT(s ⊙ y) / 16` (= y R^T / sqrt(2))**. So
+  rotate_q(q).rotate_kv(k) = q.k and unrotate(Σ p rotate_kv(v)) = Σ p v exactly in exact arithmetic;
+  every multiply of the scheme is exact, the FWHT stages one rounding each, ascending.
+- The quantiser is 12b's at N = 128 (`quantise_n<128>`; the 256 path is the same template at 256):
+  per (position, kv head) s16 = fp16_rne(amax / 127), q8 = clamp(rint(y / f16(s16)), ±127).
+- What is rotated is what the bf16 cache would hold: K = the RoPE chain's bf16 output; **V = MoVA's
+  routed mix after the value experts' combine (Review Focus 2)** on layers 3-47, the fused row's v
+  on 0-2. Decode: `k2_mova_value` at `MOVA_STAGE 1` (a new k2_moe.cl define, default the old line)
+  writes the mix to a staging row (`attn_out[m][kv_n]`, free until the attention writes it) and
+  `k2_attn_prep_kv8` rotates and quantises it with K. Prefill: `k2_pf_mova_combine`'s own binary
+  with pos 0 into the staging rows (`attn_out [C][kv_n]`), then the writer. No new allocation, no
+  new launch.
+- Readers: decode flash (`k2_attn_decode_kv8` / `k2_attn_reduce_kv8`: k2_attn.cl's orders on the
+  exactly dequantised operands, the reduce un-rotating each head through SLM before the softplus
+  gate); decode eager (`k2_attn_eager_{score,pv,reduce}_kv8` around k2_attn_eager.cl's unchanged
+  softmax: the reference's rounding points on the int8 operands, P·V in fp32, un-rotated, rounded
+  once, gated); prefill flash (`k2_pf_flash_attn_kv8`, default and EAGER: int8 as the exact bf16 DPAS
+  operand, K's scale on the score, V's folded into P as rne(p s_v) - one rounding more than bf16 KV -
+  and the **un-rotation fused into the epilogue**: a sub-group holds a row's 128 dims, FWHT stages
+  1-8 by xor shuffles, 16-64 across registers, ascending - `k2_kv8_ref_test` shows the decomposition
+  equal to `hd128::unrotate` bit for bit).
+
+**Launches.** Unchanged: 717 per decode token (813 eager), 2392 per prefill chunk + 5 - every int8
+binary replaces a bf16 one one for one.
+
+**Memory (derived, `k2_plan_test`; `runtime::KvLayout` at 8 kv heads x 128).** 99,840 B per position
+(48 x 2 x (1024 + 16)) against 196,608. `--max-len auto`, 32.53 GB card, 1.5 GB reserve:
+
+| | bf16 head | int8 head |
+|---|---:|---:|
+| int8 KV, decode only | **91904** | **98304** |
+| int8 KV, with the prefill scratch | **83968** | **90368** |
+| int8 KV, eager decode (+ the score row) | 91648 | - |
+| bf16 KV, decode only / with prefill | 46592 / 42752 | 49920 / 45824 |
+
+Plan 18e's "~64k on one card" was conservative: the planner gives ~84-98k.
+
+**Plumbing.** `K2Buffers` / `K2Engine` take a `KvCache` (default `runtime::default_kv_cache()`,
+i.e. `B70_KV_CACHE`); the capture and the prefill walk bind by the buffers' form;
+`runtime::k2::plan` / `max_len_that_fits` plan the KV term in the form; `b70-decode` accepts
+`--kv-cache int8` for K2 (`cli_reject_k2_kv8` retired) and tags its rows `int8-kv`. `b70-serve`
+still refuses K2 (18d). K2 has no snapshots yet (18d's engine side), so nothing there.
+
+**Validated on the Mac (indicative).** Host: `kv8_test` (+ hd128), `k2_kv8_ref_test`,
+`k2_plan_test`, `k2_kv8_variant_names_test`; every touched C++ file syntax-checked against Level
+Zero; the 11 new variants clang-checked. On the Mac's GPU (UHD 630, `tools/mac/clrun/k2_run`): the
+writer (decode and prefill, dense and MoVA-staged) - q, gate and scales bitwise, the int8 codes
+bitwise except 1-2 of ~38k one code apart (Apple's OpenCL has no correctly rounded divide; the card
+build has it); the staged MoVA row bitwise the bf16 build's V row; eager over int8 - scores,
+probabilities and outputs 0 differences at 6 / 300 / 1024 keys. Synthetic K2-shaped attention
+(fp64): rotkv per-head cosine >= 0.99993 at 6 / 300 / 3000 keys against per token's 0.99883.
+The flash readers (sub-groups, DPAS) have not run anywhere.
+
+**Review Focus 1 on real weights: tooling ready, not run.** `tools/oracle/k2_kv8_probe.py` (12a's
+method on k2_ref.py; every variant with its own residual stream and cache, so the routing diagnostic
+sees the routers' tie sensitivity), `test_k2_kv8_probe.py` (tiny weights: passes),
+`tools/oracle/kv8_k2_repeat.sh` (the Mac run). The `_kv8` gate twins and K1 are box work
+(box-validation-queue row 21); the tolerances (PROPOSED in `k2_kv8_kernels_test`: decode flash
+within 2 ulps of fp64, eager bitwise its reference, prefill flash >= 0.9999 default / 0.999 eager)
+are re-derived from the probe's numbers.

@@ -272,7 +272,7 @@ costs on your card (spec 8 §10).
 | `--pp-chunk C` | `2048` | positions per prefill chunk |
 | `--pp-backend B` | `l0-int8` | as for `b70-serve` |
 | `--lm-head bf16\|int8` | `bf16` | bf16 keeps the rows byte-matched with vLLM; int8 rows are marked `int8-head` |
-| `--kv-cache bf16\|int8` | `bf16` | as for `b70-serve`; int8 rows are marked `int8-kv` |
+| `--kv-cache bf16\|int8` | `bf16` | as for `b70-serve`; int8 rows are marked `int8-kv`. **K2-Horizon too** (spec 18e, built blind, on-card gates pending): the same scheme at head_dim 128 - 97.5 KiB per token instead of 192 KiB, so `--max-len auto` gives ~92k (bf16 head) / ~98k (`--lm-head int8`) decode-only and ~84k / ~90k with `--prefill` (bf16 KV: ~47k / ~50k and ~43k / ~46k; derived) |
 | `--profile` | - | replay `--steps` instrumented decode steps and print the per-launch anatomy (never a bench row) |
 | `--steps N` | `32` | `--profile`: steps per session |
 | `--repeats R` | `1` | `--profile`: independent sessions, for the spread (R >= 5 before claiming a delta under ~0.3 ms) |
