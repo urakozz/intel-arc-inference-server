@@ -2622,4 +2622,38 @@ add_executable(kolibri_pf_ref_test kernels/kolibri_pf_ref_test.cc)
 target_include_directories(kolibri_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME kolibri_pf_ref_test COMMAND kolibri_pf_ref_test)
 set_tests_properties(kolibri_pf_ref_test PROPERTIES LABELS "kolibri;prefill")
+if(B70_KOLIBRI)
+  # Task 2: every binary the prefill walk binds, both attention arms and forms (src/kernels/CMakeLists.txt's
+  # spec 20d block; pf_gemm_T0, 20c's kol_route and K2's pf_res_fold SP0 / 6144 x 2560 slab are reused).
+  set(B70_KOLIBRI_PREFILL_KERNELS
+    kernel_kol_pf_embed_gather_D2560_V128000 kernel_pf_res_fold_K2560_SP0_G20 kernel_pf_res_fold_K2560_SP1_G20_Z
+    kernel_kol_norm_M2048_K2560_G20_W20 kernel_kol_post_add_M2048_K2560_G20
+    kernel_k2_pf_dequant_slab_K2560_N7168 kernel_k2_pf_dequant_slab_K6144_N2560
+    kernel_kol_pf_bf16_slab_K2560_N7168 kernel_kol_pf_bf16_slab_K6144_N2560 kernel_pf_gemm_T0
+    kernel_kol_attn_prep_M2048_N7168_S1_Q48KV4_R4096 kernel_kol_attn_prep_M2048_N7168_S1_Q48KV4_F
+    kernel_kol_pf_flash_attn_Q48KV4_W513_R4096 kernel_kol_pf_flash_attn_Q48KV4_W513_R4096_EAGER
+    kernel_kol_pf_flash_attn_Q48KV4_F kernel_kol_pf_flash_attn_Q48KV4_F_EAGER
+    kernel_pf_moe_router_K2560_N512 kernel_kol_route_M1_E384_T6_N512_L256 kernel_kol_pf_moe_E384_T6_D2560_I512_L256
+    kernel_pf_moe_gemm_K2560_N1024_SILU kernel_pf_moe_gemm_K512_N2560)
+  # Host: the names the walk binds (kernels::kolibri::prefill_variants) are exactly this list.
+  add_executable(kolibri_pf_variant_names_test kernels/kolibri_pf_variant_names_test.cc)
+  target_include_directories(kolibri_pf_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(kolibri_pf_variant_names_test PRIVATE b70_kolibri_model)
+  b70_target_kernel_dir(kolibri_pf_variant_names_test)
+  add_test(NAME kolibri_pf_variant_names_test COMMAND kolibri_pf_variant_names_test ${B70_KOLIBRI_PREFILL_KERNELS})
+  set_tests_properties(kolibri_pf_variant_names_test PROPERTIES LABELS "kolibri;prefill")
+  # K1 for the prefill on the card, no checkpoint: every prefill kernel at the real shapes against
+  # kolibri_pf_ref.h, grouped == dense (pf_gemm_T0_SILU / pf_gemm_T0), the windowed flash against fp64.
+  add_executable(kolibri_pf_kernels_test kernels/kolibri_pf_kernels_test.cc)
+  target_include_directories(kolibri_pf_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(kolibri_pf_kernels_test PRIVATE b70_prefill_host b70_kolibri_loader b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(kolibri_pf_kernels_test)
+  endif()
+  b70_target_kernel_dir(kolibri_pf_kernels_test)
+  add_dependencies(kolibri_pf_kernels_test ${B70_KOLIBRI_PREFILL_KERNELS} ${B70_KOLIBRI_DECODE_KERNELS}
+    kernel_pf_gemm_T0_SILU)
+  add_test(NAME kolibri_pf_kernels_test COMMAND kolibri_pf_kernels_test)
+  set_tests_properties(kolibri_pf_kernels_test PROPERTIES LABELS "kolibri;prefill" TIMEOUT 1800)
+endif()
 # ==== Spec 20d: Kolibri-1 prefill ==== (end) ====
