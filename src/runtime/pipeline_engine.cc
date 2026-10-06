@@ -26,8 +26,11 @@ constexpr uint32_t kStatusTimeout = 1, kStatusStale = 2;
 
 PipelineLink::PipelineLink(l0::Context& d0, l0::Context& d1, const model::ModelDesc& d,
                            PpHandoff m)
+    : PipelineLink(d0, d1, pp_landing_layout(d), m) {}
+
+PipelineLink::PipelineLink(l0::Context& d0, l0::Context& d1, const PpLandingLayout& l, PpHandoff m)
     : mode(m),
-      layout(pp_landing_layout(d)),
+      layout(l),
       landing(d1, l0::MemKind::Device, layout.total, kPpLandingAlign),
       send_seq(d0, l0::MemKind::Device, kPpStateWords * 4),
       recv_state(d1, l0::MemKind::Shared, kPpStateWords * 4),

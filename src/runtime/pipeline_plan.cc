@@ -150,10 +150,14 @@ PpWeights pp_weights(const model::ModelDesc& d, WeightKind lm_head) {
 }
 
 PpLandingLayout pp_landing_layout(const model::ModelDesc& d) {
-  PpLandingLayout l;
   const DecodeScratchSizes s = DecodeScratchDims::sizes(kMinAutoMaxLen, d);   // rows and sums: max_len-free
-  l.resid_bytes = s.resid;
-  l.sumsq_bytes = s.norm_sumsq;
+  return pp_landing_layout(s.resid, s.norm_sumsq);
+}
+
+PpLandingLayout pp_landing_layout(size_t resid_bytes, size_t sumsq_bytes) {
+  PpLandingLayout l;
+  l.resid_bytes = resid_bytes;
+  l.sumsq_bytes = sumsq_bytes;
   l.sumsq_off = round_up(l.resid_bytes, kPpPage);
   l.stamp_off = l.sumsq_off + l.sumsq_bytes;
   l.flag_off = round_up(l.stamp_off + 4, kPpPage);
