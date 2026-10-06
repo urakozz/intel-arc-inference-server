@@ -193,8 +193,8 @@ Both CLIs take the repo id and resolve it through the local cache
 (`$HF_HOME` or `~/.cache/huggingface`, revision from `refs/main`); a snapshot
 directory path works too.
 
-Commands for each model (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5, K2-Horizon, and Kolibri-1 - decode on two
-cards, built blind, needs spec 20b's checkpoint), what each
+Commands for each model (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5, K2-Horizon, and Kolibri-1 - decode and
+prefill (`l0` only) on two cards, built blind, needs spec 20b's checkpoint), what each
 one supports, its limits, and which configurations have actually run on a B70:
 [docs/19-running-models.md](docs/19-running-models.md).
 
@@ -220,7 +220,7 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
 
 | flag | default | what it does |
 |---|---|---|
-| `<snapshot-or-repo>` | required | HF repo id resolved in the local cache, or a snapshot directory; never downloads. The model (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5 or K2-Horizon) comes from its `config.json`. **K2-Horizon** is served by its own engine since spec 18d - built without the card, its box gates pending (queue row 25): no MTP head (`--mtp`, `--spec mtp\|lookup` refused), prefill on `l0` only, its `chat_template_kwargs` `tool_call_format` (`xml`, `xml_typed`, `json`) and `reasoning_effort` (`high`, `medium`, `low`) reach its template, the prefix cache keeps KV-only snapshots; `--max-len auto` ~46k with bf16 KV, ~90k with `--kv-cache int8` (int8 head, derived). One card for every model: `--pp` is `b70-decode`'s. Kolibri-1 is refused until spec 20e (`b70-decode` runs it on two cards, spec 20c). |
+| `<snapshot-or-repo>` | required | HF repo id resolved in the local cache, or a snapshot directory; never downloads. The model (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5 or K2-Horizon) comes from its `config.json`. **K2-Horizon** is served by its own engine since spec 18d - built without the card, its box gates pending (queue row 25): no MTP head (`--mtp`, `--spec mtp\|lookup` refused), prefill on `l0` only, its `chat_template_kwargs` `tool_call_format` (`xml`, `xml_typed`, `json`) and `reasoning_effort` (`high`, `medium`, `low`) reach its template, the prefix cache keeps KV-only snapshots; `--max-len auto` ~46k with bf16 KV, ~90k with `--kv-cache int8` (int8 head, derived). One card for every model: `--pp` is `b70-decode`'s. Kolibri-1 is refused until spec 20e (`b70-decode` runs it on two cards: decode, spec 20c, and prefill on `l0` only, spec 20d). |
 | `--host H` | `0.0.0.0` | listen address |
 | `--port P` | `8000` | listen port |
 | `--served-name NAME` | `b70` | model name in the OpenAI API (`/v1/models`, the `model` field) |
@@ -309,7 +309,7 @@ leave them unset to run what the gates ran.
 | `B70_PREFILL_REPLAY` | prefill (all models, Level Zero backends) | off | `1` records each prefill chunk's command list once and replays it from then on. Experimental; refused with `sycl-tla`. |
 | `B70_PREFILL_PROFILE` | prefill | off | `1` times every prefill phase; `b70-decode --bench --prefill-length` prints the table on stderr (Qwen-family models; not yet for K2). It adds a host wait per phase, so never use it for a recorded row. |
 | `B70_K2_ATTN` | `b70-decode`, K2-Horizon | `flash` | K2's attention, decode and prefill both. `eager` rounds scores and probabilities to bf16 where the reference does (spec 18 §10.1): 813 launches per token instead of 717, plus a score row of 4 B x 32 heads x max_len. The first box session decides which becomes the default. Other values are refused. |
-| `B70_KOLIBRI_ATTN` | `b70-decode`, Kolibri-1 | `flash` | Kolibri-1's decode attention. `eager` is the reference's bf16 chain (spec 18 §10.1's switch, spec 20 §11): 856 launches per token instead of 756, plus a score row of 4 B x 48 heads x max_len. Other values are refused. |
+| `B70_KOLIBRI_ATTN` | `b70-decode`, Kolibri-1 | `flash` | Kolibri-1's decode and prefill attention. `eager` is the reference's bf16 chain (spec 18 §10.1's switch, spec 20 §11): 856 launches per token instead of 756, plus a score row of 4 B x 48 heads x max_len; prefill binds the `_EAGER` flash builds (the same 2252 launches per chunk, spec 20 §12). Other values are refused. |
 | `B70_GIT_SHA` | `b70-decode --bench` | `unknown` | the commit printed in the bench row. The box's tree has no `.git`, so `tools/bench_decode.sh` sets it. |
 
 The scripts in `tools/`:
