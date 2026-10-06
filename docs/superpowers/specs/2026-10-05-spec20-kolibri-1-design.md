@@ -2,7 +2,7 @@
 
 **Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**. 20a built
 2026-10-06 (§10).
-Plans 20c-20e written 2026-10-06: `docs/superpowers/plans/2026-10-06-spec20c-kolibri-decode.md`, `...-spec20d-kolibri-prefill.md`, `...-spec20e-kolibri-serving.md` (two cards on spec 16b's merged pieces, `--pp 2` Kolibri's default).
+20c built blind 2026-10-06 (§11, branch `spec20c-kolibri-decode`; box queue row 24). Plans 20c-20e written 2026-10-06: `docs/superpowers/plans/2026-10-06-spec20c-kolibri-decode.md`, `...-spec20d-kolibri-prefill.md`, `...-spec20e-kolibri-serving.md` (two cards on spec 16b's merged pieces, `--pp 2` Kolibri's default).
 
 **Why this model:** Aleph Alpha's Kolibri-1 is a German- and English-focused reasoning MoE with tool
 calling, Apache-2.0, released 2026-10-03. Spec 20 serves it in this engine's own format (int4 g64
@@ -262,3 +262,107 @@ Plan: `docs/superpowers/plans/2026-10-05-spec20a-kolibri-reference-and-quant.md`
 - **Open:** decision 1 (where 20b runs; the script prints the first block's tuning time - x 50 is
   the estimate), decision 2 (from 20b's table).
 
+
+## 11. 20c as built blind (2026-10-06)
+
+Plan: `docs/superpowers/plans/2026-10-06-spec20c-kolibri-decode.md`, branch `spec20c-kolibri-decode`.
+Written on the Mac: the box was unavailable and the real int4 checkpoint does not exist yet (decision
+1, 20b), so nothing here has run on a card, and every real-weight gate SKIPs (77). A synthetic
+real-width checkpoint carries the Mac gates and, on the box, KL2 / KL3 before 20b. Box validation:
+queue row 24. Every number below is **derived** unless marked measured.
+
+**Structure** (K2's pattern, spec 18 §5.1): `model::Kolibri1Desc` (`src/model/kolibri1.*`),
+`loader::load_kolibri1` (`src/loader/kolibri1_*`), `runtime::kolibri::KolibriEngine`
+(`src/runtime/kolibri/`), Kolibri-only kernels `src/kernels/kolibri/kol_*.cl` (host half
+`src/kernels/kolibri_kernels.h`), `b70-decode`'s dispatch on `model_type kolibri1`
+(`src/cli/kolibri_decode.h`). Reused at Kolibri's shapes from new CMake lines only: `gemv.cl` (the
+int4 attention arm), `gemv_bf16.cl` (router, bf16 attention arm, bf16 head), `gemv_i8w.cl` (int8 head),
+`prep.cl`'s `prep_res_fold` (SP0, and with `ZERO_RESID` at SP1 / SP4), `embed_gather.cl`, `argmax.cl`.
+Kernel command lines +23 / -0 / ~0 (K2 on; 25 without - `gemv_M1_K6144_N2560_S4_L0` and
+`prep_res_fold_M1_K2560_SP0_G20` are K2's binaries, built here only without K2). No existing `.cl` edited.
+
+**The layer list (15 launches; 17 under eager):** `kol_norm_finish` (input_layernorm) · q||k||v GEMV
+(int4 S2 L0 / bf16) · `kol_attn_prep` · `kol_attn_decode` + `kol_attn_reduce` (eager: score,
+softmax, P·V, reduce) · o_proj GEMV (int4 S4 / bf16) · `prep_res_fold ..._Z` (o_proj's row `a`, Σa²)
+· `kol_post_add` (post_attn_norm, resid +=, Σresid²) · `kol_norm_finish` (post_attention_layernorm)
+· router `gemv_bf16` (fp32 logits) · `kol_route` · `kol_moe_gate_up` · `kol_moe_down` (into `mo`,
+not the residual) · `prep_res_fold SP0` (Σmo²) · `kol_post_add` (post_ffn_norm). Plus embed + fold on
+device 0 and four at the head: **756 launches at 50 layers, 856 eager**; on two cards the same sum
+(the cut is 16b's: device 0 ends with layer s-1's `kol_post_add`, which already wrote `resid` and the
+20 sums layer s's norm reads), + pp_send / pp_recv under `peer` (758 / 858).
+
+**The sandwich** (Review Focus 1) is two kernels around an unchanged stage A: `prep_res_fold _Z`
+writes the sub-block's own bf16 row and its Σ² (MoE: `kol_moe_down` writes `mo`, `SP0` re-reads
+it), `kol_post_add` normalises it (x̂ rounded, then × the plain post-norm w), adds it to the residual
+with one rounding and reduces the new residual's per-chunk Σ² in prep_res_fold's tree - which is
+what the next `kol_norm_finish` (x̂ rounded, then × w: two roundings, the reference's) reads.
+
+**The ring: 4096 slots per sliding layer, not 513** (335.5 MB over 40 layers, against §2's ~42 MB for a
+513-slot ring): a power of two ≥ a prefill chunk (2048, 20d) + window - 1, so a chunk's own keys and
+the window before it never collide, and key p's row is `p & 4095`. Flash attention walks a sliding
+layer in ABSOLUTE 64-key blocks from `lo & ~63`: a block, and every 16-key wave in it, is contiguous
+ring rows (4096 is whole 64-row blocks), so no 2D block read crosses the ring's end; a block wholly
+below the row's window is skipped by the reduce. Full (NoPE) layers keep the growing cache, 20 KiB a
+position for 10 layers.
+
+**The router: §4's "512-lane variant" is 512 SLOTS on 256 lanes** (two experts a lane, the Mac's
+256 work-item cap); the router GEMV's 128 padded rows are zero and their slots are never ranked
+(sel = -INF). `kol_route`: sel = fp32 logit + fp32 bias, rank with ties to the lower id, ids
+ascending, weights sigmoid(logit) in fp32, never rounded, not renormalised. The combine
+(`kol_moe_down`): ascending id, `acc = acc + f32(rne(y_j)) × w_j` with the product rounded before
+the add (`FP_CONTRACT OFF`: the reference's `index_add_` of `y.float() * w`), + the bf16 shared
+expert, one rounding. The shared expert is the MoE block's seventh slot, read from bf16
+`gemv_bf16` tiles (decision 4 stays open: bf16 proposed).
+
+**Attention:** q / k RMSNorm per head (128-lane tree), RoPE only in sliding layers
+(`rne(rne(y·cos) + rne(rot(y)·sin))`, the RoPE table bitwise torch's at 0, 1, 513, 100000, 262143 -
+measured on the Mac, `kolibri1_rope_test`), full layers position-free. Flash (`kol_attn.cl`,
+`k2_attn.cl`'s v2 structure at GQA 12, no gate) is the default; `B70_KOLIBRI_ATTN=eager`
+(`kol_attn_eager.cl`, `k2_attn_eager.cl` without the gate) is the reference's bf16 chain, for the
+box's A/B (spec 18 §10.1's rule).
+
+**Two cards** (16b's pieces, reused): placement at load (`load_kolibri1` puts each layer straight onto
+its device; the model is never whole on device 0), the split by bytes = `runtime::pp_balance` over
+Kolibri's per-layer bytes at max_len (weights + 8 MiB ring or max_len × 4 KiB of full KV),
+`PipelineLink` from the descriptor-free `pp_landing_layout(5120, 80)` (two overloads added to 16b's
+files, the `ModelDesc` forms delegating byte for byte), the `copy` / `peer` hand-off, the Control
+mirror and the bounded fence. Real model, int4 attention, int8 head, 262144: **split 25**, device 0
+24.413 GB against device 1 24.086 GB (split 24: 23.045 / 25.454; 26: 25.252 / 23.247) - the plan
+estimated ~24.11 / ~23.78. `--max-len auto` on two cards: 262144 (capped by decision 3). One card
+cannot hold the model (~42.5 GB of int4 weights): `b70-decode` defaults to `--pp 2` and refuses `--pp 1`
+naming the bytes unless the planner says it fits (a synthetic checkpoint, `--layers N` -
+development mode, e.g. `--layers 30` ~26 GB).
+
+**Known deviations** (ulp-level, documented, not hidden): flash keeps fp32 probabilities against the
+reference's eager bf16; eager's 8-lane softmax indexes a sliding row from its first visible key (the
+cached decode pass's row), which differs from the reference's PROMPT pass for prompt rows past
+position 512; sigmoid's OpenCL `exp` against torch's (≤ 2 ulp in the fp32 weight; 1 ulp measured on
+the Mac GPU); the reference's prompt rows are a full-sequence forward, the engine ingests one replay
+per id.
+
+**Validated on the Mac (measured):** the host tests (`kolibri1_test`, `kolibri1_repack_test` - every
+expert block of two real-width layers word by word, both attention arms, refusals by name -,
+`kolibri1_rope_test`, `kolibri_ref_test` - the kernels' twin BITWISE against `kolibri_ref.py`'s own
+outputs (`tests/kernels/kolibri_fixture.h`): norms, q/k norm + RoPE, the route incl. a tie at the
+cut, the combine, eager attention scores / probabilities / outputs at 5, 512, 513, 700 sliding and 700
+full -, `kolibri_variant_names_test`, `kolibri_plan_test`, `pipeline_plan_test`'s overload);
+`kolibri_run` on the Mac's GPU (indicative): every portable kernel exact against the twin, and the
+eager attention exact against torch's fixture; Level Zero and OpenCL syntax of every new source and
+variant; a 1-layer real-width synthetic checkpoint (2.15 GB) `ACCEPTED` by `check.py`.
+
+**Deviations from the plan:** `KolPlacement` carries the layer count (`{devices, split, layers}`:
+the two-field form cannot say where device 1 ends); `KolLayer::qkv` / `oproj` are
+`unique_ptr<DeviceWeight>` (`l0::Mem` has no default constructor); the runtime, not Task 5, already
+holds the two-card half (Task 6 lifted the CLI gate and added its gates); the bench prompt
+(`tests/golden/prompts/kolibri_bench.ids`, `kKolibriBenchPrompt`) is PLACEHOLDER legal ids - no
+Kolibri `tokenizer.json` on the Mac and nothing downloaded - until `kolibri_oracle.sh synth` prints
+de_prose's first 42; the box queue row is 24 (23 is 16c's); the fixture compares coarse inputs
+bitwise and generic ones within an ulp (the Σx² order is torch's own), and eager outputs against the
+fp64 form at cosine ≥ 0.999 on the host (flash's 0.99999 bar is the card test's); there is no
+existing b70-serve refusal test to copy, so `cli_reject_kolibri_serve` is its own `sh -c` block.
+
+**What the box must prove (row 24):** K0 (every pre-existing binary's sha256, the suites); the 23
+binaries compile under ocloc; K1 (`kolibri_kernels_test`: `kol_attn.cl`'s sub-group / 2D path over the
+ring, the 224-lane `kol_moe_down`, the 256-lane route); the loader on the synthetic checkpoints; K3 and
+KL2 on both synthetic arms (flash and eager); `--pp 2` bitwise `--pp 1` under both hand-offs; the CLI.
+After 20b: the partial forward (30 layers, one card), KL2 / K3 on two cards, the speed rows.

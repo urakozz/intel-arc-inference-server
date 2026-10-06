@@ -12,7 +12,7 @@
 #   BASE   the baseline tree (G0's reference build)
 #   STATE  this run's state directory (logs, status lines, JUnit files)
 #   STAGE  the stage being run; LOG its log file
-#   B70_GIT_SHA, BV_BASE_SHA, JOBS, CMAKE_ARGS, SNAP_QWEN, SNAP_AGNES, SNAP_ORNITH, SNAP_K2,
+#   B70_GIT_SHA, BV_BASE_SHA, JOBS, CMAKE_ARGS, SNAP_QWEN, SNAP_AGNES, SNAP_ORNITH, SNAP_K2, SNAP_KOLIBRI,
 #   PORT, ...
 
 # ---- the registry ---------------------------------------------------------------------
@@ -66,13 +66,14 @@ bv_defaults() {
   : "${SNAP_AGNES:=urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ}"
   : "${SNAP_ORNITH:=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ}"
   : "${SNAP_K2:=urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ}"   # B70_K2_SNAPSHOT
+  : "${SNAP_KOLIBRI:=urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ}"   # B70_KOLIBRI_SNAPSHOT (spec 20b)
   : "${TOK_PYTHON:=$HOME_R/auto-round/.venv/bin/python}"
   : "${JOBS:=44}"
   : "${DEVICE:=0}"
   : "${PORT:=8013}"
   : "${CMAKE_ARGS:=}"
   : "${B70_GIT_SHA:=unknown}"
-  export SNAP_QWEN SNAP_AGNES SNAP_ORNITH SNAP_K2 TOK_PYTHON JOBS DEVICE PORT CMAKE_ARGS B70_GIT_SHA
+  export SNAP_QWEN SNAP_AGNES SNAP_ORNITH SNAP_K2 SNAP_KOLIBRI TOK_PYTHON JOBS DEVICE PORT CMAKE_ARGS B70_GIT_SHA
 }
 
 # status_of ID - this run's recorded result of a stage (empty if none)
