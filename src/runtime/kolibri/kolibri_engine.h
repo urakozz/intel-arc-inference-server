@@ -21,8 +21,8 @@
 // Spec 20c: Kolibri-1's decode loop - runtime::Engine's contract (K2Engine's arrangement) on one card
 // or, spec 16b's pieces, two: it owns the weights (each layer on its device: loader::load_kolibri1's
 // parts), one KolibriBuffers and one captured list per device, and a token is a replay of the lists.
-// A prompt is fed one id per replay (`ingest`; spec 20d prefills in chunks). No MTP (Kolibri has no
-// head), no prefill, no snapshots (spec 20e: the ring is part of the snapshot).
+// A prompt is fed one id per replay (`ingest`) or, spec 20d, in chunks (`prefill`, below). No MTP
+// (Kolibri has no head), no snapshots (spec 20e: the ring is part of the snapshot).
 //
 // **Two cards** (spec 16 §8's rules, PipelineEngine's, here for a model PipelineEngine cannot run):
 // layers [0, s) on device 0 with the embedding, [s, L) plus the head on device 1 (KolPlacement). The
@@ -95,7 +95,8 @@ class KolibriEngine {
   const loader::KolLoadedModel& model() const { return model_; }
   const CapturedStep& step(uint32_t dev) const;
   // P4's test hook (PipelineEngine's): the next step submits device 1's list only - a hand-off that
-  // never arrives. The step must throw within the bounds, never hang.
+  // never arrives. The step must throw within the bounds, never hang. Spec 20d: the next prefill CHUNK
+  // likewise (device 0's half not appended), unless prefills are replayed.
   void drop_next_handoff() { drop_next_ = true; }
 
   // --- spec 20d: prefill (defined in b70_kolibri_prefill) ---------------------------------------------
