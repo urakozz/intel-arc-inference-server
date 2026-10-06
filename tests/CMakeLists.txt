@@ -2375,4 +2375,24 @@ target_link_libraries(kolibri1_test PRIVATE b70_kolibri_model)
 add_test(NAME kolibri1_test COMMAND kolibri1_test ${CMAKE_SOURCE_DIR}/tests/model/kolibri1/config.json
   ${CMAKE_SOURCE_DIR}/tests/model/kolibri1/synth5_bf16attn.json)
 set_tests_properties(kolibri1_test PROPERTIES LABELS kolibri)
+# Task 3: the loader's host half on a synthetic checkpoint (both attention arms), the RoPE table
+# against torch's; then the card's load of the synthetic checkpoints and of the real one truncated.
+foreach(t kolibri1_repack_test kolibri1_rope_test)
+  add_executable(${t} loader/${t}.cc)
+  target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(${t} PRIVATE b70_kolibri_loader)
+  add_test(NAME ${t} COMMAND ${t})
+  set_tests_properties(${t} PROPERTIES LABELS kolibri)
+endforeach()
+set(B70_KOLIBRI_SNAPSHOT "urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ" CACHE STRING "Kolibri-1 int4 checkpoint (spec 20b)")
+set(B70_KOLIBRI_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri-synth" CACHE PATH
+  "Task 1's synthetic checkpoints and golden sets (tools/box_validate/kolibri_oracle.sh synth)")
+add_executable(kolibri1_load_checkpoint_test loader/kolibri1_load_checkpoint_test.cc)
+target_include_directories(kolibri1_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kolibri1_load_checkpoint_test PRIVATE b70_kolibri_loader b70_l0)
+add_test(NAME kolibri1_load_synth_int4attn_test COMMAND kolibri1_load_checkpoint_test ${B70_KOLIBRI_SYNTH_DIR}/int4attn/ckpt)
+add_test(NAME kolibri1_load_synth_bf16attn_test COMMAND kolibri1_load_checkpoint_test ${B70_KOLIBRI_SYNTH_DIR}/bf16attn/ckpt int8)
+add_test(NAME kolibri1_load_partial_test COMMAND kolibri1_load_checkpoint_test ${B70_KOLIBRI_SNAPSHOT} bf16 30)
+set_tests_properties(kolibri1_load_synth_int4attn_test kolibri1_load_synth_bf16attn_test kolibri1_load_partial_test
+  PROPERTIES LABELS "checkpoint;kolibri" SKIP_RETURN_CODE 77 TIMEOUT 1800)
 # ==== Spec 20c: Kolibri-1 decode ==== (end) ====
