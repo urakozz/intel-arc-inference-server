@@ -1,0 +1,183 @@
+{
+ "name": "t3_rename-openai",
+ "expect": "edit",
+ "enable_thinking": false,
+ "messages": [
+  {
+   "role": "system",
+   "content": "Du bist ein Coding-Agent und arbeitest in einem lokalen Checkout von b70-inference-server, einer LLM-Inferenz-Engine für die Intel Arc Pro B70, geschrieben in C++ mit Level-Zero-Kernels, dazu Werkzeuge in Python und Shell. Das Repository liegt unter /work.\n\nDu hilfst bei Aufgaben der Softwareentwicklung: Code finden, ihn erklären, ihn ändern sowie Builds und Tests ausführen. Nutze die Werkzeuge, die dir zur Verfügung stehen, um das Repository zu untersuchen; rate niemals den Inhalt einer Datei, die du nicht gelesen hast. Suche Code bevorzugt mit grep und glob, lies ihn mit read, ändere ihn mit edit (der oldString muss exakt mit der Datei übereinstimmen, einschließlich der Einrückung) und führe Befehle mit bash aus.\n\nRichtlinien:\n- Fasse dich kurz. Erkläre nicht lang und breit, was du vorhast; handle.\n- Rufe jeweils nur ein Werkzeug auf und warte auf sein Ergebnis.\n- Halte Änderungen minimal und im Stil des umgebenden Codes.\n- Pfade, die du an Werkzeuge übergibst, sind absolut und beginnen mit /work.\n- Der C++-Baum wird mit CMake nach /work/build gebaut; Tests sind ctest-Ziele, benannt nach ihrer Quelldatei (zum Beispiel ist tests/prefill/dequant_test.cc der Test dequant_test). Die Python-Werkzeuge laufen mit python3, ihre Tests mit python3 -m pytest.\n- Committe, pushe oder ändere den Git-Zustand nur, wenn du ausdrücklich darum gebeten wirst."
+  },
+  {
+   "role": "user",
+   "content": "Benenne `value` in /work/src/server/openai.cc in `value_val` um, nur die Variable, die in Zeile 23 definiert wird."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/src/server/openai.cc",
+       "offset": 3,
+       "limit": 120
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "<file>\n00003| #include <cmath>\n00004| #include <limits>\n00005| #include <utility>\n00006| \n00007| namespace server {\n00008| namespace {\n00009| \n00010| using json = nlohmann::json;\n00011| \n00012| [[noreturn]] void invalid(const std::string& message) {\n00013|   throw BadRequest(message);\n00014| }\n00015| \n00016| bool is_uint(const json& value) {\n00017|   if (value.is_number_unsigned()) return value.get<uint64_t>() <= UINT32_MAX;\n00018|   return value.is_number_integer() && value.get<int64_t>() >= 0 &&\n00019|          static_cast<uint64_t>(value.get<int64_t>()) <= UINT32_MAX;\n00020| }\n00021| \n00022| uint32_t uint_field(const json& object, const char* name, bool allow_zero) {\n00023|   const json& value = object.at(name);\n00024|   if (!is_uint(value) || (!allow_zero && value.get<uint64_t>() == 0)) {\n00025|     invalid(std::string(name) + (allow_zero ? \" must be a non-negative integer\"\n00026|                                              : \" must be a positive integer\"));\n00027|   }\n00028|   return value.get<uint32_t>();\n00029| }\n00030| \n00031| bool bool_field(const json& object, const char* name) {\n00032|   const json& value = object.at(name);\n00033|   if (!value.is_boolean()) invalid(std::string(name) + \" must be a boolean\");\n00034|   return value.get<bool>();\n00035| }\n00036| \n00037| float probability_field(const json& object, const char* name, bool allow_zero) {\n00038|   const json& value = object.at(name);\n00039|   if (!value.is_number()) invalid(std::string(name) + \" must be a number\");\n00040|   const double number = value.get<double>();\n00041|   if (!std::isfinite(number) || (allow_zero ? number < 0.0 : number <= 0.0) || number > 1.0) {\n00042|     invalid(std::string(name) + \" must be in (0, 1]\");\n00043|   }\n00044|   return static_cast<float>(number);\n00045| }\n00046| \n00047| float temperature_field(const json& object) {\n00048|   const json& value = object.at(\"temperature\");\n00049|   if (!value.is_number()) invalid(\"temperature must be a number\");\n00050|   const double number = value.get<double>();\n00051|   if (!std::isfinite(number) || number < 0.0) invalid(\"temperature must be non-negative\");\n00052|   return static_cast<float>(number);\n00053| }\n00054| \n00055| json base(const Request& r, const std::string& id, uint64_t created, const char* object) {\n00056|   return {\n00057|       {\"id\", id},\n00058|       {\"object\", object},\n00059|       {\"created\", created},\n00060|       {\"model\", r.model},\n00061|   };\n00062| }\n00063| \n00064| json usage_json(const Request& r, Usage u) {\n00065|   json usage = {{\"prompt_tokens\", u.prompt_tokens},\n00066|                 {\"completion_tokens\", u.completion_tokens},\n00067|                 {\"total_tokens\", u.prompt_tokens + u.completion_tokens}};\n00068|   if (r.chat) usage[\"prompt_tokens_details\"] = {{\"cached_tokens\", u.cached_tokens}};\n00069|   return usage;\n00070| }\n00071| \n00072| json tool_call_json(const ToolCall& call) {\n00073|   return {{\"id\", call.id},\n00074|           {\"type\", \"function\"},\n00075|           {\"function\", {{\"name\", call.name}, {\"arguments\", call.arguments.dump()}}}};\n00076| }\n00077| \n00078| // Messages as OpenAI clients send them: content may be null (an assistant turn\n00079| // holding only tool calls) or a list of text parts; tool-call arguments arrive as a\n00080| // JSON string and the chat template iterates them as an object.\n00081| json normalize_message(const json& message) {\n00082|   json out = message;\n00083|   const json& content = message.at(\"content\");\n00084|   if (content.is_array()) {\n00085|     for (const json& part : content) {\n00086|       if (!part.is_object() || !part.contains(\"text\") || !part.at(\"text\").is_string()) {\n00087|         invalid(\"content parts must be text parts\");\n00088|       }\n00089|     }\n00090|   } else if (!content.is_string() && !content.is_null()) {\n00091|     invalid(\"content must be a string\");\n00092|   }\n00093|   if (message.contains(\"tool_calls\") && message.at(\"tool_calls\").is_array()) {\n00094|     for (json& call : out.at(\"tool_calls\")) {\n00095|       if (!call.is_object() || !call.contains(\"function\") || !call.at(\"function\").is_object()) continue;\n00096|       json& fn = call.at(\"function\");\n00097|       if (fn.contains(\"arguments\") && fn.at(\"arguments\").is_string()) {\n00098|         const std::string text = fn.at(\"arguments\").get<std::string>();\n00099|         json parsed = text.empty() ? json::object() : json::parse(text, nullptr, false);\n00100|         if (parsed.is_discarded() || !parsed.is_object()) {\n00101|           invalid(\"tool call arguments must be a JSON object\");\n00102|         }\n00103|         fn[\"arguments\"] = std::move(parsed);\n00104|       }\n00105|     }\n00106|   }\n00107|   return out;\n00108| }\n00109| \n00110| std::string frame(json body) {\n00111|   return \"data: \" + body.dump() + \"\\n\\n\";\n00112| }\n00113| \n00114| }  // namespace\n00115| \n00116| Request parse_request(const std::string& body, bool chat) { return parse_request(body, chat, Sampling{}); }\n00117| \n00118| Sampling generation_sampling(const json& g) {\n00119|   Sampling s;\n00120|   if (!g.is_object()) throw std::invalid_argument(\"generation_config.json is not an object\");\n00121|   const auto number = [&](const char* key, double lo, double hi) {\n00122|     const json& v = g.at(key);\n\n(File has more lines. Use 'offset' parameter to read beyond line 122)\n</file>"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the local filesystem.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path to the file"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Line to start from"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Number of lines to read"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "Find files by glob pattern.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit",
+    "description": "Replace an exact string in a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "oldString": {
+       "type": "string"
+      },
+      "newString": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "oldString",
+      "newString"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "content"
+     ]
+    }
+   }
+  }
+ ],
+ "lang": "de"
+}

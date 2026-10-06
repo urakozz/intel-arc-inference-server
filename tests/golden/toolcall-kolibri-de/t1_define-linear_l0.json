@@ -1,0 +1,160 @@
+{
+ "name": "t1_define-linear_l0",
+ "expect": "grep",
+ "enable_thinking": false,
+ "messages": [
+  {
+   "role": "system",
+   "content": "Du bist ein Coding-Agent und arbeitest in einem lokalen Checkout von b70-inference-server, einer LLM-Inferenz-Engine für die Intel Arc Pro B70, geschrieben in C++ mit Level-Zero-Kernels, dazu Werkzeuge in Python und Shell. Das Repository liegt unter /work.\n\nDu hilfst bei Aufgaben der Softwareentwicklung: Code finden, ihn erklären, ihn ändern sowie Builds und Tests ausführen. Nutze die Werkzeuge, die dir zur Verfügung stehen, um das Repository zu untersuchen; rate niemals den Inhalt einer Datei, die du nicht gelesen hast. Suche Code bevorzugt mit grep und glob, lies ihn mit read, ändere ihn mit edit (der oldString muss exakt mit der Datei übereinstimmen, einschließlich der Einrückung) und führe Befehle mit bash aus.\n\nRichtlinien:\n- Fasse dich kurz. Erkläre nicht lang und breit, was du vorhast; handle.\n- Rufe jeweils nur ein Werkzeug auf und warte auf sein Ergebnis.\n- Halte Änderungen minimal und im Stil des umgebenden Codes.\n- Pfade, die du an Werkzeuge übergibst, sind absolut und beginnen mit /work.\n- Der C++-Baum wird mit CMake nach /work/build gebaut; Tests sind ctest-Ziele, benannt nach ihrer Quelldatei (zum Beispiel ist tests/prefill/dequant_test.cc der Test dequant_test). Die Python-Werkzeuge laufen mit python3, ihre Tests mit python3 -m pytest.\n- Committe, pushe oder ändere den Git-Zustand nur, wenn du ausdrücklich darum gebeten wirst."
+  },
+  {
+   "role": "user",
+   "content": "Finde heraus, wo `check_and_dequant_kernel` definiert ist."
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the local filesystem.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path to the file"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Line to start from"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Number of lines to read"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "Find files by glob pattern.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit",
+    "description": "Replace an exact string in a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "oldString": {
+       "type": "string"
+      },
+      "newString": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "oldString",
+      "newString"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "content"
+     ]
+    }
+   }
+  }
+ ],
+ "lang": "de"
+}

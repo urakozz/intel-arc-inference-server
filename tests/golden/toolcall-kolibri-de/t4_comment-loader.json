@@ -1,0 +1,183 @@
+{
+ "name": "t4_comment-loader",
+ "expect": "edit",
+ "enable_thinking": false,
+ "messages": [
+  {
+   "role": "system",
+   "content": "Du bist ein Coding-Agent und arbeitest in einem lokalen Checkout von b70-inference-server, einer LLM-Inferenz-Engine für die Intel Arc Pro B70, geschrieben in C++ mit Level-Zero-Kernels, dazu Werkzeuge in Python und Shell. Das Repository liegt unter /work.\n\nDu hilfst bei Aufgaben der Softwareentwicklung: Code finden, ihn erklären, ihn ändern sowie Builds und Tests ausführen. Nutze die Werkzeuge, die dir zur Verfügung stehen, um das Repository zu untersuchen; rate niemals den Inhalt einer Datei, die du nicht gelesen hast. Suche Code bevorzugt mit grep und glob, lies ihn mit read, ändere ihn mit edit (der oldString muss exakt mit der Datei übereinstimmen, einschließlich der Einrückung) und führe Befehle mit bash aus.\n\nRichtlinien:\n- Fasse dich kurz. Erkläre nicht lang und breit, was du vorhast; handle.\n- Rufe jeweils nur ein Werkzeug auf und warte auf sein Ergebnis.\n- Halte Änderungen minimal und im Stil des umgebenden Codes.\n- Pfade, die du an Werkzeuge übergibst, sind absolut und beginnen mit /work.\n- Der C++-Baum wird mit CMake nach /work/build gebaut; Tests sind ctest-Ziele, benannt nach ihrer Quelldatei (zum Beispiel ist tests/prefill/dequant_test.cc der Test dequant_test). Die Python-Werkzeuge laufen mit python3, ihre Tests mit python3 -m pytest.\n- Committe, pushe oder ändere den Git-Zustand nur, wenn du ausdrücklich darum gebeten wirst."
+  },
+  {
+   "role": "user",
+   "content": "Der Kommentar über `lm_head_bf16_bytes` in /work/src/loader/loader.cc (Zeilen 44 bis 49) ist zu lang für das, was er sagt. Ersetze ihn durch einen einzeiligen Kommentar, der den wesentlichen Punkt behält."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/src/loader/loader.cc",
+       "offset": 34,
+       "limit": 80
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "<file>\n00034| // offset or names a tensor: `load_small` executes the table, and both throw if\n00035| // the table and the header disagree.\n00036| \n00037| // `W` - the read-per-token bytes with a bf16 lm_head - is the model\n00038| // descriptor's `doc_w` (spec 14): Qwen3.8's is docs/03-models.md's byte\n00039| // accounting (measured 2026-08-24): 12.163 qweight + 0.760 scales + 0.052 bf16\n00040| // smalls + 2.543 lm_head = 15.519 GB. Agnes's 18.344 GB is the same four\n00041| // categories summed from its safetensors headers (14.816 + 0.926 + 0.059 +\n00042| // 2.543; the fold moves bytes, it adds none).\n00043| \n00044| // doc-03's `W` was measured over a checkpoint with a **bf16** `lm_head`. A\n00045| // checkpoint that packs it (spec 1.6 §5.1) reads 0.675 GB there instead of\n00046| // 2.543, and that difference goes on the EXPECTED side of the cross-check as\n00047| // an itemised term - never into a widened tolerance, which is the same rule\n00048| // the padding and the fp32 widening follow.\n00049| // Spec 15b: per model, K = hidden (Qwen3.8 in the comments).\n00050| size_t lm_head_bf16_bytes(const model::ModelDesc& d) {               // 2 542 796 800\n00051|   return size_t(d.hidden) * Qwen35::kVocab * 2;\n00052| }\n00053| size_t lm_head_int4_bytes(const model::ModelDesc& d) {\n00054|   return size_t(d.hidden) * Qwen35::kVocab / 2 +                     //   635 699 200\n00055|          size_t(d.hidden) * Qwen35::kVocab / 32;                     //    39 731 200\n00056| }\n00057| \n00058| // Bytes this loader adds over the checkpoint's own bf16 by widening a tensor to\n00059| // fp32 at load. Itemised rather than hidden in a tolerance: the W cross-check\n00060| // adds exactly this to its expected side and the report prints the split.\n00061| struct Widen {\n00062|   size_t norm = 0;   // the RMSNorm family, stored fp32 (1 + w)\n00063|   size_t gdn = 0;    // conv1d, -exp(A_log), dt_bias - the fp32 recurrence\n00064|   size_t total() const { return norm + gdn; }\n00065| };\n00066| \n00067| // ---------------------------------------------------------------------------\n00068| // Name mapping (requirement 1). The checkpoint carries three top-level\n00069| // namespaces; the model description knows only the language model's, with the\n00070| // prefix stripped, plus `lm_head` which is genuinely top level.\n00071| // ---------------------------------------------------------------------------\n00072| constexpr const char* kLmPrefix = \"model.language_model.\";\n00073| \n00074| bool starts_with(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }\n00075| \n00076| // Rebuilds the checkpoint name of a stripped (model-description) name: the\n00077| // prefix back on, and the model's name map run backwards (spec 14 §3.2: an\n00078| // engine `linear_attn.` is Agnes's `delta_attn.`; the identity on Qwen3.8).\n00079| std::string ckpt_name(const model::ModelDesc& d, const std::string& stripped) {\n00080|   return starts_with(stripped, \"lm_head\") ? stripped : kLmPrefix + d.to_checkpoint(stripped);\n00081| }\n00082| \n00083| bool has_suffix(const std::string& s, const char* suf) {\n00084|   const size_t n = std::strlen(suf);\n00085|   return s.size() > n && s.compare(s.size() - n, n, suf) == 0;\n00086| }\n00087| \n00088| // `self_attn.k_scale` / `self_attn.v_scale`: an fp8 KV cache's calibration (NameView).\n00089| bool is_kv_scale(const std::string& s) {\n00090|   return has_suffix(s, \"self_attn.k_scale\") || has_suffix(s, \"self_attn.v_scale\");\n00091| }\n00092| \n00093| struct NameView {\n00094|   std::map<std::string, std::string> names;  // stripped -> checkpoint name\n00095|   std::set<std::string> consumed;            // stripped names actually loaded\n00096|   size_t mtp_skipped = 0, visual_skipped = 0, qzeros = 0, g_idx = 0;\n00097|   // compressed-tensors' fp8 KV-cache calibration (`self_attn.k_scale` / `v_scale`,\n00098|   // QuantConfig::ct_kv_cache_scheme): dropped by name - this engine's KV cache is bf16\n00099|   // or its own int8 - and counted, like qzeros.\n00100|   size_t kv_scales = 0;\n00101|   size_t top_level = 0;                      // names outside model.language_model.\n00102| };\n00103| \n00104| // Every kept name is mapped to its ENGINE spelling here, once (spec 14 §3.2:\n00105| // Agnes's `delta_attn.` / `global_attn.` -> `linear_attn.` / `self_attn.`, the\n00106| // MTP head's included); everything downstream binds engine names only.\n00107| NameView build_view(const SafetensorsSet& set, bool keep_mtp, const model::ModelDesc& d) {\n00108|   NameView v;\n00109|   for (const auto& [name, info] : set.tensors()) {\n00110|     (void)info;\n00111|     if (starts_with(name, \"model.visual.\")) {          // no vision tower in v1\n00112|       ++v.visual_skipped;\n00113|     } else if (starts_with(name, \"mtp.\") && keep_mtp) {   // spec 8: kept on request\n\n(File has more lines. Use 'offset' parameter to read beyond line 113)\n</file>"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the local filesystem.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path to the file"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Line to start from"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Number of lines to read"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "Find files by glob pattern.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit",
+    "description": "Replace an exact string in a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "oldString": {
+       "type": "string"
+      },
+      "newString": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "oldString",
+      "newString"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "content"
+     ]
+    }
+   }
+  }
+ ],
+ "lang": "de"
+}

@@ -1,0 +1,183 @@
+{
+ "name": "t3_rename-box",
+ "expect": "edit",
+ "enable_thinking": false,
+ "messages": [
+  {
+   "role": "system",
+   "content": "Du bist ein Coding-Agent und arbeitest in einem lokalen Checkout von b70-inference-server, einer LLM-Inferenz-Engine für die Intel Arc Pro B70, geschrieben in C++ mit Level-Zero-Kernels, dazu Werkzeuge in Python und Shell. Das Repository liegt unter /work.\n\nDu hilfst bei Aufgaben der Softwareentwicklung: Code finden, ihn erklären, ihn ändern sowie Builds und Tests ausführen. Nutze die Werkzeuge, die dir zur Verfügung stehen, um das Repository zu untersuchen; rate niemals den Inhalt einer Datei, die du nicht gelesen hast. Suche Code bevorzugt mit grep und glob, lies ihn mit read, ändere ihn mit edit (der oldString muss exakt mit der Datei übereinstimmen, einschließlich der Einrückung) und führe Befehle mit bash aus.\n\nRichtlinien:\n- Fasse dich kurz. Erkläre nicht lang und breit, was du vorhast; handle.\n- Rufe jeweils nur ein Werkzeug auf und warte auf sein Ergebnis.\n- Halte Änderungen minimal und im Stil des umgebenden Codes.\n- Pfade, die du an Werkzeuge übergibst, sind absolut und beginnen mit /work.\n- Der C++-Baum wird mit CMake nach /work/build gebaut; Tests sind ctest-Ziele, benannt nach ihrer Quelldatei (zum Beispiel ist tests/prefill/dequant_test.cc der Test dequant_test). Die Python-Werkzeuge laufen mit python3, ihre Tests mit python3 -m pytest.\n- Committe, pushe oder ändere den Git-Zustand nur, wenn du ausdrücklich darum gebeten wirst."
+  },
+  {
+   "role": "user",
+   "content": "Benenne `_box_env` in /work/tools/box.sh in `_box_env_val` um, nur die Variable, die in Zeile 17 definiert wird."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/tools/box.sh",
+       "offset": 1,
+       "limit": 160
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "<file>\n00001| #!/usr/bin/env bash\n00002| # Sync this tree to the box and build / test there. The Mac never compiles.\n00003| #   tools/box.sh sync            rsync the tree\n00004| #   tools/box.sh build           sync + cmake configure + build\n00005| #   tools/box.sh test [regex]    sync + build + ctest (optionally -R regex)\n00006| #   tools/box.sh run <cmd...>    run a shell command in the remote tree\n00007| #   tools/box.sh pull <path>     copy a generated file back from the box\n00008| #   tools/box.sh dir             print the remote tree this checkout uses\n00009| # Env: BOX (ssh target), REMOTE_DIR (relative to $HOME on the box; default from\n00010| #      the branch, see tools/box_dir.sh), BOX_SUFFIX, JOBS,\n00011| #      BUILD_DIR (default build; e.g. build-nosycl), CMAKE_ARGS (extra -D flags for\n00012| #      the configure step).\n00013| set -euo pipefail\n00014| # Machine address. Set BOX in the environment, or put it in tools/box.env\n00015| # (untracked; copy tools/box.env.example). There is no default: a wrong\n00016| # address should fail loudly rather than quietly talk to the wrong machine.\n00017| _box_env=\"$(cd \"$(dirname \"${BASH_SOURCE[0]:-$0}\")\" && pwd)/box.env\"\n00018| # shellcheck source=/dev/null\n00019| [ -r \"$_box_env\" ] && . \"$_box_env\"\n00020| : \"${BOX:?set BOX=user@host in the environment or in tools/box.env (see tools/box.env.example)}\"\n00021| # shellcheck source=tools/box_dir.sh\n00022| . \"$(dirname \"${BASH_SOURCE[0]:-$0}\")/box_dir.sh\"\n00023| REMOTE_DIR=\"$(b70_remote_dir \"$(dirname \"${BASH_SOURCE[0]:-$0}\")/..\")\"\n00024| JOBS=\"${JOBS:-44}\"\n00025| # A second configuration lives beside the first on the box (spec 2.1 §4:\n00026| # build-nosycl is `cmake -DB70_PREFILL=OFF`). Both are named here rather than\n00027| # hardcoded so one tree serves every configuration.\n00028| BUILD_DIR=\"${BUILD_DIR:-build}\"\n00029| CMAKE_ARGS=\"${CMAKE_ARGS:-}\"\n00030| cd \"$(dirname \"$0\")/..\"\n00031| \n00032| sync_tree() {\n00033|   echo \"box: $BOX:$REMOTE_DIR\" >&2\n00034|   rsync -az --delete \\\n00035|     --exclude build --exclude 'build-*' --exclude .git --exclude 'cmake-build-*' --exclude .idea \\\n00036|     --exclude oracle-out --exclude 'oracle-out-*' \\\n00037|     ./ \"$BOX:$REMOTE_DIR/\"\n00038| }\n00039| configure_and_build() {\n00040|   ssh \"$BOX\" \"cd '$REMOTE_DIR' && cmake -S . -B '$BUILD_DIR' -DCMAKE_BUILD_TYPE=Release $CMAKE_ARGS > /dev/null && cmake --build '$BUILD_DIR' -j$JOBS\"\n00041| }\n00042| \n00043| # ssh carries no environment of its own, so `ZE_AFFINITY_MASK=1 tools/box.sh test ...`\n00044| # used to set the variable on the Mac and run the tests on the box's DEFAULT device\n00045| # (device 0) -- silently, and against the standing rule that per-kernel work uses\n00046| # device 1. Forward it explicitly when the caller set it.\n00047| ZE_ENV=\"\"\n00048| if [ -n \"${ZE_AFFINITY_MASK:-}\" ]; then ZE_ENV=\"ZE_AFFINITY_MASK='$ZE_AFFINITY_MASK' \"; fi\n00049| \n00050| case \"${1:-}\" in\n00051|   dir)   echo \"$REMOTE_DIR\" ;;\n00052|   sync)  sync_tree ;;\n00053|   build) sync_tree; configure_and_build ;;\n00054|   test)  sync_tree; configure_and_build\n00055|          ssh \"$BOX\" \"cd '$REMOTE_DIR' && ${ZE_ENV}ctest --test-dir '$BUILD_DIR' --output-on-failure ${2:+-R \\\"$2\\\"}\" ;;\n00056|   run)   shift; ssh \"$BOX\" \"cd '$REMOTE_DIR' && ${ZE_ENV}$*\" ;;\n00057|   pull)  shift; rsync -az \"$BOX:$REMOTE_DIR/$1\" \"$1\" ;;\n00058|   *)     echo \"usage: $0 dir|sync|build|test [regex]|run <cmd...>|pull <path>\" >&2; exit 2 ;;\n00059| esac\n\n(End of file - total 59 lines)\n</file>"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the local filesystem.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path to the file"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Line to start from"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Number of lines to read"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "Find files by glob pattern.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit",
+    "description": "Replace an exact string in a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "oldString": {
+       "type": "string"
+      },
+      "newString": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "oldString",
+      "newString"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "content"
+     ]
+    }
+   }
+  }
+ ],
+ "lang": "de"
+}

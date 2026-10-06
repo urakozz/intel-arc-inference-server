@@ -1,0 +1,182 @@
+{
+ "name": "t5_test-step",
+ "expect": "bash",
+ "enable_thinking": false,
+ "messages": [
+  {
+   "role": "system",
+   "content": "Du bist ein Coding-Agent und arbeitest in einem lokalen Checkout von b70-inference-server, einer LLM-Inferenz-Engine für die Intel Arc Pro B70, geschrieben in C++ mit Level-Zero-Kernels, dazu Werkzeuge in Python und Shell. Das Repository liegt unter /work.\n\nDu hilfst bei Aufgaben der Softwareentwicklung: Code finden, ihn erklären, ihn ändern sowie Builds und Tests ausführen. Nutze die Werkzeuge, die dir zur Verfügung stehen, um das Repository zu untersuchen; rate niemals den Inhalt einer Datei, die du nicht gelesen hast. Suche Code bevorzugt mit grep und glob, lies ihn mit read, ändere ihn mit edit (der oldString muss exakt mit der Datei übereinstimmen, einschließlich der Einrückung) und führe Befehle mit bash aus.\n\nRichtlinien:\n- Fasse dich kurz. Erkläre nicht lang und breit, was du vorhast; handle.\n- Rufe jeweils nur ein Werkzeug auf und warte auf sein Ergebnis.\n- Halte Änderungen minimal und im Stil des umgebenden Codes.\n- Pfade, die du an Werkzeuge übergibst, sind absolut und beginnen mit /work.\n- Der C++-Baum wird mit CMake nach /work/build gebaut; Tests sind ctest-Ziele, benannt nach ihrer Quelldatei (zum Beispiel ist tests/prefill/dequant_test.cc der Test dequant_test). Die Python-Werkzeuge laufen mit python3, ihre Tests mit python3 -m pytest.\n- Committe, pushe oder ändere den Git-Zustand nur, wenn du ausdrücklich darum gebeten wirst."
+  },
+  {
+   "role": "user",
+   "content": "Ich habe gerade /work/src/runtime/prefill/step.cc geändert. Führe die Tests für diese Datei aus."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/src/runtime/prefill/step.cc",
+       "limit": 100
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "<file>\n00001| #include \"runtime/prefill/step.h\"\n00002| \n00003| #include <cstdlib>\n00004| #include <cstring>\n00005| #include <stdexcept>\n00006| #include <string>\n00007| \n00008| #include \"kernels/kernels.h\"\n00009| #include \"kernels/prefill/pf_kernels.h\"\n00010| #include \"loader/small_layout.h\"\n00011| #include \"model/qwen35.h\"\n00012| #include \"runtime/prefill/attn.h\"\n00013| #include \"runtime/prefill/backend.h\"\n00014| #include \"runtime/prefill/dequant.h\"\n00015| #include \"runtime/prefill/gdn.h\"\n00016| #include \"runtime/prefill/gemm.h\"\n00017| #include \"runtime/prefill/int8.h\"\n00018| #include \"runtime/prefill/linear_l0.h\"\n00019| #include \"runtime/prefill/moe.h\"\n00020| #include \"runtime/prefill/profile.h\"\n00021| \n00022| // The per-chunk walk: `capture.cc`'s decode order (`:472-591`), at runtime `M`,\n00023| // at S = 1, with the int4 GEMVs replaced by the two-pass\n00024| // `dequant_to_bf16` -> `gemm_bf16` (rulings A23/A24) and the attention replaced\n00025| // by the composed path (ruling A14).\n00026| //\n00027| // **The one structural difference from `capture.cc`, and it is not cosmetic.**\n00028| // A captured decode list is 774 launches on ONE queue with a single submit; this\n00029| // walk interleaves two runtimes on one hardware compute queue. Every\n00030| // `dequant -> gemm` and every `gemm -> consumer` boundary is a host\n00031| // `Context::wait()` because there is nothing else on this device to order them\n00032| // with (A24, Probe B: `zeDeviceGetCommandQueueGroupProperties` reports exactly\n00033| // one COMPUTE group with `numQueues = 1`). The waits are counted and reported\n00034| // (`step_chunk_waits()`) rather than hidden, because at a measured 22.35 us\n00035| // each they are a real term in the chunk's cost.\n00036| namespace runtime::prefill {\n00037| namespace {\n00038| \n00039| using loader::DeviceWeight;\n00040| using loader::LoadedModel;\n00041| using model::LinearId;\n00042| using model::Qwen35;\n00043| \n00044| void require(bool ok, const std::string& what) {\n00045|   if (!ok) throw std::runtime_error(\"runtime::prefill::step_chunk: \" + what);\n00046| }\n00047| \n00048| // **The pre-S2a fallback, opt-in through the environment.**\n00049| // `B70_PREFILL_SILU_FUSED=0` makes the L0 backend run the old pair -- gate||up\n00050| // into the fp32 [C][34816] `partials`, then `pf_silu_mul` -- instead of the\n00051| // fused epilogue. It exists so that \"before and after\" is ONE binary and one\n00052| // session rather than two builds, which is the role `B70_PREFILL_GDN_SCAN`\n00053| // played for the scan experiment, and so the ABBA that prices this stage can be\n00054| // taken without rebuilding between arms.\n00055| //\n00056| // The fused path is the DEFAULT and is what every gate runs. The two are\n00057| // bitwise identical -- `pf_gemm_test`'s silu case compares them directly, on\n00058| // device, at M = 2048 and M = 772 -- so this selector chooses a cost, never a\n00059| // value. `step_chunk_launches` reads it too, so the launch arithmetic always\n00060| // describes the walk that will actually run; `prefill_smoke_test`'s pinned\n00061| // constants are the default path's and will fail loudly under `=0`, which is\n00062| // the correct behaviour for a knob that changes the list.\n00063| bool silu_fused() {\n00064|   static const bool on = [] {\n00065|     const char* v = std::getenv(\"B70_PREFILL_SILU_FUSED\");\n00066|     return v == nullptr || std::strcmp(v, \"0\") != 0;\n00067|   }();\n00068|   return on;\n00069| }\n00070| \n00071| uint8_t* at(const l0::Mem& m, size_t off) {\n00072|   return static_cast<uint8_t*>(m.ptr()) + off;\n00073| }\n00074| const void* at_const(const l0::Mem& m, size_t off) {\n00075|   return static_cast<const uint8_t*>(m.ptr()) + off;\n00076| }\n00077| \n00078| // One int4 linear on the prefill path -- THE seam of spec 2.1 §3.2. The sycl-tla side is\n00079| // spec 2's two-pass path unchanged (backend_sycl.cc); the L0 side is S2's slab walk; the\n00080| // l0-int8 side is spec 5's h8 walk (quantiser, then requant + i8 GEMM per slab).\n00081| void pf_linear(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWeight& w,\n00082|                const uint16_t* x, uint32_t M, PrefillBackend backend, Int8State* q) {\n00083|   if (backend == PrefillBackend::SyclTla) {\n00084|     linear_sycl(cx, kc, s, w, x, M);\n00085|     return;\n00086|   }\n00087|   if (backend == PrefillBackend::L0Int8) {\n00088|     linear_i8(cx, kc, s, *q, w, x, M);\n00089|     return;\n00090|   }\n00091|   linear_l0(cx, kc, s, w, x, M);\n00092| }\n00093| \n00094| // The res_norm pair at `M` rows. `s_prev` is 0 for layer 0's leading norm --\n00095| // nothing has been written into `partials` yet -- and 1 everywhere else, because\n00096| // every producer on this path is S = 1 (ruling R1).\n00097| //\n00098| // Spec 16c: its two halves are also launched apart - a pipeline stage that hands off ends\n00099| // with the next layer's fold (pf_res_fold: resid += partials and the norm sums), and the\n00100| // next device starts that layer at its pf_norm_finish over the resid and sums it received.\n\n(File has more lines. Use 'offset' parameter to read beyond line 100)\n</file>"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the local filesystem.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path to the file"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Line to start from"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Number of lines to read"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "Find files by glob pattern.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit",
+    "description": "Replace an exact string in a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "oldString": {
+       "type": "string"
+      },
+      "newString": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "oldString",
+      "newString"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "content"
+     ]
+    }
+   }
+  }
+ ],
+ "lang": "de"
+}

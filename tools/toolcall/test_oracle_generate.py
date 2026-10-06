@@ -9,7 +9,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from oracle_generate import greedy  # noqa: E402
+from oracle_generate import MOE_TYPES, greedy, parse_args  # noqa: E402
 
 
 def scripted(script):
@@ -42,6 +42,22 @@ def test_stops_at_eos_and_keeps_it():
 def test_n_caps():
     step, _ = scripted([3] * 20)
     assert greedy(step, [1], 5, {250019}, argmax) == [3, 3, 3, 3, 3]
+
+
+def test_args_kolibri():
+    """Spec 20e: --model kolibri / --device anywhere around the three paths; Kolibri takes the MoE loop."""
+    a = parse_args(["--model", "kolibri", "--device", "cuda", "/snap", "set", "out", "--new-tokens", "256"])
+    assert (a["model"], a["device"], a["snapshot"], a["set_dir"], a["out"], a["new_tokens"]) == \
+        ("kolibri", "cuda", "/snap", "set", "out", 256)
+    b = parse_args(["/snap", "set", "out"])
+    assert (b["model"], b["device"], b["new_tokens"]) == (None, "cpu", 192)
+    assert "kolibri1" in MOE_TYPES
+    for bad in (["--model", "llama", "/s", "a", "b"], ["/s", "a"], ["--device"]):
+        try:
+            parse_args(bad)
+        except SystemExit:
+            continue
+        raise AssertionError(bad)
 
 
 if __name__ == "__main__":
