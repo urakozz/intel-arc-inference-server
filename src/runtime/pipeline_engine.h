@@ -100,6 +100,9 @@ struct PipelinePrefillBase {
 // The hand-off buffers (pipeline_plan.h: pp_landing_layout).
 struct PipelineLink {
   PipelineLink(l0::Context& d0, l0::Context& d1, const model::ModelDesc& d, PpHandoff mode);
+  // Spec 20c: from a layout (pp_landing_layout(resid_bytes, sumsq_bytes)) - Kolibri-1's engine,
+  // which has no ModelDesc. The form above delegates to this one.
+  PipelineLink(l0::Context& d0, l0::Context& d1, const PpLandingLayout& layout, PpHandoff mode);
   PpHandoff mode;
   PpLandingLayout layout;
   l0::Mem landing;      // device 1, written only by device 0

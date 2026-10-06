@@ -223,6 +223,23 @@ void check_landing() {
     CHECK(l.flag_off > l.stamp_off);
     CHECK_EQ(l.total, l.flag_off + runtime::kPpPage);
   }
+  // Spec 20c: the descriptor-free form is the ModelDesc form at the same two sizes, field for
+  // field (Qwen3.8, Agnes, Ornith); at Kolibri-1's (one 2560-wide bf16 row, 20 fp32 sums) the
+  // regions are page-aligned and the flag has a page of its own.
+  for (const model::ModelDesc* d : {&model::qwen38(), &model::agnes(), &model::ornith()}) {
+    const runtime::PpLandingLayout a = runtime::pp_landing_layout(*d);
+    const runtime::PpLandingLayout b = runtime::pp_landing_layout(a.resid_bytes, a.sumsq_bytes);
+    CHECK(a.resid_bytes == b.resid_bytes && a.sumsq_bytes == b.sumsq_bytes && a.sumsq_off == b.sumsq_off &&
+          a.stamp_off == b.stamp_off && a.flag_off == b.flag_off && a.total == b.total);
+  }
+  {
+    const runtime::PpLandingLayout k = runtime::pp_landing_layout(size_t{2560} * 2, size_t{20} * 4);
+    CHECK(k.sumsq_off % runtime::kPpPage == 0 && k.sumsq_off >= k.resid_bytes);
+    CHECK_EQ(k.stamp_off, k.sumsq_off + size_t{80});
+    CHECK(k.flag_off % runtime::kPpPage == 0 && k.flag_off > k.stamp_off);
+    CHECK_EQ(k.total, k.flag_off + runtime::kPpPage);
+    CHECK_EQ(k.total, size_t{4} * runtime::kPpPage);   // rows 5120 B -> sums at 8192, flag at 12288
+  }
   const runtime::PpLandingLayout q = runtime::pp_landing_layout(model::qwen38());
   CHECK_EQ(q.resid_bytes, size_t{8} * 5120 * 2);   // kM rows
   CHECK_EQ(q.sumsq_bytes, size_t{640});
