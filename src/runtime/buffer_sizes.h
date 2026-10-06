@@ -315,6 +315,9 @@ struct Int8ScratchSizes {
 };
 Int8ScratchSizes int8_scratch_sizes(uint32_t max_k);
 size_t int8_scale_bytes(const model::ModelDesc& desc);
+// Spec 16c: the same for layers [first, last) only - one pipeline stage's linears, which is
+// what that device's Int8State holds (int8_scale_bytes(desc) is the whole range).
+size_t int8_scale_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t last);
 // The `max_k` Engine::prepare_prefill builds Int8State with: the widest int4 K the h8
 // walk runs - the MLP intermediate (down's K) on a dense model, as since spec 14; on a
 // MoE model (spec 15d) the widest dense linear's K, out_proj / o_proj's 4096 on Ornith

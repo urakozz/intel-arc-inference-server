@@ -2298,3 +2298,24 @@ exit 0
   --n 4 --pp 2)
 set_tests_properties(cli_reject_pipeline_one_gpu PROPERTIES LABELS pp TIMEOUT 60)
 # ==== Spec 16b ============================================================= (end) ====
+
+# ==== Spec 16c: pipeline parallel PREFILL across two B70s (the chunk pipeline) ==========
+# Written blind on the Mac, like 16b; box-validation-queue.md row 23 is the order to run the
+# device ones in (`ctest -L pp`).
+#
+# Host, no device: the chunks (Engine::prefill's, exactly), the host's order and its rules
+# (every mutation that drops one caught), the landing slots and the per-device plan with a
+# prefill path (runtime/pipeline_prefill_plan.h); and that order run by its one executor over
+# two host threads standing in for the devices - copy and peer, a slowed device 1
+# (back-pressure), spec 7's hooks from the shadows, a throwing hook, a lost hand-off. Clean
+# under ThreadSanitizer (by hand: tools/mac/pp_prefill_tsan.sh).
+add_executable(pipeline_prefill_plan_test runtime/pipeline_prefill_plan_test.cc)
+target_include_directories(pipeline_prefill_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(pipeline_prefill_plan_test PRIVATE b70_plan)
+add_test(NAME pipeline_prefill_plan_test COMMAND pipeline_prefill_plan_test)
+add_executable(pp_prefill_protocol_test runtime/pp_prefill_protocol_test.cc)
+target_include_directories(pp_prefill_protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(pp_prefill_protocol_test PRIVATE b70_plan Threads::Threads)
+add_test(NAME pp_prefill_protocol_test COMMAND pp_prefill_protocol_test)
+set_tests_properties(pp_prefill_protocol_test PROPERTIES TIMEOUT 120)
+# ==== Spec 16c ============================================================= (end) ====
