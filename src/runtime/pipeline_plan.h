@@ -76,6 +76,11 @@ struct PpWeights {
   std::vector<size_t> layer;   // per layer: its linears, small blocks, MoE blocks
   size_t embed = 0;            // device 0: embed_tokens
   size_t head = 0;             // the last device: lm_head and the final norm
+  // Spec 16d: the MTP head's weights (its linears, norms, FA block, a MoE head's experts) and
+  // the draft vocabulary's compact head + id table, when loaded - both on the last device.
+  // Not in total() or stage(): pp_plan adds them (and the replicated embedding) under
+  // PpExtras::mtp, so every spec 16b / 16c plan is unchanged.
+  size_t mtp = 0, draft_vocab = 0;
   size_t total() const;
   // A stage's share: its layers, and the embedding / head when it holds them.
   size_t stage(const model::ModelDesc& d, const PpStage& st) const;
@@ -133,19 +138,78 @@ inline PrefillPath pp_no_prefill() {
   p.prefill = false;
   return p;
 }
+//
+// Spec 16d (`PpExtras`, b70-serve --pp 2 and MTP across the split; the overloads below take
+// it, the ones without are PpExtras{} and unchanged):
+//   mtp   the MTP head on the last device (spec 16 §3.1): its weights (PpWeights::mtp) and
+//         a REPLICA of the embedding (the operator's choice, as 16b's placement anticipated:
+//         the drafts and the head's KV fill gather embed rows of ids produced on device 1) in
+//         `model`; MtpBuffers (its control, the verify slots of ITS GDN layers, the head's KV
+//         layer, hh / dh, the draft logits) in decode_state; the draft vocabulary's head in
+//         `draft_vocab`. On device 0 only the verify slots of its own GDN layers
+//         (pp_gdn_spec_bytes) in decode_state. With a prefill path, device 1 also holds the
+//         head's prefill hidden rows and two head Control blocks (decode_state) and, on
+//         l0-int8, the L0 slab step_mtp_kv's bf16 linears walk (prefill_scratch).
+//   hook  a spec 7 block hook on the prefill (b70-serve's prefix cache): each device's two
+//         block-end shadows of its GDN state and conv ring (and device 1's two of the head's
+//         hidden row with mtp), in prefill_scratch where PipelineEngine::memory_use counts them.
+struct PpExtras {
+  bool mtp = false;
+  uint32_t draft_vocab = 0;        // |V'| (spec 8 §11), with mtp only; 0 = the full head drafts
+  bool draft_vocab_int8 = true;    // the compact head's form: the lm_head's (int8 or bf16)
+  bool hook = false;
+};
 struct PpDevicePlan : MemoryComponents {
   PpStage stage;
   size_t weights = 0, rope = 0, link = 0, prefill_link = 0;
+  // Spec 16d's terms, each already inside one of the five components (0 without them).
+  size_t embed_replica = 0, mtp_weights = 0;     // in model
+  size_t mtp_buffers = 0, mtp_prefill = 0;       // in decode_state
+  size_t shadows = 0;                            // in prefill_scratch
 };
 struct PpPlan {
   uint32_t max_len = 0, split = 0;
   KvCache kv_cache = KvCache::Bf16;
   PrefillPath prefill = pp_no_prefill();
+  PpExtras extras;
   std::array<PpDevicePlan, kPpDevices> dev{};
   size_t max_total() const;
 };
 PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, const PpWeights& w,
                KvCache kv = default_kv_cache(), const PrefillPath& pf = pp_no_prefill());
+PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, const PpWeights& w,
+               KvCache kv, const PrefillPath& pf, const PpExtras& x);
+
+// Spec 16d: one device's MTP verify slots - gdn_step_slots' `state_spec` for the device's
+// `stage_gdn` GDN layers. The binary bakes one slot's stride as the WHOLE model's
+// (SPEC_SLOT_STRIDE = gdn_layers x one layer's state), and the stage binds its own slice g at
+// `base + g x layer` like every stage buffer, so slots 1 and 2 span the model's stride and
+// slot 3 only the stage's: (kSlots - 2) x gdn_state + stage_gdn x layer. No new binary; the
+// gaps cost (kSlots - 2) x (gdn_layers - stage_gdn) layers' state (Qwen3.8 at the even
+// split: 0.151 GB a card - a stage-stride variant would save it, a box decision).
+size_t pp_gdn_spec_bytes(const model::ModelDesc& d, uint32_t stage_gdn);
+// The head's prefill state on the last device (spec 16d): the hidden rows step_mtp_kv
+// writes (mtp_prefill_hidden_bytes) and its two Control blocks (one per chunk in flight).
+size_t pp_mtp_prefill_bytes(const model::ModelDesc& d);
+// The launches of a stage's MTP verify list at any M: the stage's decode list (the rows are
+// in the variants, not the count) and, on the last device, the head's 10-launch KV fill -
+// the two add up to runtime::verify_launches(d) (capture.cc asserts it at every capture).
+size_t pp_stage_verify_launches(const model::ModelDesc& d, const PpStage& st);
+
+// Spec 16d: spec 7's KV snapshot over two devices in the ONE-CARD host order (Engine's
+// kv_runs): per tensor (K, then V) every main layer's rows - device 0's FA layers, then
+// device 1's, which is the model's FA order - then the MTP head's layer when `head` is set
+// (its KvLayout on the last device), then at int8 every layer's scales the same way. Each
+// run is one contiguous device range: `device`, the allocation (`tensor` 0 = K / 1 = V,
+// `head` = MtpBuffers' kv_k / kv_v rather than the stage's), its byte offset and length. So
+// a snapshot moves between --pp 1 and --pp 2 byte for byte, MTP included.
+struct PpKvRun {
+  uint32_t device = 0, tensor = 0;
+  bool head = false;
+  size_t offset = 0, bytes = 0;
+};
+std::vector<PpKvRun> pp_kv_runs(const std::array<KvLayout, kPpDevices>& stage, const KvLayout* head,
+                                uint32_t begin, uint32_t end);
 
 // The descriptor-free core of the balance: `layer_bytes[l]` is everything layer l puts on
 // its device (weights + its state at the session's length), `dev0_fixed` / `dev1_fixed`
@@ -164,6 +228,8 @@ PpBalance pp_balance(const std::vector<size_t>& layer_bytes, size_t dev0_fixed, 
 // fewest bytes; ties go to the smaller difference between the two, then to the smaller s.
 uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len,
                        KvCache kv = default_kv_cache(), const PrefillPath& pf = pp_no_prefill());
+uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len, KvCache kv,
+                       const PrefillPath& pf, const PpExtras& x);
 
 // `--max-len auto` under a split: the largest multiple of kMaxLenQuantum up to `cap` whose
 // plan + `reserve` fits EACH device (the min over the devices); 0 when not even
@@ -172,6 +238,10 @@ uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const P
                               const std::array<size_t, kPpDevices>& device_bytes,
                               size_t reserve, uint32_t cap, KvCache kv = default_kv_cache(),
                               const PrefillPath& pf = pp_no_prefill());
+uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const PpWeights& w,
+                              const std::array<size_t, kPpDevices>& device_bytes,
+                              size_t reserve, uint32_t cap, KvCache kv, const PrefillPath& pf,
+                              const PpExtras& x);
 
 // Both auto: the split whose min-over-devices max_len is the largest, ties broken as
 // pp_auto_split breaks them at that length. {0, 0} when no split fits min(4096, cap).
@@ -182,6 +252,10 @@ PpChoice pp_auto_split_and_len(const model::ModelDesc& d, const PpWeights& w,
                                const std::array<size_t, kPpDevices>& device_bytes,
                                size_t reserve, uint32_t cap, KvCache kv = default_kv_cache(),
                                const PrefillPath& pf = pp_no_prefill());
+PpChoice pp_auto_split_and_len(const model::ModelDesc& d, const PpWeights& w,
+                               const std::array<size_t, kPpDevices>& device_bytes,
+                               size_t reserve, uint32_t cap, KvCache kv, const PrefillPath& pf,
+                               const PpExtras& x);
 
 // "pipeline plan at max_len N, split s (layers [0, s) | [s, L)):" and one memory_line()-style
 // line per device ("device 0: model ... total ... of ...; + reserve").

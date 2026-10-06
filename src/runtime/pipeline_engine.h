@@ -61,8 +61,19 @@
 // links no prefill symbol: this class reaches that half only through PipelinePrefillBase's
 // virtual calls.
 //
-// Not here: MTP and the server (16d), the residual tap, profiling. Snapshots (spec 7) ARE
-// here, in the single-card host layout, so a snapshot moves between --pp 1 and 2 unchanged.
+// Not here: the residual tap, profiling. Snapshots (spec 7) ARE here, in the single-card
+// host layout, so a snapshot moves between --pp 1 and 2 unchanged.
+//
+// **MTP across the split (spec 16d)** - draft() / verify() / commit() below, Engine's
+// contract. The head, its buffers and its draft lists live on device 1 with lm_head, and
+// device 1 holds a replica of the embedding for them (runtime/pipeline_place.h). A verify at
+// M = k + 1 rows is one replay of each device's verify list (runtime::build_stage_verify:
+// the stage's layers at M rows with the per-row GDN slots, M rows handed off together, the
+// head's KV fill on device 1); a draft is a replay of device 1's draft list alone. gdn_live
+// and pos move on BOTH Control blocks at commit, as pos does after every step. With MTP on,
+// ingest() and generate() run verify(0) + commit(0) per id (Engine's mtp_step1), and
+// prefill() fills the head's KV on device 1 after each chunk's layers (step_mtp_kv). The
+// snapshots carry the head's hidden row and KV layer in Engine's MTP layouts.
 namespace runtime {
 
 struct PipelineOptions {
@@ -150,10 +161,13 @@ class PipelineEngine {
   const loader::LoadedModel& model(uint32_t dev) const;
   l0::Context& context(uint32_t dev) const;
 
-  // Spec 7, in Engine's host layouts exactly (no MTP): save_state is every GDN layer's state
-  // then every conv ring - device 0's slices then device 1's, which IS the single-card
-  // order - and save_kv per tensor (K, V) every layer's rows [then at int8 every layer's
-  // scales], device 0's layers first. load_state sets pos in both Controls.
+  // Spec 7, in Engine's host layouts exactly: save_state is every GDN layer's state then
+  // every conv ring - device 0's slices then device 1's, which IS the single-card order -
+  // and save_kv per tensor (K, V) every layer's rows [then at int8 every layer's scales],
+  // device 0's layers first (runtime::pp_kv_runs). Spec 16d, MTP on: the state is the LIVE
+  // verify slot of each device's layers, then the head's hidden row h_{pos-1} last, and the
+  // KV has the head's layer after the last FA layer - Engine's MTP layouts. load_state sets
+  // pos in both Controls (and gdn_live 0).
   size_t state_bytes() const;
   size_t kv_bytes(uint32_t n_pos) const;
   void save_state(void* host) const;
@@ -163,6 +177,45 @@ class PipelineEngine {
 
   // Device 1's logits row 0 after the last step (fp32 [kVocab]) - P1's comparison.
   std::vector<float> read_logits() const;
+
+  // --- spec 16d: MTP across the split (Engine's contract, engine.h "spec 8") ---------------
+  //
+  // On iff device 1's stage model carries the head (place_stages of a model loaded with
+  // mtp = true). Off, nothing below allocates and every call throws.
+  //   draft(k, pick)   device 1's draft lists i = 0..k-1 from (h_{pos-1}, the pending id);
+  //                    d_i into draft_ids() and cur_token[1 + i] of BOTH Control blocks.
+  //   verify(k)        both devices' verify lists at M = k + 1 (bounded, as a step); row r's
+  //                    argmax in verify_ids()[r], its logits in device 1's logits row r.
+  //   commit(j, t)     gdn_live += j and pos = n + j + 1 on both devices, hh row 1 + j -> 0
+  //                    on device 1, t pending.
+  static constexpr uint32_t kMaxDraft = MtpBuffers::kMaxK;   // 3
+  bool mtp() const;
+  uint32_t max_verify_k() const;
+  void draft(uint32_t k, const std::function<uint32_t(uint32_t i)>& pick = {});
+  const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
+  void verify(uint32_t k);
+  const uint32_t* verify_ids() const;
+  void commit(uint32_t j, uint32_t next_token);
+  uint32_t draft_vocab() const;   // |V'| (spec 8 §11), 0 = the full head drafts
+  const CapturedStep& verify_step(uint32_t dev, uint32_t M) const;
+  const CapturedStep& draft_step(uint32_t i) const;
+  MtpBuffers* mtp_buffers();   // device 1's, null when MTP is off
+
+  // --- spec 16d: the server's host reads (b70-serve --pp 2, cli/pipeline_serve_adapter.h) ---
+  //
+  // The pending id (device 1's Control, mirrored on device 0 at every step boundary).
+  uint32_t pending() const;
+  // d_{i+1} as the next verify's input row 1 + i, on both devices (a host-proposed draft:
+  // spec 19e's lookup, or a sampled draft overriding the on-card argmax).
+  void set_draft_input(uint32_t i, uint32_t id);
+  // Rows [0, rows) of device 1's logits (the last step's row 0, or a verify's k + 1 rows) /
+  // the head's draft logits row i, fp32 [kVocab] each, into `host` (any host memory; the
+  // pinned host_rows() buffer is the fast one).
+  void read_logits_into(float* host, uint32_t rows = 1) const;
+  void read_draft_logits_into(float* host, uint32_t i) const;
+  // `floats` of pinned host memory (device 1's context), allocated on the first call and
+  // kept: the sampler's readback rows (probe-mtp §3: pageable costs 2.5x).
+  float* host_rows(size_t floats);
 
   // Spec 6's memory line per device ("memory, device 0: model ..., total ... of ...").
   MemoryComponents memory_use(uint32_t dev) const;
@@ -227,6 +280,18 @@ class PipelineEngine {
   struct Stage;
   struct PrefillDriver;   // spec 16c: pp_prefill_run's driver (pipeline_prefill.cc)
   void step_once();
+  // Spec 16d: one replay of a list on each device (step_once's protocol and bounds), and of
+  // one list on device 1 alone (a draft). step_once is run_pair over the decode lists.
+  void run_pair(l0::CmdList& list0, l0::CmdList& list1, const char* what);
+  void run_one(uint32_t dev, l0::CmdList& list, const char* what);
+  void require_mtp(const char* what) const;
+  void mtp_step1();             // Engine::mtp_step1: one plain token with MTP on
+  void mtp_normalise_live();    // Engine::mtp_normalise_live, on both devices
+  // Defined in pipeline_engine.cc, called by prefill(): the live slot into slot 0, no
+  // verify pending.
+  void mtp_before_prefill();
+  size_t slot_bytes() const;    // one whole-model verify slot (SPEC_SLOT_STRIDE x 4)
+  const l0::Mem& live_gdn(uint32_t dev) const;   // a device's GDN state as save_state reads it
   // Waits (bounded) for device `dev`'s outstanding step, if any; true when none is left.
   bool settle(uint32_t dev);
   [[noreturn]] void fail(const std::string& what);
@@ -247,6 +312,12 @@ class PipelineEngine {
   // Set only while a mid-prompt block hook runs: save_state reads these (each device's
   // GDN state / conv ring shadow at the block end) instead of the live state.
   std::array<const l0::Mem*, kPpDevices> snap_gdn_{}, snap_conv_{};
+  // Spec 16d: and device 1's shadow of the head's hidden row (MTP on).
+  const l0::Mem* snap_hh_ = nullptr;
+  std::vector<uint32_t> draft_ids_;
+  static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
+  uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;
+  std::unique_ptr<l0::Mem> host_rows_;   // host_rows(): pinned, device 1's context
   bool broken_ = false, drop_next_ = false;
   std::array<bool, kPpDevices> pending_{};   // a submitted step whose fence is not yet seen
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
