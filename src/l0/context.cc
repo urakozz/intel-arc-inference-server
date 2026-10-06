@@ -79,7 +79,55 @@ Context::Context(uint32_t device_index) {
 }
 
 Context::~Context() {
-  if (ctx_) zeContextDestroy(ctx_);
+  if (ctx_ && owns_) zeContextDestroy(ctx_);
+}
+
+namespace {
+// The GPUs of `driver`, in enumeration order - the same filter the primary constructor
+// applies, for the spec 16b additions below.
+std::vector<ze_device_handle_t> gpus_of(ze_driver_handle_t driver) {
+  uint32_t n_dev = 0;
+  ZE_CHECK(zeDeviceGet(driver, &n_dev, nullptr));
+  std::vector<ze_device_handle_t> devs(n_dev);
+  ZE_CHECK(zeDeviceGet(driver, &n_dev, devs.data()));
+  std::vector<ze_device_handle_t> gpus;
+  for (auto d : devs) {
+    ze_device_properties_t p{};
+    p.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES;
+    ZE_CHECK(zeDeviceGetProperties(d, &p));
+    if (p.type == ZE_DEVICE_TYPE_GPU) gpus.push_back(d);
+  }
+  return gpus;
+}
+}  // namespace
+
+Context::Context(const Context& primary, uint32_t device_index)
+    : driver_(primary.driver_), ctx_(primary.ctx_), owns_(false) {
+  const std::vector<ze_device_handle_t> gpus = gpus_of(driver_);
+  if (device_index >= gpus.size())
+    throw std::runtime_error("GPU index " + std::to_string(device_index) + " out of range (" +
+                             std::to_string(gpus.size()) + " GPUs)");
+  dev_ = gpus[device_index];
+  props_.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES;
+  ZE_CHECK(zeDeviceGetProperties(dev_, &props_));
+  compute_.stype = ZE_STRUCTURE_TYPE_DEVICE_COMPUTE_PROPERTIES;
+  ZE_CHECK(zeDeviceGetComputeProperties(dev_, &compute_));
+}
+
+uint32_t Context::gpu_count() {
+  ZE_CHECK(zeInit(ZE_INIT_FLAG_GPU_ONLY));
+  uint32_t n_drivers = 0;
+  ZE_CHECK(zeDriverGet(&n_drivers, nullptr));
+  if (n_drivers == 0) return 0;
+  std::vector<ze_driver_handle_t> drivers(n_drivers);
+  ZE_CHECK(zeDriverGet(&n_drivers, drivers.data()));
+  return static_cast<uint32_t>(gpus_of(drivers[0]).size());
+}
+
+bool Context::can_access_peer(const Context& other) const {
+  ze_bool_t ok = 0;
+  ZE_CHECK(zeDeviceCanAccessPeer(dev_, other.dev_, &ok));
+  return ok != 0;
 }
 
 size_t Context::memory_bytes() const {
