@@ -2195,3 +2195,89 @@ if(B70_K2 AND B70_KV8)
 endif()
 # Passkey near the one-card int8 ceiling (opt-in, box, by hand): tools/probe/k2_passkey.sh.
 # ==== Spec 18e: K2-Horizon's int8 KV cache ================================ (end) ====
+
+# ==== Spec 16b: pipeline parallel decode across two B70s ================================
+# Written blind on the Mac (no box, and no multi-device Level Zero on a Mac at all);
+# docs/superpowers/plans/box-validation-queue.md row 22 is the order to run these in.
+# `pp` labels the device ones: `ctest -L pp`.
+#
+# Host, no device: the planner (stages, weights by device, the per-device plan, auto split
+# and auto length for Qwen3.8 / Agnes / Ornith, K2-Horizon's bytes per card), the peer
+# hand-off's protocol on two threads (runtime/pipeline_protocol.h, pp_handoff.cl's mirror),
+# and b70-decode's --pipeline flags.
+add_executable(pipeline_plan_test runtime/pipeline_plan_test.cc)
+target_include_directories(pipeline_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(pipeline_plan_test PRIVATE b70_plan b70_k2_plan)
+add_test(NAME pipeline_plan_test COMMAND pipeline_plan_test)
+add_executable(pp_protocol_test runtime/pp_protocol_test.cc)
+target_include_directories(pp_protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+find_package(Threads REQUIRED)
+target_link_libraries(pp_protocol_test PRIVATE Threads::Threads)
+add_test(NAME pp_protocol_test COMMAND pp_protocol_test)
+add_executable(pipeline_args_test cli/pipeline_args_test.cc)
+target_include_directories(pipeline_args_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(pipeline_args_test PRIVATE b70_plan)
+add_test(NAME pipeline_args_test COMMAND pipeline_args_test)
+
+# On the box, both cards and the checkpoint; SKIP (77) with fewer than two GPUs or without
+# peer access. P1 (pp_decode_test): ingest + 64 greedy ids and a spec 7 restore at 4395,
+# --pipeline 2 with copy and peer, the auto split and the cuts at 5 and 62 - ids, logits,
+# every layer's GDN state / conv ring / KV and both Control blocks BITWISE the single card on
+# device 0; a reset and the whole run again, bitwise. P4 (pp_fail_test): a lost hand-off under
+# copy and under peer throws within its bound, never hangs, and reset() recovers.
+add_executable(pp_decode_test runtime/pp_decode_test.cc)
+target_include_directories(pp_decode_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+target_link_libraries(pp_decode_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+if(B70_PREFILL_ENABLED)
+  b70_link_prefill(pp_decode_test)
+endif()
+add_dependencies(pp_decode_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS} kernel_pp_handoff)
+add_test(NAME pp_decode_test COMMAND pp_decode_test ${B70_TEST_SNAPSHOT})
+add_test(NAME pp_decode_i8head_test COMMAND pp_decode_test ${B70_TEST_SNAPSHOT} int8)
+add_executable(pp_fail_test runtime/pp_fail_test.cc)
+target_include_directories(pp_fail_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+target_link_libraries(pp_fail_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
+add_dependencies(pp_fail_test ${B70_DECODE_LIST_KERNELS} kernel_pp_handoff)
+add_test(NAME pp_fail_test COMMAND pp_fail_test ${B70_TEST_SNAPSHOT})
+set_tests_properties(pp_decode_test pp_decode_i8head_test pp_fail_test PROPERTIES
+  LABELS "checkpoint;pp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+if(B70_KV8 AND COMMAND b70_kv8_twin)
+  add_dependencies(pp_decode_test ${B70_KV8_KERNELS})
+  add_test(NAME pp_decode_kv8_test COMMAND pp_decode_test ${B70_TEST_SNAPSHOT})
+  b70_kv8_twin(pp_decode)
+endif()
+
+# b70-decode's --pipeline refusals, before any device (cli/pipeline_args.h), and P4's missing
+# card: with ZE_AFFINITY_MASK=0 the driver shows one GPU and --pipeline 2 must stop with the
+# count, before the load (the model path does not exist).
+b70_cli_reject(cli_reject_pipeline_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pipeline 3
+  EXPECT "--pipeline expects 1 or 2")
+b70_cli_reject(cli_reject_pipeline_prefill ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pipeline 2
+  --prefill EXPECT "spec 16c")
+b70_cli_reject(cli_reject_pipeline_bench_pp ${B70_NO_MODEL} --bench --pp 64 --pipeline 2
+  EXPECT "--bench takes --depth, not --pp")
+b70_cli_reject(cli_reject_pipeline_mtp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pipeline 2
+  --mtp 1 EXPECT "spec 16d")
+b70_cli_reject(cli_reject_pipeline_device ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pipeline 2
+  --device 1 EXPECT "--device names one card")
+b70_cli_reject(cli_reject_pipeline_split_alone ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4
+  --pipeline-split 32 EXPECT "--pipeline-split belongs to --pipeline 2")
+b70_cli_reject(cli_reject_pipeline_handoff_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4
+  --pipeline 2 --pipeline-handoff p2p EXPECT "--pipeline-handoff expects copy or peer")
+b70_cli_reject(cli_reject_pipeline_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS}
+  --n 4 --pipeline 2 EXPECT "K2 across two cards is future work")
+add_test(NAME cli_reject_pipeline_one_gpu COMMAND sh -c [==[
+out=$(ZE_AFFINITY_MASK=0 "$@" 2>&1)
+rc=$?
+printf '%s\n' "$out" >&2
+[ "$rc" -eq 1 ] || { echo "expected exit 1, got $rc" >&2; exit 1; }
+printf '%s\n' "$out" | grep -qF 'needs two GPUs and Level Zero shows 1' ||
+  { echo "the refusal does not name the device count" >&2; exit 1; }
+if printf '%s\n' "$out" | grep -q '^devices:'; then echo "a device was opened" >&2; exit 1; fi
+exit 0
+]==] cli_reject_pipeline_one_gpu $<TARGET_FILE:b70-decode> ${B70_NO_MODEL} --ids ${B70_OK_IDS}
+  --n 4 --pipeline 2)
+set_tests_properties(cli_reject_pipeline_one_gpu PROPERTIES LABELS pp TIMEOUT 60)
+# ==== Spec 16b ============================================================= (end) ====
