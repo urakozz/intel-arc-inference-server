@@ -2,7 +2,7 @@
 
 **Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**. 20a built
 2026-10-06 (§10).
-20c built blind 2026-10-06 (§11, branch `spec20c-kolibri-decode`; box queue row 24). 20d built blind 2026-10-06 (§12, branch `spec20d-kolibri-prefill`; box queue row 26). Plans 20c-20e written 2026-10-06: `docs/superpowers/plans/2026-10-06-spec20c-kolibri-decode.md`, `...-spec20d-kolibri-prefill.md`, `...-spec20e-kolibri-serving.md` (two cards on spec 16b's merged pieces, `--pp 2` Kolibri's default).
+20c built blind 2026-10-06 (§11, branch `spec20c-kolibri-decode`; box queue row 24). 20d built blind 2026-10-06 (§12, branch `spec20d-kolibri-prefill`; box queue row 26). 20e built blind 2026-10-06 (§13, branch `spec20e-kolibri-serving`; box queue row 28). Plans 20c-20e written 2026-10-06: `docs/superpowers/plans/2026-10-06-spec20c-kolibri-decode.md`, `...-spec20d-kolibri-prefill.md`, `...-spec20e-kolibri-serving.md` (two cards on spec 16b's merged pieces, `--pp 2` Kolibri's default).
 
 **Why this model:** Aleph Alpha's Kolibri-1 is a German- and English-focused reasoning MoE with tool
 calling, Apache-2.0, released 2026-10-03. Spec 20 serves it in this engine's own format (int4 g64
@@ -470,3 +470,123 @@ ring and to depth 62048, a split at 64 bitwise); K3 on prefill on both synthetic
 16, the int8 head); two cards bitwise one card, P4 on the chunk hand-off; the CLI. After 20b: K3 / KL2 on the
 real checkpoint across two cards, and Task 5's speed rows (derived pp4096 ~4,000 t/s; the dequant pass
 ~3 GB of bf16 per layer per chunk).
+
+
+## 13. 20e as built blind (2026-10-06)
+
+Plan: `docs/superpowers/plans/2026-10-06-spec20e-kolibri-serving.md`, branch `spec20e-kolibri-serving`.
+Written on the Mac like 20c / 20d: no card, no real checkpoint, so nothing here has run on a B70 and every
+real-weight gate SKIPs (77); the synthetic checkpoints carry the engine side on the box before 20b. The
+tokenizer files (not the weights) of `Aleph-Alpha/Kolibri-1-BF16` at `8c8b3489` were in the Mac's HF cache,
+so the tokenizer and template gates RAN. Box validation: queue row 28. Every number is **measured** on the
+Mac where it says so, else **derived**.
+
+**What `b70-serve <Kolibri-1>` does now.** It dispatches on `model_type kolibri1` before the Qwen family's
+rules (`cli::kolibri::is_kolibri`, b70-decode's pattern) and runs `runtime::kolibri::KolibriEngine` behind
+`cli::kolibri::KolibriEngineAdapterT` (`src/cli/kolibri_serve.h`): **two cards by default** (`--pp 1` only
+when the planner says the model fits one card - a synthetic checkpoint), `--pipeline-split auto|N`,
+`--pipeline-handoff copy|peer`, `--max-len auto|N` planned over both cards with the prefill scratch
+(`cli::kolibri::settle`, b70-decode's; 262144 on two cards at split 25 with the int8 head, derived, 20d),
+`--lm-head int8` by default (spec 9), prefill on `l0` (20d's walk, chunks ending at block ends when the
+prefix cache hooks it), the prefix cache on by the usual flags, EOS [127906, 127901] and the sampling
+defaults from `generation_config.json` (**sampled**, T 1.0, top-p 0.97, top-k 128 - verified against the
+downloaded file), `ChatFormat::kolibri()`. Refused before any device, each by name: `--mtp` / `--spec mtp`
+(no head), `--spec lookup` (no verify lists), `--kv-cache int8` (bf16 only), `--prefill-backend l0-int8` /
+`sycl-tla`, a `--pp 1` that does not fit (naming the bytes), `--max-len` above 262144 (decision 3),
+`--device` with `--pp 2`. 20c's b70-serve refusal and 16d's `--pp 2` refusal for Kolibri are lifted
+(`cli/pipeline_serve.h` refuses nothing for `kolibri1`: its rules are `cli::kolibri::check_args`'s). No
+kernel was added or changed (`kernel_cmdlines` +0 / -0 / ~0).
+
+**Tokenizer and template (Task 1; measured on the Mac).** `template_kolibri_test`: 16 message lists (every
+`reasoning_effort`, `enable_thinking` off, tools with and without a system turn, call history, parallel
+calls and their tool results, reasoning before and after the last user query, the `reasoning` field,
+`<think>` inside content, German) render **byte-identical** to transformers 5.15's `apply_chat_template` -
+no minja patch was needed. `kolibri_tokenizer_test`: the Rust tokenizer equals HF's on 24 texts (German
+prose, `„…“`, a 42-letter compound, code, digits, emoji, the tags inline, empty), corpus.txt's 10240 lines
+(177,677 ids, 10 digests), three chat renders' ids (66 / 424 / 325), no BOS ever added, EOS
+`<|im_end|>` / `<|endoftext|>`. transformers warns "incorrect regex pattern ... fix_mistral_regex" for this
+tokenizer; the references are the `tokenizer.json` as written (raw `tokenizers` 0.22.2 and HF without the
+fix agree, asserted per text) - what vLLM and the engine read.
+
+**Reasoning and tool calls (Task 2).** `server::KolibriOutputStream` keys reasoning on the OUTPUT (optional
+whitespace, then `<think>` - the model opens it; the prompt never ends in it), and reads hermes JSON calls in
+`<tool_call>` through `server::parse_json_call` - K2's JSON body rule, moved out of `toolcall_k2.cc`'s
+anonymous namespace into `toolcall.{h,cc}` (K2 unchanged: `toolcall_k2_test`, `k2_server_test` green). A
+body that does not parse is content verbatim with its tags; a cut call is content; whitespace after a call
+and a segment's whitespace before one are dropped, so a template render parses back to its message and a
+client that sends a parsed turn back re-renders exactly the generated text (the prefix cache's best case).
+`toolcall_kolibri_test` (measured): the 8 assistant turns of the HF renders (7 with reasoning, 5 calls)
+parse back to their messages, every Review Focus 1 / 2 / 5 case, a 2000-output fuzz, every parse whole =
+byte stream = random 1-7 byte pieces. `kolibri_server_test`: kwargs reach the template (a bad
+`reasoning_effort` is a 400 naming it), list content joined, both EOS ids stop, streamed frames carry the
+body's reasoning / content / call, the defaults 1.0 / 0.97 / 128 apply when a request names none and a
+request's own fields win.
+
+**The engine behind the server (Task 3).** Snapshots (Review Focus 4): Kolibri's "state" is the 40 sliding
+rings' rows of `[pos - 512, pos)` - what the next query's window reads - **41,943,040 B** at every pos
+(positions below 0: zero rows on the host, written back as zeros); the blocks are the 10 full layers' KV,
+**20,480 B a position** (derived). `runtime::kolibri::state_runs` / `kv_runs` (device-free) give both host
+layouts as `[K | V][layer, in layer order][positions][kv_n]` - addressed through the placement, so `--pp 1`
+and `--pp 2` share them byte for byte (16b's rule); `KolibriEngine::save_state` / `load_state` / `save_kv`
+/ `load_kv` copy them on the immediate lists (`load_state` resets a session whose hand-off failed first).
+The adapter: host sampling at the tokenizer's id count; a greedy device argmax on a head row without a
+token replaced by the masked row's argmax; the store keyed `KOLIBRI`. `kolibri_snapshot_test` (host,
+measured): the layouts on the real shapes (80 runs, 160 across a wrap or below 0; inside the allocations;
+one host layout at splits 3 and 25), save / load on host buffers, restores through `PrefixSession` at the
+block ends 2048 / 4096 and the request ends 2049 / 5000 / 300 continuing exactly as a cold run, on one card
+and two, a snapshot moving between them, and the server over HTTP (greedy = the decode run, a second
+request restored at 2048, seeded sampling reproducible, no undefined id ever emitted). The card test is
+`kolibri_snapshot_gpu_test` (row 28).
+
+**KL4 tooling (Task 4).** `make_set.py --lang de` (the six templates over the same six files, the system
+prompt and user turns in German - the English table renders the original strings, checked against main's
+script), Kolibri rendered from key-sorted objects with thinking off; `tests/golden/toolcall-kolibri-de`:
+36 scenarios, 886-2998 ids, made on the Mac from the release's tokenizer (20b's export copies it). `score.py
+--format hermes` (KL4's hard bar - the reference's parse failures - printed); `oracle_generate.py --model
+kolibri [--device]` (`KolibriRef`, bf16, greedy through its cache); `a4_ref.sh kolibri`;
+`tools/probe/kolibri_passkey.sh` (262144 on two cards, the int8 head, 3 / 3).
+
+**20c's leftover.** `tests/golden/prompts/kolibri_bench.ids` and `kKolibriBenchPrompt` are now the first 42
+ids of `de_prose.txt` through Kolibri's tokenizer ("Als im Frühjahr 1871 die ersten Vermessungstrupps ...
+vom Holz": 27498 2625 19919 32 49 56 55 49 ...), replacing 20c's placeholder legal ids.
+
+**Deviations from the plan:**
+- **The undefined ids are 127998 and 127999**, not 127923 / 127924: the tokenizer defines 0..127997
+  contiguously (98 added tokens; 127923-127997 are `<|reserved-token-2..76|>`), the head has 128000 rows
+  (measured; the probe sheet is corrected). So the sampler's existing `vocab_used` mask (the tokenizer's
+  count) is the whole rule - no hole mask; the device argmax still ranks every row (no kernel change) and
+  the adapter replaces an argmax on the last two rows.
+- **No `chat_template.jinja` for Kolibri:** the release (and the synthetic checkpoints, which copy its
+  files) keep the template as `tokenizer_config.json`'s `chat_template` string; `chat::Template` now reads
+  that string when there is no `.jinja` (transformers' order otherwise). `tests/tokenizer/kolibri/` vendors
+  `tokenizer_config.json` and `generation_config.json` only - 20a's `kolibri1_chat_template.jinja` carries a
+  comment header, so it is not the checkpoint's bytes.
+- **`list_content` is not a template case:** Kolibri's template concatenates content as a string (HF's own
+  render of a list fails); the server joins a message's text parts with `"\n"` first (vLLM's rule for such
+  templates, `ChatFormat::string_content`), tested in `kolibri_server_test`. Two cases were added
+  (`reasoning_field`, `think_in_content`). `preserve_thinking` is checked as a bool.
+- **Sampling:** a Qwen-format server keeps `Sampling{}` - greedy unless the request names a temperature (the
+  plan's "1.0 / 0.95 / 20" are its fields). Kolibri's defaults come from `generation_config.json` through
+  `server::generation_sampling` (`do_sample` true: sampled). Its adapter also samples the FIRST id after a
+  prefill from the head's row when the request samples (the other adapters keep the device argmax there).
+- **No change to `kolibri_prefill_engine.cc`:** 20d's block hook already ends chunks at block ends.
+- **Test names:** the host test is `kolibri_snapshot_test` (layouts, a device-free engine, `PrefixSession`,
+  the HTTP server - K2's `k2_serve_test` arrangement); the plan's card test is `kolibri_snapshot_gpu_test`.
+- **A request-end restore** (2049, 300) is checked bitwise against the session that never left (the same
+  chunks), not against ONE cold prefill: 20d's split rule makes a split off a multiple of 64 close, not
+  bitwise. Block-end restores are bitwise the cold run.
+- `a4_ref.sh kolibri` and the data key `oracle_kolibri_a4` were added (the reference runs where the bf16
+  source is - decision 1 - and is pushed to the box). `serve_benchy.sh` needed nothing: 16d's
+  `SERVE_AFFINITY` already serves on both cards.
+- The records (BENCHMARKS, docs/03, docs/13, the speed rows) wait for the box: no number here is a
+  measurement on a card.
+
+**What the box must prove (row 28):** K0 (G0's sha256: no binary moved; the server path's host tests); the
+host tests on the box; b70-serve's Kolibri refusals before the device; `kolibri_snapshot_gpu_test` on the
+synthetic checkpoint - a restore at 4096 bitwise the cold run, at 2049 / 300 bitwise the uncached session,
+one card / two cards and a snapshot crossing between them; b70-serve on the synthetic (`--pp 2` by default,
+peer, `--pp 1`, a seeded request twice identical, the startup line); `golden_server_test --chat`: the
+server's greedy chat = `b70-decode --prefill --lm-head int8` on its `prompt_token_ids`. After 20b: the
+same on the real checkpoint (`--max-len auto` -> 262144), KL4 - passkey 3 / 3 at 262144 with the int8 head,
+A4 against the bf16 source's reference with 0 parse failures (agreement recorded) - and the llama-benchy
+rows (pp4096 tg256 copy / peer, prefix caching at 4k / 16k / 32k, decode at 4k / 32k / 128k).
