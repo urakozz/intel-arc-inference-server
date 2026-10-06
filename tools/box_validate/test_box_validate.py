@@ -647,7 +647,7 @@ class DriverTest(unittest.TestCase):
                               r" +\(must exit non-zero without a crash, printing /prefills on the L0 backends only/\)")
         # K2: b70-serve's refusal as main prints it; 18c's CLI rejects in row 15, 18b's in row 14
         self.assertIn("printing /is not served yet: spec 18d.s engine side/", out)
-        self.assertIn("--re '^cli_reject_(k2_kv8|mtp_k2)$'", out)
+        self.assertIn("--re '^cli_reject_mtp_k2$'", out)
         self.assertIn("--re '^cli_reject_k2_(pp_int8|prefill_sycl)$'", out)
         self.assertNotIn("cli_reject_k2_prefill,", out)
         # Ornith's binaries since spec 15 §13 (the int4 checkpoint): Qwen3.8's greedy argmax
