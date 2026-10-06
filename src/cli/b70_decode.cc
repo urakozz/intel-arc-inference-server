@@ -155,7 +155,8 @@ void usage() {
       "                 model's layers over GPUs 0 and 1 of what Level Zero shows. --prefill and\n"
       "                 --prefill-length run the two-card chunk pipeline (spec 16c: l0 / l0-int8,\n"
       "                 flash attention; each card's busy time on stderr); without them --ids\n"
-      "                 ingests one replay per id. Refused with --mtp, --profile, --device and\n"
+      "                 ingests one replay per id. --mtp K|auto (--ids, spec 16d): the head on\n"
+      "                 device 1, the verify lists on both. Refused with --profile, --device and\n"
       "                 a sycl-tla prefill. Both cards' memory lines on stderr; --max-len auto\n"
       "                 fits both. (Before 2026-10-06 --pp was the bench's prefill length: that\n"
       "                 is --prefill-length now.)\n"
@@ -649,8 +650,16 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
 // greedy acceptance keeps them equal to the plain run's ids, which is what the box's
 // long-context checks diff (queue row 6). The last positions of max_len fall back to K = 0
 // (max_verify_k), and ids past --n are not printed.
-int generate_mtp(runtime::Engine& eng, uint32_t n, bool mtp_auto, uint32_t mtp_k,
-                 loader::LmHeadForm lm_head) {
+//
+// Spec 16d: the same loop over runtime::PipelineEngine (`--pp 2 --mtp`): the engines share the
+// draft / verify / commit contract; the pending id is read through pending_of.
+uint32_t pending_of(runtime::Engine& e) {
+  return e.buffers().control.as<runtime::Control>()->cur_token[0];
+}
+uint32_t pending_of(runtime::PipelineEngine& e) { return e.pending(); }
+
+template <class Eng>
+int generate_mtp(Eng& eng, uint32_t n, bool mtp_auto, uint32_t mtp_k, loader::LmHeadForm lm_head) {
   std::optional<server::AdaptiveK> policy;
   if (mtp_auto) {
     server::AdaptiveKOptions o;
@@ -659,7 +668,6 @@ int generate_mtp(runtime::Engine& eng, uint32_t n, bool mtp_auto, uint32_t mtp_k
                                                  : server::MtpCost::bf16_head();
     policy.emplace(o);
   }
-  runtime::Control* c = eng.buffers().control.as<runtime::Control>();
   uint32_t printed = 0;
   uint64_t iters = 0, drafted = 0, accepted = 0, at_k[runtime::Engine::kMaxDraft + 1] = {};
   const auto emit = [&](uint32_t id) {
@@ -672,7 +680,7 @@ int generate_mtp(runtime::Engine& eng, uint32_t n, bool mtp_auto, uint32_t mtp_k
   while (printed < n) {
     const uint32_t want = policy ? policy->next() : mtp_k;
     const uint32_t k = std::min(want, eng.max_verify_k());
-    const uint32_t x = c->cur_token[0];
+    const uint32_t x = pending_of(eng);
     uint32_t j = 0;
     if (k == 0) {
       eng.verify(0);
@@ -1044,6 +1052,8 @@ int run(int argc, char** argv) {
     pa.bench_prefill = have_prefill_len;   // --prefill-length N already set depth = N
     pa.chunk = pp_chunk;
     pa.pf = pp_path;
+    pa.mtp = mtp_on;   // spec 16d: --ids only (synthetic runs refused --mtp above)
+    pa.run_mtp = [&](runtime::PipelineEngine& e) { return generate_mtp(e, n, mtp_auto, mtp_k, lm_head); };
     return cli::run_pipeline_decode<StdoutToStderr>(pa);
   }
 
