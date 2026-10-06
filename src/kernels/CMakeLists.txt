@@ -836,6 +836,76 @@ if(B70_KOLIBRI)
 endif()
 # ==== Spec 20c: Kolibri-1 decode ============================================ (end) ====
 
+# ==== Spec 20d: Kolibri-1 prefill ==== (begin) ====
+# Additive only, as 20c's block: no existing source is edited, so every binary above (and in prefill/)
+# keeps its name, command line and bytes. New Kolibri-only sources in src/kernels/kolibri/:
+#   kol_pf_moe.cl     the 384-expert sort (ids as ushort, two experts a lane), gather, the dequant of a
+#                     weight batch (block 384 = the bf16 shared expert, copied), the combine into `mo`
+#   kol_pf_attn.cl    the windowed flash attention over the 4096-slot ring (sliding) and the growing
+#                     cache (full), k2_pf_attn.cl's DPAS walk at GQA 12, no gate; and its eager twin
+#   kol_pf_linear.cl  the bf16 attention arm's slabs with a zero-padded tail (o_proj's 512 columns)
+# Reused at Kolibri's shapes: kol_prep.cl at M = 2048 (kernels::kolibri::kPfC: the norm, the post-add,
+# the attention prep at S 1), prefill/pf_embed.cl, prefill/pf_prep.cl's pf_res_fold (SP0, and _Z over
+# o_proj's one slice), prefill/pf_gemv_bf16.cl (the router at decode's {16, 16} tiling),
+# prefill/pf_moe_gemm.cl (gate||up 2560 x 1024 SiLU, down 512 x 2560), k2/k2_pf_linear.cl (the int4
+# arm's layout-0 slabs) and the shape-free pf_gemm_T0. The route is 20c's decode binary on grid (1, C).
+# What a Kolibri prefill chunk binds: runtime/kolibri/kolibri_prefill.cc (45 launches a layer + 2,
+# 2252 at 50 layers; derived in runtime/kolibri/kolibri_sizes.cc).
+if(B70_KOLIBRI)
+  set(KOL_PF_SRC ${CMAKE_CURRENT_SOURCE_DIR}/kolibri)
+  set(KOL_PF_REUSE ${CMAKE_CURRENT_SOURCE_DIR}/prefill)
+  add_ocloc_kernel(kol_pf_embed_gather_D2560_V128000 SOURCE ${KOL_PF_REUSE}/pf_embed.cl DEFINES HIDDEN=2560 VOCAB=128000)
+  # K2's spec 18c block builds these two names (pf_res_fold SP0 at K 2560, o_proj's 6144 x 2560 slab):
+  # built here only without K2, so no target is defined twice.
+  if(NOT B70_K2)
+    add_ocloc_kernel(pf_res_fold_K2560_SP0_G20 SOURCE ${KOL_PF_REUSE}/pf_prep.cl DEFINES K=2560 S_PREV=0 FOLD_G=20)
+    add_ocloc_kernel(k2_pf_dequant_slab_K6144_N2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_pf_linear.cl DEFINES K=6144 N=2560)
+  endif()
+  add_ocloc_kernel(pf_res_fold_K2560_SP1_G20_Z SOURCE ${KOL_PF_REUSE}/pf_prep.cl DEFINES K=2560 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
+  add_ocloc_kernel(k2_pf_dequant_slab_K2560_N7168 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_pf_linear.cl DEFINES K=2560 N=7168)
+  foreach(row "2560 7168" "6144 2560")
+    separate_arguments(f UNIX_COMMAND "${row}")
+    list(GET f 0 K)
+    list(GET f 1 N)
+    add_ocloc_kernel(kol_pf_bf16_slab_K${K}_N${N} SOURCE ${KOL_PF_SRC}/kol_pf_linear.cl DEFINES K=${K} N=${N})
+  endforeach()
+  add_ocloc_kernel(kol_norm_M2048_K2560_G20_W20 SOURCE ${KOL_PF_SRC}/kol_prep.cl DEFINES M=2048 K=2560 NORM_G=20 NORM_WGS=20)
+  add_ocloc_kernel(kol_post_add_M2048_K2560_G20 SOURCE ${KOL_PF_SRC}/kol_prep.cl DEFINES M=2048 K=2560 POST_G=20)
+  set(KOL_PF_HEADS Q_HEADS=48 KV_HEADS=4 HD=128)
+  add_ocloc_kernel(kol_attn_prep_M2048_N7168_S1_Q48KV4_R4096 SOURCE ${KOL_PF_SRC}/kol_prep.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 QKV_N=7168 QKV_S=1 ${KOL_PF_HEADS} SLIDING=1 RING=4096)
+  add_ocloc_kernel(kol_attn_prep_M2048_N7168_S1_Q48KV4_F SOURCE ${KOL_PF_SRC}/kol_prep.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 QKV_N=7168 QKV_S=1 ${KOL_PF_HEADS} SLIDING=0 RING=0)
+  # The flash attention: sliding (window 513 over the ring) and full, the default (fp32 scores and
+  # probabilities, natural exp) and the eager-mirroring form (B70_KOLIBRI_ATTN=eager). 256 GRF as
+  # k2_pf_attn / pf_flash_attn.
+  foreach(SL 1 0)
+    foreach(EG 0 1)
+      if(SL)
+        set(_n kol_pf_flash_attn_Q48KV4_W513_R4096)
+        set(_w WINDOW=513 RING=4096)
+      else()
+        set(_n kol_pf_flash_attn_Q48KV4_F)
+        set(_w WINDOW=0 RING=0)
+      endif()
+      if(EG)
+        string(APPEND _n _EAGER)
+      endif()
+      add_ocloc_kernel(${_n} SOURCE ${KOL_PF_SRC}/kol_pf_attn.cl
+                       DEFINES KT=64 RPW=8 HPW=4 Q_HEADS=48 KV_HEADS=4 EXP2=0 EAGER=${EG} ${_w}
+                       OPTIONS -cl-intel-256-GRF-per-thread)
+    endforeach()
+  endforeach()
+  add_ocloc_kernel(kol_pf_moe_E384_T6_D2560_I512_L256 SOURCE ${KOL_PF_SRC}/kol_pf_moe.cl
+                   DEFINES PF_E=384 PF_K=6 PF_WG=256 PF_EPL=2 PF_D=2560 PF_INTER=512 TM=32 KC=2048)
+  add_ocloc_kernel(pf_moe_router_K2560_N512 SOURCE ${KOL_PF_REUSE}/pf_gemv_bf16.cl DEFINES K=2560 N=512 COLS_PER_WG=16 KSPLIT=16)
+  add_ocloc_kernel(pf_moe_gemm_K2560_N1024_SILU SOURCE ${KOL_PF_REUSE}/pf_moe_gemm.cl
+                   DEFINES K=2560 N=1024 TM=32 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_moe_gemm_K512_N2560 SOURCE ${KOL_PF_REUSE}/pf_moe_gemm.cl
+                   DEFINES K=512 N=2560 TM=32 OPTIONS -cl-intel-256-GRF-per-thread)
+endif()
+# ==== Spec 20d: Kolibri-1 prefill ==== (end) ====
+
 
 # ==== Spec 15e: Ornith's MTP lists (model::ornith(), B70_ORNITH and B70_MTP) ===== (begin) ==
 # Additive only: no source changes and no existing variant's name or command line moves
