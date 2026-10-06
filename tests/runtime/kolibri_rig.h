@@ -26,6 +26,7 @@ struct Options {
   uint32_t layers = 0;  // development mode
   bool debug_tap = false;
   uint32_t timeout_ms = 30000;   // runtime::PipelineOptions' bound on a step's fence wait
+  uint32_t prefill_timeout_ms = 120000;   // spec 20d: its bound on one prefill wait
 };
 
 struct Rig {
@@ -65,6 +66,7 @@ inline void build(Rig& r, const std::string& snap, const Options& o) {
   runtime::PipelineOptions po;
   po.handoff = o.handoff;
   po.timeout_ms = o.timeout_ms;
+  po.prefill_timeout_ms = o.prefill_timeout_ms;
   r.eng = std::make_unique<runtime::kolibri::KolibriEngine>(r.ctx, std::move(m), o.max_len, o.debug_tap, po);
 }
 

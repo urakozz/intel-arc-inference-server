@@ -36,13 +36,16 @@
 //   mode `pp` (two GPUs; Review Focus 5's last clause): --pp 2 --pipeline-split <s> (pp2:<s>, default 3)
 //     against --pp 1 on the same checkpoint, BITWISE: one prefill (KV, rings, routes, logits, the first
 //     token, both Control blocks equal after the mirror), recorded + replayed, a split continuation
-//     (1000 + rest), chunks of 16; each card's prefill launches are prefill_device_launches'.
+//     (1000 + rest), chunks of 16; each card's prefill launches are prefill_device_launches'; P4 - device 0's
+//     half of a chunk dropped (drop_next_handoff): the prefill throws within its 5 s bound naming device 1,
+//     the next prefill is refused until reset(), which recovers bitwise.
 //
 // B70_KOLIBRI_ATTN=eager runs the reference-rounding attention in BOTH halves (prefill's kol_pf_attn EAGER
 // and decode's kol_attn_eager.cl; one variable, one parser) - so mode `all`'s comparisons 4-6 are between
 // matched variants (the `_eager` twins).
 // Exit 77 (SKIP) when the checkpoint is absent, does not fit the asked placement, or pp needs two GPUs.
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -360,6 +363,7 @@ int run_pp(kolibri_rig::Rig& rig, const std::string& snapdir, kolibri_rig::Optio
   kolibri_rig::Options o2 = o;   // two cards at the asked split (pp2:<s>), else 3 (the synthetic's 5 layers)
   o2.devices = 2;
   o2.split = o.split ? o.split : 3;
+  o2.prefill_timeout_ms = 5000;   // P4's bound below
   o.devices = 1;
   o.split = 0;
   kolibri_rig::build(rig, snapdir, o);
@@ -370,10 +374,38 @@ int run_pp(kolibri_rig::Rig& rig, const std::string& snapdir, kolibri_rig::Optio
   const Run two = runs(*rig.eng);
   const bool a = two.one == one.one, b = two.rep == one.rep && two.rep == one.one, c = two.cont == one.cont,
              e = two.c16 == one.c16;
+  // P4 on the prefill hand-off: device 0's half of the first chunk dropped - the prefill throws within its
+  // bound (5 s here), the next one says reset() first, reset() recovers bitwise.
+  bool p4 = false;
+  {
+    rk::KolibriEngine& en = *rig.eng;
+    en.reset();
+    en.drop_next_handoff();
+    const auto t0 = std::chrono::steady_clock::now();
+    std::string what;
+    try {
+      en.prefill(ids);
+    } catch (const std::exception& ex) {
+      what = ex.what();
+    }
+    const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    bool refused = false;
+    try {
+      en.prefill(ids);
+    } catch (const std::exception&) {
+      refused = true;
+    }
+    en.reset();
+    en.prefill(ids);
+    const bool back = snap(en, uint32_t(ids.size()), true) == one.one;
+    p4 = !what.empty() && what.find("device 1") != std::string::npos && s < 30.0 && refused && back;
+    std::printf("P4: a dropped prefill hand-off threw after %.1f s (\"%.120s\"); the next prefill %s; reset() "
+                "recovers %s\n", s, what.c_str(), refused ? "refused" : "RAN", back ? "bitwise" : "DIFFERENTLY");
+  }
   std::printf("pp: --pp 2 --pipeline-split %u vs --pp 1 (%u layers): one prefill %s, recorded + replayed %s, split "
               "continuation (1000 + rest) %s, chunks of 16 %s\n", rig.eng->split(), d.layers,
               a ? "bitwise" : "DIFFERS", b ? "bitwise" : "DIFFERS", c ? "bitwise" : "DIFFERS", e ? "bitwise" : "DIFFERS");
-  return a && b && c && e ? 0 : 1;
+  return a && b && c && e && p4 ? 0 : 1;
 }
 
 }  // namespace
