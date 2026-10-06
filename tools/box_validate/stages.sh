@@ -1205,6 +1205,108 @@ st_r19_load() {
 }
 
 # ======================================================================================
+row 22 "spec 16b - pipeline parallel decode across two B70s (--pipeline 2; spec 16 §8, plan 16b)"
+rownote 22 "Every GPU stage of this row needs BOTH cards: its commands set ZE_AFFINITY_MASK=0,1 themselves (the run exports DEVICE's one card); the GPU lock is the one lock for both. Both cards must be free of other DRM holders for r22.s1."
+rownote 22 "16a's probe (P0: peer bandwidth both ways, the three hand-offs at 10 KB / 20 MB, the TP remote-partial arm) has not run - it is plan 16a's own probe, not a stage. 16b ships both hand-offs behind --pipeline-handoff (copy default) and the split by bytes; r22.s1 is where the two hand-offs are first compared."
+rownote 22 "S1 at 32k depth is opt-in (r22.s1_32k): --pipeline 2 ingests through the decode lists (prefill across two cards is 16c), ~20 min per arm at depth 32768."
+stage r22.host 22 default cpu - - "host: pipeline_plan_test (stages; weights by device = the measured Qwen3.8 load; the per-device plan; auto split and auto length for Qwen3.8 / Agnes / Ornith; K2's bytes per card), pp_protocol_test (the peer hand-off's protocol on two threads), pipeline_args_test"
+st_r22_host() {
+  run_tests '^(pipeline_plan_test|pp_protocol_test|pipeline_args_test)$'
+  jgrab splits '^pipeline_plan_test$' 'split|auto|k2-horizon'
+  finish
+}
+stage r22.r0 22 default cpu - g0.sha,g0.bitwise,g0.suite "--pipeline 1 is today's engine: every pre-existing binary identical, the suite bitwise (G0); the one new binary (pp_handoff) built"
+st_r22_r0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  kbins pp_handoff
+  finish
+}
+stage r22.devices 22 default gpu - - "P4's preflight: both cards in one process and peer access 0 -> 1 (b70-decode --pipeline 2 prints the 'devices:' line before it fails on a missing model); the refusals before the device (cli_reject_pipeline_*), the one-GPU one under ZE_AFFINITY_MASK=0"
+st_r22_devices() {
+  chk "out=\$(ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode /nonexistent/b70-model --ids tests/cli/ok.ids --n 1 --pipeline 2 2>&1); echo \"\$out\"; echo \"\$out\" | grep -q '^devices: 0 '" \
+    "two devices and peer access (the devices line)"
+  grab devices '^devices:|needs two GPUs|cannot access device 1'
+  run_tests '^cli_reject_pipeline_' '' '' 'ZE_AFFINITY_MASK=0,1'
+  finish
+}
+stage r22.p1 22 default gpu qwen r22.devices "P1 (Review Focus 1-3, 5): pp_decode_test and _i8head - ingest + 64 ids and a spec 7 restore at 4395 under copy and peer, the auto split and the cuts at 5 and 62: ids, logits, GDN state, conv ring, KV and both Control blocks bitwise one card on device 0; a reset and the run again, bitwise"
+st_r22_p1() {
+  run_tests '^(pp_decode_test|pp_decode_i8head_test)$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab p1 '^pp_decode' 'bitwise|memory, device|OK|differ'
+  finish
+}
+stage r22.p1_kv8 22 default gpu qwen r22.p1 "P1 over the int8 KV cache: pp_decode_kv8_test (B70_KV_CACHE=int8)"
+st_r22_p1_kv8() {
+  run_tests '^pp_decode_kv8_test$' kv8 '' 'ZE_AFFINITY_MASK=0,1'
+  finish
+}
+stage r22.p4 22 default gpu qwen r22.devices "P4 (Review Focus 4): pp_fail_test - a lost hand-off under copy (the fence bound; the event host-signalled so device 1 drains) and under peer (pp_recv's spin bound) throws within its bound, never hangs; reset() recovers"
+st_r22_p4() {
+  run_tests '^pp_fail_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab p4 '^pp_fail_test$' 'threw after|recovered|OK'
+  finish
+}
+stage r22.cli 22 default gpu qwen r22.p1 "b70-decode --pipeline 2 on Qwen3.8: --ids prose.ids --n 64 under copy and peer equal the one-card ids; --max-len auto plans both cards (262144 with the bf16 head, derived) and runs; the plan and both memory lines"
+st_r22_cli() {
+  chk "build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 64 > $STATE/r22-one.ids" "one card"
+  local h
+  for h in copy peer; do
+    chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 64 --pipeline 2 --pipeline-handoff $h > $STATE/r22-$h.ids && cmp $STATE/r22-one.ids $STATE/r22-$h.ids" \
+      "--pipeline 2 --pipeline-handoff $h: the one-card ids"
+  done
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 16 --pipeline 2 --max-len auto > /dev/null" \
+    "--max-len auto across two cards"
+  grab_all auto 'max_len: auto ->|split: auto ->'
+  grab_all plan '^  device [01]:' 8
+  grab_all memory '^memory, device' 8
+  finish
+}
+stage r22.agnes 22 default gpu agnes r22.p1 "Review Focus 5 - the split from the descriptor: Agnes (72 layers) under --pipeline 2 gives the one-card ids (--ids prose.ids --n 32, --lm-head int8)"
+st_r22_agnes() {
+  chk "build/src/cli/b70-decode $SNAP_AGNES --ids tests/golden/prompts/prose.ids --n 32 --lm-head int8 > $STATE/r22-agnes-one.ids" "Agnes, one card"
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_AGNES --ids tests/golden/prompts/prose.ids --n 32 --lm-head int8 --pipeline 2 > $STATE/r22-agnes-pp.ids && cmp $STATE/r22-agnes-one.ids $STATE/r22-agnes-pp.ids" \
+    "Agnes, --pipeline 2: the one-card ids"
+  grab_all split 'split: auto ->|^engine: --pipeline 2'
+  finish
+}
+stage r22.ornith 22 default gpu ornith r22.p1 "Review Focus 5 on a MoE model: Ornith (40 layers, the cut's fold SP0) under --pipeline 2 gives the one-card ids (--ids prose.ids --n 32, --lm-head int8)"
+st_r22_ornith() {
+  chk "build/src/cli/b70-decode $SNAP_ORNITH --ids tests/golden/prompts/prose.ids --n 32 --lm-head int8 > $STATE/r22-ornith-one.ids" "Ornith, one card"
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_ORNITH --ids tests/golden/prompts/prose.ids --n 32 --lm-head int8 --pipeline 2 > $STATE/r22-ornith-pp.ids && cmp $STATE/r22-ornith-one.ids $STATE/r22-ornith-pp.ids" \
+    "Ornith, --pipeline 2: the one-card ids"
+  grab_all split 'split: auto ->|^engine: --pipeline 2'
+  finish
+}
+stage r22.s1 22 default gpu qwen r22.p1 "S1: decode at depth 4096, tg 256 - one card against --pipeline 2 copy and peer, interleaved after a warm-up, median of 3; the bar is within 2 % (ratio >= 0.98)"
+st_r22_s1() {
+  idle before
+  local arms
+  arms=" one@4096 '$(bench_cmd "$SNAP_QWEN" --depth 4096 --tg 256)'"
+  arms="$arms copy@4096 'ZE_AFFINITY_MASK=0,1 $(bench_cmd "$SNAP_QWEN" --depth 4096 --tg 256 --pipeline 2)'"
+  arms="$arms peer@4096 'ZE_AFFINITY_MASK=0,1 $(bench_cmd "$SNAP_QWEN" --depth 4096 --tg 256 --pipeline 2 --pipeline-handoff peer)'"
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 --ratio copy@4096/one@4096 --ratio peer@4096/one@4096 --$arms" \
+    "the S1 arms at 4096"
+  idle after
+  grab_all ratio '^RATIO '
+  grab_all idle '^IDLE '
+  finish
+}
+stage r22.s1_32k 22 optin gpu qwen r22.p1 "S1 at depth 32768 (max_len 40960): the same three arms (~20 min per --pipeline 2 arm: it ingests through the decode lists)"
+st_r22_s1_32k() {
+  idle before
+  local arms
+  arms=" one@32768 '$(bench_cmd "$SNAP_QWEN" --depth 32768 --tg 256 --max-len 40960)'"
+  arms="$arms copy@32768 'ZE_AFFINITY_MASK=0,1 $(bench_cmd "$SNAP_QWEN" --depth 32768 --tg 256 --max-len 40960 --pipeline 2)'"
+  arms="$arms peer@32768 'ZE_AFFINITY_MASK=0,1 $(bench_cmd "$SNAP_QWEN" --depth 32768 --tg 256 --max-len 40960 --pipeline 2 --pipeline-handoff peer)'"
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 --ratio copy@32768/one@32768 --ratio peer@32768/one@32768 --$arms" \
+    "the S1 arms at 32768"
+  idle after
+  grab_all ratio '^RATIO '
+  grab_all idle '^IDLE '
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx labels belong to their rows)"
 st_x_rest() {
