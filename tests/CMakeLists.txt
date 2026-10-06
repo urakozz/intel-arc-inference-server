@@ -2395,4 +2395,42 @@ add_test(NAME kolibri1_load_synth_bf16attn_test COMMAND kolibri1_load_checkpoint
 add_test(NAME kolibri1_load_partial_test COMMAND kolibri1_load_checkpoint_test ${B70_KOLIBRI_SNAPSHOT} bf16 30)
 set_tests_properties(kolibri1_load_synth_int4attn_test kolibri1_load_synth_bf16attn_test kolibri1_load_partial_test
   PROPERTIES LABELS "checkpoint;kolibri" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+# Task 4: the kernels' host twin (tests/kernels/kolibri_ref.h) against kolibri_ref.py's own outputs
+# (tests/kernels/kolibri_fixture.h) and the semantics' properties. Host only, headers only.
+add_executable(kolibri_ref_test kernels/kolibri_ref_test.cc)
+target_include_directories(kolibri_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME kolibri_ref_test COMMAND kolibri_ref_test)
+set_tests_properties(kolibri_ref_test PROPERTIES LABELS kolibri)
+if(B70_KOLIBRI)
+  # Every binary a Kolibri decode list binds, any arm / head / attention (src/kernels/CMakeLists.txt's
+  # Kolibri block; the two K2 already builds are bound too).
+  set(B70_KOLIBRI_DECODE_KERNELS
+    kernel_kol_embed_gather_M1_D2560_V128000 kernel_kol_argmax_stage1_M1_N128000_V128000
+    kernel_kol_argmax_stage2_N128000 kernel_prep_res_fold_M1_K2560_SP0_G20
+    kernel_prep_res_fold_M1_K2560_SP1_G20_Z kernel_prep_res_fold_M1_K2560_SP4_G20_Z
+    kernel_kol_norm_M1_K2560_G20_W20 kernel_kol_post_add_M1_K2560_G20
+    kernel_kol_attn_prep_M1_N7168_S2_Q48KV4_R4096 kernel_kol_attn_prep_M1_N7168_S2_Q48KV4_F
+    kernel_kol_attn_prep_M1_N7168_S1_Q48KV4_R4096 kernel_kol_attn_prep_M1_N7168_S1_Q48KV4_F
+    kernel_kol_attn_M1_T${ATTN_V2_TGT}_Q48KV4_W513_R4096 kernel_kol_attn_M1_T${ATTN_V2_TGT}_Q48KV4_F
+    kernel_kol_attn_eager_M1_T${ATTN_V2_TGT}_Q48KV4_W513_R4096 kernel_kol_attn_eager_M1_T${ATTN_V2_TGT}_Q48KV4_F
+    kernel_kol_route_M1_E384_T6_N512_L256 kernel_kol_moe_M1_E384_T6_D2560_I512_SH
+    kernel_gemv_M1_K2560_N7168_S2_L0 kernel_gemv_M1_K6144_N2560_S4_L0
+    kernel_gemv_bf16_M1_K2560_N7168 kernel_gemv_bf16_M1_K6144_N2560 kernel_gemv_bf16_M1_K2560_N512_C16_S16
+    kernel_gemv_bf16_M1_K2560_N128000 kernel_gemv_i8w_M1_K2560_N128000)
+  # Host: the names the capture binds (kernels::kolibri::decode_variants) are exactly this list.
+  add_executable(kolibri_variant_names_test kernels/kolibri_variant_names_test.cc)
+  target_include_directories(kolibri_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(kolibri_variant_names_test PRIVATE b70_kolibri_model)
+  b70_target_kernel_dir(kolibri_variant_names_test)
+  add_test(NAME kolibri_variant_names_test COMMAND kolibri_variant_names_test ${B70_KOLIBRI_DECODE_KERNELS})
+  set_tests_properties(kolibri_variant_names_test PROPERTIES LABELS kolibri)
+  # K1 on the card: every Kolibri kernel at the real shapes against kolibri_ref.h (no checkpoint).
+  add_executable(kolibri_kernels_test kernels/kolibri_kernels_test.cc)
+  target_include_directories(kolibri_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(kolibri_kernels_test PRIVATE b70_l0 b70_kolibri_loader)
+  b70_target_kernel_dir(kolibri_kernels_test)
+  add_dependencies(kolibri_kernels_test ${B70_KOLIBRI_DECODE_KERNELS})
+  add_test(NAME kolibri_kernels_test COMMAND kolibri_kernels_test)
+  set_tests_properties(kolibri_kernels_test PROPERTIES LABELS kolibri TIMEOUT 900)
+endif()
 # ==== Spec 20c: Kolibri-1 decode ==== (end) ====
