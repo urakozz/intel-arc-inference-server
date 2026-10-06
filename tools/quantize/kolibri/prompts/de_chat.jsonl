@@ -1,0 +1,80 @@
+{"id": "de000", "prompt": "Erkläre mir den Unterschied zwischen einer GmbH und einer UG (haftungsbeschränkt), insbesondere bei Haftung, Stammkapital und Gründungskosten.", "split": "calib"}
+{"id": "de001", "prompt": "Mein Vermieter will die Miete um 15 Prozent erhöhen. Welche Regeln gelten in Deutschland für Mieterhöhungen bis zur ortsüblichen Vergleichsmiete, und wie sollte ich reagieren?", "split": "calib"}
+{"id": "de002", "prompt": "Schreibe eine höfliche, aber bestimmte E-Mail an meinen Internetanbieter, weil die Leitung seit drei Wochen nur ein Drittel der vertraglich vereinbarten Geschwindigkeit liefert.", "split": "calib"}
+{"id": "de003", "prompt": "Ein Zug fährt um 9:12 Uhr in Hamburg los und kommt um 12:47 Uhr in Köln an. Die Strecke ist 425 km lang. Wie hoch ist die Durchschnittsgeschwindigkeit? Rechne Schritt für Schritt.", "split": "calib"}
+{"id": "de004", "prompt": "Was ist der Unterschied zwischen 'das' und 'dass'? Gib mir fünf Beispielsätze und eine Eselsbrücke.", "split": "eval"}
+{"id": "de005", "prompt": "Fasse die wichtigsten Ursachen des Dreißigjährigen Krieges in einem kurzen Absatz zusammen.", "split": "calib"}
+{"id": "de006", "prompt": "Ich möchte meinen ersten Sauerteig ansetzen. Erkläre mir den Ablauf über sieben Tage, inklusive typischer Fehler.", "split": "calib"}
+{"id": "de007", "prompt": "Wie funktioniert die Einkommensteuererklärung für Arbeitnehmer in Deutschland? Welche Werbungskosten kann ich typischerweise absetzen?", "split": "calib"}
+{"id": "de008", "prompt": "Formuliere eine Absage auf eine Bewerbung, die wertschätzend klingt und dem Kandidaten trotzdem keine falschen Hoffnungen macht.", "split": "calib"}
+{"id": "de009", "prompt": "Erkläre einem zehnjährigen Kind, warum der Himmel blau ist.", "split": "eval"}
+{"id": "de010", "prompt": "Vergleiche Wärmepumpe und Gasbrennwertheizung für ein Einfamilienhaus aus den 1970er Jahren: Kosten, Förderung, Voraussetzungen.", "split": "calib"}
+{"id": "de011", "prompt": "Was regelt die Datenschutz-Grundverordnung beim Versand von Newslettern? Welche Einwilligung brauche ich?", "split": "calib"}
+{"id": "de012", "prompt": "Schreibe ein kurzes Gedicht über den Herbst im Schwarzwald, im Stil der Romantik.", "split": "calib"}
+{"id": "de013", "prompt": "Übersetze ins Deutsche und achte auf einen natürlichen Ton: 'We regret to inform you that your order has been delayed due to unforeseen supply chain issues.'", "split": "calib"}
+{"id": "de014", "prompt": "Ich habe eine Abmahnung von meinem Arbeitgeber bekommen, weil ich zweimal zu spät kam. Was bedeutet das arbeitsrechtlich und was kann ich tun?", "split": "eval"}
+{"id": "de015", "prompt": "Erstelle einen Wochenplan für eine vierköpfige Familie mit gesunden, günstigen Abendessen, die in 30 Minuten zubereitet sind.", "split": "calib"}
+{"id": "de016", "prompt": "Löse das Rätsel: Ein Vater ist 30 Jahre älter als sein Sohn. In 5 Jahren ist er dreimal so alt wie der Sohn. Wie alt sind beide heute?", "split": "calib"}
+{"id": "de017", "prompt": "Wie unterscheiden sich Bundestag und Bundesrat, und wie läuft ein Gesetzgebungsverfahren ab?", "split": "calib"}
+{"id": "de018", "prompt": "Erkläre die Funktionsweise eines Transformers in der Künstlichen Intelligenz, ohne Formeln, aber technisch korrekt.", "split": "calib"}
+{"id": "de019", "prompt": "Schreibe ein Protokoll für eine Teambesprechung mit den Punkten: Projektstand, Budgetüberschreitung, neue Deadline, Urlaubsplanung.", "split": "eval"}
+{"id": "de020", "prompt": "Was muss ich beim Kauf eines gebrauchten Elektroautos beachten, besonders beim Zustand der Batterie?", "split": "calib"}
+{"id": "de021", "prompt": "Erkläre den Konjunktiv I und II mit Beispielen aus der indirekten Rede und aus Wunschsätzen.", "split": "calib"}
+{"id": "de022", "prompt": "Mein Kind (14) verbringt täglich sechs Stunden am Handy. Wie kann ich das Thema ansprechen, ohne einen Streit zu provozieren?", "split": "calib"}
+{"id": "de023", "prompt": "Welche Unterlagen brauche ich, um in Deutschland einen Reisepass zu beantragen, und wie lange dauert das?", "split": "calib"}
+{"id": "de024", "prompt": "Beschreibe die Unterschiede zwischen Kernspaltung und Kernfusion und warum Fusion technisch so schwierig ist.", "split": "eval"}
+{"id": "de025", "prompt": "Schreibe einen Werbetext für ein kleines Café in Leipzig, das auf regionale Produkte und Spezialitätenkaffee setzt.", "split": "calib"}
+{"id": "de026", "prompt": "Was ist eine Patientenverfügung, was sollte darin stehen, und wie unterscheidet sie sich von einer Vorsorgevollmacht?", "split": "calib"}
+{"id": "de027", "prompt": "Plane eine fünftägige Radtour entlang der Mosel mit Etappen, Übernachtungsorten und Sehenswürdigkeiten.", "split": "calib"}
+{"id": "de028", "prompt": "Analysiere die Stilmittel in folgendem Satz: 'Die Stadt schlief, doch ihre Lichter wachten wie müde Augen über den Fluss.'", "split": "calib"}
+{"id": "de029", "prompt": "Wie berechne ich den Zinseszins für 10.000 Euro bei 3,5 Prozent jährlich über 12 Jahre? Zeige den Rechenweg.", "split": "eval"}
+{"id": "de030", "prompt": "Erkläre, was Inflation ist, wie die Europäische Zentralbank darauf reagiert und welche Folgen höhere Leitzinsen haben.", "split": "calib"}
+{"id": "de031", "prompt": "Schreibe einen formellen Widerspruch gegen einen Bußgeldbescheid wegen Falschparkens, bei dem das Kennzeichen falsch notiert wurde.", "split": "calib"}
+{"id": "de032", "prompt": "Was sind die wichtigsten Unterschiede zwischen Schweizer Hochdeutsch und dem Deutsch in Deutschland?", "split": "calib"}
+{"id": "de033", "prompt": "Ich bin Projektleiterin und mein Team ist überlastet. Wie priorisiere ich Aufgaben und kommuniziere das an die Geschäftsführung?", "split": "calib"}
+{"id": "de034", "prompt": "Erkläre die Photosynthese auf dem Niveau der gymnasialen Oberstufe, inklusive Licht- und Dunkelreaktion.", "split": "eval"}
+{"id": "de035", "prompt": "Wie schreibe ich eine gute Einleitung für eine Bachelorarbeit im Fach Betriebswirtschaftslehre?", "split": "calib"}
+{"id": "de036", "prompt": "Welche Rechte habe ich als Fluggast, wenn mein Flug von Frankfurt nach Lissabon um vier Stunden verspätet ist?", "split": "calib"}
+{"id": "de037", "prompt": "Entwirf ein Konzept für eine digitale Elternsprechstunde an einer Grundschule, unter Beachtung des Datenschutzes.", "split": "calib"}
+{"id": "de038", "prompt": "Erkläre den Satz des Pythagoras und zeige einen anschaulichen Beweis.", "split": "calib"}
+{"id": "de039", "prompt": "Was spricht für und was gegen ein bedingungsloses Grundeinkommen? Bitte ausgewogen und mit Quellenhinweisen, wo möglich.", "split": "eval"}
+{"id": "de040", "prompt": "Wie pflege ich eine Monstera richtig, und warum bekommt sie gelbe Blätter?", "split": "calib"}
+{"id": "de041", "prompt": "Schreibe eine kurze Geschichte über eine Programmiererin, die in einem alten Bahnwärterhäuschen ein Rechenzentrum betreibt.", "split": "calib"}
+{"id": "de042", "prompt": "Erkläre die Gewaltenteilung im Grundgesetz und nenne die entsprechenden Artikel.", "split": "calib"}
+{"id": "de043", "prompt": "Welche Fehler passieren häufig bei der Kommasetzung vor 'und' und bei Infinitivgruppen? Mit Beispielen.", "split": "calib"}
+{"id": "de044", "prompt": "Mein Laptop wird sehr heiß und der Lüfter ist laut. Welche Ursachen kann das haben, und was kann ich selbst prüfen?", "split": "eval"}
+{"id": "de045", "prompt": "Was ist der Unterschied zwischen einer Ordnungswidrigkeit und einer Straftat im deutschen Recht?", "split": "calib"}
+{"id": "de046", "prompt": "Formuliere eine Stellenanzeige für eine Pflegefachkraft (m/w/d) in einem ambulanten Pflegedienst in Rostock.", "split": "calib"}
+{"id": "de047", "prompt": "Erkläre, wie eine Blockchain funktioniert, und warum sie für Lieferketten interessant sein könnte.", "split": "calib"}
+{"id": "de048", "prompt": "Schreibe eine Rede für die Hochzeit meiner Schwester, etwa drei Minuten lang, herzlich und mit etwas Humor.", "split": "calib"}
+{"id": "de049", "prompt": "Wie funktioniert die gesetzliche Rentenversicherung in Deutschland, und was bedeuten Entgeltpunkte?", "split": "eval"}
+{"id": "de050", "prompt": "Gib mir eine Schritt-für-Schritt-Anleitung, wie ich eine Wand streiche, ohne Flecken an den Kanten.", "split": "calib"}
+{"id": "de051", "prompt": "Was sind typische Symptome eines Eisenmangels, und welche Lebensmittel helfen? Bitte mit Hinweis, wann man zum Arzt gehen sollte.", "split": "calib"}
+{"id": "de052", "prompt": "Erkläre den Unterschied zwischen Wetter und Klima und warum ein kalter Winter den Klimawandel nicht widerlegt.", "split": "calib"}
+{"id": "de053", "prompt": "Verfasse eine Kündigung für ein Fitnessstudio-Abo mit Verweis auf einen Umzug.", "split": "calib"}
+{"id": "de054", "prompt": "Wie bereite ich mich auf ein Vorstellungsgespräch als Softwareentwickler bei einem Mittelständler vor?", "split": "eval"}
+{"id": "de055", "prompt": "Was bedeutet 'Ehrenamt' in Deutschland, und welche steuerlichen Vorteile gibt es für Ehrenamtliche?", "split": "calib"}
+{"id": "de056", "prompt": "Erkläre das Prinzip der Gewinn- und Verlustrechnung an einem Beispiel einer kleinen Schreinerei.", "split": "calib"}
+{"id": "de057", "prompt": "Schreibe einen sachlichen Leserbrief zum Thema Tempolimit auf Autobahnen.", "split": "calib"}
+{"id": "de058", "prompt": "Wie entsteht ein Gewitter, und wie verhalte ich mich draußen richtig?", "split": "calib"}
+{"id": "de059", "prompt": "Was ist der Unterschied zwischen Moderne und Postmoderne in der Literatur? Nenne deutschsprachige Beispiele.", "split": "eval"}
+{"id": "de060", "prompt": "Ich möchte Spanisch lernen und habe 20 Minuten am Tag. Erstelle mir einen realistischen Lernplan für drei Monate.", "split": "calib"}
+{"id": "de061", "prompt": "Erkläre die Begriffe Median, Mittelwert und Standardabweichung anhand von Gehaltsdaten.", "split": "calib"}
+{"id": "de062", "prompt": "Was muss ich tun, wenn ich ein Kleingewerbe anmelden möchte, und welche Steuern fallen an?", "split": "calib"}
+{"id": "de063", "prompt": "Beschreibe das Funktionsprinzip eines Kühlschranks mit den Begriffen Verdampfer, Kompressor und Kondensator.", "split": "calib"}
+{"id": "de064", "prompt": "Schreibe eine Zusammenfassung von Goethes 'Faust I' in zehn Sätzen.", "split": "eval"}
+{"id": "de065", "prompt": "Welche Vor- und Nachteile hat Homeoffice für Arbeitgeber und Arbeitnehmer?", "split": "calib"}
+{"id": "de066", "prompt": "Hilf mir, einen schwierigen Konflikt mit einem Nachbarn wegen Lärm sachlich zu lösen. Wie beginne ich das Gespräch?", "split": "calib"}
+{"id": "de067", "prompt": "Erkläre, wie das deutsche Schulsystem aufgebaut ist und warum es sich zwischen den Bundesländern unterscheidet.", "split": "calib"}
+{"id": "de068", "prompt": "Was ist der Unterschied zwischen Virus und Bakterium, und warum helfen Antibiotika nicht gegen Erkältungen?", "split": "calib"}
+{"id": "de069", "prompt": "Formuliere drei Varianten einer Begrüßung für einen Kundenservice-Chatbot: förmlich, neutral und locker.", "split": "eval"}
+{"id": "de070", "prompt": "Wie liest man eine Nebenkostenabrechnung, und welche Posten darf der Vermieter umlegen?", "split": "calib"}
+{"id": "de071", "prompt": "Erkläre die Relativitätstheorie in Grundzügen: Zeitdilatation, Lichtgeschwindigkeit und E = mc².", "split": "calib"}
+{"id": "de072", "prompt": "Schreibe eine Produktbeschreibung für eine handgefertigte Ledertasche aus einer Manufaktur in Offenbach.", "split": "calib"}
+{"id": "de073", "prompt": "Welche Schritte sind nötig, um einen Verein zu gründen, und was gehört in eine Satzung?", "split": "calib"}
+{"id": "de074", "prompt": "Prüfe die Argumentation: 'Alle Vögel können fliegen. Pinguine sind Vögel. Also können Pinguine fliegen.' Was ist falsch?", "split": "eval"}
+{"id": "de075", "prompt": "Wie funktioniert das Pfandsystem in Deutschland, und warum gibt es Einweg- und Mehrwegpfand?", "split": "calib"}
+{"id": "de076", "prompt": "Schreibe einen Dialog zwischen zwei Kollegen, die über die Einführung einer neuen Software streiten, und löse ihn konstruktiv auf.", "split": "calib"}
+{"id": "de077", "prompt": "Erkläre den Unterschied zwischen Brutto- und Nettogehalt und welche Abzüge es gibt.", "split": "calib"}
+{"id": "de078", "prompt": "Was sollte in einem Notfallvorrat für zehn Tage enthalten sein, laut Empfehlungen des Bundesamts für Bevölkerungsschutz?", "split": "calib"}
+{"id": "de079", "prompt": "Gib mir Tipps, wie ich eine Präsentation vor 200 Leuten halte, ohne vor Nervosität den Faden zu verlieren.", "split": "eval"}

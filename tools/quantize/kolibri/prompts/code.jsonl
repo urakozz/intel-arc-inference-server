@@ -1,0 +1,40 @@
+{"id": "code000", "prompt": "Schreibe eine Python-Funktion, die prüft, ob eine IBAN gültig ist (Prüfsumme nach ISO 13616), mit Tests.", "lang": "de", "split": "calib"}
+{"id": "code001", "prompt": "Write a Python function that parses ISO 8601 durations like 'P3DT4H12M' into seconds, with unit tests.", "lang": "en", "split": "calib"}
+{"id": "code002", "prompt": "Erkläre den Unterschied zwischen einer Liste und einem Tupel in Python und wann man was verwendet.", "lang": "de", "split": "calib"}
+{"id": "code003", "prompt": "Implement a thread-safe LRU cache in C++17 with get and put in O(1).", "lang": "en", "split": "calib"}
+{"id": "code004", "prompt": "Schreibe eine SQL-Abfrage, die für jeden Kunden den Umsatz der letzten 12 Monate und den Rang innerhalb seiner Region berechnet.", "lang": "de", "split": "eval"}
+{"id": "code005", "prompt": "Write a Bash script that finds all files larger than 100 MB under a directory and prints them sorted by size.", "lang": "en", "split": "calib"}
+{"id": "code006", "prompt": "Finde den Fehler in diesem Code und erkläre ihn: def mittel(xs): return sum(xs) / len(xs) if xs else None; print(mittel([]) + 1)", "lang": "de", "split": "calib"}
+{"id": "code007", "prompt": "Write a Rust function that reads a CSV file and computes the average of a numeric column, handling errors properly.", "lang": "en", "split": "calib"}
+{"id": "code008", "prompt": "Schreibe ein JavaScript-Modul, das Formulareingaben für deutsche Postleitzahlen und Telefonnummern validiert.", "lang": "de", "split": "calib"}
+{"id": "code009", "prompt": "Explain the difference between processes and threads, and when to use asyncio in Python.", "lang": "en", "split": "eval"}
+{"id": "code010", "prompt": "Schreibe einen regulären Ausdruck, der deutsche Kfz-Kennzeichen erkennt, und erkläre ihn Schritt für Schritt.", "lang": "de", "split": "calib"}
+{"id": "code011", "prompt": "Write a Python script that downloads a JSON API page by page with retries and exponential backoff.", "lang": "en", "split": "calib"}
+{"id": "code012", "prompt": "Implementiere Dijkstras Algorithmus in Python mit einer Prioritätswarteschlange und erkläre die Laufzeit.", "lang": "de", "split": "calib"}
+{"id": "code013", "prompt": "Review this function for bugs and style: int sum(int* a, int n) { int s; for (int i = 0; i <= n; i++) s += a[i]; return s; }", "lang": "en", "split": "calib"}
+{"id": "code014", "prompt": "Schreibe ein Dockerfile für eine Flask-Anwendung mit Gunicorn, das möglichst klein ist.", "lang": "de", "split": "eval"}
+{"id": "code015", "prompt": "Write a SQL schema for a library system with books, members, and loans, including constraints.", "lang": "en", "split": "calib"}
+{"id": "code016", "prompt": "Erkläre, was ein Race Condition ist, und zeige ein Beispiel in Java mit einer Lösung.", "lang": "de", "split": "calib"}
+{"id": "code017", "prompt": "Implement binary search in Go and write table-driven tests for it.", "lang": "en", "split": "calib"}
+{"id": "code018", "prompt": "Schreibe eine Python-Klasse für ein Bankkonto mit Einzahlung, Auszahlung und Überziehungsschutz, inklusive Docstrings.", "lang": "de", "split": "calib"}
+{"id": "code019", "prompt": "Write a TypeScript function that deep-merges two objects with proper typing.", "lang": "en", "split": "eval"}
+{"id": "code020", "prompt": "Wie funktioniert Git rebase im Vergleich zu merge? Zeige typische Befehle und Fallstricke.", "lang": "de", "split": "calib"}
+{"id": "code021", "prompt": "Write a C function that reverses a singly linked list in place.", "lang": "en", "split": "calib"}
+{"id": "code022", "prompt": "Schreibe ein Pandas-Skript, das Verkaufsdaten nach Monat und Produktkategorie aggregiert und als Excel exportiert.", "lang": "de", "split": "calib"}
+{"id": "code023", "prompt": "Explain big-O notation with examples of O(1), O(log n), O(n log n), and O(n^2) algorithms.", "lang": "en", "split": "calib"}
+{"id": "code024", "prompt": "Schreibe einen Unit-Test mit pytest für eine Funktion, die Rechnungsbeträge mit 19 und 7 Prozent Mehrwertsteuer berechnet.", "lang": "de", "split": "eval"}
+{"id": "code025", "prompt": "Write a Python decorator that measures and logs the runtime of a function, supporting async functions too.", "lang": "en", "split": "calib"}
+{"id": "code026", "prompt": "Erkläre den Unterschied zwischen HTTP-Methoden GET, POST, PUT und PATCH anhand einer REST-API für Termine.", "lang": "de", "split": "calib"}
+{"id": "code027", "prompt": "Implement a simple tokenizer for arithmetic expressions in Python and evaluate them with operator precedence.", "lang": "en", "split": "calib"}
+{"id": "code028", "prompt": "Optimiere diese Python-Schleife: ergebnis = []; for i in range(len(daten)): if daten[i] % 2 == 0: ergebnis.append(daten[i] ** 2)", "lang": "de", "split": "calib"}
+{"id": "code029", "prompt": "Write a Kubernetes deployment and service YAML for a stateless web app with three replicas and health checks.", "lang": "en", "split": "eval"}
+{"id": "code030", "prompt": "Schreibe eine Funktion in C++, die einen String an einem Trennzeichen aufteilt, ohne unnötige Kopien.", "lang": "de", "split": "calib"}
+{"id": "code031", "prompt": "Explain how a hash map handles collisions and implement a minimal open-addressing table in Python.", "lang": "en", "split": "calib"}
+{"id": "code032", "prompt": "Schreibe ein Shell-Skript, das täglich ein Backup eines Verzeichnisses mit Datum im Namen anlegt und alte Backups nach 30 Tagen löscht.", "lang": "de", "split": "calib"}
+{"id": "code033", "prompt": "Write a function in Python that merges overlapping intervals and explain its complexity.", "lang": "en", "split": "calib"}
+{"id": "code034", "prompt": "Erkläre Dependency Injection anhand eines kleinen Beispiels in Python.", "lang": "de", "split": "eval"}
+{"id": "code035", "prompt": "Write a minimal HTTP server in Rust using only the standard library that serves a static file.", "lang": "en", "split": "calib"}
+{"id": "code036", "prompt": "Schreibe eine SQL-Abfrage, die doppelte Kundeneinträge anhand von Name und Geburtsdatum findet.", "lang": "de", "split": "calib"}
+{"id": "code037", "prompt": "Explain the difference between unit, integration, and end-to-end tests with examples.", "lang": "en", "split": "calib"}
+{"id": "code038", "prompt": "Implementiere eine Warteschlange mit zwei Stacks in Java und erkläre die amortisierte Laufzeit.", "lang": "de", "split": "calib"}
+{"id": "code039", "prompt": "Write a Python function that validates a Sudoku board and returns the first conflict it finds.", "lang": "en", "split": "eval"}
