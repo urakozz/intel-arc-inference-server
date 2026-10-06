@@ -2032,6 +2032,103 @@ st_r27_benchy() {
 }
 
 # ======================================================================================
+row 28 "spec 20e - Kolibri-1 served: its template and tokenizer, reasoning and hermes JSON tool calls, b70-serve on two cards with the rings in the prefix-cache snapshots, KL4 (spec 20 §13, plan 20e)"
+rownote 28 "Written blind on the Mac after rows 24 / 26 (20c's decode, 20d's prefill on the card) and 27 (16d): nothing of 20e ran on a card. 20e adds NO kernel (KolibriEngine's snapshot calls are copies on the immediate lists; kernel_cmdlines +0 / -0 / ~0): G0's g0.sha is the 'nothing moved' check. Every GPU stage needs BOTH cards (ZE_AFFINITY_MASK=0,1; Kolibri serves on --pp 2 by default)."
+rownote 28 "The synthetic checkpoints (oracle-out-kolibri-synth, r24.oracle_synth) carry the engine side before spec 20b: make_synth.py copies the BF16 release's tokenizer.json / tokenizer_config.json (its chat_template string - the release ships no chat_template.jinja; chat::Template reads it) / generation_config.json into each ckpt, which b70-serve needs. kolibri_tokenizer_test reads the release's tokenizer.json from the HF cache (B70_KOLIBRI_TOKENIZER_JSON) - SKIP 77 without it."
+rownote 28 "After spec 20b (SNAP_KOLIBRI): r28.real, r28.passkey (KL4: 3 / 3 at 262144 with the int8 head), r28.benchy. KL4's A4 reference is the bf16 SOURCE (156 GB) run wherever 20b runs (decision 1: tools/toolcall/a4_ref.sh kolibri ref, MODEL_DIR / DEVICE there) and pushed as oracle-out-kolibri-a4; r28.a4 then scores the engine on two cards against it - the hard bar is 0 parse failures of the reference (score.py --format hermes); the first-call agreement is recorded, no bar."
+rownote 28 "A request-end restore (2049, 300) is bitwise the session that never left, not ONE cold prefill of the whole prompt (20d's split rule: a split off a multiple of 64 is within the split bars, not bitwise); block-end restores (4096) are bitwise the cold run."
+stage r28.k0 28 default cpu - g0.sha,g0.bitwise,g0.suite "K0: 20e adds no kernel (every binary identical, G0) and the server path is unchanged - G0's suite (golden_server_test, prefix_gpu_*) and here the host tests template_test / _agnes / _ornith / _k2, toolcall_test, toolcall_k2_test (parse_json_call moved out of toolcall_k2.cc), k2_server_test, ornith_server_test, protocol_test, prefix_server_test, mtp_server_test, lookup_server_test; Qwen's sampling defaults unchanged"
+st_r28_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  run_tests '^(template_test|template_agnes_test|template_ornith_test|template_k2_test|toolcall_test|toolcall_k2_test|k2_server_test|ornith_server_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test)$' '' 'kv8'
+  finish
+}
+stage r28.host 28 default cpu - - "host: template_kolibri_test (16 renders byte-identical to apply_chat_template), kolibri_tokenizer_test (127998 ids, the tags, 24 texts, corpus.txt, three renders' ids), toolcall_kolibri_test (the HF renders parse back, Review Focus 1 / 2 / 5, a 2000-output fuzz split-invariant), kolibri_server_test (kwargs, list content, both EOS ids, streaming, the 1.0 / 0.97 / 128 defaults), kolibri_snapshot_test (the layouts on the real shapes, restores at 2048 / 4096 / 2049 / 5000 / 300 == cold through PrefixSession, one card <-> two, the server over HTTP), pipeline_args_test; the toolcall Python tests"
+st_r28_host() {
+  run_tests '^(template_kolibri_test|kolibri_tokenizer_test|toolcall_kolibri_test|kolibri_server_test|kolibri_snapshot_test|pipeline_args_test)$'
+  jgrab snapshot '^kolibri_snapshot_test$' 'layout|round trip|restore at|pp:|server:|OK'
+  chk "python3 tools/toolcall/test_score.py && python3 tools/toolcall/test_make_set.py && python3 tools/toolcall/test_oracle_generate.py" "the toolcall Python tests (hermes scoring, the German set, --model kolibri)"
+  finish
+}
+stage r28.reject 28 default cpu - - "b70-serve's Kolibri refusals before the device (tests/model/kolibri1: config.json only): --mtp 1, --spec mtp, --spec lookup, --kv-cache int8, --prefill-backend l0-int8, --pp 1 (does not fit), --max-len 524288 (decision 3), --pp 2 --device 1"
+st_r28_reject() {
+  run_tests '^cli_reject_serve_(kolibri_mtp|kolibri_spec_mtp|kolibri_lookup|kolibri_kv8|kolibri_prefill_int8|kolibri_one_card|kolibri_max_len|pp_kolibri)$'
+  finish
+}
+stage r28.snapshot 28 default gpu oracle_kolibri_synth r26.prefill "Review Focus 4 on the card, synthetic int4attn: kolibri_snapshot_gpu_synth_test (one card) and _synth_pp_test (--pp 2, split 3) - the sizes; a restore at the block end 4096 from the hook's own saves BITWISE the cold run (32 ids, logits, KV, the rings from 3584); restores at the request ends 2049 and 300 bitwise the session that never left; _cross_test: a snapshot taken on two cards continues on one, and the reverse"
+st_r28_snapshot() {
+  run_tests '^kolibri_snapshot_gpu_synth(_pp)?_test$|^kolibri_snapshot_gpu_cross_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab snapshot '^kolibri_snapshot_gpu' 'state|restore|snapshot restored|bitwise|DIFFER|OK|FAILED'
+  finish
+}
+stage r28.serve 28 default gpu oracle_kolibri_synth r28.snapshot "b70-serve <synthetic int4attn> startup and requests: --pp 2 by default (the startup line: Kolibri-1, kolibri1 chat format, the split, prefill l0, mtp none, lm_head int8, kv cache bf16, sampling defaults sampled T 1.00 top-p 0.97 top-k 128, the rings' last 512 positions), --max-len auto planned over both cards; --pp 1 (the synthetic fits) and --pipeline-handoff peer; a seeded sampled request twice, identical"
+st_r28_serve() {
+  local ck="oracle-out-kolibri-synth/int4attn/ckpt"
+  x "ZE_AFFINITY_MASK=0,1 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $ck"
+  step_rc $? "b70-serve <synthetic>, --pp 2 (default), seeded sampling"
+  x "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_probe.sh $ck --pipeline-handoff peer --max-len 16384"
+  step_rc $? "b70-serve <synthetic> --pipeline-handoff peer"
+  x "ZE_AFFINITY_MASK=0 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $ck --pp 1 --max-len 16384"
+  step_rc $? "b70-serve <synthetic> --pp 1, seeded sampling"
+  grab_all auto 'max_len: auto ->|^split: ' 6
+  grab_all memory '^memory' 6
+  grab_all startup '^b70-serve: .*Kolibri-1' 3
+  grab_all seeded '^SEEDED ' 4
+  finish
+}
+stage r28.chat 28 default gpu oracle_kolibri_synth r28.serve "plan 20e Task 3 Step 4: one greedy chat through b70-serve equal to b70-decode on the same ids - golden_server_test --chat on the synthetic (prose / code / cjk as one user message, 32 ids, temperature 0; b70-decode --ids <prompt_token_ids> --n 32 --prefill --lm-head int8, both on --pp 2), with B70_SERVE_ARGS '--max-len 16384', '... --pipeline-handoff peer' and '... --pp 1' (one card vs b70-decode's two: bitwise by 20c / 20d's --pp rule); run directly (not registered: without a checkpoint it would fail, not SKIP)"
+st_r28_chat() {
+  local ck="oracle-out-kolibri-synth/int4attn/ckpt" a
+  for a in "--max-len 16384" "--max-len 16384 --pipeline-handoff peer" "--max-len 16384 --pp 1"; do
+    chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='$a' timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $ck --chat" \
+      "Kolibri synthetic, golden_server_test --chat, b70-serve $a"
+  done
+  grab_all chat 'chat of [0-9]+ prompt ids' 9
+  finish
+}
+stage r28.real 28 default gpu kolibri r28.chat "after spec 20b, two cards: kolibri_snapshot_gpu_test (pp2: Review Focus 4 on 50 layers); b70-serve <int4> startup (--max-len auto -> 262144 at split 25 with the int8 head and the prefill scratch, derived) with a seeded request twice; golden_server_test --chat (the server's greedy chat = b70-decode on its prompt_token_ids)"
+st_r28_real() {
+  run_tests '^kolibri_snapshot_gpu_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  x "ZE_AFFINITY_MASK=0,1 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $SNAP_KOLIBRI"
+  step_rc $? "b70-serve <kolibri>, --pp 2, auto max_len, seeded sampling"
+  chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='--max-len 32768' timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $SNAP_KOLIBRI --chat" \
+    "golden_server_test --chat against Kolibri-1"
+  grab_all auto 'max_len: auto ->|^split: |pipeline plan at' 6
+  grab_all memory '^memory' 4
+  grab_all startup '^b70-serve: .*Kolibri-1' 2
+  grab_all chat 'chat of [0-9]+ prompt ids' 3
+  finish
+}
+stage r28.passkey 28 optin gpu kolibri,oracle_image r28.real "KL4: passkey 3 / 3 at 5 / 50 / 95 % of 262144 on two cards with the int8 head (tools/probe/kolibri_passkey.sh: 260000 ids, --max-len 262144, 8 greedy ids); decode speed at that depth recorded (the full layers read ~5.4 GB of KV a token there, derived)"
+st_r28_passkey() {
+  chk "ZE_AFFINITY_MASK=0,1 MODEL=$SNAP_KOLIBRI tools/probe/kolibri_passkey.sh int8" "passkey at 262144, two cards, int8 head"
+  grab_all passkey '^passkey kolibri [^ ]+( placement [0-9.]+)?: ' 8
+  finish
+}
+stage r28.a4 28 optin gpu kolibri,oracle_kolibri_a4 r28.real "KL4: the German A4-style set (tests/golden/toolcall-kolibri-de, 36 scenarios, thinking off) on two cards - engine_generate.sh l0 with the bf16 and the int8 head against the bf16 source's reference (oracle-out-kolibri-a4, made wherever 20b ran); score.py --format hermes: 0 parse failures of the reference (the hard bar), the first-call agreement recorded"
+st_r28_a4() {
+  local d=$STATE/a4-kolibri
+  x "mkdir -p $d && cp oracle-out-kolibri-a4/*.bf16.txt $d/"
+  chk "ZE_AFFINITY_MASK=0,1 tools/toolcall/engine_generate.sh \$(tools/box_validate/data.sh resolve $SNAP_KOLIBRI) tests/golden/toolcall-kolibri-de $d l0" "KL4 engine runs, bf16 head"
+  chk "ZE_AFFINITY_MASK=0,1 LM_HEAD=int8 tools/toolcall/engine_generate.sh \$(tools/box_validate/data.sh resolve $SNAP_KOLIBRI) tests/golden/toolcall-kolibri-de $d l0" "KL4 engine runs, int8 head (the served default)"
+  chk "python3 tools/toolcall/score.py --format hermes $d bf16 l0 l0-i8head | tee $d/score.md" "scoring against the bf16 reference"
+  x "grep -q '^bf16: 0 parse failure' $d/score.md"
+  step_rc $? "the reference's calls all parse (KL4's hard bar)"
+  grab_all a4 'match|/ 36|parse failure' 6
+  finish
+}
+stage r28.benchy 28 optin gpu-self kolibri,uvx - "plan 20e Task 5's speed rows through b70-serve <kolibri> on two cards (SERVE_AFFINITY=0,1; b70-serve's default --pp 2 - llama-benchy's --pp is its prompt length): pp4096 tg256 depth 1 at 262144 under copy and peer (the operator's flags: --no-cache --exact-tg --latency-mode generation); prefix caching at depth 4k / 16k / 32k; decode at depth 4k / 32k / 128k - every row with the cards, the attention arm (decision 2), the int8 head and bf16 KV"
+st_r28_benchy() {
+  local f="--concurrency 1 --no-cache --exact-tg --latency-mode generation"
+  chk "MODEL=$SNAP_KOLIBRI MAX_LEN=262144 SERVE_AFFINITY=0,1 tools/probe/serve_benchy.sh --pp 4096 --tg 256 --depth 1 $f" "two cards (copy), pp4096 tg256"
+  chk "MODEL=$SNAP_KOLIBRI MAX_LEN=262144 SERVE_AFFINITY=0,1 SERVE_ARGS='--pipeline-handoff peer' tools/probe/serve_benchy.sh --pp 4096 --tg 256 --depth 1 $f" "two cards (peer), pp4096 tg256"
+  chk "MODEL=$SNAP_KOLIBRI MAX_LEN=65536 SERVE_AFFINITY=0,1 tools/probe/serve_benchy.sh --pp 1024 --tg 64 --depth 0 4096 16384 32768 --enable-prefix-caching --exact-tg --latency-mode generation --runs 3" "prefix cache on, depth 4k / 16k / 32k"
+  chk "MODEL=$SNAP_KOLIBRI MAX_LEN=262144 SERVE_AFFINITY=0,1 tools/probe/serve_benchy.sh --pp 512 --tg 128 --depth 4096 32768 131072 $f" "decode at depth 4k / 32k / 128k"
+  grab_all benchy '^\| ' 80
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri labels belong to their rows)"
 st_x_rest() {
