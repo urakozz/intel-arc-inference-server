@@ -2271,10 +2271,7 @@ endif()
 # count, before the load (the model path does not exist).
 b70_cli_reject(cli_reject_pipeline_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp 3
   EXPECT "--pp is the pipeline-parallel size, 1 or 2")
-b70_cli_reject(cli_reject_pipeline_prefill ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp 2
-  --prefill EXPECT "spec 16c")
-b70_cli_reject(cli_reject_pipeline_bench_prefill_length ${B70_NO_MODEL} --bench --prefill-length 64
-  --pp 2 EXPECT "--bench takes --depth, not --prefill-length")
+# (Spec 16c lifted 16b's two prefill refusals; what it refuses is in its own block below.)
 b70_cli_reject(cli_reject_pipeline_mtp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4
   --pipeline-parallel-size 2 --mtp 1 EXPECT "spec 16d")
 b70_cli_reject(cli_reject_pipeline_device ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp 2
@@ -2318,4 +2315,50 @@ target_include_directories(pp_prefill_protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/
 target_link_libraries(pp_prefill_protocol_test PRIVATE b70_plan Threads::Threads)
 add_test(NAME pp_prefill_protocol_test COMMAND pp_prefill_protocol_test)
 set_tests_properties(pp_prefill_protocol_test PROPERTIES TIMEOUT 120)
+
+# On the box, both cards and the checkpoint; SKIP (77) with fewer than two GPUs or without peer
+# access. P1 / P2 (pp_prefill_test): 4103 ids (3 chunks), 32768 (16), 2, a prefill_split
+# continuation at 2500 with chunk 1000, spec 7's hooks at 2048 / 4096 (from the shadows) and
+# 5000, a hook that throws, a one-card snapshot continued on two cards - logits, every layer's
+# GDN state / conv ring / KV, the Control blocks and 16 decoded ids BITWISE one card on device
+# 0, under copy and peer at the auto split and the cuts at 5 and 62; l0-int8 (default), l0, the
+# int8 head, the int8 KV cache. Back-pressure and P4 (pp_prefill_fail_test): device 1 held back
+# artificially - bitwise the clean run; a lost hand-off throws within its bound and reset()
+# recovers.
+add_executable(pp_prefill_test runtime/pp_prefill_test.cc)
+target_include_directories(pp_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+target_link_libraries(pp_prefill_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+if(B70_PREFILL_ENABLED)
+  b70_link_prefill(pp_prefill_test)
+endif()
+add_dependencies(pp_prefill_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS} kernel_pp_handoff)
+add_test(NAME pp_prefill_test COMMAND pp_prefill_test ${B70_TEST_SNAPSHOT} l0-int8)
+add_test(NAME pp_prefill_l0_test COMMAND pp_prefill_test ${B70_TEST_SNAPSHOT} l0)
+add_test(NAME pp_prefill_i8head_test COMMAND pp_prefill_test ${B70_TEST_SNAPSHOT} l0-int8 int8)
+add_executable(pp_prefill_fail_test runtime/pp_prefill_fail_test.cc)
+target_include_directories(pp_prefill_fail_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+target_link_libraries(pp_prefill_fail_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+if(B70_PREFILL_ENABLED)
+  b70_link_prefill(pp_prefill_fail_test)
+endif()
+add_dependencies(pp_prefill_fail_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS} kernel_pp_handoff)
+add_test(NAME pp_prefill_fail_test COMMAND pp_prefill_fail_test ${B70_TEST_SNAPSHOT})
+set_tests_properties(pp_prefill_test pp_prefill_l0_test pp_prefill_i8head_test pp_prefill_fail_test
+  PROPERTIES LABELS "checkpoint;pp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77
+  TIMEOUT 5400)
+if(B70_KV8 AND COMMAND b70_kv8_twin)
+  add_dependencies(pp_prefill_test ${B70_KV8_KERNELS})
+  add_test(NAME pp_prefill_kv8_test COMMAND pp_prefill_test ${B70_TEST_SNAPSHOT} l0-int8)
+  b70_kv8_twin(pp_prefill)
+endif()
+
+# b70-decode --pp 2 runs --prefill and --bench --prefill-length through the pipeline; what it
+# refuses before any device: a sycl-tla prefill (no two-card walk). B70_PREFILL_ATTN=composed
+# is refused the same way (pipeline_args_test; the registrations here pass no environment).
+b70_cli_reject(cli_reject_pipeline_prefill_sycl ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp 2
+  --prefill --prefill-backend sycl-tla EXPECT "not sycl-tla")
+b70_cli_reject(cli_reject_pipeline_bench_prefill_sycl ${B70_NO_MODEL} --bench --prefill-length 64
+  --pp 2 --prefill-backend sycl-tla EXPECT "--prefill-backend l0 or l0-int8")
 # ==== Spec 16c ============================================================= (end) ====

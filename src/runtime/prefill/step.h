@@ -5,6 +5,7 @@
 #include "l0/memory.h"
 #include "loader/loader.h"
 #include "runtime/buffers.h"
+#include "runtime/pipeline_plan.h"
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/kernels.h"
 #include "runtime/prefill_backend.h"
@@ -44,6 +45,29 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::L
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C,
                 l0::Mem& gdn_state_mem, l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem,
                 l0::Mem& kv_v_mem, const KvLayout& kv, PrefillBackend backend, Int8State* q);
+
+// Spec 16c (pipeline parallel prefill across two B70s): step_chunk restricted to one pipeline
+// stage's layers [st.first, st.last), on the device `cx` / `s` / `m` belong to - `m` a stage
+// model (runtime/pipeline_place.h: its layer_small / moe hold the stage's layers, indexed by
+// layer - first) and the four state buffers the stage's own (PersistentBuffers' stage
+// constructor; `kv` laid out for st.fa layers). For every layer the same launches, arguments
+// and order as step_chunk, so the two stages compute exactly what one card does (P1):
+//
+//   stage 0  pf_embed_gather of `ids` (C ids; the caller's buffer, so two chunks' ids can be
+//            in flight), layers [0, s), then layer s's pf_res_fold - the cut. Device 0 hands
+//            off `s.resid` (C rows) and `s.norm_sumsq`.
+//   stage 1  `ids` null: layer s from its pf_norm_finish over the resid and norm sums the
+//            caller copied into `s` from the hand-off, then layers (s, L). step_head after
+//            the last chunk, as on one card.
+//
+// L0 backends and the flash attention only; `ctrl` is any Control block holding the chunk's
+// pos / n_active (the pipeline keeps one per chunk in flight). Throws, by name, for anything
+// else.
+void step_stage(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m,
+                uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C, const void* ids,
+                l0::Mem& gdn_state_mem, l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem,
+                l0::Mem& kv_v_mem, const KvLayout& kv, PrefillBackend backend, Int8State* q,
+                const PpStage& st);
 
 // The tail only the LAST chunk runs: the final norm on the last row, `lm_head`
 // at M = 1 through the EXISTING decode binary, and the two argmax stages --
@@ -87,5 +111,12 @@ size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
 size_t step_chunk_gemms(const model::ModelDesc& d, PrefillBackend b);   // SYCL GEMM calls per chunk (0 on L0 since S3)
 size_t step_chunk_waits(const model::ModelDesc& d, PrefillBackend b);   // host L0<->SYCL handoffs per chunk
 inline constexpr size_t kStepHeadLaunches = 5;   // 2 norm + lm_head + 2 argmax
+// Spec 16c: one layer's launches on an L0 backend (0 on sycl-tla), and a stage's: its
+// layers, the embed on stage 0 and the cut's fold, less the fold stage 1 resumes after - so
+// the two stages add up to step_chunk_launches (the pipeline asserts it).
+size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
+                           model::LayerKind kind);
+size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
+                           const PpStage& st);
 
 }  // namespace runtime::prefill
