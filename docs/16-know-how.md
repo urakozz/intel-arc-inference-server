@@ -160,7 +160,10 @@ and only one of them is answered.
   remove. Public uploads do not quantise it, AutoRound supports it only in the
   `auto_round*` export formats, and its model-free path silently skips it - the
   config records the intent and the tensor stays bf16, so **probe the artifact,
-  never trust the config**.
+  never trust the config**. The same failure is still in 0.17.0's plain-RTN path
+  (the immediate-saving shard writer never packs the "remaining layer"); the
+  calibrated path packs it. `tools/quantize/check_gptq_export.py` is the probe;
+  the Qwen3.8 int4 scripts run it before they report success.
 - **A checkpoint advantage is not a kernel win.** An int4 head made this engine
   measure ahead of vLLM on decode, and that margin was retired rather than
   quoted: vLLM would be faster with one too and simply cannot load one, so the

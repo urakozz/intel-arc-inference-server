@@ -19,12 +19,109 @@ Checked against `origin/main` on 2026-09-22 (36 commits ahead of the box's
   upstream does not expose.
 
 Apply with `git apply tools/quantize/auto-round-local.patch` in an auto-round
-checkout, or keep them on a local branch and rebase.
+checkout, or keep them on a local branch and rebase. Re-checked against 0.17.0 @ `6afaecdb`
+(2026-10-06): still not upstream (the `os_cnt` reset is still outside the loop, `WrapperLinear`
+still has no `in_features`), and the patch still applies cleanly (`git apply --check`, offsets
+only). No script in this directory applies it; the published checkpoints below say which build
+made them.
+
+## AutoRound version (all scripts)
+
+| script | auto-round | why |
+|---|---|---|
+| `quantize_qwen38_tuned.sh` | **0.17.0, intel/auto-round main `6afaecdbe4092dc803f3e91026fe81a65b64b372`** (`AR_COMMIT`) | the calibrated path packs `lm_head` on 0.17.0 (checked below) |
+| `quantize_qwen38_rtn.sh` | **0.14.2** (PyPI wheel), still pinned | 0.17.0 still drops the `lm_head` packing on the RTN path (below) |
+| `quantize_kolibri1.sh` | 0.17.0 @ `6afaecdb` | the operator's ruling of 2026-10-05; Kolibri keeps lm_head bf16, so the bug is not exercised |
+| `quantize_qwen38_mxfp4.sh` | none - llm-compressor `model_free_ptq` | only borrows the auto-round venv's python |
+
+**Install.** The 0.17.0 scripts install `AR_SRC` - default the pip URL
+`git+https://github.com/intel/auto-round@6afaecdb...`, or a clean checkout at that commit (refused
+otherwise) - with `--no-deps --target` into `~/.cache/auto-round-6afaecdb-pkg` beside the venv, and
+run with `PYTHONPATH` pointing at it, so the venv itself is not modified (`git` is needed: setup.py
+runs `git describe`; the wheel says `0.17.0.dev209+g6afaecdb`, `auto_round.__version__` says
+`0.17.0`). They assert `auto_round.__version__ >= 0.17.0`, python >= 3.11 (0.17's floor; 0.14.2's
+was 3.10) and that `datasets`, `py-cpuinfo`, `pydantic`, `accelerate` are importable (the same
+requirement list as 0.14.2). Every Qwen3.8 export is refused unless
+`check_gptq_export.py` passes, and gets a provenance section appended to its `README.md`
+(auto-round version and commit, flags, source, date).
+
+**The CLI did not move under these scripts.** 0.14.2 already had the refactored parser; every flag
+the Qwen3.8 scripts pass means the same in 0.17.0 (checked: `--help` of both, and
+`auto_round/cli/parser.py`):
+
+| flag | 0.14.2 | 0.17.0 |
+|---|---|---|
+| `--scheme W4A16` | preset, default W4A16 | same |
+| `--group_size 64` | int | int, or comma ints (block fp8) |
+| symmetric | default; `--asym` opts out (no `--sym` since before 0.14.2) | same |
+| `--bits` | int | float (an int is still required without `--schemes`); alias `--bit` |
+| `--quant_lm_head` | `BooleanOptionalAction`, `auto_round*` formats only | same |
+| `--format auto_round:auto_gptq` | alias `--formats` | same; not eligible for model-free auto-routing (that needs format `auto_round`) |
+| `--iters 0` / `--disable_opt_rtn` | RTN / plain RTN (`--enable_opt_rtn` the other way) | same |
+| `--nsamples`, `--seqlen`, `--batch_size` | default 128 / 2048 / 8 (recipe `default`) | same |
+| `--dataset` | default `NeelNanda/pile-10k` in the parser | default `None` in the parser, resolved to `NeelNanda/pile-10k` in `compressors/base.py` - same data |
+| `--device 1` | alias of `--device_map` | same |
+| `--low_gpu_mem_usage` | flag | same |
+| low CPU memory | on by default; `--disable_low_cpu_mem_usage` | same - and it decides the RTN `lm_head` bug (below) |
+| layer exclusions | `--ignore_layers` / `--fp_layers` | same |
+| model-free | `--model_free`, `--disable_model_free` | same |
+| new in 0.17.0 | - | `--max_shard_size`, `--num_hidden_layers` (debug), `--disable_torch_compile`, `--enable_neuqi`, `--schemes` (`--options`/`--avg_bits` kept as hidden aliases) |
+
+**The lm_head bug, re-checked on 0.17.0 (2026-10-06).** Tiny random LLaMA and Qwen3 models (2
+layers, hidden 128, vocab 512, **untied** lm_head) quantised with the scripts' exact flags on CPU
+(`agnes-ref-img`, torch 2.14.1+cpu, transformers 5.15.0, 3 threads), 0.14.2 against 0.17.0 @
+`6afaecdb`, every export run through `check_gptq_export.py --source` and byte-compared:
+
+| path | 0.14.2 | 0.17.0 |
+|---|---|---|
+| RTN (`--iters 0 --disable_opt_rtn`), LLaMA and Qwen3 | lm_head packed, VERIFIED | **lm_head NOT packed**: `lm_head.weight` shipped, while `extra_config.lm_head` still says bits 4 / g64 / sym - FAIL |
+| RTN + `--disable_low_cpu_mem_usage`, LLaMA | - | packed; **byte-identical to 0.14.2** (51/51 tensors) |
+| tuned (4 iters, 8 x 64 local samples), LLaMA | packed, VERIFIED | packed, VERIFIED; **byte-identical to 0.14.2** (51/51) |
+| tuned, Qwen3 | - | packed, VERIFIED |
+
+The two scripts as committed also ran end to end on the tiny Qwen3 (`MODEL`, `DEVICE=cpu`, fresh
+`HOME`, `EXTRA` for a 4-iteration tune on local samples): tuned installed 0.17.0 from a clean
+checkout at `AR_COMMIT` and VERIFIED, rtn installed 0.14.2 from PyPI and VERIFIED, both wrote the
+provenance section; the tuned script forced onto RTN (`EXTRA="--iters 0 --disable_opt_rtn"`)
+**refused with exit 1** ("lm_head NOT packed"), which is the guard doing its job.
+
+Every other tensor is byte-identical between the versions in every arm; config keys, the
+`packing_format` string, the `extra_config` spelling and its `lm_head` entry are the same, and the
+loader's rules (`src/loader/quant.cc`) accept both. The cause, in 0.17.0's source: with low CPU
+memory on (the default) RTN takes the zero-shot loop, which saves through `ShardWriter`
+immediately; it quantises `lm_head` as a "remaining layer" (`compressors/orchestrator.py`,
+`Quantizing remaining layer ...`) **without the `immediate_pack` call** the calibrated loop makes,
+so `ShardWriter.finalize` writes the plain `lm_head.weight` from the state dict. The calibrated
+path turns immediate packing off when a quantised layer lives outside the blocks and packs every
+layer at export. Hence: the tuned script moved to 0.17.0, the RTN script keeps 0.14.2.
+`--disable_low_cpu_mem_usage` is a working 0.17.0 RTN recipe on the tiny models, but it holds the
+whole model in RAM (~54 GB bf16 for the 27B) and has not been run on it - adopt it only after a
+box run passes the checker. Not exercised on CPU: XPU; the 27B's GDN layers and MTP head (the
+scripts' checker guards the real run). On a CPU without bf16, both versions write unpacked tensors
+as F32 (the checker WARNs with `--source`); on the box's XPU they stay bf16.
+
+**Reproducibility.** The published checkpoints were not made by 0.17.0, and re-running a script
+now does not reproduce them byte for byte unless the version matches:
+`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ` (the gate) by the patched box build (`~/auto-round`,
+`141e4c99` plus `auto-round-local.patch`, `--format auto_gptq`, bf16 lm_head); the int4-lm_head RTN
+checkpoint of docs/13 by 0.14.2 (`autoround_version` 0.14.2, `tests/loader/quant_test.cc`'s
+fixture); `urakozz/Ornith-1.5-35B-A3B-W4A16-g64-AutoRound-GPTQ` by **0.15.0** (its config's
+`autoround_version`); Agnes and K2 by 0.16.0 (docs/probe-agnes-2026-10-03.md,
+docs/probe-k2-2026-10-05.md). On the tiny models the 0.14.2 and 0.17.0 tuned exports are
+byte-identical, which is evidence, not proof, for the 27B.
+
+Re-run the check on any export:
+
+```sh
+python3 tools/quantize/check_gptq_export.py OUT_DIR --lm-head quant [--source UNQUANTISED_DIR]
+```
 
 ## The command
 
-auto-round 0.16.0 dropped `--sym` (symmetric is the default; `--asym` opts out),
-and `--device` is an argparse prefix of `--device_map`:
+auto-round has no `--sym` (absent from 0.14.2's parser already; symmetric is the default and
+`--asym` opts out), and `--device` is an alias of `--device_map`. The command is unchanged on
+0.17.0; `--format auto_gptq` is the gate checkpoint's export (bf16 lm_head - `--quant_lm_head`
+needs an `auto_round*` format):
 
 ```sh
 ~/auto-round/.venv/bin/python -m auto_round \
@@ -80,9 +177,10 @@ tools/quantize_kolibri1.sh --dry-run          # the exact commands, nothing run
 **AutoRound for Kolibri is NOT the Qwen3.8 pin.** The operator's ruling (2026-10-05): intel/auto-round
 main at `6afaecdbe4092dc803f3e91026fe81a65b64b372` (0.17.0), the `AR_COMMIT` in the script, installed
 into `VENVPY` on first use from `AR_SRC` (a clean checkout at that commit - verified - or the pip
-git URL); `kolibri_recipe.json` and the card record it. The Qwen3.8 scripts
-(`quantize_qwen38_*.sh`) keep **v0.14.2** pinned so the published Qwen3.8 checkpoints stay
-reproducible. Checked for Kolibri on a tiny random Kolibri (below): the 0.17.0 API names
+git URL); `kolibri_recipe.json` and the card record it. Of the Qwen3.8 scripts,
+`quantize_qwen38_tuned.sh` uses the same commit since 2026-10-06 and `quantize_qwen38_rtn.sh`
+keeps **v0.14.2** pinned, because 0.17.0's RTN path still drops the int4 lm_head (see "AutoRound
+version" above). Checked for Kolibri on a tiny random Kolibri (below): the 0.17.0 API names
 (`scheme`, `group_size`, `sym` - the CLI has only `--asym` -, `iters`, `nsamples`, `seqlen`,
 `low_gpu_mem_usage`, `device_map`/`--device`, `ignore_layers`/`--fp_layers` substring match,
 `model_dtype`, `disable_opt_rtn`, `disable_model_free`); its fused-MoE unfusing only touches 3-D
