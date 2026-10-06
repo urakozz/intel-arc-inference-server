@@ -41,6 +41,12 @@ void CmdList::launch(Kernel& k, uint32_t gx, uint32_t gy, uint32_t gz, Event* si
   ZE_CHECK(zeCommandListAppendLaunchKernel(l_, k.handle(), &gc,
                                            signal ? signal->handle() : nullptr, 0, nullptr));
 }
+void CmdList::barrier_signal(ze_event_handle_t e) {
+  ZE_CHECK(zeCommandListAppendBarrier(l_, e, 0, nullptr));
+}
+void CmdList::wait_event(ze_event_handle_t e) {
+  ZE_CHECK(zeCommandListAppendWaitOnEvents(l_, 1, &e));
+}
 void CmdList::close() { ZE_CHECK(zeCommandListClose(l_)); }
 void CmdList::reset() { ZE_CHECK(zeCommandListReset(l_)); }
 }  // namespace l0

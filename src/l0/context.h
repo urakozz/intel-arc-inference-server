@@ -27,7 +27,24 @@ class Context {
   static constexpr uint32_t kFromEnv = 0xFFFFFFFFu;
 
   explicit Context(uint32_t device_index = kFromEnv);
+  // Spec 16b (pipeline parallel): a view of GPU `device_index` - an explicit index, so
+  // the environment is not consulted - inside `primary`'s Level Zero context. Spec 16
+  // decision 1 is ONE context holding both devices: every allocation, module, list and
+  // event made through either view lives in that context, so a cross-device copy, a peer
+  // pointer or an event one device signals and the other waits on needs no handle
+  // export. The view shares `primary`'s driver and context handle and does not destroy
+  // the context; `primary` must outlive it. (zeContextCreate's context already spans
+  // every device of the driver - this constructor only binds a second device to it.)
+  Context(const Context& primary, uint32_t device_index);
   ~Context();
+
+  // Spec 16b: the GPU devices of the first driver, in the order an index (`--device N`,
+  // the view above) counts them - what `ZE_AFFINITY_MASK` leaves visible. Initialises the
+  // driver; no context is created.
+  static uint32_t gpu_count();
+  // Spec 16b: zeDeviceCanAccessPeer(this view's device, other's device) - whether this
+  // device can read and write `other`'s device memory (P4: refused, never assumed).
+  bool can_access_peer(const Context& other) const;
 
   // Parses ONEAPI_DEVICE_SELECTOR: unset or empty and `level_zero:*` mean
   // device 0 (there is no multi-device execution until P/D disaggregation);
@@ -59,5 +76,6 @@ class Context {
   ze_context_handle_t ctx_ = nullptr;
   ze_device_properties_t props_{};
   ze_device_compute_properties_t compute_{};
+  bool owns_ = true;   // false for a view (spec 16b): the primary destroys the context
 };
 }  // namespace l0
