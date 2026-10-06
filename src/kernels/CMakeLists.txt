@@ -713,6 +713,61 @@ if(B70_K2)
 endif()
 # ==== Spec 18c: K2-Horizon prefill ============================================ (end) ====
 
+# ==== Spec 18e: K2-Horizon's int8 KV cache (`--kv-cache int8`) ============== (begin) ====
+# rotkv at head_dim 128 (spec 12 §8; src/common/kv8.h hd128): every binary that writes or reads
+# K2's int8 cache, from ONE new source (k2/k2_kv8.cl, per-family defines as kv8.cl) plus
+# k2_moe.cl's k2_mova_value at MOVA_STAGE 1 (its routed mix into a staging row, which the
+# writer quantises). Additive only: every existing binary keeps its name and command line, and
+# a `--kv-cache bf16` K2 engine (the default) binds none of these. Suffix `_KV8` (spec 12b's) on
+# the names that carry K2's `Q32KV8` heads already.
+#   decode   k2_attn_prep_M1_N10240_S2_Q32KV8_V_KV8 / ..._N9280_S2_Q32KV8_KV8   the writer
+#            k2_mova_M1_E64_T4_D2560_N1024_STAGE                             MoVA's v, staged
+#            k2_attn_M1_T<TGT>_Q32KV8_KV8           flash decode + the un-rotating reduce
+#            k2_attn_eager_M1_T<TGT>_Q32KV8_KV8     eager score / P·V / un-rotating reduce (the
+#                                                   softmax is k2_attn_eager's binary, unchanged)
+#   prefill  k2_attn_prep_M2048_N10240_S1_Q32KV8_V_KV8 / ..._N9472_S1_Q32KV8_KV8  the writer
+#            k2_pf_flash_attn_Q32KV8[_EAGER][_O]_KV8  the flash over int8 (gated, and the K1
+#                                                   test's ungated un-rotated o)
+#            (MoVA's combine is k2_pf_mova's binary with pos 0 into the staging row)
+if(B70_K2 AND B70_KV8)
+  set(K2_KV8_CL ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_kv8.cl)
+  set(K2_KV8_HEADS Q_HEADS=32 KV_HEADS=8)
+  add_ocloc_kernel(k2_attn_prep_M1_N10240_S2_Q32KV8_V_KV8 SOURCE ${K2_KV8_CL}
+                   DEFINES ${CTRL_DEFINES} K2KV8_PREP=1 M=1 QKV_S=2 ${K2_KV8_HEADS} QKV_N=10240
+                           V_FROM_PARTIALS=1)
+  add_ocloc_kernel(k2_attn_prep_M1_N9280_S2_Q32KV8_KV8 SOURCE ${K2_KV8_CL}
+                   DEFINES ${CTRL_DEFINES} K2KV8_PREP=1 M=1 QKV_S=2 ${K2_KV8_HEADS} QKV_N=9280
+                           V_FROM_PARTIALS=0)
+  add_ocloc_kernel(k2_mova_M1_E64_T4_D2560_N1024_STAGE SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_moe.cl
+                   DEFINES ${CTRL_DEFINES} M=1 MOVA_E=64 MOVA_K=4 MOVA_D=2560 MOVA_N=1024 MOVA_KS=4
+                           MOVA_STAGE=1)
+  add_ocloc_kernel(k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8_KV8 SOURCE ${K2_KV8_CL}
+                   DEFINES ${CTRL_DEFINES} K2KV8_DEC=1 M=1 TGT=${ATTN_V2_TGT} ${K2_KV8_HEADS})
+  add_ocloc_kernel(k2_attn_eager_M1_T${ATTN_V2_TGT}_Q32KV8_KV8 SOURCE ${K2_KV8_CL}
+                   DEFINES ${CTRL_DEFINES} K2KV8_EAGER=1 M=1 TGT=${ATTN_V2_TGT} ${K2_KV8_HEADS})
+  add_ocloc_kernel(k2_attn_prep_M2048_N10240_S1_Q32KV8_V_KV8 SOURCE ${K2_KV8_CL}
+                   DEFINES ${CTRL_DEFINES} K2KV8_PREP=1 M=2048 QKV_S=1 ${K2_KV8_HEADS} QKV_N=10240
+                           V_FROM_PARTIALS=1)
+  add_ocloc_kernel(k2_attn_prep_M2048_N9472_S1_Q32KV8_KV8 SOURCE ${K2_KV8_CL}
+                   DEFINES ${CTRL_DEFINES} K2KV8_PREP=1 M=2048 QKV_S=1 ${K2_KV8_HEADS} QKV_N=9472
+                           V_FROM_PARTIALS=0)
+  foreach(EG 0 1)
+    foreach(GT 0 1)
+      set(_n k2_pf_flash_attn_Q32KV8)
+      if(EG)
+        string(APPEND _n _EAGER)
+      endif()
+      if(NOT GT)
+        string(APPEND _n _O)
+      endif()
+      add_ocloc_kernel(${_n}_KV8 SOURCE ${K2_KV8_CL}
+                       DEFINES K2KV8_FLASH=1 KT=64 RPW=8 HPW=4 ${K2_KV8_HEADS} EAGER=${EG} GATE_EPI=${GT}
+                       OPTIONS -cl-intel-256-GRF-per-thread)
+    endforeach()
+  endforeach()
+endif()
+# ==== Spec 18e: K2-Horizon's int8 KV cache ==================================== (end) ====
+
 # ==== Spec 15e: Ornith's MTP lists (model::ornith(), B70_ORNITH and B70_MTP) ===== (begin) ==
 # Additive only: no source changes and no existing variant's name or command line moves
 # (tools/kernel_cmdlines' diff: additions only). What the verify and draft lists bind on
