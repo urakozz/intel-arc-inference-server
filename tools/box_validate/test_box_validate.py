@@ -743,6 +743,17 @@ class DriverTest(unittest.TestCase):
         self.assertIn("tools/toolcall/a4_ref.sh k2 ref", out)
         self.assertIn("N_NEW=512 LM_HEAD=int8 tools/toolcall/engine_generate.sh", out)
         self.assertIn("score.py $HOME/", out)
+        # row 26 (spec 20d, Kolibri-1 prefill): K0 and the host first, K1 before the synthetic gates, two
+        # cards after one, the real checkpoint last; the speed rows opt-in
+        out = self.run_driver("--dry-run", "--only", "r26", "--with", "r26.speed").stdout
+        order = re.findall(r"^--- (\S+)", out, re.M)
+        self.assertEqual(order, ["pre", "r26.k0", "r26.host", "r26.k1", "r26.reject", "r26.prefill", "r26.split",
+                                 "r26.golden", "r26.golden_eager", "r26.pp", "r26.cli", "r26.real", "r26.speed"])
+        self.assertIn("--re '^(kolibri_pf_ref_test|kolibri_pf_variant_names_test|kolibri_plan_test)$'", out)
+        self.assertIn("--re '^cli_reject_kolibri_prefill_(int8|sycl|chunk)$'", out)
+        self.assertIn("kol_pf_flash_attn_Q48KV4_W513_R4096_EAGER", out)
+        self.assertIn("--prefill-length 131072 --tg 16 --max-len 140000 --lm-head int8", out)
+        self.assertNotIn("r26.speed", re.findall(r"^--- (\S+)", self.run_driver("--dry-run", "--only", "r26").stdout, re.M))
         # row 16's A4 on Ornith's own set (made on the Mac), opt-in; the Mac steps manual
         out = self.run_driver("--dry-run", "--only", "r16.a4").stdout
         self.assertIn("oracle-out-ornith-a4/set", out)

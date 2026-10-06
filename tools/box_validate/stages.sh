@@ -1581,7 +1581,7 @@ st_r24_k1() {
   jgrab k1 '^kolibri_kernels_test$' 'bitwise|ulp|cosine|differ|OK'
   finish
 }
-stage r24.reject 24 default gpu - - "the refusals before the device: cli_reject_kolibri_* (--pp 1 on the real model naming --pp 2, --prefill naming spec 20d, --mtp, --kv-cache int8, --device with --pp 2, --layers on a Qwen checkpoint, b70-serve naming spec 20e)"
+stage r24.reject 24 default gpu - - "the refusals before the device: cli_reject_kolibri_* (--pp 1 on the real model naming --pp 2, the prefill backends and chunk (spec 20d, row 26), --mtp, --kv-cache int8, --device with --pp 2, --layers on a Qwen checkpoint, b70-serve naming spec 20e)"
 st_r24_reject() {
   run_tests '^cli_reject_kolibri_' '' '' 'ZE_AFFINITY_MASK=0,1'
   finish
@@ -1780,6 +1780,114 @@ st_r25_benchy() {
   chk "MODEL=$SNAP_K2 MAX_LEN=40960 SERVE_ARGS='--prefix-cache-gb 0' tools/probe/serve_benchy.sh --pp 1024 --tg 64 --depth 0 4096 16384 32768 --enable-prefix-caching --exact-tg --latency-mode generation --runs 3" "llama-benchy, prefix cache off"
   grab_all benchy '^\| ' 80
   finish
+}
+
+# ======================================================================================
+row 26 "spec 20d - Kolibri-1 prefill: grouped MoE over 384 experts, windowed flash over the ring, one hand-off per chunk (spec 20 §12, plan 20d)"
+rownote 26 "Written blind on the Mac, after row 24 (20c's decode on the card) and rows 22 / 23 (16b's / 16c's hand-offs): none of the 17 new binaries of the 20d block was ever compiled by ocloc - the DPAS flash at GQA 12 with the 513-key window over the 4096-slot ring (kol_pf_flash_attn_Q48KV4_{W513_R4096,F}[_EAGER]), the 384-expert sort on 256 lanes (kol_pf_moe_E384_T6_D2560_I512_L256), the grouped GEMMs at Kolibri's shapes (pf_moe_gemm_K2560_N1024_SILU, _K512_N2560), kol_prep.cl at M 2048. The 2252-launch walk and the sequential two-card chunk hand-off never ran."
+rownote 26 "The synthetic checkpoints (oracle-out-kolibri-synth, row 24's r24.oracle_synth) carry KL2 / K3 before spec 20b; everything on the real checkpoint (r26.real, r26.speed) SKIPs 'missing data' until 20b. The near-tie tolerance and the prefill-vs-decode KV bars (row >= 0.999 on layer 0, median >= 0.9998, p01 >= 0.99) are PROPOSED: the tests print the distributions."
+rownote 26 "If KL2 on prefill fails determined rows under flash, compare r26.golden_eager (B70_KOLIBRI_ATTN=eager: the eager prefill flash and decode's eager attention) before reading the kernels (spec 18 §10.1's rule)."
+stage r26.k0 26 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (no existing .cl edited; kernel_cmdlines +17 / -0 / ~0 with K2 on), the Qwen3.8 suite (G0); 20c's decode gates not failed (756 / 856 launches unchanged)"
+st_r26_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  need_ok r24.k1 r24.k3 r24.golden
+  finish
+}
+stage r26.host 26 default cpu - - "host: kolibri_pf_ref_test (the 384-expert sort and its adversaries, == pf_moe_ref::sort; the combine == decode's chain and torch's row; the windowed flash walk == the direct softmax through the ring; eager_window == torch's eager rows bitwise; the bf16 slab tail), kolibri_pf_variant_names_test, kolibri_plan_test (2252 launches one card and two, 4 + 2 weight batches, 0.905 GB scratch, 262144 on two cards with prefill planned)"
+st_r26_host() {
+  run_tests '^(kolibri_pf_ref_test|kolibri_pf_variant_names_test|kolibri_plan_test)$'
+  jgrab plan '^kolibri_plan_test$' 'prefill|split 25|OK'
+  finish
+}
+stage r26.k1 26 default gpu - r26.host "K1 for the prefill, no checkpoint: the 17 binaries built (kbins) and kolibri_pf_kernels_test - slabs exact, norm / sandwich / prep at M 2048 bit-exact (the ring wrapping at 4090), the router rows bitwise decode's, sort / gather / dequant exact (block 384 the bf16 shared tiles), GROUPED == DENSE bitwise (a 1-ulp difference is a finding), reversed chunk and replay bitwise, the shared expert alone; the flash against fp64 (>= 0.99999) sliding at 0 / 1000 / 4396 / a 300-row tail / single rows and full to 62048, EAGER (0.9999 / 0.999), a split at 64 bitwise"
+st_r26_k1() {
+  kbins kol_pf_embed_gather_D2560_V128000 pf_res_fold_K2560_SP1_G20_Z k2_pf_dequant_slab_K2560_N7168 \
+    kol_pf_bf16_slab_K2560_N7168 kol_pf_bf16_slab_K6144_N2560 kol_norm_M2048_K2560_G20_W20 kol_post_add_M2048_K2560_G20 \
+    kol_attn_prep_M2048_N7168_S1_Q48KV4_R4096 kol_attn_prep_M2048_N7168_S1_Q48KV4_F kol_pf_flash_attn_Q48KV4_W513_R4096 \
+    kol_pf_flash_attn_Q48KV4_W513_R4096_EAGER kol_pf_flash_attn_Q48KV4_F kol_pf_flash_attn_Q48KV4_F_EAGER \
+    kol_pf_moe_E384_T6_D2560_I512_L256 pf_moe_router_K2560_N512 pf_moe_gemm_K2560_N1024_SILU pf_moe_gemm_K512_N2560
+  run_tests '^kolibri_pf_kernels_test$' kolibri
+  jgrab k1-prefill '^kolibri_pf_kernels_test$' 'cos|ulp|bit-exact|bitwise|grouped|dense|OK|FAIL'
+  finish
+}
+stage r26.reject 26 default gpu - - "the refusals before the device: cli_reject_kolibri_prefill_int8 (naming the 1024-k Hadamard blocks), _sycl (no Kolibri walk), _chunk (above 2048)"
+st_r26_reject() {
+  run_tests '^cli_reject_kolibri_prefill_(int8|sycl|chunk)$'
+  finish
+}
+stage r26.prefill 26 default gpu oracle_kolibri_synth r26.k1 "K3 on one card: kolibri_prefill_synth_int4attn_test, _bf16attn_test, _eager_test - 2 + 5 x 45 = 227 launches a chunk + 5, plan == allocation, immediate / recorded / replayed bitwise, chunks of 16 bitwise (4500 ids: the third chunk wraps the ring), Review Focus 4 (KV / rings / routes / tokens against decode's fill, per layer)"
+st_r26_prefill() {
+  run_tests '^kolibri_prefill_synth_(int4attn|bf16attn|eager)_test$' kolibri
+  jgrab k3-prefill '^kolibri_prefill_synth' 'walk|K3|chunks|median|p01|routing|tokens|OK|FAIL'
+  finish
+}
+stage r26.split 26 default gpu oracle_kolibri_synth r26.k1 "Review Focus 5: prefill_split_kolibri_test - splits at 64, 1000, 2048, 4097 against one call: the multiples of 64 bitwise, the others within the split bars (the argument predicts bitwise for 1000 too only if its 8-row groups line up: read it)"
+st_r26_split() {
+  run_tests '^prefill_split_kolibri_test$' kolibri
+  jgrab split '^prefill_split_kolibri_test$' 'split at|bitwise|OK|FAIL'
+  finish
+}
+stage r26.golden 26 default gpu oracle_kolibri_synth r26.prefill "KL2 on prefill, synthetic arms: kolibri_golden_prefill_synth_int4attn_test, _bf16attn_test, _c16_test (chunks of 16), _i8head_test - the tie-aware token gate and the routing diagnostic on the prompt rows (B70_KOL_TIE_TOL as r24.golden)"
+st_r26_golden() {
+  run_tests '^kolibri_golden_prefill_synth_(int4attn|bf16attn|c16|i8head)_test$' kolibri '' "${B70_KOL_TIE_TOL:+B70_KOL_TIE_TOL=$B70_KOL_TIE_TOL}"
+  jgrab golden-prefill '^kolibri_golden_prefill_synth' 'gate:|routing:|prefill:|OK|FAIL'
+  finish
+}
+stage r26.golden_eager 26 default gpu oracle_kolibri_synth r26.prefill "KL2 on prefill through the EAGER attention (B70_KOLIBRI_ATTN=eager, both halves): kolibri_golden_prefill_synth_eager_test - compare with r26.golden"
+st_r26_golden_eager() {
+  run_tests '^kolibri_golden_prefill_synth_eager_test$' kolibri '' "${B70_KOL_TIE_TOL:+B70_KOL_TIE_TOL=$B70_KOL_TIE_TOL}"
+  jgrab golden-prefill-eager '^kolibri_golden_prefill_synth_eager' 'gate:|routing:|OK|FAIL'
+  finish
+}
+stage r26.pp 26 default gpu oracle_kolibri_synth r26.prefill,r22.p1 "two cards: kolibri_prefill_pp_test (--pp 2 --pipeline-split 3 against --pp 1, BITWISE: one prefill, recorded + replayed, a 1000 + rest continuation, chunks of 16, both Control blocks; P4 - a dropped chunk hand-off throws within 5 s naming device 1, reset() recovers), prefill_split_kolibri_pp_test, kolibri_golden_prefill_synth_pp_test"
+st_r26_pp() {
+  run_tests '^(kolibri_prefill_pp_test|prefill_split_kolibri_pp_test|kolibri_golden_prefill_synth_pp_test)$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab pp '^(kolibri_prefill_pp|prefill_split_kolibri_pp|kolibri_golden_prefill_synth_pp)' 'pp:|P4|device|split at|gate:|OK|FAIL'
+  finish
+}
+stage r26.cli 26 default gpu oracle_kolibri_synth r26.pp "CLI: b70-decode <synthetic int4attn> --ids prose.ids --n 32 with and without --prefill on --pp 1 and --pp 2 (the default) - the four id lists compared (a difference judged by the tie rule); --prefill-chunk 1000; --max-len auto with --prefill on two cards; the prefill line (2 + 45 x 5 launches a chunk + 5)"
+st_r26_cli() {
+  local ck="oracle-out-kolibri-synth/int4attn/ckpt" ids="oracle-out-kolibri-synth/int4attn/prose.ids" a
+  chk "build/src/cli/b70-decode $ck --pp 1 --ids $ids --n 32 > $STATE/r26-one.ids" "one card, decode"
+  chk "build/src/cli/b70-decode $ck --pp 1 --ids $ids --n 32 --prefill > $STATE/r26-one-pf.ids" "one card, --prefill"
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --ids $ids --n 32 --prefill > $STATE/r26-two-pf.ids && cmp $STATE/r26-one-pf.ids $STATE/r26-two-pf.ids" \
+    "--pp 2 --prefill: the one-card --prefill ids"
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --ids $ids --n 32 --prefill --prefill-chunk 1000 > $STATE/r26-c1000.ids" "--prefill-chunk 1000"
+  x "for a in one one-pf two-pf c1000; do printf '%s: ' \$a; tr '\\n' ' ' < $STATE/r26-\$a.ids; echo; done; if cmp -s $STATE/r26-one.ids $STATE/r26-one-pf.ids; then echo 'PREFILL ids identical to the decode-only run'; else echo 'PREFILL ids differ from the decode-only run: judge the first difference by the tie rule'; fi"
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --ids $ids --n 8 --prefill --max-len auto > /dev/null" "--max-len auto with --prefill on two cards"
+  grab_all prefill '^prefill:|^PREFILL ids|max_len: auto' 8
+  grab_all memory '^memory' 6
+  finish
+}
+stage r26.real 26 default gpu kolibri,oracle_kolibri r26.pp "after spec 20b, two cards: kolibri_prefill_test (pp2: K3, Review Focus 4 on 50 layers), prefill_split_kolibri_real_test, kolibri_golden_prefill_test / _c16 / _i8head (KL2 on prefill, real golden set)"
+st_r26_real() {
+  run_tests '^(kolibri_prefill_test|prefill_split_kolibri_real_test|kolibri_golden_prefill(_c16|_i8head)?_test)$' '' '' \
+    "ZE_AFFINITY_MASK=0,1${B70_KOL_TIE_TOL:+ B70_KOL_TIE_TOL=$B70_KOL_TIE_TOL}"
+  jgrab real '^(kolibri_prefill_test|prefill_split_kolibri_real|kolibri_golden_prefill)' 'walk|K3|median|split at|gate:|routing:|OK|FAIL'
+  finish
+}
+stage r26.speed 26 optin gpu kolibri r26.real "plan 20d Task 5 (needs spec 20b): pp4096 / pp32768 / pp131072 then tg16 on two cards (--lm-head int8, max_len 140000), flash vs B70_KOLIBRI_ATTN=eager at 32768, interleaved pairs, median of 3; against the derived ~4,000 t/s at pp4096 - BENCHMARKS 'Kolibri-1 (spec 20)' prefill rows"
+st_r26_speed() {
+  idle before
+  local n k="ZE_AFFINITY_MASK=0,1" arms=""
+  for n in 4096 32768 131072; do
+    arms="$arms pp$n '$k $(bench_cmd "$SNAP_KOLIBRI" --prefill-length $n --tg 16 --max-len 140000 --lm-head int8)'"
+  done
+  arms="$arms pp32768-eager '$k B70_KOLIBRI_ATTN=eager $(bench_cmd "$SNAP_KOLIBRI" --prefill-length 32768 --tg 16 --max-len 140000 --lm-head int8)'"
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 --ratio pp32768-eager/pp32768 --$arms" "the Kolibri-1 prefill arms"
+  idle after
+  grab_all prefill '^pp:|^prefill:' 12
+  grab_all memory '^memory, device' 8
+  grab_all ratio '^RATIO '
+  grab_all idle '^IDLE '
+  finish
+}
+stage r26.p0 26 manual - kolibri - "plan 20d Task 5's profile and levers (need a rebuild or the real checkpoint)"
+st_r26_p0() {
+  say "# B70_PREFILL_PROFILE=1 ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode \$SNAP_KOLIBRI --bench --prefill-length 4096 --tg 1: the moe_weights (dequant) share of a chunk, per card"
+  say "# per-device busy time per chunk: the sequential hand-off leaves one card idle - spec 16c's overlapped chunk pipeline is the recorded lever (up to ~2x)"
+  say "# an SLM-fused int4 grouped GEMM (spec 15d Task 1's arm) removing the per-chunk bf16 dequant pass"
+  say "# record: docs/BENCHMARKS.md 'Kolibri-1 (spec 20)'"
 }
 
 # ======================================================================================
