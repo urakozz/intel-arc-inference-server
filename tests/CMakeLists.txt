@@ -2362,3 +2362,17 @@ b70_cli_reject(cli_reject_pipeline_prefill_sycl ${B70_NO_MODEL} --ids ${B70_OK_I
 b70_cli_reject(cli_reject_pipeline_bench_prefill_sycl ${B70_NO_MODEL} --bench --prefill-length 64
   --pp 2 --prefill-backend sycl-tla EXPECT "--prefill-backend l0 or l0-int8")
 # ==== Spec 16c ============================================================= (end) ====
+
+# ==== Spec 20c: Kolibri-1 decode (label kolibri) ==== (begin) ====
+# One delimited block for every 20c registration (spec 16c's and 20d's blocks stay apart). Host
+# tests first (they run on the Mac: tools/mac_check.sh), then the card's (box only; box-validation
+# queue row 24). Real-checkpoint tests SKIP (77) until spec 20b's checkpoint exists; the synthetic
+# checkpoints (tools/box_validate/kolibri_oracle.sh synth) carry KL2 / KL3 before it.
+# Task 2: the model table.
+add_executable(kolibri1_test model/kolibri1_test.cc)
+target_include_directories(kolibri1_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kolibri1_test PRIVATE b70_kolibri_model)
+add_test(NAME kolibri1_test COMMAND kolibri1_test ${CMAKE_SOURCE_DIR}/tests/model/kolibri1/config.json
+  ${CMAKE_SOURCE_DIR}/tests/model/kolibri1/synth5_bf16attn.json)
+set_tests_properties(kolibri1_test PROPERTIES LABELS kolibri)
+# ==== Spec 20c: Kolibri-1 decode ==== (end) ====
