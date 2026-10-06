@@ -75,7 +75,7 @@ inline runtime::PpHandoff parse_pipeline_handoff(const std::string& v, PipelineA
 struct PipelineContext {
   bool prefill = false;      // --prefill
   bool bench_prefill = false;   // --bench --prefill-length N
-  bool mtp = false;          // --mtp K|auto
+  bool mtp = false;          // --mtp K|auto (spec 16d: allowed with --pp 2)
   bool profile = false;      // --profile
   bool device = false;       // --device N
   // Spec 16c: what a prefill would run on (read with prefill / bench_prefill only):
@@ -104,9 +104,8 @@ inline void check_pipeline(const PipelineArgs& a, const PipelineContext& c) {
   if ((c.prefill || c.bench_prefill) && c.composed_attn)
     throw std::runtime_error("--pp 2 prefills with the flash attention only: unset "
                              "B70_PREFILL_ATTN=composed (spec 16c)");
-  if (c.mtp)
-    throw std::runtime_error("--pp 2 with --mtp is spec 16d (the MTP head and its embedding "
-                             "on device 1); drop --mtp");
+  // (Spec 16d lifted 16b's --mtp refusal: the head, its embedding replica and the draft lists
+  // run on device 1, the verify lists on both.)
   if (c.profile)
     throw std::runtime_error("--profile instruments one device's list; it has no --pp 2");
   if (c.device)

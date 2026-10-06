@@ -2215,8 +2215,9 @@ fi
     EXPECT "K2-Horizon's engine does not capture")
   b70_serve_reject(cli_reject_serve_k2_prefill_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2
     --prefill-backend l0-int8 EXPECT "K2-Horizon prefills on the l0 backend only")
+  # Spec 16d: --pp 2 serves the Qwen family on two cards; K2 stays refused, by name.
   b70_serve_reject(cli_reject_serve_pp ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --pp 2
-    EXPECT "b70-serve serves on one card")
+    EXPECT "K2-Horizon runs its own engine")
 endif()
 # ==== Spec 18d ============================================================= (end) ====
 
@@ -2352,9 +2353,8 @@ endif()
 # count, before the load (the model path does not exist).
 b70_cli_reject(cli_reject_pipeline_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp 3
   EXPECT "--pp is the pipeline-parallel size, 1 or 2")
-# (Spec 16c lifted 16b's two prefill refusals; what it refuses is in its own block below.)
-b70_cli_reject(cli_reject_pipeline_mtp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4
-  --pipeline-parallel-size 2 --mtp 1 EXPECT "spec 16d")
+# (Spec 16c lifted 16b's two prefill refusals; what it refuses is in its own block below.
+# Spec 16d lifted the --mtp one, cli_reject_pipeline_mtp: --pp 2 --mtp runs.)
 b70_cli_reject(cli_reject_pipeline_device ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp 2
   --device 1 EXPECT "--device names one card")
 b70_cli_reject(cli_reject_pipeline_split_alone ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4
@@ -2458,6 +2458,11 @@ add_executable(pp_serve_plan_test runtime/pp_serve_plan_test.cc)
 target_include_directories(pp_serve_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(pp_serve_plan_test PRIVATE b70_plan)
 add_test(NAME pp_serve_plan_test COMMAND pp_serve_plan_test)
+add_executable(pp_serve_test server/pp_serve_test.cc)
+target_include_directories(pp_serve_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(pp_serve_test PRIVATE b70_server b70_plan)
+add_test(NAME pp_serve_test COMMAND pp_serve_test)
+set_tests_properties(pp_serve_test PROPERTIES TIMEOUT 300)
 
 # On the box, both cards and the checkpoint; SKIP (77) with fewer than two GPUs or without peer
 # access. Review Focus 1-3 (pp_mtp_test): MTP across the split BITWISE one card's on device 0 -
@@ -2484,6 +2489,59 @@ if(B70_MTP)
     add_test(NAME pp_mtp_kv8_test COMMAND pp_mtp_test ${B70_TEST_SNAPSHOT})
     b70_kv8_twin(pp_mtp)
   endif()
+endif()
+# Review Focus 2 / 5 and spec 16 P2 (spec 7's C2 with --pp 2): the prefix cache's request path
+# through b70-serve's adapters, two cards BITWISE one card - the plans, the final turn's ids and
+# rows, the session - on sequences a-f; copy, peer, the split_last path, MTP (K 3, step_many),
+# the int8 head; the int8 KV twin.
+if(B70_TOKENIZER_ENABLED)
+  add_executable(pp_prefix_gpu_test server/pp_prefix_gpu_test.cc)
+  target_include_directories(pp_prefix_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(pp_prefix_gpu_test PRIVATE b70_server b70_tokenizer b70_runtime b70_loader
+    b70_model b70_l0 b70_prefill_host)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(pp_prefix_gpu_test)
+  endif()
+  add_dependencies(pp_prefix_gpu_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS} kernel_pp_handoff)
+  set(_pp_prompts ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
+  add_test(NAME pp_prefix_gpu_test COMMAND pp_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${_pp_prompts} 0 copy 0)
+  add_test(NAME pp_prefix_gpu_peer_test COMMAND pp_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${_pp_prompts} 0 peer 0)
+  add_test(NAME pp_prefix_gpu_split_test COMMAND pp_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${_pp_prompts} 0 copy 1 int8)
+  set(_pp_prefix pp_prefix_gpu_test pp_prefix_gpu_peer_test pp_prefix_gpu_split_test)
+  if(B70_MTP)
+    add_dependencies(pp_prefix_gpu_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
+    add_test(NAME pp_prefix_gpu_mtp_test COMMAND pp_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${_pp_prompts} 3 copy 1 int8)
+    list(APPEND _pp_prefix pp_prefix_gpu_mtp_test)
+  endif()
+  set_tests_properties(${_pp_prefix} PROPERTIES
+    LABELS "checkpoint;pp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  if(B70_KV8 AND COMMAND b70_kv8_twin)
+    add_dependencies(pp_prefix_gpu_test ${B70_KV8_KERNELS})
+    add_test(NAME pp_prefix_gpu_kv8_test COMMAND pp_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${_pp_prompts} 0 copy 1 int8)
+    b70_kv8_twin(pp_prefix_gpu)
+  endif()
+endif()
+
+# b70-serve's --pp refusals before the device (cli/pipeline_serve.h): the model's with
+# tests/model/kolibri1 (config.json only; K2's is 18d's cli_reject_serve_pp, its expectation
+# updated), the rest before the snapshot is resolved (the model path does not exist).
+if(TARGET b70-serve AND COMMAND b70_serve_reject)
+  b70_serve_reject(cli_reject_serve_pp_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --pp 2
+    EXPECT "spec 20e")
+  b70_serve_reject(cli_reject_serve_pp_value ${B70_NO_MODEL} --pp 4096
+    EXPECT "--pp is the pipeline-parallel size, 1 or 2")
+  b70_serve_reject(cli_reject_serve_pp_device ${B70_NO_MODEL} --pipeline-parallel-size 2 --device 1
+    EXPECT "--device names one card")
+  b70_serve_reject(cli_reject_serve_pp_sycl ${B70_NO_MODEL} --pp 2 --prefill-backend sycl-tla
+    EXPECT "not sycl-tla")
+  b70_serve_reject(cli_reject_serve_pp_split_alone ${B70_NO_MODEL} --pipeline-split 20
+    EXPECT "--pipeline-split belongs to --pp 2")
+  b70_serve_reject(cli_reject_serve_pp_handoff_value ${B70_NO_MODEL} --pp 2 --pipeline-handoff p2p
+    EXPECT "--pipeline-handoff expects copy or peer")
+  set_tests_properties(cli_reject_serve_pp_kolibri cli_reject_serve_pp_value cli_reject_serve_pp_device
+    cli_reject_serve_pp_sycl cli_reject_serve_pp_split_alone cli_reject_serve_pp_handoff_value
+    PROPERTIES LABELS pp)
 endif()
 # ==== Spec 16d ============================================================= (end) ====
 

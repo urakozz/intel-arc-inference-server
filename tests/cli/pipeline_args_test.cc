@@ -2,7 +2,8 @@
 // host - the parse and every refusal that needs no device - and the 2026-10-06 rename's
 // refusals (cli/renamed_flags.h). The CLI's own registrations (cli_reject_pipeline_*,
 // cli_reject_pp_*, cli_reject_renamed_*) drive the shipped binary on the box; this is the same
-// logic without it.
+// logic without it. Spec 16d: and b70-serve's (cli/pipeline_serve.h) - what --pp 2 serves and
+// what it refuses before the device (the box's cli_reject_serve_pp_* drive the binary).
 #include <cstdio>
 #include <functional>
 #include <stdexcept>
@@ -10,6 +11,7 @@
 
 #include "check.h"
 #include "cli/pipeline_args.h"
+#include "cli/pipeline_serve.h"
 #include "cli/renamed_flags.h"
 
 namespace {
@@ -118,7 +120,9 @@ void check_refusals() {
   cli::check_pipeline(two, c);
   c = {};
   c.mtp = true;
-  CHECK(says([&] { cli::check_pipeline(two, c); }, "spec 16d"));
+  cli::check_pipeline(two, c);   // spec 16d lifted 16b's --mtp refusal
+  c.prefill = true;
+  cli::check_pipeline(two, c);   // ... with the two-card prefill too (the head's KV on device 1)
   c = {};
   c.profile = true;
   CHECK(says([&] { cli::check_pipeline(two, c); }, "--profile"));
@@ -134,6 +138,60 @@ void check_device_refusal() {
   cli::require_two_devices(2);
   cli::require_two_devices(4);
 }
+
+// Spec 16d: b70-serve --pp.
+void check_serve() {
+  cli::PipelineArgs one, two;
+  two.devices = 2;
+  cli::ServePipelineContext c;
+  // --pp 1 is today's one-card server: nothing refused, whatever the model or flags.
+  for (const char* mt : {"qwen3_5", "k2_horizon", "kolibri1", ""}) {
+    c = {};
+    c.model_type = mt;
+    c.device = true;
+    c.prefill_replay = true;
+    cli::check_serve_pipeline(one, c);
+  }
+  // ... but the sub-flags alone are refused, as b70-decode refuses them.
+  cli::PipelineArgs split_only, handoff_only;
+  cli::parse_pipeline_split("30", split_only);
+  cli::parse_pipeline_handoff("peer", handoff_only);
+  CHECK(says([&] { cli::check_serve_pipeline(split_only, {}); }, "--pipeline-split belongs to --pp 2"));
+  CHECK(says([&] { cli::check_serve_pipeline(handoff_only, {}); }, "--pipeline-handoff belongs to --pp 2"));
+  // --pp 2 serves the Qwen family with everything else on: MTP, both L0 backends.
+  for (const char* mt : {"qwen3_5", "qwen3_5_moe", ""})
+    for (runtime::PrefillBackend b : {runtime::PrefillBackend::L0Int8, runtime::PrefillBackend::L0})
+      for (bool mtp : {false, true}) {
+        c = {};
+        c.model_type = mt;
+        c.prefill_backend = b;
+        c.mtp = mtp;
+        cli::check_serve_pipeline(two, c);
+      }
+  // The refusals, by name.
+  c = {};
+  c.model_type = "k2_horizon";
+  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "K2-Horizon runs its own engine"));
+  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "serve it on one card"));
+  c.model_type = "kolibri1";
+  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "spec 20e"));
+  c = {};
+  c.device = true;
+  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "--device names one card"));
+  c = {};
+  c.prefill_backend = runtime::PrefillBackend::SyclTla;
+  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "not sycl-tla"));
+  c = {};
+  c.composed_attn = true;
+  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "flash attention only"));
+  c = {};
+  c.prefill_replay = true;
+  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "B70_PREFILL_REPLAY=1"));
+  c = {};
+  c.prefill_profile = true;
+  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "B70_PREFILL_PROFILE=1"));
+  std::printf("b70-serve --pp: --pp 1 untouched, --pp 2 serves the Qwen family, 8 refusals by name\n");
+}
 }  // namespace
 
 int main() {
@@ -141,6 +199,7 @@ int main() {
   check_rename();
   check_refusals();
   check_device_refusal();
+  check_serve();
   std::printf("pipeline_args_test: OK\n");
   return 0;
 }
