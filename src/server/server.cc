@@ -156,9 +156,10 @@ Server::Outcome Server::generate(const Request& r,
   try {
     if (!r.chat) {
       prompt = r.prompt;
-    } else if (opts_.chat_format.template_kwargs()) {   // spec 18d (K2-Horizon)
+    } else if (opts_.chat_format.template_kwargs()) {   // spec 18d (K2-Horizon), spec 20e (Kolibri-1)
       check_template_kwargs(opts_.chat_format, r.template_kwargs);
-      prompt = deps_.tmpl.render_with_kwargs(r.messages, r.tools, r.enable_thinking, r.template_kwargs);
+      prompt = deps_.tmpl.render_with_kwargs(template_messages(opts_.chat_format, r.messages), r.tools,
+                                             r.enable_thinking, r.template_kwargs);
     } else {
       prompt = deps_.tmpl.render(r.messages, r.tools, r.enable_thinking);
     }
@@ -420,7 +421,7 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
   const double t_start = steady_seconds();
   Request parsed;
   try {
-    parsed = parse_request(request.body, chat);
+    parsed = parse_request(request.body, chat, opts_.sampling_defaults.value_or(Sampling{}));
   } catch (const BadRequest& error) {
     response.status = 400;
     response.set_content(error_body(error.what(), "invalid_request_error"), "application/json");

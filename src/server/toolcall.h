@@ -83,4 +83,11 @@ int schema_string_type(const std::string& function, const std::string& key,
 uint64_t new_call_seed();
 std::string make_call_id(uint64_t seed, uint32_t index);
 
+// A JSON call body, shared by K2's json format (spec 18d, unchanged) and Kolibri-1's hermes calls
+// (spec 20e, server/toolcall_kolibri.h): the trimmed `body` is {"name": <string without whitespace>,
+// "arguments": <object | a string holding an object | null | absent>}; an argument the tool's schema
+// types as a string but written as another JSON value becomes its JSON text. Fills call.name and
+// call.arguments (not call.id); false when the body does not parse as such a call.
+bool parse_json_call(const std::string& body, const nlohmann::json& tools, ToolCall& call);
+
 }  // namespace server

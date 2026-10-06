@@ -3,6 +3,7 @@
 #include <stdexcept>
 
 #include "server/toolcall_k2.h"
+#include "server/toolcall_kolibri.h"
 
 namespace server {
 namespace {
@@ -26,12 +27,52 @@ K2CallFormat k2_call_format(const json& kwargs) {
 }  // namespace
 
 ChatFormat ChatFormat::for_model_type(const std::string& model_type) {
-  return model_type == "k2_horizon" ? k2_horizon() : ChatFormat{};
+  if (model_type == "k2_horizon") return k2_horizon();
+  if (model_type == "kolibri1") return kolibri();
+  return ChatFormat{};
 }
 
-const char* ChatFormat::name() const { return kind == Kind::K2Horizon ? "k2_horizon" : "qwen"; }
+const char* ChatFormat::name() const {
+  switch (kind) {
+    case Kind::K2Horizon: return "k2_horizon";
+    case Kind::Kolibri: return "kolibri1";
+    default: return "qwen";
+  }
+}
+
+json template_messages(const ChatFormat& format, const json& messages) {
+  if (!format.string_content() || !messages.is_array()) return messages;
+  json out = messages;
+  for (json& m : out) {
+    if (!m.is_object() || !m.contains("content") || !m.at("content").is_array()) continue;
+    std::string text;
+    bool first = true;
+    for (const json& part : m.at("content")) {
+      if (!part.is_object() || !part.contains("text") || !part.at("text").is_string()) continue;
+      if (!first) text += "\n";
+      text += part.at("text").get<std::string>();
+      first = false;
+    }
+    m["content"] = text;
+  }
+  return out;
+}
 
 void check_template_kwargs(const ChatFormat& format, const json& kwargs) {
+  if (format.kind == ChatFormat::Kind::Kolibri && kwargs.is_object()) {
+    // The template's seven efforts (none disables thinking; minimal = low; xhigh, max = high).
+    if (kwargs.contains("reasoning_effort")) {
+      const json& v = kwargs.at("reasoning_effort");
+      bool ok = v.is_null();
+      for (const char* e : {"none", "minimal", "low", "medium", "high", "xhigh", "max"}) ok = ok || v == e;
+      if (!ok)
+        throw std::invalid_argument("chat_template_kwargs.reasoning_effort must be one of none, minimal, low, "
+                                    "medium, high, xhigh, max");
+    }
+    if (kwargs.contains("preserve_thinking") && !kwargs.at("preserve_thinking").is_boolean())
+      throw std::invalid_argument("chat_template_kwargs.preserve_thinking must be a boolean");
+    return;
+  }
   if (format.kind != ChatFormat::Kind::K2Horizon || !kwargs.is_object()) return;
   (void)k2_call_format(kwargs);
   if (kwargs.contains("reasoning_effort")) {
@@ -51,6 +92,8 @@ std::unique_ptr<OutputParser> make_output_parser(const ChatFormat& format, const
     }
     return std::make_unique<K2OutputStream>(open, k2_call_format(kwargs), tools);
   }
+  // Kolibri: the model opens its reasoning itself; the parser reads it from the output.
+  if (format.kind == ChatFormat::Kind::Kolibri) return std::make_unique<KolibriOutputStream>(tools);
   // Qwen: with thinking on, the prompt ends in "<think>\n" and the output opens with reasoning.
   return std::make_unique<OutputStream>(ends_with(prompt, "<think>\n"), tools);
 }
