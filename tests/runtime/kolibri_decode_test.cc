@@ -1,8 +1,7 @@
 // Spec 20c Task 5 (KL3 on decode): KolibriEngine on one card. Box only (label checkpoint;golden;kolibri).
-//   kolibri_decode_test <checkpoint> <ids> [int8]
-// <checkpoint>: a synthetic one (tools/box_validate/kolibri_oracle.sh synth) or the real one (with two
-// cards, spec 20c Task 6, kolibri_pp_test covers it; one card here takes a synthetic or a --layers
-// checkpoint: the real model does not fit one card - SKIP).
+//   kolibri_decode_test <checkpoint> <ids> [int8] [pp2]
+// <checkpoint>: a synthetic one (tools/box_validate/kolibri_oracle.sh synth) on one card, or the real one
+// with `pp2` (spec 20c Task 6: two cards, the split by bytes) - one card cannot hold it (SKIP).
 //
 //   1. the plan == the allocation, component by component (runtime::kolibri::plan vs memory_use);
 //      the list's launches == decode_launches (756 / 856 scaled to the layers)
@@ -56,9 +55,17 @@ int main(int argc, char** argv) {
     std::printf("SKIP: no Kolibri-1 checkpoint at '%s'\n", argc > 1 ? argv[1] : "");
     return 77;
   }
-  const bool int8 = argc > 3 && std::string(argv[3]) == "int8";
+  bool int8 = false, pp2 = false;
+  for (int i = 3; i < argc; ++i) {
+    int8 = int8 || std::string(argv[i]) == "int8";
+    pp2 = pp2 || std::string(argv[i]) == "pp2";
+  }
   const model::Kolibri1Desc d0 = loader::kolibri1_checkpoint_desc(snap);
-  if (!runtime::kolibri::fits_one_card(d0, int8, size_t(32530000000ull), size_t(1.5e9))) {
+  if (pp2 && l0::Context::gpu_count() < 2) {
+    std::printf("SKIP: pp2 needs two GPUs, Level Zero shows %u\n", l0::Context::gpu_count());
+    return 77;
+  }
+  if (!pp2 && !runtime::kolibri::fits_one_card(d0, int8, size_t(32530000000ull), size_t(1.5e9))) {
     std::printf("SKIP: %s (%u layers) does not fit one card - kolibri_pp_test runs it on two\n", snap.c_str(), d0.layers);
     return 77;
   }
@@ -68,19 +75,22 @@ int main(int argc, char** argv) {
   kolibri_rig::Options o;
   o.max_len = kMaxLen;
   o.int8_head = int8;
+  o.devices = pp2 ? 2 : 1;
   kolibri_rig::build(rig, snap, o);
   runtime::kolibri::KolibriEngine& e = *rig.eng;
   const model::Kolibri1Desc& d = e.model().desc;
 
-  // 1. plan == allocation; the launch count
+  // 1. plan == allocation, per device; the launch count
   {
     const std::vector<runtime::kolibri::DevicePlan> pl =
         runtime::kolibri::plan(d, e.model().placement, kMaxLen, int8, false, e.attention());
-    const runtime::MemoryComponents got = e.memory_use(0);
-    CHECK_EQ(got.model, pl[0].model);
-    CHECK_EQ(got.kv, pl[0].kv);
-    CHECK_EQ(got.decode_state, pl[0].decode_state);
-    CHECK_EQ(e.launches(), runtime::kolibri::decode_launches(d, e.model().placement, e.attention(), runtime::kDefaultPpHandoff));
+    for (uint32_t dev = 0; dev < e.devices(); ++dev) {
+      const runtime::MemoryComponents got = e.memory_use(dev);
+      CHECK_EQ(got.model, pl[dev].model);
+      CHECK_EQ(got.kv, pl[dev].kv);
+      CHECK_EQ(got.decode_state, pl[dev].decode_state);
+    }
+    CHECK_EQ(e.launches(), runtime::kolibri::decode_launches(d, e.model().placement, e.attention(), e.handoff()));
     std::printf("plan == allocation; %zu launches a token (%s attention); %s\n", e.launches(),
                 runtime::kolibri::kol_attn_name(e.attention()), e.memory_line().c_str());
   }

@@ -2480,6 +2480,32 @@ if(B70_KOLIBRI)
     kolibri_partial_test kolibri_partial_eager_test
     PROPERTIES LABELS "checkpoint;golden;kolibri" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
+# Task 6: two cards on spec 16b's pieces - --pp 1 against --pp 2 bitwise on the synthetic checkpoint
+# under both hand-offs, the real one across splits 25 / 20, P4's lost hand-off, replay (kolibri_pp_test);
+# KL2 and K3 on the real checkpoint across two cards (needs spec 20b). SKIP 77 with one GPU or no data.
+if(B70_KOLIBRI)
+  add_executable(kolibri_pp_test runtime/kolibri_pp_test.cc)
+  target_include_directories(kolibri_pp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(kolibri_pp_test PRIVATE b70_kolibri_runtime b70_l0)
+  add_dependencies(kolibri_pp_test ${B70_KOLIBRI_DECODE_KERNELS} kernel_pp_handoff)
+  add_test(NAME kolibri_pp_test COMMAND kolibri_pp_test ${B70_KOLIBRI_SYNTH_DIR}/int4attn/ckpt ${B70_KOLIBRI_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
+  set_tests_properties(kolibri_pp_test PROPERTIES LABELS "checkpoint;kolibri;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  add_test(NAME kolibri_golden_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} pp2)
+  add_test(NAME kolibri_golden_i8head_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR}
+    int8 pp2)
+  add_test(NAME kolibri_golden_eager_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} pp2)
+  set_tests_properties(kolibri_golden_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
+  add_test(NAME kolibri_golden_peer_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR}
+    pp2 peer)
+  add_test(NAME kolibri_decode_test COMMAND kolibri_decode_test ${B70_KOLIBRI_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids pp2)
+  set_tests_properties(kolibri_golden_test kolibri_golden_i8head_test kolibri_golden_eager_test kolibri_golden_peer_test
+    kolibri_decode_test PROPERTIES LABELS "checkpoint;golden;kolibri;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+b70_cli_reject(cli_reject_kolibri_pp_device ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
+  --device 1 EXPECT "--device names one card")
 # b70-decode's model_type dispatch and Kolibri's refusals, before the device: tests/model/kolibri1/ holds
 # only the checkpoint's config.json, which is all the dispatch and the --pp 1 fit check read.
 set(_kol_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
