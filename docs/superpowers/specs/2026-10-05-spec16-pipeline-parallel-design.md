@@ -1,6 +1,7 @@
 # Spec 16 - pipeline parallel over two B70s
 
 **Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**.
+16b (decode) built blind 2026-10-06, before 16a's probe: §8.
 
 **Scope, set by the operator (2026-10-05):** multi-GPU is **pipeline parallel only** for now; tensor
 parallel is not part of this spec.
@@ -152,3 +153,105 @@ Idle box (both cards free of other DRM holders), interleaved pairs against one c
   this spec builds and gates two).
 - PP combined with batching (two micro-batches in flight): after spec 13.
 - Splitting one layer across cards.
+
+## 8. 16b as built blind (2026-10-06)
+
+Written on the Mac without the box: multi-device Level Zero cannot run on a Mac, so 16b is
+validated by host tests, syntax checks and reasoning only. **16a has not run**, so the two
+choices it would have made are open and 16b builds both sides of each. Box queue row 22 is the
+order to prove it on the cards.
+
+**The CLI is `--pipeline 2`, not `--pp 2`.** b70-decode has had `--pp N` since spec 2 (the
+bench's prefill length, llama-bench's "pp"), beside `--pp-chunk` and `--pp-backend`, and every
+bench script uses it; `--pp 2` would silently mean "prefill 2 ids". So: `--pipeline 1|2`,
+`--pipeline-split auto|N`, `--pipeline-handoff copy|peer` (b70-decode; b70-serve is 16d).
+This text keeps "PP" for the concept.
+
+**What 16a would have decided, and the defaults chosen.**
+
+| decision | 16a's job | 16b ships |
+|---|---|---|
+| the hand-off (§2 decision 3) | latency of (a) copy + event, (b) peer write + flag, (c) host-orchestrated, inside replayed lists | (a) as `copy` (default) and (b) as `peer`; (c) not built. `copy` is the default because it needs no new device code to be correct: the driver orders the copy, the event and the cache flushes. `peer` carries the two P2P rules below and is first timed by row 22's S1 |
+| the split (§2 decision 2) | per-layer timing on each card, `s` = 32 or 33 / 31 | `--pipeline-split auto` = equal **bytes** per card at the session's max_len (weights + RoPE + its layers' KV and GDN state + decode scratch + hand-off buffers), not equal layers. Decode is sequential, so time balance does not matter for 16b; 16c's prefill pipeline is where the second card's 3 % may move it |
+
+**Placement (§3.1), as built.**
+- One Level Zero context over both cards: `l0::Context(primary, 1)` is a view of device 1 in
+  device 0's context (zeContextCreate's context already spans the driver's devices), so every
+  existing buffer, module, list and queue class works per device unchanged, and cross-device
+  copies, peer pointers and events need no export.
+- **Load, then place** (runtime/pipeline_place.h): the loader is untouched and loads the
+  whole checkpoint onto device 0; layers `[s, L)`, the final norm, `lm_head` (and an int4 a||b's
+  prefill copies) move to device 1 through a 64 MiB pinned host buffer (no P2P needed). Every
+  weight is byte-for-byte a one-card load's. Cost: device 0 briefly holds the whole model
+  (18.1 GB on Qwen3.8 with the bf16 head; every supported model fits one card). A model larger
+  than one card needs per-layer placement in the loader (16d or that model's spec).
+- Each device: `PersistentBuffers`' stage constructor (its own GDN / FA layers only, the same
+  layout, so stage 0's slices then stage 1's ARE the one-card layout), a whole
+  `DecodeScratch`, its own queue, fence and Control block.
+
+**The cut (capture.h, `build_stage`).** Device 0's list is `embed_gather`, layers `[0, s)`, then
+layer `s`'s `prep_res_fold` - the fold reads no weight, so device 0 runs it and hands off the
+**folded** residual plus its norm sums (M rows bf16 + the 640-byte `norm_sumsq`: 10.9 KB on
+Qwen3.8) instead of the residual plus `down`'s split-K partials (90 KB). Device 1's list resumes
+at layer `s`'s `prep_norm_finish`. Same kernels, arguments and order as the one-card list:
+the two lists' compute launches add up to `decode_launches()` (774 / 870 / 526), asserted at
+capture. The split comes from the descriptor (`pp_stages`), so Agnes and Ornith split without
+code; each device must hold at least one GDN and one FA layer (Qwen3.8: 4 <= s <= 62).
+
+**The hand-off.**
+- `copy`: device 0's list ends with two device-to-device copies into device 1's landing buffer
+  and a barrier signalling a cross-device event (`l0::SyncEvent`: a one-slot HOST_VISIBLE pool
+  over both devices, HOST signal / wait scope); device 1's list starts with a wait on it and two
+  local copies into its own `resid` / `norm_sumsq`. The host resets the event before each step.
+- `peer` (`src/kernels/pp_handoff.cl`, the one new binary): `pp_send`, device 0's last launch,
+  writes the rows, the sums and a stamp (the sequence number) into device 1's landing buffer,
+  then publishes the sequence number in a flag with a system-scope release store. `pp_recv`,
+  device 1's first launch, spins with system-scope acquire loads up to `spin_limit` times, checks
+  the stamp, and copies the data in **with system-scope loads too** (device 1 read the same
+  landing lines one step earlier - a cached copy of them is exactly the stale buffer of §2's vLLM
+  lesson). Both counters live in device memory and are advanced by the kernels, so replays with
+  frozen arguments progress. The landing buffer is its own 64 KiB-aligned allocation, only device
+  0 writes it, the flag on a page of its own (§2's two rules). A failure (timeout; a flag whose
+  stamp did not arrive) is recorded in device-1 state words the host reads after the fence. The
+  protocol runs line for line on two host threads in `pp_protocol_test`.
+
+**The token back, and `pos` (§3.2, plan Review Focus 2-3).** argmax on device 1 writes the id and
+advances `pos` in device 1's Control. After the fence the host copies device 1's 128-byte Control
+into device 0's: no extra wait or submission, the host already reads the block after every fence.
+Nothing on device 0 writes its block, so the two are equal at every step boundary: reset, ingest,
+generate, `load_state` (spec 7) all set both. A device-side return (a copy at the end of list 1)
+was not chosen blind: device 0's Control is a shared allocation of device 0, and a peer write
+into it is the least certain thing on this list.
+
+**Bounded (P4).** Every step's fence wait has a bound (30 s default); a lost `copy` hand-off
+host-signals the event so device 1 drains, then throws naming the event; `peer` throws with
+pp_recv's record. A failed step marks the engine; every later step throws until `reset()`. A
+missing second card and no peer access are refused before the load, by name.
+
+**Spec 7 snapshots are in** (planned for 16d): `save_state` / `save_kv` under `--pipeline 2`
+write the one-card host layouts byte for byte, so a snapshot moves between one card and two
+unchanged - the refusal 16d planned between the two is not needed. P1 uses it: a one-card
+prefill's snapshot is restored into the pipeline and decoded on.
+
+**Not in 16b:** prefill across two cards (16c; `--pipeline 2` ingests one replay per id), MTP and
+`b70-serve --pipeline 2` (16d), per-device step times (S1 records the total), K2-Horizon (its own
+engine, `runtime/k2`; `pipeline_plan_test` gives its bytes per card through the descriptor-free
+`pp_balance` - 24 + 24 layers - but K2 across two cards is future work).
+
+**The planner's numbers** (derived, `pipeline_plan_test`; weights from the descriptor, which
+sum to the measured Qwen3.8 load exactly):
+
+| model, head, KV, max_len | split | device 0 / device 1 |
+|---|---|---|
+| Qwen3.8 bf16, bf16, 16384 | 32 (32 + 32) | 9.690 / 9.690 GB |
+| Qwen3.8 int8, bf16, 16384 | 29 (29 + 35) | 9.009 / 9.101 GB |
+| Qwen3.8 bf16, bf16, 262144 | 32 | 17.806 / 17.806 GB - fits two cards (one card's auto: 193792) |
+| Qwen3.8 int8, int8, 262144 | 31 (31 + 33) | 12.806 / 13.013 GB |
+| Agnes int8, bf16, 16384 | 33 (33 + 39) | 10.451 / 10.644 GB |
+| Agnes int8, bf16, 131072 | 35 (35 + 37) | 14.688 / 14.921 GB |
+| Ornith bf16, bf16, 16384 | 20 (20 + 20) | 10.203 / 10.203 GB |
+| Ornith int8, bf16, 262144 | 20 | 12.782 / 12.275 GB |
+| K2-Horizon int8, bf16, 131072 (weights + KV only) | 24 (24 + 24) | 23.216 / 23.715 GB |
+
+**Gates as built:** P1 `pp_decode_test` (+ `_i8head`, `_kv8`), P4 `pp_fail_test` and
+`cli_reject_pipeline_*`, S1 row 22's `r22.s1` (4k; 32k opt-in). P2 / P3 / S2 / S3 stay 16c / 16d.
