@@ -767,6 +767,75 @@ if(B70_K2 AND B70_KV8)
   endforeach()
 endif()
 # ==== Spec 18e: K2-Horizon's int8 KV cache ==================================== (end) ====
+# ==== Spec 20c: Kolibri-1 decode (model::kolibri1()) ======================= (begin) ====
+# Additive only: no existing source is edited, so every binary above keeps its name, its command line
+# and its bytes (tools/kernel_cmdlines' diff: additions only). Kolibri-only kernels live in
+# src/kernels/kolibri/ and are named `kol_*` with every shape define in the name
+# (src/kernels/kolibri_kernels.h is the host half); the reused sources run at Kolibri's shapes:
+#   gemv.cl         q||k||v 2560x7168 (S2 L0), o_proj 6144x2560 (S4 L0) - the int4 attention arm,
+#                   PROVISIONAL cells (model::Kolibri1Desc's {S, layout}) until Task 8's sweep
+#   gemv_bf16.cl    the bf16 attention arm's two rows, the router 2560 -> 512 rows (384 + 128 zero;
+#                   fp32 logits), lm_head 2560 -> 128000 (fp32 accumulation and logits: head_dtype float32)
+#   gemv_i8w.cl     the int8 lm_head (spec 9)
+#   prep.cl         prep_res_fold at K 2560: SP0 (after embed_gather, over the MoE output) and with
+#                   ZERO_RESID over o_proj's S slices (the sandwich: the sub-block's own row and Σ²)
+#   embed_gather.cl / argmax.cl at Kolibri's vocabulary 128000 (fully used)
+# What a Kolibri decode list binds (runtime/kolibri/kolibri_capture.cc): 15 launches per layer under
+# flash, 17 under B70_KOLIBRI_ATTN=eager, + embed + fold + 4 at the head: 756 / 856 at 50 layers.
+option(B70_KOLIBRI "build the Kolibri-1 decode variants (spec 20c)" ON)
+if(B70_KOLIBRI)
+  set(KOL_CL ${CMAKE_CURRENT_SOURCE_DIR}/kolibri)
+  add_gemv_variant(1 2560 7168 2 0)            # q||k||v int4        PROVISIONAL S2 L0
+  # o_proj int4 PROVISIONAL S4 L0 is gemv_M1_K6144_N2560_S4_L0, the binary K2's dense down already
+  # builds (spec 18b block); prep_res_fold_M1_K2560_SP0_G20 likewise. Built here only without K2, so
+  # no target is defined twice:
+  if(NOT B70_K2)
+    add_gemv_variant(1 6144 2560 4 0)
+    add_prep_res_fold(1 2560 0 20)
+  endif()
+  add_gemv_bf16_variant(1 2560 7168 64 1)      # q||k||v bf16 (decision 2's bf16 arm)
+  add_gemv_bf16_variant(1 6144 2560 64 1)      # o_proj bf16
+  add_gemv_bf16_variant(1 2560 512 16 16)      # the router, rows 384..511 zero; fp32 logits
+  add_gemv_bf16_variant(1 2560 128000 64 1)    # lm_head bf16 (fp32 accumulation and logits = head_dtype float32)
+  add_gemv_i8w_variant(1 2560 128000)          # lm_head int8 (spec 9)
+  # prep_res_fold ..._Z: o_proj's S slices (S4 int4, S1 bf16) into its own row `a` and Σa²
+  foreach(SP 1 4)
+    add_ocloc_kernel(prep_res_fold_M1_K2560_SP${SP}_G20_Z SOURCE ${PREP_CL}
+                     DEFINES M=1 K=2560 S_PREV=${SP} FOLD_G=20 ZERO_RESID=1)
+  endforeach()
+  add_ocloc_kernel(kol_embed_gather_M1_D2560_V128000 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                   DEFINES ${CTRL_DEFINES} M=1 HIDDEN=2560 VOCAB=128000)
+  set(KOL_ARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=128000 VOCAB_USED=128000)
+  add_ocloc_kernel(kol_argmax_stage1_M1_N128000_V128000 SOURCE ${ARGMAX_CL} DEFINES ${KOL_ARGMAX_DEFINES} M=1)
+  add_ocloc_kernel(kol_argmax_stage2_N128000 SOURCE ${ARGMAX_CL} DEFINES ${KOL_ARGMAX_DEFINES})
+  # kol_prep.cl: the norm's stage B (plain w, x̂ rounded first), the post norm + residual add, the
+  # attention prep (q/k head norm, RoPE in the sliding layers only, the ring or the growing cache).
+  add_ocloc_kernel(kol_norm_M1_K2560_G20_W20 SOURCE ${KOL_CL}/kol_prep.cl DEFINES M=1 K=2560 NORM_G=20 NORM_WGS=20)
+  add_ocloc_kernel(kol_post_add_M1_K2560_G20 SOURCE ${KOL_CL}/kol_prep.cl DEFINES M=1 K=2560 POST_G=20)
+  set(KOL_HEADS Q_HEADS=48 KV_HEADS=4 HD=128)
+  foreach(S 1 2)          # S 2: the int4 arm's q||k||v split-K; S 1: the bf16 arm (gemv_bf16 writes [M][N])
+    add_ocloc_kernel(kol_attn_prep_M1_N7168_S${S}_Q48KV4_R4096 SOURCE ${KOL_CL}/kol_prep.cl
+                     DEFINES ${CTRL_DEFINES} M=1 QKV_N=7168 QKV_S=${S} ${KOL_HEADS} SLIDING=1 RING=4096)
+    add_ocloc_kernel(kol_attn_prep_M1_N7168_S${S}_Q48KV4_F SOURCE ${KOL_CL}/kol_prep.cl
+                     DEFINES ${CTRL_DEFINES} M=1 QKV_N=7168 QKV_S=${S} ${KOL_HEADS} SLIDING=0 RING=0)
+  endforeach()
+  # kol_moe.cl: the 384-expert router on 512 slots / 256 lanes, the MoE block with the bf16 shared slot.
+  add_ocloc_kernel(kol_route_M1_E384_T6_N512_L256 SOURCE ${KOL_CL}/kol_moe.cl
+                   DEFINES M=1 ROUTE_E=384 ROUTE_K=6 ROUTE_WG=256 ROUTE_EPL=2 ROUTE_LN=512)
+  add_ocloc_kernel(kol_moe_M1_E384_T6_D2560_I512_SH SOURCE ${KOL_CL}/kol_moe.cl
+                   DEFINES M=1 MOE_E=384 MOE_K=6 HIDDEN=2560 INTER=512 UP_KS=4 DN_KS=2)
+  # kol_attn.cl (flash, the default) and kol_attn_eager.cl (B70_KOLIBRI_ATTN=eager), sliding and full.
+  add_ocloc_kernel(kol_attn_M1_T${ATTN_V2_TGT}_Q48KV4_W513_R4096 SOURCE ${KOL_CL}/kol_attn.cl
+                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} Q_HEADS=48 KV_HEADS=4 WINDOW=513 RING=4096)
+  add_ocloc_kernel(kol_attn_M1_T${ATTN_V2_TGT}_Q48KV4_F SOURCE ${KOL_CL}/kol_attn.cl
+                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} Q_HEADS=48 KV_HEADS=4 WINDOW=0 RING=0)
+  add_ocloc_kernel(kol_attn_eager_M1_T${ATTN_V2_TGT}_Q48KV4_W513_R4096 SOURCE ${KOL_CL}/kol_attn_eager.cl
+                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} Q_HEADS=48 KV_HEADS=4 WINDOW=513 RING=4096)
+  add_ocloc_kernel(kol_attn_eager_M1_T${ATTN_V2_TGT}_Q48KV4_F SOURCE ${KOL_CL}/kol_attn_eager.cl
+                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} Q_HEADS=48 KV_HEADS=4 WINDOW=0 RING=0)
+endif()
+# ==== Spec 20c: Kolibri-1 decode ============================================ (end) ====
+
 
 # ==== Spec 15e: Ornith's MTP lists (model::ornith(), B70_ORNITH and B70_MTP) ===== (begin) ==
 # Additive only: no source changes and no existing variant's name or command line moves
