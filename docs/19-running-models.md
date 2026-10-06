@@ -24,17 +24,17 @@ has to run is [superpowers/plans/box-validation-queue.md](superpowers/plans/box-
 
 | | Qwen3.8-27B | Agnes 3.0 Flash | Ornith 1.5 35B-A3B | K2-Horizon MoVA-36B-A4B | Kolibri-1 (spec 20) |
 |---|---|---|---|---|---|
-| checkpoint | published | published | **not published** (spec 15a) | published | **not made** (spec 20b) |
-| `b70-serve` | yes | yes | yes | **refused** (spec 18d's engine side) | **refused** (spec 20e) |
+| checkpoint | published | published | published (spec 15 §13) | published | **not made** (spec 20b) |
+| `b70-serve` | yes | yes | yes | yes (spec 18d, box gates pending) | **refused** (spec 20e) |
 | `b70-decode` | yes | yes | yes | yes | decode only, **two cards** (`--pp 2`, the default) |
 | ran on a B70 | yes (see above) | no | no | no | no |
 | MTP head (`--mtp`) | yes | yes | yes (MoE head) | none | none |
 | `--spec lookup` | yes | yes (needs the head) | yes (needs the head) | no | no |
-| `--kv-cache int8` | yes, gates pending | yes, gates pending | not built | refused (spec 18e) | refused (bf16 only) |
+| `--kv-cache int8` | yes, gates pending | yes, gates pending | not built | yes, gates pending (spec 18e) | refused (bf16 only) |
 | prefill backends | `l0-int8` (default), `l0`, `sycl-tla` | `l0-int8`, `l0` | `l0-int8`, `l0` (`sycl-tla` refused) | `l0` only | none yet (spec 20d) |
 | KV per position (bf16) | 64 KiB | 72 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) |
-| `--max-len auto`, int8 head (derived) | ~201k; ~170k with `--mtp` | ~140k; ~114k with `--mtp` | 262144, with or without `--mtp` | `b70-decode` only: ~47k decode-only (bf16 head), ~43k with prefill | 262144 on two cards (split 25) |
-| with `--kv-cache int8` (derived) | 262144, with or without `--mtp` | 262144; ~226k with `--mtp` | - | - | - |
+| `--max-len auto`, int8 head (derived) | ~201k; ~170k with `--mtp` | ~140k; ~114k with `--mtp` | 262144, with or without `--mtp` | ~46k served (the prefill planned); `b70-decode` ~50k decode-only | 262144 on two cards (split 25) |
+| with `--kv-cache int8` (derived) | 262144, with or without `--mtp` | 262144; ~226k with `--mtp` | - | ~90k served; `b70-decode` ~98k decode-only | - |
 
 The `--max-len auto` lengths are the planner's at the default 1.5 GB reserve on the
 32.53 GB card; the reserve itself is an estimate the box has not confirmed, and nothing
@@ -252,10 +252,10 @@ head dim 128); layers 3-47 route values through 64 value experts (MoVA, top-4) a
 through 100 experts (top-8) plus a shared one. Its own tokenizer (250,624 ids, BOS 0) and
 chat template. No MTP head. Trained context 524288.
 
-**Status: never run on a B70** (queue rows 14, 15, 17). Decode (18b) and prefill (18c) run
-through `b70-decode`. **`b70-serve` refuses it**: the chat template, tokenizer, tool-call
-parser and reasoning split are built and host-tested (18d host side), but the engine half
-of serving (K2 behind the server, KV-only prefix-cache snapshots) is not. Expected
+**Status: never run on a B70** (queue rows 14, 15, 17, 21, 25). Decode (18b) and prefill (18c)
+run through `b70-decode`; `b70-serve` serves it (18d: its chat template, tool calls and
+reasoning, K2's own engine behind the server, KV-only prefix-cache snapshots - host-tested only).
+Expected
 (derived): 717 launches per token, 3.15 GB read per token with the int8 head (roofline
 ~190 t/s from bytes alone), prefill ~3,400 t/s at 4096. For reference, vLLM on **two**
 cards (pipeline parallel, fp8 KV) measured 44.43 t/s decode.
@@ -276,18 +276,26 @@ python3 tools/oracle/tokenize.py <k2-snapshot> encode --bos prompt.txt > k2.ids
 
 # the reference-rounding attention, for the A/B the box will run
 B70_K2_ATTN=eager ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256
+
+# serving (spec 18d): int8 head, prefix cache on, --max-len auto (~46k bf16 KV, ~90k int8 KV)
+./build/src/cli/b70-serve $K --served-name k2 --port 8000
+./build/src/cli/b70-serve $K --served-name k2 --kv-cache int8
+# K2's template variables per request: "chat_template_kwargs": {"tool_call_format": "xml" |
+# "xml_typed" | "json", "reasoning_effort": "high" | "medium" | "low"}
 ```
 
 **Limits.**
 
-- Not served (above), so there is no llama-benchy row for K2 yet.
+- Served on one card only (no `--pp` in the server), no llama-benchy row yet (queue row 25).
+  `b70-serve` refuses `--mtp`, `--spec mtp` / `lookup` and a non-`l0` `--prefill-backend` by name.
 - Context: the bf16 KV cache costs 192 KiB per position, so `--max-len auto` gives ~46.6k
   decode-only with the bf16 head, ~49.9k with `--lm-head int8`, ~42.8k when the run
   prefills (bf16 head) - all derived. `b70-decode`'s default is 16384. Long context needs
   int8 KV or two cards (spec 18e, not built).
 - Prefill runs on `l0` only: `--prefill-backend l0-int8` and `sycl-tla` are refused by name.
   Omitting `--prefill-backend` is fine.
-- Refused: `--kv-cache int8` (spec 18e), `--mtp` (no head), `--profile` (not built yet).
+- Refused: `--mtp` (no head), `--profile` (not built yet). `--kv-cache int8` is built (spec 18e,
+  gates pending).
   `--spec lookup` has nothing to run on: it needs verify lists, which only an MTP head
   provides today.
 - The routing gate against the CPU reference has not run; until it has, nobody knows
