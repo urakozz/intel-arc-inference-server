@@ -3,8 +3,10 @@
 // members: runtime/pipeline_engine.cc (decode, b70_runtime) and runtime/prefill/
 // pipeline_prefill.cc (spec 16c's prefill, b70_prefill_host). Private to them - nothing
 // else includes this.
+#include <memory>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -44,6 +46,14 @@ struct PipelineEngine::Stage {
   mutable l0::CmdList imm;
   Control* ctl;
   std::optional<CapturedStep> step;
+  // Spec 16d, MTP on only (the head on device 1). Device 1: the head's buffers (MtpBuffers:
+  // its control, its own verify slots, KV layer, hh / dh, draft logits) and the draft lists;
+  // device 0: its verify slots alone (pp_gdn_spec_bytes). Both: the verify lists at M = 1..4.
+  std::unique_ptr<MtpBuffers> mtp;
+  std::unique_ptr<l0::Mem> gdn_spec;
+  std::vector<CapturedStep> verify, draft;
+  // The verify slots this device's lists bind (MtpBuffers::gdn_spec or gdn_spec above).
+  const l0::Mem* spec() const { return mtp ? &mtp->gdn_spec : gdn_spec.get(); }
 };
 
 }  // namespace runtime

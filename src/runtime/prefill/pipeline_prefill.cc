@@ -21,6 +21,15 @@
 //             [Hook] spec 7's hook from the shadows. [Head] step_head on device 1's list.
 //             [Drain] both lists idle, bounded.
 //
+// **MTP (spec 16d).** With the head on device 1, device 1's chunk also fills the head's KV
+// after its layers, as Engine::prefill does after step_chunk: the chunk's ids into its own
+// scratch (step_mtp_kv's embed_gather reads them there), h_{pos-1} (MtpBuffers::hh row 0)
+// into the hidden rows' row 0, step_mtp_kv over a per-chunk head Control (hctl j % 2: the
+// host writes chunk j + 1's while chunk j may run), then the chunk's last hidden row back
+// into hh row 0 - all in order on device 1's list, so chunk j + 1 reads chunk j's. With a
+// hook, that row is shadowed too (save_state's h_{end-1} at a mid-prompt block end). The head
+// reads the last row step_mtp_kv normalised, as on one card.
+//
 // **Why peer waits on the event too.** In 16b's decode the flag alone orders device 1 after
 // device 0: a step is ~18 ms, well inside pp_recv's bound of 2^24 flag loads. A prefill
 // stage is ~0.5 s at 4k and seconds near 256k, and pp_recv's bound counts loads, not time
@@ -226,15 +235,17 @@ struct PipelinePrefill final : PipelinePrefillBase {
   MemoryComponents memory(uint32_t d) const override {
     const PfDevice& p = *dev.at(d);
     MemoryComponents c;
-    c.prefill_scratch = p.scratch.bytes() + p.scratch.lazy_bytes() + p.shadow_bytes();
+    c.prefill_scratch = p.scratch.bytes() + p.scratch.lazy_bytes() + p.shadow_bytes() +
+                        (d == kPpDevices - 1 ? shadow_hh_bytes() : 0);
     c.int8 = p.int8 ? p.int8->bytes() : 0;
     c.decode_state = p.ctl.size() + p.ts.size() +
-                     (d == 0 ? send_seq.size() : landing.size() + recv_state.size());
+                     (d == 0 ? send_seq.size() : landing.size() + recv_state.size()) + mtp_bytes(d);
     return c;
   }
 
   // Spec 7: each device's shadows, the size of its state (on the first hooked prefill).
-  void ensure_shadows(const PersistentBuffers& p0, const PersistentBuffers& p1) {
+  // Spec 16d: `hh_bytes` > 0 (MTP on) - and device 1's shadows of the head's hidden row.
+  void ensure_shadows(const PersistentBuffers& p0, const PersistentBuffers& p1, size_t hh_bytes = 0) {
     const std::array<const PersistentBuffers*, kPpDevices> p{&p0, &p1};
     for (uint32_t d = 0; d < kPpDevices; ++d)
       for (uint32_t s = 0; s < kDepth; ++s) {
@@ -244,6 +255,9 @@ struct PipelinePrefill final : PipelinePrefillBase {
         dev[d]->shadow_conv[s] =
             std::make_unique<l0::Mem>(dev[d]->ctx, l0::MemKind::Device, p[d]->conv_ring.size());
       }
+    if (hh_bytes != 0)
+      for (auto& m : shadow_hh)
+        if (!m) m = std::make_unique<l0::Mem>(dev[kPpDevices - 1]->ctx, l0::MemKind::Device, hh_bytes);
   }
 
   uint8_t* slot(uint32_t j) const { return landing.as<uint8_t>() + lay.slot(j); }
@@ -261,6 +275,27 @@ struct PipelinePrefill final : PipelinePrefillBase {
   std::array<std::unique_ptr<l0::SyncEvent>, kDepth> ready;   // device 0 -> 1, per slot
   std::array<std::unique_ptr<l0::SyncEvent>, kDepth> hold;    // the back-pressure test's hook
   bool in_flight = false;   // a prefill's lists may still hold work / waits
+  // Spec 16d, MTP on: device 1's head prefill state - the hidden rows step_mtp_kv writes
+  // ([kC + 1][hidden] bf16, row 0 = h_{pos-1}), two head Control blocks (chunk parity), and
+  // with a hook two shadows of hh row 0. Allocated by ensure_mtp / ensure_shadows.
+  std::unique_ptr<l0::Mem> mtp_hid, mtp_ctl;
+  std::array<std::unique_ptr<l0::Mem>, kDepth> shadow_hh;
+  void ensure_mtp(l0::Context& d1, const model::ModelDesc& d) {
+    if (mtp_hid) return;
+    mtp_hid = std::make_unique<l0::Mem>(d1, l0::MemKind::Device, mtp_prefill_hidden_bytes(d));
+    mtp_ctl = std::make_unique<l0::Mem>(d1, l0::MemKind::Shared, kDepth * sizeof(Control));
+    std::memset(mtp_ctl->ptr(), 0, mtp_ctl->size());
+  }
+  Control* head_control(uint32_t j) const { return mtp_ctl->as<Control>() + j % kDepth; }
+  size_t mtp_bytes(uint32_t d) const {
+    if (d != kPpDevices - 1 || !mtp_hid) return 0;
+    return mtp_hid->size() + mtp_ctl->size();
+  }
+  size_t shadow_hh_bytes() const {
+    size_t b = 0;
+    for (const auto& m : shadow_hh) b += m ? m->size() : 0;
+    return b;
+  }
   // Declared last, destroyed first: the lists go before the events and buffers they name.
   std::array<std::unique_ptr<PfDevice>, kPpDevices> dev;
 };
@@ -351,9 +386,28 @@ struct PipelineEngine::PrefillDriver {
     prefill::step_stage(D.cx, D.kc, D.scratch, S.model, e.max_len_, ctl, c.pos, c.rows, nullptr,
                         S.persist.gdn_state, S.persist.conv_ring, S.persist.kv_k, S.persist.kv_v,
                         S.persist.kv_lay, backend, q(1), S.range);
+    if (S.mtp) mtp_kv(D, S, c, j);   // spec 16d: the head's KV, as Engine::prefill
     D.cx.timestamp(D.stamps(j) + 1);
     shadow(D, S, c, s);
     D.cx.signal(D.done[s]->handle());
+  }
+
+  // Spec 16d: Engine::prefill's MTP steps for chunk j, on device 1's list in order (the file
+  // header has why each is where it is).
+  void mtp_kv(PfDevice& D, Stage& S, const PpChunk& c, uint32_t j) {
+    const size_t row = size_t(S.model.desc->hidden) * 2;
+    uint8_t* hid = p.mtp_hid->as<uint8_t>();
+    Control* hc = p.head_control(j);   // chunk j - 2 is done with it (back-pressure)
+    hc->pos = c.pos == 0 ? 0 : c.pos - 1;
+    hc->n_active = prefill::mtp_kv_rows(c.pos, c.rows);
+    D.cx.copy(D.scratch.ids.ptr(), p.ids_of(j), size_t(c.rows) * 4);   // step_mtp_kv's embed input
+    D.cx.copy(hid, S.mtp->hh.ptr(), row);                               // h_{pos-1} into row 0
+    prefill::step_mtp_kv(D.cx, D.kc, D.scratch, S.model, hc, c.pos, c.rows,
+                         reinterpret_cast<uint16_t*>(hid),
+                         S.mtp->kv_lay.layer(S.mtp->kv_k.ptr(), S.mtp->kv_v.ptr(), 0));
+    // h_{end-1}: the next chunk's row 0, a snapshot's hidden, the first draft's h.
+    D.cx.copy(S.mtp->hh.ptr(), hid + size_t(c.rows) * row, row);
+    if (c.hook) D.cx.copy(p.shadow_hh[j % kDepth]->ptr(), hid + size_t(c.rows) * row, row);
   }
 
   // Spec 7: after a hooked chunk, this device's GDN state and conv ring as they are at its
@@ -407,11 +461,13 @@ struct PipelineEngine::PrefillDriver {
       e.snap_gdn_[d] = p.dev[d]->shadow_gdn[s].get();
       e.snap_conv_[d] = p.dev[d]->shadow_conv[s].get();
     }
+    if (e.mtp()) e.snap_hh_ = p.shadow_hh[s].get();   // spec 16d
     try {
       e.block_hook_(c.end(), true);
     } catch (...) {
       e.snap_gdn_ = {};
       e.snap_conv_ = {};
+      e.snap_hh_ = nullptr;
       // As on one card, the state is exactly at the block end: let what was appended after it
       // finish - on its own, nothing is released early (every ready event it waits on is
       // signalled by device 0's half, already appended) - then put the shadows back.
@@ -426,11 +482,16 @@ struct PipelineEngine::PrefillDriver {
         S.ctl->pos = c.end();
         S.ctl->n_active = 0;
       }
+      if (e.mtp()) {   // spec 16d: and h_{end-1}
+        Stage& S1 = e.st(kPpDevices - 1);
+        S1.imm.copy(S1.mtp->hh.ptr(), p.shadow_hh[s]->ptr(), size_t(S1.model.desc->hidden) * 2);
+      }
       hook_threw = true;
       throw;
     }
     e.snap_gdn_ = {};
     e.snap_conv_ = {};
+    e.snap_hh_ = nullptr;
   }
 
   // The head on device 1, after its last chunk: one card's step_head, into device 1's
@@ -441,7 +502,11 @@ struct PipelineEngine::PrefillDriver {
     Stage& S = e.st(1);
     S.ctl->pos = c.end() - 1;
     S.ctl->n_active = 1;
-    prefill::step_head(D.cx, D.kc, D.scratch, S.model, S.ctl, c.rows - 1);
+    // Spec 16d: with the head, step_mtp_kv already normalised every row of the last chunk
+    // into the hidden rows; the head reads row C (Engine::prefill's step_head call).
+    const void* normed = S.mtp ? p.mtp_hid->as<uint8_t>() + size_t(c.rows) * S.model.desc->hidden * 2
+                               : nullptr;
+    prefill::step_head(D.cx, D.kc, D.scratch, S.model, S.ctl, c.rows - 1, normed);
   }
 
   void drain() {
@@ -491,6 +556,7 @@ void PipelineEngine::prepare_prefill() {
                              "phase waits would serialise the pipeline; each device's busy time "
                              "is reported instead (spec 16c)");
   if (kv_ == KvCache::Int8) prefill::require_kv8_path(b);
+  // Spec 16d: the head's prefill runs on the L0 backends only (pf_gemm) - already required.
   if (!pf_) {
     // The two stages' walks add up to one card's, launch for launch (step.h).
     for (uint32_t C : {1u, 256u, PrefillScratch::kC})
@@ -500,6 +566,7 @@ void PipelineEngine::prepare_prefill() {
                                "at C = " + std::to_string(C) + " do not add up to one card's");
     pf_ = std::make_unique<PipelinePrefill>(st(0).ctx, st(1).ctx, d, max_len_, opt_.handoff);
   }
+  if (mtp()) as_pf(*pf_).ensure_mtp(st(1).ctx, d);   // spec 16d
   if (b != PrefillBackend::L0Int8) return;
   PipelinePrefill& p = as_pf(*pf_);
   // Engine::prepare_prefill's l0-int8 pass, per device over ITS linears: every int4
@@ -539,7 +606,8 @@ void PipelineEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   prepare_prefill();
   PipelinePrefill& p = as_pf(*pf_);
   const bool hooked = static_cast<bool>(block_hook_);
-  if (hooked) p.ensure_shadows(st(0).persist, st(1).persist);
+  if (hooked) p.ensure_shadows(st(0).persist, st(1).persist, mtp() ? size_t(st(1).model.desc->hidden) * 2 : 0);
+  mtp_before_prefill();   // spec 16d: the live verify slot into slot 0 on both devices
   const std::vector<PpChunk> chunks = pp_prefill_chunks(base, ids.size(), chunk, hooked);
   const std::vector<PpPfStep> steps = pp_prefill_schedule(chunks);
   const std::string bad = pp_prefill_check(steps, chunks);
@@ -557,6 +625,10 @@ void PipelineEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     for (uint32_t i = 0; i < kPpDevices; ++i)
       pf_stats_.expected_launches[i] += prefill::step_stage_launches(*st(i).model.desc, backend, c.rows, stage(i)) + peer;
   pf_stats_.expected_launches[1] += prefill::kStepHeadLaunches;
+  if (mtp()) {   // spec 16d: step_mtp_kv per chunk; the head's two norm launches are skipped
+    for (const PpChunk& c : chunks) pf_stats_.expected_launches[1] += prefill::step_mtp_kv_launches(c.pos, c.rows);
+    pf_stats_.expected_launches[1] -= 2;
+  }
 
   const Clock::time_point t0 = Clock::now();
   p.in_flight = true;

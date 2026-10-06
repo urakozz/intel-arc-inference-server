@@ -198,4 +198,27 @@ struct StageLink {
 CapturedStep build_stage(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                          const PpStage& st, const StageLink& link);
 
+// --- spec 16d: MTP across the split ----------------------------------------------------
+//
+// build_stage_verify: build_verify restricted to one stage, exactly as build_stage restricts
+// build - the M rows' ids from THIS device's Control (cur_token[0..M), which the host writes
+// on both devices), gdn_step's SPEC_SLOTS build on the stage's GDN layers (row m's state into
+// slot (gdn_live + m) % kSlots: slot 0 is the stage's gdn_state, slots 1..3 live in
+// `gdn_spec`, sized pp_gdn_spec_bytes for the stage - the binary's slot stride is the whole
+// model's, the stage binds its own slice g), and the hand-off of M rows (the landing buffer
+// holds kM). The last stage then runs build_verify's tail on `mtp` (its device's MtpBuffers):
+// the rows' post-final-norm hidden into hh rows 1..M and the head's KV fill (its embed_gather
+// reads the device's replica of the embedding, spec 16d placement). `mtp` is null for the
+// other stage. Launches: pp_stage_verify_launches (+ pp_send / pp_recv under peer); the two
+// stages add up to verify_launches.
+//
+// build_stage_draft: build_draft on the last stage's device - the head at M = 1 over its own
+// buffers, the stage model's head weights, lm_head and embedding replica (no layer of the
+// main model runs; the stage's buffers are only its scratch). draft_launches(d) launches.
+CapturedStep build_stage_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
+                                const PpStage& st, const StageLink& link, uint32_t M,
+                                const MtpBuffers* mtp, const l0::Mem& gdn_spec);
+CapturedStep build_stage_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
+                               const PpStage& st, const MtpBuffers& mtp, uint32_t i);
+
 }  // namespace runtime
