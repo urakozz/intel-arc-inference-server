@@ -10,6 +10,18 @@ to HF's. `b70-serve` still refuses K2. As built: spec 18 §12. Left: the K2 engi
 passes on the card) and lifting the refusal, Task 1's greedy chat through the server, Task 2
 (Review Focus 3, K4), Task 3.
 
+**Status (2026-10-06, branch `serving-18d-15e`): the engine side written blind on the Mac** (as
+built: spec 18 §14; box work: box-validation-queue row 25). `b70-serve` serves K2 through
+`cli::k2::K2EngineAdapterT<K2Engine>` (MTP, `--spec lookup` and non-l0 prefill refused by name;
+`--pp` refused for any model: one card); Review Focus 3 - KV-only snapshots (`state_bytes` 0, the
+48 layers' K / V rows and int8 scales by `kv_snapshot_runs`, the block hook on `K2Engine::prefill`,
+zero-byte block-end snapshots in the store, the store keyed by K2's root) - host-tested by
+`k2_serve_test`; Task 1's greedy chat = `golden_server_test --chat` (box) with its wiring in
+`k2_serve_test`; K4's tooling (score.py's K2 reader, `make_set.py --from ... --kwargs`,
+`oracle_generate.py`'s k2_ref branch, `a4_ref.sh`, passkey stages). Left, all box: row 25's stages
+(Review Focus 3 on the card, the chat, K4's runs and the 22 GB checkpoint's reference, Review Focus
+4's llama-benchy rows), then Task 3 (the record; its BENCHMARKS skeleton is in place).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `b70-serve` serves K2: its chat template and tool-call format, reasoning, KV-only prefix-cache snapshots (spec 7), int8 `lm_head` by default; K4 (A4, passkey); the comparison rows against vLLM; the record.

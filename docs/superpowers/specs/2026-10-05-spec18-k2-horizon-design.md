@@ -555,7 +555,8 @@ kwargs are 400s, and the default format renders without kwargs and leaves K2's t
 `EngineAdapter`, which is `runtime::Engine`'s: 18c's prefill, step, sampling over 250,624 logits,
 the snapshot calls) and lifting `b70-serve`'s refusal; Review Focus 3 (KV-only snapshots, the store
 keyed by model); a short greedy chat through the server equal to `b70-decode`; K4 (A4 - with a K2
-reader in `tools/toolcall/score.py` - and passkey); the comparison rows; the record.
+reader in `tools/toolcall/score.py` - and passkey); the comparison rows; the record. **Built blind
+since: §14** (the engine side, Review Focus 3, K4's tooling); the card runs and the record are left.
 
 ## 13. 18e Task 1 as built blind: int8 KV on K2 (2026-10-06, branch `spec18e-k2-kv8`)
 
@@ -633,3 +634,106 @@ sees the routers' tie sensitivity), `test_k2_kv8_probe.py` (tiny weights: passes
 (box-validation-queue row 21); the tolerances (PROPOSED in `k2_kv8_kernels_test`: decode flash
 within 2 ulps of fp64, eager bitwise its reference, prefill flash >= 0.9999 default / 0.999 eager)
 are re-derived from the probe's numbers.
+
+## 14. 18d engine side as built blind: K2 served (2026-10-06, branch `serving-18d-15e`)
+
+Written on the Mac with the box unavailable: plan 18d Task 1's engine half and wiring, Task 2's
+Review Focus 3 and K4's tooling. Nothing has run on the card; every card-side step is a stage of
+box-validation-queue row 25. No kernel was added and no kernel command line changed: serving
+runs the decode list and the prefill walk of 18b / 18c / 18e as they are.
+
+**K2 behind `b70-serve`.** `b70-serve` dispatches on `model_type` as `b70-decode` does: for
+`k2_horizon` it loads with `loader::load_k2`, plans with `cli::k2::settle` **with the prefill
+scratch** (every request prefills), builds `runtime::k2::K2Engine` in the `--kv-cache` form, runs
+`prepare_prefill()` at startup (the scratch and the binaries' check, not in the first request) and
+serves it through `cli::k2::K2EngineAdapterT<K2Engine>` (`src/cli/k2_serve_adapter.h`; a template
+so the host test runs the same adapter over a device-free engine). The int8 `lm_head` is the
+default, as for every model served. `--max-len auto` (derived, `k2_plan_test`'s table, 32.53 GB
+card, 1.5 GB reserve): **45824** with bf16 KV, **90368** with `--kv-cache int8`. The startup line
+names the chat format, prefill l0, the attention (`B70_K2_ATTN`), mtp none, the KV form and
+"prefix snapshots KV-only". Sampling is host sampling over the 250,624-row logits, exactly
+`EngineAdapter`'s: `K2Engine::read_logits_into` (no allocation per token) through
+`server::filter_probs` / `draw`, the drawn id written back with `K2Engine::set_pending`
+(`cur_token[0]`, the ingest protocol); the RNG seeds once from the first sampled request. As for
+every model, a request's first token is the prefill's argmax.
+
+**Refused by name, before the device:** `--mtp` / `--spec mtp` ("K2-Horizon has no MTP head"),
+`--spec lookup` (its verify lists come with an MTP head), `--prefill-backend l0-int8 | sycl-tla`
+(18c's reasons), and - for any model - `--pp N` / `--pipeline-parallel-size N` ("b70-serve serves on
+one card": pipeline parallel is `b70-decode`'s, specs 16b / 16c). `--draft-vocab` needs `--mtp`
+and is refused by that rule. Registered as `cli_reject_serve_*` (box, `b70_serve_reject`: exit 1,
+no `device:` line, the message).
+
+**Review Focus 3: what a K2 snapshot holds.** K2 has no recurrent state: no GDN state, no conv
+ring, no MTP head. Between replays a session is its KV cache and `pos`. MoVA adds nothing: the
+routed value mix IS the V row the cache holds (§3; at int8 the mix rotated and quantised after the
+combine, §13), and the route rows, the RoPE table and eager's score row are per-step scratch or
+constants. `cur_token` is not saved: every restore is followed by a prefill of at least one id
+(spec 7 §3.3 step 4), which writes it. So:
+- `state_bytes()` is **0**; `save_state` copies nothing; `load_state(host, pos)` sets
+  `control.pos` and `n_active = 0` only.
+- `save_kv` / `load_kv(begin, end)` copy positions [begin, end) of every layer in the cache's form,
+  in `runtime::Engine::save_kv`'s host layout without the head: K's rows of all 48 layers, then at
+  int8 K's fp16 scales of all 48, then V the same - the run list is
+  `runtime::k2::kv_snapshot_runs` (device-free, `k2_sizes.h`; 96 runs at bf16, 192 at int8).
+  **196,608 B a position at bf16, 99,840 at int8**: a 2048-position block is 402.7 MB / 204.5 MB,
+  and the default 32 GiB cache holds ~174k / ~344k positions (derived).
+- `K2Engine::prefill` takes spec 7's block hook (Engine::prefill's contract): with a hook every
+  chunk ends at a block end or at the prompt end (`runtime::prefill_chunk_rows`, the one shared
+  rule), the hook runs after every mid-prompt block end (device idle, `pos` = the block end) and
+  after the prompt's last chunk; without one, chunking is exactly 18c's. Since `kPfC` = `kBlock`
+  = 2048, a prompt from position 0 is cut where it always was.
+- **The restore points are free at block ends.** spec 7's store restores from snapshots only; a
+  K2 snapshot at a block end has no bytes of its own (no state, no KV past the block), so
+  `PrefixCache` now keeps a zero-byte entry without allocating (a marker pointer; `HostAlloc` is
+  never asked for 0 bytes) and `load_state` restores `pos` from it. Qwen-family entries always
+  have state bytes and are unchanged.
+- **The store key carries the model.** The prefix cache's root (`EngineIface::kv_form`) is
+  `"K2HORIZ" | form` for K2 (`cli::k2::k2_store_key`); Qwen3.8 / Agnes / Ornith keep 0 / 1, so
+  their hash chains are unchanged. The store is per process (one model per server), so no entry
+  ever crosses models today; the key makes a K2 entry unrecognisable to a Qwen-keyed store and
+  vice versa, and a bf16 entry to an int8 one.
+- **Determinism.** A restore at a block end prefills the tail in the chunks a cold run cuts there,
+  and K2's prefill is keyed to absolute positions (§11), so C1 at a block end is predicted
+  **bitwise** (ids and logits); restores at prompt / request ends start the tail elsewhere - §11's
+  argument predicts those bitwise too, `prefill_split_k2_test` holds the multiples of 64 bitwise
+  and the rest to its bars.
+
+**Task 1's greedy chat.** `golden_server_test <b70-serve> <b70-decode> <prompts> <snapshot> --chat`
+(a new mode, the default unchanged): each golden prompt's text as one user message through
+`/v1/chat/completions` (K2's template writes the BOS and ends in its think tag), then `b70-decode
+--ids <the response's prompt_token_ids> --n 32 --prefill --lm-head int8`, the generated ids equal.
+Box stage r25.chat; its wiring is held on the host by `k2_serve_test` (below).
+
+**K4 tooling.** `tools/toolcall/score.py` reads K2's calls (`xml`, `xml_typed`, `json`, by the
+tags: Qwen XML and K2 share none) behind K2's reasoning - closed by its think tag's close or
+implicitly by `<ifm|tool_calls>`, vLLM's reading and the server's; an output that ends inside the
+reasoning scores `reasoning`. `make_set.py --from <set> <k2> <out> [--kwargs JSON]` renders the
+36 conversations with K2's template: default `{"tool_call_format": "xml", "reasoning_effort":
+"low"}` (K2 always reasons; `low` keeps it inside the budget), from key-sorted messages and tools
+(the server's nlohmann order, so the server's render of the same request is the set's ids), the
+kwargs recorded in each `<name>.json` (`serve_client.py` sends them). `oracle_generate.py`
+dispatches on `model_type`: K2 runs `k2_ref.py`'s port in bf16 mode (18a's reference: the int4
+checkpoint dequantised; the bf16 original by `MODEL_DIR`), greedy through its own cache, stopping
+after an EOS id, `--new-tokens 512`. `tools/toolcall/a4_ref.sh k2 set | ref` makes the set and
+the reference (Mac container or box CPU; not run - the checkpoint is not on the Mac).
+`engine_generate.sh` takes `N_NEW` / `MAX_LEN`. A4 has no bar (K4). Passkey: r25.passkey runs
+`tools/probe/k2_passkey.sh bf16` at 5 / 50 / 95 % of decision 2's 32k and of the bf16-KV auto
+length; the int8 ceiling is r21.passkey's.
+
+**Gates as written.** Host (Mac): `k2_serve_test` - the snapshot runs on K2's real shapes (both
+forms: counts, offsets, bytes, disjoint, inside the allocation), save / load on host buffers
+(the range restored bit for bit, the rest untouched, adjacent saves compose), spec 7 C2's
+sequences a-f through `PrefixSession` over the adapter over an exact context-dependent fake
+(every cached turn bitwise a cold run's, both forms, restores from empty block-end snapshots and
+from host KV), K2's store key, and the server: a greedy chat's ids = the decode run on its
+`prompt_token_ids`, the identical second request restored from the cache with the same ids, a
+seeded sampled request reproducible; `prefix_cache_test`, `prefix_server_test`, `k2_server_test`
+unchanged; the A4 tooling's Python tests (`test_score.py`, incl. every tool-call turn of the
+recorded HF renders in all three formats; `test_make_set.py`; `test_oracle_generate.py`). Box
+(row 25): `k2_prefix_gpu_test` / `_split` / `_kv8` (the device snapshot calls byte-exact over 4100
+positions, C1 bitwise at 4096, C2's sequences a-g under the tie-aware rule with the bitwise rows
+counted), `cli_reject_serve_*`, the startup lines, r25.chat, passkey, K2's set through the server;
+opt-in the A4 reference and run, llama-benchy (Review Focus 4).
+
+**Left for the box:** everything above marked box; plan 18d Task 3 (the record) after it.

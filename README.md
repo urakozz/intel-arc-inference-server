@@ -220,7 +220,7 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model qwen3.8 \
 
 | flag | default | what it does |
 |---|---|---|
-| `<snapshot-or-repo>` | required | HF repo id resolved in the local cache, or a snapshot directory; never downloads. The model (Qwen3.8, Agnes 3.0 Flash or Ornith 1.5) comes from its `config.json`; K2-Horizon is refused until its engine side is built (`b70-decode` runs it); Kolibri-1 likewise (spec 20e; `b70-decode` runs it on two cards, spec 20c). |
+| `<snapshot-or-repo>` | required | HF repo id resolved in the local cache, or a snapshot directory; never downloads. The model (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5 or K2-Horizon) comes from its `config.json`. **K2-Horizon** is served by its own engine since spec 18d - built without the card, its box gates pending (queue row 25): no MTP head (`--mtp`, `--spec mtp\|lookup` refused), prefill on `l0` only, its `chat_template_kwargs` `tool_call_format` (`xml`, `xml_typed`, `json`) and `reasoning_effort` (`high`, `medium`, `low`) reach its template, the prefix cache keeps KV-only snapshots; `--max-len auto` ~46k with bf16 KV, ~90k with `--kv-cache int8` (int8 head, derived). One card for every model: `--pp` is `b70-decode`'s. Kolibri-1 is refused until spec 20e (`b70-decode` runs it on two cards, spec 20c). |
 | `--host H` | `0.0.0.0` | listen address |
 | `--port P` | `8000` | listen port |
 | `--served-name NAME` | `b70` | model name in the OpenAI API (`/v1/models`, the `model` field) |

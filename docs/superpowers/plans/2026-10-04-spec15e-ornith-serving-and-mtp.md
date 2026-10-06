@@ -28,6 +28,16 @@ indicative). Deviations from the text below, each recorded in §12:
 - **The short greedy chat through the server** is the existing `golden_server_test` pointed at
   the Ornith checkpoint by hand (it does not skip without one, so it is not registered for Ornith).
 
+**Status (2026-10-06, branch `serving-18d-15e`): Task 3's Mac side prepared** (spec 15 §12,
+"Task 3's Mac side"). A4: Ornith's own set and its reference from the int4 checkpoint
+(`tools/toolcall/a4_ref.sh ornith set | ref`: `make_set.py --from`, `oracle_generate.py` ->
+`ornith_ref.py` streamed, 192 ids; run script written, **not started** - the Mac's one oracle
+container slot was taken) into `oracle-out-ornith-a4/`, pushed by `--push-data`; on the box row 16
+gained r16.a4 (opt-in: engine runs, score, the set through b70-serve) and r16.a4_ref (manual, the
+Mac commands). C2 (r16.prefix), passkey (r16.passkey), the comparison rows (r16.benchy) were
+already row 16's stages. The record's skeleton: `docs/BENCHMARKS.md` "Ornith 1.5 MoE (spec 15)".
+Left: running the reference on the Mac, then row 16 and Step 3's numbers.
+
 ## Global Constraints
 
 - Branch `spec15e-ornith-serving` from main; box tree `~/b70-inference-server-spec15e`. Copy `tools/box.env` if missing; never commit it. Symlink `oracle-out*` dirs.
