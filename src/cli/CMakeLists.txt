@@ -53,6 +53,8 @@ target_link_libraries(b70-decode PRIVATE b70_server)
 target_link_libraries(b70-decode PRIVATE b70_k2_prefill)
 # Spec 20c: and Kolibri-1's engine (runtime/kolibri, src/cli/kolibri_decode.h), dispatched on model_type.
 target_link_libraries(b70-decode PRIVATE b70_kolibri_runtime)
+# Spec 20d: and Kolibri-1's prefill (b70_kolibri_prefill: KolibriEngine::prefill, its walk and scratch).
+target_link_libraries(b70-decode PRIVATE b70_kolibri_prefill)
 # Spec 18d: b70-serve serves K2-Horizon through its own engine (cli/k2_serve_adapter.h over
 # runtime::k2::K2Engine, whose prefill every request runs). Appended, as b70-decode's K2 lines.
 if(TARGET b70-serve)

@@ -40,6 +40,11 @@ KolibriEngine::Stage& KolibriEngine::st(uint32_t dev) const {
   return *st_[dev];
 }
 
+l0::Context& KolibriEngine::stage_ctx(uint32_t dev) const { return st(dev).ctx; }
+KolibriBuffers& KolibriEngine::stage_buffers(uint32_t dev) const { return st(dev).buffers; }
+Control* KolibriEngine::stage_control(uint32_t dev) const { return st(dev).ctl; }
+l0::CmdList& KolibriEngine::stage_imm(uint32_t dev) const { return st(dev).imm; }
+
 KolibriEngine::KolibriEngine(std::vector<l0::Context*> devices, loader::KolLoadedModel model, uint32_t max_len,
                              bool debug_tap, const PipelineOptions& opt)
     : model_(std::move(model)), max_len_(max_len), opt_(opt), attn_(kolibri_attn()) {
@@ -100,6 +105,9 @@ void KolibriEngine::reset() {
     if (!settle(i))
       throw std::runtime_error("runtime::kolibri::KolibriEngine::reset: device " + std::to_string(i) +
                                "'s last step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
+  if (pf_settle_ && !pf_settle_())   // spec 20d: no prefill list may still run into the buffers
+    throw std::runtime_error("runtime::kolibri::KolibriEngine::reset: a prefill list is still running after " +
+                             std::to_string(opt_.prefill_timeout_ms) + " ms");
   for (uint32_t i = 0; i < st_.size(); ++i) st(i).buffers.zero(st(i).imm);
   if (link_) link_->zero(st(0).imm, st(1).imm);
   broken_ = false;
@@ -268,6 +276,7 @@ MemoryComponents KolibriEngine::memory_use(uint32_t dev) const {
   c.kv = b.full_k.size() + b.full_v.size() + b.ring_k.size() + b.ring_v.size();
   c.decode_state = b.control.size() + b.scratch_bytes() + (taps_[dev] ? taps_[dev]->size() : 0) +
                    (link_ ? link_->bytes(dev) : 0);
+  c.prefill_scratch = dev < pf_dev_bytes_.size() ? pf_dev_bytes_[dev] : 0;   // spec 20d: 0 until prepared
   return c;
 }
 

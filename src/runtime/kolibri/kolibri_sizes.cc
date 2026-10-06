@@ -97,6 +97,80 @@ size_t decode_launches(const model::Kolibri1Desc& d, const model::KolPlacement& 
   return n;
 }
 
+// --- spec 20d: the prefill chunk ---------------------------------------------------------------------
+namespace {
+constexpr uint32_t kPfHdrWords = (4 + 384 + 1 + 15) / 16 * 16;   // kernels::kolibri::pf_hdr::words()
+constexpr uint32_t kSlabLinears = 2;                              // q||k||v, o_proj
+}  // namespace
+
+uint32_t pf_tiles(const model::Kolibri1Desc& d, uint32_t C) {
+  return (C * d.top_k + d.experts * (kPfTm - 1)) / kPfTm + (C + kPfTm - 1) / kPfTm;
+}
+size_t pf_block_gu_bytes(const model::Kolibri1Desc& d) { return size_t(d.hidden) * 2 * d.moe_inter * 2; }
+size_t pf_block_dn_bytes(const model::Kolibri1Desc& d) { return size_t(d.moe_inter) * d.hidden * 2; }
+uint32_t pf_batch_blocks_gu(const model::Kolibri1Desc& d) { return uint32_t(kPfBatchBytes / pf_block_gu_bytes(d)); }
+uint32_t pf_batch_blocks_dn(const model::Kolibri1Desc& d) { return uint32_t(kPfBatchBytes / pf_block_dn_bytes(d)); }
+uint32_t pf_batches_gu(const model::Kolibri1Desc& d) {
+  const uint32_t per = pf_batch_blocks_gu(d);
+  return (d.experts + 1 + per - 1) / per;
+}
+uint32_t pf_batches_dn(const model::Kolibri1Desc& d) {
+  const uint32_t per = pf_batch_blocks_dn(d);
+  return (d.experts + 1 + per - 1) / per;
+}
+
+PrefillSizes prefill_sizes(const model::Kolibri1Desc& d) {
+  const size_t C = kPfC, T = pf_tiles(d, kPfC), R = T * kPfTm;
+  uint32_t ld = 0, kmax = 0;
+  for (model::KolLinearId id : d.layer_linears()) {
+    const model::GemvShape s = d.linear(id).shape;
+    ld = std::max(ld, pf_ld(s.N));
+    kmax = std::max(kmax, s.K);
+  }
+  PrefillSizes s;
+  s.ids = C * 4;
+  s.resid = s.x = s.a = s.mo = C * d.hidden * 2;
+  s.partials = C * ld * 4;
+  s.slab = size_t(kmax) * kPfSlab * 2;
+  s.sumsq_a = s.sumsq_r = size_t(kNormG) * C * 4;
+  s.attn_q = C * d.q_n() * 4;
+  s.attn_out = C * d.q_n() * 2;
+  s.logits = C * d.router_n() * 4;
+  s.routes = size_t(d.layers) * C * kRouteWords * 4;
+  s.hdr = size_t(kPfHdrWords) * 4;
+  s.tiles = T * 2 * 4;
+  s.row_tok = R * 4;
+  s.pair_row = C * d.top_k * 4;
+  s.xg = R * d.hidden * 2;
+  s.h = R * d.moe_inter * 2;
+  s.w = kPfBatchBytes;
+  return s;
+}
+
+PpLandingLayout pf_landing_layout(const model::Kolibri1Desc& d) {
+  return pp_landing_layout(size_t(kPfC) * d.hidden * 2, size_t(kNormG) * kPfC * 4);
+}
+size_t pf_link_bytes(const model::Kolibri1Desc& d, uint32_t dev) {
+  return dev == 0 ? kPpStateWords * 4 : pf_landing_layout(d).total + kPpStateWords * 4;
+}
+
+size_t prefill_device_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev) {
+  size_t slabs = 0;
+  for (model::KolLinearId id : d.layer_linears()) slabs += pf_slabs(d.linear(id).shape.N);
+  static_assert(kSlabLinears == 2, "q||k||v and o_proj");
+  // norm, 2 x slabs, prep, flash, fold _Z + post_add, norm, router, route, sort, gather, gate||up and
+  // down batches x 2, combine, fold SP0 + post_add
+  const size_t per_layer = 1 + 2 * slabs + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 1 + 2 * (pf_batches_gu(d) + pf_batches_dn(d)) + 1 + 2;
+  size_t n = size_t(p.count(dev)) * per_layer;
+  if (dev == 0) n += 2;   // pf_embed_gather, pf_res_fold SP0
+  return n;
+}
+size_t prefill_chunk_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p) {
+  size_t n = 0;
+  for (uint32_t dev = 0; dev < p.devices; ++dev) n += prefill_device_launches(d, p, dev);
+  return n;
+}
+
 std::vector<size_t> pp_layer_bytes(const model::Kolibri1Desc& d, uint32_t max_len) {
   const size_t w = loader::kol_layer_bytes(d).total();
   std::vector<size_t> v(d.layers);
@@ -109,20 +183,26 @@ namespace {
 size_t fixed_state(const model::Kolibri1Desc& d, uint32_t max_len, KolAttn a) {
   return sizeof(Control) + scratch_sizes(d).total() + attn_scores_bytes(d, max_len, a);
 }
+// Spec 20d: a device's prefill scratch and its prefill link (two devices), when the run prefills.
+size_t prefill_state(const model::Kolibri1Desc& d, uint32_t devices, uint32_t dev, bool prefill) {
+  if (!prefill) return 0;
+  return prefill_sizes(d).total() + (devices > 1 ? pf_link_bytes(d, dev) : 0);
+}
 }  // namespace
 
-PpBalance pp_split(const model::Kolibri1Desc& d, uint32_t max_len, bool int8_head, PpHandoff h, KolAttn a) {
+PpBalance pp_split(const model::Kolibri1Desc& d, uint32_t max_len, bool int8_head, PpHandoff h, KolAttn a,
+                   bool prefill) {
   (void)h;   // both hand-offs allocate the same buffers (PipelineLink: the event is not device memory)
   if (d.layers < 2) throw std::invalid_argument(d.name + ": " + std::to_string(d.layers) + " layer(s), nothing to split");
   const size_t rope = d.rope_table_bytes(max_len), state = fixed_state(d, max_len, a);
-  const size_t dev0 = loader::kol_embed_bytes(d) + rope + state + link_bytes(d, 0);
+  const size_t dev0 = loader::kol_embed_bytes(d) + rope + state + link_bytes(d, 0) + prefill_state(d, 2, 0, prefill);
   const size_t dev1 = loader::kol_final_norm_bytes(d) + loader::kol_lm_head_bytes(d, int8_head) + rope + state +
-                      link_bytes(d, 1);
+                      link_bytes(d, 1) + prefill_state(d, 2, 1, prefill);
   return pp_balance(pp_layer_bytes(d, max_len), dev0, dev1);
 }
 
 std::vector<DevicePlan> plan(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t max_len,
-                             bool int8_head, bool debug_tap, KolAttn a) {
+                             bool int8_head, bool debug_tap, KolAttn a, bool prefill) {
   model::validate(p, d);
   std::vector<DevicePlan> out(p.devices);
   for (uint32_t dev = 0; dev < p.devices; ++dev) {
@@ -138,18 +218,20 @@ std::vector<DevicePlan> plan(const model::Kolibri1Desc& d, const model::KolPlace
     dp.link = p.devices > 1 ? link_bytes(d, dev) : 0;
     dp.decode_state = ps.control + scratch_sizes(d).total() + attn_scores_bytes(d, max_len, a) +
                       (debug_tap ? tap_bytes(d) : 0) + dp.link;
+    dp.prefill_scratch = prefill_state(d, p.devices, dev, prefill);
   }
   return out;
 }
 
 uint32_t max_len_that_fits(const model::Kolibri1Desc& d, const model::KolPlacement& p, bool int8_head,
-                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap) {
+                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap,
+                           bool prefill) {
   if (cap == 0 || cap > d.trained_max_len) cap = d.trained_max_len;
   if (cap < kMaxLenQuantum)
     throw std::invalid_argument("kolibri::max_len_that_fits: the cap " + std::to_string(cap) + " is below one " +
                                 std::to_string(kMaxLenQuantum) + "-position quantum");
   const auto fits = [&](uint32_t len) {
-    const std::vector<DevicePlan> pl = plan(d, p, len, int8_head);
+    const std::vector<DevicePlan> pl = plan(d, p, len, int8_head, false, kolibri_attn(), prefill);
     for (uint32_t i = 0; i < p.devices; ++i)
       if (pl[i].total() + reserve > device_bytes[i]) return false;
     return true;
@@ -168,26 +250,29 @@ uint32_t max_len_that_fits(const model::Kolibri1Desc& d, const model::KolPlaceme
 }
 
 PpChoice pp_split_and_len(const model::Kolibri1Desc& d, bool int8_head,
-                          const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap) {
+                          const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap,
+                          bool prefill) {
   uint32_t best_len = 0;
   for (uint32_t s = 1; s < d.layers; ++s) {
-    const uint32_t len = max_len_that_fits(d, model::KolPlacement::two(d, s), int8_head, device_bytes, reserve, cap);
+    const uint32_t len =
+        max_len_that_fits(d, model::KolPlacement::two(d, s), int8_head, device_bytes, reserve, cap, prefill);
     best_len = std::max(best_len, len);
   }
   if (best_len == 0) return {};
   // At that length, the split by bytes - 16b's rule - among the splits that reach it.
-  const PpBalance b = pp_split(d, best_len, int8_head, kDefaultPpHandoff);
-  if (max_len_that_fits(d, model::KolPlacement::two(d, b.split), int8_head, device_bytes, reserve, cap) == best_len)
+  const PpBalance b = pp_split(d, best_len, int8_head, kDefaultPpHandoff, kolibri_attn(), prefill);
+  if (max_len_that_fits(d, model::KolPlacement::two(d, b.split), int8_head, device_bytes, reserve, cap, prefill) ==
+      best_len)
     return {b.split, best_len};
   for (uint32_t s = 1; s < d.layers; ++s)   // the balanced split does not reach it: the first that does
-    if (max_len_that_fits(d, model::KolPlacement::two(d, s), int8_head, device_bytes, reserve, cap) == best_len)
+    if (max_len_that_fits(d, model::KolPlacement::two(d, s), int8_head, device_bytes, reserve, cap, prefill) == best_len)
       return {s, best_len};
   return {};
 }
 
-bool fits_one_card(const model::Kolibri1Desc& d, bool int8_head, size_t device_bytes, size_t reserve) {
+bool fits_one_card(const model::Kolibri1Desc& d, bool int8_head, size_t device_bytes, size_t reserve, bool prefill) {
   const uint32_t len = std::min(kMinAutoMaxLen, d.trained_max_len);
-  const std::vector<DevicePlan> pl = plan(d, model::KolPlacement::one(d), len, int8_head);
+  const std::vector<DevicePlan> pl = plan(d, model::KolPlacement::one(d), len, int8_head, false, kolibri_attn(), prefill);
   return pl[0].total() + reserve <= device_bytes;
 }
 
