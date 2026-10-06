@@ -17,6 +17,12 @@ PersistentBuffers::PersistentBuffers(l0::Context& ctx, uint32_t max_len,
     : PersistentBuffers(ctx, max_len, sizes(max_len, desc, kv),
                         kv_layout(max_len, desc, desc.fa_layers, kv)) {}
 
+PersistentBuffers::PersistentBuffers(l0::Context& ctx, uint32_t max_len,
+                                     const model::ModelDesc& desc, KvCache kv,
+                                     uint32_t gdn_layers, uint32_t fa_layers)
+    : PersistentBuffers(ctx, max_len, stage_sizes(max_len, desc, kv, gdn_layers, fa_layers),
+                        kv_layout(max_len, desc, fa_layers, kv)) {}
+
 PersistentBuffers::PersistentBuffers(l0::Context& ctx, uint32_t max_len, const PersistentSizes& s,
                                      const KvLayout& kv)
     : control(ctx, l0::MemKind::Shared, s.control),

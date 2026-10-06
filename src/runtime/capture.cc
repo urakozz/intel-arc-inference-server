@@ -131,7 +131,9 @@ void require(bool ok, const std::string& what) {
 // What a walk captures (spec 8, plan 8b). `Plain` is the decode list, unchanged.
 // `Verify` is the same list at M rows with the per-row GDN slot variant, followed by
 // the MTP head's KV fill of those M rows. `Draft` is the MTP head alone at M = 1.
-enum class Mode { Plain, Verify, Draft };
+// `Stage` (spec 16b) is the plain list restricted to one pipeline stage's layers, with the
+// hand-off appended or prepended (capture.h, build_stage).
+enum class Mode { Plain, Verify, Draft, Stage };
 
 class Capture {
  public:
@@ -140,6 +142,17 @@ class Capture {
           Mode mode = Mode::Plain, uint32_t draft_i = 0)
       : ctx_(ctx), m_(m), b_(b), tap_(tap), prof_(prof), kCapM(cap_m), mtp_(mtp), mode_(mode),
         draft_i_(draft_i), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
+  // Spec 16b: one pipeline stage's walk. `b` and `m` hold only the stage's layers.
+  Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const PpStage& st,
+          const StageLink& link)
+      : Capture(ctx, m, b, nullptr, nullptr, 1, nullptr, Mode::Stage) {
+    stage_ = &st;
+    link_ = &link;
+    small_base_ = st.first;
+    n_layers_ = st.layers();
+    n_gdn_ = st.gdn;
+    n_fa_ = st.fa;
+  }
 
   CapturedStep run() {
     // One layer's K (or V) rows; at int8 (spec 12b) the scales follow every layer's rows
@@ -147,6 +160,7 @@ class Capture {
     kv_stride_ = size_t(b_.max_len) * d_.fa_kv_heads * Qwen35::kFaHeadDim *
                  (kv8_ ? 1 : kBf16);
     check_sizes();
+    if (mode_ == Mode::Stage) return stage_run();
     if (mode_ != Mode::Plain) check_mtp();
     if (mode_ == Mode::Draft) {
       layer_ = head_layer();
@@ -268,16 +282,17 @@ class Capture {
                   ": " + v + " is missing (" + kernels::path(v) +
                   "); the compiled max_lens are listed in src/kernels/CMakeLists.txt");
 
-    const std::string gdn_n = std::to_string(d_.gdn_layers), fa_n = std::to_string(d_.fa_layers);
-    require(b_.gdn_state.size() == gdn_state_stride() * d_.gdn_layers,
+    // n_gdn_ / n_fa_ are the descriptor's counts, or (spec 16b) a stage's own.
+    const std::string gdn_n = std::to_string(n_gdn_), fa_n = std::to_string(n_fa_);
+    require(b_.gdn_state.size() == gdn_state_stride() * n_gdn_,
             "gdn_state is not " + gdn_n + " slices");
-    require(b_.conv_ring.size() == conv_ring_stride() * d_.gdn_layers,
+    require(b_.conv_ring.size() == conv_ring_stride() * n_gdn_,
             "conv_ring is not " + gdn_n + " slices");
     // The layout the buffers were allocated with must be this walk's: its rows stride, its
     // layer count, and (spec 12b) the scales after them at int8.
     const KvLayout& kl = b_.kv_lay;
     require(kl.max_len == b_.max_len && kl.kv_heads == d_.fa_kv_heads &&
-                kl.head_dim == Qwen35::kFaHeadDim && kl.layers == d_.fa_layers &&
+                kl.head_dim == Qwen35::kFaHeadDim && kl.layers == n_fa_ &&
                 kl.layer_rows() == kv_stride_,
             "the KV layout (" + std::string(kv_cache_name(kl.form)) + ", " +
                 std::to_string(kl.layers) + " layers) is not this model's " + fa_n + " FA layers");
@@ -324,9 +339,9 @@ class Capture {
     // (runtime::moe_scratch_layout), and the attention it is built for. Spec 15e: the
     // verify and draft lists exist for it too (check_mtp holds the head to its form).
     if (d_.is_moe()) {
-      require(m_.moe.size() == d_.layers,
+      require(m_.moe.size() == n_layers_,
               "the loaded model has " + std::to_string(m_.moe.size()) + " MoE layers, not " +
-                  std::to_string(d_.layers));
+                  std::to_string(n_layers_));
       require(b_.moe != nullptr && b_.moe->size() >= moe_scratch_layout(d_).total,
               "the decode scratch has no MoE region of moe_scratch_layout()'s size");
       require(attn_ == DecodeAttn::V2,
@@ -568,7 +583,12 @@ class Capture {
   // sums before the next site's stage A overwrites them.
   void res_norm(uint32_t s_prev, const void* norm_w) {
     const uint32_t g = DecodeBuffers::kNormGroups;
-    {
+    // Spec 16b: the first site of a later pipeline stage resumes after its fold, which the
+    // previous device ran (cut_fold) and handed off with the residual. Never set on the
+    // single-card walks.
+    if (resume_) {
+      resume_ = false;
+    } else {
       l0::Kernel& k =
           kernel(kernels::prep_res_fold_variant(kCapM, d_.hidden, s_prev, g),
                  "prep_res_fold", kWgResFold);
@@ -685,7 +705,7 @@ class Capture {
   // partials, gate‖up, SiLU·mul, down. `mixer_s` is the split-K width of the
   // GEMV that produced those partials (out_proj / o_proj, both S = 4).
   void mlp(uint32_t layer, uint32_t mixer_s) {
-    res_norm(mixer_s, at(m_.layer_small[layer].norms, sl_.norms_off_post));
+    res_norm(mixer_s, at(small_of(layer).norms, sl_.norms_off_post));
     gemv(layer, LinearId::GateUp, b_.x.ptr());
     // prep_silu_mul(partials, x_out) - prep.cl (Task 2), grid (I/4096, M) = (5, M)
     // at both I = 17408 (ragged last chunk 1024) and Agnes's 19456 (3072), WG 256.
@@ -722,8 +742,8 @@ class Capture {
   // output into `resid` itself, so the next fold is SP0 (ModelDesc::ffn_fold_s). The
   // shared expert is slot top_k, its weights the last block of `gate_up` / `down`.
   void moe(uint32_t layer, uint32_t mixer_s) {
-    res_norm(mixer_s, at(m_.layer_small[layer].norms, sl_.norms_off_post));
-    moe_block(m_.moe.at(layer), layer);
+    res_norm(mixer_s, at(small_of(layer).norms, sl_.norms_off_post));
+    moe_block(m_.moe.at(layer - small_base_), layer);
   }
 
   // The block's four launches on `x` (normed) into `resid`, for the weights `w` and the
@@ -772,7 +792,7 @@ class Capture {
     // and `resid` is exactly embed_gather's output: the SP0 variant. Every
     // other layer folds the previous layer's `down` (S = 4).
     res_norm(layer == 0 ? 0u : d_.ffn_fold_s(),
-             at(m_.layer_small[layer].norms, sl_.norms_off_input));
+             at(small_of(layer).norms, sl_.norms_off_input));
     gemv(layer, LinearId::QkvZ, b_.x.ptr());
     // a||b in the checkpoint's form (spec 15 §13, ModelDesc::ab): bf16 through gemv_bf16
     // ({16, 16}), or - when the checkpoint quantised in_proj_a / in_proj_b, as the published
@@ -803,7 +823,7 @@ class Capture {
       k.arg_ptr(0, b_.control.ptr());
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, b_.ab_out.ptr());
-      k.arg_ptr(3, m_.layer_small[layer].gdn.ptr());
+      k.arg_ptr(3, small_of(layer).gdn.ptr());
       k.arg_ptr(4, at(b_.conv_ring, size_t(g) * conv_ring_stride()));
       k.arg_ptr(5, at(b_.gdn_state, size_t(g) * gdn_state_stride()));
       k.arg_ptr(6, b_.gdn_o.ptr());
@@ -818,7 +838,7 @@ class Capture {
       l0::Kernel& k = kernel(kernels::prep_gated_head_variant(kCapM, d_.gdn_k_heads, d_.gdn_v_heads), "prep_gated_head", kWgGated);
       k.arg_ptr(0, b_.partials.ptr());
       k.arg_ptr(1, b_.gdn_o.ptr());
-      k.arg_ptr(2, at(m_.layer_small[layer].gdn, sl_.gdn_off_gated_norm));
+      k.arg_ptr(2, at(small_of(layer).gdn, sl_.gdn_off_gated_norm));
       k.arg_ptr(3, b_.x.ptr());
       launch(k, d_.gdn_v_heads, kCapM);
     }
@@ -828,7 +848,7 @@ class Capture {
 
   // A full-attention layer (16 of 64 on Qwen3.8, 18 of 72 on Agnes): 10 kernels.
   void fa_layer(uint32_t layer, uint32_t f) {
-    res_norm(d_.ffn_fold_s(), at(m_.layer_small[layer].norms, sl_.norms_off_input));
+    res_norm(d_.ffn_fold_s(), at(small_of(layer).norms, sl_.norms_off_input));
     gemv(layer, LinearId::Qkv, b_.x.ptr());
     // This FA layer's KV cache slices - bf16 [max_len][4][256] each, indexed by
     // absolute position inside the kernels; at int8 (spec 12b) the int8 rows and their
@@ -846,7 +866,7 @@ class Capture {
       l0::Kernel& k = kernel(kernels::attn_prep_kv8_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads), "attn_prep_kv8", kWgAttn);
       k.arg_ptr(0, b_.control.ptr());
       k.arg_ptr(1, b_.partials.ptr());
-      k.arg_ptr(2, m_.layer_small[layer].gdn.ptr());
+      k.arg_ptr(2, small_of(layer).gdn.ptr());
       k.arg_ptr(3, m_.rope.ptr());
       k.arg_ptr(4, b_.attn_q.ptr());
       k.arg_ptr(5, b_.attn_gate.ptr());
@@ -859,7 +879,7 @@ class Capture {
       l0::Kernel& k = kernel(kernels::attn_prep_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads), "attn_prep", kWgAttn);
       k.arg_ptr(0, b_.control.ptr());
       k.arg_ptr(1, b_.partials.ptr());
-      k.arg_ptr(2, m_.layer_small[layer].gdn.ptr());
+      k.arg_ptr(2, small_of(layer).gdn.ptr());
       k.arg_ptr(3, m_.rope.ptr());
       k.arg_ptr(4, b_.attn_q.ptr());
       k.arg_ptr(5, b_.attn_gate.ptr());
@@ -963,6 +983,149 @@ class Capture {
       k.arg_ptr(1, b_.argmax_part.ptr());
       launch(k, 1, 1);
     }
+  }
+
+  // --- spec 16b: one pipeline stage --------------------------------------------
+  //
+  // capture.h (build_stage) has the contract. The walk is run()'s with three differences:
+  // only layers [first, last) are walked, with stage-local GDN / FA slice indices (the
+  // stage's buffers hold its own layers only); a stage without the embedding starts with the
+  // hand-off in and resumes layer `first` after its fold; a stage without the head ends
+  // with layer `last`'s fold and the hand-off out.
+  CapturedStep stage_run() {
+    const PpStage& st = *stage_;
+    require(link_ != nullptr, "a stage walk needs its link");
+    require(tap_ == nullptr && prof_ == nullptr,
+            "a pipeline stage captures no residual tap and no profiling events");
+    require(st.last <= d_.layers && st.first < st.last &&
+                m_.layer_small.size() == st.layers(),
+            "the stage model holds " + std::to_string(m_.layer_small.size()) +
+                " layers' small tensors, not layers [" + std::to_string(st.first) + ", " +
+                std::to_string(st.last) + ")");
+    require(st.has_embed() || st.has_head(d_), "spec 16b builds two stages: one holds the "
+                                               "embedding, the other the head");
+    if (st.has_embed()) {
+      embed_gather();
+    } else {
+      handoff_in();
+      resume_ = true;   // layer `first`'s fold ran on the previous device
+    }
+    uint32_t gdn = 0, fa = 0;   // this stage's slices: its own GDN / FA layers from 0
+    for (const model::LayerDesc& layer : d_.layer_descs()) {
+      if (layer.index < st.first || layer.index >= st.last) continue;
+      layer_ = static_cast<int>(layer.index);
+      if (layer.kind == model::LayerKind::GDN)
+        gdn_layer(layer.index, gdn++);
+      else
+        fa_layer(layer.index, fa++);
+    }
+    require(!resume_, "the stage's first layer did not consume the hand-off");
+    require(gdn == st.gdn && fa == st.fa,
+            "the stage's layer kind counts are not its " + std::to_string(st.gdn) + " GDN / " +
+                std::to_string(st.fa) + " FA");
+    layer_ = kBoundary;
+    if (st.has_head(d_)) {
+      head();
+    } else {
+      layer_ = static_cast<int>(st.last);
+      cut_fold();
+      layer_ = kBoundary;
+      handoff_out();
+    }
+    // The compute launches are the single-card list's, cut in two (pp_stage_launches); the
+    // peer hand-off adds its one kernel per side.
+    const size_t want = pp_stage_launches(d_, st) + (link_->mode == PpHandoff::Peer ? 1 : 0);
+    require(step_.kernel_count == want,
+            "the stage list has " + std::to_string(step_.kernel_count) + " launches, not " +
+                std::to_string(want));
+    require(step_.kernels.size() == step_.kernel_count, "a Kernel was created but never launched");
+    require(step_.labels.size() == step_.kernel_count, "a launch went unlabelled");
+    step_.list.close();
+    return std::move(step_);
+  }
+
+  // The fold half of layer `last`'s leading res_norm - the launch the single-card walk
+  // makes there, with that site's split-K width (every layer after 0 folds the previous
+  // FFN's partials: ffn_fold_s). It reads `partials` and `resid` and writes `resid` and
+  // `norm_sumsq`, the two things the hand-off moves.
+  void cut_fold() {
+    const uint32_t g = DecodeBuffers::kNormGroups;
+    l0::Kernel& k = kernel(kernels::prep_res_fold_variant(kCapM, d_.hidden, d_.ffn_fold_s(), g),
+                           "prep_res_fold", kWgResFold);
+    k.arg_ptr(0, b_.partials.ptr());
+    k.arg_ptr(1, b_.resid.ptr());
+    k.arg_ptr(2, b_.norm_sumsq.ptr());
+    launch(k, g, kCapM);
+  }
+
+  // What crosses: the list's M residual rows and the whole norm_sumsq allocation (its
+  // [groups][M] layout is the kernels'; copying all of it needs no knowledge of it).
+  size_t handoff_resid_bytes() const { return size_t(kCapM) * d_.hidden * kBf16; }
+  size_t handoff_sumsq_bytes() const { return b_.norm_sumsq.size(); }
+  void check_link() const {
+    require(link_->land_resid && link_->land_sumsq && link_->resid_cap >= handoff_resid_bytes() &&
+                link_->sumsq_cap == handoff_sumsq_bytes(),
+            "the landing buffer does not hold " + std::to_string(handoff_resid_bytes()) +
+                " B of rows and exactly " + std::to_string(handoff_sumsq_bytes()) +
+                " B of norm sums (pp_send stamps the word after them)");
+    require(handoff_resid_bytes() % 4 == 0 && handoff_sumsq_bytes() % 4 == 0,
+            "the hand-off moves whole 32-bit words");
+    if (link_->mode == PpHandoff::Copy)
+      require(link_->event != nullptr, "the copy hand-off needs its cross-device event");
+  }
+
+  void handoff_out() {
+    check_link();
+    if (link_->mode == PpHandoff::Copy) {
+      step_.list.copy(link_->land_resid, b_.resid.ptr(), handoff_resid_bytes());
+      step_.list.copy(link_->land_sumsq, b_.norm_sumsq.ptr(), handoff_sumsq_bytes());
+      step_.list.barrier_signal(link_->event);
+      return;
+    }
+    require(link_->flag && link_->send_seq, "the peer hand-off needs its flag and counter");
+    // pp_send(resid, sumsq, land_resid, land_sumsq, flag, seq, resid_words, sumsq_words) -
+    // pp_handoff.cl, grid (1), WG 256.
+    l0::Kernel& k = kernel(kernels::pp_handoff_variant(), "pp_send", kernels::kPpHandoffWg);
+    k.arg_ptr(0, b_.resid.ptr());
+    k.arg_ptr(1, b_.norm_sumsq.ptr());
+    k.arg_ptr(2, link_->land_resid);
+    k.arg_ptr(3, link_->land_sumsq);
+    k.arg_ptr(4, link_->flag);
+    k.arg_ptr(5, link_->send_seq);
+    k.arg<uint32_t>(6, static_cast<uint32_t>(handoff_resid_bytes() / 4));
+    k.arg<uint32_t>(7, static_cast<uint32_t>(handoff_sumsq_bytes() / 4));
+    launch(k, 1);
+  }
+
+  void handoff_in() {
+    check_link();
+    if (link_->mode == PpHandoff::Copy) {
+      step_.list.wait_event(link_->event);
+      step_.list.copy(b_.resid.ptr(), link_->land_resid, handoff_resid_bytes());
+      step_.list.copy(b_.norm_sumsq.ptr(), link_->land_sumsq, handoff_sumsq_bytes());
+      return;
+    }
+    require(link_->flag && link_->recv_state && link_->spin_limit > 0,
+            "the peer hand-off needs its flag, its state words and a spin bound");
+    // pp_recv(land_resid, land_sumsq, flag, state, resid, sumsq, resid_words, sumsq_words,
+    // spin_limit) - pp_handoff.cl, grid (1), WG 256.
+    l0::Kernel& k = kernel(kernels::pp_handoff_variant(), "pp_recv", kernels::kPpHandoffWg);
+    k.arg_ptr(0, link_->land_resid);
+    k.arg_ptr(1, link_->land_sumsq);
+    k.arg_ptr(2, link_->flag);
+    k.arg_ptr(3, link_->recv_state);
+    k.arg_ptr(4, b_.resid.ptr());
+    k.arg_ptr(5, b_.norm_sumsq.ptr());
+    k.arg<uint32_t>(6, static_cast<uint32_t>(handoff_resid_bytes() / 4));
+    k.arg<uint32_t>(7, static_cast<uint32_t>(handoff_sumsq_bytes() / 4));
+    k.arg<uint32_t>(8, link_->spin_limit);
+    launch(k, 1);
+  }
+
+  // A layer's small blocks: m_.layer_small is indexed by layer, or (spec 16b) by layer -
+  // first in a stage model.
+  const loader::SmallTensors& small_of(uint32_t layer) const {
+    return m_.layer_small[layer - small_base_];
   }
 
   // --- spec 8: the MTP head (plan 8b) ---------------------------------------
@@ -1244,6 +1407,14 @@ class Capture {
   size_t kv_stride_ = 0;
   int layer_ = kBoundary;
   std::string pending_entry_, pending_variant_;
+  // Spec 16b: a stage walk's range and link (null otherwise), the layer m_.layer_small[0]
+  // and m_.moe[0] hold, the layer counts the buffers and the model were built for (the
+  // descriptor's on every single-card walk), and the one-shot "skip this fold" flag.
+  const PpStage* stage_ = nullptr;
+  const StageLink* link_ = nullptr;
+  uint32_t small_base_ = 0;
+  uint32_t n_layers_ = d_.layers, n_gdn_ = d_.gdn_layers, n_fa_ = d_.fa_layers;
+  bool resume_ = false;
 };
 
 }  // namespace
@@ -1289,6 +1460,20 @@ CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, Decode
 CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                          const MtpBuffers& mtp, uint32_t i) {
   return Capture(ctx, m, b, nullptr, nullptr, 1, &mtp, Mode::Draft, i).run();
+}
+
+CapturedStep build_stage(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
+                         const PpStage& st, const StageLink& link) {
+  // The two stages' compute launches are the single-card list's, cut in two.
+  const model::ModelDesc& d = *m.desc;
+  if (st.last == d.layers || st.first == 0) {
+    const std::array<PpStage, kPpDevices> both =
+        pp_stages(d, st.first == 0 ? st.last : st.first);
+    if (pp_stage_launches(d, both[0]) + pp_stage_launches(d, both[1]) != decode_launches(d))
+      throw std::logic_error("runtime::build_stage: the stages' launches do not add up to " +
+                             std::to_string(decode_launches(d)));
+  }
+  return Capture(ctx, m, b, st, link).run();
 }
 
 }  // namespace runtime

@@ -12,6 +12,7 @@
 #include "l0/module.h"
 #include "loader/loader.h"
 #include "runtime/buffers.h"
+#include "runtime/pipeline_plan.h"
 
 namespace runtime {
 
@@ -157,5 +158,44 @@ CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, Decode
                           const MtpBuffers& mtp, uint32_t M);
 CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                          const MtpBuffers& mtp, uint32_t i);
+
+// --- spec 16b: pipeline parallel decode ----------------------------------------------
+//
+// One stage's decode list: the walk above restricted to layers [st.first, st.last), on the
+// device `ctx` / `b` / `m` belong to (`m` holds only those layers' weights - see
+// runtime/pipeline_place.h - and `b` only their state, PersistentBuffers' stage
+// constructor). Same kernels, same arguments, same order as the single-card list, so the
+// two stages together compute exactly what it computes (spec 16 §4 P1):
+//
+//   stage 0  embed_gather, layers [0, s), then layer s's prep_res_fold - the cut: the fold
+//            reads no weight, so this device runs it and hands off the FOLDED residual and
+//            its norm sums (`resid` M rows + `norm_sumsq`, 10.9 KB on Qwen3.8) rather than
+//            the residual plus down's split-K partials (90 KB) - then the hand-off out.
+//   stage 1  the hand-off in, then layer s from its prep_norm_finish on, layers (s, L), the
+//            head (final norm, lm_head, the two argmax stages: the token lands in THIS
+//            device's control block).
+//
+// The hand-off (`link.mode`, spec 16 §2 decision 3):
+//   copy  out: two device-to-device copies into the landing buffer (peer writes by the copy
+//              path), then a barrier signalling `link.event`; in: a wait on `link.event`, then
+//              two local copies from the landing buffer into `resid` / `norm_sumsq`.
+//   peer  out: pp_send (pp_handoff.cl) as the last launch; in: pp_recv as the first.
+// The per-kind state indices are the stage's own (GDN slice g of `b.gdn_state` is the
+// model's GDN layer st.gdn_first + g), and `m.layer_small` / `m.moe` are indexed by
+// layer - st.first. The labels keep the model's layer numbers ("L32 ..."), the hand-off's
+// launches are "-- pp_send" / "-- pp_recv". No residual tap, no profiling events.
+struct StageLink {
+  PpHandoff mode = PpHandoff::Copy;
+  void* land_resid = nullptr;   // the landing buffer's rows (the next device's memory)
+  void* land_sumsq = nullptr;   // its norm sums; the stamp word follows them
+  void* flag = nullptr;         // peer: the flag word, a page of its own
+  size_t resid_cap = 0, sumsq_cap = 0;   // what the landing regions hold
+  void* send_seq = nullptr;     // peer, out: pp_send's counter (this device's memory)
+  void* recv_state = nullptr;   // peer, in: pp_recv's state words (this device's memory)
+  uint32_t spin_limit = 0;      // peer, in: pp_recv's bound on flag loads
+  ze_event_handle_t event = nullptr;   // copy: the cross-device event (l0::SyncEvent)
+};
+CapturedStep build_stage(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
+                         const PpStage& st, const StageLink& link);
 
 }  // namespace runtime
