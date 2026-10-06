@@ -2857,4 +2857,17 @@ if(B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/tokenizer/kolibri ${B70_KOLIBRI_TOKENIZER_JSON})
   set_tests_properties(template_kolibri_test kolibri_tokenizer_test PROPERTIES LABELS kolibri SKIP_RETURN_CODE 77)
 endif()
+# Task 2 (host): Kolibri's reasoning (opened by the model) and hermes JSON tool calls - server/toolcall_kolibri.h
+# over the template renders above, the Review Focus cases, German bytes and a 2000-output fuzz, every parse
+# split-invariant; the server's kolibri1 dispatch (kwargs, list content, both EOS ids, streamed frames) and the
+# model-scoped sampling defaults from the vendored generation_config.json, over a mock engine.
+add_executable(toolcall_kolibri_test server/toolcall_kolibri_test.cc)
+target_include_directories(toolcall_kolibri_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(toolcall_kolibri_test PRIVATE b70_server)
+add_test(NAME toolcall_kolibri_test COMMAND toolcall_kolibri_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
+add_executable(kolibri_server_test server/kolibri_server_test.cc)
+target_include_directories(kolibri_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kolibri_server_test PRIVATE b70_server)
+add_test(NAME kolibri_server_test COMMAND kolibri_server_test ${CMAKE_SOURCE_DIR}/tests/tokenizer/kolibri)
+set_tests_properties(toolcall_kolibri_test kolibri_server_test PROPERTIES LABELS kolibri)
 # ==== Spec 20e: Kolibri-1 served ==== (end) ====

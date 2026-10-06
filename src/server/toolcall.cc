@@ -165,6 +165,23 @@ int schema_string_type(const std::string& function, const std::string& key, cons
   return is_string_type(*type) ? 1 : 0;
 }
 
+bool parse_json_call(const std::string& body, const json& tools, ToolCall& call) {
+  const json j = json::parse(trim(body), nullptr, false);
+  if (j.is_discarded() || !j.is_object() || !j.contains("name") || !j.at("name").is_string()) return false;
+  const std::string name = j.at("name").get<std::string>();
+  if (name.empty() || std::any_of(name.begin(), name.end(), is_ws)) return false;
+  json args = j.contains("arguments") ? j.at("arguments") : json::object();
+  if (args.is_string()) args = json::parse(args.get<std::string>(), nullptr, false);
+  if (args.is_null()) args = json::object();
+  if (args.is_discarded() || !args.is_object()) return false;
+  for (auto& [key, value] : args.items()) {
+    if (!value.is_string() && schema_string_type(name, key, tools) == 1) value = value.dump();
+  }
+  call.name = name;
+  call.arguments = std::move(args);
+  return true;
+}
+
 uint64_t new_call_seed() { return next_seed(); }
 
 std::string make_call_id(uint64_t seed, uint32_t index) { return call_id(seed, index); }
