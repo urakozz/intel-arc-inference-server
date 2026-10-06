@@ -25,6 +25,7 @@
 #include <string>
 
 #include "runtime/pipeline_plan.h"
+#include "runtime/prefill_backend.h"
 
 namespace cli {
 
@@ -77,6 +78,10 @@ struct PipelineContext {
   bool mtp = false;          // --mtp K|auto
   bool profile = false;      // --profile
   bool device = false;       // --device N
+  // Spec 16c: what a prefill would run on (read with prefill / bench_prefill only):
+  // --prefill-backend (or the build's default) and B70_PREFILL_ATTN=composed.
+  runtime::PrefillBackend prefill_backend = runtime::PrefillBackend::L0Int8;
+  bool composed_attn = false;
 };
 
 // Every refusal that needs no device. --pp 1 refuses nothing (it is today's engine); the two
@@ -89,11 +94,16 @@ inline void check_pipeline(const PipelineArgs& a, const PipelineContext& c) {
       throw std::runtime_error("--pipeline-handoff belongs to --pp 2 (how the residual crosses)");
     return;
   }
-  if (c.prefill || c.bench_prefill)
-    throw std::runtime_error(
-        "--pp 2 decodes only (spec 16b): a prefill across two cards is spec 16c's chunk "
-        "pipeline. --ids ingests the prompt through the two decode lists, one replay per id; "
-        "--bench takes --depth, not --prefill-length");
+  // Spec 16c: --prefill and --bench --prefill-length run the two-card chunk pipeline, on the
+  // L0 backends' flash attention only.
+  if ((c.prefill || c.bench_prefill) && !runtime::is_l0(c.prefill_backend))
+    throw std::runtime_error(std::string("--pp 2 prefills on the L0 backends (l0, l0-int8), not ") +
+                             runtime::prefill_backend_name(c.prefill_backend) +
+                             ": sycl-tla's walk waits on the host between runtimes and has no "
+                             "two-card pipeline (spec 16c); --prefill-backend l0 or l0-int8");
+  if ((c.prefill || c.bench_prefill) && c.composed_attn)
+    throw std::runtime_error("--pp 2 prefills with the flash attention only: unset "
+                             "B70_PREFILL_ATTN=composed (spec 16c)");
   if (c.mtp)
     throw std::runtime_error("--pp 2 with --mtp is spec 16d (the MTP head and its embedding "
                              "on device 1); drop --mtp");
