@@ -218,4 +218,43 @@ bool fits_one_card(const model::Kolibri1Desc& d, bool int8_head, size_t device_b
 std::string describe(const std::vector<DevicePlan>& p, const model::KolPlacement& pl, uint32_t max_len,
                      const std::array<size_t, kPpDevices>& device_bytes, size_t reserve);
 
+// --- spec 20e: prefix-cache snapshots (spec 7's PrefixCache on Kolibri) ----------------------------
+// What a session leaves behind between replays, besides `pos`: the 10 full layers' growing KV (the
+// cache's BLOCKS, as every model's) and the 40 sliding layers' rings. A query at position p reads the
+// keys (p - window, p] - its own key it writes itself - so the ring rows of positions [p - 512, p) are
+// the whole recurrent "state" (spec 7's word): 40 x 512 x (K + V) x kv_n x 2 B = 41,943,040 B at the
+// real shapes (derived), the same at every pos. Positions before 0 (a snapshot at p < 512) are zero
+// rows on the host, written back as zeros: the window never reads them, and a cold run's ring holds
+// zeros there too (reset). The routes, the RoPE table and the scratch are per step or constant.
+//
+// The HOST layouts (spec 16b's rule: --pp 2's is --pp 1's byte for byte, so an entry moves between one
+// card and two unchanged - every layer is addressed through the placement, never by device order):
+//   state  [K | V][sliding layer, in layer order][state_positions(d)][kv_n] bf16, positions ascending
+//   kv     [K | V][full layer, in layer order][end - begin][kv_n] bf16 (runtime::Engine's / K2's order)
+// A run is one contiguous range of one device allocation (`tensor`: the device's full_k, full_v,
+// ring_k, ring_v), in host order. `zero` runs cover positions before 0: save_state writes zeros to the
+// host for them (the device slots are not read), load_state copies the host's zeros into their slots.
+inline uint32_t state_positions(const model::Kolibri1Desc& d) { return d.window - 1; }   // 512
+enum class SnapTensor : uint32_t { FullK, FullV, RingK, RingV };
+struct SnapRun {
+  uint32_t device = 0;
+  SnapTensor tensor = SnapTensor::FullK;
+  size_t offset = 0, bytes = 0;   // within the device allocation
+  bool zero = false;              // positions before 0 (state runs only)
+};
+// 40 x 512 x 2 x 1024 B = 41,943,040 at the real shapes.
+inline size_t state_snapshot_bytes(const model::Kolibri1Desc& d) {
+  return size_t(2) * (d.layers - d.full_before(d.layers)) * state_positions(d) * d.kv_n() * 2;
+}
+// 20,480 B a position at the real shapes (= full_kv_bytes_per_pos).
+inline size_t kv_snapshot_bytes(const model::Kolibri1Desc& d, uint32_t n_pos) {
+  return full_kv_bytes_per_pos(d) * n_pos;
+}
+// The ring rows of positions [pos - state_positions, pos), every sliding layer, K then V. Throws when
+// the ring cannot hold them (kRing < state_positions).
+std::vector<SnapRun> state_runs(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t pos);
+// Positions [begin, end) of every full layer, K then V. Throws unless begin <= end <= max_len.
+std::vector<SnapRun> kv_runs(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t max_len,
+                             uint32_t begin, uint32_t end);
+
 }  // namespace runtime::kolibri

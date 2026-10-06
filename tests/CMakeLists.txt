@@ -2527,8 +2527,8 @@ endif()
 # tests/model/kolibri1 (config.json only; K2's is 18d's cli_reject_serve_pp, its expectation
 # updated), the rest before the snapshot is resolved (the model path does not exist).
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
-  b70_serve_reject(cli_reject_serve_pp_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --pp 2
-    EXPECT "spec 20e")
+  b70_serve_reject(cli_reject_serve_pp_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --pp 2 --device 1
+    EXPECT "--device names one card")   # spec 20e: Kolibri-1 serves on --pp 2 (its default), refuses --device
   b70_serve_reject(cli_reject_serve_pp_value ${B70_NO_MODEL} --pp 4096
     EXPECT "--pp is the pipeline-parallel size, 1 or 2")
   b70_serve_reject(cli_reject_serve_pp_device ${B70_NO_MODEL} --pipeline-parallel-size 2 --device 1
@@ -2696,19 +2696,8 @@ b70_cli_reject(cli_reject_kolibri_mtp ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --mt
 b70_cli_reject(cli_reject_kolibri_kv8 ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "bf16 only")
 b70_cli_reject(cli_reject_kolibri_layers_qwen ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --layers 3
   EXPECT "--layers belongs to Kolibri-1")
-if(TARGET b70-serve)
-  # b70-serve refuses kolibri1 before the device, naming spec 20e (b70_cli_reject's checks on b70-serve).
-  add_test(NAME cli_reject_kolibri_serve COMMAND sh -c [==[
-out=$("$@" 2>&1)
-rc=$?
-printf '%s\n' "$out" >&2
-[ "$rc" -eq 1 ] || { echo "expected exit 1, got $rc" >&2; exit 1; }
-if printf '%s\n' "$out" | grep -q '^device:'; then echo "a device was opened" >&2; exit 1; fi
-printf '%s\n' "$out" | grep -qF 'spec 20e' || { echo "the refusal does not name spec 20e" >&2; exit 1; }
-exit 0
-]==] cli_reject_kolibri_serve $<TARGET_FILE:b70-serve> ${_kol_cfg})
-  set_tests_properties(cli_reject_kolibri_serve PROPERTIES TIMEOUT 60)
-endif()
+# (20c's cli_reject_kolibri_serve - b70-serve refusing kolibri1 - is gone: spec 20e serves it; its refusals
+# are the cli_reject_serve_kolibri_* tests of the spec 20e block.)
 # ==== Spec 20c: Kolibri-1 decode ==== (end) ====
 
 # ==== Spec 20d: Kolibri-1 prefill (labels kolibri;prefill) ==== (begin) ====
@@ -2870,4 +2859,57 @@ target_include_directories(kolibri_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src $
 target_link_libraries(kolibri_server_test PRIVATE b70_server)
 add_test(NAME kolibri_server_test COMMAND kolibri_server_test ${CMAKE_SOURCE_DIR}/tests/tokenizer/kolibri)
 set_tests_properties(toolcall_kolibri_test kolibri_server_test PROPERTIES LABELS kolibri)
+# Task 3 (host): the engine behind the server without a device - cli::kolibri::KolibriEngineAdapterT over a
+# fake with KolibriEngine's interface whose rings and full KV are host buffers in KolibriBuffers' layout (one
+# card and two): runtime::kolibri::state_runs / kv_runs on the real shapes (41,943,040 B of state, 20,480 B of
+# KV a position, one host layout under --pp 1 and --pp 2), save / load on host buffers, Review Focus 4 through
+# spec 7's PrefixSession (restores at 2048, 4096, 2049, 5000 and 300, every turn == a cold run), a snapshot
+# moving between one card and two, and the server over HTTP (greedy == the decode run, a cached second turn,
+# seeded sampling with the model's defaults, no id the tokenizer lacks).
+add_executable(kolibri_snapshot_test runtime/kolibri_snapshot_test.cc)
+target_include_directories(kolibri_snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kolibri_snapshot_test PRIVATE b70_server b70_kolibri_plan)
+add_test(NAME kolibri_snapshot_test COMMAND kolibri_snapshot_test)
+set_tests_properties(kolibri_snapshot_test PROPERTIES LABELS kolibri)
+# On the card (box only; SKIP 77 without the synthetic sets / the real checkpoint): kolibri_snapshot_gpu_test -
+# KolibriEngine's snapshot calls (Review Focus 4): restores at the block end 4096 (bitwise the cold run), at the
+# request ends 2049 and 300 (bitwise the session that never left), on one card and on two (pp2:3); `cross`: a
+# snapshot taken on two cards continues on one, and the reverse (spec 16b's rule; two GPUs). The real
+# checkpoint on two cards after spec 20b.
+if(B70_KOLIBRI)
+  add_executable(kolibri_snapshot_gpu_test runtime/kolibri_snapshot_gpu_test.cc)
+  target_include_directories(kolibri_snapshot_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(kolibri_snapshot_gpu_test PRIVATE b70_kolibri_prefill b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(kolibri_snapshot_gpu_test)
+  endif()
+  add_dependencies(kolibri_snapshot_gpu_test ${B70_KOLIBRI_PREFILL_KERNELS} ${B70_KOLIBRI_DECODE_KERNELS} kernel_pp_handoff)
+  set(_kol_synth ${B70_KOLIBRI_SYNTH_DIR})
+  set(_kol_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
+  add_test(NAME kolibri_snapshot_gpu_synth_test COMMAND kolibri_snapshot_gpu_test ${_kol_synth}/int4attn/ckpt ${_kol_ids})
+  add_test(NAME kolibri_snapshot_gpu_synth_pp_test COMMAND kolibri_snapshot_gpu_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_ids} pp2:3)
+  add_test(NAME kolibri_snapshot_gpu_cross_test COMMAND kolibri_snapshot_gpu_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_ids} cross)
+  add_test(NAME kolibri_snapshot_gpu_test COMMAND kolibri_snapshot_gpu_test ${B70_KOLIBRI_SNAPSHOT} ${_kol_ids} pp2)
+  set_tests_properties(kolibri_snapshot_gpu_synth_test kolibri_snapshot_gpu_synth_pp_test kolibri_snapshot_gpu_cross_test
+    kolibri_snapshot_gpu_test PROPERTIES LABELS "checkpoint;kolibri" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+# b70-serve's Kolibri refusals, before the device (tests/model/kolibri1: config.json only - all the dispatch,
+# cli::kolibri::check_args and the --pp 1 fit check read).
+if(TARGET b70-serve AND COMMAND b70_serve_reject)
+  set(_kol_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
+  b70_serve_reject(cli_reject_serve_kolibri_mtp ${_kol_cfg} --mtp 1 EXPECT "no MTP head")
+  b70_serve_reject(cli_reject_serve_kolibri_spec_mtp ${_kol_cfg} --spec mtp EXPECT "no MTP head")
+  b70_serve_reject(cli_reject_serve_kolibri_lookup ${_kol_cfg} --spec lookup EXPECT "Kolibri-1's engine does not capture")
+  b70_serve_reject(cli_reject_serve_kolibri_kv8 ${_kol_cfg} --kv-cache int8 EXPECT "bf16 only")
+  b70_serve_reject(cli_reject_serve_kolibri_prefill_int8 ${_kol_cfg} --prefill-backend l0-int8
+    EXPECT "1024-k Hadamard blocks")
+  b70_serve_reject(cli_reject_serve_kolibri_one_card ${_kol_cfg} --pp 1 EXPECT "run it with --pp 2")
+  b70_serve_reject(cli_reject_serve_kolibri_max_len ${_kol_cfg} --max-len 524288 EXPECT "decision 3")
+  set_tests_properties(cli_reject_serve_kolibri_mtp cli_reject_serve_kolibri_spec_mtp cli_reject_serve_kolibri_lookup
+    cli_reject_serve_kolibri_kv8 cli_reject_serve_kolibri_prefill_int8 cli_reject_serve_kolibri_one_card
+    cli_reject_serve_kolibri_max_len PROPERTIES LABELS kolibri)
+endif()
 # ==== Spec 20e: Kolibri-1 served ==== (end) ====

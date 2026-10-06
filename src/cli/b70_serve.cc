@@ -1,7 +1,9 @@
 // b70-serve -- the OpenAI-compatible server over the replayed runtime::Engine (Qwen3.8, Agnes,
-// Ornith) or runtime::k2::K2Engine (K2-Horizon, spec 18d), picked by config.json's model_type;
-// with --pp 2 (spec 16d) over runtime::PipelineEngine, the Qwen-family model split over two
-// B70s (cli/pipeline_serve.h has what it serves and refuses).
+// Ornith), runtime::k2::K2Engine (K2-Horizon, spec 18d) or runtime::kolibri::KolibriEngine
+// (Kolibri-1, spec 20e: two cards by default), picked by config.json's model_type; with --pp 2
+// (spec 16d) over runtime::PipelineEngine, the Qwen-family model split over two B70s
+// (cli/pipeline_serve.h has what it serves and refuses).
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -21,6 +23,8 @@
 
 #include "cli/k2_decode.h"
 #include "cli/k2_serve_adapter.h"
+#include "cli/kolibri_decode.h"
+#include "cli/kolibri_serve.h"
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
 #include "cli/pipeline_serve.h"
@@ -90,10 +94,16 @@ void usage() {
                "                 K2-Horizon MoVA 36B-A4B (spec 18: its own engine, prefill on l0\n"
                "                 only, no MTP head - --mtp, --spec mtp|lookup and --draft-vocab are\n"
                "                 refused; its chat_template_kwargs tool_call_format / reasoning_effort\n"
-               "                 reach the template).\n"
+               "                 reach the template) or Kolibri-1 (spec 20e: its own engine on TWO cards\n"
+               "                 by default - --pp 1 only when the model fits one card; prefill on l0\n"
+               "                 only; no MTP head and bf16 KV only - --mtp, --spec mtp|lookup and\n"
+               "                 --kv-cache int8 are refused; its chat_template_kwargs reasoning_effort\n"
+               "                 none|minimal|low|medium|high|xhigh|max reach the template; requests\n"
+               "                 without temperature / top_p / top_k sample with generation_config.json's\n"
+               "                 1.0 / 0.97 / 128). UNVALIDATED on the cards (queue row 28)\n"
                "                 [--pp 1|2] [--pipeline-parallel-size 1|2]   2 (spec 16d): the model's\n"
                "                             layers over GPUs 0 and 1 of what Level Zero shows (Qwen3.8,\n"
-               "                             Agnes, Ornith; K2-Horizon and Kolibri-1 are refused).\n"
+               "                             Agnes, Ornith, Kolibri-1 - its default; K2-Horizon is refused).\n"
                "                             --max-len auto fits both cards; the prefix cache, --mtp /\n"
                "                             --spec (the MTP head on device 1), --kv-cache int8 and\n"
                "                             --lm-head work as on one card. Not with --device or a\n"
@@ -313,6 +323,104 @@ int serve_k2(const K2Serve& a, server::Options options) {
   return listen_until_stopped(server, options);
 }
 
+// Spec 20e: Kolibri-1 served - runtime::kolibri::KolibriEngine (one card or, the default, two: spec 16b's
+// pieces as 20c / 20d built them) behind cli::kolibri::KolibriEngineAdapterT (the rings + full-KV prefix
+// snapshots, host sampling at the tokenizer's id count), Kolibri's chat format (server::ChatFormat,
+// set by run() from model_type), its EOS [127906, 127901] and its sampling defaults from
+// generation_config.json. b70-decode's flow (cli/kolibri_decode.h run_decode): the refusals before the
+// device (cli::kolibri::check_args: --mtp, --kv-cache int8, the prefill backends, a --pp 1 that does not
+// fit, --device with --pp 2), both cards in one Level Zero context with peer access, the placement and
+// max_len planned before the load with the prefill scratch (every request prefills), each layer loaded
+// straight onto its device.
+struct KolibriServe {
+  std::string snapshot_dir;
+  cli::kolibri::DecodeArgs args;   // the planner's and the refusals' inputs (prefill on)
+  bool prefix_auto = true;
+  uint32_t prefix_cache_gb = 0;
+};
+
+int serve_kolibri(const KolibriServe& a, server::Options options) {
+  const cli::kolibri::DecodeArgs& da = a.args;
+  const model::Kolibri1Desc pre = loader::kolibri1_checkpoint_desc(a.snapshot_dir, 0);
+  cli::kolibri::check_args(da, pre);
+  // Spec 20 decision 3: the served context is capped at the trained 262144 - refused here, before the device
+  // (settle() refuses it too, after the cards are open).
+  if (!da.max_len.is_auto && da.max_len.value > pre.trained_max_len)
+    throw std::runtime_error("--max-len " + std::to_string(da.max_len.value) + " exceeds Kolibri-1's trained context " +
+                             std::to_string(pre.trained_max_len) + " - a longer context is spec 20 decision 3");
+  const std::vector<uint32_t> eos = eos_ids(a.snapshot_dir);
+  server::Sampling defaults;
+  {
+    std::ifstream g(a.snapshot_dir + "generation_config.json");
+    if (!g) throw std::runtime_error("cannot open '" + a.snapshot_dir + "generation_config.json'");
+    nlohmann::json gj;
+    g >> gj;
+    try {
+      defaults = server::generation_sampling(gj);
+    } catch (const std::invalid_argument& error) {
+      throw std::runtime_error(error.what());
+    }
+  }
+  const uint32_t devs = cli::kolibri::devices_of(da);
+  if (devs == 2) cli::require_two_devices(l0::Context::gpu_count());
+  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(devs == 2 ? 0u : da.device);
+  std::unique_ptr<l0::Context> c1 = devs == 2 ? std::make_unique<l0::Context>(*c0, 1u) : nullptr;
+  std::vector<l0::Context*> ctx = {c0.get()};
+  if (c1) ctx.push_back(c1.get());
+  const std::array<size_t, runtime::kPpDevices> dev{c0->memory_bytes(), c1 ? c1->memory_bytes() : 0};
+  if (devs == 1)
+    std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
+                 da.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+  else
+    std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--pp 2: one context]\n", c0->name().c_str(),
+                 c0->eu_count(), c1->name().c_str(), c1->eu_count());
+  if (devs == 2 && !c0->can_access_peer(*c1))
+    throw std::runtime_error("--pp 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), "
+                             "and both hand-offs write it (docs/10-the-box.md)");
+  const std::pair<model::KolPlacement, uint32_t> pl = cli::kolibri::settle(pre, da, dev);
+  const uint32_t max_len = pl.second;
+  loader::KolLoadedModel model = [&] {
+    StdoutToStderr redirect;
+    return loader::load_kolibri1(ctx, a.snapshot_dir, max_len, pl.first, da.lm_head, 0);
+  }();
+  runtime::PipelineOptions opt;
+  opt.handoff = da.pipe.handoff;
+  runtime::kolibri::KolibriEngine engine(ctx, std::move(model), max_len, /*debug_tap=*/false, opt);
+  engine.prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
+  std::fprintf(stderr, "%s\n", engine.memory_line().c_str());
+  TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
+  if (tokenizer.vocab_used() != engine.vocab())
+    std::fprintf(stderr, "note: tokenizer.json defines %u ids, Kolibri-1's head has %u rows; sampling masks from "
+                         "%u, and a greedy argmax on a row without a token takes the masked row's argmax\n",
+                 tokenizer.vocab_used(), engine.vocab(), tokenizer.vocab_used());
+  TemplateAdapter chat_template(a.snapshot_dir);
+  cli::kolibri::KolibriEngineAdapterT<runtime::kolibri::KolibriEngine> engine_adapter(engine, tokenizer.vocab_used());
+  options.eos_ids = eos;
+  options.sampling_defaults = defaults;
+  // Pinned host memory of the one context both cards share: either device's copies reach it.
+  const std::unique_ptr<PinnedAlloc> prefix_alloc =
+      make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
+  server::Server server({tokenizer, chat_template, engine_adapter}, options);
+  const std::string placement =
+      devs == 2 ? std::string("--pp 2 (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
+                      std::to_string(engine.split()) + ": device 0 layers [0, " + std::to_string(engine.split()) +
+                      "), device 1 [" + std::to_string(engine.split()) + ", " +
+                      std::to_string(engine.model().desc.layers) + "))"
+                : std::string("--pp 1");
+  std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
+               options.host.c_str(), options.port, max_len);
+  print_eos(eos);
+  std::fprintf(stderr,
+               ", Kolibri-1 (%s chat format), %s, prefill backend l0 (chunk %u), attention %s (B70_KOLIBRI_ATTN), "
+               "mtp none, lm_head %s, kv cache bf16, sampling defaults %s T %.2f top-p %.2f top-k %u, prefix "
+               "snapshots: the rings' last %u positions + the full layers' KV\n",
+               options.chat_format.name(), placement.c_str(), runtime::kolibri::kPfC,
+               runtime::kolibri::kol_attn_name(engine.attention()), loader::lm_head_form_name(da.lm_head),
+               defaults.greedy ? "greedy" : "sampled", defaults.temperature, defaults.top_p, defaults.top_k,
+               runtime::kolibri::state_positions(engine.model().desc));
+  return listen_until_stopped(server, options);
+}
+
 // The speculative proposer's startup lines (spec 19e's lookup, spec 8 §10's auto policy) -
 // one card's and --pp 2's.
 void print_proposer(const server::Options& options, bool spec_lookup, uint32_t spec_min_match,
@@ -473,6 +581,7 @@ int run(int argc, char** argv) {
   uint32_t draft_vocab = 0;
   std::string draft_vocab_ids;
   cli::PipelineArgs pipe;   // spec 16d: --pp, --pipeline-split, --pipeline-handoff
+  bool pp_given = false;    // spec 20e: Kolibri-1's --pp defaults to 2, so "given" matters
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -562,6 +671,7 @@ int run(int argc, char** argv) {
       kv_cache = cli::parse_kv_cache_arg(value(i, "--kv-cache"));
     } else if (arg == "--pp" || arg == "--pipeline-parallel-size") {   // spec 16d
       pipe.devices = cli::parse_pipeline_devices(arg, value(i, arg.c_str()));
+      pp_given = true;
     } else if (arg == "--pipeline-split") {
       cli::parse_pipeline_split(value(i, "--pipeline-split"), pipe);
     } else if (arg == "--pipeline-handoff") {
@@ -655,6 +765,35 @@ int run(int argc, char** argv) {
     throw std::runtime_error("--prefill-backend expects sycl-tla, l0 or l0-int8, got '" + pp_backend_arg +
                              "'");
 
+  // Spec 20e: Kolibri-1 (model_type kolibri1) runs runtime::kolibri::KolibriEngine on two cards by default -
+  // dispatched here, before the Qwen family's kv-cache and --pp rules (its own, cli::kolibri::check_args,
+  // replace them: a --pipeline-split without --pp is its default --pp 2), as b70-decode dispatches it. A
+  // path that does not resolve is not Kolibri: the flow below reports it, so every rejection keeps its order.
+  if (cli::kolibri::is_kolibri(path)) {
+    if (spec_lookup)
+      throw std::runtime_error("--spec lookup verifies its drafts through the MTP verify lists, which Kolibri-1's "
+                               "engine does not capture (no MTP head, spec 20 §1): drop --spec lookup");
+    options.chat_format = server::ChatFormat::kolibri();
+    KolibriServe ks;
+    ks.snapshot_dir = loader::resolve_snapshot(path);
+    cli::kolibri::DecodeArgs& ka = ks.args;
+    ka.path = ks.snapshot_dir;
+    ka.max_len = max_len_arg;
+    ka.reserve = mem_reserve;
+    ka.device = device;
+    ka.lm_head = lm_head;   // int8 by default (spec 9), as every served model
+    ka.pipe = pipe;
+    ka.pp_given = pp_given;
+    ka.prefill = true;      // every request prefills: the plan carries the prefill scratch
+    ka.pp_backend_given = have_pp_backend;
+    ka.pp_backend = pp_backend;
+    ka.mtp = mtp_k > 0 || mtp_auto;
+    ka.kv8 = kv_cache == runtime::KvCache::Int8;
+    ks.prefix_auto = prefix_auto;
+    ks.prefix_cache_gb = prefix_cache_gb;
+    return serve_kolibri(ks, options);
+  }
+
   const runtime::PrefillPath pp_path = cli::prefill_path(
       true, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
   cli::check_kv_cache(kv_cache, pp_path);   // spec 12b: before the device is touched
@@ -688,17 +827,10 @@ int run(int argc, char** argv) {
     if (cj.is_object()) model_type = cj.value("model_type", std::string());
   }
   options.chat_format = server::ChatFormat::for_model_type(model_type);
-  // Spec 16d: the model's --pp refusals, before the model dispatch below - so K2 and Kolibri-1
-  // under --pp 2 are refused by name rather than served on one card.
+  // Spec 16d: the model's --pp refusals, before the model dispatch below - so K2 under --pp 2 is
+  // refused by name rather than served on one card (Kolibri-1 was dispatched above, spec 20e).
   pipe_ctx.model_type = model_type;
   cli::check_serve_pipeline(pipe, pipe_ctx);
-  // Spec 20c: Kolibri-1 decodes through b70-decode only; serving it (the tokenizer, the ChatML
-  // template, reasoning and hermes JSON tool calls, ring snapshots) is spec 20e.
-  if (model_type == "kolibri1")
-    throw std::runtime_error(
-        "Kolibri-1 (model_type kolibri1) is not served yet: serving it is spec 20e (its tokenizer and ChatML "
-        "template, reasoning and hermes JSON tool calls, prefix-cache snapshots with the sliding rings). "
-        "b70-decode runs it (spec 20c): b70-decode " + path + " --ids <file> --n <N>");
   if (model_type == "k2_horizon") {
     if (mtp_k > 0 || mtp_auto)
       throw std::runtime_error("K2-Horizon has no MTP head (spec 18 §9): drop --mtp / --spec mtp");
