@@ -1,5 +1,13 @@
 # Spec 16b - pipeline parallel: decode across two cards
 
+**Status (2026-10-06): built blind on branch `spec16b-pp-decode`, before 16a** - spec 16 §8 has
+what was built and the defaults chosen in 16a's place (both hand-offs behind
+`--pipeline-handoff copy|peer`, copy default; the split by bytes, `--pipeline-split auto`). The
+CLI spelling is `--pipeline 2` (`--pp` is the bench's prefill length). Tasks 1 and 2 are written
+and host-checked (planner, protocol, CLI); their on-card halves, P1 / P4 and Task 3's S1 are box
+queue row 22. `docs/BENCHMARKS.md`'s "Pipeline parallel (spec 16)" section waits for row 22's
+S1 numbers.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `b70-decode` / the engine run decode with layers `[0, s)` on device 0 and `[s, L)` on device 1, one captured list per device, the residual handed off once per token by 16a's chosen mechanism; P1 (bitwise equal to one card), P4, S1.
