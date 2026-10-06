@@ -7,6 +7,7 @@
 
 #include "model/qwen35.h"
 #include "runtime/pipeline_place.h"
+#include "runtime/pipeline_stage.h"
 
 namespace runtime {
 namespace {
@@ -61,34 +62,7 @@ void PipelineLink::zero(l0::CmdList& imm0, l0::CmdList& imm1) {
   if (event) event->host_reset();
 }
 
-// --- one device's half ------------------------------------------------------------------
-
-struct PipelineEngine::Stage {
-  Stage(l0::Context& c, loader::LoadedModel m, uint32_t max_len, const PpStage& r, KvCache kv)
-      : ctx(c),
-        model(std::move(m)),
-        range(r),
-        persist(c, max_len, *model.desc, kv, r.gdn, r.fa),
-        scratch(c, max_len, *model.desc),
-        buffers(persist, scratch),
-        queue(c),
-        fence(queue),
-        imm(l0::CmdList::immediate(c)),
-        ctl(buffers.control.as<Control>()) {}
-  l0::Context& ctx;
-  loader::LoadedModel model;
-  PpStage range;
-  // Declaration order is construction order: `buffers` binds references into the two
-  // above it (Engine's rule).
-  PersistentBuffers persist;
-  DecodeScratch scratch;
-  DecodeBuffers buffers;
-  l0::Queue queue;
-  l0::Fence fence;
-  mutable l0::CmdList imm;
-  Control* ctl;
-  std::optional<CapturedStep> step;
-};
+// --- one device's half: runtime/pipeline_stage.h -------------------------------------
 
 PipelineEngine::Stage& PipelineEngine::st(uint32_t dev) const {
   if (dev >= kPpDevices)
@@ -148,7 +122,15 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
 
 PipelineEngine::~PipelineEngine() {
   // Never free buffers under a running list (a failed step's survivor): bounded, and a
-  // destructor does not throw.
+  // destructor does not throw. The prefill half first (spec 16c): its lists use the stages'
+  // state.
+  if (pf_) {
+    try {
+      pf_->settle(opt_.prefill_timeout_ms);
+    } catch (...) {
+    }
+    pf_.reset();
+  }
   for (uint32_t d = 0; d < kPpDevices; ++d) {
     try {
       if (stages_[d]) settle(d);
@@ -165,6 +147,15 @@ void PipelineEngine::reset() {
       throw std::runtime_error("runtime::PipelineEngine::reset: device " + std::to_string(d) +
                                "'s last step is still running after " +
                                std::to_string(opt_.timeout_ms) + " ms");
+  // Spec 16c: and a failed prefill's lists (released from any hand-off wait first).
+  if (pf_) {
+    if (!pf_->settle(opt_.prefill_timeout_ms))
+      throw std::runtime_error("runtime::PipelineEngine::reset: a prefill list is still running after " +
+                               std::to_string(opt_.prefill_timeout_ms) + " ms");
+    pf_->zero();
+  }
+  snap_gdn_ = {};
+  snap_conv_ = {};
   st(0).persist.zero(st(0).imm);
   st(1).persist.zero(st(1).imm);
   link_->zero(st(0).imm, st(1).imm);
@@ -299,13 +290,21 @@ size_t PipelineEngine::kv_bytes(uint32_t n_pos) const {
 }
 
 void PipelineEngine::save_state(void* host) const {
+  // Inside a mid-prompt block hook (spec 16c) the block end's shadows, else the live state;
+  // the same bytes in the same order either way.
+  const auto gdn = [&](uint32_t d) -> const l0::Mem& {
+    return snap_gdn_[d] ? *snap_gdn_[d] : st(d).persist.gdn_state;
+  };
+  const auto conv = [&](uint32_t d) -> const l0::Mem& {
+    return snap_conv_[d] ? *snap_conv_[d] : st(d).persist.conv_ring;
+  };
   auto* h = static_cast<uint8_t*>(host);
   for (uint32_t d = 0; d < kPpDevices; ++d) {   // every GDN layer's state, device 0's first
-    st(d).imm.copy(h, st(d).persist.gdn_state.ptr(), st(d).persist.gdn_state.size());
+    st(d).imm.copy(h, gdn(d).ptr(), st(d).persist.gdn_state.size());
     h += st(d).persist.gdn_state.size();
   }
   for (uint32_t d = 0; d < kPpDevices; ++d) {   // then every conv ring
-    st(d).imm.copy(h, st(d).persist.conv_ring.ptr(), st(d).persist.conv_ring.size());
+    st(d).imm.copy(h, conv(d).ptr(), st(d).persist.conv_ring.size());
     h += st(d).persist.conv_ring.size();
   }
 }
@@ -407,6 +406,12 @@ MemoryComponents PipelineEngine::memory_use(uint32_t dev) const {
   c.model = model_device_bytes(s.model);
   c.kv = s.persist.kv_k.size() + s.persist.kv_v.size();
   c.decode_state = s.persist.bytes() - c.kv + s.scratch.bytes() + link_->bytes(dev);
+  if (pf_) {   // spec 16c: the prefill half, once prepared
+    const MemoryComponents p = pf_->memory(dev);
+    c.prefill_scratch += p.prefill_scratch;
+    c.int8 += p.int8;
+    c.decode_state += p.decode_state;
+  }
   return c;
 }
 

@@ -105,6 +105,9 @@ struct Context::Impl {
   std::unique_ptr<LaunchProfiler> profiler;
   Recording* recording = nullptr;  // non-owning, only during capture callback
   ze_command_queue_handle_t replay_queue = nullptr;
+  // Spec 16c: timestamp()'s clock, read on first use (0 = not yet).
+  mutable double ts_hz = 0;
+  mutable uint64_t ts_mask = 0;
 };
 
 Context::Context(ze_context_handle_t ze_ctx, ze_device_handle_t ze_dev) {
@@ -200,6 +203,51 @@ void Context::launch(ze_kernel_handle_t k, uint32_t gx, uint32_t gy, uint32_t gz
   }
   if (p_->recording) ++p_->recording->launches_;
   else ++p_->launches;
+}
+
+void Context::copy(void* dst, const void* src, size_t bytes) {
+  if (p_->recording) throw std::runtime_error("prefill capture: copy inside recording");
+  zc(zeCommandListAppendMemoryCopy(p_->list, dst, src, bytes, nullptr, 0, nullptr),
+     "zeCommandListAppendMemoryCopy");
+}
+
+void Context::signal(ze_event_handle_t e) {
+  if (p_->recording) throw std::runtime_error("prefill capture: signal inside recording");
+  zc(zeCommandListAppendBarrier(p_->list, e, 0, nullptr), "zeCommandListAppendBarrier (signal)");
+}
+
+void Context::wait_event(ze_event_handle_t e) {
+  if (p_->recording) throw std::runtime_error("prefill capture: wait_event inside recording");
+  zc(zeCommandListAppendWaitOnEvents(p_->list, 1, &e), "zeCommandListAppendWaitOnEvents");
+}
+
+void Context::timestamp(uint64_t* dst) {
+  if (p_->recording) throw std::runtime_error("prefill capture: timestamp inside recording");
+  zc(zeCommandListAppendWriteGlobalTimestamp(p_->list, dst, nullptr, 0, nullptr),
+     "zeCommandListAppendWriteGlobalTimestamp");
+}
+
+bool Context::wait_for(uint64_t timeout_ns) {
+  if (p_->recording) throw std::runtime_error("prefill capture: wait inside recording");
+  if (p_->sycl) throw std::runtime_error("prefill::Context::wait_for: the SYCL side has no bounded wait");
+  const ze_result_t r = zeCommandListHostSynchronize(p_->list, timeout_ns);
+  if (r == ZE_RESULT_NOT_READY) return false;
+  zc(r, "zeCommandListHostSynchronize (bounded)");
+  return true;
+}
+
+double Context::timestamp_ms(uint64_t begin, uint64_t end) const {
+  if (p_->ts_hz == 0) {
+    ze_device_properties_t prop{};
+    prop.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES_1_2;   // timerResolution in cycles/s
+    zc(zeDeviceGetProperties(p_->dev, &prop), "timestamp device properties");
+    if (!prop.timerResolution || !prop.timestampValidBits || prop.timestampValidBits > 64)
+      throw std::runtime_error("prefill::Context: invalid device timer calibration");
+    p_->ts_mask = prop.timestampValidBits == 64 ? ~uint64_t{0}
+                                                : (uint64_t{1} << prop.timestampValidBits) - 1;
+    p_->ts_hz = double(prop.timerResolution);
+  }
+  return double((end - begin) & p_->ts_mask) * 1000.0 / p_->ts_hz;
 }
 
 ze_context_handle_t Context::ze_context() const { return p_->ctx; }

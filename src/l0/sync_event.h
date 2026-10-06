@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <vector>
 #include "l0/context.h"
 
@@ -24,6 +25,10 @@ class SyncEvent {
   void host_reset();         // zeEventHostReset
   void host_signal();        // zeEventHostSignal: releases a list waiting on it
   bool signalled() const;    // zeEventQueryStatus == SUCCESS
+  // Spec 16c: zeEventHostSynchronize with a bound - true once signalled, false when
+  // `timeout_ns` passed first (the event is left as it is). The prefill pipeline's host
+  // waits on a device's per-chunk done event this way, never without a bound.
+  bool host_wait(uint64_t timeout_ns) const;
   ze_event_handle_t handle() const { return e_; }
 
  private:
