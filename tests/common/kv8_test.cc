@@ -9,6 +9,10 @@
 //   4. quantise: |y - deq| <= scale / 2 off the clamp, the row's amax lands on +-127, a
 //      zero row is scale 0 / all zeros, tiny rows keep their (subnormal) scale;
 //   5. FWHT known answers (e_0 -> ones; ones -> 256 e_0).
+//   6. spec 18e: the head_dim-128 scheme (hd128) - its signs are torch's hadamard(128, 0)
+//      (pinned), rotate_kv / rotate_q / unrotate against the fp64 orthonormal R (x sqrt(2),
+//      / sqrt(2), / sqrt(2)), q.k preserved, the inverse, the quantiser at 128 (the 256
+//      quantiser's statements), and K2's GQA attention shape where rotkv beats per token.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -276,6 +280,198 @@ void check_attention() {
   CHECK(r_rot < 2e-2);
 }
 
+// ---- spec 18e: head_dim 128 ----------------------------------------------------------------
+namespace h128 = common::kv8::hd128;
+
+// torch 2.2.2 (the Mac's cached wheel), printed 2026-10-06 by
+//   g = torch.Generator().manual_seed(0); torch.randint(0, 2, (128,), generator=g)
+// - the RANDINT values (1 is +1 after `* 2 - 1`, 0 is -1); the same draw for (256,) begins
+// with these 128 (one 32-bit word per element, in order): hadamard(256, 0)'s first 128.
+const char* kTorchRandint128 =
+    "0110111111100100000101100111101010110110010111110101111010011010"
+    "1000001100011010010111111011001001101001000110100000101011111011";
+
+void check_hd128_signs() {
+  CHECK_EQ(std::strlen(kTorchRandint128), size_t(128));
+  uint32_t neg = 0;
+  for (uint32_t j = 0; j < 128; ++j) {
+    CHECK_EQ(h128::sign_neg(j), kTorchRandint128[j] == '0');
+    CHECK_EQ(h128::sign_neg(j), kProbeSigns[j] == '1');   // the 256 probe string's prefix
+    neg += h128::sign_neg(j);
+  }
+  CHECK_EQ(neg, 58u);
+  std::printf("hd128 signs: torch's hadamard(128, 0) = hadamard(256, 0)'s first 128, %u negative\n", neg);
+}
+
+void check_hd128_rotation() {
+  constexpr uint32_t N = 128;
+  std::vector<double> R(N * N);   // orthonormal: H[i][j] s[j] / sqrt(128)
+  for (uint32_t i = 0; i < N; ++i)
+    for (uint32_t j = 0; j < N; ++j)
+      R[i * N + j] = h_entry(i, j) * (h128::sign_neg(j) ? -1.0 : 1.0) / std::sqrt(128.0);
+  const double r2 = std::sqrt(2.0);
+  {
+    float e0[N] = {1.0f}, y[N];
+    h128::rotate_kv(e0, y);
+    for (uint32_t j = 0; j < N; ++j) CHECK_EQ(y[j], h128::sign_neg(j) ? -0.125f : 0.125f);
+    h128::rotate_q(e0, y);
+    for (uint32_t j = 0; j < N; ++j) CHECK_EQ(y[j], h128::sign_neg(j) ? -0.0625f : 0.0625f);
+    float ones[N];
+    for (float& v : ones) v = 1.0f;
+    h128::fwht128(ones);
+    CHECK_EQ(ones[0], 128.0f);
+    for (uint32_t j = 1; j < N; ++j) CHECK_EQ(ones[j], 0.0f);
+  }
+  std::mt19937 rng(18);
+  std::normal_distribution<float> nd(0.0f, 1.0f);
+  double w_kv = 0, w_q = 0, w_un = 0, w_inv = 0, w_dot = 0;
+  for (int t = 0; t < 200; ++t) {
+    float x[N], q[N], yk[N], yq[N], back[N], un[N];
+    for (uint32_t i = 0; i < N; ++i) {
+      x[i] = common::bf16_to_f32(common::f32_to_bf16(nd(rng) * (i % 37 == 5 ? 30.0f : 1.0f)));
+      q[i] = nd(rng);
+    }
+    h128::rotate_kv(x, yk);
+    h128::rotate_q(q, yq);
+    double nx = 0, nq = 0, d0 = 0, d1 = 0;
+    for (uint32_t i = 0; i < N; ++i) {
+      nx += double(x[i]) * x[i];
+      nq += double(q[i]) * q[i];
+      d0 += double(q[i]) * x[i];
+      d1 += double(yq[i]) * yk[i];
+    }
+    nx = std::sqrt(nx);
+    nq = std::sqrt(nq);
+    for (uint32_t j = 0; j < N; ++j) {
+      double xr = 0, qr = 0;
+      for (uint32_t i = 0; i < N; ++i) {
+        xr += double(x[i]) * R[i * N + j];
+        qr += double(q[i]) * R[i * N + j];
+      }
+      w_kv = std::max(w_kv, std::fabs(r2 * xr - yk[j]) / nx);   // rotate_kv = sqrt(2) x R
+      w_q = std::max(w_q, std::fabs(qr / r2 - yq[j]) / nq);     // rotate_q = x R / sqrt(2)
+    }
+    h128::unrotate(yk, back);   // the inverse of rotate_kv
+    for (uint32_t i = 0; i < N; ++i) w_inv = std::max(w_inv, std::fabs(double(back[i]) - x[i]) / nx);
+    h128::unrotate(yq, un);     // = y R^T / sqrt(2) on any y
+    for (uint32_t i = 0; i < N; ++i) {
+      double r = 0;
+      for (uint32_t j = 0; j < N; ++j) r += double(yq[j]) * R[i * N + j];
+      w_un = std::max(w_un, std::fabs(r / r2 - un[i]) / nq);
+    }
+    w_dot = std::max(w_dot, std::fabs(d0 - d1) / (nq * nx));
+  }
+  std::printf("hd128 rotation: |rotate_kv - sqrt2 xR| %.2e, |rotate_q - xR/sqrt2| %.2e, |unrotate - "
+              "yR^T/sqrt2| %.2e, |unrotate(rotate_kv(x)) - x| %.2e, |q'.k' - q.k| / (|q||k|) %.2e\n",
+              w_kv, w_q, w_un, w_inv, w_dot);
+  CHECK(w_kv < 1e-6 && w_q < 1e-6 && w_un < 1e-6 && w_inv < 1e-6 && w_dot < 1e-6);
+  // The 256 path is the template at 256: fwht256 is fwht<256> bit for bit.
+  float a[256], b[256];
+  for (uint32_t i = 0; i < 256; ++i) a[i] = b[i] = nd(rng);
+  kv8::fwht256(a);
+  kv8::fwht<256>(b);
+  CHECK(std::memcmp(a, b, sizeof a) == 0);
+}
+
+void check_hd128_quantise() {
+  constexpr uint32_t N = 128;
+  std::mt19937 rng(28);
+  std::normal_distribution<float> nd(0.0f, 1.0f);
+  int8_t q[N];
+  const float z[N] = {};
+  CHECK_EQ(h128::quantise(z, q), uint16_t(0));
+  for (int8_t v : q) CHECK_EQ(int(v), 0);
+  for (int t = 0; t < 2000; ++t) {
+    const float mag = std::pow(10.0f, -5.0f + 8.0f * float(t) / 2000.0f);
+    float y[N];
+    for (float& v : y) v = nd(rng) * mag;
+    const uint16_t s16 = h128::quantise(y, q);
+    // The 256 quantiser on the same 128 values padded with zeros: the same scale and codes.
+    float y256[256] = {};
+    std::memcpy(y256, y, sizeof y);
+    int8_t q256[256];
+    CHECK_EQ(kv8::quantise(y256, q256), s16);
+    CHECK(std::memcmp(q, q256, N) == 0);
+    const float sf = kv8::f16f(s16);
+    for (uint32_t i = 0; i < N; ++i) {
+      CHECK(q[i] >= -127 && q[i] <= 127);
+      const float lim = std::fabs(y[i] / sf) <= 127.0f ? 0.5f * sf : std::fabs(y[i]) - 127.0f * sf;
+      CHECK(std::fabs(kv8::dequant(q[i], s16) - y[i]) <= lim * (1.0f + 1e-6f) + 1e-30f);
+    }
+  }
+  std::printf("hd128 quantise: 2000 rows over 1e-5 .. 1e3 within half a scale, equal to the 256 "
+              "quantiser on the same values\n");
+}
+
+// K2's attention shape on synthetic rows: depth 512, K with outlier channels (x 25 on 2 of
+// 128), scale 1/sqrt(128). bf16 KV (fp64 attention) against rotkv at 128 (q rotate_q, K and V
+// rotate_kv + int8, the output unrotated) and plain per token: rotkv the closer, and close.
+void check_hd128_attention() {
+  constexpr uint32_t D = 128, T = 512, Q = 64;
+  std::mt19937 rng(38);
+  std::normal_distribution<float> nd(0.0f, 1.0f);
+  auto bf = [](float x) { return common::bf16_to_f32(common::f32_to_bf16(x)); };
+  std::vector<float> K(size_t(T) * D), V(size_t(T) * D), q(size_t(Q) * D);
+  for (uint32_t t = 0; t < T; ++t)
+    for (uint32_t i = 0; i < D; ++i) {
+      K[size_t(t) * D + i] = bf(nd(rng) * (i == 9 || i == 73 ? 25.0f : 1.0f));
+      V[size_t(t) * D + i] = bf(nd(rng));
+    }
+  for (float& x : q) x = bf(nd(rng) * 0.7f);
+  std::vector<float> Kr(K.size()), Vr(V.size()), Kp(K.size()), Vp(V.size());
+  int8_t q8[D];
+  for (uint32_t t = 0; t < T; ++t) {
+    const uint16_t sk = h128::encode(&K[size_t(t) * D], q8);
+    for (uint32_t i = 0; i < D; ++i) Kr[size_t(t) * D + i] = kv8::dequant(q8[i], sk);
+    const uint16_t sv = h128::encode(&V[size_t(t) * D], q8);
+    for (uint32_t i = 0; i < D; ++i) Vr[size_t(t) * D + i] = kv8::dequant(q8[i], sv);
+    const uint16_t pk = h128::quantise(&K[size_t(t) * D], q8);
+    for (uint32_t i = 0; i < D; ++i) Kp[size_t(t) * D + i] = kv8::dequant(q8[i], pk);
+    const uint16_t pv = h128::quantise(&V[size_t(t) * D], q8);
+    for (uint32_t i = 0; i < D; ++i) Vp[size_t(t) * D + i] = kv8::dequant(q8[i], pv);
+  }
+  const double scale = 1.0 / std::sqrt(128.0);
+  auto attend = [&](const float* qq, const std::vector<float>& Kc, const std::vector<float>& Vc, double* o) {
+    std::vector<double> s(T);
+    double mx = -1e300, sum = 0;
+    for (uint32_t t = 0; t < T; ++t) {
+      double a = 0;
+      for (uint32_t i = 0; i < D; ++i) a += double(qq[i]) * Kc[size_t(t) * D + i];
+      s[t] = a * scale;
+      mx = std::max(mx, s[t]);
+    }
+    for (uint32_t i = 0; i < D; ++i) o[i] = 0;
+    for (uint32_t t = 0; t < T; ++t) {
+      const double w = std::exp(s[t] - mx);
+      sum += w;
+      for (uint32_t i = 0; i < D; ++i) o[i] += w * Vc[size_t(t) * D + i];
+    }
+    for (uint32_t i = 0; i < D; ++i) o[i] /= sum;
+  };
+  double e_rot = 0, e_pt = 0, n2 = 0;
+  for (uint32_t k = 0; k < Q; ++k) {
+    const float* qq = &q[size_t(k) * D];
+    double ref[D], orot[D], opt[D];
+    attend(qq, K, V, ref);
+    float qr[D], o32[D], back[D];
+    h128::rotate_q(qq, qr);
+    attend(qr, Kr, Vr, orot);
+    for (uint32_t i = 0; i < D; ++i) o32[i] = float(orot[i]);
+    h128::unrotate(o32, back);
+    attend(qq, Kp, Vp, opt);
+    for (uint32_t i = 0; i < D; ++i) {
+      e_rot += (back[i] - ref[i]) * (back[i] - ref[i]);
+      e_pt += (opt[i] - ref[i]) * (opt[i] - ref[i]);
+      n2 += ref[i] * ref[i];
+    }
+  }
+  const double r_rot = std::sqrt(e_rot / n2), r_pt = std::sqrt(e_pt / n2);
+  std::printf("hd128 attention (synthetic, K outliers, depth %u): rel L2 vs bf16 KV - rotkv %.2e, "
+              "per token %.2e\n", T, r_rot, r_pt);
+  CHECK(r_rot < r_pt);
+  CHECK(r_rot < 2e-2);
+}
+
 }  // namespace
 
 int main() {
@@ -284,6 +480,10 @@ int main() {
   check_rotation();
   check_quantise();
   check_attention();
+  check_hd128_signs();
+  check_hd128_rotation();
+  check_hd128_quantise();
+  check_hd128_attention();
   std::printf("kv8_test: OK\n");
   return 0;
 }
