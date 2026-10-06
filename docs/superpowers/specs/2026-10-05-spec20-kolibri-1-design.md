@@ -2,7 +2,7 @@
 
 **Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**. 20a built
 2026-10-06 (§10).
-20c built blind 2026-10-06 (§11, branch `spec20c-kolibri-decode`; box queue row 24). Plans 20c-20e written 2026-10-06: `docs/superpowers/plans/2026-10-06-spec20c-kolibri-decode.md`, `...-spec20d-kolibri-prefill.md`, `...-spec20e-kolibri-serving.md` (two cards on spec 16b's merged pieces, `--pp 2` Kolibri's default).
+20c built blind 2026-10-06 (§11, branch `spec20c-kolibri-decode`; box queue row 24). 20d built blind 2026-10-06 (§12, branch `spec20d-kolibri-prefill`; box queue row 26). Plans 20c-20e written 2026-10-06: `docs/superpowers/plans/2026-10-06-spec20c-kolibri-decode.md`, `...-spec20d-kolibri-prefill.md`, `...-spec20e-kolibri-serving.md` (two cards on spec 16b's merged pieces, `--pp 2` Kolibri's default).
 
 **Why this model:** Aleph Alpha's Kolibri-1 is a German- and English-focused reasoning MoE with tool
 calling, Apache-2.0, released 2026-10-03. Spec 20 serves it in this engine's own format (int4 g64
@@ -366,3 +366,107 @@ binaries compile under ocloc; K1 (`kolibri_kernels_test`: `kol_attn.cl`'s sub-gr
 ring, the 224-lane `kol_moe_down`, the 256-lane route); the loader on the synthetic checkpoints; K3 and
 KL2 on both synthetic arms (flash and eager); `--pp 2` bitwise `--pp 1` under both hand-offs; the CLI.
 After 20b: the partial forward (30 layers, one card), KL2 / K3 on two cards, the speed rows.
+
+
+## 12. 20d as built blind (2026-10-06)
+
+Plan: `docs/superpowers/plans/2026-10-06-spec20d-kolibri-prefill.md`, branch `spec20d-kolibri-prefill`.
+Written on the Mac like 20c: no card, no real checkpoint, so nothing here has run on a B70 and every
+real-weight gate SKIPs (77); the synthetic checkpoints carry KL2 / KL3 on the box before 20b. Box
+validation: queue row 26. Every number is **derived** unless marked measured.
+
+**Structure** (K2's 18c arrangement): the walk `runtime/kolibri/kolibri_prefill.{h,cc}` (one device's
+layers per chunk, no host wait inside), `KolibriEngine::prefill` / `prepare_prefill` / `read_prefill_routes`
+/ `set_prefill_replay` / `set_block_hook` in `kolibri_prefill_engine.cc` - its own archive
+`b70_kolibri_prefill`, so a decode-only target links what it did; the prefill state is lazy. Kolibri-only
+kernels `kol_pf_moe.cl`, `kol_pf_attn.cl`, `kol_pf_linear.cl` (host half: `kolibri_kernels.h`'s spec 20d
+block); reused at Kolibri's shapes from new CMake lines only: 20c's `kol_prep.cl` at M = 2048, `pf_embed`,
+`pf_prep`'s `pf_res_fold` (SP0, `_Z`), `pf_gemv_bf16` (the router at decode's {16, 16}), `pf_moe_gemm`
+(2560 x 1024 SiLU, 512 x 2560), `k2_pf_linear.cl` (the int4 arm's layout-0 slabs), `pf_gemm_T0`; the route
+is 20c's decode binary on grid (1, C). Kernel command lines **+17 / -0 / ~0** with K2 on (measured,
+`kernel_cmdlines`; `pf_res_fold_K2560_SP0_G20` and `k2_pf_dequant_slab_K6144_N2560` are K2's names, built
+here only without K2). No existing `.cl` edited; 20c's decode list (756 / 856) unchanged.
+
+**The chunk, per layer (45 launches):** `kol_norm_finish` (M 2048) · q||k||v as 7 slabs of 1024 (int4:
+`k2_pf_dequant_slab`; bf16: `kol_pf_bf16_slab`) each + `pf_gemm_T0` · `kol_attn_prep` (M 2048, S 1: q/k head
+norm, RoPE in sliding layers, every row's k / v into the ring slot `p & 4095` or the full cache row `p`) ·
+`kol_pf_flash_attn` · o_proj as 3 slabs (1024, 1024, 512) x 2 · `pf_res_fold _Z` + `kol_post_add` (the
+sandwich, decode's chain) · `kol_norm_finish` · the router (`pf_ab_proj`, fp32 logits) · `kol_route` ·
+`kol_pf_sort` · `kol_pf_gather` · gate||up: 4 weight batches x (`kol_pf_dequant_gu` + `pf_moe_gemm` SiLU) ·
+down: 2 x (`kol_pf_dequant_dn` + `pf_moe_gemm`) · `kol_pf_moe_combine` (into `mo`) · `pf_res_fold SP0` +
+`kol_post_add`. Device 0 adds `pf_embed_gather` + `pf_res_fold SP0`: **2252 launches per chunk at 50
+layers, on one card and on two** (the cut is 16b's: device 0 ends with layer s-1's `kol_post_add`, device 1
+starts at layer s's norm), + 5 for the head (decode's binaries over the last row on the last device).
+
+**The rounding chains** are decode's wherever a decode twin exists (norms, sandwich, prep, route, the
+combine's ascending-id fp32 + shared, one rounding, `FP_CONTRACT OFF`); what differs is where the GEMM sums
+form (DPAS over bf16-dequantised weights) and the softmax walk (64-key flash tiles) - so prefill's KV,
+rings and routes are decode's to a cosine bar and near-ties (Review Focus 4's proposed bars: layer 0
+every row >= 0.999, median >= 0.9998, p01 >= 0.99), not bitwise.
+
+**Decisions taken blind:**
+- **`l0` only.** `--prefill-backend l0-int8` refused (its h8 linears rotate in whole 1024-k Hadamard blocks;
+  hidden is 2560), `sycl-tla` refused (no Kolibri walk); `--prefill-chunk` above 2048 refused.
+- **The separate dequant pass in 512 MiB batches:** 385 blocks a layer (384 experts + the bf16 shared
+  expert as block 384, COPIED from its gemv_bf16 tiles, not dequantised) of 5,242,880 B (gate||up, 102 a
+  batch, 4 batches) and 2,621,440 B (down, 204, 2 batches); an expert with no row this chunk is skipped.
+- **The 384-expert sort** stages ids as `ushort` (k2_pf_sort's bytes stop at 255) with two experts a lane on
+  256 lanes; tmax(2048) = 820 tiles (`floor((C x 6 + 384 x 31) / 32) + ceil(C / 32)`), reachable exactly
+  (372 experts with 33 rows, 12 with 1 - tested).
+- **The window over the ring:** row t of a chunk at c0 sees keys `(c0 + t - 513, c0 + t]`; an 8-row group's
+  key tiles start at the ABSOLUTE multiple of 64 below its first row's window and every tile is 64
+  contiguous ring rows (4096 % 64 = 0), so no 2D read crosses the ring's end. A chunk of 2048 needs keys
+  `[c0 - 512, c0 + 2047]`: 2560 < 4096, the reason for 20c's 4096 slots. A row's first tile may hold none
+  of ITS keys (the group's first row reaches further): the online softmax uses `m_safe = (m == -INF ? 0 :
+  m)`, so such a tile leaves (m, l, o) exactly as they were - a row's result is a function of its absolute
+  position, which makes a split at a multiple of 64 bitwise.
+- **Two cards, sequential:** each chunk runs layers [0, s) on device 0, crosses by spec 16b's `copy`
+  hand-off at chunk size - a SECOND `PipelineLink` over `pp_landing_layout(2048 x 2560 x 2, 20 x 2048 x 4)`
+  (10.5 MB + 160 KB), two copies and the cross-device event - then layers [s, L) on device 1, the host
+  waiting on device 1 with `PipelineOptions::prefill_timeout_ms`. The chunk always crosses by copy:
+  `pp_handoff.cl`'s peer kernels are one 256-lane work-group sized for a 5 KB row. A lost hand-off
+  host-signals the event, throws naming device 1 and marks the engine until `reset()`
+  (`drop_next_handoff()` drops device 0's half of the next chunk - P4). Spec 16c's overlapped chunk
+  pipeline is NOT reused: it is built around `PipelineEngine`'s `PrefillScratch` / `Int8State` and
+  Qwen's walk (`step_stage`), and taking it for `KolibriEngine` means a second, Kolibri-shaped slot ring
+  and per-slot events - not trivial; it stays Task 5's recorded lever (up to ~2x on two cards).
+- **Replay** (`B70_PREFILL_REPLAY`): each device's chunk walk is recorded once per (pos, rows); the
+  hand-off's copies / event stay on the immediate lists (a recording cannot hold them).
+- **The prefill scratch: 904,632,800 B (0.905 GB) per device** (the 512 MiB batch its largest term), +
+  the prefill link on two cards; planned only when a run prefills: `--max-len auto` still reaches 262144
+  on two cards (split 25: device 0 25.318 GB, device 1 25.001 GB with the int8 head and the 1.5 GB
+  reserve).
+- **Precision:** flash keeps fp32 probabilities (the engine's convention); `B70_KOLIBRI_ATTN=eager` covers
+  prefill too - the `_EAGER` flash builds (k2_pf_attn's two passes: the reference's rounding points, not its
+  sum order), one parser `runtime::kolibri::kolibri_attn()`, read once at engine construction.
+
+**Validated on the Mac (measured):** host tests `kolibri_pf_ref_test` (the sort on random / tied / adversarial
+routes == `pf_moe_ref::sort`; the combine == 20c's decode chain on 300 tokens x 2560 and == torch's fixture
+row bitwise; reversed chunks and in-tile permutations bitwise; the flash walk in fp64 == the direct softmax
+within 3.4e-16 at c0 0 / 1000 / 1001 / 4396 through the ring, two rows starting on a wholly masked tile;
+`eager_window` == torch's eager rows **bitwise** - scores, probabilities and outputs - at 5, 512, 513, 700
+sliding and 700 full), `kolibri_pf_variant_names_test`, `kolibri_plan_test` (2252 / 2252, batches 4 + 2,
+the scratch term by term, 262144 with prefill planned); `kolibri_run` on the Mac's GPU (indicative): the
+sort at C = 2048 on four route sets, gather, dequant (routed, skipped, the shared block 384), combine, both
+slab kernels, `pf_res_fold` + `kol_prep.cl` at M = 2048 - exact, except 11 / 16 of 5.2M norm / post-add
+values that move with Apple's 1/sqrt (each the host chain at an rstd within 4 fp32 ulps); Level Zero syntax
+of every new / changed source; OpenCL syntax of every variant; `kernel_cmdlines` +17 / -0 / ~0.
+
+**Deviations from the plan:** `kol_pf_bf16_slab` takes the slab width `ns` as an argument (k2_pf_dequant_slab's
+contract); `pf_res_fold_K2560_SP1_G20` is not built for Kolibri (nothing binds it - the names test would
+call it dead); `PrefillSizes` has the walk's own fields (`ids, resid, x, a, mo, partials, slab, sumsq_a,
+sumsq_r, attn_q, attn_out, logits, routes, hdr, tiles, row_tok, pair_row, xg, h, w`); the head computes on
+the prefill row in place (K2's) rather than copying it into the decode `resid`; `prefill_split_kolibri_test`
+is `kolibri_prefill_test`'s `split` mode (K2's arrangement), and its `pp` mode is the one-card / two-card
+comparison; the plan's "all to 6 experts" adversary is the sort's per-lane serial worst case, not the
+tile bound's (448 tiles) - a separate adversary reaches 820; `eager_window` matches torch bitwise
+(stronger than the plan asked: P·V as one ascending fp32 chain).
+
+**What the box must prove (row 26):** K0 (G0, 20c's decode gates); the 17 binaries under ocloc
+(the DPAS flash at GQA 12 with the window, `kol_pf_sort`'s 28 KB of SLM, the grouped GEMMs at Kolibri's
+shapes); K1 (`kolibri_pf_kernels_test`: grouped == dense bitwise, flash >= 0.99999 against fp64 over the
+ring and to depth 62048, a split at 64 bitwise); K3 on prefill on both synthetic arms (2 + 5 x 45 launches
++ 5, replay and chunks of 16 bitwise, splits at 64 / 2048 bitwise); KL2 on prefill (flash, eager, chunks of
+16, the int8 head); two cards bitwise one card, P4 on the chunk hand-off; the CLI. After 20b: K3 / KL2 on the
+real checkpoint across two cards, and Task 5's speed rows (derived pp4096 ~4,000 t/s; the dequant pass
+~3 GB of bf16 per layer per chunk).

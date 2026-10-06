@@ -1,5 +1,12 @@
 # Spec 20d - Kolibri-1 prefill: grouped MoE over 384 experts, windowed flash attention
 
+**Status (2026-10-06): Tasks 1-4 built blind on branch `spec20d-kolibri-prefill` (Task 5's speed is box-only:
+its stages are r26.speed / r26.p0)** - spec 20 §12 has what was built and where the build departs from
+this plan (the bf16 slab takes the slab width as an argument; `pf_res_fold_K2560_SP1_G20` is not built for
+Kolibri - nothing binds it; `prefill_split_kolibri_test` is `kolibri_prefill_test`'s split mode; the plan's
+all-to-6 adversary is the sort's per-lane worst case, not the tile bound's - a separate adversary reaches
+the bound). Box queue row 26.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `KolibriEngine::prefill` runs a prompt in chunks of 2048 positions: the attention linears through spec 5's slab + `pf_gemm` path (both arms of decision 2), flash attention with a 513-key window over the sliding ring and causal over the full layers' KV, the MoE block through spec 15d's grouped expert GEMM with Kolibri's router, its 384-expert sort and its combine; the chunk crosses the two cards once; KL2 and KL3 on the prefill path; the prefill speed rows.
