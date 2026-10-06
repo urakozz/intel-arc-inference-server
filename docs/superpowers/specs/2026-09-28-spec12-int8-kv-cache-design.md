@@ -163,10 +163,13 @@ the writer (`attn_prep_kv8`, decode M = 2 / QKV_S = 2 and prefill PF = 1) and th
 reference (q, gate, int8 rows, scales; the gate 18432/18432 exact). The decode and flash
 readers use Intel sub-group / DPAS built-ins and have not run anywhere.
 
-**Tolerances, PROVISIONAL until the Qwen3.8 repeat** (12a §5's proposal, as registered):
-golden mean logit cos drop ≤ 1e-4 (`kv8_vs_oracle_test`); 1 - cos(int8 KV, bf16 KV) ≤ 5e-4
-at 4k-32k (`flash_long_kv8_test`); the kernel test's gated flash rows ≥ 0.9999. The golden
-and prefill gates keep their tie rule unchanged (Q2).
+**Tolerances, from the Qwen3.8 repeat of 12a** (2026-10-06,
+`docs/probe-int8-kv-qwen38-2026-10-06.md`; rotkv holds): golden mean logit cos drop ≤ 1e-4
+(`kv8_vs_oracle_test`, confirmed); 1 - cos(int8 KV, bf16 KV) ≤ 2e-3 at each of 4k-32k and
+≤ 5e-4 averaged over them (`flash_long_kv8_test`; was ≤ 5e-4 per depth, which one flat-logit
+row can exceed with no defect); the kernel test's gated flash rows ≥ 0.9999 (still
+PROVISIONAL, for the card's first run). The golden and prefill gates keep their tie rule
+unchanged (Q2).
 
 **Open for the box** (box-validation-queue row 11): every kernel binary's first ocloc
 compile and first run; Q2-Q5; the speed bars (§5) - the readers are written for

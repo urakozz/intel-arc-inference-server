@@ -11,8 +11,9 @@
 //       M = 2..4 rows BITWISE the M = 1 step at pos + m (spec 8's M2 with the int8 cache).
 //   F   prefill over int8 (pf_flash_attn_kv8 then pf_attn_gate_kv8): sampled rows x 24 heads
 //       against the same reference - pf_o (still rotated) cosine >= 0.99999 as
-//       pf_flash_attn_test's bar, the gated rows >= 0.9999 (PROVISIONAL: the flash rounds
-//       P x scale to bf16 where the bf16 kernel rounds P); finite, padding rows finite.
+//       pf_flash_attn_test's bar, the gated rows >= 0.9999 (PROVISIONAL until the card's first run: the flash rounds
+//       P x scale to bf16 where the bf16 kernel rounds P - kernel rounding against the same
+//       dequantised reference, which the CPU repeat of 12a does not measure); finite, padding rows finite.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>

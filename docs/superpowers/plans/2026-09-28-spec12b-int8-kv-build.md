@@ -17,7 +17,8 @@
 **Status (2026-10-05): Tasks 1-3 written blind on the Mac, branch `spec12b-int8-kv`; Task 4 and
 every card-side check open.** The operator set Review Focus 0 aside: 12b was written before the
 Qwen3.8 repeat of 12a, which runs on the Mac CPU (Task A below) and re-derives the PROVISIONAL
-tolerances. As built: spec 12 §9. What runs on the card, in order: box-validation-queue row 11.
+tolerances. **Task A done 2026-10-06:** rotkv holds on Qwen3.8 and the tolerances are set
+(`docs/probe-int8-kv-qwen38-2026-10-06.md`, spec 12 §9). As built: spec 12 §9. What runs on the card, in order: box-validation-queue row 11.
 
 ### Task A: the 12a repeat on Qwen3.8, on the Mac CPU (tonight)
 
