@@ -10,6 +10,14 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-05-spec16-pipeline-parallel-design.md` (§3.1, §3.4, §4 P2, P3, §5 S3, §6 16d). Needs 16b and 16c merged.
 
+**Status (2026-10-06): Tasks 1 and 2 built blind on the Mac** (branch `spec16d-pp-integration`; spec 16
+§10 is the as-built account and where 16b / 16c's build overrode this plan - Review Focus 2's
+refusal is moot, the snapshots being the one-card layouts; Review Focus 1 builds the embedding
+replica). Mac gates: host tests (`pp_serve_plan_test`, `pp_serve_test`, `pipeline_args_test`),
+Level Zero syntax, no kernel command line changed. Everything on the cards - P2, P3, S3, the
+llama-benchy rows - is box queue row 27 (`tools/box_validate.sh --only r27`). **Task 3 (the record)
+waits for that run.**
+
 ## Global Constraints
 
 - Both cards; branch `spec16d-pp-integration` from main; box tree automatic; `tools/box.env` copied if missing, never committed; `oracle-out*` symlinked.
@@ -28,11 +36,11 @@
 
 ### Task 1: snapshots and MTP across the split
 
-- [ ] Review Focus 1-3; tests extended with `--pp 2` registrations. **Commit** `runtime: prefix-cache snapshots and MTP under pipeline parallel (spec 16)`.
+- [x] (blind; the card half is row 27's r27.mtp / r27.prefix) Review Focus 1-3; tests extended with `--pp 2` registrations. **Commit** `runtime: prefix-cache snapshots and MTP under pipeline parallel (spec 16)`.
 
 ### Task 2: 262k and the server
 
-- [ ] Review Focus 4-5; P3 passkey; S3 memory rows; `b70-serve --pp 2`; llama-benchy rows (the operator's flags) one card vs `--pp 2` at pp4096 and at depth 32k / 128k. **Commit** `server: --pp 2, and Qwen3.8 at 262k (spec 16, P3, S3)`.
+- [x] (blind; P3 / S3 / the benchy rows are row 27's r27.p3, r27.s3, r27.benchy) Review Focus 4-5; P3 passkey; S3 memory rows; `b70-serve --pp 2`; llama-benchy rows (the operator's flags) one card vs `--pp 2` at pp4096 and at depth 32k / 128k. **Commit** `server: --pp 2, and Qwen3.8 at 262k (spec 16, P3, S3)`.
 
 ### Task 3: the record
 
