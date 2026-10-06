@@ -3,21 +3,19 @@
 # Mode: rtn (plain round-to-nearest, no calibration)
 #
 # Recipe:
-#   - auto-round PINNED to v0.14.2 - a later main's shard writer silently
-#     drops the lm_head packing (bug diagnosed + reproduced on TinyLlama,
-#     2026-08-25); v0.14.2 packs it correctly (qweight/qzeros/scales, v1 zeros).
-#     **Re-checked on 0.17.0 (2026-10-06, tools/quantize/README.md "AutoRound
-#     version"): still broken on THIS path.** With --iters 0 --disable_opt_rtn
-#     and the default low_cpu_mem_usage, 0.17.0's zero-shot loop quantises
+#   - auto-round 0.17.0 at AR_COMMIT + tools/quantize/auto-round-local.patch
+#     (tools/quantize/ar_pin.sh, the tuned script's install), with
+#     --disable_low_cpu_mem_usage. Until 2026-10-06 this script pinned v0.14.2:
+#     with the default low_cpu_mem_usage, 0.17.0's RTN (zero-shot) loop quantises
 #     lm_head as a "remaining layer" but never packs it, and ShardWriter.finalize
-#     writes the plain lm_head.weight - while config.json's extra_config still
-#     declares lm_head bits 4. (auto_round/compressors/orchestrator.py,
-#     "Quantizing remaining layer", has no immediate_pack; the calibrated loop
-#     does.) The tuned path packs it on 0.17.0 and has moved
-#     (quantize_qwen38_tuned.sh); this one stays on 0.14.2.
-#     --disable_low_cpu_mem_usage avoids the bug on 0.17.0 (byte-identical to
-#     0.14.2 on tiny models) at the price of the whole model in RAM; not
-#     adopted until tried on the 27B.
+#     writes the plain lm_head.weight while config.json's extra_config still
+#     declares lm_head bits 4 (auto_round/compressors/orchestrator.py, "Quantizing
+#     remaining layer", has no immediate_pack). --disable_low_cpu_mem_usage takes
+#     the path that packs at export: byte-identical to 0.14.2 on tiny random
+#     LLaMA / Qwen3 models (tools/quantize/README.md, "AutoRound version"). Its
+#     price: the whole bf16 model in RAM (~54 GB for the 27B), so the script
+#     refuses below RTN_MIN_RAM_GB (64) of available memory. The checker below
+#     refuses an export whose lm_head is not packed either way.
 #   - W4A16, group_size 64, symmetric  -> matches the b70 kernels' g64 tiles
 #     and the dequant contract w = (q-8)*scale, qzeros 0x77777777.
 #   - --quant_lm_head + format auto_round:auto_gptq -> int4 lm_head, the
@@ -27,11 +25,12 @@
 #     prefill later; same checkpoint, no format change needed.
 #   - The export is refused unless tools/quantize/check_gptq_export.py (the
 #     engine loader's rules) passes, and README.md in the export records the
-#     auto-round version.
+#     auto-round version, commit and patch.
 #
 # Usage (on the box, from the repo):  bash tools/quantize_qwen38_rtn.sh
 #   overridables: MODEL, OUT, DEVICE (default 1 = second B70), VENVPY,
-#                 EXTRA (more auto_round flags; recorded in the README)
+#                 AR_REPO (git URL or local clone containing AR_COMMIT), AR_PATCH (1 / 0),
+#                 RTN_MIN_RAM_GB (64), EXTRA (more auto_round flags; recorded in the README)
 set -euo pipefail
 
 # --- expected console noise (harmless, do not chase) ------------------------
@@ -50,38 +49,19 @@ CHECK="$HERE/quantize/check_gptq_export.py"
 MODEL="${MODEL:-Qwen/Qwen3.8-27B}"
 DEVICE="${DEVICE:-1}"
 VENVPY="${VENVPY:-$HOME/auto-round/.venv/bin/python}"   # torch-2.13+xpu venv; NOT modified
-AR_VERSION=0.14.2
-PKG="$HOME/.cache/auto-round-v0142-pkg"       # pinned auto-round, installed once
 OUT="${OUT:-$HOME/models/qwen38-27b-w4g64-rtn}"
-MODE_FLAGS="--iters 0 --disable_opt_rtn"   # RTN: minutes, format-identical, lower accuracy
+MODE_FLAGS="--iters 0 --disable_opt_rtn --disable_low_cpu_mem_usage"   # RTN: minutes, format-identical, lower accuracy
 
-# --- pin auto-round v0.14.2 beside the venv (one-time) ----------------------
-if [ ! -d "$PKG/auto_round" ]; then
-  UV=""
-  for c in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" uv; do
-    command -v "$c" >/dev/null 2>&1 && UV="$c" && break
-  done
-  if [ -n "$UV" ]; then
-    "$UV" pip install -q --no-deps --target "$PKG" auto-round==0.14.2
-  else
-    python3 - "$PKG" <<'PY'
-import json, urllib.request, zipfile, io, sys
-m = json.load(urllib.request.urlopen("https://pypi.org/pypi/auto-round/0.14.2/json"))
-u = next(x["url"] for x in m["urls"] if x["filename"].endswith("py3-none-any.whl"))
-zipfile.ZipFile(io.BytesIO(urllib.request.urlopen(u).read())).extractall(sys.argv[1])
-PY
-  fi
+# --- RAM: --disable_low_cpu_mem_usage holds the whole bf16 model -------------
+if [ -r /proc/meminfo ]; then
+  avail=$(awk '/^MemAvailable:/ { printf "%d", $2 / 1048576 }' /proc/meminfo)
+  [ "$avail" -ge "${RTN_MIN_RAM_GB:-64}" ] || {
+    echo "only ${avail} GB available; RTN holds the whole bf16 model (~54 GB for the 27B)." >&2
+    echo "Free memory, or set RTN_MIN_RAM_GB lower for a smaller MODEL." >&2; exit 2; }
 fi
-# cd /tmp before any python: `python -` puts the cwd ahead of PYTHONPATH, so an
-# auto-round checkout as cwd would shadow the pinned package.
-cd /tmp
-PYTHONPATH="$PKG" "$VENVPY" - "$PKG" <<'PY'
-import sys
-import auto_round
-assert auto_round.__version__ == "0.14.2", auto_round.__version__
-assert auto_round.__file__.startswith(sys.argv[1]), f"auto_round imported from {auto_round.__file__}, not {sys.argv[1]}"
-print(f"auto-round {auto_round.__version__} from {auto_round.__file__}")
-PY
+
+# --- auto-round 0.17.0 @ AR_COMMIT + the local patch, beside the venv (one-time); cd /tmp
+. "$HERE/quantize/ar_pin.sh"
 
 # --- quantize (from /tmp, so no source checkout is on sys.path) -------------
 PYTHONPATH="$PKG" "$VENVPY" -m auto_round "$MODEL" \
@@ -100,9 +80,9 @@ cat >> "$D/README.md" <<EOF
 
 ## Quantisation provenance
 
-- tool: auto-round $AR_VERSION (PyPI wheel; pinned - 0.17.0 drops the lm_head packing on this RTN path)
+- tool: $AR_DESC
 - recipe: \`tools/quantize_qwen38_rtn.sh\` - \`--scheme W4A16 --group_size 64 --quant_lm_head
-  --format auto_round:auto_gptq --iters 0 --disable_opt_rtn --low_gpu_mem_usage ${EXTRA:-}\`
+  --format auto_round:auto_gptq $MODE_FLAGS --low_gpu_mem_usage ${EXTRA:-}\`
 - source: \`$MODEL\`; made $(date -u +%Y-%m-%dT%H:%MZ)
 - checked by \`tools/quantize/check_gptq_export.py\`: int4 g64 sym, lm_head packed, qzeros 0x77777777
 EOF

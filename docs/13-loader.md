@@ -16,11 +16,12 @@ checkpoint files.
 **Two checkpoint shapes are supported and the loader takes both without a
 conditional anywhere in the walk**: a published checkpoint with a bf16
 `lm_head`, and a self-quantised one with the head packed at int4
-(`tools/quantize_qwen38_rtn.sh` produces the second, on auto-round 0.14.2;
-`quantize_qwen38_tuned.sh` on 0.17.0 @ `6afaecdb` writes the same config keys
-and packing - `tools/quantize/README.md`, "AutoRound version", which also
-records why the RTN script cannot move: 0.17.0's RTN path ships `lm_head.weight`
-unpacked while `extra_config` declares it bits 4). Everything in this
+(`tools/quantize_qwen38_rtn.sh` produces the second; it made the published one
+on auto-round 0.14.2 and runs 0.17.0 @ `6afaecdb` since 2026-10-06, as does
+`quantize_qwen38_tuned.sh` - the same config keys and packing,
+`tools/quantize/README.md`, "AutoRound version", which also records why the RTN
+script needs `--disable_low_cpu_mem_usage` there: 0.17.0's default RTN path ships
+`lm_head.weight` unpacked while `extra_config` declares it bits 4). Everything in this
 document that differs between them says which one it is; the section **"The
 packed-head checkpoint"** below is the delta list, and it was measured against
 the files rather than assumed.
