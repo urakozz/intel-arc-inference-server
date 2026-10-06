@@ -60,7 +60,7 @@ while read -r name count sha; do
     echo "[$n] $name: done, skipped"; continue
   fi
   t0=$(date +%s)
-  "$DECODE" "$SNAP" --ids "$ids" --n 192 --prefill --pp-backend "$BACKEND" --max-len 16384 \
+  "$DECODE" "$SNAP" --ids "$ids" --n 192 --prefill --prefill-backend "$BACKEND" --max-len 16384 \
     --lm-head "$LM_HEAD" < /dev/null > "$out_ids.tmp" 2> "$OUT/$name.$TAG.log"
   mv "$out_ids.tmp" "$out_ids"
   decode "$name.$TAG.ids" "$name.$TAG.txt" < /dev/null

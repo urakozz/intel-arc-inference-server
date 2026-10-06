@@ -2,7 +2,7 @@
 # Spec 9 H1/H3 (plan 9b Task 3 Step 4): the int8 lm_head against the bf16 one, as
 # interleaved pairs after a warm-up, ON THE BOX from a tree root, under the GPU lock:
 #   flock ~/b70-gpu.lock tools/probe/lm_head_pairs.sh <snapshot> [pairs = 3]
-# Each run is `b70-decode --bench --pp 4096 --tg 256`: prefill 4096 ids (H3's pp4096 row)
+# Each run is `b70-decode --bench --prefill-length 4096 --tg 256`: prefill 4096 ids (H3's pp4096 row)
 # and then decode 256 at that depth (H1's tg row). Pair i runs bf16 then int8 for odd i
 # and int8 then bf16 for even i, so a drift in clocks lands on both arms. Then one
 # `--profile` per head at depth 512 for the head launch's in-situ time (Review Focus 1:
@@ -12,7 +12,7 @@ SNAP="$1"
 PAIRS="${2:-3}"
 D=build/src/cli/b70-decode
 export B70_GIT_SHA="${B70_GIT_SHA:-unknown}"
-run() { "$D" "$SNAP" --bench --pp 4096 --tg 256 --lm-head "$1" 2> /dev/null | grep '^| b70-decode'; }
+run() { "$D" "$SNAP" --bench --prefill-length 4096 --tg 256 --lm-head "$1" 2> /dev/null | grep '^| b70-decode'; }
 uptime
 echo "warm-up"; run bf16 > /dev/null
 for i in $(seq "$PAIRS"); do

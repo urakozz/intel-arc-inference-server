@@ -16,11 +16,11 @@ export ZE_AFFINITY_MASK=0
 MODEL="${MODEL:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
 tools/box.sh sync
 echo "## pp4096, profiled (attention phases: attn_QK^T, attn_softmax, attn_PV)"
-tools/box.sh run "ZE_AFFINITY_MASK=0 B70_PREFILL_PROFILE=1 ./build/src/cli/b70-decode '$MODEL' --bench --pp 4096 --tg 256 2>&1" | \
+tools/box.sh run "ZE_AFFINITY_MASK=0 B70_PREFILL_PROFILE=1 ./build/src/cli/b70-decode '$MODEL' --bench --prefill-length 4096 --tg 256 2>&1" | \
   grep -E "attn_(prep|QK|softmax|PV|gate)|phase +wait_ms| pp \|" || true
 for pp in 4096 8192 14336 16128; do
   echo "## pp$pp, unprofiled, median of 3"
-  tools/bench_decode.sh --pp "$pp" --runs 3 --no-build 2>&1 | grep -E " pp \||pp median"
+  tools/bench_decode.sh --prefill-length "$pp" --runs 3 --no-build 2>&1 | grep -E " pp \||pp median"
 done
 for d in 4096 16000; do
   echo "## decode at depth $d, max_len 16384, median of 3"

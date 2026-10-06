@@ -22,7 +22,7 @@
 # comment). llama-benchy's OWN `e2e_ttft` field (`first_token_ts - start_ts`,
 # gated on a non-empty `delta.content`) is exactly "time to the first real
 # generated token" -- the same first-token-inclusive window
-# tools/bench_decode.sh's `--pp` row uses on the device side -- so
+# tools/bench_decode.sh's `--prefill-length` row uses on the device side -- so
 # `pp_http = prompt_tokens / (e2e_ttft_ms / 1000)` is the comparable,
 # HTTP-inclusive number. Both figures are recorded; the llama-benchy pp
 # figure is kept for the record but is not the number bar 5's arithmetic
