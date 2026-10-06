@@ -1,7 +1,8 @@
 # Spec 16 - pipeline parallel over two B70s
 
 **Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**.
-16b (decode) built blind 2026-10-06, before 16a's probe: §8.
+16b (decode) built blind 2026-10-06, before 16a's probe: §8. 16c (the prefill chunk pipeline) built
+blind 2026-10-06 on top of it: §9.
 
 **Scope, set by the operator (2026-10-05):** multi-GPU is **pipeline parallel only** for now; tensor
 parallel is not part of this spec.
@@ -259,3 +260,84 @@ sum to the measured Qwen3.8 load exactly):
 
 **Gates as built:** P1 `pp_decode_test` (+ `_i8head`, `_kv8`), P4 `pp_fail_test` and
 `cli_reject_pipeline_*`, S1 row 22's `r22.s1` (4k; 32k opt-in). P2 / P3 / S2 / S3 stay 16c / 16d.
+
+## 9. 16c as built blind (2026-10-06)
+
+Written on the Mac like 16b, on top of it (§8); box queue row 23 is the order to prove it on the
+cards. `b70-decode --pp 2 --prefill` and `--bench --prefill-length N --pp 2` run it
+(runtime::PipelineEngine::prefill, defined in b70_prefill_host as Engine::prefill is).
+
+**Where 16b's build overrides plan 16c** (16b wins; the plan was written before it):
+
+| plan 16c | as built, and why |
+|---|---|
+| hand off the chunk's hidden rows | 16b's cut: device 0 also runs layer s's `pf_res_fold` (it reads no weight) and hands off the FOLDED residual rows plus the norm sums (`[C][5120]` bf16 + 160 KB on Qwen3.8), not the residual and down's fp32 partials (twice the bytes); device 1 starts layer s at its `pf_norm_finish` |
+| the hand-off | 16b's two, `--pipeline-handoff copy` (default) or `peer`. `peer` moves the rows by `pp_send`'s stores into device 1's slot and checks them with `pp_recv` (flag + stamp, system-scope loads) - but in prefill device 1 also waits on the ready event before `pp_recv`: a stage is ~0.5 s at 4k and seconds near 256k, and `pp_recv`'s bound counts flag loads, not time, so a spin there could time out on a slow chunk. The spin is then a check, not a wait |
+| the split balances time (the second card ~3 % slower) | 16b's byte-balanced `--pipeline-split auto`, now planned with each card's prefill scratch; 16c reports each card's busy time per prefill instead of guessing the time balance, and row 23's opt-in sweep times the neighbouring cuts |
+| `--pp 2` refuses the composed path | so it does, and sycl-tla (its walk waits on the host between runtimes), `B70_PREFILL_REPLAY=1` (recordings are one card's walk) and `B70_PREFILL_PROFILE=1` (its phase waits would serialise the pipeline) - each by name, before the device where the flags say it |
+| the spec 7 hook fires on device 1 after the block's last layer | the hook is the host's (as on one card): it runs once BOTH devices have finished the block. Device 0 has moved on by then, so each device copies its GDN state and conv ring into a shadow after a hooked chunk, in order on its list, and `save_state` inside the hook reads the shadows; `save_kv` reads `[0, end)` live (later chunks write positions >= end) |
+
+**The order** (runtime/pipeline_prefill_plan.h; one executor, `pp_prefill_run`, runs it in the
+engine and in the host-thread protocol test). The chunks are one card's - `prefill_chunk_rows` is
+one function, called by `Engine::prefill` and by the planner - so the gated delta rule's 64-row
+chunks fall where they fall on one card. Every per-chunk resource is doubled and indexed by
+chunk % 2: the landing slot, each device's prefill Control block (the walk's kernels read pos /
+n_active while the host writes the next chunk's), device 0's ids buffer, the ready event
+(device 0 -> 1), each device's done event and shadow. **The back-pressure rule:** chunk j is
+appended to either device only after the host has seen BOTH finish chunk j - 2. Device 0 is
+then never more than two chunks ahead of device 1, a slot is never rewritten while device 1 may
+still read it, and an event is host-reset only when nothing waits on it or will signal it. The
+plan's "device 0 waits only when both buffers are full" is this rule seen from device 0; the
+difference is that device 0 waits for device 1 to *finish* chunk j - 2, not merely to copy it in -
+the same rate in steady state (the slower card sets it), one fewer event, and every reuse a host
+fact. Host loop, per chunk j: `[j >= 2: wait0 j-2, wait1 j-2, hook j-2]`, append device 0's
+chunk (embed, layers [0, s), the cut's fold, timestamps, the hand-off out, signal ready, signal
+done), append device 1's chunk (wait ready, the hand-off in, layers [s, L), signal done); at the
+end chunk n - 2's waits and hook, the head on device 1, the last waits, the drain.
+`pp_prefill_check` names every rule; the engine asserts it on the order it runs, and the host
+tests show each single-step drop of the order (48) and six named reorderings are caught.
+
+**Bitwise (P1), by construction:** `step_stage` is `step_chunk`'s loop (`walk_layers`) over the
+stage's layers - the same launches, arguments and order per layer, the stage's own GDN / FA
+slices (16b's layouts) - plus the hand-off's copies. The prefill Control blocks hold the same
+pos / n_active one card's Control does; the head writes device 1's decode Control, and the host
+mirrors it into device 0's as after a decode step. The launch arithmetic (`step_stage_launches`)
+adds up to `step_chunk_launches` for both stages at every C (asserted at `prepare_prefill`).
+
+**Bounded:** every host wait - a device's per-chunk done event, the final drain - has
+`PipelineOptions::prefill_timeout_ms` (120 s; a hang, not a slow chunk). A wait that passes its
+bound (or a `pp_recv` that reports a bad hand-off) host-signals every event device 1 may wait
+on, lets both lists drain (bounded), marks the engine and throws naming the device, the chunk
+and, when it is so, that the ready event was never signalled; `reset()` recovers. A hook that
+throws is the hook's exception, not a failure: the lists drain, the shadows go back, pos is the
+block end - one card's behaviour.
+
+**Memory** (derived, `pipeline_prefill_plan_test`): each card holds a whole `PrefillScratch`
+(0.70 GB on Qwen3.8; plus the l0 backend's slab) and on l0-int8 its own `Int8State` (the h8
+scratch and ITS layers' column scales, 0.069 GB a card at the even split), device 1 the two
+landing slots (42.3 MB), each card two Control blocks and its timestamps; with a block hook each
+card also allocates two shadows of its state (166.7 MB a card at the even split; b70-decode
+never sets a hook - the server's prefix cache would, 16d). Qwen3.8 bf16 head, l0-int8 prefill:
+16384 -> split 32, 10.459 / 10.501 GB; 262144 -> split 32, 18.575 / 18.617 GB (fits two cards
+with the default 1.5 GB reserve).
+
+**Speed, expected** (derived; row 23's S2 measures): with two equal halves of a one-card chunk
+time T, n chunks take (n + 1) T / 2 instead of n T - 1.33x at pp4096 (2 chunks), 1.88x at
+pp32768, 1.94x at pp65536; the second card's ~3 % slower half takes ~0.05 off at n >= 16. The
+copy hand-off is ~1.7 ms of 20 MB per chunk at ~12 GB/s on device 0's list (~0.4 % of a ~0.48 s
+half-chunk). The peer path's `pp_send` / `pp_recv` are 16b's single work-group kernels: moving
+20 MB through one work-group is the unmeasured term - if row 23's peer arms show it, a
+multi-group variant is the fix (copy stays the default).
+
+**Per-card busy time** (plan Review Focus 5): `zeCommandListAppendWriteGlobalTimestamp` before
+and after each chunk's walk on each card; `last_prefill()` sums them, b70-decode prints
+`pp: device N busy ... ms (x % of the wall)` per card.
+
+**Not in 16c:** `b70-serve --pp 2` and its prefix cache (16d: the hook path it would use is built
+and gated by `pp_prefill_test`), MTP (16d), the time-balanced split (measured first), a
+multi-group peer copy, more than two chunks in flight per card.
+
+**Gates as built:** host `pipeline_prefill_plan_test`, `pp_prefill_protocol_test` (TSan clean),
+`pipeline_args_test`; on the cards P1 / P2 `pp_prefill_test` (+ `_l0`, `_i8head`, `_kv8`),
+back-pressure and P4 `pp_prefill_fail_test`, `cli_reject_pipeline_*_sycl`, row 23's CLI stages
+(Qwen3.8, Agnes, Ornith) and S2 (`r23.s2_4k` / `_32k` / `_64k`; 128k and the split sweep opt-in).
