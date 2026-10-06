@@ -10,8 +10,9 @@
 `run` sends one OpenAI request per prompt, one at a time, temperature 0 (greedy), with
 `return_token_ids` so the output ids come back:
   golden    tests/golden/prompts/{prose,code,cjk}.txt as /v1/completions (text prompts)
-  toolcall  the A4 set, tests/golden/toolcall/<name>.json (messages, tools, enable_thinking)
-            as /v1/chat/completions, every scenario of manifest.json
+  toolcall  the A4 set, tests/golden/toolcall/<name>.json (messages, tools, enable_thinking,
+            and a re-tokenised set's chat_template_kwargs) as /v1/chat/completions, every
+            scenario of manifest.json
   DIR       a directory: manifest.json + <name>.json as toolcall, else every *.txt as golden
 Each prompt's ids as the server encoded them are checked against the set's committed
 <name>.ids (`prompt_ids_match`; a mismatch is reported, the request still counts). By default
@@ -78,6 +79,9 @@ def load_set(spec, root):
             if sc.get("tools"):
                 body["tools"] = sc["tools"]
             body["chat_template_kwargs"] = {"enable_thinking": bool(sc.get("enable_thinking", False))}
+            # make_set.py --from records a model's template variables (K2-Horizon's
+            # tool_call_format / reasoning_effort, spec 18d): the set's ids were rendered with them
+            body["chat_template_kwargs"].update(sc.get("chat_template_kwargs", {}))
             out.append((tag, n, "/v1/chat/completions", body, read_ids(os.path.join(d, n + ".ids"))))
         return out
     for p in sorted(glob.glob(os.path.join(d, "*.txt"))):

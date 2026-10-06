@@ -14,7 +14,11 @@
 # and the resolved tokenizer.json mounted.
 # Env: B70_DECODE (default build/src/cli/b70-decode), PYTHON (default python3),
 #      ORACLE_IMAGE, LM_HEAD (spec 9: bf16 or int8, passed as --lm-head; an int8 run
-#      is saved as <name>.<backend>-i8head.* so it sits beside the bf16-head run).
+#      is saved as <name>.<backend>-i8head.* so it sits beside the bf16-head run),
+#      N_NEW (the greedy ids per scenario, default 192 - the reference run's --new-tokens:
+#      K2-Horizon's A4 uses 512, spec 18d), MAX_LEN (default 16384).
+# K2-Horizon (spec 18d): b70-decode dispatches on config.json, so the same line runs K2's
+# engine; its backend is l0 (the only one K2 prefills on).
 set -euo pipefail
 [ $# -eq 4 ] || { echo "usage: $0 <snapshot> <set dir> <out dir> <backend>" >&2; exit 2; }
 SNAP="$1" SET="$2" OUT="$3" BACKEND="$4"
@@ -60,7 +64,7 @@ while read -r name count sha; do
     echo "[$n] $name: done, skipped"; continue
   fi
   t0=$(date +%s)
-  "$DECODE" "$SNAP" --ids "$ids" --n 192 --prefill --prefill-backend "$BACKEND" --max-len 16384 \
+  "$DECODE" "$SNAP" --ids "$ids" --n "${N_NEW:-192}" --prefill --prefill-backend "$BACKEND" --max-len "${MAX_LEN:-16384}" \
     --lm-head "$LM_HEAD" < /dev/null > "$out_ids.tmp" 2> "$OUT/$name.$TAG.log"
   mv "$out_ids.tmp" "$out_ids"
   decode "$name.$TAG.ids" "$name.$TAG.txt" < /dev/null
