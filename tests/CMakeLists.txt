@@ -2444,6 +2444,49 @@ b70_cli_reject(cli_reject_pipeline_bench_prefill_sycl ${B70_NO_MODEL} --bench --
   --pp 2 --prefill-backend sycl-tla EXPECT "--prefill-backend l0 or l0-int8")
 # ==== Spec 16c ============================================================= (end) ====
 
+# ==== Spec 16d: pipeline parallel integration (b70-serve --pp 2, MTP across the split) ====
+# Written blind on the Mac, like 16b / 16c; box-validation-queue.md row 27 is the order to run
+# the device ones in (`ctest -L pp`).
+#
+# Host, no device: the planner's server terms (the MTP head + embedding replica + buffers on
+# device 1, device 0's verify slots, the prefix cache's block shadows), the stage verify
+# lists' launch arithmetic, spec 7's KV snapshot over two devices = the one-card layout byte
+# for byte with the head's layer (pp_serve_plan_test); b70-serve's adapter over a device-free
+# two-device engine through spec 7's request path and the HTTP server - snapshots moving
+# between one card and two, MTP / lookup iterations, sampling (pp_serve_test).
+add_executable(pp_serve_plan_test runtime/pp_serve_plan_test.cc)
+target_include_directories(pp_serve_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(pp_serve_plan_test PRIVATE b70_plan)
+add_test(NAME pp_serve_plan_test COMMAND pp_serve_plan_test)
+
+# On the box, both cards and the checkpoint; SKIP (77) with fewer than two GPUs or without peer
+# access. Review Focus 1-3 (pp_mtp_test): MTP across the split BITWISE one card's on device 0 -
+# the prose prompt's prefill (the head's KV filled on device 1), 64 speculative iterations (K 3,
+# 1, 2, 0: every draft and verify logits row, the ids, the session with the live verify slot,
+# the head's hidden row and KV layer), M2 on both engines (4 plain rows == one M = 4 verify),
+# a 4103-id hooked prefill (spec 7 at 2048 / 4096 from the shadows, with the head's row), a
+# one-card snapshot continued on two cards; copy and peer at the auto split, the cuts at 5 and
+# 62; both Control blocks equal after every call. The int8 head and the int8 KV twins.
+if(B70_MTP)
+  add_executable(pp_mtp_test runtime/pp_mtp_test.cc)
+  target_include_directories(pp_mtp_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(pp_mtp_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(pp_mtp_test)
+  endif()
+  add_dependencies(pp_mtp_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels} kernel_pp_handoff)
+  add_test(NAME pp_mtp_test COMMAND pp_mtp_test ${B70_TEST_SNAPSHOT})
+  add_test(NAME pp_mtp_i8head_test COMMAND pp_mtp_test ${B70_TEST_SNAPSHOT} int8)
+  set_tests_properties(pp_mtp_test pp_mtp_i8head_test PROPERTIES
+    LABELS "checkpoint;pp;mtp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 5400)
+  if(B70_KV8 AND COMMAND b70_kv8_twin)
+    add_test(NAME pp_mtp_kv8_test COMMAND pp_mtp_test ${B70_TEST_SNAPSHOT})
+    b70_kv8_twin(pp_mtp)
+  endif()
+endif()
+# ==== Spec 16d ============================================================= (end) ====
+
 # ==== Spec 20c: Kolibri-1 decode (label kolibri) ==== (begin) ====
 # One delimited block for every 20c registration (spec 16c's and 20d's blocks stay apart). Host
 # tests first (they run on the Mac: tools/mac_check.sh), then the card's (box only; box-validation

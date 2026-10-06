@@ -132,8 +132,10 @@ void require(bool ok, const std::string& what) {
 // `Verify` is the same list at M rows with the per-row GDN slot variant, followed by
 // the MTP head's KV fill of those M rows. `Draft` is the MTP head alone at M = 1.
 // `Stage` (spec 16b) is the plain list restricted to one pipeline stage's layers, with the
-// hand-off appended or prepended (capture.h, build_stage).
-enum class Mode { Plain, Verify, Draft, Stage };
+// hand-off appended or prepended (capture.h, build_stage). Spec 16d: `StageVerify` is the
+// verify list restricted the same way (the head's KV fill on the last stage), `StageDraft`
+// the draft list on the last stage's device (capture.h, build_stage_verify / _draft).
+enum class Mode { Plain, Verify, Draft, Stage, StageVerify, StageDraft };
 
 class Capture {
  public:
@@ -153,6 +155,21 @@ class Capture {
     n_gdn_ = st.gdn;
     n_fa_ = st.fa;
   }
+  // Spec 16d: one stage's MTP verify list at M rows (`link` set, `gdn_spec` the stage's
+  // verify slots, `mtp` the head's buffers on the last stage only) or the last stage's
+  // draft list `draft_i` (no link; the head's buffers).
+  Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const PpStage& st,
+          const StageLink* link, uint32_t cap_m, const MtpBuffers* mtp, const l0::Mem* gdn_spec,
+          Mode mode, uint32_t draft_i)
+      : Capture(ctx, m, b, nullptr, nullptr, cap_m, mtp, mode, draft_i) {
+    stage_ = &st;
+    link_ = link;
+    small_base_ = st.first;
+    n_layers_ = st.layers();
+    n_gdn_ = st.gdn;
+    n_fa_ = st.fa;
+    gdn_spec_ = gdn_spec;
+  }
 
   CapturedStep run() {
     // One layer's K (or V) rows; at int8 (spec 12b) the scales follow every layer's rows
@@ -160,9 +177,12 @@ class Capture {
     kv_stride_ = size_t(b_.max_len) * d_.fa_kv_heads * Qwen35::kFaHeadDim *
                  (kv8_ ? 1 : kBf16);
     check_sizes();
-    if (mode_ == Mode::Stage) return stage_run();
+    if (mode_ == Mode::Stage || mode_ == Mode::StageVerify) return stage_run();
     if (mode_ != Mode::Plain) check_mtp();
-    if (mode_ == Mode::Draft) {
+    if (mode_ == Mode::StageDraft)
+      require(stage_ != nullptr && stage_->has_head(d_),
+              "a stage's draft list runs on the device that holds the head");
+    if (mode_ == Mode::Draft || mode_ == Mode::StageDraft) {
       layer_ = head_layer();
       draft();
       // Spec 15e: 23 launches with a dense head, 24 with a MoE head (draft_launches).
@@ -362,7 +382,8 @@ class Capture {
             "the MoE scratch has no layer slot for the MTP head's MoE layer");
     require(mtp_->max_len == b_.max_len, "MtpBuffers max_len != buffers max_len");
     require(kCapM <= MtpBuffers::kSlots, "an MTP verify list has at most kSlots rows");
-    require(mode_ != Mode::Draft || (kCapM == 1 && draft_i_ < MtpBuffers::kMaxK),
+    require((mode_ != Mode::Draft && mode_ != Mode::StageDraft) ||
+                (kCapM == 1 && draft_i_ < MtpBuffers::kMaxK),
             "a draft list is M = 1 with draft index < kMaxK");
     require(mtp_->gdn_spec.size() == gdn_state_stride() * d_.gdn_layers * (MtpBuffers::kSlots - 1),
             "gdn_spec is not (kSlots - 1) x " + std::to_string(d_.gdn_layers) + " slices");
@@ -815,8 +836,10 @@ class Capture {
     {
       // Spec 8: the verify list binds the SPEC_SLOTS build, whose eighth argument is
       // this layer's slice of slot 1 (MtpBuffers::gdn_spec is slot-major, so slot s
-      // is that plus (s - 1) whole slots - gdn_step.cl, SPEC_SLOTS).
-      const bool slots = mode_ == Mode::Verify;
+      // is that plus (s - 1) whole slots - gdn_step.cl, SPEC_SLOTS). Spec 16d: a stage's
+      // verify list binds its own slots' allocation (spec_mem(), pp_gdn_spec_bytes) at its
+      // own slice g - the same binary, the same whole-model slot stride.
+      const bool slots = mode_ == Mode::Verify || mode_ == Mode::StageVerify;
       l0::Kernel& k = kernel(slots ? kernels::gdn_step_slots_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads, d_.gdn_v_heads)
                                    : kernels::gdn_step_variant(kCapM, d_.gdn_k_heads, d_.gdn_v_heads),
                              "gdn_step", kWgGdn);
@@ -827,7 +850,7 @@ class Capture {
       k.arg_ptr(4, at(b_.conv_ring, size_t(g) * conv_ring_stride()));
       k.arg_ptr(5, at(b_.gdn_state, size_t(g) * gdn_state_stride()));
       k.arg_ptr(6, b_.gdn_o.ptr());
-      if (slots) k.arg_ptr(7, at(mtp_->gdn_spec, size_t(g) * gdn_state_stride()));
+      if (slots) k.arg_ptr(7, at(spec_mem(), size_t(g) * gdn_state_stride()));
       launch(k, d_.gdn_v_heads, kGdnStateChunks);
     }
     // prep_gated_head(qkvz_partials, gdn_o, gated_w, x_out) - prep.cl (Task 2),
@@ -1004,6 +1027,8 @@ class Capture {
                 std::to_string(st.last) + ")");
     require(st.has_embed() || st.has_head(d_), "spec 16b builds two stages: one holds the "
                                                "embedding, the other the head");
+    const bool verify = mode_ == Mode::StageVerify;
+    if (verify) check_stage_verify();
     if (st.has_embed()) {
       embed_gather();
     } else {
@@ -1026,6 +1051,14 @@ class Capture {
     layer_ = kBoundary;
     if (st.has_head(d_)) {
       head();
+      if (verify) {
+        // Spec 16d: build_verify's tail on the head's device - the M rows' post-final-norm
+        // hidden into hh rows 1..M, then the head's KV fill over hh rows 0..M-1.
+        const size_t row = size_t(d_.hidden) * kBf16;
+        step_.list.copy(at(mtp_->hh, row), b_.x.ptr(), row * kCapM);
+        layer_ = head_layer();
+        head_kv_fill(mtp_->hh.ptr());
+      }
     } else {
       layer_ = static_cast<int>(st.last);
       cut_fold();
@@ -1034,7 +1067,8 @@ class Capture {
     }
     // The compute launches are the single-card list's, cut in two (pp_stage_launches); the
     // peer hand-off adds its one kernel per side.
-    const size_t want = pp_stage_launches(d_, st) + (link_->mode == PpHandoff::Peer ? 1 : 0);
+    const size_t want = (verify ? pp_stage_verify_launches(d_, st) : pp_stage_launches(d_, st)) +
+                        (link_->mode == PpHandoff::Peer ? 1 : 0);
     require(step_.kernel_count == want,
             "the stage list has " + std::to_string(step_.kernel_count) + " launches, not " +
                 std::to_string(want));
@@ -1121,6 +1155,20 @@ class Capture {
     k.arg<uint32_t>(8, link_->spin_limit);
     launch(k, 1);
   }
+
+  // Spec 16d: what a stage's verify list needs - its verify slots, sized for its own GDN
+  // layers at the whole model's slot stride (pp_gdn_spec_bytes), the M rows in the slots,
+  // and on the head's device everything build_verify needs of the head (check_mtp).
+  void check_stage_verify() {
+    require(gdn_spec_ != nullptr, "a stage's verify list needs its verify slots");
+    require(kCapM <= MtpBuffers::kSlots, "an MTP verify list has at most kSlots rows");
+    require(gdn_spec_->size() >= size_t(MtpBuffers::kSlots - 2) * gdn_state_stride() * d_.gdn_layers +
+                                     size_t(n_gdn_) * gdn_state_stride(),
+            "the stage's verify slots hold less than (kSlots - 2) whole slots and its " +
+                std::to_string(n_gdn_) + " GDN layers of the last (pp_gdn_spec_bytes)");
+    if (stage_->has_head(d_)) check_mtp();
+  }
+  const l0::Mem& spec_mem() const { return gdn_spec_ ? *gdn_spec_ : mtp_->gdn_spec; }
 
   // A layer's small blocks: m_.layer_small is indexed by layer, or (spec 16b) by layer -
   // first in a stage model.
@@ -1415,6 +1463,8 @@ class Capture {
   uint32_t small_base_ = 0;
   uint32_t n_layers_ = d_.layers, n_gdn_ = d_.gdn_layers, n_fa_ = d_.fa_layers;
   bool resume_ = false;
+  // Spec 16d: a stage's verify slots (null: MtpBuffers::gdn_spec, the single card's).
+  const l0::Mem* gdn_spec_ = nullptr;
 };
 
 }  // namespace
@@ -1460,6 +1510,28 @@ CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, Decode
 CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                          const MtpBuffers& mtp, uint32_t i) {
   return Capture(ctx, m, b, nullptr, nullptr, 1, &mtp, Mode::Draft, i).run();
+}
+
+CapturedStep build_stage_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
+                                const PpStage& st, const StageLink& link, uint32_t M,
+                                const MtpBuffers* mtp, const l0::Mem& gdn_spec) {
+  if (M == 0 || M > MtpBuffers::kSlots)
+    throw std::runtime_error("runtime::build_stage_verify: M " + std::to_string(M) +
+                             " is outside [1, " + std::to_string(MtpBuffers::kSlots) + "]");
+  const model::ModelDesc& d = *m.desc;
+  if (st.has_head(d) != (mtp != nullptr))
+    throw std::invalid_argument("runtime::build_stage_verify: the head's buffers belong to the "
+                                "stage that holds the head, and only to it");
+  const std::array<PpStage, kPpDevices> both = pp_stages(d, st.first == 0 ? st.last : st.first);
+  if (pp_stage_verify_launches(d, both[0]) + pp_stage_verify_launches(d, both[1]) != verify_launches(d))
+    throw std::logic_error("runtime::build_stage_verify: the stages' launches do not add up to " +
+                           std::to_string(verify_launches(d)));
+  return Capture(ctx, m, b, st, &link, M, mtp, &gdn_spec, Mode::StageVerify, 0).run();
+}
+
+CapturedStep build_stage_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
+                               const PpStage& st, const MtpBuffers& mtp, uint32_t i) {
+  return Capture(ctx, m, b, st, nullptr, 1, &mtp, nullptr, Mode::StageDraft, i).run();
 }
 
 CapturedStep build_stage(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,

@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cstdio>
 #include <stdexcept>
+#include "loader/draft_vocab.h"
 #include "loader/moe_layout.h"
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
+#include "runtime/control.h"
 #include "runtime/pipeline_prefill_plan.h"
 
 namespace runtime {
@@ -178,6 +180,68 @@ size_t PpPlan::max_total() const {
 
 PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, const PpWeights& w,
                KvCache kv, const PrefillPath& pf) {
+  return pp_plan(d, split, max_len, w, kv, pf, PpExtras{});
+}
+
+size_t pp_gdn_spec_bytes(const model::ModelDesc& d, uint32_t stage_gdn) {
+  const size_t layer = size_t(d.gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;
+  return size_t(MtpDims::kSlots - 2) * d.gdn_layers * layer + size_t(stage_gdn) * layer;
+}
+
+size_t pp_mtp_prefill_bytes(const model::ModelDesc& d) {
+  return mtp_prefill_hidden_bytes(d) + kPpPfDepth * sizeof(Control);
+}
+
+size_t pp_stage_verify_launches(const model::ModelDesc& d, const PpStage& st) {
+  // The head's KV fill (capture.cc head_front): embed, the two pre-fc norm pairs, fc, the
+  // zero-residual fold pair, q||k||v, attn_prep - 10, as runtime::verify_launches adds.
+  return pp_stage_launches(d, st) + (st.has_head(d) ? 10 : 0);
+}
+
+std::vector<PpKvRun> pp_kv_runs(const std::array<KvLayout, kPpDevices>& stage, const KvLayout* head,
+                                uint32_t begin, uint32_t end) {
+  if (begin > end)
+    throw std::invalid_argument("runtime::pp_kv_runs: begin " + std::to_string(begin) + " > end " +
+                                std::to_string(end));
+  for (const KvLayout& L : stage)
+    if (end > L.max_len || L.form != stage[0].form)
+      throw std::invalid_argument("runtime::pp_kv_runs: [" + std::to_string(begin) + ", " +
+                                  std::to_string(end) + ") is not inside both stages' caches of "
+                                  "one form");
+  if (head && (head->form != stage[0].form || head->layers != 1 || end > head->max_len))
+    throw std::invalid_argument("runtime::pp_kv_runs: the head's KV is not one layer in the "
+                                "stages' form covering the range");
+  std::vector<PpKvRun> runs;
+  const size_t n = end - begin;
+  if (n == 0) return runs;
+  const uint32_t last = kPpDevices - 1;
+  for (uint32_t t = 0; t < 2; ++t) {
+    for (uint32_t dev = 0; dev < kPpDevices; ++dev) {
+      const KvLayout& L = stage[dev];
+      for (uint32_t l = 0; l < L.layers; ++l)
+        runs.push_back({dev, t, false, L.rows_offset(l) + size_t(begin) * L.row_bytes(), n * L.row_bytes()});
+    }
+    if (head)   // the head's layer, after the last FA layer (Engine's kv_runs)
+      runs.push_back({last, t, true, head->rows_offset(0) + size_t(begin) * head->row_bytes(),
+                      n * head->row_bytes()});
+    if (stage[0].scale_row_bytes() == 0) continue;
+    for (uint32_t dev = 0; dev < kPpDevices; ++dev) {
+      const KvLayout& L = stage[dev];
+      for (uint32_t l = 0; l < L.layers; ++l)
+        runs.push_back({dev, t, false, L.scales_offset(l) + size_t(begin) * L.scale_row_bytes(),
+                        n * L.scale_row_bytes()});
+    }
+    if (head)
+      runs.push_back({last, t, true, head->scales_offset(0) + size_t(begin) * head->scale_row_bytes(),
+                      n * head->scale_row_bytes()});
+  }
+  return runs;
+}
+
+PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, const PpWeights& w,
+               KvCache kv, const PrefillPath& pf, const PpExtras& x) {
+  if (x.draft_vocab != 0 && !x.mtp)
+    throw std::invalid_argument("runtime::pp_plan: a draft vocabulary drafts with the MTP head");
   if (pf.prefill && (pf.composed_attn || !is_l0(pf.backend)))
     throw std::invalid_argument(std::string("runtime::pp_plan: the two-card prefill runs the L0 "
                                             "backends' flash attention only, not ") +
@@ -188,6 +252,7 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
   p.split = split;
   p.kv_cache = kv;
   p.prefill = pf;
+  p.extras = x;
   const std::array<PpStage, kPpDevices> st = pp_stages(d, split);
   // The decode scratch is max_len-dependent only through v1's attn_part; the planner
   // follows B70_DECODE_ATTN as runtime::plan does.
@@ -211,6 +276,35 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
       dp.prefill_link = pp_prefill_link_bytes(d, i);
       dp.decode_state += dp.prefill_link;
     }
+    // Spec 16d (PpExtras, pipeline_plan.h).
+    const bool last = st[i].has_head(d);
+    if (x.mtp) {
+      if (last) {
+        dp.embed_replica = w.embed;
+        dp.mtp_weights = w.mtp;
+        dp.model += dp.embed_replica + dp.mtp_weights;
+        dp.mtp_buffers = MtpDims::sizes(max_len, d, x.draft_vocab, kv).total();
+        if (x.draft_vocab != 0)
+          dp.draft_vocab = w.draft_vocab != 0
+                               ? w.draft_vocab
+                               : loader::draft_vocab_bytes(x.draft_vocab, d.hidden, x.draft_vocab_int8).total();
+        if (pf.prefill) {
+          dp.mtp_prefill = pp_mtp_prefill_bytes(d);
+          // step_mtp_kv's bf16 linears walk the L0 slab; the l0 backend already holds it.
+          if (pf.backend == PrefillBackend::L0Int8)
+            dp.prefill_scratch += PrefillScratchDims::sizes(max_len, d).slab;
+        }
+      } else {
+        dp.mtp_buffers = pp_gdn_spec_bytes(d, st[i].gdn);
+      }
+      dp.decode_state += dp.mtp_buffers + dp.mtp_prefill;
+    }
+    if (x.hook && pf.prefill) {
+      const PersistentSizes hs = PersistentDims::stage_sizes(max_len, d, kv, st[i].gdn, st[i].fa);
+      dp.shadows = kPpPfDepth * (hs.gdn_state + hs.conv_ring +
+                                 (x.mtp && last ? size_t(d.hidden) * 2 : 0));
+      dp.prefill_scratch += dp.shadows;
+    }
   }
   return p;
 }
@@ -228,11 +322,11 @@ bool split_ok(const model::ModelDesc& d, uint32_t s) {
 // The split choice at one length: the heavier device as small as possible, then the two as
 // even as possible, then the smaller s. `allowed` filters candidates (all when empty).
 uint32_t best_split_at(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len, KvCache kv,
-                       const PrefillPath& pf, const std::vector<uint32_t>& allowed) {
+                       const PrefillPath& pf, const PpExtras& x, const std::vector<uint32_t>& allowed) {
   uint32_t best = 0;
   size_t best_max = 0, best_diff = 0;
   const auto consider = [&](uint32_t s) {
-    const PpPlan p = pp_plan(d, s, max_len, w, kv, pf);
+    const PpPlan p = pp_plan(d, s, max_len, w, kv, pf, x);
     const size_t a = p.dev[0].total(), b = p.dev[1].total();
     const size_t mx = std::max(a, b), diff = a > b ? a - b : b - a;
     if (best == 0 || mx < best_max || (mx == best_max && diff < best_diff)) {
@@ -270,9 +364,14 @@ PpBalance pp_balance(const std::vector<size_t>& layer_bytes, size_t dev0_fixed, 
 
 uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len, KvCache kv,
                        const PrefillPath& pf) {
+  return pp_auto_split(d, w, max_len, kv, pf, PpExtras{});
+}
+
+uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len, KvCache kv,
+                       const PrefillPath& pf, const PpExtras& x) {
   if (d.layers < 2)
     throw std::invalid_argument(d.name + " has fewer than two layers: nothing to split");
-  const uint32_t s = best_split_at(d, w, max_len, kv, pf, {});
+  const uint32_t s = best_split_at(d, w, max_len, kv, pf, x, {});
   if (s == 0)
     throw std::invalid_argument(d.name + ": no split leaves each device a GDN and an FA layer");
   return s;
@@ -281,13 +380,19 @@ uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t m
 uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const PpWeights& w,
                               const std::array<size_t, kPpDevices>& device_bytes, size_t reserve,
                               uint32_t cap, KvCache kv, const PrefillPath& pf) {
+  return pp_max_len_that_fits(d, split, w, device_bytes, reserve, cap, kv, pf, PpExtras{});
+}
+
+uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const PpWeights& w,
+                              const std::array<size_t, kPpDevices>& device_bytes, size_t reserve,
+                              uint32_t cap, KvCache kv, const PrefillPath& pf, const PpExtras& x) {
   if (cap < kMaxLenQuantum)
     throw std::invalid_argument("pp_max_len_that_fits: the cap " + std::to_string(cap) +
                                 " is below one " + std::to_string(kMaxLenQuantum) +
                                 "-position quantum");
   require_split(d, split);
   const auto fits = [&](uint32_t len) {
-    const PpPlan p = pp_plan(d, split, len, w, kv, pf);
+    const PpPlan p = pp_plan(d, split, len, w, kv, pf, x);
     for (uint32_t i = 0; i < kPpDevices; ++i)
       if (p.dev[i].total() + reserve > device_bytes[i]) return false;
     return true;
@@ -310,11 +415,17 @@ uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const P
 PpChoice pp_auto_split_and_len(const model::ModelDesc& d, const PpWeights& w,
                                const std::array<size_t, kPpDevices>& device_bytes, size_t reserve,
                                uint32_t cap, KvCache kv, const PrefillPath& pf) {
+  return pp_auto_split_and_len(d, w, device_bytes, reserve, cap, kv, pf, PpExtras{});
+}
+
+PpChoice pp_auto_split_and_len(const model::ModelDesc& d, const PpWeights& w,
+                               const std::array<size_t, kPpDevices>& device_bytes, size_t reserve,
+                               uint32_t cap, KvCache kv, const PrefillPath& pf, const PpExtras& x) {
   uint32_t best_len = 0;
   std::vector<uint32_t> at_best;
   for (uint32_t s = 1; s < d.layers; ++s) {
     if (!split_ok(d, s)) continue;
-    const uint32_t len = pp_max_len_that_fits(d, s, w, device_bytes, reserve, cap, kv, pf);
+    const uint32_t len = pp_max_len_that_fits(d, s, w, device_bytes, reserve, cap, kv, pf, x);
     if (len == 0) continue;
     if (len > best_len) {
       best_len = len;
@@ -323,7 +434,7 @@ PpChoice pp_auto_split_and_len(const model::ModelDesc& d, const PpWeights& w,
     if (len == best_len) at_best.push_back(s);
   }
   if (best_len == 0) return {};
-  return {best_split_at(d, w, best_len, kv, pf, at_best), best_len};
+  return {best_split_at(d, w, best_len, kv, pf, x, at_best), best_len};
 }
 
 std::string pp_describe(const PpPlan& p, const std::array<size_t, kPpDevices>& device_bytes,
@@ -334,11 +445,12 @@ std::string pp_describe(const PpPlan& p, const std::array<size_t, kPpDevices>& d
   char head[256];
   std::snprintf(head, sizeof head,
                 "pipeline plan at max_len %u, split %u (device 0 layers [0, %u): %u GDN + %u FA, "
-                "device 1 layers [%u, %u): %u GDN + %u FA)%s%s%s",
+                "device 1 layers [%u, %u): %u GDN + %u FA)%s%s%s%s",
                 p.max_len, p.split, s0.last, s0.gdn, s0.fa, s1.first, s1.last, s1.gdn, s1.fa,
                 p.kv_cache == KvCache::Int8 ? ", int8 KV cache" : "",
                 p.prefill.prefill ? ", prefill " : "",
-                p.prefill.prefill ? prefill_backend_name(p.prefill.backend) : "");
+                p.prefill.prefill ? prefill_backend_name(p.prefill.backend) : "",
+                p.extras.mtp ? ", the MTP head on device 1" : "");
   std::string out = head;
   for (uint32_t i = 0; i < kPpDevices; ++i) {
     const std::string label = "\n  device " + std::to_string(i);
@@ -351,6 +463,23 @@ std::string pp_describe(const PpPlan& p, const std::array<size_t, kPpDevices>& d
     out += tail;
     if (p.dev[i].prefill_link != 0) {   // spec 16c; 16b's line is unchanged without it
       std::snprintf(tail, sizeof tail, " + prefill hand-off %zu B", p.dev[i].prefill_link);
+      out += tail;
+    }
+    // Spec 16d's terms, only when present: 16b's and 16c's lines are unchanged without them.
+    if (p.dev[i].embed_replica + p.dev[i].mtp_weights != 0) {
+      std::snprintf(tail, sizeof tail,
+                    "; MTP: head %.3f GB + embedding replica %.3f GB in model, %.3f GB in decode state",
+                    p.dev[i].mtp_weights / gb, p.dev[i].embed_replica / gb,
+                    (p.dev[i].mtp_buffers + p.dev[i].mtp_prefill) / gb);
+      out += tail;
+    } else if (p.dev[i].mtp_buffers != 0) {
+      std::snprintf(tail, sizeof tail, "; MTP: its layers' verify slots %.3f GB in decode state",
+                    p.dev[i].mtp_buffers / gb);
+      out += tail;
+    }
+    if (p.dev[i].shadows != 0) {
+      std::snprintf(tail, sizeof tail, "; prefix-cache block shadows %.3f GB in prefill scratch",
+                    p.dev[i].shadows / gb);
       out += tail;
     }
   }
