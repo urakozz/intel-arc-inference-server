@@ -46,9 +46,11 @@ void K2Engine::prepare_prefill() {
   const model::K2Desc& d = *model_.desc;
   // A missing binary is named here, before anything is allocated or appended (the decode
   // capture's rule); the head's binaries are decode's, which the capture already checked.
-  for (const std::string& v : kernels::k2::prefill_variants(d))
+  const bool kv8 = buffers_.kv_cache() == KvCache::Int8;   // spec 18e: the int8 cache's binaries
+  for (const std::string& v : kernels::k2::prefill_variants(d, kv8))
     require(std::ifstream(kernels::path(v)).good(),
-            v + " is not compiled (" + kernels::path(v) + "): build with B70_K2=ON (spec 18c)");
+            v + " is not compiled (" + kernels::path(v) + "): build with B70_K2=ON (spec 18c)" +
+                (kv8 ? " and B70_KV8=ON (spec 18e)" : ""));
   pf_ = std::unique_ptr<K2PrefillState, void (*)(K2PrefillState*)>(new K2PrefillState(ctx_, d),
                                                                     &destroy_prefill);
   pf_bytes_ = pf_->s.bytes();

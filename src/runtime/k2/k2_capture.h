@@ -27,6 +27,13 @@
 // B70_K2_ATTN=eager (spec 18 §10.1) binds k2_attn_eager.cl's score / softmax / P·V / reduce in
 // place of every layer's decode + reduce: 813.
 //
+// Spec 18e, buffers built with the int8 KV cache (K2Buffers::kv_lay): the same walk and the same
+// launch counts with k2_kv8.cl's binaries in three places - MoVA's value experts write the routed
+// mix to a staging row (attn_out[m][kv_n], k2_mova MOVA_STAGE), k2_attn_prep_kv8 rotates q and
+// rotates + quantises K and V (V from the fused row or that staging row) into the int8 rows and
+// fp16 scales, and the attention pair (or eager's score / P·V / reduce) reads int8 and un-rotates
+// each head before the softplus gate.
+//
 // The residual stream: a dense layer's down leaves its partials for the next layer's fold
 // (S_PREV = down's S); a MoE layer's k2_moe_down folds into `resid` itself, so the fold that
 // follows it is SP0. tap (debug): `resid` copied after each layer's last launch - layer L's
