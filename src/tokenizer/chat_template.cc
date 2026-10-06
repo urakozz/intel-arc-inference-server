@@ -123,7 +123,19 @@ Template::Template(const std::string& dir) : impl_(std::make_unique<Impl>()) {
   const nlohmann::json config = nlohmann::json::parse(slurp(dir + "/tokenizer_config.json"));
   impl_->bos = token_string(config, "bos_token");
   impl_->eos = token_string(config, "eos_token");
-  const std::string template_source = slurp(dir + "/chat_template.jinja");
+  // Spec 20e: a checkpoint without chat_template.jinja keeps its template as tokenizer_config.json's
+  // "chat_template" string - transformers' older layout, which Kolibri-1's release (and 20b's
+  // export of it) uses. transformers reads the .jinja first when both exist; so does this.
+  const std::string jinja_path = dir + "/chat_template.jinja";
+  std::string template_source;
+  if (std::ifstream(jinja_path).good()) {
+    template_source = slurp(jinja_path);
+  } else if (config.contains("chat_template") && config.at("chat_template").is_string()) {
+    template_source = config.at("chat_template").get<std::string>();
+  } else {
+    throw std::runtime_error("chat::Template: " + dir + " has no chat_template.jinja and its "
+                             "tokenizer_config.json no \"chat_template\" string");
+  }
   // This checkpoint's template uses Jinja's unsupported `is undefined` test.
   // The source SHA keeps the equivalent minja fallback model-specific.
   static constexpr const char* kFallbackTemplateSha256 =

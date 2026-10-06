@@ -1,0 +1,13 @@
+<|im_start|>system
+You are a careful coding assistant.
+
+# Reasoning effort
+
+Reasoning is disabled. Proceed straight to answering according to the user's instructions.<|im_end|>
+<|im_start|>user
+Say hi.<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
