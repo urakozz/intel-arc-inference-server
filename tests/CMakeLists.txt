@@ -2153,10 +2153,14 @@ set_tests_properties(k2_serve_test PROPERTIES LABELS k2)
 # On the card (row 25), checkpoint: K2Engine's snapshot calls byte-exact, C1 bitwise at a block
 # end, C2 (prefix_gpu_test's sequences a-g through PrefixSession over the adapter) - bf16 KV,
 # and the `_kv8` twin under B70_KV_CACHE=int8 (spec 18e's cache).
-if(B70_K2 AND TARGET b70_k2_prefill)
+# serve_adapters.h (PinnedAlloc) and golden_common.h, as prefix_gpu_test: it links what
+# b70-serve links.
+if(B70_K2 AND B70_TOKENIZER_ENABLED AND TARGET b70_k2_prefill)
   add_executable(k2_prefix_gpu_test server/k2_prefix_gpu_test.cc)
-  target_include_directories(k2_prefix_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(k2_prefix_gpu_test PRIVATE b70_server b70_k2_prefill b70_runtime b70_loader b70_l0)
+  target_include_directories(k2_prefix_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(k2_prefix_gpu_test PRIVATE b70_server b70_tokenizer b70_k2_prefill b70_runtime
+    b70_loader b70_model b70_l0 b70_prefill_host)
   if(B70_PREFILL_ENABLED)
     b70_link_prefill(k2_prefix_gpu_test)
   endif()
