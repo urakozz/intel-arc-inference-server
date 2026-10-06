@@ -16,11 +16,11 @@
 # (buffer_sizes.cc) and the planner that adds them up (memory_plan.cc), in their own
 # archive with no Level Zero dependency - the allocations in buffers.cc and the plan
 # are the same functions, and the planner's test runs on any host.
-add_library(b70_plan STATIC buffer_sizes.cc memory_plan.cc)
+add_library(b70_plan STATIC buffer_sizes.cc memory_plan.cc pipeline_plan.cc)
 target_include_directories(b70_plan PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_plan PUBLIC b70_model)
 
-add_library(b70_runtime STATIC buffers.cc capture.cc engine.cc)
+add_library(b70_runtime STATIC buffers.cc capture.cc engine.cc pipeline_place.cc pipeline_engine.cc)
 target_include_directories(b70_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_runtime PUBLIC b70_l0 b70_model b70_loader b70_plan)
 b70_target_kernel_dir(b70_runtime)
