@@ -75,8 +75,8 @@ sigmoid_logit_add, route_norm=False, route_scale=1.0)`:
 
 | | |
 |---|---|
-| tokenizer | BPE (byte-level, "UniBPE"-trained), 127900 vocab entries + 98 added = **127998 ids** (`len(tok)`); ids 127923 and 127924 are unassigned; the head has 128000 rows |
-| specials | `<\|text\|>` 127900, `<\|endoftext\|>` **127901** (pad), `<\|pad\|>` 127902, `<\|chat\|>` 127903, `<\|im_start\|>` **127904**, `<\|/role\|>` 127905, `<\|im_end\|>` **127906** (EOS), PII placeholders 127913-127922, reserved 127925-127999 |
+| tokenizer | BPE (byte-level, "UniBPE"-trained), 127900 vocab entries + 98 added = **127998 ids** (`len(tok)`), ids 0..127997 contiguous; **ids 127998 and 127999 have no token** - the head's last two rows (corrected 2026-10-06 by spec 20e's tokenizer facts, `tests/tokenizer/kolibri_tokenizer.json`: this line said 127923 and 127924, which are `<\|reserved-token-2\|>` / `-3\|>`) |
+| specials | `<\|text\|>` 127900, `<\|endoftext\|>` **127901** (pad), `<\|pad\|>` 127902, `<\|chat\|>` 127903, `<\|im_start\|>` **127904**, `<\|/role\|>` 127905, `<\|im_end\|>` **127906** (EOS), PII placeholders 127913-127922, reserved 127923-127997 (`<\|reserved-token-2..76\|>`) |
 | not special (plain added) | `<think>` 127907, `</think>` 127908, `<tool_call>` 127909, `</tool_call>` 127910, `<tool_response>` 127911, `</tool_response>` 127912 - single ids, decoded as text |
 | BOS | none (`bos_token` null, `add_bos_token` false); `tok("Hallo")` = [38241] |
 | EOS | `config.json` `eos_token_id` 127906; `generation_config.json` **[127906, 127901]** - the engine's stop set is both |
