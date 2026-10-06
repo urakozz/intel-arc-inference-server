@@ -26,6 +26,7 @@ has to run is [superpowers/plans/box-validation-queue.md](superpowers/plans/box-
 |---|---|---|---|---|---|
 | checkpoint | published | published | published (spec 15 §13) | published | **not made** (spec 20b) |
 | `b70-serve` | yes | yes | yes | yes (spec 18d, box gates pending) | **refused** (spec 20e) |
+| `b70-serve --pp 2` (two cards, spec 16d) | yes, never run | yes, never run | yes, never run | **refused** (one card) | **refused** (spec 20e) |
 | `b70-decode` | yes | yes | yes | yes | decode and prefill (spec 20d), **two cards** (`--pp 2`, the default) |
 | ran on a B70 | yes (see above) | no | no | no | no |
 | MTP head (`--mtp`) | yes | yes | yes (MoE head) | none | none |
@@ -89,6 +90,36 @@ python3 tools/oracle/tokenize.py <snapshot> decode $(cat out.ids)
 
 `tests/golden/prompts/{prose,code,cjk}.ids` are ready-made ids for the Qwen tokenizer
 (Qwen3.8 and Agnes share it).
+
+**Two cards (`--pp 2`, spec 16).** Qwen3.8, Agnes and Ornith run with their layers split over
+GPUs 0 and 1 of what `ZE_AFFINITY_MASK` shows: `b70-decode --pp 2` (decode, spec 16b; the
+two-card prefill with `--prefill`, spec 16c; `--mtp`, spec 16d) and `b70-serve --pp 2` (spec
+16d, everything the server does on one card). One answer is not faster on two cards; each card
+holds about half the model, so `--max-len auto` reaches the trained 262144 tokens on every one
+of them (derived, int8 head; with `--mtp` too), and a long prompt prefills ~1.8x faster
+(derived). The MTP head runs on the second card with its own copy of the embedding (2.54 GB).
+K2-Horizon is one card only; Kolibri-1 runs on two cards by default in `b70-decode` (spec 20c / 20d)
+but is not served. **None of this has run on the cards yet** (queue rows 22, 23, 27):
+
+```sh
+# every command below: never run on a B70
+Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
+# an agentic session over both cards: 262144 tokens with MTP (derived; one card: ~170k)
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --host 0.0.0.0 --port 8000 --served-name qwen \
+    --pp 2 --prefix-split-last --mtp auto
+# the same with the int8 KV cache and the peer hand-off (both cards ~16 GB, derived)
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --served-name qwen --pp 2 --mtp auto \
+    --kv-cache int8 --pipeline-handoff peer
+# Agnes over two cards: 262144 instead of ~140k (derived)
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ \
+    --served-name agnes --pp 2 --prefix-split-last --mtp auto
+# b70-decode: the same ids as one card, greedy, with MTP across the split
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode $Q --ids tests/golden/prompts/prose.ids --n 64 \
+    --prefill --lm-head int8 --pp 2 --mtp 3
+```
+
+Startup prints the split (`split: auto -> N`), the plan per card and both cards' memory lines.
+Not with `--device`, `--prefill-backend sycl-tla` or `B70_PREFILL_ATTN=composed`.
 
 ## Qwen3.8-27B
 
