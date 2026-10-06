@@ -243,12 +243,15 @@ int k3b(const std::string& snap, const std::string& ids_path) {
 // composed path), on l0-int8 and l0, at max_len 32768. Each prefix length (4096, 8192,
 // 16384, 32704, or the oracle file's) is prefilled in a bf16-KV engine and then in an
 // int8-KV engine - one engine at a time: two do not fit beside each other.
-//   bar (PROVISIONAL - plan 12a §5's Agnes-derived tolerance, to be re-derived from the
-//   Qwen3.8 repeat): last-row logits 1 - cos(int8, bf16) <= 5e-4 at every depth, every logit
-//   finite; with the oracle file, also mean cos vs oracle drop (bf16 - int8) <= 5e-4.
+//   bar (from the Qwen3.8 repeat of 12a, docs/probe-int8-kv-qwen38-2026-10-06.md): last-row
+//   logits 1 - cos(int8, bf16) <= 2e-3 at every depth and <= 5e-4 averaged over the depths,
+//   every logit finite; with the oracle file, also mean cos vs oracle drop (bf16 - int8)
+//   <= 5e-4. One row's 1 - cos has a heavy tail (the repeat's rotkv: 7.7e-5 at the 4096 row,
+//   1.26e-3 at t1's last row, where fp32 attention alone moves it 6.3e-4), so the per-depth
+//   bar only catches breakage and the mean carries the 5e-4.
 //   Information: the argmax at each depth and the first differing step of 64 greedy ids.
 int kv8(const std::string& snap, const std::string& ids_path, const std::string& oracle_path) {
-  constexpr double kTol = 5e-4;   // PROVISIONAL (spec 12 §8, plan 12a §5)
+  constexpr double kRowTol = 2e-3, kTol = 5e-4;   // the Qwen3.8 repeat of 12a (spec 12 §8)
   std::unique_ptr<golden::Golden> oracle;
   size_t vocab = 0;
   std::vector<int32_t> at = {4096, 8192, 16384, 32704};
@@ -265,8 +268,8 @@ int kv8(const std::string& snap, const std::string& ids_path, const std::string&
   const uint32_t max_len = 32768;
   CHECK(size_t(at.back()) + 64 <= max_len && size_t(at.back()) <= all.size());
   std::printf("Q3 (spec 12b): int8 KV against bf16 KV at %zu prefix lengths of %s, flash, max_len %u;"
-              " bar 1 - cos <= %g (PROVISIONAL)%s\n",
-              at.size(), ids_path.c_str(), max_len, kTol, oracle ? ", and the oracle drop" : "");
+              " bar 1 - cos <= %g per depth, <= %g mean%s\n",
+              at.size(), ids_path.c_str(), max_len, kRowTol, kTol, oracle ? ", and the oracle drop" : "");
   l0::Context ctx(0);
   using B = runtime::PrefillBackend;
   const B backends[2] = {B::L0Int8, B::L0};
@@ -294,11 +297,12 @@ int kv8(const std::string& snap, const std::string& ids_path, const std::string&
     return size_t(std::max_element(v.begin(), v.end()) - v.begin());
   };
   for (int bi = 0; bi < 2; ++bi) {
-    double drop = 0;
+    double drop = 0, mean = 0;
     for (size_t i = 0; i < at.size(); ++i) {
       const Run &a = runs[0][bi][i], &b = runs[1][bi][i];
       const double cs = cosine(a.logits, b.logits);
-      const bool pass = 1.0 - cs <= kTol;
+      mean += (1.0 - cs) / double(at.size());
+      const bool pass = 1.0 - cs <= kRowTol;
       ok &= pass;
       std::printf("  %-8s n %5d: 1 - cos(int8 KV, bf16 KV) %.3e, argmax %zu / %zu -- %s\n",
                   runtime::prefill_backend_name(backends[bi]), at[i], 1.0 - cs, argmax(b.logits),
@@ -309,6 +313,12 @@ int kv8(const std::string& snap, const std::string& ids_path, const std::string&
         drop += (c16 - c8) / double(at.size());
         std::printf("            vs oracle: bf16 KV %.9f, int8 KV %.9f\n", c16, c8);
       }
+    }
+    {
+      const bool pass = mean <= kTol;
+      ok &= pass;
+      std::printf("  %-8s mean 1 - cos over the depths %.3e -- %s\n",
+                  runtime::prefill_backend_name(backends[bi]), mean, pass ? "PASS" : "FAIL");
     }
     if (oracle) {
       const bool pass = drop <= kTol;
@@ -326,7 +336,7 @@ int kv8(const std::string& snap, const std::string& ids_path, const std::string&
     std::fflush(stdout);
   }
   CHECK(ok);
-  std::puts("flash_long_test OK -- Q3 (spec 12b): int8 KV within the PROVISIONAL tolerance of bf16 KV at 32k");
+  std::puts("flash_long_test OK -- Q3 (spec 12b): int8 KV within tolerance of bf16 KV at 32k");
   return 0;
 }
 

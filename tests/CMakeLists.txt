@@ -1566,8 +1566,9 @@ if(B70_KV8)
   # Engine's, the planner's and b70-decode's default). Bars unchanged unless named:
   #   Q2   golden_gate_kv8 / _i8head_kv8 (decode), prefill_gate_{int8,l0}_kv8 - the tie
   #        rule's allowance unchanged; kv8_vs_oracle_test - mean logit cos vs the oracle
-  #        within 1e-4 of bf16 KV's (PROVISIONAL, tools/probe/kv8_vs_oracle.sh).
-  #   Q3   flash_long_kv8_test - 1 - cos(int8 KV, bf16 KV) <= 5e-4 at 4k..32k (PROVISIONAL);
+  #        within 1e-4 of bf16 KV's (tools/probe/kv8_vs_oracle.sh; the Qwen3.8 repeat of 12a).
+  #   Q3   flash_long_kv8_test - 1 - cos(int8 KV, bf16 KV) <= 2e-3 at each of 4k..32k and
+  #        <= 5e-4 averaged over them (the Qwen3.8 repeat of 12a);
   #        passkey 3/3 at 120k (and at 250k, which only int8 fits) is run by hand:
   #        B70_KV_CACHE=int8 tools/probe/passkey.sh l0-int8.
   #   Q4   A4 by hand: B70_KV_CACHE=int8 tools/toolcall/engine_generate.sh into its own dir.

@@ -83,6 +83,10 @@ narrative, and the numbered guides cite them where they matter.
   tiled) and end to end. Not a stop. Per-token K fails on outlier channels; KIVI and
   rotated K tie; rotating V too (`rotkv`) is best and below the bf16 eager path's own
   error. Proposed `rotkv` (decide), Q3 tolerances, and the Qwen3.8 repeats for the box
+- [probe-int8-kv-qwen38-2026-10-06.md](probe-int8-kv-qwen38-2026-10-06.md) - the 12a
+  repeat on **Qwen3.8** (Mac CPU, plan 12b Task A): `rotkv` holds (golden cos mean
+  0.99995-0.99997, above the stop rule; replay flat to 32k, below bf16 eager's own error).
+  Sets 12b's tolerances: Q2 1e-4 confirmed; Q3 2e-3 per depth and 5e-4 averaged.
 - [probe-agnes-2026-10-03.md](probe-agnes-2026-10-03.md) - spec 14 phase 1, on the
   Mac: Agnes 3.0 Flash from its own files (72 layers, W 18.344 GB from the headers), the
   CPU reference, the parallel-FFN fold (bit-exact on the weights, C++ byte-identical to
