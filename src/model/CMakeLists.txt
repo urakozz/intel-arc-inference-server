@@ -12,3 +12,10 @@ target_include_directories(b70_model PUBLIC ${CMAKE_SOURCE_DIR}/src)
 add_library(b70_k2_model STATIC k2_horizon.cc)
 target_include_directories(b70_k2_model PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_k2_model PUBLIC b70_model)
+
+# --- Spec 20c: Kolibri-1 -----------------------------------------------------------------
+# Kolibri-1 as data, BESIDE qwen3_5 and K2 (spec 20 §4): its own table, sharing GemvShape /
+# WeightKind / Fuse from qwen35.h. Host only.
+add_library(b70_kolibri_model STATIC kolibri1.cc)
+target_include_directories(b70_kolibri_model PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_kolibri_model PUBLIC b70_model)
