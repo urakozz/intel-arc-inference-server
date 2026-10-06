@@ -886,12 +886,12 @@ st_r14_golden_eager() {
   jgrab k2-golden-eager 'k2_golden_eager' 'attention|tie|routing|determined|differ|OK|PASS|FAIL'
   finish
 }
-stage r14.cli 14 default gpu k2 r14.k1 "CLI: b70-decode <k2> --ids (oracle-out-k2/prose.ids, else the committed prose.ids) --n 32; --max-len auto -> ~46592 (bf16 head) / ~49920 (--lm-head int8), derived; b70-serve <k2> refuses, naming 18d's engine side (spec 18 §12)"
+stage r14.cli 14 default gpu k2 r14.k1 "CLI: b70-decode <k2> --ids (oracle-out-k2/prose.ids, else the committed prose.ids) --n 32; --max-len auto -> ~46592 (bf16 head) / ~49920 (--lm-head int8), derived; b70-serve <k2> --mtp 1 refuses before the device (K2 has no MTP head; serving K2 is row 25's)"
 st_r14_cli() {
   chk "ids=oracle-out-k2/prose.ids; [ -s \$ids ] || ids=tests/golden/prompts/prose.ids; echo \"ids: \$ids\"; timeout 1800 build/src/cli/b70-decode $SNAP_K2 --ids \$ids --n 32 | tr '\\n' ' '; echo" "b70-decode --ids --n 32"
   chk "n=\$(tools/box_validate/auto_len.sh $SNAP_K2) && echo \"K2 max_len auto, bf16 head: \$n\"" "--max-len auto, bf16 head"
   chk "n=\$(tools/box_validate/auto_len.sh $SNAP_K2 --depth 16 --tg 1 --lm-head int8) && echo \"K2 max_len auto, int8 head: \$n\"" "--max-len auto, int8 head"
-  xfail "timeout 900 build/src/cli/b70-serve $SNAP_K2 --port $PORT --max-len 16384" 'is not served yet: spec 18d.s engine side' "b70-serve"
+  xfail "timeout 900 build/src/cli/b70-serve $SNAP_K2 --port $PORT --max-len 16384 --mtp 1" 'K2-Horizon has no MTP head' "b70-serve --mtp 1"
   grab_all generate '^generate:|^ids: ' 4
   grab_all auto '^K2 max_len auto' 2
   finish
@@ -1023,7 +1023,8 @@ row 16 "spec 15e - Ornith 1.5 served: template, tool calls, the MoE MTP head (sp
 rownote 16 "Everything after r16.kernels needs the int4 checkpoint (SNAP_ORNITH, 15a) and should follow rows 10 and 13; mtp_head_ornith_test (M1) also needs 15a's oracle-out-ornith-mtp/. Without them those stages SKIP with 'missing data'."
 rownote 16 "Since spec 15 §13 Ornith's greedy argmax masks from 248077, the int4 checkpoint's tokenizer.json count (Qwen3.8's argmax_stage1_M{1..4}; the _V248070 binaries stay built, unbound), so b70-serve's startup note comparing the two does not fire for Ornith: r16.serve checks it is absent. Its a||b is int4 (gemv_M{1..4}_K2048_N128_S1_L1; r16.r0 checks they are built)."
 rownote 16 "An Ornith --mtp-cost default (and a default K) from r16.cost's table is an edit on a branch after the run."
-rownote 16 "A4 against bf16 Ornith needs an Ornith tool-call set rendered with its own template and 15a's bf16 reference run: r16.a4 lists the steps."
+rownote 16 "A4 against the Ornith reference (plan 15e Task 3 Step 1) needs oracle-out-ornith-a4/ - the Ornith tool-call set (Qwen3.8's 36 conversations rendered by Ornith's own template) and the reference's <name>.bf16.txt - made on the Mac from the int4 checkpoint (r16.a4_ref: tools/toolcall/a4_ref.sh ornith set / ref, hours) and copied by --push-data; r16.a4 (opt-in) then runs the engine and scores. No bar: recorded beside Qwen3.8's 25/36."
+rownote 16 "Determinism and replay on Ornith (plan 15e Task 3 Step 1) are row 10's / 13's gates (ornith_decode_test, ornith_prefill_* replay and chunking bitwise); C2 is r16.prefix, passkey r16.passkey (opt-in), the comparison rows r16.benchy (opt-in). The record (BENCHMARKS 'Ornith 1.5 MoE (spec 15)', spec 15 §10) is filled from those numbers on a branch."
 
 stage r16.r0 16 default gpu qwen - "R0: every pre-existing binary identical (no .cl changed), the Qwen3.8 suite (G0); 15e's binaries built (moe_M{2,3,4}, gdn_step_slots_M{1..4}_G30_GK16V32, the prefill head-KV fill, the int4 a||b gemv_M{1..4}_K2048_N128_S1_L1 and Qwen3.8's argmax_stage1_M{1..4}, spec 15 §13); Qwen3.8's MTP suite unchanged (mtp_head, mtp_verify, mtp_gpu, load_checkpoint: the draft list's dense branch and the launch asserts are new code on that path)"
 st_r16_r0() {
@@ -1133,18 +1134,30 @@ st_r16_benchy() {
   grab_all benchy '^\| ' 60
   finish
 }
-stage r16.a4 16 manual - ornith - "plan 15e Task 3 Step 1: A4 on Ornith against bf16 Ornith (needs an Ornith tool-call set and 15a's bf16 reference)"
+stage r16.a4_ref 16 manual - ornith - "plan 15e Task 3 Step 1's data, ON THE MAC: the Ornith tool-call set and its reference from the int4 checkpoint (tools/toolcall/a4_ref.sh; one 28 GB container at a time), then --push-data"
+st_r16_a4_ref() {
+  say "tools/toolcall/a4_ref.sh ornith set      # oracle-out-ornith-a4/set: make_set.py --from tests/golden/toolcall with Ornith's template (minutes)"
+  say "tools/toolcall/a4_ref.sh ornith ref      # oracle-out-ornith-a4/<name>.bf16.{ids,txt}: ornith_ref.py streamed, 192 new ids, detached (hours)"
+  say "tools/toolcall/a4_ref.sh ornith status   # until DONE; then tools/box_validate.sh --push-data copies oracle-out-ornith-a4 to the box"
+}
+stage r16.a4 16 optin gpu ornith,oracle_ornith_a4 r16.kernels "plan 15e Task 3 Step 1: A4 on Ornith against its reference (oracle-out-ornith-a4) - engine_generate.sh on Ornith's own set (l0-int8 with the bf16 and the int8 head, l0), 192 ids, score.py; then the set as chat requests through b70-serve (tool calls back as OpenAI tool calls, the prompt ids = the set's)"
 st_r16_a4() {
-  say "# an Ornith set: tests/golden/toolcall's scenarios rendered with Ornith's chat_template.jinja (Qwen3.5's) and tokenized by its tokenizer.json, as tests/golden/toolcall-agnes was made for Agnes"
-  say "tools/oracle/run_in_container.sh 'python3 tools/toolcall/oracle_generate.py <the bf16 Ornith snapshot> tests/golden/toolcall-ornith /scratch/ornith-toolcall-ref'"
-  say "flock ~/b70-gpu.lock env ZE_AFFINITY_MASK=0 tools/toolcall/engine_generate.sh \$(tools/box_validate/data.sh resolve $SNAP_ORNITH) tests/golden/toolcall-ornith ~/ornith-toolcall-out l0-int8"
-  say "python3 tools/toolcall/score.py ~/ornith-toolcall-out bf16 l0-int8      # recorded beside Qwen3.8's 25/36"
+  local d=$STATE/a4-ornith
+  x "mkdir -p $d && cp oracle-out-ornith-a4/*.bf16.txt $d/"
+  chk "tools/toolcall/engine_generate.sh \$(tools/box_validate/data.sh resolve $SNAP_ORNITH) oracle-out-ornith-a4/set $d l0-int8" "A4 engine runs, l0-int8, bf16 head"
+  chk "LM_HEAD=int8 tools/toolcall/engine_generate.sh \$(tools/box_validate/data.sh resolve $SNAP_ORNITH) oracle-out-ornith-a4/set $d l0-int8" "A4 engine runs, l0-int8, int8 head (the served default)"
+  chk "tools/toolcall/engine_generate.sh \$(tools/box_validate/data.sh resolve $SNAP_ORNITH) oracle-out-ornith-a4/set $d l0" "A4 engine runs, l0"
+  chk "python3 tools/toolcall/score.py $d bf16 l0-int8 l0-int8-i8head l0 | tee $d/score.md" "scoring against the reference"
+  chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE.serve ornith-set 1 $SNAP_ORNITH --max-len 16384 -- --set oracle-out-ornith-a4/set --max-tokens 192 --stop-at-eos" "Ornith's set through b70-serve"
+  x "grep -o '\"finish_reason\": \"[a-z_]*\"' $STATE/$STAGE.serve/requests.jsonl | sort | uniq -c; grep -c '\"prompt_ids_match\": true' $STATE/$STAGE.serve/requests.jsonl"
+  grab_all a4 'match|/ 36|/36' 8
+  finish
 }
 
 # ======================================================================================
 row 17 "spec 18d host side - K2-Horizon's template, tokenizer, tool calls and server dispatch (spec 18 §12, plan 18d)"
-rownote 17 "No device code: G0's g0.sha is the 'no kernel touched' check. b70-serve <k2> still refuses, now naming 18d's engine side: r14.cli matches the current text."
-rownote 17 "The engine half of 18d (a K2 engine behind b70-serve, KV-only prefix snapshots, plan 18d Tasks 1-3: greedy chat through the server = b70-decode, K4, the comparison rows) is not built; it follows row 15 on the card."
+rownote 17 "No device code: G0's g0.sha is the 'no kernel touched' check. Since 18d's engine side (row 25) b70-serve serves K2; r14.cli checks its --mtp refusal instead of the old one."
+rownote 17 "The engine half of 18d (K2Engine behind b70-serve, KV-only prefix snapshots, the greedy chat through the server = b70-decode, K4, the comparison rows) is row 25; it follows rows 14, 15 and 21 on the card."
 stage r17.host 17 default cpu - - "the 18d host tests: template_k2_test (18 lists byte-identical, the vendored tests/tokenizer/k2/), toolcall_k2_test, k2_server_test, minja_ext_test (the minja patches against Jinja2), k2_tokenizer_test (K2's tokenizer.json from the int4 snapshot in the HF cache, or B70_K2_TOKENIZER_JSON; SKIP without)"
 st_r17_host() {
   run_tests '^(template_k2_test|k2_tokenizer_test|toolcall_k2_test|k2_server_test|minja_ext_test)$'
@@ -1673,10 +1686,110 @@ st_r24_sweeps() {
   say "# record: docs/BENCHMARKS.md 'Kolibri-1 (spec 20)'"
 }
 
-# ======================================================================================
-row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
+# ===============================================================================row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri labels belong to their rows)"
 st_x_rest() {
   run_tests '.' '' 'agnes ornith kv8 k2 longctx kolibri'
+=======
+row 25 "spec 18d engine side - K2-Horizon served: K2Engine behind b70-serve, KV-only prefix snapshots, K4 (A4, passkey), the comparison rows (spec 18 §14, plan 18d)"
+rownote 25 "After rows 14 / 15 (K2's decode and prefill on the card) and 21 (its int8 KV); 17 is the host half. 18d adds no kernel: G0's g0.sha is the 'nothing moved' check. Everything after r25.reject needs SNAP_K2; the A4 stages need oracle-out-k2-a4 (r25.a4_ref makes it on the box CPU: hours)."
+rownote 25 "A4 has no bar (spec 18 K4): the engine against 18a's reference (k2_ref.py, bf16 mode, on the int4 checkpoint dequantised) on K2's own set (xml calls, reasoning_effort low, 512 ids) is recorded; 'reasoning' cells (the budget ran out inside the reasoning) are read, not failed."
+rownote 25 "Review Focus 4 (the comparison rows) is r25.benchy, opt-in: b70-serve on ONE card at decision 2's 32k (bf16 KV) and at the int8-KV auto length, against the recorded vLLM baseline (TWO B70s, PP = 2, fp8 KV, 390,016 tokens, 44.43 t/s decode, spec 18 §7) - every row says which configuration. The record (BENCHMARKS 'K2-Horizon (spec 18)', spec 18 §10's amendment, README, docs/03, docs/13) is plan 18d Task 3, an edit on a branch after the run."
+stage r25.k0 25 default cpu - g0.sha,g0.bitwise,g0.suite "K0: 18d adds no kernel (every binary identical, G0) and the Qwen-family server path is unchanged - G0's suite (prefix_gpu_*, golden_server_test, snapshot_test), r17.k0, and here prefix_cache_test / prefix_server_test (the store's zero-byte snapshots are new code there); K2's decode and prefill gates not failed (rows 14 / 15 / 21; a SKIP for missing data is noted, not counted)"
+st_r25_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  need_ok r17.k0 r14.k3 r15.prefill r15.split r21.k3
+  run_tests '^(prefix_cache_test|prefix_server_test)$'
+  finish
+}
+stage r25.host 25 default cpu - - "host: k2_serve_test (the snapshot runs on K2's shapes, save / load on host buffers, C2's sequences through PrefixSession bitwise a cold run's in both KV forms, the server's greedy chat = the decode run, a cached second turn, seeded sampling), k2_server_test, toolcall_k2_test"
+st_r25_host() {
+  run_tests '^(k2_serve_test|k2_server_test|toolcall_k2_test)$'
+  jgrab host '^k2_serve_test$' 'layout|round trip|restore|continue|server|OK|FAIL'
+  finish
+}
+stage r25.reject 25 default cpu - - "b70-serve's refusals before the device (tests/model/k2: config.json only): --mtp 1, --spec mtp, --spec lookup, --prefill-backend l0-int8 for K2 by name; --pp 2 for any model (one card)"
+st_r25_reject() {
+  run_tests '^cli_reject_serve_(k2_mtp|k2_spec_mtp|k2_lookup|k2_prefill_int8|pp)$'
+  finish
+}
+stage r25.snapshot 25 default gpu k2 r15.prefill "Review Focus 3 on the card: k2_prefix_gpu_test and _split - K2Engine's save_kv / load_kv byte-exact over 4100 positions, C1 bitwise (restored at the block end 4096 + prefill [4096, 4100) = the cold run's 32 ids and logits rows), C2's sequences a-g through PrefixSession over b70-serve's adapter under the tie-aware rule (the bitwise rows counted; c / d / f restore at block ends and should be bitwise)"
+st_r25_snapshot() {
+  run_tests '^k2_prefix_gpu(_split)?_test$' k2
+  jgrab c1-c2 '^k2_prefix_gpu' 'byte-identical|C1|bitwise|restore|continue|near-tie|bad|OK|FAIL'
+  finish
+}
+stage r25.snapshot_kv8 25 default gpu k2 r25.snapshot,r21.k3 "Review Focus 3 over the int8 cache: k2_prefix_gpu_kv8_test (B70_KV_CACHE=int8: the rows and their fp16 scales in the snapshots, the store keyed by K2's int8 root)"
+st_r25_snapshot_kv8() {
+  run_tests '^k2_prefix_gpu_kv8_test$' k2
+  jgrab c1-c2-kv8 '^k2_prefix_gpu_kv8_test$' 'byte-identical|C1|bitwise|restore|near-tie|bad|OK|FAIL'
+  finish
+}
+stage r25.serve 25 default gpu k2 r15.prefill "b70-serve <k2> startup and one request: --max-len auto -> 45824 (bf16 KV, the int8 head b70-serve defaults to, the prefill scratch planned; derived) and with --kv-cache int8 -> 90368 (derived); the startup line names K2's chat format, prefill l0, mtp none, the KV-only snapshots; a seeded sampled request twice, identical"
+st_r25_serve() {
+  serve "$SNAP_K2"
+  x "PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $SNAP_K2 --kv-cache int8"
+  step_rc $? "b70-serve <k2> --kv-cache int8, seeded sampling"
+  grab_all auto 'max_len: auto ->' 4
+  grab_all memory '^memory:' 4
+  grab_all startup '^b70-serve: .*K2-Horizon' 4
+  grab_all seeded '^SEEDED ' 2
+  finish
+}
+stage r25.chat 25 default gpu k2 r25.serve "plan 18d Task 1: a short greedy chat through the server equal to b70-decode on the same ids - golden_server_test --chat (prose / code / cjk as one user message each, 32 ids, temperature 0; b70-decode --ids <the response's prompt_token_ids> --n 32 --prefill --lm-head int8), run directly (not registered for K2: without a checkpoint it would fail, not SKIP)"
+st_r25_chat() {
+  chk "timeout 1800 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $SNAP_K2 --chat" "golden_server_test --chat against K2-Horizon"
+  grab_all chat 'chat of [0-9]+ prompt ids' 3
+  finish
+}
+stage r25.passkey 25 default gpu k2,oracle_image r15.prefill "K4: passkey 3/3 at 5 / 50 / 95 % of the chosen context (tools/probe/k2_passkey.sh's placements) - decision 2's one-card 32k with bf16 KV (MAX_LEN 32768, 31000 ids) and the bf16-KV auto length (~42752, 40000 ids); the int8-KV ceiling is r21.passkey's (opt-in)"
+st_r25_passkey() {
+  chk "MODEL=$SNAP_K2 MAX_LEN=32768 N_TARGET=31000 tools/probe/k2_passkey.sh bf16" "passkey at 32768, bf16 KV"
+  chk "MODEL=$SNAP_K2 N_TARGET=40000 tools/probe/k2_passkey.sh bf16" "passkey near the bf16-KV auto length"
+  grab_all passkey '^passkey k2 [^ ]+( placement [0-9.]+)?: ' 8
+  finish
+}
+stage r25.toolcall 25 default gpu k2,k2_a4_set r25.serve "K2's own A4 set (oracle-out-k2-a4/set: xml calls, reasoning_effort low) as chat requests through b70-serve with their tools and template kwargs, greedy, 512 ids: the prompt ids = the set's (the server's render = HF's, key-sorted), finish reasons (tool_calls expected), the reasoning / calls parsed"
+st_r25_toolcall() {
+  chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE.serve k2-set 1 $SNAP_K2 --max-len 16384 -- --set oracle-out-k2-a4/set --max-tokens 512 --stop-at-eos" "the K2 set through b70-serve"
+  x "grep -o '\"finish_reason\": \"[a-z_]*\"' $STATE/$STAGE.serve/requests.jsonl | sort | uniq -c; echo \"prompt ids = the set's: \$(grep -c '\"prompt_ids_match\": true' $STATE/$STAGE.serve/requests.jsonl)/36\""
+  grab_all finish '^ *[0-9]+ "finish_reason"' 4
+  grab_all prompt-ids "^prompt ids = the set" 1
+  finish
+}
+stage r25.a4_ref 25 optin cpu k2,oracle_image - "K4's data on the box CPU: K2's tool-call set (make_set.py --from with K2's template: xml, reasoning_effort low, key-sorted) and 18a's reference on it (oracle_generate.py -> k2_ref.py, bf16 mode, the int4 checkpoint dequantised, 512 ids, resumable) into \$DATA/oracle-out-k2-a4 - HOURS; then re-links oracle-out*"
+st_r25_a4_ref() {
+  chk "OUT=$DATA/oracle-out-k2-a4 tools/toolcall/a4_ref.sh k2 set" "the K2 tool-call set"
+  chk "OUT=$DATA/oracle-out-k2-a4 tools/toolcall/a4_ref.sh k2 ref" "the K2 reference run (k2_ref.py)"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "OUT=$DATA/oracle-out-k2-a4 tools/toolcall/a4_ref.sh k2 status"
+  grab_all ref '^k2: set' 2
+  finish
+}
+stage r25.a4 25 optin gpu k2,oracle_k2_a4 r25.chat "K4: A4 on K2 against 18a's reference (oracle-out-k2-a4) - engine_generate.sh on K2's set, l0, 512 ids, the bf16 and the int8 head; score.py (K2's xml calls behind its reasoning) - recorded, no bar"
+st_r25_a4() {
+  local d=$STATE/a4-k2
+  x "mkdir -p $d && cp oracle-out-k2-a4/*.bf16.txt $d/"
+  chk "N_NEW=512 tools/toolcall/engine_generate.sh \$(tools/box_validate/data.sh resolve $SNAP_K2) oracle-out-k2-a4/set $d l0" "A4 engine runs, bf16 head"
+  chk "N_NEW=512 LM_HEAD=int8 tools/toolcall/engine_generate.sh \$(tools/box_validate/data.sh resolve $SNAP_K2) oracle-out-k2-a4/set $d l0" "A4 engine runs, int8 head (the served default)"
+  chk "python3 tools/toolcall/score.py $d bf16 l0 l0-i8head | tee $d/score.md" "scoring against the reference"
+  grab_all a4 'match|/ 36' 6
+  finish
+}
+stage r25.benchy 25 optin gpu-self k2,uvx - "Review Focus 4: llama-benchy through b70-serve <k2> on one card - pp4096 tg256 depth 1 (--no-cache --exact-tg --latency-mode generation) at 32768 (bf16 KV) and at the int8-KV auto length, then prefix caching at depth 4k / 16k / 32k cache on vs off - beside vLLM's recorded PP = 2 / fp8 KV / 390k / 44.43 t/s (spec 18 §7)"
+st_r25_benchy() {
+  chk "MODEL=$SNAP_K2 MAX_LEN=32768 tools/probe/serve_benchy.sh --pp 4096 --tg 256 --concurrency 1 --depth 1 --no-cache --exact-tg --latency-mode generation" "llama-benchy pp4096 tg256, 32k bf16 KV"
+  chk "MODEL=$SNAP_K2 MAX_LEN=auto SERVE_ARGS='--kv-cache int8' tools/probe/serve_benchy.sh --pp 4096 --tg 256 --concurrency 1 --depth 1 --no-cache --exact-tg --latency-mode generation" "llama-benchy pp4096 tg256, int8 KV at auto"
+  chk "MODEL=$SNAP_K2 MAX_LEN=40960 tools/probe/serve_benchy.sh --pp 1024 --tg 64 --depth 0 4096 16384 32768 --enable-prefix-caching --exact-tg --latency-mode generation --runs 3" "llama-benchy, prefix cache on"
+  chk "MODEL=$SNAP_K2 MAX_LEN=40960 SERVE_ARGS='--prefix-cache-gb 0' tools/probe/serve_benchy.sh --pp 1024 --tg 64 --depth 0 4096 16384 32768 --enable-prefix-caching --exact-tg --latency-mode generation --runs 3" "llama-benchy, prefix cache off"
+  grab_all benchy '^\| ' 80
+  finish
+}
+
+# ======================================================================================
+row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
+stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx labels belong to their rows)"
+st_x_rest() {
+  run_tests '.' '' 'agnes ornith kv8 k2 longctx'
   finish
 }
