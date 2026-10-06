@@ -846,4 +846,9 @@ if(B70_ORNITH AND B70_MTP)
 endif()
 # ==== Spec 15e ================================================================ (end) ====
 
+# Spec 16b (pipeline parallel, `--pipeline-handoff peer`): the peer-write hand-off between
+# the two stages' decode lists - pp_send (device 0's last launch) and pp_recv (device 1's
+# first). No defines: the word counts are kernel arguments, so one binary serves every model.
+add_ocloc_kernel(pp_handoff SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pp_handoff.cl)
+
 add_subdirectory(prefill)

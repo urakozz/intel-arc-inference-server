@@ -47,6 +47,10 @@ struct PersistentBuffers : PersistentDims {
   // `kv_lay` (runtime/buffer_sizes.h KvLayout) - at bf16 exactly today's allocation.
   PersistentBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
                     KvCache kv = default_kv_cache());
+  // Spec 16b (pipeline parallel): one stage's state - `gdn_layers` GDN and `fa_layers` FA
+  // slices (PersistentDims::stage_sizes), in the same layout and allocation order.
+  PersistentBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc, KvCache kv,
+                    uint32_t gdn_layers, uint32_t fa_layers);
 
   l0::Mem control;        // shared, sizeof(Control)
   // Spec 15b: the widths are the descriptor's; the brackets give Qwen3.8's.
