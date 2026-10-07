@@ -119,13 +119,14 @@ tools/box.sh run 'tail -3 $HOME/dl-models.log'      # poll; the log ends in ALLD
 **is not in the Mac's HF cache any more**, so it is downloaded here rather than copied (see
 §1.4 for why that matters).
 
-### 1.4 Data from the Mac (by hand, **not** `--push-data`)
+### 1.4 Data from the Mac (`--push-data`, or by hand)
 
-`--push-data` first rsyncs `~/.cache/huggingface/hub/models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ`
-from the Mac. That directory is gone from the Mac's cache (checked 2026-10-07), so the rsync
-fails (exit 23) and the driver, under `set -e`, aborts before copying any golden set. Push the
-sets directly into the box's data tree (`DATA_DIR`, `~/b70-inference-server`; `pre` links every
-`oracle-out*` there into the validate and baseline trees):
+`--push-data` skips the Agnes checkpoint when the Mac no longer has it (it is gone from the
+Mac's cache, checked 2026-10-07 - download it on the box, §1.3) and pushes every golden set that
+exists, `oracle-out-kolibri-a4` included (fixed 2026-10-07; before, the Agnes rsync failed under
+`set -e` and aborted before any golden set). By hand, into the box's data tree (`DATA_DIR`,
+`~/b70-inference-server`; `pre` links every `oracle-out*` there into the validate and baseline
+trees):
 
 ```sh
 cd <main checkout>                       # where oracle-out-* live
@@ -452,7 +453,7 @@ named stage.
 | K2 attention default (`kDefaultK2Attn`) | `r14.golden` vs `r14.golden_eager` (and `r21.golden` vs `r21.golden_eager` on int8 KV); eager's cost from opt-in `r15.speed`'s eager pairs | spec 18 §10.1: `eager` if flash fails determined rows that eager passes, or both pass and eager's routing diagnostic is strictly closer; otherwise `flash`; if eager wins and costs > ~3 % at 32k, a faster eager next |
 | K2 prefill bars (PROPOSED: KV rows >= 0.999, median >= 0.9998, p01 >= 0.99; routing margin 2e-2) | `r15.prefill`'s printed distributions | set from the distribution |
 | K2 int8 kernel bars (PROPOSED) | `r21.k1` runs at the proposals | the real numbers come from `tools/oracle/kv8_k2_repeat.sh` (4-8 h CPU, not a stage) |
-| Kolibri near-tie tolerance `B70_KOL_TIE_TOL` | `r24.oracle_synth`'s gap distribution (MoE 6th / 7th); `r24.oracle_real` after 20b | 1e-2 proposed - **cannot be overridden through the runbook today** (§5) |
+| Kolibri near-tie tolerance `B70_KOL_TIE_TOL` | `r24.oracle_synth`'s gap distribution (MoE 6th / 7th); `r24.oracle_real` after 20b | 1e-2 proposed - override with `B70_KOL_TIE_TOL=<tol> tools/box_validate.sh ...` (forwarded to r24 / r26's golden stages since 2026-10-07) |
 | Kolibri attention default | `r24.golden` vs `r24.golden_eager`, `r26.golden` vs `r26.golden_eager` | spec 18 §10.1's rule, as for K2 |
 | Kolibri prefill bars (PROPOSED: row >= 0.999 on layer 0, median >= 0.9998, p01 >= 0.99) | `r26.prefill` | set from the distribution |
 | Ornith prefill consistency (`kConsistTieRel`, `kConsistWeightAbs`) and the non-64 split bars | `r13.prefill`, `r13.split` | calibrate from the printed distribution; the split bars are Qwen3.8's (PROVISIONAL) until then |
@@ -483,13 +484,6 @@ named stage.
   continuations and the A4 bf16 ids (`GOLDEN_CONT_DIR` / `EXTRA_SOURCES`) - pull them on the
   box day (no GPU). 19a's Task 4 (verify at M = 5..8) needs a probe build that is not in the
   runbook.
-- **`--push-data` aborts** because the Agnes checkpoint is no longer in the Mac's HF cache
-  (§1.4); it also never copied `oracle-out-kolibri-a4` (which `r28.a4` reads).
-- **`B70_KOL_TIE_TOL` cannot be set through the runbook.** The driver's `remote_env` forwards
-  `B70_K2_TIE_TOL` but not `B70_KOL_TIE_TOL`, and `r24.golden` / `r24.golden_eager` do not pass
-  it at all (only `r26.golden`, `r26.golden_eager` and `r26.real` do). If `r24.oracle_synth`'s
-  gaps say 1e-2 is wrong, that is a two-line fix on a branch (forward it; pass it in `r24.golden`)
-  before `--redo r24.golden,r26.golden`.
 - **PROPOSED / PROVISIONAL bars everywhere** (kv8 gated flash rows, K2 prefill and int8 bars,
   Kolibri tie and partial-forward bars, Ornith consistency and split bars): a FAIL against one
   is first a reading - look at the printed distribution before calling it a bug.
