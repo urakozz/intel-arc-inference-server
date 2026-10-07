@@ -81,7 +81,4 @@ KolLoadedModel load_kolibri1(const std::vector<l0::Context*>& devices, const std
 // device): the CLI's planner needs it before the load (`--pp`, `--max-len auto`).
 model::Kolibri1Desc kolibri1_checkpoint_desc(const std::string& snapshot_or_repo, uint32_t layers_limit = 0);
 
-// `--max-len auto` (spec 6 §10): a new RoPE table of `max_len` positions on every part that has one.
-void set_max_len_kolibri1(const std::vector<l0::Context*>& devices, KolLoadedModel& m, uint32_t max_len);
-
 }  // namespace loader
