@@ -52,6 +52,7 @@ short version; this is where the reasoning and the evidence live.
 | [16-know-how.md](16-know-how.md) | the transferable findings, condensed |
 | [17-int8-prefill.md](17-int8-prefill.md) | how 2104.50 t/s prefill is computed: the int8 path on the W4A16 file, and the 12 things rejected on the way |
 | [10-the-box.md](10-the-box.md) | driving a remote build, and why an idle box matters for a benchmark |
+| [box-day-plan.md](box-day-plan.md) | the box-day run plan for the validation queue: sessions, invocations, time estimates, what to defer, what each result decides |
 
 ## Measurement records
 
