@@ -1,5 +1,7 @@
 # Box validation queue
 
+**Box day:** the session order, the exact invocations, time estimates, what to defer and which decisions each stage feeds are in [docs/box-day-plan.md](../../box-day-plan.md).
+
 Work merged into `main` without running on the card, in the order to validate it when the box is
 back. Each entry names its checklist or its tests. Remove an entry when it has passed on the box.
 
