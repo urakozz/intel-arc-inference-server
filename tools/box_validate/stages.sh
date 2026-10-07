@@ -1609,13 +1609,13 @@ st_r24_k3() {
 }
 stage r24.golden 24 default gpu oracle_kolibri_synth r24.k3 "KL2 on the synthetic checkpoints: kolibri_golden_synth_int4attn_test, _bf16attn_test, _i8head_test - the tie-aware token gate over prose / de_prose x 32 and the routing diagnostic (a non-tie set difference fails; B70_KOL_TIE_TOL 1e-2 proposed)"
 st_r24_golden() {
-  run_tests '^kolibri_golden_synth_(int4attn|bf16attn|i8head)_test$'
+  run_tests '^kolibri_golden_synth_(int4attn|bf16attn|i8head)_test$' kolibri '' "${B70_KOL_TIE_TOL:+B70_KOL_TIE_TOL=$B70_KOL_TIE_TOL}"
   jgrab golden '^kolibri_golden_synth' 'gate:|routing:|tap|OK'
   finish
 }
 stage r24.golden_eager 24 default gpu oracle_kolibri_synth r24.k3 "KL2 through the EAGER attention (B70_KOLIBRI_ATTN=eager, 2 + 5 x 17 + 4 = 91 launches): kolibri_golden_synth_int4attn_eager_test and _bf16attn_eager_test - compare with r24.golden"
 st_r24_golden_eager() {
-  run_tests '^kolibri_golden_synth_(int4attn|bf16attn)_eager_test$'
+  run_tests '^kolibri_golden_synth_(int4attn|bf16attn)_eager_test$' kolibri '' "${B70_KOL_TIE_TOL:+B70_KOL_TIE_TOL=$B70_KOL_TIE_TOL}"
   jgrab golden '^kolibri_golden_synth' 'gate:|routing:|OK'
   finish
 }
