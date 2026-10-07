@@ -944,7 +944,9 @@ int run(int argc, char** argv) {
   const runtime::PrefillPath pp_path = cli::prefill_path(
       have_prefill_len || prefill,
       have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
-  cli::check_kv_cache(kv_cache, pp_path);   // spec 12b
+  // Spec 12b's int8-KV refusals are the Qwen3.5 family's (B70_DECODE_ATTN, the composed prefill);
+  // K2-Horizon's engine has its own int8 twins for flash and eager and refuses its own backends.
+  if (!cli::k2::is_k2(path)) cli::check_kv_cache(kv_cache, pp_path);   // spec 12b
   if (profile && kv_cache == runtime::KvCache::Int8)
     throw std::runtime_error("--profile captures its own bf16-KV list; it has no --kv-cache int8");
   // Spec 16b: --pp's refusals are argument-only, so they come before the device too.

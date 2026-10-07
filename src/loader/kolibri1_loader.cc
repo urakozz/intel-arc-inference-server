@@ -251,19 +251,4 @@ KolLoadedModel load_kolibri1(const std::vector<l0::Context*>& devices, const std
   return m;
 }
 
-void set_max_len_kolibri1(const std::vector<l0::Context*>& devices, KolLoadedModel& m, uint32_t max_len) {
-  check_len(m.desc, max_len, m.trained_max_len);
-  if (devices.size() != m.parts.size()) throw std::invalid_argument("set_max_len_kolibri1: one context per part");
-  const std::vector<float> rope = kol_rope_table(m.desc, max_len);
-  for (size_t i = 0; i < m.parts.size(); ++i) {
-    KolDevicePart& P = m.parts[i];
-    if (!P.rope) continue;
-    l0::CmdList imm = l0::CmdList::immediate(*devices[i]);
-    auto fresh = upload_u(*devices[i], imm, rope.data(), rope.size() * 4);   // before the old one is freed
-    P.rope = std::move(fresh);
-    P.rope_bytes = rope.size() * 4;
-  }
-  m.max_len = max_len;
-}
-
 }  // namespace loader

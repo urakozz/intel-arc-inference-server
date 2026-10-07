@@ -796,7 +796,6 @@ int run(int argc, char** argv) {
 
   const runtime::PrefillPath pp_path = cli::prefill_path(
       true, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
-  cli::check_kv_cache(kv_cache, pp_path);   // spec 12b: before the device is touched
 
   // Spec 16d: --pp's refusals that need no checkpoint (cli/pipeline_serve.h) - the sub-flags
   // without --pp 2, --device, a sycl-tla prefill, the composed attention, prefill replay and
@@ -856,6 +855,9 @@ int run(int argc, char** argv) {
     k2.prefix_cache_gb = prefix_cache_gb;
     return serve_k2(k2, options);
   }
+  // Spec 12b: the Qwen3.5 family's int8-KV refusals, before the device is touched (K2 above has
+  // its own engine's int8 twins; Kolibri, earlier, refuses int8 KV itself).
+  cli::check_kv_cache(kv_cache, pp_path);
   const std::vector<uint32_t> eos = eos_ids(snapshot_dir);
   const uint32_t trained = loader::trained_context(snapshot_dir);
   cli::check_before_load(max_len_arg, trained, /*require_quantum=*/true);   // spec 6 §10
