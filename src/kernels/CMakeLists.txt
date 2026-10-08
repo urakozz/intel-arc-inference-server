@@ -412,6 +412,84 @@ if(B70_MTP)
   endforeach()
 endif()
 
+# ==== Spec 19a Task 4: the verify cost at M = 5..8 and DFlash's draft cost ==== (begin) ==
+# Plan: docs/superpowers/plans/2026-10-05-spec19a-dflash-p0.md, Task 4. Additive only: no
+# existing variant's name or command line moves (tools/kernel_cmdlines' diff: additions only),
+# and no engine binds any of these - only the two probes do:
+#   tools/probe/probe_mtp_steps <snap> ... <max_m = 8>   Qwen3.8's verify list at M = 5..8
+#       (runtime::build_verify over an 8-slot MtpBuffers the probe allocates; the engine's
+#       own lists stay M = 1..4 over 4 slots), int8 lm_head, bf16 KV, attention v2.
+#   tools/probe/probe_draft_cost                          DFlash2's drafter linears at M = 8
+#       rows, int8 / bf16 / int4 g64, random weights of the checkpoint's shapes, and the
+#       int8 head's K = 7 rows (full vocabulary and a 32k draft vocabulary).
+# Two source edits make M = 5..8 compile, both invisible to every existing command line
+# (their preprocessed sources are unchanged): gdn_step.cl's N_SLOTS became overridable
+# (`_N8` here: the state after row m into slot (live + m) % 8, SPEC_SLOT_STRIDE one
+# gdn_state as before), and attn_v2.cl's bound moved from M <= 4 to M <= 8.
+# Untuned: the int4 GEMV cells at M = 5..8 take add_gemv_variant's per-shape cells (the
+# M loop is independent of the load geometry); attention v2 at M = 8 holds 48 (q head,
+# row) pairs per lane and may spill - the probe measures what these binaries cost.
+option(B70_VERIFY_M8 "build the M = 5..8 verify and DFlash draft-cost probe variants (spec 19a)" ON)
+if(B70_VERIFY_M8 AND B70_MTP)
+  set(VM8_SLOT_DEFINES ${GDN_DEFINES} SPEC_SLOTS=1 CTRL_LIVE=19 SPEC_SLOT_STRIDE=37748736 N_SLOTS=8)
+  foreach(MM 5 6 7 8)
+    # the decode list at M rows (B70_MTP's M = 2..4 block's rows, int8 lm_head only)
+    add_gemv_variant(${MM} 5120 16384 1 1)     # qkv||z
+    add_gemv_variant(${MM} 6144 5120 4 0)      # out_proj, o_proj
+    add_gemv_variant(${MM} 5120 34816 8 0)     # gate||up (and the drafter's, M = 8)
+    add_gemv_variant(${MM} 17408 5120 4 0)     # down (and the drafter's, M = 8)
+    add_gemv_variant(${MM} 5120 14336 2 0)     # qkv
+    add_gemv_i8w_variant(${MM} 5120 248320)    # lm_head (int8; at M = 7 also the draft head)
+    add_gemv_bf16_variant(${MM} 5120 128 16 16)    # a||b
+    add_prep_res_fold(${MM} 5120 0 20)
+    add_prep_res_fold(${MM} 5120 4 20)
+    add_prep_norm_finish(${MM} 5120 20 20)
+    add_ocloc_kernel(prep_silu_mul_M${MM} SOURCE ${PREP_CL} DEFINES M=${MM})
+    add_ocloc_kernel(prep_gated_head_M${MM} SOURCE ${PREP_CL} DEFINES M=${MM})
+    add_ocloc_kernel(embed_gather_M${MM} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} HIDDEN=5120 VOCAB=248320)
+    add_ocloc_kernel(argmax_stage1_M${MM} SOURCE ${ARGMAX_CL} DEFINES ${ARGMAX_DEFINES} M=${MM})
+    add_attn_prep(${MM})
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2})
+    # the verify list's own: the 8-slot gdn_step and the MTP head's KV fill of M rows
+    add_ocloc_kernel(gdn_step_slots_M${MM}_N8 SOURCE ${GDN_CL} DEFINES ${VM8_SLOT_DEFINES} M=${MM})
+    add_gemv_bf16_variant(${MM} 10240 5120 64 1)   # fc
+    add_gemv_bf16_variant(${MM} 5120 14336 64 1)   # q||k||v
+    add_ocloc_kernel(prep_norm_finish_M${MM}_K5120_G20_W20_X10240 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=5120 NORM_G=20 NORM_WGS=20 X_STRIDE=10240)
+    add_ocloc_kernel(prep_res_fold_M${MM}_K5120_SP1_G20_Z SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=5120 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
+    add_ocloc_kernel(attn_prep_M${MM}_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1)
+  endforeach()
+  # DFlash2's drafter (z-lab/Qwen3.8-27B-DFlash2's config / safetensors header: 5 layers,
+  # hidden 5120, 32 q / 8 kv heads x 128, intermediate 17408, fc 25600 -> 5120, two
+  # 5120 -> 1280 conv kernel projections per layer, the selector's 5120 -> 256) at M = 8
+  # rows (the block of 8), in the three formats; the shapes are probe_draft_cost's table
+  # (tools/probe/draft_cost_shapes.h). int4 {S, layout}: gate||up and down are Qwen3.8's
+  # production cells (built above at M = 8); the rest are PROVISIONAL picks, not swept.
+  foreach(KN "5120 6144" "4096 5120" "5120 34816" "17408 5120" "5120 1280" "5120 2048"
+             "25600 5120" "5120 256")
+    separate_arguments(KN)
+    list(GET KN 0 _k)
+    list(GET KN 1 _n)
+    add_gemv_i8w_variant(8 ${_k} ${_n})
+    if(_n LESS 2048)   # kernels::gemv_bf16_tiling: N / 64 < 32 work-groups -> {16, 16}
+      add_gemv_bf16_variant(8 ${_k} ${_n} 16 16)
+    else()
+      add_gemv_bf16_variant(8 ${_k} ${_n} 64 1)
+    endif()
+  endforeach()
+  add_gemv_variant(8 5120 6144 4 0)     # q||k||v        PROVISIONAL S4 L0
+  add_gemv_variant(8 4096 5120 4 0)     # o_proj         PROVISIONAL S4 L0
+  add_gemv_variant(8 5120 1280 16 0)    # conv kernel projections  PROVISIONAL S16 L0
+  add_gemv_variant(8 5120 2048 8 0)     # the commit's k||v of the context rows  PROVISIONAL S8 L0
+  add_gemv_variant(8 25600 5120 8 0)    # fc             PROVISIONAL S8 L0
+  add_gemv_variant(8 5120 256 16 0)     # the selector's hidden projection  PROVISIONAL S16 L0
+  add_gemv_i8w_variant(7 5120 32768)    # the int8 head's K = 7 rows over a 32k draft vocabulary
+endif()
+# ==== Spec 19a Task 4 ======================================================== (end) ====
+
 # --- Spec 15b: other models' shapes ------------------------------------------
 # Every binary above is built at Qwen3.8's shapes - hidden 5120, FA 24 q / 4 kv
 # heads, GDN 16 k / 48 v heads - which the .cl sources bake by default. The

@@ -229,7 +229,12 @@
 #ifndef SPEC_SLOT_STRIDE
 #error "gdn_step SPEC_SLOTS: SPEC_SLOT_STRIDE (floats per slot) must be defined"
 #endif
+// N_SLOTS: 4 for spec 8's lists (every existing command line leaves it unset); spec 19a's
+// verify probe at M = 5..8 builds `gdn_step_slots_M<M>_N8` with -DN_SLOTS=8
+// (kernels::gdn_step_slots_variant's `slots`).
+#ifndef N_SLOTS
 #define N_SLOTS 4
+#endif
 #if M > N_SLOTS
 #error "gdn_step SPEC_SLOTS: M rows need M slots"
 #endif

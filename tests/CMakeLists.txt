@@ -438,6 +438,48 @@ if(B70_MTP)
     kernel_gdn_step_slots_M2 kernel_gdn_step_slots_M3 kernel_gdn_step_slots_M4)
   add_test(NAME gdn_step_slots_test COMMAND gdn_step_slots_test)
 endif()
+# Spec 19a (plan 19a Task 4): every name probe_mtp_steps' verify lists at M = 5..8 and
+# probe_draft_cost bind is built by src/kernels/CMakeLists.txt's B70_VERIFY_M8 block (or
+# reused), and the block builds nothing they do not bind. Host only (names, no device).
+if(B70_VERIFY_M8 AND B70_MTP)
+  set(B70_VERIFY_M8_KERNELS)
+  foreach(MM 5 6 7 8)
+    list(APPEND B70_VERIFY_M8_KERNELS
+      kernel_gemv_M${MM}_K5120_N16384_S1_L1 kernel_gemv_M${MM}_K6144_N5120_S4_L0
+      kernel_gemv_M${MM}_K5120_N34816_S8_L0 kernel_gemv_M${MM}_K17408_N5120_S4_L0
+      kernel_gemv_M${MM}_K5120_N14336_S2_L0 kernel_gemv_i8w_M${MM}_K5120_N248320
+      kernel_gemv_bf16_M${MM}_K5120_N128_C16_S16 kernel_prep_res_fold_M${MM}_K5120_SP0_G20
+      kernel_prep_res_fold_M${MM}_K5120_SP4_G20 kernel_prep_norm_finish_M${MM}_K5120_G20_W20
+      kernel_prep_silu_mul_M${MM} kernel_prep_gated_head_M${MM} kernel_embed_gather_M${MM}
+      kernel_argmax_stage1_M${MM} kernel_attn_prep_M${MM} kernel_attn_v2_M${MM}_T${ATTN_V2_TGT}
+      kernel_gdn_step_slots_M${MM}_N8 kernel_gemv_bf16_M${MM}_K10240_N5120
+      kernel_gemv_bf16_M${MM}_K5120_N14336 kernel_prep_norm_finish_M${MM}_K5120_G20_W20_X10240
+      kernel_prep_res_fold_M${MM}_K5120_SP1_G20_Z kernel_attn_prep_M${MM}_S1)
+  endforeach()
+  foreach(KN K5120_N6144 K4096_N5120 K5120_N34816 K17408_N5120 K25600_N5120 K5120_N2048)
+    list(APPEND B70_VERIFY_M8_KERNELS kernel_gemv_i8w_M8_${KN} kernel_gemv_bf16_M8_${KN})
+  endforeach()
+  foreach(KN K5120_N1280 K5120_N256)
+    list(APPEND B70_VERIFY_M8_KERNELS kernel_gemv_i8w_M8_${KN} kernel_gemv_bf16_M8_${KN}_C16_S16)
+  endforeach()
+  list(APPEND B70_VERIFY_M8_KERNELS kernel_gemv_M8_K5120_N6144_S4_L0 kernel_gemv_M8_K4096_N5120_S4_L0
+    kernel_gemv_M8_K5120_N1280_S16_L0 kernel_gemv_M8_K5120_N2048_S8_L0
+    kernel_gemv_M8_K25600_N5120_S8_L0 kernel_gemv_M8_K5120_N256_S16_L0
+    kernel_gemv_i8w_M7_K5120_N32768)
+  set(_v19a_reused kernel_argmax_stage2)
+  foreach(t ${B70_VERIFY_M8_KERNELS} ${_v19a_reused})
+    if(NOT TARGET ${t})
+      message(FATAL_ERROR "spec 19a: ${t} is not built (src/kernels/CMakeLists.txt)")
+    endif()
+  endforeach()
+  add_executable(verify_m8_names_test kernels/verify_m8_names_test.cc)
+  target_include_directories(verify_m8_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tools/probe)
+  target_link_libraries(verify_m8_names_test PRIVATE b70_model)
+  b70_target_kernel_dir(verify_m8_names_test)
+  add_test(NAME verify_m8_names_test COMMAND verify_m8_names_test ${B70_VERIFY_M8_KERNELS} --
+    ${_v19a_reused})
+endif()
 
 # The decode-attention trio. Its reference (attn_ref.h) reproduces the kernels'
 # norm tree, score tree, wave order and block-merge order exactly, so the KV

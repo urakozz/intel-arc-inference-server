@@ -91,6 +91,20 @@ void check_sizes_qwen38() {
   CHECK_EQ(m.gdn_spec, size_t{3} * 150994944);
   CHECK_EQ(m.kv_k, size_t{33554432});
   CHECK_EQ(m.total(), size_t{523176064});
+  // Spec 19a: probe_mtp_steps' 8-slot buffer (verify M = 5..8) - 7 gdn_state copies, the
+  // rest as at 4 slots; the default stays the 4 slots above, and [4, 8] is the range.
+  const runtime::MtpSizes m8 = runtime::MtpDims::sizes(16384, q, 0, runtime::KvCache::Bf16, 8);
+  CHECK_EQ(m8.gdn_spec, size_t{7} * 150994944);
+  CHECK_EQ(m8.total() - m8.gdn_spec, m.total() - m.gdn_spec);
+  for (uint32_t bad : {3u, 9u}) {
+    bool threw = false;
+    try {
+      runtime::MtpDims::sizes(16384, q, 0, runtime::KvCache::Bf16, bad);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    CHECK(threw);
+  }
   // (kC + 1) x 5120 x 2 B.
   CHECK_EQ(runtime::mtp_prefill_hidden_bytes(q), size_t{2049} * 5120 * 2);
   // Int8State: xq 2048 x 17408 + xs 2048 x 4 + w8 (17408 / 4) x 1024 x 4, and the

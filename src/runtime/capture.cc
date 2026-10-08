@@ -381,12 +381,16 @@ class Capture {
     require(!d_.mtp_head_moe() || moe_scratch_layout(d_).layer_slots == d_.layers + 1,
             "the MoE scratch has no layer slot for the MTP head's MoE layer");
     require(mtp_->max_len == b_.max_len, "MtpBuffers max_len != buffers max_len");
-    require(kCapM <= MtpBuffers::kSlots, "an MTP verify list has at most kSlots rows");
+    // Spec 19a: a buffer with more slots (probe_mtp_steps' M = 5..8 lists) takes up to
+    // `slots` rows; every engine's buffers have kSlots.
+    require(kCapM <= mtp_->slots, "an MTP verify list has at most MtpBuffers::slots rows");
+    require(mtp_->slots == MtpBuffers::kSlots || mode_ == Mode::Verify,
+            "only a single-card verify list binds a GDN slot count other than kSlots");
     require((mode_ != Mode::Draft && mode_ != Mode::StageDraft) ||
                 (kCapM == 1 && draft_i_ < MtpBuffers::kMaxK),
             "a draft list is M = 1 with draft index < kMaxK");
-    require(mtp_->gdn_spec.size() == gdn_state_stride() * d_.gdn_layers * (MtpBuffers::kSlots - 1),
-            "gdn_spec is not (kSlots - 1) x " + std::to_string(d_.gdn_layers) + " slices");
+    require(mtp_->gdn_spec.size() == gdn_state_stride() * d_.gdn_layers * (mtp_->slots - 1),
+            "gdn_spec is not (slots - 1) x " + std::to_string(d_.gdn_layers) + " slices");
     require(mtp_->kv_lay.form == b_.kv_lay.form && mtp_->kv_lay.layers == 1 &&
                 mtp_->kv_lay.layer_rows() == kv_stride_ && mtp_->kv_k.size() == mtp_->kv_lay.bytes() &&
                 mtp_->kv_v.size() == mtp_->kv_lay.bytes(),
@@ -840,7 +844,11 @@ class Capture {
       // verify list binds its own slots' allocation (spec_mem(), pp_gdn_spec_bytes) at its
       // own slice g - the same binary, the same whole-model slot stride.
       const bool slots = mode_ == Mode::Verify || mode_ == Mode::StageVerify;
-      l0::Kernel& k = kernel(slots ? kernels::gdn_step_slots_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads, d_.gdn_v_heads)
+      // Spec 19a: the slot count is the buffers' (kSlots on every engine: the historical
+      // names); a stage's verify list keeps kSlots (its spec_mem() is pp_gdn_spec_bytes').
+      const uint32_t n_slots = mode_ == Mode::Verify ? mtp_->slots : MtpBuffers::kSlots;
+      l0::Kernel& k = kernel(slots ? kernels::gdn_step_slots_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads,
+                                                                     d_.gdn_v_heads, n_slots)
                                    : kernels::gdn_step_variant(kCapM, d_.gdn_k_heads, d_.gdn_v_heads),
                              "gdn_step", kWgGdn);
       k.arg_ptr(0, b_.control.ptr());
@@ -1501,9 +1509,12 @@ CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers
 
 CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                           const MtpBuffers& mtp, uint32_t M) {
-  if (M == 0 || M > MtpBuffers::kSlots)
+  // Spec 19a: up to the buffers' slot count (kSlots = 4 on every engine; 8 for
+  // probe_mtp_steps' M = 5..8 lists), never past DecodeBuffers::kM.
+  if (M == 0 || M > mtp.slots || M > DecodeBuffers::kM)
     throw std::runtime_error("runtime::build_verify: M " + std::to_string(M) +
-                             " is outside [1, " + std::to_string(MtpBuffers::kSlots) + "]");
+                             " is outside [1, " + std::to_string(mtp.slots) +
+                             "] (MtpBuffers::slots)");
   return Capture(ctx, m, b, nullptr, nullptr, M, &mtp, Mode::Verify).run();
 }
 
