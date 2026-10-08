@@ -184,7 +184,7 @@ context).
 - **The embedding** (1.27 GB) can move to host USM like the PLE table (one row a token, zero-copy), returning its
   VRAM to the cache; an option, measured by the same P0.3 numbers.
 
-### 4b. The pruned mode (lossy, opt-in) - the alternative and the complement
+### 4b. The pruned mode (lossy, opt-in, coding only) - the alternative and the complement
 
 Instead of fetching cold experts, drop them: a per-model mask of kept (layer, expert) pairs, chosen by P0.8's
 scores on our agentic traces. The router's logits for dropped experts are set to -inf before the top-10 and the
@@ -192,9 +192,12 @@ kept weights renormalised (the same softmax-top-k-renorm rule as today, over the
 are never loaded. At 50 % kept (256 per layer) the experts are 32.1 GB at int4 g64 and the whole model fits two
 B70s with room for KV - no host tier, no PCIe on the decode path, about the all-resident speed (spec 21 §D).
 
-- **It is lossy**, unlike the cache: output changes wherever a dropped expert would have been routed. So it is
-  opt-in (`--expert-mask <file>`, the mask beside the checkpoint with its provenance: traces, criterion, kept
-  fraction), never the default, and every gate records the KL against the full model (P0.8's curve is the bar).
+- **It is lossy**, unlike the cache: output changes wherever a dropped expert would have been routed. **The
+  operator's ruling (2026-10-09): only as a coding mode.** The mask is calibrated on coding / agentic traces only
+  (the A4 set and opencode recordings), shipped as a named coding mask beside the checkpoint with its provenance
+  (traces, criterion, kept fraction), selected explicitly (`--expert-mask coding`), and never the default: the
+  general-purpose configuration is always the full model through the cache. Every gate records the KL against the
+  full model (P0.8's curve is the bar), and the coding mode's own bar is A4 tool-call accuracy on code.
 - **It composes with the cache:** a mild mask (e.g. 87.5 % kept) cuts the host mirror and the miss bytes without
   the full 50 % loss; the device-side indirection table simply has no entry for a dropped expert and the router
   never selects it.
@@ -242,9 +245,9 @@ B70s with room for KV - no host tier, no PCIe on the decode path, about the all-
    chunk 2048 or 4096.
 8. **(decide) The profile's source and storage:** CPU-reference traces, engine traces, or both; per model, beside
    the checkpoint.
-9. **(decide) The pruned mode (§4b):** whether to offer it, at which kept fraction, and whether the default
-   Flash-Next configuration on two cards is the cache (lossless, PCIe-bound) or a mask (lossy, all-resident) -
-   from P0.7 (cache speed) against P0.8 (mask quality).
+9. **The pruned mode (§4b): ruled a coding-only mode** (operator, 2026-10-09) - the default Flash-Next
+   configuration is always the full model through the cache. **(decide)** the coding mask's kept fraction, from
+   P0.8's A4 tool-call accuracy against P0.7's cache speed.
 
 ## 8. Out of scope
 
