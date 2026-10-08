@@ -84,6 +84,11 @@ narrative, and the numbered guides cite them where they matter.
   tiled) and end to end. Not a stop. Per-token K fails on outlier channels; KIVI and
   rotated K tie; rotating V too (`rotkv`) is best and below the bf16 eager path's own
   error. Proposed `rotkv` (decide), Q3 tolerances, and the Qwen3.8 repeats for the box
+- [probe-dflash-2026-10-08.md](probe-dflash-2026-10-08.md) - spec 19a P0 on the Mac CPU:
+  DFlash2's acceptance on Qwen3.8 (A4 tool calls 7.21 tokens per verify at K = 7, code 6.15,
+  prose 2.2); int8 / 4-bit drafters and a ranked 32k draft vocabulary cost nothing. Provisional
+  go on code and agentic output (+54-65 % over `--mtp auto`, derived); verify at M = 5..8 is
+  the box's to measure (plan 19a Task 4).
 - [probe-int8-kv-qwen38-2026-10-06.md](probe-int8-kv-qwen38-2026-10-06.md) - the 12a
   repeat on **Qwen3.8** (Mac CPU, plan 12b Task A): `rotkv` holds (golden cos mean
   0.99995-0.99997, above the stop rule; replay flat to 32k, below bf16 eager's own error).
