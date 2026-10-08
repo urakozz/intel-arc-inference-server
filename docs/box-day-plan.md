@@ -146,10 +146,10 @@ rsync -a ~/.cache/huggingface/hub/models--Aleph-Alpha--Kolibri-1-BF16 "$BOX:.cac
 | Kolibri-1-BF16 release, tokenizer and configs only | ~10 MB (tokenizer.json 9.5 MB; no weights) | `r24.oracle_synth` (make_synth copies them into each synthetic checkpoint; b70-serve needs them for `r28.*`), `r28.host`'s `kolibri_tokenizer_test` | ready |
 | `oracle-out-12a-qwen38` | 1.0 GB | no stage (the 12b tolerances are already in the tree, `6ee1d59`) | optional, record only |
 | `oracle-out-19a` | 1.3 GB | no stage | done (2026-10-08); optional, record only |
-| `oracle-out-ornith-a4`, `oracle-out-k2-a4`, `oracle-out-kolibri-a4` | - | `r16.a4`, `r25.toolcall` / `r25.a4`, `r28.a4` | **not made**: Ornith's being made on the Mac (2026-10-08, §5), K2's on the box CPU (`r25.a4_ref`, hours), Kolibri's wherever 20b runs |
+| `oracle-out-ornith-a4`, `oracle-out-k2-a4`, `oracle-out-kolibri-a4` | - | `r16.a4`, `r25.toolcall` / `r25.a4`, `r28.a4` | **not made**: Ornith's being made on the Mac (2026-10-08, §5), K2's on the box CPU (`r25.a4_ref`, hours: ~1-1.5 days sequential, ~0.6-1 day with `a4_ref.sh`'s default `BATCH=auto RESIDENT=auto` - ESTIMATED), Kolibri's wherever 20b runs |
 
 Note `r25.toolcall` is a **default** stage that needs `k2_a4_set` (`oracle-out-k2-a4/set/manifest.json`):
-it is SKIP "missing data" in session 5 unless `r25.a4_ref` (opt-in, hours) has run, or the set
+it is SKIP "missing data" in session 5 unless `r25.a4_ref` (opt-in, hours: see the table above) has run, or the set
 alone is made on the box before session 5 - one container run of make_set.py, no reference
 (est. minutes), written into the data tree so `pre` links it:
 `REMOTE_DIR=b70-inference-server-validate tools/box.sh run 'OUT=$HOME/b70-inference-server/oracle-out-k2-a4 tools/toolcall/a4_ref.sh k2 set'`
@@ -476,7 +476,7 @@ the state and run later with `--only <ids>`.
 | 1: decisions | `--only r10.p0,r13.p0,r15.p0,r13.speed,r14.speed,r15.speed,r21.speed,r16.mtp_rows,r8.auto_rows,r23.split_sweep` (idle box, both cards free for `r23.split_sweep`) | 7-10 h | the P0 profiles (incl. the int4 a\|\|b cell's share), K2's flash vs eager decode cost at 4k-32k (§10.1's ~3 % rule), K2's int8 vs bf16 KV speed, Ornith's MTP K, `--mtp auto` with a draft vocab, the time-balanced split |
 | 2: long context | `--only r6.passkey120k,r7.passkey,r11.passkey120k,r11.passkey262k,r16.passkey,r21.passkey,r22.s1_32k,r23.s2_128k` | 6-10 h | recall at 120k-262k, S1 at depth 32k, S2 at pp131072 |
 | 3: hours | `--only r6.d1,r7.depth,r8.rows_full,r8.m3_small,r10.speed,r27.p3_mtp` | 12-20 h | A12's depth rows, decode at the auto depth, the full §11 matrix, M3 at 32k / 64k, Ornith at 250k, P3 with MTP |
-| 3: K2 A4 | `--only r25.a4_ref,r25.a4` | hours (CPU) + ~1 h | K4's reference on the box CPU (blocks the idle grade while it runs), then the run; no bar |
+| 3: K2 A4 | `--only r25.a4_ref,r25.a4` | ~0.6-1 day (CPU; ESTIMATED, batched + resident weights - `BATCH=1 RESIDENT=none` is the old ~1-1.5 days) + ~1 h | K4's reference on the box CPU (blocks the idle grade while it runs), then the run; no bar |
 | 3: comparison rows | `--only r1.prefix_benchy,r16.benchy,r25.benchy,r27.benchy` (needs `uvx`) | 3-5 h | llama-benchy rows for BENCHMARKS / README |
 | blocked | `r2.opencode`, `r12.d5` (no opencode recording), `r11.a4` (`A4_REF_DIR`: set it if Qwen3.8's A4 bf16 reference dir is on the box), `r16.a4` (`oracle-out-ornith-a4`), `r24.oracle_real`, `r24.speed`, `r26.speed`, `r28.passkey`, `r28.a4`, `r28.benchy` (spec 20b) | - | data that does not exist yet |
 
@@ -539,8 +539,11 @@ named stage.
   P0's 256-id golden continuations and the A4 bf16 ids (`GOLDEN_CONT_DIR` / `EXTRA_SOURCES`) -
   pull them on the box day (no GPU) to firm up the prose number (52 anchors today).
 - **Ornith's A4 reference is being made on the Mac** (started 2026-10-08, container
-  `a4-ref-ornith`, `oracle-out-ornith-a4/ref.log`; hours): push `oracle-out-ornith-a4` when its
-  `status` shows 36/36, or `r16.a4` records SKIP.
+  `a4-ref-ornith`, `oracle-out-ornith-a4/ref.log`; MEASURED ~30 min a scenario sequential, ~18 h
+  the set; resumed batched + resident (`a4_ref.sh`'s defaults since branch `a4-ref-batched`,
+  bitwise the sequential ids) ~1.25x faster - ESTIMATED: Ornith's step is mostly per-sequence
+  compute, tools/toolcall/a4_ref.sh's header): push `oracle-out-ornith-a4` when its `status`
+  shows 36/36, or `r16.a4` records SKIP.
 - **PROPOSED / PROVISIONAL bars everywhere** (kv8 gated flash rows, K2 prefill and int8 bars,
   Kolibri tie and partial-forward bars, Ornith consistency and split bars): a FAIL against one
   is first a reading - look at the printed distribution before calling it a bug.

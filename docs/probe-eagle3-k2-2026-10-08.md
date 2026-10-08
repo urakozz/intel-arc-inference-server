@@ -152,8 +152,10 @@ tail -f oracle-out-eagle3-k2/p0.log
 
 A golden-only first look (no A4 reference, ~1 h): `A4=0 nohup tools/oracle/eagle3_k2_p0.sh > /dev/null 2>&1 &`.
 
-**Estimates (ESTIMATED, not measured):** the A4 reference ~1-1.5 days (36 scenarios x up to
-512 layer-streamed int4 decode steps at ~7 s, 28 GB container); golden continuations ~15 min
+**Estimates (ESTIMATED, not measured):** the A4 reference ~1-1.5 days sequential (36 scenarios x
+up to 512 layer-streamed int4 decode steps at ~7 s), ~0.6-1 day as the driver now starts it
+(`a4_ref.sh k2 ref` with `BATCH=auto RESIDENT=auto` in the driver's 54 GB cap: up to 8 scenarios a
+layer pass, the dense layers and 11 of 45 expert layers resident - bitwise the sequential ids); golden continuations ~15 min
 per prompt at 128 ids; the dump ~1.6 h for 39 sources (~87k tokens at the 512-id cap: 60 s of
 dequant per forward + ~1.05 PFLOP at 300 GFLOP/s), peak RSS ~12 GiB, dumps ~1.3 GB; acceptance
 ~5-10 min per arm (18.7k anchors, 74k context rows: the smoke test's rates on 2 CPUs, faster at
