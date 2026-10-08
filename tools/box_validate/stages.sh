@@ -2129,6 +2129,23 @@ st_r28_benchy() {
 }
 
 # ======================================================================================
+row 29 "spec 19a Task 4 - DFlash's verify cost at M = 5..8 and one block's draft cost (plan 19a Task 4; box-day plan Session 6b)"
+rownote 29 "Written blind on the Mac: B70_VERIFY_M8 (default ON) adds the M = 5..8 verify variants and the drafter's GEMVs; no engine binds them (G0's g0.sha lists them as added). probe_mtp_steps' M = 5..8 lists run over a probe-owned 8-slot MtpBuffers (+1.06 GB); every existing probe_mtp_steps command line (r2.cost, r6.cost, r8.cost, r16.cost) is the 4-arm mode, unchanged. verify_m8_names_test (host) runs in x.rest."
+rownote 29 "Plan 19a Task 5 (the projection and the go / no-go in spec 19) is a Mac edit from r29.cost's rows: verify(M) / plain from the 'pair M=' lines (interleaved pairs), the draft cost from probe_draft_cost's 'block' lines at the arm's precision. The M = 5..8 rows carry no bitwise check (spec 19 D3 belongs to 19c): they are costs, not outputs."
+stage r29.cost 29 optin gpu qwen - "verify(M) for M = 1..8 on the int8 head at depths 4k and 32k (probe_mtp_steps max_m 8: interleaved pairs, median of 3) and one DFlash2 block's GEMVs at M = 8 in int8 / bf16 / int4 g64 plus the int8 head's 7 rows (probe_draft_cost, random weights) - idle box, device 0 (timed)"
+st_r29_cost() {
+  idle before
+  chk "build/tools/probe/probe_mtp_steps $SNAP_QWEN 4096 32 3 int8 off 16384 8 | tee $STATE/$STAGE.4k.txt" "verify M = 1..8 at depth 4k, int8 head"
+  chk "build/tools/probe/probe_mtp_steps $SNAP_QWEN 32768 32 3 int8 off 65536 8" "verify M = 1..8 at depth 32k (max_len 65536), int8 head"
+  chk "pm=\$(awk '\$2 == \"verify\" && \$3 == \"M=1\" {print \$5; exit}' $STATE/$STAGE.4k.txt); build/tools/probe/probe_draft_cost --calls 20 --rounds 3 --plain-ms \${pm:-0}" \
+    "one DFlash2 block's GEMVs (int8 / bf16 / int4 g64, the int8 head's 7 rows), shares of the 4k plain step"
+  idle after
+  grab_all cost-rows '^lm_head:|^max_len:|^verify M = |^probe_mtp_steps:|^interleaved|^probe_draft_cost:|^allocated|^one DFlash|^\| ' 160
+  grab_all idle '^IDLE '
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri labels belong to their rows)"
 st_x_rest() {
