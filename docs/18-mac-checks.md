@@ -128,7 +128,9 @@ K2's real shapes against `tests/kernels/k2_ref.h`; it also takes two host source
 `moe_run` (spec 15e: the decode MoE block `moe.cl` at Ornith's shape against
 `tests/kernels/moe_ref.h` at M = 1, and at M = 4 - the MTP verify lists' rows - every
 row bitwise the M = 1 binary's on that row, in order and reversed; `moe_down` at DN_KS 1,
-the Mac's 256-lane work-group cap, as `k2_run` does). A new
+the Mac's 256-lane work-group cap, as `k2_run` does). Spec 19a: section 5 also runs
+`gemv_i8w_run 8 5120 1280` (a DFlash2 drafter shape at the block's 8 rows) and `argmax_run 8
+5000 4990` (eight rows) from the same binaries - B70_VERIFY_M8's M = 8 rows. A new
 driver is a `tools/mac/clrun/<kernel>_run.cc` with a `main()` over `clrun::Device`,
 `Program` and `Buffer`, and its name in section 5's loop in `tools/mac_check.sh`, which
 builds the drivers into `build/mac-check/clrun/` with `src/` and `tests/` on the include
