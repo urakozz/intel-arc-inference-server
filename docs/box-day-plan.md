@@ -19,6 +19,7 @@ to it.
 | 4 | Ornith decode, prefill, serving (rows 10, 13, 16) | device 0 | `tools/box_validate.sh --only r10,r13,r16 --skip r16.cost` | 21 | 3-5 h |
 | 5 | K2-Horizon (rows 14, 15, 21, 25) | device 0 | `tools/box_validate.sh --only r14,r15,r21,r25 --with r14.oracle` | 35 | 4.5-7.5 h |
 | 6 | timed one-card rows, **box idle (RECORD)** | device 0, both idle | `tools/box_validate.sh --only r1.sweep,r1.speed,r2.cost,r2.auto_rows,r3,r6.cost,r8.cost,r8.rows,r11.speed,r16.cost` | 10 | 7-11 h |
+| 6b | DFlash verify cost at M = 5..8 (plan 19a Task 4) - **needs a probe build first** (§2, Session 6b) | device 0, both idle | by hand: `probe_mtp_steps ... 8` + the drafter GEMV pass | - | ~1-1.5 h (est.) |
 | 7 | pipeline decode, then prefill (rows 22, 23) | **both** | `tools/box_validate.sh --only r22,r23` | 22 | 4.5-7 h |
 | 8 | pipeline integration (row 27) | **both** | `tools/box_validate.sh --only r27` | 14 | 4.5-7 h |
 | 9 | Kolibri-1 on the synthetic checkpoints (rows 24, 26, 28) | **both** | `tools/box_validate.sh --only r24,r26,r28 --with r24.oracle_synth` | 31 | 4.5-7 h |
@@ -143,8 +144,8 @@ rsync -a ~/.cache/huggingface/hub/models--Aleph-Alpha--Kolibri-1-BF16 "$BOX:.cac
 | `oracle-out-ornith-mtp` | 91 MB | `r16.m1` (`oracle_ornith_mtp`) | ready |
 | Kolibri-1-BF16 release, tokenizer and configs only | ~10 MB (tokenizer.json 9.5 MB; no weights) | `r24.oracle_synth` (make_synth copies them into each synthetic checkpoint; b70-serve needs them for `r28.*`), `r28.host`'s `kolibri_tokenizer_test` | ready |
 | `oracle-out-12a-qwen38` | 1.0 GB | no stage (the 12b tolerances are already in the tree, `6ee1d59`) | optional, record only |
-| `oracle-out-19a` | 1.3 GB | no stage | **still being written** by the DFlash P0 (§5); copy afterwards if wanted |
-| `oracle-out-ornith-a4`, `oracle-out-k2-a4`, `oracle-out-kolibri-a4` | - | `r16.a4`, `r25.toolcall` / `r25.a4`, `r28.a4` | **not made**: Ornith's on the Mac after the P0 (`r16.a4_ref`'s commands), K2's on the box CPU (`r25.a4_ref`, hours), Kolibri's wherever 20b runs |
+| `oracle-out-19a` | 1.3 GB | no stage | done (2026-10-08); optional, record only |
+| `oracle-out-ornith-a4`, `oracle-out-k2-a4`, `oracle-out-kolibri-a4` | - | `r16.a4`, `r25.toolcall` / `r25.a4`, `r28.a4` | **not made**: Ornith's being made on the Mac (2026-10-08, §5), K2's on the box CPU (`r25.a4_ref`, hours), Kolibri's wherever 20b runs |
 
 Note `r25.toolcall` is a **default** stage that needs `k2_a4_set` (`oracle-out-k2-a4/set/manifest.json`):
 it is SKIP "missing data" in session 5 unless `r25.a4_ref` (opt-in, hours) has run, or the set
@@ -318,6 +319,33 @@ the cost tables ~0.3-1 h each.
 **Check:** every row's `IDLE before` / `IDLE after` grade; a row taken ITERATE is still a
 reading, not a record.
 
+### Session 6b - DFlash verify cost at M = 5..8 (plan 19a Task 4), box idle
+
+The one number DFlash's go / no-go still needs. P0 (Tasks 2-3, `docs/probe-dflash-2026-10-08.md`)
+measured the acceptance on the Mac: 7.21 tokens per verify at K = 7 on the A4 tool calls, 6.15 on
+code, ~2.2 on prose; its projection against `--mtp auto` (+54 % / +65 % / +17 %) **extrapolates**
+verify(M) past spec 8's measured M = 2..4 (1.17 / 1.52 / 1.74 plain steps) to M = 8 = 2.62. If
+verify(8) comes out near 3.5, A4's margin shrinks to ~+17 %.
+
+**Prerequisite (not built yet - a Mac task before the box day):** plan 19a Task 4's probe build:
+the `gemv` / `gemv_i8w` / attention / GDN-slot variants at M = 5..8 (additive binaries, existing
+command lines unchanged), `probe_mtp_steps` extended to M = 8, and a timed GEMV pass over the
+drafter's weights at M = 8 (int8 and W4A16 g64) plus the ranked 32k head's K rows. Until that
+lands this session cannot run; it is not a runbook stage.
+
+Run on an idle box (§1.7), device 0, after session 6 (same idle conditions, shares its warm-up):
+
+```sh
+# int8 head, depths 4k and 32k, verify M = 1..8, draft k = 1..3; interleaved pairs, median of 3
+build/tools/probe/probe_mtp_steps $SNAP_QWEN 4096 32 3 int8 8
+build/tools/probe/probe_mtp_steps $SNAP_QWEN 32768 32 3 int8 8
+# the drafter's one-block cost (the Task 4 probe's own binary, named when it is built)
+```
+
+Then plan 19a Task 5: re-run `docs/probe-dflash-2026-10-08.md` §3's table with the measured
+costs and record the verdict in spec 19 (`≥ 10 %` over `--mtp auto` on the coding and agentic
+sets = go for 19b). Estimate ~1-1.5 h (two depths x 8 M rows x interleaved pairs; est.).
+
 ### Session 7 - pipeline parallel decode, then prefill (rows 22, 23)
 
 Idle protocol (§1.7): **both cards free of DRM holders.**
@@ -477,13 +505,14 @@ named stage.
   cards, cross-device events, peer access, load-then-place (device 0 briefly holds the whole
   model). A P1 difference is a bug - read the first differing byte the test prints. Needs both
   cards free and the P2P patch still in the kernel.
-- **The DFlash P0 is still running on the Mac** (`oracle-out-19a/p0.log`: batch 3/10 after
-  36,619 s wall, ~6,430 s a batch - roughly 12 h to go, est.). While it runs the Mac cannot run
-  another 28 GB container: Ornith's A4 set and reference (`r16.a4_ref`'s commands, hours) wait,
-  so `r16.a4` stays blocked. 19a also wants data **from** the box: spec 8 P0's 256-id golden
-  continuations and the A4 bf16 ids (`GOLDEN_CONT_DIR` / `EXTRA_SOURCES`) - pull them on the
-  box day (no GPU). 19a's Task 4 (verify at M = 5..8) needs a probe build that is not in the
-  runbook.
+- **The DFlash P0 finished on the Mac** (2026-10-08 02:54, `docs/probe-dflash-2026-10-08.md`;
+  provisional go on code and agentic output). Its formal verdict waits for Session 6b, whose
+  probe build (plan 19a Task 4) is not written yet. 19a also wants data **from** the box: spec 8
+  P0's 256-id golden continuations and the A4 bf16 ids (`GOLDEN_CONT_DIR` / `EXTRA_SOURCES`) -
+  pull them on the box day (no GPU) to firm up the prose number (52 anchors today).
+- **Ornith's A4 reference is being made on the Mac** (started 2026-10-08, container
+  `a4-ref-ornith`, `oracle-out-ornith-a4/ref.log`; hours): push `oracle-out-ornith-a4` when its
+  `status` shows 36/36, or `r16.a4` records SKIP.
 - **PROPOSED / PROVISIONAL bars everywhere** (kv8 gated flash rows, K2 prefill and int8 bars,
   Kolibri tie and partial-forward bars, Ornith consistency and split bars): a FAIL against one
   is first a reading - look at the printed distribution before calling it a bug.
