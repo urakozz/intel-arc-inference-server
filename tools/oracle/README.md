@@ -30,6 +30,12 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `dump_taps.py` | Spec 19a Task 2: the Qwen3.8 bf16 target (layer-streamed, as `kv_int8_probe.py run` builds it) over [prompt + recorded greedy continuation]; per source the residual after the drafter's tap layers (5, 19, 33, 47, 61), the greedy next ids and the top-64 logits. `test_dump_taps.py`: Review Focus 1 (tap i = layer i's OUTPUT) on a tiny checkpoint. "The DFlash P0" below. |
 | `dflash_accept.py` | Spec 19a Task 3: teacher-forced acceptance of the DFlash 2 drafter on those dumps, K = 1..7, arms bf16 / int8 RTN / int8 + int8 head / W4A16, draft vocabularies 32k / 64k / 128k (`loader::select_draft_vocab`); batched over anchors. `test_dflash_accept.py`: the batch against `dflash_ref.draft_block`. |
 | `dflash_p0.sh` | The two above on the Mac in a 28 GB container, resumable, refusing to start beside the 12a repeat; `DRY_RUN=1` plans only. |
+| `eagle3_ref.py` | The EAGLE3 K2 P0: the CPU reference of the EAGLE-3 drafter `Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3` (speculators 0.8.0 `Eagle3DraftModel`; the semantics pinned from source in its docstring and `docs/probe-eagle3-k2-2026-10-08.md`): step 0 over the context, the greedy chain, the `d2t` check, the int8 / int4 g64 RTN arms, the derived bytes; `facts`. `test_eagle3_ref.py` holds it to an independent build from transformers' Llama modules in speculators' TTT wiring. "The EAGLE3 K2 P0" below. |
+| `k2_taps.py` | The EAGLE3 K2 P0: `k2_ref.py` over [prompt + K2's recorded continuation], one forward per source: the aux taps (the INPUT of K2 layers 2 / 24 / 45), the pre-norm final hidden, K2's greedy, top-16, and the MoE / MoVA routes. `test_k2_taps.py`: the tap points bitwise against the vendored model with the vLLM plugin's capture emulated. |
+| `eagle3_accept.py` | The EAGLE3 K2 P0: teacher-forced acceptance (K = 1..5, arms bf16 / int8 / int8h / int4h), spec 19e's prompt lookup on the same anchors, and the summary with the derived speed-up. `test_eagle3_accept.py`. |
+| `eagle3_cost.py` | The EAGLE3 K2 P0: K2's verify bytes at M = 1..6 rows from the recorded routes (distinct experts per layer, model::K2Desc's blocks), the drafter's bytes per draft step. `test_eagle3_cost.py`. |
+| `eagle3_k2_p0.sh` | The four above on the Mac: the A4 reference as a prerequisite, then check / facts / golden / sources / dump / accept / lookup / cost / summary, resumable, 54 GB container, one oracle at a time; `DRY_RUN=1` plans only (no container). |
+| `third_party/eagle3_k2/` | The drafter's `config.json` (Apache-2.0), unmodified: what the tests parse. |
 | `k2_ref.py` | Spec 18a: the K2-Horizon CPU reference - a plain-torch port of the checkpoint's `modeling_k2_horizon.py`, layer at a time, bf16 or int4 GPTQ checkpoints by name; `run` (golden file + MoE / MoVA routing dumps), `hfcheck` (against the vendored HF model, layer-streamed), `facts`. `test_k2_ref.py` checks it on tiny random weights. "The K2-Horizon reference" below. |
 | `ornith_ref.py` | Spec 15a: Ornith 1.5 35B-A3B from its **int4** checkpoint - transformers' `Qwen3_5MoeForCausalLM`, layer-streamed, the routed experts dequantised on demand; `run` (golden file + every layer's router / shared-gate logits and routes, and with `--mtp-out` the MoE MTP head's M1 reference), `facts` (the checkpoint facts spec 15 §13 rests on). `test_ornith_ref.py` checks it on tiny random weights; `ornith_golden.sh` is the Mac run. "The Ornith reference" below. |
 | `kolibri_ref.py` | Spec 20a: the Kolibri-1 reference - layer at a time, bf16 or int4 GPTQ by name (sandwich norms, RoPE sliding / NoPE full layers, window 513 incl. the query, fp32 router on logit + expert_bias with sigmoid weights, ungated shared expert, fp32 head); `run`, `ppl`, `hfcheck`, `facts`, layer-major `run_batch` (the quantisation script's coverage and eval). `test_kolibri_ref.py` (KL0, 21 tests): the transformers port == it bitwise. Facts: `docs/probe-kolibri-2026-10-05.md`. |
@@ -455,6 +461,64 @@ Tests (tiny models, a minute; `dflash_p0.sh`'s `check` step runs both):
 ```bash
 docker run --rm --memory 6g -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/oracle/test_dump_taps.py
 docker run --rm --memory 6g -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/oracle/test_dflash_accept.py
+```
+
+### The EAGLE3 K2 P0 (2026-10-08)
+
+Is EAGLE-3 worth building for K2-Horizon? `Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3` (one
+Llama layer fed with K2's hidden states at the INPUT of layers 2 / 24 / 45, a 32k draft head
+mapped back by `d2t`) measured teacher-forced on K2's own greedy text, its verify cost derived
+from the routes, against the prompt lookup K2 already has. Semantics, citations, the derived
+prior and the results: `docs/probe-eagle3-k2-2026-10-08.md`.
+
+```bash
+# from the repo (or worktree) root; detached, resumable, log in oracle-out-eagle3-k2/p0.log
+DRY_RUN=1 tools/oracle/eagle3_k2_p0.sh                    # the plan + estimates, no container, seconds
+nohup tools/oracle/eagle3_k2_p0.sh > /dev/null 2>&1 &     # 1st: starts the A4 reference, exits 4
+tools/toolcall/a4_ref.sh k2 status                        # hours, until DONE
+nohup tools/oracle/eagle3_k2_p0.sh > /dev/null 2>&1 &     # 2nd: the P0 itself (54 GB container)
+A4=0 nohup tools/oracle/eagle3_k2_p0.sh > /dev/null 2>&1 &   # or: golden prompts only, ~1 h
+```
+
+- **Prerequisites:** `uvx --from huggingface_hub hf download Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3`
+  (1.67 GB) and `... urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ` (22.2 GB); the
+  driver checks both are complete (no `.incomplete` blob, every shard) and never downloads.
+  The `a4` step runs `tools/toolcall/a4_ref.sh k2 set` + `ref` (`oracle-out-k2-a4`, its own
+  28 GB container `a4-ref-k2`) and stops until `oracle-out-k2-a4/DONE`; `A4_PARTIAL=1` goes on
+  with the scenarios already done.
+- **`k2_taps.py`** writes `oracle-out-eagle3-k2/dumps/<corpus>__<label>.k2taps.safetensors`:
+  `aux.{2,24,45}` (= k2_ref's `resid.L{1,23,44}`) from `n_prompt - 2049` (the drafter's
+  window), and from `n_prompt - 1`: the pre-norm final hidden, K2's greedy next id (the
+  argmax of the logits as the A4 reference computes them), `greedy_flatnorm` (the same through
+  a ONE-group final norm: speculators' `verifier_norm`, a training-target diagnostic), top-16,
+  logsumexp, the MoE (8) / MoVA (4) expert ids per sparse layer. fp32 GEMMs with one bf16
+  rounding by default (`--matmul bf16`: bitwise k2_ref, ~6x slower here).
+- **`eagle3_accept.py run`** builds the drafter's context with step 0 over every row (the
+  target's taps, as vLLM rebuilds it each round), drafts a chain of 5 at every anchor of the
+  continuation and scores K = 1..5 with dflash_accept.py's `accept_rows` (censored where the
+  recorded text leaves K2's greedy). `lookup` replays spec 19e's matcher on the same anchors.
+  `eagle3_cost.py run` turns the routes into bytes per verify of M rows; `summary` writes
+  `oracle-out-eagle3-k2/summary.md`: E_K, the per-position acceptance a_j (the model card's
+  0.44 / 0.17 metric), alpha_j, and the DERIVED S_K = E_K / (V(K + 1) + D(K)) at `DEPTH` (4096)
+  and at 0 / 4k / 32k.
+- **Cost (ESTIMATED by `DRY_RUN`, assumed rates):** the A4 reference ~1-1.5 days; golden ~15
+  min a prompt at 128 ids; the dump ~1.6 h (39 sources, ~87k tokens at the 512-id cap), peak
+  RSS ~12 GiB, dumps ~1.3 GB on disk; acceptance ~5-10 min per arm (the real drafter's smoke
+  rates on 2 CPUs: 40-58 anchors/s), ~3-4 GiB; lookup / cost seconds.
+- **Measured before the run** (the drafter's files; `docs/probe-eagle3-k2-2026-10-08.md`): the
+  32k draft vocabulary holds none of K2's tool-call markers (250043 / 44, 250054-250061) nor
+  `<ifm|think_fast>` / `<ifm|think_faster>` - on tool-call text a marker is never drafted. One oracle at a time: a model step refuses while another `agnes-ref-img` container
+  runs (`FORCE=1` overrides; it never stops one).
+
+Tests (tiny models; ~10 min for the five on 2 CPUs, measured 2026-10-08 - eagle3_ref 2 min,
+k2_taps 1-2, eagle3_accept 2, eagle3_cost 0.3, dflash_accept 3; the driver's `check` step runs
+them and test_dflash_accept.py):
+
+```bash
+for t in test_eagle3_ref test_k2_taps test_eagle3_accept test_eagle3_cost; do
+  docker run --rm --cpus 2 --memory 8g -v "$PWD":/ws -w /ws -e HF_HOME=/tmp/hf \
+    -e TORCH_EXTENSIONS_DIR=/tmp/torch_ext agnes-ref-img:latest python3 tools/oracle/$t.py || break
+done
 ```
 
 ### The K2-Horizon reference (spec 18a, 2026-10-05)
