@@ -562,6 +562,18 @@ if(B70_MTP)
   get_property(MS_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_mtp_steps ${MS_KERNELS} ${MS_PF_KERNELS})
 endif()
+# --- probe_draft_cost: spec 19a Task 4, one DFlash2 block's GEMVs (int8 / bf16 / int4) ---
+# Plan: docs/superpowers/plans/2026-10-05-spec19a-dflash-p0.md, Task 4. Random weights of
+# the drafter's shapes (draft_cost_shapes.h); the binaries are B70_VERIFY_M8's
+# (src/kernels/CMakeLists.txt), which also gives probe_mtp_steps its verify M = 5..8 arms.
+if(B70_VERIFY_M8 AND B70_MTP)
+  add_executable(probe_draft_cost probe_draft_cost.cc)
+  target_include_directories(probe_draft_cost PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(probe_draft_cost PRIVATE b70_l0)
+  b70_target_kernel_dir(probe_draft_cost)
+  get_property(DC_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
+  add_dependencies(probe_draft_cost ${DC_KERNELS})
+endif()
 
 # --- probe_decode_attn: spec 10 P0/P1, decode attention at depth (2026-09-28) ---
 # Plan: docs/superpowers/plans/2026-09-28-spec10a-decode-attn-probe.md.
