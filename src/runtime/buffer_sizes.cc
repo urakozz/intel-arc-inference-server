@@ -269,10 +269,14 @@ PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::Mod
 }
 
 MtpSizes MtpDims::sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t draft_vocab,
-                        KvCache kv) {
+                        KvCache kv, uint32_t slots) {
+  if (slots < kSlots || slots > kMaxSlots)
+    throw std::invalid_argument("runtime::MtpDims::sizes: " + std::to_string(slots) +
+                                " GDN state slots is outside [" + std::to_string(kSlots) + ", " +
+                                std::to_string(kMaxSlots) + "]");
   MtpSizes s{};
   s.hctl = sizeof(Control);
-  s.gdn_spec = size_t{kSlots - 1} * gdn_state_bytes(desc);
+  s.gdn_spec = size_t{slots - 1} * gdn_state_bytes(desc);
   s.kv_k = kv_layout(max_len, desc, 1, kv).bytes();   // the head's own (17th) KV layer
   s.kv_v = s.kv_k;
   s.hh = size_t{DecodeScratchDims::kM + 1} * desc.hidden * kBf16;

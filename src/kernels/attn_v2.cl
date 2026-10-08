@@ -107,8 +107,11 @@
 #define EXPF(x) exp(x)
 #endif
 
-#if M < 1 || M > 4
-#error "attn_v2: M is 1..4"
+// M = 5..8: spec 19a's verify probe (B70_VERIFY_M8). qpack is 6 KB x M (48 KB at 8, under
+// the 128 KB a work-group may hold) and mx / sm / acc hold 6 x M floats per lane; the rows
+// of one launch still span at most two strides (ppw moves every 2048 keys).
+#if M < 1 || M > 8
+#error "attn_v2: M is 1..8"
 #endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }

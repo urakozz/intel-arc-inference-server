@@ -287,10 +287,16 @@ struct MtpSizes {
 struct MtpDims {
   static constexpr uint32_t kSlots = 4;   // M <= 4: K <= 3 drafts + the pending token
   static constexpr uint32_t kMaxK = kSlots - 1;
+  // Spec 19a (plan 19a Task 4): the most GDN state slots a buffer may carry - a verify
+  // list at M rows needs M slots, and DecodeScratchDims::kM = 8 bounds M.
+  static constexpr uint32_t kMaxSlots = 8;
   // `draft_vocab` = |V'| (spec 8 §11, `--draft-vocab`), 0 when the full head drafts.
   // `kv`: the head's KV follows the main cache's form (spec 12b), one layer.
+  // `slots` (spec 19a): the GDN state slots, kSlots for every engine; only
+  // tools/probe/probe_mtp_steps' M = 5..8 lists ask for more (gdn_spec grows by one
+  // gdn_state per slot). Must be in [kSlots, kMaxSlots].
   static MtpSizes sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t draft_vocab = 0,
-                        KvCache kv = default_kv_cache());
+                        KvCache kv = default_kv_cache(), uint32_t slots = kSlots);
 };
 // The draft vocabulary's compact head and id table (spec 8 §11) are the LOADER's
 // allocations, sized by loader::draft_vocab_bytes (loader/draft_vocab.h, header-only

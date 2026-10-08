@@ -149,6 +149,9 @@ size_t draft_launches(const model::ModelDesc& d);
 // logits in `logits` [M][kVocab]; argmax_stage2 advances pos by M (the caller rewinds it
 // at commit). 774 + 10 launches at every M (verify_launches; Ornith 526 + 10, spec 15e:
 // its MoE blocks at M rows run moe.cl per row, routing every row independently).
+// M is 1..mtp.slots: kSlots = 4 on every engine; spec 19a's probe (probe_mtp_steps, max M
+// 8) builds M = 5..8 over an 8-slot MtpBuffers, binding `gdn_step_slots_M<M>_N8` and the
+// B70_VERIFY_M8 binaries (src/kernels/CMakeLists.txt; Qwen3.8 at the int8 head only).
 //
 // build_draft: the MTP head at M = 1 on (hctl.cur_token[0], MtpBuffers::dh) at hctl.pos;
 // its post-mtp.norm hidden back into dh, logits into MtpBuffers::logits row `i`, the

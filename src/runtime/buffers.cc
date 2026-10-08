@@ -156,12 +156,12 @@ size_t PrefillScratch::lazy_bytes() const {
 // --- MtpBuffers (spec 8) -----------------------------------------------------
 
 MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
-                       uint32_t draft_vocab_size, KvCache kv)
-    : MtpBuffers(ctx, max_len, sizes(max_len, desc, draft_vocab_size, kv), draft_vocab_size,
-                 kv_layout(max_len, desc, 1, kv)) {}
+                       uint32_t draft_vocab_size, KvCache kv, uint32_t n_slots)
+    : MtpBuffers(ctx, max_len, sizes(max_len, desc, draft_vocab_size, kv, n_slots),
+                 draft_vocab_size, kv_layout(max_len, desc, 1, kv), n_slots) {}
 
 MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
-                       uint32_t draft_vocab_size, const KvLayout& kv)
+                       uint32_t draft_vocab_size, const KvLayout& kv, uint32_t n_slots)
     : hctl(ctx, l0::MemKind::Shared, s.hctl),
       gdn_spec(ctx, l0::MemKind::Device, s.gdn_spec),
       kv_k(ctx, l0::MemKind::Device, s.kv_k),
@@ -174,7 +174,8 @@ MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
                             : nullptr),
       max_len(max_len),
       draft_vocab(draft_vocab_size),
-      kv_lay(kv) {
+      kv_lay(kv),
+      slots(n_slots) {
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   zero(imm);
 }
