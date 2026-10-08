@@ -4,7 +4,8 @@ Written 2026-10-07 on the Mac, without the box. This is the order in which to ru
 of [box-validation-queue.md](superpowers/plans/box-validation-queue.md) through
 `tools/box_validate.sh` (stages: `tools/box_validate/stages.sh`) once the box is back. Every
 stage id below comes from `tools/box_validate.sh --list` / `--dry-run [--with optin]` on main
-`97a519b` (180 default stages including `pre`, 43 opt-in, 12 manual). **Every time in this file is an estimate**:
+`97a519b` (180 default stages including `pre`, 43 opt-in, 12 manual; row 29's opt-in
+`r29.cost`, plan 19a Task 4's probe, makes 44). **Every time in this file is an estimate**:
 nothing here has been timed on the current tree. Where an estimate comes from is stated next
 to it.
 
@@ -19,7 +20,7 @@ to it.
 | 4 | Ornith decode, prefill, serving (rows 10, 13, 16) | device 0 | `tools/box_validate.sh --only r10,r13,r16 --skip r16.cost` | 21 | 3-5 h |
 | 5 | K2-Horizon (rows 14, 15, 21, 25) | device 0 | `tools/box_validate.sh --only r14,r15,r21,r25 --with r14.oracle` | 35 | 4.5-7.5 h |
 | 6 | timed one-card rows, **box idle (RECORD)** | device 0, both idle | `tools/box_validate.sh --only r1.sweep,r1.speed,r2.cost,r2.auto_rows,r3,r6.cost,r8.cost,r8.rows,r11.speed,r16.cost` | 10 | 7-11 h |
-| 6b | DFlash verify cost at M = 5..8 (plan 19a Task 4) - **needs a probe build first** (§2, Session 6b) | device 0, both idle | by hand: `probe_mtp_steps ... 8` + the drafter GEMV pass | - | ~1-1.5 h (est.) |
+| 6b | DFlash verify cost at M = 5..8 and one block's draft cost (row 29, plan 19a Task 4) | device 0, both idle | `tools/box_validate.sh --only r29.cost` | 1 (opt-in) | 0.25-0.5 h (est.) |
 | 7 | pipeline decode, then prefill (rows 22, 23) | **both** | `tools/box_validate.sh --only r22,r23` | 22 | 4.5-7 h |
 | 8 | pipeline integration (row 27) | **both** | `tools/box_validate.sh --only r27` | 14 | 4.5-7 h |
 | 9 | Kolibri-1 on the synthetic checkpoints (rows 24, 26, 28) | **both** | `tools/box_validate.sh --only r24,r26,r28 --with r24.oracle_synth` | 31 | 4.5-7 h |
@@ -327,24 +328,50 @@ code, ~2.2 on prose; its projection against `--mtp auto` (+54 % / +65 % / +17 %)
 verify(M) past spec 8's measured M = 2..4 (1.17 / 1.52 / 1.74 plain steps) to M = 8 = 2.62. If
 verify(8) comes out near 3.5, A4's margin shrinks to ~+17 %.
 
-**Prerequisite (not built yet - a Mac task before the box day):** plan 19a Task 4's probe build:
-the `gemv` / `gemv_i8w` / attention / GDN-slot variants at M = 5..8 (additive binaries, existing
-command lines unchanged), `probe_mtp_steps` extended to M = 8, and a timed GEMV pass over the
-drafter's weights at M = 8 (int8 and W4A16 g64) plus the ranked 32k head's K rows. Until that
-lands this session cannot run; it is not a runbook stage.
+**The probe build** (plan 19a Task 4, branch `spec19a-task4-probe`, written blind on the Mac):
+`B70_VERIFY_M8` (default ON, so G0's `build` has it; `g0.sha` lists the binaries as added) builds
+Qwen3.8's verify list at M = 5..8 - the five int4 GEMVs, the int8 head, a||b, the norms, embed,
+argmax, `attn_prep` / attention v2 at M rows (attn_v2.cl now allows M <= 8), the MTP head's KV fill,
+and `gdn_step_slots_M<M>_N8` (gdn_step.cl's slot count became overridable; 8 slots) - plus
+DFlash2's drafter GEMVs at M = 8 in int8 / bf16 / int4 g64 and the int8 head at 7 rows (full and
+32k). No engine binds them. `probe_mtp_steps` takes an eighth argument, `max_m` (default 4: every
+existing command line, r2.cost / r6.cost / r8.cost / r16.cost, is unchanged): at 5..8 it builds the
+M = 5..8 lists over a probe-owned 8-slot `MtpBuffers` (+1.06 GB) beside the engine's own M = 1..4,
+rewinds pos to the depth before every arm, and adds a table of **interleaved pairs** (verify M = 1
+and verify M back to back, the order alternating by round, median of 3). `probe_draft_cost` times
+one DFlash2 block's GEMVs on random weights of the checkpoint's shapes (5 layers x {attn conv
+proj, q||k||v, o_proj, mlp conv proj, gate||up, down, the commit's ctx k||v} + fc + the selector
+projection; 37 launches) and the int8 head's 7 rows; `--plain-ms` prints shares of a plain step.
 
 Run on an idle box (§1.7), device 0, after session 6 (same idle conditions, shares its warm-up):
 
 ```sh
-# int8 head, depths 4k and 32k, verify M = 1..8, draft k = 1..3; interleaved pairs, median of 3
-build/tools/probe/probe_mtp_steps $SNAP_QWEN 4096 32 3 int8 8
-build/tools/probe/probe_mtp_steps $SNAP_QWEN 32768 32 3 int8 8
-# the drafter's one-block cost (the Task 4 probe's own binary, named when it is built)
+tools/box_validate.sh --only r29.cost
 ```
 
-Then plan 19a Task 5: re-run `docs/probe-dflash-2026-10-08.md` §3's table with the measured
-costs and record the verdict in spec 19 (`≥ 10 %` over `--mtp auto` on the coding and agentic
-sets = go for 19b). Estimate ~1-1.5 h (two depths x 8 M rows x interleaved pairs; est.).
+which runs (stage `r29.cost`, `tools/box_validate/stages.sh` row 29):
+
+```sh
+# int8 head, verify M = 1..8 and draft k = 1..3, rotated rounds + interleaved pairs, median of 3
+build/tools/probe/probe_mtp_steps $SNAP_QWEN 4096 32 3 int8 off 16384 8
+build/tools/probe/probe_mtp_steps $SNAP_QWEN 32768 32 3 int8 off 65536 8
+# one DFlash2 block's GEMVs (int8 / bf16 / int4 g64 at M = 8, the int8 head's 7 rows at V 248320
+# and 32768), random weights; --plain-ms = the 4k run's verify M=1 ms
+build/tools/probe/probe_draft_cost --calls 20 --rounds 3 --plain-ms <verify M=1 ms at 4k>
+```
+
+Read: the `| pair M=<M> |` lines (verify(M) / verify(1) as interleaved pairs; the rotated table
+above them is the cross-check), the `| block <format>, head V <V> |` lines (the draft cost in
+plain steps), and the per-linear rows (GB/s - where an M = 8 GEMV leaves the bandwidth regime).
+The verify rows include the MTP head's 10-launch KV fill, as spec 8's M = 1..4 rows do (+1.3 % at
+M = 1); a DFlash verify does not run it, so they are an upper bound by about that much.
+Estimate 0.25-0.5 h (est., from assumed call times: two loads and prefills, then per depth ~11
+arms x 104 calls and 7 x 3 pairs of 32 calls at 35-90 ms a call, ~2-4 min; the draft probe fills
+~8 GB of random weights, then runs for seconds).
+
+Then plan 19a Task 5 (a Mac edit): re-run `docs/probe-dflash-2026-10-08.md` §3's table with
+the measured costs and record the verdict in spec 19 (`≥ 10 %` over `--mtp auto` on the coding
+and agentic sets = go for 19b).
 
 ### Session 7 - pipeline parallel decode, then prefill (rows 22, 23)
 
@@ -506,8 +533,9 @@ named stage.
   model). A P1 difference is a bug - read the first differing byte the test prints. Needs both
   cards free and the P2P patch still in the kernel.
 - **The DFlash P0 finished on the Mac** (2026-10-08 02:54, `docs/probe-dflash-2026-10-08.md`;
-  provisional go on code and agentic output). Its formal verdict waits for Session 6b, whose
-  probe build (plan 19a Task 4) is not written yet. 19a also wants data **from** the box: spec 8
+  provisional go on code and agentic output). Its formal verdict waits for Session 6b
+  (`r29.cost`; the probe build is on branch `spec19a-task4-probe`, blind: its M = 5..8 binaries
+  first compile in G0's build - an ocloc failure there names the variant). 19a also wants data **from** the box: spec 8
   P0's 256-id golden continuations and the A4 bf16 ids (`GOLDEN_CONT_DIR` / `EXTRA_SOURCES`) -
   pull them on the box day (no GPU) to firm up the prose number (52 anchors today).
 - **Ornith's A4 reference is being made on the Mac** (started 2026-10-08, container

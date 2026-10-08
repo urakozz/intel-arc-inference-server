@@ -41,13 +41,47 @@
 
 ### Task 4: verify cost at M = 5..8 (box)
 
-- [ ] Build the `gemv` / `gemv_i8w` / attention / GDN-slot variants at M = 5..8 the verify needs (additive binaries; existing command lines unchanged), extend `probe_mtp_steps` to M = 8, measure verify(M) for M = 1..8 on the int8 head at depths 4k and 32k (interleaved pairs, median of 3). Also time an int8 and a bf16 GEMV pass over the drafter's weights at M = 8 for the draft cost. **Commit** `probe: verify cost at M = 5..8 (spec 19a)`.
+- [ ] (the probe build is in: Status below; the measurement is box queue row 29) Build the `gemv` / `gemv_i8w` / attention / GDN-slot variants at M = 5..8 the verify needs (additive binaries; existing command lines unchanged), extend `probe_mtp_steps` to M = 8, measure verify(M) for M = 1..8 on the int8 head at depths 4k and 32k (interleaved pairs, median of 3). Also time an int8 and a bf16 GEMV pass over the drafter's weights at M = 8 for the draft cost. **Commit** `probe: verify cost at M = 5..8 (spec 19a)`.
 
 ### Task 5: the projection and the verdict
 
 - [ ] Per corpus: tokens/s at the best K for DFlash (acceptance from Task 3, costs from Task 4) against `--mtp auto`'s (spec 8 §10 tables at the measured acceptance). Apply spec 19 §7's stopping rule (≥ 10 % over `--mtp auto` on the coding and reasoning sets). Spec 19 amendment with the verdict; if it stops, record spec 8 A7's M-row GEMV lever as the prerequisite and re-run Task 5 after it. **Commit** `spec 19: P0 verdict`.
 
 **Gate for the plan:** the verdict recorded with its numbers; 19b starts only on a "go". Tasks 1-3 run without the box.
+
+## Status (2026-10-08, Task 4's probe build)
+
+- **Task 4: the probe build is in, the measurement is not** (branch `spec19a-task4-probe`, written
+  blind on the Mac; box queue row 29, stage `r29.cost`, box-day plan Session 6b).
+  - **Kernels** (`src/kernels/CMakeLists.txt`, `B70_VERIFY_M8`, default ON, additive: no existing
+    command line moved, and the preprocessed sources of the 25 existing variants of the two edited
+    files are unchanged): Qwen3.8's verify list at M = 5..8 - the five int4 GEMVs at their
+    production {S, layout}, the int8 head, a||b, the norm pair, SiLU, the gated norm, embed,
+    argmax, `attn_prep` and attention v2 (`attn_v2.cl`: M <= 8, was <= 4), the MTP head's KV fill
+    (fc, q||k||v, the strided norm, the ZERO_RESID fold, `attn_prep_S1`) and `gdn_step_slots_M<M>_N8`
+    (`gdn_step.cl`: `N_SLOTS` overridable, 4 unless set; `kernels::gdn_step_slots_variant`'s
+    `slots`). The int8 head at M = 5..8 only (no bf16 head, no int8 KV, no v1 attention at M > 4).
+  - **Runtime:** `MtpBuffers` / `MtpDims::sizes` take a slot count (default 4 = every engine and
+    stage, unchanged); `build_verify` accepts M up to it. The engine, the pipeline engine and
+    `--mtp` / `--mtp auto` are untouched: their lists stay M = 1..4 over 4 slots.
+  - **`probe_mtp_steps ... <max_len> 8`:** the M = 5..8 lists over a probe-owned 8-slot
+    `MtpBuffers` (+1.06 GB), driven as `Engine::verify` + `commit(0)` drive theirs; pos rewound to
+    the depth before every arm; a second table of interleaved pairs (verify M = 1 then M, order
+    alternating by round, median of 3). `max_m` defaults to 4: the old probe's arms and output.
+  - **`probe_draft_cost`:** one DFlash2 block's GEMVs on random weights of the checkpoint's shapes
+    (`tools/probe/draft_cost_shapes.h`, read from z-lab/Qwen3.8-27B-DFlash2's config and
+    safetensors header: 5 layers x {attn / mlp conv kernel projections 5120 -> 1280, q||k||v
+    5120 -> 6144, o_proj 4096 -> 5120, gate||up 5120 -> 34816, down 17408 -> 5120, the commit's
+    ctx k||v 5120 -> 2048} + fc 25600 -> 5120 + the selector's 5120 -> 256, at M = 8) in int8,
+    bf16 and int4 g64 (the int4 {S} of the new shapes are PROVISIONAL picks, not swept), and the
+    int8 head over the 7 draft rows at V 248320 and 32768. GEMVs only (the drafter's attention,
+    norms, convolutions and selector walk are not in it).
+  - **Mac gates** (`B70_JOBS=2 tools/mac_check.sh --base main --quick --kernels`): host 72 pass /
+    0 fail (incl. the new `verify_m8_names_test` and `memory_plan_test`'s 8-slot sizes), L0 syntax
+    98 / 0, `kernel_cmdlines` 630 variants +111 / -0 / ~0, OpenCL syntax 614 / 0, the Mac GPU 8
+    agree (`gemv_i8w` at M = 8 K 5120 N 1280 and `argmax` at M = 8 among them; indicative).
+  - **Not done here:** a bitwise check of the M = 5..8 rows (spec 19 D3 is 19c's); the commit
+    `probe: verify cost at M = 5..8 (spec 19a)` with the box's numbers; Task 5.
 
 ## Status (2026-10-08)
 
