@@ -538,6 +538,32 @@ class KolibriRef:
             del lw
         return self.head(rms_norm(ops, h[0], self.norm_w, c.rms_norm_eps))
 
+    @torch.no_grad()
+    def forward_many(self, items: list) -> list[torch.Tensor]:
+        """Layer-major forward() over several sequences: items = [(ids, pos0, cache)], each its own
+        sequence and cache (ragged). Every item through layer 0, then layer 1, ...: a layer's dense
+        weights and each routed expert are read once for all items, while each item runs forward()'s
+        own calls on its own [1, T] tensors (nothing concatenated across items), so its logits are
+        bitwise forward()'s whatever else is in the batch. Returns each item's LAST logits row
+        (fp32 [vocab]), the full head computed and dropped item by item, as forward() computes it."""
+        c, ops = self.c, self.ops
+        st = []
+        for ids, pos0, cache in items:
+            ids = torch.as_tensor(ids, dtype=torch.long).flatten()
+            pos = torch.arange(pos0, pos0 + ids.numel())
+            cos, sin = rope_cos_sin(ops, pos, c.head_dim, c.rope_theta)
+            st.append([ops.w(self.embed[ids])[None], pos, cos, sin, cache])
+        for i in range(c.num_hidden_layers):
+            lw = self.layer(i)
+            for s in st:
+                s[0] = self.decoder_layer(i, lw, s[0], s[1], s[2], s[3], s[4])
+            del lw
+        out = []
+        for s in st:
+            out.append(self.head(rms_norm(ops, s[0][0], self.norm_w, c.rms_norm_eps))[-1].clone())
+            s.clear()
+        return out
+
     def head(self, x: torch.Tensor) -> torch.Tensor:
         """lm_head; fp32 operands and logits when head_dtype is float32 (the checkpoint's setting)."""
         if self.c.head_fp32:

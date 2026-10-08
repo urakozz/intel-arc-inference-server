@@ -558,21 +558,36 @@ class Recorder:
 class K2Ref:
     """The reference, layer at a time. `src` is a Checkpoint or a DictSource."""
 
-    def __init__(self, c: K2Config, src, mode: str = "bf16", prefetch: bool = True):
+    def __init__(self, c: K2Config, src, mode: str = "bf16", prefetch: bool = True, keep_dense=(),
+                 keep_experts=()):
+        """keep_dense: layers whose dense tensors stay loaded after their first forward;
+        keep_experts: layers whose dequantised experts (MoE and MoVA) are kept once read, instead
+        of being dropped with the layer - each read once per run. Neither changes a value."""
         self.c, self.src, self.ar = c, src, Arith(mode)
         self.embed = src.tensor("model.embed_tokens.weight")
         self.norm_w = src.tensor("model.norm.weight")
         self.lm_head = self.embed if c.tie_word_embeddings else src.tensor("lm_head.weight")
+        self.keep_dense, self.keep_experts = set(keep_dense), set(keep_experts)
+        self.dense: dict[int, dict] = {}
+        self.experts: dict[int, dict] = {i: {} for i in self.keep_experts}
         self.pf = None
         if prefetch:
-            self.pf = stream_mod()._Prefetch(lambda i: load_dense_layer(src, c, i), c.num_hidden_layers)
+            self.pf = stream_mod()._Prefetch(lambda i: load_dense_layer(src, c, i), c.num_hidden_layers,
+                                             keep=self.keep_dense)
         self.load_seconds = 0.0
 
     def layer(self, i: int) -> LayerWeights:
         t = time.time()
-        d = self.pf.get(i) if self.pf else load_dense_layer(self.src, self.c, i)
+        d = self.dense.get(i)
+        if d is None:
+            d = self.pf.get(i) if self.pf else load_dense_layer(self.src, self.c, i)
+            if i in self.keep_dense:
+                self.dense[i] = d
         self.load_seconds += time.time() - t
-        return LayerWeights(self.src, self.c, i, d)
+        lw = LayerWeights(self.src, self.c, i, d)
+        if i in self.keep_experts:
+            lw.cache = self.experts[i]
+        return lw
 
     def new_cache(self) -> list:
         return [None] * self.c.num_hidden_layers
@@ -629,32 +644,69 @@ class K2Ref:
             y = ar.r(y + mlp(ar, x, lw["shared.gate"], lw["shared.up"], lw["shared.down"]))
         return y
 
+    def decoder_layer(self, i: int, lw: LayerWeights, h: torch.Tensor, pos, cos, sin, cache: list,
+                      rec: Recorder | None = None) -> torch.Tensor:
+        c, ar = self.c, self.ar
+        G, eps = c.layernorm_num_groups, c.rms_norm_eps
+        a = self.attn(i, lw, grouped_rms_norm(ar, h, lw["input_layernorm"], G, eps), pos, cos, sin, cache, rec)
+        h = ar.r(h + a)
+        m = self.ffn(i, lw, grouped_rms_norm(ar, h, lw["post_attention_layernorm"], G, eps), rec)
+        h = ar.r(h + m)
+        if rec:
+            rec.add(f"mixer.L{i}", a)
+            rec.add(f"mlp.L{i}", m)
+            rec.add(f"resid.L{i}", h)
+        return h
+
     # the whole model ----------------------------------------------------------------------
-    @torch.no_grad()
-    def forward(self, ids, pos0: int, cache: list, rec: Recorder | None = None) -> torch.Tensor:
-        """Tokens `ids` at positions pos0.. through every layer; returns fp32 logits [T, vocab]."""
+    def _embed(self, ids, pos0: int, rec: Recorder | None = None):
         c, ar = self.c, self.ar
         ids = torch.as_tensor(ids, dtype=torch.long).flatten()
-        T = ids.numel()
-        pos = torch.arange(pos0, pos0 + T)
+        pos = torch.arange(pos0, pos0 + ids.numel())
         cos, sin = rope_cos_sin(ar, pos, c.rope_dim, c.rope_theta)
         if rec:
             rec.add("rope.cos", cos)
             rec.add("rope.sin", sin)
-        h = self.embed[ids].float()
-        G, eps = c.layernorm_num_groups, c.rms_norm_eps
-        for i in range(c.num_hidden_layers):
+        return self.embed[ids].float(), pos, cos, sin
+
+    def _final(self, h: torch.Tensor) -> torch.Tensor:
+        c = self.c
+        return self.head(grouped_rms_norm(self.ar, h, self.norm_w, c.layernorm_num_groups, c.rms_norm_eps))
+
+    @torch.no_grad()
+    def forward(self, ids, pos0: int, cache: list, rec: Recorder | None = None) -> torch.Tensor:
+        """Tokens `ids` at positions pos0.. through every layer; returns fp32 logits [T, vocab]."""
+        h, pos, cos, sin = self._embed(ids, pos0, rec)
+        for i in range(self.c.num_hidden_layers):
             lw = self.layer(i)
-            a = self.attn(i, lw, grouped_rms_norm(ar, h, lw["input_layernorm"], G, eps), pos, cos, sin, cache, rec)
-            h = ar.r(h + a)
-            m = self.ffn(i, lw, grouped_rms_norm(ar, h, lw["post_attention_layernorm"], G, eps), rec)
-            h = ar.r(h + m)
-            if rec:
-                rec.add(f"mixer.L{i}", a)
-                rec.add(f"mlp.L{i}", m)
-                rec.add(f"resid.L{i}", h)
+            h = self.decoder_layer(i, lw, h, pos, cos, sin, cache, rec)
             del lw
-        return self.head(grouped_rms_norm(ar, h, self.norm_w, G, eps))
+        return self._final(h)
+
+    @torch.no_grad()
+    def forward_many(self, items: list) -> list[torch.Tensor]:
+        """Layer-major forward() over several sequences: items = [(ids, pos0, cache)], each its own
+        sequence with its own cache (ragged lengths and positions). Every item goes through layer
+        0, then every item through layer 1, ...: a layer's weights - its dense tensors and each
+        routed expert, dequantised once - are read once for all items. Each item's arithmetic is
+        forward()'s - the same calls on the same tensors, one item at a time, nothing concatenated
+        across items - so its logits are bitwise forward()'s whatever else is in the batch.
+        Returns each item's LAST logits row (fp32 [vocab]): the full [T, vocab] head is computed
+        (as forward() does) and dropped item by item, so a batch of prompts never holds B of them."""
+        st = []
+        for ids, pos0, cache in items:
+            h, pos, cos, sin = self._embed(ids, pos0)
+            st.append([h, pos, cos, sin, cache])
+        for i in range(self.c.num_hidden_layers):
+            lw = self.layer(i)
+            for s in st:
+                s[0] = self.decoder_layer(i, lw, s[0], s[1], s[2], s[3], s[4])
+            del lw
+        out = []
+        for s in st:
+            out.append(self._final(s[0])[-1].clone())
+            s.clear()
+        return out
 
     def head(self, x: torch.Tensor, chunk: int = 32768) -> torch.Tensor:
         """lm_head: one bf16 GEMM in bf16 mode (as the reference); in f32 mode in vocab-row chunks
