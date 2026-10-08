@@ -62,6 +62,7 @@ import importlib.util  # noqa: E402
 import json  # noqa: E402
 import re  # noqa: E402
 import resource  # noqa: E402
+import threading  # noqa: E402
 import time  # noqa: E402
 
 import torch  # noqa: E402
@@ -153,15 +154,51 @@ def rtn_dequant(w: torch.Tensor) -> torch.Tensor:
 
 class LazyExperts:
     """One shared [E][2I][H] / [E][H][I] buffer pair; a layer's routed experts dequantised into
-    it on demand (module docstring). `where` maps checkpoint names to shard handles."""
+    it on demand (module docstring). `where` maps checkpoint names to shard handles.
 
-    def __init__(self, where, tc):
+    `keep`: layers that get buffers of their OWN instead, filled on demand like the shared pair
+    but never overwritten - so each of their experts is dequantised once per run, not once per
+    forward (1.61 GB per layer when every expert has been used; oracle_generate.py sizes it to the
+    container's cap). The experts module reads the same bf16 values either way."""
+
+    def __init__(self, where, tc, keep=()):
         self.where, self.tc = where, tc
+        self.keep = set(keep)
         E, I, H = tc.num_experts, tc.moe_intermediate_size, tc.hidden_size
-        self.gate_up = torch.empty(E, 2 * I, H, dtype=torch.bfloat16)
-        self.down = torch.empty(E, H, I, dtype=torch.bfloat16)
+        self.shape = ((E, 2 * I, H), (E, H, I))
+        shared = len(self.keep) < tc.num_hidden_layers
+        self.gate_up = torch.empty(*self.shape[0], dtype=torch.bfloat16) if shared else None
+        self.down = torch.empty(*self.shape[1], dtype=torch.bfloat16) if shared else None
+        self.own: dict[int, tuple[torch.Tensor, torch.Tensor, set]] = {}
+        self.lock = threading.Lock()
         self.filled = 0
         self.checked: set[str] = set()
+        # The experts of the layer the shared pair holds now: a layer-major batch (oracle_generate.py
+        # --batch) calls the same layer once per sequence in a row, and an expert already filled
+        # for this layer is not dequantised again (the bytes would be the same).
+        self.layer: int | None = None
+        self.have: set[int] = set()
+
+    def tensors(self, layer: int):
+        """(gate_up, down) for `layer`'s experts module: its own pair if kept, else the shared one.
+        No other side effect - stream.py's prefetch thread calls it (layer_sd)."""
+        if layer not in self.keep:
+            return self.gate_up, self.down
+        with self.lock:
+            if layer not in self.own:
+                self.own[layer] = (torch.empty(*self.shape[0], dtype=torch.bfloat16),
+                                   torch.empty(*self.shape[1], dtype=torch.bfloat16), set())
+            return self.own[layer][:2]
+
+    def buffers(self, layer: int):
+        """(gate_up, down, the set of experts they hold for `layer`) - the forward thread only
+        (fill): the shared pair's set is reset whenever another layer is filled."""
+        if layer in self.keep:
+            self.tensors(layer)
+            return self.own[layer]
+        if layer != self.layer:
+            self.layer, self.have = layer, set()
+        return self.gate_up, self.down, self.have
 
     def _linear(self, base: str) -> torch.Tensor:
         qk, sk = base + ".qweight", base + ".scales"
@@ -174,11 +211,15 @@ class LazyExperts:
 
     def fill(self, layer: int, ids) -> None:
         I = self.tc.moe_intermediate_size
+        gate_up, down, have = self.buffers(layer)
         for e in ids:
+            if e in have:
+                continue
+            have.add(e)
             b = f"{LP}{layer}.mlp.experts.{e}."
-            self.gate_up[e, :I] = self._linear(b + "gate_proj")
-            self.gate_up[e, I:] = self._linear(b + "up_proj")
-            self.down[e] = self._linear(b + "down_proj")
+            gate_up[e, :I] = self._linear(b + "gate_proj")
+            gate_up[e, I:] = self._linear(b + "up_proj")
+            down[e] = self._linear(b + "down_proj")
             self.filled += 1
 
     def hook(self, layer: int):
@@ -187,8 +228,11 @@ class LazyExperts:
         return fn
 
 
-def build_streamed(snapshot: str, tc):
-    """Qwen3_5MoeForCausalLM on meta, resident tensors loaded, layers streamed, experts lazy."""
+def build_streamed(snapshot: str, tc, keep_dense=(), keep_experts=()):
+    """Qwen3_5MoeForCausalLM on meta, resident tensors loaded, layers streamed, experts lazy.
+    keep_dense: layers whose dequantised non-expert weights stay materialised after their first
+    forward (stream.attach's keep, ~74 MB a layer); keep_experts: layers with their own expert
+    buffers (LazyExperts' keep). Neither changes a value any forward computes."""
     m = mqm()
     with torch.device("meta"):
         model = m.Qwen3_5MoeForCausalLM(tc)
@@ -204,7 +248,7 @@ def build_streamed(snapshot: str, tc):
     resident: dict[str, torch.Tensor] = {}
     _, lm_kind = _dump.convert(where, rest, 64, resident)
     print(f"lm_head: {lm_kind}")
-    lazy = LazyExperts(where, tc)
+    lazy = LazyExperts(where, tc, keep_experts)
 
     def layer_sd(i: int) -> dict[str, torch.Tensor]:
         sd: dict[str, torch.Tensor] = {}
@@ -214,16 +258,88 @@ def build_streamed(snapshot: str, tc):
         if bad:
             raise RuntimeError(f"layer {i}: {bad[:3]} outside {pre}")
         out = {k[len(pre):]: v for k, v in sd.items()}
-        out["mlp.experts.gate_up_proj"] = lazy.gate_up
-        out["mlp.experts.down_proj"] = lazy.down
+        out["mlp.experts.gate_up_proj"], out["mlp.experts.down_proj"] = lazy.tensors(i)
         return out
 
     layers = list(model.model.layers)
     pf = _stream.attach(model, layers, layer_sd, resident,
-                        rebuild=[(model.model, "rotary_emb", lambda: type(model.model.rotary_emb)(tc))])
+                        rebuild=[(model.model, "rotary_emb", lambda: type(model.model.rotary_emb)(tc))],
+                        keep=keep_dense)
     for i, layer in enumerate(layers):
         layer.mlp.experts.register_forward_pre_hook(lazy.hook(i))
     return model.eval(), pf, lazy
+
+
+LAYER_MAJOR_TRANSFORMERS = "5.15."     # the version layer_major's prologue was checked against
+
+
+def layer_major(model, pf):
+    """-> step_many(items) for the streamed model of build_streamed: items = [(ids, pos, state)],
+    state a dict whose "cache" is None before the prompt; returns each item's last logits row
+    (fp32 [V]), as `model(input_ids=[ids], past_key_values=cache, use_cache=True)
+    .logits[0, -1].float()` would, BITWISE.
+
+    Layer-major: every item through decoder layer 0, then every item through layer 1, ... with
+    stream.py's hold mode keeping a layer materialised until every item has run it, and
+    LazyExperts dequantising each routed expert once per layer pass - so a pass reads each layer's
+    weights once for all items. Each item runs alone, on its own [1, T] tensors and its own
+    DynamicCache: what Qwen3_5MoeTextModel.forward does before its layer loop (embed, positions
+    from the cache length, the two masks, rotary - transformers 5.15's code, restated here with
+    the module's own functions), each decoder layer called with the arguments that loop passes,
+    then the final norm and Qwen3_5MoeForCausalLM's lm_head over every row. No op sees two items,
+    so nothing depends on what else is in the batch (tools/toolcall/test_oracle_batched.py checks ids and logits
+    against the sequential path, bitwise)."""
+    m = mqm()
+    tm = model.model
+    cfg = tm.config
+    layers = list(tm.layers[: cfg.num_hidden_layers])
+
+    def prologue(ids, pos, st):
+        x = torch.tensor([list(ids)])
+        h = tm.embed_tokens(x)
+        if st.get("cache") is None:
+            st["cache"] = m.DynamicCache(config=cfg)
+        cache = st["cache"]
+        past = cache.get_seq_length()
+        if past != pos:
+            raise RuntimeError(f"position {pos} fed to a cache of {past} tokens")
+        position_ids = torch.arange(h.shape[1], device=h.device) + past
+        position_ids = position_ids.view(1, 1, -1).expand(4, h.shape[0], -1)
+        text_position_ids, position_ids = position_ids[0], position_ids[1:]
+        mk = {"config": cfg, "inputs_embeds": h, "attention_mask": None, "past_key_values": cache,
+              "position_ids": text_position_ids}
+        masks = {"full_attention": m.create_causal_mask(**mk),
+                 "linear_attention": m.create_recurrent_attention_mask(**mk)}
+        return {"h": h, "pe": tm.rotary_emb(h, position_ids), "masks": masks, "tpos": text_position_ids,
+                "cache": cache}
+
+    @torch.no_grad()
+    def step_many(items):
+        import transformers
+        if not transformers.__version__.startswith(LAYER_MAJOR_TRANSFORMERS):
+            raise RuntimeError(f"layer_major restates transformers {LAYER_MAJOR_TRANSFORMERS}x's "
+                               f"Qwen3_5MoeTextModel.forward; this is {transformers.__version__} - re-check it "
+                               f"(tools/toolcall/test_oracle_batched.py) or run --batch 1")
+        ps = [prologue(ids, pos, st) for ids, pos, st in items]
+        pf.hold = True
+        try:
+            for i, layer in enumerate(layers):
+                lt = cfg.layer_types[i]
+                for p in ps:
+                    p["h"] = layer(p["h"], position_embeddings=p["pe"], attention_mask=p["masks"][lt],
+                                   position_ids=p["tpos"], past_key_values=p["cache"], use_cache=True,
+                                   output_router_logits=False)
+                pf.release()
+        finally:
+            pf.hold = False
+            pf.release()
+        rows = []
+        for p in ps:
+            h = tm.norm(p["h"])
+            rows.append(model.lm_head(h[:, slice(0, None), :])[0, -1].float())
+            p.clear()
+        return rows
+    return step_many
 
 
 class Recorder:
