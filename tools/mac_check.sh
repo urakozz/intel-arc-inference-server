@@ -16,6 +16,7 @@
 #   4 opencl   every distinct kernel variant command line through clang -x cl -cl-std=CL3.0
 #              -fsyntax-only with the Intel-extension shim (tools/mac/cl_syntax.sh).
 #   5 kernels  (--kernels only) gemv_i8w, argmax, pf_moe, k2, moe and kolibri built and run on the Mac's OpenCL GPU
+#              (gemv_i8w and argmax also at M = 8, spec 19a)
 #              against host references (tools/mac/clrun): INDICATIVE, not a B70 result.
 #
 #   --base REF              what section 3 compares against, and --quick's "changed" (main)
@@ -239,6 +240,19 @@ if [ $kernels = 1 ]; then
       nfail=$((nfail + 1)); runs="$runs $d:DISAGREES"
     fi
     sed 's/^/    /' "$out/clrun-$d.log"
+  done
+  # Spec 19a (B70_VERIFY_M8): the M = 8 rows - gemv_i8w at a DFlash2 drafter shape (the
+  # conv kernel projection, 5120 -> 1280) and argmax over 8 rows, from the binaries above.
+  for run in "gemv_i8w 8 5120 1280" "argmax 8 5000 4990"; do
+    d=${run%% *} args=${run#* } tag=$(echo "$run" | tr ' ' '_')
+    [ -x "$bin/${d}_run" ] || continue
+    # shellcheck disable=SC2086
+    if "$bin/${d}_run" $args > "$out/clrun-$tag.log" 2>&1; then
+      npass=$((npass + 1)); runs="$runs $d@M${args%% *}:agrees"
+    else
+      nfail=$((nfail + 1)); runs="$runs $d@M${args%% *}:DISAGREES"
+    fi
+    sed 's/^/    /' "$out/clrun-$tag.log"
   done
   if [ $ok = 0 ] || [ $nfail != 0 ]; then
     row kernels FAIL "$npass agree, $nfail disagree" "${runs# } (logs in $out)"
