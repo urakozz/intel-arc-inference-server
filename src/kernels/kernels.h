@@ -233,10 +233,14 @@ inline std::string attn_v2_kv8_variant(unsigned M, unsigned T, unsigned q = kRef
 // floats) is baked, so a model with another GDN layer count is another binary:
 // Qwen3.8's 48 keeps the historical name, any other count is `_G<gdn_layers>`; the
 // v-head count (in the stride too) and the k-heads follow as the GDN suffix (spec 15b).
+// `slots` is the kernel's N_SLOTS (the ring of states row m writes into, (live + m) %
+// slots): spec 8's 4 keeps every historical name; spec 19a's verify probe at M = 5..8
+// binds the 8-slot build, `_N8` (runtime::MtpBuffers::slots).
 inline std::string gdn_step_slots_variant(unsigned M, unsigned gdn_layers,
                                           unsigned gdn_k = kRefGdnKHeads,
-                                          unsigned gdn_v = kRefGdnVHeads) {
+                                          unsigned gdn_v = kRefGdnVHeads, unsigned slots = 4) {
   return "gdn_step_slots_M" + std::to_string(M) +
+         (slots == 4 ? std::string() : "_N" + std::to_string(slots)) +
          (gdn_layers == 48 ? std::string() : "_G" + std::to_string(gdn_layers)) +
          gdn_suffix(gdn_k, gdn_v);
 }

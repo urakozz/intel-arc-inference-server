@@ -223,8 +223,11 @@ struct MtpBuffers : MtpDims {
   // `draft_vocab` = |V'| (spec 8 §11), 0 = the full head drafts (no dv_logits, and
   // `logits` is zeroed as before). Every size is MtpDims::sizes(max_len, desc, draft_vocab).
   // `kv` (spec 12b): the head's KV is in the main cache's form - one layer of KvLayout.
+  // `slots` (spec 19a, plan 19a Task 4): the GDN state slots, kSlots (4) for every engine
+  // and pipeline stage; tools/probe/probe_mtp_steps alone builds a second set at 8 for its
+  // verify lists at M = 5..8 (build_verify binds `gdn_step_slots_M<M>_N8` over them).
   MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
-             uint32_t draft_vocab = 0, KvCache kv = default_kv_cache());
+             uint32_t draft_vocab = 0, KvCache kv = default_kv_cache(), uint32_t slots = kSlots);
 
   l0::Mem hctl;
   l0::Mem gdn_spec;
@@ -236,6 +239,9 @@ struct MtpBuffers : MtpDims {
   uint32_t max_len;
   uint32_t draft_vocab = 0;
   KvLayout kv_lay;   // the head's kv_k / kv_v: one layer, the engine's form
+  // GDN state slots: slot 0 is gdn_state, gdn_spec holds slots - 1 more. A verify list
+  // at M rows needs M <= slots; row m writes slot (live + m) % slots.
+  uint32_t slots = kSlots;
 
   size_t bytes() const;
   // What Engine::reset() zeroes when MTP is on (all of it: the head's KV rows are
@@ -248,7 +254,7 @@ struct MtpBuffers : MtpDims {
 
  private:
   MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
-             uint32_t draft_vocab, const KvLayout& kv);   // the delegate
+             uint32_t draft_vocab, const KvLayout& kv, uint32_t slots);   // the delegate
 };
 
 // The VIEW. Every public name capture.cc uses, with the same types as before
