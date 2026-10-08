@@ -183,6 +183,43 @@ bf16 head by default so its rows stay comparable.
 **Relevant variables:** `B70_KV_CACHE`, `B70_DECODE_ATTN` (`v1` only for A/B against the old
 pair), the `B70_PREFILL_*` switches for prefill experiments, `B70_GIT_SHA` for bench rows.
 
+### DFlash draft model (spec 19) - measured on the Mac CPU, not in the engine yet
+
+`z-lab/Qwen3.8-27B-DFlash2` drafts a block of up to 8 tokens per step from Qwen3.8's own hidden
+states. Its acceptance on our prompts is measured (spec 19a P0, `docs/probe-dflash-2026-10-08.md`:
+7.21 tokens per verify at K = 7 on agentic tool calls, 6.15 on code, ~2.2 on prose; int8 and 4-bit
+drafters equal bf16). **The engine cannot run it yet:** the drafter (19b), the engine loop (19c)
+and serving (19d) are not built, and the go / no-go waits for the box to measure verify at
+M = 5..8 rows (`docs/box-day-plan.md`, Session 6b).
+
+Re-running the measurement (a Mac or the box CPU; ~20-25 h on a 64 GB Mac with the container at
+~54 GB - the first run's numbers are in `docs/probe-dflash-2026-10-08.md` §4):
+
+```sh
+# downloads (HF cache): the target in bf16 (~54 GB), the drafter (3.85 GB); optional 4-bit drafter arm
+uvx --from huggingface_hub hf download Qwen/Qwen3.8-27B
+uvx --from huggingface_hub hf download z-lab/Qwen3.8-27B-DFlash2
+uvx --from huggingface_hub hf download syvai/Qwen3.8-27B-DFlash2-W4A16
+# plans and estimates only, no model loaded
+DRY_RUN=1 tools/oracle/dflash_p0.sh
+# the run: tap dumps, the draft-vocabulary ranking, acceptance per drafter arm (resumable, detached)
+MEM=54g nohup tools/oracle/dflash_p0.sh > /dev/null 2>&1 &
+tail -f oracle-out-19a/p0.log                       # then oracle-out-19a/accept/summary.md
+# one arm again, e.g. after a new ranking
+STEPS="accept" ARMS=int8 tools/oracle/dflash_p0.sh
+```
+
+**Planned, not built** (spec 19 §3 decision 3; the flags do not exist yet): one proposer per
+server, DFlash replacing the MTP head:
+
+```sh
+./build/src/cli/b70-serve $Q --served-name qwen3.8 --prefix-split-last \
+    --spec dflash --draft-model z-lab/Qwen3.8-27B-DFlash2      # spec 19c/19d - NOT BUILT
+```
+
+The engine's drafter is meant to ship in our own int4 format (AutoRound W4A16 g64, re-quantised
+by us), which P0's 4-bit arm says loses no acceptance.
+
 ## Agnes 3.0 Flash
 
 `urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ` (spec 14): Qwen3.8's math with 72 layers
