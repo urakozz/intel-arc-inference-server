@@ -220,18 +220,31 @@ def attach(model, layers, layer_sd, resident_sd: dict, rebuild=(), keep=()):
     for parent, attr, factory in rebuild:
         setattr(parent, attr, factory())
     pf = _Prefetch(layer_sd, len(layers), keep)
+    # Hold mode (layer-major batches, oracle_generate.py --batch): with pf.hold set, a layer stays
+    # materialised after its forward, so the next sequence's call of the SAME layer runs on the same
+    # tensors without a second dequant; pf.release() drops it once every sequence has passed.
+    pf.hold, pf.held = False, None
+
+    def release():
+        if pf.held is not None and pf.held not in pf.keep:
+            layers[pf.held].to_empty(device="meta")
+        pf.held = None
+    pf.release = release
 
     def pre(i):
         def fn(mod, _args, _kwargs=None):
-            if i in pf.loaded:
+            if i in pf.loaded or pf.held == i:
                 return
+            release()
             sd = pf.get(i)
             mod.load_state_dict(sd, strict=True, assign=True)
+            if pf.hold:
+                pf.held = i
         return fn
 
     def post(i):
         def fn(mod, _args, _out):
-            if i not in pf.keep:
+            if i not in pf.keep and pf.held != i:
                 mod.to_empty(device="meta")
         return fn
 

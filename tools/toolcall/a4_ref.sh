@@ -39,15 +39,38 @@
 #              uvx --from huggingface_hub hf download urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ
 #   the box  tools/oracle/run_in_container.sh (ORACLE_IMAGE), in the foreground (the runbook's
 #            stages run detached already): r16.a4_ref / r25.a4_ref.
-# Time (estimated, not measured): `set` minutes; `ref` hours - a layer-streamed decode step
-# reads every layer's dense weights from the page cache: 36 scenarios x up to 192 (Ornith) / 512
-# (K2) ids. Each scenario's prompt forward and per-step seconds are in $OUT/ref.log.
+# Batched (BATCH, default auto; BATCH=1 is the old one-scenario-at-a-time run): oracle_generate.py
+# --batch runs up to BATCH scenarios through each layer together (layer-major), each layer's
+# weights dequantised once per pass for all of them, a finished scenario's slot refilled at once;
+# every sequence's arithmetic stays its own (no op sees two sequences), so the ids are bitwise the
+# sequential run's (tools/toolcall/test_oracle_batched.py: ids and every logits row, tiny Ornith /
+# K2 / Kolibri, ragged prompts, different EOS points). RESIDENT (default auto; none = off) keeps
+# dequantised weights resident once read - every layer's dense part, then whole layers of
+# experts - in what the cap leaves (also bitwise: the same values, read from RAM instead of
+# re-dequantised). The memory plan (estimates, from config.json and the container's cap - MEM)
+# is the log's first lines (on the box, no cap: MemAvailable at start, or MEM=<N>g). ONLY=a,b,...
+# runs just those scenarios (the cross-check);
+# NAME the container (a4-ref-<model>).
+#
+# Time: `set` minutes. `ref`, Ornith sequential MEASURED on the Mac (2026-10-08, 6 of 36, 12
+# threads): 920-2694 s a scenario, ~29 min mean, ~18 h the set; derived from two scenarios of
+# near-equal prompt length, a ~2800-id prompt forward ~1900 s and a decode step ~6 s (~8.7 s in
+# py-spy's window). py-spy over 800 s of it: a decode step is 38% routed-expert dequant + copy
+# (per layer and expert; a batch shares only the experts its rows have in common, ~6% fewer at 4
+# rows), 23% the GDN's bf16 depthwise conv1d (76 ms a call, per sequence), 13% grouped_mm, 9%
+# linears, 6% attention, 5% GDN - per sequence - and 1% the dense layers' (prefetched) dequant.
+# So for Ornith (ESTIMATED): batching alone ~5%; with RESIDENT=auto at MEM=60g (26 of 40 expert
+# layers resident) ~1.25x - ~14 h for 36, ~11.5 h for the 29 left. K2 (512 ids; its int4 step
+# ~7 s, ~70% of it dequant - tools/oracle/README.md's estimate, not measured): ~1-1.5 days
+# sequential, ~0.6-1 day batched (8) + RESIDENT at 54-60g (ESTIMATED). Each scenario's seconds,
+# and every prompt pass's (and every 25th pass's) seconds, are in $OUT/ref.log. Ornith batched
+# needs transformers 5.15 (agnes-ref-img; ornith_ref.layer_major refuses another version).
 #
 # Env: OUT (oracle-out-<model>-a4; git-ignored like every oracle-out*), DEVICE (kolibri's
 # reference: cpu, cuda or xpu), MODEL_DIR (a snapshot
 # directory instead of the HF cache's), NEW_TOKENS, KWARGS (K2's template variables, JSON;
 # default make_set.py's {"tool_call_format": "xml", "reasoning_effort": "low"}), IMAGE, MEM,
-# ORACLE_THREADS (12), HF_CACHE, FORCE.
+# ORACLE_THREADS (12), HF_CACHE, FORCE, BATCH (auto), RESIDENT (auto), ONLY, NAME.
 set -eu
 cd "$(dirname "$0")/../.."
 m=${1:-}
@@ -56,12 +79,12 @@ case "$m" in
   ornith) repo=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-192} ;;
   k2) repo=urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-512} ;;
   kolibri) repo=Aleph-Alpha/Kolibri-1-BF16; new=${NEW_TOKENS:-192} ;;
-  *) sed -n '2,50p' "$0" >&2; exit 2 ;;
+  *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;;
 esac
-case "$step" in set | ref | status) ;; *) sed -n '2,50p' "$0" >&2; exit 2 ;; esac
+case "$step" in set | ref | status) ;; *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;; esac
 cache_name="models--$(printf '%s' "$repo" | sed 's|/|--|g')"
 OUT=${OUT:-oracle-out-$m-a4}
-NAME=a4-ref-$m
+NAME=${NAME:-a4-ref-$m}
 HF=${HF_CACHE:-$HOME/.cache/huggingface}
 THREADS=${ORACLE_THREADS:-12}
 mac=0
@@ -114,6 +137,15 @@ else
   [ -s "$OUT/set/manifest.json" ] || { echo "a4_ref: no set in $OUT/set - run '$0 $m set' first" >&2; exit 2; }
   cmd_ref="python3 tools/toolcall/oracle_generate.py"
   [ "$m" = kolibri ] && cmd_ref="$cmd_ref --model kolibri --device ${DEVICE:-cpu}"
+  BATCH=${BATCH:-auto}
+  RESIDENT=${RESIDENT:-auto}
+  [[ "$BATCH" =~ ^(auto|[1-9][0-9]*)$ ]] || { echo "a4_ref: BATCH is auto or a count >= 1 (got $BATCH)" >&2; exit 2; }
+  [[ "$RESIDENT" =~ ^(auto|none)$ ]] || { echo "a4_ref: RESIDENT is auto or none (got $RESIDENT)" >&2; exit 2; }
+  cmd_ref="$cmd_ref --batch $BATCH --resident $RESIDENT"
+  if [ -n "${ONLY:-}" ]; then
+    [[ "$ONLY" =~ ^[A-Za-z0-9_.,-]+$ ]] || { echo "a4_ref: ONLY is a comma-separated list of scenario names (got $ONLY)" >&2; exit 2; }
+    cmd_ref="$cmd_ref --only $ONLY"
+  fi
 fi
 
 # The container sees this tree only (mounted at /ws): a run writes into a real directory inside
@@ -133,6 +165,11 @@ if [ $mac = 0 ]; then   # the box: the reference image, foreground
   if [ -n "${MODEL_DIR:-}" ]; then export ORACLE_SNAP="${MODEL_DIR%/}"; else export ORACLE_MODEL="$cache_name"; fi
   [ -n "${ORACLE_THREADS:-}" ] && export ORACLE_THREADS
   rc=0
+  # No container cap here: the memory plan reads MemAvailable at start, or MEM (e.g. 60g) when set
+  if [ "$step" = ref ] && [ -n "${MEM:-}" ]; then
+    [[ "$MEM" =~ ^[0-9]+g$ ]] || { echo "a4_ref: MEM is <N>g (got $MEM)" >&2; exit 2; }
+    cmd_ref="ORACLE_MEM_GB=${MEM%g} $cmd_ref"
+  fi
   if [ "$step" = set ]; then
     tools/oracle/run_in_container.sh "$cmd_set \"\$SNAP\" /ws/$work/set ${kw[*]+$(printf "'%s' " "${kw[@]}")}" || rc=$?
   else

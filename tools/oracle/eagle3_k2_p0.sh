@@ -34,6 +34,7 @@
 # Env: OUT, A4_OUT, GOLDEN_DIR, GOLDEN_GEN, K2_REPO (the int4 checkpoint the engine runs),
 # DRAFTER_REPO, IMAGE, MEM (54g), THREADS (16), STEPS, ARMS, WINDOW (query | anchor), DEPTH
 # (4096), MATMUL (fp32 | bf16), KEEP=1 (keep the container at exit), FORCE=1, A4, A4_PARTIAL,
+# A4_MEM (MEM) / A4_BATCH (auto) / A4_RESIDENT (auto): the a4 step's a4_ref.sh MEM / BATCH / RESIDENT,
 # K2_EMBED=1 (also the arms with K2's embedding, `<arm>-k2emb`: when facts finds it differs).
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 2
@@ -125,7 +126,7 @@ if [ -n "$DRY_RUN" ]; then
     if [ "$A4" != 1 ]; then echo "a4: skipped (A4=0: golden only)"
     elif [ -f "$A4_OUT/DONE" ]; then echo "a4: done"
     elif [ -n "$a4_running" ]; then echo "a4: running in a4-ref-k2 - the driver would stop here (exit 4) until $A4_OUT/DONE"
-    else echo "a4: would run tools/toolcall/a4_ref.sh k2 set (if no $A4_OUT/set) and tools/toolcall/a4_ref.sh k2 ref (detached, 28 GB, its own container), then stop (exit 4); ESTIMATED ~1-1.5 days (36 scenarios x up to 512 layer-streamed decode steps at ~7 s, tools/oracle/README.md's K2 int4 estimate)"; fi
+    else echo "a4: would run tools/toolcall/a4_ref.sh k2 set (if no $A4_OUT/set) and tools/toolcall/a4_ref.sh k2 ref (detached, its own container capped at ${A4_MEM:-$MEM}, BATCH=${A4_BATCH:-auto} RESIDENT=${A4_RESIDENT:-auto}: its memory plan is the first lines of $A4_OUT/ref.log), then stop (exit 4); ESTIMATED sequential ~1-1.5 days (36 scenarios x up to 512 layer-streamed decode steps at ~7 s, tools/oracle/README.md's K2 int4 estimate), batched + resident ~0.6-1 day (ESTIMATED: a pass shares the dense dequant and the experts its rows have in common)"; fi
   fi
   has check && echo "check: python3 tools/oracle/test_{eagle3_ref,k2_taps,eagle3_accept,eagle3_cost,dflash_accept}.py in $NAME (~10 min measured on 2 CPUs, less at $THREADS threads)"
   has facts && echo "facts: python3 tools/oracle/eagle3_ref.py facts <drafter> --k2 <K2> (reads the drafter 1.67 GB + K2's embedding 1.28 GB; ~1 min)"
@@ -189,8 +190,11 @@ if has a4 && [ "$A4" = 1 ]; then
   else
     need_k2 a4
     drop_container                                     # a4_ref.sh holds the one oracle slot itself
-    # a4_ref.sh reads MEM / IMAGE / HF_CACHE from the environment: give it its own (28 GB)
-    a4env=(env OUT="$A4_OUT" MEM="${A4_MEM:-28g}" IMAGE="$IMAGE" HF_CACHE="$HF")
+    # a4_ref.sh reads MEM / IMAGE / HF_CACHE / BATCH / RESIDENT from the environment: it runs alone
+    # (this driver exits 4 while it does), so it gets this driver's cap (MEM, 54g) and the batched,
+    # resident-weights run (bitwise the sequential one: tools/toolcall/test_oracle_batched.py)
+    a4env=(env OUT="$A4_OUT" MEM="${A4_MEM:-$MEM}" IMAGE="$IMAGE" HF_CACHE="$HF" BATCH="${A4_BATCH:-auto}"
+           RESIDENT="${A4_RESIDENT:-auto}")
     if [ ! -s "$A4_OUT/set/manifest.json" ]; then
       "${a4env[@]}" tools/toolcall/a4_ref.sh k2 set || { echo "a4: a4_ref.sh k2 set FAILED"; exit 1; }
     fi
