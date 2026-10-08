@@ -52,10 +52,12 @@ measured.)
   The engine's drafter should therefore be our own format - AutoRound W4A16 g64 symmetric,
   re-quantised by us (the operator's one-format rule; syvai's checkpoint proves the 4-bit
   acceptance, it is not the format we ship) - or int8 if a W4A16 g64 drafter is not ready.
-- **A ranked 32k draft vocabulary is free** (7.11 vs 7.09) and shrinks the draft head ~7.6x
-  (32768 of 248320 rows); by id it loses up to 1.4 tokens at K = 7 - the ranking
-  (`oracle-out-19a/draft_vocab.ranked.ids`, from the A4 and golden logs) is what makes it work.
-  cjk is the exception: unranked 32k / 64k drop it to 1.19 (the ranked lists hold it at 1.62).
+- **A ranked 32k draft vocabulary looks free** (7.11 vs 7.09) and would shrink the draft head
+  ~7.6x (32768 of 248320 rows); by id it loses up to 1.4 tokens at K = 7. **Caveat: the ranking
+  is in-sample** - `oracle-out-19a/draft_vocab.ranked.ids` was ranked (`tools/draft_vocab/rank.py`)
+  on the same A4 and golden sources it is scored on, so the `-r` rows are an upper bound for a
+  ranked V′. A ranking from other traffic (e.g. the opencode request logs) must be re-scored
+  before the 32k head is the default. cjk: unranked 32k / 64k drop it to 1.19 (ranked: 1.62).
 
 ## 3. Provisional projection (derived - the verify and draft costs are not measured)
 
