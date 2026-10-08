@@ -89,6 +89,8 @@ narrative, and the numbered guides cite them where they matter.
   prose 2.2); int8 / 4-bit drafters cost nothing; a ranked 32k draft vocabulary too (in-sample ranking: an upper bound). Provisional
   go on code and agentic output (+54-65 % over `--mtp auto`, derived); verify at M = 5..8 is
   the box's to measure (plan 19a Task 4).
+- [probe-eagle3-k2-2026-10-08.md](probe-eagle3-k2-2026-10-08.md) - EAGLE-3 on K2-Horizon
+  P0 (stub): the drafter's semantics pinned from source, the Mac tools built; results pending.
 - [probe-int8-kv-qwen38-2026-10-06.md](probe-int8-kv-qwen38-2026-10-06.md) - the 12a
   repeat on **Qwen3.8** (Mac CPU, plan 12b Task A): `rotkv` holds (golden cos mean
   0.99995-0.99997, above the stop rule; replay flat to 32k, below bf16 eager's own error).
