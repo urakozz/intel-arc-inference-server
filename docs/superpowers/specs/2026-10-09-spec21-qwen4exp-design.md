@@ -2,6 +2,7 @@
 
 **Status:** design, 2026-10-09; the operator approved the design on 2026-10-08 (§0 records what was ruled).
 Open decisions are marked **(decide)**. Nothing is built.
+**Plans (2026-10-09, after the operator's approval that day):** `docs/superpowers/plans/2026-10-09-spec21{a,b,c,d,e,q}-*.md` - 21a reference, 21b descriptor / loader / formats, 21c decode, 21d prefill, 21e serving and MTP, 21q our AutoRound run; box queue rows 30-34.
 
 **Model:** `Qwen/Qwen3.8-Flash-Next` (`Qwen4ExpForConditionalGeneration`, `model_type: qwen4_exp`; bf16,
 359,999,963,128 B in 1658 tensors). Intel's derived `Intel/Qwen3.8-Flash-Next-W4A16-AutoRound` (181.17 GB: routed
