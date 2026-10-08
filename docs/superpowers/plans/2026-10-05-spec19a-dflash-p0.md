@@ -49,6 +49,13 @@
 
 **Gate for the plan:** the verdict recorded with its numbers; 19b starts only on a "go". Tasks 1-3 run without the box.
 
+## Status (2026-10-08)
+
+- **Tasks 2-3 done** (Mac CPU, 2026-10-06 12:40 to 10-08 02:54): `docs/probe-dflash-2026-10-08.md`.
+  E_7 = 7.21 on A4, 6.15 code, 2.2 prose; int8 / w4a16 drafters and the ranked 32k V′ equal bf16.
+  Provisional projection (verify at M = 5..8 extrapolated): go on code and agentic output, prose
+  marginal. **Task 4 (box) and Task 5 decide formally.**
+
 ## Status (2026-10-06)
 
 - **Task 1** merged (`dflash_ref.py`).
