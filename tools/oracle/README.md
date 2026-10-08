@@ -25,7 +25,7 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `golden.sh` | The production run: the three prompts, serially, `--gen 32`. This is the script that made the files plan 3 compares against - committed rather than retyped. `PROMPTS` names which sets to build; `--max-prompt 4096` since spec 2. |
 | `make_long_prompt.sh` | Builds `tests/golden/prompts/long.ids` (2820 ids) and `long.txt` from the three committed prompts, on the Mac, with no model and no tokenizer. Spec 2 §6.2's ≥ 2048-id prompt. |
 | `check.sh` | Re-reads the three written files in a separate process and prints the block quoted under "Sanity checks" below. |
-| `stream.py` | Layer-streamed weights for `dump.py --stream` / `mtp_ref.py --dump --stream` (spec 14, the Mac path below): the model on `meta`, embed/norm/lm_head resident, each decoder layer materialised by a forward pre-hook and dropped after its forward; plus a bit-exact C++ `dequant_t` and the single-thread grouped conv1d. |
+| `stream.py` | Layer-streamed weights for `dump.py --stream` / `mtp_ref.py --dump --stream` (spec 14, the Mac path below): the model on `meta`, embed/norm/lm_head resident, each decoder layer materialised by a forward pre-hook and dropped after its forward; plus a bit-exact C++ `dequant_t`, the single-thread grouped conv1d, and a hold mode (a layer stays materialised until every sequence of a layer-major batch has run it). |
 | `dflash_ref.py` | Spec 19a: the CPU reference of the DFlash / DFlash 2 drafters (config reader, drafter + target embed/head loader incl. the W4A16 drafter, `context_kv`, `draft_block`); `test_dflash_ref.py` checks it on tiny random weights. "The DFlash reference" below. |
 | `dump_taps.py` | Spec 19a Task 2: the Qwen3.8 bf16 target (layer-streamed, as `kv_int8_probe.py run` builds it) over [prompt + recorded greedy continuation]; per source the residual after the drafter's tap layers (5, 19, 33, 47, 61), the greedy next ids and the top-64 logits. `test_dump_taps.py`: Review Focus 1 (tap i = layer i's OUTPUT) on a tiny checkpoint. "The DFlash P0" below. |
 | `dflash_accept.py` | Spec 19a Task 3: teacher-forced acceptance of the DFlash 2 drafter on those dumps, K = 1..7, arms bf16 / int8 RTN / int8 + int8 head / W4A16, draft vocabularies 32k / 64k / 128k (`loader::select_draft_vocab`); batched over anchors. `test_dflash_accept.py`: the batch against `dflash_ref.draft_block`. |
@@ -484,7 +484,8 @@ A4=0 nohup tools/oracle/eagle3_k2_p0.sh > /dev/null 2>&1 &   # or: golden prompt
   (1.67 GB) and `... urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ` (22.2 GB); the
   driver checks both are complete (no `.incomplete` blob, every shard) and never downloads.
   The `a4` step runs `tools/toolcall/a4_ref.sh k2 set` + `ref` (`oracle-out-k2-a4`, its own
-  28 GB container `a4-ref-k2`) and stops until `oracle-out-k2-a4/DONE`; `A4_PARTIAL=1` goes on
+  container `a4-ref-k2` capped at `A4_MEM` (MEM, 54g), `BATCH=auto RESIDENT=auto`: "The A4
+  reference, batched" below) and stops until `oracle-out-k2-a4/DONE`; `A4_PARTIAL=1` goes on
   with the scenarios already done.
 - **`k2_taps.py`** writes `oracle-out-eagle3-k2/dumps/<corpus>__<label>.k2taps.safetensors`:
   `aux.{2,24,45}` (= k2_ref's `resid.L{1,23,44}`) from `n_prompt - 2049` (the drafter's
@@ -501,7 +502,8 @@ A4=0 nohup tools/oracle/eagle3_k2_p0.sh > /dev/null 2>&1 &   # or: golden prompt
   `oracle-out-eagle3-k2/summary.md`: E_K, the per-position acceptance a_j (the model card's
   0.44 / 0.17 metric), alpha_j, and the DERIVED S_K = E_K / (V(K + 1) + D(K)) at `DEPTH` (4096)
   and at 0 / 4k / 32k.
-- **Cost (ESTIMATED by `DRY_RUN`, assumed rates):** the A4 reference ~1-1.5 days; golden ~15
+- **Cost (ESTIMATED by `DRY_RUN`, assumed rates):** the A4 reference ~1-1.5 days sequential, ~0.6-1
+  day batched + resident ("The A4 reference, batched" below); golden ~15
   min a prompt at 128 ids; the dump ~1.6 h (39 sources, ~87k tokens at the 512-id cap), peak
   RSS ~12 GiB, dumps ~1.3 GB on disk; acceptance ~5-10 min per arm (the real drafter's smoke
   rates on 2 CPUs: 40-58 anchors/s), ~3-4 GiB; lookup / cost seconds.
@@ -616,6 +618,94 @@ docker run --rm --cpus 2 --memory 6g -v "$PWD":/ws -w /ws -e HF_HOME=/tmp/hf \
 The real run - download first (plan 15a has the disk / RAM / time figures), then
 `tools/oracle/ornith_golden.sh` (detached, resumable, 28 GB cap, `facts` first) and
 `tools/oracle/ornith_golden.sh --status`.
+
+### The A4 reference, batched (2026-10-08)
+
+`tools/toolcall/oracle_generate.py --batch N|auto --resident none|auto` (what
+`tools/toolcall/a4_ref.sh` runs by default since branch `a4-ref-batched`: `BATCH=auto
+RESIDENT=auto`; `BATCH=1 RESIDENT=none` is the old run, byte for byte the old code path) for the
+three MoE references, Ornith (`ornith_ref.layer_major`), K2 (`K2Ref.forward_many`) and Kolibri
+(`KolibriRef.forward_many`):
+
+- **Layer-major, each sequence alone.** Up to N scenarios are in flight; a pass takes every one
+  through decoder layer 0, then every one through layer 1, ... - each layer's weights read (and
+  dequantised) once for the pass: stream.py's hold mode keeps an Ornith layer materialised until
+  every sequence has run it, `LazyExperts` fills each routed expert once per layer pass, K2's /
+  Kolibri's `LayerWeights` (dense part and expert cache) are shared by the pass. Nothing else is
+  shared: each sequence runs the sequential path's own calls on its own `[1, T]` tensors and its
+  own cache (Ornith: what `Qwen3_5MoeTextModel.forward` does before its layer loop - embed,
+  positions from the cache length, the two masks, rotary - restated with the module's own
+  functions, then each `Qwen3_5MoeDecoderLayer` with the arguments that loop passes; K2 / Kolibri:
+  `forward()` split at its layer loop, one `decoder_layer` body for both). No op ever sees two
+  sequences - no padding, no concatenated rows, no batch-shaped GEMM - so a row's bits cannot
+  depend on what else is in the batch, ragged prompts and positions are free, and the head runs
+  over every row exactly as `forward()` runs it (the last row is kept). A sequence that ends
+  (EOS kept, or its cap) is written at once and its slot refilled: a new prompt's forward shares
+  a pass with the others' decode steps.
+- **Resident weights.** `--resident auto` keeps dequantised weights once read in what the
+  memory plan leaves: every layer's dense part (stream.py's `keep` / `K2Ref(keep_dense=)`), then
+  whole layers of experts (`LazyExperts(keep=)`: per-layer buffers filled on demand and never
+  overwritten; `K2Ref(keep_experts=)`). The values are the dequant's, read from RAM instead of
+  recomputed. Kolibri: batching only.
+- **The memory plan** (`batch_plan`, printed first in `ref.log`, ESTIMATES from config.json): the
+  cap (the cgroup's, i.e. MEM), the base (embed + head, the streamed layer and its prefetch, the
+  expert buffers), the largest single forward (the longest prompt: `[T, V]` logits, eager
+  attention's scores - sequences run one at a time, so one is live), per sequence (KV / GDN
+  state at the longest prompt + N new ids: Ornith 0.13 GiB, K2 1.32 GiB - k2_ref keeps K / V in
+  fp32 tensors), in 85% of the cap less 2 GiB; auto batch at most 4 (Ornith, Kolibri) / 8 (K2).
+  Ornith at 60g: batch 4, 40/40 dense + 26/40 expert layers resident (~49 GiB peak); K2 at 54g:
+  batch 8, 48/48 dense + 11/45 expert layers (~43 GiB); at 28g Ornith keeps 8 expert layers, K2
+  runs 6 sequences and 13 dense layers.
+- **Each greedy step's top-1 minus top-2 logit** goes to `<name>.bf16.gap` (both modes), and
+  `tools/toolcall/compare_ref.py A B` compares two runs id for id - the first differing position
+  and both gaps there - and gap for gap where both wrote them.
+- **Tests** (`tools/toolcall/test_oracle_batched.py`, agnes-ref-img, 2 CPUs, ~1 min; run
+  2026-10-08, all pass): tiny random Ornith (int4, streamed, lazy experts), K2 (int4, MoVA) and
+  Kolibri (bf16, sliding + full) checkpoints through `moe_runner` as the A4 run loads them; five
+  ragged prompts (1-17 ids), a cap per prompt, an EOS set making two sequences stop early at
+  different lengths and others at their caps; batch 2 (refills), 3 (reverse order) and 5 - **ids
+  and every logits row the greedy loop read, `torch.equal` against the sequential path**, and the
+  same with dense + half the expert layers resident (sequential and batch 3); the CLI end to end
+  (`--batch 1` and `--batch 3` file for file, one scenario resumed untouched, `--only`,
+  `--resident auto`); the plan on the real configs. `test_oracle_generate.py` (no torch): the
+  scheduler feeds every sequence exactly greedy()'s (ids, pos) at batch 1 / 2 / 4 / 6;
+  compare_ref. The existing test_ornith_ref / test_k2_ref / test_kolibri_ref / test_k2_taps /
+  test_k2_kv8_probe pass unchanged. Weight reads on the tiny models, sequential -> batch 5:
+  Ornith 80 -> 32 layer loads, 236 -> 130 expert dequants; K2 64 -> 32, 630 -> 328 (tiny models
+  share experts far more than real ones: 6-12 experts; timing there means nothing).
+- **Where Ornith's time goes** (MEASURED: the sequential run, 6 of 36 done, 920-2694 s a
+  scenario; py-spy over 800 s of it, 600 s of them decode at ~1150-1200 ids of context): a decode
+  step (~6-9 s) is 38% routed-expert dequant + copy into the buffers (per layer and expert: a
+  batch shares only the experts its rows have in common - ~6% fewer at 4 rows if routing were
+  uniform), 23% the GDN's **bf16 depthwise conv1d** (76 ms a call on one thread at [1, 8192, 5],
+  1 ms in fp32 - per sequence; not replaced: an fp32 rewrite would have to match its summation
+  order, unproven), 13% `grouped_mm`, 9% linears, 6% attention, 5% the GDN recurrence - per
+  sequence - and 1% the dense layers' (prefetched) dequant. The prompt forward (~1900 s at ~2800
+  ids, derived from two scenarios of near-equal prompt length) is attention 29%, `grouped_mm`
+  22%, expert fill 22%, linears 10%, the head over every prompt row 7%, GDN 7%. So for Ornith the
+  per-step cost is mostly per-sequence compute: **batching alone ~5%, batching + 26 resident
+  expert layers ~1.25x (ESTIMATED: ~11.5 h for the 29 scenarios left instead of ~14.5 h)**. K2
+  (README's estimate above: ~7 s an int4 step, ~70% of it dequant; weights-resident compute
+  0.12-0.17 s per 4 layers) gains more - ESTIMATED ~0.6-1 day for the set instead of ~1-1.5 -
+  to be read off its `ref.log` pass lines.
+
+Resume Ornith batched (after stopping the sequential container: outputs resume per scenario) and
+the cross-check of the four scenarios the sequential run made first:
+
+```bash
+docker stop a4-ref-ornith && docker rm a4-ref-ornith          # the operator's call
+# cross-check first (ESTIMATED ~2 h: the 4 prompts in one pass, then <= 126 decode passes)
+mkdir -p oracle-out-ornith-a4-xcheck && cp -R oracle-out-ornith-a4/set oracle-out-ornith-a4-xcheck/
+OUT=oracle-out-ornith-a4-xcheck NAME=a4-ref-ornith-xcheck MEM=60g BATCH=4 \
+  ONLY=t1_define-linear_l0,t2_explain-linear_l0,t3_rename-linear_l0,t4_comment-linear_l0 \
+  tools/toolcall/a4_ref.sh ornith ref
+OUT=oracle-out-ornith-a4-xcheck NAME=a4-ref-ornith-xcheck tools/toolcall/a4_ref.sh ornith status   # until DONE
+python3 tools/toolcall/compare_ref.py oracle-out-ornith-a4 oracle-out-ornith-a4-xcheck \
+  t1_define-linear_l0 t2_explain-linear_l0 t3_rename-linear_l0 t4_comment-linear_l0
+docker rm a4-ref-ornith-xcheck
+# then the rest, into the real directory (skips the scenarios already there)
+MEM=60g tools/toolcall/a4_ref.sh ornith ref                     # BATCH=auto RESIDENT=auto
+```
 
 ## The gate: what these files are compared against, and what it proved
 
