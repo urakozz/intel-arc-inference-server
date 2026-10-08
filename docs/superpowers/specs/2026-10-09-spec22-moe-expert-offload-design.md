@@ -139,6 +139,16 @@ the record goes to `docs/probe-offload-<date>.md`.
 - Prefill t/s at chunk 2048 / 4096.
 - One card (f ≈ 0.34) as a row for completeness.
 
+**P0.8 The pruning curve** (for decision 9, the pruned mode; the operator's idea, 2026-10-09). From spec 21a's
+CPU reference on the agentic set: score every (layer, expert) by its routed contribution - REAP's criterion, the
+router weight times the norm of the expert's output, summed over the trace's tokens (frequency alone is a weaker
+proxy) - then, for kept fractions 50 / 62.5 / 75 / 87.5 % per layer, re-run the reference with the dropped experts
+masked out of the router (logits -inf before the top-10, the top-10 renormalised over the kept set) and record the
+KL to the full model and the argmax agreement on the golden and A4 sets, plus A4 tool-call accuracy at the kept
+fractions that fit the cards entirely (50 % = 32.1 GB at int4 g64). A published reference point: a community
+coding-only GGUF keeps half the experts (`ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF`, reported weaker
+outside code); its kept set is not published as original expert ids, so ours is computed, not copied.
+
 **Stopping rule:** if the projected decode at 32k is below 40 t/s on two cards with the best fill, stop and report
 before any engine work. The tier's levers then come first in the record (HC int8 to free D, int8 KV, a smaller
 context).
@@ -173,6 +183,25 @@ context).
   through the same table. Under spec 16c's chunk pipeline both cards stream at once (P0.2's concurrent number).
 - **The embedding** (1.27 GB) can move to host USM like the PLE table (one row a token, zero-copy), returning its
   VRAM to the cache; an option, measured by the same P0.3 numbers.
+
+### 4b. The pruned mode (lossy, opt-in) - the alternative and the complement
+
+Instead of fetching cold experts, drop them: a per-model mask of kept (layer, expert) pairs, chosen by P0.8's
+scores on our agentic traces. The router's logits for dropped experts are set to -inf before the top-10 and the
+kept weights renormalised (the same softmax-top-k-renorm rule as today, over the kept set), and the dropped experts
+are never loaded. At 50 % kept (256 per layer) the experts are 32.1 GB at int4 g64 and the whole model fits two
+B70s with room for KV - no host tier, no PCIe on the decode path, about the all-resident speed (spec 21 §D).
+
+- **It is lossy**, unlike the cache: output changes wherever a dropped expert would have been routed. So it is
+  opt-in (`--expert-mask <file>`, the mask beside the checkpoint with its provenance: traces, criterion, kept
+  fraction), never the default, and every gate records the KL against the full model (P0.8's curve is the bar).
+- **It composes with the cache:** a mild mask (e.g. 87.5 % kept) cuts the host mirror and the miss bytes without
+  the full 50 % loss; the device-side indirection table simply has no entry for a dropped expert and the router
+  never selects it.
+- **Engine cost:** small - a mask applied in the route kernel (one bit per expert per layer) and a loader that
+  skips dropped experts; no new kernel family.
+- **It does not replace re-training:** experts are dropped, not merged or fine-tuned (merging methods are out of
+  scope).
 
 ## 5. Gates (sketch)
 
@@ -213,12 +242,15 @@ context).
    chunk 2048 or 4096.
 8. **(decide) The profile's source and storage:** CPU-reference traces, engine traces, or both; per model, beside
    the checkpoint.
+9. **(decide) The pruned mode (§4b):** whether to offer it, at which kept fraction, and whether the default
+   Flash-Next configuration on two cards is the cache (lossless, PCIe-bound) or a mask (lossy, all-resident) -
+   from P0.7 (cache speed) against P0.8 (mask quality).
 
 ## 8. Out of scope
 
 - CPU expert compute (the operator's design excludes it).
 - An SSD tier.
-- Changing the experts' format to make them fit.
+- Changing the experts' format to make them fit (the pruned mode, §4b, drops experts; it does not change the format).
 - Batching (spec 13) interactions.
 - Models other than the `qwen4_exp` family until the tier exists; the indirection table is family-agnostic, so
   others can adopt it later.
