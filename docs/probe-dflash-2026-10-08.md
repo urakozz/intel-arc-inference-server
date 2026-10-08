@@ -84,7 +84,9 @@ error) - the adaptive K should fall back to MTP or plain decode there.
 M = 5..8 on the int8 head at depths 4k and 32k (GEMV may leave the bandwidth-bound regime
 past M = 4, which is exactly where the extrapolation is weakest), the drafter's GEMV pass at
 M = 8 in int8 and in W4A16 g64, and the head's K rows. Then re-run this table with measured
-costs (Task 5) and record the verdict in spec 19.
+costs (Task 5) and record the verdict in spec 19. The probes are built (plan 19a Task 4's
+status): `probe_mtp_steps <snap> <depth> 32 3 int8 off <max_len> 8` and `probe_draft_cost`, run
+by box queue row 29 (`tools/box_validate.sh --only r29.cost`, box-day plan Session 6b).
 
 ## 4. Run notes
 
