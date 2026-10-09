@@ -35,6 +35,7 @@
 #include "cli/serve_adapters.h"
 #include "l0/context.h"
 #include "loader/loader.h"
+#include "loader/qwen4exp_loader.h"
 #include "loader/snapshot.h"
 #include "loader/trained_context.h"
 #include "model/model_desc.h"
@@ -769,6 +770,18 @@ int run(int argc, char** argv) {
   // dispatched here, before the Qwen family's kv-cache and --pp rules (its own, cli::kolibri::check_args,
   // replace them: a --pipeline-split without --pp is its default --pp 2), as b70-decode dispatches it. A
   // path that does not resolve is not Kolibri: the flow below reports it, so every rejection keeps its order.
+  // Spec 21c: Qwen3.8-Flash-Next (model_type qwen4_exp) is decode-only until spec 21e builds its server path (the
+  // template's XML tool calls, the prefix cache's snapshots, the MTP head) - refused here, before the device.
+  {
+    bool q4 = false;
+    try {
+      q4 = loader::is_qwen4exp_checkpoint(loader::resolve_snapshot(path));
+    } catch (const std::exception&) {
+    }
+    if (q4)
+      throw std::runtime_error("Qwen3.8-Flash-Next (model_type qwen4_exp) is served in spec 21e (the template, XML tool "
+                               "calls, the prefix cache, MTP); spec 21c decodes it with b70-decode --layers N");
+  }
   if (cli::kolibri::is_kolibri(path)) {
     if (spec_lookup)
       throw std::runtime_error("--spec lookup verifies its drafts through the MTP verify lists, which Kolibri-1's "
