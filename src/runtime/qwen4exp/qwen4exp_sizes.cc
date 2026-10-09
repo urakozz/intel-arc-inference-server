@@ -74,23 +74,23 @@ Q4Attn q4_attn() {
 }
 const char* q4_attn_name(Q4Attn a) { return a == Q4Attn::Eager ? "eager" : "flash"; }
 
-size_t partials_floats(const model::Qwen4ExpDesc& d) {
+size_t partials_floats(const model::Qwen4ExpDesc& d, uint32_t rows) {
   size_t m = 0;
   for (model::Q4LinearId id : {model::Q4LinearId::GdnQkvz, model::Q4LinearId::GdnOut, model::Q4LinearId::QsaQkvg,
                                model::Q4LinearId::QsaO}) {
     const model::Q4Linear l = d.linear(id);
     m = std::max(m, size_t(l.shape.S) * l.shape.N);
   }
-  return m * kM;
+  return m * rows;
 }
 
-ScratchSizes scratch_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len, Q4Attn) {
-  const size_t M = kM, qsa = std::max<uint32_t>(1u, d.qsa_before(d.layers));
+ScratchSizes scratch_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len, Q4Attn, uint32_t rows) {
+  const size_t M = rows, qsa = std::max<uint32_t>(1u, d.qsa_before(d.layers));
   ScratchSizes s;
   s.H = M * d.hc_n() * 2;
   s.xn = M * d.hc_n() * 2;
   s.x = M * d.hidden * 2;
-  s.partials = partials_floats(d) * 4;
+  s.partials = partials_floats(d, rows) * 4;
   s.down_f32 = M * d.hc_down_rows() * 4;
   s.inj = line(0);
   s.ab = M * model::Qwen4ExpDesc::kAbPaddedN * 4;
@@ -235,7 +235,7 @@ size_t pf_link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev) {
 }
 
 size_t prefill_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t pos,
-                               uint32_t C, bool injected) {
+                               uint32_t C, bool injected, bool mtp) {
   model::validate(p, d);
   if (dev >= p.devices) throw std::out_of_range("qwen4exp::prefill_device_launches: device " + std::to_string(dev));
   if (C == 0 || C > kPfC) throw std::invalid_argument("qwen4exp::prefill_device_launches: C = " + std::to_string(C));
@@ -256,12 +256,13 @@ size_t prefill_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Plac
     if (l == d.ple_layer) n += ((two && dev == 1 && l == p.first(1)) ? 0 : 1) + 1 + lin(d.ple_kv_n()) + 3;
   }
   if (two && dev == 0) n += 1;                    // combine_norm _Y_NN: the materialised H crosses
+  if (mtp && dev + 1 == p.devices) n += mtp_prefill_launches(pos, C);   // spec 21e: the head's pass
   return n;
 }
 size_t prefill_chunk_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t pos, uint32_t C,
-                              bool injected) {
+                              bool injected, bool mtp) {
   size_t n = 0;
-  for (uint32_t dev = 0; dev < p.devices; ++dev) n += prefill_device_launches(d, p, dev, pos, C, injected);
+  for (uint32_t dev = 0; dev < p.devices; ++dev) n += prefill_device_launches(d, p, dev, pos, C, injected, mtp);
   return n;
 }
 size_t prefill_state(const model::Qwen4ExpDesc& d, uint32_t devices, uint32_t dev, uint32_t max_len) {
@@ -304,10 +305,23 @@ std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placem
     const PersistentSizes ps = persistent_sizes(d, p, dev, max_len);
     dp.kv = ps.kv_total();
     dp.state = ps.state();
-    dp.scratch = scratch_sizes(d, max_len, kDefaultQ4Attn).total() + (debug_tap ? tap_bytes(d) : 0);
-    dp.link = p.devices == 2 ? link_bytes(d, dev) : 0;
+    // Spec 21e: with the head, the scratch's verify rows, gdn_spec, the verify's PLE rows, the head's buffers (the
+    // last device: its KV and keys go to `kv`), a link of kVerifyRows rows, and the prefill's R rows.
+    const uint32_t rows = mtp ? kVerifyRows : kM;
+    dp.scratch = scratch_sizes(d, max_len, kDefaultQ4Attn, rows).total() + (debug_tap ? tap_bytes(d) : 0);
+    if (mtp) {
+      dp.state += gdn_spec_bytes(d, p, dev) + ple_verify_bytes(d, p, dev);
+      if (dev + 1 == p.devices) {
+        const MtpSizes ms = mtp_sizes(d, max_len);
+        dp.kv += ms.kv + ms.idx_keys + ms.idx_tail;
+        dp.state += ms.ctl + ms.hh;
+        dp.scratch += ms.list + ms.diag + ms.xe + ms.xh + ms.fe + ms.fh + ms.logits;
+      }
+    }
+    dp.link = p.devices == 2 ? link_bytes_rows(d, dev, rows) : 0;
     dp.decode_state = dp.state + dp.scratch + dp.link;
     dp.prefill_scratch = prefill ? prefill_state(d, p.devices, dev, max_len) : 0;
+    if (prefill && mtp && dev + 1 == p.devices) dp.prefill_scratch += mtp_prefill_R_bytes(d);
   }
   return out;
 }
@@ -422,6 +436,85 @@ std::string describe(const std::vector<DevicePlan>& p, const model::Q4Placement&
   }
   return out;
 }
+
+// --- spec 21e: the MTP head, the verify and draft lists ---------------------------------------------------------
+MtpNorm mtp_norm() {
+  const char* e = std::getenv("B70_Q4_MTP_NORM");
+  if (e == nullptr || *e == '\0') return MtpNorm::Single;
+  if (std::strcmp(e, "single") == 0) return MtpNorm::Single;
+  if (std::strcmp(e, "per_stream") == 0) return MtpNorm::PerStream;
+  throw std::runtime_error(std::string("B70_Q4_MTP_NORM=") + e + ": expected single or per_stream (unset: single - "
+                           "vLLM's one RMS over the 4 x 2560 values, spec 21 decision 4)");
+}
+const char* mtp_norm_name(MtpNorm n) { return n == MtpNorm::PerStream ? "per_stream" : "single"; }
+MtpSelect mtp_select() {
+  const char* e = std::getenv("B70_Q4_MTP_SELECT");
+  if (e == nullptr || *e == '\0') return MtpSelect::Reuse;
+  if (std::strcmp(e, "reuse") == 0) return MtpSelect::Reuse;
+  if (std::strcmp(e, "fresh") == 0) return MtpSelect::Fresh;
+  throw std::runtime_error(std::string("B70_Q4_MTP_SELECT=") + e + ": expected reuse or fresh (unset: reuse - draft "
+                           "steps after the first attend step 0's selection, spec 21 decision 5)");
+}
+const char* mtp_select_name(MtpSelect s) { return s == MtpSelect::Fresh ? "fresh" : "reuse"; }
+
+MtpSizes mtp_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
+  const size_t R = kVerifyRows;
+  MtpSizes s;
+  s.ctl = sizeof(Control);
+  s.kv = size_t(max_len) * 2 * d.kv_n() * 2;
+  s.idx_keys = size_t(max_len / d.idx_compress) * d.idx_dim * 2;
+  s.idx_tail = size_t(kIdxTail) * d.idx_dim * 2;
+  s.list = size_t(kListRow) * 4;
+  s.diag = line(2 * 4);
+  s.hh = (1 + R) * d.hc_n() * 2;
+  s.xe = R * d.hidden * 2;
+  s.xh = R * d.hc_n() * 2;
+  s.fe = R * d.hidden * 4;
+  s.fh = R * d.hc * d.hidden * 4;
+  s.logits = size_t(kMaxDraft) * d.vocab * 4;
+  return s;
+}
+
+size_t gdn_spec_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev) {
+  const uint32_t gdn = p.count(dev) - count_qsa(d, p.first(dev), p.end(dev));
+  return line(size_t(kGdnSlots - 1) * gdn * gdn_state_bytes_per_layer(d));
+}
+
+size_t ple_verify_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev) {
+  const bool has_ple = d.ple_layer >= p.first(dev) && d.ple_layer < p.end(dev);
+  return has_ple ? 2 * size_t(kVerifyRows) * d.hc_n() * 2 : 0;
+}
+
+PpLandingLayout landing_layout_rows(const model::Qwen4ExpDesc& d, uint32_t rows) {
+  return pp_landing_layout(size_t(rows) * d.hc_n() * 2, 0);
+}
+size_t link_bytes_rows(const model::Qwen4ExpDesc& d, uint32_t dev, uint32_t rows) {
+  return dev == 0 ? kPpStateWords * 4 : landing_layout_rows(d, rows).total + kPpStateWords * 4;
+}
+
+size_t mtp_device_state(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t max_len) {
+  size_t b = gdn_spec_bytes(d, p, dev) + ple_verify_bytes(d, p, dev);
+  b += scratch_sizes(d, max_len, kDefaultQ4Attn, kVerifyRows).total() - scratch_sizes(d, max_len, kDefaultQ4Attn).total();
+  if (p.devices == 2) b += link_bytes_rows(d, dev, kVerifyRows) - link_bytes(d, dev);
+  if (dev + 1 == p.devices) b += mtp_sizes(d, max_len).total();
+  return b;
+}
+
+size_t verify_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t M,
+                              Q4Attn a, PpHandoff h) {
+  if (M == 0 || M > kVerifyRows) throw std::invalid_argument("qwen4exp::verify_device_launches: M = " + std::to_string(M));
+  size_t n = device_launches(d, p, dev, a, h, false);
+  if (M > 1 && d.ple_layer >= p.first(dev) && d.ple_layer < p.end(dev)) n += 2;   // q4_pf_ple's three for the block
+  if (dev + 1 == p.devices) n += 10 + M;                                           // the head's KV pass
+  return n;
+}
+size_t verify_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t M, Q4Attn a, PpHandoff h) {
+  size_t n = 0;
+  for (uint32_t dev = 0; dev < p.devices; ++dev) n += verify_device_launches(d, p, dev, M, a, h);
+  return n;
+}
+size_t draft_launches(Q4Attn a, bool select) { return (a == Q4Attn::Eager ? 26 : 27) + (select ? 2 : 0); }
+size_t mtp_prefill_launches(uint32_t pos, uint32_t C) { return 1 + (mtp_prefill_rows(pos, C) > 0 ? 26 : 0); }
 
 // --- spec 21e: prefix-cache snapshots ---------------------------------------------------------------------------
 const char* snap_tensor_name(SnapTensor t) {
