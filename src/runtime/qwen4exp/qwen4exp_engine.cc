@@ -454,6 +454,93 @@ MemoryComponents Qwen4ExpEngine::memory_use(uint32_t dev) const {
   return c;
 }
 
+// --- spec 21e: prefix-cache snapshots ------------------------------------------------------------------------------
+void Qwen4ExpEngine::settle_all(const char* what) {
+  if (pf_settle_ && !pf_settle_())
+    throw std::runtime_error(std::string("runtime::qwen4exp::Qwen4ExpEngine::") + what + ": a prefill list is still "
+                             "running after " + std::to_string(opt_.prefill_timeout_ms) + " ms");
+  for (uint32_t i = 0; i < st_.size(); ++i)
+    if (!settle(i))
+      throw std::runtime_error(std::string("runtime::qwen4exp::Qwen4ExpEngine::") + what + ": device " +
+                               std::to_string(i) + "'s last step is still running after " +
+                               std::to_string(opt_.timeout_ms) + " ms");
+}
+
+uint8_t* Qwen4ExpEngine::snap_ptr(const SnapRun& r) const {
+  const Qwen4ExpBuffers& b = st(r.device).buffers;
+  const l0::Mem* m = nullptr;
+  switch (r.tensor) {
+    case SnapTensor::Kv: m = &b.kv; break;
+    case SnapTensor::IdxKeys: m = &b.idx_keys; break;
+    case SnapTensor::IdxTail: m = &b.idx_tail; break;
+    case SnapTensor::GdnState: m = &b.gdn_state; break;
+    case SnapTensor::ConvRing: m = &b.conv_ring; break;
+    case SnapTensor::PleIds:
+    case SnapTensor::PleRing: m = &b.ple; break;
+    default:
+      throw std::logic_error(std::string("runtime::qwen4exp::Qwen4ExpEngine: a ") + snap_tensor_name(r.tensor) +
+                             " snapshot run without the MTP head");
+  }
+  if (r.offset + r.bytes > m->size())
+    throw std::logic_error(std::string("runtime::qwen4exp::Qwen4ExpEngine: a ") + snap_tensor_name(r.tensor) +
+                           " snapshot run past its allocation (" + std::to_string(r.offset + r.bytes) + " > " +
+                           std::to_string(m->size()) + ")");
+  return static_cast<uint8_t*>(m->ptr()) + r.offset;
+}
+
+size_t Qwen4ExpEngine::state_bytes() const { return state_snapshot_bytes(model_.desc, false); }
+size_t Qwen4ExpEngine::kv_bytes(uint32_t n_pos) const { return kv_snapshot_bytes(model_.desc, 0, n_pos, false); }
+
+void Qwen4ExpEngine::save_state(void* host) {
+  settle_all("save_state");
+  auto* h = static_cast<uint8_t*>(host);
+  const uint32_t eos = model_.desc.ple_eos;
+  for (const SnapRun& r : state_runs(model_.desc, model_.placement, pos(), false)) {
+    if (r.pad || r.zero) {
+      std::memset(h, 0, r.bytes);   // positions before 0 / filler: a cold run's history
+      if (r.zero && r.tensor == SnapTensor::PleIds) std::memcpy(h, &eos, 4);   // q4_ple_gather reads EOS there
+    } else {
+      st(r.device).imm.copy(h, snap_ptr(r), r.bytes);
+    }
+    h += r.bytes;
+  }
+}
+
+void Qwen4ExpEngine::load_state(const void* host, uint32_t p) {
+  if (p > max_len_)
+    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::load_state: pos " + std::to_string(p) +
+                             " exceeds max_len " + std::to_string(max_len_));
+  if (broken_) reset();   // a failed hand-off: the restore below rewrites what the session reads
+  settle_all("load_state");
+  const auto* h = static_cast<const uint8_t*>(host);
+  for (const SnapRun& r : state_runs(model_.desc, model_.placement, p, false)) {
+    if (!r.pad) st(r.device).imm.copy(snap_ptr(r), h, r.bytes);
+    h += r.bytes;
+  }
+  for (auto& s : st_) {
+    s->ctl->pos = p;
+    s->ctl->n_active = 0;
+  }
+}
+
+void Qwen4ExpEngine::save_kv(uint32_t begin, uint32_t end, void* host) {
+  settle_all("save_kv");
+  auto* h = static_cast<uint8_t*>(host);
+  for (const SnapRun& r : kv_runs(model_.desc, model_.placement, max_len_, begin, end, false)) {
+    st(r.device).imm.copy(h, snap_ptr(r), r.bytes);
+    h += r.bytes;
+  }
+}
+
+void Qwen4ExpEngine::load_kv(uint32_t begin, uint32_t end, const void* host) {
+  settle_all("load_kv");
+  const auto* h = static_cast<const uint8_t*>(host);
+  for (const SnapRun& r : kv_runs(model_.desc, model_.placement, max_len_, begin, end, false)) {
+    st(r.device).imm.copy(snap_ptr(r), h, r.bytes);
+    h += r.bytes;
+  }
+}
+
 std::string Qwen4ExpEngine::memory_line() const {
   std::string s;
   for (uint32_t i = 0; i < st_.size(); ++i) {

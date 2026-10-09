@@ -12,6 +12,7 @@
 #include "l0/memory.h"
 #include "l0/queue.h"
 #include "loader/qwen4exp_loader.h"
+#include "runtime/buffer_sizes.h"   // KvCache (device-free)
 #include "runtime/capture.h"
 #include "runtime/control.h"
 #include "runtime/memory_plan.h"
@@ -170,6 +171,26 @@ class Qwen4ExpEngine {
   using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
   void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
 
+  // --- spec 21e: spec 7's prefix-cache snapshots ---------------------------------------------------------------
+  // The state at pos (the GDN states and conv rows, the PLE history, the QSA layers' open-block raw keys; with the MTP
+  // head its tail and R_{pos-1}) and the blocks (K / V rows and the complete blocks' compressed keys; the head's last):
+  // runtime/qwen4exp/qwen4exp_sizes.h's state_runs / kv_runs give both HOST layouts, the same under --pp 1 and --pp 2
+  // (spec 16b's rule). state_bytes() is 115,651,592 B at the real 48 layers and kv_bytes(n) the blocks of n positions
+  // from a block start (25,344 B a position; derived). save_state copies the state at pos() (the zero runs' history:
+  // zeros, the PLE ids as EOS); load_state writes it back and sets pos on every device (n_active 0; the GDN state into
+  // slot 0, made live; the prefill that follows every restore, spec 7 §3.3 step 4, sets the pending id). save_kv /
+  // load_kv copy [begin, end), begin a multiple of 4 (the cache's is of kBlock); begin == end copies nothing. Every
+  // call runs on the devices' immediate lists with no step in flight (a failed hand-off is reset by load_state,
+  // which overwrites everything a session reads). KV bf16 (spec 21 decision 8): kv_cache() is KvCache::Bf16, the
+  // prefix cache's kv_form 0.
+  size_t state_bytes() const;
+  size_t kv_bytes(uint32_t n_pos) const;
+  KvCache kv_cache() const { return KvCache::Bf16; }
+  void save_state(void* host);
+  void load_state(const void* host, uint32_t pos);
+  void save_kv(uint32_t begin, uint32_t end, void* host);
+  void load_kv(uint32_t begin, uint32_t end, const void* host);
+
  private:
   struct Stage;
   // Spec 21d: a device's pieces for the prefill half (b70_qwen4exp_prefill), which cannot see Stage.
@@ -184,6 +205,9 @@ class Qwen4ExpEngine {
   void build_injected();
   void ple_init();
   CapturedStep& active(uint32_t dev) const;
+  // Spec 21e: a snapshot run's device bytes (the GDN state's live slot with the MTP head).
+  uint8_t* snap_ptr(const SnapRun& r) const;
+  void settle_all(const char* what);
 
   loader::Q4LoadedModel model_;
   uint32_t max_len_;
