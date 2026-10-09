@@ -2599,4 +2599,378 @@ target_link_libraries(kolibri1_test PRIVATE b70_kolibri_model)
 add_test(NAME kolibri1_test COMMAND kolibri1_test ${CMAKE_SOURCE_DIR}/tests/model/kolibri1/config.json
   ${CMAKE_SOURCE_DIR}/tests/model/kolibri1/synth5_bf16attn.json)
 set_tests_properties(kolibri1_test PROPERTIES LABELS kolibri)
+# Task 3: the loader's host half on a synthetic checkpoint (both attention arms), the RoPE table
+# against torch's; then the card's load of the synthetic checkpoints and of the real one truncated.
+foreach(t kolibri1_repack_test kolibri1_rope_test)
+  add_executable(${t} loader/${t}.cc)
+  target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(${t} PRIVATE b70_kolibri_loader)
+  add_test(NAME ${t} COMMAND ${t})
+  set_tests_properties(${t} PROPERTIES LABELS kolibri)
+endforeach()
+set(B70_KOLIBRI_SNAPSHOT "urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ" CACHE STRING "Kolibri-1 int4 checkpoint (spec 20b)")
+set(B70_KOLIBRI_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri-synth" CACHE PATH
+  "Task 1's synthetic checkpoints and golden sets (tools/box_validate/kolibri_oracle.sh synth)")
+add_executable(kolibri1_load_checkpoint_test loader/kolibri1_load_checkpoint_test.cc)
+target_include_directories(kolibri1_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kolibri1_load_checkpoint_test PRIVATE b70_kolibri_loader b70_l0)
+add_test(NAME kolibri1_load_synth_int4attn_test COMMAND kolibri1_load_checkpoint_test ${B70_KOLIBRI_SYNTH_DIR}/int4attn/ckpt)
+add_test(NAME kolibri1_load_synth_bf16attn_test COMMAND kolibri1_load_checkpoint_test ${B70_KOLIBRI_SYNTH_DIR}/bf16attn/ckpt int8)
+add_test(NAME kolibri1_load_partial_test COMMAND kolibri1_load_checkpoint_test ${B70_KOLIBRI_SNAPSHOT} bf16 30)
+set_tests_properties(kolibri1_load_synth_int4attn_test kolibri1_load_synth_bf16attn_test kolibri1_load_partial_test
+  PROPERTIES LABELS "checkpoint;kolibri" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+# Task 4: the kernels' host twin (tests/kernels/kolibri_ref.h) against kolibri_ref.py's own outputs
+# (tests/kernels/kolibri_fixture.h) and the semantics' properties. Host only, headers only.
+add_executable(kolibri_ref_test kernels/kolibri_ref_test.cc)
+target_include_directories(kolibri_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME kolibri_ref_test COMMAND kolibri_ref_test)
+set_tests_properties(kolibri_ref_test PROPERTIES LABELS kolibri)
+if(B70_KOLIBRI)
+  # Every binary a Kolibri decode list binds, any arm / head / attention (src/kernels/CMakeLists.txt's
+  # Kolibri block; the two K2 already builds are bound too).
+  set(B70_KOLIBRI_DECODE_KERNELS
+    kernel_kol_embed_gather_M1_D2560_V128000 kernel_kol_argmax_stage1_M1_N128000_V128000
+    kernel_kol_argmax_stage2_N128000 kernel_prep_res_fold_M1_K2560_SP0_G20
+    kernel_prep_res_fold_M1_K2560_SP1_G20_Z kernel_prep_res_fold_M1_K2560_SP4_G20_Z
+    kernel_kol_norm_M1_K2560_G20_W20 kernel_kol_post_add_M1_K2560_G20
+    kernel_kol_attn_prep_M1_N7168_S2_Q48KV4_R4096 kernel_kol_attn_prep_M1_N7168_S2_Q48KV4_F
+    kernel_kol_attn_prep_M1_N7168_S1_Q48KV4_R4096 kernel_kol_attn_prep_M1_N7168_S1_Q48KV4_F
+    kernel_kol_attn_M1_T${ATTN_V2_TGT}_Q48KV4_W513_R4096 kernel_kol_attn_M1_T${ATTN_V2_TGT}_Q48KV4_F
+    kernel_kol_attn_eager_M1_T${ATTN_V2_TGT}_Q48KV4_W513_R4096 kernel_kol_attn_eager_M1_T${ATTN_V2_TGT}_Q48KV4_F
+    kernel_kol_route_M1_E384_T6_N512_L256 kernel_kol_moe_M1_E384_T6_D2560_I512_SH
+    kernel_gemv_M1_K2560_N7168_S2_L0 kernel_gemv_M1_K6144_N2560_S4_L0
+    kernel_gemv_bf16_M1_K2560_N7168 kernel_gemv_bf16_M1_K6144_N2560 kernel_gemv_bf16_M1_K2560_N512_C16_S16
+    kernel_gemv_bf16_M1_K2560_N128000 kernel_gemv_i8w_M1_K2560_N128000)
+  # Host: the names the capture binds (kernels::kolibri::decode_variants) are exactly this list.
+  add_executable(kolibri_variant_names_test kernels/kolibri_variant_names_test.cc)
+  target_include_directories(kolibri_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(kolibri_variant_names_test PRIVATE b70_kolibri_model)
+  b70_target_kernel_dir(kolibri_variant_names_test)
+  add_test(NAME kolibri_variant_names_test COMMAND kolibri_variant_names_test ${B70_KOLIBRI_DECODE_KERNELS})
+  set_tests_properties(kolibri_variant_names_test PROPERTIES LABELS kolibri)
+  # K1 on the card: every Kolibri kernel at the real shapes against kolibri_ref.h (no checkpoint).
+  add_executable(kolibri_kernels_test kernels/kolibri_kernels_test.cc)
+  target_include_directories(kolibri_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(kolibri_kernels_test PRIVATE b70_l0 b70_kolibri_loader)
+  b70_target_kernel_dir(kolibri_kernels_test)
+  add_dependencies(kolibri_kernels_test ${B70_KOLIBRI_DECODE_KERNELS})
+  add_test(NAME kolibri_kernels_test COMMAND kolibri_kernels_test)
+  set_tests_properties(kolibri_kernels_test PROPERTIES LABELS kolibri TIMEOUT 900)
+endif()
+# Task 5: the runtime. The planner, the launch counts and the split by bytes on the host ...
+add_executable(kolibri_plan_test runtime/kolibri_plan_test.cc)
+target_include_directories(kolibri_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kolibri_plan_test PRIVATE b70_kolibri_plan)
+add_test(NAME kolibri_plan_test COMMAND kolibri_plan_test)
+set_tests_properties(kolibri_plan_test PROPERTIES LABELS kolibri)
+# ... and on the card: plan == allocation, K3 replay determinism and the ring (kolibri_decode_test); KL2,
+# the tie-aware gate with the routing diagnostic (kolibri_golden_test) on both synthetic arms, flash and
+# eager, and the int8 head; the real checkpoint truncated to 30 layers on one card (kolibri_partial_test,
+# development mode; needs spec 20b). SKIP 77 without the data (tools/box_validate/kolibri_oracle.sh).
+if(B70_KOLIBRI)
+  set(B70_KOLIBRI_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri"
+    CACHE PATH "The real checkpoint's golden set (kolibri_oracle.sh real): <prompt>.ids + .golden.safetensors")
+  foreach(t kolibri_decode_test kolibri_golden_test kolibri_partial_test)
+    if(t STREQUAL "kolibri_decode_test")
+      add_executable(${t} runtime/${t}.cc)
+    else()
+      add_executable(${t} golden/${t}.cc)
+    endif()
+    target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+      ${CMAKE_SOURCE_DIR}/tests/runtime)
+    target_link_libraries(${t} PRIVATE b70_kolibri_runtime b70_l0)
+    add_dependencies(${t} ${B70_KOLIBRI_DECODE_KERNELS} kernel_pp_handoff)
+  endforeach()
+  set(_kol_synth ${B70_KOLIBRI_SYNTH_DIR})
+  add_test(NAME kolibri_decode_synth_test COMMAND kolibri_decode_test ${_kol_synth}/int4attn/ckpt
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
+  add_test(NAME kolibri_golden_synth_int4attn_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn)
+  add_test(NAME kolibri_golden_synth_bf16attn_test COMMAND kolibri_golden_test ${_kol_synth}/bf16attn/ckpt
+    ${_kol_synth}/bf16attn)
+  add_test(NAME kolibri_golden_synth_int4attn_eager_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn)
+  add_test(NAME kolibri_golden_synth_bf16attn_eager_test COMMAND kolibri_golden_test ${_kol_synth}/bf16attn/ckpt
+    ${_kol_synth}/bf16attn)
+  set_tests_properties(kolibri_golden_synth_int4attn_eager_test kolibri_golden_synth_bf16attn_eager_test
+    PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
+  add_test(NAME kolibri_golden_synth_i8head_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn int8)
+  add_test(NAME kolibri_partial_test COMMAND kolibri_partial_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} 30)
+  add_test(NAME kolibri_partial_eager_test COMMAND kolibri_partial_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} 30)
+  set_tests_properties(kolibri_partial_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
+  set_tests_properties(kolibri_decode_synth_test kolibri_golden_synth_int4attn_test kolibri_golden_synth_bf16attn_test
+    kolibri_golden_synth_int4attn_eager_test kolibri_golden_synth_bf16attn_eager_test kolibri_golden_synth_i8head_test
+    kolibri_partial_test kolibri_partial_eager_test
+    PROPERTIES LABELS "checkpoint;golden;kolibri" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+# Task 6: two cards on spec 16b's pieces - --pp 1 against --pp 2 bitwise on the synthetic checkpoint
+# under both hand-offs, the real one across splits 25 / 20, P4's lost hand-off, replay (kolibri_pp_test);
+# KL2 and K3 on the real checkpoint across two cards (needs spec 20b). SKIP 77 with one GPU or no data.
+if(B70_KOLIBRI)
+  add_executable(kolibri_pp_test runtime/kolibri_pp_test.cc)
+  target_include_directories(kolibri_pp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(kolibri_pp_test PRIVATE b70_kolibri_runtime b70_l0)
+  add_dependencies(kolibri_pp_test ${B70_KOLIBRI_DECODE_KERNELS} kernel_pp_handoff)
+  add_test(NAME kolibri_pp_test COMMAND kolibri_pp_test ${B70_KOLIBRI_SYNTH_DIR}/int4attn/ckpt ${B70_KOLIBRI_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
+  set_tests_properties(kolibri_pp_test PROPERTIES LABELS "checkpoint;kolibri;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  add_test(NAME kolibri_golden_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} pp2)
+  add_test(NAME kolibri_golden_i8head_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR}
+    int8 pp2)
+  add_test(NAME kolibri_golden_eager_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} pp2)
+  set_tests_properties(kolibri_golden_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
+  add_test(NAME kolibri_golden_peer_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR}
+    pp2 peer)
+  add_test(NAME kolibri_decode_test COMMAND kolibri_decode_test ${B70_KOLIBRI_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids pp2)
+  set_tests_properties(kolibri_golden_test kolibri_golden_i8head_test kolibri_golden_eager_test kolibri_golden_peer_test
+    kolibri_decode_test PROPERTIES LABELS "checkpoint;golden;kolibri;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+b70_cli_reject(cli_reject_kolibri_pp_device ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
+  --device 1 EXPECT "--device names one card")
+# b70-decode's model_type dispatch and Kolibri's refusals, before the device: tests/model/kolibri1/ holds
+# only the checkpoint's config.json, which is all the dispatch and the --pp 1 fit check read.
+set(_kol_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
+b70_cli_reject(cli_reject_kolibri_one_card ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --pp 1 EXPECT "--pp 2")
+b70_cli_reject(cli_reject_kolibri_mtp ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "no MTP head")
+b70_cli_reject(cli_reject_kolibri_kv8 ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "bf16 only")
+b70_cli_reject(cli_reject_kolibri_layers_qwen ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --layers 3
+  EXPECT "--layers belongs to Kolibri-1")
+# (20c's cli_reject_kolibri_serve - b70-serve refusing kolibri1 - is gone: spec 20e serves it; its refusals
+# are the cli_reject_serve_kolibri_* tests of the spec 20e block.)
+# ==== Spec 20c: Kolibri-1 decode ==== (end) ====
+
+# ==== Spec 20d: Kolibri-1 prefill (labels kolibri;prefill) ==== (begin) ====
+# One delimited block for every 20d registration, after 20c's. Written blind on the Mac (box queue row
+# 26): host tests first (tools/mac_check.sh runs them), then the card's; the checkpoint ones SKIP (77)
+# until the synthetic sets (kolibri_oracle.sh synth) or, for the real checkpoint, spec 20b exist.
+# Task 1: the prefill kernels' host twin (tests/kernels/kolibri_pf_ref.h) - the 384-expert sort and its
+# adversaries, the combine == 20c's decode chain and torch's fixture row, the windowed flash walk over
+# the ring in fp64, eager_window against the fixture's eager rows, the bf16 slab tail. Headers only.
+add_executable(kolibri_pf_ref_test kernels/kolibri_pf_ref_test.cc)
+target_include_directories(kolibri_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME kolibri_pf_ref_test COMMAND kolibri_pf_ref_test)
+set_tests_properties(kolibri_pf_ref_test PROPERTIES LABELS "kolibri;prefill")
+if(B70_KOLIBRI)
+  # Task 2: every binary the prefill walk binds, both attention arms and forms (src/kernels/CMakeLists.txt's
+  # spec 20d block; pf_gemm_T0, 20c's kol_route and K2's pf_res_fold SP0 / 6144 x 2560 slab are reused).
+  set(B70_KOLIBRI_PREFILL_KERNELS
+    kernel_kol_pf_embed_gather_D2560_V128000 kernel_pf_res_fold_K2560_SP0_G20 kernel_pf_res_fold_K2560_SP1_G20_Z
+    kernel_kol_norm_M2048_K2560_G20_W20 kernel_kol_post_add_M2048_K2560_G20
+    kernel_k2_pf_dequant_slab_K2560_N7168 kernel_k2_pf_dequant_slab_K6144_N2560
+    kernel_kol_pf_bf16_slab_K2560_N7168 kernel_kol_pf_bf16_slab_K6144_N2560 kernel_pf_gemm_T0
+    kernel_kol_attn_prep_M2048_N7168_S1_Q48KV4_R4096 kernel_kol_attn_prep_M2048_N7168_S1_Q48KV4_F
+    kernel_kol_pf_flash_attn_Q48KV4_W513_R4096 kernel_kol_pf_flash_attn_Q48KV4_W513_R4096_EAGER
+    kernel_kol_pf_flash_attn_Q48KV4_F kernel_kol_pf_flash_attn_Q48KV4_F_EAGER
+    kernel_pf_moe_router_K2560_N512 kernel_kol_route_M1_E384_T6_N512_L256 kernel_kol_pf_moe_E384_T6_D2560_I512_L256
+    kernel_pf_moe_gemm_K2560_N1024_SILU kernel_pf_moe_gemm_K512_N2560)
+  # Host: the names the walk binds (kernels::kolibri::prefill_variants) are exactly this list.
+  add_executable(kolibri_pf_variant_names_test kernels/kolibri_pf_variant_names_test.cc)
+  target_include_directories(kolibri_pf_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(kolibri_pf_variant_names_test PRIVATE b70_kolibri_model)
+  b70_target_kernel_dir(kolibri_pf_variant_names_test)
+  add_test(NAME kolibri_pf_variant_names_test COMMAND kolibri_pf_variant_names_test ${B70_KOLIBRI_PREFILL_KERNELS})
+  set_tests_properties(kolibri_pf_variant_names_test PROPERTIES LABELS "kolibri;prefill")
+  # K1 for the prefill on the card, no checkpoint: every prefill kernel at the real shapes against
+  # kolibri_pf_ref.h, grouped == dense (pf_gemm_T0_SILU / pf_gemm_T0), the windowed flash against fp64.
+  add_executable(kolibri_pf_kernels_test kernels/kolibri_pf_kernels_test.cc)
+  target_include_directories(kolibri_pf_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(kolibri_pf_kernels_test PRIVATE b70_prefill_host b70_kolibri_loader b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(kolibri_pf_kernels_test)
+  endif()
+  b70_target_kernel_dir(kolibri_pf_kernels_test)
+  add_dependencies(kolibri_pf_kernels_test ${B70_KOLIBRI_PREFILL_KERNELS} ${B70_KOLIBRI_DECODE_KERNELS}
+    kernel_pf_gemm_T0_SILU)
+  add_test(NAME kolibri_pf_kernels_test COMMAND kolibri_pf_kernels_test)
+  set_tests_properties(kolibri_pf_kernels_test PROPERTIES LABELS "kolibri;prefill" TIMEOUT 1800)
+endif()
+# Task 3: the prefill walk on the card (box only; SKIP 77 without the synthetic sets / the real checkpoint).
+#   kolibri_prefill_test: the walk's launches and the plan, K3 (two prefills, recorded == replayed, chunks
+#       of 16 == chunks of 2048, all bitwise), Review Focus 4 (KV / rings / routes / tokens against decode's
+#       fill); its `split` mode is prefill_split_kolibri_test (Review Focus 5), its `pp` mode one card
+#       against two, bitwise (needs two GPUs);
+#   kolibri_golden_test's `prefill` mode: KL2 on prefill (the synthetic arms; the real checkpoint after 20b).
+if(B70_KOLIBRI)
+  add_executable(kolibri_prefill_test runtime/kolibri_prefill_test.cc)
+  target_include_directories(kolibri_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(kolibri_prefill_test PRIVATE b70_kolibri_prefill b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(kolibri_prefill_test)
+  endif()
+  add_dependencies(kolibri_prefill_test ${B70_KOLIBRI_PREFILL_KERNELS} ${B70_KOLIBRI_DECODE_KERNELS} kernel_pp_handoff)
+  set(_kol_synth ${B70_KOLIBRI_SYNTH_DIR})
+  set(_kol_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
+  add_test(NAME kolibri_prefill_synth_int4attn_test COMMAND kolibri_prefill_test ${_kol_synth}/int4attn/ckpt ${_kol_ids} all)
+  add_test(NAME kolibri_prefill_synth_bf16attn_test COMMAND kolibri_prefill_test ${_kol_synth}/bf16attn/ckpt ${_kol_ids} all)
+  add_test(NAME kolibri_prefill_synth_eager_test COMMAND kolibri_prefill_test ${_kol_synth}/int4attn/ckpt ${_kol_ids} all)
+  set_tests_properties(kolibri_prefill_synth_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
+  add_test(NAME prefill_split_kolibri_test COMMAND kolibri_prefill_test ${_kol_synth}/int4attn/ckpt ${_kol_ids} split)
+  set_tests_properties(kolibri_prefill_synth_int4attn_test kolibri_prefill_synth_bf16attn_test
+    kolibri_prefill_synth_eager_test prefill_split_kolibri_test
+    PROPERTIES LABELS "checkpoint;kolibri;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # two cards (16b's pieces): one card against --pp 2 --pipeline-split 3 bitwise on the synthetic checkpoint,
+  # the split test across two cards; the real checkpoint on two cards (needs spec 20b)
+  add_test(NAME kolibri_prefill_pp_test COMMAND kolibri_prefill_test ${_kol_synth}/int4attn/ckpt ${_kol_ids} pp pp2:3)
+  add_test(NAME prefill_split_kolibri_pp_test COMMAND kolibri_prefill_test ${_kol_synth}/int4attn/ckpt ${_kol_ids}
+    split pp2:3)
+  add_test(NAME kolibri_prefill_test COMMAND kolibri_prefill_test ${B70_KOLIBRI_SNAPSHOT} ${_kol_ids} all pp2)
+  add_test(NAME prefill_split_kolibri_real_test COMMAND kolibri_prefill_test ${B70_KOLIBRI_SNAPSHOT} ${_kol_ids} split pp2)
+  set_tests_properties(kolibri_prefill_pp_test prefill_split_kolibri_pp_test kolibri_prefill_test
+    prefill_split_kolibri_real_test PROPERTIES LABELS "checkpoint;kolibri;prefill;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # KL2 on prefill: 20c's golden test in its prefill mode (one chunk, and chunks of 16), both synthetic arms,
+  # eager, the int8 head; the real checkpoint on two cards after 20b.
+  target_link_libraries(kolibri_golden_test PRIVATE b70_kolibri_prefill)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(kolibri_golden_test)
+  endif()
+  add_dependencies(kolibri_golden_test ${B70_KOLIBRI_PREFILL_KERNELS})
+  add_test(NAME kolibri_golden_prefill_synth_int4attn_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn prefill)
+  add_test(NAME kolibri_golden_prefill_synth_bf16attn_test COMMAND kolibri_golden_test ${_kol_synth}/bf16attn/ckpt
+    ${_kol_synth}/bf16attn prefill)
+  add_test(NAME kolibri_golden_prefill_synth_c16_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn prefill:16)
+  add_test(NAME kolibri_golden_prefill_synth_i8head_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn int8 prefill)
+  add_test(NAME kolibri_golden_prefill_synth_eager_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn prefill)
+  set_tests_properties(kolibri_golden_prefill_synth_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
+  add_test(NAME kolibri_golden_prefill_synth_pp_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_synth}/int4attn pp2:3 prefill)
+  set_tests_properties(kolibri_golden_prefill_synth_int4attn_test kolibri_golden_prefill_synth_bf16attn_test
+    kolibri_golden_prefill_synth_c16_test kolibri_golden_prefill_synth_i8head_test
+    kolibri_golden_prefill_synth_eager_test kolibri_golden_prefill_synth_pp_test
+    PROPERTIES LABELS "checkpoint;golden;kolibri;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  add_test(NAME kolibri_golden_prefill_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR}
+    pp2 prefill)
+  add_test(NAME kolibri_golden_prefill_c16_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT}
+    ${B70_KOLIBRI_ORACLE_DIR} pp2 prefill:16)
+  add_test(NAME kolibri_golden_prefill_i8head_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT}
+    ${B70_KOLIBRI_ORACLE_DIR} int8 pp2 prefill)
+  set_tests_properties(kolibri_golden_prefill_test kolibri_golden_prefill_c16_test kolibri_golden_prefill_i8head_test
+    PROPERTIES LABELS "checkpoint;golden;kolibri;prefill;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+# Task 3: b70-decode's Kolibri prefill backends and chunk, before the device (tests/model/kolibri1: config.json
+# only). 20c's cli_reject_kolibri_prefill (--prefill naming spec 20d) is gone: Kolibri prefills now.
+b70_cli_reject(cli_reject_kolibri_prefill_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --bench --prefill-length 64
+  --prefill-backend l0-int8 EXPECT "1024-k Hadamard blocks")
+b70_cli_reject(cli_reject_kolibri_prefill_sycl ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
+  --prefill --prefill-backend sycl-tla EXPECT "sycl-tla has no Kolibri walk")
+b70_cli_reject(cli_reject_kolibri_prefill_chunk ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
+  --prefill --prefill-chunk 4096 EXPECT "exceeds Kolibri-1's prefill chunk 2048")
+# ==== Spec 20d: Kolibri-1 prefill ==== (end) ====
+# ==== Spec 20e: Kolibri-1 served (label kolibri) ==== (begin) ====
+if(B70_TOKENIZER_ENABLED)
+  # Kolibri-1's chat template - Aleph-Alpha/Kolibri-1-BF16 at 8c8b3489's tokenizer_config.json "chat_template"
+  # (the release ships no chat_template.jinja; chat::Template reads the string), vendored with its
+  # generation_config at tests/tokenizer/kolibri/ (Apache-2.0) - on 16 message lists (every reasoning_effort,
+  # enable_thinking off, tools with and without a system turn, call history, parallel calls and their tool
+  # results, reasoning before and after the last query, the `reasoning` field, <think> inside content, German)
+  # against transformers' apply_chat_template (tools/tokenizer/dump_kolibri.py).
+  add_test(NAME template_kolibri_test COMMAND template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${CMAKE_SOURCE_DIR}/tests/tokenizer/kolibri kolibri_template_cases.json kolibri)
+  # ... and its 128k tokenizer against HF's (the id count and the two ids the head has but the tokenizer does
+  # not define, every tag, a German-heavy text set, corpus.txt's digests, three chat renders' ids).
+  # tokenizer.json (9.5 MB) is not vendored: the BF16 release's in the HF cache (20b's export copies it
+  # unchanged), or -DB70_KOLIBRI_TOKENIZER_JSON / the environment variable of the same name. Absent:
+  # disabled on the Mac (host_only), SKIP (77) elsewhere.
+  set(B70_KOLIBRI_TOKENIZER_JSON
+    "${_b70_hf_home}/hub/models--Aleph-Alpha--Kolibri-1-BF16/snapshots/8c8b34899c7bc77b349f7916b07158e3ba29456a/tokenizer.json"
+    CACHE FILEPATH "Kolibri-1's tokenizer.json for kolibri_tokenizer_test (-D or the environment variable)")
+  add_executable(kolibri_tokenizer_test tokenizer/kolibri_tokenizer_test.cc)
+  target_include_directories(kolibri_tokenizer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(kolibri_tokenizer_test PRIVATE b70_tokenizer)
+  add_test(NAME kolibri_tokenizer_test COMMAND kolibri_tokenizer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${CMAKE_SOURCE_DIR}/tests/tokenizer/kolibri ${B70_KOLIBRI_TOKENIZER_JSON})
+  set_tests_properties(template_kolibri_test kolibri_tokenizer_test PROPERTIES LABELS kolibri SKIP_RETURN_CODE 77)
+endif()
+# Task 2 (host): Kolibri's reasoning (opened by the model) and hermes JSON tool calls - server/toolcall_kolibri.h
+# over the template renders above, the Review Focus cases, German bytes and a 2000-output fuzz, every parse
+# split-invariant; the server's kolibri1 dispatch (kwargs, list content, both EOS ids, streamed frames) and the
+# model-scoped sampling defaults from the vendored generation_config.json, over a mock engine.
+add_executable(toolcall_kolibri_test server/toolcall_kolibri_test.cc)
+target_include_directories(toolcall_kolibri_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(toolcall_kolibri_test PRIVATE b70_server)
+add_test(NAME toolcall_kolibri_test COMMAND toolcall_kolibri_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
+add_executable(kolibri_server_test server/kolibri_server_test.cc)
+target_include_directories(kolibri_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kolibri_server_test PRIVATE b70_server)
+add_test(NAME kolibri_server_test COMMAND kolibri_server_test ${CMAKE_SOURCE_DIR}/tests/tokenizer/kolibri)
+set_tests_properties(toolcall_kolibri_test kolibri_server_test PROPERTIES LABELS kolibri)
+# Task 3 (host): the engine behind the server without a device - cli::kolibri::KolibriEngineAdapterT over a
+# fake with KolibriEngine's interface whose rings and full KV are host buffers in KolibriBuffers' layout (one
+# card and two): runtime::kolibri::state_runs / kv_runs on the real shapes (41,943,040 B of state, 20,480 B of
+# KV a position, one host layout under --pp 1 and --pp 2), save / load on host buffers, Review Focus 4 through
+# spec 7's PrefixSession (restores at 2048, 4096, 2049, 5000 and 300, every turn == a cold run), a snapshot
+# moving between one card and two, and the server over HTTP (greedy == the decode run, a cached second turn,
+# seeded sampling with the model's defaults, no id the tokenizer lacks).
+add_executable(kolibri_snapshot_test runtime/kolibri_snapshot_test.cc)
+target_include_directories(kolibri_snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kolibri_snapshot_test PRIVATE b70_server b70_kolibri_plan)
+add_test(NAME kolibri_snapshot_test COMMAND kolibri_snapshot_test)
+set_tests_properties(kolibri_snapshot_test PROPERTIES LABELS kolibri)
+# On the card (box only; SKIP 77 without the synthetic sets / the real checkpoint): kolibri_snapshot_gpu_test -
+# KolibriEngine's snapshot calls (Review Focus 4): restores at the block end 4096 (bitwise the cold run), at the
+# request ends 2049 and 300 (bitwise the session that never left), on one card and on two (pp2:3); `cross`: a
+# snapshot taken on two cards continues on one, and the reverse (spec 16b's rule; two GPUs). The real
+# checkpoint on two cards after spec 20b.
+if(B70_KOLIBRI)
+  add_executable(kolibri_snapshot_gpu_test runtime/kolibri_snapshot_gpu_test.cc)
+  target_include_directories(kolibri_snapshot_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(kolibri_snapshot_gpu_test PRIVATE b70_kolibri_prefill b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(kolibri_snapshot_gpu_test)
+  endif()
+  add_dependencies(kolibri_snapshot_gpu_test ${B70_KOLIBRI_PREFILL_KERNELS} ${B70_KOLIBRI_DECODE_KERNELS} kernel_pp_handoff)
+  set(_kol_synth ${B70_KOLIBRI_SYNTH_DIR})
+  set(_kol_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
+  add_test(NAME kolibri_snapshot_gpu_synth_test COMMAND kolibri_snapshot_gpu_test ${_kol_synth}/int4attn/ckpt ${_kol_ids})
+  add_test(NAME kolibri_snapshot_gpu_synth_pp_test COMMAND kolibri_snapshot_gpu_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_ids} pp2:3)
+  add_test(NAME kolibri_snapshot_gpu_cross_test COMMAND kolibri_snapshot_gpu_test ${_kol_synth}/int4attn/ckpt
+    ${_kol_ids} cross)
+  add_test(NAME kolibri_snapshot_gpu_test COMMAND kolibri_snapshot_gpu_test ${B70_KOLIBRI_SNAPSHOT} ${_kol_ids} pp2)
+  set_tests_properties(kolibri_snapshot_gpu_synth_test kolibri_snapshot_gpu_synth_pp_test kolibri_snapshot_gpu_cross_test
+    kolibri_snapshot_gpu_test PROPERTIES LABELS "checkpoint;kolibri" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+# b70-serve's Kolibri refusals, before the device (tests/model/kolibri1: config.json only - all the dispatch,
+# cli::kolibri::check_args and the --pp 1 fit check read).
+if(TARGET b70-serve AND COMMAND b70_serve_reject)
+  set(_kol_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
+  b70_serve_reject(cli_reject_serve_kolibri_mtp ${_kol_cfg} --mtp 1 EXPECT "no MTP head")
+  b70_serve_reject(cli_reject_serve_kolibri_spec_mtp ${_kol_cfg} --spec mtp EXPECT "no MTP head")
+  b70_serve_reject(cli_reject_serve_kolibri_lookup ${_kol_cfg} --spec lookup EXPECT "Kolibri-1's engine does not capture")
+  b70_serve_reject(cli_reject_serve_kolibri_kv8 ${_kol_cfg} --kv-cache int8 EXPECT "bf16 only")
+  b70_serve_reject(cli_reject_serve_kolibri_prefill_int8 ${_kol_cfg} --prefill-backend l0-int8
+    EXPECT "1024-k Hadamard blocks")
+  b70_serve_reject(cli_reject_serve_kolibri_one_card ${_kol_cfg} --pp 1 EXPECT "run it with --pp 2")
+  b70_serve_reject(cli_reject_serve_kolibri_max_len ${_kol_cfg} --max-len 524288 EXPECT "decision 3")
+  set_tests_properties(cli_reject_serve_kolibri_mtp cli_reject_serve_kolibri_spec_mtp cli_reject_serve_kolibri_lookup
+    cli_reject_serve_kolibri_kv8 cli_reject_serve_kolibri_prefill_int8 cli_reject_serve_kolibri_one_card
+    cli_reject_serve_kolibri_max_len PROPERTIES LABELS kolibri)
+endif()
+# ==== Spec 20e: Kolibri-1 served ==== (end) ====
+
+# ==== Spec 21b: Qwen3.8-Flash-Next descriptor and loader (label qwen4exp) ==== (begin) ====
+# One delimited block for every 21b registration. Host tests first (they run on the Mac:
+# tools/mac_check.sh), then the card's (box only; box-validation queue row 31): the loads SKIP (77)
+# until the synthetic checkpoints (tools/quantize/qwen4exp/make_synth.py + ple_int8.py, r31.synth) or
+# Intel's checkpoint and its PLE file (r31.ple_convert) are on the box.
+# Task 2: the model table (the configs are built in code: the original's config.json is not vendored).
+add_executable(qwen4exp_test model/qwen4exp_test.cc)
+target_include_directories(qwen4exp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(qwen4exp_test PRIVATE b70_qwen4exp_model)
+add_test(NAME qwen4exp_test COMMAND qwen4exp_test)
+set_tests_properties(qwen4exp_test PROPERTIES LABELS qwen4exp)
+# Task 3: the loader's host half on synthetic real-width checkpoints in both forms (written by the test).
+add_executable(qwen4exp_repack_test loader/qwen4exp_repack_test.cc)
+target_include_directories(qwen4exp_repack_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(qwen4exp_repack_test PRIVATE b70_qwen4exp_loader)
+add_test(NAME qwen4exp_repack_test COMMAND qwen4exp_repack_test)
+set_tests_properties(qwen4exp_repack_test PROPERTIES LABELS qwen4exp TIMEOUT 900)
 # ==== Spec 21b: Qwen3.8-Flash-Next descriptor and loader ==== (end) ====
