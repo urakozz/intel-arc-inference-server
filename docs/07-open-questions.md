@@ -76,6 +76,11 @@ Unknown, and in this order:
 The order matters: measure the accuracy on a probe before writing a mainloop.
 That is the mistake W4A8 made and it cost a kernel.
 
+**Planned (2026-10-09):** `docs/superpowers/plans/2026-10-09-w4a4-probe.md`, box queue row 35 - the
+accuracy grid first (a CPU job: h8's rotation, then int4 on both operands at **group 256**, the
+operator's choice: projected ~2.5x bf16 from the W4A8 rescale fit, ~1.4x over h8, derived), a
+stopping rule at 2 points above h8's end-to-end error, and the g256 rescale microprobe only on a pass.
+
 ## 4. Is W8A8 worth anything for prefill?
 
 int8 XMX has 2x bf16 throughput and prefill is compute-bound. The rate is now
