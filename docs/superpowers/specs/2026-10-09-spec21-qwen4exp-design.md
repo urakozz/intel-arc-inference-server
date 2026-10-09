@@ -2,7 +2,7 @@
 
 **Status:** design, 2026-10-09; the operator approved the design on 2026-10-08 (§0 records what was ruled).
 Open decisions are marked **(decide)**. Nothing is built.
-**Plans (2026-10-09, after the operator's approval that day; 21a built on the Mac, §12; 21b built on the Mac, §13):** `docs/superpowers/plans/2026-10-09-spec21{a,b,c,d,e,q}-*.md` - 21a reference, 21b descriptor / loader / formats, 21c decode, 21d prefill, 21e serving and MTP, 21q our AutoRound run; box queue rows 30-34.
+**Plans (2026-10-09, after the operator's approval that day; 21a built on the Mac, §12; 21b built on the Mac, §13; 21c built on the Mac, §14):** `docs/superpowers/plans/2026-10-09-spec21{a,b,c,d,e,q}-*.md` - 21a reference, 21b descriptor / loader / formats, 21c decode, 21d prefill, 21e serving and MTP, 21q our AutoRound run; box queue rows 30-34.
 
 **Model:** `Qwen/Qwen3.8-Flash-Next` (`Qwen4ExpForConditionalGeneration`, `model_type: qwen4_exp`; bf16,
 359,999,963,128 B in 1658 tensors). Intel's derived `Intel/Qwen3.8-Flash-Next-W4A16-AutoRound` (181.17 GB: routed
@@ -579,3 +579,94 @@ descriptor and the checkpoint headers' shapes); the tests assert the formulas an
   unconsumed and every part's bytes = the plan; the device read-backs = the host repack at the edges; the
   51.8 GB table pinned as 32 ranges with no alias, its time and MemAvailable before / after (spec 22 P0.5's
   start); the pointer table; the planner's N lines.
+
+## 14. 21c as built (2026-10-09; the Mac - nothing on a card yet)
+
+Plan: `docs/superpowers/plans/2026-10-09-spec21c-qwen4exp-decode.md`, branch `spec21c-qwen4exp-decode`. Box
+validation: queue row 32. Every launch count and byte count below is **derived** (the tests assert the formulas);
+the Mac results are **measured**.
+
+- **Built:** `tests/kernels/qwen4exp_ref.h` (namespace `q4ref`: the host twin of every chain below) with
+  `tools/oracle/qwen4exp_fixture.py` -> `tests/kernels/qwen4exp_fixture.h` (21a's restated ops and transformers
+  5.19.0's modules; the PLE layer's restatement held bitwise to `Qwen4ExpTextPLELayer` first) and
+  `qwen4exp_ref_test`; the kernels `src/kernels/qwen4exp/q4_{hc,ple,qsa,qsa_attn,qsa_attn_eager,moe}.cl` and their
+  host half `src/kernels/qwen4exp_kernels.h` (`kernels::qwen4exp`), `qwen4exp_variant_names_test`,
+  `qwen4exp_kernels_test` (F2 on the card; `--bench-attn`, `--ple-rate`), the Mac driver
+  `tools/mac/clrun/qwen4exp_run.cc`; `runtime::qwen4exp` - the decode scratch, the tap, the hand-off and the launch
+  counts in `qwen4exp_sizes`, `Qwen4ExpBuffers`, the capture, `Qwen4ExpEngine` (one card and two); `b70-decode`'s
+  `model_type qwen4_exp` dispatch (`src/cli/qwen4exp_decode.h`), `b70-serve`'s refusal; the card tests
+  `qwen4exp_decode_test`, `qwen4exp_golden_test`, `qwen4exp_partial_test`, `qwen4exp_pp_test`; `cli_reject_qwen4exp_*`;
+  `qwen4exp_oracle.sh synth` (the synthetic golden sets); queue row 32.
+- **The list per layer** (`runtime/qwen4exp/qwen4exp_capture.h`). One gated residual = `q4_hc_combine_norm`
+  (folds the PENDING block output of the block before - `_E` the embedding at layer 0, `_S<S>` a mixer GEMV's
+  split-K slices, `_Y` the MoE's `y`, `_X` nothing - then the grouped `(1 + w)` norm), `gemv_bf16` {10240, 336}
+  (down's 320 rows and `block_inject`'s 4), `q4_hc_up_mix` (silu(/4), the up linear, sigmoid, the mean of the 4
+  streams; `inj`). A GDN layer is **15** launches (hc, qkv||z GEMV, a||b, Qwen3.8's `gdn_step_M1`,
+  `prep_gated_head_M1_SIG`, out_proj, hc, router `gemv_bf16` 528, `q4_route`, `q4_moe_gate_up`, `q4_moe_down`); a QSA
+  layer **19** (hc, q||gate||k||v GEMV, the indexer `gemv_bf16` 640, `attn_prep_M1_Q24KV2`, `q4_qsa_prep` /
+  `_score` / `_select`, `q4_qsa_attn` + `q4_qsa_reduce`, o_proj, the MLP side's 8) - **18** under
+  `B70_Q4_ATTN=eager` (one `q4_qsa_attn_eager` for attn + reduce); the PLE layer **+4** (a combine-only `_Y_NN`, the
+  gather, the key||value `gemv_bf16` 12800, the block; its attn side's combine is `_X`); the head **1 + 6** (the
+  embedding; the final mixer's combine `_Y` / down {10240, 320} / up_mix, lm_head, argmax x 2). **779 launches a
+  token at 48 layers on one card** (1 + 36 x 15 + 12 x 19 + 4 + 6), 767 eager, 755 with injected selections, **75 at
+  `--layers 4`**; two cards **+1** (device 0's `_Y_NN`: the materialised H crosses, 20,480 B; device 1 starts with
+  `_X`) and peer +2 more - +0 when the cut is the PLE layer (device 1's PLE prologue then folds nothing).
+- **The 8-slot tail ring** (plan Review Focus 3; §4.2 said 4): the open block's raw keys at slot `p % 8`; a
+  completing row forms its block's compressed key ONCE, from this launch's rows straight from the indexer GEMV and
+  older rows from the ring - with 4 rows a launch the writes `pos .. pos + 3` and the reads `pos - 3 .. pos - 1` are
+  seven consecutive positions, distinct mod 8. Measured on the Mac at M = 1 and at M = 4 (not a box binary yet).
+- **Reused** at this family's shapes from new CMake lines: `attn_prep` (`_Q24KV2`, QKV_S 2 int4 / `_S1` bf16 - the
+  q / k `(1 + w)` norms, the partial RoPE, the KV write, the gate), Qwen3.8's `gdn_step_M1` and argmax binaries by
+  name, `gemv` / `gemv_bf16` / `gemv_i8w` at 33 new shapes in all (kernel_cmdlines **+33 / -0 / ~0** with K2 and
+  Kolibri on), `embed_gather_M1_D2560`, `attn_v2_M1_T32_Q24KV2` (decision 10's bench only). **One existing source
+  changed:** `prep.cl`'s `-DGDN_GATE_SIGMOID` (`prep_gated_head_M1_SIG`: `GATED_ACT(z)` is `silu_f32(z)` otherwise);
+  all 98 existing `prep.cl` variants preprocess token for token as main's (`clang -E -P`, measured) - G0's sha256 is
+  the box's check (r32.k0); if any moved, the variant moves to a copy in `src/kernels/qwen4exp/` and prep.cl is
+  restored.
+- **exp:** every sigmoid / SiLU in the new kernels (and `_SIG`) is `1 / (1 + exp_torch(-x))` / `x / (1 + exp_torch(-x))`
+  - Sleef's expf u10 step for step, k2_attn_eager.cl's - so the kernels, `qwen4exp_ref.h` and torch agree bit for
+  bit at those points.
+- **The selection** (`q4_qsa_select`, decision 3): an MSB-first radix select over the scores' bits (every score >=
+  +0) with a local integer histogram, the ties at T to the lowest blocks through an exclusive scan over contiguous
+  per-lane chunks; the list ascending (blocks expanded, then the tail), the count at word 2052 of a 2064-word row,
+  the 512th / 513th scores as the diagnostic. Below 513 complete blocks the identity list (one kernel at every
+  depth, decision 10's proposal). The device's tie rule is tested against `q4ref::qsa_select`'s `(score desc, block
+  asc)` sort, not torch's topk (which broke the fixture's planted ties its own way on 15 blocks).
+- **The expert address** spec 22 replaces: `q4_moe.cl`'s `Q4_EXPERT_GU(base, id)` / `Q4_EXPERT_DN(base, id)` - the
+  only lines that turn a route row's id into weights.
+- **Known deviations (recorded):** flash keeps fp32 probabilities (the eager twin rounds them, the reference's
+  chain); the mean over the 4 streams is `(((p0 + p1) + p2) + p3) / 4` (torch's order for 4 terms, exact in practice
+  - the fixture agrees bitwise); `attn_prep`'s q keeps its fp32 RoPE output (attn.cl's documented <= 1-op
+  difference; the eager kernel rounds it to bf16 first); the router's softmax sum is a pairwise tree (torch's is its
+  own: p differs by an ulp, the ids and weights did not on the fixture).
+- **Departures from the plan:**
+  1. qkv||z int4 is `gemv_M1_K2560_N16384_S1_L0` - 21b's loader writes layout 0 - not the plan's `_L1`.
+  2. The bf16 arm's prep is `attn_prep_M1_Q24KV2_S1` (`kernels::attn_prep_s1_variant`'s spelling).
+  3. `q4_qsa.cl`'s prep / score / select are ONE binary `q4_qsa_M1_T512_W1024`; eager attention is one launch.
+  4. No `q4_expert.h`: no kernel in this tree `#include`s (ocloc's include resolution unproven blind) - the macro
+     pair lives in `q4_moe.cl`.
+  5. The combine is 21a's pinned `grouped_mm` order (rank order, fp32, one rounding; the shared expert's gated term
+     added after), not the plan's "eager ascending id" text.
+  6. The PLE state is a 16-slot id ring + a 16-slot conv ring (21b planned 2 ids + 9 rows); the tail ring 8 slots;
+     21b's plan test numbers updated.
+  7. `data.sh` gains `oracle_q4exp_synth_golden` instead of widening `oracle_q4exp_synth` (r31 needs only the
+     checkpoints); `golden_common.h` reads I64 (`ple.ids`).
+  8. `--layers N|auto` is required for `qwen4_exp` (the 4-layer synthetic too); the CLI refusal tests run over a
+     self-written `model_type` stub (`tests/model/qwen4exp/config.json`: §13 departure 1 still holds).
+  9. The fixture checks every step bitwise from torch's own previous output (the plan's "every case bit for bit"):
+     the GEMVs' fp32 order is torch's, held to one ulp - measured 0 ulps apart on the fixture.
+  10. The injected selection rides a second capture per device (built on first use), as the plan's interface says.
+  11. Mac GPU caps (256 lanes): `qwen4exp_run` builds `q4_qsa` at `SEL_WG=256` and `q4_moe` at `DN_KS=1` (the B70
+      binaries: 1024, 2).
+- **Mac gates (measured):** `qwen4exp_ref_test` PASS (HC, PLE ids and block over 10 positions, indexer q and keys,
+  scores, combine, the sigmoid gated norm all bitwise against torch; the route = the ruled order with torch's topk
+  apart on 7 tied slots; Review Focus 1 - three layers in the reference's and the fused order bitwise, inj 0 / 2 -,
+  2 and 3); `qwen4exp_variant_names_test`, `qwen4exp_plan_test` PASS; `qwen4exp_run` on the Mac's GPU (Intel UHD
+  630): 0 disagreements - every portable kernel exact but the scores (1 fp32 ulp, Apple's divide), route p10 / p11
+  (1 ulp), MoE h (1 bf16 ulp on 2 of 7040) and the random gated head (1 of 6144); Level Zero syntax of every new
+  source, OpenCL syntax of every new variant.
+- **What row 32 must prove:** every binary's first compile; F2 on the card (bitwise; flash at cosine 0.99999); G0
+  with `prep_gated_head_M1` unchanged; F4 (75 launches, two runs bitwise, the injected run = the free run); F3 on
+  both synthetics (tokens, routing, gate S, PLE ids; the injected run on every determined row); the partial forward
+  on Intel's 18 layers within the proposed bars; two cards bitwise one; the PLE gather's host-USM rate (spec 22
+  P0); decision 10's bench and the speed rows (Task 7).

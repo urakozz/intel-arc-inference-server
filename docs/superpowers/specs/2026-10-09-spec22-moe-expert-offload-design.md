@@ -26,6 +26,10 @@ Every number is **measured** unless marked **derived**, **estimated** or **publi
 - **Measured pinned copies on device 0** (`docs/probe-prefix-cache-2026-09-27.md` §2): host to device 12.2-12.9
   GB/s, device to host 14.2 GB/s, on an immediate list, 128 MiB to 3.9 GB. That is an x16 Gen3 rate; device 1 was
   never measured, and neither was a GPU kernel reading host USM directly.
+- **A GPU kernel reading host USM directly** (spec 21c's `q4_ple_gather`, the PLE table's 16 rows a token by a
+  device-computed index; per card and both, narrow and 256 rows a replay): `qwen4exp_kernels_test --ple-rate`, box
+  queue row 32's `r32.ple_rate` - **not measured yet**; its µs per token and implied bus rate are recorded in row 32's
+  hand-back and then here.
 - **Measured pinned allocations:** 48 GiB worked, the largest tried; the cap was MemAvailable - 16 GiB = 101.2 GiB
   (same doc §1). **Box RAM is about 128 GB** (docs/10). The full expert mirror (64.17 GB) plus spec 21's int8 PLE
   table (~51.8 GB) is ~116 GB pinned, which is above that cap (decision 4).
