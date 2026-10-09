@@ -543,6 +543,46 @@ class LongIdsAndOracleTest(Tmp):
         self.assertIn("SKIP_REASON k2_oracle: MemAvailable", r.stdout)
         self.assertFalse(os.path.exists(self.p("data", "oracle-out-k2")))
 
+    def test_w4a4_grid(self):
+        """Row 35: the RAM guard, the four prompts, the stopping rule from the grid's JSON."""
+        grid = os.path.join(HERE, "w4a4_grid.sh")
+        if not os.path.exists("/proc/meminfo"):
+            r = subprocess.run([grid, self.p("data"), "grid"], capture_output=True, text=True,
+                               env=dict(os.environ, W4A4_MIN_GB="1"))
+            self.assertEqual(r.returncode, 77, r.stdout + r.stderr)
+            self.assertIn("SKIP_REASON w4a4_grid: MemAvailable", r.stdout)
+            self.assertFalse(os.path.exists(self.p("data", "oracle-out-w4a4")))
+        write(self.p("heldout.ids"), " ".join(str(i) for i in range(478)) + "\n")
+        r = subprocess.run([grid, self.p("data"), "prompts"], capture_output=True, text=True,
+                           env=dict(os.environ, W4A4_HELDOUT=self.p("heldout.ids")))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = self.p("data", "oracle-out-w4a4")
+
+        def ids(path):
+            with open(path) as f:
+                return [int(x) for x in f.read().split()]
+        prompts = os.path.join(ROOT, "tests", "golden", "prompts")
+        self.assertEqual(ids(os.path.join(out, "long512.ids")), ids(os.path.join(prompts, "long.ids"))[:512])
+        self.assertEqual(ids(os.path.join(out, "code.ids")), ids(os.path.join(prompts, "code.ids")))
+        self.assertEqual(len(ids(os.path.join(out, "cjk.ids"))), 38)
+        self.assertEqual(ids(os.path.join(out, "heldout.ids")), list(range(478)))
+        self.assertIn("w4a4_grid: long512   512 ids", r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(ROOT, "oracle-out-w4a4.partial")))
+
+        def passes(rel, top1, n):
+            return {"passes": [{"variant": v, "only": None, "metrics": {"rel": rel[v], "top1": top1[v], "n": n}}
+                               for v in rel]}
+        write(os.path.join(out, "cjk.grid.json"), json.dumps(passes(
+            {"none": 0.087, "h8": 0.088, "h4": 0.105, "h4p2": 0.12}, {"none": 35, "h8": 35, "h4": 35, "h4p2": 34}, 38)))
+        r = subprocess.run([grid, self.p("data"), "summary"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("| cjk | 8.80 % | 10.50 % | 12.00 % | +1.70 (h4) | 35 / 35 | 0.0 |", r.stdout)
+        self.assertIn("-> within the rule", r.stdout)
+        write(os.path.join(out, "code.grid.json"), json.dumps(passes(
+            {"none": 0.115, "h8": 0.12, "h4": 0.145, "h4p2": 0.16}, {"none": 61, "h8": 61, "h4": 60, "h4p2": 60}, 61)))
+        r = subprocess.run([grid, self.p("data"), "summary"], capture_output=True, text=True)
+        self.assertIn("worst prompt +2.50 points; argmax lost 1 of 99 = 1.01 per 100 -> CLOSED by the rule", r.stdout)
+
 
 class TokDiffTest(Tmp):
     """tok_diff.py: two tokenizer.json files beyond their added tokens (row 16, r16.tokdiff)."""
@@ -778,6 +818,13 @@ class DriverTest(unittest.TestCase):
         self.assertIn("l0-int8 l0-int8-i8head l0", out)
         out = self.run_driver("--dry-run", "--with", "r16.a4_ref").stdout
         self.assertNotIn("--- r16.a4_ref", out)   # manual: printed in the summary, never run
+        # row 35 (the W4A4 probe's grid): CPU, opt-in only, the grid before the per-class passes
+        self.assertEqual(re.findall(r"^--- (\S+)", self.run_driver("--dry-run", "--only", "r35").stdout, re.M), ["pre"])
+        out = self.run_driver("--dry-run", "--only", "r35", "--with", "r35.grid,r35.per_class").stdout
+        self.assertEqual(re.findall(r"^--- (\S+)", out, re.M), ["pre", "r35.grid", "r35.per_class"])
+        self.assertIn("tools/box_validate/w4a4_grid.sh $HOME/b70-inference-server grid", out)
+        self.assertIn("tools/box_validate/w4a4_grid.sh $HOME/b70-inference-server per-class", out)
+        self.assertIn("free -g | head -2", out)
         r = self.run_driver("--dry-run", "--only", "r99", ok=False)
         self.assertEqual(r.returncode, 2)
         out = self.run_driver("--dry-run", "--redo", "r1").stdout
