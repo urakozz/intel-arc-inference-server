@@ -3164,5 +3164,72 @@ if(B70_Q4EXP)
   add_dependencies(qwen4exp_pf_kernels_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS} kernel_pf_gemm_T0_SILU)
   add_test(NAME qwen4exp_pf_kernels_test COMMAND qwen4exp_pf_kernels_test)
   set_tests_properties(qwen4exp_pf_kernels_test PROPERTIES LABELS "qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+  # Task 3: the prefill walk on the card (box only; SKIP 77 without the synthetic checkpoints / Intel's).
+  #   qwen4exp_prefill_test: the walk's launches and the plan, F4 (two prefills, recorded == replayed, chunks of 64 ==
+  #       2048 bitwise, 16 printed), Review Focus 5 (the state, routes and selections against decode's fill, tokens),
+  #       the injected run chunked == whole; its `split` mode (multiples of 64 bitwise, the rest within bars), its `pp`
+  #       mode (one card against two, bitwise; P4), its `gdn` mode (gdn_chunk_q4 against decode's gdn_step, no
+  #       checkpoint);
+  #   qwen4exp_golden_test's `prefill` mode: F3 on prefill (both synthetics; Intel's --layers 18 after 21a's data).
+  add_executable(qwen4exp_prefill_test runtime/qwen4exp_prefill_test.cc)
+  target_include_directories(qwen4exp_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(qwen4exp_prefill_test PRIVATE b70_qwen4exp_prefill b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(qwen4exp_prefill_test)
+  endif()
+  add_dependencies(qwen4exp_prefill_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS} kernel_pp_handoff)
+  set(_q4s ${B70_Q4EXP_SYNTH_DIR})
+  set(_q4ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids)
+  set(_q4pf "")
+  foreach(f ours intel)
+    add_test(NAME qwen4exp_prefill_synth_${f}_test COMMAND qwen4exp_prefill_test ${_q4s}/${f}/ckpt ${_q4ids} all)
+    list(APPEND _q4pf qwen4exp_prefill_synth_${f}_test)
+  endforeach()
+  add_test(NAME qwen4exp_prefill_synth_eager_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} all)
+  set_tests_properties(qwen4exp_prefill_synth_eager_test PROPERTIES ENVIRONMENT "B70_Q4_ATTN=eager")
+  add_test(NAME prefill_split_qwen4exp_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} split)
+  add_test(NAME qwen4exp_prefill_gdn_test COMMAND qwen4exp_prefill_test - - gdn)
+  set_tests_properties(${_q4pf} qwen4exp_prefill_synth_eager_test prefill_split_qwen4exp_test
+    PROPERTIES LABELS "checkpoint;qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  set_tests_properties(qwen4exp_prefill_gdn_test PROPERTIES LABELS "qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+  # two cards (16b's pieces): one card against --pp 2 --pipeline-split 2 bitwise on the ours synthetic, the split test
+  # across two cards; Intel's truncated model on two cards at the planner's N with prefill (37 at 32768: 38 does not fit
+  # beside the prefill scratch)
+  add_test(NAME qwen4exp_prefill_pp_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} pp pp2:2)
+  add_test(NAME prefill_split_qwen4exp_pp_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} split pp2:2)
+  add_test(NAME qwen4exp_prefill_intel_pp_test COMMAND qwen4exp_prefill_test ${B70_Q4EXP_INTEL_SNAPSHOT} ${_q4ids} all pp2
+    layers:37 int8)
+  set_tests_properties(qwen4exp_prefill_pp_test prefill_split_qwen4exp_pp_test qwen4exp_prefill_intel_pp_test
+    PROPERTIES LABELS "checkpoint;qwen4exp;prefill;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # F3 on prefill: 21c's golden test in its prefill mode (one chunk, chunks of 16, the int8 head, injected, eager) on
+  # both synthetic golden sets; Intel's --layers 18 after 21a's sets exist.
+  target_link_libraries(qwen4exp_golden_test PRIVATE b70_qwen4exp_prefill)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(qwen4exp_golden_test)
+  endif()
+  add_dependencies(qwen4exp_golden_test ${B70_Q4EXP_PREFILL_KERNELS})
+  set(_q4g "")
+  foreach(f ours intel)
+    add_test(NAME qwen4exp_golden_prefill_synth_${f}_test COMMAND qwen4exp_golden_test ${_q4s}/${f}/ckpt ${_q4s}/${f} prefill)
+    add_test(NAME qwen4exp_golden_prefill_synth_${f}_c16_test COMMAND qwen4exp_golden_test ${_q4s}/${f}/ckpt ${_q4s}/${f}
+      prefill:16)
+    add_test(NAME qwen4exp_golden_prefill_synth_${f}_i8head_test COMMAND qwen4exp_golden_test ${_q4s}/${f}/ckpt ${_q4s}/${f}
+      int8 prefill)
+    add_test(NAME qwen4exp_golden_prefill_synth_${f}_inject_test COMMAND qwen4exp_golden_test ${_q4s}/${f}/ckpt ${_q4s}/${f}
+      inject prefill)
+    add_test(NAME qwen4exp_golden_prefill_synth_${f}_eager_test COMMAND qwen4exp_golden_test ${_q4s}/${f}/ckpt ${_q4s}/${f}
+      prefill)
+    set_tests_properties(qwen4exp_golden_prefill_synth_${f}_eager_test PROPERTIES ENVIRONMENT "B70_Q4_ATTN=eager")
+    list(APPEND _q4g qwen4exp_golden_prefill_synth_${f}_test qwen4exp_golden_prefill_synth_${f}_c16_test
+      qwen4exp_golden_prefill_synth_${f}_i8head_test qwen4exp_golden_prefill_synth_${f}_inject_test
+      qwen4exp_golden_prefill_synth_${f}_eager_test)
+  endforeach()
+  add_test(NAME qwen4exp_golden_prefill_synth_pp_test COMMAND qwen4exp_golden_test ${_q4s}/ours/ckpt ${_q4s}/ours pp2:2
+    prefill)
+  add_test(NAME qwen4exp_golden_prefill_intel_test COMMAND qwen4exp_golden_test ${B70_Q4EXP_INTEL_SNAPSHOT}
+    ${B70_Q4EXP_ORACLE_DIR}-L18 layers:18 int8 prefill)
+  list(APPEND _q4g qwen4exp_golden_prefill_synth_pp_test qwen4exp_golden_prefill_intel_test)
+  set_tests_properties(${_q4g} PROPERTIES LABELS "checkpoint;golden;qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # ==== Spec 21d: Qwen3.8-Flash-Next prefill ==== (end) ====
