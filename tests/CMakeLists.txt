@@ -3271,4 +3271,12 @@ if(B70_TOKENIZER_ENABLED)
   set_tests_properties(qwen4exp_tokenizer_test qwen4exp_server_test PROPERTIES LABELS qwen4exp SKIP_RETURN_CODE 77
     TIMEOUT 300)
 endif()
+# Task 2: the prefix cache's snapshots. Host: the layouts (state_runs / kv_runs) over simulated devices - the bytes,
+# one host layout under --pp 1 and --pp 2 (every split of --layers 4 and 8), round trips across placements, the
+# history before position 0 (EOS ids, zero conv rows), the open block's raw keys at 2049..2052 and the head's.
+add_executable(qwen4exp_snapshot_test runtime/qwen4exp_snapshot_test.cc)
+target_include_directories(qwen4exp_snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(qwen4exp_snapshot_test PRIVATE b70_qwen4exp_plan)
+add_test(NAME qwen4exp_snapshot_test COMMAND qwen4exp_snapshot_test)
+set_tests_properties(qwen4exp_snapshot_test PROPERTIES LABELS qwen4exp TIMEOUT 300)
 # ==== Spec 21e: Qwen3.8-Flash-Next served ==== (end) ====

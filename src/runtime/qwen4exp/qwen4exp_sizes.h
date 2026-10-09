@@ -253,6 +253,66 @@ inline constexpr size_t kPrefillHeadLaunches = 6;
 // A device's prefill scratch + its prefill link (two devices): what `prefill` plans into DevicePlan::prefill_scratch.
 size_t prefill_state(const model::Qwen4ExpDesc& d, uint32_t devices, uint32_t dev, uint32_t max_len);
 
+// --- spec 21e: spec 7's prefix-cache snapshots --------------------------------------------------------------
+// The STATE at position p is everything the next token reads that is not a per-position block (plan 21e Review
+// Focus 1): every GDN layer's recurrent state and its conv ring's rows of p - 3 .. p - 1 (gdn_step's window), the
+// PLE layer's id history p - 1, p - 2 (q4_ple_gather's) and its conv rows p - 9 .. p - 1 (q4_ple_block's dilated
+// taps read p - 9, p - 6, p - 3), and per QSA layer the open block's raw keys (positions 4 floor(p / 4) .. p - 1,
+// at most 3: the tail ring's slots p % 8). The BLOCKS are per position: the QSA layers' K / V rows and the
+// compressed keys of the complete blocks [begin / 4, floor(end / 4)). With the MTP head (spec 21e Task 3) the state
+// adds the head's open-block raw keys - the head runs one position behind (its KV at position q is the head on
+// (R_q, t_{q+1}), so at main position p it holds positions [0, p - 1): its tail is 4 floor((p - 1) / 4) .. p - 2 -
+// and R_{p-1}, the main model's pre-mixer 4-stream H of position p - 1 (the next draft step's and the next head
+// pass's input: Qwen3.8's spec 8 `hh` row, Engine::state_bytes); the blocks add the head's K / V and keys, last.
+//
+// The HOST layouts (spec 16b's rule: --pp 2's is --pp 1's byte for byte - every layer addressed through the
+// placement, in layer order, whichever device holds it; the head on the last device, last):
+//   state  [GDN layers: fp32 state 3,145,728 B][GDN layers: conv rows p-3, p-2, p-1, 3 x 20,480 B]
+//          [PLE ids p-1, p-2: u32 x 2 (EOS 248044 before 0)][PLE conv rows p-9 .. p-1: 9 x 20,480 B]
+//          [QSA layers: raw keys 4 floor(p/4) .. p-1, padded to 3 rows of 256 B]
+//          (mtp) [the head's raw keys 4 floor((p-1)/4) .. p-2, padded to 3 rows][R_{p-1}: 20,480 B]
+//   kv     [QSA layers: K rows [begin, end) then V rows, 1024 B a row each][QSA layers: keys of blocks
+//          [begin/4, floor(end/4)), 256 B each] (mtp) [the head's K, V, then its keys - last]
+// 115,651,592 B of state at the real 48 layers (derived: 36 x 3,145,728 + 36 x 61,440 + 8 + 184,320 + 12 x 768;
+// + 21,248 with the head) and 25,344 B a position of blocks (12 x (2048 + 64); + 2,112 with the head).
+//
+// A run is one contiguous range of one device allocation (`tensor`, `offset` into it), in host order:
+//   Kv / IdxKeys / IdxTail / GdnState / ConvRing   the device's kv, idx_keys, idx_tail, gdn_state, conv_ring (offset
+//                                                  from the allocation's start: the layer's slice + the row)
+//   PleIds / PleRing   the PLE layer device's `ple` allocation (the id ring at 0, the conv ring at kPleConvOff)
+//   MtpKv / MtpIdxKeys / MtpIdxTail / MtpHidden   the head's (the last device): [K | V][max_len][512] bf16,
+//                                                  [max_len / 4][128], [8][128], R_{p-1} [10240] bf16
+//   GdnState with the MTP head: the engine reads / writes the LIVE slot (spec 8's gdn_live: a commit may leave the
+//   state in one of the verify's slots); load_state writes slot 0 and makes it live.
+// `zero` runs are positions before 0: save_state writes the cold run's history to the host (zeros; the PLE ids as
+// EOS 248044 - q4_ple_gather reads a missing predecessor as EOS), load_state copies the host's bytes back into
+// those slots (the kernels never read them: every read of a position before 0 is masked by p >= q). `pad` runs are
+// host-only filler (the tails' rows past the open block): zeros on save, nothing written on load.
+enum class SnapTensor : uint32_t {
+  Kv, IdxKeys, IdxTail, GdnState, ConvRing, PleIds, PleRing, MtpKv, MtpIdxKeys, MtpIdxTail, MtpHidden
+};
+const char* snap_tensor_name(SnapTensor t);
+struct SnapRun {
+  uint32_t device = 0;
+  SnapTensor tensor = SnapTensor::Kv;
+  size_t offset = 0, bytes = 0;   // within the device allocation
+  bool zero = false;              // positions before 0: the cold history on the host
+  bool pad = false;               // host-only filler: no device range
+};
+inline constexpr uint32_t kSnapTailRows = 3;   // the open block's raw keys (idx_compress - 1)
+size_t state_snapshot_bytes(const model::Qwen4ExpDesc& d, bool mtp);
+// `begin` a multiple of 4 (the prefix cache's begin is a multiple of kBlock 2048): KV rows of [begin, end) and the
+// keys of the complete blocks [begin / 4, floor(end / 4)).
+size_t kv_snapshot_bytes(const model::Qwen4ExpDesc& d, uint32_t begin, uint32_t end, bool mtp);
+// Throws unless pos <= max_len (state) / 4 | begin <= end <= max_len (kv).
+std::vector<SnapRun> state_runs(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t pos, bool mtp);
+std::vector<SnapRun> kv_runs(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
+                             uint32_t begin, uint32_t end, bool mtp);
+// The bytes of one device allocation a run addresses (the host test's simulated devices; the engine checks its
+// own buffers against it): persistent_sizes' groups, the PLE state, and the head's (spec 21e Task 3: mtp_sizes).
+size_t snap_tensor_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t max_len,
+                         SnapTensor t);
+
 // --- the split by bytes (16b's rule) ---------------------------------------------------------------------
 // layer_bytes[l] = loader::q4_layer_bytes(d, l).total() + its state at max_len (QSA: KV, keys, tail; GDN:
 // state, ring; the PLE layer: + the PLE state).
