@@ -98,7 +98,7 @@ from the routes) and how much better than UltraChat the agentic text accepts.
 5. **`d2t`: offset or direct id?** Resolved: offset (`vocab_mapping.py`'s comment and
    construction, vLLM's `base + draft_id_to_target_id`). `eagle3_ref.check_vocab_maps` holds
    the real file to it (strictly increasing, = t2d's set) and refuses a direct-id reading;
-   `facts` prints the result on the real checkpoint (pending the download).
+   `facts` printed it on the real checkpoint: byte-identical (2026-10-09).
 6. **Does the drafter attend over all previous positions?** Yes (S7), within its 2048
    window - so a probe that only fed the anchor's own row would be wrong.
 7. **The training targets' head (an observation, not a blocker).** `verifier_norm` is a
