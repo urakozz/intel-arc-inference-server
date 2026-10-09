@@ -3092,6 +3092,17 @@ if(B70_Q4EXP)
     ${B70_Q4EXP_ORACLE_DIR}-L18 18 int8)
   set_tests_properties(${_q4tests} qwen4exp_partial_test
     PROPERTIES LABELS "checkpoint;golden;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # Task 4: two cards on spec 16b's pieces - --pp 1 against --pp 2 (splits 2 and 1, copy and peer) bitwise on the
+  # ours synthetic, Intel's --layers 38 split 19 against 20, P4's lost hand-off, the landing layout. SKIP 77 with one
+  # GPU or no data.
+  add_executable(qwen4exp_pp_test runtime/qwen4exp_pp_test.cc)
+  target_include_directories(qwen4exp_pp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(qwen4exp_pp_test PRIVATE b70_qwen4exp_runtime b70_l0)
+  add_dependencies(qwen4exp_pp_test ${B70_Q4EXP_DECODE_KERNELS} kernel_pp_handoff)
+  add_test(NAME qwen4exp_pp_test COMMAND qwen4exp_pp_test ${_q4s}/ours/ckpt ${B70_Q4EXP_INTEL_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_short.ids)
+  set_tests_properties(qwen4exp_pp_test PROPERTIES LABELS "checkpoint;qwen4exp;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # b70-decode's model_type dispatch and this family's refusals, before the device: tests/model/qwen4exp/ holds only a
 # model_type stub config.json (spec 21 §13 departure 1: the checkpoint's own config is not vendored), which is all the
