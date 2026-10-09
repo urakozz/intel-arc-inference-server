@@ -3,6 +3,7 @@
 **Status:** outline, probe-first, 2026-10-09; the operator approved the design on 2026-10-08. This document gives
 P0 in full, the design as a sketch and the decisions P0 feeds, marked **(decide)**. The design is detailed after
 P0's record. Nothing is built.
+**Plans (2026-10-10, still probe-first):** `docs/superpowers/plans/2026-10-10-spec22{a,b,c,d,m}-*.md` - 22a P0 (queue row 36), 22b the table, mirror and static cache with the whole model on two cards (37), 22c swaps and prefill streaming (38), 22d serving and the record (39), 22m the coding mask (40); 22b-22d begin only on P0's go, 22m on decision 9.
 
 **Why:** Qwen3.8-Flash-Next (spec 21) does not fit two B70s at int4 g64:
 - routed experts 64.17 GB + ~5 GB of everything else + the MTP head + KV, against ~62.2 GB usable (spec 21 §3);
