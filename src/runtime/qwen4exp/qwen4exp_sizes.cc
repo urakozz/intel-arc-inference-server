@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 
 #include "loader/qwen4exp_layout.h"
@@ -36,7 +38,7 @@ size_t gdn_state_bytes_per_layer(const model::Qwen4ExpDesc& d) {
   return size_t(d.gdn_v_heads) * d.gdn_head * d.gdn_head * 4;
 }
 size_t conv_ring_bytes_per_layer(const model::Qwen4ExpDesc& d) { return size_t(kConvRing) * d.conv_rows() * 2; }
-size_t ple_state_bytes(const model::Qwen4ExpDesc& d) { return size_t(2) * 4 + size_t(d.ple_ring()) * d.hc_n() * 2; }
+size_t ple_state_bytes(const model::Qwen4ExpDesc& d) { return kPleConvOff + size_t(kPleRing) * d.hc_n() * 2; }
 
 PersistentSizes persistent_sizes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev,
                                  uint32_t max_len) {
@@ -61,6 +63,88 @@ size_t host_ple_bytes(const model::Qwen4ExpDesc& d, loader::Q4PleScale s) {
   return loader::q4_ple_table_bytes(loader::q4_ple_primes(d.ple_base, d.ple_heads, 0), d.ple_dim, s);
 }
 
+// --- spec 21c: the decode list ----------------------------------------------------------------------------------
+Q4Attn q4_attn() {
+  const char* e = std::getenv("B70_Q4_ATTN");
+  if (e == nullptr || *e == '\0') return kDefaultQ4Attn;
+  if (std::strcmp(e, "flash") == 0) return Q4Attn::Flash;
+  if (std::strcmp(e, "eager") == 0) return Q4Attn::Eager;
+  throw std::runtime_error(std::string("B70_Q4_ATTN=") + e + ": expected flash or eager (unset: " +
+                           q4_attn_name(kDefaultQ4Attn) + ")");
+}
+const char* q4_attn_name(Q4Attn a) { return a == Q4Attn::Eager ? "eager" : "flash"; }
+
+size_t partials_floats(const model::Qwen4ExpDesc& d) {
+  size_t m = 0;
+  for (model::Q4LinearId id : {model::Q4LinearId::GdnQkvz, model::Q4LinearId::GdnOut, model::Q4LinearId::QsaQkvg,
+                               model::Q4LinearId::QsaO}) {
+    const model::Q4Linear l = d.linear(id);
+    m = std::max(m, size_t(l.shape.S) * l.shape.N);
+  }
+  return m * kM;
+}
+
+ScratchSizes scratch_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len, Q4Attn) {
+  const size_t M = kM, qsa = std::max<uint32_t>(1u, d.qsa_before(d.layers));
+  ScratchSizes s;
+  s.H = M * d.hc_n() * 2;
+  s.xn = M * d.hc_n() * 2;
+  s.x = M * d.hidden * 2;
+  s.partials = partials_floats(d) * 4;
+  s.down_f32 = M * d.hc_down_rows() * 4;
+  s.inj = line(0);
+  s.ab = M * model::Qwen4ExpDesc::kAbPaddedN * 4;
+  s.gdn_o = M * d.gdn_v_heads * d.gdn_head * 4;
+  s.idx_f32 = M * d.idx_n() * 4;
+  s.idx_q = M * d.idx_heads * d.idx_dim * 4;
+  s.scores = M * (max_len / d.idx_compress) * 4;
+  s.list = qsa * M * kListRow * 4;
+  s.diag = line(qsa * M * 2 * 4);
+  s.attn_q = M * d.q_n() * 4;
+  s.attn_gate = M * d.q_n() * 4;
+  s.attn_part = size_t(d.q_heads) * kAttnTgt * M * kAttnPart * 4;
+  s.attn_out = M * d.q_n() * 2;
+  s.logits_r = M * d.router_n() * 4;
+  s.routes = size_t(d.layers) * M * kRouteWords * 4;
+  s.moe_h = M * (d.top_k + 1) * d.moe_inter * 2;
+  s.y = M * d.hidden * 2;
+  s.ple_e = M * d.ple_e() * 2;
+  s.ple_kv = M * d.ple_kv_n() * 4;
+  s.ple_ids = line(M * d.ple_heads * 8);
+  s.ple_consts = line(size_t(kPleConsts) * 8);
+  s.logits = M * d.vocab * 4;
+  s.argmax_part = M * ((d.vocab + 1023) / 1024) * 2 * 4;
+  return s;
+}
+
+PpLandingLayout landing_layout(const model::Qwen4ExpDesc& d) { return pp_landing_layout(size_t(kM) * d.hc_n() * 2, 0); }
+size_t link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev) {
+  return dev == 0 ? kPpStateWords * 4 : landing_layout(d).total + kPpStateWords * 4;
+}
+
+size_t device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, Q4Attn a,
+                       PpHandoff h, bool injected) {
+  model::validate(p, d);
+  if (dev >= p.devices) throw std::out_of_range("qwen4exp::device_launches: device " + std::to_string(dev));
+  const size_t gdn = 15, qsa = (a == Q4Attn::Eager ? 18 : 19) - (injected ? 2 : 0);
+  const bool two = p.devices == 2;
+  size_t n = 0;
+  if (dev == 0) n += 1;                                  // embed_gather
+  if (two && dev == 1 && h == PpHandoff::Peer) n += 1;   // pp_recv
+  for (uint32_t l = p.first(dev); l < p.end(dev); ++l) {
+    n += d.is_qsa(l) ? qsa : gdn;
+    if (l == d.ple_layer) n += (two && dev == 1 && l == p.first(1)) ? 3 : 4;
+  }
+  if (two && dev == 0) n += 1 + (h == PpHandoff::Peer ? 1 : 0);   // combine_norm _Y_NN (+ pp_send)
+  if (dev + 1 == p.devices) n += 6;                      // the final mixer's 3, lm_head, argmax x 2
+  return n;
+}
+size_t decode_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, Q4Attn a, PpHandoff h, bool injected) {
+  size_t n = 0;
+  for (uint32_t dev = 0; dev < p.devices; ++dev) n += device_launches(d, p, dev, a, h, injected);
+  return n;
+}
+
 std::vector<size_t> pp_layer_bytes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   std::vector<size_t> v(d.layers);
   for (uint32_t l = 0; l < d.layers; ++l) {
@@ -81,7 +165,7 @@ PpBalance pp_split(const model::Qwen4ExpDesc& d, uint32_t max_len, bool int8_hea
 }
 
 std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
-                             bool int8_head, bool mtp) {
+                             bool int8_head, bool mtp, bool debug_tap) {
   model::validate(p, d);
   std::vector<DevicePlan> out(p.devices);
   for (uint32_t dev = 0; dev < p.devices; ++dev) {
@@ -97,7 +181,9 @@ std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placem
     const PersistentSizes ps = persistent_sizes(d, p, dev, max_len);
     dp.kv = ps.kv_total();
     dp.state = ps.state();
-    dp.decode_state = dp.state;
+    dp.scratch = scratch_sizes(d, max_len, kDefaultQ4Attn).total() + (debug_tap ? tap_bytes(d) : 0);
+    dp.link = p.devices == 2 ? link_bytes(d, dev) : 0;
+    dp.decode_state = dp.state + dp.scratch + dp.link;
   }
   return out;
 }
@@ -202,10 +288,11 @@ std::string describe(const std::vector<DevicePlan>& p, const model::Q4Placement&
   for (const DevicePlan& dp : p) {
     const std::string label = "\n  device " + std::to_string(dp.device);
     out += format_memory(label.c_str(), dp, device_bytes[dp.device]);
-    char tail[240];
+    char tail[300];
     std::snprintf(tail, sizeof tail, "; + reserve %.3f GB = %.3f GB (weights %.3f GB%s, RoPE %.3f GB, KV + indexer "
-                  "keys %.3f GB, GDN / PLE state %.3f GB)", reserve / 1e9, (dp.total() + reserve) / 1e9, dp.weights / 1e9,
-                  dp.mtp ? " with the MTP head" : "", dp.rope / 1e9, dp.kv / 1e9, dp.state / 1e9);
+                  "keys %.3f GB, GDN / PLE state %.3f GB, decode scratch %.3f GB%s)", reserve / 1e9,
+                  (dp.total() + reserve) / 1e9, dp.weights / 1e9, dp.mtp ? " with the MTP head" : "", dp.rope / 1e9,
+                  dp.kv / 1e9, dp.state / 1e9, dp.scratch / 1e9, dp.link ? ", hand-off" : "");
     out += tail;
   }
   return out;

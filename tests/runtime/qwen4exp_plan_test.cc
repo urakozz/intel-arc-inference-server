@@ -9,7 +9,10 @@
 //   3. require_fits: the full model refused on two cards naming spec 22 (both forms), --layers 38 refused on
 //      one card naming its bytes, the synthetic's N = 4 planned on one card;
 //   4. pp_split is runtime::pp_balance over pp_layer_bytes (16b's rule, no second one);
-//   5. max_len_that_fits, describe's text, the host PLE table's bytes.
+//   5. max_len_that_fits, describe's text, the host PLE table's bytes;
+//   6. spec 21c: the decode list's launch counts (779 at 48 layers on one card, eager, two cards, peer, the
+//      injected run, the synthetic's 75), the decode scratch at 262144 (the score row is the term that scales),
+//      the plan with the scratch at --layers 18 (one card) and 38 (two) at 32768, the full model refused.
 #include <array>
 #include <cstdio>
 #include <stdexcept>
@@ -73,7 +76,7 @@ int main() {
   CHECK_EQ(rq::kv_bytes_per_pos(ours), size_t(25344));
   CHECK_EQ(rq::gdn_state_bytes_per_layer(ours), size_t(48) * 128 * 128 * 4);
   CHECK_EQ(rq::conv_ring_bytes_per_layer(ours), size_t(16) * 10240 * 2);
-  CHECK_EQ(rq::ple_state_bytes(ours), size_t(8) + size_t(9) * 10240 * 2);
+  CHECK_EQ(rq::ple_state_bytes(ours), size_t(64) + size_t(16) * 10240 * 2);   // 21c: the 16-slot id and conv rings
   {
     const uint32_t L = 262144;
     const rq::PersistentSizes ps = rq::persistent_sizes(ours, Q4Placement::one(ours), 0, L);
@@ -153,7 +156,7 @@ int main() {
     CHECK_EQ(lb[0], loader::q4_layer_bytes(t, 0).total() + rq::gdn_state_bytes_per_layer(t) + rq::conv_ring_bytes_per_layer(t));
     CHECK_EQ(lb[1], loader::q4_layer_bytes(t, 1).total() + rq::gdn_state_bytes_per_layer(t) + rq::conv_ring_bytes_per_layer(t) +
                         rq::ple_state_bytes(t));
-    CHECK_EQ(lb[3], loader::q4_layer_bytes(t, 3).total() + size_t(L) * 2048 + size_t(L / 4) * 256 + 4 * 256);
+    CHECK_EQ(lb[3], loader::q4_layer_bytes(t, 3).total() + size_t(L) * 2048 + size_t(L / 4) * 256 + 8 * 256);   // 21c: 8 tail slots
     const size_t ctl = sizeof(runtime::Control), rope = t.rope_table_bytes(L);
     const runtime::PpBalance direct = runtime::pp_balance(
         lb, loader::q4_embed_bytes(t) + rope + ctl, loader::q4_final_mixer_bytes(t) + loader::q4_lm_head_bytes(t, true) + rope + ctl);
@@ -180,6 +183,52 @@ int main() {
   const size_t b16 = rq::host_ple_bytes(ours, loader::Q4PleScale::Bf16), f32 = rq::host_ple_bytes(ours, loader::Q4PleScale::F32);
   CHECK_EQ(b16, size_t(320001446) * (160 + 2));
   CHECK_EQ(f32, size_t(320001446) * (160 + 4));
+  // --- 6. spec 21c: the decode list --------------------------------------------------------------------------
+  {
+    using runtime::PpHandoff;
+    const rq::Q4Attn F = rq::Q4Attn::Flash, E = rq::Q4Attn::Eager;
+    const Q4Placement one = Q4Placement::one(ours);
+    CHECK_EQ(rq::decode_launches(ours, one, F, PpHandoff::Copy), size_t(1 + 36 * 15 + 12 * 19 + 4 + 6));
+    CHECK_EQ(rq::decode_launches(ours, one, F, PpHandoff::Copy), size_t(779));
+    CHECK_EQ(rq::decode_launches(ours, one, E, PpHandoff::Copy), size_t(779 - 12));
+    CHECK_EQ(rq::decode_launches(ours, one, F, PpHandoff::Copy, true), size_t(779 - 24));   // injected: no score / select
+    const Qwen4ExpDesc t4 = rq::truncated(ours, 4);
+    CHECK_EQ(rq::decode_launches(t4, Q4Placement::one(t4), F, PpHandoff::Copy), size_t(1 + 3 * 15 + 19 + 4 + 6));
+    CHECK_EQ(rq::decode_launches(t4, Q4Placement::one(t4), F, PpHandoff::Copy), size_t(75));
+    for (uint32_t s : {2u, 24u, 47u}) {   // two cards: +1 (the materialising _Y_NN), peer +2 more
+      const Q4Placement two = Q4Placement::two(ours, s);
+      CHECK_EQ(rq::decode_launches(ours, two, F, PpHandoff::Copy), size_t(780));
+      CHECK_EQ(rq::decode_launches(ours, two, F, PpHandoff::Peer), size_t(782));
+      CHECK_EQ(rq::device_launches(ours, two, 0, F, PpHandoff::Copy) + rq::device_launches(ours, two, 1, F, PpHandoff::Copy),
+               size_t(780));
+    }
+    // split at the PLE layer: device 1's PLE prologue folds nothing (the landed H is materialised) - +0
+    CHECK_EQ(rq::decode_launches(ours, Q4Placement::two(ours, 1), F, PpHandoff::Copy), size_t(779));
+    CHECK_EQ(rq::decode_launches(t4, Q4Placement::two(t4, 2), F, PpHandoff::Copy), size_t(76));
+    // the scratch: the score row [M][max_len / 4] fp32 is the term that scales
+    const rq::ScratchSizes s32 = rq::scratch_sizes(ours, 32768, F), s256 = rq::scratch_sizes(ours, 262144, F);
+    CHECK_EQ(s256.scores, size_t(65536) * 4);
+    CHECK_EQ(s256.total() - s32.total(), s256.scores - s32.scores);
+    CHECK_EQ(s256.list, size_t(12) * rq::kListRow * 4);
+    CHECK_EQ(s256.partials, size_t(2) * 13312 * 4);   // q||gate||k||v S2 is the widest
+    CHECK_EQ(rq::landing_layout(ours).resid_bytes, size_t(20480));
+    CHECK_EQ(rq::landing_layout(ours).sumsq_bytes, size_t(0));
+    CHECK(rq::landing_layout(ours).flag_off >= rq::landing_layout(ours).stamp_off + 4);
+    // the plan with the scratch: --layers 18 on one card and 38 on two at 32768 fit (Intel's forms), 48 refused
+    const Qwen4ExpDesc i18 = rq::truncated(intel, 18), i38 = rq::truncated(intel, 38);
+    CHECK(rq::fits(rq::plan(i18, Q4Placement::one(i18), 32768, true, false), caps, kReserve));
+    const Q4Placement p38 = rq::placement_for(i38, 2, 32768, true, false, kCard, kReserve);
+    CHECK(rq::fits(rq::plan(i38, p38, 32768, true, false), caps, kReserve));
+    const Q4Placement p48 = Q4Placement::two(intel, rq::pp_split(intel, 32768, true, false).split);
+    throws_naming("spec 22", [&] { rq::require_fits(rq::plan(intel, p48, 32768, true, false), caps, kReserve); });
+    const std::vector<rq::DevicePlan> pd = rq::plan(i18, Q4Placement::one(i18), 32768, true, false, true);
+    CHECK_EQ(pd[0].scratch, rq::scratch_sizes(i18, 32768, F).total() + rq::tap_bytes(i18));
+    std::printf("21c: %zu launches a token at 48 layers on one card (flash), %zu eager, %zu injected, 75 at --layers 4, "
+                "+1 on two cards (+3 with peer); decode scratch %zu B at 32768, %zu B at 262144; --layers 18 / 38 at 32768 "
+                "fit one / two cards (split %u)\n", rq::decode_launches(ours, one, F, PpHandoff::Copy),
+                rq::decode_launches(ours, one, E, PpHandoff::Copy), rq::decode_launches(ours, one, F, PpHandoff::Copy, true),
+                s32.total(), s256.total(), p38.split);
+  }
   std::printf("qwen4exp_plan_test OK: N at 32768 with Intel's forms = %u on one card, %u on two; the host PLE table "
               "%zu B (%.2f GB, bf16 scales) / %zu B (%.2f GB, f32); the full model refused naming spec 22\n",
               n_intel_1, n_intel_2, b16, b16 / 1e9, f32, f32 / 1e9);

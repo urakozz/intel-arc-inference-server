@@ -3057,5 +3057,51 @@ if(B70_Q4EXP)
   add_dependencies(qwen4exp_kernels_test ${B70_Q4EXP_DECODE_KERNELS} kernel_attn_v2_M1_T${ATTN_V2_TGT}_Q24KV2)
   add_test(NAME qwen4exp_kernels_test COMMAND qwen4exp_kernels_test)
   set_tests_properties(qwen4exp_kernels_test PROPERTIES LABELS qwen4exp SKIP_RETURN_CODE 77 TIMEOUT 1800)
+  # Task 3: the runtime on the card - F4 on decode (plan == allocation, two runs bitwise, the injected capture fed
+  # the free run's lists = the free run) on both synthetic checkpoints past the selection's first cut (2200 ids of
+  # q4exp_4k); F3 (tokens tie-aware, routing, gate S, PLE ids; free, int8 head, eager, injected) on both synthetic
+  # golden sets (qwen4exp_oracle.sh synth); the development mode on Intel's checkpoint at --layers 18 against 21a's
+  # full and truncated sets. SKIP 77 without the data.
+  set(B70_Q4EXP_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp"
+    CACHE PATH "21a's golden sets on Intel's checkpoint (qwen4exp_oracle.sh intel): <prompt>.ids + .golden.safetensors")
+  foreach(t qwen4exp_decode_test qwen4exp_golden_test qwen4exp_partial_test)
+    if(t STREQUAL "qwen4exp_decode_test")
+      add_executable(${t} runtime/${t}.cc)
+    else()
+      add_executable(${t} golden/${t}.cc)
+    endif()
+    target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+      ${CMAKE_SOURCE_DIR}/tests/runtime)
+    target_link_libraries(${t} PRIVATE b70_qwen4exp_runtime b70_l0)
+    add_dependencies(${t} ${B70_Q4EXP_DECODE_KERNELS} kernel_pp_handoff)
+  endforeach()
+  set(_q4s ${B70_Q4EXP_SYNTH_DIR})
+  set(_q4tests "")
+  foreach(f ours intel)
+    add_test(NAME qwen4exp_decode_synth_${f}_test COMMAND qwen4exp_decode_test ${_q4s}/${f}/ckpt
+      ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids 2200)
+    add_test(NAME qwen4exp_golden_synth_${f}_test COMMAND qwen4exp_golden_test ${_q4s}/${f}/ckpt ${_q4s}/${f})
+    add_test(NAME qwen4exp_golden_synth_${f}_i8head_test COMMAND qwen4exp_golden_test ${_q4s}/${f}/ckpt ${_q4s}/${f} int8)
+    add_test(NAME qwen4exp_golden_synth_${f}_eager_test COMMAND qwen4exp_golden_test ${_q4s}/${f}/ckpt ${_q4s}/${f})
+    set_tests_properties(qwen4exp_golden_synth_${f}_eager_test PROPERTIES ENVIRONMENT "B70_Q4_ATTN=eager")
+    add_test(NAME qwen4exp_golden_synth_${f}_inject_test COMMAND qwen4exp_golden_test ${_q4s}/${f}/ckpt ${_q4s}/${f} inject)
+    list(APPEND _q4tests qwen4exp_decode_synth_${f}_test qwen4exp_golden_synth_${f}_test qwen4exp_golden_synth_${f}_i8head_test
+      qwen4exp_golden_synth_${f}_eager_test qwen4exp_golden_synth_${f}_inject_test)
+  endforeach()
+  add_test(NAME qwen4exp_partial_test COMMAND qwen4exp_partial_test ${B70_Q4EXP_INTEL_SNAPSHOT} ${B70_Q4EXP_ORACLE_DIR}
+    ${B70_Q4EXP_ORACLE_DIR}-L18 18 int8)
+  set_tests_properties(${_q4tests} qwen4exp_partial_test
+    PROPERTIES LABELS "checkpoint;golden;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+# b70-decode's model_type dispatch and this family's refusals, before the device: tests/model/qwen4exp/ holds only a
+# model_type stub config.json (spec 21 §13 departure 1: the checkpoint's own config is not vendored), which is all the
+# dispatch and the refusals read.
+set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
+b70_cli_reject(cli_reject_qwen4exp_full ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 EXPECT "spec 22")
+b70_cli_reject(cli_reject_qwen4exp_prefill ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --prefill EXPECT "spec 21d")
+b70_cli_reject(cli_reject_qwen4exp_mtp ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "spec 21e")
+b70_cli_reject(cli_reject_qwen4exp_kv8 ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "decision 8")
+if(TARGET b70-serve)
+  b70_serve_reject(cli_reject_qwen4exp_serve ${_q4_cfg} EXPECT "spec 21e")
 endif()
 # ==== Spec 21c: Qwen3.8-Flash-Next decode ==== (end) ====

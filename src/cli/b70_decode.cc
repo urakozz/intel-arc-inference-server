@@ -37,6 +37,7 @@
 
 #include "cli/k2_decode.h"
 #include "cli/kolibri_decode.h"
+#include "cli/qwen4exp_decode.h"
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
 #include "cli/pipeline_decode.h"
@@ -171,6 +172,10 @@ void usage() {
       "                 mode). Spec 20d: --prefill / --prefill-length N on the l0 backend only\n"
       "                 (chunk <= 2048; two cards cross each chunk by copy); --mtp, --kv-cache\n"
       "                 int8, --profile refused.\n"
+      "  Qwen3.8-Flash-Next (model_type qwen4_exp, spec 21c): --layers N|auto is REQUIRED (the\n"
+      "                 whole model needs spec 22's expert-offload tier); --ple-dir DIR the PLE\n"
+      "                 int8 file (default <snapshot>-ple-int8/); --pp 1 (default) or 2; decode\n"
+      "                 only - the prefill (21d), --mtp (21e) and --kv-cache int8 refused.\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -739,6 +744,8 @@ int run(int argc, char** argv) {
   bool pp_given = false;    // spec 20c: Kolibri-1's --pp defaults to 2, so "given" matters
   uint32_t layers = 0;      // spec 20c: --layers N (Kolibri-1's development mode)
   bool have_layers = false;
+  bool layers_auto = false; // spec 21c: --layers auto (Qwen3.8-Flash-Next's planner N)
+  std::string ple_dir;      // spec 21c: --ple-dir (Qwen3.8-Flash-Next's PLE int8 file)
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -806,10 +813,17 @@ int run(int argc, char** argv) {
     } else if (a == "--pp" || a == "--pipeline-parallel-size") {   // spec 16b, vLLM's spelling
       pipe.devices = cli::parse_pipeline_devices(a, value(i, a.c_str()));
       pp_given = true;
-    } else if (a == "--layers") {   // spec 20c, Kolibri-1 only
-      layers = parse_u32("--layers", value(i, "--layers"));
+    } else if (a == "--layers") {   // spec 20c, Kolibri-1; spec 21c, Qwen3.8-Flash-Next (also `auto`)
+      const std::string v = value(i, "--layers");
       have_layers = true;
-      if (layers == 0) throw std::runtime_error("--layers 0 would load no layer");
+      if (v == "auto") {
+        layers_auto = true;
+      } else {
+        layers = parse_u32("--layers", v);
+        if (layers == 0) throw std::runtime_error("--layers 0 would load no layer");
+      }
+    } else if (a == "--ple-dir") {   // spec 21c, Qwen3.8-Flash-Next only
+      ple_dir = value(i, "--ple-dir");
     } else if (a == "--pipeline-split") {
       cli::parse_pipeline_split(value(i, "--pipeline-split"), pipe);
     } else if (a == "--pipeline-handoff") {
@@ -914,6 +928,8 @@ int run(int argc, char** argv) {
   // cli/kolibri_decode.h, replace them: --pp defaults to 2 there). A path that does not resolve is
   // not Kolibri - the flows below report it, so every rejection keeps its order.
   if (cli::kolibri::is_kolibri(path)) {
+    if (layers_auto) throw std::runtime_error("--layers auto is Qwen3.8-Flash-Next's (spec 21c); Kolibri-1 takes --layers N");
+    if (!ple_dir.empty()) throw std::runtime_error("--ple-dir belongs to Qwen3.8-Flash-Next (spec 21c)");
     cli::kolibri::DecodeArgs ka;
     ka.path = path;
     ka.ids_path = ids_path;
@@ -938,9 +954,41 @@ int run(int argc, char** argv) {
     ka.profile = profile;
     return cli::kolibri::run_decode<StdoutToStderr>(ka);
   }
+  // Spec 21c: Qwen3.8-Flash-Next (model_type qwen4_exp) runs runtime::qwen4exp::Qwen4ExpEngine on one or two cards -
+  // dispatched here, beside Kolibri-1 and before the Qwen engine's pipeline and kv-cache rules (its own refusals,
+  // cli/qwen4exp_decode.h: the prefill (21d), --mtp (21e), int8 KV (decision 8), the whole model without --layers
+  // (spec 22)). A path that does not resolve is not this family - the flows below report it.
+  if (cli::qwen4exp::is_qwen4exp(path)) {
+    cli::qwen4exp::DecodeArgs qa;
+    qa.path = path;
+    qa.ids_path = ids_path;
+    qa.ple_dir = ple_dir;
+    qa.n = n;
+    qa.bench = bench;
+    qa.depth = depth;
+    qa.tg = tg;
+    qa.max_len = max_len_arg;
+    qa.reserve = mem_reserve;
+    qa.device = device;
+    qa.lm_head = lm_head;
+    qa.layers = layers;
+    qa.layers_auto = layers_auto;
+    qa.pipe = pipe;
+    qa.pp_given = pp_given;
+    qa.prefill = prefill;
+    qa.prefill_length = have_prefill_len;
+    qa.prefill_chunk = have_pp_chunk;
+    qa.prefill_backend = have_pp_backend;
+    qa.mtp = mtp_on;
+    qa.kv8 = kv_cache == runtime::KvCache::Int8;
+    qa.profile = profile;
+    return cli::qwen4exp::run_decode<StdoutToStderr>(qa);
+  }
+  if (!ple_dir.empty()) throw std::runtime_error("--ple-dir belongs to Qwen3.8-Flash-Next (spec 21c)");
   if (have_layers)
-    throw std::runtime_error("--layers belongs to Kolibri-1's development mode (spec 20c: load only its first N "
-                             "layers); this checkpoint is not model_type kolibri1");
+    throw std::runtime_error("--layers belongs to Kolibri-1's and Qwen3.8-Flash-Next's development modes (spec 20c / "
+                             "21c: load only the first N layers); this checkpoint is neither model_type kolibri1 nor "
+                             "qwen4_exp");
   const runtime::PrefillPath pp_path = cli::prefill_path(
       have_prefill_len || prefill,
       have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
