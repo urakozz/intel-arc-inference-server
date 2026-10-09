@@ -76,8 +76,9 @@ script), `tools/probe/serve_benchy.sh` (llama-benchy against `b70-serve`, `SERVE
    swaps on and off.
 3. **The cost table is measured, not carried over.** `MtpCost::qwen4exp_tier()`'s every entry comes from Task 2's run
    (the commit names the run and its date); `--mtp-cost` still overrides it.
-4. **Restores are bitwise across the tier's state.** A snapshot taken before a swap round restores after it (and under
-   `--pp 2` into `--pp 1` and back, 21e's cross test) with a bitwise continuation.
+4. **Restores are bitwise across the tier's state.** A snapshot taken before a swap round restores after it with a bitwise
+   continuation; 21e's cross test (`--pp 2` -> `--pp 1` and back) runs where one card can hold the model - Intel's
+   `--layers 18` with the tier forcing 50 % residency.
 5. **Every speed row says what it ran:** the checkpoint, f per card, h measured (from 22c's counters, or from route
    read-backs against the map), swaps on / off, streaming on / off, `--mtp` K, the depth; against the projection's row.
 
@@ -128,7 +129,7 @@ script), `tools/probe/serve_benchy.sh` (llama-benchy against `b70-serve`, `SERVE
 - [ ] **Step 1:** 21e's saves (block ends 2048 / 4096, request ends 2049-2052, 5000, 1) on the whole model with the
   tier, restored into a fresh engine: continuations bitwise a cold run's; with the head (K = 2); across a forced swap
   round between save and restore (22c built: `B70_Q4_SWAP` stress for 64 steps in between); `--pp 2` -> `--pp 1` is not
-  possible whole (it does not fit one card) - the cross test runs on Intel's `--layers 37` with the tier forcing 50 %
+  possible whole (it does not fit one card) - the cross test runs on Intel's `--layers 18` with the tier forcing 50 %
   residency instead (recorded). Commit `git commit -S -m "tests: prefix-cache restores bitwise on the whole model with
   the expert tier, across swap rounds (spec 22d)"`.
 
