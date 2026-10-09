@@ -1,7 +1,7 @@
 # Spec 22b - the expert table, the pinned host mirror and the static cache; Qwen3.8-Flash-Next whole on two cards
 
 **Status (2026-10-10): planned; begins only on the operator's go after plan 22a's record** (spec 22 §3's stopping
-rule). Tasks 1 and 4's O0 half are also plan 22m's prerequisite (the coding mask addresses its kept experts through
+rule). Task 1, Task 3's table (identity rows, no mirror) and Task 4's binding with O0 are also plan 22m's prerequisite (the coding mask addresses its kept experts through
 the same table) and may begin on decision 9 alone (Dependencies). Box queue row 37 (renumbers at build time if taken).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -65,7 +65,7 @@ tests.
   still open (each behind a switch so the other arm is measurable):
   1. the miss path: **zero-copy** (proposed). If decision 1 rules gather staging (22a's arm K), Task 1 Step 5 adds the
      `_STG` form; copy-engine staging as spec 22 §3 writes it (arm S) needs a per-layer host step the captured list
-     does not have, and is not built (see the hand-back's ambiguities).
+     does not have, and is not built (22a's record says so beside decision 1).
   2. the per-layer budget: `--expert-budget uniform|curve`, default **curve** if 22a's held-out curves gain over uniform
      by >= 0.5 point of h at the two-card f, else uniform (recorded).
   4. the mirror: `--expert-mirror all|misses`, default **misses** (the PLE table and the full mirror exceed the
@@ -75,9 +75,10 @@ tests.
      checkpoint; `--expert-profile none` fills by id order (test mode, printed as such).
 - **Rows 31-34 PASS** (21b's loader, 21c's decode incl. `r32.partial`, 21d's prefill, 21e's verify and head): this
   plan changes their binding sites and must leave their gates green.
-- **For plan 22m only** (the coding mask without the tier): Task 1 and Task 4's O0 half are the table it needs (a
+- **For plan 22m only** (the coding mask without the tier): Task 1, Task 3's table (identity rows, no mirror) and
+  Task 4's binding with O0 are the table it needs (a
   loader that skips dropped experts must remap ids to compacted blocks: the table is that remap). If decision 9 is
-  ruled before the operator's go, those two pieces are built first on this plan's branch and the rest waits.
+  ruled before the operator's go, those pieces are built first on this plan's branch and the rest waits.
 - **Not here:** adaptive swaps and prefill streaming (22c), serving the full model, MTP / snapshots / A4 on it, `--max-len
   auto` with the cache, the record (22d), the mask (22m).
 
