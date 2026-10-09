@@ -26,7 +26,17 @@
 //                    crafted route row (ids < 16): all slots, each routed slot alone (the others' weights zero),
 //                    the shared slot alone
 //   prep.cl          prep_gated_head _SIG (GDN_GATE_SIGMOID=1), random and the fixture's case
-// Not run: q4_qsa_attn.cl (sub-group shuffles and reductions: the box's qwen4exp_kernels_test).
+// Spec 21d's prefill kernels (tests/kernels/qwen4exp_pf_ref.h), at the block's defines:
+//   q4_hc.cl at M = 2048  combine _E / _S1 / _Y / _X / _Y_NN over 37 rows; the up-mix at the GEMM's pitch 512
+//   q4_pf_moe.cl     q4_pf_sort at C 2048 (random, all-to-10 over the lane boundaries, the 1200-tile bound) and C 300 /
+//                    1 - header, tiles, row_tok, pair_row EXACT; the gather; the combine in decode's order; the
+//                    dequants of a batch (an empty expert untouched) and block 512 in both shared forms
+//   q4_pf_ple.cl     gate / conv / ring over chunks 5, 16, 17, 40, 3 through the 16-slot rings; q4_ple.cl's gather at
+//                    M = 2048 (-DPLE_PF, the chunk's ids, the ring read not written)
+//   q4_qsa.cl -DQSA_PF  the prep + q4_qsa_ring over chunks 9, 300, 1741, 2, 300 (q, keys, the tail ring == decode's),
+//                    then score + select at M = 2048 over a 300-row sparse chunk (every row's list EXACT)
+// Not run: q4_qsa_attn.cl, q4_pf_attn.cl (DPAS, sub-group shuffles and reductions: the box's qwen4exp_kernels_test /
+// qwen4exp_pf_kernels_test).
 //
 // Bars: integer and exp-free / division-free outputs exact (H, the PLE ids and rows, the tail, the selection,
 // the route ids, the MoE down + combine from the device's own h); everything else within 2 bf16 ulps - the exps
@@ -46,6 +56,7 @@
 #include "clrun.h"
 #include "common/bf16.h"
 #include "kernels/qwen4exp_fixture.h"
+#include "kernels/qwen4exp_pf_ref.h"
 #include "kernels/qwen4exp_ref.h"
 #include "loader/qwen4exp_ple_hash.h"
 
@@ -756,6 +767,375 @@ void gated_checks(clrun::Device& dev) {
   }
 }
 
+// =================================================================================================================
+// Spec 21d: the prefill kernels (src/kernels/CMakeLists.txt "Spec 21d") against tests/kernels/qwen4exp_pf_ref.h.
+constexpr uint32_t kPfC = 2048;
+
+// C route rows with K distinct ids each: random, every token to ten fixed experts, or the bound reached.
+std::vector<uint32_t> pf_routes(uint32_t C, int kind, uint32_t seed) {
+  std::vector<uint32_t> rows(size_t(C) * 32, 0);
+  std::mt19937 rng(seed);
+  std::vector<uint32_t> list;
+  if (kind == 1)
+    for (uint32_t e : {511u, 0u, 256u, 255u, 1u, 127u, 254u, 257u, 383u, 510u}) list.insert(list.end(), C, e);
+  if (kind == 2)
+    for (uint32_t e = 0; e < 512; ++e) list.insert(list.end(), e < 112 ? 65u : 33u, e);
+  std::vector<uint32_t> all(512);
+  for (uint32_t e = 0; e < 512; ++e) all[e] = e;
+  for (uint32_t t = 0; t < C; ++t) {
+    uint32_t* r = rows.data() + size_t(t) * 32;
+    if (kind == 0) {
+      for (uint32_t j = 0; j < 10; ++j) std::swap(all[j], all[j + rng() % (512 - j)]);
+      for (uint32_t j = 0; j < 10; ++j) r[qr::kIds + j] = all[j];
+    } else {
+      for (uint32_t j = 0; j < 10; ++j) r[qr::kIds + j] = list[size_t(j) * C + t];
+    }
+    for (uint32_t j = 0; j < 10; ++j) r[qr::kWeights + j] = qr::as_u32(rf(0.02f + 0.01f * float(rng() % 16)));
+    r[qr::kSharedGate] = qr::as_u32(rf(0.25f + 0.03125f * float(rng() % 16)));
+  }
+  return rows;
+}
+
+void pf_moe_checks(clrun::Device& dev) {
+  clrun::Program p(dev, "src/kernels/qwen4exp/q4_pf_moe.cl",
+                   {"PF_E=512", "PF_K=10", "PF_WG=256", "PF_EPL=2", "PF_D=2560", "PF_INTER=640", "TM=32", "KC=2048"});
+  const uint32_t T = q4pf::tmax(kPfC);
+  // -- the sort: random, all-to-10 (lanes 255 / 256 / 511), the bound reached (1200 tiles), and C 300 / 1
+  struct SortCase { const char* name; uint32_t C; int kind; };
+  for (const SortCase c : {SortCase{"random C 2048", kPfC, 0}, SortCase{"all-to-10 C 2048", kPfC, 1},
+                           SortCase{"the bound reached (1200 tiles)", kPfC, 2}, SortCase{"random C 300", 300, 0},
+                           SortCase{"random C 1", 1, 0}}) {
+    const std::vector<uint32_t> route = pf_routes(c.C, c.kind, 900 + c.C);
+    const uint32_t tm = q4pf::tmax(c.C);
+    clrun::Buffer rb(dev, route), hb(dev, std::vector<uint32_t>(q4pf::hdr_words(), 0xEEEEEEEEu)),
+        tb(dev, std::vector<uint32_t>(size_t(T) * 2, 0xEEEEEEEEu)), ob(dev, std::vector<uint32_t>(size_t(T) * 32, 0xEEEEEEEEu)),
+        pb(dev, std::vector<uint32_t>(size_t(kPfC) * 10, 0xEEEEEEEEu));
+    p.run("q4_pf_sort", {256}, {256}, rb, hb, tb, ob, pb, c.C, tm);
+    const q4pf::Sorted s = q4pf::sort(route.data(), c.C);
+    const std::vector<uint32_t> hd = hb.read<uint32_t>(), td = tb.read<uint32_t>(), od = ob.read<uint32_t>(),
+                                pd = pb.read<uint32_t>();
+    bool ok = std::equal(s.hdr.begin(), s.hdr.begin() + 4 + 513, hd.begin()) &&
+              std::equal(s.tiles.begin(), s.tiles.end(), td.begin()) &&
+              std::equal(s.row_tok.begin(), s.row_tok.begin() + s.rows_used(), od.begin()) &&
+              std::equal(s.pair_row.begin(), s.pair_row.end(), pd.begin());
+    report_bool(std::string("q4_pf_sort ") + c.name + ": header, tiles (" + std::to_string(s.tiles_used) + " of " +
+                    std::to_string(tm) + "), row_tok, pair_row",
+                ok);
+  }
+  // -- gather and the combine over a C 300 chunk
+  const uint32_t C = 300;
+  const std::vector<uint32_t> route = pf_routes(C, 0, 910);
+  const q4pf::Sorted s = q4pf::sort(route.data(), C);
+  {
+    const std::vector<uint16_t> x = random_bf16(size_t(C) * D, -1.f, 1.f, 911);
+    clrun::Buffer xb(dev, x), hb(dev, s.hdr), ob(dev, s.row_tok), gb(dev, size_t(s.rows_used()) * D * 2);
+    p.run("q4_pf_gather", {size_t(s.rows_used()) * 64}, {64}, xb, hb, ob, gb);
+    const std::vector<uint16_t> want = q4pf::gather(s, x.data()), got = gb.read<uint16_t>();
+    Diff d;
+    for (size_t i = 0; i < want.size(); ++i) d.add16(i, got[i], want[i]);
+    report("q4_pf_gather (C 300, " + std::to_string(s.rows_used()) + " sorted rows)", d, 0);
+    const std::vector<uint16_t> y = random_bf16(size_t(s.rows_used()) * D, -1.f, 1.f, 912);
+    clrun::Buffer rb(dev, route), pb(dev, s.pair_row), yb(dev, y), mb(dev, size_t(C) * D * 2);
+    p.run("q4_pf_moe_combine", {(D / 256) * 256, C}, {256, 1}, rb, hb, pb, yb, mb, C);
+    std::vector<uint16_t> mw(size_t(C) * D);
+    q4pf::combine(route.data(), s, y.data(), mw.data(), C);
+    const std::vector<uint16_t> md = mb.read<uint16_t>();
+    Diff dc;
+    for (size_t i = 0; i < mw.size(); ++i) dc.add16(i, md[i], mw[i]);
+    report("q4_pf_moe_combine (C 300 x 2560: decode's order)", dc, 0);
+  }
+  // -- the dequants: a batch of 8 allocated experts [0, 8) (expert 3 empty: untouched), and [508, 513) - the routed
+  //    blocks empty, block 512 the shared expert in both forms
+  {
+    const uint32_t NE = 8, I = qr::kInter;
+    const size_t gub = qr::gate_up_block_words(), dnb = qr::down_block_words();
+    const std::vector<uint32_t> gu = random_blocks(gub * NE, 920), dn = random_blocks(dnb * NE, 921);
+    const std::vector<uint32_t> sgu4 = random_blocks(gub, 922), sdn4 = random_blocks(dnb, 923);
+    const std::vector<uint16_t> sgub = random_bf16(size_t(D) * 2 * I, -0.05f, 0.05f, 924), sdnb = random_bf16(size_t(I) * D, -0.05f, 0.05f, 925);
+    std::vector<uint32_t> hdr(q4pf::hdr_words(), 0);
+    for (uint32_t e = 0; e < NE; ++e) hdr[q4pf::kHdrCount + e] = e == 3 ? 0 : 5;
+    hdr[q4pf::kHdrCount + 512] = 7;
+    clrun::Buffer gb(dev, gu), db(dev, dn), hb(dev, hdr), g4(dev, sgu4), d4(dev, sdn4), gbf(dev, sgub), dbf(dev, sdnb);
+    for (int dn_side = 0; dn_side <= 1; ++dn_side) {
+      const uint32_t K = dn_side ? I : D, N = dn_side ? D : 2 * I;
+      const size_t blk = size_t(K) * N;
+      Diff dr;
+      bool empty_untouched = true;
+      {   // [0, 8)
+        clrun::Buffer ob(dev, std::vector<uint16_t>(blk * NE, 0x7FC1));
+        p.run(dn_side ? "q4_pf_dequant_dn" : "q4_pf_dequant_gu", {(N / 16) * 16, K / 64, NE}, {16, 1, 1}, dn_side ? db : gb, g4,
+              hb, ob, 0u, NE);
+        const std::vector<uint16_t> o = ob.read<uint16_t>();
+        for (uint32_t e = 0; e < NE; ++e) {
+          if (e == 3) {
+            for (size_t i = 0; i < blk; ++i) empty_untouched = empty_untouched && o[size_t(e) * blk + i] == 0x7FC1;
+            continue;
+          }
+          const std::vector<uint16_t> want = dn_side ? q4pf::dequant_dn(dn.data(), nullptr, nullptr, e)
+                                                     : q4pf::dequant_gu(gu.data(), nullptr, nullptr, e);
+          for (size_t i = 0; i < blk; ++i) dr.add16(size_t(e) * blk + i, o[size_t(e) * blk + i], want[i]);
+        }
+      }
+      const std::string side = dn_side ? "q4_pf_dequant_dn" : "q4_pf_dequant_gu";
+      report(side + " experts 0..7 of a batch", dr, 0);
+      report_bool(side + " an empty expert's block untouched", empty_untouched);
+      for (int shb = 0; shb <= 1; ++shb) {   // [508, 513): only block 512 written
+        clrun::Buffer ob(dev, std::vector<uint16_t>(blk * 5, 0x7FC1));
+        const std::string entry = side + (shb ? "_shb" : "");
+        p.run(entry.c_str(), {(N / 16) * 16, K / 64, 5}, {16, 1, 1}, dn_side ? db : gb,
+              shb ? (dn_side ? dbf : gbf) : (dn_side ? d4 : g4), hb, ob, 508u, 513u);
+        const std::vector<uint16_t> o = ob.read<uint16_t>();
+        const std::vector<uint16_t> want =
+            dn_side ? q4pf::dequant_dn(nullptr, shb ? nullptr : sdn4.data(), shb ? sdnb.data() : nullptr, 512)
+                    : q4pf::dequant_gu(nullptr, shb ? nullptr : sgu4.data(), shb ? sgub.data() : nullptr, 512);
+        Diff ds;
+        bool untouched = true;
+        for (size_t i = 0; i < 4 * blk; ++i) untouched = untouched && o[i] == 0x7FC1;
+        for (size_t i = 0; i < blk; ++i) ds.add16(i, o[4 * blk + i], want[i]);
+        report(entry + " block 512 (the shared expert, " + (shb ? "Intel's bf16 tiles copied" : "ours int4") + ")", ds, 0);
+        report_bool(entry + " blocks 508..511 (no rows) untouched", untouched);
+      }
+    }
+  }
+}
+
+void pf_ple_checks(clrun::Device& dev) {
+  const uint32_t KVN = HCN + D;
+  clrun::Program p(dev, "src/kernels/qwen4exp/q4_pf_ple.cl", with(kCtrlDefs, {"PF_C=2048"}));
+  std::vector<float> pw = bf16_vals(size_t(3) * HCN, 0.5f, 1.5f, 960);
+  const std::vector<float> taps = random_f32(size_t(HCN) * 4, -0.5f, 0.5f, 961);
+  pw.insert(pw.end(), taps.begin(), taps.end());
+  const float* wk = pw.data();
+  const float* wq = pw.data() + HCN;
+  const float* wc = pw.data() + 2 * HCN;
+  clrun::Buffer pwb(dev, pw), ringb(dev, size_t(16) * HCN * 2), idrb(dev, std::vector<uint32_t>(16, 0));
+  std::vector<uint16_t> ring_h(size_t(16) * HCN, 0);
+  std::vector<uint32_t> idr_h(16, 0);
+  Diff dg, dn, dh, dr;
+  bool ids_ok = true;
+  uint32_t pos = 0;
+  for (uint32_t C : {5u, 16u, 17u, 40u, 3u}) {
+    const std::vector<float> kv = random_f32(size_t(C) * KVN, -2.f, 2.f, 970 + pos);
+    const std::vector<uint16_t> H = random_bf16(size_t(C) * HCN, -2.f, 2.f, 980 + pos);
+    std::vector<uint32_t> ids(C);
+    for (uint32_t m = 0; m < C; ++m) ids[m] = (pos + m) * 7919u % 248000u;
+    clrun::Buffer cb(dev, ctrl_at(pos, C)), kvb(dev, kv), hb(dev, H), gb(dev, size_t(C) * HCN * 2),
+        gnb(dev, size_t(C) * HCN * 2), ib(dev, ids);
+    p.run("q4_pf_ple_gate", {4 * 256, C}, {256, 1}, cb, kvb, hb, pwb, gb, gnb);
+    const std::vector<uint16_t> gd = gb.read<uint16_t>(), gnd = gnb.read<uint16_t>();
+    for (uint32_t m = 0; m < C; ++m) {
+      std::vector<uint16_t> g(HCN), gn(HCN);
+      q4pf::ple_gate_row(H.data() + size_t(m) * HCN, kv.data() + size_t(m) * KVN, wk, wq, wc, g.data(), gn.data());
+      for (uint32_t c = 0; c < HCN; ++c) {
+        dg.add16(size_t(pos + m) * HCN + c, gd[size_t(m) * HCN + c], g[c]);
+        dn.add16(size_t(pos + m) * HCN + c, gnd[size_t(m) * HCN + c], gn[c]);
+      }
+    }
+    p.run("q4_pf_ple_conv", {(HCN / 256) * 256, C}, {256, 1}, cb, gb, gnb, ringb, pwb, hb);
+    // the reference conv over the DEVICE's gated / gn rows and the reference ring (the conv's own arithmetic)
+    std::vector<uint16_t> Hh = H;
+    for (uint32_t m = 0; m < C; ++m) {
+      const uint32_t pp = pos + m;
+      const uint16_t* hist[3];
+      for (uint32_t t = 0; t < 3; ++t) {
+        const uint32_t back = 9 - 3 * t;
+        hist[t] = pp < back ? nullptr
+                  : pp - back >= pos ? gnd.data() + size_t(pp - back - pos) * HCN
+                                     : ring_h.data() + size_t((pp - back) % 16) * HCN;
+      }
+      q4pf::ple_conv_row(Hh.data() + size_t(m) * HCN, gd.data() + size_t(m) * HCN, gnd.data() + size_t(m) * HCN, hist,
+                         taps.data());
+    }
+    const std::vector<uint16_t> Hd = hb.read<uint16_t>();
+    for (size_t i = 0; i < Hh.size(); ++i) dh.add16(size_t(pos) * HCN + i, Hd[i], Hh[i]);
+    p.run("q4_pf_ple_ring", {(HCN / 256) * 256, 16}, {256, 1}, cb, gnb, ib, ringb, idrb);
+    for (uint32_t m = C > 16 ? C - 16 : 0; m < C; ++m) {
+      std::copy(gnd.begin() + size_t(m) * HCN, gnd.begin() + size_t(m + 1) * HCN, ring_h.begin() + size_t((pos + m) % 16) * HCN);
+      idr_h[(pos + m) % 16] = ids[m];
+    }
+    const std::vector<uint16_t> rd = ringb.read<uint16_t>();
+    for (size_t i = 0; i < rd.size(); ++i) dr.add16(i, rd[i], ring_h[i]);
+    ids_ok = ids_ok && idrb.read<uint32_t>() == idr_h;
+    pos += C;
+  }
+  report("q4_pf_ple_gate gated (chunks 5, 16, 17, 40, 3)", dg, 2);
+  report("q4_pf_ple_gate gn", dn, 2);
+  report("q4_pf_ple_conv H (the device's gated / gn, the ring before the chunk)", dh, 2);
+  report("q4_pf_ple_ring conv ring (the last min(16, C) rows)", dr, 0);
+  report_bool("q4_pf_ple_ring id ring", ids_ok);
+  // q4_ple_gather at M = 2048 (PLE_PF, PLE_DIRECT): a chunk's ids from its buffer, the ring before it, no ring write
+  {
+    const std::vector<uint64_t> sizes = loader::q4_ple_primes(1000, 16, 0), offs = loader::q4_ple_offsets(sizes);
+    const std::array<uint64_t, 3> mult = {fx::kPleMult[0], fx::kPleMult[1], fx::kPleMult[2]};
+    const uint64_t R = loader::q4_ple_total_rows(sizes);
+    std::vector<int8_t> q_all(size_t(R) * qr::kPleDim);
+    std::mt19937 rng(990);
+    for (int8_t& v : q_all) v = int8_t(int(rng() % 255) - 127);
+    std::vector<uint8_t> s_all(size_t(R) * 2);
+    std::vector<float> scale(R);
+    for (uint64_t r = 0; r < R; ++r) {
+      const uint16_t b = rne(0.001f + 0.0001f * float(rng() % 400));
+      std::memcpy(&s_all[r * 2], &b, 2);
+      scale[r] = f32(b);
+    }
+    std::vector<uint64_t> consts(35), head_off(32);
+    for (uint32_t i = 0; i < 3; ++i) consts[i] = mult[i];
+    for (uint32_t h = 0; h < 16; ++h) {
+      consts[3 + h] = sizes[h];
+      consts[19 + h] = offs[h];
+      head_off[h] = offs[h] * qr::kPleDim;
+      head_off[16 + h] = offs[h] * 2;
+    }
+    clrun::Program g(dev, "src/kernels/qwen4exp/q4_ple.cl",
+                     with(kCtrlDefs, {"M=2048", "PLE_GATHER=1", "PLE_EOS=248044", "PLE_SCALE_BF16=1", "PLE_DIRECT=1", "PLE_PF=1"}));
+    std::vector<uint32_t> seq(60);
+    for (uint32_t& t : seq) t = rng() % 248320;
+    seq[3] = seq[20] = seq[21] = qr::kPleEos;
+    std::vector<uint32_t> ring(16, 0);
+    for (uint32_t q = 0; q < 20; ++q) ring[q % 16] = seq[q];   // what earlier chunks / steps left: positions < 20
+    const uint32_t gpos = 20, gC = 40;
+    clrun::Buffer cb(dev, ctrl_at(gpos, gC)), rb(dev, ring), qb(dev, q_all), sb(dev, s_all), ob(dev, head_off), kb(dev, consts),
+        eb(dev, size_t(gC) * D * 2), idb(dev, size_t(gC) * 16 * 8),
+        tb(dev, std::vector<uint32_t>(seq.begin() + gpos, seq.begin() + gpos + gC));
+    g.run("q4_ple_gather", {16 * 160, gC}, {160, 1}, cb, rb, qb, sb, ob, kb, eb, idb, tb);
+    const std::vector<uint64_t> got = idb.read<uint64_t>();
+    const std::vector<uint16_t> e = eb.read<uint16_t>();
+    const std::vector<loader::Q4PleHistory> hs = q4pf::ple_ids_chunk(seq.data() + gpos, gpos, gC, ring.data());
+    Diff di, de;
+    for (uint32_t m = 0; m < gC; ++m) {
+      const std::array<uint64_t, 16> want = loader::q4_ple_ids(hs[m].t0, hs[m].t1, hs[m].t2, mult, sizes, offs);
+      for (uint32_t h = 0; h < 16; ++h) {
+        di.addx(m * 16 + h, got[size_t(m) * 16 + h], want[h]);
+        uint16_t row[qr::kPleDim];
+        qr::ple_row(q_all.data() + want[h] * qr::kPleDim, scale[want[h]], row);
+        for (uint32_t i = 0; i < qr::kPleDim; ++i) de.add16(size_t(m) * D + h * qr::kPleDim + i, e[size_t(m) * D + h * qr::kPleDim + i], row[i]);
+      }
+    }
+    report("q4_ple_gather_M2048_BF16_PF ids (chunk 20..59 over the ring, EOS at 20 / 21)", di, 0, "mismatch");
+    report("q4_ple_gather_M2048_BF16_PF rows", de, 0);
+    report_bool("q4_ple_gather_M2048_BF16_PF id ring untouched", rb.read<uint32_t>() == ring);
+  }
+}
+
+void pf_qsa_checks(clrun::Device& dev) {
+  const std::vector<std::string> defs =
+      with(with(kCtrlDefs, {"M=2048", "TOPB=512", "SEL_WG=" + std::to_string(g_sel_wg), "QSA_PF=1"}), kListDefs);
+  clrun::Program p(dev, "src/kernels/qwen4exp/q4_qsa.cl", defs);
+  const uint32_t LD = 768, ML = 2560, stride = ML / 4;
+  const std::vector<float> rope = rope_table(ML);
+  const std::vector<float> small = bf16_vals(768, 0.5f, 1.5f, 1000);
+  clrun::Buffer rb(dev, rope), smb(dev, small), tb(dev, size_t(8) * 128 * 2), kb(dev, size_t(stride) * 128 * 2);
+  std::vector<uint16_t> tail_h(size_t(8) * 128, 0), keys_h(size_t(stride) * 128, 0);
+  Diff dq, dk, dt;
+  uint32_t pos = 0;
+  std::vector<float> q_last;
+  for (uint32_t C : {9u, 300u, 1741u, 2u, 300u}) {   // ends at 2352: the last chunk straddles nothing, starts at 2052
+    const std::vector<float> idx = random_f32(size_t(C) * LD, -3.f, 3.f, 1010 + pos);
+    clrun::Buffer cb(dev, ctrl_at(pos, C)), ib(dev, idx), qb(dev, size_t(C) * 512 * 4);
+    p.run("q4_qsa_prep", {5 * 128, C}, {128, 1}, cb, ib, smb, rb, qb, tb, kb);
+    p.run("q4_qsa_ring", {128, 8}, {128, 1}, cb, ib, tb);
+    std::vector<float> qh(size_t(C) * 512);
+    q4pf::qsa_prep_chunk(idx.data(), LD, pos, C, small.data() + 512, small.data() + 640, rope.data(), tail_h.data(),
+                         keys_h.data(), qh.data());
+    const std::vector<float> qd = qb.read<float>();
+    for (size_t i = 0; i < qh.size(); ++i) dq.add16(size_t(pos) * 512 + i, rne(qd[i]), rne(qh[i]));
+    const std::vector<uint16_t> td = tb.read<uint16_t>(), kd = kb.read<uint16_t>();
+    for (size_t i = 0; i < td.size(); ++i) dt.add16(i, td[i], tail_h[i]);
+    for (size_t i = 0; i < size_t((pos + C) / 4) * 128; ++i) dk.add16(i, kd[i], keys_h[i]);
+    if (pos + C == 2352) q_last = qd;
+    pos += C;
+  }
+  report("q4_qsa_prep_M2048_PF idx q (chunks 9, 300, 1741, 2, 300)", dq, 2);
+  report("q4_qsa_prep_M2048_PF compressed keys (588 blocks, chunk edges on and off multiples of 4)", dk, 2);
+  report("q4_qsa_ring tail ring after each chunk == decode's", dt, 0);
+  // the last chunk (positions 2052..2351: every row sparse) scored and selected at M = 2048 against the reference
+  // over the device's own keys and scores
+  {
+    const uint32_t C = 300, p0 = 2052;
+    const std::vector<uint16_t> kd = kb.read<uint16_t>();
+    clrun::Buffer cb(dev, ctrl_at(p0, C)), qb(dev, q_last), sb(dev, std::vector<float>(size_t(C) * stride, -1.0f)),
+        lb(dev, std::vector<uint32_t>(size_t(C) * kListRow, 0xFFFFFFFFu)), db(dev, size_t(C) * 8);
+    p.run("q4_qsa_score", {(stride + 255) / 256 * 256, C}, {256, 1}, cb, qb, kb, sb, stride);
+    p.run("q4_qsa_select", {g_sel_wg, C}, {g_sel_wg, 1}, cb, sb, stride, lb, db);
+    const std::vector<float> sd = sb.read<float>();
+    const std::vector<uint32_t> ld = lb.read<uint32_t>();
+    Diff ds;
+    bool sel_ok = true;
+    std::string why;
+    for (uint32_t m = 0; m < C && sel_ok; ++m) {
+      const uint32_t pp = p0 + m, n = (pp + 1) / 4;
+      for (uint32_t b = 0; b < n; ++b)
+        ds.add32(size_t(m) * stride + b, sd[size_t(m) * stride + b], qr::qsa_score(q_last.data() + size_t(m) * 512, kd.data() + size_t(b) * 128));
+      const qr::Selection sel = qr::qsa_select(sd.data() + size_t(m) * stride, pp);
+      const uint32_t* row = ld.data() + size_t(m) * kListRow;
+      if (row[kCountW] != sel.count() || !std::equal(sel.list.begin(), sel.list.end(), row)) {
+        sel_ok = false;
+        why = " (row " + std::to_string(m) + ")";
+      }
+    }
+    report("q4_qsa_score_M2048_PF scores (300 rows at 2052..2351)", ds, 2, "fp32 ulp");
+    report_bool("q4_qsa_select_M2048_PF every row's list and count == q4ref::qsa_select over the device's scores", sel_ok, why);
+  }
+}
+
+void pf_hc_checks(clrun::Device& dev) {
+  const uint32_t C = 37;
+  const std::vector<uint16_t> H0 = random_bf16(size_t(C) * HCN, -2.f, 2.f, 1100);
+  const std::vector<float> w = bf16_vals(HCN, 0.5f, 1.5f, 1101);
+  std::vector<float> inj(size_t(C) * 4);
+  for (size_t i = 0; i < inj.size(); ++i) inj[i] = rf(0.5f + 0.125f * float(i % 13));
+  const std::vector<float> slices = random_f32(size_t(C) * D, -0.5f, 0.5f, 1102);
+  const std::vector<uint16_t> ybf = random_bf16(size_t(C) * D, -1.f, 1.f, 1103);
+  const std::vector<uint32_t> ctrl = ctrl_at(4000, C);
+  struct V { const char* name; std::vector<std::string> defs; int src; bool norm; };
+  for (const V& v : std::vector<V>{{"_E", {"HC_SRC=0", "HC_NORM=1"}, 0, true}, {"_S1", {"HC_SRC=1", "SRC_S=1", "HC_NORM=1"}, 1, true},
+                                   {"_Y", {"HC_SRC=2", "HC_NORM=1"}, 2, true}, {"_X", {"HC_SRC=3", "HC_NORM=1"}, 3, true},
+                                   {"_Y_NN", {"HC_SRC=2", "HC_NORM=0"}, 2, false}}) {
+    clrun::Program p(dev, "src/kernels/qwen4exp/q4_hc.cl", with(with(kCtrlDefs, {"M=2048"}), v.defs));
+    std::unique_ptr<clrun::Buffer> sb;
+    if (v.src == 1) sb.reset(new clrun::Buffer(dev, slices));
+    else if (v.src == 3) sb.reset(new clrun::Buffer(dev, 64));
+    else sb.reset(new clrun::Buffer(dev, ybf));
+    clrun::Buffer cb(dev, ctrl), hb(dev, H0), ib(dev, inj), wb(dev, w), xb(dev, size_t(C) * HCN * 2);
+    p.run("q4_hc_combine_norm", {4 * 256, C}, {256, 1}, cb, hb, *sb, ib, wb, xb);
+    const std::vector<uint16_t> Hd = hb.read<uint16_t>(), xd = xb.read<uint16_t>();
+    Diff dh, dx;
+    for (uint32_t m = 0; m < C; ++m) {
+      std::vector<uint16_t> Hh(H0.begin() + size_t(m) * HCN, H0.begin() + size_t(m + 1) * HCN), xh(HCN, 0), y(D);
+      for (uint32_t k = 0; k < D; ++k)
+        y[k] = v.src == 1 ? rne(slices[size_t(m) * D + k]) : ybf[size_t(m) * D + k];
+      const qr::HcSrc hs = v.src == 0 ? qr::HcSrc::Embed : v.src == 3 ? qr::HcSrc::None : qr::HcSrc::Y;
+      qr::hc_combine_norm(Hh.data(), hs, y.data(), inj.data() + size_t(m) * 4, w.data(), v.norm ? xh.data() : nullptr);
+      for (uint32_t i = 0; i < HCN; ++i) {
+        dh.add16(size_t(m) * HCN + i, Hd[size_t(m) * HCN + i], Hh[i]);
+        if (v.norm) dx.add16(size_t(m) * HCN + i, xd[size_t(m) * HCN + i], xh[i]);
+      }
+    }
+    report(std::string("q4_hc_combine_norm_M2048") + v.name + " H (37 rows)", dh, 0);
+    if (v.norm) report(std::string("q4_hc_combine_norm_M2048") + v.name + " xn", dx, 2);
+  }
+  {   // the up-mix at the GEMM's pitch 512 (q4_hc_up_mix_M2048_I_D512)
+    clrun::Program p(dev, "src/kernels/qwen4exp/q4_hc.cl", with(kCtrlDefs, {"M=2048", "UP_DOWN=512", "UP_INJECT=1"}));
+    const std::vector<float> down = random_f32(size_t(C) * 512, -6.f, 6.f, 1110);
+    const std::vector<uint16_t> up = random_bf16(size_t(qr::kHcLow) * HCN, -0.15f, 0.15f, 1111);
+    const std::vector<uint16_t> xn = random_bf16(size_t(C) * HCN, -2.f, 2.f, 1112);
+    clrun::Buffer cb(dev, ctrl), db(dev, down), ub(dev, up), xnb(dev, xn), xb(dev, size_t(C) * D * 2), ib(dev, size_t(C) * 16);
+    p.run("q4_hc_up_mix", {(D / 16) * 64, C}, {64, 1}, cb, db, ub, xnb, xb, ib);
+    const std::vector<uint16_t> xd = xb.read<uint16_t>();
+    const std::vector<float> id = ib.read<float>();
+    Diff dx, di;
+    for (uint32_t m = 0; m < C; ++m) {
+      std::vector<uint16_t> xh(D);
+      float ih[4];
+      qr::hc_up_mix(down.data() + size_t(m) * 512, true, up.data(), xn.data() + size_t(m) * HCN, xh.data(), ih);
+      for (uint32_t c = 0; c < D; ++c) dx.add16(size_t(m) * D + c, xd[size_t(m) * D + c], xh[c]);
+      for (uint32_t s = 0; s < 4; ++s) di.add16(m * 4 + s, rne(id[m * 4 + s]), rne(ih[s]));
+    }
+    report("q4_hc_up_mix_M2048_I_D512 x (37 rows, pitch 512)", dx, 2);
+    report("q4_hc_up_mix_M2048_I_D512 inj", di, 2);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -777,6 +1157,10 @@ int main() {
     route_checks(dev);
     moe_checks(dev, dn_ks);
     gated_checks(dev);
+    pf_hc_checks(dev);
+    pf_moe_checks(dev);
+    pf_ple_checks(dev);
+    pf_qsa_checks(dev);
   } catch (const std::exception& e) {
     std::printf("qwen4exp_run: ERROR %s\n", e.what());
     return 1;
