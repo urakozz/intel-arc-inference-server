@@ -106,7 +106,8 @@ experts a layer at M = 2 / 3 / 4 against the iid 15.36 / 22.13 / 28.36 - the sha
    beside it, never instead of it.
 5. **The pruning curve's mask is the engine's rule.** The reference's masked router sets the dropped experts' logits
    to -inf **before** the fp32 softmax over 512, takes the top 10 of what remains and renormalises over them - the
-   router's own rule on the kept set (spec 22 §4b). Tested: an all-kept mask is bitwise the unmasked run; a mask that
+   router's own rule on the kept set (spec 22 §4b); dropped experts rank below every kept one, so a kept expert whose
+   probability underflows to 0 still beats a dropped one (plan 22m's kernel applies the same rule). Tested: an all-kept mask is bitwise the unmasked run; a mask that
    drops only experts the unmasked run never selected is bitwise the unmasked run.
 6. **The stopping rule is computed, not argued.** `offload_curve.py project` prints `STOP` or `GO-CANDIDATE` from the
    measured numbers and the rule's own inputs (two cards, 32k, the best fill, the measured mixed-launch law, P measured
