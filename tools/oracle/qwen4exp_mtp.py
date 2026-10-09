@@ -300,3 +300,145 @@ def trace_routes(head: MtpHead, R: torch.Tensor, ids, chunk: int = 2048) -> dict
             "mtp_p": torch.cat([p.gather(-1, order), pad_f]).contiguous(),
             "mtp_onorm": torch.cat([on.gather(-1, order), pad_f]).contiguous()}
 
+
+# ------------------------------------------------------------------------------------------------
+# Spec 21e: the engine-format head and the acceptance run (F5's numbers until spec 22)
+
+def rtn_dequant(w: torch.Tensor) -> torch.Tensor:
+    """loader::rtn_int4_g64 then its dequantisation: bf16 [N][K] -> bf16 [N][K]. Per output row and group of 64:
+    s16 = f16(2 amax / 15) (round to nearest even), q = clamp(rint(w / f32(s16)) + 8, 0, 15) (an all-zero group:
+    s16 = 0, q = 8), the value (q - 8) x f32(s16) rounded to bf16 (ornith_ref.rtn_int4_g64's formula)."""
+    N, Kd = w.shape
+    if Kd % 64:
+        raise ValueError(f"RTN g64 over K = {Kd}")
+    wf = w.float().reshape(N, Kd // 64, 64)
+    amax = wf.abs().amax(-1)
+    s = (2.0 * amax / 15.0).to(torch.float16).float().unsqueeze(-1)
+    q = torch.where(s > 0, torch.round(wf / torch.where(s > 0, s, torch.ones_like(s))) + 8.0,
+                    torch.full_like(wf, 8.0)).clamp(0.0, 15.0)
+    return ((q - 8.0) * s).reshape(N, Kd).to(w.dtype)
+
+
+def engine_format(head: MtpHead) -> MtpHead:
+    """The head's routed experts as the engine loads them (21b: the checkpoints ship the head's experts bf16, the
+    loader RTN-quantises them to int4 g64 - spec 15e's rule): every expert quantised and dequantised. Gate and up
+    rows quantise independently (the RTN is per output row), so the fused [2I][H] form is quantised as one."""
+    lazy = head.lazy
+    orig = lazy.expert
+
+    def expert(layer, e):
+        gu, dn = orig(layer, e)
+        return rtn_dequant(gu), rtn_dequant(dn)
+
+    lazy.expert = expert
+    return head
+
+
+@torch.no_grad()
+def greedy_continuation(model, ids, n: int, chunk: int = 2048) -> list:
+    """The main model's greedy continuation of `ids` (n ids), the reference's cached decode (qwen4exp_ref's run)."""
+    last = {}
+    cache = ref.forward_chunks(model, list(ids), chunk if len(ids) > 4096 else 0,
+                               on_logits=lambda _r0, lg: last.update(row=lg[-1].float()), logits_to_keep=1)
+    out = []
+    row = last["row"]
+    for _ in range(n):
+        nxt = int(torch.argmax(row).item())
+        out.append(nxt)
+        o = model(input_ids=torch.tensor([[nxt]]), past_key_values=cache, use_cache=True)
+        cache = o.past_key_values
+        row = o.logits[0, -1].float()
+    return out
+
+
+def cmd_accept(argv) -> None:
+    """qwen4exp_mtp.py accept <checkpoint> --out accept_<norm>.json [--norm single|per_stream] [--select reuse|fresh|
+    both] [--source NAME:CTX_IDS[:CONT_IDS] ...] [--golden DIR] [--k 3] [--ctx-max 2048] [--gen 64] [--layers N]
+    [--ple SPEC] [--experts rtn|bf16]
+
+    Teacher-forced greedy acceptance by depth (accept()) per source and pooled (rows-weighted): accept_by_depth[d] =
+    the share of continuation rows whose drafts 1..d+1 all equal the main model's greedy text, E_K = 1 + sum_{d<K}
+    accept_by_depth[d] the expected tokens an iteration at K drafts. A source's continuation is CONT_IDS, or the
+    golden set's `tokens` (--golden: q4exp_short, q4exp_agentic from <DIR>/<p>.golden.safetensors), or the
+    reference's own greedy continuation of --gen ids. The head is the engine's (--experts rtn, the default) or the
+    checkpoint's bf16 experts. Box CPU (r34.accept), hours on Intel's checkpoint."""
+    import argparse
+    import json
+    import time
+    ap = argparse.ArgumentParser(prog="qwen4exp_mtp.py accept")
+    ap.add_argument("checkpoint")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--norm", choices=NORMS, default="single")
+    ap.add_argument("--select", choices=("reuse", "fresh", "both"), default="both")
+    ap.add_argument("--source", action="append", default=[])
+    ap.add_argument("--golden", default="")
+    ap.add_argument("--k", type=int, default=3)
+    ap.add_argument("--ctx-max", type=int, default=2048)
+    ap.add_argument("--gen", type=int, default=64)
+    ap.add_argument("--layers", type=int, default=None)
+    ap.add_argument("--ple", default="")
+    ap.add_argument("--experts", choices=("rtn", "bf16"), default="rtn")
+    a = ap.parse_args(argv)
+    t0 = time.time()
+    sources = []
+    for s in a.source:
+        parts = s.split(":")
+        if len(parts) not in (2, 3):
+            raise SystemExit(f"--source {s}: NAME:CTX_IDS[:CONT_IDS]")
+        sources.append((parts[0], ref.read_ids(parts[1]), ref.read_ids(parts[2]) if len(parts) == 3 else None))
+    if a.golden:
+        from safetensors import safe_open
+        prompts = os.path.join(_HERE, "..", "..", "tests", "golden", "prompts")
+        for p in ("q4exp_short", "q4exp_agentic"):
+            g = os.path.join(a.golden, f"{p}.golden.safetensors")
+            if not os.path.exists(g):
+                print(f"golden {p}: no {g} - skipped", flush=True)
+                continue
+            with safe_open(g, "pt") as f:
+                cont = [int(x) for x in f.get_tensor("tokens").tolist()]
+            sources.append((p, ref.read_ids(os.path.join(prompts, f"{p}.ids")), cont))
+    if not sources:
+        raise SystemExit("no source: --source NAME:CTX[:CONT] or --golden DIR")
+    tc = ref.text_config(a.checkpoint, a.layers)
+    ple_spec = a.ple or (f"int8:{a.checkpoint.rstrip('/')}-ple-int8"
+                         if os.path.isdir(a.checkpoint.rstrip("/") + "-ple-int8") else "bf16")
+    model, pf, _ = ref.build_streamed(a.checkpoint, tc, ple=ref.PleTable(ref.ple_source(a.checkpoint, ple_spec), tc))
+    head = MtpHead(a.checkpoint, tc, norm=a.norm, model=model)
+    if a.experts == "rtn":
+        engine_format(head)
+    step = ref.layer_major(model, pf)
+    selects = ("reuse", "fresh") if a.select == "both" else (a.select,)
+    out = {"checkpoint": os.path.abspath(a.checkpoint), "norm": a.norm, "experts": a.experts, "k_max": a.k,
+           "layers": tc.num_hidden_layers, "sources": {}, "pooled": {}}
+    for name, ctx, cont in sources:
+        ctx = ctx[-a.ctx_max:]
+        if cont is None:
+            cont = greedy_continuation(model, ctx, a.gen)
+        R = step([(list(ctx) + list(cont), 0, {})])[0]
+        out["sources"][name] = {}
+        for sel in selects:
+            r = accept(R, head, ctx, cont, a.k, share_sel=sel == "reuse")
+            out["sources"][name][sel] = r
+            print(f"{name} ({len(ctx)} + {len(cont)} ids) {a.norm} {sel}: rows {r['rows']}, accept by depth "
+                  f"{[round(x, 4) for x in r['accept_by_depth']]}, mean accepted {r['mean_accepted']:.4f} "
+                  f"({time.time() - t0:.0f}s)", flush=True)
+    for sel in selects:
+        rows = sum(v[sel]["rows"] for v in out["sources"].values())
+        acc = [sum(v[sel]["accept_by_depth"][d] * v[sel]["rows"] for v in out["sources"].values()) / max(rows, 1)
+               for d in range(a.k)]
+        e = [1.0 + sum(acc[:K]) for K in range(1, a.k + 1)]
+        out["pooled"][sel] = {"rows": rows, "accept_by_depth": acc, "expected_tokens_at_K": e}
+        print(f"pooled {a.norm} {sel}: rows {rows}, accept by depth {[round(x, 4) for x in acc]}, E_K (K = 1..{a.k}) "
+              f"{[round(x, 3) for x in e]}", flush=True)
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+    with open(a.out, "w") as f:
+        json.dump(out, f, indent=1)
+    print(f"wrote {a.out} ({time.time() - t0:.0f}s)")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "accept":
+        cmd_accept(sys.argv[2:])
+    else:
+        raise SystemExit("usage: qwen4exp_mtp.py accept <checkpoint> --out FILE ... (python3 qwen4exp_mtp.py accept -h)")
+
