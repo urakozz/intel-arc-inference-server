@@ -3109,7 +3109,6 @@ endif()
 # dispatch and the refusals read.
 set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
 b70_cli_reject(cli_reject_qwen4exp_full ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 EXPECT "spec 22")
-b70_cli_reject(cli_reject_qwen4exp_prefill ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --prefill EXPECT "spec 21d")
 b70_cli_reject(cli_reject_qwen4exp_mtp ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "spec 21e")
 b70_cli_reject(cli_reject_qwen4exp_kv8 ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "decision 8")
 if(TARGET b70-serve)
@@ -3232,4 +3231,13 @@ if(B70_Q4EXP)
   list(APPEND _q4g qwen4exp_golden_prefill_synth_pp_test qwen4exp_golden_prefill_intel_test)
   set_tests_properties(${_q4g} PROPERTIES LABELS "checkpoint;golden;qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
+# Task 3: b70-decode's Qwen3.8-Flash-Next prefill backends and chunk, before the device (tests/model/qwen4exp: the
+# model_type stub). 21c's cli_reject_qwen4exp_prefill (--prefill naming spec 21d) is gone: this family prefills now.
+set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
+b70_cli_reject(cli_reject_qwen4exp_prefill_int8 ${_q4_cfg} --layers 4 --bench --prefill-length 64 --prefill-backend l0-int8
+  EXPECT "1024-k Hadamard blocks")
+b70_cli_reject(cli_reject_qwen4exp_prefill_sycl ${_q4_cfg} --layers 4 --ids ${B70_OK_IDS} --n 4 --prefill
+  --prefill-backend sycl-tla EXPECT "sycl-tla has no Qwen3.8-Flash-Next walk")
+b70_cli_reject(cli_reject_qwen4exp_prefill_chunk ${_q4_cfg} --layers 4 --ids ${B70_OK_IDS} --n 4 --prefill
+  --prefill-chunk 4096 EXPECT "exceeds Qwen3.8-Flash-Next's prefill chunk 2048")
 # ==== Spec 21d: Qwen3.8-Flash-Next prefill ==== (end) ====
