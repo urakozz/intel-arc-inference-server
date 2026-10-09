@@ -1075,6 +1075,96 @@ if(B70_Q4EXP)
 endif()
 # ==== Spec 21c: Qwen3.8-Flash-Next decode ==== (end) ====
 
+# ==== Spec 21d: Qwen3.8-Flash-Next prefill ==== (begin) ====
+# Additive but for three sources, each gaining one define that every existing binary leaves unset - their
+# preprocessed source token for token as before (the 9a67889 rule; G0's sha256 on the box, r33.k0):
+#   prefill/pf_gated_head.cl  GDN_GATE_SIGMOID (pf_gated_head_SIG: the sigmoid gate, prep.cl's _SIG twin)
+#   qwen4exp/q4_qsa.cl        QSA_PF (the prep at M = 2048 without its in-launch ring write, + q4_qsa_ring; the indexer
+#                             rows at the GEMM's pitch 768)
+#   qwen4exp/q4_ple.cl        PLE_PF (the gather's tokens from the chunk's id buffer, no ring write)
+# New family sources (src/kernels/qwen4exp/, kernels::qwen4exp's spec 21d block is the host half):
+#   q4_pf_moe.cl    the 512-expert ushort sort, gather, a weight batch's dequant (block 512 = the shared expert: int4
+#                   dequantised or Intel's bf16 copied), the combine in decode's order
+#   q4_pf_attn.cl   the sparse flash over each row's own list (rows past 2050; DPAS; flash and eager forms)
+#   q4_pf_ple.cl    the PLE block over a chunk in three launches (gate, conv, the rings)
+# Reused at this family's shapes: 21c's q4_hc.cl at M = 2048 (combine _E / _S1 / _Y / _X / _Y_NN, up-mix _I at the
+# GEMM's pitch 512), prefill/pf_embed.cl and pf_gemv_bf16.cl (a||b, the router at decode's {16, 16} tiling) at hidden
+# 2560, pf_dequant_slab.cl (qkv||z, q||gate||k||v int4 layout 0), kolibri/kol_pf_linear.cl's bf16 slab (q4_ prefix),
+# pf_attn_prep.cl (q16), pf_attn.cl (the gate) and pf_flash_attn.cl at 24 q / 2 kv heads (HPW 6 of GQA 12, KT 64, RPW
+# 8, EXP2 as the existing binary, 256 GRF), pf_moe_gemm.cl (gate||up 2560 x 1280 SiLU, down 640 x 2560); bound by
+# name, nothing built here: Qwen3.8's pf_gdn_conv / _wy / _scan (the GDN shape is Qwen3.8's), pf_gemm_T0, 21c's
+# q4_route_M1 (grid (1, C)); K2's / Kolibri's k2_pf_dequant_slab_K6144_N2560 (out_proj / o_proj int4) is built here
+# only when neither block is on. What a chunk binds: runtime/qwen4exp/qwen4exp_prefill.cc (launch counts in
+# runtime/qwen4exp/qwen4exp_sizes.cc: they depend on the chunk's dense / sparse rows).
+if(B70_Q4EXP)
+  set(Q4_PF_REUSE ${CMAKE_CURRENT_SOURCE_DIR}/prefill)
+  add_ocloc_kernel(pf_gated_head_SIG SOURCE ${Q4_PF_REUSE}/pf_gated_head.cl DEFINES GDN_GATE_SIGMOID=1)
+  add_ocloc_kernel(pf_embed_gather_D2560 SOURCE ${Q4_PF_REUSE}/pf_embed.cl DEFINES HIDDEN=2560 VOCAB=248320)
+  add_ocloc_kernel(pf_ab_proj_D2560 SOURCE ${Q4_PF_REUSE}/pf_gemv_bf16.cl DEFINES K=2560 N=128 COLS_PER_WG=16 KSPLIT=16)
+  add_ocloc_kernel(pf_moe_router_K2560_N528 SOURCE ${Q4_PF_REUSE}/pf_gemv_bf16.cl
+                   DEFINES K=2560 N=528 COLS_PER_WG=16 KSPLIT=16)
+  foreach(row "2560 16384" "2560 13312")
+    separate_arguments(f UNIX_COMMAND "${row}")
+    list(GET f 0 K)
+    list(GET f 1 N)
+    add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L0 SOURCE ${Q4_PF_REUSE}/pf_dequant_slab.cl DEFINES K=${K} N=${N} LAYOUT=0)
+  endforeach()
+  if(NOT B70_K2 AND NOT B70_KOLIBRI)
+    add_ocloc_kernel(k2_pf_dequant_slab_K6144_N2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_pf_linear.cl DEFINES K=6144 N=2560)
+  endif()
+  # the bf16 slabs: Intel's dense rows (qkv||z, q||gate||k||v, out / o), the indexer, the HC down||inject (336 rows,
+  # a 512-column slab), the PLE key||value
+  foreach(row "2560 16384" "2560 13312" "6144 2560" "2560 640" "10240 336" "2560 12800")
+    separate_arguments(f UNIX_COMMAND "${row}")
+    list(GET f 0 K)
+    list(GET f 1 N)
+    add_ocloc_kernel(q4_pf_bf16_slab_K${K}_N${N} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_linear.cl
+                     DEFINES K=${K} N=${N})
+  endforeach()
+  # 21c's sources at M = 2048 (kernels::qwen4exp::kPfC)
+  add_ocloc_kernel(q4_hc_combine_norm_M2048_E SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=2048 HC_SRC=0 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_combine_norm_M2048_S1 SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 HC_SRC=1 SRC_S=1 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_combine_norm_M2048_Y SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=2048 HC_SRC=2 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_combine_norm_M2048_Y_NN SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 HC_SRC=2 HC_NORM=0)
+  add_ocloc_kernel(q4_hc_combine_norm_M2048_X SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=2048 HC_SRC=3 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_up_mix_M2048_I_D512 SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 UP_DOWN=512 UP_INJECT=1)
+  add_ocloc_kernel(q4_qsa_M2048_T512_W1024_PF SOURCE ${Q4_CL}/q4_qsa.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES} QSA_PF=1)
+  add_ocloc_kernel(q4_ple_gather_M2048_BF16_PF SOURCE ${Q4_CL}/q4_ple.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=1 PLE_PF=1)
+  add_ocloc_kernel(q4_ple_gather_M2048_F32_PF SOURCE ${Q4_CL}/q4_ple.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=0 PLE_PF=1)
+  # the attention: q16 prep, the gate, the dense flash (rows <= 2050) at 24 / 2 heads; the sparse flash and its eager
+  # twin (B70_Q4_ATTN=eager: one switch for decode and prefill)
+  set(Q4_PF_FA FA_Q_HEADS=24 FA_KV_HEADS=2)
+  add_ocloc_kernel(pf_attn_prep_q16_Q24KV2 SOURCE ${Q4_PF_REUSE}/pf_attn_prep.cl
+                   DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 ${Q4_PF_FA})
+  add_ocloc_kernel(pf_attn_Q24KV2 SOURCE ${Q4_PF_REUSE}/pf_attn.cl DEFINES ${Q4_PF_FA})
+  add_ocloc_kernel(pf_flash_attn_Q24KV2 SOURCE ${Q4_PF_REUSE}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 ${Q4_PF_FA} OPTIONS -cl-intel-256-GRF-per-thread)
+  foreach(EG 0 1)
+    set(_n q4_pf_sparse_attn_Q24KV2)
+    if(EG)
+      string(APPEND _n _EAGER)
+    endif()
+    add_ocloc_kernel(${_n} SOURCE ${Q4_CL}/q4_pf_attn.cl DEFINES KT=32 EAGER=${EG} ${Q4_LIST_DEFINES}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+  endforeach()
+  # the MoE: the sort / gather / dequant / combine (TM and KC: kernels::qwen4exp::kPfTm / kPfC), the grouped GEMMs
+  add_ocloc_kernel(q4_pf_moe_E512_T10_D2560_I640_L256 SOURCE ${Q4_CL}/q4_pf_moe.cl
+                   DEFINES PF_E=512 PF_K=10 PF_WG=256 PF_EPL=2 PF_D=2560 PF_INTER=640 TM=32 KC=2048)
+  add_ocloc_kernel(pf_moe_gemm_K2560_N1280_SILU SOURCE ${Q4_PF_REUSE}/pf_moe_gemm.cl
+                   DEFINES K=2560 N=1280 TM=32 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_moe_gemm_K640_N2560 SOURCE ${Q4_PF_REUSE}/pf_moe_gemm.cl
+                   DEFINES K=640 N=2560 TM=32 OPTIONS -cl-intel-256-GRF-per-thread)
+  # the PLE block over a chunk
+  add_ocloc_kernel(q4_pf_ple_C2048 SOURCE ${Q4_CL}/q4_pf_ple.cl DEFINES ${CTRL_DEFINES} PF_C=2048)
+endif()
+# ==== Spec 21d: Qwen3.8-Flash-Next prefill ==== (end) ====
+
 
 # ==== Spec 15e: Ornith's MTP lists (model::ornith(), B70_ORNITH and B70_MTP) ===== (begin) ==
 # Additive only: no source changes and no existing variant's name or command line moves
