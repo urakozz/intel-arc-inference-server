@@ -2259,6 +2259,132 @@ st_r31_ple_kl() {
 }
 
 # ======================================================================================
+row 32 "spec 21c - Qwen3.8-Flash-Next (qwen4_exp) decode: hyper-connections, QSA, the PLE gather from host USM, the 512-expert MoE, one card then two (plan 21c)"
+rownote 32 "Written on the Mac: every 21c binary's first ocloc compile is here (r32.k1's kbins), and nothing of Qwen4ExpEngine has touched a card. One EXISTING source changed: prep.cl gains -DGDN_GATE_SIGMOID (prep_gated_head_M1_SIG); every other prep.cl variant's command line and preprocessed source are token for token main's (checked on the Mac for all 98) - G0's g0.sha must show prep_gated_head_M1 and every prep_* binary unchanged; if one moved, the variant moves to a copy in src/kernels/qwen4exp/ and prep.cl is restored (plan 21c F0)."
+rownote 32 "Data: r32.oracle_synth needs the synthetic checkpoints (r31.synth) and writes their golden sets (~0.5-1 h each on the box CPU, ESTIMATED); r32.golden / r32.k3 need them; r32.partial needs 21a's real sets on Intel's checkpoint (row 30: qwen4exp_oracle.sh intel and intel-layers 18) and the PLE int8 file (r31.ple_convert); r32.pp and the two-card CLI need two GPUs (after r22.p1)."
+rownote 32 "Tolerances PROPOSED until row 30 prints the gap distributions: B70_Q4_TIE_TOL 1e-3 (the router's 10th / 11th p) and B70_Q4_SEL_TOL 1e-3 (the 512th / 513th block score); a gap of exactly 0 is undetermined whatever the tolerance (torch's topk does not prefer the lower index: spec 21 §12 finding 2). The partial forward's bars (tap median cosine >= 0.9998, min >= 0.99) are PROPOSED too."
+rownote 32 "r32.ple_rate's numbers (us per token, the implied bus rate, one card / the other / both) are spec 22 P0's first host-USM measurement: hand them back with the row (spec 22 §1 records where)."
+stage r32.k0 32 default cpu - g0.sha,g0.bitwise,g0.suite "K0 (F0): every pre-existing binary identical - prep.cl's GDN_GATE_SIGMOID leaves prep_gated_head_M1 (and every prep_* binary) byte-identical; kernel_cmdlines +33 / -0 / ~0 with K2 and Kolibri on; the 21b loader untouched"
+st_r32_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  x "grep -E 'prep_gated_head_M1(\.bin)?$|prep_res' $STATE/g0-sha/changed.txt 2>/dev/null && echo 'a prep.cl binary MOVED' || echo 'no prep.cl binary moved'"
+  finish
+}
+stage r32.host 32 default cpu - - "host: qwen4exp_ref_test (the kernels' twin against qwen4exp_ref.py / transformers 5.19.0's fixture: HC, PLE ids and block, indexer, scores, selection, route, combine, the sigmoid gated norm; Review Focus 1-3), qwen4exp_variant_names_test (the bound names = the CMake block), qwen4exp_plan_test (779 / 767 / 755 launches, 75 at --layers 4, +1 two cards, +3 peer; the scratch; --layers 18 / 38 fit at 32k)"
+st_r32_host() {
+  run_tests '^(qwen4exp_ref_test|qwen4exp_variant_names_test|qwen4exp_plan_test)$'
+  jgrab host '^qwen4exp_(ref|variant_names|plan)_test$' 'HC:|PLE:|indexer:|select:|route:|21c:|OK'
+  finish
+}
+stage r32.k1 32 default gpu - - "F2, no checkpoint: the 33 new binaries built (kbins - their first ocloc compile) and qwen4exp_kernels_test - every q4_* kernel bitwise against qwen4exp_ref.h (HC, the PLE gather from real host-USM ranges through the pointer table and q4_ple_check, the block, the indexer prep / scores, the selection at Review Focus 2's rows incl. exact ties and n 65536, the route, the MoE with each slot alone and both shared forms, eager attention, prep_gated_head_M1_SIG); flash within cosine 0.99999 of fp64 at 1 / 2050 / 2051 / 9000 / 131072 and of attn_v2 below 2052"
+st_r32_k1() {
+  kbins embed_gather_M1_D2560 prep_gated_head_M1_SIG attn_prep_M1_Q24KV2 attn_prep_M1_Q24KV2_S1 attn_v2_M1_T32_Q24KV2 \
+    gemv_M1_K2560_N16384_S1_L0 gemv_M1_K2560_N13312_S2_L0 gemv_bf16_M1_K2560_N16384 gemv_bf16_M1_K2560_N13312 \
+    gemv_bf16_M1_K10240_N336_C16_S16 gemv_bf16_M1_K10240_N320_C16_S16 gemv_bf16_M1_K2560_N640_C16_S16 \
+    gemv_bf16_M1_K2560_N528_C16_S16 gemv_bf16_M1_K2560_N12800 gemv_bf16_M1_K2560_N248320 gemv_i8w_M1_K2560_N248320 \
+    q4_hc_combine_norm_M1_E q4_hc_combine_norm_M1_S1 q4_hc_combine_norm_M1_S4 q4_hc_combine_norm_M1_Y \
+    q4_hc_combine_norm_M1_Y_NN q4_hc_combine_norm_M1_X q4_hc_up_mix_M1_I q4_hc_up_mix_M1 q4_ple_gather_M1_BF16 \
+    q4_ple_gather_M1_F32 q4_ple_block_M1 q4_qsa_M1_T512_W1024 q4_qsa_attn_M1_T32 q4_qsa_attn_eager_M1 \
+    q4_route_M1_E512_T10_N528_L256 q4_moe_M1_E512_T10_D2560_I640_SH4 q4_moe_M1_E512_T10_D2560_I640_SHB
+  run_tests '^qwen4exp_kernels_test$' qwen4exp
+  jgrab k1 '^qwen4exp_kernels_test$' 'exact|bitwise|ulp|cosine|differ|PASS|FAIL|OK'
+  finish
+}
+stage r32.reject 32 default gpu - - "the refusals before the device (tests/model/qwen4exp: a model_type stub): cli_reject_qwen4exp_full (no --layers: spec 22, the bytes), _prefill (spec 21d), _mtp (spec 21e), _kv8 (decision 8), _serve (b70-serve: spec 21e); and cli_reject_kolibri_layers_qwen still names Kolibri-1"
+st_r32_reject() {
+  run_tests '^(cli_reject_qwen4exp_|cli_reject_kolibri_layers_qwen$)'
+  finish
+}
+stage r32.oracle_synth 32 optin cpu oracle_q4exp_synth,oracle_image - "the synthetic golden sets on the box CPU: qwen4exp_oracle.sh synth - qwen4exp_ref.py run on both synthetic checkpoints (ours, Intel's form) for q4exp_short / 4k / agentic x 32 with their own int8 PLE files -> \$DATA/oracle-out-q4exp-synth/{ours,intel}/ (resumable; MemAvailable >= 32 GB); the gap lines (decision 3's tau, the routing tolerance); then re-links oracle-out*"
+st_r32_oracle_synth() {
+  chk "tools/box_validate/qwen4exp_oracle.sh $DATA synth" "the qwen4_exp synthetic reference runs"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_oracle_q4exp' $STATE/have.env"
+  grab_all gap 'gap' 24
+  finish
+}
+stage r32.k3 32 default gpu oracle_q4exp_synth r31.load "F4 on decode, the synthetic checkpoints: qwen4exp_decode_synth_{ours,intel}_test over 2200 ids of q4exp_4k - plan == allocation per component, 1 + 3 x 15 + 19 + 4 + 6 = 75 launches, the PLE table read back by the device (q4_ple_check), two runs bitwise (logits, routes, selections and diagnostics, KV, compressed keys, tail rings, GDN state, conv and PLE rings, PLE ids), the injected capture (73 launches) fed the free run's lists = the free run"
+st_r32_k3() {
+  run_tests '^qwen4exp_decode_synth_(ours|intel)_test$'
+  jgrab k3 '^qwen4exp_decode_synth' 'device [01]:|launches|F4:|injected|OK'
+  finish
+}
+stage r32.golden 32 default gpu oracle_q4exp_synth_golden r32.k3 "F3 on the synthetic checkpoints: qwen4exp_golden_synth_{ours,intel}_test, _i8head, _eager (B70_Q4_ATTN=eager, 73 launches), _inject (the reference's selections fed in: every determined row) - the tie-aware token gate over q4exp_short / 4k / agentic x 32, the routing diagnostic, gate S (rows >= 2051), the PLE ids bitwise, the H tap"
+st_r32_golden() {
+  run_tests '^qwen4exp_golden_synth_(ours|intel)(_i8head|_eager|_inject)?_test$' qwen4exp '' \
+    "${B70_Q4_TIE_TOL:+B70_Q4_TIE_TOL=$B70_Q4_TIE_TOL} ${B70_Q4_SEL_TOL:+B70_Q4_SEL_TOL=$B70_Q4_SEL_TOL}"
+  jgrab golden '^qwen4exp_golden_synth' 'gate:|routing:|gate S:|tap|OK'
+  finish
+}
+stage r32.partial 32 default gpu q4exp_intel,q4exp_intel_ple,oracle_q4exp,oracle_q4exp_layers r32.k3 "development mode on Intel's checkpoint, one card: qwen4exp_partial_test at --layers 18 (int8 head) - the H tap of layers 0..17 against the full reference's H.L* (median cosine >= 0.9998, min >= 0.99, PROPOSED, per layer), the routing diagnostic and gate S for layers < 18, the token gate against the truncated reference oracle-out-q4exp-L18"
+st_r32_partial() {
+  x "free -g | head -2"
+  run_tests '^qwen4exp_partial_test$'
+  jgrab partial '^qwen4exp_partial_test$' 'tokens|tap cosine|routing:|OK'
+  finish
+}
+stage r32.pp 32 default gpu oracle_q4exp_synth r32.k3,r22.p1 "two cards (Review Focus 6): qwen4exp_pp_test - --pp 1 against --pp 2 --pipeline-split 2 and 1 (the cut at the PLE layer) on the ours synthetic under copy and peer: tokens, logits, routes, selections, every layer's persistent bytes and the PLE ids bitwise, both Control blocks equal; P4 (a lost hand-off throws within 10 s, reset recovers); Intel's --layers 38 split 19 vs 20 when present"
+st_r32_pp() {
+  run_tests '^qwen4exp_pp_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab pp '^qwen4exp_pp_test$' '\(a\)|\(b\)|\(c\)|\(d\)|SKIP|OK'
+  finish
+}
+stage r32.cli 32 default gpu oracle_q4exp_synth r32.pp "CLI: b70-decode <ours synthetic> --layers 4 --ids q4exp_short.ids --n 32 on one card against --pp 2 (copy, peer): the same ids; --layers auto and --max-len auto plan; the memory lines"
+st_r32_cli() {
+  local ck="oracle-out-q4exp-synth/ours/ckpt" ids="tests/golden/prompts/q4exp_short.ids" h
+  chk "build/src/cli/b70-decode $ck --layers 4 --ids $ids --n 32 > $STATE/r32-one.ids" "one card"
+  for h in copy peer; do
+    chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --layers 4 --pp 2 --ids $ids --n 32 --pipeline-handoff $h > $STATE/r32-$h.ids && cmp $STATE/r32-one.ids $STATE/r32-$h.ids" \
+      "--pp 2, $h: the one-card ids"
+  done
+  chk "build/src/cli/b70-decode $ck --layers auto --max-len auto --ids $ids --n 8 > /dev/null" "--layers auto --max-len auto"
+  grab_all plan 'layers: |max_len: |plan at|^engine:' 8
+  grab_all memory '^memory' 6
+  finish
+}
+stage r32.ple_rate 32 optin gpu - r32.k1 "Task 5 (spec 22 P0's first host-USM number): qwen4exp_kernels_test --ple-rate 16, then 51.8 (the real table's size; stop other RAM users: free -g >= 70 GB) - q4_ple_gather alone in a replayed list, 10^4 replays with random ids, device 0, device 1, both: the median us per token, the implied bus rate, every row read back equal; the 'wide' mode's 256 rows a replay"
+st_r32_ple_rate() {
+  x "free -g | head -2"
+  chk "flock \$HOME/b70-gpu.lock build/tests/qwen4exp_kernels_test --ple-rate 16" "the PLE gather's rate at 16 GB"
+  chk "flock \$HOME/b70-gpu.lock build/tests/qwen4exp_kernels_test --ple-rate 51.8" "the PLE gather's rate at the real table's 51.8 GB"
+  grab_all rate 'us per token|GB/s|read back|wide|device' 24
+  finish
+}
+stage r32.bench_attn 32 optin gpu - r32.k1 "decision 10's evidence: qwen4exp_kernels_test --bench-attn - the sparse kernel over the identity list against attn_v2 at 24 / 2 heads at depths 512 / 1024 / 2048, interleaved, median of 3 (one sparse kernel at every depth, or v2 below 2052)"
+st_r32_bench_attn() {
+  idle before
+  chk "flock \$HOME/b70-gpu.lock build/tests/qwen4exp_kernels_test --bench-attn" "the sparse kernel against attn_v2"
+  idle after
+  grab_all bench 'depth|us|median' 12
+  finish
+}
+stage r32.speed 32 optin gpu q4exp_intel,q4exp_intel_ple r32.partial "Task 7: decode on what fits - Intel's checkpoint --layers 18 on one card and 38 on two (copy, peer), --bench --depth 1024 / 4096 / 32768 --tg 256, int8 and bf16 heads, flash and eager - interleaved, median of 3; launches per token, each card's step time, against the derived roofline per layer (spec 21 §3); then the {S, layout} and UP_KS / DN_KS sweeps (r32.sweeps)"
+st_r32_speed() {
+  idle before
+  local d arms="" ratios="" k="ZE_AFFINITY_MASK=0,1" s="${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound}"
+  for d in 1024 4096 32768; do
+    arms="$arms d$d-L18 '$(bench_cmd "$s" --layers 18 --depth $d --tg 256 --max-len 40960 --lm-head int8)'"
+    arms="$arms d$d-L18-bf16head '$(bench_cmd "$s" --layers 18 --depth $d --tg 256 --max-len 40960)'"
+    arms="$arms d$d-L18-eager 'B70_Q4_ATTN=eager $(bench_cmd "$s" --layers 18 --depth $d --tg 256 --max-len 40960 --lm-head int8)'"
+    arms="$arms d$d-L38 '$k $(bench_cmd "$s" --layers 38 --pp 2 --depth $d --tg 256 --max-len 40960 --lm-head int8)'"
+    arms="$arms d$d-L38-peer '$k $(bench_cmd "$s" --layers 38 --pp 2 --depth $d --tg 256 --max-len 40960 --lm-head int8 --pipeline-handoff peer)'"
+    ratios="$ratios --ratio d$d-L18-bf16head/d$d-L18 --ratio d$d-L18-eager/d$d-L18 --ratio d$d-L38-peer/d$d-L38"
+  done
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "the Qwen3.8-Flash-Next decode arms"
+  idle after
+  grab_all memory '^memory' 8
+  grab_all ratio '^RATIO '
+  grab_all idle '^IDLE '
+  finish
+}
+stage r32.sweeps 32 manual - q4exp_intel - "Task 7's sweeps: the int4 rows' {S, layout} (q||gate||k||v 2560x13312, out_proj / o_proj 6144x2560: S 1 / 2 / 4, L 0 / 1; qkv||z stays S 1 for gdn_step) on our synthetic, and q4_moe's UP_KS / DN_KS"
+st_r32_sweeps() {
+  say "# {S, layout} of 2560x13312 and 6144x2560 (probe_gemv rows, spec 14 step 4's method); model::qwen4exp()'s qkvg_s / gdn_out_s / o_s and kernels::qwen4exp's names move together"
+  say "# UP_KS / DN_KS: rebuild q4_moe.cl's variants per value, qwen4exp_kernels_test, then build/src/cli/b70-decode <synthetic> --layers 4 --bench --depth 4096 --tg 256 --lm-head int8 per value"
+  say "# record: docs/BENCHMARKS.md 'Qwen3.8-Flash-Next (spec 21)'"
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp labels belong to their rows)"
 st_x_rest() {
