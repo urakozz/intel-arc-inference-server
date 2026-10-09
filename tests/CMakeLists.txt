@@ -2994,6 +2994,14 @@ set(B70_Q4EXP_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-synth" CACHE PATH
   "Spec 21b's synthetic checkpoints: <dir>/{ours,intel}/ckpt and ckpt-ple-int8 (box: r31.synth)")
 set(B70_Q4EXP_INTEL_SNAPSHOT "Intel/Qwen3.8-Flash-Next-W4A16-AutoRound" CACHE STRING
   "Intel's Qwen3.8-Flash-Next W4A16 AutoRound checkpoint (181 GB; its PLE file: r31.ple_convert)")
+# The host half over the synthetic files themselves (make_synth.py's writer against the C++ reader; no device,
+# ~7 min on the Mac: the MTP head's RTN dominates) - label checkpoint, so mac_check leaves it to the box's r31.load
+# (run it by hand on a Mac that has the files: build/mac-host/tests/qwen4exp_synth_host_test <dir>).
+add_executable(qwen4exp_synth_host_test loader/qwen4exp_synth_host_test.cc)
+target_include_directories(qwen4exp_synth_host_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(qwen4exp_synth_host_test PRIVATE b70_qwen4exp_loader)
+add_test(NAME qwen4exp_synth_host_test COMMAND qwen4exp_synth_host_test ${B70_Q4EXP_SYNTH_DIR})
+set_tests_properties(qwen4exp_synth_host_test PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 1800)
 add_executable(qwen4exp_load_checkpoint_test loader/qwen4exp_load_checkpoint_test.cc)
 target_include_directories(qwen4exp_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(qwen4exp_load_checkpoint_test PRIVATE b70_qwen4exp_loader b70_l0)
