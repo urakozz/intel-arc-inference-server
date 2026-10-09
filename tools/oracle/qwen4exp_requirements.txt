@@ -1,0 +1,12 @@
+# Spec 21a: the qwen4_exp reference's transformers, installed BESIDE the oracle image (never into it):
+#   tools/oracle/qwen4exp_env.sh <dir>   ->  pip install --no-deps --target <dir> -r this file
+# Pins read from transformers-5.19.0.dist-info/METADATA (Requires-Dist), not guessed:
+#   huggingface-hub<3.0,>=1.31.0  tokenizers<0.24.0,>=0.23.1  safetensors>=0.8.0
+#   (numpy, packaging, pyyaml, regex>=2025.10.22, tqdm, typer: the image's own satisfy them - agnes-ref-img
+#   has regex 2026.9.29, typer 0.27.2 - and --no-deps leaves them, and torch, untouched).
+# tokenizers is the one agnes-ref-img does not satisfy (it has 0.22.2); hub and safetensors are pinned at
+# agnes-ref-img's own versions so the site is self-consistent on any image.
+transformers==5.19.0
+tokenizers==0.23.2
+huggingface_hub==1.33.0
+safetensors==0.8.0
