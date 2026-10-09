@@ -3024,4 +3024,38 @@ target_include_directories(qwen4exp_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${C
 target_link_libraries(qwen4exp_ref_test PRIVATE b70_qwen4exp_loader)
 add_test(NAME qwen4exp_ref_test COMMAND qwen4exp_ref_test)
 set_tests_properties(qwen4exp_ref_test PROPERTIES LABELS qwen4exp TIMEOUT 600)
+if(B70_Q4EXP)
+  # Task 2: every binary a Qwen3.8-Flash-Next decode list binds, any dense arm / head / attention / PLE scale form
+  # (src/kernels/CMakeLists.txt's spec 21c block; the reused binaries other blocks build - Qwen3.8's gdn_step_M1 and
+  # argmax, K2's a||b and 6144 x 2560 int4, Kolibri's 6144 x 2560 bf16 - are bound by name and listed too).
+  set(B70_Q4EXP_DECODE_KERNELS
+    kernel_embed_gather_M1_D2560 kernel_q4_hc_combine_norm_M1_E kernel_q4_hc_combine_norm_M1_S1
+    kernel_q4_hc_combine_norm_M1_S4 kernel_q4_hc_combine_norm_M1_Y kernel_q4_hc_combine_norm_M1_Y_NN
+    kernel_q4_hc_combine_norm_M1_X kernel_q4_hc_up_mix_M1_I kernel_q4_hc_up_mix_M1
+    kernel_gemv_bf16_M1_K10240_N336_C16_S16 kernel_gemv_bf16_M1_K10240_N320_C16_S16
+    kernel_gemv_M1_K2560_N16384_S1_L0 kernel_gemv_bf16_M1_K2560_N16384 kernel_gemv_bf16_M1_K2560_N128_C16_S16
+    kernel_gdn_step_M1 kernel_prep_gated_head_M1_SIG kernel_gemv_M1_K6144_N2560_S4_L0 kernel_gemv_bf16_M1_K6144_N2560
+    kernel_gemv_M1_K2560_N13312_S2_L0 kernel_gemv_bf16_M1_K2560_N13312 kernel_gemv_bf16_M1_K2560_N640_C16_S16
+    kernel_attn_prep_M1_Q24KV2 kernel_attn_prep_M1_Q24KV2_S1 kernel_q4_qsa_M1_T512_W1024 kernel_q4_qsa_attn_M1_T32
+    kernel_q4_qsa_attn_eager_M1 kernel_gemv_bf16_M1_K2560_N528_C16_S16 kernel_q4_route_M1_E512_T10_N528_L256
+    kernel_q4_moe_M1_E512_T10_D2560_I640_SH4 kernel_q4_moe_M1_E512_T10_D2560_I640_SHB kernel_q4_ple_gather_M1_BF16
+    kernel_q4_ple_gather_M1_F32 kernel_q4_ple_block_M1 kernel_gemv_bf16_M1_K2560_N12800
+    kernel_gemv_bf16_M1_K2560_N248320 kernel_gemv_i8w_M1_K2560_N248320 kernel_argmax_stage1_M1 kernel_argmax_stage2)
+  # Host: the names the capture binds (kernels::qwen4exp::decode_variants) are exactly this list.
+  add_executable(qwen4exp_variant_names_test kernels/qwen4exp_variant_names_test.cc)
+  target_include_directories(qwen4exp_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(qwen4exp_variant_names_test PRIVATE b70_qwen4exp_model)
+  b70_target_kernel_dir(qwen4exp_variant_names_test)
+  add_test(NAME qwen4exp_variant_names_test COMMAND qwen4exp_variant_names_test ${B70_Q4EXP_DECODE_KERNELS})
+  set_tests_properties(qwen4exp_variant_names_test PROPERTIES LABELS qwen4exp)
+  # F2 on the card: every binary of the block at the real shapes against qwen4exp_ref.h (no checkpoint);
+  # --bench-attn (decision 10's evidence: attn_v2 at 24 / 2 against the sparse kernel) and --ple-rate (Task 5) opt-in.
+  add_executable(qwen4exp_kernels_test kernels/qwen4exp_kernels_test.cc)
+  target_include_directories(qwen4exp_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(qwen4exp_kernels_test PRIVATE b70_l0 b70_qwen4exp_loader)
+  b70_target_kernel_dir(qwen4exp_kernels_test)
+  add_dependencies(qwen4exp_kernels_test ${B70_Q4EXP_DECODE_KERNELS} kernel_attn_v2_M1_T${ATTN_V2_TGT}_Q24KV2)
+  add_test(NAME qwen4exp_kernels_test COMMAND qwen4exp_kernels_test)
+  set_tests_properties(qwen4exp_kernels_test PROPERTIES LABELS qwen4exp SKIP_RETURN_CODE 77 TIMEOUT 1800)
+endif()
 # ==== Spec 21c: Qwen3.8-Flash-Next decode ==== (end) ====
