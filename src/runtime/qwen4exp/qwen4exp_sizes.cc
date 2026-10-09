@@ -423,4 +423,166 @@ std::string describe(const std::vector<DevicePlan>& p, const model::Q4Placement&
   return out;
 }
 
+// --- spec 21e: prefix-cache snapshots ---------------------------------------------------------------------------
+const char* snap_tensor_name(SnapTensor t) {
+  switch (t) {
+    case SnapTensor::Kv: return "kv";
+    case SnapTensor::IdxKeys: return "idx_keys";
+    case SnapTensor::IdxTail: return "idx_tail";
+    case SnapTensor::GdnState: return "gdn_state";
+    case SnapTensor::ConvRing: return "conv_ring";
+    case SnapTensor::PleIds: return "ple_ids";
+    case SnapTensor::PleRing: return "ple_ring";
+    case SnapTensor::MtpKv: return "mtp_kv";
+    case SnapTensor::MtpIdxKeys: return "mtp_idx_keys";
+    case SnapTensor::MtpIdxTail: return "mtp_idx_tail";
+    case SnapTensor::MtpHidden: return "mtp_hidden";
+  }
+  return "?";
+}
+
+namespace {
+size_t kv_row_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.kv_n()) * 2; }          // 1024: a K (or V) row
+size_t key_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.idx_dim) * 2; }            // 256: a raw / block key
+size_t conv_row_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.conv_rows()) * 2; }   // 20,480
+size_t ple_row_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.hc_n()) * 2; }         // 20,480
+// Layer l's index among its device's layers of its kind (QSA or GDN): its slice of the device's group.
+uint32_t on_device_index(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t l) {
+  const uint32_t first = p.first(p.device_of(l));
+  return d.is_qsa(l) ? d.qsa_before(l) - d.qsa_before(first) : d.gdn_before(l) - d.gdn_before(first);
+}
+uint32_t slot_of(int64_t q, uint32_t slots) { return uint32_t(((q % int64_t(slots)) + int64_t(slots)) % int64_t(slots)); }
+// Ring rows of positions [q0, q1) of a `slots`-slot ring of `row`-byte rows at `base` (slot q % slots), split where
+// the slots wrap; a position below 0 is a zero run of its own slot (so a load writes the host's bytes back there).
+void ring_rows(std::vector<SnapRun>& runs, uint32_t dev, SnapTensor t, size_t base, size_t row, uint32_t slots,
+               int64_t q0, int64_t q1) {
+  for (int64_t q = q0; q < q1;) {
+    const uint32_t slot = slot_of(q, slots);
+    if (q < 0) {
+      runs.push_back({dev, t, base + size_t(slot) * row, row, true, false});
+      ++q;
+      continue;
+    }
+    const uint32_t n = uint32_t(std::min<int64_t>(q1 - q, int64_t(slots - slot)));
+    runs.push_back({dev, t, base + size_t(slot) * row, size_t(n) * row, false, false});
+    q += n;
+  }
+}
+// The open block's raw keys of positions [4 floor(o / 4), o) (slot q % kIdxTail), then pad rows to kSnapTailRows.
+void tail_rows(std::vector<SnapRun>& runs, const model::Qwen4ExpDesc& d, uint32_t dev, SnapTensor t, size_t base,
+               int64_t o) {
+  const size_t row = key_bytes(d);
+  const int64_t b = o <= 0 ? 0 : o / d.idx_compress * d.idx_compress;
+  const uint32_t n = o <= 0 ? 0 : uint32_t(o - b);
+  ring_rows(runs, dev, t, base, row, kIdxTail, b, b + n);
+  if (n < kSnapTailRows) runs.push_back({dev, t, 0, size_t(kSnapTailRows - n) * row, false, true});
+}
+}  // namespace
+
+size_t state_snapshot_bytes(const model::Qwen4ExpDesc& d, bool mtp) {
+  const size_t gdn = d.gdn_before(d.layers), qsa = d.qsa_before(d.layers);
+  size_t b = gdn * (gdn_state_bytes_per_layer(d) + size_t(d.conv_taps - 1) * conv_row_bytes(d));
+  if (d.ple_layer < d.layers) b += 2 * 4 + size_t(d.ple_ring()) * ple_row_bytes(d);
+  b += qsa * kSnapTailRows * key_bytes(d);
+  if (mtp) b += kSnapTailRows * key_bytes(d) + size_t(d.hc_n()) * 2;
+  return b;
+}
+
+size_t kv_snapshot_bytes(const model::Qwen4ExpDesc& d, uint32_t begin, uint32_t end, bool mtp) {
+  if (begin > end || begin % d.idx_compress != 0)
+    throw std::invalid_argument("runtime::qwen4exp::kv_snapshot_bytes: range [" + std::to_string(begin) + ", " +
+                                std::to_string(end) + ") does not start at a whole indexer block");
+  const size_t layers = size_t(d.qsa_before(d.layers)) + (mtp ? 1 : 0);
+  const size_t n = end - begin, blocks = end / d.idx_compress - begin / d.idx_compress;
+  return layers * (n * 2 * kv_row_bytes(d) + blocks * key_bytes(d));
+}
+
+std::vector<SnapRun> state_runs(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t pos, bool mtp) {
+  model::validate(p, d);
+  std::vector<SnapRun> runs;
+  const int64_t P = pos;
+  // GDN states, layer order (a layer's whole state: one run).
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    if (d.is_qsa(l)) continue;
+    runs.push_back({p.device_of(l), SnapTensor::GdnState, size_t(on_device_index(d, p, l)) * gdn_state_bytes_per_layer(d),
+                    gdn_state_bytes_per_layer(d), false, false});
+  }
+  // Their conv rows p - 3 .. p - 1 (kConvRing slots: gdn_step's window).
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    if (d.is_qsa(l)) continue;
+    ring_rows(runs, p.device_of(l), SnapTensor::ConvRing, size_t(on_device_index(d, p, l)) * conv_ring_bytes_per_layer(d),
+              conv_row_bytes(d), kConvRing, P - int64_t(d.conv_taps - 1), P);
+  }
+  // The PLE layer: ids p - 1, p - 2 (that order), then its conv rows p - 9 .. p - 1.
+  if (d.ple_layer < d.layers) {
+    const uint32_t dev = p.device_of(d.ple_layer);
+    for (int64_t q : {P - 1, P - 2}) runs.push_back({dev, SnapTensor::PleIds, size_t(slot_of(q, kPleRing)) * 4, 4, q < 0, false});
+    ring_rows(runs, dev, SnapTensor::PleRing, kPleConvOff, ple_row_bytes(d), kPleRing, P - int64_t(d.ple_ring()), P);
+  }
+  // QSA layers: the open block's raw keys.
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    if (!d.is_qsa(l)) continue;
+    tail_rows(runs, d, p.device_of(l), SnapTensor::IdxTail, size_t(on_device_index(d, p, l)) * kIdxTail * key_bytes(d), P);
+  }
+  if (mtp) {   // the head, one position behind; then R_{p-1}
+    const uint32_t dev = p.devices - 1;
+    tail_rows(runs, d, dev, SnapTensor::MtpIdxTail, 0, P - 1);
+    runs.push_back({dev, SnapTensor::MtpHidden, 0, size_t(d.hc_n()) * 2, false, false});
+  }
+  return runs;
+}
+
+std::vector<SnapRun> kv_runs(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
+                             uint32_t begin, uint32_t end, bool mtp) {
+  model::validate(p, d);
+  if (begin > end || end > max_len || begin % d.idx_compress != 0)
+    throw std::invalid_argument("runtime::qwen4exp::kv_runs: range [" + std::to_string(begin) + ", " +
+                                std::to_string(end) + ") is not within [0, max_len " + std::to_string(max_len) +
+                                "] from a whole indexer block");
+  std::vector<SnapRun> runs;
+  if (begin == end) return runs;
+  const size_t row = kv_row_bytes(d), rows = size_t(max_len) * row, n = end - begin;
+  const uint32_t b0 = begin / d.idx_compress, b1 = end / d.idx_compress;
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    if (!d.is_qsa(l)) continue;
+    const uint32_t dev = p.device_of(l);
+    const size_t base = size_t(on_device_index(d, p, l)) * 2 * rows;
+    runs.push_back({dev, SnapTensor::Kv, base + size_t(begin) * row, n * row, false, false});          // K
+    runs.push_back({dev, SnapTensor::Kv, base + rows + size_t(begin) * row, n * row, false, false});   // V
+  }
+  const size_t kb = key_bytes(d), keys = size_t(max_len / d.idx_compress) * kb;
+  if (b1 > b0)
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      if (!d.is_qsa(l)) continue;
+      runs.push_back({p.device_of(l), SnapTensor::IdxKeys, size_t(on_device_index(d, p, l)) * keys + size_t(b0) * kb,
+                      size_t(b1 - b0) * kb, false, false});
+    }
+  if (mtp) {   // the head's, last: K, V, then its keys
+    const uint32_t dev = p.devices - 1;
+    runs.push_back({dev, SnapTensor::MtpKv, size_t(begin) * row, n * row, false, false});
+    runs.push_back({dev, SnapTensor::MtpKv, rows + size_t(begin) * row, n * row, false, false});
+    if (b1 > b0) runs.push_back({dev, SnapTensor::MtpIdxKeys, size_t(b0) * kb, size_t(b1 - b0) * kb, false, false});
+  }
+  return runs;
+}
+
+size_t snap_tensor_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t max_len,
+                         SnapTensor t) {
+  const PersistentSizes s = persistent_sizes(d, p, dev, max_len);
+  switch (t) {
+    case SnapTensor::Kv: return s.kv;
+    case SnapTensor::IdxKeys: return s.idx_keys;
+    case SnapTensor::IdxTail: return s.idx_tail;
+    case SnapTensor::GdnState: return s.gdn_state;
+    case SnapTensor::ConvRing: return s.conv_ring;
+    case SnapTensor::PleIds:
+    case SnapTensor::PleRing: return s.ple;
+    case SnapTensor::MtpKv: return size_t(max_len) * 2 * kv_row_bytes(d);
+    case SnapTensor::MtpIdxKeys: return size_t(max_len / d.idx_compress) * key_bytes(d);
+    case SnapTensor::MtpIdxTail: return size_t(kIdxTail) * key_bytes(d);
+    case SnapTensor::MtpHidden: return size_t(d.hc_n()) * 2;
+  }
+  return 0;
+}
+
 }  // namespace runtime::qwen4exp
