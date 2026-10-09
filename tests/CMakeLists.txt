@@ -2981,4 +2981,10 @@ target_include_directories(qwen4exp_ple_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${C
 target_link_libraries(qwen4exp_ple_test PRIVATE b70_qwen4exp_loader)
 add_test(NAME qwen4exp_ple_test COMMAND qwen4exp_ple_test)
 set_tests_properties(qwen4exp_ple_test PROPERTIES LABELS qwen4exp)
+# Task 5: the memory plan - N per card, the split by bytes, the full model refused until spec 22. Host only.
+add_executable(qwen4exp_plan_test runtime/qwen4exp_plan_test.cc)
+target_include_directories(qwen4exp_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(qwen4exp_plan_test PRIVATE b70_qwen4exp_plan)
+add_test(NAME qwen4exp_plan_test COMMAND qwen4exp_plan_test)
+set_tests_properties(qwen4exp_plan_test PROPERTIES LABELS qwen4exp)
 # ==== Spec 21b: Qwen3.8-Flash-Next descriptor and loader ==== (end) ====
