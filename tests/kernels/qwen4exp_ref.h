@@ -454,6 +454,37 @@ inline std::vector<uint32_t> route_row(const Route& r) {
   return w;
 }
 
+// One layout-1 block's column n over k-groups [g0, g1): q4_moe.cl's tile_dot (moe_ref::tile_dot's order, with the
+// group sum's scale product a statement of its own - no host compiler contracts it into an fma, the kernel's
+// FP_CONTRACT OFF does not either; every other product here is exact).
+inline float tile_dot(const uint32_t* blk, uint32_t K, uint32_t n, const uint16_t* x, uint32_t g0, uint32_t g1) {
+  const uint32_t G = K / 64;
+  float acc = 0.f;
+  for (uint32_t g = g0; g < g1; ++g) {
+    const uint32_t* tile = blk + (size_t(n / 16) * G + g) * 136;
+    const uint32_t sw = tile[128 + (n % 16) / 2];
+    const float scale = common::f16_to_f32(uint16_t(n % 2 == 0 ? sw & 0xFFFFu : sw >> 16));
+    float gacc = 0.f;
+    for (uint32_t j = 0; j < 8; ++j) {
+      const uint32_t word = tile[j * 16 + n % 16];
+      float a = 0.f;
+      for (uint32_t i = 0; i < 8; ++i) a += float(int((word >> (4 * i)) & 0xFu) - 8) * f32(x[g * 64 + j * 8 + i]);
+      gacc += a;
+    }
+    const float t = gacc * scale;
+    acc += t;
+  }
+  return acc;
+}
+inline float split_dot(const uint32_t* blk, uint32_t K, uint32_t n, const uint16_t* x, uint32_t ks) {
+  const uint32_t per = K / 64 / ks;
+  std::vector<float> r(ks);
+  for (uint32_t q = 0; q < ks; ++q) r[q] = tile_dot(blk, K, n, x, q * per, (q + 1) * per);
+  for (uint32_t stride = ks / 2; stride > 0; stride >>= 1)
+    for (uint32_t q = 0; q < stride; ++q) r[q] += r[q + stride];
+  return r[0];
+}
+
 // u32 words of one expert's layout-1 blocks (loader/qwen4exp_layout.h: 1,740,800 B and 870,400 B).
 inline size_t gate_up_block_words() { return size_t(2 * kInter / 16) * (kHidden / 64) * 136; }
 inline size_t down_block_words() { return size_t(kHidden / 16) * (kInter / 64) * 136; }
@@ -487,8 +518,8 @@ inline std::vector<uint16_t> gate_up(const uint32_t* ids, const uint16_t* x, con
       float g, u;
       if (slot < kTopK || sh_gu4) {
         const uint32_t* blk = slot < kTopK ? gu + ids[slot] * gate_up_block_words() : sh_gu4;
-        g = moe_ref::split_dot(blk, kHidden, gc, x, up_ks);
-        u = moe_ref::split_dot(blk, kHidden, uc, x, up_ks);
+        g = split_dot(blk, kHidden, gc, x, up_ks);
+        u = split_dot(blk, kHidden, uc, x, up_ks);
       } else {
         g = bf16_split_dot(sh_gub, kHidden, gc, x, up_ks);
         u = bf16_split_dot(sh_gub, kHidden, uc, x, up_ks);
@@ -520,9 +551,9 @@ inline std::vector<uint16_t> down(const uint32_t* ids, const float* w, float sg,
     for (uint32_t slot = 0; slot < kSlots; ++slot) {
       const uint16_t* hs = h.data() + size_t(slot) * kInter;
       if (slot < kTopK)
-        d[slot] = moe_ref::split_dot(dn + ids[slot] * down_block_words(), kInter, n, hs, dn_ks);
+        d[slot] = split_dot(dn + ids[slot] * down_block_words(), kInter, n, hs, dn_ks);
       else
-        d[slot] = sh_dn4 ? moe_ref::split_dot(sh_dn4, kInter, n, hs, dn_ks) : bf16_split_dot(sh_dnb, kInter, n, hs, dn_ks);
+        d[slot] = sh_dn4 ? split_dot(sh_dn4, kInter, n, hs, dn_ks) : bf16_split_dot(sh_dnb, kInter, n, hs, dn_ks);
     }
     out[n] = combine(d, w, sg);
   }

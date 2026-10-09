@@ -153,6 +153,37 @@ inline ushort rne_bf16(float f) {
 // before it stays bit-comparable.
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 
+// Spec 21c: Qwen3.8-Flash-Next's gated norm multiplies by sigmoid(z) (`output_gate_type: sigmoid`, M:491-493)
+// where Qwen3.5 / Ornith multiply by silu(z): -DGDN_GATE_SIGMOID=1 builds prep_gated_head_M<M>_SIG with the
+// sigmoid as 1 / (1 + exp_torch(-z)) (Sleef's expf u10 step for step, k2_attn_eager.cl's - the host twin is
+// tests/kernels/qwen4exp_ref.h gated_head_sig, bitwise) and FP_CONTRACT off from here on in that binary only.
+// Unset (every other binary), GATED_ACT(z) is `silu_f32(z)`: the preprocessed source of every existing binary is
+// token for token what it was (commit 9a67889's rule).
+#ifdef GDN_GATE_SIGMOID
+#pragma OPENCL FP_CONTRACT OFF
+inline float exp_torch(float d) {
+  const int q = convert_int_rte(d * 1.442695040888963407359924681001892137426645954152985934135449406931f);
+  const float qf = (float)q;
+  float s = fma(qf, -0.693145751953125f, d);
+  s = fma(qf, -1.428606765330187045e-06f, s);
+  float u = 0.000198527617612853646278381f;
+  u = fma(u, s, 0.00139304355252534151077271f);
+  u = fma(u, s, 0.00833336077630519866943359f);
+  u = fma(u, s, 0.0416664853692054748535156f);
+  u = fma(u, s, 0.166666671633720397949219f);
+  u = fma(u, s, 0.5f);
+  const float ss = s * s;
+  u = 1.0f + fma(ss, u, s);
+  if (d < -104.0f) return 0.0f;
+  if (100.0f < d) return INFINITY;
+  u = u * as_float((uint)((q >> 1) + 127) << 23);
+  return u * as_float((uint)((q - (q >> 1)) + 127) << 23);
+}
+#define GATED_ACT(z) (1.0f / (1.0f + exp_torch(-(z))))
+#else
+#define GATED_ACT(z) silu_f32(z)
+#endif
+
 // ---------------------------------------------------------------------------
 // prep_res_norm - residual add + RMSNorm, one work-group of 256 per token.
 //
@@ -425,5 +456,5 @@ __kernel void prep_gated_head(__global const float* restrict qkvz_partials,
   const ushort n_b = rne_bf16(o_f * rstd);
   const ushort t_b = rne_bf16(bf16f(gated_w[i]) * bf16f(n_b));
   x_out[(size_t)m * GATED_OUT_N + h * HEAD_DIM + i] =
-      rne_bf16(bf16f(t_b) * silu_f32(bf16f(z_b)));
+      rne_bf16(bf16f(t_b) * GATED_ACT(bf16f(z_b)));
 }
