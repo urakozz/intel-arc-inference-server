@@ -810,6 +810,35 @@ std::vector<uint32_t> Qwen4ExpEngine::read_verify_routes() {
   return v;
 }
 
+std::vector<uint32_t> Qwen4ExpEngine::read_verify_selection(uint32_t layer, uint32_t r) {
+  const model::Qwen4ExpDesc& d = model_.desc;
+  if (layer >= d.layers || !d.is_qsa(layer))
+    throw std::out_of_range("read_verify_selection: layer " + std::to_string(layer) + " is not a QSA layer");
+  Stage& s = st(model_.placement.device_of(layer));
+  if (r >= s.buffers.rows) throw std::out_of_range("read_verify_selection: row " + std::to_string(r));
+  std::vector<uint32_t> row(kListRow);
+  s.imm.copy(row.data(),
+             static_cast<const uint8_t*>(s.buffers.list.ptr()) + s.buffers.list_off(d.qsa_before(layer)) +
+                 size_t(r) * kListRow * 4,
+             size_t(kListRow) * 4);
+  const uint32_t c = std::min(row[kCountWord], kListMax);
+  std::vector<uint32_t> out(row.begin(), row.begin() + c);
+  out.push_back(row[kCountWord]);
+  return out;
+}
+
+std::vector<float> Qwen4ExpEngine::read_gdn_slot(uint32_t layer, uint32_t slot) {
+  const model::Qwen4ExpDesc& d = model_.desc;
+  if (layer >= d.layers || d.is_qsa(layer)) throw std::out_of_range("read_gdn_slot: layer " + std::to_string(layer));
+  if (slot != 0) require_mtp("read_gdn_slot");
+  Stage& s = st(model_.placement.device_of(layer));
+  std::vector<float> v(gdn_state_bytes_per_layer(d) / 4);
+  s.imm.copy(v.data(), s.buffers.gdn_slot(layer, slot), v.size() * 4);
+  return v;
+}
+
+uint32_t Qwen4ExpEngine::gdn_live() const { return st(0).ctl->gdn_live; }
+
 std::vector<uint32_t> Qwen4ExpEngine::read_draft_selection() {
   require_mtp("read_draft_selection");
   std::vector<uint32_t> row(kListRow);

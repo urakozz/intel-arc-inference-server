@@ -4,7 +4,11 @@
 // model at --layers 18 when present. The host side (the layouts, round trips across placements) is
 // qwen4exp_snapshot_test's.
 //
-//   qwen4exp_snapshot_gpu_test <checkpoint> <ids> [pp2[:split]] [cross] [layers:N] [int8]
+//   qwen4exp_snapshot_gpu_test <checkpoint> <ids> [pp2[:split]] [cross] [layers:N] [int8] [mtp]
+//
+// `mtp` (Task 3): the head loaded - the snapshots carry its open-block keys, R_{p-1}, its K / V and compressed keys
+// (Review Focus 5: the head's last), every continuation runs draft / verify / commit at K = 2, and the head's R, K / V
+// and keys of [0, pos - 1) are compared too.
 //
 // The prompt: <ids> cycled to kN = 5004 positions (3 chunks: the QSA selection is active past 2050); then 32 greedy
 // ids. The block hook is set in every run, so every run's chunks end at the same block ends.
@@ -23,6 +27,7 @@
 //   cross (two GPUs; spec 16b's rule): a snapshot taken under --pp 2 (pp2:<s>, default 2) restores under --pp 1 and
 //     continues bitwise as the two-card session does, and the reverse - one host layout.
 // Exit 77 (SKIP) when the checkpoint is absent or two GPUs are needed.
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -63,19 +68,55 @@ void restore(rq::Qwen4ExpEngine& e, const Saved& s, uint32_t at) {
 struct Out {
   Ids ids;
   qwen4exp_rig::State state;
+  // with the MTP head: R_{pos-1}, the head's K / V of [0, pos - 1) and its compressed keys
+  std::vector<uint16_t> R, hk, hv, hkeys;
 };
+
+// The continuation: kGen greedy ids - with the MTP head through draft / verify / commit at K = 2 (spec 8's greedy
+// acceptance), so the snapshots' head parts are exercised, not only carried.
+Ids continue_ids(rq::Qwen4ExpEngine& e) {
+  if (!e.mtp()) return e.generate(kGen);
+  Ids out;
+  while (out.size() < kGen) {
+    const uint32_t k = std::min<uint32_t>(2, e.max_verify_k());
+    if (k == 0) {
+      out.push_back(e.generate(1)[0]);
+      continue;
+    }
+    const uint32_t x = e.pending();
+    e.draft(k);
+    e.verify(k);
+    uint32_t j = 0;
+    while (j < k && e.draft_ids()[j] == e.verify_ids()[j]) ++j;
+    out.push_back(x);
+    for (uint32_t i = 0; i < j; ++i) out.push_back(e.draft_ids()[i]);
+    e.commit(j, e.verify_ids()[j]);
+  }
+  out.resize(kGen);
+  return out;
+}
 
 Out finish(rq::Qwen4ExpEngine& e) {
   Out o;
-  o.ids = e.generate(kGen);
+  o.ids = continue_ids(e);
   o.state = qwen4exp_rig::read_state(e);
+  if (e.mtp()) {
+    const uint32_t n = e.pos() - 1;   // the head holds [0, pos - 1)
+    o.R = e.read_mtp_R();
+    o.hk = e.read_mtp_kv(0, n, false);
+    o.hv = e.read_mtp_kv(0, n, true);
+    o.hkeys = e.read_mtp_idx_keys(0, n / 4);
+  }
   return o;
 }
 
 Ids slice(const Ids& v, size_t a, size_t b) { return Ids(v.begin() + a, v.begin() + b); }
 
 bool report(const std::string& what, const Out& got, const Out& want) {
-  const std::string diff = qwen4exp_rig::first_difference(got.state, want.state);
+  std::string diff = qwen4exp_rig::first_difference(got.state, want.state);
+  if (diff.empty() && got.R != want.R) diff = "the head's R";
+  if (diff.empty() && (got.hk != want.hk || got.hv != want.hv)) diff = "the head's K / V";
+  if (diff.empty() && got.hkeys != want.hkeys) diff = "the head's compressed keys";
   const bool ok = got.ids == want.ids && diff.empty();
   std::printf("  %s: ids %s, state %s\n", what.c_str(), got.ids == want.ids ? "bitwise" : "DIFFER",
               diff.empty() ? "bitwise" : ("DIFFERS at " + diff).c_str());
@@ -85,8 +126,8 @@ bool report(const std::string& what, const Out& got, const Out& want) {
 int run_default(rq::Qwen4ExpEngine& e, const Ids& prompt) {
   const model::Qwen4ExpDesc& d = e.model().desc;
   bool ok = true;
-  CHECK_EQ(e.state_bytes(), rq::state_snapshot_bytes(d, false));
-  CHECK_EQ(e.kv_bytes(4096), rq::kv_snapshot_bytes(d, 0, 4096, false));
+  CHECK_EQ(e.state_bytes(), rq::state_snapshot_bytes(d, e.mtp()));
+  CHECK_EQ(e.kv_bytes(4096), rq::kv_snapshot_bytes(d, 0, 4096, e.mtp()));
   std::printf("0. state %zu B, blocks %zu B a position (%u layers)\n", e.state_bytes(), e.kv_bytes(4) / 4, d.layers);
 
   // a. the block ends: the hook saves at 2048 and 4096 during the cold prefill.
@@ -179,8 +220,11 @@ int main(int argc, char** argv) {
       o.layers = uint32_t(std::strtoul(x.c_str() + 7, nullptr, 10));
     } else if (x == "int8") {
       o.int8_head = true;
+    } else if (x == "mtp") {
+      o.mtp = true;
     } else {
-      std::fprintf(stderr, "qwen4exp_snapshot_gpu_test: unknown flag %s (pp2[:split], cross, layers:N, int8)\n", x.c_str());
+      std::fprintf(stderr, "qwen4exp_snapshot_gpu_test: unknown flag %s (pp2[:split], cross, layers:N, int8, mtp)\n",
+                   x.c_str());
       return 2;
     }
   }

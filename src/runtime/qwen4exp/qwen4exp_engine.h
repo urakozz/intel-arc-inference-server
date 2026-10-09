@@ -234,6 +234,11 @@ class Qwen4ExpEngine {
   // per-layer union of experts over the verify rows is spec 22 P0.6's "MTP verify" term.
   std::vector<uint32_t> read_verify_routes();
   uint32_t last_verify_rows() const { return last_verify_m_; }
+  // QSA layer `layer`'s selection of the last verify's row r (positions, then the count) - M2's per-row compare.
+  std::vector<uint32_t> read_verify_selection(uint32_t layer, uint32_t r);
+  // fp32 [48][128][128] of GDN layer `layer`'s state in slot s (0..3; the live one is Control::gdn_live).
+  std::vector<float> read_gdn_slot(uint32_t layer, uint32_t s);
+  uint32_t gdn_live() const;
   // u32 [count + 1] of draft step 0's selection (positions, then the count) and step i's route row (the head's MoE).
   std::vector<uint32_t> read_draft_selection();
   std::vector<uint32_t> read_draft_routes(uint32_t i);
