@@ -19,3 +19,10 @@ target_link_libraries(b70_k2_model PUBLIC b70_model)
 add_library(b70_kolibri_model STATIC kolibri1.cc)
 target_include_directories(b70_kolibri_model PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_kolibri_model PUBLIC b70_model)
+
+# --- Spec 21b: Qwen3.8-Flash-Next (qwen4_exp) ----------------------------------------------------
+# The family as data, BESIDE qwen3_5, K2 and Kolibri (spec 21 §6): its own table, sharing GemvShape /
+# WeightKind / Fuse from qwen35.h. Host only.
+add_library(b70_qwen4exp_model STATIC qwen4exp.cc)
+target_include_directories(b70_qwen4exp_model PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_qwen4exp_model PUBLIC b70_model)
