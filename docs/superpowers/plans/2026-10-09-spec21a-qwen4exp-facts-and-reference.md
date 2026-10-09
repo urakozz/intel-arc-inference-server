@@ -1,7 +1,11 @@
 # Spec 21a - Qwen3.8-Flash-Next (`qwen4_exp`): the facts, the CPU reference, golden sets, routing traces
 
-**Status (2026-10-09): planned; nothing built.** The operator approved spec 21 on 2026-10-09. Box queue row
-30 (it renumbers at build time if taken).
+**Status (2026-10-09): built on the Mac, branch `spec21a-qwen4exp-reference`; the box CPU runs pending (queue
+row 30).** Tasks 1-5 and 8 done and their Mac gates green (F1 bitwise on the tiny model in bf16 and fp32; the
+MTP head = an independent build bitwise); Tasks 6-7's scripts written, `DRY_RUN=1` checked - the real-weight
+steps (6.2, 6.3, 7.2) wait for Intel's checkpoint on the box. As built, departures and findings: spec 21 §12
+"21a as built" (decision 5's reuse is vLLM's opt-in; torch's tie rule is not the lower index; the original's
+tokenizer adds `\p{M}`; `--layers N` needs N >= 4 cached). The operator approved spec 21 on 2026-10-09.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking.
 
