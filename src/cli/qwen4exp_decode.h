@@ -23,9 +23,10 @@
 // A prefilling run plans the prefill scratch (and, on two cards, the prefill hand-off) into --layers auto, --max-len
 // auto and the fit.
 // Refused before the device, each by name: --prefill-backend l0-int8 (spec 5's h8 linears rotate in whole 1024-k
-// Hadamard blocks; the hidden is 2560) / sycl-tla (no walk for this family), --prefill-chunk above 2048, --mtp (spec
-// 21e), --kv-cache int8 (decision 8: bf16 first; kv8.cl hard-codes 24 q / 4 kv heads), --profile (Task 7 times it
-// with --bench), --device N with --pp 2 (16b's rule: GPUs 0 and 1), and the whole model without --layers (spec 22).
+// Hadamard blocks; the hidden is 2560) / sycl-tla (no walk for this family), --prefill-chunk above 2048, --mtp
+// (b70-decode runs plain; the head - spec 21e - is b70-serve's and qwen4exp_mtp_test's), --kv-cache int8 (decision 8:
+// bf16 first; kv8.cl hard-codes 24 q / 4 kv heads), --profile (Task 7 times it with --bench), --device N with --pp 2
+// (16b's rule: GPUs 0 and 1), and the whole model without --layers (spec 22).
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -94,6 +95,9 @@ struct DecodeArgs {
   runtime::PrefillBackend pp_backend = runtime::PrefillBackend::L0;
   // What else was asked for, for the refusals.
   bool mtp = false, kv8 = false, profile = false;
+  // Spec 21e: b70-serve's --mtp / --spec loads the MTP head - the planner (settle) then carries its weights, its
+  // buffers and the verify rows (runtime::qwen4exp::plan(..., mtp)). b70-decode never sets it.
+  bool load_mtp = false;
   bool int8_head() const { return lm_head == loader::LmHeadForm::Int8; }
   bool prefills() const { return prefill || pp; }
 };
@@ -102,16 +106,16 @@ inline uint32_t devices_of(const DecodeArgs& a) { return a.pp_given ? a.pipe.dev
 
 // The whole published model's refusal (no --layers): the planner's own message (require_fits names the bytes,
 // each card's capacity and spec 22) on its best two-card split.
-[[noreturn]] inline void refuse_whole(const DecodeArgs& a) {
+[[noreturn]] inline void refuse_whole(const DecodeArgs& a, const char* tool = "b70-decode") {
   namespace rq = runtime::qwen4exp;
   const model::Qwen4ExpDesc& d = model::qwen4exp();
   const uint32_t len = a.max_len.is_auto ? runtime::kMinAutoMaxLen : a.max_len.value;
-  const model::Q4Placement p = model::Q4Placement::two(d, rq::pp_split(d, len, a.int8_head(), false).split);
+  const model::Q4Placement p = model::Q4Placement::two(d, rq::pp_split(d, len, a.int8_head(), a.load_mtp).split);
   const std::array<size_t, runtime::kPpDevices> caps = {kB70Bytes, kB70Bytes};
   try {
-    rq::require_fits(rq::plan(d, p, len, a.int8_head(), false), caps, a.reserve);
+    rq::require_fits(rq::plan(d, p, len, a.int8_head(), a.load_mtp), caps, a.reserve);
   } catch (const std::exception& e) {
-    throw std::runtime_error(std::string(e.what()) + ". Without --layers b70-decode would load all 48 layers: pass "
+    throw std::runtime_error(std::string(e.what()) + ". Without --layers " + tool + " would load all 48 layers: pass "
                              "--layers N or --layers auto (development mode, spec 21c)");
   }
   throw std::runtime_error("Qwen3.8-Flash-Next's whole model runs only with spec 22's expert-offload tier: pass "
@@ -120,7 +124,7 @@ inline uint32_t devices_of(const DecodeArgs& a) { return a.pp_given ? a.pipe.dev
 
 // Every refusal that needs no device and no tensor - in this order, each by name (tests/CMakeLists.txt's
 // cli_reject_qwen4exp_*): the stages that build what was asked for first, then the whole model.
-inline void check_args(const DecodeArgs& a) {
+inline void check_args(const DecodeArgs& a, const char* tool = "b70-decode") {
   if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::L0Int8)
     throw std::runtime_error("Qwen3.8-Flash-Next prefills on the l0 backend only (spec 21d), not l0-int8: its h8 linears "
                              "rotate in whole 1024-k Hadamard blocks and this model's hidden is 2560 - "
@@ -132,7 +136,8 @@ inline void check_args(const DecodeArgs& a) {
     throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " exceeds Qwen3.8-Flash-Next's prefill chunk " +
                              std::to_string(runtime::qwen4exp::kPfC) + " (the prefill scratch is sized for it)");
   if (a.mtp)
-    throw std::runtime_error("Qwen3.8-Flash-Next's MTP head (its own QSA layer and 512 experts) is spec 21e's: drop --mtp");
+    throw std::runtime_error("b70-decode runs Qwen3.8-Flash-Next plain: its MTP head (spec 21e) is served by b70-serve "
+                             "--mtp K and measured by qwen4exp_mtp_test - drop --mtp");
   if (a.kv8)
     throw std::runtime_error("--kv-cache int8: Qwen3.8-Flash-Next's KV is bf16 (spec 21 decision 8: int8 later - kv8.cl "
                              "hard-codes 24 q / 4 kv heads and this model has 2)");
@@ -146,7 +151,7 @@ inline void check_args(const DecodeArgs& a) {
     throw std::runtime_error("--pp 2 runs on GPUs 0 and 1 of what Level Zero shows (ZE_AFFINITY_MASK picks which "
                              "two); --device names one card - drop it");
   }
-  if (a.layers == 0 && !a.layers_auto) refuse_whole(a);
+  if (a.layers == 0 && !a.layers_auto) refuse_whole(a, tool);
 }
 
 inline std::vector<uint32_t> read_ids(const std::string& path, uint32_t vocab) {
@@ -179,12 +184,13 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
                       const std::array<size_t, runtime::kPpDevices>& dev) {
   namespace rq = runtime::qwen4exp;
   const bool int8 = a.int8_head(), pf = a.prefills();   // spec 21d: the prefill scratch planned
+  const bool hd = a.load_mtp;                            // spec 21e: the MTP head planned
   const uint32_t devs = devices_of(a), cap = full.trained_max_len;
   Settled s;
   uint32_t layers = a.layers;
   if (a.layers_auto) {
     const uint32_t len = a.max_len.is_auto ? runtime::kMinAutoMaxLen : a.max_len.value;
-    layers = rq::layers_that_fit(full, devs, len, int8, false, std::min(dev[0], devs == 2 ? dev[1] : dev[0]), a.reserve, pf);
+    layers = rq::layers_that_fit(full, devs, len, int8, hd, std::min(dev[0], devs == 2 ? dev[1] : dev[0]), a.reserve, pf);
     if (layers == 0)
       throw std::runtime_error("--layers auto: not even " + std::to_string(full.ple_layer + 1) + " layers fit " +
                                std::to_string(devs) + " card(s) at max_len " + std::to_string(len));
@@ -204,11 +210,11 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
   uint32_t len = a.max_len.value;
   if (a.max_len.is_auto) {
     if (devs == 2 && a.pipe.split_auto)
-      p = model::Q4Placement::two(d, rq::pp_split(d, runtime::kMinAutoMaxLen, int8, false, pf).split);
-    len = rq::max_len_that_fits(d, p, int8, false, dev, a.reserve, cap, pf);
+      p = model::Q4Placement::two(d, rq::pp_split(d, runtime::kMinAutoMaxLen, int8, hd, pf).split);
+    len = rq::max_len_that_fits(d, p, int8, hd, dev, a.reserve, cap, pf);
     if (len == 0)
       throw std::runtime_error("--max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) + " positions fit - " +
-                               rq::describe(rq::plan(d, p, runtime::kMinAutoMaxLen, int8, false, false, pf), p,
+                               rq::describe(rq::plan(d, p, runtime::kMinAutoMaxLen, int8, hd, false, pf), p,
                                             runtime::kMinAutoMaxLen, dev, a.reserve));
     std::fprintf(stderr, "max_len: auto -> %u (the largest multiple of %u that fits every card with a %.3f GB "
                  "reserve; trained context %u)\n", len, runtime::kMaxLenQuantum, a.reserve / 1e9, cap);
@@ -216,14 +222,14 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
     if (len > cap)
       throw std::runtime_error("--max-len " + std::to_string(len) + " exceeds Qwen3.8-Flash-Next's trained context " +
                                std::to_string(cap));
-    if (devs == 2 && a.pipe.split_auto) p = model::Q4Placement::two(d, rq::pp_split(d, len, int8, false, pf).split);
+    if (devs == 2 && a.pipe.split_auto) p = model::Q4Placement::two(d, rq::pp_split(d, len, int8, hd, pf).split);
     std::fprintf(stderr, "max_len: %u (--max-len)\n", len);
   }
-  rq::require_fits(rq::plan(d, p, len, int8, false, false, pf), dev, a.reserve);
+  rq::require_fits(rq::plan(d, p, len, int8, hd, false, pf), dev, a.reserve);
   if (devs == 2)
     std::fprintf(stderr, "split: %s%u (layers [0, %u) on device 0, [%u, %u) and the head on device 1)\n",
                  a.pipe.split_auto ? "auto -> " : "", p.split, p.split, p.split, d.layers);
-  std::fprintf(stderr, "%s\n", rq::describe(rq::plan(d, p, len, int8, false, false, pf), p, len, dev, a.reserve).c_str());
+  std::fprintf(stderr, "%s\n", rq::describe(rq::plan(d, p, len, int8, hd, false, pf), p, len, dev, a.reserve).c_str());
   s.placement = p;
   s.max_len = len;
   return s;

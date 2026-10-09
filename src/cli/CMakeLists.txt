@@ -73,3 +73,8 @@ if(TARGET b70-serve)
 endif()
 # Spec 21d: and Qwen3.8-Flash-Next's prefill (b70_qwen4exp_prefill: Qwen4ExpEngine::prefill, its walk and scratch).
 target_link_libraries(b70-decode PRIVATE b70_qwen4exp_prefill)
+# Spec 21e: b70-serve serves Qwen3.8-Flash-Next (src/cli/qwen4exp_serve.h; runtime::qwen4exp::Qwen4ExpEngine behind spec
+# 16d's cli::pp::PipelineEngineAdapterT, whose prefill every request runs). Appended, as the lines above.
+if(TARGET b70-serve)
+  target_link_libraries(b70-serve PRIVATE b70_qwen4exp_runtime b70_qwen4exp_prefill)
+endif()

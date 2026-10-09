@@ -31,6 +31,8 @@
 #include "cli/pipeline_serve_adapter.h"
 #include "cli/pipeline_settle.h"
 #include "cli/prefix_cache_size.h"
+#include "cli/qwen4exp_chat.h"
+#include "cli/qwen4exp_serve.h"
 #include "cli/renamed_flags.h"
 #include "cli/serve_adapters.h"
 #include "l0/context.h"
@@ -102,6 +104,14 @@ void usage() {
                "                 none|minimal|low|medium|high|xhigh|max reach the template; requests\n"
                "                 without temperature / top_p / top_k sample with generation_config.json's\n"
                "                 1.0 / 0.97 / 128). UNVALIDATED on the cards (queue row 28)\n"
+               "                 Qwen3.8-Flash-Next (spec 21e, model_type qwen4_exp): its own engine, one card\n"
+               "                 or two (--pp 2), --layers N|auto REQUIRED until spec 22 (the whole model is\n"
+               "                 refused naming its bytes), [--ple-dir DIR] (the PLE int8 file), [--tokenizer\n"
+               "                 FILE] (the original's tokenizer.json when the snapshot ships Qwen3.8's - it is\n"
+               "                 refused), the Qwen path (XML tool calls, reasoning, greedy unless the request\n"
+               "                 samples), the prefix cache, --mtp 1..3 / --spec lookup (--mtp auto,\n"
+               "                 --draft-vocab and --kv-cache int8 are refused); prefill on l0 only.\n"
+               "                 UNVALIDATED on the cards (queue row 34)\n"
                "                 [--pp 1|2] [--pipeline-parallel-size 1|2]   2 (spec 16d): the model's\n"
                "                             layers over GPUs 0 and 1 of what Level Zero shows (Qwen3.8,\n"
                "                             Agnes, Ornith, Kolibri-1 - its default; K2-Horizon is refused).\n"
@@ -422,6 +432,89 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
   return listen_until_stopped(server, options);
 }
 
+// Spec 21e: Qwen3.8-Flash-Next served (--layers N until spec 22) - runtime::qwen4exp::Qwen4ExpEngine (one card or two:
+// spec 16b's pieces as 21c / 21d built them) behind spec 16d's cli::pp::PipelineEngineAdapterT (EngineAdapter's logic
+// over the engine's host calls: greedy and sampled steps, spec 7's prefix cache over the engine's snapshots, spec 8's
+// MTP - draft / verify / commit - and spec 19e's lookup through the same verify lists), the Qwen family's request path
+// (cli::qwen4exp::chat_options: ChatFormat Qwen, EOS [248046, 248044], decision 11's greedy-unless-asked). b70-decode's
+// flow (cli/qwen4exp_decode.h run_decode): the refusals before the device (cli::qwen4exp::check_serve), the served
+// tokenizer.json held to the original's (check_tokenizer), both cards in one context with peer access, the layers,
+// placement and max_len planned before the load with the prefill scratch and (--mtp / --spec) the head, each layer
+// loaded straight onto its device.
+int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
+  namespace cq = cli::qwen4exp;
+  cq::check_serve(a);
+  const std::vector<uint32_t> eos = eos_ids(a.snapshot_dir);
+  const std::string tok_path = a.tokenizer_path();
+  cq::check_tokenizer(tok_path);   // a file read, before the device
+  const cq::DecodeArgs& da = a.args;
+  const model::Qwen4ExpDesc full = loader::qwen4exp_checkpoint_desc(a.snapshot_dir, 0);
+  if (!da.max_len.is_auto && da.max_len.value > full.trained_max_len)
+    throw std::runtime_error("--max-len " + std::to_string(da.max_len.value) +
+                             " exceeds Qwen3.8-Flash-Next's trained context " + std::to_string(full.trained_max_len));
+  const uint32_t devs = cq::devices_of(da);
+  if (devs == 2) cli::require_two_devices(l0::Context::gpu_count());
+  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(devs == 2 ? 0u : da.device);
+  std::unique_ptr<l0::Context> c1 = devs == 2 ? std::make_unique<l0::Context>(*c0, 1u) : nullptr;
+  std::vector<l0::Context*> ctx = {c0.get()};
+  if (c1) ctx.push_back(c1.get());
+  const std::array<size_t, runtime::kPpDevices> dev{c0->memory_bytes(), c1 ? c1->memory_bytes() : c0->memory_bytes()};
+  if (devs == 1)
+    std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
+                 da.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+  else
+    std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--pp 2: one context]\n", c0->name().c_str(),
+                 c0->eu_count(), c1->name().c_str(), c1->eu_count());
+  if (devs == 2 && !c0->can_access_peer(*c1))
+    throw std::runtime_error("--pp 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), "
+                             "and both hand-offs write it (docs/10-the-box.md)");
+  const cq::Settled s = cq::settle(full, da, dev);
+  loader::Q4LoadedModel model = [&] {
+    StdoutToStderr redirect;
+    return loader::load_qwen4exp(ctx, a.snapshot_dir, s.max_len, s.placement, da.lm_head, s.desc.layers, a.loads_head(),
+                                 da.ple_dir);
+  }();
+  std::fprintf(stderr, "layers: %u of the checkpoint's %u (--layers: development mode until spec 22)\n",
+               model.desc.layers, model.checkpoint_layers);
+  runtime::PipelineOptions opt;
+  opt.handoff = da.pipe.handoff;
+  runtime::qwen4exp::Qwen4ExpEngine engine(ctx, std::move(model), s.max_len, /*debug_tap=*/false, opt);
+  engine.prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
+  std::fprintf(stderr, "%s\n", engine.memory_line().c_str());
+  TokAdapter tokenizer(tok_path);
+  if (tokenizer.vocab_used() != engine.model().desc.vocab_used)
+    std::fprintf(stderr, "note: %s defines %u ids, the greedy argmax masks from %u; sampling masks from %u\n",
+                 tok_path.c_str(), tokenizer.vocab_used(), engine.model().desc.vocab_used, tokenizer.vocab_used());
+  TemplateAdapter chat_template(a.snapshot_dir);
+  cli::pp::PipelineEngineAdapterT<runtime::qwen4exp::Qwen4ExpEngine> engine_adapter(
+      engine, tokenizer.vocab_used(), engine.vocab(), a.mtp_k, a.spec_lookup);
+  cq::chat_options(options, eos);
+  // Pinned host memory of the one context both cards share: either device's copies reach it.
+  const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
+  server::Server server({tokenizer, chat_template, engine_adapter}, options);
+  const std::string placement =
+      devs == 2 ? std::string("--pp 2 (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
+                      std::to_string(engine.split()) + ")"
+                : std::string("--pp 1");
+  std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
+               options.host.c_str(), options.port, s.max_len);
+  print_eos(eos);
+  std::fprintf(stderr,
+               ", Qwen3.8-Flash-Next --layers %u (%s chat format), %s, prefill backend l0 (chunk %u), attention %s "
+               "(B70_Q4_ATTN), mtp %u%s, lm_head %s, kv cache bf16, sampling defaults: greedy unless the request "
+               "samples (decision 11 open), prefix snapshots: state %zu B (GDN, PLE, indexer tails%s), blocks %zu B a "
+               "position\n",
+               engine.model().desc.layers, options.chat_format.name(), placement.c_str(), runtime::qwen4exp::kPfC,
+               runtime::qwen4exp::q4_attn_name(engine.attention()), a.mtp_k,
+               engine.mtp() ? (std::string(" (the head: ") + runtime::qwen4exp::mtp_norm_name(engine.mtp_norm()) +
+                               " norm, " + runtime::qwen4exp::mtp_select_name(engine.mtp_select()) + " selection" +
+                               (a.spec_lookup ? ", --spec lookup" : "") + ")").c_str()
+                            : "",
+               loader::lm_head_form_name(da.lm_head), engine.state_bytes(), engine.mtp() ? ", the head's" : "",
+               engine.kv_bytes(4) / 4);
+  return listen_until_stopped(server, options);
+}
+
 // The speculative proposer's startup lines (spec 19e's lookup, spec 8 §10's auto policy) -
 // one card's and --pp 2's.
 void print_proposer(const server::Options& options, bool spec_lookup, uint32_t spec_min_match,
@@ -583,6 +676,11 @@ int run(int argc, char** argv) {
   std::string draft_vocab_ids;
   cli::PipelineArgs pipe;   // spec 16d: --pp, --pipeline-split, --pipeline-handoff
   bool pp_given = false;    // spec 20e: Kolibri-1's --pp defaults to 2, so "given" matters
+  // Spec 21e: Qwen3.8-Flash-Next only - its development mode (--layers N|auto until spec 22), its PLE file, and the
+  // original's tokenizer.json when the snapshot ships Qwen3.8's.
+  uint32_t q4_layers = 0;
+  bool q4_layers_auto = false, have_q4_layers = false;
+  std::string q4_ple_dir, q4_tokenizer;
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -677,6 +775,19 @@ int run(int argc, char** argv) {
       cli::parse_pipeline_split(value(i, "--pipeline-split"), pipe);
     } else if (arg == "--pipeline-handoff") {
       cli::parse_pipeline_handoff(value(i, "--pipeline-handoff"), pipe);
+    } else if (arg == "--layers") {   // spec 21e: Qwen3.8-Flash-Next only (also `auto`)
+      const std::string v = value(i, "--layers");
+      have_q4_layers = true;
+      if (v == "auto") {
+        q4_layers_auto = true;
+      } else {
+        q4_layers = parse_u32("--layers", v);
+        if (q4_layers == 0) throw std::runtime_error("--layers 0 would load no layer");
+      }
+    } else if (arg == "--ple-dir") {     // spec 21e: Qwen3.8-Flash-Next only
+      q4_ple_dir = value(i, "--ple-dir");
+    } else if (arg == "--tokenizer") {   // spec 21e: Qwen3.8-Flash-Next only
+      q4_tokenizer = value(i, "--tokenizer");
     } else if (!arg.empty() && arg[0] == '-') {
       usage();
       throw std::runtime_error(cli::unknown_option(arg));
@@ -770,18 +881,41 @@ int run(int argc, char** argv) {
   // dispatched here, before the Qwen family's kv-cache and --pp rules (its own, cli::kolibri::check_args,
   // replace them: a --pipeline-split without --pp is its default --pp 2), as b70-decode dispatches it. A
   // path that does not resolve is not Kolibri: the flow below reports it, so every rejection keeps its order.
-  // Spec 21c: Qwen3.8-Flash-Next (model_type qwen4_exp) is decode-only until spec 21e builds its server path (the
-  // template's XML tool calls, the prefix cache's snapshots, the MTP head) - refused here, before the device.
-  {
-    bool q4 = false;
-    try {
-      q4 = loader::is_qwen4exp_checkpoint(loader::resolve_snapshot(path));
-    } catch (const std::exception&) {
-    }
-    if (q4)
-      throw std::runtime_error("Qwen3.8-Flash-Next (model_type qwen4_exp) is served in spec 21e (the template, XML tool "
-                               "calls, the prefix cache, MTP); spec 21c decodes it with b70-decode --layers N");
+  // Spec 21e: Qwen3.8-Flash-Next (model_type qwen4_exp) runs runtime::qwen4exp::Qwen4ExpEngine behind spec 16d's
+  // PipelineEngineAdapterT (one card or two) - dispatched here, before the Qwen family's kv-cache and --pp rules (its
+  // own, cli::qwen4exp::check_serve, replace them), as b70-decode dispatches it. --layers / --ple-dir / --tokenizer
+  // belong to it alone.
+  if (cli::qwen4exp::is_qwen4exp(path)) {
+    cli::qwen4exp::ServeArgs qs;
+    qs.snapshot_dir = loader::resolve_snapshot(path);
+    qs.tokenizer = q4_tokenizer;
+    cli::qwen4exp::DecodeArgs& qa = qs.args;
+    qa.path = qs.snapshot_dir;
+    qa.ple_dir = q4_ple_dir;
+    qa.max_len = max_len_arg;
+    qa.reserve = mem_reserve;
+    qa.device = device;
+    qa.lm_head = lm_head;   // int8 by default (spec 9), as every served model
+    qa.layers = q4_layers;
+    qa.layers_auto = q4_layers_auto;
+    qa.pipe = pipe;
+    qa.pp_given = pp_given;
+    qa.prefill = true;      // every request prefills: the plan carries the prefill scratch
+    qa.pp_backend_given = have_pp_backend;
+    qa.pp_backend = pp_backend;
+    qa.kv8 = kv_cache == runtime::KvCache::Int8;
+    qs.mtp_k = mtp_auto ? 0 : mtp_k;
+    qs.mtp_auto = mtp_auto;
+    qs.spec_lookup = spec_lookup;
+    qs.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
+    qa.load_mtp = qs.loads_head();
+    qs.prefix_auto = prefix_auto;
+    qs.prefix_cache_gb = prefix_cache_gb;
+    return serve_qwen4exp(qs, options);
   }
+  if (have_q4_layers || !q4_ple_dir.empty() || !q4_tokenizer.empty())
+    throw std::runtime_error("--layers, --ple-dir and --tokenizer belong to Qwen3.8-Flash-Next (model_type qwen4_exp, "
+                             "spec 21e); this checkpoint is not one");
   if (cli::kolibri::is_kolibri(path)) {
     if (spec_lookup)
       throw std::runtime_error("--spec lookup verifies its drafts through the MTP verify lists, which Kolibri-1's "

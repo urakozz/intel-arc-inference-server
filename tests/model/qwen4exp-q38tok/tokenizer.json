@@ -1,0 +1,4 @@
+{
+  "_comment": "Spec 21e: the pre_tokenizer of Qwen3.8's tokenizer.json, nothing else (cli_reject_serve_qwen4exp_tokenizer)",
+  "pre_tokenizer": {"type": "Sequence", "pretokenizers": [{"type": "Split", "pattern": {"Regex": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"}, "behavior": "Isolated", "invert": false}]}
+}
