@@ -71,3 +71,5 @@ target_link_libraries(b70-decode PRIVATE b70_qwen4exp_runtime)
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_qwen4exp_loader)
 endif()
+# Spec 21d: and Qwen3.8-Flash-Next's prefill (b70_qwen4exp_prefill: Qwen4ExpEngine::prefill, its walk and scratch).
+target_link_libraries(b70-decode PRIVATE b70_qwen4exp_prefill)

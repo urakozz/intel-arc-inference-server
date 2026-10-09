@@ -174,8 +174,9 @@ void usage() {
       "                 int8, --profile refused.\n"
       "  Qwen3.8-Flash-Next (model_type qwen4_exp, spec 21c): --layers N|auto is REQUIRED (the\n"
       "                 whole model needs spec 22's expert-offload tier); --ple-dir DIR the PLE\n"
-      "                 int8 file (default <snapshot>-ple-int8/); --pp 1 (default) or 2; decode\n"
-      "                 only - the prefill (21d), --mtp (21e) and --kv-cache int8 refused.\n"
+      "                 int8 file (default <snapshot>-ple-int8/); --pp 1 (default) or 2. Spec 21d:\n"
+      "                 --prefill / --prefill-length N on the l0 backend only (chunk <= 2048; two\n"
+      "                 cards cross each chunk by copy); --mtp (21e) and --kv-cache int8 refused.\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -956,8 +957,8 @@ int run(int argc, char** argv) {
   }
   // Spec 21c: Qwen3.8-Flash-Next (model_type qwen4_exp) runs runtime::qwen4exp::Qwen4ExpEngine on one or two cards -
   // dispatched here, beside Kolibri-1 and before the Qwen engine's pipeline and kv-cache rules (its own refusals,
-  // cli/qwen4exp_decode.h: the prefill (21d), --mtp (21e), int8 KV (decision 8), the whole model without --layers
-  // (spec 22)). A path that does not resolve is not this family - the flows below report it.
+  // cli/qwen4exp_decode.h: the prefill's other backends (21d: l0 only), --mtp (21e), int8 KV (decision 8), the whole
+  // model without --layers (spec 22)). A path that does not resolve is not this family - the flows below report it.
   if (cli::qwen4exp::is_qwen4exp(path)) {
     cli::qwen4exp::DecodeArgs qa;
     qa.path = path;
@@ -975,10 +976,11 @@ int run(int argc, char** argv) {
     qa.layers_auto = layers_auto;
     qa.pipe = pipe;
     qa.pp_given = pp_given;
-    qa.prefill = prefill;
-    qa.prefill_length = have_prefill_len;
-    qa.prefill_chunk = have_pp_chunk;
-    qa.prefill_backend = have_pp_backend;
+    qa.prefill = prefill;           // spec 21d: --ids through Qwen4ExpEngine::prefill
+    qa.pp = have_prefill_len;       // --prefill-length N already set depth = N above
+    qa.pp_chunk = pp_chunk;
+    qa.pp_backend_given = have_pp_backend;
+    qa.pp_backend = pp_backend;
     qa.mtp = mtp_on;
     qa.kv8 = kv_cache == runtime::KvCache::Int8;
     qa.profile = profile;
