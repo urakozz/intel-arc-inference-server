@@ -25,7 +25,9 @@ target_link_libraries(b70_kolibri_loader PUBLIC b70_loader b70_kolibri_model b70
 
 # --- Spec 21b: Qwen3.8-Flash-Next (qwen4_exp) -----------------------------------------------------
 # The qwen4_exp loader, beside loader.cc, the K2 and the Kolibri loaders (none touched): the host half
-# (qwen4exp_repack.cc - no Level Zero, run on any host by tests/loader/qwen4exp_repack_test.cc).
-add_library(b70_qwen4exp_loader STATIC qwen4exp_repack.cc)
+# (qwen4exp_repack.cc, qwen4exp_ple.cc - no Level Zero, run on any host by tests/loader/qwen4exp_repack_test.cc
+# and qwen4exp_ple_test.cc) and the PLE table's pinning into host USM (qwen4exp_ple_usm.cc, Level Zero: its own
+# object so a host test that uses the hash or the file links no device call).
+add_library(b70_qwen4exp_loader STATIC qwen4exp_repack.cc qwen4exp_ple.cc qwen4exp_ple_usm.cc)
 target_include_directories(b70_qwen4exp_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_qwen4exp_loader PUBLIC b70_loader b70_qwen4exp_model b70_l0)
