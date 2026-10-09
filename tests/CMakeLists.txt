@@ -3116,3 +3116,17 @@ if(TARGET b70-serve)
   b70_serve_reject(cli_reject_qwen4exp_serve ${_q4_cfg} EXPECT "spec 21e")
 endif()
 # ==== Spec 21c: Qwen3.8-Flash-Next decode ==== (end) ====
+
+# ==== Spec 21d: Qwen3.8-Flash-Next prefill (labels qwen4exp;prefill) ==== (begin) ====
+# One delimited block for every 21d registration, after 21c's. Written blind on the Mac (box queue row 33): host
+# tests first (tools/mac_check.sh runs them), then the card's (box only); the checkpoint ones SKIP (77) until the
+# synthetic golden sets (qwen4exp_oracle.sh synth) or Intel's checkpoint and 21a's sets exist.
+# Task 1: the prefill kernels' host twin (tests/kernels/qwen4exp_pf_ref.h) - the 512-expert sort and its adversaries,
+# the combine == 21c's decode chain, dense / sparse rows, the sparse attention over row lists in fp64 and eager, the
+# indexer and PLE over a chunk == decode's M = 1 chains with their rings. Headers only (+ the PLE hash header).
+add_executable(qwen4exp_pf_ref_test kernels/qwen4exp_pf_ref_test.cc)
+target_include_directories(qwen4exp_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(qwen4exp_pf_ref_test PRIVATE b70_qwen4exp_loader)
+add_test(NAME qwen4exp_pf_ref_test COMMAND qwen4exp_pf_ref_test)
+set_tests_properties(qwen4exp_pf_ref_test PROPERTIES LABELS "qwen4exp;prefill" TIMEOUT 900)
+# ==== Spec 21d: Qwen3.8-Flash-Next prefill ==== (end) ====
