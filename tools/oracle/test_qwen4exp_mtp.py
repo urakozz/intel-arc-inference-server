@@ -313,6 +313,54 @@ TESTS = [test_against_independent, test_unit_injection, test_fc_hidden_per_strea
          test_returns_premixer, test_norm_forms_differ, test_accept_and_trace_routes]
 
 
+def test_rtn_engine_format():
+    """Spec 21e: rtn_dequant is loader::rtn_int4_g64's formula element by element (per row and 64-group, s16 =
+    f16(2 amax / 15), q = clamp(rint(w / s16) + 8, 0, 15), an all-zero group q = 8), and engine_format swaps every
+    routed expert the head reads for its RTN form (the shared expert stays bf16)."""
+    g = torch.Generator().manual_seed(5)
+    w = (torch.randn(6, 128, generator=g) * 0.02).to(BF)
+    w[2, 64:] = 0
+    got = mtp.rtn_dequant(w)
+    for n in range(6):
+        for grp in range(2):
+            row = w[n, grp * 64:(grp + 1) * 64].float()
+            s = float(torch.tensor(2.0 * float(row.abs().max()) / 15.0).to(torch.float16))
+            for k in range(64):
+                q = 8.0 if s == 0 else min(max(float(torch.round(row[k] / s)) + 8.0, 0.0), 15.0)
+                want = torch.tensor((q - 8.0) * s).to(BF)
+                assert got[n, grp * 64 + k] == want, (n, grp, k)
+    s = setup()
+    head = mtp.engine_format(mtp.MtpHead(s["d"], s["tc"], model=s["model"]))
+    gu, dn = head.lazy.expert(0, 1)
+    gu0, dn0 = mtp.MtpHead(s["d"], s["tc"], model=s["model"]).lazy.expert(0, 1)
+    assert torch.equal(gu, mtp.rtn_dequant(gu0)) and torch.equal(dn, mtp.rtn_dequant(dn0))
+    print("  rtn_dequant = loader/rtn.h's formula per element; engine_format swaps the routed experts")
+
+
+def test_accept_cli():
+    """Spec 21e: `qwen4exp_mtp.py accept` on the tiny with a head - per source and pooled acceptance by depth in
+    [0, 1], E_K non-decreasing in K, both selection forms, written as JSON."""
+    import json
+    s = setup()
+    d = os.path.join(TMP, "acc")
+    os.makedirs(d, exist_ok=True)
+    ctx = os.path.join(d, "ctx.ids")
+    with open(ctx, "w") as f:
+        f.write(" ".join(str(x) for x in ids_of(24, 11)))
+    out = os.path.join(d, "accept.json")
+    mtp.cmd_accept([s["d"], "--out", out, "--source", f"tiny:{ctx}", "--gen", "12", "--k", "3"])
+    r = json.load(open(out))
+    for sel in ("reuse", "fresh"):
+        p = r["pooled"][sel]
+        assert p["rows"] > 0 and all(0.0 <= x <= 1.0 for x in p["accept_by_depth"])
+        assert p["expected_tokens_at_K"] == sorted(p["expected_tokens_at_K"])
+        assert r["sources"]["tiny"][sel]["rows"] == p["rows"]
+    print(f"  accept: pooled {r['pooled']}")
+
+
+TESTS += [test_rtn_engine_format, test_accept_cli]
+
+
 def main() -> None:
     import traceback
     torch.manual_seed(0)
