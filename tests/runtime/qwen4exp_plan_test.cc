@@ -229,6 +229,82 @@ int main() {
                 rq::decode_launches(ours, one, E, PpHandoff::Copy), rq::decode_launches(ours, one, F, PpHandoff::Copy, true),
                 s32.total(), s256.total(), p38.split);
   }
+  // --- 7. spec 21d: the prefill chunk --------------------------------------------------------------------------
+  {
+    // the launches per chunk (the formula, asserted; printed): a gated residual 4, a GDN layer 84, a QSA layer 73 +
+    // score / select (sparse rows) + flash (dense rows) + sparse (sparse rows), the PLE layer + 31, device 0 + 1
+    const size_t gdn = 2 * 4 + 32 + 1 + 10 + 6 + 27, qsa = 2 * 4 + 26 + 2 + 3 + 1 + 6 + 27, ple = 1 + 1 + 26 + 3;
+    CHECK_EQ(gdn, size_t(84));
+    CHECK_EQ(qsa, size_t(73));
+    CHECK_EQ(rq::pf_batches_gu(ours), 7u);
+    CHECK_EQ(rq::pf_batches_dn(ours), 4u);
+    CHECK_EQ(rq::pf_batch_blocks_gu(ours), 81u);
+    CHECK_EQ(rq::pf_batch_blocks_dn(ours), 163u);
+    CHECK_EQ(rq::pf_tiles(ours, rq::kPfC), 1200u);
+    CHECK_EQ(rq::pf_dense_rows(0, 2048), 2048u);
+    CHECK_EQ(rq::pf_dense_rows(1000, 2048), 1051u);
+    CHECK_EQ(rq::pf_dense_rows(2000, 2048), 51u);
+    CHECK_EQ(rq::pf_dense_rows(2048, 2048), 3u);
+    CHECK_EQ(rq::pf_dense_rows(4096, 2048), 0u);
+    CHECK_EQ(rq::pf_dense_rows(2048, 2), 2u);
+    const Qwen4ExpDesc t4 = rq::truncated(ours, 4);
+    const Q4Placement one4 = Q4Placement::one(t4);
+    struct Case { uint32_t pos, C; size_t want; const char* what; };
+    for (const Case c : {Case{0, 2048, 1 + 3 * gdn + qsa + 1 + ple, "pos 0 (all dense)"},
+                         Case{2048, 2048, 1 + 3 * gdn + qsa + 4 + ple, "pos 2048 (3 dense, 2045 sparse)"},
+                         Case{4096, 2048, 1 + 3 * gdn + qsa + 3 + ple, "pos 4096 (all sparse)"},
+                         Case{2000, 300, 1 + 3 * gdn + qsa + 4 + ple, "pos 2000 (51 dense of 300)"}}) {
+      const size_t n = rq::prefill_chunk_launches(t4, one4, c.pos, c.C);
+      CHECK_EQ(n, c.want);
+      std::printf("21d: --layers 4 chunk at %s: %zu launches\n", c.what, n);
+    }
+    CHECK_EQ(rq::prefill_chunk_launches(t4, one4, 4096, 2048, true), 1 + 3 * gdn + qsa + 1 + ple);   // injected
+    const Q4Placement one48 = Q4Placement::one(ours);
+    const size_t n48_0 = rq::prefill_chunk_launches(ours, one48, 0, 2048), n48_s = rq::prefill_chunk_launches(ours, one48, 4096, 2048);
+    CHECK_EQ(n48_0, 1 + 36 * gdn + 12 * (qsa + 1) + ple);
+    CHECK_EQ(n48_s, 1 + 36 * gdn + 12 * (qsa + 3) + ple);
+    // two cards: device 0 ends with _Y_NN (+1); a split at the PLE layer: device 1's prologue folds nothing (-1)
+    const Q4Placement two = Q4Placement::two(ours, 24);
+    CHECK_EQ(rq::prefill_chunk_launches(ours, two, 4096, 2048), n48_s + 1);
+    CHECK_EQ(rq::prefill_chunk_launches(ours, Q4Placement::two(ours, 1), 4096, 2048), n48_s);
+    CHECK_EQ(rq::prefill_device_launches(ours, two, 0, 4096, 2048) + rq::prefill_device_launches(ours, two, 1, 4096, 2048),
+             n48_s + 1);
+    // the scratch: the score rows [kPfC][max_len / 4] fp32 and the 512 MiB weight batch are the largest terms
+    const Qwen4ExpDesc i18 = rq::truncated(intel, 18), i38 = rq::truncated(intel, 38);
+    const rq::PrefillSizes p32 = rq::prefill_sizes(i18, 32768), p128 = rq::prefill_sizes(i18, 131072);
+    CHECK_EQ(p128.scores, size_t(2048) * 32768 * 4);
+    CHECK_EQ(p128.total() - p32.total(), p128.scores - p32.scores);
+    CHECK_EQ(p32.w, size_t(512) << 20);
+    CHECK_EQ(p32.lists, size_t(4) * 2048 * rq::kListRow * 4);   // --layers 18: QSA layers 3, 7, 11, 15
+    CHECK(p32.w >= p32.xg && p32.w >= p32.scores);
+    CHECK(p32.total() > size_t(1.3e9) && p128.total() < size_t(2.2e9));
+    CHECK_EQ(rq::pf_landing_layout(ours).resid_bytes, size_t(2048) * 10240 * 2);
+    CHECK_EQ(rq::pf_landing_layout(ours).sumsq_bytes, size_t(0));
+    // the plan with prefill (Intel's forms, 32768): the prefill scratch is planned; the N that fit
+    const std::vector<rq::DevicePlan> pp = rq::plan(i18, Q4Placement::one(i18), 32768, true, false, false, true);
+    CHECK_EQ(pp[0].prefill_scratch, p32.total());
+    const uint32_t n1d = rq::layers_that_fit(intel, 1, 32768, true, false, kCard, kReserve, false);
+    const uint32_t n1p = rq::layers_that_fit(intel, 1, 32768, true, false, kCard, kReserve, true);
+    const uint32_t n2d = rq::layers_that_fit(intel, 2, 32768, true, false, kCard, kReserve, false);
+    const uint32_t n2p = rq::layers_that_fit(intel, 2, 32768, true, false, kCard, kReserve, true);
+    CHECK(n1p >= 1 && n1p <= n1d && n2p >= 1 && n2p <= n2d);
+    const Qwen4ExpDesc t1p = rq::truncated(intel, n1p), t2p = rq::truncated(intel, n2p);
+    CHECK(rq::fits(rq::plan(t1p, Q4Placement::one(t1p), 32768, true, false, false, true), caps, kReserve));
+    const Q4Placement p2p = rq::placement_for(t2p, 2, 32768, true, false, kCard, kReserve, true);
+    CHECK(rq::fits(rq::plan(t2p, p2p, 32768, true, false, false, true), caps, kReserve));
+    // --max-len auto with prefill planned at --layers 18 (one card) and 38 (two): the length that fits (0 if none)
+    const uint32_t len_d = rq::max_len_that_fits(i18, Q4Placement::one(i18), true, false, caps, kReserve, 0, false);
+    const uint32_t len_p = rq::max_len_that_fits(i18, Q4Placement::one(i18), true, false, caps, kReserve, 0, true);
+    const Q4Placement p38 = rq::placement_for(i38, 2, runtime::kMinAutoMaxLen, true, false, kCard, kReserve, true);
+    const uint32_t len_2p = rq::max_len_that_fits(i38, p38, true, false, caps, kReserve, 0, true);
+    CHECK(len_p <= len_d);
+    std::printf("21d: 48 layers one card %zu launches a chunk at pos 0, %zu all sparse (+1 on two cards); prefill scratch "
+                "--layers 18: %zu B at 32768 (scores %zu, weight batch %zu, xg %zu, GDN %zu, lists %zu), %zu B at 131072\n",
+                n48_0, n48_s, p32.total(), p32.scores, p32.w, p32.xg, p32.gdn, p32.lists, p128.total());
+    std::printf("21d: Intel's forms at 32768 with the int8 head: layers_that_fit one card %u decode-only / %u with "
+                "prefill, two cards %u / %u; max_len auto --layers 18 one card %u decode-only / %u with prefill; --layers "
+                "38 two cards (split %u) %u with prefill\n", n1d, n1p, n2d, n2p, len_d, len_p, p38.split, len_2p);
+  }
   std::printf("qwen4exp_plan_test OK: N at 32768 with Intel's forms = %u on one card, %u on two; the host PLE table "
               "%zu B (%.2f GB, bf16 scales) / %zu B (%.2f GB, f32); the full model refused naming spec 22\n",
               n_intel_1, n_intel_2, b16, b16 / 1e9, f32, f32 / 1e9);
