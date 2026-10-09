@@ -3303,8 +3303,14 @@ if(B70_Q4EXP)
     ${_q4snap_ids} cross)
   add_test(NAME qwen4exp_snapshot_gpu_intel_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_INTEL_SNAPSHOT}
     ${_q4snap_ids} layers:18 int8)
+  # spec 21e Task 3: the same with the MTP head (its tail, R, K / V and keys ride the snapshots; continuations at K = 2)
+  add_test(NAME qwen4exp_snapshot_gpu_synth_mtp_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt
+    ${_q4snap_ids} mtp)
+  add_test(NAME qwen4exp_snapshot_gpu_cross_mtp_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt
+    ${_q4snap_ids} cross mtp)
   set_tests_properties(qwen4exp_snapshot_gpu_synth_test qwen4exp_snapshot_gpu_synth_intel_test
     qwen4exp_snapshot_gpu_synth_pp_test qwen4exp_snapshot_gpu_cross_test qwen4exp_snapshot_gpu_intel_test
+    qwen4exp_snapshot_gpu_synth_mtp_test qwen4exp_snapshot_gpu_cross_mtp_test
     PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # Task 3: the MTP head and spec 8's lists. B70_Q4EXP_MTP_KERNELS is src/kernels/CMakeLists.txt's spec 21e block (the
@@ -3334,6 +3340,9 @@ if(B70_Q4EXP AND B70_MTP)
   endforeach()
   set(_q4mtp_reused ${B70_Q4EXP_DECODE_KERNELS} ${B70_Q4EXP_PREFILL_KERNELS} kernel_argmax_stage1_M2
     kernel_argmax_stage1_M3 kernel_argmax_stage1_M4)
+  if(TARGET qwen4exp_snapshot_gpu_test)   # its `mtp` mode binds the head's lists
+    add_dependencies(qwen4exp_snapshot_gpu_test ${B70_Q4EXP_MTP_KERNELS})
+  endif()
   # Host: the names the lists bind (kernels::qwen4exp verify / draft / mtp_prefill_variants) are built, the block's
   # binaries are all bound; the launch counts of every list (runtime::qwen4exp's).
   add_executable(qwen4exp_mtp_names_test kernels/qwen4exp_mtp_names_test.cc)
@@ -3342,5 +3351,38 @@ if(B70_Q4EXP AND B70_MTP)
   b70_target_kernel_dir(qwen4exp_mtp_names_test)
   add_test(NAME qwen4exp_mtp_names_test COMMAND qwen4exp_mtp_names_test ${B70_Q4EXP_MTP_KERNELS} --reused ${_q4mtp_reused})
   set_tests_properties(qwen4exp_mtp_names_test PROPERTIES LABELS qwen4exp)
+  # On the card (box only; SKIP 77 without the synthetic checkpoints / Intel's): qwen4exp_mtp_test - M1 the head
+  # against 21a's port on tools/oracle/qwen4exp_mtp_fixture.py's data (both norm forms; SKIPs without the fixture),
+  # M2 verify rows bitwise the plain steps, M3 greedy lossless at K = 1..3 (and the head off), the verify's cost and
+  # per-layer expert union; one card and two (pp2:2); Intel's --layers 18 when present.
+  add_executable(qwen4exp_mtp_test runtime/qwen4exp_mtp_test.cc)
+  target_include_directories(qwen4exp_mtp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(qwen4exp_mtp_test PRIVATE b70_qwen4exp_prefill b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(qwen4exp_mtp_test)
+  endif()
+  add_dependencies(qwen4exp_mtp_test ${B70_Q4EXP_MTP_KERNELS} ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS}
+    kernel_pp_handoff)
+  set(B70_Q4EXP_MTP_FIXTURE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-mtp" CACHE PATH
+    "tools/oracle/qwen4exp_mtp_fixture.py's M1 data: <dir>/<ours|intel>/mtp_{single,per_stream}.safetensors (box: r34.fixture)")
+  set(_q4m ${B70_Q4EXP_MTP_FIXTURE_DIR})
+  set(_q4m_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids)
+  add_test(NAME qwen4exp_mtp_synth_test COMMAND qwen4exp_mtp_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m}/ours ${_q4m_ids})
+  add_test(NAME qwen4exp_mtp_synth_intel_test COMMAND qwen4exp_mtp_test ${B70_Q4EXP_SYNTH_DIR}/intel/ckpt ${_q4m}/intel
+    ${_q4m_ids})
+  add_test(NAME qwen4exp_mtp_synth_eager_test COMMAND qwen4exp_mtp_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m}/ours
+    ${_q4m_ids} m2 m3)
+  set_tests_properties(qwen4exp_mtp_synth_eager_test PROPERTIES ENVIRONMENT "B70_Q4_ATTN=eager")
+  add_test(NAME qwen4exp_mtp_synth_fresh_test COMMAND qwen4exp_mtp_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m}/ours
+    ${_q4m_ids} m3)
+  set_tests_properties(qwen4exp_mtp_synth_fresh_test PROPERTIES ENVIRONMENT "B70_Q4_MTP_SELECT=fresh")
+  add_test(NAME qwen4exp_mtp_synth_pp_test COMMAND qwen4exp_mtp_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m}/ours
+    ${_q4m_ids} m2 m3 cost pp2:2)
+  add_test(NAME qwen4exp_mtp_intel_test COMMAND qwen4exp_mtp_test ${B70_Q4EXP_INTEL_SNAPSHOT} ${_q4m}/intel-L18 ${_q4m_ids}
+    layers:18 int8)
+  set_tests_properties(qwen4exp_mtp_synth_test qwen4exp_mtp_synth_intel_test qwen4exp_mtp_synth_eager_test
+    qwen4exp_mtp_synth_fresh_test qwen4exp_mtp_synth_pp_test qwen4exp_mtp_intel_test
+    PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # ==== Spec 21e: Qwen3.8-Flash-Next served ==== (end) ====
