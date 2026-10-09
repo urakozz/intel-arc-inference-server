@@ -897,6 +897,12 @@ in `tests/loader/ct/`.
   PLE shards, `mtp.*` without `--mtp`, the later layers with `--layers N` (N >= 2: the PLE layer is 1).
 - **The plan before the first allocation**: `runtime::qwen4exp::plan` + `require_fits` (weights + persistent
   state; the full model is refused naming spec 22's expert-offload tier).
+- **Serving (spec 21e) adds no loader code.** `b70-serve` loads through `load_qwen4exp` as `b70-decode` does
+  (`--layers N`, `--ple-dir`; `mtp = true` with `--mtp K` or `--spec lookup`, the head's bf16 experts RTN int4 g64 as
+  above), and the planner counts the head's buffers (Intel's forms at 32768: 18 layers on one card and 37 on two with
+  the head, decode-only). The one file it checks besides the weights is `tokenizer.json`: the served file must be
+  the original's (its split has `\p{M}`); Intel's checkpoint ships Qwen3.8's, so `b70-serve` refuses it and takes
+  `--tokenizer FILE`.
 
 ## Deliberately not loaded
 

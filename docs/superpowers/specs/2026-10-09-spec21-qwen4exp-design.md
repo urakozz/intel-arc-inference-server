@@ -2,7 +2,7 @@
 
 **Status:** design, 2026-10-09; the operator approved the design on 2026-10-08 (§0 records what was ruled).
 Open decisions are marked **(decide)**. Nothing is built.
-**Plans (2026-10-09, after the operator's approval that day; 21a built on the Mac, §12; 21b built on the Mac, §13; 21c built on the Mac, §14; 21d built on the Mac, §15):** `docs/superpowers/plans/2026-10-09-spec21{a,b,c,d,e,q}-*.md` - 21a reference, 21b descriptor / loader / formats, 21c decode, 21d prefill, 21e serving and MTP, 21q our AutoRound run; box queue rows 30-34.
+**Plans (2026-10-09, after the operator's approval that day; 21a built on the Mac, §12; 21b built on the Mac, §13; 21c built on the Mac, §14; 21d built on the Mac, §15; 21e built on the Mac, §16):** `docs/superpowers/plans/2026-10-09-spec21{a,b,c,d,e,q}-*.md` - 21a reference, 21b descriptor / loader / formats, 21c decode, 21d prefill, 21e serving and MTP, 21q our AutoRound run; box queue rows 30-34.
 
 **Model:** `Qwen/Qwen3.8-Flash-Next` (`Qwen4ExpForConditionalGeneration`, `model_type: qwen4_exp`; bf16,
 359,999,963,128 B in 1658 tensors). Intel's derived `Intel/Qwen3.8-Flash-Next-W4A16-AutoRound` (181.17 GB: routed
@@ -761,3 +761,127 @@ Mac results are **measured**.
   whole); prefill against decode's fill within the PROPOSED bars per layer, routes and selections equal except near-ties;
   F3 on prefill for both synthetics (Intel's `--layers 18` when 21a's data exists); two cards bitwise one; the speed rows
   (Task 5, opt-in).
+
+## 16. 21e as built (2026-10-09; the Mac - nothing on a card yet)
+
+Plan: `docs/superpowers/plans/2026-10-09-spec21e-qwen4exp-serving-and-mtp.md`, branch `spec21e-qwen4exp-serving`. Box
+validation: queue row 34. Every launch count and byte count below is **derived** (the tests assert the formulas); the
+Mac results are **measured**. The whole model is still refused (spec 22): everything here serves the synthetic
+checkpoints and Intel's truncated with `--layers N`.
+
+- **Built:** Task 1 - `tools/tokenizer/dump_qwen4exp.py` (run with transformers 5.19.0), the fixture
+  `tests/tokenizer/qwen4exp_tokenizer.json`, `qwen4exp_tokenizer_test`, `src/cli/qwen4exp_chat.h`
+  (`cli::qwen4exp::chat_options`), `qwen4exp_server_test`. Task 2 - the snapshot runs in `qwen4exp_sizes`
+  (`SnapTensor`, `SnapRun`, `state_runs`, `kv_runs`, `state_snapshot_bytes`, `kv_snapshot_bytes`),
+  `Qwen4ExpEngine::{save,load}_{state,kv}`, `qwen4exp_snapshot_test` (host, simulated devices) and
+  `qwen4exp_snapshot_gpu_test`. Task 3 - `src/kernels/qwen4exp/q4_mtp.cl`, the spec 21e block of
+  `qwen4exp_kernels.h` and `src/kernels/CMakeLists.txt` (**+122 binaries**), the MTP sizes / launches / buffers,
+  `Qwen4ExpEngine`'s draft / verify / commit and the prefill's head pass (`qwen4exp_capture.cc` now builds Decode,
+  Verify and Draft lists), `qwen4exp_mtp_names_test`, `qwen4exp_mtp_test`, `tools/oracle/qwen4exp_mtp_fixture.py`,
+  `qwen4exp_mtp.py accept`. Task 4 - `src/cli/qwen4exp_serve.h`, `b70-serve`'s dispatch (`serve_qwen4exp`; 21c's
+  refusal gone), `tests/cli/qwen4exp_adapter_compile.cc`, ten `cli_reject_serve_*` tests. Task 5 - `oracle_generate.py
+  --model qwen4exp`, `a4_ref.sh qwen4exp`, the batched reference test. Task 6 - queue row 34, `qwen4exp_oracle.sh
+  mtp-fixture | mtp-accept`, `tools/box_validate/decode_extra.sh`.
+- **Tokens and template.** The template is Qwen3.8's byte for byte (21a). **The tokenizer is not:** the original's
+  `tokenizer.json` (sha256 `0997f410...`) adds `\p{M}` to the pre-tokenizer's split; Intel's checkpoint ships Qwen3.8's
+  file (`06b95093...`). `qwen4exp_tokenizer_test` holds the Rust `tokenizers` crate on the original's file to
+  transformers 5.19.0's ids (24 cases, 3 of which Qwen3.8's file splits differently, + 10240 corpus lines / 167,899
+  ids) and the three chat renders (plain, thinking, a tool-call history) to the fixture; transformers 5.15 (the oracle
+  image) ignores the file's regex and builds Qwen2's, so every dump runs on 21a's 5.19.0 site. `b70-serve` refuses a
+  `tokenizer.json` without the mark class (`cli_reject_serve_qwen4exp_tokenizer`) and takes `--tokenizer FILE` (the
+  original's, a few MB) for Intel's checkpoint. The request path is the Qwen one unchanged (`ChatFormat::Kind::Qwen`,
+  XML tool calls, `<think>`), EOS `[248046, 248044]`; decision 11 stays open - greedy unless the request asks (the
+  Qwen family's), `sampling_defaults` reset. `reasoning_effort` is not forwarded (as for Qwen3.8; a server-wide
+  follow-up). The A4 set re-rendered by the original's files is Qwen3.8's ids exactly (36 / 36: no scenario holds a
+  combining mark).
+- **Snapshots** (`qwen4exp_sizes.h`): the state at position p is one host layout whatever the placement - per layer in
+  layer order: GDN layers the fp32 recurrent state (3.15 MB) and the conv rows of the last 3 positions; QSA layers the
+  open block's raw indexer keys (positions `4 floor(p / 4) .. p - 1`, `kSnapTailRows` 3 rows) from the 8-slot tail
+  ring; the PLE layer's id history (p - 1, p - 2) and its 9 conv rows. Positions before 0 are **zero runs** (EOS ids,
+  zero conv rows: what a cold run reads), so a snapshot at pos 0 or 1 restores as a cold engine. **115.7 MB** a
+  snapshot at 48 layers (115,651,592 B), + 21,248 B with the head (its tail keys and **R_{p-1}**, the 4-stream H the
+  head's next step reads). The blocks: per position the KV rows of the 12 QSA layers + the compressed keys of complete
+  4-position blocks, **25,344 B a position** (51.9 MB a 2048-block), + 2,112 with the head (its KV and keys). Under
+  `--pp 2` the runs are the same bytes in the same order, each read from the device that holds its layer (the head
+  on the last) - `qwen4exp_snapshot_test` round-trips 4 and 8 layers over every placement bitwise on simulated
+  devices. On the card (`qwen4exp_snapshot_gpu_test`): saves at block ends 2048 / 4096 and request ends 2049-2052,
+  5000, 1; restored into a fresh engine the continuation is held bitwise to a cold run's (logits, GDN state, rings,
+  tails, keys, KV; with the head its R, KV, keys and a K = 2 speculative continuation); `cross` saves under `--pp 2`
+  and restores under `--pp 1` and back.
+- **The MTP head** (vLLM's form, decision 1; `src/kernels/qwen4exp/q4_mtp.cl`): `q4_mtp_norm` (grid (5, M): the
+  embedding's gemma RMS over 2560 and `pre_fc_norm_hidden` - one RMS over 10240 under `MTP_NORM_SINGLE`, decision 4's
+  default, or per stream) and `q4_mtp_fuse` (grid (40, M): `fc` over [e; h] per stream, `e` injected into every
+  stream); then 21c's QSA layer, MoE (its experts RTN int4 g64 at load) and final mixer, the shared head. Read at
+  construction: `B70_Q4_MTP_NORM=single|per_stream`, `B70_Q4_MTP_SELECT=reuse|fresh` (anything else throws).
+  - **Draft** (last device only): step 0 scores and selects, steps 1..k-1 bind step 0's list (decision 5 =
+    vLLM's opt-in `index_share_for_mtp_iteration`, kept as the default and recorded; `fresh` selects every step):
+    27 launches a step (26 eager), + 2 when it selects; **29 / 27** at `--layers 4`.
+  - **Verify at M = K + 1** (every device): 21c's decode list at M rows - every kernel row-independent, each row's own
+    selection and top-10, the GDN state through per-layer slots - + 2 on the PLE layer when M > 1 + the head's KV
+    pass (10 + M) on the last device: **790 / 793 / 794 / 795** launches at M = 1 / 2 / 3 / 4 at 48 layers (778-783
+    eager), 390 + 401 (M = 1) on two cards; **86 / 91** at `--layers 4` (M = 1 / 4; plain decode 75). An iteration at
+    K = 3: 878 launches for up to 4 tokens (plain: 779 a token).
+  - **The head runs one position behind:** its KV at q comes from (R_q, t_{q+1}), so after a verify it is valid to
+    pos - 2 and the head's row 0 is R_{pos-1}; verify rewrites the head KV for its rows, prefill fills it by a head
+    pass per chunk (27 launches: `q4_mtp_M2048_*_PF` + the head's k‖v slab, the indexer and the ring over the chunk's
+    R rows `[C + 1][10240]`).
+  - **Two cards:** the head lives on device 1 and reads device 0's embedding over peer (no 2.54 GB copy - Qwen3.8's
+    two-card head copies it); draft lists are exempt from the link requirement (they never cross).
+  - The memory plan counts the head's buffers: Intel's forms at 32768 fit 18 layers on one card and 37 on two with
+    the head (decode-only; 18 / 38 without).
+- **Serving** (`src/cli/qwen4exp_serve.h`, `b70_serve.cc`'s `serve_qwen4exp`): before the device -
+  `cli::qwen4exp::check_serve` refuses the whole model (no `--layers`, naming spec 22), `--mtp auto` (naming spec 22's
+  numbers), `--spec mtp` without `--mtp K`, `--draft-vocab`, `--kv-cache int8`, `--prefill-backend l0-int8 |
+  sycl-tla`, `--pipeline-split` without `--pp 2`, Qwen3.8's tokenizer; `--layers`, `--ple-dir`, `--tokenizer` are
+  refused for any other model. Then the planner (the prefill scratch always; the head with `--mtp K` or `--spec
+  lookup`), the load, the engine and spec 16d's `cli::pp::PipelineEngineAdapterT<Qwen4ExpEngine>` - greedy and
+  sampled acceptance, the prefix cache over the snapshots, `--spec lookup` through the same verify lists. No third
+  copy of the speculative loop: the adapter's header names the engine's interface and the explicit instantiation
+  compiles (Level Zero syntax on the Mac). `b70-decode --mtp` is refused naming `b70-serve --mtp K`.
+- **F5 as built** (`qwen4exp_mtp_test`): M1 against 21a's port on `qwen4exp_mtp_fixture.py`'s data (the engine at
+  pos 1, R_0 replaced by the fixture's R_i through `write_mtp_R`, `draft(3)` against `chain(R_i, [t_i], 3)`; logits
+  and the last pre-mixer H at cosine >= 0.9999, PROPOSED; ids tie-aware) for both norm forms; M2 verify rows at M =
+  2..4 bitwise the plain steps (logits, routes, every QSA layer's selection, K / V, the GDN slot) on a short prompt and
+  on 2100 ids; M3 greedy lossless at K = 1..3 and with the head off; the cost (a draft step, a verify at K = 0..3) and
+  the per-layer union of experts over the verify rows (`read_verify_routes`, spec 22 P0.6's MTP term), recorded.
+- **Decision 4's acceptance** comes from the CPU reference until spec 22: `qwen4exp_mtp.py accept` (teacher-forced
+  greedy acceptance by depth, K <= 3, the engine's RTN head, reuse and fresh selection, per norm form) on Intel's
+  checkpoint is r34.accept - **not run** (hours on the box CPU). The synthetic checkpoints' drafts are random: no
+  rate is read from them.
+- **A4 for spec 22** (Task 5): `a4_ref.sh qwen4exp set` (the original's small files, 5.19.0) and `ref`
+  (`oracle_generate.py --model qwen4exp`: `qwen4exp_ref.py` streamed on Intel's checkpoint, 192 ids, the PLE from
+  the int8 file when present). On the Mac: the set (36 / 36 Qwen3.8's ids) and the tiny model's one scenario; the
+  batched path is bitwise the sequential (ids and 30 logits rows over batch 2 / 3 / 5 and resident). The reference on
+  Intel's checkpoint is r34.a4_ref; the engine's run is spec 22's.
+- **Departures from the plan:**
+  1. **The tokenizer is the original's, not Qwen3.8's** (the plan assumed 21a found both identical): a fixture test
+     instead of a hash identity, `--tokenizer FILE` and the refusal; `tests/model/qwen4exp-q38tok` is the refused stub.
+  2. The state layout carries the head's **R_{p-1}** (`SnapTensor::MtpHidden`) - the head's next step reads it -
+     and `SnapRun` gains `pad` / `zero` runs (positions before 0, the per-device padding of the snapshot buffers).
+  3. **The GDN slots are per layer** (`gdn_step_slots_M<M>_G1`, `SPEC_SLOT_STRIDE` 786,432 floats, `gdn_spec`
+     layer-major) instead of Qwen3.8's per-model binaries: the layers' GDN states are not one contiguous array here.
+  4. **The PLE layer at M > 1 runs 21d's `q4_pf_ple` at C = 4** (`q4_pf_ple_C4`: three launches for the decode
+     block's one - `q4_ple_block` is M = 1 only): + 2 launches a verify.
+  5. `B70_Q4_MTP_SELECT=reuse|fresh` added so decision 5's both modes are measurable; the prefill's head pass
+     uses only the head's k‖v slab (its q and the attention are not needed to fill KV and keys).
+  6. M1 samples are position-0 heads with the fixture's R written in (`write_mtp_R`), not mid-prompt rows; test-only
+     engine hooks `write_mtp_R`, `read_mtp_R`, `read_gdn_slot`, `read_verify_selection`, `read_mtp_kv`,
+     `read_mtp_idx_keys`, `read_draft_{selection,routes,H}`.
+  7. The acceptance CLI is `qwen4exp_mtp.py accept` (21a's `accept()` over sources and the golden continuations).
+  8. The head-KV row `end - 1` of a block entry is not valid at save time (the next head pass rewrites it): drafts
+     after a restore may differ from a cold run's at that one row, outputs do not (Qwen3.8's precedent, spec 8 §7).
+  9. The injected run (21c's `set_injector`) is refused with the head on.
+  10. Two-card draft lists bind device 0's embedding by peer pointer (above), and are exempt from the link check.
+- **Mac gates (measured):** `qwen4exp_tokenizer_test`, `qwen4exp_server_test`, `qwen4exp_snapshot_test`,
+  `qwen4exp_mtp_names_test` (171 names bound, 122 built by the block, 76 reused by name), `qwen4exp_plan_test` PASS;
+  the adapter instantiation and every changed source through the Level Zero syntax check; OpenCL syntax of every
+  new variant; `test_qwen4exp_mtp.py` (the RTN engine format, the accept CLI on the tiny model),
+  `test_oracle_generate.py` (9), `test_oracle_batched.py test_qwen4exp`, `test_box_validate.py` (22) PASS;
+  kernel_cmdlines +122 / -0 / ~0 (815 variants); `tools/mac_check.sh --base main --quick --kernels` exit 0
+  (host 85 pass / 0 fail, l0 28 / 0, opencl 797 / 0, kernels 9 agree). q4_mtp has no Mac clrun path: it is checked by
+  OpenCL syntax only and first runs in r34.mtp's M1.
+- **What row 34 must prove:** every binary's first compile (122) with G0 unchanged; F4 on the prefix cache (restores
+  bitwise on one card, across placements on two); F5 M1 (after r34.fixture), M2, M3 on one card and two; the verify
+  cost and the expert union recorded; the server's greedy chat = `b70-decode --layers 4 --prefill`, plain and `--mtp
+  2`, and the prefix-cache repeat identical to a cache-off server; the reference's acceptance for both norm forms
+  (r34.accept, decision 4) and the A4 reference (r34.a4_ref) ready for spec 22.

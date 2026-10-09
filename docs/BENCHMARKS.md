@@ -859,6 +859,24 @@ the vLLM baseline's and every row says how (spec 18 Review Focus 4).
 | llama-benchy prefix caching, follow-up after 4k / 16k / 32k | cache on vs off | pending | r25.benchy |
 | **vLLM baseline** | **two** B70s, PP = 2 (layers 25 / 23), fp8 KV, 390,016-token context | **44.43 t/s decode** (measured 2026-09-16, spec 18 §7) | - |
 
+## Qwen3.8-Flash-Next (spec 21)
+
+**Nothing here is measured yet.** Qwen3.8-Flash-Next (`qwen4_exp`) runs its own engine (specs 21b-21e, built
+without the card) and only **truncated** (`--layers N`) until spec 22's expert-offload tier runs the whole
+model: every row below is on Intel's interim checkpoint (`Intel/Qwen3.8-Flash-Next-W4A16-AutoRound`) cut to the
+layers that fit, or on the synthetic checkpoints (4 real-width layers), and says which. The whole model's rows
+(decode and prefill speed, A4, passkey, llama-benchy, the engine's MTP acceptance) are spec 22's.
+
+| what | configuration | number | stage |
+|---|---|---|---|
+| prefill pp4096 / pp32768 | Intel's, `--layers 18` one card / `37` two (`--pp 2`), l0, int8 head; flash vs eager at 32768 | pending | r33.speed |
+| prefill pp131072 | Intel's, `--layers auto` (the planner's N) | pending | r33.speed |
+| the PLE gather from host USM | us a token, the implied bus rate, one card / the other / both | pending (spec 22 P0's first number) | r32.ple_rate |
+| MTP verify cost | M = 1..4 against a plain step, ms; a draft step; synthetic `--layers 4` and Intel's `--layers 18` | pending (launches 86-91 at 4 layers, 790-795 at 48, derived) | r34.mtp |
+| MTP verify: experts a layer | the union over the K + 1 = 4 verify rows (spec 22 P0.6's MTP term) | pending | r34.mtp |
+| MTP acceptance by depth, K <= 3 | the CPU reference on Intel's checkpoint, teacher-forced greedy, the engine's RTN head; `pre_fc_norm_hidden` single / per stream (decision 4), selection reused / fresh (decision 5) | pending (the engine's is spec 22's) | r34.accept |
+| prefix-cache snapshot | bytes and a restore's continuation, 48 layers | 115.7 MB state + 25,344 B a position (+ 21 KB / 2,112 B with the head; derived); restore bitwise pending | r34.snapshot |
+
 ## Correctness
 
 Numerics are gated, not eyeballed. The full protocol is in
