@@ -39,6 +39,13 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `k2_ref.py` | Spec 18a: the K2-Horizon CPU reference - a plain-torch port of the checkpoint's `modeling_k2_horizon.py`, layer at a time, bf16 or int4 GPTQ checkpoints by name; `run` (golden file + MoE / MoVA routing dumps), `hfcheck` (against the vendored HF model, layer-streamed), `facts`. `test_k2_ref.py` checks it on tiny random weights. "The K2-Horizon reference" below. |
 | `ornith_ref.py` | Spec 15a: Ornith 1.5 35B-A3B from its **int4** checkpoint - transformers' `Qwen3_5MoeForCausalLM`, layer-streamed, the routed experts dequantised on demand; `run` (golden file + every layer's router / shared-gate logits and routes, and with `--mtp-out` the MoE MTP head's M1 reference), `facts` (the checkpoint facts spec 15 §13 rests on). `test_ornith_ref.py` checks it on tiny random weights; `ornith_golden.sh` is the Mac run. "The Ornith reference" below. |
 | `kolibri_ref.py` | Spec 20a: the Kolibri-1 reference - layer at a time, bf16 or int4 GPTQ by name (sandwich norms, RoPE sliding / NoPE full layers, window 513 incl. the query, fp32 router on logit + expert_bias with sigmoid weights, ungated shared expert, fp32 head); `run`, `ppl`, `hfcheck`, `facts`, layer-major `run_batch` (the quantisation script's coverage and eval). `test_kolibri_ref.py` (KL0, 21 tests): the transformers port == it bitwise. Facts: `docs/probe-kolibri-2026-10-05.md`. |
+| `qwen4exp_ref.py` | Spec 21a: the Qwen3.8-Flash-Next (`qwen4_exp`) CPU reference - transformers **5.19.0**'s own `Qwen4ExpForCausalLM` (refused on another version), layer-streamed, the QSA indexer's block keys cached (bitwise transformers' per-query recomputation), the PLE table by mmap (bf16 shards or 21b's int8 file), routed experts lazy in every form (fused bf16, int4 g128 / g64, per-expert); `run` (golden layout), `ppl`, `hfcheck`, `trace` (spec 22's routing traces), `facts`; `expected_names`, `PleTable`, the restated ops 21b / 21c import. `test_qwen4exp_ref.py` (F1, bitwise on the tiny model). "The Qwen3.8-Flash-Next reference" below. |
+| `qwen4exp_mtp.py` | Spec 21a Task 4: the MTP head from vLLM's semantics on transformers' modules (`MtpHead.step`, `chain`, `accept`, `trace_routes`); `test_qwen4exp_mtp.py` holds it to an independent build. |
+| `qwen4exp_env.sh`, `qwen4exp_requirements.txt` | transformers 5.19.0 + tokenizers 0.23.2 `pip --no-deps --target <dir>` beside the oracle image (the image is never changed); `PYTHONPATH=<dir>` first. |
+| `qwen4exp_tiny_check.py` | Spec 21a Task 1: the tiny model end to end in 5.19.0 (the layer-type remap, the experts implementation, cached vs uncached, the selection past 2051). |
+| `qwen4exp_facts.py` | Spec 21a Task 2: the checkpoint facts from small files and headers (local or `hf:REPO` by range requests, no torch): config, the PLE head table and I64 constants against the formula, tensor groups, Intel's quantization_config and qzeros, tokenizer / template, derived bytes. `docs/probe-qwen4exp-2026-10-09.md`. |
+| `qwen4exp_make_tiny.py` | Tiny `qwen4_exp` variants for the tests (hidden 128, any layer pattern, the four checkpoint forms, tied router rows, `mtp.*`, a dequantised twin) and 21b's int8 PLE file writer. |
+| `qwen4exp_prompts.py` | Spec 21a Task 5: `tests/golden/prompts/q4exp_*.ids` from the original's tokenizer (re-checks Qwen3.8's ids; renders `q4exp_agentic.json` through the checkpoint's template). |
 | `third_party/kolibri1/` | Our transformers 5.x port `Kolibri1ForCausalLM` (from Aleph Alpha's vLLM plugin `aleph-alpha-inference` @ `049a6a7b`, Apache-2.0) - what AutoRound loads (`tools/quantize_kolibri1.sh`) - with the checkpoint's `config.json`, `generation_config.json`, `tokenizer_config.json` and the chat template, unmodified. |
 | `kolibri_fixture.py` | Spec 20c Task 1: `kolibri_ref.py`'s own functions (rms_norm, q/k norm + RoPE, route, the combine, eager attention) on hash inputs at the real widths, written as `tests/kernels/kolibri_fixture.h` for `kolibri_ref_test` / `kolibri1_rope_test`; no checkpoint, seconds - the docker line is in its docstring. |
 | `kolibri_chat_ids.py` | Spec 20c Task 1: a chat-formatted golden prompt's ids through the checkpoint's own template (`apply_chat_template(messages, tools, add_generation_prompt, reasoning_effort)`) - `de_chat`'s, for `tools/box_validate/kolibri_oracle.sh real`. |
@@ -618,6 +625,111 @@ docker run --rm --cpus 2 --memory 6g -v "$PWD":/ws -w /ws -e HF_HOME=/tmp/hf \
 The real run - download first (plan 15a has the disk / RAM / time figures), then
 `tools/oracle/ornith_golden.sh` (detached, resumable, 28 GB cap, `facts` first) and
 `tools/oracle/ornith_golden.sh --status`.
+
+### The Qwen3.8-Flash-Next reference (spec 21a, 2026-10-09)
+
+`qwen4exp_ref.py` runs **transformers 5.19.0**'s own `Qwen4ExpForCausalLM` (decision 1; it refuses any
+other version) - eager attention, the `grouped_mm` experts implementation (5.19.0's default), bf16 -
+layer-streamed (`stream.attach`) on any of the forms: the original's fused bf16 experts (sliced per
+expert), Intel's per-expert int4 g128 / our g64 (`stream.dequant_t`: `bf16(float(q - 8) x float(scale))`,
+qzeros checked to be 0x77777777), the tiny model's per-expert fp32. Both name forms are read
+(`model.language_model.*` and the tiny's `model.layers.*`); `mtp.*` and `model.visual.*` are not part of it.
+Three pieces Ornith did not need:
+
+- **the PLE table is never materialised** (102.4 GB): `ngram_embedding` is replaced by `PleLookup`, 16 rows
+  a token by numpy memmap from the shards, or from 21b's int8 file (`--ple int8:<dir>`: per head
+  `ple.h<h>.q` I8 / `ple.h<h>.s`, a row is `bf16(float(q) x float(s))` - the engine-format reference).
+  transformers' own hash makes the ids from the checkpoint's I64 buffers; a gather has no rounding.
+- **the QSA indexer caches each complete block's key** (fp32 mean of 4 raw keys -> bf16 -> `k_layernorm`
+  -> RoPE at the block start) beside the cache instead of recomputing every block for every query; the
+  per-query scores are the same matmul at the same shapes, so the selection and the attention are
+  transformers' bit for bit (`test_indexer_cache_bitwise`; on real weights `hfcheck`).
+- **the MTP head** (`qwen4exp_mtp.py`), which transformers drops: vLLM's wiring on transformers' own
+  `Qwen4ExpTextDecoderLayer` - `fc_embedding(norm(embed))` added at unit weight to every stream of
+  `fc_hidden` applied per stream to the ONE-RMS-over-10240 normed main pre-mixer hidden
+  (`MtpHead(norm="per_stream")`: decision 4's alternative), the head's own QSA layer and 512 experts, its own final mixer ->
+  the shared `lm_head`; it returns the logits and its pre-mixer hidden (the next draft step's R). Steps
+  >= 2 reuse step 1's token list when `share_sel` (decision 5, ruled) - **vLLM's default is a fresh
+  selection per step** (its reuse is the opt-in `index_share_for_mtp_iteration`, absent from the
+  checkpoint's config): see the facts sheet. `chain` drafts k steps from every row; `accept` is
+  mtp_accept.py's teacher-forced acceptance; `trace_routes` the head's step-1 routes.
+
+The image never changes: `tools/oracle/qwen4exp_env.sh <dir>` installs 5.19.0 + tokenizers 0.23.2 with
+`pip --no-deps --target <dir>` (inside the container, so the wheels match its Python) and every command
+runs with `PYTHONPATH=<dir>` first (Mac: `oracle-out-q4exp/site`; box: `<tree>/oracle-out-q4exp-site`).
+Facts: `docs/probe-qwen4exp-2026-10-09.md` (`qwen4exp_facts.py`, torch-free, reads a snapshot or
+`hf:REPO` by range requests).
+
+Subcommands: `run <snapshot> --prompt <ids> --out <p>.golden.safetensors [--gen 32] [--layers N] [--ple
+bf16|bf16:<snap>|int8:<dir>] [--chunk C] [--logits-tail L] [--act-tail A]` (the golden layout is in the
+module docstring: `H.L*` / `mixer.L*` / `moe.L*` for the last A prompt rows and every generated row,
+`route.{ids,w,gap}.L*` for every row - ids in the router's topk order, which is the `grouped_mm`
+combine's slot order -, `qsa.sel.L*` for rows >= 2051 and `qsa.gap.L*` for every row, `ple.ids`, the
+last L rows' logits, `tokens`, `nll`; long prompts are prefilled in chunks of 2048 through the cache,
+which is transformers' own chunked forward - `test_chunked_prefill_equals_hf`); `ppl`; `hfcheck <snapshot>
+--layers N` (transformers' own per-query indexer against the cache, bitwise or exit 1); `trace` (Task 7,
+below); `facts`. `--layers N` truncates the reference identically to the engine's development mode; a
+cached run needs N >= 4 (transformers' `DynamicCache` takes the length from an attention layer) and N >= 2
+for the PLE layer.
+
+Tests (Mac, `agnes-ref-img` capped at 8 GB / 4 CPUs, the tiny model in `oracle-out-q4exp/tiny` or the HF
+cache; measured 2026-10-09 on the Mac shared with another 16-core container: the reference suite about
+an hour - the 2100-row bf16 eager forwards dominate -, the MTP suite ~10 min, all pass):
+
+```bash
+# from the repo (or worktree) root on the Mac, once: the 5.19.0 site
+docker run --rm --memory 8g --cpus 4 -v "$PWD":/ws -w /ws agnes-ref-img:latest \
+  tools/oracle/qwen4exp_env.sh oracle-out-q4exp/site
+# the tests (TORCH_EXTENSIONS_DIR keeps dequant_t's compiled extension between runs)
+docker run --rm --memory 8g --memory-swap 8g --cpus 4 -e OMP_NUM_THREADS=3 -e HF_HUB_OFFLINE=1 \
+  -e PYTHONPATH=/ws/oracle-out-q4exp/site -e TORCH_EXTENSIONS_DIR=/ws/oracle-out-q4exp/torch-ext \
+  -v "$PWD":/ws -w /ws agnes-ref-img:latest sh -c \
+  'python3 tools/oracle/test_qwen4exp_ref.py && python3 tools/oracle/test_qwen4exp_mtp.py'
+```
+
+`test_qwen4exp_ref.py` (F1): the streamed port = transformers un-streamed **bitwise** on the tiny model in
+bf16 and fp32 (40 and 2100 ids + 8 cached decode steps: logits and every layer's 4-stream residual), in
+chunks of 512, at rows 2047..2060 of the indexer (prefill and decode); one test per trap - the HC rounding
+chain (restated ops = the module, a whole GDN layer recomposed), PLE ids (EOS at 0 / 1 / 5 / twice, left
+padding, a decode boundary, the I64 constants = the formula), the sigmoid gate, the v-head map `h // 3`,
+router ties (16 experts top-4 with two identical router rows: `route.gap == 0` exactly where the pair
+straddles the cut - and torch did NOT always pick the lower id), `--layers N`, int4 g128 / g64 (the
+dequant rule; the forward = transformers on the dequantised twin), the original's fused experts, the int8
+PLE file, the real checkpoints' names = `expected_names` (from `oracle-out-q4exp/meta/{orig,intel}` - their
+config + index - when present), the trace = the run's routes, the CLI (`run`'s layout, `hfcheck`, `facts`).
+`test_qwen4exp_mtp.py`: the head = an independent build from transformers' modules (with transformers' own
+per-query indexer) wired as `V/nvidia/mtp.py` reads, bitwise for step 1 over every row and step 2 from three
+rows, both norm forms; unit injection, fc_hidden per stream, skip_topk, the pre-mixer hand-off, the norm
+forms differ, acceptance and the head's trace routes. `qwen4exp_make_tiny.py` writes the variants (hidden
+128, any layer pattern, experts / top-k, forms tiny / bf16 / intel / ours, tied router rows, `mtp.*`, a
+smaller indexer budget, a dequantised twin, 21b's int8 PLE file).
+
+**The real runs (box CPU, queue row 30)**: `tools/box_validate/qwen4exp_oracle.sh <data tree> tests | tiny |
+intel | intel-layers N | ours | ppl | hfcheck | trace` (kolibri_oracle.sh's shape: per prompt resumable,
+`MemAvailable` floor 64 GB for real weights, exit 77 without the snapshot; `DRY_RUN=1` prints every command
+and the ESTIMATED times). Golden prompts: `tests/golden/prompts/q4exp_{short,4k,8k,32k,agentic}.ids`
+(`qwen4exp_prompts.py`, from the original's tokenizer; `q4exp_agentic.json` is an original coding session on
+this repo through the checkpoint's template). RAM / time per prompt are ESTIMATED until row 30 measures them
+(the table is in the script's DRY_RUN output: ~10 min for `q4exp_short` to ~1.5-2 h for `q4exp_32k`).
+
+#### The routing traces (spec 22 P0.6 / P0.8's input)
+
+`qwen4exp_ref.py trace <snapshot> --source NAME:IDS ... [--opencode DIR] --out <dir> [--batch 8] [--chunk
+2048]`: one teacher-forced forward per source (no generation), layer-major across the batch (one pass reads
+each layer's weights once for all sources; chunks through each source's own cache), written as
+`<dir>/<name>.routes.safetensors` (sources already written are skipped):
+
+| tensor | dtype / shape | what |
+|---|---|---|
+| `ids` | i32 [T][L][k] | each row's top-k per layer, **ascending expert id** |
+| `p` | f32 [T][L][k] | the router's renormalised probabilities in fp32 (before the bf16 cast), aligned with `ids` |
+| `onorm` | f32 [T][L][k] | the L2 norm of each routed expert's output (bf16, before the routing weight) - REAP's `\|\|f_e(x)\|\|`, read from `grouped_mm`'s own down projection |
+| `mtp_ids`, `mtp_p`, `mtp_onorm` | [T][k] | the MTP head's step-1 routes on (R_t, t+1) when the checkpoint has `mtp.*`; row T-1 has no next token (-1 / 0) |
+
+Metadata: model, checkpoint path and revision, transformers, source, T, layers, top-k, experts, chunk, and
+the format line. REAP's score for (layer, expert) is the mean over the rows that route to it of `p x onorm`
+(spec 22 P0.8); the hit-rate curves (P0.6) need only `ids`. `test_trace_equals_run`: the trace's routes are
+the sequential run's, and three sources batched equal each alone.
 
 ### The A4 reference, batched (2026-10-08)
 
