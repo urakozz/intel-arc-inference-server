@@ -43,12 +43,27 @@
 #if !defined(TOPB) || !defined(SEL_WG) || !defined(LIST_ROW) || !defined(COUNT_W)
 #error "q4_qsa: TOPB, SEL_WG, LIST_ROW and COUNT_W must be defined (kernels::qwen4exp)"
 #endif
-#if M < 1 || M > 4
+// Spec 21d: -DQSA_PF builds the PREFILL form at M = C (kernels::qwen4exp::kPfC): the indexer GEMM's rows arrive at
+// the prefill GEMM's pitch IDX_LD = pf_ld(640) = 768, and q4_qsa_prep writes NO tail-ring slot - a 2048-row launch's
+// rows would overwrite slots (p % 8) its first rows still read for the block that straddles pos - so the ring is
+// updated by its own launch, q4_qsa_ring, after the prep: the last min(8, C) raw keys, what decode's ring holds
+// after the same ids. Unset (every 21c binary), IDX_LD is IDX_N and the tail write is the prep's, token for token
+// (commit 9a67889's rule: the preprocessed source of every existing binary is unchanged).
+#ifdef QSA_PF
+#if M < 1 || M > 2048
+#error "q4_qsa: the prefill form is M = 1..2048 (kernels::qwen4exp::kPfC)"
+#endif
+#elif M < 1 || M > 4
 #error "q4_qsa: M is 1..4 (the 8-slot tail ring holds a 4-row launch)"
 #endif
 #define IDX_HEADS 4
 #define IDX_DIM 128
 #define IDX_N 640
+#ifdef QSA_PF
+#define IDX_LD 768          /* pf_ld(640): runtime::qwen4exp::pf_ld */
+#else
+#define IDX_LD IDX_N
+#endif
 #define BLK 4
 #define TAIL 8
 #define ROT_HALF 32
@@ -109,26 +124,46 @@ __kernel void q4_qsa_prep(__global const uint* restrict ctrl, __global const flo
   const uint pos = ctrl[CTRL_POS];
   const uint p = pos + m;
   if (h < IDX_HEADS) {
-    const float x = rf(idx_f32[(size_t)m * IDX_N + h * IDX_DIM + i]);
+    const float x = rf(idx_f32[(size_t)m * IDX_LD + h * IDX_DIM + i]);
     idx_q[((size_t)m * IDX_HEADS + h) * IDX_DIM + i] =
         norm_rope(v, red, x, small + IDX_QNORM_OFF, rope + (size_t)p * 2 * ROT_HALF, i);
     return;
   }
-  const ushort raw = rne_bf16(idx_f32[(size_t)m * IDX_N + IDX_HEADS * IDX_DIM + i]);
+  const ushort raw = rne_bf16(idx_f32[(size_t)m * IDX_LD + IDX_HEADS * IDX_DIM + i]);
   if ((p + 1) % BLK == 0) {   // uniform: row p completes block b
     const uint b = (p + 1) / BLK - 1;
     float k4[BLK];
     for (uint j = 0; j < BLK; ++j) {
       const uint q = b * BLK + j;
-      k4[j] = q >= pos ? rf(idx_f32[(size_t)(q - pos) * IDX_N + IDX_HEADS * IDX_DIM + i])
+      k4[j] = q >= pos ? rf(idx_f32[(size_t)(q - pos) * IDX_LD + IDX_HEADS * IDX_DIM + i])
                        : bf16f(tail[(size_t)(q % TAIL) * IDX_DIM + i]);
     }
     const float mean = rf((((k4[0] + k4[1]) + k4[2]) + k4[3]) / 4.0f);
     const float o = norm_rope(v, red, mean, small + IDX_KNORM_OFF, rope + (size_t)(b * BLK) * 2 * ROT_HALF, i);
     idx_keys[(size_t)b * IDX_DIM + i] = rne_bf16(o);
   }
+#ifndef QSA_PF
   tail[(size_t)(p % TAIL) * IDX_DIM + i] = raw;
+#else
+  (void)raw;   // q4_qsa_ring writes the ring after this launch
+#endif
 }
+
+#ifdef QSA_PF
+// q4_qsa_ring(ctrl, idx_f32, tail)   grid (1, TAIL), WG 128 - the prefill form's ring update: work-group y writes the
+// y-th of the chunk's last TAIL rows (fewer rows: only the last C), tail[(pos + m) % 8] = rne(idx_f32[m][512 + i]).
+__attribute__((reqd_work_group_size(WG_PREP, 1, 1)))
+__kernel void q4_qsa_ring(__global const uint* restrict ctrl, __global const float* restrict idx_f32,
+                          __global ushort* restrict tail) {
+  const uint y = get_group_id(1);
+  const uint i = get_local_id(0);
+  const uint C = n_rows(ctrl);
+  if (C + y < TAIL) return;   // uniform
+  const uint m = C + y - TAIL;
+  tail[(size_t)((ctrl[CTRL_POS] + m) % TAIL) * IDX_DIM + i] =
+      rne_bf16(idx_f32[(size_t)m * IDX_LD + IDX_HEADS * IDX_DIM + i]);
+}
+#endif
 
 // ---------------------------------------------------------------------------------------------------------------
 #define WG_SCORE 256
