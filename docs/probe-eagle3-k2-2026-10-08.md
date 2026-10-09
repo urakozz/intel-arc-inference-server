@@ -1,10 +1,11 @@
-# EAGLE-3 on K2-Horizon, P0 (Mac CPU), 2026-10-08 - STUB: semantics pinned, tools built
+# EAGLE-3 on K2-Horizon, P0 (Mac CPU), 2026-10-08 - verdict: no-go for this checkpoint (2026-10-09)
 
-**Status.** Step 1 (the drafter's semantics, pinned from source) and the tools are done and
-tested on tiny weights; **no result yet**. The run needs the drafter's `model.safetensors`
-(1.67 GB) and the K2 int4 checkpoint (22.2 GB) in the HF cache - the operator is downloading
-both - and K2's A4 reference continuations (`tools/toolcall/a4_ref.sh k2 ref`, hours). The
-results section below is to be filled from `oracle-out-eagle3-k2/summary.md`.
+**Status (2026-10-09).** The golden-prompt run is done (`oracle-out-eagle3-k2/summary.md`, 12:26):
+**no-go - the community drafter `Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3` is undertrained** (operator,
+2026-10-09) and loses to plain decode at every K; prompt lookup (spec 19e) is K2's speculative path. The
+A4 corpus (K2's A4 reference continuations) has not run; it is not expected to change the verdict (the
+32k draft vocabulary holds none of K2's tool-call markers). A good K2 EAGLE3 would be our own, trained on
+agentic traces with those markers in its vocabulary - out of scope until asked.
 
 **The question** (the operator chose "probe first"): is EAGLE-3
 ([`Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3`](https://huggingface.co/Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3),
@@ -43,9 +44,8 @@ from the routes) and how much better than UltraChat the agentic text accepts.
   runs (int8 / int8h / int4h quantise 8 / 9 / 9 linears), propose_batch == propose, every
   draft inside V'; 40-58 anchors/s for the 5-draft chain (int4h 17/s in that run: every arm
   computes in float32, so the spread is the shared CPUs'), 65-420 context rows/s.
-- **The embedding against K2's:** pending - K2's `model-00004-of-00005.safetensors` (it holds
-  `model.embed_tokens.weight`) is still downloading; `eagle3_ref.py facts --k2` compares the
-  sha256 of the two tensors' bytes the moment it is complete.
+- **The embedding against K2's: BYTE-IDENTICAL** (sha256 `f198e179...`, measured 2026-10-09 by
+  `eagle3_ref.py facts --k2` on the downloaded K2 int4 checkpoint) - an engine would share one copy.
 
 ## Sources read (Review Focus 1)
 
@@ -164,6 +164,27 @@ the driver refuses beside any other `agnes-ref-img` container unless `FORCE=1`).
 
 ## Results
 
-Pending: `oracle-out-eagle3-k2/summary.md` (acceptance per corpus and arm, lookup, verify /
-draft bytes, S_K at 4k and every depth) and `facts.log` (the drafter's tensors, the `d2t`
-check on the real file, its embedding against K2's bytes).
+Golden prompts only (prose / code / cjk with K2 greedy continuations of up to 128 ids, made by the batched
+resident generator; 267 anchors; teacher-forced, greedy, against K2's own argmax). Acceptance MEASURED;
+costs and S_K DERIVED (bytes, the engine bandwidth-bound), from `oracle-out-eagle3-k2/summary.md`.
+
+| proposer | E_1 | E_2 | E_3 | E_5 | per-position a_1..a_3 | S_1 / S_2 / S_5 @ 4096 | S_1 @ 32768 |
+|---|---:|---:|---:|---:|---|---|---:|
+| EAGLE3 bf16 | 1.232 | 1.292 | 1.296 | 1.296 | 0.23 / 0.06 / 0.00 | 0.917 / 0.798 / 0.560 | 1.035 |
+| EAGLE3 int8 | 1.228 | 1.288 | 1.292 | 1.292 | 0.23 / 0.06 / 0.00 | 0.936 / 0.824 / 0.591 | 1.047 |
+| EAGLE3 int8h | 1.232 | 1.292 | 1.300 | 1.300 | 0.23 / 0.06 / 0.01 | 0.956 / 0.852 / 0.629 | 1.062 |
+| EAGLE3 int4h | 1.232 | 1.292 | 1.300 | 1.300 | 0.23 / 0.06 / 0.01 | 0.966 / 0.867 / 0.648 | 1.069 |
+| prompt lookup | 1.262 | 1.498 | 1.712 | 2.082 | 0.26 / 0.24 / 0.21 | 1.180 / 1.335 / 1.677 | 1.215 |
+
+- **About half the card's acceptance** (0.44 / 0.17 on UltraChat): 0.23, then 0.06, then nothing. The 32k
+  draft vocabulary holds 0.875 of the continuation's ids - one in eight can never be drafted.
+- **The drafter's precision does not matter** (int8 / int4 = bf16 to 0.004).
+- **Speed-up below 1 at every K at 4096;** at 32k with int8 KV it scrapes 1.04-1.07 at K = 1 only.
+- **Prompt lookup wins** (1.18-1.68 at 4096, to 1.84 at 32k), almost all of it on the code prompt; prose
+  gets nothing from lookup (E_K = 1.00).
+
+**K2's routing locality (a by-product, MEASURED from the recorded routes):** M consecutive rows touch
+12.46 / 15.75 / 18.55 distinct MoE experts per layer at M = 2 / 3 / 4, against 15.36 / 22.13 / 28.36 for
+independent routing - so a verify costs 1.26 / 1.46 / 1.63 plain steps (int8 head; 1.13 / 1.23 / 1.31 at
+32k with int8 KV), not the iid prior's 1.41 / 1.78 / 2.12. This applies to every K2 speculative scheme,
+prompt lookup included (spec 19e's K2 cost row).
