@@ -3011,3 +3011,17 @@ add_test(NAME qwen4exp_load_intel_layers_test COMMAND qwen4exp_load_checkpoint_t
 set_tests_properties(qwen4exp_load_synth_ours_test qwen4exp_load_synth_intel_test qwen4exp_load_intel_layers_test
   PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 # ==== Spec 21b: Qwen3.8-Flash-Next descriptor and loader ==== (end) ====
+
+# ==== Spec 21c: Qwen3.8-Flash-Next decode (label qwen4exp) ==== (begin) ====
+# One delimited block for every 21c registration, after 21b's. Written blind on the Mac (box queue row 32): host
+# tests first (tools/mac_check.sh runs them), then the card's (box only); the checkpoint ones SKIP (77) until the
+# synthetic golden sets (tools/box_validate/qwen4exp_oracle.sh synth) or Intel's checkpoint and 21a's sets exist.
+# Task 1: the kernels' host twin (tests/kernels/qwen4exp_ref.h) against qwen4exp_ref.py's restated ops and
+# transformers' modules (tests/kernels/qwen4exp_fixture.h) and the semantics' properties. Host only; the loader's
+# host half for the RoPE table (q4_rope_table) and the PLE hash.
+add_executable(qwen4exp_ref_test kernels/qwen4exp_ref_test.cc)
+target_include_directories(qwen4exp_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(qwen4exp_ref_test PRIVATE b70_qwen4exp_loader)
+add_test(NAME qwen4exp_ref_test COMMAND qwen4exp_ref_test)
+set_tests_properties(qwen4exp_ref_test PROPERTIES LABELS qwen4exp TIMEOUT 600)
+# ==== Spec 21c: Qwen3.8-Flash-Next decode ==== (end) ====
