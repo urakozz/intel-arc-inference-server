@@ -118,6 +118,8 @@ case "${1:-}" in
       bash -c 'test "$(ls oracle-out-kolibri-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     have oracle_ornith_a4 "oracle-out-ornith-a4/ with Ornith's set and 36 <name>.bf16.txt (spec 15e Task 3: tools/toolcall/a4_ref.sh ornith set / ref on the Mac, then --push-data)" \
       bash -c 'test -s oracle-out-ornith-a4/set/manifest.json && test "$(ls oracle-out-ornith-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
+    have oracle_q4exp_a4 "oracle-out-q4exp-a4/ with Qwen3.8-Flash-Next's set and 36 <name>.bf16.txt (spec 21e Task 5: tools/toolcall/a4_ref.sh qwen4exp set / ref on Intel's checkpoint - --with r34.a4_ref; spec 22's engine run scores against it)" \
+      bash -c 'test -s oracle-out-q4exp-a4/set/manifest.json && test "$(ls oracle-out-q4exp-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     have oracle_image "the oracle container image (tools/oracle/run_in_container.sh; passkey ids)" \
       docker image inspect "${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
     have tok_python "a python with tokenizers (${TOK_PYTHON:-?})" "${TOK_PYTHON:-/nonexistent}" -c 'import tokenizers'

@@ -16,6 +16,11 @@ prompt sharing a pass with decode steps), 3 in reverse order, and all at once mu
 ids AND every logits row the greedy loop read, torch.equal. The streamed weight reads per
 generated id are counted both ways (what batching saves).
 
+test_qwen4exp (spec 21e) does the same on a tiny Qwen3.8-Flash-Next in Intel's form (int4 g128 experts, 3 GDN
+layers and a QSA layer, the PLE in bf16): qwen4exp_ref.py needs transformers 5.19.0 - run it alone with the qwen4exp
+site first on PYTHONPATH (`PYTHONPATH=<site> python3 tools/toolcall/test_oracle_batched.py test_qwen4exp`); it says
+SKIP under another version, and the others need 5.15 (Ornith's layer_major refuses another).
+
 test_cli_resume runs oracle_generate.py's main on a tiny Ornith set: --batch 1 into one directory,
 --batch 3 into another with one scenario already present (skipped, untouched), the .ids / .txt
 files equal; and --batch auto prints the memory plan.
@@ -92,7 +97,15 @@ def kolibri_snapshot(tmp: str):
     return "kolibri1", c.vocab_size
 
 
-SNAPSHOTS = {"ornith": ornith_snapshot, "k2": k2_snapshot, "kolibri": kolibri_snapshot}
+def qwen4exp_snapshot(tmp: str):
+    """Spec 21e: qwen4exp_make_tiny's Intel form (what the A4 reference loads: qwen4_exp, int4 g128 experts)."""
+    mk = _load(os.path.join(ORACLE, "qwen4exp_make_tiny.py"), "tb_qwen4exp_make_tiny")
+    mk.make(tmp, hidden=128, layer_types="lllq", experts=8, topk=2, form="intel", seed=23)
+    with open(os.path.join(tmp, "config.json"), encoding="utf-8") as f:
+        return "qwen4_exp", json.load(f)["text_config"]["vocab_size"]
+
+
+SNAPSHOTS = {"ornith": ornith_snapshot, "k2": k2_snapshot, "kolibri": kolibri_snapshot, "qwen4exp": qwen4exp_snapshot}
 
 
 # --------------------------------------------------------------------------------------------
@@ -146,7 +159,7 @@ class Counter:
 
     def __init__(self, runner, mtype: str):
         self.layers = self.experts = 0
-        if mtype == "qwen3_5_moe":
+        if mtype == "qwen3_5_moe" or mtype in OG.Q4_TYPES:
             pf = runner.pf
             orig = pf.layer_sd
 
@@ -247,6 +260,17 @@ def test_k2():
 
 def test_kolibri():
     check("kolibri")
+
+
+def test_qwen4exp():
+    import transformers
+    if transformers.__version__ != "5.19.0":
+        print(f"  SKIP: transformers {transformers.__version__} (qwen4exp_ref.py needs 5.19.0: the qwen4exp site first "
+              "on PYTHONPATH)")
+        return
+    os.environ.pop("Q4_LAYERS", None)
+    os.environ["Q4_PLE"] = "bf16"
+    check("qwen4exp")
 
 
 # --------------------------------------------------------------------------------------------
@@ -366,7 +390,7 @@ def test_plan_real_configs():
     assert p["batch"] == 3 and p["keep_dense"] == p["keep_experts"] == 0   # a count, capped by the scenarios
 
 
-TESTS = [test_plan_real_configs, test_ornith, test_k2, test_kolibri, test_cli_resume]
+TESTS = [test_plan_real_configs, test_ornith, test_k2, test_kolibri, test_cli_resume, test_qwen4exp]
 
 
 def main() -> None:

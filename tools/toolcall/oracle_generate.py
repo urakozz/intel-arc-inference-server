@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Greedy bf16 baseline for the tool-call set (spec 5 T0, gate A4), on CPU.
 
-    oracle_generate.py [--model kolibri] [--device cpu|cuda|xpu] <snapshot> <set dir> <out dir>
+    oracle_generate.py [--model kolibri|qwen4exp] [--device cpu|cuda|xpu] <snapshot> <set dir> <out dir>
                        [--new-tokens N] [--batch 1|N|auto] [--resident none|auto] [--only a,b,..]
 
 Builds transformers' Qwen3_5ForCausalLM the way tools/rotate/check_rotation.py
@@ -35,6 +35,12 @@ The model follows config.json's model_type:
                     checkpoint given - the 156 GB bf16 source (the KL4 reference, wherever 20b
                     runs: `--device` cuda / xpu where there is one) or the int4 export
                     (dequantised) - greedy through its own cache, the head's 128000 rows.
+  qwen4_exp         Qwen3.8-Flash-Next (spec 21e; `--model qwen4exp` says so and checks it):
+                    tools/oracle/qwen4exp_ref.py's layer-streamed model (transformers 5.19.0: the
+                    qwen4exp site first on PYTHONPATH) on the checkpoint given - Intel's int4 g128
+                    experts dequantised, its bf16 dense layers, the PLE rows from <snapshot>-ple-int8
+                    when present (the engine's format; Q4_PLE overrides) - greedy through its own
+                    cache; Q4_LAYERS=N truncates as the engine's --layers N does.
 The MoE paths stop after an EOS id of generation_config.json (kept, as HF generate keeps it)
 or --new-tokens ids (default 192; K2's A4 run uses 512: its replies open with reasoning), and
 also write <out>/<name>.bf16.gap: each greedy step's top-1 minus top-2 logit (compare_ref.py).
@@ -60,6 +66,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUN = "bf16"
 NEW_TOKENS = 192
+Q4_TYPES = ("qwen4_exp", "qwen4_exp_text")   # spec 21e: Qwen3.8-Flash-Next (a checkpoint, a text-only export)
 
 
 def load_manifest(set_dir: str) -> list[dict]:
@@ -186,6 +193,29 @@ def mem_model(mtype: str, cfg: dict) -> dict:
                 "per_seq": lambda T: state + T * nf * 2 * kvh * hd * 2 + T * H * 2,
                 "dense": dense, "experts": [ex] * L,
                 "what": f"KV bf16 in {nf} full-attention layers + GDN state fp32 in {nl} ({state / 2**20:.0f} MiB)"}
+    if mtype in Q4_TYPES:               # spec 21e: Qwen3.8-Flash-Next (qwen4exp_ref.py, bf16 dense, eager attention)
+        c = cfg.get("text_config", cfg)
+        L, H, V = c["num_hidden_layers"], c["hidden_size"], c["vocab_size"]
+        hc = c.get("hc_count", 4)
+        types = c.get("layer_types") or ["linear_attention" if i % 4 != 3 else "indexed_attention" for i in range(L)]
+        nq = sum(1 for t in types[:L] if t != "linear_attention")
+        ng = L - nq
+        heads, kvh, hd = c["num_attention_heads"], c["num_key_value_heads"], c["head_dim"]
+        hv, dv, dk = c["linear_num_value_heads"], c["linear_value_head_dim"], c["linear_key_head_dim"]
+        E, I, Is = c["num_experts"], c["moe_intermediate_size"], c.get("shared_expert_intermediate_size", 0)
+        low = c.get("hc_lowrank", 320)
+        hcl = 2 * 2 * (hc * H * (low + hc) + low * hc * H)       # both gated residuals of a layer, bf16
+        qsa = H * (2 * heads * hd + 2 * kvh * hd) + heads * hd * H + H * 5 * c.get("index_head_dim", 128)
+        gdn = H * (2 * c["linear_num_key_heads"] * dk + 2 * hv * dv) + 2 * H * hv + hv * dv * H
+        common = H * (E + 1) + 3 * H * Is
+        dense = [hcl + 2 * (common + (gdn if t == "linear_attention" else qsa)) for t in types[:L]]
+        ex = E * 3 * I * H * 2
+        state = ng * (hv * dk * dv * 4 + (2 * c["linear_num_key_heads"] * dk + hv * dv) * 4 * 2)
+        return {"base": 2 * V * H * 2 + ex + 2 * max(dense),
+                "transient": lambda T: T * V * 2 + heads * T * T * 8 + T * hc * H * 2 * 8,
+                "per_seq": lambda T: state + T * nq * (2 * kvh * hd * 2 + c.get("index_head_dim", 128) * 2) + T * hc * H * 2,
+                "dense": dense, "experts": [ex] * L,
+                "what": f"KV bf16 + indexer keys in {nq} QSA layers + GDN state fp32 in {ng} ({state / 2**20:.0f} MiB)"}
     L, H, V = cfg["num_hidden_layers"], cfg["hidden_size"], cfg["vocab_size"]
     heads, kvh = cfg["num_attention_heads"], cfg["num_key_value_heads"]
     hd = cfg.get("head_dim") or H // heads
@@ -242,7 +272,7 @@ def mem_limit() -> int | None:
 # auto's most sequences in flight. Ornith's time is mostly per-sequence compute (a prompt forward
 # is minutes, and a pass of B prompts holds every other sequence for all B), so a few; K2's is
 # mostly the per-step dequant a pass shares, so more.
-MAX_AUTO_BATCH = {"qwen3_5_moe": 4, "k2_horizon": 8, "kolibri1": 4}
+MAX_AUTO_BATCH = {"qwen3_5_moe": 4, "k2_horizon": 8, "kolibri1": 4, "qwen4_exp": 4, "qwen4_exp_text": 4}
 
 
 def batch_plan(mtype: str, cfg: dict, lens: list[int], n: int, cap: int | None, want="auto",
@@ -331,6 +361,41 @@ def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int]
         return SimpleNamespace(generate=generate, new_state=ref.new_cache, argmax=argmax,
                                step_many=ref.forward_many, ref=ref)
 
+    if mtype in Q4_TYPES:
+        # Spec 21e: Qwen3.8-Flash-Next - tools/oracle/qwen4exp_ref.py's layer-streamed model (transformers 5.19.0 from
+        # the qwen4exp site first on PYTHONPATH), the checkpoint's experts as stored (Intel's int4 g128 dequantised), the
+        # PLE rows from the engine's int8 file when it sits beside the snapshot (21b's <snapshot>-ple-int8: the engine-
+        # format reference, spec 21 F3) - Q4_PLE overrides (bf16 | int8:<dir>) - greedy through its own cache. The
+        # batched path: layer_major's pre-mixer rows -> final_logits of each sequence's LAST row (the sequential step
+        # asks for the last row's logits only: logits_to_keep=1, the same one-row head).
+        Q4 = load("qwen4exp_ref")
+        tc = Q4.text_config(snap, int(os.environ["Q4_LAYERS"]) if os.environ.get("Q4_LAYERS") else None)
+        side = snap.rstrip("/") + "-ple-int8"
+        ple_spec = os.environ.get("Q4_PLE") or (f"int8:{side}" if os.path.isdir(side) else "bf16")
+        ple = Q4.PleTable(Q4.ple_source(snap, ple_spec), tc)
+        kd = range(min(keep[0], tc.num_hidden_layers))
+        ke = range(min(keep[1], tc.num_hidden_layers))
+        model, pf, lazy = Q4.build_streamed(snap, tc, ple, keep_dense=kd, keep_experts=ke)
+        print(f"Qwen3.8-Flash-Next reference: qwen4exp_ref.py, {tc.num_hidden_layers} layers, streamed, PLE {ple.kind}; "
+              f"resident once read: dense {len(kd)} layers, experts {len(ke)} layers", flush=True)
+        major = Q4.layer_major(model, pf)
+
+        def generate(ids, n, eos, on_row=None):
+            state = {"cache": None}
+
+            def step(chunk, pos):
+                with torch.no_grad():
+                    o = model(input_ids=torch.tensor([chunk]), past_key_values=state["cache"], use_cache=True,
+                              logits_to_keep=1)
+                state["cache"] = o.past_key_values
+                return o.logits[0, -1].float()
+            return greedy(step, ids, n, eos, watch(argmax, on_row))
+
+        def step_many(items):
+            return [Q4.final_logits(model, R[-1:])[0].float() for R in major(items)]
+        return SimpleNamespace(generate=generate, new_state=lambda: {"cache": None}, argmax=argmax,
+                               step_many=step_many, lazy=lazy, ref=model, pf=pf)
+
     if mtype == "k2_horizon":
         K2 = load("k2_ref")
         src = K2.Checkpoint(snap)
@@ -369,8 +434,10 @@ def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int]
                            step_many=OR.layer_major(model, pf), lazy=lazy, ref=model, pf=pf)
 
 
-MOE_TYPES = ("qwen3_5_moe", "k2_horizon", "kolibri1")
-MODELS = {"kolibri": "kolibri1"}   # --model NAME -> the model_type it must be
+MOE_TYPES = ("qwen3_5_moe", "k2_horizon", "kolibri1", "qwen4_exp", "qwen4_exp_text")
+# --model NAME -> the model_type(s) it must be (spec 21e: qwen4exp - the checkpoints say qwen4_exp, a text-only
+# export qwen4_exp_text)
+MODELS = {"kolibri": ("kolibri1",), "qwen4exp": ("qwen4_exp", "qwen4_exp_text")}
 
 
 def parse_args(argv: list[str]) -> dict:
@@ -434,8 +501,8 @@ def main() -> None:
 
     with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:
         mtype = json.load(f).get("model_type", "")
-    if a["model"] is not None and mtype != MODELS[a["model"]]:
-        sys.exit(f"--model {a['model']}: {snap} is model_type {mtype!r}, not {MODELS[a['model']]}")
+    if a["model"] is not None and mtype not in MODELS[a["model"]]:
+        sys.exit(f"--model {a['model']}: {snap} is model_type {mtype!r}, not {' or '.join(MODELS[a['model']])}")
     if mtype in MOE_TYPES:
         moe_main(snap, out, todo, prompts, new_tokens, mtype, a["device"], a["batch"], a["keep"])
         return
