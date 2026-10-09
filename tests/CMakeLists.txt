@@ -3111,9 +3111,7 @@ set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
 b70_cli_reject(cli_reject_qwen4exp_full ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 EXPECT "spec 22")
 b70_cli_reject(cli_reject_qwen4exp_mtp ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "spec 21e")
 b70_cli_reject(cli_reject_qwen4exp_kv8 ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "decision 8")
-if(TARGET b70-serve)
-  b70_serve_reject(cli_reject_qwen4exp_serve ${_q4_cfg} EXPECT "spec 21e")
-endif()
+# (spec 21e removed cli_reject_qwen4exp_serve: b70-serve serves this family now - its refusals are 21e's block's)
 # ==== Spec 21c: Qwen3.8-Flash-Next decode ==== (end) ====
 
 # ==== Spec 21d: Qwen3.8-Flash-Next prefill (labels qwen4exp;prefill) ==== (begin) ====
@@ -3384,5 +3382,38 @@ if(B70_Q4EXP AND B70_MTP)
   set_tests_properties(qwen4exp_mtp_synth_test qwen4exp_mtp_synth_intel_test qwen4exp_mtp_synth_eager_test
     qwen4exp_mtp_synth_fresh_test qwen4exp_mtp_synth_pp_test qwen4exp_mtp_intel_test
     PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+# Task 4: b70-serve serves this family (src/cli/qwen4exp_serve.h; 21c's cli_reject_qwen4exp_serve is gone). The
+# adapter: spec 16d's cli::pp::PipelineEngineAdapterT instantiated over Qwen4ExpEngine (an object library - the Mac's
+# Level Zero syntax check compiles it; b70-serve links the same instantiation). The refusals before the device, each by
+# name (tests/model/qwen4exp: the model_type stub; tests/model/qwen4exp-q38tok: the stub with Qwen3.8's split regex).
+if(B70_Q4EXP)
+  add_library(qwen4exp_adapter_compile OBJECT cli/qwen4exp_adapter_compile.cc)
+  target_include_directories(qwen4exp_adapter_compile PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(qwen4exp_adapter_compile PRIVATE b70_qwen4exp_runtime b70_server)
+endif()
+if(TARGET b70-serve)
+  set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
+  b70_serve_reject(cli_reject_serve_qwen4exp_full ${_q4_cfg} EXPECT "spec 22")
+  b70_serve_reject(cli_reject_serve_qwen4exp_mtp_auto ${_q4_cfg} --layers 4 --mtp auto
+    EXPECT "auto waits for spec 22's full-model numbers")
+  b70_serve_reject(cli_reject_serve_qwen4exp_spec_mtp ${_q4_cfg} --layers 4 --spec mtp EXPECT "pass --mtp 1, 2 or 3")
+  b70_serve_reject(cli_reject_serve_qwen4exp_draft_vocab ${_q4_cfg} --layers 4 --mtp 1 --draft-vocab 32k
+    EXPECT "--draft-vocab is not built for Qwen3.8-Flash-Next")
+  b70_serve_reject(cli_reject_serve_qwen4exp_kv8 ${_q4_cfg} --layers 4 --kv-cache int8 EXPECT "decision 8")
+  b70_serve_reject(cli_reject_serve_qwen4exp_prefill_int8 ${_q4_cfg} --layers 4 --prefill-backend l0-int8
+    EXPECT "1024-k Hadamard blocks")
+  b70_serve_reject(cli_reject_serve_qwen4exp_prefill_sycl ${_q4_cfg} --layers 4 --prefill-backend sycl-tla
+    EXPECT "sycl-tla has no Qwen3.8-Flash-Next walk")
+  b70_serve_reject(cli_reject_serve_qwen4exp_split_alone ${_q4_cfg} --layers 4 --pipeline-split 2
+    EXPECT "--pipeline-split belongs to --pp 2")
+  b70_serve_reject(cli_reject_serve_qwen4exp_tokenizer ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp-q38tok --layers 4
+    EXPECT "Pass --tokenizer")
+  b70_serve_reject(cli_reject_serve_layers_other ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --layers 4
+    EXPECT "belong to Qwen3.8-Flash-Next")
+  set_tests_properties(cli_reject_serve_qwen4exp_full cli_reject_serve_qwen4exp_mtp_auto cli_reject_serve_qwen4exp_spec_mtp
+    cli_reject_serve_qwen4exp_draft_vocab cli_reject_serve_qwen4exp_kv8 cli_reject_serve_qwen4exp_prefill_int8
+    cli_reject_serve_qwen4exp_prefill_sycl cli_reject_serve_qwen4exp_split_alone cli_reject_serve_qwen4exp_tokenizer
+    cli_reject_serve_layers_other PROPERTIES LABELS qwen4exp)
 endif()
 # ==== Spec 21e: Qwen3.8-Flash-Next served ==== (end) ====
