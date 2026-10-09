@@ -107,8 +107,9 @@ struct ScratchSizes {
            logits + argmax_part;
   }
 };
-ScratchSizes scratch_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len, Q4Attn a = q4_attn());
-size_t partials_floats(const model::Qwen4ExpDesc& d);
+// `rows`: kM (1) without the MTP head, kVerifyRows (4) with it - every M-strided term x rows (spec 21e).
+ScratchSizes scratch_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len, Q4Attn a = q4_attn(), uint32_t rows = kM);
+size_t partials_floats(const model::Qwen4ExpDesc& d, uint32_t rows = kM);
 inline size_t route_at(uint32_t layer) { return size_t(layer) * kM * kRouteWords * 4; }
 inline size_t list_at(uint32_t qsa_index) { return size_t(qsa_index) * kM * kListRow * 4; }
 inline size_t diag_at(uint32_t qsa_index) { return size_t(qsa_index) * kM * 2 * 4; }
@@ -246,12 +247,89 @@ size_t pf_link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev);
 //   two cards    device 0 ends with combine_norm _Y_NN (the materialised H crosses)                          + 1
 // The last chunk's head on the last device: kPrefillHeadLaunches (decode's final mixer, lm_head, argmax x 2).
 size_t prefill_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t pos,
-                               uint32_t C, bool injected = false);
+                               uint32_t C, bool injected = false, bool mtp = false);
 size_t prefill_chunk_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t pos, uint32_t C,
-                              bool injected = false);
+                              bool injected = false, bool mtp = false);
 inline constexpr size_t kPrefillHeadLaunches = 6;
 // A device's prefill scratch + its prefill link (two devices): what `prefill` plans into DevicePlan::prefill_scratch.
 size_t prefill_state(const model::Qwen4ExpDesc& d, uint32_t devices, uint32_t dev, uint32_t max_len);
+
+// --- spec 21e: the MTP head, the verify and draft lists ------------------------------------------------------
+// Spec 8's machinery (runtime/engine.h's draft / verify / commit contracts) on this family. With the head loaded:
+//   - every device's decode scratch holds kVerifyRows rows (the verify lists run at M = k + 1 <= 4): the M-strided
+//     terms of scratch_sizes x 4, the per-layer rows (routes, selections, diagnostics) strided by 4 rows;
+//   - every device holds gdn_spec: (kGdnSlots - 1) more GDN states per GDN layer, LAYER-major ([its GDN layers][3]
+//     [48][128][128] fp32) - gdn_step_slots_M<M>_G1 bakes ONE layer's state as SPEC_SLOT_STRIDE, so a layer's slots
+//     are its state (slot 0) and gdn_spec's three after it, whatever the layer count (Qwen3.8's binaries bake a whole
+//     48-layer slot; spec 8 §3.4's rule otherwise unchanged: verify row r writes slot (live + r) % 4, commit(j) makes
+//     slot (live + j) % 4 live);
+//   - the PLE layer's device holds the verify's PLE rows (gated, gn bf16 [4][10240]: q4_ple_block is M = 1 only, so
+//     a verify at M > 1 runs q4_pf_ple's gate / conv / ring at C = 4 - 21d's cut of the same chain);
+//   - the last device holds the head's buffers (MtpSizes): its Control (the head runs one position behind the main
+//     model: draft step i at pos - 1 + i), its KV [K | V][max_len][512] bf16, compressed keys, 8-slot tail ring, its
+//     selection row (draft step 0's, which later steps reuse - decision 5), the R rows hh [1 + 4][10240] bf16 (row 0
+//     R_{pos-1}, rows 1 .. M the last verify's pre-mixer H), the fusion's rows (xe [4][2560], xh [4][10240] bf16; fe
+//     [4][2560], fh [16][2560] fp32) and the draft logits rows [3][vocab] fp32.
+// The plan carries all of it (plan(..., mtp)).
+inline constexpr uint32_t kMaxDraft = 3;                  // drafts an iteration: verify at M <= 4
+inline constexpr uint32_t kVerifyRows = kMaxDraft + 1;    // the decode scratch's rows with the head
+inline constexpr uint32_t kGdnSlots = 4;                  // gdn_step SPEC_SLOTS' N_SLOTS (slot 0 = the layer's state)
+// Decision 4 (`pre_fc_norm_hidden`): vLLM's single RMS over the 4 x 2560 values (the default, ruled) or one RMS per
+// stream (llama.cpp's reading of the same [10240] weight). B70_Q4_MTP_NORM=single|per_stream, read at engine
+// construction; unset or empty is single; anything else throws.
+enum class MtpNorm { Single, PerStream };
+MtpNorm mtp_norm();
+const char* mtp_norm_name(MtpNorm n);
+// Decision 5 (draft attention): the ruled form REUSES draft step 0's selection on steps 1.. (vLLM's opt-in
+// index_share_for_mtp_iteration - 21a found it is not vLLM's default); `fresh` (vLLM's default) selects on every step.
+// B70_Q4_MTP_SELECT=reuse|fresh, read at engine construction; unset or empty is reuse; anything else throws.
+enum class MtpSelect { Reuse, Fresh };
+MtpSelect mtp_select();
+const char* mtp_select_name(MtpSelect s);
+
+struct MtpSizes {
+  size_t ctl = 0, kv = 0, idx_keys = 0, idx_tail = 0, list = 0, diag = 0, hh = 0, xe = 0, xh = 0, fe = 0, fh = 0,
+         logits = 0;
+  size_t persistent() const { return ctl + kv + idx_keys + idx_tail + hh; }   // zeroed by reset
+  size_t total() const { return persistent() + list + diag + xe + xh + fe + fh + logits; }
+};
+MtpSizes mtp_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len);
+// gdn_spec on a device: (kGdnSlots - 1) x its GDN layers x 3,145,728 B (a 64-byte line when it has none).
+size_t gdn_spec_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev);
+// The verify's PLE rows on the PLE layer's device: gated, gn bf16 [kVerifyRows][10240] each (0 elsewhere).
+size_t ple_verify_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev);
+// What the head adds to a device's plan beyond its weights: gdn_spec, the PLE rows, (last device) MtpSizes, and the
+// decode scratch's extra rows (scratch_sizes at kVerifyRows less at 1).
+size_t mtp_device_state(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t max_len);
+// The scratch's per-layer row offsets at `rows` rows a layer (1 without the head, kVerifyRows with it).
+inline size_t route_at_r(uint32_t layer, uint32_t rows) { return size_t(layer) * rows * kRouteWords * 4; }
+inline size_t list_at_r(uint32_t qsa_index, uint32_t rows) { return size_t(qsa_index) * rows * kListRow * 4; }
+inline size_t diag_at_r(uint32_t qsa_index, uint32_t rows) { return size_t(qsa_index) * rows * 2 * 4; }
+// The decode link's landing with the head: kVerifyRows rows of H (a verify list hands off M rows).
+PpLandingLayout landing_layout_rows(const model::Qwen4ExpDesc& d, uint32_t rows);
+size_t link_bytes_rows(const model::Qwen4ExpDesc& d, uint32_t dev, uint32_t rows);
+
+// The lists' launches (the copies excluded, as device_launches):
+//   verify at M on a device: device_launches' list at M rows - the GDN step is gdn_step_slots, and on the PLE layer
+//     at M > 1 q4_ple_block's one launch is q4_pf_ple's three (+ 2) - and, on the last device, the head's KV pass over
+//     the M rows (positions pos - 1 .. pos + M - 2: the head on (R_q, t_{q+1})): q4_mtp_norm, fc_embedding, fc_hidden
+//     (one M = 4 GEMV a row: a row's 4 streams), q4_mtp_fuse, the attn side's gated residual (3), q||gate||k||v,
+//     the indexer, attn_prep (the head's K / V), q4_qsa_prep (its tail ring and compressed keys) - 10 + M
+//   draft step (the last device, M = 1): q4_mtp_norm, fc_embedding, fc_hidden, q4_mtp_fuse, the head's QSA layer
+//     (q4_qsa_score / _select on step 0 and, under `fresh`, on every step) and MoE, its own final mixer, lm_head,
+//     argmax x 2: 27 + (select ? 2 : 0) flash, 26 + (select ? 2 : 0) eager
+//   the prefill's head pass on the last device a chunk (Review Focus 4): combine _Y_NN (the chunk's rows of R), then
+//     over the head's rows (pos - 1 .. pos + C - 2; C - 1 rows from pos 0): q4_mtp_norm _PF, fc_embedding and
+//     fc_hidden as bf16 slabs + pf_gemm (3 slabs each), q4_mtp_fuse, the attn side's gated residual (4), the k||v slab
+//     of q||gate||k||v (one slab + pf_gemm), the indexer (2), pf_attn_prep_q16, q4_qsa_prep _PF, q4_qsa_ring: 1 + 26
+size_t verify_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t M,
+                              Q4Attn a, PpHandoff h);
+size_t verify_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t M, Q4Attn a, PpHandoff h);
+size_t draft_launches(Q4Attn a, bool select);
+inline uint32_t mtp_prefill_rows(uint32_t pos, uint32_t C) { return pos == 0 ? C - 1 : C; }
+size_t mtp_prefill_launches(uint32_t pos, uint32_t C);
+// The prefill's R rows for the head pass on the last device: bf16 [kPfC + 1][10240] (row 0 R_{pos-1}).
+inline size_t mtp_prefill_R_bytes(const model::Qwen4ExpDesc& d) { return size_t(kPfC + 1) * d.hc_n() * 2; }
 
 // --- spec 21e: spec 7's prefix-cache snapshots --------------------------------------------------------------
 // The STATE at position p is everything the next token reads that is not a per-position block (plan 21e Review

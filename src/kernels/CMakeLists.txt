@@ -1165,6 +1165,102 @@ if(B70_Q4EXP)
 endif()
 # ==== Spec 21d: Qwen3.8-Flash-Next prefill ==== (end) ====
 
+# ==== Spec 21e: Qwen3.8-Flash-Next MTP (B70_Q4EXP and B70_MTP) ==== (begin) ====
+# Additions only; no existing source changes. kernels::qwen4exp's spec 21e block is the host half
+# (verify_variants / draft_variants / mtp_prefill_variants). What the lists bind (runtime/qwen4exp/qwen4exp_capture.cc):
+#   verify at M = k + 1 (spec 8's lists): every 21c decode kernel at M = 2..4 - the q4_ sources (combine _E / _S1 /
+#     _S4 / _Y / _Y_NN / _X, up-mix, the PLE gather, q4_qsa, the attention (flash, eager), the route and the 11-slot
+#     MoE), attn_prep _Q24KV2 / _S1, prep_gated_head _SIG, embed_gather D2560, the GEMVs at this family's shapes (gemv
+#     int4 S1 / S2 / S4 layout 0, gemv_bf16 for Intel's dense arms, the HC downs, the indexer, the router, a||b, the PLE
+#     key||value, lm_head bf16 and int8); Qwen3.8's argmax_stage1_M<M> by name (vocab 248077 used);
+#     gdn_step_slots_M<1..4>_G1 - gdn_step.cl's SPEC_SLOTS at SPEC_SLOT_STRIDE = ONE layer's state (48 x 128 x 128
+#     floats): the engine lays gdn_spec out layer-major, so no layer count is baked (Qwen3.8's _M<M> bakes 48 layers);
+#     q4_pf_ple_C4 - 21d's three-launch PLE block at C = 4 (q4_ple_block is M = 1 only);
+#   the MTP head (draft at M = 1, its KV pass in every verify at M = 1..4, the prefill's pass at M = 2048):
+#     q4_mtp.cl (q4_mtp_norm: the gather of t, gemma_rms of the embedding and the SINGLE / per-STREAM RMS of the
+#     4-stream R; q4_mtp_fuse: + e on every stream) at M = 1..4 and _PF at 2048; fc_embedding / fc_hidden gemv_bf16
+#     {2560, 2560} at M = 1..4 (fc_hidden at M = 4 a row: its 4 streams) and the bf16 slab {2560, 2560} for prefill.
+#     The head's own layer is bf16 dense / bf16 shared (loader::q4_mtp_desc) with int4 experts: 21c's / 21d's Intel-form
+#     binaries serve it.
+if(B70_Q4EXP AND B70_MTP)
+  set(Q4_SLOT_DEFINES ${GDN_DEFINES} SPEC_SLOTS=1 CTRL_LIVE=19 SPEC_SLOT_STRIDE=786432)
+  foreach(MM 1 2 3 4)
+    add_ocloc_kernel(gdn_step_slots_M${MM}_G1 SOURCE ${GDN_CL} DEFINES ${Q4_SLOT_DEFINES} M=${MM})
+    add_gemv_bf16_variant(${MM} 2560 2560 64 1)   # fc_embedding / fc_hidden
+    foreach(NF SINGLE STREAM)
+      if(NF STREQUAL SINGLE)
+        set(_single 1)
+      else()
+        set(_single 0)
+      endif()
+      add_ocloc_kernel(q4_mtp_M${MM}_${NF} SOURCE ${Q4_CL}/q4_mtp.cl DEFINES ${CTRL_DEFINES} M=${MM} MTP_NORM_SINGLE=${_single})
+    endforeach()
+    if(MM EQUAL 1)
+      continue()
+    endif()
+    add_gemv_variant(${MM} 2560 16384 1 0)            # qkv||z int4
+    add_gemv_variant(${MM} 2560 13312 2 0)            # q||gate||k||v int4
+    add_gemv_variant(${MM} 6144 2560 4 0)             # out_proj / o_proj int4
+    add_gemv_bf16_variant(${MM} 2560 16384 64 1)      # qkv||z bf16 (Intel's)
+    add_gemv_bf16_variant(${MM} 2560 13312 64 1)      # q||gate||k||v bf16 (Intel's, the head's)
+    add_gemv_bf16_variant(${MM} 6144 2560 64 1)       # out_proj / o_proj bf16
+    add_gemv_bf16_variant(${MM} 2560 128 16 16)       # a||b
+    add_gemv_bf16_variant(${MM} 10240 336 16 16)      # HC down || block_inject
+    add_gemv_bf16_variant(${MM} 10240 320 16 16)      # the final mixer's down
+    add_gemv_bf16_variant(${MM} 2560 640 16 16)       # the indexer
+    add_gemv_bf16_variant(${MM} 2560 528 16 16)       # the router + shared gate
+    add_gemv_bf16_variant(${MM} 2560 12800 64 1)      # the PLE key || value
+    add_gemv_bf16_variant(${MM} 2560 248320 64 1)     # lm_head bf16
+    add_gemv_i8w_variant(${MM} 2560 248320)           # lm_head int8 (spec 9)
+    add_ocloc_kernel(embed_gather_M${MM}_D2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} HIDDEN=2560 VOCAB=248320)
+    add_ocloc_kernel(prep_gated_head_M${MM}_SIG SOURCE ${PREP_CL} DEFINES M=${MM} GDN_GATE_SIGMOID=1)
+    add_ocloc_kernel(attn_prep_M${MM}_Q24KV2 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} ${Q4_FA_HEADS})
+    add_ocloc_kernel(attn_prep_M${MM}_Q24KV2_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1 ${Q4_FA_HEADS})
+    add_ocloc_kernel(q4_hc_combine_norm_M${MM}_E SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=0 HC_NORM=1)
+    foreach(S 1 4)
+      add_ocloc_kernel(q4_hc_combine_norm_M${MM}_S${S} SOURCE ${Q4_CL}/q4_hc.cl
+                       DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=1 SRC_S=${S} HC_NORM=1)
+    endforeach()
+    add_ocloc_kernel(q4_hc_combine_norm_M${MM}_Y SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=2 HC_NORM=1)
+    add_ocloc_kernel(q4_hc_combine_norm_M${MM}_Y_NN SOURCE ${Q4_CL}/q4_hc.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=2 HC_NORM=0)
+    add_ocloc_kernel(q4_hc_combine_norm_M${MM}_X SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=3 HC_NORM=1)
+    add_ocloc_kernel(q4_hc_up_mix_M${MM}_I SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} UP_DOWN=336 UP_INJECT=1)
+    add_ocloc_kernel(q4_hc_up_mix_M${MM} SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} UP_DOWN=320 UP_INJECT=0)
+    add_ocloc_kernel(q4_ple_gather_M${MM}_BF16 SOURCE ${Q4_CL}/q4_ple.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=1)
+    add_ocloc_kernel(q4_ple_gather_M${MM}_F32 SOURCE ${Q4_CL}/q4_ple.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=0)
+    add_ocloc_kernel(q4_qsa_M${MM}_T512_W1024 SOURCE ${Q4_CL}/q4_qsa.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES})
+    add_ocloc_kernel(q4_qsa_attn_M${MM}_T32 SOURCE ${Q4_CL}/q4_qsa_attn.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=32 ${Q4_LIST_DEFINES})
+    add_ocloc_kernel(q4_qsa_attn_eager_M${MM} SOURCE ${Q4_CL}/q4_qsa_attn_eager.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} ${Q4_LIST_DEFINES} LISTMAX=2052)
+    add_ocloc_kernel(q4_route_M${MM}_E512_T10_N528_L256 SOURCE ${Q4_CL}/q4_moe.cl
+                     DEFINES M=${MM} ROUTE_E=512 ROUTE_K=10 ROUTE_WG=256 ROUTE_LN=528)
+    foreach(SHB 0 1)
+      if(SHB)
+        set(_sh SHB)
+      else()
+        set(_sh SH4)
+      endif()
+      add_ocloc_kernel(q4_moe_M${MM}_E512_T10_D2560_I640_${_sh} SOURCE ${Q4_CL}/q4_moe.cl
+                       DEFINES M=${MM} MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=640 UP_KS=4 DN_KS=2 SHARED_BF16=${SHB})
+    endforeach()
+  endforeach()
+  add_ocloc_kernel(q4_pf_ple_C4 SOURCE ${Q4_CL}/q4_pf_ple.cl DEFINES ${CTRL_DEFINES} PF_C=4)
+  # the prefill's head pass (kernels::qwen4exp::mtp_prefill_variants; 21d's binaries otherwise)
+  add_ocloc_kernel(q4_mtp_M2048_SINGLE_PF SOURCE ${Q4_CL}/q4_mtp.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 MTP_NORM_SINGLE=1 MTP_PF=1)
+  add_ocloc_kernel(q4_mtp_M2048_STREAM_PF SOURCE ${Q4_CL}/q4_mtp.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 MTP_NORM_SINGLE=0 MTP_PF=1)
+  add_ocloc_kernel(q4_pf_bf16_slab_K2560_N2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_linear.cl
+                   DEFINES K=2560 N=2560)
+endif()
+# ==== Spec 21e: Qwen3.8-Flash-Next MTP ==== (end) ====
+
 
 # ==== Spec 15e: Ornith's MTP lists (model::ornith(), B70_ORNITH and B70_MTP) ===== (begin) ==
 # Additive only: no source changes and no existing variant's name or command line moves
