@@ -184,7 +184,12 @@ alone is made on the box before session 5 - one container run of make_set.py, no
       tools/box.sh run 'ORACLE_THREADS=22 tools/probe/detach.sh $HOME/oracle-kol.log tools/box_validate/kolibri_oracle.sh $HOME/b70-inference-server synth'  # ~1-1.5 h (est.)
       ```
       Both are resumable and skip what exists, so `r14.oracle` / `r24.oracle_synth` in sessions
-      5 / 9 then only re-link the sets and record the gap distributions. **Never during
+      5 / 9 then only re-link the sets and record the gap distributions.
+- [ ] **Also for the CPU lane - queue row 35, the W4A4 probe** (plan
+      `docs/superpowers/plans/2026-10-09-w4a4-probe.md` Task 2, once its Task 1 tool is on the
+      tree): `eval_quantised.py sim <Qwen3.8 bf16> <gate checkpoint> --variants none,w4a16,h8,h4,h4p2
+      --group 256` on h8's prompts, detached in the oracle container, `free -g` >= 70 GB first;
+      hours (est.). Same rule: not during sessions 6-9. **Never during
       sessions 6-9**: a running container makes every timed row ITERATE.
 
 ### 1.7 Idle protocol (before sessions 6, 7, 8, 9)
