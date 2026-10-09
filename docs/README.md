@@ -89,6 +89,10 @@ narrative, and the numbered guides cite them where they matter.
   prose 2.2); int8 / 4-bit drafters cost nothing; a ranked 32k draft vocabulary too (in-sample ranking: an upper bound). Provisional
   go on code and agentic output (+54-65 % over `--mtp auto`, derived); verify at M = 5..8 is
   the box's to measure (plan 19a Task 4).
+- [probe-qwen4exp-2026-10-09.md](probe-qwen4exp-2026-10-09.md) - spec 21a: Qwen3.8-Flash-Next (`qwen4_exp`)
+  from its small files, headers and transformers 5.19.0 / vLLM source - the rounding chain, both checkpoints,
+  the PLE layout and hash constants (= the formula), the MTP head's wiring (decision 5's reuse is vLLM's
+  opt-in), the tokenizer (the pre-tokenizer adds `\p{M}`), torch's tie rule, the derived bytes.
 - [probe-eagle3-k2-2026-10-08.md](probe-eagle3-k2-2026-10-08.md) - EAGLE-3 on K2-Horizon
   P0 (stub): the drafter's semantics pinned from source, the Mac tools built; results pending.
 - [probe-int8-kv-qwen38-2026-10-06.md](probe-int8-kv-qwen38-2026-10-06.md) - the 12a
