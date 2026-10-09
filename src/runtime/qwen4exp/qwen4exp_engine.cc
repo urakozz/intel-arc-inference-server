@@ -29,8 +29,8 @@ constexpr uint32_t kStatusTimeout = 1, kStatusStale = 2;
 
 struct Qwen4ExpEngine::Stage {
   Stage(l0::Context& c, const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t max_len,
-        Q4Attn a)
-      : ctx(c), buffers(c, d, p, dev, max_len, a), queue(c), fence(queue), imm(l0::CmdList::immediate(c)),
+        Q4Attn a, bool mtp)
+      : ctx(c), buffers(c, d, p, dev, max_len, a, mtp), queue(c), fence(queue), imm(l0::CmdList::immediate(c)),
         ctl(buffers.control.as<Control>()) {}
   l0::Context& ctx;
   Qwen4ExpBuffers buffers;
@@ -39,6 +39,8 @@ struct Qwen4ExpEngine::Stage {
   mutable l0::CmdList imm;
   Control* ctl;
   std::optional<CapturedStep> step, inj_step;
+  // Spec 21e, with the MTP head: the verify lists at M = 1..4 and (the last device) the draft steps.
+  std::vector<CapturedStep> verify, drafts;
 };
 
 Qwen4ExpEngine::Stage& Qwen4ExpEngine::st(uint32_t dev) const {
@@ -73,20 +75,52 @@ Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4Load
     if (opt.timeout_ms == 0 || (opt.handoff == PpHandoff::Peer && opt.spin_limit == 0))
       throw std::invalid_argument("runtime::qwen4exp::Qwen4ExpEngine: a hand-off needs a non-zero bound");
   }
+  // Spec 21e: the MTP head (the loader's, on the last device) - read the switches before anything is allocated.
+  const bool mtp = model_.mtp;
+  if (mtp) {
+    if (!model_.parts.back().mtp || !model_.parts.back().mtp_fc || !model_.parts.back().mtp_mixer)
+      throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine: the model says mtp but the last device holds no head");
+    mtp_norm_ = runtime::qwen4exp::mtp_norm();
+    mtp_select_ = runtime::qwen4exp::mtp_select();
+  }
   for (uint32_t i = 0; i < p.devices; ++i) {
-    st_.push_back(std::make_unique<Stage>(*devices[i], d, p, i, max_len, attn_));
+    st_.push_back(std::make_unique<Stage>(*devices[i], d, p, i, max_len, attn_, mtp));
     taps_.push_back(debug_tap ? std::make_unique<l0::Mem>(*devices[i], l0::MemKind::Device, tap_bytes(d)) : nullptr);
     inj_rows_.push_back(nullptr);
   }
   pending_.assign(p.devices, false);
   if (p.devices == 2) {
-    link_ = std::make_unique<PipelineLink>(*devices[0], *devices[1], landing_layout(d), opt.handoff);
+    link_ = std::make_unique<PipelineLink>(*devices[0], *devices[1], landing_layout_rows(d, mtp ? kVerifyRows : kM),
+                                           opt.handoff);
     binding_ = link_->binding(opt.spin_limit);
   }
   ple_init();
   for (uint32_t i = 0; i < p.devices; ++i)
     st(i).step.emplace(build(st(i).ctx, model_, model_.parts[i], st(i).buffers, link_ ? &binding_ : nullptr,
                              taps_[i].get(), nullptr));
+  if (mtp) {
+    const uint32_t last = p.devices - 1;
+    mtp_ = std::make_unique<Qwen4ExpMtpBuffers>(st(last).ctx, d, max_len);
+    mtp_bind_.bufs = mtp_.get();
+    mtp_bind_.embed = model_.parts[0].embed->ptr();   // device 0's table: the head reads it over peer access
+    mtp_bind_.single = mtp_norm_ == MtpNorm::Single;
+    for (uint32_t i = 0; i < p.devices; ++i)
+      for (uint32_t M = 1; M <= kVerifyRows; ++M) {
+        ListSpec ls;
+        ls.kind = ListKind::Verify;
+        ls.M = M;
+        st(i).verify.push_back(build(st(i).ctx, model_, model_.parts[i], st(i).buffers, link_ ? &binding_ : nullptr,
+                                     nullptr, nullptr, ls, &mtp_bind_));
+      }
+    for (uint32_t s = 0; s < kMaxDraft; ++s) {
+      ListSpec ls;
+      ls.kind = ListKind::Draft;
+      ls.draft = s;
+      ls.select = s == 0 || mtp_select_ == MtpSelect::Fresh;
+      st(last).drafts.push_back(build(st(last).ctx, model_, model_.parts[last], st(last).buffers, nullptr, nullptr,
+                                      nullptr, ls, &mtp_bind_));
+    }
+  }
   reset();
 }
 
@@ -186,6 +220,9 @@ void Qwen4ExpEngine::reset() {
                                "'s last step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
   for (uint32_t i = 0; i < st_.size(); ++i) st(i).buffers.zero(st(i).imm);
   if (link_) link_->zero(st(0).imm, st(1).imm);
+  if (mtp_) mtp_->zero(st(uint32_t(st_.size()) - 1).imm);   // spec 21e: the head's Control, KV, keys, tail, R rows
+  verify_k_ = kNoVerify;
+  draft_ids_.clear();
   broken_ = false;
   drop_next_ = false;
 }
@@ -200,6 +237,12 @@ CapturedStep& Qwen4ExpEngine::active(uint32_t dev) const {
 }
 
 void Qwen4ExpEngine::step_once() {
+  std::vector<CapturedStep*> lists;
+  for (uint32_t i = 0; i < st_.size(); ++i) lists.push_back(&active(i));
+  submit(lists);
+}
+
+void Qwen4ExpEngine::submit(const std::vector<CapturedStep*>& lists) {
   if (broken_) throw std::runtime_error("pipeline: a hand-off failed earlier in this session; reset() first");
   Stage& last = st(uint32_t(st_.size()) - 1);
   const size_t pos = last.ctl->pos, n = last.ctl->n_active;
@@ -208,7 +251,7 @@ void Qwen4ExpEngine::step_once() {
                              std::to_string(n) + " exceeds max_len " + std::to_string(max_len_) +
                              " - the KV, the indexer keys and the RoPE table stop there");
   if (st_.size() == 1) {
-    st(0).queue.execute(active(0).list, &st(0).fence);
+    st(0).queue.execute(lists[0]->list, &st(0).fence);
     st(0).fence.wait();
     return;
   }
@@ -216,10 +259,10 @@ void Qwen4ExpEngine::step_once() {
   const bool send = !drop_next_;
   drop_next_ = false;
   if (send) {
-    st(0).queue.execute(active(0).list, &st(0).fence);
+    st(0).queue.execute(lists[0]->list, &st(0).fence);
     pending_[0] = true;
   }
-  st(1).queue.execute(active(1).list, &st(1).fence);
+  st(1).queue.execute(lists[1]->list, &st(1).fence);
   pending_[1] = true;
   if (!settle(1)) {
     if (link_->event) link_->event->host_signal();
@@ -260,7 +303,10 @@ void Qwen4ExpEngine::ingest(const std::vector<uint32_t>& ids) {
   for (uint32_t id : ids) {
     for (auto& s : st_) s->ctl->n_active = 1;
     set_token(id);
-    step_once();
+    if (mtp_)
+      mtp_step1();
+    else
+      step_once();
   }
 }
 
@@ -273,7 +319,10 @@ std::vector<uint32_t> Qwen4ExpEngine::generate(uint32_t n, const std::function<v
   for (uint32_t i = 0; i < n; ++i) {
     const uint32_t id = st(uint32_t(st_.size()) - 1).ctl->cur_token[0];
     const Clock::time_point f0 = Clock::now();
-    step_once();
+    if (mtp_)
+      mtp_step1();
+    else
+      step_once();
     fence_ms += ms_since(f0);
     out.push_back(id);
     if (on_token) on_token(id);
@@ -301,6 +350,9 @@ void Qwen4ExpEngine::build_injected() {
   }
 }
 void Qwen4ExpEngine::set_injected_selection(bool on) {
+  if (on && mtp_)
+    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine: the injected selection is a decode-list debug run; with "
+                             "the MTP head every step runs the verify lists - load without the head");
   if (on) build_injected();
   injected_ = on;
 }
@@ -344,10 +396,10 @@ std::vector<uint16_t> Qwen4ExpEngine::read_debug_H() {
 std::vector<uint32_t> Qwen4ExpEngine::read_routes() {
   const model::Qwen4ExpDesc& d = model_.desc;
   std::vector<uint32_t> v(size_t(d.layers) * kRouteWords);
-  for (uint32_t i = 0; i < st_.size(); ++i) {
-    const uint32_t first = model_.placement.first(i), n = model_.placement.count(i);
-    st(i).imm.copy(v.data() + size_t(first) * kRouteWords,
-                   static_cast<const uint8_t*>(st(i).buffers.routes.ptr()) + route_at(first), size_t(n) * kRouteWords * 4);
+  for (uint32_t l = 0; l < d.layers; ++l) {   // row 0 of each layer's rows (the scratch's stride: 1, or 4 with the head)
+    Stage& s = st(model_.placement.device_of(l));
+    s.imm.copy(v.data() + size_t(l) * kRouteWords,
+               static_cast<const uint8_t*>(s.buffers.routes.ptr()) + s.buffers.route_off(l), size_t(kRouteWords) * 4);
   }
   return v;
 }
@@ -360,7 +412,8 @@ std::vector<uint32_t> Qwen4ExpEngine::read_selection(uint32_t layer) {
   if (injected_)
     std::memcpy(row.data(), static_cast<const uint8_t*>(inj_rows_[dev]->ptr()) + list_at(qi), size_t(kListRow) * 4);
   else
-    st(dev).imm.copy(row.data(), static_cast<const uint8_t*>(st(dev).buffers.list.ptr()) + list_at(qi), size_t(kListRow) * 4);
+    st(dev).imm.copy(row.data(), static_cast<const uint8_t*>(st(dev).buffers.list.ptr()) + st(dev).buffers.list_off(qi),
+                     size_t(kListRow) * 4);
   const uint32_t c = std::min(row[kCountWord], kListMax);
   std::vector<uint32_t> out(row.begin(), row.begin() + c);
   out.push_back(row[kCountWord]);
@@ -374,7 +427,8 @@ std::vector<float> Qwen4ExpEngine::read_selection_diag() {
   for (uint32_t l = 0; l < d.layers; ++l) {
     if (!d.is_qsa(l)) continue;
     const uint32_t qi = d.qsa_before(l), dev = model_.placement.device_of(l);
-    st(dev).imm.copy(v.data() + size_t(qi) * 2, static_cast<const uint8_t*>(st(dev).buffers.diag.ptr()) + diag_at(qi), 8);
+    st(dev).imm.copy(v.data() + size_t(qi) * 2,
+                     static_cast<const uint8_t*>(st(dev).buffers.diag.ptr()) + st(dev).buffers.diag_off(qi), 8);
   }
   return v;
 }
@@ -449,7 +503,12 @@ MemoryComponents Qwen4ExpEngine::memory_use(uint32_t dev) const {
   c.model = P.bytes + P.rope_bytes;
   c.kv = b.kv.size() + b.idx_keys.size() + b.idx_tail.size();
   c.decode_state = b.control.size() + b.gdn_state.size() + b.conv_ring.size() + b.ple.size() + b.scratch_bytes() +
-                   (taps_[dev] ? taps_[dev]->size() : 0) + (link_ ? link_->bytes(dev) : 0);
+                   (taps_[dev] ? taps_[dev]->size() : 0) + (link_ ? link_->bytes(dev) : 0) + b.mtp_bytes();
+  if (mtp_ && dev + 1 == st_.size()) {   // spec 21e: the head's KV and keys in kv, the rest in decode state (plan())
+    const size_t kv = mtp_->kv.size() + mtp_->idx_keys.size() + mtp_->idx_tail.size();
+    c.kv += kv;
+    c.decode_state += mtp_->bytes() - kv;
+  }
   c.prefill_scratch = dev < pf_dev_bytes_.size() ? pf_dev_bytes_[dev] : 0;   // spec 21d: after prepare_prefill
   return c;
 }
@@ -469,17 +528,35 @@ void Qwen4ExpEngine::settle_all(const char* what) {
 uint8_t* Qwen4ExpEngine::snap_ptr(const SnapRun& r) const {
   const Qwen4ExpBuffers& b = st(r.device).buffers;
   const l0::Mem* m = nullptr;
+  const bool head = r.tensor == SnapTensor::MtpKv || r.tensor == SnapTensor::MtpIdxKeys ||
+                    r.tensor == SnapTensor::MtpIdxTail || r.tensor == SnapTensor::MtpHidden;
+  if (head && (!mtp_ || r.device + 1 != st_.size()))
+    throw std::logic_error(std::string("runtime::qwen4exp::Qwen4ExpEngine: a ") + snap_tensor_name(r.tensor) +
+                           " snapshot run without the MTP head (or off the last device)");
   switch (r.tensor) {
     case SnapTensor::Kv: m = &b.kv; break;
     case SnapTensor::IdxKeys: m = &b.idx_keys; break;
     case SnapTensor::IdxTail: m = &b.idx_tail; break;
-    case SnapTensor::GdnState: m = &b.gdn_state; break;
+    case SnapTensor::GdnState: {
+      // The LIVE slot (spec 8: after a commit the state may be one of gdn_spec's): the layer's slice of gdn_state at
+      // slot 0, else gdn_spec's slot (layer-major: [its GDN layers][3][state]).
+      const uint32_t live = mtp_ ? st(r.device).ctl->gdn_live : 0;
+      if (live == 0) {
+        m = &b.gdn_state;
+        break;
+      }
+      const size_t S = gdn_state_bytes_per_layer(model_.desc), i = r.offset / S;
+      if (r.offset % S != 0 || r.bytes != S || !b.gdn_spec)
+        throw std::logic_error("runtime::qwen4exp::Qwen4ExpEngine: a GDN state run that is not one layer's state");
+      return static_cast<uint8_t*>(b.gdn_spec->ptr()) + (i * (kGdnSlots - 1) + (live - 1)) * S;
+    }
     case SnapTensor::ConvRing: m = &b.conv_ring; break;
     case SnapTensor::PleIds:
     case SnapTensor::PleRing: m = &b.ple; break;
-    default:
-      throw std::logic_error(std::string("runtime::qwen4exp::Qwen4ExpEngine: a ") + snap_tensor_name(r.tensor) +
-                             " snapshot run without the MTP head");
+    case SnapTensor::MtpKv: m = &mtp_->kv; break;
+    case SnapTensor::MtpIdxKeys: m = &mtp_->idx_keys; break;
+    case SnapTensor::MtpIdxTail: m = &mtp_->idx_tail; break;
+    case SnapTensor::MtpHidden: m = &mtp_->hh; break;   // row 0: R_{pos-1}
   }
   if (r.offset + r.bytes > m->size())
     throw std::logic_error(std::string("runtime::qwen4exp::Qwen4ExpEngine: a ") + snap_tensor_name(r.tensor) +
@@ -488,14 +565,16 @@ uint8_t* Qwen4ExpEngine::snap_ptr(const SnapRun& r) const {
   return static_cast<uint8_t*>(m->ptr()) + r.offset;
 }
 
-size_t Qwen4ExpEngine::state_bytes() const { return state_snapshot_bytes(model_.desc, false); }
-size_t Qwen4ExpEngine::kv_bytes(uint32_t n_pos) const { return kv_snapshot_bytes(model_.desc, 0, n_pos, false); }
+size_t Qwen4ExpEngine::state_bytes() const { return state_snapshot_bytes(model_.desc, mtp()); }
+size_t Qwen4ExpEngine::kv_bytes(uint32_t n_pos) const { return kv_snapshot_bytes(model_.desc, 0, n_pos, mtp()); }
 
 void Qwen4ExpEngine::save_state(void* host) {
   settle_all("save_state");
+  if (verify_k_ != kNoVerify)
+    throw std::logic_error("runtime::qwen4exp::Qwen4ExpEngine::save_state: a verify is pending its commit");
   auto* h = static_cast<uint8_t*>(host);
   const uint32_t eos = model_.desc.ple_eos;
-  for (const SnapRun& r : state_runs(model_.desc, model_.placement, pos(), false)) {
+  for (const SnapRun& r : state_runs(model_.desc, model_.placement, pos(), mtp())) {
     if (r.pad || r.zero) {
       std::memset(h, 0, r.bytes);   // positions before 0 / filler: a cold run's history
       if (r.zero && r.tensor == SnapTensor::PleIds) std::memcpy(h, &eos, 4);   // q4_ple_gather reads EOS there
@@ -512,8 +591,11 @@ void Qwen4ExpEngine::load_state(const void* host, uint32_t p) {
                              " exceeds max_len " + std::to_string(max_len_));
   if (broken_) reset();   // a failed hand-off: the restore below rewrites what the session reads
   settle_all("load_state");
+  // The GDN state goes into slot 0, made live (spec 8's rule) - before snap_ptr resolves the runs.
+  for (auto& s : st_) s->ctl->gdn_live = 0;
+  verify_k_ = kNoVerify;
   const auto* h = static_cast<const uint8_t*>(host);
-  for (const SnapRun& r : state_runs(model_.desc, model_.placement, p, false)) {
+  for (const SnapRun& r : state_runs(model_.desc, model_.placement, p, mtp())) {
     if (!r.pad) st(r.device).imm.copy(snap_ptr(r), h, r.bytes);
     h += r.bytes;
   }
@@ -526,7 +608,7 @@ void Qwen4ExpEngine::load_state(const void* host, uint32_t p) {
 void Qwen4ExpEngine::save_kv(uint32_t begin, uint32_t end, void* host) {
   settle_all("save_kv");
   auto* h = static_cast<uint8_t*>(host);
-  for (const SnapRun& r : kv_runs(model_.desc, model_.placement, max_len_, begin, end, false)) {
+  for (const SnapRun& r : kv_runs(model_.desc, model_.placement, max_len_, begin, end, mtp())) {
     st(r.device).imm.copy(h, snap_ptr(r), r.bytes);
     h += r.bytes;
   }
@@ -535,7 +617,7 @@ void Qwen4ExpEngine::save_kv(uint32_t begin, uint32_t end, void* host) {
 void Qwen4ExpEngine::load_kv(uint32_t begin, uint32_t end, const void* host) {
   settle_all("load_kv");
   const auto* h = static_cast<const uint8_t*>(host);
-  for (const SnapRun& r : kv_runs(model_.desc, model_.placement, max_len_, begin, end, false)) {
+  for (const SnapRun& r : kv_runs(model_.desc, model_.placement, max_len_, begin, end, mtp())) {
     st(r.device).imm.copy(snap_ptr(r), h, r.bytes);
     h += r.bytes;
   }
@@ -548,6 +630,257 @@ std::string Qwen4ExpEngine::memory_line() const {
     s += (i ? "\n" : "") + format_memory(label.c_str(), memory_use(i), st(i).ctx.memory_bytes());
   }
   return s;
+}
+
+// --- spec 21e: the MTP head - spec 8's draft / verify / commit -----------------------------------------------------
+void Qwen4ExpEngine::require_mtp(const char* what) const {
+  if (!mtp_)
+    throw std::runtime_error(std::string("runtime::qwen4exp::Qwen4ExpEngine::") + what +
+                             ": MTP is off - load the model with its head (loader::load_qwen4exp(..., mtp = true), "
+                             "b70-serve --mtp K)");
+}
+Control* Qwen4ExpEngine::hctl() const { return mtp_->hctl.as<Control>(); }
+
+uint32_t Qwen4ExpEngine::max_verify_k() const {
+  const uint32_t p = pos();
+  if (!mtp_ || p == 0 || p + 1 >= max_len_) return 0;
+  return std::min<uint32_t>(kMaxDraft, max_len_ - p - 1);
+}
+
+void Qwen4ExpEngine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick) {
+  require_mtp("draft");
+  if (broken_) throw std::runtime_error("pipeline: a hand-off failed earlier in this session; reset() first");
+  const uint32_t p = pos();
+  if (k == 0 || k > kMaxDraft || k > max_verify_k())
+    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::draft: k " + std::to_string(k) +
+                             " is outside [1, max_verify_k() = " + std::to_string(max_verify_k()) + "] at pos " +
+                             std::to_string(p));
+  const uint32_t last = uint32_t(st_.size()) - 1;
+  Stage& L = st(last);
+  for (uint32_t i = 0; i < st_.size(); ++i)
+    if (!settle(i)) throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::draft: a step is still running");
+  // The chain: step i at position p - 1 + i (the head runs one position behind); step 0's R is hh row 0 (R_{p-1})
+  // and its token the pending x_p; each step's argmax advances the head Control and leaves its id in cur_token[0].
+  Control* h = hctl();
+  h->pos = p - 1;
+  h->n_active = 1;
+  h->cur_token[0] = L.ctl->cur_token[0];
+  draft_ids_.clear();
+  for (uint32_t i = 0; i < k; ++i) {
+    L.queue.execute(L.drafts[i].list, &L.fence);
+    L.fence.wait();
+    uint32_t d = h->out_token[0];
+    if (pick) {
+      d = pick(i);
+      if (d >= model_.desc.vocab)
+        throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::draft: picked id " + std::to_string(d) +
+                                 " is outside the vocabulary");
+      h->cur_token[0] = d;   // the next draft step's input
+    }
+    draft_ids_.push_back(d);
+    for (auto& s : st_) s->ctl->cur_token[1 + i] = d;
+  }
+}
+
+const uint32_t* Qwen4ExpEngine::verify_ids() const {
+  require_mtp("verify_ids");
+  return st(uint32_t(st_.size()) - 1).ctl->out_token;
+}
+
+void Qwen4ExpEngine::set_draft_input(uint32_t i, uint32_t id) {
+  require_mtp("set_draft_input");
+  if (i >= kMaxDraft || id >= model_.desc.vocab)
+    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::set_draft_input: draft " + std::to_string(i) + " id " +
+                             std::to_string(id));
+  for (auto& s : st_) s->ctl->cur_token[1 + i] = id;
+}
+
+void Qwen4ExpEngine::verify(uint32_t k) {
+  require_mtp("verify");
+  const uint32_t p = pos();
+  if (k > kMaxDraft || p == 0 || size_t(p) + k + 1 > max_len_)
+    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::verify: k " + std::to_string(k) + " at pos " +
+                             std::to_string(p) + " (max_verify_k() = " + std::to_string(max_verify_k()) +
+                             "; pos must be >= 1 and pos + k + 1 <= max_len " + std::to_string(max_len_) + ")");
+  const uint32_t last = uint32_t(st_.size()) - 1;
+  Control* c = st(last).ctl;
+  for (uint32_t r = 0; r <= k; ++r)
+    if (c->cur_token[r] >= model_.desc.vocab)
+      throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::verify: id " + std::to_string(c->cur_token[r]) +
+                               " in row " + std::to_string(r) + " is outside the vocabulary");
+  for (auto& s : st_) {
+    s->ctl->n_active = k + 1;
+    for (uint32_t r = 0; r <= k; ++r) s->ctl->cur_token[r] = c->cur_token[r];
+  }
+  // The head's KV pass over the same rows at p - 1 .. p + k - 1: row r is (hh[r], x_{p+r}).
+  Control* h = hctl();
+  h->pos = p - 1;
+  h->n_active = k + 1;
+  for (uint32_t r = 0; r <= k; ++r) h->cur_token[r] = c->cur_token[r];
+  verify_pos_ = p;
+  verify_k_ = k;
+  last_verify_m_ = k + 1;
+  std::vector<CapturedStep*> lists;
+  for (uint32_t i = 0; i < st_.size(); ++i) lists.push_back(&st(i).verify[k]);
+  submit(lists);
+}
+
+void Qwen4ExpEngine::commit(uint32_t j, uint32_t next_token) {
+  require_mtp("commit");
+  if (verify_k_ == kNoVerify || j > verify_k_)
+    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::commit: j " + std::to_string(j) +
+                             (verify_k_ == kNoVerify ? " with no verify() pending"
+                                                     : " exceeds the last verify's k " + std::to_string(verify_k_)));
+  if (next_token >= model_.desc.vocab)
+    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::commit: next_token " + std::to_string(next_token) +
+                             " is outside the vocabulary");
+  // Row j's GDN state is slot (live + j) % 4 on every device: make it live. Row j's pre-mixer H (hh row 1 + j) is
+  // the next iteration's R_{pos-1}.
+  for (auto& s : st_) {
+    s->ctl->gdn_live = (s->ctl->gdn_live + j) % kGdnSlots;
+    s->ctl->pos = verify_pos_ + j + 1;
+    s->ctl->n_active = 1;
+    s->ctl->cur_token[0] = next_token;
+  }
+  const size_t row = size_t(model_.desc.hc_n()) * 2;
+  st(uint32_t(st_.size()) - 1).imm.copy(mtp_->hh_row(0), mtp_->hh_row(1 + j), row);
+  verify_k_ = kNoVerify;
+}
+
+void Qwen4ExpEngine::mtp_step1() {
+  if (pos() == 0) {
+    // No R_{-1}: the plain list, which reads and writes GDN slot 0 (live is 0 at pos 0 - reset() and load_state()
+    // both leave it so), then its pre-mixer H (the final mixer's combine materialised it in b.H) into hh row 0.
+    if (st(0).ctl->gdn_live != 0) mtp_normalise_live();
+    step_once();
+    Stage& L = st(uint32_t(st_.size()) - 1);
+    L.imm.copy(mtp_->hh_row(0), L.buffers.H.ptr(), size_t(model_.desc.hc_n()) * 2);
+    return;
+  }
+  verify(0);
+  commit(0, verify_ids()[0]);
+}
+
+void Qwen4ExpEngine::mtp_normalise_live() {
+  if (!mtp_) return;
+  const uint32_t live = st(0).ctl->gdn_live;
+  if (live == 0) return;
+  const model::Qwen4ExpDesc& d = model_.desc;
+  const size_t S = gdn_state_bytes_per_layer(d);
+  for (uint32_t i = 0; i < st_.size(); ++i) {
+    Stage& s = st(i);
+    for (uint32_t l = model_.placement.first(i); l < model_.placement.end(i); ++l)
+      if (!d.is_qsa(l)) s.imm.copy(s.buffers.gdn_state_layer(l), s.buffers.gdn_slot(l, live), S);
+    s.ctl->gdn_live = 0;
+  }
+}
+
+void Qwen4ExpEngine::read_logits_into(float* host, uint32_t rows) {
+  if (rows == 0 || rows > st(uint32_t(st_.size()) - 1).buffers.rows)
+    throw std::out_of_range("read_logits_into: " + std::to_string(rows) + " rows");
+  Stage& s = st(uint32_t(st_.size()) - 1);
+  s.imm.copy(host, s.buffers.logits.ptr(), size_t(rows) * model_.desc.vocab * 4);
+}
+
+void Qwen4ExpEngine::read_draft_logits_into(float* host, uint32_t i) {
+  require_mtp("read_draft_logits_into");
+  if (i >= kMaxDraft) throw std::out_of_range("read_draft_logits_into: draft " + std::to_string(i));
+  st(uint32_t(st_.size()) - 1).imm.copy(host, static_cast<const uint8_t*>(mtp_->logits.ptr()) +
+                                                    size_t(i) * model_.desc.vocab * 4,
+                                        size_t(model_.desc.vocab) * 4);
+}
+
+float* Qwen4ExpEngine::host_rows(size_t floats) {
+  if (!host_rows_ || host_rows_->size() < floats * 4)
+    host_rows_ = std::make_unique<l0::Mem>(st(uint32_t(st_.size()) - 1).ctx, l0::MemKind::Host, floats * 4);
+  return host_rows_->as<float>();
+}
+
+std::vector<uint32_t> Qwen4ExpEngine::read_verify_routes() {
+  require_mtp("read_verify_routes");
+  const model::Qwen4ExpDesc& d = model_.desc;
+  const uint32_t M = last_verify_m_;
+  if (M == 0) throw std::runtime_error("read_verify_routes before the first verify");
+  std::vector<uint32_t> v(size_t(d.layers) * M * kRouteWords);
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    Stage& s = st(model_.placement.device_of(l));
+    s.imm.copy(v.data() + size_t(l) * M * kRouteWords,
+               static_cast<const uint8_t*>(s.buffers.routes.ptr()) + s.buffers.route_off(l), size_t(M) * kRouteWords * 4);
+  }
+  return v;
+}
+
+std::vector<uint32_t> Qwen4ExpEngine::read_draft_selection() {
+  require_mtp("read_draft_selection");
+  std::vector<uint32_t> row(kListRow);
+  st(uint32_t(st_.size()) - 1).imm.copy(row.data(), mtp_->list.ptr(), size_t(kListRow) * 4);
+  const uint32_t c = std::min(row[kCountWord], kListMax);
+  std::vector<uint32_t> out(row.begin(), row.begin() + c);
+  out.push_back(row[kCountWord]);
+  return out;
+}
+
+std::vector<uint32_t> Qwen4ExpEngine::read_draft_routes(uint32_t i) {
+  require_mtp("read_draft_routes");
+  if (i >= kMaxDraft) throw std::out_of_range("read_draft_routes: draft " + std::to_string(i));
+  std::vector<uint32_t> v(kRouteWords);
+  st(uint32_t(st_.size()) - 1).imm.copy(v.data(), static_cast<const uint8_t*>(mtp_->routes.ptr()) + size_t(i) * kRouteWords * 4,
+                                        size_t(kRouteWords) * 4);
+  return v;
+}
+
+std::vector<uint16_t> Qwen4ExpEngine::read_mtp_R() {
+  require_mtp("read_mtp_R");
+  std::vector<uint16_t> v(model_.desc.hc_n());
+  st(uint32_t(st_.size()) - 1).imm.copy(v.data(), mtp_->hh_row(0), v.size() * 2);
+  return v;
+}
+
+void Qwen4ExpEngine::write_mtp_R(const std::vector<uint16_t>& R) {
+  require_mtp("write_mtp_R");
+  if (R.size() != model_.desc.hc_n()) throw std::invalid_argument("write_mtp_R: R is not [10240]");
+  st(uint32_t(st_.size()) - 1).imm.copy(mtp_->hh_row(0), R.data(), R.size() * 2);
+}
+
+std::vector<uint16_t> Qwen4ExpEngine::read_draft_H() {
+  require_mtp("read_draft_H");
+  Stage& s = st(uint32_t(st_.size()) - 1);
+  std::vector<uint16_t> v(model_.desc.hc_n());
+  s.imm.copy(v.data(), s.buffers.H.ptr(), v.size() * 2);
+  return v;
+}
+
+size_t Qwen4ExpEngine::verify_list_launches(uint32_t M) const {
+  require_mtp("verify_list_launches");
+  if (M == 0 || M > kVerifyRows) throw std::out_of_range("verify_list_launches: M " + std::to_string(M));
+  size_t n = 0;
+  for (uint32_t i = 0; i < st_.size(); ++i) n += st(i).verify[M - 1].kernel_count;
+  return n;
+}
+size_t Qwen4ExpEngine::draft_list_launches(uint32_t i) const {
+  require_mtp("draft_list_launches");
+  return st(uint32_t(st_.size()) - 1).drafts.at(i).kernel_count;
+}
+
+std::vector<uint16_t> Qwen4ExpEngine::read_mtp_kv(uint32_t first, uint32_t count, bool v) {
+  require_mtp("read_mtp_kv");
+  if (size_t(first) + count > max_len_) throw std::out_of_range("read_mtp_kv: past max_len");
+  const size_t row = size_t(model_.desc.kv_n()) * 2;
+  std::vector<uint16_t> out(size_t(count) * model_.desc.kv_n());
+  st(uint32_t(st_.size()) - 1).imm.copy(out.data(), static_cast<const uint8_t*>(v ? mtp_->v() : mtp_->k()) + first * row,
+                                        count * row);
+  return out;
+}
+
+std::vector<uint16_t> Qwen4ExpEngine::read_mtp_idx_keys(uint32_t first_block, uint32_t count) {
+  require_mtp("read_mtp_idx_keys");
+  const model::Qwen4ExpDesc& d = model_.desc;
+  if (size_t(first_block) + count > max_len_ / d.idx_compress) throw std::out_of_range("read_mtp_idx_keys: past max_len");
+  std::vector<uint16_t> out(size_t(count) * d.idx_dim);
+  st(uint32_t(st_.size()) - 1).imm.copy(out.data(), static_cast<const uint8_t*>(mtp_->idx_keys.ptr()) +
+                                                    size_t(first_block) * d.idx_dim * 2,
+                                        out.size() * 2);
+  return out;
 }
 
 }  // namespace runtime::qwen4exp

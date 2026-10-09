@@ -50,9 +50,10 @@ class Walk {
  public:
   Walk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
        const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager, const l0::Mem* injected,
-       bool two_cards)
+       bool two_cards, const Qwen4ExpMtpPrefill* mtp)
       : cx_(cx), kc_(kc), s_(s), m_(m), part_(part), d_(m.desc), b_(b), pos_(pos), C_(C), eager_(eager),
-        injected_(injected), two_(two_cards), dense_(pf_dense_rows(pos, C)) {}
+        injected_(injected), two_(two_cards), dense_(pf_dense_rows(pos, C)), mtp_(mtp), ctrl_(b.control.ptr()),
+        rows_(C) {}
 
   void run() {
     check();
@@ -66,7 +67,9 @@ class Walk {
     }
     for (uint32_t l = part_.first; l < part_.end; ++l) layer(l);
     if (two_ && part_.device == 0) combine(HcSrc::Y, false, nullptr);   // _Y_NN: the materialised H crosses
-    const size_t want = prefill_device_launches(d_, b_.placement, part_.device, pos_, C_, injected_ != nullptr);
+    if (mtp_) mtp_pass();
+    const size_t want =
+        prefill_device_launches(d_, b_.placement, part_.device, pos_, C_, injected_ != nullptr, mtp_ != nullptr);
     require(n_ == want, "device " + std::to_string(part_.device) + "'s chunk at " + std::to_string(pos_) + " (" +
                             std::to_string(C_) + " rows) appended " + std::to_string(n_) + " launches, not the " +
                             std::to_string(want) + " runtime::qwen4exp::prefill_device_launches gives");
@@ -96,13 +99,22 @@ class Walk {
             "the prefill scratch is not runtime::qwen4exp::prefill_sizes'");
     require(ps.hdr == size_t(kq::pf_hdr::words()) * 4, "the sort's header width moved");
     if (injected_) require(injected_->size() >= pf_injected_bytes(d_), "the injected selection rows are short");
+    if (mtp_) {   // spec 21e: the head's pass (the last device)
+      require(part_.device + 1 == b_.placement.devices, "the MTP head's prefill pass off the last device");
+      require(part_.mtp && part_.mtp_fc && part_.rope && mtp_->bufs && mtp_->R && mtp_->embed,
+              "the MTP head's prefill pass without the head, its fc block, the RoPE table or its buffers");
+      require(mtp_->R->size() >= mtp_prefill_R_bytes(d_), "the head's R rows are shorter than [kPfC + 1][10240]");
+      require(s_.xg.size() >= size_t(kPfC) * (d_.hc_n() + d_.hidden) * 2 &&
+                  s_.o.size() >= size_t(kPfC) * d_.hidden * 4 && s_.partials.size() >= size_t(kPfC) * d_.hc * d_.hidden * 4,
+              "the prefill scratch does not hold the head's fusion rows (xh / xe in xg, fe in o, fh in partials)");
+    }
   }
 
   void launch(l0::Kernel& k, uint32_t gx, uint32_t gy, uint32_t gz, std::initializer_list<prefill::KernelArg> args) {
     cx_.launch(k, gx, gy, gz, args);
     ++n_;
   }
-  const void* ctrl() const { return b_.control.ptr(); }
+  const void* ctrl() const { return ctrl_; }   // the device's Control, or the head's for its pass (spec 21e)
 
   // One linear over the chunk: per slab the slab kernel then pf_gemm_T0 [C][K] x slab [K][ns] into out + n0 at pitch
   // ld - slabs of 1024 and one zero-padded tail (pf_slab_width).
@@ -125,7 +137,7 @@ class Walk {
       else
         launch(sk, ns / 16, K / 8, 1, {PtrArg(w), PtrArg(s_.slab.ptr()), arg_val(n0), arg_val(ns)});
       prefill::profile_wait(cx_, Phase::kSlabDequant);
-      const prefill::GemmBatch gb{C_, K, ns, 1, K, ns, ld, 0, 0, 0};
+      const prefill::GemmBatch gb{rows_, K, ns, 1, K, ns, ld, 0, 0, 0};
       prefill::gemm_l0(cx_, kc_, gb, static_cast<const uint16_t*>(x), s_.slab.as<uint16_t>(),
                        static_cast<float*>(out) + n0, false);
       ++n_;
@@ -148,7 +160,7 @@ class Walk {
     if (src == HcSrc::Embed) sp = s_.x.ptr();
     if (src == HcSrc::Slices) sp = s_.partials.ptr();   // the mixer's linear at pitch 2560 (S 1)
     if (src == HcSrc::Y) sp = s_.y.ptr();
-    launch(kc_(kq::pf_hc_combine_norm_variant(src, norm), "q4_hc_combine_norm"), d_.hc, C_, 1,
+    launch(kc_(kq::pf_hc_combine_norm_variant(src, norm), "q4_hc_combine_norm"), d_.hc, rows_, 1,
            {PtrArg(ctrl()), PtrArg(s_.H.ptr()), PtrArg(sp), PtrArg(s_.inj.ptr()),
             PtrArg(w ? static_cast<const void*>(w) : s_.partials.ptr()), PtrArg(s_.xn.ptr())});
     prefill::profile_wait(cx_, Phase::kNorm);
@@ -161,7 +173,7 @@ class Walk {
     combine(src_, true, reinterpret_cast<const float*>(at(block, o.norm)));
     src_ = HcSrc::None;
     slabs(false, at(block, o.down), nullptr, d_.hc_n(), o.down_n, s_.xn.ptr(), s_.down_f32.ptr(), kq::kPfHcDownLd);
-    launch(kc_(kq::pf_hc_up_mix_variant(), "q4_hc_up_mix"), d_.hidden / 16, C_, 1,
+    launch(kc_(kq::pf_hc_up_mix_variant(), "q4_hc_up_mix"), d_.hidden / 16, rows_, 1,
            {PtrArg(ctrl()), PtrArg(s_.down_f32.ptr()), PtrArg(at(block, o.up)), PtrArg(s_.xn.ptr()), PtrArg(s_.x.ptr()),
             PtrArg(s_.inj.ptr())});
     prefill::profile_wait(cx_, Phase::kNorm);
@@ -372,6 +384,81 @@ class Walk {
     src_ = HcSrc::Y;
   }
 
+  // --- spec 21e: the MTP head's pass -------------------------------------------------------------------------------
+  // A bf16 linear's columns [n_from, n_to) over `rows` rows of x (pitch K): per slab kol_pf_bf16_slab then pf_gemm_T0
+  // into out + n0 at pitch ld.
+  void bf16_cols(const void* w, uint32_t K, uint32_t N, uint32_t n_from, uint32_t n_to, uint32_t rows, const void* x,
+                 void* out, uint32_t ld) {
+    require(K % 64 == 0 && N % 16 == 0 && n_from % kPfSlab == 0, "a head linear is not whole k-groups / slabs");
+    require(s_.slab.size() >= size_t(K) * kPfSlab * 2, "the slab buffer is smaller than [K][1024]");
+    l0::Kernel& sk = kc_(kq::pf_bf16_slab_variant(K, N), "kol_pf_bf16_slab");
+    for (uint32_t n0 = n_from; n0 < n_to;) {
+      const uint32_t ns = pf_slab_width(N, n0);
+      launch(sk, ns / 16, K / 8, 1, {PtrArg(w), PtrArg(s_.slab.ptr()), arg_val(n0), arg_val(ns)});
+      prefill::profile_wait(cx_, Phase::kSlabDequant);
+      const prefill::GemmBatch gb{rows, K, ns, 1, K, ns, ld, 0, 0, 0};
+      prefill::gemm_l0(cx_, kc_, gb, static_cast<const uint16_t*>(x), s_.slab.as<uint16_t>(),
+                       static_cast<float*>(out) + n0, false);
+      ++n_;
+      prefill::profile_wait(cx_, Phase::kSlabGemm);
+      n0 += ns;
+    }
+  }
+
+  // The head's pass (qwen4exp_prefill.h, Qwen4ExpMtpPrefill): the chunk's R rows, then the head over its rows.
+  void mtp_pass() {
+    Qwen4ExpMtpBuffers& mb = *mtp_->bufs;
+    const size_t row = size_t(d_.hc_n()) * 2;
+    combine(HcSrc::Y, false, nullptr);   // _Y_NN: the chunk's pre-mixer H (R_{pos} .. R_{pos+C-1})
+    cx_.copy(at(*mtp_->R, 0), mb.hh_row(0), row);                       // R_{pos-1}
+    cx_.copy(at(*mtp_->R, row), s_.H.ptr(), size_t(C_) * row);          // rows 1..C
+    const uint32_t rows = mtp_prefill_rows(pos_, C_), r0 = C_ - rows;   // pos 0: no R_{-1}, the head starts at row 1
+    if (rows > 0) {
+      ctrl_ = mb.hctl.ptr();
+      const loader::Q4MtpFcOffsets fo = loader::q4_mtp_fc_offsets(d_);
+      const l0::Mem& fc = *part_.mtp_fc;
+      const loader::Q4Layer& L = *part_.mtp;
+      void* xh = s_.xg.ptr();                                   // bf16 [rows][10240] = [4 rows][2560]
+      void* xe = at(s_.xg, size_t(kPfC) * d_.hc_n() * 2);       // bf16 [rows][2560]
+      const std::string v = kq::mtp_variant(kPfC, mtp_->single, true);
+      // q4_mtp_norm(ctrl, R, embed, w_e, w_h, xe, xh, ids) _PF - grid (1 + 4, rows): R_{q} and t_{q+1} for the head's
+      // rows q = pos - 1 + r0 .. (the chunk's ids from r0)
+      launch(kc_(v, "q4_mtp_norm"), 1 + d_.hc, rows, 1,
+             {PtrArg(ctrl()), PtrArg(at(*mtp_->R, size_t(r0) * row)), PtrArg(mtp_->embed), PtrArg(at(fc, fo.norm_embedding)),
+              PtrArg(at(fc, fo.norm_hidden)), PtrArg(xe), PtrArg(xh), PtrArg(s_.ids.as<uint32_t>() + r0)});
+      prefill::profile_wait(cx_, Phase::kNorm);
+      bf16_cols(at(fc, fo.fc_embedding), d_.hidden, d_.hidden, 0, d_.hidden, rows, xe, s_.o.ptr(), d_.hidden);
+      bf16_cols(at(fc, fo.fc_hidden), d_.hidden, d_.hidden, 0, d_.hidden, rows * d_.hc, xh, s_.partials.ptr(), d_.hidden);
+      // q4_mtp_fuse(ctrl, fe, fh, H) - grid (10240 / 256, rows): the head layer's input, materialised
+      launch(kc_(v, "q4_mtp_fuse"), d_.hc_n() / kq::kMtpWg, rows, 1,
+             {PtrArg(ctrl()), PtrArg(s_.o.ptr()), PtrArg(s_.partials.ptr()), PtrArg(s_.H.ptr())});
+      prefill::profile_wait(cx_, Phase::kNorm);
+      src_ = HcSrc::None;
+      rows_ = rows;
+      hc(*L.hc_attn);   // combine _X, the down||inject slab + pf_gemm, up_mix _D512 -> x (the head's rows)
+      rows_ = C_;
+      // the k||v columns of q||gate||k||v only (the K / V the head attends later), the indexer
+      require(d_.q_n() * 2 % kPfSlab == 0, "q||gate is not whole slabs");
+      bf16_cols(L.qsa_qkvg->mem.ptr(), d_.hidden, d_.qkvg_n(), 2 * d_.q_n(), d_.qkvg_n(), rows, s_.x.ptr(),
+                s_.partials.ptr(), pf_ld(d_.qkvg_n()));
+      bf16_cols(L.qsa_idx->mem.ptr(), d_.hidden, d_.idx_n(), 0, d_.idx_n(), rows, s_.x.ptr(), s_.idx_f32.ptr(), kq::kPfIdxLd);
+      // pf_attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v) q16 - grid (24 + 2, rows): the
+      // head's K / V at its positions (q16 is written and never read)
+      launch(kc_(kq::pf_attn_prep_q4_variant(), "pf_attn_prep"), d_.q_heads + d_.kv_heads, rows, 1,
+             {PtrArg(ctrl()), PtrArg(s_.partials.ptr()), PtrArg(L.qsa_small->ptr()), PtrArg(part_.rope->ptr()),
+              PtrArg(s_.q16.ptr()), PtrArg(nullptr), PtrArg(mb.k()), PtrArg(mb.v())});
+      const std::string qv = kq::pf_qsa_variant();
+      // q4_qsa_prep(ctrl, idx_f32, small, rope, idx_q, tail, idx_keys) _PF - grid (5, rows); q4_qsa_ring - grid (1, 8)
+      launch(kc_(qv, "q4_qsa_prep"), d_.idx_heads + 1, rows, 1,
+             {PtrArg(ctrl()), PtrArg(s_.idx_f32.ptr()), PtrArg(L.qsa_small->ptr()), PtrArg(part_.rope->ptr()),
+              PtrArg(s_.idx_q.ptr()), PtrArg(mb.idx_tail.ptr()), PtrArg(mb.idx_keys.ptr())});
+      launch(kc_(qv, "q4_qsa_ring"), 1, kIdxTail, 1, {PtrArg(ctrl()), PtrArg(s_.idx_f32.ptr()), PtrArg(mb.idx_tail.ptr())});
+      prefill::profile_wait(cx_, Phase::kAttnPrep);
+      ctrl_ = b_.control.ptr();
+    }
+    cx_.copy(mb.hh_row(0), at(*mtp_->R, size_t(C_) * row), row);       // R_{pos+C-1}: the next chunk's row 0
+  }
+
   prefill::Context& cx_;
   prefill::KernelCache& kc_;
   Qwen4ExpPrefillScratch& s_;
@@ -384,6 +471,9 @@ class Walk {
   const l0::Mem* injected_;
   const bool two_;
   const uint32_t dense_;
+  const Qwen4ExpMtpPrefill* mtp_;   // spec 21e: the head's pass (the last device), or null
+  const void* ctrl_;                // the device's Control, or the head's for its pass
+  uint32_t rows_;                   // the rows a combine / up_mix / linear covers: C, or the head's rows
   HcSrc src_ = HcSrc::None;
   size_t n_ = 0;
 };
@@ -432,23 +522,29 @@ size_t Qwen4ExpPrefillScratch::bytes() const {
 
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                    const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager,
-                   const l0::Mem* injected, bool two_cards) {
-  Walk(cx, kc, s, m, part, b, pos, C, eager, injected, two_cards).run();
+                   const l0::Mem* injected, bool two_cards, const Qwen4ExpMtpPrefill* mtp) {
+  Walk(cx, kc, s, m, part, b, pos, C, eager, injected, two_cards, mtp).run();
 }
 
 void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
-                  const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t last_row) {
+                  const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t last_row, const void* R_last) {
   const model::Qwen4ExpDesc& d = m.desc;
   if (last_row >= kPfC) throw std::runtime_error("runtime::qwen4exp::prefill_head: last_row past kPfC");
   if (!part.final_mixer || !part.lm_head)
     throw std::runtime_error("runtime::qwen4exp::prefill_head: device " + std::to_string(part.device) + " holds no head");
   const loader::Q4HcOffsets o = loader::q4_hc_offsets(d, false);
   // decode's final mixer over the last row: combine _Y (M 1: the row's H, its pending y and inject weights) -> b.xn;
-  // gemv_bf16 {10240, 320} -> b.down_f32; q4_hc_up_mix (M 1, no inject) -> b.x
-  cx.launch(kc(kq::hc_combine_norm_variant(1, HcSrc::Y, 0, true), "q4_hc_combine_norm"), d.hc, 1, 1,
-            {PtrArg(b.control.ptr()), PtrArg(at(s.H, size_t(last_row) * d.hc_n() * 2)),
-             PtrArg(at(s.y, size_t(last_row) * d.hidden * 2)), PtrArg(at(s.inj, size_t(last_row) * d.hc * 4)),
-             PtrArg(at(*part.final_mixer, o.norm)), PtrArg(b.xn.ptr())});
+  // gemv_bf16 {10240, 320} -> b.down_f32; q4_hc_up_mix (M 1, no inject) -> b.x. Spec 21e: with the MTP head's pass
+  // the rows were materialised (R_last: nothing pending, combine _X - the same norm over the same H).
+  if (R_last)
+    cx.launch(kc(kq::hc_combine_norm_variant(1, HcSrc::None, 0, true), "q4_hc_combine_norm"), d.hc, 1, 1,
+              {PtrArg(b.control.ptr()), PtrArg(R_last), PtrArg(R_last), PtrArg(b.inj.ptr()),
+               PtrArg(at(*part.final_mixer, o.norm)), PtrArg(b.xn.ptr())});
+  else
+    cx.launch(kc(kq::hc_combine_norm_variant(1, HcSrc::Y, 0, true), "q4_hc_combine_norm"), d.hc, 1, 1,
+              {PtrArg(b.control.ptr()), PtrArg(at(s.H, size_t(last_row) * d.hc_n() * 2)),
+               PtrArg(at(s.y, size_t(last_row) * d.hidden * 2)), PtrArg(at(s.inj, size_t(last_row) * d.hc * 4)),
+               PtrArg(at(*part.final_mixer, o.norm)), PtrArg(b.xn.ptr())});
   {
     const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(o.down_n);
     cx.launch(kc(kernels::gemv_bf16_variant(1, d.hc_n(), o.down_n, t), "gemv_bf16"), o.down_n / t.cols, 1, 1,
