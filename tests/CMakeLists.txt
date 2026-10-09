@@ -3279,4 +3279,32 @@ target_include_directories(qwen4exp_snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/sr
 target_link_libraries(qwen4exp_snapshot_test PRIVATE b70_qwen4exp_plan)
 add_test(NAME qwen4exp_snapshot_test COMMAND qwen4exp_snapshot_test)
 set_tests_properties(qwen4exp_snapshot_test PROPERTIES LABELS qwen4exp TIMEOUT 300)
+# On the card (box only; SKIP 77 without the synthetic checkpoints / Intel's): qwen4exp_snapshot_gpu_test - restores at
+# the block ends 2048 / 4096 bitwise the cold run, at the request ends 2049..2052 (the QSA cut), 5000 and 1 bitwise the
+# session that never left; one card, two (pp2:2), and `cross` (a two-card snapshot continues on one card and the
+# reverse); Intel's --layers 18 when present.
+if(B70_Q4EXP)
+  add_executable(qwen4exp_snapshot_gpu_test runtime/qwen4exp_snapshot_gpu_test.cc)
+  target_include_directories(qwen4exp_snapshot_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(qwen4exp_snapshot_gpu_test PRIVATE b70_qwen4exp_prefill b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(qwen4exp_snapshot_gpu_test)
+  endif()
+  add_dependencies(qwen4exp_snapshot_gpu_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS} kernel_pp_handoff)
+  set(_q4snap_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids)
+  add_test(NAME qwen4exp_snapshot_gpu_synth_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt
+    ${_q4snap_ids})
+  add_test(NAME qwen4exp_snapshot_gpu_synth_intel_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_SYNTH_DIR}/intel/ckpt
+    ${_q4snap_ids})
+  add_test(NAME qwen4exp_snapshot_gpu_synth_pp_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt
+    ${_q4snap_ids} pp2:2)
+  add_test(NAME qwen4exp_snapshot_gpu_cross_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt
+    ${_q4snap_ids} cross)
+  add_test(NAME qwen4exp_snapshot_gpu_intel_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_INTEL_SNAPSHOT}
+    ${_q4snap_ids} layers:18 int8)
+  set_tests_properties(qwen4exp_snapshot_gpu_synth_test qwen4exp_snapshot_gpu_synth_intel_test
+    qwen4exp_snapshot_gpu_synth_pp_test qwen4exp_snapshot_gpu_cross_test qwen4exp_snapshot_gpu_intel_test
+    PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
 # ==== Spec 21e: Qwen3.8-Flash-Next served ==== (end) ====
