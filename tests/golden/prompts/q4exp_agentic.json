@@ -1,0 +1,249 @@
+{
+ "name": "q4exp_agentic",
+ "enable_thinking": true,
+ "note": "spec 21a Task 5: an original multi-turn coding session for this repository (Qwen XML tool calls through the checkpoint's template, reasoning kept); tool results hold src/runtime/kolibri/kolibri_sizes.h and src/loader/kolibri1_layout.h verbatim as of 2026-10-09; the grep / bash results are written for the session (illustrative, not captured). The prompt ends after the last tool result with the generation prompt.",
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a coding agent working in a local checkout of b70-inference-server, an LLM inference engine for the Intel Arc Pro B70 written in C++ with Level Zero kernels, plus Python and shell tooling. The repository is at /work.\n\nYou help the user with software engineering tasks: finding code, explaining it, editing it and running builds and tests. Use the tools you are given to inspect the repository; never guess the contents of a file you have not read. Prefer grep and glob to locate code, read to look at it, edit to change it (the oldString must match the file exactly, including indentation) and bash to run commands.\n\nGuidelines:\n- Be concise. Act rather than describe.\n- Make one tool call at a time and wait for its result.\n- Keep edits minimal and in the style of the surrounding code.\n- Paths passed to tools are absolute and start with /work.\n- The C++ tree builds with CMake into /work/build; tests are ctest targets named after their source file. The Python tools run with python3.\n- Do not commit, push or change git state unless the user asks."
+  },
+  {
+   "role": "user",
+   "content": "Kolibri's planner (src/runtime/kolibri/kolibri_sizes.h) and its loader layout (src/loader/kolibri1_layout.h) both describe how many bytes a layer and the KV take on the card. Before I add a second model family with the same split, I want to know whether the two headers can disagree. Read both, tell me which numbers each one owns, and whether any per-layer byte count is computed in two places. If you find a duplicate formula, propose the smallest change that makes one header use the other's."
+  },
+  {
+   "role": "assistant",
+   "reasoning_content": "The user wants a comparison of two headers. Start with the planner header, since it is the one that consumes sizes; then the loader layout. Read the whole file - it is a header, so it should fit.",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/src/runtime/kolibri/kolibri_sizes.h"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "<file>\n00001| #pragma once\n00002| #include <array>\n00003| #include <cstddef>\n00004| #include <cstdint>\n00005| #include <string>\n00006| #include <vector>\n00007| \n00008| #include \"model/kolibri1.h\"\n00009| #include \"runtime/memory_plan.h\"\n00010| #include \"runtime/pipeline_plan.h\"   // PpBalance, PpChoice, PpHandoff, kPpDevices, the landing layout\n00011| \n00012| // Spec 20c: Kolibri-1's runtime allocations as device-free arithmetic, the planner over them\n00013| // (`--max-len auto`, spec 6 §10) and the split by bytes (`--pipeline-split auto`, spec 16b's\n00014| // runtime::pp_balance - not a second rule) - runtime/k2/k2_sizes.h's arrangement for Kolibri: the\n00015| // KolibriBuffers constructor allocates exactly what these return, per device, and the plan adds the\n00016| // same numbers up before anything is allocated. Host only (tests/runtime/kolibri_plan_test.cc).\n00017| namespace runtime::kolibri {\n00018| \n00019| inline constexpr uint32_t kM = 1;   // Kolibri builds M = 1 only (no MTP head, spec 20 §1)\n00020| \n00021| // Which decode attention every capture binds - kol_attn.cl's flash form or kol_attn_eager.cl's\n00022| // eager form (the reference's bf16 chain). `B70_KOLIBRI_ATTN=flash|eager`, read at each call;\n00023| // unset or empty is the default; anything else throws (spec 18 §10.1's switch).\n00024| enum class KolAttn { Flash, Eager };\n00025| inline constexpr KolAttn kDefaultKolAttn = KolAttn::Flash;   // until the box A/B (spec 18 §10.1's rule)\n00026| KolAttn kolibri_attn();\n00027| const char* kol_attn_name(KolAttn a);\n00028| \n00029| // One device's persistent group (zeroed by KolibriBuffers::zero, KolibriEngine::reset):\n00030| //   control      runtime::Control, shared memory\n00031| //   full_k/v     bf16 [its full layers][max_len][kv_heads][head_dim] each - the growing KV, 20 KiB a\n00032| //                position for the model's 10 full layers (K and V)\n00033| //   ring_k/v     bf16 [its sliding layers][kRing][kv_heads][head_dim] each - 8 MiB a layer (K and V),\n00034| //                335.5 MB for the 40 sliding layers (derived)\n00035| // An empty group (a device with no full / no sliding layer) still allocates one 64-byte line.\n00036| struct PersistentSizes {\n00037|   size_t control = 0, full_k = 0, full_v = 0, ring_k = 0, ring_v = 0;\n00038|   size_t kv() const { return full_k + full_v + ring_k + ring_v; }\n00039|   size_t total() const { return control + kv(); }\n00040| };\n00041| PersistentSizes persistent_sizes(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev,\n00042|                                  uint32_t max_len);\n00043| inline size_t full_kv_bytes_per_pos(const model::Kolibri1Desc& d) {\n00044|   return size_t(d.full_before(d.layers)) * 2 * d.kv_n() * 2;   // 20480 at 50 layers\n00045| }\n00046| inline size_t ring_bytes_per_layer(const model::Kolibri1Desc& d) {\n00047|   return size_t(model::Kolibri1Desc::kRing) * 2 * d.kv_n() * 2;   // 8 MiB (K and V)\n00048| }\n00049| inline size_t full_bytes_per_layer(const model::Kolibri1Desc& d, uint32_t max_len) {\n00050|   return size_t(max_len) * 2 * d.kv_n() * 2;   // K and V\n00051| }\n00052| // The rows of one layer of either kind in its group (bytes, K or V alone).\n00053| inline size_t full_layer_rows_bytes(const model::Kolibri1Desc& d, uint32_t max_len) {\n00054|   return size_t(max_len) * d.kv_n() * 2;\n00055| }\n00056| inline size_t ring_layer_rows_bytes(const model::Kolibri1Desc& d) {\n00057|   return size_t(model::Kolibri1Desc::kRing) * d.kv_n() * 2;\n00058| }\n00059| \n00060| // The decode scratch of one device, sized for kM rows (every device has the whole set: the lists are\n00061| // per device and scratch is per list):\n00062| //   resid, x, a, mo  bf16 [M][hidden]        the residual, every norm's output, o_proj's row, the MoE's\n00063| //   partials         fp32 [max S x N][M]     the int4 / bf16 GEMVs' output (q||k||v S2 x 7168 at most)\n00064| //   sumsq_a, sumsq_r fp32 [kNormG][M]        a sub-block's Σ², the residual's\n00065| //   attn_q           fp32 [M][q_n]\n00066| //   attn_part        fp32 [q_heads][TGT][M][130]\n00067| //   attn_out         bf16 [M][q_n]           o_proj's input\n00068| //   logits_r         fp32 [M][router_n]      the router GEMV's fp32 logits\n00069| //   routes           u32  [layers][M][32]    every layer's route row (the routing diagnostic)\n00070| //   moe_h            bf16 [M][7][moe_inter]  SiLU(gate) x up of the 6 routed + the shared slot\n00071| //   logits           fp32 [M][vocab]\n00072| //   argmax_part      fp32 [M][ceil(vocab / 1024)][2]\n00073| struct ScratchSizes {\n00074|   size_t resid = 0, x = 0, a = 0, mo = 0, partials = 0, sumsq_a = 0, sumsq_r = 0, attn_q = 0, attn_part = 0,\n00075|          attn_out = 0, logits_r = 0, routes = 0, moe_h = 0, logits = 0, argmax_part = 0;\n00076|   size_t total() const {\n00077|     return resid + x + a + mo + partials + sumsq_a + sumsq_r + attn_q + attn_part + attn_out + logits_r + routes +\n00078|            moe_h + logits + argmax_part;\n00079|   }\n00080| };\n00081| ScratchSizes scratch_sizes(const model::Kolibri1Desc& d);\n00082| size_t partials_floats(const model::Kolibri1Desc& d);\n00083| // Eager's score row, fp32 [M][q_heads][max_len]; 0 under flash.\n00084| size_t attn_scores_bytes(const model::Kolibri1Desc& d, uint32_t max_len, KolAttn a = kolibri_attn());\n00085| inline constexpr uint32_t kRouteWords = 32;   // = kernels::kolibri::route::kWords\n00086| inline size_t route_at(uint32_t layer) { return size_t(layer) * kM * kRouteWords * 4; }\n00087| // The residual tap (debug): bf16 [layers][M][hidden] on every device (its layers' rows written).\n00088| inline size_t tap_bytes(const model::Kolibri1Desc& d) { return size_t(d.layers) * kM * d.hidden * 2; }\n00089| \n00090| // The hand-off (spec 16b's buffers through the descriptor-free layout): the residual row and the\n00091| // 20 norm sums cross. Device 0: pp_send's counter; device 1: the landing allocation + pp_recv's state.\n00092| PpLandingLayout landing_layout(const model::Kolibri1Desc& d);\n00093| size_t link_bytes(const model::Kolibri1Desc& d, uint32_t dev);\n00094| \n00095| // The decode list's launches on one device (the hand-off's copies and barriers excluded; peer's\n00096| // pp_send / pp_recv included), and their sum:\n00097| //   device 0  embed_gather + prep_res_fold SP0, then its layers\n00098| //   a layer   15 (flash) / 17 (eager): kol_norm_finish, q||k||v GEMV, kol_attn_prep, decode + reduce\n00099| //             (eager: score, softmax, P·V, reduce), o_proj GEMV, prep_res_fold _Z (a, Σa²), kol_post_add\n00100| //             (post_attn_norm), kol_norm_finish, router GEMV, kol_route, kol_moe_gate_up, kol_moe_down,\n00101| //             prep_res_fold SP0 (Σmo²), kol_post_add (post_ffn_norm)\n00102| //   last      kol_norm_finish (model.norm), lm_head, the two argmax stages\n00103| // 756 / 856 at 50 layers on one card AND on two (the cut is 16b's: device 0 ends with layer s-1's\n00104| // kol_post_add, which already wrote resid and the sums layer s's norm reads); peer adds pp_send and\n00105| // pp_recv: 758 / 858.\n00106| size_t device_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev, KolAttn a,\n00107|                        PpHandoff h);\n00108| size_t decode_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, KolAttn a, PpHandoff h);\n00109| \n00110| // --- spec 20d: the prefill chunk ------------------------------------------------------------------\n00111| // One chunk of at most kPfC positions (= kernels::kolibri::kPfC, checked in kolibri_prefill.cc): every\n00112| // allocation KolibriPrefillScratch makes on a device, as device-free arithmetic. None depends on max_len\n00113| // (the flash attention keeps no score scratch), so the prefill scratch is one constant per device.\n00114| inline constexpr uint32_t kPfC = 2048;\n00115| inline constexpr uint32_t kPfTm = 32;                          // the grouped GEMM's tile rows (pf_moe_gemm TM)\n00116| inline constexpr uint32_t kPfSlab = 1024;                      // a whole slab of an attention linear\n00117| inline constexpr size_t kPfBatchBytes = size_t(512) << 20;     // one weight batch of bf16 expert blocks\n00118| inline uint32_t pad256(uint32_t n) { return (n + 255) / 256 * 256; }\n00119| // The attention linears' slab walk over N columns: slabs of kPfSlab and one tail of pad256(N - n0)\n00120| // (k2_pf_dequant_slab / kol_pf_bf16_slab zero-fill its padding); the partials row pitch pad256(N).\n00121| inline uint32_t pf_slabs(uint32_t N) { return (N + kPfSlab - 1) / kPfSlab; }\n00122| inline uint32_t pf_slab_width(uint32_t N, uint32_t n0) { return N - n0 >= kPfSlab ? kPfSlab : pad256(N - n0); }\n00123| inline uint32_t pf_ld(uint32_t N) { return pad256(N); }\n00124| // The grouped GEMMs' padded tile count of a C-row chunk (kol_pf_moe.cl's header has the bound):\n00125| //   floor((C x top_k + experts x (TM - 1)) / TM) + ceil(C / TM)        820 at C = 2048\n00126| uint32_t pf_tiles(const model::Kolibri1Desc& d, uint32_t C);\n00127| // The weight batches: 385 blocks (384 experts + the bf16 shared expert, block 384) of bf16 [K][N] in\n00128| // kPfBatchBytes regions - gate||up 5,242,880 B a block, 102 a batch, 4 batches; down 2,621,440 B, 204,\n00129| // 2 batches.\n00130| size_t pf_block_gu_bytes(const model::Kolibri1Desc& d);\n00131| size_t pf_block_dn_bytes(const model::Kolibri1Desc& d);\n00132| uint32_t pf_batch_blocks_gu(const model::Kolibri1Desc& d);\n00133| uint32_t pf_batch_blocks_dn(const model::Kolibri1Desc& d);\n00134| uint32_t pf_batches_gu(const model::Kolibri1Desc& d);\n00135| uint32_t pf_batches_dn(const model::Kolibri1Desc& d);\n00136| \n00137| // KolibriPrefillScratch's allocations on one device (kPfC rows each; both devices hold the whole set -\n00138| // the lists are per device):\n00139| //   ids       u32  [kPfC]                       host memory: the chunk's ids (read by device 0's embed)\n00140| //   resid     bf16 [kPfC][hidden]               the residual stream (crosses the cut on two cards)\n00141| //   x, a, mo  bf16 [kPfC][hidden]               every norm's output, o_proj's own row, the MoE's output\n00142| //   partials  fp32 [kPfC][pf_ld(7168)]          the slab GEMMs' output (q||k||v, then o_proj at 2560)\n00143| //   slab      bf16 [6144][kPfSlab]              one slab of the widest-K attention linear\n00144| //   sumsq_a/r fp32 [kNormG][kPfC]               a sub-block's Σ², the residual's (crosses with resid)\n00145| //   attn_q    fp32 [kPfC][q_n]                  kol_attn_prep's q\n00146| //   attn_out  bf16 [kPfC][q_n]                  the flash attention's output, o_proj's A\n00147| //   logits    fp32 [kPfC][router_n]             the router GEMV\n00148| //   routes    u32  [layers][kPfC][32]           every layer's route rows of the LAST chunk\n00149| //   hdr       u32  [pf_hdr words]               the sort's header\n00150| //   tiles     u32  [tmax(kPfC)][2]              the tile table\n00151| //   row_tok   u32  [tmax x TM]                  the sorted rows' tokens\n00152| //   pair_row  u32  [kPfC][top_k]                every (token, slot)'s sorted row\n00153| //   xg        bf16 [tmax x TM][hidden]          the gathered A, then down's y\n00154| //   h         bf16 [tmax x TM][moe_inter]       gate||up's SiLU h\n00155| //   w         bf16 kPfBatchBytes                the expert weight batch\n00156| struct PrefillSizes {\n00157|   size_t ids = 0, resid = 0, x = 0, a = 0, mo = 0, partials = 0, slab = 0, sumsq_a = 0, sumsq_r = 0, attn_q = 0,\n00158|          attn_out = 0, logits = 0, routes = 0, hdr = 0, tiles = 0, row_tok = 0, pair_row = 0, xg = 0, h = 0, w = 0;\n00159|   size_t total() const {\n00160|     return ids + resid + x + a + mo + partials + slab + sumsq_a + sumsq_r + attn_q + attn_out + logits + routes + hdr +\n00161|            tiles + row_tok + pair_row + xg + h + w;\n00162|   }\n00163| };\n00164| PrefillSizes prefill_sizes(const model::Kolibri1Desc& d);\n00165| inline size_t pf_route_at(uint32_t layer) { return size_t(layer) * kPfC * kRouteWords * 4; }\n00166| // The two-card prefill hand-off: a second runtime::PipelineLink in `copy` mode over spec 16b's layout at\n00167| // chunk size - kPfC rows of the residual and the [kNormG][kPfC] sums (10.5 MB + 160 KB).\n00168| PpLandingLayout pf_landing_layout(const model::Kolibri1Desc& d);\n00169| size_t pf_link_bytes(const model::Kolibri1Desc& d, uint32_t dev);\n00170| \n00171| // The chunk's launches on one device and their sum, the same at every C (the hand-off's copies, the\n00172| // event and the head excluded):\n00173| //   device 0  pf_embed_gather + pf_res_fold SP0, then its layers\n00174| //   a layer   45: kol_norm_finish, q||k||v 7 slabs x (dequant | copy + pf_gemm), kol_attn_prep,\n00175| //             kol_pf_flash_attn, o_proj 3 slabs x 2, pf_res_fold _Z + kol_post_add, kol_norm_finish,\n00176| //             the router GEMV, kol_route, sort, gather, gate||up 4 batches x (dequant + grouped GEMM),\n00177| //             down 2 x 2, the combine, pf_res_fold SP0 + kol_post_add\n00178| // 2252 at 50 layers on one card AND on two (the cut is 16b's: device 0 ends with layer s-1's\n00179| // kol_post_add, whose rows and sums cross; device 1 starts at layer s's norm - nothing recomputed).\n00180| size_t prefill_device_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev);\n00181| size_t prefill_chunk_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p);\n00182| inline constexpr size_t kPrefillHeadLaunches = 5;   // fold + norm over the last row, lm_head, argmax x 2\n00183| \n00184| // --- the split by bytes (16b's rule) -------------------------------------------------------------\n00185| // layer_bytes[l] = kol_layer_bytes(d).total() + (is_sliding(l) ? ring_bytes_per_layer : max_len x 2 x kv_n x 2)\n00186| std::vector<size_t> pp_layer_bytes(const model::Kolibri1Desc& d, uint32_t max_len);\n00187| // dev0_fixed = embedding + RoPE + decode scratch + control + link (device 0); dev1_fixed = final norm +\n00188| // lm_head + RoPE + decode scratch + control + link (device 1) - then runtime::pp_balance. `prefill`\n00189| // (spec 20d): both devices' fixed bytes also hold the prefill scratch and the prefill link.\n00190| PpBalance pp_split(const model::Kolibri1Desc& d, uint32_t max_len, bool int8_head, PpHandoff h,\n00191|                    KolAttn a = kolibri_attn(), bool prefill = false);\n00192| \n00193| // --- the planner -----------------------------------------------------------------------------------\n00194| // One device's plan in memory_line()'s components: model = its weights + its RoPE table; kv = its\n00195| // full KV + its rings; decode_state = control + scratch (+ eager's score row) (+ the tap) + its link;\n00196| // prefill_scratch (spec 20d, `prefill`) = prefill_sizes + its prefill link.\n00197| struct DevicePlan : MemoryComponents {\n00198|   uint32_t device = 0;\n00199|   size_t weights = 0, rope = 0, link = 0, full_kv = 0, rings = 0;\n00200| };\n00201| std::vector<DevicePlan> plan(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t max_len,\n00202|                              bool int8_head, bool debug_tap = false, KolAttn a = kolibri_attn(), bool prefill = false);\n00203| // The largest multiple of kMaxLenQuantum, at most min(cap, trained 262144), whose plan + reserve fits\n00204| // EVERY device; 0 when not even min(kMinAutoMaxLen, cap) does.\n00205| uint32_t max_len_that_fits(const model::Kolibri1Desc& d, const model::KolPlacement& p, bool int8_head,\n00206|                            const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap = 0,\n00207|                            bool prefill = false);\n00208| // `--pipeline-split auto` with `--max-len auto`: pp_auto_split_and_len's rule over pp_split - the split\n00209| // whose min-over-devices max_len is the largest, ties broken by pp_balance at that length.\n00210| PpChoice pp_split_and_len(const model::Kolibri1Desc& d, bool int8_head,\n00211|                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap = 0,\n00212|                           bool prefill = false);\n00213| // Whether `--pp 1` may run: the one-card plan at min(kMinAutoMaxLen, trained) fits device_bytes - reserve.\n00214| bool fits_one_card(const model::Kolibri1Desc& d, bool int8_head, size_t device_bytes, size_t reserve,\n00215|                    bool prefill = false);\n00216| // \"pipeline plan at max_len N, split s (layers [0, s) | [s, L)):\" + one line per device\n00217| // (runtime::pp_describe's text; \"plan at max_len N (one card):\" for one device).\n00218| std::string describe(const std::vector<DevicePlan>& p, const model::KolPlacement& pl, uint32_t max_len,\n00219|                      const std::array<size_t, kPpDevices>& device_bytes, size_t reserve);\n00220| \n00221| // --- spec 20e: prefix-cache snapshots (spec 7's PrefixCache on Kolibri) ----------------------------\n00222| // What a session leaves behind between replays, besides `pos`: the 10 full layers' growing KV (the\n00223| // cache's BLOCKS, as every model's) and the 40 sliding layers' rings. A query at position p reads the\n00224| // keys (p - window, p] - its own key it writes itself - so the ring rows of positions [p - 512, p) are\n00225| // the whole recurrent \"state\" (spec 7's word): 40 x 512 x (K + V) x kv_n x 2 B = 41,943,040 B at the\n00226| // real shapes (derived), the same at every pos. Positions before 0 (a snapshot at p < 512) are zero\n00227| // rows on the host, written back as zeros: the window never reads them, and a cold run's ring holds\n00228| // zeros there too (reset). The routes, the RoPE table and the scratch are per step or constant.\n00229| //\n00230| // The HOST layouts (spec 16b's rule: --pp 2's is --pp 1's byte for byte, so an entry moves between one\n00231| // card and two unchanged - every layer is addressed through the placement, never by device order):\n00232| //   state  [K | V][sliding layer, in layer order][state_positions(d)][kv_n] bf16, positions ascending\n00233| //   kv     [K | V][full layer, in layer order][end - begin][kv_n] bf16 (runtime::Engine's / K2's order)\n00234| // A run is one contiguous range of one device allocation (`tensor`: the device's full_k, full_v,\n00235| // ring_k, ring_v), in host order. `zero` runs cover positions before 0: save_state writes zeros to the\n00236| // host for them (the device slots are not read), load_state copies the host's zeros into their slots.\n00237| inline uint32_t state_positions(const model::Kolibri1Desc& d) { return d.window - 1; }   // 512\n00238| enum class SnapTensor : uint32_t { FullK, FullV, RingK, RingV };\n00239| struct SnapRun {\n00240|   uint32_t device = 0;\n00241|   SnapTensor tensor = SnapTensor::FullK;\n00242|   size_t offset = 0, bytes = 0;   // within the device allocation\n00243|   bool zero = false;              // positions before 0 (state runs only)\n00244| };\n00245| // 40 x 512 x 2 x 1024 B = 41,943,040 at the real shapes.\n00246| inline size_t state_snapshot_bytes(const model::Kolibri1Desc& d) {\n00247|   return size_t(2) * (d.layers - d.full_before(d.layers)) * state_positions(d) * d.kv_n() * 2;\n00248| }\n00249| // 20,480 B a position at the real shapes (= full_kv_bytes_per_pos).\n00250| inline size_t kv_snapshot_bytes(const model::Kolibri1Desc& d, uint32_t n_pos) {\n00251|   return full_kv_bytes_per_pos(d) * n_pos;\n00252| }\n00253| // The ring rows of positions [pos - state_positions, pos), every sliding layer, K then V. Throws when\n00254| // the ring cannot hold them (kRing < state_positions).\n00255| std::vector<SnapRun> state_runs(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t pos);\n00256| // Positions [begin, end) of every full layer, K then V. Throws unless begin <= end <= max_len.\n00257| std::vector<SnapRun> kv_runs(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t max_len,\n00258|                              uint32_t begin, uint32_t end);\n00259| \n00260| }  // namespace runtime::kolibri\n\n(End of file - total 260 lines)\n</file>"
+  },
+  {
+   "role": "assistant",
+   "reasoning_content": "kolibri_sizes.h owns the runtime allocations: the persistent KV groups (full layers growing with max_len, sliding layers in a fixed ring), the decode scratch, and the planner that adds them up per device. It includes model/kolibri1.h and the pipeline plan, but not the loader layout - so where do the weight bytes come from? It mentions that the plan adds weight bytes; I need the layout header to see the per-layer weight formula.",
+   "content": "The planner header owns the KV and scratch sizes. Now the loader layout.",
+   "tool_calls": [
+    {
+     "id": "call_2",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/src/loader/kolibri1_layout.h"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_2",
+   "content": "<file>\n00001| #pragma once\n00002| #include <cstddef>\n00003| #include <cstdint>\n00004| \n00005| #include \"model/kolibri1.h\"\n00006| \n00007| // Spec 20c: Kolibri-1 on the card as device-free arithmetic - the ONE home of every weight\n00008| // allocation's size, header-only so the planner (runtime/kolibri/kolibri_sizes.h, no loader\n00009| // library) and the loader (loader/kolibri1_loader.cc allocates exactly these) share it.\n00010| //\n00011| // Per layer (model::Kolibri1Desc's shapes; derived, the loader asserts them):\n00012| //\n00013| //   qkv, oproj   int4 arm: GPTQ layout 0 (words [K/8][N] + f16 scales [K/64][N]) -\n00014| //                  q||k||v 2560 x 7168 (9,175,040 + 573,440 B), o_proj 6144 x 2560\n00015| //                  (7,864,320 + 491,520 B): 18,104,320 B\n00016| //                bf16 arm: gemv_bf16's tiles, 36,700,160 + 31,457,280 = 68,157,440 B\n00017| //   router       bf16 tiled {hidden, router_n 512}, rows 384..511 zero: 2,621,440 B\n00018| //   bias         fp32 [router_n]: expert_bias widened, 0 past the experts: 2,048 B\n00019| //   norms        fp32 [4 x hidden + 2 x head_dim] (Kolibri1Desc::norm_off_*): 41,984 B\n00020| //   gate_up      int4 layout-1 blocks [experts][hidden x 2I] (gate||up interleave16):\n00021| //                  384 x 1,392,640 = 534,773,760 B\n00022| //   down         int4 layout-1 blocks [experts][I x hidden]: 384 x 696,320 = 267,386,880 B\n00023| //   shared       bf16 tiled {hidden, 2I} (gate||up interleave16) 5,242,880 B and\n00024| //                  {I, hidden} 2,621,440 B: 7,864,320 B\n00025| //   total        830,794,752 B (int4 attention), 880,847,872 B (bf16 attention)\n00026| //\n00027| // Top level: embed bf16 [vocab][hidden] 655,360,000 B (device 0, gathered); lm_head bf16 tiled\n00028| // 655,360,000 B or int8 + fp32 row scales 328,192,000 B, and the final norm fp32 [hidden]\n00029| // (the last device); the RoPE table fp32 [max_len][2][64] on every device holding a sliding\n00030| // layer (Kolibri1Desc::rope_table_bytes - the one term that scales with max_len).\n00031| // The real model, int4 attention, int8 head, split 25: device 0 21,425,228,800 B, device 1\n00032| // 21,098,071,040 B (derived; kolibri1_repack_test pins it).\n00033| namespace loader {\n00034| \n00035| inline constexpr uint32_t kKolTileU32 = 136;   // layout 1: 128 nibble + 8 scale u32 per tile\n00036| \n00037| inline constexpr size_t kol_layout1_bytes(uint32_t K, uint32_t N) {\n00038|   return size_t(N / 16) * (K / 64) * kKolTileU32 * 4;\n00039| }\n00040| inline constexpr size_t kol_layout0_bytes(uint32_t K, uint32_t N) {\n00041|   return size_t(K / 8) * N * 4 + size_t(K / 64) * N * 2;\n00042| }\n00043| \n00044| struct KolLayerBytes {\n00045|   size_t qkv = 0, oproj = 0, router = 0, bias = 0, norms = 0, gate_up = 0, down = 0, shared_gate_up = 0,\n00046|          shared_down = 0;\n00047|   size_t total() const { return qkv + oproj + router + bias + norms + gate_up + down + shared_gate_up + shared_down; }\n00048|   size_t experts() const { return gate_up + down; }\n00049|   size_t attention() const { return qkv + oproj; }\n00050| };\n00051| \n00052| inline size_t kol_linear_bytes(const model::Kolibri1Desc& d, model::KolLinearId id) {\n00053|   const model::GemvShape s = d.linear(id).shape;\n00054|   return d.attn == model::KolAttnForm::Int4 ? kol_layout0_bytes(s.K, s.N) : size_t(s.K) * s.N * 2;\n00055| }\n00056| \n00057| inline KolLayerBytes kol_layer_bytes(const model::Kolibri1Desc& d) {\n00058|   KolLayerBytes b;\n00059|   b.qkv = kol_linear_bytes(d, model::KolLinearId::Qkv);\n00060|   b.oproj = kol_linear_bytes(d, model::KolLinearId::OProj);\n00061|   b.router = size_t(d.router_n()) * d.hidden * 2;\n00062|   b.bias = size_t(d.router_n()) * 4;\n00063|   b.norms = size_t(d.norm_floats()) * 4;\n00064|   b.gate_up = kol_layout1_bytes(d.hidden, 2 * d.moe_inter) * d.experts;\n00065|   b.down = kol_layout1_bytes(d.moe_inter, d.hidden) * d.experts;\n00066|   b.shared_gate_up = size_t(d.hidden) * 2 * d.shared_inter * 2;\n00067|   b.shared_down = size_t(d.shared_inter) * d.hidden * 2;\n00068|   return b;\n00069| }\n00070| // One expert's block in `gate_up` / `down` (block e at e x this).\n00071| inline size_t kol_gate_up_block_bytes(const model::Kolibri1Desc& d) {\n00072|   return kol_layout1_bytes(d.hidden, 2 * d.moe_inter);\n00073| }\n00074| inline size_t kol_down_block_bytes(const model::Kolibri1Desc& d) { return kol_layout1_bytes(d.moe_inter, d.hidden); }\n00075| \n00076| inline size_t kol_embed_bytes(const model::Kolibri1Desc& d) { return size_t(d.vocab) * d.hidden * 2; }\n00077| inline size_t kol_lm_head_bytes(const model::Kolibri1Desc& d, bool int8) {\n00078|   return int8 ? size_t(d.vocab) * d.hidden + size_t(d.vocab) * 4 : size_t(d.vocab) * d.hidden * 2;\n00079| }\n00080| inline size_t kol_final_norm_bytes(const model::Kolibri1Desc& d) { return size_t(d.hidden) * 4; }\n00081| \n00082| // A device's weights under a placement (the RoPE table excluded): its layers, the embedding on\n00083| // device 0, the final norm and lm_head on the last device.\n00084| inline size_t kol_device_weight_bytes(const model::Kolibri1Desc& d, const model::KolPlacement& p,\n00085|                                       uint32_t dev, bool int8_head) {\n00086|   size_t b = size_t(p.count(dev)) * kol_layer_bytes(d).total();\n00087|   if (dev == 0) b += kol_embed_bytes(d);\n00088|   if (dev + 1 == p.devices) b += kol_final_norm_bytes(d) + kol_lm_head_bytes(d, int8_head);\n00089|   return b;\n00090| }\n00091| // Whether device `dev` holds a sliding layer (and so a RoPE table).\n00092| inline bool kol_device_has_sliding(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev) {\n00093|   for (uint32_t l = p.first(dev); l < p.end(dev); ++l)\n00094|     if (d.is_sliding(l)) return true;\n00095|   return false;\n00096| }\n00097| \n00098| // What ONE decode token reads of a layer (derived): attention, router, bias, norms, top_k\n00099| // expert blocks and the shared expert.\n00100| inline size_t kol_layer_read_per_token(const model::Kolibri1Desc& d) {\n00101|   const KolLayerBytes b = kol_layer_bytes(d);\n00102|   return b.qkv + b.oproj + b.router + b.bias + b.norms +\n00103|          size_t(d.top_k) * (kol_gate_up_block_bytes(d) + kol_down_block_bytes(d)) + b.shared_gate_up +\n00104|          b.shared_down;\n00105| }\n00106| \n00107| }  // namespace loader\n\n(End of file - total 107 lines)\n</file>"
+  },
+  {
+   "role": "assistant",
+   "reasoning_content": "kolibri1_layout.h is header-only on purpose: its comment says the planner and the loader share it, so the weight bytes have one home. But kolibri_sizes.h computes full_kv_bytes_per_pos and ring bytes itself - those are runtime buffers, not weights, so that is not a duplicate. The question is whether kolibri_sizes.cc re-derives any weight number instead of calling kol_layer_bytes. Grep for the layout helpers and for a hand-written 136 or layout-1 formula outside the layout header.",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_3",
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "arguments": {
+       "pattern": "kol_layout1_bytes|kol_layer_bytes|kKolTileU32|136 \\*",
+       "path": "/work/src",
+       "include": "*.{h,cc}"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_3",
+   "content": "/work/src/loader/kolibri1_layout.h:\n  Line 47: inline constexpr uint32_t kKolTileU32 = 136;   // layout 1: 128 nibble + 8 scale u32 per tile\n  Line 49: inline constexpr size_t kol_layout1_bytes(uint32_t K, uint32_t N) {\n  Line 50:   return size_t(N / 16) * (K / 64) * kKolTileU32 * 4;\n/work/src/loader/kolibri1_loader.cc:\n  Line 212:   const loader::KolLayerBytes want = loader::kol_layer_bytes(d, form);\n  Line 388:   if (bytes != loader::kol_layer_bytes(d, form).total())\n/work/src/runtime/kolibri/kolibri_sizes.cc:\n  Line 141:     w += loader::kol_layer_bytes(d, form).total();\n  Line 163:   const size_t top = loader::kol_top_bytes(d, form, last);\n/work/tests/runtime/kolibri_plan_test.cc:\n  Line 58:   EXPECT_EQ(loader::kol_layer_bytes(d, form).total(), 830794752u);"
+  },
+  {
+   "role": "assistant",
+   "reasoning_content": "Good: both the loader and the planner call loader::kol_layer_bytes, and the only tile constant is in the layout header. The KV formulas live only in kolibri_sizes.h. One more place to check: the RoPE table, which the layout comment says scales with max_len and is counted via Kolibri1Desc::rope_table_bytes - make sure kolibri_sizes.cc does not count it a second time in the persistent group.",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_4",
+     "type": "function",
+     "function": {
+      "name": "bash",
+      "arguments": {
+       "command": "grep -n \"rope_table_bytes\\|persistent_sizes\" /work/src/runtime/kolibri/kolibri_sizes.cc /work/src/model/kolibri1.cc | head -20"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_4",
+   "content": "/work/src/runtime/kolibri/kolibri_sizes.cc:58:PersistentSizes persistent_sizes(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev,\n/work/src/runtime/kolibri/kolibri_sizes.cc:166:  w += model::Kolibri1Desc::rope_table_bytes(max_len) * (p.sliding_on(dev) ? 1 : 0);\n/work/src/model/kolibri1.cc:94:size_t Kolibri1Desc::rope_table_bytes(uint32_t max_len) {\n/work/src/model/kolibri1.cc:95:  return size_t(max_len) * 2 * 64 * 4;\n"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the local filesystem.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path to the file"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Line to start from"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Number of lines to read"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "Find files by glob pattern.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit",
+    "description": "Replace an exact string in a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "oldString": {
+       "type": "string"
+      },
+      "newString": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "oldString",
+      "newString"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "content"
+     ]
+    }
+   }
+  }
+ ]
+}
