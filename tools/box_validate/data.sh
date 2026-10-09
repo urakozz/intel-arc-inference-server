@@ -96,6 +96,10 @@ case "${1:-}" in
       bash -c 'for n in 4 18; do for p in q4exp_short q4exp_4k q4exp_agentic; do test -s oracle-out-q4exp-L$n/$p.golden.safetensors || exit 1; done; done'
     have oracle_q4exp_traces "oracle-out-q4exp-traces/*.routes.safetensors (spec 21a Task 7: qwen4exp_oracle.sh trace - spec 22 P0.6 / P0.8's input)" \
       bash -c 'test "$(ls oracle-out-q4exp-traces/*.routes.safetensors 2>/dev/null | wc -l)" -ge 39'
+    # Spec 21b: the synthetic real-width checkpoints (make_synth.py --layers 4 --mtp, both forms) and their PLE
+    # int8 files beside them (ple_int8.py) - r31.synth writes them.
+    have oracle_q4exp_synth "oracle-out-q4exp-synth/{ours,intel}/ckpt/ and ckpt-ple-int8/ (spec 21b: r31.synth - make_synth.py + ple_int8.py)" \
+      bash -c 'for f in ours intel; do test -s oracle-out-q4exp-synth/$f/ckpt/model.safetensors.index.json && test -s oracle-out-q4exp-synth/$f/ckpt-ple-int8/model.safetensors.index.json || exit 1; done'
     have k2_a4_set "oracle-out-k2-a4/set/manifest.json (K2's tool-call set, spec 18d: --with r25.a4_ref, or tools/toolcall/a4_ref.sh k2 set)" \
       test -s oracle-out-k2-a4/set/manifest.json
     have oracle_k2_a4 "oracle-out-k2-a4/ with K2's set and 36 <name>.bf16.txt (18a's reference on it: --with r25.a4_ref)" \
