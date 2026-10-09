@@ -2193,9 +2193,75 @@ st_r30_traces() {
 }
 
 # ======================================================================================
+row 31 "spec 21b - Qwen3.8-Flash-Next (qwen4_exp): the descriptor, the loader (both checkpoint forms), the PLE int8 table pinned per head in host USM, the memory plan (plan 21b)"
+rownote 31 "No kernel and no existing file's behaviour moved (kernel_cmdlines +0 / -0 / ~0): G0's g0.sha is the 'nothing moved' check. Written on the Mac: the host stages ran there (r31.host); nothing of load_qwen4exp has touched a card or a real shard."
+rownote 31 "Downloads: r31.synth needs only the ORIGINAL's small files (hf download Qwen/Qwen3.8-Flash-Next config.json tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja - a few MB, not its 360 GB); r31.ple_convert and r31.load_real need Intel's checkpoint (hf download Intel/Qwen3.8-Flash-Next-W4A16-AutoRound, 181.17 GB incl. its 102.4 GB of PLE shards - row 30's download)."
+rownote 31 "Disk: r31.synth writes two ~13.5 / ~13.7 GB synthetic checkpoints (+ tiny PLE files) under \$DATA/oracle-out-q4exp-synth (via the tree's oracle-out-q4exp-synth.partial: same filesystem); r31.ple_convert writes ~51.8 GB (bf16 scales; Q4_PLE_SCALE=f32: ~52.5 GB) beside Intel's snapshot - df -h ~ first."
+rownote 31 "r31.load_real pins the 51.8 GB table: load_q4_ple refuses when it exceeds MemAvailable - 16 GiB (the measured pinned cap's rule), naming both - stop other RAM users first (free -g >= 70 GB). Its report line (bytes, seconds to pin, MemAvailable before / after, page tags, rows compared) is spec 22 P0.5's starting number: hand it back."
+rownote 31 "r31.ple_kl is 21q Task 3's (tools/quantize/qwen4exp/evaluate.py --ple-only, decision 7's evidence) - SKIP until that file exists."
+stage r31.k0 31 default cpu - g0.sha,g0.bitwise,g0.suite "K0: 21b adds no kernel (every binary identical, G0) and leaves loader::load / load_k2 / load_kolibri1 and their files untouched"
+st_r31_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r31.host 31 default cpu - - "host: qwen4exp_test (the table against config.json key by key), qwen4exp_repack_test (both forms at real widths: every expert block word for word incl. the g128 expansion, gate||up, the router's row 512, names both ways), qwen4exp_ple_test (the hash = transformers' on 64 sequences, the int8 file per head), qwen4exp_plan_test (N per card, the split by bytes, the full model refused naming spec 22)"
+st_r31_host() {
+  run_tests '^(qwen4exp_test|qwen4exp_repack_test|qwen4exp_ple_test|qwen4exp_plan_test)$'
+  jgrab host '^qwen4exp_(test|repack_test|ple_test|plan_test)$' 'OK'
+  finish
+}
+stage r31.plan 31 default cpu - r31.host "the planner's N for one and two cards at 32k / 128k (Intel's forms and ours, int8 head, 32.53 GB cards, 1.5 GB reserve; weights + persistent state - 21c adds the decode scratch), the split by bytes, the persistent sizes"
+st_r31_plan() {
+  jgrab plan '^qwen4exp_plan_test$' 'layers_that_fit|plan at|pipeline plan|device [01]:|pp_split|persistent|max_len_that_fits|OK'
+  finish
+}
+stage r31.synth 31 optin cpu q4exp_orig_small,oracle_image - "the two synthetic real-width checkpoints on the box CPU: qwen4exp_oracle.sh synth-ckpt - make_synth.py --layers 4 --mtp (ours, Intel's form), ple_int8.py beside each, check.py --ple (ACCEPTED twice) -> \$DATA/oracle-out-q4exp-synth/{ours,intel}/{ckpt,ckpt-ple-int8}; then re-links oracle-out*"
+st_r31_synth() {
+  chk "tools/box_validate/qwen4exp_oracle.sh $DATA synth-ckpt" "the synthetic qwen4_exp checkpoints"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_(q4exp|oracle_q4exp)' $STATE/have.env"
+  grab_all synth '^ACCEPTED|^wrote|REFUSED|synthetic' 12
+  finish
+}
+stage r31.ple_convert 31 optin cpu q4exp_intel,oracle_image - "the real PLE table as int8 rows: qwen4exp_oracle.sh ple-int8 - ple_int8.py on Intel's 128 bf16 shards (the original's rows as shipped) -> <Intel snapshot>-ple-int8/ (~51.8 GB, bf16 scales; Q4_PLE_SCALE=f32 for the other arm), check.py --ple (the I64 tensors = the formula, sampled rows re-quantised bit for bit); df -h first"
+st_r31_ple_convert() {
+  x "df -h \$HOME | tail -1; free -g | head -2"
+  chk "tools/box_validate/qwen4exp_oracle.sh $DATA ple-int8" "the PLE int8 file"
+  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_q4exp_intel_ple' $STATE/have.env"
+  grab_all ple '^wrote|^ACCEPTED|REFUSED|PLE int8|head 15' 12
+  finish
+}
+stage r31.load 31 default gpu oracle_q4exp_synth r31.host "the loader on the synthetic checkpoints with the MTP head: qwen4exp_synth_host_test (the host half over make_synth's files: forms, names both ways, every layer and the head repacked, the PLE file = the descriptor) and on the card qwen4exp_load_synth_ours_test and _intel_test - 0 unconsumed, every part's bytes = q4_device_weight_bytes, the last expert's blocks / the router's row 512 / the shared expert / the head's last expert read back = the host repack, the PLE ranges' page words = the file, the pointer table"
+st_r31_load() {
+  run_tests '^qwen4exp_(synth_host|load_synth_(ours|intel))_test$'
+  jgrab load '^qwen4exp_(synth_host|load_synth)' 'model |device 0|host PLE|read/token|load  |ours:|intel:|OK'
+  finish
+}
+stage r31.load_real 31 default gpu q4exp_intel,q4exp_intel_ple r31.load "Intel's checkpoint at 18 layers on one card (development mode, its bf16 dense arms, g128 experts expanded): qwen4exp_load_intel_layers_test - 0 unconsumed, bytes = the plan, the edges read back; and the 51.8 GB PLE table pinned in 16 + 16 host-USM ranges: the time to pin it, MemAvailable before / after (spec 22 P0.5's starting number)"
+st_r31_load_real() {
+  x "free -g | head -2"
+  run_tests '^qwen4exp_load_intel_layers_test$'
+  x "free -g | head -2"
+  jgrab load-real '^qwen4exp_load_intel_layers_test$' 'model |skipped|note|device 0|host PLE|read/token|load  |OK'
+  finish
+}
+stage r31.ple_kl 31 optin cpu q4exp_intel,q4exp_bf16,oracle_image r31.ple_convert "21q Task 3 (decision 7's evidence): the reference through the int8 PLE file (f32 and bf16 scales) against the bf16 table - KL and top-1 per held-out set (tools/quantize/qwen4exp/evaluate.py --ple-only; SKIP until 21q writes it)"
+st_r31_ple_kl() {
+  if [ ! -f tools/quantize/qwen4exp/evaluate.py ]; then
+    skip "tools/quantize/qwen4exp/evaluate.py (21q Task 3) is not in this tree"
+    finish
+    return
+  fi
+  chk "ORACLE_MODEL=models--Intel--Qwen3.8-Flash-Next-W4A16-AutoRound tools/oracle/run_in_container.sh 'tools/oracle/qwen4exp_env.sh /ws/oracle-out-q4exp-site > /dev/null && export PYTHONPATH=/ws/oracle-out-q4exp-site && python3 tools/quantize/qwen4exp/evaluate.py --ple-only \"\$SNAP\"'" \
+    "the int8-vs-bf16 PLE KL"
+  grab_all ple-kl 'KL|top-1|scale' 24
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
-stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri labels belong to their rows)"
+stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp labels belong to their rows)"
 st_x_rest() {
-  run_tests '.' '' 'agnes ornith kv8 k2 longctx kolibri'
+  run_tests '.' '' 'agnes ornith kv8 k2 longctx kolibri qwen4exp'
   finish
 }
