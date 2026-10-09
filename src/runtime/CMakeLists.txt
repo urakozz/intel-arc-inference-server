@@ -37,3 +37,6 @@ add_subdirectory(k2)
 
 # Spec 20c: Kolibri-1's runtime (KolibriEngine, its capture and its planner) - its own directory.
 add_subdirectory(kolibri)
+
+# Spec 21b: Qwen3.8-Flash-Next's planner (21c adds its engine) - its own directory.
+add_subdirectory(qwen4exp)
