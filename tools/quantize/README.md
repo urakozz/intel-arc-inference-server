@@ -231,3 +231,50 @@ plus `kolibri/test_kolibri_quant.py` (packing, the tool-call turn == the templat
 greedy top-up, restore + check accepting the right export and rejecting a bad qzeros word, a
 permuting g_idx, a changed expert_bias, a quantised shared expert, a column-permuted qweight and an
 asymmetric config, the KL arithmetic, the card's choice, the prompt lists).
+
+## Qwen3.8-Flash-Next (spec 21b): synthetic checkpoints, the PLE int8 file, the export check
+
+`tools/quantize/qwen4exp/` holds what spec 21's engine needs before (and beside) 21q's own AutoRound run.
+Every script runs in `agnes-ref-img` with 21a's transformers 5.19.0 site first on `PYTHONPATH`
+(`tools/oracle/qwen4exp_env.sh`; on the Mac `oracle-out-q4exp/site`):
+
+- `make_synth.py <out> --form ours|intel --tokenizer <the original's small files> [--layers 4]
+  [--ple-base 1000] [--mtp] [--seed 0]` - a checkpoint at the REAL widths with random weights, every tensor
+  named as `qwen4exp_ref.expected_names(tc, form)` names it (checked both ways at the end): the original's
+  `config.json` at N layers (2..48; 4 holds the PLE layer 1 and the QSA layer 3) with a reduced PLE base
+  (the same hash and gather over small primes), our form (int4 g64 experts / shared / dense) or Intel's
+  (int4 g128 experts with F16 scales, the rest bf16), the PLE table as 128 bf16 shards plus the three I64
+  tensors by the formula, `--mtp` the head (bf16, per-expert `.weight` experts). The packer is Kolibri's
+  `pack_rtn_g64` at group g (`(q - 8) x scale`, qzeros 0x77777777). One layer at a time; ~1.4 GB a layer
+  (Intel's; ~0.75 ours) + 2.54 GB of embedding and head (+ 5.2 GB with `--mtp`), derived.
+- `ple_int8.py <snapshot> <out> [--scale bf16|f32]` - decision 7's file: the checkpoint's 128 PLE shards
+  re-cut PER HEAD (head h's rows `[offset_h, offset_h + prime_h)` are its own tensor, head-local row r =
+  global row `offset_h + r`; no shard boundary is a head boundary on the real table) and quantised by
+  spec 9's row rule (`s = max|w| / 127` fp32, bf16 rounds it once; `q = clamp(rne(w / s), -127, 127)`; a
+  zero row s = 0): `ple.h<h>.q` I8 `[prime_h][160]`, `ple.h<h>.s` BF16 / F32 `[prime_h]`, the I64 tensors
+  copied after checking them against the formula, one file per head + an index, metadata `{source:
+  <repo>@<revision>, rule: row-int8-spec9, scale}`. Streams 65,536 rows at a time; the real table: 51.2 GB
+  of q + 0.64 GB of bf16 scales out (derived). The engine reads `<snapshot>-ple-int8/` (or `$B70_Q4_PLE`),
+  as does `qwen4exp_ref.py --ple int8:<dir>` (the engine-format reference).
+- `check.py <ckpt> [--ple <dir>]` - would the engine accept it: `quantization_config` (g64 ours, g128
+  Intel's), names = `expected_names` both ways, dtypes and shapes at the real widths, qzeros, finite
+  scales, no g_idx, the I64 tensors = the formula; with `--ple` the file's heads, constants and sampled
+  rows re-quantised from the source bit for bit. Prints `ACCEPTED`.
+- `test_qwen4exp_quant.py` - the names both ways for both forms (and `--mtp`), check.py's refusals (a
+  missing tensor, a wrong qzeros word, a g64 expert in Intel's form), the packer at g64 / g128 against
+  dequant.py, gate rows first as the reference reads them, the PLE file's marker rows (each head's first /
+  last row, a shard boundary inside a head, a zero row, both scale dtypes, byte-equal to 21a's
+  `write_ple_int8`), and the hash constants for the reduced base and 20,000,000 against transformers'
+  builders. Small fixtures (16 experts, a 1024-row vocabulary): ~3-4 min in an 8 GB / 4-CPU container.
+
+```sh
+docker run --rm --memory 8g --cpus 4 -e PYTHONPATH=/ws/oracle-out-q4exp/site \
+  -e TORCH_EXTENSIONS_DIR=/ws/oracle-out-q4exp/torch-ext -v "$PWD":/ws -w /ws agnes-ref-img:latest \
+  python3 tools/quantize/qwen4exp/test_qwen4exp_quant.py
+# a synthetic checkpoint, its PLE file beside it and the check - the layout qwen4exp_load_synth_*_test reads
+# (box: r31.synth writes oracle-out-q4exp-synth/{ours,intel}/ckpt and ckpt-ple-int8 under $DATA)
+python3 tools/quantize/qwen4exp/make_synth.py oracle-out-q4exp-synth/ours/ckpt --form ours --mtp \
+  --tokenizer oracle-out-q4exp/orig-small
+python3 tools/quantize/qwen4exp/ple_int8.py oracle-out-q4exp-synth/ours/ckpt oracle-out-q4exp-synth/ours/ckpt-ple-int8
+python3 tools/quantize/qwen4exp/check.py oracle-out-q4exp-synth/ours/ckpt --ple oracle-out-q4exp-synth/ours/ckpt-ple-int8
+```
