@@ -731,6 +731,22 @@ the format line. REAP's score for (layer, expert) is the mean over the rows that
 (spec 22 P0.8); the hit-rate curves (P0.6) need only `ids`. `test_trace_equals_run`: the trace's routes are
 the sequential run's, and three sources batched equal each alone.
 
+#### The PLE hash fixture (spec 21b)
+
+`qwen4exp_ple_fixture.py <the original's config.json> tests/loader/qwen4exp_ple_fixture.h` writes the C++
+fixture `qwen4exp_ple_test` holds `loader/qwen4exp_ple_hash.h` to: for bases 20,000,000 and 1000,
+transformers 5.19.0's own multipliers (`_build_layer_multipliers`), head sizes and offsets (the
+`Qwen4ExpTextNGramEmbedding` constructor's prime walk), and for 64 token sequences (EOS at every slot of the
+short ones, a missing predecessor, the ids 0 and 248319) the 16 row ids of the last token as the module's
+own `forward` computes them (built on `meta`, its embedding swapped for a recorder), each cross-checked
+against `qwen4exp_ref.ple_hash_ids`. Seconds; the output is committed:
+
+```bash
+docker run --rm --memory 8g --cpus 4 -e PYTHONPATH=/ws/oracle-out-q4exp/site -v "$PWD":/ws -w /ws \
+  agnes-ref-img:latest python3 tools/oracle/qwen4exp_ple_fixture.py oracle-out-q4exp/orig-small/config.json \
+  tests/loader/qwen4exp_ple_fixture.h
+```
+
 ### The A4 reference, batched (2026-10-08)
 
 `tools/toolcall/oracle_generate.py --batch N|auto --resident none|auto` (what
