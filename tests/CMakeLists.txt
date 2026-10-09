@@ -2987,4 +2987,19 @@ target_include_directories(qwen4exp_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${
 target_link_libraries(qwen4exp_plan_test PRIVATE b70_qwen4exp_plan)
 add_test(NAME qwen4exp_plan_test COMMAND qwen4exp_plan_test)
 set_tests_properties(qwen4exp_plan_test PROPERTIES LABELS qwen4exp)
+# Task 6: the loader on the card - the synthetic checkpoints (both forms, with the MTP head) and Intel's
+# checkpoint at 18 layers (one card's fit with its bf16 dense layers, development mode); each with its PLE int8
+# file beside it (<snapshot>-ple-int8/, or B70_Q4_PLE). SKIP 77 without the data.
+set(B70_Q4EXP_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-synth" CACHE PATH
+  "Spec 21b's synthetic checkpoints: <dir>/{ours,intel}/ckpt and ckpt-ple-int8 (box: r31.synth)")
+set(B70_Q4EXP_INTEL_SNAPSHOT "Intel/Qwen3.8-Flash-Next-W4A16-AutoRound" CACHE STRING
+  "Intel's Qwen3.8-Flash-Next W4A16 AutoRound checkpoint (181 GB; its PLE file: r31.ple_convert)")
+add_executable(qwen4exp_load_checkpoint_test loader/qwen4exp_load_checkpoint_test.cc)
+target_include_directories(qwen4exp_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(qwen4exp_load_checkpoint_test PRIVATE b70_qwen4exp_loader b70_l0)
+add_test(NAME qwen4exp_load_synth_ours_test COMMAND qwen4exp_load_checkpoint_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt 0 mtp)
+add_test(NAME qwen4exp_load_synth_intel_test COMMAND qwen4exp_load_checkpoint_test ${B70_Q4EXP_SYNTH_DIR}/intel/ckpt 0 mtp)
+add_test(NAME qwen4exp_load_intel_layers_test COMMAND qwen4exp_load_checkpoint_test ${B70_Q4EXP_INTEL_SNAPSHOT} 18)
+set_tests_properties(qwen4exp_load_synth_ours_test qwen4exp_load_synth_intel_test qwen4exp_load_intel_layers_test
+  PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 # ==== Spec 21b: Qwen3.8-Flash-Next descriptor and loader ==== (end) ====
