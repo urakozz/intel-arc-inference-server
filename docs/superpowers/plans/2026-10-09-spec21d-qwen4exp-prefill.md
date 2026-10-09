@@ -1,7 +1,11 @@
 # Spec 21d - Qwen3.8-Flash-Next prefill: dense flash below 2052, the indexer and sparse flash above, grouped MoE at 512
 
-**Status (2026-10-09): planned; nothing built.** Built blind on the Mac; box queue row 33 (it renumbers at build
-time if taken). Real-weight gates SKIP (77) until Intel's checkpoint and 21a's sets exist on the box.
+**Status (2026-10-09): Tasks 1-4 built on the Mac (branch `spec21d-qwen4exp-prefill`; as built: spec 21 §15 "21d as
+built"); nothing on a card yet - box queue row 33 (`tools/box_validate.sh --only r33`), Task 5 is its opt-in
+`r33.speed` / manual `r33.p0`.** Real-weight gates SKIP (77) until Intel's checkpoint and 21a's sets exist on the box.
+Departures recorded in §15: three existing sources gain a define (not one: `q4_qsa.cl` QSA_PF + a `q4_qsa_ring` launch,
+`q4_ple.cl` PLE_PF), chunks of 16 not gated bitwise (the GDN's 64-row sub-chunks), Intel's two-card runs at
+`--layers 37` (38 does not fit beside the prefill scratch).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -181,9 +185,9 @@ void set_block_hook(BlockHook hook);                                  // fired a
 **Files:**
 - Modify: `docs/superpowers/specs/2026-10-09-spec21-qwen4exp-design.md` (section "21d as built"), this plan's status line, `docs/superpowers/plans/box-validation-queue.md` (row 33), `tools/box_validate/stages.sh` (`row 33` block), `docs/19-running-models.md` (the Qwen3.8-Flash-Next row: `--prefill`)
 
-- [ ] **Step 1:** "21d as built": the chunk table (kernels, rounding chains, launches per kind of chunk), the scores' departure from spec 21 §4.2 and its cost, `gdn_chunk_q4`, the prefill scratch per device, precision against the reference (flash's fp32 probabilities; `B70_Q4_ATTN=eager` covers prefill too).
-- [ ] **Step 2: the queue row** (33): every binary of the 21d block never compiled by ocloc; the DPAS sparse flash; the grouped GEMMs at this family's shapes; the walk; stages `r33.k0` (G0 incl. `pf_gated_head`), `r33.host`, `r33.k1` (`qwen4exp_pf_kernels_test`), `r33.prefill` (`qwen4exp_prefill_test`, `_eager`), `r33.golden` (synthetics; Intel's `--layers 18` after 21a's data), `r33.pp` (two cards), `r33.speed` (opt-in, Task 5). `python3 tools/box_validate/test_box_validate.py` passes.
-- [ ] **Step 3: commit** `git commit -S -m "docs: spec 21 (21d as built), box queue row 33 - Qwen3.8-Flash-Next prefill"`.
+- [x] **Step 1:** "21d as built": the chunk table (kernels, rounding chains, launches per kind of chunk), the scores' departure from spec 21 §4.2 and its cost, `gdn_chunk_q4`, the prefill scratch per device, precision against the reference (flash's fp32 probabilities; `B70_Q4_ATTN=eager` covers prefill too).
+- [x] **Step 2: the queue row** (33): every binary of the 21d block never compiled by ocloc; the DPAS sparse flash; the grouped GEMMs at this family's shapes; the walk; stages `r33.k0` (G0 incl. `pf_gated_head`), `r33.host`, `r33.k1` (`qwen4exp_pf_kernels_test`), `r33.prefill` (`qwen4exp_prefill_test`, `_eager`), `r33.golden` (synthetics; Intel's `--layers 18` after 21a's data), `r33.pp` (two cards), `r33.speed` (opt-in, Task 5). `python3 tools/box_validate/test_box_validate.py` passes.
+- [x] **Step 3: commit** `git commit -S -m "docs: spec 21 (21d as built), box queue row 33 - Qwen3.8-Flash-Next prefill"`.
 
 ### Task 5: prefill speed (box)
 

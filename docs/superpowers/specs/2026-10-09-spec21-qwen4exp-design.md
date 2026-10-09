@@ -2,7 +2,7 @@
 
 **Status:** design, 2026-10-09; the operator approved the design on 2026-10-08 (§0 records what was ruled).
 Open decisions are marked **(decide)**. Nothing is built.
-**Plans (2026-10-09, after the operator's approval that day; 21a built on the Mac, §12; 21b built on the Mac, §13; 21c built on the Mac, §14):** `docs/superpowers/plans/2026-10-09-spec21{a,b,c,d,e,q}-*.md` - 21a reference, 21b descriptor / loader / formats, 21c decode, 21d prefill, 21e serving and MTP, 21q our AutoRound run; box queue rows 30-34.
+**Plans (2026-10-09, after the operator's approval that day; 21a built on the Mac, §12; 21b built on the Mac, §13; 21c built on the Mac, §14; 21d built on the Mac, §15):** `docs/superpowers/plans/2026-10-09-spec21{a,b,c,d,e,q}-*.md` - 21a reference, 21b descriptor / loader / formats, 21c decode, 21d prefill, 21e serving and MTP, 21q our AutoRound run; box queue rows 30-34.
 
 **Model:** `Qwen/Qwen3.8-Flash-Next` (`Qwen4ExpForConditionalGeneration`, `model_type: qwen4_exp`; bf16,
 359,999,963,128 B in 1658 tensors). Intel's derived `Intel/Qwen3.8-Flash-Next-W4A16-AutoRound` (181.17 GB: routed
@@ -670,3 +670,94 @@ the Mac results are **measured**.
   both synthetics (tokens, routing, gate S, PLE ids; the injected run on every determined row); the partial forward
   on Intel's 18 layers within the proposed bars; two cards bitwise one; the PLE gather's host-USM rate (spec 22
   P0); decision 10's bench and the speed rows (Task 7).
+
+## 15. 21d as built (2026-10-09; the Mac - nothing on a card yet)
+
+Plan: `docs/superpowers/plans/2026-10-09-spec21d-qwen4exp-prefill.md`, branch `spec21d-qwen4exp-prefill`. Box
+validation: queue row 33. Every launch count and byte count below is **derived** (the tests assert the formulas); the
+Mac results are **measured**.
+
+- **Built:** `tests/kernels/qwen4exp_pf_ref.h` (namespace `q4pf`: the 512-expert sort, gather, dequant, the combine as
+  21c's `q4ref::combine` over read-back down sums, `dense_rows`, the indexer over a chunk with its ring, the sparse
+  attention's tiled fp64 walk and the eager chain, the PLE over a chunk in three steps) and `qwen4exp_pf_ref_test`; the
+  kernels `src/kernels/qwen4exp/q4_pf_{moe,attn,ple}.cl`, the spec 21d block of `qwen4exp_kernels.h` and of
+  `src/kernels/CMakeLists.txt` (+30 binaries with K2 and Kolibri on, +31 without them),
+  `qwen4exp_pf_variant_names_test`, `qwen4exp_pf_kernels_test` (F2 for the prefill on the card), `qwen4exp_run`'s prefill
+  checks; `runtime::qwen4exp` - `qwen4exp_prefill.{h,cc}` (the walk, `Qwen4ExpPrefillScratch`, the head),
+  `qwen4exp_prefill_gdn.{h,cc}` (`gdn_chunk_q4`), `qwen4exp_prefill_engine.cc` (`Qwen4ExpEngine::prefill`, replay, the
+  injector, the block hook, two cards), the prefill sizes / launches / planner flag in `qwen4exp_sizes`, archive
+  `b70_qwen4exp_prefill`; `qwen4exp_prefill_test` (modes `all`, `split`, `pp`, `gdn`), `qwen4exp_golden_test`'s `prefill`
+  mode; `b70-decode <qwen4_exp> --prefill` / `--bench --prefill-length N [--prefill-chunk C]`; `cli_reject_qwen4exp_prefill_{int8,sycl,chunk}`
+  (21c's `cli_reject_qwen4exp_prefill` removed); queue row 33.
+- **The chunk** (`runtime/qwen4exp/qwen4exp_prefill.h`), C <= 2048 rows on one device's `l0` list:
+
+  | piece | kernels | rounding chain | launches |
+  |---|---|---|---:|
+  | device 0 | `pf_embed_gather_D2560` (the rows into x; layer 0's combine `_E` repeats them) | copy | 1 |
+  | a gated residual | `q4_hc_combine_norm_M2048_{E,S1,Y,X}` · the down‖inject bf16 slab {10240, 336} (one 512-column slab, 176 zero columns) + `pf_gemm_T0` (pitch 512) · `q4_hc_up_mix_M2048_I_D512` | 21c's HC chain; the down sums are DPAS's | 4 |
+  | GDN mixer | qkv‖z 16 slabs (`pf_dequant_slab_K2560_N16384_L0` or `q4_pf_bf16_slab`) + GEMM · a‖b `pf_ab_proj_D2560` · `gdn_chunk_q4` (10) · out_proj 3 slabs (`k2_pf_dequant_slab_K6144_N2560` or bf16) + GEMM | Qwen3.8's chunked WY recurrence; the gated head `pf_gated_head_SIG` = `prep_gated_head _SIG`'s chain | 49 |
+  | QSA mixer | q‖gate‖k‖v 13 slabs + GEMM · the indexer bf16 slab {2560, 640} + GEMM (pitch 768) · `pf_attn_prep_q16_Q24KV2` · `q4_qsa_prep` `_PF` · `q4_qsa_ring` · [sparse rows: `q4_qsa_score` + `q4_qsa_select` at M = C] · [rows <= 2050: `pf_flash_attn_Q24KV2`] · [rows >= 2051: `q4_pf_sparse_attn_Q24KV2`] · `pf_attn_gate` · o_proj 3 slabs + GEMM | the indexer's keys, scores and selection are decode's code; attention fp32 (flash) or the reference's points (eager) | 38 + 2 + 1 + 1 |
+  | the MoE | router `pf_moe_router_K2560_N528` (decode's {16, 16}: rows bitwise decode's) · `q4_route_M1` on grid (1, C) · `q4_pf_sort` · `q4_pf_gather` · gate‖up 7 batches x (`q4_pf_dequant_gu[_shb]` + `pf_moe_gemm_K2560_N1280_SILU`) · down 4 x (`q4_pf_dequant_dn[_shb]` + `pf_moe_gemm_K640_N2560`) · `q4_pf_moe_combine` | the combine is `q4_moe_down`'s epilogue over sorted rows (rank order, fp32, one rounding) | 27 |
+  | the PLE layer | `_Y_NN` (not when H landed) · `q4_ple_gather_M2048_*_PF` · key‖value 13 bf16 slabs + GEMM · `q4_pf_ple_gate` · `q4_pf_ple_conv` · `q4_pf_ple_ring` | 21c's block, statement for statement, cut in three | 31 (30) |
+  | two cards | device 0 ends with `_Y_NN` (the chunk's materialised H, 42 MB, crosses by `copy`) | | + 1 |
+  | the head (last chunk) | decode's final mixer `_Y` M1 over the last row, its down / up-mix, lm_head, argmax x 2 | decode's | 6 |
+
+  A GDN layer is 84 launches, a QSA layer 73 + its attention's 2-4; **358 / 361 / 360** a chunk at `--layers 4` (all
+  dense / straddling 2050 / all sparse), **3944 / 3968** at 48 layers, + 1 on two cards; the injected run -2 a QSA
+  layer of a chunk with sparse rows. Asserted per chunk by the walk (`prefill_device_launches`).
+- **The scores' departure from §4.2** (plan 21d's one deliberate one): the prefill runs decode's `q4_qsa_score` at M =
+  C (fp32 FMA chains) instead of a DPAS GEMM, so a row's scores are bitwise decode's for the same query and keys and the
+  selection is exactly decode's rule; cost ~8.6 GFLOP a QSA layer a chunk at 32k context, ~34 at 128k (ESTIMATED). The
+  GEMM form is Task 5's recorded lever. Score rows `[2048][max_len / 4]` fp32 are the scratch term that grows (268 MB at
+  131072).
+- **`gdn_chunk_q4`:** `gdn.cc`'s ten launches over explicit buffers (no `PrefillScratch`, no `ModelDesc`), the tenth
+  `pf_gated_head_SIG`; the scan / solve entries follow `gdn.cc`'s process-wide selectors. The GDN shape (16 / 48 heads,
+  10240 conv channels, the small block's offsets) is Qwen3.8's, so Qwen3.8's binaries apply as built.
+- **The prefill scratch** (`prefill_sizes`, every device the whole set): **1.489 GB at `--layers 18` / 32768**, 1.690 GB
+  at 131072 - the 512 MiB weight batch, xg 197 MB (also the PLE gate's gated / gn rows), the GDN chunk scratch 194 MB,
+  the score rows, the selection rows 16.9 MB a QSA layer (all QSA layers' last chunk: the gate S read-back), partials 134
+  MB; + the prefill link on two cards (42 MB of H). Planned into `--layers auto` / `--max-len auto` when a run prefills:
+  Intel's forms fit **18 layers on one card (max_len auto 70144) and 37 on two** at 32768 - `--layers 38` on two cards
+  does not fit beside the prefill scratch (decode-only: 19 / 39).
+- **Precision against the reference:** the dense rows run spec 6's flash (fp32 probabilities, `exp2`, P rounded to
+  bf16 as the P·V operand), the sparse rows `q4_pf_sparse_attn` (fp32 online softmax at 1/16, natural `exp`); both
+  against fp64 at the K1 bar. `B70_Q4_ATTN=eager` binds the `_EAGER` sparse build (the reference's points: s rounded twice,
+  p once, o once) in prefill as well as decode's eager kernel; the dense rows keep the flash (no eager dense form).
+  `pf_attn_gate`'s tail is `rne(rne(o) x sigmoid(gate))` with plain `exp` and an unrounded sigmoid, decode's
+  `q4_qsa_reduce` `rne(rne(o) x rne(sigmoid_torch(gate)))`: <= 1 bf16 ulp apart (the plan's binary, kept).
+- **Departures from the plan:**
+  1. **Three existing sources gain a define, not one:** besides `pf_gated_head.cl`'s `GDN_GATE_SIGMOID`, `q4_qsa.cl`'s
+     `QSA_PF` (the prep at M = 2048 must not write the 8-slot tail ring in its own launch - rows past pos + 4 overwrite
+     slots the first rows read for the block straddling pos - so a new `q4_qsa_ring` launch writes the last min(8, C) raw
+     keys after the prep; and the indexer rows arrive at the GEMM's pitch 768) and `q4_ple.cl`'s `PLE_PF` (the gather's
+     tokens from the chunk's id buffer - Control holds 8 - and no id-ring write: `q4_pf_ple_ring` writes it). +1 launch
+     a QSA layer a chunk. Every existing binary of the three: preprocessed source checked on the Mac (`pf_gated_head`,
+     `_GK16V32`, `q4_qsa_M1`: byte for byte; `q4_ple_gather_M1_*`: token for token, whitespace moved).
+  2. `q4_hc_up_mix` at M = 2048 is built at `UP_DOWN = 512` (the HC down GEMM's pitch) and named `..._I_D512`.
+  3. The int4 qkv‖z slab is layout 0 (21c's as built), `pf_dequant_slab_K2560_N16384_L0` (the plan said L1).
+  4. `q4_pf_moe` is one binary with the shared form as entry points (`q4_pf_dequant_{gu,dn}` int4, `_shb` bf16).
+  5. **Chunks of 16 are not gated bitwise against 2048** (the plan's Review Focus 5 / Step 3, written from Kolibri's
+     GDN-free walk): the GDN's 64-row WY sub-chunks sit at multiples of 64 from the chunk start, so a 16-row chunk
+     re-partitions them. Chunks of 64 (and splits at multiples of 64) ARE gated bitwise; 16 is printed.
+  6. `gdn_chunk_q4` against decode's `gdn_step` lives in `qwen4exp_prefill_test`'s `gdn` mode (it needs the runtime),
+     not in `qwen4exp_pf_kernels_test`.
+  7. The injected run on prefill takes its lists from a per-chunk callback (`set_prefill_injector`) into host-USM rows
+     `[qsa layers][2048][2064]`; `read_prefill_selection` returns those rows when injected.
+  8. Intel's two-card real runs use `--layers 37` (above); the prefill scratch is on every device (the PLE gather's
+     ids too), not sized per device's layers.
+  9. The PLE ids of the prompt rows are not read back by the golden test's prefill mode (its decode rows still check them).
+- **Mac gates (measured):** `qwen4exp_pf_ref_test` PASS (the sort at C 1 / 37 / 300 / 2048 incl. 2386 rows with an exact
+  tie at the 10th, all-to-10 over the lane boundaries, the 1200-tile bound, a full tile and an empty expert, == spec
+  15d's sort; the combine == 21c's down chain over real-width blocks, both shared forms, bitwise; the sparse walk ==
+  the direct softmax within 3.4e-16; the indexer over 22 chunks and the PLE over 13 == decode's M = 1 chains with their
+  rings, bitwise); `qwen4exp_pf_variant_names_test`, `qwen4exp_plan_test` PASS; `qwen4exp_run` on the Mac's GPU (Intel
+  UHD 630): 0 disagreements - the sort / gather / dequant / combine / rings / PLE gather / selection exact, the HC xn,
+  PLE gn, indexer q / keys within 1 bf16 ulp, the scores within 1 fp32 ulp (Apple's divide and sqrt); Level Zero syntax
+  of every new / changed source, OpenCL syntax of every variant; kernel_cmdlines +30 / -0 / ~0; `tools/mac_check.sh
+  --base main --quick --kernels` exit 0 (host 81 pass / 0 fail, l0 21 / 0, opencl 675 / 0, kernels 9 agree).
+- **What row 33 must prove:** every binary's first compile (30), G0 with the three changed sources' binaries unchanged;
+  F2 on the card (grouped == dense bitwise, the sparse flash at cosine 0.99999 of fp64, eager within its bars); F4 on
+  prefill (two runs and replay bitwise, chunks of 64 and splits at multiples of 64 bitwise, the injected run chunked ==
+  whole); prefill against decode's fill within the PROPOSED bars per layer, routes and selections equal except near-ties;
+  F3 on prefill for both synthetics (Intel's `--layers 18` when 21a's data exists); two cards bitwise one; the speed rows
+  (Task 5, opt-in).
