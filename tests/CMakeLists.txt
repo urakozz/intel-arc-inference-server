@@ -2973,4 +2973,12 @@ target_include_directories(qwen4exp_repack_test PRIVATE ${CMAKE_SOURCE_DIR}/src 
 target_link_libraries(qwen4exp_repack_test PRIVATE b70_qwen4exp_loader)
 add_test(NAME qwen4exp_repack_test COMMAND qwen4exp_repack_test)
 set_tests_properties(qwen4exp_repack_test PROPERTIES LABELS qwen4exp TIMEOUT 900)
+# Task 4: the PLE table's host half - the hash against transformers' (tests/loader/qwen4exp_ple_fixture.h,
+# tools/oracle/qwen4exp_ple_fixture.py), the int8 file per head, the refusals by name.
+add_executable(qwen4exp_ple_test loader/qwen4exp_ple_test.cc)
+target_include_directories(qwen4exp_ple_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+  ${CMAKE_SOURCE_DIR}/tests/loader)
+target_link_libraries(qwen4exp_ple_test PRIVATE b70_qwen4exp_loader)
+add_test(NAME qwen4exp_ple_test COMMAND qwen4exp_ple_test)
+set_tests_properties(qwen4exp_ple_test PROPERTIES LABELS qwen4exp)
 # ==== Spec 21b: Qwen3.8-Flash-Next descriptor and loader ==== (end) ====
