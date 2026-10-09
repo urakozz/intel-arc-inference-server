@@ -102,6 +102,16 @@ inline uint n_rows(__global const uint* restrict ctrl) {
 #error "q4_ple_gather: PLE_SCALE_BF16 (0: fp32 row scales, 1: bf16) must be defined"
 #endif
 #define WG_GATHER DIM
+// Spec 21d: -DPLE_PF builds the PREFILL form at M = C: the rows' tokens come from the chunk's id buffer `ids` (u32
+// [C], the last argument) instead of Control's cur_token (8 slots), and the gather writes NO id-ring slot - a 2048-row
+// launch's rows would overwrite slots its first rows read for p - 1, p - 2 - so q4_pf_ple_ring (q4_pf_ple.cl) writes
+// the ring after the chunk's PLE block. Unset (every 21c binary), PLE_TOK(r) is Control's cur_token[r] and the ring
+// write is the gather's, token for token (commit 9a67889's rule).
+#ifdef PLE_PF
+#define PLE_TOK(r) ids[r]
+#else
+#define PLE_TOK(r) ctrl[CTRL_CUR + r]
+#endif
 __attribute__((reqd_work_group_size(WG_GATHER, 1, 1)))
 __kernel void q4_ple_gather(__global const uint* restrict ctrl, __global uint* restrict ids_ring,
 #ifdef PLE_DIRECT
@@ -111,18 +121,22 @@ __kernel void q4_ple_gather(__global const uint* restrict ctrl, __global uint* r
                             __global const ulong* restrict ptrs,
 #endif
                             __global const ulong* restrict consts, __global ushort* restrict e,
-                            __global ulong* restrict ids_out) {
+                            __global ulong* restrict ids_out
+#ifdef PLE_PF
+                            , __global const uint* restrict ids
+#endif
+                            ) {
   const uint h = get_group_id(0);
   const uint m = get_group_id(1);
   const uint i = get_local_id(0);
   if (m >= n_rows(ctrl)) return;   // uniform
   const uint pos = ctrl[CTRL_POS];
   const uint p = pos + m;
-  const uint t0 = ctrl[CTRL_CUR + m];
+  const uint t0 = PLE_TOK(m);
   // id(q): this launch's rows from Control, earlier ones from the ring
   uint t1 = PLE_EOS, t2 = PLE_EOS;
-  if (p >= 1) t1 = p - 1 >= pos ? ctrl[CTRL_CUR + (p - 1 - pos)] : ids_ring[(p - 1) % RING];
-  if (t1 != PLE_EOS && p >= 2) t2 = p - 2 >= pos ? ctrl[CTRL_CUR + (p - 2 - pos)] : ids_ring[(p - 2) % RING];
+  if (p >= 1) t1 = p - 1 >= pos ? PLE_TOK((p - 1 - pos)) : ids_ring[(p - 1) % RING];
+  if (t1 != PLE_EOS && p >= 2) t2 = p - 2 >= pos ? PLE_TOK((p - 2 - pos)) : ids_ring[(p - 2) % RING];
   const ulong mixed2 = ((ulong)t0 * consts[0]) ^ ((ulong)t1 * consts[1]);
   const ulong mixed = h < 8 ? mixed2 : mixed2 ^ ((ulong)t2 * consts[2]);
   const ulong r = mixed % consts[3 + h];
@@ -143,7 +157,9 @@ __kernel void q4_ple_gather(__global const uint* restrict ctrl, __global uint* r
 #endif
 #endif
   e[(size_t)m * HIDDEN + h * DIM + i] = rne_bf16((float)qv * sc);
+#ifndef PLE_PF
   if (h == 0 && i == 0) ids_ring[p % RING] = t0;
+#endif
 }
 
 #ifndef PLE_DIRECT

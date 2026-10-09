@@ -3129,4 +3129,28 @@ target_include_directories(qwen4exp_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src 
 target_link_libraries(qwen4exp_pf_ref_test PRIVATE b70_qwen4exp_loader)
 add_test(NAME qwen4exp_pf_ref_test COMMAND qwen4exp_pf_ref_test)
 set_tests_properties(qwen4exp_pf_ref_test PROPERTIES LABELS "qwen4exp;prefill" TIMEOUT 900)
+if(B70_Q4EXP)
+  # Task 2: every binary a prefill chunk binds, both dense arms / attention forms / PLE scale forms
+  # (src/kernels/CMakeLists.txt's spec 21d block; the reused binaries other blocks build - pf_gemm_T0, Qwen3.8's
+  # pf_gdn_*, 21c's q4_route_M1, K2's / Kolibri's 6144 x 2560 int4 slab - are bound by name and listed too).
+  set(B70_Q4EXP_PREFILL_KERNELS
+    kernel_pf_embed_gather_D2560 kernel_q4_hc_combine_norm_M2048_E kernel_q4_hc_combine_norm_M2048_S1
+    kernel_q4_hc_combine_norm_M2048_Y kernel_q4_hc_combine_norm_M2048_X kernel_q4_hc_combine_norm_M2048_Y_NN
+    kernel_q4_pf_bf16_slab_K10240_N336 kernel_pf_gemm_T0 kernel_q4_hc_up_mix_M2048_I_D512 kernel_pf_ab_proj_D2560
+    kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan kernel_pf_gated_head_SIG kernel_q4_pf_bf16_slab_K2560_N640
+    kernel_pf_attn_prep_q16_Q24KV2 kernel_q4_qsa_M2048_T512_W1024_PF kernel_pf_flash_attn_Q24KV2
+    kernel_q4_pf_sparse_attn_Q24KV2 kernel_q4_pf_sparse_attn_Q24KV2_EAGER kernel_pf_attn_Q24KV2
+    kernel_pf_moe_router_K2560_N528 kernel_q4_route_M1_E512_T10_N528_L256 kernel_q4_pf_moe_E512_T10_D2560_I640_L256
+    kernel_pf_moe_gemm_K2560_N1280_SILU kernel_pf_moe_gemm_K640_N2560 kernel_q4_ple_gather_M2048_BF16_PF
+    kernel_q4_ple_gather_M2048_F32_PF kernel_q4_pf_bf16_slab_K2560_N12800 kernel_q4_pf_ple_C2048
+    kernel_pf_dequant_slab_K2560_N16384_L0 kernel_pf_dequant_slab_K2560_N13312_L0 kernel_k2_pf_dequant_slab_K6144_N2560
+    kernel_q4_pf_bf16_slab_K2560_N16384 kernel_q4_pf_bf16_slab_K2560_N13312 kernel_q4_pf_bf16_slab_K6144_N2560)
+  # Host: the names the walk binds (kernels::qwen4exp::prefill_variants) are exactly this list.
+  add_executable(qwen4exp_pf_variant_names_test kernels/qwen4exp_pf_variant_names_test.cc)
+  target_include_directories(qwen4exp_pf_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(qwen4exp_pf_variant_names_test PRIVATE b70_qwen4exp_model)
+  b70_target_kernel_dir(qwen4exp_pf_variant_names_test)
+  add_test(NAME qwen4exp_pf_variant_names_test COMMAND qwen4exp_pf_variant_names_test ${B70_Q4EXP_PREFILL_KERNELS})
+  set_tests_properties(qwen4exp_pf_variant_names_test PROPERTIES LABELS "qwen4exp;prefill")
+endif()
 # ==== Spec 21d: Qwen3.8-Flash-Next prefill ==== (end) ====

@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "kernels/kernels.h"
+#include "kernels/prefill/pf_kernels.h"
 #include "model/qwen4exp.h"
 
 // Spec 21c: Qwen3.8-Flash-Next's decode binaries by name - the host half of the spec 21c block in
@@ -202,6 +203,125 @@ inline std::vector<std::string> decode_variants(const model::Qwen4ExpDesc& d, bo
   (void)two_cards;
   return decode_variants(d.forms.dense == model::Q4Form::Int4, d.forms.shared == model::Q4Form::Bf16, int8_head, eager,
                          ple_bf16_scale);
+}
+
+// =================================================================================================================
+// Spec 21d: Qwen3.8-Flash-Next's PREFILL binaries by name - the host half of src/kernels/CMakeLists.txt's spec 21d
+// block. A chunk of at most kPfC positions on the `l0` backend (runtime/qwen4exp/qwen4exp_prefill.h has the walk):
+// the linears as slab GEMMs (prefill/pf_gemm.cl's pf_gemm_T0 over int4 dequant slabs or bf16 slabs), 21c's HC /
+// indexer / PLE-gather sources rebuilt at M = kPfC, Qwen3.8's GDN chain (gdn_chunk_q4) with the sigmoid gated head,
+// spec 6's flash at 24 / 2 heads for the rows with <= 2051 visible positions and q4_pf_sparse_attn over each row's
+// own list past them, the MoE through a 512-expert ushort sort and spec 15d's grouped GEMMs. New sources
+// (src/kernels/qwen4exp/):
+//   q4_pf_moe.cl    q4_pf_sort, q4_pf_gather, q4_pf_dequant_{gu,dn}[_shb], q4_pf_moe_combine     the Mac runs it
+//   q4_pf_attn.cl   q4_pf_sparse_attn (DPAS over a gathered list)                               card only
+//   q4_pf_ple.cl    q4_pf_ple_gate, q4_pf_ple_conv, q4_pf_ple_ring                               plain OpenCL C
+// and three existing sources gain a define each, every existing binary's preprocessed source token for token as it
+// was (commit 9a67889's rule): prefill/pf_gated_head.cl GDN_GATE_SIGMOID (`pf_gated_head_SIG`), q4_qsa.cl QSA_PF
+// (the M = kPfC prep without the in-launch ring write + q4_qsa_ring; `_PF`), q4_ple.cl PLE_PF (the gather's tokens
+// from the chunk's id buffer, no ring write; `_PF`).
+inline constexpr unsigned kPfC = 2048, kPfTm = 32, kPfSlab = 1024;
+inline constexpr size_t kPfBatchBytes = size_t(512) << 20;   // gate||up: 513 blocks of 6,553,600 B, 81 a batch, 7
+                                                             // batches; down: 3,276,800 B, 163 a batch, 4 (derived)
+inline constexpr unsigned kPfSortWg = 256, kPfGatherWg = 64, kPfCombineWg = 256, kPfDequantWg = 16;
+inline constexpr unsigned kPfKt = 32, kPfSparseWg = 32;      // q4_pf_sparse_attn: list entries a tile, 2 sub-groups
+inline constexpr unsigned kPfPleWg = 256, kPfRingWg = 128;   // q4_pf_ple_*; q4_qsa_ring (= kPrepWg)
+inline constexpr unsigned kPfIdxLd = 768;                    // the indexer GEMM's row pitch: pf_ld(640)
+inline constexpr unsigned kPfHcDownLd = 512;                 // the HC down||inject GEMM's: pf_ld(336)
+inline constexpr unsigned kPfFlashRpw = 8, kPfFlashHpw = 6;  // pf_flash_attn_Q24KV2: rows a work-group, heads (GQA 12)
+// The sort's header (q4_pf_moe.cl H_*): [0] tiles used, [1] the shared expert's first row, [2] rows used, [3] C,
+// [4 + e] expert e's rows, [4 + 512] C; padded to 16 words.
+namespace pf_hdr {
+inline constexpr unsigned kTiles = 0, kSharedRow = 1, kRows = 2, kC = 3, kCount = 4;
+inline constexpr unsigned words() { return (kCount + kExperts + 1 + 15) / 16 * 16; }   // 528
+}  // namespace pf_hdr
+
+inline std::string pf_moe_variant() {   // "q4_pf_moe_E512_T10_D2560_I640_L256"
+  return "q4_pf_moe_E" + std::to_string(kExperts) + "_T" + std::to_string(kTopK) + "_D" + std::to_string(kHidden) +
+         "_I" + std::to_string(kInter) + "_L" + std::to_string(kPfSortWg);
+}
+inline std::string pf_sparse_attn_variant(bool eager) {   // "q4_pf_sparse_attn_Q24KV2" | "_EAGER"
+  return std::string("q4_pf_sparse_attn_Q") + std::to_string(kQHeads) + "KV" + std::to_string(kKvHeads) +
+         (eager ? "_EAGER" : "");
+}
+inline std::string pf_ple_variant() { return "q4_pf_ple_C" + std::to_string(kPfC); }   // "q4_pf_ple_C2048"
+// kolibri/kol_pf_linear.cl's bf16 slab at this family's shapes (the source's own name carries Kolibri's prefix).
+inline std::string pf_bf16_slab_variant(unsigned K, unsigned N) {
+  return "q4_pf_bf16_slab_K" + std::to_string(K) + "_N" + std::to_string(N);
+}
+// The int4 (layout 0) slabs: whole 1024-column slabs through prefill/pf_dequant_slab.cl (qkv||z, q||gate||k||v), a
+// zero-padded tail through k2/k2_pf_linear.cl (out_proj / o_proj: 2560 = 1024 + 1024 + 512).
+inline bool pf_int4_slab_tail(unsigned N) { return N % kPfSlab != 0; }
+inline std::string pf_int4_slab_variant(unsigned K, unsigned N) {
+  return pf_int4_slab_tail(N) ? "k2_pf_dequant_slab_K" + std::to_string(K) + "_N" + std::to_string(N)
+                              : pf_dequant_slab_variant(K, N, 0);
+}
+// 21c's sources at M = kPfC.
+inline std::string pf_hc_combine_norm_variant(HcSrc src, bool norm) { return hc_combine_norm_variant(kPfC, src, 1, norm); }
+inline std::string pf_hc_up_mix_variant() {   // "q4_hc_up_mix_M2048_I_D512": UP_DOWN = the GEMM's pitch
+  return hc_up_mix_variant(kPfC, true) + "_D" + std::to_string(kPfHcDownLd);
+}
+inline std::string pf_qsa_variant() { return qsa_variant(kPfC) + "_PF"; }   // "q4_qsa_M2048_T512_W1024_PF"
+inline std::string pf_ple_gather_variant(bool bf16_scale) { return ple_gather_variant(kPfC, bf16_scale) + "_PF"; }
+// The reused prefill binaries at this family's shapes.
+inline std::string pf_embed_variant() { return pf_embed_gather_variant(kHidden); }          // pf_embed_gather_D2560
+inline std::string pf_ab_variant() { return pf_ab_proj_variant(kHidden); }                  // pf_ab_proj_D2560
+inline std::string pf_router_variant() { return pf_moe_router_variant(kHidden, kRouterN); }  // pf_moe_router_K2560_N528
+inline std::string pf_gemm_gu_variant() { return pf_moe_gemm_variant(kHidden, 2 * kInter, false, true); }
+inline std::string pf_gemm_dn_variant() { return pf_moe_gemm_variant(kInter, kHidden, false, false); }
+inline std::string pf_gated_head_sig_variant() { return pf_gated_head_variant() + "_SIG"; }   // pf_gated_head_SIG
+inline std::string pf_attn_prep_q4_variant() { return pf_attn_prep_q16_variant(kQHeads, kKvHeads); }
+inline std::string pf_flash_q4_variant() { return pf_flash_attn_variant(kQHeads, kKvHeads); }
+inline std::string pf_gate_q4_variant() { return pf_attn_variant(kQHeads, kKvHeads); }
+
+// Every binary a prefill chunk binds (runtime/qwen4exp/qwen4exp_prefill.cc), for a dense arm (int4 / bf16), an
+// attention form and the PLE scale form (the shared expert's form is an entry point of q4_pf_moe, not a binary). The
+// last row's head is decode's binaries (decode_variants: the capture checks them). Two cards add nothing (the chunk
+// crosses by copy).
+inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bool ple_bf16_scale = true) {
+  std::vector<std::string> v = {
+      pf_embed_variant(),
+      pf_hc_combine_norm_variant(HcSrc::Embed, true),
+      pf_hc_combine_norm_variant(HcSrc::Slices, true),
+      pf_hc_combine_norm_variant(HcSrc::Y, true),
+      pf_hc_combine_norm_variant(HcSrc::None, true),
+      pf_hc_combine_norm_variant(HcSrc::Y, false),
+      pf_bf16_slab_variant(kHcN, kHcDownN),
+      pf_gemm_variant(false),
+      pf_hc_up_mix_variant(),
+      pf_ab_variant(),
+      pf_gdn_conv_variant(),
+      pf_gdn_wy_variant(),
+      pf_gdn_scan_variant(),
+      pf_gated_head_sig_variant(),
+      pf_bf16_slab_variant(kHidden, kIdxN),
+      pf_attn_prep_q4_variant(),
+      pf_qsa_variant(),
+      pf_flash_q4_variant(),
+      pf_sparse_attn_variant(eager),
+      pf_gate_q4_variant(),
+      pf_router_variant(),
+      route_variant(1),
+      pf_moe_variant(),
+      pf_gemm_gu_variant(),
+      pf_gemm_dn_variant(),
+      pf_ple_gather_variant(ple_bf16_scale),
+      pf_bf16_slab_variant(kHidden, kPleKvN),
+      pf_ple_variant(),
+  };
+  if (int4_dense) {
+    v.push_back(pf_int4_slab_variant(kHidden, kQkvzN));
+    v.push_back(pf_int4_slab_variant(kHidden, kQkvgN));
+    v.push_back(pf_int4_slab_variant(kGdnZN, kHidden));
+  } else {
+    v.push_back(pf_bf16_slab_variant(kHidden, kQkvzN));
+    v.push_back(pf_bf16_slab_variant(kHidden, kQkvgN));
+    v.push_back(pf_bf16_slab_variant(kGdnZN, kHidden));
+  }
+  return v;
+}
+inline std::vector<std::string> prefill_variants(const model::Qwen4ExpDesc& d, bool eager, bool ple_bf16_scale = true) {
+  return prefill_variants(d.forms.dense == model::Q4Form::Int4, eager, ple_bf16_scale);
 }
 
 }  // namespace kernels::qwen4exp
