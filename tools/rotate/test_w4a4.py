@@ -3,7 +3,7 @@
 
     python3 tools/rotate/test_w4a4.py [--before <tree>] [test_name ...]
 
-CPU, synthetic tensors and a tiny random Qwen3.5 model, seconds. Run in the oracle image:
+CPU, synthetic tensors and a tiny random Qwen3.5 model, ~4 min on 4 cores. In the oracle image:
 
     docker run --rm --memory 8g --cpus 4 -v "$PWD:/ws" -w /ws --entrypoint python3 \\
         agnes-ref-img:latest tools/rotate/test_w4a4.py
@@ -386,6 +386,22 @@ def test_tiny_model() -> None:
     except SystemExit as e:
         check("group 384 refused before any forward, naming a linear", "L0." in str(e) and "384" in str(e),
               str(e)[:160])
+    # the command line, as the box runs it: argparse, --out JSON, --vocab-used, no per-linear stats
+    out = os.path.join(os.path.dirname(prompt), "cli.json")
+    argv = sys.argv
+    sys.argv = ["eval_quantised.py", "sim", bf, qd, "--prompt", prompt, "--variants", "none,h4p2", "--group", "256",
+                "--per-class", "h8", "--vocab-used", "500", "--no-linear-stats", "--out", out]
+    try:
+        EQ.main()
+    finally:
+        sys.argv = argv
+    with open(out, encoding="utf-8") as f:
+        js = json.load(f)
+    scopes = [(p["variant"], p["only"]) for p in js["passes"]]
+    check("the CLI: --out JSON with every pass, group 256, vocab_used 500, no per-linear stats",
+          js["group"] == 256 and js["vocab_used"] == 500 and scopes[:2] == [("none", None), ("h4p2", None)]
+          and len(scopes) == 2 + len(EQ.CLASS_NAMES) and all(p["linear_stats"] is None for p in js["passes"])
+          and abs(js["passes"][1]["metrics"]["rel"] - m["h4p2"]["rel"]) < 1e-12, str(scopes))
     if BEFORE:
         test_before(passes)
 
