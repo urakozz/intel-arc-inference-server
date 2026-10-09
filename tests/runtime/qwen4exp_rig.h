@@ -29,6 +29,7 @@ struct Options {
   uint32_t timeout_ms = 60000;
   uint32_t prefill_timeout_ms = 120000;   // spec 21d: a prefill chunk's bound (PipelineOptions::prefill_timeout_ms)
   std::string ple_dir;  // "" = loader::q4_ple_dir(snapshot)
+  bool mtp = false;     // spec 21e: load the MTP head (its bf16 experts RTN int4 g64 at load) - the verify / draft lists
 };
 
 struct Rig {
@@ -64,7 +65,7 @@ inline void open(Rig& r, uint32_t devices) {
 
 inline model::Q4Placement placement(const model::Qwen4ExpDesc& d, const Options& o) {
   if (o.devices == 1) return model::Q4Placement::one(d);
-  return model::Q4Placement::two(d, o.split ? o.split : runtime::qwen4exp::pp_split(d, o.max_len, o.int8_head, false).split);
+  return model::Q4Placement::two(d, o.split ? o.split : runtime::qwen4exp::pp_split(d, o.max_len, o.int8_head, o.mtp).split);
 }
 
 inline void build(Rig& r, const std::string& snap, const Options& o) {
@@ -74,7 +75,7 @@ inline void build(Rig& r, const std::string& snap, const Options& o) {
   const model::Q4Placement p = placement(d, o);
   loader::Q4LoadedModel m = loader::load_qwen4exp(r.ctx, snap, o.max_len, p,
                                                   o.int8_head ? loader::LmHeadForm::Int8 : loader::LmHeadForm::Checkpoint,
-                                                  o.layers, false, o.ple_dir);
+                                                  o.layers, o.mtp, o.ple_dir);
   runtime::PipelineOptions po;
   po.handoff = o.handoff;
   po.timeout_ms = o.timeout_ms;

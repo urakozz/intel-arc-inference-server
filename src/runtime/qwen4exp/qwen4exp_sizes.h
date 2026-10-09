@@ -289,9 +289,9 @@ const char* mtp_select_name(MtpSelect s);
 
 struct MtpSizes {
   size_t ctl = 0, kv = 0, idx_keys = 0, idx_tail = 0, list = 0, diag = 0, hh = 0, xe = 0, xh = 0, fe = 0, fh = 0,
-         logits = 0;
+         logits = 0, routes = 0;
   size_t persistent() const { return ctl + kv + idx_keys + idx_tail + hh; }   // zeroed by reset
-  size_t total() const { return persistent() + list + diag + xe + xh + fe + fh + logits; }
+  size_t total() const { return persistent() + list + diag + xe + xh + fe + fh + logits + routes; }
 };
 MtpSizes mtp_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len);
 // gdn_spec on a device: (kGdnSlots - 1) x its GDN layers x 3,145,728 B (a 64-byte line when it has none).

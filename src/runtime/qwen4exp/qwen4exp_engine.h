@@ -18,6 +18,7 @@
 #include "runtime/memory_plan.h"
 #include "runtime/pipeline_engine.h"   // PipelineOptions, PipelineLink (spec 16b's, unchanged)
 #include "runtime/qwen4exp/qwen4exp_buffers.h"
+#include "runtime/qwen4exp/qwen4exp_capture.h"   // ListSpec, MtpBinding (spec 21e)
 
 // Spec 21c: Qwen3.8-Flash-Next's decode loop - runtime::Engine's contract (KolibriEngine's arrangement) on one
 // card or, spec 16b's pieces, two: it owns the weights (each layer on its device: loader::load_qwen4exp's parts,
@@ -191,6 +192,64 @@ class Qwen4ExpEngine {
   void save_kv(uint32_t begin, uint32_t end, void* host);
   void load_kv(uint32_t begin, uint32_t end, const void* host);
 
+  // --- spec 21e: the MTP head - spec 8's draft / verify / commit (runtime/engine.h's contracts) -----------------
+  //
+  // On iff the model was loaded with its head (loader::load_qwen4exp(..., mtp = true)); off, none of this allocates
+  // or captures anything and every call below throws. On, every device's scratch holds kVerifyRows rows and its GDN
+  // layers three more state slots, the last device the head's buffers (runtime/qwen4exp/qwen4exp_sizes.h), and the
+  // engine captures a verify list per M = 1..4 on every device and kMaxDraft draft lists on the last.
+  //
+  // One iteration at pos = n, pending id x_n in cur_token[0] (every device's):
+  //   draft(k)       the head drafts d_1..d_k on the last device: step i at position n - 1 + i on (R, t) - step 0 on
+  //                  (R_{n-1}, x_n), step i on (its own pre-mixer H, d_i); step 0 selects its QSA blocks, later steps
+  //                  attend step 0's list (decision 5; B70_Q4_MTP_SELECT=fresh selects on every step). The ids go to
+  //                  every device's cur_token[1..k] and draft_ids(); draft i's logits (q_i) are the head's row i
+  //                  (read_draft_logits_into). `pick(i)` (the sampled path) replaces the on-card argmax as d_{i+1}.
+  //   verify(k)      the main model at M = k + 1 rows (x_n, d_1..d_k at n..n+k) on every device: row r's argmax in
+  //                  verify_ids()[r], its logits row r (read_logits_into(host, k + 1)), its GDN state into slot
+  //                  (live + r) % 4, every row its own selection and top-10; then the head's KV pass over the rows
+  //                  (positions n - 1 .. n + k - 1 from (R_{n-1+r}, x_{n+r})).
+  //   commit(j, t)   j accepted drafts (0 <= j <= k): pos = n + j + 1 on every device, row j's GDN slot live, R_{n+j}
+  //                  the next draft's R, t the pending id. Rows past j are stale and never read (plan 21e Review Focus 2).
+  // verify(0) + commit(0, verify_ids()[0]) is one plain token; with the head on, ingest() and generate() run exactly
+  // that (pos 0: the plain list, then its pre-mixer H into the head's R row), so the head's KV stays filled whatever
+  // mix of plain and speculative steps runs; prefill() runs the head's pass per chunk (Review Focus 4).
+  // verify(k) needs 1 <= pos and pos + k + 1 <= max_len; max_verify_k() is the largest k allowed now.
+  static constexpr uint32_t kMaxDraft = runtime::qwen4exp::kMaxDraft;   // 3: verify at M <= 4
+  bool mtp() const { return mtp_ != nullptr; }
+  uint32_t max_verify_k() const;
+  void draft(uint32_t k, const std::function<uint32_t(uint32_t i)>& pick = {});
+  const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
+  void verify(uint32_t k);
+  const uint32_t* verify_ids() const;   // the last device's out_token[0..k]
+  void commit(uint32_t j, uint32_t next_token);
+  // Spec 19e's prompt lookup: draft i's id from outside (every device's cur_token[1 + i]) before verify(k).
+  void set_draft_input(uint32_t i, uint32_t id);
+  // The last verify's (or plain step's) logits rows [0, rows) - fp32 [rows][vocab] - and draft step i's head row.
+  void read_logits_into(float* host, uint32_t rows);
+  void read_draft_logits_into(float* host, uint32_t i);
+  // Pinned host rows for the sampled path (EngineAdapter's): `floats` fp32, allocated once (grown on demand).
+  float* host_rows(size_t floats);
+  // u32 [layers][M][32]: the last verify's route rows (M = its k + 1), each layer's from the device holding it - the
+  // per-layer union of experts over the verify rows is spec 22 P0.6's "MTP verify" term.
+  std::vector<uint32_t> read_verify_routes();
+  uint32_t last_verify_rows() const { return last_verify_m_; }
+  // u32 [count + 1] of draft step 0's selection (positions, then the count) and step i's route row (the head's MoE).
+  std::vector<uint32_t> read_draft_selection();
+  std::vector<uint32_t> read_draft_routes(uint32_t i);
+  // bf16 [10240] of the head's R row 0 (R_{pos-1}) and of the last draft step's pre-mixer H (the next step's R).
+  std::vector<uint16_t> read_mtp_R();
+  std::vector<uint16_t> read_draft_H();
+  // M1's test hook: replace R_{pos-1} (hh row 0) - the head then drafts on a reference's R (bf16 [10240]).
+  void write_mtp_R(const std::vector<uint16_t>& R);
+  MtpNorm mtp_norm() const { return mtp_norm_; }
+  MtpSelect mtp_select() const { return mtp_select_; }
+  size_t verify_list_launches(uint32_t M) const;   // every device's verify list at M
+  size_t draft_list_launches(uint32_t i) const;
+  // The head's KV / compressed keys of positions [first, first + count) (bf16 [count][2][256] / blocks [count][128]).
+  std::vector<uint16_t> read_mtp_kv(uint32_t first, uint32_t count, bool v);
+  std::vector<uint16_t> read_mtp_idx_keys(uint32_t first_block, uint32_t count);
+
  private:
   struct Stage;
   // Spec 21d: a device's pieces for the prefill half (b70_qwen4exp_prefill), which cannot see Stage.
@@ -205,9 +264,19 @@ class Qwen4ExpEngine {
   void build_injected();
   void ple_init();
   CapturedStep& active(uint32_t dev) const;
+  // One step over every device's list `lists[dev]` (the hand-off, the bounds, the Control mirror) - step_once's
+  // body; the plain step, the verify lists.
+  void submit(const std::vector<CapturedStep*>& lists);
   // Spec 21e: a snapshot run's device bytes (the GDN state's live slot with the MTP head).
   uint8_t* snap_ptr(const SnapRun& r) const;
   void settle_all(const char* what);
+  // Spec 21e: the MTP head's plain token (verify(0) + commit(0), or at pos 0 the plain list and R_0 into hh row 0),
+  // what ingest() and generate() run with the head on; the live GDN slot copied into slot 0 (before anything that
+  // reads gdn_state directly: prefill); the check every MTP call starts with.
+  void mtp_step1();
+  void mtp_normalise_live();
+  void require_mtp(const char* what) const;
+  Control* hctl() const;
 
   loader::Q4LoadedModel model_;
   uint32_t max_len_;
@@ -223,6 +292,15 @@ class Qwen4ExpEngine {
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
   BlockHook block_hook_;           // spec 21d: empty = no hook (uniform chunks)
   PrefillInjector pf_inject_;      // spec 21d: the injected run's lists on prefill
+  // Spec 21e: the MTP head (null without it), its binding into the lists, the iteration's bookkeeping.
+  std::unique_ptr<Qwen4ExpMtpBuffers> mtp_;
+  MtpBinding mtp_bind_;
+  MtpNorm mtp_norm_ = MtpNorm::Single;
+  MtpSelect mtp_select_ = MtpSelect::Reuse;
+  static constexpr uint32_t kNoVerify = ~0u;
+  uint32_t verify_k_ = kNoVerify, verify_pos_ = 0, last_verify_m_ = 0;
+  std::vector<uint32_t> draft_ids_;
+  std::unique_ptr<l0::Mem> host_rows_;
   // Spec 21d: set by prepare_prefill (b70_qwen4exp_prefill) - releases a prefill list waiting on a hand-off that will
   // not come and waits (bounded) for every prefill list to go idle; reset() calls it.
   std::function<bool()> pf_settle_;
