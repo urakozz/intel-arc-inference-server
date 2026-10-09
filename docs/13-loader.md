@@ -857,6 +857,47 @@ W4A16-GPTQ and RedHatAI/Qwen3-8B-quantized.w4a16 (`symmetric = false`), and
 halt95/Qwen3.8-Flash-Next-W4A16-Merlin (an int8 channel group). The configs are fixtures
 in `tests/loader/ct/`.
 
+## Qwen3.8-Flash-Next (spec 21b): two checkpoint forms, the g128 expansion, the PLE file
+
+`loader::load_qwen4exp` (`src/loader/qwen4exp_{layout.h,repack.*,ple*,loader.*}`) is a loader BESIDE
+`loader::load`, `load_k2` and `load_kolibri1`; it reuses `resolve_snapshot`, `QuantConfig::parse`,
+`SafetensorsSet`, `assert_quant_invariants` / `check_quant_scan`, `LinearSrc::classify`, the int8 head and
+`rtn_int4_g64`, and touches none of their files.
+
+- **Forms, from the names.** One weight format (AutoRound int4 g64 sym, `auto_round:auto_gptq`) plus the
+  operator's one exact conversion. `q4_forms` reads three groups all-or-nothing - the dense projections (GDN
+  `in_proj_qkv` / `in_proj_z` / `out_proj`, QSA `q/k/v/o_proj`), the shared experts, the MTP head's experts
+  - as `.qweight` (int4) or `.weight` (bf16), and refuses a mixed group naming the first odd tensor. Ours
+  (21q): int4 everywhere AutoRound quantises. Intel's interim export: bf16 dense / shared / MTP, routed
+  experts int4 **g128**. A bf16 or fused (`mlp.experts.gate_up_proj`, the original's) routed expert in the
+  main model is refused by name: the bf16 original is the reference's input, never the engine's.
+- **The g128 expansion** is `LinearSrc::classify`'s (above, "g128 checkpoints"), expert by expert: g64
+  scale rows 2j and 2j + 1 both take g128 row j, so each expert's layout-1 block dequantises to `(q - 8) x
+  scale` of its g128 source bit for bit (`qwen4exp_repack_test` checks every block word for word and every
+  weight of sampled columns). `quantization_config.group_size` must equal the experts' scales (64 / 128).
+- **Layouts** (`qwen4exp_layout.h`, the planner's and the loader's one formula): routed experts as layout-1
+  blocks, block e at `e x 1,740,800` (gate||up `cols_interleave16`) and `e x 870,400` (down) - each expert one
+  contiguous range per allocation, the offsets spec 22's indirection table will replace; HC blocks
+  (down||inject bf16 tiles {10240, 336}, up {320, 10240}, the `(1 + w)` norm fp32); the router {2560, 528}
+  with `shared_expert_gate` as row 512; dense int4 GPTQ layout 0, bf16 tiles in Intel's form; the GDN small
+  block `make_small_layout(2560, 10240, 48)`; every `(1 + w)` norm baked fp32 at load.
+- **The MTP head's bf16 experts** (both checkpoints ship `mtp.*` bf16) are RTN-quantised to int4 g64 at
+  load (`rtn_int4_g64`, spec 15e's precedent: the head only drafts), until decision 6.
+- **The PLE table** is not in device memory. The checkpoint's 128 bf16 shards are skipped by design; the
+  engine reads `<snapshot>-ple-int8/` (or `$B70_Q4_PLE`), made once by `tools/quantize/qwen4exp/ple_int8.py`:
+  per n-gram head `ple.h<h>.q` I8 `[prime_h][160]` and `ple.h<h>.s` BF16 / F32 `[prime_h]` (spec 9's row
+  rule), the three I64 constants. A checkpoint without the file is refused naming the converter's command.
+  Both the checkpoint's and the file's I64 tensors are held to the formula (`qwen4exp_ple_hash.h`, exact
+  integers = transformers' builders). `load_q4_ple` refuses a table larger than MemAvailable - 16 GiB, then
+  pins it as **16 + 16 host-USM ranges** (one per head, ~3.2 GB each - never one 51.8 GB allocation, above the
+  largest pinned allocation measured), writes and reads back a tag per 2 MiB page of every range before the
+  data (the alias check), copies the rows, compares sampled rows, and uploads the device pointer table the
+  gather (21c) indexes.
+- **Names both ways**: every tensor is read once or skipped by design and counted - `model.visual.*`, the
+  PLE shards, `mtp.*` without `--mtp`, the later layers with `--layers N` (N >= 2: the PLE layer is 1).
+- **The plan before the first allocation**: `runtime::qwen4exp::plan` + `require_fits` (weights + persistent
+  state; the full model is refused naming spec 22's expert-offload tier).
+
 ## Deliberately not loaded
 
 - **`model.visual.*`** (333 tensors, 0.921 GB) - this checkpoint is a

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Spec 21a: the Qwen3.8-Flash-Next (qwen4_exp) CPU reference runs, ON THE BOX CPU (kolibri_oracle.sh's shape).
-#   tools/box_validate/qwen4exp_oracle.sh <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace
+#   tools/box_validate/qwen4exp_oracle.sh <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8
 #
 # Every mode runs tools/oracle/qwen4exp_ref.py in the oracle image (tools/oracle/run_in_container.sh) with
 # transformers 5.19.0 from a site directory BESIDE the image (tools/oracle/qwen4exp_env.sh: pip --no-deps
@@ -16,6 +16,13 @@
 #                  below a sanity ceiling of 30 on prose, ESTIMATED) -> <data>/oracle-out-q4exp/ppl.log
 #   hfcheck        transformers' own per-query indexer against the port's cache on real weights, --layers 4,
 #                  2100 ids + 4 steps: BITWISE or exit 1 -> <data>/oracle-out-q4exp/hfcheck.log
+#   synth-ckpt     spec 21b: the two synthetic real-width checkpoints (tools/quantize/qwen4exp/make_synth.py --layers 4
+#                  --mtp, ours and Intel's form, from the ORIGINAL's small files - config.json and the tokenizer
+#                  files of Qwen/Qwen3.8-Flash-Next, a few MB, not its weights), their PLE int8 files (ple_int8.py)
+#                  and check.py -> <data>/oracle-out-q4exp-synth/{ours,intel}/{ckpt,ckpt-ple-int8} (r31.synth)
+#   ple-int8       spec 21b: Intel's checkpoint's 128 bf16 PLE shards -> the int8 file the engine pins,
+#                  <Intel snapshot>-ple-int8/ (ple_int8.py --scale ${Q4_PLE_SCALE:-bf16}; ~51.8 GB written; df -h first;
+#                  written in the tree, then moved beside the snapshot) and check.py --ple (r31.ple_convert)
 #   trace          teacher-forced routing traces for spec 22 P0.6 / P0.8: the 36 A4 scenarios
 #                  (tests/golden/toolcall/*.ids), q4exp_agentic, code, prose, and the opencode recording when
 #                  OPENCODE_LOG is set -> <data>/oracle-out-q4exp-traces/<name>.routes.safetensors
@@ -29,11 +36,11 @@
 #      OPENCODE_LOG, HF_HOME, ORACLE_IMAGE, ORACLE_THREADS.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
-[ $# -ge 2 ] || { echo "usage: $0 <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace" >&2; exit 2; }
+[ $# -ge 2 ] || { echo "usage: $0 <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8" >&2; exit 2; }
 data="$1" mode="$2" nl="${3:-}"
-case "$mode" in tests|tiny|intel|ours|ppl|hfcheck|trace) ;;
+case "$mode" in tests|tiny|intel|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8) ;;
   intel-layers) [[ "$nl" =~ ^[0-9]+$ ]] && [ "$nl" -ge 4 ] || { echo "qwen4exp_oracle: intel-layers N needs N >= 4 (the first QSA layer: a cached run needs one)" >&2; exit 2; } ;;
-  *) echo "qwen4exp_oracle: mode $mode is not one of tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace" >&2; exit 2 ;;
+  *) echo "qwen4exp_oracle: mode $mode is not one of tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8" >&2; exit 2 ;;
 esac
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
 dry="${DRY_RUN:-0}"
@@ -41,9 +48,10 @@ gen="${Q4_GEN:-32}"
 TINY=models--qikp--tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next
 INTEL="${SNAP_Q4EXP_INTEL:-models--Intel--Qwen3.8-Flash-Next-W4A16-AutoRound}"
 OURS="${SNAP_Q4EXP_OURS:-models--urakozz--Qwen3.8-Flash-Next-W4A16-g64-AutoRound-GPTQ}"
+ORIG="${SNAP_Q4EXP_ORIG:-models--Qwen--Qwen3.8-Flash-Next}"   # spec 21b: its small files only (synth-ckpt)
 SITE=oracle-out-q4exp-site
-case "$mode" in tests|tiny) need="${Q4_REF_MIN_GB:-24}" ;; *) need="${Q4_REF_MIN_GB:-64}" ;; esac
-case "$mode" in tests|tiny) model="$TINY" ;; ours) model="$OURS" ;; *) model="$INTEL" ;; esac
+case "$mode" in tests|tiny|synth-ckpt|ple-int8) need="${Q4_REF_MIN_GB:-24}" ;; *) need="${Q4_REF_MIN_GB:-64}" ;; esac
+case "$mode" in tests|tiny) model="$TINY" ;; ours) model="$OURS" ;; synth-ckpt) model="$ORIG" ;; *) model="$INTEL" ;; esac
 snapdir=$(ls -d "$hf/hub/$model"/snapshots/*/ 2>/dev/null | head -1)
 avail=$(awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null || echo 0)
 echo "qwen4exp_oracle: $mode${nl:+ $nl} -> $data; checkpoint $model (${snapdir:-absent}); MemAvailable ${avail} GB (need $need)"
@@ -75,6 +83,7 @@ fi
 if [ -z "$snapdir" ] && [ "$dry" != 1 ]; then
   case "$mode" in
     tests|tiny) echo "SKIP_REASON qwen4exp_oracle: $TINY is not in $hf/hub (hf download qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next - 124 MB)" ;;
+    synth-ckpt) echo "SKIP_REASON qwen4exp_oracle: $ORIG is not in $hf/hub (its small files only: hf download Qwen/Qwen3.8-Flash-Next config.json tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja - a few MB)" ;;
     ours) echo "SKIP_REASON qwen4exp_oracle: $OURS is not in $hf/hub (spec 21q's checkpoint; decision 6)" ;;
     *) echo "SKIP_REASON qwen4exp_oracle: $INTEL is not in $hf/hub (hf download Intel/Qwen3.8-Flash-Next-W4A16-AutoRound: 181 GB, df -h ~ first; the 128 PLE shards alone are 102.4 GB)" ;;
   esac
@@ -122,6 +131,49 @@ gaps() {   # the gap distributions (decision 3's tau, R2's MoE tolerance)
 case "$mode" in
   tests)
     in_box "python3 tools/oracle/test_qwen4exp_ref.py && python3 tools/oracle/test_qwen4exp_mtp.py" || rc=1
+    ;;
+  synth-ckpt)
+    # spec 21b Task 1: written in the tree (the container mounts only it), moved under <data> when checked; an
+    # older incomplete set is moved aside (<f>.old-<epoch>), never deleted.
+    for f in ours intel; do
+      if [ -s "$data/oracle-out-q4exp-synth/$f/ckpt-ple-int8/model.safetensors.index.json" ]; then
+        echo "qwen4exp_oracle: synthetic $f kept ($data/oracle-out-q4exp-synth/$f)"
+        continue
+      fi
+      part=oracle-out-q4exp-synth.partial/$f
+      echo "qwen4exp_oracle: synthetic $f - make_synth.py --layers 4 --mtp, ple_int8.py, check.py ($(date '+%F %T'))"
+      if ! in_box "mkdir -p /ws/$part && python3 tools/quantize/qwen4exp/make_synth.py /ws/$part/ckpt --layers 4 --form $f \
+            --mtp --tokenizer \"\$SNAP\" && python3 tools/quantize/qwen4exp/ple_int8.py /ws/$part/ckpt /ws/$part/ckpt-ple-int8 && \
+            python3 tools/quantize/qwen4exp/check.py /ws/$part/ckpt --ple /ws/$part/ckpt-ple-int8"; then
+        echo "qwen4exp_oracle: synthetic $f FAILED"
+        rc=1
+        continue
+      fi
+      [ "$dry" = 1 ] && continue
+      mkdir -p "$data/oracle-out-q4exp-synth"
+      [ -e "$data/oracle-out-q4exp-synth/$f" ] && mv "$data/oracle-out-q4exp-synth/$f" "$data/oracle-out-q4exp-synth/$f.old-$(date +%s)"
+      mv "$part" "$data/oracle-out-q4exp-synth/$f"
+      echo "qwen4exp_oracle: synthetic $f done ($(date '+%F %T'))"
+    done
+    ;;
+  ple-int8)
+    # spec 21b Task 1 on the real table: Intel's shards (the original's bf16 rows as shipped) -> <snapshot>-ple-int8/.
+    dest="${snapdir%/}-ple-int8"
+    if [ -s "$dest/model.safetensors.index.json" ]; then
+      echo "qwen4exp_oracle: the PLE int8 file is there ($dest)"
+    else
+      df -h . "$hf" 2>/dev/null | tail -2
+      echo "qwen4exp_oracle: ple_int8.py on $model -> $dest (~51.8 GB written, ESTIMATED ~0.5-1 h) ($(date '+%F %T'))"
+      if in_box "mkdir -p /ws/oracle-out-q4exp-ple.partial && python3 tools/quantize/qwen4exp/ple_int8.py \"\$SNAP\" \
+            /ws/oracle-out-q4exp-ple.partial/ple --scale ${Q4_PLE_SCALE:-bf16} && python3 tools/quantize/qwen4exp/check.py \
+            \"\$SNAP\" --ple /ws/oracle-out-q4exp-ple.partial/ple"; then
+        [ "$dry" = 1 ] || mv oracle-out-q4exp-ple.partial/ple "$dest"
+        echo "qwen4exp_oracle: the PLE int8 file written ($dest, $(date '+%F %T'))"
+      else
+        echo "qwen4exp_oracle: ple_int8.py FAILED"
+        rc=1
+      fi
+    fi
     ;;
   tiny)
     for p in q4exp_short q4exp_4k; do

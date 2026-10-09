@@ -34,9 +34,10 @@ norm and dt_bias 1 + 0.1 N(0,1), A_log = log U(1, 16), conv taps 0.5 N(0,1), rou
 the embedding and the PLE rows N(0,1), every other linear N(0,1) / sqrt(K).
 
 One layer is generated, packed and written at a time (one shard per layer, one expert's matrices at a
-time), so the peak is about one layer's tensors (~3 GB at N = 4, ESTIMATED), not the model. Size: ~1.40 GB
-a layer (intel; ~0.75 GB ours) + 2.54 GB of embedding and head (+ 0.19 GB of the head's dense part and
-5.03 GB of bf16 experts with --mtp; derived). Afterwards `check.py <out-dir> [--ple <dir>]` must print
+time), so the peak is about one layer's tensors (~3 GB at N = 4, ESTIMATED), not the model. Size: ~1.4 GB
+a layer in either form (the routed experts dominate) + 2.54 GB of embedding and head (+ 0.19 GB of the head's
+dense part and 5.03 GB of bf16 experts with --mtp; derived) - measured at N = 4 with --mtp: 13.52 GB (ours),
+13.68 GB (Intel's form). Afterwards `check.py <out-dir> [--ple <dir>]` must print
 ACCEPTED, and `ple_int8.py <out-dir> <out-dir>-ple-int8` makes the PLE file the engine reads.
 """
 import argparse
