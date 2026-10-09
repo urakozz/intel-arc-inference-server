@@ -169,7 +169,17 @@ bool Qwen4ExpEngine::settle(uint32_t dev) {
   return !pending_[dev];
 }
 
+l0::Context& Qwen4ExpEngine::stage_ctx(uint32_t dev) const { return st(dev).ctx; }
+Qwen4ExpBuffers& Qwen4ExpEngine::stage_buffers(uint32_t dev) const { return st(dev).buffers; }
+Control* Qwen4ExpEngine::stage_control(uint32_t dev) const { return st(dev).ctl; }
+l0::CmdList& Qwen4ExpEngine::stage_imm(uint32_t dev) const { return st(dev).imm; }
+
 void Qwen4ExpEngine::reset() {
+  // Spec 21d: a prefill list waiting on a hand-off that will not come is released first (pf_settle_ is set by
+  // prepare_prefill; b70_qwen4exp_prefill's) - the buffers below are not touched under a running list.
+  if (pf_settle_ && !pf_settle_())
+    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::reset: a prefill list is still running after " +
+                             std::to_string(opt_.prefill_timeout_ms) + " ms");
   for (uint32_t i = 0; i < st_.size(); ++i)
     if (!settle(i))
       throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::reset: device " + std::to_string(i) +
@@ -440,6 +450,7 @@ MemoryComponents Qwen4ExpEngine::memory_use(uint32_t dev) const {
   c.kv = b.kv.size() + b.idx_keys.size() + b.idx_tail.size();
   c.decode_state = b.control.size() + b.gdn_state.size() + b.conv_ring.size() + b.ple.size() + b.scratch_bytes() +
                    (taps_[dev] ? taps_[dev]->size() : 0) + (link_ ? link_->bytes(dev) : 0);
+  c.prefill_scratch = dev < pf_dev_bytes_.size() ? pf_dev_bytes_[dev] : 0;   // spec 21d: after prepare_prefill
   return c;
 }
 
