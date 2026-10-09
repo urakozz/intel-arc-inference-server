@@ -2619,6 +2619,26 @@ st_r34_a4_ref() {
 }
 
 # ======================================================================================
+row 35 "the W4A4 probe (docs/07 §3): int4 weights x int4 activations at group 256 after h8's runtime Hadamard - the accuracy grid on the box CPU (plan 2026-10-09-w4a4-probe Task 2)"
+rownote 35 "A CPU job, opt-in, outside the timed sessions (never during sessions 6-9: a running container makes every timed row ITERATE). Task 1 (tools/rotate/eval_quantised.py sim: h4 / h4p2 / w4a16, --group, --per-class; tools/rotate/test_w4a4.py) is on the tree. r35.grid gives the stopping rule's numbers (best of h4 / h4p2 > 2 points of rel L2 above h8, or > 2 argmax in 100 lost against it, closes W4A4); r35.per_class is Review Focus 5 (each class alone: o_proj / out_proj / down apart). The verdict, Task 2 Step 2 (AutoRound g256, ~3 h, only if h4 is within ~3 points of h8) and Task 3 (the GPU microprobe, only on a pass) are not stages."
+rownote 35 "Prompts: §15.4's 478 held-out ids are not in the tree - W4A4_HELDOUT=<file> if the box still has it, otherwise w4a4_grid.sh re-makes a 478-id held-out prompt from this tree's texts (NOT §15's ids: h4 is read against the same run's none / w4a16 / h8, not against §15's 12.0 / 12.5 %). long512 / code / cjk are §15.4's. Data: the bf16 Qwen3.8 (SNAP_QWEN_BF16, default Qwen/Qwen3.8-27B, 54 GB) beside the gate snapshot; MemAvailable >= 70 GB (W4A4_MIN_GB) or the stage SKIPs."
+stage r35.grid 35 optin cpu qwen,qwen_bf16,oracle_image - "plan Task 2 Step 1 on the box CPU: w4a4_grid.sh grid - eval_quantised.py sim <Qwen3.8 bf16> <gate checkpoint> --prompt <p> --variants none,w4a16,h8,h4,h4p2 --group 256 --vocab-used 248077 on cjk / code / heldout (478) / long512 in the oracle container (free -g >= 70 GB first) -> \$DATA/oracle-out-w4a4/<p>.grid.{log,json}, resumable - HOURS (est.); the summary tables and the stopping rule computed from the JSON"
+st_r35_grid() {
+  x "free -g | head -2"
+  chk "tools/box_validate/w4a4_grid.sh $DATA grid" "the W4A4 grid (none, w4a16, h8, h4, h4p2 at g256) on four prompts"
+  grab_all w4a4 '^(=== .*\.grid\.log|\| (none|w4a16|h8|h4|h4p2) \| all \|)' 40
+  grab_all w4a4_rule '^(\| (cjk|code|heldout|long512) \||worst prompt )' 8
+  finish
+}
+stage r35.per_class 35 optin cpu qwen,qwen_bf16,oracle_image r35.grid "Review Focus 5 on the box CPU: w4a4_grid.sh per-class - sim --variants none --per-class h8,h4,h4p2 --group 256 on heldout and long512: each linear class alone (attn_qkv, attn_o, gdn_in, gdn_out, gate_up, down; the rest none), end-to-end rel L2 / worst cos / argmax / top-5 / KL -> \$DATA/oracle-out-w4a4/<p>.per-class.{log,json} - HOURS (est.: 19 forwards a prompt)"
+st_r35_per_class() {
+  x "free -g | head -2"
+  chk "tools/box_validate/w4a4_grid.sh $DATA per-class" "the W4A4 per-class passes (h8, h4, h4p2 one class at a time)"
+  grab_all w4a4_class '^(=== .*\.per-class\.log|\| (none|h8|h4|h4p2) \| (all|attn_qkv|attn_o|gdn_in|gdn_out|gate_up|down) \|)' 80
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp labels belong to their rows)"
 st_x_rest() {

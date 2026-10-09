@@ -10,7 +10,7 @@
 #       The stages' NEEDS name these keys (tools/box_validate/stages.sh).
 #   tools/box_validate/data.sh resolve <repo id | snapshot dir>
 #       the snapshot directory the CLIs would load (refs/main for a repo id).
-# Env: SNAP_QWEN, SNAP_AGNES, SNAP_ORNITH, SNAP_K2, SNAP_KOLIBRI, SNAP_Q4EXP_{TINY,INTEL,BF16}, HF_HOME, TOK_PYTHON, OPENCODE_LOG,
+# Env: SNAP_QWEN, SNAP_QWEN_BF16, SNAP_AGNES, SNAP_ORNITH, SNAP_K2, SNAP_KOLIBRI, SNAP_Q4EXP_{TINY,INTEL,BF16}, HF_HOME, TOK_PYTHON, OPENCODE_LOG,
 #      A4_REF_DIR, ORACLE_IMAGE. Run from a tree root (the oracle-out* checks look there).
 set -u
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
@@ -120,6 +120,10 @@ case "${1:-}" in
       bash -c 'test -s oracle-out-ornith-a4/set/manifest.json && test "$(ls oracle-out-ornith-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     have oracle_q4exp_a4 "oracle-out-q4exp-a4/ with Qwen3.8-Flash-Next's set and 36 <name>.bf16.txt (spec 21e Task 5: tools/toolcall/a4_ref.sh qwen4exp set / ref on Intel's checkpoint - --with r34.a4_ref; spec 22's engine run scores against it)" \
       bash -c 'test -s oracle-out-q4exp-a4/set/manifest.json && test "$(ls oracle-out-q4exp-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
+    # Queue row 35 (the W4A4 probe, plan 2026-10-09-w4a4-probe Task 2): the bf16 reference the grid's
+    # logits are compared against (tools/box_validate/w4a4_grid.sh).
+    have qwen_bf16 "the bf16 original ${SNAP_QWEN_BF16:-Qwen/Qwen3.8-27B} (54 GB; row 35's W4A4 grid reference)" \
+      complete "${SNAP_QWEN_BF16:-Qwen/Qwen3.8-27B}"
     have oracle_image "the oracle container image (tools/oracle/run_in_container.sh; passkey ids)" \
       docker image inspect "${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
     have tok_python "a python with tokenizers (${TOK_PYTHON:-?})" "${TOK_PYTHON:-/nonexistent}" -c 'import tokenizers'
