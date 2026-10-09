@@ -1,0 +1,5 @@
+{
+  "_comment": "Spec 21e: a model_type stub whose tokenizer.json has Qwen3.8's split regex (no \\\\p{M}) - cli_reject_serve_qwen4exp_tokenizer: b70-serve refuses to serve Qwen3.8-Flash-Next with Qwen3.8's tokenizer (Intel's checkpoint ships it); written here, not a release file",
+  "architectures": ["Qwen4ExpForConditionalGeneration"],
+  "model_type": "qwen4_exp"
+}
