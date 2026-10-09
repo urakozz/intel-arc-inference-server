@@ -3307,4 +3307,40 @@ if(B70_Q4EXP)
     qwen4exp_snapshot_gpu_synth_pp_test qwen4exp_snapshot_gpu_cross_test qwen4exp_snapshot_gpu_intel_test
     PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
+# Task 3: the MTP head and spec 8's lists. B70_Q4EXP_MTP_KERNELS is src/kernels/CMakeLists.txt's spec 21e block (the
+# verify lists' M = 2..4 binaries, gdn_step_slots_M<1..4>_G1, q4_pf_ple_C4, q4_mtp at M = 1..4 and _PF, the fc's);
+# the lists also bind 21c's decode binaries, 21d's prefill binaries and Qwen3.8's argmax_stage1_M<2..4> by name.
+if(B70_Q4EXP AND B70_MTP)
+  set(B70_Q4EXP_MTP_KERNELS kernel_q4_pf_ple_C4 kernel_q4_mtp_M2048_SINGLE_PF kernel_q4_mtp_M2048_STREAM_PF
+    kernel_q4_pf_bf16_slab_K2560_N2560)
+  foreach(MM 1 2 3 4)
+    list(APPEND B70_Q4EXP_MTP_KERNELS kernel_gdn_step_slots_M${MM}_G1 kernel_gemv_bf16_M${MM}_K2560_N2560
+      kernel_q4_mtp_M${MM}_SINGLE kernel_q4_mtp_M${MM}_STREAM)
+    if(NOT MM EQUAL 1)
+      list(APPEND B70_Q4EXP_MTP_KERNELS kernel_gemv_M${MM}_K2560_N16384_S1_L0 kernel_gemv_M${MM}_K2560_N13312_S2_L0
+        kernel_gemv_M${MM}_K6144_N2560_S4_L0 kernel_gemv_bf16_M${MM}_K2560_N16384 kernel_gemv_bf16_M${MM}_K2560_N13312
+        kernel_gemv_bf16_M${MM}_K6144_N2560 kernel_gemv_bf16_M${MM}_K2560_N128_C16_S16
+        kernel_gemv_bf16_M${MM}_K10240_N336_C16_S16 kernel_gemv_bf16_M${MM}_K10240_N320_C16_S16
+        kernel_gemv_bf16_M${MM}_K2560_N640_C16_S16 kernel_gemv_bf16_M${MM}_K2560_N528_C16_S16
+        kernel_gemv_bf16_M${MM}_K2560_N12800 kernel_gemv_bf16_M${MM}_K2560_N248320 kernel_gemv_i8w_M${MM}_K2560_N248320
+        kernel_embed_gather_M${MM}_D2560 kernel_prep_gated_head_M${MM}_SIG kernel_attn_prep_M${MM}_Q24KV2
+        kernel_attn_prep_M${MM}_Q24KV2_S1 kernel_q4_hc_combine_norm_M${MM}_E kernel_q4_hc_combine_norm_M${MM}_S1
+        kernel_q4_hc_combine_norm_M${MM}_S4 kernel_q4_hc_combine_norm_M${MM}_Y kernel_q4_hc_combine_norm_M${MM}_Y_NN
+        kernel_q4_hc_combine_norm_M${MM}_X kernel_q4_hc_up_mix_M${MM}_I kernel_q4_hc_up_mix_M${MM}
+        kernel_q4_ple_gather_M${MM}_BF16 kernel_q4_ple_gather_M${MM}_F32 kernel_q4_qsa_M${MM}_T512_W1024
+        kernel_q4_qsa_attn_M${MM}_T32 kernel_q4_qsa_attn_eager_M${MM} kernel_q4_route_M${MM}_E512_T10_N528_L256
+        kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4 kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB)
+    endif()
+  endforeach()
+  set(_q4mtp_reused ${B70_Q4EXP_DECODE_KERNELS} ${B70_Q4EXP_PREFILL_KERNELS} kernel_argmax_stage1_M2
+    kernel_argmax_stage1_M3 kernel_argmax_stage1_M4)
+  # Host: the names the lists bind (kernels::qwen4exp verify / draft / mtp_prefill_variants) are built, the block's
+  # binaries are all bound; the launch counts of every list (runtime::qwen4exp's).
+  add_executable(qwen4exp_mtp_names_test kernels/qwen4exp_mtp_names_test.cc)
+  target_include_directories(qwen4exp_mtp_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(qwen4exp_mtp_names_test PRIVATE b70_qwen4exp_plan)
+  b70_target_kernel_dir(qwen4exp_mtp_names_test)
+  add_test(NAME qwen4exp_mtp_names_test COMMAND qwen4exp_mtp_names_test ${B70_Q4EXP_MTP_KERNELS} --reused ${_q4mtp_reused})
+  set_tests_properties(qwen4exp_mtp_names_test PROPERTIES LABELS qwen4exp)
+endif()
 # ==== Spec 21e: Qwen3.8-Flash-Next served ==== (end) ====

@@ -324,4 +324,139 @@ inline std::vector<std::string> prefill_variants(const model::Qwen4ExpDesc& d, b
   return prefill_variants(d.forms.dense == model::Q4Form::Int4, eager, ple_bf16_scale);
 }
 
+// =================================================================================================================
+// Spec 21e: Qwen3.8-Flash-Next's MTP head and spec 8's verify lists by name - the host half of src/kernels/
+// CMakeLists.txt's spec 21e block (B70_Q4EXP and B70_MTP). What the lists bind (runtime/qwen4exp/qwen4exp_capture.cc):
+//   verify at M = k + 1 (1..4), every device: 21c's decode list at M rows - every 21c kernel rebuilt at M = 2..4 (the
+//     q4_ sources, attn_prep _Q24KV2 / _S1, prep_gated_head _SIG, embed_gather D2560, the GEMVs at this family's
+//     shapes) - with the GDN step `gdn_step_slots_M<M>_G1` (spec 8's state slots, SPEC_SLOT_STRIDE = ONE layer's
+//     state: the engine lays gdn_spec out layer-major, so the stride does not bake a layer count - Qwen3.8's
+//     `gdn_step_slots_M<M>` bakes its 48-layer slot) and, on the PLE layer at M > 1, q4_pf_ple (21d's three-launch
+//     cut of q4_ple_block, which is M = 1 only) at C = 4; argmax_stage1_M<M> is Qwen3.8's (vocab 248077 used);
+//   the head's KV pass in every verify list (last device): q4_mtp (norm, fuse) at M, fc_embedding gemv_bf16 {2560,
+//     2560} at M and fc_hidden at M = 4 a row, the attn side's gated residual (_X: H materialised by the fuse), the
+//     head's bf16 q||gate||k||v and indexer at M, attn_prep _Q24KV2_S1 and q4_qsa at M;
+//   a draft step (M = 1): q4_mtp_M1, the fc's, the head's QSA layer (bf16 dense, int4 experts, bf16 shared: _SHB) and
+//     its final mixer, lm_head, argmax - every 21c M = 1 binary but q4_mtp and the fc's;
+//   the prefill's head pass (M = kPfC): q4_mtp _PF (the chunk's ids), the fc's as bf16 slabs {2560, 2560}, then 21d's
+//     binaries (combine _X / _Y_NN, the HC down slab, up_mix, the k||v slab of q||gate||k||v, the indexer slab,
+//     pf_attn_prep_q16, q4_qsa _PF).
+// The norm form of pre_fc_norm_hidden (decision 4) is a binary: `_SINGLE` (one RMS over the row's 10240, vLLM's) or
+// `_STREAM` (per stream), B70_Q4_MTP_NORM.
+inline constexpr unsigned kMtpVerifyRows = 4;   // = runtime::qwen4exp::kVerifyRows
+inline constexpr unsigned kMtpWg = 256;
+// "q4_mtp_M1_SINGLE" | "_STREAM", + "_PF" at M = kPfC (the prefill's head pass: tokens from the chunk's ids).
+inline std::string mtp_variant(unsigned M, bool single, bool pf = false) {
+  return "q4_mtp" + m_(M) + (single ? "_SINGLE" : "_STREAM") + (pf ? "_PF" : "");
+}
+inline std::string gdn_slots_variant(unsigned M) { return gdn_step_slots_variant(M, 1); }   // gdn_step_slots_M<M>_G1
+inline std::string pf_ple_verify_variant() { return "q4_pf_ple_C" + std::to_string(kMtpVerifyRows); }   // q4_pf_ple_C4
+inline std::string bf16_m_variant(unsigned M, unsigned K, unsigned N) { return gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N)); }
+inline std::string fc_variant(unsigned M) { return bf16_m_variant(M, kHidden, kHidden); }   // gemv_bf16_M<M>_K2560_N2560
+// The dense / head linears at M rows (21c's M = 1 helpers above are these at M = 1).
+inline std::string qkvz_m_variant(unsigned M, bool int4) {
+  return int4 ? gemv_variant(M, kHidden, kQkvzN, 1, 0) : bf16_m_variant(M, kHidden, kQkvzN);
+}
+inline std::string qkvg_m_variant(unsigned M, bool int4) {
+  return int4 ? gemv_variant(M, kHidden, kQkvgN, 2, 0) : bf16_m_variant(M, kHidden, kQkvgN);
+}
+inline std::string out_m_variant(unsigned M, bool int4) {
+  return int4 ? gemv_variant(M, kGdnZN, kHidden, 4, 0) : bf16_m_variant(M, kGdnZN, kHidden);
+}
+inline std::string lm_head_m_variant(unsigned M, bool int8) {
+  return int8 ? gemv_i8w_variant(M, kHidden, kVocab) : bf16_m_variant(M, kHidden, kVocab);
+}
+
+// Every binary a verify list at M binds (one device or the last of two: the union), for the dense arm, the shared
+// form, the head form, the attention form, the PLE scale form and the norm form. Two cards add nothing new (the
+// materialising _Y_NN is every list's) but pp_handoff under peer (16b's binary).
+inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, bool shared_bf16, bool int8_head, bool eager,
+                                                bool ple_bf16_scale, bool single) {
+  const unsigned S = int4_dense ? 4u : 1u;
+  std::vector<std::string> v = {
+      embed_variant(M),
+      hc_combine_norm_variant(M, HcSrc::Embed, 0, true),
+      hc_combine_norm_variant(M, HcSrc::Slices, S, true),
+      hc_combine_norm_variant(M, HcSrc::Y, 0, true),
+      hc_combine_norm_variant(M, HcSrc::None, 0, true),
+      hc_combine_norm_variant(M, HcSrc::Y, 0, false),
+      bf16_m_variant(M, kHcN, kHcDownN),
+      bf16_m_variant(M, kHcN, kHcLow),
+      hc_up_mix_variant(M, true),
+      hc_up_mix_variant(M, false),
+      qkvz_m_variant(M, int4_dense),
+      bf16_m_variant(M, kHidden, kAbN),
+      gdn_slots_variant(M),
+      gated_head_sig_variant(M),
+      out_m_variant(M, int4_dense),
+      qkvg_m_variant(M, int4_dense),
+      bf16_m_variant(M, kHidden, kIdxN),
+      attn_prep_q4_variant(M, int4_dense ? 2u : 1u),
+      qsa_variant(M),
+      qsa_attn_variant(M, eager),
+      bf16_m_variant(M, kHidden, kRouterN),
+      route_variant(M),
+      moe_variant(M, shared_bf16),
+      ple_gather_variant(M, ple_bf16_scale),
+      bf16_m_variant(M, kHidden, kPleKvN),
+      M == 1 ? ple_block_variant(1) : pf_ple_verify_variant(),
+      lm_head_m_variant(M, int8_head),
+      argmax1_variant(M),
+      argmax2_variant(),
+      // the head's KV pass
+      mtp_variant(M, single),
+      fc_variant(M),
+      fc_variant(kMtpVerifyRows),
+      qkvg_m_variant(M, false),
+      attn_prep_q4_variant(M, 1u),
+  };
+  return v;
+}
+inline std::vector<std::string> verify_variants(const model::Qwen4ExpDesc& d, unsigned M, bool int8_head, bool eager,
+                                                bool ple_bf16_scale, bool single) {
+  return verify_variants(M, d.forms.dense == model::Q4Form::Int4, d.forms.shared == model::Q4Form::Bf16, int8_head, eager,
+                         ple_bf16_scale, single);
+}
+// Every binary a draft step binds (the last device, M = 1): the head's layer is bf16 dense and bf16 shared
+// (loader::q4_mtp_desc) with int4 experts, whatever the main model's form.
+inline std::vector<std::string> draft_variants(bool int8_head, bool eager, bool single) {
+  return {mtp_variant(1, single),
+          fc_variant(1),
+          fc_variant(kMtpVerifyRows),
+          hc_combine_norm_variant(1, HcSrc::None, 0, true),
+          hc_combine_norm_variant(1, HcSrc::Slices, 1, true),
+          hc_combine_norm_variant(1, HcSrc::Y, 0, true),
+          hc_down_variant(true),
+          hc_down_variant(false),
+          hc_up_mix_variant(1, true),
+          hc_up_mix_variant(1, false),
+          qkvg_variant(false),
+          idx_variant(),
+          attn_prep_q4_variant(1, 1u),
+          qsa_variant(1),
+          qsa_attn_variant(1, eager),
+          out_variant(false),
+          router_variant(),
+          route_variant(1),
+          moe_variant(1, true),
+          lm_head_variant(int8_head),
+          argmax1_variant(1),
+          argmax2_variant()};
+}
+// Every binary the prefill's head pass binds (the last device, a chunk).
+inline std::vector<std::string> mtp_prefill_variants(bool single) {
+  return {mtp_variant(kPfC, single, true),
+          pf_bf16_slab_variant(kHidden, kHidden),
+          pf_gemm_variant(false),
+          pf_hc_combine_norm_variant(HcSrc::None, true),
+          pf_hc_combine_norm_variant(HcSrc::Y, false),
+          pf_bf16_slab_variant(kHcN, kHcDownN),
+          pf_hc_up_mix_variant(),
+          pf_bf16_slab_variant(kHidden, kQkvgN),
+          pf_bf16_slab_variant(kHidden, kIdxN),
+          pf_attn_prep_q4_variant(),
+          pf_qsa_variant(),
+          hc_combine_norm_variant(1, HcSrc::None, 0, true)};   // prefill_head's final mixer over R (H materialised)
+}
+
 }  // namespace kernels::qwen4exp
