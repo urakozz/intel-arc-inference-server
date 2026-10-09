@@ -1,0 +1,5 @@
+{
+  "_comment": "Spec 21c: a model_type stub for b70-decode / b70-serve dispatch tests (cli_reject_qwen4exp_*) - written here, not the checkpoint config (spec 21 §13 departure 1: its licence text is unread); the refusals it exercises read nothing else",
+  "architectures": ["Qwen4ExpForConditionalGeneration"],
+  "model_type": "qwen4_exp"
+}

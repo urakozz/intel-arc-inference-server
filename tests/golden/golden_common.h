@@ -105,7 +105,7 @@ class Golden {
                    want_elems);
       std::exit(1);
     }
-    const size_t esz = std::strcmp(dtype, "BF16") == 0 ? 2 : 4;   // F32 / I32 are 4
+    const size_t esz = std::strcmp(dtype, "BF16") == 0 ? 2 : std::strcmp(dtype, "I64") == 0 ? 8 : 4;   // F32 / I32 are 4
     const size_t want_bytes = want_elems * esz;
     if (t.begin > t.end || t.end - t.begin != want_bytes) {
       std::fprintf(stderr, "golden '%s' spans %llu bytes ([%llu, %llu)), expected %zu\n", n.c_str(),
@@ -130,6 +130,10 @@ class Golden {
   }
   const int32_t* i32(const std::string& n, size_t e) const {
     return static_cast<const int32_t*>(raw(n, "I32", e));
+  }
+  // Spec 21c: the qwen4_exp golden sets' ple.ids (I64 [T + gen][16]).
+  const int64_t* i64(const std::string& n, size_t e) const {
+    return static_cast<const int64_t*>(raw(n, "I64", e));
   }
 
  private:

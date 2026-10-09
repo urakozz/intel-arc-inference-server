@@ -8,3 +8,11 @@
 add_library(b70_qwen4exp_plan STATIC qwen4exp_sizes.cc)
 target_include_directories(b70_qwen4exp_plan PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_qwen4exp_plan PUBLIC b70_qwen4exp_model b70_plan)
+
+# Spec 21c: b70_qwen4exp_runtime - the buffers, the capture and the decode loop on one or two devices (Level
+# Zero). It links b70_runtime for spec 16b's pieces (runtime::PipelineLink, StageLink, the pp_handoff binary) and
+# the loader (load_qwen4exp's parts, the PLE table in host USM).
+add_library(b70_qwen4exp_runtime STATIC qwen4exp_buffers.cc qwen4exp_capture.cc qwen4exp_engine.cc)
+target_include_directories(b70_qwen4exp_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_qwen4exp_runtime PUBLIC b70_l0 b70_qwen4exp_loader b70_qwen4exp_plan b70_runtime)
+b70_target_kernel_dir(b70_qwen4exp_runtime)

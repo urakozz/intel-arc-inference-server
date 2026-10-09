@@ -65,3 +65,9 @@ endif()
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_kolibri_runtime b70_kolibri_prefill)
 endif()
+# Spec 21c: and Qwen3.8-Flash-Next's engine (runtime/qwen4exp, src/cli/qwen4exp_decode.h), dispatched on model_type;
+# b70-serve refuses it before the device (spec 21e serves it): the loader's model_type check only.
+target_link_libraries(b70-decode PRIVATE b70_qwen4exp_runtime)
+if(TARGET b70-serve)
+  target_link_libraries(b70-serve PRIVATE b70_qwen4exp_loader)
+endif()
