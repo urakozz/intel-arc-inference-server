@@ -39,10 +39,44 @@
 //
 // tap (debug): H copied to tap row l right after the combine that materialises layer l's output (the next
 // layer's first combine, the PLE prologue's, device 0's last, or the final mixer's) - the reference's H.L<l>.
+//
+// **Spec 21e: spec 8's lists** (`spec.kind`; runtime/engine.h's draft / verify / commit contracts):
+//   Verify at M = k + 1 rows, every device: the decode list at M rows (Control::cur_token[0..M) the ids, positions
+//     pos .. pos + M - 1; every kernel row-independent - the verify row r IS the M = 1 step at its position, plan 21e
+//     Review Focus 2) with gdn_step_slots_M<M>_G1 (row r's GDN state into slot (gdn_live + r) % 4) and, on the PLE
+//     layer at M > 1, q4_pf_ple's gate / conv / ring at C = 4 for q4_ple_block; the hand-off carries M rows; on the
+//     last device the final mixer, lm_head and argmax at M (out_token[0..M), pos += M), then a copy of the M
+//     pre-mixer rows of H into the head's hh rows 1..M, then the head's KV pass over the M rows - positions pos - 1 ..
+//     pos + M - 2 (the head's Control), inputs (hh[r], cur_token[r]) = (R_{pos-1+r}, t_{pos+r}): q4_mtp_norm,
+//     fc_embedding, fc_hidden (one M = 4 GEMV a row), q4_mtp_fuse, the attn side's gated residual (_X), q||gate||k||v,
+//     the indexer, attn_prep (the head's K / V) and q4_qsa_prep (its tail ring, its compressed keys) - Review Focus 4:
+//     the head's KV is written for every position the main model has;
+//   Draft step i (the last device, M = 1, the head's Control: position pos - 1 + i): q4_mtp_norm over R = hh row 0
+//     (step 0) or the previous step's pre-mixer H (b.H, which its final mixer's combine materialised) and the head
+//     Control's cur_token[0], the fc's, q4_mtp_fuse, the head's QSA layer - q4_qsa_score / _select into the head's
+//     list on step 0 (and on every step under B70_Q4_MTP_SELECT=fresh), steps 1.. attend step 0's list as it is
+//     (decision 5) - and MoE (bf16 dense and shared, int4 experts), its own final mixer (b.H = the head's pre-mixer H:
+//     the next step's R), lm_head into the head's logits row i, argmax into the head's Control (out_token[0],
+//     cur_token[0], pos + 1).
+// The launch counts are runtime::qwen4exp's verify_device_launches / draft_launches, asserted at capture.
 namespace runtime::qwen4exp {
+
+enum class ListKind { Decode, Verify, Draft };
+struct ListSpec {
+  ListKind kind = ListKind::Decode;
+  uint32_t M = 1;        // Verify: 1..kVerifyRows; Decode / Draft: 1
+  uint32_t draft = 0;    // Draft: the step index (0 reads hh row 0, later steps the previous step's H)
+  bool select = true;    // Draft: whether the step scores and selects (step 0; every step under `fresh`)
+};
+// The head's pieces the Verify / Draft lists bind (the last device).
+struct MtpBinding {
+  Qwen4ExpMtpBuffers* bufs = nullptr;
+  const void* embed = nullptr;   // the embedding table: device 0's (read by the last device over peer access)
+  bool single = true;            // decision 4: q4_mtp's _SINGLE (one RMS over 10240) or _STREAM
+};
 
 CapturedStep build(l0::Context& ctx, const loader::Q4LoadedModel& m, const loader::Q4DevicePart& part,
                    Qwen4ExpBuffers& b, const runtime::StageLink* link, l0::Mem* tap = nullptr,
-                   const l0::Mem* injected = nullptr);
+                   const l0::Mem* injected = nullptr, const ListSpec& spec = {}, const MtpBinding* mtp = nullptr);
 
 }  // namespace runtime::qwen4exp

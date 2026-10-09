@@ -315,7 +315,7 @@ std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placem
         const MtpSizes ms = mtp_sizes(d, max_len);
         dp.kv += ms.kv + ms.idx_keys + ms.idx_tail;
         dp.state += ms.ctl + ms.hh;
-        dp.scratch += ms.list + ms.diag + ms.xe + ms.xh + ms.fe + ms.fh + ms.logits;
+        dp.scratch += ms.list + ms.diag + ms.xe + ms.xh + ms.fe + ms.fh + ms.logits + ms.routes;
       }
     }
     dp.link = p.devices == 2 ? link_bytes_rows(d, dev, rows) : 0;
@@ -472,6 +472,7 @@ MtpSizes mtp_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   s.fe = R * d.hidden * 4;
   s.fh = R * d.hc * d.hidden * 4;
   s.logits = size_t(kMaxDraft) * d.vocab * 4;
+  s.routes = size_t(kMaxDraft) * kRouteWords * 4;   // draft step i's route row (the head's MoE)
   return s;
 }
 

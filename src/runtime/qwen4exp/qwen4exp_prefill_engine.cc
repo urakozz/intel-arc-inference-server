@@ -43,6 +43,7 @@ struct Qwen4ExpPrefillState {
     prefill::KernelCache kc;
     Qwen4ExpPrefillScratch s;
     std::unique_ptr<l0::Mem> inj;   // host USM [qsa layers][kPfC][kListRow]: the injected rows (lazy)
+    std::unique_ptr<l0::Mem> mtp_R;   // spec 21e, the last device with the MTP head: the head pass's R rows
     // Declared after cx / kc / s: recordings are destroyed first.
     std::vector<Chunk> chunks;
     Dev(l0::Context& c, const model::Qwen4ExpDesc& d, uint32_t max_len) : cx(c), kc(c), s(c, d, max_len) {}
@@ -85,6 +86,10 @@ void Qwen4ExpEngine::prepare_prefill() {
   for (const std::string& v : kernels::qwen4exp::prefill_variants(d, eager, model_.ple.scale == loader::Q4PleScale::Bf16))
     require(std::ifstream(kernels::path(v)).good(),
             v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON (spec 21d)");
+  if (mtp_)   // spec 21e: the head's pass per chunk
+    for (const std::string& v : kernels::qwen4exp::mtp_prefill_variants(mtp_norm_ == MtpNorm::Single))
+      require(std::ifstream(kernels::path(v)).good(),
+              v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_MTP=ON (spec 21e)");
   auto* ps = new Qwen4ExpPrefillState();
   pf_ = std::unique_ptr<Qwen4ExpPrefillState, void (*)(Qwen4ExpPrefillState*)>(ps, &destroy_prefill);
   ps->timeout_ns = uint64_t(opt_.prefill_timeout_ms) * 1000000ull;
@@ -92,10 +97,14 @@ void Qwen4ExpEngine::prepare_prefill() {
     ps->dev.push_back(std::make_unique<Qwen4ExpPrefillState::Dev>(stage_ctx(i), d, max_len_));
   if (devices() == 2)
     ps->link = std::make_unique<PipelineLink>(stage_ctx(0), stage_ctx(1), pf_landing_layout(d), PpHandoff::Copy);
+  if (mtp_)
+    ps->dev[devices() - 1]->mtp_R =
+        std::make_unique<l0::Mem>(stage_ctx(devices() - 1), l0::MemKind::Device, mtp_prefill_R_bytes(d));
   pf_dev_bytes_.assign(devices(), 0);
   pf_bytes_ = 0;
   for (uint32_t i = 0; i < devices(); ++i) {
-    pf_dev_bytes_[i] = ps->dev[i]->s.bytes() + (ps->link ? ps->link->bytes(i) : 0);
+    pf_dev_bytes_[i] = ps->dev[i]->s.bytes() + (ps->link ? ps->link->bytes(i) : 0) +
+                       (ps->dev[i]->mtp_R ? ps->dev[i]->mtp_R->size() : 0);
     pf_bytes_ += pf_dev_bytes_[i];
     require(ps->dev[i]->s.bytes() == prefill_sizes(d, max_len_).total(), "the prefill scratch is not prefill_sizes()'s");
     require(!ps->link || ps->link->bytes(i) == pf_link_bytes(d, i), "the prefill link is not pf_link_bytes()'s");
@@ -158,9 +167,22 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   for (uint32_t i = 0; i < devices(); ++i)   // no decode step in flight writes the state or the Control
     require(settle(i), "device " + std::to_string(i) + "'s last decode step is still running");
   if (injected_) require(bool(pf_inject_), "the injected run on prefill needs set_prefill_injector's lists");
+  // Spec 21e: the prefill's GDN path reads slot 0 directly, so a live slot a commit left is copied there first; a
+  // verify waiting for its commit is dropped (the prompt continues from pos).
+  if (mtp_) {
+    mtp_normalise_live();
+    verify_k_ = kNoVerify;
+  }
 
   prepare_prefill();
   Qwen4ExpPrefillState& P = *pf_;
+  Qwen4ExpMtpPrefill mp;
+  if (mtp_) {
+    mp.bufs = mtp_.get();
+    mp.R = P.dev[devices() - 1]->mtp_R.get();
+    mp.embed = mtp_bind_.embed;
+    mp.single = mtp_norm_ == MtpNorm::Single;
+  }
   const bool eager = attn_ == Q4Attn::Eager;
   const char* env = std::getenv("B70_PREFILL_REPLAY");
   const bool replay = pf_replay_ >= 0 ? pf_replay_ == 1 : (env && std::strcmp(env, "1") == 0);
@@ -190,7 +212,7 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     Qwen4ExpPrefillState::Dev& D = *P.dev[i];
     auto encode = [&] {
       prefill_chunk(D.cx, D.kc, D.s, model_, model_.parts[i], stage_buffers(i), pos, C, eager, inj ? D.inj.get() : nullptr,
-                    ndev == 2);
+                    ndev == 2, mtp_ && i + 1 == ndev ? &mp : nullptr);
     };
     if (!replay) return encode();
     auto it = std::find_if(D.chunks.begin(), D.chunks.end(), [&](const Qwen4ExpPrefillState::Chunk& c) {
@@ -214,6 +236,10 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     wait_all("before a chunk");   // before touching the ids buffers, the injected rows or a Control block
     for (uint32_t i = 0; i < ndev; ++i) std::memcpy(P.dev[i]->s.ids.ptr(), ids.data() + off, size_t(C) * 4);
     set_ctl(pos, C);
+    if (mtp_) {   // spec 21e: the head's pass covers positions pos - 1 .. pos + C - 2 (from 0 at pos 0)
+      hctl()->pos = pos == 0 ? 0 : pos - 1;
+      hctl()->n_active = mtp_prefill_rows(pos, C);
+    }
     if (inj) {   // the caller's lists for this chunk, into the device holding each QSA layer
       for (uint32_t l = 0; l < d.layers; ++l) {
         if (!d.is_qsa(l)) continue;
@@ -275,7 +301,8 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   set_ctl(base + uint32_t(ids.size()) - 1, 1);
   {
     Qwen4ExpPrefillState::Dev& D = *P.dev[ndev - 1];
-    prefill_head(D.cx, D.kc, D.s, model_, model_.parts[ndev - 1], stage_buffers(ndev - 1), C - 1);
+    const void* R_last = mtp_ ? static_cast<const uint8_t*>(mp.R->ptr()) + size_t(C) * d.hc_n() * 2 : nullptr;
+    prefill_head(D.cx, D.kc, D.s, model_, model_.parts[ndev - 1], stage_buffers(ndev - 1), C - 1, R_last);
     if (!D.cx.wait_for(tmo))
       fail("device " + std::to_string(ndev - 1) + "'s prefill head did not finish within " +
            std::to_string(opt_.prefill_timeout_ms) + " ms");

@@ -57,6 +57,21 @@ struct Qwen4ExpPrefillScratch {
   size_t bytes() const;
 };
 
+// Spec 21e: the MTP head's pass over a chunk (plan 21e Review Focus 4: the head's KV is filled for every position the
+// main model has), on the last device after its layers: combine _Y_NN over the chunk (its rows of R, the main model's
+// pre-mixer H, materialised), R into `R` rows 1..C (row 0 is R_{pos-1}: the head's hh row 0, copied in first), then
+// the head on (R_q, t_{q+1}) for the head's rows - positions pos - 1 .. pos + C - 2 (pos 0: 0 .. C - 2, C - 1 rows) -
+// under the head's Control (the caller sets pos / n_active = mtp_prefill_rows): q4_mtp _PF (norm), fc_embedding /
+// fc_hidden as bf16 slabs + pf_gemm, q4_mtp_fuse, the attn side's gated residual (_X), the k||v slab of
+// q||gate||k||v, the indexer slab, pf_attn_prep_q16 (the head's K / V), q4_qsa_prep _PF and q4_qsa_ring (its compressed
+// keys and tail ring); last, `R` row C into hh row 0 (R_{pos+C-1}: the next chunk's row 0, the first draft's R).
+struct Qwen4ExpMtpPrefill {
+  Qwen4ExpMtpBuffers* bufs = nullptr;
+  l0::Mem* R = nullptr;            // bf16 [kPfC + 1][10240] (mtp_prefill_R_bytes)
+  const void* embed = nullptr;     // device 0's embedding table (peer-read on two cards)
+  bool single = true;              // decision 4's norm form
+};
+
 // ONE chunk at absolute position `pos`, C rows, through device `part.device`'s layers. The caller has written the ids
 // into every device's s.ids, set every device's Control::{pos = pos, n_active = C} (the HC, the prep, the indexer,
 // the PLE kernels read both), and - device 1 of two - landed device 0's H rows in s.H. `injected` (spec 21 F3's
@@ -67,13 +82,15 @@ struct Qwen4ExpPrefillScratch {
 // H (pending the last MoE's y) and its layers' route rows / selections of this chunk.
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                    const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager,
-                   const l0::Mem* injected, bool two_cards);
+                   const l0::Mem* injected, bool two_cards, const Qwen4ExpMtpPrefill* mtp = nullptr);
 
 // The tail only the LAST chunk runs, on the last device: decode's final mixer over row `last_row` (its H, the pending
 // y and inject weights), lm_head and the two argmax stages - decode's binaries, so the first generated id is chosen
 // exactly as every later one. The caller sets the device's Control::{pos = base + L - 1, n_active = 1};
-// argmax_stage2 leaves pos = base + L and the id in cur_token[0]. kPrefillHeadLaunches launches.
+// argmax_stage2 leaves pos = base + L and the id in cur_token[0]. kPrefillHeadLaunches launches. Spec 21e: with the
+// MTP head the chunk's rows were materialised for the head's pass, so the final mixer reads `R_last` (that row of R,
+// nothing pending: combine _X) instead.
 void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
-                  const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t last_row);
+                  const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t last_row, const void* R_last = nullptr);
 
 }  // namespace runtime::qwen4exp
