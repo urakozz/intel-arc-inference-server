@@ -96,6 +96,12 @@ case "${1:-}" in
       bash -c 'for n in 4 18; do for p in q4exp_short q4exp_4k q4exp_agentic; do test -s oracle-out-q4exp-L$n/$p.golden.safetensors || exit 1; done; done'
     have oracle_q4exp_traces "oracle-out-q4exp-traces/*.routes.safetensors (spec 21a Task 7: qwen4exp_oracle.sh trace - spec 22 P0.6 / P0.8's input)" \
       bash -c 'test "$(ls oracle-out-q4exp-traces/*.routes.safetensors 2>/dev/null | wc -l)" -ge 39'
+    # Spec 21b: the original's small files (config.json + tokenizer files, a few MB - make_synth.py's input), the
+    # int8 PLE file beside Intel's snapshot (ple_int8.py - r31.ple_convert writes it).
+    have q4exp_orig_small "the original's small files ${SNAP_Q4EXP_BF16:-Qwen/Qwen3.8-Flash-Next}/config.json + tokenizer.json (hf download Qwen/Qwen3.8-Flash-Next config.json tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja)" \
+      bash -c 'd=$(tools/box_validate/data.sh resolve "${SNAP_Q4EXP_BF16:-Qwen/Qwen3.8-Flash-Next}") && test -s "$d/config.json" && test -s "$d/tokenizer.json"'
+    have q4exp_intel_ple "the int8 PLE file <Intel snapshot>-ple-int8/ (spec 21b: r31.ple_convert - ple_int8.py, ~51.8 GB)" \
+      bash -c 'd=$(tools/box_validate/data.sh resolve "${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound}") && test -s "${d%/}-ple-int8/model.safetensors.index.json"'
     # Spec 21b: the synthetic real-width checkpoints (make_synth.py --layers 4 --mtp, both forms) and their PLE
     # int8 files beside them (ple_int8.py) - r31.synth writes them.
     have oracle_q4exp_synth "oracle-out-q4exp-synth/{ours,intel}/ckpt/ and ckpt-ple-int8/ (spec 21b: r31.synth - make_synth.py + ple_int8.py)" \

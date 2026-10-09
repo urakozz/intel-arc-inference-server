@@ -2,7 +2,7 @@
 
 **Status:** design, 2026-10-09; the operator approved the design on 2026-10-08 (§0 records what was ruled).
 Open decisions are marked **(decide)**. Nothing is built.
-**Plans (2026-10-09, after the operator's approval that day; 21a built on the Mac, §12):** `docs/superpowers/plans/2026-10-09-spec21{a,b,c,d,e,q}-*.md` - 21a reference, 21b descriptor / loader / formats, 21c decode, 21d prefill, 21e serving and MTP, 21q our AutoRound run; box queue rows 30-34.
+**Plans (2026-10-09, after the operator's approval that day; 21a built on the Mac, §12; 21b built on the Mac, §13):** `docs/superpowers/plans/2026-10-09-spec21{a,b,c,d,e,q}-*.md` - 21a reference, 21b descriptor / loader / formats, 21c decode, 21d prefill, 21e serving and MTP, 21q our AutoRound run; box queue rows 30-34.
 
 **Model:** `Qwen/Qwen3.8-Flash-Next` (`Qwen4ExpForConditionalGeneration`, `model_type: qwen4_exp`; bf16,
 359,999,963,128 B in 1658 tensors). Intel's derived `Intel/Qwen3.8-Flash-Next-W4A16-AutoRound` (181.17 GB: routed
@@ -468,3 +468,114 @@ Plan: `docs/superpowers/plans/2026-10-09-spec21a-qwen4exp-facts-and-reference.md
   sets, the gap distributions (decision 3's tau, R2's MoE tolerance), the per-prompt times and RSS, the
   traces. Times are ESTIMATED in `qwen4exp_oracle.sh`'s DRY_RUN table (~10 min for `q4exp_short` to
   ~1.5-2 h for `q4exp_32k`, ~3-4 h for the `intel` set).
+
+## 13. 21b as built (2026-10-09; the Mac - nothing on a card yet)
+
+Plan: `docs/superpowers/plans/2026-10-09-spec21b-qwen4exp-descriptor-loader-formats.md`, branch
+`spec21b-qwen4exp-loader`. Box validation: queue row 31. Every byte count below is **derived** (the
+descriptor and the checkpoint headers' shapes); the tests assert the formulas and print the values.
+
+- **Built:** `model::Qwen4ExpDesc` (`src/model/qwen4exp.*`: the published model, `check_qwen4exp_config` /
+  `qwen4exp_desc` holding config.json key by key, `Q4Placement`); `loader/qwen4exp_layout.h` (header-only:
+  every allocation's size and every block offset - the planner's and the loader's one formula, and 21c's
+  kernels' host half); `loader/qwen4exp_repack.*` (the host half: `q4_forms`, `q4_expected_names`,
+  `Q4Checkpoint`, `q4_rope_table`); `loader/qwen4exp_ple_hash.h` (the PLE hash in exact integers),
+  `loader/qwen4exp_ple.*` (the int8 file, its checks, the host-memory rule) and `qwen4exp_ple_usm.cc` (the
+  pinning); `loader/qwen4exp_loader.*` (`load_qwen4exp`); `runtime/qwen4exp/qwen4exp_sizes.*` (the plan);
+  `tools/quantize/qwen4exp/{make_synth,ple_int8,check}.py` + `test_qwen4exp_quant.py`;
+  `tools/oracle/qwen4exp_ple_fixture.py` -> `tests/loader/qwen4exp_ple_fixture.h`; host tests
+  `qwen4exp_test`, `qwen4exp_repack_test`, `qwen4exp_ple_test`, `qwen4exp_plan_test`; `qwen4exp_synth_host_test`
+  (the host half over make_synth's files - an addition to the plan); the card test
+  `qwen4exp_load_checkpoint_test` (`qwen4exp_load_synth_{ours,intel}_test`, `qwen4exp_load_intel_layers_test`);
+  `qwen4exp_oracle.sh` modes `synth-ckpt` / `ple-int8`; queue row 31. No kernel (kernel_cmdlines +0 / -0 / ~0).
+- **The layouts and their bytes** (`qwen4exp_layout.h`; `qwen4exp_repack_test` prints them): routed experts
+  int4 layout-1, block e at `e x 1,740,800` (gate||up `cols_interleave16` {2560, 1280}) and `e x 870,400`
+  (down) - **1,336,934,400 B a layer**, each expert one contiguous range per allocation (spec 22's host mirror
+  and indirection table address exactly `q4_gate_up_offset` / `q4_down_offset`); a gated residual's block
+  (down||inject bf16 tiles {10240, 336} - 324 rows used - , up {320, 10240}, the `(1 + w)` norm fp32):
+  13,475,840 B, **26,951,680 B a layer**; the final mixer 13,148,160 B; the router {2560, 528} (row 512 =
+  `shared_expert_gate`, 513..527 zero) 2,703,360 B; the shared expert one allocation (ours: two layout-1
+  blocks, 2,611,200 B; Intel's: bf16 tiles, 9,830,400 B); dense projections int4 GPTQ layout 0 (qkv||z S 1,
+  q||gate||k||v with k at column 12288 and v at 12800, out / o S 4 / S 2 / S 4 PROVISIONAL) or bf16 tiles; the
+  GDN small block `make_small_layout(2560, 10240, 48)` 164,480 B; the QSA small block (q / k norms, the
+  indexer's q / k norms, fp32 `(1 + w)`) 3,072 B; the PLE layer's block (key||value tiles {2560, 12800},
+  three `(1 + w)` norms, the conv taps fp32) 65,822,720 B; the int8 head **636,692,480 B**. A layer in Intel's
+  forms: GDN **1,492,583,040 B (1.493 GB)**, QSA 1,479,314,432 B; ours: GDN 1,400,658,560 B. The MTP head
+  (its QSA layer with bf16 dense / shared arms and int4 g64 experts, the fc block, its own mixer):
+  1,518,728,192 B.
+- **The forms detection** (`q4_forms`): three groups read from the names all-or-nothing - dense (layer 0's
+  `linear_attn.in_proj_qkv`), shared (layer 0's `mlp.shared_expert.gate_proj`), the MTP head's experts - and
+  the routed experts' group from their scales' rows (64 / 128, one size for the checkpoint, = the config's
+  `group_size`). A mixed group, a g64 expert among g128, a bf16 or the original's fused routed expert: each
+  refused naming the tensor. g128 goes through `LinearSrc::classify`'s exact expansion, expert by expert
+  (Review Focus 1: every block word for word, every weight of sampled columns dequantised equal).
+- **The interim MTP head:** both checkpoints ship `mtp.*` bf16 (per-expert `.weight` experts); `repack_mtp`
+  RTN-quantises them with `rtn_int4_g64` (spec 15e's rule, block for block equal in the test) until
+  decision 6.
+- **The PLE file (decision 7's proposal as built):** `ple_int8.py <snapshot> <out> [--scale bf16|f32]`
+  (default **bf16**: 51.84 GB on the real table, f32 52.48 GB, derived): per head `ple.h<h>.q` I8
+  `[prime_h][160]` and `ple.h<h>.s` `[prime_h]`, spec 9's row rule (`s = max|w| / 127` fp32, bf16 rounded
+  once; a zero row s = 0), the three I64 constants checked against the formula and copied, one file per head +
+  an index, metadata `{source, rule: row-int8-spec9, scale}`; byte-equal to 21a's `write_ple_int8`. The engine
+  reads `<snapshot>-ple-int8/` or `$B70_Q4_PLE`, refusing a missing file naming the converter's command.
+  `load_q4_ple`: the file against the descriptor (heads, width, the I64 tensors = `qwen4exp_ple_hash.h` =
+  transformers 5.19.0's own builders and forward on 64 sequences x 2 tables, `qwen4exp_ple_test`), the
+  host-memory rule (table + 16 GiB <= MemAvailable, refused naming both), then **16 + 16 host-USM ranges**
+  (q and scales per head, 2 MiB aligned), a tag written at every 2 MiB page of every range and read back
+  before the data (the alias check), the rows copied, sampled rows (every 4096th, the last) compared with the
+  file, each page's first word recorded (`page_words`, for 21c's device read), the device pointer table
+  `ptrs` u64 [32] on the device holding the PLE layer.
+- **The memory plan** (`runtime::qwen4exp`): weights + persistent state (KV + compressed indexer keys
+  25,344 B a position over 12 QSA layers - 6.64 GB at 262144; GDN state 113.2 MB for 36 layers; conv rings;
+  the PLE state on the PLE layer's device); `pp_split` = `runtime::pp_balance` over `pp_layer_bytes`;
+  `layers_that_fit` = the largest N whose truncated model fits under some placement. On 32.53 GB cards with a
+  1.5 GB reserve and the int8 head: **Intel's forms N = 19 on one card and 39 on two at 32768** (18 / 38 with
+  the MTP head; 18 / 38 at 131072); ours 20 / 41 (19 / 40 at 131072). 21c's decode scratch will lower these a
+  little. The full model is refused on two cards by `require_fits` naming its bytes, each card's capacity and
+  spec 22; `load_qwen4exp` runs the plan before its first allocation.
+- **Mac gates (measured):** the four host tests PASS (`qwen4exp_repack_test` ~40 s: two 4-layer real-width
+  checkpoints written and read back); `test_qwen4exp_quant.py` 6 / 6 in `agnes-ref-img` (8 GB / 4 CPUs) with the
+  5.19.0 site; both synthetic checkpoints made on the Mac (`make_synth.py --layers 4 --mtp`, PLE base 1000:
+  ours 13.52 GB / 20,277 tensors in 1650 s; Intel's form 13.68 GB / 20,227 tensors in 748 s) and `ACCEPTED` by
+  `check.py --ple`; the C++ host half over those very files (`qwen4exp_synth_host_test`, label `checkpoint` -
+  run by hand on the Mac, 425 s: both forms' names both ways, every layer and the head repacked to the layout's
+  bytes, the 128 shards skipped, the PLE files = the descriptor, 0 unconsumed); Level Zero syntax PASS on every
+  new source; `tools/mac_check.sh --base main --quick` exit 0 (host 77 pass / 0 fail, kernel_cmdlines 630
+  variants +0 / -0 / ~0).
+- **Departures from the plan:**
+  1. `tests/model/qwen4exp/config.json` and `synth4.json` are not vendored (the plan's fallback): the
+     checkpoint's licence is `qwen-community-1.0` and its text was not read, so `qwen4exp_test` builds both
+     configs in code (every structural key with its value).
+  2. The hash functions live in a header-only `loader/qwen4exp_ple_hash.h` (included by `qwen4exp_ple.h`) so
+     the host-only planner shares them without linking the loader; `load_q4_ple` is its own object
+     (`qwen4exp_ple_usm.cc`) so a host test that uses the file links no device call.
+  3. The tag check writes its tags BEFORE the data (tags and rows cannot share the pages); the data's page
+     words are then recorded in `Q4PleTable::page_words` for 21c's device read. `Q4PleTable` also records
+     `rows_checked`, `mem_before` / `mem_after`, `seconds`.
+  4. `Q4Checkpoint::final_mixer()` / `mtp_fc()` / `mtp_mixer()` return byte blocks; `ple_constants()` and
+     `skip_ple_shards()` added; `Q4HostWeight` carries a GEMV weight's device form; `Q4DevicePart` gains
+     `mtp_mixer`; `Q4Layer` gains `shared_down_offset`; `DevicePlan` uses `MemoryComponents::kv` (KV + indexer
+     keys) and adds `first` / `end` / `state` / `mtp` / `whole`; the plan adds `fits`, `truncated`,
+     `placement_for`, the per-layer state helpers.
+  5. `q4_expected_names` excludes the PLE table's bf16 shards (skipped by design: their count is the export's
+     split, not the model's).
+  6. `is_qwen4exp_model_type` also accepts `qwen4_exp_text` (a text-only export's top level).
+  7. The synthetic checkpoints follow Kolibri's layout, `oracle-out-q4exp-synth/{ours,intel}/ckpt` with the
+     PLE file beside as `ckpt-ple-int8` (the loader's default name), so 21c's golden sets can live in
+     `{ours,intel}/`. `make_synth.py` reads the original's config.json from `--tokenizer` (or `--config`); its
+     Intel-form `extra_config` is the export's bits-16 patterns, not Intel's 2340 per-layer entries.
+  8. `r31.ple_convert` converts Intel's 128 bf16 PLE shards (the original's rows as shipped) - no 360 GB
+     download; `r31.synth` needs only the original's small files (new `have` key `q4exp_orig_small`).
+  9. `load_qwen4exp` also refuses a `max_len` that is not a multiple of 256 (kMaxLenQuantum).
+  10. `test_qwen4exp_quant.py`'s fixtures shrink the experts (16) and the vocabulary (1024) through test-only
+      `make()` arguments; containers ran at 8 GB / 4 CPUs (the operator's cap), not the plan's 28 GB.
+  11. `r31.ple_kl` runs 21q Task 3's `evaluate.py --ple-only` and SKIPs until that file exists.
+  12. The indexer tail is planned at 4 slots (`kIdxTail`, this plan's form); 21c records 8.
+  13. `tools/box_validate/qwen4exp_oracle.sh` (21a's) gains the modes `synth-ckpt` and `ple-int8` (21c adds its
+      golden `synth` mode); row x's `x.rest` leaves the `qwen4exp` label to row 31.
+  14. Added: `qwen4exp_synth_host_test` (the C++ host half over make_synth's own files, label `checkpoint`, run in
+      `r31.load` before the uploads) - the Python writer and the C++ reader held to each other on real files.
+- **What row 31 must prove:** the uploads (both synthetic forms with the MTP head, Intel's 18 layers) with 0
+  unconsumed and every part's bytes = the plan; the device read-backs = the host repack at the edges; the
+  51.8 GB table pinned as 32 ranges with no alias, its time and MemAvailable before / after (spec 22 P0.5's
+  start); the pointer table; the planner's N lines.

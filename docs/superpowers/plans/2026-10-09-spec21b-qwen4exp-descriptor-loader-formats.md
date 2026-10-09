@@ -1,6 +1,9 @@
 # Spec 21b - Qwen3.8-Flash-Next: the descriptor, the loader, the formats, synthetic checkpoints, the memory plan
 
-**Status (2026-10-09): planned; nothing built.** Box queue row 31 (it renumbers at build time if taken).
+**Status (2026-10-09): built on the Mac, branch `spec21b-qwen4exp-loader`; the card runs pending (queue row 31).**
+Tasks 1-7 done and their Mac gates green: the four host tests, `test_qwen4exp_quant.py` 6 / 6, both synthetic
+checkpoints `ACCEPTED`, Level Zero syntax, kernel_cmdlines +0 / -0 / ~0, `tools/mac_check.sh --base main --quick`
+exit 0. As built (layouts, bytes, the planner's N, departures): spec 21 §13 "21b as built".
 21q (our AutoRound run) is its own plan, `2026-10-09-spec21q-qwen4exp-autoround.md`, parallel to this one.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking.

@@ -246,7 +246,8 @@ Every script runs in `agnes-ref-img` with 21a's transformers 5.19.0 site first o
   (int4 g128 experts with F16 scales, the rest bf16), the PLE table as 128 bf16 shards plus the three I64
   tensors by the formula, `--mtp` the head (bf16, per-expert `.weight` experts). The packer is Kolibri's
   `pack_rtn_g64` at group g (`(q - 8) x scale`, qzeros 0x77777777). One layer at a time; ~1.4 GB a layer
-  (Intel's; ~0.75 ours) + 2.54 GB of embedding and head (+ 5.2 GB with `--mtp`), derived.
+  in either form + 2.54 GB of embedding and head (+ 5.2 GB with `--mtp`), derived; measured at N = 4 with
+  `--mtp` on the Mac: 13.52 GB ours (1650 s), 13.68 GB Intel's form (748 s).
 - `ple_int8.py <snapshot> <out> [--scale bf16|f32]` - decision 7's file: the checkpoint's 128 PLE shards
   re-cut PER HEAD (head h's rows `[offset_h, offset_h + prime_h)` are its own tensor, head-local row r =
   global row `offset_h + r`; no shard boundary is a head boundary on the real table) and quantised by
