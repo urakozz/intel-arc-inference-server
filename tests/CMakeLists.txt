@@ -3152,5 +3152,17 @@ if(B70_Q4EXP)
   b70_target_kernel_dir(qwen4exp_pf_variant_names_test)
   add_test(NAME qwen4exp_pf_variant_names_test COMMAND qwen4exp_pf_variant_names_test ${B70_Q4EXP_PREFILL_KERNELS})
   set_tests_properties(qwen4exp_pf_variant_names_test PROPERTIES LABELS "qwen4exp;prefill")
+  # F2 for the prefill on the card, no checkpoint: every prefill kernel at the real shapes against qwen4exp_pf_ref.h,
+  # grouped == dense (pf_gemm_T0_SILU / pf_gemm_T0), the dense and the sparse flash against fp64, the eager chain.
+  add_executable(qwen4exp_pf_kernels_test kernels/qwen4exp_pf_kernels_test.cc)
+  target_include_directories(qwen4exp_pf_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(qwen4exp_pf_kernels_test PRIVATE b70_prefill_host b70_qwen4exp_loader b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(qwen4exp_pf_kernels_test)
+  endif()
+  b70_target_kernel_dir(qwen4exp_pf_kernels_test)
+  add_dependencies(qwen4exp_pf_kernels_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS} kernel_pf_gemm_T0_SILU)
+  add_test(NAME qwen4exp_pf_kernels_test COMMAND qwen4exp_pf_kernels_test)
+  set_tests_properties(qwen4exp_pf_kernels_test PROPERTIES LABELS "qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 1800)
 endif()
 # ==== Spec 21d: Qwen3.8-Flash-Next prefill ==== (end) ====
