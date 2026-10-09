@@ -25,12 +25,12 @@ has to run is [superpowers/plans/box-validation-queue.md](superpowers/plans/box-
 | | Qwen3.8-27B | Agnes 3.0 Flash | Ornith 1.5 35B-A3B | K2-Horizon MoVA-36B-A4B | Kolibri-1 (spec 20) | Qwen3.8-Flash-Next (spec 21) |
 |---|---|---|---|---|---|---|
 | checkpoint | published | published | published (spec 15 §13) | published | **not made** (spec 20b) | Intel's interim W4A16 (181 GB); ours not made (21q) |
-| `b70-serve` | yes | yes | yes | yes (spec 18d, box gates pending) | yes (spec 20e, box gates pending; needs 20b), **two cards** by default | **refused** (spec 21e) |
-| `b70-serve --pp 2` (two cards, spec 16d) | yes, never run | yes, never run | yes, never run | **refused** (one card) | its default (its own engine, spec 20e), never run | **refused** (spec 21e) |
+| `b70-serve` | yes | yes | yes | yes (spec 18d, box gates pending) | yes (spec 20e, box gates pending; needs 20b), **two cards** by default | `--layers N` only (spec 21e; the whole model refused naming spec 22), never run |
+| `b70-serve --pp 2` (two cards, spec 16d) | yes, never run | yes, never run | yes, never run | **refused** (one card) | its default (its own engine, spec 20e), never run | yes, `--layers N` (spec 21e), never run |
 | `b70-decode` | yes | yes | yes | yes | decode and prefill (spec 20d), **two cards** (`--pp 2`, the default) | decode (spec 21c) and prefill (spec 21d), **`--layers N` required** (the whole model needs spec 22), `--pp 1` or `2`, never run |
 | ran on a B70 | yes (see above) | no | no | no | no | no |
-| MTP head (`--mtp`) | yes | yes | yes (MoE head) | none | none | present, not built (spec 21e) |
-| `--spec lookup` | yes | yes (needs the head) | yes (needs the head) | no | no | no |
+| MTP head (`--mtp`) | yes | yes | yes (MoE head) | none | none | `b70-serve --mtp 1..3` (spec 21e; `auto` refused until spec 22's numbers), never run; `b70-decode` refuses it |
+| `--spec lookup` | yes | yes (needs the head) | yes (needs the head) | no | no | yes (needs the head; spec 21e), never run |
 | `--kv-cache int8` | yes, gates pending | yes, gates pending | not built | yes, gates pending (spec 18e) | refused (bf16 only) | refused (decision 8: bf16 first) |
 | prefill backends | `l0-int8` (default), `l0`, `sycl-tla` | `l0-int8`, `l0` | `l0-int8`, `l0` (`sycl-tla` refused) | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` and `sycl-tla` refused) |
 | KV per position (bf16) | 64 KiB | 72 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
@@ -454,7 +454,8 @@ MoE in every layer, 4-stream hyper-connections instead of a residual, and a per-
 g64 expansion; its PLE table must be converted once (`tools/box_validate/qwen4exp_oracle.sh <data> ple-int8`, ~51.8 GB
 beside the snapshot). Our own AutoRound g64 export is spec 21q's.
 
-**Status: never run on a B70** (queue rows 31, 32 and 33). Decode (spec 21c) and prefill (spec 21d): **the whole
+**Status: never run on a B70** (queue rows 31, 32, 33 and 34). Decode (spec 21c), prefill (spec 21d) and serving
+(spec 21e): **the whole
 model does not fit two B70s** (its routed experts alone are 64.17 GB at int4 g64) and is refused, naming spec 22
 (the expert-offload tier); `--layers N` (development mode: the first N layers, then the final mixer and the head) or
 `--layers auto` (the planner's N, derived: 18-19 of Intel's layers on one card, 38-39 on two, by `--max-len`) is
@@ -467,6 +468,20 @@ at 48 layers (derived). The prefill scratch is ~1.5 GB a card (the 512 MiB exper
 grow with `--max-len`), planned into `--layers auto` / `--max-len auto` when a run prefills: with it Intel's forms fit
 18 layers on one card and 37 on two at 32768 (derived).
 
+**Serving (spec 21e).** `b70-serve <checkpoint> --layers N` serves OpenAI chat on one card or two (`--pp 2`) through
+the Qwen chat path: the template is Qwen3.8's byte for byte, XML tool calls and `<think>` reasoning as for Qwen3.8,
+greedy unless the request asks (decision 11 open). **The tokenizer must be the original's** (`Qwen/Qwen3.8-Flash-Next`'s
+`tokenizer.json`, whose split adds `\p{M}`): Intel's checkpoint ships Qwen3.8's file, which `b70-serve` refuses -
+pass `--tokenizer <the original's tokenizer.json>` (a few MB: `hf download Qwen/Qwen3.8-Flash-Next tokenizer.json`).
+The prefix cache keeps this family's state with each snapshot (115.7 MB: the 36 GDN states and conv rows, the PLE
+history, the QSA open block's raw keys; + 21 KB with the head) and 25,344 B a position in its blocks (+ 2,112 with the
+head), one layout on one card or two. `--mtp K` (1-3) drafts with the MTP head (vLLM's form; `pre_fc_norm_hidden` as
+one RMS over the 4 streams, `B70_Q4_MTP_NORM=per_stream` for the other form; draft steps after the first reuse step
+0's selection, `B70_Q4_MTP_SELECT=fresh` selects every step) and verifies K + 1 rows in one list (790-795 launches at
+48 layers, 86-91 at `--layers 4`, derived); `--mtp auto` is refused until spec 22 measures the acceptance on the
+whole model. The head's bf16 experts are RTN-quantised to int4 g64 at load; on two cards it runs on the second and
+reads the first card's embedding over peer.
+
 ```sh
 I=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound
 
@@ -477,14 +492,20 @@ I=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound
 # spec 21d: the prompt prefilled in chunks (l0 only), then decode; the pp row
 ./build/src/cli/b70-decode $I --layers 18 --lm-head int8 --ids tests/golden/prompts/q4exp_4k.ids --n 32 --prefill
 ./build/src/cli/b70-decode $I --layers 37 --pp 2 --lm-head int8 --bench --prefill-length 32768 --tg 16 --max-len 33024
+# spec 21e: served truncated, the original's tokenizer.json (Intel's ships Qwen3.8's), MTP K = 2, one card / two
+T=$(ls -d ~/.cache/huggingface/hub/models--Qwen--Qwen3.8-Flash-Next/snapshots/*/)tokenizer.json
+./build/src/cli/b70-serve $I --layers 18 --tokenizer $T --mtp 2
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $I --layers 37 --pp 2 --tokenizer $T --mtp 2
 ```
 
 **Limits.** Prefill on `l0` only (`--prefill-backend l0-int8`: spec 5's h8 linears rotate in whole 1024-k Hadamard
 blocks and the hidden is 2560; `sycl-tla`: no walk for this family), `--prefill-chunk` at most 2048; the two cards
-cross each chunk by copy, sequentially (spec 16c's overlapped chunk pipeline is a later lever); no MTP (`--mtp`
-refused, spec 21e), no serving (`b70-serve` refused, spec 21e), bf16 KV only (`--kv-cache int8` refused, decision 8),
+cross each chunk by copy, sequentially (spec 16c's overlapped chunk pipeline is a later lever); MTP in `b70-serve`
+only (`b70-decode --mtp` refused; `--mtp auto` and `--draft-vocab` refused), the whole model refused in both CLIs
+(spec 22), bf16 KV only (`--kv-cache int8` refused, decision 8), `reasoning_effort` not forwarded to the template (as
+for Qwen3.8),
 no `--profile`, `--device` refused with `--pp 2`, context capped at the trained 262144.
 
 **Relevant variables:** `B70_Q4_ATTN` (`flash` | `eager`, decode and prefill alike), `B70_Q4_PLE` (the PLE int8
-directory), `B70_PREFILL_REPLAY` (record each prefill chunk's lists once and replay them),
+directory), `B70_Q4_MTP_NORM` (`single` | `per_stream`), `B70_Q4_MTP_SELECT` (`reuse` | `fresh`), `B70_PREFILL_REPLAY` (record each prefill chunk's lists once and replay them),
 `B70_Q4_TIE_TOL` / `B70_Q4_SEL_TOL` (the golden test's routing and selection near-tie tolerances, 1e-3 proposed).
