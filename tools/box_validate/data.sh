@@ -10,7 +10,7 @@
 #       The stages' NEEDS name these keys (tools/box_validate/stages.sh).
 #   tools/box_validate/data.sh resolve <repo id | snapshot dir>
 #       the snapshot directory the CLIs would load (refs/main for a repo id).
-# Env: SNAP_QWEN, SNAP_AGNES, SNAP_ORNITH, SNAP_K2, SNAP_KOLIBRI, HF_HOME, TOK_PYTHON, OPENCODE_LOG,
+# Env: SNAP_QWEN, SNAP_AGNES, SNAP_ORNITH, SNAP_K2, SNAP_KOLIBRI, SNAP_Q4EXP_{TINY,INTEL,BF16}, HF_HOME, TOK_PYTHON, OPENCODE_LOG,
 #      A4_REF_DIR, ORACLE_IMAGE. Run from a tree root (the oracle-out* checks look there).
 set -u
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
@@ -82,6 +82,20 @@ case "${1:-}" in
       bash -c 'for p in prose code de_prose de_chat; do test -s oracle-out-kolibri/$p.ids && test -s oracle-out-kolibri/$p.golden.safetensors || exit 1; done'
     have oracle_kolibri_synth "oracle-out-kolibri-synth/{int4attn,bf16attn}/{ckpt/,prose,de_prose} (spec 20c: kolibri_oracle.sh synth)" \
       bash -c 'for a in int4attn bf16attn; do test -s oracle-out-kolibri-synth/$a/ckpt/model.safetensors.index.json || exit 1; for p in prose de_prose; do test -s oracle-out-kolibri-synth/$a/$p.golden.safetensors || exit 1; done; done'
+    # Spec 21a: Qwen3.8-Flash-Next (qwen4_exp) - the checkpoints and the CPU reference's golden sets
+    # (tools/box_validate/qwen4exp_oracle.sh <data tree> intel | intel-layers N | trace).
+    have q4exp_tiny "the tiny qwen4_exp model (hf download qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next, 124 MB)" \
+      complete "${SNAP_Q4EXP_TINY:-qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next}"
+    have q4exp_intel "Intel's Qwen3.8-Flash-Next W4A16 AutoRound checkpoint ${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound} (181 GB with the 102.4 GB PLE shards; df -h first)" \
+      complete "${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound}"
+    have q4exp_bf16 "the bf16 original ${SNAP_Q4EXP_BF16:-Qwen/Qwen3.8-Flash-Next} (360 GB; its 128 PLE shards alone are what the bf16-PLE KL needs)" \
+      complete "${SNAP_Q4EXP_BF16:-Qwen/Qwen3.8-Flash-Next}"
+    have oracle_q4exp "oracle-out-q4exp/q4exp_{short,4k,8k,32k,agentic}.{ids,golden.safetensors} (spec 21a: qwen4exp_oracle.sh intel)" \
+      bash -c 'for p in q4exp_short q4exp_4k q4exp_8k q4exp_32k q4exp_agentic; do test -s oracle-out-q4exp/$p.ids && test -s oracle-out-q4exp/$p.golden.safetensors || exit 1; done'
+    have oracle_q4exp_layers "oracle-out-q4exp-L4/ and -L18/ q4exp_{short,4k,agentic} (spec 21a: qwen4exp_oracle.sh intel-layers 4 / 18 - 21c's --layers N gate)" \
+      bash -c 'for n in 4 18; do for p in q4exp_short q4exp_4k q4exp_agentic; do test -s oracle-out-q4exp-L$n/$p.golden.safetensors || exit 1; done; done'
+    have oracle_q4exp_traces "oracle-out-q4exp-traces/*.routes.safetensors (spec 21a Task 7: qwen4exp_oracle.sh trace - spec 22 P0.6 / P0.8's input)" \
+      bash -c 'test "$(ls oracle-out-q4exp-traces/*.routes.safetensors 2>/dev/null | wc -l)" -ge 39'
     have k2_a4_set "oracle-out-k2-a4/set/manifest.json (K2's tool-call set, spec 18d: --with r25.a4_ref, or tools/toolcall/a4_ref.sh k2 set)" \
       test -s oracle-out-k2-a4/set/manifest.json
     have oracle_k2_a4 "oracle-out-k2-a4/ with K2's set and 36 <name>.bf16.txt (18a's reference on it: --with r25.a4_ref)" \
