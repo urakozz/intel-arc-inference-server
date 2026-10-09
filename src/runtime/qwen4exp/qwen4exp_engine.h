@@ -41,6 +41,13 @@
 // replay (injected_list), without q4_qsa_score / _select; its launch count is injected_launches().
 namespace runtime::qwen4exp {
 
+// Spec 21d: prefill() and its accessors are DEFINED in b70_qwen4exp_prefill (runtime/qwen4exp/
+// qwen4exp_prefill_engine.cc), not in b70_qwen4exp_runtime - KolibriEngine's arrangement (runtime/kolibri/
+// kolibri_engine.h): a target that never prefills links what it always linked; one that does links
+// b70_qwen4exp_prefill. The prefill state is lazy (allocated by the first prefill or prepare_prefill), so a
+// decode-only engine holds exactly what it did.
+struct Qwen4ExpPrefillState;   // runtime/qwen4exp/qwen4exp_prefill_engine.cc
+
 class Qwen4ExpEngine {
  public:
   // `devices[i]` is the context of placement device i (device 1 a view of device 0's context); `model` was
@@ -119,8 +126,57 @@ class Qwen4ExpEngine {
   // The PLE table's device read-back at construction: pages checked (q4_ple_check).
   size_t ple_pages_checked() const { return ple_pages_checked_; }
 
+  // --- spec 21d: prefill (defined in b70_qwen4exp_prefill) --------------------------------------------------------
+  // Runs `ids` from the current pos in chunks of `chunk` (0 = kPfC 2048) through runtime/qwen4exp/qwen4exp_prefill.h's
+  // walk on every device, then decode's head on the last row: leaves pos += ids.size() on every device and the first
+  // generated id pending in cur_token (Engine::prefill's contract). The state it writes (KV, compressed keys and tail
+  // rings, GDN state and conv rings, the PLE rings) is decode's to a cosine bar (the GEMMs' sum orders, the chunked GDN,
+  // the flash walks), not bitwise (plan 21d Review Focus 5). A prompt may be continued by another prefill. Two
+  // devices: each chunk runs layers [0, s) on device 0, crosses by spec 16b's `copy` hand-off at chunk size (a second
+  // PipelineLink; the chunk always crosses by copy, whatever --pipeline-handoff says for decode: pp_handoff.cl's peer
+  // kernels are sized for a 20 KB row, not 42 MB), then layers [s, L) on device 1 - sequentially (spec 16c's
+  // overlapped chunk pipeline is a later lever). A lost hand-off host-signals the event, throws naming it and marks
+  // the engine until reset(). B70_Q4_ATTN=eager runs the eager sparse attention in prefill too (one switch, read at
+  // construction). With injected() on, the sparse rows read the lists set_prefill_injector's callback writes before
+  // each chunk (q4_qsa_score / _select not launched).
+  void prefill(const std::vector<uint32_t>& ids, uint32_t chunk = 0);
+  // Allocates every device's prefill scratch, Context and (two devices) the prefill link, and checks every binary the
+  // walk binds exists; prefill() calls it. A CLI calls it before timing the first prefill.
+  void prepare_prefill();
+  // B70_PREFILL_REPLAY's arrangement (Kolibri's): record each chunk's list once per (pos, rows, injected) and device
+  // and replay it; the hand-off's copies and event stay on the immediate lists (never inside a recording).
+  void set_prefill_replay(bool enabled) { pf_replay_ = enabled ? 1 : 0; }
+  // Launches every device's prefill Context has appended since it was made (0 before the first prefill).
+  size_t prefill_launches() const;
+  size_t prefill_launches(uint32_t dev) const;
+  bool prefill_ready() const { return pf_bytes_ != 0; }
+  // u32 [layers][kPfC][32]: every layer's route rows of the last chunk (rows [0, C) written; pf_route_at), each
+  // layer's from the device holding it. Throws before the first prefill.
+  std::vector<uint32_t> read_prefill_routes();
+  // QSA layer `layer`'s selection rows of the last chunk, u32 [kPfC][kListRow] (positions [0, count), the count at
+  // kCountWord; rows [0, C) written, the dense rows' identity lists only when the chunk had sparse rows - or the
+  // injected rows when injected() is on).
+  std::vector<uint32_t> read_prefill_selection(uint32_t layer);
+  // The injected run on prefill (spec 21 F3's debug input): with injected() on, before each chunk the engine calls
+  // `f(qsa_index, pos, rows, lists)` for every QSA layer, `lists` the host-USM rows [rows][kListRow] the chunk's sparse
+  // rows read (positions [0, count), count at kCountWord).
+  using PrefillInjector = std::function<void(uint32_t qsa_index, uint32_t pos, uint32_t rows, uint32_t* lists)>;
+  void set_prefill_injector(PrefillInjector f) { pf_inject_ = std::move(f); }
+  // Spec 7's block (runtime::Engine::kBlock); spec 21e's prefix cache hooks into the chunk walk: with a hook set every
+  // chunk ends at a block end or at the prompt end (runtime::prefill_chunk_rows), and the hook is called on the host
+  // after each chunk whose end is a multiple of kBlock (devices idle, pos == end_pos, n_active 0 on every device) and
+  // once at the prompt end (the first generated id in cur_token).
+  static constexpr uint32_t kBlock = 2048;
+  using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
+  void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
+
  private:
   struct Stage;
+  // Spec 21d: a device's pieces for the prefill half (b70_qwen4exp_prefill), which cannot see Stage.
+  l0::Context& stage_ctx(uint32_t dev) const;
+  Qwen4ExpBuffers& stage_buffers(uint32_t dev) const;
+  Control* stage_control(uint32_t dev) const;
+  l0::CmdList& stage_imm(uint32_t dev) const;
   void step_once();
   bool settle(uint32_t dev);
   [[noreturn]] void fail(const std::string& what);
@@ -141,6 +197,18 @@ class Qwen4ExpEngine {
   std::vector<bool> pending_;
   size_t ple_pages_checked_ = 0;
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
+  BlockHook block_hook_;           // spec 21d: empty = no hook (uniform chunks)
+  PrefillInjector pf_inject_;      // spec 21d: the injected run's lists on prefill
+  // Spec 21d: set by prepare_prefill (b70_qwen4exp_prefill) - releases a prefill list waiting on a hand-off that will
+  // not come and waits (bounded) for every prefill list to go idle; reset() calls it.
+  std::function<bool()> pf_settle_;
+  // Spec 21d: the prefill state, lazy; declared LAST so it (its Contexts, kernels, recordings and link) is destroyed
+  // before the buffers it points into. The deleter is set where the state is made (b70_qwen4exp_prefill), so this
+  // header names no prefill symbol. pf_dev_bytes_: each device's prefill scratch + prefill link, for memory_use().
+  std::vector<size_t> pf_dev_bytes_;
+  size_t pf_bytes_ = 0;
+  int pf_replay_ = -1;   // -1: B70_PREFILL_REPLAY decides
+  std::unique_ptr<Qwen4ExpPrefillState, void (*)(Qwen4ExpPrefillState*)> pf_{nullptr, nullptr};
 };
 
 }  // namespace runtime::qwen4exp

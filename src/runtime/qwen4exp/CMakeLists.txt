@@ -16,3 +16,14 @@ add_library(b70_qwen4exp_runtime STATIC qwen4exp_buffers.cc qwen4exp_capture.cc 
 target_include_directories(b70_qwen4exp_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_qwen4exp_runtime PUBLIC b70_l0 b70_qwen4exp_loader b70_qwen4exp_plan b70_runtime)
 b70_target_kernel_dir(b70_qwen4exp_runtime)
+
+# Spec 21d: Qwen3.8-Flash-Next's prefill (the chunk walk, gdn_chunk_q4, its scratch, and Qwen4ExpEngine::prefill's
+# definitions) - its own archive, as b70_kolibri_prefill is beside b70_kolibri_runtime: a target that never prefills
+# this family links what it always linked. It runs the prefill path's Level Zero half only (runtime::prefill::Context,
+# KernelCache, gemm_l0, gdn.cc's scan selector), but Context's object names the SYCL side's entry points
+# (libb70_prefill.so when the component is built), so an executable linking this calls b70_link_prefill when
+# B70_PREFILL_ENABLED, as every b70_prefill_host user does.
+add_library(b70_qwen4exp_prefill STATIC qwen4exp_prefill.cc qwen4exp_prefill_gdn.cc qwen4exp_prefill_engine.cc)
+target_include_directories(b70_qwen4exp_prefill PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_qwen4exp_prefill PUBLIC b70_qwen4exp_runtime b70_prefill_host)
+b70_target_kernel_dir(b70_qwen4exp_prefill)
