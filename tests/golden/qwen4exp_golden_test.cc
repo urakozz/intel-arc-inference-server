@@ -33,7 +33,14 @@
 // The free run passes S and the token gate on rows with no near-tie in any layer, and reports the others (a near
 // tie upstream can move a determined row's logits: counted, not failed).
 //
-// argv: <checkpoint> <oracle dir> [int8] [inject] [pp2 | pp2:<split>] [copy | peer] [layers:<N>]
+// **F3 on prefill (spec 21d)**: with `prefill` (or `prefill:<chunk>`) the prompt goes through Qwen4ExpEngine::prefill
+// instead of one replay per id; the token gate is the same rule from row T - 1 on (the prefill's head chooses the
+// first token), the routing diagnostic and gate S read the prefill's rows of the LAST chunk (its route rows and
+// selection rows), with `inject` the reference's selections reach the prefill through set_prefill_injector; no tap
+// (prefill writes none) and no PLE ids on the prompt rows (the decode rows after it check them). The 32 teacher-forced
+// steps after it are decode's, as before.
+//
+// argv: <checkpoint> <oracle dir> [int8] [inject] [pp2 | pp2:<split>] [copy | peer] [layers:<N>] [prefill[:<chunk>]]
 // Exit 77 (SKIP) when the checkpoint, its PLE file or the golden set is absent.
 #include <algorithm>
 #include <cmath>
@@ -102,17 +109,21 @@ int main(int argc, char** argv) {
   qwen4exp_rig::Options o;
   o.max_len = 16384;
   o.debug_tap = true;
-  bool inject = false;
+  bool inject = false, prefill = false;
+  uint32_t chunk = 0;   // spec 21d: 0 = kPfC
   for (int i = 3; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "int8") o.int8_head = true;
     else if (a == "inject") inject = true;
+    else if (a == "prefill") prefill = true;
+    else if (a.rfind("prefill:", 0) == 0) { prefill = true; chunk = uint32_t(std::strtoul(a.c_str() + 8, nullptr, 10)); }
     else if (a == "pp2") o.devices = 2;
     else if (a.rfind("pp2:", 0) == 0) { o.devices = 2; o.split = uint32_t(std::strtoul(a.c_str() + 4, nullptr, 10)); }
     else if (a == "copy" || a == "peer") o.handoff = a == "peer" ? runtime::PpHandoff::Peer : runtime::PpHandoff::Copy;
     else if (a.rfind("layers:", 0) == 0) o.layers = uint32_t(std::strtoul(a.c_str() + 7, nullptr, 10));
     else {
-      std::fprintf(stderr, "qwen4exp_golden_test: unknown flag %s (int8, inject, pp2[:split], copy, peer, layers:N)\n", a.c_str());
+      std::fprintf(stderr, "qwen4exp_golden_test: unknown flag %s (int8, inject, pp2[:split], copy, peer, layers:N, "
+                   "prefill[:chunk])\n", a.c_str());
       return 2;
     }
   }
@@ -148,6 +159,7 @@ int main(int argc, char** argv) {
               eng.devices() == 2 ? (std::string(", split ") + std::to_string(eng.split()) + " " +
                                     runtime::pp_handoff_name(eng.handoff())).c_str() : "",
               eng.launches(), inject ? " (INJECTED selections)" : "", double(tie_tol), double(sel_tol));
+  if (prefill) std::printf("the prompt through Qwen4ExpEngine::prefill (chunks of %u)\n", chunk ? chunk : rq::kPfC);
 
   bool gate_ok = true;
   Counts route_c, sel_c;
@@ -273,7 +285,71 @@ int main(int argc, char** argv) {
       }
     };
     eng.reset();
-    for (uint32_t t = 0; t < T; ++t) {
+    if (prefill) {
+      // Spec 21d: the prompt in one Qwen4ExpEngine::prefill; with `inject` the reference's lists per chunk
+      if (inject)
+        eng.set_prefill_injector([&](uint32_t q, uint32_t pos, uint32_t n_rows, uint32_t* lists) {
+          for (uint32_t m = 0; m < n_rows; ++m) {
+            uint32_t* list = lists + size_t(m) * rq::kListRow;
+            const uint32_t p = pos + m, n = (p + 1) / 4;
+            const Sel& s = sels[q];
+            uint32_t at = 0;
+            if (n <= 512 || !s.blocks || p < s.row0) {
+              CHECK(n <= 512);   // a row past the cut needs the reference's selection row
+              for (uint32_t i = 0; i <= p; ++i) list[at++] = i;
+            } else {
+              const int32_t* b = s.blocks + size_t(p - s.row0) * 512;
+              std::vector<uint32_t> blocks(b, b + 512);
+              std::sort(blocks.begin(), blocks.end());
+              for (uint32_t k = 0; k < 512; ++k)
+                for (uint32_t j = 0; j < 4; ++j) list[at++] = blocks[k] * 4 + j;
+              for (uint32_t q2 = n * 4; q2 <= p; ++q2) list[at++] = q2;
+            }
+            list[rq::kCountWord] = at;
+          }
+        });
+      eng.prefill(ids, chunk);
+      const uint32_t c = chunk ? chunk : rq::kPfC, row0 = (T - 1) / c * c;
+      const std::vector<uint32_t> r = eng.read_prefill_routes();
+      for (uint32_t row = row0; row < T; ++row)
+        for (uint32_t l = 0; l < d.layers; ++l) {
+          const std::string ls = std::to_string(l);
+          if (!g.has("route.ids.L" + ls)) continue;
+          const int32_t* gi = g.i32("route.ids.L" + ls, size_t(rows) * 10) + size_t(row) * 10;
+          const float gap = g.f32("route.gap.L" + ls, rows)[row];
+          const uint64_t near0 = route_c.near + route_c.undetermined;
+          compare_route(r.data() + rq::pf_route_at(l) / 4 + size_t(row - row0) * rq::kRouteWords, gi, gap, tie_tol, route_c,
+                        pname.c_str(), row, l);
+          if (route_c.near + route_c.undetermined != near0) near_row[row] = 1;
+        }
+      for (const Sel& s : sels) {   // gate S on the last chunk's rows
+        if (!s.blocks) continue;
+        const std::vector<uint32_t> lists = eng.read_prefill_selection(s.layer);
+        for (uint32_t row = std::max(row0, std::max(kDenseRows, s.row0)); row < T; ++row) {
+          ++sel_c.rows;
+          const uint32_t* got = lists.data() + size_t(row - row0) * rq::kListRow;
+          std::vector<uint32_t> gb, wb(s.blocks + size_t(row - s.row0) * 512, s.blocks + size_t(row - s.row0) * 512 + 512);
+          for (uint32_t k = 0; k < 512 && 4 * k < got[rq::kCountWord]; ++k) gb.push_back(got[4 * k] / 4);
+          std::sort(wb.begin(), wb.end());
+          const float gap = s.gap ? s.gap[row] : 1.0f;
+          if (gb == wb) {
+            ++sel_c.exact;
+          } else if (gap == 0.0f) {
+            ++sel_c.undetermined;
+            near_row[row] = 1;
+          } else if (gap <= sel_tol) {
+            ++sel_c.near;
+            near_row[row] = 1;
+          } else if (++sel_c.bad <= 10) {
+            std::printf("    %s QSA L%u row %u: the prefill's selection differs beyond a near-tie (gap %.3e)\n",
+                        pname.c_str(), s.layer, row, double(gap));
+          }
+        }
+      }
+      std::printf("  prefill: %u ids in chunks of %u (%zu launches), routing and gate S on rows %u..%u\n", T, c,
+                  eng.prefill_launches(), row0, T - 1);
+    }
+    for (uint32_t t = 0; t < T && !prefill; ++t) {
       if (inject) feed(t);
       eng.ingest({ids[t]});
       check_row(t);
