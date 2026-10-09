@@ -313,6 +313,7 @@ leave them unset to run what the gates ran.
 | `B70_PREFILL_PROFILE` | prefill | off | `1` times every prefill phase; `b70-decode --bench --prefill-length` prints the table on stderr (Qwen-family models; not yet for K2). It adds a host wait per phase, so never use it for a recorded row. |
 | `B70_K2_ATTN` | `b70-decode`, K2-Horizon | `flash` | K2's attention, decode and prefill both. `eager` rounds scores and probabilities to bf16 where the reference does (spec 18 §10.1): 813 launches per token instead of 717, plus a score row of 4 B x 32 heads x max_len. The first box session decides which becomes the default. Other values are refused. |
 | `B70_KOLIBRI_ATTN` | `b70-decode`, Kolibri-1 | `flash` | Kolibri-1's decode and prefill attention. `eager` is the reference's bf16 chain (spec 18 §10.1's switch, spec 20 §11): 856 launches per token instead of 756, plus a score row of 4 B x 48 heads x max_len; prefill binds the `_EAGER` flash builds (the same 2252 launches per chunk, spec 20 §12). Other values are refused. |
+| `B70_Q4_ATTN` | `b70-decode`, Qwen3.8-Flash-Next | `flash` | Qwen3.8-Flash-Next's QSA decode attention (spec 21c): `eager` is the reference's bf16 chain over the selected positions (one launch for flash's two in each QSA layer: 767 launches a token at 48 layers instead of 779). Other values are refused. Never run on a B70. |
 | `B70_GIT_SHA` | `b70-decode --bench` | `unknown` | the commit printed in the bench row. The box's tree has no `.git`, so `tools/bench_decode.sh` sets it. |
 
 The scripts in `tools/`:
@@ -340,6 +341,7 @@ Test-only (the checkpoint paths the tests load are CMake options, e.g. `-DB70_TE
 | `B70_LONGCTX_TESTS` | the `longctx` tests | unset: SKIP | `1` runs the long-context MTP variants (`mtp_verify_{32k,128k}_test`, `mtp_gpu_{32k,128k}_test`) |
 | `B70_K2_TIE_TOL` | `k2_golden_test` | `1e-3` | the near-tie tolerance of K2's routing diagnostic, proposed until the reference run measures it |
 | `B70_KOL_TIE_TOL` | `kolibri_golden_test`, `kolibri_partial_test` | `1e-2` | the same for Kolibri-1 (spec 20c), proposed until `kolibri_oracle.sh` prints the gap distribution |
+| `B70_Q4_TIE_TOL`, `B70_Q4_SEL_TOL` | `qwen4exp_golden_test`, `qwen4exp_partial_test` | `1e-3` | Qwen3.8-Flash-Next (spec 21c): the routing diagnostic's 10th / 11th and gate S's 512th / 513th near-tie tolerances, proposed until row 30 prints the gap distributions; a gap of exactly 0 is undetermined |
 | `B70_TOKENIZER_JSON` | the Qwen3.8 tokenizer tests, `mac_check.sh`'s host section | Qwen3.8's snapshot under `$HF_HOME` | path to Qwen3.8's `tokenizer.json`; without it those tests are disabled on the Mac |
 | `B70_SNAPSHOT_DIR` | `template_test` | Qwen3.8's snapshot under `$HF_HOME` | the snapshot whose chat template it renders |
 | `B70_K2_TOKENIZER_JSON` | `k2_tokenizer_test` | the CMake option of that name | K2's `tokenizer.json`; absent, the test is skipped |

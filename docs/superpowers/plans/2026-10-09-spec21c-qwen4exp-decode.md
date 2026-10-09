@@ -1,6 +1,6 @@
 # Spec 21c - Qwen3.8-Flash-Next decode: hyper-connections, QSA, PLE zero-copy, 512-expert MoE, one card then two
 
-**Status (2026-10-09): planned; nothing built.** Built blind on the Mac; every kernel's first compile and run is
+**Status (2026-10-09): built on the Mac (branch `spec21c-qwen4exp-decode`; spec 21 §14 "21c as built"); nothing has run on a card - box queue row 32.** Built blind on the Mac; every kernel's first compile and run is
 the box's. Box queue row 32 (it renumbers at build time if taken). Every real-weight gate SKIPs (77) until
 Intel's checkpoint and 21a's golden sets exist on the box.
 
