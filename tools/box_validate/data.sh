@@ -106,6 +106,10 @@ case "${1:-}" in
     # int8 files beside them (ple_int8.py) - r31.synth writes them.
     have oracle_q4exp_synth "oracle-out-q4exp-synth/{ours,intel}/ckpt/ and ckpt-ple-int8/ (spec 21b: r31.synth - make_synth.py + ple_int8.py)" \
       bash -c 'for f in ours intel; do test -s oracle-out-q4exp-synth/$f/ckpt/model.safetensors.index.json && test -s oracle-out-q4exp-synth/$f/ckpt-ple-int8/model.safetensors.index.json || exit 1; done'
+    # Spec 21c: their golden sets (qwen4exp_oracle.sh synth: qwen4exp_ref.py run on each, the engine-format PLE) -
+    # a key of its own, so r31's stages (the checkpoints alone) do not wait for them.
+    have oracle_q4exp_synth_golden "oracle-out-q4exp-synth/{ours,intel}/q4exp_{short,4k,agentic}.{ids,golden.safetensors} (spec 21c: r32.oracle_synth - qwen4exp_oracle.sh synth)" \
+      bash -c 'for f in ours intel; do for p in q4exp_short q4exp_4k q4exp_agentic; do test -s oracle-out-q4exp-synth/$f/$p.ids && test -s oracle-out-q4exp-synth/$f/$p.golden.safetensors || exit 1; done; done'
     have k2_a4_set "oracle-out-k2-a4/set/manifest.json (K2's tool-call set, spec 18d: --with r25.a4_ref, or tools/toolcall/a4_ref.sh k2 set)" \
       test -s oracle-out-k2-a4/set/manifest.json
     have oracle_k2_a4 "oracle-out-k2-a4/ with K2's set and 36 <name>.bf16.txt (18a's reference on it: --with r25.a4_ref)" \
