@@ -1,17 +1,27 @@
 #!/bin/bash
 # tools/toolcall/a4_ref.sh - the A4 tool-call set and its CPU reference run for a MoE model
-# (spec 15e Task 3: Ornith; spec 18d K4: K2-Horizon; spec 20e KL4: Kolibri-1), from the repo (or
-# worktree) root.
+# (spec 15e Task 3: Ornith; spec 18d K4: K2-Horizon; spec 20e KL4: Kolibri-1; spec 21e Task 5:
+# Qwen3.8-Flash-Next), from the repo (or worktree) root.
 #
-#   tools/toolcall/a4_ref.sh <ornith|k2|kolibri> set   the model's set: make_set.py --from
+#   tools/toolcall/a4_ref.sh <ornith|k2|kolibri|qwen4exp> set   the model's set: make_set.py --from
 #                                                   tests/golden/toolcall (the 36 conversations of
 #                                                   Qwen3.8's set, re-rendered and re-tokenised by
 #                                                   the checkpoint's own template) -> $OUT/set;
 #                                                   kolibri: the committed German set
 #                                                   tests/golden/toolcall-kolibri-de (make_set.py
 #                                                   --lang de, made from the release's tokenizer,
-#                                                   which 20b's export copies) copied to $OUT/set
-#   tools/toolcall/a4_ref.sh <ornith|k2> ref       the reference: oracle_generate.py over $OUT/set
+#                                                   which 20b's export copies) copied to $OUT/set;
+#                                                   qwen4exp: make_set.py --from tests/golden/toolcall
+#                                                   on the ORIGINAL's small files (TOK_DIR, default
+#                                                   the HF cache's Qwen/Qwen3.8-Flash-Next: config,
+#                                                   tokenizer.json, chat_template.jinja - Intel's
+#                                                   checkpoint ships Qwen3.8's tokenizer.json, without
+#                                                   the original's \p{M} split, spec 21e) with
+#                                                   transformers 5.19.0; the template is byte-identical
+#                                                   to Qwen3.8's, so a scenario's ids differ only where
+#                                                   the split does - the log (and $OUT/set/SAME) says
+#                                                   how many of the 36 are Qwen3.8's ids exactly
+#   tools/toolcall/a4_ref.sh <ornith|k2|qwen4exp> ref      the reference: oracle_generate.py over $OUT/set
 #                                                   -> $OUT/<name>.bf16.{ids,txt} (resumable)
 #   tools/toolcall/a4_ref.sh <ornith|k2> status    what is done
 #
@@ -26,6 +36,15 @@
 #           decision 1: MODEL_DIR, DEVICE=cuda|xpu where there is one), 192 new ids (the set renders
 #           thinking off). Score with `score.py --format hermes` (0 parse failures of the reference:
 #           the hard bar).
+#   qwen4exp tools/oracle/qwen4exp_ref.py's layer-streamed model (spec 21a) on Intel's W4A16
+#           AutoRound checkpoint (Intel/Qwen3.8-Flash-Next-W4A16-AutoRound: int4 g128 experts
+#           dequantised, the PLE table from <snapshot>-ple-int8/ when present - the engine's format),
+#           192 new ids, transformers 5.19.0 from the qwen4exp site first on PYTHONPATH (SITE: the Mac
+#           oracle-out-q4exp/site, the box oracle-out-q4exp-site - tools/oracle/qwen4exp_env.sh makes
+#           it in the container once). Q4_LAYERS=N truncates as the engine's --layers N (a test run;
+#           the A4 reference is the whole model). Prepared for spec 22: the engine's A4 run on the
+#           whole model waits for it (box-validation-queue row 34's r34.a4_ref makes the reference).
+#           Score with `score.py` (Qwen XML; 0 parse failures of the reference).
 # Then on the box: tools/toolcall/engine_generate.sh with the same set and N_NEW, and
 # tools/toolcall/score.py <dir> bf16 <engine runs> (box-validation-queue rows 16 / 25).
 #
@@ -70,7 +89,8 @@
 # reference: cpu, cuda or xpu), MODEL_DIR (a snapshot
 # directory instead of the HF cache's), NEW_TOKENS, KWARGS (K2's template variables, JSON;
 # default make_set.py's {"tool_call_format": "xml", "reasoning_effort": "low"}), IMAGE, MEM,
-# ORACLE_THREADS (12), HF_CACHE, FORCE, BATCH (auto), RESIDENT (auto), ONLY, NAME.
+# ORACLE_THREADS (12), HF_CACHE, FORCE, BATCH (auto), RESIDENT (auto), ONLY, NAME; qwen4exp only:
+# TOK_DIR (the original's small files for `set`), SITE, Q4_LAYERS, Q4_PLE.
 set -eu
 cd "$(dirname "$0")/../.."
 m=${1:-}
@@ -79,9 +99,15 @@ case "$m" in
   ornith) repo=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-192} ;;
   k2) repo=urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-512} ;;
   kolibri) repo=Aleph-Alpha/Kolibri-1-BF16; new=${NEW_TOKENS:-192} ;;
+  qwen4exp) repo=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound; new=${NEW_TOKENS:-192} ;;
   *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;;
 esac
 case "$step" in set | ref | status) ;; *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;; esac
+# Qwen3.8-Flash-Next's set is the ORIGINAL's tokenizer and template (its small files), not Intel's.
+if [ "$m" = qwen4exp ] && [ "$step" = set ]; then
+  repo=Qwen/Qwen3.8-Flash-Next
+  if [ -n "${TOK_DIR:-}" ]; then MODEL_DIR=$TOK_DIR; else unset MODEL_DIR; fi
+fi
 cache_name="models--$(printf '%s' "$repo" | sed 's|/|--|g')"
 OUT=${OUT:-oracle-out-$m-a4}
 NAME=${NAME:-a4-ref-$m}
@@ -96,6 +122,7 @@ if [ "$step" = status ]; then
   [ $mac = 1 ] && docker ps -a --filter "name=^$NAME\$" --format '{{.Names}} {{.Status}}'
   n_set=$(ls "$OUT"/set/*.ids 2> /dev/null | wc -l | tr -d ' ')
   n_ref=$(ls "$OUT"/*.bf16.txt 2> /dev/null | wc -l | tr -d ' ')
+  [ -f "$OUT/set/SAME" ] && echo "$m: $(cat "$OUT/set/SAME")"
   echo "$m: set $n_set/36 scenarios ($OUT/set), reference $n_ref/36 ($OUT/*.bf16.txt)$([ -f "$OUT/DONE" ] && echo ', DONE')"
   tail -3 "$OUT/ref.log" 2> /dev/null || true
   exit 0
@@ -116,7 +143,8 @@ tmpl=chat_template.jinja
 for f in config.json generation_config.json tokenizer.json $tmpl; do
   [ -e "$snap$f" ] || { echo "a4_ref: $snap$f is missing" >&2; exit 2; }
 done
-python3 - "$snap" << 'EOF' || exit 2
+# (The original's small files for qwen4exp's set: its index names shards that are not there.)
+[ "$m" = qwen4exp ] && [ "$step" = set ] || python3 - "$snap" << 'EOF' || exit 2
 import json, os, sys
 d = sys.argv[1]
 idx = os.path.join(d, "model.safetensors.index.json")
@@ -137,6 +165,7 @@ else
   [ -s "$OUT/set/manifest.json" ] || { echo "a4_ref: no set in $OUT/set - run '$0 $m set' first" >&2; exit 2; }
   cmd_ref="python3 tools/toolcall/oracle_generate.py"
   [ "$m" = kolibri ] && cmd_ref="$cmd_ref --model kolibri --device ${DEVICE:-cpu}"
+  [ "$m" = qwen4exp ] && cmd_ref="$cmd_ref --model qwen4exp"
   BATCH=${BATCH:-auto}
   RESIDENT=${RESIDENT:-auto}
   [[ "$BATCH" =~ ^(auto|[1-9][0-9]*)$ ]] || { echo "a4_ref: BATCH is auto or a count >= 1 (got $BATCH)" >&2; exit 2; }
@@ -147,6 +176,34 @@ else
     cmd_ref="$cmd_ref --only $ONLY"
   fi
 fi
+
+# qwen4exp: transformers 5.19.0 from the site directory first on PYTHONPATH (made in the container
+# once by tools/oracle/qwen4exp_env.sh - pip --no-deps --target, the image never changed), the
+# reference's knobs passed through.
+pre=""
+q4env=()
+if [ "$m" = qwen4exp ]; then
+  if [ $mac = 1 ]; then SITE=${SITE:-oracle-out-q4exp/site}; else SITE=${SITE:-oracle-out-q4exp-site}; fi
+  [[ "$SITE" =~ ^[A-Za-z0-9_./-]+$ ]] && [ "${SITE#/}" = "$SITE" ] || {
+    echo "a4_ref: SITE is a directory inside this tree (got $SITE)" >&2; exit 2; }
+  pre="tools/oracle/qwen4exp_env.sh /ws/$SITE > /dev/null && export PYTHONPATH=/ws/$SITE && "
+  for v in Q4_LAYERS Q4_PLE; do
+    x=${!v:-}
+    [ -n "$x" ] || continue
+    [[ "$x" =~ ^[A-Za-z0-9_.:/-]+$ ]] || { echo "a4_ref: $v=$x" >&2; exit 2; }
+    q4env+=(-e "$v=$x")
+    [ "$step" = ref ] && cmd_ref="$v=$x $cmd_ref"
+  done
+fi
+# same_ids - how many of the set's scenarios are Qwen3.8's ids exactly (qwen4exp: the \p{M} split)
+same_ids() {
+  local n=0 t=0 f
+  for f in "$1"/*.ids; do
+    t=$((t + 1))
+    cmp -s "$f" "tests/golden/toolcall/$(basename "$f")" && n=$((n + 1))
+  done
+  echo "same ids as Qwen3.8's set (tests/golden/toolcall): $n/$t scenarios" | tee "$1/SAME"
+}
 
 # The container sees this tree only (mounted at /ws): a run writes into a real directory inside
 # it. On the box OUT may be elsewhere (the runbook keeps data in the data tree, linked into the
@@ -171,9 +228,10 @@ if [ $mac = 0 ]; then   # the box: the reference image, foreground
     cmd_ref="ORACLE_MEM_GB=${MEM%g} $cmd_ref"
   fi
   if [ "$step" = set ]; then
-    tools/oracle/run_in_container.sh "$cmd_set \"\$SNAP\" /ws/$work/set ${kw[*]+$(printf "'%s' " "${kw[@]}")}" || rc=$?
+    tools/oracle/run_in_container.sh "$pre$cmd_set \"\$SNAP\" /ws/$work/set ${kw[*]+$(printf "'%s' " "${kw[@]}")}" || rc=$?
+    [ "$rc" = 0 ] && [ "$m" = qwen4exp ] && same_ids "$work/set"
   else
-    tools/oracle/run_in_container.sh "$cmd_ref \"\$SNAP\" /ws/$work/set /ws/$work --new-tokens $new" 2>&1 | tee -a "$work/ref.log"
+    tools/oracle/run_in_container.sh "$pre$cmd_ref \"\$SNAP\" /ws/$work/set /ws/$work --new-tokens $new" 2>&1 | tee -a "$work/ref.log"
     rc=${PIPESTATUS[0]}
     [ "$rc" = 0 ] && echo done > "$work/DONE"
   fi
@@ -196,11 +254,16 @@ fi
 if [ -n "${MODEL_DIR:-}" ]; then mount=(-v "${MODEL_DIR%/}":/snap:ro); S=/snap; else mount=(-v "$HF":/hf:ro); S="/hf/${snap#"$HF/"}"; fi
 run=(docker run --name "$NAME" --memory "$MEM" --memory-swap "$MEM" "${mount[@]}" -v "$PWD":/ws -w /ws
      -e HF_HOME=/tmp/hf -e HF_HUB_OFFLINE=1 -e PYTHONUNBUFFERED=1 -e TORCH_EXTENSIONS_DIR=/tmp/torch_ext
-     -e OMP_NUM_THREADS="$THREADS" -e MKL_NUM_THREADS="$THREADS")
+     -e OMP_NUM_THREADS="$THREADS" -e MKL_NUM_THREADS="$THREADS" ${q4env[@]+"${q4env[@]}"})
+if [ "$step" = set ] && [ "$m" = qwen4exp ]; then   # the site first (pip in the container), then the set
+  "${run[@]}" --rm --entrypoint sh "$IMAGE" -c "$pre$cmd_set $S /ws/$OUT/set"
+  same_ids "$OUT/set"
+  exit 0
+fi
 if [ "$step" = set ]; then
   "${run[@]}" --rm --entrypoint python3 "$IMAGE" tools/toolcall/make_set.py --from tests/golden/toolcall \
     "$S" "/ws/$OUT/set" ${kw[@]+"${kw[@]}"}
   exit $?
 fi
-"${run[@]}" -d "$IMAGE" sh -c "$cmd_ref $S /ws/$OUT/set /ws/$OUT --new-tokens $new >> /ws/$OUT/ref.log 2>&1 && echo done > /ws/$OUT/DONE"
+"${run[@]}" -d "$IMAGE" sh -c "$pre$cmd_ref $S /ws/$OUT/set /ws/$OUT --new-tokens $new >> /ws/$OUT/ref.log 2>&1 && echo done > /ws/$OUT/DONE"
 echo "a4_ref: started $NAME (detached): '$0 $m status'; the log is $OUT/ref.log"

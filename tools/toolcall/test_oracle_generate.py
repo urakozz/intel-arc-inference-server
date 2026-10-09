@@ -149,6 +149,83 @@ def test_args_kolibri():
         raise AssertionError(bad)
 
 
+def _fake_set(d, ids):
+    """A one-scenario set dir (manifest + ids, SHA-256 checked as oracle_generate.py checks it)."""
+    import hashlib
+    import json
+    raw = (" ".join(map(str, ids)) + "\n").encode()
+    with open(os.path.join(d, "s1.ids"), "wb") as f:
+        f.write(raw)
+    with open(os.path.join(d, "manifest.json"), "w") as f:
+        json.dump([{"name": "s1", "ids": len(ids), "sha256": hashlib.sha256(raw).hexdigest()}], f)
+
+
+def test_args_qwen4exp():
+    """Spec 21e: --model qwen4exp; qwen4_exp (and a text-only export's qwen4_exp_text) take the MoE loop; the memory
+    plan reads its config (layer types, the 4 streams, 512 experts)."""
+    import oracle_generate as og
+    a = parse_args(["--model", "qwen4exp", "/snap", "set", "out", "--new-tokens", "192"])
+    assert (a["model"], a["new_tokens"]) == ("qwen4exp", 192)
+    assert "qwen4_exp" in MOE_TYPES and "qwen4_exp_text" in MOE_TYPES
+    assert og.MODELS["qwen4exp"] == ("qwen4_exp", "qwen4_exp_text")
+    cfg = {"model_type": "qwen4_exp", "text_config": {
+        "num_hidden_layers": 48, "hidden_size": 2560, "vocab_size": 248320, "hc_count": 4, "hc_lowrank": 320,
+        "layer_types": ["linear_attention", "linear_attention", "linear_attention", "full_attention"] * 12,
+        "num_attention_heads": 24, "num_key_value_heads": 2, "head_dim": 256, "linear_num_value_heads": 48,
+        "linear_num_key_heads": 16, "linear_value_head_dim": 128, "linear_key_head_dim": 128, "num_experts": 512,
+        "moe_intermediate_size": 640, "shared_expert_intermediate_size": 640, "index_head_dim": 128}}
+    plan = og.batch_plan("qwen4_exp", cfg, [2000, 2800], 192, 60 * og.GiB, "auto", "auto")
+    assert 1 <= plan["batch"] <= 2 and "12 QSA layers" in plan["text"] and "36" in plan["text"], plan["text"]
+    mm = og.mem_model("qwen4_exp", cfg)
+    assert len(mm["dense"]) == 48 and mm["experts"][0] == 512 * 3 * 640 * 2560 * 2
+
+
+def test_model_check_qwen4exp():
+    """Spec 21e: `--model qwen4exp` refuses a snapshot of another model_type before anything loads."""
+    import json
+    import tempfile
+    import oracle_generate as og
+    with tempfile.TemporaryDirectory() as snap, tempfile.TemporaryDirectory() as st, \
+            tempfile.TemporaryDirectory() as out:
+        with open(os.path.join(snap, "config.json"), "w") as f:
+            json.dump({"model_type": "kolibri1"}, f)
+        _fake_set(st, [1, 2, 3])
+        saved = sys.argv
+        sys.argv = ["oracle_generate.py", "--model", "qwen4exp", snap, st, out]
+        try:
+            og.main()
+        except SystemExit as e:
+            assert "not qwen4_exp or qwen4_exp_text" in str(e), e
+        else:
+            raise AssertionError("--model qwen4exp ran on a kolibri1 snapshot")
+        finally:
+            sys.argv = saved
+
+
+def test_qwen4exp_tiny_one_scenario():
+    """Spec 21e: the tiny model (Q4EXP_TINY_SNAP: a snapshot directory with a tokenizer.json - the original's - beside
+    the tiny's weights; transformers 5.19.0 first on PYTHONPATH) runs one scenario to its .bf16.{ids,txt,gap}.
+    Skipped (printed) without the environment: run it in agnes-ref-img with the qwen4exp site."""
+    snap = os.environ.get("Q4EXP_TINY_SNAP")
+    if not snap:
+        print("    skipped: Q4EXP_TINY_SNAP is unset")
+        return
+    import tempfile
+    import oracle_generate as og
+    with tempfile.TemporaryDirectory() as st, tempfile.TemporaryDirectory() as out:
+        _fake_set(st, [760, 72103, 506, 37119, 557, 11012, 3213, 310, 6512, 279, 61789, 272])
+        saved = sys.argv
+        sys.argv = ["oracle_generate.py", "--model", "qwen4exp", snap, st, out, "--new-tokens", "6"]
+        try:
+            og.main()
+        finally:
+            sys.argv = saved
+        for x in ("ids", "txt", "gap"):
+            assert os.path.exists(os.path.join(out, f"s1.bf16.{x}")), x
+        ids = open(os.path.join(out, "s1.bf16.ids")).read().split()
+        assert 1 <= len(ids) <= 6, ids
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     for n, f in tests:
