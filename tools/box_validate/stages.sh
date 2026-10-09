@@ -2385,6 +2385,116 @@ st_r32_sweeps() {
 }
 
 # ======================================================================================
+row 33 "spec 21d - Qwen3.8-Flash-Next (qwen4_exp) prefill: dense flash to 2050, the indexer and the sparse flash past it, the 512-expert grouped MoE, the PLE over a chunk, one hand-off per chunk (plan 21d)"
+rownote 33 "Written blind on the Mac, after row 32 (21c's decode on the card): none of the 30 new binaries of the 21d block was ever compiled by ocloc - the DPAS sparse flash over row lists (q4_pf_sparse_attn_Q24KV2[_EAGER]), spec 6's flash at 24 / 2 heads (pf_flash_attn_Q24KV2), the 512-expert ushort sort / dequant / combine (q4_pf_moe_E512_T10_D2560_I640_L256), the grouped GEMMs at this family's shapes (pf_moe_gemm_K2560_N1280_SILU, _K640_N2560), 21c's HC / indexer / PLE gather at M 2048 (_PF), the PLE block over a chunk (q4_pf_ple_C2048). The walk (358 / 361 / 360 launches a chunk at --layers 4) and the sequential two-card chunk hand-off never ran."
+rownote 33 "THREE existing sources changed, each by a define every existing binary leaves unset: prefill/pf_gated_head.cl (GDN_GATE_SIGMOID: pf_gated_head_SIG), qwen4exp/q4_qsa.cl (QSA_PF: the prep without its in-launch ring write + q4_qsa_ring; the indexer pitch 768), qwen4exp/q4_ple.cl (PLE_PF: the gather's tokens from the chunk's ids, no ring write). Their existing binaries' preprocessed sources were checked on the Mac (pf_gated_head x 2, q4_qsa_M1: byte for byte; q4_ple_gather_M1_* token for token) - G0's g0.sha must show every pf_gated_head*, q4_qsa_M1* and q4_ple_* binary unchanged (r33.k0); if one moved, the variant moves to a copy in src/kernels/qwen4exp/ and the source is restored (plan 21d F0)."
+rownote 33 "Bars PROPOSED (spec 18c's family; the tests print the distributions): prefill vs decode's fill - every row of the first QSA layer >= 0.999, all rows' median >= 0.9998, p01 >= 0.99; the sparse flash against fp64 >= 0.99999 (spec 6 K1), eager >= 0.9999 / 0.999; routing / selection near-ties 1e-3 (B70_Q4_TIE_TOL / B70_Q4_SEL_TOL, row 30 decides), a 0 gap undetermined. Chunks of 16 are printed, not gated bitwise: the GDN's 64-row WY sub-chunks move with the chunk start (chunks of 64 ARE gated bitwise)."
+rownote 33 "Data: r33.prefill / r33.golden need the synthetic checkpoints and their golden sets (r31.synth, r32.oracle_synth); r33.golden_real needs 21a's --layers 18 set (r30.golden_layers) and the PLE int8 file (r31.ple_convert); r33.pp needs two GPUs (after r22.p1). With prefill planned Intel's forms fit 18 layers on one card (max_len auto 70144) and 37 on two at 32768 (derived) - 38 does not fit beside the 1.49 GB prefill scratch a device: the real two-card runs use --layers 37."
+stage r33.k0 33 default cpu - g0.sha,g0.bitwise,g0.suite "K0 (F0): every pre-existing binary identical - pf_gated_head.cl's GDN_GATE_SIGMOID, q4_qsa.cl's QSA_PF and q4_ple.cl's PLE_PF leave pf_gated_head / _GK16V32, q4_qsa_M1_T512_W1024 and every q4_ple_* M1 binary byte-identical; kernel_cmdlines +30 / -0 / ~0 with K2 and Kolibri on; 21c's decode gates not failed (779 / 75 launches unchanged)"
+st_r33_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  need_ok r32.k1 r32.k3
+  x "grep -E 'pf_gated_head(_GK16V32)?(\.bin)?$|q4_qsa_M1|q4_ple_' $STATE/g0-sha/changed.txt 2>/dev/null && echo 'a source-changed binary MOVED' || echo 'no pf_gated_head / q4_qsa / q4_ple binary moved'"
+  finish
+}
+stage r33.host 33 default cpu - - "host: qwen4exp_pf_ref_test (the 512-expert sort and its adversaries == pf_moe_ref::sort, row independence, the combine == 21c's down chain, dense_rows, the sparse attention's tiled fp64 walk == the direct softmax and the eager chain == q4ref's, the indexer and the PLE over chunks == decode's M = 1 chains with their rings), qwen4exp_pf_variant_names_test, qwen4exp_plan_test (358 / 361 / 360 launches at --layers 4, 3944 / 3968 at 48, the 1.49 GB prefill scratch, N with prefill 18 / 37)"
+st_r33_host() {
+  run_tests '^(qwen4exp_pf_ref_test|qwen4exp_pf_variant_names_test|qwen4exp_plan_test)$'
+  jgrab host '^qwen4exp_(pf_ref|pf_variant_names|plan)_test$' 'sort:|combine:|dense_rows:|sparse|indexer|PLE|21d:|OK'
+  finish
+}
+stage r33.k1 33 default gpu - r33.host "F2 for the prefill, no checkpoint: the 30 binaries built (kbins - their first ocloc compile) and qwen4exp_pf_kernels_test - the slabs exact, the HC / indexer / PLE at M 2048 bitwise q4ref's, the router rows bitwise decode's and q4_route on grid (1, C), the MoE (sort / gather / dequant exact, block 512 in both shared forms, GROUPED == DENSE bitwise, reversed and replayed bitwise), the sort adversaries, the dense flash and the sparse flash against fp64 (>= 0.99999) at chunk starts 2048 / 4096 / 30000 / 131072 / a 300-row tail, EAGER (0.9999 / 0.999), pf_attn_gate; and qwen4exp_prefill_gdn_test (gdn_chunk_q4 against decode's gdn_step + _SIG: 64-chunks bitwise, the band printed)"
+st_r33_k1() {
+  kbins pf_gated_head_SIG pf_embed_gather_D2560 pf_ab_proj_D2560 pf_moe_router_K2560_N528 pf_dequant_slab_K2560_N16384_L0 \
+    pf_dequant_slab_K2560_N13312_L0 q4_pf_bf16_slab_K2560_N16384 q4_pf_bf16_slab_K2560_N13312 q4_pf_bf16_slab_K6144_N2560 \
+    q4_pf_bf16_slab_K2560_N640 q4_pf_bf16_slab_K10240_N336 q4_pf_bf16_slab_K2560_N12800 q4_hc_combine_norm_M2048_E \
+    q4_hc_combine_norm_M2048_S1 q4_hc_combine_norm_M2048_Y q4_hc_combine_norm_M2048_Y_NN q4_hc_combine_norm_M2048_X \
+    q4_hc_up_mix_M2048_I_D512 q4_qsa_M2048_T512_W1024_PF q4_ple_gather_M2048_BF16_PF q4_ple_gather_M2048_F32_PF \
+    pf_attn_prep_q16_Q24KV2 pf_attn_Q24KV2 pf_flash_attn_Q24KV2 q4_pf_sparse_attn_Q24KV2 q4_pf_sparse_attn_Q24KV2_EAGER \
+    q4_pf_moe_E512_T10_D2560_I640_L256 pf_moe_gemm_K2560_N1280_SILU pf_moe_gemm_K640_N2560 q4_pf_ple_C2048
+  run_tests '^(qwen4exp_pf_kernels_test|qwen4exp_prefill_gdn_test)$' qwen4exp
+  jgrab k1-prefill '^(qwen4exp_pf_kernels_test|qwen4exp_prefill_gdn_test)$' 'cos|ulp|bitwise|grouped|dense|gdn:|OK|FAIL'
+  finish
+}
+stage r33.reject 33 default gpu - - "the refusals before the device (tests/model/qwen4exp: the model_type stub): cli_reject_qwen4exp_prefill_int8 (naming the 1024-k Hadamard blocks), _sycl (no walk), _chunk (above 2048); 21c's cli_reject_qwen4exp_prefill is gone"
+st_r33_reject() {
+  run_tests '^cli_reject_qwen4exp_prefill_(int8|sycl|chunk)$'
+  finish
+}
+stage r33.prefill 33 default gpu oracle_q4exp_synth r33.k1,r32.k3 "F4 on prefill, one card: qwen4exp_prefill_synth_{ours,intel}_test, _eager_test (4500 ids of q4exp_4k: chunks at 0 (dense), 2048 (3 dense rows), 4096 (sparse)) - launches = prefill_chunk_launches per chunk + 6, plan == allocation, immediate / recorded / replayed bitwise, chunks of 64 bitwise (16 printed), Review Focus 5 (state, routes, selections and tokens against decode's fill, per layer), the injected run chunked == whole; prefill_split_qwen4exp_test (splits at 64 / 2048 bitwise, 2051 / 4097 within the bars)"
+st_r33_prefill() {
+  run_tests '^(qwen4exp_prefill_synth_(ours|intel|eager)_test|prefill_split_qwen4exp_test)$' qwen4exp '' \
+    "${B70_Q4_TIE_TOL:+B70_Q4_TIE_TOL=$B70_Q4_TIE_TOL}"
+  jgrab prefill '^(qwen4exp_prefill_synth|prefill_split_qwen4exp)' 'walk|F4|chunks|median|p01|routing|tokens|injected|split at|OK|FAIL'
+  finish
+}
+stage r33.golden 33 default gpu oracle_q4exp_synth_golden r33.prefill "F3 on prefill, the synthetic golden sets: qwen4exp_golden_prefill_synth_{ours,intel}_test, _c16, _i8head, _inject (the reference's selections through set_prefill_injector: every determined row), _eager - the tie-aware token gate from row T - 1, the routing diagnostic and gate S on the last chunk's rows"
+st_r33_golden() {
+  run_tests '^qwen4exp_golden_prefill_synth_(ours|intel)(_c16|_i8head|_inject|_eager)?_test$' qwen4exp '' \
+    "${B70_Q4_TIE_TOL:+B70_Q4_TIE_TOL=$B70_Q4_TIE_TOL} ${B70_Q4_SEL_TOL:+B70_Q4_SEL_TOL=$B70_Q4_SEL_TOL}"
+  jgrab golden-prefill '^qwen4exp_golden_prefill_synth' 'gate:|routing:|gate S:|prefill:|OK|FAIL'
+  finish
+}
+stage r33.golden_real 33 default gpu q4exp_intel,q4exp_intel_ple,oracle_q4exp_layers r33.golden "F3 on prefill on Intel's checkpoint at --layers 18 (int8 head, one card): qwen4exp_golden_prefill_intel_test against 21a's truncated set oracle-out-q4exp-L18"
+st_r33_golden_real() {
+  x "free -g | head -2"
+  run_tests '^qwen4exp_golden_prefill_intel_test$' qwen4exp '' \
+    "${B70_Q4_TIE_TOL:+B70_Q4_TIE_TOL=$B70_Q4_TIE_TOL} ${B70_Q4_SEL_TOL:+B70_Q4_SEL_TOL=$B70_Q4_SEL_TOL}"
+  jgrab golden-real '^qwen4exp_golden_prefill_intel' 'gate:|routing:|gate S:|prefill:|OK|FAIL'
+  finish
+}
+stage r33.pp 33 default gpu oracle_q4exp_synth r33.prefill,r22.p1 "two cards: qwen4exp_prefill_pp_test (--pp 2 --pipeline-split 2 against --pp 1, BITWISE: one prefill, recorded + replayed, a 2051 + rest continuation, chunks of 64, both Control blocks; P4 - a dropped chunk hand-off throws within 30 s naming device 1, reset() recovers), prefill_split_qwen4exp_pp_test, qwen4exp_golden_prefill_synth_pp_test; Intel's --layers 37 on two cards (qwen4exp_prefill_intel_pp_test) when present"
+st_r33_pp() {
+  run_tests '^(qwen4exp_prefill_pp_test|prefill_split_qwen4exp_pp_test|qwen4exp_golden_prefill_synth_pp_test|qwen4exp_prefill_intel_pp_test)$' \
+    '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab pp '^(qwen4exp_prefill_pp|prefill_split_qwen4exp_pp|qwen4exp_golden_prefill_synth_pp|qwen4exp_prefill_intel_pp)' \
+    'pp:|P4|split at|gate:|walk|median|OK|FAIL|SKIP'
+  finish
+}
+stage r33.cli 33 default gpu oracle_q4exp_synth r33.pp "CLI: b70-decode <ours synthetic> --layers 4 --ids q4exp_4k.ids --n 32 --prefill on one card against --pp 2 (the same ids) and against the decode-only run (a difference judged by the tie rule); --prefill-chunk 1000; --bench --prefill-length 4096 (the pp row); --layers auto --max-len auto with --prefill (the prefill scratch planned)"
+st_r33_cli() {
+  local ck="oracle-out-q4exp-synth/ours/ckpt" ids="tests/golden/prompts/q4exp_4k.ids" a
+  chk "build/src/cli/b70-decode $ck --layers 4 --ids $ids --n 32 > $STATE/r33-one.ids" "one card, decode"
+  chk "build/src/cli/b70-decode $ck --layers 4 --ids $ids --n 32 --prefill > $STATE/r33-one-pf.ids" "one card, --prefill"
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --layers 4 --pp 2 --ids $ids --n 32 --prefill > $STATE/r33-two-pf.ids && cmp $STATE/r33-one-pf.ids $STATE/r33-two-pf.ids" \
+    "--pp 2 --prefill: the one-card --prefill ids"
+  chk "build/src/cli/b70-decode $ck --layers 4 --ids $ids --n 32 --prefill --prefill-chunk 1000 > $STATE/r33-c1000.ids" "--prefill-chunk 1000"
+  x "for a in one one-pf two-pf c1000; do printf '%s: ' \$a; tr '\\n' ' ' < $STATE/r33-\$a.ids; echo; done; if cmp -s $STATE/r33-one.ids $STATE/r33-one-pf.ids; then echo 'PREFILL ids identical to the decode-only run'; else echo 'PREFILL ids differ from the decode-only run: judge the first difference by the tie rule'; fi"
+  chk "$(bench_cmd "$ck" --layers 4 --prefill-length 4096 --tg 16 --max-len 8192) > $STATE/r33-pp.row" "--bench --prefill-length 4096"
+  chk "build/src/cli/b70-decode $ck --layers auto --max-len auto --ids $ids --n 8 --prefill > /dev/null" "--layers auto --max-len auto with --prefill"
+  grab_all prefill '^prefill:|^pp:|^PREFILL ids|max_len: auto|layers: auto' 10
+  grab_all memory '^memory' 6
+  finish
+}
+stage r33.speed 33 optin gpu q4exp_intel,q4exp_intel_ple r33.golden_real "plan 21d Task 5: Intel's checkpoint, l0 - pp4096 / pp32768 at --layers 18 (one card) and 37 (two, --pp 2), pp131072 at the planner's N (--layers auto: 18 layers fit only to 70144 with prefill) - tg16 after, --lm-head int8; flash vs B70_Q4_ATTN=eager at 32768; interleaved pairs, median of 3, uptime - BENCHMARKS 'Qwen3.8-Flash-Next (spec 21)' prefill rows"
+st_r33_speed() {
+  idle before
+  local n k="ZE_AFFINITY_MASK=0,1" s="${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound}" arms=""
+  x "uptime"
+  for n in 4096 32768; do
+    arms="$arms pp$n-L18 '$(bench_cmd "$s" --layers 18 --prefill-length $n --tg 16 --max-len 33024 --lm-head int8)'"
+    arms="$arms pp$n-L37 '$k $(bench_cmd "$s" --layers 37 --pp 2 --prefill-length $n --tg 16 --max-len 33024 --lm-head int8)'"
+  done
+  arms="$arms pp131072-auto '$(bench_cmd "$s" --layers auto --prefill-length 131072 --tg 16 --max-len 131328 --lm-head int8)'"
+  arms="$arms pp32768-L18-eager 'B70_Q4_ATTN=eager $(bench_cmd "$s" --layers 18 --prefill-length 32768 --tg 16 --max-len 33024 --lm-head int8)'"
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 --ratio pp32768-L18-eager/pp32768-L18 --$arms" "the Qwen3.8-Flash-Next prefill arms"
+  x "uptime"
+  idle after
+  grab_all prefill '^pp:|^prefill:|layers: auto' 12
+  grab_all memory '^memory' 8
+  grab_all ratio '^RATIO '
+  grab_all idle '^IDLE '
+  finish
+}
+stage r33.p0 33 manual - q4exp_intel - "plan 21d Task 5's profile and levers (one chunk's anatomy, the recorded levers)"
+st_r33_p0() {
+  say "# B70_PREFILL_PROFILE=1 build/src/cli/b70-decode \$SNAP_Q4EXP_INTEL --layers 18 --bench --prefill-length 4096 --tg 1 --lm-head int8: one chunk's phases - the expert dequant pass (moe_weights), the HC kernels at M = C (the HC up ~6.7 GFLOP a chunk an HC on plain FMA, ESTIMATED ~0.5 ms), the scores (fp32 FMA; the DPAS GEMM form is the lever), the sparse flash"
+  say "# per-device busy time per chunk on two cards (--layers 37 --pp 2): the sequential hand-off leaves one card idle - spec 16c's overlapped chunk pipeline is the recorded lever"
+  say "# levers, recorded not built: HC up through DPAS slabs, the scores as one GEMM, an SLM-fused int4 grouped GEMM (spec 15d Task 1's arm) removing the dequant pass, spec 22's prefill streaming once the full model runs"
+  say "# record: docs/BENCHMARKS.md 'Qwen3.8-Flash-Next (spec 21)' prefill rows"
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp labels belong to their rows)"
 st_x_rest() {
