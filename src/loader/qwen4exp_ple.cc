@@ -24,7 +24,7 @@ std::vector<uint64_t> i64s(const SafetensorsSet& set, const std::string& dir, co
   if (it == set.tensors().end())
     throw std::runtime_error("PLE file " + dir + ": no tensor '" + name + "' (tools/quantize/qwen4exp/ple_int8.py "
                              "writes it)");
-  const TensorInfo& t = it->second;
+  const TensorInfo t = it->second;   // a copy (loader.cc's -Wdangling-reference note)
   if (t.dtype != "I64" || t.shape.size() != 1)
     throw std::runtime_error("PLE file " + dir + ": '" + name + "' is " + t.dtype + " rank " +
                              std::to_string(t.shape.size()) + ", expected I64 rank 1");
@@ -58,8 +58,8 @@ Q4PleHost::Q4PleHost(const std::string& d) : dir(with_slash(d)) {
     if (qi == ts.end()) break;
     const auto si = ts.find(sn);
     if (si == ts.end()) throw std::runtime_error("PLE file " + dir + ": '" + qn + "' without '" + sn + "'");
-    const TensorInfo& q = qi->second;
-    const TensorInfo& s = si->second;
+    const TensorInfo q = qi->second;   // copies (loader.cc's -Wdangling-reference note)
+    const TensorInfo s = si->second;
     if (q.dtype != "I8" || q.shape.size() != 2)
       throw std::runtime_error("PLE file " + dir + ": '" + qn + "' is " + q.dtype + " rank " +
                                std::to_string(q.shape.size()) + ", expected I8 [rows][dim]");
