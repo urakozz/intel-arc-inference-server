@@ -192,6 +192,14 @@ engine's ruled rule (exact ties to the lower block / expert id, spec 21 §4.2 / 
 differ **only on exact ties**; the reference records them (`route.gap == 0`, `qsa.gap == 0` in the golden files,
 the `==0` count in the logs' gap lines) and the gates treat those rows as undetermined (docs/14's rule).
 
+**Exact ties of zeros at the QSA cut.** A block's score is `sum_h relu(q_h . k_b) / sqrt(128)`: a block whose
+four head products are all negative scores **exactly 0**, so whenever more than 512 blocks are visible and fewer
+than 513 score above zero, the 512th and 513th scores are both 0 and the selection among the zero blocks is
+torch's tie order. On the tiny random model every gap at rows 2051..2060 is exactly 0 (measured,
+`test_indexer_cache_bitwise`); at an indexer budget of 16 tokens on a hidden-128 variant all 77 gaps are
+non-zero (min 0.0055, median 0.23). How often the real model's cut falls in zeros is the box's to measure (the
+`==0` counts of row 30's gap lines); such rows are undetermined for gate S whatever tau is.
+
 ## Derived bytes (spec 21 §3, from the headers)
 
 | part (per decoded token) | format | GB |
