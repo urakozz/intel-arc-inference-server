@@ -4,6 +4,19 @@ The engine supports one model family, `model_type: qwen3_5`, on purpose. A
 general engine cannot hardcode the things this one hardcodes; specialisation is
 the whole strategy.
 
+This document is that target. The families added since each have their own
+engine, specialised the same way, and their own spec: Agnes (14), Ornith (15),
+K2-Horizon (18), Kolibri-1 (20) and Qwen3.8-Flash-Next (`qwen4_exp`, spec 21:
+12 QSA sparse-attention + 36 GDN layers, a 512-expert MoE, 4-stream
+hyper-connections, a 51.8 GB host-resident n-gram embedding). Qwen3.8-Flash-Next
+is built through serving (decode 21c, prefill 21d, `b70-serve` with its prefix
+cache and MTP head 21e - all blind, its box rows 31-34 pending) but served
+**truncated** (`--layers N`): the whole model needs spec 22's expert-offload
+tier. Its chat template is Qwen3.8's byte for byte; its tokenizer is not (the
+original's split adds `\p{M}`, and Intel's interim checkpoint ships Qwen3.8's
+file). What each one runs, and with which flags:
+[19-running-models.md](19-running-models.md).
+
 ## The checkpoint
 
 `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ` - GPTQ g64 symmetric, int4
