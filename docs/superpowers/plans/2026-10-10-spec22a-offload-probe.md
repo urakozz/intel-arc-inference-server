@@ -165,7 +165,7 @@ std::string budget_json(const ExpertBudget& b);  // one line: {"max_len":..,"dev
   `tools/probe/probe_offload_moe.cl` (generated, committed), `tools/probe/offload_links.sh`,
   `tools/mac/clrun/offload_run.cc`
 - Modify: `tools/probe/CMakeLists.txt` (a block `# --- spec 22 P0 (2026-10-10): the expert-offload probe ---`, inside
-  `if(B70_Q4EXP)`: the two kernels, `probe_offload` linking `b70_l0` and `b70_model`, depending on 21c's
+  `if(B70_Q4EXP)`: the two kernels, `probe_offload` linking `b70_l0` and `b70_qwen4exp_model` (`model::qwen4exp()`), depending on 21c's
   `q4_moe_M1_E512_T10_D2560_I640_SH4` target), `tests/CMakeLists.txt` (`probe_offload_kernel_drift_test`: `python3
   tools/probe/mk_offload_kernel.py --check`, label host), `tools/mac_check.sh` (section 5's loop gains `offload`)
 - Test: `probe_offload_kernel_drift_test` (host), `offload_run` (Mac GPU, indicative)
