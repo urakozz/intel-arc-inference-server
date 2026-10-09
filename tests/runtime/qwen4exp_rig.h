@@ -27,6 +27,7 @@ struct Options {
   uint32_t layers = 0;  // development mode (0: the checkpoint's)
   bool debug_tap = false;
   uint32_t timeout_ms = 60000;
+  uint32_t prefill_timeout_ms = 120000;   // spec 21d: a prefill chunk's bound (PipelineOptions::prefill_timeout_ms)
   std::string ple_dir;  // "" = loader::q4_ple_dir(snapshot)
 };
 
@@ -77,6 +78,7 @@ inline void build(Rig& r, const std::string& snap, const Options& o) {
   runtime::PipelineOptions po;
   po.handoff = o.handoff;
   po.timeout_ms = o.timeout_ms;
+  po.prefill_timeout_ms = o.prefill_timeout_ms;
   r.eng = std::make_unique<runtime::qwen4exp::Qwen4ExpEngine>(r.ctx, std::move(m), o.max_len, o.debug_tap, po);
 }
 
