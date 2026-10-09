@@ -139,15 +139,17 @@ script), `tools/probe/serve_benchy.sh` (llama-benchy against `b70-serve`, `SERVE
 - Create: `tools/probe/q4exp_passkey.sh` (`kolibri_passkey.sh`'s form: `passkey.py`'s prompts at the context asked,
   `b70-decode --prefill` on the whole model, `--tokenizer` the original's)
 - Modify: `tools/box_validate/decode_extra.sh` (21e's `golden_server_test --chat` invocation: a whole-model arm),
-  `tests/CMakeLists.txt` (`golden_server_qwen4exp_whole_test`)
+  `tools/toolcall/engine_generate.sh` (`DECODE_ARGS`: extra b70-decode flags - `--pp 2`, the tier's - appended to every
+  run and recorded in the output names' log; empty = today's command line), `tests/CMakeLists.txt`
+  (`golden_server_qwen4exp_whole_test`)
 - Test: `golden_server_qwen4exp_whole_test` (card); the A4 and passkey stages (opt-in)
 
 - [ ] **Step 1:** `golden_server_test --chat` against `b70-serve <intel> --pp 2 --tokenizer <orig> [--mtp 2]` = `b70-decode
   --prefill` on the response's prompt ids (prose / code / cjk, 32 greedy ids), and the prefix-cache repeat of two
   2.7k-id A4 scenarios identical to a cache-off server (21e's r34.serve, whole). Commit `git commit -S -m "tests: the
   whole Qwen3.8-Flash-Next served = b70-decode, prefix-cache repeats identical (spec 22d)"`.
-- [ ] **Step 2 (box): A4** - `tools/toolcall/engine_generate.sh <intel> oracle-out-q4exp-a4/set <out> l0` (`LM_HEAD=int8`
-  and `bf16`, 192 ids, `MAX_LEN` 16384) and the set as chat requests through `b70-serve` (`serve_client.py`); `score.py`
+- [ ] **Step 2 (box): A4** - `DECODE_ARGS='--pp 2' tools/toolcall/engine_generate.sh <intel> oracle-out-q4exp-a4/set <out> l0`
+  (`LM_HEAD=int8` and `bf16`, 192 ids, `MAX_LEN` 16384) and the set as chat requests through `b70-serve` (`serve_client.py`); `score.py`
   against `<name>.bf16.txt` - recorded, the bar is the operator's (K2's precedent: "recorded, no bar"); spec 21 F6's
   "after spec 22" A4 row.
 - [ ] **Step 3: `q4exp_passkey.sh`** (`bash -n`; `DRY_RUN=1`); **(box)** passkey at 32768 and at decision 5's context
