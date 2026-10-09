@@ -3241,3 +3241,34 @@ b70_cli_reject(cli_reject_qwen4exp_prefill_sycl ${_q4_cfg} --layers 4 --ids ${B7
 b70_cli_reject(cli_reject_qwen4exp_prefill_chunk ${_q4_cfg} --layers 4 --ids ${B70_OK_IDS} --n 4 --prefill
   --prefill-chunk 4096 EXPECT "exceeds Qwen3.8-Flash-Next's prefill chunk 2048")
 # ==== Spec 21d: Qwen3.8-Flash-Next prefill ==== (end) ====
+# ==== Spec 21e: Qwen3.8-Flash-Next served (label qwen4exp) ==== (begin) ====
+# Task 1 (host): the tokens and the template. 21a found the original's tokenizer.json NOT Qwen3.8's (the split regex
+# adds \p{M}; Intel's checkpoint ships Qwen3.8's file), so qwen4exp_tokenizer_test holds the engine's tokenizer to
+# tools/tokenizer/dump_qwen4exp.py's fixture (tests/tokenizer/qwen4exp_tokenizer.json: 24 texts, the added tokens
+# both ways, corpus.txt's digests, three renders' ids) and the template to its hash (c3cf9e34... = Qwen3.8's /
+# Agnes's) and Agnes's renders. Nothing of the release is vendored (its licence text unread): the original's small
+# files are the synthetic checkpoint's (21b's make_synth.py copies them; box: r31.synth), or
+# -DB70_Q4EXP_TOKENIZER_JSON / the environment variable of the same name (a directory holding the original's
+# tokenizer.json, tokenizer_config.json, chat_template.jinja and generation_config.json). Absent: disabled on the
+# Mac (host_only), SKIP (77) elsewhere.
+if(B70_TOKENIZER_ENABLED)
+  set(B70_Q4EXP_TOKENIZER_JSON "${B70_Q4EXP_SYNTH_DIR}/ours/ckpt/tokenizer.json"
+    CACHE FILEPATH "Qwen3.8-Flash-Next's (the original's) tokenizer.json for qwen4exp_tokenizer_test, its small files beside it")
+  get_filename_component(_q4_tok_dir "${B70_Q4EXP_TOKENIZER_JSON}" DIRECTORY)
+  add_executable(qwen4exp_tokenizer_test tokenizer/qwen4exp_tokenizer_test.cc)
+  target_include_directories(qwen4exp_tokenizer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(qwen4exp_tokenizer_test PRIVATE b70_tokenizer)
+  add_test(NAME qwen4exp_tokenizer_test COMMAND qwen4exp_tokenizer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${B70_Q4EXP_TOKENIZER_JSON})
+  # ... and the server over that template (mock engine and tokenizer, cli::qwen4exp::chat_options - b70-serve's
+  # dispatch's options): ChatFormat Qwen, the prompt = transformers' render, two parallel Qwen XML calls back as
+  # OpenAI tool calls (buffered and streamed), reasoning on / off, both EOS ids stop, greedy without sampling fields
+  # (decision 11's interim).
+  add_executable(qwen4exp_server_test server/qwen4exp_server_test.cc)
+  target_include_directories(qwen4exp_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(qwen4exp_server_test PRIVATE b70_server b70_tokenizer)
+  add_test(NAME qwen4exp_server_test COMMAND qwen4exp_server_test ${CMAKE_SOURCE_DIR}/tests/tokenizer ${_q4_tok_dir})
+  set_tests_properties(qwen4exp_tokenizer_test qwen4exp_server_test PROPERTIES LABELS qwen4exp SKIP_RETURN_CODE 77
+    TIMEOUT 300)
+endif()
+# ==== Spec 21e: Qwen3.8-Flash-Next served ==== (end) ====
