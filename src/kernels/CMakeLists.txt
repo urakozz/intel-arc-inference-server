@@ -984,6 +984,97 @@ if(B70_KOLIBRI)
 endif()
 # ==== Spec 20d: Kolibri-1 prefill ==== (end) ====
 
+# ==== Spec 21c: Qwen3.8-Flash-Next decode (model::qwen4exp()) ==== (begin) ====
+# Additive only but for ONE source: prep.cl gains -DGDN_GATE_SIGMOID (prep_gated_head's sigmoid gate, the `_SIG`
+# binary); every existing prep.cl variant keeps its command line and its preprocessed source token for token (the
+# 9a67889 rule; G0's sha256 on the box). Family-only kernels live in src/kernels/qwen4exp/ and are named `q4_*` with
+# every shape define in the name (src/kernels/qwen4exp_kernels.h is the host half); the reused sources run at this
+# family's shapes:
+#   gemv.cl         qkv||z 2560x16384 (S1 L0: gdn_step / prep_gated_head read S 1), q||gate||k||v 2560x13312 (S2 L0),
+#                   out_proj / o_proj 6144x2560 (S4 L0) - ours (int4 g64); PROVISIONAL cells (model::Qwen4ExpDesc's
+#                   {S, layout}) until Task 7's sweep
+#   gemv_bf16.cl    Intel's interim bf16 dense rows (16384, 13312, 6144x2560), the HC down||inject {10240, 336} and the
+#                   final mixer's down {10240, 320}, the indexer 2560 -> 640, the router + shared gate 2560 -> 528, a||b
+#                   2560 -> 128, the PLE key||value 2560 -> 12800, lm_head 2560 -> 248320
+#   gemv_i8w.cl     the int8 lm_head (spec 9)
+#   gdn_step.cl / argmax.cl   Qwen3.8's own binaries (gdn_step_M1: 16 / 48 heads, 10240 conv rows; argmax_stage1_M1:
+#                   vocab 248320 / 248077 used) - bound by name, nothing built here
+#   attn.cl         attn_prep at 24 q / 2 kv heads (q / k (1 + w) norms, partial RoPE 64, the KV write, the gate),
+#                   QKV_S 2 (int4) and 1 (bf16)
+#   attn_v2.cl      at 24 / 2 for decision 10's bench only (qwen4exp_kernels_test --bench-attn); never bound
+#   embed_gather.cl at hidden 2560, vocab 248320
+# What a decode list binds (runtime/qwen4exp/qwen4exp_capture.cc): 15 launches a GDN layer, 19 a QSA layer (18
+# under B70_Q4_ATTN=eager), + 4 on the PLE layer, + embed + 6 at the head: 779 at 48 layers (derived).
+option(B70_Q4EXP "build the Qwen3.8-Flash-Next decode variants (spec 21c)" ON)
+if(B70_Q4EXP)
+  set(Q4_CL ${CMAKE_CURRENT_SOURCE_DIR}/qwen4exp)
+  add_gemv_variant(1 2560 16384 1 0)            # qkv||z int4                     S1 L0 (fixed)
+  add_gemv_variant(1 2560 13312 2 0)            # q||gate||k||v int4              PROVISIONAL S2 L0
+  # out_proj / o_proj int4 PROVISIONAL S4 L0 is gemv_M1_K6144_N2560_S4_L0 (K2's dense down, Kolibri's o_proj);
+  # the bf16 6144 x 2560 is Kolibri's o_proj bf16; a||b {16, 16} is K2's router: built here only without them.
+  if(NOT B70_K2 AND NOT B70_KOLIBRI)
+    add_gemv_variant(1 6144 2560 4 0)
+  endif()
+  if(NOT B70_KOLIBRI)
+    add_gemv_bf16_variant(1 6144 2560 64 1)
+  endif()
+  if(NOT B70_K2)
+    add_gemv_bf16_variant(1 2560 128 16 16)
+  endif()
+  add_gemv_bf16_variant(1 2560 16384 64 1)      # qkv||z bf16 (Intel's)
+  add_gemv_bf16_variant(1 2560 13312 64 1)      # q||gate||k||v bf16 (Intel's)
+  add_gemv_bf16_variant(1 10240 336 16 16)      # HC down || block_inject (324 rows used)
+  add_gemv_bf16_variant(1 10240 320 16 16)      # the final mixer's down
+  add_gemv_bf16_variant(1 2560 640 16 16)       # the indexer's index_qk_proj
+  add_gemv_bf16_variant(1 2560 528 16 16)       # the router (512) + shared_expert_gate (row 512), zero to 528
+  add_gemv_bf16_variant(1 2560 12800 64 1)      # the PLE key || value projections
+  add_gemv_bf16_variant(1 2560 248320 64 1)     # lm_head bf16
+  add_gemv_i8w_variant(1 2560 248320)           # lm_head int8 (spec 9)
+  add_ocloc_kernel(embed_gather_M1_D2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                   DEFINES ${CTRL_DEFINES} M=1 HIDDEN=2560 VOCAB=248320)
+  add_ocloc_kernel(prep_gated_head_M1_SIG SOURCE ${PREP_CL} DEFINES M=1 GDN_GATE_SIGMOID=1)
+  set(Q4_FA_HEADS FA_Q_HEADS=24 FA_KV_HEADS=2)
+  add_ocloc_kernel(attn_prep_M1_Q24KV2 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=1 ${Q4_FA_HEADS})
+  add_ocloc_kernel(attn_prep_M1_Q24KV2_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=1 QKV_S=1 ${Q4_FA_HEADS})
+  add_ocloc_kernel(attn_v2_M1_T${ATTN_V2_TGT}_Q24KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} ${Q4_FA_HEADS})
+  # q4_hc.cl: the combine + grouped norm by what it folds (_E embedding, _S<S> the mixer's slices, _Y the MoE's y,
+  # _X nothing; _NN without the norm) and the up-mix (_I with the 4 inject rows; the final mixer without).
+  add_ocloc_kernel(q4_hc_combine_norm_M1_E SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 HC_SRC=0 HC_NORM=1)
+  foreach(S 1 4)
+    add_ocloc_kernel(q4_hc_combine_norm_M1_S${S} SOURCE ${Q4_CL}/q4_hc.cl
+                     DEFINES ${CTRL_DEFINES} M=1 HC_SRC=1 SRC_S=${S} HC_NORM=1)
+  endforeach()
+  add_ocloc_kernel(q4_hc_combine_norm_M1_Y SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 HC_SRC=2 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_combine_norm_M1_Y_NN SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 HC_SRC=2 HC_NORM=0)
+  add_ocloc_kernel(q4_hc_combine_norm_M1_X SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 HC_SRC=3 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_up_mix_M1_I SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 UP_DOWN=336 UP_INJECT=1)
+  add_ocloc_kernel(q4_hc_up_mix_M1 SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 UP_DOWN=320 UP_INJECT=0)
+  # q4_ple.cl: the gather from host USM by the table's scale dtype (+ q4_ple_check), the block.
+  add_ocloc_kernel(q4_ple_gather_M1_BF16 SOURCE ${Q4_CL}/q4_ple.cl
+                   DEFINES ${CTRL_DEFINES} M=1 PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=1)
+  add_ocloc_kernel(q4_ple_gather_M1_F32 SOURCE ${Q4_CL}/q4_ple.cl
+                   DEFINES ${CTRL_DEFINES} M=1 PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=0)
+  add_ocloc_kernel(q4_ple_block_M1 SOURCE ${Q4_CL}/q4_ple.cl DEFINES ${CTRL_DEFINES} M=1 PLE_BLOCK=1)
+  # q4_qsa.cl (prep, score, select), q4_qsa_attn.cl (flash: attn + reduce), q4_qsa_attn_eager.cl. LIST_ROW / COUNT_W /
+  # LISTMAX: kernels::qwen4exp::kListRow / kCountWord / kListMax; TGT: kAttnTgt.
+  set(Q4_LIST_DEFINES LIST_ROW=2064 COUNT_W=2052)
+  add_ocloc_kernel(q4_qsa_M1_T512_W1024 SOURCE ${Q4_CL}/q4_qsa.cl
+                   DEFINES ${CTRL_DEFINES} M=1 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES})
+  add_ocloc_kernel(q4_qsa_attn_M1_T32 SOURCE ${Q4_CL}/q4_qsa_attn.cl DEFINES ${CTRL_DEFINES} M=1 TGT=32 ${Q4_LIST_DEFINES})
+  add_ocloc_kernel(q4_qsa_attn_eager_M1 SOURCE ${Q4_CL}/q4_qsa_attn_eager.cl
+                   DEFINES ${CTRL_DEFINES} M=1 ${Q4_LIST_DEFINES} LISTMAX=2052)
+  # q4_moe.cl: the 512-expert softmax route (two experts a lane), the 11-slot block by the shared expert's form.
+  # UP_KS / DN_KS PROVISIONAL (kernels::qwen4exp::kUpKs / kDnKs; Task 7 sweeps them).
+  add_ocloc_kernel(q4_route_M1_E512_T10_N528_L256 SOURCE ${Q4_CL}/q4_moe.cl
+                   DEFINES M=1 ROUTE_E=512 ROUTE_K=10 ROUTE_WG=256 ROUTE_LN=528)
+  add_ocloc_kernel(q4_moe_M1_E512_T10_D2560_I640_SH4 SOURCE ${Q4_CL}/q4_moe.cl
+                   DEFINES M=1 MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=640 UP_KS=4 DN_KS=2 SHARED_BF16=0)
+  add_ocloc_kernel(q4_moe_M1_E512_T10_D2560_I640_SHB SOURCE ${Q4_CL}/q4_moe.cl
+                   DEFINES M=1 MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=640 UP_KS=4 DN_KS=2 SHARED_BF16=1)
+endif()
+# ==== Spec 21c: Qwen3.8-Flash-Next decode ==== (end) ====
+
 
 # ==== Spec 15e: Ornith's MTP lists (model::ornith(), B70_ORNITH and B70_MTP) ===== (begin) ==
 # Additive only: no source changes and no existing variant's name or command line moves
