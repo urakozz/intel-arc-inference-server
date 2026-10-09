@@ -2495,6 +2495,130 @@ st_r33_p0() {
 }
 
 # ======================================================================================
+row 34 "spec 21e - Qwen3.8-Flash-Next (qwen4_exp) served truncated: b70-serve over Qwen4ExpEngine, prefix-cache snapshots, the MTP head (draft / verify / commit), the A4 set and its CPU reference for spec 22 (plan 21e)"
+rownote 34 "Written blind on the Mac, after rows 32 / 33 (21c's decode and 21d's prefill on the card): none of the 122 binaries of the 21e block was ever compiled by ocloc - the head's norm / fuse (q4_mtp_M<1..4>_{SINGLE,STREAM}, the prefill head pass q4_mtp_M2048_*_PF), the verify list at M = 2..4 (21c's decode kernels at M rows: the int4 / bf16 / i8w GEMVs, HC, QSA, route / MoE, PLE gather), the per-layer GDN slots (gdn_step_slots_M<1..4>_G1), the PLE block at M > 1 (q4_pf_ple_C4). The verify list (779 + 2 + 10 + M launches at 48 layers), the draft step (27 / 26, + 2 when it selects), the snapshot runs and the server never ran. No existing kernel source changed (kernel_cmdlines +122 / -0 / ~0): G0's g0.sha is the 'nothing moved' check."
+rownote 34 "Data: every card stage runs on the synthetic checkpoints (r31.synth; 4 real-width layers + the MTP layer) - r34.fixture writes M1's data (oracle-out-q4exp-mtp, box CPU ~0.5 h, ESTIMATED); Intel's --layers 18 rows (qwen4exp_snapshot_gpu_intel_test, qwen4exp_mtp_intel_test) need Intel's checkpoint and its PLE int8 file (rows 30 / 31). The served tokenizer is the ORIGINAL's (its split has \\p{M}); Intel's checkpoint ships Qwen3.8's tokenizer.json - b70-serve refuses it unless --tokenizer names the original's file (cli_reject_serve_qwen4exp_tokenizer)."
+rownote 34 "MTP acceptance has no engine bar here: on the synthetic checkpoints the drafts are random (M3 is greedy LOSSLESS at K = 1..3, not a rate). Decision 4's numbers are r34.accept's (the reference's teacher-forced acceptance on Intel's checkpoint, both pre_fc_norm_hidden forms, the selection reused and fresh) until spec 22 runs the whole model on the card. The verify cost (M = 2..4 against M = 1) and the per-layer expert union are r34.mtp's cost lines: hand them back."
+rownote 34 "Spec 22's, not this row's: A4 on the engine (the reference is r34.a4_ref's), passkey at the context spec 22 chooses, the llama-benchy rows, the full-model acceptance and speed. b70-serve refuses the whole model (no --layers N) naming spec 22, and --mtp auto naming spec 22's numbers."
+stage r34.k0 34 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (21e adds 122, changes none); the server path's suite unchanged (golden_server_test, prefix_gpu_*, mtp_verify_test, snapshot_test in G0's suite); rows 32 / 33's gates not failed"
+st_r34_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  need_ok r32.k1 r32.k3 r33.k1 r33.prefill
+  run_tests '^(prefix_cache_test|prefix_server_test|mtp_server_test|lookup_server_test)$'
+  finish
+}
+stage r34.host 34 default cpu - - "host: qwen4exp_tokenizer_test (the original's tokenizer.json bitwise transformers 5.19.0 over 24 cases + a 10240-line corpus, Qwen3.8's file refused by its SHA-256, the three chat renders), qwen4exp_server_test (ChatFormat, EOS, decision 11's sampling defaults, the serve refusals), qwen4exp_snapshot_test (the snapshot runs on simulated devices: one host layout for --pp 1 / 2, block and request ends, sizes), qwen4exp_mtp_names_test (every bound name built, every 21e binary bound; the verify / draft / head-pass launch counts), qwen4exp_plan_test"
+st_r34_host() {
+  run_tests '^(qwen4exp_tokenizer_test|qwen4exp_server_test|qwen4exp_snapshot_test|qwen4exp_mtp_names_test|qwen4exp_plan_test)$'
+  jgrab host '^qwen4exp_(tokenizer|server|snapshot|mtp_names|plan)_test$' 'tokenizer|render|snapshot|bytes|verify|draft|launch|OK'
+  finish
+}
+stage r34.k1 34 default gpu - r34.host "the 21e block's 122 binaries built (kbins - their first ocloc compile) and qwen4exp_mtp_names_test against them"
+st_r34_k1() {
+  kbins \
+    attn_prep_M2_Q24KV2 attn_prep_M2_Q24KV2_S1 attn_prep_M3_Q24KV2 attn_prep_M3_Q24KV2_S1 attn_prep_M4_Q24KV2 \
+    attn_prep_M4_Q24KV2_S1 embed_gather_M2_D2560 embed_gather_M3_D2560 embed_gather_M4_D2560 gdn_step_slots_M1_G1 \
+    gdn_step_slots_M2_G1 gdn_step_slots_M3_G1 gdn_step_slots_M4_G1 gemv_M2_K2560_N13312_S2_L0 \
+    gemv_M2_K2560_N16384_S1_L0 gemv_M2_K6144_N2560_S4_L0 gemv_M3_K2560_N13312_S2_L0 gemv_M3_K2560_N16384_S1_L0 \
+    gemv_M3_K6144_N2560_S4_L0 gemv_M4_K2560_N13312_S2_L0 gemv_M4_K2560_N16384_S1_L0 gemv_M4_K6144_N2560_S4_L0 \
+    gemv_bf16_M1_K2560_N2560 gemv_bf16_M2_K10240_N320_C16_S16 gemv_bf16_M2_K10240_N336_C16_S16 \
+    gemv_bf16_M2_K2560_N12800 gemv_bf16_M2_K2560_N128_C16_S16 gemv_bf16_M2_K2560_N13312 gemv_bf16_M2_K2560_N16384 \
+    gemv_bf16_M2_K2560_N248320 gemv_bf16_M2_K2560_N2560 gemv_bf16_M2_K2560_N528_C16_S16 \
+    gemv_bf16_M2_K2560_N640_C16_S16 gemv_bf16_M2_K6144_N2560 gemv_bf16_M3_K10240_N320_C16_S16 \
+    gemv_bf16_M3_K10240_N336_C16_S16 gemv_bf16_M3_K2560_N12800 gemv_bf16_M3_K2560_N128_C16_S16 \
+    gemv_bf16_M3_K2560_N13312 gemv_bf16_M3_K2560_N16384 gemv_bf16_M3_K2560_N248320 gemv_bf16_M3_K2560_N2560 \
+    gemv_bf16_M3_K2560_N528_C16_S16 gemv_bf16_M3_K2560_N640_C16_S16 gemv_bf16_M3_K6144_N2560 \
+    gemv_bf16_M4_K10240_N320_C16_S16 gemv_bf16_M4_K10240_N336_C16_S16 gemv_bf16_M4_K2560_N12800 \
+    gemv_bf16_M4_K2560_N128_C16_S16 gemv_bf16_M4_K2560_N13312 gemv_bf16_M4_K2560_N16384 gemv_bf16_M4_K2560_N248320 \
+    gemv_bf16_M4_K2560_N2560 gemv_bf16_M4_K2560_N528_C16_S16 gemv_bf16_M4_K2560_N640_C16_S16 \
+    gemv_bf16_M4_K6144_N2560 gemv_i8w_M2_K2560_N248320 gemv_i8w_M3_K2560_N248320 gemv_i8w_M4_K2560_N248320 \
+    prep_gated_head_M2_SIG prep_gated_head_M3_SIG prep_gated_head_M4_SIG q4_hc_combine_norm_M2_E \
+    q4_hc_combine_norm_M2_S1 q4_hc_combine_norm_M2_S4 q4_hc_combine_norm_M2_X q4_hc_combine_norm_M2_Y \
+    q4_hc_combine_norm_M2_Y_NN q4_hc_combine_norm_M3_E q4_hc_combine_norm_M3_S1 q4_hc_combine_norm_M3_S4 \
+    q4_hc_combine_norm_M3_X q4_hc_combine_norm_M3_Y q4_hc_combine_norm_M3_Y_NN q4_hc_combine_norm_M4_E \
+    q4_hc_combine_norm_M4_S1 q4_hc_combine_norm_M4_S4 q4_hc_combine_norm_M4_X q4_hc_combine_norm_M4_Y \
+    q4_hc_combine_norm_M4_Y_NN q4_hc_up_mix_M2 q4_hc_up_mix_M2_I q4_hc_up_mix_M3 q4_hc_up_mix_M3_I q4_hc_up_mix_M4 \
+    q4_hc_up_mix_M4_I q4_moe_M2_E512_T10_D2560_I640_SH4 q4_moe_M2_E512_T10_D2560_I640_SHB \
+    q4_moe_M3_E512_T10_D2560_I640_SH4 q4_moe_M3_E512_T10_D2560_I640_SHB q4_moe_M4_E512_T10_D2560_I640_SH4 \
+    q4_moe_M4_E512_T10_D2560_I640_SHB q4_mtp_M1_SINGLE q4_mtp_M1_STREAM q4_mtp_M2048_SINGLE_PF \
+    q4_mtp_M2048_STREAM_PF q4_mtp_M2_SINGLE q4_mtp_M2_STREAM q4_mtp_M3_SINGLE q4_mtp_M3_STREAM q4_mtp_M4_SINGLE \
+    q4_mtp_M4_STREAM q4_pf_bf16_slab_K2560_N2560 q4_pf_ple_C4 q4_ple_gather_M2_BF16 q4_ple_gather_M2_F32 \
+    q4_ple_gather_M3_BF16 q4_ple_gather_M3_F32 q4_ple_gather_M4_BF16 q4_ple_gather_M4_F32 q4_qsa_M2_T512_W1024 \
+    q4_qsa_M3_T512_W1024 q4_qsa_M4_T512_W1024 q4_qsa_attn_M2_T32 q4_qsa_attn_M3_T32 q4_qsa_attn_M4_T32 \
+    q4_qsa_attn_eager_M2 q4_qsa_attn_eager_M3 q4_qsa_attn_eager_M4 q4_route_M2_E512_T10_N528_L256 \
+    q4_route_M3_E512_T10_N528_L256 q4_route_M4_E512_T10_N528_L256
+  run_tests '^qwen4exp_mtp_names_test$'
+  finish
+}
+stage r34.reject 34 default gpu - - "the refusals before the device: cli_reject_serve_qwen4exp_{full (spec 22), mtp_auto, spec_mtp, draft_vocab, kv8, prefill_int8, prefill_sycl, split_alone, tokenizer (Qwen3.8's split)} and cli_reject_serve_layers_other (--layers for another model); 21c's cli_reject_qwen4exp_serve is gone"
+st_r34_reject() {
+  run_tests '^cli_reject_serve_(qwen4exp_(full|mtp_auto|spec_mtp|draft_vocab|kv8|prefill_int8|prefill_sycl|split_alone|tokenizer)|layers_other)$'
+  finish
+}
+stage r34.snapshot 34 default gpu oracle_q4exp_synth r34.k1,r33.prefill "F4 on the prefix cache, one card: qwen4exp_snapshot_gpu_synth_{,intel_,mtp_}test - save at block ends 2048 / 4096 and request ends 2049..2052 / 5000 / 1, load into a fresh engine, the continuation BITWISE a cold run's (logits, GDN state, conv and PLE rings, indexer tails and compressed keys, KV; with the head: its R, KV and keys, a K = 2 speculative continuation); Intel's --layers 18 when present"
+st_r34_snapshot() {
+  run_tests '^qwen4exp_snapshot_gpu_(synth|synth_intel|synth_mtp|intel)_test$' qwen4exp
+  jgrab snapshot '^qwen4exp_snapshot_gpu' 'snapshot|bytes|bitwise|restore|cross|OK|FAIL|SKIP'
+  finish
+}
+stage r34.mtp 34 default gpu oracle_q4exp_synth r34.k1,r33.prefill "F5 on one card: qwen4exp_mtp_synth_{,intel_,eager_,fresh_}test - M1 the head against 21a's port (r34.fixture's data, both norm forms; SKIP without it), M2 the verify rows (M = 2..4) BITWISE the plain steps, M3 greedy lossless at K = 1..3 and the head off, the selection reused (default) and fresh; the verify's cost (M = 2..4 against M = 1, us) and the per-layer expert union; Intel's --layers 18 (qwen4exp_mtp_intel_test) when present"
+st_r34_mtp() {
+  run_tests '^qwen4exp_mtp_(synth|synth_intel|synth_eager|synth_fresh|intel)_test$' qwen4exp
+  jgrab mtp '^qwen4exp_mtp_' 'M1|M2|M3|cost|union|accept|launch|OK|FAIL|SKIP'
+  finish
+}
+stage r34.serve 34 default gpu oracle_q4exp_synth r34.snapshot,r34.mtp "b70-serve on the ours synthetic --layers 4, one card: golden_server_test --chat (prose / code / cjk, 32 greedy ids) = b70-decode --layers 4 --prefill on the response's prompt ids, plain and --mtp 2; the prefix-cache repeat - t4_comment-step / t3_rename-linear_l0 (2748 / 2737 ids) warmed then served (cached_tokens >= 2048), plain and --mtp 2, every output identical to a cache-off server's"
+st_r34_serve() {
+  local ck="oracle-out-q4exp-synth/ours/ckpt" d="$STATE/r34-serve" only="t4_comment-step,t3_rename-linear_l0"
+  local cl="--set toolcall --only $only --max-tokens 32"
+  chk "B70_SERVE_ARGS='--layers 4' B70_DECODE_EXTRA='--layers 4' timeout 1800 build/tests/golden_server_test build/src/cli/b70-serve tools/box_validate/decode_extra.sh tests/golden/prompts $ck --chat" \
+    "golden_server_test --chat: the server's greedy chat = b70-decode (--layers 4)"
+  chk "B70_SERVE_ARGS='--layers 4 --mtp 2' B70_DECODE_EXTRA='--layers 4' timeout 1800 build/tests/golden_server_test build/src/cli/b70-serve tools/box_validate/decode_extra.sh tests/golden/prompts $ck --chat" \
+    "golden_server_test --chat through --mtp 2 (greedy lossless)"
+  chk "PORT=$PORT tools/box_validate/serve_run.sh $d/cold cold 1 $ck --layers 4 --prefix-cache-gb 0 -- $cl --warmup 0" \
+    "the cache-off server"
+  chk "PORT=$PORT tools/box_validate/serve_run.sh $d/plain plain 1 $ck --layers 4 -- $cl --warmup 2" \
+    "the prefix-cache repeat (each scenario warmed once, then served)"
+  chk "PORT=$PORT tools/box_validate/serve_run.sh $d/mtp2 mtp2 1 $ck --layers 4 --mtp 2 -- $cl --warmup 2" \
+    "the prefix-cache repeat through --mtp 2"
+  chk "python3 tools/box_validate/serve_client.py compare --dir $d --ref cold" "the warmed outputs identical to the cache-off server's"
+  chk "python3 -c 'import json, sys; c = [json.loads(l)[\"usage\"].get(\"prompt_tokens_details\", {}).get(\"cached_tokens\", 0) for f in sys.argv[1:] for l in open(f)]; print(\"cached_tokens\", c); sys.exit(0 if c and min(c) >= 2048 else 1)' $d/plain/requests.jsonl $d/mtp2/requests.jsonl" \
+    "every warmed request reused at least one 2048-id block"
+  grab_all serve '^IDENTICAL|chat of|^cached_tokens|prefix cache:|mtp|max_len' 20
+  finish
+}
+stage r34.pp 34 default gpu oracle_q4exp_synth r34.serve,r22.p1 "two cards: qwen4exp_snapshot_gpu_synth_pp_test (the snapshot runs on --pp 2, bitwise a cold run's), _cross_{,mtp_}test (one host layout: taken under --pp 2, restored under --pp 1 and back, bitwise; with the head), qwen4exp_mtp_synth_pp_test (M2 / M3 and the cost on --pp 2 --pipeline-split 2: the head on device 1 reading device 0's embedding over peer), golden_server_test --chat with b70-serve --pp 2 --mtp 2 = b70-decode on one card"
+st_r34_pp() {
+  run_tests '^qwen4exp_(snapshot_gpu_(synth_pp|cross|cross_mtp)|mtp_synth_pp)_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab pp '^qwen4exp_(snapshot_gpu_(synth_pp|cross)|mtp_synth_pp)' 'snapshot|bitwise|M2|M3|cost|OK|FAIL|SKIP'
+  chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='--layers 4 --pp 2 --mtp 2' B70_DECODE_EXTRA='--layers 4' timeout 1800 build/tests/golden_server_test build/src/cli/b70-serve tools/box_validate/decode_extra.sh tests/golden/prompts oracle-out-q4exp-synth/ours/ckpt --chat" \
+    "golden_server_test --chat: --pp 2 --mtp 2 = one card's b70-decode"
+  finish
+}
+stage r34.fixture 34 optin cpu oracle_q4exp_synth,oracle_image - "M1's data on the box CPU: qwen4exp_oracle.sh mtp-fixture - 21a's MTP port on the engine-format head (bf16 experts RTN int4 g64), both norm forms, on each synthetic checkpoint (+ Intel's at --layers 18 when present) -> \$DATA/oracle-out-q4exp-mtp/{ours,intel,intel-L18}/mtp_{single,per_stream}.safetensors; then re-links oracle-out*"
+st_r34_fixture() {
+  chk "tools/box_validate/qwen4exp_oracle.sh $DATA mtp-fixture" "the MTP fixtures"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  finish
+}
+stage r34.accept 34 optin cpu q4exp_intel,oracle_image - "decision 4's acceptance on the box CPU: qwen4exp_oracle.sh mtp-accept - qwen4exp_mtp.py accept on Intel's checkpoint (the engine's RTN head), teacher-forced greedy, K <= 3, the selection reused and fresh, over the golden continuations (q4exp_short / q4exp_agentic, after row 30's intel run) and four A4 scenarios, per norm form -> \$DATA/oracle-out-q4exp-mtp/accept_{single,per_stream}.json - HOURS; the pooled lines are the row's numbers until spec 22"
+st_r34_accept() {
+  x "free -g | head -2"
+  chk "tools/box_validate/qwen4exp_oracle.sh $DATA mtp-accept" "the reference's MTP acceptance, both norm forms"
+  grab_all accept '^pooled' 8
+  finish
+}
+stage r34.a4_ref 34 optin cpu q4exp_intel,q4exp_orig_small,oracle_image - "plan 21e Task 5 Step 2 on the box CPU: the Qwen3.8-Flash-Next tool-call set (make_set.py --from tests/golden/toolcall on the ORIGINAL's tokenizer and template, transformers 5.19.0: the log says how many of the 36 are Qwen3.8's ids exactly) and qwen4exp_ref.py's reference on Intel's checkpoint (192 ids, resumable) into \$DATA/oracle-out-q4exp-a4 - HOURS; score.py's parse of every reference call (0 failures: the hard bar); then re-links oracle-out*. The engine's A4 run is spec 22's"
+st_r34_a4_ref() {
+  chk "OUT=$DATA/oracle-out-q4exp-a4 tools/toolcall/a4_ref.sh qwen4exp set" "the Qwen3.8-Flash-Next tool-call set"
+  chk "OUT=$DATA/oracle-out-q4exp-a4 tools/toolcall/a4_ref.sh qwen4exp ref" "the reference run (qwen4exp_ref.py)"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "OUT=$DATA/oracle-out-q4exp-a4 tools/toolcall/a4_ref.sh qwen4exp status"
+  chk "python3 tools/toolcall/score.py $DATA/oracle-out-q4exp-a4 bf16" "every reference call parses (Qwen XML)"
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp labels belong to their rows)"
 st_x_rest() {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Spec 21a: the Qwen3.8-Flash-Next (qwen4_exp) CPU reference runs, ON THE BOX CPU (kolibri_oracle.sh's shape).
-#   tools/box_validate/qwen4exp_oracle.sh <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth
+#   tools/box_validate/qwen4exp_oracle.sh <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept
 #
 # Every mode runs tools/oracle/qwen4exp_ref.py in the oracle image (tools/oracle/run_in_container.sh) with
 # transformers 5.19.0 from a site directory BESIDE the image (tools/oracle/qwen4exp_env.sh: pip --no-deps
@@ -31,6 +31,16 @@
 #   trace          teacher-forced routing traces for spec 22 P0.6 / P0.8: the 36 A4 scenarios
 #                  (tests/golden/toolcall/*.ids), q4exp_agentic, code, prose, and the opencode recording when
 #                  OPENCODE_LOG is set -> <data>/oracle-out-q4exp-traces/<name>.routes.safetensors
+#   mtp-fixture    spec 21e Task 3 (M1's data): tools/oracle/qwen4exp_mtp_fixture.py - 21a's MTP port on the engine-
+#                  format head (bf16 experts RTN int4 g64), both norm forms, 8 samples of q4exp_short - on each synthetic
+#                  checkpoint (their own ckpt-ple-int8) -> <data>/oracle-out-q4exp-mtp/{ours,intel}/mtp_{single,
+#                  per_stream}.safetensors, and on Intel's at --layers 18 when it is there (and MemAvailable >= 64 GB)
+#                  -> <data>/oracle-out-q4exp-mtp/intel-L18/ (r34.fixture; what qwen4exp_mtp_test's M1 reads)
+#   mtp-accept     spec 21e Task 3 step 4 (decision 4): qwen4exp_mtp.py accept on Intel's checkpoint - teacher-forced
+#                  greedy acceptance by depth, K <= 3, the selection reused and fresh, over 21a's golden continuations
+#                  of q4exp_short and q4exp_agentic (<data>/oracle-out-q4exp, `intel` first) and the A4 set's first
+#                  four scenarios (their own 64-id continuations), per norm form ->
+#                  <data>/oracle-out-q4exp-mtp/accept_{single,per_stream}.json (r34.accept; hours)
 # Golden runs are per prompt resumable (written into <tree>/oracle-out-q4exp*.partial/, moved when complete, the
 # golden file last); traces skip sources already written. Exit 77 (SKIP) when MemAvailable < Q4_REF_MIN_GB
 # (24 tiny / tests, 64 real) or the snapshot is absent. DRY_RUN=1 prints the commands, the RAM floor and an
@@ -41,11 +51,11 @@
 #      OPENCODE_LOG, HF_HOME, ORACLE_IMAGE, ORACLE_THREADS.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
-[ $# -ge 2 ] || { echo "usage: $0 <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth" >&2; exit 2; }
+[ $# -ge 2 ] || { echo "usage: $0 <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept" >&2; exit 2; }
 data="$1" mode="$2" nl="${3:-}"
-case "$mode" in tests|tiny|intel|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth) ;;
+case "$mode" in tests|tiny|intel|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept) ;;
   intel-layers) [[ "$nl" =~ ^[0-9]+$ ]] && [ "$nl" -ge 4 ] || { echo "qwen4exp_oracle: intel-layers N needs N >= 4 (the first QSA layer: a cached run needs one)" >&2; exit 2; } ;;
-  *) echo "qwen4exp_oracle: mode $mode is not one of tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth" >&2; exit 2 ;;
+  *) echo "qwen4exp_oracle: mode $mode is not one of tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept" >&2; exit 2 ;;
 esac
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
 dry="${DRY_RUN:-0}"
@@ -55,7 +65,7 @@ INTEL="${SNAP_Q4EXP_INTEL:-models--Intel--Qwen3.8-Flash-Next-W4A16-AutoRound}"
 OURS="${SNAP_Q4EXP_OURS:-models--urakozz--Qwen3.8-Flash-Next-W4A16-g64-AutoRound-GPTQ}"
 ORIG="${SNAP_Q4EXP_ORIG:-models--Qwen--Qwen3.8-Flash-Next}"   # spec 21b: its small files only (synth-ckpt)
 SITE=oracle-out-q4exp-site
-case "$mode" in tests|tiny|synth-ckpt|ple-int8) need="${Q4_REF_MIN_GB:-24}" ;; synth) need="${Q4_REF_MIN_GB:-32}" ;; *) need="${Q4_REF_MIN_GB:-64}" ;; esac
+case "$mode" in tests|tiny|synth-ckpt|ple-int8) need="${Q4_REF_MIN_GB:-24}" ;; synth|mtp-fixture) need="${Q4_REF_MIN_GB:-32}" ;; *) need="${Q4_REF_MIN_GB:-64}" ;; esac
 case "$mode" in tests|tiny) model="$TINY" ;; ours) model="$OURS" ;; synth-ckpt|synth) model="$ORIG" ;; *) model="$INTEL" ;; esac
 snapdir=$(ls -d "$hf/hub/$model"/snapshots/*/ 2>/dev/null | head -1)
 avail=$(awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null || echo 0)
@@ -90,8 +100,9 @@ synth_have() {   # both synthetic checkpoints and their PLE files are there
     [ -s "$data/oracle-out-q4exp-synth/$f/ckpt-ple-int8/model.safetensors.index.json" ] || return 1
   done
 }
-if [ -z "$snapdir" ] && [ "$dry" != 1 ] && ! { [ "$mode" = synth ] && synth_have; }; then
+if [ -z "$snapdir" ] && [ "$dry" != 1 ] && ! { { [ "$mode" = synth ] || [ "$mode" = mtp-fixture ]; } && synth_have; }; then
   case "$mode" in
+    mtp-fixture) echo "SKIP_REASON qwen4exp_oracle: neither the synthetic checkpoints (r31.synth) nor $INTEL are there" ;;
     synth) echo "SKIP_REASON qwen4exp_oracle: the synthetic checkpoints are absent and $ORIG is not in $hf/hub to make them (its small files only: hf download Qwen/Qwen3.8-Flash-Next config.json tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja - a few MB)" ;;
     tests|tiny) echo "SKIP_REASON qwen4exp_oracle: $TINY is not in $hf/hub (hf download qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next - 124 MB)" ;;
     synth-ckpt) echo "SKIP_REASON qwen4exp_oracle: $ORIG is not in $hf/hub (its small files only: hf download Qwen/Qwen3.8-Flash-Next config.json tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja - a few MB)" ;;
@@ -212,6 +223,73 @@ case "$mode" in
       unset ORACLE_SNAP
     done
     gaps "$data/oracle-out-q4exp-synth/*/*.log"
+    ;;
+  mtp-fixture)
+    # spec 21e: per synthetic form against its own snapshot (ORACLE_SNAP) and PLE file (copied into the tree, as
+    # synth does); then Intel's at --layers 18. Written into the tree, the files moved when both are there.
+    fixture() {   # fixture <out dir> <partial dir> <extra args>
+      local out="$1" part="$2" extra="$3"
+      if [ -s "$out/mtp_single.safetensors" ] && [ -s "$out/mtp_per_stream.safetensors" ]; then
+        echo "qwen4exp_oracle: MTP fixture kept ($out)"; return 0
+      fi
+      [ "$dry" = 1 ] || mkdir -p "$out" "$part"
+      echo "qwen4exp_oracle: MTP fixture -> $out ($extra) ($(date '+%F %T'))"
+      if ! in_box "python3 tools/oracle/qwen4exp_mtp_fixture.py \"\$SNAP\" /ws/$part $extra > /ws/$part/fixture.log 2>&1"; then
+        echo "qwen4exp_oracle: MTP fixture $out FAILED"; tail -20 "$part/fixture.log" 2>/dev/null; rc=1; return 1
+      fi
+      [ "$dry" = 1 ] && return 0
+      for f in fixture.log mtp_per_stream.safetensors mtp_single.safetensors; do mv -f "$part/$f" "$out/$f"; done
+      tail -3 "$out/fixture.log"
+    }
+    for f in ours intel; do
+      src="$data/oracle-out-q4exp-synth/$f"; part="oracle-out-q4exp-mtp.partial/$f"
+      if [ "$dry" != 1 ] && [ ! -s "$src/ckpt-ple-int8/model.safetensors.index.json" ]; then
+        echo "qwen4exp_oracle: synthetic $f absent (r31.synth: qwen4exp_oracle.sh synth-ckpt) - its fixture skipped"; continue
+      fi
+      if [ "$dry" != 1 ] && [ ! -s "$part/ple/model.safetensors.index.json" ]; then
+        mkdir -p "$part" && cp -r "$src/ckpt-ple-int8" "$part/ple.partial" && mv "$part/ple.partial" "$part/ple"
+      fi
+      export ORACLE_SNAP
+      ORACLE_SNAP="$(cd "$src/ckpt" 2>/dev/null && pwd || echo "$src/ckpt")"
+      fixture "$data/oracle-out-q4exp-mtp/$f" "$part" "--ple int8:/ws/$part/ple"
+      unset ORACLE_SNAP
+    done
+    if [ -n "$snapdir" ] || [ "$dry" = 1 ]; then
+      if [ "$dry" != 1 ] && [ "${avail:-0}" -lt "${Q4_REF_REAL_GB:-64}" ]; then
+        echo "qwen4exp_oracle: Intel's --layers 18 fixture skipped: MemAvailable ${avail} GB < ${Q4_REF_REAL_GB:-64}"
+      else
+        fixture "$data/oracle-out-q4exp-mtp/intel-L18" oracle-out-q4exp-mtp.partial/intel-L18 "--layers 18 --ple $ple"
+      fi
+    else
+      echo "qwen4exp_oracle: $INTEL absent - the intel-L18 fixture (qwen4exp_mtp_intel_test) skipped"
+    fi
+    ;;
+  mtp-accept)
+    # spec 21e decision 4: both norm forms; the golden continuations copied into the tree (the container mounts only it).
+    part=oracle-out-q4exp-mtp.partial/accept
+    [ "$dry" = 1 ] || mkdir -p "$part/golden" "$data/oracle-out-q4exp-mtp"
+    for p in q4exp_short q4exp_agentic; do
+      if [ -s "$data/oracle-out-q4exp/$p.golden.safetensors" ]; then
+        [ "$dry" = 1 ] || cp -f "$data/oracle-out-q4exp/$p.golden.safetensors" "$part/golden/"
+      else
+        echo "qwen4exp_oracle: no $data/oracle-out-q4exp/$p.golden.safetensors (qwen4exp_oracle.sh intel) - accept runs without it"
+      fi
+    done
+    srcs=""
+    for f in $(ls tests/golden/toolcall/*.ids | head -4); do srcs="$srcs --source $(basename "$f" .ids):$f"; done
+    for n in single per_stream; do
+      if [ -s "$data/oracle-out-q4exp-mtp/accept_$n.json" ]; then echo "qwen4exp_oracle: accept_$n kept"; continue; fi
+      echo "qwen4exp_oracle: acceptance, norm $n ($(date '+%F %T'))"
+      if in_box "python3 tools/oracle/qwen4exp_mtp.py accept \"\$SNAP\" --out /ws/$part/accept_$n.json --norm $n \
+            --select both --golden /ws/$part/golden $srcs --k 3 --ple $ple > /ws/$part/accept_$n.log 2>&1"; then
+        if [ "$dry" != 1 ]; then
+          mv -f "$part/accept_$n.log" "$part/accept_$n.json" "$data/oracle-out-q4exp-mtp/"
+          grep -E '^pooled' "$data/oracle-out-q4exp-mtp/accept_$n.log"
+        fi
+      else
+        echo "qwen4exp_oracle: acceptance $n FAILED"; tail -20 "$part/accept_$n.log" 2>/dev/null; rc=1
+      fi
+    done
     ;;
   tiny)
     for p in q4exp_short q4exp_4k; do
