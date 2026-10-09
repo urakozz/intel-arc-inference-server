@@ -2146,6 +2146,53 @@ st_r29_cost() {
 }
 
 # ======================================================================================
+row 30 "spec 21a - Qwen3.8-Flash-Next (qwen4_exp): the facts, the CPU reference (F1), golden sets, routing traces (plan 21a)"
+rownote 30 "Box CPU only, no card: nothing here takes the GPU lock. Every stage runs tools/box_validate/qwen4exp_oracle.sh in the oracle image with transformers 5.19.0 from <tree>/oracle-out-q4exp-site (tools/oracle/qwen4exp_env.sh: pip --no-deps --target, made once; the image is never changed). r30.host needs the tiny model (hf download qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next, 124 MB)."
+rownote 30 "Everything on real weights (r30.ppl, r30.hfcheck, r30.golden, r30.golden_layers, r30.traces) needs Intel's checkpoint: hf download Intel/Qwen3.8-Flash-Next-W4A16-AutoRound - 181.17 GB including the 128 PLE shards (102.4 GB): df -h ~ first. The bf16 original (Qwen/Qwen3.8-Flash-Next, 360 GB) is needed only for 21q's bf16-PLE KL (its 128 PLE shards), not here. Without the snapshot every real stage SKIPs 77 'missing data'."
+rownote 30 "RAM: the real-weight stages SKIP 77 when MemAvailable < Q4_REF_MIN_GB (64; the 32k prompt's chunked eager attention peaks near 20 GB, ESTIMATED). The reference is layer-streamed - Intel's bf16 dense arms read from the page cache, the routed experts dequantised per forward - so times are hours (DRY_RUN=1 qwen4exp_oracle.sh <data> intel prints the ESTIMATED table). The PLE source is Intel's own bf16 shards until 21b's int8 file (<snapshot>-ple-int8/) exists; then the engine-format reference reads it (spec 21 F3) - Q4_PLE overrides."
+rownote 30 "Decision 3's tau and R2's MoE tolerance are read from the gap distributions r30.golden / r30.golden_layers print ('QSA 512th/513th gap' per QSA layer, 'MoE 10th/11th gap'); the plan's 'hand back' asks for those lines and each prompt's wall / RSS line. r30.traces' files are spec 22 P0.6 / P0.8's input (tools/oracle/README.md 'The routing traces')."
+stage r30.host 30 default cpu q4exp_tiny,oracle_image - "F1 on the tiny model in the oracle image: test_qwen4exp_ref.py (the streamed port = transformers 5.19.0 bitwise, bf16 / fp32, 40 / 2100 ids + cached decode, chunks; the indexer cache at 2047..2060; one test per trap) and test_qwen4exp_mtp.py (the MTP head = an independent build bitwise, both pre_fc_norm_hidden forms) - qwen4exp_oracle.sh tests"
+st_r30_host() {
+  chk "tools/box_validate/qwen4exp_oracle.sh $DATA tests" "the qwen4_exp reference tests (tiny model)"
+  grab_all tests '^test_|^  |^ok|FAIL|SKIP' 120
+  finish
+}
+stage r30.ppl 30 optin cpu q4exp_intel,oracle_image - "F1's third bullet on Intel's checkpoint: perplexity on prose.txt, code.txt and the agentic transcript (finite, below 30 on prose - ESTIMATED ceiling) - qwen4exp_oracle.sh ppl"
+st_r30_ppl() {
+  chk "tools/box_validate/qwen4exp_oracle.sh $DATA ppl" "the reference's perplexity on the real model"
+  grab_all ppl '^ppl |^wall|not sane' 8
+  finish
+}
+stage r30.hfcheck 30 optin cpu q4exp_intel,oracle_image - "transformers' own per-query QSA indexer against the port's cached block keys on real weights: hfcheck --layers 4, 2100 ids + 4 steps, logits and every H.L* BITWISE - qwen4exp_oracle.sh hfcheck"
+st_r30_hfcheck() {
+  chk "tools/box_validate/qwen4exp_oracle.sh $DATA hfcheck" "hfcheck on Intel's checkpoint"
+  grab_all hfcheck '^hfcheck' 6
+  finish
+}
+stage r30.golden 30 optin cpu q4exp_intel,oracle_image - "the golden sets on Intel's checkpoint (hours, resumable): q4exp_short (QSA dense) / 4k / 8k / agentic / 32k, --gen 32 -> \$DATA/oracle-out-q4exp; the gap distributions (decision 3's tau, R2); then re-links oracle-out*"
+st_r30_golden() {
+  chk "tools/box_validate/qwen4exp_oracle.sh $DATA intel" "the qwen4_exp golden sets on Intel's checkpoint"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  grab_all gap 'gap|wall' 120
+  finish
+}
+stage r30.golden_layers 30 optin cpu q4exp_intel,oracle_image - "the --layers N golden sets 21c's truncated gate reads: intel-layers 4 and 18 (one card's fit with Intel's bf16 dense layers) on q4exp_short / 4k / agentic -> \$DATA/oracle-out-q4exp-L4, -L18"
+st_r30_golden_layers() {
+  chk "tools/box_validate/qwen4exp_oracle.sh $DATA intel-layers 4" "the reference at --layers 4"
+  chk "tools/box_validate/qwen4exp_oracle.sh $DATA intel-layers 18" "the reference at --layers 18"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  grab_all gap 'gap|wall' 120
+  finish
+}
+stage r30.traces 30 optin cpu q4exp_intel,oracle_image - "spec 22 P0.6 / P0.8's input: teacher-forced routing traces (ids, p, onorm per layer; the MTP head's step-1 routes) on the 36 A4 scenarios, q4exp_agentic, code, prose and the opencode recording when OPENCODE_LOG is set -> \$DATA/oracle-out-q4exp-traces"
+st_r30_traces() {
+  chk "tools/box_validate/qwen4exp_oracle.sh $DATA trace" "the routing traces"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  grab_all traces '^trace ' 48
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri labels belong to their rows)"
 st_x_rest() {

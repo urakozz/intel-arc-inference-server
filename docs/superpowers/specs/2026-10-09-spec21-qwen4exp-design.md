@@ -2,7 +2,7 @@
 
 **Status:** design, 2026-10-09; the operator approved the design on 2026-10-08 (§0 records what was ruled).
 Open decisions are marked **(decide)**. Nothing is built.
-**Plans (2026-10-09, after the operator's approval that day):** `docs/superpowers/plans/2026-10-09-spec21{a,b,c,d,e,q}-*.md` - 21a reference, 21b descriptor / loader / formats, 21c decode, 21d prefill, 21e serving and MTP, 21q our AutoRound run; box queue rows 30-34.
+**Plans (2026-10-09, after the operator's approval that day; 21a built on the Mac, §12):** `docs/superpowers/plans/2026-10-09-spec21{a,b,c,d,e,q}-*.md` - 21a reference, 21b descriptor / loader / formats, 21c decode, 21d prefill, 21e serving and MTP, 21q our AutoRound run; box queue rows 30-34.
 
 **Model:** `Qwen/Qwen3.8-Flash-Next` (`Qwen4ExpForConditionalGeneration`, `model_type: qwen4_exp`; bf16,
 359,999,963,128 B in 1658 tensors). Intel's derived `Intel/Qwen3.8-Flash-Next-W4A16-AutoRound` (181.17 GB: routed
@@ -404,3 +404,67 @@ On K2's / Kolibri's pattern (spec 18 §5.1, spec 20 §11):
 - Tensor parallel.
 - A GGUF-derived layout of any tensor: a GGUF port's v-head map `h % 16` reflects llama.cpp's reordered weights,
   not the safetensors order (`h // 3`).
+
+## 12. 21a as built (2026-10-09; the Mac - nothing on the box yet)
+
+Plan: `docs/superpowers/plans/2026-10-09-spec21a-qwen4exp-facts-and-reference.md`, branch
+`spec21a-qwen4exp-reference`. Facts: `docs/probe-qwen4exp-2026-10-09.md`. Box validation: queue row 30
+(box CPU only). Every number is measured on the Mac unless marked.
+
+- **The version.** transformers **5.19.0** runs beside `agnes-ref-img` (`tools/oracle/qwen4exp_env.sh`:
+  `pip --no-deps --target`, tokenizers 0.23.2; the image keeps 5.15.0). 5.19.0 loads the tiny model **as
+  shipped**: `qwen_sparse_attention` is remapped by `PreTrainedConfig.__post_init__`
+  (`configuration_utils.py:96`, `:398`) before `validate_architecture` - the plan's rewritten-config fallback
+  was not needed. Default experts implementation: `grouped_mm` (its combine sums the 10 weighted expert rows in
+  the router's topk slot order, fp32 accumulation, one rounding - §4.4's "combine order" for the engine).
+- **Built:** `tools/oracle/qwen4exp_ref.py` (transformers' own model layer-streamed; the QSA block keys cached
+  beside the cache; the PLE table by mmap from the bf16 shards or 21b's int8 file; routed experts lazy in the
+  fused bf16 / int4 g128 / int4 g64 / per-expert forms; `run`, `ppl`, `hfcheck`, `trace`, `facts`;
+  `expected_names`, `PleTable`, the restated ops), `qwen4exp_mtp.py` (the head, vLLM's semantics),
+  `qwen4exp_facts.py`, `qwen4exp_make_tiny.py`, `qwen4exp_prompts.py`, `qwen4exp_tiny_check.py`, the golden
+  prompts `tests/golden/prompts/q4exp_{short,4k,8k,32k,agentic}.ids` (+ `q4exp_agentic.json`),
+  `tools/box_validate/qwen4exp_oracle.sh`, `data.sh`'s q4exp keys, queue row 30.
+- **F1 on the Mac (all bitwise):** the streamed port = transformers 5.19.0 un-streamed on the tiny model in
+  **bf16 and fp32**, prompts of **40 and 2100** ids + 8 cached decode steps (logits and every layer's 4-stream
+  residual), 2100 ids in chunks of 512; the indexer cache = transformers' per-query recomputation at rows
+  2047..2060 (selection masks, attention outputs, the recorded 512th / 513th gaps) in prefill and in decode;
+  int4 g128 (Intel's form) and g64 (ours, dense linears too) = transformers on the dequantised twin; the
+  original's fused experts; the int8 PLE file = transformers on the dequantised table; `--layers 4` of an
+  8-layer tiny; the HC chain, PLE ids, sigmoid gate, `h // 3` traps; `expected_names` = the real indexes
+  (1325 / 223947 text tensors). The MTP head = an independent build bitwise (both `pre_fc_norm_hidden`
+  forms). Its points each have a test: unit injection, `fc_hidden` per stream, the reused list, the pre-mixer hand-off, the norm forms differ.
+- **Departures from the plan, and findings:**
+  1. **Decision 5 is vLLM's opt-in, not its default** (`index_share_for_mtp_iteration`, absent from the
+     checkpoint config; `config/speculative.py:442-444, 845-864`, `llm_base_proposer.py:578-613`). The port
+     builds both (`chain(share_sel=True)` the ruled form); the operator may want to re-read decision 5. In the
+     shared form a later step attends exactly step 1's list - neither its own key nor earlier draft keys.
+  2. **torch's CPU `topk` does not prefer the lower index on exact ties** (the lower index won 29 / 50 planted ties at the QSA cut and 25 / 50 at the router's; deterministic across calls): the engine's
+     rule (ties to the lower id / block, §4.2, §4.4) and the reference differ only on exact ties; the
+     recorder flags them (`route.gap == 0`, `qsa.gap == 0`) so the gates treat those rows as undetermined. The
+     QSA scores are relu sums, so a block with all four head products negative scores exactly 0: on the tiny
+     model every 512th / 513th gap at rows 2051..2060 is an exact 0 (the cut inside a tie of zeros) - how often
+     that happens on the real model is row 30's `==0` count, and those rows are undetermined for gate S.
+  3. **The tokenizer is not Qwen3.8's**: same vocab / merges / added tokens, but the pre-tokenizer's split
+     regex adds `\p{M}`; Intel's checkpoint ships Qwen3.8's `tokenizer.json`. The committed prompts are
+     unaffected (prose / code / cjk and long32k re-encode identically); 21e must use the original's file and
+     implement `\p{M}`.
+  4. **`--layers N` needs N >= 4 for a cached run**: transformers 5.19.0's `DynamicCache` takes the sequence
+     length from an attention layer (`cache_utils.py:1566`); `run` / `ppl` / `hfcheck` / `trace` refuse
+     N < 4 by name, and the truncation test runs `layers=2` uncached (bitwise) and `layers=4` cached on an
+     8-layer tiny (the downloaded tiny has 4 layers: N = 2 cannot run cached in transformers itself).
+  5. **The golden layout keeps activations and logits for a tail window** (`--act-tail 256`,
+     `--logits-tail 1024`; every row's routes, QSA gaps, selections past 2050, PLE ids and NLL): the full set
+     at 32k would be ~50 GB of `H.L*` alone (derived). Prompts > 4096 ids are prefilled in chunks of 2048 -
+     transformers' own chunked forward (`test_chunked_prefill_equals_hf`).
+  6. **The trace format adds what spec 22 P0.8 (REAP) needs**: `p` is the router's pre-cast fp32
+     renormalised value and `onorm` each routed expert's output norm (read from `grouped_mm`'s own down
+     projection), plus the MTP head's `mtp_p` / `mtp_onorm`.
+  7. Mac containers capped at 8 GB / 4 CPUs (the operator's rule, not the plan's 28 GB); the tests keep the
+     last 48 logits rows of a prompt chunk (a 2100-row fp32 logits block is 2 GB) and compare every row's
+     residual. The tiny model was copied into git-ignored `oracle-out-q4exp/tiny` (already downloaded).
+  8. The box site lives in `<tree>/oracle-out-q4exp-site` (the container mounts only the tree), not
+     `$DATA/q4exp-site`; `qwen4exp_oracle.sh` adds `tests` and `hfcheck` modes.
+- **Pending (box CPU, row 30):** the perplexity, `hfcheck` on real weights, the golden and `--layers 4 / 18`
+  sets, the gap distributions (decision 3's tau, R2's MoE tolerance), the per-prompt times and RSS, the
+  traces. Times are ESTIMATED in `qwen4exp_oracle.sh`'s DRY_RUN table (~10 min for `q4exp_short` to
+  ~1.5-2 h for `q4exp_32k`, ~3-4 h for the `intel` set).
