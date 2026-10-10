@@ -45,9 +45,10 @@ lane, the 16-slot route row), §15 (the prefill's route on grid (1, C)), §16 (A
 
 ## Dependencies and branch points
 
-- **Decision 9** (the kept fraction) ruled from 22a's record; the shipped mask is `reap`'s at that fraction, calibrated
-  as decision 9 says (with or without the A4 scenarios: 22a records both arms - the held-out arm is the honest A4
-  number, the in-sample arm the shipped one if the operator picks it).
+- **Decision 9** (the kept fraction) ruled from 22a's record by the operator's rule (2026-10-10): the kept fraction
+  from the 4-fold held-out A4 curve; the shipped mask is `reap`'s at that fraction calibrated on **all** coding
+  traces (A4, golden, opencode recordings); the in-sample minus held-out gap reported (a big gap blocks shipping until
+  more varied calibration traces exist).
 - **Plan 22b's table pieces merged** (Task 1's `_TBL` binaries, the table upload with identity rows, the engine's
   binding with O0). If plan 22b's cache has merged too, the mask composes with it in plan 22d Task 6, not here.
 - **Row 30 / 34's CPU data** for the masked reference sets: Intel's checkpoint, 21a's golden prompts, the A4 set.

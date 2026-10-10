@@ -285,7 +285,11 @@ std::string budget_json(const ExpertBudget& b);  // one line: {"max_len":..,"dev
   (REAP; `freq` counts tokens - the weaker proxy, written for comparison); per layer keep the top `round(512 x kept)`
   by score (ties to the lower id); writes `mask-<criterion>-<kept>.safetensors` and the overlap between the REAP and
   frequency masks per layer. `--holdout-a4` calibrates without the A4 scenarios (the held-out arm; Review Focus 4's
-  rule applied to P0.8).
+  rule applied to P0.8). **Decision 9's rule (operator, 2026-10-10) needs `--kfold 4` too:** the A4 scenarios split
+  into 4 fixed folds (by a hash of the scenario name); `--fold i` calibrates without fold i (plus golden and any
+  opencode recordings), so `maskeval` grades each fold's scenarios on a mask that never saw them; the 4-fold held-out
+  curve picks the kept fraction, the all-traces mask at that fraction ships, and the in-sample minus held-out gap is
+  reported per kept fraction.
 - `qwen4exp_ref.py ... --expert-mask FILE`: a forward hook on every `layer.mlp.gate` that replaces its `(logits,
   scores, idx)` with the masked rule (Review Focus 5) from the same logits; the MTP head's router likewise with
   `mtp_keep`. `qwen4exp_ref.py maskeval <snapshot> --expert-mask FILE --golden <p>.golden.safetensors [--ple ...]`:
