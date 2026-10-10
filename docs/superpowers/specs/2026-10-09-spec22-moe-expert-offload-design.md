@@ -252,7 +252,16 @@ B70s with room for KV - no host tier, no PCIe on the decode path, about the all-
    the checkpoint.
 9. **The pruned mode (§4b): ruled a coding-only mode** (operator, 2026-10-09) - the default Flash-Next
    configuration is always the full model through the cache. **(decide)** the coding mask's kept fraction, from
-   P0.8's A4 tool-call accuracy against P0.7's cache speed.
+   P0.8's A4 tool-call accuracy against P0.7's cache speed. **The rule (operator, 2026-10-10): the held-out number
+   decides; the shipped mask is calibrated on everything.**
+   1. The kept fraction comes from the **4-fold held-out curve**: the 36 A4 scenarios split into 4 folds; each fold's
+      scenarios are graded on a mask calibrated without them (on the other 3 folds plus the golden prompts and any
+      opencode recordings), so all 36 are graded unseen; the smallest kept fraction whose held-out A4 accuracy stays
+      within the bar.
+   2. The **shipped mask** is calibrated on all available coding traces at that fraction (A4, golden, opencode
+      recordings when the box has them) - more data, a better mask; the held-out curve already says what to expect.
+   3. The **gap** between the in-sample and held-out numbers is reported: a big gap means the mask over-fits and needs
+      more varied calibration traces (real opencode logs) before it ships; a small gap means 36 scenarios sufficed.
 
 ## 8. Out of scope
 
