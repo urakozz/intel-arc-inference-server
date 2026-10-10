@@ -154,7 +154,7 @@ fractions that fit the cards entirely (50 % = 32.1 GB at int4 g64). A published 
 coding-only GGUF keeps half the experts (`ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF`, reported weaker
 outside code); its kept set is not published as original expert ids, so ours is computed, not copied.
 
-**Stopping rule:** if the projected decode at 32k is below 40 t/s on two cards with the best fill, stop and report
+**Stopping rule** (applied to the projection with **our int4 g64 dense layers** - spec 21q's format, what ships - not Intel's bf16-dense interim checkpoint, whose row is printed beside it for information; operator, 2026-10-10): if the projected decode at 32k is below 40 t/s on two cards with the best fill, stop and report
 before any engine work. The tier's levers then come first in the record (HC int8 to free D, int8 KV, a smaller
 context).
 

@@ -51,7 +51,7 @@ lane, the 16-slot route row), §15 (the prefill's route on grid (1, C)), §16 (A
 - **Plan 22b's table pieces merged** (Task 1's `_TBL` binaries, the table upload with identity rows, the engine's
   binding with O0). If plan 22b's cache has merged too, the mask composes with it in plan 22d Task 6, not here.
 - **Row 30 / 34's CPU data** for the masked reference sets: Intel's checkpoint, 21a's golden prompts, the A4 set.
-- **Open point (proposed here):** the MTP head's experts stay unmasked (`mtp_keep` all ones; 1.34 GB resident) - the
+- **Ruled (operator, 2026-10-10):** the MTP head's experts stay unmasked (`mtp_keep` all ones; 1.34 GB resident) - the
   mask changes the main model's output, the head only drafts; acceptance with the mask is measured (Task 5). A masked
   head is one flag away (`mtp_keep` from `reap --mtp`), recorded if the operator asks for it.
 
