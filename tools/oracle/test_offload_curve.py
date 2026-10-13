@@ -269,7 +269,7 @@ def test_tiny_model_traces():
     T = sum(t.T for t in tr)
     assert int(OC.counts_of(tr, L, E).sum()) == T * L * k
     py = [sys.executable, os.path.join(_HERE, "offload_curve.py")]
-    for cmd in (["counts"], ["curve", "--f", "0.25:1.0:0.125"], ["swap", "--f", "0.5", "--S", "1,4", "--B", "2.6",
+    for cmd in (["counts"], ["curve", "--f", "0.25:1.0:0.125", "--split", "none"], ["swap", "--f", "0.5", "--S", "1,4", "--B", "2.6",
                 "--copy-ms", "0.25", "--step-ms", "12", "--W", "16"], ["mtp", "--K", "1,2,3,4", "--f", "0.5"],
                 ["prefill", "--chunk", "128", "--f", "0.5:0.75:0.25"], ["profile", "--out", os.path.join(out, "profile.safetensors")]):
         r = subprocess.run(py + [cmd[0], "--traces", out] + cmd[1:], capture_output=True, text=True)
