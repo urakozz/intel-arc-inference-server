@@ -3,6 +3,7 @@
 
     oracle_generate.py [--model kolibri|qwen4exp] [--device cpu|cuda|xpu] <snapshot> <set dir> <out dir>
                        [--new-tokens N] [--batch 1|N|auto] [--resident none|auto] [--only a,b,..]
+                       [--expert-mask FILE]
 
 Builds transformers' Qwen3_5ForCausalLM the way tools/rotate/check_rotation.py
 does (text_config, load_sd in bf16, eager attention), then for every scenario
@@ -44,6 +45,10 @@ The model follows config.json's model_type:
 The MoE paths stop after an EOS id of generation_config.json (kept, as HF generate keeps it)
 or --new-tokens ids (default 192; K2's A4 run uses 512: its replies open with reasoning), and
 also write <out>/<name>.bf16.gap: each greedy step's top-1 minus top-2 logit (compare_ref.py).
+
+--expert-mask FILE (qwen4exp only; spec 22 P0.8, the pruned mode's reference): the router on the mask's kept set
+(qwen4exp_ref.py's masked_route - LOSSY), and the outputs are <out>/<name>.mask-<tag>.{ids,txt,gap} (<tag> the file
+name without `mask-` and `.safetensors`) beside the full run's .bf16.* - score.py compares them as runs.
 
 The MoE paths' batched mode (--batch N, or auto from the memory plan; default 1 = one scenario
 at a time, the code path as before): up to N scenarios in flight, LAYER-MAJOR - every sequence
@@ -325,13 +330,21 @@ def batch_plan(mtype: str, cfg: dict, lens: list[int], n: int, cap: int | None, 
     return {"batch": b, "keep_dense": kd, "keep_experts": ke, "text": text}
 
 
-def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int] = (0, 0)):
+def mask_tag(path: str) -> str:
+    """The run tag of an expert mask's outputs: mask-<the file name without mask- and .safetensors>."""
+    base = os.path.basename(path)
+    base = base[: -len(".safetensors")] if base.endswith(".safetensors") else base
+    return base if base.startswith("mask-") else "mask-" + base
+
+
+def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int] = (0, 0), mask: str | None = None):
     """-> a namespace for Ornith (qwen3_5_moe), K2-Horizon (k2_horizon) or Kolibri-1 (kolibri1;
     `device` is its reference's): generate(ids, n, eos[, on_row]) - the sequential path, one
     scenario at a time - and new_state() / step_many(items) - the layer-major batched path
     (greedy_batched); `ref` is the reference object (K2Ref / KolibriRef / the streamed model).
     keep = (dense layers, expert layers) resident once dequantised (batch_plan's counts: the
-    first that many layers; expert layers among those with experts); Ornith and K2 only."""
+    first that many layers; expert layers among those with experts); Ornith and K2 only. `mask` (qwen4exp only): a
+    spec22-mask-1 file, the router on its kept set (qwen4exp_ref.apply_expert_mask)."""
     import torch
     from types import SimpleNamespace
 
@@ -348,6 +361,8 @@ def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int]
     def watch(am, on_row):        # generate(..., on_row): every logits row the greedy loop reads (tests)
         return am if on_row is None else (lambda row: (on_row(row), am(row))[1])
 
+    if mask is not None and mtype not in Q4_TYPES:
+        raise SystemExit(f"--expert-mask is Qwen3.8-Flash-Next's (qwen4_exp) only; {snap} is {mtype}")
     if mtype == "kolibri1":
         KR = load("kolibri_ref")
         src = KR.Checkpoint(snap)
@@ -376,6 +391,9 @@ def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int]
         kd = range(min(keep[0], tc.num_hidden_layers))
         ke = range(min(keep[1], tc.num_hidden_layers))
         model, pf, lazy = Q4.build_streamed(snap, tc, ple, keep_dense=kd, keep_experts=ke)
+        em = Q4.load_expert_mask(mask, tc) if mask else None
+        Q4.apply_expert_mask(model, em)        # every path below (sequential and layer-major) runs the gate modules
+        print(Q4.mask_line(em), flush=True)
         print(f"Qwen3.8-Flash-Next reference: qwen4exp_ref.py, {tc.num_hidden_layers} layers, streamed, PLE {ple.kind}; "
               f"resident once read: dense {len(kd)} layers, experts {len(ke)} layers", flush=True)
         major = Q4.layer_major(model, pf)
@@ -443,12 +461,13 @@ MODELS = {"kolibri": ("kolibri1",), "qwen4exp": ("qwen4_exp", "qwen4_exp_text")}
 def parse_args(argv: list[str]) -> dict:
     """[--model kolibri] [--device D] <snapshot> <set dir> <out dir> [--new-tokens N]
     [--batch N|auto] [--resident none|auto] [--only NAME,...] -> a dict."""
-    a = {"model": None, "device": "cpu", "new_tokens": NEW_TOKENS, "batch": "1", "keep": "none", "only": None}
+    a = {"model": None, "device": "cpu", "new_tokens": NEW_TOKENS, "batch": "1", "keep": "none", "only": None,
+         "expert_mask": None}
     pos: list[str] = []
     i = 0
     while i < len(argv):
         x = argv[i]
-        if x in ("--model", "--device", "--new-tokens", "--batch", "--resident", "--only"):
+        if x in ("--model", "--device", "--new-tokens", "--batch", "--resident", "--only", "--expert-mask"):
             if i + 1 >= len(argv):
                 sys.exit(f"{x} needs a value")
             v = argv[i + 1]
@@ -468,6 +487,8 @@ def parse_args(argv: list[str]) -> dict:
                 a["keep"] = v
             elif x == "--only":
                 a["only"] = [n for n in v.split(",") if n]
+            elif x == "--expert-mask":
+                a["expert_mask"] = v
             else:
                 a["new_tokens"] = int(v)
             i += 2
@@ -481,8 +502,13 @@ def parse_args(argv: list[str]) -> dict:
 
 
 def main() -> None:
+    global RUN
     a = parse_args(sys.argv[1:])
     snap, set_dir, out, new_tokens = a["snapshot"], a["set_dir"], a["out"], a["new_tokens"]
+    if a["expert_mask"]:
+        if not os.path.isfile(a["expert_mask"]):
+            sys.exit(f"--expert-mask {a['expert_mask']}: no such file")
+        RUN = mask_tag(a["expert_mask"])      # <name>.mask-<tag>.{ids,txt,gap}, never the full run's .bf16.*
     os.makedirs(out, exist_ok=True)
     manifest = load_manifest(set_dir)
     if a["only"]:
@@ -503,8 +529,10 @@ def main() -> None:
         mtype = json.load(f).get("model_type", "")
     if a["model"] is not None and mtype not in MODELS[a["model"]]:
         sys.exit(f"--model {a['model']}: {snap} is model_type {mtype!r}, not {' or '.join(MODELS[a['model']])}")
+    if a["expert_mask"] and mtype not in Q4_TYPES:
+        sys.exit(f"--expert-mask is Qwen3.8-Flash-Next's (qwen4_exp) only; {snap} is model_type {mtype!r}")
     if mtype in MOE_TYPES:
-        moe_main(snap, out, todo, prompts, new_tokens, mtype, a["device"], a["batch"], a["keep"])
+        moe_main(snap, out, todo, prompts, new_tokens, mtype, a["device"], a["batch"], a["keep"], a["expert_mask"])
         return
 
     import torch
@@ -590,7 +618,7 @@ def top2_gap(row) -> float:
 
 
 def moe_main(snap: str, out: str, todo: list[dict], prompts: dict, new_tokens: int, mtype: str,
-             device: str = "cpu", batch: str = "1", keep: str = "none") -> None:
+             device: str = "cpu", batch: str = "1", keep: str = "none", mask: str | None = None) -> None:
     import torch
     from tokenizers import Tokenizer
     with open(os.path.join(snap, "generation_config.json"), encoding="utf-8") as f:
@@ -607,7 +635,7 @@ def moe_main(snap: str, out: str, todo: list[dict], prompts: dict, new_tokens: i
         print(plan["text"], flush=True)
         b, kept = plan["batch"], (plan["keep_dense"], plan["keep_experts"])
     t = time.time()
-    runner = moe_runner(snap, mtype, device, kept)
+    runner = moe_runner(snap, mtype, device, kept, mask)
     print(f"ready in {time.time() - t:.0f}s", flush=True)
     if b == 1:
         print("sequential: one scenario at a time", flush=True)

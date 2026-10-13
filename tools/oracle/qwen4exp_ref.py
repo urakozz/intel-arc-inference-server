@@ -31,6 +31,17 @@ not part of the text model (the MTP head is qwen4exp_mtp.py).
     qwen4exp_ref.py trace <snapshot> --source NAME:IDS [...] [--opencode DIR] --out <dir> [--layers N]
     qwen4exp_ref.py hfcheck <snapshot> --layers N [--prompt <ids>] [--n 2100] [--gen 4]
     qwen4exp_ref.py facts <snapshot> [--qwen38-tokenizer FILE]
+    qwen4exp_ref.py maskeval <snapshot> --expert-mask FILE --golden <p>.golden.safetensors [--prompt IDS]
+    qwen4exp_ref.py maskeval <snapshot> --expert-mask FILE --prompt IDS --cont IDS [--full-cache FILE] [--json F]
+
+Spec 22 P0.8 (plan 22a Task 4): `--expert-mask FILE` on run / ppl / trace / maskeval - a spec22-mask-1 file
+(offload_curve.py reap) - puts a forward hook on every layer's router (and the MTP head's, under mtp_keep) that
+replaces its (logits, scores, idx) with masked_route over the same logits: a dropped expert's logit -inf before the
+fp32 softmax, the top k of the rest, renormalised over them; dropped experts rank below every kept one. LOSSY, the
+pruned mode's reference (spec 22 §4b). `maskeval` replays a golden set's prompt and generated ids on run's own path
+(the chunks, then one cached step a token) under the mask, against its stored logits rows: per row KL(full ||
+masked) in fp32 and the argmax agreement, `maskeval <p> kept=<f> kl_mean=.. kl_p99=.. argmax=..`, and JSON; for an
+A4 scenario the same over its prompt + the full reference's continuation, the full model's rows cached once.
 
 `run`'s golden layout (bf16 activations are the rows from `act_row0`, metadata, to the end; logits from
 `logits_row0`):
@@ -762,6 +773,122 @@ def router(x: torch.Tensor, w: torch.Tensor, k: int, norm_topk: bool = True):
 
 
 # ------------------------------------------------------------------------------------------------
+# spec 22 P0.8 (plan 22a Task 4): the expert mask - the pruned mode's reference (spec 22 §4b)
+
+MASK_FORMAT = "spec22-mask-1"
+
+
+class ExpertMask:
+    """`keep` bool [L][E] (the model's first L layers of the file's), `mtp_keep` bool [E], the file's metadata and
+    its tag (`mask-<name>`: the file name without `mask-` and `.safetensors`)."""
+
+    def __init__(self, keep: torch.Tensor, mtp_keep: torch.Tensor, meta: dict, path: str):
+        self.keep, self.mtp_keep, self.meta, self.path = keep, mtp_keep, meta, path
+        base = os.path.basename(path)
+        base = base[: -len(".safetensors")] if base.endswith(".safetensors") else base
+        self.tag = base if base.startswith("mask-") else "mask-" + base
+        self.kept = float(meta.get("kept_fraction", float(keep.float().mean())))
+
+
+def load_expert_mask(path: str, tc) -> ExpertMask:
+    """The mask file (plan 22a: safetensors `keep` u8 [L][E] (1 = kept), `mtp_keep` u8 [E], metadata model,
+    checkpoint_revision, criterion, kept_fraction, per_layer, calibration, format spec22-mask-1). Refused by name: another
+    format, a width other than the model's experts, fewer layers than the model's, a layer (or the head) keeping fewer
+    than top_k experts."""
+    from safetensors import safe_open
+    with safe_open(path, framework="pt") as f:
+        meta = dict(f.metadata() or {})
+        keys = set(f.keys())
+        if meta.get("format") != MASK_FORMAT or "keep" not in keys:
+            raise ValueError(f"{path}: not a {MASK_FORMAT} expert mask (format {meta.get('format')!r})")
+        keep = f.get_tensor("keep")
+        mtp_keep = f.get_tensor("mtp_keep") if "mtp_keep" in keys else torch.ones(keep.shape[-1], dtype=torch.uint8)
+    L, E, k = tc.num_hidden_layers, tc.num_experts, tc.num_experts_per_tok
+    if keep.dim() != 2 or keep.shape[1] != E:
+        raise ValueError(f"{path}: keep is {list(keep.shape)}, the model has {E} experts a layer")
+    if keep.shape[0] < L:
+        raise ValueError(f"{path}: keep holds {keep.shape[0]} layers, the model {L}")
+    if mtp_keep.shape != (E,):
+        raise ValueError(f"{path}: mtp_keep is {list(mtp_keep.shape)}, the head has {E} experts")
+    keep, mtp_keep = keep[:L] != 0, mtp_keep != 0
+    for l in range(L):
+        n = int(keep[l].sum())
+        if n < k:
+            raise ValueError(f"{path}: layer {l} keeps {n} experts, fewer than top_k {k}")
+    if int(mtp_keep.sum()) < k:
+        raise ValueError(f"{path}: the MTP head keeps {int(mtp_keep.sum())} experts, fewer than top_k {k}")
+    return ExpertMask(keep, mtp_keep, meta, path)
+
+
+def masked_route(logits: torch.Tensor, keep: torch.Tensor, k: int, norm_topk: bool = True):
+    """The router's rule on the kept set (spec 22 §4b; plan 22m's route kernel applies the same): a dropped expert's
+    logit is -inf BEFORE the fp32 softmax over E, the top k of what remains, renormalised over them, cast to the logits'
+    dtype. Dropped experts rank below every kept one: a row where fewer than k kept experts have p > 0 still takes kept
+    ones (p = 0) before any dropped one. A layer that keeps everything is the router itself (M:961-970), op for op.
+    Returns (the masked logits, scores, idx) - the gate's own output form."""
+    if bool(keep.all()):
+        p = F.softmax(logits, dtype=torch.float, dim=-1)
+        v, i = torch.topk(p, k, dim=-1)
+        if norm_topk:
+            v /= v.sum(dim=-1, keepdim=True)
+        return logits, v.to(logits.dtype), i
+    lm = logits.masked_fill(~keep, float("-inf"))
+    p = F.softmax(lm, dtype=torch.float, dim=-1)
+    v, i = torch.topk(p, k, dim=-1)
+    bad = (~keep[i]).any(dim=-1)
+    if bool(bad.any()):
+        key = p.masked_fill(~keep, -1.0)
+        v2, i2 = torch.topk(key[bad], k, dim=-1)
+        i, v = i.clone(), v.clone()
+        i[bad] = i2
+        v[bad] = p[bad].gather(-1, i2)
+    if norm_topk:
+        v = v / v.sum(dim=-1, keepdim=True)
+    return lm, v.to(logits.dtype), i
+
+
+class MaskHooks:
+    def __init__(self, hooks):
+        self.hooks = hooks
+
+    def remove(self):
+        for h in self.hooks:
+            h.remove()
+
+
+def _mask_hook(keep_row: torch.Tensor):
+    def fn(mod, _args, out):
+        logits, _, _ = out
+        return masked_route(logits, keep_row, mod.top_k, mod.norm_topk_prob)
+    return fn
+
+
+def apply_expert_mask(model_or_layers, mask: "ExpertMask | None") -> MaskHooks:
+    """A forward hook on every layer's `mlp.gate` replacing its (logits, scores, idx) with masked_route over the same
+    logits. Install it BEFORE a Recorder / trace hook (forward hooks run in order, each on the previous one's output):
+    the recorded routes, p and gaps are then the masked router's."""
+    if mask is None:
+        return MaskHooks([])
+    layers = list(model_or_layers.model.layers) if hasattr(model_or_layers, "model") else list(model_or_layers)
+    return MaskHooks([layer.mlp.gate.register_forward_hook(_mask_hook(mask.keep[i])) for i, layer in enumerate(layers)])
+
+
+def apply_head_mask(head, mask: "ExpertMask | None") -> MaskHooks:
+    """The MTP head's router (qwen4exp_mtp.MtpHead.layer) under `mtp_keep` (all ones unless the mask asks)."""
+    if mask is None:
+        return MaskHooks([])
+    return MaskHooks([head.layer.mlp.gate.register_forward_hook(_mask_hook(mask.mtp_keep))])
+
+
+def mask_line(mask: "ExpertMask | None") -> str:
+    if mask is None:
+        return "expert mask: none (the full model)"
+    dropped = int((~mask.keep).sum())
+    return (f"expert mask: {mask.tag} (LOSSY), kept {mask.kept:g} - {dropped} (layer, expert) dropped, the head keeps "
+            f"{int(mask.mtp_keep.sum())}; criterion {mask.meta.get('criterion', '?')}, {mask.path}")
+
+
+# ------------------------------------------------------------------------------------------------
 # recording
 
 class Recorder:
@@ -1007,6 +1134,9 @@ def cmd_run(a) -> None:
         die(f"{a.prompt}: {T} ids (1..{a.max_prompt})")
     ple = PleTable(ple_source(a.snapshot, a.ple), tc)
     model, pf, lazy = build_streamed(a.snapshot, tc, ple)
+    mask = load_expert_mask(a.expert_mask, tc) if a.expert_mask else None
+    apply_expert_mask(model, mask)          # before the Recorder: its routes are the masked router's
+    print(mask_line(mask), flush=True)
     chunk = auto_chunk(T, a.chunk)
     act_from = max(0, T - a.act_tail) if a.act_tail >= 0 else 0
     log_from = max(0, T - max(1, a.logits_tail)) if a.logits_tail >= 0 else 0   # the last prompt row: greedy
@@ -1067,6 +1197,7 @@ def cmd_run(a) -> None:
             "act_row0": str(act_from), "logits_row0": str(log_from), "qsa_row0": str(QSA_DENSE_ROWS),
             "attn_implementation": "eager", "experts_implementation": tc._experts_implementation,
             "transformers": PINNED_TRANSFORMERS, "torch": torch.__version__,
+            "expert_mask": "none" if mask is None else f"{mask.tag} kept {mask.kept:g} {os.path.abspath(mask.path)}",
             "ppl": f"{math.exp(float(nll.double().mean())) if T > 1 else float('nan'):.6g}",
             "model": "Qwen3.8-Flash-Next (Qwen4ExpForCausalLM, tools/oracle/qwen4exp_ref.py, layer-streamed)"}
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
@@ -1101,6 +1232,9 @@ def cmd_ppl(a) -> None:
     tc = text_config(a.snapshot, a.layers, a.experts)
     require_cacheable(tc)
     model, pf, lazy = build_streamed(a.snapshot, tc, PleTable(ple_source(a.snapshot, a.ple), tc))
+    mask = load_expert_mask(a.expert_mask, tc) if a.expert_mask else None
+    apply_expert_mask(model, mask)
+    print(mask_line(mask), flush=True)
     srcs = [(n, tokenize_text(a.snapshot, p)) for n, p in (x.split("=", 1) for x in a.text)]
     srcs += [(n, read_ids(p)) for n, p in (x.split("=", 1) for x in a.ids)]
     if not srcs:
@@ -1288,9 +1422,13 @@ def cmd_trace(a) -> None:
     todo = [(n, ids) for n, ids in srcs if not os.path.exists(os.path.join(a.out, f"{n}.routes.safetensors"))]
     print(f"trace: {len(srcs)} sources, {len(srcs) - len(todo)} already written, chunk {a.chunk}, batch {a.batch}")
     model, pf, lazy = build_streamed(a.snapshot, tc, PleTable(ple_source(a.snapshot, a.ple), tc))
+    mask = load_expert_mask(a.expert_mask, tc) if a.expert_mask else None
+    apply_expert_mask(model, mask)          # before trace_routes' Recorder: the masked router's routes
+    print(mask_line(mask), flush=True)
     head = None
     if a.mtp and any(k.startswith("mtp.") for k in model.q4_ckpt.keys()):
         head = _load("qwen4exp_mtp").MtpHead(a.snapshot, tc, model=model)
+        apply_head_mask(head, mask)
     L, k = tc.num_hidden_layers, tc.num_experts_per_tok
     for b0 in range(0, len(todo), a.batch):
         batch = todo[b0:b0 + a.batch]
@@ -1302,6 +1440,7 @@ def cmd_trace(a) -> None:
                     "checkpoint_revision": os.path.basename(os.path.normpath(a.snapshot)),
                     "transformers": PINNED_TRANSFORMERS, "source": name, "T": str(len(ids)), "layers": str(L),
                     "top_k": str(k), "experts": str(tc.num_experts), "chunk": str(a.chunk),
+                    "expert_mask": "none" if mask is None else f"{mask.tag} kept {mask.kept:g}",
                     "format": TRACE_FORMAT}
             save_file(o, os.path.join(a.out, f"{name}.routes.safetensors"), metadata=meta)
             distinct = [int(torch.unique(o["ids"][:, i]).numel()) for i in range(L)]
@@ -1309,6 +1448,108 @@ def cmd_trace(a) -> None:
                   f"{sorted(distinct)[L // 2]} max {max(distinct)}", flush=True)
         print(f"trace batch of {len(batch)}: {time.time() - t1:.0f}s ({lazy.filled} expert dequants so far)", flush=True)
     print(f"wall {time.time() - t0:.0f}s, peak RSS {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20:.1f} GiB")
+
+
+# ------------------------------------------------------------------------------------------------
+# maskeval (spec 22 P0.8): the masked model against the full one, teacher-forced
+
+def _repo_path(p: str) -> str:
+    """A path a box run recorded inside the container (/ws/...) read from this tree when it is not there."""
+    if os.path.exists(p) or not p.startswith("/ws/"):
+        return p
+    return os.path.join(os.path.dirname(os.path.dirname(_HERE)), p[len("/ws/"):])
+
+
+def kl_rows(ref_logits: torch.Tensor, got_logits: torch.Tensor):
+    """Per row KL(full || masked) in fp32 and the argmax agreement."""
+    lp = torch.log_softmax(ref_logits.float(), -1)
+    lq = torch.log_softmax(got_logits.float(), -1)
+    kl = (lp.exp() * (lp - lq)).sum(-1)
+    agree = ref_logits.float().argmax(-1) == got_logits.float().argmax(-1)
+    return kl.clamp_min(0.0), agree
+
+
+def replay_rows(model, ids: list[int], chunk: int, gen: list[int], row0: int) -> torch.Tensor:
+    """`run`'s own path - the prompt by forward_chunks at `chunk`, then each of `gen` as one cached decode step - the
+    logits rows from row0 (bf16 widened to fp32): with the full model this is the golden set's logits bit for bit."""
+    rows = []
+    T = len(ids)
+
+    def on_logits(r0, lg):
+        r1 = r0 + lg.shape[0]
+        if r1 > row0:
+            rows.append(lg[max(0, row0 - r0):].float().clone())
+    with torch.no_grad():
+        cache = forward_chunks(model, ids, chunk, on_logits=on_logits)
+        for t in gen:                      # run feeds every greedy token, one cached step each
+            out = model(input_ids=torch.tensor([[t]]), past_key_values=cache, use_cache=True)
+            cache = out.past_key_values
+            rows.append(out.logits[0].float().clone())
+    got = torch.cat(rows, 0)
+    want = T + len(gen) - row0
+    if got.shape[0] != want:
+        raise RuntimeError(f"replay: {got.shape[0]} rows, expected {want}")
+    return got
+
+
+def cmd_maskeval(a) -> None:
+    """maskeval <snapshot> --expert-mask FILE --golden <p>.golden.safetensors [--prompt IDS] | --prompt IDS --cont IDS
+    [--full-cache FILE]: per row KL(full || masked) and argmax agreement, printed and (--json) written."""
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+    t0 = time.time()
+    tc = text_config(a.snapshot, a.layers, a.experts)
+    require_cacheable(tc)
+    mask = load_expert_mask(a.expert_mask, tc)
+    model, pf, lazy = build_streamed(a.snapshot, tc, PleTable(ple_source(a.snapshot, a.ple), tc))
+    print(mask_line(mask), flush=True)
+    if a.golden:
+        with safe_open(a.golden, framework="pt") as f:
+            meta = dict(f.metadata() or {})
+            ref_rows = f.get_tensor("logits").float()
+            gen = f.get_tensor("tokens").tolist()
+        ids = read_ids(_repo_path(a.prompt or meta["prompt"]))
+        if len(ids) != int(meta["n_prompt"]):
+            die(f"{a.golden}: n_prompt {meta['n_prompt']}, the prompt has {len(ids)} ids")
+        row0, chunk = int(meta["logits_row0"]), int(meta["chunk"])
+        name, kind = os.path.basename(a.golden).split(".golden")[0], "golden"
+        h = apply_expert_mask(model, mask)
+        got = replay_rows(model, ids, chunk, gen, row0)
+        h.remove()
+    else:
+        if not (a.prompt and a.cont):
+            die("maskeval: --golden, or --prompt and --cont")
+        ids, cont = read_ids(a.prompt), read_ids(a.cont)
+        T, C = len(ids), len(cont)
+        seq = ids + cont
+        chunk = auto_chunk(len(seq), a.chunk)
+        name, kind = os.path.basename(a.prompt).rsplit(".", 1)[0], "a4"
+        if a.full_cache and os.path.exists(a.full_cache):
+            with safe_open(a.full_cache, framework="pt") as f:
+                ref_rows = f.get_tensor("logits").float()
+        else:
+            ref_rows = replay_rows(model, seq, chunk, [], T - 1)[:C]
+            if a.full_cache:
+                save_file({"logits": ref_rows.to(torch.bfloat16).contiguous()}, a.full_cache,
+                          metadata={"prompt": os.path.abspath(a.prompt), "cont": os.path.abspath(a.cont)})
+        h = apply_expert_mask(model, mask)
+        got = replay_rows(model, seq, chunk, [], T - 1)[:C]
+        h.remove()
+    if got.shape != ref_rows.shape:
+        die(f"maskeval: {list(got.shape)} rows against the reference's {list(ref_rows.shape)}")
+    kl, agree = kl_rows(ref_rows, got)
+    kl_d = kl.double()
+    out = {"prompt": name, "set": kind, "kept": mask.kept, "criterion": mask.meta.get("criterion", ""), "tag": mask.tag,
+           "mask": os.path.abspath(mask.path), "calibration": mask.meta.get("calibration", "[]"),
+           "fold": mask.meta.get("fold", ""), "rows": int(kl.numel()), "kl_mean": float(kl_d.mean()),
+           "kl_p99": float(torch.quantile(kl_d, 0.99)), "kl_max": float(kl_d.max()), "argmax": float(agree.double().mean()),
+           "kl": [float(x) for x in kl.tolist()]}
+    print(f"maskeval {name} kept={mask.kept:g} kl_mean={out['kl_mean']:.6g} kl_p99={out['kl_p99']:.6g} "
+          f"argmax={out['argmax']:.4f} rows={out['rows']} set={kind} tag={mask.tag} ({time.time() - t0:.0f}s)", flush=True)
+    if a.json:
+        os.makedirs(os.path.dirname(os.path.abspath(a.json)), exist_ok=True)
+        with open(a.json, "w") as fh:
+            json.dump(out, fh)
 
 
 TRACE_FORMAT = ("ids i32 [T][L][k]: each row's top-k per layer, ascending expert id; p f32 [T][L][k]: the router's "
@@ -1373,6 +1614,7 @@ def main() -> None:
         p.add_argument("--experts", default=DEFAULT_EXPERTS, choices=["grouped_mm", "eager"])
         p.add_argument("--ple", default="bf16", help="bf16 (the snapshot's shards), bf16:<snapshot>, int8:<dir>")
         p.add_argument("--chunk", type=int, default=-1, help="prefill chunk (-1: whole up to 4096 ids, else 2048)")
+        p.add_argument("--expert-mask", help="spec 22 P0.8: a spec22-mask-1 file - the router on the kept set (LOSSY)")
     r = sub.add_parser("run")
     common(r)
     r.add_argument("--prompt", required=True)
@@ -1402,8 +1644,19 @@ def main() -> None:
     f = sub.add_parser("facts")
     f.add_argument("snapshot")
     f.add_argument("--qwen38-tokenizer")
+    e = sub.add_parser("maskeval")
+    common(e)
+    e.add_argument("--golden", help="a run golden set: its prompt + generated ids replayed, against its logits rows")
+    e.add_argument("--prompt", help="the prompt ids (default: the golden set's own)")
+    e.add_argument("--cont", help="without --golden: the continuation ids teacher-forced after --prompt (an A4 scenario's "
+                                  "full-model reference output)")
+    e.add_argument("--full-cache", help="without --golden: the full model's rows, read when present, else written")
+    e.add_argument("--json")
     a = ap.parse_args()
-    {"run": cmd_run, "ppl": cmd_ppl, "hfcheck": cmd_hfcheck, "trace": cmd_trace, "facts": cmd_facts}[a.cmd](a)
+    if a.cmd == "maskeval" and not a.expert_mask:
+        die("maskeval: --expert-mask FILE is required")
+    {"run": cmd_run, "ppl": cmd_ppl, "hfcheck": cmd_hfcheck, "trace": cmd_trace, "facts": cmd_facts,
+     "maskeval": cmd_maskeval}[a.cmd](a)
 
 
 if __name__ == "__main__":
