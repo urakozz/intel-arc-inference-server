@@ -438,4 +438,33 @@ void require_fits(const std::vector<DevicePlan>& p, const std::array<size_t, kPp
 std::string describe(const std::vector<DevicePlan>& p, const model::Q4Placement& pl, uint32_t max_len,
                      const std::array<size_t, kPpDevices>& device_bytes, size_t reserve);
 
+// --- spec 22a: the routed-expert budget ---------------------------------------------------------------------
+// Spec 22 §2 (derived): what each device has left for ROUTED experts once everything else of the plan - the
+// non-routed weights, RoPE, KV + indexer keys, state, decode (and with `prefill` the prefill) scratch, the link -
+// and the reserve are placed. The MTP head's experts count as non-routed (decision 6's proposal: resident).
+// non_routed[dev] = plan(...)[dev].total() minus its layers' gate_up + down blocks (loader::q4_layer_bytes'
+// experts()); cache[dev] = max(0, capacity - reserve - non_routed). Devices past p.devices stay 0. Plan 22b's
+// cache sizes from this function; offload_curve.py's projection reads budget_json's lines (qwen4exp_plan_test
+// --budget-json FILE).
+struct ExpertBudget {
+  uint32_t max_len = 0, devices = 0;
+  bool mtp = false, prefill = false, int8_head = false;
+  model::Q4Forms forms;                          // the descriptor's (ours: int4 dense; Intel's: bf16)
+  std::array<size_t, kPpDevices> capacity{};     // the device_bytes it was given
+  size_t reserve = 0;
+  std::array<size_t, kPpDevices> non_routed{};   // per device: plan(...) minus its layers' gate_up + down blocks
+  std::array<size_t, kPpDevices> cache{};        // max(0, capacity - reserve - non_routed)
+  std::array<uint32_t, kPpDevices> first{}, end{};
+  uint32_t layers = 0, experts = 0;
+  size_t expert_bytes = 0;                       // one expert: gate_up + down blocks (2,611,200 B at int4 g64)
+  size_t routed_total = 0;                       // layers x 512 x (1,740,800 + 870,400)
+  double f() const;                              // min(1, sum(cache) / routed_total): the resident fraction
+};
+ExpertBudget expert_budget(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
+                           bool int8_head, bool mtp, bool prefill,
+                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve);
+// One line: {"max_len":..,"devices":..,"mtp":..,"prefill":..,"int8_head":..,"dense":"int4"|"bf16",..,"cache":[..],
+// "f":..}.
+std::string budget_json(const ExpertBudget& b);
+
 }  // namespace runtime::qwen4exp
