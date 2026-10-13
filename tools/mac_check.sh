@@ -15,7 +15,8 @@
 #              command line must not change or disappear (additions are listed, and fine).
 #   4 opencl   every distinct kernel variant command line through clang -x cl -cl-std=CL3.0
 #              -fsyntax-only with the Intel-extension shim (tools/mac/cl_syntax.sh).
-#   5 kernels  (--kernels only) gemv_i8w, argmax, pf_moe, k2, moe, kolibri and qwen4exp built and run on the Mac's OpenCL GPU
+#   5 kernels  (--kernels only) gemv_i8w, argmax, pf_moe, k2, moe, kolibri, qwen4exp and offload (spec 22a: the
+#              table-addressed expert kernels) built and run on the Mac's OpenCL GPU
 #              (gemv_i8w and argmax also at M = 8, spec 19a)
 #              against host references (tools/mac/clrun): INDICATIVE, not a B70 result.
 #
@@ -42,7 +43,7 @@ while [ $# -gt 0 ]; do
     --quick) quick=1; shift ;;
     --allow-kernel-changes) allow=1; shift ;;
     --kernels) kernels=1; shift ;;
-    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
     *) echo "mac_check: unknown argument $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -221,7 +222,7 @@ if [ $kernels = 1 ]; then
   bin=$out/clrun
   mkdir -p "$bin"
   ok=1 runs="" nfail=0 npass=0
-  for d in gemv_i8w argmax pf_moe k2 moe kolibri qwen4exp; do
+  for d in gemv_i8w argmax pf_moe k2 moe kolibri qwen4exp offload; do
     # k2_run (spec 18b) checks against tests/kernels/k2_ref.h and builds the RoPE table
     # with the loader's own function, so it also takes two host sources.
     extra=""
