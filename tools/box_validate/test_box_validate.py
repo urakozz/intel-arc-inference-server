@@ -842,6 +842,17 @@ class DriverTest(unittest.TestCase):
                 b = self.run_driver("--dry-run").stdout
                 self.assertEqual(a, b)
 
+    def test_row36_sees_both_cards(self):
+        # Row 36 (spec 22 P0): the run exports ZE_AFFINITY_MASK=$DEVICE (one card); every probe_offload command must
+        # see both cards itself, as row 22's do - else its --dev 1 / both arms SKIP and the row measures one card.
+        out = self.run_driver("--dry-run", "--only", "r36", "--with", "r36.prune,r36.prune_a4").stdout
+        lines = [ln for ln in out.splitlines() if "probe_offload " in ln or "PROBE_OFFLOAD=" in ln]
+        self.assertTrue(lines, "no probe_offload command in row 36's dry-run")
+        for ln in lines:
+            if ln.lstrip().startswith("---") or "(record" in ln:
+                continue
+            self.assertIn("ZE_AFFINITY_MASK=0,1", ln, ln[:160])
+
     def test_registry_consistent(self):
         reg = tempfile.mktemp(suffix=".tsv")
         try:
@@ -871,7 +882,7 @@ class DriverTest(unittest.TestCase):
                 self.assertTrue(cmds.get(sid), f"{sid}: no commands")
             seen.append(sid)
         self.assertEqual(len(seen), len(set(seen)))
-        g0 = [sid for sid, s in stages.items() if s["sel"] == "g0"]
+        g0 =[sid for sid, s in stages.items() if s["sel"] == "g0"]
         first = [sid for sid, s in stages.items() if s["sel"] != "always"][: len(g0)]
         self.assertEqual(g0, first, "the G0 stages come first")
 
