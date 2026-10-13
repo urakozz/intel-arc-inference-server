@@ -838,7 +838,7 @@ def test_maskeval_all_ones():
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
     line = next(x for x in r.stdout.splitlines() if x.startswith("maskeval "))
-    f = dict(t.split("=", 1) for t in line.split()[2:])
+    f = dict(t.split("=", 1) for t in line.split()[2:] if "=" in t)
     assert float(f["kl_mean"]) == 0.0 and float(f["kl_p99"]) == 0.0 and float(f["argmax"]) == 1.0, line
     j = json.load(open(js))
     assert j["rows"] == 46 and j["kept"] == 1.0, j

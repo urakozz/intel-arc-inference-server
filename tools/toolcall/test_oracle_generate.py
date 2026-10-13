@@ -264,9 +264,13 @@ def test_qwen4exp_mask_reaches_reference():
         r0 = og.moe_runner(snap, "qwen4_exp")
         L, E, k = 4, 16, 4
         routed = [dict() for _ in range(L)]
-        hooks = [layer.mlp.gate.register_forward_hook(
-            lambda _m, _a, out, i=i: [routed[i].__setitem__(e, routed[i].get(e, 0) + 1) for e in out[2].reshape(-1).tolist()])
-            for i, layer in enumerate(r0.ref.model.layers)]
+
+        def count(i):
+            def fn(_m, _a, out):          # observes only: a forward hook returning a value would replace the output
+                for e in out[2].reshape(-1).tolist():
+                    routed[i][e] = routed[i].get(e, 0) + 1
+            return fn
+        hooks = [layer.mlp.gate.register_forward_hook(count(i)) for i, layer in enumerate(r0.ref.model.layers)]
         out0 = {}
         og.greedy_batched(r0.step_many, r0.new_state, [("s", prompt, 6)], 2, set(), r0.argmax,
                           on_done=lambda n, o: out0.__setitem__(n, list(o)))
