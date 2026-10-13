@@ -422,9 +422,81 @@ def test_prune_report():
           f"({row['experts_gb']} GB) fits two cards, 87.5 % does not")
 
 
+# --- P0.7 (Task 4 Step 4): the projection ------------------------------------------------------------------------------
+def test_project_spec_table():
+    """P = 12 GB/s, BW = 590 GB/s, D = 3.712 GB, R = 1.253 GB and spec 22 §2's h reproduce its serial and overlapped
+    t/s columns to 0.1; mix at alpha 0 / 1 is overlapped / serial."""
+    table = {1.00: (118.8, 118.8), 0.99: (106.0, 119.1), 0.95: (73.9, 86.9), 0.90: (53.6, 59.8), 0.80: (34.6, 36.8),
+             0.50: (16.8, 17.1)}
+    for h, (ser, ovl) in table.items():
+        ts = 1e3 / OC.decode_ms(3.712e9, 1.253e9, 590.0, 12.0, h, "serial")
+        to = 1e3 / OC.decode_ms(3.712e9, 1.253e9, 590.0, 12.0, h, "overlapped")
+        assert round(ts, 1) == ser and round(to, 1) == ovl, (h, ts, to)
+        assert OC.decode_ms(3.712e9, 1.253e9, 590, 12, h, "mix", 1.0) == OC.decode_ms(3.712e9, 1.253e9, 590, 12, h, "serial")
+        assert OC.decode_ms(3.712e9, 1.253e9, 590, 12, h, "mix", 0.0) == OC.decode_ms(3.712e9, 1.253e9, 590, 12, h, "overlapped")
+    print("  spec 22 §2's table reproduced to 0.1 t/s (serial and overlapped, h 1.00 .. 0.50)")
+
+
+def _project_inputs(d, h):
+    os.makedirs(d, exist_ok=True)
+    rr = 48 * 10 * 2611200
+    lines = []
+    for dense in ("int4", "bf16"):
+        for devices in (1, 2):
+            for L in (4096, 32768, 131072):
+                first, end = ([0], [48]) if devices == 1 else ([0, 24], [24, 48])
+                cache = [26e9] if devices == 1 else [25.9e9, 24.9e9]
+                lines.append({"max_len": L, "devices": devices, "mtp": True, "prefill": True, "int8_head": True,
+                              "dense": dense, "layers": 48, "experts": 512, "top_k": 10, "expert_bytes": 2611200,
+                              "read_routed": rr, "read_non_routed": 3.712e9 if dense == "int4" else 8.0e9,
+                              "read_mtp_step": 0.845e9, "first": first, "end": end, "cache": cache,
+                              "cache_total": sum(cache), "routed_total": 48 * 512 * 2611200,
+                              "f": sum(cache) / (48 * 512 * 2611200)})
+    open(os.path.join(d, "budget.json"), "w").write("".join("budget-json " + json.dumps(x) + "\n" for x in lines))
+    rows = [{"f": f, "uniform_held": h, "perlayer_held": h - 0.01, "uniform_in": h, "perlayer_in": h}
+            for f in OC.frange("0.30:1.00:0.05")]
+    json.dump({"split": "hash", "rows": rows}, open(os.path.join(d, "curve.json"), "w"))
+    po = ["po info mode=zc dev=0 pairs=4", "po zc dev=0 card=0 P=26 law_summary law=sum alpha=1.000 tA_us=1 tC_us=2 "
+          "P_gbps=12.000 P_marginal_gbps=13.0", "po zc dev=1 card=1 P=26 law_summary law=sum alpha=1.000 tA_us=1 tC_us=2 "
+          "P_gbps=12.000 P_marginal_gbps=13.0", "po zc dev=0 card=0 P=7 law_summary law=max alpha=0.000 tA_us=1 tC_us=2 "
+          "P_gbps=99.000 P_marginal_gbps=99", "po copy dev=both card=all list=regular ordinal=copy shape=256_experts_one "
+          "bytes=1336934400 us=60000.0 aggregate_gbps=22.000"]
+    open(os.path.join(d, "p0.txt"), "w").write("\n".join(po) + "\n")
+    json.dump({"K": [{"K": K, "M": K + 1, "distinct_per_layer": 10.0 * (K + 1) * 0.8} for K in (1, 2, 3, 4)]},
+              open(os.path.join(d, "mtp.json"), "w"))
+    json.dump({"rows": [{"C": C, "f": f, "streamed_gb_per_chunk": (1 - f) * 64.17} for C in (2048, 4096)
+                        for f in OC.frange("0.60:0.90:0.05")]}, open(os.path.join(d, "prefill.json"), "w"))
+
+
+def test_project_stop_flips():
+    """The last line is STOP below 40 t/s and GO-CANDIDATE above (two cards, 32k, ours, the best fill, the measured law
+    - the largest P's - and P per card): h 0.83 projects ~38.6 t/s, h 0.85 ~41.9 (serial, P 12, BW 590)."""
+    py = [sys.executable, os.path.join(_HERE, "offload_curve.py"), "project"]
+    for h, want in ((0.83, "STOP"), (0.85, "GO-CANDIDATE")):
+        d = os.path.join(TMP, f"project-{h}")
+        _project_inputs(d, h)
+        js = os.path.join(d, "project.json")
+        r = subprocess.run(py + ["--budget", os.path.join(d, "budget.json"), "--p0", os.path.join(d, "p0.txt"), "--curve",
+                                 os.path.join(d, "curve.json"), "--mtp", os.path.join(d, "mtp.json"), "--prefill",
+                                 os.path.join(d, "prefill.json"), "--bw", "590", "--json", js],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+        last = r.stdout.strip().splitlines()[-1]
+        assert last.startswith(want + ":"), last
+        j = json.load(open(js))
+        assert j["verdict"] == want and j["law"] == "serial" and j["P"] == {"0": 12.0, "1": 12.0}, (j["law"], j["P"])
+        D = 3.712e9 + OC.attn_bytes(32768)
+        tps = 1e3 / OC.decode_ms(D, 48 * 10 * 2611200, 590.0, 12.0, h, "serial")
+        assert abs(j["stop_inputs"]["tps"] - tps) < 1e-9, (j["stop_inputs"], tps)
+        assert j["stop_inputs"]["policy"] == "uniform"                     # the better of the two held-out fills
+        assert {m["K"] for m in j["mtp"]} == {1, 2, 3} and all("PROPOSED" in m["accept_source"] for m in j["mtp"])
+        assert [p["C"] for p in j["prefill"]] == [2048, 4096] and j["prefill"][1]["derived"]
+        print(f"  h {h}: {last[:90]}...")
+
+
 TESTS = [test_curve_analytic, test_holdout_disjoint, test_swap_never_lands_is_static, test_mtp_unions,
          test_prefill_repeated_row, test_counts_and_profile_roundtrip, test_cli_synthetic, test_tiny_model_traces,
-         test_reap_masks, test_reap_folds, test_prune_report]
+         test_reap_masks, test_reap_folds, test_prune_report, test_project_spec_table, test_project_stop_flips]
 
 
 def main() -> None:

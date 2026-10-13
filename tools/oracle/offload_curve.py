@@ -1067,9 +1067,10 @@ def main(argv=None) -> None:
     p.add_argument("--kfold", type=int, default=4)
     p.add_argument("--a4-bar", type=float, help="decision 9's bar on the held-out A4 accuracy (prints the pick)")
     p.add_argument("--json")
+    project_args(sub)
     a = ap.parse_args(argv)
     {"counts": cmd_counts, "curve": cmd_curve, "swap": cmd_swap, "mtp": cmd_mtp, "prefill": cmd_prefill,
-     "profile": cmd_profile, "reap": cmd_reap, "prune-report": cmd_prune_report}[a.cmd](a)
+     "profile": cmd_profile, "reap": cmd_reap, "prune-report": cmd_prune_report, "project": cmd_project}[a.cmd](a)
 
 
 if __name__ == "__main__":
