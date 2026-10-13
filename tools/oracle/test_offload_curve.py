@@ -392,8 +392,12 @@ def test_prune_report():
     os.makedirs(ev, exist_ok=True)
     os.makedirs(a4d, exist_ok=True)
     names = [f"t{i}_define-{f}" for i in range(1, 3) for f in ("box", "step", "loader", "openai")]
-    folds = OC.a4_folds(names, 4)
-    call = "<tool_call>\n<function=read>\n<parameter=path>\na.py\n</parameter>\n</function>\n</tool_call>"
+    # the folds reap wrote (folds.json) - deliberately NOT a4_folds' order over these names: prune-report must read them
+    folds = {n: i % 4 for i, n in enumerate(sorted(names))}
+    assert folds != OC.a4_folds(names, 4)
+    fj = os.path.join(d, "folds.json")
+    json.dump({"kfold": 4, "folds": folds}, open(fj, "w"))
+    call ="<tool_call>\n<function=read>\n<parameter=path>\na.py\n</parameter>\n</function>\n</tool_call>"
     other = "<tool_call>\n<function=grep>\n<parameter=q>\nx\n</parameter>\n</function>\n</tool_call>"
     for n in names:
         open(os.path.join(a4d, f"{n}.bf16.txt"), "w").write(call)
@@ -408,9 +412,16 @@ def test_prune_report():
     open(budget, "w").write(json.dumps({"max_len": 32768, "devices": 2, "mtp": True, "prefill": True, "dense": "int4",
                                         "cache_total": 50764655176, "routed_total": 64172851200, "f": 0.791061,
                                         "experts": 512, "layers": 48, "expert_bytes": 2611200}) + "\n")
-    r = subprocess.run([sys.executable, os.path.join(_HERE, "offload_curve.py"), "prune-report", "--dir", ev, "--a4",
-                        a4d, "--budget", budget, "--json", os.path.join(d, "prune.json")], capture_output=True, text=True)
+    cmd = [sys.executable, os.path.join(_HERE, "offload_curve.py"), "prune-report", "--dir", ev, "--a4", a4d,
+           "--budget", budget, "--folds", fj, "--json", os.path.join(d, "prune.json")]
+    r = subprocess.run(cmd, capture_output=True, text=True)
     assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+    # a scenario the folds do not list is refused (its held-out run would be graded on a mask that saw it)
+    fj2 = os.path.join(d, "folds-short.json")
+    json.dump({"kfold": 4, "folds": {n: v for n, v in folds.items() if n != names[0]}}, open(fj2, "w"))
+    r2 = subprocess.run(cmd[:cmd.index("--folds") + 1] + [fj2] + cmd[cmd.index("--folds") + 2:], capture_output=True,
+                        text=True)
+    assert r2.returncode != 0 and names[0] in (r2.stdout + r2.stderr), r2.stdout[-800:] + r2.stderr[-800:]
     j = json.load(open(os.path.join(d, "prune.json")))
     row = {x["kept"]: x for x in j["rows"]}[0.5]
     n0 = sum(1 for n in names if folds[n] == 0)
@@ -494,9 +505,76 @@ def test_project_stop_flips():
         print(f"  h {h}: {last[:90]}...")
 
 
+def test_project_per_device_and_swaps():
+    """Each card's h is scored on its own layers at its own f (curve --budget writes per_device); the swap simulation's
+    gain applies only where its f matches the card's, with its copy traffic charged to the link."""
+    d = os.path.join(TMP, "project-pd")
+    tr = os.path.join(d, "traces")
+    L, k, E, T = 4, 2, 64, 200
+    rng = np.random.default_rng(9)
+    for i in range(8):                       # sources in both halves: layers 0-1 always experts 0-1, layers 2-3 uniform
+        ids = np.zeros((T, L, k), np.int64)
+        ids[:, :2, :] = [0, 1]
+        for t in range(T):
+            for l in (2, 3):
+                ids[t, l] = rng.choice(E, k, replace=False)
+        write_trace(tr, f"src{i}", ids, experts=E)
+    eb, P = 2611200, 12.0
+    routed_dev = 2 * E * eb                  # two layers a card
+    lines = []
+    for L_ctx, f_card in ((4096, 0.9), (32768, 0.5)):
+        cache = [f_card * routed_dev, f_card * routed_dev]
+        lines.append({"max_len": L_ctx, "devices": 2, "mtp": True, "prefill": True, "int8_head": True, "dense": "int4",
+                      "layers": L, "experts": E, "top_k": k, "expert_bytes": eb, "read_routed": L * k * eb,
+                      "read_non_routed": 1.0e9, "read_mtp_step": 0.2e9, "first": [0, 2], "end": [2, 4], "cache": cache,
+                      "cache_total": sum(cache), "routed_total": L * E * eb, "f": f_card})
+    budget = os.path.join(d, "budget.json")
+    open(budget, "w").write("".join("budget-json " + json.dumps(x) + "\n" for x in lines))
+    py = [sys.executable, os.path.join(_HERE, "offload_curve.py")]
+    cj = os.path.join(d, "curve.json")
+    r = subprocess.run(py + ["curve", "--traces", tr, "--f", "0.1:1.0:0.1", "--budget", budget, "--json", cj],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+    c = json.load(open(cj))
+    b32 = next(x for x in c["budget"] if x["max_len"] == 32768)
+    pd = b32["per_device"]
+    assert len(pd) == 2 and pd[0]["h_uniform"] == 1.0 and pd[1]["h_uniform"] < 0.75, pd
+    sw = os.path.join(d, "swap.json")
+    json.dump({"f": 0.5, "fill": "uniform", "copy_ms": 0.2, "step_ms": 25, "static": 0.6,
+               "rows": [{"S": 4, "B_mb": 2.6112, "W": 64, "h": 0.7, "gain": 0.1, "moved_per_step": 0.25}]},
+              open(sw, "w"))
+    p0 = os.path.join(d, "p0.txt")
+    open(p0, "w").write("po zc dev=0 card=0 P=26 law_summary law=sum alpha=1.000 tA_us=1 tC_us=2 P_gbps=12.000 "
+                        "P_marginal_gbps=1\npo zc dev=1 card=1 P=26 law_summary law=sum alpha=1.000 tA_us=1 tC_us=2 "
+                        "P_gbps=12.000 P_marginal_gbps=1\n")
+    js = os.path.join(d, "project.json")
+    r = subprocess.run(py + ["project", "--budget", budget, "--p0", p0, "--curve", cj, "--swap", sw, "--bw", "590",
+                             "--json", js], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+    j = json.load(open(js))
+    rows = {x["max_len"]: x for x in j["rows"]}
+    assert "swaps" not in rows[4096]["policy"], rows[4096]           # f 0.9: not where the swaps were simulated
+    assert "swaps" in rows[32768]["policy"], rows[32768]
+    assert rows[32768]["h"][0] == 1.0                                 # card 0's own layers, not the pooled curve
+    # the time: per card, the static (or swapped) h on its own layers, + the swap copies on the link
+    want = 0.0
+    for i in range(2):
+        hs = pd[i]
+        h_static = max(hs["h_uniform"], hs["h_perlayer"])
+        h_sw = min(1.0, hs["h_uniform"] + 0.1)
+        Ri = 2 * k * eb
+        Di = (1.0e9 + OC.attn_bytes(32768)) * 0.5
+        t_static = OC.decode_ms(Di, Ri, 590.0, P, h_static, "serial")
+        t_swap = OC.decode_ms(Di, Ri, 590.0, P, h_sw, "serial") + 0.25 * 0.5 * eb / P / 1e6
+        want += min(t_static, t_swap)
+    assert abs(rows[32768]["ms"] - want) < 1e-9, (rows[32768]["ms"], want)
+    print(f"  per card h {rows[32768]['h']} on its own layers; swaps applied at f 0.5 only, their copies charged")
+
+
 TESTS = [test_curve_analytic, test_holdout_disjoint, test_swap_never_lands_is_static, test_mtp_unions,
          test_prefill_repeated_row, test_counts_and_profile_roundtrip, test_cli_synthetic, test_tiny_model_traces,
-         test_reap_masks, test_reap_folds, test_prune_report, test_project_spec_table, test_project_stop_flips]
+         test_reap_masks, test_reap_folds, test_prune_report, test_project_spec_table, test_project_stop_flips,
+         test_project_per_device_and_swaps]
 
 
 def main() -> None:

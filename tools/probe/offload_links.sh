@@ -163,6 +163,25 @@ if [ $self = 1 ]; then
   rm -f "$dmi"
   grep -q 'dimms=2 configured_mts=2133 channels=2' <<< "$m" || { echo "self-test: memory '$m'"; ok=0; }
   grep -q '= 2 x 2133 MT/s x 8 B = 34.1 GB/s' <<< "$m" || { echo "self-test: ceiling '$m'"; ok=0; }
+  # without root lspci hides LnkCap / LnkSta: the world-readable sysfs link files answer instead (a fake tree here,
+  # dev1's root port at Gen3 x4 - the STOP must still be seen)
+  tmp=$(mktemp "${TMPDIR:-/tmp}/offload_links_nolnk.XXXXXX")
+  sfs=$(mktemp -d "${TMPDIR:-/tmp}/offload_links_sysfs.XXXXXX")
+  grep -v -E 'LnkCap:|LnkSta:' "$fx" > "$tmp"
+  for b in 0000:00:02.0:8.0:16:8.0:16 0000:02:00.0:8.0:16:16.0:16 0000:00:03.0:8.0:4:8.0:16 0000:06:00.0:8.0:8:16.0:16; do
+    IFS=: read -r d1 d2 d3 cs cw ms mw <<< "$b"
+    mkdir -p "$sfs/$d1:$d2:$d3"
+    echo "$cs GT/s PCIe" > "$sfs/$d1:$d2:$d3/current_link_speed"
+    echo "$cw" > "$sfs/$d1:$d2:$d3/current_link_width"
+    echo "$ms GT/s PCIe" > "$sfs/$d1:$d2:$d3/max_link_speed"
+    echo "$mw" > "$sfs/$d1:$d2:$d3/max_link_width"
+  done
+  lspci_file=$tmp
+  out3=$(OFFLOAD_SYSFS=$sfs links idle); rc3=$?
+  rm -rf "$tmp" "$sfs"
+  grep -q '^links: dev0 Gen3 x16, dev1 Gen3 x4' <<< "$out3" || { echo "self-test: the sysfs fallback read '$(grep '^links:' <<< "$out3")'"; ok=0; }
+  grep -q 'role=root cap=Gen3 x16 sta=Gen3 x4 state=idle (sysfs)' <<< "$out3" || { echo "self-test: no sysfs-marked line"; ok=0; }
+  [ "$rc3" = 3 ] || { echo "self-test: exit $rc3 on the sysfs x4 (want 3)"; ok=0; }
   echo "$out" | sed 's/^/  /'
   if [ $ok = 1 ]; then echo "offload_links self-test: OK"; exit 0; fi
   echo "offload_links self-test: FAIL"; exit 1
