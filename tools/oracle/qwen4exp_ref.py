@@ -1519,12 +1519,22 @@ def cmd_maskeval(a) -> None:
         masks = todo
         if not masks:
             return
-    model, pf, lazy = build_streamed(a.snapshot, tc, PleTable(ple_source(a.snapshot, a.ple), tc))
+    ple = PleTable(ple_source(a.snapshot, a.ple), tc)
     if a.golden:
         with safe_open(a.golden, framework="pt") as f:
             meta = dict(f.metadata() or {})
             ref_rows = f.get_tensor("logits").float()
             gen = f.get_tensor("tokens").tolist()
+        # the golden set's own configuration, or the KL would charge a PLE / depth difference to the mask
+        if meta.get("ple", ple.kind) != ple.kind:
+            die(f"maskeval: {a.golden} was made with the PLE from {meta.get('ple')!r}, this run reads {ple.kind!r} "
+                f"(--ple {a.ple}): pass the golden set's PLE source")
+        if meta.get("layers") not in (None, str(tc.num_hidden_layers)):
+            die(f"maskeval: {a.golden} has {meta['layers']} layers, this run {tc.num_hidden_layers} (--layers)")
+        if meta.get("expert_mask", "none") != "none":
+            die(f"maskeval: {a.golden} is itself a masked run ({meta['expert_mask']}): the reference must be the full model")
+    model, pf, lazy = build_streamed(a.snapshot, tc, ple)
+    if a.golden:
         ids = read_ids(_repo_path(a.prompt or meta["prompt"]))
         if len(ids) != int(meta["n_prompt"]):
             die(f"{a.golden}: n_prompt {meta['n_prompt']}, the prompt has {len(ids)} ids")
@@ -1540,11 +1550,16 @@ def cmd_maskeval(a) -> None:
         if a.full_cache and os.path.exists(a.full_cache):
             with safe_open(a.full_cache, framework="pt") as f:
                 ref_rows = f.get_tensor("logits").float()
+                cmeta = dict(f.metadata() or {})
+            if cmeta.get("ple", ple.kind) != ple.kind:
+                die(f"maskeval: {a.full_cache} holds the full rows with the PLE from {cmeta.get('ple')!r}, this run "
+                    f"reads {ple.kind!r}: remove it or pass that PLE source")
         else:
             ref_rows = replay_rows(model, seq, chunk, [], T - 1)[:C]
             if a.full_cache:
                 save_file({"logits": ref_rows.to(torch.bfloat16).contiguous()}, a.full_cache,
-                          metadata={"prompt": os.path.abspath(a.prompt), "cont": os.path.abspath(a.cont)})
+                          metadata={"prompt": os.path.abspath(a.prompt), "cont": os.path.abspath(a.cont),
+                                    "ple": ple.kind, "layers": str(tc.num_hidden_layers)})
             ref_rows = ref_rows.to(torch.bfloat16).float()   # what the cache holds (the model's logits are bf16)
 
         def masked_rows():
