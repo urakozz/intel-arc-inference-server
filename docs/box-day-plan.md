@@ -38,8 +38,10 @@ path (§3) is ~36 h. The opt-in stages (§3.3) are extra: tier 1 alone 7-10 h, e
 
 **Added 2026-10-13: Session 9b** for rows 30-34 (spec 21, Qwen3.8-Flash-Next), merged after this
 plan was written - their 32 default stages were in no session (checked against `--list`: every
-other default stage is). With 9b, sessions 1-10 run each of today's 207 default stages once; 9b
-adds ~3.5-6 h (est.), plus its CPU-lane data (§1.6) and, optionally, Intel's real checkpoint (§1.3).
+other default stage is). **Session 9c** (row 36, spec 22's expert-offload probe, plan 22a) follows it:
+it needs 9b's data and binaries. With 9b and 9c, sessions 1-10 run each of today's 221 default stages
+once; 9b adds ~3.5-6 h (est.) plus its CPU-lane data (§1.6) and, optionally, Intel's real checkpoint
+(§1.3); 9c ~3-5 h of GPU time (est.) plus its opt-in CPU stages.
 
 Row 20 (Kolibri-1 spec 20a, the quantisation) has no runbook stage and needs spec 20
 decision 1; it is not part of the box day. Everything on the real Kolibri int4 checkpoint

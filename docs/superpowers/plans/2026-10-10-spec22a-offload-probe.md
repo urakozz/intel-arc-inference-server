@@ -1,7 +1,7 @@
 # Spec 22a - the expert-offload probe (P0): the links, zero-copy reads, pinned capacity, the hit-rate curve, the pruning curve, the projection
 
 **Status (2026-10-13): Tasks 1-4 built on the Mac and Task 5 Step 1 in (branch `spec22a-offload-probe`); Task 5
-Steps 2-7 are the box's - queue row 36, box-day plan Session 9b.** Everything that can be written and checked without
+Steps 2-7 are the box's - queue row 36, box-day plan Session 9c.** Everything that can be written and checked without
 the box is (the Mac gates below, measured); every number is the box's. Plans 22b-22d begin only on the operator's go
 after this plan's record (spec 22 §3, the stopping rule); plan 22m (the coding mask) begins on decision 9, whatever the
 tier's verdict.
