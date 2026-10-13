@@ -455,9 +455,14 @@ struct ExpertBudget {
   std::array<size_t, kPpDevices> non_routed{};   // per device: plan(...) minus its layers' gate_up + down blocks
   std::array<size_t, kPpDevices> cache{};        // max(0, capacity - reserve - non_routed)
   std::array<uint32_t, kPpDevices> first{}, end{};
-  uint32_t layers = 0, experts = 0;
+  uint32_t layers = 0, experts = 0, top_k = 0;
   size_t expert_bytes = 0;                       // one expert: gate_up + down blocks (2,611,200 B at int4 g64)
   size_t routed_total = 0;                       // layers x 512 x (1,740,800 + 870,400)
+  // Spec 22 §2's byte model per decode token (derived from loader::q4_layer_read_per_token - the projection reads
+  // these, never a second formula): R = layers x top_k x expert_bytes; D = every layer's other reads + the final
+  // mixer + lm_head (KV / indexer reads excluded: they scale with the context); an MTP draft step's read of the
+  // resident head (its layer at top_k experts, fc, final mixer, lm_head).
+  size_t read_routed = 0, read_non_routed = 0, read_mtp_step = 0;
   double f() const;                              // min(1, sum(cache) / routed_total): the resident fraction
 };
 ExpertBudget expert_budget(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
