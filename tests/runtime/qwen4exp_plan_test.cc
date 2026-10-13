@@ -12,9 +12,17 @@
 //   5. max_len_that_fits, describe's text, the host PLE table's bytes;
 //   6. spec 21c: the decode list's launch counts (779 at 48 layers on one card, eager, two cards, peer, the
 //      injected run, the synthetic's 75), the decode scratch at 262144 (the score row is the term that scales),
-//      the plan with the scratch at --layers 18 (one card) and 38 (two) at 32768, the full model refused.
+//      the plan with the scratch at --layers 18 (one card) and 38 (two) at 32768, the full model refused;
+//   7. spec 22a Task 1: the routed-expert budget (expert_budget) - for the published 48 layers, ours and Intel's
+//      forms, one and two 32.53 GB cards, the 1.5 GB reserve, the int8 head, max_len 4096 / 32768 / 131072 / 262144,
+//      with and without the MTP head and the prefill scratch: non_routed + the device's routed blocks == plan()'s
+//      total byte for byte, cache = capacity - reserve - non_routed (0 below), f = min(1, sum(cache) / routed_total).
+//      Every case prints `budget-json {...}`; `--budget-json FILE` also writes them to FILE, one a line (the
+//      projection's input, tools/oracle/offload_curve.py project).
+#include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -66,7 +74,16 @@ bool any_fit(const Qwen4ExpDesc& d, uint32_t n, uint32_t devices, uint32_t max_l
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  const char* budget_path = nullptr;
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--budget-json") == 0 && i + 1 < argc) {
+      budget_path = argv[++i];
+    } else {
+      std::fprintf(stderr, "usage: qwen4exp_plan_test [--budget-json FILE]\n");
+      return 2;
+    }
+  }
   const Qwen4ExpDesc& ours = model::qwen4exp();
   const Qwen4ExpDesc intel = intel_desc();
   const std::array<size_t, runtime::kPpDevices> caps = {kCard, kCard};
@@ -304,6 +321,72 @@ int main() {
     std::printf("21d: Intel's forms at 32768 with the int8 head: layers_that_fit one card %u decode-only / %u with "
                 "prefill, two cards %u / %u; max_len auto --layers 18 one card %u decode-only / %u with prefill; --layers "
                 "38 two cards (split %u) %u with prefill\n", n1d, n1p, n2d, n2p, len_d, len_p, p38.split, len_2p);
+  }
+  // --- 7. spec 22a: the routed-expert budget ------------------------------------------------------------------
+  double f_ours_32k = 0;
+  {
+    std::FILE* out = budget_path ? std::fopen(budget_path, "w") : nullptr;
+    if (budget_path && !out) {
+      std::fprintf(stderr, "qwen4exp_plan_test: cannot write %s\n", budget_path);
+      return 1;
+    }
+    const size_t block = loader::q4_gate_up_block_bytes(ours) + loader::q4_down_block_bytes(ours);
+    CHECK_EQ(block, size_t(1740800) + 870400);
+    CHECK_EQ(loader::q4_layer_bytes(ours, 0).experts(), size_t(1336934400));
+    size_t lines = 0;
+    for (const Qwen4ExpDesc* d : {&ours, &intel})
+      for (uint32_t devices : {1u, 2u})
+        for (uint32_t L : {4096u, 32768u, 131072u, 262144u})
+          for (bool mtp : {false, true})
+            for (bool prefill : {false, true}) {
+              const Q4Placement pl = devices == 1 ? Q4Placement::one(*d)
+                                                  : Q4Placement::two(*d, rq::pp_split(*d, L, true, mtp, prefill).split);
+              const std::vector<rq::DevicePlan> p = rq::plan(*d, pl, L, true, mtp, false, prefill);
+              const rq::ExpertBudget b = rq::expert_budget(*d, pl, L, true, mtp, prefill, caps, kReserve);
+              CHECK(b.max_len == L && b.devices == devices && b.mtp == mtp && b.prefill == prefill && b.int8_head);
+              CHECK_EQ(b.routed_total, size_t(d->layers) * d->experts * block);
+              size_t sum_cache = 0;
+              for (uint32_t dev = 0; dev < devices; ++dev) {
+                size_t routed = 0;
+                for (uint32_t l = pl.first(dev); l < pl.end(dev); ++l)
+                  routed += size_t(d->experts) * (loader::q4_gate_up_block_bytes(*d) + loader::q4_down_block_bytes(*d));
+                CHECK_EQ(b.first[dev], pl.first(dev));
+                CHECK_EQ(b.end[dev], pl.end(dev));
+                CHECK_EQ(b.non_routed[dev] + routed, p[dev].total());   // byte for byte
+                const size_t used = b.non_routed[dev] + kReserve;
+                CHECK_EQ(b.cache[dev], used >= caps[dev] ? size_t(0) : caps[dev] - used);
+                sum_cache += b.cache[dev];
+              }
+              for (uint32_t dev = devices; dev < runtime::kPpDevices; ++dev)
+                CHECK(b.cache[dev] == 0 && b.non_routed[dev] == 0);
+              const double f = std::min(1.0, double(sum_cache) / double(b.routed_total));
+              CHECK_NEAR(b.f(), f, 1e-12);
+              CHECK(b.f() > 0 && b.f() < 1);   // the full model fits neither one nor two cards whole
+              const std::string j = rq::budget_json(b);
+              CHECK(j.front() == '{' && j.back() == '}' && j.find('\n') == std::string::npos);
+              CHECK(j.find("\"max_len\":" + std::to_string(L) + ",") != std::string::npos);
+              CHECK(j.find("\"devices\":" + std::to_string(devices) + ",") != std::string::npos);
+              CHECK(j.find(std::string("\"dense\":\"") + (d == &ours ? "int4" : "bf16") + "\"") != std::string::npos);
+              CHECK(j.find("\"cache\":[") != std::string::npos && j.find("\"f\":") != std::string::npos);
+              std::printf("budget-json %s\n", j.c_str());
+              if (out) std::fprintf(out, "%s\n", j.c_str());
+              ++lines;
+              if (d == &ours && devices == 2 && L == 32768 && mtp && prefill) f_ours_32k = b.f();
+            }
+    CHECK_EQ(lines, size_t(64));
+    // Monotone in max_len: every term of the plan is non-decreasing, so the cache is not increasing.
+    for (bool mtp : {false, true}) {
+      const auto f_at = [&](uint32_t L) {
+        return rq::expert_budget(ours, Q4Placement::two(ours, rq::pp_split(ours, L, true, mtp, true).split), L, true,
+                                 mtp, true, caps, kReserve).f();
+      };
+      CHECK(f_at(4096) >= f_at(32768) && f_at(32768) >= f_at(131072) && f_at(131072) >= f_at(262144));
+    }
+    if (out) std::fclose(out);
+    // Spec 22 section 2's ~0.83 at 32k on two cards (derived there by hand); plan 22a's record states the difference.
+    std::printf("spec 22a: f (ours, two cards, 32768, int8 head + MTP head + prefill scratch) = %.4f against spec 22 "
+                "section 2's ~0.83 (%+.4f)%s%s\n", f_ours_32k, f_ours_32k - 0.83, budget_path ? "; budget lines -> " : "",
+                budget_path ? budget_path : "");
   }
   std::printf("qwen4exp_plan_test OK: N at 32768 with Intel's forms = %u on one card, %u on two; the host PLE table "
               "%zu B (%.2f GB, bf16 scales) / %zu B (%.2f GB, f32); the full model refused naming spec 22\n",
