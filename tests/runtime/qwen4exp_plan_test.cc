@@ -374,6 +374,21 @@ int main(int argc, char** argv) {
               if (d == &ours && devices == 2 && L == 32768 && mtp && prefill) f_ours_32k = b.f();
             }
     CHECK_EQ(lines, size_t(64));
+    // The per-token byte model the projection reads (spec 22 §2's D and R; spec 21 §3's table): R = 48 x 10 experts,
+    // R + D = every layer's read per token + the final mixer + the int8 lm_head; ours ~3.712 GB of D (spec 21 §3).
+    for (const Qwen4ExpDesc* d : {&ours, &intel}) {
+      const rq::ExpertBudget b = rq::expert_budget(*d, Q4Placement::one(*d), 32768, true, true, true, caps, kReserve);
+      size_t reads = 0;
+      for (uint32_t l = 0; l < d->layers; ++l) reads += loader::q4_layer_read_per_token(*d, l);
+      CHECK_EQ(b.read_routed, size_t(48) * 10 * block);
+      CHECK_EQ(b.read_non_routed + b.read_routed,
+               reads + loader::q4_final_mixer_bytes(*d) + loader::q4_lm_head_bytes(*d, true));
+      CHECK(b.read_mtp_step > loader::q4_lm_head_bytes(*d, true) && b.read_mtp_step < loader::q4_mtp_bytes(*d) +
+                                                                                       loader::q4_lm_head_bytes(*d, true));
+      std::printf("spec 22a: per decode token (%s forms): R %.3f GB, D %.3f GB (spec 21 section 3: 1.253 / 3.712 for "
+                  "ours), an MTP draft step %.3f GB\n", d == &ours ? "ours" : "Intel's", b.read_routed / 1e9,
+                  b.read_non_routed / 1e9, b.read_mtp_step / 1e9);
+    }
     // Monotone in max_len: every term of the plan is non-decreasing, so the cache is not increasing.
     for (bool mtp : {false, true}) {
       const auto f_at = [&](uint32_t L) {

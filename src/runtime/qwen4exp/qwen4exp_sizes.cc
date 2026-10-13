@@ -461,6 +461,15 @@ ExpertBudget expert_budget(const model::Qwen4ExpDesc& d, const model::Q4Placemen
   b.experts = d.experts;
   b.expert_bytes = loader::q4_gate_up_block_bytes(d) + loader::q4_down_block_bytes(d);
   b.routed_total = size_t(d.layers) * d.experts * b.expert_bytes;
+  b.top_k = d.top_k;
+  b.read_routed = size_t(d.layers) * d.top_k * b.expert_bytes;
+  size_t layer_reads = 0;
+  for (uint32_t l = 0; l < d.layers; ++l) layer_reads += loader::q4_layer_read_per_token(d, l);
+  const size_t head = loader::q4_final_mixer_bytes(d) + loader::q4_lm_head_bytes(d, int8_head);
+  b.read_non_routed = layer_reads - b.read_routed + head;
+  const loader::Q4LayerBytes mb = loader::q4_mtp_layer_bytes(d);
+  b.read_mtp_step = mb.total() - mb.experts() + mb.experts() / d.experts * d.top_k + loader::q4_mtp_fc_offsets(d).total +
+                    head;
   for (uint32_t dev = 0; dev < p.devices; ++dev) {
     size_t routed = 0;
     for (uint32_t l = p.first(dev); l < p.end(dev); ++l) routed += loader::q4_layer_bytes(d, l).experts();
@@ -492,8 +501,11 @@ std::string budget_json(const ExpertBudget& b) {
                   model::q4_form_name(b.forms.dense) + "\",\"shared\":\"" + model::q4_form_name(b.forms.shared) +
                   "\",\"mtp_experts\":\"" + model::q4_form_name(b.forms.mtp_experts) +
                   "\",\"expert_group\":" + std::to_string(b.forms.expert_group) + ",\"layers\":" +
-                  std::to_string(b.layers) + ",\"experts\":" + std::to_string(b.experts) + ",\"expert_bytes\":" +
-                  std::to_string(b.expert_bytes) + ",\"reserve\":" + std::to_string(b.reserve) +
+                  std::to_string(b.layers) + ",\"experts\":" + std::to_string(b.experts) + ",\"top_k\":" +
+                  std::to_string(b.top_k) + ",\"expert_bytes\":" + std::to_string(b.expert_bytes) +
+                  ",\"read_routed\":" + std::to_string(b.read_routed) + ",\"read_non_routed\":" +
+                  std::to_string(b.read_non_routed) + ",\"read_mtp_step\":" + std::to_string(b.read_mtp_step) +
+                  ",\"reserve\":" + std::to_string(b.reserve) +
                   ",\"capacity\":" + arr(b.capacity) + ",\"first\":" + arr(b.first) + ",\"end\":" + arr(b.end) +
                   ",\"non_routed\":" + arr(b.non_routed) + ",\"cache\":" + arr(b.cache) + ",\"cache_total\":" +
                   std::to_string(sum) + ",\"routed_total\":" + std::to_string(b.routed_total) + ",\"f\":" + f + "}";
