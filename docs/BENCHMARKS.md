@@ -108,20 +108,43 @@ directly rather than through `llama-benchy`'s `pp` figure: **2544.043 ms for
 4096 tokens, 1610.04 t/s**. The decode baseline is **31.01 t/s** on vLLM
 `0.28.1rc1.dev396`.
 
-### Why `llama-benchy`'s own `pp` figure is unusable against our server
+### `llama-benchy`'s own `pp` figure against our server: fixed 2026-09-27
 
-Not a defect, a structural mismatch. `llama-benchy` derives
-`pp_throughput = prompt_tokens / (ttfr - latency)`, and `ttfr` is the arrival
-time of the first SSE frame carrying `choices` at all. `b70-serve` writes the
-role-delta frame before `generate()` starts, which is correct, spec-compliant,
-anti-buffering behaviour that `protocol_test.cc` asserts on directly. So `ttfr`
-measures time-to-role-frame, not time-to-first-token, and the derived `pp`
-comes out in the millions of tokens per second.
+`llama-benchy` derives `pp_throughput = prompt_tokens / (ttfr - latency)`, and `ttfr` is the
+arrival time of the first SSE frame carrying `choices` at all. Until a811ad1 (2026-09-27)
+`b70-serve` wrote the role-delta frame before `generate()` started, so `ttfr` measured
+time-to-role-frame and the derived `pp` came out in the millions of tokens per second. Since
+a811ad1 the role frame goes out with the first delta, after prefill, as vLLM sends it, and
+`llama-benchy`'s `pp` reads the same way for both servers. `tg_throughput` was never affected.
+The matched prefill baseline above (1610.04 t/s) predates the fix and was measured directly: a
+non-streaming `/v1/completions` request, `max_tokens: 1`, over a prompt our own tokenizer counts
+as exactly 4096 tokens.
 
-`tg_throughput` is unaffected: it comes from streamed content-chunk timestamps
-and a token count, not from `ttfr`. Prefill over HTTP is measured directly
-instead, with a non-streaming `/v1/completions` request, `max_tokens: 1`, over
-a prompt our own tokenizer counts as exactly 4096 tokens.
+### llama-benchy comparisons (queue row 41)
+
+One client, one set of flags, one card for every server, so these rows compare with vLLM's and
+with tables others publish. They are **HTTP-inclusive** and sit beside, never replace, the
+engine-internal records in the sections below. Runbook `r41.ours`, `r41.vllm`, `r41.vllm_mtp`
+(box-day Session 6c, idle box, device 0); servers `tools/probe/serve_benchy.sh` and
+`tools/probe/vllm_benchy.sh`; llama-benchy pinned at 0.4.0 (`BENCHY_VERSION`); Qwen3.8 int4 g64
+(`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`) for every arm.
+
+| matrix | llama-benchy flags |
+|---|---|
+| A | `--pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md` (the usual published form; a repeated prompt may hit a server's prefix cache) |
+| B | A + `--no-cache` (the fair cross-engine reading) |
+| D | `--pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2 --no-cache --format md` (agentic depth) |
+
+| arm | server | A | B | D |
+|---|---|---|---|---|
+| b70-serve `--mtp 0` | int8 head, bf16 KV, `--max-len 40960` | pending | pending | pending |
+| b70-serve `--mtp auto` | the same, MTP head on | pending | pending | pending |
+| vLLM, no speculation | recorded baseline flags, bf16 KV, `--max-num-seqs 8` | pending | pending | pending |
+| vLLM MTP-4, fp8 KV | the same + `--speculative-config` mtp 4, `--kv-cache-dtype fp8` | pending | pending | pending |
+
+b70-serve has no batched decode yet (spec 13b / 13c): its concurrency 2 / 4 / 8 cells are requests
+served one after another, recorded as the baseline batching has to beat. Every vLLM cell names the
+version string `vllm_benchy.sh` prints.
 
 ## Prefill
 
