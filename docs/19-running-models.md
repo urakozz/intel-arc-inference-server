@@ -74,11 +74,11 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model <served-name> \
     --pp 4096 --tg 256 --concurrency 1 --depth 1 --no-cache --exact-tg --latency-mode generation
 ```
 
-Read its `tg` figure. Its own `pp` figure is meaningless against `b70-serve`: the server
-sends the role frame before it starts generating, so llama-benchy times the role frame
-and reports millions of tokens per second (docs/BENCHMARKS.md, "Why llama-benchy's own pp
-figure is unusable"). Use `e2e_ttft` instead, as `tools/serve_bench.sh` does, or
-`b70-decode --bench --prefill-length` for the device-side prefill time.
+Both its `tg` and its `pp` figures read the same way as vLLM's: since 2026-09-27 the server
+sends the role frame with the first token, after prefill, as vLLM does (docs/BENCHMARKS.md,
+"llama-benchy's own pp figure against our server"). Its `pp` is HTTP-inclusive;
+`b70-decode --bench --prefill-length` gives the device-side prefill time. The same-flags
+comparison against vLLM is queue row 41 (docs/BENCHMARKS.md, "llama-benchy comparisons").
 
 **Token ids for `b70-decode --ids`** are whitespace-separated, made with the checkpoint's
 own tokenizer (needs `transformers`; `<snapshot>` is the snapshot directory in the cache):
