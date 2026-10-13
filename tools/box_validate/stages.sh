@@ -2639,6 +2639,43 @@ st_r35_per_class() {
 }
 
 # ======================================================================================
+row 41 "the llama-benchy comparison matrix (operator, 2026-10-13): b70-serve and vLLM through one client, one set of flags, one card - Qwen3.8 int4 g64, every engine served the same way so the rows compare with numbers others publish"
+rownote 41 "One matrix, every arm: llama-benchy pinned (BENCHY_VERSION, default 0.4.0), A = --pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md verbatim (the flags such tables are usually published with - no --no-cache, so a repeated prompt can hit a server's prefix cache: b70-serve's and vLLM's are on by default), B = A with --no-cache (the fair cross-engine reading), D = --pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2 --no-cache (agentic depth). HTTP-inclusive: these rows sit beside, never replace, the engine-internal records (docs/BENCHMARKS.md 'llama-benchy comparisons')."
+rownote 41 "Opt-in and timed: run on an idle box (box-day plan Session 6c, after Session 6), device 0, never with a container or the CPU lane up. b70-serve has no batched decode yet (spec 13b / 13c): its concurrency 2 / 4 / 8 rows are requests served one after another - recorded as the baseline batching has to beat, labelled so. vLLM: the recorded baseline's flags (docs/BENCHMARKS.md 'vLLM: how the baseline is served') with --max-num-seqs 8; the version string vllm_benchy.sh prints goes in every vLLM row. r41.vllm_mtp is the MTP-4 + fp8-KV recipe: if the XPU image refuses or crashes on it, record the failure (~/benchy-vllm.log) - no patches."
+stage r41.ours 41 optin gpu-self qwen,uvx - "b70-serve <qwen> --max-len 40960 on device 0, --mtp 0 and --mtp auto: matrices A, B and D (int8 head, bf16 KV, defaults otherwise)"
+st_r41_ours() {
+  local v="${BENCHY_VERSION:-0.4.0}" a="--pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md"
+  local d="--pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2 --no-cache --format md" m
+  for m in 0 auto; do
+    chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN MAX_LEN=40960 SERVE_ARGS='--mtp $m' tools/probe/serve_benchy.sh $a" "b70-serve --mtp $m, matrix A"
+    chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN MAX_LEN=40960 SERVE_ARGS='--mtp $m' tools/probe/serve_benchy.sh $a --no-cache" "b70-serve --mtp $m, matrix B"
+    chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN MAX_LEN=40960 SERVE_ARGS='--mtp $m' tools/probe/serve_benchy.sh $d" "b70-serve --mtp $m, matrix D"
+  done
+  grab_all benchy '^(client: |\| )' 160
+  finish
+}
+stage r41.vllm 41 optin gpu-self qwen,uvx,vllm_image - "vLLM (the box's XPU image) on <qwen>, device 0, no speculation, bf16 KV, --max-num-seqs 8: matrices A, B and D"
+st_r41_vllm() {
+  local v="${BENCHY_VERSION:-0.4.0}" a="--pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md"
+  local d="--pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2 --no-cache --format md"
+  chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN tools/probe/vllm_benchy.sh $a" "vLLM, matrix A"
+  chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN tools/probe/vllm_benchy.sh $a --no-cache" "vLLM, matrix B"
+  chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN tools/probe/vllm_benchy.sh $d" "vLLM, matrix D"
+  grab_all benchy '^(vllm version |client: |\| )' 120
+  finish
+}
+stage r41.vllm_mtp 41 optin gpu-self qwen,uvx,vllm_image - "vLLM's MTP recipe on <qwen>: the checkpoint's MTP head, 4 speculative tokens, fp8 KV, --max-num-seqs 8 - matrices A, B and D (a refusal or crash is the row's reading)"
+st_r41_vllm_mtp() {
+  local v="${BENCHY_VERSION:-0.4.0}" a="--pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md"
+  local d="--pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2 --no-cache --format md"
+  chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN MTP=4 KV=fp8 tools/probe/vllm_benchy.sh $a" "vLLM MTP-4 fp8 KV, matrix A"
+  chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN MTP=4 KV=fp8 tools/probe/vllm_benchy.sh $a --no-cache" "vLLM MTP-4 fp8 KV, matrix B"
+  chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN MTP=4 KV=fp8 tools/probe/vllm_benchy.sh $d" "vLLM MTP-4 fp8 KV, matrix D"
+  grab_all benchy '^(vllm version |client: |\| )' 120
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp labels belong to their rows)"
 st_x_rest() {
