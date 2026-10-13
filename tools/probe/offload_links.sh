@@ -17,7 +17,8 @@
 #
 # Prints `link <dev> bdf=.. role=root|bridge|endpoint cap=Gen<g> x<w> sta=Gen<g> x<w> state=idle|load`, one line
 # `links: dev0 Gen<g> x<w>, dev1 Gen<g> x<w>` (per state) and `STOP: <card> trains below Gen3 x8` when one does
-# (spec 22 §3: stop and report). Exit 0, or 3 on a STOP line, 2 on a usage error.
+# (spec 22 §3: stop and report). Exit 0 (an unreadable link - lspci -vv hides LnkSta without root - prints an
+# `UNKNOWN:` line for the record and the hand command), 3 on a STOP line, 2 on a usage error.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
@@ -30,7 +31,7 @@ while [ $# -gt 0 ]; do
     --lspci-file) lspci_file=${2:?}; shift 2 ;;
     --dmidecode-file) dmi_file=${2:?}; shift 2 ;;
     --self-test) self=1; shift ;;
-    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "offload_links: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -56,8 +57,8 @@ chain() {
 lspci_of() {
   if [ -n "$lspci_file" ]; then
     awk -v b="$(short "$1")" '/^[^#\t ]/ { on = (index($0, b " ") == 1) } on' "$lspci_file"
-  else
-    lspci -vv -s "$1" 2>/dev/null
+  else   # the capabilities (LnkCap / LnkSta) need root: sudo -n first, then plain lspci
+    sudo -n lspci -vv -s "$1" 2>/dev/null || lspci -vv -s "$1" 2>/dev/null
   fi
 }
 # "<gen> <width>" of a LnkCap / LnkSta line ("Speed 8GT/s (downgraded), Width x16 (downgraded)").
@@ -100,7 +101,10 @@ links() {
       fi
     done
     summary="$summary $tag Gen$g x$w,"
-    if [ "$g" -lt 3 ] || [ "$w" -lt 8 ]; then
+    if [ "$g" = 0 ] || [ "$w" = 0 ]; then
+      # not a STOP and not a pass of the rule: the record names it; run `sudo lspci -vv -s <bdf>` by hand
+      echo "UNKNOWN: $tag ($card) - its link was not readable (lspci -vv without root hides LnkSta: sudo -n refused)"
+    elif [ "$g" -lt 3 ] || [ "$w" -lt 8 ]; then
       echo "STOP: $tag ($card) trains below Gen3 x8 (Gen$g x$w, state $state) - spec 22 §3: stop and report"
       rc=3
     fi
@@ -165,7 +169,8 @@ if [ $self = 1 ]; then
 fi
 
 rc=0
-links idle || rc=3
+links idle; r=$?
+[ "$r" = 3 ] && rc=3
 if [ -z "$lspci_file" ]; then
   echo "lscpu:"
   lscpu 2>/dev/null | grep -E 'Model name|Socket|Core\(s\)|Thread\(s\)|NUMA node\(s\)|MHz' | sed 's/^/  /'
@@ -184,7 +189,8 @@ if [ "$load" != 0 ] && [ -z "$lspci_file" ]; then
     fi
     pid=$!
     sleep "$(awk -v s="$load" 'BEGIN { printf "%.1f", s / 2 }')"
-    links load || rc=3
+    links load; r=$?
+    [ "$r" = 3 ] && rc=3
     wait "$pid"; hrc=$?
     sed 's/^/  hold: /' "${TMPDIR:-/tmp}/offload_links_hold.$$"
     rm -f "${TMPDIR:-/tmp}/offload_links_hold.$$"
