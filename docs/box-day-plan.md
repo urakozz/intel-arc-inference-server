@@ -26,6 +26,7 @@ to it.
 | 8 | pipeline integration (row 27) | **both** | `tools/box_validate.sh --only r27` | 14 | 4.5-7 h |
 | 9 | Kolibri-1 on the synthetic checkpoints (rows 24, 26, 28) | **both** | `tools/box_validate.sh --only r24,r26,r28 --with r24.oracle_synth` | 31 | 4.5-7 h |
 | 9b | Qwen3.8-Flash-Next on the synthetic checkpoints (rows 30-34, spec 21) | **both** | `tools/box_validate.sh --only r30,r31,r32,r33,r34 --with r32.ple_rate,r32.bench_attn` | 32 + 2 opt-in | 3.5-6 h (est.) |
+| 9c | spec 22's expert-offload probe (row 36, plan 22a): links, copy / zero-copy rates, capacity, the curves, the projection | **both**, idle | `tools/box_validate.sh --only r36` (+ CPU lane: `--with r36.prune,r36.prune_a4`) | 15 (+ 2 opt-in) | 3-5 h GPU (est.); the CPU opt-ins hours to days |
 | 10 | the rest of the suite | device 0 | `tools/box_validate.sh --only x` | 1 | 0.5-1 h |
 
 **Total, the default set: ~40-63 h of box time, ~51 h central (est.)** - two to two and a half
@@ -535,6 +536,35 @@ synthetic checkpoints, ~13.5 GB each, load in about a minute; the `.pp` stages a
 changed by defines only - every existing binary unchanged); `r32.k1`, `r33.k1`, `r34.k1` (first
 runs); `r32.golden`, `r33.golden` (token gates); `r34.mtp`'s M2 bitwise; the `.pp` stages bitwise.
 Hand back: `r32.ple_rate`'s rate lines and `r34.mtp`'s verify-cost lines (spec 22's inputs).
+### Session 9c - spec 22's expert-offload probe (row 36, plan 22a), both cards idle
+
+After spec 21's rows 30-34 (their data: row 30's traces and golden sets, `r32.k1`'s `q4_moe` binary, row 34's
+A4 reference) and after Session 7's `r22.p1` (two cards, one context). Idle protocol (§1.7): **both cards free
+of DRM holders**, RECORD grade for the timed stages, **no container and no CPU oracle up** (the pinned arms:
+`r36.pin` SKIPs "host RAM" below 110 GB available or with any container running).
+
+```sh
+tools/box_validate.sh --only r36                                  # the default stages
+tools/box_validate.sh --only r36 --with r36.prune,r36.prune_a4    # the CPU lane, later, alone
+```
+
+Order: `r36.k0`, `r36.host` (the budget lines -> `$DATA/oracle-out-q4exp-offload/budget.json`), `r36.build`
+(the probe's two kernels, first ocloc compile), **`r36.links`** (P0.1 idle: a card below Gen3 x8 is a STOP -
+spec 22 §3 says stop and report; an UNKNOWN line means `lspci -vv` needed root: run
+`sudo lspci -vv -s 04:00.0` / `08:00.0` by hand for the record), `r36.links_load` (P0.1 under `probe_offload
+hold`), `r36.copy` (P0.2), `r36.zc` (P0.3: the arms and the mixed-launch law), `r36.replay` (the visibility
+hazard, 10^4 replays), `r36.hostbw` (P0.4), `r36.pin` / `r36.alias` (P0.5), then the CPU stages `r36.curve`
+(P0.6, uses `r36.copy`'s measured expert copy), `r36.reap` (P0.8's masks) and `r36.project` (P0.7: the STOP /
+GO-CANDIDATE line). A mismatch in `r36.replay` or `r36.alias` is reported first, with its replay / page.
+Estimate 3-5 h of GPU time (est.: `copy` ~20 min a card set, `zc` ~30-60 min - 13 arms x 4 P x interleaved
+pairs, 3 device sets -, `replay` ~20 min, `hostbw` ~10 min, `pin` ~30-60 min of pinning up to ~100 GiB, `alias`
+~10 min) plus `r36.curve` up to ~1 h (the swap simulation at S 1). The opt-in CPU lane (`r36.prune` hours to
+days, `r36.prune_a4` days, ESTIMATED from row 30's walls) runs one oracle at a time with `free -g` >= 70 GB,
+never during the GPU stages. Then (a Mac edit) the record `docs/probe-offload-<date>.md` and spec 22's
+decisions section (plan 22a Task 5 Steps 6-7); the operator's go / no-go follows.
+**Check:** `r36.links` prints `links: dev0 Gen3 x16, dev1 Gen3 x<w>` without STOP; `r36.zc` prints `exact=1` on
+every arm and a `law_summary`; `r36.replay` / `r36.alias` `result=exact` / `clean`; `r36.project` ends in
+`STOP` or `GO-CANDIDATE`.
 
 ### Session 10 - the rest, and the summary
 

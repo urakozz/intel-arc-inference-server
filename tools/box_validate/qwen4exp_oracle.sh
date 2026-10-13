@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Spec 21a: the Qwen3.8-Flash-Next (qwen4_exp) CPU reference runs, ON THE BOX CPU (kolibri_oracle.sh's shape).
-#   tools/box_validate/qwen4exp_oracle.sh <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|reap|prune|prune-a4
+#   tools/box_validate/qwen4exp_oracle.sh <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|reap|curve|project|prune|prune-a4
 #
 # Every mode runs tools/oracle/qwen4exp_ref.py in the oracle image (tools/oracle/run_in_container.sh) with
 # transformers 5.19.0 from a site directory BESIDE the image (tools/oracle/qwen4exp_env.sh: pip --no-deps
@@ -45,13 +45,19 @@
 #                  REAP and freq masks at PRUNE_KEPT (0.5,0.625,0.75,0.875) from PRUNE_SOURCES (A4,agentic,opencode) -
 #                  in sample, --holdout-a4, and decision 9's --kfold 4 --fold all -> <data>/oracle-out-q4exp-prune/masks/
 #                  (+ reap.json, folds.json) (r36.reap; minutes)
+#   curve          spec 22 P0.6: offload_curve.py counts / curve / swap / mtp / prefill / profile over the traces (no
+#                  checkpoint) -> <data>/oracle-out-q4exp-offload/*.{txt,json}, the profile -> oracle-out-q4exp-traces/
+#                  profile.safetensors (r36.curve; minutes to an hour: swap at S 1 is a step-by-step simulation)
+#   project        spec 22 P0.7: offload_curve.py prune-report (with r36.prune's maskevals) and project over Task 1's
+#                  budget, r36's po-*.txt lines and the curves -> oracle-out-q4exp-offload/{prune,project}.{txt,json},
+#                  the last line STOP / GO-CANDIDATE (r36.project)
 #   prune          spec 22 P0.8: qwen4exp_ref.py maskeval for every REAP mask (in sample, -noa4) over q4exp_short, 4k,
 #                  agentic (+ q4exp_32k with PRUNE_32K=1; r30.golden's sets) and per A4 scenario its in-sample masks and
 #                  its own fold's, teacher-forced over the full reference's continuation (r34.a4_ref), the full rows
 #                  cached once -> <data>/oracle-out-q4exp-prune/maskeval/<p>.<tag>.json (r36.prune; HOURS, resumable)
 #   prune-a4       spec 22 P0.8: tools/toolcall/a4_ref.sh qwen4exp ref with MASK= every REAP mask whose experts fit
-#                  two cards whole (Task 1's budget at 32k with the head: <data>/oracle-out-q4exp-prune/budget.json or
-#                  PRUNE_BUDGET) - the all-traces mask on the 36 scenarios and each fold's mask on its 9 - then score.py
+#                  two cards whole (Task 1's budget at 32k with the head: <data>/oracle-out-q4exp-offload/budget.json -
+#                  r36.host - or PRUNE_BUDGET) - the all-traces mask on the 36 scenarios and each fold's mask on its 9 - then score.py
 #                  -> <data>/oracle-out-q4exp-a4/<name>.mask-<tag>.{ids,txt}, oracle-out-q4exp-prune/a4_score.txt
 #                  (r36.prune_a4; DAYS at 3 fractions x 72 generations, ESTIMATED; resumable per scenario)
 # Golden runs are per prompt resumable (written into <tree>/oracle-out-q4exp*.partial/, moved when complete, the
@@ -64,11 +70,11 @@
 #      OPENCODE_LOG, HF_HOME, ORACLE_IMAGE, ORACLE_THREADS.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
-[ $# -ge 2 ] || { echo "usage: $0 <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|reap|prune|prune-a4" >&2; exit 2; }
+[ $# -ge 2 ] || { echo "usage: $0 <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|reap|curve|project|prune|prune-a4" >&2; exit 2; }
 data="$1" mode="$2" nl="${3:-}"
-case "$mode" in tests|tiny|intel|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|reap|prune|prune-a4) ;;
+case "$mode" in tests|tiny|intel|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|reap|curve|project|prune|prune-a4) ;;
   intel-layers) [[ "$nl" =~ ^[0-9]+$ ]] && [ "$nl" -ge 4 ] || { echo "qwen4exp_oracle: intel-layers N needs N >= 4 (the first QSA layer: a cached run needs one)" >&2; exit 2; } ;;
-  *) echo "qwen4exp_oracle: mode $mode is not one of tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|reap|prune|prune-a4" >&2; exit 2 ;;
+  *) echo "qwen4exp_oracle: mode $mode is not one of tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|reap|curve|project|prune|prune-a4" >&2; exit 2 ;;
 esac
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
 dry="${DRY_RUN:-0}"
@@ -82,7 +88,7 @@ prune_sources="${PRUNE_SOURCES:-A4,agentic,opencode}"   # spec 22 §4b: coding /
 prune_kept="${PRUNE_KEPT:-0.5,0.625,0.75,0.875}"
 [[ "$prune_sources" =~ ^[A-Za-z0-9_,.-]+$ ]] && [[ "$prune_kept" =~ ^[0-9.,]+$ ]] || {
   echo "qwen4exp_oracle: PRUNE_SOURCES / PRUNE_KEPT ($prune_sources / $prune_kept)" >&2; exit 2; }
-case "$mode" in tests|tiny|synth-ckpt|ple-int8) need="${Q4_REF_MIN_GB:-24}" ;; reap) need="${Q4_REF_MIN_GB:-8}" ;; synth|mtp-fixture) need="${Q4_REF_MIN_GB:-32}" ;; *) need="${Q4_REF_MIN_GB:-64}" ;; esac
+case "$mode" in tests|tiny|synth-ckpt|ple-int8) need="${Q4_REF_MIN_GB:-24}" ;; reap|curve|project) need="${Q4_REF_MIN_GB:-8}" ;; synth|mtp-fixture) need="${Q4_REF_MIN_GB:-32}" ;; *) need="${Q4_REF_MIN_GB:-64}" ;; esac
 case "$mode" in tests|tiny) model="$TINY" ;; ours) model="$OURS" ;; synth-ckpt|synth) model="$ORIG" ;; *) model="$INTEL" ;; esac
 snapdir=$(ls -d "$hf/hub/$model"/snapshots/*/ 2>/dev/null | head -1)
 avail=$(awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null || echo 0)
@@ -121,12 +127,12 @@ synth_have() {   # both synthetic checkpoints and their PLE files are there
     [ -s "$data/oracle-out-q4exp-synth/$f/ckpt-ple-int8/model.safetensors.index.json" ] || return 1
   done
 }
-if [ "$mode" = reap ] && [ "$dry" != 1 ] && ! ls "$data/oracle-out-q4exp-traces"/*.routes.safetensors > /dev/null 2>&1; then
+if { [ "$mode" = reap ] || [ "$mode" = curve ]; } && [ "$dry" != 1 ] && ! ls "$data/oracle-out-q4exp-traces"/*.routes.safetensors > /dev/null 2>&1; then
   echo "SKIP_REASON qwen4exp_oracle: no routing traces in $data/oracle-out-q4exp-traces (r30.traces)"
   exit 77
 fi
 # reap reads the traces only (no checkpoint): run_in_container is given the tree's config-only stand-in as ORACLE_SNAP
-[ "$mode" = reap ] && snapdir="$PWD/tests/model/qwen4exp/"
+case "$mode" in reap|curve|project) snapdir="$PWD/tests/model/qwen4exp/" ;; esac
 if [ -z "$snapdir" ] && [ "$dry" != 1 ] && ! { { [ "$mode" = synth ] || [ "$mode" = mtp-fixture ]; } && synth_have; }; then
   case "$mode" in
     mtp-fixture) echo "SKIP_REASON qwen4exp_oracle: neither the synthetic checkpoints (r31.synth) nor $INTEL are there" ;;
@@ -143,7 +149,7 @@ rc=0
 # in_box <command> - one oracle-image run with the 5.19.0 site first on PYTHONPATH ($SNAP = the checkpoint).
 in_box() {
   local cmd="tools/oracle/qwen4exp_env.sh /ws/$SITE > /dev/null && export PYTHONPATH=/ws/$SITE && $1"
-  if [ "$mode" = reap ]; then   # no checkpoint read: the config-only stand-in satisfies run_in_container's $SNAP
+  if [ "$mode" = reap ] || [ "$mode" = curve ] || [ "$mode" = project ]; then   # no checkpoint read: the config-only stand-in satisfies run_in_container's $SNAP
     if [ "$dry" = 1 ]; then echo "DRY_RUN: ORACLE_SNAP=${snapdir%/} tools/oracle/run_in_container.sh '$cmd'"; return 0; fi
     ORACLE_SNAP="${snapdir%/}" tools/oracle/run_in_container.sh "$cmd"
     return
@@ -404,6 +410,70 @@ case "$mode" in
       grep -E '^reap' "$part/reap.log" | tail -40
     fi
     ;;
+  curve)
+    # spec 22 P0.6: offload_curve.py over the traces (no checkpoint read) -> <data>/oracle-out-q4exp-offload/
+    # {counts,curve,swap,mtp,prefill}.{txt,json} and the routing profile <data>/oracle-out-q4exp-traces/profile.safetensors
+    # (decision 8's source). swap's copy time: r36.copy's one-expert copy on the copy queue (po-copy.txt), else spec 22 §1's
+    # measured 12.2 GB/s on device 0 (0.214 ms, marked); its step time SWAP_STEP_MS (25: the stopping rule's 40 t/s);
+    # swap / mtp at the two-card f of Task 1's budget at 32k (the head + prefill; CURVE_F overrides).
+    tr="$data/oracle-out-q4exp-traces" off="$data/oracle-out-q4exp-offload" part=oracle-out-q4exp-offload.partial
+    cms="" f="${CURVE_F:-}" sms="${SWAP_STEP_MS:-25}"
+    [ -s "$off/po-copy.txt" ] && cms=$(awk '/^po copy / && / shape=expert / && / list=regular / && / ordinal=copy / { for (i = 1; i <= NF; ++i) if ($i ~ /^us=/) { sub("us=", "", $i); print $i / 1000; exit } }' "$off/po-copy.txt")
+    [ -n "$cms" ] || { cms=0.214; echo "qwen4exp_oracle: curve: no measured expert copy (r36.copy) - swap uses 0.214 ms (spec 22 §1's 12.2 GB/s, MEASURED on device 0 2026-09-27, not this row's)"; }
+    if [ -z "$f" ] && [ -s "$off/budget.json" ]; then
+      f=$(python3 -c "import json,sys; b=[json.loads(l.split('budget-json ',1)[-1]) for l in open(sys.argv[1]) if '{' in l]; b=[x for x in b if x['devices']==2 and x['max_len']==32768 and x['mtp'] and x['prefill'] and x['dense']=='int4']; print(round(b[0]['f'], 4))" "$off/budget.json")
+    fi
+    f=${f:-0.79}
+    [[ "$cms" =~ ^[0-9.]+$ ]] && [[ "$f" =~ ^[0-9.]+$ ]] && [[ "$sms" =~ ^[0-9.]+$ ]] || { echo "qwen4exp_oracle: curve: copy-ms $cms / f $f / step $sms" >&2; exit 2; }
+    [ "$dry" = 1 ] || { mkdir -p "$part/traces" "$off"; cp -f "$tr"/*.routes.safetensors "$part/traces/"
+                        [ -s "$off/budget.json" ] && cp -f "$off/budget.json" "$part/"; }
+    oc="python3 /ws/tools/oracle/offload_curve.py"
+    bud=""
+    [ -s "$off/budget.json" ] && bud="--budget budget.json"
+    in_box "cd /ws/$part && $oc counts --traces traces --json counts.json > counts.txt && \
+      $oc curve --traces traces --split hash --f 0.30:1.00:0.01 $bud --json curve.json > curve.txt && \
+      $oc swap --traces traces --f $f --S 1,4,16,64 --B 2.6112,26.112,261.12 --W 64,256,1024 --copy-ms $cms --step-ms $sms \
+        --json swap.json > swap.txt && \
+      $oc mtp --traces traces --K 1,2,3,4 --f $f --json mtp.json > mtp.txt && \
+      $oc prefill --traces traces --chunk 2048,4096 --f 0.6:0.9:0.05 --json prefill.json > prefill.txt && \
+      $oc profile --traces traces --out profile.safetensors --json profile.json > profile.txt" || rc=1
+    if [ "$dry" != 1 ]; then
+      for x in counts curve swap mtp prefill profile; do cp -f "$part/$x.txt" "$part/$x.json" "$off/" 2>/dev/null; done
+      cp -f "$part/profile.safetensors" "$tr/profile.safetensors" 2>/dev/null
+      tail -6 "$part/curve.txt"; tail -8 "$part/swap.txt"; cat "$part/mtp.txt" "$part/profile.txt"
+    fi
+    ;;
+  project)
+    # spec 22 P0.7: prune-report (when r36.prune's maskevals exist) and the projection -> <data>/oracle-out-q4exp-offload/
+    # {prune,project}.{txt,json}; the last line STOP or GO-CANDIDATE. Inputs: Task 1's budget, r36's po-*.txt lines, the
+    # curve / swap / mtp / prefill JSON (r36.curve), r34.accept's accept_single.json when present; PROJECT_BW (row 32's
+    # measured rate, GB/s) and PROJECT_PF_MS (row 33's compute a chunk, 2048:X[,4096:Y]) when the box has them.
+    off="$data/oracle-out-q4exp-offload" part=oracle-out-q4exp-offload.partial
+    if [ "$dry" != 1 ]; then
+      [ -s "$off/budget.json" ] && [ -s "$off/curve.json" ] || {
+        echo "SKIP_REASON qwen4exp_oracle: project needs $off/budget.json (r36.host) and curve.json (r36.curve)"; exit 77; }
+      mkdir -p "$part/maskeval" "$part/a4"
+      cat "$off"/po-*.txt > "$part/p0.txt" 2>/dev/null || : > "$part/p0.txt"
+      for x in budget curve swap mtp prefill; do [ -s "$off/$x.json" ] && cp -f "$off/$x.json" "$part/"; done
+      [ -s "$data/oracle-out-q4exp-mtp/accept_single.json" ] && cp -f "$data/oracle-out-q4exp-mtp/accept_single.json" "$part/accept.json"
+      cp -f "$data"/oracle-out-q4exp-prune/maskeval/*.json "$part/maskeval/" 2>/dev/null
+      cp -f "$data"/oracle-out-q4exp-a4/*.txt "$part/a4/" 2>/dev/null
+    fi
+    opt=""
+    for x in swap mtp prefill accept; do [ "$dry" = 1 ] || [ -s "$part/$x.json" ] && opt="$opt --$x $x.json"; done
+    [ -n "${PROJECT_BW:-}" ] && [[ "$PROJECT_BW" =~ ^[0-9.]+$ ]] && opt="$opt --bw $PROJECT_BW"
+    [ -n "${PROJECT_PF_MS:-}" ] && [[ "$PROJECT_PF_MS" =~ ^[0-9.:,]+$ ]] && opt="$opt --prefill-compute-ms $PROJECT_PF_MS"
+    oc="python3 /ws/tools/oracle/offload_curve.py"
+    if [ "$dry" = 1 ] || ls "$part"/maskeval/*.json > /dev/null 2>&1; then
+      in_box "cd /ws/$part && $oc prune-report --dir maskeval --a4 a4 --budget budget.json --json prune.json > prune.txt" || rc=1
+    fi
+    in_box "cd /ws/$part && $oc project --budget budget.json --p0 p0.txt --curve curve.json$opt --json project.json > project.txt" || rc=1
+    if [ "$dry" != 1 ]; then
+      for x in prune project; do cp -f "$part/$x.txt" "$part/$x.json" "$off/" 2>/dev/null; done
+      [ -s "$part/prune.txt" ] && cat "$part/prune.txt"
+      cat "$part/project.txt"
+    fi
+    ;;
   prune)
     # spec 22 P0.8: maskeval for every REAP mask (in sample and without A4) over the golden prompts, and per A4
     # scenario the in-sample masks and its own fold's (decision 9: graded on a mask that never saw it), teacher-forced
@@ -480,7 +550,7 @@ case "$mode" in
     # against the full reference (r34.a4_ref) -> <data>/oracle-out-q4exp-a4/<name>.mask-<tag>.{ids,txt,gap}.
     masks="$data/oracle-out-q4exp-prune/masks"
     a4="$data/oracle-out-q4exp-a4"
-    budget="${PRUNE_BUDGET:-$data/oracle-out-q4exp-prune/budget.json}"
+    budget="${PRUNE_BUDGET:-$data/oracle-out-q4exp-offload/budget.json}"
     if [ "$dry" != 1 ]; then
       ls "$masks"/mask-reap-*.safetensors > /dev/null 2>&1 || { echo "SKIP_REASON qwen4exp_oracle: no REAP masks in $masks (r36.reap)"; exit 77; }
       [ -s "$a4/set/manifest.json" ] || { echo "SKIP_REASON qwen4exp_oracle: no A4 set / reference in $a4 (r34.a4_ref)"; exit 77; }
@@ -522,6 +592,8 @@ EOF
     done
     if [ "$dry" = 1 ]; then
       echo "DRY_RUN: python3 tools/toolcall/score.py $a4 bf16$tags > $data/oracle-out-q4exp-prune/a4_score.txt"
+    elif [ -z "$fit" ]; then
+      echo "qwen4exp_oracle: prune-a4: no REAP fraction fits two cards whole at 32k - nothing generated"
     elif [ -n "$tags" ]; then
       mkdir -p "$data/oracle-out-q4exp-prune"
       python3 tools/toolcall/score.py "$a4" bf16 $tags > "$data/oracle-out-q4exp-prune/a4_score.txt" || rc=1

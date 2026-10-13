@@ -124,6 +124,12 @@ case "${1:-}" in
     # logits are compared against (tools/box_validate/w4a4_grid.sh).
     have qwen_bf16 "the bf16 original ${SNAP_QWEN_BF16:-Qwen/Qwen3.8-27B} (54 GB; row 35's W4A4 grid reference)" \
       complete "${SNAP_QWEN_BF16:-Qwen/Qwen3.8-27B}"
+    # Queue row 36 (spec 22 P0, plan 22a): the masked reference's KL / argmax files (r36.prune: qwen4exp_oracle.sh
+    # prune) and the probe binary (r36.build; listed for the record - the r36 stages order on r36.build itself).
+    have oracle_q4exp_prune "oracle-out-q4exp-prune/maskeval/*.json (spec 22 P0.8: r36.prune - qwen4exp_oracle.sh prune)" \
+      bash -c 'ls oracle-out-q4exp-prune/maskeval/*.json'
+    have probe_offload_bin "build/tools/probe/probe_offload (spec 22 P0: r36.build - the probe and its two kernels)" \
+      test -x build/tools/probe/probe_offload
     have oracle_image "the oracle container image (tools/oracle/run_in_container.sh; passkey ids)" \
       docker image inspect "${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
     # Queue row 41 (the llama-benchy comparison matrix): the vLLM XPU image tools/probe/vllm_benchy.sh serves.
