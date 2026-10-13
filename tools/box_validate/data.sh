@@ -126,6 +126,9 @@ case "${1:-}" in
       complete "${SNAP_QWEN_BF16:-Qwen/Qwen3.8-27B}"
     have oracle_image "the oracle container image (tools/oracle/run_in_container.sh; passkey ids)" \
       docker image inspect "${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
+    # Queue row 41 (the llama-benchy comparison matrix): the vLLM XPU image tools/probe/vllm_benchy.sh serves.
+    have vllm_image "the vLLM XPU image ${VLLM_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest} (tools/probe/vllm_benchy.sh)" \
+      docker image inspect "${VLLM_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
     have tok_python "a python with tokenizers (${TOK_PYTHON:-?})" "${TOK_PYTHON:-/nonexistent}" -c 'import tokenizers'
     # shellcheck disable=SC2016 # expanded by the inner bash
     have uvx "uvx (llama-benchy)" bash -c 'command -v uvx || test -x "$HOME/.local/bin/uvx"'

@@ -21,6 +21,7 @@ to it.
 | 5 | K2-Horizon (rows 14, 15, 21, 25) | device 0 | `tools/box_validate.sh --only r14,r15,r21,r25 --with r14.oracle` | 35 | 4.5-7.5 h |
 | 6 | timed one-card rows, **box idle (RECORD)** | device 0, both idle | `tools/box_validate.sh --only r1.sweep,r1.speed,r2.cost,r2.auto_rows,r3,r6.cost,r8.cost,r8.rows,r11.speed,r16.cost` | 10 | 7-11 h |
 | 6b | DFlash verify cost at M = 5..8 and one block's draft cost (row 29, plan 19a Task 4) | device 0, both idle | `tools/box_validate.sh --only r29.cost` | 1 (opt-in) | 0.25-0.5 h (est.) |
+| 6c | llama-benchy comparison matrix: b70-serve and vLLM, one client and set of flags (row 41) | device 0, both idle | `tools/box_validate.sh --only r41.ours,r41.vllm,r41.vllm_mtp` | 3 (opt-in) | 2-3.5 h (est.) |
 | 7 | pipeline decode, then prefill (rows 22, 23) | **both** | `tools/box_validate.sh --only r22,r23` | 22 | 4.5-7 h |
 | 8 | pipeline integration (row 27) | **both** | `tools/box_validate.sh --only r27` | 14 | 4.5-7 h |
 | 9 | Kolibri-1 on the synthetic checkpoints (rows 24, 26, 28) | **both** | `tools/box_validate.sh --only r24,r26,r28 --with r24.oracle_synth` | 31 | 4.5-7 h |
@@ -391,6 +392,31 @@ Then plan 19a Task 5 (a Mac edit): re-run `docs/probe-dflash-2026-10-08.md` §3'
 the measured costs and record the verdict in spec 19 (`≥ 10 %` over `--mtp auto` on the coding
 and agentic sets = go for 19b).
 
+### Session 6c - the llama-benchy comparison matrix (row 41), box idle
+
+So our numbers read the same way as vLLM's and as tables others publish: one client (llama-benchy
+pinned at 0.4.0), one set of flags, one card, the same Qwen3.8 int4 g64 checkpoint for every server.
+Run on an idle box (§1.7), device 0, right after sessions 6 / 6b (the same idle conditions):
+
+```sh
+tools/box_validate.sh --only r41.ours,r41.vllm,r41.vllm_mtp
+```
+
+Each stage serves one engine at a time (never two on the card) and runs three matrices: **A** =
+`--pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md` verbatim (the usual published
+form; a repeated prompt may hit a prefix cache), **B** = A with `--no-cache` (the fair
+cross-engine reading), **D** = `--pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2
+--no-cache` (agentic depth). Arms: `b70-serve --mtp 0` and `--mtp auto` (`r41.ours`), vLLM plain
+(`r41.vllm`), vLLM's MTP-4 + fp8-KV recipe (`r41.vllm_mtp`; if the XPU image refuses or crashes on
+it, `~/benchy-vllm.log` is the reading - no patches).
+
+Read: the `| pp... | tg... |` table lines per arm, the `client:` line (version and server flags) and
+`vllm version` (never the image tag). b70-serve's concurrency 2 / 4 / 8 rows are requests served one
+after another until spec 13b / 13c's batched decode - recorded as the baseline batching must beat.
+Estimate 2-3.5 h (est.: 4 server arms x 3 matrices; vLLM's startup with graph capture ~5-15 min a
+launch, 6 launches; each A / B matrix 16 cells x 2 runs).
+Then (a Mac edit) the rows go into docs/BENCHMARKS.md "llama-benchy comparisons".
+
 ### Session 7 - pipeline parallel decode, then prefill (rows 22, 23)
 
 Idle protocol (§1.7): **both cards free of DRM holders.**
@@ -496,6 +522,7 @@ the state and run later with `--only <ids>`.
 | 3: hours | `--only r6.d1,r7.depth,r8.rows_full,r8.m3_small,r10.speed,r27.p3_mtp` | 12-20 h | A12's depth rows, decode at the auto depth, the full §11 matrix, M3 at 32k / 64k, Ornith at 250k, P3 with MTP |
 | 3: K2 A4 | `--only r25.a4_ref,r25.a4` | ~0.6-1 day (CPU; ESTIMATED, batched + resident weights - `BATCH=1 RESIDENT=none` is the old ~1-1.5 days) + ~1 h | K4's reference on the box CPU (blocks the idle grade while it runs), then the run; no bar |
 | 3: comparison rows | `--only r1.prefix_benchy,r16.benchy,r25.benchy,r27.benchy` (needs `uvx`) | 3-5 h | llama-benchy rows for BENCHMARKS / README |
+| 3: comparison matrix | Session 6c: `--only r41.ours,r41.vllm,r41.vllm_mtp` (needs `uvx`, the vLLM image; idle box) | 2-3.5 h | b70-serve vs vLLM through one pinned client and flag set (row 41) |
 | blocked | `r2.opencode`, `r12.d5` (no opencode recording), `r11.a4` (`A4_REF_DIR`: set it if Qwen3.8's A4 bf16 reference dir is on the box), `r16.a4` (`oracle-out-ornith-a4`), `r24.oracle_real`, `r24.speed`, `r26.speed`, `r28.passkey`, `r28.a4`, `r28.benchy` (spec 20b) | - | data that does not exist yet |
 
 Manual stages (commands in `--dry-run --with ...` and in the summary, never run by the

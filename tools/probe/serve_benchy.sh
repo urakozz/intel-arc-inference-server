@@ -5,7 +5,8 @@
 # e.g. tools/probe/detach.sh ~/benchy.log tools/probe/serve_benchy.sh --pp 4096 --tg 256
 # Env: MODEL (repo id or snapshot; default the W4A16 g64 checkpoint), MAX_LEN
 # (16384), PORT (8011), SERVE_ARGS (extra b70-serve flags), SERVE_AFFINITY (the server's
-# ZE_AFFINITY_MASK, default 0; spec 16d's `SERVE_ARGS='--pp 2'` needs 0,1).
+# ZE_AFFINITY_MASK, default 0; spec 16d's `SERVE_ARGS='--pp 2'` needs 0,1), BENCHY_VERSION
+# (pins llama-benchy, e.g. 0.4.0 for queue row 41's matrix; unset: whatever uvx resolves).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 MODEL="${MODEL:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
@@ -25,6 +26,8 @@ for _ in $(seq 1 600); do
   sleep 1
 done
 echo "server up"
-uvx llama-benchy --base-url "http://127.0.0.1:$PORT/v1" --model "$MODEL" \
+benchy=llama-benchy${BENCHY_VERSION:+@$BENCHY_VERSION}
+echo "client: $benchy, server: b70-serve ${SERVE_ARGS:-} --max-len $MAX_LEN"
+uvx "$benchy" --base-url "http://127.0.0.1:$PORT/v1" --model "$MODEL" \
   --served-model-name b70 --tokenizer "$MODEL" "$@"
 uptime
