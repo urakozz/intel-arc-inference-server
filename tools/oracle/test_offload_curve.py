@@ -499,7 +499,7 @@ def test_project_stop_flips():
         D = 3.712e9 + OC.attn_bytes(32768)
         tps = 1e3 / OC.decode_ms(D, 48 * 10 * 2611200, 590.0, 12.0, h, "serial")
         assert abs(j["stop_inputs"]["tps"] - tps) < 1e-9, (j["stop_inputs"], tps)
-        assert j["stop_inputs"]["policy"] == "uniform"                     # the better of the two held-out fills
+        assert j["stop_inputs"]["policy"] == "uniform (pooled curve)"      # the better fill; no per-device curve here
         assert {m["K"] for m in j["mtp"]} == {1, 2, 3} and all("PROPOSED" in m["accept_source"] for m in j["mtp"])
         assert [p["C"] for p in j["prefill"]] == [2048, 4096] and j["prefill"][1]["derived"]
         print(f"  h {h}: {last[:90]}...")

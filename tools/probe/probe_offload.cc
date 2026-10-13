@@ -232,11 +232,19 @@ class AsyncImm {
   ze_command_list_handle_t l_ = nullptr;
 };
 
+// A hang ends the process HERE: the FAIL line, then _Exit - no unwinding, so no destructor (zeMemFree, a queue's or a
+// list's destroy, a joinable std::thread's terminate) waits on a device that is still busy.
+[[noreturn]] void hang(const std::string& what) {
+  std::printf("po %s dev=%s FAIL hang: %s: no completion within %.0f s\n", g_opt.mode.c_str(), g_opt.dev.c_str(),
+              what.c_str(), g_opt.timeout_s);
+  std::fflush(stdout);
+  std::_Exit(1);
+}
 void wait_event(l0::SyncEvent& e, const std::string& what) {
-  if (!e.host_wait(g_opt.timeout_ns())) throw Hang(what + ": no completion within " + std::to_string(g_opt.timeout_s) + " s");
+  if (!e.host_wait(g_opt.timeout_ns())) hang(what);
 }
 void wait_fence(l0::Fence& f, const std::string& what) {
-  if (!f.wait_for(g_opt.timeout_ns())) throw Hang(what + ": no completion within " + std::to_string(g_opt.timeout_s) + " s");
+  if (!f.wait_for(g_opt.timeout_ns())) hang(what);
 }
 
 struct Card {
@@ -284,7 +292,11 @@ Devices open_devices(const std::string& dev) {
   d.c0 = std::make_unique<l0::Context>(0);
   const uint32_t n = l0::Context::gpu_count();
   if (dev != "0") {
-    if (n < 2) throw Skip("--dev " + dev + " needs two GPUs, the driver enumerates " + std::to_string(n));
+    if (n < 2) {
+      const char* m = std::getenv("ZE_AFFINITY_MASK");
+      throw Skip("--dev " + dev + " needs two GPUs, the driver enumerates " + std::to_string(n) + " (ZE_AFFINITY_MASK=" +
+                 (m ? m : "<unset>") + ": set it to 0,1)");
+    }
     d.c1 = std::make_unique<l0::Context>(*d.c0, 1);
     if (dev == "both" && !d.c0->can_access_peer(*d.c1))
       std::printf("po info dev=both peer=no (the arms here need none: every buffer is the card's own or host USM)\n");
@@ -1146,9 +1158,15 @@ int hostbw_mode() {
           }
         });
     }
-    execute(cv, "hostbw warm-up");
     std::vector<double> v;
-    for (uint32_t r = 0; r < g_opt.reps; ++r) v.push_back(execute(cv, "hostbw arm C"));
+    try {   // the load threads are joined on every path (a joinable std::thread's destructor terminates)
+      execute(cv, "hostbw warm-up");
+      for (uint32_t r = 0; r < g_opt.reps; ++r) v.push_back(execute(cv, "hostbw arm C"));
+    } catch (...) {
+      stop = true;
+      for (auto& x : bg) x.join();
+      throw;
+    }
     stop = true;
     for (auto& x : bg) x.join();
     const double tl = now_s() - tl0;
@@ -1193,8 +1211,15 @@ int pin_mode() {
     }
     return out;
   };
+  // Every 4 KiB page written (a lazily backed range is then populated - spec 7's probe_host_copy touches each page),
+  // then the tag at every 2 MiB page.
   const auto tag = [&](uint8_t* p, size_t bytes, uint32_t range) {
+    for (size_t off = 0; off < bytes; off += 4096) p[off] = 0;
     for (size_t g = 0; g * kPage < bytes; ++g) *reinterpret_cast<uint64_t*>(p + g * kPage) = host_tag(range, g);
+  };
+  // How much of `bytes` MemAvailable lost (populated / pinned): below 0.9 the pin did not take the memory it reports.
+  const auto populated = [](uint64_t before, uint64_t after, double bytes) {
+    return bytes > 0 && before > after ? double(before - after) / bytes : 0.0;
   };
   // 1. one range: doubling from 1 GiB, then bisection to 1 GiB
   {
@@ -1213,9 +1238,11 @@ int pin_mode() {
         const double t_all = now_s() - t0;
         const uint64_t after = mem_available();
         const std::string chk = check_all({m.as<uint8_t>()}, {m.size()});
+        const double pop = populated(before, after, double(m.size()));
         std::printf("po pin dev=%s single gib=%.0f ok=1 alloc_s=%.2f s_per_gb=%.4f mem_before_gib=%.1f mem_after_gib=%.1f "
-                    "check=%s\n",
-                    dv.label.c_str(), gib, t_alloc, t_all / (gib * kGiB / 1e9), before / kGiB, after / kGiB, chk.c_str());
+                    "populated=%.3f%s check=%s\n",
+                    dv.label.c_str(), gib, t_alloc, t_all / (gib * kGiB / 1e9), before / kGiB, after / kGiB, pop,
+                    pop < 0.9 ? " NOT_POPULATED" : "", chk.c_str());
         return true;
       } catch (const l0::Error& e) {
         std::printf("po pin dev=%s single gib=%.0f ok=0 reason=\"%s\" mem_before_gib=%.1f\n", dv.label.c_str(), gib, e.what(),
@@ -1276,10 +1303,12 @@ int pin_mode() {
     const double secs = now_s() - t0;
     const uint64_t after = mem_available();
     const std::string chk = ptrs.empty() ? std::string(" none") : check_all(ptrs, bytes);
+    const double pop = populated(before, after, sum);
     std::printf("po pin dev=%s ranges allocated=%zu of %zu bytes=%.0f of %.0f (experts 48 x %zu + PLE 32 shards) stopped_at=%s "
-                "s_per_gb=%.4f mem_before_gib=%.1f mem_after_gib=%.1f check=%s\n",
+                "s_per_gb=%.4f mem_before_gib=%.1f mem_after_gib=%.1f populated=%.3f%s check=%s\n",
                 dv.label.c_str(), got.size(), want.size(), sum, total_want, s.layer, stop.c_str(),
-                sum > 0 ? secs / (sum / 1e9) : 0.0, before / kGiB, after / kGiB, chk.c_str());
+                sum > 0 ? secs / (sum / 1e9) : 0.0, before / kGiB, after / kGiB, pop, pop < 0.9 ? " NOT_POPULATED" : "",
+                chk.c_str());
   }
   return g_fail ? 1 : 0;
 }
@@ -1390,6 +1419,7 @@ int usage() {
 }  // namespace
 
 int main(int argc, char** argv) {
+  std::setvbuf(stdout, nullptr, _IOLBF, 0);   // stdout is a tee pipe on the box: every po line out as it is printed
   if (argc < 2) return usage();
   g_opt.mode = argv[1];
   try {
