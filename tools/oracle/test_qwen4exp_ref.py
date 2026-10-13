@@ -843,6 +843,17 @@ def test_maskeval_all_ones():
     j = json.load(open(js))
     assert j["rows"] == 46 and j["kept"] == 1.0, j
     print(f"  {line}")
+    # a golden set made with another PLE source (or layer count) is refused: its KL would charge the PLE to the mask
+    from safetensors.torch import load_file, save_file
+    from safetensors import safe_open as _so
+    with _so(gold, "pt") as f:
+        gmeta = dict(f.metadata())
+    other = os.path.join(w, "p-int8.golden.safetensors")
+    save_file(load_file(gold), other, metadata=dict(gmeta, ple="int8"))
+    r = subprocess.run(py + ["maskeval", d, "--expert-mask", path, "--golden", other, "--prompt", os.path.join(w, "p.ids")],
+                       capture_output=True, text=True)
+    assert r.returncode != 0 and "PLE" in (r.stdout + r.stderr), r.stdout[-800:] + r.stderr[-800:]
+    print("  a golden set of another PLE source: refused")
     # the A4 form (prompt + a continuation, the full rows cached) with two masks in one process, resumable by file
     from safetensors import safe_open
     with safe_open(gold, "pt") as f:
