@@ -27,6 +27,15 @@ tier's verdict.
   guaranteed in fp32 in general). `maskeval` takes several masks with `--json-dir` (one model build a prompt);
   `prune-report --a4` reads the A4 outputs' directory with score.py's own parser; the stopping rule's number is the
   two-card 32k decode without MTP drafting on the serving budget (head + prefill scratch), the MTP rows beside it.
+- The whole-branch review's fixes: every row 36 `probe_offload` command sets `ZE_AFFINITY_MASK=0,1` (the run exports
+  one card) and a two-card arm that still sees one card FAILS; a hang prints its FAIL line and `_Exit`s where it is
+  detected (stdout line-buffered); `pin` writes every 4 KiB page and prints `populated=` (flagged below 0.9);
+  `maskeval` refuses a golden set made with another PLE source / layer count, and `prune` passes the golden's own;
+  `reap` writes an all-ones control (`mask-reap-1`); `prune-report --a4` reads reap's `folds.json` (`--folds`) and
+  refuses a scenario in no fold; `curve --budget` scores each device's h on its own layers at its own f
+  (`per_device`), `project` uses it (else the pooled curve, marked) and applies the swap gain only where a card's f is
+  within 0.02 of the simulated f, with the swaps' copies charged to the link; `offload_links.sh` falls back to the
+  sysfs link files without root and fails when the load could not be held.
 - Task 5 Step 1: row 36's stages write P0's outputs to `$DATA/oracle-out-q4exp-offload` (budget, links, `po-*.txt`, the
   curves, project), the masks / maskevals to `oracle-out-q4exp-prune`; `qwen4exp_oracle.sh` gained `reap`, `curve`,
   `project`, `prune`, `prune-a4` (the first three read no checkpoint).

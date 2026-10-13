@@ -18,7 +18,8 @@
 # Prints `link <dev> bdf=.. role=root|bridge|endpoint cap=Gen<g> x<w> sta=Gen<g> x<w> state=idle|load`, one line
 # `links: dev0 Gen<g> x<w>, dev1 Gen<g> x<w>` (per state) and `STOP: <card> trains below Gen3 x8` when one does
 # (spec 22 §3: stop and report). Exit 0 (an unreadable link - lspci -vv hides LnkSta without root - prints an
-# `UNKNOWN:` line for the record and the hand command), 3 on a STOP line, 2 on a usage error.
+# `UNKNOWN:` line for the record and the hand command, after the sysfs link files were tried), 3 on a STOP line, 1 when
+# --under-load could not hold the load (no probe, or the hold exited non-zero), 2 on a usage error.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
@@ -61,6 +62,16 @@ lspci_of() {
     sudo -n lspci -vv -s "$1" 2>/dev/null || lspci -vv -s "$1" 2>/dev/null
   fi
 }
+# Without root lspci hides the capabilities: the world-readable sysfs files answer ("<GT/s> <width>" or nothing).
+sysfs=${OFFLOAD_SYSFS:-/sys/bus/pci/devices}
+sysfs_link() {   # sysfs_link <bdf> current|max
+  local d="$sysfs/$1" s w
+  [ -r "$d/${2}_link_speed" ] && [ -r "$d/${2}_link_width" ] || return 1
+  s=$(cut -d' ' -f1 < "$d/${2}_link_speed")
+  s=${s%.0}
+  w=$(tr -d ' \n' < "$d/${2}_link_width")
+  [ -n "$s" ] && [ -n "$w" ] && echo "$s $w"
+}
 # "<gen> <width>" of a LnkCap / LnkSta line ("Speed 8GT/s (downgraded), Width x16 (downgraded)").
 parse_link() {
   sed -n "s/.*$2:[[:space:]]*\(.*\)/\1/p" <<< "$1" | head -1 |
@@ -88,12 +99,17 @@ links() {
       local txt cap sta capg capw stag staw
       txt=$(lspci_of "$b")
       cap=$(parse_link "$txt" LnkCap) sta=$(parse_link "$txt" LnkSta)
+      local via=""
+      if [ -z "$sta" ] && sta=$(sysfs_link "$b" current); then
+        cap=$(sysfs_link "$b" max)
+        via=" (sysfs)"
+      fi
       capg=$(gen_of "${cap% *}") capw=${cap#* } stag=$(gen_of "${sta% *}") staw=${sta#* }
       if [ -z "$sta" ]; then
-        echo "link $tag bdf=$b role=$role no LnkSta (lspci -vv needs root for the capabilities: run it with sudo)"
+        echo "link $tag bdf=$b role=$role no LnkSta (lspci -vv needs root for the capabilities and $sysfs/$b has no link files)"
         continue
       fi
-      echo "link $tag bdf=$b role=$role cap=Gen$capg x$capw sta=Gen$stag x$staw state=$state"
+      echo "link $tag bdf=$b role=$role cap=Gen$capg x$capw sta=Gen$stag x$staw state=$state$via"
       # the card's link: the root port's LnkSta and the device below it (both ends; the lower is what trains)
       if [ "$n" -le 2 ] && [ "$role" != endpoint ]; then
         if [ "$g" = 0 ] || [ "$stag" -lt "$g" ]; then g=$stag; fi
@@ -177,7 +193,9 @@ if [ $self = 1 ]; then
     echo "$mw" > "$sfs/$d1:$d2:$d3/max_link_width"
   done
   lspci_file=$tmp
-  out3=$(OFFLOAD_SYSFS=$sfs links idle); rc3=$?
+  sysfs=$sfs
+  out3=$(links idle); rc3=$?
+  sysfs=${OFFLOAD_SYSFS:-/sys/bus/pci/devices}
   rm -rf "$tmp" "$sfs"
   grep -q '^links: dev0 Gen3 x16, dev1 Gen3 x4' <<< "$out3" || { echo "self-test: the sysfs fallback read '$(grep '^links:' <<< "$out3")'"; ok=0; }
   grep -q 'role=root cap=Gen3 x16 sta=Gen3 x4 state=idle (sysfs)' <<< "$out3" || { echo "self-test: no sysfs-marked line"; ok=0; }
@@ -198,7 +216,8 @@ memory
 if [ "$load" != 0 ] && [ -z "$lspci_file" ]; then
   probe=${PROBE_OFFLOAD:-$root/build/tools/probe/probe_offload}
   if [ ! -x "$probe" ]; then
-    echo "under-load: SKIP no $probe (build probe_offload, or set PROBE_OFFLOAD)"
+    echo "under-load: FAIL no $probe (build probe_offload, or set PROBE_OFFLOAD) - nothing was measured under load"
+    [ "$rc" = 3 ] || rc=1
   else
     cap=$((load + 120))
     if command -v timeout > /dev/null; then
@@ -214,6 +233,10 @@ if [ "$load" != 0 ] && [ -z "$lspci_file" ]; then
     sed 's/^/  hold: /' "${TMPDIR:-/tmp}/offload_links_hold.$$"
     rm -f "${TMPDIR:-/tmp}/offload_links_hold.$$"
     echo "under-load: probe_offload hold exit $hrc"
+    if [ "$hrc" != 0 ]; then   # the 'load' lines above were then sampled on an idle (or half-loaded) link
+      echo "under-load: FAIL - the hold did not run to its end (exit $hrc): the state=load lines are not under load"
+      [ "$rc" = 3 ] || rc=1
+    fi
   fi
 fi
 exit $rc

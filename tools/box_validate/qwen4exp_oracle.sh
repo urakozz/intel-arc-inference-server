@@ -405,6 +405,8 @@ case "$mode" in
       in_box "python3 tools/oracle/offload_curve.py reap --traces /ws/$part/traces --sources $prune_sources --kept $prune_kept \
         --criterion reap,freq --out /ws/$part/masks $arm >> /ws/$part/reap.log 2>&1" || rc=1
     done
+    in_box "python3 tools/oracle/offload_curve.py reap --traces /ws/$part/traces --sources $prune_sources --kept 1 \
+      --criterion reap --out /ws/$part/masks >> /ws/$part/reap.log 2>&1" || rc=1   # the all-ones control: mask-reap-1
     if [ "$dry" != 1 ]; then
       cp -f "$part"/masks/* "$data/oracle-out-q4exp-prune/masks/"
       grep -E '^reap' "$part/reap.log" | tail -40
@@ -457,6 +459,7 @@ case "$mode" in
       for x in budget curve swap mtp prefill; do [ -s "$off/$x.json" ] && cp -f "$off/$x.json" "$part/"; done
       [ -s "$data/oracle-out-q4exp-mtp/accept_single.json" ] && cp -f "$data/oracle-out-q4exp-mtp/accept_single.json" "$part/accept.json"
       cp -f "$data"/oracle-out-q4exp-prune/maskeval/*.json "$part/maskeval/" 2>/dev/null
+      cp -f "$data/oracle-out-q4exp-prune/masks/folds.json" "$part/folds.json" 2>/dev/null
       cp -f "$data"/oracle-out-q4exp-a4/*.txt "$part/a4/" 2>/dev/null
     fi
     opt=""
@@ -465,7 +468,7 @@ case "$mode" in
     [ -n "${PROJECT_PF_MS:-}" ] && [[ "$PROJECT_PF_MS" =~ ^[0-9.:,]+$ ]] && opt="$opt --prefill-compute-ms $PROJECT_PF_MS"
     oc="python3 /ws/tools/oracle/offload_curve.py"
     if [ "$dry" = 1 ] || ls "$part"/maskeval/*.json > /dev/null 2>&1; then
-      in_box "cd /ws/$part && $oc prune-report --dir maskeval --a4 a4 --budget budget.json --json prune.json > prune.txt" || rc=1
+      in_box "cd /ws/$part && $oc prune-report --dir maskeval --a4 a4 --folds folds.json --budget budget.json --json prune.json > prune.txt" || rc=1
     fi
     in_box "cd /ws/$part && $oc project --budget budget.json --p0 p0.txt --curve curve.json$opt --json project.json > project.txt" || rc=1
     if [ "$dry" != 1 ]; then
@@ -500,8 +503,16 @@ case "$mode" in
         [ -s "$part/eval/$p.$t.json" ] || args="$args --expert-mask /ws/$part/masks/$mfile"
       done
       [ -n "$args" ] || { echo "qwen4exp_oracle: prune: $p kept (every mask evaluated)"; continue; }
-      echo "qwen4exp_oracle: prune: $p - maskeval ($(date '+%F %T'))"
-      in_box "python3 tools/oracle/qwen4exp_ref.py maskeval \"\$SNAP\" --ple $ple --golden /ws/$part/golden/$p.golden.safetensors \
+      gple=$ple
+      if [ "$dry" != 1 ]; then   # the golden's PLE (run's metadata: shards = the snapshot's bf16 shards, int8 = 21b's file)
+        gk=$(python3 -c "import json, struct, sys; f = open(sys.argv[1], 'rb'); n = struct.unpack('<Q', f.read(8))[0]; print(json.loads(f.read(n)).get('__metadata__', {}).get('ple', ''))" "$part/golden/$p.golden.safetensors")
+        case "$gk" in
+          shards) gple=bf16 ;;
+          int8) case "$ple" in int8:*) ;; *) echo "qwen4exp_oracle: prune: $p's golden read the int8 PLE file, which is not beside the snapshot - skipped"; continue ;; esac ;;
+        esac
+      fi
+      echo "qwen4exp_oracle: prune: $p - maskeval, PLE $gple ($(date '+%F %T'))"
+      in_box "python3 tools/oracle/qwen4exp_ref.py maskeval \"\$SNAP\" --ple $gple --golden /ws/$part/golden/$p.golden.safetensors \
         --prompt tests/golden/prompts/$p.ids $args --json-dir /ws/$part/eval >> /ws/$part/maskeval.log 2>&1" || rc=1
     done
     a4="$data/oracle-out-q4exp-a4"
@@ -519,6 +530,7 @@ case "$mode" in
         fold=""
         [ -s "$part/masks/folds.json" ] && fold=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['folds'].get(sys.argv[2], ''))" "$part/masks/folds.json" "$n")
         [ "$dry" != 1 ] || fold=${fold:-0}
+        [ -n "$fold" ] || echo "qwen4exp_oracle: prune: $n is in no fold of masks/folds.json - graded in sample only (no held-out mask)"
         [ "$dry" = 1 ] || cp -f "$f" "$a4/$n.bf16.ids" "$part/a4/"
         args=""
         for mfile in $in_sample; do
@@ -527,7 +539,9 @@ case "$mode" in
           [ -s "$part/eval/$n.$t.json" ] || args="$args --expert-mask /ws/$part/masks/$mfile"
           if [ -n "$fold" ]; then
             tf="$t-fold$fold"
-            [ -s "$part/eval/$n.$tf.json" ] || args="$args --expert-mask /ws/$part/masks/$tf.safetensors"
+            if [ "$dry" = 1 ] || [ -f "$part/masks/$tf.safetensors" ]; then
+              [ -s "$part/eval/$n.$tf.json" ] || args="$args --expert-mask /ws/$part/masks/$tf.safetensors"
+            fi
           fi
         done
         [ -n "$args" ] || continue

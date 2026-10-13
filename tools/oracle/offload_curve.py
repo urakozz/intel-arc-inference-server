@@ -261,6 +261,23 @@ def curve(traces, L: int, E: int, fs, split: str = "hash") -> dict:
             "sources": {t.name: {"class": t.cls, "T": t.T} for t in traces}}
 
 
+class LayerSlice:
+    """A trace restricted to layers [lo, hi) (a device's), for the per-device curve."""
+
+    def __init__(self, t, lo: int, hi: int):
+        self.name, self.cls, self.T, self.top_k = t.name, t.cls, t.T, t.top_k
+        self.ids = t.ids[:, lo:hi, :]
+        self.layers = hi - lo
+
+
+def device_h(traces, E: int, lo: int, hi: int, f: float, split: str = "hash") -> dict:
+    """h at f over layers [lo, hi) alone - the fill and the score on that device's layers (held out when split hash)."""
+    sl = [LayerSlice(t, lo, hi) for t in traces]
+    r = curve(sl, hi - lo, E, [f], split)["rows"][0]
+    key = "held" if split == "hash" else "in"
+    return {"f": f, "first": lo, "end": hi, "h_uniform": r[f"uniform_{key}"], "h_perlayer": r[f"perlayer_{key}"]}
+
+
 def read_budget(path: str) -> list:
     """Task 1's `budget-json` lines (qwen4exp_plan_test --budget-json FILE)."""
     out = []
@@ -291,7 +308,7 @@ def interp(rows, f: float, key: str) -> float:
 
 # --- swap -------------------------------------------------------------------------------------------------------------
 def swap_sim(trace, res0: np.ndarray, S: int, B: float, W: int, copy_ms: float, step_ms: float,
-             expert_bytes: int = EXPERT_BYTES):
+             expert_bytes: int = EXPERT_BYTES, stats: dict | None = None):
     """Adaptive swaps over one trace's rows as decode steps (spec 22 §4's protocol). Every S steps (when no round is
     in flight) up to floor(B / expert_bytes) experts move: over all layers, the most-routed non-resident experts of
     the last W steps replace the least-routed residents of the same layer (only where the incoming count is higher).
@@ -326,6 +343,8 @@ def swap_sim(trace, res0: np.ndarray, S: int, B: float, W: int, copy_ms: float, 
                     cand.append((int(out_c[e_in]) - int(in_c[e_v]), l, int(e_in), int(e_v)))
             cand.sort(key=lambda c: (-c[0], c[1], c[2]))
             moves = cand[:nmax]
+            if moves and stats is not None:
+                stats["moved"] = stats.get("moved", 0) + len(moves)
             if moves:
                 delay = math.ceil(len(moves) * copy_ms / step_ms)
                 for _, l, e_in, e_v in moves:
@@ -597,7 +616,14 @@ def cmd_prune_report(a) -> None:
     a4_names = None
     if a.a4:
         a4_names = sorted(n[: -len(".bf16.txt")] for n in os.listdir(a.a4) if n.endswith(".bf16.txt"))
-        folds = a4_folds(a4_names, a.kfold)
+        if not a.folds:
+            raise SystemExit("offload_curve prune-report: --a4 needs --folds <masks>/folds.json (the folds reap wrote: the "
+                             "held-out runs are graded on those masks)")
+        folds = json.load(open(a.folds))["folds"]
+        missing = [n for n in a4_names if n not in folds]
+        if missing:
+            raise SystemExit(f"offload_curve prune-report: {len(missing)} A4 scenario(s) in no fold of {a.folds}: "
+                             f"{', '.join(missing[:6])} - their held-out run would be graded on a mask that saw them")
     kepts = sorted({float(j["kept"]) for j in ev} | set(frange(a.kept) if a.kept else []))
     rows = []
     for kept in kepts:
@@ -690,13 +716,25 @@ def read_p0(path: str) -> dict:
     return out
 
 
-def best_h(curve_rows, f: float, key: str, swap_gain: float = 0.0):
-    """The best held-out fill at f: max(uniform, per layer) (+ the swap simulation's best gain when it is positive)."""
-    hu, hp = interp(curve_rows, f, f"uniform_{key}"), interp(curve_rows, f, f"perlayer_{key}")
-    pol, h = ("per-layer", hp) if hp >= hu else ("uniform", hu)
-    if swap_gain > 0:
-        return min(1.0, h + swap_gain), pol + " + swaps"
-    return h, pol
+SWAP_F_TOL = 0.02                 # a card's f within this of the swap simulation's f: its gain applies there
+
+
+def card_options(dev: dict | None, curve_rows, f: float, key: str, swap):
+    """A card's fills as (h, policy, swap moves a step): the static best (its own layers when curve --budget scored them,
+    else the pooled curve, marked), and - only where the swap simulation ran at this f (uniform fill) - uniform + its best
+    gain with the experts it moves a step."""
+    if dev is not None:
+        hu, hp = dev["h_uniform"], dev["h_perlayer"]
+        src = ""
+    else:
+        hu, hp = interp(curve_rows, f, f"uniform_{key}"), interp(curve_rows, f, f"perlayer_{key}")
+        src = " (pooled curve)"
+    opts = [(hp, "per-layer" + src, 0.0) if hp >= hu else (hu, "uniform" + src, 0.0)]
+    if swap and abs(f - swap["f"]) <= SWAP_F_TOL and swap["fill"] == "uniform":
+        r = swap["best"]
+        opts.append((min(1.0, hu + r["gain"]), f"uniform{src} + swaps (S {r['S']}, B {r['B_mb']:g} MB, W {r['W']})",
+                     float(r.get("moved_per_step", 0.0))))
+    return opts
 
 
 def cmd_project(a) -> None:
@@ -706,10 +744,16 @@ def cmd_project(a) -> None:
     cj = json.load(open(a.curve))
     key = "held" if cj.get("split") == "hash" else "in"
     rows = cj["rows"]
-    swap_gain = 0.0
+    swap_gain, swap = 0.0, None
     if a.swap:
         sw = json.load(open(a.swap))
-        swap_gain = max((r["gain"] for r in sw.get("rows", [])), default=0.0)
+        best = max(sw.get("rows", []), key=lambda r: r["gain"], default=None)
+        if best is not None and best["gain"] > 0:
+            swap_gain, swap = best["gain"], {"f": sw["f"], "fill": sw.get("fill", "uniform"), "best": best}
+    per_dev = {}
+    for e in cj.get("budget", []):
+        if e.get("per_device"):
+            per_dev[(e["max_len"], e["devices"], e["mtp"], e["prefill"], e["dense"])] = e["per_device"]
     mtpj = json.load(open(a.mtp)) if a.mtp else None
     prej = json.load(open(a.prefill)) if a.prefill else None
     acc = None
@@ -735,26 +779,35 @@ def cmd_project(a) -> None:
     out = {"BW": BW, "bw_source": bw_src, "law": law, "alpha": alpha, "law_source": law_src, "P": P_of, "p_source": p_src,
            "swap_gain": swap_gain, "rows": [], "mtp": [], "prefill": []}
     print(f"project: BW {BW:.1f} GB/s ({bw_src}); law {law} ({law_src}); P {', '.join(f'card {c} {v:.2f}' for c, v in sorted(P_of.items()))} "
-          f"GB/s ({p_src}); h = the best held-out fill ({key}){f' + swaps {swap_gain:+.4f}' if swap_gain > 0 else ''}")
+          f"GB/s ({p_src}); h = each card's best held-out fill on its own layers ({key})" +
+          (f"; swaps (+{swap_gain:.4f} at f {swap['f']:g}, uniform) only where a card's f is within {SWAP_F_TOL} of it, "
+           f"their copies on the link" if swap else ""))
     print("| form | cards | max_len | f per card | h per card | policy | ms a token | t/s |")
     print("|---|---:|---:|---|---|---|---:|---:|")
 
     def project_line(b, ctx):
         devs = int(b["devices"])
         D = float(b["read_non_routed"]) + attn_bytes(ctx)
+        pdl = per_dev.get((b["max_len"], b["devices"], b["mtp"], b["prefill"], b["dense"]))
         t = 0.0
-        fs, hs, pol = [], [], ""
+        fs, hs, pols = [], [], []
         for i in range(devs):
             Ri = (int(b["end"][i]) - int(b["first"][i])) * int(b["top_k"]) * int(b["expert_bytes"])
             routed_i = (int(b["end"][i]) - int(b["first"][i])) * int(b["experts"]) * int(b["expert_bytes"])
-            fi = min(1.0, int(b["cache"][i]) / routed_i) if routed_i else 1.0
-            hi, pol = best_h(rows, fi, key, swap_gain)
+            fi = min(1.0, float(b["cache"][i]) / routed_i) if routed_i else 1.0
             Pi = P_of.get(i, P_of.get(0))
-            Di = D * (Ri / float(b["read_routed"]))   # the non-routed bytes split as the layers are
-            t += decode_ms(Di, Ri, BW, Pi, hi, law, alpha)
+            share = Ri / float(b["read_routed"])     # the card's share of the layers (and so of D and of the swaps)
+            Di = D * share
+            best = None
+            for hi, pol, moved in card_options(pdl[i] if pdl and i < len(pdl) else None, rows, fi, key, swap):
+                ti = decode_ms(Di, Ri, BW, Pi, hi, law, alpha) + moved * share * float(b["expert_bytes"]) / Pi / 1e6
+                if best is None or ti < best[0]:
+                    best = (ti, hi, pol)
+            t += best[0]
             fs.append(fi)
-            hs.append(hi)
-        return t, fs, hs, pol
+            hs.append(best[1])
+            pols.append(best[2])
+        return t, fs, hs, " / ".join(dict.fromkeys(pols))
     stop_row = None
     for b in budget:
         if not (b["mtp"] and b["prefill"]) and b["devices"] == 2:
@@ -908,10 +961,19 @@ def cmd_curve(a) -> None:
         r["budget"] = []
         for b in read_budget(a.budget):
             hu, hp = interp(r["rows"], b["f"], f"uniform_{key}"), interp(r["rows"], b["f"], f"perlayer_{key}")
+            pd = []
+            if int(b.get("layers", L)) == L:     # each device's h on its own layers, at its own f
+                for i in range(int(b["devices"])):
+                    lo, hi = int(b["first"][i]), int(b["end"][i])
+                    routed_i = (hi - lo) * int(b["experts"]) * int(b["expert_bytes"])
+                    fi = min(1.0, float(b["cache"][i]) / routed_i) if routed_i else 1.0
+                    pd.append(device_h(tr, E, lo, hi, fi, a.split))
             r["budget"].append({**{k_: b[k_] for k_ in ("max_len", "devices", "mtp", "prefill", "dense")}, "f": b["f"],
-                                "h_uniform": hu, "h_perlayer": hp})
+                                "h_uniform": hu, "h_perlayer": hp, "per_device": pd})
             print(f"budget max_len {b['max_len']} devices {b['devices']} dense {b['dense']} mtp {b['mtp']} prefill "
-                  f"{b['prefill']}: f {b['f']:.4f} -> h uniform {hu:.4f}, per layer {hp:.4f} ({key})")
+                  f"{b['prefill']}: f {b['f']:.4f} -> h uniform {hu:.4f}, per layer {hp:.4f} ({key})" +
+                  "".join(f"; device {i} layers [{x['first']}, {x['end']}) f {x['f']:.4f}: uniform {x['h_uniform']:.4f}, "
+                          f"per layer {x['h_perlayer']:.4f}" for i, x in enumerate(pd)))
     _dump(a, r)
 
 
@@ -938,12 +1000,14 @@ def cmd_swap(a) -> None:
     for S in ilist(a.S):
         for Bmb in frange(a.B):
             for W in ilist(a.W):
-                hh = tt = 0
+                hh = tt = steps = 0
+                st = {}
                 for t in tr:
-                    h, n = swap_sim(t, res_of[t.name], S, Bmb * 1e6, W, copy_ms, a.step_ms)
-                    hh, tt = hh + h, tt + n
+                    h, n = swap_sim(t, res_of[t.name], S, Bmb * 1e6, W, copy_ms, a.step_ms, stats=st)
+                    hh, tt, steps = hh + h, tt + n, steps + t.T
                 hs = _ratio(hh, tt)
-                rows.append({"S": S, "B_mb": Bmb, "W": W, "h": hs, "gain": hs - static})
+                rows.append({"S": S, "B_mb": Bmb, "W": W, "h": hs, "gain": hs - static,
+                             "moved_per_step": st.get("moved", 0) / max(1, steps)})
                 print(f"| {S} | {Bmb:g} | {W} | {hs:.4f} | {hs - static:+.4f} |")
     _dump(a, {"f": a.f, "fill": a.fill, "copy_ms": None if math.isinf(copy_ms) else copy_ms, "step_ms": a.step_ms,
               "static": static, "rows": rows})
@@ -1066,6 +1130,7 @@ def main(argv=None) -> None:
     p.add_argument("--kept", help="kept fractions to list even without maskeval files")
     p.add_argument("--kfold", type=int, default=4)
     p.add_argument("--a4-bar", type=float, help="decision 9's bar on the held-out A4 accuracy (prints the pick)")
+    p.add_argument("--folds", help="reap's folds.json (needed with --a4): the fold each A4 scenario was held out of")
     p.add_argument("--json")
     project_args(sub)
     a = ap.parse_args(argv)
