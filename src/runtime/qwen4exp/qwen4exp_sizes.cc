@@ -437,6 +437,69 @@ std::string describe(const std::vector<DevicePlan>& p, const model::Q4Placement&
   return out;
 }
 
+// --- spec 22a: the routed-expert budget ---------------------------------------------------------------------------
+double ExpertBudget::f() const {
+  if (routed_total == 0) return 0.0;
+  size_t sum = 0;
+  for (size_t c : cache) sum += c;
+  return std::min(1.0, double(sum) / double(routed_total));
+}
+
+ExpertBudget expert_budget(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
+                           bool int8_head, bool mtp, bool prefill,
+                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve) {
+  const std::vector<DevicePlan> dp = plan(d, p, max_len, int8_head, mtp, false, prefill);
+  ExpertBudget b;
+  b.max_len = max_len;
+  b.devices = p.devices;
+  b.mtp = mtp;
+  b.prefill = prefill;
+  b.int8_head = int8_head;
+  b.forms = d.forms;
+  b.reserve = reserve;
+  b.layers = d.layers;
+  b.experts = d.experts;
+  b.expert_bytes = loader::q4_gate_up_block_bytes(d) + loader::q4_down_block_bytes(d);
+  b.routed_total = size_t(d.layers) * d.experts * b.expert_bytes;
+  for (uint32_t dev = 0; dev < p.devices; ++dev) {
+    size_t routed = 0;
+    for (uint32_t l = p.first(dev); l < p.end(dev); ++l) routed += loader::q4_layer_bytes(d, l).experts();
+    const size_t total = dp[dev].total();
+    if (routed > total) throw std::logic_error("qwen4exp::expert_budget: the routed blocks exceed the device's plan");
+    b.capacity[dev] = device_bytes[dev];
+    b.first[dev] = p.first(dev);
+    b.end[dev] = p.end(dev);
+    b.non_routed[dev] = total - routed;
+    const size_t used = b.non_routed[dev] + reserve;
+    b.cache[dev] = used >= device_bytes[dev] ? 0 : device_bytes[dev] - used;
+  }
+  return b;
+}
+
+std::string budget_json(const ExpertBudget& b) {
+  const auto arr = [&](const auto& a) {
+    std::string s = "[";
+    for (uint32_t i = 0; i < b.devices; ++i) s += (i ? "," : "") + std::to_string(a[i]);
+    return s + "]";
+  };
+  size_t sum = 0;
+  for (uint32_t i = 0; i < b.devices; ++i) sum += b.cache[i];
+  char f[64];
+  std::snprintf(f, sizeof f, "%.6f", b.f());
+  std::string s = "{\"max_len\":" + std::to_string(b.max_len) + ",\"devices\":" + std::to_string(b.devices) +
+                  ",\"mtp\":" + (b.mtp ? "true" : "false") + ",\"prefill\":" + (b.prefill ? "true" : "false") +
+                  ",\"int8_head\":" + (b.int8_head ? "true" : "false") + ",\"dense\":\"" +
+                  model::q4_form_name(b.forms.dense) + "\",\"shared\":\"" + model::q4_form_name(b.forms.shared) +
+                  "\",\"mtp_experts\":\"" + model::q4_form_name(b.forms.mtp_experts) +
+                  "\",\"expert_group\":" + std::to_string(b.forms.expert_group) + ",\"layers\":" +
+                  std::to_string(b.layers) + ",\"experts\":" + std::to_string(b.experts) + ",\"expert_bytes\":" +
+                  std::to_string(b.expert_bytes) + ",\"reserve\":" + std::to_string(b.reserve) +
+                  ",\"capacity\":" + arr(b.capacity) + ",\"first\":" + arr(b.first) + ",\"end\":" + arr(b.end) +
+                  ",\"non_routed\":" + arr(b.non_routed) + ",\"cache\":" + arr(b.cache) + ",\"cache_total\":" +
+                  std::to_string(sum) + ",\"routed_total\":" + std::to_string(b.routed_total) + ",\"f\":" + f + "}";
+  return s;
+}
+
 // --- spec 21e: the MTP head, the verify and draft lists ---------------------------------------------------------
 MtpNorm mtp_norm() {
   const char* e = std::getenv("B70_Q4_MTP_NORM");
