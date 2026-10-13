@@ -14,6 +14,7 @@ router ties, --layers N, int4 experts at g64 / g128, the int8 PLE table, the ori
 the trace (Task 7), the CLI.
 """
 import glob
+import json
 import io
 import os
 import sys
@@ -678,10 +679,177 @@ def test_cli_run_and_hfcheck():
     print("  run: the golden layout; hfcheck: BITWISE; facts: names and the topk tie rule")
 
 
+# ------------------------------------------------------------------------------------------------
+# spec 22 P0.8 (plan 22a Task 4): the masked reference
+
+def mask16():
+    """The 16-expert top-4 tiny the mask tests run on (the downloaded tiny has 4 experts / top-2)."""
+    d = os.path.join(TMP, "mask16")
+    if not os.path.exists(d):
+        mk.make(d, hidden=128, layer_types="lllq", experts=16, topk=4, form="tiny", seed=13)
+    return d
+
+
+def write_mask(path, keep, mtp_keep=None, kept=None):
+    from safetensors.torch import save_file
+    keep = keep.to(torch.uint8).contiguous()
+    E = keep.shape[1]
+    mtp_keep = torch.ones(E, dtype=torch.uint8) if mtp_keep is None else mtp_keep.to(torch.uint8).contiguous()
+    meta = {"model": "tiny", "checkpoint_revision": "test", "criterion": "test",
+            "kept_fraction": str(kept if kept is not None else float(keep.float().mean())), "per_layer": "uniform",
+            "calibration": "[]", "format": "spec22-mask-1"}
+    save_file({"keep": keep, "mtp_keep": mtp_keep}, path, metadata=meta)
+    return path
+
+
+def routed_and_run(model, tc, ids, steps):
+    """One drive: the logits, every layer's H, and every layer's routed ids (the gate's own output)."""
+    hh, routed = {}, [set() for _ in range(tc.num_hidden_layers)]
+    hooks = hidden_hooks(model, hh)
+    for i, layer in enumerate(model.model.layers):
+        hooks.append(layer.mlp.gate.register_forward_hook(
+            lambda _m, _a, out, i=i: routed[i].update(out[2].reshape(-1).tolist())))
+    lg, _ = drive(model, ids, steps)
+    for h in hooks:
+        h.remove()
+    return lg, {i: torch.cat(v) for i, v in hh.items()}, routed
+
+
+def test_expert_mask_identities():
+    """Review Focus 5: (a) an all-ones mask is bitwise the unmasked run (logits and every layer's H); (b) a mask
+    dropping only experts the unmasked run never routed to (read from its own routes) is bitwise the unmasked run;
+    and a mask dropping routed experts changes the run (the hook acts)."""
+    d = mask16()
+    tc = ref.text_config(d, dtype=BF)
+    model, _, _ = ref.build_streamed(d, tc, ref.PleTable(d, tc))
+    ids = rand_ids(12, seed=61)
+    with torch.no_grad():
+        lg0, _ = drive(model, ids, [])
+    steps = [int(lg0[-1].float().argmax())]
+    lg, H, routed = routed_and_run(model, tc, ids, steps + [5, 77, 1234])
+    L, E, k = tc.num_hidden_layers, tc.num_experts, tc.num_experts_per_tok
+    for name, keep in (("all-ones", torch.ones(L, E, dtype=torch.bool)),
+                       ("never-routed dropped", torch.tensor([[e in routed[l] for e in range(E)] for l in range(L)]))):
+        if name != "all-ones":
+            dropped = int((~keep).sum())
+            assert dropped > 0, "every expert was routed somewhere: the never-routed case would be blind"
+        path = write_mask(os.path.join(TMP, f"mask-{name.split()[0]}.safetensors"), keep)
+        km = ref.load_expert_mask(path, tc)
+        h = ref.apply_expert_mask(model, km)
+        try:
+            lg_m, H_m, _ = routed_and_run(model, tc, ids, steps + [5, 77, 1234])
+        finally:
+            h.remove()
+        assert torch.equal(lg, lg_m), f"{name}: logits differ"
+        for i in range(L):
+            assert torch.equal(H[i], H_m[i]), f"{name}: H.L{i} differs"
+        print(f"  {name}: logits and H.L0..{L - 1} bitwise the unmasked run" +
+              ("" if name == "all-ones" else f" ({dropped} (layer, expert) dropped, none routed unmasked)"))
+    # the complement: drop routed experts (keeping >= top_k a layer) -> the run changes
+    keep = torch.ones(L, E, dtype=torch.bool)
+    for l in range(L):
+        for e in sorted(routed[l])[: max(0, E - k - 2)]:
+            keep[l, e] = False
+    h = ref.apply_expert_mask(model, ref.load_expert_mask(write_mask(os.path.join(TMP, "mask-routed.safetensors"), keep), tc))
+    try:
+        lg_r, _, routed_r = routed_and_run(model, tc, ids, steps + [5, 77, 1234])
+    finally:
+        h.remove()
+    assert not torch.equal(lg, lg_r), "dropping routed experts left the logits unchanged"
+    for l in range(L):
+        assert not (routed_r[l] & {e for e in range(E) if not keep[l, e]}), f"L{l}: a dropped expert was routed"
+    print("  routed experts dropped: the logits change and no dropped expert is ever routed")
+
+
+def test_masked_route_rule():
+    """(c) the hook's (scores, idx) equal router()'s rule restated with the dropped logits at -inf before the fp32
+    softmax (top-k of the rest, renormalised over them, cast), including a planted tie at the k-th; a kept expert whose
+    probability underflows to 0 still ranks above every dropped one."""
+    g = torch.Generator().manual_seed(7)
+    R, E, k = 64, 512, 10
+    for dtype in (BF, F32):
+        logits = (torch.randn(R, E, generator=g) * 2).to(dtype)
+        keep = torch.rand(R, E, generator=g) > 0.4
+        keep_row = keep[0]
+        # a planted exact tie at the cut on row 1: the k-th and (k+1)-th kept experts equal
+        lm = logits[1].float().masked_fill(~keep_row, -math.inf)
+        order = lm.argsort(descending=True)
+        a, b = order[k - 1].item(), order[k].item()
+        logits[1, b] = logits[1, a]
+        _, scores, idx = ref.masked_route(logits, keep_row, k, True)
+        lmask = logits.masked_fill(~keep_row, -math.inf)
+        p = torch.softmax(lmask, dtype=torch.float, dim=-1)
+        v, i = torch.topk(p, k, dim=-1)
+        v = v / v.sum(dim=-1, keepdim=True)
+        assert torch.equal(idx, i) and torch.equal(scores, v.to(dtype)), dtype
+        assert not bool((~keep_row[idx]).any())
+    # the underflow: 3 kept experts with p > 0, every other kept expert at -1e30 (p = 0 exactly), top 10
+    logits = torch.full((2, E), -1e30, dtype=F32)
+    keep_row = torch.zeros(E, dtype=torch.bool)
+    keep_row[100:120] = True
+    logits[:, 100:103] = torch.tensor([1.0, 2.0, 3.0])
+    logits[:, :100] = 5.0                                   # dropped experts with the highest logits
+    _, scores, idx = ref.masked_route(logits, keep_row, k, True)
+    assert bool(keep_row[idx].all()), idx
+    assert set(idx[0, :3].tolist()) == {100, 101, 102} and float(scores[0, 3:].abs().sum()) == 0.0
+    print("  masked_route == the restated rule (bf16 / fp32, a tie planted at the 10th); underflowed kept experts "
+          "outrank every dropped one")
+
+
+def test_expert_mask_refusals():
+    """(d) a mask keeping fewer than top_k experts in a layer is refused by name; a wrong shape / format likewise."""
+    d = mask16()
+    tc = ref.text_config(d, dtype=BF)
+    L, E, k = tc.num_hidden_layers, tc.num_experts, tc.num_experts_per_tok
+    keep = torch.ones(L, E, dtype=torch.bool)
+    keep[2, : E - (k - 1)] = False
+    try:
+        ref.load_expert_mask(write_mask(os.path.join(TMP, "mask-thin.safetensors"), keep), tc)
+    except (ValueError, SystemExit, RuntimeError) as e:
+        assert f"layer 2 keeps {k - 1} experts, fewer than top_k {k}" in str(e), e
+    else:
+        raise AssertionError("a layer keeping fewer than top_k experts was accepted")
+    try:
+        ref.load_expert_mask(write_mask(os.path.join(TMP, "mask-wide.safetensors"), torch.ones(L, E + 1, dtype=torch.bool)), tc)
+    except (ValueError, SystemExit, RuntimeError) as e:
+        assert "experts" in str(e), e
+    else:
+        raise AssertionError("a mask of the wrong width was accepted")
+    print(f"  layer 2 keeping {k - 1} < top_k {k}: refused by name; a {E + 1}-wide mask: refused")
+
+
+def test_maskeval_all_ones():
+    """(e) `maskeval` of an all-ones mask over a `run` golden set: KL 0 and argmax 1.0 (the replay is run's own path)."""
+    import subprocess
+    d = mask16()
+    tc = ref.text_config(d, dtype=BF)
+    w = os.path.join(TMP, "maskeval")
+    os.makedirs(w, exist_ok=True)
+    open(os.path.join(w, "p.ids"), "w").write(" ".join(map(str, rand_ids(40, seed=71))) + "\n")
+    py = [sys.executable, os.path.join(_HERE, "qwen4exp_ref.py")]
+    gold = os.path.join(w, "p.golden.safetensors")
+    r = subprocess.run(py + ["run", d, "--prompt", os.path.join(w, "p.ids"), "--out", gold, "--gen", "6",
+                             "--logits-tail", "-1", "--act-tail", "8"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+    path = write_mask(os.path.join(w, "mask-ones.safetensors"),
+                      torch.ones(tc.num_hidden_layers, tc.num_experts, dtype=torch.bool), kept=1.0)
+    js = os.path.join(w, "p.maskeval.json")
+    r = subprocess.run(py + ["maskeval", d, "--expert-mask", path, "--golden", gold, "--json", js],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+    line = next(x for x in r.stdout.splitlines() if x.startswith("maskeval "))
+    f = dict(t.split("=", 1) for t in line.split()[2:])
+    assert float(f["kl_mean"]) == 0.0 and float(f["kl_p99"]) == 0.0 and float(f["argmax"]) == 1.0, line
+    j = json.load(open(js))
+    assert j["rows"] == 46 and j["kept"] == 1.0, j
+    print(f"  {line}")
+
+
 TESTS = [test_expected_names_tiny, test_real_names, test_hc_chain, test_ple_ids, test_sigmoid_gate, test_v_head_map,
          test_streamed_equals_hf_bf16, test_streamed_equals_hf_fp32, test_chunked_prefill_equals_hf,
          test_indexer_cache_bitwise, test_indexer_gaps_small_budget, test_layers_truncation, test_route_ties, test_int4_experts, test_fused_experts,
-         test_ple_int8, test_trace_equals_run, test_cli_run_and_hfcheck]
+         test_ple_int8, test_trace_equals_run, test_cli_run_and_hfcheck, test_expert_mask_identities,
+         test_masked_route_rule, test_expert_mask_refusals, test_maskeval_all_ones]
 
 
 def main() -> None:

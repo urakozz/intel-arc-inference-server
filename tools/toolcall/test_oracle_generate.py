@@ -5,6 +5,7 @@
 A fake step records the (ids, pos) it is fed - the prompt at 0, then one id a step at the next
 position, as a KV-cached decode is fed - and answers a scripted next id.
 """
+import importlib.util
 import os
 import sys
 
@@ -224,6 +225,79 @@ def test_qwen4exp_tiny_one_scenario():
             assert os.path.exists(os.path.join(out, f"s1.bf16.{x}")), x
         ids = open(os.path.join(out, "s1.bf16.ids")).read().split()
         assert 1 <= len(ids) <= 6, ids
+
+
+def test_mask_args():
+    """Spec 22 P0.8: --expert-mask FILE (qwen4exp only) and the outputs' run tag .mask-<tag>."""
+    import oracle_generate as og
+    a = parse_args(["--model", "qwen4exp", "/snap", "set", "out", "--expert-mask", "/m/mask-reap-0.5.safetensors"])
+    assert a["expert_mask"] == "/m/mask-reap-0.5.safetensors"
+    assert og.mask_tag("/m/mask-reap-0.5.safetensors") == "mask-reap-0.5"
+    assert og.mask_tag("/m/coding.safetensors") == "mask-coding"
+    assert parse_args(["/snap", "set", "out"])["expert_mask"] is None
+
+
+def test_qwen4exp_mask_reaches_reference():
+    """Spec 22 P0.8: the mask reaches the reference - on a tiny Qwen3.8-Flash-Next (16 experts, top 4) the batched
+    path's greedy ids with a mask that drops routed experts (keeping >= top_k a layer) differ from the unmasked ids,
+    and no dropped expert is routed. Needs transformers 5.19.0 first on PYTHONPATH (the qwen4exp site): skipped
+    (printed) otherwise."""
+    try:
+        import transformers
+        ok = transformers.__version__ == "5.19.0"
+    except ImportError:
+        ok = False
+    if not ok:
+        print("    skipped: transformers 5.19.0 is not on PYTHONPATH (the qwen4exp site)")
+        return
+    import tempfile
+    import torch
+    from safetensors.torch import save_file
+    import oracle_generate as og
+    with tempfile.TemporaryDirectory() as snap:
+        spec = importlib.util.spec_from_file_location(
+            "tog_make_tiny", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "oracle", "qwen4exp_make_tiny.py"))
+        mk = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mk)
+        mk.make(snap, hidden=128, layer_types="lllq", experts=16, topk=4, form="intel", seed=29)
+        prompt = [760, 72103, 506, 37119, 557, 11012, 3213, 310, 6512, 279]
+        r0 = og.moe_runner(snap, "qwen4_exp")
+        L, E, k = 4, 16, 4
+        routed = [dict() for _ in range(L)]
+        hooks = [layer.mlp.gate.register_forward_hook(
+            lambda _m, _a, out, i=i: [routed[i].__setitem__(e, routed[i].get(e, 0) + 1) for e in out[2].reshape(-1).tolist()])
+            for i, layer in enumerate(r0.ref.model.layers)]
+        out0 = {}
+        og.greedy_batched(r0.step_many, r0.new_state, [("s", prompt, 6)], 2, set(), r0.argmax,
+                          on_done=lambda n, o: out0.__setitem__(n, list(o)))
+        for h in hooks:
+            h.remove()
+        keep = torch.ones(L, E, dtype=torch.uint8)
+        for l in range(L):
+            for e, _ in sorted(routed[l].items(), key=lambda x: -x[1])[:E - k - 2]:
+                keep[l, e] = 0
+        mpath = os.path.join(snap, "..", os.path.basename(snap) + "-mask-test.safetensors")
+        save_file({"keep": keep, "mtp_keep": torch.ones(E, dtype=torch.uint8)}, mpath,
+                  metadata={"format": "spec22-mask-1", "kept_fraction": str(float(keep.float().mean())),
+                            "criterion": "test", "per_layer": "test", "calibration": "[]", "model": "tiny",
+                            "checkpoint_revision": "test"})
+        try:
+            r1 = og.moe_runner(snap, "qwen4_exp", mask=mpath)
+            seen = [set() for _ in range(L)]
+            hooks = [layer.mlp.gate.register_forward_hook(
+                lambda _m, _a, out, i=i: seen[i].update(out[2].reshape(-1).tolist()))
+                for i, layer in enumerate(r1.ref.model.layers)]
+            out1 = {}
+            og.greedy_batched(r1.step_many, r1.new_state, [("s", prompt, 6)], 2, set(), r1.argmax,
+                              on_done=lambda n, o: out1.__setitem__(n, list(o)))
+            for h in hooks:
+                h.remove()
+        finally:
+            os.remove(mpath)
+        assert out0["s"] != out1["s"], (out0, out1)
+        for l in range(L):
+            assert not seen[l] & {e for e in range(E) if not keep[l, e]}, f"L{l}: a dropped expert was routed"
+        print(f"    unmasked {out0['s']} vs masked {out1['s']}: the mask reached the batched reference")
 
 
 if __name__ == "__main__":
