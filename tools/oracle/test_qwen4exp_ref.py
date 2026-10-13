@@ -843,6 +843,27 @@ def test_maskeval_all_ones():
     j = json.load(open(js))
     assert j["rows"] == 46 and j["kept"] == 1.0, j
     print(f"  {line}")
+    # the A4 form (prompt + a continuation, the full rows cached) with two masks in one process, resumable by file
+    from safetensors import safe_open
+    with safe_open(gold, "pt") as f:
+        toks = f.get_tensor("tokens").tolist()
+    open(os.path.join(w, "c.ids"), "w").write(" ".join(map(str, toks)) + "\n")
+    keep = torch.ones(tc.num_hidden_layers, tc.num_experts, dtype=torch.bool)
+    keep[:, :6] = False
+    thin = write_mask(os.path.join(w, "mask-thin.safetensors"), keep)
+    jd, cache = os.path.join(w, "eval"), os.path.join(w, "p.full.safetensors")
+    cmd = py + ["maskeval", d, "--prompt", os.path.join(w, "p.ids"), "--cont", os.path.join(w, "c.ids"), "--full-cache",
+                cache, "--expert-mask", path, "--expert-mask", thin, "--json-dir", jd]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+    ones, th = json.load(open(os.path.join(jd, "p.mask-ones.json"))), json.load(open(os.path.join(jd, "p.mask-thin.json")))
+    assert ones["set"] == "a4" and ones["rows"] == len(toks) and ones["kl_mean"] == 0.0 and ones["argmax"] == 1.0, ones
+    assert th["kl_mean"] > 0.0, th
+    assert os.path.exists(cache)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout.count(" kept (") == 2, r.stdout[-800:]
+    print(f"  A4 form, 2 masks in one process: all-ones KL 0 / argmax 1.0, 6 experts dropped a layer KL "
+          f"{th['kl_mean']:.3g}; the full rows cached; a rerun skips both")
 
 
 TESTS = [test_expected_names_tiny, test_real_names, test_hc_chain, test_ple_ids, test_sigmoid_gate, test_v_head_map,
