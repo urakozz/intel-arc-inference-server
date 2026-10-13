@@ -3417,3 +3417,12 @@ if(TARGET b70-serve)
     cli_reject_serve_layers_other PROPERTIES LABELS qwen4exp)
 endif()
 # ==== Spec 21e: Qwen3.8-Flash-Next served ==== (end) ====
+
+# ==== Spec 22a: the expert-offload probe ==== (begin) ====
+# tools/probe/probe_offload_moe.cl is q4_moe.cl with its two expert-address lines as a pointer-table read
+# (tools/probe/mk_offload_kernel.py); the drift test reruns the generator in --check mode. Host only.
+add_executable(probe_offload_kernel_drift_test kernels/probe_offload_kernel_drift_test.cc)
+target_compile_definitions(probe_offload_kernel_drift_test PRIVATE B70_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME probe_offload_kernel_drift_test COMMAND probe_offload_kernel_drift_test)
+set_tests_properties(probe_offload_kernel_drift_test PROPERTIES LABELS host)
+# ==== Spec 22a: the expert-offload probe ==== (end) ====
