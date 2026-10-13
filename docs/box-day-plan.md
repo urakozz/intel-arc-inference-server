@@ -25,6 +25,7 @@ to it.
 | 7 | pipeline decode, then prefill (rows 22, 23) | **both** | `tools/box_validate.sh --only r22,r23` | 22 | 4.5-7 h |
 | 8 | pipeline integration (row 27) | **both** | `tools/box_validate.sh --only r27` | 14 | 4.5-7 h |
 | 9 | Kolibri-1 on the synthetic checkpoints (rows 24, 26, 28) | **both** | `tools/box_validate.sh --only r24,r26,r28 --with r24.oracle_synth` | 31 | 4.5-7 h |
+| 9b | Qwen3.8-Flash-Next on the synthetic checkpoints (rows 30-34, spec 21) | **both** | `tools/box_validate.sh --only r30,r31,r32,r33,r34 --with r32.ple_rate,r32.bench_attn` | 32 + 2 opt-in | 3.5-6 h (est.) |
 | 10 | the rest of the suite | device 0 | `tools/box_validate.sh --only x` | 1 | 0.5-1 h |
 
 **Total, the default set: ~40-63 h of box time, ~51 h central (est.)** - two to two and a half
@@ -33,6 +34,11 @@ stages exactly once (checked against the default `--dry-run`: no stage missing, 
 sessions 5 and 9 add the two opt-in oracle stages the K2 and Kolibri gates need. The short
 path (§3) is ~36 h. The opt-in stages (§3.3) are extra: tier 1 alone 7-10 h, every tier
 30-45 h or more.
+
+**Added 2026-10-13: Session 9b** for rows 30-34 (spec 21, Qwen3.8-Flash-Next), merged after this
+plan was written - their 32 default stages were in no session (checked against `--list`: every
+other default stage is). With 9b, sessions 1-10 run each of today's 207 default stages once; 9b
+adds ~3.5-6 h (est.), plus its CPU-lane data (§1.6) and, optionally, Intel's real checkpoint (§1.3).
 
 Row 20 (Kolibri-1 spec 20a, the quantisation) has no runbook stage and needs spec 20
 decision 1; it is not part of the box day. Everything on the real Kolibri int4 checkpoint
@@ -110,6 +116,9 @@ expected, not a failure.
 | K2-Horizon int4 | `urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ` | 21.8 GB | rows 14, 15, 21, 25 | `k2` |
 | Qwen3.8 int4 g64 gate snapshot | `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ` `--revision 84575a18f209992ef96d819b31f924b489e3d55d` | 20.0 GB | everything (G0) | `qwen` - **only if `HAVE_qwen=0`**: the box has used this snapshot since August |
 | Kolibri-1 int4 | does not exist (spec 20b) | ~42.5 GB when it does | `r24.partial`, `r24.pp_real`, `r26.real`, `r28.real` | `kolibri` |
+| tiny qwen4_exp model | `qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next` | 124 MB | `r30.host` (session 9b) | `q4exp_tiny` |
+| Qwen3.8-Flash-Next original, **small files only** | `Qwen/Qwen3.8-Flash-Next` `config.json tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja` | a few MB (never the 360 GB) | `r31.synth` (the synthetic checkpoints), `r34.a4_ref` | `q4exp_orig_small` |
+| Intel's Qwen3.8-Flash-Next W4A16 (**optional**, 9b part 2) | `Intel/Qwen3.8-Flash-Next-W4A16-AutoRound` | 181.17 GB (102.4 GB of it the PLE shards) | `r31.load_real`, `r32.partial`, `r33.golden_real` (SKIP "missing data" without it), the opt-in real-weight stages of rows 30-34 | `q4exp_intel` |
 
 ```sh
 export REMOTE_DIR=b70-inference-server-validate
@@ -117,7 +126,16 @@ tools/box.sh run 'tools/probe/detach.sh $HOME/dl-models.log bash -c "for r in ur
 tools/box.sh run 'tail -3 $HOME/dl-models.log'      # poll; the log ends in ALLDONE rc=0
 ```
 
-~67.7 GB in all; at an unmeasured 30-100 MB/s that is 10-40 min (est.), well inside session
+For session 9b add the two small spec 21 downloads (the tiny model, the original's small files), and
+Intel's 181 GB only if part 2 of 9b runs (disk first, §1.5):
+
+```sh
+tools/box.sh run 'tools/probe/detach.sh $HOME/dl-q4exp.log bash -c "uvx --from huggingface_hub hf download qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next && uvx --from huggingface_hub hf download Qwen/Qwen3.8-Flash-Next config.json tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja"'
+# optional, 9b part 2 (hours):
+tools/box.sh run 'tools/probe/detach.sh $HOME/dl-q4exp-intel.log uvx --from huggingface_hub hf download Intel/Qwen3.8-Flash-Next-W4A16-AutoRound'
+```
+
+~67.7 GB in all (without spec 21's); at an unmeasured 30-100 MB/s that is 10-40 min (est.), well inside session
 1. (`uvx` may be only at `~/.local/bin/uvx` in a non-interactive shell.) The Agnes checkpoint
 **is not in the Mac's HF cache any more**, so it is downloaded here rather than copied (see
 §1.4 for why that matters).
@@ -164,8 +182,12 @@ alone is made on the box before session 5 - one container run of make_set.py, no
       baseline tree, `build-agnes-sweep`; unmeasured, budget 10-20 GB). **Want >= 120 GB free**;
       +20 GB if the Qwen3.8 snapshot must be fetched; +42.5 GB later for Kolibri int4; +20 GB
       for the manual `r18.ct` checkpoint (`RedHatAI/Qwen3.8-27B-INT4`), which is not on the day's
-      list.
-- [ ] **RAM** (121 GB on the box): one CPU oracle at a time; `r14.oracle` needs
+      list. **Session 9b:** +~27 GB for the two Qwen3.8-Flash-Next synthetic checkpoints
+      (`r31.synth`, ~13.5 / ~13.7 GB); part 2 adds **~233 GB** (Intel's 181.17 GB + the 51.8 GB
+      int8 PLE file `r31.ple_convert` writes beside it) - only if `df -h ~` has it.
+- [ ] **RAM** (121 GB on the box): one CPU oracle at a time; 9b part 2's `r31.load_real` pins the
+      51.8 GB PLE table (MemAvailable - 16 GiB rule: `free -g` >= 70 GB, nothing else running), the
+      real-weight references SKIP below MemAvailable 64 GB (`Q4_REF_MIN_GB`); `r14.oracle` needs
       MemAvailable >= 32 GB (`K2_REF_MIN_GB`), `r24.oracle_synth` >= 24 GB (`KOL_REF_MIN_GB`);
       never during `g0.build` (a compile slows a CPU oracle by ~28 %, docs/10, and both want RAM).
 
@@ -186,6 +208,23 @@ alone is made on the box before session 5 - one container run of make_set.py, no
       ```
       Both are resumable and skip what exists, so `r14.oracle` / `r24.oracle_synth` in sessions
       5 / 9 then only re-link the sets and record the gap distributions.
+- [ ] **For session 9b, on the CPU lane before it** (opt-in CPU stages, one at a time, once G0
+      is PASS - `--only` needs it - and never during sessions 6-9): the synthetic Qwen3.8-Flash-Next checkpoints from the
+      original's small files, their golden sets, and the MTP head's M1 data. Without them every
+      synthetic GPU stage of rows 31-34 SKIPs "missing data":
+      ```sh
+      tools/box_validate.sh --only r31.synth            # ~27 GB, make_synth.py + ple_int8.py (est. < 1 h)
+      tools/box_validate.sh --only r32.oracle_synth     # the golden sets, ~0.5-1 h each form (est.)
+      tools/box_validate.sh --only r34.fixture          # M1's data, ~0.5 h (est.)
+      ```
+      (The Mac has `oracle-out-q4exp-synth/{ours,intel}` - 26 GB, checkpoints only, no golden sets -
+      but over the box's flaky WiFi making them on the box is the safer path; by hand:
+      `rsync -a oracle-out-q4exp-synth "$BOX:b70-inference-server/"`.)
+      **Part 2 (optional, real weights, after Intel's download):** `--only r31.ple_convert` (the int8
+      PLE file, ~51.8 GB) and `--only r30.golden_layers` (21c's `--layers 4 / 18` sets, HOURS) - they
+      turn `r31.load_real`, `r32.partial`, `r33.golden_real` from SKIP into real runs; `r30.traces`
+      (spec 22 P0.6 / P0.8's routing traces) and `r34.accept` (decision 4's MTP acceptance) are the
+      other real-weight CPU stages worth the time, both HOURS.
 - [ ] **Also for the CPU lane - queue row 35, the W4A4 probe** (plan
       `docs/superpowers/plans/2026-10-09-w4a4-probe.md` Task 2; Task 1's tool is on the tree):
       `tools/box_validate/w4a4_grid.sh` runs `eval_quantised.py sim <Qwen3.8 bf16> <gate checkpoint>
@@ -471,6 +510,32 @@ Estimate 4.5-7 h: `r24.oracle_synth` ~1-1.5 h (0 if baked in the CPU lane), the 
 **Check:** `r24.k1` and `r26.k1` (the 40 Kolibri binaries' first run) PASS; `r24.pp` /
 `r26.pp` bitwise; `r28.snapshot` (restores bitwise) PASS.
 
+### Session 9b - Qwen3.8-Flash-Next on the synthetic checkpoints (rows 30-34, spec 21)
+
+```sh
+tools/box_validate.sh --only r30,r31,r32,r33,r34 --with r32.ple_rate,r32.bench_attn
+```
+
+32 default stages plus two cheap opt-in GPU probes, both cards for the `.pp` / `.cli` stages:
+`r30.host` (CPU, the tiny model in the oracle image), the K0 recaps `r31.k0` .. `r34.k0`, the host
+stages, `r31.plan`, `r31.load`, then per row the first ocloc compile of each blind kernel block
+(`r32.k1` 33 binaries, `r33.k1` 30, `r34.k1` 122) and its tests, the synthetic gates (`r32.k3`,
+`r32.golden`, `r33.prefill`, `r33.golden`, `r34.snapshot`, `r34.mtp`, `r34.serve`), the refusals, and
+the two-card twins (`r32.pp`, `r32.cli`, `r33.pp`, `r33.cli`, `r34.pp` - each `after r22.p1`, so after
+session 7). `r32.ple_rate` is spec 22 P0's first host-USM rate (no checkpoint; `free -g` >= 70 GB for
+its 51.8 GB arm) and `r32.bench_attn` decision 10's sparse-vs-dense attention evidence.
+Needs: the CPU-lane data of §1.6 (`oracle_q4exp_synth`, `oracle_q4exp_synth_golden`, M1's fixture),
+the tiny model and the original's small files (§1.3). `r31.load_real`, `r32.partial` and
+`r33.golden_real` SKIP "missing data" unless part 2's real checkpoint, PLE file and `--layers` sets
+exist - expected, not a failure; re-run them with the same command once they do (a re-run repeats
+only what is not PASS).
+Estimate 3.5-6 h (est., unmeasured: three kbins blocks, 185 binaries in all; 4-layer real-width
+synthetic checkpoints, ~13.5 GB each, load in about a minute; the `.pp` stages are two-card loads).
+**Check:** `r32.k0` / `r33.k0` / `r34.k0` PASS (prep.cl, pf_gated_head.cl, q4_qsa.cl, q4_ple.cl
+changed by defines only - every existing binary unchanged); `r32.k1`, `r33.k1`, `r34.k1` (first
+runs); `r32.golden`, `r33.golden` (token gates); `r34.mtp`'s M2 bitwise; the `.pp` stages bitwise.
+Hand back: `r32.ple_rate`'s rate lines and `r34.mtp`'s verify-cost lines (spec 22's inputs).
+
 ### Session 10 - the rest, and the summary
 
 ```sh
@@ -495,9 +560,9 @@ day's record.
   `r28.snapshot`; and P4, the "never hangs" proofs, `r22.p4`, `r23.p4`.
 - **First runs of new kernels** (a blind kernel either works here or nowhere): `r8.kernels`,
   `r10.nockpt`, `r11.kernels`, `r13.kernels`, `r14.k1`, `r15.k1`, `r16.kernels`, `r21.k1`,
-  `r24.k1`, `r26.k1`; and `r19.load`, `r22.devices`.
+  `r24.k1`, `r26.k1`, `r32.k1`, `r33.k1`, `r34.k1`; and `r19.load`, `r22.devices`.
 - **The token gates:** `r1.gates`, `r10.gates`, `r13.gates`, `r14.golden`, `r15.golden`,
-  `r21.golden`, `r24.golden`, `r26.golden`.
+  `r21.golden`, `r24.golden`, `r26.golden`, `r32.golden`, `r33.golden`.
 
 ### 3.2 Defer first (default stages; the short path, ~36 h instead of ~51 h)
 
