@@ -280,8 +280,151 @@ def test_tiny_model_traces():
     print(f"  tiny 16 x top-4, {T} rows over 2 sources: every subcommand ran; counts = T x L x k; profile round-trips")
 
 
+# --- P0.8 (Task 4): REAP masks -----------------------------------------------------------------------------------------
+def _reap_set(d, E=16, L=2, k=2, T=320):
+    """Every expert routed equally often (cycling rows), p = 1 / k; onorm of expert e = e + 1 except experts 9 and 10,
+    whose onorm are equal (11.0): REAP's score is (e + 1) x count / k, with an exact tie between 9 and 10. The A4
+    scenarios route the low ids only (so calibrating without them moves the frequency mask)."""
+    ids = cycling_rows(T, L, k, lambda l: E)
+    on = (ids + 1).astype(np.float32)
+    on[ids == 9] = 11.0
+    on[ids == 10] = 11.0
+    write_trace(d, "q4exp_agentic", ids, onorm=on, experts=E)
+    a4 = [f"t{i}_define-{f}" for i in (1, 2) for f in ("box", "step", "loader", "openai")]
+    for n in a4:
+        lo = cycling_rows(64, L, k, lambda l: 4)
+        write_trace(d, n, lo, onorm=np.ones(lo.shape, np.float32), experts=E)
+    return a4
+
+
+def test_reap_masks():
+    d = os.path.join(TMP, "reap")
+    a4 = _reap_set(d)
+    E, L, k = 16, 2, 2
+    tr = OC.load_traces(d)
+    s = OC.reap_scores([t for t in tr if t.cls == "agentic"], L, E, "reap")
+    assert np.allclose(s[0], np.array([(e + 1 if e not in (9, 10) else 11.0) * 40 * 0.5 for e in range(E)])), s[0]
+    keep = OC.mask_keep(s, 0.375)                       # round(16 x 0.375) = 6: the top 6 by score
+    assert keep.sum(1).tolist() == [6, 6]
+    assert sorted(np.nonzero(keep[0])[0].tolist()) == [9, 11, 12, 13, 14, 15], np.nonzero(keep[0])
+    keep7 = OC.mask_keep(s, 0.4375)                     # 7: the tie (9, 10) at the cut -> both in; at 5 neither
+    assert sorted(np.nonzero(keep7[0])[0].tolist()) == [9, 10, 11, 12, 13, 14, 15]
+    s5 = s.copy()
+    s5[:, 15] = 0.0                                     # now 9 and 10 tie for the 6th of 6 kept: the lower id wins
+    assert sorted(np.nonzero(OC.mask_keep(s5, 0.375)[0])[0].tolist()) == [9, 10, 11, 12, 13, 14]
+    s6 = s.copy()
+    s6[:, 14] = 0.0
+    s6[:, 15] = 0.0
+    assert sorted(np.nonzero(OC.mask_keep(s6, 0.375)[0])[0].tolist()) == [8, 9, 10, 11, 12, 13]
+    s7 = np.zeros((L, E))
+    s7[:, 3] = s7[:, 7] = 5.0
+    assert np.nonzero(OC.mask_keep(s7, 1 / 16)[0])[0].tolist() == [3], "an exact tie at the cut goes to the lower id"
+    try:
+        OC.mask_keep(s, 1 / 16, top_k=k)
+    except SystemExit as e:
+        assert "keeps 1 experts, fewer than top_k 2" in str(e), e
+    else:
+        raise AssertionError("a mask below top_k was written")
+    out = os.path.join(d, "masks")
+    py = [sys.executable, os.path.join(_HERE, "offload_curve.py")]
+    for extra in ([], ["--holdout-a4"]):
+        r = subprocess.run(py + ["reap", "--traces", d, "--sources", "A4,agentic", "--kept", "0.375,0.5",
+                                 "--criterion", "reap,freq", "--out", out] + extra, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+    m_in = OC.read_mask(os.path.join(out, "mask-reap-0.375.safetensors"))
+    m_ho = OC.read_mask(os.path.join(out, "mask-reap-0.375-noa4.safetensors"))
+    f_in = OC.read_mask(os.path.join(out, "mask-freq-0.375.safetensors"))
+    f_ho = OC.read_mask(os.path.join(out, "mask-freq-0.375-noa4.safetensors"))
+    for m in (m_in, m_ho, f_in, f_ho):
+        assert m["keep"].dtype == np.uint8 and m["keep"].shape == (L, E) and int(m["mtp_keep"].sum()) == E
+        assert m["meta"]["format"] == "spec22-mask-1" and m["meta"]["per_layer"] == "uniform"
+        assert float(m["meta"]["kept_fraction"]) == 0.375
+    cal_in = {x["name"] for x in json.loads(m_in["meta"]["calibration"])}
+    cal_ho = {x["name"] for x in json.loads(m_ho["meta"]["calibration"])}
+    assert cal_in == set(a4) | {"q4exp_agentic"} and cal_ho == {"q4exp_agentic"}, (cal_in, cal_ho)
+    assert m_in["meta"]["criterion"] == m_ho["meta"]["criterion"] == "reap"
+    for key in ("model", "checkpoint_revision", "kept_fraction", "per_layer", "format"):
+        assert m_in["meta"][key] == m_ho["meta"][key], key            # --holdout-a4 changes the calibration only
+    assert sorted(np.nonzero(f_ho["keep"][0])[0].tolist()) == [0, 1, 2, 3, 4, 5]          # all equal: lower ids
+    assert sorted(np.nonzero(f_in["keep"][0])[0].tolist()) == [0, 1, 2, 3, 4, 5]
+    js = json.load(open(os.path.join(out, "reap.json")))
+    assert "overlap" in js and js["overlap"]["0.375"]["all"][0] == len({9, 11, 12, 13, 14, 15} & {0, 1, 2, 3, 4, 5})
+    print("  REAP keeps the analytic top 6 (ties to the lower id), freq the lower ids; --holdout-a4 drops the A4 "
+          "traces from the calibration and nothing else; below top_k refused; the overlap written")
+
+
+def test_reap_folds():
+    """Decision 9 (operator, 2026-10-10): --kfold 4 --fold i calibrates without fold i's A4 scenarios (keeping every
+    non-A4 source); the 4 folds partition the A4 set; --fold all writes the 4 masks."""
+    d = os.path.join(TMP, "folds")
+    E, L, k = 16, 2, 2
+    write_trace(d, "q4exp_agentic", cycling_rows(320, L, k, lambda l: E), experts=E)
+    a4 = [f"t{i}_{t}-{f}" for i, t in enumerate(("define", "explain", "rename", "comment", "test", "fix"), 1)
+          for f in ("box", "linear_l0", "loader", "openai", "rotation", "step")]
+    for n in a4:
+        write_trace(d, n, cycling_rows(16, L, k, lambda l: 4), experts=E)
+    write_trace(d, "2026-10-01_turn3", cycling_rows(16, L, k, lambda l: 8), experts=E)     # an opencode recording
+    folds = OC.a4_folds(a4, 4)
+    assert sorted(sum(1 for n in a4 if folds[n] == i) for i in range(4)) == [9, 9, 9, 9]
+    out = os.path.join(d, "masks")
+    r = subprocess.run([sys.executable, os.path.join(_HERE, "offload_curve.py"), "reap", "--traces", d, "--sources",
+                        "A4,agentic,opencode", "--kept", "0.5", "--kfold", "4", "--fold", "all", "--out", out],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+    seen = set()
+    for i in range(4):
+        m = OC.read_mask(os.path.join(out, f"mask-reap-0.5-fold{i}.safetensors"))
+        cal = {x["name"] for x in json.loads(m["meta"]["calibration"])}
+        held = {n for n in a4 if folds[n] == i}
+        assert cal == (set(a4) - held) | {"q4exp_agentic", "2026-10-01_turn3"}, i
+        assert json.loads(m["meta"]["held_out"]) == sorted(held) and m["meta"]["fold"] == f"{i}/4"
+        seen |= held
+    assert seen == set(a4)
+    assert os.path.exists(os.path.join(out, "folds.json"))
+    print("  --kfold 4 --fold all: 4 masks, each calibrated without its 9 A4 scenarios (agentic + opencode kept)")
+
+
+def test_prune_report():
+    """prune-report: the curve table from maskeval JSONs and the A4 outputs - in sample (the all-traces mask) and the
+    4-fold held-out accuracy (each scenario on its fold's mask), the gap, the experts' bytes and the two-card fit."""
+    d = os.path.join(TMP, "prune")
+    ev, a4d = os.path.join(d, "maskeval"), os.path.join(d, "a4")
+    os.makedirs(ev, exist_ok=True)
+    os.makedirs(a4d, exist_ok=True)
+    names = [f"t{i}_define-{f}" for i in range(1, 3) for f in ("box", "step", "loader", "openai")]
+    folds = OC.a4_folds(names, 4)
+    call = "<tool_call>\n<function=read>\n<parameter=path>\na.py\n</parameter>\n</function>\n</tool_call>"
+    other = "<tool_call>\n<function=grep>\n<parameter=q>\nx\n</parameter>\n</function>\n</tool_call>"
+    for n in names:
+        open(os.path.join(a4d, f"{n}.bf16.txt"), "w").write(call)
+        open(os.path.join(a4d, f"{n}.mask-reap-0.5.txt"), "w").write(call)                  # in sample: all match
+        bad = folds[n] == 0                                                                    # held out: fold 0 fails
+        open(os.path.join(a4d, f"{n}.mask-reap-0.5-fold{folds[n]}.txt"), "w").write(other if bad else call)
+    for kept, kl in ((0.5, 0.25), (0.875, 0.01)):
+        json.dump({"prompt": "q4exp_short", "set": "golden", "kept": kept, "criterion": "reap", "tag": f"mask-reap-{kept}",
+                   "kl_mean": kl, "kl_p99": kl * 4, "argmax": 1 - kl, "rows": 100},
+                  open(os.path.join(ev, f"q4exp_short.mask-reap-{kept}.json"), "w"))
+    budget = os.path.join(d, "budget.json")
+    open(budget, "w").write(json.dumps({"max_len": 32768, "devices": 2, "mtp": True, "prefill": True, "dense": "int4",
+                                        "cache_total": 50764655176, "routed_total": 64172851200, "f": 0.791061,
+                                        "experts": 512, "layers": 48, "expert_bytes": 2611200}) + "\n")
+    r = subprocess.run([sys.executable, os.path.join(_HERE, "offload_curve.py"), "prune-report", "--dir", ev, "--a4",
+                        a4d, "--budget", budget, "--json", os.path.join(d, "prune.json")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+    j = json.load(open(os.path.join(d, "prune.json")))
+    row = {x["kept"]: x for x in j["rows"]}[0.5]
+    n0 = sum(1 for n in names if folds[n] == 0)
+    assert row["a4_in_sample"] == 1.0 and abs(row["a4_held_out"] - (len(names) - n0) / len(names)) < 1e-12, row
+    assert abs(row["a4_gap"] - n0 / len(names)) < 1e-12 and row["kl_mean_golden"] == 0.25
+    assert row["experts_gb"] == round(48 * 256 * 2611200 / 1e9, 3) and row["fits_two_cards"] is True
+    assert {x["kept"]: x for x in j["rows"]}[0.875]["fits_two_cards"] is False
+    print(f"  prune-report: in sample 1.0, held out {row['a4_held_out']:.3f}, gap {row['a4_gap']:.3f}; 50 % "
+          f"({row['experts_gb']} GB) fits two cards, 87.5 % does not")
+
+
 TESTS = [test_curve_analytic, test_holdout_disjoint, test_swap_never_lands_is_static, test_mtp_unions,
-         test_prefill_repeated_row, test_counts_and_profile_roundtrip, test_cli_synthetic, test_tiny_model_traces]
+         test_prefill_repeated_row, test_counts_and_profile_roundtrip, test_cli_synthetic, test_tiny_model_traces,
+         test_reap_masks, test_reap_folds, test_prune_report]
 
 
 def main() -> None:
