@@ -1493,16 +1493,33 @@ def replay_rows(model, ids: list[int], chunk: int, gen: list[int], row0: int) ->
 
 
 def cmd_maskeval(a) -> None:
-    """maskeval <snapshot> --expert-mask FILE --golden <p>.golden.safetensors [--prompt IDS] | --prompt IDS --cont IDS
-    [--full-cache FILE]: per row KL(full || masked) and argmax agreement, printed and (--json) written."""
+    """maskeval <snapshot> --expert-mask FILE [--expert-mask FILE ...] --golden <p>.golden.safetensors [--prompt IDS] |
+    --prompt IDS --cont IDS [--full-cache FILE]: per row KL(full || masked) and argmax agreement for each mask, printed
+    and written (--json FILE for one mask; --json-dir DIR: <DIR>/<prompt>.<tag>.json each - a mask whose file exists is
+    skipped, so a killed run resumes). The model is built once for all the masks."""
     from safetensors import safe_open
     from safetensors.torch import save_file
     t0 = time.time()
     tc = text_config(a.snapshot, a.layers, a.experts)
     require_cacheable(tc)
-    mask = load_expert_mask(a.expert_mask, tc)
+    masks = [load_expert_mask(m, tc) for m in a.expert_mask]
+    if len(masks) > 1 and not a.json_dir:
+        die("maskeval: several --expert-mask need --json-dir")
+    if a.golden:
+        name, kind = os.path.basename(a.golden).split(".golden")[0], "golden"
+    else:
+        if not (a.prompt and a.cont):
+            die("maskeval: --golden, or --prompt and --cont")
+        name, kind = os.path.basename(a.prompt).rsplit(".", 1)[0], "a4"
+    if a.json_dir:
+        todo = [m for m in masks if not os.path.exists(os.path.join(a.json_dir, f"{name}.{m.tag}.json"))]
+        for m in masks:
+            if m not in todo:
+                print(f"maskeval {name}: {m.tag} kept ({a.json_dir}/{name}.{m.tag}.json)")
+        masks = todo
+        if not masks:
+            return
     model, pf, lazy = build_streamed(a.snapshot, tc, PleTable(ple_source(a.snapshot, a.ple), tc))
-    print(mask_line(mask), flush=True)
     if a.golden:
         with safe_open(a.golden, framework="pt") as f:
             meta = dict(f.metadata() or {})
@@ -1512,18 +1529,14 @@ def cmd_maskeval(a) -> None:
         if len(ids) != int(meta["n_prompt"]):
             die(f"{a.golden}: n_prompt {meta['n_prompt']}, the prompt has {len(ids)} ids")
         row0, chunk = int(meta["logits_row0"]), int(meta["chunk"])
-        name, kind = os.path.basename(a.golden).split(".golden")[0], "golden"
-        h = apply_expert_mask(model, mask)
-        got = replay_rows(model, ids, chunk, gen, row0)
-        h.remove()
+
+        def masked_rows():
+            return replay_rows(model, ids, chunk, gen, row0)
     else:
-        if not (a.prompt and a.cont):
-            die("maskeval: --golden, or --prompt and --cont")
         ids, cont = read_ids(a.prompt), read_ids(a.cont)
         T, C = len(ids), len(cont)
         seq = ids + cont
         chunk = auto_chunk(len(seq), a.chunk)
-        name, kind = os.path.basename(a.prompt).rsplit(".", 1)[0], "a4"
         if a.full_cache and os.path.exists(a.full_cache):
             with safe_open(a.full_cache, framework="pt") as f:
                 ref_rows = f.get_tensor("logits").float()
@@ -1532,24 +1545,37 @@ def cmd_maskeval(a) -> None:
             if a.full_cache:
                 save_file({"logits": ref_rows.to(torch.bfloat16).contiguous()}, a.full_cache,
                           metadata={"prompt": os.path.abspath(a.prompt), "cont": os.path.abspath(a.cont)})
+            ref_rows = ref_rows.to(torch.bfloat16).float()   # what the cache holds (the model's logits are bf16)
+
+        def masked_rows():
+            return replay_rows(model, seq, chunk, [], T - 1)[:C]
+    for mask in masks:
+        t1 = time.time()
+        print(mask_line(mask), flush=True)
         h = apply_expert_mask(model, mask)
-        got = replay_rows(model, seq, chunk, [], T - 1)[:C]
-        h.remove()
-    if got.shape != ref_rows.shape:
-        die(f"maskeval: {list(got.shape)} rows against the reference's {list(ref_rows.shape)}")
-    kl, agree = kl_rows(ref_rows, got)
-    kl_d = kl.double()
-    out = {"prompt": name, "set": kind, "kept": mask.kept, "criterion": mask.meta.get("criterion", ""), "tag": mask.tag,
-           "mask": os.path.abspath(mask.path), "calibration": mask.meta.get("calibration", "[]"),
-           "fold": mask.meta.get("fold", ""), "rows": int(kl.numel()), "kl_mean": float(kl_d.mean()),
-           "kl_p99": float(torch.quantile(kl_d, 0.99)), "kl_max": float(kl_d.max()), "argmax": float(agree.double().mean()),
-           "kl": [float(x) for x in kl.tolist()]}
-    print(f"maskeval {name} kept={mask.kept:g} kl_mean={out['kl_mean']:.6g} kl_p99={out['kl_p99']:.6g} "
-          f"argmax={out['argmax']:.4f} rows={out['rows']} set={kind} tag={mask.tag} ({time.time() - t0:.0f}s)", flush=True)
-    if a.json:
-        os.makedirs(os.path.dirname(os.path.abspath(a.json)), exist_ok=True)
-        with open(a.json, "w") as fh:
-            json.dump(out, fh)
+        try:
+            got = masked_rows()
+        finally:
+            h.remove()
+        if got.shape != ref_rows.shape:
+            die(f"maskeval: {list(got.shape)} rows against the reference's {list(ref_rows.shape)}")
+        kl, agree = kl_rows(ref_rows, got)
+        kl_d = kl.double()
+        out = {"prompt": name, "set": kind, "kept": mask.kept, "criterion": mask.meta.get("criterion", ""),
+               "tag": mask.tag, "mask": os.path.abspath(mask.path), "variant": mask.meta.get("variant", ""),
+               "calibration": mask.meta.get("calibration", "[]"), "fold": mask.meta.get("fold", ""),
+               "rows": int(kl.numel()), "kl_mean": float(kl_d.mean()), "kl_p99": float(torch.quantile(kl_d, 0.99)),
+               "kl_max": float(kl_d.max()), "argmax": float(agree.double().mean()), "kl": [float(x) for x in kl.tolist()]}
+        print(f"maskeval {name} kept={mask.kept:g} kl_mean={out['kl_mean']:.6g} kl_p99={out['kl_p99']:.6g} "
+              f"argmax={out['argmax']:.4f} rows={out['rows']} set={kind} tag={mask.tag} ({time.time() - t1:.0f}s)",
+              flush=True)
+        path = a.json or (os.path.join(a.json_dir, f"{name}.{mask.tag}.json") if a.json_dir else None)
+        if path:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            with open(path + ".tmp", "w") as fh:
+                json.dump(out, fh)
+            os.replace(path + ".tmp", path)
+    print(f"maskeval {name}: {len(masks)} mask(s), wall {time.time() - t0:.0f}s")
 
 
 TRACE_FORMAT = ("ids i32 [T][L][k]: each row's top-k per layer, ascending expert id; p f32 [T][L][k]: the router's "
@@ -1614,7 +1640,11 @@ def main() -> None:
         p.add_argument("--experts", default=DEFAULT_EXPERTS, choices=["grouped_mm", "eager"])
         p.add_argument("--ple", default="bf16", help="bf16 (the snapshot's shards), bf16:<snapshot>, int8:<dir>")
         p.add_argument("--chunk", type=int, default=-1, help="prefill chunk (-1: whole up to 4096 ids, else 2048)")
-        p.add_argument("--expert-mask", help="spec 22 P0.8: a spec22-mask-1 file - the router on the kept set (LOSSY)")
+        if p.prog.endswith("maskeval"):
+            p.add_argument("--expert-mask", action="append", default=[],
+                           help="spec 22 P0.8: a spec22-mask-1 file (repeat for several, with --json-dir)")
+        else:
+            p.add_argument("--expert-mask", help="spec 22 P0.8: a spec22-mask-1 file - the router on the kept set (LOSSY)")
     r = sub.add_parser("run")
     common(r)
     r.add_argument("--prompt", required=True)
@@ -1652,6 +1682,7 @@ def main() -> None:
                                   "full-model reference output)")
     e.add_argument("--full-cache", help="without --golden: the full model's rows, read when present, else written")
     e.add_argument("--json")
+    e.add_argument("--json-dir", help="<DIR>/<prompt>.<tag>.json per mask (resumable: existing files are skipped)")
     a = ap.parse_args()
     if a.cmd == "maskeval" and not a.expert_mask:
         die("maskeval: --expert-mask FILE is required")
