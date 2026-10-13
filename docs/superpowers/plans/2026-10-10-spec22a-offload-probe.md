@@ -1,9 +1,35 @@
 # Spec 22a - the expert-offload probe (P0): the links, zero-copy reads, pinned capacity, the hit-rate curve, the pruning curve, the projection
 
-**Status (2026-10-10): planned, not started.** Box queue row 36 (it renumbers at build time if taken). Everything
-that can be written and checked without the box is (Tasks 1-4, Mac gates); every number is the box's (Task 5).
-Plans 22b-22d begin only on the operator's go after this plan's record (spec 22 §3, the stopping rule); plan 22m (the
-coding mask) begins on decision 9, whatever the tier's verdict.
+**Status (2026-10-13): Tasks 1-4 built on the Mac and Task 5 Step 1 in (branch `spec22a-offload-probe`); Task 5
+Steps 2-7 are the box's - queue row 36, box-day plan Session 9b.** Everything that can be written and checked without
+the box is (the Mac gates below, measured); every number is the box's. Plans 22b-22d begin only on the operator's go
+after this plan's record (spec 22 §3, the stopping rule); plan 22m (the coding mask) begins on decision 9, whatever the
+tier's verdict.
+
+**As built (2026-10-13) - where the build departs from, or adds to, the text below:**
+- Task 1: `expert_budget` / `budget_json` as the interface below, plus the per-token byte model the projection reads
+  (`read_routed`, `read_non_routed`, `read_mtp_step` from `loader::q4_layer_read_per_token`). Derived (the planner's
+  bytes): f = 0.874 bare, 0.843 with the MTP head, 0.822 with the prefill scratch, **0.791 with both** (ours, two
+  cards, 32k) - spec 22 §2's ~0.83 counted the head but not 21d's prefill scratch (~3.3 GB over two cards); Intel's
+  forms 0.724; one card 0.334. D = 3.754 GB (spec 21 §3's hand 3.712), R = 1.253 GB, a draft step 0.845 GB.
+- Task 2: the drift test is a C++ runner (`tests/kernels/probe_offload_kernel_drift_test.cc`) over `python3
+  mk_offload_kernel.py --check` - the host-only configuration runs only tests that are executables of the tree. `zc`'s
+  pairs share one VRAM layer image a card with disjoint experts a pair (26 images would not fit a card); `po_page_check`
+  takes the range count and `po_stage` writes a launch table (`ltable`) the expert kernels then bind; arm S is paired on
+  wall time (the copy queue's work is outside the compute list's timestamps). `offload_run` (Mac GPU, Intel UHD 630):
+  the table kernels bitwise the direct build (identity, permuted, a host-allocated arena; a swapped-entry control
+  differs). `tools/probe/testdata/lspci_b70.txt` is HAND-WRITTEN.
+- Task 3: held out = the mean of the two cross-half scores, in sample = each half on its own profile (the disjoint
+  test's 0 / 1 needs that reading); the per-layer fill is the global greedy by the training half's counts; a swap round
+  whose copy cannot land is never started (so `--copy-ms inf` is the static fill exactly).
+- Task 4: the masked router is -inf before the fp32 softmax (spec 22 §4b, plan 22m) with dropped experts ranked below
+  every kept one; the never-routed test (b) held bitwise on the tiny (the bf16 cast absorbs the changed denominator - not
+  guaranteed in fp32 in general). `maskeval` takes several masks with `--json-dir` (one model build a prompt);
+  `prune-report --a4` reads the A4 outputs' directory with score.py's own parser; the stopping rule's number is the
+  two-card 32k decode without MTP drafting on the serving budget (head + prefill scratch), the MTP rows beside it.
+- Task 5 Step 1: row 36's stages write P0's outputs to `$DATA/oracle-out-q4exp-offload` (budget, links, `po-*.txt`, the
+  curves, project), the masks / maskevals to `oracle-out-q4exp-prune`; `qwen4exp_oracle.sh` gained `reap`, `curve`,
+  `project`, `prune`, `prune-a4` (the first three read no checkpoint).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -147,13 +173,13 @@ std::string budget_json(const ExpertBudget& b);  // one line: {"max_len":..,"dev
 }
 ```
 
-- [ ] **Step 1: the failing test.** `qwen4exp_plan_test` gains a budget case: for the published 48 layers, ours and
+- [x] **Step 1: the failing test.** `qwen4exp_plan_test` gains a budget case: for the published 48 layers, ours and
   Intel's forms (21b's `Q4Placement::two(d, pp_split(...).split)`, 32.53 GB cards, the 1.5 GB reserve, int8 head),
   at max_len 4096 / 32768 / 131072 / 262144, with and without the MTP head and the prefill scratch: `non_routed +
   routed blocks == plan()`'s per-device total byte for byte; `cache` = capacity - reserve - non_routed; one card
   (`Q4Placement::one`) likewise. It prints every case as `budget-json {...}` and, with `--budget-json FILE`, writes
   them (one per line) to FILE. FAIL (no function).
-- [ ] **Step 2: implement**; PASS on the Mac (`ctest --preset mac-host -R '^qwen4exp_plan_test$'`). The printed f for
+- [x] **Step 2: implement**; PASS on the Mac (`ctest --preset mac-host -R '^qwen4exp_plan_test$'`). The printed f for
   ours at 32768 on two cards with the head and the prefill scratch is spec 22 §2's 0.83 or the record says by how much
   it differs and why (derived; no bar). Commit `git commit -S -m "runtime: the routed-expert budget per device -
   what the plan leaves for spec 22's cache (spec 22a)"`.
@@ -205,21 +231,21 @@ std::string budget_json(const ExpertBudget& b);  // one line: {"max_len":..,"dev
     to run by hand when `sudo -n` fails); the derived host RAM ceiling (channels x MT/s x 8 B); one line `links: dev0
     Gen<g> x<w>, dev1 Gen<g> x<w>` and `STOP: <card> trains below Gen3 x8` when it does.
 
-- [ ] **Step 1: the generator and its drift test** (host): `mk_offload_kernel.py`, the generated file,
+- [x] **Step 1: the generator and its drift test** (host): `mk_offload_kernel.py`, the generated file,
   `probe_offload_kernel_drift_test` registered; `ctest --preset mac-host -R probe_offload_kernel_drift_test` PASS; a
   hand edit of the generated file makes it FAIL (checked once, reverted). Commit `git commit -S -m "probe: the
   expert kernels read through a pointer table - q4_moe.cl with its two address lines swapped, drift-checked (spec 22a)"`.
-- [ ] **Step 2: `probe_offload.cc` and `probe_offload.cl`, the CMake block.** Sizes only from the layout header; the
+- [x] **Step 2: `probe_offload.cc` and `probe_offload.cl`, the CMake block.** Sizes only from the layout header; the
   route rows written by the host (the 10 ids of each pair, weights 0.1 in bf16, the shared gate 0); every arm's
   `y` read back; every wait bounded. Commit `git commit -S -m "probe: probe_offload - copy-engine rates, zero-copy
   expert reads mixed with VRAM, replayed visibility, host RAM under load, pinned capacity, the alias check (spec 22a)"`.
-- [ ] **Step 3: Mac gates.** `tools/mac_check.sh --base main --quick` exit 0 (Level Zero syntax of the new source;
+- [x] **Step 3: Mac gates.** `tools/mac_check.sh --base main --quick` exit 0 (Level Zero syntax of the new source;
   cmdlines +0 / -0 / ~0); by hand, recorded in the commit message: `clang -x cl -cl-std=CL3.0 -fsyntax-only -include
   tools/mac/opencl/intel_shim.h` over both `.cl` files with the q4_moe defines of 21c's `_SH4` line and with
   `-Dcl_intel_subgroups` unset; `offload_run` on the Mac GPU: the table kernel over (identity, a permuted slot order,
   host-allocated blocks) bitwise `q4_moe.cl`'s plain-load build at the real shapes - `offload_run: q4_moe table exact`.
   Commit `git commit -S -m "mac: offload_run - the table-addressed expert kernels bitwise the direct ones (spec 22a)"`.
-- [ ] **Step 4: `offload_links.sh`** (`bash -n`, and its parser run over a saved `lspci -vv` sample in a heredoc-free
+- [x] **Step 4: `offload_links.sh`** (`bash -n`, and its parser run over a saved `lspci -vv` sample in a heredoc-free
   fixture `tools/probe/testdata/lspci_b70.txt` - a recorded or hand-written sample, said which). Commit `git commit -S
   -m "probe: offload_links.sh - the B70s' PCIe links, bridges, root ports and host memory channels (spec 22a)"`.
 
@@ -254,12 +280,12 @@ std::string budget_json(const ExpertBudget& b);  // one line: {"max_len":..,"dev
   - `profile --out FILE [--sources ...]`: the routing profile 22b's loader reads (decision 8's proposal): safetensors
     `counts` u32 [L][512], `mtp_counts` u32 [512], metadata `{model, checkpoint, checkpoint_revision, traces (names +
     sha256), sources, tokens, format: "spec22-profile-1"}`.
-- [ ] **Step 1: the failing tests** `test_offload_curve.py` on synthetic traces built in the test with known answers:
+- [x] **Step 1: the failing tests** `test_offload_curve.py` on synthetic traces built in the test with known answers:
   a trace where layer l routes only experts [0, 10 + l): h(f) is analytic; a hold-out split that sees disjoint
   experts scores h = 0 held out and 1 in sample; a swap simulation where the copy never lands (`--copy-ms` = inf)
   equals the static fill exactly; M = K + 1 unions on repeated rows equal 10, on disjoint rows 10 M; prefill chunks of
   one repeated row stream 10 experts a layer. FAIL.
-- [ ] **Step 2: implement**; PASS. Then on the tiny model's own traces: `qwen4exp_ref.py trace` on a 16-expert /
+- [x] **Step 2: implement**; PASS. Then on the tiny model's own traces: `qwen4exp_ref.py trace` on a 16-expert /
   top-4 tiny made by `qwen4exp_make_tiny.py` (the downloaded tiny has 4 experts / top-2: too few for a curve) over
   `q4exp_agentic` and `code` (truncated to 512 ids), then every subcommand runs, `counts` sums to T x L x k and
   `profile` round-trips. Commit `git commit -S -m "oracle: offload_curve.py - hit-rate curves from 21a's traces
@@ -300,7 +326,7 @@ std::string budget_json(const ExpertBudget& b);  // one line: {"max_len":..,"dev
   {KL mean / p99, argmax agreement on golden and on A4, A4 tool-call accuracy (score.py's match rate against the full
   reference) where generated, the experts' bytes at int4 g64, fits two cards whole (from Task 1's budget at 32k)}.
 - `offload_curve.py project --budget FILE --p0 FILE --curve FILE [--accept FILE]`: P0.7's table (Task 5 Step 7).
-- [ ] **Step 1: the failing tests.** `test_qwen4exp_ref.py`: on the 16-expert tiny, (a) an all-ones mask is bitwise
+- [x] **Step 1: the failing tests.** `test_qwen4exp_ref.py`: on the 16-expert tiny, (a) an all-ones mask is bitwise
   the unmasked `run` (logits and every layer's H); (b) a mask dropping only experts the unmasked run never routed to
   (read from its own trace) is bitwise the unmasked run; (c) the hook's `(scores, idx)` equal `router()` restated with
   the dropped logits at -inf, including a planted tie at the 10th; (d) a mask keeping fewer than `top_k` in a layer is
@@ -308,10 +334,10 @@ std::string budget_json(const ExpertBudget& b);  // one line: {"max_len":..,"dev
   reaches the reference (the tiny's batched path, ids differ from unmasked when (b)'s complement is dropped).
   `test_offload_curve.py`: `reap` on a synthetic trace keeps the analytically top experts, ties to the lower id, and
   `--holdout-a4` changes the calibration set only. FAIL.
-- [ ] **Step 2: implement**; PASS in `agnes-ref-img` with the 5.19.0 site. Commit `git commit -S -m "oracle: the
+- [x] **Step 2: implement**; PASS in `agnes-ref-img` with the 5.19.0 site. Commit `git commit -S -m "oracle: the
   masked reference (router logits -inf before the softmax, renormalised over the kept top-10) and REAP masks from 21a's
   traces (spec 22 P0.8)"`.
-- [ ] **Step 3: `qwen4exp_oracle.sh prune` / `prune-a4`** (`DRY_RUN=1` prints each): `prune` = `reap` at the four
+- [x] **Step 3: `qwen4exp_oracle.sh prune` / `prune-a4`** (`DRY_RUN=1` prints each): `prune` = `reap` at the four
   fractions (both criteria, with and without `--holdout-a4`), then `maskeval` for each REAP mask over `q4exp_short`,
   `q4exp_4k`, `q4exp_agentic` (and `q4exp_32k` with `PRUNE_32K=1`) and over the 36 A4 scenarios' teacher-forced
   continuations -> `<data>/oracle-out-q4exp-prune/`; `prune-a4` = `a4_ref.sh qwen4exp ref` with `MASK=` each REAP
@@ -320,7 +346,7 @@ std::string budget_json(const ExpertBudget& b);  // one line: {"max_len":..,"dev
   Resumable per prompt / scenario, `Q4_REF_MIN_GB` as the other modes. Times ESTIMATED in its DRY_RUN table from row
   30's per-prompt walls. Commit `git commit -S -m "box_validate: qwen4exp_oracle.sh prune / prune-a4 - spec 22 P0.8's
   masked runs (spec 22a)"`.
-- [ ] **Step 4: `project`** with its tests (synthetic inputs: P = 12 GB/s, BW = 590 GB/s, D = 3.712 GB and h from
+- [x] **Step 4: `project`** with its tests (synthetic inputs: P = 12 GB/s, BW = 590 GB/s, D = 3.712 GB and h from
   spec 22 §2's table reproduce its serial and overlapped t/s columns to 0.1; the stopping line flips at 40 t/s). The
   projection: decode t/s at max_len 4096 / 32768 / 131072 = f from Task 1's budget (two cards, the head, the prefill
   scratch; ours and Intel's forms), h from P0.6's best held-out policy at that f (static per-layer, or static + swaps
@@ -366,7 +392,7 @@ The stages (`stage <id> 36 <kind> <cpu|gpu> <have> <after> "..."`):
 | `r36.prune_a4` | optin cpu | q4exp_intel, oracle_q4exp_a4, r36.reap | `qwen4exp_oracle.sh prune-a4` (A4 accuracy at the fractions that fit; HOURS) |
 | `r36.project` | default cpu | r36.host, r36.zc, r36.curve | `offload_curve.py prune-report` (when r36.prune ran) and `project` -> the STOP / GO-CANDIDATE line |
 
-- [ ] **Step 1: the row and its stages** (`python3 tools/box_validate/test_box_validate.py` passes; `tools/box_validate.sh
+- [x] **Step 1: the row and its stages** (`python3 tools/box_validate/test_box_validate.py` passes; `tools/box_validate.sh
   --dry-run --only r36` prints every command; `--dry-run --with r36.prune,r36.prune_a4` the opt-ins). The rownotes:
   the data each stage needs (rows 30, 32, 34), the RAM rule (pinned arms never beside a CPU oracle), the session
   (both cards idle, RECORD grade). Commit `git commit -S -m "box: queue row 36 - spec 22 P0, the expert-offload probe
