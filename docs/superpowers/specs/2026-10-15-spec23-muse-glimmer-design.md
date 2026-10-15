@@ -605,7 +605,7 @@ Branch `spec23a-muse-reference` (plan 23a); box queue row 42 holds what the Mac 
   **21.48**, cap_tie 0 / 74 rows, raw top-1 / top-2 gap min 0.5 / median 19, wall 2065 s, peak RSS 17.7 GiB, the
   continuation " For now, the water held its breath.\n\nI had come to the island..." (coherent);
   `muse_short_code` - 53 ids, perplexity **1.70**, cap_tie 0 / 85, gap min 1 / median 83.75, wall 1954 s, RSS 17.7
-  GiB. Each file ~176 MB (taps of every row, every `H.L`, raw / capped logits). A prompt forward of ~50 ids took
+  GiB. The files are 176 / 202 MB (taps of every row, every `H.L`, raw / capped logits). A prompt forward of ~50 ids took
   ~400 s and every decode step ~51-54 s (the 52 layers re-dequantised each step) on the Mac: `muse_4k` (~3.5 h),
   `muse_8k` (~7 h), `muse_agentic` (~11 h) and `muse_32k` (~30 h) are ESTIMATED from these and left to row 42
   (`r42.golden` keeps the two finished prompts when `--push-data` carries them). The perplexity sanity of §4.2 MG1
