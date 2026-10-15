@@ -3506,4 +3506,23 @@ target_include_directories(muse_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE
 target_link_libraries(muse_ref_test PRIVATE b70_muse_plan)
 add_test(NAME muse_ref_test COMMAND muse_ref_test)
 set_tests_properties(muse_ref_test PROPERTIES LABELS muse)
+# Task 2-3: every binary a Muse decode list binds (kernels::muse::decode_variants), any head / attention form, is
+# exactly the Spec 23c block's list (src/kernels/CMakeLists.txt). Host only.
+if(B70_MUSE)
+  set(B70_MUSE_DECODE_KERNELS
+    kernel_mg_embed_M1_K6656_G26_V202048 kernel_mg_norm_M1_K6656_G26_W26 kernel_mg_post_add_M1_K6656_G26
+    kernel_mg_attn_prep_M1_N8704_S2_Q32KV2_R4096 kernel_mg_attn_prep_M1_N8704_S2_Q32KV2_F
+    kernel_mg_silu_mul_M1_I19968_S8 kernel_prep_res_fold_M1_K6656_SP4_G26_Z
+    kernel_gemv_M1_K6656_N8704_S2_L0 kernel_gemv_M1_K4096_N6656_S4_L0 kernel_gemv_M1_K6656_N39936_S8_L0
+    kernel_gemv_M1_K19968_N6656_S4_L0 kernel_gemv_i8w_M1_K6656_N202048 kernel_gemv_bf16_M1_K6656_N202048
+    kernel_mg_argmax_stage1_M1_N202048_V202048 kernel_mg_argmax_stage2_N202048
+    kernel_mg_attn_M1_T64_Q32KV2_W2048_R4096 kernel_mg_attn_M1_T64_Q32KV2_F
+    kernel_mg_attn_eager_M1_T64_Q32KV2_W2048_R4096 kernel_mg_attn_eager_M1_T64_Q32KV2_F)
+  add_executable(muse_variant_names_test kernels/muse_variant_names_test.cc)
+  target_include_directories(muse_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_variant_names_test PRIVATE b70_muse_model)
+  b70_target_kernel_dir(muse_variant_names_test)
+  add_test(NAME muse_variant_names_test COMMAND muse_variant_names_test ${B70_MUSE_DECODE_KERNELS})
+  set_tests_properties(muse_variant_names_test PROPERTIES LABELS muse)
+endif()
 # ==== Spec 23c: Muse-Glimmer decode ==== (end) ====

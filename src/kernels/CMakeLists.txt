@@ -30,6 +30,17 @@ function(add_gemv_variant M K N S L)
     list(APPEND extra_defs GEMV_DEQ_SHIFT=1)                    # PROVISIONAL
   elseif(L EQUAL 0 AND K EQUAL 19456 AND N EQUAL 5120 AND S EQUAL 4)
     list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)     # PROVISIONAL
+  # Spec 23c, Muse-Glimmer-30B: PROVISIONAL cells, COPIED from the nearest Qwen3.8 production cells above
+  # (q||k||v 5120x14336 S2, out_proj 6144x5120 S4, gate||up 5120x34816 S8, down 17408x5120 S4), not measured;
+  # 23c Task 7's sweep (r44.sweeps) replaces them and model::MuseGlimmerDesc's S together.
+  elseif(L EQUAL 0 AND K EQUAL 6656 AND N EQUAL 8704 AND S EQUAL 2)
+    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)     # PROVISIONAL q||gate||k||v
+  elseif(L EQUAL 0 AND K EQUAL 4096 AND N EQUAL 6656 AND S EQUAL 4)
+    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)     # PROVISIONAL o_proj
+  elseif(L EQUAL 0 AND K EQUAL 6656 AND N EQUAL 39936 AND S EQUAL 8)
+    list(APPEND extra_defs GEMV_DEQ_SHIFT=1)                    # PROVISIONAL gate||up
+  elseif(L EQUAL 0 AND K EQUAL 19968 AND N EQUAL 6656 AND S EQUAL 4)
+    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)     # PROVISIONAL down
   endif()
   add_ocloc_kernel(gemv_M${M}_K${K}_N${N}_S${S}_L${L} SOURCE ${GEMV_CL}
                    DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L} ${extra_defs})
@@ -1339,6 +1350,52 @@ if(B70_ORNITH AND B70_MTP)
   endforeach()
 endif()
 # ==== Spec 15e ================================================================ (end) ====
+
+# ==== Spec 23c: Muse-Glimmer-30B decode (model::muse_glimmer()) ==== (begin) ====
+# Additive only: no existing source is edited, so every binary above keeps its name, its command line and its bytes
+# (tools/kernel_cmdlines' diff: additions only - MG0). Muse-only kernels live in src/kernels/muse/ and are named
+# `mg_*` with every shape define in the name (src/kernels/muse_kernels.h is the host half); the reused sources run at
+# Muse's shapes:
+#   gemv.cl         the four int4 layout-0 GEMVs a layer: q||gate||k||v 6656x8704 S2, o_proj 4096x6656 S4,
+#                   gate||up 6656x39936 S8 (concatenated, up at column 19968), down 19968x6656 S4 - PROVISIONAL
+#                   cells (add_gemv_variant's Spec 23c rows) until 23c Task 7's sweep
+#   gemv_i8w.cl / gemv_bf16.cl   lm_head 6656 -> 202048 (int8 the default, spec 9; bf16)
+#   prep.cl         prep_res_fold with ZERO_RESID at K 6656, G 26 over a sub-block's S4 slices (o_proj's and down's:
+#                   the sandwich's own row and Σ²)
+#   argmax.cl       at the vocabulary 202048 (every id real: VOCAB_USED = VOCAB)
+# What a Muse decode list binds (runtime/muse/muse_capture.cc): 14 launches a layer under flash, 13 under
+# B70_MUSE_ATTN=eager, + mg_embed on device 0 + 4 at the head: 733 / 681 at 52 layers.
+option(B70_MUSE "build the Muse-Glimmer-30B decode variants (spec 23c)" ON)
+if(B70_MUSE)
+  set(MG_CL ${CMAKE_CURRENT_SOURCE_DIR}/muse)
+  add_gemv_variant(1 6656 8704 2 0)            # q||gate||k||v int4   PROVISIONAL S2 L0
+  add_gemv_variant(1 4096 6656 4 0)            # o_proj int4          PROVISIONAL S4 L0
+  add_gemv_variant(1 6656 39936 8 0)           # gate||up int4        PROVISIONAL S8 L0
+  add_gemv_variant(1 19968 6656 4 0)           # down int4            PROVISIONAL S4 L0
+  add_gemv_i8w_variant(1 6656 202048)          # lm_head int8 (spec 9, the default)
+  add_gemv_bf16_variant(1 6656 202048 64 1)    # lm_head bf16
+  # prep_res_fold ..._Z: o_proj's / down's S4 slices into the sub-block's own row and its Σ² (26 chunks of 256)
+  add_ocloc_kernel(prep_res_fold_M1_K6656_SP4_G26_Z SOURCE ${PREP_CL}
+                   DEFINES M=1 K=6656 S_PREV=4 FOLD_G=26 ZERO_RESID=1)
+  set(MG_ARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=202048 VOCAB_USED=202048)
+  add_ocloc_kernel(mg_argmax_stage1_M1_N202048_V202048 SOURCE ${ARGMAX_CL} DEFINES ${MG_ARGMAX_DEFINES} M=1)
+  add_ocloc_kernel(mg_argmax_stage2_N202048 SOURCE ${ARGMAX_CL} DEFINES ${MG_ARGMAX_DEFINES})
+  # mg_prep.cl: the embedding with its weight-less norm, the centered norm (and the plain-w final norm), the
+  # sandwich's post norm + residual add, the attention prep (weight-less q / k norms, q x 3.87, RoPE on sliding
+  # layers only, the gate's sigmoid, the ring or the NoPE cache), SiLU x up over the concatenated gate||up.
+  add_ocloc_kernel(mg_embed_M1_K6656_G26_V202048 SOURCE ${MG_CL}/mg_prep.cl
+                   DEFINES ${CTRL_DEFINES} M=1 K=6656 EMBED_G=26 VOCAB=202048 IMG_TOKEN=200092 VID_TOKEN=200091)
+  add_ocloc_kernel(mg_norm_M1_K6656_G26_W26 SOURCE ${MG_CL}/mg_prep.cl
+                   DEFINES M=1 K=6656 NORM_G=26 NORM_WGS=26 NORM_EPS=1e-5f)
+  add_ocloc_kernel(mg_post_add_M1_K6656_G26 SOURCE ${MG_CL}/mg_prep.cl DEFINES M=1 K=6656 POST_G=26 POST_EPS=1e-8f)
+  set(MG_HEADS Q_HEADS=32 KV_HEADS=2 HD=128 QK_SCALE=3.87f)
+  add_ocloc_kernel(mg_attn_prep_M1_N8704_S2_Q32KV2_R4096 SOURCE ${MG_CL}/mg_prep.cl
+                   DEFINES ${CTRL_DEFINES} M=1 QGKV_N=8704 QGKV_S=2 ${MG_HEADS} SLIDING=1 RING=4096)
+  add_ocloc_kernel(mg_attn_prep_M1_N8704_S2_Q32KV2_F SOURCE ${MG_CL}/mg_prep.cl
+                   DEFINES ${CTRL_DEFINES} M=1 QGKV_N=8704 QGKV_S=2 ${MG_HEADS} SLIDING=0 RING=0)
+  add_ocloc_kernel(mg_silu_mul_M1_I19968_S8 SOURCE ${MG_CL}/mg_prep.cl DEFINES M=1 SILU_I=19968 SILU_S=8)
+endif()
+# ==== Spec 23c: Muse-Glimmer-30B decode ==== (end) ====
 
 # Spec 16b (pipeline parallel, `--pipeline-handoff peer`): the peer-write hand-off between
 # the two stages' decode lists - pp_send (device 0's last launch) and pp_recv (device 1's
