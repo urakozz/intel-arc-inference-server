@@ -122,7 +122,15 @@ case "$mode" in
   tests|tiny) complete "$TINY" || [ "$dry" = 1 ] || {
     echo "SKIP_REASON muse_oracle: $TINY is not in $hf/hub (hf download optimum-intel-internal-testing/tiny-random-muse-glimmer - 27 MB)"; exit 77; } ;;
   facts|golden|taps) complete "$GPTQ" || [ "$dry" = 1 ] || {
-    echo "SKIP_REASON muse_oracle: $GPTQ is absent or incomplete in $hf/hub (Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ, 22.8 GB; df -h first)"; exit 77; } ;;
+    echo "SKIP_REASON muse_oracle: $GPTQ is absent or incomplete in $hf/hub (Vishva007/Muse-Glimmer-30B-W4A16-AutoRound or -GPTQ, 22.8 GB; df -h first)"; exit 77; }
+    if [ "$mode" = facts ] && [ "$dry" != 1 ]; then   # the original's small files (config, tokenizer, template)
+      b=$(snap_of "$BF16")
+      for f in config.json tokenizer.json chat_template.jinja model.safetensors.index.json; do
+        [ -n "$b" ] && [ -s "$b/$f" ] || {
+          echo "SKIP_REASON muse_oracle: facts needs the original's small files ($BF16: $f - hf download meta-models/Muse-Glimmer-30B config.json tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja model.safetensors.index.json)"
+          exit 77; }
+      done
+    fi ;;
   golden-bf16) complete "$BF16" || [ "$dry" = 1 ] || {
     echo "SKIP_REASON muse_oracle: $BF16 is absent or incomplete in $hf/hub (meta-models/Muse-Glimmer-30B, 59.6 GB; df -h first)"; exit 77; } ;;
   a4|gateq) { complete "$GPTQ" && complete "$BF16"; } || [ "$dry" = 1 ] || {
@@ -193,9 +201,14 @@ case "$mode" in
       echo "muse_oracle: muse_facts.py FAILED"; tail -20 "$out/facts.log"; rc=1
     fi
     bc="/hf/hub/$BF16/snapshots/$(basename "${b%/}")"
-    in_box "$GPTQ" "python3 tools/oracle/muse_facts.py $bc \"\$SNAP\" --section cites,tokens && \
-      python3 tools/oracle/muse_ref.py facts \"\$SNAP\"" >> "$out/facts.log" 2>&1 || rc=1
-    [ "$dry" = 1 ] || grep -E 'FULL SCAN|citations hold|text names|BOS count' "$out/facts.log"
+    cmd="python3 tools/oracle/muse_facts.py $bc \"\$SNAP\" --section cites,tokens && \
+      python3 tools/oracle/muse_ref.py facts \"\$SNAP\""
+    if [ "$dry" = 1 ]; then
+      in_box "$GPTQ" "$cmd"
+    else
+      in_box "$GPTQ" "$cmd" >> "$out/facts.log" 2>&1 || rc=1
+      grep -E 'FULL SCAN|citations hold|text names|BOS count' "$out/facts.log"
+    fi
     ;;
   ppl|hfcheck)
     for f in "${forms[@]}"; do
@@ -234,6 +247,18 @@ case "$mode" in
   a4)
     # tools/toolcall/a4_ref.sh muse: the committed set, then both references (resumable; the box: foreground)
     a4env=(OUT="$data/oracle-out-muse-a4")
+    if [ $mac = 1 ] && [ "$dry" != 1 ]; then
+      # the Mac: a4_ref.sh runs one DETACHED container a form, OUT inside this tree; each call advances one step
+      [ "$(cd "$data" && pwd -P)" = "$(pwd -P)" ] || { echo "muse_oracle: on the Mac a4 needs the data tree = this tree (.)" >&2; exit 2; }
+      OUT=oracle-out-muse-a4 tools/toolcall/a4_ref.sh muse set || exit 1
+      for f in gptq bf16; do
+        [ -f "oracle-out-muse-a4/DONE.$f" ] && continue
+        echo "muse_oracle: a4 - starting the $f reference detached (re-run this mode after it: FORM=$f tools/toolcall/a4_ref.sh muse status)"
+        OUT=oracle-out-muse-a4 FORM=$f tools/toolcall/a4_ref.sh muse ref; exit $?
+      done
+      python3 tools/toolcall/score.py --format atem oracle-out-muse-a4 bf16 gptq | tee oracle-out-muse-a4/score.txt
+      exit 0
+    fi
     if [ "$dry" = 1 ]; then
       echo "DRY_RUN: ${a4env[*]} tools/toolcall/a4_ref.sh muse set && ${a4env[*]} FORM=both tools/toolcall/a4_ref.sh muse ref"
       echo "DRY_RUN: python3 tools/toolcall/score.py --format atem $data/oracle-out-muse-a4 bf16 gptq"
@@ -253,10 +278,15 @@ case "$mode" in
     [ "$dry" = 1 ] || mkdir -p oracle-out-muse-gateq.partial
     [ "$dry" = 1 ] || cp -f "$out"/*.bf16.ids oracle-out-muse-gateq.partial/
     bsnap="/hf/hub/$BF16/snapshots/$(basename "$(snap_of "$BF16")")"
-    in_box "$GPTQ" "python3 tools/oracle/muse_gateq.py kl /ws/oracle-out-muse-gateq.partial \"\$SNAP\" \
+    cmd="python3 tools/oracle/muse_gateq.py kl /ws/oracle-out-muse-gateq.partial \"\$SNAP\" \
       --set tests/golden/toolcall-muse --bf16 $bsnap --text prose=tests/golden/prompts/muse_short_prose.ids \
       --text code=tests/golden/prompts/muse_short_code.ids --text muse_4k=tests/golden/prompts/muse_4k.ids \
-      --out /ws/oracle-out-muse-gateq.partial/gateq.json" > "$data/gateq.kl.log" 2>&1 || { rc=1; tail -20 "$data/gateq.kl.log"; }
+      --out /ws/oracle-out-muse-gateq.partial/gateq.json"
+    if [ "$dry" = 1 ]; then
+      in_box "$GPTQ" "$cmd"
+    else
+      in_box "$GPTQ" "$cmd" > "$data/gateq.kl.log" 2>&1 || { rc=1; tail -20 "$data/gateq.kl.log"; }
+    fi
     if [ "$dry" != 1 ] && [ "$rc" = 0 ]; then
       cp -f oracle-out-muse-gateq.partial/gateq.json "$out/gateq.json"
       mv -f "$data/gateq.kl.log" "$out/gateq.kl.log"
