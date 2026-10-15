@@ -3524,5 +3524,14 @@ if(B70_MUSE)
   b70_target_kernel_dir(muse_variant_names_test)
   add_test(NAME muse_variant_names_test COMMAND muse_variant_names_test ${B70_MUSE_DECODE_KERNELS})
   set_tests_properties(muse_variant_names_test PROPERTIES LABELS muse)
+  # MG2 on the card: every mg_* kernel at the real shapes against museref (no checkpoint) - bitwise where the
+  # arithmetic is the same, flash against fp64 at cosine 0.99999, the ring's rows (r44.k1).
+  add_executable(muse_kernels_test kernels/muse_kernels_test.cc)
+  target_include_directories(muse_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_kernels_test PRIVATE b70_l0 b70_muse_plan)
+  b70_target_kernel_dir(muse_kernels_test)
+  add_dependencies(muse_kernels_test ${B70_MUSE_DECODE_KERNELS})
+  add_test(NAME muse_kernels_test COMMAND muse_kernels_test)
+  set_tests_properties(muse_kernels_test PROPERTIES LABELS muse TIMEOUT 900)
 endif()
 # ==== Spec 23c: Muse-Glimmer decode ==== (end) ====
