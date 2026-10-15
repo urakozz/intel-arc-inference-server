@@ -9,7 +9,9 @@ DFlash drafter (P0 first, then the engine). **Box queue rows 42-47** (one per pl
 **What the operator ruled (2026-10-15):**
 - **The checkpoint is `Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ`, used as-is**: it is our format exactly
   (§3). Its quality is gated against a bf16 CPU reference of `meta-models/Muse-Glimmer-30B` on our A4 tool-call set;
-  we re-quantise with our own calibration **only if that gate shows a gap** (the rule, §3.3).
+  we re-quantise with our own calibration **only if that gate shows a gap** (the rule, §3.3). *Superseded the same
+  day: the quant is kept and gate Q is a recorded measurement (§3.3's ruling); either Vishva007 spelling of the
+  export is read (§3.1, 23a).*
 - **The DFlash drafter `meta-models/Muse-Glimmer-30B-assistant` is in this spec** (stage 23f), **P0 first**:
   teacher-forced acceptance on the CPU, the verify cost on the box, and a stopping rule against plain decode AND
   prompt lookup (§8). The engine part reuses spec 19's DFlash design.
@@ -61,7 +63,7 @@ From `meta-models/Muse-Glimmer-30B` at `a4e59da5` (`config.json`, `generation_co
 | tokens | BOS 200000 `<|begin_of_text|>`; EOS {200001 `<|end_of_text|>`, 200008 `<|eot|>`} (`generation_config.json`); pad 200018; `<|eom|>` 200007, `<|start|>` 200022, `<|message|>` 200023 (`tokenizer.json`) |
 | sampling defaults | `do_sample` true, T 1.0, top-k 64, top-p 0.95 (`generation_config.json`; the model card's "Best Practices") |
 | context | `max_position_embeddings` 131072 ("131,072+", published) |
-| vision | a 50-layer ViT (`model.vision_tower.*`, 800 tensors) + adapter / projection: 809 tensors, 3.84 GB - skipped |
+| vision | a 50-layer ViT (`model.vision_tower.*`, 806 tensors - 23a's count) + adapter / projection: 809 tensors, 3.84 GB - skipped |
 
 **Two traps in the configuration:**
 - **`layer_rope_theta` is only a switch in 5.19.0.** The rotary table is built once from `rope_parameters.rope_theta`
@@ -174,6 +176,12 @@ parser's reference** on complete turns (§6.5).
 
 ### 3.1 What it is (verified on the headers, 2026-10-15)
 
+**Either Vishva007 repo** (23a, 2026-10-15: one export in two spellings, sampled tensors byte-identical -
+`docs/probe-muse-glimmer-2026-10-15.md`): `Vishva007/Muse-Glimmer-30B-W4A16-AutoRound` at `ad7b9432` (`quant_method`
+"auto-round", `packing_format` "auto_round:auto_gptq" - our own checkpoints' spelling -, no `g_idx`, 2268 tensors,
+22,790,907,104 B; **the repo the Mac downloaded and the reference reads**) or the GPTQ spelling below (`g_idx`
+shipped). `g_idx` is optional; when present it must be `i // 64`.
+
 `Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ` at `0987fe04`: 6 shards, 2684 tensors, 22,803,933,184 B (text
 18.96 GB, vision 3.84 GB):
 - `quantization_config`: `quant_method` "gptq", `provider` "auto-round", `autoround_version` 0.15.0, bits 4,
@@ -181,7 +189,7 @@ parser's reference** on complete turns (§6.5).
   samples, seqlen 2048, `quant_nontext_module` false). No `dynamic`, no `extra_config`, no `packing_format`. This is
   the spelling `loader::QuantConfig::parse` already reads for `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ`
   (`src/loader/quant.h:21-33`): accepted as is.
-- Per layer the seven linears as `qweight` I32 `[K/8][N]`, `scales` F16 `[K/64][N]`, `qzeros` I32 `[K/64][N/8]`,
+- Per layer the eight linears (q, k, v, the attention `gate_proj`, o; gate, up, down - 23a) as `qweight` I32 `[K/8][N]`, `scales` F16 `[K/64][N]`, `qzeros` I32 `[K/64][N/8]`,
   `g_idx` I32 `[K]`; norms bf16; `embed_tokens`, `lm_head`, final `norm` bf16.
 - **Sampled values (range reads of a few KB, not the shards):** `qzeros` = `0x77777777` everywhere in layer 0's
   `q_proj` and layer 51's `down_proj`; `g_idx` = `i // 64` in those two and layer 30's `o_proj`. 23b's loader checks
@@ -208,11 +216,16 @@ CPU (23a); it is never served.
 
 ### 3.3 The quality rule
 
+**Ruled 2026-10-15 (operator): Vishva007's quant is kept.** The operator has re-quantised with this recipe on
+coding data before and saw no reason to repeat it here. Gate Q still runs (23a), as a **recorded measurement, not a
+decision**: it documents the int4 checkpoint's distance from bf16 on A4 / KL; a re-quantisation is not on the plan.
+
 The checkpoint is served as is **unless** 23a's gate Q (on the box CPU, both references layer-streamed) shows a gap.
 The operator's ruling stands (use it as-is first); gate Q exists because its calibration was the Pile (§3.1), not
 agentic coding - if quantisation error concentrates anywhere, it is on the chat-template / channel / ATEM tokens our
 workload is made of, and A4 measures exactly those:
-- **Q-A4:** the 36 A4 scenarios rendered by Muse's template (23a Task 5), 192 greedy ids each, through the int4
+- **Q-A4:** the 36 A4 scenarios rendered by Muse's template (23a Task 5), 512 greedy ids each (23a: plan 23a's count - the replies open with a
+  `to=self` channel; 192 was this spec's first figure), through the int4
   checkpoint dequantised (the engine-format reference) and through the bf16 original. Bars **(PROPOSED, decision
   5):** the int4 reference has **no more parse failures** than bf16's; its **first-call agreement with bf16 >= 25 / 36**
   (Qwen3.8's measured int4-vs-bf16 A4 agreement, docs/BENCHMARKS.md, the bar this project already accepted).
@@ -470,7 +483,9 @@ drafter, ~0.18 plain steps** at roofline (estimated: 4.6 ms against ~32 ms) - fl
    int4 linears allocated, 13.4 GB, plus the int8 head) - `gemv.cl` at M = 9..16 as new variants if they compile, else
    two M = 8 passes, both measured - and one drafter block at M = 16 (bf16 / int8 / int4); interleaved pairs after a warm-up,
    median of 3 (sequential arms mis-state ratios under clock drift).
-5. **The projection and the stopping rule:** tokens / s at the best K per corpus. **Go only if DFlash beats plain
+5. **The projection** (ruled 2026-10-15: the engine half is built whatever P0 shows - the operator's "we need to
+   support it"; P0 picks the drafter format, K_max and the q form, and sets the expectation). The superseded rule:
+   tokens / s at the best K per corpus. **Go only if DFlash beats plain
    decode by >= 10 % AND prompt lookup by >= 10 % on the coding and agentic sets** (Muse has no MTP head); otherwise
    stop and record, and 23f's engine half does not start.
 
@@ -550,3 +565,51 @@ as soon as 23a's tap dumps exist; 23f's engine half needs 23c-23e and P0's "go".
 16. **(decide) A call cut by `max_tokens` / a stop string:** dropped and stripped from content with `finish_reason`
     `length` (vLLM-like) or emitted with its tags synthesised (OVMS-like). **Recommended:** dropped - a partial edit
     or command must never reach an agent as if complete.
+
+## 12. 23a as built (2026-10-15; the Mac - nothing on the box yet)
+
+Branch `spec23a-muse-reference` (plan 23a); box queue row 42 holds what the Mac could not run. Facts:
+`docs/probe-muse-glimmer-2026-10-15.md`.
+
+- **The version:** transformers **5.19.0** (spec 21a's site beside `agnes-ref-img`, unchanged) loads the tiny model
+  `optimum-intel-internal-testing/tiny-random-muse-glimmer` @ `cb70af19` as shipped (`muse_tiny_check.py`: tiny
+  check OK). Cached decode vs one uncached forward: bf16 bitwise, fp32 max |diff| 6.9e-6 (matmul shapes; the plan
+  expected fp32 bitwise - MG1's comparisons are at equal shapes and ARE bitwise).
+- **MG1 on the tiny variants (`test_muse_ref.py`, 16 tests, all pass):** the streamed port = `from_pretrained`
+  un-streamed BITWISE on `untied`, `l8`, `gqa16`, `win16` (bf16 and fp32; 40 / 100 ids across window 16 + 8 cached
+  decode steps; raw and capped logits, every `H.L`), `l8` at 2100 ids with the real window, chunks of 32, `--layers
+  4`, the int4 variant = transformers on its dequantised twin, `layer_major` = sequential, the taps = transformers'
+  `output_hidden_states=[1, 5]`; one test per trap of §1.1. **MG1 on real weights (Mac, measured):**
+  `hfcheck --layers 4` on 2100 ids of `muse_4k` + 4 steps, the int4 checkpoint: streamed = resident = layer-major
+  **BITWISE** (447 s streamed, 2062 s resident with another agent's container beside it).
+- **Departures from the plan:** (1) the int4 checkpoint is read in **either Vishva007 spelling** (§3.1): the Mac's
+  is `-AutoRound` (no `g_idx`); `expected_names` has a third form `autoround` (1459 text names; `gptq` 1875, `bf16`
+  627, vision 809 in each). (2) `run` chunks the prefill above 2048 ids (not 4096): a 4096-row head OOMs an 8 GB
+  container; chunked = transformers chunked, bitwise. (3) Q-A4 runs **512** new ids (§3.3 said 192). (4) Gate Q is a
+  **recorded measurement** (the operator's ruling): `muse_gateq.py verdict` prints WITHIN / OUTSIDE the proposed bars,
+  exit 0. (5) `muse_gateq.py kl` takes `--bf16 <snapshot>` and caches the bf16 rows beside the run. (6) The
+  agentic golden prompt is 13,416 ids (plan: ~12k); `muse_32k` needs `long.txt` appended (Muse's BPE encodes
+  long32k's text in 29,946 ids).
+- **Facts that change this spec** (edited above): eight linears a layer (not seven); the vision tower is 806
+  tensors (809 in all); the GPTQ `config.json` says `dtype float16` at the top level (the reference uses bf16 -
+  the stored dtype of every non-quantised tensor); ids 200091 / 200092 embed as row 0 in transformers (M:1010-1013);
+  `output_hidden_states` with the model's LAST layer in the list returns the final-normed state there
+  (OC:294-305 - the real taps end at 49 of 52, unaffected); on torch's CPU `pow(x, -0.5)`, `rsqrt(x)` and
+  `1 / sqrt(x)` are the same fp32 value (10^7 draws) - the norms' `pow` / `rsqrt` forms are indistinguishable there,
+  and the device kernels must reproduce the correctly rounded `1 / sqrt`; transformers 5.19.0 reaches the DFlash
+  generator only with `generate(..., speculation_type="dflash")` (23f).
+- **The full quant scan** (the -AutoRound repo, local): every `qzeros` word `0x77777777` in all 416 linears (196.6 MB)
+  - CLEAN; sampled tensors of the two repos byte-identical (7 / 7). The -GPTQ repo's `g_idx` scan is the box's.
+- **Golden sets made on the Mac** (the -AutoRound checkpoint dequantised, `muse_oracle.sh . golden`, `--gen 32
+  --taps`, 8 threads, 40 GB cap, measured): `oracle-out-muse/muse_short_prose` - 42 ids, prompt perplexity
+  **21.48**, cap_tie 0 / 74 rows, raw top-1 / top-2 gap min 0.5 / median 19, wall 2065 s, peak RSS 17.7 GiB, the
+  continuation " For now, the water held its breath.\n\nI had come to the island..." (coherent);
+  `muse_short_code` - 53 ids, perplexity **1.70**, cap_tie 0 / 85, gap min 1 / median 83.75, wall 1954 s, RSS 17.7
+  GiB. The files are 176 / 202 MB (taps of every row, every `H.L`, raw / capped logits). A prompt forward of ~50 ids took
+  ~400 s and every decode step ~51-54 s (the 52 layers re-dequantised each step) on the Mac: `muse_4k` (~3.5 h),
+  `muse_8k` (~7 h), `muse_agentic` (~11 h) and `muse_32k` (~30 h) are ESTIMATED from these and left to row 42
+  (`r42.golden` keeps the two finished prompts when `--push-data` carries them). The perplexity sanity of §4.2 MG1
+  holds on the two short prompts (< 30); `r42.ppl` adds the 4k text and both forms.
+- **Gate Q:** not run on the Mac - ESTIMATED ~90 h a form (36 scenarios x [a ~1.8k-id prompt at ~53 ms a layer-token
+  + 512 decode steps at ~51 s, each re-dequantising the 52 layers]) against the 8-hour budget; prepared for the box
+  (row 42: `r42.a4`, `r42.gateq`). Its numbers will be recorded here (the checkpoint is kept either way).

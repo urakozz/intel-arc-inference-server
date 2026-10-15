@@ -42,6 +42,12 @@ else
 fi
 
 env_flags=(-e HF_HUB_OFFLINE=1 -e HF_HOME=/scratch/hf -e HOME=/scratch -e PYTHONUNBUFFERED=1)
+# ORACLE_MEMORY (e.g. 40g; spec 23a): a container memory cap, for a run on the Mac (Docker Desktop's VM is shared);
+# unset on the box, where the oracle takes what it needs (above).
+if [ -n "${ORACLE_MEMORY:-}" ]; then
+  [[ "$ORACLE_MEMORY" =~ ^[0-9]+g$ ]] || { echo "ORACLE_MEMORY is <N>g (got $ORACLE_MEMORY)" >&2; exit 2; }
+  env_flags+=(--memory "$ORACLE_MEMORY" --memory-swap "$ORACLE_MEMORY")
+fi
 if [ -n "$ORACLE_THREADS" ]; then
   # torch takes its intra-op pool from OMP_NUM_THREADS at import; MKL's own
   # knob is separate. dump.py prints torch.get_num_threads() so the cap is

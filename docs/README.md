@@ -93,6 +93,7 @@ narrative, and the numbered guides cite them where they matter.
   from its small files, headers and transformers 5.19.0 / vLLM source - the rounding chain, both checkpoints,
   the PLE layout and hash constants (= the formula), the MTP head's wiring (decision 5's reuse is vLLM's
   opt-in), the tokenizer (the pre-tokenizer adds `\p{M}`), torch's tie rule, the derived bytes.
+- [probe-muse-glimmer-2026-10-15.md](probe-muse-glimmer-2026-10-15.md) - spec 23a: Muse-Glimmer-30B from its small files, headers and transformers 5.19.0 - the rounding chain (47 citations held to the source), both checkpoints (GPTQ = our int4 g64 sym), tokens / templates (one BOS), the drafter, the tie_last_hidden_states trap.
 - [probe-lfm2moe-2026-10-15.md](probe-lfm2moe-2026-10-15.md) - spec 24a: LFM2.5-24B-A2B (`lfm2_moe`) - the
   rounding chain cited into transformers 5.19.0 (`grouped_mm`, the torch conv path), the checkpoint from its
   headers (7,610 tensors, the derived bytes), tokens (`vocab_used` 125017), the template's pythonic calls and

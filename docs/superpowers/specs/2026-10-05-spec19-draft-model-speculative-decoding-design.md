@@ -264,7 +264,10 @@ Every list is captured once and replayed. The host decides only j, exactly as sp
      - for the draft-only vocabulary at V′ = 32k / 64k / 128k.
   2. **Verify cost at M = 5..8** with `probe_mtp_steps` extended (interleaved pairs, int8 head).
   3. **The projection.** Expected tokens/s per corpus at the best K, against `--mtp auto`'s.
-  - **Stopping rule:** if the projection does not beat `--mtp auto` by ≥ 10 % on the coding and
+  - **Ruled 2026-10-15 (operator): DFlash is built - the stopping rule no longer gates it** ("in vLLM DFlash is a
+    monster of performance, we need to support it"). P0's numbers now choose the defaults (drafter format, K, V′) and
+    set the expectation; a projection below `--mtp auto` is recorded as a finding for the engine stages to close.
+  - **Stopping rule (superseded 2026-10-15):** if the projection does not beat `--mtp auto` by ≥ 10 % on the coding and
     reasoning sets, stop and record. Spec 8's A7 M-row GEMV lever then comes first, and P0 is
     re-run after it.
 - **19b. The drafter.** Loader (`DFlash2DraftModel` / `DFlashDraftModel` configs, the shared
