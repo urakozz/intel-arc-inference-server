@@ -93,6 +93,10 @@ narrative, and the numbered guides cite them where they matter.
   from its small files, headers and transformers 5.19.0 / vLLM source - the rounding chain, both checkpoints,
   the PLE layout and hash constants (= the formula), the MTP head's wiring (decision 5's reuse is vLLM's
   opt-in), the tokenizer (the pre-tokenizer adds `\p{M}`), torch's tie rule, the derived bytes.
+- [probe-lfm2moe-2026-10-15.md](probe-lfm2moe-2026-10-15.md) - spec 24a: LFM2.5-24B-A2B (`lfm2_moe`) - the
+  rounding chain cited into transformers 5.19.0 (`grouped_mm`, the torch conv path), the checkpoint from its
+  headers (7,610 tensors, the derived bytes), tokens (`vocab_used` 125017), the template's pythonic calls and
+  renders, torch's tie order (not the lower id), the conv's accumulation (fp32 taps ascending: 0 of 100k rows differ).
 - [probe-eagle3-k2-2026-10-08.md](probe-eagle3-k2-2026-10-08.md) - EAGLE-3 on K2-Horizon (Mac CPU P0):
   **no-go** - the community drafter is undertrained (golden: 0.23 / 0.06 acceptance, below plain decode at
   every K); prompt lookup wins (to 1.68x at 4k). K2 verify costs 1.26x / 1.63x a plain step at M = 2 / 4.

@@ -398,7 +398,7 @@ def sec_template(src: Source) -> None:
 
 def sec_prompts(src: Source) -> None:
     from tokenizers import Tokenizer
-    tok = Tokenizer.from_bytes(src.small("tokenizer.json"))
+    tok = Tokenizer.from_str(src.small("tokenizer.json").decode())
     d = os.path.join(REPO, "tests", "golden", "prompts")
     print("## prompts: tests/golden/prompts re-tokenised by LFM2's tokenizer")
     for name in ("prose", "code", "long"):
