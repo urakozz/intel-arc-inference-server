@@ -321,7 +321,32 @@ void refusals() {
 
 }  // namespace
 
+// resolve_muse_snapshot: a cache holding only the -GPTQ spelling answers for the -AutoRound repo id (and the other
+// way round); another repo is not substituted.
+void spelling_fallback() {
+  const fs::path hf = mf::tmpdir("hf");
+  const fs::path m = hf / "hub" / "models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound-GPTQ";
+  fs::create_directories(m / "refs");
+  fs::create_directories(m / "snapshots" / "0987fe04");
+  std::ofstream(m / "refs" / "main") << "0987fe04";
+  std::ofstream(m / "snapshots" / "0987fe04" / "config.json") << "{}";
+  const char* old = std::getenv("HF_HOME");
+  const std::string keep = old ? old : "";
+  ::setenv("HF_HOME", hf.c_str(), 1);
+  const std::string got = loader::resolve_muse_snapshot("Vishva007/Muse-Glimmer-30B-W4A16-AutoRound");
+  CHECK(got.find("models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound-GPTQ/snapshots/0987fe04") != std::string::npos);
+  CHECK(loader::resolve_muse_snapshot("Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ") == got);
+  throws_naming({"Vishva007/Some-Other-Repo"}, [] { (void)loader::resolve_muse_snapshot("Vishva007/Some-Other-Repo"); });
+  if (old)
+    ::setenv("HF_HOME", keep.c_str(), 1);
+  else
+    ::unsetenv("HF_HOME");
+  fs::remove_all(hf);
+  std::printf("  either spelling: the -AutoRound repo id resolves to the cached -GPTQ snapshot\n");
+}
+
 int main() {
+  spelling_fallback();
   // --- 1. the real widths, one layer, a test-only vocabulary ------------------------------------------------
   {
     MuseGlimmerDesc d = model::muse_glimmer();

@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
   const uint32_t layers = argc > 2 ? uint32_t(std::stoul(argv[2])) : 0;
   if (!fs::exists(fs::path(dir) / "config.json")) {   // a repo id: the HF cache's snapshot
     try {
-      dir = loader::resolve_snapshot(dir);
+      dir = loader::resolve_muse_snapshot(dir);
     } catch (const std::exception&) {
     }
   }
