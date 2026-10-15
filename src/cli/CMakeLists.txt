@@ -78,3 +78,9 @@ target_link_libraries(b70-decode PRIVATE b70_qwen4exp_prefill)
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_qwen4exp_runtime b70_qwen4exp_prefill)
 endif()
+# Spec 23c: and Muse-Glimmer-30B's engine (runtime/muse, src/cli/muse_decode.h), dispatched on model_type; b70-serve
+# refuses the model by name (spec 23e serves it) and needs only the loader's model_type check for that.
+target_link_libraries(b70-decode PRIVATE b70_muse_runtime)
+if(TARGET b70-serve)
+  target_link_libraries(b70-serve PRIVATE b70_muse_runtime)
+endif()
