@@ -3485,4 +3485,14 @@ add_test(NAME muse_load_synth_pp2_test COMMAND muse_load_checkpoint_test ${B70_M
 add_test(NAME muse_load_real_test COMMAND muse_load_checkpoint_test ${B70_MUSE_SNAPSHOT})
 set_tests_properties(muse_load_synth_test muse_load_synth_pp2_test muse_load_real_test
   PROPERTIES LABELS "checkpoint;muse" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+# Task 4: the host half over make_synth.py's checkpoint (Review Focus 5) and over the real checkpoint (either spelling;
+# the names, the data asserts and every layer's repack on the host) - label checkpoint, so mac_check leaves them to the
+# box's r43.synth_host (run them by hand on a Mac that has the files: build/mac-host/tests/muse_synth_host_test <dir>).
+add_executable(muse_synth_host_test loader/muse_synth_host_test.cc)
+target_include_directories(muse_synth_host_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(muse_synth_host_test PRIVATE b70_muse_loader)
+add_test(NAME muse_synth_host_test COMMAND muse_synth_host_test ${B70_MUSE_SYNTH_DIR}/ckpt4)
+add_test(NAME muse_real_host_test COMMAND muse_synth_host_test ${B70_MUSE_SNAPSHOT})
+set_tests_properties(muse_synth_host_test muse_real_host_test PROPERTIES LABELS "checkpoint;muse" SKIP_RETURN_CODE 77
+  TIMEOUT 3600)
 # ==== Spec 23b: Muse-Glimmer descriptor and loader ==== (end) ====

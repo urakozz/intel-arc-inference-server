@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spec 23a: the Muse-Glimmer-30B CPU reference runs (kolibri_oracle.sh's / qwen4exp_oracle.sh's shape), on the BOX
 # CPU - and on the Mac (Docker Desktop: ORACLE_IMAGE agnes-ref-img, the container capped by ORACLE_MEMORY).
-#   tools/box_validate/muse_oracle.sh <data tree> tests|tiny|facts|ppl|hfcheck|golden|golden-bf16|a4|gateq|taps
+#   tools/box_validate/muse_oracle.sh <data tree> tests|tiny|facts|ppl|hfcheck|golden|golden-bf16|a4|gateq|taps|synth-ckpt
 #
 # Every container mode runs in the oracle image (tools/oracle/run_in_container.sh) with transformers 5.19.0 from spec
 # 21a's site BESIDE the image (tools/oracle/qwen4exp_env.sh; the box's oracle-out-q4exp-site, the Mac's
@@ -24,6 +24,11 @@
 #   gateq        muse_gateq.py kl (teacher-forced over the bf16 run's A4 continuations, + prose / code) and verdict
 #                (spec 23 §3.3's bars, decision 5: a RECORDED measurement - the checkpoint is kept, operator ruling
 #                2026-10-15) -> <data>/oracle-out-muse-a4/{gateq.json,gateq.log}
+#   synth-ckpt   spec 23b: tools/quantize/muse/make_synth.py - a real-width synthetic checkpoint of the first
+#                MUSE_SYNTH_LAYERS (4) layers in the -GPTQ spelling (random weights, 23a's RTN packer; ~6.4 GB at 4) - then
+#                tools/quantize/muse/check.py (names = muse_ref.expected_names, the data asserts, every linear within
+#                RTN's bound of its regenerated twin) -> <data>/oracle-out-muse-synth/ckpt<N>/ + ckpt<N>.ACCEPTED (the
+#                check's log; written last, it marks done). Needs only the original's and the -GPTQ repo's SMALL files.
 #   taps         for 23f P0: the residual after layers 1, 13, 25, 37, 49 over [prompt + the GPTQ form's own A4
 #                continuation] per scenario (teacher-forced, no generation) -> <data>/oracle-out-muse-taps/
 # Golden runs are per prompt resumable (written into <tree>/oracle-out-muse*.partial/, moved when complete, the golden
@@ -36,7 +41,7 @@
 #      MUSE_PROMPTS (golden's prompts, default all six), MUSE_REF_MIN_GB, MUSE_GEN (32), HF_HOME, ORACLE_IMAGE, ORACLE_THREADS, ORACLE_MEMORY (the Mac: 40g).
 set -u
 cd "$(dirname "$0")/../.." || exit 2
-MODES="tests|tiny|facts|ppl|hfcheck|golden|golden-bf16|a4|gateq|taps"
+MODES="tests|tiny|facts|ppl|hfcheck|golden|golden-bf16|a4|gateq|taps|synth-ckpt"
 [ $# -eq 2 ] || { echo "usage: $0 <data tree> $MODES" >&2; exit 2; }
 data="$1" mode="$2"
 case "|$MODES|" in *"|$mode|"*) ;; *) echo "muse_oracle: mode $mode is not one of $MODES" >&2; exit 2 ;; esac
@@ -62,7 +67,7 @@ else
   SITE=oracle-out-q4exp-site
 fi
 case "$mode" in
-  tests|tiny|facts) need="${MUSE_REF_MIN_GB:-24}" ;;
+  tests|tiny|facts|synth-ckpt) need="${MUSE_REF_MIN_GB:-24}" ;;
   golden-bf16) need="${MUSE_REF_MIN_GB:-72}" ;;
   *) need="${MUSE_REF_MIN_GB:-40}" ;;
 esac
@@ -131,6 +136,17 @@ case "$mode" in
           exit 77; }
       done
     fi ;;
+  synth-ckpt) [ "$dry" = 1 ] || {
+    b=$(snap_of "$BF16") g=$(snap_of models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound-GPTQ)
+    for f in tokenizer.json tokenizer_config.json chat_template.jinja generation_config.json; do
+      [ -n "$b" ] && [ -s "$b/$f" ] || {
+        echo "SKIP_REASON muse_oracle: synth-ckpt needs the original's small files ($BF16: $f - hf download meta-models/Muse-Glimmer-30B tokenizer.json tokenizer_config.json chat_template.jinja generation_config.json)"
+        exit 77; }
+    done
+    [ -n "$g" ] && [ -s "$g/config.json" ] || {
+      echo "SKIP_REASON muse_oracle: synth-ckpt needs the -GPTQ repo's config.json (hf download Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ config.json)"
+      exit 77; }
+  } ;;
   golden-bf16) complete "$BF16" || [ "$dry" = 1 ] || {
     echo "SKIP_REASON muse_oracle: $BF16 is absent or incomplete in $hf/hub (meta-models/Muse-Glimmer-30B, 59.6 GB; df -h first)"; exit 77; } ;;
   a4|gateq) { complete "$GPTQ" && complete "$BF16"; } || [ "$dry" = 1 ] || {
@@ -292,6 +308,33 @@ case "$mode" in
       mv -f "$data/gateq.kl.log" "$out/gateq.kl.log"
       python3 tools/oracle/muse_gateq.py verdict "$out" "$out/gateq.json" | tee "$out/gateq.log"
       [ "${PIPESTATUS[0]}" = 0 ] || rc=1
+    fi
+    ;;
+  synth-ckpt)
+    nl="${MUSE_SYNTH_LAYERS:-4}"
+    [[ "$nl" =~ ^[0-9]+$ ]] && [ "$nl" -ge 1 ] && [ "$nl" -le 52 ] || { echo "muse_oracle: MUSE_SYNTH_LAYERS=$nl (1..52)" >&2; exit 2; }
+    out="$data/oracle-out-muse-synth" part=oracle-out-muse-synth.partial ck="ckpt$nl"
+    if [ -f "$out/$ck.ACCEPTED" ] && [ -s "$out/$ck/model.safetensors.index.json" ]; then
+      echo "muse_oracle: $out/$ck kept (ACCEPTED)"
+    else
+      GQ=models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound-GPTQ
+      bc="/hf/hub/$BF16/snapshots/$(basename "$(snap_of "$BF16")")"
+      [ "$dry" = 1 ] || mkdir -p "$out" "$part"
+      echo "muse_oracle: synth-ckpt - make_synth.py --layers $nl, then check.py ($(date '+%F %T'))"
+      if in_box "$GQ" "python3 tools/quantize/muse/make_synth.py /ws/$part/$ck --layers $nl --tokenizer $bc \
+            --gptq \"\$SNAP\" > /ws/$part/$ck.log 2>&1 && \
+            python3 tools/quantize/muse/check.py /ws/$part/$ck > /ws/$part/$ck.check.log 2>&1"; then
+        if [ "$dry" != 1 ]; then
+          tail -1 "$part/$ck.check.log"
+          [ -e "$out/$ck" ] && mv -f "$out/$ck" "$out/$ck.stale.$(date +%s)"
+          mv -f "$part/$ck" "$out/$ck" && mv -f "$part/$ck.log" "$out/$ck.log" && mv -f "$part/$ck.check.log" "$out/$ck.ACCEPTED"
+          du -sh "$out/$ck"
+        fi
+      else
+        echo "muse_oracle: synth-ckpt FAILED"
+        tail -20 "$part/$ck.log" "$part/$ck.check.log" 2>/dev/null
+        rc=1
+      fi
     fi
     ;;
   taps)
