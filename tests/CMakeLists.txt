@@ -3617,4 +3617,35 @@ add_executable(muse_pf_ref_test kernels/muse_pf_ref_test.cc)
 target_include_directories(muse_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME muse_pf_ref_test COMMAND muse_pf_ref_test)
 set_tests_properties(muse_pf_ref_test PROPERTIES LABELS "muse;prefill" TIMEOUT 600)
+if(B70_MUSE)
+  # Task 2: every binary the prefill walk binds, both attention forms (src/kernels/CMakeLists.txt's spec 23d block;
+  # pf_gemm_T0 is prefill/'s shape-free binary).
+  set(B70_MUSE_PREFILL_KERNELS
+    kernel_mg_pf_embed_M2048_K6656_G26_V202048 kernel_mg_norm_M2048_K6656_G26_W26 kernel_mg_post_add_M2048_K6656_G26
+    kernel_k2_pf_dequant_slab_K6656_N8704 kernel_k2_pf_dequant_slab_K4096_N6656 kernel_k2_pf_dequant_slab_K6656_N39936
+    kernel_k2_pf_dequant_slab_K19968_N6656 kernel_pf_gemm_T0
+    kernel_mg_attn_prep_M2048_N8704_S1_Q32KV2_R4096 kernel_mg_attn_prep_M2048_N8704_S1_Q32KV2_F
+    kernel_mg_pf_flash_attn_Q32KV2_W2048_R4096 kernel_mg_pf_flash_attn_Q32KV2_W2048_R4096_EAGER
+    kernel_mg_pf_flash_attn_Q32KV2_F kernel_mg_pf_flash_attn_Q32KV2_F_EAGER
+    kernel_mg_pf_attn_gate_M2048_N4096 kernel_pf_res_fold_K6656_SP1_G26_Z kernel_mg_silu_mul_M2048_I19968_S1)
+  add_executable(muse_pf_variant_names_test kernels/muse_pf_variant_names_test.cc)
+  target_include_directories(muse_pf_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_pf_variant_names_test PRIVATE b70_muse_model)
+  b70_target_kernel_dir(muse_pf_variant_names_test)
+  add_test(NAME muse_pf_variant_names_test COMMAND muse_pf_variant_names_test ${B70_MUSE_PREFILL_KERNELS})
+  set_tests_properties(muse_pf_variant_names_test PROPERTIES LABELS "muse;prefill")
+  # MG2 for the prefill on the card, no checkpoint (r45.k1): every prefill kernel at the real shapes against
+  # muse_pf_ref.h / muse_ref.h - the slabs exact, the M 2048 kernels bit-exact, the flash against fp64 (0.99999) over
+  # the ring and to depth 30048, the eager build bitwise decode's eager rows, splits at 64 bitwise, replay bitwise.
+  add_executable(muse_pf_kernels_test kernels/muse_pf_kernels_test.cc)
+  target_include_directories(muse_pf_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_pf_kernels_test PRIVATE b70_prefill_host b70_muse_plan b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(muse_pf_kernels_test)
+  endif()
+  b70_target_kernel_dir(muse_pf_kernels_test)
+  add_dependencies(muse_pf_kernels_test ${B70_MUSE_PREFILL_KERNELS})
+  add_test(NAME muse_pf_kernels_test COMMAND muse_pf_kernels_test)
+  set_tests_properties(muse_pf_kernels_test PROPERTIES LABELS "muse;prefill" TIMEOUT 1800)
+endif()
 # ==== Spec 23d: Muse-Glimmer prefill ==== (end) ====

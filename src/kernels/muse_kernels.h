@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "kernels/kernels.h"
+#include "kernels/prefill/pf_kernels.h"   // spec 23d: the reused prefill names
 
 // Spec 23c: Muse-Glimmer-30B's device binaries by name - the host half of the "Spec 23c" block in
 // src/kernels/CMakeLists.txt, in its own header so kernels.h (shared with every branch in flight) is not edited.
@@ -95,6 +96,63 @@ inline std::vector<std::string> decode_variants(bool int8_head, bool eager) {
       lm_head_variant(int8_head),
       argmax1_variant(1),
       argmax2_variant(),
+  };
+}
+
+// ==== Spec 23d: the prefill chunk ===============================================================================
+// One chunk of at most kPfC rows through one device's layers on the Level Zero list (runtime/muse/muse_prefill.cc has
+// the walk). The Muse-only prefill binaries are mg_pf_* (src/kernels/muse/mg_pf_{attn,prep}.cl); 23c's mg_prep.cl is
+// built again at M = kPfC (the norms, the sandwich, the attention prep and SiLU x up at S 1); the rest are reused
+// sources at Muse's shapes (18c's k2_pf_dequant_slab for the int4 layout-0 slabs - widths that are not whole 1024-column
+// slabs get one zero-padded tail -, prefill/pf_prep.cl's pf_res_fold _Z, the shape-free pf_gemm_T0). The head over the
+// last row is decode's (mg_final_norm from the M kPfC norm binary on the last row's offsets, the lm_head, argmax).
+inline constexpr unsigned kPfC = 2048, kPfSlab = 1024;
+inline constexpr unsigned kPfKt = 64, kPfRpw = 8, kPfHpw = 4;   // mg_pf_flash_attn: key tile, rows, heads a work-group
+inline constexpr unsigned kPfFlashWg = 16 * (kPfHpw * kPfRpw / 8);   // 64: HPW x RPW / 8 sub-groups of 16
+inline constexpr unsigned kPfEagerWg = 128;                         // the eager build: one (row, head) a work-group
+inline constexpr unsigned kPfGateN = kQN;                           // mg_pf_attn_gate's row (4096)
+inline constexpr unsigned kPfGateGroups = kPfGateN / kRowWg;        // 16
+static_assert(kRing >= kPfC + kWindow - 1 && kRing % kPfKt == 0,
+              "a chunk's own keys and the window before it must fit the ring without colliding, in whole tiles");
+
+inline std::string pf_embed_variant() { return "mg_pf_embed" + m_(kPfC) + "_K6656_G26_V202048"; }
+inline std::string pf_norm_variant() { return norm_variant(kPfC); }           // mg_norm and mg_final_norm
+inline std::string pf_post_add_variant() { return post_add_variant(kPfC); }
+inline std::string pf_attn_prep_variant(bool sliding) { return attn_prep_variant(kPfC, 1, sliding); }
+inline std::string pf_silu_variant() { return silu_variant(kPfC, 1); }
+inline std::string pf_gate_variant() { return "mg_pf_attn_gate" + m_(kPfC) + "_N4096"; }
+// mg_pf_attn.cl: the flash build (the default) or the eager one (B70_MUSE_ATTN=eager), sliding / full.
+inline std::string pf_flash_variant(bool sliding, bool eager) {
+  return std::string("mg_pf_flash_attn_Q32KV2") + (sliding ? "_W2048_R4096" : "_F") + (eager ? "_EAGER" : "");
+}
+// 18c's k2_pf_linear.cl at Muse's linears: q||gate||k||v 6656 x 8704, o_proj 4096 x 6656, gate||up 6656 x 39936,
+// down 19968 x 6656.
+inline std::string pf_slab_variant(unsigned K, unsigned N) {
+  return "k2_pf_dequant_slab_K" + std::to_string(K) + "_N" + std::to_string(N);
+}
+inline std::string pf_fold_zero_variant() { return kernels::pf_res_fold_zero_variant(kHidden, kNormG); }
+inline std::string pf_gemm_variant() { return kernels::pf_gemm_variant(false); }
+
+// Every binary a Muse prefill chunk binds for an attention form (the head's lm_head and argmax are decode's, which
+// the decode capture already checked). tests/kernels/muse_pf_variant_names_test.cc holds the union to the CMake
+// block's list.
+inline std::vector<std::string> prefill_variants(bool eager) {
+  return {
+      pf_embed_variant(),
+      pf_norm_variant(),
+      pf_post_add_variant(),
+      pf_slab_variant(kHidden, kQgkvN),
+      pf_slab_variant(kQN, kHidden),
+      pf_slab_variant(kHidden, kGateUpN),
+      pf_slab_variant(kInter, kHidden),
+      pf_gemm_variant(),
+      pf_attn_prep_variant(true),
+      pf_attn_prep_variant(false),
+      pf_flash_variant(true, eager),
+      pf_flash_variant(false, eager),
+      pf_gate_variant(),
+      pf_fold_zero_variant(),
+      pf_silu_variant(),
   };
 }
 
