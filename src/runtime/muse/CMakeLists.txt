@@ -15,3 +15,13 @@ add_library(b70_muse_runtime STATIC muse_buffers.cc muse_capture.cc muse_engine.
 target_include_directories(b70_muse_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_muse_runtime PUBLIC b70_l0 b70_muse_loader b70_muse_plan b70_runtime)
 b70_target_kernel_dir(b70_muse_runtime)
+
+# Spec 23d: Muse-Glimmer's prefill (the chunk walk, its scratch, and MuseEngine::prefill's definitions) - its own
+# archive, as b70_kolibri_prefill is beside b70_kolibri_runtime: a target that never prefills Muse links what it always
+# linked. It runs the prefill path's Level Zero half only (runtime::prefill::Context, KernelCache, gemm_l0), but
+# Context's object names the SYCL side's entry points (libb70_prefill.so when the component is built), so an
+# executable linking this calls b70_link_prefill when B70_PREFILL_ENABLED, as every b70_prefill_host user does.
+add_library(b70_muse_prefill STATIC muse_prefill.cc muse_prefill_engine.cc)
+target_include_directories(b70_muse_prefill PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_muse_prefill PUBLIC b70_muse_runtime b70_prefill_host)
+b70_target_kernel_dir(b70_muse_prefill)

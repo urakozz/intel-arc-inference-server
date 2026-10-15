@@ -2,8 +2,13 @@
 // Spec 23c: b70-decode's Muse-Glimmer-30B path - the CLI dispatches on config.json's model_type
 // (loader::is_muse_checkpoint) and, for "muse_glimmer", runs runtime::muse::MuseEngine on one card (the default,
 // spec 23 decision 7) or two. `--ids` and `--bench` exactly as the Qwen path prints them (ids on stdout, one per
-// line; the bench row on stdout); the prompt goes through the decode list one replay per id (the chunked prefill is
-// spec 23d's).
+// line; the bench row on stdout); the prompt goes through the decode list one replay per id, or (spec 23d) through
+// MuseEngine::prefill in chunks:
+//
+//   --prefill          (--ids) the prompt prefilled, then --n greedy ids
+//   --prefill-length N (--bench) depth N prefilled and timed (the pp row), then --tg decoded
+//   --prefill-chunk C  the chunk width, <= 2048 (runtime::muse::kPfC; the default)
+//   --prefill-backend l0  the only backend
 //
 //   --pp N / --pipeline-parallel-size N   1 (the default: 17.4 GB of weights with the int8 head, one card) or 2
 //                      (capacity, not speed - decision 7)
@@ -12,8 +17,9 @@
 //   --layers N         development mode: load only layers [0, N) of the checkpoint (the head reads layer N-1's residual)
 //   --lm-head int8|bf16 (int8 the default, spec 9), --max-len N|auto (b70-decode's 16384 the default; at most
 //                      131072, a multiple of 256)
-// Refused before the device, each by name: --prefill / --prefill-length / --prefill-chunk / --prefill-backend
-// (spec 23d - box queue row 45), --mtp (Muse has no MTP head), --spec (Muse's drafter is spec 23f's DFlash),
+// Refused before the device, each by name: --prefill-backend l0-int8 (spec 23 §10: the h8 linears rotate in whole
+// 1024-wide Hadamard blocks and 6656 = 6.5 x 1024) and sycl-tla (no Muse walk), --prefill-chunk above 2048 (the
+// 4096-slot ring holds a chunk of 2048 and the 2047 keys before it), --mtp (Muse has no MTP head), --spec (Muse's drafter is spec 23f's DFlash),
 // --kv-cache int8 (decision 8: bf16 KV), --max-len above 131072 (decision 6), --profile (not built for Muse),
 // --device N with --pp 2 (16b's rule: GPUs 0 and 1), --layers auto, --ple-dir.
 #include <array>
@@ -34,6 +40,7 @@
 #include "loader/snapshot.h"
 #include "runtime/muse/muse_engine.h"
 #include "runtime/muse/muse_sizes.h"
+#include "runtime/prefill_backend.h"
 
 namespace cli::muse {
 
@@ -65,18 +72,30 @@ struct DecodeArgs {
   bool int8_head = true;        // --lm-head (int8 unless bf16 is asked for)
   uint32_t layers = 0;          // --layers N (0: the checkpoint's)
   PipelineArgs pipe;            // devices as parsed (1 when --pp was not given)
+  // Spec 23d: --prefill (--ids), --prefill-length N (--bench at depth N: the pp row), --prefill-chunk C (0 = kPfC),
+  // --prefill-backend as parsed (l0 only).
+  bool prefill = false, pp = false, pp_backend_given = false;
+  uint32_t pp_chunk = 0;
+  runtime::PrefillBackend pp_backend = runtime::PrefillBackend::L0;
+  bool prefills() const { return prefill || pp; }
   // What else was asked for, for the refusals.
-  bool prefill = false, prefill_len = false, prefill_chunk = false, prefill_backend = false;
   bool mtp = false, spec = false, kv8 = false, profile = false, layers_auto = false, ple_dir = false;
 };
 
 // Every refusal that needs no device - in this order, each by name (tests/CMakeLists.txt's cli_reject_muse_*). `d` is
 // the checkpoint's descriptor (config.json only).
 inline void check_args(const DecodeArgs& a, const model::MuseGlimmerDesc& d) {
-  if (a.prefill || a.prefill_len || a.prefill_chunk || a.prefill_backend)
-    throw std::runtime_error("Muse-Glimmer-30B has no prefill path yet: spec 23d builds it (box queue row 45) - feed the "
-                             "prompt through the decode list (drop --prefill, --prefill-length, --prefill-chunk and "
-                             "--prefill-backend)");
+  if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::L0Int8)
+    throw std::runtime_error("Muse-Glimmer-30B prefills on the l0 backend only (spec 23d), not l0-int8: spec 23 §10 - its "
+                             "h8 linears rotate in whole 1024-wide Hadamard blocks and 6656 = 6.5 x 1024 (a later probe) - "
+                             "--prefill-backend l0, or omit it");
+  if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::SyclTla)
+    throw std::runtime_error("Muse-Glimmer-30B prefills on the l0 backend only (spec 23d), not sycl-tla: sycl-tla has no "
+                             "Muse walk - --prefill-backend l0, or omit it");
+  if (a.pp_chunk > runtime::muse::kPfC)
+    throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " exceeds Muse-Glimmer's prefill chunk " +
+                             std::to_string(runtime::muse::kPfC) + " (the 4096-slot ring holds a chunk of 2048 and the "
+                             "2047 keys before it: 4095 <= 4096)");
   if (a.mtp)
     throw std::runtime_error("Muse-Glimmer-30B has no MTP head (spec 23 §1); its drafter is the DFlash assistant, "
                              "spec 23f - drop --mtp");
@@ -172,6 +191,7 @@ int run_decode(const DecodeArgs& a) {
   o.handoff = a.pipe.handoff;
   o.split = devs == 2 && !a.pipe.split_auto ? a.pipe.split : 0;
   o.layers = a.layers;
+  o.prefill = a.prefills();   // spec 23d: plan the prefill scratch (and its link) into max_len and the fit
   std::unique_ptr<runtime::muse::MuseEngine> eng;
   {
     Redirect redirect;
@@ -198,12 +218,35 @@ int run_decode(const DecodeArgs& a) {
                runtime::muse::decode_launches(eng->weights().desc, eng->weights().placement, eng->attention(),
                                               eng->handoff()),
                eng->max_len(), a.int8_head ? "int8" : "bf16");
+  // Spec 23d: the prefill setup (every device's scratch, Context, the prefill hand-off, the binaries' check) happens
+  // here, outside the timed window, which is then the whole prefill() call: first launch to the first generated id in
+  // cur_token (argmax_stage2 is its last launch).
+  const uint32_t chunk = a.pp_chunk ? a.pp_chunk : runtime::muse::kPfC;
+  size_t pp_launches0 = 0;
+  if (a.prefills()) {
+    eng->prepare_prefill();
+    pp_launches0 = eng->prefill_launches();
+    std::fprintf(stderr, "prefill: l0 backend, chunk %u, attention %s (B70_MUSE_ATTN), %zu launches per chunk (%s) + %zu "
+                 "for the head%s\n", chunk, runtime::muse::muse_attn_name(eng->attention()),
+                 runtime::muse::prefill_chunk_launches(eng->weights().desc, eng->weights().placement),
+                 devs == 2 ? "both cards" : "one card", runtime::muse::kPrefillHeadLaunches,
+                 devs == 2 ? "; the chunk crosses by copy, sequentially" : "");
+  }
   std::fprintf(stderr, "%s\n", eng->memory_line().c_str());
   const auto t0 = std::chrono::steady_clock::now();
-  eng->ingest(ids);
+  if (a.prefills())
+    eng->prefill(ids, chunk);
+  else
+    eng->ingest(ids);
   const double ingest_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token, one decode replay per id), pos %u\n", ids.size(),
-               ingest_ms, ingest_ms / double(ids.size()), eng->pos());
+  if (a.prefills())
+    std::fprintf(stderr, "%s: %zu ids in %.1f ms (%.2f t/s) - device-side, loader excluded, first prefill launch to the "
+                 "first generated id; chunk %u, %zu L0 launches, pos %u\n", a.pp ? "pp" : "prefill", ids.size(),
+                 ingest_ms, ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0, chunk,
+                 eng->prefill_launches() - pp_launches0, eng->pos());
+  else
+    std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token, one decode replay per id), pos %u\n", ids.size(),
+                 ingest_ms, ingest_ms / double(ids.size()), eng->pos());
   const uint32_t n = a.bench ? a.tg : a.n;
   eng->generate(n, [&](uint32_t id) {
     if (a.bench) return;
@@ -226,6 +269,18 @@ int run_decode(const DecodeArgs& a) {
               devs == 2 ? (std::string(" pipeline2-") + runtime::pp_handoff_name(eng->handoff()) + "-s" +
                            std::to_string(eng->split())).c_str() : "",
               a.depth, a.tg, eng->last_tok_per_s(), ms_per_token);
+  // Spec 23d: the pp row, a second line as the Kolibri / K2 / Qwen paths print it (depth, chunk, ms, t/s) - and the
+  // linears' derived rate (50.3 GFLOP a token at 52 layers: 2 x the linears' parameters, spec 23 §5.3).
+  if (a.pp) {
+    const double tps = ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0;
+    const double gflop_tok = 2.0 * double(eng->weights().desc.layers) * 483917824.0 / 1e9;
+    std::fprintf(stderr, "  pp: %.2f t/s x %.1f GFLOP a token (the linears, derived) = %.1f TFLOP/s\n", tps, gflop_tok,
+                 tps * gflop_tok / 1e3);
+    std::printf("| b70-decode %s muse%s%s%s l0 pp | %u | %u | %.1f | %.2f |\n", sha, a.int8_head ? " int8-head" : " bf16-head",
+                eng->attention() == runtime::muse::MuseAttn::Eager ? " eager" : "",
+                devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng->split())).c_str() : "", a.depth,
+                chunk, ingest_ms, tps);
+  }
   return 0;
 }
 

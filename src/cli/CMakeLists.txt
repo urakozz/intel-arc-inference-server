@@ -84,3 +84,5 @@ target_link_libraries(b70-decode PRIVATE b70_muse_runtime)
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_muse_runtime)
 endif()
+# Spec 23d: and Muse-Glimmer's prefill (b70_muse_prefill: MuseEngine::prefill, its walk and scratch).
+target_link_libraries(b70-decode PRIVATE b70_muse_prefill)

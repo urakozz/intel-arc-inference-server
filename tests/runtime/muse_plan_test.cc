@@ -162,6 +162,54 @@ int main() {
     std::printf("  23c: 733 / 681 launches a token (735 / 683 with peer), decode scratch %zu B at 131072 (+ %zu B eager)\n",
                 rm::decode_scratch_bytes(d, 131072, 1, MuseAttn::Flash), size_t(32) * 131072 * 4);
   }
+  // --- spec 23d: the prefill chunk's scratch, its launches, and the plan with it ---------------------------------
+  using runtime::muse::MuseAttn;
+  {
+    const model::MusePlacement one = model::MusePlacement::one(d), two = model::MusePlacement::two(d, 26);
+    CHECK_EQ(rm::kPfC, 2048u);
+    // the slab walk: q||gate||k||v 8 x 1024 + 512, o_proj / down 6 x 1024 + 512, gate||up 39 x 1024
+    CHECK_EQ(rm::pf_slabs(8704), 9u);
+    CHECK_EQ(rm::pf_slabs(6656), 7u);
+    CHECK_EQ(rm::pf_slabs(39936), 39u);
+    CHECK_EQ(rm::pf_slab_width(8704, 8192), 512u);
+    CHECK_EQ(rm::pf_ld(8704), 8704u);
+    // a layer: norm, 9 x 2, prep, attention, gate, 7 x 2, fold _Z, post-add, norm, 39 x 2, silu, 7 x 2, fold _Z,
+    // post-add = 134 (the same under eager: one attention launch either way)
+    CHECK_EQ(rm::prefill_layer_launches(d), size_t(134));
+    CHECK_EQ(rm::prefill_chunk_launches(d, one), size_t(1 + 52 * 134));   // + mg_pf_embed on device 0
+    CHECK_EQ(rm::prefill_chunk_launches(d, two), size_t(1 + 52 * 134));   // the cut adds nothing
+    CHECK_EQ(rm::prefill_device_launches(d, two, 0), size_t(1 + 26 * 134));
+    CHECK_EQ(rm::prefill_device_launches(d, two, 1), size_t(26 * 134));
+    CHECK_EQ(rm::kPrefillHeadLaunches, size_t(4));   // mg_final_norm on the last row, lm_head, argmax x 2
+    const rm::PrefillSizes ps = rm::prefill_sizes(d);
+    const size_t row = size_t(2048) * 6656 * 2;
+    CHECK_EQ(ps.ids, size_t(2048) * 4);
+    CHECK(ps.resid == row && ps.x == row && ps.a == row);
+    CHECK_EQ(ps.partials, size_t(2048) * 39936 * 4);   // gate||up's fp32 rows, the widest linear
+    CHECK_EQ(ps.slab, size_t(19968) * 1024 * 2);       // down's K
+    CHECK(ps.sumsq_a == size_t(26) * 2048 * 4 && ps.sumsq_r == ps.sumsq_a);
+    CHECK_EQ(ps.attn_q, size_t(2048) * 4096 * 4);
+    CHECK(ps.gate == size_t(2048) * 4096 * 2 && ps.attn_out == ps.gate);
+    CHECK_EQ(ps.h, size_t(2048) * 19968 * 2);
+    CHECK_EQ(ps.total(), ps.ids + 3 * row + ps.partials + ps.slab + 2 * ps.sumsq_a + ps.attn_q + 2 * ps.gate + ps.h);
+    const runtime::PpLandingLayout ll = rm::pf_landing_layout(d);
+    CHECK(ll.resid_bytes == row && ll.sumsq_bytes == size_t(26) * 2048 * 4);
+    CHECK(rm::pf_link_bytes(d, 1) > rm::pf_link_bytes(d, 0));
+    CHECK_EQ(rm::prefill_reserve(d, 1), ps.total());
+    CHECK_EQ(rm::prefill_reserve(d, 2), ps.total() + rm::pf_link_bytes(d, 1));
+    // one card still reaches 131072 with the int8 head, the decode AND prefill scratch and the int4 drafter
+    rm::MuseReserve r = rm::run_reserve(d, 0, 1, MuseAttn::Flash, true);
+    CHECK_EQ(r.prefill_scratch, ps.total());
+    CHECK_EQ(r.decode_scratch, rm::decode_reserve(d, 0, 1, MuseAttn::Flash).decode_scratch);
+    CHECK_EQ(rm::run_reserve(d, 0, 1, MuseAttn::Flash, false).prefill_scratch, size_t(0));
+    r.drafter = 1358000000ull;
+    const rm::MusePlan p = rm::plan_muse(d, 1, 0, true, r, one_card);
+    CHECK(p.fits && p.max_len == 131072);
+    std::printf("  23d: %zu launches a chunk (134 a layer) + %zu at the head; prefill scratch %zu B (%.3f GB) a device; "
+                "one card at 131072 with it, the int8 head and the int4 drafter: %.3f GB of %.3f\n",
+                rm::prefill_chunk_launches(d, one), rm::kPrefillHeadLaunches, ps.total(), ps.total() / 1e9,
+                p.devices[0].total() / 1e9, kCard / 1e9);
+  }
   std::printf("muse_plan_test OK\n");
   return 0;
 }
