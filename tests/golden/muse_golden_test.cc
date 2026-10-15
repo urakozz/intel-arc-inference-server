@@ -22,7 +22,13 @@
 // **The diagnostic** (printed, not gated): per layer the minimum cosine of the engine's residual tap against H.L<l>
 // over the rows the golden keeps; the raw logits' worst cosine at the decision rows.
 //
-// argv: <checkpoint> <golden dir> [bf16] [pp2 | pp2:<split>] [copy | peer]   (the attention form: B70_MUSE_ATTN)
+// **MG3 on prefill (spec 23d)**: with `prefill` (or `prefill:<chunk>`) the prompt goes through MuseEngine::prefill
+// (chunks of 2048, or <chunk>) instead of one replay per id; the gate is the same rule from row T - 1 on (the prefill's
+// head chooses the first token over the raw row, decode's argmax); the residual taps are read from the decode steps
+// only (prefill writes no tap). The 32 teacher-forced steps after it are decode's, as before.
+//
+// argv: <checkpoint> <golden dir> [bf16] [pp2 | pp2:<split>] [copy | peer] [prefill | prefill:<chunk>]
+//   (the attention form: B70_MUSE_ATTN, both halves)
 // Exit 77 (SKIP) when the checkpoint or the golden set is absent, or two GPUs are asked for and not there.
 #include <algorithm>
 #include <cmath>
@@ -52,9 +58,16 @@ int main(int argc, char** argv) {
   runtime::muse::MuseOptions o;
   o.debug_tap = true;
   uint32_t devices = 1;
+  bool prefill = false;   // spec 23d: the prompt through MuseEngine::prefill
+  uint32_t chunk = 0;
   for (int i = 3; i < argc; ++i) {
     const std::string a = argv[i];
-    if (a == "bf16") {
+    if (a == "prefill") {
+      prefill = true;
+    } else if (a.rfind("prefill:", 0) == 0) {
+      prefill = true;
+      chunk = uint32_t(std::strtoul(a.c_str() + 8, nullptr, 10));
+    } else if (a == "bf16") {
       o.int8_head = false;
     } else if (a == "int8") {
       o.int8_head = true;
@@ -66,7 +79,8 @@ int main(int argc, char** argv) {
     } else if (a == "copy" || a == "peer") {
       o.handoff = a == "peer" ? runtime::PpHandoff::Peer : runtime::PpHandoff::Copy;
     } else {
-      std::fprintf(stderr, "muse_golden_test: unknown flag %s (bf16, int8, pp2[:split], copy, peer)\n", a.c_str());
+      std::fprintf(stderr, "muse_golden_test: unknown flag %s (bf16, int8, pp2[:split], copy, peer, prefill[:chunk])\n",
+                   a.c_str());
       return 2;
     }
   }
@@ -94,6 +108,7 @@ int main(int argc, char** argv) {
   for (const std::string& p : prompts)
     longest = std::max(longest, muse_rig::read_ids(gdir + "/" + p + ".ids", pre.vocab).size());
   o.max_len = muse_rig::len_for(longest + kGen + 1);
+  o.prefill = prefill;
   muse_rig::Rig rig;
   muse_rig::build(rig, snap, devices, o);
   runtime::muse::MuseEngine& eng = *rig.eng;
@@ -104,6 +119,10 @@ int main(int argc, char** argv) {
               eng.devices() == 2 ? (std::string(", split ") + std::to_string(eng.split()) + " " +
                                     runtime::pp_handoff_name(eng.handoff())).c_str() : "",
               eng.launches(), eng.max_len());
+  if (prefill)
+    std::printf("MG3 on prefill: the prompt through MuseEngine::prefill in chunks of %u, %zu launches a chunk + %zu at "
+                "the head\n", chunk ? chunk : runtime::muse::kPfC,
+                runtime::muse::prefill_chunk_launches(d, eng.weights().placement), runtime::muse::kPrefillHeadLaunches);
 
   bool gate_ok = true;
   std::vector<double> sa, sb;
@@ -142,7 +161,11 @@ int main(int argc, char** argv) {
                                                                  gh[l] + size_t(row - arow0) * d.hidden, d.hidden, sa, sb).cos);
     };
     eng.reset();
-    for (uint32_t t = 0; t < T; ++t) {
+    if (prefill) {
+      eng.prefill(ids, chunk);   // spec 23d: the first id is the prefill head's
+      CHECK_EQ(eng.pos(), T);
+    }
+    for (uint32_t t = 0; t < T && !prefill; ++t) {
       eng.ingest({ids[t]});
       check_tap(t);
     }

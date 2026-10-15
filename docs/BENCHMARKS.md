@@ -903,7 +903,7 @@ layers that fit, or on the synthetic checkpoints (4 real-width layers), and says
 ## Muse-Glimmer-30B (spec 23)
 
 **Nothing here is measured yet.** Muse-Glimmer-30B (`muse_glimmer`, Vishva007's int4 g64 export used as-is) runs its
-own engine (spec 23c's decode, built without the card: no Muse binary has been compiled). One card holds the whole
+own engine (spec 23c's decode and 23d's prefill, built without the card: no Muse binary has been compiled). One card holds the whole
 model (17.41 GB of weights with the int8 head). The roofline is spec 23 §2's: 14.72 GB read a token plus 13,312 B a
 position on the 13 full layers and up to 81.8 MB of sliding windows - **39.7 / 38.7 / 35.7 t/s** at 590 GB/s (depth
 4096 / 32768 / 131072), ~30.8 t/s at Qwen3.8's 77.6 % of roofline (estimated). Launches a token: 733 (flash), 681
@@ -916,6 +916,11 @@ position on the 13 full layers and up to 81.8 MB of sliding windows - **39.7 / 3
 | decode across two cards | `--pp 2`, copy and peer, int8 head, depth 4096 / 32768 (capacity, not speed: decision 7) | pending | r44.speed |
 | the four int4 GEMVs' {S, layout} | q\|\|gate\|\|k\|\|v 6656x8704, o_proj 4096x6656, gate\|\|up 6656x39936, down 19968x6656: S 1 / 2 / 4 (8), L 0 / 1 | pending (PROVISIONAL S2 / S4 / S8 / S4 L0, Qwen3.8's nearest cells) | r44.sweeps |
 | memory per card | one card at `--max-len auto` (131072) | 17.41 GB weights + 1.745 GB KV + 0.164 GB rings + 0.070 GB decode scratch (derived) | r44.speed |
+| prefill pp 4096 / 16384 / 32768 (spec 23d) | one B70, `l0` backend (bf16 slabs + `pf_gemm_T0`, flash over the 4096-slot ring / NoPE), chunk 2048, int8 head; `b70-decode --bench --prefill-length N` | pending; 50.3 GFLOP a token in the linears (derived) - the bf16 `l0` walk's comparable is Qwen3.8's 1670.72 t/s at 4096 (2026-09-23, `## Prefill`) | r45.speed |
+| prefill across two cards | `--pp 2 --pipeline-split auto`, the chunk crosses by copy, sequentially (capacity, not speed) | pending | r45.speed |
+| prefill, eager attention | one B70, pp 4096 (`B70_MUSE_ATTN=eager`: the portable three-pass build, bitwise decode's eager rows - an A/B mode, not a speed path) | pending | r45.speed |
+| prefill memory per card | the chunk's scratch (partials [2048][39936] fp32 the largest), + the 27.3 MB landing on two cards | 0.599 GB a device (599,171,072 B, derived; one card still reaches 131072 with it, the int8 head and the int4 drafter: 22.845 GB of 32.53) | r45.speed |
+| prefill launches | a chunk at 52 layers; the head | 6969 (1 + 134 a layer) + 4 (derived, asserted at the walk) | r45.prefill |
 
 ## Correctness
 
