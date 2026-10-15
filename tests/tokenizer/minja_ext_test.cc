@@ -85,6 +85,39 @@ void case_tool_call_probe() {
   std::printf("tool_call_probe: %s\n", got.c_str());
 }
 
+// Spec 23e: the same probe for a template that writes argument names as a double-quoted ATTRIBUTE -
+// Muse-Glimmer's ATEM `<atem:parameter name="KEY">VALUE</atem:parameter>` (its chat_template.jinja T:31-49; a
+// string `arguments` raises, T:28-30). Without the patch the probe finds no argument name it knows, and apply()
+// rewrites the call history into JSON content.
+void case_tool_call_probe_attribute() {
+  const std::string source =
+      "{%- for m in messages -%}"
+      "{{- '<' + m.role + '>' -}}"
+      "{%- if m.content is string -%}{{- m.content -}}{%- endif -%}"
+      "{%- for tc in (m.tool_calls or []) -%}"
+      "{%- if tc.function.arguments is not mapping -%}{{- raise_exception('arguments must be a mapping') -}}{%- endif -%}"
+      "{{- '<atem:invoke name=\"' + tc.function.name + '\">' -}}"
+      "{%- for k, v in tc.function.arguments.items() -%}"
+      "{{- '<atem:parameter name=\"' + k + '\">' -}}{{- v -}}{{- '</atem:parameter>' -}}"
+      "{%- endfor -%}"
+      "{{- '</atem:invoke>' -}}"
+      "{%- endfor -%}"
+      "{%- endfor -%}";
+  minja::chat_template tmpl(source, "", "");
+  CHECK(tmpl.original_caps().supports_tool_calls);
+  CHECK(tmpl.original_caps().requires_object_arguments);
+  minja::chat_template_inputs inputs;
+  inputs.messages = nlohmann::ordered_json::parse(R"([
+    {"role": "user", "content": "go"},
+    {"role": "assistant", "content": "", "tool_calls": [
+      {"type": "function", "function": {"name": "fs.read", "arguments": {"path": "/a"}}}]}])");
+  inputs.add_generation_prompt = false;
+  const std::string got = tmpl.apply(inputs);
+  CHECK_EQ(got, std::string("<user>go<assistant><atem:invoke name=\"fs.read\"><atem:parameter name=\"path\">/a"
+                            "</atem:parameter></atem:invoke>"));
+  std::printf("tool_call_probe_attribute: %s\n", got.c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -92,6 +125,7 @@ int main(int argc, char** argv) {
   const int bad = run_jinja_cases(dir);
   CHECK_EQ(bad, 0);
   case_tool_call_probe();
+  case_tool_call_probe_attribute();
   std::printf("minja_ext_test OK\n");
   return 0;
 }

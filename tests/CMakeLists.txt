@@ -3715,3 +3715,30 @@ b70_cli_reject(cli_reject_muse_prefill_sycl ${CMAKE_CURRENT_SOURCE_DIR}/model/mu
 b70_cli_reject(cli_reject_muse_prefill_chunk ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer --ids ${B70_OK_IDS} --n 4
   --prefill --prefill-chunk 4096 EXPECT "exceeds Muse-Glimmer's prefill chunk 2048")
 # ==== Spec 23d: Muse-Glimmer prefill ==== (end) ====
+
+# ==== Spec 23e: Muse-Glimmer served (label muse) ==== (begin) ====
+if(B70_TOKENIZER_ENABLED)
+  # Task 1 (host): the ORIGINAL's chat_template.jinja (meta-models/Muse-Glimmer-30B @ a4e59da5, sha256 cfc67e5f... -
+  # spec 23 decision 1), vendored with its tokenizer_config.json and generation_config.json at tests/tokenizer/muse/
+  # (Apache-2.0), on 26 message lists against transformers 5.19.0's apply_chat_template (tools/tokenizer/dump_muse.py
+  # templates -> tests/tokenizer/muse_templates.json); string arguments raise; strftime_now on a fixed clock.
+  add_executable(template_muse_test tokenizer/template_muse_test.cc)
+  target_include_directories(template_muse_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(template_muse_test PRIVATE b70_tokenizer b70_third_party_minja)
+  add_test(NAME template_muse_test COMMAND template_muse_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${CMAKE_SOURCE_DIR}/tests/tokenizer/muse)
+  # ... and its tokenizer (dump_muse.py tokenizer -> tests/tokenizer/muse_tokenizer.json): the id count, the named
+  # added tokens both ways, 24 texts, corpus.txt's digests, every render's ids with ONE BOS (Review Focus 1).
+  # tokenizer.json (28 MB) is not vendored: the bf16 original's in the HF cache, or -DB70_MUSE_TOKENIZER_JSON / the
+  # environment variable of the same name. Absent: disabled on the Mac (host_only), SKIP (77) elsewhere.
+  set(B70_MUSE_TOKENIZER_JSON
+    "${_b70_hf_home}/hub/models--meta-models--Muse-Glimmer-30B/snapshots/a4e59da52a7bc87ae7251dd5545c0dd437c44b68/tokenizer.json"
+    CACHE FILEPATH "Muse-Glimmer-30B's tokenizer.json for muse_tokenizer_test (-D or the environment variable)")
+  add_executable(muse_tokenizer_test tokenizer/muse_tokenizer_test.cc)
+  target_include_directories(muse_tokenizer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_tokenizer_test PRIVATE b70_tokenizer)
+  add_test(NAME muse_tokenizer_test COMMAND muse_tokenizer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${CMAKE_SOURCE_DIR}/tests/tokenizer/muse ${B70_MUSE_TOKENIZER_JSON})
+  set_tests_properties(template_muse_test muse_tokenizer_test PROPERTIES LABELS muse SKIP_RETURN_CODE 77 TIMEOUT 300)
+endif()
+# ==== Spec 23e: Muse-Glimmer served ==== (end) ====

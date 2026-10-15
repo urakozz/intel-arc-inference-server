@@ -1,7 +1,7 @@
 # name        source                              pin                                       sha256
 # json header: third_party/json/nlohmann/json.hpp (kept at the include path minja uses)
 json          https://github.com/nlohmann/json   v3.12.0                                  aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63
-minja         https://github.com/google/minja    021c2293c187789ef13d56c6cfd89c9b134fd80f  345e8dbac339c6a858dae6130dd52e1f0e32fd16fdf843bc5a83c3ad21f63482 bc04a3645a198b256172f1b762328671e7e823c867c0281e02d2c64c4c4bc249
+minja         https://github.com/google/minja    021c2293c187789ef13d56c6cfd89c9b134fd80f  345e8dbac339c6a858dae6130dd52e1f0e32fd16fdf843bc5a83c3ad21f63482 5c21ccd1ba70b1d698ca4d3e3784681c4e4d049742bd62fbb854bcd5951f2fee
 httplib       https://github.com/yhirose/cpp-httplib v0.54.1                                 5933c14b2d0f45212925ed18ca579841f5fce717f431fc20cec712423e905b10
 #
 # minja carries b70 patches (spec 18d; every one marked "b70 patch (spec 18d)" in the source,
@@ -18,4 +18,8 @@ httplib       https://github.com/yhirose/cpp-httplib v0.54.1                    
 #   chat-template.hpp  the tool-call capability probe also accepts ">argument_needle<" (an
 #                      argument name between tags), so K2's tool-call history is rendered by
 #                      its template instead of being polyfilled into JSON content.
+#                      b70 patch (spec 23e): and `name="argument_needle"` (an argument name as a
+#                      double-quoted attribute - Muse-Glimmer's ATEM <atem:parameter name="...">),
+#                      for the same reason (tests/tokenizer/minja_ext_test.cc's
+#                      tool_call_probe_attribute case).
 # The Qwen3.8 / Agnes template tests are unchanged by them (byte-identical renders).

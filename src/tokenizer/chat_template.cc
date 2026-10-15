@@ -31,7 +31,7 @@ uint32_t rotate_right(uint32_t value, uint32_t shift) {
   return (value >> shift) | (value << (32U - shift));
 }
 
-std::string sha256(const std::string& input) {
+std::string sha256_impl(const std::string& input) {
   static constexpr std::array<uint32_t, 64> k = {
       0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U,
       0x923f82a4U, 0xab1c5ed5U, 0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U,
@@ -117,18 +117,25 @@ struct Template::Impl {
   std::unique_ptr<minja::chat_template> tmpl;
   std::string bos;
   std::string eos;
+  std::string sha;
+  std::function<std::chrono::system_clock::time_point()> clock;
 };
 
-Template::Template(const std::string& dir) : impl_(std::make_unique<Impl>()) {
+Template::Template(const std::string& dir) : Template(dir, std::string()) {}
+
+Template::Template(const std::string& dir, const std::string& template_file) : impl_(std::make_unique<Impl>()) {
   const nlohmann::json config = nlohmann::json::parse(slurp(dir + "/tokenizer_config.json"));
   impl_->bos = token_string(config, "bos_token");
   impl_->eos = token_string(config, "eos_token");
   // Spec 20e: a checkpoint without chat_template.jinja keeps its template as tokenizer_config.json's
   // "chat_template" string - transformers' older layout, which Kolibri-1's release (and 20b's
   // export of it) uses. transformers reads the .jinja first when both exist; so does this.
+  // Spec 23e: an explicit file (b70-serve --chat-template) replaces both.
   const std::string jinja_path = dir + "/chat_template.jinja";
   std::string template_source;
-  if (std::ifstream(jinja_path).good()) {
+  if (!template_file.empty()) {
+    template_source = slurp(template_file);
+  } else if (std::ifstream(jinja_path).good()) {
     template_source = slurp(jinja_path);
   } else if (config.contains("chat_template") && config.at("chat_template").is_string()) {
     template_source = config.at("chat_template").get<std::string>();
@@ -148,7 +155,8 @@ Template::Template(const std::string& dir) : impl_(std::make_unique<Impl>()) {
   // only, keyed like the fallback above.
   static constexpr const char* kOrnithTemplateSha256 =
       "182e77dd83bd8e9ca818b240b82e28f243762cd5dda32e6eef327df7b1cd107e";
-  const std::string sha = sha256(template_source);
+  const std::string sha = sha256_impl(template_source);
+  impl_->sha = sha;
   std::string source = sha == kFallbackTemplateSha256 ? slurp(B70_CHAT_TEMPLATE_FALLBACK_PATH)
                                                       : template_source;
   if (sha == kOrnithTemplateSha256) {
@@ -175,6 +183,7 @@ std::string Template::render(const nlohmann::json& messages, const nlohmann::jso
   inputs.messages = messages;
   inputs.tools = tools.is_null() ? nlohmann::ordered_json() : nlohmann::ordered_json(tools);
   inputs.add_generation_prompt = true;
+  inputs.now = impl_->clock ? impl_->clock() : std::chrono::system_clock::now();
   inputs.extra_context = nlohmann::ordered_json::object();
   if (kwargs.is_object()) {
     for (const auto& [key, value] : kwargs.items()) inputs.extra_context[key] = value;
@@ -187,5 +196,13 @@ std::string Template::render(const nlohmann::json& messages, const nlohmann::jso
 const std::string& Template::bos_token() const { return impl_->bos; }
 
 const std::string& Template::eos_token() const { return impl_->eos; }
+
+const std::string& Template::source_sha256() const { return impl_->sha; }
+
+void Template::set_clock(std::function<std::chrono::system_clock::time_point()> clock) {
+  impl_->clock = std::move(clock);
+}
+
+std::string sha256_hex(const std::string& bytes) { return sha256_impl(bytes); }
 
 }  // namespace chat
