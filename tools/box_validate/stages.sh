@@ -2874,6 +2874,57 @@ st_r42_taps() {
 }
 
 # ======================================================================================
+row 43 "spec 23b - Muse-Glimmer-30B: the descriptor, the loader (either Vishva007 spelling, the fused GEMVs, the vision skip by name), synthetic real-width checkpoints, the memory plan one card and two (plan 23b)"
+rownote 43 "No kernel and no existing file's behaviour moved (kernel_cmdlines +0 / -0 / ~0; the int4 layout formulas moved to loader/int4_layout.h byte-identically): G0's g0.sha is the 'nothing moved' check. Written on the Mac: the host stages ran there; nothing of load_muse_glimmer has touched a card."
+rownote 43 "Downloads: r43.synth and r43.pytest need only SMALL files - the original's (hf download meta-models/Muse-Glimmer-30B tokenizer.json tokenizer_config.json chat_template.jinja generation_config.json config.json) and the -GPTQ repo's config.json (hf download Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ config.json); r43.load_real needs the int4 checkpoint in either spelling (22.8 GB, row 42's download, data key muse_gptq)."
+rownote 43 "Disk: r43.synth writes ~6.4 GB (4 layers at the real widths, measured 5.9 GB at 2 on the Mac) under \$DATA/oracle-out-muse-synth via the tree's oracle-out-muse-synth.partial; RAM: ~12 GB in the oracle container (the embedding's and the head's fp32 draws)."
+rownote 43 "Hand back: each load line (layers, spelling, vision skipped, head, devices, bytes) and its seconds (the int8 head's quantisation time separately), every device's weights line against the plan, the real checkpoint's host-half line (tensors, 1459 or 1875 text, 809 vision, 0 unconsumed) and the plan lines (one card at 131072; split by bytes)."
+stage r43.k0 43 default cpu - g0.sha,g0.bitwise,g0.suite "MG0: 23b adds no kernel (every binary identical, G0) and leaves the other loaders' files untouched"
+st_r43_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r43.host 43 default cpu - - "host: muse_glimmer_test (the descriptor against the vendored config.json key by key, 29 refusals by name, layer_rope_theta's switch rule), muse_layout_test (spec 23 §2's bytes), muse_repack_test (the fused GEMVs' columns at the real widths, the vision skip by name, the data asserts and refusals; 23a's tiny int4 variant / the synthetic when linked), muse_plan_test (131072 on one card with the drafter's reservation, the split by bytes, decision 6)"
+st_r43_host() {
+  run_tests '^(muse_glimmer_test|muse_layout_test|muse_repack_test|muse_plan_test)$'
+  jgrab host '^muse_(glimmer|layout|repack|plan)_test$' 'OK|a layer|one card|read per token|Muse-Glimmer plan|device [01] layers|a 20 GB card|real widths|tiny|make_synth'
+  finish
+}
+stage r43.pytest 43 default cpu oracle_image - "the Python tools' tests in the oracle image with the 5.19.0 site: test_muse_quant.py (make_synth at one real-width layer = muse_ref.expected_names, check.py ACCEPTS it and refuses six corruptions by name, the packer's rule) - muse_oracle.sh synth-tests"
+st_r43_pytest() {
+  chk "tools/box_validate/muse_oracle.sh $DATA synth-tests" "test_muse_quant.py"
+  grab_all pytest '^(PASS|FAIL|SKIP) |passed|refused:|ACCEPTED' 20
+  finish
+}
+stage r43.synth 43 optin cpu oracle_image - "the synthetic real-width checkpoint on the box CPU: muse_oracle.sh synth-ckpt - make_synth.py --layers 4 (the -GPTQ spelling, random weights, 23a's packer), check.py ACCEPTED -> \$DATA/oracle-out-muse-synth/ckpt4 (~6.4 GB); then re-links oracle-out*"
+st_r43_synth() {
+  chk "tools/box_validate/muse_oracle.sh $DATA synth-ckpt" "the synthetic Muse-Glimmer checkpoint"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_oracle_muse_synth' $STATE/have.env"
+  grab_all synth '^ACCEPTED|REFUSED|^wrote|FAILED' 12
+  finish
+}
+stage r43.synth_host 43 default cpu oracle_muse_synth r43.host "the C++ host half over make_synth's own files (Review Focus 5): muse_synth_host_test - the served constructor, names both ways, every layer repacked (bytes = muse_layer_bytes, the part boundaries read back), 0 unconsumed, the plan"
+st_r43_synth_host() {
+  run_tests '^muse_synth_host_test$'
+  jgrab synth-host '^muse_synth_host_test$' 'tensors|OK|plan at|device 0'
+  finish
+}
+stage r43.load 43 default gpu oracle_muse_synth r43.synth_host "load_muse_glimmer on the card over the synthetic checkpoint: one card (muse_load_synth_test), then --pp 2 split 2 over both (muse_load_synth_pp2_test; SKIP without the second card) - 0 unconsumed, every part's bytes = muse_device_weight_bytes, Review Focus 1's columns (every k-row word and scale) read back = the host repack, the norms, the embedding's first / last rows, the int8 head's bytes"
+st_r43_load() {
+  run_tests '^muse_load_synth(_pp2)?_test$'
+  jgrab load '^muse_load_synth' 'Muse-Glimmer-30B:|device [01] |read/token|load  |OK'
+  finish
+}
+stage r43.load_real 43 default gpu muse_gptq r43.load "the real checkpoint (either spelling): muse_real_host_test (the host half: names, the full data asserts, 52 layers repacked, 0 unconsumed) then muse_load_real_test on one card (18.96 GB read, 17.41 GB on the card with the int8 head): its load line and time, 0 unconsumed, the read-backs"
+st_r43_load_real() {
+  x "free -g | head -2"
+  run_tests '^muse_(real_host|load_real)_test$'
+  jgrab load-real '^muse_(real_host|load_real)_test$' 'tensors|Muse-Glimmer-30B:|device 0 |checks|read/token|load  |OK'
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp labels belong to their rows)"
 st_x_rest() {
