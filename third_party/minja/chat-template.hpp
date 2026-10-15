@@ -196,9 +196,12 @@ class chat_template {
         // Note: the arguments are rendered in both cases, but may be double-escaped, which we don't want.
         // b70 patch (spec 18d): ">argument_needle<" too - an argument name between tags, as
         // K2-Horizon's <ifm|arg_key>NAME</ifm|arg_key> writes it.
+        // b70 patch (spec 23e): `name="argument_needle"` too - an argument name as a double-quoted attribute, as
+        // Muse-Glimmer's ATEM <atem:parameter name="NAME"> writes it.
         const auto renders_argument = [&](const std::string & s) {
             return contains(s, "<parameter=argument_needle>") || contains(s, "\"argument_needle\":") ||
-                   contains(s, "'argument_needle':") || contains(s, ">argument_needle<");
+                   contains(s, "'argument_needle':") || contains(s, ">argument_needle<") ||
+                   contains(s, "name=\"argument_needle\"");
         };
         out = try_raw_render(json::array({
             dummy_user_msg,
