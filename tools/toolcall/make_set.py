@@ -50,6 +50,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 WORK = "/work"
 MIN_IDS, MAX_IDS = 800, 3000
+# --from re-renders the SAME conversations: another tokenizer may need fewer ids for them. LFM2.5's renders the
+# shortest scenario in 748 ids (spec 24a: 748..2460, 54768 in all), so its floor is lower; the conversations are unchanged.
+MIN_IDS_FROM = {"lfm2_moe": 600}
 
 FILES = [
     "src/runtime/prefill/linear_l0.cc",
@@ -368,8 +371,9 @@ def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=No
                                     enable_thinking=sc.get("enable_thinking", False), tokenize=True,
                                     **kwargs)
         ids = [int(x) for x in (r["input_ids"] if hasattr(r, "keys") else r)]
-        if not MIN_IDS <= len(ids) <= MAX_IDS:
-            sys.exit(f"FATAL: {name} renders to {len(ids)} ids, outside {MIN_IDS} to {MAX_IDS}")
+        lo = MIN_IDS_FROM.get(mtype, MIN_IDS)
+        if not lo <= len(ids) <= MAX_IDS:
+            sys.exit(f"FATAL: {name} renders to {len(ids)} ids, outside {lo} to {MAX_IDS}")
         text = " ".join(map(str, ids)) + "\n"
         with open(os.path.join(src, f"{name}.ids"), encoding="utf-8") as f:
             same += f.read() == text
