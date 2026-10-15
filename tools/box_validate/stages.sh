@@ -2903,7 +2903,7 @@ st_r48_golden() {
   grab_all gap 'sel gap|wall' 200
   finish
 }
-stage r48.a4_ref   48 optin   cpu  lfm2moe_bf16,oracle_image    -  "the A4 reference on the bf16 original -> oracle-out-lfm2moe-a4 (hours)"
+stage r48.a4_ref   48 optin   cpu  lfm2moe_bf16,oracle_image    -  "the A4 reference on the bf16 original -> oracle-out-lfm2moe-a4 (days, ESTIMATED; resumable)"
 st_r48_a4_ref() {
   chk "tools/box_validate/lfm2moe_oracle.sh $DATA a4" "the A4 reference (36 scenarios, 2048 new ids, batched)"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"

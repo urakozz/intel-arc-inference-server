@@ -23,7 +23,7 @@
 #                 as ORACLE_SNAP): the engine-format reference every F3 gate reads -> <data>/oracle-out-lfm2moe-<name>/
 #                 (<name> = the directory's base name)
 #   a4            tools/toolcall/a4_ref.sh lfm2moe set + ref (36 scenarios, greedy, 2048 new ids, batched)
-#                 -> <data>/oracle-out-lfm2moe-a4/ (HOURS; resumable per scenario)
+#                 -> <data>/oracle-out-lfm2moe-a4/ (DAYS, ESTIMATED; resumable per scenario)
 # Golden runs are per prompt resumable (written into <tree>/oracle-out-lfm2moe*.partial/, moved when complete, the
 # golden file last). Exit 77 (SKIP) when the memory is short (box: MemAvailable < LFM_REF_MIN_GB - 8 tests, 64 real;
 # Mac: the container cap LFM_MEM_GB, default 40, below the floor - 8 tests, 36 real) or the snapshot is absent or
@@ -88,11 +88,11 @@ if [ "$dry" = 1 ]; then
   echo "  smaller) - the box (22 Haswell cores) is ESTIMATED at ~1-2x these:"
   echo "    lfm2moe_short (100 ids) 881 s (prompt 658 s, 32 steps 204 s)   hfcheck --layers 6 (2048 ids + 4 steps) 390 s"
   echo "    lfm2moe_4k 2923 s (prompt 2496 s whole, 32 steps 395 s)         ppl (46 + 55 + 4096 ids) 2905 s"
-  echo "    lfm2moe_agentic (12474 ids, 7 chunks of 2048): ~2.5-3.5 h ESTIMATED from the 4k prompt rate"
+  echo "    lfm2moe_agentic (12474 ids, 7 chunks of 2048) 12564 s (prompt 12277 s, 32 steps 265 s)"
   echo "    lfm2moe_32k (16 chunks of 2048, eager scores up to [32][2048][32768] fp32 ~8.6 GB a layer call):"
   echo "      ~6-8 h ESTIMATED - above the Mac's 6 h rule: a box run"
-  echo "    a4: 36 scenarios x up to 2048 new ids (reasoning first; ~10 s a decode step measured on the Mac at"
-  echo "      100 ids) ~1-3 days ESTIMATED even batched - a box run; tests (tiny models) ~15-25 min measured"
+  echo "    a4: 36 scenarios x up to 2048 new ids (reasoning first; 6.4 s a decode step measured on the Mac at"
+  echo "      100 ids, 12 s at 4k) ~1-3 days ESTIMATED even batched - a box run; tests (tiny models) ~15-25 min"
 fi
 if [ "$dry" != 1 ] && [ "${avail:-0}" -lt "$need" ]; then
   echo "SKIP_REASON lfm2moe_oracle: $memwhat ${avail} GB < $need GB (another job holds the RAM)"

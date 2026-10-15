@@ -267,6 +267,11 @@ def test_pythonic_quote_recovery_backtracks():
         "path": "/w/m.py", "content": "if __name__ == '__main__':\n    main()"}, 1)
     t = lfm("[bash(command='print('hi', x)', description='run')]")
     assert parse_first_call(t, "pythonic")[2] == {"command": "print('hi', x)", "description": "run"}
+    # two quoted strings inside one unescaped argument: two quotes stay in the string, the greedy skip order fails
+    t = lfm("[bash(command='print('a', 'b')', description='run')]")
+    assert parse_first_call(t, "pythonic")[2] == {"command": "print('a', 'b')", "description": "run"}
+    t = lfm("[bash(command='run(['ls', '-la'])')]")
+    assert parse_first_call(t, "pythonic")[2] == {"command": "run(['ls', '-la'])"}
 
 
 def test_pythonic_cut_block_keeps_closed_calls():

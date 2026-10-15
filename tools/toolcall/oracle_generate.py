@@ -4,7 +4,7 @@
     oracle_generate.py [--model kolibri|qwen4exp|muse|lfm2moe] [--form gptq|bf16] [--weights bf16|int4]
                        [--device cpu|cuda|xpu] <snapshot> <set dir> <out dir>
                        [--new-tokens N] [--batch 1|N|auto] [--resident none|auto] [--only a,b,..]
-                       [--expert-mask FILE] [--weights bf16|int4]
+                       [--expert-mask FILE]
 
 Builds transformers' Qwen3_5ForCausalLM the way tools/rotate/check_rotation.py
 does (text_config, load_sd in bf16, eager attention), then for every scenario

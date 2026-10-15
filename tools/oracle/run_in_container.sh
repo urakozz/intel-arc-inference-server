@@ -42,7 +42,7 @@ else
 fi
 
 env_flags=(-e HF_HUB_OFFLINE=1 -e HF_HOME=/scratch/hf -e HOME=/scratch -e PYTHONUNBUFFERED=1)
-# ORACLE_MEMORY (e.g. 40g; spec 23a): a container memory cap, for a run on the Mac (Docker Desktop's VM is shared);
+# ORACLE_MEMORY (e.g. 40g; specs 23a / 24a): a container memory cap, for a run on the Mac (Docker Desktop's VM is shared);
 # unset on the box, where the oracle takes what it needs (above).
 if [ -n "${ORACLE_MEMORY:-}" ]; then
   [[ "$ORACLE_MEMORY" =~ ^[0-9]+g$ ]] || { echo "ORACLE_MEMORY is <N>g (got $ORACLE_MEMORY)" >&2; exit 2; }
@@ -55,14 +55,6 @@ if [ -n "$ORACLE_THREADS" ]; then
   env_flags+=(-e "OMP_NUM_THREADS=$ORACLE_THREADS" -e "MKL_NUM_THREADS=$ORACLE_THREADS")
 fi
 
-# ORACLE_MEMORY (e.g. 40g) caps the container (--memory and --memory-swap): unset on the box (above),
-# set on the shared Mac (spec 24a: every oracle container there is capped, 40 GB).
-mem_flags=()
-if [ -n "${ORACLE_MEMORY:-}" ]; then
-  [[ "$ORACLE_MEMORY" =~ ^[0-9]+[gm]$ ]] || { echo "ORACLE_MEMORY=$ORACLE_MEMORY: <N>g or <N>m" >&2; exit 2; }
-  mem_flags=(--memory "$ORACLE_MEMORY" --memory-swap "$ORACLE_MEMORY")
-fi
-
-exec docker run --rm --entrypoint bash -u "$(id -u):$(id -g)" ${mem_flags[@]+"${mem_flags[@]}"} \
+exec docker run --rm --entrypoint bash -u "$(id -u):$(id -g)" \
   "${mounts[@]}" "${env_flags[@]}" "$IMAGE" -c \
   "set -euo pipefail; $resolve; $*"
