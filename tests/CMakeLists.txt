@@ -3606,3 +3606,15 @@ if(TARGET b70-serve)
   b70_serve_reject(cli_reject_muse_serve ${_muse_cfg} EXPECT "spec 23e")
 endif()
 # ==== Spec 23c: Muse-Glimmer decode ==== (end) ====
+
+# ==== Spec 23d: Muse-Glimmer prefill (labels muse;prefill) ==== (begin) ====
+# One delimited block for every 23d registration, after 23c's. Written blind on the Mac (box queue row 45): host tests
+# first (tools/mac_check.sh runs them), then the card's; the checkpoint ones SKIP (77) without the synthetic sets.
+# Task 1: the prefill attention's host twins (tests/kernels/muse_pf_ref.h) - the window over the 4096-slot ring, the
+# fp64 tile walk against the direct softmax, the masked first tile, row independence and splits, flash's fp32
+# arithmetic against fp64, the eager build's structure bitwise decode's eager row, the gate. Headers only.
+add_executable(muse_pf_ref_test kernels/muse_pf_ref_test.cc)
+target_include_directories(muse_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME muse_pf_ref_test COMMAND muse_pf_ref_test)
+set_tests_properties(muse_pf_ref_test PROPERTIES LABELS "muse;prefill" TIMEOUT 600)
+# ==== Spec 23d: Muse-Glimmer prefill ==== (end) ====
