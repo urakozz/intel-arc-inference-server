@@ -259,6 +259,24 @@ def test_pythonic_reasoning_and_no_call():
     assert parse_first_call(inside, "pythonic")[0] == "no call"
 
 
+def test_pythonic_quote_recovery_backtracks():
+    """Spec 24 §4.6: a quote followed by a closer that leaves the rest unparseable is kept in the string (code inside
+    a single-quoted argument)."""
+    t = lfm("[write(path='/w/m.py', content='if __name__ == '__main__':\\n    main()')]")
+    assert parse_first_call(t, "pythonic") == ("call", "write", {
+        "path": "/w/m.py", "content": "if __name__ == '__main__':\n    main()"}, 1)
+    t = lfm("[bash(command='print('hi', x)', description='run')]")
+    assert parse_first_call(t, "pythonic")[2] == {"command": "print('hi', x)", "description": "run"}
+
+
+def test_pythonic_cut_block_keeps_closed_calls():
+    """Spec 24 §4.6: generation ending inside a block emits every call whose ) closed; an unfinished first call is
+    incomplete."""
+    t = "ok.</think>" + S + "[read(filePath='/w/a'), edit(filePath='/w/a', oldString='half"
+    assert parse_first_call(t, "pythonic") == ("call", "read", {"filePath": "/w/a"}, 1)
+    assert parse_first_call("ok.</think>" + S + "[read(filePath='/w/a'", "pythonic")[0] == "incomplete"
+
+
 def test_pythonic_template_render_round_trip():
     """chat_template.jinja's format_arg_value, restated: a string argument single-quoted with backslash, quote,
     newline and CR escaped; lists / dicts through tojson; everything else str(). Reading it back gives the value."""

@@ -438,15 +438,17 @@ def test_layers_truncation():
 
 def test_port_equals_hf():
     """hfcheck on the tiny models: the restated ops chained = transformers' model, bitwise (logits, every h / mixer /
-    ffn row, the routes, the conv states) - prompt whole and in chunks, then cached steps."""
-    for snap, dtype in ((variant("pattern8"), BF), (variant("pattern8-fp32"), F32)):
+    ffn row, the routes, the conv states) - prompt whole and in chunks (bf16 also in chunks of 1, 2, 3 and 5: first
+    chunks shorter than the conv's 3 taps and every split offset - short_conv's state hand-off, Review Focus 3),
+    then cached steps."""
+    for snap, dtype, chunks in ((variant("pattern8"), BF, (0, 1, 2, 3, 5, 64)), (variant("pattern8-fp32"), F32, (0, 64))):
         cfg = ref.config(snap, dtype=dtype)
-        for chunk in (0, 64):
+        for chunk in chunks:
             (ht, htok), (pt, ptok) = ref.hfcheck_arms(snap, cfg, rand_ids(200, 12, 124000), 4, "bf16", chunk)
             assert htok == ptok
             bad = [k for k in sorted(ht) if k not in pt or not torch.equal(ht[k], pt[k])]
             assert not bad and set(ht) == set(pt), (snap, chunk, bad[:5], sorted(set(ht) ^ set(pt))[:5])
-        print(f"  port = transformers ({str(dtype)[6:]}): {len(ht)} tensors bitwise, whole and chunk 64")
+        print(f"  port = transformers ({str(dtype)[6:]}): {len(ht)} tensors bitwise, chunks {chunks} (0 = whole)")
 
 
 def test_expected_names():

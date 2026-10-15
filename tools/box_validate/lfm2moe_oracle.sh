@@ -28,9 +28,10 @@
 # RSS per prompt, runs nothing.
 # The Mac: ORACLE_IMAGE agnes-ref-img:latest, every container capped at LFM_MEM_GB (run_in_container.sh's
 # ORACLE_MEMORY), and the whole run holds flock(2) on LFM_LOCK (default /tmp/b70-cpu-model.lock: one model job on
-# the Mac's CPU at a time, across agents) - it waits for the lock first.
+# the Mac's CPU at a time, across agents) - it waits for the lock after the SKIP checks.
 # Env: SNAP_LFM2MOE (default models--LiquidAI--LFM2.5-24B-A2B), LFM_REF_MIN_GB, LFM_MEM_GB, LFM_GEN (32),
-#      LFM_PROMPTS (lfm2moe_short lfm2moe_4k lfm2moe_agentic lfm2moe_32k), LFM_LOCK, HF_HOME, ORACLE_IMAGE,
+#      LFM_PROMPTS (lfm2moe_short lfm2moe_4k lfm2moe_agentic lfm2moe_32k), LFM_LOCK, LFM_LOCK_HELD (1: the
+#      caller already holds LFM_LOCK - do not take it again), HF_HOME, ORACLE_IMAGE,
 #      ORACLE_THREADS.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
@@ -43,17 +44,6 @@ esac
 mac=0
 [ "$(uname -s)" = Darwin ] && mac=1
 dry="${DRY_RUN:-0}"
-
-# The Mac: one model job at a time on its CPU (the operator's rule) - re-run this script under flock(2).
-if [ $mac = 1 ] && [ "$dry" != 1 ] && [ -z "${LFM_LOCK_HELD:-}" ]; then
-  lock="${LFM_LOCK:-/tmp/b70-cpu-model.lock}"
-  echo "lfm2moe_oracle: waiting for $lock ($(date '+%F %T'))"
-  exec env LFM_LOCK_HELD=1 python3 -c 'import fcntl, subprocess, sys
-f = open(sys.argv[1], "a")
-fcntl.flock(f, fcntl.LOCK_EX)
-print("lfm2moe_oracle: holding the lock", flush=True)
-sys.exit(subprocess.call(sys.argv[2:]))' "$lock" "$PWD/tools/box_validate/lfm2moe_oracle.sh" "$@"
-fi
 
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
 gen="${LFM_GEN:-32}"
@@ -74,6 +64,11 @@ if [ "$mode" != tests ]; then
   if [ $mac = 1 ]; then need="${LFM_REF_MIN_GB:-36}"; else need="${LFM_REF_MIN_GB:-64}"; fi
 fi
 snapdir=$(ls -d "$hf/hub/$model"/snapshots/*/ 2>/dev/null | head -1)
+if [ "$mode" = export ]; then   # the export's own directory is the checkpoint (the bf16 original is not read)
+  model="$arg"
+  snapdir=""
+  [ -f "$arg/config.json" ] && snapdir="$arg"
+fi
 if [ $mac = 1 ]; then
   avail="${LFM_MEM_GB:-40}"
   memwhat="the container cap LFM_MEM_GB"
@@ -105,13 +100,26 @@ fi
 if [ "$dry" != 1 ] && [ -z "$snapdir" ]; then
   case "$mode" in
     tests) echo "SKIP_REASON lfm2moe_oracle: $TINY is not in $hf/hub (hf download yujiepan/lfm2-moe-tiny-random - 10 MB)" ;;
+    export) echo "SKIP_REASON lfm2moe_oracle: $arg has no config.json (24q's export, or 24b's synthetic checkpoint)" ;;
     *) echo "SKIP_REASON lfm2moe_oracle: $REAL is not in $hf/hub (hf download LiquidAI/LFM2.5-24B-A2B: 47.96 GB, df -h ~ first)" ;;
   esac
   exit 77
 fi
-if [ "$dry" != 1 ] && [ "$mode" != tests ] && ls "$hf/hub/$model/blobs/"*.incomplete > /dev/null 2>&1; then
+if [ "$dry" != 1 ] && [ "$mode" != tests ] && [ "$mode" != export ] && ls "$hf/hub/$model/blobs/"*.incomplete > /dev/null 2>&1; then
   echo "SKIP_REASON lfm2moe_oracle: the download of $model is not complete ($hf/hub/$model/blobs/*.incomplete)"
   exit 77
+fi
+# The Mac: one model job at a time on its CPU (the operator's rule) - re-run this script under flock(2), AFTER the
+# SKIP checks above (a run that would SKIP never waits for the lock). A caller that already holds the lock sets
+# LFM_LOCK_HELD=1 (flock(2) on a second open of the file would wait for itself).
+if [ $mac = 1 ] && [ "$dry" != 1 ] && [ -z "${LFM_LOCK_HELD:-}" ]; then
+  lock="${LFM_LOCK:-/tmp/b70-cpu-model.lock}"
+  echo "lfm2moe_oracle: waiting for $lock ($(date '+%F %T'))"
+  exec env LFM_LOCK_HELD=1 python3 -c 'import fcntl, subprocess, sys
+f = open(sys.argv[1], "a")
+fcntl.flock(f, fcntl.LOCK_EX)
+print("lfm2moe_oracle: holding the lock", flush=True)
+sys.exit(subprocess.call(sys.argv[2:]))' "$lock" "$PWD/tools/box_validate/lfm2moe_oracle.sh" "$@"
 fi
 rc=0
 
@@ -194,9 +202,6 @@ case "$mode" in
   export)
     name=$(basename "${arg%/}")
     [[ "$name" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "lfm2moe_oracle: export directory name $name" >&2; exit 2; }
-    if [ "$dry" != 1 ] && [ ! -f "$arg/config.json" ]; then
-      echo "SKIP_REASON lfm2moe_oracle: $arg has no config.json (24q's export, or 24b's synthetic checkpoint)"; exit 77
-    fi
     export ORACLE_SNAP
     ORACLE_SNAP="$(cd "$arg" 2>/dev/null && pwd || echo "$arg")"
     for p in $prompts; do
@@ -213,7 +218,9 @@ case "$mode" in
       if [ ! -s "$out/set/manifest.json" ]; then
         OUT="$out" FOREGROUND=1 tools/toolcall/a4_ref.sh lfm2moe set || rc=1
       fi
-      [ "$rc" = 0 ] && { OUT="$out" FOREGROUND=1 MEM="${LFM_MEM_GB:-40}g" tools/toolcall/a4_ref.sh lfm2moe ref || rc=1; }
+      # the Mac's container cap is the memory plan's; the box plans from MemAvailable (a4_ref.sh, no cap)
+      if [ $mac = 1 ]; then a4mem="${LFM_MEM_GB:-40}g"; else a4mem="${MEM:-}"; fi
+      [ "$rc" = 0 ] && { OUT="$out" FOREGROUND=1 MEM="$a4mem" tools/toolcall/a4_ref.sh lfm2moe ref || rc=1; }
       OUT="$out" tools/toolcall/a4_ref.sh lfm2moe status
     fi
     ;;
