@@ -26,6 +26,7 @@ derived / estimated / published.
 |---|---|
 | bf16 original | `meta-models/Muse-Glimmer-30B` @ `a4e59da5`: 2 shards, **1436 tensors** (627 text + 809 vision), files 59,553,435,272 B; data text **55,709,561,856 B**, vision 3,843,691,520 B; `config.json` saved by transformers 5.15.0.dev0, `dtype` bfloat16 |
 | GPTQ (served) | `Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ` @ `0987fe04`: 6 shards, **2684 tensors** (1875 text + 809 vision), files 22,804,270,776 B; data text **18,960,241,664 B**, vision 3,843,691,520 B; `config.json` saved by 5.15.0 |
+| int4, auto_round spelling (the Mac's) | `Vishva007/Muse-Glimmer-30B-W4A16-AutoRound` @ `ad7b9432` (downloaded whole, 2026-10-15): 6 shards, **2268 tensors** (1459 text + 809 vision), files 22,790,907,104 B; data text 18,946,929,664 B - the SAME export (the recipe's `format="auto_round,auto_gptq"`) without `g_idx`; `quantization_config` `quant_method` "auto-round", `packing_format` "auto_round:auto_gptq", bits 4, group_size 64, sym, iters 800, `autoround_version` 0.15.0, `block_name_to_quantize` "model.language_model.layers" (no `desc_act`, no `lm_head` key); its template is the older `114f55eb...` |
 | drafter | `meta-models/Muse-Glimmer-30B-assistant` @ `e8192f3a`: one `model.safetensors`, 58 tensors, data **5,111,970,304 B** (file 5,111,976,608 B) |
 | tiny | `optimum-intel-internal-testing/tiny-random-muse-glimmer` @ `cb70af19`: one shard, 123 tensors (50 text + 73 vision), 27.1 MB, bf16, **no `lm_head` tensor** (tied), the GPTQ repo's older 7167-byte template |
 
@@ -144,7 +145,17 @@ the original's 3 + 52 x 12 = **627**.
 | layer 30 `self_attn.o_proj` ([64, 832]) | yes | yes |
 | layer 51 `mlp.down_proj` ([312, 832]) | yes | yes |
 
-The full scan (all 416 linears, `muse_facts.py --scan-quant` / `muse_oracle.sh facts`) is the box's (Task 6).
+**The two Vishva007 repos are one export** (`muse_facts.py <bf16> <AutoRound snapshot> --twin <GPTQ snapshot>`,
+the -GPTQ shards read by HTTP range): layer 0 `k_proj` `qweight` / `scales` / `qzeros`, layer 30 `o_proj.scales`,
+layer 51 `down_proj.qzeros`, layer 30 `post_feedforward_layernorm`, the final `norm` - **7 / 7 byte-identical**
+(sha256); the -AutoRound repo ships no `g_idx` (0 / 416 tensors), the -GPTQ one 416. Its `quantization_config` is
+the spelling of our own Qwen3.8 / Ornith checkpoints (`quant_method` auto-round, `packing_format`
+auto_round:auto_gptq), which `loader::QuantConfig::parse` reads (`src/loader/quant.h:21-60`): either repo is
+accepted; `g_idx` is optional and, when shipped, must be `i // 64`.
+
+**The full scan** on the -AutoRound repo (all 416 linears, local reads, `muse_facts.py --scan-quant`): **every
+`qzeros` word is `0x77777777` - 196,591,616 B read, CLEAN** (no `g_idx` to check). The -GPTQ repo's 416 `g_idx`
+tensors (13.3 MB) are scanned where it is downloaded (`muse_oracle.sh facts`, queue row 42).
 
 ## Bytes (derived from the headers; spec 23 §2 re-derived)
 
@@ -217,6 +228,8 @@ These equal spec 23 §2's table.
 
 ## What this sheet changes in spec 23
 
+- §3 the checkpoint: EITHER Vishva007 repo (the same tensors; `-AutoRound` without `g_idx` is the one the Mac
+  downloaded and the reference reads; `g_idx` optional, checked `== i // 64` when present).
 - §3.1 "the seven linears" -> eight (the attention `gate_proj` is the eighth; §2's count already had it).
 - §1 vision "800 tensors" for the tower -> 806 (809 in all, as stated).
 - §8.1 "one `model.safetensors`, 5,111,970,304 B" is the DATA size; the file is 5,111,976,608 B.

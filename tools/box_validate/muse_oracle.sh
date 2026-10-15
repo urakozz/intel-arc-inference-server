@@ -33,7 +33,7 @@
 # DRY_RUN=1 prints the commands, the RAM floor and an ESTIMATED time per prompt, runs nothing.
 # Env: SNAP_MUSE (default: models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound when complete, else -AutoRound-GPTQ), SNAP_MUSE_BF16
 #      (models--meta-models--Muse-Glimmer-30B), SNAP_MUSE_ASSIST (models--meta-models--Muse-Glimmer-30B-assistant),
-#      MUSE_REF_MIN_GB, MUSE_GEN (32), HF_HOME, ORACLE_IMAGE, ORACLE_THREADS, ORACLE_MEMORY (the Mac: 40g).
+#      MUSE_PROMPTS (golden's prompts, default all six), MUSE_REF_MIN_GB, MUSE_GEN (32), HF_HOME, ORACLE_IMAGE, ORACLE_THREADS, ORACLE_MEMORY (the Mac: 40g).
 set -u
 cd "$(dirname "$0")/../.." || exit 2
 MODES="tests|tiny|facts|ppl|hfcheck|golden|golden-bf16|a4|gateq|taps"
@@ -48,7 +48,10 @@ TINY=models--optimum-intel-internal-testing--tiny-random-muse-glimmer
 GPTQ="${SNAP_MUSE:-}"      # the int4 checkpoint: set below (either Vishva007 spelling) unless given
 BF16="${SNAP_MUSE_BF16:-models--meta-models--Muse-Glimmer-30B}"
 ASSIST="${SNAP_MUSE_ASSIST:-models--meta-models--Muse-Glimmer-30B-assistant}"
-PROMPTS="muse_short_prose muse_short_code muse_4k muse_8k muse_32k muse_agentic"
+PROMPTS="${MUSE_PROMPTS:-muse_short_prose muse_short_code muse_4k muse_8k muse_32k muse_agentic}"   # golden's set
+for p in $PROMPTS; do
+  [ -s "tests/golden/prompts/$p.ids" ] || { echo "muse_oracle: MUSE_PROMPTS names $p: no tests/golden/prompts/$p.ids" >&2; exit 2; }
+done
 mac=0
 [ "$(uname -s)" = Darwin ] && mac=1
 if [ $mac = 1 ]; then
