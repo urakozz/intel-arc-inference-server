@@ -2925,6 +2925,150 @@ st_r43_load_real() {
 }
 
 # ======================================================================================
+row 44 "spec 23c - Muse-Glimmer-30B decode: the mg_* kernels (embed with its weight-less norm, the centered norms and the sandwich, q / k prep with the 3.87 scale and RoPE on sliding layers only, flash and eager attention over the 4096-slot ring or the NoPE cache with the output gate), MuseEngine on one card and two, b70-decode's dispatch and refusals, MG2-MG4 on decode, the speed rows (plan 23c)"
+rownote 44 "Written blind on the Mac: NO Muse binary has ever been compiled (ocloc is the box's) - r44.k1's kbins is the first build of the 19 new command lines (kernel_cmdlines +19 / -0 / ~0; four of them are gemv.cl / gemv_i8w.cl / gemv_bf16.cl / prep.cl at Muse's shapes, the GEMVs with PROVISIONAL cells copied from Qwen3.8's nearest: S2 / S4 / S8 / S4 L0). mg_attn.cl (flash: shuffles, sub-group reductions, 2D block reads) has never run anywhere; its block / wave / merge arithmetic was held to fp64 on the host (museref::attention_flash_sim, muse_ref_test). On the Mac's GPU every mg_prep kernel and mg_attn_eager ran bitwise the twin (muse_run, indicative)."
+rownote 44 "The twin (tests/kernels/muse_ref.h) is bitwise transformers 5.19.0's own modules at the real widths (muse_ref_test against tools/oracle/muse_fixture.py's dump): the embed / centered / final norms, the sandwich, q / k prep at 0 .. 131071, the gate, SiLU x up, eager attention's scores / probabilities / outputs, the RoPE table. MG2 on the card (r44.k1) holds every mg_* kernel bitwise to it (correctly rounded sqrt / divide on the B70) and flash to fp64 at cosine 0.99999."
+rownote 44 "Bars that are PROPOSED (set from the first run, printed): the partial forward's per-layer median cosine 0.9998 / min 0.99 (r44.partial). MG3 is the tie-aware token gate (docs/14 + spec 23 §1.1's capped-tie rule: a raw or a capped tie at the decision row is undetermined). The synthetic checkpoint's margins are SMALL (random weights; measured on the Mac's 2-layer synthetic: raw top-1 - top-2 gap ==0 in 5 / 74 rows, median 0.17): a determined-row failure on the int8-head arm there (r44.golden) is read against the bf16 arm before it is called a bug."
+rownote 44 "Data: r44.oracle_synth (opt-in, box CPU) writes oracle-out-muse-synth/golden/ from row 43's ckpt4 (muse_oracle.sh synth; ~15 min, ESTIMATED); r44.partial / r44.real / r44.speed need the int4 checkpoint (either Vishva007 spelling, 22.8 GB - row 42's download, data key muse_gptq) and row 42's golden sets (oracle-out-muse, data key oracle_muse; the long prompts are the box CPU's - row 42's r42.golden); r44.oracle_layers (opt-in) adds the truncated reference the partial forward's head is graded against."
+rownote 44 "If determined rows fail under flash, the first suspect is flash's fp32 probabilities against the reference's eager bf16 chain: r44.golden_eager runs B70_MUSE_ATTN=eager (681 launches at 52 layers against flash's 733); spec 18 §10.1's rule decides the default. Two cards (r44.pp) need row 22's hand-offs proven first."
+rownote 44 "Hand back: the kbins list, muse_kernels_test's lines (bitwise / cosine), muse_decode_test's plan / launches / memory lines, every MG3 gate line and the per-layer tap cosines, muse_pp_test's lines, the partial forward's per-layer table, the speed rows (t/s, ms/token, launches, each card's memory line) and RATIO lines; then 23c's follow-up commit: the {S, layout} sweep's winners into model::MuseGlimmerDesc and kernels::muse together (r44.sweeps)."
+stage r44.k0 44 default cpu - g0.sha,g0.bitwise,g0.suite "MG0: no existing .cl edited (kernel_cmdlines +19 / -0 / ~0), every pre-existing binary identical, the suite (G0); 23c's edits to shared files are b70-decode's dispatch (before the Qwen rules), b70-serve's refusal and add_gemv_variant's four new PROVISIONAL rows"
+st_r44_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r44.host 44 default cpu - - "host: muse_ref_test (the twin bitwise against transformers 5.19.0's modules; flash's arithmetic against fp64), muse_variant_names_test (every name the capture binds is built, nothing built is unbound), muse_plan_test (733 / 681 launches, the decode scratch, 131072 on one card with it reserved)"
+st_r44_host() {
+  run_tests '^(muse_ref_test|muse_variant_names_test|muse_plan_test)$'
+  jgrab host '^muse_(ref|variant_names|plan)_test$' 'OK|differ|cosine|launches|decode scratch|bound names'
+  finish
+}
+stage r44.k1 44 default gpu - - "MG2, no checkpoint: the 19 new binaries built (kbins: the first ocloc build of every mg_* kernel) and muse_kernels_test - mg_embed (rows 7 / 202047, the placeholders' row 0), mg_norm / mg_final_norm, prep_res_fold _Z G26 + mg_post_add, mg_attn_prep (sliding 37 / 4097, full 0 / 100000: NoPE position-free), mg_silu_mul - all bitwise museref; eager attention bitwise at 5 / 2046 / 2047 / 2048 / 4095 / 4096 / 4097 / 9000 sliding and 3000 / 30000 full; flash against fp64 at cosine 0.99999 (the same rows, full 20000); flash at 9000 == 4904 (the same ring rows)"
+st_r44_k1() {
+  kbins mg_embed_M1_K6656_G26_V202048 mg_norm_M1_K6656_G26_W26 mg_post_add_M1_K6656_G26 \
+    mg_attn_prep_M1_N8704_S2_Q32KV2_R4096 mg_attn_prep_M1_N8704_S2_Q32KV2_F mg_silu_mul_M1_I19968_S8 \
+    mg_attn_M1_T64_Q32KV2_W2048_R4096 mg_attn_M1_T64_Q32KV2_F mg_attn_eager_M1_T64_Q32KV2_W2048_R4096 \
+    mg_attn_eager_M1_T64_Q32KV2_F prep_res_fold_M1_K6656_SP4_G26_Z gemv_M1_K6656_N8704_S2_L0 gemv_M1_K4096_N6656_S4_L0 \
+    gemv_M1_K6656_N39936_S8_L0 gemv_M1_K19968_N6656_S4_L0 gemv_i8w_M1_K6656_N202048 gemv_bf16_M1_K6656_N202048 \
+    mg_argmax_stage1_M1_N202048_V202048 mg_argmax_stage2_N202048
+  run_tests '^muse_kernels_test$' muse
+  jgrab k1 '^muse_kernels_test$' 'bitwise|cosine|differ|OK'
+  finish
+}
+stage r44.reject 44 default gpu - - "the refusals before the device (b70-decode on tests/model/muse_glimmer: config.json only): cli_reject_muse_* - --prefill / --prefill-length naming spec 23d, --mtp, --spec naming 23f, --kv-cache int8 (decision 8), --max-len 262144 (decision 6), --device with --pp 2; b70-serve naming spec 23e. Under the GPU lock (Kolibri's r24.reject): a refusal that regressed would open the device"
+st_r44_reject() {
+  run_tests '^cli_reject_muse_' '' '' 'ZE_AFFINITY_MASK=0,1'
+  finish
+}
+stage r44.oracle_synth 44 optin cpu oracle_image,oracle_muse_synth - "the synthetic golden sets on the box CPU: muse_oracle.sh synth - muse_ref.py run --gen 32 on row 43's ckpt4 over muse_short_prose and muse_4k -> \$DATA/oracle-out-muse-synth/golden (resumable; MemAvailable >= 24 GB; ~15 min ESTIMATED); the cap_tie / gap lines; then re-links oracle-out*"
+st_r44_oracle_synth() {
+  chk "tools/box_validate/muse_oracle.sh $DATA synth" "the Muse-Glimmer synthetic reference runs"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_oracle_muse_synth' $STATE/have.env"
+  grab_all gap 'cap_tie|top-1 - top-2 gap|ppl|^wall' 12
+  finish
+}
+stage r44.k3 44 default gpu oracle_muse_synth r44.k1 "MG4 on one card: muse_decode_synth_test - plan == allocation (weights, KV, rings, the decode scratch), 1 + 4 x 14 + 4 = 61 launches (733 at 52 layers), two runs bitwise (tokens, logits, full KV, rings), the ring at 4200 holds 105..4200 at rows p & 4095, --layers 2 (development mode) bitwise the whole model's first two layers"
+st_r44_k3() {
+  run_tests '^muse_decode_synth_test$'
+  jgrab k3 '^muse_decode_synth_test$' 'plan == allocation|launches|MG4|ring:|--layers 2|memory|OK'
+  finish
+}
+stage r44.golden 44 default gpu oracle_muse_synth_golden r44.k3 "MG3 on the synthetic checkpoint: muse_golden_synth_test (int8 head, flash) and _bf16_test - the tie-aware token gate over muse_short_prose / muse_4k x 32 (raw or capped ties undetermined), the per-layer residual taps against H.L*, the raw logits' cosine"
+st_r44_golden() {
+  run_tests '^muse_golden_synth(_bf16)?_test$'
+  jgrab golden '^muse_golden_synth' 'gate:|tap|step [0-9]+:|OK'
+  finish
+}
+stage r44.golden_eager 44 default gpu oracle_muse_synth_golden r44.k3 "MG3 through the EAGER attention (B70_MUSE_ATTN=eager, 1 + 4 x 13 + 4 = 57 launches): muse_golden_synth_eager_test (bf16 head: the reference's chain end to end) - compare with r44.golden"
+st_r44_golden_eager() {
+  run_tests '^muse_golden_synth_eager_test$'
+  jgrab golden-eager '^muse_golden_synth_eager_test$' 'gate:|tap|step [0-9]+:|OK'
+  finish
+}
+stage r44.pp 44 default gpu oracle_muse_synth r44.k3,r22.p1 "two cards (spec 16b's pieces): muse_pp_test - --pp 1 against --pp 2 --pipeline-split 2 on the synthetic checkpoint under copy and peer: tokens, logits, full KV and rings bitwise, both Control blocks equal; P4 (a lost hand-off throws within 5 s naming device 1, reset recovers); replay; then MG3 across the split (muse_golden_synth_pp2{,_peer}_test, SKIP without the golden set)"
+st_r44_pp() {
+  run_tests '^(muse_pp_test|muse_golden_synth_pp2(_peer)?_test)$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab pp '^muse_(pp|golden_synth_pp2)' 'device|P4|tokens|gate:|OK'
+  finish
+}
+stage r44.cli 44 default gpu oracle_muse_synth r44.pp "CLI: b70-decode <synthetic ckpt4> --ids muse_short_prose.ids --n 32 on one card (the default) against --pp 2 (copy, peer, --pipeline-split 2): the same ids; --max-len auto on one card plans 131072; the plan, launches and memory lines"
+st_r44_cli() {
+  local ck="oracle-out-muse-synth/ckpt4" ids="tests/golden/prompts/muse_short_prose.ids" h
+  chk "build/src/cli/b70-decode $ck --ids $ids --n 32 > $STATE/r44-one.ids" "one card"
+  for h in copy peer; do
+    chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --pp 2 --ids $ids --n 32 --pipeline-handoff $h > $STATE/r44-$h.ids && cmp $STATE/r44-one.ids $STATE/r44-$h.ids" \
+      "--pp 2, $h: the one-card ids"
+  done
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --pp 2 --ids $ids --n 32 --pipeline-split 2 > $STATE/r44-s2.ids && cmp $STATE/r44-one.ids $STATE/r44-s2.ids" \
+    "--pipeline-split 2: the one-card ids"
+  chk "build/src/cli/b70-decode $ck --ids $ids --n 8 --max-len auto > /dev/null" "--max-len auto on one card"
+  grab_all plan 'max_len: |split: |Muse-Glimmer plan at|^engine:' 8
+  grab_all memory '^memory' 6
+  finish
+}
+stage r44.oracle_layers 44 optin cpu oracle_image,muse_gptq - "the truncated reference for the partial forward's head: muse_oracle.sh real-layers (MUSE_LAYERS=8) - muse_ref.py run --layers 8 on the int4 checkpoint over muse_short_prose -> \$DATA/oracle-out-muse-L8 (MemAvailable >= 40 GB; minutes)"
+st_r44_oracle_layers() {
+  chk "MUSE_LAYERS=8 tools/box_validate/muse_oracle.sh $DATA real-layers" "the 8-layer reference"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  grab_all layers 'cap_tie|top-1 - top-2 gap|^wall' 6
+  finish
+}
+stage r44.partial 44 default gpu muse_gptq,oracle_muse r44.k3 "development mode on the real checkpoint, one card: muse_partial_test / _eager (--layers 8) - every layer's residual tap against 23a's H.L* over the golden prompts (median cosine >= 0.9998, min >= 0.99, PROPOSED - printed per layer); the head against oracle-out-muse-L8 when r44.oracle_layers made it"
+st_r44_partial() {
+  run_tests '^muse_partial(_eager)?_test$'
+  jgrab partial '^muse_partial' 'L[0-9]+ |head|teacher-forced|OK'
+  finish
+}
+stage r44.real 44 default gpu muse_gptq,oracle_muse r44.partial "MG3 on the REAL checkpoint (52 layers, one card: it fits): muse_golden_real_test (int8 head), _bf16, _eager over every golden prompt row 42 made (short prose / code, 4k, 8k, 32k, agentic); then _pp2 (two cards, copy; SKIP with one)"
+st_r44_real() {
+  x "free -g | head -2"
+  run_tests '^muse_golden_real(_bf16|_eager)?_test$'
+  run_tests '^muse_golden_real_pp2_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab real '^muse_golden_real' 'gate:|tap|step [0-9]+:|launches|OK'
+  finish
+}
+stage r44.speed 44 optin gpu muse_gptq r44.real "decode speed (Task 7), --max-len 131072, tg 256, interleaved, median of 3: depth 4096 - int8 head (default), bf16 head, eager, --pp 2 copy and peer; depth 32768 - int8, bf16, --pp 2 copy. The prompt is ingested one replay per id until 23d's prefill (~30 ms an id, ESTIMATED: ~3 h for the stage). Launches per token, each card's memory; against spec 23 §2's roofline (39.7 / 38.7 t/s at 590 GB/s; ~30.8 at Qwen3.8's 77.6 %)"
+st_r44_speed() {
+  idle before
+  local m="${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound}" k="ZE_AFFINITY_MASK=0,1" arms="" ratios=""
+  arms="$arms d4096 '$(bench_cmd "$m" --depth 4096 --tg 256 --max-len 131072)'"
+  arms="$arms d4096-bf16 '$(bench_cmd "$m" --depth 4096 --tg 256 --max-len 131072 --lm-head bf16)'"
+  arms="$arms d4096-eager 'B70_MUSE_ATTN=eager $(bench_cmd "$m" --depth 4096 --tg 256 --max-len 131072)'"
+  arms="$arms d4096-pp2 '$k $(bench_cmd "$m" --pp 2 --depth 4096 --tg 256 --max-len 131072)'"
+  arms="$arms d4096-pp2-peer '$k $(bench_cmd "$m" --pp 2 --depth 4096 --tg 256 --max-len 131072 --pipeline-handoff peer)'"
+  arms="$arms d32768 '$(bench_cmd "$m" --depth 32768 --tg 256 --max-len 131072)'"
+  arms="$arms d32768-bf16 '$(bench_cmd "$m" --depth 32768 --tg 256 --max-len 131072 --lm-head bf16)'"
+  arms="$arms d32768-pp2 '$k $(bench_cmd "$m" --pp 2 --depth 32768 --tg 256 --max-len 131072)'"
+  ratios="--ratio d4096-bf16/d4096 --ratio d4096-eager/d4096 --ratio d4096-pp2/d4096 --ratio d4096-pp2-peer/d4096-pp2"
+  ratios="$ratios --ratio d32768-bf16/d32768 --ratio d32768-pp2/d32768 --ratio d32768/d4096"
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 $ratios --$arms" "the Muse-Glimmer decode arms"
+  idle after
+  grab_all memory '^memory' 8
+  grab_all launches 'launches a token' 4
+  grab_all ratio '^RATIO '
+  grab_all idle '^IDLE '
+  finish
+}
+stage r44.speed_long 44 optin gpu muse_gptq r44.speed "decode at the full context: one card, int8 head, depth 130816 + tg 256 = 131072 (decision 6's cap; --max-len 131072), ONE run (the ingest is ~130k replays until 23d's prefill: ~70 min ESTIMATED) - t/s against spec 23 §2's 35.7 t/s roofline at 131072"
+st_r44_speed_long() {
+  idle before
+  local m="${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound}"
+  chk "$(bench_cmd "$m" --depth 130816 --tg 256 --max-len 131072) | tee $STATE/$STAGE.rows" "depth 130816 + 256"
+  idle after
+  grab_all row '^\| b70-decode' 2
+  grab_all memory '^memory' 2
+  finish
+}
+stage r44.sweeps 44 manual - muse_gptq - "Task 7's sweep: the four int4 GEMVs' {S, layout} (q||gate||k||v 6656x8704, o_proj 4096x6656, gate||up 6656x39936, down 19968x6656: S 1 / 2 / 4 (8), L 0 / 1) - the winners replace the PROVISIONAL S2 / S4 / S8 / S4 L0 in a follow-up commit"
+st_r44_sweeps() {
+  say "# {S, layout} of 6656x8704, 4096x6656, 6656x39936, 19968x6656 with their GEMV_* defines (probe_gemv rows, spec 14 step 4's method: interleaved pairs after a warm-up)"
+  say "# model::MuseGlimmerDesc's qgkv_s / oproj_s / gate_up_s / down_s, kernels::muse::kQgkvS.. and add_gemv_variant's Spec 23c rows move together (muse_variant_names_test holds them)"
+  say "# then ZE_AFFINITY_MASK=0 build/src/cli/b70-decode \${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound} --bench --depth 4096 --tg 256 per cell set"
+  say "# record: docs/BENCHMARKS.md 'Muse-Glimmer-30B (spec 23)'"
+}
+
+# ======================================================================================
 row 48 "spec 24a - LFM2.5-24B-A2B (lfm2_moe): the facts, the CPU reference (F1), golden sets, the A4 reference (plan 24a)"
 rownote 48 "Download first: hf download LiquidAI/LFM2.5-24B-A2B (47.96 GB; df -h ~ first; MemAvailable >= 64 GB for the real-weight stages)."
 rownote 48 "Box CPU only, no card: nothing here takes the GPU lock. Every stage runs tools/box_validate/lfm2moe_oracle.sh in the oracle image with transformers 5.19.0 from <tree>/oracle-out-q4exp-site (tools/oracle/qwen4exp_env.sh; the image is never changed). r48.host needs the tiny model (hf download yujiepan/lfm2-moe-tiny-random, 10 MB); the real stages SKIP 77 'missing data' without the bf16 original, or while it is still downloading."
