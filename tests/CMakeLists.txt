@@ -3666,6 +3666,17 @@ if(B70_MUSE)
   add_test(NAME prefill_split_muse_test COMMAND muse_prefill_test ${B70_MUSE_SYNTH_DIR}/ckpt4 ${_muse_prompts} split)
   set_tests_properties(muse_prefill_synth_test muse_prefill_synth_bf16_test muse_prefill_synth_eager_test
     prefill_split_muse_test PROPERTIES LABELS "checkpoint;muse;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # Task 4, two cards (spec 20 §12's sequential chunk hand-off): one card against --pp 2 --pipeline-split 2 bitwise on
+  # the synthetic checkpoint (one prefill, replay, a split continuation, chunks of 64) with P4 on the chunk hand-off;
+  # the split test across two cards; the eager form across two cards.
+  add_test(NAME muse_prefill_pp_test COMMAND muse_prefill_test ${B70_MUSE_SYNTH_DIR}/ckpt4 ${_muse_prompts} pp pp2:2)
+  add_test(NAME muse_prefill_pp_eager_test COMMAND muse_prefill_test ${B70_MUSE_SYNTH_DIR}/ckpt4 ${_muse_prompts} pp
+    pp2:2)
+  set_tests_properties(muse_prefill_pp_eager_test PROPERTIES ENVIRONMENT "B70_MUSE_ATTN=eager")
+  add_test(NAME prefill_split_muse_pp_test COMMAND muse_prefill_test ${B70_MUSE_SYNTH_DIR}/ckpt4 ${_muse_prompts} split
+    pp2:2)
+  set_tests_properties(muse_prefill_pp_test muse_prefill_pp_eager_test prefill_split_muse_pp_test
+    PROPERTIES LABELS "checkpoint;muse;prefill;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # Task 3: b70-decode's Muse prefill backends and chunk, before the device (tests/model/muse_glimmer: config.json only).
 b70_cli_reject(cli_reject_muse_prefill_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer --bench --prefill-length 64
