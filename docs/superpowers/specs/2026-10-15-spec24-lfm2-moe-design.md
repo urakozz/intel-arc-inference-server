@@ -558,3 +558,72 @@ export replaces RTN in every real-weight gate when it exists (each row has an `o
   (spec 19e) needs M-row verify lists for this family - a follow-up after 24e.
 - Batching (spec 13) - the spare ~13 GB a card is where it would live.
 - Tensor parallel.
+
+## 12. 24a as built (2026-10-15; the Mac, the tiny models AND the real bf16 weights)
+
+Plan: `docs/superpowers/plans/2026-10-15-spec24a-lfm2moe-facts-and-reference.md`, branch
+`spec24a-lfm2moe-reference`. Facts: `docs/probe-lfm2moe-2026-10-15.md`. Box validation: queue row 48 (box CPU
+only). Every number is measured on the Mac (`agnes-ref-img`, torch 2.14.1+cpu, the 5.19.0 site; real weights in a
+40 GB container, 12 threads, under the one-model-job lock) unless marked.
+
+- **What 5.19.0 runs:** the `grouped_mm` experts implementation (§2.4's combine: `t_k` rounded, the k products
+  summed in fp32 in slot order, one rounding - the engine copies this one; the eager fallback differs on every
+  row tested); the torch conv functions (`causal_conv1d` absent); `expert_bias` stays fp32 under bf16; the head is
+  the embedding's storage. sdpa differs from eager by 2.9e-3 in the logits (tiny, bf16) - never used.
+- **The conv's accumulation (§2.5's open point):** fp32 taps ascending with one rounding is torch's bf16 depthwise
+  `conv1d` **exactly** on 100,000 rows x 2048 channels (0 rows differ; descending 72, a bf16 accumulator 99,900):
+  §4.1's `lfm_conv` can be held bitwise.
+- **torch's tie order:** at the 4th / 5th of 64 the lower id wins 26 / 50 (batched 25 / 50) - not the lower id;
+  exact ties are undetermined (`route.gap == 0`). On the real prompts **no** exact tie occurred (0 of 637,108
+  (row, layer)).
+- **F1 on the tiny models (all bitwise):** the streamed reference = transformers un-streamed on `pattern8` (the
+  real first eight layers at head_dim 64, biased routers) and the downloaded tiny, bf16 and fp32, 40 / 600 ids +
+  8 cached steps; chunks 1 / 2 / 3 / 64 / 255 and splits at 1..5 = one forward (conv states too); the port (the
+  restated ops chained) = transformers at chunks 0 / 1 / 2 / 3 / 5 / 64; one test per §2 trap (`test_lfm2moe_ref.py`,
+  14 tests; `test_lfm2moe_make_tiny.py` 4; the toolcall tests 28 + 7 + the batched reference).
+- **F1 on the real weights:** `hfcheck --layers 6` (2048 ids of `lfm2moe_4k` + 4 cached steps, transformers'
+  model against the port on the bf16 original): **BITWISE** over 40 tensors (logits, every h / mixer / ffn row,
+  the routes, the conv states), 390 s. Golden sets on the bf16 original: `lfm2moe_short` (100 ids, 881 s: prompt
+  658 s, 32 steps 204 s), `lfm2moe_4k` (4096 ids whole, 2923 s: prompt 2496 s, steps 395 s), `lfm2moe_agentic`
+  (12474 ids in chunks of 2048, 12,564 s: prompt 12,277 s, steps 265 s; py-spy: the eager attention's bf16 P V
+  matmul dominates the long chunks, ~1 core busy). `peak RSS` prints 39.9 GiB everywhere: `ru_maxrss` counts
+  the mmap'd shard pages under the 40 GB cap. `lfm2moe_32k` and the A4 reference were NOT run on the Mac (32k
+  ESTIMATED 6-8 h from these rates, A4 days - above the operator's 6 h rule): the box's (row 48).
+- **The perplexities (a departure from the plan's "below 20 on prose"):** prose 53.2 (45 tokens), code 2.54 (54),
+  the agentic transcript's first 4096 ids 290. Investigated, not an input bug: BOS once and the ids
+  `apply_chat_template`'s; the top-5 predictions are coherent (after "The harbour at dawn was": " still",
+  " mist", " quiet"); the short set's greedy continuation re-writes the `clamp` function; `lfm2moe_4k` (long.txt
+  repeated) has ppl **1.19** (copying across 4096 positions works); the agentic set's greedy continuation is "The
+  test passes. The user asked to "run the planner's test" — done. The comment edit is complete. Let me verify the
+  final state of the". Split by the role of the predicted token (agentic golden, 12,473 rows): **assistant turns
+  6.9**, tool results 88, user 217, system (incl. the tool list JSON) 4,190, the turn markup (`<|im_start|>` /
+  role words) ~4e5 - prose 53 is dominated by the first tokens (" harbour" at position 1: 16.5 nats). The model
+  scores prompt-side text badly (post-trained on assistant turns); the stage's bound is now code < 10, prose and
+  agentic recorded. 4k's 4,096 rows still show a few copied tokens at 11-16 nats (e.g. " ferry" in the 20th
+  repetition) - recorded; whether vLLM's / LiquidAI's own forward agrees on such rows is for 24e / 24q to compare
+  (they run vLLM where it serves `lfm2_moe`).
+- **The routing gaps (B70_LFM_TIE_TOL's evidence):** the 4th / 5th `sel` gap over every (row, layer):
+
+  | set | (row, layer) | == 0 | < 1e-4 | < 1e-3 | < 1e-2 | min / p0.01% / p0.1% / p1% / median |
+  |---|---:|---:|---:|---:|---:|---|
+  | lfm2moe_short | 5,016 | 0 | 28 | 267 | 2,056 | 2.98e-7 / 5.05e-6 / 1.39e-5 / 1.78e-4 / 0.0133 |
+  | lfm2moe_4k | 156,864 | 0 | 985 | 9,605 | 70,373 | 4.47e-8 / 1.63e-6 / 1.53e-5 / 1.60e-4 / 0.0118 |
+  | lfm2moe_agentic | 475,228 | 0 | 3,172 | 31,044 | 216,167 | 7.45e-8 / 1.22e-6 / 1.48e-5 / 1.51e-4 / 0.0116 |
+
+  Per layer (agentic): < 1e-3 on 4.3 % (L21) .. 8.7 % (L36) of rows, median 0.0084 (L36) .. 0.0185 (L21). The gap is
+  in `sel` units: `s_b` is bf16 (one ulp 2^-9 .. 2^-8 for s in [0.25, 1)), so gaps below ~1e-3 come from the fp32
+  bias, and an engine whose router logit differs from torch's by one bf16 ulp moves `s_b` by up to ~4e-3 (|l| < 4,
+  derived). PROPOSED for 24c / 24d: `B70_LFM_TIE_TOL` = 4e-3 (one bf16 ulp of the logit carried through the
+  sigmoid; ~15-20 % of (row, layer) fall under it, ESTIMATED between the 1e-3 and 1e-2 columns) unless 24c's route
+  kernel reproduces torch's `l_b` bitwise, in which case the 1e-3 PROPOSAL stands (6.5 % of (row, layer)).
+- **Departures from the plan:** the 5.19.0 site from host-downloaded wheels (pip in the container had no network);
+  fp32 cached decode vs one uncached forward is NOT bitwise in transformers itself (1.8e-7, `conv.in_proj` at M 1 vs
+  M 32) - recorded, F1 compares on the same path; the int4 tiny loads through its dequantised twin (no auto-round in
+  the image); the A4 set renders key-sorted (b70-serve's order) and `make_set --from` takes a 600-id floor for
+  LFM2 (748..2460 ids); `test_oracle_batched test_lfm2moe` runs on the downloaded tiny (pattern8's greedy repeats);
+  4k / 32k are BOS + long.txt joined by blank lines (not mk_long_ids's whole-tree text); `score.py --format
+  pythonic` implements §4.6's quote recovery (one backtrack per quote) and counts the calls that closed in a block
+  cut by the end of generation; `run_in_container.sh` gained `ORACLE_MEMORY` (the Mac's container cap) and
+  `lfm2moe_oracle.sh` runs on the Mac under the CPU lock.
+- **Pending (box CPU, row 48):** the five test files in the box's image (another torch build), `lfm2moe_32k`, the
+  A4 reference (2048 new ids, reasoning first; `score.py --format pythonic`, 0 parse failures the bar).
