@@ -82,10 +82,34 @@
   },
   {
    "role": "assistant",
-   "content": "Every user goes through kol_layer_bytes: the planner (kolibri_sizes.cc:175), the device total and the loader's check (kolibri1_loader.cc:220). I'll say so in the comment.",
+   "content": "Two call sites in the planner's .cc. Let me see how it uses them.",
    "tool_calls": [
     {
      "id": "call_4",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/src/runtime/kolibri/kolibri_sizes.cc",
+       "offset": 150,
+       "limit": 120
+      }
+     }
+    }
+   ],
+   "reasoning_content": "kolibri_sizes.cc:175 takes kol_layer_bytes(d).total() and :211 kol_device_weight_bytes. I want to see whether the per-device plan adds anything on top that the loader would not count."
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_4",
+   "content": "<file>\n00150| PpLandingLayout pf_landing_layout(const model::Kolibri1Desc& d) {\n00151|   return pp_landing_layout(size_t(kPfC) * d.hidden * 2, size_t(kNormG) * kPfC * 4);\n00152| }\n00153| size_t pf_link_bytes(const model::Kolibri1Desc& d, uint32_t dev) {\n00154|   return dev == 0 ? kPpStateWords * 4 : pf_landing_layout(d).total + kPpStateWords * 4;\n00155| }\n00156| \n00157| size_t prefill_device_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev) {\n00158|   size_t slabs = 0;\n00159|   for (model::KolLinearId id : d.layer_linears()) slabs += pf_slabs(d.linear(id).shape.N);\n00160|   static_assert(kSlabLinears == 2, \"q||k||v and o_proj\");\n00161|   // norm, 2 x slabs, prep, flash, fold _Z + post_add, norm, router, route, sort, gather, gate||up and\n00162|   // down batches x 2, combine, fold SP0 + post_add\n00163|   const size_t per_layer = 1 + 2 * slabs + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 1 + 2 * (pf_batches_gu(d) + pf_batches_dn(d)) + 1 + 2;\n00164|   size_t n = size_t(p.count(dev)) * per_layer;\n00165|   if (dev == 0) n += 2;   // pf_embed_gather, pf_res_fold SP0\n00166|   return n;\n00167| }\n00168| size_t prefill_chunk_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p) {\n00169|   size_t n = 0;\n00170|   for (uint32_t dev = 0; dev < p.devices; ++dev) n += prefill_device_launches(d, p, dev);\n00171|   return n;\n00172| }\n00173| \n00174| std::vector<size_t> pp_layer_bytes(const model::Kolibri1Desc& d, uint32_t max_len) {\n00175|   const size_t w = loader::kol_layer_bytes(d).total();\n00176|   std::vector<size_t> v(d.layers);\n00177|   for (uint32_t l = 0; l < d.layers; ++l)\n00178|     v[l] = w + (d.is_sliding(l) ? ring_bytes_per_layer(d) : full_bytes_per_layer(d, max_len));\n00179|   return v;\n00180| }\n00181| \n00182| namespace {\n00183| size_t fixed_state(const model::Kolibri1Desc& d, uint32_t max_len, KolAttn a) {\n00184|   return sizeof(Control) + scratch_sizes(d).total() + attn_scores_bytes(d, max_len, a);\n00185| }\n00186| // Spec 20d: a device's prefill scratch and its prefill link (two devices), when the run prefills.\n00187| size_t prefill_state(const model::Kolibri1Desc& d, uint32_t devices, uint32_t dev, bool prefill) {\n00188|   if (!prefill) return 0;\n00189|   return prefill_sizes(d).total() + (devices > 1 ? pf_link_bytes(d, dev) : 0);\n00190| }\n00191| }  // namespace\n00192| \n00193| PpBalance pp_split(const model::Kolibri1Desc& d, uint32_t max_len, bool int8_head, PpHandoff h, KolAttn a,\n00194|                    bool prefill) {\n00195|   (void)h;   // both hand-offs allocate the same buffers (PipelineLink: the event is not device memory)\n00196|   if (d.layers < 2) throw std::invalid_argument(d.name + \": \" + std::to_string(d.layers) + \" layer(s), nothing to split\");\n00197|   const size_t rope = d.rope_table_bytes(max_len), state = fixed_state(d, max_len, a);\n00198|   const size_t dev0 = loader::kol_embed_bytes(d) + rope + state + link_bytes(d, 0) + prefill_state(d, 2, 0, prefill);\n00199|   const size_t dev1 = loader::kol_final_norm_bytes(d) + loader::kol_lm_head_bytes(d, int8_head) + rope + state +\n00200|                       link_bytes(d, 1) + prefill_state(d, 2, 1, prefill);\n00201|   return pp_balance(pp_layer_bytes(d, max_len), dev0, dev1);\n00202| }\n00203| \n00204| std::vector<DevicePlan> plan(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t max_len,\n00205|                              bool int8_head, bool debug_tap, KolAttn a, bool prefill) {\n00206|   model::validate(p, d);\n00207|   std::vector<DevicePlan> out(p.devices);\n00208|   for (uint32_t dev = 0; dev < p.devices; ++dev) {\n00209|     DevicePlan& dp = out[dev];\n00210|     dp.device = dev;\n00211|     dp.weights = loader::kol_device_weight_bytes(d, p, dev, int8_head);\n00212|     dp.rope = loader::kol_device_has_sliding(d, p, dev) ? d.rope_table_bytes(max_len) : 0;\n00213|     dp.model = dp.weights + dp.rope;\n00214|     const PersistentSizes ps = persistent_sizes(d, p, dev, max_len);\n00215|     dp.full_kv = ps.full_k + ps.full_v;\n00216|     dp.rings = ps.ring_k + ps.ring_v;\n00217|     dp.kv = ps.kv();\n00218|     dp.link = p.devices > 1 ? link_bytes(d, dev) : 0;\n00219|     dp.decode_state = ps.control + scratch_sizes(d).total() + attn_scores_bytes(d, max_len, a) +\n00220|                       (debug_tap ? tap_bytes(d) : 0) + dp.link;\n00221|     dp.prefill_scratch = prefill_state(d, p.devices, dev, prefill);\n00222|   }\n00223|   return out;\n00224| }\n00225| \n00226| uint32_t max_len_that_fits(const model::Kolibri1Desc& d, const model::KolPlacement& p, bool int8_head,\n00227|                            const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap,\n00228|                            bool prefill) {\n00229|   if (cap == 0 || cap > d.trained_max_len) cap = d.trained_max_len;\n00230|   if (cap < kMaxLenQuantum)\n00231|     throw std::invalid_argument(\"kolibri::max_len_that_fits: the cap \" + std::to_string(cap) + \" is below one \" +\n00232|                                 std::to_string(kMaxLenQuantum) + \"-position quantum\");\n00233|   const auto fits = [&](uint32_t len) {\n00234|     const std::vector<DevicePlan> pl = plan(d, p, len, int8_head, false, kolibri_attn(), prefill);\n00235|     for (uint32_t i = 0; i < p.devices; ++i)\n00236|       if (pl[i].total() + reserve > device_bytes[i]) return false;\n00237|     return true;\n00238|   };\n00239|   // Every term is non-decreasing in max_len on every device: the quanta that fit are a prefix.\n00240|   uint32_t lo = std::min(kMinAutoMaxLen, cap) / kMaxLenQuantum, hi = cap / kMaxLenQuantum;\n00241|   if (!fits(lo * kMaxLenQuantum)) return 0;\n00242|   while (lo < hi) {\n00243|     const uint32_t mid = lo + (hi - lo + 1) / 2;\n00244|     if (fits(mid * kMaxLenQuantum))\n00245|       lo = mid;\n00246|     else\n00247|       hi = mid - 1;\n00248|   }\n00249|   return lo * kMaxLenQuantum;\n00250| }\n00251| \n00252| PpChoice pp_split_and_len(const model::Kolibri1Desc& d, bool int8_head,\n00253|                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap,\n00254|                           bool prefill) {\n00255|   uint32_t best_len = 0;\n00256|   for (uint32_t s = 1; s < d.layers; ++s) {\n00257|     const uint32_t len =\n00258|         max_len_that_fits(d, model::KolPlacement::two(d, s), int8_head, device_bytes, reserve, cap, prefill);\n00259|     best_len = std::max(best_len, len);\n00260|   }\n00261|   if (best_len == 0) return {};\n00262|   // At that length, the split by bytes - 16b's rule - among the splits that reach it.\n00263|   const PpBalance b = pp_split(d, best_len, int8_head, kDefaultPpHandoff, kolibri_attn(), prefill);\n00264|   if (max_len_that_fits(d, model::KolPlacement::two(d, b.split), int8_head, device_bytes, reserve, cap, prefill) ==\n00265|       best_len)\n00266|     return {b.split, best_len};\n00267|   for (uint32_t s = 1; s < d.layers; ++s)   // the balanced split does not reach it: the first that does\n00268|     if (max_len_that_fits(d, model::KolPlacement::two(d, s), int8_head, device_bytes, reserve, cap, prefill) == best_len)\n00269|       return {s, best_len};\n\n(File has more lines. Use 'offset' parameter to read beyond line 269)\n</file>"
+  },
+  {
+   "role": "assistant",
+   "content": "Every user goes through kol_layer_bytes: the planner (kolibri_sizes.cc:175), the device total and the loader's check (kolibri1_loader.cc:220). I'll say so in the comment.",
+   "tool_calls": [
+    {
+     "id": "call_5",
      "type": "function",
      "function": {
       "name": "edit",
@@ -101,7 +125,7 @@
   },
   {
    "role": "tool",
-   "tool_call_id": "call_4",
+   "tool_call_id": "call_5",
    "content": "Edit applied successfully."
   },
   {
@@ -109,7 +133,7 @@
    "content": "",
    "tool_calls": [
     {
-     "id": "call_5",
+     "id": "call_6",
      "type": "function",
      "function": {
       "name": "bash",
@@ -124,7 +148,7 @@
   },
   {
    "role": "tool",
-   "tool_call_id": "call_5",
+   "tool_call_id": "call_6",
    "content": "Test project /work/build\n    Start 412: kolibri_plan_test\n1/1 Test #412: kolibri_plan_test ................   Passed    0.31 sec\n\n100% tests passed, 0 tests failed out of 1\n\nTotal Test time (real) =   0.33 sec"
   }
  ],
