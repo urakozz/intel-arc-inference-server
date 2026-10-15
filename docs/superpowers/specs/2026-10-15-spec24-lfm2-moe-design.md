@@ -614,7 +614,7 @@ only). Every number is measured on the Mac (`agnes-ref-img`, torch 2.14.1+cpu, t
   Per layer (agentic): < 1e-3 on 4.3 % (L21) .. 8.7 % (L36) of rows, median 0.0084 (L15) .. 0.0185 (L21). The gap is
   in `sel` units: `s_b` is bf16 (one ulp 2^-9 .. 2^-8 for s in [0.25, 1)), so gaps below ~1e-3 come from the fp32
   bias, and an engine whose router logit differs from torch's by one bf16 ulp moves `s_b` by up to ~4e-3 (|l| < 4,
-  derived). PROPOSED for 24c / 24d: `B70_LFM_TIE_TOL` = 4e-3 (one bf16 ulp of the logit carried through the
+  derived). RULED (operator, 2026-10-16) for 24c / 24d: `B70_LFM_TIE_TOL` = 4e-3 (one bf16 ulp of the logit carried through the
   sigmoid; ~15-20 % of (row, layer) fall under it, ESTIMATED between the 1e-3 and 1e-2 columns) unless 24c's route
   kernel reproduces torch's `l_b` bitwise, in which case the 1e-3 PROPOSAL stands (6.5 % of (row, layer)).
 - **Departures from the plan:** the 5.19.0 site from host-downloaded wheels (pip in the container had no network);
