@@ -80,18 +80,16 @@ echo "lfm2moe_oracle: $mode${arg:+ $arg} -> $data; checkpoint $model (${snapdir:
 
 if [ "$dry" = 1 ]; then
   echo "DRY_RUN: RAM floor $need GB ($memwhat now ${avail} GB); site $SITE (qwen4exp_env.sh)$([ $mac = 1 ] && echo "; Mac: image $ORACLE_IMAGE, --memory $ORACLE_MEMORY, $ORACLE_THREADS threads, the lock ${LFM_LOCK:-/tmp/b70-cpu-model.lock}")"
-  echo "DRY_RUN: ESTIMATED (not measured) for the bf16 original layer-streamed: ~2.45 B active parameters a token"
-  echo "  (bf16 matmuls without native bf16 on either CPU); a 2048-row chunk touches ~all 64 experts of every MoE"
-  echo "  layer (38 x 64 x 18.9 MB = 46 GB of bf16 expert slices read through the page cache), a decode step 4 a layer"
-  echo "  (~2.9 GB); resident: embedding 0.52 GB + the expert buffers 1.2 GB + a layer's dense part."
-  echo "    lfm2moe_short (100 ids) ~5-15 min (32 decode steps at ~5-20 s dominate)   peak RSS ~4-6 GB"
-  echo "    lfm2moe_4k ~15-40 min (2 chunk-sized forwards of ~0.5-1 TFLOP-s each)        peak RSS ~6-8 GB"
-  echo "    lfm2moe_agentic (12474 ids) ~0.5-1.5 h (7 chunks of 2048)                    peak RSS ~8-12 GB"
-  echo "    lfm2moe_32k ~1.5-3.5 h (16 chunks; 10 attention layers' eager scores over up to 32k keys: the"
-  echo "      [32][2048][32768] bf16 / fp32 softmax transient ~13-22 GB in the last chunks) peak RSS ~25 GB"
-  echo "    golden total ~2.5-6 h | ppl (3 sources, <= 4096 ids) ~20-40 min | hfcheck --layers 6 (2048 ids + 4 steps,"
-  echo "    both arms) ~10-20 min | a4: 36 scenarios x up to 2048 new ids (reasoning first) ~12-40 h batched - more"
-  echo "    than one session; tests (tiny models) ~10-30 min"
+  echo "DRY_RUN: MEASURED on the Mac (2026-10-15: agnes-ref-img, 12 threads, --memory 40g, the bf16 original"
+  echo "  layer-streamed; ru_maxrss counts the mmap'd shard pages, so 'peak RSS' sits at the cap - the anon part is"
+  echo "  smaller) - the box (22 Haswell cores) is ESTIMATED at ~1-2x these:"
+  echo "    lfm2moe_short (100 ids) 881 s (prompt 658 s, 32 steps 204 s)   hfcheck --layers 6 (2048 ids + 4 steps) 390 s"
+  echo "    lfm2moe_4k 2923 s (prompt 2496 s whole, 32 steps 395 s)         ppl (46 + 55 + 4096 ids) 2905 s"
+  echo "    lfm2moe_agentic (12474 ids, 7 chunks of 2048): ~2.5-3.5 h ESTIMATED from the 4k prompt rate"
+  echo "    lfm2moe_32k (16 chunks of 2048, eager scores up to [32][2048][32768] fp32 ~8.6 GB a layer call):"
+  echo "      ~6-8 h ESTIMATED - above the Mac's 6 h rule: a box run"
+  echo "    a4: 36 scenarios x up to 2048 new ids (reasoning first; ~10 s a decode step measured on the Mac at"
+  echo "      100 ids) ~1-3 days ESTIMATED even batched - a box run; tests (tiny models) ~15-25 min measured"
 fi
 if [ "$dry" != 1 ] && [ "${avail:-0}" -lt "$need" ]; then
   echo "SKIP_REASON lfm2moe_oracle: $memwhat ${avail} GB < $need GB (another job holds the RAM)"
