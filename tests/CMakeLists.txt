@@ -3761,4 +3761,40 @@ if(B70_TOKENIZER_ENABLED)
   add_test(NAME muse_server_test COMMAND muse_server_test ${CMAKE_SOURCE_DIR}/tests/tokenizer/muse)
   set_tests_properties(muse_server_test PROPERTIES LABELS muse TIMEOUT 300)
 endif()
+# Task 4 (host): the prefix cache's snapshots without a device - cli::muse::MuseEngineAdapterT over a fake with
+# MuseEngine's interface whose rings and full KV are host buffers in MuseBuffers' layout (one card and two):
+# runtime::muse::state_runs / kv_runs on the real shapes (81,748,992 B of state, 13,312 B of KV a position, one host
+# layout under --pp 1 and --pp 2 at splits 13 and 26), save / load on host buffers, restores through spec 7's
+# PrefixSession at 2048, 4096, 2049, 5000 and 300 (every turn == a cold run), a snapshot moving between one card and
+# two, and the server over HTTP (greedy == the decode run, a second request restored at 2048, seeded sampling through
+# the model's cap).
+add_executable(muse_snapshot_test runtime/muse_snapshot_test.cc)
+target_include_directories(muse_snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(muse_snapshot_test PRIVATE b70_server b70_muse_plan)
+add_test(NAME muse_snapshot_test COMMAND muse_snapshot_test)
+set_tests_properties(muse_snapshot_test PROPERTIES LABELS muse TIMEOUT 600)
+# On the card (box only; SKIP 77 without 23b's 4-layer synthetic checkpoint): muse_snapshot_gpu_test - MuseEngine's
+# snapshot calls (MG4): restores at the block end 4096 bitwise the cold run, at the request ends 2049 and 300 bitwise
+# the session that never left, on one card and on two (pp2:2); `cross`: a snapshot taken on two cards continues on one
+# card and the reverse (spec 16b's rule; two GPUs). The real checkpoint on one card with the same modes. No `gpu` label
+# (23c's ruling): checkpoint;muse.
+if(B70_MUSE)
+  add_executable(muse_snapshot_gpu_test runtime/muse_snapshot_gpu_test.cc)
+  target_include_directories(muse_snapshot_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(muse_snapshot_gpu_test PRIVATE b70_muse_prefill b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(muse_snapshot_gpu_test)
+  endif()
+  add_dependencies(muse_snapshot_gpu_test ${B70_MUSE_PREFILL_KERNELS} ${B70_MUSE_DECODE_KERNELS} kernel_pp_handoff)
+  set(_muse_snap_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/muse_4k.ids)
+  add_test(NAME muse_snapshot_gpu_synth_test COMMAND muse_snapshot_gpu_test ${B70_MUSE_SYNTH_DIR}/ckpt4 ${_muse_snap_ids})
+  add_test(NAME muse_snapshot_gpu_synth_pp_test COMMAND muse_snapshot_gpu_test ${B70_MUSE_SYNTH_DIR}/ckpt4
+    ${_muse_snap_ids} pp2:2)
+  add_test(NAME muse_snapshot_gpu_cross_test COMMAND muse_snapshot_gpu_test ${B70_MUSE_SYNTH_DIR}/ckpt4 ${_muse_snap_ids}
+    cross)
+  add_test(NAME muse_snapshot_gpu_test COMMAND muse_snapshot_gpu_test ${B70_MUSE_SNAPSHOT} ${_muse_snap_ids})
+  set_tests_properties(muse_snapshot_gpu_synth_test muse_snapshot_gpu_synth_pp_test muse_snapshot_gpu_cross_test
+    muse_snapshot_gpu_test PROPERTIES LABELS "checkpoint;muse" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
 # ==== Spec 23e: Muse-Glimmer served ==== (end) ====
