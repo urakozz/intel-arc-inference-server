@@ -50,7 +50,7 @@ inline constexpr size_t kMuseBenchPromptLen = sizeof(kMuseBenchPrompt) / sizeof(
 // resolve is not Muse: the caller's own flow then reports it.
 inline bool is_muse(const std::string& path) {
   try {
-    return loader::is_muse_checkpoint(loader::resolve_snapshot(path));
+    return loader::is_muse_checkpoint(loader::resolve_muse_snapshot(path));   // either Vishva007 spelling
   } catch (const std::exception&) {
     return false;
   }
