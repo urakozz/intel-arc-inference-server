@@ -2809,6 +2809,45 @@ st_r41_vllm_mtp() {
 }
 
 # ======================================================================================
+row 48 "spec 24a - LFM2.5-24B-A2B (lfm2_moe): the facts, the CPU reference (F1), golden sets, the A4 reference (plan 24a)"
+rownote 48 "Download first: hf download LiquidAI/LFM2.5-24B-A2B (47.96 GB; df -h ~ first; MemAvailable >= 64 GB for the real-weight stages)."
+rownote 48 "Box CPU only, no card: nothing here takes the GPU lock. Every stage runs tools/box_validate/lfm2moe_oracle.sh in the oracle image with transformers 5.19.0 from <tree>/oracle-out-q4exp-site (tools/oracle/qwen4exp_env.sh; the image is never changed). r48.host needs the tiny model (hf download yujiepan/lfm2-moe-tiny-random, 10 MB); the real stages SKIP 77 'missing data' without the bf16 original, or while it is still downloading."
+rownote 48 "B70_LFM_TIE_TOL (24c / 24d's routing tolerance) is read from the 'MoE 4th/5th sel gap' lines r48.golden prints (per layer and over all layers); hand them back with each prompt's wall / RSS line, the perplexities, hfcheck's verdict and the A4 reference's parse-failure count (score.py --format pythonic)."
+stage r48.host     48 default cpu  oracle_image                 -  "lfm2moe_oracle.sh tests: test_lfm2moe_ref.py, test_lfm2moe_make_tiny.py, the toolcall tests (tiny models: hf download yujiepan/lfm2-moe-tiny-random)"
+st_r48_host() {
+  chk "tools/box_validate/lfm2moe_oracle.sh $DATA tests" "the lfm2_moe reference tests (tiny models)"
+  grab_all tests '^ok |^  |FAIL|SKIP|passed' 120
+  finish
+}
+stage r48.ppl      48 optin   cpu  lfm2moe_bf16,oracle_image    -  "perplexity on prose / code / agentic (finite, < 20 ESTIMATED ceiling; recorded)"
+st_r48_ppl() {
+  chk "tools/box_validate/lfm2moe_oracle.sh $DATA ppl" "the reference's perplexity on the bf16 original"
+  grab_all ppl '^ppl |^wall|not sane|not finite' 8
+  finish
+}
+stage r48.hfcheck  48 optin   cpu  lfm2moe_bf16,oracle_image    -  "hfcheck --layers 6: transformers' own model vs the port on real weights, BITWISE"
+st_r48_hfcheck() {
+  chk "tools/box_validate/lfm2moe_oracle.sh $DATA hfcheck" "hfcheck on the bf16 original"
+  grab_all hfcheck '^hfcheck|max \|diff\|' 12
+  finish
+}
+stage r48.golden   48 optin   cpu  lfm2moe_bf16,oracle_image    -  "golden sets on the bf16 original -> oracle-out-lfm2moe (gap lines per layer)"
+st_r48_golden() {
+  chk "tools/box_validate/lfm2moe_oracle.sh $DATA golden" "the lfm2_moe golden sets on the bf16 original"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  grab_all gap 'sel gap|wall' 200
+  finish
+}
+stage r48.a4_ref   48 optin   cpu  lfm2moe_bf16,oracle_image    -  "the A4 reference on the bf16 original -> oracle-out-lfm2moe-a4 (hours)"
+st_r48_a4_ref() {
+  chk "tools/box_validate/lfm2moe_oracle.sh $DATA a4" "the A4 reference (36 scenarios, 2048 new ids, batched)"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "python3 tools/toolcall/score.py --format pythonic $DATA/oracle-out-lfm2moe-a4 bf16 bf16"
+  grab_all a4 'scenarios|parse failure|^bf16:' 12
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp labels belong to their rows)"
 st_x_rest() {
