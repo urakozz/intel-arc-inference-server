@@ -49,6 +49,13 @@ struct Sampling {
   float top_p = 0.95f;
   uint64_t seed = 0;
   bool has_seed = false;
+  // Spec 23e (spec 23 §6.4): the model's logit transform before temperature / top-k / top-p, applied on the host
+  // inside server::filter_probs (so sampling and every acceptance path see the same p): z' = logit_mult x z, then
+  // with softcap > 0, softcap x tanh(z' / softcap) - fp32, monotone (greedy, the device argmax over the raw row, is
+  // unchanged). Muse-Glimmer: 0.19611613513818404 and 20; every other model 1 and 0 (filter_probs exactly as before).
+  // Model properties, set with the server's sampling defaults - never request fields.
+  float logit_mult = 1.0f;
+  float softcap = 0.0f;
 };
 
 struct EngineIface {

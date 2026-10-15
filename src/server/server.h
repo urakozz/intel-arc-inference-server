@@ -36,6 +36,9 @@ struct Options {
   // defaults). b70-serve sets it for Kolibri-1 only, from generation_config.json (T 1.0, top-p 0.97,
   // top-k 128, sampled); unset = Sampling{} (greedy unless the request says otherwise), as before.
   std::optional<Sampling> sampling_defaults;
+  // Spec 23e: generation_config.json's stop_strings (server::generation_stop_strings), applied to every request beside
+  // its own `stop` (content only, as every stop string). b70-serve sets them for Muse-Glimmer; empty elsewhere.
+  std::vector<std::string> stop_strings;
   // Non-empty: write DIR/NNNNNN.json per served request (spec 7 P0): timings, the
   // request body, prompt and generated ids, the generated text.
   std::string log_requests_dir;

@@ -17,7 +17,9 @@ namespace server {
 // - top-k: `std::partial_sort` picks the k highest-logit ids among the first
 //   `vocab_used` (k = min(top_k, vocab_used); top_k == 0 means no cap). Ids >=
 //   vocab_used are never candidates -- that is the vocabulary mask.
-// - softmax over exactly those k, at `temperature` (<= 0 treated as 1.0).
+// - softmax over exactly those k, at `temperature` (<= 0 treated as 1.0) - of the model's transformed
+//   logits when Sampling::logit_mult / softcap say so (spec 23e: Muse-Glimmer's
+//   20 tanh(z x 0.196... / 20), fp32, on the k candidates; monotone, so the raw order is kept).
 // - top-p: walk the k in probability order, cut after the first prefix whose
 //   cumulative mass >= top_p; at least one candidate is always kept.
 //
