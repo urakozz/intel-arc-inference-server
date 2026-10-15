@@ -278,4 +278,76 @@ size_t prefill_chunk_launches(const model::MuseGlimmerDesc& d, const model::Muse
   return n;
 }
 
+// --- spec 23e: prefix-cache snapshots ---------------------------------------------------------------------------
+PersistentSizes persistent_sizes(const model::MuseGlimmerDesc& d, const model::MusePlacement& p, uint32_t dev,
+                                 uint32_t max_len) {
+  PersistentSizes s;
+  s.full_k = s.full_v = device_kv_bytes(d, p, dev, max_len) / 2;
+  s.ring_k = s.ring_v = device_ring_bytes(d, p, dev) / 2;
+  return s;
+}
+
+size_t state_snapshot_bytes(const model::MuseGlimmerDesc& d) {
+  return size_t(2) * d.sliding_layers() * state_positions(d) * d.kv_n() * 2;
+}
+
+size_t kv_snapshot_bytes(const model::MuseGlimmerDesc& d, uint32_t n_pos) {
+  return loader::muse_kv_bytes_per_position(d) * n_pos;
+}
+
+std::vector<SnapRun> state_runs(const model::MuseGlimmerDesc& d, const model::MusePlacement& p, uint32_t pos) {
+  model::validate(p, d);
+  const uint32_t W = state_positions(d), R = model::MuseGlimmerDesc::kRing;
+  if (W > R)
+    throw std::invalid_argument("runtime::muse::state_runs: the ring's " + std::to_string(R) + " slots cannot hold the "
+                                "window's " + std::to_string(W) + " positions");
+  const size_t row = size_t(d.kv_n()) * 2;
+  const size_t layer_rows = size_t(R) * row;   // one sliding layer's K (or V) ring
+  std::vector<SnapRun> runs;
+  for (SnapTensor t : {SnapTensor::RingK, SnapTensor::RingV}) {
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      if (d.is_full(l)) continue;
+      const uint32_t dev = p.device_of(l);
+      const size_t base = size_t(d.sliding_before(l) - d.sliding_before(p.first(dev))) * layer_rows;
+      // Positions q in [pos - W, pos): those below 0 first (one zero run over their slots [R - (W - pos), R)), then
+      // the rest through the ring, split where the slots wrap.
+      int64_t q = int64_t(pos) - int64_t(W);
+      const int64_t end = int64_t(pos);
+      if (q < 0) {
+        const uint32_t n = uint32_t(-q);
+        runs.push_back({dev, t, base + size_t(R - n) * row, size_t(n) * row, true});
+        q = 0;
+      }
+      while (q < end) {
+        const uint32_t slot = uint32_t(q) & (R - 1);
+        const uint32_t n = uint32_t(std::min<int64_t>(end - q, int64_t(R - slot)));
+        runs.push_back({dev, t, base + size_t(slot) * row, size_t(n) * row, false});
+        q += n;
+      }
+    }
+  }
+  return runs;
+}
+
+std::vector<SnapRun> kv_runs(const model::MuseGlimmerDesc& d, const model::MusePlacement& p, uint32_t max_len,
+                             uint32_t begin, uint32_t end) {
+  model::validate(p, d);
+  if (begin > end || end > max_len)
+    throw std::invalid_argument("runtime::muse::kv_runs: range [" + std::to_string(begin) + ", " + std::to_string(end) +
+                                ") is not within [0, max_len " + std::to_string(max_len) + ")");
+  std::vector<SnapRun> runs;
+  if (begin == end) return runs;
+  const size_t row = size_t(d.kv_n()) * 2;
+  const size_t layer_rows = size_t(max_len) * row;   // one full layer's K (or V)
+  for (SnapTensor t : {SnapTensor::FullK, SnapTensor::FullV}) {
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      if (!d.is_full(l)) continue;
+      const uint32_t dev = p.device_of(l);
+      const size_t base = size_t(d.full_before(l) - d.full_before(p.first(dev))) * layer_rows;
+      runs.push_back({dev, t, base + size_t(begin) * row, size_t(end - begin) * row, false});
+    }
+  }
+  return runs;
+}
+
 }  // namespace runtime::muse

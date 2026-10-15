@@ -199,4 +199,44 @@ inline uint64_t prefill_wait_ms(uint32_t base_ms, MuseAttn a, uint32_t depth) {
   return uint64_t(base_ms) * (steps ? steps : 1);
 }
 
+// ==== Spec 23e: prefix-cache snapshots (spec 7's PrefixCache on Muse-Glimmer, spec 23 §5.4) ======================
+// What a session leaves behind between replays, besides `pos`: the 13 full layers' growing KV (the cache's BLOCKS, as
+// every model's) and the 39 sliding layers' rings. A query at position p reads the keys (p - 2048, p] - its own key
+// it writes itself - so the ring rows of positions [p - 2047, p) are the whole recurrent "state": 39 x 2047 x (K + V)
+// x 256 x 2 B = 81,748,992 B at the real shapes (derived), the same at every pos. Positions before 0 (a snapshot at p
+// < 2047) are zero rows on the host, written back as zeros: the window never reads them, and a cold run's ring holds
+// zeros there too (reset). The RoPE table and the scratch are per step or constant.
+//
+// The HOST layouts (spec 16b's rule: --pp 2's is --pp 1's byte for byte, so an entry moves between one card and two
+// unchanged - every layer is addressed through the placement, never by device order):
+//   state  [K | V][sliding layer, in layer order][state_positions(d)][kv_n] bf16, positions ascending
+//   kv     [K | V][full layer, in layer order][end - begin][kv_n] bf16 (Kolibri's / runtime::Engine's order)
+// A run is one contiguous range of one device allocation (`tensor`: the device's full_k, full_v, ring_k, ring_v), in
+// host order. `zero` runs cover positions before 0: save_state writes zeros to the host for them (the device slots are
+// not read), load_state copies the host's zeros into their slots.
+inline uint32_t state_positions(const model::MuseGlimmerDesc& d) { return d.window - 1; }   // 2047
+enum class SnapTensor : uint32_t { FullK, FullV, RingK, RingV };
+struct SnapRun {
+  uint32_t device = 0;
+  SnapTensor tensor = SnapTensor::FullK;
+  size_t offset = 0, bytes = 0;   // within the device allocation
+  bool zero = false;              // positions before 0 (state runs only)
+};
+// One device's four persistent allocations (MuseBuffers' full_k / full_v / ring_k / ring_v), bytes.
+struct PersistentSizes {
+  size_t full_k = 0, full_v = 0, ring_k = 0, ring_v = 0;
+};
+PersistentSizes persistent_sizes(const model::MuseGlimmerDesc& d, const model::MusePlacement& p, uint32_t dev,
+                                 uint32_t max_len);
+// 39 x 2047 x 2 x 512 B = 81,748,992 at the real shapes.
+size_t state_snapshot_bytes(const model::MuseGlimmerDesc& d);
+// 13,312 B a position at the real shapes (13 full layers x (K + V) x 256 x 2 B).
+size_t kv_snapshot_bytes(const model::MuseGlimmerDesc& d, uint32_t n_pos);
+// The ring rows of positions [pos - state_positions, pos), every sliding layer, K then V. Throws when the ring cannot
+// hold them (kRing < state_positions).
+std::vector<SnapRun> state_runs(const model::MuseGlimmerDesc& d, const model::MusePlacement& p, uint32_t pos);
+// Positions [begin, end) of every full layer, K then V. Throws unless begin <= end <= max_len.
+std::vector<SnapRun> kv_runs(const model::MuseGlimmerDesc& d, const model::MusePlacement& p, uint32_t max_len,
+                             uint32_t begin, uint32_t end);
+
 }  // namespace runtime::muse
