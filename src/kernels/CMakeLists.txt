@@ -1409,6 +1409,60 @@ if(B70_MUSE)
 endif()
 # ==== Spec 23c: Muse-Glimmer-30B decode ==== (end) ====
 
+# ==== Spec 23d: Muse-Glimmer-30B prefill ==== (begin) ====
+# Additive only, as 23c's block: no existing source is edited, so every binary above (and in prefill/) keeps its name,
+# its command line and its bytes (MG0). New Muse-only sources in src/kernels/muse/:
+#   mg_pf_attn.cl   the prefill attention over a chunk: the flash build (kol_pf_attn.cl's DPAS walk at GQA 16 - the
+#                   2048-key window over the 4096-slot ring in absolute 64-key tiles, causal NoPE over the full cache)
+#                   and the eager build (B70_MUSE_ATTN=eager: plain OpenCL, bitwise decode's eager row)
+#   mg_pf_prep.cl   mg_pf_embed (mg_embed's chain over the chunk's ids) and mg_pf_attn_gate (decode's output gate)
+# Reused at Muse's shapes: mg_prep.cl at M = 2048 (kernels::muse::kPfC: the norms, the sandwich's post-add, the attention
+# prep and SiLU x up at S 1), prefill/pf_prep.cl's pf_res_fold _Z at K 6656 (o_proj's and down's own rows and Σ²),
+# k2/k2_pf_linear.cl (the int4 layout-0 slabs, a zero-padded tail where N is not whole 1024-column slabs) and the
+# shape-free pf_gemm_T0. What a Muse prefill chunk binds: runtime/muse/muse_prefill.cc (derived in muse_sizes.cc).
+if(B70_MUSE)
+  set(MG_CL ${CMAKE_CURRENT_SOURCE_DIR}/muse)
+  add_ocloc_kernel(mg_pf_embed_M2048_K6656_G26_V202048 SOURCE ${MG_CL}/mg_pf_prep.cl
+                   DEFINES M=2048 K=6656 EMBED_G=26 VOCAB=202048 IMG_TOKEN=200092 VID_TOKEN=200091)
+  add_ocloc_kernel(mg_pf_attn_gate_M2048_N4096 SOURCE ${MG_CL}/mg_pf_prep.cl DEFINES M=2048 GATE_N=4096)
+  add_ocloc_kernel(mg_norm_M2048_K6656_G26_W26 SOURCE ${MG_CL}/mg_prep.cl
+                   DEFINES M=2048 K=6656 NORM_G=26 NORM_WGS=26 NORM_EPS=1e-5f)
+  add_ocloc_kernel(mg_post_add_M2048_K6656_G26 SOURCE ${MG_CL}/mg_prep.cl DEFINES M=2048 K=6656 POST_G=26 POST_EPS=1e-8f)
+  set(MG_PF_HEADS Q_HEADS=32 KV_HEADS=2 HD=128 QK_SCALE=3.87f)
+  add_ocloc_kernel(mg_attn_prep_M2048_N8704_S1_Q32KV2_R4096 SOURCE ${MG_CL}/mg_prep.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 QGKV_N=8704 QGKV_S=1 ${MG_PF_HEADS} SLIDING=1 RING=4096)
+  add_ocloc_kernel(mg_attn_prep_M2048_N8704_S1_Q32KV2_F SOURCE ${MG_CL}/mg_prep.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 QGKV_N=8704 QGKV_S=1 ${MG_PF_HEADS} SLIDING=0 RING=0)
+  add_ocloc_kernel(mg_silu_mul_M2048_I19968_S1 SOURCE ${MG_CL}/mg_prep.cl DEFINES M=2048 SILU_I=19968 SILU_S=1)
+  add_ocloc_kernel(pf_res_fold_K6656_SP1_G26_Z SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/pf_prep.cl
+                   DEFINES K=6656 S_PREV=1 FOLD_G=26 ZERO_RESID=1)
+  # The int4 linears' slabs (layout 0): q||gate||k||v (8 x 1024 + 512), o_proj (6 x 1024 + 512), gate||up (39 x 1024),
+  # down (6 x 1024 + 512).
+  foreach(row "6656 8704" "4096 6656" "6656 39936" "19968 6656")
+    separate_arguments(f UNIX_COMMAND "${row}")
+    list(GET f 0 K)
+    list(GET f 1 N)
+    add_ocloc_kernel(k2_pf_dequant_slab_K${K}_N${N} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_pf_linear.cl
+                     DEFINES K=${K} N=${N})
+  endforeach()
+  # The attention: sliding (the 2048-key window over the ring) and full (NoPE), flash (256 GRF, as kol_pf_attn) and
+  # eager (TGT 64: decode's eager_block target).
+  foreach(SL 1 0)
+    if(SL)
+      set(_n mg_pf_flash_attn_Q32KV2_W2048_R4096)
+      set(_w WINDOW=2048 RING=4096)
+    else()
+      set(_n mg_pf_flash_attn_Q32KV2_F)
+      set(_w WINDOW=0 RING=0)
+    endif()
+    add_ocloc_kernel(${_n} SOURCE ${MG_CL}/mg_pf_attn.cl
+                     DEFINES KT=64 RPW=8 HPW=4 Q_HEADS=32 KV_HEADS=2 EAGER=0 ${_w}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    add_ocloc_kernel(${_n}_EAGER SOURCE ${MG_CL}/mg_pf_attn.cl DEFINES TGT=64 Q_HEADS=32 KV_HEADS=2 EAGER=1 ${_w})
+  endforeach()
+endif()
+# ==== Spec 23d: Muse-Glimmer-30B prefill ==== (end) ====
+
 # Spec 16b (pipeline parallel, `--pipeline-handoff peer`): the peer-write hand-off between
 # the two stages' decode lists - pp_send (device 0's last launch) and pp_recv (device 1's
 # first). No defines: the word counts are kernel arguments, so one binary serves every model.
