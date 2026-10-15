@@ -13,6 +13,8 @@
 //      2046, 2047, 2048, 4095, 4096, 4097, 9000 (Review Focus 3's rows); full at 3000 and 30000
 //   5. flash (mg_attn.cl) against the fp64 form within spec 10's bar (cosine 0.99999): the same rows, full at 20000;
 //      sliding at 9000 bitwise sliding at 4904 (9000 - 4096: the same ring rows - the ring is only addressing)
+//   6. the window's edge EXACTLY (flash and eager): the slots of p - 2048 and p + 1 .. p + 15 poisoned leave the output
+//      bitwise unchanged at 2047 / 2048 / 4096 / 9000, poisoning p - 2047 changes it; a full layer's rows p + 1 .. unread
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -351,6 +353,74 @@ int main() {
                     pos + 1 - mr::key_lo(pos, sliding != 0), worst);
         CHECK(worst >= 0.99999);
       }
+    }
+    // The window's edge EXACTLY, flash and eager (a cosine bar cannot see one key in 2048): poisoning the ring slot of
+    // key p - 2048 and those of p + 1 .. p + 15 leaves the output bitwise unchanged; poisoning key p - 2047's changes it.
+    // Full layers: the cache rows p + 1 .. p + 15 are never read.
+    auto run_attn = [&](bool sliding, bool eager, uint32_t pos, const l0::Mem& kb, const l0::Mem& vb) {
+      c->pos = pos;
+      if (eager) {
+        l0::Module em(d.ctx, kernels::path(km::attn_eager_variant(1, sliding)));
+        l0::Kernel k = em.kernel("mg_attn_eager");
+        k.group_size(km::kAttnWg);
+        k.arg_ptr(0, ctrl.ptr());
+        k.arg_ptr(1, qb.ptr());
+        k.arg_ptr(2, kb.ptr());
+        k.arg_ptr(3, vb.ptr());
+        k.arg_ptr(4, gb.ptr());
+        k.arg_ptr(5, sb.ptr());
+        k.arg_ptr(6, ob.ptr());
+        k.arg<uint32_t>(7, ML);
+        d.run(k, QH, 1);
+      } else {
+        l0::Module fm(d.ctx, kernels::path(km::attn_variant(1, sliding)));
+        l0::Kernel dk = fm.kernel("mg_attn_decode");
+        dk.group_size(km::kAttnWg);
+        dk.arg_ptr(0, ctrl.ptr());
+        dk.arg_ptr(1, qb.ptr());
+        dk.arg_ptr(2, kb.ptr());
+        dk.arg_ptr(3, vb.ptr());
+        dk.arg_ptr(4, part.ptr());
+        d.run(dk, KVH, km::kAttnTgt);
+        l0::Kernel rk2 = fm.kernel("mg_attn_reduce");
+        rk2.group_size(km::kAttnWg);
+        rk2.arg_ptr(0, ctrl.ptr());
+        rk2.arg_ptr(1, part.ptr());
+        rk2.arg_ptr(2, gb.ptr());
+        rk2.arg_ptr(3, ob.ptr());
+        d.run(rk2, QH, 1);
+      }
+      return d.read<uint16_t>(ob, QN);
+    };
+    auto poisoned = [&](const std::vector<uint16_t>& src, bool sliding, const std::vector<uint32_t>& keys, float v) {
+      std::vector<uint16_t> out = src;
+      for (uint32_t p : keys)
+        for (uint32_t i = 0; i < KVN; ++i) out[size_t(sliding ? (p & (km::kRing - 1)) : p) * KVN + i] = rne(v);
+      return out;
+    };
+    for (bool eager : {false, true}) {
+      for (uint32_t pos : {2047u, 2048u, 4096u, 9000u}) {
+        const std::vector<uint16_t> a = run_attn(true, eager, pos, rkb, rvb);
+        std::vector<uint32_t> outside;
+        if (pos >= 2048) outside.push_back(pos - 2048);
+        for (uint32_t p = pos + 1; p <= pos + 15; ++p) outside.push_back(p);
+        l0::Mem pk = d.upload(poisoned(rk, true, outside, 64.f).data(), rk.size() * 2);
+        l0::Mem pv = d.upload(poisoned(rv, true, outside, -64.f).data(), rv.size() * 2);
+        CHECK(run_attn(true, eager, pos, pk, pv) == a);
+        outside.push_back(pos - 2047);
+        l0::Mem ik = d.upload(poisoned(rk, true, outside, 64.f).data(), rk.size() * 2);
+        l0::Mem iv = d.upload(poisoned(rv, true, outside, -64.f).data(), rv.size() * 2);
+        CHECK(run_attn(true, eager, pos, ik, iv) != a);
+      }
+      const uint32_t pos = 3000;
+      const std::vector<uint16_t> a = run_attn(false, eager, pos, fkb, fvb);
+      std::vector<uint32_t> after;
+      for (uint32_t p = pos + 1; p <= pos + 15; ++p) after.push_back(p);
+      l0::Mem pk = d.upload(poisoned(fk, false, after, 64.f).data(), fk.size() * 2);
+      l0::Mem pv = d.upload(poisoned(fv, false, after, -64.f).data(), fv.size() * 2);
+      CHECK(run_attn(false, eager, pos, pk, pv) == a);
+      std::printf("  %s: the window's edge exact (p - 2048 and p + 1 .. p + 15 unread, p - 2047 read; full 3000)\n",
+                  eager ? "eager" : "flash");
     }
   }
   std::puts("muse_kernels_test OK");
