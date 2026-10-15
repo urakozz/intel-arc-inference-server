@@ -3677,6 +3677,35 @@ if(B70_MUSE)
     pp2:2)
   set_tests_properties(muse_prefill_pp_test muse_prefill_pp_eager_test prefill_split_muse_pp_test
     PROPERTIES LABELS "checkpoint;muse;prefill;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # Task 5, MG3 on prefill: 23c's golden test in its prefill mode - the synthetic golden set (muse_oracle.sh synth: the
+  # 4-layer checkpoint's reference) flash and eager, chunks of 64, the bf16 head beside the int8 default, two cards;
+  # then the real checkpoint against 23a's golden sets (it fits one card), the same arms.
+  target_link_libraries(muse_golden_test PRIVATE b70_muse_prefill)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(muse_golden_test)
+  endif()
+  add_dependencies(muse_golden_test ${B70_MUSE_PREFILL_KERNELS})
+  set(_mg_synth ${B70_MUSE_SYNTH_DIR}/ckpt4 ${B70_MUSE_SYNTH_DIR}/golden)
+  add_test(NAME muse_golden_prefill_synth_test COMMAND muse_golden_test ${_mg_synth} prefill)
+  add_test(NAME muse_golden_prefill_synth_bf16_test COMMAND muse_golden_test ${_mg_synth} bf16 prefill)
+  add_test(NAME muse_golden_prefill_synth_c64_test COMMAND muse_golden_test ${_mg_synth} prefill:64)
+  add_test(NAME muse_golden_prefill_synth_eager_test COMMAND muse_golden_test ${_mg_synth} bf16 prefill)
+  set_tests_properties(muse_golden_prefill_synth_eager_test PROPERTIES ENVIRONMENT "B70_MUSE_ATTN=eager")
+  set_tests_properties(muse_golden_prefill_synth_test muse_golden_prefill_synth_bf16_test
+    muse_golden_prefill_synth_c64_test muse_golden_prefill_synth_eager_test
+    PROPERTIES LABELS "checkpoint;golden;muse;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  add_test(NAME muse_golden_prefill_synth_pp2_test COMMAND muse_golden_test ${_mg_synth} pp2:2 copy prefill)
+  set_tests_properties(muse_golden_prefill_synth_pp2_test
+    PROPERTIES LABELS "checkpoint;golden;muse;prefill;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  set(_mg_real ${B70_MUSE_SNAPSHOT} ${B70_MUSE_ORACLE_DIR})
+  add_test(NAME muse_golden_prefill_real_test COMMAND muse_golden_test ${_mg_real} prefill)
+  add_test(NAME muse_golden_prefill_real_bf16_test COMMAND muse_golden_test ${_mg_real} bf16 prefill)
+  add_test(NAME muse_golden_prefill_real_c64_test COMMAND muse_golden_test ${_mg_real} prefill:64)
+  add_test(NAME muse_golden_prefill_real_eager_test COMMAND muse_golden_test ${_mg_real} bf16 prefill)
+  set_tests_properties(muse_golden_prefill_real_eager_test PROPERTIES ENVIRONMENT "B70_MUSE_ATTN=eager")
+  set_tests_properties(muse_golden_prefill_real_test muse_golden_prefill_real_bf16_test muse_golden_prefill_real_c64_test
+    muse_golden_prefill_real_eager_test PROPERTIES LABELS "checkpoint;golden;muse;prefill" SKIP_RETURN_CODE 77
+    TIMEOUT 14400)
 endif()
 # Task 3: b70-decode's Muse prefill backends and chunk, before the device (tests/model/muse_glimmer: config.json only).
 b70_cli_reject(cli_reject_muse_prefill_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer --bench --prefill-length 64
