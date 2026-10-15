@@ -16,7 +16,7 @@
 # ORACLE_THREADS caps the CPU pool. It exists because the box is shared: a
 # dump that grabs all 44 threads fights whatever else is running, and torch's
 # default is "all of them". Leave it unset for the default.
-# Env: ORACLE_IMAGE, HF_CACHE, REPO_DIR, ORACLE_MODEL, ORACLE_SNAP, ORACLE_THREADS.
+# Env: ORACLE_IMAGE, HF_CACHE, REPO_DIR, ORACLE_MODEL, ORACLE_SNAP, ORACLE_THREADS, ORACLE_MEMORY.
 set -euo pipefail
 # t214 was the reference until 2026-09-09 and is no longer on the box; every
 # golden set dumped before that date was produced by it and its rows still say
@@ -49,6 +49,14 @@ if [ -n "$ORACLE_THREADS" ]; then
   env_flags+=(-e "OMP_NUM_THREADS=$ORACLE_THREADS" -e "MKL_NUM_THREADS=$ORACLE_THREADS")
 fi
 
-exec docker run --rm --entrypoint bash -u "$(id -u):$(id -g)" \
+# ORACLE_MEMORY (e.g. 40g) caps the container (--memory and --memory-swap): unset on the box (above),
+# set on the shared Mac (spec 24a: every oracle container there is capped, 40 GB).
+mem_flags=()
+if [ -n "${ORACLE_MEMORY:-}" ]; then
+  [[ "$ORACLE_MEMORY" =~ ^[0-9]+[gm]$ ]] || { echo "ORACLE_MEMORY=$ORACLE_MEMORY: <N>g or <N>m" >&2; exit 2; }
+  mem_flags=(--memory "$ORACLE_MEMORY" --memory-swap "$ORACLE_MEMORY")
+fi
+
+exec docker run --rm --entrypoint bash -u "$(id -u):$(id -g)" ${mem_flags[@]+"${mem_flags[@]}"} \
   "${mounts[@]}" "${env_flags[@]}" "$IMAGE" -c \
   "set -euo pipefail; $resolve; $*"
