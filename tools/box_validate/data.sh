@@ -112,8 +112,10 @@ case "${1:-}" in
       bash -c 'for f in ours intel; do for p in q4exp_short q4exp_4k q4exp_agentic; do test -s oracle-out-q4exp-synth/$f/$p.ids && test -s oracle-out-q4exp-synth/$f/$p.golden.safetensors || exit 1; done; done'
     # Spec 23a: Muse-Glimmer-30B - the served GPTQ checkpoint, the bf16 original (gate Q's reference, decision 14) and
     # the CPU reference's outputs (tools/box_validate/muse_oracle.sh <data tree> golden | a4).
-    have muse_gptq "the Muse-Glimmer GPTQ checkpoint ${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ} (22.8 GB; df -h first)" \
-      complete "${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ}"
+    have muse_gptq "the Muse-Glimmer int4 checkpoint ${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound or its -GPTQ spelling} (22.8 GB; df -h first)" \
+      bash -c 'if [ -n "${SNAP_MUSE:-}" ]; then tools/box_validate/data.sh complete "$SNAP_MUSE"; else
+        tools/box_validate/data.sh complete Vishva007/Muse-Glimmer-30B-W4A16-AutoRound ||
+        tools/box_validate/data.sh complete Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ; fi'
     have muse_bf16 "the Muse-Glimmer bf16 original ${SNAP_MUSE_BF16:-meta-models/Muse-Glimmer-30B} (59.6 GB; gate Q's reference)" \
       complete "${SNAP_MUSE_BF16:-meta-models/Muse-Glimmer-30B}"
     have oracle_muse "oracle-out-muse/muse_{short_prose,short_code,4k,8k,32k,agentic}.{ids,golden.safetensors} (spec 23a: muse_oracle.sh golden)" \
@@ -153,5 +155,6 @@ case "${1:-}" in
     have a4_ref "A4_REF_DIR=${A4_REF_DIR:-<unset>} (<name>.bf16.txt reference runs)" test -d "${A4_REF_DIR:-/nonexistent}"
     ;;
   resolve) resolve "$2" ;;
-  *) echo "usage: $0 link <data tree> <tree>... | have | resolve <id|dir>" >&2; exit 2 ;;
+  complete) complete "$2" ;;      # exit 0 when the snapshot is complete (spec 23a: either int4 spelling)
+  *) echo "usage: $0 link <data tree> <tree>... | have | resolve <id|dir> | complete <id|dir>" >&2; exit 2 ;;
 esac

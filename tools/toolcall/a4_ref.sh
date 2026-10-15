@@ -24,6 +24,14 @@
 #   tools/toolcall/a4_ref.sh <ornith|k2|qwen4exp> ref      the reference: oracle_generate.py over $OUT/set
 #                                                   -> $OUT/<name>.bf16.{ids,txt} (resumable)
 #   tools/toolcall/a4_ref.sh <ornith|k2> status    what is done
+#   tools/toolcall/a4_ref.sh muse set|ref|status    spec 23a gate Q: `set` copies the committed set
+#                                                   tests/golden/toolcall-muse (the original's template) to
+#                                                   $OUT/set; `ref` runs FORM=gptq (the served GPTQ checkpoint
+#                                                   dequantised) and FORM=bf16 (meta-models/Muse-Glimmer-30B) -
+#                                                   FORM=both (default) one after the other on the box, the Mac
+#                                                   one detached container a form - with muse_ref.py, 512 new ids,
+#                                                   -> $OUT/<name>.{gptq,bf16}.{ids,txt,gap}, DONE.<form>; score
+#                                                   with `score.py --format atem $OUT bf16 gptq`
 #
 # The references (tools/toolcall/oracle_generate.py, by config.json's model_type):
 #   ornith  tools/oracle/ornith_ref.py's layer-streamed Qwen3_5MoeForCausalLM on the INT4
@@ -101,6 +109,18 @@ cd "$(dirname "$0")/../.."
 m=${1:-}
 step=${2:-}
 case "$m" in
+  muse)   # spec 23a gate Q: FORM gptq (the served checkpoint, dequantised) | bf16 (the original) | both (the box)
+    FORM=${FORM:-both}
+    case "$FORM" in
+      gptq)   # the int4 export in either spelling (spec 23 §3.1): the auto_round one when its shards are all there
+        repo=Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ
+        ls "${HF_CACHE:-$HOME/.cache/huggingface}"/hub/models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound/snapshots/*/model-00006-of-00006.safetensors \
+          > /dev/null 2>&1 && repo=Vishva007/Muse-Glimmer-30B-W4A16-AutoRound ;;
+      bf16) repo=meta-models/Muse-Glimmer-30B ;;
+      both) repo=- ;;
+      *) echo "a4_ref: FORM is gptq, bf16 or both (got $FORM)" >&2; exit 2 ;;
+    esac
+    new=${NEW_TOKENS:-512} ;;
   ornith) repo=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-192} ;;
   k2) repo=urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-512} ;;
   kolibri) repo=Aleph-Alpha/Kolibri-1-BF16; new=${NEW_TOKENS:-192} ;;
@@ -108,6 +128,21 @@ case "$m" in
   *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;;
 esac
 case "$step" in set | ref | status) ;; *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;; esac
+if [ "$m" = muse ] && [ "$step" = set ]; then   # the committed set (spec 23a Task 5: the original's template)
+  OUT=${OUT:-oracle-out-muse-a4}
+  mkdir -p "$OUT/set"
+  cp tests/golden/toolcall-muse/* "$OUT/set/"
+  echo "a4_ref: muse set: tests/golden/toolcall-muse -> $OUT/set ($(ls "$OUT"/set/*.ids | wc -l | tr -d ' ') scenarios)"
+  exit 0
+fi
+if [ "$m" = muse ] && [ "$FORM" = both ]; then   # both references, one after the other
+  [ "$step" = status ] && { FORM=gptq "$0" muse status; exec env FORM=bf16 "$0" muse status; }
+  [ "$(uname -s)" = Darwin ] && {
+    echo "a4_ref: on the Mac the references run detached, one container at a time: FORM=gptq $0 muse ref, then FORM=bf16" >&2
+    exit 2; }
+  FORM=gptq "$0" muse "$step" || exit $?
+  exec env FORM=bf16 "$0" muse "$step"
+fi
 # Qwen3.8-Flash-Next's set is the ORIGINAL's tokenizer and template (its small files), not Intel's.
 if [ "$m" = qwen4exp ] && [ "$step" = set ]; then
   repo=Qwen/Qwen3.8-Flash-Next
@@ -117,6 +152,8 @@ cache_name="models--$(printf '%s' "$repo" | sed 's|/|--|g')"
 OUT=${OUT:-oracle-out-$m-a4}
 name_given=${NAME:+1}
 NAME=${NAME:-a4-ref-$m}
+run_tag=bf16      # the outputs' tag: <name>.<run_tag>.{ids,txt,gap} (Muse: the checkpoint's form)
+if [ "$m" = muse ]; then run_tag=$FORM; [ -n "$name_given" ] || NAME=a4-ref-muse-$FORM; fi
 HF=${HF_CACHE:-$HOME/.cache/huggingface}
 THREADS=${ORACLE_THREADS:-12}
 mac=0
@@ -127,9 +164,11 @@ kw=()
 if [ "$step" = status ]; then
   [ $mac = 1 ] && docker ps -a --filter "name=^$NAME\$" --format '{{.Names}} {{.Status}}'
   n_set=$(ls "$OUT"/set/*.ids 2> /dev/null | wc -l | tr -d ' ')
-  n_ref=$(ls "$OUT"/*.bf16.txt 2> /dev/null | wc -l | tr -d ' ')
+  n_ref=$(ls "$OUT"/*."$run_tag".txt 2> /dev/null | wc -l | tr -d ' ')
+  dn=DONE
+  [ "$m" = muse ] && dn=DONE.$run_tag
   [ -f "$OUT/set/SAME" ] && echo "$m: $(cat "$OUT/set/SAME")"
-  echo "$m: set $n_set/36 scenarios ($OUT/set), reference $n_ref/36 ($OUT/*.bf16.txt)$([ -f "$OUT/DONE" ] && echo ', DONE')"
+  echo "$m: set $n_set/36 scenarios ($OUT/set), reference $n_ref/36 ($OUT/*.$run_tag.txt)$([ -f "$OUT/$dn" ] && echo ', DONE')"
   tail -3 "$OUT/ref.log" 2> /dev/null || true
   exit 0
 fi
@@ -172,6 +211,7 @@ else
   cmd_ref="python3 tools/toolcall/oracle_generate.py"
   [ "$m" = kolibri ] && cmd_ref="$cmd_ref --model kolibri --device ${DEVICE:-cpu}"
   [ "$m" = qwen4exp ] && cmd_ref="$cmd_ref --model qwen4exp"
+  [ "$m" = muse ] && cmd_ref="$cmd_ref --model muse --form $FORM"
   BATCH=${BATCH:-auto}
   RESIDENT=${RESIDENT:-auto}
   [[ "$BATCH" =~ ^(auto|[1-9][0-9]*)$ ]] || { echo "a4_ref: BATCH is auto or a count >= 1 (got $BATCH)" >&2; exit 2; }
@@ -184,6 +224,7 @@ else
 fi
 # Spec 22 P0.8: MASK (qwen4exp ref only) - the expert-masked reference, its outputs tagged .mask-<tag>.
 mask_base="" done_file=DONE
+[ "$m" = muse ] && done_file=DONE.$run_tag
 if [ -n "${MASK:-}" ]; then
   [ "$m" = qwen4exp ] && [ "$step" = ref ] || { echo "a4_ref: MASK is qwen4exp's ref only" >&2; exit 2; }
   [ -f "$MASK" ] || { echo "a4_ref: MASK=$MASK: no such file" >&2; exit 2; }
@@ -200,12 +241,12 @@ fi
 # reference's knobs passed through.
 pre=""
 q4env=()
-if [ "$m" = qwen4exp ]; then
+if [ "$m" = qwen4exp ] || [ "$m" = muse ]; then
   if [ $mac = 1 ]; then SITE=${SITE:-oracle-out-q4exp/site}; else SITE=${SITE:-oracle-out-q4exp-site}; fi
   [[ "$SITE" =~ ^[A-Za-z0-9_./-]+$ ]] && [ "${SITE#/}" = "$SITE" ] || {
     echo "a4_ref: SITE is a directory inside this tree (got $SITE)" >&2; exit 2; }
   pre="tools/oracle/qwen4exp_env.sh /ws/$SITE > /dev/null && export PYTHONPATH=/ws/$SITE && "
-  for v in Q4_LAYERS Q4_PLE; do
+  for v in Q4_LAYERS Q4_PLE MUSE_LAYERS; do
     x=${!v:-}
     [ -n "$x" ] || continue
     [[ "$x" =~ ^[A-Za-z0-9_.:/-]+$ ]] || { echo "a4_ref: $v=$x" >&2; exit 2; }
@@ -265,7 +306,7 @@ fi
 [ $inside = 1 ] || { echo "a4_ref: on the Mac OUT must be a directory inside this tree (got $OUT)" >&2; exit 2; }
 mkdir -p "$OUT/set"
 IMAGE=${IMAGE:-agnes-ref-img:latest}
-MEM=${MEM:-28g}
+if [ "$m" = muse ]; then MEM=${MEM:-40g}; else MEM=${MEM:-28g}; fi   # Muse: 5.4 GB resident + 2 layers + the batch
 others=$(docker ps --filter "ancestor=$IMAGE" --format '{{.Names}}' | grep -vx "$NAME" || true)
 if [ -n "$others" ] && [ "${FORCE:-0}" != 1 ]; then
   echo "a4_ref: another $IMAGE container is running ($others): wait for it, or FORCE=1" >&2; exit 2

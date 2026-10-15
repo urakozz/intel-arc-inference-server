@@ -584,7 +584,11 @@ def test_layer_major():
 def test_expected_names():
     """expected_names(tc, "gptq") = the real GPTQ index's 1875 text names and vision_names its other 809; "bf16" = the
     original's 627; on the variants: int4 is the gptq form, untied the bf16 form (small files only)."""
-    for snap, form, n_text in ((gptq_snapshot(), "gptq", 1875), (original_snapshot(), "bf16", 627)):
+    pairs = [(gptq_snapshot(), "gptq", 1875), (original_snapshot(), "bf16", 627)]
+    ar = _hf("Vishva007/Muse-Glimmer-30B-W4A16-AutoRound")     # the same export, auto_round spelling (no g_idx)
+    if ar and os.path.exists(os.path.join(ar, "model.safetensors.index.json")):
+        pairs.append((ar, "autoround", 1459))
+    for snap, form, n_text in pairs:
         idx = json.load(open(os.path.join(snap, "model.safetensors.index.json")))
         tc = ref.text_config(snap)
         names = {k for k in idx["weight_map"] if ref.is_text(k)}
@@ -594,7 +598,8 @@ def test_expected_names():
         ck = ref.Ckpt(variant(v))
         tc = ref.text_config(variant(v))
         assert set(ref.expected_names(tc, form)) == {k for k in ck.keys() if ref.is_text(k)}, v
-    print("  gptq: 1875 text + 809 vision; bf16: 627 text; the variants' names match their forms")
+    print(f"  gptq: 1875 text + 809 vision; bf16: 627 text{'; autoround: 1459 text' if len(pairs) == 3 else ''}; the "
+          f"variants' names match their forms")
 
 
 def test_assist_loads():

@@ -8,7 +8,7 @@
 # oracle-out-q4exp/site - the same site qwen4exp uses, not a second one) first on PYTHONPATH.
 #   tests        test_muse_ref.py, test_muse_gateq.py and the toolcall tests on the tiny model (r42.host)
 #   tiny         golden runs on the tiny model (window 2048 crossed by muse_4k) -> <data>/oracle-out-muse-tiny/
-#   facts        muse_facts.py on the host (small files, headers, the FULL qzeros / g_idx scan of the GPTQ shards:
+#   facts        muse_facts.py on the host (small files, headers, the FULL qzeros / g_idx scan of the int4 shards:
 #                ~210 MB read), then in the container the 5.19.0 citations, the one-message render and
 #                muse_ref.py facts (the names) -> <data>/oracle-out-muse/facts.log (r42.facts)
 #   ppl          muse_ref.py ppl on prose.txt, code.txt, muse_4k.ids and muse_agentic.ids for each form present
@@ -22,7 +22,8 @@
 #   a4           tools/toolcall/a4_ref.sh muse set + ref (both forms, 512 new ids) -> <data>/oracle-out-muse-a4/
 #                <name>.{gptq,bf16}.{ids,txt,gap} (resumable per scenario), then score.py --format atem
 #   gateq        muse_gateq.py kl (teacher-forced over the bf16 run's A4 continuations, + prose / code) and verdict
-#                (spec 23 §3.3's bars, decision 5) -> <data>/oracle-out-muse-a4/{gateq.json,gateq.log}
+#                (spec 23 §3.3's bars, decision 5: a RECORDED measurement - the checkpoint is kept, operator ruling
+#                2026-10-15) -> <data>/oracle-out-muse-a4/{gateq.json,gateq.log}
 #   taps         for 23f P0: the residual after layers 1, 13, 25, 37, 49 over [prompt + the GPTQ form's own A4
 #                continuation] per scenario (teacher-forced, no generation) -> <data>/oracle-out-muse-taps/
 # Golden runs are per prompt resumable (written into <tree>/oracle-out-muse*.partial/, moved when complete, the golden
@@ -30,7 +31,7 @@
 # bf16 one; the box: MemAvailable; the Mac: the ORACLE_MEMORY cap) or a snapshot is absent / incomplete (every shard
 # of its index, no *.incomplete blob - never download here: df -h first, then hf download by hand).
 # DRY_RUN=1 prints the commands, the RAM floor and an ESTIMATED time per prompt, runs nothing.
-# Env: SNAP_MUSE (default models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound-GPTQ), SNAP_MUSE_BF16
+# Env: SNAP_MUSE (default: models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound when complete, else -AutoRound-GPTQ), SNAP_MUSE_BF16
 #      (models--meta-models--Muse-Glimmer-30B), SNAP_MUSE_ASSIST (models--meta-models--Muse-Glimmer-30B-assistant),
 #      MUSE_REF_MIN_GB, MUSE_GEN (32), HF_HOME, ORACLE_IMAGE, ORACLE_THREADS, ORACLE_MEMORY (the Mac: 40g).
 set -u
@@ -44,7 +45,7 @@ dry="${DRY_RUN:-0}"
 gen="${MUSE_GEN:-32}"
 [[ "$gen" =~ ^[0-9]+$ ]] || { echo "muse_oracle: MUSE_GEN=$gen" >&2; exit 2; }
 TINY=models--optimum-intel-internal-testing--tiny-random-muse-glimmer
-GPTQ="${SNAP_MUSE:-models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound-GPTQ}"
+GPTQ="${SNAP_MUSE:-}"      # the int4 checkpoint: set below (either Vishva007 spelling) unless given
 BF16="${SNAP_MUSE_BF16:-models--meta-models--Muse-Glimmer-30B}"
 ASSIST="${SNAP_MUSE_ASSIST:-models--meta-models--Muse-Glimmer-30B-assistant}"
 PROMPTS="muse_short_prose muse_short_code muse_4k muse_8k muse_32k muse_agentic"
@@ -83,6 +84,13 @@ files = set(json.load(open(idx))["weight_map"].values()) if os.path.exists(idx) 
 sys.exit(1 if [f for f in files if not os.path.exists(os.path.join(d, f))] else 0)
 EOF
 }
+# The int4 checkpoint: the same export in two spellings (spec 23 §3.1) - the auto_round one (no g_idx; the Mac's
+# download) when complete, else the GPTQ one (g_idx, checked == i // 64).
+if [ -z "$GPTQ" ]; then
+  GPTQ=models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound-GPTQ
+  complete models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound && GPTQ=models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound
+fi
+echo "muse_oracle: the int4 checkpoint is $GPTQ"
 forms=()     # the checkpoint forms a mode can run on
 complete "$GPTQ" && forms+=(gptq)
 complete "$BF16" && forms+=(bf16)
