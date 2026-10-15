@@ -28,6 +28,14 @@ budget - and renders from KEY-SORTED messages and tools: b70-serve holds a reque
 nlohmann::json, whose objects are sorted, so the server's render of the same request is
 these ids (tools/tokenizer/dump_k2.py's rule).
 
+Muse-Glimmer (model_type muse_glimmer, spec 23a Task 5) renders with the ORIGINAL's chat_template.jinja
+(meta-models/Muse-Glimmer-30B, sha256 cfc67e5f...; a snapshot with another template - the GPTQ repo's older
+one - is refused: decision 1), ATEM calls from the arguments OBJECTS the set stores (the template raises on a
+JSON string), defaults {"reasoning_strength": "low", "current_date": "2026-10-15"} (K2's precedent for a
+reasoning-first model), KEY-SORTED like K2 / Kolibri (b70-serve's nlohmann::json). The plan's spelling
+    make_set.py --from <set dir> --model muse --tokenizer <bf16 snapshot> <out dir> [--kwargs JSON]
+is the same call.
+
 --lang de (spec 20e, KL4: Kolibri-1's German A4-style set): the same six templates over the same
 six files with the system prompt and the user turns in German (the DE table below); the tool
 results stay what the tools print. Kolibri-1 (model_type kolibri1) renders from KEY-SORTED
@@ -325,8 +333,19 @@ def load_tokenizer(snap: str):
 
 
 K2_KWARGS = {"tool_call_format": "xml", "reasoning_effort": "low"}
+MUSE_KWARGS = {"reasoning_strength": "low", "current_date": "2026-10-15"}
+MUSE_TEMPLATE_SHA = "cfc67e5f"      # the original's chat_template.jinja (spec 23 decision 1)
 # Models whose server render is of key-sorted objects (their template tests are recorded that way).
-SORTED_MODELS = ("k2_horizon", "kolibri1")
+SORTED_MODELS = ("k2_horizon", "kolibri1", "muse_glimmer")
+
+
+def check_muse_template(snap: str) -> None:
+    """Refuse a Muse snapshot whose chat_template.jinja is not the original's (the GPTQ repo ships an older one)."""
+    p = os.path.join(snap, "chat_template.jinja")
+    sha = hashlib.sha256(open(p, "rb").read()).hexdigest() if os.path.exists(p) else "absent"
+    if not sha.startswith(MUSE_TEMPLATE_SHA):
+        sys.exit(f"FATAL: {p} is sha256 {sha[:8]}..., not the original's {MUSE_TEMPLATE_SHA}... - render Muse-Glimmer "
+                 f"with meta-models/Muse-Glimmer-30B's small files (spec 23 decision 1)")
 
 
 def model_type(snap: str) -> str:
@@ -342,9 +361,12 @@ def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=No
     template variables (K2-Horizon's default K2_KWARGS); `tok` / `mtype` for the tests."""
     mtype = model_type(snap) if mtype is None else mtype
     k2 = mtype == "k2_horizon"
+    muse = mtype == "muse_glimmer"
     sort = mtype in SORTED_MODELS
     if kwargs is None:
-        kwargs = dict(K2_KWARGS) if k2 else {}
+        kwargs = dict(K2_KWARGS) if k2 else dict(MUSE_KWARGS) if muse else {}
+    if muse and tok is None:
+        check_muse_template(snap)
     tok = load_tokenizer(snap) if tok is None else tok
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(src, "manifest.json"), encoding="utf-8") as f:
@@ -436,6 +458,12 @@ def build_set(snap: str, out: str, lang: str = "en", tok=None, mtype: str | None
 
 
 def main() -> None:
+    if len(sys.argv) in (8, 10) and sys.argv[1] == "--from" and sys.argv[3:7:2] == ["--model", "--tokenizer"]:
+        if sys.argv[4] != "muse":           # the plan's spelling (spec 23a): --model muse --tokenizer SNAP
+            sys.exit("--model expects muse (other models: --from <set> <snapshot> <out>)")
+        if model_type(sys.argv[6]) != "muse_glimmer":
+            sys.exit(f"FATAL: {sys.argv[6]} is not a muse_glimmer snapshot")
+        sys.argv = sys.argv[:3] + [sys.argv[6]] + sys.argv[7:]
     if len(sys.argv) in (5, 7) and sys.argv[1] == "--from":
         kwargs = None
         if len(sys.argv) == 7:
