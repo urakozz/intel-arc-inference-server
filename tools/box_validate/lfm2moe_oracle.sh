@@ -52,7 +52,7 @@ if [ $mac = 1 ] && [ "$dry" != 1 ] && [ -z "${LFM_LOCK_HELD:-}" ]; then
 f = open(sys.argv[1], "a")
 fcntl.flock(f, fcntl.LOCK_EX)
 print("lfm2moe_oracle: holding the lock", flush=True)
-sys.exit(subprocess.call(sys.argv[2:]))' "$lock" "$0" "$@"
+sys.exit(subprocess.call(sys.argv[2:]))' "$lock" "$PWD/tools/box_validate/lfm2moe_oracle.sh" "$@"
 fi
 
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
@@ -89,9 +89,9 @@ if [ "$dry" = 1 ]; then
   echo "  (bf16 matmuls without native bf16 on either CPU); a 2048-row chunk touches ~all 64 experts of every MoE"
   echo "  layer (38 x 64 x 18.9 MB = 46 GB of bf16 expert slices read through the page cache), a decode step 4 a layer"
   echo "  (~2.9 GB); resident: embedding 0.52 GB + the expert buffers 1.2 GB + a layer's dense part."
-  echo "    lfm2moe_short (~200 ids) ~5-15 min (32 decode steps at ~5-20 s dominate)  peak RSS ~4-6 GB"
+  echo "    lfm2moe_short (100 ids) ~5-15 min (32 decode steps at ~5-20 s dominate)   peak RSS ~4-6 GB"
   echo "    lfm2moe_4k ~15-40 min (2 chunk-sized forwards of ~0.5-1 TFLOP-s each)        peak RSS ~6-8 GB"
-  echo "    lfm2moe_agentic (~12k ids) ~0.5-1.5 h (6 chunks of 2048)                     peak RSS ~8-12 GB"
+  echo "    lfm2moe_agentic (12474 ids) ~0.5-1.5 h (7 chunks of 2048)                    peak RSS ~8-12 GB"
   echo "    lfm2moe_32k ~1.5-3.5 h (16 chunks; 10 attention layers' eager scores over up to 32k keys: the"
   echo "      [32][2048][32768] bf16 / fp32 softmax transient ~13-22 GB in the last chunks) peak RSS ~25 GB"
   echo "    golden total ~2.5-6 h | ppl (3 sources, <= 4096 ids) ~20-40 min | hfcheck --layers 6 (2048 ids + 4 steps,"
