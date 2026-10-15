@@ -135,6 +135,14 @@ case "${1:-}" in
     # Queue row 41 (the llama-benchy comparison matrix): the vLLM XPU image tools/probe/vllm_benchy.sh serves.
     have vllm_image "the vLLM XPU image ${VLLM_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest} (tools/probe/vllm_benchy.sh)" \
       docker image inspect "${VLLM_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
+    # Queue row 48 (spec 24a, plan 24a): LFM2.5-24B-A2B's bf16 original (the reference's input,
+    # tools/box_validate/lfm2moe_oracle.sh), its golden sets and its A4 reference.
+    have lfm2moe_bf16 "LFM2.5-24B-A2B's bf16 original ${SNAP_LFM2MOE_BF16:-LiquidAI/LFM2.5-24B-A2B} (47.96 GB; hf download LiquidAI/LFM2.5-24B-A2B, df -h ~ first)" \
+      complete "${SNAP_LFM2MOE_BF16:-LiquidAI/LFM2.5-24B-A2B}"
+    have oracle_lfm2moe "oracle-out-lfm2moe/lfm2moe_{short,4k,agentic,32k}.{ids,golden.safetensors} (spec 24a: lfm2moe_oracle.sh golden)" \
+      bash -c 'for p in lfm2moe_short lfm2moe_4k lfm2moe_agentic lfm2moe_32k; do test -s oracle-out-lfm2moe/$p.ids && test -s oracle-out-lfm2moe/$p.golden.safetensors || exit 1; done'
+    have lfm2moe_a4_ref "oracle-out-lfm2moe-a4/ with LFM2.5's set and 36 <name>.bf16.txt (spec 24a: lfm2moe_oracle.sh a4 - the bf16 original's A4 reference, 24q / 24e score against it)" \
+      bash -c 'test -s oracle-out-lfm2moe-a4/set/manifest.json && test "$(ls oracle-out-lfm2moe-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     have tok_python "a python with tokenizers (${TOK_PYTHON:-?})" "${TOK_PYTHON:-/nonexistent}" -c 'import tokenizers'
     # shellcheck disable=SC2016 # expanded by the inner bash
     have uvx "uvx (llama-benchy)" bash -c 'command -v uvx || test -x "$HOME/.local/bin/uvx"'
