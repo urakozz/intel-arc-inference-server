@@ -582,7 +582,9 @@ def main() -> None:
         RUN = mask_tag(a["expert_mask"])      # <name>.mask-<tag>.{ids,txt,gap}, never the full run's .bf16.*
     if a["form"] and a["model"] != "muse":
         sys.exit("--form is Muse-Glimmer's (--model muse)")
-    if a["model"] == "muse":                  # spec 23a: the outputs are tagged by the checkpoint's form
+    with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:
+        is_muse = json.load(f).get("model_type") == "muse_glimmer"
+    if a["model"] == "muse" or is_muse:       # spec 23a: the outputs are tagged by the checkpoint's form, always
         got = muse_form(snap)
         if a["form"] and a["form"] != got:
             sys.exit(f"--form {a['form']}: {snap} is the {got} form")

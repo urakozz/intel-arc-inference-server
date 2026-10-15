@@ -123,6 +123,17 @@ def cmd_kl(a) -> None:
     t0 = time.time()
     srcs = sources(a.set, a.run, a.text, set(a.only.split(",")) if a.only else None)
     cache = {n: os.path.join(a.run, f"{n}.bf16.rows.safetensors") for n, *_ in srcs}
+
+    def ids_sha(prompt, cont) -> str:      # what a cached row set was computed over (and how)
+        key = f"{prompt}|{cont}|layers={a.layers}|chunk={a.chunk}"
+        return hashlib.sha256(key.encode()).hexdigest()
+    for name, _k, prompt, cont in srcs:   # a continuation regenerated under the cache: refuse, never compare stale rows
+        if os.path.exists(cache[name]):
+            with safe_open(cache[name], framework="pt") as f:
+                got = (f.metadata() or {}).get("ids_sha256")
+            if got != ids_sha(prompt, cont):
+                sys.exit(f"FATAL: {cache[name]} was computed over other ids (stale: the prompt / continuation, --layers "
+                         f"or --chunk changed) - move it aside and re-run")
     todo = [s for s in srcs if not os.path.exists(cache[s[0]])]
     if todo:
         if not a.bf16:
@@ -132,7 +143,8 @@ def cmd_kl(a) -> None:
             t1 = time.time()
             rows = teacher_rows(ref, model, tc, prompt, cont, a.chunk)
             save_file({"cap": rows.contiguous()}, cache[name] + ".tmp",
-                      metadata={"snapshot": os.path.abspath(a.bf16), "n_prompt": str(len(prompt)), "n_cont": str(len(cont))})
+                      metadata={"snapshot": os.path.abspath(a.bf16), "n_prompt": str(len(prompt)), "n_cont": str(len(cont)),
+                                "ids_sha256": ids_sha(prompt, cont)})
             os.replace(cache[name] + ".tmp", cache[name])
             print(f"bf16 rows {name}: {len(prompt)} + {len(cont)} ids, {time.time() - t1:.0f}s", flush=True)
         del model

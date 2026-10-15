@@ -458,9 +458,11 @@ def layer_major(model, pf, rec: "Recorder | None" = None):
             rec.base[key] = past
 
     @torch.no_grad()
-    def step_many(items, keys=None, last_only: bool = False):
-        """last_only: the head over each item's LAST row only - bitwise what model(..., logits_to_keep=1) computes
-        (a 1-row lm_head; a T-row one may accumulate differently), oracle_generate.py's greedy step."""
+    def step_many(items, keys=None, last_only: bool = False, tail: int = 0):
+        """last_only (= tail 1): the head over each item's LAST row only - bitwise what model(..., logits_to_keep=1)
+        computes (a 1-row lm_head; a T-row one may accumulate differently), oracle_generate.py's greedy step. tail=N:
+        the head over the last N rows (logits_to_keep=N's shape; hfcheck)."""
+        tail = 1 if last_only else tail
         import transformers
         if transformers.__version__ != PINNED_TRANSFORMERS:
             raise RuntimeError(f"layer_major restates transformers {PINNED_TRANSFORMERS}'s MuseGlimmerTextModel."
@@ -485,7 +487,7 @@ def layer_major(model, pf, rec: "Recorder | None" = None):
         out = []
         for j, p in enumerate(ps):
             select(keys[j], p["past"])
-            raw = model.lm_head(tm.norm(p["h"][:, -1:] if last_only else p["h"]))[0]
+            raw = model.lm_head(tm.norm(p["h"][:, -tail:] if tail > 0 else p["h"]))[0]
             out.append((raw, softcap(raw, tcfg.output_multiplier, tcfg.final_logit_softcapping)))
             p.clear()
         return out
@@ -713,11 +715,11 @@ def cmd_hfcheck(a) -> None:
         if arm == "streamed":
             step = layer_major(model, pf)
             st = {}
-            lm_rows = [step([(ids, 0, st)])[0]]
+            lm_rows = [step([(ids, 0, st)], tail=64)[0]]       # the streamed arm's logits_to_keep=64: the same head shape
             for i, tk in enumerate(toks):
                 lm_rows.append(step([([tk], len(ids) + i, st)])[0])
-            res["layer_major"] = ({"raw": torch.cat([lm_rows[0][0][-64:]] + [r for r, _ in lm_rows[1:]]),
-                                   "cap": torch.cat([lm_rows[0][1][-64:]] + [c for _, c in lm_rows[1:]])}, toks)
+            res["layer_major"] = ({"raw": torch.cat([r for r, _ in lm_rows]),
+                                   "cap": torch.cat([c for _, c in lm_rows])}, toks)
             print(f"hfcheck layer_major: {time.time() - t0:.0f}s", flush=True)
         del model
     (st_, stok), (rt, rtok) = res["streamed"], res["resident"]
