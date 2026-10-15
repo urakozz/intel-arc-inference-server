@@ -184,6 +184,96 @@ def test_hermes_hf_renders_round_trip():
     assert n_turns == 4, n_turns
 
 
+# ---- LFM2.5-24B-A2B (spec 24a Task 6): pythonic calls behind the reasoning the prompt opens --------------------
+
+S, E = "<|tool_call_start|>", "<|tool_call_end|>"
+BS = chr(92)
+
+
+def lfm(block: str, before: str = "", after: str = "<|im_end|>") -> str:
+    return "I should look at the file first.</think>" + before + S + block + E + after
+
+
+def test_pythonic_literal_types():
+    t = lfm("[f(s='x', i=-3, fl=2.5e-1, d=.5, t=True, n=None, xs=[1, 'a', [2]], m={\"k\": \"v\", \"n\": {\"x\": 1}}, "
+            "tu=(1, 2))]")
+    assert parse_first_call(t, "pythonic") == ("call", "f", {
+        "s": "x", "i": -3, "fl": 0.25, "d": 0.5, "t": True, "n": None, "xs": [1, "a", [2]],
+        "m": {"k": "v", "n": {"x": 1}}, "tu": [1, 2]}, 1)
+
+
+def test_pythonic_json_words_equal_python_words():
+    a = parse_first_call(lfm("[f(a=True, b=None, c=False)]"), "pythonic")
+    b = parse_first_call(lfm("[f(a=true, b=null, c=false)]"), "pythonic")
+    assert a == b and a[2] == {"a": True, "b": None, "c": False}
+
+
+def test_pythonic_quotes_and_escapes():
+    # a top-level string: the template's escapes (backslash, its own quote, n, r) decode; others stay verbatim
+    t = lfm("[read(filePath='/w/it" + BS + "'s" + BS + BS + "a" + BS + "nb" + BS + "rc', p='C:" + BS + "Users',"
+            " re='" + BS + "d+" + BS + "t', dq=\"say \\\"hi\\\"\")]")
+    assert parse_first_call(t, "pythonic")[2] == {"filePath": "/w/it's" + BS + "a\nb\rc", "p": "C:" + BS + "Users",
+                                                  "re": BS + "d+" + BS + "t", "dq": 'say "hi"'}
+    # inside a list / dict (tojson): JSON's escapes, \t and \u included
+    t = lfm('[f(xs=["a' + BS + 'tb", "' + BS + 'u00e9"], m={"q": "x' + BS + '"y"})]')
+    assert parse_first_call(t, "pythonic")[2] == {"xs": ["a\tb", "é"], "m": {"q": 'x"y'}}
+    # an unescaped quote that is not followed by a closer stays in the string
+    assert parse_first_call(lfm("[f(s='it's a test', k=1)]"), "pythonic")[2] == {"s": "it's a test", "k": 1}
+    # delimiters inside strings are content
+    assert parse_first_call(lfm("[f(s='a, b) ] { = >= c')]"), "pythonic")[2] == {"s": "a, b) ] { = >= c"}
+    # triple quotes; double quotes at top level
+    assert parse_first_call(lfm("[f(s='''multi\nline''', d=\"x\")]"), "pythonic")[2] == {"s": "multi\nline", "d": "x"}
+
+
+def test_pythonic_two_calls_first_wins_and_text_around():
+    t = lfm("[read(filePath='/w/a'), grep(pattern='x')]", before="Let me read it.\n", after="\nThen grep.<|im_end|>")
+    assert parse_first_call(t, "pythonic") == ("call", "read", {"filePath": "/w/a"}, 2)
+    two = lfm("[a(x=1)]") + "\n" + S + "[b(y=2)]" + E
+    assert parse_first_call(two, "pythonic")[:2] == ("call", "a")
+
+
+def test_pythonic_names_bare_call_and_empty():
+    assert parse_first_call(lfm("f(a=1)"), "pythonic") == ("call", "f", {"a": 1}, 1)          # no brackets
+    assert parse_first_call(lfm("[\"f\"(\"path\"='x')]"), "pythonic")[1:3] == ("f", {"path": "x"})
+    assert parse_first_call(lfm("[f()]"), "pythonic")[2] == {}
+    assert parse_first_call(lfm("[f(name='',)]"), "pythonic")[2] == {"name": ""}             # trailing comma
+    assert parse_first_call(lfm("[f(\n  a=1,\n  b=2\n)]"), "pythonic")[2] == {"a": 1, "b": 2}
+    assert parse_first_call(lfm("[f({'a': 1})]"), "pythonic")[2] == {"a": 1}                  # a lone positional dict
+
+
+def test_pythonic_incomplete():
+    assert parse_first_call(lfm("[f(1)]"), "pythonic")[0] == "incomplete"                    # positional
+    assert parse_first_call(lfm("[f(a)]"), "pythonic")[0] == "incomplete"                    # a name, no value
+    assert parse_first_call(lfm("[f(a=)]"), "pythonic")[0] == "incomplete"                   # = without a value
+    t = "done.</think>" + S + "[read(filePath='/w/a"                                         # unterminated block
+    assert parse_first_call(t, "pythonic")[0] == "incomplete"
+    assert parse_first_call(lfm("[f(a=1"), "pythonic")[0] == "incomplete"
+
+
+def test_pythonic_reasoning_and_no_call():
+    # the prompt ends in <think>: an output without </think> ended inside the reasoning
+    assert parse_first_call("still thinking " + S + "[f(a=1)]" + E, "pythonic")[0] == "reasoning"
+    assert parse_first_call("thought.</think>The function returns early.<|im_end|>", "pythonic")[0] == "no call"
+    # a block inside the reasoning is reasoning text, not a call
+    inside = "maybe " + S + "[f(a=1)]" + E + " no.</think>Nothing to do.<|im_end|>"
+    assert parse_first_call(inside, "pythonic")[0] == "no call"
+
+
+def test_pythonic_template_render_round_trip():
+    """chat_template.jinja's format_arg_value, restated: a string argument single-quoted with backslash, quote,
+    newline and CR escaped; lists / dicts through tojson; everything else str(). Reading it back gives the value."""
+    def fmt(v):
+        if isinstance(v, str):
+            return "'" + v.replace(BS, BS + BS).replace("'", BS + "'").replace("\n", BS + "n").replace("\r", BS + "r") + "'"
+        if isinstance(v, (dict, list)):
+            return json.dumps(v, ensure_ascii=False)
+        return str(v)
+    args = {"s": "it's C:" + BS + "x\nline\r", "n": 3, "f": 1.5, "b": False, "z": None,
+            "xs": ["a\"b", 1, {"k": "t" + BS + "u"}], "m": {"q": "x\ty"}}
+    block = "[f(" + ", ".join(f"{k}={fmt(v)}" for k, v in args.items()) + ")]"
+    assert parse_first_call(lfm(block), "pythonic") == ("call", "f", args, 1)
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     for n, f in tests:

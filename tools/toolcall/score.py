@@ -1,6 +1,6 @@
 """Score tool calls: the first tool call of each output against a reference run.
 
-    score.py [--format qwen|hermes] <out dir> <reference run> <candidate run>...
+    score.py [--format qwen|hermes|pythonic] <out dir> <reference run> <candidate run>...
 
 Reads <out dir>/<scenario>.<run>.txt (the generated text, special tokens kept) and compares
 each candidate's first call - its name and raw argument strings - with the reference's.
@@ -26,8 +26,22 @@ Two call syntaxes, told apart by their tags (the two sets share none):
       (optional whitespace, then <think> ... </think>) is skipped first, and an output that ends
       inside it is 'reasoning'. Arguments are kept as JSON values and compared as such.
 
+  pythonic (LFM2.5-24B-A2B, spec 24; `--format pythonic`): the prompt ends in <think>, so the output OPENS
+      inside reasoning, closed by </think> (an output that ends inside it is 'reasoning'; a block inside the
+      reasoning is reasoning text). Then <|tool_call_start|>[name(k=v, ...), ...]<|tool_call_end|>: a list of
+      calls with keyword arguments whose values are Python literals, read by a safe literal parser (never
+      eval): strings in single, double or triple quotes, ints, floats, True / False / None and JSON's true /
+      false / null, lists, tuples, dicts, nested. Escapes are the template's inverse per context
+      (chat_template.jinja's format_arg_value): a TOP-LEVEL string decodes only a doubled backslash, its own
+      quote's escape, n and r; a string inside a list / dict (written by tojson) decodes JSON's set; every
+      other backslash is kept verbatim. A quote closes a string only when what follows (after whitespace) is
+      , ) ] } : or the end of the block, so 'it's here' is one string. A bare call without the brackets is one
+      call; a lone positional dict is the arguments; any other positional argument, or a name without a
+      value, makes the call 'incomplete'. The first block's first call wins; values compare as JSON values
+      (True == true, tuples == lists).
+
 Kinds: 'call', 'no call', 'incomplete' (a call opened and not closed, or one that does not
-parse), 'reasoning' (K2 / hermes: generation ended inside the reasoning).
+parse), 'reasoning' (K2 / hermes / pythonic: generation ended inside the reasoning).
 """
 import json
 import os
@@ -157,10 +171,202 @@ def parse_first_call_hermes(text: str):
     return ("call", got[0], got[1], len(calls))
 
 
+LFM_THINK_CLOSE = "</think>"
+LFM_START, LFM_END = "<|tool_call_start|>", "<|tool_call_end|>"
+_BS = chr(92)                                              # a backslash
+_TOP_ESC = {_BS: _BS, "n": "\n", "r": "\r"}                # + the string's own quote
+_JSON_ESC = {'"': '"', _BS: _BS, "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+_WS = " \t\r\n"
+
+
+class _PyLit:
+    """The pythonic call list's literal parser (spec 24 §4.6, decision 7) over a block's body."""
+
+    CLOSERS = ",)]}:"
+    WORDS = {"True": True, "true": True, "False": False, "false": False, "None": None, "null": None}
+
+    def __init__(self, s: str):
+        self.s, self.i = s, 0
+
+    def peek(self) -> str:
+        while self.i < len(self.s) and self.s[self.i] in _WS:
+            self.i += 1
+        return self.s[self.i] if self.i < len(self.s) else ""
+
+    def eat(self, c: str) -> None:
+        if self.peek() != c:
+            raise ValueError(f"expected {c!r} at {self.i}")
+        self.i += 1
+
+    def closes(self, j: int, extra: str = "") -> bool:
+        """A quote ending at j closes its string when the next non-space character is a closer or the end
+        (`extra`: a quoted NAME also closes before ( or =)."""
+        while j < len(self.s) and self.s[j] in _WS:
+            j += 1
+        return j >= len(self.s) or self.s[j] in self.CLOSERS + extra
+
+    def string(self, nested: bool, extra: str = "") -> str:
+        self.peek()
+        q = self.s[self.i]
+        triple = self.s.startswith(q * 3, self.i)
+        self.i += 3 if triple else 1
+        out = []
+        while True:
+            if self.i >= len(self.s):
+                raise ValueError("unterminated string")
+            c = self.s[self.i]
+            if c == _BS and self.i + 1 < len(self.s):
+                e = self.s[self.i + 1]
+                if nested and e == "u" and self.i + 6 <= len(self.s):
+                    out.append(chr(int(self.s[self.i + 2:self.i + 6], 16)))
+                    self.i += 6
+                    continue
+                table = _JSON_ESC if nested else dict(_TOP_ESC, **{q: q})
+                out.append(table[e] if e in table else c + e)   # anything else verbatim ("C:\Users", "\d")
+                self.i += 2
+                continue
+            if triple and self.s.startswith(q * 3, self.i):
+                self.i += 3
+                return "".join(out)
+            if not triple and c == q and self.closes(self.i + 1, extra):
+                self.i += 1
+                return "".join(out)
+            out.append(c)
+            self.i += 1
+
+    def name(self) -> str:
+        if self.peek() in ("'", '"'):
+            return self.string(False, "(=")
+        j = self.i
+        while self.i < len(self.s) and (self.s[self.i].isalnum() or self.s[self.i] in "_.-"):
+            self.i += 1
+        if j == self.i:
+            raise ValueError(f"expected a name at {j}")
+        return self.s[j:self.i]
+
+    def value(self, nested: bool, depth: int):
+        if depth > 64:
+            raise ValueError("nested deeper than 64")
+        c = self.peek()
+        if c in ("'", '"'):
+            return self.string(nested)
+        if c in "[(":
+            close = "]" if c == "[" else ")"
+            self.i += 1
+            out = []
+            while self.peek() != close:
+                out.append(self.value(True, depth + 1))
+                if self.peek() == ",":
+                    self.i += 1
+                elif self.peek() != close:
+                    raise ValueError("list separator")
+            self.i += 1
+            return out
+        if c == "{":
+            self.i += 1
+            out = {}
+            while self.peek() != "}":
+                k = self.value(True, depth + 1)
+                self.eat(":")
+                out[k if isinstance(k, str) else json.dumps(k)] = self.value(True, depth + 1)
+                if self.peek() == ",":
+                    self.i += 1
+                elif self.peek() != "}":
+                    raise ValueError("dict separator")
+            self.i += 1
+            return out
+        j = self.i
+        while self.i < len(self.s) and (self.s[self.i].isalnum() or self.s[self.i] in "+-._"):
+            self.i += 1
+        tok = self.s[j:self.i]
+        if tok in self.WORDS:
+            return self.WORDS[tok]
+        for conv in (int, float):
+            try:
+                return conv(tok)
+            except ValueError:
+                pass
+        raise ValueError(f"not a literal: {tok!r}")
+
+    def call(self):
+        name = self.name()
+        self.eat("(")
+        args, positional = {}, []
+        while self.peek() != ")":
+            if self.peek() in ("'", '"', "[", "(", "{") or self.peek().isdigit() or self.peek() in "+-.":
+                v = self.string(False, "=") if self.peek() in ("'", '"') else self.value(False, 1)
+                if self.peek() == "=" and isinstance(v, str):     # a quoted argument name: "path"="x"
+                    self.i += 1
+                    args[v] = self.value(False, 1)
+                else:
+                    positional.append(v)
+            else:
+                k = self.name()
+                if self.peek() != "=":
+                    raise ValueError(f"{k}: a name without '='")
+                self.i += 1
+                if self.peek() in (",", ")", ""):
+                    raise ValueError(f"{k}= without a value")
+                args[k] = self.value(False, 1)
+            if self.peek() == ",":
+                self.i += 1
+            elif self.peek() != ")":
+                raise ValueError("argument separator")
+        self.i += 1
+        if positional:
+            if len(positional) == 1 and isinstance(positional[0], dict) and not args:
+                return name, positional[0]
+            raise ValueError("a positional argument")
+        return name, args
+
+    def calls(self) -> list:
+        bracket = self.peek() == "["
+        if bracket:
+            self.i += 1
+        out = []
+        while self.peek() not in ("]", ""):
+            out.append(self.call())
+            if self.peek() == ",":
+                self.i += 1
+        if bracket:
+            self.eat("]")
+        if self.peek() != "" or not out:
+            raise ValueError("text after the call list, or no call")
+        return out
+
+
+def parse_pythonic_block(body: str) -> list:
+    """The calls of one <|tool_call_start|> ... <|tool_call_end|> body: [(name, arguments dict)]; ValueError when
+    it does not parse."""
+    return _PyLit(body).calls()
+
+
+def parse_first_call_pythonic(text: str):
+    """-> (kind, name, arguments, n_calls) for LFM2.5's output (its prompt ends in <think>)."""
+    end = text.find(LFM_THINK_CLOSE)
+    if end < 0:
+        return ("reasoning", None, {}, 0)
+    rest = text[end + len(LFM_THINK_CLOSE):]
+    a = rest.find(LFM_START)
+    if a < 0:
+        return ("no call", None, {}, 0)
+    b = rest.find(LFM_END, a)
+    if b < 0:
+        return ("incomplete", None, {}, 0)
+    try:
+        calls = parse_pythonic_block(rest[a + len(LFM_START):b])
+    except (ValueError, IndexError):
+        return ("incomplete", None, {}, 0)
+    name, args = calls[0]
+    return ("call", name, args, len(calls))
+
+
 def parse_first_call(text: str, fmt: str = "auto"):
     """-> (kind, name, params, n_calls); kind is 'call', 'no call', 'incomplete' or (K2, hermes)
     'reasoning'. fmt 'hermes' reads Kolibri-1's calls; 'auto' (and 'qwen') K2's tags when present,
     else Qwen XML."""
+    if fmt == "pythonic":
+        return parse_first_call_pythonic(text)
     if fmt == "hermes":
         return parse_first_call_hermes(text)
     if is_k2(text):
@@ -179,8 +385,8 @@ def main() -> None:
     args = sys.argv[1:]
     fmt = "auto"
     if args[:1] == ["--format"]:
-        if len(args) < 2 or args[1] not in ("qwen", "hermes"):
-            sys.exit("--format expects qwen or hermes")
+        if len(args) < 2 or args[1] not in ("qwen", "hermes", "pythonic"):
+            sys.exit("--format expects qwen, hermes or pythonic")
         fmt, args = args[1], args[2:]
     if len(args) < 3:
         sys.exit(__doc__)
@@ -210,7 +416,7 @@ def main() -> None:
     print()
     for c in cands:
         print(f"{c}: {matches[c]} / {len(names)} match {ref}")
-    if fmt == "hermes":   # KL4's hard bar: the parser reads every call the reference wrote
+    if fmt in ("hermes", "pythonic"):   # KL4's / spec 24 F6's bar: the parser reads every call the reference wrote
         bad = [n for n in names if parse_first_call(
             open(os.path.join(out, f"{n}.{ref}.txt"), encoding="utf-8").read(), fmt)[0] == "incomplete"]
         print(f"{ref}: {len(bad)} parse failure(s)" + (f": {', '.join(bad)}" if bad else ""))
