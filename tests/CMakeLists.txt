@@ -3592,10 +3592,8 @@ if(B70_MUSE)
 endif()
 # b70-decode's model_type dispatch and Muse's refusals, before the device: tests/model/muse_glimmer/ holds only the
 # checkpoint's config.json (and generation_config.json), which is all the dispatch reads. b70-serve refuses the model
-# naming spec 23e.
+# naming spec 23e. (23d removed 23c's cli_reject_muse_prefill / _prefill_len: Muse prefills now - spec 23d's block.)
 set(_muse_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer)
-b70_cli_reject(cli_reject_muse_prefill ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --prefill EXPECT "spec 23d")
-b70_cli_reject(cli_reject_muse_prefill_len ${_muse_cfg} --bench --prefill-length 64 EXPECT "spec 23d")
 b70_cli_reject(cli_reject_muse_mtp ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "no MTP head")
 b70_cli_reject(cli_reject_muse_spec ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash EXPECT "spec 23f")
 b70_cli_reject(cli_reject_muse_kv8 ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "bf16 only")
@@ -3647,5 +3645,33 @@ if(B70_MUSE)
   add_dependencies(muse_pf_kernels_test ${B70_MUSE_PREFILL_KERNELS})
   add_test(NAME muse_pf_kernels_test COMMAND muse_pf_kernels_test)
   set_tests_properties(muse_pf_kernels_test PROPERTIES LABELS "muse;prefill" TIMEOUT 1800)
+  # Task 3: the prefill walk on the card (box only; SKIP 77 without 23b's 4-layer synthetic checkpoint).
+  #   muse_prefill_test: the walk's launches and the plan, MG4 (two prefills, recorded == replayed, chunks of 64 ==
+  #       chunks of 2048, all bitwise), Review Focus 5 (KV / rings / logits / tokens / pos against decode's fill) on
+  #       muse_short_prose / muse_4k / muse_8k; its `split` mode is prefill_split_muse_test (Review Focus 2 / 3), its
+  #       `pp` mode one card against two, bitwise (two GPUs, Task 4).
+  add_executable(muse_prefill_test runtime/muse_prefill_test.cc)
+  target_include_directories(muse_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_prefill_test PRIVATE b70_muse_prefill b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(muse_prefill_test)
+  endif()
+  add_dependencies(muse_prefill_test ${B70_MUSE_PREFILL_KERNELS} ${B70_MUSE_DECODE_KERNELS} kernel_pp_handoff)
+  set(_muse_prompts ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
+  add_test(NAME muse_prefill_synth_test COMMAND muse_prefill_test ${B70_MUSE_SYNTH_DIR}/ckpt4 ${_muse_prompts} all)
+  add_test(NAME muse_prefill_synth_bf16_test COMMAND muse_prefill_test ${B70_MUSE_SYNTH_DIR}/ckpt4 ${_muse_prompts} all
+    bf16)
+  add_test(NAME muse_prefill_synth_eager_test COMMAND muse_prefill_test ${B70_MUSE_SYNTH_DIR}/ckpt4 ${_muse_prompts} all)
+  set_tests_properties(muse_prefill_synth_eager_test PROPERTIES ENVIRONMENT "B70_MUSE_ATTN=eager")
+  add_test(NAME prefill_split_muse_test COMMAND muse_prefill_test ${B70_MUSE_SYNTH_DIR}/ckpt4 ${_muse_prompts} split)
+  set_tests_properties(muse_prefill_synth_test muse_prefill_synth_bf16_test muse_prefill_synth_eager_test
+    prefill_split_muse_test PROPERTIES LABELS "checkpoint;muse;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
+# Task 3: b70-decode's Muse prefill backends and chunk, before the device (tests/model/muse_glimmer: config.json only).
+b70_cli_reject(cli_reject_muse_prefill_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer --bench --prefill-length 64
+  --prefill-backend l0-int8 EXPECT "6656 = 6.5 x 1024")
+b70_cli_reject(cli_reject_muse_prefill_sycl ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer --ids ${B70_OK_IDS} --n 4
+  --prefill --prefill-backend sycl-tla EXPECT "sycl-tla has no Muse walk")
+b70_cli_reject(cli_reject_muse_prefill_chunk ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer --ids ${B70_OK_IDS} --n 4
+  --prefill --prefill-chunk 4096 EXPECT "exceeds Muse-Glimmer's prefill chunk 2048")
 # ==== Spec 23d: Muse-Glimmer prefill ==== (end) ====
