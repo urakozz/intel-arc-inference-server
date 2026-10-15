@@ -26,3 +26,10 @@ target_link_libraries(b70_kolibri_model PUBLIC b70_model)
 add_library(b70_qwen4exp_model STATIC qwen4exp.cc)
 target_include_directories(b70_qwen4exp_model PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_qwen4exp_model PUBLIC b70_model)
+
+# --- Spec 23b: Muse-Glimmer-30B ------------------------------------------------------------------
+# The text model as data, BESIDE qwen3_5, K2, Kolibri and qwen4_exp (spec 23 §5.1): its own table, sharing
+# GemvShape / WeightKind / Fuse from qwen35.h. Host only.
+add_library(b70_muse_model STATIC muse_glimmer.cc)
+target_include_directories(b70_muse_model PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_muse_model PUBLIC b70_model)
