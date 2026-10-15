@@ -122,6 +122,9 @@ case "${1:-}" in
       bash -c 'for p in muse_short_prose muse_short_code muse_4k muse_8k muse_32k muse_agentic; do test -s oracle-out-muse/$p.ids && test -s oracle-out-muse/$p.golden.safetensors || exit 1; done'
     have oracle_muse_a4 "oracle-out-muse-a4/ with 36 <name>.bf16.txt and 36 <name>.gptq.txt (spec 23a gate Q: muse_oracle.sh a4)" \
       bash -c 'test "$(ls oracle-out-muse-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36 && test "$(ls oracle-out-muse-a4/*.gptq.txt 2>/dev/null | wc -l)" -eq 36'
+    # Spec 23b: the synthetic real-width checkpoint (4 layers, check.py ACCEPTED) the loader's tests read.
+    have oracle_muse_synth "oracle-out-muse-synth/ckpt4/ + ckpt4.ACCEPTED (spec 23b: r43.synth - muse_oracle.sh synth-ckpt)" \
+      bash -c 'test -s oracle-out-muse-synth/ckpt4/model.safetensors.index.json && test -f oracle-out-muse-synth/ckpt4.ACCEPTED'
     have k2_a4_set "oracle-out-k2-a4/set/manifest.json (K2's tool-call set, spec 18d: --with r25.a4_ref, or tools/toolcall/a4_ref.sh k2 set)" \
       test -s oracle-out-k2-a4/set/manifest.json
     have oracle_k2_a4 "oracle-out-k2-a4/ with K2's set and 36 <name>.bf16.txt (18a's reference on it: --with r25.a4_ref)" \

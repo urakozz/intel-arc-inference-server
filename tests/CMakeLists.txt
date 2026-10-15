@@ -3425,3 +3425,75 @@ add_executable(probe_offload_kernel_drift_test kernels/probe_offload_kernel_drif
 add_test(NAME probe_offload_kernel_drift_test COMMAND probe_offload_kernel_drift_test ${CMAKE_SOURCE_DIR})
 set_tests_properties(probe_offload_kernel_drift_test PROPERTIES LABELS host)
 # ==== Spec 22a: the expert-offload probe ==== (end) ====
+
+# ==== Spec 23b: Muse-Glimmer descriptor and loader (label muse) ==== (begin) ====
+# One delimited block for every 23b registration. Host tests first (tools/mac_check.sh runs them), then the
+# checkpoint / card ones (box queue row 43): they SKIP (77) until the synthetic checkpoint
+# (tools/box_validate/muse_oracle.sh synth-ckpt) or the real int4 checkpoint is on the machine.
+# Task 1: the descriptor against the vendored config.json (meta-models/Muse-Glimmer-30B @ a4e59da5, byte for byte)
+# and, when the HF cache has it, the int4 repo's config.json.
+set(B70_MUSE_SNAPSHOT "Vishva007/Muse-Glimmer-30B-W4A16-AutoRound" CACHE STRING
+  "Muse-Glimmer-30B int4 g64 checkpoint (either Vishva007 spelling: -AutoRound or -AutoRound-GPTQ)")
+add_executable(muse_glimmer_test model/muse_glimmer_test.cc)
+target_include_directories(muse_glimmer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(muse_glimmer_test PRIVATE b70_muse_model)
+# The int4 repo's config.json only when this machine's HF cache has it (an absent path would disable the test here).
+if(DEFINED ENV{HF_HOME})
+  set(_muse_hf "$ENV{HF_HOME}")
+else()
+  set(_muse_hf "$ENV{HOME}/.cache/huggingface")
+endif()
+string(REPLACE "/" "--" _muse_repo "${B70_MUSE_SNAPSHOT}")
+file(GLOB _muse_int4_cfg "${_muse_hf}/hub/models--${_muse_repo}/snapshots/*/config.json"
+  "${_muse_hf}/hub/models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound*/snapshots/*/config.json")
+list(SUBLIST _muse_int4_cfg 0 1 _muse_int4_cfg)
+add_test(NAME muse_glimmer_test COMMAND muse_glimmer_test ${CMAKE_SOURCE_DIR}/tests/model/muse_glimmer/config.json
+  ${CMAKE_SOURCE_DIR}/tests/model/muse_glimmer/generation_config.json ${_muse_int4_cfg})
+set_tests_properties(muse_glimmer_test PROPERTIES LABELS muse)
+# Task 2: every allocation's bytes from loader/muse_layout.h (spec 23 §2's derived numbers). Host only.
+add_executable(muse_layout_test loader/muse_layout_test.cc)
+target_include_directories(muse_layout_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(muse_layout_test PRIVATE b70_muse_model b70_kolibri_model)
+add_test(NAME muse_layout_test COMMAND muse_layout_test)
+set_tests_properties(muse_layout_test PROPERTIES LABELS muse)
+# Task 3: the loader's host half - fixtures written by the test (the real widths at one layer; small-width
+# refusals), and 23a's tiny int4 variant / make_synth.py's checkpoint when present (MUSE_TINY_INT4 / MUSE_SYNTH_DIR;
+# their absence skips that part only). Host only.
+set(B70_MUSE_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-muse-synth" CACHE PATH
+  "Spec 23b's synthetic checkpoints: <dir>/ckpt4 (box: r43.synth) or ckpt2 (the Mac)")
+set(B70_MUSE_TINY_INT4 "${CMAKE_SOURCE_DIR}/oracle-out-muse-tiny-int4" CACHE PATH
+  "23a's tiny int4 variant (tools/oracle/muse_make_tiny.py --variant int4)")
+add_executable(muse_repack_test loader/muse_repack_test.cc)
+target_include_directories(muse_repack_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+  ${CMAKE_SOURCE_DIR}/tests/loader)
+target_link_libraries(muse_repack_test PRIVATE b70_muse_loader)
+add_test(NAME muse_repack_test COMMAND muse_repack_test)
+set_tests_properties(muse_repack_test PROPERTIES LABELS muse TIMEOUT 900
+  ENVIRONMENT "MUSE_TINY_INT4=${B70_MUSE_TINY_INT4};MUSE_SYNTH_DIR=${B70_MUSE_SYNTH_DIR}")
+# Task 5: the memory plan - one card at 131072 with the drafter's reservation, two by bytes, decision 6. Host only.
+add_executable(muse_plan_test runtime/muse_plan_test.cc)
+target_include_directories(muse_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(muse_plan_test PRIVATE b70_muse_plan)
+add_test(NAME muse_plan_test COMMAND muse_plan_test)
+set_tests_properties(muse_plan_test PROPERTIES LABELS muse)
+# Task 3 (device half): load_muse_glimmer on the card - the synthetic checkpoint on one card and split 2 over two
+# (r43.load), the real checkpoint (r43.load_real). SKIP 77 without the data / the second card.
+add_executable(muse_load_checkpoint_test loader/muse_load_checkpoint_test.cc)
+target_include_directories(muse_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(muse_load_checkpoint_test PRIVATE b70_muse_loader b70_l0)
+add_test(NAME muse_load_synth_test COMMAND muse_load_checkpoint_test ${B70_MUSE_SYNTH_DIR}/ckpt4)
+add_test(NAME muse_load_synth_pp2_test COMMAND muse_load_checkpoint_test ${B70_MUSE_SYNTH_DIR}/ckpt4 0 2)
+add_test(NAME muse_load_real_test COMMAND muse_load_checkpoint_test ${B70_MUSE_SNAPSHOT})
+set_tests_properties(muse_load_synth_test muse_load_synth_pp2_test muse_load_real_test
+  PROPERTIES LABELS "checkpoint;muse" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+# Task 4: the host half over make_synth.py's checkpoint (Review Focus 5) and over the real checkpoint (either spelling;
+# the names, the data asserts and every layer's repack on the host) - label checkpoint, so mac_check leaves them to the
+# box's r43.synth_host (run them by hand on a Mac that has the files: build/mac-host/tests/muse_synth_host_test <dir>).
+add_executable(muse_synth_host_test loader/muse_synth_host_test.cc)
+target_include_directories(muse_synth_host_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(muse_synth_host_test PRIVATE b70_muse_loader)
+add_test(NAME muse_synth_host_test COMMAND muse_synth_host_test ${B70_MUSE_SYNTH_DIR}/ckpt4)
+add_test(NAME muse_real_host_test COMMAND muse_synth_host_test ${B70_MUSE_SNAPSHOT})
+set_tests_properties(muse_synth_host_test muse_real_host_test PROPERTIES LABELS "checkpoint;muse" SKIP_RETURN_CODE 77
+  TIMEOUT 3600)
+# ==== Spec 23b: Muse-Glimmer descriptor and loader ==== (end) ====
