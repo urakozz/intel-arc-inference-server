@@ -460,8 +460,9 @@ On Kolibri's pattern (spec 20 §11):
   argmax mask; flash against fp64 at cosine ≥ 0.99999 (spec 6 K1).
 - **F3, golden** (greedy, tie-aware, docs/14's undetermined-row rule) against the **engine-format** reference (our
   export dequantised): on a synthetic real-width checkpoint, on the RTN export, then on the AutoRound export. Routing:
-  top-4 sets equal except near-ties at the 4th / 5th `sel` (a tolerance from 24a's gap distribution, decision 4 of the
-  plan, as `B70_LFM_TIE_TOL`; an exact 0 gap undetermined). The fused arms are bitwise the as-built list.
+  top-4 sets equal except near-ties at the 4th / 5th `sel` (`B70_LFM_TIE_TOL`, set from 24a's measured gap
+  distribution, 1e-3 PROPOSED until then; an exact 0 gap undetermined). Prefill against decode's fill is held to cosine
+  bars, not bitwise (the GEMM's K order differs from the GEMV's; plan 24d). The fused arms are bitwise the as-built list.
 - **F4, determinism.** Replay bitwise; prefill split at multiples of 64 bitwise; chunked = whole; prefix-cache restores at
   block ends bitwise the cold run (KV and conv rings); `--pp 2` bitwise `--pp 1`.
 - **F5 is unused** (no MTP head).
