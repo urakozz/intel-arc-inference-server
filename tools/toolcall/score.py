@@ -349,26 +349,46 @@ class _PyLit:
         return self.done
 
     def calls(self, partial: bool = False) -> list:
-        """The block's calls. Quote recovery (spec 24 §4.6): when the parse fails, the last quote that closed a
-        string is kept IN the string instead and the parse restarts - once per quote, so at most one retry per
-        quote of the block. `partial` (generation ended inside the block): the calls whose ) closed, from the
+        """The block's calls. Quote recovery (spec 24 §4.6): when a parse fails, a quote that closed a string in that
+        attempt is kept IN the string instead and the parse restarts - a depth-first search over which quotes to
+        keep, latest quote first, each quote kept at most once on a path and only quotes AFTER the last one kept
+        tried next (so every set of kept quotes is tried at most once), bounded by MAX_ATTEMPTS parses (the block's
+        length, at least 64). `partial` (generation ended inside the block): the calls whose ) closed, from the
         attempt that closed the most; ValueError when none did."""
-        skip: set[int] = set()
         best: list = []
-        while True:
-            self.i, self.skip, self.closed, self.done = 0, skip, [], []
+        budget = [max(64, len(self.s))]
+
+        def attempt(skip: frozenset):
+            self.i, self.skip, self.closed, self.done = 0, set(skip), [], []
+            budget[0] -= 1
             try:
-                return self._calls()
+                return self._calls(), []
             except (ValueError, IndexError):
-                if len(self.done) > len(best):
-                    best = list(self.done)
-                cand = [q for q in reversed(self.closed) if q not in skip]
-                if cand:
-                    skip.add(cand[0])
+                return None, (list(self.done), list(self.closed))
+
+        def search(skip: frozenset, floor: int):
+            nonlocal best
+            got, info = attempt(skip)
+            if got is not None:
+                return got
+            done, closed = info
+            if len(done) > len(best):
+                best = done
+            for q in reversed(closed):            # the latest closing quote first
+                if budget[0] <= 0:
+                    return None
+                if q in skip or q <= floor:
                     continue
-                if partial and best:
-                    return best
-                raise ValueError("the call list does not parse") from None
+                r = search(skip | {q}, q)
+                if r is not None:
+                    return r
+            return None
+        got = search(frozenset(), -1)
+        if got is not None:
+            return got
+        if partial and best:
+            return best
+        raise ValueError("the call list does not parse")
 
 
 def parse_pythonic_block(body: str, partial: bool = False) -> list:
