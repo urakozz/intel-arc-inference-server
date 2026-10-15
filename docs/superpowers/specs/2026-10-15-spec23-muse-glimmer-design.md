@@ -208,6 +208,10 @@ CPU (23a); it is never served.
 
 ### 3.3 The quality rule
 
+**Ruled 2026-10-15 (operator): Vishva007's quant is kept.** The operator has re-quantised with this recipe on
+coding data before and saw no reason to repeat it here. Gate Q still runs (23a), as a **recorded measurement, not a
+decision**: it documents the int4 checkpoint's distance from bf16 on A4 / KL; a re-quantisation is not on the plan.
+
 The checkpoint is served as is **unless** 23a's gate Q (on the box CPU, both references layer-streamed) shows a gap.
 The operator's ruling stands (use it as-is first); gate Q exists because its calibration was the Pile (§3.1), not
 agentic coding - if quantisation error concentrates anywhere, it is on the chat-template / channel / ATEM tokens our
@@ -470,7 +474,9 @@ drafter, ~0.18 plain steps** at roofline (estimated: 4.6 ms against ~32 ms) - fl
    int4 linears allocated, 13.4 GB, plus the int8 head) - `gemv.cl` at M = 9..16 as new variants if they compile, else
    two M = 8 passes, both measured - and one drafter block at M = 16 (bf16 / int8 / int4); interleaved pairs after a warm-up,
    median of 3 (sequential arms mis-state ratios under clock drift).
-5. **The projection and the stopping rule:** tokens / s at the best K per corpus. **Go only if DFlash beats plain
+5. **The projection** (ruled 2026-10-15: the engine half is built whatever P0 shows - the operator's "we need to
+   support it"; P0 picks the drafter format, K_max and the q form, and sets the expectation). The superseded rule:
+   tokens / s at the best K per corpus. **Go only if DFlash beats plain
    decode by >= 10 % AND prompt lookup by >= 10 % on the coding and agentic sets** (Muse has no MTP head); otherwise
    stop and record, and 23f's engine half does not start.
 
