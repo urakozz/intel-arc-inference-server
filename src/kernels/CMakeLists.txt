@@ -1394,6 +1394,18 @@ if(B70_MUSE)
   add_ocloc_kernel(mg_attn_prep_M1_N8704_S2_Q32KV2_F SOURCE ${MG_CL}/mg_prep.cl
                    DEFINES ${CTRL_DEFINES} M=1 QGKV_N=8704 QGKV_S=2 ${MG_HEADS} SLIDING=0 RING=0)
   add_ocloc_kernel(mg_silu_mul_M1_I19968_S8 SOURCE ${MG_CL}/mg_prep.cl DEFINES M=1 SILU_I=19968 SILU_S=8)
+  # mg_attn.cl (flash, the default: kol_attn.cl's v2 structure at GQA 16 with the gate in the reduce, M <= 16 as a
+  # define) and mg_attn_eager.cl (B70_MUSE_ATTN=eager: the reference's bf16 chain, one launch), sliding (the
+  # 2048-key window through the 4096-slot ring) and full (NoPE). TGT 64: a window's 34 absolute 64-key blocks.
+  set(MG_ATTN_HEADS TGT=64 Q_HEADS=32 KV_HEADS=2)
+  add_ocloc_kernel(mg_attn_M1_T64_Q32KV2_W2048_R4096 SOURCE ${MG_CL}/mg_attn.cl
+                   DEFINES ${CTRL_DEFINES} M=1 ${MG_ATTN_HEADS} WINDOW=2048 RING=4096)
+  add_ocloc_kernel(mg_attn_M1_T64_Q32KV2_F SOURCE ${MG_CL}/mg_attn.cl
+                   DEFINES ${CTRL_DEFINES} M=1 ${MG_ATTN_HEADS} WINDOW=0 RING=0)
+  add_ocloc_kernel(mg_attn_eager_M1_T64_Q32KV2_W2048_R4096 SOURCE ${MG_CL}/mg_attn_eager.cl
+                   DEFINES ${CTRL_DEFINES} M=1 ${MG_ATTN_HEADS} WINDOW=2048 RING=4096)
+  add_ocloc_kernel(mg_attn_eager_M1_T64_Q32KV2_F SOURCE ${MG_CL}/mg_attn_eager.cl
+                   DEFINES ${CTRL_DEFINES} M=1 ${MG_ATTN_HEADS} WINDOW=0 RING=0)
 endif()
 # ==== Spec 23c: Muse-Glimmer-30B decode ==== (end) ====
 

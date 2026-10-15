@@ -251,6 +251,56 @@ void prep_checks(clrun::Device& dev) {
   }
 }
 
+// mg_attn_eager.cl (one launch a layer) against museref::attention_eager, bitwise (no Apple sqrt / divide in its
+// exp-free part; the softmax's reciprocal is 1 / sum - Apple's divide may move a probability, counted with the
+// output): sliding through the ring at 5, 2046, 2047, 2048, 4095, 4096, 4097, 9000 (Review Focus 3's rows: the
+// window's edge, the ring's wrap) and at 4904 (= 9000 - 4096: the same ring rows, the same output), full at 3000;
+// random caches and q, the gate applied.
+void attention_checks(clrun::Device& dev) {
+  const uint32_t ML = 3001;
+  std::mt19937 rng(40);
+  std::uniform_real_distribution<float> u(-1.f, 1.f), uq(-4.f, 4.f);
+  std::vector<uint16_t> rk(size_t(mr::kRing) * KVN), rv(rk.size()), fk(size_t(ML) * KVN), fv(fk.size()), q(QN), g(QN);
+  for (auto* v : {&rk, &rv, &fk, &fv})
+    for (uint16_t& e : *v) e = rne(u(rng));
+  for (uint16_t& e : q) e = rne(uq(rng));
+  for (uint16_t& e : g) e = mr::gate_bf16(rne(uq(rng)));
+  std::vector<float> qf(QN);
+  for (uint32_t i = 0; i < QN; ++i) qf[i] = bf(q[i]);
+  std::vector<uint16_t> o4904;
+  for (int sliding = 1; sliding >= 0; --sliding) {
+    clrun::Program p(dev, "src/kernels/muse/mg_attn_eager.cl",
+                     with(kCtrlDefs, {"M=1", "TGT=64", "Q_HEADS=32", "KV_HEADS=2", sliding ? "WINDOW=2048" : "WINDOW=0",
+                                      sliding ? "RING=4096" : "RING=0"}));
+    const std::vector<uint16_t>& kc = sliding ? rk : fk;
+    const std::vector<uint16_t>& vc = sliding ? rv : fv;
+    for (uint32_t pos : sliding ? std::vector<uint32_t>{5, 2046, 2047, 2048, 4095, 4096, 4097, 4904, 9000}
+                                : std::vector<uint32_t>{3000}) {
+      std::vector<uint32_t> ctrl(32, 0);
+      ctrl[0] = pos;
+      ctrl[1] = 1;
+      clrun::Buffer cb(dev, ctrl), qb(dev, qf), kb(dev, kc), vb(dev, vc), gb(dev, g), sb(dev, size_t(QN / HD) * 9001 * 4),
+          ob(dev, size_t(QN) * 2);
+      p.run("mg_attn_eager", {size_t(32) * 128, 1}, {128, 1}, cb, qb, kb, vb, gb, sb, ob, uint32_t(9001));
+      const std::vector<uint16_t> o = ob.read<uint16_t>();
+      std::vector<uint16_t> want(QN);
+      mr::attention_eager(q.data(), kc.data(), vc.data(), pos, sliding != 0, mr::kRing, g.data(), want.data());
+      int worst = 0;
+      size_t diff = 0;
+      for (uint32_t i = 0; i < QN; ++i) {
+        worst = std::max(worst, ulps(o[i], want[i]));
+        diff += o[i] != want[i];
+      }
+      if (sliding && pos == 4904) o4904 = o;
+      if (sliding && pos == 9000) report_bool("mg_attn_eager: query 9000 == query 4904 (the same ring rows)", o == o4904);
+      char what[120];
+      std::snprintf(what, sizeof what, "mg_attn_eager %s at %u (%zu differ: Apple's 1/sum)", sliding ? "sliding" : "full",
+                    pos, diff);
+      report(what, worst, 1, QN);
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -258,6 +308,7 @@ int main() {
     clrun::Device dev;
     std::printf("muse_run: device %s (INDICATIVE: Mac OpenCL, emulated subgroups)\n", dev.name().c_str());
     prep_checks(dev);
+    attention_checks(dev);
   } catch (const std::exception& e) {
     std::printf("muse_run: FAILED: %s\n", e.what());
     return 1;

@@ -291,6 +291,85 @@ inline void attention_fp64(const uint16_t* q, const uint16_t* kc, const uint16_t
   }
 }
 
+// --- flash decode attention's arithmetic on the host (mg_attn.cl, M = 1) ------------------------------------
+// mg_attn_decode's blocks and waves and mg_attn_reduce's merge, step for step but for the score dot's order (one
+// fma chain here; the card's is 8 fmas a lane and a 16-lane shuffle tree) and `exp` (std::exp here): a tolerance
+// twin (fp64 at cosine 0.99999) that runs the block / window / ring arithmetic of Review Focus 3 on any host.
+//   SLIDING: base = key_lo(pos) & ~63, absolute 64-key blocks b = 0.. while base + 64 b <= pos; FULL: base 0,
+//   v2's ppw(pos + 1) keys a block. Per block: waves of 16 from its start; a key outside [lo, pos] scores -INF
+//   (weight 0); online softmax (nmx, resc, wl; sums ascending); the reduce merges blocks with bmx > -INF.
+inline uint32_t flash_ppw(uint32_t len, uint32_t tgt = kAttnTgt) { return eager_block(len, tgt); }
+inline void attention_flash_sim(const uint16_t* q, const uint16_t* kc, const uint16_t* vc, uint32_t pos, bool sliding,
+                                uint32_t ring, const uint16_t* gate, uint16_t* out) {
+  const uint32_t lo = key_lo(pos, sliding), end = pos + 1;
+  const uint32_t base = sliding ? (lo & ~63u) : 0u, s = sliding ? 64u : flash_ppw(pos + 1);
+  const uint32_t nb = sliding ? (pos - base) / 64u + 1u : pos / s + 1u;
+  for (uint32_t h = 0; h < kQHeads; ++h) {
+    const uint32_t j = h / (kQHeads / kKvHeads);
+    std::vector<float> bmx(nb), bsm(nb), bacc(size_t(nb) * kHd);
+    for (uint32_t b = 0; b < nb; ++b) {
+      const uint32_t bstart = base + b * s, bend = std::min(bstart + s, end);
+      float mx = -INFINITY, sm = 0.0f;
+      std::vector<float> acc(kHd, 0.0f);
+      for (uint32_t p0 = bstart; p0 < bend; p0 += 16) {
+        float sc[16];
+        for (uint32_t l = 0; l < 16; ++l) {
+          const uint32_t p = p0 + l;
+          if (p > pos || p < lo) {
+            sc[l] = -INFINITY;
+            continue;
+          }
+          float a = 0.0f;
+          const size_t rw = (cache_row(p, sliding, ring) * kKvHeads + j) * kHd;
+          for (uint32_t d = 0; d < kHd; ++d) a = std::fma(bf(q[size_t(h) * kHd + d]), bf(kc[rw + d]), a);
+          sc[l] = a * kAttnScale;
+        }
+        float wmx = -INFINITY;
+        for (float x : sc) wmx = std::max(wmx, x);
+        const float nmx = std::max(mx, wmx);
+        float resc = 1.0f, wl[16];
+        if (nmx > -INFINITY) {
+          resc = std::exp(mx - nmx);
+          for (uint32_t l = 0; l < 16; ++l) wl[l] = std::exp(sc[l] - nmx);
+        } else {
+          for (float& w : wl) w = 0.0f;
+        }
+        float ssum = 0.0f;
+        for (uint32_t l = 0; l < 16; ++l) ssum += wl[l];
+        for (uint32_t d = 0; d < kHd; ++d) {
+          float tsum = 0.0f;
+          for (uint32_t l = 0; l < 16; ++l) {
+            const uint32_t p = p0 + l;
+            const float v = (p <= pos && p >= lo) ? bf(vc[(cache_row(p, sliding, ring) * kKvHeads + j) * kHd + d]) : 0.0f;
+            tsum = std::fma(wl[l], v, tsum);
+          }
+          acc[d] = std::fma(acc[d], resc, tsum);
+        }
+        if (nmx > -INFINITY) {
+          sm = std::fma(sm, resc, ssum);
+          mx = nmx;
+        }
+      }
+      bmx[b] = mx;
+      bsm[b] = sm;
+      std::copy(acc.begin(), acc.end(), bacc.begin() + size_t(b) * kHd);
+    }
+    for (uint32_t d = 0; d < kHd; ++d) {
+      float mx = -INFINITY, sm = 0.0f, acc = 0.0f;
+      for (uint32_t b = 0; b < nb; ++b) {
+        if (!(bmx[b] > -INFINITY)) continue;
+        const float nmx = std::max(mx, bmx[b]);
+        const float a = std::exp(mx - nmx), bs = std::exp(bmx[b] - nmx);
+        sm = std::fma(sm, a, bsm[b] * bs);
+        acc = std::fma(acc, a, bacc[size_t(b) * kHd + d] * bs);
+        mx = nmx;
+      }
+      const uint16_t o = rne(acc / sm);
+      out[size_t(h) * kHd + d] = gate ? gate_product(o, gate[size_t(h) * kHd + d]) : o;
+    }
+  }
+}
+
 // --- the head --------------------------------------------------------------------------------------------
 inline void softcap_row(const float* z, uint32_t V, float* out) {
   for (uint32_t i = 0; i < V; ++i) out[i] = kSoftcap * std::tanh((z[i] * kOutMult) / kSoftcap);

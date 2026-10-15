@@ -13,11 +13,16 @@
 //       two roundings (a one-rounding x 3.87 differs: Review Focus 2); NoPE rows are position-free (Focus 5)
 //   (f) the gate product and (g) SiLU x up bitwise
 //   (h) eager attention: scores and probabilities bitwise, outputs within 1 ulp (P·V's fp32 order), counted;
-//       fp64 within cosine 0.9999 (the bf16 chain at 2048+ keys; flash holds 0.99999); the gated output rne(rne(o) x rne(sigmoid(g))); the window's edge at
-//       2046 / 2047 / 2048 / 4095 / 4096 / 4097 / 9000 and the ring's rows (Review Focus 3); ring = linear cache
+//       fp64 within cosine 0.9999 (the bf16 chain at 2048+ keys); the gated output rne(rne(o) x rne(sigmoid(g)));
+//       the window's edge at 2046 / 2047 / 2048 / 4095 / 4096 / 4097 / 9000 and the ring's rows (Review Focus 3);
+//       ring = linear cache
+//   (h') flash's block / wave / merge arithmetic (museref::attention_flash_sim) against fp64 at cosine 0.99999 at the
+//       same rows and full 3000 / 20000; the query at 9000 == at 4904 (the same ring rows), bitwise
 //   (i) the softcap: the fp32 form within 2 bf16 ulps of the reference's four roundings, monotone
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <random>
 #include <vector>
 
 #include "check.h"
@@ -263,6 +268,49 @@ void test_attention() {
   std::printf("  the window [p - 2047, p] at 0 .. 9000, ring rows p & 4095, ring == linear bitwise (Review Focus 3)\n");
 }
 
+// mg_attn.cl's block / wave / merge arithmetic (museref::attention_flash_sim) against fp64 at cosine 0.99999 (spec 10's
+// bar), random caches: sliding through the ring across the window's edge and the ring's wrap, full at 3000 / 20000;
+// the query at 9000 and at 4904 read the same ring rows (9000 - 4096) and give the same output, bitwise.
+void test_flash_sim() {
+  std::mt19937 rng(7);
+  std::uniform_real_distribution<float> u(-1.f, 1.f), uq(-4.f, 4.f);
+  const uint32_t ML = 20001;
+  std::vector<uint16_t> rk(size_t(mr::kRing) * mr::kKvN), rv(rk.size()), fk(size_t(ML) * mr::kKvN), fv(fk.size()),
+      q(mr::kQN), g(mr::kQN);
+  for (auto* v : {&rk, &rv, &fk, &fv})
+    for (uint16_t& e : *v) e = rne(u(rng));
+  for (uint16_t& e : q) e = rne(uq(rng));
+  for (uint16_t& e : g) e = mr::gate_bf16(rne(uq(rng)));
+  std::vector<uint16_t> o(mr::kQN), o9000, o4904;
+  std::vector<double> f(mr::kQN);
+  for (int sliding = 1; sliding >= 0; --sliding)
+    for (uint32_t pos : sliding ? std::vector<uint32_t>{5, 2046, 2047, 2048, 4095, 4096, 4097, 4904, 9000}
+                                : std::vector<uint32_t>{3000, 20000}) {
+      const uint16_t* kc = sliding ? rk.data() : fk.data();
+      const uint16_t* vc = sliding ? rv.data() : fv.data();
+      mr::attention_flash_sim(q.data(), kc, vc, pos, sliding, mr::kRing, g.data(), o.data());
+      mr::attention_fp64(q.data(), kc, vc, pos, sliding, mr::kRing, g.data(), f.data());
+      double worst = 1.0;
+      for (uint32_t h = 0; h < mr::kQHeads; ++h) {
+        double dot = 0, na = 0, nb = 0;
+        for (uint32_t d = 0; d < HD; ++d) {
+          const double a = bf(o[h * HD + d]), b = f[h * HD + d];
+          dot += a * b;
+          na += a * a;
+          nb += b * b;
+        }
+        worst = std::min(worst, dot / std::sqrt(na * nb));
+      }
+      std::printf("  flash (host) %s at %5u (%4u keys): worst head cosine %.7f\n", sliding ? "sliding" : "full", pos,
+                  pos + 1 - mr::key_lo(pos, sliding), worst);
+      CHECK(worst >= 0.99999);
+      if (sliding && pos == 9000) o9000 = o;
+      if (sliding && pos == 4904) o4904 = o;
+    }
+  CHECK(o9000 == o4904);   // the same ring rows, the same absolute 64-key blocks modulo the ring
+  std::printf("  flash (host) at 9000 == at 4904 bitwise (the ring is addressing)\n");
+}
+
 void test_softcap() {
   const std::vector<uint16_t> z = row(false, 10, 64, 11, 0.125f, 64.f);
   std::vector<float> zf(64), c(64);
@@ -287,6 +335,7 @@ int main() {
   test_qk_prep();
   test_gate_silu();
   test_attention();
+  test_flash_sim();
   test_softcap();
   std::printf("muse_ref_test: OK\n");
   return 0;
