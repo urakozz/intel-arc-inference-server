@@ -35,10 +35,13 @@ Two call syntaxes, told apart by their tags (the two sets share none):
       (chat_template.jinja's format_arg_value): a TOP-LEVEL string decodes only a doubled backslash, its own
       quote's escape, n and r; a string inside a list / dict (written by tojson) decodes JSON's set; every
       other backslash is kept verbatim. A quote closes a string only when what follows (after whitespace) is
-      , ) ] } : or the end of the block, so 'it's here' is one string. A bare call without the brackets is one
-      call; a lone positional dict is the arguments; any other positional argument, or a name without a
-      value, makes the call 'incomplete'. The first block's first call wins; values compare as JSON values
-      (True == true, tuples == lists).
+      , ) ] } : or the end of the block, so 'it's here' is one string; when the rest then fails to parse,
+      the last quote that closed is kept in its string and the parse retried (once per quote: code such as
+      'if __name__ == '__main__':' survives). A bare call without the brackets is one call; a lone positional
+      dict is the arguments; any other positional argument, or a name without a value, makes the call
+      'incomplete'. A block cut by the end of generation (no <|tool_call_end|>) counts the calls whose )
+      closed; an unfinished first call is 'incomplete'. The first block's first call wins; values compare as
+      JSON values (True == true, tuples == lists).
 
 Kinds: 'call', 'no call', 'incomplete' (a call opened and not closed, or one that does not
 parse), 'reasoning' (K2 / hermes / pythonic: generation ended inside the reasoning).
@@ -187,6 +190,9 @@ class _PyLit:
 
     def __init__(self, s: str):
         self.s, self.i = s, 0
+        self.skip: set[int] = set()     # quotes kept in their string (quote recovery)
+        self.closed: list[int] = []     # quotes that closed a string, in order
+        self.done: list = []            # the calls that closed
 
     def peek(self) -> str:
         while self.i < len(self.s) and self.s[self.i] in _WS:
@@ -228,7 +234,8 @@ class _PyLit:
             if triple and self.s.startswith(q * 3, self.i):
                 self.i += 3
                 return "".join(out)
-            if not triple and c == q and self.closes(self.i + 1, extra):
+            if not triple and c == q and self.i not in self.skip and self.closes(self.i + 1, extra):
+                self.closed.append(self.i)
                 self.i += 1
                 return "".join(out)
             out.append(c)
@@ -319,26 +326,47 @@ class _PyLit:
             raise ValueError("a positional argument")
         return name, args
 
-    def calls(self) -> list:
+    def _calls(self) -> list:
         bracket = self.peek() == "["
         if bracket:
             self.i += 1
-        out = []
         while self.peek() not in ("]", ""):
-            out.append(self.call())
+            self.done.append(self.call())
             if self.peek() == ",":
                 self.i += 1
         if bracket:
             self.eat("]")
-        if self.peek() != "" or not out:
+        if self.peek() != "" or not self.done:
             raise ValueError("text after the call list, or no call")
-        return out
+        return self.done
+
+    def calls(self, partial: bool = False) -> list:
+        """The block's calls. Quote recovery (spec 24 §4.6): when the parse fails, the last quote that closed a
+        string is kept IN the string instead and the parse restarts - once per quote, so at most one retry per
+        quote of the block. `partial` (generation ended inside the block): the calls whose ) closed, from the
+        attempt that closed the most; ValueError when none did."""
+        skip: set[int] = set()
+        best: list = []
+        while True:
+            self.i, self.skip, self.closed, self.done = 0, skip, [], []
+            try:
+                return self._calls()
+            except (ValueError, IndexError):
+                if len(self.done) > len(best):
+                    best = list(self.done)
+                cand = [q for q in reversed(self.closed) if q not in skip]
+                if cand:
+                    skip.add(cand[0])
+                    continue
+                if partial and best:
+                    return best
+                raise ValueError("the call list does not parse") from None
 
 
-def parse_pythonic_block(body: str) -> list:
+def parse_pythonic_block(body: str, partial: bool = False) -> list:
     """The calls of one <|tool_call_start|> ... <|tool_call_end|> body: [(name, arguments dict)]; ValueError when
-    it does not parse."""
-    return _PyLit(body).calls()
+    it does not parse. `partial`: the body was cut by the end of generation - the calls that closed."""
+    return _PyLit(body).calls(partial)
 
 
 def parse_first_call_pythonic(text: str):
@@ -351,10 +379,8 @@ def parse_first_call_pythonic(text: str):
     if a < 0:
         return ("no call", None, {}, 0)
     b = rest.find(LFM_END, a)
-    if b < 0:
-        return ("incomplete", None, {}, 0)
-    try:
-        calls = parse_pythonic_block(rest[a + len(LFM_START):b])
+    try:   # no end tag: generation ended inside the block - the calls that closed count (spec 24 §4.6)
+        calls = parse_pythonic_block(rest[a + len(LFM_START):] if b < 0 else rest[a + len(LFM_START):b], b < 0)
     except (ValueError, IndexError):
         return ("incomplete", None, {}, 0)
     name, args = calls[0]
