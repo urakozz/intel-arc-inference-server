@@ -279,3 +279,32 @@ python3 tools/quantize/qwen4exp/make_synth.py oracle-out-q4exp-synth/ours/ckpt -
 python3 tools/quantize/qwen4exp/ple_int8.py oracle-out-q4exp-synth/ours/ckpt oracle-out-q4exp-synth/ours/ckpt-ple-int8
 python3 tools/quantize/qwen4exp/check.py oracle-out-q4exp-synth/ours/ckpt --ple oracle-out-q4exp-synth/ours/ckpt-ple-int8
 ```
+
+## Muse-Glimmer-30B (spec 23b): synthetic checkpoints and the checkpoint check
+
+**No quantisation run here.** Spec 23 §3.3 (operator ruling, 2026-10-15): Vishva007's int4 g64 export is served as
+is, in either spelling (`-AutoRound`: auto_round:auto_gptq without `g_idx`; `-AutoRound-GPTQ`: gptq with `g_idx`
+= i // 64) - it is our format exactly. `tools/quantize/muse/` holds what the engine needs beside it:
+
+- `make_synth.py <out> --layers N --tokenizer <bf16 snapshot> [--gptq <-GPTQ snapshot>] [--seed S]` - a checkpoint
+  of the first N layers at the REAL widths in the -GPTQ spelling (its `config.json` and `quantization_config`,
+  `layer_types` / `layer_rope_theta` truncated), random bf16 weights RTN-packed by 23a's packer
+  (`tools/oracle/muse_make_tiny.pack_int4`: scale = f16(max|w| / 7), qzeros 0x77777777, g_idx i // 64), real-shape
+  `embed_tokens` / `lm_head` / `norm`, the ORIGINAL's tokenizer, template and generation config, and
+  `muse_synth.json` (the recipe: every tensor has its own seeded generator). 5.38 GB + 0.267 GB a layer.
+- `check.py <checkpoint> [--sample N]` - the loader's rules in Python: the quantization_config, the names =
+  `muse_ref.expected_names(text_config, form)` of the spelling found (vision tensors counted, nothing else), the
+  shapes and dtypes, every qzeros word and g_idx, finite positive scales, and - on a make_synth checkpoint - every
+  linear within RTN's bound of its regenerated twin. Prints ACCEPTED or every violation.
+- `test_muse_quant.py` - the tools' tests (1 layer at the real widths, a 1024-row vocabulary).
+
+All three need transformers 5.19.0 (spec 21a's site) in the oracle image:
+
+```bash
+# the Mac: the CPU lock around the run (one model computation at a time); the box: r43.synth
+ORACLE_MODEL=models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound-GPTQ tools/oracle/run_in_container.sh \
+  'tools/oracle/qwen4exp_env.sh /ws/oracle-out-q4exp/site > /dev/null && export PYTHONPATH=/ws/oracle-out-q4exp/site &&
+   python3 tools/quantize/muse/test_muse_quant.py'
+MUSE_SYNTH_LAYERS=2 tools/box_validate/muse_oracle.sh . synth-ckpt   # -> oracle-out-muse-synth/ckpt2 + ckpt2.ACCEPTED
+build/mac-host/tests/muse_synth_host_test oracle-out-muse-synth/ckpt2   # the C++ host half on the same files
+```
