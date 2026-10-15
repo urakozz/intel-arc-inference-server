@@ -142,7 +142,7 @@ Refused by name: a vocab or hidden unlike the target's, a tap layer >= the targe
   - `r47.host` default cpu: `test_dflash_ref.py` (Muse form), `test_muse_taps.py`, `test_dflash_accept.py`, `test_muse_p0_project.py`;
   - `r47.taps` optin cpu `muse_gptq,oracle_muse`: Task 2 Step 2 (hours);
   - `r47.accept` optin cpu `oracle_muse_taps`: Task 3 Step 2 (all arms; incoai's drafter `rownote`d as an optional download);
-  - `r47.cost` default gpu `muse_gptq`-free (random weights): Task 4 Step 2 at 4096 / 32768;
+  - `r47.cost` default gpu, no data needed (random weights of the real shapes): Task 4 Step 2 at 4096 / 32768;
   - `r47.verdict` manual: Task 5;
   - after "go": `r47.k0` (D0), `r47.k1` (the new binaries, the twin), `r47.d1`, `r47.d3`, `r47.d2`, `r47.serve`, `r47.benchy` (D5).
   `rownote`s: Part 2's stages SKIP "no go" until spec 23 §8 records "go"; the drafter download (5.1 GB).

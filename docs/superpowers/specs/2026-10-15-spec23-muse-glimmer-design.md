@@ -280,7 +280,7 @@ Per layer, on Kolibri's arrangement with Muse's chains:
 6. `mg_norm` (pre-ff), int4 GEMV `gate || up` (39936 rows), SiLU x up, down GEMV, its row and Σ², `mg_post_add`.
 
 Plus the embedding (gather + the weight-less norm, `mg_embed`) and the head (`mg_final_norm` with plain `w`, the int8
-or bf16 `lm_head`, argmax x 2). **~14 launches a layer, ~735 a token** (derived; 23c asserts its formula). The
+or bf16 `lm_head`, argmax x 2). **~14 launches a layer, ~733 a token** (derived; 23c asserts its formula). The
 **ring is 4096 slots** for the same reason as Kolibri's (spec 20 §11): a prefill chunk of 2048 plus the 2047 keys
 before it never collide, and 64-key blocks never cross the ring's end. Kernels that already serve Kolibri
 (`kol_attn.cl`: `Q_HEADS`, `KV_HEADS`, `WINDOW`, `RING` defines, M <= 4, no gate) are reused at Muse's defines only if
