@@ -195,7 +195,7 @@ case "$mode" in
     for p in $prompts; do
       golden "$data/oracle-out-lfm2moe" oracle-out-lfm2moe.partial "$p" ""
     done
-    gaps "$data/oracle-out-lfm2moe/*.log"
+    gaps "$data/oracle-out-lfm2moe/lfm2moe_*.log"   # the per-prompt logs only: never a file this run writes to
     ;;
   export)
     name=$(basename "${arg%/}")
@@ -206,7 +206,7 @@ case "$mode" in
       golden "$data/oracle-out-lfm2moe-$name" "oracle-out-lfm2moe-$name.partial" "$p" "--weights int4"
     done
     unset ORACLE_SNAP
-    gaps "$data/oracle-out-lfm2moe-$name/*.log"
+    gaps "$data/oracle-out-lfm2moe-$name/lfm2moe_*.log"
     ;;
   a4)
     out="$data/oracle-out-lfm2moe-a4"
