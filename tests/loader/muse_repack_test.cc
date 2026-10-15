@@ -216,6 +216,32 @@ MuseGlimmerDesc small_desc(uint32_t layers = 2) {
   return d;
 }
 
+// muse_make_tiny.py writes ONE model.safetensors without an index (the loader reads indexed snapshots only): a
+// temporary directory with the file and config.json linked and an index written from the header.
+fs::path indexed(const fs::path& snap) {
+  if (fs::exists(snap / "model.safetensors.index.json")) return snap;
+  const fs::path d = mf::tmpdir("indexed");
+  fs::create_directories(d);
+  fs::create_symlink(fs::absolute(snap / "model.safetensors"), d / "model.safetensors");
+  fs::create_symlink(fs::absolute(snap / "config.json"), d / "config.json");
+  std::ifstream f(snap / "model.safetensors", std::ios::binary);
+  uint64_t n = 0;
+  f.read(reinterpret_cast<char*>(&n), 8);
+  std::vector<uint8_t> h(size_t(8) + n);
+  std::memcpy(h.data(), &n, 8);
+  f.read(reinterpret_cast<char*>(h.data() + 8), std::streamsize(n));
+  std::ofstream ix(d / "model.safetensors.index.json");
+  ix << "{\"metadata\":{},\"weight_map\":{";
+  bool first = true;
+  for (const auto& [name, info] : loader::SafetensorsSet::parse_header(h.data(), h.size())) {
+    (void)info;
+    ix << (first ? "" : ",") << "\"" << name << "\":\"model.safetensors\"";
+    first = false;
+  }
+  ix << "}}";
+  return d;
+}
+
 fs::path write(const std::string& tag, const mf::Tensors& ts, const std::string& cfg) {
   const fs::path p = mf::tmpdir(tag);
   mf::write_checkpoint(p, ts, cfg);
@@ -319,10 +345,14 @@ int main() {
   // --- 3. 23a's tiny int4 variant and make_synth.py's real-width checkpoint, when present --------------------
   if (const char* t = std::getenv("MUSE_TINY_INT4"); t && fs::exists(fs::path(t) / "config.json")) {
     const MuseGlimmerDesc d = desc_from(t);
-    const MuseCheckpoint ck(d, std::string(t) + "/");
-    CHECK(ck.form() == MuseQuantForm::Gptq);
-    check_all(ck, 16, "23a's tiny int4 variant");
-    CHECK_EQ(ck.vision_skipped(), size_t(73));
+    const fs::path ix = indexed(t);
+    {
+      const MuseCheckpoint ck(d, ix.string() + "/");
+      CHECK(ck.form() == MuseQuantForm::Gptq);
+      check_all(ck, 16, "23a's tiny int4 variant");
+      CHECK_EQ(ck.vision_skipped(), size_t(73));
+    }
+    if (ix != fs::path(t)) fs::remove_all(ix);
   } else {
     std::printf("  (no MUSE_TINY_INT4 checkpoint - muse_make_tiny.py --variant int4; that part skipped)\n");
   }
