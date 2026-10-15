@@ -202,6 +202,13 @@ int main() {
     CHECK_EQ(r.prefill_scratch, ps.total());
     CHECK_EQ(r.decode_scratch, rm::decode_reserve(d, 0, 1, MuseAttn::Flash).decode_scratch);
     CHECK_EQ(rm::run_reserve(d, 0, 1, MuseAttn::Flash, false).prefill_scratch, size_t(0));
+    // the bound a chunk waits for: the configured one under flash; under eager (the portable three-pass build, its cost
+    // grows with the keys a row reads) one bound per 2048 keys of the chunk's deepest row
+    CHECK_EQ(rm::prefill_wait_ms(30000, MuseAttn::Flash, 32768), uint64_t(30000));
+    CHECK_EQ(rm::prefill_wait_ms(30000, MuseAttn::Eager, 2048), uint64_t(30000));
+    CHECK_EQ(rm::prefill_wait_ms(30000, MuseAttn::Eager, 2049), uint64_t(60000));
+    CHECK_EQ(rm::prefill_wait_ms(30000, MuseAttn::Eager, 32768), uint64_t(16) * 30000);
+    CHECK_EQ(rm::prefill_wait_ms(5000, MuseAttn::Eager, 1), uint64_t(5000));
     r.drafter = 1358000000ull;
     const rm::MusePlan p = rm::plan_muse(d, 1, 0, true, r, one_card);
     CHECK(p.fits && p.max_len == 131072);
