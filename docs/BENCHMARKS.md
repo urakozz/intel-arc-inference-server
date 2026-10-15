@@ -900,6 +900,23 @@ layers that fit, or on the synthetic checkpoints (4 real-width layers), and says
 | MTP acceptance by depth, K <= 3 | the CPU reference on Intel's checkpoint, teacher-forced greedy, the engine's RTN head; `pre_fc_norm_hidden` single / per stream (decision 4), selection reused / fresh (decision 5) | pending (the engine's is spec 22's) | r34.accept |
 | prefix-cache snapshot | bytes and a restore's continuation, 48 layers | 115.7 MB state + 25,344 B a position (+ 21 KB / 2,112 B with the head; derived); restore bitwise pending | r34.snapshot |
 
+## Muse-Glimmer-30B (spec 23)
+
+**Nothing here is measured yet.** Muse-Glimmer-30B (`muse_glimmer`, Vishva007's int4 g64 export used as-is) runs its
+own engine (spec 23c's decode, built without the card: no Muse binary has been compiled). One card holds the whole
+model (17.41 GB of weights with the int8 head). The roofline is spec 23 §2's: 14.72 GB read a token plus 13,312 B a
+position on the 13 full layers and up to 81.8 MB of sliding windows - **39.7 / 38.7 / 35.7 t/s** at 590 GB/s (depth
+4096 / 32768 / 131072), ~30.8 t/s at Qwen3.8's 77.6 % of roofline (estimated). Launches a token: 733 (flash), 681
+(B70_MUSE_ATTN=eager), +2 with `--pipeline-handoff peer` (derived, asserted at capture).
+
+| what | configuration | number | stage |
+|---|---|---|---|
+| decode tg256 at depth 4096 / 32768 / 131072 | one B70, int8 head (default) and bf16 head, flash; bf16 KV | pending (roofline 39.7 / 38.7 / 35.7 t/s, derived) | r44.speed |
+| decode, eager attention | one B70, int8 head, depth 4096 / 32768 (the reference's bf16 chain, A/B) | pending | r44.speed |
+| decode across two cards | `--pp 2`, copy and peer, int8 head, depth 4096 / 32768 (capacity, not speed: decision 7) | pending | r44.speed |
+| the four int4 GEMVs' {S, layout} | q\|\|gate\|\|k\|\|v 6656x8704, o_proj 4096x6656, gate\|\|up 6656x39936, down 19968x6656: S 1 / 2 / 4 (8), L 0 / 1 | pending (PROVISIONAL S2 / S4 / S8 / S4 L0, Qwen3.8's nearest cells) | r44.sweeps |
+| memory per card | one card at `--max-len auto` (131072) | 17.41 GB weights + 1.745 GB KV + 0.164 GB rings + 0.070 GB decode scratch (derived) | r44.speed |
+
 ## Correctness
 
 Numerics are gated, not eyeballed. The full protocol is in
