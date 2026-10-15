@@ -93,6 +93,7 @@ narrative, and the numbered guides cite them where they matter.
   from its small files, headers and transformers 5.19.0 / vLLM source - the rounding chain, both checkpoints,
   the PLE layout and hash constants (= the formula), the MTP head's wiring (decision 5's reuse is vLLM's
   opt-in), the tokenizer (the pre-tokenizer adds `\p{M}`), torch's tie rule, the derived bytes.
+- [probe-muse-glimmer-2026-10-15.md](probe-muse-glimmer-2026-10-15.md) - spec 23a: Muse-Glimmer-30B from its small files, headers and transformers 5.19.0 - the rounding chain (47 citations held to the source), both checkpoints (GPTQ = our int4 g64 sym), tokens / templates (one BOS), the drafter, the tie_last_hidden_states trap.
 - [probe-eagle3-k2-2026-10-08.md](probe-eagle3-k2-2026-10-08.md) - EAGLE-3 on K2-Horizon (Mac CPU P0):
   **no-go** - the community drafter is undertrained (golden: 0.23 / 0.06 acceptance, below plain decode at
   every K); prompt lookup wins (to 1.68x at 4k). K2 verify costs 1.26x / 1.63x a plain step at M = 2 / 4.
