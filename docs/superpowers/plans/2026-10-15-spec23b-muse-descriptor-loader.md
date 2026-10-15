@@ -22,7 +22,7 @@
 ## Global Constraints
 
 - Branch `spec23b-muse-loader` from main; signed commits; no merge, no push. Box tree automatic; `tools/box.env` never read into a log, never committed. Every GPU command under `flock ~/b70-gpu.lock`, detached, polled.
-- **Our format only:** int4 g64 symmetric GPTQ (`qweight` / `scales` f16 / `qzeros` 0x77777777 / identity `g_idx`). Anything else (g128 aside, which `LinearSrc::classify` expands exactly) is refused by name; no new kernel family.
+- **Our format only:** int4 g64 symmetric GPTQ (`qweight` / `scales` f16 / `qzeros` 0x77777777 / identity `g_idx`). **Either Vishva007 repo** (23a's facts sheet, 2026-10-15: one export, sampled tensors byte-identical): `-AutoRound` (`quant_method` auto-round, `packing_format` auto_round:auto_gptq, NO `g_idx` - the repo the Mac downloaded, 1459 text names) or `-AutoRound-GPTQ` (`quant_method` gptq, `g_idx` shipped and checked `== i // 64`, 1875 text names); `expected_names` takes both (23a's `muse_ref.expected_names(tc, "autoround" | "gptq")`). Anything else (g128 aside, which `LinearSrc::classify` expands exactly) is refused by name; no new kernel family.
 - Every buffer through `loader/muse_layout.h` and the planner; the plan runs before the first allocation.
 - The vendored config: `tests/model/muse_glimmer/config.json` (+ `generation_config.json`) copied byte for byte from `meta-models/Muse-Glimmer-30B` at `a4e59da5` (Apache-2.0).
 - No `rm -rf`. No third-party engine named.
