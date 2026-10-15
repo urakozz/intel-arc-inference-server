@@ -39,6 +39,6 @@ target_link_libraries(b70_qwen4exp_loader PUBLIC b70_loader b70_qwen4exp_model b
 # any host by tests/loader/muse_repack_test.cc and muse_synth_host_test.cc) and the upload onto one or two devices
 # (muse_loader.cc). It links the host-only planner (b70_muse_plan): the load runs the plan and refuses what does not
 # fit before the first allocation.
-add_library(b70_muse_loader STATIC muse_repack.cc)
+add_library(b70_muse_loader STATIC muse_repack.cc muse_loader.cc)
 target_include_directories(b70_muse_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(b70_muse_loader PUBLIC b70_loader b70_muse_model b70_l0)
+target_link_libraries(b70_muse_loader PUBLIC b70_loader b70_muse_model b70_muse_plan b70_l0)

@@ -3475,4 +3475,14 @@ target_include_directories(muse_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAK
 target_link_libraries(muse_plan_test PRIVATE b70_muse_plan)
 add_test(NAME muse_plan_test COMMAND muse_plan_test)
 set_tests_properties(muse_plan_test PROPERTIES LABELS muse)
+# Task 3 (device half): load_muse_glimmer on the card - the synthetic checkpoint on one card and split 2 over two
+# (r43.load), the real checkpoint (r43.load_real). SKIP 77 without the data / the second card.
+add_executable(muse_load_checkpoint_test loader/muse_load_checkpoint_test.cc)
+target_include_directories(muse_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(muse_load_checkpoint_test PRIVATE b70_muse_loader b70_l0)
+add_test(NAME muse_load_synth_test COMMAND muse_load_checkpoint_test ${B70_MUSE_SYNTH_DIR}/ckpt4)
+add_test(NAME muse_load_synth_pp2_test COMMAND muse_load_checkpoint_test ${B70_MUSE_SYNTH_DIR}/ckpt4 0 2)
+add_test(NAME muse_load_real_test COMMAND muse_load_checkpoint_test ${B70_MUSE_SNAPSHOT})
+set_tests_properties(muse_load_synth_test muse_load_synth_pp2_test muse_load_real_test
+  PROPERTIES LABELS "checkpoint;muse" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 # ==== Spec 23b: Muse-Glimmer descriptor and loader ==== (end) ====
