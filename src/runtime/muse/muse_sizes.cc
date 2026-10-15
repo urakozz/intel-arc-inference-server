@@ -1,10 +1,15 @@
 #include "runtime/muse/muse_sizes.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 
 #include "loader/muse_layout.h"
+#include "runtime/control.h"         // Control (the persistent block a device holds)
 #include "runtime/memory_plan.h"     // kMaxLenQuantum, kMinAutoMaxLen, kDefaultReserveGb
+#include "runtime/muse/muse_rope.h"
 #include "runtime/pipeline_plan.h"   // pp_balance
 
 namespace runtime::muse {
@@ -133,6 +138,93 @@ std::string MusePlan::describe() const {
          "): weights " + gb(d.weights) + ", KV " + gb(d.kv) + ", rings " + gb(d.rings) + ", scratch " + gb(d.scratch) +
          ", drafter " + gb(d.drafter) + ", reserve " + gb(d.reserve) + " = " + gb(d.total()) + " of " + gb(d.capacity);
   return s;
+}
+
+// ==== Spec 23c ===========================================================================================
+MuseAttn muse_attn() {
+  const char* v = std::getenv("B70_MUSE_ATTN");
+  if (v == nullptr || *v == '\0') return kDefaultMuseAttn;
+  if (std::strcmp(v, "flash") == 0) return MuseAttn::Flash;
+  if (std::strcmp(v, "eager") == 0) return MuseAttn::Eager;
+  throw std::runtime_error(std::string("B70_MUSE_ATTN=") + v + ": expected flash or eager");
+}
+
+const char* muse_attn_name(MuseAttn a) { return a == MuseAttn::Eager ? "eager" : "flash"; }
+
+size_t partials_floats(const model::MuseGlimmerDesc& d) {
+  size_t m = 0;
+  for (model::MuseLinearId id : d.layer_linears()) {
+    const model::GemvShape sh = d.linear(id).shape;
+    m = std::max(m, size_t(sh.S) * sh.N);
+  }
+  return m;
+}
+
+MuseScratchSizes scratch_sizes(const model::MuseGlimmerDesc& d, uint32_t max_len, uint32_t M, MuseAttn a) {
+  MuseScratchSizes s;
+  s.resid = s.x = s.a = size_t(M) * d.hidden * 2;
+  s.partials = partials_floats(d) * M * 4;
+  s.sumsq_a = s.sumsq_r = size_t(kNormG) * M * 4;
+  s.attn_q = size_t(M) * d.q_n() * 4;
+  s.gate = size_t(M) * d.q_n() * 2;
+  s.attn_part = size_t(d.q_heads) * kAttnTgt * M * kAttnPart * 4;
+  s.attn_out = size_t(M) * d.q_n() * 2;
+  s.h = size_t(M) * d.inter * 2;
+  s.logits = size_t(M) * d.vocab * 4;
+  s.argmax_part = size_t(M) * ((d.vocab + kArgmaxChunk - 1) / kArgmaxChunk) * 2 * 4;
+  s.control = sizeof(Control);
+  s.rope = rope_table_bytes(d.head_dim, max_len);
+  s.attn_s = a == MuseAttn::Eager ? size_t(M) * d.q_heads * max_len * 4 : 0;
+  return s;
+}
+
+size_t decode_scratch_bytes(const model::MuseGlimmerDesc& d, uint32_t max_len, uint32_t M, MuseAttn a) {
+  return scratch_sizes(d, max_len, M, a).total();
+}
+
+size_t device_kv_bytes(const model::MuseGlimmerDesc& d, const model::MusePlacement& p, uint32_t dev, uint32_t max_len) {
+  size_t b = 0;
+  for (uint32_t l = p.first(dev); l < p.end(dev); ++l)
+    if (d.is_full(l)) b += loader::muse_full_layer_kv_bytes(d, max_len);
+  return b;
+}
+size_t device_ring_bytes(const model::MuseGlimmerDesc& d, const model::MusePlacement& p, uint32_t dev) {
+  size_t b = 0;
+  for (uint32_t l = p.first(dev); l < p.end(dev); ++l)
+    if (!d.is_full(l)) b += loader::muse_ring_bytes_per_layer(d);
+  return b;
+}
+
+PpLandingLayout landing_layout(const model::MuseGlimmerDesc& d) {
+  return pp_landing_layout(size_t(kM) * d.hidden * 2, size_t(kNormG) * kM * 4);
+}
+size_t link_bytes(const model::MuseGlimmerDesc& d, uint32_t dev) {
+  return dev == 0 ? kPpStateWords * 4 : landing_layout(d).total + kPpStateWords * 4;
+}
+
+MuseReserve decode_reserve(const model::MuseGlimmerDesc& d, uint32_t max_len, uint32_t devices, MuseAttn a) {
+  MuseReserve r;
+  r.decode_scratch = decode_scratch_bytes(d, max_len ? max_len : d.max_pos, kM, a) +
+                     (devices > 1 ? std::max(link_bytes(d, 0), link_bytes(d, 1)) : 0);
+  return r;
+}
+
+size_t device_launches(const model::MuseGlimmerDesc& d, const model::MusePlacement& p, uint32_t dev, MuseAttn a,
+                       PpHandoff h, uint32_t M) {
+  model::validate(p, d);
+  if (M == 0 || M > 16) throw std::invalid_argument("device_launches: M " + std::to_string(M) + " outside 1..16");
+  const size_t per_layer = a == MuseAttn::Eager ? 13 : 14;
+  size_t n = size_t(p.count(dev)) * per_layer;
+  if (dev == 0) n += 1;                                          // mg_embed
+  if (dev + 1 == p.devices) n += 4;                              // mg_final_norm, lm_head, argmax x 2
+  if (p.devices == 2 && h == PpHandoff::Peer) n += 1;            // pp_send (device 0) / pp_recv (device 1)
+  return n;
+}
+
+size_t decode_launches(const model::MuseGlimmerDesc& d, const model::MusePlacement& p, MuseAttn a, PpHandoff h) {
+  size_t n = 0;
+  for (uint32_t dev = 0; dev < p.devices; ++dev) n += device_launches(d, p, dev, a, h);
+  return n;
 }
 
 }  // namespace runtime::muse

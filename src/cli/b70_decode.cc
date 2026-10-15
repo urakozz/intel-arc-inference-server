@@ -37,6 +37,7 @@
 
 #include "cli/k2_decode.h"
 #include "cli/kolibri_decode.h"
+#include "cli/muse_decode.h"
 #include "cli/qwen4exp_decode.h"
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
@@ -177,6 +178,12 @@ void usage() {
       "                 int8 file (default <snapshot>-ple-int8/); --pp 1 (default) or 2. Spec 21d:\n"
       "                 --prefill / --prefill-length N on the l0 backend only (chunk <= 2048; two\n"
       "                 cards cross each chunk by copy); --mtp (21e) and --kv-cache int8 refused.\n"
+      "  Muse-Glimmer-30B (model_type muse_glimmer, spec 23c): one card by default (--pp 2 for\n"
+      "                 capacity); --lm-head int8 is ITS default (bf16 on request); --layers N\n"
+      "                 development mode; --max-len at most 131072 (decision 6). The prompt is\n"
+      "                 decoded one replay per id: --prefill* (spec 23d), --mtp / --spec (23f),\n"
+      "                 --kv-cache int8 and --profile refused. B70_MUSE_ATTN=eager: the\n"
+      "                 reference's bf16 attention chain (A/B).\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -737,6 +744,8 @@ int run(int argc, char** argv) {
   bool have_pp_backend = false;
   // Spec 9 §3: bf16 by default, so BENCHMARKS rows stay byte-matched with vLLM.
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
+  bool have_lm_head = false;   // spec 23c: Muse-Glimmer's head is int8 unless --lm-head bf16
+  bool have_spec = false;      // spec 23c: --spec is refused by name for Muse-Glimmer (23f's DFlash); else unknown
   runtime::KvCache kv_cache = runtime::default_kv_cache();   // spec 12b: --kv-cache
   // Spec 8: --mtp K|auto in --ids mode (greedy); absent = no head, every path as before.
   uint32_t mtp_k = 0;
@@ -833,6 +842,10 @@ int run(int argc, char** argv) {
       const std::string v = value(i, "--lm-head");
       if (!loader::parse_lm_head_form(v, lm_head))
         throw std::runtime_error("--lm-head expects bf16 or int8, got '" + v + "'");
+      have_lm_head = true;
+    } else if (a == "--spec") {   // spec 23c: parsed so Muse-Glimmer refuses it by name (spec 23f's DFlash)
+      (void)value(i, "--spec");
+      have_spec = true;
     } else if (!a.empty() && a[0] == '-') {
       usage();
       throw std::runtime_error(cli::unknown_option(a));
@@ -924,6 +937,36 @@ int run(int argc, char** argv) {
   if (synthetic && depth == 0)
     throw std::runtime_error("--depth 0 would ingest nothing; --bench and --profile both measure"
                              " a step at a context depth");
+  // Spec 23c: Muse-Glimmer-30B (model_type muse_glimmer) runs runtime::muse::MuseEngine on one card (or two) -
+  // dispatched here, beside Kolibri-1 and before the Qwen engine's pipeline and kv-cache rules (its own refusals,
+  // cli/muse_decode.h: the prefill (spec 23d), --mtp / --spec, int8 KV (decision 8), --max-len above 131072
+  // (decision 6)). A path that does not resolve is not Muse - the flows below report it.
+  if (cli::muse::is_muse(path)) {
+    cli::muse::DecodeArgs ma;
+    ma.path = path;
+    ma.ids_path = ids_path;
+    ma.n = n;
+    ma.bench = bench;
+    ma.depth = depth;
+    ma.tg = tg;
+    ma.max_len = max_len_arg;
+    ma.device = device;
+    ma.int8_head = !have_lm_head || lm_head == loader::LmHeadForm::Int8;
+    ma.layers = layers;
+    ma.pipe = pipe;
+    ma.prefill = prefill;
+    ma.prefill_len = have_prefill_len;
+    ma.prefill_chunk = have_pp_chunk;
+    ma.prefill_backend = have_pp_backend;
+    ma.mtp = mtp_on;
+    ma.spec = have_spec;
+    ma.kv8 = kv_cache == runtime::KvCache::Int8;
+    ma.profile = profile;
+    ma.layers_auto = layers_auto;
+    ma.ple_dir = !ple_dir.empty();
+    return cli::muse::run_decode<StdoutToStderr>(ma);
+  }
+  if (have_spec) throw std::runtime_error(cli::unknown_option("--spec"));
   // Spec 20c: Kolibri-1 (model_type kolibri1) runs runtime::kolibri::KolibriEngine on one or two
   // cards - dispatched here, before the Qwen engine's pipeline and kv-cache rules (its own refusals,
   // cli/kolibri_decode.h, replace them: --pp defaults to 2 there). A path that does not resolve is

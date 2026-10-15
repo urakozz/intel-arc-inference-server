@@ -3533,5 +3533,41 @@ if(B70_MUSE)
   add_dependencies(muse_kernels_test ${B70_MUSE_DECODE_KERNELS})
   add_test(NAME muse_kernels_test COMMAND muse_kernels_test)
   set_tests_properties(muse_kernels_test PROPERTIES LABELS muse TIMEOUT 900)
+  # Task 4 (MG4 / MG3 on decode, one card): MuseEngine on 23b's 4-layer synthetic checkpoint (muse_oracle.sh
+  # synth-ckpt) and its golden set (muse_oracle.sh synth: muse_ref.py run on it over muse_short_prose / muse_4k ->
+  # oracle-out-muse-synth/golden/). SKIP 77 without the checkpoint / the golden set.
+  add_executable(muse_decode_test runtime/muse_decode_test.cc)
+  target_include_directories(muse_decode_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_decode_test PRIVATE b70_muse_runtime)
+  add_dependencies(muse_decode_test ${B70_MUSE_DECODE_KERNELS})
+  add_test(NAME muse_decode_synth_test COMMAND muse_decode_test ${B70_MUSE_SYNTH_DIR}/ckpt4
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/muse_short_prose.ids)
+  add_executable(muse_golden_test golden/muse_golden_test.cc)
+  target_include_directories(muse_golden_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_golden_test PRIVATE b70_muse_runtime)
+  add_dependencies(muse_golden_test ${B70_MUSE_DECODE_KERNELS})
+  add_test(NAME muse_golden_synth_test COMMAND muse_golden_test ${B70_MUSE_SYNTH_DIR}/ckpt4 ${B70_MUSE_SYNTH_DIR}/golden)
+  add_test(NAME muse_golden_synth_bf16_test COMMAND muse_golden_test ${B70_MUSE_SYNTH_DIR}/ckpt4
+    ${B70_MUSE_SYNTH_DIR}/golden bf16)
+  add_test(NAME muse_golden_synth_eager_test COMMAND muse_golden_test ${B70_MUSE_SYNTH_DIR}/ckpt4
+    ${B70_MUSE_SYNTH_DIR}/golden bf16)
+  set_tests_properties(muse_golden_synth_eager_test PROPERTIES ENVIRONMENT "B70_MUSE_ATTN=eager")
+  set_tests_properties(muse_decode_synth_test muse_golden_synth_test muse_golden_synth_bf16_test
+    muse_golden_synth_eager_test PROPERTIES LABELS "checkpoint;golden;muse" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+# b70-decode's model_type dispatch and Muse's refusals, before the device: tests/model/muse_glimmer/ holds only the
+# checkpoint's config.json (and generation_config.json), which is all the dispatch reads. b70-serve refuses the model
+# naming spec 23e.
+set(_muse_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer)
+b70_cli_reject(cli_reject_muse_prefill ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --prefill EXPECT "spec 23d")
+b70_cli_reject(cli_reject_muse_prefill_len ${_muse_cfg} --bench --prefill-length 64 EXPECT "spec 23d")
+b70_cli_reject(cli_reject_muse_mtp ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "no MTP head")
+b70_cli_reject(cli_reject_muse_spec ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash EXPECT "spec 23f")
+b70_cli_reject(cli_reject_muse_kv8 ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "bf16 only")
+b70_cli_reject(cli_reject_muse_maxlen ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --max-len 262144 EXPECT "decision 6")
+b70_cli_reject(cli_reject_muse_pp_device ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --pp 2 --device 1
+  EXPECT "--device names one card")
+if(TARGET b70-serve)
+  b70_serve_reject(cli_reject_muse_serve ${_muse_cfg} EXPECT "spec 23e")
 endif()
 # ==== Spec 23c: Muse-Glimmer decode ==== (end) ====

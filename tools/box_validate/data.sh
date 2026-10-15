@@ -125,6 +125,10 @@ case "${1:-}" in
     # Spec 23b: the synthetic real-width checkpoint (4 layers, check.py ACCEPTED) the loader's tests read.
     have oracle_muse_synth "oracle-out-muse-synth/ckpt4/ + ckpt4.ACCEPTED (spec 23b: r43.synth - muse_oracle.sh synth-ckpt)" \
       bash -c 'test -s oracle-out-muse-synth/ckpt4/model.safetensors.index.json && test -f oracle-out-muse-synth/ckpt4.ACCEPTED'
+    # Spec 23c: its golden sets (muse_oracle.sh synth: muse_ref.py run on ckpt4 over muse_short_prose / muse_4k) - a
+    # key of its own, so 23b's stages (the checkpoint alone) do not wait for them.
+    have oracle_muse_synth_golden "oracle-out-muse-synth/golden/muse_{short_prose,4k}.{ids,golden.safetensors} (spec 23c: r44.oracle_synth - muse_oracle.sh synth)" \
+      bash -c 'for p in muse_short_prose muse_4k; do test -s oracle-out-muse-synth/golden/$p.ids && test -s oracle-out-muse-synth/golden/$p.golden.safetensors || exit 1; done'
     have k2_a4_set "oracle-out-k2-a4/set/manifest.json (K2's tool-call set, spec 18d: --with r25.a4_ref, or tools/toolcall/a4_ref.sh k2 set)" \
       test -s oracle-out-k2-a4/set/manifest.json
     have oracle_k2_a4 "oracle-out-k2-a4/ with K2's set and 36 <name>.bf16.txt (18a's reference on it: --with r25.a4_ref)" \
