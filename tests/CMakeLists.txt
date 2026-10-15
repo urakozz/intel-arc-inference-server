@@ -3449,4 +3449,10 @@ list(SUBLIST _muse_int4_cfg 0 1 _muse_int4_cfg)
 add_test(NAME muse_glimmer_test COMMAND muse_glimmer_test ${CMAKE_SOURCE_DIR}/tests/model/muse_glimmer/config.json
   ${CMAKE_SOURCE_DIR}/tests/model/muse_glimmer/generation_config.json ${_muse_int4_cfg})
 set_tests_properties(muse_glimmer_test PROPERTIES LABELS muse)
+# Task 2: every allocation's bytes from loader/muse_layout.h (spec 23 §2's derived numbers). Host only.
+add_executable(muse_layout_test loader/muse_layout_test.cc)
+target_include_directories(muse_layout_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(muse_layout_test PRIVATE b70_muse_model b70_kolibri_model)
+add_test(NAME muse_layout_test COMMAND muse_layout_test)
+set_tests_properties(muse_layout_test PROPERTIES LABELS muse)
 # ==== Spec 23b: Muse-Glimmer descriptor and loader ==== (end) ====
