@@ -16,7 +16,7 @@
 # ORACLE_THREADS caps the CPU pool. It exists because the box is shared: a
 # dump that grabs all 44 threads fights whatever else is running, and torch's
 # default is "all of them". Leave it unset for the default.
-# Env: ORACLE_IMAGE, HF_CACHE, REPO_DIR, ORACLE_MODEL, ORACLE_SNAP, ORACLE_THREADS.
+# Env: ORACLE_IMAGE, HF_CACHE, REPO_DIR, ORACLE_MODEL, ORACLE_SNAP, ORACLE_THREADS, ORACLE_MEMORY.
 set -euo pipefail
 # t214 was the reference until 2026-09-09 and is no longer on the box; every
 # golden set dumped before that date was produced by it and its rows still say
@@ -42,6 +42,12 @@ else
 fi
 
 env_flags=(-e HF_HUB_OFFLINE=1 -e HF_HOME=/scratch/hf -e HOME=/scratch -e PYTHONUNBUFFERED=1)
+# ORACLE_MEMORY (e.g. 40g; spec 23a): a container memory cap, for a run on the Mac (Docker Desktop's VM is shared);
+# unset on the box, where the oracle takes what it needs (above).
+if [ -n "${ORACLE_MEMORY:-}" ]; then
+  [[ "$ORACLE_MEMORY" =~ ^[0-9]+g$ ]] || { echo "ORACLE_MEMORY is <N>g (got $ORACLE_MEMORY)" >&2; exit 2; }
+  env_flags+=(--memory "$ORACLE_MEMORY" --memory-swap "$ORACLE_MEMORY")
+fi
 if [ -n "$ORACLE_THREADS" ]; then
   # torch takes its intra-op pool from OMP_NUM_THREADS at import; MKL's own
   # knob is separate. dump.py prints torch.get_num_threads() so the cap is
