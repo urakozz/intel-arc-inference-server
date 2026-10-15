@@ -44,6 +44,11 @@ bool muse_is_text(const std::string& name);
 // The vision side, skipped by name: `model.vision_tower.` / `model.vision_adapter.` / `model.vision_projection.`.
 bool muse_is_vision(const std::string& name);
 
+// resolve_snapshot, plus the one export's other spelling: the repo id Vishva007/Muse-Glimmer-30B-W4A16-AutoRound
+// resolves to the cached -AutoRound-GPTQ snapshot when only that one is here (and the other way round) - the two
+// are the same tensors (spec 23 §3.1). Any other argument is resolve_snapshot's; a miss names both repos.
+std::string resolve_muse_snapshot(const std::string& arg);
+
 // One fused linear in its row's layout: layout 0 = words [K/8][N] + scales f16 [K/64][N]; layout 1 = tiles in
 // `words`, `scales` empty.
 struct MuseHostLinear {

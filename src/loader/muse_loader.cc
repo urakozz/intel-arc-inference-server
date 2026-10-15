@@ -58,14 +58,14 @@ bool is_muse_checkpoint(const std::string& snapshot_dir) {
 }
 
 model::MuseGlimmerDesc muse_checkpoint_desc(const std::string& snapshot_or_repo, uint32_t layers_override) {
-  return model::check_muse_config(read_json(resolve_snapshot(snapshot_or_repo) + "config.json"), layers_override);
+  return model::check_muse_config(read_json(resolve_muse_snapshot(snapshot_or_repo) + "config.json"), layers_override);
 }
 
 MuseWeights load_muse_glimmer(const std::vector<l0::Context*>& devices, const std::string& snapshot_or_repo,
                               uint32_t max_len, const model::MusePlacement& placement, bool int8,
                               uint32_t layers_override, const runtime::muse::MuseReserve& reserve) {
   const auto t0 = std::chrono::steady_clock::now();
-  const std::string snap = resolve_snapshot(snapshot_or_repo);
+  const std::string snap = resolve_muse_snapshot(snapshot_or_repo);
   // The host half's checks, before anything else: config.json, the quantisation, the names, the data asserts.
   const MuseCheckpoint ck(snap, layers_override);
   const model::MuseGlimmerDesc& d = ck.desc();

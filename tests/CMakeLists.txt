@@ -3444,7 +3444,8 @@ else()
   set(_muse_hf "$ENV{HOME}/.cache/huggingface")
 endif()
 string(REPLACE "/" "--" _muse_repo "${B70_MUSE_SNAPSHOT}")
-file(GLOB _muse_int4_cfg "${_muse_hf}/hub/models--${_muse_repo}/snapshots/*/config.json")
+file(GLOB _muse_int4_cfg "${_muse_hf}/hub/models--${_muse_repo}/snapshots/*/config.json"
+  "${_muse_hf}/hub/models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound*/snapshots/*/config.json")
 list(SUBLIST _muse_int4_cfg 0 1 _muse_int4_cfg)
 add_test(NAME muse_glimmer_test COMMAND muse_glimmer_test ${CMAKE_SOURCE_DIR}/tests/model/muse_glimmer/config.json
   ${CMAKE_SOURCE_DIR}/tests/model/muse_glimmer/generation_config.json ${_muse_int4_cfg})

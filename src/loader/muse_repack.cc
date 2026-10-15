@@ -9,6 +9,7 @@
 #include "common/bf16.h"
 #include "common/repack.h"
 #include "loader/muse_layout.h"
+#include "loader/snapshot.h"
 
 namespace loader {
 namespace {
@@ -41,6 +42,22 @@ long layer_of(const std::string& name) {
 }
 
 }  // namespace
+
+std::string resolve_muse_snapshot(const std::string& arg) {
+  static const std::string a = "Vishva007/Muse-Glimmer-30B-W4A16-AutoRound", g = a + "-GPTQ";
+  try {
+    return resolve_snapshot(arg);
+  } catch (const std::exception& e) {
+    if (arg != a && arg != g) throw;
+    const std::string other = arg == a ? g : a;
+    try {
+      return resolve_snapshot(other);
+    } catch (const std::exception&) {
+      throw std::runtime_error(std::string(e.what()) + " - nor its other spelling " + other +
+                               " (spec 23 §3.1: either Vishva007 repo is the same export)");
+    }
+  }
+}
 
 const char* muse_quant_form_name(MuseQuantForm f) { return f == MuseQuantForm::Gptq ? "gptq" : "autoround"; }
 
