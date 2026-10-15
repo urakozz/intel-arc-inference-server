@@ -1,6 +1,6 @@
 # Spec 23b - Muse-Glimmer-30B: the descriptor, the loader, synthetic checkpoints, the memory plan
 
-**Status (2026-10-15): plan, not started. Box queue row 43.**
+**Status (2026-10-15): built on the Mac (branch `spec23b-muse-loader`): Tasks 1-6 done, every host test green, the synthetic 2-layer checkpoint ACCEPTED and read by the C++ host half, the real -AutoRound checkpoint through the host half (1459 text, 809 vision skipped, 0 unconsumed); the card's loads are box queue row 43. As built: spec 23 §13.**
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking.
 >
@@ -8,7 +8,7 @@
 
 **Goal:** Muse-Glimmer as data and bytes on the card: `model::MuseGlimmerDesc` held to `config.json` key by key; `loader::load_muse_glimmer` reading the GPTQ checkpoint (int4 g64 linears through the existing `LinearSrc::classify`, bf16 norms / embedding / head, spec 9's int8 head at load, the 809 vision tensors skipped by name, 0 unconsumed); `make_synth.py` (N layers at real width in exactly that format); the memory plan for one card and two (`--max-len auto`, `--pp 2` by bytes).
 
-**Architecture:** spec 23 §2, §3, §5.1, §5.5. Kolibri's arrangement (spec 20 §11: `model::Kolibri1Desc`, `loader/kolibri1_layout.h` as the one byte formula for the planner, the loader and the kernels' host half, `loader::load_kolibri1`, `runtime::kolibri::kolibri_sizes`) for a dense model: no experts, no router - the layer is seven int4 linears fused into four GEMVs, four centered norms, and the attention's ring or full cache.
+**Architecture:** spec 23 §2, §3, §5.1, §5.5. Kolibri's arrangement (spec 20 §11: `model::Kolibri1Desc`, `loader/kolibri1_layout.h` as the one byte formula for the planner, the loader and the kernels' host half, `loader::load_kolibri1`, `runtime::kolibri::kolibri_sizes`) for a dense model: no experts, no router - the layer is eight int4 linears (q, k, v, the attention gate_proj, o; gate, up, down - 23a's count) fused into four GEMVs, four centered norms, and the attention's ring or full cache.
 
 **Tech Stack:** C++17, CMake / ctest, Level Zero (the load), Python 3 (`make_synth.py`, `check.py` in the oracle image with spec 21a's 5.19.0 site).
 
@@ -74,9 +74,9 @@ bool is_muse_model_type(const std::string& model_type);             // "muse_gli
 }
 ```
 
-- [ ] **Step 1: the failing test** `muse_glimmer_test`: `muse_glimmer()` equals `check_muse_config(tests/model/muse_glimmer/config.json)` field by field; `full` is true exactly at `l % 4 == 3` (13 of 52); `qgkv_rows() == 8704`; `linear(QGKV).parts == {"self_attn.q_proj", "self_attn.gate_proj", "self_attn.k_proj", "self_attn.v_proj"}`, `GateUp == {"mlp.gate_proj", "mlp.up_proj"}`; refusals, each naming the key and value, on in-memory edits of the vendored config: `head_dim` 64, `num_key_value_heads` 4 (the kernels' GQA 16 is a define - refuse until built), `hidden_activation` gelu, `tie_word_embeddings` true, a non-zero `layer_rope_theta` != the global theta, a zero at a sliding layer, `rope_type` not default, `attention_bias` true, `final_logit_softcapping` null (the host cap needs it), `vocab_size` changed; `layers_override` 4 keeps `full = {0,0,0,1}`; `is_muse_model_type`.
-- [ ] **Step 2: run, expect FAIL** (`ctest --test-dir build -R muse_glimmer_test --output-on-failure`: target not found).
-- [ ] **Step 3: implement**, PASS. **Commit** `model: MuseGlimmerDesc held to config.json key by key (spec 23b)`.
+- [x] **Step 1: the failing test** `muse_glimmer_test`: `muse_glimmer()` equals `check_muse_config(tests/model/muse_glimmer/config.json)` field by field; `full` is true exactly at `l % 4 == 3` (13 of 52); `qgkv_rows() == 8704`; `linear(QGKV).parts == {"self_attn.q_proj", "self_attn.gate_proj", "self_attn.k_proj", "self_attn.v_proj"}`, `GateUp == {"mlp.gate_proj", "mlp.up_proj"}`; refusals, each naming the key and value, on in-memory edits of the vendored config: `head_dim` 64, `num_key_value_heads` 4 (the kernels' GQA 16 is a define - refuse until built), `hidden_activation` gelu, `tie_word_embeddings` true, a non-zero `layer_rope_theta` != the global theta, a zero at a sliding layer, `rope_type` not default, `attention_bias` true, `final_logit_softcapping` null (the host cap needs it), `vocab_size` changed; `layers_override` 4 keeps `full = {0,0,0,1}`; `is_muse_model_type`.
+- [x] **Step 2: run, expect FAIL** (`ctest --test-dir build -R muse_glimmer_test --output-on-failure`: target not found).
+- [x] **Step 3: implement**, PASS. **Commit** `model: MuseGlimmerDesc held to config.json key by key (spec 23b)`.
 
 ### Task 2: the layout header (bytes, the one formula)
 
@@ -103,8 +103,8 @@ size_t muse_layer_read_per_token(const model::MuseGlimmerDesc& d);
 }
 ```
 
-- [ ] **Step 1: failing test** printing and asserting spec 23 §2's derived numbers from the formulas: per-layer int4 (qweight + scales) 257,081,344 B ± the layout's padding (assert the formula, print the value), 52 layers 13.368 GB, int8 head 1,345,639,680 B, embed 2,689,662,976 B, KV 13,312 B a position, ring 4,194,304 B a sliding layer (39 -> 163,577,856 B), read per token 14.72 GB (derived).
-- [ ] **Step 2: implement** on `kol_layout0_bytes` / `kol_layout1_bytes`' formulas (shared, not copied: if they are Kolibri-local, move them to a common header with a byte-identical check - Kolibri's own test must stay green), PASS. **Commit** `loader: muse_layout.h - every Muse-Glimmer allocation's bytes (spec 23b)`.
+- [x] **Step 1: failing test** printing and asserting spec 23 §2's derived numbers from the formulas: per-layer int4 (qweight + scales) 257,081,344 B ± the layout's padding (assert the formula, print the value), 52 layers 13.368 GB, int8 head 1,345,639,680 B, embed 2,689,662,976 B, KV 13,312 B a position, ring 4,194,304 B a sliding layer (39 -> 163,577,856 B), read per token 14.72 GB (derived).
+- [x] **Step 2: implement** on `kol_layout0_bytes` / `kol_layout1_bytes`' formulas (shared, not copied: if they are Kolibri-local, move them to a common header with a byte-identical check - Kolibri's own test must stay green), PASS. **Commit** `loader: muse_layout.h - every Muse-Glimmer allocation's bytes (spec 23b)`.
 
 ### Task 3: the loader (host half, then the device half)
 
@@ -136,9 +136,9 @@ MuseWeights load_muse_glimmer(l0::Context& ctx0, l0::Context* ctx1, const std::s
 }
 ```
 
-- [ ] **Step 1: failing host test** `muse_repack_test` over 23a's tiny `int4` variant, and over a 2-layer real-width checkpoint written by Task 4's `make_synth.py` when present (SKIP 77 otherwise): Review Focus 1's column read-backs (every sampled weight `(q - 8) x scale` of the source row), Review Focus 2 (names both ways: consumed = `expected_names(gptq)`, the vision names counted; one extra text name throws naming it), the data asserts (a `qzeros` word != 0x77777777 throws naming the tensor and index; a non-identity `g_idx` throws), the norms' fp32 copies bit-exact widenings, refusals by name (`desc_act` true, group 32, bits 8, asym).
-- [ ] **Step 2: implement the host half**, PASS. **Commit** `loader: Muse-Glimmer host half - the fused GEMVs, the norms, the vision skip, the data asserts (spec 23b)`.
-- [ ] **Step 3: the device half** - `load_muse_glimmer`: the plan first (Task 5's `require_fits`), then per layer straight onto its device (`device_of`), the embedding on device 0, the final norm and the head (int8 built on the host with `quantise_row_int8`, 0.35-0.75 s on 44 threads for Qwen's - recorded here) on the last device; a load line `Muse-Glimmer-30B: 52 layers (int4 g64), 809 vision tensors skipped, head int8, devices 1, <bytes>`. Card test `muse_load_checkpoint_test` (label `gpu`; SKIP 77 without a checkpoint): every allocation's bytes = `muse_device_weight_bytes`, the read-backs of Review Focus 1's columns on the device equal the host repack, 0 unconsumed. **Commit** `loader: load_muse_glimmer - placement, the int8 head at load (spec 23b)`.
+- [x] **Step 1: failing host test** `muse_repack_test` over 23a's tiny `int4` variant, and over a 2-layer real-width checkpoint written by Task 4's `make_synth.py` when present (SKIP 77 otherwise): Review Focus 1's column read-backs (every sampled weight `(q - 8) x scale` of the source row), Review Focus 2 (names both ways: consumed = `expected_names(gptq)`, the vision names counted; one extra text name throws naming it), the data asserts (a `qzeros` word != 0x77777777 throws naming the tensor and index; a non-identity `g_idx` throws), the norms' fp32 copies bit-exact widenings, refusals by name (`desc_act` true, group 32, bits 8, asym).
+- [x] **Step 2: implement the host half**, PASS. **Commit** `loader: Muse-Glimmer host half - the fused GEMVs, the norms, the vision skip, the data asserts (spec 23b)`.
+- [x] **Step 3: the device half** - `load_muse_glimmer`: the plan first (Task 5's `require_fits`), then per layer straight onto its device (`device_of`), the embedding on device 0, the final norm and the head (int8 built on the host with `quantise_row_int8`, 0.35-0.75 s on 44 threads for Qwen's - recorded here) on the last device; a load line `Muse-Glimmer-30B: 52 layers (int4 g64), 809 vision tensors skipped, head int8, devices 1, <bytes>`. Card test `muse_load_checkpoint_test` (label `gpu`; SKIP 77 without a checkpoint): every allocation's bytes = `muse_device_weight_bytes`, the read-backs of Review Focus 1's columns on the device equal the host repack, 0 unconsumed. **Commit** `loader: load_muse_glimmer - placement, the int8 head at load (spec 23b)`.
 
 ### Task 4: synthetic checkpoints and `check.py`
 
@@ -149,9 +149,9 @@ MuseWeights load_muse_glimmer(l0::Context& ctx0, l0::Context* ctx1, const std::s
 **Interfaces:**
 - Produces: `make_synth.py <out> --layers N --tokenizer <bf16-snapshot> [--seed S]`: a GPTQ-form checkpoint of the first N layers at real widths (`layer_types` / `layer_rope_theta` truncated, random bf16 weights with spec 20b's init scales, RTN-packed with 23a's packer, `quantization_config` copied from the real GPTQ config), real-shape `embed_tokens` / `lm_head` / `norm`, the original's `tokenizer.json`, `tokenizer_config.json`, `chat_template.jinja` (the ORIGINAL's), `generation_config.json`; `check.py <ckpt>`: names = `muse_ref.expected_names(text_config(ckpt), "gptq")`, every int4 tensor dequantises to the stored bf16 twin within RTN's bound, prints `ACCEPTED` or the first failure. Bytes (derived): 4 layers ~6.41 GB (embed + head 5.38 GB + 4 x 257 MB).
 
-- [ ] **Step 1: failing tests** `test_muse_quant.py` (a 1-layer checkpoint at a test-only reduced vocab of 1024 through `make()` arguments: names, `check.py` accepts it, a corrupted `qzeros` word is refused) and `muse_synth_host_test` (label `checkpoint`: the C++ host half over a `make_synth.py --layers 2` checkpoint - Review Focus 5).
-- [ ] **Step 2: implement, PASS** (Python tests in `agnes-ref-img` with the 5.19.0 site). Make the 2-layer real-width checkpoint on the Mac (~5.9 GB; time recorded) and run `muse_synth_host_test` by hand. **Commit** `quantize: Muse-Glimmer synthetic real-width checkpoints and check.py (spec 23b)`.
-- [ ] **Step 3: the box mode** `muse_oracle.sh <data> synth-ckpt` -> `$DATA/oracle-out-muse-synth/ckpt4` (`--layers 4`) + `check.py`; 23c's golden sets live beside it. **Commit** `box: muse_oracle.sh synth-ckpt (spec 23b)`.
+- [x] **Step 1: failing tests** `test_muse_quant.py` (a 1-layer checkpoint at a test-only reduced vocab of 1024 through `make()` arguments: names, `check.py` accepts it, a corrupted `qzeros` word is refused) and `muse_synth_host_test` (label `checkpoint`: the C++ host half over a `make_synth.py --layers 2` checkpoint - Review Focus 5).
+- [x] **Step 2: implement, PASS** (Python tests in `agnes-ref-img` with the 5.19.0 site). Make the 2-layer real-width checkpoint on the Mac (~5.9 GB; time recorded) and run `muse_synth_host_test` by hand. **Commit** `quantize: Muse-Glimmer synthetic real-width checkpoints and check.py (spec 23b)`.
+- [x] **Step 3: the box mode** `muse_oracle.sh <data> synth-ckpt` -> `$DATA/oracle-out-muse-synth/ckpt4` (`--layers 4`) + `check.py`; 23c's golden sets live beside it. **Commit** `box: muse_oracle.sh synth-ckpt (spec 23b)`.
 
 ### Task 5: the memory plan
 
@@ -178,22 +178,22 @@ void require_fits(const MusePlan& p);       // throws naming each device's bytes
 
 `max_len` auto: the largest multiple of 256 up to `d.max_pos` (decision 6) that fits; the split for two devices by `pp_balance` over per-layer bytes (weights + ring or `max_len x 1024 B` per full layer).
 
-- [ ] **Step 1: failing test** `muse_plan_test`: one card, int8 head, no drafter -> `max_len` 131072, total printed (~19.3 GB + scratch placeholders); with a 1.358 GB drafter reservation still 131072 (Review Focus 4); bf16 head and a 5.112 GB bf16 drafter still 131072 (printed); two cards: the split by bytes and both totals printed, `--pp 2` with `split` given; `max_len` 262144 refused naming decision 6; a 16 GB card capacity -> the largest fitting `max_len` or a refusal naming the bytes; the plan's weights term = `muse_device_weight_bytes` per device.
-- [ ] **Step 2: implement, PASS.** The decode / prefill scratch terms are placeholders here (23c / 23d fill them; the test asserts they are added, not their values). **Commit** `runtime: the Muse-Glimmer memory plan, one card and two (spec 23b)`.
+- [x] **Step 1: failing test** `muse_plan_test`: one card, int8 head, no drafter -> `max_len` 131072, total printed (~19.3 GB + scratch placeholders); with a 1.358 GB drafter reservation still 131072 (Review Focus 4); bf16 head and a 5.112 GB bf16 drafter still 131072 (printed); two cards: the split by bytes and both totals printed, `--pp 2` with `split` given; `max_len` 262144 refused naming decision 6; a 16 GB card capacity -> the largest fitting `max_len` or a refusal naming the bytes; the plan's weights term = `muse_device_weight_bytes` per device.
+- [x] **Step 2: implement, PASS.** The decode / prefill scratch terms are placeholders here (23c / 23d fill them; the test asserts they are added, not their values). **Commit** `runtime: the Muse-Glimmer memory plan, one card and two (spec 23b)`.
 
 ### Task 6: docs, the queue row
 
 **Files:**
 - Modify: spec 23 ("23b as built"), this plan's status line, `docs/superpowers/plans/box-validation-queue.md` (row 43), `tools/box_validate/stages.sh` (row 43 block), `docs/13-loader.md` (a "Muse-Glimmer" paragraph: the GPTQ spelling accepted, the vision skip)
 
-- [ ] **Step 1:** "23b as built" with the measured Mac results and departures.
-- [ ] **Step 2: queue row 43. Stage list (sketch):**
+- [x] **Step 1:** "23b as built" with the measured Mac results and departures.
+- [x] **Step 2: queue row 43. Stage list (sketch):**
   - `r43.k0` default cpu (after `g0.*`): MG0 - no kernel changed, the suites;
   - `r43.host` default cpu: `muse_glimmer_test`, `muse_layout_test`, `muse_repack_test`, `muse_plan_test`, `test_muse_quant.py`;
   - `r43.synth` optin cpu `oracle_image`: `muse_oracle.sh synth-ckpt` + `check.py` (~6.4 GB, then re-links `oracle-out*`);
   - `r43.synth_host` default cpu `oracle_muse_synth`: `muse_synth_host_test`;
   - `r43.load` default gpu `oracle_muse_synth`: `muse_load_checkpoint_test` on the synthetic (one card, then `--pp 2` split 2);
   - `r43.load_real` default gpu `muse_gptq`: the real checkpoint's load (18.96 GB read, 17.41 GB on the card), its line and time, 0 unconsumed.
-- [ ] **Step 3: commit** `docs: spec 23 (23b as built), box queue row 43 - the Muse-Glimmer loader`.
+- [x] **Step 3: commit** `docs: spec 23 (23b as built), box queue row 43 - the Muse-Glimmer loader`.
 
 **Gate for the plan:** Mac - every host test green; the synthetic 2-layer checkpoint `ACCEPTED` and read by the C++ host half with 0 unconsumed; `tools/mac_check.sh --base main --quick` exit 0 (`kernel_cmdlines` +0 / -0 / ~0). Box - the loads on the synthetic and the real checkpoint with every part's bytes = the plan.

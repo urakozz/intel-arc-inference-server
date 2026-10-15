@@ -613,3 +613,42 @@ Branch `spec23a-muse-reference` (plan 23a); box queue row 42 holds what the Mac 
 - **Gate Q:** not run on the Mac - ESTIMATED ~90 h a form (36 scenarios x [a ~1.8k-id prompt at ~53 ms a layer-token
   + 512 decode steps at ~51 s, each re-dequantising the 52 layers]) against the 8-hour budget; prepared for the box
   (row 42: `r42.a4`, `r42.gateq`). Its numbers will be recorded here (the checkpoint is kept either way).
+
+## 13. 23b as built (2026-10-15; the Mac - nothing on a card yet)
+
+Branch `spec23b-muse-loader` (plan 23b); box queue row 43 holds what the Mac could not run (every upload, the card's
+read-backs, two cards). No kernel added or changed (`kernel_cmdlines` +0 / -0 / ~0).
+
+- **The descriptor** `model::MuseGlimmerDesc` (`src/model/muse_glimmer.*`) = the vendored `config.json` (meta-models @
+  `a4e59da5`, `tests/model/muse_glimmer/`, byte for byte) field by field, and Vishva007's `-AutoRound` `config.json`
+  reads as the same descriptor (its `dtype float16` and `quantization_config` are not structure). `check_muse_config`
+  refuses 29 in-memory edits, each naming the key and its value - incl. both halves of §1's `layer_rope_theta`
+  trap (a non-zero entry != the global theta; a zero at a sliding layer, a non-zero at a full one, each naming the
+  layer), `num_key_value_heads` 4, `final_logit_softcapping` null, `hidden_activation` gelu, tying at either level.
+- **The bytes** (`loader/muse_layout.h`, the planner's and the loader's one formula) are §2's exactly: 257,081,344 B of
+  int4 a layer (no layout padding at these shapes), 257,187,840 B with the norms, 17,409,096,960 B on one card with
+  the int8 head (1,345,639,680 B), read per token 14,719,433,984 B. The int4 layouts' formulas moved to
+  `loader/int4_layout.h` (shared with `moe_layout.h` / `kolibri1_layout.h`, byte-identical; Kolibri's tests green).
+- **The GEMVs:** all four int4 layout 0 with PROVISIONAL S (q||gate||k||v S2, o_proj S4, gate||up S8, down S4 -
+  Qwen3.8's nearest measured cells; 23c sweeps). `gate || up` is CONCATENATED (up at column 19968; spec §5.2's
+  separate SiLU x up), not Qwen's interleave16. The norms are the bf16 `w` widened (the kernels add 1 in fp32).
+- **The host half on the real checkpoint (measured, Mac):** the -AutoRound repo through the served constructor -
+  2268 tensors, 1459 text (= `muse_expected_names(autoround)`), **809 vision skipped by name**, every `qzeros` word
+  0x77777777 (`assert_quant_invariants`), **957 subnormal f16 scales** (counted, decoded exactly), all 52 layers
+  repacked (bytes = the layout, the part boundaries' words and scales = the shards), 0 unconsumed - 76 s, 15.5 GB RSS
+  (the mmap). The -GPTQ spelling's 1875 names are tested on fixtures and the synthetic checkpoint only.
+- **Synthetic checkpoints:** `tools/quantize/muse/make_synth.py --layers 2` wrote 5.90 GB in 54 s (agnes-ref-img, 8
+  threads; the plan's ~5.9 GB); `check.py` ACCEPTED it (75 names = `muse_ref.expected_names(gptq)`, every linear
+  within RTN's bound of its regenerated twin, worst 0.500 of a scale) and `muse_synth_host_test` read it with 0
+  unconsumed. `test_muse_quant.py` 3 / 3 (six refusals by name). 23a's tiny int4 variant (73 vision tensors, one
+  un-indexed `model.safetensors`) read by `muse_repack_test` through a temporary index.
+- **The plan** (`runtime::muse`): one card at 131072 with the int8 head 20.818 GB incl. the 1.5 GB reserve; with the
+  1.358 GB int4 drafter and 1.5 GB of scratch placeholders 23.676 GB; bf16 head + 5.112 GB bf16 drafter 27.274 GB -
+  131072 in each (decision 6). Two cards by bytes split at 24 (11.243 / 11.075 GB); a 20 GB card reaches 69632; a
+  16 GB card is refused naming the bytes; 262144 is refused naming decision 6.
+- **Departures from the plan:** (1) `load_muse_glimmer(devices, snapshot, max_len, placement, int8_head,
+  layers_override, reserve)` - Kolibri's / qwen4exp's vector of devices plus `max_len` (the plan before the first
+  allocation needs it) and the scratch / drafter placeholders. (2) `MuseHostLayer` holds each GEMV as words + scales
+  (layout 0's two allocations) rather than one byte vector. (3) `plan_muse` takes an optional `split` (`--pp 2` with a
+  split given). (4) The drafter's reservation sits on the last device (the head it reads). (5) `muse_oracle.sh` has
+  a second new mode, `synth-tests`. (6) Task 5 was built before Task 3's device half (the load calls `require_fits`).
