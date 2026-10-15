@@ -751,6 +751,53 @@ docker run --rm --memory 8g --cpus 4 -e PYTHONPATH=/ws/oracle-out-q4exp/site -v 
   tests/loader/qwen4exp_ple_fixture.h
 ```
 
+### The LFM2.5-24B-A2B reference (spec 24a, 2026-10-15)
+
+`lfm2moe_ref.py` runs **transformers 5.19.0**'s own `Lfm2MoeForCausalLM` (refused on another version; the same
+site as spec 21a: `tools/oracle/qwen4exp_env.sh <dir>`, `PYTHONPATH=<dir>` first) - eager attention (decision 13),
+the `grouped_mm` experts implementation 5.19.0 picks on torch 2.14.1 CPU, the torch conv path (`causal_conv1d` is
+not installed) - layer-streamed (`stream.attach`): the embedding (which is the tied head), `embedding_norm` and the
+rotary table resident, routed experts read on demand per expert - bf16 `experts.E.{w1,w3,w2}` from the original,
+or `qweight` / `scales` from our int4 g64 export (`--weights int4`, either expert spelling, `stream.dequant_t`): the
+engine-format reference. The restated ops (`rms_norm`, `route`, `expert_outputs` + `combine`, `short_conv`,
+`dense_mlp`) are each bitwise the module they restate; `port_forward` chains them into a whole forward and
+`hfcheck` holds it to transformers' model on any weights. Facts: `docs/probe-lfm2moe-2026-10-15.md`.
+
+Subcommands: `run <snapshot> --prompt <ids> --out <p>.golden.safetensors [--gen 32] [--layers N] [--weights
+bf16|int4] [--chunk C]` (the golden layout is in the module docstring: `h.L*` every row up to 4096 ids, else the
+last 256, `mixer.L*` / `ffn.L*` the last 256, `conv.L*` the state after the prompt, `route.{ids,w,sel,gap}.L*`
+every row and step, the last 1024 prompt rows' logits and every generated row, `tokens`, `nll`; the log prints
+the 4th / 5th `sel` gap per layer - `B70_LFM_TIE_TOL`'s evidence); `ppl`; `hfcheck <snapshot> --layers N`
+(bitwise or exit 1); `facts` (`lfm2moe_facts.py`). `--layers N` needs an attention layer among the first N (N >=
+3): transformers' `DynamicCache` takes the length from one.
+
+Tests (Mac, `agnes-ref-img` capped at 8 GB / 4 CPUs, measured 2026-10-15: ~15-25 min for all five files):
+
+```bash
+docker run --rm --memory 8g --memory-swap 8g --cpus 4 -e OMP_NUM_THREADS=3 -e HF_HUB_OFFLINE=1 \
+  -e PYTHONPATH=/ws/oracle-out-q4exp/site -e TORCH_EXTENSIONS_DIR=/ws/oracle-out-q4exp/torch-ext \
+  -v ~/.cache/huggingface:/hf:ro -e HF_HOME=/tmp/hf -v "$PWD":/ws -w /ws agnes-ref-img:latest sh -c \
+  'python3 tools/oracle/test_lfm2moe_make_tiny.py && python3 tools/oracle/test_lfm2moe_ref.py && \
+   python3 tools/toolcall/test_score.py && python3 tools/toolcall/test_make_set.py && \
+   python3 tools/toolcall/test_oracle_batched.py test_lfm2moe'
+```
+
+`test_lfm2moe_ref.py` (F1, all bitwise): the streamed reference = transformers un-streamed on `pattern8` (the
+real first eight layers at head_dim 64, biased routers) and the downloaded tiny, bf16 and fp32, 40 and 600 ids +
+8 cached steps (logits and every layer's residual); chunks of 1 / 2 / 3 / 64 / 255 and splits at 1..5 = one
+forward (conv states included); the router chain, planted ties (`route.gap == 0`, torch's order recorded), the
+combine in both orders, the short conv, the two-rounding norm, `embedding_norm` and the tie, int4 exports in
+both spellings = transformers on the dequantised twin, `--layers 3` / `2`, the port = transformers (chunks 0 /
+1 / 2 / 3 / 5 / 64), `expected_names` = the real index's 7610 names, the `run` layout.
+
+**Real weights** (`tools/box_validate/lfm2moe_oracle.sh <data> ppl|hfcheck|golden|export <dir>|a4`, queue row
+48; on the Mac too since 2026-10-15: `agnes-ref-img`, every container `--memory 40g` through
+`run_in_container.sh`'s `ORACLE_MEMORY`, the whole run under flock(2) on `/tmp/b70-cpu-model.lock` - one model job
+on the Mac's CPU at a time). `DRY_RUN=1` prints the commands and the times (measured on the Mac where run).
+Golden prompts: `tests/golden/prompts/lfm2moe_{short,4k,32k,agentic}.ids` (`lfm2moe_prompts.py`); the A4 set
+`tests/golden/toolcall-lfm2moe` (`a4_ref.sh lfm2moe set`); the A4 reference `a4_ref.sh lfm2moe ref` (2048 new ids,
+reasoning first; score with `score.py --format pythonic`).
+
 ### The A4 reference, batched (2026-10-08)
 
 `tools/toolcall/oracle_generate.py --batch N|auto --resident none|auto` (what
