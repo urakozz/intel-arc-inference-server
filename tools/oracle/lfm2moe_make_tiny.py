@@ -15,8 +15,8 @@ Random weights on the real model's structure, written with the REAL checkpoint's
   pattern8-fp32  the same weights in fp32
   ties           pattern8 with exact `sel` ties AT THE CUT: in layer 2 experts 3 and 11 get identical router
                  rows and biases, in layer 4 experts 5 and 6 - and in both layers three other experts get a bias
-                 of +2 and the pair +1, so the pair is always 4th / 5th (sigmoid < 1): the 4th / 5th `sel` are
-                 bit-equal on every token
+                 of +3 and the pair +1.5, the others keep |bias| < 0.5 (a bf16 sigmoid is in [0, 1]), so the pair
+                 is always 4th / 5th: the 4th / 5th `sel` are bit-equal on every token
   int4-g64       pattern8 with every nn.Linear (experts, dense w1/w2/w3, conv in_proj / out_proj, attention
                  q/k/v/out_proj) packed RTN int4 g64 sym in the `auto_round:auto_gptq` bytes (qweight int32
                  [K/8][N], scales F16 [K/64][N], qzeros 0x77777777; src/loader/rtn.h:20-27's rule:
@@ -48,7 +48,7 @@ from safetensors.torch import save_file  # noqa: E402
 VARIANTS = ("pattern8", "pattern8-fp32", "ties", "int4-g64")
 PATTERN8 = ["conv", "conv", "full_attention", "conv", "conv", "conv", "full_attention", "conv"]
 TIES = {2: (3, 11), 4: (5, 6)}          # layer -> the planted pair
-TIE_TOP3 = (0, 1, 2)                     # bias +2 in the tie layers: always ranks 1-3, so the pair is 4th / 5th
+TIE_TOP3 = (0, 1, 2)                     # bias +3 in the tie layers: always ranks 1-3, so the pair is 4th / 5th
 TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja")
 GROUP = 64
 AUTOROUND_VERSION = "0.17.0"
@@ -117,8 +117,9 @@ def random_state(cfg: dict, seed: int, ties: bool = False) -> dict[str, torch.Te
         if ties and i in TIES:
             a, c = TIES[i]
             gate[c] = gate[a]
-            bias[list(TIE_TOP3)] = 2.0
-            bias[a] = bias[c] = 1.0
+            bias = bias.clamp(-0.45, 0.45)
+            bias[list(TIE_TOP3)] = 3.0
+            bias[a] = bias[c] = 1.5
         sd[f + "gate.weight"] = gate
         sd[f + "expert_bias"] = bias
         for e in range(E):
