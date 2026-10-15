@@ -3425,3 +3425,28 @@ add_executable(probe_offload_kernel_drift_test kernels/probe_offload_kernel_drif
 add_test(NAME probe_offload_kernel_drift_test COMMAND probe_offload_kernel_drift_test ${CMAKE_SOURCE_DIR})
 set_tests_properties(probe_offload_kernel_drift_test PROPERTIES LABELS host)
 # ==== Spec 22a: the expert-offload probe ==== (end) ====
+
+# ==== Spec 23b: Muse-Glimmer descriptor and loader (label muse) ==== (begin) ====
+# One delimited block for every 23b registration. Host tests first (tools/mac_check.sh runs them), then the
+# checkpoint / card ones (box queue row 43): they SKIP (77) until the synthetic checkpoint
+# (tools/box_validate/muse_oracle.sh synth-ckpt) or the real int4 checkpoint is on the machine.
+# Task 1: the descriptor against the vendored config.json (meta-models/Muse-Glimmer-30B @ a4e59da5, byte for byte)
+# and, when the HF cache has it, the int4 repo's config.json.
+set(B70_MUSE_SNAPSHOT "Vishva007/Muse-Glimmer-30B-W4A16-AutoRound" CACHE STRING
+  "Muse-Glimmer-30B int4 g64 checkpoint (either Vishva007 spelling: -AutoRound or -AutoRound-GPTQ)")
+add_executable(muse_glimmer_test model/muse_glimmer_test.cc)
+target_include_directories(muse_glimmer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(muse_glimmer_test PRIVATE b70_muse_model)
+# The int4 repo's config.json only when this machine's HF cache has it (an absent path would disable the test here).
+if(DEFINED ENV{HF_HOME})
+  set(_muse_hf "$ENV{HF_HOME}")
+else()
+  set(_muse_hf "$ENV{HOME}/.cache/huggingface")
+endif()
+string(REPLACE "/" "--" _muse_repo "${B70_MUSE_SNAPSHOT}")
+file(GLOB _muse_int4_cfg "${_muse_hf}/hub/models--${_muse_repo}/snapshots/*/config.json")
+list(SUBLIST _muse_int4_cfg 0 1 _muse_int4_cfg)
+add_test(NAME muse_glimmer_test COMMAND muse_glimmer_test ${CMAKE_SOURCE_DIR}/tests/model/muse_glimmer/config.json
+  ${CMAKE_SOURCE_DIR}/tests/model/muse_glimmer/generation_config.json ${_muse_int4_cfg})
+set_tests_properties(muse_glimmer_test PROPERTIES LABELS muse)
+# ==== Spec 23b: Muse-Glimmer descriptor and loader ==== (end) ====
