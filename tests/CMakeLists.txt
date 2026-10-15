@@ -3750,4 +3750,15 @@ target_include_directories(toolcall_muse_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${
 target_link_libraries(toolcall_muse_test PRIVATE b70_server)
 add_test(NAME toolcall_muse_test COMMAND toolcall_muse_test ${CMAKE_SOURCE_DIR}/tests/server)
 set_tests_properties(toolcall_muse_test PROPERTIES LABELS muse TIMEOUT 300)
+# Task 3 (host): the request path for model_type muse_glimmer over mock engines and the REAL template (the vendored
+# chat_template.jinja): kwargs and reasoning_effort -> reasoning_strength, the vision refusal, string arguments, both
+# EOS ids (not <|eom|>), streamed channels, a call cut by max_tokens, the sampling defaults with the host softcap
+# (filter_probs: the capped softmax, a chi-square, the acceptance paths on the same p), stop_strings, cached_tokens.
+if(B70_TOKENIZER_ENABLED)
+  add_executable(muse_server_test server/muse_server_test.cc)
+  target_include_directories(muse_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_server_test PRIVATE b70_server b70_tokenizer)
+  add_test(NAME muse_server_test COMMAND muse_server_test ${CMAKE_SOURCE_DIR}/tests/tokenizer/muse)
+  set_tests_properties(muse_server_test PROPERTIES LABELS muse TIMEOUT 300)
+endif()
 # ==== Spec 23e: Muse-Glimmer served ==== (end) ====

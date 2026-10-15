@@ -83,6 +83,13 @@ json normalize_message(const json& message) {
   const json& content = message.at("content");
   if (content.is_array()) {
     for (const json& part : content) {
+      // Spec 23e: an image / video / audio part is refused by name - no served model loads its encoder (Muse-Glimmer's
+      // vision tower is out of scope, spec 23 §10).
+      if (part.is_object() && part.contains("type") && part.at("type").is_string() && part.at("type") != "text") {
+        invalid("content part of type '" + part.at("type").get<std::string>() +
+                "' is refused: this server serves text only - the vision encoder (images, video) and any audio "
+                "encoder are not loaded");
+      }
       if (!part.is_object() || !part.contains("text") || !part.at("text").is_string()) {
         invalid("content parts must be text parts");
       }
@@ -98,7 +105,12 @@ json normalize_message(const json& message) {
         const std::string text = fn.at("arguments").get<std::string>();
         json parsed = text.empty() ? json::object() : json::parse(text, nullptr, false);
         if (parsed.is_discarded() || !parsed.is_object()) {
-          invalid("tool call arguments must be a JSON object");
+          // Spec 23e (plan 23e Review Focus 5): name the call - a template that iterates the arguments (Muse's raises
+          // on a string) must never see one, and the client must see which call it sent wrong.
+          const std::string name = fn.contains("name") && fn.at("name").is_string() ? fn.at("name").get<std::string>() : "";
+          const std::string id = call.contains("id") && call.at("id").is_string() ? call.at("id").get<std::string>() : "";
+          invalid("tool call arguments must be a JSON object (or a JSON string holding one): the call '" + name +
+                  "' (id '" + id + "')");
         }
         fn["arguments"] = std::move(parsed);
       }
@@ -142,6 +154,24 @@ Sampling generation_sampling(const json& g) {
   }
   s.greedy = !sample || s.temperature == 0.0f;
   return s;
+}
+
+std::vector<std::string> generation_stop_strings(const json& g) {
+  std::vector<std::string> out;
+  if (!g.is_object() || !g.contains("stop_strings") || g.at("stop_strings").is_null()) return out;
+  const json& v = g.at("stop_strings");
+  if (v.is_string()) {
+    out.push_back(v.get<std::string>());
+    return out;
+  }
+  if (!v.is_array())
+    throw std::invalid_argument("generation_config.json stop_strings is neither a string nor a list of strings");
+  for (const json& s : v) {
+    if (!s.is_string())
+      throw std::invalid_argument("generation_config.json stop_strings holds a non-string entry: " + s.dump());
+    out.push_back(s.get<std::string>());
+  }
+  return out;
 }
 
 Request parse_request(const std::string& body, bool chat, const Sampling& defaults) {
@@ -192,6 +222,7 @@ Request parse_request(const std::string& body, bool chat, const Sampling& defaul
       }
       out.template_kwargs = kwargs;
     }
+    if (request.contains("reasoning_effort")) out.reasoning_effort = request.at("reasoning_effort");
   } else {
     if (!request.contains("prompt")) invalid("missing prompt");
     if (!request.at("prompt").is_string()) invalid("prompt must be a string");

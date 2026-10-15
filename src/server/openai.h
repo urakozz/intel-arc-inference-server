@@ -32,6 +32,10 @@ struct Request {
   bool return_token_ids = false;
   Sampling sampling;
   std::string model;
+  // Spec 23e: the OpenAI top-level `reasoning_effort` as sent (null when absent). Which models read it, and how, is
+  // the chat format's (Muse-Glimmer maps it onto chat_template_kwargs.reasoning_strength - spec 23 decision 3);
+  // every other model ignores it, as before.
+  nlohmann::json reasoning_effort;
 };
 
 struct BadRequest : std::runtime_error {
@@ -48,6 +52,10 @@ Request parse_request(const std::string& body, bool chat, const Sampling& defaul
 // false or absent, or temperature is 0), temperature / top_p / top_k where present, the rest Sampling{}'s.
 // Throws std::invalid_argument naming a field of the wrong type or range.
 Sampling generation_sampling(const nlohmann::json& generation_config);
+// Spec 23e: generation_config.json's `stop_strings` - absent: none; a string, or a list of strings (Hugging Face
+// allows both; openvino.genai's reader fixed the string form, d54d3768). Anything else throws std::invalid_argument
+// naming the key. b70-serve merges them with every request's `stop` (Options::stop_strings).
+std::vector<std::string> generation_stop_strings(const nlohmann::json& generation_config);
 
 std::string error_body(const std::string& message, const std::string& type);
 

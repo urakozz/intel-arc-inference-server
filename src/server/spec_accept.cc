@@ -24,12 +24,21 @@ FilteredProbs filter_probs(const float* logits, uint32_t vocab_used, const Sampl
   idx.resize(k);
 
   const float temperature = s.temperature > 0.0f ? s.temperature : 1.0f;
-  const float top_logit = logits[idx[0]];
+  // Spec 23e: the model's logit transform (Muse-Glimmer's multiplier and softcap, fp32) on the k candidates only - it
+  // is monotone, so the top-k / top-p order by the raw logits is the transformed order. Unset (1, 0): the raw logits,
+  // exactly as before.
+  const bool shaped = s.softcap > 0.0f || s.logit_mult != 1.0f;
+  const auto shape = [&s](float z) {
+    const float x = z * s.logit_mult;
+    return s.softcap > 0.0f ? s.softcap * std::tanh(x / s.softcap) : x;
+  };
+  const float top_logit = shaped ? shape(logits[idx[0]]) : logits[idx[0]];
   std::vector<double>& probs = f.probs;
   probs.resize(k);
   double sum = 0.0;
   for (uint32_t i = 0; i < k; ++i) {
-    probs[i] = std::exp(static_cast<double>((logits[idx[i]] - top_logit) / temperature));
+    const float z = shaped ? shape(logits[idx[i]]) : logits[idx[i]];
+    probs[i] = std::exp(static_cast<double>((z - top_logit) / temperature));
     sum += probs[i];
   }
   for (double& p : probs) p /= sum;
