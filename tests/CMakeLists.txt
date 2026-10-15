@@ -3569,6 +3569,26 @@ if(B70_MUSE)
     ${B70_MUSE_SYNTH_DIR}/golden pp2:2 peer)
   set_tests_properties(muse_pp_test muse_golden_synth_pp2_test muse_golden_synth_pp2_peer_test
     PROPERTIES LABELS "checkpoint;muse;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # Task 6: the real checkpoint (either Vishva007 spelling) against 23a's golden sets (muse_oracle.sh golden ->
+  # oracle-out-muse/): the partial forward (--layers 8: every layer's residual tap against H.L*, the head against the
+  # truncated reference muse_oracle.sh real-layers writes), then the whole model (it fits one card) - MG3 on every
+  # golden prompt, int8 and bf16 heads, flash and eager, and across two cards. SKIP 77 without the data.
+  set(B70_MUSE_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-muse" CACHE PATH "23a's golden sets (muse_oracle.sh golden)")
+  add_executable(muse_partial_test golden/muse_partial_test.cc)
+  target_include_directories(muse_partial_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_partial_test PRIVATE b70_muse_runtime)
+  add_dependencies(muse_partial_test ${B70_MUSE_DECODE_KERNELS})
+  add_test(NAME muse_partial_test COMMAND muse_partial_test ${B70_MUSE_SNAPSHOT} ${B70_MUSE_ORACLE_DIR} 8)
+  add_test(NAME muse_partial_eager_test COMMAND muse_partial_test ${B70_MUSE_SNAPSHOT} ${B70_MUSE_ORACLE_DIR} 8)
+  set_tests_properties(muse_partial_eager_test PROPERTIES ENVIRONMENT "B70_MUSE_ATTN=eager")
+  add_test(NAME muse_golden_real_test COMMAND muse_golden_test ${B70_MUSE_SNAPSHOT} ${B70_MUSE_ORACLE_DIR})
+  add_test(NAME muse_golden_real_bf16_test COMMAND muse_golden_test ${B70_MUSE_SNAPSHOT} ${B70_MUSE_ORACLE_DIR} bf16)
+  add_test(NAME muse_golden_real_eager_test COMMAND muse_golden_test ${B70_MUSE_SNAPSHOT} ${B70_MUSE_ORACLE_DIR} bf16)
+  set_tests_properties(muse_golden_real_eager_test PROPERTIES ENVIRONMENT "B70_MUSE_ATTN=eager")
+  add_test(NAME muse_golden_real_pp2_test COMMAND muse_golden_test ${B70_MUSE_SNAPSHOT} ${B70_MUSE_ORACLE_DIR} pp2 copy)
+  set_tests_properties(muse_partial_test muse_partial_eager_test muse_golden_real_test muse_golden_real_bf16_test
+    muse_golden_real_eager_test muse_golden_real_pp2_test
+    PROPERTIES LABELS "checkpoint;golden;muse" SKIP_RETURN_CODE 77 TIMEOUT 14400)
 endif()
 # b70-decode's model_type dispatch and Muse's refusals, before the device: tests/model/muse_glimmer/ holds only the
 # checkpoint's config.json (and generation_config.json), which is all the dispatch reads. b70-serve refuses the model
