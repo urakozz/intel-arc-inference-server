@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 
+#include "loader/int4_layout.h"   // kInt4TileU32, int4_layout1_bytes (spec 23b: one home)
 #include "model/model_desc.h"
 
 // Spec 15c: a mixture-of-experts layer on the card, as device-free arithmetic and
@@ -51,8 +52,6 @@
 // parts (`mlp.shared_expert.{gate,up,down}_proj`), int4 like the experts.
 namespace loader {
 
-inline constexpr uint32_t kInt4TileU32 = 136;   // common/repack.h layout 1: 128 nibble + 8 scale u32
-
 // The checkpoint's per-layer names, layer-relative (the loader prefixes them).
 inline constexpr const char* kMoeRouter = "mlp.gate";
 inline constexpr const char* kMoeSharedGate = "mlp.shared_expert_gate";
@@ -75,11 +74,6 @@ struct MoeLayerBytes {
     return router + size_t(top_k + 1) * (gate_up_block + down_block);
   }
 };
-
-// Layout-1 bytes of a K x N int4 g64 linear: (N / 16) x (K / 64) tiles of 136 u32.
-inline constexpr size_t int4_layout1_bytes(uint32_t K, uint32_t N) {
-  return size_t(N / 16) * (K / 64) * kInt4TileU32 * 4;
-}
 
 // Zero on a dense model.
 inline MoeLayerBytes moe_layer_bytes(const model::ModelDesc& d) {

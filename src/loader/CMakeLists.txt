@@ -33,3 +33,12 @@ target_link_libraries(b70_kolibri_loader PUBLIC b70_loader b70_kolibri_model b70
 add_library(b70_qwen4exp_loader STATIC qwen4exp_repack.cc qwen4exp_ple.cc qwen4exp_ple_usm.cc qwen4exp_loader.cc)
 target_include_directories(b70_qwen4exp_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_qwen4exp_loader PUBLIC b70_loader b70_qwen4exp_model b70_qwen4exp_plan b70_l0)
+
+# --- Spec 23b: Muse-Glimmer-30B ------------------------------------------------------------------
+# The Muse-Glimmer loader, beside the others (none touched): the host half (muse_repack.cc - no Level Zero, run on
+# any host by tests/loader/muse_repack_test.cc and muse_synth_host_test.cc) and the upload onto one or two devices
+# (muse_loader.cc). It links the host-only planner (b70_muse_plan): the load runs the plan and refuses what does not
+# fit before the first allocation.
+add_library(b70_muse_loader STATIC muse_repack.cc muse_loader.cc)
+target_include_directories(b70_muse_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_muse_loader PUBLIC b70_loader b70_muse_model b70_muse_plan b70_l0)

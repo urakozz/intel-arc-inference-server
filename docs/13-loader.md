@@ -904,6 +904,35 @@ in `tests/loader/ct/`.
   the original's (its split has `\p{M}`); Intel's checkpoint ships Qwen3.8's, so `b70-serve` refuses it and takes
   `--tokenizer FILE`.
 
+## Muse-Glimmer-30B (spec 23b): either GPTQ spelling, the fused GEMVs, the vision skip
+
+`loader::load_muse_glimmer` (`src/loader/muse_{layout.h,repack.*,loader.*}`) is a loader BESIDE the others; it
+reuses `resolve_snapshot`, `QuantConfig::parse`, `SafetensorsSet`, `assert_quant_invariants` / `check_quant_scan`,
+`LinearSrc::classify`, the int8 head and the existing GEMV repack (`common::repack_int4_layout0_cols`), and touches
+none of their files. The int4 layouts' byte formulas moved to `loader/int4_layout.h` (shared by `moe_layout.h`,
+`kolibri1_layout.h` - byte-identical aliases, static_asserted - and `muse_layout.h`).
+
+- **The checkpoint is Vishva007's, used as is (spec 23 §3.3), in EITHER spelling of the one export**:
+  `-AutoRound` (`quant_method` auto-round, `packing_format` auto_round:auto_gptq, no `g_idx` - 1459 text names)
+  or `-AutoRound-GPTQ` (`quant_method` gptq, `desc_act` false, `g_idx` = i // 64 - 1875 text names). The spelling
+  is read from the names (any text `.g_idx`) and every linear is then held to it; `QuantConfig::parse` refuses
+  another arithmetic by name (`desc_act` true, a group but 64 / 128, bits but 4, asymmetric), the auto-round
+  spelling with `g_idx` tensors (an activation order nobody declared) and any compressed-tensors linear.
+  `assert_quant_invariants` proves every `qzeros` word 0x77777777 and every `g_idx` before a byte is repacked.
+- **Eight int4 linears a layer, four GEMVs** (int4 GPTQ layout 0, `MuseGlimmerDesc::linear`): `q || gate || k ||
+  v` 6656 -> 8704 (gate at column 4096, k at 8192, v at 8448), `o_proj`, `gate || up` 6656 -> 39936 (concatenated,
+  up at 19968), `down`; 257,081,344 B a layer. The four centered norms are the bf16 `w` widened to fp32 bit for
+  bit (the kernels add the 1 in fp32, as the reference does), one [4][hidden] block a layer.
+- **Names both ways.** The text names are exactly `muse_expected_names` (= `muse_ref.expected_names` of the
+  spelling); the vision tower, adapter and projection (`model.vision_{tower,adapter,projection}.*`, 809 tensors
+  on the real checkpoint) are skipped BY NAME and counted in the load line; any other name throws naming it;
+  every text tensor is read once (`unconsumed()` empty), the later layers' consumed by design with `--layers N`.
+- **The plan before the first allocation**: `runtime::muse::plan_at` + `require_fits` at the 1.5 GB reserve
+  against each device's memory. Device 0 holds the embedding (gathered), the last device the final norm and the
+  head - int8 + fp32 row scales built at load (spec 9; 1,345,639,680 B) or bf16 tiled. One card, int8 head:
+  17,409,096,960 B; the load line: `Muse-Glimmer-30B: 52 layers (int4 g64, ... spelling), 809 vision tensors
+  skipped, head int8, devices 1, 17409096960 B`.
+
 ## Deliberately not loaded
 
 - **`model.visual.*`** (333 tensors, 0.921 GB) - this checkpoint is a
