@@ -21,7 +21,7 @@ layers and a QSA layer, the PLE in bf16): qwen4exp_ref.py needs transformers 5.1
 site first on PYTHONPATH (`PYTHONPATH=<site> python3 tools/toolcall/test_oracle_batched.py test_qwen4exp`); it says
 SKIP under another version, and the others need 5.15 (Ornith's layer_major refuses another).
 
-test_lfm2moe (spec 24a) the same on lfm2moe_make_tiny's pattern8 (LFM2.5's layer pattern, bf16 as the original):
+test_lfm2moe (spec 24a) the same on the downloaded tiny yujiepan/lfm2-moe-tiny-random (bf16, the original's names):
 lfm2moe_ref.py needs transformers 5.19.0 too (`... test_oracle_batched.py test_lfm2moe` with the site).
 
 test_cli_resume runs oracle_generate.py's main on a tiny Ornith set: --batch 1 into one directory,
@@ -109,11 +109,25 @@ def qwen4exp_snapshot(tmp: str):
 
 
 def lfm2moe_snapshot(tmp: str):
-    """Spec 24a: lfm2moe_make_tiny's pattern8 (the real layer pattern, head_dim 64, biased routers; bf16, the original's
-    per-expert w1 / w3 / w2 names) - what the A4 reference loads (LFM2.5's bf16 original)."""
-    mk = _load(os.path.join(ORACLE, "lfm2moe_make_tiny.py"), "tb_lfm2moe_make_tiny")
-    mk.make(tmp, "pattern8", seed=24, tokenizer="")
-    return "lfm2_moe", 124000
+    """Spec 24a: the downloaded tiny yujiepan/lfm2-moe-tiny-random (bf16, the original's per-expert w1 / w3 / w2 names:
+    what the A4 reference loads from LFM2.5's bf16 original), copied into tmp. Not lfm2moe_make_tiny's pattern8: with
+    its unit-scale tied embedding a random model's greedy continuation repeats its last id, so no EOS set stops two
+    sequences at different points."""
+    import glob
+    hf = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+    snaps = [c for root in (hf, "/hf", os.path.expanduser("~/.cache/huggingface"))
+             for c in sorted(glob.glob(os.path.join(root, "hub", "models--yujiepan--lfm2-moe-tiny-random", "snapshots",
+                                                    "*")))]
+    if not snaps:
+        raise SkipTiny("yujiepan/lfm2-moe-tiny-random is not in the HF cache (hf download, 10 MB)")
+    for fn in ("config.json", "generation_config.json", "model.safetensors"):
+        shutil.copyfile(os.path.join(snaps[0], fn), os.path.join(tmp, fn))
+    with open(os.path.join(tmp, "config.json"), encoding="utf-8") as f:
+        return "lfm2_moe", json.load(f)["vocab_size"]
+
+
+class SkipTiny(Exception):
+    pass
 
 
 SNAPSHOTS = {"ornith": ornith_snapshot, "k2": k2_snapshot, "kolibri": kolibri_snapshot, "qwen4exp": qwen4exp_snapshot,
@@ -292,7 +306,10 @@ def test_lfm2moe():
               "on PYTHONPATH)")
         return
     os.environ.pop("LFM_LAYERS", None)
-    check("lfm2moe")
+    try:
+        check("lfm2moe")
+    except SkipTiny as e:
+        print(f"  SKIP: {e}")
 
 
 # --------------------------------------------------------------------------------------------
