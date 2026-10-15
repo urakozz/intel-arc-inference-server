@@ -174,7 +174,7 @@ docker run --rm --memory 8g --memory-swap 8g --cpus 4 -e OMP_NUM_THREADS=3 -e HF
 
 - [ ] **Step 1: failing tests** (`test_muse_gateq.py`, on the tiny `int4` vs `untied` pair): KL of identical models is exactly 0 and top-1 1.0; the verdict reads a planted A4 table (parse failures, agreement) and a KL json and prints PASS / GAP by the bars.
 - [ ] **Step 2: implement, PASS.** Commit `oracle: gate Q - the GPTQ checkpoint against the bf16 original, A4 and teacher-forced KL (spec 23a)`.
-- [ ] **Step 3 (box CPU):** `muse_oracle.sh <data> a4` (both forms, 36 scenarios, resumable, hours - DRY_RUN's estimate first), then `gateq`; `score.py --format atem <out> bf16 gptq`; the verdict. **If GAP:** record it in spec 23 §3.3 and stop - stage 23q (our quantisation) is the operator's call; 23b-23e continue on the synthetic checkpoints meanwhile.
+- [ ] **Step 3 (box CPU):** (why this gate decides: the checkpoint was calibrated on AutoRound's default `NeelNanda/pile-10k`, 512 x 2048 tokens of web text with no chat template, channels or ATEM calls - spec 23 §3.1, auto-round `da52d6da`'s `examples/Muse-Glimmer/Muse-Glimmer_W4A16.ipynb`.) `muse_oracle.sh <data> a4` (both forms, 36 scenarios, resumable, hours - DRY_RUN's estimate first), then `gateq`; `score.py --format atem <out> bf16 gptq`; the verdict. **If GAP:** record it in spec 23 §3.3 and stop - stage 23q (our quantisation) is the operator's call; 23b-23e continue on the synthetic checkpoints meanwhile.
 
 ### Task 8: docs, the queue row
 

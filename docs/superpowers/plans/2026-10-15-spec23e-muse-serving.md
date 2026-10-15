@@ -12,7 +12,7 @@
 
 **Tech Stack:** C++17 (server, minja, the Rust `tokenizers` crate via `src/tokenizer/rs`), Python 3 + transformers 5.19.0 (the fixtures), Level Zero (snapshots on the card).
 
-**Spec:** `docs/superpowers/specs/2026-10-15-spec23-muse-glimmer-design.md` (§1.2, §5.4, §6, §4.2 MG4-MG5, §11 decisions 1-4, 6). Precedents: plan 20e (`2026-10-06-spec20e-kolibri-serving.md`: `template_kolibri_test`, `kolibri_tokenizer_test`, `toolcall_kolibri_test`, `kolibri_snapshot_test`, `KolibriEngineAdapterT`), plan 21e (`dump_qwen4exp.py`, the `\p{M}` split), spec 18d (minja patches, each tested against Jinja2), `src/server/{chat_format,toolcall,spec_accept,openai}.h`.
+**Spec:** `docs/superpowers/specs/2026-10-15-spec23-muse-glimmer-design.md` (§1.2, §5.4, §6, §4.2 MG4-MG5, §11 decisions 1-4, 6, 15, 16). Precedents: plan 20e (`2026-10-06-spec20e-kolibri-serving.md`: `template_kolibri_test`, `kolibri_tokenizer_test`, `toolcall_kolibri_test`, `kolibri_snapshot_test`, `KolibriEngineAdapterT`), plan 21e (`dump_qwen4exp.py`, the `\p{M}` split), spec 18d (minja patches, each tested against Jinja2), `src/server/{chat_format,toolcall,spec_accept,openai}.h`.
 
 ## Dependencies and branch points
 
@@ -26,7 +26,7 @@
 - The template is the ORIGINAL's `chat_template.jinja` (sha256 `cfc67e5f...`; decision 1): `b70-serve` reads `<snapshot>/chat_template.jinja` only when its sha256 is that one, else refuses naming `--chat-template FILE`; `--chat-template FILE` overrides (the operator's way to use the GPTQ repo's older file deliberately).
 - Every fixture is made by transformers 5.19.0 (spec 21a's site), committed, and the scripts that make them are committed beside them; tests pass `current_date="2026-10-15"` so no render depends on the clock.
 - Vendored small files under `tests/tokenizer/muse/`: `tokenizer_config.json`, `generation_config.json`, `chat_template.jinja` (Apache-2.0); `tokenizer.json` (28 MB) is NOT vendored - tests read it from the HF cache (`B70_MUSE_TOKENIZER_JSON`), SKIP 77 without it.
-- No `rm -rf`. No third-party engine named beyond transformers and vLLM.
+- No `rm -rf`. No third-party engine named beyond the Apache-2.0 references spec 23 cites (transformers, vLLM, OpenVINO Model Server / openvino.genai - ideas only, no code copied).
 
 ## Review Focus
 

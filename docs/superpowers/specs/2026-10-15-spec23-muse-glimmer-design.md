@@ -34,7 +34,9 @@ range-fetched: no weight shard was downloaded), **estimated** or **published** (
 - `T:` = the original's `chat_template.jinja` (sha256 `cfc67e5f...cae678`, 9992 B, 211 lines);
 - the second implementation is vLLM at `13e919a3d3` (2026-10-15, the local checkout
   `/Users/urakozz/PycharmProjects/vllm`, Apache-2.0): `V/models/muse_glimmer.py`,
-  `V/tool_parsers/muse_glimmer_tool_parser.py`, `V/reasoning/muse_glimmer_reasoning_parser.py`.
+  `V/tool_parsers/muse_glimmer_tool_parser.py`, `V/reasoning/muse_glimmer_reasoning_parser.py`; for the parser's
+  edge cases also OpenVINO Model Server at `5d8bdfb19` (`/Users/urakozz/PycharmProjects/model_server`, Apache-2.0,
+  ideas only) and intel/auto-round at `da52d6da` for the checkpoint's recipe.
 
 ## 1. The model
 
