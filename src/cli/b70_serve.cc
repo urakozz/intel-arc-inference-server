@@ -25,6 +25,7 @@
 #include "cli/k2_serve_adapter.h"
 #include "cli/kolibri_decode.h"
 #include "cli/kolibri_serve.h"
+#include "cli/muse_decode.h"   // spec 23c: is_muse (the refusal below; 23e serves it)
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
 #include "cli/pipeline_serve.h"
@@ -885,6 +886,13 @@ int run(int argc, char** argv) {
   // PipelineEngineAdapterT (one card or two) - dispatched here, before the Qwen family's kv-cache and --pp rules (its
   // own, cli::qwen4exp::check_serve, replace them), as b70-decode dispatches it. --layers / --ple-dir / --tokenizer
   // belong to it alone.
+  // Spec 23c: Muse-Glimmer-30B (model_type muse_glimmer) decodes in b70-decode; serving it - the chat template, the
+  // tokenizer, the ATEM / channel parser, the host softcap - is spec 23e's (box queue row 46). Refused here, before
+  // the device and before the Qwen family's rules, by name.
+  if (cli::muse::is_muse(path))
+    throw std::runtime_error("Muse-Glimmer-30B (model_type muse_glimmer) is not served yet: spec 23e builds its server "
+                             "(the chat template, the tokenizer, the channel / ATEM parser, the host softcap - box queue "
+                             "row 46); b70-decode runs it (spec 23c)");
   if (cli::qwen4exp::is_qwen4exp(path)) {
     cli::qwen4exp::ServeArgs qs;
     qs.snapshot_dir = loader::resolve_snapshot(path);

@@ -8,3 +8,10 @@
 add_library(b70_muse_plan STATIC muse_sizes.cc muse_rope.cc)
 target_include_directories(b70_muse_plan PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_muse_plan PUBLIC b70_muse_model b70_plan)
+
+# Spec 23c: b70_muse_runtime - the decode buffers, the captured list and MuseEngine on one or two devices (Level Zero).
+# It links b70_runtime for spec 16b's pieces (runtime::PipelineLink, StageLink, the pp_handoff binary).
+add_library(b70_muse_runtime STATIC muse_buffers.cc muse_capture.cc muse_engine.cc)
+target_include_directories(b70_muse_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_muse_runtime PUBLIC b70_l0 b70_muse_loader b70_muse_plan b70_runtime)
+b70_target_kernel_dir(b70_muse_runtime)

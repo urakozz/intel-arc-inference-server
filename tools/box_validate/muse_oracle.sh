@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spec 23a: the Muse-Glimmer-30B CPU reference runs (kolibri_oracle.sh's / qwen4exp_oracle.sh's shape), on the BOX
 # CPU - and on the Mac (Docker Desktop: ORACLE_IMAGE agnes-ref-img, the container capped by ORACLE_MEMORY).
-#   tools/box_validate/muse_oracle.sh <data tree> tests|tiny|facts|ppl|hfcheck|golden|golden-bf16|a4|gateq|taps|synth-ckpt|synth-tests
+#   tools/box_validate/muse_oracle.sh <data tree> tests|tiny|facts|ppl|hfcheck|golden|golden-bf16|a4|gateq|taps|synth-ckpt|synth-tests|synth|real-layers
 #
 # Every container mode runs in the oracle image (tools/oracle/run_in_container.sh) with transformers 5.19.0 from spec
 # 21a's site BESIDE the image (tools/oracle/qwen4exp_env.sh; the box's oracle-out-q4exp-site, the Mac's
@@ -30,6 +30,14 @@
 #                RTN's bound of its regenerated twin) -> <data>/oracle-out-muse-synth/ckpt<N>/ + ckpt<N>.ACCEPTED (the
 #                check's log; written last, it marks done). Needs only the original's and the -GPTQ repo's SMALL files.
 #   synth-tests  spec 23b: tools/quantize/muse/test_muse_quant.py (make_synth / check.py / the packer; the same small files)
+#   synth        spec 23c: the golden sets of the synthetic checkpoint (synth-ckpt's ckpt<MUSE_SYNTH_LAYERS>, mounted as
+#                ORACLE_SNAP): muse_ref.py run --gen 32 over MUSE_SYNTH_PROMPTS (default muse_short_prose muse_4k) ->
+#                <data>/oracle-out-muse-synth/golden/<p>.{ids,golden.safetensors,log} (the engine's MG3 on decode:
+#                muse_golden_synth_*; 4 layers: ~1 min short, ~10-15 min the 4k prompt, ESTIMATED)
+#   real-layers  spec 23c: the reference TRUNCATED to the first MUSE_LAYERS (8) layers (muse_ref.py run --layers N - then
+#                the final norm and the head on layer N-1's residual) on the int4 checkpoint over MUSE_PROMPTS (default
+#                muse_short_prose) -> <data>/oracle-out-muse-L<N>/ (muse_partial_test's head rows; its taps read the
+#                whole model's golden, whose H.L0..H.L<N-1> are the same computation)
 #   taps         for 23f P0: the residual after layers 1, 13, 25, 37, 49 over [prompt + the GPTQ form's own A4
 #                continuation] per scenario (teacher-forced, no generation) -> <data>/oracle-out-muse-taps/
 # Golden runs are per prompt resumable (written into <tree>/oracle-out-muse*.partial/, moved when complete, the golden
@@ -42,7 +50,7 @@
 #      MUSE_PROMPTS (golden's prompts, default all six), MUSE_REF_MIN_GB, MUSE_GEN (32), HF_HOME, ORACLE_IMAGE, ORACLE_THREADS, ORACLE_MEMORY (the Mac: 40g).
 set -u
 cd "$(dirname "$0")/../.." || exit 2
-MODES="tests|tiny|facts|ppl|hfcheck|golden|golden-bf16|a4|gateq|taps|synth-ckpt|synth-tests"
+MODES="tests|tiny|facts|ppl|hfcheck|golden|golden-bf16|a4|gateq|taps|synth-ckpt|synth-tests|synth|real-layers"
 [ $# -eq 2 ] || { echo "usage: $0 <data tree> $MODES" >&2; exit 2; }
 data="$1" mode="$2"
 case "|$MODES|" in *"|$mode|"*) ;; *) echo "muse_oracle: mode $mode is not one of $MODES" >&2; exit 2 ;; esac
@@ -68,7 +76,7 @@ else
   SITE=oracle-out-q4exp-site
 fi
 case "$mode" in
-  tests|tiny|facts|synth-ckpt|synth-tests) need="${MUSE_REF_MIN_GB:-24}" ;;
+  tests|tiny|facts|synth-ckpt|synth-tests|synth) need="${MUSE_REF_MIN_GB:-24}" ;;
   golden-bf16) need="${MUSE_REF_MIN_GB:-72}" ;;
   *) need="${MUSE_REF_MIN_GB:-40}" ;;
 esac
@@ -127,7 +135,12 @@ fi
 case "$mode" in
   tests|tiny) complete "$TINY" || [ "$dry" = 1 ] || {
     echo "SKIP_REASON muse_oracle: $TINY is not in $hf/hub (hf download optimum-intel-internal-testing/tiny-random-muse-glimmer - 27 MB)"; exit 77; } ;;
-  facts|golden|taps) complete "$GPTQ" || [ "$dry" = 1 ] || {
+  synth) [ "$dry" = 1 ] || {
+    ck="$data/oracle-out-muse-synth/ckpt${MUSE_SYNTH_LAYERS:-4}"
+    [ -f "$ck.ACCEPTED" ] && [ -s "$ck/model.safetensors.index.json" ] || {
+      echo "SKIP_REASON muse_oracle: synth needs $ck (ACCEPTED) - muse_oracle.sh <data> synth-ckpt first"; exit 77; }
+  } ;;
+  facts|golden|taps|real-layers) complete "$GPTQ" || [ "$dry" = 1 ] || {
     echo "SKIP_REASON muse_oracle: $GPTQ is absent or incomplete in $hf/hub (Vishva007/Muse-Glimmer-30B-W4A16-AutoRound or -GPTQ, 22.8 GB; df -h first)"; exit 77; }
     if [ "$mode" = facts ] && [ "$dry" != 1 ]; then   # the original's small files (config, tokenizer, template)
       b=$(snap_of "$BF16")
@@ -340,6 +353,25 @@ case "$mode" in
         rc=1
       fi
     fi
+    ;;
+  synth)
+    nl="${MUSE_SYNTH_LAYERS:-4}"
+    ck="$data/oracle-out-muse-synth/ckpt$nl"
+    # the synthetic checkpoint never went through hf download: run_in_container.sh mounts it read-only as /snap
+    if [ "$dry" = 1 ]; then export ORACLE_SNAP="$ck"; else ORACLE_SNAP="$(cd "$ck" && pwd -P)"; export ORACLE_SNAP; fi
+    for p in ${MUSE_SYNTH_PROMPTS:-muse_short_prose muse_4k}; do
+      [ -s "tests/golden/prompts/$p.ids" ] || { echo "muse_oracle: MUSE_SYNTH_PROMPTS names $p: no tests/golden/prompts/$p.ids" >&2; exit 2; }
+      golden synth "$data/oracle-out-muse-synth/golden" oracle-out-muse-synth-golden.partial "$p" "" || true
+    done
+    summary "$data/oracle-out-muse-synth/golden/*.log"
+    ;;
+  real-layers)
+    nl="${MUSE_LAYERS:-8}"
+    [[ "$nl" =~ ^[0-9]+$ ]] && [ "$nl" -ge 1 ] && [ "$nl" -le 52 ] || { echo "muse_oracle: MUSE_LAYERS=$nl (1..52)" >&2; exit 2; }
+    for p in ${MUSE_PROMPTS:-muse_short_prose}; do
+      golden "$GPTQ" "$data/oracle-out-muse-L$nl" "oracle-out-muse-L$nl.partial" "$p" "--layers $nl" || true
+    done
+    summary "$data/oracle-out-muse-L$nl/*.log"
     ;;
   taps)
     a4="$data/oracle-out-muse-a4"
