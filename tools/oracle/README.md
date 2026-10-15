@@ -766,7 +766,7 @@ thread). Two checkpoint forms, read by name: the GPTQ repo's `qweight` / `scales
 level; the reference never uses it). Attention is eager. Subcommands:
 
 - `run <snapshot> --prompt <ids> --out <p>.golden.safetensors [--gen 32] [--taps] [--layers N] [--act-tail 256]
-  [--logits-tail 1024] [--chunk C] [--sublayers]`: the prompt in chunks (whole up to 4096 ids, else 2048), then
+  [--logits-tail 1024] [--chunk C] [--sublayers]`: the prompt in chunks (whole up to 2048 ids, else 2048), then
   greedy decode by argmax over the CAPPED row (what `generate(do_sample=False)` does), the raw argmax recorded beside
   it. Layout: `H.L<l>` (bf16, the residual after layer l, rows from `act_row0`), `logits.raw` (lm_head's row) and
   `logits.cap` (the model's four-rounding softcap of it) f32 from `logits_row0`, `cap_tie` u8 / `gap.raw` f32 for
@@ -801,7 +801,11 @@ docker run --rm --memory 8g --memory-swap 8g --cpus 4 -e OMP_NUM_THREADS=3 -e HF
   -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/oracle/test_muse_ref.py
 ```
 
-**Real weights** (`tools/box_validate/muse_oracle.sh`, queue row 42; `DRY_RUN=1` prints every command): RAM and
+**Real weights** (`tools/box_validate/muse_oracle.sh <data tree> tests | tiny | facts | ppl | hfcheck | golden |
+golden-bf16 | a4 | gateq | taps`, queue row 42; `DRY_RUN=1` prints every command and the ESTIMATED times; it also
+runs on the Mac: `agnes-ref-img`, the container capped by `ORACLE_MEMORY` (default 40g there), the checkpoints from
+the HF cache - complete snapshots only, nothing is downloaded; `tiny` measured on the Mac 2026-10-15: muse_4k
+43 s, peak RSS 5.2 GiB - the 2048-row head dominates at the tiny width). RAM and
 time are ESTIMATED until row 42 measures them - resident 5.4 GB (embed + head bf16) + two streamed layers (~1.9 GB)
 + the activations of a 2048-row chunk (at 32k the full layers' scores are 4.3 GB bf16 + 8.6 GB fp32 softmax) ->
 floors 24 GB (tiny), 40 GB (GPTQ), 72 GB (bf16, which also holds bigger reads); a prompt costs ~50 GFLOP a token in

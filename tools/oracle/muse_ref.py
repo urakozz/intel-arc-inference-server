@@ -494,9 +494,11 @@ def read_ids(path: str) -> list[int]:
 
 
 def auto_chunk(n: int, chunk: int) -> int:
+    """Whole up to 2048 ids, else chunks of 2048 (the engine's prefill chunk): a 2048-row forward's head is 0.83 GB of
+    bf16 logits and the softcap holds ~4 such tensors; at 4096 rows the peak doubles (the Mac's capped container)."""
     if chunk >= 0:
         return chunk
-    return 0 if n <= 4096 else 2048
+    return 0 if n <= 2048 else 2048
 
 
 @torch.no_grad()
@@ -598,7 +600,8 @@ def cmd_run(a) -> None:
     n_rows = T + a.gen
     if t["cap_tie"].shape[0] != n_rows or ("taps" in t and t["taps"].shape[0] != n_rows):
         die(f"rows: cap_tie {t['cap_tie'].shape[0]}, taps {t.get('taps', torch.empty(n_rows)).shape[0]}, expected {n_rows}")
-    if not torch.isfinite(t[f"H.L{tc.num_hidden_layers - 1}"].float()).all():
+    last = t.get(f"H.L{tc.num_hidden_layers - 1}", t["logits.raw"])     # --act-tail 0 keeps no activations
+    if not torch.isfinite(last.float()).all():
         die("the last layer's output has NaN/Inf - the weights are wrong")
     print(f"cap_tie: {int(t['cap_tie'].sum())} of {n_rows} rows (capped maximum shared, raw maximum unique)")
     print(gap_line(t["gap.raw"], "raw top-1 - top-2 gap"))
@@ -752,7 +755,7 @@ def main() -> None:
         p.add_argument("snapshot")
         p.add_argument("--layers", type=int)
         p.add_argument("--form", default="auto", choices=["auto", "gptq", "bf16"])
-        p.add_argument("--chunk", type=int, default=-1, help="prefill chunk (-1: whole up to 4096 ids, else 2048)")
+        p.add_argument("--chunk", type=int, default=-1, help="prefill chunk (-1: whole up to 2048 ids, else 2048)")
     r = sub.add_parser("run")
     common(r)
     r.add_argument("--prompt", required=True)
