@@ -49,6 +49,10 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `lfm2moe_facts.py`, `lfm2moe_prompts.py` | Spec 24a: the facts (the rounding chain cited from the installed sources, shard headers, bytes, tokens, template renders, torch's tie order, the conv's accumulation; `docs/probe-lfm2moe-2026-10-15.md`); the golden prompts `tests/golden/prompts/lfm2moe_{short,4k,32k,agentic}.ids`. |
 | `qwen4exp_make_tiny.py` | Tiny `qwen4_exp` variants for the tests (hidden 128, any layer pattern, the four checkpoint forms, tied router rows, `mtp.*`, a dequantised twin) and 21b's int8 PLE file writer. |
 | `offload_curve.py` | Spec 22 P0.6 / P0.7 / P0.8 (plan 22a): from 21a's routing traces - `counts`, `curve` (h(f) for the uniform and per-layer fills, held out by sha256 halves with the A4 scenarios balanced, and in sample), `swap` (spec 22 §4's adaptive swaps simulated), `mtp` (verify unions over K + 1 rows), `prefill` (streamed bytes a chunk), `profile` (the routing profile 22b loads, `spec22-profile-1`); `reap` (REAP / freq masks, `spec22-mask-1`, `--holdout-a4`, decision 9's `--kfold 4 --fold i\|all`), `prune-report` (the pruning curve: KL / argmax, A4 accuracy in sample and 4-fold held out, the gap, the two-card fit), `project` (decode / MTP / prefill t/s from Task 1's budget, probe_offload's `po` lines and the curves; the last line `STOP` or `GO-CANDIDATE`). numpy + safetensors only. `test_offload_curve.py`. The masked reference is `qwen4exp_ref.py --expert-mask` / `maskeval`. |
+| `muse_ref.py` | Spec 23a: the Muse-Glimmer-30B CPU reference - transformers **5.19.0**'s own `MuseGlimmerForConditionalGeneration` text path (refused on another version; the vision modules removed from the meta model), layer-streamed, the GPTQ form's int4 linears dequantised on demand (sym / g_idx asserts), the bf16 original's `.weight` form; `run` (golden layout: raw and capped logits, `cap_tie`, the drafter `taps`), `ppl`, `hfcheck` (streamed = resident = layer-major), `facts`; `expected_names`, `vision_names`, `softcap`, `cap_tie`, `Recorder`, `layer_major`. `test_muse_ref.py` (MG1, bitwise on the tiny variants). "The Muse-Glimmer reference" below. |
+| `muse_make_tiny.py` | Tiny Muse-Glimmer variants from the downloaded tiny: `untied`, `l8`, `gqa16`, `win16`, `int4` (+ a dequantised `--twin`), `assist` (a 2-layer DFlash drafter for 23f); the original's template and tokenizer files. |
+| `muse_tiny_check.py` | Spec 23a Task 1: the tiny model end to end in 5.19.0 (config, cached vs uncached, `output_hidden_states=[1, 3]` and the `tie_last_hidden_states` trap). |
+| `muse_facts.py` | Spec 23a Task 2: the facts from small files, shard headers by HTTP range (no torch) and transformers' source (`--section cites` holds every citation to the installed 5.19.0); `--scan-quant` the full `qzeros` / `g_idx` scan. `docs/probe-muse-glimmer-2026-10-15.md`. |
 | `qwen4exp_prompts.py` | Spec 21a Task 5: `tests/golden/prompts/q4exp_*.ids` from the original's tokenizer (re-checks Qwen3.8's ids; renders `q4exp_agentic.json` through the checkpoint's template). |
 | `third_party/kolibri1/` | Our transformers 5.x port `Kolibri1ForCausalLM` (from Aleph Alpha's vLLM plugin `aleph-alpha-inference` @ `049a6a7b`, Apache-2.0) - what AutoRound loads (`tools/quantize_kolibri1.sh`) - with the checkpoint's `config.json`, `generation_config.json`, `tokenizer_config.json` and the chat template, unmodified. |
 | `kolibri_fixture.py` | Spec 20c Task 1: `kolibri_ref.py`'s own functions (rms_norm, q/k norm + RoPE, route, the combine, eager attention) on hash inputs at the real widths, written as `tests/kernels/kolibri_fixture.h` for `kolibri_ref_test` / `kolibri1_rope_test`; no checkpoint, seconds - the docker line is in its docstring. |
@@ -797,6 +801,66 @@ on the Mac's CPU at a time). `DRY_RUN=1` prints the commands and the times (meas
 Golden prompts: `tests/golden/prompts/lfm2moe_{short,4k,32k,agentic}.ids` (`lfm2moe_prompts.py`); the A4 set
 `tests/golden/toolcall-lfm2moe` (`a4_ref.sh lfm2moe set`); the A4 reference `a4_ref.sh lfm2moe ref` (2048 new ids,
 reasoning first; score with `score.py --format pythonic`).
+
+### The Muse-Glimmer reference (spec 23a, 2026-10-15)
+
+`muse_ref.py` runs **transformers 5.19.0**'s own `MuseGlimmerForConditionalGeneration` (it refuses any other
+version) with spec 21a's site: the image never changes; `tools/oracle/qwen4exp_env.sh <dir>` installs 5.19.0 beside
+it (`oracle-out-q4exp/site` on the Mac, `$DATA/q4exp-site` on the box - the same site, not a second one) and
+`PYTHONPATH=<dir>` goes first. The model is built on `meta` from the snapshot's config, the vision tower / adapter /
+projection are set to None (never materialised; the text path calls none of them), `embed_tokens`, the final `norm`
+and `lm_head` are resident and the 52 decoder layers stream through `stream.attach` (one layer dequantised ahead on a
+thread). Two checkpoint forms, read by name: the GPTQ repo's `qweight` / `scales` (+ `qzeros` all `0x77777777` and
+`g_idx == i // 64`, asserted the first time a linear is read) dequantised to `bf16(float(q - 8) x float(scale))`
+(`stream.dequant_t`), and the original's `.weight`. The dtype is bf16 (the GPTQ `config.json` says float16 at the top
+level; the reference never uses it). Attention is eager. Subcommands:
+
+- `run <snapshot> --prompt <ids> --out <p>.golden.safetensors [--gen 32] [--taps] [--layers N] [--act-tail 256]
+  [--logits-tail 1024] [--chunk C] [--sublayers]`: the prompt in chunks (whole up to 2048 ids, else 2048), then
+  greedy decode by argmax over the CAPPED row (what `generate(do_sample=False)` does), the raw argmax recorded beside
+  it. Layout: `H.L<l>` (bf16, the residual after layer l, rows from `act_row0`), `logits.raw` (lm_head's row) and
+  `logits.cap` (the model's four-rounding softcap of it) f32 from `logits_row0`, `cap_tie` u8 / `gap.raw` f32 for
+  every row (the capped maximum shared by >= 2 ids while the raw one is unique; raw top-1 - top-2), `taps` bf16
+  `[T + gen][5][6656]` (the residual after layers 1, 13, 25, 37, 49), `tokens` / `tokens.raw`, `nll` (capped, T 1.0).
+  The log prints the `cap_tie` count and the raw gap's min / p01 / median.
+- `ppl <snapshot> --text NAME=FILE --ids NAME=FILE [--max-tokens 4096]`: perplexity under the capped distribution.
+- `hfcheck <snapshot> --layers N [--n 2100] [--gen 4]`: on real weights, the streamed model against the same class
+  with every layer resident (no hooks) and against `layer_major` - logits (raw / capped), every `H.L`, the greedy ids,
+  BITWISE or exit 1.
+- `facts <snapshot> [--gptq <snapshot>] [--scan-quant]`: `muse_facts.py`'s tables, then the index against
+  `expected_names` (1875 text names in the GPTQ form, 627 in the bf16 one, 809 vision names either way).
+
+**What is bitwise against what** (`test_muse_ref.py`, MG1; the variants from `muse_make_tiny.py`): the streamed port
+= `from_pretrained` un-streamed on `untied`, `l8`, `gqa16`, `win16` in bf16 and fp32, prompts of 40 / 100 ids
+(window 16 crossed six times) + 8 cached decode steps (raw and capped logits, every `H.L`), `l8` at 2100 ids with the
+real window, `win16` in chunks of 32; `--layers 4` = transformers' 4-layer model; `int4` = transformers on the
+dequantised twin; `layer_major` (two sequences, one layer at a time) = each alone; the recorder's taps =
+`output_hidden_states=[1, 5]`. One test per trap: the norm forms (the embed / final norms ARE `MuseGlimmerRMSNorm`
+without / with scale; the centered ones rsqrt with eps 1e-5 / 1e-8 - and on torch's CPU `pow(x, -0.5)`, `rsqrt(x)`
+and `1 / sqrt(x)` are the same fp32 value on 10^7 draws, so the forms are indistinguishable there: the device kernel
+must reproduce the correctly rounded `1 / sqrt`), q x 3.87 after the norm, the NoPE switch (a +100 position shift
+moves a RoPE layer's attention output, not a NoPE one's), the output gate (zeroed: exactly half), the softcap (a
+planted raw pair caps to one value: `cap_tie` set, argmax the lower id), the untied head, the GPTQ asserts, the
+names, the DFlash drafter variant (lossless greedy through `generate(speculation_type="dflash")`).
+
+```bash
+# from the repo (or worktree) root on the Mac (the site once, as above); the tiny model and the original's /
+# the GPTQ repo's small files in the HF cache
+docker run --rm --memory 8g --memory-swap 8g --cpus 4 -e OMP_NUM_THREADS=3 -e HF_HUB_OFFLINE=1 \
+  -e PYTHONPATH=/ws/oracle-out-q4exp/site -v ~/.cache/huggingface:/hf:ro -e HF_HOME=/tmp/hf \
+  -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/oracle/test_muse_ref.py
+```
+
+**Real weights** (`tools/box_validate/muse_oracle.sh <data tree> tests | tiny | facts | ppl | hfcheck | golden |
+golden-bf16 | a4 | gateq | taps`, queue row 42; `DRY_RUN=1` prints every command and the ESTIMATED times; it also
+runs on the Mac: `agnes-ref-img`, the container capped by `ORACLE_MEMORY` (default 40g there), the checkpoints from
+the HF cache - complete snapshots only, nothing is downloaded; `tiny` measured on the Mac 2026-10-15: muse_4k
+43 s, peak RSS 5.2 GiB - the 2048-row head dominates at the tiny width). RAM and
+time are ESTIMATED until row 42 measures them - resident 5.4 GB (embed + head bf16) + two streamed layers (~1.9 GB)
++ the activations of a 2048-row chunk (at 32k the full layers' scores are 4.3 GB bf16 + 8.6 GB fp32 softmax) ->
+floors 24 GB (tiny), 40 GB (GPTQ), 72 GB (bf16, which also holds bigger reads); a prompt costs ~50 GFLOP a token in
+the linears plus the 13 full layers' attention: ~10-20 min for a short prompt, ~2-3 h for 32k, and every decode step
+re-dequantises the 52 layers (~5-10 s a step) - all ESTIMATED.
 
 ### The A4 reference, batched (2026-10-08)
 

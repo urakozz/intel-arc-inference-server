@@ -2809,6 +2809,71 @@ st_r41_vllm_mtp() {
 }
 
 # ======================================================================================
+row 42 "spec 23a - Muse-Glimmer-30B: the facts, the CPU reference (MG1), golden sets with the drafter taps, the A4 set in ATEM, gate Q (plan 23a)"
+rownote 42 "Box CPU only, no card: nothing here takes the GPU lock. Every stage runs tools/box_validate/muse_oracle.sh in the oracle image with transformers 5.19.0 from <tree>/oracle-out-q4exp-site (spec 21a's site: tools/oracle/qwen4exp_env.sh, made once; the image is never changed). r42.host needs the tiny model (hf download optimum-intel-internal-testing/tiny-random-muse-glimmer, 27 MB) and the original's / the GPTQ repo's small files (a few MB each)."
+rownote 42 "Downloads (df -h ~ first; never inside a stage): the int4 checkpoint in either spelling of the same export - Vishva007/Muse-Glimmer-30B-W4A16-AutoRound (auto_round:auto_gptq, no g_idx; what the Mac downloaded) or Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ (gptq, g_idx), 22.8 GB; the bf16 original meta-models/Muse-Glimmer-30B, 59.6 GB (gate Q's reference, decision 14). Without a complete snapshot (every shard, no *.incomplete blob) a stage SKIPs 77 'missing data'."
+rownote 42 "RAM floors (MUSE_REF_MIN_GB): 24 GB tests / facts, 40 GB the int4 form (resident embed + head 5.4 GB, two streamed layers, a 2048-row chunk's head and eager scores - ~20 GB at 32k, ESTIMATED), 72 GB the bf16 form. Times are hours (DRY_RUN=1 tools/box_validate/muse_oracle.sh <data> golden prints the ESTIMATED table); the CPU oracle stages run one at a time, outside the GPU sessions."
+rownote 42 "Gate Q is a RECORDED MEASUREMENT (operator ruling 2026-10-15: Vishva007's quant is kept): the int4 form's distance from bf16 against decision 5's PROPOSED bars - no more ATEM parse failures than bf16's, first-call agreement >= 25 / 36, mean KL(bf16 || int4) <= 0.02 and top-1 >= 95 % on the A4 rows (prose recorded) - printed WITHIN / OUTSIDE, exit 0 either way; the numbers go into spec 23 §3.3."
+rownote 42 "Hand back: each golden log's cap_tie count and raw top-1 / top-2 gap line (MG3's tie rule), every wall / peak RSS line, the perplexities (sanity: below 30 on prose and the 4k text, ESTIMATED), hfcheck's BITWISE lines, the full quant scan's line (qzeros all 0x77777777; g_idx == i // 64 where shipped), gate Q's verdict with its numbers. If the Mac already made a set (oracle-out-muse*), --push-data it instead of re-running."
+stage r42.host 42 default cpu oracle_image - "MG1 on the tiny variants in the oracle image: test_muse_ref.py (the streamed port = transformers 5.19.0 bitwise, bf16 / fp32, prompts across the window + cached decode, one test per trap), test_muse_gateq.py (KL / verdict / the muse runner), the toolcall tests (the ATEM render and reader) - muse_oracle.sh tests"
+st_r42_host() {
+  chk "tools/box_validate/muse_oracle.sh $DATA tests" "the Muse-Glimmer reference tests (tiny model)"
+  grab_all tests '^test_|^  |^ok|FAIL|SKIP|passed' 120
+  finish
+}
+stage r42.facts 42 default cpu muse_gptq,oracle_image - "the facts on the int4 checkpoint: the FULL qzeros / g_idx scan (~210 MB), the 5.19.0 citations, the one-message render (one BOS), the names = expected_names - muse_oracle.sh facts"
+st_r42_facts() {
+  chk "tools/box_validate/muse_oracle.sh $DATA facts" "muse_facts.py --scan-quant and muse_ref.py facts"
+  grab_all facts 'FULL SCAN|citations hold|text names|BOS count|accepted' 12
+  finish
+}
+stage r42.ppl 42 optin cpu muse_gptq,oracle_image - "MG1's real-weight sanity: perplexity on prose.txt, code.txt, muse_4k and the agentic transcript, each form present (int4 dequantised; the bf16 original when muse_bf16) - muse_oracle.sh ppl"
+st_r42_ppl() {
+  chk "tools/box_validate/muse_oracle.sh $DATA ppl" "the reference's perplexity on the real model"
+  grab_all ppl '^ppl |^wall|outside' 12
+  finish
+}
+stage r42.hfcheck 42 optin cpu muse_gptq,oracle_image - "streamed = resident = layer-major on real weights: hfcheck --layers 4 on 2100 ids of muse_4k (the window crossed) + 4 steps, raw / capped logits and every H.L* BITWISE, each form present - muse_oracle.sh hfcheck"
+st_r42_hfcheck() {
+  chk "tools/box_validate/muse_oracle.sh $DATA hfcheck" "hfcheck on the real checkpoint(s)"
+  grab_all hfcheck '^hfcheck' 8
+  finish
+}
+stage r42.golden 42 optin cpu muse_gptq,oracle_image - "the golden sets on the int4 checkpoint (hours, resumable): muse_short_prose / short_code / 4k / 8k / 32k / agentic, --gen 32 --taps -> \$DATA/oracle-out-muse; cap_tie and the raw gap per prompt; then re-links oracle-out*"
+st_r42_golden() {
+  chk "tools/box_validate/muse_oracle.sh $DATA golden" "the Muse-Glimmer golden sets"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  grab_all golden 'cap_tie|gap|wall|ppl' 120
+  finish
+}
+stage r42.golden_bf16 42 optin cpu muse_bf16,oracle_image - "the bf16 original's golden sets on muse_short_prose and muse_agentic -> \$DATA/oracle-out-muse-bf16 (the quantisation's own error beside the int4 sets)"
+st_r42_golden_bf16() {
+  chk "tools/box_validate/muse_oracle.sh $DATA golden-bf16" "the bf16 golden sets"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  grab_all golden 'cap_tie|gap|wall|ppl' 40
+  finish
+}
+stage r42.a4 42 optin cpu muse_gptq,muse_bf16,oracle_image - "gate Q's A4 half: both references on the 36 Muse-rendered scenarios (512 new ids, greedy on the capped row, resumable; days, ESTIMATED), then score.py --format atem bf16 gptq -> \$DATA/oracle-out-muse-a4"
+st_r42_a4() {
+  chk "tools/box_validate/muse_oracle.sh $DATA a4" "the A4 references, both forms"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  grab_all a4 'match bf16|parse failure' 8
+  finish
+}
+stage r42.gateq 42 optin cpu oracle_muse_a4,muse_gptq,muse_bf16,oracle_image r42.a4 "gate Q: teacher-forced KL(bf16 || int4) and top-1 over the bf16 run's A4 continuations (+ prose / code / 4k, recorded), then the bars of decision 5 - a recorded measurement (the checkpoint is kept): WITHIN / OUTSIDE with the numbers"
+st_r42_gateq() {
+  chk "tools/box_validate/muse_oracle.sh $DATA gateq" "gate Q (A4 + KL)"
+  grab_all gateq '^(PASS|FAIL) |^gate Q|A4 pooled' 8      # PASS / FAIL per bar: recorded, the stage exits 0
+  finish
+}
+stage r42.taps 42 optin cpu oracle_muse_a4,muse_gptq,oracle_image r42.a4 "23f P0's input: the five drafter taps (the residual after layers 1, 13, 25, 37, 49) over [prompt + the int4 form's own A4 continuation], teacher-forced -> \$DATA/oracle-out-muse-taps"
+st_r42_taps() {
+  chk "tools/box_validate/muse_oracle.sh $DATA taps" "the drafter taps over the A4 continuations"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  finish
+}
+
+# ======================================================================================
 row 48 "spec 24a - LFM2.5-24B-A2B (lfm2_moe): the facts, the CPU reference (F1), golden sets, the A4 reference (plan 24a)"
 rownote 48 "Download first: hf download LiquidAI/LFM2.5-24B-A2B (47.96 GB; df -h ~ first; MemAvailable >= 64 GB for the real-weight stages)."
 rownote 48 "Box CPU only, no card: nothing here takes the GPU lock. Every stage runs tools/box_validate/lfm2moe_oracle.sh in the oracle image with transformers 5.19.0 from <tree>/oracle-out-q4exp-site (tools/oracle/qwen4exp_env.sh; the image is never changed). r48.host needs the tiny model (hf download yujiepan/lfm2-moe-tiny-random, 10 MB); the real stages SKIP 77 'missing data' without the bf16 original, or while it is still downloading."

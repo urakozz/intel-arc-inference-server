@@ -292,6 +292,55 @@ def test_pythonic_template_render_round_trip():
     assert parse_first_call(lfm(block), "pythonic") == ("call", "f", args, 1)
 
 
+ATEM_READ = ('<atem:function_calls>\n<atem:invoke name="read">\n<atem:parameter name="filePath">/work/x.cc'
+             '</atem:parameter>\n<atem:parameter name="offset">7</atem:parameter>\n</atem:invoke>\n</atem:function_calls>')
+
+
+def test_atem_first_call_after_reasoning():
+    """Muse-Glimmer (spec 23 §6.5): the first message has no <|start|> (the prompt ended with it); reasoning in
+    to=self, then a tool channel; values JSON-decoded per value ("7" -> 7), else the raw string."""
+    t = (" to=self<|message|>Read the file first.<|eom|><|start|>assistant to=read<|message|>" + ATEM_READ + "<|eot|>")
+    assert parse_first_call(t, "atem") == ("call", "read", {"filePath": "/work/x.cc", "offset": 7}, 1)
+
+
+def test_atem_calls_inside_self_are_ignored():
+    t = (" to=self<|message|>I could write " + ATEM_READ.replace("read", "write") + " but no.<|eom|>"
+         "<|start|>assistant to=read<|message|>" + ATEM_READ + "<|eom|>")
+    assert parse_first_call(t, "atem")[:2] == ("call", "read")
+
+
+def test_atem_content_channel_is_not_a_call():
+    t = " to=user<|message|>Here is how: " + ATEM_READ + "<|eot|>"
+    assert parse_first_call(t, "atem")[0] == "no call"
+    assert parse_first_call("<|message|>plain answer<|eot|>", "atem")[0] == "no call"
+
+
+def test_atem_doubled_name_collapsed():
+    t = " to=bash.bash<|message|>" + ATEM_READ.replace('name="read"', 'name="bash.bash"') + "<|eom|>"
+    assert parse_first_call(t, "atem", tools={"bash", "read"})[:2] == ("call", "bash")
+    assert parse_first_call(t, "atem", tools={"read"})[:2] == ("call", "bash.bash")   # unknown: passes through
+
+
+def test_atem_unterminated_invoke_is_a_parse_failure():
+    t = " to=read<|message|><atem:function_calls>\n<atem:invoke name=\"read\">\n<atem:parameter name=\"filePath\">/w"
+    assert parse_first_call(t, "atem")[0] == "incomplete"
+    t2 = " to=self<|message|>still thinking about it"
+    assert parse_first_call(t2, "atem")[0] == "reasoning"
+
+
+def test_atem_name_from_invoke_not_recipient():
+    t = " to=functions<|message|>" + ATEM_READ + "<|eom|><|start|>assistant to=read<|message|>" + \
+        ATEM_READ.replace("read", "grep") + "<|eom|>"
+    assert parse_first_call(t, "atem")[:2] == ("call", "read")
+    assert parse_first_call(t, "atem")[3] == 2
+
+
+def test_atem_header_while_generating_ends_a_body():
+    """A body ends at <|eom|> / <|eot|> or at the next <|start|> (a header still being generated)."""
+    t = " to=read<|message|>" + ATEM_READ + "<|start|>assistant to="
+    assert parse_first_call(t, "atem")[:2] == ("call", "read")
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     for n, f in tests:

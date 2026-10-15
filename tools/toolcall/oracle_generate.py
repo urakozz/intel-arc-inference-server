@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Greedy bf16 baseline for the tool-call set (spec 5 T0, gate A4), on CPU.
 
-    oracle_generate.py [--model kolibri|qwen4exp|lfm2moe] [--device cpu|cuda|xpu] <snapshot> <set dir> <out dir>
+    oracle_generate.py [--model kolibri|qwen4exp|muse|lfm2moe] [--form gptq|bf16] [--weights bf16|int4]
+                       [--device cpu|cuda|xpu] <snapshot> <set dir> <out dir>
                        [--new-tokens N] [--batch 1|N|auto] [--resident none|auto] [--only a,b,..]
                        [--expert-mask FILE] [--weights bf16|int4]
 
@@ -42,6 +43,15 @@ The model follows config.json's model_type:
                     experts dequantised, its bf16 dense layers, the PLE rows from <snapshot>-ple-int8
                     when present (the engine's format; Q4_PLE overrides) - greedy through its own
                     cache; Q4_LAYERS=N truncates as the engine's --layers N does.
+  muse_glimmer      Muse-Glimmer-30B (spec 23a gate Q; `--model muse [--form gptq|bf16]`):
+                    tools/oracle/muse_ref.py's layer-streamed MuseGlimmerForConditionalGeneration text
+                    path (transformers 5.19.0: the qwen4exp site first on PYTHONPATH) on the checkpoint
+                    given - the GPTQ repo's int4 g64 dequantised (the engine-format reference) or the
+                    bf16 original - greedy by argmax of the CAPPED row (generate(do_sample=False)'s
+                    rule); the outputs are tagged by the form, <name>.gptq.* / <name>.bf16.* (--form
+                    must match the checkpoint's names; default: what they are). A4 runs 512 new ids
+                    (K2's precedent for a reasoning-first model: replies open with a to=self channel).
+                    MUSE_LAYERS=N truncates (a test run).
   lfm2_moe          LFM2.5-24B-A2B (spec 24a; `--model lfm2moe` says so and checks it): tools/oracle/
                     lfm2moe_ref.py's layer-streamed Lfm2MoeForCausalLM (transformers 5.19.0: the qwen4exp site
                     first on PYTHONPATH) on the checkpoint given - the bf16 original (the A4 reference) or our int4
@@ -207,6 +217,22 @@ def mem_model(mtype: str, cfg: dict) -> dict:
                 "per_seq": lambda T: state + T * nf * 2 * kvh * hd * 2 + T * H * 2,
                 "dense": dense, "experts": [ex] * L,
                 "what": f"KV bf16 in {nf} full-attention layers + GDN state fp32 in {nl} ({state / 2**20:.0f} MiB)"}
+    if mtype == "muse_glimmer":         # spec 23a: Muse-Glimmer (muse_ref.py, dense, bf16, eager attention)
+        c = cfg.get("text_config", cfg)
+        L, H, V, I = c["num_hidden_layers"], c["hidden_size"], c["vocab_size"], c["intermediate_size"]
+        heads, kvh, hd = c["num_attention_heads"], c["num_key_value_heads"], c["head_dim"]
+        types = c.get("layer_types") or ["full_attention" if i % 4 == 3 else "sliding_attention" for i in range(L)]
+        nf = types[:L].count("full_attention")
+        ns = L - nf
+        W = c.get("sliding_window") or 0
+        dense = [2 * (3 * H * heads * hd + 2 * H * kvh * hd + 3 * H * I + 4 * H)] * L
+        return {"base": 2 * V * H * 2 + 2 * dense[0],
+                # a prefill chunk of <= 2048 rows: its head (bf16 logits, the softcap's ~4 temporaries) and eager
+                # scores over every key (bf16 + the fp32 softmax + the cast)
+                "transient": lambda T: min(T, 2048) * V * 2 * 5 + heads * min(T, 2048) * T * 8,
+                "per_seq": lambda T: (T * nf + ns * min(T, max(W - 1, 0))) * 2 * kvh * hd * 2 + T * H * 2,
+                "dense": dense, "experts": [0] * L,
+                "what": f"KV bf16 in {nf} full + {ns} sliding layers (window {W})"}
     if mtype in Q4_TYPES:               # spec 21e: Qwen3.8-Flash-Next (qwen4exp_ref.py, bf16 dense, eager attention)
         c = cfg.get("text_config", cfg)
         L, H, V = c["num_hidden_layers"], c["hidden_size"], c["vocab_size"]
@@ -305,6 +331,7 @@ def mem_limit() -> int | None:
 # is minutes, and a pass of B prompts holds every other sequence for all B), so a few; K2's is
 # mostly the per-step dequant a pass shares, so more.
 MAX_AUTO_BATCH = {"qwen3_5_moe": 4, "k2_horizon": 8, "kolibri1": 4, "qwen4_exp": 4, "qwen4_exp_text": 4,
+                  "muse_glimmer": 8,     # Muse: a decode pass is mostly the 52 layers' dequant, shared by the batch
                   "lfm2_moe": 8}
 
 
@@ -404,6 +431,34 @@ def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int]
             return greedy(lambda chunk, pos: ref.forward(chunk, pos, cache)[-1], ids, n, eos, watch(argmax, on_row))
         return SimpleNamespace(generate=generate, new_state=ref.new_cache, argmax=argmax,
                                step_many=ref.forward_many, ref=ref)
+
+    if mtype == "muse_glimmer":
+        # Spec 23a: Muse-Glimmer - tools/oracle/muse_ref.py's layer-streamed model (transformers 5.19.0 from the qwen4exp
+        # site first on PYTHONPATH) on the checkpoint as stored (the GPTQ form dequantised, or the bf16 original); greedy
+        # by argmax of the CAPPED row. Both paths run a one-row head (logits_to_keep=1 / layer_major last_only): bitwise.
+        MR = load("muse_ref")
+        tc = MR.text_config(snap, int(os.environ["MUSE_LAYERS"]) if os.environ.get("MUSE_LAYERS") else None)
+        kd = range(min(keep[0], tc.num_hidden_layers))
+        model, pf = MR.build_streamed(snap, tc, keep=kd)
+        print(f"Muse-Glimmer reference: muse_ref.py, {tc.num_hidden_layers} layers, streamed, form {model.muse_form}; "
+              f"resident once read: {len(kd)} layers", flush=True)
+        major = MR.layer_major(model, pf)
+
+        def generate(ids, n, eos, on_row=None):
+            state = {"cache": None}
+
+            def step(chunk, pos):
+                with torch.no_grad():
+                    o = model(input_ids=torch.tensor([chunk]), past_key_values=state["cache"], use_cache=True,
+                              logits_to_keep=1)
+                state["cache"] = o.past_key_values
+                return o.logits[0, -1].float()
+            return greedy(step, ids, n, eos, watch(argmax, on_row))
+
+        def step_many(items):
+            return [cap[-1].float() for _raw, cap in major(items, last_only=True)]
+        return SimpleNamespace(generate=generate, new_state=lambda: {"cache": None}, argmax=argmax,
+                               step_many=step_many, ref=model, pf=pf, form=model.muse_form)
 
     if mtype in Q4_TYPES:
         # Spec 21e: Qwen3.8-Flash-Next - tools/oracle/qwen4exp_ref.py's layer-streamed model (transformers 5.19.0 from
@@ -513,26 +568,45 @@ def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int]
                            step_many=OR.layer_major(model, pf), lazy=lazy, ref=model, pf=pf)
 
 
-MOE_TYPES = ("qwen3_5_moe", "k2_horizon", "kolibri1", "qwen4_exp", "qwen4_exp_text", "lfm2_moe")
+MOE_TYPES = ("qwen3_5_moe", "k2_horizon", "kolibri1", "qwen4_exp", "qwen4_exp_text", "muse_glimmer", "lfm2_moe")
 # --model NAME -> the model_type(s) it must be (spec 21e: qwen4exp - the checkpoints say qwen4_exp, a text-only
-# export qwen4_exp_text)
-MODELS = {"kolibri": ("kolibri1",), "qwen4exp": ("qwen4_exp", "qwen4_exp_text"), "lfm2moe": ("lfm2_moe",)}
+# export qwen4_exp_text; spec 23a: muse; spec 24a: lfm2moe)
+MODELS = {"kolibri": ("kolibri1",), "qwen4exp": ("qwen4_exp", "qwen4_exp_text"), "muse": ("muse_glimmer",),
+          "lfm2moe": ("lfm2_moe",)}
+
+
+def muse_form(snap: str) -> str:
+    """gptq when the checkpoint's names hold `.qweight` (the GPTQ repo), else bf16 (the original) - muse_ref's rule."""
+    idx = os.path.join(snap, "model.safetensors.index.json")
+    if os.path.exists(idx):
+        with open(idx, encoding="utf-8") as f:
+            names = json.load(f)["weight_map"]
+    else:
+        from safetensors import safe_open
+        with safe_open(os.path.join(snap, "model.safetensors"), framework="pt") as h:
+            names = list(h.keys())
+    return "gptq" if any(k.endswith(".qweight") for k in names) else "bf16"
 
 
 def parse_args(argv: list[str]) -> dict:
     """[--model kolibri] [--device D] <snapshot> <set dir> <out dir> [--new-tokens N]
     [--batch N|auto] [--resident none|auto] [--only NAME,...] -> a dict."""
     a = {"model": None, "device": "cpu", "new_tokens": NEW_TOKENS, "batch": "1", "keep": "none", "only": None,
-         "expert_mask": None, "weights": None}
+         "expert_mask": None, "form": None, "weights": None}
     pos: list[str] = []
     i = 0
     while i < len(argv):
         x = argv[i]
-        if x in ("--model", "--device", "--new-tokens", "--batch", "--resident", "--only", "--expert-mask", "--weights"):
+        if x in ("--model", "--device", "--new-tokens", "--batch", "--resident", "--only", "--expert-mask", "--form",
+                 "--weights"):
             if i + 1 >= len(argv):
                 sys.exit(f"{x} needs a value")
             v = argv[i + 1]
-            if x == "--model":
+            if x == "--form":
+                if v not in ("gptq", "bf16"):
+                    sys.exit(f"--form expects gptq or bf16, got {v!r}")
+                a["form"] = v
+            elif x == "--model":
                 if v not in MODELS:
                     sys.exit(f"--model expects one of {', '.join(MODELS)}, got {v!r}")
                 a["model"] = v
@@ -574,6 +648,15 @@ def main() -> None:
         if not os.path.isfile(a["expert_mask"]):
             sys.exit(f"--expert-mask {a['expert_mask']}: no such file")
         RUN = mask_tag(a["expert_mask"])      # <name>.mask-<tag>.{ids,txt,gap}, never the full run's .bf16.*
+    if a["form"] and a["model"] != "muse":
+        sys.exit("--form is Muse-Glimmer's (--model muse)")
+    with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:
+        is_muse = json.load(f).get("model_type") == "muse_glimmer"
+    if a["model"] == "muse" or is_muse:       # spec 23a: the outputs are tagged by the checkpoint's form, always
+        got = muse_form(snap)
+        if a["form"] and a["form"] != got:
+            sys.exit(f"--form {a['form']}: {snap} is the {got} form")
+        RUN = got
     os.makedirs(out, exist_ok=True)
     manifest = load_manifest(set_dir)
     if a["only"]:
@@ -672,7 +755,8 @@ def save(out: str, name: str, new: list[int], text: str, i: int, n: int, n_promp
     if gaps is not None:      # the MoE paths: each greedy step's top-1 minus top-2 logit (fp32, exact)
         write_atomic(os.path.join(out, f"{name}.{RUN}.gap"), " ".join("%.9g" % g for g in gaps) + "\n")
     write_atomic(os.path.join(out, f"{name}.{RUN}.txt"), text)
-    call = "<tool_call>" in text or "<ifm|tool_call>" in text or "<|tool_call_start|>" in text
+    call = ("<tool_call>" in text or "<ifm|tool_call>" in text or "<atem:invoke" in text
+            or "<|tool_call_start|>" in text)
     low = f", min gap {min(gaps):.3g}" if gaps else ""
     print(f"[{i}/{n}] {name}: {n_prompt} prompt ids, {len(new)} new, {time.time() - t:.0f}s, call={call}{low}",
           flush=True)
@@ -703,12 +787,12 @@ def moe_main(snap: str, out: str, todo: list[dict], prompts: dict, new_tokens: i
         plan = batch_plan(mtype, cfg, [len(prompts[e["name"]]) for e in todo], new_tokens, mem_limit(), batch, keep)
         print(plan["text"], flush=True)
         b, kept = plan["batch"], (plan["keep_dense"], plan["keep_experts"])
-    if mtype in LFM_TYPES:   # ESTIMATED (spec 24a Task 7's DRY_RUN table): ~2.45 B active parameters a token in bf16
+    if mtype in LFM_TYPES:   # spec 24a: the Mac measured 6-12 s a decode step and ~1.6 prompt ids/s at 4k (2026-10-15)
         n_p = sum(len(prompts[e["name"]]) for e in todo)
         print(f"ESTIMATED: {len(todo)} scenarios, {n_p} prompt ids and up to {len(todo) * new_tokens} new ids (reasoning "
-              f"first); at ~0.4-1.5 s a sequential decode step ~{len(todo) * new_tokens * 0.4 / 3600:.1f}-"
-              f"{len(todo) * new_tokens * 1.5 / 3600:.1f} h, less batched (a pass reads each layer once for all "
-              f"sequences)", flush=True)
+              f"first); at the Mac's measured 6-12 s a sequential decode step ~{len(todo) * new_tokens * 6 / 3600:.0f}-"
+              f"{len(todo) * new_tokens * 12 / 3600:.0f} h + the prompts ~{n_p / 1.6 / 3600:.0f} h, less batched (a pass "
+              f"reads each layer once for all sequences)", flush=True)
     t = time.time()
     runner = moe_runner(snap, mtype, device, kept, mask, weights)
     print(f"ready in {time.time() - t:.0f}s", flush=True)

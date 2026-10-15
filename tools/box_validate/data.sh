@@ -10,7 +10,7 @@
 #       The stages' NEEDS name these keys (tools/box_validate/stages.sh).
 #   tools/box_validate/data.sh resolve <repo id | snapshot dir>
 #       the snapshot directory the CLIs would load (refs/main for a repo id).
-# Env: SNAP_QWEN, SNAP_QWEN_BF16, SNAP_AGNES, SNAP_ORNITH, SNAP_K2, SNAP_KOLIBRI, SNAP_Q4EXP_{TINY,INTEL,BF16}, HF_HOME, TOK_PYTHON, OPENCODE_LOG,
+# Env: SNAP_QWEN, SNAP_QWEN_BF16, SNAP_AGNES, SNAP_ORNITH, SNAP_K2, SNAP_KOLIBRI, SNAP_Q4EXP_{TINY,INTEL,BF16}, SNAP_MUSE, SNAP_MUSE_BF16, HF_HOME, TOK_PYTHON, OPENCODE_LOG,
 #      A4_REF_DIR, ORACLE_IMAGE. Run from a tree root (the oracle-out* checks look there).
 set -u
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
@@ -110,6 +110,18 @@ case "${1:-}" in
     # a key of its own, so r31's stages (the checkpoints alone) do not wait for them.
     have oracle_q4exp_synth_golden "oracle-out-q4exp-synth/{ours,intel}/q4exp_{short,4k,agentic}.{ids,golden.safetensors} (spec 21c: r32.oracle_synth - qwen4exp_oracle.sh synth)" \
       bash -c 'for f in ours intel; do for p in q4exp_short q4exp_4k q4exp_agentic; do test -s oracle-out-q4exp-synth/$f/$p.ids && test -s oracle-out-q4exp-synth/$f/$p.golden.safetensors || exit 1; done; done'
+    # Spec 23a: Muse-Glimmer-30B - the served GPTQ checkpoint, the bf16 original (gate Q's reference, decision 14) and
+    # the CPU reference's outputs (tools/box_validate/muse_oracle.sh <data tree> golden | a4).
+    have muse_gptq "the Muse-Glimmer int4 checkpoint ${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound or its -GPTQ spelling} (22.8 GB; df -h first)" \
+      bash -c 'if [ -n "${SNAP_MUSE:-}" ]; then tools/box_validate/data.sh complete "$SNAP_MUSE"; else
+        tools/box_validate/data.sh complete Vishva007/Muse-Glimmer-30B-W4A16-AutoRound ||
+        tools/box_validate/data.sh complete Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ; fi'
+    have muse_bf16 "the Muse-Glimmer bf16 original ${SNAP_MUSE_BF16:-meta-models/Muse-Glimmer-30B} (59.6 GB; gate Q's reference)" \
+      complete "${SNAP_MUSE_BF16:-meta-models/Muse-Glimmer-30B}"
+    have oracle_muse "oracle-out-muse/muse_{short_prose,short_code,4k,8k,32k,agentic}.{ids,golden.safetensors} (spec 23a: muse_oracle.sh golden)" \
+      bash -c 'for p in muse_short_prose muse_short_code muse_4k muse_8k muse_32k muse_agentic; do test -s oracle-out-muse/$p.ids && test -s oracle-out-muse/$p.golden.safetensors || exit 1; done'
+    have oracle_muse_a4 "oracle-out-muse-a4/ with 36 <name>.bf16.txt and 36 <name>.gptq.txt (spec 23a gate Q: muse_oracle.sh a4)" \
+      bash -c 'test "$(ls oracle-out-muse-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36 && test "$(ls oracle-out-muse-a4/*.gptq.txt 2>/dev/null | wc -l)" -eq 36'
     have k2_a4_set "oracle-out-k2-a4/set/manifest.json (K2's tool-call set, spec 18d: --with r25.a4_ref, or tools/toolcall/a4_ref.sh k2 set)" \
       test -s oracle-out-k2-a4/set/manifest.json
     have oracle_k2_a4 "oracle-out-k2-a4/ with K2's set and 36 <name>.bf16.txt (18a's reference on it: --with r25.a4_ref)" \
@@ -151,5 +163,6 @@ case "${1:-}" in
     have a4_ref "A4_REF_DIR=${A4_REF_DIR:-<unset>} (<name>.bf16.txt reference runs)" test -d "${A4_REF_DIR:-/nonexistent}"
     ;;
   resolve) resolve "$2" ;;
-  *) echo "usage: $0 link <data tree> <tree>... | have | resolve <id|dir>" >&2; exit 2 ;;
+  complete) complete "$2" ;;      # exit 0 when the snapshot is complete (spec 23a: either int4 spelling)
+  *) echo "usage: $0 link <data tree> <tree>... | have | resolve <id|dir> | complete <id|dir>" >&2; exit 2 ;;
 esac
