@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spec 23a: the Muse-Glimmer-30B CPU reference runs (kolibri_oracle.sh's / qwen4exp_oracle.sh's shape), on the BOX
 # CPU - and on the Mac (Docker Desktop: ORACLE_IMAGE agnes-ref-img, the container capped by ORACLE_MEMORY).
-#   tools/box_validate/muse_oracle.sh <data tree> tests|tiny|facts|ppl|hfcheck|golden|golden-bf16|a4|gateq|taps|synth-ckpt
+#   tools/box_validate/muse_oracle.sh <data tree> tests|tiny|facts|ppl|hfcheck|golden|golden-bf16|a4|gateq|taps|synth-ckpt|synth-tests
 #
 # Every container mode runs in the oracle image (tools/oracle/run_in_container.sh) with transformers 5.19.0 from spec
 # 21a's site BESIDE the image (tools/oracle/qwen4exp_env.sh; the box's oracle-out-q4exp-site, the Mac's
@@ -29,6 +29,7 @@
 #                tools/quantize/muse/check.py (names = muse_ref.expected_names, the data asserts, every linear within
 #                RTN's bound of its regenerated twin) -> <data>/oracle-out-muse-synth/ckpt<N>/ + ckpt<N>.ACCEPTED (the
 #                check's log; written last, it marks done). Needs only the original's and the -GPTQ repo's SMALL files.
+#   synth-tests  spec 23b: tools/quantize/muse/test_muse_quant.py (make_synth / check.py / the packer; the same small files)
 #   taps         for 23f P0: the residual after layers 1, 13, 25, 37, 49 over [prompt + the GPTQ form's own A4
 #                continuation] per scenario (teacher-forced, no generation) -> <data>/oracle-out-muse-taps/
 # Golden runs are per prompt resumable (written into <tree>/oracle-out-muse*.partial/, moved when complete, the golden
@@ -41,7 +42,7 @@
 #      MUSE_PROMPTS (golden's prompts, default all six), MUSE_REF_MIN_GB, MUSE_GEN (32), HF_HOME, ORACLE_IMAGE, ORACLE_THREADS, ORACLE_MEMORY (the Mac: 40g).
 set -u
 cd "$(dirname "$0")/../.." || exit 2
-MODES="tests|tiny|facts|ppl|hfcheck|golden|golden-bf16|a4|gateq|taps|synth-ckpt"
+MODES="tests|tiny|facts|ppl|hfcheck|golden|golden-bf16|a4|gateq|taps|synth-ckpt|synth-tests"
 [ $# -eq 2 ] || { echo "usage: $0 <data tree> $MODES" >&2; exit 2; }
 data="$1" mode="$2"
 case "|$MODES|" in *"|$mode|"*) ;; *) echo "muse_oracle: mode $mode is not one of $MODES" >&2; exit 2 ;; esac
@@ -67,7 +68,7 @@ else
   SITE=oracle-out-q4exp-site
 fi
 case "$mode" in
-  tests|tiny|facts|synth-ckpt) need="${MUSE_REF_MIN_GB:-24}" ;;
+  tests|tiny|facts|synth-ckpt|synth-tests) need="${MUSE_REF_MIN_GB:-24}" ;;
   golden-bf16) need="${MUSE_REF_MIN_GB:-72}" ;;
   *) need="${MUSE_REF_MIN_GB:-40}" ;;
 esac
@@ -136,7 +137,7 @@ case "$mode" in
           exit 77; }
       done
     fi ;;
-  synth-ckpt) [ "$dry" = 1 ] || {
+  synth-ckpt|synth-tests) [ "$dry" = 1 ] || {
     b=$(snap_of "$BF16") g=$(snap_of models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound-GPTQ)
     for f in tokenizer.json tokenizer_config.json chat_template.jinja generation_config.json; do
       [ -n "$b" ] && [ -s "$b/$f" ] || {
@@ -309,6 +310,9 @@ case "$mode" in
       python3 tools/oracle/muse_gateq.py verdict "$out" "$out/gateq.json" | tee "$out/gateq.log"
       [ "${PIPESTATUS[0]}" = 0 ] || rc=1
     fi
+    ;;
+  synth-tests)
+    in_box models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound-GPTQ "python3 tools/quantize/muse/test_muse_quant.py" || rc=1
     ;;
   synth-ckpt)
     nl="${MUSE_SYNTH_LAYERS:-4}"
