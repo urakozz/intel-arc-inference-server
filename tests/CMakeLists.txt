@@ -3741,4 +3741,13 @@ if(B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/tokenizer/muse ${B70_MUSE_TOKENIZER_JSON})
   set_tests_properties(template_muse_test muse_tokenizer_test PROPERTIES LABELS muse SKIP_RETURN_CODE 77 TIMEOUT 300)
 endif()
+# Task 2 (host): Muse-Glimmer's channel / ATEM output parser (server/toolcall_muse.h) - transformers 5.19.0's
+# parse_response on complete turns (tools/tokenizer/dump_muse.py parse -> tests/server/muse_parse_cases.json) but for
+# the documented decisions 2 / 15 and the ns.ns collapse, vLLM's selection on damaged turns, generation cut mid-call,
+# the split first header, a 2000-output fuzz - every parse whole == byte stream == random 1-7 byte pieces.
+add_executable(toolcall_muse_test server/toolcall_muse_test.cc)
+target_include_directories(toolcall_muse_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(toolcall_muse_test PRIVATE b70_server)
+add_test(NAME toolcall_muse_test COMMAND toolcall_muse_test ${CMAKE_SOURCE_DIR}/tests/server)
+set_tests_properties(toolcall_muse_test PROPERTIES LABELS muse TIMEOUT 300)
 # ==== Spec 23e: Muse-Glimmer served ==== (end) ====
