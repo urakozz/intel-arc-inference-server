@@ -939,7 +939,7 @@ int run(int argc, char** argv) {
                              " a step at a context depth");
   // Spec 23c: Muse-Glimmer-30B (model_type muse_glimmer) runs runtime::muse::MuseEngine on one card (or two) -
   // dispatched here, beside Kolibri-1 and before the Qwen engine's pipeline and kv-cache rules (its own refusals,
-  // cli/muse_decode.h: the prefill (spec 23d), --mtp / --spec, int8 KV (decision 8), --max-len above 131072
+  // cli/muse_decode.h: the prefill's backend and chunk (spec 23d), --mtp / --spec, int8 KV (decision 8), --max-len above 131072
   // (decision 6)). A path that does not resolve is not Muse - the flows below report it.
   if (cli::muse::is_muse(path)) {
     cli::muse::DecodeArgs ma;
@@ -954,10 +954,11 @@ int run(int argc, char** argv) {
     ma.int8_head = !have_lm_head || lm_head == loader::LmHeadForm::Int8;
     ma.layers = layers;
     ma.pipe = pipe;
-    ma.prefill = prefill;
-    ma.prefill_len = have_prefill_len;
-    ma.prefill_chunk = have_pp_chunk;
-    ma.prefill_backend = have_pp_backend;
+    ma.prefill = prefill;           // spec 23d: --ids through MuseEngine::prefill
+    ma.pp = have_prefill_len;       // --prefill-length N already set depth = N above
+    ma.pp_chunk = pp_chunk;
+    ma.pp_backend_given = have_pp_backend;
+    ma.pp_backend = pp_backend;
     ma.mtp = mtp_on;
     ma.spec = have_spec;
     ma.kv8 = kv_cache == runtime::KvCache::Int8;

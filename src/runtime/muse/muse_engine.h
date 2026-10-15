@@ -28,7 +28,14 @@
 // pp_send / pp_recv). The token's way back: argmax on device 1 writes the id and advances pos in device 1's Control;
 // after the fence the host copies device 1's Control block into device 0's. set_token writes both. A lost hand-off
 // host-signals the event (so the queue drains), throws naming device 1, and marks the engine until reset().
+//
+// **Spec 23d: prefill() and its accessors are DEFINED in b70_muse_prefill** (runtime/muse/muse_prefill_engine.cc), not
+// in b70_muse_runtime - Kolibri's arrangement (runtime/kolibri/kolibri_engine.h): a target that never prefills links
+// what it always linked; one that does links b70_muse_prefill. The prefill state is lazy (allocated by the first
+// prefill or prepare_prefill), so a decode-only engine holds exactly what it did.
 namespace runtime::muse {
+
+struct MusePrefillState;   // runtime/muse/muse_prefill_engine.cc
 
 struct MuseOptions {
   uint32_t max_len = 0;                  // 0 = auto: the largest that fits every device, at most 131072 (decision 6)
@@ -39,6 +46,8 @@ struct MuseOptions {
   bool debug_tap = false;                // the per-layer residual tap (MG3's partial forward)
   uint32_t timeout_ms = 30000;           // a step's fence wait (two devices)
   uint32_t spin_limit = 1u << 24;        // peer: pp_recv's flag loads before it gives up
+  bool prefill = false;                  // spec 23d: plan the prefill scratch (and its link) into max_len and the fit
+  uint32_t prefill_timeout_ms = 30000;   // spec 23d: a prefill chunk's / the head's wait (bounded)
 };
 
 class MuseEngine {
@@ -98,10 +107,45 @@ class MuseEngine {
   double last_fence_ms() const { return last_fence_ms_; }
   // P4's test hook (PipelineEngine's): the next step submits device 1's list only - a hand-off that never arrives.
   // The step must throw within the bound, never hang.
+  // Spec 23d: the next prefill CHUNK likewise (device 0's half not appended), unless prefills are replayed.
   void drop_next_handoff() { drop_next_ = true; }
+
+  // --- spec 23d: prefill (defined in b70_muse_prefill) ---------------------------------------------------------
+  // Runs `ids` from the current pos in chunks of `chunk` (0 = kPfC 2048; at most 2048 - the 4096-slot ring holds a
+  // chunk and the window before it) through runtime/muse/muse_prefill.h's walk on every device, then decode's head on
+  // the last row: leaves pos += ids.size() on every device and the first generated id pending in cur_token (the
+  // device argmax over the raw fp32 row, as every decode step). The KV and ring rows it writes are decode's to a cosine
+  // bar (the slab GEMMs' sum order, the flash tiles), not bitwise (plan 23d Review Focus 5). A prompt may be continued
+  // by another prefill. Two devices: each chunk runs layers [0, s) on device 0, crosses by a `copy` hand-off at chunk
+  // size (a second PipelineLink; whatever --pipeline-handoff says for decode), then layers [s, L) on device 1 -
+  // sequentially. A lost hand-off host-signals the event, throws naming device 1 and marks the engine until reset().
+  // B70_MUSE_ATTN=eager runs the eager prefill attention too (attention(), read once at construction).
+  void prefill(const std::vector<uint32_t>& ids, uint32_t chunk = 0);
+  // Allocates every device's prefill scratch, Context and (two devices) the prefill link, and checks every binary the
+  // walk binds exists; prefill() calls it. A CLI calls it before timing the first prefill.
+  void prepare_prefill();
+  // B70_PREFILL_REPLAY's arrangement: record each chunk's list once per (pos, rows) and device and replay it; the
+  // hand-off's copies and event stay on the immediate lists (never inside a recording).
+  void set_prefill_replay(bool enabled) { pf_replay_ = enabled ? 1 : 0; }
+  // Launches every device's prefill Context has appended since it was made (0 before the first prefill).
+  size_t prefill_launches() const;
+  size_t prefill_launches(uint32_t dev) const;
+  bool prefill_ready() const { return pf_bytes_ != 0; }
+  // Spec 7's block; spec 23e's prefix cache hooks into the chunk walk: with a hook set every chunk ends at a block end
+  // or at the prompt end (runtime::prefill_chunk_rows), and the hook is called on the host after each chunk whose end
+  // is a multiple of kBlock (devices idle, pos == end_pos, n_active 0 on every device) and once at the prompt end (the
+  // first generated id in cur_token) - Kolibri's contract (spec 20e).
+  static constexpr uint32_t kBlock = 2048;
+  using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
+  void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
 
  private:
   struct Stage;
+  // Spec 23d: a device's pieces for the prefill half (b70_muse_prefill), which cannot see Stage.
+  l0::Context& stage_ctx(uint32_t dev) const;
+  MuseBuffers& stage_buffers(uint32_t dev) const;
+  Control* stage_control(uint32_t dev) const;
+  l0::CmdList& stage_imm(uint32_t dev) const;
   Stage& st(uint32_t dev) const;
   void step_once();
   bool settle(uint32_t dev);
@@ -118,6 +162,17 @@ class MuseEngine {
   bool broken_ = false, drop_next_ = false;
   std::vector<bool> pending_;
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
+  BlockHook block_hook_;   // spec 23d: empty = no hook (uniform chunks)
+  // Spec 23d: set by prepare_prefill (b70_muse_prefill) - releases a prefill list waiting on a hand-off that will not
+  // come and waits (bounded) for every prefill list to go idle; reset() calls it.
+  std::function<bool()> pf_settle_;
+  // Spec 23d: the prefill state, lazy; declared LAST so it (its Contexts, kernels, recordings and link) is destroyed
+  // before the buffers it points into. The deleter is set where the state is made (b70_muse_prefill), so this header
+  // names no prefill symbol. pf_dev_bytes_: each device's prefill scratch + prefill link, for memory_use().
+  std::vector<size_t> pf_dev_bytes_;
+  size_t pf_bytes_ = 0;
+  int pf_replay_ = -1;   // -1: B70_PREFILL_REPLAY decides
+  std::unique_ptr<MusePrefillState, void (*)(MusePrefillState*)> pf_{nullptr, nullptr};
 };
 
 }  // namespace runtime::muse

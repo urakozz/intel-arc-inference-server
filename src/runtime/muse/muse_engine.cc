@@ -36,6 +36,11 @@ struct MuseEngine::Stage {
   std::optional<CapturedStep> step;
 };
 
+l0::Context& MuseEngine::stage_ctx(uint32_t dev) const { return st(dev).ctx; }
+MuseBuffers& MuseEngine::stage_buffers(uint32_t dev) const { return st(dev).buffers; }
+Control* MuseEngine::stage_control(uint32_t dev) const { return st(dev).ctl; }
+l0::CmdList& MuseEngine::stage_imm(uint32_t dev) const { return st(dev).imm; }
+
 MuseEngine::Stage& MuseEngine::st(uint32_t dev) const {
   if (dev >= st_.size())
     throw std::out_of_range("runtime::muse::MuseEngine: device " + std::to_string(dev) + " of " + std::to_string(st_.size()));
@@ -63,11 +68,12 @@ MuseEngine::MuseEngine(std::vector<l0::Context*> ctx, const std::string& snapsho
   const model::MuseGlimmerDesc d = loader::muse_checkpoint_desc(snapshot, o.layers);
   std::vector<size_t> caps;
   for (l0::Context* c : ctx) caps.push_back(c->memory_bytes());
-  const MusePlan first = plan_muse(d, devs, o.max_len, o.int8_head, decode_reserve(d, o.max_len, devs, attn_), caps,
-                                   devs == 2 ? o.split : 0);
+  // Spec 23d: a run that prefills (MuseOptions::prefill) plans the prefill scratch and its link too.
+  const MusePlan first = plan_muse(d, devs, o.max_len, o.int8_head, run_reserve(d, o.max_len, devs, attn_, o.prefill),
+                                   caps, devs == 2 ? o.split : 0);
   require_fits(first);
   max_len_ = first.max_len;
-  const MuseReserve reserve = decode_reserve(d, max_len_, devs, attn_);
+  const MuseReserve reserve = run_reserve(d, max_len_, devs, attn_, o.prefill);
   plan_ = plan_at(d, first.placement, max_len_, o.int8_head, reserve, caps);
   require_fits(plan_);
   w_ = loader::load_muse_glimmer(ctx, snapshot, max_len_, plan_.placement, o.int8_head, o.layers, reserve);
@@ -113,6 +119,9 @@ void MuseEngine::reset() {
     if (!settle(i))
       throw std::runtime_error("runtime::muse::MuseEngine::reset: device " + std::to_string(i) +
                                "'s last step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
+  if (pf_settle_ && !pf_settle_())   // spec 23d: no prefill list may still run into the buffers
+    throw std::runtime_error("runtime::muse::MuseEngine::reset: a prefill list is still running after " +
+                             std::to_string(opt_.prefill_timeout_ms) + " ms");
   for (uint32_t i = 0; i < st_.size(); ++i) st(i).buffers.zero(st(i).imm);
   if (link_) link_->zero(st(0).imm, st(1).imm);
   broken_ = false;
@@ -282,6 +291,7 @@ MemoryComponents MuseEngine::memory_use(uint32_t dev) const {
   c.model = P.bytes;
   c.kv = b.kv_bytes() + b.ring_bytes();
   c.decode_state = b.scratch_bytes() + (taps_[dev] ? taps_[dev]->size() : 0) + (link_ ? link_->bytes(dev) : 0);
+  c.prefill_scratch = dev < pf_dev_bytes_.size() ? pf_dev_bytes_[dev] : 0;   // spec 23d: 0 until prepared
   return c;
 }
 

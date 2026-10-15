@@ -135,4 +135,59 @@ size_t device_launches(const model::MuseGlimmerDesc& d, const model::MusePlaceme
                        PpHandoff h, uint32_t M = 1);
 size_t decode_launches(const model::MuseGlimmerDesc& d, const model::MusePlacement& p, MuseAttn a, PpHandoff h);
 
+// ==== Spec 23d: the prefill chunk ===========================================================================
+// One chunk of at most kPfC positions (= kernels::muse::kPfC, checked in muse_prefill.cc). Every allocation
+// MusePrefillScratch makes on a device, as device-free arithmetic. None depends on max_len (the flash attention keeps
+// no score scratch; the eager build recomputes its scores), so the prefill scratch is one constant per device.
+inline constexpr uint32_t kPfC = 2048;
+inline constexpr uint32_t kPfSlab = 1024;   // a whole slab of a linear (pf_gemm's 1024 columns)
+inline uint32_t pf_pad256(uint32_t n) { return (n + 255) / 256 * 256; }
+// A linear's slab walk over N columns: slabs of kPfSlab and one tail of pad256(N - n0) (k2_pf_dequant_slab zero-fills
+// its padding); the partials row pitch pad256(N) - 8704, 6656 and 39936 are all whole 256s.
+inline uint32_t pf_slabs(uint32_t N) { return (N + kPfSlab - 1) / kPfSlab; }
+inline uint32_t pf_slab_width(uint32_t N, uint32_t n0) { return N - n0 >= kPfSlab ? kPfSlab : pf_pad256(N - n0); }
+inline uint32_t pf_ld(uint32_t N) { return pf_pad256(N); }
+
+// MusePrefillScratch's allocations on one device (kPfC rows each; both devices hold the whole set - the lists are
+// per device):
+//   ids       u32  [kPfC]                  host memory: the chunk's ids (read by device 0's mg_pf_embed)
+//   resid     bf16 [kPfC][hidden]          the residual stream (crosses the cut on two cards)
+//   x, a      bf16 [kPfC][hidden]          every norm's output; a sub-block's own row (o_proj's, down's)
+//   partials  fp32 [kPfC][pf_ld(39936)]    the slab GEMMs' output (q||gate||k||v, o_proj, gate||up, down in turn)
+//   slab      bf16 [19968][kPfSlab]        one slab of the widest-K linear (down)
+//   sumsq_a/r fp32 [kNormG][kPfC]          a sub-block's Σ², the residual's (crosses with resid)
+//   attn_q    fp32 [kPfC][q_n]             mg_attn_prep's q;   gate bf16 [kPfC][q_n] its bf16(sigmoid(g))
+//   attn_out  bf16 [kPfC][q_n]             the attention's output, gated in place, o_proj's A
+//   h         bf16 [kPfC][inter]           SiLU(gate) x up, down's A
+struct PrefillSizes {
+  size_t ids = 0, resid = 0, x = 0, a = 0, partials = 0, slab = 0, sumsq_a = 0, sumsq_r = 0, attn_q = 0, gate = 0,
+         attn_out = 0, h = 0;
+  size_t total() const {
+    return ids + resid + x + a + partials + slab + sumsq_a + sumsq_r + attn_q + gate + attn_out + h;
+  }
+};
+PrefillSizes prefill_sizes(const model::MuseGlimmerDesc& d);
+// The two-card prefill hand-off: a second runtime::PipelineLink in `copy` mode over spec 16b's layout at chunk size -
+// kPfC rows of the residual and the [kNormG][kPfC] sums (27.3 MB + 213 KB).
+PpLandingLayout pf_landing_layout(const model::MuseGlimmerDesc& d);
+size_t pf_link_bytes(const model::MuseGlimmerDesc& d, uint32_t dev);
+// What a prefilling run reserves per device (MuseReserve::prefill_scratch): the scratch, + the larger device's prefill
+// link on two cards.
+size_t prefill_reserve(const model::MuseGlimmerDesc& d, uint32_t devices);
+// decode_reserve, plus the prefill's when the run prefills (MuseOptions::prefill).
+MuseReserve run_reserve(const model::MuseGlimmerDesc& d, uint32_t max_len, uint32_t devices, MuseAttn a, bool prefill);
+
+// The chunk's launches (the hand-off's copies, the event and the head excluded), the same at every C and under either
+// attention form:
+//   device 0  mg_pf_embed (the gather, the weight-less norm and layer 0's Σ² in one launch), then its layers
+//   a layer   mg_norm · q||gate||k||v pf_slabs(8704) x (slab + pf_gemm_T0) · mg_attn_prep · mg_pf_flash_attn ·
+//             mg_pf_attn_gate · o_proj 7 x 2 · pf_res_fold _Z + mg_post_add · mg_norm · gate||up 39 x 2 · mg_silu_mul ·
+//             down 7 x 2 · pf_res_fold _Z + mg_post_add = 134 at Muse's shapes
+// 6969 at 52 layers on one card AND on two (the cut is 16b's: device 0 ends with layer s-1's mg_post_add, whose rows
+// and sums cross; device 1 starts at layer s's norm).
+size_t prefill_layer_launches(const model::MuseGlimmerDesc& d);
+size_t prefill_device_launches(const model::MuseGlimmerDesc& d, const model::MusePlacement& p, uint32_t dev);
+size_t prefill_chunk_launches(const model::MuseGlimmerDesc& d, const model::MusePlacement& p);
+inline constexpr size_t kPrefillHeadLaunches = 4;   // mg_final_norm on the last row, lm_head, argmax x 2
+
 }  // namespace runtime::muse

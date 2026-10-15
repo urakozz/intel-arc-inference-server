@@ -227,4 +227,55 @@ size_t decode_launches(const model::MuseGlimmerDesc& d, const model::MusePlaceme
   return n;
 }
 
+// ==== Spec 23d ===========================================================================================
+PrefillSizes prefill_sizes(const model::MuseGlimmerDesc& d) {
+  PrefillSizes s;
+  uint32_t ld = 0, kmax = 0;
+  for (model::MuseLinearId id : d.layer_linears()) {
+    const model::GemvShape sh = d.linear(id).shape;
+    ld = std::max(ld, pf_ld(sh.N));
+    kmax = std::max(kmax, sh.K);
+  }
+  s.ids = size_t(kPfC) * 4;
+  s.resid = s.x = s.a = size_t(kPfC) * d.hidden * 2;
+  s.partials = size_t(kPfC) * ld * 4;
+  s.slab = size_t(kmax) * kPfSlab * 2;
+  s.sumsq_a = s.sumsq_r = size_t(kNormG) * kPfC * 4;
+  s.attn_q = size_t(kPfC) * d.q_n() * 4;
+  s.gate = s.attn_out = size_t(kPfC) * d.q_n() * 2;
+  s.h = size_t(kPfC) * d.inter * 2;
+  return s;
+}
+
+PpLandingLayout pf_landing_layout(const model::MuseGlimmerDesc& d) {
+  return pp_landing_layout(size_t(kPfC) * d.hidden * 2, size_t(kNormG) * kPfC * 4);
+}
+size_t pf_link_bytes(const model::MuseGlimmerDesc& d, uint32_t dev) {
+  return dev == 0 ? kPpStateWords * 4 : pf_landing_layout(d).total + kPpStateWords * 4;
+}
+size_t prefill_reserve(const model::MuseGlimmerDesc& d, uint32_t devices) {
+  return prefill_sizes(d).total() + (devices > 1 ? std::max(pf_link_bytes(d, 0), pf_link_bytes(d, 1)) : 0);
+}
+MuseReserve run_reserve(const model::MuseGlimmerDesc& d, uint32_t max_len, uint32_t devices, MuseAttn a, bool prefill) {
+  MuseReserve r = decode_reserve(d, max_len, devices, a);
+  if (prefill) r.prefill_scratch = prefill_reserve(d, devices);
+  return r;
+}
+
+size_t prefill_layer_launches(const model::MuseGlimmerDesc& d) {
+  const auto pair = [&](model::MuseLinearId id) { return size_t(2) * pf_slabs(d.linear(id).shape.N); };
+  // norm, prep, attention, gate, fold _Z, post-add, norm, silu, fold _Z, post-add + the four linears' slab pairs
+  return 10 + pair(model::MuseLinearId::QGKV) + pair(model::MuseLinearId::OProj) + pair(model::MuseLinearId::GateUp) +
+         pair(model::MuseLinearId::Down);
+}
+size_t prefill_device_launches(const model::MuseGlimmerDesc& d, const model::MusePlacement& p, uint32_t dev) {
+  model::validate(p, d);
+  return size_t(p.count(dev)) * prefill_layer_launches(d) + (dev == 0 ? 1 : 0);
+}
+size_t prefill_chunk_launches(const model::MuseGlimmerDesc& d, const model::MusePlacement& p) {
+  size_t n = 0;
+  for (uint32_t dev = 0; dev < p.devices; ++dev) n += prefill_device_launches(d, p, dev);
+  return n;
+}
+
 }  // namespace runtime::muse
