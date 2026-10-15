@@ -707,3 +707,67 @@ card, MG3 / MG4 on decode, two cards, speed). MG0 on the Mac: kernel_cmdlines **
   `gpu` ctest label (card tests are `muse` / `checkpoint;golden;muse`); `r44.reject` holds the GPU lock (Kolibri's
   r24.reject: a refusal that regressed would open the device); the two-card path was built with the engine (Task 4),
   Task 5 adds its tests; the bench prompt is 23a's `muse_short_prose.ids`.
+
+## 15. 23d as built (2026-10-16; the Mac - no Muse prefill binary compiled, nothing on a card)
+
+Branch `spec23d-muse-prefill` (plan 23d); box queue row 45 holds what the Mac could not run (every ocloc build, MG2 on
+the card, MG3 / MG4 on prefill, two cards, speed). MG0 on the Mac: kernel_cmdlines **+16 / -0 / ~0** (no existing `.cl`
+edited); 23c's decode list unchanged (`muse_pf_variant_names_test` pins its 17 names; its launch formula, 733 / 681,
+re-asserted in `muse_plan_test`).
+
+- **The host twins** `tests/kernels/muse_pf_ref.h` (`musepf`, on 23c's `museref`): the window over the ring - a chunk of
+  2048 at 2048 / 4096 / 6143 reads keys `[c0 - 2047, c0 + 2047]`, **4095 pairwise-distinct slots of 4096** (Review Focus
+  1, the first and last rows named); the fp64 tile walk (64-key tiles from `lo(p0) & ~63`, `m_safe`) equals the direct
+  softmax over per-POSITION keys to **5.8e-16** at c0 0 / 1000 / 2048 / 4096 / 6143 and full depths 3000 / 20000; a row
+  whose first tile holds none of its keys (row 15 of the chunk at 2096: tile [0, 64)) gives bitwise the walk from the
+  next tile - and dropping the guard makes it NaN (shown by mutation); rows reversed or permuted inside their 8-row
+  groups bitwise; a row's result is the same in chunks starting 2048 / 4032 / 4096 / 2112 bitwise - and at **2049 too**
+  (the twin's tiles are absolute, so any split is bitwise in exact rules; the card's GEMMs are not the twin - Review
+  Focus 2's "close" bar stays for the card); flash's fp32 arithmetic (bf16 P, natural exp) against fp64 worst
+  **0.9999954** (bar 0.99999) through the ring and full to 30000.
+- **The kernels** (`src/kernels/muse/`, `kernels::muse` "spec 23d" block): `mg_pf_attn.cl` - one entry,
+  `mg_pf_flash_attn`, two builds: **flash** (EAGER 0) is `kol_pf_attn.cl`'s DPAS default path at GQA 16 (HPW 4, RPW 8,
+  KT 64, 256 GRF; grid (ceil(C / 8), 2, 4)), unchanged in structure; **eager** (EAGER 1, `B70_MUSE_ATTN=eager`) is NOT
+  Kolibri's DPAS-with-rounding-points but a portable plain-OpenCL kernel (grid (32, C), WG 128) that walks a row's keys
+  in 128-key tiles three times (max; torch's 8 lanes; P·V in `eager_block(L)` blocks), recomputing each score - so it is
+  **bitwise decode's eager row** (`museref::attention_eager_head`, = `mg_attn_eager` at M 1) with no score scratch.
+  `mg_pf_prep.cl`: `mg_pf_embed` (mg_embed's chain over the chunk's ids buffer: mg_embed reads `Control::cur_token`,
+  M <= 8) and **`mg_pf_attn_gate`** - the gate is a separate launch after either attention build (decode's chain
+  `rne(rne(o) x bf16(sigmoid(g)))`), not folded into the flash epilogue: portable, shared by both forms. Reused at new
+  CMake lines: `mg_prep.cl` at M 2048 (mg_norm / mg_final_norm, mg_post_add, mg_attn_prep at S 1 both kinds,
+  mg_silu_mul at S 1), `k2_pf_dequant_slab` at 6656x8704 (8 x 1024 + 512), 4096x6656 (6 x 1024 + 512), 6656x39936 (39 x
+  1024), 19968x6656, `pf_res_fold_K6656_SP1_G26_Z`, the shape-free `pf_gemm_T0`. Every partials pitch (8704, 6656,
+  39936) is a whole 256, so mg_attn_prep and mg_silu_mul read the GEMM's rows at S 1 unchanged.
+- **The Mac's GPU** (UHD 630, `muse_run`, indicative): the slabs at K 6656 / 19968, `mg_pf_embed` (the placeholder's row
+  0, sums at the 2048 pitch), mg_norm / `_Z` + mg_post_add / mg_attn_prep (3 rows across the ring's wrap 4095, 0, 1; NoPE
+  at 37) / mg_silu_mul at M 2048, the gate - **exact** against the twin. The eager build over a sliding chunk of 24 rows
+  at 4090 and a full chunk of 12 at 2990: **bitwise decode's `mg_attn_eager` rows on the same device**; against the host
+  twin 8 of 98,304 values move one bf16 ulp (Apple's `1 / sum`, not correctly rounded - decode's move identically).
+  The flash build cannot run there (DPAS, 2D block reads, sub-group reductions): its card test is `muse_pf_kernels_test`
+  (r45.k1).
+- **The walk** (`runtime/muse/muse_prefill.{h,cc}`, archive `b70_muse_prefill`): **134 launches a layer** (mg_norm,
+  q||gate||k||v 9 x 2, mg_attn_prep, the attention, the gate, o_proj 7 x 2, `_Z` + mg_post_add, mg_norm, gate||up 39 x 2,
+  mg_silu_mul, down 7 x 2, `_Z` + mg_post_add) + mg_pf_embed on device 0: **6969 a chunk at 52 layers**, the same under
+  eager and on two cards; the head 4 (mg_final_norm from the M 2048 norm binary at grid (26, 1) on the last row's
+  offsets - decode's chain, no new binary -, lm_head, argmax x 2). Asserted at the walk (`prefill_device_launches`).
+- **The scratch** (`runtime::muse::prefill_sizes`, one constant a device: nothing depends on max_len): **599,171,072 B**
+  - partials [2048][39936] fp32 (327 MB, gate||up's rows) the largest, the slab [19968][1024] bf16 (40.9 MB), h
+  [2048][19968] (81.8 MB), attn_q / gate / attn_out, resid / x / a, the sums; + the 27.3 MB landing on two cards
+  (`pf_landing_layout`). One card at 131072 with it, the int8 head, the decode scratch and the int4 drafter: **22.845 GB
+  of 32.53** (`muse_plan_test`). `MuseOptions::prefill` plans it (`run_reserve`); the CLI sets it for `--prefill` /
+  `--prefill-length`.
+- **The engine** (`muse_prefill_engine.cc`, Kolibri's arrangement): `prefill(ids, chunk)` (chunk <= 2048), lazy
+  `prepare_prefill` naming a missing binary, `set_prefill_replay` (B70_PREFILL_REPLAY), the block hook with Kolibri's
+  `(end_pos, is_block_end)` signature (23e), two cards by the sequential copy hand-off with the bounded wait, P4's
+  `drop_next_handoff`, the Control mirror. `b70-decode <muse> --prefill`, `--bench --prefill-length N [--prefill-chunk C]`
+  print the prefill line and a pp row (t/s, and TFLOP/s against 2 x 52 x 483,917,824 = 50.3 GFLOP a token); refused by
+  name: `--prefill-backend l0-int8` (6656 = 6.5 x 1024, §10), `sycl-tla` (no Muse walk), `--prefill-chunk` above 2048
+  (23c's `cli_reject_muse_prefill` / `_len` removed).
+- **Departures from the plan**: (1) the gate is its own launch (above); (2) prefill eager is the portable bitwise build,
+  not DPAS-with-rounding-points; (3) the flash's "portable path" check is the host's (`flash_window_sim`) and the card's,
+  not the Mac GPU's; (4) `PrefillSizes` carries `h` and no `logits` (the head writes decode's), `prefill_sizes` takes no
+  max_len; (5) `set_block_hook` is Kolibri's two-argument hook; (6) no `gpu` ctest label (23c's ruling): the card tests
+  are `checkpoint;muse;prefill` (+ `pp`); (7) `muse_pf_kernels_test` (r45.k1) was written in Task 2; (8) the two-card
+  hand-off landed with Task 3's `MuseEngine::prefill` (one function), Task 4 is its tests; (9) "in-tile permutations"
+  became row permutations inside the 8-row groups (the twin's key order inside a tile IS its sum order); (10) r45.reject
+  holds the GPU lock (23c's r44.reject rule).

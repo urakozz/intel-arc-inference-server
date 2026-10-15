@@ -2955,7 +2955,7 @@ st_r44_k1() {
   jgrab k1 '^muse_kernels_test$' 'bitwise|cosine|differ|OK'
   finish
 }
-stage r44.reject 44 default gpu - - "the refusals before the device (b70-decode on tests/model/muse_glimmer: config.json only): cli_reject_muse_* - --prefill / --prefill-length naming spec 23d, --mtp, --spec naming 23f, --kv-cache int8 (decision 8), --max-len 262144 (decision 6), --device with --pp 2; b70-serve naming spec 23e. Under the GPU lock (Kolibri's r24.reject): a refusal that regressed would open the device"
+stage r44.reject 44 default gpu - - "the refusals before the device (b70-decode on tests/model/muse_glimmer: config.json only): cli_reject_muse_* - --mtp, --spec naming 23f, --kv-cache int8 (decision 8), --max-len 262144 (decision 6), --device with --pp 2; b70-serve naming spec 23e (23d replaced the --prefill refusals: its cli_reject_muse_prefill_* run here too, r45.reject names them). Under the GPU lock (Kolibri's r24.reject): a refusal that regressed would open the device"
 st_r44_reject() {
   run_tests '^cli_reject_muse_' '' '' 'ZE_AFFINITY_MASK=0,1'
   finish
@@ -3066,6 +3066,85 @@ st_r44_sweeps() {
   say "# model::MuseGlimmerDesc's qgkv_s / oproj_s / gate_up_s / down_s, kernels::muse::kQgkvS.. and add_gemv_variant's Spec 23c rows move together (muse_variant_names_test holds them)"
   say "# then ZE_AFFINITY_MASK=0 build/src/cli/b70-decode \${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound} --bench --depth 4096 --tg 256 per cell set"
   say "# record: docs/BENCHMARKS.md 'Muse-Glimmer-30B (spec 23)'"
+}
+
+# ======================================================================================
+row 45 "spec 23d - Muse-Glimmer-30B prefill on l0: the chunk walk (q||gate||k||v / o_proj / gate||up / down as int4 slabs + pf_gemm_T0, mg_prep at M 2048), mg_pf_attn (flash: the 2048-key window over the 4096-slot ring in absolute 64-key tiles, causal NoPE over the full cache; eager: bitwise decode's eager rows), the gate after, MuseEngine::prefill on one card and two, b70-decode --prefill / --prefill-length, MG2-MG4 on prefill, the speed rows (plan 23d)"
+rownote 45 "Written blind on the Mac: NO Muse prefill binary has ever been compiled (ocloc is the box's) - r45.k1's kbins is the first build of the 16 new command lines (kernel_cmdlines +16 / -0 / ~0: mg_pf_attn.cl x 4, mg_pf_prep.cl x 2, mg_prep.cl at M 2048 x 5, k2_pf_linear.cl at Muse's four linears, pf_prep.cl's _Z at K 6656). mg_pf_attn.cl's FLASH build (kol_pf_attn.cl's DPAS walk at GQA 16) has never run anywhere; its tile walk is held to fp64 on the host (musepf::flash_window_sim at 0.9999954 worst, muse_pf_ref_test). On the Mac's GPU every portable prefill kernel ran exact against the twin, and the EAGER build equalled decode's mg_attn_eager rows bitwise on the same device (muse_run, indicative)."
+rownote 45 "Bars: MG2's flash >= 0.99999 vs fp64 (r45.k1); the KV / rings against decode's fill PROPOSED (Kolibri's: layer 0 every row >= 0.999, median >= 0.9998, p01 >= 0.99 - printed per layer, r45.prefill); MG3 the tie-aware token gate from row T - 1 on (r45.golden / r45.real). Bitwise: replay, chunks of 64 vs 2048, splits at multiples of 64, --pp 2 vs --pp 1; a split at 2049 within the bars (the host twin is bitwise there too: read the printed line). The synthetic checkpoint's margins are small (23c's note): a determined-row failure on the int8-head arm is read against the bf16 arm first."
+rownote 45 "Data: r45.prefill / r45.golden / r45.pp need row 43's ckpt4 (oracle_muse_synth) and row 44's synthetic golden set (r44.oracle_synth); r45.real / r45.speed the int4 checkpoint (muse_gptq) and row 42's golden sets (oracle_muse). The prompts are in the tree (tests/golden/prompts/muse_{short_prose,4k,8k}.ids)."
+rownote 45 "Hand back: the kbins list, muse_pf_kernels_test's lines, muse_prefill_test's walk / MG4 / per-layer KV tables / token lines, the split lines (bitwise or not), the pp and P4 lines, every MG3 gate line on prefill, the speed rows (pp t/s, TFLOP/s against 50.3 GFLOP a token, each card's memory line) and RATIO lines."
+stage r45.k0 45 default cpu - g0.sha,g0.bitwise,g0.suite "MG0: no existing .cl edited (kernel_cmdlines +16 / -0 / ~0), every pre-existing binary identical - 23c's decode list among them (muse_pf_variant_names_test pins its 17 names) - and the suite (G0); 23d's edits to shared files: b70-decode's Muse refusals (the prefill flags now run), cli/CMakeLists.txt's b70_muse_prefill link"
+st_r45_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r45.host 45 default cpu - - "host: muse_pf_ref_test (the window over the ring: 4095 distinct slots a chunk; the fp64 tile walk == the direct softmax; the masked first tile; row independence and splits; flash's fp32 arithmetic vs fp64; the eager build's structure bitwise decode's eager row; the gate), muse_pf_variant_names_test, muse_plan_test (6969 launches a chunk + 4; the prefill scratch 599,171,072 B; 131072 on one card with it and the int4 drafter)"
+st_r45_host() {
+  run_tests '^(muse_pf_ref_test|muse_pf_variant_names_test|muse_plan_test)$'
+  jgrab host '^muse_(pf_ref|pf_variant_names|plan)_test$' '^\(|OK|23d:|bound names'
+  finish
+}
+stage r45.k1 45 default gpu - r45.host "MG2 for the prefill, no checkpoint: the 16 new binaries built (kbins) and muse_pf_kernels_test - the slabs exact (first and last of the four linears), q||gate||k||v through pf_gemm_T0 >= 0.99999 vs fp64, mg_pf_embed / mg_norm / pf_res_fold _Z + mg_post_add / mg_attn_prep (ring wrap at 4090, NoPE at 37) / mg_silu_mul / mg_pf_attn_gate at M 2048 bit-exact; the flash vs fp64 >= 0.99999 sliding at 0 / 1000 / 4396 / 6143 / a 300-row tail / single rows and full to depth 30048; the EAGER build bitwise eager_window; a split at 64 bitwise, at 2049 within the bar (printed), replay bitwise"
+st_r45_k1() {
+  kbins mg_pf_embed_M2048_K6656_G26_V202048 mg_pf_attn_gate_M2048_N4096 mg_norm_M2048_K6656_G26_W26 \
+    mg_post_add_M2048_K6656_G26 mg_attn_prep_M2048_N8704_S1_Q32KV2_R4096 mg_attn_prep_M2048_N8704_S1_Q32KV2_F \
+    mg_silu_mul_M2048_I19968_S1 pf_res_fold_K6656_SP1_G26_Z k2_pf_dequant_slab_K6656_N8704 \
+    k2_pf_dequant_slab_K4096_N6656 k2_pf_dequant_slab_K6656_N39936 k2_pf_dequant_slab_K19968_N6656 \
+    mg_pf_flash_attn_Q32KV2_W2048_R4096 mg_pf_flash_attn_Q32KV2_W2048_R4096_EAGER mg_pf_flash_attn_Q32KV2_F \
+    mg_pf_flash_attn_Q32KV2_F_EAGER
+  run_tests '^muse_pf_kernels_test$' muse
+  jgrab k1-prefill '^muse_pf_kernels_test$' 'cosine|bit-exact|bitwise|splits|exact|OK|FAIL'
+  finish
+}
+stage r45.reject 45 default gpu - - "the refusals before the device: cli_reject_muse_prefill_int8 (naming 6656 = 6.5 x 1024, spec 23 §10), _sycl (no Muse walk), _chunk (above 2048). Under the GPU lock (Kolibri's r24.reject / 23c's r44.reject): a refusal that regressed would open the device"
+st_r45_reject() {
+  run_tests '^cli_reject_muse_prefill_(int8|sycl|chunk)$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  finish
+}
+stage r45.prefill 45 default gpu oracle_muse_synth r45.k1 "MG4 / Review Focus 5 on one card: muse_prefill_synth_test, _bf16_test, _eager_test - 1 + 4 x 134 = 537 launches a chunk + 4 (6969 at 52 layers), plan == allocation, immediate / recorded / replayed bitwise, chunks of 64 bitwise (muse_4k), KV / rings / pos / tokens against decode's fill per layer on muse_short_prose / 4k / 8k; prefill_split_muse_test (splits at 64 / 1000 / 2048 / 2049 / 4097 of the 8k prompt: multiples of 64 bitwise, the others within the bars)"
+st_r45_prefill() {
+  run_tests '^(muse_prefill_synth(_bf16|_eager)?_test|prefill_split_muse_test)$' muse
+  jgrab prefill '^(muse_prefill_synth|prefill_split_muse)' 'walk|MG4|chunks of 64|vs decode|per layer|tokens|split at|OK|FAIL'
+  finish
+}
+stage r45.golden 45 default gpu oracle_muse_synth_golden r45.prefill "MG3 on prefill, synthetic: muse_golden_prefill_synth_test (int8 head, flash), _bf16_test, _c64_test (chunks of 64), _eager_test (B70_MUSE_ATTN=eager, both halves) - the tie-aware token gate from row T - 1 on (the prefill head's first id), the decode steps' taps - compare with r44.golden"
+st_r45_golden() {
+  run_tests '^muse_golden_prefill_synth(_bf16|_c64|_eager)?_test$' muse
+  jgrab golden-prefill '^muse_golden_prefill_synth' 'MG3 on prefill|gate:|tap|step [0-9]+:|OK|FAIL'
+  finish
+}
+stage r45.pp 45 default gpu oracle_muse_synth r45.prefill,r44.pp,r23.p1 "two cards: muse_prefill_pp_test and _pp_eager_test (--pp 2 --pipeline-split 2 against --pp 1, BITWISE: one prefill, recorded + replayed, a 1000 + rest continuation, chunks of 64, both Control blocks; each card's launches; P4 - a dropped chunk hand-off throws within 5 s naming device 1, reset() recovers), prefill_split_muse_pp_test, muse_golden_prefill_synth_pp2_test"
+st_r45_pp() {
+  run_tests '^(muse_prefill_pp(_eager)?_test|prefill_split_muse_pp_test|muse_golden_prefill_synth_pp2_test)$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab pp '^(muse_prefill_pp|prefill_split_muse_pp|muse_golden_prefill_synth_pp2)' 'pp:|P4|device|split at|gate:|OK|FAIL'
+  finish
+}
+stage r45.real 45 default gpu muse_gptq,oracle_muse r45.golden,r44.real "MG3 on prefill, the REAL checkpoint (52 layers, one card): muse_golden_prefill_real_test (int8 head), _bf16, _c64, _eager over every golden prompt row 42 made (short prose / code, 4k, 8k, 32k, agentic) - compare with r44.real's decode-ingested lines"
+st_r45_real() {
+  x "free -g | head -2"
+  run_tests '^muse_golden_prefill_real(_bf16|_c64|_eager)?_test$'
+  jgrab real-prefill '^muse_golden_prefill_real' 'MG3 on prefill|gate:|tap|step [0-9]+:|OK|FAIL'
+  finish
+}
+stage r45.speed 45 optin gpu muse_gptq r45.real "prefill speed (Task 5): pp 4096 / 16384 / 32768 at chunk 2048 then tg 16, one card (int8 head, --max-len 131072), pp 4096 / 32768 on two cards (--pp 2, the chunk crosses by copy), pp 4096 eager; interleaved, median of 3 - pp t/s and TFLOP/s against 50.3 GFLOP a token (derived), beside Qwen3.8's bf16 l0 walk (1670.72 t/s at 4096, BENCHMARKS '## Prefill')"
+st_r45_speed() {
+  idle before
+  local m="${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound}" n k="ZE_AFFINITY_MASK=0,1" arms=""
+  for n in 4096 16384 32768; do
+    arms="$arms pp$n '$(bench_cmd "$m" --prefill-length $n --tg 16 --max-len 131072)'"
+  done
+  arms="$arms pp4096-pp2 '$k $(bench_cmd "$m" --pp 2 --prefill-length 4096 --tg 16 --max-len 131072)'"
+  arms="$arms pp32768-pp2 '$k $(bench_cmd "$m" --pp 2 --prefill-length 32768 --tg 16 --max-len 131072)'"
+  arms="$arms pp4096-eager 'B70_MUSE_ATTN=eager $(bench_cmd "$m" --prefill-length 4096 --tg 16 --max-len 131072)'"
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 --ratio pp4096-pp2/pp4096 --ratio pp32768-pp2/pp32768 --ratio pp4096-eager/pp4096 --$arms" \
+    "the Muse-Glimmer prefill arms"
+  idle after
+  grab_all prefill '^pp:|^prefill:|  pp: ' 18
+  grab_all memory '^memory' 8
+  grab_all ratio '^RATIO '
+  grab_all idle '^IDLE '
+  finish
 }
 
 # ======================================================================================
