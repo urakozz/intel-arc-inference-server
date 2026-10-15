@@ -140,6 +140,23 @@ class MuseEngine {
   using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
   void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
 
+  // --- spec 23e: spec 7's prefix-cache snapshots ---------------------------------------------------------------
+  // Muse's "state" is the sliding rings' last state_positions (2047) positions - what the next query's window reads -
+  // and its blocks are the full layers' KV: runtime/muse/muse_sizes.h's state_runs / kv_runs give both host layouts,
+  // which are the same under --pp 1 and --pp 2 (spec 16b's rule: layers in layer order, whichever device holds them).
+  // state_bytes() is 81,748,992 B and kv_bytes(n) n x 13,312 B at the real shapes (derived). save_state copies the
+  // rings' rows of [pos - 2047, pos) (zeros for positions before 0); load_state writes them back into their slots
+  // (p & 4095, the zeros into the slots of positions before 0) and sets pos on every device (n_active 0; the
+  // cur_token is the prefill's that follows every restore, spec 7 §3.3 step 4) - after a reset() when a hand-off failed
+  // in this session. save_kv / load_kv copy positions [begin, end) of every full layer; begin == end copies nothing;
+  // throws unless begin <= end <= max_len. Every call runs on the devices' immediate lists with no step in flight.
+  size_t state_bytes() const;
+  size_t kv_bytes(uint32_t n_pos) const;
+  void save_state(void* host);
+  void load_state(const void* host, uint32_t pos);
+  void save_kv(uint32_t begin, uint32_t end, void* host);
+  void load_kv(uint32_t begin, uint32_t end, const void* host);
+
  private:
   struct Stage;
   // Spec 23d: a device's pieces for the prefill half (b70_muse_prefill), which cannot see Stage.
@@ -150,6 +167,8 @@ class MuseEngine {
   Stage& st(uint32_t dev) const;
   void step_once();
   bool settle(uint32_t dev);
+  void settle_all(const char* what);                       // spec 23e: every device's last step, bounded
+  l0::Mem& snap_mem(uint32_t dev, SnapTensor t) const;     // spec 23e: a snapshot run's allocation
   [[noreturn]] void fail(const std::string& what);
 
   MuseOptions opt_;

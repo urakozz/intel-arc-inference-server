@@ -245,6 +245,76 @@ void MuseEngine::read_logits_into(float* host) {
   s.imm.copy(host, s.buffers.logits.ptr(), size_t(w_.desc.vocab) * 4);
 }
 
+// --- spec 23e: prefix-cache snapshots ---------------------------------------------------------------------------
+l0::Mem& MuseEngine::snap_mem(uint32_t dev, SnapTensor t) const {
+  MuseBuffers& b = st(dev).buffers;
+  const std::unique_ptr<l0::Mem>& m = t == SnapTensor::FullK   ? b.full_k
+                                      : t == SnapTensor::FullV ? b.full_v
+                                      : t == SnapTensor::RingK ? b.ring_k
+                                                               : b.ring_v;
+  if (!m)
+    throw std::logic_error("runtime::muse::MuseEngine: device " + std::to_string(dev) +
+                           " holds no allocation for a snapshot run (state_runs / kv_runs disagree with MuseBuffers)");
+  return *m;
+}
+
+void MuseEngine::settle_all(const char* what) {
+  for (uint32_t i = 0; i < st_.size(); ++i)
+    if (!settle(i))
+      throw std::runtime_error(std::string("runtime::muse::MuseEngine::") + what + ": device " + std::to_string(i) +
+                               "'s last step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
+}
+
+size_t MuseEngine::state_bytes() const { return state_snapshot_bytes(w_.desc); }
+size_t MuseEngine::kv_bytes(uint32_t n_pos) const { return kv_snapshot_bytes(w_.desc, n_pos); }
+
+void MuseEngine::save_state(void* host) {
+  settle_all("save_state");
+  auto* h = static_cast<uint8_t*>(host);
+  for (const SnapRun& r : state_runs(w_.desc, w_.placement, pos())) {
+    if (r.zero)
+      std::memset(h, 0, r.bytes);   // positions before 0: never read, zero on the host
+    else
+      st(r.device).imm.copy(h, static_cast<const uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, r.bytes);
+    h += r.bytes;
+  }
+}
+
+void MuseEngine::load_state(const void* host, uint32_t p) {
+  if (p > max_len_)
+    throw std::runtime_error("runtime::muse::MuseEngine::load_state: pos " + std::to_string(p) + " exceeds max_len " +
+                             std::to_string(max_len_));
+  if (broken_) reset();   // a failed hand-off: start from a clean session, then the restore rewrites what it reads
+  settle_all("load_state");
+  const auto* h = static_cast<const uint8_t*>(host);
+  for (const SnapRun& r : state_runs(w_.desc, w_.placement, p)) {
+    st(r.device).imm.copy(static_cast<uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, h, r.bytes);
+    h += r.bytes;
+  }
+  for (auto& s : st_) {
+    s->ctl->pos = p;
+    s->ctl->n_active = 0;
+  }
+}
+
+void MuseEngine::save_kv(uint32_t begin, uint32_t end, void* host) {
+  settle_all("save_kv");
+  auto* h = static_cast<uint8_t*>(host);
+  for (const SnapRun& r : kv_runs(w_.desc, w_.placement, max_len_, begin, end)) {
+    st(r.device).imm.copy(h, static_cast<const uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, r.bytes);
+    h += r.bytes;
+  }
+}
+
+void MuseEngine::load_kv(uint32_t begin, uint32_t end, const void* host) {
+  settle_all("load_kv");
+  const auto* h = static_cast<const uint8_t*>(host);
+  for (const SnapRun& r : kv_runs(w_.desc, w_.placement, max_len_, begin, end)) {
+    st(r.device).imm.copy(static_cast<uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, h, r.bytes);
+    h += r.bytes;
+  }
+}
+
 std::vector<uint16_t> MuseEngine::read_kv(uint32_t layer, uint32_t first, uint32_t count, bool v) {
   const model::MuseGlimmerDesc& d = w_.desc;
   if (layer >= d.layers) throw std::out_of_range("read_kv: layer " + std::to_string(layer));
