@@ -309,6 +309,38 @@ void test_flash_sim() {
     }
   CHECK(o9000 == o4904);   // the same ring rows, the same absolute 64-key blocks modulo the ring
   std::printf("  flash (host) at 9000 == at 4904 bitwise (the ring is addressing)\n");
+  // The window's edge exactly (a cosine bar cannot see one key in 2048): poisoning the slot of key p - 2048 and the
+  // slots of p + 1 .. p + 15 must leave the output bitwise unchanged; poisoning key p - 2047's must change it.
+  for (uint32_t pos : {2047u, 2048u, 4096u, 9000u}) {
+    std::vector<uint16_t> a(mr::kQN), b(mr::kQN);
+    mr::attention_flash_sim(q.data(), rk.data(), rv.data(), pos, true, mr::kRing, g.data(), a.data());
+    std::vector<uint16_t> pk = rk, pv = rv;
+    auto poison = [&](uint32_t p) {
+      for (uint32_t i = 0; i < mr::kKvN; ++i) {
+        pk[size_t(p & (mr::kRing - 1)) * mr::kKvN + i] = rne(64.0f);
+        pv[size_t(p & (mr::kRing - 1)) * mr::kKvN + i] = rne(-64.0f);
+      }
+    };
+    if (pos >= 2048) poison(pos - 2048);
+    for (uint32_t p = pos + 1; p <= pos + 15; ++p) poison(p);
+    mr::attention_flash_sim(q.data(), pk.data(), pv.data(), pos, true, mr::kRing, g.data(), b.data());
+    CHECK(a == b);
+    poison(pos - 2047);
+    mr::attention_flash_sim(q.data(), pk.data(), pv.data(), pos, true, mr::kRing, g.data(), b.data());
+    CHECK(a != b);
+    // the eager twin likewise
+    mr::attention_eager(q.data(), rk.data(), rv.data(), pos, true, mr::kRing, g.data(), a.data());
+    std::vector<uint16_t> ek = rk, ev = rv;
+    for (uint32_t p : {pos - 2048, pos + 1, pos + 15})
+      if (p <= pos + 15 && (p != pos - 2048 || pos >= 2048))
+        for (uint32_t i = 0; i < mr::kKvN; ++i) {
+          ek[size_t(p & (mr::kRing - 1)) * mr::kKvN + i] = rne(64.0f);
+          ev[size_t(p & (mr::kRing - 1)) * mr::kKvN + i] = rne(-64.0f);
+        }
+    mr::attention_eager(q.data(), ek.data(), ev.data(), pos, true, mr::kRing, g.data(), b.data());
+    CHECK(a == b);
+  }
+  std::printf("  the window's edge: keys p - 2048 and p + 1 .. p + 15 unread, key p - 2047 read (flash and eager)\n");
 }
 
 void test_softcap() {
