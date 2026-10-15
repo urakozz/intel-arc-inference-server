@@ -3469,4 +3469,10 @@ target_link_libraries(muse_repack_test PRIVATE b70_muse_loader)
 add_test(NAME muse_repack_test COMMAND muse_repack_test)
 set_tests_properties(muse_repack_test PROPERTIES LABELS muse TIMEOUT 900
   ENVIRONMENT "MUSE_TINY_INT4=${B70_MUSE_TINY_INT4};MUSE_SYNTH_DIR=${B70_MUSE_SYNTH_DIR}")
+# Task 5: the memory plan - one card at 131072 with the drafter's reservation, two by bytes, decision 6. Host only.
+add_executable(muse_plan_test runtime/muse_plan_test.cc)
+target_include_directories(muse_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(muse_plan_test PRIVATE b70_muse_plan)
+add_test(NAME muse_plan_test COMMAND muse_plan_test)
+set_tests_properties(muse_plan_test PROPERTIES LABELS muse)
 # ==== Spec 23b: Muse-Glimmer descriptor and loader ==== (end) ====
