@@ -51,7 +51,8 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 WORK = "/work"
 MIN_IDS, MAX_IDS = 800, 3000
 # --from re-renders the SAME conversations: another tokenizer may need fewer ids for them. LFM2.5's renders the
-# shortest scenario in 748 ids (spec 24a: 748..2460, 54768 in all), so its floor is lower; the conversations are unchanged.
+# shortest scenario in 748 ids (spec 24a: 748..2460, 54768 in all), so its floor is lower; the conversations
+# are unchanged.
 MIN_IDS_FROM = {"lfm2_moe": 600}
 
 FILES = [
