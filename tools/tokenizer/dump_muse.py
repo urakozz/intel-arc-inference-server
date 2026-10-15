@@ -29,9 +29,11 @@ are sorted - dump_k2.py's rule), so the comparison never grades key order.
 
 Run in the oracle image with the 5.19.0 site first on PYTHONPATH (small files only):
   docker run --rm --memory 8g --cpus 4 -v "$PWD:/ws" -v <oracle-out-q4exp/site>:/site:ro \\
-      -v <hf-cache>/models--meta-models--Muse-Glimmer-30B:/m:ro -w /ws -e PYTHONPATH=/site \\
+      -v <hf-cache>/hub:/hub:ro -w /ws -e PYTHONPATH=/site \\
       --entrypoint python3 agnes-ref-img:latest tools/tokenizer/dump_muse.py templates \\
-      /m/snapshots/a4e59da52a7bc87ae7251dd5545c0dd437c44b68 tests/tokenizer/muse_templates.json
+      /hub/models--meta-models--Muse-Glimmer-30B/snapshots/a4e59da52a7bc87ae7251dd5545c0dd437c44b68 \\
+      tests/tokenizer/muse_templates.json
+(the whole hub directory: the snapshot's links reach blobs outside the model's own directory)
 """
 import hashlib
 import json
@@ -376,7 +378,7 @@ PARSE_HAND = [
     ("typing_string_schema",
      " to=typed.probe<|message|>" + atem("typed.probe", [("s", "007"), ("sn", "null"), ("i", "007"), ("n", "1.50"),
                                                           ("b", "true"), ("o", "{\"a\": [1]}"), ("a", "[1, \"x\"]")])
-     + EOT, ["typed.probe"], {"differs": ["typing"], "arguments": [{"s": "007", "sn": "null", "i": 7, "n": 1.5,
+     + EOT, ["typed.probe"], {"differs": ["typing"], "arguments": [{"s": "007", "sn": None, "i": 7, "n": 1.5,
                                                                      "b": True, "o": {"a": [1]}, "a": [1, "x"]}]}),
     ("typing_spaces",
      " to=typed.probe<|message|>" + atem("typed.probe", [("s", " x "), ("i", " 12 "), ("b", " false ")]) + EOT,
