@@ -3554,6 +3554,21 @@ if(B70_MUSE)
   set_tests_properties(muse_golden_synth_eager_test PROPERTIES ENVIRONMENT "B70_MUSE_ATTN=eager")
   set_tests_properties(muse_decode_synth_test muse_golden_synth_test muse_golden_synth_bf16_test
     muse_golden_synth_eager_test PROPERTIES LABELS "checkpoint;golden;muse" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # Task 5 (two cards, spec 16b's pieces): --pp 1 against --pp 2 --pipeline-split 2 on the synthetic checkpoint under
+  # copy and peer, bitwise; P4's lost hand-off; replay; the real checkpoint across splits 26 / 20 when present. MG3
+  # across the split (the synthetic golden set). SKIP 77 with one GPU or no data.
+  add_executable(muse_pp_test runtime/muse_pp_test.cc)
+  target_include_directories(muse_pp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_pp_test PRIVATE b70_muse_runtime)
+  add_dependencies(muse_pp_test ${B70_MUSE_DECODE_KERNELS} kernel_pp_handoff)
+  add_test(NAME muse_pp_test COMMAND muse_pp_test ${B70_MUSE_SYNTH_DIR}/ckpt4
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/muse_short_prose.ids ${B70_MUSE_SNAPSHOT})
+  add_test(NAME muse_golden_synth_pp2_test COMMAND muse_golden_test ${B70_MUSE_SYNTH_DIR}/ckpt4
+    ${B70_MUSE_SYNTH_DIR}/golden pp2:2 copy)
+  add_test(NAME muse_golden_synth_pp2_peer_test COMMAND muse_golden_test ${B70_MUSE_SYNTH_DIR}/ckpt4
+    ${B70_MUSE_SYNTH_DIR}/golden pp2:2 peer)
+  set_tests_properties(muse_pp_test muse_golden_synth_pp2_test muse_golden_synth_pp2_peer_test
+    PROPERTIES LABELS "checkpoint;muse;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # b70-decode's model_type dispatch and Muse's refusals, before the device: tests/model/muse_glimmer/ holds only the
 # checkpoint's config.json (and generation_config.json), which is all the dispatch reads. b70-serve refuses the model
