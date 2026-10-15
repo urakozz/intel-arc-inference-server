@@ -103,7 +103,7 @@ size_t muse_layer_read_per_token(const model::MuseGlimmerDesc& d);
 }
 ```
 
-- [ ] **Step 1: failing test** printing and asserting spec 23 §2's derived numbers from the formulas: per-layer int4 (qweight + scales) 257,081,600 B ± the layout's padding (assert the formula, print the value), 52 layers 13.368 GB, int8 head 1,345,639,680 B, embed 2,689,662,976 B, KV 13,312 B a position, ring 4,194,304 B a sliding layer (39 -> 163,577,856 B), read per token 14.72 GB (derived).
+- [ ] **Step 1: failing test** printing and asserting spec 23 §2's derived numbers from the formulas: per-layer int4 (qweight + scales) 257,081,344 B ± the layout's padding (assert the formula, print the value), 52 layers 13.368 GB, int8 head 1,345,639,680 B, embed 2,689,662,976 B, KV 13,312 B a position, ring 4,194,304 B a sliding layer (39 -> 163,577,856 B), read per token 14.72 GB (derived).
 - [ ] **Step 2: implement** on `kol_layout0_bytes` / `kol_layout1_bytes`' formulas (shared, not copied: if they are Kolibri-local, move them to a common header with a byte-identical check - Kolibri's own test must stay green), PASS. **Commit** `loader: muse_layout.h - every Muse-Glimmer allocation's bytes (spec 23b)`.
 
 ### Task 3: the loader (host half, then the device half)
