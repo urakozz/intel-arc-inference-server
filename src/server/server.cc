@@ -156,10 +156,12 @@ Server::Outcome Server::generate(const Request& r,
   try {
     if (!r.chat) {
       prompt = r.prompt;
-    } else if (opts_.chat_format.template_kwargs()) {   // spec 18d (K2-Horizon), spec 20e (Kolibri-1)
-      check_template_kwargs(opts_.chat_format, r.template_kwargs);
+    } else if (opts_.chat_format.template_kwargs()) {   // spec 18d (K2-Horizon), 20e (Kolibri-1), 23e (Muse)
+      // Spec 23e: Muse-Glimmer maps the top-level reasoning_effort onto reasoning_strength (decision 3).
+      const nlohmann::json kwargs = request_template_kwargs(opts_.chat_format, r.template_kwargs, r.reasoning_effort);
+      check_template_kwargs(opts_.chat_format, kwargs);
       prompt = deps_.tmpl.render_with_kwargs(template_messages(opts_.chat_format, r.messages), r.tools,
-                                             r.enable_thinking, r.template_kwargs);
+                                             r.enable_thinking, kwargs);
     } else {
       prompt = deps_.tmpl.render(r.messages, r.tools, r.enable_thinking);
     }
@@ -422,6 +424,9 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
   Request parsed;
   try {
     parsed = parse_request(request.body, chat, opts_.sampling_defaults.value_or(Sampling{}));
+    // Spec 23e: generation_config.json's stop_strings beside the request's own stop.
+    for (const std::string& s : opts_.stop_strings)
+      if (!s.empty() && std::find(parsed.stop.begin(), parsed.stop.end(), s) == parsed.stop.end()) parsed.stop.push_back(s);
   } catch (const BadRequest& error) {
     response.status = 400;
     response.set_content(error_body(error.what(), "invalid_request_error"), "application/json");

@@ -4,6 +4,7 @@
 
 #include "server/toolcall_k2.h"
 #include "server/toolcall_kolibri.h"
+#include "server/toolcall_muse.h"
 
 namespace server {
 namespace {
@@ -29,6 +30,7 @@ K2CallFormat k2_call_format(const json& kwargs) {
 ChatFormat ChatFormat::for_model_type(const std::string& model_type) {
   if (model_type == "k2_horizon") return k2_horizon();
   if (model_type == "kolibri1") return kolibri();
+  if (model_type == "muse_glimmer" || model_type == "muse_glimmer_text") return muse();
   return ChatFormat{};
 }
 
@@ -36,6 +38,7 @@ const char* ChatFormat::name() const {
   switch (kind) {
     case Kind::K2Horizon: return "k2_horizon";
     case Kind::Kolibri: return "kolibri1";
+    case Kind::Muse: return "muse";
     default: return "qwen";
   }
 }
@@ -49,7 +52,7 @@ json template_messages(const ChatFormat& format, const json& messages) {
     bool first = true;
     for (const json& part : m.at("content")) {
       if (!part.is_object() || !part.contains("text") || !part.at("text").is_string()) continue;
-      if (!first) text += "\n";
+      if (!first) text += format.content_join();
       text += part.at("text").get<std::string>();
       first = false;
     }
@@ -58,7 +61,29 @@ json template_messages(const ChatFormat& format, const json& messages) {
   return out;
 }
 
+static bool muse_strength(const json& v) {
+  return v.is_string() && (v == "low" || v == "medium" || v == "high" || v == "xhigh");
+}
+
 void check_template_kwargs(const ChatFormat& format, const json& kwargs) {
+  if (format.kind == ChatFormat::Kind::Muse && kwargs.is_object()) {
+    // Spec 23 decision 3: the card's four strengths (the template takes any truthy string; nothing else is trained).
+    if (kwargs.contains("reasoning_strength") && !muse_strength(kwargs.at("reasoning_strength")))
+      throw std::invalid_argument("chat_template_kwargs.reasoning_strength must be one of low, medium, high, xhigh");
+    for (const char* key : {"current_date", "knowledge_cutoff"})
+      if (kwargs.contains(key) && !kwargs.at(key).is_string())
+        throw std::invalid_argument(std::string("chat_template_kwargs.") + key + " must be a string");
+    if (kwargs.contains("tool_namespace_descriptions")) {
+      const json& d = kwargs.at("tool_namespace_descriptions");
+      bool ok = d.is_object();
+      if (ok)
+        for (const auto& item : d.items()) ok = ok && item.value().is_string();
+      if (!ok)
+        throw std::invalid_argument("chat_template_kwargs.tool_namespace_descriptions must be an object of strings "
+                                    "(namespace -> description)");
+    }
+    return;
+  }
   if (format.kind == ChatFormat::Kind::Kolibri && kwargs.is_object()) {
     // The template's seven efforts (none disables thinking; minimal = low; xhigh, max = high).
     if (kwargs.contains("reasoning_effort")) {
@@ -82,6 +107,16 @@ void check_template_kwargs(const ChatFormat& format, const json& kwargs) {
   }
 }
 
+json request_template_kwargs(const ChatFormat& format, const json& kwargs, const json& reasoning_effort) {
+  if (format.kind != ChatFormat::Kind::Muse || reasoning_effort.is_null()) return kwargs;
+  if (!muse_strength(reasoning_effort))
+    throw std::invalid_argument("reasoning_effort must be one of low, medium, high, xhigh (Muse-Glimmer's reasoning "
+                                "strengths, spec 23 decision 3)");
+  json out = kwargs.is_object() ? kwargs : json::object();
+  if (!out.contains("reasoning_strength")) out["reasoning_strength"] = reasoning_effort;
+  return out;
+}
+
 std::unique_ptr<OutputParser> make_output_parser(const ChatFormat& format, const std::string& prompt,
                                                  const json& kwargs, const json& tools) {
   if (format.kind == ChatFormat::Kind::K2Horizon) {
@@ -94,6 +129,8 @@ std::unique_ptr<OutputParser> make_output_parser(const ChatFormat& format, const
   }
   // Kolibri: the model opens its reasoning itself; the parser reads it from the output.
   if (format.kind == ChatFormat::Kind::Kolibri) return std::make_unique<KolibriOutputStream>(tools);
+  // Muse: the model writes each message's recipient; the parser reads the channels (spec 23e).
+  if (format.kind == ChatFormat::Kind::Muse) return std::make_unique<MuseOutputStream>(tools);
   // Qwen: with thinking on, the prompt ends in "<think>\n" and the output opens with reasoning.
   return std::make_unique<OutputStream>(ends_with(prompt, "<think>\n"), tools);
 }
