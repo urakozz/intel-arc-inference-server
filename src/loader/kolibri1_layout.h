@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "loader/int4_layout.h"
 #include "model/kolibri1.h"
 
 // Spec 20c: Kolibri-1 on the card as device-free arithmetic - the ONE home of every weight
@@ -32,14 +33,17 @@
 // 21,098,071,040 B (derived; kolibri1_repack_test pins it).
 namespace loader {
 
-inline constexpr uint32_t kKolTileU32 = 136;   // layout 1: 128 nibble + 8 scale u32 per tile
+inline constexpr uint32_t kKolTileU32 = kInt4TileU32;   // layout 1: 128 nibble + 8 scale u32 per tile
 
-inline constexpr size_t kol_layout1_bytes(uint32_t K, uint32_t N) {
-  return size_t(N / 16) * (K / 64) * kKolTileU32 * 4;
-}
-inline constexpr size_t kol_layout0_bytes(uint32_t K, uint32_t N) {
-  return size_t(K / 8) * N * 4 + size_t(K / 64) * N * 2;
-}
+// The shared formulas (loader/int4_layout.h, spec 23b), byte-identical to the ones this header held.
+inline constexpr size_t kol_layout1_bytes(uint32_t K, uint32_t N) { return int4_layout1_bytes(K, N); }
+inline constexpr size_t kol_layout0_bytes(uint32_t K, uint32_t N) { return int4_layout0_bytes(K, N); }
+static_assert(kol_layout1_bytes(2560, 1024) == size_t(1024 / 16) * (2560 / 64) * 136 * 4 &&
+                  kol_layout1_bytes(512, 2560) == size_t(2560 / 16) * (512 / 64) * 136 * 4,
+              "layout 1: the shared formula is the one Kolibri had");
+static_assert(kol_layout0_bytes(2560, 7168) == size_t(2560 / 8) * 7168 * 4 + size_t(2560 / 64) * 7168 * 2 &&
+                  kol_layout0_bytes(6144, 2560) == size_t(6144 / 8) * 2560 * 4 + size_t(6144 / 64) * 2560 * 2,
+              "layout 0: the shared formula is the one Kolibri had");
 
 struct KolLayerBytes {
   size_t qkv = 0, oproj = 0, router = 0, bias = 0, norms = 0, gate_up = 0, down = 0, shared_gate_up = 0,
