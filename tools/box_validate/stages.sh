@@ -2819,7 +2819,7 @@ st_r48_host() {
   grab_all tests '^ok |^  |FAIL|SKIP|passed' 120
   finish
 }
-stage r48.ppl      48 optin   cpu  lfm2moe_bf16,oracle_image    -  "perplexity on prose / code / agentic (finite, < 20 ESTIMATED ceiling; recorded)"
+stage r48.ppl      48 optin   cpu  lfm2moe_bf16,oracle_image    -  "perplexity on prose / code / agentic (finite; code < 10 - the Mac measured 2.54; prose / agentic recorded: prompt-side text scores badly on this RL-tuned model)"
 st_r48_ppl() {
   chk "tools/box_validate/lfm2moe_oracle.sh $DATA ppl" "the reference's perplexity on the bf16 original"
   grab_all ppl '^ppl |^wall|not sane|not finite' 8

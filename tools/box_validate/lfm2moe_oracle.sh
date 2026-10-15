@@ -9,7 +9,10 @@
 #   tests         the Python tests on the tiny models: test_lfm2moe_ref.py, test_lfm2moe_make_tiny.py, the toolcall
 #                 tests (test_score.py, test_make_set.py, test_oracle_batched.py test_lfm2moe) (r48.host)
 #   ppl           perplexity of the bf16 original on prose.txt, code.txt (BOS first) and the agentic transcript
-#                 (lfm2moe_agentic.ids): finite, prose below an ESTIMATED sanity ceiling of 20
+#                 (lfm2moe_agentic.ids): finite, CODE below a sanity ceiling of 10 (measured 2.54 on the Mac); prose and the
+#                 agentic transcript recorded only - this RL-tuned chat model scores prompt-side text badly (Mac,
+#                 2026-10-15: prose 53.2 over 45 tokens, agentic 290; by role in the agentic golden set: assistant
+#                 turns 6.9, system 4190, tool results 88 - spec 24 "24a as built")
 #                 -> <data>/oracle-out-lfm2moe/ppl.log
 #   hfcheck       transformers' own model against the port (the restated ops chained) on real weights, --layers 6,
 #                 2048 ids of lfm2moe_4k + 4 cached steps: BITWISE or exit 1 -> <data>/oracle-out-lfm2moe/hfcheck.log
@@ -177,7 +180,7 @@ case "$mode" in
       mv -f oracle-out-lfm2moe.ppl.log "$data/oracle-out-lfm2moe/ppl.log"
       cat "$data/oracle-out-lfm2moe/ppl.log"
       awk '/^ppl / { n++; if ($3 ~ /nan|inf/ || /NOT SANE/) { print "lfm2moe_oracle: " $2 " perplexity " $3 " is not finite"; bad = 1 } }
-           /^ppl prose:/ { if ($3 + 0 > 20) { print "lfm2moe_oracle: prose perplexity " $3 " is not sane (ceiling 20, ESTIMATED)"; bad = 1 } }
+           /^ppl code:/ { if ($3 + 0 > 10) { print "lfm2moe_oracle: code perplexity " $3 " is not sane (ceiling 10; the Mac measured 2.54)"; bad = 1 } }
            END { if (n < 3) { print "lfm2moe_oracle: " n + 0 " of 3 perplexity lines"; bad = 1 }; exit bad }' \
         "$data/oracle-out-lfm2moe/ppl.log" || rc=1
     fi
