@@ -506,6 +506,8 @@ export replaces RTN in every real-weight gate when it exists (each row has an `o
 
 ## 10. Decisions
 
+**Ruled (operator, 2026-10-15): all decisions below as recommended.** Decision 9: the operator confirms the LFM Open License v1.0 threshold is met (well under USD 10 M annual revenue), so our quant is published under LFM 1.0 with its notices.
+
 1. **(decide) Repetition penalty.** The engine has none. Proposed: implement HF's rule (§2.8) in the host sampler for
    **sampled** requests - over the distinct ids of the session's prompt and output (a 128000-bit set per request, applied
    to the host logits row before `filter_probs`), from generation_config's 1.05 as the default and a request's
