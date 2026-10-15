@@ -3455,4 +3455,18 @@ target_include_directories(muse_layout_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CM
 target_link_libraries(muse_layout_test PRIVATE b70_muse_model b70_kolibri_model)
 add_test(NAME muse_layout_test COMMAND muse_layout_test)
 set_tests_properties(muse_layout_test PROPERTIES LABELS muse)
+# Task 3: the loader's host half - fixtures written by the test (the real widths at one layer; small-width
+# refusals), and 23a's tiny int4 variant / make_synth.py's checkpoint when present (MUSE_TINY_INT4 / MUSE_SYNTH_DIR;
+# their absence skips that part only). Host only.
+set(B70_MUSE_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-muse-synth" CACHE PATH
+  "Spec 23b's synthetic checkpoints: <dir>/ckpt4 (box: r43.synth) or ckpt2 (the Mac)")
+set(B70_MUSE_TINY_INT4 "${CMAKE_SOURCE_DIR}/oracle-out-muse-tiny-int4" CACHE PATH
+  "23a's tiny int4 variant (tools/oracle/muse_make_tiny.py --variant int4)")
+add_executable(muse_repack_test loader/muse_repack_test.cc)
+target_include_directories(muse_repack_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+  ${CMAKE_SOURCE_DIR}/tests/loader)
+target_link_libraries(muse_repack_test PRIVATE b70_muse_loader)
+add_test(NAME muse_repack_test COMMAND muse_repack_test)
+set_tests_properties(muse_repack_test PROPERTIES LABELS muse TIMEOUT 900
+  ENVIRONMENT "MUSE_TINY_INT4=${B70_MUSE_TINY_INT4};MUSE_SYNTH_DIR=${B70_MUSE_SYNTH_DIR}")
 # ==== Spec 23b: Muse-Glimmer descriptor and loader ==== (end) ====
