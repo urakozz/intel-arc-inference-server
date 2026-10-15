@@ -22,7 +22,8 @@ transformers' attention module) into a whole forward - hfcheck holds it bitwise 
     lfm2moe_ref.py hfcheck <snapshot> --layers N [--prompt <ids>] [--n 2048] [--gen 4]
     lfm2moe_ref.py facts <snapshot>
 
-`run`'s golden layout (rows are absolute positions; `act_row0` / `logits_row0` in the metadata):
+`run`'s golden layout (rows are absolute positions; `h_row0` / `act_row0` / `logits_row0` in the metadata; the
+activations and conv states are in the model's dtype - bf16 in every golden run, fp32 only in the tests' fp32 twins):
     h.L<l>          bf16 [A][H]     the residual after layer l: every row for T <= 4096, else the last --act-tail
                                     (256) prompt rows; plus every generated row
     mixer.L<l>      bf16 [A'][H]    the conv / attention output (before the residual add), last --act-tail rows +
@@ -531,7 +532,7 @@ class Recorder:
             frm = self.h_from if which == "h" else self.act_from
             skip = max(0, frm - self.base.get(self.key, 0))
             if skip < t.shape[0]:
-                self._put(name, t[skip:].to(torch.bfloat16).clone())
+                self._put(name, t[skip:].clone())
         return fn
 
     def _router(self, i):
@@ -556,7 +557,7 @@ def conv_states(cache, cfg) -> dict[str, torch.Tensor]:
     for i, t in enumerate(cfg.layer_types[: cfg.num_hidden_layers]):
         if t == "conv":
             st = cache.layers[i].conv_states[0]                       # [1][H][3]
-            out[f"conv.L{i}"] = st[0, :, -2:].t().contiguous().to(torch.bfloat16)
+            out[f"conv.L{i}"] = st[0, :, -2:].t().contiguous()
     return out
 
 
