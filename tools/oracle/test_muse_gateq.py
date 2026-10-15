@@ -90,6 +90,22 @@ def test_kl_int4_vs_untied():
     print(f"  int4 vs untied: KL mean {a['kl_mean']:.4g} p99 {a['kl_p99']:.4g}, top-1 {a['top1']:.3f}")
 
 
+def test_kl_refuses_stale_rows():
+    """The cached bf16 rows record what they were computed over (sha256 of prompt + continuation): a continuation
+    regenerated with the same length is refused, not silently compared against stale rows (final review)."""
+    run_kl(T.variant("int4"), T.variant("untied"), "stale")
+    d = os.path.join(T.TMP, "gq", "run-stale")
+    p = os.path.join(d, "a.bf16.ids")
+    ids = [int(x) for x in open(p).read().split()]
+    open(p, "w").write(" ".join(map(str, [(x + 1) % 200000 for x in ids])) + "\n")
+    try:
+        run_kl(T.variant("int4"), T.variant("untied"), "stale")
+        raise AssertionError("stale cached rows were used")
+    except SystemExit as e:
+        assert "stale" in str(e) or "computed over" in str(e), e
+    print("  a continuation changed under the cache: refused")
+
+
 CALL = ('<|start|>assistant to={n}<|message|><atem:function_calls>\n<atem:invoke name="{n}">\n'
         '<atem:parameter name="filePath">{p}</atem:parameter>\n</atem:invoke>\n</atem:function_calls><|eom|>')
 
@@ -167,7 +183,22 @@ def test_oracle_generate_muse():
     print("  muse runner: sequential = muse_ref's model step by step; layer-major batched (2) = sequential")
 
 
-TESTS = [test_kl_identical_is_zero, test_kl_int4_vs_untied, test_verdict_bars, test_oracle_generate_muse]
+def test_oracle_generate_tags_muse_by_form():
+    """oracle_generate.py on a muse_glimmer checkpoint tags its outputs by the checkpoint's form even without --model
+    muse (an int4 run written as <name>.bf16.* would make gate Q compare the int4 run with itself)."""
+    d = os.path.join(T.TMP, "og")
+    s, out = os.path.join(d, "set"), os.path.join(d, "out")
+    write_set(s, [("a", T.rand_ids(20, seed=51))])
+    r = subprocess.run([sys.executable, os.path.join(_HERE, "..", "toolcall", "oracle_generate.py"), T.variant("int4"),
+                        s, out, "--new-tokens", "2"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-1500:]
+    got = sorted(os.listdir(out))
+    assert "a.gptq.ids" in got and "a.gptq.txt" in got and not any(".bf16." in g for g in got), got
+    print("  without --model muse: a.gptq.{ids,txt}")
+
+
+TESTS = [test_kl_identical_is_zero, test_kl_int4_vs_untied, test_kl_refuses_stale_rows, test_verdict_bars,
+         test_oracle_generate_muse, test_oracle_generate_tags_muse_by_form]
 
 
 def main() -> None:
