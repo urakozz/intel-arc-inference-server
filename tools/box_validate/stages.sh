@@ -2821,7 +2821,7 @@ st_r42_host() {
   grab_all tests '^test_|^  |^ok|FAIL|SKIP|passed' 120
   finish
 }
-stage r42.facts 42 default cpu muse_gptq - "the facts on the int4 checkpoint: the FULL qzeros / g_idx scan (~210 MB), the 5.19.0 citations, the one-message render (one BOS), the names = expected_names - muse_oracle.sh facts"
+stage r42.facts 42 default cpu muse_gptq,oracle_image - "the facts on the int4 checkpoint: the FULL qzeros / g_idx scan (~210 MB), the 5.19.0 citations, the one-message render (one BOS), the names = expected_names - muse_oracle.sh facts"
 st_r42_facts() {
   chk "tools/box_validate/muse_oracle.sh $DATA facts" "muse_facts.py --scan-quant and muse_ref.py facts"
   grab_all facts 'FULL SCAN|citations hold|text names|BOS count|accepted' 12
