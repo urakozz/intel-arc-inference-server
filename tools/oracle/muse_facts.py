@@ -26,6 +26,9 @@ Sections (docs/probe-muse-glimmer-2026-10-15.md quotes every table):
            and what differs; response_template; generation_config; with transformers a one-message render
            (apply_chat_template(tokenize=True) ids, the BOS count) through the ORIGINAL's template
   drafter  the assistant's config and its header table (spec 23 §8.1)
+  --twin   <the other int4 snapshot>: the two Vishva007 repos (-AutoRound: auto_round:auto_gptq, no g_idx; -AutoRound-
+           GPTQ: gptq, g_idx) are one export - sampled tensors' bytes compared (sha256)
+<gptq snapshot> is either int4 spelling (g_idx is checked when shipped).
 No torch is needed except for `cites` / the render (transformers imports torch).
 """
 import os
@@ -382,14 +385,39 @@ def _i32(data: bytes):
     return a
 
 
-def check_quant_tensor(src: Snapshot, wm: dict, base: str) -> tuple[bool, bool, int]:
+def check_quant_tensor(src: Snapshot, wm: dict, base: str):
+    """(qzeros all 0x77777777, g_idx == i // 64 - None when the spelling ships no g_idx, bytes read)."""
     dtz, shz, z = src.tensor(base + ".qzeros", wm)
+    zero_ok = dtz == "I32" and all((v & 0xFFFFFFFF) == SYM_ZERO for v in _i32(z))
+    if base + ".g_idx" not in wm:
+        return zero_ok, None, len(z)
     dtg, shg, g = src.tensor(base + ".g_idx", wm)
-    zs = _i32(z)
-    gs = _i32(g)
-    zero_ok = dtz == "I32" and all((v & 0xFFFFFFFF) == SYM_ZERO for v in zs)
-    gidx_ok = dtg == "I32" and all(v == i // 64 for i, v in enumerate(gs))
+    gidx_ok = dtg == "I32" and all(v == i // 64 for i, v in enumerate(_i32(g)))
     return zero_ok, gidx_ok, len(z) + len(g)
+
+
+def sec_twin(a: Snapshot, b: Snapshot) -> None:
+    """The two Vishva007 int4 repos are one export in two spellings (auto_round:auto_gptq / gptq): sampled tensors'
+    bytes compared (local reads, else HTTP range) - sha256 per tensor."""
+    print(f"## twin: {a.repo}@{a.rev[:8]} vs {b.repo}@{b.rev[:8]}")
+    wa, wb = a.weight_map(), b.weight_map()
+    names = [f"model.language_model.layers.0.self_attn.k_proj{s}" for s in (".qweight", ".scales", ".qzeros")]
+    names += ["model.language_model.layers.30.self_attn.o_proj.scales", "model.language_model.layers.51.mlp.down_proj.qzeros",
+              "model.language_model.layers.30.post_feedforward_layernorm.weight", "model.language_model.norm.weight"]
+    same = 0
+    for n in names:
+        if n not in wa or n not in wb:
+            print(f"  {n}: absent in {'the first' if n not in wa else 'the second'}")
+            continue
+        da, sa, ba = a.tensor(n, wa)
+        db, sb, bb = b.tensor(n, wb)
+        ha, hb = hashlib.sha256(ba).hexdigest(), hashlib.sha256(bb).hexdigest()
+        same += ha == hb and da == db and sa == sb
+        print(f"  {n}: {da} {sa}, {len(ba):,} B - sha256 {ha[:12]} / {hb[:12]}: {'IDENTICAL' if ha == hb else 'DIFFER'}")
+    gi = sum(k.endswith(".g_idx") for k in wa), sum(k.endswith(".g_idx") for k in wb)
+    print(f"  {same} / {len(names)} sampled tensors byte-identical; g_idx tensors {gi[0]} / {gi[1]}; text names "
+          f"{sum(k.startswith('model.language_model.') or k == 'lm_head.weight' for k in wa)} / "
+          f"{sum(k.startswith('model.language_model.') or k == 'lm_head.weight' for k in wb)}")
 
 
 def sec_quant(gq: Snapshot, wm: dict, scan: bool) -> None:
@@ -402,32 +430,35 @@ def sec_quant(gq: Snapshot, wm: dict, scan: bool) -> None:
     acc = (qc.get("bits") == 4 and qc.get("group_size") in (64, 128) and qc.get("sym") is True
            and qc.get("desc_act") in (False, None) and qc.get("quant_method") in ("gptq", "auto-round")
            and not any(str(r).startswith("+:") for r in (qc.get("dynamic") or {}))
-           and "extra_config" not in qc and "packing_format" not in qc)
+           and "extra_config" not in qc and qc.get("packing_format") in (None, "auto_round:auto_gptq"))
     print(f"  loader::QuantConfig::parse's rule (src/loader/quant.h:21-60): bits 4, group 64|128, sym, desc_act false or "
-          f"absent, quant_method gptq|auto-round, no '+:' dynamic rule -> accepted: {acc} (dynamic "
+          f"absent, quant_method gptq|auto-round (packing auto_round:auto_gptq), no '+:' dynamic rule -> accepted: {acc} (dynamic "
           f"{'absent' if 'dynamic' not in qc else len(qc['dynamic'])}, extra_config "
           f"{'absent' if 'extra_config' not in qc else 'present'}, packing_format {qc.get('packing_format', 'absent')})")
     for layer, lin in SAMPLES:
         base = f"model.language_model.layers.{layer}.{lin}"
         zo, go, nb = check_quant_tensor(gq, wm, base)
         e = gq.entry(base + ".qzeros", wm)
-        print(f"  sample {base}: qzeros {e['shape']} all 0x77777777: {zo}; g_idx == i // 64: {go} ({nb:,} B read)")
+        gtxt = "not shipped (the auto_round spelling)" if go is None else go
+        print(f"  sample {base}: qzeros {e['shape']} all 0x77777777: {zo}; g_idx == i // 64: {gtxt} ({nb:,} B read)")
     if not scan:
         print("  full scan: not run (--scan-quant; the box's, plan 23a Task 6)")
         return
     bases = sorted({k[: -len(".qzeros")] for k in wm if k.endswith(".qzeros")})
-    zbad, gbad, total = [], [], 0
+    zbad, gbad, total, ng = [], [], 0, 0
     for i, b in enumerate(bases):
         zo, go, nb = check_quant_tensor(gq, wm, b)
         total += nb
+        ng += go is not None
         if not zo:
             zbad.append(b)
-        if not go:
+        if go is False:
             gbad.append(b)
         if (i + 1) % 52 == 0:
             print(f"    scanned {i + 1}/{len(bases)} ({total / 1e6:.0f} MB)", flush=True)
     print(f"  FULL SCAN: {len(bases)} linears, {total:,} B read: qzeros != 0x77777777 in {len(zbad)} {zbad[:4]}; "
-          f"g_idx != i // 64 in {len(gbad)} {gbad[:4]}" + ("  -> CLEAN" if not zbad and not gbad else "  -> NOT SYM g64"))
+          f"g_idx shipped for {ng}, != i // 64 in {len(gbad)} {gbad[:4]}"
+          + ("  -> CLEAN" if not zbad and not gbad else "  -> NOT SYM g64"))
 
 
 def sec_bytes(tc: dict, bfi: dict, gqi: dict) -> None:
@@ -556,6 +587,7 @@ def main(argv=None) -> None:
     ap.add_argument("--section", default="cites,config,tensors,quant,bytes,tokens,drafter")
     ap.add_argument("--cache", default="oracle-out-muse-facts")
     ap.add_argument("--no-render", action="store_true")
+    ap.add_argument("--twin", help="the other Vishva007 int4 spelling's snapshot: sampled tensors compared byte for byte")
     a = ap.parse_args(argv)
     secs = set(a.section.split(","))
     bf, gq = Snapshot(a.bf16, a.cache), Snapshot(a.gptq, a.cache)
@@ -575,6 +607,8 @@ def main(argv=None) -> None:
         sec_tokens(bf, gq, not a.no_render)
     if "drafter" in secs and a.assistant:
         sec_drafter(Snapshot(a.assistant, a.cache))
+    if a.twin:
+        sec_twin(gq, Snapshot(a.twin, a.cache))
     print(f"range bytes read: bf16 {bf.ranged:,}, gptq {gq.ranged:,}")
 
 

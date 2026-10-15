@@ -119,8 +119,9 @@ def kl_json(path, mean, top1):
 
 def test_verdict_bars():
     """verdict reads the A4 outputs (score.py's ATEM reader: parse failures, first-call agreement) and the KL json,
-    and prints PASS / GAP by spec 23 §3.3's bars (decision 5): candidate parse failures <= the reference's, agreement
-    >= 25 / 36, mean KL <= 0.02, top-1 >= 0.95."""
+    and prints each of spec 23 §3.3's bars (decision 5) - candidate parse failures <= the reference's, agreement
+    >= 25 / 36, mean KL <= 0.02, top-1 >= 0.95 - and WITHIN / OUTSIDE: a recorded measurement (the checkpoint is kept,
+    operator 2026-10-15), exit 0."""
     base = os.path.join(T.TMP, "verdict")
     cases = [("pass", (30, 6, 0, 0), (0.01, 0.97), True), ("agree", (24, 12, 0, 0), (0.01, 0.97), False),
              ("fail", (30, 6, 1, 0), (0.01, 0.97), False), ("failboth", (30, 6, 1, 1), (0.01, 0.97), True),
@@ -130,13 +131,14 @@ def test_verdict_bars():
         plant(d, *table)
         ok, lines = gq.verdict(d, kl_json(os.path.join(d, "kl.json"), *kl))
         assert ok == want, (name, lines)
-        assert lines[-1].startswith("gate Q: PASS" if want else "gate Q: GAP"), lines
+        assert lines[-1].startswith("gate Q: WITHIN" if want else "gate Q: OUTSIDE"), lines
     t = gq.a4_table(os.path.join(base, "fail"))
     assert t["n"] == 36 and t["agree"] == 30 and t["cand_fail"] == 1 and t["ref_fail"] == 0, t
     r = subprocess.run([sys.executable, os.path.join(_HERE, "muse_gateq.py"), "verdict", os.path.join(base, "kl"),
                         os.path.join(base, "kl", "kl.json")], capture_output=True, text=True)
-    assert r.returncode == 1 and "gate Q: GAP" in r.stdout, r.stdout + r.stderr
-    print("  bars: agreement 25 / 36, parse failures, mean KL 0.02, top-1 0.95 - PASS / GAP as planted; GAP exits 1")
+    assert r.returncode == 0 and "gate Q: OUTSIDE the proposed bars on Q-KL mean" in r.stdout, r.stdout + r.stderr
+    print("  bars: agreement 25 / 36, parse failures, mean KL 0.02, top-1 0.95 - within / outside as planted; a "
+          "recorded measurement (exit 0)")
 
 
 def test_oracle_generate_muse():

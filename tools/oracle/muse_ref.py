@@ -7,9 +7,10 @@ materialised; the text path never calls them), and LAYER-STREAMED (stream.py: `e
 `norm` and `lm_head` resident, each decoder layer materialised by a forward pre-hook and dropped after).
 Muse needs no new mechanism: dense SwiGLU, no experts, no PLE. Two checkpoint forms are read by name:
   "bf16"  the original's `<linear>.weight` (and the tiny's)
-  "gptq"  the GPTQ repo's `<linear>.{qweight, scales, qzeros, g_idx}` - dequantised on demand to
-          bf16(float(q - 8) x float(scale)) (stream.dequant_t, g64); every linear's qzeros must be 0x77777777 and
-          its g_idx i // 64 (checked the first time it is read)
+  "gptq"  the int4 checkpoint: `<linear>.{qweight, scales, qzeros[, g_idx]}` - either Vishva007 repo, the same
+          export in two spellings (-AutoRound: auto_round:auto_gptq, no g_idx; -AutoRound-GPTQ: gptq with g_idx) -
+          dequantised on demand to bf16(float(q - 8) x float(scale)) (stream.dequant_t, g64); every linear's qzeros
+          must be 0x77777777 and its g_idx, when shipped, i // 64 (checked the first time it is read)
 The forward is the module's own, eager attention (`attn_implementation="eager"`); the reference dtype is bf16
 (fp32 for the tests). A Recorder (forward hooks) keeps per layer the residual after the layer (`H.L<l>`), the
 attention and MLP outputs, the drafter taps (the OUTPUT of layers TAP_LAYERS, OC:112-131), and per row the raw
@@ -147,9 +148,12 @@ def full_config(snapshot: str, tc, raw: dict | None = None):
 
 def expected_names(tc, form: str) -> list[str]:
     """Every text-model tensor of a checkpoint in `form` - "gptq" (`qweight` / `scales` / `qzeros` / `g_idx` per
-    linear) or "bf16" (`.weight`) -; norms, embed_tokens, the final norm and lm_head (omitted when tied) in both."""
-    if form not in ("gptq", "bf16"):
+    linear: Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ), "autoround" (the same without `g_idx`: the same export's
+    auto_round:auto_gptq spelling, Vishva007/Muse-Glimmer-30B-W4A16-AutoRound) or "bf16" (`.weight`) -; norms,
+    embed_tokens, the final norm and lm_head (omitted when tied) in all."""
+    if form not in ("gptq", "autoround", "bf16"):
         raise ValueError(form)
+    sfx = {"gptq": GPTQ_SUFFIXES, "autoround": GPTQ_SUFFIXES[:3], "bf16": (".weight",)}[form]
     names = [LM + "embed_tokens.weight", LM + "norm.weight"]
     if not tc.tie_word_embeddings:
         names.append("lm_head.weight")
@@ -157,7 +161,7 @@ def expected_names(tc, form: str) -> list[str]:
         b = f"{LM}layers.{i}."
         names += [b + n + ".weight" for n in NORMS]
         for lin in LINEARS:
-            names += [b + lin + s for s in GPTQ_SUFFIXES] if form == "gptq" else [b + lin + ".weight"]
+            names += [b + lin + s for s in sfx]
     return sorted(names)
 
 
@@ -454,7 +458,9 @@ def layer_major(model, pf, rec: "Recorder | None" = None):
             rec.base[key] = past
 
     @torch.no_grad()
-    def step_many(items, keys=None):
+    def step_many(items, keys=None, last_only: bool = False):
+        """last_only: the head over each item's LAST row only - bitwise what model(..., logits_to_keep=1) computes
+        (a 1-row lm_head; a T-row one may accumulate differently), oracle_generate.py's greedy step."""
         import transformers
         if transformers.__version__ != PINNED_TRANSFORMERS:
             raise RuntimeError(f"layer_major restates transformers {PINNED_TRANSFORMERS}'s MuseGlimmerTextModel."
@@ -479,7 +485,7 @@ def layer_major(model, pf, rec: "Recorder | None" = None):
         out = []
         for j, p in enumerate(ps):
             select(keys[j], p["past"])
-            raw = model.lm_head(tm.norm(p["h"]))[0]
+            raw = model.lm_head(tm.norm(p["h"][:, -1:] if last_only else p["h"]))[0]
             out.append((raw, softcap(raw, tcfg.output_multiplier, tcfg.final_logit_softcapping)))
             p.clear()
         return out
@@ -740,7 +746,7 @@ def cmd_facts(a) -> None:
     if os.path.exists(idx):
         wm = json.load(open(idx, encoding="utf-8"))["weight_map"]
         names = {k for k in wm if is_text(k)}
-        hit = [f for f in ("gptq", "bf16") if set(expected_names(tc, f)) == names]
+        hit = [f for f in ("gptq", "autoround", "bf16") if set(expected_names(tc, f)) == names]
         print(f"{a.snapshot}: {len(names)} text names " + (f"== expected_names(tc, {hit[0]!r})" if hit else
               "match NO form") + f"; vision_names {len(vision_names(wm))}")
         if not hit:
