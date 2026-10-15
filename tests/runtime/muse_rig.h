@@ -25,7 +25,7 @@ struct Rig {
 // The snapshot `arg` resolves to when it is a Muse-Glimmer checkpoint, else "" (the caller SKIPs, 77).
 inline std::string muse_snapshot(const std::string& arg) {
   try {
-    const std::string s = loader::resolve_snapshot(arg);
+    const std::string s = loader::resolve_muse_snapshot(arg);   // either Vishva007 spelling
     return loader::is_muse_checkpoint(s) ? s : "";
   } catch (const std::exception&) {
     return "";

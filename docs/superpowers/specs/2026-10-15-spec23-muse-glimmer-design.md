@@ -652,3 +652,58 @@ read-backs, two cards). No kernel added or changed (`kernel_cmdlines` +0 / -0 / 
   (layout 0's two allocations) rather than one byte vector. (3) `plan_muse` takes an optional `split` (`--pp 2` with a
   split given). (4) The drafter's reservation sits on the last device (the head it reads). (5) `muse_oracle.sh` has
   a second new mode, `synth-tests`. (6) Task 5 was built before Task 3's device half (the load calls `require_fits`).
+
+## 14. 23c as built (2026-10-15; the Mac - no Muse binary compiled, nothing on a card)
+
+Branch `spec23c-muse-decode` (plan 23c); box queue row 44 holds what the Mac could not run (every ocloc build, MG2 on the
+card, MG3 / MG4 on decode, two cards, speed). MG0 on the Mac: kernel_cmdlines **+19 / -0 / ~0** (no existing `.cl` edited).
+
+- **The host twin** `tests/kernels/muse_ref.h` (`museref`) is **bitwise** transformers 5.19.0's own modules at the REAL
+  widths (`tools/oracle/muse_fixture.py` runs `MuseGlimmerTextNormedEmbedding`, the centered / weight-less / plain-w
+  norms, the decoder layer's post norm + add, the attention's `qk_norm` x `qk_scale_factor`, the rotary module +
+  `apply_rotary_pos_emb`, `eager_attention_forward`, the gate's and the MLP's lines in the oracle image; 508 KB of
+  fixture): every chain 0 values differ, the fine rows included; eager attention's scores, probabilities AND outputs 0
+  differ at 5 / 2047 / 2048 / 4097 sliding and 3000 full; q / k prep RoPE'd at 0, 1, 2047, 2048, 4096, 9000, 100000,
+  131071. The host RoPE table (`runtime::muse::rope_table`, fp32 `pow`, double `cos` / `sin` rounded to bf16 - Kolibri's
+  rule at theta 5e5) equals the rotary module's bf16 rows bit for bit at those positions. Review Focus 1 / 2 / 5 are
+  tests: Kolibri's two-rounding norm and a plain-w norm differ from torch; a one-rounding q x 3.87 differs; a NoPE row
+  is position-free. The fp32 softcap is within 2 bf16 ulps of the four roundings (26 / 64 values move one or two).
+- **Eager against fp64 is 0.99994**, not 0.99999 (2048+ keys: the bf16 chain rounds scores and probabilities); the
+  0.99999 bar is flash's. Flash's own block / wave / merge arithmetic (`museref::attention_flash_sim`, mg_attn's
+  structure on the host) is within fp64 cosine 0.99999 at 5 .. 9000 sliding and 3000 / 20000 full (worst 0.9999945),
+  and the query at 9000 equals the one at 4904 bitwise (the same ring rows: the plan's "808" was Kolibri's 513-key
+  arithmetic; at a 2048-key window the pair is 9000 / 4904).
+- **The kernels** (`src/kernels/muse/`, `kernels::muse`): `mg_prep.cl` (`mg_embed`, `mg_norm` + `mg_final_norm` in one
+  binary, `mg_post_add`, `mg_attn_prep`, `mg_silu_mul`), `mg_attn.cl` (a COPY of `kol_attn.cl`: GQA 16, TGT 64 - a
+  2048-key window is 34 absolute 64-key blocks, more than the project's TGT 32 -, the gate fused into the reduce, M <= 16
+  as a define; `kol_attn.cl` was not reused: M <= 4 and no gate), `mg_attn_eager.cl` (the reference's chain and the gate
+  in ONE launch). Σ² in 26 chunks of 256 at hidden 6656. `prep_silu_mul` was not reused (Qwen's interleave16 and plain
+  `exp`; 23b's gate || up is concatenated). The gate is stored as `bf16(sigmoid(g))` by `mg_attn_prep` (the reference
+  rounds the sigmoid before the product). `mg_embed` maps the image / video placeholders (200092 / 200091) to row 0, as
+  M:1010-1013 do. The four GEMVs keep 23b's PROVISIONAL S2 / S4 / S8 / S4 L0 with Qwen3.8's nearest cells' `GEMV_*`
+  defines (new `add_gemv_variant` rows); the 957 subnormal f16 scales need nothing (denormals are never flushed).
+- **The Mac's GPU** (UHD 630, `muse_run`, indicative, emulated sub-groups): every `mg_prep` kernel and `mg_attn_eager`
+  (sliding 5 / 2046 / 2047 / 2048 / 4095 / 4096 / 4097 / 4904 / 9000, full 3000; 9000 == 4904) **exact** against the
+  twin - no value moved even with Apple's 1 / sqrt. `mg_attn.cl` cannot run there (shuffles, reductions, 2D reads).
+- **The engine** (`runtime::muse`): 14 launches a layer (13 eager), **733 a token at 52 layers (681 eager; +2 with the
+  peer hand-off)**, asserted at capture. The decode scratch is **70,374,528 B at 131072** (+16,777,216 B eager's score
+  row), 67.1 MB of it the RoPE table (23b's plan carried no RoPE term: it is in `MuseReserve::decode_scratch` now). One
+  card at 131072 with it reserved still fits (`muse_plan_test`). Empty KV / ring groups are not allocated, so the
+  allocation equals the planner's bytes exactly. The engine plans at 131072 while `--max-len` is auto, then re-plans at
+  the length chosen.
+- **The CLI**: `b70-decode` dispatches `muse_glimmer` before the Qwen rules (either Vishva007 spelling resolves); the
+  int8 head is Muse's default; refused before the device by name: `--prefill*` (23d), `--mtp`, `--spec` (23f; now
+  parsed by b70-decode, still an unknown option elsewhere), `--kv-cache int8` (decision 8), `--max-len` above 131072
+  (decision 6) or off the 256 grid, `--profile`, `--device` with `--pp 2`. `b70-serve` refuses the model naming 23e.
+- **The synthetic golden mode** (`muse_oracle.sh synth`, the checkpoint mounted as `ORACLE_SNAP`) ran on the Mac's
+  2-layer synthetic: `muse_short_prose` in 50 s, cap_tie 1 / 74 rows, raw top-1 - top-2 gap **==0 in 5 rows, median
+  0.17** - random weights give SMALL margins: MG3 on the synthetic leans on the undetermined-row rule, and the int8
+  head (spec 9) may fail determined rows there that the bf16 head passes (read r44.golden's two arms together).
+  `muse_oracle.sh real-layers N` adds the truncated reference the partial forward's head is graded against.
+- **Departures from the plan**: the fixture is at the real widths (not a hidden-256 tiny); eager-vs-fp64's bar is 0.9999
+  and the outputs' bar 1 ulp (measured 0); no `tests/kernels/CMakeLists.txt` or `tools/mac/clrun/CMakeLists.txt` exists
+  (tests in `tests/CMakeLists.txt`, `muse_run` in `mac_check.sh`'s loop); a card test `muse_kernels_test` (MG2) was
+  added for r44.k1; the speed arms are stages (`r44.speed`, `r44.speed_long`), not a `bench_decode.sh` arm; there is no
+  `gpu` ctest label (card tests are `muse` / `checkpoint;golden;muse`); `r44.reject` holds the GPU lock (Kolibri's
+  r24.reject: a refusal that regressed would open the device); the two-card path was built with the engine (Task 4),
+  Task 5 adds its tests; the bench prompt is 23a's `muse_short_prose.ids`.

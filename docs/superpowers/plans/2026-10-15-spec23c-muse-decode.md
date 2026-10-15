@@ -1,6 +1,6 @@
 # Spec 23c - Muse-Glimmer-30B decode: kernels, the captured list, one card then two
 
-**Status (2026-10-15): plan, not started. Box queue row 44.**
+**Status (2026-10-15): built on the Mac (branch `spec23c-muse-decode`): Tasks 1-8 done - the twin bitwise transformers 5.19.0 at the real widths, every `mg_prep` kernel and `mg_attn_eager` exact on the Mac's GPU (indicative), the engine, the CLI and the two-card path written and syntax-checked; no Muse binary compiled, nothing on a card: box queue row 44. As built: spec 23 §14.**
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking.
 >
@@ -66,8 +66,8 @@ void softcap_row(const float* z, uint32_t V, float* out);                  // fp
 ```
 `muse_fixture.py` writes `muse_fixture.h`: on a 2-layer `l8`-shape tiny at real head geometry where it matters (32 q / 2 kv x 128 for q / k prep and attention; hidden 256 elsewhere), torch's own module outputs for each op at chosen inputs, positions 0, 1, 2047, 2048, 4096, 9000, 100000, 131071, and an RoPE table excerpt.
 
-- [ ] **Step 1: the failing test** `muse_ref_test`: every `museref` op bitwise against the fixture's torch output (embed norm, centered norm at eps 1e-5 and 1e-8, final norm, post_add, qk_prep sliding and NoPE, silu_mul, the gate product, eager attention at 5 / 2047 / 2048 / 4097 sliding and 3000 full); `attention_fp64` within cosine 0.99999 of eager; Review Focus 1 (a Kolibri-form norm differs on the fixture), 2, 5.
-- [ ] **Step 2: run, FAIL; implement; PASS.** Commit `tests: the Muse-Glimmer decode twin, bitwise against transformers 5.19.0 (spec 23c)`.
+- [x] **Step 1: the failing test** `muse_ref_test`: every `museref` op bitwise against the fixture's torch output (embed norm, centered norm at eps 1e-5 and 1e-8, final norm, post_add, qk_prep sliding and NoPE, silu_mul, the gate product, eager attention at 5 / 2047 / 2048 / 4097 sliding and 3000 full); `attention_fp64` within cosine 0.99999 of eager; Review Focus 1 (a Kolibri-form norm differs on the fixture), 2, 5.
+- [x] **Step 2: run, FAIL; implement; PASS.** Commit `tests: the Muse-Glimmer decode twin, bitwise against transformers 5.19.0 (spec 23c)`.
 
 ### Task 2: `mg_prep.cl` (embed, norms, sandwich, q / k prep)
 
@@ -85,8 +85,8 @@ void softcap_row(const float* z, uint32_t V, float* out);                  // fp
 - `kernels::muse::*_variant(...)` name builders and the arg-index constants for the capture.
 - Shared at Muse's shapes (new CMake lines only): `prep_res_fold` `_Z` at K 6656 (the sub-block's row and Σ², Kolibri's use), `prep_silu_mul` at I 19968 **only if its build is eps-free and its chain equals `museref::silu_mul`** (else `mg_silu_mul` in `mg_prep.cl`), `gemv.cl` int4 at {K 6656, N 8704}, {4096, 6656}, {6656, 39936}, {19968, 6656} with Qwen3.8's {S, layout} picks for the nearest shapes (PROVISIONAL: Task 7 sweeps), `gemv_i8w.cl` / `gemv_bf16.cl` at {6656, 202048}, `embed_gather.cl` if `mg_embed` reuses it, `argmax.cl` at N 202048.
 
-- [ ] **Step 1: failing tests:** `muse_variant_names_test` (every name the capture binds is built by the block; nothing built is unbound); `muse_run` (Mac GPU, indicative) runs each `mg_prep` kernel at M = 1 on random inputs against `museref` - exact except where Apple's `sqrt` / `pow` move an ulp (counted, bounded at 4 fp32 ulps of rstd as Kolibri's run).
-- [ ] **Step 2: implement**; Level Zero syntax (`tools/mac_check.sh --quick`'s l0 section) and OpenCL syntax of every variant; `tools/kernel_cmdlines` additions only. Commit `kernels: mg_prep.cl - Muse-Glimmer's embed, centered norms, sandwich and q / k prep (spec 23c)`.
+- [x] **Step 1: failing tests:** `muse_variant_names_test` (every name the capture binds is built by the block; nothing built is unbound); `muse_run` (Mac GPU, indicative) runs each `mg_prep` kernel at M = 1 on random inputs against `museref` - exact except where Apple's `sqrt` / `pow` move an ulp (counted, bounded at 4 fp32 ulps of rstd as Kolibri's run).
+- [x] **Step 2: implement**; Level Zero syntax (`tools/mac_check.sh --quick`'s l0 section) and OpenCL syntax of every variant; `tools/kernel_cmdlines` additions only. Commit `kernels: mg_prep.cl - Muse-Glimmer's embed, centered norms, sandwich and q / k prep (spec 23c)`.
 
 ### Task 3: attention (`mg_attn.cl`, `mg_attn_eager.cl`)
 
@@ -98,8 +98,8 @@ void softcap_row(const float* z, uint32_t V, float* out);                  // fp
 - `mg_attn_decode(ctrl, attn_q, kv_k, kv_v, attn_part)` grid (KV_HEADS, TGT) and `mg_attn_reduce(ctrl, attn_part, gate, attn_out)` grid (Q_HEADS, M): `kol_attn.cl`'s v2 structure (spec 20 §11) at `-DQ_HEADS=32 -DKV_HEADS=2 -DWINDOW=2048 -DRING=4096` (sliding) or full (`-DFULL`, no window, no ring), **M as a define 1..16** (only M = 1 built here; 23f adds 2..16), the reduce writing `rne(rne(acc / sm) x gate)`; `mg_attn_eager` the reference's bf16 chain (scores rounded twice, probabilities once, the gate) for `B70_MUSE_ATTN=eager`.
 - Before writing: check whether `kol_attn.cl` builds at these defines with M = 1 and the gate applied in a separate launch; **if a new CMake line suffices and the extra launch is acceptable, reuse it and record the choice** - otherwise the copy as above. Either way the twin is the same.
 
-- [ ] **Step 1: failing tests** (`muse_run`, Mac GPU): flash against `attention_fp64` at cosine >= 0.99999 at positions 5, 2047, 2048, 4097, 9000 (sliding, ring wraps) and 3000 / 20000 (full); eager against `attention_eager` bitwise; Review Focus 3's boundary rows; the same query at 9000 and at 808 + a ring holding the same keys gives the same output (the ring is addressing).
-- [ ] **Step 2: implement, PASS on the Mac** (indicative); syntax checks. Commit `kernels: mg_attn - GQA 16 over the 4096-slot ring or the NoPE cache, the output gate (spec 23c)`.
+- [x] **Step 1: failing tests** (`muse_run`, Mac GPU): flash against `attention_fp64` at cosine >= 0.99999 at positions 5, 2047, 2048, 4097, 9000 (sliding, ring wraps) and 3000 / 20000 (full); eager against `attention_eager` bitwise; Review Focus 3's boundary rows; the same query at 9000 and at 808 + a ring holding the same keys gives the same output (the ring is addressing).
+- [x] **Step 2: implement, PASS on the Mac** (indicative); syntax checks. Commit `kernels: mg_attn - GQA 16 over the 4096-slot ring or the NoPE cache, the output gate (spec 23c)`.
 
 ### Task 4: the engine on one card
 
@@ -136,9 +136,9 @@ class MuseEngine {                                            // KolibriEngine's
 ```
 The list per layer (Kolibri's order, Muse's chains): `mg_norm` · q||gate||k||v GEMV · `mg_attn_prep` · `mg_attn_decode` + `mg_attn_reduce` (eager: one launch) · o_proj GEMV · `prep_res_fold _Z` · `mg_post_add` · `mg_norm` · gate||up GEMV · silu_mul · down GEMV · `prep_res_fold _Z` · `mg_post_add` = **14 launches (13 eager)**; plus `mg_embed` (+ its Σ² if separate) on device 0 and `mg_final_norm`, `lm_head`, argmax x 2 on the last: **~733 a token at 52 layers** - `decode_launches` asserts the formula and the test prints it.
 
-- [ ] **Step 1: failing tests** (label `gpu`; SKIP 77 without a checkpoint / card): `muse_decode_test` on the 4-layer synthetic: plan == allocation; the launch formula; two runs bitwise (logits, KV, rings); the ring at 4200 holds 105..4200 at rows `& 4095`; `--layers 2` development mode; `muse_golden_test` (MG3, tie-aware; docs/14's gate plus `cap_tie` rows undetermined; `B70_MUSE_ATTN=eager` arm) against 23b's synthetic golden set (`muse_oracle.sh synth` - this task adds that mode: `muse_ref.py run` on the synthetic checkpoint over `short_prose` / `4k`).
-- [ ] **Step 2: implement the buffers, the capture and the engine; the CLI:** `b70-decode <muse> --ids F --n N [--bench --depth D --tg T] [--lm-head int8|bf16] [--max-len auto|N] [--layers N] [--pp N --pipeline-split auto|N --pipeline-handoff copy|peer]`, the plan and memory lines printed. Refused before the device, by name: `--prefill*` (spec 23d - until row 45), `--mtp` / `--spec` (Muse has no MTP head; `--spec dflash` is spec 23f's), `--kv-cache int8` (decision 8), `--max-len` > 131072 (decision 6), `--device N` with `--pp 2`; `b70-serve <muse>` naming spec 23e. `cli_reject_muse_{prefill,mtp,kv8,maxlen,serve}` over `tests/model/muse_glimmer` (config only).
-- [ ] **Step 3: Mac gates:** Level Zero syntax of every new source, host tests green, `tools/mac_check.sh --base main --quick --kernels` exit 0. Commit `runtime: MuseEngine decode on one card - the captured list, b70-decode dispatch, refusals (spec 23c)`.
+- [x] **Step 1: failing tests** (label `gpu`; SKIP 77 without a checkpoint / card): `muse_decode_test` on the 4-layer synthetic: plan == allocation; the launch formula; two runs bitwise (logits, KV, rings); the ring at 4200 holds 105..4200 at rows `& 4095`; `--layers 2` development mode; `muse_golden_test` (MG3, tie-aware; docs/14's gate plus `cap_tie` rows undetermined; `B70_MUSE_ATTN=eager` arm) against 23b's synthetic golden set (`muse_oracle.sh synth` - this task adds that mode: `muse_ref.py run` on the synthetic checkpoint over `short_prose` / `4k`).
+- [x] **Step 2: implement the buffers, the capture and the engine; the CLI:** `b70-decode <muse> --ids F --n N [--bench --depth D --tg T] [--lm-head int8|bf16] [--max-len auto|N] [--layers N] [--pp N --pipeline-split auto|N --pipeline-handoff copy|peer]`, the plan and memory lines printed. Refused before the device, by name: `--prefill*` (spec 23d - until row 45), `--mtp` / `--spec` (Muse has no MTP head; `--spec dflash` is spec 23f's), `--kv-cache int8` (decision 8), `--max-len` > 131072 (decision 6), `--device N` with `--pp 2`; `b70-serve <muse>` naming spec 23e. `cli_reject_muse_{prefill,mtp,kv8,maxlen,serve}` over `tests/model/muse_glimmer` (config only).
+- [x] **Step 3: Mac gates:** Level Zero syntax of every new source, host tests green, `tools/mac_check.sh --base main --quick --kernels` exit 0. Commit `runtime: MuseEngine decode on one card - the captured list, b70-decode dispatch, refusals (spec 23c)`.
 
 ### Task 5: two cards
 
@@ -148,29 +148,29 @@ The list per layer (Kolibri's order, Muse's chains): `mg_norm` · q||gate||k||v 
 **Interfaces:**
 - Consumes: `PipelineLink(l0::Context&, l0::Context&, const PpLandingLayout&, PpHandoff)`, `runtime::pp_landing_layout(6656 x 2, the Σ² chunk bytes)`, `pp_balance` over 23b's per-layer bytes, `require_two_devices`.
 
-- [ ] **Step 1: failing test** `muse_pp_test` (label `gpu`, both cards): `--pp 1` against `--pp 2 --pipeline-split 2` on the 4-layer synthetic under `copy` and `peer`: tokens, logits, KV, rings bitwise; both Control blocks equal; P4 (a dropped hand-off throws within 5 s naming device 1; `reset()` recovers); replay.
-- [ ] **Step 2: implement** the cut (device 0 ends with layer s-1's `mg_post_add`, which wrote `resid` and the Σ² layer s's `mg_norm` reads - Kolibri's cut), the hand-off, the bounded fence. Commit `runtime: Muse-Glimmer on two cards - spec 16b's split and hand-off (spec 23c)`.
+- [x] **Step 1: failing test** `muse_pp_test` (label `gpu`, both cards): `--pp 1` against `--pp 2 --pipeline-split 2` on the 4-layer synthetic under `copy` and `peer`: tokens, logits, KV, rings bitwise; both Control blocks equal; P4 (a dropped hand-off throws within 5 s naming device 1; `reset()` recovers); replay.
+- [x] **Step 2: implement** the cut (device 0 ends with layer s-1's `mg_post_add`, which wrote `resid` and the Σ² layer s's `mg_norm` reads - Kolibri's cut), the hand-off, the bounded fence. Commit `runtime: Muse-Glimmer on two cards - spec 16b's split and hand-off (spec 23c)`.
 
 ### Task 6: the box runner's synthetic mode and the real-checkpoint gates
 
 **Files:**
 - Modify: `tools/box_validate/muse_oracle.sh` (`synth`: the golden sets of the 4-layer synthetic; `real-layers N`: 23a's reference truncated for the partial forward), `tools/box_validate/data.sh` (`have oracle_muse_synth_golden`), `tests/golden/muse_partial_test.cc` (create)
 
-- [ ] **Step 1:** `muse_partial_test` - development mode on the real checkpoint, `--layers 8`: the residual tap of every layer against 23a's `H.L*` (median cosine >= 0.9998, min >= 0.99, PROPOSED - printed per layer); then the full 52 layers (it fits): MG3 on `short_prose`, `4k`, `8k`, `32k`, `agentic` (int8 and bf16 heads, flash and eager). Commit `golden: the Muse-Glimmer partial forward and the full-model golden gate (spec 23c)`.
+- [x] **Step 1:** `muse_partial_test` - development mode on the real checkpoint, `--layers 8`: the residual tap of every layer against 23a's `H.L*` (median cosine >= 0.9998, min >= 0.99, PROPOSED - printed per layer); then the full 52 layers (it fits): MG3 on `short_prose`, `4k`, `8k`, `32k`, `agentic` (int8 and bf16 heads, flash and eager). Commit `golden: the Muse-Glimmer partial forward and the full-model golden gate (spec 23c)`. **(Written and committed on the Mac; the runs are box queue row 44: r44.partial, r44.real.)**
 
 ### Task 7: speed rows and the sweeps
 
 **Files:**
 - Modify: `tools/box_validate/muse_oracle.sh` or `tools/bench_decode.sh` (a `muse` arm), `docs/BENCHMARKS.md` (a "Muse-Glimmer-30B" section with PENDING rows)
 
-- [ ] **Step 1:** the decode rows (opt-in, box): depth 4096 / 32768 / 131072, tg 256, int8 and bf16 heads, flash and eager, one card and `--pp 2` (copy / peer): interleaved, median of 3, launches per token and memory per card, against spec 23 §2's roofline (39.7 / 38.7 / 35.7 t/s; ~30.8 at 77.6 %). The `{S, layout}` sweep of the four int4 shapes (S 1 / 2 / 4, L 0 / 1) - the winner replaces the PROVISIONAL picks in a follow-up commit. Commit `bench: Muse-Glimmer decode rows and the GEMV shape sweep (spec 23c)`.
+- [x] **Step 1:** the decode rows (opt-in, box): depth 4096 / 32768 / 131072, tg 256, int8 and bf16 heads, flash and eager, one card and `--pp 2` (copy / peer): interleaved, median of 3, launches per token and memory per card, against spec 23 §2's roofline (39.7 / 38.7 / 35.7 t/s; ~30.8 at 77.6 %). The `{S, layout}` sweep of the four int4 shapes (S 1 / 2 / 4, L 0 / 1) - the winner replaces the PROVISIONAL picks in a follow-up commit. Commit `bench: Muse-Glimmer decode rows and the GEMV shape sweep (spec 23c)`. **(The rows are PENDING in BENCHMARKS; the arms are r44.speed / r44.speed_long / r44.sweeps - box queue row 44.)**
 
 ### Task 8: docs, the queue row
 
 **Files:**
 - Modify: spec 23 ("23c as built"), this plan's status, `docs/superpowers/plans/box-validation-queue.md` (row 44), `tools/box_validate/stages.sh` (row 44 block), `docs/12-kernels.md` (the `mg_*` family)
 
-- [ ] **Step 1: queue row 44. Stage list (sketch):**
+- [x] **Step 1: queue row 44. Stage list (sketch):**
   - `r44.k0` default cpu `g0.*`: MG0 - every pre-existing binary identical, `kernel_cmdlines` additions only;
   - `r44.host` default cpu: `muse_ref_test`, `muse_variant_names_test`, `muse_plan_test`;
   - `r44.k1` default gpu: every new binary compiled (ocloc) and `muse_kernels_test` (MG2 on the card: the twin bitwise; flash >= 0.99999; Review Focus 3 rows);
@@ -182,6 +182,6 @@ The list per layer (Kolibri's order, Muse's chains): `mg_norm` · q||gate||k||v 
   - `r44.partial` / `r44.real` default gpu `muse_gptq,oracle_muse`: Task 6;
   - `r44.speed` optin gpu `muse_gptq`: Task 7; `r44.sweeps` manual.
   `rownote`s: written blind, no Muse binary ever compiled; the PROPOSED bars; the real checkpoint's download.
-- [ ] **Step 2: commit** `docs: spec 23 (23c as built), box queue row 44 - Muse-Glimmer decode`.
+- [x] **Step 2: commit** `docs: spec 23 (23c as built), box queue row 44 - Muse-Glimmer decode`.
 
 **Gate for the plan:** Mac - `muse_ref_test` bitwise; `muse_run` exact (bounded ulps where Apple's math differs); every variant's syntax; `kernel_cmdlines` additions only; `tools/mac_check.sh --base main --quick --kernels` exit 0. Box - MG0, MG2 on the card, MG3 / MG4 on the synthetic and the real checkpoint, two cards bitwise one, the speed rows recorded.
