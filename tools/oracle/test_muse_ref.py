@@ -293,7 +293,7 @@ def test_norm_forms():
     assert torch.equal(cap["emb"], _pow_norm(rows, eps=tc.rms_norm_eps)), "the embed norm is not pow(ms + eps, -0.5)"
     assert torch.equal(cap["fin"], _pow_norm(cap["fin_in"], lm.norm.weight, tc.rms_norm_eps)), "final norm != pow * w"
     assert lm.norm.with_scale and not lm.embed_tokens.embed_norm.with_scale
-    layer = lm.layers[0]
+    layer = layers_of(hf_model(snap, BF))[0]           # the same class, materialised (the port's are back on meta)
     assert layer.input_layernorm.eps == 1e-5 and layer.pre_feedforward_layernorm.eps == 1e-5
     assert layer.post_attention_layernorm.eps == 1e-8 and layer.post_feedforward_layernorm.eps == 1e-8
     x = (torch.randn(1, 40, tc.hidden_size) * 3).to(BF)
@@ -320,6 +320,13 @@ def test_norm_forms():
         lines.append(f"{what}: a crafted row rounds apart; the module matches the first form")
     for s in lines:
         print("  " + s)
+    # why "indistinguishable": on torch's CPU, pow(x, -0.5), rsqrt(x) and 1 / sqrt(x) are the same fp32 value (the
+    # correctly rounded 1 / sqrt); a device kernel must reproduce that, not an approximate native rsqrt (23c's fixture)
+    v = torch.rand(10**7, generator=torch.Generator().manual_seed(5)) * 1e3 + 1e-6
+    same = int((torch.pow(v, -0.5) == torch.rsqrt(v)).sum())
+    inv = int((1.0 / torch.sqrt(v) == torch.rsqrt(v)).sum())
+    print(f"  fp32: torch.pow(x, -0.5) == torch.rsqrt(x) on {same} of {v.numel()} values, 1 / sqrt(x) == rsqrt(x) on "
+          f"{inv} (torch {torch.__version__} CPU)")
 
 
 class AttnSpy:
@@ -471,8 +478,8 @@ def test_untied():
     tied (the downloaded tiny = untied minus lm_head); the port reads lm_head, not embed_tokens."""
     pu = port_model(variant("untied"), BF)[0]
     pt = port_model(variant("tiny"), BF)[0]
-    assert pu.lm_head.weight is not pu.model.language_model.embed_tokens.weight
-    assert pt.lm_head.weight is pt.model.language_model.embed_tokens.weight
+    assert pu.lm_head.weight.data_ptr() != pu.model.language_model.embed_tokens.weight.data_ptr()
+    assert pt.lm_head.weight.data_ptr() == pt.model.language_model.embed_tokens.weight.data_ptr()
     ids = torch.tensor([rand_ids(40, seed=16)])
     with torch.no_grad():
         a, b = pu(input_ids=ids, use_cache=False).logits, pt(input_ids=ids, use_cache=False).logits
@@ -592,24 +599,28 @@ def test_expected_names():
 
 def test_assist_loads():
     """The `assist` variant is a valid MuseGlimmerAssistantModel (strict load) whose DFlash drafting over the l8 target
-    is lossless under greedy: generate(assistant_model=...) = plain greedy."""
+    is lossless under greedy: generate(assistant_model=..., speculation_type="dflash") = plain greedy. A 5.19.0 fact
+    for 23f: without `speculation_type="dflash"` generate does not pick DFlashTokenCandidateGenerator
+    (generation/utils.py:1343) and fails on the assistant's config, which has no `vocab_size` (utils.py:1882) - the
+    REAL assistant's config.json has none either."""
     from transformers.models.muse_glimmer_assistant import modeling_muse_glimmer_assistant as am
     d = variant("assist")
     asst, info = am.MuseGlimmerAssistantModel.from_pretrained(d, dtype=BF, output_loading_info=True)
     assert not any(info.get(k) for k in ("missing_keys", "unexpected_keys", "mismatched_keys")), info
     target = hf_model(variant("l8"), BF)
     ids = torch.tensor([rand_ids(24, seed=22)])
+    kw = dict(max_new_tokens=12, min_new_tokens=12, do_sample=False, top_k=None, top_p=None, temperature=None)
     with torch.no_grad():
-        plain = target.generate(ids, max_new_tokens=12, min_new_tokens=12, do_sample=False, top_k=None, top_p=None,
-                                temperature=None)
+        plain = target.generate(ids, **kw)
         try:
-            spec = target.generate(ids, assistant_model=asst.eval(), max_new_tokens=12, min_new_tokens=12,
-                                   do_sample=False, top_k=None, top_p=None, temperature=None)
-        except Exception as e:      # noqa: BLE001 - recorded, the strict load is the gate
-            print(f"  assist: loads strictly; DFlash generate raised {type(e).__name__}: {str(e)[:200]}")
-            return
+            target.generate(ids, assistant_model=asst.eval(), **kw)
+            raise AssertionError("5.19.0 took the assistant without speculation_type='dflash': record the change")
+        except AttributeError as e:
+            assert "vocab_size" in str(e), e
+        spec = target.generate(ids, assistant_model=asst, speculation_type="dflash", **kw)
     assert torch.equal(plain, spec), (plain, spec)
-    print("  assist: loads strictly; DFlash greedy over l8 = plain greedy (12 tokens)")
+    print("  assist: loads strictly; DFlash greedy over l8 (speculation_type='dflash') = plain greedy (12 tokens); "
+          "without speculation_type 5.19.0 raises on the missing vocab_size")
 
 
 def test_cli_run_and_hfcheck():
