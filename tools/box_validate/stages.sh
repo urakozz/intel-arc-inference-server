@@ -2943,7 +2943,7 @@ st_r44_host() {
   jgrab host '^muse_(ref|variant_names|plan)_test$' 'OK|differ|cosine|launches|decode scratch|bound names'
   finish
 }
-stage r44.k1 44 default gpu - - "MG2, no checkpoint: the 19 new binaries built (kbins: the first ocloc build of every mg_* kernel) and muse_kernels_test - mg_embed (rows 7 / 202047, the placeholders' row 0), mg_norm / mg_final_norm, prep_res_fold _Z G26 + mg_post_add, mg_attn_prep (sliding 37 / 4097, full 0 / 100000: NoPE position-free), mg_silu_mul - all bitwise museref; eager attention bitwise at 5 / 2046 / 2047 / 2048 / 4095 / 4096 / 4097 / 9000 sliding and 3000 / 30000 full; flash against fp64 at cosine 0.99999 (the same rows, full 20000); flash at 9000 == 4904 (the same ring rows)"
+stage r44.k1 44 default gpu - - "MG2, no checkpoint: the 19 new binaries built (kbins: the first ocloc build of every mg_* kernel) and muse_kernels_test - mg_embed (rows 7 / 202047, the placeholders' row 0), mg_norm / mg_final_norm, prep_res_fold _Z G26 + mg_post_add, mg_attn_prep (sliding 37 / 4097, full 0 / 100000: NoPE position-free), mg_silu_mul - all bitwise museref; eager attention bitwise at 5 / 2046 / 2047 / 2048 / 4095 / 4096 / 4097 / 9000 sliding and 3000 / 30000 full; flash against fp64 at cosine 0.99999 (the same rows, full 20000); flash at 9000 == 4904 (the same ring rows); the window's edge EXACT for flash and eager (the slots of p - 2048 and p + 1 .. p + 15 poisoned: bitwise unchanged; p - 2047 poisoned: changed)"
 st_r44_k1() {
   kbins mg_embed_M1_K6656_G26_V202048 mg_norm_M1_K6656_G26_W26 mg_post_add_M1_K6656_G26 \
     mg_attn_prep_M1_N8704_S2_Q32KV2_R4096 mg_attn_prep_M1_N8704_S2_Q32KV2_F mg_silu_mul_M1_I19968_S8 \
