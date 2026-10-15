@@ -131,7 +131,13 @@ void MuseEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   const char* env = std::getenv("B70_PREFILL_REPLAY");
   const bool replay = pf_replay_ >= 0 ? pf_replay_ == 1 : (env && std::strcmp(env, "1") == 0);
   const uint32_t ndev = devices();
-  const uint64_t tmo = P.timeout_ns;
+  // The bound a chunk's lists are waited for: prefill_wait_ms (muse_sizes.h) - the configured bound, or under eager one
+  // bound per 2048 keys of the chunk's deepest row (the portable eager build's cost grows with depth).
+  uint64_t wait_ms = opt_.prefill_timeout_ms, tmo = P.timeout_ns;
+  const auto set_bound = [&](uint32_t depth) {
+    wait_ms = prefill_wait_ms(opt_.prefill_timeout_ms, attn_, depth);
+    tmo = wait_ms * 1000000ull;
+  };
   const auto set_ctl = [&](uint32_t pos, uint32_t n) {
     for (uint32_t i = 0; i < ndev; ++i) {
       stage_control(i)->pos = pos;
@@ -142,7 +148,7 @@ void MuseEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     for (uint32_t i = 0; i < ndev; ++i)
       if (!P.dev[i]->cx.wait_for(tmo))
         fail(std::string("device ") + std::to_string(i) + "'s prefill list did not finish within " +
-             std::to_string(opt_.prefill_timeout_ms) + " ms (" + what + ")");
+             std::to_string(wait_ms) + " ms (" + what + ")");
   };
   // One device's walk for a chunk: immediately, or through its recording (B70_PREFILL_REPLAY).
   const auto run_dev = [&](uint32_t i, uint32_t pos, uint32_t C) {
@@ -166,7 +172,8 @@ void MuseEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   for (size_t off = 0; off < ids.size(); off += C) {
     C = prefill_chunk_rows(base + uint32_t(off), ids.size() - off, chunk, hooked, kBlock);
     const uint32_t pos = base + uint32_t(off);
-    wait_all("before a chunk");   // before touching the ids buffer or a Control block
+    wait_all("before a chunk");   // before touching the ids buffer or a Control block (the previous chunk's bound)
+    set_bound(pos + C);
     std::memcpy(P.dev[0]->s.ids.ptr(), ids.data() + off, size_t(C) * 4);
     set_ctl(pos, C);
     if (ndev == 1) {
@@ -202,14 +209,14 @@ void MuseEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
         const bool drained = D1.cx.wait_for(tmo);
         const bool d0 = D0.cx.wait_for(tmo);
         fail("device 1's prefill chunk at " + std::to_string(pos) + " (" + std::to_string(C) +
-             " rows) did not finish within " + std::to_string(opt_.prefill_timeout_ms) + " ms - " +
+             " rows) did not finish within " + std::to_string(wait_ms) + " ms - " +
              (d0 ? "device 0 finished but its rows never released device 1" : "device 0 did not finish either") +
              " (the prefill link's cross-device event; device 1 " + (drained ? "released" : "did not drain") + ")" +
              (send ? "" : " [device 0's half was not appended: drop_next_handoff()]"));
       }
       if (!D0.cx.wait_for(tmo))
         fail("device 0's prefill chunk at " + std::to_string(pos) + " did not finish within " +
-             std::to_string(opt_.prefill_timeout_ms) + " ms");
+             std::to_string(wait_ms) + " ms");
     }
     const uint32_t end = pos + C;
     if (hooked && off + C < ids.size() && end % kBlock == 0) {
@@ -228,7 +235,7 @@ void MuseEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     prefill_head(D.cx, D.kc, D.s, w_.parts[ndev - 1], d, stage_buffers(ndev - 1), C - 1);
     if (!D.cx.wait_for(tmo))
       fail("device " + std::to_string(ndev - 1) + "'s prefill head did not finish within " +
-           std::to_string(opt_.prefill_timeout_ms) + " ms");
+           std::to_string(wait_ms) + " ms");
   }
   // The token's way back (16b's mirror): device 0 reads pos and cur_token from its own block next step.
   if (ndev == 2) std::memcpy(stage_control(0), stage_control(1), sizeof(Control));

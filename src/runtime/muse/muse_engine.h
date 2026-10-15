@@ -47,7 +47,8 @@ struct MuseOptions {
   uint32_t timeout_ms = 30000;           // a step's fence wait (two devices)
   uint32_t spin_limit = 1u << 24;        // peer: pp_recv's flag loads before it gives up
   bool prefill = false;                  // spec 23d: plan the prefill scratch (and its link) into max_len and the fit
-  uint32_t prefill_timeout_ms = 30000;   // spec 23d: a prefill chunk's / the head's wait (bounded)
+  uint32_t prefill_timeout_ms = 30000;   // spec 23d: a prefill chunk's / the head's wait (bounded; under eager per
+                                         // 2048 keys of the chunk's deepest row - runtime::muse::prefill_wait_ms)
 };
 
 class MuseEngine {
