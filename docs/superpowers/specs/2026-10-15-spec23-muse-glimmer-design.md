@@ -771,3 +771,8 @@ re-asserted in `muse_plan_test`).
   hand-off landed with Task 3's `MuseEngine::prefill` (one function), Task 4 is its tests; (9) "in-tile permutations"
   became row permutations inside the 8-row groups (the twin's key order inside a tile IS its sum order); (10) r45.reject
   holds the GPU lock (23c's r44.reject rule).
+- **The final review's fixes** (one Important, two minors re-graded by effect): the eager build's cost grows with depth
+  (each of its three passes re-reads a row's keys), so a chunk's bounded wait is now `prefill_wait_ms` - the configured
+  bound under flash, one bound per 2048 keys of the chunk's deepest row under eager (a 32k eager chunk waits 16 x 30 s,
+  not 30 s; row 45's note says how to read an eager timeout); `muse_prefill_test` now gates the last logits' cosine
+  (>= 0.9995, PROPOSED) and, in `split` mode, every full layer's first-part rows bitwise at every split (Review Focus 3).
