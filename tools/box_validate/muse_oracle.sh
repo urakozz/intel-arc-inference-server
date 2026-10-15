@@ -139,9 +139,9 @@ case "$mode" in
     fi ;;
   synth-ckpt|synth-tests) [ "$dry" = 1 ] || {
     b=$(snap_of "$BF16") g=$(snap_of models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound-GPTQ)
-    for f in tokenizer.json tokenizer_config.json chat_template.jinja generation_config.json; do
+    for f in config.json tokenizer.json tokenizer_config.json chat_template.jinja generation_config.json; do
       [ -n "$b" ] && [ -s "$b/$f" ] || {
-        echo "SKIP_REASON muse_oracle: synth-ckpt needs the original's small files ($BF16: $f - hf download meta-models/Muse-Glimmer-30B tokenizer.json tokenizer_config.json chat_template.jinja generation_config.json)"
+        echo "SKIP_REASON muse_oracle: synth-ckpt and synth-tests need the original's small files ($BF16: $f - hf download meta-models/Muse-Glimmer-30B config.json tokenizer.json tokenizer_config.json chat_template.jinja generation_config.json)"
         exit 77; }
     done
     [ -n "$g" ] && [ -s "$g/config.json" ] || {

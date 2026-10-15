@@ -1,4 +1,4 @@
-// Spec 23b Task 3: load_muse_glimmer on the card (box only; label `gpu;checkpoint;muse`).
+// Spec 23b Task 3: load_muse_glimmer on the card (box only; label `checkpoint;muse`).
 //   muse_load_checkpoint_test <snapshot> [layers] [split]
 // Loads the checkpoint (make_synth.py's synthetic one - muse_oracle.sh synth-ckpt -, or the real one, either
 // Vishva007 spelling; `layers` > 0: development mode; `split` > 0: two devices, layers [0, split) | [split, L))
@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
   const uint32_t split = argc > 3 ? uint32_t(std::stoul(argv[3])) : 0;
   std::string snap;
   try {
-    snap = loader::resolve_snapshot(arg);
+    snap = loader::resolve_muse_snapshot(arg);
     if (!loader::is_muse_checkpoint(snap)) throw std::runtime_error("not a muse_glimmer checkpoint");
   } catch (const std::exception& e) {
     std::printf("SKIP: no Muse-Glimmer checkpoint at '%s' (%s)\n", arg.c_str(), e.what());
