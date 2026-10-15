@@ -28,6 +28,11 @@ budget - and renders from KEY-SORTED messages and tools: b70-serve holds a reque
 nlohmann::json, whose objects are sorted, so the server's render of the same request is
 these ids (tools/tokenizer/dump_k2.py's rule).
 
+LFM2.5-24B-A2B (model_type lfm2_moe, spec 24a) renders --from the same 36 conversations from KEY-SORTED messages
+and tools (b70-serve's order, as K2's), no template kwargs: its template writes the history calls as pythonic
+`<|tool_call_start|>[name(k=v)]<|tool_call_end|>` and ends the prompt in "<think>"; tools/toolcall/a4_ref.sh
+lfm2moe set writes tests/golden/toolcall-lfm2moe.
+
 --lang de (spec 20e, KL4: Kolibri-1's German A4-style set): the same six templates over the same
 six files with the system prompt and the user turns in German (the DE table below); the tool
 results stay what the tools print. Kolibri-1 (model_type kolibri1) renders from KEY-SORTED
@@ -326,7 +331,10 @@ def load_tokenizer(snap: str):
 
 K2_KWARGS = {"tool_call_format": "xml", "reasoning_effort": "low"}
 # Models whose server render is of key-sorted objects (their template tests are recorded that way).
-SORTED_MODELS = ("k2_horizon", "kolibri1")
+# Spec 24a: LFM2.5-24B-A2B (lfm2_moe) too - its schemas and call arguments reach the template key-sorted through
+# b70-serve (spec 24 §4.6's known limitation), so its A4 set is rendered that way; the history calls come out
+# pythonic through the template itself, and the prompt ends in "<think>" (the template always reasons).
+SORTED_MODELS = ("k2_horizon", "kolibri1", "lfm2_moe")
 
 
 def model_type(snap: str) -> str:
