@@ -40,3 +40,6 @@ add_subdirectory(kolibri)
 
 # Spec 21b: Qwen3.8-Flash-Next's planner (21c adds its engine) - its own directory.
 add_subdirectory(qwen4exp)
+
+# Spec 23b: Muse-Glimmer-30B's planner (23c adds its engine) - its own directory.
+add_subdirectory(muse)
