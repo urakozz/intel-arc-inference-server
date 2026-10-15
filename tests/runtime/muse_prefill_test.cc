@@ -20,14 +20,14 @@
 //     4. Review Focus 5, prefill against decode's M = 1 fill (ingest, one id per replay) of the same prompt: per layer,
 //        per position the ring / the cache still holds, K and V cosine - gated (PROPOSED, Kolibri's bars): every row of
 //        layer 0 >= 0.999, all rows' median >= 0.9998, 1st percentile >= 0.99; printed per layer; pos exact; the ring
-//        slots p & 4095 (read_kv addresses them so); the last logits' cosine printed;
+//        slots p & 4095 (read_kv addresses them so); the last logits' cosine >= 0.9995 (PROPOSED, the split bar);
 //     5. tokens: prefill + 32 greedy against ingest + 32 greedy - every row whose decode-side top-2 raw gap is at least
 //        one bf16 ulp of the top logit agrees; teacher-forced on decode's token.
 //   mode `split` (Review Focus 2 / 3): the 8k prompt in ONE prefill against TWO calls split at 64, 1000, 2048, 2049,
 //     4097 - KV, rings, the last logits and the first token. Gated: the multiples of 64 bitwise, the others within
 //     the bars (logits cosine >= 0.9995, layers 0-1 every row >= 0.999, median >= 0.9998, p01 >= 0.99) - each printed
-//     bitwise or not. The full (NoPE) layer's later chunk reads the earlier rows from the cache, not recomputed: a
-//     split continuation's full-layer KV of the FIRST part is bitwise the one-call run's.
+//     bitwise or not. Review Focus 3: every full (NoPE) layer's K / V rows of the FIRST part [0, s) are bitwise the
+//     one-call run's at EVERY split (row-local kernels: the second call reads them from the cache, never rewrites them).
 //   mode `pp` (two GPUs): --pp 2 --pipeline-split <s> (pp2:<s>, default 2) against --pp 1 on the same checkpoint,
 //     BITWISE: one prefill (KV, rings, logits, the first token, both Control blocks equal after the mirror), recorded +
 //     replayed, a split continuation (1000 + rest), chunks of 64; each card's prefill launches are
@@ -215,7 +215,8 @@ bool run_prompt(rm::MuseEngine& e, const std::string& name, const Ids& prompt, b
               "%u vs %u\n", n, d.layers, kc.layer0_worst, kc.median, kc.p01, kc.below99, kc.worst, kc.worst_layer,
               kc.worst_pos, kv_ok ? "" : "  ** FAIL **", a.pos, dec.pos, lg, a.first_token, dec.first_token);
   print_layers(kc);
-  ok = ok && kv_ok && a.pos == dec.pos;
+  ok = ok && kv_ok && a.pos == dec.pos && lg >= 0.9995;
+  if (lg < 0.9995) std::printf("   ** FAIL **: the last logits' cosine %.6f is below 0.9995\n", lg);
 
   // ---- 5. tokens -------------------------------------------------------------------------------------------------------
   std::vector<uint32_t> dtok(kGen);
@@ -263,20 +264,29 @@ int run_split(rm::MuseEngine& e, const Ids& ids) {
     if (s >= N) continue;
     e.reset();
     e.prefill(Ids(ids.begin(), ids.begin() + s));
-    // Review Focus 3: the full layers' rows of the first part, written before the second call, are read from the
-    // cache by the second part's rows - and the first part's rows are bitwise the one-call run's when the cut is at a
-    // multiple of 64 (they are computed by the same chunks' kernels on the same rows)
     e.prefill(Ids(ids.begin() + s, ids.end()));
     CHECK_EQ(e.pos(), N);
     const Snap got = snap(e, N);
+    // Review Focus 3: the full layers' rows of the first part were written by the first call and read from the cache
+    // by the second; every kernel is row-local, so they are the one-call run's bitwise at any split
+    bool first_part = true;
+    const size_t row = d.kv_n();
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      if (!d.is_full(l)) continue;
+      const std::vector<uint16_t>& g = got.kv[l];
+      const std::vector<uint16_t>& r = ref.kv[l];
+      first_part = first_part && std::equal(g.begin(), g.begin() + size_t(s) * row, r.begin()) &&
+                   std::equal(g.begin() + size_t(N) * row, g.begin() + size_t(N + s) * row, r.begin() + size_t(N) * row);
+    }
     const bool bitwise = got == ref;
     const double lg = cos_f32(got.logits.data(), ref.logits.data(), d.vocab);
     const KvCmp kc = compare_kv(d, ref, got, N);
     const double shallow = std::min(kc.layer_worst[0], d.layers > 1 ? kc.layer_worst[1] : 1.0);
     const bool bars = lg >= 0.9995 && shallow >= 0.999 && kc.median >= 0.9998 && kc.p01 >= 0.99;
-    const bool pass = s % 64 == 0 ? bitwise : (bitwise || bars);
-    std::printf("  split at %4u: %s | logits %.6f, layers 0-1 worst %.6f, median %.7f, p01 %.6f%s\n", s,
-                bitwise ? "bitwise" : "not bitwise", lg, shallow, kc.median, kc.p01, pass ? "" : "  ** FAIL **");
+    const bool pass = (s % 64 == 0 ? bitwise : (bitwise || bars)) && first_part;
+    std::printf("  split at %4u: %s | logits %.6f, layers 0-1 worst %.6f, median %.7f, p01 %.6f; full layers' first "
+                "part %s%s\n", s, bitwise ? "bitwise" : "not bitwise", lg, shallow, kc.median, kc.p01,
+                first_part ? "bitwise" : "DIFFERS", pass ? "" : "  ** FAIL **");
     ok = ok && pass;
   }
   return ok ? 0 : 1;

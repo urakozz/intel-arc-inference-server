@@ -190,4 +190,13 @@ size_t prefill_device_launches(const model::MuseGlimmerDesc& d, const model::Mus
 size_t prefill_chunk_launches(const model::MuseGlimmerDesc& d, const model::MusePlacement& p);
 inline constexpr size_t kPrefillHeadLaunches = 4;   // mg_final_norm on the last row, lm_head, argmax x 2
 
+// The bound a prefill chunk's lists are waited for (ms), `depth` = the chunk's end (pos + C): the configured bound
+// (MuseOptions::prefill_timeout_ms) under flash; under B70_MUSE_ATTN=eager - the portable three-pass build, whose cost
+// grows with the keys a row reads (a full layer's row at depth d reads d keys, three times) - one bound per kPfC keys
+// of the chunk's deepest row, so a long prompt's eager chunk is not reported as a lost hand-off.
+inline uint64_t prefill_wait_ms(uint32_t base_ms, MuseAttn a, uint32_t depth) {
+  const uint64_t steps = a == MuseAttn::Eager ? (uint64_t(depth) + kPfC - 1) / kPfC : 1;
+  return uint64_t(base_ms) * (steps ? steps : 1);
+}
+
 }  // namespace runtime::muse
