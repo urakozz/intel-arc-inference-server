@@ -516,6 +516,8 @@ as soon as 23a's tap dumps exist; 23f's engine half needs 23c-23e and P0's "go".
 
 ## 11. Decisions
 
+**Ruled (operator, 2026-10-15): all 16 decisions below as recommended.** Each one's recommendation is the ruling; 23a starts.
+
 1. **(decide) The chat template:** the original's `chat_template.jinja` (`cfc67e5f...`) for every checkpoint, not
    the GPTQ repo's older one (`114f55eb...`). **Recommended:** the original's (it is the newer, it handles a system
    prompt that already states the reasoning strength); `--chat-template FILE` overrides.
