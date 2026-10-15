@@ -185,6 +185,18 @@ parser's reference** on complete turns (§6.5).
   `q_proj` and layer 51's `down_proj`; `g_idx` = `i // 64` in those two and layer 30's `o_proj`. 23b's loader checks
   every tensor (docs/13's three data asserts) and 23a's facts sheet records the full scan.
 - So: **our format exactly** - AutoRound int4 g64 symmetric, `w = (q - 8) x scale`. No new kernel, no conversion.
+- **The recipe that made it** (intel/auto-round commit `da52d6da`, 2026-10-15, author Vishva R - the checkpoint's
+  author; `examples/Muse-Glimmer/Muse-Glimmer_W4A16.ipynb`, read at the local checkout
+  `/Users/urakozz/PycharmProjects/auto-round`): `AutoModelForImageTextToText` in bf16; `SignRoundConfig(iters=800,
+  group_size=64, sym=True)`; `AutoRound(scheme="W4A16", nsamples=512, batch_size=4, seqlen=2048, processor=processor,
+  quant_nontext_module=False, enable_torch_compile=True)` with **no `dataset` argument**; `quantize_and_save(format=
+  "auto_round,auto_gptq")` (the GPTQ repo is the second export). With no dataset AutoRound calibrates on its default
+  **`NeelNanda/pile-10k`** (`auto_round/compressors/base.py:261` at `da52d6da`; `:239` at the `v0.15.0` tag, the
+  checkpoint's `autoround_version`), and with `quant_nontext_module` false and `muse_glimmer` not in
+  `NOT_SUPPORT_ONLY_TEXT_MODELS` (`auto_round/special_model_handler.py:62`) the multimodal path keeps that text set
+  (`auto_round/calibration/mllm.py:90-120`). **The calibration is generic web text (the Pile), 512 x 2048 tokens - no
+  chat template, no reasoning channels, no ATEM tool calls.** That is why gate Q (§3.3) is the deciding gate: our
+  workload is exactly the distribution the calibration did not see.
 
 ### 3.2 The bf16 original
 
@@ -194,7 +206,10 @@ CPU (23a); it is never served.
 
 ### 3.3 The quality rule
 
-The checkpoint is served as is **unless** 23a's gate Q (on the box CPU, both references layer-streamed) shows a gap:
+The checkpoint is served as is **unless** 23a's gate Q (on the box CPU, both references layer-streamed) shows a gap.
+The operator's ruling stands (use it as-is first); gate Q exists because its calibration was the Pile (§3.1), not
+agentic coding - if quantisation error concentrates anywhere, it is on the chat-template / channel / ATEM tokens our
+workload is made of, and A4 measures exactly those:
 - **Q-A4:** the 36 A4 scenarios rendered by Muse's template (23a Task 5), 192 greedy ids each, through the int4
   checkpoint dequantised (the engine-format reference) and through the bf16 original. Bars **(PROPOSED, decision
   5):** the int4 reference has **no more parse failures** than bf16's; its **first-call agreement with bf16 >= 25 / 36**
@@ -203,8 +218,9 @@ The checkpoint is served as is **unless** 23a's gate Q (on the box CPU, both ref
   int4) over the capped distribution at T 1.0 and top-1 agreement. Bars (PROPOSED): **mean KL <= 0.02, top-1 >= 95
   %** on A4; recorded, not gated, on prose.
 - **If Q fails:** re-quantise from the bf16 original with our own calibration (Kolibri's §3.1 recipe adapted: agentic
-  coding and tool calls rendered through Muse's template, AutoRound at the pinned commit, `--group_size 64` sym,
-  `lm_head` and vision out) - a stage 23q added then, not planned now. **The rule is recorded:** third-party
+  coding sessions and tool calls rendered through Muse's template with reasoning channels and ATEM calls, preferably
+  the bf16 model's own outputs, AutoRound at the pinned commit, `--group_size 64` sym, `lm_head` and vision out;
+  the same 800 iterations so the only change is the calibration set) - a stage 23q added then, not planned now. **The rule is recorded:** third-party
   checkpoints in our exact format are used as-is when they pass gate Q; otherwise we quantise.
 
 ## 4. Reference and gates
@@ -356,11 +372,33 @@ rule, `V/tool_parsers/muse_glimmer_tool_parser.py:_iter_messages`):
 - a doubled name `ns.ns` maps to a registered bare `ns` (the template renders a bare name's recipient as `"ns.*"`
   and the model writes `ns.ns`; `V/tool_parsers/muse_glimmer_tool_parser.py:_normalize_name`); any other unknown name
   passes through;
-- a truncated call (no `</atem:invoke>`) is not a call; streamed frames hold back any tail that may still be a marker
-  or a ` to=` header.
+- the call's name is read from `<atem:invoke name="...">`, never from the channel's `to=` recipient (an Apache-2.0
+  server's Muse parser - OpenVINO Model Server's `onyx` parser, "Onyx" being the name the GPTQ repo's older template
+  still carries - observes the model writing the BARE tool name in `to=`, `src/llm/io_processing/onyx/
+  onyx_tool_parser.hpp:47-51` at `5d8bdfb19`, while vLLM observes `ns.ns`: the invoke name plus the collapse covers
+  both);
+- **argument values are typed by the tool's schema first** (decision 15): a string-typed parameter keeps its exact
+  text; integer / number / boolean / null / object / array are decoded; with no schema, JSON-decode else the raw
+  text. The three references differ here: transformers JSON-decodes first (`allow_non_json` returns the STRIPPED
+  text, `content_parsers.py:46-88`) and casts only values still strings (RP:42-64, RP:378-396), so a string-typed
+  `"007"` becomes `7`; vLLM JSON-decodes else keeps the raw text; the `onyx` parser types by schema
+  (`onyx_tool_parser.hpp:53-56`) - our Qwen XML `convert_value`'s rule (`server/toolcall.h`);
+- **a call cut by `max_tokens` or a stop string** (decision 16): never an error; the unterminated ATEM block is
+  removed from content (no raw markup reaches the client) and no partial call is emitted - an agent would execute
+  a truncated edit - with `finish_reason` `length`. (OVMS commit `503ff8662`, `onyx_tool_parser.cpp:211-249`,
+  instead synthesises the missing closing tags and emits the partial call; vLLM drops it.)
+- streamed frames hold back any tail that may still be a marker (`<|` - the framing idea of OVMS's gpt-oss parser,
+  `src/llm/io_processing/gptoss/content_parser.cpp:29-32, 110` at `db2f05cff`) or a growing ` to=` header; the
+  first message's header has no `<|start|>assistant` (`content_parser.cpp:56-59` lists both header forms for
+  gpt-oss's channels).
 - **The gate:** on every complete turn of 23e's corpus the parse equals transformers 5.19.0's `parse_response(text,
-  prefix=prompt, tools=...)` - except the reasoning join (decision 2) - and every split into 1-7 byte pieces streams
-  to the same result.
+  prefix=prompt, tools=...)` - except the reasoning join (decision 2) and the listed value-typing cases (decision
+  15) - and every split into 1-7 byte pieces streams to the same result.
+- **Two server facts checked:** `usage.prompt_tokens_details.cached_tokens` is already reported (spec 7 / plan 7c:
+  `server/openai.cc:64-70`, `server/server.cc:184`), so a prefix-cache hit on Muse shows there (23e asserts it);
+  `generation_config.json`'s `stop_strings` is not read today - Muse's has none, but 23e reads it as a string OR a
+  list (HF allows both; openvino.genai `d54d3768` fixed the string form in its reader) and merges it with a
+  request's `stop`.
 
 ## 7. Correctness of the fp32 deviations (recorded, not hidden)
 
@@ -502,3 +540,9 @@ as soon as 23a's tap dumps exist; 23f's engine half needs 23c-23e and P0's "go".
     transformers' (the pinned reference); the difference is one key at the window's edge and touches acceptance only.
 14. **(decide) Who runs the bf16 reference:** the box CPU (55.7 GB of text weights, layer-streamed, ~128 GB RAM) -
     **recommended** - or a rented machine.
+15. **(decide) Tool-call argument typing:** schema first (a string parameter keeps its text; our Qwen XML rule and the
+    `onyx` parser's) or transformers' JSON-first `parse_response`. **Recommended:** schema first - `"007"`, `"true"`,
+    `"null"` or `" x "` typed as strings must reach the tool unchanged; the gate lists these as the known differences.
+16. **(decide) A call cut by `max_tokens` / a stop string:** dropped and stripped from content with `finish_reason`
+    `length` (vLLM-like) or emitted with its tags synthesised (OVMS-like). **Recommended:** dropped - a partial edit
+    or command must never reach an agent as if complete.
