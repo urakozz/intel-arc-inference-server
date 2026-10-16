@@ -40,6 +40,20 @@ struct MtpCost {
   // the verify list covers.
   MtpCost with_free_drafts() const;
 
+  // Spec 19c (`--spec dflash`, spec 19 decision 4): the verify rows to M = 8 and the DFlash drafter's draft row,
+  // FLAT in K - one pass of the drafter drafts the whole block. DERIVED until the box measures them (queue row 29's
+  // probe_mtp_steps at M = 5..8 and probe_draft_cost; `--spec-cost` replaces either part):
+  //   verify M = 1..4   the head form's rows above; M = 5..8: M = 3 -> 4's slope, 0.22 a row
+  //                     (docs/probe-dflash-2026-10-08.md §3);
+  //   draft             the drafter's weights read once (int8 ~1.8 GB -> 0.10, bf16 ~3.6 GB -> 0.19 of the 32.65 ms
+  //                     int8 plain step) plus the target's head over the K mask rows, read once (int8 1.27 GB ->
+  //                     0.07, bf16 2.54 GB -> 0.14), whatever K (spec 19 §3).
+  static MtpCost dflash(bool i8_head, bool int8_drafter);
+  static constexpr double kDFlashDrafterInt8 = 0.10, kDFlashDrafterBf16 = 0.19;
+  static constexpr double kDFlashHeadInt8 = 0.07, kDFlashHeadBf16 = 0.14;
+  // The head's share of that draft row - what a draft vocabulary scales (with_draft_vocab).
+  static double dflash_head_share(bool i8_head, bool int8_drafter);
+
   uint32_t max_k() const;              // the deepest K both lists cover
   double cost(uint32_t k) const;       // K = 0: 1 (a plain step)
 };

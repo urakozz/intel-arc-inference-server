@@ -21,6 +21,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "cli/dflash_args.h"    // spec 19c: --spec dflash
 #include "cli/k2_decode.h"
 #include "cli/k2_serve_adapter.h"
 #include "cli/kolibri_decode.h"
@@ -181,7 +182,7 @@ void usage() {
                "                             so --max-len auto reaches about twice the context\n"
                "                             (Qwen3.8: the trained 262144). Accuracy gates on\n"
                "                             the card pending; needs the l0 / l0-int8 backends\n"
-               "                 [--spec off|mtp|lookup]   the speculative proposer (spec 19\n"
+               "                 [--spec off|mtp|lookup|dflash]   the speculative proposer (spec 19\n"
                "                             decision 3; default: --mtp's). mtp = --mtp auto unless\n"
                "                             --mtp is given. lookup (spec 19e) = prompt lookup: the\n"
                "                             drafts are the continuation of the longest earlier match\n"
@@ -192,9 +193,19 @@ void usage() {
                "                             UNVALIDATED on the card (plan 19e Task 2)\n"
                "                 [--spec-min-match N]   lookup drafts only after a match of >= N ids\n"
                "                             (2..64, default 3)\n"
-               "                 [--spec-max K]   lookup's largest K (1..3, default 3)\n"
-               "                 [--spec-cost SPEC]   lookup's cost table, --mtp-cost's syntax\n"
-               "                             (default: the --lm-head form's verify rows, free drafts)\n"
+               "                 [--spec-max K]   lookup's largest K (1..3, default 3); dflash's (1..7,\n"
+               "                             default 7)\n"
+               "                 [--spec-cost SPEC]   lookup's / dflash's cost table, --mtp-cost's syntax\n"
+               "                             (lookup default: the --lm-head form's verify rows, free drafts;\n"
+               "                             dflash: verify M = 1..8 and a draft row flat in K, derived)\n"
+               "                 --spec dflash (spec 19c): the DFlash drafter drafts K <= 7 ids a block from\n"
+               "                             the target's own hidden states, verified at M = K + 1 rows; K per\n"
+               "                             iteration by --mtp auto's policy. Greedy output unchanged; sampled\n"
+               "                             output lossless (the drafter's sparse q). One card, bf16 KV. Loads\n"
+               "                             no MTP head. UNVALIDATED on the card (queue row 55)\n"
+               "                 [--draft-model PATH]   the drafter (default z-lab/Qwen3.8-27B-DFlash2,\n"
+               "                             from the HF cache)\n"
+               "                 [--draft-format int8|bf16]   the drafter's linears (default int8, at load)\n"
                "                 [--spec-history N]   also match the generated ids of the last N\n"
                "                             requests (default 0)\n");
 }
@@ -782,6 +793,9 @@ int run(int argc, char** argv) {
   bool have_mtp_arg = false, have_spec_tuning = false;
   uint32_t spec_min_match = 3, spec_max = runtime::Engine::kMaxDraft, spec_history = 0;
   std::string spec_cost_arg;
+  // Spec 19c: --spec dflash's drafter (cli/dflash_args.h); --spec-max / --spec-cost serve lookup and dflash.
+  cli::dflash::Args dflash;
+  bool have_spec_max = false, have_spec_cost = false;
   // Spec 9 §3: the serving default is the gated int8 head (amendment §8, L3).
   loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
   // Spec 8 §11: off until the box rows decide (§11 "Gates").
@@ -852,7 +866,7 @@ int run(int argc, char** argv) {
       // Spec 23e: `dflash` is parsed so that Muse-Glimmer refuses it by name (its drafter is spec 23f's); every other
       // model refuses it below with this same message.
       if (spec_arg != "off" && spec_arg != "mtp" && spec_arg != "lookup" && spec_arg != "dflash")
-        throw std::runtime_error("--spec expects off, mtp or lookup, got '" + spec_arg + "'");
+        throw std::runtime_error("--spec expects off, mtp, lookup or dflash, got '" + spec_arg + "'");
     } else if (arg == "--spec-min-match") {
       spec_min_match = parse_u32("--spec-min-match", value(i, "--spec-min-match"));
       if (spec_min_match < 2 || spec_min_match > 64)
@@ -860,12 +874,18 @@ int run(int argc, char** argv) {
       have_spec_tuning = true;
     } else if (arg == "--spec-max") {
       spec_max = parse_u32("--spec-max", value(i, "--spec-max"));
-      if (spec_max == 0 || spec_max > runtime::Engine::kMaxDraft)
-        throw std::runtime_error("--spec-max expects 1..3");
-      have_spec_tuning = true;
+      have_spec_max = true;   // its range is the proposer's: checked below
     } else if (arg == "--spec-cost") {
       spec_cost_arg = value(i, "--spec-cost");
-      have_spec_tuning = true;
+      have_spec_cost = true;
+    } else if (arg == "--draft-model") {   // spec 19c
+      dflash.model = value(i, "--draft-model");
+      dflash.have_model = true;
+    } else if (arg == "--draft-format") {   // spec 19c
+      const std::string v = value(i, "--draft-format");
+      if (!loader::parse_draft_format(v, dflash.format))
+        throw std::runtime_error("--draft-format expects int8 or bf16, got '" + v + "'");
+      dflash.have_format = true;
     } else if (arg == "--spec-history") {
       spec_history = parse_u32("--spec-history", value(i, "--spec-history"));
       have_spec_tuning = true;
@@ -922,12 +942,19 @@ int run(int argc, char** argv) {
   }
   // Spec 19 decision 3: --spec names the proposer; --mtp keeps its meaning (--spec mtp).
   const bool spec_lookup = spec_arg == "lookup";
+  dflash.on = spec_arg == "dflash";   // spec 19c
   if (spec_arg == "mtp" && !have_mtp_arg) mtp_auto = true;
-  if ((spec_arg == "off" || spec_lookup) && have_mtp_arg && (mtp_auto || mtp_k > 0))
+  if ((spec_arg == "off" || spec_lookup || dflash.on) && have_mtp_arg && (mtp_auto || mtp_k > 0))
     throw std::runtime_error("--spec " + spec_arg + " and --mtp: one proposer per server");
   if (have_spec_tuning && !spec_lookup)
-    throw std::runtime_error("--spec-min-match, --spec-max, --spec-cost and --spec-history need "
-                             "--spec lookup");
+    throw std::runtime_error("--spec-min-match and --spec-history need --spec lookup");
+  if ((have_spec_max || have_spec_cost) && !spec_lookup && !dflash.on)
+    throw std::runtime_error("--spec-max and --spec-cost need --spec lookup or --spec dflash");
+  if (have_spec_max && spec_lookup && (spec_max == 0 || spec_max > runtime::Engine::kMaxDraft))
+    throw std::runtime_error("--spec-max expects 1..3 with --spec lookup");
+  if (dflash.on) dflash.max_k = have_spec_max ? spec_max : 7;
+  cli::dflash::check_flags(dflash);
+  cli::dflash::check_engine(dflash, pipe.on(), kv_cache);   // spec 19c: one card, bf16 KV, attention v2
   if (spec_lookup) {
     options.spec_lookup = true;
     options.lookup_min_match = spec_min_match;
@@ -983,8 +1010,14 @@ int run(int argc, char** argv) {
   // --mtp (K or auto), and the ranked list needs a size to fill. Checked here, before the
   // device is touched. The compact head is gathered from the head in either --lm-head
   // form; the loader refuses only a checkpoint that ships the head int4.
-  if ((draft_vocab != 0 || !draft_vocab_ids.empty()) && mtp_k == 0)
-    throw std::runtime_error("--draft-vocab and --draft-vocab-ids need --mtp (K or auto)");
+  if ((draft_vocab != 0 || !draft_vocab_ids.empty()) && mtp_k == 0 && !dflash.on)
+    throw std::runtime_error("--draft-vocab and --draft-vocab-ids need --mtp (K or auto) or --spec dflash");
+  // Spec 19c: the drafter's AdaptiveK policy (the server's --mtp auto loop, over the drafter's cost table).
+  if (dflash.on) {
+    options.mtp_auto = true;
+    options.mtp_adaptive.max_k = dflash.max_k;
+    options.mtp_adaptive.cost = cli::dflash::cost(dflash, lm_head, draft_vocab, spec_cost_arg);
+  }
   if (!draft_vocab_ids.empty() && draft_vocab == 0)
     throw std::runtime_error("--draft-vocab-ids needs --draft-vocab 32k, 64k or 128k");
   if (options.host.empty()) throw std::runtime_error("--host must not be empty");
@@ -1008,7 +1041,6 @@ int run(int argc, char** argv) {
   // kv-cache and --pp rules (its own, cli::muse::check_args, replace them), as b70-decode dispatches it. --chat-template
   // and --spec dflash are parsed for it alone.
   const bool muse = cli::muse::is_muse(path);
-  if (!muse && spec_arg == "dflash") throw std::runtime_error("--spec expects off, mtp or lookup, got 'dflash'");
   if (!muse && !chat_template_file.empty())
     throw std::runtime_error("--chat-template is built for Muse-Glimmer-30B only (spec 23e: its checkpoints ship an "
                              "older template); this checkpoint renders its own");
@@ -1036,6 +1068,9 @@ int run(int argc, char** argv) {
     return serve_muse(ms, options);
   }
   if (cli::qwen4exp::is_qwen4exp(path)) {
+    if (dflash.on)
+      throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter (spec 19c); "
+                               "Qwen3.8-Flash-Next has none");
     cli::qwen4exp::ServeArgs qs;
     qs.snapshot_dir = loader::resolve_snapshot(path);
     qs.tokenizer = q4_tokenizer;
@@ -1067,6 +1102,9 @@ int run(int argc, char** argv) {
     throw std::runtime_error("--layers, --ple-dir and --tokenizer belong to Qwen3.8-Flash-Next (model_type qwen4_exp, "
                              "spec 21e); this checkpoint is not one");
   if (cli::kolibri::is_kolibri(path)) {
+    if (dflash.on)
+      throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter (spec 19c); Kolibri-1 has "
+                               "none");
     if (spec_lookup)
       throw std::runtime_error("--spec lookup verifies its drafts through the MTP verify lists, which Kolibri-1's "
                                "engine does not capture (no MTP head, spec 20 §1): drop --spec lookup");
@@ -1128,6 +1166,8 @@ int run(int argc, char** argv) {
   pipe_ctx.model_type = model_type;
   cli::check_serve_pipeline(pipe, pipe_ctx);
   if (model_type == "k2_horizon") {
+    if (dflash.on)
+      throw std::runtime_error("--spec dflash: no DFlash drafter exists for K2-Horizon (spec 19 §1)");
     if (mtp_k > 0 || mtp_auto)
       throw std::runtime_error("K2-Horizon has no MTP head (spec 18 §9): drop --mtp / --spec mtp");
     if (spec_lookup)
@@ -1163,6 +1203,7 @@ int run(int argc, char** argv) {
   loader::DraftVocabSpec dv_spec;
   if (draft_vocab != 0) {
     dv_spec.size = draft_vocab;
+    dv_spec.for_drafter = dflash.on;   // spec 19c: the drafter's head, no MTP head
     dv_spec.added = loader::added_token_ids_file(snapshot_dir + "tokenizer.json");
     dv_spec.eos = eos;
     if (!draft_vocab_ids.empty()) dv_spec.ranked = loader::read_ranked_ids(draft_vocab_ids);
@@ -1200,6 +1241,10 @@ int run(int argc, char** argv) {
     return loader::load(context, snapshot_dir, cli::load_len(max_len_arg, trained),
                         /*mtp=*/mtp_k > 0 || spec_lookup, lm_head, dv_spec);
   }();
+  // Spec 19c: the drafter beside the target, before the plan (its weights and buffers, and the engine's verify
+  // slots and prefill taps for it, come out of what auto can give the context).
+  std::unique_ptr<cli::dflash::Loaded> drafter_load;
+  if (dflash.on) drafter_load = std::make_unique<cli::dflash::Loaded>(cli::dflash::load(context, dflash, model));
   // Spec 15c: the server prefills every request; a model whose prefill is not built is
   // refused here by name. Spec 15e serves Ornith (a MoE model): its chat template is the
   // checkpoint's (chat::Template, tests/tokenizer/ornith_*), its tool calls the Qwen XML
@@ -1208,8 +1253,15 @@ int run(int argc, char** argv) {
   model::require_prefill(*model.desc);
   // Spec 6 §10: auto plans the largest max_len that fits and re-tables the model; an
   // explicit N is held to the same plan. Both print the plan's breakdown.
-  const uint32_t max_len = cli::settle(context, model, max_len_arg, mem_reserve, pp_path, kv_cache);
-  runtime::Engine engine(context, std::move(model), max_len, /*debug_resid=*/false, kv_cache);
+  const uint32_t max_len = cli::settle(context, model, max_len_arg, mem_reserve, pp_path, kv_cache,
+                                       drafter_load ? drafter_load->plan : runtime::DrafterPlan{});
+  std::unique_ptr<runtime::dflash::DFlashDrafter> drafter;
+  if (drafter_load)
+    drafter = std::make_unique<runtime::dflash::DFlashDrafter>(context, std::move(drafter_load->w),
+                                                               drafter_load->head_rows, max_len, dflash.max_k);
+  const bool draft_vocab_on = model.draft_vocab != nullptr;
+  runtime::Engine engine(context, std::move(model), max_len, /*debug_resid=*/false, kv_cache, drafter.get());
+  if (drafter) drafter->attach(engine, draft_vocab_on);
   if (have_pp_backend) engine.set_prefill_backend(pp_backend);
   // Prefill setup at load, not in the first request: on l0-int8 this is the
   // one-time rotated column-scale pass (spec 5 T2).
@@ -1231,7 +1283,8 @@ int run(int argc, char** argv) {
                  tokenizer.vocab_used(), served.name.c_str(), served.vocab_used,
                  tokenizer.vocab_used());
   TemplateAdapter chat_template(snapshot_dir);
-  EngineAdapter engine_adapter(engine, tokenizer.vocab_used(), mtp_k, spec_lookup);
+  EngineAdapter engine_adapter(engine, tokenizer.vocab_used(), dflash.on ? dflash.max_k : mtp_k, spec_lookup,
+                               dflash.on);
   options.eos_ids = eos;
   // Sized after the model is loaded, so "available" already excludes the process's own load.
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
@@ -1250,6 +1303,15 @@ int run(int argc, char** argv) {
                runtime::kv_cache_name(engine.kv_cache()));
   print_proposer(options, spec_lookup, spec_min_match, spec_max, spec_history, mtp_auto,
                  served.is_moe() && mtp_cost_arg.empty(), served.name);
+  if (drafter) {   // spec 19c: the drafter's policy line (print_proposer's format)
+    const server::MtpCost& c = options.mtp_adaptive.cost;
+    std::fprintf(stderr, "spec dflash: %s drafter, K <= %u, cost verify M=1..%zu",
+                 loader::draft_format_name(dflash.format), dflash.max_k, c.verify.size());
+    for (double v : c.verify) std::fprintf(stderr, " %.3f", v);
+    std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
+    for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
+    std::fprintf(stderr, " (plain steps; derived until the box measures them)\n");
+  }
 
   return listen_until_stopped(server, options);
 }

@@ -35,6 +35,7 @@
 #include <utility>
 #include <vector>
 
+#include "cli/dflash_args.h"   // spec 19c: --spec dflash
 #include "cli/k2_decode.h"
 #include "cli/kolibri_decode.h"
 #include "cli/muse_decode.h"
@@ -124,6 +125,11 @@ void usage() {
        "                 auto's per-request policy, its default cost table for the --lm-head\n"
        "                 form). Greedy, so the ids equal the plain run's; off / 0 = no head.\n"
        "                 Stderr adds the iterations and the acceptance.\n"
+       "  --spec dflash  --ids only (spec 19c): greedy speculative decoding with a DFlash drafter\n"
+       "                 (the MTP head is not loaded): K = --spec-max drafts a block (1..7,\n"
+       "                 default 7), verified at M = K + 1; the ids equal the plain run's.\n"
+       "                 [--draft-model PATH] (default z-lab/Qwen3.8-27B-DFlash2, HF cache)\n"
+       "                 [--draft-format int8|bf16] (default int8). One card, bf16 KV.\n"
       "  --device N     GPU index. Absent: ONEAPI_DEVICE_SELECTOR=level_zero:N, else device 0.\n"
       "  --max-len <L>  KV cache and RoPE capacity: default 16384 (bench rows stay comparable);\n"
       "                 any multiple of 256 up to the trained context (config.json\n"
@@ -728,6 +734,57 @@ int generate_mtp(Eng& eng, uint32_t n, bool mtp_auto, uint32_t mtp_k, loader::Lm
   return 0;
 }
 
+// --- --spec dflash: greedy speculative decoding with a DFlash drafter in --ids mode (spec 19c) ----------------
+//
+// generate_mtp's loop with the engine's drafter as the proposer at a fixed K (--spec-max; the last positions of
+// max_len fall back through max_verify_k): the drafter's draft list -> verify(K) -> the longest prefix the target's
+// argmax agrees with -> commit (which projects the committed rows into the drafter's ring). Greedy, so the ids are
+// the plain run's (D2); stderr adds the iterations and the acceptance.
+int generate_dflash(runtime::Engine& eng, uint32_t n, uint32_t max_k) {
+  runtime::TapDrafter& d = *eng.tap_drafter();
+  uint32_t printed = 0;
+  uint64_t iters = 0, drafted = 0, accepted = 0, at_k[8] = {};
+  const auto emit = [&](uint32_t id) {
+    if (printed == n) return;
+    std::printf("%u\n", id);
+    std::fflush(stdout);
+    ++printed;
+  };
+  const auto t0 = std::chrono::steady_clock::now();
+  while (printed < n) {
+    const uint32_t k = std::min(max_k, eng.max_verify_k());
+    const uint32_t x = pending_of(eng);
+    uint32_t j = 0;
+    if (k == 0) {
+      eng.verify(0);
+      eng.commit(0, eng.verify_ids()[0]);
+      emit(x);
+    } else {
+      const runtime::dflash::DFlashDraftOut& o = d.draft(eng, k, 0.0f, 0);
+      const std::vector<uint32_t> drafts(o.ids, o.ids + k);
+      eng.verify(k);
+      while (j < k && drafts[j] == eng.verify_ids()[j]) ++j;
+      emit(x);
+      for (uint32_t i = 0; i < j; ++i) emit(drafts[i]);
+      eng.commit(j, eng.verify_ids()[j]);
+    }
+    ++iters;
+    ++at_k[k];
+    drafted += k;
+    accepted += j;
+  }
+  const double ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  std::fprintf(stderr, "generate: %u ids, %.2f t/s, %.2f ms/token (--spec dflash, K %u, greedy)\n", n,
+               ms > 0.0 ? 1000.0 * n / ms : 0.0, n ? ms / n : 0.0, max_k);
+  std::fprintf(stderr, "dflash: %llu iterations (K=0..7:", (unsigned long long)iters);
+  for (uint64_t c : at_k) std::fprintf(stderr, " %llu", (unsigned long long)c);
+  std::fprintf(stderr, "), acceptance %.4f (%llu/%llu), %.3f ids per iteration, pos %u\n",
+               drafted ? double(accepted) / double(drafted) : 0.0, (unsigned long long)accepted,
+               (unsigned long long)drafted, iters ? double(n) / double(iters) : 0.0, eng.pos());
+  return 0;
+}
+
 int run(int argc, char** argv) {
   std::string path, ids_path;
   uint32_t n = 0, depth = 4096, tg = 256, steps = 32, repeats = 1, max_len = 16384;
@@ -746,6 +803,9 @@ int run(int argc, char** argv) {
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   bool have_lm_head = false;   // spec 23c: Muse-Glimmer's head is int8 unless --lm-head bf16
   bool have_spec = false;      // spec 23c: --spec is refused by name for Muse-Glimmer (23f's DFlash); else unknown
+  std::string spec_arg;        // spec 19c: `dflash` runs the DFlash drafter (--ids); anything else is unknown
+  cli::dflash::Args dflash;
+  bool have_spec_max = false;
   runtime::KvCache kv_cache = runtime::default_kv_cache();   // spec 12b: --kv-cache
   // Spec 8: --mtp K|auto in --ids mode (greedy); absent = no head, every path as before.
   uint32_t mtp_k = 0;
@@ -843,9 +903,20 @@ int run(int argc, char** argv) {
       if (!loader::parse_lm_head_form(v, lm_head))
         throw std::runtime_error("--lm-head expects bf16 or int8, got '" + v + "'");
       have_lm_head = true;
-    } else if (a == "--spec") {   // spec 23c: parsed so Muse-Glimmer refuses it by name (spec 23f's DFlash)
-      (void)value(i, "--spec");
+    } else if (a == "--spec") {   // spec 23c: parsed so Muse-Glimmer refuses it by name; spec 19c: dflash
+      spec_arg = value(i, "--spec");
       have_spec = true;
+    } else if (a == "--spec-max") {   // spec 19c
+      dflash.max_k = parse_u32("--spec-max", value(i, "--spec-max"));
+      have_spec_max = true;
+    } else if (a == "--draft-model") {   // spec 19c
+      dflash.model = value(i, "--draft-model");
+      dflash.have_model = true;
+    } else if (a == "--draft-format") {   // spec 19c
+      const std::string v = value(i, "--draft-format");
+      if (!loader::parse_draft_format(v, dflash.format))
+        throw std::runtime_error("--draft-format expects int8 or bf16, got '" + v + "'");
+      dflash.have_format = true;
     } else if (!a.empty() && a[0] == '-') {
       usage();
       throw std::runtime_error(cli::unknown_option(a));
@@ -967,12 +1038,25 @@ int run(int argc, char** argv) {
     ma.ple_dir = !ple_dir.empty();
     return cli::muse::run_decode<StdoutToStderr>(ma);
   }
-  if (have_spec) throw std::runtime_error(cli::unknown_option("--spec"));
+  // Spec 19c: --spec dflash is the Qwen engine's (--ids, one card); every other --spec is unknown here.
+  if (have_spec && spec_arg != "dflash") throw std::runtime_error(cli::unknown_option("--spec"));
+  dflash.on = spec_arg == "dflash";
+  if (have_spec_max && !dflash.on) throw std::runtime_error("--spec-max needs --spec dflash");
+  cli::dflash::check_flags(dflash);
+  if (dflash.on) {
+    if (ids_path.empty())
+      throw std::runtime_error("--spec dflash belongs to --ids (greedy speculative decoding); --bench and --profile "
+                               "time the plain list");
+    if (mtp_on) throw std::runtime_error("--spec dflash and --mtp: one proposer");
+    cli::dflash::check_engine(dflash, pipe.on(), kv_cache);
+  }
   // Spec 20c: Kolibri-1 (model_type kolibri1) runs runtime::kolibri::KolibriEngine on one or two
   // cards - dispatched here, before the Qwen engine's pipeline and kv-cache rules (its own refusals,
   // cli/kolibri_decode.h, replace them: --pp defaults to 2 there). A path that does not resolve is
   // not Kolibri - the flows below report it, so every rejection keeps its order.
   if (cli::kolibri::is_kolibri(path)) {
+    if (dflash.on)
+      throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter (spec 19c); Kolibri-1 has none");
     if (layers_auto) throw std::runtime_error("--layers auto is Qwen3.8-Flash-Next's (spec 21c); Kolibri-1 takes --layers N");
     if (!ple_dir.empty()) throw std::runtime_error("--ple-dir belongs to Qwen3.8-Flash-Next (spec 21c)");
     cli::kolibri::DecodeArgs ka;
@@ -1004,6 +1088,8 @@ int run(int argc, char** argv) {
   // cli/qwen4exp_decode.h: the prefill's other backends (21d: l0 only), --mtp (21e), int8 KV (decision 8), the whole
   // model without --layers (spec 22)). A path that does not resolve is not this family - the flows below report it.
   if (cli::qwen4exp::is_qwen4exp(path)) {
+    if (dflash.on)
+      throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter (spec 19c); Qwen3.8-Flash-Next has none");
     cli::qwen4exp::DecodeArgs qa;
     qa.path = path;
     qa.ids_path = ids_path;
@@ -1053,6 +1139,8 @@ int run(int argc, char** argv) {
   // K2 does not have yet is refused here by the stage that builds it. A path that does not
   // resolve is not K2 - the Qwen flow below reports it, so every rejection keeps its order.
   if (cli::k2::is_k2(path)) {
+    if (dflash.on)
+      throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter (spec 19c); K2-Horizon has none");
     // Spec 18c: K2 prefills (--prefill / --prefill-length) on the l0 backend only - the h8 path (l0-int8)
     // rotates in 1024-k Hadamard blocks and K2's hidden is 2560; sycl-tla has no K2 walk.
     if ((have_prefill_len || prefill) && have_pp_backend && pp_backend != runtime::PrefillBackend::L0)
@@ -1161,13 +1249,17 @@ int run(int argc, char** argv) {
     StdoutToStderr redirect;
     return loader::load(ctx, path, cli::load_len(max_len_arg, trained), /*mtp=*/mtp_on, lm_head);
   }();
+  // Spec 19c: the drafter beside the target, before the plan.
+  std::unique_ptr<cli::dflash::Loaded> drafter_load;
+  if (dflash.on) drafter_load = std::make_unique<cli::dflash::Loaded>(cli::dflash::load(ctx, dflash, model));
   // Spec 15c: --prefill-length / --prefill on a model whose prefill is not built stop here with the
   // reason, before a plan or an engine is made for it (spec 15d: Ornith's is built, on
   // the L0 backends - Engine::prepare_prefill refuses sycl-tla by name).
   if (have_prefill_len || prefill) model::require_prefill(*model.desc);
   // Spec 6 §10: auto plans and re-tables the model; an explicit length is held to the
   // plan. The prefill scratch is planned only when this run prefills (ruling R7).
-  max_len = cli::settle(ctx, model, max_len_arg, mem_reserve, pp_path, kv_cache);
+  max_len = cli::settle(ctx, model, max_len_arg, mem_reserve, pp_path, kv_cache,
+                        drafter_load ? drafter_load->plan : runtime::DrafterPlan{});
   if (max_len_arg.is_auto) check_len(max_len);
 
   // --profile forks here: it replays an instrumented capture and has to reset
@@ -1177,7 +1269,12 @@ int run(int argc, char** argv) {
 
   // debug_resid off: the per-layer tap costs 64 device copies a token and only
   // the golden gate (Task 8) reads it.
-  runtime::Engine eng(ctx, std::move(model), max_len, /*debug_resid=*/false, kv_cache);
+  std::unique_ptr<runtime::dflash::DFlashDrafter> drafter;
+  if (drafter_load)
+    drafter = std::make_unique<runtime::dflash::DFlashDrafter>(ctx, std::move(drafter_load->w), drafter_load->head_rows,
+                                                               max_len, dflash.max_k);
+  runtime::Engine eng(ctx, std::move(model), max_len, /*debug_resid=*/false, kv_cache, drafter.get());
+  if (drafter) drafter->attach(eng, /*draft_vocab=*/false);
   std::fprintf(stderr,
                "engine: %zu kernels, %zu modules, max_len %u, %.2f GB of persistent state, "
                "decode attention %s, kv cache %s\n",
@@ -1232,6 +1329,7 @@ int run(int argc, char** argv) {
     std::fprintf(stderr, "prefill: %zu ids, pos %u\n", ids.size(), eng.pos());
 
   if (!bench && mtp_on) return generate_mtp(eng, n, mtp_auto, mtp_k, lm_head);
+  if (!bench && drafter) return generate_dflash(eng, n, dflash.max_k);   // spec 19c
   if (!bench) {
     eng.generate(n, [](uint32_t id) {
       std::printf("%u\n", id);

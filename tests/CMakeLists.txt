@@ -3823,7 +3823,7 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_chat_template_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --chat-template x
     EXPECT "Muse-Glimmer-30B only")
   b70_serve_reject(cli_reject_serve_spec_dflash_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --spec dflash
-    EXPECT "--spec expects off, mtp or lookup")
+    EXPECT "built for Qwen3.8 beside its drafter")   # spec 19c: dflash is Qwen3.8's now
   set_tests_properties(cli_reject_serve_muse_mtp cli_reject_serve_muse_spec_mtp cli_reject_serve_muse_spec
     cli_reject_serve_muse_lookup cli_reject_serve_muse_kv8 cli_reject_serve_muse_int8pf cli_reject_serve_muse_sycl
     cli_reject_serve_muse_maxlen cli_reject_serve_muse_device cli_reject_serve_muse_template
@@ -3943,7 +3943,7 @@ endif()
 # with the real drafter beside the gate checkpoint (dflash_engine_test).
 add_executable(dflash_engine_host_test runtime/dflash_engine_host_test.cc)
 target_include_directories(dflash_engine_host_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(dflash_engine_host_test PRIVATE b70_plan)
+target_link_libraries(dflash_engine_host_test PRIVATE b70_plan b70_server)
 add_test(NAME dflash_engine_host_test COMMAND dflash_engine_host_test)
 set_tests_properties(dflash_engine_host_test PROPERTIES LABELS dflash)
 # The engine with the real drafter beside the gate checkpoint (int8 head, bf16 KV): the lists' counts, the taps and
@@ -3962,5 +3962,35 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_test(NAME dflash_engine_test COMMAND dflash_engine_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_engine_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
+endif()
+# b70-decode --spec dflash's refusals before the device.
+b70_cli_reject(cli_reject_dflash_bench ${B70_NO_MODEL} --bench --spec dflash EXPECT "--spec dflash belongs to --ids")
+b70_cli_reject(cli_reject_dflash_mtp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --mtp 1
+  EXPECT "one proposer")
+b70_cli_reject(cli_reject_dflash_spec_max ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --spec-max 9
+  EXPECT "expects 1..7")
+b70_cli_reject(cli_reject_dflash_kv8 ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --kv-cache int8
+  EXPECT "--kv-cache bf16 with --spec dflash")
+b70_cli_reject(cli_reject_dflash_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
+  --spec dflash EXPECT "Kolibri-1 has none")
+set_tests_properties(cli_reject_dflash_bench cli_reject_dflash_mtp cli_reject_dflash_spec_max cli_reject_dflash_kv8
+  cli_reject_dflash_kolibri PROPERTIES LABELS dflash)
+# b70-serve --spec dflash's refusals before the device (cli/dflash_args.h).
+if(TARGET b70-serve AND COMMAND b70_serve_reject)
+  b70_serve_reject(cli_reject_serve_dflash_mtp ${B70_NO_MODEL} --spec dflash --mtp 1 EXPECT "one proposer per server")
+  b70_serve_reject(cli_reject_serve_dflash_model_alone ${B70_NO_MODEL} --draft-model x EXPECT "need --spec dflash")
+  b70_serve_reject(cli_reject_serve_dflash_spec_max ${B70_NO_MODEL} --spec dflash --spec-max 8 EXPECT "expects 1..7")
+  b70_serve_reject(cli_reject_serve_dflash_min_match ${B70_NO_MODEL} --spec dflash --spec-min-match 4
+    EXPECT "need --spec lookup")
+  b70_serve_reject(cli_reject_serve_dflash_format ${B70_NO_MODEL} --spec dflash --draft-format fp8
+    EXPECT "--draft-format expects int8 or bf16")
+  b70_serve_reject(cli_reject_serve_dflash_kv8 ${B70_NO_MODEL} --spec dflash --kv-cache int8
+    EXPECT "--kv-cache bf16 with --spec dflash")
+  b70_serve_reject(cli_reject_serve_dflash_pp ${B70_NO_MODEL} --spec dflash --pp 2 EXPECT "runs on one card")
+  b70_serve_reject(cli_reject_serve_dflash_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --spec dflash
+    EXPECT "no DFlash drafter exists for K2-Horizon")
+  set_tests_properties(cli_reject_serve_dflash_mtp cli_reject_serve_dflash_model_alone cli_reject_serve_dflash_spec_max
+    cli_reject_serve_dflash_min_match cli_reject_serve_dflash_format cli_reject_serve_dflash_kv8
+    cli_reject_serve_dflash_pp cli_reject_serve_dflash_k2 PROPERTIES LABELS dflash)
 endif()
 # ==== Spec 19c ==== (end) ====

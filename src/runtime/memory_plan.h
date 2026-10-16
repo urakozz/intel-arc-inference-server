@@ -42,6 +42,11 @@ struct MemoryComponents {
 // per_position; the rest does not move with max_len. All zero = no drafter.
 struct DrafterPlan {
   size_t weights = 0, fixed = 0, per_position = 0;
+  // Spec 19c: the target layers the drafter taps (its target_layer_ids' count). With a drafter the plan also counts
+  // the ENGINE's side of it (runtime/tap_drafter.h): TapVerifyDims' 7 more GDN state slots for the verify lists at
+  // M <= 8 (in decode_state) and, when the engine prefills, the tap staging (in prefill_scratch, lazy).
+  uint32_t n_taps = 0;
+  bool on() const { return weights != 0; }
   size_t bytes(uint32_t max_len) const { return weights + fixed + per_position * size_t(max_len); }
 };
 
@@ -102,6 +107,10 @@ struct MemoryPlan : MemoryComponents {
   // Spec 15d: the MoE prefill scratch (runtime::moe_prefill_layout: routing, sorted rows,
   // expert activations, the per-chunk weight batch) - inside prefill_scratch. 0 when dense.
   size_t moe_prefill = 0;
+  // Spec 19c, a drafter: the engine's verify slots (in decode_state) and the prefill's tap staging (in
+  // prefill_scratch, counted with prefill only). 0 without a drafter.
+  size_t drafter_slots = 0;
+  size_t drafter_taps = 0;
 };
 
 // `kv` (spec 12b, `--kv-cache`): the KV cache's form - its term follows it (bf16: 64 KiB

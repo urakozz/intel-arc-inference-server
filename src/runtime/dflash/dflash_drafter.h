@@ -45,7 +45,8 @@ class DFlashDrafter final : public TapDrafter {
   // drafter drafts greedily only). k must be 1 .. min(max_k(), e.max_verify_k()). Returns the readback: per draft
   // row its id, its 16 candidates (real ids), their head logits and the selector's realized scores - the draft
   // distribution q of row j is softmax(scores[j] / temperature) over cand[j] (server::dflash_q).
-  const DFlashDraftOut& draft(Engine& e, uint32_t k, float temperature, uint64_t seed);
+  const DFlashDraftOut& draft(Engine& e, uint32_t k, float temperature, uint64_t seed) override;
+  bool samples() const override { return w_.desc.v2(); }
 
   const model::DFlashDesc& desc() const { return w_.desc; }
   const loader::DFlashWeights& weights() const { return w_; }

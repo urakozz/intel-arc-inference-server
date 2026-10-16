@@ -25,8 +25,9 @@ std::string format_memory(const char* label, const MemoryComponents& c, size_t d
 
 MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t model_bytes,
                 const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv, const DrafterPlan& drafter) {
-  if (dv.rows != 0 && !mtp)
-    throw std::invalid_argument("runtime::plan: a draft vocabulary drafts with the MTP head");
+  // Spec 8 §11 / spec 19c: a draft vocabulary narrows the MTP head's or the DFlash drafter's head.
+  if (dv.rows != 0 && !mtp && !drafter.on())
+    throw std::invalid_argument("runtime::plan: a draft vocabulary drafts with the MTP head or a drafter");
   MemoryPlan p;
   p.drafter = drafter.bytes(max_len);   // spec 19b: 0 without a drafter
   p.max_len = max_len;
@@ -42,12 +43,12 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
   // DecodeScratchSizes::moe is in decode_state).
   p.moe_weights = loader::moe_bytes(desc);
   p.moe_scratch = moe_scratch_layout(desc).total;
+  // The loader's compact head and id table, outside model_bytes (LoadReport::total()) - for the MTP head's drafts or
+  // (spec 19c) the drafter's, whose own logits are in its buffers (DrafterPlan).
+  if (dv.rows != 0) p.draft_vocab = loader::draft_vocab_bytes(dv.rows, desc.hidden, dv.int8).total();
   if (mtp) {
     // With a draft vocabulary MtpBuffers also holds its compact logits (spec 8 §11).
     p.mtp_buffers = MtpDims::sizes(max_len, desc, dv.rows, kv).total();
-    // The loader's compact head and id table, outside model_bytes (LoadReport::total()).
-    if (dv.rows != 0)
-      p.draft_vocab = loader::draft_vocab_bytes(dv.rows, desc.hidden, dv.int8).total();
     // Allocated on the first prefill of an engine with the head (engine_prefill.cc).
     p.mtp_hidden = path.prefill ? mtp_prefill_hidden_bytes(desc) : 0;
     p.decode_state += p.mtp_buffers + p.mtp_hidden;
@@ -68,6 +69,15 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
     if (path.backend == PrefillBackend::L0Int8)
       p.int8 = int8_scratch_sizes(prefill_int8_max_k(desc)).total() + int8_scale_bytes(desc);
     p.moe_prefill = s.moe;   // spec 15d: inside s.eager(), 0 when dense
+  }
+  // Spec 19c: the engine's side of a drafter - 7 more GDN slots, and the prefill's tap staging.
+  if (drafter.on()) {
+    p.drafter_slots = TapVerifyDims::gdn_spec_bytes(desc);
+    p.decode_state += p.drafter_slots;
+    if (path.prefill) {
+      p.drafter_taps = TapVerifyDims::prefill_taps_bytes(desc, drafter.n_taps);
+      p.prefill_scratch += p.drafter_taps;
+    }
   }
   return p;
 }
@@ -121,6 +131,14 @@ std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_by
   }
   if (p.prefill_lazy != 0) {
     std::snprintf(buf, sizeof buf, ", lazy %.3f GB in prefill scratch", p.prefill_lazy / gb);
+    s += buf;
+  }
+  if (p.drafter_slots != 0) {   // spec 19c
+    std::snprintf(buf, sizeof buf, ", drafter's verify slots %.3f GB in decode state", p.drafter_slots / gb);
+    s += buf;
+  }
+  if (p.drafter_taps != 0) {
+    std::snprintf(buf, sizeof buf, ", drafter's prefill taps %.3f GB in prefill scratch", p.drafter_taps / gb);
     s += buf;
   }
   if (p.kv_cache == KvCache::Int8) s += ", int8 KV cache";   // spec 12b; bf16 says nothing

@@ -45,6 +45,11 @@ endif()
 # Spec 18b: b70-decode dispatches on config.json's model_type; K2-Horizon runs its own engine
 # (runtime/k2, src/cli/k2_decode.h). Appended, so the lines above are unchanged.
 target_link_libraries(b70-decode PRIVATE b70_k2_runtime)
+# Spec 19c: --spec dflash (runtime::dflash::DFlashDrafter beside runtime::Engine).
+target_link_libraries(b70-decode PRIVATE b70_dflash_runtime)
+if(TARGET b70-serve)
+  target_link_libraries(b70-serve PRIVATE b70_dflash_runtime)
+endif()
 # Spec 8: b70-decode --mtp auto runs b70-serve's per-request policy (server::AdaptiveK, host
 # code in b70_server); appended, as the K2 line above.
 target_link_libraries(b70-decode PRIVATE b70_server)

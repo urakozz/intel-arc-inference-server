@@ -67,6 +67,7 @@ DrafterPlan drafter_plan(const model::DFlashDesc& d, uint32_t target_hidden, uin
   const size_t b = sizes(d, target_hidden, head_rows, 8192).total();
   p.per_position = (b - a) / 4096;
   p.fixed = a - p.per_position * 4096;
+  p.n_taps = uint32_t(d.taps.size());   // spec 19c: the engine's prefill tap staging
   return p;
 }
 
