@@ -183,9 +183,10 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
   return pp_plan(d, split, max_len, w, kv, pf, PpExtras{});
 }
 
-size_t pp_gdn_spec_bytes(const model::ModelDesc& d, uint32_t stage_gdn) {
+size_t pp_gdn_spec_bytes(const model::ModelDesc& d, uint32_t stage_gdn, uint32_t slots) {
+  if (slots < 2) throw std::invalid_argument("runtime::pp_gdn_spec_bytes: a verify list needs >= 2 slots");
   const size_t layer = size_t(d.gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;
-  return size_t(MtpDims::kSlots - 2) * d.gdn_layers * layer + size_t(stage_gdn) * layer;
+  return size_t(slots - 2) * d.gdn_layers * layer + size_t(stage_gdn) * layer;
 }
 
 size_t pp_mtp_prefill_bytes(const model::ModelDesc& d) {
@@ -240,8 +241,10 @@ std::vector<PpKvRun> pp_kv_runs(const std::array<KvLayout, kPpDevices>& stage, c
 
 PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, const PpWeights& w,
                KvCache kv, const PrefillPath& pf, const PpExtras& x) {
-  if (x.draft_vocab != 0 && !x.mtp)
-    throw std::invalid_argument("runtime::pp_plan: a draft vocabulary drafts with the MTP head");
+  if (x.draft_vocab != 0 && !x.mtp && !x.drafter.on())
+    throw std::invalid_argument("runtime::pp_plan: a draft vocabulary drafts with the MTP head or a drafter");
+  if (x.mtp && x.drafter.on())
+    throw std::invalid_argument("runtime::pp_plan: the MTP head and a drafter are two proposers (spec 19 decision 3)");
   if (pf.prefill && (pf.composed_attn || !is_l0(pf.backend)))
     throw std::invalid_argument(std::string("runtime::pp_plan: the two-card prefill runs the L0 "
                                             "backends' flash attention only, not ") +
@@ -298,6 +301,23 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
         dp.mtp_buffers = pp_gdn_spec_bytes(d, st[i].gdn);
       }
       dp.decode_state += dp.mtp_buffers + dp.mtp_prefill;
+    }
+    if (x.drafter.on()) {   // spec 19d (PpExtras, pipeline_plan.h)
+      if (last) {
+        dp.embed_replica = w.embed;
+        dp.model += dp.embed_replica;
+        dp.drafter = x.drafter.bytes(max_len);
+        if (x.draft_vocab != 0)
+          dp.draft_vocab = w.draft_vocab != 0
+                               ? w.draft_vocab
+                               : loader::draft_vocab_bytes(x.draft_vocab, d.hidden, x.draft_vocab_int8).total();
+        if (pf.prefill) {
+          dp.drafter_taps = kPpPfDepth * TapVerifyDims::prefill_taps_bytes(d, x.drafter.n_taps);
+          dp.prefill_scratch += dp.drafter_taps;
+        }
+      }
+      dp.drafter_slots = pp_gdn_spec_bytes(d, st[i].gdn, TapVerifyDims::kSlots);
+      dp.decode_state += dp.drafter_slots;
     }
     if (x.hook && pf.prefill) {
       const PersistentSizes hs = PersistentDims::stage_sizes(max_len, d, kv, st[i].gdn, st[i].fa);
@@ -450,7 +470,7 @@ std::string pp_describe(const PpPlan& p, const std::array<size_t, kPpDevices>& d
                 p.kv_cache == KvCache::Int8 ? ", int8 KV cache" : "",
                 p.prefill.prefill ? ", prefill " : "",
                 p.prefill.prefill ? prefill_backend_name(p.prefill.backend) : "",
-                p.extras.mtp ? ", the MTP head on device 1" : "");
+                p.extras.mtp ? ", the MTP head on device 1" : p.extras.drafter.on() ? ", the DFlash drafter on device 1" : "");
   std::string out = head;
   for (uint32_t i = 0; i < kPpDevices; ++i) {
     const std::string label = "\n  device " + std::to_string(i);
@@ -466,15 +486,22 @@ std::string pp_describe(const PpPlan& p, const std::array<size_t, kPpDevices>& d
       out += tail;
     }
     // Spec 16d's terms, only when present: 16b's and 16c's lines are unchanged without them.
-    if (p.dev[i].embed_replica + p.dev[i].mtp_weights != 0) {
+    if (p.extras.mtp && p.dev[i].embed_replica + p.dev[i].mtp_weights != 0) {
       std::snprintf(tail, sizeof tail,
                     "; MTP: head %.3f GB + embedding replica %.3f GB in model, %.3f GB in decode state",
                     p.dev[i].mtp_weights / gb, p.dev[i].embed_replica / gb,
                     (p.dev[i].mtp_buffers + p.dev[i].mtp_prefill) / gb);
       out += tail;
-    } else if (p.dev[i].mtp_buffers != 0) {
+    } else if (p.extras.mtp && p.dev[i].mtp_buffers != 0) {
       std::snprintf(tail, sizeof tail, "; MTP: its layers' verify slots %.3f GB in decode state",
                     p.dev[i].mtp_buffers / gb);
+      out += tail;
+    }
+    if (p.dev[i].drafter_slots != 0) {   // spec 19d
+      std::snprintf(tail, sizeof tail,
+                    "; DFlash: embedding replica %.3f GB in model, its layers' verify slots %.3f GB in decode state, "
+                    "prefill tap stagings %.3f GB",
+                    p.dev[i].embed_replica / gb, p.dev[i].drafter_slots / gb, p.dev[i].drafter_taps / gb);
       out += tail;
     }
     if (p.dev[i].shadows != 0) {

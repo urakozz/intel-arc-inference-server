@@ -696,6 +696,7 @@ struct PipeServe {
   uint32_t prefix_cache_gb = 0;
   cli::PipelineArgs pipe;
   std::vector<uint32_t> eos;
+  cli::dflash::Args dflash;   // spec 19d: --spec dflash --pp 2 (the drafter on device 1)
 };
 
 int serve_pipeline(const PipeServe& a, server::Options options) {
@@ -715,6 +716,11 @@ int serve_pipeline(const PipeServe& a, server::Options options) {
                         /*mtp=*/a.mtp_k > 0 || a.spec_lookup, a.lm_head, a.dv_spec);
   }();
   model::require_prefill(*full.desc);   // spec 15c, as on one card
+  // Spec 19d: the drafter's planner term, read off its checkpoint against the whole target (it loads onto device 1
+  // after the placement, beside lm_head and the embedding replica).
+  runtime::DrafterPlan drafter_plan;
+  if (a.dflash.on) drafter_plan = cli::dflash::plan_only(a.dflash, full);
+  const bool draft_vocab_on = full.draft_vocab != nullptr;
   const model::ModelDesc& d = *full.desc;
   const runtime::PpWeights w = runtime::pp_weights(full);
   const std::array<size_t, runtime::kPpDevices> dev{d0.memory_bytes(), d1.memory_bytes()};
@@ -722,17 +728,28 @@ int serve_pipeline(const PipeServe& a, server::Options options) {
   // host's RAM only after the load (make_prefix_alloc), and an unplanned shadow would be an
   // allocation in the first request.
   const bool hook = a.prefix_auto || a.prefix_cache_gb > 0;
+  runtime::PpExtras extras = cli::pp_extras(full, hook);
+  extras.drafter = drafter_plan;   // spec 19d
   const cli::PpSettled settled = cli::pp_settle(d, w, dev, a.max_len_arg, full.trained_max_len,
-                                                a.mem_reserve, a.kv_cache, a.pp_path,
-                                                cli::pp_extras(full, hook), a.pipe);
-  std::vector<loader::LoadedModel> stages = runtime::place_stages(d0, d1, std::move(full), settled.split);
+                                                a.mem_reserve, a.kv_cache, a.pp_path, extras, a.pipe);
+  std::vector<loader::LoadedModel> stages =
+      runtime::place_stages(d0, d1, std::move(full), settled.split, /*drafter=*/a.dflash.on);
   if (stages[0].max_len != settled.max_len) {   // auto loaded at a small length: re-table both
     loader::set_max_len(d0, stages[0], settled.max_len);
     loader::set_max_len(d1, stages[1], settled.max_len);
   }
+  // Spec 19d: the drafter on device 1 beside the stage model (its lm_head, the embedding replica).
+  std::unique_ptr<runtime::dflash::DFlashDrafter> drafter;
+  if (a.dflash.on) {
+    cli::dflash::Loaded l = cli::dflash::load(d1, a.dflash, stages[1]);
+    drafter = std::make_unique<runtime::dflash::DFlashDrafter>(d1, std::move(l.w), l.head_rows, settled.max_len,
+                                                               a.dflash.max_k);
+  }
   runtime::PipelineOptions opt;
   opt.handoff = a.pipe.handoff;
-  runtime::PipelineEngine engine(d0, d1, std::move(stages), settled.max_len, opt, a.kv_cache);
+  runtime::PipelineEngine engine(d0, d1, std::move(stages), settled.max_len, opt, a.kv_cache, drafter.get());
+  if (drafter)
+    drafter->attach_target(d1, engine.model(1), engine.buffers(1).control, settled.max_len, draft_vocab_on);
   if (a.have_pp_backend) engine.set_prefill_backend(a.pp_backend);
   // The two-card prefill set up at load, not in a request (each card's scratch, context and
   // l0-int8 column scales; with the head, its prefill rows on device 1).
@@ -748,7 +765,8 @@ int serve_pipeline(const PipeServe& a, server::Options options) {
                  tokenizer.vocab_used(), served.name.c_str(), served.vocab_used, tokenizer.vocab_used());
   TemplateAdapter chat_template(a.snapshot_dir);
   cli::pp::PipelineEngineAdapterT<runtime::PipelineEngine> engine_adapter(
-      engine, tokenizer.vocab_used(), model::Qwen35::kVocab, a.mtp_k, a.spec_lookup);
+      engine, tokenizer.vocab_used(), model::Qwen35::kVocab, a.dflash.on ? a.dflash.max_k : a.mtp_k, a.spec_lookup,
+      a.dflash.on);
   options.eos_ids = a.eos;
   // Pinned host memory of the one context both cards share: either device's copies reach it.
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
@@ -763,12 +781,23 @@ int serve_pipeline(const PipeServe& a, server::Options options) {
                runtime::pp_handoff_name(engine.handoff()), engine.split(), engine.split(),
                engine.stage(1).first, engine.stage(1).last,
                runtime::prefill_backend_name(engine.prefill_backend()), a.mtp_auto ? "auto, max " : "",
-               a.mtp_k, engine.mtp() ? " (the head on device 1)" : "", loader::lm_head_form_name(a.lm_head),
+               a.mtp_k,
+               engine.mtp() ? " (the head on device 1)" : engine.has_drafter() ? " (dflash: the drafter on device 1)" : "",
+               loader::lm_head_form_name(a.lm_head),
                engine.draft_vocab() ? ", draft vocab " : "",
                engine.draft_vocab() ? loader::draft_vocab_name(engine.draft_vocab()).c_str() : "",
                runtime::kv_cache_name(engine.kv_cache()));
   print_proposer(options, a.spec_lookup, a.spec_min_match, a.spec_max, a.spec_history, a.mtp_auto,
                  served.is_moe() && a.default_mtp_costs, served.name);
+  if (drafter) {   // spec 19d: the drafter's policy line, as on one card
+    const server::MtpCost& c = options.mtp_adaptive.cost;
+    std::fprintf(stderr, "spec dflash (--pp 2, device 1): %s drafter, K <= %u, cost verify M=1..%zu",
+                 loader::draft_format_name(a.dflash.format), a.dflash.max_k, c.verify.size());
+    for (double v : c.verify) std::fprintf(stderr, " %.3f", v);
+    std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
+    for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
+    std::fprintf(stderr, " (plain steps; derived until the box measures them)\n");
+  }
   return listen_until_stopped(server, options);
 }
 
@@ -954,7 +983,9 @@ int run(int argc, char** argv) {
     throw std::runtime_error("--spec-max expects 1..3 with --spec lookup");
   if (dflash.on) dflash.max_k = have_spec_max ? spec_max : 7;
   cli::dflash::check_flags(dflash);
-  cli::dflash::check_engine(dflash, pipe.on(), kv_cache);   // spec 19c: one card, bf16 KV, attention v2
+  // Spec 19c: bf16 KV, attention v2; spec 19d: --pp 2 on the copy hand-off.
+  cli::dflash::check_engine(dflash, pipe.on(), kv_cache, {}, false, /*pipeline_served=*/true,
+                            pipe.handoff == runtime::PpHandoff::Peer);
   if (spec_lookup) {
     options.spec_lookup = true;
     options.lookup_min_match = spec_min_match;
@@ -1133,7 +1164,8 @@ int run(int argc, char** argv) {
       true, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
   {   // spec 19c: the drafter's prefill refusals, before the device (cli/dflash_args.h)
     const char* replay_env = std::getenv("B70_PREFILL_REPLAY");
-    cli::dflash::check_engine(dflash, pipe.on(), kv_cache, pp_path, replay_env != nullptr && std::string(replay_env) == "1");
+    cli::dflash::check_engine(dflash, pipe.on(), kv_cache, pp_path, replay_env != nullptr && std::string(replay_env) == "1",
+                              /*pipeline_served=*/true, pipe.handoff == runtime::PpHandoff::Peer);
   }
 
   // Spec 16d: --pp's refusals that need no checkpoint (cli/pipeline_serve.h) - the sub-flags
@@ -1235,6 +1267,7 @@ int run(int argc, char** argv) {
     ps.prefix_cache_gb = prefix_cache_gb;
     ps.pipe = pipe;
     ps.eos = eos;
+    ps.dflash = dflash;   // spec 19d
     return serve_pipeline(ps, options);
   }
   l0::Context context(device);

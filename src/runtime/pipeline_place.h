@@ -47,7 +47,10 @@ size_t model_device_bytes(const loader::LoadedModel& m);
 // Throws for a split outside [1, layers - 1]. `d1` must be a view of d0's context
 // (l0::Context's view constructor). Spec 16d: the MTP head and a draft vocabulary move to
 // device 1 with lm_head, and the embedding is replicated there.
+// Spec 19d: `drafter` (--spec dflash --pp 2) - the DFlash drafter will draft on device 1 beside lm_head: the
+// embedding is replicated there as for the head, and a draft vocabulary (the drafter's, built without the MTP
+// head) moves to device 1 too.
 std::vector<loader::LoadedModel> place_stages(l0::Context& d0, l0::Context& d1,
-                                              loader::LoadedModel full, uint32_t split);
+                                              loader::LoadedModel full, uint32_t split, bool drafter = false);
 
 }  // namespace runtime

@@ -137,8 +137,9 @@ void require(bool ok, const std::string& what) {
 // the draft list on the last stage's device (capture.h, build_stage_verify / _draft).
 // Spec 19c: `VerifyTaps` is a tap drafter's verify list (capture.h, build_verify_taps) - the decode
 // list at M rows with the per-row GDN slots over the drafter's slots, and the taps copied after the
-// input fold of every tapped layer's successor; no MTP head anywhere.
-enum class Mode { Plain, Verify, Draft, Stage, StageVerify, StageDraft, VerifyTaps };
+// input fold of every tapped layer's successor; no MTP head anywhere. Spec 19d: `StageVerifyTaps` is that list
+// restricted to one pipeline stage (capture.h, build_stage_verify_taps).
+enum class Mode { Plain, Verify, Draft, Stage, StageVerify, StageDraft, VerifyTaps, StageVerifyTaps };
 
 class Capture {
  public:
@@ -180,6 +181,18 @@ class Capture {
       : Capture(ctx, m, b, nullptr, nullptr, cap_m, nullptr, Mode::VerifyTaps) {
     tv_ = &tv;
   }
+  // Spec 19d: one pipeline stage's tap verify list at M rows (`tv.gdn_spec` the stage's slots).
+  Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const PpStage& st,
+          const StageLink& link, const TapVerify& tv, uint32_t cap_m)
+      : Capture(ctx, m, b, nullptr, nullptr, cap_m, nullptr, Mode::StageVerifyTaps) {
+    stage_ = &st;
+    link_ = &link;
+    small_base_ = st.first;
+    n_layers_ = st.layers();
+    n_gdn_ = st.gdn;
+    n_fa_ = st.fa;
+    tv_ = &tv;
+  }
 
   CapturedStep run() {
     // One layer's K (or V) rows; at int8 (spec 12b) the scales follow every layer's rows
@@ -187,7 +200,7 @@ class Capture {
     kv_stride_ = size_t(b_.max_len) * d_.fa_kv_heads * Qwen35::kFaHeadDim *
                  (kv8_ ? 1 : kBf16);
     check_sizes();
-    if (mode_ == Mode::Stage || mode_ == Mode::StageVerify) return stage_run();
+    if (mode_ == Mode::Stage || mode_ == Mode::StageVerify || mode_ == Mode::StageVerifyTaps) return stage_run();
     if (mode_ == Mode::VerifyTaps)
       check_taps();
     else if (mode_ != Mode::Plain)
@@ -862,14 +875,14 @@ class Capture {
       // is that plus (s - 1) whole slots - gdn_step.cl, SPEC_SLOTS). Spec 16d: a stage's
       // verify list binds its own slots' allocation (spec_mem(), pp_gdn_spec_bytes) at its
       // own slice g - the same binary, the same whole-model slot stride.
-      const bool slots =
-          mode_ == Mode::Verify || mode_ == Mode::StageVerify || mode_ == Mode::VerifyTaps;
+      const bool slots = mode_ == Mode::Verify || mode_ == Mode::StageVerify || mode_ == Mode::VerifyTaps ||
+                         mode_ == Mode::StageVerifyTaps;
       // Spec 19a: the slot count is the buffers' (kSlots on every engine: the historical
       // names); a stage's verify list keeps kSlots (its spec_mem() is pp_gdn_spec_bytes').
       // Spec 19c: a tap drafter's verify list binds its own TapVerifyDims::kSlots (8).
-      const uint32_t n_slots = mode_ == Mode::Verify       ? mtp_->slots
-                               : mode_ == Mode::VerifyTaps ? tv_->slots
-                                                           : MtpBuffers::kSlots;
+      const uint32_t n_slots = mode_ == Mode::Verify                                          ? mtp_->slots
+                               : mode_ == Mode::VerifyTaps || mode_ == Mode::StageVerifyTaps ? tv_->slots
+                                                                                              : MtpBuffers::kSlots;
       l0::Kernel& k = kernel(slots ? kernels::gdn_step_slots_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads,
                                                                      d_.gdn_v_heads, n_slots)
                                    : kernels::gdn_step_variant(kCapM, d_.gdn_k_heads, d_.gdn_v_heads),
@@ -1062,6 +1075,7 @@ class Capture {
                                                "embedding, the other the head");
     const bool verify = mode_ == Mode::StageVerify;
     if (verify) check_stage_verify();
+    if (mode_ == Mode::StageVerifyTaps) check_stage_taps();   // spec 19d
     if (st.has_embed()) {
       embed_gather();
     } else {
@@ -1230,11 +1244,30 @@ class Capture {
   // tap buffer, one device copy per row (5 x M <= 40 on Qwen3.8's drafter; copies are commands, not
   // launches, exactly as the residual tap above).
   void tap_copy(uint32_t site) {
-    if (mode_ != Mode::VerifyTaps) return;
+    if (mode_ != Mode::VerifyTaps && mode_ != Mode::StageVerifyTaps) return;
     const size_t row = size_t(d_.hidden) * kBf16, n = tv_->layers.size();
     for (uint32_t t : sites_.at(site))
       for (uint32_t m = 0; m < kCapM; ++m)
         step_.list.copy(at(*tv_->taps, (size_t(m) * n + t) * row), at(b_.resid, size_t(m) * row), row);
+  }
+
+  // Spec 19d: a stage's tap verify list - its slots (pp_gdn_spec_bytes(d, stage gdn, 8): the whole model's slot
+  // stride, the stage's slice), the taps (every row's taps of THIS stage's sites, into the drafter's buffer on the
+  // last device - a device-0 stage copies them across, ordered before its hand-off), the copy hand-off only (the
+  // peer hand-off's flag does not order the copy engine's earlier writes into the other device).
+  void check_stage_taps() {
+    require(tv_ != nullptr && tv_->gdn_spec != nullptr && tv_->taps != nullptr,
+            "a stage's tap verify list needs its GDN slots and the drafter's tap buffer");
+    require(link_->mode == PpHandoff::Copy,
+            "a stage's tap verify list runs on the copy hand-off only (--pipeline-handoff copy)");
+    require(tv_->slots == TapVerifyDims::kSlots && kCapM <= tv_->slots,
+            "a stage's tap verify list binds gdn_step_slots_M<M>_N" + std::to_string(TapVerifyDims::kSlots));
+    require(tv_->gdn_spec->size() == pp_gdn_spec_bytes(d_, n_gdn_, tv_->slots),
+            "the stage's tap verify slots are not pp_gdn_spec_bytes(" + std::to_string(n_gdn_) + " GDN layers, " +
+                std::to_string(tv_->slots) + " slots)");
+    sites_ = tap_sites(d_, tv_->layers);
+    require(tv_->taps->size() >= size_t(DecodeBuffers::kM) * tv_->layers.size() * d_.hidden * kBf16,
+            "the tap buffer is smaller than [kM][taps][hidden] bf16");
   }
 
   // A layer's small blocks: m_.layer_small is indexed by layer, or (spec 16b) by layer -
@@ -1608,6 +1641,19 @@ CapturedStep build_stage_verify(l0::Context& ctx, const loader::LoadedModel& m, 
     throw std::logic_error("runtime::build_stage_verify: the stages' launches do not add up to " +
                            std::to_string(verify_launches(d)));
   return Capture(ctx, m, b, st, &link, M, mtp, &gdn_spec, Mode::StageVerify, 0).run();
+}
+
+CapturedStep build_stage_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
+                                     const PpStage& st, const StageLink& link, const TapVerify& tv, uint32_t M) {
+  if (M == 0 || M > tv.slots || M > DecodeBuffers::kM)
+    throw std::runtime_error("runtime::build_stage_verify_taps: M " + std::to_string(M) + " is outside [1, " +
+                             std::to_string(tv.slots) + "] (TapVerify::slots)");
+  const model::ModelDesc& d = *m.desc;
+  const std::array<PpStage, kPpDevices> both = pp_stages(d, st.first == 0 ? st.last : st.first);
+  if (pp_stage_launches(d, both[0]) + pp_stage_launches(d, both[1]) != decode_launches(d))
+    throw std::logic_error("runtime::build_stage_verify_taps: the stages' launches do not add up to " +
+                           std::to_string(decode_launches(d)));
+  return Capture(ctx, m, b, st, link, tv, M).run();
 }
 
 CapturedStep build_stage_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,

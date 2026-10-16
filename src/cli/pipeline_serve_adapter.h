@@ -20,14 +20,19 @@
 //     of the drafts and the p rows of the verify), the commit deferred exactly as
 //     EngineAdapter defers it (truncate_to commits fewer);
 //   - spec 19e's prompt lookup (`--spec lookup`): the proposer's drafts written on both
-//     devices (set_draft_input), the same verify lists, server::accept_point_mass.
+//     devices (set_draft_input), the same verify lists, server::accept_point_mass;
+//   - spec 19d's DFlash drafter on device 1 (`--spec dflash --pp 2`): draft_tap (the drafter's block, its sparse q
+//     in the readback), the tap verify lists on both devices, the host's acceptance (greedy argmax match; sampled:
+//     server::accept_sparse) - EngineAdapter::step_dflash line for line; the commit replays the drafter's projection;
+//     the snapshots carry its ring and the store keys it (drafter_key).
 //
 // The engine's interface (what this calls; runtime::PipelineEngine and the test's fake):
 //   reset, prefill(ids), ingest(ids), generate(1), pos, max_len, kBlock, kMaxDraft,
 //   state_bytes, kv_bytes(n), kv_cache, save_state, load_state, save_kv, load_kv,
 //   set_block_hook, pending, set_token(id), read_logits_into(host, rows),
 //   read_draft_logits_into(host, i), host_rows(floats), mtp, max_verify_k, draft(k, pick),
-//   draft_ids, verify(k), verify_ids, commit(j, t), set_draft_input(i, id).
+//   draft_ids, verify(k), verify_ids, commit(j, t), set_draft_input(i, id); spec 19d: max_draft, draft_tap(k, T,
+//   seed), tap_samples, drafter_key.
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -35,35 +40,67 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "runtime/buffer_sizes.h"   // runtime::KvCache (device-free)
+#include "runtime/dflash/dflash_control.h"   // spec 19d: DFlashDraftOut (a plain struct)
 #include "server/deps.h"
 #include "server/spec_accept.h"
 
 namespace cli::pp {
 
+// Spec 19d: whether an engine has the tap drafter's calls (runtime::PipelineEngine does; Qwen4ExpEngine and the
+// spec 16d test fake do not) - the DFlash path is compiled only for those that do.
+template <class E, class = void>
+struct HasTapDrafter : std::false_type {};
+template <class E>
+struct HasTapDrafter<E, std::void_t<decltype(std::declval<E&>().draft_tap(1u, 0.0f, uint64_t(0))),
+                                    decltype(std::declval<const E&>().max_draft()),
+                                    decltype(std::declval<const E&>().tap_samples()),
+                                    decltype(std::declval<const E&>().drafter_key())>> : std::true_type {};
+
 template <class Engine>
 struct PipelineEngineAdapterT : server::EngineIface {
+  static constexpr bool kTap = HasTapDrafter<Engine>::value;
+
   // `vocab` (the sampler's mask: the tokenizer's count) and `V` (the logits row's width: the
   // model's whole vocabulary, model::Qwen35::kVocab). `mtp_k` > 0 needs the head loaded;
   // `lookup` verifies prompt-lookup drafts through the same verify lists (spec 19e).
-  PipelineEngineAdapterT(Engine& engine, uint32_t vocab, uint32_t V, uint32_t mtp_k = 0, bool lookup = false)
-      : eng(engine), vocab_used(vocab), V_(V), k_(mtp_k), lookup_(lookup) {
+  // `dflash` (spec 19d): draft with the engine's drafter on device 1, `mtp_k` its deepest K (--spec-max, 1..7).
+  PipelineEngineAdapterT(Engine& engine, uint32_t vocab, uint32_t V, uint32_t mtp_k = 0, bool lookup = false,
+                         bool dflash = false)
+      : eng(engine), vocab_used(vocab), V_(V), k_(mtp_k), lookup_(lookup), df_(dflash) {
     if (vocab_used == 0 || vocab_used > V_)
       throw std::runtime_error("PipelineEngineAdapter: vocab_used " + std::to_string(vocab_used) +
                                " is outside the logits row (" + std::to_string(V_) + ")");
-    if (k_ > Engine::kMaxDraft)
+    if (df_) {
+      if (lookup_) throw std::runtime_error("--spec dflash and --spec lookup: pick one proposer");
+      if constexpr (kTap) {
+        if (eng.max_draft() == 0 || eng.mtp())
+          throw std::runtime_error("--spec dflash: the pipeline was not built with a drafter");
+        if (k_ == 0 || k_ > eng.max_draft())
+          throw std::runtime_error("--spec-max " + std::to_string(k_) + ": the drafter verifies K in 1.." +
+                                   std::to_string(eng.max_draft()));
+      } else {
+        throw std::runtime_error("--spec dflash: this engine has no tap drafter");
+      }
+    } else if (k_ > Engine::kMaxDraft) {
       throw std::runtime_error("--mtp " + std::to_string(k_) + ": K is 0..3");
-    if (k_ > 0 && !eng.mtp()) throw std::runtime_error("--mtp needs the model's MTP head loaded");
+    }
+    if (k_ > 0 && !df_ && !eng.mtp()) throw std::runtime_error("--mtp needs the model's MTP head loaded");
     if (lookup_ && k_ > 0) throw std::runtime_error("--spec lookup and --mtp: pick one proposer");
     if (lookup_ && !eng.mtp())
       throw std::runtime_error("--spec lookup needs the verify lists, which the pipeline captures "
                                "with the MTP head loaded; this model has none");
-    // Pinned readback rows (EngineAdapter's): q [kMaxDraft][V], then p [kMaxDraft + 1][V].
-    rows_ = eng.host_rows(size_t(2 * Engine::kMaxDraft + 1) * V_);
+    // Pinned readback rows (EngineAdapter's): q [kMaxDraft][V], then p [kMaxDraft + 1][V]; spec 19d: DFlash's p rows
+    // alone, up to [8][V] (its q is the 16-candidate readback).
+    rows_ = eng.host_rows(size_t(std::max<uint32_t>(2 * Engine::kMaxDraft + 1, kMaxIterK + 1)) * V_);
   }
+
+  // The deepest K any proposer runs (spec 19d: DFlash's 7) - the per-K counters' size.
+  static constexpr uint32_t kMaxIterK = 7;
 
   void reset() override {
     pending_ = false;   // the session is discarded; nothing to commit
@@ -78,16 +115,22 @@ struct PipelineEngineAdapterT : server::EngineIface {
       std::fprintf(stderr, "gen: %u tokens, %.3f ms, %.4f ms/token\n", gen_tokens_, ms, ms / gen_tokens_);
       std::fflush(stderr);
     }
-    if ((k_ > 0 || lookup_) && mtp_iters > 0)
+    if ((k_ > 0 || lookup_) && mtp_iters > 0) {
       std::fprintf(stderr,
                    "%s: K %u, %llu iterations, %llu/%llu drafts accepted (%.3f), iterations at "
-                   "K 0/1/2/3: %llu/%llu/%llu/%llu\n",
-                   lookup_ ? "lookup" : "mtp", lookup_ ? Engine::kMaxDraft : k_,
+                   "K 0/1/2/3: %llu/%llu/%llu/%llu",
+                   lookup_ ? "lookup" : df_ ? "dflash" : "mtp", lookup_ ? Engine::kMaxDraft : k_,
                    (unsigned long long)mtp_iters, (unsigned long long)mtp_accepted,
                    (unsigned long long)mtp_drafted,
                    mtp_drafted ? double(mtp_accepted) / double(mtp_drafted) : 0.0,
                    (unsigned long long)mtp_iters_at_k[0], (unsigned long long)mtp_iters_at_k[1],
                    (unsigned long long)mtp_iters_at_k[2], (unsigned long long)mtp_iters_at_k[3]);
+      if (df_)   // spec 19d: K 4..7 as well
+        std::fprintf(stderr, ", K 4/5/6/7: %llu/%llu/%llu/%llu", (unsigned long long)mtp_iters_at_k[4],
+                     (unsigned long long)mtp_iters_at_k[5], (unsigned long long)mtp_iters_at_k[6],
+                     (unsigned long long)mtp_iters_at_k[7]);
+      std::fprintf(stderr, "\n");
+    }
     mtp_iters = mtp_drafted = mtp_accepted = 0;
     for (auto& n : mtp_iters_at_k) n = 0;
     gen_tokens_ = 0;
@@ -112,6 +155,9 @@ struct PipelineEngineAdapterT : server::EngineIface {
 
   std::vector<uint32_t> step_many(const server::Sampling& sampling, uint32_t k_req) override {
     flush_commit();
+    if constexpr (kTap) {
+      if (df_) return step_dflash(sampling, k_req);   // spec 19d
+    }
     const uint32_t k = std::min({k_req, k_, eng.max_verify_k()});
     ++mtp_iters_at_k[k];
     if (k == 0) return {step(sampling)};   // K = 0, or the last positions of max_len: plain
@@ -146,6 +192,54 @@ struct PipelineEngineAdapterT : server::EngineIface {
     mtp_accepted += a.accepted;
     std::vector<uint32_t> out{x};
     out.insert(out.end(), pending_drafts_.begin(), pending_drafts_.begin() + a.accepted);
+    gen_tokens_ += static_cast<uint32_t>(out.size());
+    return out;
+  }
+
+  // --- spec 19d: one DFlash iteration across the split (EngineAdapter::step_dflash) ---------------------------
+  // A member template, so an explicit instantiation of the adapter over an engine without a drafter
+  // (tests/cli/qwen4exp_adapter_compile.cc) does not instantiate it.
+  template <class E = Engine>
+  std::vector<uint32_t> step_dflash(const server::Sampling& sampling, uint32_t k_req) {
+    static_assert(HasTapDrafter<E>::value, "step_dflash needs an engine with a tap drafter");
+    uint32_t k = std::min({k_req, k_, eng.max_verify_k()});
+    if (!sampling.greedy && !eng.tap_samples()) k = 0;   // a v1 drafter drafts greedily only
+    ++mtp_iters_at_k[k];
+    if (k == 0) return {step(sampling)};
+    const uint32_t n = eng.pos();
+    const uint32_t x = eng.pending();
+    server::AcceptResult a{};
+    std::vector<uint32_t> drafts;
+    if (sampling.greedy) {
+      const runtime::dflash::DFlashDraftOut& o = eng.draft_tap(k, 0.0f, 0);
+      drafts.assign(o.ids, o.ids + k);
+      eng.verify(k);
+      a = server::accept_greedy(eng.verify_ids(), drafts.data(), k);
+    } else {
+      // EngineAdapter::dflash_sampled's RNG order: the walk's Gumbel key, the uniforms, the correction draw.
+      seed_rng(sampling);
+      const uint64_t seed = rng();
+      const float T = server::dflash_temperature(sampling);
+      const runtime::dflash::DFlashDraftOut& o = eng.draft_tap(k, T, seed);
+      drafts.assign(o.ids, o.ids + k);
+      server::SparseQ q[kMaxIterK];
+      for (uint32_t j = 0; j < k; ++j)
+        q[j] = server::dflash_q(o.cand[j], o.scores[j], runtime::dflash::DFlashDraftOut::kTopK, T);
+      eng.verify(k);
+      float* p = rows_;
+      eng.read_logits_into(p, k + 1);
+      a = server::accept_sparse(p, q, drafts.data(), k, vocab_used, V_, sampling, rng);
+    }
+    pending_ = true;
+    pending_pos_ = n;
+    pending_j_ = a.accepted;
+    pending_next_ = a.next_token;
+    pending_drafts_ = drafts;
+    ++mtp_iters;
+    mtp_drafted += k;
+    mtp_accepted += a.accepted;
+    std::vector<uint32_t> out{x};
+    out.insert(out.end(), drafts.begin(), drafts.begin() + a.accepted);
     gen_tokens_ += static_cast<uint32_t>(out.size());
     return out;
   }
@@ -221,6 +315,10 @@ struct PipelineEngineAdapterT : server::EngineIface {
   size_t state_bytes() override { return eng.state_bytes(); }
   size_t kv_bytes(uint32_t n) override { return eng.kv_bytes(n); }
   uint64_t kv_form() override { return eng.kv_cache() == runtime::KvCache::Int8 ? 1 : 0; }
+  uint64_t drafter_key() override {   // spec 19d: 0 without a drafter
+    if constexpr (kTap) return eng.drafter_key();
+    return 0;
+  }
   void save_state(void* host) override {
     flush_commit();
     eng.save_state(host);
@@ -261,11 +359,12 @@ struct PipelineEngineAdapterT : server::EngineIface {
   std::chrono::steady_clock::time_point gen_start_{};
   uint32_t k_ = 0;
   bool lookup_ = false;
+  bool df_ = false;   // spec 19d: step_many drafts with the engine's drafter
   bool pending_ = false;
   uint32_t pending_pos_ = 0, pending_j_ = 0, pending_next_ = 0;
   std::vector<uint32_t> pending_drafts_;
   uint64_t mtp_iters = 0, mtp_drafted = 0, mtp_accepted = 0;
-  uint64_t mtp_iters_at_k[4] = {};
+  uint64_t mtp_iters_at_k[kMaxIterK + 1] = {};
 };
 
 }  // namespace cli::pp

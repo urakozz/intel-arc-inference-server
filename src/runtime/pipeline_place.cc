@@ -110,11 +110,13 @@ size_t model_device_bytes(const loader::LoadedModel& m) {
 }
 
 std::vector<loader::LoadedModel> place_stages(l0::Context& d0, l0::Context& d1,
-                                              loader::LoadedModel full, uint32_t split) {
+                                              loader::LoadedModel full, uint32_t split, bool drafter) {
   if (!full.desc) throw std::invalid_argument("runtime::place_stages: the model has no descriptor");
   const model::ModelDesc& d = *full.desc;
-  if (full.draft_vocab && !full.mtp)
-    throw std::invalid_argument("runtime::place_stages: a draft vocabulary without the MTP head");
+  if (full.draft_vocab && !full.mtp && !drafter)
+    throw std::invalid_argument("runtime::place_stages: a draft vocabulary without the MTP head or a drafter");
+  if (full.mtp && drafter)
+    throw std::invalid_argument("runtime::place_stages: the MTP head and a drafter are two proposers");
   if (d1.handle() != d0.handle())
     throw std::invalid_argument("runtime::place_stages: device 1 is not a view of device 0's "
                                 "Level Zero context (spec 16 decision 1: one context)");
@@ -132,7 +134,7 @@ std::vector<loader::LoadedModel> place_stages(l0::Context& d0, l0::Context& d1,
   // its own. Braced initialisers run left to right.
   loader::LoadedModel s1{{},
                          {},
-                         full.mtp ? mv.move(full.embed) : l0::Mem(d1, l0::MemKind::Device, 64),
+                         full.mtp || drafter ? mv.move(full.embed) : l0::Mem(d1, l0::MemKind::Device, 64),
                          mv.move(full.final_norm),
                          mv.move(full.rope),
                          {},
