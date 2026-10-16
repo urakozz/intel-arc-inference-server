@@ -3524,6 +3524,37 @@ if(B70_MUSE)
   b70_target_kernel_dir(muse_variant_names_test)
   add_test(NAME muse_variant_names_test COMMAND muse_variant_names_test ${B70_MUSE_DECODE_KERNELS})
   set_tests_properties(muse_variant_names_test PROPERTIES LABELS muse)
+  # Spec 23f: the verify lists' binaries at M = 1..16 (kernels::muse::verify_variants) are exactly the Spec 23f block's
+  # B70_MUSE_VERIFY_M16 list plus 23c's M = 1 names. Host only.
+  if(B70_MUSE_VERIFY_M16)
+    set(B70_MUSE_VERIFY_KERNELS kernel_mg_vargmax_stage2_N202048)
+    foreach(MM RANGE 1 16)
+      list(APPEND B70_MUSE_VERIFY_KERNELS kernel_mg_pf_embed_M${MM}_K6656_G26_V202048
+           kernel_mg_vargmax_stage1_M${MM}_N202048)
+      if(MM GREATER 1)
+        list(APPEND B70_MUSE_VERIFY_KERNELS kernel_gemv_M${MM}_K6656_N8704_S2_L0 kernel_gemv_M${MM}_K4096_N6656_S4_L0
+             kernel_gemv_M${MM}_K6656_N39936_S8_L0 kernel_gemv_M${MM}_K19968_N6656_S4_L0
+             kernel_gemv_i8w_M${MM}_K6656_N202048 kernel_gemv_bf16_M${MM}_K6656_N202048
+             kernel_prep_res_fold_M${MM}_K6656_SP4_G26_Z kernel_mg_norm_M${MM}_K6656_G26_W26
+             kernel_mg_post_add_M${MM}_K6656_G26 kernel_mg_attn_prep_M${MM}_N8704_S2_Q32KV2_R4096
+             kernel_mg_attn_prep_M${MM}_N8704_S2_Q32KV2_F kernel_mg_silu_mul_M${MM}_I19968_S8
+             kernel_mg_attn_M${MM}_T64_Q32KV2_W2048_R4096 kernel_mg_attn_M${MM}_T64_Q32KV2_F
+             kernel_mg_attn_eager_M${MM}_T64_Q32KV2_W2048_R4096 kernel_mg_attn_eager_M${MM}_T64_Q32KV2_F)
+      endif()
+    endforeach()
+    foreach(t ${B70_MUSE_VERIFY_KERNELS})
+      if(NOT TARGET ${t})
+        message(FATAL_ERROR "spec 23f: ${t} is not built (src/kernels/CMakeLists.txt)")
+      endif()
+    endforeach()
+    add_executable(muse_verify_names_test kernels/muse_verify_names_test.cc)
+    target_include_directories(muse_verify_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+    target_link_libraries(muse_verify_names_test PRIVATE b70_muse_model)
+    b70_target_kernel_dir(muse_verify_names_test)
+    add_test(NAME muse_verify_names_test COMMAND muse_verify_names_test ${B70_MUSE_VERIFY_KERNELS} --
+             ${B70_MUSE_DECODE_KERNELS})
+    set_tests_properties(muse_verify_names_test PROPERTIES LABELS muse)
+  endif()
   # MG2 on the card: every mg_* kernel at the real shapes against museref (no checkpoint) - bitwise where the
   # arithmetic is the same, flash against fp64 at cosine 0.99999, the ring's rows (r44.k1).
   add_executable(muse_kernels_test kernels/muse_kernels_test.cc)

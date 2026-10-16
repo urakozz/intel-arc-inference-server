@@ -156,4 +156,45 @@ inline std::vector<std::string> prefill_variants(bool eager) {
   };
 }
 
+// ==== Spec 23f: the verify lists (B70_MUSE_VERIFY_M16) ===========================================================
+// 23c's decode walk at M = 1..16 rows (the anchor + up to 15 drafts, spec 23 decision 10), the taps of every row copied
+// out (runtime/muse/muse_capture.h build_verify). Every name above at M; two that differ from the decode list's:
+//   the embedding   mg_pf_prep.cl's mg_pf_embed at M - the ids [anchor, d_1 .. d_K] from the verify's ids buffer
+//                   (mg_embed reads Control::cur_token: 8 slots), mg_embed's chain line for line
+//   the argmax      mg_argmax.cl: stage 1 at M (argmax.cl's line for line, M <= 16), stage 2 writing every row's id to
+//                   the verify's output buffer and leaving Control::pos to the host's commit (one binary, M 16: it
+//                   folds rows < min(n_active, 16))
+inline constexpr unsigned kVerifyMaxM = 16;
+inline std::string verify_embed_variant(unsigned M) { return "mg_pf_embed" + m_(M) + "_K6656_G26_V202048"; }
+inline std::string vargmax1_variant(unsigned M) { return "mg_vargmax_stage1" + m_(M) + "_N202048"; }
+inline std::string vargmax2_variant() { return "mg_vargmax_stage2_N202048"; }
+inline std::string verify_lm_head_variant(unsigned M, bool int8) {
+  return int8 ? gemv_i8w_variant(M, kHidden, kVocab) : gemv_bf16_variant(M, kHidden, kVocab, gemv_bf16_tiling(kVocab));
+}
+
+// Every binary a Muse verify list at M rows binds (runtime/muse/muse_capture.cc's build_verify forms the same names):
+// decode_variants' set at M, mg_pf_embed for mg_embed and mg_vargmax for the argmax. tests/kernels/
+// muse_variant_names_test.cc holds the union over M = 1..16 to the CMake block's list.
+inline std::vector<std::string> verify_variants(unsigned M, bool int8_head, bool eager) {
+  return {
+      verify_embed_variant(M),
+      norm_variant(M),
+      post_add_variant(M),
+      qgkv_variant(M),
+      attn_prep_variant(M, kQgkvS, true),
+      attn_prep_variant(M, kQgkvS, false),
+      eager ? attn_eager_variant(M, true) : attn_variant(M, true),
+      eager ? attn_eager_variant(M, false) : attn_variant(M, false),
+      oproj_variant(M),
+      fold_zero_variant(M, kOprojS),
+      gate_up_variant(M),
+      silu_variant(M, kGateUpS),
+      down_variant(M),
+      fold_zero_variant(M, kDownS),
+      verify_lm_head_variant(M, int8_head),
+      vargmax1_variant(M),
+      vargmax2_variant(),
+  };
+}
+
 }  // namespace kernels::muse
