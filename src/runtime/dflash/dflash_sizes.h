@@ -32,14 +32,20 @@
 //   hid          fp32 [M][selector rank] (DFlash 2)
 namespace runtime::dflash {
 
+// Spec 23f: a Muse-form drafter (model::DFlashForm::Muse) at its 16 rows (kernels/dflash_dims.h list_rows), the
+// 16-row readback (MuseDraftOut), the verify's ids buffer `vids` (u32 [16], shared: mg_df_select writes [anchor, the
+// drafts], the target's verify list reads it) and its ring of window + 1 slots in whole 64-offset blocks (2112).
 struct DFlashSizes {
   size_t dctl = 0, out = 0, rope = 0, ring_k = 0, ring_v = 0, taps = 0, resid = 0, h = 0, x = 0, xa = 0, gout = 0,
-         co = 0, q = 0, kb = 0, vb = 0, part = 0, kv = 0, logits = 0, tpart = 0, cand = 0, unary = 0, hid = 0;
+         co = 0, q = 0, kb = 0, vb = 0, part = 0, kv = 0, logits = 0, tpart = 0, cand = 0, unary = 0, hid = 0,
+         vids = 0;
   size_t total() const {
     return dctl + out + rope + ring_k + ring_v + taps + resid + h + x + xa + gout + co + q + kb + vb + part + kv +
-           logits + tpart + cand + unary + hid;
+           logits + tpart + cand + unary + hid + vids;
   }
 };
+// The lists' rows for a drafter: Qwen3.8's 8 (kernels::dflash::kM), a Muse-form drafter's 16.
+uint32_t list_rows(const model::DFlashDesc& d);
 
 // The drafter's RoPE table: [rows][head_dim] fp32, cos in the first half, sin in the second, angle = pos x
 // theta^(-2j / head_dim) in double, rounded once (tools/oracle/dflash_ref.py rope(); tests/kernels/dflash_ref.h
