@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <fstream>
+#include <vector>
 #include <stdexcept>
 #include <string>
 
@@ -37,8 +38,9 @@ void require(bool ok, const std::string& what) {
 class Walk {
  public:
   Walk(l0::Context& ctx, const loader::MuseDevicePart& part, const model::MuseGlimmerDesc& d, MuseBuffers& b,
-       const StageLink* link, l0::Mem* tap)
-      : ctx_(ctx), part_(part), d_(d), b_(b), link_(link), tap_(tap), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
+       const StageLink* link, l0::Mem* tap, uint32_t M = 1, const VerifyBind* verify = nullptr)
+      : ctx_(ctx), part_(part), d_(d), b_(b), link_(link), tap_(tap), verify_(verify), M_(M),
+        step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
 
   CapturedStep run() {
     check();
@@ -48,13 +50,14 @@ class Walk {
     for (uint32_t l = part_.first; l < part_.end; ++l) {
       layer_ = int(l);
       layer(l);
-      if (tap_) step_.list.copy(at(*tap_, size_t(l) * kM * d_.hidden * 2), b_.resid.ptr(), size_t(kM) * d_.hidden * 2);
+      if (tap_) step_.list.copy(at(*tap_, size_t(l) * M_ * d_.hidden * 2), b_.resid.ptr(), size_t(M_) * d_.hidden * 2);
+      if (verify_ && verify_->taps) drafter_taps(l);
     }
     layer_ = -1;
     if (link_ && dev == 0) handoff_out();
     if (dev + 1 == b_.placement.devices) head();
     const PpHandoff h = link_ ? link_->mode : kDefaultPpHandoff;
-    const size_t want = device_launches(d_, b_.placement, dev, b_.attn, h, kM);
+    const size_t want = device_launches(d_, b_.placement, dev, b_.attn, h, M_);
     require(step_.kernel_count == want, "device " + std::to_string(dev) + "'s decode list has " +
                                             std::to_string(step_.kernel_count) + " launches, not the " +
                                             std::to_string(want) + " runtime::muse::device_launches gives (" +
@@ -89,12 +92,28 @@ class Walk {
     require(b_.kv_bytes() == device_kv_bytes(d_, b_.placement, b_.device, b_.max_len) &&
                 b_.ring_bytes() == device_ring_bytes(d_, b_.placement, b_.device),
             "the KV groups are not runtime::muse's");
-    require(b_.scratch_bytes() == decode_scratch_bytes(d_, b_.max_len, kM, b_.attn),
+    require(b_.scratch_bytes() == decode_scratch_bytes(d_, b_.max_len, b_.rows, b_.attn),
             "the decode scratch is not runtime::muse::decode_scratch_bytes'");
+    require(M_ >= 1 && M_ <= b_.rows, "a list of " + std::to_string(M_) + " rows over a scratch of " +
+                                          std::to_string(b_.rows));
     require(bool(b_.attn_s) == (b_.attn == MuseAttn::Eager), "eager's score row exists exactly under eager");
     if (tap_) require(tap_->size() >= tap_bytes(d_), "the tap is smaller than [layers][M][hidden] bf16");
     const bool int8 = part_.lm_head ? part_.lm_head->kind == model::WeightKind::Int8 : true;
-    std::vector<std::string> need = km::decode_variants(int8, b_.attn == MuseAttn::Eager);
+    std::vector<std::string> need = verify_ ? km::verify_variants(M_, int8, b_.attn == MuseAttn::Eager)
+                                            : km::decode_variants(int8, b_.attn == MuseAttn::Eager);
+    if (verify_) {
+      require(b_.placement.devices == 1 && link_ == nullptr, "a verify list is one card's (spec 23f)");
+      require(verify_->ids && verify_->ids->size() >= M_ * 4 && verify_->out && verify_->out->size() >= M_ * 4,
+              "the verify's ids / output buffers hold fewer than M ids");
+      if (verify_->taps) {
+        require(verify_->tap_layers && !verify_->tap_layers->empty(), "the drafter's taps without tap layers");
+        for (uint32_t t : *verify_->tap_layers)
+          require(t < d_.layers, "the drafter taps layer " + std::to_string(t) + " of a " + std::to_string(d_.layers) +
+                                     "-layer target");
+        require(verify_->taps->size() >= size_t(M_) * verify_->tap_layers->size() * d_.hidden * 2,
+                "the drafter's tap buffer is smaller than [M][taps][hidden] bf16");
+      }
+    }
     if (link_ && link_->mode == PpHandoff::Peer) need.push_back(kernels::pp_handoff_variant());
     for (const std::string& v : need)   // a missing binary is named before a command is appended
       require(std::ifstream(kernels::path(v)).good(), v + " is not compiled (" + kernels::path(v) + "): build with B70_MUSE=ON");
@@ -120,50 +139,52 @@ class Walk {
     ++step_.kernel_count;
   }
 
-  // mg_embed(ctrl, embed, resid, sumsq), grid (1, M): the residual row and layer 0's Σ².
+  // mg_embed(ctrl, embed, resid, sumsq), grid (1, M): the residual row and layer 0's Σ². Spec 23f's verify:
+  // mg_pf_embed(ids, embed, resid, sumsq) at M - the same chain over the verify's ids buffer.
   void embed() {
-    l0::Kernel& k = kernel(km::embed_variant(kM), "mg_embed", km::kRowWg);
-    k.arg_ptr(0, b_.control.ptr());
+    l0::Kernel& k = verify_ ? kernel(km::verify_embed_variant(M_), "mg_pf_embed", km::kRowWg)
+                            : kernel(km::embed_variant(M_), "mg_embed", km::kRowWg);
+    k.arg_ptr(0, verify_ ? verify_->ids->ptr() : b_.control.ptr());
     k.arg_ptr(1, part_.embed->ptr());
     k.arg_ptr(2, b_.resid.ptr());
     k.arg_ptr(3, b_.sumsq_r.ptr());
-    launch(k, 1, kM);
+    launch(k, 1, M_);
   }
   // mg_norm / mg_final_norm(sumsq, resid, w, x), grid (kNormW, M).
   void norm(const float* w, const char* entry = "mg_norm") {
-    l0::Kernel& k = kernel(km::norm_variant(kM), entry, km::kRowWg);
+    l0::Kernel& k = kernel(km::norm_variant(M_), entry, km::kRowWg);
     k.arg_ptr(0, b_.sumsq_r.ptr());
     k.arg_ptr(1, b_.resid.ptr());
     k.arg_ptr(2, w);
     k.arg_ptr(3, b_.x.ptr());
-    launch(k, km::kNormW, kM);
+    launch(k, km::kNormW, M_);
   }
   // prep_res_fold ..._Z(partials, a, sumsq_a), grid (kNormG, M): a sub-block's S slices -> its own row and Σ².
   void fold_zero(uint32_t S) {
-    l0::Kernel& k = kernel(km::fold_zero_variant(kM, S), "prep_res_fold", km::kRowWg);
+    l0::Kernel& k = kernel(km::fold_zero_variant(M_, S), "prep_res_fold", km::kRowWg);
     k.arg_ptr(0, b_.partials.ptr());
     k.arg_ptr(1, b_.a.ptr());
     k.arg_ptr(2, b_.sumsq_a.ptr());
-    launch(k, km::kNormG, kM);
+    launch(k, km::kNormG, M_);
   }
   // mg_post_add(sumsq_sub, sub, w_post, resid, sumsq_out), grid (kNormG, M).
   void post_add(const float* w) {
-    l0::Kernel& k = kernel(km::post_add_variant(kM), "mg_post_add", km::kRowWg);
+    l0::Kernel& k = kernel(km::post_add_variant(M_), "mg_post_add", km::kRowWg);
     k.arg_ptr(0, b_.sumsq_a.ptr());
     k.arg_ptr(1, b_.a.ptr());
     k.arg_ptr(2, w);
     k.arg_ptr(3, b_.resid.ptr());
     k.arg_ptr(4, b_.sumsq_r.ptr());
-    launch(k, km::kNormG, kM);
+    launch(k, km::kNormG, M_);
   }
   // gemv(w, scales, x, out), grid (N / 64, S) - an int4 layout-0 linear into `partials` [S][M][N].
   void linear(const loader::DeviceWeight& w, const void* x, const std::string& variant) {
     const model::GemvShape& s = w.shape;
     require(w.kind == model::WeightKind::Int4 && s.layout == 0 && w.scales, "a Muse linear is int4 layout 0 with its scales");
-    require(variant == kernels::gemv_variant(kM, s.K, s.N, s.S, s.layout),
+    require(variant == kernels::gemv_variant(M_, s.K, s.N, s.S, s.layout),
             "the loaded weight's shape {" + std::to_string(s.K) + ", " + std::to_string(s.N) + ", S" + std::to_string(s.S) +
                 "} is not the binary " + variant + "'s");
-    require(b_.partials.size() >= size_t(s.S) * kM * s.N * 4, "the GEMV's output is smaller than [S][M][N]");
+    require(b_.partials.size() >= size_t(s.S) * M_ * s.N * 4, "the GEMV's output is smaller than [S][M][N]");
     l0::Kernel& k = kernel(variant, "gemv", 64);
     k.arg_ptr(0, w.mem.ptr());
     k.arg_ptr(1, w.scales->ptr());
@@ -179,12 +200,12 @@ class Walk {
     const l0::Mem& nw = *L.norms;
     // --- attention ----------------------------------------------------------------------------------------
     norm(fat(nw, d_.norm_off_input()));
-    linear(*L.qgkv, b_.x.ptr(), km::qgkv_variant(kM));
+    linear(*L.qgkv, b_.x.ptr(), km::qgkv_variant(M_));
     void* kv_k = b_.k_layer(l);
     void* kv_v = b_.v_layer(l);
     {
       // mg_attn_prep(ctrl, partials, rope, attn_q, gate, kv_k, kv_v), grid (2 q + 2 kv heads, M)
-      l0::Kernel& k = kernel(km::attn_prep_variant(kM, km::kQgkvS, sliding), "mg_attn_prep", km::kPrepWg);
+      l0::Kernel& k = kernel(km::attn_prep_variant(M_, km::kQgkvS, sliding), "mg_attn_prep", km::kPrepWg);
       k.arg_ptr(0, b_.control.ptr());
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, b_.rope.ptr());   // read only when sliding: the full layers are NoPE
@@ -192,26 +213,26 @@ class Walk {
       k.arg_ptr(4, b_.gate.ptr());
       k.arg_ptr(5, kv_k);
       k.arg_ptr(6, kv_v);
-      launch(k, km::kPrepGroups, kM);
+      launch(k, km::kPrepGroups, M_);
     }
     if (b_.attn == MuseAttn::Eager)
       attention_eager(sliding, kv_k, kv_v);
     else
       attention_flash(sliding, kv_k, kv_v);
-    linear(*L.oproj, b_.attn_out.ptr(), km::oproj_variant(kM));
+    linear(*L.oproj, b_.attn_out.ptr(), km::oproj_variant(M_));
     fold_zero(km::kOprojS);
     post_add(fat(nw, d_.norm_off_post_attn()));
     // --- the MLP --------------------------------------------------------------------------------------------
     norm(fat(nw, d_.norm_off_pre_ff()));
-    linear(*L.gate_up, b_.x.ptr(), km::gate_up_variant(kM));
+    linear(*L.gate_up, b_.x.ptr(), km::gate_up_variant(M_));
     {
       // mg_silu_mul(partials, h), grid (ceil(I / 256), M)
-      l0::Kernel& k = kernel(km::silu_variant(kM, km::kGateUpS), "mg_silu_mul", km::kRowWg);
+      l0::Kernel& k = kernel(km::silu_variant(M_, km::kGateUpS), "mg_silu_mul", km::kRowWg);
       k.arg_ptr(0, b_.partials.ptr());
       k.arg_ptr(1, b_.h.ptr());
-      launch(k, km::kSiluGroups, kM);
+      launch(k, km::kSiluGroups, M_);
     }
-    linear(*L.down, b_.h.ptr(), km::down_variant(kM));
+    linear(*L.down, b_.h.ptr(), km::down_variant(M_));
     fold_zero(km::kDownS);
     post_add(fat(nw, d_.norm_off_post_ff()));
   }
@@ -219,7 +240,7 @@ class Walk {
   // mg_attn_decode(ctrl, attn_q, kv_k, kv_v, attn_part)   grid (kv heads, TGT)
   // mg_attn_reduce(ctrl, attn_part, gate, attn_out)       grid (q heads, M)
   void attention_flash(bool sliding, void* kv_k, void* kv_v) {
-    const std::string v = km::attn_variant(kM, sliding);
+    const std::string v = km::attn_variant(M_, sliding);
     {
       l0::Kernel& k = kernel(v, "mg_attn_decode", km::kAttnWg);
       k.arg_ptr(0, b_.control.ptr());
@@ -235,12 +256,12 @@ class Walk {
       k.arg_ptr(1, b_.attn_part.ptr());
       k.arg_ptr(2, b_.gate.ptr());
       k.arg_ptr(3, b_.attn_out.ptr());
-      launch(k, d_.q_heads, kM);
+      launch(k, d_.q_heads, M_);
     }
   }
   // B70_MUSE_ATTN=eager: mg_attn_eager(ctrl, attn_q, kv_k, kv_v, gate, attn_s, attn_out, stride), grid (q heads, M).
   void attention_eager(bool sliding, void* kv_k, void* kv_v) {
-    l0::Kernel& k = kernel(km::attn_eager_variant(kM, sliding), "mg_attn_eager", km::kAttnWg);
+    l0::Kernel& k = kernel(km::attn_eager_variant(M_, sliding), "mg_attn_eager", km::kAttnWg);
     k.arg_ptr(0, b_.control.ptr());
     k.arg_ptr(1, b_.attn_q.ptr());
     k.arg_ptr(2, kv_k);
@@ -249,7 +270,7 @@ class Walk {
     k.arg_ptr(5, b_.attn_s->ptr());
     k.arg_ptr(6, b_.attn_out.ptr());
     k.arg<uint32_t>(7, b_.max_len);
-    launch(k, d_.q_heads, kM);
+    launch(k, d_.q_heads, M_);
   }
 
   void head() {
@@ -258,7 +279,8 @@ class Walk {
     require(lm.shape.N == d_.vocab && lm.shape.K == d_.hidden, "lm_head is not [vocab][hidden]");
     if (lm.kind == model::WeightKind::Int8) {
       require(bool(lm.scales), "the int8 lm_head has no row scales");
-      l0::Kernel& k = kernel(km::lm_head_variant(true), "gemv_i8w", kernels::kGemvI8wCols);
+      l0::Kernel& k = kernel(verify_ ? km::verify_lm_head_variant(M_, true) : km::lm_head_variant(true), "gemv_i8w",
+                             kernels::kGemvI8wCols);
       k.arg_ptr(0, lm.mem.ptr());
       k.arg_ptr(1, lm.scales->ptr());
       k.arg_ptr(2, b_.x.ptr());
@@ -267,17 +289,33 @@ class Walk {
     } else {
       require(lm.kind == model::WeightKind::Bf16, "lm_head is neither int8 nor bf16");
       const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(lm.shape.N);
-      l0::Kernel& k = kernel(km::lm_head_variant(false), "gemv_bf16", t.cols * t.ksplit);
+      l0::Kernel& k = kernel(verify_ ? km::verify_lm_head_variant(M_, false) : km::lm_head_variant(false), "gemv_bf16",
+                             t.cols * t.ksplit);
       k.arg_ptr(0, lm.mem.ptr());
       k.arg_ptr(1, b_.x.ptr());
       k.arg_ptr(2, b_.logits.ptr());
       launch(k, lm.shape.N / t.cols);
     }
+    if (verify_) {   // spec 23f: mg_vargmax - every row's id into the verify's output, Control::pos left alone
+      {
+        l0::Kernel& k = kernel(km::vargmax1_variant(M_), "mg_vargmax_stage1", km::kArgmaxWg);
+        k.arg_ptr(0, b_.logits.ptr());
+        k.arg_ptr(1, b_.argmax_part.ptr());
+        launch(k, km::argmax_groups(), M_);
+      }
+      l0::Kernel& k = kernel(km::vargmax2_variant(), "mg_vargmax_stage2", km::kArgmaxWg);
+      k.arg_ptr(0, b_.control.ptr());
+      k.arg_ptr(1, b_.argmax_part.ptr());
+      k.arg_ptr(2, verify_->out->ptr());
+      launch(k, 1, 1);
+      require(km::argmax_groups() <= km::kArgmaxWg, "mg_vargmax_stage2 folds at most 256 groups");
+      return;
+    }
     {
-      l0::Kernel& k = kernel(km::argmax1_variant(kM), "argmax_stage1", km::kArgmaxWg);
+      l0::Kernel& k = kernel(km::argmax1_variant(M_), "argmax_stage1", km::kArgmaxWg);
       k.arg_ptr(0, b_.logits.ptr());
       k.arg_ptr(1, b_.argmax_part.ptr());
-      launch(k, km::argmax_groups(), kM);
+      launch(k, km::argmax_groups(), M_);
     }
     {
       l0::Kernel& k = kernel(km::argmax2_variant(), "argmax_stage2", km::kArgmaxWg);
@@ -289,7 +327,7 @@ class Walk {
   }
 
   // --- the hand-off (spec 16b's: capture.cc handoff_out / handoff_in; Kolibri's) --------------------------------
-  size_t resid_bytes() const { return size_t(kM) * d_.hidden * 2; }
+  size_t resid_bytes() const { return size_t(M_) * d_.hidden * 2; }
   size_t sumsq_bytes() const { return b_.sumsq_r.size(); }
   void check_link() const {
     require(link_->land_resid && link_->land_sumsq && link_->resid_cap >= resid_bytes() &&
@@ -343,12 +381,26 @@ class Walk {
     launch(k, 1);
   }
 
+  // Spec 23f: layer l's OUTPUT (resid after its last mg_post_add) of every row into the drafter's taps
+  // [row][tap][hidden] when l is a tap layer (target_layer_ids: 1, 13, 25, 37, 49).
+  void drafter_taps(uint32_t l) {
+    const std::vector<uint32_t>& tl = *verify_->tap_layers;
+    const size_t row = size_t(d_.hidden) * 2;
+    for (size_t t = 0; t < tl.size(); ++t) {
+      if (tl[t] != l) continue;
+      for (uint32_t r = 0; r < M_; ++r)
+        step_.list.copy(at(*verify_->taps, (size_t(r) * tl.size() + t) * row), at(b_.resid, size_t(r) * row), row);
+    }
+  }
+
   l0::Context& ctx_;
   const loader::MuseDevicePart& part_;
   const model::MuseGlimmerDesc& d_;
   MuseBuffers& b_;
   const StageLink* link_;
   l0::Mem* tap_;
+  const VerifyBind* verify_;
+  uint32_t M_;
   CapturedStep step_;
   int layer_ = -1;
   std::string pending_entry_, pending_variant_;
@@ -359,6 +411,13 @@ class Walk {
 CapturedStep build(l0::Context& ctx, const loader::MuseDevicePart& part, const model::MuseGlimmerDesc& d, MuseBuffers& b,
                    const StageLink* link, l0::Mem* tap) {
   return Walk(ctx, part, d, b, link, tap).run();
+}
+
+CapturedStep build_verify(l0::Context& ctx, const loader::MuseDevicePart& part, const model::MuseGlimmerDesc& d,
+                          MuseBuffers& b, uint32_t M, const VerifyBind& v) {
+  if (M < 1 || M > kVerifyMaxRows)
+    throw std::invalid_argument("runtime::muse::build_verify: M " + std::to_string(M) + " outside 1..16");
+  return Walk(ctx, part, d, b, nullptr, nullptr, M, &v).run();
 }
 
 }  // namespace runtime::muse

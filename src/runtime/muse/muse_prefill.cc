@@ -42,8 +42,9 @@ const float* fat(const l0::Mem& m, size_t floats) { return static_cast<const flo
 class Walk {
  public:
   Walk(prefill::Context& cx, prefill::KernelCache& kc, MusePrefillScratch& s, const loader::MuseDevicePart& part,
-       const model::MuseGlimmerDesc& d, MuseBuffers& b, uint32_t pos, uint32_t C, bool eager)
-      : cx_(cx), kc_(kc), s_(s), part_(part), d_(d), b_(b), pos_(pos), C_(C), eager_(eager) {}
+       const model::MuseGlimmerDesc& d, MuseBuffers& b, uint32_t pos, uint32_t C, bool eager,
+       const MusePrefillTaps* taps)
+      : cx_(cx), kc_(kc), s_(s), part_(part), d_(d), b_(b), pos_(pos), C_(C), eager_(eager), taps_(taps) {}
 
   void run() {
     check();
@@ -53,13 +54,26 @@ class Walk {
              {PtrArg(s_.ids.ptr()), PtrArg(part_.embed->ptr()), PtrArg(s_.resid.ptr()), PtrArg(s_.sumsq_r.ptr())});
       prefill::profile_wait(cx_, Phase::kNorm);
     }
-    for (uint32_t l = part_.first; l < part_.end; ++l) layer(l);
+    for (uint32_t l = part_.first; l < part_.end; ++l) {
+      layer(l);
+      if (taps_ && taps_->r0 < C_) stage_taps(l);   // spec 23f
+    }
     const size_t want = prefill_device_launches(d_, b_.placement, part_.device);
     require(n_ == want, "device " + std::to_string(part_.device) + "'s chunk appended " + std::to_string(n_) +
                             " launches, not the " + std::to_string(want) + " runtime::muse::prefill_device_launches gives");
   }
 
  private:
+  // Spec 23f: layer l's output rows r0 .. C - 1 into the drafter's staging when l is a tap layer (one 2D copy).
+  void stage_taps(uint32_t l) {
+    const std::vector<uint32_t>& tl = *taps_->layers;
+    const size_t row = size_t(d_.hidden) * 2;
+    for (size_t t = 0; t < tl.size(); ++t)
+      if (tl[t] == l)
+        cx_.copy_2d(static_cast<uint8_t*>(taps_->dst) + t * row, tl.size() * row,
+                    static_cast<const uint8_t*>(s_.resid.ptr()) + size_t(taps_->r0) * row, row, row, C_ - taps_->r0);
+  }
+
   void check() {
     require(C_ > 0 && C_ <= kPfC, "C = " + std::to_string(C_) + " is outside (0, kPfC]");
     require(size_t(pos_) + C_ <= b_.max_len, "pos + C exceeds max_len (the full layers' KV and the RoPE table)");
@@ -187,6 +201,7 @@ class Walk {
   MuseBuffers& b_;
   const uint32_t pos_, C_;
   const bool eager_;
+  const MusePrefillTaps* taps_;
   size_t n_ = 0;
 };
 
@@ -214,8 +229,8 @@ size_t MusePrefillScratch::bytes() const {
 
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, MusePrefillScratch& s,
                    const loader::MuseDevicePart& part, const model::MuseGlimmerDesc& d, MuseBuffers& b, uint32_t pos,
-                   uint32_t C, bool eager) {
-  Walk(cx, kc, s, part, d, b, pos, C, eager).run();
+                   uint32_t C, bool eager, const MusePrefillTaps* taps) {
+  Walk(cx, kc, s, part, d, b, pos, C, eager, taps).run();
 }
 
 void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, MusePrefillScratch& s,

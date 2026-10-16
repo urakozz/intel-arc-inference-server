@@ -24,8 +24,8 @@ constexpr uint32_t kStatusTimeout = 1, kStatusStale = 2;
 
 struct MuseEngine::Stage {
   Stage(l0::Context& c, const model::MuseGlimmerDesc& d, const model::MusePlacement& p, uint32_t dev, uint32_t max_len,
-        MuseAttn a)
-      : ctx(c), buffers(c, d, p, dev, max_len, a), queue(c), fence(queue), imm(l0::CmdList::immediate(c)),
+        MuseAttn a, uint32_t rows)
+      : ctx(c), buffers(c, d, p, dev, max_len, a, rows), queue(c), fence(queue), imm(l0::CmdList::immediate(c)),
         ctl(buffers.control.as<Control>()) {}
   l0::Context& ctx;
   MuseBuffers buffers;
@@ -69,11 +69,19 @@ MuseEngine::MuseEngine(std::vector<l0::Context*> ctx, const std::string& snapsho
   std::vector<size_t> caps;
   for (l0::Context* c : ctx) caps.push_back(c->memory_bytes());
   // Spec 23d: a run that prefills (MuseOptions::prefill) plans the prefill scratch and its link too.
-  const MusePlan first = plan_muse(d, devs, o.max_len, o.int8_head, run_reserve(d, o.max_len, devs, attn_, o.prefill),
-                                   caps, devs == 2 ? o.split : 0);
+  // Spec 23f: the verify lists' scratch rows and the drafter's term (one card only).
+  if (o.spec.rows == 0 || o.spec.rows > kVerifyMaxRows)
+    throw std::invalid_argument("runtime::muse::MuseEngine: spec.rows " + std::to_string(o.spec.rows) +
+                                " outside 1..16 (the anchor + up to 15 drafts)");
+  if (o.spec.on() && devs != 1)
+    throw std::invalid_argument("runtime::muse::MuseEngine: speculative decoding (--spec dflash / lookup) runs on one "
+                                "card (spec 23f); --pp 2 serves Muse-Glimmer plainly");
+  const MusePlan first = plan_muse(d, devs, o.max_len, o.int8_head,
+                                   run_reserve(d, o.max_len, devs, attn_, o.prefill, o.spec), caps,
+                                   devs == 2 ? o.split : 0);
   require_fits(first);
   max_len_ = first.max_len;
-  const MuseReserve reserve = run_reserve(d, max_len_, devs, attn_, o.prefill);
+  const MuseReserve reserve = run_reserve(d, max_len_, devs, attn_, o.prefill, o.spec);
   plan_ = plan_at(d, first.placement, max_len_, o.int8_head, reserve, caps);
   require_fits(plan_);
   w_ = loader::load_muse_glimmer(ctx, snapshot, max_len_, plan_.placement, o.int8_head, o.layers, reserve);
@@ -85,7 +93,7 @@ MuseEngine::MuseEngine(std::vector<l0::Context*> ctx, const std::string& snapsho
     throw std::logic_error("runtime::muse::MuseEngine: " + std::to_string(w_.parts.size()) + " loaded parts for a " +
                            std::to_string(P.devices) + "-device placement");
   for (uint32_t i = 0; i < P.devices; ++i) {
-    st_.push_back(std::make_unique<Stage>(*ctx[i], D, P, i, max_len_, attn_));
+    st_.push_back(std::make_unique<Stage>(*ctx[i], D, P, i, max_len_, attn_, o.spec.rows));
     taps_.push_back(o.debug_tap ? std::make_unique<l0::Mem>(*ctx[i], l0::MemKind::Device, tap_bytes(D)) : nullptr);
   }
   pending_.assign(P.devices, false);
@@ -96,6 +104,13 @@ MuseEngine::MuseEngine(std::vector<l0::Context*> ctx, const std::string& snapsho
   }
   for (uint32_t i = 0; i < P.devices; ++i)
     st(i).step.emplace(build(st(i).ctx, w_.parts[i], D, st(i).buffers, link_ ? &binding : nullptr, taps_[i].get()));
+  if (o.spec.on()) {   // spec 23f: the verify's ids / output (the lists themselves on first use)
+    vin_ = std::make_unique<l0::Mem>(*ctx[0], l0::MemKind::Shared, kVerifyMaxRows * 4);
+    vout_ = std::make_unique<l0::Mem>(*ctx[0], l0::MemKind::Shared, kVerifyMaxRows * 4);
+    std::memset(vin_->ptr(), 0, vin_->size());
+    std::memset(vout_->ptr(), 0, vout_->size());
+    verify_steps_.resize(o.spec.rows);
+  }
   reset();
 }
 
@@ -124,8 +139,126 @@ void MuseEngine::reset() {
                              std::to_string(opt_.prefill_timeout_ms) + " ms");
   for (uint32_t i = 0; i < st_.size(); ++i) st(i).buffers.zero(st(i).imm);
   if (link_) link_->zero(st(0).imm, st(1).imm);
+  if (drafter_) drafter_->reset(st(0).imm);   // spec 23f: a cold drafter
+  verify_k_ = kNoVerify;
   broken_ = false;
   drop_next_ = false;
+}
+
+// --- spec 23f: speculative decoding ---------------------------------------------------------------------------
+void MuseEngine::attach_drafter(TapSink& d) {
+  if (!opt_.spec.on())
+    throw std::logic_error("runtime::muse::MuseEngine::attach_drafter: the engine was built without verify lists "
+                           "(MuseOptions::spec.rows is 1)");
+  if (drafter_) throw std::logic_error("runtime::muse::MuseEngine::attach_drafter: a drafter is already attached");
+  if (d.max_k() + 1 > opt_.spec.rows)
+    throw std::invalid_argument("runtime::muse::MuseEngine::attach_drafter: the drafter drafts up to " +
+                                std::to_string(d.max_k()) + ", the verify lists hold " +
+                                std::to_string(opt_.spec.rows) + " rows");
+  for (uint32_t t : d.tap_layers())
+    if (t >= w_.desc.layers)
+      throw std::invalid_argument("runtime::muse::MuseEngine::attach_drafter: the drafter taps layer " +
+                                  std::to_string(t) + " of a " + std::to_string(w_.desc.layers) + "-layer target");
+  for (auto& s : verify_steps_) s.reset();   // lookup's lists bound no taps: recaptured with them
+  drafter_ = &d;
+  drafter_->reset(st(0).imm);
+}
+
+uint32_t MuseEngine::max_verify_k() const {
+  if (!opt_.spec.on()) return 0;
+  const uint32_t k = drafter_ ? std::min(drafter_->max_k(), opt_.spec.rows - 1) : opt_.spec.rows - 1;
+  const uint32_t p = pos();
+  if (size_t(p) + 1 >= size_t(max_len_)) return 0;
+  return std::min<uint32_t>(k, max_len_ - p - 1);
+}
+
+void MuseEngine::run_verify(uint32_t M) {
+  std::optional<CapturedStep>& s = verify_steps_.at(M - 1);
+  if (!s) {
+    VerifyBind v;
+    v.ids = vin_.get();
+    v.out = vout_.get();
+    if (drafter_) {
+      v.taps = &drafter_->taps();
+      v.tap_layers = &drafter_->tap_layers();
+    }
+    s.emplace(build_verify(st(0).ctx, w_.parts[0], w_.desc, st(0).buffers, M, v));
+  }
+  st(0).queue.execute(s->list, &st(0).fence);
+  st(0).fence.wait();
+}
+
+void MuseEngine::verify(const uint32_t* drafts, uint32_t k) {
+  if (!opt_.spec.on()) throw std::logic_error("runtime::muse::MuseEngine::verify: no verify lists (spec.rows 1)");
+  if (broken_) throw std::runtime_error("runtime::muse::MuseEngine::verify: reset() first");
+  if (k > max_verify_k())
+    throw std::invalid_argument("runtime::muse::MuseEngine::verify: k " + std::to_string(k) + " exceeds " +
+                                std::to_string(max_verify_k()) + " at pos " + std::to_string(pos()));
+  Control& c = *st(0).ctl;
+  if (size_t(c.pos) + k + 1 > size_t(max_len_))
+    throw std::runtime_error("runtime::muse::MuseEngine::verify: pos " + std::to_string(c.pos) + " + " +
+                             std::to_string(k + 1) + " rows exceeds max_len " + std::to_string(max_len_));
+  uint32_t* in = vin_->as<uint32_t>();
+  in[0] = c.cur_token[0];
+  for (uint32_t i = 0; i < k; ++i) {
+    if (drafts[i] >= w_.desc.vocab)
+      throw std::invalid_argument("runtime::muse::MuseEngine::verify: draft " + std::to_string(drafts[i]) +
+                                  " is outside the vocabulary");
+    in[1 + i] = drafts[i];
+  }
+  c.n_active = k + 1;
+  run_verify(k + 1);
+  verify_k_ = k;
+  verify_pos_ = c.pos;
+}
+
+const uint32_t* MuseEngine::verify_ids() const {
+  if (!vout_) throw std::logic_error("runtime::muse::MuseEngine::verify_ids: no verify lists");
+  return vout_->as<uint32_t>();
+}
+
+void MuseEngine::read_verify_logits(float* host, uint32_t rows) {
+  if (verify_k_ == kNoVerify || rows > verify_k_ + 1)
+    throw std::logic_error("runtime::muse::MuseEngine::read_verify_logits: " + std::to_string(rows) +
+                           " rows after no verify / a verify of fewer");
+  st(0).imm.copy(host, st(0).buffers.logits.ptr(), size_t(rows) * w_.desc.vocab * 4);
+}
+
+void MuseEngine::commit(uint32_t j, uint32_t next_token) {
+  Control& c = *st(0).ctl;
+  if (verify_k_ == kNoVerify || c.pos != verify_pos_)
+    throw std::logic_error("runtime::muse::MuseEngine::commit: no verify at pos " + std::to_string(c.pos));
+  if (j > verify_k_)
+    throw std::invalid_argument("runtime::muse::MuseEngine::commit: j " + std::to_string(j) + " > k " +
+                                std::to_string(verify_k_));
+  if (next_token >= w_.desc.vocab)
+    throw std::invalid_argument("runtime::muse::MuseEngine::commit: id " + std::to_string(next_token) +
+                                " is outside the vocabulary");
+  const uint32_t n = c.pos;
+  verify_k_ = kNoVerify;
+  if (drafter_) replay_aux(drafter_->projection(n, j + 1));   // rows 0..j of the taps: positions n .. n + j
+  c.pos = n + j + 1;
+  c.cur_token[0] = next_token;
+  c.n_active = 1;
+}
+
+void MuseEngine::replay_aux(l0::CmdList& list) {
+  st(0).queue.execute(list, &st(0).fence);
+  st(0).fence.wait();
+}
+
+const l0::Mem& MuseEngine::control_mem() const { return st(0).buffers.control; }
+const l0::Mem& MuseEngine::embed() const {
+  if (!w_.parts.at(0).embed) throw std::logic_error("runtime::muse::MuseEngine: device 0 holds no embedding");
+  return *w_.parts.at(0).embed;
+}
+const loader::DeviceWeight& MuseEngine::lm_head() const {
+  const loader::MuseDevicePart& p = w_.parts.back();
+  if (!p.lm_head) throw std::logic_error("runtime::muse::MuseEngine: the last device holds no lm_head");
+  return *p.lm_head;
+}
+size_t MuseEngine::verify_launches(uint32_t M) const {
+  return M >= 1 && M <= verify_steps_.size() && verify_steps_[M - 1] ? verify_steps_[M - 1]->kernel_count : 0;
 }
 
 void MuseEngine::fail(const std::string& what) {
@@ -197,6 +330,11 @@ void MuseEngine::ingest(const std::vector<uint32_t>& ids) {
   for (uint32_t id : ids) {
     for (auto& s : st_) s->ctl->n_active = 1;
     set_token(id);
+    if (drafter_) {   // spec 23f: one plain token through the M = 1 verify list, its taps projected
+      verify(nullptr, 0);
+      commit(0, verify_ids()[0]);
+      continue;
+    }
     step_once();
   }
 }
@@ -210,7 +348,12 @@ std::vector<uint32_t> MuseEngine::generate(uint32_t n, const std::function<void(
   for (uint32_t i = 0; i < n; ++i) {
     const uint32_t id = st(uint32_t(st_.size()) - 1).ctl->cur_token[0];   // == device 0's after the mirror
     const Clock::time_point f0 = Clock::now();
-    step_once();
+    if (drafter_) {   // spec 23f: the plain token through the M = 1 verify list (the drafter's ring stays filled)
+      verify(nullptr, 0);
+      commit(0, verify_ids()[0]);
+    } else {
+      step_once();
+    }
     fence_ms += ms_since(f0);
     out.push_back(id);
     if (on_token) on_token(id);
@@ -265,7 +408,10 @@ void MuseEngine::settle_all(const char* what) {
                                "'s last step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
 }
 
-size_t MuseEngine::state_bytes() const { return state_snapshot_bytes(w_.desc); }
+// Spec 23f: with a drafter, its ring after the target's state (spec 19d decision 5 as ruled, the operator's option a).
+size_t MuseEngine::state_bytes() const {
+  return state_snapshot_bytes(w_.desc) + (drafter_ ? drafter_->ring_bytes() : 0);
+}
 size_t MuseEngine::kv_bytes(uint32_t n_pos) const { return kv_snapshot_bytes(w_.desc, n_pos); }
 
 void MuseEngine::save_state(void* host) {
@@ -278,6 +424,7 @@ void MuseEngine::save_state(void* host) {
       st(r.device).imm.copy(h, static_cast<const uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, r.bytes);
     h += r.bytes;
   }
+  if (drafter_) drafter_->save_ring(st(0).imm, h);
 }
 
 void MuseEngine::load_state(const void* host, uint32_t p) {
@@ -291,6 +438,8 @@ void MuseEngine::load_state(const void* host, uint32_t p) {
     st(r.device).imm.copy(static_cast<uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, h, r.bytes);
     h += r.bytes;
   }
+  if (drafter_) drafter_->load_ring(st(0).imm, h);
+  verify_k_ = kNoVerify;
   for (auto& s : st_) {
     s->ctl->pos = p;
     s->ctl->n_active = 0;
@@ -362,6 +511,8 @@ MemoryComponents MuseEngine::memory_use(uint32_t dev) const {
   c.kv = b.kv_bytes() + b.ring_bytes();
   c.decode_state = b.scratch_bytes() + (taps_[dev] ? taps_[dev]->size() : 0) + (link_ ? link_->bytes(dev) : 0);
   c.prefill_scratch = dev < pf_dev_bytes_.size() ? pf_dev_bytes_[dev] : 0;   // spec 23d: 0 until prepared
+  if (dev == 0 && vin_) c.decode_state += vin_->size() + vout_->size();      // spec 23f
+  if (dev + 1 == st_.size() && drafter_) c.drafter = drafter_->bytes();    // spec 23f: weights + buffers
   return c;
 }
 

@@ -27,33 +27,36 @@ uint32_t kind_index(const model::MuseGlimmerDesc& d, uint32_t first, uint32_t la
 }  // namespace
 
 MuseBuffers::MuseBuffers(l0::Context& ctx, const model::MuseGlimmerDesc& d, const model::MusePlacement& p,
-                         uint32_t dev, uint32_t len, MuseAttn at)
-    : control(ctx, l0::MemKind::Shared, scratch_sizes(d, len, kM, at).control),
+                         uint32_t dev, uint32_t len, MuseAttn at, uint32_t rows_)
+    : control(ctx, l0::MemKind::Shared, scratch_sizes(d, len, rows_, at).control),
       full_k(group(ctx, half(device_kv_bytes(d, p, dev, len)))),
       full_v(group(ctx, half(device_kv_bytes(d, p, dev, len)))),
       ring_k(group(ctx, half(device_ring_bytes(d, p, dev)))),
       ring_v(group(ctx, half(device_ring_bytes(d, p, dev)))),
-      resid(ctx, l0::MemKind::Device, scratch_sizes(d, len, kM, at).resid),
-      x(ctx, l0::MemKind::Device, scratch_sizes(d, len, kM, at).x),
-      a(ctx, l0::MemKind::Device, scratch_sizes(d, len, kM, at).a),
-      partials(ctx, l0::MemKind::Device, scratch_sizes(d, len, kM, at).partials),
-      sumsq_a(ctx, l0::MemKind::Device, scratch_sizes(d, len, kM, at).sumsq_a),
-      sumsq_r(ctx, l0::MemKind::Device, scratch_sizes(d, len, kM, at).sumsq_r),
-      attn_q(ctx, l0::MemKind::Device, scratch_sizes(d, len, kM, at).attn_q),
-      gate(ctx, l0::MemKind::Device, scratch_sizes(d, len, kM, at).gate),
-      attn_part(ctx, l0::MemKind::Device, scratch_sizes(d, len, kM, at).attn_part),
-      attn_out(ctx, l0::MemKind::Device, scratch_sizes(d, len, kM, at).attn_out),
-      h(ctx, l0::MemKind::Device, scratch_sizes(d, len, kM, at).h),
-      logits(ctx, l0::MemKind::Device, scratch_sizes(d, len, kM, at).logits),
-      argmax_part(ctx, l0::MemKind::Device, scratch_sizes(d, len, kM, at).argmax_part),
-      rope(ctx, l0::MemKind::Device, scratch_sizes(d, len, kM, at).rope),
-      attn_s(group(ctx, scratch_sizes(d, len, kM, at).attn_s)),
+      resid(ctx, l0::MemKind::Device, scratch_sizes(d, len, rows_, at).resid),
+      x(ctx, l0::MemKind::Device, scratch_sizes(d, len, rows_, at).x),
+      a(ctx, l0::MemKind::Device, scratch_sizes(d, len, rows_, at).a),
+      partials(ctx, l0::MemKind::Device, scratch_sizes(d, len, rows_, at).partials),
+      sumsq_a(ctx, l0::MemKind::Device, scratch_sizes(d, len, rows_, at).sumsq_a),
+      sumsq_r(ctx, l0::MemKind::Device, scratch_sizes(d, len, rows_, at).sumsq_r),
+      attn_q(ctx, l0::MemKind::Device, scratch_sizes(d, len, rows_, at).attn_q),
+      gate(ctx, l0::MemKind::Device, scratch_sizes(d, len, rows_, at).gate),
+      attn_part(ctx, l0::MemKind::Device, scratch_sizes(d, len, rows_, at).attn_part),
+      attn_out(ctx, l0::MemKind::Device, scratch_sizes(d, len, rows_, at).attn_out),
+      h(ctx, l0::MemKind::Device, scratch_sizes(d, len, rows_, at).h),
+      logits(ctx, l0::MemKind::Device, scratch_sizes(d, len, rows_, at).logits),
+      argmax_part(ctx, l0::MemKind::Device, scratch_sizes(d, len, rows_, at).argmax_part),
+      rope(ctx, l0::MemKind::Device, scratch_sizes(d, len, rows_, at).rope),
+      attn_s(group(ctx, scratch_sizes(d, len, rows_, at).attn_s)),
       desc(d),
       placement(p),
       device(dev),
       max_len(len),
-      attn(at) {
+      attn(at),
+      rows(rows_) {
   model::validate(p, d);
+  if (rows_ == 0 || rows_ > kVerifyMaxRows)
+    throw std::invalid_argument("MuseBuffers: rows " + std::to_string(rows_) + " outside [1, 16] (spec 23f)");
   if (len == 0 || len > d.max_pos)
     throw std::invalid_argument("MuseBuffers: max_len " + std::to_string(len) + " outside [1, " + std::to_string(d.max_pos) +
                                 "] (spec 23 decision 6)");
