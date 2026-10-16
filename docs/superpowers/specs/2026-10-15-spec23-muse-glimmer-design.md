@@ -330,7 +330,7 @@ chunk (spec 20 §12). Prefill compute: 2 x 25.16 B = **50.3 GFLOP a token** in t
 
 Spec 7's store with Kolibri's split (spec 20 §13):
 - **State at position p:** the 39 sliding rings' rows `[p - 2047, p)` - what the next query's window reads - **39 x
-  2047 x 1024 B = 81,747,968 B** (positions below 0 zero rows); with the drafter, its context rows (§8.4).
+  2047 x 1024 B = 81,748,992 B** (positions below 0 zero rows; 23e: the first edition said 81,747,968 - a mistyped product); with the drafter, its context rows (§8.4).
 - **Blocks:** the 13 full layers' KV, **13,312 B a position** (27.3 MB a 2048-block).
 - One host layout for `--pp 1` and `--pp 2` (16b's rule).
 
@@ -776,3 +776,80 @@ re-asserted in `muse_plan_test`).
   bound under flash, one bound per 2048 keys of the chunk's deepest row under eager (a 32k eager chunk waits 16 x 30 s,
   not 30 s; row 45's note says how to read an eager timeout); `muse_prefill_test` now gates the last logits' cosine
   (>= 0.9995, PROPOSED) and, in `split` mode, every full layer's first-part rows bitwise at every split (Review Focus 3).
+
+## 16. 23e as built (2026-10-16; the Mac - nothing on a card)
+
+Branch `spec23e-muse-serving` (plan 23e); box queue row 46 holds what the Mac could not run (MG4's restores on the
+card, the server on the synthetic and the real checkpoint, MG5, the llama-benchy rows). No kernel added or changed
+(`kernel_cmdlines` +0 / -0 / ~0).
+
+- **Both Vishva007 repos ship the OLDER template** (`114f55eb...`, 7167 B - the -AutoRound repo too, not only the
+  -GPTQ one as §1.2 said). Decision 1's rule as built (`cli::muse::check_serve_template`): `<snapshot>/chat_template.jinja`
+  is used only when its sha256 is the original's `cfc67e5f...`, else `b70-serve` refuses before the device naming
+  `--chat-template FILE` (and the vendored `tests/tokenizer/muse/chat_template.jinja`); with the flag any file is
+  used and its sha prefix printed in the startup line. 23b's synthetic checkpoints copy the original's: no flag there.
+- **Fixtures** (`tools/tokenizer/dump_muse.py tokenizer|templates|parse`, transformers 5.19.0 from 21a's site in
+  `agnes-ref-img`, small files only; every request key-sorted): `tests/tokenizer/muse_tokenizer.json` (84 KB),
+  `tests/tokenizer/muse_templates.json` (26 cases, 50 KB), `tests/server/muse_parse_cases.json` (22 cases, 28 KB).
+- **The template** renders byte for byte on all 26 lists (`template_muse_test`) after ONE minja patch: the tool-call
+  capability probe accepts `name="argument_needle"` (without it minja found no argument name it knew and polyfilled
+  every call history into JSON content - 5 renders differed); `minja_ext_test`'s `tool_call_probe_attribute` holds
+  it, `third_party/VERSIONS` carries the new sha. Through `chat::Template` a string `arguments` does NOT raise (minja's
+  object-arguments polyfill parses it, the same render as the object - tested); the raw template does (tested); the
+  server parses string arguments first anyway and answers a non-object with a 400 naming the call (name and id).
+  `chat::Template` gained `(dir, file)`, `source_sha256()`, `set_clock()` (strftime_now's clock) and
+  `chat::sha256_hex`. Muse's list content is joined with "" (the template concatenates text parts).
+- **The tokenizer** equals transformers' (`muse_tokenizer_test`: 202048 ids, the 16 named tokens both ways, 24 texts
+  incl. every tag and ATEM, corpus.txt's 10240 lines in 10 digests, the 26 renders' ids) - and Review Focus 1: every
+  render encodes to exactly one 200000 at position 0; encoding with special tokens would double it.
+- **The parser** (`server::MuseOutputStream`, `server/toolcall_muse.{h,cc}`): segments messages at `<|message|>`
+  (the header extended back over `to=RECIPIENT`, horizontal whitespace and `<|start|>\s*assistant`), a body ends at
+  `<|eom|>` / `<|eot|>` / `<|start|>` / the next header; bodies are STRIPPED (transformers' `text` parser strips) and a
+  channel's bodies joined with "\n" (decision 2; content joins too); tool channels' complete invokes are the calls,
+  the rest of a tool body dropped; an output with no header at all is one content body (held until a header or the
+  end); text between messages dropped; a bare `<|message|>` is content (vLLM; transformers drops it). Typing
+  (`muse_convert_value`, decision 15): all-string schemas keep the exact text (a nullable string's literal `null` is
+  JSON null, as transformers); other types JSON-decode first, then cast as transformers' `_coerce` (int / number /
+  boolean / null / object / array), a union with string falling back to the exact text. Measured: the 22 fixture
+  cases equal `parse_response` but 6 documented differences (the reasoning join; typing x 4 incl. transformers
+  stripping a multi-line string value; the ns.ns collapse); the 7 rendered turns parse back to their messages; the
+  damaged cases; Review Focus 2 (` to=self` cut at every byte never leaks), 3, 6, 7; a 2000-output fuzz (646 cut)
+  - every parse whole == byte stream == random 1-7 byte pieces (2041 parses). A mutation (no hold-back of a growing
+  `to`) is caught by the fuzz.
+- **The request path** (`ChatFormat::Kind::Muse`): `request_template_kwargs` maps the top-level `reasoning_effort`
+  onto `reasoning_strength` (an explicit kwarg wins); `check_template_kwargs` holds reasoning_strength to the four
+  strengths, current_date / knowledge_cutoff to strings, tool_namespace_descriptions to an object of strings; image /
+  video / audio parts are a 400 naming the vision encoder (for every model - none loads an encoder);
+  `Sampling::logit_mult` / `softcap` (model properties: b70-serve sets them with generation_config's defaults, the
+  adapter writes them into what it filters with) are applied in `filter_probs` to the k candidates (monotone: the
+  top-k / top-p order is the raw one), so sampling and every acceptance path see one p; unset, `filter_probs` is
+  bit-for-bit what it was. `muse_server_test`: the capped probabilities to 1e-12, a 10^5-draw chi-square 14.0 against
+  the capped p (bar 30.58) and ~8.6e13 against the raw one, `accept_point_mass` identical on raw-capped and pre-capped
+  rows over 200 seeds. `generation_stop_strings` (a string or a list, else refused naming the key) feed
+  `Options::stop_strings`, merged with each request's `stop`.
+- **Snapshots** (`runtime::muse::state_runs` / `kv_runs` / `persistent_sizes`; `MuseEngine::save_state` / `load_state`
+  / `save_kv` / `load_kv`, Kolibri's loops; `load_state` resets a broken session first): **81,748,992 B** of state
+  (39 x 2047 x 1024 - §5.4's first figure, 81,747,968, was a mistyped product), 13,312 B of KV a position; 78 runs (156
+  across a wrap or below 0), one host layout at splits 13 and 26. `muse_snapshot_test` (host, 20 s): restores at
+  2048 / 4096 / 2049 / 5000 / 300 through `PrefixSession` == the cold run on one card and two; a two-card snapshot
+  continues on one and the reverse; over HTTP the greedy chat == the decode run, the repeat restored at 2048
+  (`cached_tokens` 2048), a seeded sampled request reproducible through the cap. `muse_snapshot_gpu_test` (the card;
+  ckpt4, one card / pp2:2 / cross, and the real checkpoint) is r46.snapshot / r46.real's.
+- **b70-serve <muse>** (`src/cli/muse_serve.h`: `MuseEngineAdapterT`, store key "MUSEGLIM"; `serve_muse` in
+  `b70_serve.cc`): one card by default, `--pp 2` / `--pipeline-split` / `--pipeline-handoff`, `--max-len auto`
+  (MuseEngine plans with the prefill scratch), int8 head default, the startup line (the template's sha, sampling
+  defaults, the rings' positions). Refused before the device by name (12 `cli_reject_serve_*` tests, box-only: b70-serve
+  is not built on the Mac host): `--mtp`, `--spec mtp|lookup|dflash` (`dflash` is parsed now so Muse names 23f; every
+  other model refuses it as before), `--kv-cache int8`, `--prefill-backend l0-int8|sycl-tla`, `--max-len` above
+  131072, `--device` with `--pp 2`, a template that is not the original's, `--chat-template` on another model. 23c's
+  `cli_reject_muse_serve` is gone. `muse_adapter_compile.cc` instantiates the adapter over `MuseEngine` (Level Zero
+  syntax check PASS).
+- **MG5's tooling**: `tools/probe/muse_passkey.sh` (BOS + 130000 ids - passkey.py writes no special tokens and every
+  Muse prompt starts with the template's BOS); `engine_generate.sh`'s Muse arm runs `b70-decode` on the committed
+  set's ids (byte-identical to the reference's input, A4's rule; 512 ids) rather than `b70-serve` - the server's path
+  is held to `b70-decode` by r46.chat's `golden_server_test --chat`. BENCHMARKS carries the pending rows.
+- **Departures from the plan**: (1) tests registered in `tests/CMakeLists.txt` (no `tests/tokenizer/CMakeLists.txt`
+  exists); (2) the state is 81,748,992 B (above); (3) the adapter and the template rule live in `cli/muse_serve.h`
+  and were written in Task 4 (the host test drives the adapter); (4) the A4 arm is `b70-decode`'s (above); (5) Task 5
+  Step 2 is a stage (r46.chat), not a registered test (Kolibri's precedent: without a checkpoint it would fail, not
+  SKIP); (6) the vision refusal is generic.
