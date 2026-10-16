@@ -3830,3 +3830,26 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     cli_reject_serve_chat_template_other cli_reject_serve_spec_dflash_other PROPERTIES LABELS muse)
 endif()
 # ==== Spec 23e: Muse-Glimmer served ==== (end) ====
+
+# ==== Spec 19b: the DFlash drafter (label dflash) ==== (begin) ====
+# Task 1: the descriptor (the published config vendored at tests/model/dflash/) and the loader's host half on tiny
+# synthetic checkpoints the test writes itself (tests/loader/dflash_fixture.h). Host only.
+add_executable(dflash_loader_test loader/dflash_loader_test.cc)
+target_include_directories(dflash_loader_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dflash_loader_test PRIVATE b70_dflash_loader)
+add_test(NAME dflash_loader_test COMMAND dflash_loader_test
+  ${CMAKE_CURRENT_SOURCE_DIR}/model/dflash/qwen38_dflash2_config.json)
+set_tests_properties(dflash_loader_test PROPERTIES LABELS dflash)
+# Task 1 (device half): load_drafter beside the int4 gate checkpoint (int8 head), both formats - the bytes against
+# the layout formula, linears / norms / codebook rows / the mask row read back from the card. SKIP 77 without either
+# snapshot. B70_DFLASH_SNAPSHOT: a repo id (resolved in the HF cache) or a directory.
+set(B70_DFLASH_SNAPSHOT "z-lab/Qwen3.8-27B-DFlash2" CACHE STRING
+  "The DFlash drafter the dflash-labelled checkpoint tests load (spec 19b)")
+add_executable(dflash_load_checkpoint_test loader/dflash_load_checkpoint_test.cc)
+target_include_directories(dflash_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dflash_load_checkpoint_test PRIVATE b70_dflash_loader b70_l0)
+add_test(NAME dflash_load_checkpoint_test COMMAND dflash_load_checkpoint_test ${B70_TEST_SNAPSHOT}
+  ${B70_DFLASH_SNAPSHOT})
+set_tests_properties(dflash_load_checkpoint_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
+  TIMEOUT 1800)
+# ==== Spec 19b ==== (end) ====
