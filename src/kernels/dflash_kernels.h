@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 
+#include "kernels/dflash_dims.h"
 #include "kernels/kernels.h"
 
 // Spec 19b: the DFlash drafter's device binaries by name - the host half of the "Spec 19b" block in
@@ -16,16 +17,7 @@
 // descriptor against them before it names a binary.
 namespace kernels::dflash {
 
-inline constexpr unsigned kM = 8;          // the block's rows (the list's M): anchor + up to 7 drafts
-inline constexpr unsigned kR = kM - 1;     // the head's rows (mask rows 1..7)
-inline constexpr unsigned kTopK = 16, kQs = 16;
-inline constexpr unsigned kWg = 256;       // df_prep's, df_topk's, df_select's work-group
-inline constexpr unsigned kAttnPb = 128, kAttnWg = 128;   // df_attn_part: ring offsets per block, its work-group
-inline constexpr unsigned kTopkChunk = 4096;              // df_topk_stage1's logits per work-group
-
-// The DFlash control block's word indices (runtime/dflash/dflash_control.h holds the struct to them).
-inline constexpr unsigned kDctlK = 0, kDctlProjPos = 1, kDctlProjN = 2, kDctlTemp = 3, kDctlSeedLo = 4,
-                          kDctlSeedHi = 5;
+// kM, kR, kTopK, kQs, kWg, kAttnPb, kAttnWg, kTopkChunk and the control block's indices: kernels/dflash_dims.h.
 
 struct Shape {
   unsigned H = 5120, I = 17408, NH = 32, NKV = 8, HD = 128, ring = 2048, win = 2048, group = 16, ctaps = 2;

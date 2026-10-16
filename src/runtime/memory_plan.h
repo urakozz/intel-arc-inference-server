@@ -27,10 +27,22 @@ namespace runtime {
 // `draft_vocab` (spec 8 §11, `--draft-vocab`): the compact draft head and its id table,
 // which the loader allocates OUTSIDE LoadReport::total() (so `model` reads the same with
 // and without it), sized by loader::draft_vocab_bytes. 0 when off.
+//
+// `drafter` (spec 19b, 19c's `--spec dflash`): a DFlash drafter's weights and buffers (DrafterPlan below). 0 when off.
 struct MemoryComponents {
   size_t model = 0, kv = 0, decode_state = 0, prefill_scratch = 0, int8 = 0;
   size_t draft_vocab = 0;
-  size_t total() const { return model + kv + decode_state + prefill_scratch + int8 + draft_vocab; }
+  size_t drafter = 0;
+  size_t total() const { return model + kv + decode_state + prefill_scratch + int8 + draft_vocab + drafter; }
+};
+
+// Spec 19b: a DFlash drafter beside the model - its weights (loader::dflash_weight_bytes) and its buffers
+// (runtime/dflash/dflash_sizes.h: the ring, the taps, the RoPE rows, the draft list's scratch), as
+// runtime::dflash::drafter_plan builds it. The buffers' part that grows with max_len (the drafter's RoPE rows) is
+// per_position; the rest does not move with max_len. All zero = no drafter.
+struct DrafterPlan {
+  size_t weights = 0, fixed = 0, per_position = 0;
+  size_t bytes(uint32_t max_len) const { return weights + fixed + per_position * size_t(max_len); }
 };
 
 // "<label>: model 18.116 GB, kv 8.590 GB, decode state 0.590 GB, prefill scratch
@@ -102,9 +114,10 @@ struct MemoryPlan : MemoryComponents {
 // max_len. The MTP head's weights are in it when the model was loaded with the head
 // (`mtp`); its buffers are planned here. `plan.model` adds the table back at
 // `max_len`, so it equals memory_line()'s `model` once the table has that length.
+// `drafter` (spec 19b): a DFlash drafter's bytes at this max_len go to MemoryComponents::drafter.
 MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t model_bytes,
                 const PrefillPath& path = {}, const DraftVocabPlan& dv = {},
-                KvCache kv = default_kv_cache());
+                KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});
 
 // The max_len grid: the L0 prefill backends need max_len % 256 == 0 (spec 2.1 §3.1,
 // prefill/attn.cc), which is also a whole number of decode attention blocks (64).
@@ -125,7 +138,7 @@ constexpr double kDefaultReserveGb = 1.5;
 uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,
                            size_t device_bytes, size_t reserve_bytes, uint32_t cap,
                            const PrefillPath& path = {}, const DraftVocabPlan& dv = {},
-                           KvCache kv = default_kv_cache());
+                           KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});
 
 // One line for the startup log: the plan's five components, the finer split where it
 // is non-zero, the reserve and the device total.

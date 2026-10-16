@@ -45,11 +45,18 @@ l0::Mem upload_f32(l0::Context& ctx, l0::CmdList& imm, const std::vector<float>&
 
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const LoadedModel& target,
                            DraftFormat format, unsigned threads) {
-  const auto t0 = std::chrono::steady_clock::now();
   if (!target.desc) throw std::runtime_error("load_drafter: the target model is not loaded");
+  return load_drafter(ctx, snapshot_or_repo, *target.desc,
+                      target.linears.at({kTopLevel, model::LinearId::LmHead}).shape.N, target.embed, format, threads);
+}
+
+DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const model::ModelDesc& target,
+                           uint32_t vocab_rows, const l0::Mem& target_embed, DraftFormat format, unsigned threads) {
+  const auto t0 = std::chrono::steady_clock::now();
   const DFlashCheckpoint ck(snapshot_or_repo);
-  const uint32_t vocab_rows = target.linears.at({kTopLevel, model::LinearId::LmHead}).shape.N;
-  ck.check_target(*target.desc, vocab_rows);
+  ck.check_target(target, vocab_rows);
+  if (target_embed.size() < size_t(vocab_rows) * target.hidden * 2)
+    throw std::runtime_error("load_drafter: the target embedding is smaller than [vocab rows][hidden] bf16");
   const model::DFlashDesc& d = ck.desc();
 
   DFlashWeights w;
@@ -98,7 +105,7 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
   w.mask_from_checkpoint = !mask.empty();
   if (mask.empty()) {
     l0::Mem stage(ctx, l0::MemKind::Host, size_t(d.hidden) * 2);
-    imm.copy(stage.ptr(), static_cast<const uint8_t*>(target.embed.ptr()) + size_t(d.mask_id) * d.hidden * 2,
+    imm.copy(stage.ptr(), static_cast<const uint8_t*>(target_embed.ptr()) + size_t(d.mask_id) * d.hidden * 2,
              size_t(d.hidden) * 2);
     const uint16_t* row = stage.as<uint16_t>();
     mask.resize(d.hidden);
