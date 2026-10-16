@@ -11,20 +11,40 @@
 # Env: SNAP_QWEN (the target: the gate checkpoint), SNAP_DFLASH (z-lab/Qwen3.8-27B-DFlash2), DUMPS (oracle-out-19a/dumps),
 #      RANKED (oracle-out-19a/draft_vocab.ranked.ids), ANCHORS (a dump, default 16), ARMS (default "i8 bf16 i8dv32k"),
 #      ORACLE_IMAGE, ORACLE_THREADS, HF_HOME.
+#
+# MODEL=muse (spec 23f Task 7): Muse-Glimmer-30B's assistant - the target SNAP_MUSE (the int4 checkpoint: dflash_d1 loads
+# its embedding and head with ONE layer), the drafter SNAP_MUSE_DFLASH (meta-models/Muse-Glimmer-30B-assistant), DUMPS
+# default oracle-out-muse-taps/dumps (muse_oracle.sh taps), K 15, the arms i4 (int4 g64, the default), i8, bf16 - each
+# with the int8 head (the served default) and --draft-q raw (the readback's scores are the raw head logits).
 set -u
 mode="${1:?gpu|ref}"
 out="${2:?out dir}"
 mkdir -p "$out"
 HF="${HF_HOME:-$HOME/.cache/huggingface}"
-DUMPS="${DUMPS:-oracle-out-19a/dumps}"
 RANKED="${RANKED:-oracle-out-19a/draft_vocab.ranked.ids}"
-ARMS="${ARMS:-i8 bf16 i8dv32k}"
-target=$(tools/box_validate/data.sh resolve "${SNAP_QWEN:?SNAP_QWEN (the target) is unset}") || exit 2
-drafter=$(tools/box_validate/data.sh resolve "${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}") || exit 2
+if [ "${MODEL:-qwen38}" = muse ]; then
+  DUMPS="${DUMPS:-oracle-out-muse-taps/dumps}"
+  ARMS="${ARMS:-i4 i8 bf16}"
+  muse_target="${SNAP_MUSE:-}"
+  if [ -z "$muse_target" ]; then
+    muse_target=Vishva007/Muse-Glimmer-30B-W4A16-AutoRound
+    tools/box_validate/data.sh resolve "$muse_target" > /dev/null 2>&1 || muse_target=Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ
+  fi
+  target=$(tools/box_validate/data.sh resolve "$muse_target") || exit 2
+  drafter=$(tools/box_validate/data.sh resolve "${SNAP_MUSE_DFLASH:-meta-models/Muse-Glimmer-30B-assistant}") || exit 2
+else
+  DUMPS="${DUMPS:-oracle-out-19a/dumps}"
+  ARMS="${ARMS:-i8 bf16 i8dv32k}"
+  target=$(tools/box_validate/data.sh resolve "${SNAP_QWEN:?SNAP_QWEN (the target) is unset}") || exit 2
+  drafter=$(tools/box_validate/data.sh resolve "${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}") || exit 2
+fi
 flags() {
   case "$1" in
-    i8) echo "--format int8 --head int8" ;;
-    bf16) echo "--format bf16 --head bf16" ;;
+    i4) echo "--format int4 --head int8 --k 15 --draft-q raw" ;;   # MODEL=muse
+    i8) [ "${MODEL:-qwen38}" = muse ] && { echo "--format int8 --head int8 --k 15 --draft-q raw"; return; }
+        echo "--format int8 --head int8" ;;
+    bf16) [ "${MODEL:-qwen38}" = muse ] && { echo "--format bf16 --head int8 --k 15 --draft-q raw"; return; }
+          echo "--format bf16 --head bf16" ;;
     i8dv32k) echo "--format int8 --head int8 --draft-vocab 32k --draft-vocab-ids $RANKED" ;;
     *) echo "unknown arm $1" >&2; return 1 ;;
   esac
