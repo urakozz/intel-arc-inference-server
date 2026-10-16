@@ -164,7 +164,17 @@ void MuseEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (drafter_) {
     require(!replay, "a drafter's prefill taps are copies, which a recorded chunk cannot hold - unset "
                      "B70_PREFILL_REPLAY with --spec dflash");
-    require(ndev == 1 && P.taps_stage, "a drafter's prefill taps run on one card, into the planned staging");
+    require(ndev == 1, "a drafter's prefill taps run on one card");
+    const size_t stage_bytes = size_t(kPfC) * drafter_->tap_layers().size() * d.hidden * 2;
+    if (!P.taps_stage || P.taps_stage->size() < stage_bytes) {   // unplanned (a test's drafter): allocated here
+      if (P.taps_stage) {
+        pf_dev_bytes_[0] -= P.taps_stage->size();
+        pf_bytes_ -= P.taps_stage->size();
+      }
+      P.taps_stage = std::make_unique<l0::Mem>(stage_ctx(0), l0::MemKind::Device, stage_bytes);
+      pf_dev_bytes_[0] += stage_bytes;
+      pf_bytes_ += stage_bytes;
+    }
     const uint32_t end_all = base + uint32_t(ids.size());
     df_from = end_all > drafter_->window() ? end_all - drafter_->window() : 0;
   }
