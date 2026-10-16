@@ -3342,6 +3342,91 @@ st_r54_d1_ref() {
 }
 
 # ======================================================================================
+row 55 "spec 19c - DFlash in the decode loop: the taps in the verify lists (runtime::build_verify_taps, M = 1..8 over 8 GDN slots), the commit-side projection of the accepted rows, the prefill tail (the window's taps through Context::copy_2d, projected 8 rows a replay), runtime::dflash::DFlashDrafter behind runtime::TapDrafter, host acceptance with the drafter's sparse q (server::accept_sparse), --spec dflash in b70-serve (AdaptiveK over MtpCost::dflash) and b70-decode --ids; D0, D2, D3, D4 (plan 19c)"
+rownote 55 "Written blind on the Mac after row 54 (19b's drafter, itself unvalidated): nothing of 19c has run on a card. 7 new binaries (kernel_cmdlines +7 / -0 / ~0): gdn_step_slots_M1..4_N8 (the 8-slot verify build at the rows spec 8's lists ran at 4 slots) and the bf16 lm_head at M = 5 / 6 / 8. Nothing binds them without --spec dflash: D0 is G0. On the Mac (indicative): tools/mac/clrun/gdn_slots_run - gdn_step's 8-slot build at M = 8 and 5 bitwise to the plain kernel stepping the same rows, and a partial acceptance (j = 0 / 3 / 6 / 7 of 7, 2 of 4) leaves the live slot exactly the state after row j, with 3 new rows from it equal to the plain run (a mutant committing j + 1 is caught)."
+rownote 55 "How the GDN state ends at the last accepted token (the operator's upstream question, vllm-xpu-kernels 78799fe's per-token replay state): the verify list writes the state after EVERY row into its own slot ((live + m) % 8) and commit(j) only moves Control::gdn_live to row j's slot - no copy, no replay; the rejected rows' slots and conv-ring positions are never read before a later list rewrites them. The cost is M x 151 MB of state writes per verify (1.2 GB at M = 8, ~2 ms at 600 GB/s, derived) and 1.06 GB of slots; a replay-entry scheme (per row: corr, normalised k, decay - ~2.4 MB at M = 8 - then one rank-1 replay pass at commit, ~0.5 ms) is recorded as a lever in spec 19 §11, not built."
+rownote 55 "Data: the gate checkpoint (qwen) and the drafter (dflash: hf download z-lab/Qwen3.8-27B-DFlash2, 3.85 GB - row 54's). r55.engine and r55.gpu load both (~19 GB + 2.1 GB int8 drafter + 1.06 GB slots at max_len 16384). Hand back: every stage's lines - L (launch counts, the memory line), T1 / D3 per row (cosines and the bitwise marks), P per j (the live slot, the ring rows, the 64 ids), D2 per K (acceptance, ids an iteration), RF3, PF (split / chunked / decode cosines), dflash_gpu_test's per-prompt D2 lines and its S line, r55.serve's IDENTICAL / RATIO lines and the 'spec dflash:' / 'dflash:' server lines, r55.tps's generate lines."
+stage r55.k0 55 default cpu - g0.sha,g0.bitwise,g0.suite "D0: no existing command line moved (kernel_cmdlines +7 / -0 / ~0), every pre-existing binary identical, the suite (G0) - incl. 19c's edits to shared files: capture.cc (a new mode; Plain / Verify / Stage walks unchanged), runtime::Engine (a defaulted TapDrafter*), step_chunk (a defaulted PrefillTaps*), the planner (a drafter term), EngineAdapter (a defaulted dflash flag), the loader's DraftVocabSpec::for_drafter"
+st_r55_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r55.host 55 default cpu - - "host: dflash_engine_host_test (the tap sites, the 8 slots, the planner with a drafter, MtpCost::dflash and AdaptiveK at K <= 7), dflash_accept_test (D4: sparse-q acceptance, 10^6 seeded draws per case, chi-square >= 0.01, no draft outside the candidates, the residual finite), dflash_plan_test (19b's, now with the engine's slots and prefill taps), spec_accept_test / adaptive_k_test unchanged; b70-serve / b70-decode --spec dflash's refusals before the device"
+st_r55_host() {
+  run_tests '^(dflash_engine_host_test|dflash_accept_test|dflash_plan_test|spec_accept_test|adaptive_k_test|cli_reject_(serve_)?dflash_.*|cli_reject_serve_spec_dflash_other)$'
+  jgrab host '^(dflash_engine_host_test|dflash_accept_test)$' 'p-value|accepted|adaptive K|plan with|OK|FAIL'
+  finish
+}
+stage r55.kernels 55 default gpu - - "the 7 new binaries built (kbins: the first ocloc build of gdn_step_slots_M1..4_N8 and the bf16 head at M 5 / 6 / 8)"
+st_r55_kernels() {
+  kbins gdn_step_slots_M1_N8 gdn_step_slots_M2_N8 gdn_step_slots_M3_N8 gdn_step_slots_M4_N8 \
+    gemv_bf16_M5_K5120_N248320 gemv_bf16_M6_K5120_N248320 gemv_bf16_M8_K5120_N248320
+  finish
+}
+stage r55.engine 55 default gpu qwen,dflash r54.draft,r55.kernels "dflash_engine_test - the engine with the real drafter (int8, int8 head, bf16 KV): L (verify M = 1..8 = 774 launches each, draft 87, projection 8, the memory line), T1 (taps of M rows vs M = 1, the commit's ring rows vs the plain steps'), D3 (M = 1..8 logits and GDN slots vs M = 1, cosine >= 0.99999, bitwise recorded), P (partial acceptance at K 7 and 4, every j: the live GDN slot = the state after row j, the rejected rows' ring positions untouched, 64 further ids = plain), D2 on the card (the greedy loop at K 7 / 3 / 1 = plain), RF3 (the last positions of max_len), PF (the prefill tail: split at 1024 bitwise, chunks of 1000 and the decode path by cosine)"
+st_r55_engine() {
+  run_tests '^dflash_engine_test$' dflash '' "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  jgrab engine '^dflash_engine_test$' '^L:|^memory:|D3 k=7|T1 k=|  P k=|^T1 \+ D3|  D2 K=|^RF3|^PF|^dflash_engine_test' 120
+  finish
+}
+stage r55.gpu 55 default gpu qwen,dflash r55.engine "dflash_gpu_test through EngineAdapter (what b70-serve calls): D2 at K 7 / 3 / AdaptiveK on the golden and 36 A4 prompts = the plain loop (identity), truncate_to inside a burst, a seeded sampled run reproducible; acceptance and ids an iteration per prompt"
+st_r55_gpu() {
+  run_tests '^dflash_gpu_test$' dflash '' "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  jgrab gpu '^dflash_gpu_test$' '^D2|^RF1|^S:|^dflash_gpu_test' 140
+  finish
+}
+stage r55.serve 55 default gpu qwen,dflash r55.gpu "D2 by b70-serve: the 36 A4 tool-call scenarios and the golden prompts through --spec off / --spec dflash (auto K) / --spec dflash --spec-max 3, greedy, max_tokens 192 - output identical to --spec off; a seeded sampled request twice; the 'spec dflash:' startup line and the per-request 'dflash:' lines"
+st_r55_serve() {
+  local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  serve_arms "$STATE/$STAGE" 1 "$SNAP_QWEN" "--set toolcall --set golden --max-tokens 192 --stop-at-eos" \
+    "off|--max-len 16384 --spec off" "dflash|--max-len 16384 --spec dflash $dm" \
+    "dflash3|--max-len 16384 --spec dflash --spec-max 3 $dm"
+  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output through --spec dflash identical to --spec off"
+  x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref off --metric wall_tps"
+  x "PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $SNAP_QWEN --max-len 16384 --spec dflash $dm"
+  step_rc $? "b70-serve --spec dflash: serves; the seeded sampled request twice"
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 20
+  grab_all ratio '^RATIO ' 10
+  grab_all dflash 'spec dflash:|dflash:|SEEDED|memory:' 16
+  finish
+}
+stage r55.decode 55 default gpu qwen,dflash r55.engine "D2 without the server: b70-decode --ids (code, prose, the 4395-id long prompt) --prefill --n 256, plain / --spec dflash (K 7) / --spec dflash --spec-max 3 / --draft-format bf16 - the outputs identical; the 'dflash:' acceptance lines"
+st_r55_decode() {
+  local p arm f a dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  chk "python3 tools/box_validate/long_ids.py 4395 $STATE/$STAGE.long.ids" "the 4395-id prompt"
+  for p in code prose long; do
+    f=tests/golden/prompts/$p.ids; [ "$p" = long ] && f=$STATE/$STAGE.long.ids
+    for arm in off k7 k3 bf16; do
+      case "$arm" in
+        off) a="" ;; k7) a="--spec dflash $dm" ;; k3) a="--spec dflash --spec-max 3 $dm" ;; bf16) a="--spec dflash --draft-format bf16 $dm" ;;
+      esac
+      chk "build/src/cli/b70-decode $SNAP_QWEN --ids $f --n 256 --prefill --lm-head int8 $a > $STATE/$STAGE.$p.$arm.out" "b70-decode $p $arm"
+    done
+    chk "cmp $STATE/$STAGE.$p.off.out $STATE/$STAGE.$p.k7.out && cmp $STATE/$STAGE.$p.off.out $STATE/$STAGE.$p.k3.out && cmp $STATE/$STAGE.$p.off.out $STATE/$STAGE.$p.bf16.out && echo 'GREEDY identical: $p plain / dflash K 7 / K 3 / bf16 drafter'" "greedy ids identical with and without the drafter ($p)"
+  done
+  grab_all dflash '^dflash:|^generate:|GREEDY' 30
+  finish
+}
+stage r55.tps 55 optin gpu-self qwen,dflash r55.decode "the speed record, informational (D5 proper is 19d's): b70-decode --ids --prefill --n 512 plain vs --spec dflash on code and on an A4 scenario, 3 rounds in rotated order after a warm-up - the generate t/s and the acceptance lines"
+st_r55_tps() {
+  local r arm p a order dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  idle before
+  for r in 0 1 2 3; do
+    order="off dflash"; [ $((r % 2)) = 1 ] && order="dflash off"
+    for p in tests/golden/prompts/code.ids tests/golden/toolcall/t3_rename-openai.ids; do
+      for arm in $order; do
+        a=""; [ "$arm" = dflash ] && a="--spec dflash $dm"
+        x "build/src/cli/b70-decode $SNAP_QWEN --ids $p --n 512 --prefill --lm-head int8 $a > /dev/null 2> $STATE/$STAGE.r$r.$arm.$(basename $p .ids).err"
+        step_rc $? "round $r $arm $(basename $p)"
+      done
+    done
+  done
+  idle after
+  grab_all tps '^generate:|^dflash:' 40
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / muse / dflash labels belong to their rows)"
 st_x_rest() {
