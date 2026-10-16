@@ -658,6 +658,15 @@ void case_server() {
   }
   CHECK(a == b);
   CHECK_EQ(reads, a.size() + 1);
+  // A seed is honoured per request: the same seeded request twice on ONE server draws the same ids (the RNG is
+  // reseeded from the request's seed at its first sampled step - not only once per process).
+  {
+    ServeFixture g(/*cache=*/false);
+    const Ids first = g.chat(sampled).at("choices").at(0).at("token_ids").get<Ids>();
+    const Ids second = g.chat(sampled).at("choices").at(0).at("token_ids").get<Ids>();
+    CHECK(first == a);
+    CHECK(second == first);
+  }
   for (uint32_t id : a) CHECK(std::find(f.eng.words.begin(), f.eng.words.end(), id) != f.eng.words.end());
   // The cap applies even when a request's Sampling lacks it (the adapter writes the model's constants): a sampled
   // step's draw on a fixed row is filter_probs(row, cap)'s draw, not the raw row's.
