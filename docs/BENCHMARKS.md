@@ -844,6 +844,67 @@ Setup:
 | server | `mtp_server_test`: EOS, stop strings and `max_tokens` inside a burst, and a streamed tool call in bursts of 1-4. Byte-identical to `--mtp 0` under 4 burst patterns, and the engine is left at the same position. |
 | M5, spec 7 C2 with MTP on | **pending** plan 7c's merge. `prefix_gpu_test` lives on `spec7c-server-prefix-cache` and loads no head. The merge adds an argv[6] = K there: `loader::load(..., K > 0)` and `EngineAdapter(eng, vocab, K)`. Then one command: `build/tests/prefix_gpu_test "$SNAP" tests/golden/prompts l0-int8 1 0 3`. |
 
+## DFlash (spec 19)
+
+**Nothing on the card is measured yet.** `b70-serve --spec dflash` drafts with `z-lab/Qwen3.8-27B-DFlash2` (5 layers,
+int8 at load, beside the gate checkpoint's int8 head) from the target's own hidden states and verifies up to 8 rows at
+once (specs 19b-19d, built on the Mac; box queue rows 54-56). The acceptance below is measured on the Mac CPU (spec 19a,
+`docs/probe-dflash-2026-10-08.md`); every speed is derived until the D5 rows run. Spec:
+`docs/superpowers/specs/2026-10-05-spec19-draft-model-speculative-decoding-design.md`.
+
+### P0, acceptance (measured, CPU reference, teacher-forced greedy)
+
+| corpus | E_1 | E_3 | E_7 (tokens per verify at K = 7) |
+|---|---:|---:|---:|
+| A4 tool calls (34 scenarios, 2409 anchors) | 1.99 | 3.88 | **7.21** |
+| golden code | 1.88 | 3.60 | 6.15 |
+| golden prose | 1.73 | 2.19 | 2.20 |
+| golden cjk | 1.38 | 1.50 | 1.54 |
+
+int8 and the published 4-bit drafter equal bf16 to 0.01; a ranked 32k draft vocabulary looks free (7.11 vs 7.09, ranked
+in-sample), by id it loses up to 1.4 at K = 7.
+
+### Projection (derived: verify at M = 5..8 extrapolated at +0.22 a row, the draft ~0.17-0.2 plain steps)
+
+| corpus | DFlash best K | DFlash tokens / step-time | `--mtp auto` | DFlash vs MTP |
+|---|---|---:|---:|---:|
+| A4 tool calls | 7 | 2.56 | 1.66 | +54 % |
+| golden code | 7 | 2.18 | 1.32 | +65 % |
+| golden prose | 2 | 1.24 | 1.06 | +17 % |
+
+### D5, speed (bar: `--spec dflash` >= 1.10 x `--mtp auto` on the opencode recording, no loss > 3 % elsewhere)
+
+| what | configuration | number | stage |
+|---|---|---|---|
+| verify cost at M = 5..8 | `probe_mtp_steps`, int8 head, depth 4k / 32k, interleaved pairs | pending | r29.cost |
+| one draft block | `probe_draft_cost`, the int8 drafter + the head's 7 rows | pending (derived 0.17 plain steps) | r29.cost |
+| A4 + golden through b70-serve | `--spec off` / `--mtp auto` / `--spec dflash` (auto K) / `--spec dflash --spec-max 3`, `--max-len 16384`, int8 head, bf16 KV, greedy, max_tokens 256, 3 rotated rounds; decode t/s, RATIO dflash / mtp | pending - the expectation, not the bar | r56.d5_a4 |
+| the draft vocabulary | `--spec dflash` vs `--draft-vocab 32k` ranked (in-sample) and by id | pending | r56.d5_dv |
+| llama-benchy | row 41's matrix A at concurrency 1 and matrix D, `--max-len 40960`, off / mtp auto / dflash, 3 rotated rounds | pending | r56.d5_benchy |
+| **the opencode recording (the bar)** | `replay_ab.sh`, prefix cache on, max_len 131072, off / mtp auto / dflash, 3 rotated rounds | pending - **the recording does not exist yet** | r56.d5_opencode |
+| two cards | `--pp 2 --mtp auto` vs `--pp 2 --spec dflash`, A4 + golden | pending | r56.d5_pp |
+| Ornith's DFlash (v1) drafter | the same rows on Ornith | not built (a full-attention drafter layer and a 16-row block: its own stage) | - |
+
+### Memory (derived)
+
+| term | bytes |
+|---|---|
+| the int8 drafter's weights + buffers at max_len 16384 | 2,053,464,064 + ~62.3 MB |
+| the engine's verify slots (7 x one GDN state) and the prefill tap staging | 1.06 GB, 105 MB |
+| `--max-len auto`, one 32 GB card, 17 GB target, int8 drafter | 139520 (190208 without the drafter) |
+| a prefix-cache snapshot with the drafter (decision 5) | the state + 41,943,040 B of ring (+25 %) |
+| `--pp 2`: device 1's embedding replica, each device's 8-slot verify slots | 2.54 GB; ~0.97-0.99 GB a device |
+
+### Correctness (host, measured on the Mac; the card's are pending)
+
+| gate | result |
+|---|---|
+| D4, sampling exact (`dflash_accept_test`) | 10^6 seeded draws: chi-square p 0.59 / 0.23 unfiltered, 0.29 / 0.91 filtered; no accepted draft outside the candidates |
+| the ring across a restore (`dflash_prefix_test`) | a turn restored from its predecessor's request-end snapshot leaves the ring equal to the unbroken session's; a ring-less snapshot (19c's) is caught |
+| batching (`dflash_scheduler_test`) | 4 requests on 4 slots: ids = the plain scheduler's, each request's speculative record = its record alone |
+| `--pp 2` adapter (`pp_dflash_serve_test`) | greedy at K 7 / 3 / auto = plain; seeded sampling reproducible; a restored turn drafts as the unbroken one |
+| D2 / D3 / ring / --pp 2 bitwise on the card | pending (r55.engine, r55.gpu, r56.prefix, r56.pp) |
+
 ## Ornith 1.5 MoE (spec 15)
 
 **Nothing here is measured yet.** Ornith 1.5 35B-A3B (`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`,
