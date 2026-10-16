@@ -46,6 +46,8 @@ struct MusePrefillState {
   };
   std::vector<std::unique_ptr<Dev>> dev;
   std::unique_ptr<PipelineLink> link;   // two devices: `copy` mode at chunk size (pf_landing_layout)
+  // Spec 23f: a drafter's tap staging [kPfC][taps][hidden] bf16 (runtime::muse::spec_prefill_taps_bytes), one card.
+  std::unique_ptr<l0::Mem> taps_stage;
   uint64_t timeout_ns = 0;
   ~MusePrefillState() {   // never free a scratch under a running list
     if (link && link->event) link->event->host_signal();
@@ -88,10 +90,14 @@ void MuseEngine::prepare_prefill() {
   for (uint32_t i = 0; i < devices(); ++i) ps->dev.push_back(std::make_unique<MusePrefillState::Dev>(stage_ctx(i), d));
   if (devices() == 2)
     ps->link = std::make_unique<PipelineLink>(stage_ctx(0), stage_ctx(1), pf_landing_layout(d), PpHandoff::Copy);
+  if (opt_.spec.drafter.on())   // spec 23f: the planned tap staging (one card)
+    ps->taps_stage = std::make_unique<l0::Mem>(stage_ctx(0), l0::MemKind::Device,
+                                               spec_prefill_taps_bytes(d, opt_.spec.drafter));
   pf_dev_bytes_.assign(devices(), 0);
   pf_bytes_ = 0;
   for (uint32_t i = 0; i < devices(); ++i) {
-    pf_dev_bytes_[i] = ps->dev[i]->s.bytes() + (ps->link ? ps->link->bytes(i) : 0);
+    pf_dev_bytes_[i] = ps->dev[i]->s.bytes() + (ps->link ? ps->link->bytes(i) : 0) +
+                       (i == 0 && ps->taps_stage ? ps->taps_stage->size() : 0);
     pf_bytes_ += pf_dev_bytes_[i];
     require(ps->dev[i]->s.bytes() == prefill_sizes(d).total(), "the prefill scratch is not prefill_sizes()'s");
     require(!ps->link || ps->link->bytes(i) == pf_link_bytes(d, i), "the prefill link is not pf_link_bytes()'s");
@@ -150,10 +156,24 @@ void MuseEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
         fail(std::string("device ") + std::to_string(i) + "'s prefill list did not finish within " +
              std::to_string(wait_ms) + " ms (" + what + ")");
   };
+  // Spec 23f: with a drafter, every chunk taps its rows inside the drafter's window of this call's end (the positions
+  // its ring reads back: [end - window(), end)) into the staging, projected after the chunk (16 rows a replay).
+  // Positions before this call keep the ring's own rows (the session's, or a restored snapshot's). Copies cannot sit in
+  // a recorded chunk: B70_PREFILL_REPLAY is refused with a drafter.
+  uint32_t df_from = 0;
+  if (drafter_) {
+    require(!replay, "a drafter's prefill taps are copies, which a recorded chunk cannot hold - unset "
+                     "B70_PREFILL_REPLAY with --spec dflash");
+    require(ndev == 1 && P.taps_stage, "a drafter's prefill taps run on one card, into the planned staging");
+    const uint32_t end_all = base + uint32_t(ids.size());
+    df_from = end_all > drafter_->window() ? end_all - drafter_->window() : 0;
+  }
+  MusePrefillTaps df_taps;
   // One device's walk for a chunk: immediately, or through its recording (B70_PREFILL_REPLAY).
   const auto run_dev = [&](uint32_t i, uint32_t pos, uint32_t C) {
     MusePrefillState::Dev& D = *P.dev[i];
-    auto encode = [&] { prefill_chunk(D.cx, D.kc, D.s, w_.parts[i], d, stage_buffers(i), pos, C, eager); };
+    const MusePrefillTaps* tp = drafter_ && df_taps.r0 < C ? &df_taps : nullptr;
+    auto encode = [&] { prefill_chunk(D.cx, D.kc, D.s, w_.parts[i], d, stage_buffers(i), pos, C, eager, tp); };
     if (!replay) return encode();
     auto it = std::find_if(D.chunks.begin(), D.chunks.end(),
                            [&](const MusePrefillState::Chunk& c) { return c.pos == pos && c.rows == C; });
@@ -176,9 +196,16 @@ void MuseEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     set_bound(pos + C);
     std::memcpy(P.dev[0]->s.ids.ptr(), ids.data() + off, size_t(C) * 4);
     set_ctl(pos, C);
+    if (drafter_) {
+      df_taps.dst = P.taps_stage->ptr();
+      df_taps.layers = &drafter_->tap_layers();
+      df_taps.r0 = df_from > pos ? std::min<uint32_t>(C, df_from - pos) : 0;
+    }
     if (ndev == 1) {
       run_dev(0, pos, C);
       wait_all("one card");
+      if (drafter_ && df_taps.r0 < C)
+        drafter_project_staged(P.taps_stage->as<uint8_t>(), pos + df_taps.r0, C - df_taps.r0);
     } else {
       PipelineLink& L = *P.link;
       MusePrefillState::Dev& D0 = *P.dev[0];
@@ -242,6 +269,17 @@ void MuseEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (hooked) {   // the prompt end, the first generated id in cur_token
     const uint32_t end = base + uint32_t(ids.size());
     block_hook_(end, end % kBlock == 0);
+  }
+}
+
+// Spec 23f: the staged rows [n][taps][hidden] at positions pos .. pos + n - 1 through the drafter's projection, 16 a
+// replay on device 0's queue (the prefill list has completed).
+void MuseEngine::drafter_project_staged(const uint8_t* staged, uint32_t pos, uint32_t n) {
+  const size_t row = drafter_->tap_layers().size() * size_t(w_.desc.hidden) * 2;
+  for (uint32_t r = 0; r < n; r += kVerifyMaxRows) {
+    const uint32_t g = std::min<uint32_t>(kVerifyMaxRows, n - r);
+    stage_imm(0).copy(drafter_->taps().ptr(), staged + size_t(r) * row, size_t(g) * row);
+    replay_aux(drafter_->projection(pos + r, g));
   }
 }
 

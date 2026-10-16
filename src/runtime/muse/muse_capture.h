@@ -1,4 +1,7 @@
 #pragma once
+#include <cstdint>
+#include <vector>
+
 #include "l0/context.h"
 #include "l0/memory.h"
 #include "loader/muse_loader.h"
@@ -29,9 +32,29 @@
 // `sumsq_r`, then layer s. The compute launches of the two lists add up to the one-card count.
 //
 // tap (debug): `resid` copied to tap row l after each layer's last launch (layer l's output: the reference's H.L<l>).
+//
+// **Spec 23f: the verify lists** (build_verify): the same walk at M = 1..16 rows on ONE card - the anchor and up to 15
+// drafts at positions pos .. pos + M - 1 (n_active = M) - with two launches changed and copies added:
+//   the embedding   mg_pf_embed at M over `ids` (the host writes [anchor, d_1 .. d_K]: Control::cur_token has 8 slots)
+//   the argmax      mg_vargmax_stage1 at M and mg_vargmax_stage2 writing row m's id into `out[m]` - Control::pos is the
+//                   host's commit (MuseEngine::commit), not the device's
+//   the taps        with a drafter, after each tap layer l (target_layer_ids) every row's residual (layer l's output)
+//                   into `taps` [row][tap][hidden] bf16 - M x 5 copies a list
+// The launch count is the M = 1 decode list's (device_launches): mg_pf_embed for mg_embed, mg_vargmax for argmax. The
+// lm_head writes [M][vocab] fp32 logits (the scratch's rows). Every row's chain is the M = 1 row's (D3: the GEMVs'
+// rows are M-independent, mg_attn / mg_attn_prep index the row's own position; the argmax trees are argmax.cl's).
 namespace runtime::muse {
 
 CapturedStep build(l0::Context& ctx, const loader::MuseDevicePart& part, const model::MuseGlimmerDesc& d, MuseBuffers& b,
                    const runtime::StageLink* link, l0::Mem* tap = nullptr);
+
+struct VerifyBind {
+  const l0::Mem* ids = nullptr;                    // u32 [16]: [anchor, d_1 .. d_K] (shared memory, host-written)
+  const l0::Mem* out = nullptr;                    // u32 [16]: row m's argmax (shared memory, host-read)
+  l0::Mem* taps = nullptr;                         // a drafter's [16][taps][hidden] bf16, or null (--spec lookup)
+  const std::vector<uint32_t>* tap_layers = nullptr;
+};
+CapturedStep build_verify(l0::Context& ctx, const loader::MuseDevicePart& part, const model::MuseGlimmerDesc& d,
+                          MuseBuffers& b, uint32_t M, const VerifyBind& v);
 
 }  // namespace runtime::muse
