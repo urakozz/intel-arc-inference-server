@@ -191,6 +191,11 @@ struct MuseSpec {
   bool on() const { return rows > 1; }
 };
 size_t spec_prefill_taps_bytes(const model::MuseGlimmerDesc& d, const DrafterPlan& p);
+// The first tapped row of a prefill chunk [pos, pos + C) in a call whose prompt ends at `end` (C when none): the rows
+// inside the drafter's window of the call's end ([end - window, end) - what the ring reads back after it), and - with a
+// block hook - every row of a chunk ending at a mid-prompt block end E (the hook's snapshot then carries a ring holding
+// [E - window, E): hooked chunks are at most one block, ending at block ends - runtime::prefill_chunk_rows).
+uint32_t prefill_tap_r0(uint32_t pos, uint32_t C, uint32_t end, uint32_t window, bool hooked, uint32_t block);
 // decode_reserve at `rows` rows (decode_reserve(d, max_len, devices, a) is rows 1).
 MuseReserve decode_reserve(const model::MuseGlimmerDesc& d, uint32_t max_len, uint32_t devices, MuseAttn a,
                            uint32_t rows);

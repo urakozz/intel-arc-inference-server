@@ -85,5 +85,9 @@ struct DFlashCtl;
 // which the 16-candidate readback cannot carry, so T != 0 is refused here (std::invalid_argument naming v1) rather
 // than drafted greedily under a sampled request's acceptance (19c's sampled rule would read the wrong q).
 void set_draft_params(DFlashCtl& c, const model::DFlashDesc& d, uint32_t k, float temperature, uint64_t seed);
+// Spec 23f: the dctl.k a draft list runs at for a caller that keeps k drafts - k (Qwen3.8's drafter: rows and keys
+// past k masked, vLLM's block of k + 1), or a Muse-form drafter's whole block (15: every row attends to all 16, as
+// transformers' DFlashTokenCandidateGenerator always drafts; the caller verifies the first k).
+uint32_t draft_list_k(const model::DFlashDesc& d, uint32_t k);
 
 }  // namespace runtime::dflash

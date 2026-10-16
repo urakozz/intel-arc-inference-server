@@ -157,10 +157,11 @@ void MuseEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
              std::to_string(wait_ms) + " ms (" + what + ")");
   };
   // Spec 23f: with a drafter, every chunk taps its rows inside the drafter's window of this call's end (the positions
-  // its ring reads back: [end - window(), end)) into the staging, projected after the chunk (16 rows a replay).
+  // its ring reads back: [end - window(), end)) - and, with a block hook, every row of a chunk ending at a mid-prompt
+  // block end, so that block end's snapshot carries a full ring (prefill_tap_r0) - into the staging, projected after the
+  // chunk (16 rows a replay) and before the hook.
   // Positions before this call keep the ring's own rows (the session's, or a restored snapshot's). Copies cannot sit in
   // a recorded chunk: B70_PREFILL_REPLAY is refused with a drafter.
-  uint32_t df_from = 0;
   if (drafter_) {
     require(!replay, "a drafter's prefill taps are copies, which a recorded chunk cannot hold - unset "
                      "B70_PREFILL_REPLAY with --spec dflash");
@@ -175,8 +176,6 @@ void MuseEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       pf_dev_bytes_[0] += stage_bytes;
       pf_bytes_ += stage_bytes;
     }
-    const uint32_t end_all = base + uint32_t(ids.size());
-    df_from = end_all > drafter_->window() ? end_all - drafter_->window() : 0;
   }
   MusePrefillTaps df_taps;
   // One device's walk for a chunk: immediately, or through its recording (B70_PREFILL_REPLAY).
@@ -209,7 +208,7 @@ void MuseEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     if (drafter_) {
       df_taps.dst = P.taps_stage->ptr();
       df_taps.layers = &drafter_->tap_layers();
-      df_taps.r0 = df_from > pos ? std::min<uint32_t>(C, df_from - pos) : 0;
+      df_taps.r0 = prefill_tap_r0(pos, C, base + uint32_t(ids.size()), drafter_->window(), hooked, kBlock);
     }
     if (ndev == 1) {
       run_dev(0, pos, C);

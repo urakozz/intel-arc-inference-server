@@ -288,6 +288,31 @@ int main(int argc, char** argv) {
                 "with the int4 or the int8 drafter\n",
                 i4, loader::dflash_weight_bytes(d, 6656, loader::DraftFormat::Bf16).total(), s.ring_k);
   }
+  // --- 4. the final review's two rules (spec 23f) ---------------------------------------------------------------
+  {
+    const model::DFlashDesc d = parse(real);
+    // the draft list always runs the whole 16-row block, whatever K the caller keeps (transformers' form); Qwen3.8's
+    // drafter keeps dctl.k = K (its rows past K are masked)
+    for (uint32_t k = 1; k <= 15; ++k) CHECK_EQ(runtime::dflash::draft_list_k(d, k), 15u);
+    model::DFlashDesc q = d;
+    q.form = model::DFlashForm::Vllm;
+    q.block = 8;
+    for (uint32_t k = 1; k <= 7; ++k) CHECK_EQ(runtime::dflash::draft_list_k(q, k), k);
+    // the prefill's tapped rows of a chunk [pos, pos + C) of a call ending at `end`: the window before the call's end,
+    // and - with a block hook - every row of a chunk that ends at a block end (its snapshot's ring holds [E - 2048, E))
+    using runtime::muse::prefill_tap_r0;
+    CHECK_EQ(prefill_tap_r0(0, 2048, 6000, 2048, false, 2048), 2048u);      // outside the window: nothing
+    CHECK_EQ(prefill_tap_r0(2048, 2048, 6000, 2048, false, 2048), 1904u);   // from 3952
+    CHECK_EQ(prefill_tap_r0(4096, 1904, 6000, 2048, false, 2048), 0u);      // [3952, 6000): all of [4096, 6000)
+    CHECK_EQ(prefill_tap_r0(2048, 2048, 5000, 2048, false, 2048), 904u);    // from 2952
+    CHECK_EQ(prefill_tap_r0(0, 2048, 6000, 2048, true, 2048), 0u);          // hooked block end 2048: the whole chunk
+    CHECK_EQ(prefill_tap_r0(2048, 2048, 6000, 2048, true, 2048), 0u);       // hooked block end 4096
+    CHECK_EQ(prefill_tap_r0(4096, 1904, 6000, 2048, true, 2048), 0u);       // the prompt's end: the window rule
+    CHECK_EQ(prefill_tap_r0(0, 1000, 1000, 2048, true, 2048), 0u);
+    CHECK_EQ(prefill_tap_r0(0, 1500, 9000, 2048, true, 2048), 1500u);       // a hooked chunk not at a block end
+    std::printf("4. the draft list's dctl.k is 15 at every K; the prefill taps the window before the call's end and, "
+                "hooked, every chunk ending at a block end\n");
+  }
   std::printf("muse_assistant_test OK\n");
   return 0;
 }
