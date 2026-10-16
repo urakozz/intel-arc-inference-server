@@ -14,4 +14,15 @@ inline constexpr unsigned kTopkChunk = 4096;              // df_topk_stage1's lo
 inline constexpr unsigned kDctlK = 0, kDctlProjPos = 1, kDctlProjN = 2, kDctlTemp = 3, kDctlSeedLo = 4,
                           kDctlSeedHi = 5;
 
+// Spec 23f: Muse-Glimmer's assistant (model::DFlashForm::Muse) runs the same lists at its block of 16 rows (the anchor
+// + 15 drafts: spec 23 decision 10), df_attn's blocks of 64 ring offsets (64 q pairs x 128 offsets would overflow its
+// local memory) and a ring of window + 1 positions rounded up to them: row 0 reads p - window .. p - 1 (|q - k| <=
+// window, decision 13), so df_attn runs at WIN = window + 1 and RING >= WIN.
+inline constexpr unsigned kMuseM = 16;
+inline constexpr unsigned kMuseR = kMuseM - 1;
+inline constexpr unsigned kMuseAttnPb = 64;
+inline constexpr unsigned list_rows(bool muse) { return muse ? kMuseM : kM; }
+inline constexpr unsigned attn_pb(bool muse) { return muse ? kMuseAttnPb : kAttnPb; }
+inline constexpr unsigned muse_ring(unsigned window) { return (window + 1 + kMuseAttnPb - 1) / kMuseAttnPb * kMuseAttnPb; }
+
 }  // namespace kernels::dflash
