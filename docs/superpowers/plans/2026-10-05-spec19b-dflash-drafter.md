@@ -68,8 +68,10 @@ Each deviation from the 2026-10-05 text, with what it costs if it is wrong:
 - **Review Focus 4's `mask_embedding.pt`** is refused (a torch pickle) naming `tools/oracle/dflash_mask_embedding.py`,
   which writes `mask_embedding.safetensors`; that file replaces the row. No published drafter ships one. Cost: a pickle
   reader if one appears.
-- **Review Focus 5:** v1 configs parse, load and draft greedily (top-1 a row); v1 sampling (full-vocabulary Gumbel),
-  causal and full-attention layers (Ornith's v1 drafter) are refused at capture - their binaries are Ornith's stage.
+- **Review Focus 5:** v1 configs parse, load and draft greedily (top-1 a row); v1 sampling (full-vocabulary Gumbel) is
+  refused by `runtime::dflash::set_draft_params` (and df_select's v1 build drafts nothing - readback k 0 - at T != 0, the
+  final review's fix); causal and full-attention layers (Ornith's v1 drafter) are refused at capture - their binaries are
+  Ornith's stage.
 - **Formats:** bf16 and int8 at load (decision 2). int4 g64 drafter weights are not built (no checkpoint of ours; 19a:
   equal acceptance). Cost if wrong: an RTN int4 path (loader/rtn.h) and int4 GEMV variants at M 8.
 - **The draft vocabulary** reuses `LoadedModel::draft_vocab`, which `loader::load` still builds only with the MTP head;

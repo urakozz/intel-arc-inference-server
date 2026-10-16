@@ -23,6 +23,7 @@
 #include "loader/dflash_layout.h"
 #include "model/dflash.h"
 #include "model/model_desc.h"
+#include "runtime/dflash/dflash_control.h"
 #include "runtime/dflash/dflash_sizes.h"
 #include "runtime/memory_plan.h"
 
@@ -109,6 +110,30 @@ int main(int argc, char** argv) {
   model::DFlashDesc v1 = d;
   v1.version = 1;
   CHECK_EQ(rd::draft_launches(v1), size_t(66));
+
+  // 5. the draft's parameters (the only way the host sets K / T / seed): K 1..7; DFlash v1 drafts greedily only (its
+  //    sampled q is a full-vocabulary softmax the 16-candidate readback cannot carry) - T != 0 refused by name.
+  {
+    runtime::dflash::DFlashCtl c{};
+    rd::set_draft_params(c, d, 7, 0.8f, 0x0123456789ABCDEFull);
+    CHECK(c.k == 7 && c.temperature == 0.8f && c.seed_lo == 0x89ABCDEFu && c.seed_hi == 0x01234567u);
+    bool threw = false;
+    try {
+      rd::set_draft_params(c, d, 8, 0.0f, 0);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    CHECK(threw);
+    threw = false;
+    try {
+      rd::set_draft_params(c, v1, 3, 0.7f, 1);
+    } catch (const std::invalid_argument& e) {
+      threw = std::string(e.what()).find("v1") != std::string::npos;
+    }
+    CHECK(threw);
+    rd::set_draft_params(c, v1, 3, 0.0f, 1);   // greedy v1 is fine
+    CHECK(c.k == 3 && c.temperature == 0.0f);
+  }
   std::printf("dflash_plan_test: PASS\n");
   return 0;
 }

@@ -148,6 +148,7 @@ void project(Gpu& g, const std::vector<uint16_t>& taps, uint32_t pos0, uint32_t 
 struct Out {
   std::vector<float> hidden;
   std::vector<uint32_t> words;
+  std::vector<uint32_t> ctrl;   // runtime::Control's words after the list
 };
 
 // The draft list. `w` is the drafter (v2 or v1: the convs and the selector by its version); `cids` non-empty: the
@@ -241,8 +242,9 @@ Out draft(Gpu& g, const dfref::Weights& w, const Ring& ring, clrun::Buffer& brop
   o.hidden = h.read<float>();
   o.words = out.read<uint32_t>();
   const std::vector<uint32_t> c = bctrl.read<uint32_t>();
-  for (uint32_t j = 0; j < K; ++j)
+  for (uint32_t j = 0; j < o.words[0] && j < K; ++j)
     if (c[3 + j] != o.words[OUT_IDS + j]) throw clrun::Error("ctrl.cur_token[1 + j] != the readback's id");
+  o.ctrl = c;
   return o;
 }
 
@@ -465,6 +467,10 @@ int main() {
         for (uint32_t r = 0; r <= c.K; ++r)
           hc = std::fmin(hc, dfref::cosine(&o.hidden[size_t(r) * d.H], &t.hidden[size_t(r) * d.H], d.H));
         if (hc < 0.99999) ++v1_bad;
+        // v1 at T != 0 (an engine bug past set_draft_params' refusal): no draft at all - readback k 0 and
+        // ctrl.cur_token[1..] untouched - rather than greedy drafts under a sampled request's acceptance.
+        const Out s = draft(g, w1, ring, brope, c.anchor, c.p, c.K, 0.7f, 5);
+        if (s.words[0] != 0 || s.ctrl[3] != 0) ++v1_bad;
       }
       std::printf("dflash_run: DFlash v1 (no convs, no selector), greedy, %zu cases: %s\n", cs.size() - 2,
                   v1_bad ? "DIFFERS" : "rows and ids = the twin");
