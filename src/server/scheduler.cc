@@ -18,7 +18,7 @@ namespace server {
 PrefixSlots::PrefixSlots(BatchEngineIface& engine, size_t budget_bytes, HostAlloc& alloc)
     : engine_(engine),
       cache_(budget_bytes, engine.state_bytes(), engine.kv_bytes(1), engine.block(), alloc,
-             /*hash=*/{}, engine.kv_form()),
+             /*hash=*/{}, store_root(engine.kv_form(), engine.drafter_key())),
       slots_(engine.slots()) {}
 
 uint32_t PrefixSlots::match(uint32_t slot, const std::vector<uint32_t>& prompt) {

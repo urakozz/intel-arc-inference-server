@@ -263,6 +263,69 @@ struct StateMockEngine : server::EngineIface {
   }
 };
 
+// Spec 19d: StateMockEngine with a DFlash-like drafter ring - `window` slots, slot p % window holding position p's
+// "projection" (a hash of the ids up to and including p, as the real projection is a function of position p's taps).
+// It fills the ring as runtime::Engine does: a prefill call projects only the positions inside the window of the
+// call's end (so a mid-call block end's snapshot may hold unprojected positions), every decode step and ingested id
+// projects its own position, reset() zeroes it. With `ring_in_state` (the spec 19d engine) save_state / load_state
+// carry the ring after the target's state; without it (19c's engine, the mutant) a restore leaves the ring as it was.
+struct DrafterMockEngine : StateMockEngine {
+  uint32_t window = 4;
+  bool ring_in_state = true;
+  uint64_t key = 0xD1AF7E2;
+  std::vector<uint64_t> ring = std::vector<uint64_t>(4, 0);
+
+  uint64_t projection(uint32_t at) const {
+    uint64_t h = 0x51ED27;
+    for (uint32_t i = 0; i <= at; ++i) h = mix(h, kv[i]);
+    return h;
+  }
+  void project(uint32_t at) { ring[at % window] = projection(at); }
+
+  void reset() override {
+    StateMockEngine::reset();
+    ring.assign(window, 0);
+  }
+  void prefill(const std::vector<uint32_t>& ids) override {
+    if (ids.empty()) throw std::runtime_error("mock: empty prefill");
+    const uint32_t base = p, end = p + uint32_t(ids.size());
+    const uint32_t from = end > window ? std::max(base, end - window) : base;
+    for (size_t i = 0; i < ids.size(); ++i) {
+      if (ids[i] == bad_id) throw std::runtime_error("mock: id out of vocabulary");
+      consume(ids[i]);
+      ++prefilled;
+      if (p - 1 >= from) project(p - 1);
+      const bool last = i + 1 == ids.size();
+      if (last) cur = next();
+      if (hook && (last || p % blk == 0)) hook(p, p % blk == 0);
+    }
+  }
+  uint32_t step(const server::Sampling& s) override {
+    const uint32_t id = StateMockEngine::step(s);
+    project(p - 1);
+    return id;
+  }
+  void ingest(const std::vector<uint32_t>& ids) override {
+    for (uint32_t id : ids) {
+      if (id == bad_id) throw std::runtime_error("mock: id out of vocabulary");
+      consume(id);
+      project(p - 1);
+      ++ingested;
+    }
+    cur = next();
+  }
+  uint64_t drafter_key() override { return key; }
+  size_t state_bytes() override { return sizeof(uint64_t) + (ring_in_state ? window * sizeof(uint64_t) : 0); }
+  void save_state(void* host) override {
+    StateMockEngine::save_state(host);
+    if (ring_in_state) std::memcpy(static_cast<uint8_t*>(host) + 8, ring.data(), window * sizeof(uint64_t));
+  }
+  void load_state(const void* host, uint32_t at) override {
+    StateMockEngine::load_state(host, at);
+    if (ring_in_state) std::memcpy(ring.data(), static_cast<const uint8_t*>(host) + 8, window * sizeof(uint64_t));
+  }
+};
+
 // Spec 13 (plan 13c Task 1): a batched engine with `n_slots` independent sessions, each a
 // StateMockEngine: the next id is a function of the slot's state hash AND its KV ids, so a
 // wrong restore or a row mixed up with another slot's generates different ids. Sampled rows

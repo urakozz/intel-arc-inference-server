@@ -179,9 +179,11 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   uint16_t* hid = nullptr;
   // Spec 19c: with a drafter, slot 0 holds the state the prefill GDN path reads and writes, and every chunk taps
   // its rows inside the drafter's window of this call's end (the positions its ring reads back) into the staging,
-  // projected after the chunk (drafter_project_staged). Positions before this call keep whatever the ring held -
-  // after a prefix-cache restore that is a cold ring: correct, lower acceptance until it refills (spec 19 decision
-  // 5's plane is 19d's).
+  // projected after the chunk (drafter_project_staged). Positions before this call keep the ring's own rows: the
+  // session's, or since spec 19d a restored snapshot's (save_state / load_state carry the ring - spec 19 decision 5).
+  // A mid-call block end's snapshot (the block hook below) holds the ring as it stands there: its window's positions
+  // that are not inside this call's last window() have not been projected yet - lower acceptance after a restore
+  // there followed by a tail shorter than the window, never a different output (spec 19 §12).
   std::vector<std::vector<uint32_t>> df_sites;
   uint32_t df_from = 0;   // the first position tapped
   if (drafter_) {

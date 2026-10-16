@@ -383,6 +383,8 @@ struct EngineAdapter : server::EngineIface {
   size_t state_bytes() override { return eng.state_bytes(); }
   size_t kv_bytes(uint32_t n) override { return eng.kv_bytes(n); }
   uint64_t kv_form() override { return eng.kv_cache() == runtime::KvCache::Int8 ? 1 : 0; }
+  // Spec 19d: the engine's drafter (its ring rides in save_state), 0 without one.
+  uint64_t drafter_key() override { return eng.tap_drafter() ? eng.tap_drafter()->key() : 0; }
   void save_state(void* host) override {
     flush_commit();
     eng.save_state(host);
