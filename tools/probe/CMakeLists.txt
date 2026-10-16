@@ -667,3 +667,15 @@ if(B70_Q4EXP)
   add_dependencies(probe_offload kernel_po_moe_M1_E512_T10_D2560_I640_SH4 kernel_po_kernels
                    kernel_q4_moe_M1_E512_T10_D2560_I640_SH4)
 endif()
+
+# --- dflash_d1: spec 19 §6 D1 (plan 19b Task 3), the engine's half ---
+# The DFlash drafter beside the loaded target drafts at teacher-forced anchors of tap dumps; tools/oracle/dflash_d1.py
+# holds every draft to tools/oracle/dflash_ref.py on the same taps. Box queue row 54 (stage r54.d1).
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(dflash_d1 dflash_d1.cc)
+  target_include_directories(dflash_d1 PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(dflash_d1 PRIVATE b70_dflash_runtime b70_loader b70_l0)
+  b70_target_kernel_dir(dflash_d1)
+  get_property(D1_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
+  add_dependencies(dflash_d1 ${D1_KERNELS})
+endif()
