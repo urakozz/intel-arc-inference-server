@@ -38,7 +38,7 @@ class DFlashDrafter final : public TapDrafter {
   // `draft_vocab` the compact one LoadedModel::draft_vocab holds) and its Control block. `e` must have been built
   // with this drafter. Once.
   void attach(Engine& e, bool draft_vocab);
-  bool attached() const { return engine_ != nullptr; }
+  bool attached() const { return draft_ != nullptr; }
 
   // One block at the engine's pos: the anchor cur_token[0], K = k drafts into cur_token[1..k] (what e.verify(k)
   // reads), the walk greedy at temperature 0 or Gumbel at `temperature` with `seed` (set_draft_params' rules: a v1
@@ -47,6 +47,11 @@ class DFlashDrafter final : public TapDrafter {
   // distribution q of row j is softmax(scores[j] / temperature) over cand[j] (server::dflash_q).
   const DFlashDraftOut& draft(Engine& e, uint32_t k, float temperature, uint64_t seed) override;
   bool samples() const override { return w_.desc.v2(); }
+  // Spec 19d: the same beside any target (runtime::PipelineEngine's device 1) - runtime/tap_drafter.h.
+  void attach_target(l0::Context& ctx, const loader::LoadedModel& target, const l0::Mem& control, uint32_t max_len,
+                     bool draft_vocab) override;
+  const DFlashDraftOut& draft_with(const std::function<void(l0::CmdList&)>& replay, uint32_t k, float temperature,
+                                   uint64_t seed) override;
 
   const model::DFlashDesc& desc() const { return w_.desc; }
   const loader::DFlashWeights& weights() const { return w_; }

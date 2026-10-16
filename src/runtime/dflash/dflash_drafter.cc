@@ -50,22 +50,35 @@ void DFlashDrafter::load_ring(l0::CmdList& imm, const void* host) {
 }
 
 void DFlashDrafter::attach(Engine& e, bool draft_vocab) {
-  require(engine_ == nullptr, "attach() twice");
+  require(draft_ == nullptr, "attach() twice");
   require(e.tap_drafter() == this, "the engine was not built with this drafter (Engine(..., &drafter))");
-  require(e.max_len() == b_.max_len, "the engine's max_len " + std::to_string(e.max_len()) +
-                                         " is not the drafter's buffers' " + std::to_string(b_.max_len));
-  draft_ = std::make_unique<CapturedStep>(
-      build_dflash_draft(e.context(), w_, dflash_target(e.model(), draft_vocab), b_, e.buffers().control));
+  attach_target(e.context(), e.model(), e.buffers().control, e.max_len(), draft_vocab);
   engine_ = &e;
+}
+
+void DFlashDrafter::attach_target(l0::Context& ctx, const loader::LoadedModel& target, const l0::Mem& control,
+                                  uint32_t max_len, bool draft_vocab) {
+  require(draft_ == nullptr, "attach() twice");
+  require(max_len == b_.max_len, "the target's max_len " + std::to_string(max_len) +
+                                     " is not the drafter's buffers' " + std::to_string(b_.max_len));
+  draft_ = std::make_unique<CapturedStep>(
+      build_dflash_draft(ctx, w_, dflash_target(target, draft_vocab), b_, control));
 }
 
 const DFlashDraftOut& DFlashDrafter::draft(Engine& e, uint32_t k, float temperature, uint64_t seed) {
   require(engine_ == &e, "draft() before attach() to this engine");
-  require(k >= 1 && k <= max_k_ && k <= e.max_verify_k(),
+  require(k <= e.max_verify_k(),
           "k " + std::to_string(k) + " is outside 1.." + std::to_string(std::min(max_k_, e.max_verify_k())) +
               " at pos " + std::to_string(e.pos()));
+  return draft_with([&e](l0::CmdList& list) { e.replay_aux(list); }, k, temperature, seed);
+}
+
+const DFlashDraftOut& DFlashDrafter::draft_with(const std::function<void(l0::CmdList&)>& replay, uint32_t k,
+                                                float temperature, uint64_t seed) {
+  require(draft_ != nullptr, "draft before attach");
+  require(k >= 1 && k <= max_k_, "k " + std::to_string(k) + " is outside 1.." + std::to_string(max_k_));
   set_draft_params(*b_.ctl(), w_.desc, k, temperature, seed);
-  e.replay_aux(draft_->list);
+  replay(draft_->list);
   const DFlashDraftOut& out = *b_.readback();
   require(out.k == k, "the draft list drafted " + std::to_string(out.k) + " ids, not " + std::to_string(k));
   return out;

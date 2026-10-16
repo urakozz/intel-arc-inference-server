@@ -1,6 +1,7 @@
 #pragma once
 // Spec 19c: `--spec dflash` - speculative decoding with a DFlash drafter (spec 19 §5) - for b70-serve and b70-decode
-// (--ids), one card, the Qwen3.5 family's engine (runtime::Engine). The flags:
+// (--ids), the Qwen3.5 family's engine (runtime::Engine); spec 19d: and b70-serve --pp 2 (runtime::PipelineEngine,
+// the drafter on device 1 beside lm_head). The flags:
 //
 //   --spec dflash          the proposer is the drafter (spec 19 decision 3: one per server; the MTP head is not
 //                          loaded, --mtp / --spec lookup are refused)
@@ -14,7 +15,9 @@
 //                          MTP head)
 //
 // What is refused here, by name, before the device (each is a later stage's, or has no binaries):
-//   --pp 2                 the drafter beside a split target (spec 19 §5's hand-off of the taps) is 19d's
+//   --pp 2                 b70-decode: one card (b70-serve --pp 2 serves it); b70-serve --pp 2: the copy hand-off
+//                          only (--pipeline-handoff peer: device 0's taps are copies into device 1 that only the
+//                          copy hand-off's event orders)
 //   --kv-cache int8        the verify lists at M = 5..8 have no int8-KV attention binaries (kv8.cl builds M <= 4)
 //   B70_DECODE_ATTN=v1     decode attention v1 is not built at M = 5..8
 //   sycl-tla prefill, B70_PREFILL_REPLAY=1   the drafter's prefill taps are copies on the L0 list
@@ -29,6 +32,7 @@
 #include "l0/context.h"
 #include "loader/dflash_layout.h"
 #include "loader/dflash_loader.h"
+#include "loader/dflash_repack.h"
 #include "loader/lm_head_int8.h"
 #include "loader/loader.h"
 #include "model/qwen35.h"
@@ -57,11 +61,12 @@ inline void check_flags(const Args& a) {
     throw std::runtime_error("--spec-max with --spec dflash expects 1..7 (the drafter's block of 8)");
 }
 
-// The one-card engine's refusals (see the header). `path` / `prefill_replay` (B70_PREFILL_REPLAY=1): what
+// The engine's refusals (see the header). `path` / `prefill_replay` (B70_PREFILL_REPLAY=1): what
 // Engine::prefill would otherwise refuse per request, after the load - the drafter's prefill taps are copies on the
-// L0 list, which sycl-tla's walk and a recorded chunk cannot hold.
+// L0 list, which sycl-tla's walk and a recorded chunk cannot hold. Spec 19d: `pipeline_served` - the caller serves
+// --pp 2 with the drafter (b70-serve); `peer` - its hand-off is --pipeline-handoff peer.
 inline void check_engine(const Args& a, bool pipeline, runtime::KvCache kv, const runtime::PrefillPath& path = {},
-                         bool prefill_replay = false) {
+                         bool prefill_replay = false, bool pipeline_served = false, bool peer = false) {
   if (!a.on) return;
   if (path.prefill && !runtime::is_l0(path.backend))
     throw std::runtime_error("--spec dflash prefills on the l0 / l0-int8 backends only (the drafter's taps are copies "
@@ -69,9 +74,12 @@ inline void check_engine(const Args& a, bool pipeline, runtime::KvCache kv, cons
   if (path.prefill && prefill_replay)
     throw std::runtime_error("--spec dflash: the drafter's prefill taps are copies, which a recorded chunk cannot "
                              "hold - unset B70_PREFILL_REPLAY");
-  if (pipeline)
-    throw std::runtime_error("--spec dflash runs on one card: the drafter beside a split target (--pp 2, the taps "
-                             "across the hand-off) is spec 19d's");
+  if (pipeline && !pipeline_served)
+    throw std::runtime_error("b70-decode --spec dflash runs on one card (b70-serve --pp 2 --spec dflash serves the "
+                             "drafter beside a split target): drop --pp 2");
+  if (pipeline && peer)
+    throw std::runtime_error("--spec dflash --pp 2 needs --pipeline-handoff copy: device 0's taps are copies into "
+                             "device 1, which only the copy hand-off's event orders before device 1's rows");
   if (kv == runtime::KvCache::Int8)
     throw std::runtime_error("--spec dflash verifies up to 8 rows, and --kv-cache int8's attention is built for "
                              "M <= 4 (kv8.cl): use --kv-cache bf16 with --spec dflash");
@@ -109,6 +117,20 @@ struct Loaded {
   uint32_t head_rows = 0;
   runtime::DrafterPlan plan;
 };
+// Spec 19d (--pp 2): the planner's term before the drafter is loaded - read off its checkpoint (config.json, the
+// shards' shapes) against the WHOLE target as loaded on device 0, so the split and max_len account for it; the
+// weights are then loaded onto device 1 beside the stage model (load(), below).
+inline runtime::DrafterPlan plan_only(const Args& a, const loader::LoadedModel& target) {
+  const loader::DFlashCheckpoint ck(a.model);
+  const uint32_t head_rows = target.draft_vocab ? target.draft_vocab->size()
+                                                : target.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
+  ck.check_target(*target.desc, target.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N);
+  if (a.max_k > ck.desc().max_k())
+    throw std::runtime_error("--spec-max " + std::to_string(a.max_k) + " exceeds the drafter's block (" +
+                             std::to_string(ck.desc().max_k()) + " drafts)");
+  return runtime::dflash::drafter_plan(ck.desc(), ck.target_hidden(), head_rows, a.format);
+}
+
 inline Loaded load(l0::Context& ctx, const Args& a, const loader::LoadedModel& target) {
   Loaded l{loader::load_drafter(ctx, a.model, target, a.format), 0, {}};
   l.head_rows = target.draft_vocab ? target.draft_vocab->size()

@@ -76,8 +76,8 @@ PipelineEngine::Stage& PipelineEngine::st(uint32_t dev) const {
 
 PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
                                std::vector<loader::LoadedModel> stages, uint32_t max_len,
-                               const PipelineOptions& opt, KvCache kv)
-    : max_len_(max_len), opt_(opt), kv_(kv) {
+                               const PipelineOptions& opt, KvCache kv, TapDrafter* drafter)
+    : max_len_(max_len), opt_(opt), kv_(kv), drafter_(drafter) {
   if (stages.size() != kPpDevices)
     throw std::invalid_argument("runtime::PipelineEngine: " + std::to_string(stages.size()) +
                                 " stage models (spec 16b builds two)");
@@ -101,9 +101,23 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
                                std::to_string(max_len));
   // Spec 16d: the MTP head (and a draft vocabulary) is device 1's, with lm_head
   // (runtime::place_stages); device 0's model holds neither.
-  if (stages[0].mtp || stages[0].draft_vocab || (stages[1].draft_vocab && !stages[1].mtp))
+  if (stages[0].mtp || stages[0].draft_vocab || (stages[1].draft_vocab && !stages[1].mtp && !drafter))
     throw std::invalid_argument("runtime::PipelineEngine: the MTP head and a draft vocabulary "
                                 "belong to device 1's stage (runtime::place_stages)");
+  if (drafter) {   // spec 19d
+    if (stages[1].mtp)
+      throw std::invalid_argument("runtime::PipelineEngine: a tap drafter and the MTP head are two proposers - "
+                                  "load the model without its head (spec 19 decision 3)");
+    if (opt.handoff != PpHandoff::Copy)
+      throw std::invalid_argument("runtime::PipelineEngine: a tap drafter across the split needs the copy "
+                                  "hand-off (device 0's taps are copies into device 1, ordered by its event)");
+    if (drafter->max_k() == 0 || drafter->max_k() + 1 > TapVerifyDims::kSlots)
+      throw std::invalid_argument("runtime::PipelineEngine: the drafter drafts " + std::to_string(drafter->max_k()) +
+                                  " ids a block; the verify lists take 1.." + std::to_string(TapVerifyDims::kSlots - 1));
+    if (stages[1].embed.size() != stages[0].embed.size())
+      throw std::invalid_argument("runtime::PipelineEngine: device 1's stage holds no embedding replica for the "
+                                  "drafter's draft list (runtime::place_stages(..., drafter = true))");
+  }
   if (opt.timeout_ms == 0 || (opt.handoff == PpHandoff::Peer && opt.spin_limit == 0))
     throw std::invalid_argument("runtime::PipelineEngine: a hand-off needs a non-zero bound");
   const uint32_t split = static_cast<uint32_t>(stages[0].layer_small.size());
@@ -141,6 +155,23 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
       }
     for (uint32_t i = 0; i < kMaxDraft; ++i)
       s1.draft.push_back(build_stage_draft(s1.ctx, s1.model, s1.buffers, s1.range, *s1.mtp, i));
+  }
+  // Spec 19d: each device's verify slots for 8 slots and its tap verify lists at M = 1..max_k + 1.
+  if (drafter_) {
+    for (uint32_t i = 0; i < kPpDevices; ++i) {
+      Stage& s = st(i);
+      s.gdn_spec = std::make_unique<l0::Mem>(s.ctx, l0::MemKind::Device,
+                                             pp_gdn_spec_bytes(*desc, s.range.gdn, TapVerifyDims::kSlots));
+      s.tv.gdn_spec = s.gdn_spec.get();
+      s.tv.slots = TapVerifyDims::kSlots;
+      s.tv.taps = &drafter_->taps();
+      s.tv.layers = drafter_->tap_layers();
+    }
+    for (uint32_t M = 1; M <= drafter_->max_k() + 1; ++M)
+      for (uint32_t i = 0; i < kPpDevices; ++i) {
+        Stage& s = st(i);
+        s.verify.push_back(build_stage_verify_taps(s.ctx, s.model, s.buffers, s.range, binding, s.tv, M));
+      }
   }
   reset();
 }
@@ -186,7 +217,9 @@ void PipelineEngine::reset() {
   st(1).persist.zero(st(1).imm);
   // Spec 16d: and the MTP state (Engine::reset's mtp_->zero), on both devices.
   if (st(1).mtp) st(1).mtp->zero(st(1).imm);
-  if (st(0).gdn_spec) st(0).imm.fill(st(0).gdn_spec->ptr(), 0u, st(0).gdn_spec->size());
+  for (uint32_t d = 0; d < kPpDevices; ++d)   // spec 19d: device 1 holds its own slots with a drafter
+    if (st(d).gdn_spec) st(d).imm.fill(st(d).gdn_spec->ptr(), 0u, st(d).gdn_spec->size());
+  if (drafter_) drafter_->reset(st(1).imm);   // a cold drafter
   verify_k_ = kNoVerify;
   draft_ids_.clear();
   link_->zero(st(0).imm, st(1).imm);
@@ -283,8 +316,8 @@ void PipelineEngine::ingest(const std::vector<uint32_t>& ids) {
   for (uint32_t id : ids) {
     for (uint32_t d = 0; d < kPpDevices; ++d) st(d).ctl->n_active = 1;
     set_token(id);
-    if (mtp())
-      mtp_step1();   // spec 16d: Engine's rule - the head's KV stays filled
+    if (spec_on())
+      mtp_step1();   // spec 16d: Engine's rule - the head's KV stays filled (spec 19d: the drafter's ring)
     else
       step_once();
   }
@@ -300,7 +333,7 @@ std::vector<uint32_t> PipelineEngine::generate(uint32_t n,
   for (uint32_t i = 0; i < n; ++i) {
     const uint32_t id = st(1).ctl->cur_token[0];   // == device 0's after the mirror
     const Clock::time_point f0 = Clock::now();
-    if (mtp())
+    if (spec_on())
       mtp_step1();
     else
       step_once();
@@ -321,6 +354,7 @@ size_t PipelineEngine::state_bytes() const {
   for (uint32_t d = 0; d < kPpDevices; ++d)
     t += st(d).persist.gdn_state.size() + st(d).persist.conv_ring.size();
   if (mtp()) t += size_t(st(0).model.desc->hidden) * 2;   // spec 16d: hh row 0, last
+  if (drafter_) t += drafter_->ring_bytes();               // spec 19d: the drafter's ring, last
   return t;
 }
 
@@ -347,7 +381,7 @@ void PipelineEngine::save_state(void* host) const {
   // Inside a mid-prompt block hook (spec 16c) the block end's shadows, else the live state;
   // the same bytes in the same order either way.
   const auto gdn = [&](uint32_t d) -> const void* {
-    const uint32_t live = mtp() && !snap_gdn_[d] ? st(d).ctl->gdn_live % MtpBuffers::kSlots : 0;
+    const uint32_t live = spec_on() && !snap_gdn_[d] ? st(d).ctl->gdn_live % gdn_slots() : 0;
     if (live == 0) return live_gdn(d).ptr();
     return st(d).spec()->as<uint8_t>() + size_t(live - 1) * slot_bytes();
   };
@@ -366,6 +400,10 @@ void PipelineEngine::save_state(void* host) const {
   if (mtp())   // spec 16d: then the head's input hidden h_{pos-1} (Engine's MTP layout)
     st(1).imm.copy(h, snap_hh_ ? snap_hh_->ptr() : st(1).mtp->hh.ptr(),
                    size_t(st(1).model.desc->hidden) * 2);
+  // Spec 19d: then the drafter's ring (Engine's layout). Inside a mid-prompt hook it is the ring at the block end:
+  // the prefill projects a chunk's rows once both devices have finished it, before that chunk's hook runs, and
+  // nothing else writes the ring while later chunks run.
+  if (drafter_) drafter_->save_ring(st(1).imm, h);
 }
 
 void PipelineEngine::load_state(const void* host, uint32_t pos) {
@@ -383,6 +421,11 @@ void PipelineEngine::load_state(const void* host, uint32_t pos) {
   }
   if (mtp()) {   // spec 16d: the head's hidden row; the state went into slot 0 on both
     st(1).imm.copy(st(1).mtp->hh.ptr(), h, size_t(st(1).model.desc->hidden) * 2);
+    for (uint32_t d = 0; d < kPpDevices; ++d) st(d).ctl->gdn_live = 0;
+    verify_k_ = kNoVerify;
+  }
+  if (drafter_) {   // spec 19d: the ring; the state went into slot 0 on both
+    drafter_->load_ring(st(1).imm, h);
     for (uint32_t d = 0; d < kPpDevices; ++d) st(d).ctl->gdn_live = 0;
     verify_k_ = kNoVerify;
   }
@@ -471,8 +514,21 @@ uint32_t PipelineEngine::draft_vocab() const {
 
 MtpBuffers* PipelineEngine::mtp_buffers() { return mtp() ? st(1).mtp.get() : nullptr; }
 
+void PipelineEngine::require_spec(const char* what) const {
+  if (!spec_on())
+    throw std::runtime_error(std::string("runtime::PipelineEngine::") + what +
+                             ": no proposer - load the model with its MTP head, or build the engine with a "
+                             "drafter (--spec dflash)");
+}
+
+uint32_t PipelineEngine::gdn_slots() const {
+  return mtp() ? MtpBuffers::kSlots : drafter_ ? TapVerifyDims::kSlots : 1;
+}
+
+uint32_t PipelineEngine::max_draft() const { return mtp() ? kMaxDraft : drafter_ ? drafter_->max_k() : 0; }
+
 const CapturedStep& PipelineEngine::verify_step(uint32_t dev, uint32_t M) const {
-  require_mtp("verify_step");
+  require_spec("verify_step");
   return st(dev).verify.at(M - 1);
 }
 
@@ -483,8 +539,9 @@ const CapturedStep& PipelineEngine::draft_step(uint32_t i) const {
 
 uint32_t PipelineEngine::max_verify_k() const {
   const uint32_t pos = st(1).ctl->pos;
-  if (!mtp() || pos == 0 || pos + 1 >= max_len_) return 0;
-  return std::min<uint32_t>(kMaxDraft, max_len_ - pos - 1);
+  // Spec 19d: a drafter's verify needs no h_{pos-1}, so pos 0 drafts too (Engine's rule).
+  if (!spec_on() || (mtp() && pos == 0) || pos + 1 >= max_len_) return 0;
+  return std::min<uint32_t>(max_draft(), max_len_ - pos - 1);
 }
 
 const uint32_t* PipelineEngine::verify_ids() const { return st(1).ctl->out_token; }
@@ -492,15 +549,16 @@ const uint32_t* PipelineEngine::verify_ids() const { return st(1).ctl->out_token
 uint32_t PipelineEngine::pending() const { return st(1).ctl->cur_token[0]; }
 
 void PipelineEngine::set_draft_input(uint32_t i, uint32_t id) {
-  if (i >= kMaxDraft || id >= model::Qwen35::kVocab)
+  const uint32_t n = std::max<uint32_t>(kMaxDraft, max_draft());
+  if (i >= n || id >= model::Qwen35::kVocab)
     throw std::runtime_error("runtime::PipelineEngine::set_draft_input: draft " + std::to_string(i) +
                              " id " + std::to_string(id) + " is outside [0, " +
-                             std::to_string(kMaxDraft) + ") x the vocabulary");
+                             std::to_string(n) + ") x the vocabulary");
   for (uint32_t d = 0; d < kPpDevices; ++d) st(d).ctl->cur_token[1 + i] = id;
 }
 
 void PipelineEngine::read_logits_into(float* host, uint32_t rows) const {
-  if (rows == 0 || rows > MtpBuffers::kSlots)
+  if (rows == 0 || rows > std::max<uint32_t>(MtpBuffers::kSlots, max_draft() + 1))
     throw std::runtime_error("runtime::PipelineEngine::read_logits_into: rows " + std::to_string(rows));
   st(1).imm.copy(host, st(1).buffers.logits.ptr(), size_t(rows) * model::Qwen35::kVocab * sizeof(float));
 }
@@ -561,24 +619,27 @@ void PipelineEngine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& 
 }
 
 void PipelineEngine::verify(uint32_t k) {
-  require_mtp("verify");
+  require_spec("verify");
   const uint32_t pos = st(1).ctl->pos;
-  if (k > kMaxDraft || pos == 0 || size_t(pos) + k + 1 > max_len_)
+  if (k > max_draft() || (mtp() && pos == 0) || size_t(pos) + k + 1 > max_len_)
     throw std::runtime_error("runtime::PipelineEngine::verify: k " + std::to_string(k) + " at pos " +
                              std::to_string(pos) + " (max_verify_k() = " +
-                             std::to_string(max_verify_k()) + "; pos must be >= 1 and pos + k"
-                             " + 1 <= max_len " + std::to_string(max_len_) + ")");
+                             std::to_string(max_verify_k()) + "; k <= " + std::to_string(max_draft()) +
+                             ", pos >= 1 with the MTP head, and pos + k + 1 <= max_len " +
+                             std::to_string(max_len_) + ")");
   for (uint32_t r = 0; r <= k; ++r)
     if (st(1).ctl->cur_token[r] >= model::Qwen35::kVocab || st(0).ctl->cur_token[r] != st(1).ctl->cur_token[r])
       throw std::runtime_error("runtime::PipelineEngine::verify: row " + std::to_string(r) + "'s id " +
                                std::to_string(st(1).ctl->cur_token[r]) +
                                " is outside the vocabulary or not on both devices");
   for (uint32_t d = 0; d < kPpDevices; ++d) st(d).ctl->n_active = k + 1;
-  // The head's KV fill of the same rows at pos - 1 .. pos + k - 1 (build_verify's tail).
-  Control* hctl = st(1).mtp->hctl.as<Control>();
-  hctl->pos = pos - 1;
-  hctl->n_active = k + 1;
-  for (uint32_t r = 0; r <= k; ++r) hctl->cur_token[r] = st(1).ctl->cur_token[r];
+  if (mtp()) {
+    // The head's KV fill of the same rows at pos - 1 .. pos + k - 1 (build_verify's tail).
+    Control* hctl = st(1).mtp->hctl.as<Control>();
+    hctl->pos = pos - 1;
+    hctl->n_active = k + 1;
+    for (uint32_t r = 0; r <= k; ++r) hctl->cur_token[r] = st(1).ctl->cur_token[r];
+  }
   verify_pos_ = pos;
   verify_k_ = k;
   run_pair(st(0).verify[k].list, st(1).verify[k].list, "verify");
@@ -588,7 +649,7 @@ void PipelineEngine::verify(uint32_t k) {
 }
 
 void PipelineEngine::commit(uint32_t j, uint32_t next_token) {
-  require_mtp("commit");
+  require_spec("commit");
   if (verify_k_ == kNoVerify || j > verify_k_)
     throw std::runtime_error("runtime::PipelineEngine::commit: j " + std::to_string(j) +
                              (verify_k_ == kNoVerify ? " with no verify() pending"
@@ -599,20 +660,50 @@ void PipelineEngine::commit(uint32_t j, uint32_t next_token) {
                              " is outside the vocabulary");
   Stage& s1 = st(1);
   const size_t row = size_t(s1.model.desc->hidden) * 2;
-  // Row j's GDN state is slot (live + j) % kSlots on BOTH devices (each holds its own layers'
+  // Row j's GDN state is slot (live + j) % slots on BOTH devices (each holds its own layers'
   // slots); row j's hidden (hh row 1 + j, device 1) is the next iteration's h_{pos-1}.
-  s1.imm.copy(s1.mtp->hh.ptr(), s1.mtp->hh.as<uint8_t>() + (1 + size_t(j)) * row, row);
+  if (mtp()) s1.imm.copy(s1.mtp->hh.ptr(), s1.mtp->hh.as<uint8_t>() + (1 + size_t(j)) * row, row);
   for (uint32_t d = 0; d < kPpDevices; ++d) {
     Control* c = st(d).ctl;
-    c->gdn_live = (c->gdn_live + j) % MtpBuffers::kSlots;
+    c->gdn_live = (c->gdn_live + j) % gdn_slots();
     c->pos = verify_pos_ + j + 1;
     c->n_active = 1;
     c->cur_token[0] = next_token;
   }
   verify_k_ = kNoVerify;
+  // Spec 19d: the committed rows' taps (rows 0..j: positions verify_pos_ .. + j) into the drafter's ring, on device
+  // 1, before anything rewrites the taps (Engine::commit's rule).
+  if (drafter_) run_one(1, drafter_->projection(verify_pos_, j + 1), "drafter projection");
+}
+
+const dflash::DFlashDraftOut& PipelineEngine::draft_tap(uint32_t k, float temperature, uint64_t seed) {
+  if (!drafter_) throw std::runtime_error("runtime::PipelineEngine::draft_tap: no drafter (--spec dflash)");
+  if (k == 0 || k > max_verify_k())
+    throw std::runtime_error("runtime::PipelineEngine::draft_tap: k " + std::to_string(k) +
+                             " is outside [1, max_verify_k() = " + std::to_string(max_verify_k()) + "] at pos " +
+                             std::to_string(pos()));
+  const dflash::DFlashDraftOut& o =
+      drafter_->draft_with([this](l0::CmdList& list) { run_one(1, list, "draft list"); }, k, temperature, seed);
+  // Device 1's list wrote the drafts into its cur_token[1..k]; device 0's verify list reads its own block.
+  for (uint32_t i = 1; i <= k; ++i) st(0).ctl->cur_token[i] = st(1).ctl->cur_token[i];
+  return o;
+}
+
+void PipelineEngine::drafter_project(const void* staging, uint32_t pos, uint32_t n) {
+  const size_t row = drafter_->tap_layers().size() * size_t(st(1).model.desc->hidden) * 2;
+  for (uint32_t r = 0; r < n; r += 8) {
+    const uint32_t g = std::min<uint32_t>(8, n - r);
+    st(1).imm.copy(drafter_->taps().ptr(), static_cast<const uint8_t*>(staging) + size_t(r) * row, size_t(g) * row);
+    run_one(1, drafter_->projection(pos + r, g), "drafter projection");
+  }
 }
 
 void PipelineEngine::mtp_step1() {
+  if (drafter_) {   // spec 19d: Engine's rule - verify(0) + commit(0) at every pos, the projection in commit
+    verify(0);
+    commit(0, st(1).ctl->out_token[0]);
+    return;
+  }
   if (st(1).ctl->pos == 0) {
     // No h_{-1}: the plain lists (slot 0, live 0 at pos 0), then the step's final-normed
     // hidden into hh row 0 - Engine::mtp_step1.
@@ -627,8 +718,8 @@ void PipelineEngine::mtp_step1() {
 }
 
 void PipelineEngine::mtp_normalise_live() {
-  if (!mtp()) return;
-  const uint32_t live = st(1).ctl->gdn_live % MtpBuffers::kSlots;
+  if (!spec_on()) return;
+  const uint32_t live = st(1).ctl->gdn_live % gdn_slots();
   if (live != 0)
     for (uint32_t d = 0; d < kPpDevices; ++d) {
       Stage& s = st(d);
@@ -639,7 +730,7 @@ void PipelineEngine::mtp_normalise_live() {
 }
 
 void PipelineEngine::mtp_before_prefill() {
-  if (!mtp()) return;
+  if (!spec_on()) return;
   mtp_normalise_live();
   verify_k_ = kNoVerify;
 }
@@ -653,6 +744,7 @@ MemoryComponents PipelineEngine::memory_use(uint32_t dev) const {
   // Spec 16d: the MTP state (device 1's MtpBuffers, device 0's verify slots) is decode
   // state, the draft vocabulary its own term - Engine::memory_use's split, per device.
   c.decode_state += (s.mtp ? s.mtp->bytes() : 0) + (s.gdn_spec ? s.gdn_spec->size() : 0);
+  if (dev == kPpDevices - 1 && drafter_) c.drafter = drafter_->bytes();   // spec 19d
   if (s.model.draft_vocab) {
     c.draft_vocab = s.model.draft_vocab->bytes();
     c.model -= c.draft_vocab;
