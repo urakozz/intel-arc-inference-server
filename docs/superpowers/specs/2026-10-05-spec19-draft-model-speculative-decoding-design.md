@@ -327,3 +327,63 @@ Plan 19e Task 1 and the host half of Task 2, written on the Mac (branch
   `cur_token[1..k]`, which `EngineAdapter::step_drafts` writes) - unvalidated on the card.
   Mock-tested: responses byte-identical to plain over EOS, stop, max_tokens and tool calls
   inside accepted runs.
+
+## 10. 19b as built (2026-10-16)
+
+Branch `spec19b-dflash-drafter`, written on the Mac; box queue row 54 (`tools/box_validate.sh --only r54`). Nothing
+of it has run on a card: no `df_*` binary has been compiled (kernel_cmdlines +14 / -0 / ~0) and nothing binds them
+without a drafter, so D0 is G0. Plan: `docs/superpowers/plans/2026-10-05-spec19b-dflash-drafter.md` (its status
+section lists the rulings and the deviations from the 2026-10-05 plan).
+
+- **The drafter as data** (`model::DFlashDesc`, `src/model/dflash.{h,cc}`): config.json read as `dflash_ref.py`'s
+  `config_from_dict` reads it - DFlash 2 or v1 by the config (Review Focus 5), per-layer window / causality as
+  `resolve_layer_attention`. Refused by name: a quantization_config (our formats only), another activation, rope type
+  or partial rotary, `sample_from_anchor`, no fc, unordered taps, a drafter vocabulary of its own (d2t), attention
+  biases, a value scale or sink bias, a conv group that does not divide the hidden size. Held to the target
+  (`check_dflash_target`): hidden and vocab_size equal the target's (the embedding and head are shared), every tap
+  layer exists, `num_target_layers` matches, the mask id is a row of the shared embedding (Ornith's drafter masks
+  with 248077, the first padded row - not a defined token).
+- **The loader** (`loader/dflash_repack` host half, `loader/dflash_loader` upload): the checkpoint's names both ways
+  after `dflash_ref.py`'s `_canon`; a shipped embedding / head / d2t / mask_hidden refused (the drafter never owns a
+  copy - Review Focus 3); bf16 tiled (gemv_bf16) or int8 per-row RTN at load (gemv_i8w, spec 9's quantiser = 19a's
+  int8 arm); q || k || v and gate || up fused, the context projection's k || v the q || k || v weight's rows from q_n
+  on (no copy); the norms, q / k norms, conv bases fp32; the codebooks bf16 as stored. The mask row is the target's
+  embedding row, or a `mask_embedding.safetensors` (vLLM's `.pt` is a pickle: refused naming
+  `tools/oracle/dflash_mask_embedding.py`, the converter). `SafetensorsSet` opens a single-file drafter by an opt-in
+  flag. Bytes (`loader/dflash_layout.h`, the planner's formula): int8 2,053,464,064 B, bf16 3,849,364,480 B.
+- **The kernels** (`src/kernels/dflash/`, names `kernels/dflash_kernels.h`): `df_prep.cl` (embed, norm, the grouped
+  two-tap conv prepare / finish, SiLU x up, the block's q / k / v prep, the projection's ring store), `df_attn.cl`
+  (the block's 8 rows over the 2048-slot ring plus the block's own K / V, non-causal; **the window is the
+  reference's: block row r at p + r sees context >= p + r - 2047**, so row 0 sees 2047 positions and row 7 2040 - the
+  plan's "max(0, p - 2048) .. p - 1" was superseded by D1's reference), `df_topk.cl` (the 16 best per head row, two
+  fixed stages, ties to the lower id, NaN never, ids >= 248077 masked as argmax.cl masks them; a draft vocabulary's
+  compact indices mapped to ids before anything reads them), `df_select.cl` (DFlash 2's walk: greedy, or Gumbel with
+  vLLM's murmur3 keying at the request's temperature and 64-bit seed; v1's per-row pick, greedy only). Work-group
+  reductions only - every kernel runs on the Mac's GPU too (tools/mac/clrun/dflash_run). Numerics: residual and
+  every norm fp32, GEMV inputs bf16 (the reused gemv kernels read bf16 - vLLM runs the drafter in bf16 throughout),
+  the ring bf16 (20 KB a position), the block's K / V fp32, FP_CONTRACT off.
+- **The lists** (`runtime/dflash/`): `DFlashBuffers` by the one formula (`dflash_sizes`: ring 41,943,040 B, taps
+  409,600 B, RoPE 512 B a position, 62.3 MB at max_len 16384 with the full head), `runtime::DrafterPlan` in
+  `plan()` / `max_len_that_fits()` (the memory line gains "drafter X GB," only with one; on a 32 GB card with a 17 GB
+  target auto goes 190208 -> 156928 with the int8 drafter, derived), `build_dflash_draft` (87 launches: K, the
+  walk's temperature and seed in the drafter's control block `DFlashCtl` - one list for every K, rows past K masked;
+  the anchor from `Control.pos` / `cur_token[0]`, the drafts into `Control.cur_token[1..K]` where the verify list
+  reads them; the readback `DFlashDraftOut`: per row 16 candidates as ids, their head logits, the selector's
+  realized scores, the choice) and `build_dflash_project` (8 launches, `proj_n <= 8` rows at `proj_pos` - 19c's
+  commit-side projection and prefill tail). The head is the target's at 7 rows: `gemv_i8w` / `gemv_bf16` over the
+  full head or the draft vocabulary's compact one (`LoadedModel::draft_vocab`, which `loader::load` still builds only
+  with the MTP head - 19c relaxes it with `--spec dflash`).
+- **Measured on the Mac:** the host twin `tests/kernels/dflash_ref.h` equals `dflash_ref.py` to 6e-7 on its own
+  fixture (rows, top-16 order, scores, walks - two of them sampled; `dflash_ref_test`); the lists on the Mac's GPU
+  equal the twin (`dflash_run`, indicative); a draft vocabulary holding every candidate gives the full head's draft
+  bitwise (Review Focus 3, on the Mac at 256 ids and in `dflash_draft_test` at 32768 on the card). A preview with
+  the real drafter on 19a's real taps (no target head on the Mac: random anchor rows and head) put the bf16 engine's
+  final rows at cosine 0.99991 of the fp32 reference (0.99999 with fp32 GEMV inputs and the bf16 ring) - D1's
+  scores bar (0.9999) is measured on the box against the real head (r54.d1); if it fails while the sets and walks
+  hold, fp32-input GEMV variants are the lever.
+- **D1** (r54.d1 / r54.d1_ref): `tools/probe/dflash_d1` drafts at teacher-forced anchors of 19a's tap dumps (the
+  engine's own taps arrive with 19c's verify list; the tool takes either) and `tools/oracle/dflash_d1.py` runs
+  `dflash_ref.py` on the same taps, anchors and head form, three arms (int8 / int8, bf16 / bf16, int8 + a 32k V').
+- **Not in 19b:** int4 g64 drafter weights (no checkpoint of ours; 19a measured equal acceptance), v1 sampling (full
+  vocabulary Gumbel), causal or full-attention drafter layers (Ornith's v1 drafter: its stage), the engine loop,
+  `--spec dflash` and the taps (19c).

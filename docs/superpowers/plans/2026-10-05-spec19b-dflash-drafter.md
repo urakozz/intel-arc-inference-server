@@ -1,5 +1,9 @@
 # Spec 19b - the DFlash drafter on the card
 
+**Status (2026-10-16): Tasks 1-3 built on the Mac (branch `spec19b-dflash-drafter`); the plan's gate - D0 and D1 on
+the box - is box queue row 54.** As built: spec 19 §10 "19b as built". Built regardless of P0 (spec 19 §7, the
+operator's ruling of 2026-10-15).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** load a DFlash / DFlash 2 drafter beside the target and run its draft pass as a captured Level Zero list: context projection into a ring, the block forward, the head's top-16, the selector walk; D1 against 19a's reference.
@@ -29,14 +33,52 @@
 
 ### Task 1: loader
 
-- [ ] `loader::load_drafter(ctx, path, target)`: config (`dflash_config`, `layer_types`, `sliding_window`, `is_causal`), weights (fc, hidden_norm, layers incl. conv and selector parts, final norm), int8 quantisation at load (decision 2) or bf16; refuse a drafter whose `target_layer_ids` exceed the target's layers or whose vocab differs. Host tests on a tiny synthetic checkpoint. **Commit** `loader: DFlash drafters (spec 19b)`.
+- [x] `loader::load_drafter(ctx, path, target)`: config (`dflash_config`, `layer_types`, `sliding_window`, `is_causal`), weights (fc, hidden_norm, layers incl. conv and selector parts, final norm), int8 quantisation at load (decision 2) or bf16; refuse a drafter whose `target_layer_ids` exceed the target's layers or whose vocab differs. Host tests on a tiny synthetic checkpoint. **Commit** `loader: DFlash drafters (spec 19b)`.
 
 ### Task 2: kernels
 
-- [ ] Context projection (fc + hidden_norm + per-layer k/v + k_norm + RoPE → ring), the grouped convolution (prepare / finish), attention v2 with ring + block, top-16 over head rows (plain and compact-vocab), the selector walk (greedy, and Gumbel at a seed). Host references for each; kernel tests registered for the box. **Commit** `kernels: DFlash drafter kernels (spec 19b)`.
+- [x] Context projection (fc + hidden_norm + per-layer k/v + k_norm + RoPE → ring), the grouped convolution (prepare / finish), attention v2 with ring + block, top-16 over head rows (plain and compact-vocab), the selector walk (greedy, and Gumbel at a seed). Host references for each; kernel tests registered for the box. **Commit** `kernels: DFlash drafter kernels (spec 19b)`.
 
 ### Task 3: the draft list and D1
 
-- [ ] `build_dflash_draft` (captured once; K up to 7 as a parameter in Control), the drafter buffers through `buffer_sizes` and the planner; D1 on the box against 19a's reference fed the engine's taps (top-16 sets tie-aware equal; scores cosine ≥ 0.9999 bf16 / ≥ 0.999 int8; walk ids equal at T = 0). **Commit** `runtime: the DFlash draft list (spec 19b, D1)`.
+- [x] (Mac half; D1 itself is box row 54: r54.d1 / r54.d1_ref) `build_dflash_draft` (captured once; K up to 7 as a parameter in Control), the drafter buffers through `buffer_sizes` and the planner; D1 on the box against 19a's reference fed the engine's taps (top-16 sets tie-aware equal; scores cosine ≥ 0.9999 bf16 / ≥ 0.999 int8; walk ids equal at T = 0). **Commit** `runtime: the DFlash draft list (spec 19b, D1)`.
 
 **Gate for the plan:** D0 and D1 green on the box.
+
+## As built (2026-10-16) - and where the tree's current patterns replaced the plan's
+
+Each deviation from the 2026-10-05 text, with what it costs if it is wrong:
+
+- **Files** follow the per-model module pattern main grew since (K2, Kolibri, Muse): `model/dflash`, `loader/dflash_repack`
+  (host half) + `loader/dflash_loader` (upload), `kernels/dflash/df_*.cl` + `kernels/dflash_kernels.h` (+ `dflash_dims.h`,
+  plain constants for host code), `runtime/dflash/{dflash_sizes,dflash_buffers,dflash_capture,dflash_control}`. The
+  plan's `buffer_sizes` became `runtime/dflash/dflash_sizes` beside `runtime::DrafterPlan` in `memory_plan.h` (the
+  drafter's sizes depend on its config, not on `ModelDesc`). Cost if wrong: file moves.
+- **`load_drafter(ctx, path, target)`** takes a `LoadedModel`, plus an overload by parts (the target's descriptor, head
+  rows and embedding) for the device tests.
+- **Review Focus 1's window** is the D1 reference's (`dflash_ref.py`, vLLM's symmetric non-causal window): block row r
+  at p + r sees context >= p + r - 2047, not "max(0, p - 2048) .. p - 1". Cost if wrong: one bound in df_attn.
+- **"K up to 7 as a parameter in Control"**: K (with the walk's temperature / seed and the projection's position / row
+  count) lives in the drafter's own control block `DFlashCtl` (spec 8's hctl precedent), so `runtime::Control` keeps its
+  layout; the anchor is read from and the drafts written to `runtime::Control` (`cur_token[1..K]`, what the verify list
+  reads). Cost if wrong: moving six words.
+- **Attention** is a new pair (`df_attn_part` / `df_attn_reduce`), not attn_v2 with a ring mode: attn_v2 is
+  Qwen3.8's 256-dim head with partial RoPE and gating; the drafter's heads are 128-dim with a ring and a block term.
+  attn_v2.cl and every existing binary are untouched (D0). Cost if wrong: a merge into attn_v2 later.
+- **Review Focus 4's `mask_embedding.pt`** is refused (a torch pickle) naming `tools/oracle/dflash_mask_embedding.py`,
+  which writes `mask_embedding.safetensors`; that file replaces the row. No published drafter ships one. Cost: a pickle
+  reader if one appears.
+- **Review Focus 5:** v1 configs parse, load and draft greedily (top-1 a row); v1 sampling (full-vocabulary Gumbel),
+  causal and full-attention layers (Ornith's v1 drafter) are refused at capture - their binaries are Ornith's stage.
+- **Formats:** bf16 and int8 at load (decision 2). int4 g64 drafter weights are not built (no checkpoint of ours; 19a:
+  equal acceptance). Cost if wrong: an RTN int4 path (loader/rtn.h) and int4 GEMV variants at M 8.
+- **The draft vocabulary** reuses `LoadedModel::draft_vocab`, which `loader::load` still builds only with the MTP head;
+  D1's V' arm loads the head. 19c relaxes that rule with `--spec dflash`. Cost: one condition in loader.cc.
+- **D1's taps** are 19a's CPU-reference dumps (oracle-out-19a), fed to both sides - "the engine's taps" arrive with
+  19c's verify list; `dflash_d1` reads any dump in that format. Cost: a re-run on engine dumps.
+- **Mac-side tests beyond the plan:** the twin is held to `dflash_ref.py` on a python-made fixture
+  (tests/loader/dflash_ref_fixture.safetensors, 544 KB); `tools/mac/clrun/dflash_run` runs both lists on the Mac's GPU
+  (mac_check section 5); `dflash_draft_test` (box) runs both lists with the real drafter beside a synthetic target.
+- **Precision note for D1:** the engine's GEMV inputs are bf16 (the reused kernels' contract); a Mac preview on the
+  real drafter put the final rows at cosine 0.99991 of the fp32 reference. If r54.d1's scores bar (0.9999) fails while
+  the sets and walks hold, fp32-input GEMV variants (gemv_i8w / gemv_bf16 with an fp32 x) are the lever.
