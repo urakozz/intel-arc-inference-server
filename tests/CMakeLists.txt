@@ -3901,7 +3901,8 @@ set_tests_properties(dflash_load_checkpoint_test PROPERTIES LABELS "checkpoint;d
 add_executable(dflash_ref_test kernels/dflash_ref_test.cc)
 target_include_directories(dflash_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(dflash_ref_test PRIVATE b70_loader b70_dflash_model)
-add_test(NAME dflash_ref_test COMMAND dflash_ref_test ${CMAKE_CURRENT_SOURCE_DIR}/loader/dflash_ref_fixture.safetensors)
+add_test(NAME dflash_ref_test COMMAND dflash_ref_test ${CMAKE_CURRENT_SOURCE_DIR}/loader/dflash_ref_fixture.safetensors
+         ${CMAKE_CURRENT_SOURCE_DIR}/loader/muse_dflash_fixture.safetensors)
 set_tests_properties(dflash_ref_test PROPERTIES LABELS dflash)
 # Task 2: every binary the draft / projection lists bind (kernels::dflash::draft_variants) is built - by the Spec 19b
 # block (B70_DFLASH_KERNELS) or reused (B70_VERIFY_M8's drafter GEMVs and int8 heads) - and the block builds nothing
