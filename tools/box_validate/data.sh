@@ -155,6 +155,10 @@ case "${1:-}" in
       complete "${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
     have oracle_dflash_dumps "oracle-out-19a/dumps/*.taps.safetensors (spec 19a's tap dumps, 2.7 GB: --push-data from the Mac)" \
       bash -c 'ls oracle-out-19a/dumps/*.taps.safetensors'
+    # Queue row 56 (spec 19d): 19a's ranked draft vocabulary (tools/draft_vocab/rank.py over A4 + golden, in-sample;
+    # --push-data from the Mac) for r56.d5_dv's ranked 32k arm.
+    have oracle_dflash_rank "oracle-out-19a/draft_vocab.ranked.ids (spec 19a's ranking, in-sample: --push-data from the Mac)" \
+      test -s oracle-out-19a/draft_vocab.ranked.ids
     have oracle_image "the oracle container image (tools/oracle/run_in_container.sh; passkey ids)" \
       docker image inspect "${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
     # Queue row 41 (the llama-benchy comparison matrix): the vLLM XPU image tools/probe/vllm_benchy.sh serves.
