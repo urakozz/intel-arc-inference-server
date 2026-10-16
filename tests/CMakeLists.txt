@@ -3627,7 +3627,15 @@ endif()
 # b70-serve serves it - its refusals are 23e's cli_reject_serve_muse_*.)
 set(_muse_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer)
 b70_cli_reject(cli_reject_muse_mtp ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "no MTP head")
-b70_cli_reject(cli_reject_muse_spec ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash EXPECT "spec 23f")
+# spec 23f: --spec dflash runs (b70-decode --ids, greedy, one card); its refusals before the device
+b70_cli_reject(cli_reject_muse_spec ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash --pp 2
+  EXPECT "runs on one card (spec 23f")
+b70_cli_reject(cli_reject_muse_spec_bench ${_muse_cfg} --bench --spec dflash EXPECT "drop --bench or --spec")
+b70_cli_reject(cli_reject_muse_spec_lookup ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --spec lookup EXPECT "b70-serve's")
+b70_cli_reject(cli_reject_muse_spec_max ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash --spec-max 16
+  EXPECT "expects 1..15")
+b70_cli_reject(cli_reject_muse_draft_q ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --draft-q capped
+  EXPECT "need --spec dflash")
 b70_cli_reject(cli_reject_muse_kv8 ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "bf16 only")
 b70_cli_reject(cli_reject_muse_maxlen ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --max-len 262144 EXPECT "decision 6")
 b70_cli_reject(cli_reject_muse_pp_device ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --pp 2 --device 1
@@ -3843,8 +3851,14 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set(_muse_serve_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer)
   b70_serve_reject(cli_reject_serve_muse_mtp ${_muse_serve_cfg} --mtp 1 EXPECT "no MTP head")
   b70_serve_reject(cli_reject_serve_muse_spec_mtp ${_muse_serve_cfg} --spec mtp EXPECT "no MTP head")
-  b70_serve_reject(cli_reject_serve_muse_spec ${_muse_serve_cfg} --spec dflash EXPECT "spec 23f")
-  b70_serve_reject(cli_reject_serve_muse_lookup ${_muse_serve_cfg} --spec lookup EXPECT "spec 23f")
+  # spec 23f: --spec dflash / lookup serve Muse-Glimmer on one card; their refusals before the device
+  b70_serve_reject(cli_reject_serve_muse_spec ${_muse_serve_cfg} --spec dflash --pp 2 EXPECT "runs on one card (spec 23f")
+  b70_serve_reject(cli_reject_serve_muse_lookup ${_muse_serve_cfg} --spec lookup --pp 2
+    EXPECT "runs on one card (spec 23f")
+  b70_serve_reject(cli_reject_serve_muse_spec_max ${_muse_serve_cfg} --spec dflash --spec-max 16 EXPECT "expects 1..15")
+  b70_serve_reject(cli_reject_serve_muse_draft_vocab ${_muse_serve_cfg} --spec dflash --draft-vocab 32k
+    EXPECT "not built for Muse-Glimmer-30B's drafter")
+  b70_serve_reject(cli_reject_serve_muse_draft_q ${_muse_serve_cfg} --draft-q capped EXPECT "need --spec dflash")
   b70_serve_reject(cli_reject_serve_muse_kv8 ${_muse_serve_cfg} --kv-cache int8 EXPECT "decision 8")
   b70_serve_reject(cli_reject_serve_muse_int8pf ${_muse_serve_cfg} --prefill-backend l0-int8 EXPECT "6.5 x 1024")
   b70_serve_reject(cli_reject_serve_muse_sycl ${_muse_serve_cfg} --prefill-backend sycl-tla EXPECT "no Muse walk")
@@ -3855,6 +3869,8 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     EXPECT "Muse-Glimmer-30B only")
   b70_serve_reject(cli_reject_serve_spec_dflash_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --spec dflash
     EXPECT "built for Qwen3.8 beside its drafter")   # spec 19c: dflash is Qwen3.8's now
+  set_tests_properties(cli_reject_serve_muse_spec_max cli_reject_serve_muse_draft_vocab cli_reject_serve_muse_draft_q
+    PROPERTIES LABELS muse)
   set_tests_properties(cli_reject_serve_muse_mtp cli_reject_serve_muse_spec_mtp cli_reject_serve_muse_spec
     cli_reject_serve_muse_lookup cli_reject_serve_muse_kv8 cli_reject_serve_muse_int8pf cli_reject_serve_muse_sycl
     cli_reject_serve_muse_maxlen cli_reject_serve_muse_device cli_reject_serve_muse_template
@@ -3873,6 +3889,15 @@ add_test(NAME muse_assistant_test COMMAND muse_assistant_test
   ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer/assistant_config.json
   ${CMAKE_SOURCE_DIR}/tools/oracle/fixtures/rtn_int4_g64.json)
 set_tests_properties(muse_assistant_test PROPERTIES LABELS "muse;dflash")
+# Task 8 (D2 / D4, the loop's host half): cli::muse::MuseEngineAdapterT's speculative paths over a device-free engine
+# and drafter - greedy dflash / lookup equal plain steps (K fixed, K varying, runs cut by truncate_to); 10^6 seeded
+# sampled iterations distributed as the capped, filtered p for both q forms and lookup's point mass; the deferred
+# commit around snapshots. Host only.
+add_executable(muse_spec_test server/muse_spec_test.cc)
+target_include_directories(muse_spec_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(muse_spec_test PRIVATE b70_server b70_muse_plan)
+add_test(NAME muse_spec_test COMMAND muse_spec_test)
+set_tests_properties(muse_spec_test PROPERTIES LABELS "muse;dflash" TIMEOUT 900)
 # Task 7: every binary the Muse draft / projection lists bind (kernels::dflash::muse_draft_variants, bf16 / int8 / int4
 # g64 x head int8 / bf16) is built - by the kernels' Spec 23f B70_MUSE_DFLASH lines or reused from its verify lines (the
 # head at M = 15) - and those lines build nothing unbound; kMuse is the vendored assistant config. Host only.
@@ -4088,7 +4113,11 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_dflash_min_match ${B70_NO_MODEL} --spec dflash --spec-min-match 4
     EXPECT "need --spec lookup")
   b70_serve_reject(cli_reject_serve_dflash_format ${B70_NO_MODEL} --spec dflash --draft-format fp8
-    EXPECT "--draft-format expects int8 or bf16")
+    EXPECT "--draft-format expects int8, bf16 or int4")
+  # spec 23f: int4 and --draft-q are Muse-Glimmer's assistant's
+  b70_serve_reject(cli_reject_serve_dflash_int4 ${B70_NO_MODEL} --spec dflash --draft-format int4
+    EXPECT "Muse-Glimmer-30B's assistant's")
+  b70_serve_reject(cli_reject_serve_draft_q_other ${B70_NO_MODEL} --draft-q raw EXPECT "is Muse-Glimmer-30B's")
   b70_serve_reject(cli_reject_serve_dflash_kv8 ${B70_NO_MODEL} --spec dflash --kv-cache int8
     EXPECT "--kv-cache bf16 with --spec dflash")
   # spec 19d: --pp 2 serves the drafter on device 1, on the copy hand-off only

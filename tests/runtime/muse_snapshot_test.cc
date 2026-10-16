@@ -144,6 +144,14 @@ struct FakeMuse {
     cur = id;
   }
   void set_block_hook(BlockHook h) { hook = std::move(h); }
+  // Spec 23f: MuseEngine's speculative calls - no verify lists here (the adapter's spec paths stay off).
+  uint32_t spec_rows() const { return 1; }
+  uint32_t max_verify_k() const { return 0; }
+  void verify(const uint32_t*, uint32_t) { CHECK(false); }
+  const uint32_t* verify_ids() const { return nullptr; }
+  void read_verify_logits(float*, uint32_t) { CHECK(false); }
+  void commit(uint32_t, uint32_t) { CHECK(false); }
+  uint64_t drafter_key() const { return 0; }
   // The head's RAW row of the last position: the words scored from the last view (the argmax word highest), everything
   // else -1e30 - next() is this row's argmax, the device's.
   void read_logits_into(float* host) {
