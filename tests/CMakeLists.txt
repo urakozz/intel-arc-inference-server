@@ -3859,4 +3859,45 @@ target_include_directories(dflash_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMA
 target_link_libraries(dflash_ref_test PRIVATE b70_loader b70_dflash_model)
 add_test(NAME dflash_ref_test COMMAND dflash_ref_test ${CMAKE_CURRENT_SOURCE_DIR}/loader/dflash_ref_fixture.safetensors)
 set_tests_properties(dflash_ref_test PROPERTIES LABELS dflash)
+# Task 2: every binary the draft / projection lists bind (kernels::dflash::draft_variants) is built - by the Spec 19b
+# block (B70_DFLASH_KERNELS) or reused (B70_VERIFY_M8's drafter GEMVs and int8 heads) - and the block builds nothing
+# unbound. Host only (names, no device).
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  set(B70_DFLASH_KERNELS kernel_df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320
+    kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128 kernel_df_topk_R7_N248320_U248077
+    kernel_df_select_M8_K16_Q16_RK256_V248320 kernel_df_select_v1_M8_K16 kernel_gemv_bf16_M7_K5120_N248320)
+  foreach(NV 32768 65536 131072)
+    list(APPEND B70_DFLASH_KERNELS kernel_df_topk_R7_N${NV}_U${NV}_C kernel_gemv_bf16_M7_K5120_N${NV})
+  endforeach()
+  list(APPEND B70_DFLASH_KERNELS kernel_gemv_i8w_M7_K5120_N65536 kernel_gemv_i8w_M7_K5120_N131072)
+  set(_v19b_reused kernel_gemv_i8w_M7_K5120_N248320 kernel_gemv_i8w_M7_K5120_N32768)
+  foreach(KN K5120_N6144 K4096_N5120 K5120_N34816 K17408_N5120 K25600_N5120 K5120_N2048)
+    list(APPEND _v19b_reused kernel_gemv_i8w_M8_${KN} kernel_gemv_bf16_M8_${KN})
+  endforeach()
+  foreach(KN K5120_N1280 K5120_N256)
+    list(APPEND _v19b_reused kernel_gemv_i8w_M8_${KN} kernel_gemv_bf16_M8_${KN}_C16_S16)
+  endforeach()
+  foreach(t ${B70_DFLASH_KERNELS} ${_v19b_reused})
+    if(NOT TARGET ${t})
+      message(FATAL_ERROR "spec 19b: ${t} is not built (src/kernels/CMakeLists.txt)")
+    endif()
+  endforeach()
+  add_executable(dflash_variant_names_test kernels/dflash_variant_names_test.cc)
+  target_include_directories(dflash_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(dflash_variant_names_test PRIVATE b70_dflash_model)
+  b70_target_kernel_dir(dflash_variant_names_test)
+  add_test(NAME dflash_variant_names_test COMMAND dflash_variant_names_test
+    ${CMAKE_CURRENT_SOURCE_DIR}/model/dflash/qwen38_dflash2_config.json ${B70_DFLASH_KERNELS} -- ${_v19b_reused})
+  set_tests_properties(dflash_variant_names_test PROPERTIES LABELS dflash)
+  # Task 2 on the card: every df_* kernel at the drafter's real shapes against the host twin, random data (no
+  # checkpoint): bitwise where no transcendental is involved, within 1 bf16 ulp through exp, the window / wrap / K
+  # cases, top-16 with planted ties / NaN / the mask, both head forms of the walk.
+  add_executable(dflash_kernels_test kernels/dflash_kernels_test.cc)
+  target_include_directories(dflash_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(dflash_kernels_test PRIVATE b70_l0)
+  b70_target_kernel_dir(dflash_kernels_test)
+  add_dependencies(dflash_kernels_test ${B70_DFLASH_KERNELS})
+  add_test(NAME dflash_kernels_test COMMAND dflash_kernels_test)
+  set_tests_properties(dflash_kernels_test PROPERTIES LABELS dflash TIMEOUT 900)
+endif()
 # ==== Spec 19b ==== (end) ====
