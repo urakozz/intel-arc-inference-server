@@ -74,6 +74,10 @@ struct EngineIface {
   virtual size_t kv_bytes(uint32_t) { return unsupported<size_t>(); }
   // Spec 12b: the KV cache's form (0 = bf16, 1 = int8), which keys the prefix cache.
   virtual uint64_t kv_form() { return 0; }
+  // Spec 19d: the drafter whose ring save_state carries (runtime::TapDrafter::key), 0 without one - keys the
+  // prefix cache beside kv_form (server::store_root), so a snapshot is restored only beside the drafter it was
+  // written with.
+  virtual uint64_t drafter_key() { return 0; }
   virtual void save_state(void*) { unsupported<int>(); }
   virtual void load_state(const void*, uint32_t) { unsupported<int>(); }
   virtual void save_kv(uint32_t, uint32_t, void*) { unsupported<int>(); }

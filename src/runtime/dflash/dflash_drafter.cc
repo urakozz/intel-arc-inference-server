@@ -28,7 +28,26 @@ DFlashDrafter::DFlashDrafter(l0::Context& ctx, loader::DFlashWeights w, uint32_t
     : w_(std::move(w)),
       b_(ctx, w_.desc, w_.target_hidden, head_rows, max_len),
       max_k_(checked_max_k(w_.desc, max_k)),
-      project_(build_dflash_project(ctx, w_, b_)) {}
+      project_(build_dflash_project(ctx, w_, b_)) {
+  // Spec 19d: the store's name for this drafter - its shapes, format and the two norms' weights as loaded.
+  std::vector<uint8_t> norms(w_.hidden_norm->size() + w_.final_norm->size());
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  imm.copy(norms.data(), w_.hidden_norm->ptr(), w_.hidden_norm->size());
+  imm.copy(norms.data() + w_.hidden_norm->size(), w_.final_norm->ptr(), w_.final_norm->size());
+  key_ = drafter_key(w_.desc, w_.format, norms.data(), norms.size());
+}
+
+void DFlashDrafter::save_ring(l0::CmdList& imm, void* host) const {
+  auto* h = static_cast<uint8_t*>(host);
+  imm.copy(h, b_.ring_k.ptr(), b_.ring_k.size());
+  imm.copy(h + b_.ring_k.size(), b_.ring_v.ptr(), b_.ring_v.size());
+}
+
+void DFlashDrafter::load_ring(l0::CmdList& imm, const void* host) {
+  const auto* h = static_cast<const uint8_t*>(host);
+  imm.copy(b_.ring_k.ptr(), h, b_.ring_k.size());
+  imm.copy(b_.ring_v.ptr(), h + b_.ring_k.size(), b_.ring_v.size());
+}
 
 void DFlashDrafter::attach(Engine& e, bool draft_vocab) {
   require(engine_ == nullptr, "attach() twice");

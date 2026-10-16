@@ -20,7 +20,10 @@
 //     is the next block's row 0;
 //   - Engine::prefill writes the taps of the prompt positions inside window() of its end and projects them, at most
 //     kernels' 8 rows a replay, through the same projection(pos, n) with taps() refilled per group;
-//   - Engine::reset() calls reset(): the drafter's ring holds no position afterwards (a cold drafter).
+//   - Engine::reset() calls reset(): the drafter's ring holds no position afterwards (a cold drafter);
+//   - spec 19d (decision 5, as ruled there): Engine::save_state / load_state carry the ring - save_ring / load_ring,
+//     ring_bytes() of it after the target's state - so a prefix-cache restore resumes the drafter exactly where the
+//     snapshot left it; and key() names the drafter in the prefix store's keys (server::store_root).
 // Everything runs on the Engine's queue (Engine::replay_aux), synchronously, between the Engine's own replays.
 namespace runtime {
 
@@ -44,6 +47,16 @@ class TapDrafter {
   virtual void reset(l0::CmdList& imm) = 0;
   // Device bytes the drafter holds - its weights and its buffers (Engine::memory_use's `drafter`).
   virtual size_t bytes() const = 0;
+
+  // Spec 19d (spec 19 decision 5): the drafter's share of a session snapshot - its whole ring (every slot of every
+  // layer's K and V, as the device holds it), so the ring after load_ring is bitwise the ring at save_ring. Both copy
+  // on `imm` (a synchronous immediate list) with nothing in flight; host memory of ring_bytes().
+  virtual size_t ring_bytes() const = 0;
+  virtual void save_ring(l0::CmdList& imm, void* host) const = 0;
+  virtual void load_ring(l0::CmdList& imm, const void* host) = 0;
+  // A 64-bit name for what the ring's bytes mean - the drafter's shapes, format and norm weights - which the prefix
+  // store folds into every key, so a snapshot written beside one drafter is never restored beside another. Never 0.
+  virtual uint64_t key() const = 0;
 
   // The proposer's side, for the serving loop (cli EngineAdapter, b70-decode): one block of k drafts at the
   // engine's pos into Control.cur_token[1..k] - greedy at temperature 0, sampled at `temperature` with `seed` -

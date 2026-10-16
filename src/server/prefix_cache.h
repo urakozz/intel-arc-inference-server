@@ -164,4 +164,9 @@ class PrefixSession {
 
 const char* plan_kind_name(PrefixCache::Plan::Kind k);
 
+// Spec 19d: the root of every hash chain (PrefixCache's `kv_form` argument) for an engine's KV form and drafter
+// (EngineIface::kv_form / drafter_key): `kv_form` itself without a drafter - every key what it was before spec 19d -
+// and with one a mix of both, so neither a KV form nor a drafter ever restores another's bytes.
+uint64_t store_root(uint64_t kv_form, uint64_t drafter_key);
+
 }  // namespace server

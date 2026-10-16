@@ -7,7 +7,10 @@
 // n .. n + 7.
 //
 //   L    the lists: verify at M = 1..8 = decode_launches (774 on Qwen3.8; the taps are copies), the draft list 87,
-//        the projection 8; the snapshot sizes are the plain engine's (no head: the ring is not snapshotted).
+//        the projection 8; the snapshot is the plain engine's state plus the drafter's whole ring (spec 19d,
+//        decision 5: 41,943,040 B).
+//   SR   (spec 19d) save_state / load_state carry the ring: after a reset() (a zero ring) the restore brings the
+//        ring back bitwise, every slot of every layer's K and V.
 //   T1   (Task 1, Review Focus 1-2) for k = 1..7: restore S0, the true greedy drafts g[1..k], verify(k): every row's
 //        TAPS against the reference step's tap row (cosine >= 0.99999; bitwise expected - the M-row kernels sum each
 //        row as M = 1 does - and recorded); commit(k): the ring rows of positions n .. n + k against the reference
@@ -132,28 +135,21 @@ double worst_row_cos(const std::vector<uint16_t>& a, const std::vector<uint16_t>
   return w;
 }
 
-// A session snapshot: state + KV [0, pos) + the pending id + the drafter's whole ring (the engine's snapshot does
-// not carry it - spec 19 decision 5 is 19d's).
+// A session snapshot: state (since spec 19d with the drafter's whole ring) + KV [0, pos) + the pending id.
 struct Snap {
-  l0::Mem st, kv, rk, rv;
+  l0::Mem st, kv;
   uint32_t pos, pending;
   explicit Snap(Ctx& c)
       : st(c.ctx, l0::MemKind::Host, c.e.state_bytes()),
         kv(c.ctx, l0::MemKind::Host, c.e.kv_bytes(c.e.pos())),
-        rk(c.ctx, l0::MemKind::Host, c.d.buffers().ring_k.size()),
-        rv(c.ctx, l0::MemKind::Host, c.d.buffers().ring_v.size()),
         pos(c.e.pos()),
         pending(c.ctl->cur_token[0]) {
     c.e.save_state(st.ptr());
     c.e.save_kv(0, pos, kv.ptr());
-    c.imm.copy(rk.ptr(), c.d.buffers().ring_k.ptr(), rk.size());
-    c.imm.copy(rv.ptr(), c.d.buffers().ring_v.ptr(), rv.size());
   }
   void restore(Ctx& c) const {
     c.e.load_state(st.ptr(), pos);
     c.e.load_kv(0, pos, kv.ptr());
-    c.imm.copy(c.d.buffers().ring_k.ptr(), rk.ptr(), rk.size());
-    c.imm.copy(c.d.buffers().ring_v.ptr(), rv.ptr(), rv.size());
     c.ctl->cur_token[0] = pending;
     c.ctl->n_active = 1;
   }
@@ -329,7 +325,8 @@ int main(int argc, char** argv) {
     for (uint32_t M = 1; M <= kK + 1; ++M) l_ok &= e.verify_step(M).kernel_count == runtime::decode_launches(md);
     l_ok &= d.draft_step()->kernel_count == runtime::dflash::draft_launches(d.desc());
     l_ok &= d.project_step().kernel_count == runtime::dflash::project_launches(d.desc());
-    l_ok &= e.state_bytes() == kGdnBytes + size_t(md.gdn_layers) * 16 * 10240 * 2;
+    l_ok &= e.state_bytes() == kGdnBytes + size_t(md.gdn_layers) * 16 * 10240 * 2 + 41943040;   // + the ring (19d)
+    l_ok &= d.ring_bytes() == 41943040 && d.key() != 0;
     std::printf("L: verify M = 1..8 %zu launches each, draft %zu, projection %zu, state %zu B: %s\n",
                 e.verify_step(1).kernel_count, d.draft_step()->kernel_count, d.project_step().kernel_count,
                 e.state_bytes(), l_ok ? "ok" : "WRONG");
@@ -343,6 +340,15 @@ int main(int argc, char** argv) {
     e.prefill(head(ids, n));
     std::printf("n = %u (n %% 16 = %u)\n", n, n % 16);
     const Snap s0(c);
+    {   // SR (spec 19d): the snapshot carries the ring - a reset zeroes it, the restore brings it back bitwise
+      const std::vector<uint16_t> before = ring_rows(c, 0, d.window());
+      e.reset();
+      s0.restore(c);
+      const bool sr = ring_rows(c, 0, d.window()) == before;
+      std::printf("SR at n = %u: the ring after reset() + restore %s\n", n, sr ? "equals the saved one (bitwise)"
+                                                                               : "DIFFERS");
+      ok &= sr;
+    }
     const Ref ref = reference(c, s0, 200);
     const bool a = t1_d3(c, s0, ref);
     const bool p7 = partial(c, s0, ref, 7), p4 = partial(c, s0, ref, 4);

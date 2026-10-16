@@ -71,6 +71,40 @@ DrafterPlan drafter_plan(const model::DFlashDesc& d, uint32_t target_hidden, uin
   return p;
 }
 
+size_t ring_snapshot_bytes(const model::DFlashDesc& d, uint32_t max_len) {
+  size_t k = 0;
+  for (uint32_t l = 0; l < d.layers; ++l) k += size_t(ring_slots(d, l, max_len)) * d.kv_n() * 2;
+  return 2 * k;   // ring_k, then ring_v: sizes()' two terms
+}
+
+namespace {
+struct Fnv {
+  uint64_t h = 0xCBF29CE484222325ull;
+  void bytes(const void* p, size_t n) {
+    const auto* b = static_cast<const uint8_t*>(p);
+    for (size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 0x100000001B3ull;
+  }
+  void u32(uint32_t v) { bytes(&v, sizeof v); }
+  void f64(double v) { bytes(&v, sizeof v); }
+};
+}  // namespace
+
+uint64_t drafter_key(const model::DFlashDesc& d, loader::DraftFormat f, const void* norms, size_t norm_bytes) {
+  Fnv h;
+  h.bytes(d.architecture.data(), d.architecture.size());
+  for (uint32_t v : {d.version, d.layers, d.hidden, d.q_heads, d.kv_heads, d.head_dim, d.inter, d.vocab, d.block,
+                     d.mask_id, d.conv_group, d.conv_taps, d.sel_rank, d.sel_top_k})
+    h.u32(v);
+  h.u32(uint32_t(d.taps.size()));
+  for (uint32_t t : d.taps) h.u32(t);
+  for (uint32_t w : d.window) h.u32(w);
+  h.f64(d.theta);
+  h.f64(d.eps);
+  h.u32(f == loader::DraftFormat::Int8 ? 8u : 16u);
+  if (norm_bytes != 0) h.bytes(norms, norm_bytes);
+  return h.h != 0 ? h.h : 1;
+}
+
 size_t draft_launches(const model::DFlashDesc& d) {
   return 1 + size_t(d.layers) * (d.v2() ? 16 : 12) + (d.v2() ? 6 : 5);
 }

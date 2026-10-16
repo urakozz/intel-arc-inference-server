@@ -4018,3 +4018,29 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     cli_reject_serve_dflash_pp cli_reject_serve_dflash_sycl cli_reject_serve_dflash_k2 PROPERTIES LABELS dflash)
 endif()
 # ==== Spec 19c ==== (end) ====
+# ==== Spec 19d: DFlash in the server ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-05-spec19d-dflash-serving.md. Host: the drafter's ring across a prefix-cache
+# restore through PrefixSession (decision 5), the store keyed by the drafter. Box: the same on the card.
+add_executable(dflash_prefix_test server/dflash_prefix_test.cc)
+target_include_directories(dflash_prefix_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dflash_prefix_test PRIVATE b70_server)
+add_test(NAME dflash_prefix_test COMMAND dflash_prefix_test)
+set_tests_properties(dflash_prefix_test PROPERTIES LABELS dflash)
+# The same on the card, through PrefixSession over EngineAdapter (--spec dflash): the ring after a restore bitwise the
+# uninterrupted session's (and a cold run's after a block-end restore with a long tail), the continuation's ids and
+# per-iteration acceptance identical; a cold-ring control printed. SKIP 77 without either checkpoint.
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP AND B70_TOKENIZER_ENABLED)
+  add_executable(dflash_prefix_gpu_test server/dflash_prefix_gpu_test.cc)
+  target_include_directories(dflash_prefix_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(dflash_prefix_gpu_test PRIVATE b70_server b70_tokenizer b70_dflash_runtime b70_prefill_host
+    b70_runtime b70_loader b70_model b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(dflash_prefix_gpu_test)
+  endif()
+  add_dependencies(dflash_prefix_gpu_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
+  add_test(NAME dflash_prefix_gpu_test COMMAND dflash_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
+  set_tests_properties(dflash_prefix_gpu_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+endif()
+# ==== Spec 19d ==== (end) ====

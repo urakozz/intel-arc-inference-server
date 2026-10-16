@@ -65,11 +65,19 @@ class DFlashDrafter final : public TapDrafter {
   l0::CmdList& projection(uint32_t pos, uint32_t n) override;
   void reset(l0::CmdList& imm) override { b_.zero(imm); }
   size_t bytes() const override { return w_.bytes + b_.bytes(); }
+  // Spec 19d: the ring in a snapshot - ring_k's bytes then ring_v's, as the device holds them (every layer, every
+  // slot): 41,943,040 B for Qwen3.8's drafter. The key: FNV-1a over the descriptor's shapes, the format and the
+  // hidden / final norm weights' bytes (read once at construction).
+  size_t ring_bytes() const override { return b_.ring_k.size() + b_.ring_v.size(); }
+  void save_ring(l0::CmdList& imm, void* host) const override;
+  void load_ring(l0::CmdList& imm, const void* host) override;
+  uint64_t key() const override { return key_; }
 
  private:
   loader::DFlashWeights w_;
   DFlashBuffers b_;
   uint32_t max_k_;
+  uint64_t key_ = 0;
   CapturedStep project_;
   std::unique_ptr<CapturedStep> draft_;
   Engine* engine_ = nullptr;

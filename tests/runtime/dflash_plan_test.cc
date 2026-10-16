@@ -138,6 +138,27 @@ int main(int argc, char** argv) {
     rd::set_draft_params(c, v1, 3, 0.0f, 1);   // greedy v1 is fine
     CHECK(c.k == 3 && c.temperature == 0.0f);
   }
+  // 6. spec 19d (decision 5): a snapshot carries the whole ring - sizes()' ring_k + ring_v at any max_len (every
+  //    layer slides) - and the store's key names the drafter: its shapes, its format and its norm weights.
+  for (uint32_t L : {4096u, 16384u, 131072u})
+    CHECK_EQ(rd::ring_snapshot_bytes(d, L), rd::sizes(d, 5120, V, L).ring_k + rd::sizes(d, 5120, V, L).ring_v);
+  CHECK_EQ(rd::ring_snapshot_bytes(d, 16384), size_t(41943040));
+  {
+    std::vector<float> norms(2 * 5120, 1.0f);
+    const uint64_t k8 = rd::drafter_key(d, loader::DraftFormat::Int8, norms.data(), norms.size() * 4);
+    const uint64_t k16 = rd::drafter_key(d, loader::DraftFormat::Bf16, norms.data(), norms.size() * 4);
+    norms[17] = 1.0078125f;   // one norm weight another checkpoint has
+    const uint64_t k8b = rd::drafter_key(d, loader::DraftFormat::Int8, norms.data(), norms.size() * 4);
+    model::DFlashDesc other = d;
+    other.taps.back() = 60;
+    const uint64_t kt = rd::drafter_key(other, loader::DraftFormat::Int8, norms.data(), norms.size() * 4);
+    CHECK(k8 != 0 && k16 != 0 && k8b != 0 && kt != 0);
+    CHECK(k8 != k16 && k8 != k8b && k8b != kt);
+    CHECK_EQ(k8, rd::drafter_key(d, loader::DraftFormat::Int8, std::vector<float>(2 * 5120, 1.0f).data(),
+                                 2 * 5120 * 4));
+    std::printf("snapshot ring %zu B; the drafter's key moves with its format, a norm weight and a tap\n",
+                rd::ring_snapshot_bytes(d, 16384));
+  }
   std::printf("dflash_plan_test: PASS\n");
   return 0;
 }

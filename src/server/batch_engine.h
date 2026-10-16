@@ -59,6 +59,8 @@ struct BatchEngineIface {
   // Spec 12b: the KV cache's form (0 = bf16, 1 = int8), which keys the prefix cache so a
   // bf16 entry is never restored into an int8 engine (EngineIface::kv_form's twin).
   virtual uint64_t kv_form() { return 0; }
+  // Spec 19d: EngineIface::drafter_key's twin (every slot's ring is the same drafter's).
+  virtual uint64_t drafter_key() { return 0; }
   virtual void save_state(uint32_t /*slot*/, void*) { unsupported<int>(); }
   virtual void load_state(uint32_t /*slot*/, const void*, uint32_t /*pos*/) { unsupported<int>(); }
   virtual void save_kv(uint32_t /*slot*/, uint32_t, uint32_t, void*) { unsupported<int>(); }
