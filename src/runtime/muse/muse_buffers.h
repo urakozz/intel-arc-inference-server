@@ -18,9 +18,10 @@ class CmdList;
 namespace runtime::muse {
 
 struct MuseBuffers {
-  // `attn`: the decode attention the capture will bind.
+  // `attn`: the decode attention the capture will bind. Spec 23f: `rows` - the scratch's rows (1, or a run with
+  // verify lists: K_max + 1 <= 16, one set every list shares - a list at M <= rows indexes it at its own M).
   MuseBuffers(l0::Context& ctx, const model::MuseGlimmerDesc& d, const model::MusePlacement& p, uint32_t device,
-              uint32_t max_len, MuseAttn attn);
+              uint32_t max_len, MuseAttn attn, uint32_t rows = 1);
 
   // --- persistent: zeroed by zero() (MuseEngine::reset) ----------------------------------------------------
   l0::Mem control;                           // runtime::Control, shared memory
@@ -35,6 +36,7 @@ struct MuseBuffers {
   model::MusePlacement placement;
   uint32_t device, max_len;
   MuseAttn attn;
+  uint32_t rows;   // spec 23f: the scratch's rows
 
   // Layer `layer`'s K / V rows on this device (it must live here): a full layer's [max_len][kv_heads][128] or a
   // sliding layer's ring [4096][kv_heads][128].

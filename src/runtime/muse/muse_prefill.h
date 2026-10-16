@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "l0/context.h"
 #include "l0/memory.h"
@@ -46,6 +47,15 @@ struct MusePrefillScratch {
   size_t bytes() const;
 };
 
+// Spec 23f: a drafter's prefill taps - after each tap layer l (`layers`: target_layer_ids), the chunk's rows r0 .. C - 1
+// of the residual (layer l's output) into `dst` [row - r0][tap][hidden] bf16, one 2D copy per tap (the prompt's last
+// window, which the drafter's ring reads back; the engine projects the staged rows after the chunk).
+struct MusePrefillTaps {
+  void* dst = nullptr;
+  const std::vector<uint32_t>* layers = nullptr;
+  uint32_t r0 = 0;
+};
+
 // ONE chunk at absolute position `pos`, C rows, through device `part.device`'s layers. The caller has uploaded the ids
 // into device 0's s.ids, set every device's Control::{pos = pos, n_active = C} (mg_attn_prep reads both), and - device
 // 1 of two - landed device 0's residual rows and sums in s.resid / s.sumsq_r first. Appends exactly
@@ -54,7 +64,7 @@ struct MusePrefillScratch {
 // rows and their sums after its last layer. `eager`: B70_MUSE_ATTN=eager's attention build.
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, MusePrefillScratch& s,
                    const loader::MuseDevicePart& part, const model::MuseGlimmerDesc& d, MuseBuffers& b, uint32_t pos,
-                   uint32_t C, bool eager);
+                   uint32_t C, bool eager, const MusePrefillTaps* taps = nullptr);
 
 // The tail only the LAST chunk runs, on the last device: mg_final_norm over row `last_row` (the M kPfC norm binary at
 // grid (26, 1) on that row's offsets: decode's chain) into the decode buffers' x, the lm_head, the two argmax stages -

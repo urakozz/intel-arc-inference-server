@@ -15,6 +15,7 @@
 #include "runtime/muse/muse_buffers.h"
 #include "runtime/muse/muse_sizes.h"
 #include "runtime/pipeline_engine.h"   // PipelineLink (spec 16b's, unchanged)
+#include "runtime/tap_drafter.h"      // spec 23f: TapSink (an interface: no link dependency)
 
 // Spec 23c: Muse-Glimmer-30B's decode loop - runtime::Engine's contract (KolibriEngine's arrangement) on one card
 // (the default, spec 23 decision 7) or, spec 16b's pieces, two: it plans (runtime::muse::plan_muse, the decode
@@ -49,6 +50,10 @@ struct MuseOptions {
   bool prefill = false;                  // spec 23d: plan the prefill scratch (and its link) into max_len and the fit
   uint32_t prefill_timeout_ms = 30000;   // spec 23d: a prefill chunk's / the head's wait (bounded; under eager per
                                          // 2048 keys of the chunk's deepest row - runtime::muse::prefill_wait_ms)
+  // Spec 23f: speculative decoding - `spec.rows` the verify lists' rows (K_max + 1, 2..16; 1 = none) and, with
+  // --spec dflash, the drafter's planner term (the plan reserves its weights + buffers and its prefill tap staging).
+  // One card only.
+  MuseSpec spec;
 };
 
 class MuseEngine {
@@ -140,6 +145,44 @@ class MuseEngine {
   using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
   void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
 
+  // --- spec 23f: speculative decoding (one card; MuseOptions::spec.rows > 1) ------------------------------------
+  // The verify lists are 23c's decode walk at M = k + 1 rows (runtime/muse/muse_capture.h build_verify), captured on
+  // first use per M, every one over the same scratch (MuseBuffers at spec.rows). At pos = n with x_n pending:
+  //   verify(drafts, k)  rows [x_n, d_1 .. d_k] at n .. n + k (the ids written into the verify's ids buffer, n_active
+  //                      k + 1); row r's argmax in verify_ids()[r], its raw fp32 logits row in the scratch's
+  //                      logits [k + 1][vocab] (read_verify_logits); every row's KV / ring rows written; with a drafter,
+  //                      every row's taps into its taps(). pos is NOT advanced.
+  //   commit(j, t)       j accepted drafts (0 <= j <= k): pos = n + j + 1, pending t, n_active 1 - and with a drafter
+  //                      its projection of rows 0..j (the committed positions n .. n + j) into its ring, replayed on
+  //                      this engine's queue now (Review Focus 3: a rejected row's taps never reach the ring). Rows past
+  //                      j left their KV / ring rows behind: the full layers' are rewritten before any query reads
+  //                      them, the rings' overwrote positions 4096 back, outside every window.
+  // verify(nullptr, 0) + commit(0, verify_ids()[0]) is one plain token; with a drafter attached ingest() and
+  // generate() run exactly that (the ring stays filled), and prefill() taps the prompt's last window() positions and
+  // projects them (the prefill tail). Positions: verify(k) needs pos + k + 1 <= max_len (max_verify_k()).
+  //
+  // attach_drafter: the drafter (runtime::dflash::MuseDrafter behind TapSink), borrowed - it must outlive the engine;
+  // before the first verify; its max_k() + 1 <= spec.rows. reset() resets it; state_bytes / save_state / load_state
+  // carry its ring after the target's state (spec 19d decision 5, as 19c's Engine); drafter_key() names it.
+  void attach_drafter(TapSink& d);
+  bool has_drafter() const { return drafter_ != nullptr; }
+  TapSink* drafter() const { return drafter_; }
+  uint32_t spec_rows() const { return opt_.spec.rows; }
+  uint32_t max_verify_k() const;
+  void verify(const uint32_t* drafts, uint32_t k);
+  const uint32_t* verify_ids() const;
+  void read_verify_logits(float* host, uint32_t rows);   // rows <= the last verify's k + 1
+  void commit(uint32_t j, uint32_t next_token);
+  uint64_t drafter_key() const { return drafter_ ? drafter_->key() : 0; }
+  // Runs a list that is not the engine's own (the drafter's draft / projection lists) on device 0's queue and waits.
+  void replay_aux(l0::CmdList& list);
+  // What the drafter's draft list binds: device 0's context and Control block, the target's embedding and lm_head.
+  l0::Context& context(uint32_t dev = 0) const { return stage_ctx(dev); }
+  const l0::Mem& control_mem() const;
+  const l0::Mem& embed() const;
+  const loader::DeviceWeight& lm_head() const;
+  size_t verify_launches(uint32_t M) const;   // a captured verify list's (0 before its first use)
+
   // --- spec 23e: spec 7's prefix-cache snapshots ---------------------------------------------------------------
   // Muse's "state" is the sliding rings' last state_positions (2047) positions - what the next query's window reads -
   // and its blocks are the full layers' KV: runtime/muse/muse_sizes.h's state_runs / kv_runs give both host layouts,
@@ -166,6 +209,10 @@ class MuseEngine {
   l0::CmdList& stage_imm(uint32_t dev) const;
   Stage& st(uint32_t dev) const;
   void step_once();
+  // Spec 23f: one verify replay at M rows (captured on first use), and the prefill tail's projection of the staged
+  // rows (b70_muse_prefill).
+  void run_verify(uint32_t M);
+  void drafter_project_staged(const uint8_t* staged, uint32_t pos, uint32_t n);
   bool settle(uint32_t dev);
   void settle_all(const char* what);                       // spec 23e: every device's last step, bounded
   l0::Mem& snap_mem(uint32_t dev, SnapTensor t) const;     // spec 23e: a snapshot run's allocation
@@ -181,6 +228,13 @@ class MuseEngine {
   std::vector<std::unique_ptr<l0::Mem>> taps_;
   bool broken_ = false, drop_next_ = false;
   std::vector<bool> pending_;
+  // Spec 23f: the borrowed drafter, the verify's ids / output buffers (shared memory, 16 u32 each), the verify lists
+  // [M - 1] (captured on first use) and the last verify (k, pos) a commit must match.
+  TapSink* drafter_ = nullptr;
+  std::unique_ptr<l0::Mem> vin_, vout_;
+  std::vector<std::optional<CapturedStep>> verify_steps_;
+  static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
+  uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
   BlockHook block_hook_;   // spec 23d: empty = no hook (uniform chunks)
   // Spec 23d: set by prepare_prefill (b70_muse_prefill) - releases a prefill list waiting on a hand-off that will not
