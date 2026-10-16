@@ -1131,6 +1131,10 @@ int run(int argc, char** argv) {
 
   const runtime::PrefillPath pp_path = cli::prefill_path(
       true, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
+  {   // spec 19c: the drafter's prefill refusals, before the device (cli/dflash_args.h)
+    const char* replay_env = std::getenv("B70_PREFILL_REPLAY");
+    cli::dflash::check_engine(dflash, pipe.on(), kv_cache, pp_path, replay_env != nullptr && std::string(replay_env) == "1");
+  }
 
   // Spec 16d: --pp's refusals that need no checkpoint (cli/pipeline_serve.h) - the sub-flags
   // without --pp 2, --device, a sycl-tla prefill, the composed attention, prefill replay and
