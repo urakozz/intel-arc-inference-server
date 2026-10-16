@@ -66,8 +66,8 @@ bool is_dflash_architecture(const std::string& architecture);
 // The drafter held to its target (spec 19 §2, plan 19b Task 1): it shares the target's embedding and lm_head, so
 // its hidden size must be the target's and its vocab_size the target's head rows (`target_vocab_rows`); every tap
 // layer must exist (target_layer_ids[i] < target.layers - the residual after the last layer is the pre-final-norm
-// hidden, a legal tap); a declared num_target_layers must equal target.layers; the mask id must be a token the
-// target's tokenizer defines (< target.vocab_used). Throws naming the key.
+// hidden, a legal tap); a declared num_target_layers must equal target.layers; the mask id must be a row of the shared
+// embedding (< target_vocab_rows; Ornith's drafter masks with a padded row). Throws naming the key.
 void check_dflash_target(const DFlashDesc& d, const ModelDesc& target, uint32_t target_vocab_rows);
 
 }  // namespace model
