@@ -19,9 +19,14 @@
 //                      131072, a multiple of 256)
 // Refused before the device, each by name: --prefill-backend l0-int8 (spec 23 §10: the h8 linears rotate in whole
 // 1024-wide Hadamard blocks and 6656 = 6.5 x 1024) and sycl-tla (no Muse walk), --prefill-chunk above 2048 (the
-// 4096-slot ring holds a chunk of 2048 and the 2047 keys before it), --mtp (Muse has no MTP head), --spec (Muse's drafter is spec 23f's DFlash),
+// 4096-slot ring holds a chunk of 2048 and the 2047 keys before it), --mtp (Muse has no MTP head),
 // --kv-cache int8 (decision 8: bf16 KV), --max-len above 131072 (decision 6), --profile (not built for Muse),
 // --device N with --pp 2 (16b's rule: GPUs 0 and 1), --layers auto, --ple-dir.
+//
+// Spec 23f: `--spec dflash` (--ids: greedy, through cli::muse::MuseEngineAdapterT's speculative loop at --spec-max K
+// every iteration - D2: the ids equal --spec off's) with --draft-model / --draft-format / --draft-q (cli/muse_spec.h has
+// the flags and their refusals); --spec lookup is b70-serve's (the server's prompt lookup proposes), --bench with --spec
+// is refused (b70-serve's llama-benchy times the loop, D5).
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -34,6 +39,7 @@
 #include <vector>
 
 #include "cli/max_len.h"
+#include "cli/muse_spec.h"   // spec 23f
 #include "cli/pipeline_args.h"
 #include "l0/context.h"
 #include "loader/muse_loader.h"
@@ -80,6 +86,7 @@ struct DecodeArgs {
   bool prefills() const { return prefill || pp; }
   // What else was asked for, for the refusals.
   bool mtp = false, spec = false, kv8 = false, profile = false, layers_auto = false, ple_dir = false;
+  SpecArgs spec_args;   // spec 23f: --spec dflash / lookup and the drafter's flags (`spec` above: --spec mtp)
 };
 
 // Every refusal that needs no device - in this order, each by name (tests/CMakeLists.txt's cli_reject_muse_*). `d` is
@@ -100,8 +107,9 @@ inline void check_args(const DecodeArgs& a, const model::MuseGlimmerDesc& d) {
     throw std::runtime_error("Muse-Glimmer-30B has no MTP head (spec 23 §1); its drafter is the DFlash assistant, "
                              "spec 23f - drop --mtp");
   if (a.spec)
-    throw std::runtime_error("--spec: Muse-Glimmer-30B's speculative decoding is the DFlash drafter of spec 23f "
-                             "(--spec dflash, b70-serve) - not built yet; drop --spec");
+    throw std::runtime_error("--spec mtp: Muse-Glimmer-30B has no MTP head (spec 23 §1); its proposers are --spec "
+                             "dflash (the assistant, spec 23f) and --spec lookup");
+  check_spec(a.spec_args, a.pipe.devices, a.prefills());   // spec 23f
   if (a.kv8)
     throw std::runtime_error("--kv-cache int8: Muse-Glimmer-30B's KV is bf16 only (spec 23 decision 8: 13,312 B a "
                              "position on its 13 full layers; int8 KV is recorded for later, §10)");
@@ -157,6 +165,12 @@ int run_decode(const DecodeArgs& a) {
   const model::MuseGlimmerDesc pre = loader::muse_checkpoint_desc(a.path, a.layers);
   check_args(a, pre);
   const uint32_t devs = a.pipe.devices;
+  if (a.spec_args.on() && a.bench)
+    throw std::runtime_error("--bench times plain decode; --spec on Muse-Glimmer-30B is timed through b70-serve "
+                             "(llama-benchy, spec 23f D5) - drop --bench or --spec");
+  if (a.spec_args.lookup())
+    throw std::runtime_error("--spec lookup is b70-serve's (the server's prompt lookup proposes the drafts); b70-decode "
+                             "runs --spec dflash");
   std::vector<uint32_t> ids;
   if (!a.bench) {
     ids = read_ids(a.ids_path, pre.vocab);
@@ -192,11 +206,18 @@ int run_decode(const DecodeArgs& a) {
   o.split = devs == 2 && !a.pipe.split_auto ? a.pipe.split : 0;
   o.layers = a.layers;
   o.prefill = a.prefills();   // spec 23d: plan the prefill scratch (and its link) into max_len and the fit
+  o.spec = engine_spec(a.spec_args, pre);   // spec 23f: the verify lists' rows and the drafter's term
   std::unique_ptr<runtime::muse::MuseEngine> eng;
+  std::unique_ptr<runtime::dflash::MuseDrafter> drafter;
   {
     Redirect redirect;
     eng = std::make_unique<runtime::muse::MuseEngine>(ctx, a.path, o);
+    if (a.spec_args.dflash()) drafter = attach_drafter(*eng, a.spec_args);
   }
+  if (drafter)
+    std::fprintf(stderr, "drafter: %s, --draft-q %s, --spec-max %u, %zu B (%s)\n", a.spec_args.draft_model.c_str(),
+                 runtime::dflash::muse_q_name(a.spec_args.q), a.spec_args.max_k, drafter->bytes(),
+                 drafter->weights().line.c_str());
   if (need > eng->max_len())
     throw std::runtime_error("the prompt / --depth plus " + std::to_string(after) + " generated ids exceeds max_len " +
                              std::to_string(eng->max_len()));
@@ -233,6 +254,36 @@ int run_decode(const DecodeArgs& a) {
                  devs == 2 ? "; the chunk crosses by copy, sequentially" : "");
   }
   std::fprintf(stderr, "%s\n", eng->memory_line().c_str());
+  if (drafter) {   // spec 23f: greedy through the adapter's speculative loop (D2), K = --spec-max every iteration
+    MuseEngineAdapterT<runtime::muse::MuseEngine> ad(*eng, pre.vocab, pre.out_mult, pre.softcap, a.spec_args.max_k,
+                                                     false, draft_hooks(*eng, *drafter));
+    const auto s0 = std::chrono::steady_clock::now();
+    if (a.prefills()) ad.prefill(ids);
+    else ad.ingest(ids);
+    const double in_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - s0).count();
+    std::fprintf(stderr, "%s: %zu ids in %.1f ms (the drafter's ring filled: the prompt's last %u positions), pos %u\n",
+                 a.prefills() ? "prefill" : "ingest", ids.size(), in_ms, drafter->window(), eng->pos());
+    server::Sampling greedy;
+    greedy.greedy = true;
+    uint32_t printed = 0;
+    const auto g0 = std::chrono::steady_clock::now();
+    while (printed < a.n) {
+      const std::vector<uint32_t> run = ad.step_many(greedy, a.spec_args.max_k);
+      for (uint32_t id : run) {
+        if (printed == a.n) break;
+        std::printf("%u\n", id);
+        ++printed;
+      }
+      std::fflush(stdout);
+    }
+    const double g_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g0).count();
+    std::fprintf(stderr, "generate (--spec dflash): %u ids in %.1f ms (%.2f t/s); %llu iterations, %llu / %llu drafts "
+                 "accepted (%.3f)\n", printed, g_ms, g_ms > 0 ? 1000.0 * printed / g_ms : 0.0,
+                 (unsigned long long)ad.spec_iterations(), (unsigned long long)ad.spec_accepted(),
+                 (unsigned long long)ad.spec_drafted(),
+                 ad.spec_drafted() ? double(ad.spec_accepted()) / double(ad.spec_drafted()) : 0.0);
+    return 0;
+  }
   const auto t0 = std::chrono::steady_clock::now();
   if (a.prefills())
     eng->prefill(ids, chunk);

@@ -806,6 +806,8 @@ int run(int argc, char** argv) {
   std::string spec_arg;        // spec 19c: `dflash` runs the DFlash drafter (--ids); anything else is unknown
   cli::dflash::Args dflash;
   bool have_spec_max = false;
+  runtime::dflash::MuseQ draft_q = runtime::dflash::MuseQ::Raw;   // spec 23f: --draft-q (Muse-Glimmer only)
+  bool have_draft_q = false;
   runtime::KvCache kv_cache = runtime::default_kv_cache();   // spec 12b: --kv-cache
   // Spec 8: --mtp K|auto in --ids mode (greedy); absent = no head, every path as before.
   uint32_t mtp_k = 0;
@@ -912,11 +914,16 @@ int run(int argc, char** argv) {
     } else if (a == "--draft-model") {   // spec 19c
       dflash.model = value(i, "--draft-model");
       dflash.have_model = true;
-    } else if (a == "--draft-format") {   // spec 19c
+    } else if (a == "--draft-format") {   // spec 19c; spec 23f: int4 (Muse-Glimmer's assistant only)
       const std::string v = value(i, "--draft-format");
       if (!loader::parse_draft_format(v, dflash.format))
-        throw std::runtime_error("--draft-format expects int8 or bf16, got '" + v + "'");
+        throw std::runtime_error("--draft-format expects int8, bf16 or int4, got '" + v + "'");
       dflash.have_format = true;
+    } else if (a == "--draft-q") {   // spec 23f: Muse-Glimmer only
+      const std::string v = value(i, "--draft-q");
+      if (!runtime::dflash::parse_muse_q(v, draft_q))
+        throw std::runtime_error("--draft-q expects raw or capped, got '" + v + "'");
+      have_draft_q = true;
     } else if (!a.empty() && a[0] == '-') {
       usage();
       throw std::runtime_error(cli::unknown_option(a));
@@ -1031,7 +1038,20 @@ int run(int argc, char** argv) {
     ma.pp_backend_given = have_pp_backend;
     ma.pp_backend = pp_backend;
     ma.mtp = mtp_on;
-    ma.spec = have_spec;
+    ma.spec = have_spec && spec_arg == "mtp";   // refused by name (no MTP head)
+    if (have_spec && spec_arg != "mtp" && spec_arg != "dflash" && spec_arg != "lookup" && spec_arg != "off")
+      throw std::runtime_error(cli::unknown_option("--spec"));
+    // Spec 23f: --spec dflash and the drafter's flags (cli/muse_spec.h).
+    cli::muse::SpecArgs& sa = ma.spec_args;
+    sa.spec = have_spec && (spec_arg == "dflash" || spec_arg == "lookup") ? spec_arg : "off";
+    if (dflash.have_model) sa.draft_model = dflash.model;
+    if (dflash.have_format) sa.format = dflash.format;
+    sa.have_model = dflash.have_model;
+    sa.have_format = dflash.have_format;
+    sa.q = draft_q;
+    sa.have_q = have_draft_q;
+    sa.have_max_k = have_spec_max;
+    if (have_spec_max) sa.max_k = dflash.max_k;
     ma.kv8 = kv_cache == runtime::KvCache::Int8;
     ma.profile = profile;
     ma.layers_auto = layers_auto;
@@ -1040,6 +1060,8 @@ int run(int argc, char** argv) {
   }
   // Spec 19c: --spec dflash is the Qwen engine's (--ids, one card); every other --spec is unknown here.
   if (have_spec && spec_arg != "dflash") throw std::runtime_error(cli::unknown_option("--spec"));
+  if (have_draft_q)
+    throw std::runtime_error("--draft-q is Muse-Glimmer-30B's (spec 23f: the q of its assistant's 16 candidates)");
   dflash.on = spec_arg == "dflash";
   if (have_spec_max && !dflash.on) throw std::runtime_error("--spec-max needs --spec dflash");
   cli::dflash::check_flags(dflash);

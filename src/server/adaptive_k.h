@@ -54,6 +54,16 @@ struct MtpCost {
   // The head's share of that draft row - what a draft vocabulary scales (with_draft_vocab).
   static double dflash_head_share(bool i8_head, bool int8_drafter);
 
+  // Spec 23f: Muse-Glimmer-30B's rows, DERIVED (tools/spec/muse_p0_project.py; box row 47's r47.cost measures them).
+  // The verify at M = 1..16: the int8 head's M = 1..4 (1.00 1.18 1.56 1.79) extended by its M = 2..4 slope, 0.305 a
+  // row. The draft row flat in K (one 16-row block drafts all 15): (the drafter's bytes + the head's) over the plain
+  // step's 14.86 GB - int4 g64 0.182, int8 0.263, bf16 0.435 with the int8 head (1.346 GB); the bf16 head (2.692 GB)
+  // adds its 1.346 GB to both. `drafter_format`: 0 bf16, 1 int8, 2 int4 g64 (loader::DraftFormat's order).
+  static MtpCost muse_verify(bool i8_head);
+  static MtpCost muse_dflash(bool i8_head, unsigned drafter_format);
+  static constexpr double kMusePlainGB = 14.86, kMuseHeadInt8GB = 1.346;
+  static constexpr double kMuseDrafterGB[3] = {5.112, 2.556, 1.358};
+
   uint32_t max_k() const;              // the deepest K both lists cover
   double cost(uint32_t k) const;       // K = 0: 1 (a plain step)
 };

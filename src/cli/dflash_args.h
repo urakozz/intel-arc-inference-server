@@ -57,6 +57,9 @@ struct Args {
 inline void check_flags(const Args& a) {
   if (!a.on && (a.have_model || a.have_format))
     throw std::runtime_error("--draft-model and --draft-format need --spec dflash");
+  if (a.on && a.format == loader::DraftFormat::Int4G64)
+    throw std::runtime_error("--draft-format int4 is Muse-Glimmer-30B's assistant's (spec 23f); Qwen3.8's drafter loads "
+                             "int8 or bf16");
   if (a.on && (a.max_k == 0 || a.max_k > 7))
     throw std::runtime_error("--spec-max with --spec dflash expects 1..7 (the drafter's block of 8)");
 }
