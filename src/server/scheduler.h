@@ -19,6 +19,13 @@
 //      otherwise the id goes to on_token (which may end it: a stop string on the text),
 //      and max_tokens steps end it with Length. A finishing slot's final state is
 //      snapshotted (SlotCacheIface::end) before anything else can take the slot.
+//      Spec 19d: with a speculative engine (BatchEngineIface::spec_k() > 0) the step is one
+//      draft / verify / accept iteration (step_spec): each row asks for K drafts from its
+//      request's own policy (server::AdaptiveK over SchedulerOptions::spec, fed only by that
+//      request's acceptance - or spec_fixed_k), gets back 1..K + 1 ids and runs them through
+//      the same per-id rules in order; ids past the one that ends the request are handed
+//      back with truncate_to(slot, pos) BEFORE the request-end snapshot, so the slot holds
+//      exactly the prompt and the ids consumed, as plain steps would leave it.
 //
 // Threading: submit() and cancel() may be called from any thread; engine calls and the
 // callbacks run on the thread calling tick() (the start() loop in the server, the test's
@@ -32,6 +39,7 @@
 #include <string>
 #include <vector>
 
+#include "server/adaptive_k.h"
 #include "server/batch_engine.h"
 #include "server/deps.h"
 #include "server/prefix_cache.h"
@@ -47,6 +55,11 @@ struct SchedulerOptions {
   size_t queue_depth = 4;        // requests waiting beyond the free slots; more get nullptr
   std::vector<uint32_t> eos_ids;
   std::function<double()> clock; // seconds; empty = std::chrono::steady_clock
+  // Spec 19d, a speculative engine only: each request's K policy (max_k clamped to the
+  // engine's spec_k(); the cost table is the proposer's, e.g. MtpCost::dflash), or a fixed K
+  // for every iteration when spec_fixed_k > 0.
+  AdaptiveKOptions spec;
+  uint32_t spec_fixed_k = 0;
 };
 
 struct Finish {
@@ -56,6 +69,8 @@ struct Finish {
   uint32_t completion_tokens = 0;   // ids passed to on_token
   uint32_t cached_tokens = 0;       // prompt positions the slot grant reused (spec 7)
   int slot = -1;                    // -1: never granted
+  // Spec 19d: speculative iterations, drafts asked for, drafts kept (consumed ids only).
+  uint32_t spec_iters = 0, spec_drafted = 0, spec_accepted = 0;
 };
 
 struct SchedRequest {
@@ -91,6 +106,7 @@ class Job {
   uint32_t prefilled = 0;    // prompt ids the slot holds
   uint32_t steps = 0;        // decode steps taken (the EOS that ends it included)
   Finish fin;
+  std::unique_ptr<AdaptiveK> policy;   // spec 19d: this request's K (speculative engines)
 };
 
 // Spec 7 per slot: the scheduler's prefix-cache calls. PrefixSlots is the implementation
@@ -171,6 +187,7 @@ class Scheduler {
   void grant(const std::shared_ptr<Job>& job, uint32_t slot);
   bool prefill_round();
   bool decode_round();
+  bool spec_round();   // spec 19d
   void finish(const std::shared_ptr<Job>& job, Finish::Reason reason, std::string error = {});
   uint32_t pick_slot(const Job& job) const;
   double now() const;
