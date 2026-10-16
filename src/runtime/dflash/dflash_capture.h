@@ -32,6 +32,14 @@
 // the committed rows and its prefill tail; here it is how a test or the D1 tool fills the ring.
 //
 // The drafter's embedding and head are the TARGET's (Review Focus 3): DFlashTarget points at them.
+//
+// **Spec 23f: a Muse-form drafter** (meta-models/Muse-Glimmer-30B-assistant, model::DFlashForm::Muse) runs the same two
+// walks at kernels::dflash::kMuse: M = 16 rows (the draft list's 15 drafts from one block whatever K - rows past K are
+// computed and masked as at 8), its norm mg_df_norm (the two-rounding RMSNorm) where df_norm stands, df_attn at WIN
+// 2049 / RING 2112 / PB 64, the head at 15 rows, and mg_df_select for df_select - the 16-row readback (MuseDraftOut)
+// and the verify's ids buffer (DFlashBuffers::vids: [anchor, d_1 .. d_K]) instead of Control::cur_token[1..K] (7
+// slots). Its linears in any of the three formats (bf16, int8, int4 g64 layout 1). 66 draft launches, 8 projection
+// launches (the projection's rows up to 16).
 namespace runtime::dflash {
 
 struct DFlashTarget {
@@ -40,6 +48,11 @@ struct DFlashTarget {
   const l0::Mem* ids = nullptr;                 // the draft vocabulary's id table (u32, ascending); null: the full head
   uint32_t vocab_rows = 0;                      // the full head's rows (the codebooks' rows)
   uint32_t vocab_used = 0;                      // ids below it are tokens (the full head's mask)
+  // Spec 23f: the multiplier and softcap df_topk applies to the 16 candidates' logits (the draft distribution q's
+  // logits): < 0 = the descriptor's (out_mult, softcap). A Muse-Glimmer drafter's q is its RAW head rows (1, 0) or,
+  // spec 23 decision 11's other form, the target's own cap (0.19611613513818404, 20) - the candidates' order is the
+  // raw logits' either way (the cap is monotone).
+  float q_mult = -1.0f, q_softcap = -1.0f;
   uint32_t head_rows() const { return head ? head->shape.N : 0; }
 };
 // The target's full head (`draft_vocab` false) or its draft vocabulary's compact one (LoadedModel::draft_vocab).
