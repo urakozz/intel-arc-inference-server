@@ -509,3 +509,61 @@ no `--profile`, `--device` refused with `--pp 2`, context capped at the trained 
 **Relevant variables:** `B70_Q4_ATTN` (`flash` | `eager`, decode and prefill alike), `B70_Q4_PLE` (the PLE int8
 directory), `B70_Q4_MTP_NORM` (`single` | `per_stream`), `B70_Q4_MTP_SELECT` (`reuse` | `fresh`), `B70_PREFILL_REPLAY` (record each prefill chunk's lists once and replay them),
 `B70_Q4_TIE_TOL` / `B70_Q4_SEL_TOL` (the golden test's routing and selection near-tie tolerances, 1e-3 proposed).
+
+## Muse-Glimmer-30B (spec 23)
+
+`Vishva007/Muse-Glimmer-30B-W4A16-AutoRound` (or its `-GPTQ` spelling - the same export; our format exactly,
+AutoRound int4 g64 sym, used as-is: spec 23 §3), the text half of `meta-models/Muse-Glimmer-30B` (`model_type
+muse_glimmer`): 52 dense layers, hidden 6656, 32 / 2 heads x 128 with an output gate, 39 sliding-window layers
+(2048 keys, RoPE) and 13 full NoPE layers, sandwich norms, a 202048-id vocabulary, the logits through x 1/sqrt(26)
+and a softcap of 20, context 131072. The vision tower (809 tensors) is skipped: text only.
+
+**Status: never run on a B70** (queue rows 43-46). Decode (spec 23c), prefill (spec 23d, `l0` only, chunks of up to
+2048) and serving (spec 23e, `b70-serve`) on **one card** - 17.41 GB of weights with the int8 head (the default),
+131072 fits beside them (derived); `--pp 2` splits the layers over two cards for capacity, not speed. Expected
+(derived): 733 launches a token (681 with `B70_MUSE_ATTN=eager`), 14.72 GB read a token plus 13,312 B of KV a
+position on the 13 full layers - a roofline of 39.7 t/s at depth 4096, 35.7 at 131072.
+
+```sh
+M=Vishva007/Muse-Glimmer-30B-W4A16-AutoRound
+T=tests/tokenizer/muse/chat_template.jinja        # the ORIGINAL's template (the int4 repos ship an older one)
+
+# every command below: never run on a B70
+./build/src/cli/b70-decode $M --ids m.ids --n 32 --prefill                     # one card, int8 head
+./build/src/cli/b70-decode $M --bench --prefill-length 4096 --tg 256 --max-len 131072
+./build/src/cli/b70-serve $M --chat-template $T                                  # one card, --max-len auto (131072)
+./build/src/cli/b70-serve $M --chat-template $T --prefix-split-last              # agentic sessions
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $M --chat-template $T --pp 2      # capacity on two cards
+curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages":
+  [{"role": "user", "content": "Read src/main.cc"}], "reasoning_effort": "low"}'
+```
+
+**Serving (spec 23e).** The template is `meta-models/Muse-Glimmer-30B`'s `chat_template.jinja` (sha256
+`cfc67e5f...`, byte-identical to transformers 5.19.0's `apply_chat_template` on 26 message lists - measured on the
+Mac); the snapshot's file is used only when it is that one, so the Vishva007 repos need `--chat-template FILE`
+(their older template neither normalises "Reasoning effort" nor skips a system prompt's own reasoning line).
+The model writes each message's recipient after the prompt's `<|start|>assistant`: `to=self` comes back as
+`reasoning_content` (several blocks joined with a newline), `to=user` as `content`, ATEM calls in tool channels as
+OpenAI tool calls (the name from `<atem:invoke name=...>`; a doubled `ns.ns` collapses to a registered bare `ns`;
+values typed by the tool's schema first - a string parameter keeps `"007"` as written). A call cut by `max_tokens`
+is dropped, never half-sent (`finish_reason` `length`). `<|eom|>` ends a message, not the turn: reasoning, calls and
+the answer are one generation; `<|eot|>` and `<|end_of_text|>` stop it. `chat_template_kwargs`: `reasoning_strength`
+(`low`, `medium`, `high` - the template's default -, `xhigh`; the OpenAI top-level `reasoning_effort` maps onto it),
+`current_date`, `knowledge_cutoff`, `tool_namespace_descriptions`. Sampling: a request without `temperature` /
+`top_k` / `top_p` samples with `generation_config.json`'s T 1.0 / top-k 64 / top-p 0.95, through the model's
+softcap `20 tanh(z / 20)` of the scaled logits, applied in fp32 on the host (greedy is the device argmax of the raw
+row: the cap is monotone). `generation_config.json`'s `stop_strings` (none in Muse's) join every request's `stop`.
+The prefix cache keeps the 39 rings' last 2047 positions (81.7 MB, derived) with each snapshot, beside 13,312 B of
+KV a position.
+
+**MG5 (box):** `tools/toolcall/engine_generate.sh` on `tests/golden/toolcall-muse` (512 ids, `score.py --format
+atem` against 23a's bf16 reference: no more parse failures than it) and `tools/probe/muse_passkey.sh` (3 / 3 at
+131072, int8 head).
+
+**Limits.** Prefill on `l0` only (`l0-int8` refused: 6656 = 6.5 x 1024-wide Hadamard blocks; `sycl-tla`: no Muse
+walk), `--prefill-chunk` at most 2048; no `--mtp` / `--spec` (no MTP head; the DFlash drafter is spec 23f), bf16 KV
+only (`--kv-cache int8` refused, decision 8), context at most 131072 (decision 6), `--device` refused with `--pp 2`,
+no `--profile`, image / video content refused.
+
+**Relevant variables:** `B70_MUSE_ATTN` (`flash` | `eager`, decode and prefill alike), `B70_PREFILL_REPLAY`,
+`B70_MUSE_TOKENIZER_JSON` (`muse_tokenizer_test`'s tokenizer.json).

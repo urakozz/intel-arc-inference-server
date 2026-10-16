@@ -2955,7 +2955,7 @@ st_r44_k1() {
   jgrab k1 '^muse_kernels_test$' 'bitwise|cosine|differ|OK'
   finish
 }
-stage r44.reject 44 default gpu - - "the refusals before the device (b70-decode on tests/model/muse_glimmer: config.json only): cli_reject_muse_* - --mtp, --spec naming 23f, --kv-cache int8 (decision 8), --max-len 262144 (decision 6), --device with --pp 2; b70-serve naming spec 23e (23d replaced the --prefill refusals: its cli_reject_muse_prefill_* run here too, r45.reject names them). Under the GPU lock (Kolibri's r24.reject): a refusal that regressed would open the device"
+stage r44.reject 44 default gpu - - "the refusals before the device (b70-decode on tests/model/muse_glimmer: config.json only): cli_reject_muse_* - --mtp, --spec naming 23f, --kv-cache int8 (decision 8), --max-len 262144 (decision 6), --device with --pp 2 (23e removed cli_reject_muse_serve: b70-serve serves Muse, r46.reject; 23d replaced the --prefill refusals: its cli_reject_muse_prefill_* run here too, r45.reject names them). Under the GPU lock (Kolibri's r24.reject): a refusal that regressed would open the device"
 st_r44_reject() {
   run_tests '^cli_reject_muse_' '' '' 'ZE_AFFINITY_MASK=0,1'
   finish
@@ -3145,6 +3145,105 @@ st_r45_speed() {
   grab_all memory '^memory' 8
   grab_all ratio '^RATIO '
   grab_all idle '^IDLE '
+  finish
+}
+
+# ======================================================================================
+row 46 "spec 23e - Muse-Glimmer-30B served: the original's chat template byte-identical to transformers 5.19.0, the tokenizer equal, the channel / ATEM parser (parse_response on complete turns, vLLM's selection on damaged ones), reasoning_strength, sampling with the host softcap, the prefix cache's snapshots (the rings' last 2047 positions + the full layers' KV), b70-serve <muse> one card by default; MG4 restores, MG5 (A4 on the engine, passkey at 131072), the llama-benchy rows (plan 23e)"
+rownote 46 "Written blind on the Mac: no kernel added or changed (kernel_cmdlines +0 / -0 / ~0); nothing of b70-serve <muse> or MuseEngine's snapshot calls has run on a card. Mac-side (measured): template_muse_test (26 renders byte-identical to apply_chat_template, after one minja patch: the tool-call capability probe accepts name=\"argument_needle\"), muse_tokenizer_test (202048 ids, 24 texts, corpus.txt, 26 renders' ids with ONE BOS), toolcall_muse_test (22 parse_response cases, 6 by a documented difference; damaged turns; a 2000-output fuzz split-invariant), muse_server_test, muse_snapshot_test (the layouts on the real shapes; restores at 2048 / 4096 / 2049 / 5000 / 300 == cold; one card <-> two; the server over HTTP)."
+rownote 46 "The template: BOTH Vishva007 repos ship the OLDER chat_template.jinja (114f55eb..., 7167 B); b70-serve refuses it naming --chat-template (spec 23 decision 1). Every real-checkpoint stage passes --chat-template tests/tokenizer/muse/chat_template.jinja (the original's, cfc67e5f..., vendored). The synthetic checkpoints copy the original's (make_synth.py): no flag there."
+rownote 46 "Data: r46.snapshot / r46.serve / r46.chat need row 43's ckpt4 (oracle_muse_synth) and rows 44 / 45 green on the card (decode, prefill); r46.real / r46.passkey / r46.benchy the int4 checkpoint (muse_gptq); r46.a4 also 23a's A4 references (oracle_muse_a4: row 42's r42.a4, days on the box CPU)."
+rownote 46 "Hand back: muse_snapshot_gpu_test's lines (bitwise or DIFFER per check), every startup line (b70-serve: ... Muse-Glimmer-30B ...: max_len, the template's sha prefix, sampling defaults, the rings' positions), the SEEDED lines, golden_server_test --chat's lines, the A4 score table and parse-failure counts, the passkey lines (with the decode speed at depth), the llama-benchy tables."
+stage r46.k0 46 default cpu - g0.sha,g0.bitwise,g0.suite "no kernel changed (kernel_cmdlines +0 / -0 / ~0: G0's sha is the check) and the server path unchanged for every other model: template_test / _agnes / _ornith / _k2 / _kolibri, minja_ext_test (one new probe case), toolcall_test / _k2 / _kolibri, k2_server_test, kolibri_server_test, ornith_server_test, qwen4exp_server_test, protocol_test, openai_test, spec_accept_test (filter_probs unchanged with softcap 0), sampling_test, prefix_server_test, lookup_server_test, mtp_server_test"
+st_r46_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  run_tests '^(template_test|template_agnes_test|template_ornith_test|template_k2_test|template_kolibri_test|minja_ext_test|toolcall_test|toolcall_k2_test|toolcall_kolibri_test|k2_server_test|kolibri_server_test|ornith_server_test|qwen4exp_server_test|protocol_test|openai_test|spec_accept_test|sampling_test|prefix_server_test|lookup_server_test|mtp_server_test)$' '' 'kv8'
+  finish
+}
+stage r46.host 46 default cpu - - "host: muse_tokenizer_test (the HF cache's tokenizer.json - meta-models/Muse-Glimmer-30B's, or SNAP_MUSE's: the file is identical - 202048 ids, the named tokens, 24 texts, corpus.txt, every render's ids with one BOS), template_muse_test (26 renders byte-identical; strftime_now on a fixed clock), toolcall_muse_test (parse_response on complete turns, damaged turns, the 2000-output fuzz), muse_server_test (kwargs, reasoning_effort, the vision refusal, string arguments, both EOS ids, the host softcap's chi-square, stop_strings, cached_tokens, the template rule), muse_snapshot_test; the toolcall Python tests"
+st_r46_host() {
+  run_tests '^(muse_tokenizer_test|template_muse_test|toolcall_muse_test|muse_server_test|muse_snapshot_test)$' '' '' "B70_MUSE_TOKENIZER_JSON=\$(tools/box_validate/data.sh resolve ${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound})/tokenizer.json"
+  jgrab host-serve '^(muse_tokenizer|template_muse|toolcall_muse|muse_server|muse_snapshot)_test$' 'OK|SKIP|renders|fixture|fuzz|layout|restore at|server:|sampling:'
+  chk "python3 tools/toolcall/test_score.py && python3 tools/toolcall/test_make_set.py" "the toolcall Python tests (atem scoring, the Muse set)"
+  finish
+}
+stage r46.reject 46 default gpu - - "b70-serve's Muse refusals before the device (tests/model/muse_glimmer: config.json, generation_config.json, the older chat_template.jinja): cli_reject_serve_muse_{mtp,spec_mtp,spec,lookup,kv8,int8pf,sycl,maxlen,device,template}, cli_reject_serve_chat_template_other, cli_reject_serve_spec_dflash_other. Under the GPU lock (23c's r44.reject): a refusal that regressed would open the device"
+st_r46_reject() {
+  run_tests '^cli_reject_serve_(muse_.*|chat_template_other|spec_dflash_other)$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  finish
+}
+stage r46.snapshot 46 default gpu oracle_muse_synth r45.prefill "MG4 on the card, the synthetic ckpt4: muse_snapshot_gpu_synth_test (one card) and _synth_pp_test (--pp 2, split 2) - the sizes; a restore at the block end 4096 from the hook's own saves BITWISE the cold run (32 ids, logits, full KV, the rings from 2049); restores at the request ends 2049 and 300 bitwise the session that never left; _cross_test: a snapshot taken on two cards continues on one, and the reverse"
+st_r46_snapshot() {
+  run_tests '^muse_snapshot_gpu_synth(_pp)?_test$|^muse_snapshot_gpu_cross_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab snapshot '^muse_snapshot_gpu' 'state|restore|snapshot restored|bitwise|DIFFER|OK|FAILED|SKIP'
+  finish
+}
+stage r46.serve 46 default gpu oracle_muse_synth r46.snapshot "b70-serve <synthetic ckpt4> startup and requests: ONE card by default (the startup line: Muse-Glimmer-30B, muse chat format, the template's sha cfc67e5f - the original's, prefill l0 chunk 2048, mtp none, lm_head int8, kv cache bf16, sampling defaults sampled T 1.00 top-k 64 top-p 0.95 softcap 20, the rings' last 2047 positions), --max-len auto (the plan's line); --pp 2 (copy) and --pipeline-handoff peer; a seeded sampled request twice, identical"
+st_r46_serve() {
+  local ck="oracle-out-muse-synth/ckpt4"
+  x "ZE_AFFINITY_MASK=0 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $ck"
+  step_rc $? "b70-serve <synthetic>, one card (default), --max-len auto, seeded sampling"
+  x "ZE_AFFINITY_MASK=0,1 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $ck --pp 2 --max-len 16384"
+  step_rc $? "b70-serve <synthetic> --pp 2 (copy), seeded sampling"
+  x "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_probe.sh $ck --pp 2 --pipeline-handoff peer --max-len 16384"
+  step_rc $? "b70-serve <synthetic> --pp 2 --pipeline-handoff peer"
+  grab_all plan 'Muse-Glimmer plan at|^memory' 8
+  grab_all startup '^b70-serve: .*Muse-Glimmer-30B' 3
+  grab_all seeded '^SEEDED ' 4
+  finish
+}
+stage r46.chat 46 default gpu oracle_muse_synth r46.serve "plan 23e Task 5 Step 2: the server's greedy chat = b70-decode --prefill --lm-head int8 on its prompt_token_ids - golden_server_test --chat on the synthetic (prose / code / cjk as one user message through the original's template, 32 ids, temperature 0) with B70_SERVE_ARGS '--max-len 16384' (the prefix cache on: auto), '... --prefix-cache-gb 0' (off: the same ids) and '... --pp 2' (two cards vs b70-decode's one: bitwise by 23c / 23d's --pp rule); run directly (not registered: without a checkpoint it would fail, not SKIP)"
+st_r46_chat() {
+  local ck="oracle-out-muse-synth/ckpt4" a
+  for a in "--max-len 16384" "--max-len 16384 --prefix-cache-gb 0" "--max-len 16384 --pp 2"; do
+    chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='$a' timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $ck --chat" \
+      "Muse synthetic, golden_server_test --chat, b70-serve $a"
+  done
+  grab_all chat 'chat of [0-9]+ prompt ids' 9
+  finish
+}
+stage r46.real 46 default gpu muse_gptq r46.chat,r45.real "the REAL checkpoint, one card: muse_snapshot_gpu_test (MG4 on 52 layers); b70-serve <int4> --chat-template <the original's> startup (--max-len auto -> 131072 with the int8 head and the prefill scratch: the plan's line) with a seeded request twice; the template refusal without the flag (exit 1 naming --chat-template, before the device); golden_server_test --chat (the server's greedy chat = b70-decode on its prompt_token_ids)"
+st_r46_real() {
+  local m="${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound}" t="tests/tokenizer/muse/chat_template.jinja"
+  x "free -g | head -2"
+  run_tests '^muse_snapshot_gpu_test$' '' '' 'ZE_AFFINITY_MASK=0'
+  x "build/src/cli/b70-serve $m --port $PORT 2>&1 | tail -3 | grep -q 'pass --chat-template FILE'"
+  step_rc $? "b70-serve <int4> without --chat-template: refused naming the flag (the repo's older template)"
+  x "ZE_AFFINITY_MASK=0 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $m --chat-template $t"
+  step_rc $? "b70-serve <muse int4> --chat-template <original>, one card, auto max_len, seeded sampling"
+  chk "ZE_AFFINITY_MASK=0 B70_SERVE_ARGS='--max-len 32768 --chat-template $t' timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $m --chat" \
+    "golden_server_test --chat against Muse-Glimmer-30B"
+  grab_all plan 'Muse-Glimmer plan at|^memory' 6
+  grab_all startup '^b70-serve: .*Muse-Glimmer-30B' 2
+  grab_all chat 'chat of [0-9]+ prompt ids' 3
+  finish
+}
+stage r46.a4 46 optin gpu muse_gptq,oracle_muse_a4 r46.real "MG5: A4 on the engine - the 36 Muse-rendered scenarios (tests/golden/toolcall-muse, reasoning_strength low), 512 greedy ids, one card, l0, the bf16 and the int8 head (engine_generate.sh: b70-decode on the set's ids, byte-identical to the reference's), against 23a's bf16 reference (oracle-out-muse-a4); score.py --format atem bf16 gptq l0 l0-i8head: the bar - no engine run has more parse failures than the bf16 reference's; first-call agreement recorded (gptq = gate Q's int4 CPU reference, for comparison)"
+st_r46_a4() {
+  local d=$STATE/a4-muse m="${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound}"
+  x "mkdir -p $d && cp oracle-out-muse-a4/*.bf16.txt oracle-out-muse-a4/*.gptq.txt $d/"
+  chk "ZE_AFFINITY_MASK=0 tools/toolcall/engine_generate.sh \$(tools/box_validate/data.sh resolve $m) tests/golden/toolcall-muse $d l0" "A4 engine runs, bf16 head"
+  chk "ZE_AFFINITY_MASK=0 LM_HEAD=int8 tools/toolcall/engine_generate.sh \$(tools/box_validate/data.sh resolve $m) tests/golden/toolcall-muse $d l0" "A4 engine runs, int8 head (the served default)"
+  chk "python3 tools/toolcall/score.py --format atem $d bf16 gptq l0 l0-i8head | tee $d/score.md" "scoring against the bf16 reference"
+  x "awk '/^bf16: [0-9]+ parse failure/ {b = \$2} /^l0(-i8head)?: [0-9]+ parse failure/ {n++; if (\$2 > e) e = \$2} END {exit !(b != \"\" && n == 2 && e <= b)}' $d/score.md"
+  step_rc $? "MG5: no engine run has more parse failures than the bf16 reference's"
+  grab_all a4 'match|parse failure' 8
+  finish
+}
+stage r46.passkey 46 optin gpu muse_gptq,oracle_image r46.real "MG5: passkey 3 / 3 at 5 / 50 / 95 % of 131072 on one card with the int8 head (tools/probe/muse_passkey.sh: BOS + 130000 ids, --max-len 131072, 8 greedy ids); the decode speed at that depth recorded (~1.74 GB of full-layer KV a token there, derived)"
+st_r46_passkey() {
+  chk "ZE_AFFINITY_MASK=0 MODEL=${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound} tools/probe/muse_passkey.sh int8" "passkey at 131072, one card, int8 head"
+  grab_all passkey '^passkey muse [^ ]+( placement [0-9.]+)?: ' 8
+  finish
+}
+stage r46.benchy 46 optin gpu-self muse_gptq,uvx - "plan 23e Task 6's speed rows through b70-serve <muse> --chat-template <the original's> on one card (SERVE_AFFINITY=0): pp4096 tg256 depth 1 at 131072 (the operator's flags: --no-cache --exact-tg --latency-mode generation); prefix caching at depth 4k / 16k / 32k; decode at depth 4k / 32k / 128k - every row with the card, the int8 head and bf16 KV"
+st_r46_benchy() {
+  local m="${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound}" t="--chat-template tests/tokenizer/muse/chat_template.jinja"
+  local f="--concurrency 1 --no-cache --exact-tg --latency-mode generation"
+  chk "MODEL=$m MAX_LEN=131072 SERVE_AFFINITY=0 SERVE_ARGS='$t' tools/probe/serve_benchy.sh --pp 4096 --tg 256 --depth 1 $f" "one card, pp4096 tg256"
+  chk "MODEL=$m MAX_LEN=65536 SERVE_AFFINITY=0 SERVE_ARGS='$t' tools/probe/serve_benchy.sh --pp 1024 --tg 64 --depth 0 4096 16384 32768 --enable-prefix-caching --exact-tg --latency-mode generation --runs 3" "prefix cache on, depth 4k / 16k / 32k"
+  chk "MODEL=$m MAX_LEN=131072 SERVE_AFFINITY=0 SERVE_ARGS='$t' tools/probe/serve_benchy.sh --pp 512 --tg 128 --depth 4096 32768 131072 $f" "decode at depth 4k / 32k / 128k"
+  grab_all benchy '^\| ' 80
   finish
 }
 
