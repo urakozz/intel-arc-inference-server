@@ -52,6 +52,8 @@ struct PipelineEngine::Stage {
   std::unique_ptr<MtpBuffers> mtp;
   std::unique_ptr<l0::Mem> gdn_spec;
   std::vector<CapturedStep> verify, draft;
+  // Spec 19d, a drafter: what this device's tap verify lists bind (its own gdn_spec, the drafter's taps).
+  TapVerify tv;
   // The verify slots this device's lists bind (MtpBuffers::gdn_spec or gdn_spec above).
   const l0::Mem* spec() const { return mtp ? &mtp->gdn_spec : gdn_spec.get(); }
 };

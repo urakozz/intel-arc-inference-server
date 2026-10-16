@@ -1,9 +1,12 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "l0/cmdlist.h"
+#include "l0/context.h"
+#include "loader/loader.h"
 #include "l0/memory.h"
 #include "runtime/dflash/dflash_control.h"   // DFlashDraftOut: a plain struct, no link dependency
 
@@ -63,6 +66,17 @@ class TapDrafter {
   // and the readback (per draft row its id, its 16 candidates and their scores: the draft distribution q).
   // Throws unless the drafter can draft k at e's pos (k <= e.max_verify_k()).
   virtual const dflash::DFlashDraftOut& draft(Engine& e, uint32_t k, float temperature, uint64_t seed) = 0;
+
+  // Spec 19d (--pp 2, runtime::PipelineEngine): the same proposer beside a target that is not a runtime::Engine.
+  // attach_target captures the draft list once against `target` (its embedding and head - the full one, or with
+  // `draft_vocab` the compact one - on the drafter's device) and that device's Control block `control` (the anchor
+  // pos / cur_token[0]; the drafts go to its cur_token[1..k]); the drafter's buffers must be at `max_len`.
+  // draft_with drafts k ids (1 .. max_k(); the caller bounds k by its own max_verify_k) by handing the draft list to
+  // `replay`, which runs it on the drafter's device and waits; it returns the readback.
+  virtual void attach_target(l0::Context& ctx, const loader::LoadedModel& target, const l0::Mem& control,
+                             uint32_t max_len, bool draft_vocab) = 0;
+  virtual const dflash::DFlashDraftOut& draft_with(const std::function<void(l0::CmdList&)>& replay, uint32_t k,
+                                                  float temperature, uint64_t seed) = 0;
   // False when the drafter drafts greedily only (a DFlash v1 drafter: its sampled q is a full-vocabulary softmax
   // the readback cannot carry) - a sampled request then decodes plainly.
   virtual bool samples() const = 0;

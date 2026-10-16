@@ -244,4 +244,17 @@ CapturedStep build_stage_verify(l0::Context& ctx, const loader::LoadedModel& m, 
 CapturedStep build_stage_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                                const PpStage& st, const MtpBuffers& mtp, uint32_t i);
 
+// --- spec 19d: a tap drafter across the split (--spec dflash --pp 2) -------------------------
+//
+// build_stage_verify_taps: build_verify_taps restricted to one stage, exactly as build_stage_verify restricts
+// build_verify - the stage's layers at M rows, gdn_step_slots_M<M>_N8 over `tv.gdn_spec` (the stage's slots,
+// pp_gdn_spec_bytes(d, stage gdn, 8): the binary's slot stride is the whole model's, the stage binds its slice g),
+// the hand-off of M rows, and the taps of THIS stage's sites (a tap whose site - the input fold of the tapped
+// layer's successor - lies in the stage) copied into `tv.taps`, the drafter's buffer on the last device: from device
+// 0 that is a device-to-device copy into the other card's memory, appended before the hand-off out and so ordered
+// before the cross-device event (the copy hand-off only - capture refuses peer). Launches: pp_stage_launches (the
+// taps are copies); the two stages' lists add up to build_verify_taps' decode_launches.
+CapturedStep build_stage_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
+                                     const PpStage& st, const StageLink& link, const TapVerify& tv, uint32_t M);
+
 }  // namespace runtime

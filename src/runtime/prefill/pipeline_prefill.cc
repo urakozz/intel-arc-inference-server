@@ -236,7 +236,7 @@ struct PipelinePrefill final : PipelinePrefillBase {
     const PfDevice& p = *dev.at(d);
     MemoryComponents c;
     c.prefill_scratch = p.scratch.bytes() + p.scratch.lazy_bytes() + p.shadow_bytes() +
-                        (d == kPpDevices - 1 ? shadow_hh_bytes() : 0);
+                        (d == kPpDevices - 1 ? shadow_hh_bytes() + taps_bytes() : 0);
     c.int8 = p.int8 ? p.int8->bytes() : 0;
     c.decode_state = p.ctl.size() + p.ts.size() +
                      (d == 0 ? send_seq.size() : landing.size() + recv_state.size()) + mtp_bytes(d);
@@ -280,6 +280,18 @@ struct PipelinePrefill final : PipelinePrefillBase {
   // with a hook two shadows of hh row 0. Allocated by ensure_mtp / ensure_shadows.
   std::unique_ptr<l0::Mem> mtp_hid, mtp_ctl;
   std::array<std::unique_ptr<l0::Mem>, kDepth> shadow_hh;
+  // Spec 19d, a drafter: the prefill's tap staging per chunk parity, on device 1 ([kC][taps][hidden] bf16: both
+  // devices' walks write their own taps' columns; the host projects a chunk's rows once both have finished it).
+  std::array<std::unique_ptr<l0::Mem>, kDepth> taps;
+  void ensure_taps(l0::Context& d1, size_t bytes) {
+    for (auto& m : taps)
+      if (!m) m = std::make_unique<l0::Mem>(d1, l0::MemKind::Device, bytes);
+  }
+  size_t taps_bytes() const {
+    size_t b = 0;
+    for (const auto& m : taps) b += m ? m->size() : 0;
+    return b;
+  }
   void ensure_mtp(l0::Context& d1, const model::ModelDesc& d) {
     if (mtp_hid) return;
     mtp_hid = std::make_unique<l0::Mem>(d1, l0::MemKind::Device, mtp_prefill_hidden_bytes(d));
@@ -314,6 +326,21 @@ struct PipelineEngine::PrefillDriver {
   int64_t drop_chunk;        // drop_next_handoff(): device 0 hands this chunk over to nobody
   std::unique_ptr<Releaser> releaser;
   bool hook_threw = false;
+  // Spec 19d, a drafter: its tap sites (runtime::tap_sites), the first position tapped (the call's last window()),
+  // and the chunks (wait() projects a chunk's rows).
+  const std::vector<std::vector<uint32_t>>* df_sites = nullptr;
+  uint32_t df_from = 0;
+  const std::vector<PpChunk>* chunks = nullptr;
+
+  // Chunk c's taps: its rows from df_from on into staging j % 2 (r0 = rows: none).
+  prefill::PrefillTaps taps_of(const PpChunk& c, uint32_t j) const {
+    prefill::PrefillTaps t;
+    t.dst = p.taps[j % kDepth]->ptr();
+    t.sites = df_sites;
+    t.n_taps = uint32_t(e.drafter_->tap_layers().size());
+    t.r0 = df_from > c.pos ? std::min(df_from - c.pos, c.rows) : 0;
+    return t;
+  }
 
   prefill::Int8State* q(uint32_t d) const {
     return backend == PrefillBackend::L0Int8 ? p.dev[d]->int8.get() : nullptr;
@@ -334,9 +361,10 @@ struct PipelineEngine::PrefillDriver {
       std::memcpy(in, ids.data() + (c.pos - base), size_t(c.rows) * 4);
       p.ready[s]->host_reset();   // device 1's chunk j - 2 waited on it, and is done
       D.cx.timestamp(D.stamps(j));
+      const prefill::PrefillTaps tp0 = df_sites ? taps_of(c, j) : prefill::PrefillTaps{};
       prefill::step_stage(D.cx, D.kc, D.scratch, S.model, e.max_len_, ctl, c.pos, c.rows, in,
                           S.persist.gdn_state, S.persist.conv_ring, S.persist.kv_k, S.persist.kv_v,
-                          S.persist.kv_lay, backend, q(0), S.range);
+                          S.persist.kv_lay, backend, q(0), S.range, df_sites ? &tp0 : nullptr);
       D.cx.timestamp(D.stamps(j) + 1);
       shadow(D, S, c, s);
       // drop_next_handoff() (P4's test): device 1 never hears of this chunk - no ready
@@ -383,9 +411,10 @@ struct PipelineEngine::PrefillDriver {
                    prefill::arg_val(rw), prefill::arg_val(sw), prefill::arg_val(spin)});
     }
     D.cx.timestamp(D.stamps(j));
+    const prefill::PrefillTaps tp1 = df_sites ? taps_of(c, j) : prefill::PrefillTaps{};
     prefill::step_stage(D.cx, D.kc, D.scratch, S.model, e.max_len_, ctl, c.pos, c.rows, nullptr,
                         S.persist.gdn_state, S.persist.conv_ring, S.persist.kv_k, S.persist.kv_v,
-                        S.persist.kv_lay, backend, q(1), S.range);
+                        S.persist.kv_lay, backend, q(1), S.range, df_sites ? &tp1 : nullptr);
     if (S.mtp) mtp_kv(D, S, c, j);   // spec 16d: the head's KV, as Engine::prefill
     D.cx.timestamp(D.stamps(j) + 1);
     shadow(D, S, c, s);
@@ -448,6 +477,13 @@ struct PipelineEngine::PrefillDriver {
                              " - the rows did not arrive with the flag (a silent hand-off, spec 16 §2)");
       if (w[kStStatus] != 0)
         throw PrefillFailure("pp_recv reported status " + std::to_string(w[kStStatus]));
+    }
+    // Spec 19d: both devices have finished chunk j (device 0's wait comes first in every order): its tapped rows into
+    // the drafter's ring now - before its hook (save_state reads the ring) and before chunk j + 2 reuses the staging.
+    if (d == 1 && df_sites) {
+      const PpChunk& c = chunks->at(j);
+      const prefill::PrefillTaps t = taps_of(c, j);
+      if (t.r0 < c.rows) e.drafter_project(t.dst, c.pos + t.r0, c.rows - t.r0);
     }
   }
 
@@ -615,6 +651,21 @@ void PipelineEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
 
   const PrefillBackend backend = prefill_backend();
   PrefillDriver drv{*this, p, ids, base, backend, drop_next_ ? 0 : -1, nullptr, false};
+  // Spec 19d: with a drafter, every chunk taps its rows inside the drafter's window of this call's end (Engine's rule;
+  // positions before the call keep the ring's own rows - the session's, or a restored snapshot's).
+  std::vector<std::vector<uint32_t>> df_sites;
+  if (drafter_) {
+    df_sites = tap_sites(*st(0).model.desc, drafter_->tap_layers());
+    if (!df_sites.back().empty())
+      throw std::runtime_error("runtime::PipelineEngine::prefill: the drafter taps the last layer's output, whose "
+                               "fold prefill runs for the last row only - not built (no published drafter does)");
+    p.ensure_taps(st(1).ctx, TapVerifyDims::prefill_taps_bytes(*st(0).model.desc,
+                                                               uint32_t(drafter_->tap_layers().size())));
+    const uint64_t end = uint64_t(base) + ids.size(), w = drafter_->window();
+    drv.df_from = uint32_t(end > w ? std::max<uint64_t>(base, end - w) : base);
+    drv.df_sites = &df_sites;
+  }
+  drv.chunks = &chunks;
   drop_next_ = false;
   if (opt_.prefill_hold_ms != 0) drv.releaser = std::make_unique<Releaser>();
   pf_stats_ = PrefillStats{};

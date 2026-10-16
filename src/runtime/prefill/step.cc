@@ -328,7 +328,7 @@ void step_stage(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C, const void* ids,
                 l0::Mem& gdn_state_mem, l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem,
                 l0::Mem& kv_v_mem, const KvLayout& kv, PrefillBackend backend, Int8State* q,
-                const PpStage& st) {
+                const PpStage& st, const PrefillTaps* taps) {
   require((q != nullptr) == (backend == PrefillBackend::L0Int8),
           "the int8 state must be given iff the backend is l0-int8");
   require(is_l0(backend), "a pipeline stage prefills on the L0 backends only (l0, l0-int8)");
@@ -360,13 +360,17 @@ void step_stage(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
               conv_ring_stride * st.gdn == conv_ring_mem.size(),
           "the GDN state / conv ring are not the stage's " + std::to_string(st.gdn) + " GDN layers");
   if (kv8) require_kv8_path(backend);
+  // Spec 19d: step_chunk's tap rule, per stage (step.h).
+  require(!taps || (taps->dst && taps->sites && taps->sites->size() == size_t(d.layers) + 1 &&
+                    taps->sites->back().empty()),
+          "the prefill taps need their staging and one site list per layer, none at the final fold");
 
   if (st.has_embed())
     cx.launch(kc(kernels::pf_embed_gather_variant(s.desc().hidden), "pf_embed_gather"), 1, C, 1,
               {PtrArg(ids), PtrArg(m.embed.ptr()), PtrArg(s.resid.ptr()), arg_val(C)});
   uint32_t gdn = 0, fa = 0;
   walk_layers(cx, kc, s, m, ctrl, pos, C, gdn_state_mem, conv_ring_mem, kv_k_mem, kv_v_mem, kv,
-              backend, q, Walk{st.first, st.last, !st.has_embed(), !st.has_head(d)}, gdn, fa);
+              backend, q, Walk{st.first, st.last, !st.has_embed(), !st.has_head(d)}, gdn, fa, taps);
   require(gdn == st.gdn && fa == st.fa, "the stage's layer kinds are not its " +
                                             std::to_string(st.gdn) + " GDN / " +
                                             std::to_string(st.fa) + " FA");

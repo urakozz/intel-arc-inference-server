@@ -18,7 +18,10 @@
 //      kv_runs, restated here) byte for byte - bf16 and int8, with and without the head's
 //      layer, three splits, several ranges; a load of those bytes restores both stages;
 //   6. b70-serve --pp 2's auto choices with the server's terms (derived): Qwen3.8, Agnes and
-//      Ornith with and without MTP, both KV forms - and each beats one card's auto length.
+//      Ornith with and without MTP, both KV forms - and each beats one card's auto length;
+//   7. spec 19d (a DFlash drafter on device 1, --spec dflash --pp 2): device 1 gains the drafter's bytes and the
+//      embedding replica, each device its 8-slot verify slots (pp_gdn_spec_bytes(d, gdn, 8)), device 1 two prefill
+//      tap stagings with a prefill path; refused with the MTP head; the auto choice still beats one card's.
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -216,7 +219,7 @@ void check_shadows() {
       }
     }
   const runtime::PpPlan q = runtime::pp_plan(model::qwen38(), 32, 16384, runtime::pp_weights(model::qwen38(), WeightKind::Int8),
-                                             KvCache::Bf16, paths()[1], runtime::PpExtras{false, 0, true, true});
+                                             KvCache::Bf16, paths()[1], runtime::PpExtras{false, 0, true, true, {}});
   std::printf("block shadows (b70-serve's prefix cache), Qwen3.8 split 32: %.3f / %.3f GB\n",
               q.dev[0].shadows / 1e9, q.dev[1].shadows / 1e9);
 }
@@ -382,6 +385,67 @@ void check_serve_auto() {
 
 }  // namespace
 
+// ---- 7 -------------------------------------------------------------------------------------
+void check_drafter_terms() {
+  const model::ModelDesc& d = model::qwen38();
+  runtime::DrafterPlan dr;   // Qwen3.8's int8 drafter's figures (dflash_plan_test holds the formula)
+  dr.weights = 2053464064;
+  dr.fixed = 62000000;
+  dr.per_position = 512;
+  dr.n_taps = 5;
+  const runtime::PpWeights w = runtime::pp_weights(d, WeightKind::Int8);
+  for (const runtime::PrefillPath& pf : paths())
+    for (uint32_t dv : {0u, 32768u}) {
+      runtime::PpExtras x;
+      x.drafter = dr;
+      x.draft_vocab = dv;
+      const uint32_t s = 32, len = 16384;
+      const runtime::PpPlan base = runtime::pp_plan(d, s, len, w, KvCache::Bf16, pf);
+      const runtime::PpPlan p = runtime::pp_plan(d, s, len, w, KvCache::Bf16, pf, x);
+      for (uint32_t i = 0; i < 2; ++i) {
+        const runtime::PpDevicePlan &b = base.dev[i], &q = p.dev[i];
+        const size_t slots = runtime::pp_gdn_spec_bytes(d, q.stage.gdn, runtime::TapVerifyDims::kSlots);
+        CHECK_EQ(slots, size_t(6) * runtime::TapVerifyDims::gdn_spec_bytes(d) / 7 + size_t(q.stage.gdn) *
+                                                                                       (runtime::TapVerifyDims::gdn_spec_bytes(d) / 7 / d.gdn_layers));
+        CHECK_EQ(q.drafter_slots, slots);
+        CHECK_EQ(q.decode_state, b.decode_state + slots);
+        CHECK_EQ(q.kv, b.kv);
+        if (i == 0) {
+          CHECK_EQ(q.model, b.model);
+          CHECK_EQ(q.drafter, size_t{0});
+          CHECK_EQ(q.prefill_scratch, b.prefill_scratch);
+        } else {
+          CHECK_EQ(q.model, b.model + w.embed);
+          CHECK_EQ(q.drafter, dr.bytes(len));
+          const size_t taps = pf.prefill ? 2 * runtime::TapVerifyDims::prefill_taps_bytes(d, 5) : 0;
+          CHECK_EQ(q.drafter_taps, taps);
+          CHECK_EQ(q.prefill_scratch, b.prefill_scratch + taps);
+          CHECK_EQ(q.draft_vocab, dv ? loader::draft_vocab_bytes(dv, d.hidden, true).total() : size_t{0});
+        }
+      }
+    }
+  CHECK(throws([&] {
+    runtime::PpExtras x;
+    x.drafter = dr;
+    x.mtp = true;
+    runtime::pp_plan(d, 32, 4096, w, KvCache::Bf16, runtime::pp_no_prefill(), x);
+  }));
+  runtime::PpExtras x;
+  x.drafter = dr;
+  x.hook = true;
+  const runtime::PpChoice c = runtime::pp_auto_split_and_len(d, w, kTwo, kReserve, 262144, KvCache::Bf16, paths()[1], x);
+  const uint32_t one = runtime::max_len_that_fits(d, false, w.total(), kDevice, kReserve, 262144, paths()[1], {},
+                                                  KvCache::Bf16, dr);
+  CHECK(c.max_len > one);
+  const std::string line =
+      runtime::pp_describe(runtime::pp_plan(d, c.split, c.max_len, w, KvCache::Bf16, paths()[1], x), kTwo, kReserve);
+  CHECK(line.find("the DFlash drafter on device 1") != std::string::npos && line.find("DFlash:") != std::string::npos &&
+        line.find("MTP") == std::string::npos);
+  std::printf("drafter on device 1 (Qwen3.8, int8 drafter, l0-int8, cache on): auto split %u, max_len %u (one card "
+              "%u)\n%s\n",
+              c.split, c.max_len, one, line.c_str());
+}
+
 int main() {
   check_extras_off();
   check_gdn_spec();
@@ -390,6 +454,7 @@ int main() {
   check_verify_launches();
   check_kv_runs();
   check_serve_auto();
+  check_drafter_terms();
   std::printf("pp_serve_plan_test OK\n");
   return 0;
 }

@@ -77,11 +77,15 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::L
 // L0 backends and the flash attention only; `ctrl` is any Control block holding the chunk's
 // pos / n_active (the pipeline keeps one per chunk in flight). Throws, by name, for anything
 // else.
+//
+// `taps` (spec 19d, a drafter across the split): step_chunk's, for the sites this stage walks - each device writes
+// its own taps' columns of the one staging ([row - r0][tap][hidden], on the drafter's device: device 0's copies go
+// into the other card's memory). Null is the walk above, unchanged.
 void step_stage(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m,
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C, const void* ids,
                 l0::Mem& gdn_state_mem, l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem,
                 l0::Mem& kv_v_mem, const KvLayout& kv, PrefillBackend backend, Int8State* q,
-                const PpStage& st);
+                const PpStage& st, const PrefillTaps* taps = nullptr);
 
 // The tail only the LAST chunk runs: the final norm on the last row, `lm_head`
 // at M = 1 through the EXISTING decode binary, and the two argmax stages --

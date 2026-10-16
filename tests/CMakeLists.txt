@@ -3995,8 +3995,11 @@ b70_cli_reject(cli_reject_dflash_kv8 ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 -
   EXPECT "--kv-cache bf16 with --spec dflash")
 b70_cli_reject(cli_reject_dflash_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
   --spec dflash EXPECT "Kolibri-1 has none")
+# spec 19d: b70-decode stays one card (b70-serve --pp 2 serves the drafter).
+b70_cli_reject(cli_reject_dflash_pp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --pp 2
+  EXPECT "b70-decode --spec dflash runs on one card")
 set_tests_properties(cli_reject_dflash_bench cli_reject_dflash_mtp cli_reject_dflash_spec_max cli_reject_dflash_kv8
-  cli_reject_dflash_kolibri PROPERTIES LABELS dflash)
+  cli_reject_dflash_kolibri cli_reject_dflash_pp PROPERTIES LABELS dflash)
 # b70-serve --spec dflash's refusals before the device (cli/dflash_args.h).
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_dflash_mtp ${B70_NO_MODEL} --spec dflash --mtp 1 EXPECT "one proposer per server")
@@ -4008,7 +4011,9 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     EXPECT "--draft-format expects int8 or bf16")
   b70_serve_reject(cli_reject_serve_dflash_kv8 ${B70_NO_MODEL} --spec dflash --kv-cache int8
     EXPECT "--kv-cache bf16 with --spec dflash")
-  b70_serve_reject(cli_reject_serve_dflash_pp ${B70_NO_MODEL} --spec dflash --pp 2 EXPECT "runs on one card")
+  # spec 19d: --pp 2 serves the drafter on device 1, on the copy hand-off only
+  b70_serve_reject(cli_reject_serve_dflash_pp ${B70_NO_MODEL} --spec dflash --pp 2 --pipeline-handoff peer
+    EXPECT "needs --pipeline-handoff copy")
   b70_serve_reject(cli_reject_serve_dflash_sycl ${B70_NO_MODEL} --spec dflash --prefill-backend sycl-tla
     EXPECT "drop --prefill-backend sycl-tla")
   b70_serve_reject(cli_reject_serve_dflash_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --spec dflash
@@ -4033,6 +4038,13 @@ target_include_directories(dflash_scheduler_test PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_link_libraries(dflash_scheduler_test PRIVATE b70_server)
 add_test(NAME dflash_scheduler_test COMMAND dflash_scheduler_test)
 set_tests_properties(dflash_scheduler_test PROPERTIES LABELS dflash)
+# --spec dflash --pp 2 without a device: PipelineEngineAdapterT's DFlash path over a fake two-card engine with a tap
+# drafter (lossless greedy, seeded sampling, a restored turn drafting as the uninterrupted one, the refusals).
+add_executable(pp_dflash_serve_test server/pp_dflash_serve_test.cc)
+target_include_directories(pp_dflash_serve_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(pp_dflash_serve_test PRIVATE b70_server b70_plan)
+add_test(NAME pp_dflash_serve_test COMMAND pp_dflash_serve_test)
+set_tests_properties(pp_dflash_serve_test PROPERTIES LABELS dflash)
 # The same on the card, through PrefixSession over EngineAdapter (--spec dflash): the ring after a restore bitwise the
 # uninterrupted session's (and a cold run's after a block-end restore with a long tail), the continuation's ids and
 # per-iteration acceptance identical; a cold-ring control printed. SKIP 77 without either checkpoint.
@@ -4049,5 +4061,22 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP AND B70_TOKENIZER_ENABLED)
   add_test(NAME dflash_prefix_gpu_test COMMAND dflash_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_prefix_gpu_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+endif()
+# --spec dflash --pp 2 on two cards, BITWISE the one-card drafter (the copy hand-off at the auto split and at 20): the
+# prefill's ring, every verify's rows, the drafts and ids, the session and the hooked snapshots; a one-card snapshot
+# continued on two cards. SKIP 77 with fewer than two GPUs, without peer access or either checkpoint.
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(pp_dflash_test runtime/pp_dflash_test.cc)
+  target_include_directories(pp_dflash_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(pp_dflash_test PRIVATE b70_dflash_runtime b70_prefill_host b70_runtime b70_loader b70_l0
+    b70_model)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(pp_dflash_test)
+  endif()
+  add_dependencies(pp_dflash_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS} kernel_pp_handoff)
+  add_test(NAME pp_dflash_test COMMAND pp_dflash_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
+  set_tests_properties(pp_dflash_test PROPERTIES LABELS "checkpoint;dflash;pp" SKIP_RETURN_CODE 77
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
 endif()
 # ==== Spec 19d ==== (end) ====

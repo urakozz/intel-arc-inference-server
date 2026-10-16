@@ -153,11 +153,18 @@ inline PrefillPath pp_no_prefill() {
 //   hook  a spec 7 block hook on the prefill (b70-serve's prefix cache): each device's two
 //         block-end shadows of its GDN state and conv ring (and device 1's two of the head's
 //         hidden row with mtp), in prefill_scratch where PipelineEngine::memory_use counts them.
+//   drafter  (spec 19d, `--spec dflash --pp 2`; not with mtp - one proposer) a DFlash drafter on the last
+//         device beside lm_head: its weights and buffers (DrafterPlan, in `drafter`) and the embedding
+//         replica (in `model`) the draft list gathers; on EACH device the verify slots of its own GDN layers
+//         for TapVerifyDims::kSlots (pp_gdn_spec_bytes(d, gdn, 8), decode_state); with a prefill path, the
+//         last device's two tap stagings (one per chunk in flight, prefill_scratch). A draft vocabulary
+//         (draft_vocab) is the drafter's then.
 struct PpExtras {
   bool mtp = false;
-  uint32_t draft_vocab = 0;        // |V'| (spec 8 §11), with mtp only; 0 = the full head drafts
+  uint32_t draft_vocab = 0;        // |V'| (spec 8 §11), with mtp or a drafter; 0 = the full head drafts
   bool draft_vocab_int8 = true;    // the compact head's form: the lm_head's (int8 or bf16)
   bool hook = false;
+  DrafterPlan drafter;             // spec 19d: on() = a DFlash drafter on the last device
 };
 struct PpDevicePlan : MemoryComponents {
   PpStage stage;
@@ -166,6 +173,9 @@ struct PpDevicePlan : MemoryComponents {
   size_t embed_replica = 0, mtp_weights = 0;     // in model
   size_t mtp_buffers = 0, mtp_prefill = 0;       // in decode_state
   size_t shadows = 0;                            // in prefill_scratch
+  // Spec 19d's terms (a drafter): its verify slots (decode_state), its prefill tap stagings (prefill_scratch);
+  // its weights and buffers are MemoryComponents::drafter, the replica embed_replica.
+  size_t drafter_slots = 0, drafter_taps = 0;
 };
 struct PpPlan {
   uint32_t max_len = 0, split = 0;
@@ -187,7 +197,9 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
 // slot 3 only the stage's: (kSlots - 2) x gdn_state + stage_gdn x layer. No new binary; the
 // gaps cost (kSlots - 2) x (gdn_layers - stage_gdn) layers' state (Qwen3.8 at the even
 // split: 0.151 GB a card - a stage-stride variant would save it, a box decision).
-size_t pp_gdn_spec_bytes(const model::ModelDesc& d, uint32_t stage_gdn);
+// Spec 19d: `slots` = the verify lists' slot count (MtpDims::kSlots = 4 for MTP, TapVerifyDims::kSlots = 8 for a
+// drafter - the gdn_step_slots_M<M>_N<slots> binaries): (slots - 2) whole slots + the stage's share of the last.
+size_t pp_gdn_spec_bytes(const model::ModelDesc& d, uint32_t stage_gdn, uint32_t slots = MtpDims::kSlots);
 // The head's prefill state on the last device (spec 16d): the hidden rows step_mtp_kv
 // writes (mtp_prefill_hidden_bytes) and its two Control blocks (one per chunk in flight).
 size_t pp_mtp_prefill_bytes(const model::ModelDesc& d);

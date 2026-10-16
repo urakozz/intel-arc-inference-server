@@ -21,6 +21,7 @@
 #include "runtime/memory_plan.h"
 #include "runtime/pipeline_plan.h"
 #include "runtime/prefill_backend.h"
+#include "runtime/tap_drafter.h"
 
 // Spec 16b: decode with the model's layers split over two B70s (`b70-decode --pp 2`).
 //
@@ -74,6 +75,17 @@
 // ingest() and generate() run verify(0) + commit(0) per id (Engine's mtp_step1), and
 // prefill() fills the head's KV on device 1 after each chunk's layers (step_mtp_kv). The
 // snapshots carry the head's hidden row and KV layer in Engine's MTP layouts.
+//
+// **A DFlash drafter across the split (spec 19d, `--spec dflash --pp 2`)** - Engine's spec 19c contract on two
+// cards. The drafter (runtime/tap_drafter.h) lives on device 1 with lm_head and the embedding replica its draft list
+// gathers; each device holds the verify slots of its own GDN layers for 8 slots (pp_gdn_spec_bytes(d, gdn, 8)), and
+// its verify lists at M = 1 .. max_k + 1 (build_stage_verify_taps) copy the taps of the sites it walks into the
+// drafter's tap buffer - device 0's straight into device 1's memory, before its hand-off (the copy hand-off only).
+// verify(k) is a replay of each device's tap list; commit(j, t) moves gdn_live (mod 8) and pos on both and replays
+// the drafter's projection of rows 0..j on device 1; draft_tap(k, T, seed) replays the draft list on device 1. With
+// a drafter, ingest() and generate() run verify(0) + commit(0) per id (pos 0 included), prefill() taps the prompt's
+// last window() positions on both devices into a per-chunk staging on device 1 and projects each chunk's rows there
+// once both devices have finished it, and the snapshots carry the ring after the state (Engine's spec 19d layout).
 namespace runtime {
 
 struct PipelineOptions {
@@ -131,9 +143,13 @@ class PipelineEngine {
   // `stages` is runtime::place_stages()'s pair (device 0's model, device 1's), both loaded at
   // `max_len`. `d1` is a view of `d0`'s context. Throws when device 0 cannot access device
   // 1's memory (zeDeviceCanAccessPeer) - both hand-offs write it.
+  // `drafter` (spec 19d): a tap drafter on device 1 (its buffers at max_len), borrowed - it must outlive the engine;
+  // not with the MTP head; needs the copy hand-off and device 1's stage model holding the embedding replica
+  // (place_stages(..., drafter = true)). Attach it afterwards: drafter->attach_target(context(1), model(1),
+  // buffers(1).control, max_len, draft_vocab).
   PipelineEngine(l0::Context& d0, l0::Context& d1, std::vector<loader::LoadedModel> stages,
                  uint32_t max_len, const PipelineOptions& opt = {},
-                 KvCache kv = default_kv_cache());
+                 KvCache kv = default_kv_cache(), TapDrafter* drafter = nullptr);
   ~PipelineEngine();
   PipelineEngine(const PipelineEngine&) = delete;
   PipelineEngine& operator=(const PipelineEngine&) = delete;
@@ -200,6 +216,18 @@ class PipelineEngine {
   const CapturedStep& verify_step(uint32_t dev, uint32_t M) const;
   const CapturedStep& draft_step(uint32_t i) const;
   MtpBuffers* mtp_buffers();   // device 1's, null when MTP is off
+
+  // --- spec 19d: a tap drafter across the split (see the header) ---------------------------
+  bool has_drafter() const { return drafter_ != nullptr; }
+  TapDrafter* tap_drafter() const { return drafter_; }
+  // The deepest k verify() takes: kMaxDraft with the head, the drafter's max_k(), 0 otherwise.
+  uint32_t max_draft() const;
+  // The drafter's block of k drafts at pos into both devices' cur_token[1..k] (device 1's list writes them; the host
+  // mirrors them onto device 0) - greedy at temperature 0, else Gumbel at `temperature` with `seed`. k must be
+  // 1 .. max_verify_k(). Returns the readback (the drafts, the candidates and their scores - the sparse q).
+  const dflash::DFlashDraftOut& draft_tap(uint32_t k, float temperature, uint64_t seed);
+  bool tap_samples() const { return drafter_ && drafter_->samples(); }
+  uint64_t drafter_key() const { return drafter_ ? drafter_->key() : 0; }
 
   // --- spec 16d: the server's host reads (b70-serve --pp 2, cli/pipeline_serve_adapter.h) ---
   //
@@ -285,6 +313,12 @@ class PipelineEngine {
   void run_pair(l0::CmdList& list0, l0::CmdList& list1, const char* what);
   void run_one(uint32_t dev, l0::CmdList& list, const char* what);
   void require_mtp(const char* what) const;
+  void require_spec(const char* what) const;   // spec 19d: the head or a drafter
+  bool spec_on() const { return mtp() || drafter_ != nullptr; }
+  uint32_t gdn_slots() const;   // MtpBuffers::kSlots (MTP), TapVerifyDims::kSlots (a drafter), 1
+  // Spec 19d: n staged tap rows of `staging` (device 1, [row][tap][hidden]) at positions pos .. pos + n - 1 into the
+  // drafter's ring, 8 rows a replay of its projection list on device 1. Defined here; the prefill calls it.
+  void drafter_project(const void* staging, uint32_t pos, uint32_t n);
   void mtp_step1();             // Engine::mtp_step1: one plain token with MTP on
   void mtp_normalise_live();    // Engine::mtp_normalise_live, on both devices
   // Defined in pipeline_engine.cc, called by prefill(): the live slot into slot 0, no
@@ -315,6 +349,7 @@ class PipelineEngine {
   // Spec 16d: and device 1's shadow of the head's hidden row (MTP on).
   const l0::Mem* snap_hh_ = nullptr;
   std::vector<uint32_t> draft_ids_;
+  TapDrafter* drafter_ = nullptr;   // spec 19d: on device 1, borrowed
   static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
   uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;
   std::unique_ptr<l0::Mem> host_rows_;   // host_rows(): pinned, device 1's context
