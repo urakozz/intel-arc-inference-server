@@ -3591,8 +3591,9 @@ if(B70_MUSE)
     PROPERTIES LABELS "checkpoint;golden;muse" SKIP_RETURN_CODE 77 TIMEOUT 14400)
 endif()
 # b70-decode's model_type dispatch and Muse's refusals, before the device: tests/model/muse_glimmer/ holds only the
-# checkpoint's config.json (and generation_config.json), which is all the dispatch reads. b70-serve refuses the model
-# naming spec 23e. (23d removed 23c's cli_reject_muse_prefill / _prefill_len: Muse prefills now - spec 23d's block.)
+# checkpoint's config.json (and generation_config.json), which is all the dispatch reads. (23d removed 23c's
+# cli_reject_muse_prefill / _prefill_len: Muse prefills now - spec 23d's block; 23e removed cli_reject_muse_serve:
+# b70-serve serves it - its refusals are 23e's cli_reject_serve_muse_*.)
 set(_muse_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer)
 b70_cli_reject(cli_reject_muse_mtp ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "no MTP head")
 b70_cli_reject(cli_reject_muse_spec ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash EXPECT "spec 23f")
@@ -3600,9 +3601,6 @@ b70_cli_reject(cli_reject_muse_kv8 ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --kv-c
 b70_cli_reject(cli_reject_muse_maxlen ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --max-len 262144 EXPECT "decision 6")
 b70_cli_reject(cli_reject_muse_pp_device ${_muse_cfg} --ids ${B70_OK_IDS} --n 4 --pp 2 --device 1
   EXPECT "--device names one card")
-if(TARGET b70-serve)
-  b70_serve_reject(cli_reject_muse_serve ${_muse_cfg} EXPECT "spec 23e")
-endif()
 # ==== Spec 23c: Muse-Glimmer decode ==== (end) ====
 
 # ==== Spec 23d: Muse-Glimmer prefill (labels muse;prefill) ==== (begin) ====
@@ -3796,5 +3794,39 @@ if(B70_MUSE)
   add_test(NAME muse_snapshot_gpu_test COMMAND muse_snapshot_gpu_test ${B70_MUSE_SNAPSHOT} ${_muse_snap_ids})
   set_tests_properties(muse_snapshot_gpu_synth_test muse_snapshot_gpu_synth_pp_test muse_snapshot_gpu_cross_test
     muse_snapshot_gpu_test PROPERTIES LABELS "checkpoint;muse" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+# Task 5: b70-serve serves Muse-Glimmer (src/cli/muse_serve.h; 23c's cli_reject_muse_serve is gone). The adapter:
+# cli::muse::MuseEngineAdapterT instantiated over MuseEngine (an object library - the Mac's Level Zero syntax check
+# compiles it; b70-serve links the same instantiation). The refusals before the device, each by name, over
+# tests/model/muse_glimmer (config.json, generation_config.json and - for the template refusal - the older
+# chat_template.jinja the Vishva007 repos ship, 114f55eb..., Apache-2.0): --mtp / --spec mtp (no MTP head), --spec
+# dflash / lookup (spec 23f), --kv-cache int8 (decision 8), --prefill-backend l0-int8 / sycl-tla, --max-len above
+# 131072 (decision 6), --device with --pp 2, a template that is not the original's without --chat-template; and
+# --chat-template on another model.
+if(B70_MUSE)
+  add_library(muse_adapter_compile OBJECT cli/muse_adapter_compile.cc)
+  target_include_directories(muse_adapter_compile PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_adapter_compile PRIVATE b70_muse_runtime b70_server b70_tokenizer)
+endif()
+if(TARGET b70-serve AND COMMAND b70_serve_reject)
+  set(_muse_serve_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer)
+  b70_serve_reject(cli_reject_serve_muse_mtp ${_muse_serve_cfg} --mtp 1 EXPECT "no MTP head")
+  b70_serve_reject(cli_reject_serve_muse_spec_mtp ${_muse_serve_cfg} --spec mtp EXPECT "no MTP head")
+  b70_serve_reject(cli_reject_serve_muse_spec ${_muse_serve_cfg} --spec dflash EXPECT "spec 23f")
+  b70_serve_reject(cli_reject_serve_muse_lookup ${_muse_serve_cfg} --spec lookup EXPECT "spec 23f")
+  b70_serve_reject(cli_reject_serve_muse_kv8 ${_muse_serve_cfg} --kv-cache int8 EXPECT "decision 8")
+  b70_serve_reject(cli_reject_serve_muse_int8pf ${_muse_serve_cfg} --prefill-backend l0-int8 EXPECT "6.5 x 1024")
+  b70_serve_reject(cli_reject_serve_muse_sycl ${_muse_serve_cfg} --prefill-backend sycl-tla EXPECT "no Muse walk")
+  b70_serve_reject(cli_reject_serve_muse_maxlen ${_muse_serve_cfg} --max-len 262144 EXPECT "decision 6")
+  b70_serve_reject(cli_reject_serve_muse_device ${_muse_serve_cfg} --pp 2 --device 1 EXPECT "--device names one card")
+  b70_serve_reject(cli_reject_serve_muse_template ${_muse_serve_cfg} EXPECT "pass --chat-template FILE")
+  b70_serve_reject(cli_reject_serve_chat_template_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --chat-template x
+    EXPECT "Muse-Glimmer-30B only")
+  b70_serve_reject(cli_reject_serve_spec_dflash_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --spec dflash
+    EXPECT "--spec expects off, mtp or lookup")
+  set_tests_properties(cli_reject_serve_muse_mtp cli_reject_serve_muse_spec_mtp cli_reject_serve_muse_spec
+    cli_reject_serve_muse_lookup cli_reject_serve_muse_kv8 cli_reject_serve_muse_int8pf cli_reject_serve_muse_sycl
+    cli_reject_serve_muse_maxlen cli_reject_serve_muse_device cli_reject_serve_muse_template
+    cli_reject_serve_chat_template_other cli_reject_serve_spec_dflash_other PROPERTIES LABELS muse)
 endif()
 # ==== Spec 23e: Muse-Glimmer served ==== (end) ====
