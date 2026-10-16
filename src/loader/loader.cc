@@ -830,8 +830,9 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // Spec 8 §11: a draft vocabulary is a subset of the MTP draft's head (int8 or bf16), at a
   // size the compact GEMV and argmax are compiled for - all knowable before a byte is read.
   if (draft_vocab.size != 0) {
-    if (!mtp)
-      throw std::runtime_error("--draft-vocab drafts with the MTP head: it needs --mtp");
+    if (!mtp && !draft_vocab.for_drafter)
+      throw std::runtime_error("--draft-vocab drafts with the MTP head or a DFlash drafter: it needs --mtp or "
+                               "--spec dflash");
     if (lm_int4)
       throw std::runtime_error(
           "--draft-vocab gathers rows of an int8 or bf16 lm_head (spec 8 §11); this "

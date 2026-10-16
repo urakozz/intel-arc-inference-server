@@ -84,7 +84,11 @@ int main(int argc, char** argv) {
       runtime::plan(q, 32768, false, model_bytes, {}, {}, runtime::default_kv_cache(), dr);
   CHECK_EQ(off.drafter, size_t(0));
   CHECK_EQ(on.drafter, dr.bytes(32768));
-  CHECK_EQ(on.total(), off.total() + dr.bytes(32768));
+  // Spec 19c: and the engine's side - 7 more GDN slots (decode state) and, prefilling, the tap staging.
+  CHECK_EQ(dr.n_taps, 5u);
+  CHECK_EQ(on.drafter_slots, runtime::TapVerifyDims::gdn_spec_bytes(q));
+  CHECK_EQ(on.drafter_taps, runtime::TapVerifyDims::prefill_taps_bytes(q, 5));
+  CHECK_EQ(on.total(), off.total() + dr.bytes(32768) + on.drafter_slots + on.drafter_taps);
   const std::string loff = runtime::format_memory("x", off, 32'000'000'000ull),
                     lon = runtime::format_memory("x", on, 32'000'000'000ull);
   CHECK(loff.find("drafter") == std::string::npos && lon.find(" drafter ") != std::string::npos);
