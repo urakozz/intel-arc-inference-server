@@ -3949,7 +3949,7 @@ add_test(NAME dflash_accept_test COMMAND dflash_accept_test)
 set_tests_properties(dflash_accept_test PROPERTIES LABELS dflash TIMEOUT 600)
 add_executable(dflash_engine_host_test runtime/dflash_engine_host_test.cc)
 target_include_directories(dflash_engine_host_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(dflash_engine_host_test PRIVATE b70_plan b70_server)
+target_link_libraries(dflash_engine_host_test PRIVATE b70_plan b70_server PkgConfig::ZE)
 add_test(NAME dflash_engine_host_test COMMAND dflash_engine_host_test)
 set_tests_properties(dflash_engine_host_test PROPERTIES LABELS dflash)
 # The engine with the real drafter beside the gate checkpoint (int8 head, bf16 KV): the lists' counts, the taps and
@@ -4009,10 +4009,12 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_dflash_kv8 ${B70_NO_MODEL} --spec dflash --kv-cache int8
     EXPECT "--kv-cache bf16 with --spec dflash")
   b70_serve_reject(cli_reject_serve_dflash_pp ${B70_NO_MODEL} --spec dflash --pp 2 EXPECT "runs on one card")
+  b70_serve_reject(cli_reject_serve_dflash_sycl ${B70_NO_MODEL} --spec dflash --prefill-backend sycl-tla
+    EXPECT "drop --prefill-backend sycl-tla")
   b70_serve_reject(cli_reject_serve_dflash_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --spec dflash
     EXPECT "no DFlash drafter exists for K2-Horizon")
   set_tests_properties(cli_reject_serve_dflash_mtp cli_reject_serve_dflash_model_alone cli_reject_serve_dflash_spec_max
     cli_reject_serve_dflash_min_match cli_reject_serve_dflash_format cli_reject_serve_dflash_kv8
-    cli_reject_serve_dflash_pp cli_reject_serve_dflash_k2 PROPERTIES LABELS dflash)
+    cli_reject_serve_dflash_pp cli_reject_serve_dflash_sycl cli_reject_serve_dflash_k2 PROPERTIES LABELS dflash)
 endif()
 # ==== Spec 19c ==== (end) ====

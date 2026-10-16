@@ -1124,6 +1124,10 @@ int run(int argc, char** argv) {
   const runtime::PrefillPath pp_path = cli::prefill_path(
       have_prefill_len || prefill,
       have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
+  {   // spec 19c: the drafter's prefill refusals, before the device (cli/dflash_args.h)
+    const char* replay_env = std::getenv("B70_PREFILL_REPLAY");
+    cli::dflash::check_engine(dflash, pipe.on(), kv_cache, pp_path, replay_env != nullptr && std::string(replay_env) == "1");
+  }
   // Spec 12b's int8-KV refusals are the Qwen3.5 family's (B70_DECODE_ATTN, the composed prefill);
   // K2-Horizon's engine has its own int8 twins for flash and eager and refuses its own backends.
   if (!cli::k2::is_k2(path)) cli::check_kv_cache(kv_cache, pp_path);   // spec 12b
