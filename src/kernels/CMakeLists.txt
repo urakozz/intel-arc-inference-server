@@ -542,6 +542,24 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
 endif()
 # ==== Spec 19b ==== (end) ====
 
+# ==== Spec 19c: DFlash in the decode loop ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-05-spec19c-dflash-engine-loop.md. Additive only: no existing variant's name or
+# command line moves, and no engine binds any of these without a drafter (`--spec dflash`). With a drafter the Engine's
+# verify lists (runtime::build_verify_taps) run M = 1..8 rows over 8 GDN state slots, so:
+#   gdn_step_slots_M<M>_N8, M = 1..4   the per-row slot build at the rows spec 8's lists had at 4 slots (B70_VERIFY_M8
+#                                      built M = 5..8 at 8)
+#   gemv_bf16_M<M>_K5120_N248320       the bf16 lm_head at M = 5, 6, 8 (7 is 19b's draft head) - `--lm-head bf16`
+# Every other binary the lists bind is spec 8's (M = 1..4) or B70_VERIFY_M8's (M = 5..8).
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  foreach(MM 1 2 3 4)
+    add_ocloc_kernel(gdn_step_slots_M${MM}_N8 SOURCE ${GDN_CL} DEFINES ${VM8_SLOT_DEFINES} M=${MM})
+  endforeach()
+  foreach(MM 5 6 8)
+    add_gemv_bf16_variant(${MM} 5120 248320 64 1)
+  endforeach()
+endif()
+# ==== Spec 19c ==== (end) ====
+
 # --- Spec 15b: other models' shapes ------------------------------------------
 # Every binary above is built at Qwen3.8's shapes - hidden 5120, FA 24 q / 4 kv
 # heads, GDN 16 k / 48 v heads - which the .cl sources bake by default. The
