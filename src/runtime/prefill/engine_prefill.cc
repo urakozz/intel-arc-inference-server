@@ -71,7 +71,11 @@ MemoryComponents Engine::memory_use() const {
   // decode state; the head's weights are in `model` (LoadReport::mtp_bytes).
   c.decode_state = persist_.bytes() - c.kv + decode_scratch_.bytes() +
                    (mtp_ ? mtp_->bytes() : 0) + (mtp_pf_hid_ ? mtp_pf_hid_->size() : 0);
-  c.prefill_scratch = pf_ ? pf_->bytes() + pf_->lazy_bytes() : 0;
+  // Spec 19c: a drafter's verify slots are decode state, its prefill tap staging prefill scratch, and the drafter
+  // itself (weights, ring, taps, scratch) its own term.
+  if (df_slots_) c.decode_state += df_slots_->size();
+  c.prefill_scratch = (pf_ ? pf_->bytes() + pf_->lazy_bytes() : 0) + (df_pf_taps_ ? df_pf_taps_->size() : 0);
+  c.drafter = drafter_ ? drafter_->bytes() : 0;
   c.int8 = pfx_ && pfx_->int8 ? pfx_->int8->bytes() : 0;
   // Spec 8 §11: the draft vocabulary's compact head and id table - the loader's, but
   // outside LoadReport::total(), so `model` reads as before; its compact logits are in
@@ -164,6 +168,10 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   // The prefill GDN path reads slot 0 directly, so a live slot left by a commit is
   // copied there first.
   uint16_t* hid = nullptr;
+  if (drafter_) {   // spec 19c: slot 0 holds the state the prefill GDN path reads and writes
+    mtp_normalise_live();
+    verify_k_ = kNoVerify;
+  }
   if (mtp_) {
     if (!is_l0(backend))
       throw std::runtime_error("runtime::Engine::prefill: the MTP head's prefill runs on the L0"

@@ -18,6 +18,7 @@
 #include "runtime/control.h"
 #include "runtime/memory_plan.h"
 #include "runtime/prefill_backend.h"
+#include "runtime/tap_drafter.h"
 
 namespace runtime {
 
@@ -60,8 +61,13 @@ class Engine {
   // int8 needs decode attention v2 and, for prefill(), the L0 backends' flash attention;
   // anything else throws (at capture, or at the first prefill) rather than reading int8
   // rows as bf16.
+  //
+  // `drafter` (spec 19c, `--spec dflash`): a proposer fed by the target's taps (runtime/tap_drafter.h), borrowed - it
+  // must outlive the Engine. The Engine then allocates 8 GDN state slots (TapVerifyDims) and captures the verify
+  // lists at M = 1 .. drafter->max_k() + 1 with the taps (build_verify_taps); ingest(), generate() and commit() keep
+  // the drafter's ring filled (see "spec 19c" below). Not with the MTP head (one proposer per engine): throws.
   Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len,
-         bool debug_resid = false, KvCache kv = default_kv_cache());
+         bool debug_resid = false, KvCache kv = default_kv_cache(), TapDrafter* drafter = nullptr);
 
   // Zeroes exactly the persistent group - control, gdn_state, conv_ring, kv_k,
   // kv_v. Scratch is deliberately NOT zeroed: no step may read scratch it has
@@ -258,6 +264,37 @@ class Engine {
   const CapturedStep& verify_step(uint32_t M) const;
   const CapturedStep& draft_step(uint32_t i) const;
 
+  // --- spec 19c: a tap drafter (DFlash) -------------------------------------------------
+  //
+  // On iff the Engine was built with a TapDrafter. Then verify(k) / commit(j, t) / max_verify_k() are spec 8's
+  // contract with three differences:
+  //   - k goes up to max_draft() = drafter->max_k() (7 for DFlash 2's block of 8) and the verify list is
+  //     build_verify_taps' at M = k + 1 over TapVerifyDims::kSlots (8) GDN slots: row m's state into slot
+  //     (live + m) % 8, so commit(j, t) makes row j's state live by setting Control::gdn_live = (live + j) % 8 -
+  //     the GDN state is then exactly the state after the last accepted row, rows past j are stale slots that no
+  //     list reads before a later verify overwrites them (and the conv ring's positions past n + j are rewritten
+  //     before any row reads them - gdn_step.cl's slot disjointness at ring depth 16 >= M + 3);
+  //   - the drafts are whatever the caller (the drafter's draft list) wrote into cur_token[1..k]; there is no
+  //     draft() / draft_ids() (those are the MTP head's);
+  //   - commit(j, t) then replays the drafter's projection of verify rows 0..j - the committed positions
+  //     n .. n + j - into its ring (TapDrafter::projection), before it returns. The rejected rows' taps are never
+  //     projected; t has no tap (it is the next block's row 0).
+  // verify(0) + commit(0, verify_ids()[0]) is one plain token and, with a drafter, is what ingest() and generate()
+  // run (pos 0 included: nothing here needs h_{-1}). prefill() fills the ring from the prompt's last window()
+  // positions (spec 19c Task 3).
+  bool has_drafter() const { return drafter_ != nullptr; }
+  TapDrafter* tap_drafter() const { return drafter_; }
+  // The deepest k verify() takes: kMaxDraft with the MTP head, drafter->max_k() with a drafter, 0 otherwise.
+  uint32_t max_draft() const;
+  // The GDN slot count of the verify lists: MtpBuffers::kSlots (MTP) or TapVerifyDims::kSlots (drafter).
+  uint32_t gdn_slots() const;
+  // Spec 19c: the drafter's GDN state slots 1..7 (slot-major, one gdn_state each); null without a drafter.
+  const l0::Mem* drafter_slots() const { return df_slots_.get(); }
+  // Replays a list that is not the Engine's own (the drafter's draft and projection lists) on this engine's queue
+  // and waits for it: nothing of the Engine's is in flight before or after. The list must only read Control and
+  // the buffers it was captured against.
+  void replay_aux(l0::CmdList& list);
+
   l0::Context& context() const { return ctx_; }
   const loader::LoadedModel& model() const { return model_; }
   KvCache kv_cache() const { return persist_.kv_lay.form; }   // spec 12b
@@ -275,12 +312,20 @@ class Engine {
   // KV cache and the RoPE table.
   void replay();
   // Spec 8: one plain token with MTP on (verify(0) + commit(0), or the plain list at
-  // pos 0 plus the hidden bookkeeping) - what ingest() and generate() run then.
+  // pos 0 plus the hidden bookkeeping) - what ingest() and generate() run then. Spec 19c:
+  // with a drafter, verify(0) + commit(0) at every pos.
   void mtp_step1();
   void require_mtp(const char* what) const;
+  void require_spec(const char* what) const;   // spec 19c: MTP or a drafter
   // Spec 8: before anything that reads gdn_state directly (prefill, save_state's
   // callers see the live slot): copy the live slot into slot 0 and make 0 live.
+  // Spec 19c: from the drafter's slots as well.
   void mtp_normalise_live();
+  // The live GDN slot's device address (slot 0 = gdn_state; MTP's or the drafter's slots).
+  const void* live_gdn_slot() const;
+  // Spec 19c (defined in engine_prefill.cc): the prefill tail of the drafter's ring - the staged taps of rows
+  // [r0, r0 + n) at positions pos .. pos + n - 1, projected 8 rows a replay.
+  void drafter_project_staged(uint32_t pos, uint32_t n);
 
   l0::Context& ctx_;
   loader::LoadedModel model_;
@@ -308,6 +353,12 @@ class Engine {
   std::vector<CapturedStep> verify_steps_;   // [M - 1] for M = 1..kSlots
   std::unique_ptr<l0::Mem> mtp_pf_hid_;      // prefill: bf16 [kC + 1][hidden], lazy
   std::vector<uint32_t> draft_ids_;
+  // Spec 19c: the borrowed drafter, its 7 GDN slots (TapVerifyDims), what the verify lists bind, and the
+  // prefill's tap staging (bf16 [kC][taps][hidden], lazy: the first prefill).
+  TapDrafter* drafter_ = nullptr;
+  std::unique_ptr<l0::Mem> df_slots_;
+  TapVerify df_tv_;
+  std::unique_ptr<l0::Mem> df_pf_taps_;
   static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
   uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;
   l0::Queue queue_;

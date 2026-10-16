@@ -3920,3 +3920,47 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   set_tests_properties(dflash_draft_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # ==== Spec 19b ==== (end) ====
+
+# ==== Spec 19c: DFlash in the decode loop ==== (begin) ====
+# The binaries the Engine's tap verify lists add (src/kernels/CMakeLists.txt's Spec 19c block): checked to exist as
+# targets, as 19b's block does.
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  set(B70_DFLASH_VERIFY_KERNELS)
+  foreach(MM 1 2 3 4)
+    list(APPEND B70_DFLASH_VERIFY_KERNELS kernel_gdn_step_slots_M${MM}_N8)
+  endforeach()
+  foreach(MM 5 6 8)
+    list(APPEND B70_DFLASH_VERIFY_KERNELS kernel_gemv_bf16_M${MM}_K5120_N248320)
+  endforeach()
+  foreach(t ${B70_DFLASH_VERIFY_KERNELS})
+    if(NOT TARGET ${t})
+      message(FATAL_ERROR "spec 19c: ${t} is not built (src/kernels/CMakeLists.txt)")
+    endif()
+  endforeach()
+endif()
+# Plan: docs/superpowers/plans/2026-10-05-spec19c-dflash-engine-loop.md. Host: the arithmetic the loop rests on
+# (the tap sites, the verify slots, the planner's terms, the cost table, the sparse-q acceptance). Box: the engine
+# with the real drafter beside the gate checkpoint (dflash_engine_test).
+add_executable(dflash_engine_host_test runtime/dflash_engine_host_test.cc)
+target_include_directories(dflash_engine_host_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dflash_engine_host_test PRIVATE b70_plan)
+add_test(NAME dflash_engine_host_test COMMAND dflash_engine_host_test)
+set_tests_properties(dflash_engine_host_test PROPERTIES LABELS dflash)
+# The engine with the real drafter beside the gate checkpoint (int8 head, bf16 KV): the lists' counts, the taps and
+# the commit projection (Task 1), D3 at M = 1..8, partial acceptance (the GDN state at the last accepted row, the
+# ring), D2 on the card at K 7 / 3 / 1, the last positions of max_len. SKIP 77 without either checkpoint.
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(dflash_engine_test runtime/dflash_engine_test.cc)
+  target_include_directories(dflash_engine_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(dflash_engine_test PRIVATE b70_dflash_runtime b70_prefill_host b70_runtime b70_loader
+    b70_l0 b70_model)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(dflash_engine_test)
+  endif()
+  add_dependencies(dflash_engine_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
+  add_test(NAME dflash_engine_test COMMAND dflash_engine_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
+  set_tests_properties(dflash_engine_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
+endif()
+# ==== Spec 19c ==== (end) ====

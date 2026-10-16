@@ -286,6 +286,29 @@ MtpSizes MtpDims::sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t
   return s;
 }
 
+size_t TapVerifyDims::gdn_spec_bytes(const model::ModelDesc& desc) {
+  return size_t{kSlots - 1} * gdn_state_bytes(desc);
+}
+
+size_t TapVerifyDims::prefill_taps_bytes(const model::ModelDesc& desc, uint32_t n_taps) {
+  return size_t{PrefillScratchDims::kC} * n_taps * desc.hidden * kBf16;
+}
+
+std::vector<std::vector<uint32_t>> tap_sites(const model::ModelDesc& desc,
+                                             const std::vector<uint32_t>& layers) {
+  if (layers.empty()) throw std::invalid_argument("runtime::tap_sites: no tapped layer");
+  std::vector<std::vector<uint32_t>> sites(size_t{desc.layers} + 1);
+  for (size_t t = 0; t < layers.size(); ++t) {
+    if (layers[t] >= desc.layers)
+      throw std::invalid_argument("runtime::tap_sites: layer " + std::to_string(layers[t]) + " is not one of " +
+                                  desc.name + "'s " + std::to_string(desc.layers));
+    if (t > 0 && layers[t] <= layers[t - 1])
+      throw std::invalid_argument("runtime::tap_sites: the tapped layers are not strictly ascending");
+    sites[layers[t] + 1].push_back(static_cast<uint32_t>(t));
+  }
+  return sites;
+}
+
 size_t mtp_prefill_hidden_bytes(const model::ModelDesc& desc) {
   return size_t{PrefillScratchDims::kC + 1} * desc.hidden * kBf16;
 }
