@@ -50,6 +50,36 @@ struct BatchEngineIface {
   };
   virtual std::vector<uint32_t> step_batch(const std::vector<Row>& rows) = 0;
 
+  // Spec 19d (spec 19 §5 "Batching": one drafter ring per slot, the draft list batching slots as the verify does):
+  // speculative decoding under the scheduler. spec_k() == 0 (the default) means the scheduler calls step_batch()
+  // only, exactly as before. Otherwise step_spec(rows) runs ONE draft / verify / accept iteration over every row
+  // (distinct slots, each with an id pending): row r drafts up to rows[r].k ids (<= spec_k(); 0 = a plain step; the
+  // engine may draft fewer near max_len) from ITS SLOT'S proposer state alone - a DFlash drafter's ring per slot,
+  // which no other slot's row reads or writes - verifies them, and keeps the longest acceptable prefix (greedy: the
+  // target's argmax; sampled: the lossless rule with the row's own *rng, so a seeded request draws the same ids
+  // whatever shares the step). It returns per row the pending id then the kept drafts (1 .. k + 1 ids); pos(slot)
+  // counts them all and the next id is pending. truncate_to(slot, pos) keeps fewer of the slot's last run (an EOS,
+  // a stop or max_tokens inside it): the slot is then exactly what that many plain steps leave - EngineIface's
+  // truncate_to, per slot. The slot's snapshots (save_state) carry its ring, keyed by drafter_key().
+  struct SpecRow {
+    uint32_t slot;
+    const Sampling* sampling;
+    std::mt19937_64* rng;
+    uint32_t k;      // drafts asked for this iteration (the request's own policy, server::AdaptiveK)
+  };
+  virtual uint32_t spec_k() { return 0; }
+  virtual std::vector<std::vector<uint32_t>> step_spec(const std::vector<SpecRow>& rows) {
+    std::vector<Row> plain;
+    for (const SpecRow& r : rows) plain.push_back({r.slot, r.sampling, r.rng});
+    std::vector<std::vector<uint32_t>> out;
+    for (uint32_t id : step_batch(plain)) out.push_back({id});
+    return out;
+  }
+  virtual void truncate_to(uint32_t slot, uint32_t pos) {
+    if (pos != this->pos(slot))
+      throw std::logic_error("BatchEngineIface::truncate_to: no speculative run to shorten on this engine");
+  }
+
   // Spec 7 (plan 7b's snapshot calls), per slot. The host layouts are EngineIface's: one
   // state blob of state_bytes(), KV in save_kv's layout, kv_bytes(n) for n positions.
   // Defaults throw, so an engine without them runs with the prefix cache off only.

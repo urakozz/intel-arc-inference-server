@@ -332,16 +332,32 @@ struct DrafterMockEngine : StateMockEngine {
 // draw from the row's own generator only. `clock` counts cost in mock ticks: a decode step
 // costs `step_cost` whatever its row count (decode is bandwidth-bound, spec 13 §1), a
 // prefill call costs its ids / `prefill_rate`. `events` logs the calls for ordering checks.
+//
+// Spec 19d: with `spec` > 0 it is a speculative batched engine with a DFlash-like drafter: one ring per slot
+// (`window` slots, filled as runtime::Engine fills its drafter's: a prefill chunk projects the positions inside the
+// window of its end, every consumed decode id its own position; reset() zeroes it), carried by the slot's
+// save_state / load_state and keyed by drafter_key(). step_spec drafts for a row from ITS slot's ring alone: with a
+// ring that holds the true projections of the window before the anchor n, draft j >= 2 is wrong when
+// mix(hash(the ring), n * 8 + j) % 4 == 0 (draft 1 always right); with any slot of that window wrong (a ring another
+// session left, a cold one) every draft is wrong. So the acceptance a slot sees is a function of its own ring - a row
+// that read another slot's ring, or a restore that left the ring behind, accepts differently. A right draft is the
+// target's own next id (greedy: the argmax rule; sampled: the row's own draw, one per id exactly as step_batch
+// draws), and the run stops at the first wrong one. `spec_log[slot]` records every iteration's (anchor, drafts kept).
+// truncate_to rewinds the slot to any point of its last run (state, pending id and ring as they were there).
 struct MockBatchEngine : server::BatchEngineIface {
   struct Slot {
     std::vector<uint32_t> kv;
     uint64_t state = 0;
     uint32_t p = 0, cur = 0, prompt_end = 0;
     bool pending = false;
+    std::vector<uint64_t> ring;   // spec 19d
   };
   explicit MockBatchEngine(uint32_t n_slots = 4, uint32_t len = 1024) : maxlen(len) {
     slot.resize(n_slots);
-    for (auto& s : slot) s.kv.assign(maxlen, 0);
+    for (auto& s : slot) {
+      s.kv.assign(maxlen, 0);
+      s.ring.assign(window, 0);
+    }
     for (uint32_t i = 0; i < 24; ++i) words.push_back(1000 + i);
   }
   uint32_t maxlen;
@@ -356,6 +372,35 @@ struct MockBatchEngine : server::BatchEngineIface {
   int step_us = 0;                 // wall-clock sleep per step (threaded tests)
   std::vector<std::string> events;
   std::atomic<uint64_t> steps{0};
+  // Spec 19d: the speculative mode (see above).
+  uint32_t spec = 0;
+  static constexpr uint32_t window = 4;
+  uint64_t dkey = 0xD1AF7E2;
+  bool ring_in_state = true;             // false: 19c's snapshot (the ring stays as it was) - the mutant
+  std::vector<std::vector<Slot>> runs;   // per slot: the slot after each id of its last run
+  std::map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>> spec_log;   // per slot: (anchor pos, kept)
+  std::vector<uint32_t> truncations;     // every truncate_to's pos
+
+  static uint64_t projection(const Slot& s, uint32_t at) {
+    uint64_t h = 0x51ED27;
+    for (uint32_t i = 0; i <= at; ++i) h = StateMockEngine::mix(h, s.kv[i]);
+    return h;
+  }
+  static void project(Slot& s, uint32_t at) { s.ring[at % window] = projection(s, at); }
+  static bool ring_true(const Slot& s, uint32_t n) {
+    for (uint32_t q = n > window ? n - window : 0; q < n; ++q)
+      if (s.ring[q % window] != projection(s, q)) return false;
+    return true;
+  }
+  static uint64_t ring_hash(const Slot& s) {
+    uint64_t h = 0;
+    for (uint64_t r : s.ring) h = StateMockEngine::mix(h, r);
+    return h;
+  }
+  std::vector<Slot>& run_of(uint32_t i) {
+    if (runs.size() < slot.size()) runs.resize(slot.size());
+    return runs[i];
+  }
 
   uint32_t next(const Slot& s) const {
     const uint32_t generated = s.p - s.prompt_end + 1;   // the pending id's index, 1-based
@@ -383,6 +428,8 @@ struct MockBatchEngine : server::BatchEngineIface {
     s.state = 0;
     s.p = s.cur = s.prompt_end = 0;
     s.pending = false;
+    s.ring.assign(window, 0);
+    run_of(i).clear();
     events.push_back(ev("reset", i, 0));
   }
   void prefill(const std::vector<Chunk>& chunks) override {
@@ -392,9 +439,12 @@ struct MockBatchEngine : server::BatchEngineIface {
       if (c.n == 0) throw std::runtime_error("mock: empty chunk");
       Slot& s = slot.at(c.slot);
       e += " " + std::to_string(c.slot) + ":" + std::to_string(c.n);
+      run_of(c.slot).clear();
+      const uint32_t end = s.p + c.n, from = end > window ? std::max(s.p, end - window) : s.p;
       for (uint32_t k = 0; k < c.n; ++k) {
         if (c.ids[k] == bad_id) throw std::runtime_error("mock: id out of vocabulary");
         consume(s, c.ids[k]);
+        if (s.p - 1 >= from) project(s, s.p - 1);
       }
       total += c.n;
       if (c.last) {
@@ -414,8 +464,10 @@ struct MockBatchEngine : server::BatchEngineIface {
       Slot& s = slot.at(r.slot);
       if (!s.pending) throw std::logic_error("mock: step on a slot with nothing pending");
       e += " " + std::to_string(r.slot);
+      run_of(r.slot).clear();
       const uint32_t id = s.cur;
       consume(s, id);
+      project(s, s.p - 1);
       s.cur = next(s);
       if (!r.sampling->greedy && s.cur != eos) s.cur = words[(*r.rng)() % words.size()];
       out.push_back(id);
@@ -426,18 +478,77 @@ struct MockBatchEngine : server::BatchEngineIface {
     return out;
   }
 
+  // Spec 19d: one draft / verify / accept iteration per row (see the struct's comment).
+  uint32_t spec_k() override { return spec; }
+  std::vector<std::vector<uint32_t>> step_spec(const std::vector<SpecRow>& rows) override {
+    if (spec == 0) throw std::logic_error("mock: step_spec with spec_k 0");
+    std::vector<std::vector<uint32_t>> out;
+    std::string e = "spec";
+    for (const SpecRow& r : rows) {
+      Slot& s = slot.at(r.slot);
+      if (!s.pending) throw std::logic_error("mock: step_spec on a slot with nothing pending");
+      if (r.k > spec) throw std::logic_error("mock: a row asked for more drafts than spec_k()");
+      const uint32_t k = std::min(r.k, s.p + 1 < maxlen ? maxlen - s.p - 1 : 0u);
+      e += " " + std::to_string(r.slot) + ":" + std::to_string(k);
+      const uint64_t rh = ring_hash(s);   // the drafter reads its ring before the verify writes anything
+      const uint32_t n = s.p;
+      const bool good = ring_true(s, n);
+      std::vector<Slot>& hist = run_of(r.slot);
+      hist.clear();
+      std::vector<uint32_t> ids;
+      for (uint32_t j = 0; j <= k; ++j) {
+        if (j > 0 && (!good || (j >= 2 && StateMockEngine::mix(rh, uint64_t(n) * 8 + j) % 4 == 0)))
+          break;   // draft j is wrong
+        const uint32_t id = s.cur;
+        consume(s, id);
+        project(s, s.p - 1);
+        s.cur = next(s);
+        if (!r.sampling->greedy && s.cur != eos) s.cur = words[(*r.rng)() % words.size()];
+        ids.push_back(id);
+        hist.push_back(s);
+      }
+      spec_log[r.slot].push_back({n, uint32_t(ids.size() - 1)});
+      out.push_back(ids);
+    }
+    clock += step_cost;
+    events.push_back(e);
+    ++steps;
+    return out;
+  }
+  void truncate_to(uint32_t i, uint32_t at) override {
+    truncations.push_back(at);
+    Slot& s = slot.at(i);
+    if (at == s.p) return;
+    for (const Slot& h : run_of(i))
+      if (h.p == at) {
+        s = h;
+        events.push_back(ev("truncate", i, at));
+        return;
+      }
+    throw std::logic_error("mock: truncate_to " + std::to_string(at) + " is not inside slot " + std::to_string(i) +
+                           "'s last run");
+  }
+  uint64_t drafter_key() override { return spec ? dkey : 0; }
+
   uint32_t block() override { return blk; }
-  size_t state_bytes() override { return sizeof(uint64_t); }
+  size_t state_bytes() override {
+    return sizeof(uint64_t) + (spec && ring_in_state ? window * sizeof(uint64_t) : 0);
+  }
   size_t kv_bytes(uint32_t n) override { return size_t(n) * sizeof(uint32_t); }
   void save_state(uint32_t i, void* host) override {
     std::memcpy(host, &slot.at(i).state, sizeof(uint64_t));
+    if (spec && ring_in_state)
+      std::memcpy(static_cast<uint8_t*>(host) + 8, slot[i].ring.data(), window * sizeof(uint64_t));
     events.push_back(ev("save_state", i, slot[i].p));
   }
   void load_state(uint32_t i, const void* host, uint32_t at) override {
     Slot& s = slot.at(i);
     std::memcpy(&s.state, host, sizeof(uint64_t));
+    if (spec && ring_in_state)
+      std::memcpy(s.ring.data(), static_cast<const uint8_t*>(host) + 8, window * sizeof(uint64_t));
     s.p = at;
     s.pending = false;
+    run_of(i).clear();
     events.push_back(ev("load_state", i, at));
   }
   void save_kv(uint32_t i, uint32_t b, uint32_t e, void* host) override {

@@ -4026,6 +4026,13 @@ target_include_directories(dflash_prefix_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${
 target_link_libraries(dflash_prefix_test PRIVATE b70_server)
 add_test(NAME dflash_prefix_test COMMAND dflash_prefix_test)
 set_tests_properties(dflash_prefix_test PROPERTIES LABELS dflash)
+# Task 2: speculative decoding under the batching scheduler (one drafter ring per slot) against the mock batched
+# engine's speculative mode. Host only.
+add_executable(dflash_scheduler_test server/dflash_scheduler_test.cc)
+target_include_directories(dflash_scheduler_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dflash_scheduler_test PRIVATE b70_server)
+add_test(NAME dflash_scheduler_test COMMAND dflash_scheduler_test)
+set_tests_properties(dflash_scheduler_test PROPERTIES LABELS dflash)
 # The same on the card, through PrefixSession over EngineAdapter (--spec dflash): the ring after a restore bitwise the
 # uninterrupted session's (and a cold run's after a block-end restore with a long tail), the continuation's ids and
 # per-iteration acceptance identical; a cold-ring control printed. SKIP 77 without either checkpoint.
