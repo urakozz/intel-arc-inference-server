@@ -22,6 +22,7 @@
 #include "runtime/buffer_sizes.h"
 #include "runtime/memory_plan.h"
 #include "server/adaptive_k.h"
+#include "cli/dflash_args.h"
 
 namespace {
 
@@ -138,9 +139,30 @@ void cost_case() {
   CHECK(lo == 0);
 }
 
+// The final review's Important 1: what Engine::prefill would refuse per request is refused before the device.
+void refusal_case() {
+  cli::dflash::Args a;
+  a.on = true;
+  int refused = 0;
+  const auto expect = [&](const runtime::PrefillPath& p, bool replay, const char* what) {
+    try {
+      cli::dflash::check_engine(a, false, runtime::KvCache::Bf16, p, replay);
+    } catch (const std::runtime_error& e) {
+      if (std::string(e.what()).find(what) != std::string::npos) ++refused;
+    }
+  };
+  expect({true, runtime::PrefillBackend::SyclTla, false}, false, "sycl-tla");
+  expect({true, runtime::PrefillBackend::L0Int8, false}, true, "B70_PREFILL_REPLAY");
+  CHECK(refused == 2);
+  cli::dflash::check_engine(a, false, runtime::KvCache::Bf16, {true, runtime::PrefillBackend::L0Int8, false}, false);
+  cli::dflash::check_engine(a, false, runtime::KvCache::Bf16, {false, runtime::PrefillBackend::SyclTla, false}, true);
+  std::printf("check_engine: sycl-tla prefill and B70_PREFILL_REPLAY refused before the device\n");
+}
+
 }  // namespace
 
 int main() {
+  refusal_case();
   tap_sites_case();
   dims_case();
   plan_case();

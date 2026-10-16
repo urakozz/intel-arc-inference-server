@@ -17,6 +17,7 @@
 //   --pp 2                 the drafter beside a split target (spec 19 §5's hand-off of the taps) is 19d's
 //   --kv-cache int8        the verify lists at M = 5..8 have no int8-KV attention binaries (kv8.cl builds M <= 4)
 //   B70_DECODE_ATTN=v1     decode attention v1 is not built at M = 5..8
+//   sycl-tla prefill, B70_PREFILL_REPLAY=1   the drafter's prefill taps are copies on the L0 list
 // and by the loader / the capture (with the reason): a target the drafter is not trained for
 // (model::check_dflash_target), an int4 lm_head (the draft head reads int8 or bf16 rows).
 #include <cstdint>
@@ -35,6 +36,7 @@
 #include "runtime/dflash/dflash_drafter.h"
 #include "runtime/dflash/dflash_sizes.h"
 #include "runtime/memory_plan.h"
+#include "runtime/prefill_backend.h"
 #include "server/adaptive_k.h"
 
 namespace cli::dflash {
@@ -55,9 +57,18 @@ inline void check_flags(const Args& a) {
     throw std::runtime_error("--spec-max with --spec dflash expects 1..7 (the drafter's block of 8)");
 }
 
-// The one-card engine's refusals (see the header).
-inline void check_engine(const Args& a, bool pipeline, runtime::KvCache kv) {
+// The one-card engine's refusals (see the header). `path` / `prefill_replay` (B70_PREFILL_REPLAY=1): what
+// Engine::prefill would otherwise refuse per request, after the load - the drafter's prefill taps are copies on the
+// L0 list, which sycl-tla's walk and a recorded chunk cannot hold.
+inline void check_engine(const Args& a, bool pipeline, runtime::KvCache kv, const runtime::PrefillPath& path = {},
+                         bool prefill_replay = false) {
   if (!a.on) return;
+  if (path.prefill && !runtime::is_l0(path.backend))
+    throw std::runtime_error("--spec dflash prefills on the l0 / l0-int8 backends only (the drafter's taps are copies "
+                             "on the L0 list): drop --prefill-backend sycl-tla");
+  if (path.prefill && prefill_replay)
+    throw std::runtime_error("--spec dflash: the drafter's prefill taps are copies, which a recorded chunk cannot "
+                             "hold - unset B70_PREFILL_REPLAY");
   if (pipeline)
     throw std::runtime_error("--spec dflash runs on one card: the drafter beside a split target (--pp 2, the taps "
                              "across the hand-off) is spec 19d's");
