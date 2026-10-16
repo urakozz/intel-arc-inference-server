@@ -3427,6 +3427,127 @@ st_r55_tps() {
 }
 
 # ======================================================================================
+row 56 "spec 19d - DFlash in the server: the drafter's ring in the prefix cache's snapshots (decision 5 as ruled: the whole ring after the state, the store keyed by the drafter), the batching scheduler's speculative hook (per-slot rings, a mock engine), --spec dflash --pp 2 (the drafter on device 1, tap verify stage lists, the pipeline prefill's taps), D5 against --mtp auto (plan 19d)"
+rownote 56 "Written blind on the Mac after rows 54 / 55 (themselves unvalidated): nothing of 19d has run on a card. No new binary (kernel_cmdlines +0 / -0 / ~0): the --pp 2 tap verify stage lists bind 19c's gdn_step_slots_M<M>_N8 and B70_VERIFY_M8's M = 5..8 variants per stage. Nothing changes without --spec dflash: D0 is G0 (shared edits: Engine's snapshots gain the ring only with a drafter, PipelineEngine / place_stages / pp_plan gain defaulted drafter arguments, capture.cc a new mode, step_stage a defaulted PrefillTaps*, the prefix store's root store_root(kv_form, 0) = kv_form)."
+rownote 56 "Decision 5 as ruled in 19d (spec 19 §12): every snapshot carries the drafter's WHOLE ring (41,943,040 B, +25 % a snapshot) - a restore is a copy, bitwise by construction; a mid-call block end's snapshot holds the ring as that call left it (positions outside the call's last 2048 not yet projected): lower acceptance after a restore there with a short tail, never another output (r56.prefix's R2 caveat line counts it)."
+rownote 56 "Data: the gate checkpoint (qwen), the drafter (dflash), both cards for r56.pp / r56.pp_serve / r56.d5_pp, uvx for r56.d5_benchy, OPENCODE_LOG for r56.d5_opencode (the recording may not exist yet - the stage then SKIPs), oracle-out-19a/draft_vocab.ranked.ids (--push-data from the Mac; IN-SAMPLE on A4 / golden) for r56.d5_dv. Hand back: every stage's lines - the K / R1 / R2 lines of dflash_prefix_gpu_test, dflash_engine_test's SR and L lines, pp_dflash_test's bitwise lines per split, the serve rows' IDENTICAL / RATIO tables and 'dflash:' lines, llama-benchy's tables, the replay summaries. D5's bar (spec 19 §6): --spec dflash becomes the Qwen3.8 default only at >= +10 % over --mtp auto on the opencode recording and no loss > 3 % elsewhere - the operator decides from r56.d5_opencode; the A4 / golden rows (r56.d5_a4) are the expectation, not the bar."
+stage r56.k0 56 default cpu - g0.sha,g0.bitwise,g0.suite "D0: no command line moved (kernel_cmdlines +0 / -0 / ~0), every pre-existing binary identical, the suite (G0) - incl. 19d's shared edits (Engine / PipelineEngine snapshots, capture.cc's StageVerifyTaps mode, step_stage, place_stages, pp_plan, the prefix store's root, BatchEngineIface / Scheduler's speculative round)"
+st_r56_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r56.host 56 default cpu - - "host: dflash_prefix_test (the ring across a PrefixSession restore, the store key; the ring-less mutant caught), dflash_scheduler_test (speculation under the batching scheduler: lossless, per-request records, ends inside a run, a restore onto another slot), pp_dflash_serve_test (the --pp 2 adapter's DFlash path), pp_serve_plan_test (the drafter's terms on two cards), dflash_plan_test (the ring and key rows), scheduler_test / prefix_cache_test / pp_serve_test unchanged; the --spec dflash --pp 2 refusals (peer, b70-decode)"
+st_r56_host() {
+  run_tests '^(dflash_prefix_test|dflash_scheduler_test|pp_dflash_serve_test|pp_serve_plan_test|dflash_plan_test|scheduler_test|prefix_cache_test|pp_serve_test|cli_reject_(serve_)?dflash_pp)$'
+  jgrab host '^(dflash_prefix_test|dflash_scheduler_test|pp_dflash_serve_test)$' '^(K|R1|R2|S[1-5]|[1-4])[:.] |OK$|FAIL' 40
+  finish
+}
+stage r56.engine 56 default gpu qwen,dflash r55.engine "dflash_engine_test again (19d's L and SR: the snapshot is the state plus the ring - 41,943,040 B - and a reset + restore brings the ring back bitwise; T1 / D3 / P / D2 / RF3 / PF as row 55)"
+st_r56_engine() {
+  run_tests '^dflash_engine_test$' dflash '' "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  jgrab engine '^dflash_engine_test$' '^L:|^SR |^T1 \+ D3|  D2 K=|^RF3|^PF|^dflash_engine_test' 60
+  finish
+}
+stage r56.prefix 56 default gpu qwen,dflash r56.engine "dflash_prefix_gpu_test (decision 5 on the card, 19c's deferred restore-and-continue test): K (the store keyed by the drafter), R1 (a turn restored from the previous turn's request-end snapshot after a side request: the ring after the tail BITWISE the uninterrupted session's, the next 128 ids and every iteration's acceptance identical; the cold-ring control's acceptance printed), R2 (a block-end restore with a 2500-id tail = a cold run's ring bitwise; the 300-id caveat counted)"
+st_r56_prefix() {
+  run_tests '^dflash_prefix_gpu_test$' dflash '' "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  jgrab prefix '^dflash_prefix_gpu_test$' '^K:|^R1|^R2|turn of|^dflash_prefix_gpu_test' 60
+  finish
+}
+stage r56.pp 56 default gpu qwen,dflash r56.engine "pp_dflash_test on both cards (ZE_AFFINITY_MASK=0,1): --spec dflash across the split BITWISE the one-card drafter at the auto split and at 20 - the prefill's ring, every verify's rows, the drafts and ids at K 7, the session with the ring, the hooked snapshots at 2048 / 4096 / 4103; a one-card snapshot continued on two cards"
+st_r56_pp() {
+  run_tests '^pp_dflash_test$' dflash '' "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2} ZE_AFFINITY_MASK=0,1"
+  jgrab pp '^pp_dflash_test$' '^reference|^--pp 2|  ids|bitwise|DIFFERS|continued|PASS|FAIL' 60
+  finish
+}
+stage r56.pp_serve 56 default gpu qwen,dflash r56.pp "D2 by b70-serve --pp 2 --spec dflash (both cards): the A4 + golden sets greedy, max_tokens 192, against one card's --spec off - identical; the plan line (the drafter on device 1, the embedding replica), both memory lines, the 'spec dflash (--pp 2' line"
+st_r56_pp_serve() {
+  local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" c="--set toolcall --set golden --max-tokens 192 --stop-at-eos"
+  chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/off.r1 off 1 $SNAP_QWEN --max-len 16384 --spec off -- $c" "one card, --spec off"
+  chk "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/pp2dflash.r1 pp2dflash 1 $SNAP_QWEN --max-len 16384 --pp 2 --spec dflash $dm -- $c" "--pp 2 --spec dflash"
+  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output through --pp 2 --spec dflash identical to one card's --spec off"
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 20
+  grab_all plan 'pipeline plan|DFlash:|memory, device|spec dflash' 12
+  finish
+}
+stage r56.d5_a4 56 optin gpu qwen,dflash r56.prefix "D5's expectation on the A4 + golden sets (the recording is the bar): b70-serve --spec off / --mtp auto / --spec dflash (auto K) / --spec dflash --spec-max 3, the same flags otherwise (--max-len 16384, the int8 head, bf16 KV, the prefix cache's default), greedy, max_tokens 256, 3 rounds in rotated order after an idle check - per-arm decode t/s (the server's decode-only rate) and the RATIO lines dflash / mtp-auto; greedy output identical across the arms"
+st_r56_d5_a4() {
+  local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  idle before
+  serve_arms "$STATE/$STAGE" "${R56_ROUNDS:-3}" "$SNAP_QWEN" "--set toolcall --set golden --max-tokens 256 --stop-at-eos" \
+    "off|--max-len 16384 --spec off" "mtp|--max-len 16384 --mtp auto" "dflash|--max-len 16384 --spec dflash $dm" \
+    "dflash3|--max-len 16384 --spec dflash --spec-max 3 $dm"
+  idle after
+  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output identical across off / mtp auto / dflash"
+  x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref mtp --ratio dflash/mtp --ratio dflash3/mtp --ratio dflash/off"
+  grab_all ratio '^RATIO ' 20
+  grab_all dflash 'spec dflash:|^dflash:|^mtp:' 24
+  grab_all idle '^IDLE '
+  finish
+}
+stage r56.d5_dv 56 optin gpu qwen,dflash,oracle_dflash_rank r56.d5_a4 "the draft vocabulary arm: --spec dflash against --spec dflash --draft-vocab 32k --draft-vocab-ids oracle-out-19a/draft_vocab.ranked.ids (ranked IN-SAMPLE on these sets - an upper bound) and --draft-vocab 32k by id, A4 + golden, 3 rotated rounds - decode t/s ratios and acceptance; output identical"
+st_r56_d5_dv() {
+  local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  idle before
+  serve_arms "$STATE/$STAGE" "${R56_ROUNDS:-3}" "$SNAP_QWEN" "--set toolcall --set golden --max-tokens 256 --stop-at-eos" \
+    "dflash|--max-len 16384 --spec dflash $dm" \
+    "dv32k-r|--max-len 16384 --spec dflash --draft-vocab 32k --draft-vocab-ids oracle-out-19a/draft_vocab.ranked.ids $dm" \
+    "dv32k|--max-len 16384 --spec dflash --draft-vocab 32k $dm"
+  idle after
+  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref dflash" "greedy output identical with the draft vocabulary"
+  x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref dflash --ratio dv32k-r/dflash --ratio dv32k/dflash"
+  grab_all ratio '^RATIO ' 20
+  grab_all dflash 'spec dflash:|^dflash:|draft vocab' 24
+  finish
+}
+stage r56.d5_benchy 56 optin gpu-self qwen,dflash,uvx r56.d5_a4 "D5 with llama-benchy at the operator's flags (row 41's matrix A at concurrency 1 and matrix D: --pp 512 4096 --tg 128 --runs 2; --pp 512 --tg 128 --depth 4096 32768 --no-cache), b70-serve --max-len 40960 --spec off / --mtp auto / --spec dflash, the arms in rotated order over 3 rounds"
+st_r56_d5_benchy() {
+  local v="${BENCHY_VERSION:-0.4.0}" r arm args order dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  local a="--pp 512 4096 --tg 128 --concurrency 1 --runs 2 --format md"
+  local d="--pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2 --no-cache --format md"
+  for r in 1 2 3; do
+    order="off mtp dflash"; [ "$r" = 2 ] && order="dflash mtp off"
+    for arm in $order; do
+      case "$arm" in off) args="--spec off" ;; mtp) args="--mtp auto" ;; dflash) args="--spec dflash $dm" ;; esac
+      chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN MAX_LEN=40960 SERVE_ARGS='$args' tools/probe/serve_benchy.sh $a" "round $r $arm, matrix A (c1)"
+      chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN MAX_LEN=40960 SERVE_ARGS='$args' tools/probe/serve_benchy.sh $d" "round $r $arm, matrix D"
+    done
+  done
+  grab_all benchy '^(client: |\| )' 200
+  finish
+}
+stage r56.d5_opencode 56 optin gpu-self qwen,dflash,opencode_log r56.d5_a4 "D5 proper (spec 19 §6): the opencode recording (OPENCODE_LOG) replayed through b70-serve with the prefix cache on (replay_ab.sh, max_len 131072), --spec off / --mtp auto / --spec dflash, 3 rounds in rotated order - the per-arm t/s and ttft summaries; the bar is dflash >= 1.10 x --mtp auto here"
+st_r56_d5_opencode() {
+  local r arm args order dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  for r in 1 2 3; do
+    order="off mtp dflash"; [ "$r" = 2 ] && order="dflash mtp off"
+    for arm in $order; do
+      case "$arm" in off) args="--spec off" ;; mtp) args="--mtp auto" ;; dflash) args="--spec dflash $dm" ;; esac
+      chk "MODEL=$SNAP_QWEN ARMS=on SERVE_ARGS='$args' tools/prefix/replay_ab.sh $OPENCODE_LOG $STATE/r56.d5.r$r.$arm" "replay round $r, $arm"
+    done
+  done
+  grab_all replay 'tok/s|t/s|requests|ttft' 60
+  finish
+}
+stage r56.d5_pp 56 optin gpu qwen,dflash r56.pp_serve "the --pp 2 rows (both cards): b70-serve --pp 2 --mtp auto against --pp 2 --spec dflash on A4 + golden, 3 rounds in rotated order - decode t/s, RATIO dflash / mtp; output identical"
+st_r56_d5_pp() {
+  local r arm flags order c="--set toolcall --set golden --max-tokens 256 --stop-at-eos" dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  idle before
+  for r in 1 2 3; do
+    order="mtp dflash"; [ $((r % 2)) = 0 ] && order="dflash mtp"
+    for arm in $order; do
+      flags="--max-len 16384 --pp 2 --mtp auto"; [ "$arm" = dflash ] && flags="--max-len 16384 --pp 2 --spec dflash $dm"
+      chk "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/$arm.r$r $arm $r $SNAP_QWEN $flags -- $c" "arm $arm, round $r"
+    done
+  done
+  idle after
+  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref mtp" "greedy output identical"
+  x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref mtp --ratio dflash/mtp"
+  grab_all ratio '^RATIO ' 10
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / muse / dflash labels belong to their rows)"
 st_x_rest() {
