@@ -16,7 +16,8 @@
 #   4 opencl   every distinct kernel variant command line through clang -x cl -cl-std=CL3.0
 #              -fsyntax-only with the Intel-extension shim (tools/mac/cl_syntax.sh).
 #   5 kernels  (--kernels only) gemv_i8w, argmax, pf_moe, k2, moe, kolibri, qwen4exp, offload (spec 22a: the
-#              table-addressed expert kernels) and muse (spec 23c) built and run on the Mac's OpenCL GPU
+#              table-addressed expert kernels), muse (spec 23c) and dflash (spec 19b: the drafter's draft and
+#              projection lists at the fixture's tiny shapes) built and run on the Mac's OpenCL GPU
 #              (gemv_i8w and argmax also at M = 8, spec 19a)
 #              against host references (tools/mac/clrun): INDICATIVE, not a B70 result.
 #
@@ -222,7 +223,7 @@ if [ $kernels = 1 ]; then
   bin=$out/clrun
   mkdir -p "$bin"
   ok=1 runs="" nfail=0 npass=0
-  for d in gemv_i8w argmax pf_moe k2 moe kolibri qwen4exp offload muse; do
+  for d in gemv_i8w argmax pf_moe k2 moe kolibri qwen4exp offload muse dflash; do
     # k2_run (spec 18b) checks against tests/kernels/k2_ref.h and builds the RoPE table
     # with the loader's own function, so it also takes two host sources.
     extra=""
@@ -232,6 +233,8 @@ if [ $kernels = 1 ]; then
     # qwen4exp_run (spec 21c) needs no host source: qwen4exp_ref.h, its fixture and the PLE hash are headers.
     # muse_run (spec 23c): muse_ref.h and the engine's RoPE table (runtime::muse::rope_table).
     [ "$d" = muse ] && extra="$root/src/runtime/muse/muse_rope.cc"
+    # dflash_run (spec 19b): the fixture's reader (safetensors.cc, the descriptor) and the int8 quantiser / gather.
+    [ "$d" = dflash ] && extra="$root/src/loader/safetensors.cc $root/src/loader/lm_head_int8.cc $root/src/model/dflash.cc"
     # shellcheck disable=SC2086
     if ! clang++ -std=c++17 -O2 -Wall -Wextra -Werror -DB70_CLRUN_ROOT="\"$root\"" -I"$root/src" -I"$root/tests" \
          "$root/tools/mac/clrun/clrun.cc" "$root/tools/mac/clrun/${d}_run.cc" $extra \

@@ -501,6 +501,47 @@ if(B70_VERIFY_M8 AND B70_MTP)
 endif()
 # ==== Spec 19a Task 4 ======================================================== (end) ====
 
+# ==== Spec 19b: the DFlash drafter on the card ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-05-spec19b-dflash-drafter.md. Additive only: no existing variant's name or
+# command line moves, and no engine binds any of these without a drafter (19c's --spec dflash). The draft list and
+# the projection list (runtime/dflash/dflash_capture.cc) bind, at z-lab/Qwen3.8-27B-DFlash2's shapes beside Qwen3.8
+# (kernels::dflash::kQwen38, src/kernels/dflash_kernels.h):
+#   df_prep.cl    df_embed, df_norm, df_conv_prep / df_conv_add, df_add, df_silu_mul, df_qkv_prep, df_ctx_store
+#   df_attn.cl    df_attn_part (grid (8 kv heads, 16 blocks of 128 ring offsets)) + df_attn_reduce
+#   df_topk.cl    the 16 best head logits per draft row, two stages; the full head masks ids >= 248077, a draft
+#                 vocabulary's (COMPACT) maps its indices through the id table
+#   df_select.cl  DFlash 2's candidate-selector walk (V2), or v1's per-row pick
+# and the reused GEMVs: the drafter's linears at M = 8 (B70_VERIFY_M8's drafter shapes - built there - plus the
+# context k||v at N 2048), the target's head at M = 7 rows (int8 from B70_VERIFY_M8; the bf16 head and the compact
+# heads at 64k / 128k / bf16 added here). The block reads the ring (the projection's bf16 rows) and its own fp32 K / V.
+option(B70_DFLASH "build the DFlash drafter variants (spec 19b)" ON)
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  set(DCTL_DEFINES DCTL_K=0 DCTL_PPOS=1 DCTL_PN=2 DCTL_TEMP=3 DCTL_SEED_LO=4 DCTL_SEED_HI=5)
+  set(DF_DIR ${CMAKE_CURRENT_SOURCE_DIR}/dflash)
+  add_ocloc_kernel(df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320 SOURCE ${DF_DIR}/df_prep.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
+                           INTER=17408 NH=32 NKV=8 HD=128 RING=2048)
+  add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128 SOURCE ${DF_DIR}/df_attn.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
+                           CAUSAL=0)
+  add_ocloc_kernel(df_topk_R7_N248320_U248077 SOURCE ${DF_DIR}/df_topk.cl DEFINES R=7 N=248320 USED=248077 TOPK=16
+                   CH=4096 COMPACT=0)
+  foreach(NV 32768 65536 131072)
+    add_ocloc_kernel(df_topk_R7_N${NV}_U${NV}_C SOURCE ${DF_DIR}/df_topk.cl DEFINES R=7 N=${NV} USED=${NV} TOPK=16
+                     CH=4096 COMPACT=1)
+    add_gemv_bf16_variant(7 5120 ${NV} 64 1)          # the compact bf16 head at the head's 7 rows
+    if(NOT NV EQUAL 32768)                            # 32768 is B70_VERIFY_M8's
+      add_gemv_i8w_variant(7 5120 ${NV})
+    endif()
+  endforeach()
+  add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320 SOURCE ${DF_DIR}/df_select.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320)
+  add_ocloc_kernel(df_select_v1_M8_K16 SOURCE ${DF_DIR}/df_select.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=0)
+  add_gemv_bf16_variant(7 5120 248320 64 1)           # the full bf16 head at 7 rows
+endif()
+# ==== Spec 19b ==== (end) ====
+
 # --- Spec 15b: other models' shapes ------------------------------------------
 # Every binary above is built at Qwen3.8's shapes - hidden 5120, FA 24 q / 4 kv
 # heads, GDN 16 k / 48 v heads - which the .cl sources bake by default. The

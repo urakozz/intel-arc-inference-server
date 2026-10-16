@@ -220,7 +220,9 @@ inline void attention(const AttnDims& a, const float* q, const float* kb, const 
   }
 }
 
-inline float silu_mul(float g, float u) { return g / (1.0f + std::exp(-g)) * u; }
+// The exp the twin's SiLU uses (a test may swap it to price another implementation's ulps; default libm's expf).
+inline float (*silu_exp)(float) = [](float x) { return std::exp(x); };
+inline float silu_mul(float g, float u) { return g / (1.0f + silu_exp(-g)) * u; }
 
 struct Cand {
   float v;
