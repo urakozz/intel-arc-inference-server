@@ -82,4 +82,32 @@ AcceptResult accept_point_mass(const float* p_rows /*[k+1][row_stride]*/, const 
 uint32_t sample_draft(const float* q_row, uint32_t vocab_used, const Sampling& s,
                       std::mt19937_64& rng);
 
+// --- spec 19c: the DFlash drafter's sparse q (spec 19 §2 "The walk", §6 D4) --------------
+//
+// The drafter's walk (df_select.cl) samples draft row j by Gumbel-argmax of scores[j][c] / T over the row's 16
+// candidates, i.e. from q_j = softmax(scores[j] / T) on cand[j] and q_j = 0 on every other id. SparseQ is that row;
+// a candidate whose score is -inf or NaN has q = 0 (the walk never picks it).
+struct SparseQ {
+  static constexpr uint32_t kMax = 16;
+  uint32_t n = 0;
+  uint32_t ids[kMax] = {};
+  double probs[kMax] = {};
+  double prob(uint32_t id) const;   // q(id): 0 off the candidates
+};
+SparseQ dflash_q(const uint32_t* cand, const float* scores, uint32_t n, float temperature);
+// The temperature the drafter's walk samples at for a sampled request: filter_probs' (T <= 0 is 1.0), so q's
+// sharpness follows the request's p.
+float dflash_temperature(const Sampling& s);
+
+// Spec 8's lossless rule (accept_sampled) with a sparse q: accept d_i with probability min(1, p(d_i) / q_i(d_i));
+// on the first rejection sample from normalise(max(0, p - q_i)) - p's filtered support only (q = 0 off the
+// candidates leaves p there whole), from p itself if that is all zero (p == q on the candidates: a rejection then
+// came from fp rounding); all k kept: the bonus from p_k. The output is distributed as p whatever q was, as long as
+// each d_i was drawn from q_i. Throws std::logic_error when q_i(d_i) = 0 (d_i was not drawn from q_i). RNG order:
+// one uniform per draft considered, then exactly one draw for the correction / bonus (the caller's device seed,
+// drawn before the drafts, comes first).
+AcceptResult accept_sparse(const float* p_rows /*[k+1][row_stride]*/, const SparseQ* q /*[k]*/,
+                           const uint32_t* drafts, uint32_t k, uint32_t vocab_used, size_t row_stride,
+                           const Sampling& s, std::mt19937_64& rng);
+
 }  // namespace server

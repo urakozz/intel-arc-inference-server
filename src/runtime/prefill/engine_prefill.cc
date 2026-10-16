@@ -121,6 +121,15 @@ void Engine::prepare_prefill() {
   prefill::moe_prepare_int8(pfx_->cx, pfx_->kc, *pfx_->int8, model_);
 }
 
+void Engine::drafter_project_staged(uint32_t pos, uint32_t n) {
+  const size_t row = drafter_->tap_layers().size() * size_t(model_.desc->hidden) * 2;
+  for (uint32_t r = 0; r < n; r += 8) {
+    const uint32_t g = std::min<uint32_t>(8, n - r);
+    imm_.copy(drafter_->taps().ptr(), df_pf_taps_->as<uint8_t>() + size_t(r) * row, size_t(g) * row);
+    replay_aux(drafter_->projection(pos + r, g));
+  }
+}
+
 void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (ids.empty()) throw std::runtime_error("runtime::Engine::prefill: no ids");
   if (chunk == 0) chunk = PrefillScratch::kC;
@@ -168,9 +177,32 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   // The prefill GDN path reads slot 0 directly, so a live slot left by a commit is
   // copied there first.
   uint16_t* hid = nullptr;
-  if (drafter_) {   // spec 19c: slot 0 holds the state the prefill GDN path reads and writes
+  // Spec 19c: with a drafter, slot 0 holds the state the prefill GDN path reads and writes, and every chunk taps
+  // its rows inside the drafter's window of this call's end (the positions its ring reads back) into the staging,
+  // projected after the chunk (drafter_project_staged). Positions before this call keep whatever the ring held -
+  // after a prefix-cache restore that is a cold ring: correct, lower acceptance until it refills (spec 19 decision
+  // 5's plane is 19d's).
+  std::vector<std::vector<uint32_t>> df_sites;
+  uint32_t df_from = 0;   // the first position tapped
+  if (drafter_) {
+    if (!is_l0(backend))
+      throw std::runtime_error("runtime::Engine::prefill: a drafter's prefill taps run on the L0 backends only "
+                               "(l0, l0-int8)");
+    if (replay)
+      throw std::runtime_error("runtime::Engine::prefill: a drafter's prefill taps are copies, which a recorded "
+                               "chunk cannot hold - unset B70_PREFILL_REPLAY with --spec dflash");
+    df_sites = tap_sites(*model_.desc, drafter_->tap_layers());
+    if (!df_sites.back().empty())
+      throw std::runtime_error("runtime::Engine::prefill: the drafter taps the last layer's output, whose fold "
+                               "prefill runs for the last row only - not built (no published drafter does)");
     mtp_normalise_live();
     verify_k_ = kNoVerify;
+    if (!df_pf_taps_)
+      df_pf_taps_ = std::make_unique<l0::Mem>(
+          ctx_, l0::MemKind::Device,
+          TapVerifyDims::prefill_taps_bytes(*model_.desc, uint32_t(drafter_->tap_layers().size())));
+    const uint64_t end = uint64_t(base) + ids.size(), w = drafter_->window();
+    df_from = uint32_t(end > w ? std::max<uint64_t>(base, end - w) : base);
   }
   if (mtp_) {
     if (!is_l0(backend))
@@ -197,10 +229,20 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       hctl_->n_active = prefill::mtp_kv_rows(pos, C);
       imm_.copy(hid, mtp_->hh.ptr(), hid_row);   // h_{pos-1} into row 0
     }
+    // Spec 19c: this chunk's rows from df_from on (r0 = C: none).
+    const uint32_t cpos = base + uint32_t(off);
+    prefill::PrefillTaps df_taps;
+    if (drafter_) {
+      df_taps.dst = df_pf_taps_->ptr();
+      df_taps.sites = &df_sites;
+      df_taps.n_taps = uint32_t(drafter_->tap_layers().size());
+      df_taps.r0 = df_from > cpos ? std::min(df_from - cpos, C) : 0;
+    }
     auto encode = [&] {
       prefill::step_chunk(pfx_->cx, pfx_->kc, *pf_, model_, buffers_.max_len, control_,
                         base + uint32_t(off), C, persist_.gdn_state, persist_.conv_ring,
-                        persist_.kv_k, persist_.kv_v, persist_.kv_lay, backend, q);
+                        persist_.kv_k, persist_.kv_v, persist_.kv_lay, backend, q,
+                        drafter_ ? &df_taps : nullptr);
       if (mtp_)
         prefill::step_mtp_kv(pfx_->cx, pfx_->kc, *pf_, model_, hctl_, base + uint32_t(off), C,
                              hid, mtp_->kv_lay.layer(mtp_->kv_k.ptr(), mtp_->kv_v.ptr(), 0));
@@ -222,6 +264,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       encode();
     }
     pfx_->cx.wait();                       // the chunk's state has landed
+    if (drafter_ && df_taps.r0 < C) drafter_project_staged(cpos + df_taps.r0, C - df_taps.r0);   // spec 19c
     if (mtp_)   // h_{end-1}: the next chunk's row 0, a snapshot's hidden, the first draft's h
       imm_.copy(mtp_->hh.ptr(), reinterpret_cast<uint8_t*>(hid) + size_t(C) * hid_row, hid_row);
     const uint32_t end = base + uint32_t(off) + C;
