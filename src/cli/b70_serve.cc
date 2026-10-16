@@ -25,7 +25,8 @@
 #include "cli/k2_serve_adapter.h"
 #include "cli/kolibri_decode.h"
 #include "cli/kolibri_serve.h"
-#include "cli/muse_decode.h"   // spec 23c: is_muse (the refusal below; 23e serves it)
+#include "cli/muse_decode.h"   // spec 23c: is_muse, check_args
+#include "cli/muse_serve.h"    // spec 23e: MuseEngineAdapterT, the template check
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
 #include "cli/pipeline_serve.h"
@@ -113,6 +114,16 @@ void usage() {
                "                 samples), the prefix cache, --mtp 1..3 / --spec lookup (--mtp auto,\n"
                "                 --draft-vocab and --kv-cache int8 are refused); prefill on l0 only.\n"
                "                 UNVALIDATED on the cards (queue row 34)\n"
+               "                 Muse-Glimmer-30B (spec 23e, model_type muse_glimmer): its own engine, ONE card by\n"
+               "                 default (--pp 2 for capacity), prefill on l0 only, --max-len auto -> up to 131072;\n"
+               "                 the original's chat template is required: [--chat-template FILE] (the Vishva007\n"
+               "                 repos ship an older chat_template.jinja - pass meta-models/Muse-Glimmer-30B's, it\n"
+               "                 is vendored at tests/tokenizer/muse/chat_template.jinja); reasoning in to=self,\n"
+               "                 ATEM tool calls, chat_template_kwargs reasoning_strength low|medium|high|xhigh\n"
+               "                 (the OpenAI reasoning_effort maps onto it); requests without temperature / top_k /\n"
+               "                 top_p sample with generation_config.json's 1.0 / 64 / 0.95 through the model's\n"
+               "                 softcap on the host; --mtp, --spec, --kv-cache int8 and --prefill-backend\n"
+               "                 l0-int8|sycl-tla are refused. UNVALIDATED on the cards (queue row 46)\n"
                "                 [--pp 1|2] [--pipeline-parallel-size 1|2]   2 (spec 16d): the model's\n"
                "                             layers over GPUs 0 and 1 of what Level Zero shows (Qwen3.8,\n"
                "                             Agnes, Ornith, Kolibri-1 - its default; K2-Horizon is refused).\n"
@@ -433,6 +444,107 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
   return listen_until_stopped(server, options);
 }
 
+// Spec 23e: Muse-Glimmer-30B served - runtime::muse::MuseEngine (one card by default, decision 7; or two, spec 16b's
+// pieces as 23c / 23d built them) behind cli::muse::MuseEngineAdapterT (the rings + full-KV prefix snapshots, host
+// sampling with the model's softcap), Muse's chat format (server::ChatFormat::muse(): the channels, ATEM calls,
+// reasoning_strength), the original's chat template (or --chat-template FILE), its EOS [200001, 200008], its sampling
+// defaults and stop_strings from generation_config.json. b70-decode's flow (cli/muse_decode.h run_decode): the
+// refusals before the device (cli::muse::check_args: --mtp, --spec, --kv-cache int8, the prefill backends, --max-len
+// above 131072, --device with --pp 2; then the template), the contexts, MuseEngine planning max_len (auto: the largest
+// that fits with the prefill scratch) and loading each layer straight onto its device.
+struct MuseServe {
+  std::string snapshot_dir;
+  cli::muse::DecodeArgs args;   // the planner's and the refusals' inputs (prefill on)
+  std::string chat_template;    // --chat-template FILE ("" = the snapshot's, which must be the original's)
+  bool prefix_auto = true;
+  uint32_t prefix_cache_gb = 0;
+};
+
+int serve_muse(const MuseServe& a, server::Options options) {
+  const cli::muse::DecodeArgs& da = a.args;
+  const model::MuseGlimmerDesc pre = loader::muse_checkpoint_desc(a.snapshot_dir, 0);
+  cli::muse::check_args(da, pre);
+  const cli::muse::TemplateChoice tc = cli::muse::check_serve_template(a.snapshot_dir, a.chat_template);
+  const std::vector<uint32_t> eos = eos_ids(a.snapshot_dir);
+  server::Sampling defaults;
+  std::vector<std::string> stops;
+  {
+    std::ifstream g(a.snapshot_dir + "generation_config.json");
+    if (!g) throw std::runtime_error("cannot open '" + a.snapshot_dir + "generation_config.json'");
+    nlohmann::json gj;
+    g >> gj;
+    try {
+      defaults = server::generation_sampling(gj);   // decision 4: sampled, T 1.0, top-k 64, top-p 0.95
+      stops = server::generation_stop_strings(gj);
+    } catch (const std::invalid_argument& error) {
+      throw std::runtime_error(error.what());
+    }
+  }
+  // The model's logit transform rides with every sampled request (spec 23 §6.4) - a model property, never a request
+  // field; the adapter writes the same two constants into what it filters with.
+  defaults.logit_mult = pre.out_mult;
+  defaults.softcap = pre.softcap;
+  const uint32_t devs = da.pipe.devices;
+  if (devs == 2) cli::require_two_devices(l0::Context::gpu_count());
+  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(devs == 2 ? 0u : da.device);
+  std::unique_ptr<l0::Context> c1 = devs == 2 ? std::make_unique<l0::Context>(*c0, 1u) : nullptr;
+  std::vector<l0::Context*> ctx = {c0.get()};
+  if (c1) ctx.push_back(c1.get());
+  if (devs == 1)
+    std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
+                 da.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+  else
+    std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--pp 2: one context]\n", c0->name().c_str(),
+                 c0->eu_count(), c1->name().c_str(), c1->eu_count());
+  runtime::muse::MuseOptions o;
+  o.max_len = da.max_len.is_auto ? 0 : da.max_len.value;
+  o.int8_head = da.int8_head;
+  o.handoff = da.pipe.handoff;
+  o.split = devs == 2 && !da.pipe.split_auto ? da.pipe.split : 0;
+  o.prefill = true;   // every request prefills: plan the prefill scratch into max_len and the fit
+  std::unique_ptr<runtime::muse::MuseEngine> engine;
+  {
+    StdoutToStderr redirect;
+    engine = std::make_unique<runtime::muse::MuseEngine>(ctx, a.snapshot_dir, o);
+  }
+  engine->prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
+  std::fprintf(stderr, "%s\n%s\n", engine->plan().describe().c_str(), engine->memory_line().c_str());
+  TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
+  if (tokenizer.vocab_used() != engine->vocab())
+    std::fprintf(stderr, "note: tokenizer.json defines %u ids, Muse-Glimmer's head has %u rows; sampling masks from %u\n",
+                 tokenizer.vocab_used(), engine->vocab(), tokenizer.vocab_used());
+  TemplateAdapter chat_template(a.snapshot_dir, tc.file);
+  cli::muse::MuseEngineAdapterT<runtime::muse::MuseEngine> engine_adapter(*engine, tokenizer.vocab_used(), pre.out_mult,
+                                                                         pre.softcap);
+  options.chat_format = server::ChatFormat::muse();
+  options.eos_ids = eos;
+  options.sampling_defaults = defaults;
+  options.stop_strings = stops;
+  // Pinned host memory of the one context both cards share: either device's copies reach it.
+  const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
+  server::Server server({tokenizer, chat_template, engine_adapter}, options);
+  const std::string placement =
+      devs == 2 ? std::string("--pp 2 (hand-off ") + runtime::pp_handoff_name(engine->handoff()) + ", split " +
+                      std::to_string(engine->split()) + ": device 0 layers [0, " + std::to_string(engine->split()) +
+                      "), device 1 [" + std::to_string(engine->split()) + ", " +
+                      std::to_string(engine->weights().desc.layers) + "))"
+                : std::string("--pp 1 (one card)");
+  std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u%s, eos ", options.served_model.c_str(),
+               options.host.c_str(), options.port, engine->max_len(), da.max_len.is_auto ? " (auto)" : "");
+  print_eos(eos);
+  std::fprintf(stderr,
+               ", Muse-Glimmer-30B (%s chat format, template %s sha256 %.8s%s), %s, prefill backend l0 (chunk %u), "
+               "attention %s (B70_MUSE_ATTN), mtp none, lm_head %s, kv cache bf16, sampling defaults %s T %.2f top-k %u "
+               "top-p %.2f softcap %.0f (host, fp32), stop_strings %zu, prefix snapshots: the rings' last %u positions + "
+               "the full layers' KV\n",
+               options.chat_format.name(), tc.file.empty() ? "<snapshot>/chat_template.jinja" : tc.file.c_str(),
+               tc.sha256.c_str(), tc.original ? " - the original's" : " - NOT the original's (--chat-template)",
+               placement.c_str(), runtime::muse::kPfC, runtime::muse::muse_attn_name(engine->attention()),
+               da.int8_head ? "int8" : "bf16", defaults.greedy ? "greedy" : "sampled", defaults.temperature,
+               defaults.top_k, defaults.top_p, defaults.softcap, stops.size(), runtime::muse::state_positions(pre));
+  return listen_until_stopped(server, options);
+}
+
 // Spec 21e: Qwen3.8-Flash-Next served (--layers N until spec 22) - runtime::qwen4exp::Qwen4ExpEngine (one card or two:
 // spec 16b's pieces as 21c / 21d built them) behind spec 16d's cli::pp::PipelineEngineAdapterT (EngineAdapter's logic
 // over the engine's host calls: greedy and sampled steps, spec 7's prefix cache over the engine's snapshots, spec 8's
@@ -682,6 +794,7 @@ int run(int argc, char** argv) {
   uint32_t q4_layers = 0;
   bool q4_layers_auto = false, have_q4_layers = false;
   std::string q4_ple_dir, q4_tokenizer;
+  std::string chat_template_file;   // spec 23e: --chat-template FILE (Muse-Glimmer)
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -736,7 +849,9 @@ int run(int argc, char** argv) {
       have_mtp_tuning = true;
     } else if (arg == "--spec") {
       spec_arg = value(i, "--spec");
-      if (spec_arg != "off" && spec_arg != "mtp" && spec_arg != "lookup")
+      // Spec 23e: `dflash` is parsed so that Muse-Glimmer refuses it by name (its drafter is spec 23f's); every other
+      // model refuses it below with this same message.
+      if (spec_arg != "off" && spec_arg != "mtp" && spec_arg != "lookup" && spec_arg != "dflash")
         throw std::runtime_error("--spec expects off, mtp or lookup, got '" + spec_arg + "'");
     } else if (arg == "--spec-min-match") {
       spec_min_match = parse_u32("--spec-min-match", value(i, "--spec-min-match"));
@@ -789,6 +904,8 @@ int run(int argc, char** argv) {
       q4_ple_dir = value(i, "--ple-dir");
     } else if (arg == "--tokenizer") {   // spec 21e: Qwen3.8-Flash-Next only
       q4_tokenizer = value(i, "--tokenizer");
+    } else if (arg == "--chat-template") {   // spec 23e: Muse-Glimmer only
+      chat_template_file = value(i, "--chat-template");
     } else if (!arg.empty() && arg[0] == '-') {
       usage();
       throw std::runtime_error(cli::unknown_option(arg));
@@ -886,13 +1003,38 @@ int run(int argc, char** argv) {
   // PipelineEngineAdapterT (one card or two) - dispatched here, before the Qwen family's kv-cache and --pp rules (its
   // own, cli::qwen4exp::check_serve, replace them), as b70-decode dispatches it. --layers / --ple-dir / --tokenizer
   // belong to it alone.
-  // Spec 23c: Muse-Glimmer-30B (model_type muse_glimmer) decodes in b70-decode; serving it - the chat template, the
-  // tokenizer, the ATEM / channel parser, the host softcap - is spec 23e's (box queue row 46). Refused here, before
-  // the device and before the Qwen family's rules, by name.
-  if (cli::muse::is_muse(path))
-    throw std::runtime_error("Muse-Glimmer-30B (model_type muse_glimmer) is not served yet: spec 23e builds its server "
-                             "(the chat template, the tokenizer, the channel / ATEM parser, the host softcap - box queue "
-                             "row 46); b70-decode runs it (spec 23c)");
+  // Spec 23e: Muse-Glimmer-30B (model_type muse_glimmer) runs runtime::muse::MuseEngine behind
+  // cli::muse::MuseEngineAdapterT (one card by default, --pp 2 for capacity) - dispatched here, before the Qwen family's
+  // kv-cache and --pp rules (its own, cli::muse::check_args, replace them), as b70-decode dispatches it. --chat-template
+  // and --spec dflash are parsed for it alone.
+  const bool muse = cli::muse::is_muse(path);
+  if (!muse && spec_arg == "dflash") throw std::runtime_error("--spec expects off, mtp or lookup, got 'dflash'");
+  if (!muse && !chat_template_file.empty())
+    throw std::runtime_error("--chat-template is built for Muse-Glimmer-30B only (spec 23e: its checkpoints ship an "
+                             "older template); this checkpoint renders its own");
+  if (muse) {
+    if (have_q4_layers || !q4_ple_dir.empty() || !q4_tokenizer.empty())
+      throw std::runtime_error("--layers, --ple-dir and --tokenizer belong to Qwen3.8-Flash-Next (model_type qwen4_exp, "
+                               "spec 21e); this checkpoint is Muse-Glimmer-30B");
+    MuseServe ms;
+    ms.snapshot_dir = loader::resolve_muse_snapshot(path);
+    ms.chat_template = chat_template_file;
+    cli::muse::DecodeArgs& ma = ms.args;
+    ma.path = ms.snapshot_dir;
+    ma.max_len = max_len_arg;   // auto by default: the largest that fits, at most 131072 (decision 6)
+    ma.device = device;
+    ma.int8_head = lm_head == loader::LmHeadForm::Int8;   // int8 by default (spec 9), as every served model
+    ma.pipe = pipe;
+    ma.prefill = true;          // every request prefills: the plan carries the prefill scratch
+    ma.pp_backend_given = have_pp_backend;
+    ma.pp_backend = pp_backend;
+    ma.mtp = mtp_k > 0 || mtp_auto;
+    ma.spec = spec_lookup || spec_arg == "dflash";
+    ma.kv8 = kv_cache == runtime::KvCache::Int8;
+    ms.prefix_auto = prefix_auto;
+    ms.prefix_cache_gb = prefix_cache_gb;
+    return serve_muse(ms, options);
+  }
   if (cli::qwen4exp::is_qwen4exp(path)) {
     cli::qwen4exp::ServeArgs qs;
     qs.snapshot_dir = loader::resolve_snapshot(path);
