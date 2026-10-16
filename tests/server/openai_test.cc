@@ -56,6 +56,17 @@ int main() {
   CHECK_EQ(r.sampling.top_k, 40U);
   CHECK_NEAR(r.sampling.top_p, 0.95, 1e-6);
 
+  // Spec 23e: a text-bearing part of another type (input_text) is still a text part; only media parts are refused.
+  {
+    nlohmann::json parts = chat_request();
+    parts["messages"][0]["content"] = nlohmann::json::array({{{"type", "input_text"}, {"text", "hi"}}, {{"text", "x"}}});
+    CHECK(!rejects(parts.dump(), true));
+    for (const char* media : {"image_url", "image", "input_image", "video", "video_url", "input_audio", "audio"}) {
+      parts["messages"][0]["content"] = nlohmann::json::array({{{"type", media}, {media, {{"url", "x"}}}}});
+      CHECK(rejects(parts.dump(), true));
+    }
+  }
+
   nlohmann::json bad_n = chat_request();
   bad_n["n"] = 2;
   CHECK(rejects(bad_n.dump(), true));

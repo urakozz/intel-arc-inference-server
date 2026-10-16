@@ -1,6 +1,8 @@
 #include "server/openai.h"
 
+#include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <utility>
 
@@ -84,8 +86,13 @@ json normalize_message(const json& message) {
   if (content.is_array()) {
     for (const json& part : content) {
       // Spec 23e: an image / video / audio part is refused by name - no served model loads its encoder (Muse-Glimmer's
-      // vision tower is out of scope, spec 23 §10).
-      if (part.is_object() && part.contains("type") && part.at("type").is_string() && part.at("type") != "text") {
+      // vision tower is out of scope, spec 23 §10). A text-bearing part of another type (input_text) stays text.
+      static const char* const kMedia[] = {"image", "image_url", "input_image", "video", "video_url", "input_video",
+                                           "audio", "input_audio", "file", "input_file"};
+      const bool media = part.is_object() && part.contains("type") && part.at("type").is_string() &&
+                         std::any_of(std::begin(kMedia), std::end(kMedia),
+                                     [&](const char* m) { return part.at("type") == m; });
+      if (media) {
         invalid("content part of type '" + part.at("type").get<std::string>() +
                 "' is refused: this server serves text only - the vision encoder (images, video) and any audio "
                 "encoder are not loaded");

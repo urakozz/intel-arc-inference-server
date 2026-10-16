@@ -3207,8 +3207,8 @@ st_r46_real() {
   local m="${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound}" t="tests/tokenizer/muse/chat_template.jinja"
   x "free -g | head -2"
   run_tests '^muse_snapshot_gpu_test$' '' '' 'ZE_AFFINITY_MASK=0'
-  x "build/src/cli/b70-serve $m --port $PORT 2>&1 | tail -3 | grep -q 'pass --chat-template FILE'"
-  step_rc $? "b70-serve <int4> without --chat-template: refused naming the flag (the repo's older template)"
+  xfail "timeout 900 build/src/cli/b70-serve $m --port $PORT" 'pass --chat-template FILE' \
+    "b70-serve <int4> without --chat-template: refused naming the flag (the repo's older template)"
   x "ZE_AFFINITY_MASK=0 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $m --chat-template $t"
   step_rc $? "b70-serve <muse int4> --chat-template <original>, one card, auto max_len, seeded sampling"
   chk "ZE_AFFINITY_MASK=0 B70_SERVE_ARGS='--max-len 32768 --chat-template $t' timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $m --chat" \
@@ -3236,13 +3236,13 @@ st_r46_passkey() {
   grab_all passkey '^passkey muse [^ ]+( placement [0-9.]+)?: ' 8
   finish
 }
-stage r46.benchy 46 optin gpu-self muse_gptq,uvx - "plan 23e Task 6's speed rows through b70-serve <muse> --chat-template <the original's> on one card (SERVE_AFFINITY=0): pp4096 tg256 depth 1 at 131072 (the operator's flags: --no-cache --exact-tg --latency-mode generation); prefix caching at depth 4k / 16k / 32k; decode at depth 4k / 32k / 128k - every row with the card, the int8 head and bf16 KV"
+stage r46.benchy 46 optin gpu-self muse_gptq,uvx - "plan 23e Task 6's speed rows through b70-serve <muse> --chat-template <the original's> on one card (SERVE_AFFINITY=0): pp4096 tg256 depth 1 at 131072 (the operator's flags: --no-cache --exact-tg --latency-mode generation); prefix caching at depth 4k / 16k / 32k; decode at depth 4k / 32k / 130000 (~128k: the request must fit 131072) - every row with the card, the int8 head and bf16 KV"
 st_r46_benchy() {
   local m="${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound}" t="--chat-template tests/tokenizer/muse/chat_template.jinja"
   local f="--concurrency 1 --no-cache --exact-tg --latency-mode generation"
   chk "MODEL=$m MAX_LEN=131072 SERVE_AFFINITY=0 SERVE_ARGS='$t' tools/probe/serve_benchy.sh --pp 4096 --tg 256 --depth 1 $f" "one card, pp4096 tg256"
   chk "MODEL=$m MAX_LEN=65536 SERVE_AFFINITY=0 SERVE_ARGS='$t' tools/probe/serve_benchy.sh --pp 1024 --tg 64 --depth 0 4096 16384 32768 --enable-prefix-caching --exact-tg --latency-mode generation --runs 3" "prefix cache on, depth 4k / 16k / 32k"
-  chk "MODEL=$m MAX_LEN=131072 SERVE_AFFINITY=0 SERVE_ARGS='$t' tools/probe/serve_benchy.sh --pp 512 --tg 128 --depth 4096 32768 131072 $f" "decode at depth 4k / 32k / 128k"
+  chk "MODEL=$m MAX_LEN=131072 SERVE_AFFINITY=0 SERVE_ARGS='$t' tools/probe/serve_benchy.sh --pp 512 --tg 128 --depth 4096 32768 130000 $f" "decode at depth 4k / 32k / ~128k (130000: depth + 512 + 128 fit 131072)"
   grab_all benchy '^\| ' 80
   finish
 }

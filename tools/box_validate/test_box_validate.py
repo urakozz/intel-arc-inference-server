@@ -853,6 +853,18 @@ class DriverTest(unittest.TestCase):
                 continue
             self.assertIn("ZE_AFFINITY_MASK=0,1", ln, ln[:160])
 
+    def test_row46_refusal_and_depths(self):
+        # Row 46 (spec 23e): the int4 checkpoint's template refusal is an xfail (the refusal exits 1: a pipeline under
+        # pipefail would always read BAD, and a regressed refusal would hang the stage); every benchy depth fits
+        # MAX_LEN with its prompt and generation.
+        out = self.run_driver("--dry-run", "--only", "r46", "--with", "r46.benchy").stdout
+        self.assertRegex(out, r"timeout \d+ build/src/cli/b70-serve \S+ --port \d+\n +\(must exit non-zero without a "
+                              r"crash, printing /pass --chat-template FILE/\)")
+        for m in re.finditer(r"MAX_LEN=(\d+) .*--pp (\d+) --tg (\d+) --depth ([0-9 ]+)", out):
+            max_len, pp, tg = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            for depth in m.group(4).split():
+                self.assertLessEqual(int(depth) + pp + tg, max_len, m.group(0)[:160])
+
     def test_registry_consistent(self):
         reg = tempfile.mktemp(suffix=".tsv")
         try:
