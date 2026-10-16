@@ -913,7 +913,8 @@ if wrong are the plan's SDD ledger; the ones that change what §8.4 says are bel
   `|q - k| <= WIN - 1` with `RING >= WIN`, so the inclusive 2048 window is WIN 2049 over 33 blocks of PB 64 (PB 64 keeps
   its local memory under 64 KB at 64 q pairs) - 1.4 MB more ring than 2048 slots. df_prep's q / k norms round once in
   fp32 where transformers' bf16 rounds twice: inside D1's bars.
-- **The draft list always runs the whole 16-row block** (dctl.k = 15): df_attn drops rows and keys past dctl.k, and
+- **The draft list always runs the whole 16-row block** (dctl.k = 15, `runtime::dflash::draft_list_k`; the final
+  review found the first build passing K through): df_attn drops rows and keys past dctl.k, and
   transformers' generator always attends over all 16 rows - so K only bounds what is verified (the head runs 15 rows
   either way). `runtime::dflash::MuseDrafter` (`runtime/dflash/muse_drafter.h`) owns the weights, the buffers (ring,
   taps [16][5][6656], the 804-word `MuseDraftOut`), the draft list over the target's embedding / head / Control and the
@@ -926,7 +927,9 @@ if wrong are the plan's SDD ledger; the ones that change what §8.4 says are bel
   x 5 copies). `MuseEngine::verify(drafts, k)` / `verify_ids()` / `read_verify_logits` / `commit(j, t)` (the projection
   of rows 0..j replayed at once - a rejected row's taps never reach the ring) / `max_verify_k`; with a drafter, plain
   tokens (ingest, generate, K = 0) run verify(0) + commit(0). The prefill taps the prompt's last 2048 positions per
-  chunk (`MusePrefillTaps`, `Context::copy_2d`) and projects them 16 rows a replay.
+  chunk (`MusePrefillTaps`, `Context::copy_2d`) and projects them 16 rows a replay; with a block hook (the prefix
+  cache) every row of a chunk ending at a mid-prompt block end as well (`runtime::muse::prefill_tap_r0`), so that block
+  end's snapshot carries a full ring (the final review's fix; ~0.5 s more projection on a 32k prompt, derived).
 - **Snapshots carry the projected ring** (spec 19d decision 5 as ruled; the operator's 2026-10-16 option a), not §8.4's
   fc rows: 43.3 MB after the 81.7 MB state; `drafter_key` keys the store.
 - **The loop** (`cli::muse::MuseEngineAdapterT`, `cli/muse_serve.h`): `step_many` (greedy: the device's picks,

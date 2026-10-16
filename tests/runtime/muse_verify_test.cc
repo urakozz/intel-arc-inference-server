@@ -17,7 +17,8 @@
 //      positions, and commit(5, .) projects positions P .. P + 5 only (a rejected row's taps never reach the ring).
 //   4. The prefill tail: prefill(P = 2100) with the drafter - the projection covers [P - 2048, P) exactly once, 16
 //      rows a replay, and the staged taps match the decode path's taps of the same positions to cosine >= 0.999
-//      (prefill's linears and attention are decode's to a cosine bar, plan 23d Review Focus 5).
+//      (prefill's linears and attention are decode's to a cosine bar, plan 23d Review Focus 5); with a block hook
+//      (P = 4196) every position before a mid-prompt block end is projected before its hook runs (its snapshot's ring).
 // Exit 77 (SKIP) when the checkpoint or the ids are absent.
 #include <cmath>
 #include <cstdio>
@@ -272,6 +273,21 @@ int main(int argc, char** argv) {
     bad += with_drafter(e, f, prompts[i], refs[i]);
   }
   bad += prefill_tail(e, f, prompts.back());
+  {   // the final review's fix: with a block hook, a mid-prompt block end's snapshot carries a full ring - every row of a
+      // chunk ending at a block end is projected before the hook runs
+    std::vector<uint32_t> prompt(4196);
+    for (uint32_t i = 0; i < prompt.size(); ++i) prompt[i] = ids[i % ids.size()];
+    std::vector<std::pair<uint32_t, size_t>> at_hook;   // (block end, positions projected so far)
+    e.set_block_hook([&](uint32_t end, bool) { at_hook.emplace_back(end, f.rows.size()); });
+    e.reset();
+    e.prefill(prompt);
+    e.set_block_hook({});
+    bool ok = f.rows.size() == prompt.size() && f.rows.begin()->first == 0 && f.rows.rbegin()->first == prompt.size() - 1;
+    for (const auto& [end, n] : at_hook) ok &= end == prompt.size() || n == end;   // [0, E) projected at block end E
+    std::printf("  hooked prefill of %zu: %zu positions projected, at the block ends %s\n", prompt.size(), f.rows.size(),
+                ok ? "every position before E" : "MISSING positions");
+    bad += !ok;
+  }
   if (bad) {
     std::printf("muse_verify_test: FAIL (%d)\n", bad);
     return 1;
