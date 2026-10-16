@@ -987,6 +987,9 @@ position on the 13 full layers and up to 81.8 MB of sliding windows - **39.7 / 3
 | served: decode at depth 4k / 32k / 130000 (~128k) | the same server, pp 512 tg 128 (130000 + 640 fits 131072) | pending (the roofline above) | r46.benchy |
 | MG5: A4 on the engine | the 36 Muse-rendered scenarios (`tests/golden/toolcall-muse`, reasoning_strength low), 512 greedy ids, `l0`, int8 and bf16 heads, against 23a's bf16 reference (`score.py --format atem`) | pending - the bar: no more parse failures than the bf16 reference's; first-call agreement recorded (beside gate Q's int4 CPU reference) | r46.a4 |
 | MG5: passkey at 131072 | `tools/probe/muse_passkey.sh`: 130000 ids + BOS at 5 / 50 / 95 %, one B70, int8 head, `--max-len 131072`; the decode speed at that depth (~1.74 GB of full-layer KV a token, derived) | pending - the bar: 3 / 3 | r46.passkey |
+| DFlash P0: acceptance E_K, K 1..15 (spec 23f) | `dflash_accept.py --model muse` teacher-forced over 23a's continuations, the assistant bf16 / int8 / int4 g64 RTN (+ the int8 head) | **Mac, 2 short prompts (18 anchors each)**: code E_15 9.33 (bf16) = 9.33 (int4 g64 + int8 head), 9.78 (int8 + int8 head); prose ~1.8; sampled (T 1.0 / top-k 64 / top-p 0.95) code E_15 5.58 with q raw vs 1.35 capped; the agentic sets pending | r47.accept |
+| DFlash P0: verify cost M = 1..16 and one drafter block | `probe_draft_cost --shapes muse` at depth 4096 / 32768, interleaved pairs, median of 3 | pending (derived: verify 1.00 1.18 1.56 1.79 + 0.305 a row; the block int4 0.182 / int8 0.263 / bf16 0.435 plain steps) | r47.cost |
+| served `--spec dflash` vs `--spec off` / `--spec lookup` (D5) | `b70-serve <muse> --chat-template <the original's>`, one B70, int8 head, llama-benchy pp4096 tg256 and decode at depth 4k / 16k, the agentic session | pending - the rule: dflash becomes the default only at >= 10 % over both on the agentic set and no loss > 3 % | r47.benchy |
 
 ## Correctness
 

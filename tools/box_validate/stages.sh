@@ -3248,6 +3248,138 @@ st_r46_benchy() {
 }
 
 # ======================================================================================
+row 47 "spec 23f - Muse-Glimmer-30B's DFlash drafter (meta-models/Muse-Glimmer-30B-assistant): P0 (teacher-forced acceptance K 1..15, the int4 g64 / int8 arms, raw vs capped q, prompt lookup, the verify cost at M = 1..16, the projection and its stopping rule) and the engine - the drafter on the card in int4 g64 / int8 / bf16, df_* at Muse's shapes + mg_dflash.cl, MuseDrafter, the verify lists at M = 1..16 with the taps, the commit's projection, the prefill tail, the ring in snapshots, --spec dflash / lookup in b70-serve and b70-decode; D0-D5 (plan 23f)"
+rownote 47 "Written blind on the Mac (plan 23f, ONE branch for both parts - operator 2026-10-15: Part 2 built regardless of P0, P0 picks the defaults). New binaries: the verify lists' (B70_MUSE_VERIFY_M16: every decode kernel at M 2..16, mg_pf_embed and mg_vargmax_stage1 at M 1..16, mg_vargmax_stage2) and the drafter's (B70_MUSE_DFLASH: df_prep / df_attn / df_topk at Muse's defines, mg_dflash_M16_H6656_K16_E5, the drafter GEMVs at M 16 in int8 / bf16 / int4 layout 1) - nothing binds them without --spec dflash / lookup on Muse: D0 is G0. Mac-side (measured): dflash_ref_test's Muse form (the twin vs dflash_ref.py: rows cos 1.0000000, ids / order exact; norm2 = transformers' bf16 _m_norm on 256 / 256), tools/mac/clrun/muse_dflash_run (the draft and projection lists at the fixture's shapes: rows / logits cos 1.0000000, 15 ids / vids equal, the attention at the window's edge exact; the int4 arm NOT RUN - Apple's OpenCL has no as_half), muse_spec_test (D2 greedy == plain at K 15 / 1..15 / truncated runs, lookup; D4 chi-square >= 0.01 over 10^6 for both q forms and lookup), muse_dflash_names_test, muse_verify_names_test."
+rownote 47 "P0 on the Mac (2 short prompts, docs/probe-muse-dflash-2026-10-16.md, provisional): code E_15 9.33 (bf16) = 9.33 (int4 g64 + int8 head) vs 9.78 int8; prose saturates ~1.8; sampled q raw E_15 5.58 vs capped 1.35 -> the default is RAW (reverses decision 11's recommendation); lookup 1.04-1.09x; projected int4 code 1.91x plain at K 8 with the DERIVED costs. Verdict UNDECIDED - the agentic corpora (r47.taps / r47.accept) and the measured verify cost (r47.cost) decide. Provisional defaults: --draft-format int4, --spec-max 15 under AdaptiveK, --draft-q raw."
+rownote 47 "Deviations to read the results by: the drafter's ring is 2112 slots (df_attn's WIN 2049 for |q - k| <= 2048; RING >= WIN; PB 64); the draft list always runs the whole 16-row block (dctl.k 15 - transformers' form), K only bounds what is verified; df_prep's q / k norms round once in fp32 (transformers' bf16 rounds twice) - inside D1's bars; the prefix snapshot carries the projected ring (43.3 MB) not spec 23 §8.4's fc rows; --spec dflash / lookup run on ONE card (--pp 2 refused); sampled drafts are drawn on the host from the readback's q (lossless). mg_attn at M = 16 is compiled as-is (NPR 256: register spills possible - r47.cost / r47.benchy show it; the lever is chunking rows)."
+rownote 47 "Data: the drafter (muse_dflash: hf download meta-models/Muse-Glimmer-30B-assistant, 5.11 GB), the int4 checkpoint (muse_gptq), 23a's golden sets with taps (oracle_muse) for r47.taps, then oracle_muse_taps for r47.accept / r47.d1; row 43's ckpt4 (oracle_muse_synth) for r47.d3. RAM: r47.accept ~20-24 GiB peak (the drafter fp32 10.2 GB + head + embedding, ESTIMATED), r47.d1_ref likewise. Hand back: r47.cost's table (verify M = 1..16 at 4096 / 32768, the drafter block per format), r47.accept's summary.md + lookup.txt, r47.verdict's project output, muse_dflash_test's lines, the D1 tables (d1.md), muse_verify_*_test's lines (every M bitwise or DIFFER, the drafter lines, the prefill tail), r47.d2's GREEDY lines and dflash: acceptance lines, r47.serve's IDENTICAL / RATIO / SEEDED lines, the llama-benchy tables."
+rownote 47 "D5's rule (spec 19 D5's form): --spec dflash becomes Muse's default only if it beats both --spec off and --spec lookup by >= 10 % on the agentic set and loses nowhere by more than 3 %; otherwise it ships as an option. Recorded in spec 23 '23f as built' by the operator."
+stage r47.k0 47 default cpu - g0.sha,g0.bitwise,g0.suite "D0: no existing command line moved (only additions), every pre-existing binary identical, the suite (G0) - incl. 23f's edits to shared files: dflash_capture.cc (the Muse shape; Qwen3.8's walk unchanged), tap_drafter.h (TapSink split out of TapDrafter), MuseBuffers / muse_capture (rows, build_verify), MuseEngine (a defaulted MuseSpec), muse_prefill (defaulted taps), dflash_d1 (a Muse branch), b70-serve / b70-decode (Muse's --spec), cli::dflash::check_flags (int4 refused for Qwen3.8)"
+st_r47_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r47.host 47 default cpu - - "host: dflash_ref_test (the twin's Muse form vs dflash_ref.py), dflash_loader_test, muse_assistant_test (the config, int4 g64 RTN vs the oracle's fixture, the plan with the drafter), muse_dflash_names_test, muse_verify_names_test, muse_spec_test (D2 / D4 over a fake engine), muse_snapshot_test, adaptive_k_test; in the oracle image test_dflash_ref.py (Muse form bitwise transformers), test_muse_taps.py, test_dflash_accept.py, test_lookup_accept.py, test_muse_p0_project.py, test_dflash_d1.py"
+st_r47_host() {
+  run_tests '^(dflash_ref_test|dflash_loader_test|muse_assistant_test|muse_dflash_names_test|muse_verify_names_test|muse_spec_test|muse_snapshot_test|adaptive_k_test)$'
+  jgrab host '^(dflash_ref|muse_assistant|muse_dflash_names|muse_spec)_test$' 'muse|PASS|p-value|greedy|cos'
+  chk "tools/oracle/run_in_container.sh 'python3 tools/oracle/test_dflash_ref.py && python3 tools/oracle/test_muse_taps.py && python3 tools/oracle/test_dflash_accept.py && python3 tools/spec/test_lookup_accept.py && python3 tools/spec/test_muse_p0_project.py && python3 tools/oracle/test_dflash_d1.py'" \
+    "the reference's, the dumps', the acceptance's, lookup's, the projection's and the D1 comparator's tests (oracle image)"
+  finish
+}
+stage r47.reject 47 default gpu - - "the refusals before the device: b70-decode cli_reject_muse_{spec,spec_bench,spec_lookup,spec_max,draft_q}, b70-serve cli_reject_serve_muse_{spec,lookup,spec_max,draft_vocab,draft_q}, cli_reject_serve_dflash_{format,int4}, cli_reject_serve_draft_q_other. Under the GPU lock (a refusal that regressed would open the device)"
+st_r47_reject() {
+  run_tests '^cli_reject_(muse_(spec|spec_bench|spec_lookup|spec_max|draft_q)|serve_muse_(spec|lookup|spec_max|draft_vocab|draft_q)|serve_dflash_(format|int4)|serve_draft_q_other)$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  finish
+}
+stage r47.taps 47 optin cpu muse_gptq,oracle_muse,oracle_image - "P0 Task 2 (box CPU, hours): muse_oracle.sh taps - the code / prose golden runs at MUSE_TAPS_GEN 256 converted to dumps, the agentic prompt at 512, A4 teacher-forced when r42.a4's references exist -> \$DATA/oracle-out-muse-taps/dumps (resumable); then re-links oracle-out*"
+st_r47_taps() {
+  chk "tools/box_validate/muse_oracle.sh $DATA taps" "the Muse-Glimmer tap dumps"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "ls -la oracle-out-muse-taps/dumps/ | tail -20"
+  finish
+}
+stage r47.accept 47 optin cpu muse_dflash,muse_gptq,oracle_muse_taps,oracle_image - "P0 Task 3 (box CPU): MODEL=muse tools/oracle/dflash_p0.sh - dflash_accept.py run --model muse over every dump (arms bf16, int8, int8h, int4g64, int4g64h; K 1..15 from one 16-row block an anchor; the sampled estimate for q raw and capped; incoai's DFlash2 drafter only if already in the cache - never downloaded) and lookup_accept.py --dumps --max-k 15 -> oracle-out-muse-p0/{accept/summary.md,lookup.txt}"
+st_r47_accept() {
+  x "free -g | head -2"
+  chk "MODEL=muse ARMS=bf16,int8,int8h,int4g64,int4g64h,dflash2 tools/oracle/dflash_p0.sh" "the Muse-Glimmer acceptance and the lookup baseline"
+  x "cat oracle-out-muse-p0/accept/summary.md oracle-out-muse-p0/lookup.txt 2>/dev/null | head -120"
+  grab_all accept '^\| |E_15|lookup' 80
+  finish
+}
+stage r47.cost 47 default gpu - - "P0 Task 4: probe_draft_cost --shapes muse at depth 4096 and 32768 - the verify at M = 1..16 (52 layers x 4 int4 GEMVs, the int8 head, the attention estimate) and one drafter block per format (int4 g64 layout 1 / int8 / bf16), interleaved pairs against M = 1 after a warm-up, median of 3 (random weights of the real shapes: no data)"
+st_r47_cost() {
+  idle before
+  chk "build/tools/probe/probe_draft_cost --shapes muse --mmax 16 --depth 4096,32768 --calls 10 --rounds 3 | tee $STATE/$STAGE.txt" "the Muse verify and draft costs"
+  idle after
+  grab_all cost '^\||^probe_draft_cost|verify|draft' 80
+  finish
+}
+stage r47.verdict 47 manual - - - "P0 Task 5: the projection and the verdict from the box's numbers - tools/spec/muse_p0_project.py over r47.accept's tables, r47.cost's probe output and lookup; record it in spec 23 §8.5 (go / defaults: the drafter format by decision 9 - int4 g64 within 0.05 of bf16's acceptance -, K_max, the q form)"
+st_r47_verdict() {
+  say "python3 tools/spec/muse_p0_project.py --accept oracle-out-muse-p0/accept --lookup oracle-out-muse-p0/lookup.json --probe \$STATE/r47.cost.txt"
+  say "# then edit docs/superpowers/specs/2026-10-15-spec23-muse-glimmer-design.md §8.5 with the verdict and the defaults"
+  finish
+}
+stage r47.k1 47 default gpu - - "the new binaries built (kbins: the first ocloc build of the drafter's df_* at Muse's defines, mg_dflash, the drafter GEMVs at M 16 in three formats; the verify lists' at M 2..16 are kbins'd by name below) and the names tests on the box build"
+st_r47_k1() {
+  kbins df_prep_M16_H6656_I19968_Q32KV8_D128_R2112_V202048_E5 df_attn_M16_Q32KV8_D128_R2112_W2049_P64 \
+    df_topk_R15_N202048_U202048 mg_dflash_M16_H6656_K16_E5 mg_vargmax_stage2_N202048 \
+    mg_vargmax_stage1_M16_N202048 mg_pf_embed_M16_K6656_G26_V202048 mg_attn_M16_T64_Q32KV2_W2048_R4096 \
+    mg_attn_M16_T64_Q32KV2_F gemv_M16_K6656_N8704_S2_L0 gemv_i8w_M15_K6656_N202048 gemv_i8w_M16_K6656_N6144 \
+    gemv_M16_K6656_N6144_S1_L1 gemv_bf16_M16_K6656_N6144 gemv_M16_K33280_N6656_S1_L1 gemv_M16_K19968_N6656_S1_L1
+  run_tests '^(muse_dflash_names_test|muse_verify_names_test)$'
+  finish
+}
+stage r47.d1 47 default gpu muse_dflash,muse_gptq,oracle_muse_taps r47.k1 "D1, the engine's half: muse_dflash_test (the REAL assistant beside a synthetic target vs the twin: 66 / 8 launches, 2200 positions projected across the 2112-slot ring, a draft at p 2200 - rows / logits cosine >= 0.99999, the 15 ids, vids; the replay bitwise, set_draft, the capped q, the ring's snapshot round trip, the bf16 head; int4 / int8 / bf16), then MODEL=muse dflash_d1.sh gpu over oracle-out-muse-taps (16 anchors a dump, K 15, the arms i4 / i8 / bf16 with the int8 head) -> \$STATE/d1/d1.<arm>.jsonl"
+st_r47_d1() {
+  x "build/tests/muse_dflash_test ${SNAP_MUSE_DFLASH:-meta-models/Muse-Glimmer-30B-assistant} | tee $STATE/$STAGE.txt"
+  step_rc $? "muse_dflash_test (int4 / int8 / bf16)"
+  chk "MODEL=muse tools/box_validate/dflash_d1.sh gpu $STATE/d1" "dflash_d1 (Muse) x 3 arms"
+  grab_all d1 '^== drafter|^launches|^projection|^greedy|^replay|^set_draft|^capped|^ring snapshot|^bf16 head|^muse_dflash_test|^dflash_d1' 40
+  finish
+}
+stage r47.d1_ref 47 default cpu muse_dflash,muse_gptq,oracle_muse_taps,oracle_image r47.d1 "D1, the reference's half (box CPU, the oracle image): MODEL=muse dflash_d1.sh ref - dflash_ref.py's Muse form (bitwise transformers 5.19.0) in float32 on the same taps, anchors and head form (int8 / int4 g64 RTN simulated where the engine quantised); the bars: top-16 sets tie-aware, the raw logits' cosine >= 0.9999 (bf16) / 0.999 (int8, int4), the 15 greedy ids equal -> \$STATE/d1/d1.md"
+st_r47_d1_ref() {
+  x "free -g | head -2"
+  chk "MODEL=muse tools/box_validate/dflash_d1.sh ref $STATE/d1" "dflash_d1.py (Muse) x 3 arms: D1"
+  grab_all d1-ref '^\| |^D1 |^  FAIL' 40
+  finish
+}
+stage r47.d3 47 default gpu oracle_muse_synth,muse_gptq r47.k1 "D3: muse_verify_synth_test (ckpt4) and muse_verify_real_test (the int4 checkpoint) - the verify lists at M = 1..16 bitwise the M = 1 decode steps (logits rows, ids, the full / sliding layers' KV rows) at P 64 and 2100 (across the window and the ring); with a recording TapSink: plain steps through verify(0) bitwise, an M = 16 verify's taps bitwise the M = 1 steps', commit(5) projects P .. P + 5 only, the prefill tail covers [P - 2048, P) 16 rows a replay (taps cosine >= 0.999 vs decode's)"
+st_r47_d3() {
+  run_tests '^muse_verify_(synth|real)_test$' dflash '' 'ZE_AFFINITY_MASK=0'
+  jgrab d3 '^muse_verify_(synth|real)_test$' 'M +[0-9]+ at P|drafter|verify M 16|prefill tail|PASS|FAIL|SKIP' 120
+  finish
+}
+stage r47.d2 47 default gpu muse_dflash,muse_gptq r47.d3 "D2 without the server: b70-decode <muse int4> --ids (23a's muse_short_code / muse_short_prose / muse_4k / muse_agentic prompts) --prefill --n 256 plain / --spec dflash (int4, K 15) / --spec dflash --spec-max 4 / --draft-format bf16 / --draft-format int8 - the ids identical; the acceptance lines"
+st_r47_d2() {
+  local m="${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound}" p arm f a dm="--draft-model ${SNAP_MUSE_DFLASH:-meta-models/Muse-Glimmer-30B-assistant}"
+  for p in short_code short_prose 4k agentic; do
+    f=tests/golden/prompts/muse_$p.ids
+    for arm in off k15 k4 bf16 int8; do
+      case "$arm" in
+        off) a="" ;; k15) a="--spec dflash $dm" ;; k4) a="--spec dflash --spec-max 4 $dm" ;;
+        bf16) a="--spec dflash --draft-format bf16 $dm" ;; int8) a="--spec dflash --draft-format int8 $dm" ;;
+      esac
+      chk "ZE_AFFINITY_MASK=0 build/src/cli/b70-decode $m --ids $f --n 256 --prefill --max-len 16384 $a > $STATE/$STAGE.$p.$arm.out" "b70-decode $p $arm"
+    done
+    chk "for a in k15 k4 bf16 int8; do cmp $STATE/$STAGE.$p.off.out $STATE/$STAGE.$p.\$a.out || exit 1; done && echo 'GREEDY identical: $p plain / dflash int4 K 15 / K 4 / bf16 / int8'" "greedy ids identical with and without the drafter ($p)"
+  done
+  grab_all dflash '^generate|^drafter:|GREEDY' 40
+  finish
+}
+stage r47.serve 47 default gpu muse_dflash,muse_gptq r47.d2 "D2 / D4 by b70-serve <muse int4> --chat-template <the original's>: the 36 Muse-rendered A4 tool-call scenarios (tests/golden/toolcall-muse) through --spec off / --spec dflash (AdaptiveK to 15) / --spec lookup, greedy, max_tokens 192 - identical to --spec off; a seeded sampled request twice (--spec dflash, raw q) and with --draft-q capped; the startup and per-request 'dflash:' lines"
+st_r47_serve() {
+  local m="${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound}" t="--chat-template tests/tokenizer/muse/chat_template.jinja"
+  local dm="--draft-model ${SNAP_MUSE_DFLASH:-meta-models/Muse-Glimmer-30B-assistant}"
+  serve_arms "$STATE/$STAGE" 1 "$m" "--set tests/golden/toolcall-muse --max-tokens 192 --stop-at-eos" \
+    "off|--max-len 32768 $t --spec off" "dflash|--max-len 32768 $t --spec dflash $dm" "lookup|--max-len 32768 $t --spec lookup"
+  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output through --spec dflash / lookup identical to --spec off"
+  x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref off --metric wall_tps"
+  x "ZE_AFFINITY_MASK=0 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $m --max-len 32768 $t --spec dflash $dm"
+  step_rc $? "b70-serve --spec dflash (raw q): serves; the seeded sampled request twice"
+  x "ZE_AFFINITY_MASK=0 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $m --max-len 32768 $t --spec dflash --draft-q capped $dm"
+  step_rc $? "b70-serve --spec dflash --draft-q capped: the seeded sampled request twice"
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 20
+  grab_all ratio '^RATIO ' 10
+  grab_all dflash 'drafter:|dflash:|lookup:|SEEDED|memory' 20
+  finish
+}
+stage r47.benchy 47 optin gpu-self muse_dflash,muse_gptq,uvx r47.serve "D5 (spec 19 D5's rule): llama-benchy through b70-serve <muse int4> on one card at the operator's flags (pp4096 tg256 depth 1, --no-cache --exact-tg --latency-mode generation) and on the agentic session, --spec off / --spec lookup / --spec dflash (auto K) - dflash becomes Muse's default only if it beats both by >= 10 % on the agentic set and loses nowhere by more than 3 %"
+st_r47_benchy() {
+  local m="${SNAP_MUSE:-Vishva007/Muse-Glimmer-30B-W4A16-AutoRound}" t="--chat-template tests/tokenizer/muse/chat_template.jinja"
+  local dm="--draft-model ${SNAP_MUSE_DFLASH:-meta-models/Muse-Glimmer-30B-assistant}" f="--concurrency 1 --no-cache --exact-tg --latency-mode generation" arm a
+  for arm in off lookup dflash; do
+    case "$arm" in off) a="--spec off" ;; lookup) a="--spec lookup" ;; dflash) a="--spec dflash $dm" ;; esac
+    chk "MODEL=$m MAX_LEN=65536 SERVE_AFFINITY=0 SERVE_ARGS='$t $a' tools/probe/serve_benchy.sh --pp 4096 --tg 256 --depth 1 $f" "pp4096 tg256, $arm"
+    chk "MODEL=$m MAX_LEN=65536 SERVE_AFFINITY=0 SERVE_ARGS='$t $a' tools/probe/serve_benchy.sh --pp 1024 --tg 256 --depth 4096 16384 $f" "decode at depth 4k / 16k, $arm"
+  done
+  grab_all benchy '^\| ' 80
+  finish
+}
+
+# ======================================================================================
 row 48 "spec 24a - LFM2.5-24B-A2B (lfm2_moe): the facts, the CPU reference (F1), golden sets, the A4 reference (plan 24a)"
 rownote 48 "Download first: hf download LiquidAI/LFM2.5-24B-A2B (47.96 GB; df -h ~ first; MemAvailable >= 64 GB for the real-weight stages)."
 rownote 48 "Box CPU only, no card: nothing here takes the GPU lock. Every stage runs tools/box_validate/lfm2moe_oracle.sh in the oracle image with transformers 5.19.0 from <tree>/oracle-out-q4exp-site (tools/oracle/qwen4exp_env.sh; the image is never changed). r48.host needs the tiny model (hf download yujiepan/lfm2-moe-tiny-random, 10 MB); the real stages SKIP 77 'missing data' without the bf16 original, or while it is still downloading."

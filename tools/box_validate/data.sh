@@ -122,6 +122,9 @@ case "${1:-}" in
       bash -c 'for p in muse_short_prose muse_short_code muse_4k muse_8k muse_32k muse_agentic; do test -s oracle-out-muse/$p.ids && test -s oracle-out-muse/$p.golden.safetensors || exit 1; done'
     have oracle_muse_a4 "oracle-out-muse-a4/ with 36 <name>.bf16.txt and 36 <name>.gptq.txt (spec 23a gate Q: muse_oracle.sh a4)" \
       bash -c 'test "$(ls oracle-out-muse-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36 && test "$(ls oracle-out-muse-a4/*.gptq.txt 2>/dev/null | wc -l)" -eq 36'
+    # Spec 23f: Muse-Glimmer-30B's DFlash assistant (5.11 GB bf16; hf download meta-models/Muse-Glimmer-30B-assistant).
+    have muse_dflash "the Muse-Glimmer assistant ${SNAP_MUSE_DFLASH:-meta-models/Muse-Glimmer-30B-assistant} (5.11 GB bf16)" \
+      complete "${SNAP_MUSE_DFLASH:-meta-models/Muse-Glimmer-30B-assistant}"
     # Spec 23f: the drafter's tap dumps (muse_oracle.sh taps: dump_taps.py's format) dflash_accept.py drafts over.
     have oracle_muse_taps "oracle-out-muse-taps/dumps/*.taps.safetensors (spec 23f Task 2: muse_oracle.sh taps - code / prose / agentic, + a4/* after r42.a4)" \
       bash -c 'ls oracle-out-muse-taps/dumps/*.taps.safetensors'
