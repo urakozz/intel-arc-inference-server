@@ -3907,4 +3907,16 @@ target_include_directories(dflash_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CM
 target_link_libraries(dflash_plan_test PRIVATE b70_dflash_plan b70_dflash_loader)
 add_test(NAME dflash_plan_test COMMAND dflash_plan_test ${CMAKE_CURRENT_SOURCE_DIR}/model/dflash/qwen38_dflash2_config.json)
 set_tests_properties(dflash_plan_test PROPERTIES LABELS dflash)
+# Task 3 on the card: the draft and projection lists end to end - the real drafter (B70_DFLASH_SNAPSHOT, both formats)
+# beside a synthetic target (random embedding, random int8 / bf16 heads at Qwen3.8's shapes) against the host twin:
+# the projection across the ring's wrap, a draft at p 2053, determinism, K by the control block, a sampled walk, a
+# 32768-id draft vocabulary bitwise the full head (Review Focus 3). SKIP 77 without the drafter.
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(dflash_draft_test runtime/dflash_draft_test.cc)
+  target_include_directories(dflash_draft_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(dflash_draft_test PRIVATE b70_dflash_runtime)
+  add_dependencies(dflash_draft_test ${B70_DFLASH_KERNELS} ${_v19b_reused})
+  add_test(NAME dflash_draft_test COMMAND dflash_draft_test ${B70_DFLASH_SNAPSHOT})
+  set_tests_properties(dflash_draft_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
 # ==== Spec 19b ==== (end) ====
