@@ -122,6 +122,9 @@ case "${1:-}" in
       bash -c 'for p in muse_short_prose muse_short_code muse_4k muse_8k muse_32k muse_agentic; do test -s oracle-out-muse/$p.ids && test -s oracle-out-muse/$p.golden.safetensors || exit 1; done'
     have oracle_muse_a4 "oracle-out-muse-a4/ with 36 <name>.bf16.txt and 36 <name>.gptq.txt (spec 23a gate Q: muse_oracle.sh a4)" \
       bash -c 'test "$(ls oracle-out-muse-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36 && test "$(ls oracle-out-muse-a4/*.gptq.txt 2>/dev/null | wc -l)" -eq 36'
+    # Spec 23f: the drafter's tap dumps (muse_oracle.sh taps: dump_taps.py's format) dflash_accept.py drafts over.
+    have oracle_muse_taps "oracle-out-muse-taps/dumps/*.taps.safetensors (spec 23f Task 2: muse_oracle.sh taps - code / prose / agentic, + a4/* after r42.a4)" \
+      bash -c 'ls oracle-out-muse-taps/dumps/*.taps.safetensors'
     # Spec 23b: the synthetic real-width checkpoint (4 layers, check.py ACCEPTED) the loader's tests read.
     have oracle_muse_synth "oracle-out-muse-synth/ckpt4/ + ckpt4.ACCEPTED (spec 23b: r43.synth - muse_oracle.sh synth-ckpt)" \
       bash -c 'test -s oracle-out-muse-synth/ckpt4/model.safetensors.index.json && test -f oracle-out-muse-synth/ckpt4.ACCEPTED'
