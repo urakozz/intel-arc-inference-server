@@ -3500,33 +3500,42 @@ st_r56_d5_dv() {
   grab_all dflash 'spec dflash:|^dflash:|draft vocab' 24
   finish
 }
-stage r56.d5_benchy 56 optin gpu-self qwen,dflash,uvx r56.d5_a4 "D5 with llama-benchy at the operator's flags (row 41's matrix A at concurrency 1 and matrix D: --pp 512 4096 --tg 128 --runs 2; --pp 512 --tg 128 --depth 4096 32768 --no-cache), b70-serve --max-len 40960 --spec off / --mtp auto / --spec dflash, the arms in rotated order over 3 rounds"
+stage r56.d5_benchy 56 optin gpu-self qwen,dflash,uvx r56.d5_a4 "D5 with llama-benchy at the operator's flags (row 41's matrix A at concurrency 1 and matrix D: --pp 512 4096 --tg 128 --runs 2; --pp 512 --tg 128 --depth 4096 32768 --no-cache), b70-serve --max-len 40960 --spec off / --mtp auto / --spec dflash, 3 rounds in a Latin square (every arm in every position once), idle checks around them"
 st_r56_d5_benchy() {
   local v="${BENCHY_VERSION:-0.4.0}" r arm args order dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   local a="--pp 512 4096 --tg 128 --concurrency 1 --runs 2 --format md"
   local d="--pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2 --no-cache --format md"
-  for r in 1 2 3; do
-    order="off mtp dflash"; [ "$r" = 2 ] && order="dflash mtp off"
+  idle before
+  for r in 1 2 3; do   # a Latin square: every arm in every position once
+    case "$r" in 1) order="off mtp dflash" ;; 2) order="mtp dflash off" ;; 3) order="dflash off mtp" ;; esac
     for arm in $order; do
       case "$arm" in off) args="--spec off" ;; mtp) args="--mtp auto" ;; dflash) args="--spec dflash $dm" ;; esac
       chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN MAX_LEN=40960 SERVE_ARGS='$args' tools/probe/serve_benchy.sh $a" "round $r $arm, matrix A (c1)"
       chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN MAX_LEN=40960 SERVE_ARGS='$args' tools/probe/serve_benchy.sh $d" "round $r $arm, matrix D"
     done
   done
+  idle after
   grab_all benchy '^(client: |\| )' 200
+  grab_all idle '^IDLE '
   finish
 }
-stage r56.d5_opencode 56 optin gpu-self qwen,dflash,opencode_log r56.d5_a4 "D5 proper (spec 19 §6): the opencode recording (OPENCODE_LOG) replayed through b70-serve with the prefix cache on (replay_ab.sh, max_len 131072), --spec off / --mtp auto / --spec dflash, 3 rounds in rotated order - the per-arm t/s and ttft summaries; the bar is dflash >= 1.10 x --mtp auto here"
+stage r56.d5_opencode 56 optin gpu-self qwen,dflash,opencode_log r56.d5_a4 "D5 proper (spec 19 §6): the opencode recording (OPENCODE_LOG) replayed through b70-serve with the prefix cache on (replay_ab.sh, max_len 131072), --spec off / --mtp auto / --spec dflash, 3 rounds in a Latin square, idle checks around them - the per-arm t/s and ttft summaries, and per request the prefix plan beside the dflash acceptance; the bar is dflash >= 1.10 x --mtp auto here"
 st_r56_d5_opencode() {
   local r arm args order dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
-  for r in 1 2 3; do
-    order="off mtp dflash"; [ "$r" = 2 ] && order="dflash mtp off"
+  idle before
+  for r in 1 2 3; do   # a Latin square: every arm in every position once
+    case "$r" in 1) order="off mtp dflash" ;; 2) order="mtp dflash off" ;; 3) order="dflash off mtp" ;; esac
     for arm in $order; do
       case "$arm" in off) args="--spec off" ;; mtp) args="--mtp auto" ;; dflash) args="--spec dflash $dm" ;; esac
       chk "MODEL=$SNAP_QWEN ARMS=on SERVE_ARGS='$args' tools/prefix/replay_ab.sh $OPENCODE_LOG $STATE/r56.d5.r$r.$arm" "replay round $r, $arm"
     done
   done
+  idle after
+  # Per request: the prefix plan (cold / continue / restore and where) beside the dflash acceptance - whether restores
+  # at mid-call block ends (their ring not the session's, spec 19 §12) cost acceptance.
+  x "grep -hE '^prefix: |^dflash: ' $STATE/r56.d5.r1.dflash.on.serve.log | head -400 > $STATE/r56.d5.restore_vs_accept.txt; wc -l $STATE/r56.d5.restore_vs_accept.txt"
   grab_all replay 'tok/s|t/s|requests|ttft' 60
+  grab_all idle '^IDLE '
   finish
 }
 stage r56.d5_pp 56 optin gpu qwen,dflash r56.pp_serve "the --pp 2 rows (both cards): b70-serve --pp 2 --mtp auto against --pp 2 --spec dflash on A4 + golden, 3 rounds in rotated order - decode t/s, RATIO dflash / mtp; output identical"

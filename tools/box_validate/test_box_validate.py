@@ -865,6 +865,22 @@ class DriverTest(unittest.TestCase):
             for depth in m.group(4).split():
                 self.assertLessEqual(int(depth) + pp + tg, max_len, m.group(0)[:160])
 
+    def test_d5_arms_balanced(self):
+        """Spec 19d D5 (Review Focus 4): over its 3 rounds every arm of r56.d5_opencode and r56.d5_benchy takes every
+        position once (a Latin square), so no arm always runs first, last or between the same two; idle checks bracket
+        the timed rounds."""
+        out = self.run_driver("--dry-run", "--only", "r56", "--with", "r56.d5_opencode,r56.d5_benchy").stdout
+        for stage, pat in (("r56.d5_opencode", r"SERVE_ARGS='([^']*)' tools/prefix/replay_ab\.sh"),
+                           ("r56.d5_benchy", r"SERVE_ARGS='([^']*)' tools/probe/serve_benchy\.sh --pp 512 4096")):
+            block = out.split("--- " + stage + " ", 1)[1].split("\n--- ", 1)[0]
+            arms = [a.split()[1] if a.startswith("--spec") else "mtp" for a in re.findall(pat, block)]
+            self.assertEqual(len(arms), 9, (stage, arms))
+            rounds = [arms[i:i + 3] for i in (0, 3, 6)]
+            for pos in range(3):
+                self.assertEqual(sorted(r[pos] for r in rounds), ["dflash", "mtp", "off"], (stage, rounds))
+            self.assertIn("idle.sh before", block, stage)
+            self.assertIn("idle.sh after", block, stage)
+
     def test_registry_consistent(self):
         reg = tempfile.mktemp(suffix=".tsv")
         try:

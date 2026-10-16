@@ -169,11 +169,13 @@ Recorded here so it is not re-proposed without a cheaper drafter.
    - Store the projected ring rows (20 KB, +31 %).
    - Start cold after a hit (no extra memory; acceptance dips until the ring refills from the
      uncached suffix and generated tokens).
-   - **Ruled in 19d (§12, for the operator to confirm): the whole ring in every snapshot** - neither of the per-position
-     options can be produced for every block (the device keeps only the last window's rows: a block finished in decode,
-     or mid-call outside the call's last window, has no plane left to store), while a snapshot is always taken at its
-     own position, where the ring is exactly the session's. +41.9 MB a snapshot (+25 % of the 166.7 MB state); the
-     cold start stays the behaviour of a snapshot taken without a drafter.
+   - **Ruled in 19d (§12, for the operator to confirm): option 2 at snapshot granularity - the whole projected ring in
+     every snapshot**, not per block: a per-block plane or ring cannot be produced for every block (the device keeps
+     only the last window's rows: a block finished in decode, or a mid-call block outside the call's last window, has
+     none left to store), while a snapshot is taken at its own position and copies the ring as the session holds it.
+     +41.9 MB a snapshot (+25 % of the 166.7 MB state). That ring equals an unbroken session's at prompt-end, request-end
+     and decode-time snapshots; at a mid-call block end it holds what the call had projected by then - see §12's
+     caveat. The cold start stays the behaviour of a snapshot taken without a drafter.
 6. **A draft-only vocabulary (lever, P0 decides):**
    - **What it is.** The drafter's candidate head reads the full 248,320-row target head. Restricting
      *drafting* to a subset V′ (the most frequent ids on the golden, A4 and opencode corpora, as
@@ -475,10 +477,15 @@ and nothing changes without `--spec dflash`, so D0 is G0. Plan: `docs/superpower
   `load_ring` (the whole ring, ring_k then ring_v, 41,943,040 B for Qwen3.8's drafter) and `key()`; `Engine::state_bytes /
   save_state / load_state` append it after the target's state (and `PipelineEngine`'s, in the same one-card layout, so a
   snapshot moves between `--pp 1` and `--pp 2`). A restore is a copy: the ring after it is bitwise the ring the snapshot
-  found (Review Focus 1, by construction). **The caveat, recorded:** a mid-call block end's snapshot holds the ring as
-  the call left it - the prefill projects only the call's last 2048 positions (19c's tail), so positions of that window
-  the call had not reached are unprojected; a restore there followed by a tail shorter than the window drafts worse
-  until the ring refills (never another output). Projecting every position under the hook would cost ~90-130 ms a block
+  found (Review Focus 1, by construction). **The caveat, recorded:** a mid-call block end b's snapshot holds the ring as
+  the call left it there - the prefill projects only the call's last 2048 positions (19c's tail), so of the window
+  [b - 2048, b) every position the call reached but which lies before the call's last 2048 is unprojected (the slot
+  holds an older position's row or zero). For a block end at or before the call's end - 2048 that is the WHOLE window:
+  such snapshots carry 41.9 MB that buys nothing (a 64k first prompt makes ~30 of them). A restore there equals a cold
+  run's ring only when the new tail is at least 2048 long; otherwise it drafts worse until the ring refills (never
+  another output). r56.d5_opencode records each request's prefix plan beside its dflash acceptance, so the operator can
+  see whether such restores happen and cost; the choices then are to project every position under the hook, to treat
+  those restores as cold (and not store their ring), or to keep this. Projecting every position under the hook would cost ~90-130 ms a block
   (~10-13 % of prefill, derived) - the lever if the recording shows such restores matter. The plane per snapshot (the
   normed fc output, 20 MB, re-projected at restore, ~30-50 ms derived) is the lever for the memory.
 - **Store keys carry the drafter (Review Focus 2):** `server::store_root(kv_form, drafter_key)` is the root of every hash
