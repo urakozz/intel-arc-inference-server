@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 #include "model/model_desc.h"
 
 // The byte size of every runtime allocation that a model and a max_len decide, as
@@ -298,6 +299,24 @@ struct MtpDims {
   static MtpSizes sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t draft_vocab = 0,
                         KvCache kv = default_kv_cache(), uint32_t slots = kSlots);
 };
+// --- spec 19c: a tap drafter's verify state (DFlash) --------------------------------------
+//
+// With a drafter (runtime/tap_drafter.h) the Engine's verify lists run up to M = 8 rows (K <= 7 drafts + the
+// pending id), so the GDN state needs 8 slots: slot 0 is PersistentBuffers::gdn_state, gdn_spec_bytes() the
+// other 7 (one gdn_state each, slot-major - MtpBuffers::gdn_spec's layout at 8 slots). Prefill stages the taps
+// of a chunk's rows inside the drafter's window: bf16 [kC][taps][hidden] (prefill_taps_bytes), allocated on
+// the first prefill of an engine with a drafter.
+struct TapVerifyDims {
+  static constexpr uint32_t kSlots = 8;
+  static size_t gdn_spec_bytes(const model::ModelDesc& desc);
+  static size_t prefill_taps_bytes(const model::ModelDesc& desc, uint32_t n_taps);
+};
+// Where the verify list copies each tap: for every site s in [0, layers] the indices t into `layers` whose
+// tapped layer is s - 1 - copied after the input fold of layer s (layer s - 1's output), or for s == layers
+// after the final norm's fold (the last layer's output). Throws std::invalid_argument unless `layers` is
+// non-empty, strictly ascending and every entry < desc.layers. Host only (tests/runtime/dflash_engine_host_test).
+std::vector<std::vector<uint32_t>> tap_sites(const model::ModelDesc& desc, const std::vector<uint32_t>& layers);
+
 // The draft vocabulary's compact head and id table (spec 8 §11) are the LOADER's
 // allocations, sized by loader::draft_vocab_bytes (loader/draft_vocab.h, header-only
 // so this archive needs no loader); memory_plan.h adds them as their own term.

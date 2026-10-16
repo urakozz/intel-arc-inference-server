@@ -162,6 +162,26 @@ CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, Decode
 CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                          const MtpBuffers& mtp, uint32_t i);
 
+// --- spec 19c: a tap drafter's verify list (DFlash) ------------------------------------
+//
+// build_verify_taps: the decode list at M rows (positions pos .. pos + M - 1, ids cur_token[0..M)), with
+// gdn_step's SPEC_SLOTS build over the drafter's `slots` GDN state slots - row m's state into slot
+// (gdn_live + m) % slots, binaries gdn_step_slots_M<M>_N8 -, and the TAPS: after the input fold of layer
+// i + 1 (or the final norm's fold, for the last layer) `resid` holds layer i's output, and for every i in
+// `layers` each row's [hidden] bf16 goes to taps[row][t][hidden] (t: i's index in `layers`) by a device
+// copy (5 x M on Qwen3.8's drafter). argmax ids land in out_token[0..M), logits in `logits` [M][kVocab],
+// argmax_stage2 advances pos by M (the caller rewinds it at commit) - exactly build_verify's contract
+// without the MTP head's KV fill: decode_launches(d) launches at every M. runtime/tap_drafter.h says what
+// the Engine does with the taps.
+struct TapVerify {
+  const l0::Mem* gdn_spec = nullptr;   // slots 1..slots-1, slot-major, one gdn_state each (slot 0 = gdn_state)
+  uint32_t slots = 0;                  // TapVerifyDims::kSlots
+  l0::Mem* taps = nullptr;             // bf16 [DecodeBuffers::kM][layers.size()][hidden]
+  std::vector<uint32_t> layers;        // the tapped layers' OUTPUTS: ascending, each < the model's layers
+};
+CapturedStep build_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
+                               const TapVerify& tv, uint32_t M);
+
 // --- spec 16b: pipeline parallel decode ----------------------------------------------
 //
 // One stage's decode list: the walk above restricted to layers [st.first, st.last), on the

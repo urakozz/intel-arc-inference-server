@@ -43,7 +43,7 @@ uint32_t checked_max_len(const loader::LoadedModel& m, uint32_t max_len) {
 }  // namespace
 
 Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bool debug_resid,
-               KvCache kv)
+               KvCache kv, TapDrafter* drafter)
     : ctx_(ctx),
       model_(std::move(model)),
       persist_(ctx, checked_max_len(model_, max_len), *model_.desc, kv),
@@ -62,6 +62,25 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
       fence_(queue_),
       imm_(l0::CmdList::immediate(ctx)),
       control_(buffers_.control.as<Control>()) {
+  if (drafter) {
+    // Spec 19c: one proposer per engine, and the drafter's verify lists at M = 1 .. max_k + 1 over its 8 slots.
+    if (mtp_)
+      throw std::runtime_error("runtime::Engine: a tap drafter and the MTP head are two proposers - load the "
+                               "model without its head (one proposer per server, spec 19 decision 3)");
+    if (drafter->max_k() == 0 || drafter->max_k() + 1 > TapVerifyDims::kSlots)
+      throw std::runtime_error("runtime::Engine: the drafter drafts " + std::to_string(drafter->max_k()) +
+                               " ids a block; the verify lists take 1.." +
+                               std::to_string(TapVerifyDims::kSlots - 1));
+    drafter_ = drafter;
+    df_slots_ = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device,
+                                          TapVerifyDims::gdn_spec_bytes(*model_.desc));
+    df_tv_.gdn_spec = df_slots_.get();
+    df_tv_.slots = TapVerifyDims::kSlots;
+    df_tv_.taps = &drafter->taps();
+    df_tv_.layers = drafter->tap_layers();
+    for (uint32_t M = 1; M <= drafter->max_k() + 1; ++M)
+      verify_steps_.push_back(build_verify_taps(ctx, model_, buffers_, df_tv_, M));
+  }
   if (mtp_) {
     // Spec 8: the draft lists (one per draft index, each writing its own logits row)
     // and the verify lists at M = 1..kSlots. Only the head's model carries these.
@@ -81,6 +100,9 @@ void Engine::reset() {
   // left alone on purpose - see the header.
   persist_.zero(imm_);
   if (mtp_) mtp_->zero(imm_);
+  // Spec 19c: the drafter's slots (as MtpBuffers::zero does the head's) and a cold drafter.
+  if (df_slots_) imm_.fill(df_slots_->ptr(), 0u, df_slots_->size());
+  if (drafter_) drafter_->reset(imm_);
   verify_k_ = kNoVerify;
   draft_ids_.clear();
 }
@@ -101,7 +123,7 @@ void Engine::ingest(const std::vector<uint32_t>& ids) {
   control_->n_active = 1;
   for (uint32_t id : ids) {
     control_->cur_token[0] = id;
-    if (mtp_)
+    if (mtp_ || drafter_)
       mtp_step1();
     else
       replay();
@@ -119,7 +141,7 @@ std::vector<uint32_t> Engine::generate(uint32_t n,
     // Produced by the previous fence; replay i is what turns it into i + 1.
     const uint32_t id = control_->cur_token[0];
     const Clock::time_point f0 = Clock::now();
-    if (mtp_)
+    if (mtp_ || drafter_)
       mtp_step1();
     else
       replay();
@@ -147,10 +169,29 @@ void Engine::require_mtp(const char* what) const {
                              " = true), b70 --mtp)");
 }
 
+void Engine::require_spec(const char* what) const {
+  if (!mtp_ && !drafter_)
+    throw std::runtime_error(std::string("runtime::Engine::") + what +
+                             ": no proposer - load the model with its MTP head (b70 --mtp) or build the engine "
+                             "with a drafter (--spec dflash)");
+}
+
+uint32_t Engine::max_draft() const { return mtp_ ? kMaxDraft : drafter_ ? drafter_->max_k() : 0; }
+
+uint32_t Engine::gdn_slots() const {
+  return mtp_ ? MtpBuffers::kSlots : drafter_ ? TapVerifyDims::kSlots : 1;
+}
+
+void Engine::replay_aux(l0::CmdList& list) {
+  queue_.execute(list, &fence_);
+  fence_.wait();
+}
+
 uint32_t Engine::max_verify_k() const {
   const uint32_t pos = control_->pos;
-  if (!mtp_ || pos == 0 || pos + 1 >= buffers_.max_len) return 0;
-  return std::min<uint32_t>(kMaxDraft, buffers_.max_len - pos - 1);
+  // Spec 19c: a drafter's verify needs no h_{pos-1}, so pos 0 drafts too.
+  if ((!mtp_ && !drafter_) || (mtp_ && pos == 0) || pos + 1 >= buffers_.max_len) return 0;
+  return std::min<uint32_t>(max_draft(), buffers_.max_len - pos - 1);
 }
 
 const float* Engine::mtp_logits_device() const {
@@ -158,11 +199,11 @@ const float* Engine::mtp_logits_device() const {
   return mtp_->logits.as<float>();
 }
 const float* Engine::verify_logits_device() const {
-  require_mtp("verify_logits_device");
+  require_spec("verify_logits_device");
   return buffers_.logits.as<float>();
 }
 const CapturedStep& Engine::verify_step(uint32_t M) const {
-  require_mtp("verify_step");
+  require_spec("verify_step");
   return verify_steps_.at(M - 1);
 }
 const CapturedStep& Engine::draft_step(uint32_t i) const {
@@ -201,24 +242,27 @@ void Engine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick) {
 }
 
 void Engine::verify(uint32_t k) {
-  require_mtp("verify");
+  require_spec("verify");
   const uint32_t pos = control_->pos;
-  if (k > kMaxDraft || pos == 0 || size_t(pos) + k + 1 > buffers_.max_len)
+  if (k > max_draft() || (mtp_ && pos == 0) || size_t(pos) + k + 1 > buffers_.max_len)
     throw std::runtime_error("runtime::Engine::verify: k " + std::to_string(k) + " at pos " +
                              std::to_string(pos) + " (max_verify_k() = " +
-                             std::to_string(max_verify_k()) + "; pos must be >= 1 and pos + k"
-                             " + 1 <= max_len " + std::to_string(buffers_.max_len) + ")");
+                             std::to_string(max_verify_k()) + "; k <= " + std::to_string(max_draft()) +
+                             ", pos >= 1 with the MTP head, and pos + k + 1 <= max_len " +
+                             std::to_string(buffers_.max_len) + ")");
   for (uint32_t r = 0; r <= k; ++r)
     if (control_->cur_token[r] >= Qwen35::kVocab)
       throw std::runtime_error("runtime::Engine::verify: id " +
                                std::to_string(control_->cur_token[r]) + " in row " +
                                std::to_string(r) + " is outside the vocabulary");
   control_->n_active = k + 1;
-  // The head's KV fill of the same rows at pos - 1 .. pos + k - 1: row r is the pair
-  // (hh[r], cur_token[r]) = (h_{pos-1+r}, x[pos+r]) - capture.h, build_verify.
-  hctl_->pos = pos - 1;
-  hctl_->n_active = k + 1;
-  for (uint32_t r = 0; r <= k; ++r) hctl_->cur_token[r] = control_->cur_token[r];
+  if (mtp_) {
+    // The head's KV fill of the same rows at pos - 1 .. pos + k - 1: row r is the pair
+    // (hh[r], cur_token[r]) = (h_{pos-1+r}, x[pos+r]) - capture.h, build_verify.
+    hctl_->pos = pos - 1;
+    hctl_->n_active = k + 1;
+    for (uint32_t r = 0; r <= k; ++r) hctl_->cur_token[r] = control_->cur_token[r];
+  }
   verify_pos_ = pos;
   verify_k_ = k;
   queue_.execute(verify_steps_[k].list, &fence_);
@@ -226,7 +270,7 @@ void Engine::verify(uint32_t k) {
 }
 
 void Engine::commit(uint32_t j, uint32_t next_token) {
-  require_mtp("commit");
+  require_spec("commit");
   if (verify_k_ == kNoVerify || j > verify_k_)
     throw std::runtime_error("runtime::Engine::commit: j " + std::to_string(j) +
                              (verify_k_ == kNoVerify ? " with no verify() pending"
@@ -235,17 +279,28 @@ void Engine::commit(uint32_t j, uint32_t next_token) {
   if (next_token >= Qwen35::kVocab)
     throw std::runtime_error("runtime::Engine::commit: next_token " + std::to_string(next_token) +
                              " is outside the vocabulary");
-  // Row j's GDN state is slot (live + j) % kSlots (gdn_step.cl SPEC_SLOTS): make it
+  // Row j's GDN state is slot (live + j) % slots (gdn_step.cl SPEC_SLOTS): make it
   // live. Row j's hidden (hh row 1 + j) is the next iteration's h_{pos-1}.
-  control_->gdn_live = (control_->gdn_live + j) % MtpBuffers::kSlots;
-  imm_.copy(mtp_->hh.ptr(), mtp_->hh.as<uint8_t>() + (1 + size_t(j)) * hid_bytes(*model_.desc), hid_bytes(*model_.desc));
+  control_->gdn_live = (control_->gdn_live + j) % gdn_slots();
+  if (mtp_)
+    imm_.copy(mtp_->hh.ptr(), mtp_->hh.as<uint8_t>() + (1 + size_t(j)) * hid_bytes(*model_.desc),
+              hid_bytes(*model_.desc));
   control_->pos = verify_pos_ + j + 1;
   control_->n_active = 1;
   control_->cur_token[0] = next_token;
   verify_k_ = kNoVerify;
+  // Spec 19c: the committed rows' taps (rows 0..j: positions verify_pos_ .. + j) into the drafter's ring. The
+  // projection list reads only the taps and its own control block, so Control's new pos / cur_token above do not
+  // reach it; it runs before anything can rewrite the taps (the next verify).
+  if (drafter_) replay_aux(drafter_->projection(verify_pos_, j + 1));
 }
 
 void Engine::mtp_step1() {
+  if (drafter_) {   // spec 19c: no hidden bookkeeping; the projection rides in commit()
+    verify(0);
+    commit(0, control_->out_token[0]);
+    return;
+  }
   if (control_->pos == 0) {
     // No h_{-1}: the plain list, which reads and writes slot 0 (live is 0 at pos 0 -
     // reset() and load_state() both leave it so), then its hidden into hh row 0.
@@ -258,12 +313,17 @@ void Engine::mtp_step1() {
   commit(0, control_->out_token[0]);
 }
 
+const void* Engine::live_gdn_slot() const {
+  const uint32_t live = (mtp_ || drafter_) ? control_->gdn_live : 0;
+  if (live == 0) return persist_.gdn_state.ptr();
+  const l0::Mem& spec = mtp_ ? mtp_->gdn_spec : *df_slots_;
+  return spec.as<uint8_t>() + size_t(live - 1) * persist_.gdn_state.size();
+}
+
 void Engine::mtp_normalise_live() {
   const uint32_t live = control_->gdn_live;
-  if (!mtp_ || live == 0) return;
-  imm_.copy(persist_.gdn_state.ptr(),
-            mtp_->gdn_spec.as<uint8_t>() + size_t(live - 1) * persist_.gdn_state.size(),
-            persist_.gdn_state.size());
+  if ((!mtp_ && !drafter_) || live == 0) return;
+  imm_.copy(persist_.gdn_state.ptr(), live_gdn_slot(), persist_.gdn_state.size());
   control_->gdn_live = 0;
 }
 
@@ -290,12 +350,10 @@ size_t Engine::kv_bytes(uint32_t n_pos) const {
 
 void Engine::save_state(void* host) const {
   auto* h = static_cast<uint8_t*>(host);
-  // The LIVE GDN slot (spec 8: after a commit it may be one of gdn_spec's).
-  const uint32_t live = mtp_ ? control_->gdn_live : 0;
-  const void* gdn = live == 0 ? persist_.gdn_state.ptr()
-                              : mtp_->gdn_spec.as<uint8_t>() +
-                                    size_t(live - 1) * persist_.gdn_state.size();
-  imm_.copy(h, gdn, persist_.gdn_state.size());
+  // The LIVE GDN slot (spec 8: after a commit it may be one of gdn_spec's; spec 19c: of the
+  // drafter's slots). The drafter's ring is not part of a snapshot: a restore starts it cold (spec 19
+  // decision 5 is 19d's plane) - correct, lower acceptance until the ring refills.
+  imm_.copy(h, live_gdn_slot(), persist_.gdn_state.size());
   imm_.copy(h + persist_.gdn_state.size(), persist_.conv_ring.ptr(), persist_.conv_ring.size());
   if (mtp_)
     imm_.copy(h + persist_.gdn_state.size() + persist_.conv_ring.size(), mtp_->hh.ptr(),
@@ -313,6 +371,10 @@ void Engine::load_state(const void* host, uint32_t pos) {
     imm_.copy(mtp_->hh.ptr(), h + persist_.gdn_state.size() + persist_.conv_ring.size(),
               hid_bytes(*model_.desc));
     control_->gdn_live = 0;   // the state went into slot 0
+    verify_k_ = kNoVerify;
+  }
+  if (drafter_) {   // spec 19c: the same, and the ring stays as it is (cold for this session)
+    control_->gdn_live = 0;
     verify_k_ = kNoVerify;
   }
   control_->pos = pos;
