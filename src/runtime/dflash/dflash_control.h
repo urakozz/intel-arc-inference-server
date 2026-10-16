@@ -2,7 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "kernels/dflash_kernels.h"
+#include "kernels/dflash_dims.h"
 
 // Spec 19b: the DFlash lists' two host-visible blocks (shared memory), beside runtime::Control - which the draft list
 // reads for the anchor (pos, cur_token[0]) and writes the drafts into (cur_token[1..K], what the verify list reads) and

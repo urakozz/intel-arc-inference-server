@@ -3900,4 +3900,11 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_test(NAME dflash_kernels_test COMMAND dflash_kernels_test)
   set_tests_properties(dflash_kernels_test PROPERTIES LABELS dflash TIMEOUT 900)
 endif()
+# Task 3: the drafter's buffers through the planner (sizes, DrafterPlan, the memory line, max_len auto), the RoPE
+# table against the twin, the launch formulas. Host only.
+add_executable(dflash_plan_test runtime/dflash_plan_test.cc)
+target_include_directories(dflash_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dflash_plan_test PRIVATE b70_dflash_plan b70_dflash_loader)
+add_test(NAME dflash_plan_test COMMAND dflash_plan_test ${CMAKE_CURRENT_SOURCE_DIR}/model/dflash/qwen38_dflash2_config.json)
+set_tests_properties(dflash_plan_test PROPERTIES LABELS dflash)
 # ==== Spec 19b ==== (end) ====
