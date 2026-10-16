@@ -3852,4 +3852,11 @@ add_test(NAME dflash_load_checkpoint_test COMMAND dflash_load_checkpoint_test ${
   ${B70_DFLASH_SNAPSHOT})
 set_tests_properties(dflash_load_checkpoint_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
   TIMEOUT 1800)
+# Task 2: the host twin (tests/kernels/dflash_ref.h) against tools/oracle/dflash_ref.py's own outputs
+# (tests/loader/dflash_ref_fixture.safetensors, tools/oracle/dflash_fixture.py). Host only.
+add_executable(dflash_ref_test kernels/dflash_ref_test.cc)
+target_include_directories(dflash_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dflash_ref_test PRIVATE b70_loader b70_dflash_model)
+add_test(NAME dflash_ref_test COMMAND dflash_ref_test ${CMAKE_CURRENT_SOURCE_DIR}/loader/dflash_ref_fixture.safetensors)
+set_tests_properties(dflash_ref_test PROPERTIES LABELS dflash)
 # ==== Spec 19b ==== (end) ====
