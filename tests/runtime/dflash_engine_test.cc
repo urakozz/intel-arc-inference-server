@@ -28,6 +28,13 @@
 //        longest agreeing prefix -> commit - at K = 7, 3 and 1: the 160 ids equal g; acceptance printed.
 //   RF3  near max_len: max_verify_k() falls 7 .. 0, the loop runs to max_len - 1 and emits the plain run's ids;
 //        then verify(1) refuses.
+//   PF   (Task 3, the prefill tail) a 3000-id prompt: one prefill() call fills the ring with the taps of its last
+//        2048 positions (the window) - the same ring, BITWISE, from the prompt prefilled in two calls split at 1024
+//        (a multiple of 64: prefill_split_test's bitwise case) and in chunks of 1000 (chunk boundaries move no
+//        per-row value... except the GDN scan's 64-chunks: gated at row cosine, median >= 0.9999); and against the
+//        decode path (16 ids prefilled, the rest ingested - verify(0) + commit(0) per id, each projecting its row):
+//        the window's rows at median cosine >= 0.999 (prefill's GEMMs vs decode's GEMVs), worst printed; and no row of
+//        the window is left zero (every position the ring reads back was projected).
 //
 // usage: dflash_engine_test <target snapshot> <drafter> [max_len = 16384]   (cwd = the source tree)
 // SKIP (77) when either checkpoint is missing.
@@ -391,6 +398,52 @@ int main(int argc, char** argv) {
                 n, ks.front(), c.e.max_verify_k(), got.size(), rf3 ? "yes" : "NO", c.e.pos(),
                 refused ? "refused" : "ran");
     ok &= rf3;
+  }
+
+  // --- PF: the prefill tail ----------------------------------------------------------------------------------
+  {
+    const uint32_t n = 3000, W = d.window();
+    const size_t row = ring_row_elems(c);
+    const auto window_rows = [&] { return ring_rows(c, n - W, W); };
+    e.reset();
+    e.prefill(head(ids, n));
+    const std::vector<uint16_t> one = window_rows();
+    e.reset();
+    e.prefill(head(ids, 1024));
+    e.prefill(std::vector<uint32_t>(ids.begin() + 1024, ids.begin() + n));
+    const std::vector<uint16_t> split = window_rows();
+    e.reset();
+    e.prefill(head(ids, n), 1000);
+    const std::vector<uint16_t> chunked = window_rows();
+    e.reset();
+    e.prefill(head(ids, 16));
+    e.ingest(std::vector<uint32_t>(ids.begin() + 16, ids.begin() + n));
+    const std::vector<uint16_t> decode = window_rows();
+    const auto stats = [&](const std::vector<uint16_t>& a, const std::vector<uint16_t>& b, double* med) {
+      std::vector<double> cs(W);
+      for (uint32_t i = 0; i < W; ++i) {
+        const std::vector<float> fa = widen(a.data() + i * row, row), fb = widen(b.data() + i * row, row);
+        cs[i] = cosine(fa.data(), fb.data(), row);
+      }
+      std::sort(cs.begin(), cs.end());
+      *med = cs[W / 2];
+      return cs.front();
+    };
+    double m_chunk = 0, m_dec = 0;
+    const bool split_bits = split == one;
+    const double w_chunk = stats(chunked, one, &m_chunk), w_dec = stats(decode, one, &m_dec);
+    bool nonzero = true;   // every window row was projected (a zero row is a position prefill missed)
+    for (uint32_t i = 0; i < W; ++i) {
+      bool any = false;
+      for (size_t x = 0; x < row && !any; ++x) any = one[i * row + x] != 0;
+      nonzero &= any;
+    }
+    const bool pf = split_bits && m_chunk >= 0.9999 && m_dec >= 0.999 && nonzero;
+    std::printf("PF: the window's %u ring rows after prefill(%u): split at 1024 %s; chunks of 1000 median cos %.7f "
+                "(worst %.6f); the decode path median cos %.6f (worst %.6f); every row projected %s: %s\n",
+                W, n, split_bits ? "bitwise" : "DIFFERS", m_chunk, w_chunk, m_dec, w_dec, nonzero ? "yes" : "NO",
+                pf ? "PASS" : "FAIL");
+    ok &= pf;
   }
 
   std::printf("dflash_engine_test: %s\n", ok ? "PASS" : "FAIL");

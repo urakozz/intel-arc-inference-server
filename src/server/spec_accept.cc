@@ -107,6 +107,58 @@ AcceptResult accept_sampled(const float* p_rows, const float* q_rows, const uint
   return {k, draw(filter_probs(p_rows + k * row_stride, vocab_used, s), rng)};
 }
 
+double SparseQ::prob(uint32_t id) const {
+  for (uint32_t i = 0; i < n; ++i)
+    if (ids[i] == id) return probs[i];
+  return 0.0;
+}
+
+SparseQ dflash_q(const uint32_t* cand, const float* scores, uint32_t n, float temperature) {
+  if (n > SparseQ::kMax) throw std::invalid_argument("server::dflash_q: more than 16 candidates");
+  if (!(temperature > 0.0f)) throw std::invalid_argument("server::dflash_q: the temperature must be > 0");
+  SparseQ q;
+  q.n = n;
+  double mx = -INFINITY;
+  for (uint32_t i = 0; i < n; ++i)
+    if (std::isfinite(scores[i])) mx = std::max(mx, double(scores[i]) / temperature);
+  double z = 0.0;
+  for (uint32_t i = 0; i < n; ++i) {
+    q.ids[i] = cand[i];
+    q.probs[i] = std::isfinite(scores[i]) ? std::exp(double(scores[i]) / temperature - mx) : 0.0;
+    z += q.probs[i];
+  }
+  if (!(z > 0.0)) throw std::invalid_argument("server::dflash_q: no candidate has a finite score");
+  for (uint32_t i = 0; i < n; ++i) q.probs[i] /= z;
+  return q;
+}
+
+float dflash_temperature(const Sampling& s) { return s.temperature > 0.0f ? s.temperature : 1.0f; }
+
+AcceptResult accept_sparse(const float* p_rows, const SparseQ* q, const uint32_t* drafts, uint32_t k,
+                           uint32_t vocab_used, size_t row_stride, const Sampling& s, std::mt19937_64& rng) {
+  std::uniform_real_distribution<double> uniform(0.0, 1.0);
+  for (uint32_t i = 0; i < k; ++i) {
+    const double qd = q[i].prob(drafts[i]);
+    if (!(qd > 0.0))
+      throw std::logic_error("server::accept_sparse: draft " + std::to_string(i) + " (id " +
+                             std::to_string(drafts[i]) +
+                             ") has q = 0 - it is not one of the row's candidates the walk could draw");
+    const FilteredProbs p = filter_probs(p_rows + i * row_stride, vocab_used, s);
+    const double pd = p.prob(drafts[i]);
+    if (uniform(rng) < std::min(1.0, pd / qd)) continue;   // accepted with probability min(1, p/q)
+    std::vector<double> residual(p.ids.size());
+    double total = 0.0;
+    for (size_t r = 0; r < p.ids.size(); ++r) {
+      residual[r] = std::max(0.0, p.probs[r] / p.mass - q[i].prob(p.ids[r]));
+      total += residual[r];
+    }
+    if (!(total > 0.0)) return {i, draw(p, rng)};
+    std::discrete_distribution<uint32_t> d(residual.begin(), residual.end());
+    return {i, p.ids[d(rng)]};
+  }
+  return {k, draw(filter_probs(p_rows + k * row_stride, vocab_used, s), rng)};
+}
+
 AcceptResult accept_point_mass(const float* p_rows, const uint32_t* drafts, uint32_t k,
                                uint32_t vocab_used, size_t row_stride, const Sampling& s,
                                std::mt19937_64& rng) {

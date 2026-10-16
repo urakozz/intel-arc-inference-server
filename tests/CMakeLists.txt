@@ -3941,6 +3941,12 @@ endif()
 # Plan: docs/superpowers/plans/2026-10-05-spec19c-dflash-engine-loop.md. Host: the arithmetic the loop rests on
 # (the tap sites, the verify slots, the planner's terms, the cost table, the sparse-q acceptance). Box: the engine
 # with the real drafter beside the gate checkpoint (dflash_engine_test).
+# Task 3 / D4: lossless sampling with the drafter's sparse q (server::accept_sparse), 10^6 seeded draws. Host only.
+add_executable(dflash_accept_test server/dflash_accept_test.cc)
+target_include_directories(dflash_accept_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dflash_accept_test PRIVATE b70_server)
+add_test(NAME dflash_accept_test COMMAND dflash_accept_test)
+set_tests_properties(dflash_accept_test PROPERTIES LABELS dflash TIMEOUT 600)
 add_executable(dflash_engine_host_test runtime/dflash_engine_host_test.cc)
 target_include_directories(dflash_engine_host_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(dflash_engine_host_test PRIVATE b70_plan b70_server)
@@ -3962,6 +3968,22 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_test(NAME dflash_engine_test COMMAND dflash_engine_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_engine_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
+endif()
+# Through EngineAdapter (what b70-serve's loop calls): D2 at K 7 / 3 / auto against the plain loop on the golden and A4
+# prompts, truncate_to inside a burst, seeded sampling reproducible. SKIP 77 without either checkpoint.
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP AND B70_TOKENIZER_ENABLED)
+  add_executable(dflash_gpu_test server/dflash_gpu_test.cc)
+  target_include_directories(dflash_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(dflash_gpu_test PRIVATE b70_server b70_tokenizer b70_dflash_runtime b70_prefill_host
+    b70_runtime b70_loader b70_model b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(dflash_gpu_test)
+  endif()
+  add_dependencies(dflash_gpu_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
+  add_test(NAME dflash_gpu_test COMMAND dflash_gpu_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
+  set_tests_properties(dflash_gpu_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
 endif()
 # b70-decode --spec dflash's refusals before the device.
 b70_cli_reject(cli_reject_dflash_bench ${B70_NO_MODEL} --bench --spec dflash EXPECT "--spec dflash belongs to --ids")

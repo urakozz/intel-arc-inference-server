@@ -92,6 +92,10 @@ class Context {
   //   wait_event everything appended after it waits until `e` is signalled
   //   timestamp  the device's global timestamp, written to `dst` when the list reaches it
   void copy(void* dst, const void* src, size_t bytes);
+  // Spec 19c: a 2D copy (zeCommandListAppendMemoryCopyRegion, depth 0) - `rows` rows of `width` bytes from
+  // `src` at `src_pitch` to `dst` at `dst_pitch`: a drafter's taps, the chunk's residual rows into the
+  // [row][tap][hidden] staging. Same rules as copy().
+  void copy_2d(void* dst, size_t dst_pitch, const void* src, size_t src_pitch, size_t width, size_t rows);
   void signal(ze_event_handle_t e);
   void wait_event(ze_event_handle_t e);
   void timestamp(uint64_t* dst);

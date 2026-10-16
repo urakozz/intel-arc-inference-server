@@ -323,8 +323,8 @@ class Engine {
   void mtp_normalise_live();
   // The live GDN slot's device address (slot 0 = gdn_state; MTP's or the drafter's slots).
   const void* live_gdn_slot() const;
-  // Spec 19c (defined in engine_prefill.cc): the prefill tail of the drafter's ring - the staged taps of rows
-  // [r0, r0 + n) at positions pos .. pos + n - 1, projected 8 rows a replay.
+  // Spec 19c (defined in engine_prefill.cc): the prefill tail of the drafter's ring - the n staged tap rows
+  // (df_pf_taps_ rows 0..n-1) at positions pos .. pos + n - 1, projected 8 rows a replay.
   void drafter_project_staged(uint32_t pos, uint32_t n);
 
   l0::Context& ctx_;

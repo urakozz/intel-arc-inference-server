@@ -130,7 +130,8 @@ struct Walk {
 void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,
                  void* ctrl, uint32_t pos, uint32_t C, l0::Mem& gdn_state_mem,
                  l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem, const KvLayout& kv,
-                 PrefillBackend backend, Int8State* q, const Walk& w, uint32_t& gdn, uint32_t& fa) {
+                 PrefillBackend backend, Int8State* q, const Walk& w, uint32_t& gdn, uint32_t& fa,
+                 const PrefillTaps* taps = nullptr) {
   const model::ModelDesc& d = *m.desc;
   const bool l0 = is_l0(backend);
   const bool kv8 = kv.form == KvCache::Int8;
@@ -156,6 +157,14 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
       // combine folded the block's output into resid itself (ModelDesc::ffn_fold_s() == 0).
       pf_res_norm(cx, kc, s, l == 0 || d.ffn_fold_s() == 0 ? 0u : 1u, in_norm, s.partials.ptr(),
                   s.resid.ptr(), s.x.ptr(), C);                     // x stride hidden
+    }
+    // Spec 19c: a drafter's taps of layer l - 1's output - the chunk's rows r0.. into the staging, one 2D copy
+    // per tap (step.h, PrefillTaps).
+    if (taps && taps->r0 < C) {
+      const size_t row = size_t(d.hidden) * 2;
+      for (uint32_t t : taps->sites->at(l))
+        cx.copy_2d(static_cast<uint8_t*>(taps->dst) + t * row, size_t(taps->n_taps) * row,
+                   at_const(s.resid, size_t(taps->r0) * row), row, row, C - taps->r0);
     }
 
     if (L.kind == model::LayerKind::GDN) {
@@ -263,12 +272,16 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
 void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C, l0::Mem& gdn_state_mem,
                 l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem,
-                const KvLayout& kv, PrefillBackend backend, Int8State* q) {
+                const KvLayout& kv, PrefillBackend backend, Int8State* q, const PrefillTaps* taps) {
   require((q != nullptr) == (backend == PrefillBackend::L0Int8),
           "the int8 state must be given iff the backend is l0-int8");
   require(C > 0 && C <= PrefillScratch::kC,
           "C = " + std::to_string(C) + " is outside (0, PrefillScratch::kC]");
   require(size_t(pos) + C <= size_t(max_len), "pos + C exceeds max_len");
+  // Spec 19c: the taps' sites cover every layer and none is the final norm's fold (step.h).
+  require(!taps || (taps->dst && taps->sites && taps->sites->size() == size_t(m.desc->layers) + 1 &&
+                    taps->sites->back().empty()),
+          "the prefill taps need their staging and one site list per layer, none at the final fold");
 
   // The per-layer slice strides, re-derived from the descriptor here rather
   // than shared with buffers.cc -- capture.cc's arrangement, and for its
@@ -306,7 +319,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
 
   uint32_t gdn = 0, fa = 0;
   walk_layers(cx, kc, s, m, ctrl, pos, C, gdn_state_mem, conv_ring_mem, kv_k_mem, kv_v_mem, kv,
-              backend, q, Walk{0, d.layers, false, false}, gdn, fa);
+              backend, q, Walk{0, d.layers, false, false}, gdn, fa, taps);
   require(gdn == d.gdn_layers && fa == d.fa_layers,
           "the layer table did not give " + gdn_n + " GDN and " + fa_n + " FA layers");
 }
