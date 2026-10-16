@@ -20,6 +20,20 @@ MtpCost MtpCost::int8_head() {
   return c;
 }
 
+MtpCost MtpCost::dflash(bool i8_head, bool int8_drafter) {
+  MtpCost c = i8_head ? int8_head() : bf16_head();
+  while (c.verify.size() < 8) c.verify.push_back(c.verify.back() + 0.22);
+  const double d = (int8_drafter ? kDFlashDrafterInt8 : kDFlashDrafterBf16) +
+                   (i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16);
+  c.draft.assign(7, d);
+  return c;
+}
+
+double MtpCost::dflash_head_share(bool i8_head, bool int8_drafter) {
+  const double h = i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16;
+  return h / (h + (int8_drafter ? kDFlashDrafterInt8 : kDFlashDrafterBf16));
+}
+
 MtpCost MtpCost::with_draft_vocab(double head_share, double fraction) const {
   if (!(head_share >= 0 && head_share <= 1) || !(fraction > 0 && fraction <= 1))
     throw std::invalid_argument("MtpCost::with_draft_vocab: head_share in [0, 1], fraction in (0, 1]");

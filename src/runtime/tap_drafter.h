@@ -5,6 +5,7 @@
 
 #include "l0/cmdlist.h"
 #include "l0/memory.h"
+#include "runtime/dflash/dflash_control.h"   // DFlashDraftOut: a plain struct, no link dependency
 
 // Spec 19c: a speculative proposer fed by the target's own hidden states - DFlash (spec 19 §2, §5). The Engine
 // (runtime/engine.h) knows a drafter only through this interface, because the drafter's code (runtime/dflash,
@@ -22,6 +23,8 @@
 //   - Engine::reset() calls reset(): the drafter's ring holds no position afterwards (a cold drafter).
 // Everything runs on the Engine's queue (Engine::replay_aux), synchronously, between the Engine's own replays.
 namespace runtime {
+
+class Engine;
 
 class TapDrafter {
  public:
@@ -41,6 +44,15 @@ class TapDrafter {
   virtual void reset(l0::CmdList& imm) = 0;
   // Device bytes the drafter holds - its weights and its buffers (Engine::memory_use's `drafter`).
   virtual size_t bytes() const = 0;
+
+  // The proposer's side, for the serving loop (cli EngineAdapter, b70-decode): one block of k drafts at the
+  // engine's pos into Control.cur_token[1..k] - greedy at temperature 0, sampled at `temperature` with `seed` -
+  // and the readback (per draft row its id, its 16 candidates and their scores: the draft distribution q).
+  // Throws unless the drafter can draft k at e's pos (k <= e.max_verify_k()).
+  virtual const dflash::DFlashDraftOut& draft(Engine& e, uint32_t k, float temperature, uint64_t seed) = 0;
+  // False when the drafter drafts greedily only (a DFlash v1 drafter: its sampled q is a full-vocabulary softmax
+  // the readback cannot carry) - a sampled request then decodes plainly.
+  virtual bool samples() const = 0;
 };
 
 }  // namespace runtime

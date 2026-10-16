@@ -48,6 +48,9 @@ std::string draft_vocab_name(uint32_t size);
 // What the loader needs to build V'. `size` = 0 is off (nothing is gathered).
 struct DraftVocabSpec {
   uint32_t size = 0;
+  // Spec 19c: the compact head is for a DFlash drafter's draft list (`--spec dflash`), which reads the TARGET's head
+  // - so loader::load builds it without the MTP head. False: spec 8 §11's rule (it needs the head).
+  bool for_drafter = false;
   std::vector<uint32_t> added;    // tokenizer.json's added tokens, file order
   std::vector<uint32_t> eos;      // generation_config.json's eos_token_id
   std::vector<uint32_t> ranked;   // --draft-vocab-ids, file order (may be empty)
