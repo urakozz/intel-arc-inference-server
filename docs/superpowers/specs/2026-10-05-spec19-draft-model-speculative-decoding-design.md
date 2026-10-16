@@ -387,3 +387,74 @@ section lists the rulings and the deviations from the 2026-10-05 plan).
 - **Not in 19b:** int4 g64 drafter weights (no checkpoint of ours; 19a measured equal acceptance), v1 sampling (full
   vocabulary Gumbel: refused by `runtime::dflash::set_draft_params`; df_select's v1 build drafts nothing at T != 0), causal or full-attention drafter layers (Ornith's v1 drafter: its stage), the engine loop,
   `--spec dflash` and the taps (19c).
+
+## 11. 19c as built (2026-10-16)
+
+Branch `spec19c-dflash-engine`, written on the Mac after 19b (itself unvalidated); box queue row 55
+(`tools/box_validate.sh --only r55`). Nothing of it has run on a card: 7 new binaries (`gdn_step_slots_M1..4_N8`, the bf16
+lm_head at M = 5 / 6 / 8; kernel_cmdlines +7 / -0 / ~0), none bound without `--spec dflash`, so D0 is G0. Plan:
+`docs/superpowers/plans/2026-10-05-spec19c-dflash-engine-loop.md` (its "As built" lists the deviations).
+
+- **The Engine's view of a drafter** (`runtime/tap_drafter.h`): `runtime::TapDrafter` - its taps (the layers and the
+  [8][taps][hidden] bf16 buffer), the window it reads back, the projection list for (pos, n), a reset, its bytes, and
+  the proposer side (`draft(engine, k, T, seed)` -> the 19b readback, `samples()`). `runtime::dflash::DFlashDrafter`
+  implements it over 19b's weights, buffers and lists (`runtime/dflash/dflash_drafter.h`: build the drafter, the
+  Engine with it, then `attach()` captures the draft list against the Engine's model and Control).
+- **Per iteration** (§5, as built): the draft list (anchor `Control.pos` / `cur_token[0]`, drafts into
+  `cur_token[1..K]`) -> `Engine::verify(K)` on the **tap verify list** (`runtime::build_verify_taps`: the decode list at
+  M = K + 1 rows, gdn_step's SPEC_SLOTS build over 8 GDN slots the Engine owns, and after the input fold of layer
+  i + 1 each row's residual - layer i's output, vLLM's aux index i + 1 - copied into the taps; `decode_launches` at
+  every M, 5 x M row copies) -> host acceptance (`server::accept_greedy`, or `server::accept_sparse` with the
+  drafter's sparse q) -> `Engine::commit(j, t)`: `Control.gdn_live = (live + j) % 8`, pos = n + j + 1, then the
+  projection of verify rows 0..j at positions n .. n + j into the ring (replayed before commit returns, so nothing
+  rewrites the taps first). Review Focus 1: rows past j are never projected. Review Focus 2: t has no tap; it is the
+  next draft's anchor. ingest() and generate() run verify(0) + commit(0) (pos 0 included: no h_{-1} is needed), so
+  the ring stays filled across plain and speculative steps.
+- **The GDN state at the last accepted token** (the operator's question, against vllm-xpu-kernels 78799fe's per-token
+  replay state): the verify list writes the state after EVERY row into its own slot ((live + m) % 8); committing j
+  accepted drafts only moves the slot index - no copy, no replay. The rejected rows' slots are never read before a
+  later list rewrites them, and their conv-ring positions (pos % 16) are rewritten by the next rows before any row
+  reads them (gdn_step.cl's slot disjointness at ring depth 16 >= M + 3). Held by `tools/mac/clrun/gdn_slots_run` on
+  the Mac's GPU (the 8-slot build bitwise to the plain kernel; partial acceptance at j = 0 / 3 / 6 / 7 of 7 and 2 of 4
+  continues exactly as the plain run; a mutant committing j + 1 is caught) and on the card by `dflash_engine_test` P
+  (the live slot against the state after j plain steps, then 64 greedy ids). **Its cost, and a lever (not built):**
+  each verify writes M x 151 MB of state (1.2 GB at M = 8, ~2 ms at ~600 GB/s, derived) and the 7 extra slots hold
+  1.06 GB. vLLM's RecoverSSM verify reads a read-only state and records per row a replay entry (the delta-rule
+  correction [V], the normalised k [K], the decay - ~2.4 MB at M = 8 on Qwen3.8) and commit replays the accepted rows'
+  rank-1 updates in one pass (~0.5 ms); that would return ~1.5 ms a verify at M = 8 and 1.06 GB to the KV cache, at
+  the price of a commit kernel whose replay must be bitwise to the in-line recurrence (vLLM adds a + dt_bias in fp32
+  for the same reason). Read for ideas only; nothing copied.
+- **The prefill tail:** every chunk copies its rows inside the drafter's window of the call's end (the last 2048
+  positions) at each tap site into a [row][tap][hidden] staging (one 2D region copy per tap, `prefill::Context::
+  copy_2d`), then projects them 8 rows a replay (~256 replays for a full window, each reading ~183 MB of fc and k||v
+  weights: ~80-100 ms a long prompt, derived; a projection GEMM at M = C is the lever). Chunking does not change a
+  position's projection; a split at a multiple of 64 is bitwise (`dflash_engine_test` PF). Refused by name: the
+  sycl-tla backend and `B70_PREFILL_REPLAY` (the taps are copies, which a recording cannot hold), a drafter tapping
+  the last layer (prefill folds it for the last row only; no published drafter does).
+- **Sampling (D4):** q_j = softmax(scores_j / T) over draft row j's 16 candidates (the walk's realized selector
+  scores), 0 elsewhere (`server::SparseQ`, `dflash_q`); T is filter_probs' (<= 0 -> 1.0). `accept_sparse` is spec 8's
+  rule over it: a draft with q = 0 is a logic error, the residual max(0, p - q) lives on p's filtered support (p is
+  whole there off the candidates), and p == q falls back to p. EngineAdapter draws one fresh 64-bit Gumbel key per
+  iteration from the request's RNG (then the uniforms, then the correction draw), so no position's noise is reused
+  across iterations. `dflash_accept_test` (10^6 seeded draws): chi-square p 0.59 / 0.23 unfiltered, 0.29 / 0.91 at
+  top-k 12 / top-p 0.8 / T 0.7; no accepted draft outside the candidates; a mutant residual (p instead of p - q) fails
+  at p 0.0000. A v1 drafter (greedy only, 19b) decodes sampled requests plainly.
+- **Serving:** `b70-serve --spec dflash [--draft-model PATH] [--draft-format int8|bf16] [--spec-max 1..7]
+  [--spec-cost SPEC] [--draft-vocab N]` rides the server's `--mtp auto` loop: `EngineAdapter::step_many` drafts
+  through TapDrafter, `server::AdaptiveK` chooses K over `MtpCost::dflash` (verify M = 1..4 the head form's rows,
+  M = 5..8 extrapolated at +0.22 a row; the draft row flat in K: drafter 0.10 int8 / 0.19 bf16 + the head's K rows 0.07
+  int8 / 0.14 bf16 - all DERIVED until row 29's probes and row 55 measure them; AdaptiveK then picks K 7 at alpha 0.95,
+  1 at 0.5, 0 at 0.1). `b70-decode --ids --spec dflash` runs greedy at a fixed K (`--spec-max`). The draft
+  vocabulary is built without the MTP head (`DraftVocabSpec::for_drafter`). Refused before the device, by name: `--pp 2`
+  (the taps across the hand-off are 19d's), `--kv-cache int8` (kv8.cl is built for M <= 4), `B70_DECODE_ATTN=v1`
+  (not built at M = 5..8), `--mtp`, other models.
+- **Memory:** the planner counts the engine's side of a drafter - 7 x 150,994,944 B of GDN slots in decode state and,
+  prefilling, the 104,857,600 B tap staging in prefill scratch - beside 19b's drafter term; `--max-len auto` on a 32 GB
+  card with a 17 GB target: 139520 with the int8 drafter (19b's 156928 did not count these).
+- **Prefix cache (Review Focus 5):** the ring is not part of a snapshot; a restored session's ring holds whatever it
+  held (zeros after a reset) until prefill and commits refill it - correct, lower acceptance only; decision 5's plane
+  is 19d's.
+- **Not in 19c:** `--pp 2` and batching (19d), int8 KV and v1 attention at M = 5..8, D5 and the BENCHMARKS rows (19d),
+  an engine-side tap dump for D1 (r54.d1 still feeds 19a's CPU dumps; `dflash_engine_test` T1 holds the engine's taps
+  to its own M = 1 path), the replay-state lever above, fusing the projection and the next draft into one submit (3
+  submits an iteration today: draft, verify, projection).
