@@ -55,7 +55,9 @@ Branch `spec19d-dflash-serving`, written on the Mac after 19b / 19c (both unvali
   drafter does.
 - **Mid-call block-end snapshots keep the ring as the call left it** (not every position projected under the hook,
   ~10-13 % of prefill, derived). Cost if wrong: lower acceptance after such a restore with a short tail (counted by the
-  R2 caveat lines).
+  R2 caveat lines), and the block ends at or before the call's end - 2048 store 41.9 MB of ring that buys nothing (~30
+  of them for a 64k first prompt); r56.d5_opencode records each request's prefix plan beside its acceptance for the
+  operator's ruling (project under the hook / such restores cold / keep).
 - **"snapshot_test / prefix_gpu_* with the drafter"** became one dedicated `dflash_prefix_gpu_test` (PrefixSession over
   EngineAdapter: restore vs Continue, bitwise ring, ids and per-iteration acceptance; a block-end restore vs a cold run)
   plus `dflash_engine_test` SR. Cost if wrong: spec 7's C2 sequences a-g are not re-run with the drafter on.

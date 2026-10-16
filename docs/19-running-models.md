@@ -212,7 +212,10 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --served-name qwen3.8 --pp 2 \
 - **Refused, by name:** `--kv-cache int8` (kv8.cl is built for M <= 4), `B70_DECODE_ATTN=v1`, `--prefill-backend
   sycl-tla`, `B70_PREFILL_REPLAY=1`, `--pp 2 --pipeline-handoff peer`, `b70-decode --pp 2`, every other model.
 - **The prefix cache** keeps the drafter's ring (41.9 MB) with every snapshot (spec 19 decision 5 as ruled in 19d), so a
-  restored conversation drafts exactly as an unbroken one; the store is keyed by the drafter.
+  conversation restored from a request's prompt-end or request-end snapshot drafts exactly as an unbroken one; the store
+  is keyed by the drafter. **Caveat:** a snapshot at a block end inside a long prefill holds the ring as that prefill
+  left it - the prefill projects only its last 2048 positions - so a restore there drafts worse (never differently)
+  until 2048 new positions have refilled the ring (spec 19 §12).
 
 Re-running the acceptance measurement (a Mac or the box CPU; ~20-25 h on a 64 GB Mac with the container at
 ~54 GB - the first run's numbers are in `docs/probe-dflash-2026-10-08.md` §4):
