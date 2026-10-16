@@ -134,7 +134,11 @@ the Mac's 256-lane work-group cap, as `k2_run` does). Spec 19a: section 5 also r
 `dflash_run`: the DFlash drafter's draft and projection lists (every `df_*` kernel and `gemv_i8w`, in the capture's
 order) at `tests/loader/dflash_ref_fixture.safetensors`' tiny shapes against the host twin `tests/kernels/dflash_ref.h`
 - the window's edge, the ring's wrap, K below 7, sampled walks, a draft vocabulary bitwise the full head, v1 (the
-df_* kernels use work-group reductions only, so all of them run here). A new
+df_* kernels use work-group reductions only, so all of them run here). Spec 19c adds `gdn_slots_run`: `gdn_step.cl`'s
+8-slot verify build (SPEC_SLOTS, N_SLOTS 8, one layer at Qwen3.8's shapes) against the plain kernel stepping the same
+rows - every row's slot and output bitwise at M = 8 and 5, and a partial acceptance (j = 0 / 3 / 6 / 7 of 7, 2 of 4):
+the live slot after the commit is exactly the state after row j and three new rows from it equal the plain run (the
+stale slots and conv-ring positions of the rejected rows are never read); no host source. A new
 driver is a `tools/mac/clrun/<kernel>_run.cc` with a `main()` over `clrun::Device`,
 `Program` and `Buffer`, and its name in section 5's loop in `tools/mac_check.sh`, which
 builds the drivers into `build/mac-check/clrun/` with `src/` and `tests/` on the include
