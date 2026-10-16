@@ -130,7 +130,11 @@ K2's real shapes against `tests/kernels/k2_ref.h`; it also takes two host source
 row bitwise the M = 1 binary's on that row, in order and reversed; `moe_down` at DN_KS 1,
 the Mac's 256-lane work-group cap, as `k2_run` does). Spec 19a: section 5 also runs
 `gemv_i8w_run 8 5120 1280` (a DFlash2 drafter shape at the block's 8 rows) and `argmax_run 8
-5000 4990` (eight rows) from the same binaries - B70_VERIFY_M8's M = 8 rows. A new
+5000 4990` (eight rows) from the same binaries - B70_VERIFY_M8's M = 8 rows. Spec 19b adds
+`dflash_run`: the DFlash drafter's draft and projection lists (every `df_*` kernel and `gemv_i8w`, in the capture's
+order) at `tests/loader/dflash_ref_fixture.safetensors`' tiny shapes against the host twin `tests/kernels/dflash_ref.h`
+- the window's edge, the ring's wrap, K below 7, sampled walks, a draft vocabulary bitwise the full head, v1 (the
+df_* kernels use work-group reductions only, so all of them run here). A new
 driver is a `tools/mac/clrun/<kernel>_run.cc` with a `main()` over `clrun::Device`,
 `Program` and `Buffer`, and its name in section 5's loop in `tools/mac_check.sh`, which
 builds the drivers into `build/mac-check/clrun/` with `src/` and `tests/` on the include
