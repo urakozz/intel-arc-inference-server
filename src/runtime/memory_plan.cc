@@ -11,22 +11,24 @@ namespace runtime {
 
 std::string format_memory(const char* label, const MemoryComponents& c, size_t device_bytes) {
   const double gb = 1e9;
-  char dv[48] = "";
+  char dv[48] = "", dr[48] = "";
   if (c.draft_vocab) std::snprintf(dv, sizeof dv, " draft vocab %.3f GB,", c.draft_vocab / gb);
-  char buf[320];
+  if (c.drafter) std::snprintf(dr, sizeof dr, " drafter %.3f GB,", c.drafter / gb);   // spec 19b
+  char buf[384];
   std::snprintf(buf, sizeof buf,
                 "%s: model %.3f GB, kv %.3f GB, decode state %.3f GB, prefill scratch %.3f GB,"
-                " int8 %.3f GB,%s total %.3f GB of %.3f GB",
+                " int8 %.3f GB,%s%s total %.3f GB of %.3f GB",
                 label, c.model / gb, c.kv / gb, c.decode_state / gb, c.prefill_scratch / gb,
-                c.int8 / gb, dv, c.total() / gb, device_bytes / gb);
+                c.int8 / gb, dv, dr, c.total() / gb, device_bytes / gb);
   return buf;
 }
 
 MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t model_bytes,
-                const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv) {
+                const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv, const DrafterPlan& drafter) {
   if (dv.rows != 0 && !mtp)
     throw std::invalid_argument("runtime::plan: a draft vocabulary drafts with the MTP head");
   MemoryPlan p;
+  p.drafter = drafter.bytes(max_len);   // spec 19b: 0 without a drafter
   p.max_len = max_len;
   p.mtp = mtp;
   p.kv_cache = kv;
@@ -72,13 +74,14 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
 
 uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,
                            size_t device_bytes, size_t reserve_bytes, uint32_t cap,
-                           const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv) {
+                           const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv,
+                           const DrafterPlan& drafter) {
   if (cap < kMaxLenQuantum)
     throw std::invalid_argument("max_len_that_fits: the cap " + std::to_string(cap) +
                                 " is below one " + std::to_string(kMaxLenQuantum) +
                                 "-position quantum");
   const auto fits = [&](uint32_t len) {
-    return plan(desc, len, mtp, model_bytes, path, dv, kv).total() + reserve_bytes <= device_bytes;
+    return plan(desc, len, mtp, model_bytes, path, dv, kv, drafter).total() + reserve_bytes <= device_bytes;
   };
   // Every term of the plan is non-decreasing in max_len (the KV, attn_part's block
   // count, the RoPE table, the MTP head's KV, the composed pf_s / pf_p), so the
