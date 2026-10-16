@@ -199,9 +199,11 @@ void check_dflash_target(const DFlashDesc& d, const ModelDesc& t, uint32_t targe
   if (d.num_target_layers && d.num_target_layers != t.layers)
     bad("num_target_layers " + std::to_string(d.num_target_layers) + " != the target's " +
         std::to_string(t.layers));
-  if (t.vocab_used && d.mask_id >= t.vocab_used)
-    bad("mask_token_id " + std::to_string(d.mask_id) + " is not a token the target defines (< " +
-        std::to_string(t.vocab_used) + ")");
+  // A row of the shared embedding - not necessarily a token the tokenizer defines: Ornith's drafter masks with
+  // 248077, the first padded row past its tokenizer's 248077 ids.
+  if (d.mask_id >= target_vocab_rows)
+    bad("mask_token_id " + std::to_string(d.mask_id) + " is not a row of the target's embedding (< " +
+        std::to_string(target_vocab_rows) + ")");
 }
 
 }  // namespace model
