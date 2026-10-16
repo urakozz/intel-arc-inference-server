@@ -148,7 +148,7 @@ void test_real_config(const std::string& path) {
   bad.num_target_layers = 40;
   CHECK(throws_with([&] { model::check_dflash_target(bad, q, model::Qwen35::kVocab); }, "num_target_layers"));
   bad = d;
-  bad.mask_id = 248100;   // past Qwen3.8's 248077 defined ids
+  bad.mask_id = 248320;   // past the embedding rows (248077 itself is legal: Ornith masks with it)
   CHECK(throws_with([&] { model::check_dflash_target(bad, q, model::Qwen35::kVocab); }, "mask_token_id"));
   std::printf("real config: DFlash 2, 5 x 5120, taps 5/19/33/47/61, window 2048, block 8 - held to qwen3.8\n");
 }
