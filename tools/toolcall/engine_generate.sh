@@ -19,6 +19,11 @@
 #      K2-Horizon's A4 uses 512, spec 18d), MAX_LEN (default 16384).
 # K2-Horizon (spec 18d): b70-decode dispatches on config.json, so the same line runs K2's
 # engine; its backend is l0 (the only one K2 prefills on).
+# Muse-Glimmer (spec 23e, MG5): the same line runs MuseEngine (one card, l0) on the committed set
+# tests/golden/toolcall-muse - its ids were rendered by transformers 5.19.0 with the ORIGINAL's template and the set's
+# reasoning_strength (make_set.py's MUSE_KWARGS), so the engine sees exactly the reference's bytes; N_NEW defaults to
+# 512 for it (23a's gate Q count: the replies open with a to=self channel). Score with `score.py --format atem`.
+# The server's path (template + parser) is held to this one by golden_server_test --chat (r46.chat).
 set -euo pipefail
 [ $# -eq 4 ] || { echo "usage: $0 <snapshot> <set dir> <out dir> <backend>" >&2; exit 2; }
 SNAP="$1" SET="$2" OUT="$3" BACKEND="$4"
@@ -32,6 +37,8 @@ DECODE="${B70_DECODE:-build/src/cli/b70-decode}"
 PY="${PYTHON:-python3}"
 [ -x "$DECODE" ] || { echo "no b70-decode at $DECODE" >&2; exit 2; }
 [ -f "$SNAP/tokenizer.json" ] || { echo "$SNAP has no tokenizer.json" >&2; exit 2; }
+N_DEFAULT=192
+if grep -q '"model_type": *"muse_glimmer"' "$SNAP/config.json" 2> /dev/null; then N_DEFAULT=512; fi
 mkdir -p "$OUT"
 OUT_ABS=$(cd "$OUT" && pwd)
 TOK_JSON=$(readlink -f "$SNAP/tokenizer.json")
@@ -64,7 +71,7 @@ while read -r name count sha; do
     echo "[$n] $name: done, skipped"; continue
   fi
   t0=$(date +%s)
-  "$DECODE" "$SNAP" --ids "$ids" --n "${N_NEW:-192}" --prefill --prefill-backend "$BACKEND" --max-len "${MAX_LEN:-16384}" \
+  "$DECODE" "$SNAP" --ids "$ids" --n "${N_NEW:-$N_DEFAULT}" --prefill --prefill-backend "$BACKEND" --max-len "${MAX_LEN:-16384}" \
     --lm-head "$LM_HEAD" < /dev/null > "$out_ids.tmp" 2> "$OUT/$name.$TAG.log"
   mv "$out_ids.tmp" "$out_ids"
   decode "$name.$TAG.ids" "$name.$TAG.txt" < /dev/null

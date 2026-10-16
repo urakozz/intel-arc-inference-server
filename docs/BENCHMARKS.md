@@ -921,6 +921,11 @@ position on the 13 full layers and up to 81.8 MB of sliding windows - **39.7 / 3
 | prefill, eager attention | one B70, pp 4096 (`B70_MUSE_ATTN=eager`: the portable three-pass build, bitwise decode's eager rows - an A/B mode, not a speed path) | pending | r45.speed |
 | prefill memory per card | the chunk's scratch (partials [2048][39936] fp32 the largest), + the 27.3 MB landing on two cards | 0.599 GB a device (599,171,072 B, derived; one card still reaches 131072 with it, the int8 head and the int4 drafter: 22.845 GB of 32.53) | r45.speed |
 | prefill launches | a chunk at 52 layers; the head | 6969 (1 + 134 a layer) + 4 (derived, asserted at the walk) | r45.prefill |
+| served: llama-benchy pp4096 tg256 depth 1 (spec 23e) | `b70-serve <muse> --chat-template <the original's>`, one B70, int8 head, `--max-len 131072`, the operator's flags (`--no-cache --exact-tg --latency-mode generation`) | pending | r46.benchy |
+| served: prefix caching at depth 4k / 16k / 32k | the same server, cache on (`--enable-prefix-caching`): the state is the 39 rings' last 2047 positions (81,748,992 B, derived) + 13,312 B of KV a position | pending | r46.benchy |
+| served: decode at depth 4k / 32k / 128k | the same server, pp 512 tg 128 | pending (the roofline above) | r46.benchy |
+| MG5: A4 on the engine | the 36 Muse-rendered scenarios (`tests/golden/toolcall-muse`, reasoning_strength low), 512 greedy ids, `l0`, int8 and bf16 heads, against 23a's bf16 reference (`score.py --format atem`) | pending - the bar: no more parse failures than the bf16 reference's; first-call agreement recorded (beside gate Q's int4 CPU reference) | r46.a4 |
+| MG5: passkey at 131072 | `tools/probe/muse_passkey.sh`: 130000 ids + BOS at 5 / 50 / 95 %, one B70, int8 head, `--max-len 131072`; the decode speed at that depth (~1.74 GB of full-layer KV a token, derived) | pending - the bar: 3 / 3 | r46.passkey |
 
 ## Correctness
 
