@@ -853,3 +853,12 @@ card, the server on the synthetic and the real checkpoint, MG5, the llama-benchy
   and were written in Task 4 (the host test drives the adapter); (4) the A4 arm is `b70-decode`'s (above); (5) Task 5
   Step 2 is a stage (r46.chat), not a registered test (Kolibri's precedent: without a checkpoint it would fail, not
   SKIP); (6) the vision refusal is generic.
+- **The final review's fixes** (three Important, one Minor re-graded by effect): a seed now holds per request -
+  `MuseEngineAdapterT` reseeds the RNG from a seeded request's seed at its first sampled step (before, only the first
+  sampled request after startup was seeded, so Muse's default sampling made `seed` meaningless on a long-running
+  server and r46's SEEDED checks would differ; `muse_snapshot_test`: the same seeded request twice on one server);
+  the media refusal is a list of media part types (`image`, `image_url`, `input_image`, `video`, `video_url`,
+  `input_video`, `audio`, `input_audio`, `file`, `input_file`) - a text-bearing `input_text` part stays text for
+  every model (`openai_test`); r46.real's template refusal is an `xfail` (the pipeline under pipefail always read BAD,
+  and a regressed refusal would have hung the stage); r46.benchy's deepest decode row is 130000 (131072 + 640 did not
+  fit; `test_box_validate.py`'s `test_row46_refusal_and_depths` holds both).
