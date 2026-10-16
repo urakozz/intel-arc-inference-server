@@ -28,12 +28,19 @@
 // v2: the codebooks, bf16 [vocab][sel_rank] each.
 namespace loader {
 
-enum class DraftFormat { Bf16, Int8 };
-const char* draft_format_name(DraftFormat f);                 // "bf16" | "int8"
-bool parse_draft_format(const std::string& s, DraftFormat& out);
+// Spec 23f adds Int4G64 (spec 23 decision 9: our int4 g64 symmetric RTN, quantised at load by loader/rtn.h's
+// rtn_int4_g64 - P0's int4g64 arm, restated in tools/oracle/dflash_accept.py - and stored in gemv.cl's layout 1, the
+// n-tile-major subgroup tiles (common/repack.h repack_int4_layout1), so a row range such as the context projection's
+// k||v rows of q||k||v is a contiguous sub-range of the weight, as in the other two forms; S 1: the GEMV writes the
+// [M][N] rows the df_* kernels read).
+enum class DraftFormat { Bf16, Int8, Int4G64 };
+const char* draft_format_name(DraftFormat f);                 // "bf16" | "int8" | "int4"
+bool parse_draft_format(const std::string& s, DraftFormat& out);   // also "int4g64"
 
-// One linear's device bytes: bf16 K N x 2; int8 K N + 4 N (the scales).
+// One linear's device bytes: bf16 K N x 2; int8 K N + 4 N (the scales); int4 g64 layout 1 (N / 16) x (K / 64) tiles
+// of 136 u32 (K / 2 N + K / 32 N: the nibbles and the f16 scales, 4.25 bits a weight).
 inline size_t dflash_linear_bytes(uint32_t K, uint32_t N, DraftFormat f) {
+  if (f == DraftFormat::Int4G64) return size_t(N / 16) * (K / 64) * 136 * 4;
   return f == DraftFormat::Bf16 ? size_t(K) * N * 2 : size_t(K) * N + size_t(N) * 4;
 }
 

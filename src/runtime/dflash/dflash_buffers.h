@@ -27,9 +27,12 @@ struct DFlashBuffers {
   l0::Mem dctl, out;   // shared
   l0::Mem rope, ring_k, ring_v, taps, resid, h, x, xa, gout, q, kb, vb, part, kv, logits, tpart, cand, unary;
   std::unique_ptr<l0::Mem> co, hid;   // DFlash 2 only
+  std::unique_ptr<l0::Mem> vids;      // spec 23f, a Muse-form drafter: u32 [16] shared - [anchor, drafts] for the verify
 
   DFlashCtl* ctl() const { return dctl.as<DFlashCtl>(); }
   const DFlashDraftOut* readback() const { return out.as<DFlashDraftOut>(); }
+  // Spec 23f: a Muse-form drafter's 16-row readback (mg_df_select's), writable: a sampled draft is drawn on the host.
+  MuseDraftOut* muse_readback() const { return out.as<MuseDraftOut>(); }
   size_t bytes() const;   // == sz.total()
   // Zero the ring and every scratch, reset the control block and the readback, and upload the RoPE table: what
   // construction leaves and what a session reset restores (the ring then holds no position - a cold drafter).

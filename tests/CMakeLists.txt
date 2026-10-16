@@ -3862,6 +3862,19 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
 endif()
 # ==== Spec 23e: Muse-Glimmer served ==== (end) ====
 
+# ==== Spec 23f: Muse-Glimmer's DFlash drafter (labels muse;dflash) ==== (begin) ====
+# Task 6: the assistant's descriptor (the published config vendored at tests/model/muse_glimmer/assistant_config.json),
+# the loader's host half on a tiny assistant the test writes (bf16 / int8 / int4 g64), rtn_int4_g64 against the
+# oracle's fixture, the drafter's bytes and the plan with it. Host only.
+add_executable(muse_assistant_test loader/muse_assistant_test.cc)
+target_include_directories(muse_assistant_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(muse_assistant_test PRIVATE b70_dflash_loader b70_dflash_plan b70_muse_plan)
+add_test(NAME muse_assistant_test COMMAND muse_assistant_test
+  ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer/assistant_config.json
+  ${CMAKE_SOURCE_DIR}/tools/oracle/fixtures/rtn_int4_g64.json)
+set_tests_properties(muse_assistant_test PROPERTIES LABELS "muse;dflash")
+# ==== Spec 23f ==== (end) ====
+
 # ==== Spec 19b: the DFlash drafter (label dflash) ==== (begin) ====
 # Task 1: the descriptor (the published config vendored at tests/model/dflash/) and the loader's host half on tiny
 # synthetic checkpoints the test writes itself (tests/loader/dflash_fixture.h). Host only.

@@ -203,8 +203,15 @@ size_t link_bytes(const model::MuseGlimmerDesc& d, uint32_t dev) {
 }
 
 MuseReserve decode_reserve(const model::MuseGlimmerDesc& d, uint32_t max_len, uint32_t devices, MuseAttn a) {
+  return decode_reserve(d, max_len, devices, a, kM);
+}
+
+MuseReserve decode_reserve(const model::MuseGlimmerDesc& d, uint32_t max_len, uint32_t devices, MuseAttn a,
+                           uint32_t rows) {
+  if (rows == 0 || rows > kVerifyMaxRows)
+    throw std::invalid_argument("decode_reserve: rows " + std::to_string(rows) + " outside 1..16");
   MuseReserve r;
-  r.decode_scratch = decode_scratch_bytes(d, max_len ? max_len : d.max_pos, kM, a) +
+  r.decode_scratch = decode_scratch_bytes(d, max_len ? max_len : d.max_pos, rows, a) +
                      (devices > 1 ? std::max(link_bytes(d, 0), link_bytes(d, 1)) : 0);
   return r;
 }
@@ -259,6 +266,18 @@ size_t prefill_reserve(const model::MuseGlimmerDesc& d, uint32_t devices) {
 MuseReserve run_reserve(const model::MuseGlimmerDesc& d, uint32_t max_len, uint32_t devices, MuseAttn a, bool prefill) {
   MuseReserve r = decode_reserve(d, max_len, devices, a);
   if (prefill) r.prefill_scratch = prefill_reserve(d, devices);
+  return r;
+}
+
+size_t spec_prefill_taps_bytes(const model::MuseGlimmerDesc& d, const DrafterPlan& p) {
+  return p.on() ? size_t(kPfC) * p.n_taps * d.hidden * 2 : 0;
+}
+
+MuseReserve run_reserve(const model::MuseGlimmerDesc& d, uint32_t max_len, uint32_t devices, MuseAttn a, bool prefill,
+                        const MuseSpec& spec) {
+  MuseReserve r = decode_reserve(d, max_len, devices, a, spec.rows);
+  if (prefill) r.prefill_scratch = prefill_reserve(d, devices) + spec_prefill_taps_bytes(d, spec.drafter);
+  r.drafter = spec.drafter.on() ? spec.drafter.bytes(max_len ? max_len : d.max_pos) : 0;
   return r;
 }
 

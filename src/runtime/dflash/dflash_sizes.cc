@@ -27,14 +27,18 @@ std::vector<float> rope_table(double theta, uint32_t hd, uint32_t rows) {
 }
 
 uint32_t ring_slots(const model::DFlashDesc& d, uint32_t layer, uint32_t max_len) {
-  return d.window.at(layer) ? d.window[layer] : max_len;
+  if (!d.window.at(layer)) return max_len;
+  return d.muse() ? kd::muse_ring(d.window[layer]) : d.window[layer];   // spec 23f: window + 1, whole PB 64 blocks
 }
 
+uint32_t list_rows(const model::DFlashDesc& d) { return kd::list_rows(d.muse()); }
+
 DFlashSizes sizes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t head_rows, uint32_t max_len) {
-  const size_t M = kd::kM, R = kd::kR, H = d.hidden;
+  const size_t M = list_rows(d), R = M - 1, H = d.hidden;
   DFlashSizes s;
   s.dctl = sizeof(DFlashCtl);
-  s.out = sizeof(DFlashDraftOut);
+  s.out = d.muse() ? sizeof(MuseDraftOut) : sizeof(DFlashDraftOut);
+  s.vids = d.muse() ? M * 4 : 0;
   s.rope = (size_t(max_len) + M) * d.head_dim * 4;
   for (uint32_t l = 0; l < d.layers; ++l) s.ring_k += size_t(ring_slots(d, l, max_len)) * d.kv_n() * 2;
   s.ring_v = s.ring_k;
@@ -49,7 +53,8 @@ DFlashSizes sizes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t h
   // df_attn_part's blocks of 128 ring offsets over the largest ring (a full layer: max_len)
   uint32_t slots = 0;
   for (uint32_t l = 0; l < d.layers; ++l) slots = std::max(slots, ring_slots(d, l, max_len));
-  s.part = size_t(d.q_heads) * ((slots + kd::kAttnPb - 1) / kd::kAttnPb) * M * (d.head_dim + 2) * 4;
+  const size_t pb = kd::attn_pb(d.muse());
+  s.part = size_t(d.q_heads) * ((slots + pb - 1) / pb) * M * (d.head_dim + 2) * 4;
   s.kv = size_t(d.layers) * M * 2 * d.kv_n() * 4;
   s.logits = R * head_rows * 4;
   s.tpart = R * ((head_rows + kd::kTopkChunk - 1) / kd::kTopkChunk) * kd::kTopK * 2 * 4;
@@ -100,7 +105,8 @@ uint64_t drafter_key(const model::DFlashDesc& d, loader::DraftFormat f, const vo
   for (uint32_t w : d.window) h.u32(w);
   h.f64(d.theta);
   h.f64(d.eps);
-  h.u32(f == loader::DraftFormat::Int8 ? 8u : 16u);
+  h.u32(f == loader::DraftFormat::Int8 ? 8u : f == loader::DraftFormat::Int4G64 ? 4u : 16u);
+  if (d.muse()) h.u32(0x4D555345u);   // spec 23f: the form ("MUSE") - its window edge and norm differ
   if (norm_bytes != 0) h.bytes(norms, norm_bytes);
   return h.h != 0 ? h.h : 1;
 }
@@ -111,11 +117,14 @@ size_t draft_launches(const model::DFlashDesc& d) {
 size_t project_launches(const model::DFlashDesc& d) { return 3 + d.layers; }
 
 void set_draft_params(DFlashCtl& c, const model::DFlashDesc& d, uint32_t k, float temperature, uint64_t seed) {
-  if (k < 1 || k > kd::kR || k > d.max_k())
+  const uint32_t R = list_rows(d) - 1;
+  if (k < 1 || k > R || k > d.max_k())
     throw std::invalid_argument("DFlash draft: K " + std::to_string(k) + " outside 1.." +
-                                std::to_string(std::min(kd::kR, d.max_k())));
+                                std::to_string(std::min(R, d.max_k())));
   if (!(temperature >= 0.0f)) throw std::invalid_argument("DFlash draft: the temperature must be >= 0");
-  if (!d.v2() && temperature != 0.0f)
+  // Spec 23f: a Muse-form drafter's device pick is greedy and a sampled request's drafts are drawn on the host from
+  // the readback's 16 candidates (runtime::dflash::MuseDrafter::draft) - the temperature is the host's.
+  if (!d.v2() && !d.muse() && temperature != 0.0f)
     throw std::invalid_argument("DFlash draft: a DFlash v1 drafter drafts greedily only (temperature 0): its sampled "
                                 "q is a full-vocabulary softmax the 16-candidate readback cannot carry");
   c.k = k;

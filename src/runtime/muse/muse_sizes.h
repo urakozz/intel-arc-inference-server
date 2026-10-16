@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "model/muse_glimmer.h"
+#include "runtime/memory_plan.h"     // DrafterPlan (spec 23f)
 #include "runtime/pipeline_plan.h"   // PpHandoff, PpLandingLayout, pp_landing_layout (spec 16b)
 
 // Spec 23b Task 5: Muse-Glimmer-30B's device memory as device-free arithmetic - the planner over the weights (the
@@ -176,6 +177,27 @@ size_t pf_link_bytes(const model::MuseGlimmerDesc& d, uint32_t dev);
 size_t prefill_reserve(const model::MuseGlimmerDesc& d, uint32_t devices);
 // decode_reserve, plus the prefill's when the run prefills (MuseOptions::prefill).
 MuseReserve run_reserve(const model::MuseGlimmerDesc& d, uint32_t max_len, uint32_t devices, MuseAttn a, bool prefill);
+
+// ==== Spec 23f: speculative decoding (spec 23 §8.4) ==========================================================
+// A run with verify lists (`--spec dflash` or `--spec lookup`): every list's scratch is sized for `rows` = K_max + 1
+// rows (1..16; one set shared by every verify list and the plain M = 1 list - only one runs at a time, and a list at
+// M rows indexes its buffers at its own M), and with a drafter (`drafter.on()`, `--spec dflash`) the last device also
+// holds its weights + buffers (runtime::dflash::drafter_plan at max_len) and, prefilling, the tap staging of the
+// prompt's last window: kPfC rows x the drafter's taps x hidden bf16 (136,314,880 B at 5 taps).
+inline constexpr uint32_t kVerifyMaxRows = 16;
+struct MuseSpec {
+  uint32_t rows = 1;            // the verify lists' rows (K_max + 1); 1 = no speculative decoding
+  DrafterPlan drafter;          // --spec dflash: the drafter's term; off for --spec lookup
+  bool on() const { return rows > 1; }
+};
+size_t spec_prefill_taps_bytes(const model::MuseGlimmerDesc& d, const DrafterPlan& p);
+// decode_reserve at `rows` rows (decode_reserve(d, max_len, devices, a) is rows 1).
+MuseReserve decode_reserve(const model::MuseGlimmerDesc& d, uint32_t max_len, uint32_t devices, MuseAttn a,
+                           uint32_t rows);
+// run_reserve with the spec's terms: the decode scratch at spec.rows, the drafter (at max_len; 0 = 131072, auto's
+// first plan) on the reserve's drafter, its prefill tap staging on the prefill scratch.
+MuseReserve run_reserve(const model::MuseGlimmerDesc& d, uint32_t max_len, uint32_t devices, MuseAttn a, bool prefill,
+                        const MuseSpec& spec);
 
 // The chunk's launches (the hand-off's copies, the event and the head excluded), the same at every C and under either
 // attention form:
