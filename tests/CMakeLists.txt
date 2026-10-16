@@ -3873,6 +3873,41 @@ add_test(NAME muse_assistant_test COMMAND muse_assistant_test
   ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer/assistant_config.json
   ${CMAKE_SOURCE_DIR}/tools/oracle/fixtures/rtn_int4_g64.json)
 set_tests_properties(muse_assistant_test PROPERTIES LABELS "muse;dflash")
+# Task 7: every binary the Muse draft / projection lists bind (kernels::dflash::muse_draft_variants, bf16 / int8 / int4
+# g64 x head int8 / bf16) is built - by the kernels' Spec 23f B70_MUSE_DFLASH lines or reused from its verify lines (the
+# head at M = 15) - and those lines build nothing unbound; kMuse is the vendored assistant config. Host only.
+if(B70_MUSE AND B70_MUSE_VERIFY_M16 AND B70_MUSE_DFLASH)
+  set(B70_MUSE_DFLASH_KERNELS kernel_df_prep_M16_H6656_I19968_Q32KV8_D128_R2112_V202048_E5
+    kernel_df_attn_M16_Q32KV8_D128_R2112_W2049_P64 kernel_df_topk_R15_N202048_U202048 kernel_mg_dflash_M16_H6656_K16_E5)
+  foreach(KN K6656_N6144 K4096_N6656 K6656_N39936 K19968_N6656 K33280_N6656 K6656_N2048)
+    list(APPEND B70_MUSE_DFLASH_KERNELS kernel_gemv_i8w_M16_${KN} kernel_gemv_bf16_M16_${KN} kernel_gemv_M16_${KN}_S1_L1)
+  endforeach()
+  set(_v23f_reused kernel_gemv_i8w_M15_K6656_N202048 kernel_gemv_bf16_M15_K6656_N202048)
+  foreach(t ${B70_MUSE_DFLASH_KERNELS} ${_v23f_reused})
+    if(NOT TARGET ${t})
+      message(FATAL_ERROR "spec 23f: ${t} is not built (src/kernels/CMakeLists.txt)")
+    endif()
+  endforeach()
+  add_executable(muse_dflash_names_test kernels/muse_dflash_names_test.cc)
+  target_include_directories(muse_dflash_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_dflash_names_test PRIVATE b70_dflash_model)
+  b70_target_kernel_dir(muse_dflash_names_test)
+  add_test(NAME muse_dflash_names_test COMMAND muse_dflash_names_test
+    ${CMAKE_CURRENT_SOURCE_DIR}/model/muse_glimmer/assistant_config.json ${B70_MUSE_DFLASH_KERNELS} -- ${_v23f_reused})
+  set_tests_properties(muse_dflash_names_test PROPERTIES LABELS "muse;dflash")
+  # Task 7 on the card (D1's list half): MuseDrafter's draft / projection lists with the REAL assistant (int4 g64 /
+  # int8 / bf16) beside a synthetic target of Muse's shapes, against the twin; the ring's snapshot; the capped q.
+  # SKIP 77 without the assistant.
+  set(B70_MUSE_ASSISTANT "meta-models/Muse-Glimmer-30B-assistant" CACHE STRING
+      "the Muse-Glimmer DFlash drafter (HF cache repo id or a directory) for muse_dflash_test (spec 23f)")
+  add_executable(muse_dflash_test runtime/muse_dflash_test.cc)
+  target_include_directories(muse_dflash_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_dflash_test PRIVATE b70_dflash_runtime)
+  b70_target_kernel_dir(muse_dflash_test)
+  add_dependencies(muse_dflash_test ${B70_MUSE_DFLASH_KERNELS} ${_v23f_reused})
+  add_test(NAME muse_dflash_test COMMAND muse_dflash_test ${B70_MUSE_ASSISTANT})
+  set_tests_properties(muse_dflash_test PROPERTIES LABELS "checkpoint;muse;dflash" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
 # ==== Spec 23f ==== (end) ====
 
 # ==== Spec 19b: the DFlash drafter (label dflash) ==== (begin) ====
