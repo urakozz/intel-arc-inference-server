@@ -34,6 +34,10 @@ class MappedFile {
 class SafetensorsSet {
  public:
   explicit SafetensorsSet(const std::string& snapshot_dir);
+  // Spec 19b: `single_file_ok` also opens a directory with no index and one `model.safetensors` (every published
+  // DFlash drafter ships that way): its header is the manifest. Without it - every target loader - a missing index
+  // is the error it always was.
+  SafetensorsSet(const std::string& snapshot_dir, bool single_file_ok);
   const std::map<std::string, TensorInfo>& tensors() const { return tensors_; }
   const uint8_t* data(const TensorInfo& t) const;
   size_t bytes(const TensorInfo& t) const { return t.end - t.begin; }

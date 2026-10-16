@@ -42,3 +42,11 @@ target_link_libraries(b70_qwen4exp_loader PUBLIC b70_loader b70_qwen4exp_model b
 add_library(b70_muse_loader STATIC muse_repack.cc muse_loader.cc)
 target_include_directories(b70_muse_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_muse_loader PUBLIC b70_loader b70_muse_model b70_muse_plan b70_l0)
+
+# --- Spec 19b: the DFlash drafter ----------------------------------------------------------------
+# Beside the target's loader (not touched): the host half (dflash_repack.cc - the checkpoint held to its config and
+# names, every piece in its device form, no Level Zero: tests/loader/dflash_loader_test.cc runs it on any host) and
+# the upload beside a loaded target (dflash_loader.cc: loader::load_drafter).
+add_library(b70_dflash_loader STATIC dflash_repack.cc dflash_loader.cc)
+target_include_directories(b70_dflash_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_dflash_loader PUBLIC b70_loader b70_dflash_model b70_l0)

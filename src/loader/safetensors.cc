@@ -61,8 +61,31 @@ std::vector<std::pair<std::string, TensorInfo>> SafetensorsSet::parse_header(con
   return out;
 }
 
-SafetensorsSet::SafetensorsSet(const std::string& snapshot_dir) {
+SafetensorsSet::SafetensorsSet(const std::string& snapshot_dir) : SafetensorsSet(snapshot_dir, false) {}
+
+SafetensorsSet::SafetensorsSet(const std::string& snapshot_dir, bool single_file_ok) {
   std::ifstream ixf(snapshot_dir + "model.safetensors.index.json");
+  if (!ixf && single_file_ok && std::ifstream(snapshot_dir + "model.safetensors")) {
+    // One file, its header the manifest (spec 19b): the same bounds check as an indexed shard's.
+    const std::string fname = "model.safetensors";
+    files_.emplace_back(snapshot_dir + fname);
+    names_.push_back(fname);
+    if (files_.back().size() < 8)
+      throw std::runtime_error(snapshot_dir + fname + " is shorter than its 8-byte header length");
+    uint64_t hlen = 0;
+    std::memcpy(&hlen, files_.back().data(), 8);
+    data_start_.push_back(size_t(8 + hlen));
+    const size_t avail = files_.back().size() - data_start_.back();
+    for (auto& [n, t] : parse_header(files_.back().data(), files_.back().size())) {
+      t.file = 0;
+      if (t.begin > t.end || t.end > avail)
+        throw std::runtime_error("tensor '" + n + "' in " + fname + " has data_offsets [" +
+                                 std::to_string(t.begin) + ", " + std::to_string(t.end) + "] outside the file's " +
+                                 std::to_string(avail) + "-byte data section");
+      tensors_.emplace(n, std::move(t));
+    }
+    return;
+  }
   if (!ixf)
     throw std::runtime_error("no model.safetensors.index.json in " + snapshot_dir +
                              " (single-file checkpoints are out of scope)");

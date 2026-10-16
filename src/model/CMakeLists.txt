@@ -33,3 +33,9 @@ target_link_libraries(b70_qwen4exp_model PUBLIC b70_model)
 add_library(b70_muse_model STATIC muse_glimmer.cc)
 target_include_directories(b70_muse_model PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_muse_model PUBLIC b70_model)
+
+# --- Spec 19b: the DFlash / DFlash 2 drafter (spec 19 §2) -----------------------------------------
+# The drafter's config as data and its checks against the target it drafts for (model/dflash.h). Host only.
+add_library(b70_dflash_model STATIC dflash.cc)
+target_include_directories(b70_dflash_model PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_dflash_model PUBLIC b70_model)
