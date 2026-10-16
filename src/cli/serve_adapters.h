@@ -278,13 +278,25 @@ struct EngineAdapter : server::EngineIface {
     return out;
   }
 
-  // The sampled half (spec 19c Task 3): one 64-bit draw from the request's RNG keys the drafter's Gumbel walk, then
-  // the acceptance's uniforms and its one correction / bonus draw (RNG order: seed, uniforms, draw).
+  // The sampled half (spec 19c Task 3, D4): one 64-bit draw from the request's RNG keys the drafter's Gumbel walk
+  // (df_select.cl's murmur3 keying), then the acceptance's uniforms and its one correction / bonus draw (RNG order:
+  // seed, uniforms, draw). A fresh key every iteration: no position's Gumbel noise is reused across iterations, so
+  // each d_j is a fresh draw from q_j - what server::accept_sparse's losslessness assumes.
   server::AcceptResult dflash_sampled(const server::Sampling& sampling, uint32_t k, std::vector<uint32_t>& drafts) {
-    (void)sampling;
-    (void)k;
-    (void)drafts;
-    throw std::logic_error("EngineAdapter: DFlash sampled acceptance is spec 19c Task 3");
+    seed_rng(sampling);
+    const uint64_t seed = rng();   // the walk's Gumbel key: fresh every iteration, reproducible from the request's seed
+    const float T = server::dflash_temperature(sampling);
+    const runtime::dflash::DFlashDraftOut& o = df_->draft(eng, k, T, seed);
+    drafts.assign(o.ids, o.ids + k);
+    // q_j = softmax(scores_j / T) over row j's 16 candidates - what the walk drew d_j from (spec 19 §2)
+    server::SparseQ q[kMaxIterK];
+    for (uint32_t j = 0; j < k; ++j)
+      q[j] = server::dflash_q(o.cand[j], o.scores[j], runtime::dflash::DFlashDraftOut::kTopK, T);
+    eng.verify(k);
+    constexpr size_t V = model::Qwen35::kVocab;
+    float* p = spec_logits_->as<float>();
+    imm.copy(p, eng.verify_logits_device(), (k + 1) * V * sizeof(float));
+    return server::accept_sparse(p, q, drafts.data(), k, vocab_used, V, sampling, rng);
   }
 
   // --- spec 19e: one iteration over drafts proposed outside the engine (prompt lookup) -----

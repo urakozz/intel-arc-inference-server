@@ -211,6 +211,19 @@ void Context::copy(void* dst, const void* src, size_t bytes) {
      "zeCommandListAppendMemoryCopy");
 }
 
+void Context::copy_2d(void* dst, size_t dst_pitch, const void* src, size_t src_pitch, size_t width,
+                      size_t rows) {
+  if (p_->recording) throw std::runtime_error("prefill capture: copy_2d inside recording");
+  if (rows == 0) return;
+  if (width > dst_pitch || width > src_pitch || dst_pitch > UINT32_MAX || src_pitch > UINT32_MAX ||
+      rows > UINT32_MAX)
+    throw std::runtime_error("prefill copy_2d: a row is wider than its pitch, or a pitch / count exceeds 32 bits");
+  const ze_copy_region_t region{0, 0, 0, uint32_t(width), uint32_t(rows), 0};   // depth 0: a 2D copy
+  zc(zeCommandListAppendMemoryCopyRegion(p_->list, dst, &region, uint32_t(dst_pitch), 0, src, &region,
+                                         uint32_t(src_pitch), 0, nullptr, 0, nullptr),
+     "zeCommandListAppendMemoryCopyRegion");
+}
+
 void Context::signal(ze_event_handle_t e) {
   if (p_->recording) throw std::runtime_error("prefill capture: signal inside recording");
   zc(zeCommandListAppendBarrier(p_->list, e, 0, nullptr), "zeCommandListAppendBarrier (signal)");
