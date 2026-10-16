@@ -42,6 +42,7 @@
 #include "server/openai.h"
 #include "server/server.h"
 #include "server/spec_accept.h"
+#include "cli/muse_serve.h"
 #include "server/toolcall_muse.h"
 #include "tokenizer/chat_template.h"
 
@@ -571,6 +572,40 @@ void case_cached_tokens() {
               j2.at("usage").at("prompt_tokens").get<uint32_t>());
 }
 
+// ---- b70-serve's template rule (spec 23 decision 1), before the device -----------------------------------------
+void case_template_choice() {
+  const std::string older_dir = g_dir + "/../../model/muse_glimmer";   // the Vishva007 repos' older template
+  const cli::muse::TemplateChoice ok = cli::muse::check_serve_template(g_dir, "");
+  CHECK(ok.original && ok.file.empty());
+  CHECK_EQ(ok.sha256, std::string(cli::muse::kOriginalTemplateSha256));
+  bool threw = false;
+  try {
+    (void)cli::muse::check_serve_template(older_dir, "");
+  } catch (const std::runtime_error& e) {
+    const std::string m = e.what();
+    threw = m.find("pass --chat-template FILE") != std::string::npos && m.find("114f55eb") != std::string::npos &&
+            m.find("older template") != std::string::npos;
+    if (!threw) std::fprintf(stderr, "template refusal: %s\n", m.c_str());
+  }
+  CHECK(threw);
+  // --chat-template FILE wins: the original's over the older snapshot, or the older one deliberately (not original).
+  const cli::muse::TemplateChoice over = cli::muse::check_serve_template(older_dir, g_dir + "/chat_template.jinja");
+  CHECK(over.original && over.file == g_dir + "/chat_template.jinja");
+  const cli::muse::TemplateChoice deliberate =
+      cli::muse::check_serve_template(g_dir, older_dir + "/chat_template.jinja");
+  CHECK(!deliberate.original);
+  CHECK_EQ(deliberate.sha256, std::string(cli::muse::kOlderTemplateSha256));
+  threw = false;
+  try {
+    (void)cli::muse::check_serve_template(g_dir, g_dir + "/no_such_template.jinja");
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  CHECK(threw);
+  std::printf("template rule: the snapshot's original accepted, the older one refused naming --chat-template, "
+              "--chat-template FILE wins either way\n");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -584,6 +619,7 @@ int main(int argc, char** argv) {
   case_sampling();
   case_stop_strings();
   case_cached_tokens();
-  std::printf("muse_server_test OK: 6 cases\n");
+  case_template_choice();
+  std::printf("muse_server_test OK: 7 cases\n");
   return 0;
 }

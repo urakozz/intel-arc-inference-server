@@ -32,10 +32,66 @@
 #include <utility>
 #include <vector>
 
+#include <fstream>
+#include <sstream>
+
 #include "server/deps.h"
 #include "server/spec_accept.h"
+#include "tokenizer/chat_template.h"
 
 namespace cli::muse {
+
+// ---- the chat template (spec 23 decision 1) -------------------------------------------------------------------------
+// The ORIGINAL's chat_template.jinja (meta-models/Muse-Glimmer-30B @ a4e59da5, 9992 B; vendored at
+// tests/tokenizer/muse/chat_template.jinja) - and the older one both Vishva007 repos (and the tiny test model) ship
+// (7167 B, one line: no "Reasoning effort" normalisation, no skip of a system prompt's own reasoning line, another
+// model's name in its error text).
+inline constexpr const char* kOriginalTemplateSha256 = "cfc67e5f349f37690dfd31ed1f18bc4442a9dd32fe39a648f993cb4eb3cae678";
+inline constexpr const char* kOlderTemplateSha256 = "114f55ebdc1804c1af371197b9fdf2d6bb925966c9dfe46b73782a71bc07965e";
+
+struct TemplateChoice {
+  std::string file;     // the template chat::Template reads ("" = the snapshot's chat_template.jinja)
+  std::string sha256;   // of what is read
+  bool original = false;
+};
+
+// Before the device: `--chat-template FILE` (b70-serve) wins - any file, its sha256 printed (the operator's way to use
+// an older template deliberately); otherwise <snapshot>/chat_template.jinja is read only when it IS the original's,
+// else refused naming --chat-template (the GPTQ / -AutoRound repos ship the older one: pass the original's).
+inline TemplateChoice check_serve_template(const std::string& snapshot_dir, const std::string& file) {
+  const auto slurp = [](const std::string& path, std::string& out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    std::stringstream s;
+    s << f.rdbuf();
+    out = s.str();
+    return true;
+  };
+  TemplateChoice c;
+  std::string src;
+  if (!file.empty()) {
+    if (!slurp(file, src)) throw std::runtime_error("--chat-template: cannot read '" + file + "'");
+    c.file = file;
+    c.sha256 = chat::sha256_hex(src);
+    c.original = c.sha256 == kOriginalTemplateSha256;
+    return c;
+  }
+  const std::string path = snapshot_dir + (snapshot_dir.empty() || snapshot_dir.back() == '/' ? "" : "/") +
+                           "chat_template.jinja";
+  if (!slurp(path, src))
+    throw std::runtime_error("Muse-Glimmer-30B's chat template: " + path + " is absent - pass --chat-template FILE with "
+                             "the original's chat_template.jinja (meta-models/Muse-Glimmer-30B, sha256 " +
+                             std::string(kOriginalTemplateSha256).substr(0, 8) + "...; spec 23 decision 1)");
+  c.sha256 = chat::sha256_hex(src);
+  c.original = c.sha256 == kOriginalTemplateSha256;
+  if (!c.original)
+    throw std::runtime_error("Muse-Glimmer-30B's chat template: " + path + " has sha256 " + c.sha256.substr(0, 8) +
+                             "..." + (c.sha256 == kOlderTemplateSha256 ? " (the older template the Vishva007 repos ship)" : "") +
+                             ", not the original's " + std::string(kOriginalTemplateSha256).substr(0, 8) +
+                             "... (spec 23 decision 1) - pass --chat-template FILE with meta-models/Muse-Glimmer-30B's "
+                             "chat_template.jinja (vendored at tests/tokenizer/muse/chat_template.jinja)");
+  return c;
+}
 
 // The prefix cache's root for Muse (PrefixCache's kv_form): "MUSEGLIM". Qwen3.8 / Agnes / Ornith keep 0 / 1, K2 its
 // "K2HORIZ" key, Kolibri "KOLIBRI": no chain crosses models; the entries' bytes are Muse's ring and full-layer layouts
