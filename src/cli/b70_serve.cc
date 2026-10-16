@@ -28,6 +28,7 @@
 #include "cli/kolibri_serve.h"
 #include "cli/muse_decode.h"   // spec 23c: is_muse, check_args
 #include "cli/muse_serve.h"    // spec 23e: MuseEngineAdapterT, the template check
+#include "cli/muse_spec.h"     // spec 23f: --spec dflash / lookup for Muse-Glimmer
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
 #include "cli/pipeline_serve.h"
@@ -471,6 +472,7 @@ struct MuseServe {
   std::string chat_template;    // --chat-template FILE ("" = the snapshot's, which must be the original's)
   bool prefix_auto = true;
   uint32_t prefix_cache_gb = 0;
+  uint32_t spec_min_match = 3, spec_history = 0;   // spec 23f: --spec lookup's
 };
 
 int serve_muse(const MuseServe& a, server::Options options) {
@@ -515,20 +517,39 @@ int serve_muse(const MuseServe& a, server::Options options) {
   o.handoff = da.pipe.handoff;
   o.split = devs == 2 && !da.pipe.split_auto ? da.pipe.split : 0;
   o.prefill = true;   // every request prefills: plan the prefill scratch into max_len and the fit
+  const cli::muse::SpecArgs& sa = da.spec_args;
+  o.spec = cli::muse::engine_spec(sa, pre);   // spec 23f: the verify lists' rows and the drafter's planner term
   std::unique_ptr<runtime::muse::MuseEngine> engine;
+  std::unique_ptr<runtime::dflash::MuseDrafter> drafter;
   {
     StdoutToStderr redirect;
     engine = std::make_unique<runtime::muse::MuseEngine>(ctx, a.snapshot_dir, o);
+    if (sa.dflash()) drafter = cli::muse::attach_drafter(*engine, sa);   // before the adapter: snapshots carry its ring
   }
   engine->prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
+  if (sa.dflash()) {   // the server's --mtp auto loop over the drafter's cost table (AdaptiveK, K to --spec-max)
+    options.mtp_auto = true;
+    options.mtp_adaptive.max_k = sa.max_k;
+    options.mtp_adaptive.cost = cli::muse::spec_cost(sa, da.int8_head);
+    std::fprintf(stderr, "drafter: %s, %s, --draft-q %s, --spec-max %u, %zu B (%s)\n", sa.draft_model.c_str(),
+                 loader::draft_format_name(sa.format), runtime::dflash::muse_q_name(sa.q), sa.max_k, drafter->bytes(),
+                 drafter->weights().line.c_str());
+  } else if (sa.lookup()) {
+    options.spec_lookup = true;
+    options.lookup_min_match = a.spec_min_match;
+    options.lookup_history = a.spec_history;
+    options.lookup_adaptive.max_k = sa.max_k;
+    options.lookup_adaptive.cost = cli::muse::spec_cost(sa, da.int8_head).with_free_drafts();
+  }
   std::fprintf(stderr, "%s\n%s\n", engine->plan().describe().c_str(), engine->memory_line().c_str());
   TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
   if (tokenizer.vocab_used() != engine->vocab())
     std::fprintf(stderr, "note: tokenizer.json defines %u ids, Muse-Glimmer's head has %u rows; sampling masks from %u\n",
                  tokenizer.vocab_used(), engine->vocab(), tokenizer.vocab_used());
   TemplateAdapter chat_template(a.snapshot_dir, tc.file);
-  cli::muse::MuseEngineAdapterT<runtime::muse::MuseEngine> engine_adapter(*engine, tokenizer.vocab_used(), pre.out_mult,
-                                                                         pre.softcap);
+  cli::muse::MuseEngineAdapterT<runtime::muse::MuseEngine> engine_adapter(
+      *engine, tokenizer.vocab_used(), pre.out_mult, pre.softcap, sa.on() ? sa.max_k : 0, sa.lookup(),
+      drafter ? cli::muse::draft_hooks(*engine, *drafter) : cli::muse::MuseDraftHooks{});
   options.chat_format = server::ChatFormat::muse();
   options.eos_ids = eos;
   options.sampling_defaults = defaults;
@@ -547,13 +568,13 @@ int serve_muse(const MuseServe& a, server::Options options) {
   print_eos(eos);
   std::fprintf(stderr,
                ", Muse-Glimmer-30B (%s chat format, template %s sha256 %.8s%s), %s, prefill backend l0 (chunk %u), "
-               "attention %s (B70_MUSE_ATTN), mtp none, lm_head %s, kv cache bf16, sampling defaults %s T %.2f top-k %u "
+               "attention %s (B70_MUSE_ATTN), spec %s, lm_head %s, kv cache bf16, sampling defaults %s T %.2f top-k %u "
                "top-p %.2f softcap %.0f (host, fp32), stop_strings %zu, prefix snapshots: the rings' last %u positions + "
                "the full layers' KV\n",
                options.chat_format.name(), tc.file.empty() ? "<snapshot>/chat_template.jinja" : tc.file.c_str(),
                tc.sha256.c_str(), tc.original ? " - the original's" : " - NOT the original's (--chat-template)",
                placement.c_str(), runtime::muse::kPfC, runtime::muse::muse_attn_name(engine->attention()),
-               da.int8_head ? "int8" : "bf16", defaults.greedy ? "greedy" : "sampled", defaults.temperature,
+               sa.dflash() ? "dflash (the assistant)" : sa.lookup() ? "lookup" : "off", da.int8_head ? "int8" : "bf16", defaults.greedy ? "greedy" : "sampled", defaults.temperature,
                defaults.top_k, defaults.top_p, defaults.softcap, stops.size(), runtime::muse::state_positions(pre));
   return listen_until_stopped(server, options);
 }
@@ -827,6 +848,8 @@ int run(int argc, char** argv) {
   // Spec 19c: --spec dflash's drafter (cli/dflash_args.h); --spec-max / --spec-cost serve lookup and dflash.
   cli::dflash::Args dflash;
   bool have_spec_max = false, have_spec_cost = false;
+  runtime::dflash::MuseQ draft_q = runtime::dflash::MuseQ::Raw;   // spec 23f: --draft-q (Muse-Glimmer only)
+  bool have_draft_q = false;
   // Spec 9 §3: the serving default is the gated int8 head (amendment §8, L3).
   loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
   // Spec 8 §11: off until the box rows decide (§11 "Gates").
@@ -912,11 +935,16 @@ int run(int argc, char** argv) {
     } else if (arg == "--draft-model") {   // spec 19c
       dflash.model = value(i, "--draft-model");
       dflash.have_model = true;
-    } else if (arg == "--draft-format") {   // spec 19c
+    } else if (arg == "--draft-format") {   // spec 19c; spec 23f: int4 (Muse-Glimmer's assistant only)
       const std::string v = value(i, "--draft-format");
       if (!loader::parse_draft_format(v, dflash.format))
-        throw std::runtime_error("--draft-format expects int8 or bf16, got '" + v + "'");
+        throw std::runtime_error("--draft-format expects int8, bf16 or int4, got '" + v + "'");
       dflash.have_format = true;
+    } else if (arg == "--draft-q") {   // spec 23f: Muse-Glimmer only
+      const std::string v = value(i, "--draft-q");
+      if (!runtime::dflash::parse_muse_q(v, draft_q))
+        throw std::runtime_error("--draft-q expects raw or capped, got '" + v + "'");
+      have_draft_q = true;
     } else if (arg == "--spec-history") {
       spec_history = parse_u32("--spec-history", value(i, "--spec-history"));
       have_spec_tuning = true;
@@ -971,6 +999,11 @@ int run(int argc, char** argv) {
     usage();
     throw std::runtime_error("a snapshot directory or HF repo id is required");
   }
+  // Spec 23f: Muse-Glimmer-30B's --spec dflash / lookup are its own (cli/muse_spec.h: K to 15, the assistant, one
+  // card) - the Qwen family's spec rules below skip it; its branch further down checks its own.
+  const bool muse = cli::muse::is_muse(path);
+  if (!muse && have_draft_q)
+    throw std::runtime_error("--draft-q is Muse-Glimmer-30B's (spec 23f: the q of its assistant's 16 candidates)");
   // Spec 19 decision 3: --spec names the proposer; --mtp keeps its meaning (--spec mtp).
   const bool spec_lookup = spec_arg == "lookup";
   dflash.on = spec_arg == "dflash";   // spec 19c
@@ -981,14 +1014,16 @@ int run(int argc, char** argv) {
     throw std::runtime_error("--spec-min-match and --spec-history need --spec lookup");
   if ((have_spec_max || have_spec_cost) && !spec_lookup && !dflash.on)
     throw std::runtime_error("--spec-max and --spec-cost need --spec lookup or --spec dflash");
-  if (have_spec_max && spec_lookup && (spec_max == 0 || spec_max > runtime::Engine::kMaxDraft))
+  if (!muse && have_spec_max && spec_lookup && (spec_max == 0 || spec_max > runtime::Engine::kMaxDraft))
     throw std::runtime_error("--spec-max expects 1..3 with --spec lookup");
-  if (dflash.on) dflash.max_k = have_spec_max ? spec_max : 7;
-  cli::dflash::check_flags(dflash);
-  // Spec 19c: bf16 KV, attention v2; spec 19d: --pp 2 on the copy hand-off.
-  cli::dflash::check_engine(dflash, pipe.on(), kv_cache, {}, false, /*pipeline_served=*/true,
-                            pipe.handoff == runtime::PpHandoff::Peer);
-  if (spec_lookup) {
+  if (!muse) {
+    if (dflash.on) dflash.max_k = have_spec_max ? spec_max : 7;
+    cli::dflash::check_flags(dflash);
+    // Spec 19c: bf16 KV, attention v2; spec 19d: --pp 2 on the copy hand-off.
+    cli::dflash::check_engine(dflash, pipe.on(), kv_cache, {}, false, /*pipeline_served=*/true,
+                              pipe.handoff == runtime::PpHandoff::Peer);
+  }
+  if (spec_lookup && !muse) {
     options.spec_lookup = true;
     options.lookup_min_match = spec_min_match;
     options.lookup_history = spec_history;
@@ -1043,10 +1078,10 @@ int run(int argc, char** argv) {
   // --mtp (K or auto), and the ranked list needs a size to fill. Checked here, before the
   // device is touched. The compact head is gathered from the head in either --lm-head
   // form; the loader refuses only a checkpoint that ships the head int4.
-  if ((draft_vocab != 0 || !draft_vocab_ids.empty()) && mtp_k == 0 && !dflash.on)
+  if (!muse && (draft_vocab != 0 || !draft_vocab_ids.empty()) && mtp_k == 0 && !dflash.on)
     throw std::runtime_error("--draft-vocab and --draft-vocab-ids need --mtp (K or auto) or --spec dflash");
   // Spec 19c: the drafter's AdaptiveK policy (the server's --mtp auto loop, over the drafter's cost table).
-  if (dflash.on) {
+  if (dflash.on && !muse) {
     options.mtp_auto = true;
     options.mtp_adaptive.max_k = dflash.max_k;
     options.mtp_adaptive.cost = cli::dflash::cost(dflash, lm_head, draft_vocab, spec_cost_arg);
@@ -1073,7 +1108,6 @@ int run(int argc, char** argv) {
   // cli::muse::MuseEngineAdapterT (one card by default, --pp 2 for capacity) - dispatched here, before the Qwen family's
   // kv-cache and --pp rules (its own, cli::muse::check_args, replace them), as b70-decode dispatches it. --chat-template
   // and --spec dflash are parsed for it alone.
-  const bool muse = cli::muse::is_muse(path);
   if (!muse && !chat_template_file.empty())
     throw std::runtime_error("--chat-template is built for Muse-Glimmer-30B only (spec 23e: its checkpoints ship an "
                              "older template); this checkpoint renders its own");
@@ -1094,8 +1128,23 @@ int run(int argc, char** argv) {
     ma.pp_backend_given = have_pp_backend;
     ma.pp_backend = pp_backend;
     ma.mtp = mtp_k > 0 || mtp_auto;
-    ma.spec = spec_lookup || spec_arg == "dflash";
+    ma.spec = spec_arg == "mtp";   // refused by name (no MTP head)
     ma.kv8 = kv_cache == runtime::KvCache::Int8;
+    // Spec 23f: --spec dflash / lookup and the drafter's flags (cli/muse_spec.h).
+    cli::muse::SpecArgs& sa = ma.spec_args;
+    sa.spec = spec_arg == "dflash" || spec_arg == "lookup" ? spec_arg : "off";
+    if (dflash.have_model) sa.draft_model = dflash.model;
+    if (dflash.have_format) sa.format = dflash.format;
+    sa.have_model = dflash.have_model;
+    sa.have_format = dflash.have_format;
+    sa.q = draft_q;
+    sa.have_q = have_draft_q;
+    sa.have_max_k = have_spec_max;
+    if (have_spec_max) sa.max_k = spec_max;
+    sa.cost = spec_cost_arg;
+    sa.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
+    ms.spec_min_match = spec_min_match;
+    ms.spec_history = spec_history;
     ms.prefix_auto = prefix_auto;
     ms.prefix_cache_gb = prefix_cache_gb;
     return serve_muse(ms, options);
