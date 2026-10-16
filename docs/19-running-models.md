@@ -31,6 +31,7 @@ has to run is [superpowers/plans/box-validation-queue.md](superpowers/plans/box-
 | ran on a B70 | yes (see above) | no | no | no | no | no |
 | MTP head (`--mtp`) | yes | yes | yes (MoE head) | none | none | `b70-serve --mtp 1..3` (spec 21e; `auto` refused until spec 22's numbers), never run; `b70-decode` refuses it |
 | `--spec lookup` | yes | yes (needs the head) | yes (needs the head) | no | no | yes (needs the head; spec 21e), never run |
+| `--spec dflash` (spec 19c / 19d) | yes, one card or `--pp 2` (copy hand-off), bf16 KV, never run | no drafter (refused) | no (its v1 drafter is a later stage) | no drafter exists (refused) | refused | refused |
 | `--kv-cache int8` | yes, gates pending | yes, gates pending | not built | yes, gates pending (spec 18e) | refused (bf16 only) | refused (decision 8: bf16 first) |
 | prefill backends | `l0-int8` (default), `l0`, `sycl-tla` | `l0-int8`, `l0` | `l0-int8`, `l0` (`sycl-tla` refused) | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` and `sycl-tla` refused) |
 | KV per position (bf16) | 64 KiB | 72 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
@@ -183,16 +184,37 @@ bf16 head by default so its rows stay comparable.
 **Relevant variables:** `B70_KV_CACHE`, `B70_DECODE_ATTN` (`v1` only for A/B against the old
 pair), the `B70_PREFILL_*` switches for prefill experiments, `B70_GIT_SHA` for bench rows.
 
-### DFlash draft model (spec 19) - measured on the Mac CPU, not in the engine yet
+### DFlash draft model (spec 19) - built, not yet run on the card
 
-`z-lab/Qwen3.8-27B-DFlash2` drafts a block of up to 8 tokens per step from Qwen3.8's own hidden
-states. Its acceptance on our prompts is measured (spec 19a P0, `docs/probe-dflash-2026-10-08.md`:
-7.21 tokens per verify at K = 7 on agentic tool calls, 6.15 on code, ~2.2 on prose; int8 and 4-bit
-drafters equal bf16). **The engine cannot run it yet:** the drafter (19b), the engine loop (19c)
-and serving (19d) are not built, and the go / no-go waits for the box to measure verify at
-M = 5..8 rows (`docs/box-day-plan.md`, Session 6b).
+`z-lab/Qwen3.8-27B-DFlash2` drafts a block of up to 7 tokens per step from Qwen3.8's own hidden
+states (the outputs of layers 5 / 19 / 33 / 47 / 61). Its acceptance on our prompts is measured on the Mac CPU (spec 19a
+P0, `docs/probe-dflash-2026-10-08.md`: 7.21 tokens per verify at K = 7 on agentic tool calls, 6.15 on code, ~2.2 on
+prose; int8 and 4-bit drafters equal bf16). The engine runs it since spec 19b-19d - **written on the Mac, nothing of it
+has run on a B70** (box queue rows 54, 55, 56):
 
-Re-running the measurement (a Mac or the box CPU; ~20-25 h on a 64 GB Mac with the container at
+```sh
+# one card: the drafter beside the target (int8 at load, 2.05 GB + 1.06 GB of verify slots), K per request (auto, <= 7)
+./build/src/cli/b70-serve $Q --served-name qwen3.8 --prefix-split-last \
+    --spec dflash --draft-model z-lab/Qwen3.8-27B-DFlash2                 # never run on a B70
+# two cards: the drafter on the second card beside lm_head (the copy hand-off only)
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --served-name qwen3.8 --pp 2 \
+    --spec dflash                                                         # never run on a B70
+# greedy at a fixed K without the server (one card)
+./build/src/cli/b70-decode $Q --ids tests/golden/prompts/code.ids --n 256 --prefill --lm-head int8 \
+    --spec dflash --spec-max 7                                            # never run on a B70
+```
+
+- **Defaults (spec 19 §12, chosen from P0):** `--draft-format int8` (P0: int8 = bf16 acceptance at half the bytes),
+  `--spec-max 7` (the drafter's block; P0's acceptance still rises at K = 7 on tool calls and code, and the per-request
+  policy drops K on prose), `--draft-vocab off` (P0's free-looking ranked 32k was ranked in-sample; by id it loses up to
+  1.4 tokens at K = 7 - r56.d5_dv measures it). `--spec` stays unset (= `--mtp`'s meaning): `dflash` becomes Qwen3.8's
+  default only if it beats `--mtp auto` by >= 10 % on the opencode recording (D5, r56.d5_opencode).
+- **Refused, by name:** `--kv-cache int8` (kv8.cl is built for M <= 4), `B70_DECODE_ATTN=v1`, `--prefill-backend
+  sycl-tla`, `B70_PREFILL_REPLAY=1`, `--pp 2 --pipeline-handoff peer`, `b70-decode --pp 2`, every other model.
+- **The prefix cache** keeps the drafter's ring (41.9 MB) with every snapshot (spec 19 decision 5 as ruled in 19d), so a
+  restored conversation drafts exactly as an unbroken one; the store is keyed by the drafter.
+
+Re-running the acceptance measurement (a Mac or the box CPU; ~20-25 h on a 64 GB Mac with the container at
 ~54 GB - the first run's numbers are in `docs/probe-dflash-2026-10-08.md` §4):
 
 ```sh
@@ -208,17 +230,6 @@ tail -f oracle-out-19a/p0.log                       # then oracle-out-19a/accept
 # one arm again, e.g. after a new ranking
 STEPS="accept" ARMS=int8 tools/oracle/dflash_p0.sh
 ```
-
-**Planned, not built** (spec 19 §3 decision 3; the flags do not exist yet): one proposer per
-server, DFlash replacing the MTP head:
-
-```sh
-./build/src/cli/b70-serve $Q --served-name qwen3.8 --prefix-split-last \
-    --spec dflash --draft-model z-lab/Qwen3.8-27B-DFlash2      # spec 19c/19d - NOT BUILT
-```
-
-The engine's drafter is meant to ship in our own int4 format (AutoRound W4A16 g64, re-quantised
-by us), which P0's 4-bit arm says loses no acceptance.
 
 ## Agnes 3.0 Flash
 
