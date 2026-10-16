@@ -64,4 +64,11 @@ DrafterPlan drafter_plan(const model::DFlashDesc& d, uint32_t target_hidden, uin
 size_t draft_launches(const model::DFlashDesc& d);
 size_t project_launches(const model::DFlashDesc& d);
 
+struct DFlashCtl;
+// The one way to set a draft's K, temperature and seed in the control block (before a replay, under the drain rule):
+// K must be 1 .. 7, and a DFlash (v1) drafter drafts greedily only - its sampled q is a softmax over the whole head,
+// which the 16-candidate readback cannot carry, so T != 0 is refused here (std::invalid_argument naming v1) rather
+// than drafted greedily under a sampled request's acceptance (19c's sampled rule would read the wrong q).
+void set_draft_params(DFlashCtl& c, const model::DFlashDesc& d, uint32_t k, float temperature, uint64_t seed);
+
 }  // namespace runtime::dflash

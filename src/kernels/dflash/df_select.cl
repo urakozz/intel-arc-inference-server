@@ -85,6 +85,12 @@ __kernel void df_select(__global uint* restrict ctrl, __global const uint* restr
   if (K > MAXR - 1) K = MAXR - 1;
   const float T = as_float(dctl[DCTL_TEMP]);
   const uint seed_lo = dctl[DCTL_SEED_LO], seed_hi = dctl[DCTL_SEED_HI];
+#if !V2
+  // v1 samples over its whole head, which this readback cannot carry: at T != 0 (an engine bug past the host's
+  // runtime::dflash::set_draft_params) draft nothing - k 0, Control untouched - rather than greedy drafts that a
+  // sampled acceptance would read with the wrong q.
+  if (T != 0.0f) K = 0;
+#endif
   if (lid == 0) {
     prev_l = anchor;
     out[OUT_K] = K;

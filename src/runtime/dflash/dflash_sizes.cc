@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
+#include <string>
 
 #include "kernels/dflash_dims.h"
 #include "runtime/dflash/dflash_control.h"
@@ -72,5 +74,19 @@ size_t draft_launches(const model::DFlashDesc& d) {
   return 1 + size_t(d.layers) * (d.v2() ? 16 : 12) + (d.v2() ? 6 : 5);
 }
 size_t project_launches(const model::DFlashDesc& d) { return 3 + d.layers; }
+
+void set_draft_params(DFlashCtl& c, const model::DFlashDesc& d, uint32_t k, float temperature, uint64_t seed) {
+  if (k < 1 || k > kd::kR || k > d.max_k())
+    throw std::invalid_argument("DFlash draft: K " + std::to_string(k) + " outside 1.." +
+                                std::to_string(std::min(kd::kR, d.max_k())));
+  if (!(temperature >= 0.0f)) throw std::invalid_argument("DFlash draft: the temperature must be >= 0");
+  if (!d.v2() && temperature != 0.0f)
+    throw std::invalid_argument("DFlash draft: a DFlash v1 drafter drafts greedily only (temperature 0): its sampled "
+                                "q is a full-vocabulary softmax the 16-candidate readback cannot carry");
+  c.k = k;
+  c.temperature = temperature;
+  c.seed_lo = uint32_t(seed);
+  c.seed_hi = uint32_t(seed >> 32);
+}
 
 }  // namespace runtime::dflash
