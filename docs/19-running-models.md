@@ -548,6 +548,10 @@ T=tests/tokenizer/muse/chat_template.jinja        # the ORIGINAL's template (the
 ./build/src/cli/b70-serve $M --chat-template $T                                  # one card, --max-len auto (131072)
 ./build/src/cli/b70-serve $M --chat-template $T --prefix-split-last              # agentic sessions
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $M --chat-template $T --pp 2      # capacity on two cards
+./build/src/cli/b70-serve $M --chat-template $T --spec dflash                    # spec 23f: the assistant, int4, K <= 15
+./build/src/cli/b70-serve $M --chat-template $T --spec dflash --draft-format bf16 --spec-max 8
+./build/src/cli/b70-serve $M --chat-template $T --spec lookup                    # prompt lookup, the same verify lists
+./build/src/cli/b70-decode $M --ids m.ids --n 256 --prefill --spec dflash       # greedy: the ids equal --spec off's
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages":
   [{"role": "user", "content": "Read src/main.cc"}], "reasoning_effort": "low"}'
 ```
@@ -570,12 +574,29 @@ row: the cap is monotone). `generation_config.json`'s `stop_strings` (none in Mu
 The prefix cache keeps the 39 rings' last 2047 positions (81.7 MB, derived) with each snapshot, beside 13,312 B of
 KV a position.
 
+**Speculative decoding (spec 23f, never run on a B70: queue row 47).** `--spec dflash` runs Muse-Glimmer's DFlash
+assistant `meta-models/Muse-Glimmer-30B-assistant` (bf16 as published, 5.11 GB; never downloaded here) beside the
+engine on the same card: it reads the target's residual after layers 1 / 13 / 25 / 37 / 49 of every committed
+position, and one 16-row block (the newest token + 15 mask rows, its 2048-key window inclusive) proposes up to 15
+tokens through the target's own head; the target checks them in ONE pass at up to 16 rows (23c's decode list at
+M = K + 1, every row bitwise the one-row step's) and keeps the longest agreeing prefix (greedy: the output is plain
+decode's) - sampled requests draw the guesses from the assistant's candidates and accept them by the lossless rule
+against the capped, filtered p. Flags: `--draft-format int4` (the default: g64 RTN at load, 1.36 GB) / `int8` / `bf16`,
+`--spec-max 1..15` (default 15; b70-serve picks K per request with AdaptiveK over the derived cost table, `--spec-cost`
+calibrates it), `--draft-q raw` (default) / `capped`. `--spec lookup` verifies the server's prompt-lookup guesses
+through the same lists. The prefix cache keeps the assistant's ring (43.3 MB) after the 81.7 MB state with each
+snapshot, so a restored conversation guesses as an unbroken one. P0 on the Mac (2 short prompts, provisional):
+9.33 tokens a check on code at 15 guesses (int4 g64 = bf16 within 0.02), ~1.8 on prose; the box decides the agentic
+sets, the verify cost and the default (spec 19 D5's rule: on only if it beats `--spec off` and `--spec lookup` by
+>= 10 % on the agentic set). Refused: `--pp 2` with `--spec` (one card), `--draft-vocab`, `--spec-max` above 15,
+`B70_PREFILL_REPLAY=1` with `--spec dflash`, `b70-decode --bench --spec` and `b70-decode --spec lookup`.
+
 **MG5 (box):** `tools/toolcall/engine_generate.sh` on `tests/golden/toolcall-muse` (512 ids, `score.py --format
 atem` against 23a's bf16 reference: no more parse failures than it) and `tools/probe/muse_passkey.sh` (3 / 3 at
 131072, int8 head).
 
 **Limits.** Prefill on `l0` only (`l0-int8` refused: 6656 = 6.5 x 1024-wide Hadamard blocks; `sycl-tla`: no Muse
-walk), `--prefill-chunk` at most 2048; no `--mtp` / `--spec` (no MTP head; the DFlash drafter is spec 23f), bf16 KV
+walk), `--prefill-chunk` at most 2048; no `--mtp` / `--spec mtp` (no MTP head; `--spec dflash` / `lookup` above, one card), bf16 KV
 only (`--kv-cache int8` refused, decision 8), context at most 131072 (decision 6), `--device` refused with `--pp 2`,
 no `--profile`, image / video content refused.
 

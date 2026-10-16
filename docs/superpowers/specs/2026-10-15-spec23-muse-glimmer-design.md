@@ -888,3 +888,63 @@ card, the server on the synthetic and the real checkpoint, MG5, the llama-benchy
   every model (`openai_test`); r46.real's template refusal is an `xfail` (the pipeline under pipefail always read BAD,
   and a regressed refusal would have hung the stage); r46.benchy's deepest decode row is 130000 (131072 + 640 did not
   fit; `test_box_validate.py`'s `test_row46_refusal_and_depths` holds both).
+
+## 17. 23f as built (2026-10-16; the Mac - nothing on a card; box queue row 47)
+
+Plan `docs/superpowers/plans/2026-10-15-spec23f-muse-dflash.md`, both parts on ONE branch `spec23f-muse-dflash` (the
+operator's 2026-10-15 ruling: Part 2 built regardless of P0 - P0 picks the defaults, §8.5). The rulings with their costs
+if wrong are the plan's SDD ledger; the ones that change what §8.4 says are below.
+
+- **P0 (Tasks 1-5)**: `tools/oracle/dflash_ref.py`'s Muse form (`MuseSession` / `draft_block`; bitwise transformers
+  5.19.0 on the tiny pair, the window's edge, the crop, Review Focus 4's three mutations), `tools/oracle/muse_taps.py` +
+  `muse_oracle.sh taps`, `dflash_accept.py --model muse` (K 1..15 from one 16-row block, the int4 g64 / int8 arms with
+  and without the int8 head, raw vs capped q) + `lookup_accept.py --dumps`, `probe_draft_cost --shapes muse`,
+  `tools/spec/muse_p0_project.py`. The Mac's verdict and the provisional defaults: §8.5 (int4 g64 + int8 head,
+  `--spec-max` 15 under AdaptiveK, q **raw** - decision 11's recommendation reversed by the measurement).
+- **No new descriptor / loader** (§8.4's `MuseAssistantDesc` / `load_muse_assistant`): spec 19b's `model::DFlashDesc`
+  gained `DFlashForm::Muse` (`window_inclusive`, `norm_two_roundings`; `muse_desc_from_config`,
+  `check_muse_assistant`) and `loader::load_drafter` an overload by the target's shape (`DFlashTargetShape`: a Muse
+  drafter's vocab is the target's head rows); `DraftFormat::Int4G64` quantises every linear at load
+  (`loader::rtn_int4_g64` -> layout 1). Bytes: int4 1.358 GB, int8 2.556, bf16 5.112 (+ the buffers).
+- **No edited kernel source (MG0 / D0)**: §8.4's `mg_attn` ring mode and a projection kernel became spec 19b's `df_*`
+  sources at Muse's defines from new CMake lines (`df_prep_M16_..._R2112_V202048_E5`, `df_attn_M16_..._R2112_W2049_P64`,
+  `df_topk_R15_N202048_U202048`) plus one new source `src/kernels/muse/mg_dflash.cl` (`mg_df_norm`: the two-rounding
+  norm; `mg_df_select`: the 16-row readback and the verify's ids). **The ring is 2112 slots**: df_attn's rule is
+  `|q - k| <= WIN - 1` with `RING >= WIN`, so the inclusive 2048 window is WIN 2049 over 33 blocks of PB 64 (PB 64 keeps
+  its local memory under 64 KB at 64 q pairs) - 1.4 MB more ring than 2048 slots. df_prep's q / k norms round once in
+  fp32 where transformers' bf16 rounds twice: inside D1's bars.
+- **The draft list always runs the whole 16-row block** (dctl.k = 15): df_attn drops rows and keys past dctl.k, and
+  transformers' generator always attends over all 16 rows - so K only bounds what is verified (the head runs 15 rows
+  either way). `runtime::dflash::MuseDrafter` (`runtime/dflash/muse_drafter.h`) owns the weights, the buffers (ring,
+  taps [16][5][6656], the 804-word `MuseDraftOut`), the draft list over the target's embedding / head / Control and the
+  projection list (up to 16 rows); `runtime::TapSink` (split out of `TapDrafter`, `runtime/tap_drafter.h`) is the
+  engine's view of it.
+- **The verify** (`runtime::muse::build_verify`, `muse_capture.h`): 23c's decode walk at M = 1..16 over ONE 16-row
+  scratch (`MuseBuffers` rows = `MuseSpec::rows`), captured lazily per M; the ids come from a host-written buffer
+  through `mg_pf_embed` at M (Control::cur_token has 8 slots), every row's argmax into an output buffer through
+  `mg_vargmax` (Control::pos is the host's commit), the taps of every row copied after layers 1 / 13 / 25 / 37 / 49 (M
+  x 5 copies). `MuseEngine::verify(drafts, k)` / `verify_ids()` / `read_verify_logits` / `commit(j, t)` (the projection
+  of rows 0..j replayed at once - a rejected row's taps never reach the ring) / `max_verify_k`; with a drafter, plain
+  tokens (ingest, generate, K = 0) run verify(0) + commit(0). The prefill taps the prompt's last 2048 positions per
+  chunk (`MusePrefillTaps`, `Context::copy_2d`) and projects them 16 rows a replay.
+- **Snapshots carry the projected ring** (spec 19d decision 5 as ruled; the operator's 2026-10-16 option a), not §8.4's
+  fc rows: 43.3 MB after the 81.7 MB state; `drafter_key` keys the store.
+- **The loop** (`cli::muse::MuseEngineAdapterT`, `cli/muse_serve.h`): `step_many` (greedy: the device's picks,
+  `accept_greedy`; sampled: the drafts DRAWN ON THE HOST from q_j = softmax(scores_j / T) over the readback's 16
+  candidates, `server::dflash_q`, then `accept_sparse` against the capped, filtered p - lossless by construction),
+  `step_drafts` (lookup's point mass), the deferred commit, `truncate_to`, the commit flushed before a save.
+  `cli/muse_spec.h`: `--spec dflash` / `--spec lookup`, `--draft-model` (default the assistant), `--draft-format int4`
+  (default) / `int8` / `bf16`, `--draft-q raw|capped`, `--spec-max 1..15`, `--spec-cost`; `server::MtpCost::muse_dflash`
+  / `muse_verify` (DERIVED: verify 1.00 1.18 1.56 1.79 + 0.305 a row; the block flat - int4 0.182, int8 0.263, bf16 0.435).
+  **One card**: `--spec` with `--pp 2` is refused by name. `b70-decode --spec dflash` (--ids, greedy, K = --spec-max
+  every iteration) is D2's tool; `--spec lookup` is b70-serve's only. Qwen3.8's CLI refuses `--draft-format int4`.
+- **Tests**: host - `dflash_ref_test` (the twin `tests/kernels/dflash_ref.h` gained the Muse form: norm2, int4 g64, the
+  whole block; against `tests/loader/muse_dflash_fixture.safetensors` from `dflash_fixture.py --muse`),
+  `muse_dflash_names_test`, `muse_spec_test` (D2 / D4 over a fake engine), `tools/mac/clrun/muse_dflash_run` (both
+  lists on the Mac's GPU; its int4 arm does not build there); card - `muse_dflash_test` (the real assistant vs the twin),
+  `muse_verify_{synth,real}_test` (D3 and the commit / prefill-tail halves of Review Focus 3); D1 proper is
+  `dflash_d1` + `dflash_d1.py`'s Muse form over the tap dumps (`MODEL=muse tools/box_validate/dflash_d1.sh`).
+- **Open (the box's)**: every new binary's first ocloc build; `mg_attn` at M = 16 (NPR 256) may spill registers - the
+  lever is chunking rows; P0's agentic acceptance and the measured verify cost (r47.accept / r47.cost) and the verdict;
+  D1-D5 (r47.d1 .. r47.benchy); `--spec dflash` stays off by default until D5's rule says otherwise.
+
