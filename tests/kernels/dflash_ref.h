@@ -34,6 +34,7 @@
 #include <cstring>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "common/bf16.h"
@@ -320,31 +321,61 @@ inline size_t i8_index(uint32_t K, uint32_t k, uint32_t n) {
 inline size_t bf16_tiled_index(uint32_t K, uint32_t k, uint32_t n) {
   return ((size_t(n / 16) * (K / 8) + k / 8) * 8 + k % 8) * 16 + n % 16;
 }
+// The twin's GEMV threads (a test at the real shapes raises it; every output column is one thread's, so the result
+// does not depend on it).
+inline unsigned threads = 1;
+template <class F>
+inline void parallel_cols(uint32_t N, F f) {
+  const unsigned T = std::max(1u, std::min(threads, N));
+  if (T == 1) {
+    f(0u, N);
+    return;
+  }
+  std::vector<std::thread> pool;
+  for (unsigned t = 0; t < T; ++t)
+    pool.emplace_back([&, t] { f(uint32_t(uint64_t(N) * t / T), uint32_t(uint64_t(N) * (t + 1) / T)); });
+  for (std::thread& th : pool) th.join();
+}
+
 inline void gemv_i8w(const int8_t* q, const float* scales, uint32_t K, uint32_t N, const uint16_t* x, uint32_t M,
                      float* out) {
-  for (uint32_t m = 0; m < M; ++m)
-    for (uint32_t n = 0; n < N; ++n) {
-      float a = 0.0f;
-      for (uint32_t k = 0; k < K; ++k) a = a + float(q[i8_index(K, k, n)]) * bf(x[size_t(m) * K + k]);
-      out[size_t(m) * N + n] = a * scales[n];
+  std::vector<float> xf(size_t(M) * K);
+  for (size_t i = 0; i < xf.size(); ++i) xf[i] = bf(x[i]);
+  parallel_cols(N, [&](uint32_t n0, uint32_t n1) {
+    for (uint32_t n = n0; n < n1; ++n) {
+      const int8_t* col = q + size_t(n / 16) * (K / 16) * 256 + n % 16;   // + (k / 16) 256 + (k % 16) 16
+      for (uint32_t m = 0; m < M; ++m) {
+        const float* xr = &xf[size_t(m) * K];
+        float a = 0.0f;
+        for (uint32_t k = 0; k < K; ++k) a = a + float(col[size_t(k / 16) * 256 + (k % 16) * 16]) * xr[k];
+        out[size_t(m) * N + n] = a * scales[n];
+      }
     }
+  });
 }
 inline void gemv_bf16(const uint16_t* w, uint32_t K, uint32_t N, uint32_t ksplit, const uint16_t* x, uint32_t M,
                       float* out) {
   const uint32_t k8_per = K / 8 / ksplit;
-  for (uint32_t m = 0; m < M; ++m)
-    for (uint32_t n = 0; n < N; ++n) {
-      std::vector<float> red(ksplit);
-      for (uint32_t q = 0; q < ksplit; ++q) {
-        float a = 0.0f;
-        for (uint32_t k = q * k8_per * 8; k < (q + 1) * k8_per * 8; ++k)
-          a = a + bf(w[bf16_tiled_index(K, k, n)]) * bf(x[size_t(m) * K + k]);
-        red[q] = a;
+  std::vector<float> xf(size_t(M) * K);
+  for (size_t i = 0; i < xf.size(); ++i) xf[i] = bf(x[i]);
+  parallel_cols(N, [&](uint32_t n0, uint32_t n1) {
+    std::vector<float> red(ksplit);
+    for (uint32_t n = n0; n < n1; ++n) {
+      const uint16_t* col = w + size_t(n / 16) * (K / 8) * 128 + n % 16;   // + (k / 8) 128 + (k % 8) 16
+      for (uint32_t m = 0; m < M; ++m) {
+        const float* xr = &xf[size_t(m) * K];
+        for (uint32_t qq = 0; qq < ksplit; ++qq) {
+          float a = 0.0f;
+          for (uint32_t k = qq * k8_per * 8; k < (qq + 1) * k8_per * 8; ++k)
+            a = a + bf(col[size_t(k / 8) * 128 + (k % 8) * 16]) * xr[k];
+          red[qq] = a;
+        }
+        for (uint32_t stride = ksplit / 2; stride > 0; stride >>= 1)
+          for (uint32_t qq = 0; qq < stride; ++qq) red[qq] = red[qq] + red[qq + stride];
+        out[size_t(m) * N + n] = red[0];
       }
-      for (uint32_t stride = ksplit / 2; stride > 0; stride >>= 1)
-        for (uint32_t q = 0; q < stride; ++q) red[q] = red[q] + red[q + stride];
-      out[size_t(m) * N + n] = red[0];
     }
+  });
 }
 
 // --- the whole drafter --------------------------------------------------------------------------------------------
@@ -376,12 +407,14 @@ struct Lin {
   // y [M][N] = W x for M rows; xb the bf16 rows (Engine), xf the fp32 rows (Reference).
   void apply(const uint16_t* xb, const float* xf, uint32_t M, float* y) const {
     if (!f32.empty()) {
-      for (uint32_t m = 0; m < M; ++m)
-        for (uint32_t n = 0; n < N; ++n) {
-          float a = 0.0f;
-          for (uint32_t k = 0; k < K; ++k) a = a + f32[size_t(n) * K + k] * xf[size_t(m) * K + k];
-          y[size_t(m) * N + n] = a;
-        }
+      parallel_cols(N, [&](uint32_t n0, uint32_t n1) {
+        for (uint32_t m = 0; m < M; ++m)
+          for (uint32_t n = n0; n < n1; ++n) {
+            float a = 0.0f;
+            for (uint32_t k = 0; k < K; ++k) a = a + f32[size_t(n) * K + k] * xf[size_t(m) * K + k];
+            y[size_t(m) * N + n] = a;
+          }
+      });
     } else if (!i8.empty()) {
       gemv_i8w(i8.data(), scales.data(), K, N, xb, M, y);
     } else {
