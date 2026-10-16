@@ -38,8 +38,11 @@
 #                the final norm and the head on layer N-1's residual) on the int4 checkpoint over MUSE_PROMPTS (default
 #                muse_short_prose) -> <data>/oracle-out-muse-L<N>/ (muse_partial_test's head rows; its taps read the
 #                whole model's golden, whose H.L0..H.L<N-1> are the same computation)
-#   taps         for 23f P0: the residual after layers 1, 13, 25, 37, 49 over [prompt + the GPTQ form's own A4
-#                continuation] per scenario (teacher-forced, no generation) -> <data>/oracle-out-muse-taps/
+#   taps         for 23f P0 (spec 23f Task 2): tools/oracle/muse_taps.py dumps (dump_taps.py's format: the residual
+#                after layers 1, 13, 25, 37, 49, the raw greedy, the capped top-64 / lse) -> <data>/oracle-out-muse-taps/
+#                dumps/ - code / prose (muse_short_*, a golden run at --gen MUSE_TAPS_GEN 256 converted), agentic
+#                (muse_agentic at --gen MUSE_AGENTIC_GEN 512), a4/* (36 teacher-forced over [prompt + the GPTQ form's
+#                own A4 continuation], when mode a4 left them); resumable per source
 # Golden runs are per prompt resumable (written into <tree>/oracle-out-muse*.partial/, moved when complete, the golden
 # file last). Exit 77 (SKIP) when the RAM is short (MUSE_REF_MIN_GB: 24 tests / tiny / facts, 40 the GPTQ form, 72 the
 # bf16 one; the box: MemAvailable; the Mac: the ORACLE_MEMORY cap) or a snapshot is absent / incomplete (every shard
@@ -374,21 +377,79 @@ case "$mode" in
     summary "$data/oracle-out-muse-L$nl/*.log"
     ;;
   taps)
+    # Spec 23f Task 2: dump_taps.py-format dumps (tools/oracle/muse_taps.py) that dflash_accept.py reads, one per
+    # source, in <data>/oracle-out-muse-taps/dumps/ (resumable: a dumped source is kept):
+    #   code/muse_short_code, prose/muse_short_prose   a golden run with --gen MUSE_TAPS_GEN (256) --taps, converted
+    #                                                  (from-golden: no second forward); MUSE_TAPS_GEN=0 converts 23a's
+    #                                                  --gen 32 goldens in oracle-out-muse instead
+    #   agentic/muse_agentic                           the same at --gen MUSE_AGENTIC_GEN (512) over the 13.4k-id session
+    #   a4/<scenario> x 36                             teacher-forced over [prompt + the int4 form's own A4 continuation]
+    #                                                  (muse_taps.py run) - when mode a4 left the 36 continuations, else
+    #                                                  SKIPPED here (the line says so) and the rest still runs
+    out="$data/oracle-out-muse-taps" part=oracle-out-muse-taps.partial
+    tgen="${MUSE_TAPS_GEN:-256}" agen="${MUSE_AGENTIC_GEN:-512}"
+    [[ "$tgen" =~ ^[0-9]+$ && "$agen" =~ ^[0-9]+$ ]] || { echo "muse_oracle: MUSE_TAPS_GEN / MUSE_AGENTIC_GEN" >&2; exit 2; }
+    [ "$dry" = 1 ] || mkdir -p "$out/dumps" "$out/sources" "$part"
+    if [ "$dry" = 1 ]; then
+      echo "DRY_RUN: taps ESTIMATED (23a measured ~53 ms a layer-token on the Mac for a 2048-id chunk, ~2.8 s a token at"
+      echo "  52 layers; the box ~2.5x faster; a decode step re-dequantises the 52 layers, ~5-10 s on the box):"
+      echo "    short code / prose at --gen $tgen: ~$((tgen * 8 / 60 + 5)) min each | agentic (13.4k ids + $agen steps):"
+      echo "    ~$(( (13416 * 11 / 10 + agen * 8) / 3600 + 1 )) h | A4: 36 x ~2.3k ids teacher-forced = ~83k tokens, ~20-25 h"
+      echo "  peak RSS ~18 GiB measured for the golden runs (19a's dumps peaked ~4x their estimate: MUSE_REF_MIN_GB=64 first)"
+    fi
+    # golden <prompt> <gen> <corpus>: a resumable golden run at <gen> into $out/sources, then from-golden
+    taps_golden() {
+      local p="$1" g="$2" corpus="$3" name src
+      name="$corpus/$p"
+      [ -s "$out/dumps/${corpus}__$p.taps.safetensors" ] && { echo "muse_oracle: taps $name kept"; return 0; }
+      if [ "$g" = 0 ]; then
+        src="$data/oracle-out-muse"
+        [ "$dry" = 1 ] || [ -s "$src/$p.golden.safetensors" ] || {
+          echo "muse_oracle: taps $name SKIPPED - $src/$p.golden.safetensors absent (mode golden first)"; return 0; }
+      else
+        src="$out/sources/g$g"
+        golden "$GPTQ" "$src" "$part/g$g" "$p" "--taps --act-tail 0 --logits-tail 1" || return 1
+      fi
+      # the container sees this tree only (/ws): the golden and its ids are copied into the partial dir to convert
+      local cmd="python3 tools/oracle/muse_taps.py from-golden /ws/$part/conv/$p.golden.safetensors \
+        --prompt /ws/$part/conv/$p.ids --name $name --out /ws/$part/conv/dumps"
+      if [ "$dry" = 1 ]; then echo "DRY_RUN: cp $src/$p.{ids,golden.safetensors} $part/conv/ && $cmd"; return 0; fi
+      mkdir -p "$part/conv/dumps" && cp -f "$src/$p.ids" "$src/$p.golden.safetensors" "$part/conv/" || { rc=1; return 1; }
+      if in_box "$GPTQ" "$cmd"; then
+        mv -f "$part/conv/dumps/${corpus}__$p.taps.safetensors" "$out/dumps/" && rm -f "$part/conv/$p.golden.safetensors"
+      else
+        echo "muse_oracle: taps $name FAILED (from-golden)"; rc=1
+      fi
+    }
+    gen_save="$gen"
+    gen="$tgen"
+    for p in muse_short_code muse_short_prose; do
+      c=code; [ "$p" = muse_short_prose ] && c=prose
+      taps_golden "$p" "$tgen" "$c" || true
+    done
+    gen="$agen"
+    taps_golden muse_agentic "$agen" agentic || true
+    gen="$gen_save"
     a4="$data/oracle-out-muse-a4"
     if [ "$dry" != 1 ] && [ "$(ls "$a4"/*.gptq.ids 2>/dev/null | wc -l)" -ne 36 ]; then
-      echo "SKIP_REASON muse_oracle: taps needs the 36 GPTQ-form A4 continuations in $a4 (mode a4 first)"; exit 77
+      echo "muse_oracle: taps a4/* SKIPPED - the 36 GPTQ-form A4 continuations are not in $a4 (mode a4 first)"
+    else
+      srcs=()
+      for f in tests/golden/toolcall-muse/*.ids; do
+        n=$(basename "$f" .ids)
+        [ -s "$out/dumps/a4__$n.taps.safetensors" ] && { echo "muse_oracle: taps a4/$n kept"; continue; }
+        np=$(wc -w < "$f" | tr -d ' ')
+        [ "$dry" = 1 ] || { tr -s ' \n' ' ' < "$f"; tr -s ' \n' ' ' < "$a4/$n.gptq.ids"; echo; } > "$part/$n.ids"
+        srcs+=(--source "a4/$n:/ws/$part/$n.ids:$np")
+      done
+      if [ ${#srcs[@]} -gt 0 ]; then
+        echo "muse_oracle: taps - $(( ${#srcs[@]} / 2 )) A4 scenarios teacher-forced ($(date '+%F %T'))"
+        in_box "$GPTQ" "python3 tools/oracle/muse_taps.py run \"\$SNAP\" ${srcs[*]} --out /ws/$part/a4 \
+          > /ws/$part/a4.log 2>&1" || { echo "muse_oracle: taps a4 FAILED"; tail -20 "$part/a4.log" 2>/dev/null; rc=1; }
+        [ "$dry" = 1 ] || for d in "$part"/a4/*.taps.safetensors; do [ -s "$d" ] && mv -f "$d" "$out/dumps/"; done
+      fi
     fi
-    out="$data/oracle-out-muse-taps" part=oracle-out-muse-taps.partial
-    [ "$dry" = 1 ] || mkdir -p "$out" "$part"
-    for f in tests/golden/toolcall-muse/*.ids; do
-      n=$(basename "$f" .ids)
-      [ -s "$out/$n.golden.safetensors" ] && { echo "muse_oracle: taps $n kept"; continue; }
-      [ "$dry" = 1 ] || { tr -s ' \n' ' ' < "$f"; tr -s ' \n' ' ' < "$a4/$n.gptq.ids"; echo; } > "$part/$n.ids"
-      in_box "$GPTQ" "python3 tools/oracle/muse_ref.py run \"\$SNAP\" --prompt /ws/$part/$n.ids \
-        --out /ws/$part/$n.golden.safetensors --gen 0 --taps --act-tail 0 --logits-tail 1 > /ws/$part/$n.log 2>&1" \
-        || { echo "muse_oracle: taps $n FAILED"; rc=1; continue; }
-      [ "$dry" = 1 ] || for x in "$n.ids" "$n.log" "$n.golden.safetensors"; do mv -f "$part/$x" "$out/$x"; done
-    done
+    [ "$dry" = 1 ] || ls -la "$out/dumps"
     ;;
 esac
 exit "$rc"
