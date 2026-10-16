@@ -48,6 +48,11 @@ const char* plan_kind_name(PrefixCache::Plan::Kind k) {
   return "?";
 }
 
+uint64_t store_root(uint64_t kv_form, uint64_t drafter_key) {
+  if (drafter_key == 0) return kv_form;
+  return splitmix(kv_form ^ splitmix(drafter_key ^ 0xD5A61266F0C9392Cull));
+}
+
 PrefixCache::PrefixCache(size_t budget_bytes, size_t state_bytes, size_t kv_bytes_per_pos,
                          uint32_t block, HostAlloc& alloc, HashFn hash, uint64_t kv_form)
     : budget_(budget_bytes),
@@ -311,7 +316,7 @@ PrefixSession::PrefixSession(EngineIface& engine, size_t budget_bytes, HostAlloc
   if (alloc == nullptr) throw std::invalid_argument("PrefixSession: a budget needs an allocator");
   cache_ = std::make_unique<PrefixCache>(budget_bytes, engine.state_bytes(), engine.kv_bytes(1),
                                          engine.block(), *alloc, PrefixCache::HashFn{},
-                                         engine.kv_form());
+                                         store_root(engine.kv_form(), engine.drafter_key()));
   engine_.set_block_hook([this](uint32_t end, bool is_block_end) {
     if (prompt_ != nullptr) store(*prompt_, end, is_block_end);
   });

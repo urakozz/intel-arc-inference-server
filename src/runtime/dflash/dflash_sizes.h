@@ -64,6 +64,15 @@ DrafterPlan drafter_plan(const model::DFlashDesc& d, uint32_t target_hidden, uin
 size_t draft_launches(const model::DFlashDesc& d);
 size_t project_launches(const model::DFlashDesc& d);
 
+// Spec 19d (spec 19 decision 5): what a session snapshot adds with a drafter - its whole ring, ring_k then ring_v
+// (sizes(...).ring_k + ring_v: 41,943,040 B for Qwen3.8's drafter, whatever max_len - every layer slides). The
+// prefix store's entries grow by it (server::PrefixCache's state_bytes = Engine::state_bytes()).
+size_t ring_snapshot_bytes(const model::DFlashDesc& d, uint32_t max_len);
+// The drafter's name in the prefix store's keys (TapDrafter::key): FNV-1a 64 over the descriptor's shapes and taps,
+// the weight format and `norms` (the drafter's hidden_norm and final_norm weights as loaded - two checkpoints of one
+// shape differ there). Never 0 (0 means "no drafter" to server::store_root).
+uint64_t drafter_key(const model::DFlashDesc& d, loader::DraftFormat f, const void* norms, size_t norm_bytes);
+
 struct DFlashCtl;
 // The one way to set a draft's K, temperature and seed in the control block (before a replay, under the drain rule):
 // K must be 1 .. 7, and a DFlash (v1) drafter drafts greedily only - its sampled q is a softmax over the whole head,

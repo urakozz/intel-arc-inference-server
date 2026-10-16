@@ -339,7 +339,9 @@ void check_range(uint32_t begin, uint32_t end, uint32_t max_len, const char* wha
 }  // namespace
 
 size_t Engine::state_bytes() const {
-  return persist_.gdn_state.size() + persist_.conv_ring.size() + (mtp_ ? hid_bytes(*model_.desc) : 0);
+  // Spec 19d: with a drafter, its ring follows (TapDrafter::ring_bytes; never with the MTP head - one proposer).
+  return persist_.gdn_state.size() + persist_.conv_ring.size() + (mtp_ ? hid_bytes(*model_.desc) : 0) +
+         (drafter_ ? drafter_->ring_bytes() : 0);
 }
 
 size_t Engine::kv_bytes(uint32_t n_pos) const {
@@ -351,13 +353,14 @@ size_t Engine::kv_bytes(uint32_t n_pos) const {
 void Engine::save_state(void* host) const {
   auto* h = static_cast<uint8_t*>(host);
   // The LIVE GDN slot (spec 8: after a commit it may be one of gdn_spec's; spec 19c: of the
-  // drafter's slots). The drafter's ring is not part of a snapshot: a restore starts it cold (spec 19
-  // decision 5 is 19d's plane) - correct, lower acceptance until the ring refills.
+  // drafter's slots). Spec 19d (spec 19 decision 5, as ruled there): with a drafter its whole ring
+  // follows, so a restore resumes the drafter bitwise where this snapshot found it.
   imm_.copy(h, live_gdn_slot(), persist_.gdn_state.size());
   imm_.copy(h + persist_.gdn_state.size(), persist_.conv_ring.ptr(), persist_.conv_ring.size());
   if (mtp_)
     imm_.copy(h + persist_.gdn_state.size() + persist_.conv_ring.size(), mtp_->hh.ptr(),
               hid_bytes(*model_.desc));
+  if (drafter_) drafter_->save_ring(imm_, h + persist_.gdn_state.size() + persist_.conv_ring.size());
 }
 
 void Engine::load_state(const void* host, uint32_t pos) {
@@ -373,7 +376,8 @@ void Engine::load_state(const void* host, uint32_t pos) {
     control_->gdn_live = 0;   // the state went into slot 0
     verify_k_ = kNoVerify;
   }
-  if (drafter_) {   // spec 19c: the same, and the ring stays as it is (cold for this session)
+  if (drafter_) {   // spec 19c: the state went into slot 0; spec 19d: and the ring is the snapshot's
+    drafter_->load_ring(imm_, h + persist_.gdn_state.size() + persist_.conv_ring.size());
     control_->gdn_live = 0;
     verify_k_ = kNoVerify;
   }

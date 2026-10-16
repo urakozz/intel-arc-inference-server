@@ -152,16 +152,18 @@ class Engine {
   // Spec 8 §3.5 (plan 8b Review Focus 4): with MTP on, the state also carries the
   // head's input hidden h_{pos-1} (MtpBuffers::hh row 0, 10240 B) and the KV the head's
   // own layer (a 17th KV layer); both sizes grow accordingly.
-  size_t state_bytes() const;                 // gdn_state + conv_ring (166.72 MB) [+ hh0]
+  // Spec 19d (spec 19 decision 5): with a drafter, its whole ring as well (TapDrafter::ring_bytes, 41.94 MB for
+  // Qwen3.8's) - a restore then resumes the drafter where the snapshot found it, not cold.
+  size_t state_bytes() const;                 // gdn_state + conv_ring (166.72 MB) [+ hh0] [+ the drafter's ring]
   // n_pos * (fa_layers [+1]) * KvLayout::pos_bytes(), K and V: 4 x 256 x 2 B per layer and
   // position at bf16; 4 x (256 + 2) B at int8 (spec 12b: the rows and their scales).
   size_t kv_bytes(uint32_t n_pos) const;
-  // Layout: gdn_state (the LIVE slot) then conv_ring [then hh row 0]. conv_ring is a
+  // Layout: gdn_state (the LIVE slot) then conv_ring [then hh row 0 | then the drafter's ring]. conv_ring is a
   // ring indexed by pos % kConvRing; the whole ring is copied, so a restore at any
   // pos % 16 is exact.
   void save_state(void* host) const;
-  // Writes both, then control.pos = pos, control.n_active = 0. cur_token is NOT
-  // restored: prefill at least one id after a restore (spec 7 §3.3 step 4).
+  // Writes both (and the hidden row / the drafter's ring), then control.pos = pos, control.n_active = 0.
+  // cur_token is NOT restored: prefill at least one id after a restore (spec 7 §3.3 step 4).
   void load_state(const void* host, uint32_t pos);
   // Positions [begin, end) of kv_k and kv_v. Host layout: K [16][end-begin][4][256]
   // bf16, then V the same; with MTP on, [17] layers each, the head's cache last. begin == end copies nothing (host may be null). Throws
