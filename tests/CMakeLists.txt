@@ -3933,6 +3933,23 @@ if(B70_MUSE AND B70_MUSE_VERIFY_M16 AND B70_MUSE_DFLASH)
   add_test(NAME muse_dflash_test COMMAND muse_dflash_test ${B70_MUSE_ASSISTANT})
   set_tests_properties(muse_dflash_test PROPERTIES LABELS "checkpoint;muse;dflash" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
+# Task 8 on the card (D3): MuseEngine's verify lists at M = 1..16 bitwise the M = 1 decode steps (logits, ids, KV rows)
+# at P 64 and 2100; with a recording TapSink: the plain steps through verify(0), the taps of an M = 16 verify bitwise
+# the M = 1 steps', the commit's projection of the committed rows only, the prefill tail's coverage of [P - 2048, P).
+# On 23b's 4-layer synthetic checkpoint and on the real one; SKIP 77 without them.
+if(B70_MUSE AND B70_MUSE_VERIFY_M16)
+  add_executable(muse_verify_test runtime/muse_verify_test.cc)
+  target_include_directories(muse_verify_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(muse_verify_test PRIVATE b70_muse_runtime b70_muse_prefill)
+  add_dependencies(muse_verify_test ${B70_MUSE_DECODE_KERNELS} ${B70_MUSE_PREFILL_KERNELS} ${B70_MUSE_VERIFY_KERNELS})
+  b70_target_kernel_dir(muse_verify_test)
+  add_test(NAME muse_verify_synth_test COMMAND muse_verify_test ${B70_MUSE_SYNTH_DIR}/ckpt4
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/muse_short_prose.ids)
+  add_test(NAME muse_verify_real_test COMMAND muse_verify_test ${B70_MUSE_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/muse_short_prose.ids)
+  set_tests_properties(muse_verify_synth_test muse_verify_real_test PROPERTIES LABELS "checkpoint;muse;dflash"
+    SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
 # ==== Spec 23f ==== (end) ====
 
 # ==== Spec 19b: the DFlash drafter (label dflash) ==== (begin) ====
