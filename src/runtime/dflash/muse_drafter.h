@@ -49,8 +49,10 @@ class MuseDrafter final : public TapSink {
   void attach(l0::Context& ctx, const l0::Mem& embed, const loader::DeviceWeight& head, const l0::Mem& control);
   bool attached() const { return draft_ != nullptr; }
 
-  // One block of k drafts (1..max_k()) at the Control block's pos: `replay` runs the draft list on the target's queue
-  // and waits. Greedy (the device's pick). Returns the readback; vids() holds [anchor, d_1 .. d_k].
+  // One block at the Control block's pos for a caller that keeps k drafts (1..max_k()): `replay` runs the draft list
+  // on the target's queue and waits. The list always runs the whole 16-row block (dctl.k = 15, draft_list_k: every row
+  // attends to all 16, transformers' form - a block cut at k + 1 rows would draft differently), so the readback holds
+  // 15 greedy drafts (the device's pick) and vids() [anchor, d_1 .. d_15]; the caller verifies the first k.
   const MuseDraftOut& draft(const std::function<void(l0::CmdList&)>& replay, uint32_t k);
   // A sampled request's draft j (< the last draft's k) replaced by `id`, one of row j's candidates (the caller drew it
   // from q_j): the readback's ids / chosen and vids[1 + j]. Throws when id is not a candidate of row j.

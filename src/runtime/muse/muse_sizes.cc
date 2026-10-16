@@ -269,6 +269,13 @@ MuseReserve run_reserve(const model::MuseGlimmerDesc& d, uint32_t max_len, uint3
   return r;
 }
 
+uint32_t prefill_tap_r0(uint32_t pos, uint32_t C, uint32_t end, uint32_t window, bool hooked, uint32_t block) {
+  const uint32_t stop = pos + C;
+  if (hooked && block != 0 && stop < end && stop % block == 0) return 0;
+  const uint32_t from = end > window ? end - window : 0;
+  return from > pos ? std::min(C, from - pos) : 0;
+}
+
 size_t spec_prefill_taps_bytes(const model::MuseGlimmerDesc& d, const DrafterPlan& p) {
   return p.on() ? size_t(kPfC) * p.n_taps * d.hidden * 2 : 0;
 }

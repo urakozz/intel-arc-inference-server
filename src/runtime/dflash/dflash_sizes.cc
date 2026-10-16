@@ -133,4 +133,6 @@ void set_draft_params(DFlashCtl& c, const model::DFlashDesc& d, uint32_t k, floa
   c.seed_hi = uint32_t(seed >> 32);
 }
 
+uint32_t draft_list_k(const model::DFlashDesc& d, uint32_t k) { return d.muse() ? list_rows(d) - 1 : k; }
+
 }  // namespace runtime::dflash

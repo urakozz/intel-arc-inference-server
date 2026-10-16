@@ -59,10 +59,13 @@ void MuseDrafter::attach(l0::Context& ctx, const l0::Mem& embed, const loader::D
 const MuseDraftOut& MuseDrafter::draft(const std::function<void(l0::CmdList&)>& replay, uint32_t k) {
   require(draft_ != nullptr, "draft before attach");
   require(k >= 1 && k <= max_k_, "k " + std::to_string(k) + " is outside 1.." + std::to_string(max_k_));
-  set_draft_params(*b_.ctl(), w_.desc, k, 0.0f, 0);
+  // The whole block, always (transformers' DFlashTokenCandidateGenerator: the 16 rows attend to each other whatever
+  // the caller keeps; df_attn drops rows / keys past dctl.k, so dctl.k is 15 and k only bounds what is read).
+  const uint32_t R = draft_list_k(w_.desc, k);
+  set_draft_params(*b_.ctl(), w_.desc, R, 0.0f, 0);
   replay(draft_->list);
   const MuseDraftOut& out = *b_.muse_readback();
-  require(out.k == k, "the draft list drafted " + std::to_string(out.k) + " ids, not " + std::to_string(k));
+  require(out.k == R, "the draft list drafted " + std::to_string(out.k) + " ids, not " + std::to_string(R));
   return out;
 }
 
