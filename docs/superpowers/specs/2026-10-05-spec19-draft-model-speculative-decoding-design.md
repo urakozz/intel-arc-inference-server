@@ -385,5 +385,5 @@ section lists the rulings and the deviations from the 2026-10-05 plan).
   engine's own taps arrive with 19c's verify list; the tool takes either) and `tools/oracle/dflash_d1.py` runs
   `dflash_ref.py` on the same taps, anchors and head form, three arms (int8 / int8, bf16 / bf16, int8 + a 32k V').
 - **Not in 19b:** int4 g64 drafter weights (no checkpoint of ours; 19a measured equal acceptance), v1 sampling (full
-  vocabulary Gumbel), causal or full-attention drafter layers (Ornith's v1 drafter: its stage), the engine loop,
+  vocabulary Gumbel: refused by `runtime::dflash::set_draft_params`; df_select's v1 build drafts nothing at T != 0), causal or full-attention drafter layers (Ornith's v1 drafter: its stage), the engine loop,
   `--spec dflash` and the taps (19c).

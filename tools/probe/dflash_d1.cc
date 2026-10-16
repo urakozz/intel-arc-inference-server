@@ -206,8 +206,7 @@ int main(int argc, char** argv) {
       c->pos = p;
       c->n_active = 1;
       c->cur_token[0] = uint32_t(d.ids[p]);
-      b.ctl()->k = K;
-      b.ctl()->temperature = 0.0f;
+      runtime::dflash::set_draft_params(*b.ctl(), w.desc, K, 0.0f, 0);
       const auto t0 = std::chrono::steady_clock::now();
       q.execute(draft.list, &fence);
       fence.wait();
