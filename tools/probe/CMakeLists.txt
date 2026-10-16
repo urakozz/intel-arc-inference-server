@@ -674,7 +674,7 @@ endif()
 if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_executable(dflash_d1 dflash_d1.cc)
   target_include_directories(dflash_d1 PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(dflash_d1 PRIVATE b70_dflash_runtime b70_loader b70_l0)
+  target_link_libraries(dflash_d1 PRIVATE b70_dflash_runtime b70_muse_loader b70_loader b70_l0)   # spec 23f: + Muse
   b70_target_kernel_dir(dflash_d1)
   get_property(D1_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(dflash_d1 ${D1_KERNELS})

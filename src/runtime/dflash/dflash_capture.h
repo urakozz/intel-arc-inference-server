@@ -34,8 +34,8 @@
 // The drafter's embedding and head are the TARGET's (Review Focus 3): DFlashTarget points at them.
 //
 // **Spec 23f: a Muse-form drafter** (meta-models/Muse-Glimmer-30B-assistant, model::DFlashForm::Muse) runs the same two
-// walks at kernels::dflash::kMuse: M = 16 rows (the draft list's 15 drafts from one block whatever K - rows past K are
-// computed and masked as at 8), its norm mg_df_norm (the two-rounding RMSNorm) where df_norm stands, df_attn at WIN
+// walks at kernels::dflash::kMuse: M = 16 rows (MuseDrafter runs the list at dctl.k = 15 - the whole block, every
+// row attending to all 16 as transformers' generator does - and the caller keeps the first K), its norm mg_df_norm (the two-rounding RMSNorm) where df_norm stands, df_attn at WIN
 // 2049 / RING 2112 / PB 64, the head at 15 rows, and mg_df_select for df_select - the 16-row readback (MuseDraftOut)
 // and the verify's ids buffer (DFlashBuffers::vids: [anchor, d_1 .. d_K]) instead of Control::cur_token[1..K] (7
 // slots). Its linears in any of the three formats (bf16, int8, int4 g64 layout 1). 66 draft launches, 8 projection
