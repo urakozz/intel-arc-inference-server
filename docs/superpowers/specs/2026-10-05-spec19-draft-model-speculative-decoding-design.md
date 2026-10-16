@@ -488,6 +488,8 @@ and nothing changes without `--spec dflash`, so D0 is G0. Plan: `docs/superpower
   those restores as cold (and not store their ring), or to keep this. Projecting every position under the hook would cost ~90-130 ms a block
   (~10-13 % of prefill, derived) - the lever if the recording shows such restores matter. The plane per snapshot (the
   normed fc output, 20 MB, re-projected at restore, ~30-50 ms derived) is the lever for the memory.
+  **Ruled 2026-10-16 (operator): keep this** (option a) - rings stored as the prefill left them; revisit only if
+  r56.d5_opencode's prefix plans show such restores happen and cost acceptance.
 - **Store keys carry the drafter (Review Focus 2):** `server::store_root(kv_form, drafter_key)` is the root of every hash
   chain - `kv_form` itself without a drafter (every key as before), a mix of both with one. The key is FNV-1a over the
   drafter's shapes, taps, format and its two norm weights as loaded (`runtime::dflash::drafter_key`).
