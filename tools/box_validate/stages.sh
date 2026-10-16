@@ -3287,9 +3287,64 @@ st_r48_a4_ref() {
 }
 
 # ======================================================================================
+row 54 "spec 19b - the DFlash drafter on the card: loader::load_drafter (z-lab/Qwen3.8-27B-DFlash2 beside Qwen3.8, bf16 or int8 at load, the target's embedding and head shared), the df_* kernels (embed, norms, the grouped two-tap convs, the block's q / k / v, ring + block attention, top-16 with the vocab mask and the draft vocabulary's id map, the selector walk), the captured draft (87 launches) and projection (8) lists, the planner's drafter term; D0 and D1 (plan 19b)"
+rownote 54 "Written blind on the Mac: no df_* binary has ever been compiled (ocloc is the box's) - r54.kernels' kbins is the first build of the 14 new command lines (kernel_cmdlines +14 / -0 / ~0: 8 df_*, the bf16 head at 7 rows, the compact heads at 7 rows). Nothing binds them without a drafter (19c's --spec dflash): D0 is G0. On the Mac's GPU (tools/mac/clrun/dflash_run, indicative) the whole draft and projection lists ran at the fixture's tiny shapes against the host twin: rows / scores cos 1.0000000 in 8 of 9 cases (one at 0.99999 - Apple's 1 / sqrt is not correctly rounded), every walk equal, a 256-id draft vocabulary bitwise the full head's, v1. The twin (tests/kernels/dflash_ref.h) matches tools/oracle/dflash_ref.py to 6e-7 (dflash_ref_test). The kernels use work-group reductions only (no sub-group ops): their speed on the B70 is unmeasured."
+rownote 54 "Data: the drafter (hf download z-lab/Qwen3.8-27B-DFlash2, 3.85 GB; data key dflash) for r54.load / r54.draft / r54.d1; 19a's tap dumps (the Mac's oracle-out-19a/dumps, 2.7 GB, and oracle-out-19a/draft_vocab.ranked.ids: tools/box_validate.sh --push-data; data key oracle_dflash_dumps) for r54.d1; the gate checkpoint (qwen). r54.d1_ref runs dflash_ref.py in the oracle image: ~15 GB RSS (the drafter fp32 7.2 GB, the target's head and embedding), ~1-2 s a draft on 44 threads, ESTIMATED (16 anchors x 37 dumps x 3 arms ~ 0.5-1 h)."
+rownote 54 "D1's bars are spec 19 §6's: top-16 sets tie-aware, scores cosine >= 0.9999 (bf16 drafter) / 0.999 (int8), walk ids equal at T 0. The engine rounds every GEMV input to bf16 (the reused gemv kernels read bf16 activations; vLLM runs the drafter in bf16 throughout) and keeps the ring bf16; the reference is fp32. A Mac preview on the real drafter with real taps (random head: the true scores need the target's head) measured the final rows at cosine 0.99991 (bf16) - if the scores bar fails, read the per-draft table: fp32-input GEMV variants are the lever (plan 19b status)."
+rownote 54 "Hand back: the kbins list, dflash_kernels_test's lines, dflash_load_checkpoint_test's lines (bytes, read-backs), dflash_draft_test's lines (launches, the projection, every draft line, the replay, the draft vocabulary line, the host-timed ms), and r54.d1's three tables (out/d1.md) with any FAIL lines."
+stage r54.k0 54 default cpu - g0.sha,g0.bitwise,g0.suite "D0: no existing command line moved (kernel_cmdlines +14 / -0 / ~0), every pre-existing binary identical, the suite (G0); 19b's edits to shared files: SafetensorsSet's opt-in single-file mode, runtime::plan / max_len_that_fits' defaulted DrafterPlan, the CMake blocks"
+st_r54_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r54.host 54 default cpu - - "host: dflash_loader_test (the config, every refusal, the synthetic checkpoints' device forms), dflash_ref_test (the twin vs dflash_ref.py), dflash_variant_names_test, dflash_plan_test (the buffers, the planner's term, auto); test_dflash_ref.py and test_dflash_d1.py in the oracle image"
+st_r54_host() {
+  run_tests '^(dflash_loader_test|dflash_ref_test|dflash_variant_names_test|dflash_plan_test)$'
+  jgrab host '^dflash_(loader|ref|variant_names|plan)_test$' 'PASS|OK|refusal|bytes|cos|launches|auto'
+  chk "tools/oracle/run_in_container.sh 'python3 tools/oracle/test_dflash_ref.py && python3 tools/oracle/test_dflash_d1.py'" \
+    "the reference's and the D1 comparator's tests (oracle image)"
+  finish
+}
+stage r54.kernels 54 default gpu - - "the 14 new binaries built (kbins: the first ocloc build of every df_* kernel) and dflash_kernels_test at the drafter's real shapes against the twin: embed / norm / convs / q-k-v prep / the ring store bitwise, SiLU and attention within 1 bf16 ulp (the window's edge and the ring's wrap: p 5 .. 131000, K 7 / 5 / 3 / 1), top-16 exact (ties, NaN, the mask, the draft vocabulary's map), the walk (greedy bitwise; sampled to near ties)"
+st_r54_kernels() {
+  kbins df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320 df_attn_M8_Q32KV8_D128_R2048_W2048_P128 \
+    df_topk_R7_N248320_U248077 df_topk_R7_N32768_U32768_C df_topk_R7_N65536_U65536_C df_topk_R7_N131072_U131072_C \
+    df_select_M8_K16_Q16_RK256_V248320 df_select_v1_M8_K16 gemv_bf16_M7_K5120_N248320 gemv_bf16_M7_K5120_N32768 \
+    gemv_bf16_M7_K5120_N65536 gemv_bf16_M7_K5120_N131072 gemv_i8w_M7_K5120_N65536 gemv_i8w_M7_K5120_N131072
+  run_tests '^dflash_kernels_test$' dflash
+  jgrab kernels '^dflash_kernels_test$' 'df_|differ|ulp|PASS|FAIL'
+  finish
+}
+stage r54.load 54 default gpu qwen,dflash r54.kernels "loader::load_drafter beside the int4 gate checkpoint (int8 head), int8 and bf16: the bytes = loader::dflash_weight_bytes (2.053 / 3.849 GB, derived), fc / q||k||v / down / the kernel projection / the selector read back = the host forms, the norms, the conv bases, the codebook rows, the mask row = the embedding's row 248070"
+st_r54_load() {
+  run_tests '^dflash_load_checkpoint_test$' dflash '' "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  jgrab load '^dflash_load_checkpoint_test$' 'DFlash drafter:|read back|formula|PASS'
+  finish
+}
+stage r54.draft 54 default gpu dflash r54.kernels "the draft and projection lists end to end - the real drafter, a synthetic target - against the twin: 87 / 8 launches, 2053 positions projected across the ring's wrap, a draft at p 2053 (rows / scores cosine >= 0.99999, top-16 tie-aware, the walk), the replay bitwise, K 3 by the control block, a sampled walk, a 32768-id draft vocabulary BITWISE the full head (Review Focus 3), the bf16 head; the draft list's host-timed replay (informational)"
+st_r54_draft() {
+  x "build/tests/dflash_draft_test ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2} | tee $STATE/$STAGE.txt"
+  step_rc $? "dflash_draft_test (both drafter formats)"
+  grab_all draft '^== drafter|^launches|^projection|^greedy|^K 3|^sampled|^bf16 head|^replay|^draft vocabulary|^dflash_draft_test' 40
+  finish
+}
+stage r54.d1 54 default gpu qwen,dflash,oracle_dflash_dumps r54.draft "D1, the engine's half: build/tools/probe/dflash_d1 over oracle-out-19a's 37 tap dumps (16 anchors each over the continuation, K 7, T 0) for the arms i8 (int8 drafter + int8 head), bf16 (bf16 + bf16), i8dv32k (i8 over 19a's ranked 32k draft vocabulary) -> \$STATE/d1/d1.<arm>.jsonl"
+st_r54_d1() {
+  chk "SNAP_QWEN=$SNAP_QWEN tools/box_validate/dflash_d1.sh gpu $STATE/d1" "dflash_d1 x 3 arms"
+  grab_all d1 '^dflash_d1:|^DFlash drafter:|^=== ' 20
+  finish
+}
+stage r54.d1_ref 54 default cpu qwen,dflash,oracle_dflash_dumps,oracle_image r54.d1 "D1, the reference's half (box CPU, the oracle image): tools/oracle/dflash_d1.py per arm - dflash_ref.py on the same taps, anchors and head form (int8 RTN simulated where the engine quantised), the vocab mask, V' masked; the bars: top-16 sets tie-aware, scores cosine >= 0.9999 (bf16) / 0.999 (int8), the walk equal. The table -> \$STATE/d1/d1.md"
+st_r54_d1_ref() {
+  chk "SNAP_QWEN=$SNAP_QWEN tools/box_validate/dflash_d1.sh ref $STATE/d1" "dflash_d1.py x 3 arms: D1"
+  grab_all d1-ref '^\| |^D1 |^  FAIL' 40
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
-stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / muse labels belong to their rows)"
+stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / muse / dflash labels belong to their rows)"
 st_x_rest() {
-  run_tests '.' '' 'agnes ornith kv8 k2 longctx kolibri qwen4exp muse'
+  run_tests '.' '' 'agnes ornith kv8 k2 longctx kolibri qwen4exp muse dflash'
   finish
 }

@@ -10,7 +10,7 @@
 #       The stages' NEEDS name these keys (tools/box_validate/stages.sh).
 #   tools/box_validate/data.sh resolve <repo id | snapshot dir>
 #       the snapshot directory the CLIs would load (refs/main for a repo id).
-# Env: SNAP_QWEN, SNAP_QWEN_BF16, SNAP_AGNES, SNAP_ORNITH, SNAP_K2, SNAP_KOLIBRI, SNAP_Q4EXP_{TINY,INTEL,BF16}, SNAP_MUSE, SNAP_MUSE_BF16, HF_HOME, TOK_PYTHON, OPENCODE_LOG,
+# Env: SNAP_QWEN, SNAP_QWEN_BF16, SNAP_AGNES, SNAP_ORNITH, SNAP_K2, SNAP_KOLIBRI, SNAP_Q4EXP_{TINY,INTEL,BF16}, SNAP_MUSE, SNAP_MUSE_BF16, SNAP_DFLASH, HF_HOME, TOK_PYTHON, OPENCODE_LOG,
 #      A4_REF_DIR, ORACLE_IMAGE. Run from a tree root (the oracle-out* checks look there).
 set -u
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
@@ -149,6 +149,12 @@ case "${1:-}" in
       bash -c 'ls oracle-out-q4exp-prune/maskeval/*.json'
     have probe_offload_bin "build/tools/probe/probe_offload (spec 22 P0: r36.build - the probe and its two kernels)" \
       test -x build/tools/probe/probe_offload
+    # Queue row 54 (spec 19b): the DFlash drafter (3.85 GB; hf download z-lab/Qwen3.8-27B-DFlash2) and 19a's tap dumps
+    # (the Mac's oracle-out-19a/dumps, --push-data) that D1 drafts from on both sides.
+    have dflash "the DFlash drafter ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2} (3.85 GB)" \
+      complete "${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+    have oracle_dflash_dumps "oracle-out-19a/dumps/*.taps.safetensors (spec 19a's tap dumps, 2.7 GB: --push-data from the Mac)" \
+      bash -c 'ls oracle-out-19a/dumps/*.taps.safetensors'
     have oracle_image "the oracle container image (tools/oracle/run_in_container.sh; passkey ids)" \
       docker image inspect "${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
     # Queue row 41 (the llama-benchy comparison matrix): the vLLM XPU image tools/probe/vllm_benchy.sh serves.
