@@ -209,6 +209,11 @@ void Scheduler::grant(const std::shared_ptr<Job>& job, uint32_t slot) {
   job->slot = static_cast<int>(slot);
   job->fin.slot = job->slot;
   job->state = Job::State::Prefilling;
+  if (engine_.spec_k() > 0 && opts_.spec_fixed_k == 0) {   // spec 19d: the request's own K policy
+    AdaptiveKOptions o = opts_.spec;
+    o.max_k = std::min(o.max_k, engine_.spec_k());
+    job->policy = std::make_unique<AdaptiveK>(o);
+  }
   try {
     // Review Focus 5: the prefix plan is taken here, at the grant, against what the slot
     // and the host store hold now - not when the request arrived.
@@ -291,7 +296,85 @@ bool Scheduler::prefill_round() {
   return true;
 }
 
+// Spec 19d: one speculative iteration over every decoding slot; each row's run goes through the per-id rules in
+// order, and the ids past the one that ends a request are handed back before its request-end snapshot.
+bool Scheduler::spec_round() {
+  std::vector<std::shared_ptr<Job>> jobs;
+  std::vector<BatchEngineIface::SpecRow> rows;
+  const uint32_t cap = engine_.spec_k();
+  for (const auto& j : impl_->slots) {
+    if (!j || j->state != Job::State::Decoding) continue;
+    jobs.push_back(j);
+    const uint32_t k = j->policy ? j->policy->next() : std::min(opts_.spec_fixed_k, cap);
+    rows.push_back({static_cast<uint32_t>(j->slot), &j->req.sampling, &j->rng, std::min(k, cap)});
+  }
+  if (rows.empty()) return false;
+  std::vector<std::vector<uint32_t>> runs;
+  try {
+    runs = engine_.step_spec(rows);
+    if (runs.size() != rows.size())
+      throw std::logic_error("BatchEngineIface::step_spec returned " + std::to_string(runs.size()) +
+                             " runs for " + std::to_string(rows.size()) + " rows");
+    for (size_t i = 0; i < runs.size(); ++i)
+      if (runs[i].empty() || runs[i].size() > size_t(rows[i].k) + 1)
+        throw std::logic_error("BatchEngineIface::step_spec returned " + std::to_string(runs[i].size()) +
+                               " ids for a row of " + std::to_string(rows[i].k) + " drafts");
+  } catch (const std::exception& error) {
+    for (const auto& j : jobs) finish(j, Finish::Error, error.what());
+    return true;
+  }
+  for (size_t i = 0; i < jobs.size(); ++i) {
+    const auto& j = jobs[i];
+    const std::vector<uint32_t>& run = runs[i];
+    const uint32_t slot = rows[i].slot, k = rows[i].k;
+    const uint32_t kept_drafts = static_cast<uint32_t>(run.size() - 1);
+    if (j->policy) j->policy->observe(k, std::min(k, kept_drafts));
+    ++j->fin.spec_iters;
+    j->fin.spec_drafted += k;
+    // server.cc's per-id rules over the run; `end` = the reason, at the id that ends the request.
+    bool ended = false;
+    Finish::Reason reason = Finish::Length;
+    size_t used = 0;
+    for (; used < run.size() && !ended;) {
+      const uint32_t id = run[used++];
+      if (cache_) cache_->fed(slot, id);
+      ++j->steps;
+      const bool is_eos = impl_->eos.count(id) != 0;
+      if (is_eos && !j->req.ignore_eos && j->fin.completion_tokens >= j->req.min_tokens) {
+        ended = true;
+        reason = Finish::Stop;
+        break;
+      }
+      ++j->fin.completion_tokens;
+      if (j->req.on_token && !j->req.on_token(id)) {
+        ended = true;
+        reason = Finish::Stop;
+        break;
+      }
+      if (j->steps >= j->max_tokens) {
+        ended = true;
+        reason = Finish::Length;
+        break;
+      }
+    }
+    j->fin.spec_accepted += static_cast<uint32_t>(used - 1);
+    if (!ended) continue;
+    if (used < run.size()) {
+      try {   // the slot keeps exactly the ids consumed; then the request-end snapshot (finish)
+        engine_.truncate_to(slot, engine_.pos(slot) - static_cast<uint32_t>(run.size() - used));
+      } catch (const std::exception& error) {
+        if (cache_) cache_->fail(slot);
+        finish(j, Finish::Error, error.what());
+        continue;
+      }
+    }
+    finish(j, reason);
+  }
+  return true;
+}
+
 bool Scheduler::decode_round() {
+  if (engine_.spec_k() > 0) return spec_round();   // spec 19d
   std::vector<std::shared_ptr<Job>> jobs;
   std::vector<BatchEngineIface::Row> rows;
   for (const auto& j : impl_->slots) {
