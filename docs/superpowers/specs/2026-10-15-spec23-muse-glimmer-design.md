@@ -505,6 +505,32 @@ Spec 19's design (§5 there; plan 19b / 19c as written) at Muse's shapes:
 - `b70-serve --spec dflash --draft-model PATH`, `--spec-max K` (1..15), the adaptive-K cost row flat in K;
   `--spec lookup` beside it (19e's matcher through the same verify lists).
 
+### 8.5 P0 verdict (2026-10-16; the Mac, PROVISIONAL - the box's r47.accept / r47.cost decide)
+
+Recorded, not applied (the operator's 2026-10-15 ruling: the engine half is built whatever P0 shows). Numbers:
+`docs/probe-muse-dflash-2026-10-16.md`. The Mac measured teacher-forced acceptance on the only two continuations it has
+(23a's `muse_short_code` / `muse_short_prose`, 32 greedy ids each, 18 anchors each) and projected with the DERIVED cost
+table (`tools/spec/muse_p0_project.py`: verify M = 1..4 Qwen3.8's int8-head rows, +0.305 a row to M = 16; the block
+read once - int4 g64 0.18, int8 0.26, bf16 0.43 plain steps):
+
+| arm | code: best K, E_K, x plain | prose | lookup (n 3) code / prose |
+|---|---|---|---|
+| int4 g64 + int8 head | K 8, 6.67, **1.91x** | K 1, 1.56, 1.14x | 1.09x / 1.00x |
+| int8 + int8 head | K 9, 7.33, 1.89x | K 1, 1.56, 1.08x | |
+| bf16 (bf16 head) | K 9, 7.22, 1.78x | K 1, 1.50, 0.93x | |
+
+- **The rule cannot be decided on the Mac**: its agentic sets (A4 + the session) are the box's (`r47.taps` -> `r47.accept`).
+  On code DFlash beats plain by 1.9x and lookup by 1.7x - the rule's coding half holds by a wide margin on 18 anchors.
+- **The provisional defaults** (each `b70-serve` flag overrides; P0's box run must confirm):
+  - **the drafter's format: int4 g64 RTN** (decision 9: with the int8 head it serves, its E_K equals bf16's within 0.02 at
+    every K on both corpora; 1.36 GB against 5.11);
+  - **K_max 15** (the block) with AdaptiveK choosing K per request (best K 8-9 on code, 1 on prose at the derived costs);
+  - **q raw** (decision 11 recommended the capped form; the measurement reverses it: sampled E_15 on code 5.58 raw vs
+    1.35 capped - the drafter's raw rows are what tracks the target's capped p; capping them again flattens q ~5x).
+- **What the box must confirm**: E_K on A4 and the agentic session per arm (decision 9's 0.05 rule at the chosen K), the
+  verify cost at M = 1..16 and the two-pass form (r47.cost), the projection with the measured table, and the q form on the
+  sampled estimate.
+
 ## 9. Stages and what needs the box
 
 | stage | Mac (blind) | box | queue row |

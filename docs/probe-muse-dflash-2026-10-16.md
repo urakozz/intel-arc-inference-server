@@ -67,5 +67,18 @@ ESTIMATED from the KV bytes, and one drafter block at 16 rows in bf16 / int8 / i
 ## 4. The projection (Task 5)
 
 `tools/spec/muse_p0_project.py` - DFlash tokens per plain step = E_K / (verify(K + 1) + draft), lookup's the same
-verify costs with a free draft - is spec 23 §8 "P0 verdict"'s table; until r47.cost measures the verify, its cost table
-is the DERIVED one there (provisional).
+verify costs with a free draft (AdaptiveK, n = 3) - with the DERIVED cost table (verify 1 / 1.18 / 1.56 / 1.79, then
++0.305 a row to 5.45 at M = 16; the block 0.18 int4 g64, 0.26 int8, 0.43 bf16 plain steps):
+
+| arm | corpus | best K | E_K | DFlash x plain | lookup x plain |
+|---|---|---:|---:|---:|---:|
+| int4g64h | code | 8 | 6.67 | 1.906 | 1.091 |
+| int4g64h | prose | 1 | 1.56 | 1.142 | 1.000 |
+| int8h | code | 9 | 7.33 | 1.889 | 1.091 |
+| bf16 | code | 9 | 7.22 | 1.781 | 1.091 |
+| bf16 | prose | 1 | 1.50 | 0.929 | 1.000 |
+
+Sampled (q raw, the expected-acceptance E_K): int4g64h code 1.64x at K 4, prose 1.22x at K 1. The stopping rule is
+UNDECIDED on the Mac (no agentic corpus); spec 23 §8.5 records the verdict and the provisional defaults (int4 g64 + the
+int8 head, K_max 15 under AdaptiveK, q raw). Outputs (git-ignored, the main checkout): `oracle-out-muse-taps/dumps/` (2
+dumps, 10.7 MB), `oracle-out-muse-p0/` (accept/, lookup.{txt,json}, project.*).
