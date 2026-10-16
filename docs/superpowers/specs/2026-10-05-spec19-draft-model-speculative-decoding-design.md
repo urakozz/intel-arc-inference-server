@@ -169,6 +169,11 @@ Recorded here so it is not re-proposed without a cheaper drafter.
    - Store the projected ring rows (20 KB, +31 %).
    - Start cold after a hit (no extra memory; acceptance dips until the ring refills from the
      uncached suffix and generated tokens).
+   - **Ruled in 19d (§12, for the operator to confirm): the whole ring in every snapshot** - neither of the per-position
+     options can be produced for every block (the device keeps only the last window's rows: a block finished in decode,
+     or mid-call outside the call's last window, has no plane left to store), while a snapshot is always taken at its
+     own position, where the ring is exactly the session's. +41.9 MB a snapshot (+25 % of the 166.7 MB state); the
+     cold start stays the behaviour of a snapshot taken without a drafter.
 6. **A draft-only vocabulary (lever, P0 decides):**
    - **What it is.** The drafter's candidate head reads the full 248,320-row target head. Restricting
      *drafting* to a subset V′ (the most frequent ids on the golden, A4 and opencode corpora, as
@@ -458,3 +463,59 @@ lm_head at M = 5 / 6 / 8; kernel_cmdlines +7 / -0 / ~0), none bound without `--s
   an engine-side tap dump for D1 (r54.d1 still feeds 19a's CPU dumps; `dflash_engine_test` T1 holds the engine's taps
   to its own M = 1 path), the replay-state lever above, fusing the projection and the next draft into one submit (3
   submits an iteration today: draft, verify, projection).
+
+## 12. 19d as built (2026-10-16)
+
+Branch `spec19d-dflash-serving`, written on the Mac after 19b and 19c (both unvalidated); box queue row 56
+(`tools/box_validate.sh --only r56`). Nothing of it has run on a card; it adds no binary (kernel_cmdlines +0 / -0 / ~0)
+and nothing changes without `--spec dflash`, so D0 is G0. Plan: `docs/superpowers/plans/2026-10-05-spec19d-dflash-serving.md`
+(its "As built" lists the deviations from the 2026-10-05 plan, each with its cost if wrong).
+
+- **Decision 5 as ruled: the ring rides in every snapshot.** `runtime::TapDrafter` gains `ring_bytes` / `save_ring` /
+  `load_ring` (the whole ring, ring_k then ring_v, 41,943,040 B for Qwen3.8's drafter) and `key()`; `Engine::state_bytes /
+  save_state / load_state` append it after the target's state (and `PipelineEngine`'s, in the same one-card layout, so a
+  snapshot moves between `--pp 1` and `--pp 2`). A restore is a copy: the ring after it is bitwise the ring the snapshot
+  found (Review Focus 1, by construction). **The caveat, recorded:** a mid-call block end's snapshot holds the ring as
+  the call left it - the prefill projects only the call's last 2048 positions (19c's tail), so positions of that window
+  the call had not reached are unprojected; a restore there followed by a tail shorter than the window drafts worse
+  until the ring refills (never another output). Projecting every position under the hook would cost ~90-130 ms a block
+  (~10-13 % of prefill, derived) - the lever if the recording shows such restores matter. The plane per snapshot (the
+  normed fc output, 20 MB, re-projected at restore, ~30-50 ms derived) is the lever for the memory.
+- **Store keys carry the drafter (Review Focus 2):** `server::store_root(kv_form, drafter_key)` is the root of every hash
+  chain - `kv_form` itself without a drafter (every key as before), a mix of both with one. The key is FNV-1a over the
+  drafter's shapes, taps, format and its two norm weights as loaded (`runtime::dflash::drafter_key`).
+  `EngineIface::drafter_key` / `BatchEngineIface::drafter_key` (0 = none) feed PrefixSession and PrefixSlots.
+- **Batching (spec 13c):** no batched runtime engine exists (13b was never built: the scheduler runs over its mock), so
+  the hook is the interface and the scheduler: `BatchEngineIface::spec_k / step_spec / truncate_to(slot, pos)` - one
+  draft / verify / accept iteration over every row, each row drafting from its own slot's state (one ring per slot,
+  Review Focus 3) - and `Scheduler::spec_round`: K per row from the request's own `AdaptiveK` (or a fixed K), the run's
+  ids through the per-id rules, the ids past an EOS / stop / max_tokens handed back before the request-end snapshot.
+  `MockBatchEngine`'s speculative mode keeps a ring per slot whose content decides the slot's acceptance.
+- **`--spec dflash --pp 2`** (19c refused it): the drafter on device 1 beside lm_head and an embedding replica (2.54 GB,
+  `place_stages(..., drafter)`); each device's verify slots for 8 slots (`pp_gdn_spec_bytes(d, gdn, 8)`); the stage tap
+  verify lists (`build_stage_verify_taps`: device 0 copies the taps of its sites straight into device 1's tap buffer,
+  before its hand-off - so **the copy hand-off only**: `--pipeline-handoff peer` is refused by name); `PipelineEngine::
+  draft_tap` (the draft list on device 1, the drafts mirrored to device 0), commit moves gdn_live mod 8 on both and
+  replays the projection on device 1; the pipeline prefill taps the call's last window on both devices into a per-chunk
+  staging on device 1 and projects a chunk's rows from the host once both devices have finished it (before its block
+  hook). `TapDrafter::attach_target / draft_with` let a drafter serve a target that is not a runtime::Engine.
+  `PipelineEngineAdapterT`'s DFlash path is EngineAdapter::step_dflash's; the planner's `PpExtras::drafter` counts the
+  drafter, the replica, both devices' slots and the stagings (Qwen3.8, int8 drafter, cache on: auto split 36, 262144
+  on two cards, derived). b70-decode stays one card.
+- **The defaults, chosen from P0 (the 2026-10-15 ruling):** `--draft-format int8` (P0: equal acceptance at half the
+  bytes; our int4 g64 drafter is a later lever), `--spec-max 7` (the block; acceptance still rises at 7 on tool calls and
+  code, and AdaptiveK lowers K per request on prose), `--draft-vocab off` (the ranked 32k was ranked in-sample; r56.d5_dv
+  measures it), `--spec` unset (= `--mtp`'s meaning): `dflash` becomes the Qwen3.8 default only on D5's bar.
+- **D5:** prepared, not run - `r56.d5_a4` (A4 + golden through b70-serve: off / `--mtp auto` / dflash / dflash K 3,
+  rotated rounds), `r56.d5_dv`, `r56.d5_benchy` (row 41's flags at concurrency 1), `r56.d5_opencode` (the bar: the
+  recording, which does not exist yet - the stage SKIPs without OPENCODE_LOG), `r56.d5_pp`. BENCHMARKS "DFlash (spec 19)"
+  holds the rows, pending.
+- **Tests:** host - `dflash_prefix_test` (restore-and-continue through PrefixSession over a mock whose ring fills as the
+  engine's: the ring equals the unbroken session's; 19c's ring-less snapshot caught; the key), `dflash_scheduler_test`,
+  `pp_dflash_serve_test`, `pp_serve_plan_test` 7, `dflash_plan_test`'s ring / key rows; box - `dflash_prefix_gpu_test`
+  (19c's deferred minor 8: R1 the ring bitwise after a restored tail, the next ids and every iteration's acceptance
+  equal; R2 a block-end restore; the caveat counted; a cold-ring control), `dflash_engine_test` SR, `pp_dflash_test`
+  (`--pp 2` bitwise one card's).
+- **Not in 19d:** Ornith's DFlash (v1) drafter (a full-attention layer and a 16-row block - its stage), a batched runtime
+  engine (spec 13b), int8 KV / v1 attention at M = 5..8, the replay-state lever (§11), the measured cost table (row 29).
+
