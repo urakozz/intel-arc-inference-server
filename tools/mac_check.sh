@@ -94,8 +94,8 @@ else
   nfail=$(grep -oE '[0-9]+ tests? failed' "$out/host-ctest.log" | tail -1 | grep -oE '^[0-9]+')
   total=${total:-0} nfail=${nfail:-0}
   skipped=$root/build/mac-host/host_only_skipped.txt
-  ndis=$(grep -c . "$skipped" 2>/dev/null || echo 0)
-  ndata=$(grep -c ' | needs ' "$skipped" 2>/dev/null || echo 0)
+  ndis=$(grep -c . "$skipped" 2>/dev/null); ndis=${ndis:-0}   # grep -c prints 0 AND exits 1: no `|| echo 0`
+  ndata=$(grep -c ' | needs ' "$skipped" 2>/dev/null); ndata=${ndata:-0}
   counts="$((total - nfail)) pass, $nfail fail, $ndis disabled"
   if [ "$nfail" != 0 ] || [ "$total" = 0 ]; then
     row host FAIL "$counts" "$(sed -n '/tests FAILED:/,$p' "$out/host-ctest.log" | grep -E '^[[:space:]]+[0-9]+ - ' | head -5 | awk '{print $3}' | tr '\n' ' ')- $out/host-ctest.log"
