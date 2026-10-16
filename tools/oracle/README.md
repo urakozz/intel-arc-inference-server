@@ -437,6 +437,31 @@ On the box: `tools/oracle/run_in_container.sh 'HF_HUB_CACHE=/hf/hub python3 tool
 (the script points `HF_HOME` at a scratch dir; `HF_HUB_CACHE` sends `find_snapshot` to the
 read-only cache mount). Not yet run there.
 
+**The Muse-Glimmer form (spec 23f, 2026-10-16).** A config with `model_type: muse_glimmer_assistant`
+(`meta-models/Muse-Glimmer-30B-assistant`) reads as `DFlashConfig(form="muse", version=1, window_inclusive=True,
+norm_two_roundings=True)`: block 16 (row 0 the anchor at p, rows 1..15 the mask 201818 at p + 1 .. p + 15, always 16
+rows - drafts are rows 1..K, the rest computed and discarded), the window `|q - k| <= 2048` (transformers' MU:142-152;
+vLLM's `<= 2047` is the other form, decision 13), the norm `w x dtype(x-hat)` (A:50-55), no q scale and no gate, its
+own RoPE (theta 5e5, fp32 `inv_freq` - transformers' table, not the float64 angles of the vLLM forms), the embedding
+the target's RAW rows (G:1563-1579: the target's weight-less norm bypassed) and the drafts the RAW `lm_head` rows
+(G:1658: no multiplier, no softcap). The vocabulary is the target's (the config has none). It computes in the drafter's
+`dtype` (`load_drafter(..., dtype=torch.bfloat16)` = the checkpoint's own arithmetic; float32 = the D1 reference) with
+transformers' ops restated. `MuseSession` is transformers' `DFlashTokenCandidateGenerator` + `DFlashCache` for one
+sequence (crop the previous block, project [new context | block] in one linear, keep the last window - 1 context rows):
+**bitwise** transformers 5.19.0 in bf16 and fp32 (`test_muse_equals_transformers` - 23a's l8 target's own
+`output_hidden_states=[1, 5]` taps, anchors 20..59 of a 60-id prompt, the window-16 assistant `assist16`, a 3-accepted
+continuation with 12 random rejected rows and every layer's cache after the crop; `test_muse_window_edge` at p = 2047,
+2048, 2049, 3000 on the real window; `test_muse_review_focus_4`: the one-rounding norm, the embedding norm, q x 3.87 and
+theta 1e6 each flip drafts - 29 / 600, 600, 592, 240). `draft_block` is the stateless form dflash_accept batches (the
+context projected once, the window in the mask): the same ids, logits within 2.3e-5 in fp32 (0 in bf16). The tests
+need spec 21a's 5.19.0 site and the tiny model (they SKIP otherwise):
+
+```bash
+docker run --rm --memory 8g --memory-swap 8g --cpus 4 -e OMP_NUM_THREADS=3 -e HF_HUB_OFFLINE=1 -e TQDM_DISABLE=1 \
+  -e PYTHONPATH=/ws/oracle-out-q4exp/site -v ~/.cache/huggingface:/hf:ro -e HF_HOME=/hf \
+  -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/oracle/test_dflash_ref.py
+```
+
 ### The DFlash P0 (spec 19a Tasks 2-3, 2026-10-06)
 
 Two scripts and a driver, on the Mac:

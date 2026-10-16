@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Spec 23a: tiny Muse-Glimmer checkpoints the downloaded tiny model cannot give (tests only).
 
-    muse_make_tiny.py <tiny snapshot> <out dir> --variant untied|l8|gqa16|win16|int4|assist
+    muse_make_tiny.py <tiny snapshot> <out dir> --variant untied|l8|gqa16|win16|int4|assist|assist16
                       [--original <bf16 snapshot>] [--gptq <gptq snapshot>] [--seed 0] [--twin <dir>]
 
 The base is `optimum-intel-internal-testing/tiny-random-muse-glimmer` (4 layers [s, s, s, f], hidden 64, 4 q / 2 kv
@@ -19,6 +19,7 @@ tokenizer_config.json and generation_config.json (`--original`, default: the HF 
           (bf16(float(q - 8) x float(scale)), dequant.py's rule) - the checkpoint from_pretrained reads
   assist  a 2-layer MuseGlimmerAssistantModel for 23f (hidden 64, 4 q / 2 kv x 16, FF 256, block 16,
           target_layer_ids [1, 5] - the l8 target's layers -, mask_token_id 201818, window 2048), random bf16
+  assist16  assist's weights (the same generator) with sliding_window 16 (spec 23f: window crossings at tiny lengths)
 Weights: linears N(0, 1/sqrt(fan_in)), centered-norm weights N(0, 0.1) (they act as 1 + w), the final norm and the
 drafter's norms N(1, 0.1), lm_head N(0, 1) (raw logits of a few units, so the softcap is not the identity).
 """
@@ -42,7 +43,7 @@ LM = "model.language_model."
 LINEARS = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.gate_proj", "self_attn.o_proj",
            "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
 NORMS = ("input_layernorm", "post_attention_layernorm", "pre_feedforward_layernorm", "post_feedforward_layernorm")
-VARIANTS = ("untied", "l8", "gqa16", "win16", "int4", "assist")
+VARIANTS = ("untied", "l8", "gqa16", "win16", "int4", "assist", "assist16")
 SMALL_FILES = ("chat_template.jinja", "tokenizer.json", "tokenizer_config.json", "generation_config.json")
 GROUP = 64
 BF = torch.bfloat16
@@ -127,11 +128,11 @@ def make(tiny: str, out: str, variant: str, original: str, gptq: str | None, see
     if variant not in VARIANTS:
         raise ValueError(variant)
     # int4 is untied quantised: the same generator, so its lm_head is untied's (gate Q's tiny pair)
-    g = torch.Generator().manual_seed(seed * 1000 + VARIANTS.index("untied" if variant == "int4" else variant))
+    g = torch.Generator().manual_seed(seed * 1000 + VARIANTS.index({"int4": "untied", "assist16": "assist"}.get(variant, variant)))
     cfg = json.load(open(os.path.join(tiny, "config.json"), encoding="utf-8"))
     src = read_all(tiny)
-    if variant == "assist":
-        return make_assist(out, original, g)
+    if variant in ("assist", "assist16"):
+        return make_assist(out, original, g, window=16 if variant == "assist16" else 2048)
     t = cfg["text_config"]
     cfg["tie_word_embeddings"] = t["tie_word_embeddings"] = False
     if variant in ("l8", "win16"):
@@ -168,7 +169,7 @@ def make(tiny: str, out: str, variant: str, original: str, gptq: str | None, see
     return out
 
 
-def make_assist(out: str, original: str, g: torch.Generator) -> str:
+def make_assist(out: str, original: str, g: torch.Generator, window: int = 2048) -> str:
     H, I, nq, nkv, hd, L, taps = 64, 256, 4, 2, 16, 2, [1, 5]
     cfg = {"architectures": ["MuseGlimmerAssistantModel"], "model_type": "muse_glimmer_assistant",
            "attention_dropout": 0, "block_size": 16, "bos_token_id": 200000, "dtype": "bfloat16", "eos_token_id": 200001,
@@ -176,7 +177,7 @@ def make_assist(out: str, original: str, g: torch.Generator) -> str:
            "layer_types": ["sliding_attention"] * L, "mask_token_id": 201818, "max_position_embeddings": 131072,
            "num_attention_heads": nq, "num_hidden_layers": L, "num_key_value_heads": nkv, "pad_token_id": 200018,
            "rms_norm_eps": 1e-5, "rope_parameters": {"rope_theta": 500000.0, "rope_type": "default"},
-           "sliding_window": 2048, "target_layer_ids": taps}
+           "sliding_window": window, "target_layer_ids": taps}
     shapes = {"encoder.fc.weight": (H, H * len(taps)), "encoder.output_norm_enc.weight": (H,), "norm.weight": (H,)}
     for i in range(L):
         b = f"layers.{i}."

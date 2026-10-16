@@ -687,10 +687,250 @@ def test_real_checkpoint():
     print(f"  W4A16: fc cosine vs bf16 {float(cos):.4f}, ids {oq.ids.tolist()}")
 
 
+# --------------------------------------------------------------------------------------------
+# spec 23f: the Muse-Glimmer assistant form, against transformers 5.19.0 on 23a's tiny pair
+
+MUSE_ASSIST = {  # meta-models/Muse-Glimmer-30B-assistant config.json @ e8192f3a (2026-10-15), unmodified fields
+    "architectures": ["MuseGlimmerAssistantModel"], "attention_dropout": 0, "block_size": 16, "bos_token_id": 200000,
+    "dtype": "bfloat16", "eos_token_id": 200001, "head_dim": 128, "hidden_act": "silu", "hidden_size": 6656,
+    "intermediate_size": 19968, "layer_types": ["sliding_attention"] * 5, "mask_token_id": 201818,
+    "max_position_embeddings": 131072, "model_type": "muse_glimmer_assistant", "num_attention_heads": 32,
+    "num_hidden_layers": 5, "num_key_value_heads": 8, "pad_token_id": 200018, "rms_norm_eps": 1e-05,
+    "rope_parameters": {"rope_theta": 500000.0, "rope_type": "default"}, "sliding_window": 2048,
+    "target_layer_ids": [1, 13, 25, 37, 49], "transformers_version": "5.15.0.dev0"}
+
+_MUSE: dict = {}
+
+
+def _muse_env():
+    """test_muse_ref's tiny-variant builder and transformers 5.19.0 (spec 21a's site): SKIP without them."""
+    if "t" in _MUSE:
+        return _MUSE["t"]
+    try:
+        import transformers
+    except ImportError:
+        _skip("transformers is not importable (run with spec 21a's 5.19.0 site first on PYTHONPATH)")
+    if transformers.__version__ != "5.19.0":
+        _skip(f"transformers {transformers.__version__}: the Muse form is held to 5.19.0 (spec 21a's site)")
+    spec = importlib.util.spec_from_file_location("test_muse_ref", os.path.join(_HERE, "test_muse_ref.py"))
+    t = importlib.util.module_from_spec(spec)
+    sys.modules["test_muse_ref"] = t
+    spec.loader.exec_module(t)
+    try:
+        t.variant("l8")
+    except t.Skip as s:
+        _skip(str(s))
+    _MUSE["t"] = t
+    return t
+
+
+def _muse_pair(dtype, assist="assist"):
+    """(the l8 target - transformers' own -, transformers' assistant, the port) in `dtype` (cached)."""
+    key = (dtype, assist)
+    if key in _MUSE:
+        return _MUSE[key]
+    t = _muse_env()
+    from transformers.models.muse_glimmer_assistant import modeling_muse_glimmer_assistant as am
+    target = t.hf_model(t.variant("l8"), dtype)
+    ad = t.variant(assist)
+    asst = am.MuseGlimmerAssistantModel.from_pretrained(ad, dtype=dtype, attn_implementation="eager").eval()
+    e, h = ref.read_target_embed_head(t.variant("l8"))
+    port = ref.load_drafter(ad, embed=e, lm_head=h, dtype=dtype)
+    _MUSE[key] = (target, asst, port)
+    return _MUSE[key]
+
+
+def _muse_taps(target, ids):
+    """transformers' own taps: output_hidden_states=[1, 5] gives hidden_states[i] = decoder layer i's OUTPUT
+    (OC:112-131; no embedding prepended) - {1: [N, H], 5: [N, H]}."""
+    with torch.no_grad():
+        out = target(input_ids=torch.tensor([ids]), output_hidden_states=[1, 5])
+    return {i: out.hidden_states[i][0] for i in (1, 5)}
+
+
+class _Outputs:
+    def __init__(self, hs):
+        self.hidden_states = hs
+
+
+def _hf_generator(asst, target):
+    from transformers import GenerationConfig
+    from transformers.generation.candidate_generator import DFlashTokenCandidateGenerator
+    gc = GenerationConfig(max_length=100000, do_sample=False)
+    return DFlashTokenCandidateGenerator(asst, target.get_input_embeddings(), target.get_output_embeddings(), gc, None)
+
+
+def _hf_candidates(g, ids_upto_anchor, hs_rows, n_last):
+    """One get_candidates call: input_ids = the committed ids + the anchor (the last), hidden_states rows = the
+    main model's last forward (the first n rows are the newly committed positions), n_last = accepted drafts."""
+    T = len(ids_upto_anchor)
+    hs = [None] * 8
+    for i, r in hs_rows.items():
+        hs[i] = r[None]
+    mk = {"position_ids": torch.arange(T)[None], "attention_mask": torch.ones(1, T, dtype=torch.long)}
+    with torch.no_grad():
+        cand, logits = g.get_candidates(torch.tensor([ids_upto_anchor]), mk, _Outputs(tuple(hs)),
+                                        is_first_iteration=False, n_last_matches=n_last)
+    return cand[0, T:], logits[0].float()
+
+
+def test_muse_config():
+    """The assistant's config reads as the Muse form (AC:62-89): top-level block / mask / taps, window 2048 INCLUSIVE
+    (decision 13), the two-rounding norm, theta 5e5, eps 1e-5, no vocab (the target's), no causal layer; the cached
+    real config.json when present is the vendored dict."""
+    c = ref.config_from_dict(MUSE_ASSIST)
+    assert (c.form, c.version, c.block_size, c.max_k, c.mask_token_id) == ("muse", 1, 16, 15, 201818)
+    assert c.target_layer_ids == [1, 13, 25, 37, 49] and c.windows == [2048] * 5 and c.causal == [False] * 5
+    assert c.window_inclusive and c.norm_two_roundings and not c.embed_norm and not c.head_cap and c.q_scale == 1.0
+    assert (c.hidden, c.n_heads, c.n_kv_heads, c.head_dim, c.ffn, c.eps, c.rope_theta, c.vocab) == \
+        (6656, 32, 8, 128, 19968, 1e-5, 500000.0, 0)
+    bad = dict(MUSE_ASSIST, layer_types=["sliding_attention"] * 4 + ["full_attention"])
+    try:
+        ref.config_from_dict(bad)
+        raise AssertionError("a full-attention assistant layer was accepted")
+    except NotImplementedError:
+        pass
+    snap = ref.find_snapshot("meta-models/Muse-Glimmer-30B-assistant", ("config.json",))
+    if snap:
+        with open(os.path.join(snap, "config.json")) as f:
+            assert json.load(f) == MUSE_ASSIST, "the real assistant's config.json moved from the vendored dict"
+        print("  the cached meta-models/Muse-Glimmer-30B-assistant config.json == the vendored dict")
+
+
+def _bitwise(a, b, what):
+    if not torch.equal(a, b):
+        d = (a.float() - b.float()).abs()
+        raise AssertionError(f"{what}: differ, max |d| {d.max():.3e} at {int(d.argmax())}")
+
+
+def test_muse_equals_transformers():
+    """Review Focus 1-3. The l8 target's own taps (output_hidden_states=[1, 5]) into both transformers'
+    DFlashTokenCandidateGenerator and the port (MuseSession): candidate logits and ids BITWISE, in bf16 and fp32,
+    - at anchors 20..59 of a 60-id prompt (a fresh generator per anchor: the prefill call);
+    - on the window-16 assistant (assist16) across its edge at the same anchors;
+    - a continuation (Review Focus 3): prefill at anchor 20, 3 drafts accepted (4 committed rows: the anchor + 3;
+      the verify's 12 rejected rows are random and must never matter), the next block at 24, then 0 accepted, then
+      the block at 25: logits / ids and every layer's cache bitwise transformers' after its crop;
+    and the stateless draft_block (the dflash_accept form) gives the same ids with logits to 1e-5 (bf16: 2 ulps)."""
+    _muse_env()
+    ids = _rand_muse_ids(61, seed=31)
+    for dtype in (torch.float32, torch.bfloat16):
+        for assist in ("assist", "assist16"):
+            target, asst, port = _muse_pair(dtype, assist)
+            taps = _muse_taps(target, ids[:60])
+            worst = 0.0
+            for p in range(20, 60):
+                g = _hf_generator(asst, target)
+                cand, logits = _hf_candidates(g, ids[:p + 1], {i: taps[i][:p] for i in taps}, 0)
+                s = ref.MuseSession(port)
+                pids, plog = s.draft({i: taps[i][:p] for i in taps}, ids[p])
+                _bitwise(plog, logits, f"{dtype} {assist} anchor {p}: candidate logits")
+                assert torch.equal(pids, cand), (p, pids, cand)
+                ctx = port.context_kv({i: taps[i][:p] for i in taps}, torch.arange(p))
+                o = port.draft_block(ids[p], p, 15, ctx)
+                assert torch.equal(o.ids, cand) or _tie_ok(logits, o.ids), (dtype, assist, p, o.ids, cand)
+                worst = max(worst, float((o.unary[:, 0] - logits.max(-1).values).abs().max()))
+            # the continuation
+            g = _hf_generator(asst, target)
+            s = ref.MuseSession(port)
+            _hf_candidates(g, ids[:21], {i: taps[i][:20] for i in taps}, 0)
+            s.draft({i: taps[i][:20] for i in taps}, ids[20])
+            junk = torch.Generator().manual_seed(7)
+            for (c0, n, nxt) in ((20, 4, 24), (24, 1, 25)):
+                rows = {i: torch.cat([taps[i][c0:c0 + n], torch.randn(16 - n, taps[i].shape[1], generator=junk)
+                                      .to(dtype)]) for i in taps}
+                cand, logits = _hf_candidates(g, ids[:nxt + 1], rows, n - 1)
+                pids, plog = s.draft({i: taps[i][c0:c0 + n] for i in taps}, ids[nxt])
+                _bitwise(plog, logits, f"{dtype} {assist} continuation at {nxt}")
+                assert torch.equal(pids, cand)
+                for li, layer in enumerate(g.cache.layers):
+                    _bitwise(s.k[li], layer.keys, f"{dtype} {assist} cache keys L{li} at {nxt}")
+                    _bitwise(s.v[li], layer.values, f"{dtype} {assist} cache values L{li} at {nxt}")
+            g.cache.crop(-16)
+            s.crop()
+            for li, layer in enumerate(g.cache.layers):
+                _bitwise(s.k[li], layer.keys, f"{dtype} {assist} cache after crop L{li}")
+            print(f"  {str(dtype)[6:]} {assist}: anchors 20..59 + the continuation BITWISE; stateless draft_block "
+                  f"ids equal, top logit within {worst:.2e}")
+
+
+def _rand_muse_ids(n, seed):
+    g = torch.Generator().manual_seed(seed)
+    return torch.randint(0, 200000, (n,), generator=g).tolist()
+
+
+def _tie_ok(logits, ids):
+    """ids are argmaxes of `logits` up to ties within 1e-5 (the stateless form's summation order)."""
+    best = logits.max(-1).values
+    return bool(((logits.gather(1, ids[:, None])[:, 0] - best).abs() <= 1e-5 * best.abs().clamp_min(1)).all())
+
+
+def test_muse_window_edge():
+    """Review Focus 2 on the REAL window (2048): anchors p = 2047, 2048, 2049, 3000 over a 3001-id prompt, fp32 -
+    port == transformers bitwise; row 0 (at p) sees context p - 2048 (inclusive) and not p - 2049: perturbing the taps
+    at p - 2049 leaves the drafts bitwise unchanged, perturbing p - 2048 moves them; the vLLM edge (window_inclusive
+    False, <= 2047) differs from transformers at p >= 2048 (decision 13: one key at the edge)."""
+    _muse_env()
+    target, asst, port = _muse_pair(torch.float32, "assist")
+    ids = _rand_muse_ids(3002, seed=33)
+    taps = _muse_taps(target, ids[:3001])
+    for p in (2047, 2048, 2049, 3000):
+        g = _hf_generator(asst, target)
+        cand, logits = _hf_candidates(g, ids[:p + 1], {i: taps[i][:p] for i in taps}, 0)
+        pids, plog = ref.MuseSession(port).draft({i: taps[i][:p] for i in taps}, ids[p])
+        _bitwise(plog, logits, f"window edge, anchor {p}")
+        if p >= 2049:
+            for off, moves in ((2049, False), (2048, True)):
+                pt = {i: taps[i][:p].clone() for i in taps}
+                for i in pt:
+                    pt[i][p - off] += 3.0
+                _, l2 = ref.MuseSession(port).draft(pt, ids[p])
+                assert torch.equal(l2, plog) != moves, (p, off, moves)
+        if p >= 2048:
+            port.cfg.window_inclusive = False
+            try:
+                _, lv = ref.MuseSession(port).draft({i: taps[i][:p] for i in taps}, ids[p])
+            finally:
+                port.cfg.window_inclusive = True
+            assert not torch.equal(lv, plog), f"the <= 2047 edge equals transformers' at {p}"
+    print("  p 2047 / 2048 / 2049 / 3000: BITWISE; p - 2048 visible, p - 2049 not; the vLLM edge differs")
+
+
+def test_muse_review_focus_4():
+    """Review Focus 4, bf16, anchors 20..59: each of the drafter's own rules, removed, changes the drafts against
+    transformers - the norm's two roundings (one rounding instead), the raw embedding (the target's weight-less norm
+    applied), no q scale (the target's 3.87 applied), its own RoPE table (theta 1e6 instead of 5e5). Each must move
+    the logits somewhere and flip at least one draft id."""
+    _muse_env()
+    target, asst, port = _muse_pair(torch.bfloat16, "assist")
+    ids = _rand_muse_ids(61, seed=31)
+    taps = _muse_taps(target, ids[:60])
+    base = {}
+    for p in range(20, 60):
+        base[p] = ref.MuseSession(port).draft({i: taps[i][:p] for i in taps}, ids[p])
+    c = port.cfg
+    muts = (("one-rounding norm", "norm_two_roundings", False), ("embedding norm", "embed_norm", True),
+            ("q x 3.87", "q_scale", 3.87), ("theta 1e6", "rope_theta", 1e6))
+    for what, attr, val in muts:
+        old = getattr(c, attr)
+        setattr(c, attr, val)
+        try:
+            moved = flips = 0
+            for p in range(20, 60):
+                pids, plog = ref.MuseSession(port).draft({i: taps[i][:p] for i in taps}, ids[p])
+                moved += int(not torch.equal(plog, base[p][1]))
+                flips += int((pids != base[p][0]).sum())
+        finally:
+            setattr(c, attr, old)
+        assert moved > 0 and flips > 0, (what, moved, flips)
+        print(f"  {what}: logits moved at {moved} / 40 anchors, {flips} / 600 draft ids flipped")
+
+
 TESTS = [test_real_configs, test_shapes_and_determinism, test_tap_offset_at_api, test_context_kv_and_rope,
          test_context_window, test_full_attention_layer, test_block_attention_causality, test_conv_lookback, test_v2_layer_wiring,
          test_short_K, test_score_edges_and_anchor, test_walk_tie_rule, test_gumbel, test_d2t,
-         test_mask_embedding_and_scale, test_dequant_pack_quantized, test_load_from_files, test_real_checkpoint]
+         test_mask_embedding_and_scale, test_dequant_pack_quantized, test_load_from_files, test_real_checkpoint,
+         test_muse_config, test_muse_equals_transformers, test_muse_window_edge, test_muse_review_focus_4]
 
 
 def main() -> None:
