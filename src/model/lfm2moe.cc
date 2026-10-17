@@ -137,18 +137,20 @@ std::string Lfm2MoeDesc::layer_prefix(const std::string& model_prefix, uint32_t 
 
 std::vector<LfmLinear> Lfm2MoeDesc::linears(uint32_t l) const {
   std::vector<LfmLinear> v;
+  // Layout 1 (the shared subgroup-tiled int4 layout, loader/int4_layout.h) for every linear here -
+  // Review Focus 2: repack_in_proj's false (non-tiled) form is exactly repack_int4_layout1_cols.
   if (is_attention(l)) {
-    v.push_back({LfmLinearId::Qkv, {hidden, qkv_n(), 1, 0}, WeightKind::Int4, Fuse::Concat,
+    v.push_back({LfmLinearId::Qkv, {hidden, qkv_n(), 1, 1}, WeightKind::Int4, Fuse::Concat,
                 {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}});
-    v.push_back({LfmLinearId::OProj, {q_n(), hidden, 1, 0}, WeightKind::Int4, Fuse::Single, {"self_attn.out_proj"}});
+    v.push_back({LfmLinearId::OProj, {q_n(), hidden, 1, 1}, WeightKind::Int4, Fuse::Single, {"self_attn.out_proj"}});
   } else {
-    v.push_back({LfmLinearId::InProj, {hidden, 3 * hidden, 1, 0}, WeightKind::Int4, Fuse::Single, {"conv.in_proj"}});
-    v.push_back({LfmLinearId::OutProj, {hidden, hidden, 1, 0}, WeightKind::Int4, Fuse::Single, {"conv.out_proj"}});
+    v.push_back({LfmLinearId::InProj, {hidden, 3 * hidden, 1, 1}, WeightKind::Int4, Fuse::Single, {"conv.in_proj"}});
+    v.push_back({LfmLinearId::OutProj, {hidden, hidden, 1, 1}, WeightKind::Int4, Fuse::Single, {"conv.out_proj"}});
   }
   if (is_dense(l)) {
-    v.push_back({LfmLinearId::DenseGateUp, {hidden, 2 * dense_inter, 1, 0}, WeightKind::Int4, Fuse::Interleave16,
+    v.push_back({LfmLinearId::DenseGateUp, {hidden, 2 * dense_inter, 1, 1}, WeightKind::Int4, Fuse::Interleave16,
                 {"feed_forward.w1", "feed_forward.w3"}});
-    v.push_back({LfmLinearId::DenseDown, {dense_inter, hidden, 1, 0}, WeightKind::Int4, Fuse::Single,
+    v.push_back({LfmLinearId::DenseDown, {dense_inter, hidden, 1, 1}, WeightKind::Int4, Fuse::Single,
                 {"feed_forward.w2"}});
   } else {
     v.push_back({LfmLinearId::Router, {hidden, experts, 1, 0}, WeightKind::Bf16, Fuse::Single,

@@ -43,6 +43,14 @@ add_library(b70_muse_loader STATIC muse_repack.cc muse_loader.cc)
 target_include_directories(b70_muse_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_muse_loader PUBLIC b70_loader b70_muse_model b70_muse_plan b70_l0)
 
+# --- Spec 24b: LFM2.5-24B-A2B --------------------------------------------------------------------
+# The LFM2.5-24B-A2B loader, beside the others (none touched): the host half (lfm2moe_repack.cc,
+# lfm2moe_rope.cc - no Level Zero, run on any host by tests/loader/lfm2moe_repack_test.cc and
+# lfm2moe_rope_test.cc). Task 4 adds lfm2moe_loader.cc (the upload) to this same library.
+add_library(b70_lfm2moe_loader STATIC lfm2moe_repack.cc lfm2moe_rope.cc)
+target_include_directories(b70_lfm2moe_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_lfm2moe_loader PUBLIC b70_loader b70_lfm2moe_model b70_l0)
+
 # --- Spec 19b: the DFlash drafter ----------------------------------------------------------------
 # Beside the target's loader (not touched): the host half (dflash_repack.cc - the checkpoint held to its config and
 # names, every piece in its device form, no Level Zero: tests/loader/dflash_loader_test.cc runs it on any host) and
