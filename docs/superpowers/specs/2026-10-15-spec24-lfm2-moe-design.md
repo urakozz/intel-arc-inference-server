@@ -634,7 +634,11 @@ only). Every number is measured on the Mac (`agnes-ref-img`, torch 2.14.1+cpu, t
 Plan: `docs/superpowers/plans/2026-10-15-spec24b-lfm2moe-descriptor-loader.md`, branch
 `spec24b-lfm2moe-loader`. Box validation: queue row 50. Every byte figure below is derived from
 `model::lfm2moe()`'s widths (`src/loader/lfm2moe_layout.h`) and cross-checked against §3's table above,
-word for word, by `lfm2moe_repack_test.cc` and `lfm2moe_plan_test.cc` - no test types a constant.
+word for word, by `lfm2moe_repack_test.cc` and `lfm2moe_plan_test.cc` (review fix, M5: this used to claim
+"no test types a constant" - false. `lfm2moe_repack_test.cc` does type a handful of literal byte constants,
+e.g. `embed_tiled_bytes` == 524,288,000 and `head_int8_bytes` == 262,656,000, each reconciled by hand against
+spec 24 §3's table; what no test does is hardcode the grand `weight_bytes` TOTAL - that figure is always the
+sum of `layer_weight_bytes`'s own per-layer outputs, `CHECK_EQ`'d against an independently-accumulated `want`).
 
 - **The ground truth for names came from 24a, not from this plan's guesses.** `tools/oracle/lfm2moe_ref.py`'s
   `expected_names` (already built, bitwise tested against transformers 5.19.0) fixed several spellings this
@@ -644,13 +648,19 @@ word for word, by `lfm2moe_repack_test.cc` and `lfm2moe_plan_test.cc` - no test 
   checkpoint form (bf16 or our int4) ever ships `lm_head.weight` as a REQUIRED tensor (`expected_names` never
   lists it; an optional one is the loader's own bitwise-tie check). `src/model/lfm2moe.cc` and
   `src/loader/lfm2moe_repack.cc` use these names directly.
-- **Layout 1 everywhere, not layout 0.** Review Focus 2 (`repack_in_proj`'s false form is exactly
-  `repack_int4_layout1_cols`) settled this for `in_proj`; the same choice was then made for every other
-  per-layer int4 linear (`out_proj`, `q‖k‖v`, attention `out_proj`, the two dense linears) for one reason:
-  Kolibri's GPTQ-native layout 0 exists because ITS loader was written before `loader/int4_layout.h` unified
-  the two layouts (spec 23b); LFM2.5 has no such history, so every linear here is the shared subgroup-tiled
-  layout the newer models (Muse, K2) already use, with S left at 1 (PROVISIONAL, 24c's sweep) - the loader
-  never allocates a separate GPTQ-native `scales` buffer.
+- **Per-linear switchable layout, not "layout 1 everywhere" (review fix, I1).** The first pass of this
+  section claimed every per-layer int4 linear uses the shared subgroup-tiled layout 1 - false against the
+  codebase's own evidence: Muse, K2, Kolibri and qwen4exp all use layout 0 for their DENSE linears (the
+  GPTQ-native `.qweight`/`.scales` pair) and layout 1 only for routed-expert blocks. `model::Lfm2MoeDesc::linears()`
+  is now the one source of truth for each `LfmLinear`'s `{S, layout}` (`src/model/lfm2moe.cc`), and
+  `repack_layer` / the upload loop branch on it instead of hardcoding `{..,1,1}` (`src/loader/lfm2moe_repack.{h,cc}`,
+  `src/loader/lfm2moe_loader.{h,cc}`). Provisional picks, swept in 24c (plan 24c §note): layout 1 for `in_proj`,
+  `out_proj` / `o_proj` / the dense down-projection (every N = hidden row-count linear) and the routed experts
+  (unchanged - this part of the original claim was right); layout 0 for the fused `q‖k‖v` and the fused dense
+  `gate‖up`. `S` stays 1 everywhere (PROVISIONAL, 24c's sweep). Both layouts are byte-count-identical here (every
+  linear has N % 16 == 0 and K % 64 == 0, so `int4_layout0_bytes` == `int4_l1_bytes`): this correction changes
+  no byte figure in this section, only which buffer shape `repack_layer` builds and which GEMV kernel (24c) must
+  read it.
 - **No router padding.** Kolibri's `router_n()` rounds its 384 experts up to a power of two for `gemv_bf16`'s
   16-column tiles. LFM2.5's 64 experts is already a multiple of 16, so `loader::lfm::router_bytes` and the
   repack are one `repack_bf16_tiled` call with no padded rows and no `router_n()` function at all.
@@ -688,8 +698,11 @@ word for word, by `lfm2moe_repack_test.cc` and `lfm2moe_plan_test.cc` - no test 
 - **Every derived figure matches spec 24 §3 exactly:** routed experts 12,192,841,728 B (38 x 320,864,256), the
   other int4 linears 399,932,928 B (conv 267,386,880 + attention 55,705,600 + dense 76,840,448 - each
   independently reconciled against §3's "x M params at 0.53125 B / param" row), routers 9,961,472 B, the
-  embedding 524,288,000 B, the int8 head 262,656,000 B: `weight_bytes(lfm2moe(), true)` = 13,391,087,616 B
-  (13.39 GB). KV 20,480 B a position (2,684,354,560 B at 131072, 2.684 GB). The conv rings 1,966,080 B. The one
+  embedding 524,288,000 B, the int8 head 262,656,000 B, the 40 layers' small blocks (norms / conv taps /
+  biases) 1,448,960 B: `weight_bytes(lfm2moe(), true)` = 13,391,129,088 B (13.391 GB; `lfm2moe_repack_test`
+  prints this exact figure - review fix: an earlier manual sum here read 13,391,087,616 B, 41,472 B short,
+  from mis-adding the small-block term; the formula itself never changed). KV 20,480 B a position
+  (2,684,354,560 B at 131072, 2.684 GB). The conv rings 1,966,080 B. The one
   figure that does not land where §3's prose says: "norms / conv taps / biases < 1 MB" measures at ~1.41 MB
   (40 layers' small blocks summed) - a rounding in the spec's ESTIMATE, not a formula mismatch (the per-layer
   byte counts above are exact and tested).
