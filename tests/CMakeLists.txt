@@ -4249,5 +4249,10 @@ add_test(NAME lfm2moe_load_synth_proj_test COMMAND lfm2moe_load_checkpoint_test 
 add_test(NAME lfm2moe_load_real_test COMMAND lfm2moe_load_checkpoint_test ${B70_LFM2MOE_SNAPSHOT})
 set_tests_properties(lfm2moe_load_synth_w_test lfm2moe_load_synth_proj_test lfm2moe_load_real_test PROPERTIES
   LABELS "checkpoint;lfm2moe" SKIP_RETURN_CODE 77 TIMEOUT 1800)
-# Task 5 appends to this block as it is built (the memory plan).
+# Task 5: the runtime. The memory plan, max-len auto and the two-card split as device-free arithmetic.
+add_executable(lfm2moe_plan_test runtime/lfm2moe_plan_test.cc)
+target_include_directories(lfm2moe_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lfm2moe_plan_test PRIVATE b70_lfm2moe_plan)
+add_test(NAME lfm2moe_plan_test COMMAND lfm2moe_plan_test)
+set_tests_properties(lfm2moe_plan_test PROPERTIES LABELS lfm2moe)
 # ==== Spec 24b: LFM2.5-24B-A2B descriptor and loader (label lfm2moe) ==== (end) ====

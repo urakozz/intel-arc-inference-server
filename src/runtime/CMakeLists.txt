@@ -47,3 +47,6 @@ add_subdirectory(muse)
 # Spec 19b: the DFlash drafter's buffers, planner term and its two captured lists (draft, projection) - its own
 # directory, beside the engines it serves (19c wires it into runtime::Engine).
 add_subdirectory(dflash)
+
+# Spec 24b Task 5: LFM2.5-24B-A2B's memory plan (24c adds its engine) - its own directory.
+add_subdirectory(lfm2moe)
