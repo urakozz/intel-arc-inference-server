@@ -105,6 +105,11 @@ LfmLoaded load_lfm2moe(const std::vector<l0::Context*>& devices, const std::stri
   if (!model::is_lfm2moe(cfg))
     throw std::runtime_error("load_lfm2moe: " + snap + " is model_type '" + mt + "', not lfm2_moe");
   const QuantConfig qc = QuantConfig::parse(cfg);
+  // I6: the one-format rule (spec 24 §5) is g64 ONLY - QuantConfig::parse accepts g128 generically
+  // (other families expand it onto g64 kernels), but LFM2.5-24B-A2B's own export never ships it.
+  if (qc.group_size != 64)
+    throw std::runtime_error("load_lfm2moe: config.json's quantization_config.group_size is " +
+                             std::to_string(qc.group_size) + ", not 64 (spec 24 §5: int4 g64 sym only)");
   const uint32_t trained = trained_context(cfg);
 
   SafetensorsSet set(snap);
