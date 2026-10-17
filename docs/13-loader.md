@@ -938,9 +938,15 @@ none of their files. The int4 layouts' byte formulas moved to `loader/int4_layou
 `loader::load_lfm2moe` (`src/loader/lfm2moe_{layout.h,repack.*,loader.*}`) is a loader BESIDE the others; it
 reuses `resolve_snapshot`, `QuantConfig::parse`, `SafetensorsSet`, `assert_quant_invariants` / `check_quant_scan`,
 `LinearSrc::classify`, `DeviceWeight` and `quantise_int8_tiled`, and touches none of their files. Every int4
-linear - per-layer (conv `in_proj` / `out_proj`, attention `q||k||v` / `out_proj`, the two dense linears) and
-per-expert (`gate_up`, `down`) - is the shared subgroup-tiled layout 1 (`loader/int4_layout.h`); there is no
-GPTQ-native layout 0 arm for this family.
+linear draws BOTH of `loader/int4_layout.h`'s layouts, per linear, from `model::Lfm2MoeDesc::linears(l)`'s
+`shape.layout` (review fix, I1 - an earlier draft of this paragraph claimed layout 1 everywhere; that was
+false): layout 1 (the shared subgroup-tiled form) for `in_proj`, attention `out_proj` / the dense
+down-projection (every N = hidden row-count linear) and the routed experts (`gate_up`, `down`); layout 0 (the
+GPTQ-native `.qweight`/`.scales` pair) for the fused attention `q||k||v` and the fused dense `gate||up`. `S` is
+1 everywhere (PROVISIONAL - plan 24c sweeps it; 24c's GEMV kernel must branch on each linear's `layout` the
+same way, and `GEMV_BLOCK2D` is layout-0-only). Both layouts are byte-count-identical for every linear here (N
+% 16 == 0, K % 64 == 0), so this choice changes no byte figure below, only which kernel variant 24c's prefill
+and decode paths must call for each linear.
 
 - **Our one export, either expert spelling.** Spec 24 §5's AutoRound export is the only form read (no checkpoint
   arm switch like Kolibri's attention, no vendored third-party spelling like Muse's): every `nn.Linear` int4 g64
@@ -962,16 +968,26 @@ GPTQ-native layout 0 arm for this family.
   both if it differs. The embedding is uploaded once, in `gemv_bf16`'s tiled layout, on device 0 (the gather);
   the int8 head (spec 9's rule, `quantise_int8_tiled`) is built from the SAME host-mmapped bf16 bytes and
   uploaded on the last device. With a bf16 head on a LAST device that is not device 0 (`--pp 2`), that device
-  gets its own replica of the tiles (524,288,000 B) - the one case where the embedding is not "kept once".
+  gets its own replica of the tiles (524,288,000 B) - the one case where the embedding is not "kept once": for
+  24c, `LfmDevicePart::embed_tiles` on that last device is the head's own weights (the gather for its device's
+  layers plus `lm_head`'s matmul both read it), never a second allocation to tell apart from `embed_tiles` on
+  device 0.
+- **The conv tap order (for 24c).** `conv.conv.weight` is `[hidden][1][conv_taps]` (`conv_taps` = 3); tap index
+  0 is the OLDEST position and multiplies `Bx[t - 2]`, tap 2 is the newest and multiplies `Bx[t]` (spec 24 §2.5:
+  `c_b = rne(Σ_{j=0..2} w_j · Bx_b[t - 2 + j])`, taps ascending). `small_block(d, layer).conv_taps` stores them
+  in that same ascending order, widened to fp32 bit-for-bit (`widen_small`) - 24c's decode kernel must read tap
+  0 against the ring's oldest slot, not its newest, or the conv runs backwards.
 - **Names both ways.** The text names are exactly `lfm_expected_names` (ground-truthed against
   `tools/oracle/lfm2moe_ref.py`'s `expected_names`, built in 24a from transformers 5.19.0 itself - attention's
   output projection is `self_attn.out_proj`, not `o_proj`; the final norm is `model.embedding_norm.weight`, not
   `model.norm`); every tensor is read exactly once (`unconsumed()` empty), the later layers' consumed by design
   with `--layers N`.
-- **The memory plan before the first allocation**: `runtime::lfm2moe::plan` + `require_fits` at the 1.5 GB
-  reserve. One card, int8 head, at the trained context (131072): weights 13,391,087,616 B (13.39 GB - routed
-  experts 12,192,841,728, the other int4 linears 399,932,928, routers 9,961,472, the embedding 524,288,000, the
-  int8 head 262,656,000), KV 2,684,354,560 B, the conv rings 1,966,080 B. `--max-len auto` is the largest
+- **The memory plan before the first allocation**: `load_lfm2moe` calls `require_fits(runtime::lfm2moe::plan(...),
+  devices[dev]->memory_bytes())` for every device before any upload (review fix, I2 - this used to happen only
+  inside the planner's own test, never from the loader itself). Reserve 1.5 GB. One card, int8 head, at the
+  trained context (131072): weights 13,391,129,088 B (13.391 GB - routed experts 12,192,841,728, the other int4
+  linears 399,932,928, routers 9,961,472, the embedding 524,288,000, the int8 head 262,656,000, the 40 layers'
+  small blocks 1,448,960), KV 2,684,354,560 B, the conv rings 1,966,080 B. `--max-len auto` is the largest
   multiple of 256 that fits and is at most 131072 (`max_position_embeddings`); an explicit value above it is
   refused naming that key. The two-card split (`pp_split`) balances layer weights alone (`runtime::pp_balance`),
   device 0's embedding and the last device's final norm / head counted as each side's fixed overhead.
