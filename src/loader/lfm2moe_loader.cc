@@ -155,10 +155,7 @@ LfmLoaded load_lfm2moe(const std::vector<l0::Context*>& devices, const std::stri
       P.embed_tiles = upload_u(ctx, imm, tiles.data(), tiles.size() * 2);
       P.bytes += tiles.size() * 2;
     }
-    bool has_attn = false;
-    for (uint32_t l = P.first; l < P.end; ++l)
-      if (d.is_attention(l)) has_attn = true;
-    if (has_attn) {
+    if (lfm::device_has_attention(d, place, dev)) {
       P.rope = upload_u(ctx, imm, rope.data(), rope.size() * 4);
       P.rope_bytes = rope.size() * 4;
       if (P.rope_bytes != lfm::rope_table_bytes(o.max_len))
@@ -216,19 +213,10 @@ LfmLoaded load_lfm2moe(const std::vector<l0::Context*>& devices, const std::stri
         P.bytes += tiles.size() * 2;
       }
     }
-    size_t want = 0;
-    for (uint32_t l = P.first; l < P.end; ++l) want += lfm::layer_weight_bytes(d, l);
-    if (dev == 0) want += lfm::embed_tiled_bytes(d);
-    if (dev + 1 == place.devices) {
-      want += size_t(d.hidden) * 4;
-      if (o.int8_head)
-        want += lfm::head_int8_bytes(d);
-      else if (dev != 0)
-        want += lfm::embed_tiled_bytes(d);
-    }
+    const size_t want = lfm::device_weight_bytes(d, place, dev, o.int8_head);
     if (P.bytes != want)
       throw std::logic_error("load_lfm2moe: device " + std::to_string(dev) + " allocated " +
-                             std::to_string(P.bytes) + " B of weights, loader::lfm::layer_weight_bytes says " +
+                             std::to_string(P.bytes) + " B of weights, loader::lfm::device_weight_bytes says " +
                              std::to_string(want));
   }
 
