@@ -89,8 +89,11 @@ ExpertRepacked repack_expert(const LinearSrc& w1, const LinearSrc& w3, const Lin
   return r;
 }
 
-std::vector<uint32_t> repack_in_proj(const uint32_t* qweight, const uint16_t* scales, uint32_t K, uint32_t N,
-                                     bool conv_tiles) {
+namespace {
+// The column order alone - "a column map valid in both" layouts (Review Focus 2): independent of
+// how the resulting columns are then packed.
+std::vector<common::ColSource> in_proj_cols(const uint32_t* qweight, const uint16_t* scales, uint32_t N,
+                                            bool conv_tiles) {
   const uint32_t H = N / 3;
   std::vector<common::ColSource> cols(N);
   if (!conv_tiles) {
@@ -101,9 +104,36 @@ std::vector<uint32_t> repack_in_proj(const uint32_t* qweight, const uint16_t* sc
       for (uint32_t part = 0; part < 3; ++part)
         for (uint32_t l = 0; l < 16; ++l) cols[idx++] = {qweight, scales, part * H + t * 16 + l, N};
   }
-  std::vector<uint32_t> out(lfm::int4_l1_bytes(K, N) / 4);
-  common::repack_int4_layout1_cols(K, N, cols, out.data());
+  return cols;
+}
+
+HostLinear pack_cols(uint32_t K, uint32_t N, const std::vector<common::ColSource>& cols, uint32_t layout) {
+  HostLinear out;
+  if (layout == 0) {
+    out.words.resize(size_t(K / 8) * N);
+    out.scales.resize(size_t(K / 64) * N);
+    common::repack_int4_layout0_cols(K, N, cols, out.words.data(), out.scales.data());
+  } else {
+    out.words.resize(lfm::int4_l1_bytes(K, N) / 4);
+    common::repack_int4_layout1_cols(K, N, cols, out.words.data());
+  }
   return out;
+}
+}  // namespace
+
+HostLinear repack_in_proj(const uint32_t* qweight, const uint16_t* scales, uint32_t K, uint32_t N, bool conv_tiles,
+                          uint32_t layout) {
+  return pack_cols(K, N, in_proj_cols(qweight, scales, N, conv_tiles), layout);
+}
+
+HostLinear repack_fused_linear(const model::LfmLinear& ln, const std::vector<LinearSrc>& part_srcs) {
+  std::vector<common::Part> parts;
+  parts.reserve(part_srcs.size());
+  for (const LinearSrc& s : part_srcs) parts.push_back({s.qweight, s.scales, s.N});
+  const std::vector<common::ColSource> cols = (ln.fuse == model::Fuse::Interleave16 && parts.size() == 2)
+                                                  ? common::cols_interleave16(parts[0], parts[1])
+                                                  : common::cols_concat(parts);
+  return pack_cols(ln.shape.K, ln.shape.N, cols, ln.shape.layout);
 }
 
 std::vector<float> widen_bf16(const uint16_t* w, size_t n) {

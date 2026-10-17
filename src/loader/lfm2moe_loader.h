@@ -84,12 +84,15 @@ struct LfmLoadOptions {
 
 // One layer's host-repacked bytes (loader::Lfm2MoeCheckpoint::repack_layer's output), exactly what
 // load_lfm2moe uploads - exposed so tests/loader/lfm2moe_synth_host_test.cc can check them against
-// loader/lfm2moe_repack.h's functions over a checkpoint's own tensors, with NO Level Zero.
+// loader/lfm2moe_repack.h's functions over a checkpoint's own tensors, with NO Level Zero. Each
+// HostLinear's `.scales` is empty at layout 1 (inline), populated at layout 0 - whichever
+// `model::Lfm2MoeDesc::linears` says for that id (PROVISIONAL, switchable; spec 24 "24b as built"'s
+// §13 correction).
 struct HostLayer {
-  std::vector<uint32_t> in_proj, out_proj;              // conv, layout-1
-  std::vector<uint32_t> qkv, o_proj;                    // attention, layout-1
-  std::vector<uint32_t> dense_gate_up, dense_down;      // dense, layout-1
-  std::vector<uint32_t> experts_gate_up, experts_down;  // MoE: all E blocks, concatenated
+  HostLinear in_proj, out_proj;                         // conv
+  HostLinear qkv, o_proj;                               // attention
+  HostLinear dense_gate_up, dense_down;                 // dense
+  std::vector<uint32_t> experts_gate_up, experts_down;  // MoE: all E blocks, concatenated, ALWAYS layout 1
   std::vector<uint16_t> router;                         // bf16 tiles {hidden, experts}
   std::vector<float> small;                             // fp32, lfm::small_block(d, l).bytes / 4
 };
@@ -135,9 +138,20 @@ class Lfm2MoeCheckpoint {
   }
 
   // bf16 tensor `name` ([elems]) widened into out.small at byte offset `off`.
-  void widen_small(HostLayer& out, const std::string& name, uint64_t elems, size_t off) {
-    const std::vector<float> w = widen_bf16(take_bf16(name, elems), elems);
+  void widen_small(HostLayer& out, const std::string& name, uint64_t elems, size_t off,
+                   const std::vector<uint64_t>& want_shape = {}) {
+    const std::vector<float> w = widen_bf16(take_bf16(name, elems, want_shape), elems);
     std::memcpy(out.small.data() + off / 4, w.data(), elems * 4);
+  }
+
+  // The generic case - every linear but InProj (its own permutation, Review Focus 2) and Router
+  // (bf16): classify each part against `ln.shape.K` / `ln.part_n[i]` (M3: the descriptor is the one
+  // source of shapes), then pack at `ln.shape.layout` via loader/lfm2moe_repack.h's one function.
+  void fused_linear(const std::string& lp, const model::LfmLinear& ln, HostLinear& out) {
+    std::vector<LinearSrc> srcs;
+    srcs.reserve(ln.parts.size());
+    for (size_t i = 0; i < ln.parts.size(); ++i) srcs.push_back(int4(lp + ln.parts[i], ln.shape.K, ln.part_n[i]));
+    out = repack_fused_linear(ln, srcs);
   }
 
   void repack_layer(uint32_t layer, bool conv_tiles, HostLayer& out) {
@@ -148,55 +162,54 @@ class Lfm2MoeCheckpoint {
     out.small.assign(sb.bytes / 4, 0.0f);
     widen_small(out, lp + "operator_norm.weight", d_.hidden, sb.operator_norm);
     widen_small(out, lp + "ffn_norm.weight", d_.hidden, sb.ffn_norm);
-
     if (d_.is_attention(layer)) {
       widen_small(out, lp + "self_attn.q_layernorm.weight", d_.head_dim, sb.q_norm);
       widen_small(out, lp + "self_attn.k_layernorm.weight", d_.head_dim, sb.k_norm);
-      const LinearSrc q = int4(lp + "self_attn.q_proj", d_.hidden, d_.q_n());
-      const LinearSrc k = int4(lp + "self_attn.k_proj", d_.hidden, d_.kv_n());
-      const LinearSrc v = int4(lp + "self_attn.v_proj", d_.hidden, d_.kv_n());
-      out.qkv.resize(lfm::int4_l1_bytes(d_.hidden, d_.qkv_n()) / 4);
-      common::repack_int4_layout1_cols(
-          d_.hidden, d_.qkv_n(),
-          common::cols_concat({{q.qweight, q.scales, q.N}, {k.qweight, k.scales, k.N}, {v.qweight, v.scales, v.N}}),
-          out.qkv.data());
-      const LinearSrc o = int4(lp + "self_attn.out_proj", d_.q_n(), d_.hidden);
-      out.o_proj.resize(lfm::int4_l1_bytes(d_.q_n(), d_.hidden) / 4);
-      common::repack_int4_layout1_cols(d_.q_n(), d_.hidden, common::cols_concat({{o.qweight, o.scales, o.N}}),
-                                       out.o_proj.data());
     } else {
-      widen_small(out, lp + "conv.conv.weight", size_t(d_.hidden) * d_.conv_taps, sb.conv_taps);
-      const LinearSrc in = int4(lp + "conv.in_proj", d_.hidden, 3 * d_.hidden);
-      out.in_proj = repack_in_proj(in.qweight, in.scales, in.K, in.N, conv_tiles);
-      const LinearSrc op = int4(lp + "conv.out_proj", d_.hidden, d_.hidden);
-      out.out_proj.resize(lfm::int4_l1_bytes(d_.hidden, d_.hidden) / 4);
-      common::repack_int4_layout1_cols(d_.hidden, d_.hidden, common::cols_concat({{op.qweight, op.scales, op.N}}),
-                                       out.out_proj.data());
+      widen_small(out, lp + "conv.conv.weight", size_t(d_.hidden) * d_.conv_taps, sb.conv_taps,
+                 {d_.hidden, 1, d_.conv_taps});   // M2: the shape, not just the element count
     }
 
-    if (d_.is_dense(layer)) {
-      const LinearSrc w1 = int4(lp + "feed_forward.w1", d_.hidden, d_.dense_inter);
-      const LinearSrc w3 = int4(lp + "feed_forward.w3", d_.hidden, d_.dense_inter);
-      out.dense_gate_up.resize(lfm::int4_l1_bytes(d_.hidden, 2 * d_.dense_inter) / 4);
-      common::repack_int4_layout1_cols(d_.hidden, 2 * d_.dense_inter,
-                                       common::cols_interleave16({w1.qweight, w1.scales, w1.N},
-                                                                  {w3.qweight, w3.scales, w3.N}),
-                                       out.dense_gate_up.data());
-      const LinearSrc w2 = int4(lp + "feed_forward.w2", d_.dense_inter, d_.hidden);
-      out.dense_down.resize(lfm::int4_l1_bytes(d_.dense_inter, d_.hidden) / 4);
-      common::repack_int4_layout1_cols(d_.dense_inter, d_.hidden, common::cols_concat({{w2.qweight, w2.scales, w2.N}}),
-                                       out.dense_down.data());
-      return;
+    for (const model::LfmLinear& ln : d_.linears(layer)) {
+      switch (ln.id) {
+        case model::LfmLinearId::InProj: {
+          const LinearSrc in = int4(lp + ln.parts[0], ln.shape.K, ln.shape.N);
+          out.in_proj = repack_in_proj(in.qweight, in.scales, in.K, in.N, conv_tiles, ln.shape.layout);
+          break;
+        }
+        case model::LfmLinearId::OutProj:
+          fused_linear(lp, ln, out.out_proj);
+          break;
+        case model::LfmLinearId::Qkv:
+          fused_linear(lp, ln, out.qkv);
+          break;
+        case model::LfmLinearId::OProj:
+          fused_linear(lp, ln, out.o_proj);
+          break;
+        case model::LfmLinearId::DenseGateUp:
+          fused_linear(lp, ln, out.dense_gate_up);
+          break;
+        case model::LfmLinearId::DenseDown:
+          fused_linear(lp, ln, out.dense_down);
+          break;
+        case model::LfmLinearId::Router: {
+          const TensorInfo gate = take(lp + ln.parts[0] + ".weight", size_t(ln.shape.N) * ln.shape.K, "BF16",
+                                       {ln.shape.N, ln.shape.K});   // M2: [experts, hidden], not transposed
+          out.router.resize(size_t(ln.shape.K) * ln.shape.N);
+          common::repack_bf16_tiled(reinterpret_cast<const uint16_t*>(set_.data(gate)), ln.shape.K, ln.shape.N,
+                                    out.router.data());
+          break;
+        }
+        default:
+          break;
+      }
     }
+    if (d_.is_dense(layer)) return;
 
+    // The routed experts: always layout 1 (loader/lfm2moe_repack.h's rule), both spellings.
     const std::string fp = lp + "feed_forward.";
-    const TensorInfo gate = take(fp + "gate.weight", size_t(d_.experts) * d_.hidden, "BF16");
-    out.router.resize(size_t(d_.hidden) * d_.experts);
-    common::repack_bf16_tiled(reinterpret_cast<const uint16_t*>(set_.data(gate)), d_.hidden, d_.experts,
-                              out.router.data());
     const TensorInfo bias = take(fp + "expert_bias", d_.experts, "F32");
     std::memcpy(out.small.data() + sb.expert_bias / 4, set_.data(bias), size_t(d_.experts) * 4);
-
     static const char* const kW[] = {"w1", "w3", "w2"};
     static const char* const kProj[] = {"gate_proj", "up_proj", "down_proj"};
     const char* const* ex = names_ == model::LfmExpertNames::Proj ? kProj : kW;
@@ -215,7 +228,8 @@ class Lfm2MoeCheckpoint {
   }
 
   const uint16_t* embed() {
-    const TensorInfo t = take(d_.prefix + "embed_tokens.weight", size_t(d_.vocab) * d_.hidden, "BF16");
+    const TensorInfo t = take(d_.prefix + "embed_tokens.weight", size_t(d_.vocab) * d_.hidden, "BF16",
+                              {d_.vocab, d_.hidden});   // M2: [vocab, hidden], not transposed
     embed_bytes_ = set_.bytes(t);
     embed_ptr_ = set_.data(t);
     return reinterpret_cast<const uint16_t*>(embed_ptr_);
@@ -278,7 +292,12 @@ class Lfm2MoeCheckpoint {
     for (const std::string& suffix : s.suffixes()) consumed_.insert(prefix + suffix);
     return s;
   }
-  TensorInfo take(const std::string& name, uint64_t elems, const char* dtype) {
+  // `want_shape` empty: only the element count is checked (most small tensors - a norm's [2048] or
+  // [1][2048] are both fine). Non-empty (M2): the exact shape is checked too - conv.conv.weight
+  // [hidden, 1, conv_taps], the router [experts, hidden], the embedding [vocab, hidden], where a
+  // transposed or reshaped tensor of the same element count must still be refused.
+  TensorInfo take(const std::string& name, uint64_t elems, const char* dtype,
+                  const std::vector<uint64_t>& want_shape = {}) {
     auto it = set_.tensors().find(name);
     if (it == set_.tensors().end()) throw std::runtime_error("load_lfm2moe: no tensor '" + name + "'");
     const TensorInfo t = it->second;
@@ -289,11 +308,17 @@ class Lfm2MoeCheckpoint {
     if (n != elems)
       throw std::runtime_error("load_lfm2moe: '" + name + "' has " + std::to_string(n) + " elements, expected " +
                                std::to_string(elems));
+    if (!want_shape.empty() && t.shape != want_shape) {
+      std::string got, want;
+      for (uint64_t x : t.shape) got += (got.empty() ? "" : ",") + std::to_string(x);
+      for (uint64_t x : want_shape) want += (want.empty() ? "" : ",") + std::to_string(x);
+      throw std::runtime_error("load_lfm2moe: '" + name + "' has shape [" + got + "], expected [" + want + "]");
+    }
     consumed_.insert(name);
     return t;
   }
-  const uint16_t* take_bf16(const std::string& name, uint64_t elems) {
-    return reinterpret_cast<const uint16_t*>(set_.data(take(name, elems, "BF16")));
+  const uint16_t* take_bf16(const std::string& name, uint64_t elems, const std::vector<uint64_t>& want_shape = {}) {
+    return reinterpret_cast<const uint16_t*>(set_.data(take(name, elems, "BF16", want_shape)));
   }
 
   model::Lfm2MoeDesc d_;

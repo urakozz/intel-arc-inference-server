@@ -17,6 +17,7 @@
 #include "loader/safetensors.h"
 #include "loader/snapshot.h"
 #include "loader/trained_context.h"
+#include "runtime/lfm2moe/lfm2moe_sizes.h"
 
 namespace loader {
 namespace {
@@ -67,12 +68,17 @@ l0::Mem upload(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes
 std::unique_ptr<l0::Mem> upload_u(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
   return std::make_unique<l0::Mem>(upload(ctx, imm, src, bytes));
 }
-// Layout 1 int4: scales are inline in `mem` (loader.h's DeviceWeight::scales comment).
-std::unique_ptr<DeviceWeight> upload_int4(l0::Context& ctx, l0::CmdList& imm, const std::vector<uint32_t>& words,
-                                          model::GemvShape shape) {
+// `shape.layout` picks whether `scales` is a real, separate allocation (0: DeviceWeight::scales is
+// the real thing, loader.h's rule) or null (1: inline in `words` already).
+std::unique_ptr<DeviceWeight> upload_linear(l0::Context& ctx, l0::CmdList& imm, const HostLinear& ln,
+                                            model::GemvShape shape) {
+  std::unique_ptr<l0::Mem> scales =
+      shape.layout == 0 ? upload_u(ctx, imm, ln.scales.data(), ln.scales.size() * 2) : nullptr;
   return std::make_unique<DeviceWeight>(
-      DeviceWeight{upload(ctx, imm, words.data(), words.size() * 4), nullptr, shape, model::WeightKind::Int4});
+      DeviceWeight{upload(ctx, imm, ln.words.data(), ln.words.size() * 4), std::move(scales), shape,
+                  model::WeightKind::Int4});
 }
+size_t linear_bytes(const HostLinear& ln) { return ln.words.size() * 4 + ln.scales.size() * 2; }
 }  // namespace
 
 size_t LfmLoaded::total_bytes() const {
@@ -115,12 +121,22 @@ LfmLoaded load_lfm2moe(const std::vector<l0::Context*>& devices, const std::stri
   const LfmExpertNames names = detect_expert_names(set);
   Lfm2MoeCheckpoint ck(full, set, names);
   ck.check_names();
+  // M1: the optional tied lm_head is checked right after check_names, before any upload - embed()
+  // just finds the tensor (no device work), so this costs nothing extra later (embed() is
+  // idempotent: it is called again on device 0 and, for a bf16 head, on the last device).
+  ck.embed();
+  const std::string tied_note = ck.check_tied_lm_head();
 
   const Lfm2MoeDesc d = desc_of(cfg, o.layers);
   model::validate(place, d);
   if (devices.size() != place.devices)
     throw std::invalid_argument("load_lfm2moe: " + std::to_string(devices.size()) + " device(s) for a " +
                                 std::to_string(place.devices) + "-device placement");
+  // I2: the plan before the first allocation (muse_loader.cc's precedent) - every device's byte
+  // total must fit before a single tensor is repacked or uploaded.
+  for (uint32_t dev = 0; dev < place.devices; ++dev)
+    runtime::lfm2moe::require_fits(runtime::lfm2moe::plan(d, place, dev, o.max_len, o.int8_head),
+                                   devices[dev]->memory_bytes());
 
   LfmLoaded m;
   m.desc = d;
@@ -158,32 +174,54 @@ LfmLoaded load_lfm2moe(const std::vector<l0::Context*>& devices, const std::stri
     if (lfm::device_has_attention(d, place, dev)) {
       P.rope = upload_u(ctx, imm, rope.data(), rope.size() * 4);
       P.rope_bytes = rope.size() * 4;
-      if (P.rope_bytes != lfm::rope_table_bytes(o.max_len))
+      if (P.rope_bytes != lfm::rope_table_bytes(d, o.max_len))
         throw std::logic_error("load_lfm2moe: the RoPE table is not loader::lfm::rope_table_bytes");
     }
     for (uint32_t l = P.first; l < P.end; ++l) {
       ck.repack_layer(l, o.conv_tiles, host);
       LfmLayer L;
-      if (d.is_attention(l)) {
-        L.qkv = upload_int4(ctx, imm, host.qkv, {d.hidden, d.qkv_n(), 1, 1});
-        L.o_proj = upload_int4(ctx, imm, host.o_proj, {d.q_n(), d.hidden, 1, 1});
-        P.bytes += host.qkv.size() * 4 + host.o_proj.size() * 4;
-      } else {
-        L.in_proj = upload_int4(ctx, imm, host.in_proj, {d.hidden, 3 * d.hidden, 1, 1});
-        L.out_proj = upload_int4(ctx, imm, host.out_proj, {d.hidden, d.hidden, 1, 1});
-        P.bytes += host.in_proj.size() * 4 + host.out_proj.size() * 4;
+      // Every linear's upload SHAPE (incl. layout) comes from the descriptor - the same source
+      // repack_layer read (M3: one source of shapes, not a second hardcoded copy here).
+      for (const model::LfmLinear& ln : d.linears(l)) {
+        switch (ln.id) {
+          case model::LfmLinearId::InProj:
+            L.in_proj = upload_linear(ctx, imm, host.in_proj, ln.shape);
+            P.bytes += linear_bytes(host.in_proj);
+            break;
+          case model::LfmLinearId::OutProj:
+            L.out_proj = upload_linear(ctx, imm, host.out_proj, ln.shape);
+            P.bytes += linear_bytes(host.out_proj);
+            break;
+          case model::LfmLinearId::Qkv:
+            L.qkv = upload_linear(ctx, imm, host.qkv, ln.shape);
+            P.bytes += linear_bytes(host.qkv);
+            break;
+          case model::LfmLinearId::OProj:
+            L.o_proj = upload_linear(ctx, imm, host.o_proj, ln.shape);
+            P.bytes += linear_bytes(host.o_proj);
+            break;
+          case model::LfmLinearId::DenseGateUp:
+            L.dense_gate_up = upload_linear(ctx, imm, host.dense_gate_up, ln.shape);
+            P.bytes += linear_bytes(host.dense_gate_up);
+            break;
+          case model::LfmLinearId::DenseDown:
+            L.dense_down = upload_linear(ctx, imm, host.dense_down, ln.shape);
+            P.bytes += linear_bytes(host.dense_down);
+            break;
+          case model::LfmLinearId::Router:
+            L.router = std::make_unique<DeviceWeight>(DeviceWeight{
+                upload(ctx, imm, host.router.data(), host.router.size() * 2), nullptr, ln.shape,
+                model::WeightKind::Bf16});
+            P.bytes += host.router.size() * 2;
+            break;
+          default:
+            break;
+        }
       }
-      if (d.is_dense(l)) {
-        L.dense_gate_up = upload_int4(ctx, imm, host.dense_gate_up, {d.hidden, 2 * d.dense_inter, 1, 1});
-        L.dense_down = upload_int4(ctx, imm, host.dense_down, {d.dense_inter, d.hidden, 1, 1});
-        P.bytes += host.dense_gate_up.size() * 4 + host.dense_down.size() * 4;
-      } else {
-        L.router = std::make_unique<DeviceWeight>(DeviceWeight{
-            upload(ctx, imm, host.router.data(), host.router.size() * 2), nullptr,
-            model::GemvShape{d.hidden, d.experts, 1, 0}, model::WeightKind::Bf16});
+      if (!d.is_dense(l)) {
         L.experts_gate_up = upload_u(ctx, imm, host.experts_gate_up.data(), host.experts_gate_up.size() * 4);
         L.experts_down = upload_u(ctx, imm, host.experts_down.data(), host.experts_down.size() * 4);
-        P.bytes += host.router.size() * 2 + host.experts_gate_up.size() * 4 + host.experts_down.size() * 4;
+        P.bytes += host.experts_gate_up.size() * 4 + host.experts_down.size() * 4;
       }
       L.small = upload_u(ctx, imm, host.small.data(), host.small.size() * 4);
       P.bytes += host.small.size() * 4;
@@ -220,8 +258,7 @@ LfmLoaded load_lfm2moe(const std::vector<l0::Context*>& devices, const std::stri
                              std::to_string(want));
   }
 
-  const std::string tied = ck.check_tied_lm_head();
-  if (!tied.empty()) m.skipped.push_back(tied);
+  if (!tied_note.empty()) m.skipped.push_back(tied_note);
 
   std::string names_str;
   m.unconsumed = ck.unconsumed(&names_str);

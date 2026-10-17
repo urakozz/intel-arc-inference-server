@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
   const loader::LfmDevicePart& P = m.parts[0];
   CHECK_EQ(P.layers.size(), size_t(d.layers));
   CHECK_EQ(P.bytes, loader::lfm::device_weight_bytes(d, m.place, 0, o.int8_head));
-  CHECK_EQ(P.rope_bytes, loader::lfm::rope_table_bytes(o.max_len));
+  CHECK_EQ(P.rope_bytes, loader::lfm::rope_table_bytes(d, o.max_len));
   CHECK(P.embed_tiles && P.final_norm && P.rope);
   CHECK((o.int8_head && P.head_int8) || (!o.int8_head && !P.head_int8));
 

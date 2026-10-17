@@ -9,8 +9,14 @@
 // Spec 24b Task 3: LFM2.5-24B-A2B on the card as device-free arithmetic - the ONE home of every
 // weight allocation's size, header-only so the planner (runtime/lfm2moe/lfm2moe_sizes.h, no loader
 // library) and the loader (src/loader/lfm2moe_loader.cc allocates exactly these) share it. Every
-// int4 linear (per-layer and per-expert) is the shared subgroup-tiled layout 1 (loader/int4_layout.h,
-// Review Focus 2: `repack_in_proj`'s false form is exactly `repack_int4_layout1_cols`).
+// int4 linear's layout is PROVISIONAL and PER LINEAR (spec 24 "24b as built"'s §13 correction: the
+// codebase's own convention - Muse, K2, Kolibri and qwen4exp all pick layout 0, the GPTQ-native
+// words + separate f16 scales, for most of their dense linears; layout 1, the shared subgroup-tiled
+// layout, only for routed-expert blocks). `layer_weight_bytes` reads `model::Lfm2MoeDesc::linears`
+// for each layer's shapes AND layouts - one source of truth, not a second hardcoded copy - and the
+// routed experts' bytes are always layout 1 (`int4_l1_bytes`, `repack_expert`'s rule). At N % 16 ==
+// 0 and K % 64 == 0 (true everywhere here) layout 0 and 1 are the same byte count
+// (`loader/int4_layout.h`'s comment), so this choice changes no total below.
 //
 // Every number below is derived (model::lfm2moe()'s widths) and cross-checked against spec 24 §3's
 // table: routed experts 12,192,841,728 B (38 MoE layers x 320,864,256), the other int4 linears
@@ -24,6 +30,12 @@ inline constexpr size_t kTileBytes = 544;                 // layout 1: 128 u32 n
 inline constexpr uint32_t kConvRing = 16;
 
 inline constexpr size_t int4_l1_bytes(uint32_t K, uint32_t N) { return int4_layout1_bytes(K, N); }
+// A linear's device bytes at its OWN layout (0: words + separate scales; 1: inline) - equal at N %
+// 16 == 0, K % 64 == 0 (always true here), but this is the one place that reads `shape.layout`
+// rather than assuming 1.
+inline size_t int4_bytes(const model::GemvShape& s) {
+  return s.layout == 0 ? int4_layout0_bytes(s.K, s.N) : int4_l1_bytes(s.K, s.N);
+}
 
 inline size_t expert_gate_up_bytes(const model::Lfm2MoeDesc& d) {
   return int4_l1_bytes(d.hidden, 2 * d.moe_inter);   // 3,342,336 at the real widths
@@ -84,8 +96,10 @@ inline size_t lfm_embed_row_index(uint32_t K, uint32_t k, uint32_t n) {
   return ((size_t(n / 16) * K8 + k / 8) * 8 + k % 8) * 16 + n % 16;
 }
 
-// fp32 [max_len][2][head_dim / 2] (cos then sin, bf16-valued; loader::lfm_rope_table).
-inline size_t rope_table_bytes(uint32_t max_len) { return size_t(max_len) * 2 * 32 * 4; }
+// fp32 [max_len][2][head_dim / 2] (cos then sin, bf16-valued; loader::lfm_rope_table) -
+// model::Lfm2MoeDesc::rope_table_bytes's formula, forwarded (the descriptor is the one source of
+// head_dim; this header never hardcodes it as 32).
+inline size_t rope_table_bytes(const model::Lfm2MoeDesc& d, uint32_t max_len) { return d.rope_table_bytes(max_len); }
 // 10 attention layers x 8 kv heads x 64 x 2 (K, V) x 2 B (bf16) = 20,480 B a position.
 inline size_t kv_bytes_per_position(const model::Lfm2MoeDesc& d) {
   return size_t(d.attn_layers()) * d.kv_heads * d.head_dim * 2 * 2;
@@ -95,18 +109,18 @@ inline size_t conv_ring_bytes(const model::Lfm2MoeDesc& d) {
   return size_t(d.conv_layers()) * kConvRing * d.hidden * 2;
 }
 
-// One layer's int4 linears + (router + its expert block, if MoE) + its small block - what the
-// two-card split (runtime::lfm2moe::pp_split) balances.
+// One layer's int4 linears (at EACH ONE's own layout, model::Lfm2MoeDesc::linears - the single
+// source of shapes) + (its expert block, if MoE) + its small block - what the two-card split
+// (runtime::lfm2moe::pp_split) balances.
 inline size_t layer_weight_bytes(const model::Lfm2MoeDesc& d, uint32_t layer) {
   size_t b = 0;
-  if (d.is_attention(layer))
-    b += int4_l1_bytes(d.hidden, d.qkv_n()) + int4_l1_bytes(d.q_n(), d.hidden);
-  else
-    b += int4_l1_bytes(d.hidden, 3 * d.hidden) + int4_l1_bytes(d.hidden, d.hidden);
-  if (d.is_dense(layer))
-    b += int4_l1_bytes(d.hidden, 2 * d.dense_inter) + int4_l1_bytes(d.dense_inter, d.hidden);
-  else
-    b += router_bytes(d) + moe_layer_bytes(d);
+  for (const model::LfmLinear& ln : d.linears(layer)) {
+    if (ln.kind == model::WeightKind::Int4)
+      b += int4_bytes(ln.shape);
+    else if (ln.kind == model::WeightKind::Bf16)
+      b += size_t(ln.shape.K) * ln.shape.N * 2;   // the router
+  }
+  if (!d.is_dense(layer)) b += moe_layer_bytes(d);
   b += small_block(d, layer).bytes;
   return b;
 }
