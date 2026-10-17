@@ -308,3 +308,42 @@ ORACLE_MODEL=models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound-GPTQ tools/orac
 MUSE_SYNTH_LAYERS=2 tools/box_validate/muse_oracle.sh . synth-ckpt   # -> oracle-out-muse-synth/ckpt2 + ckpt2.ACCEPTED
 build/mac-host/tests/muse_synth_host_test oracle-out-muse-synth/ckpt2   # the C++ host half on the same files
 ```
+
+## LFM2.5-24B-A2B (spec 24b Task 1): synthetic checkpoints and the checkpoint check
+
+**No quantisation run here either** (24q, spec 24 §0's stage, is not built - no `rtn_export.py` exists yet to
+reuse): `tools/quantize/lfm2moe/` holds a self-contained RTN packer in the kolibri / muse pattern (its own
+`make_synth.py`, not a second import of a stage that is not there), plus the checkpoint check 24b's loader
+and 24q's export will both have to pass:
+
+- `make_synth.py <out> --layers N [--expert-names w|proj] [--tokenizer <LFM2.5 snapshot>] [--seed S]
+  [--plant-sign]` - a checkpoint of the first N layers (1..40; default 4: both dense conv layers, the first
+  attention + MoE layer, a conv + MoE layer - every layer kind) at the REAL widths, in LiquidAI/LFM2.5-24B-A2B's
+  own config (embedded: no vendored copy exists under `tools/oracle`) with `quantization_config` as AutoRound
+  0.17.0 writes it (no `extra_config`: the router, `expert_bias`, `conv.conv.weight`, the norms and the
+  embedding are never `nn.Linear`, so AutoRound excludes nothing). Every `nn.Linear` is packed int4 g64 sym by
+  `src/loader/rtn.h`'s rule, reusing `tools/oracle/lfm2moe_make_tiny.rtn_int4` (already proven by
+  `test_lfm2moe_make_tiny.py`'s `int4-g64` variant) rather than a second copy of the formula.
+  `--expert-names proj` writes the routed experts as `gate_proj` / `up_proj` / `down_proj` (AutoRound's generic
+  unfusing spelling) instead of the checkpoint's own `w1` / `w3` / `w2` - 24b's loader reads either, all or
+  nothing. `--plant-sign` writes `w3 = -w1` for expert 0 of the first MoE layer (Review Focus 1 at the source).
+  ~1.28 GB at N = 4.
+- `check.py <checkpoint> [--source <bf16 snapshot>] [--expert-names w|proj] [--sample N]` - the loader's rules
+  in Python: `quantization_config`, the names (`lfm2moe_ref.expected_names(cfg, "int4", spelling)` of the
+  spelling found or given, refusing a mix of the two), shapes and dtypes (`expert_bias` F32, everything else
+  that stays unquantised BF16), every qzeros word, finite scales, an optional `lm_head.weight` checked bitwise
+  against `embed_tokens.weight` (the tie) or rejected naming both, and - against `--source` - every untouched
+  tensor bitwise and a dequant sample within RTN's bound. Prints ACCEPTED or every violation.
+- `test_lfm2moe_quant.py` - the tools' tests (a 3-layer synthetic: the smallest that keeps an attention layer
+  and a MoE layer).
+
+All three need transformers 5.19.0 (spec 21a's site) in the oracle image:
+
+```bash
+# the Mac: the CPU lock around the run (one model computation at a time); the box: r50.synth
+tools/oracle/run_in_container.sh \
+  'tools/oracle/qwen4exp_env.sh /ws/oracle-out-q4exp/site > /dev/null && export PYTHONPATH=/ws/oracle-out-q4exp/site &&
+   python3 tools/quantize/lfm2moe/test_lfm2moe_quant.py'
+python3 tools/quantize/lfm2moe/make_synth.py /tmp/lfm2moe-synth/w --layers 4 --expert-names w
+python3 tools/quantize/lfm2moe/check.py /tmp/lfm2moe-synth/w   # ACCEPTED
+```
