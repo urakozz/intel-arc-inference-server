@@ -1,6 +1,8 @@
 # Spec 24b - LFM2.5-24B-A2B: the descriptor, the loader, synthetic checkpoints, the memory plan
 
-**Status (2026-10-15): planned; nothing built.** Box queue row **50** (rows 42-47 are spec 23's): the loads on a card.
+**Status (2026-10-17): Tasks 1-6 built on the Mac; box queue row 50 added.** Branch `spec24b-lfm2moe-loader`.
+Everything host-side is green (`tools/mac_check.sh`); nothing has run on a card (24b's own row, and 24q's RTN /
+AutoRound export, are the box's job). See spec 24 "24b as built" for the measured facts.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
 
@@ -49,9 +51,9 @@
 **Interfaces:**
 - Consumes: `tools/oracle/lfm2moe_ref.py` (`config`, `expected_names`), `tools/quantize/lfm2moe/rtn_export.py`'s packer, `check.py`.
 - Produces: `make_synth.py <out> --layers N [--expert-names w|proj] --tokenizer <LFM2.5 snapshot> [--seed 0]` - a real-width checkpoint: the original's `config.json` with `num_hidden_layers = N` and `layer_types[:N]` (N in 3..40; the default 4 holds two dense conv layers, the first attention + MoE layer and a conv + MoE layer - every layer kind), `quantization_config` as 24q's export writes it; weights drawn at the real widths (normal, std 0.02 for linears, norms ~1, conv taps ~N(0, 0.3), `expert_bias` ~N(0, 0.05) F32, embedding std 0.02) and packed by `rtn_export.py`'s packer; one layer generated, packed and written at a time (peak RAM ~2 GB, ESTIMATED); `model.safetensors.index.json`; the tokenizer, template, generation config and LICENSE copied from `--tokenizer`. Size at N = 4: ~1.28 GB (derived: the two dense conv layers 47.3 MB each, the attention + MoE layer 326.7 MB, the conv + MoE layer 330.0 MB, the embedding 524.3 MB).
-- [ ] **Step 1: the failing tests:** `test_synth_names` (both spellings: the file's names equal `expected_names(cfg, "int4", spelling)` both ways); `test_synth_checked` (`check.py` `ACCEPTED`); `test_synth_loads_in_reference` (`lfm2moe_ref.build_streamed(weights="int4")` runs 16 ids through it); `test_gate_up_sign` (Review Focus 1 at the source: a `--plant-sign` option writes w3 = -w1 for expert 0 of the first MoE layer).
-- [ ] **Step 2: implement; PASS.** Then one synthetic per spelling on the Mac (`/data/lfm2moe-synth/{w,proj}`, N 4) and `check.py`: `ACCEPTED` twice.
-- [ ] **Step 3: commit** `git commit -S -m "quantize: LFM2.5-24B-A2B synthetic real-width checkpoints in our format, both expert spellings (spec 24b)"`.
+- [x] **Step 1: the failing tests:** `test_synth_names` (both spellings: the file's names equal `expected_names(cfg, "int4", spelling)` both ways); `test_synth_checked` (`check.py` `ACCEPTED`); `test_synth_loads_in_reference` (`lfm2moe_ref.build_streamed(weights="int4")` runs 16 ids through it); `test_gate_up_sign` (Review Focus 1 at the source: a `--plant-sign` option writes w3 = -w1 for expert 0 of the first MoE layer).
+- [x] **Step 2: implement; PASS.** Then one synthetic per spelling on the Mac (`/data/lfm2moe-synth/{w,proj}`, N 4) and `check.py`: `ACCEPTED` twice.
+- [x] **Step 3: commit** `git commit -S -m "quantize: LFM2.5-24B-A2B synthetic real-width checkpoints in our format, both expert spellings (spec 24b)"`.
 
 ### Task 2: the model table
 
@@ -100,8 +102,8 @@ void validate(const LfmPlacement& p, const Lfm2MoeDesc& d);
 }
 ```
 
-- [ ] **Step 1: the failing test** `lfm2moe_test.cc`: `lfm2moe_desc(config.json)` == `lfm2moe()` field by field; `kinds` = the 30 / 10 pattern (attention at `l % 4 == 2`, layer 39 conv); `is_dense` true for 0 and 1 only; every `linears(l)` shape (in_proj {2048, 6144}, out_proj / o_proj {2048, 2048}, q‖k‖v {2048, 3072}, dense gate‖up {2048, 23552} fused `Interleave16`, dense down {11776, 2048}, router {2048, 64} bf16); refusals, each naming its key: another `model_type`, `conv_bias` true, `use_expert_bias` false, `norm_topk_prob` false, `routed_scaling_factor` 2.0, `rope_type` other than default, `tie_word_embeddings` false, a `layer_types` entry off the published pattern, a width other than the published one (hidden, heads, head_dim, experts, top_k, intermediates, vocab), `num_dense_layers` 1; the synthetic (`synth4.json`) accepted with `layers` 4; `validate` refuses a split of 0 or 40.
-- [ ] **Step 2: register, run, FAIL; implement; PASS** (`ctest --preset mac-host -R '^lfm2moe_test$'`). **Commit** `git commit -S -m "model: Lfm2MoeDesc - LFM2.5-24B-A2B held to config.json key by key, the layer kinds, the GEMV shapes, the placement (spec 24b)"`.
+- [x] **Step 1: the failing test** `lfm2moe_test.cc`: `lfm2moe_desc(config.json)` == `lfm2moe()` field by field; `kinds` = the 30 / 10 pattern (attention at `l % 4 == 2`, layer 39 conv); `is_dense` true for 0 and 1 only; every `linears(l)` shape (in_proj {2048, 6144}, out_proj / o_proj {2048, 2048}, q‖k‖v {2048, 3072}, dense gate‖up {2048, 23552} fused `Interleave16`, dense down {11776, 2048}, router {2048, 64} bf16); refusals, each naming its key: another `model_type`, `conv_bias` true, `use_expert_bias` false, `norm_topk_prob` false, `routed_scaling_factor` 2.0, `rope_type` other than default, `tie_word_embeddings` false, a `layer_types` entry off the published pattern, a width other than the published one (hidden, heads, head_dim, experts, top_k, intermediates, vocab), `num_dense_layers` 1; the synthetic (`synth4.json`) accepted with `layers` 4; `validate` refuses a split of 0 or 40.
+- [x] **Step 2: register, run, FAIL; implement; PASS** (`ctest --preset mac-host -R '^lfm2moe_test$'`). **Commit** `git commit -S -m "model: Lfm2MoeDesc - LFM2.5-24B-A2B held to config.json key by key, the layer kinds, the GEMV shapes, the placement (spec 24b)"`.
 
 ### Task 3: the layouts and the host repack half
 
@@ -139,8 +141,8 @@ size_t weight_bytes(const model::Lfm2MoeDesc&, bool int8_head);       // 13.39 G
 
 - Produces (`lfm2moe_repack.h`, host only): `lfm_expected_names(desc, LfmExpertNames)`, `detect_expert_names(const SafetensorsSet&)` (all-or-nothing), `repack_expert(w1, w3, w2 int4 GPTQ) -> {gate_up layout-1, down layout-1}` (`cols_interleave16` then `repack_int4_layout1_cols`), `repack_in_proj(qweight, scales, bool conv_tiles)` (Review Focus 2's permutation when `conv_tiles`), `widen_bf16(const uint16_t*, size_t) -> std::vector<float>` (norms, taps, exact), `lfm_rope_table(desc, max_len)` (`kolibri1_rope.cc`'s method at dim 64, θ 1e7).
 
-- [ ] **Step 1: the failing tests** `lfm2moe_repack_test.cc`: every byte formula above (asserted, printed); `repack_expert` on a crafted expert (Review Focus 1: w3 = -w1 lands in the up tiles; both spellings through `detect_expert_names`; a mixed checkpoint refused); `repack_in_proj` with `conv_tiles` false = `repack_int4_layout1_cols` of the GPTQ tensor, with `conv_tiles` true its inverse permutation gives the false layout back word for word (Review Focus 2); `lfm_embed_row_index` against the row-major tensor (Review Focus 3); `small_block` offsets disjoint and 64-byte aligned. `lfm2moe_rope_test.cc`: the table equals transformers 5.19.0's `Lfm2MoeRotaryEmbedding` cos / sin (bf16) bitwise at positions 0, 1, 2, 4095, 131071 and 1000 random ones (the fixture, generated in `agnes-ref-img` with 24a's site).
-- [ ] **Step 2: register, FAIL; implement; PASS. Commit** `git commit -S -m "loader: lfm2moe layouts and the host repack half - per-expert layout-1 blocks, in_proj B/C/x (and the conv-tile permutation), the tied embedding tiles, the RoPE table (spec 24b)"`.
+- [x] **Step 1: the failing tests** `lfm2moe_repack_test.cc`: every byte formula above (asserted, printed); `repack_expert` on a crafted expert (Review Focus 1: w3 = -w1 lands in the up tiles; both spellings through `detect_expert_names`; a mixed checkpoint refused); `repack_in_proj` with `conv_tiles` false = `repack_int4_layout1_cols` of the GPTQ tensor, with `conv_tiles` true its inverse permutation gives the false layout back word for word (Review Focus 2); `lfm_embed_row_index` against the row-major tensor (Review Focus 3); `small_block` offsets disjoint and 64-byte aligned. `lfm2moe_rope_test.cc`: the table equals transformers 5.19.0's `Lfm2MoeRotaryEmbedding` cos / sin (bf16) bitwise at positions 0, 1, 2, 4095, 131071 and 1000 random ones (the fixture, generated in `agnes-ref-img` with 24a's site).
+- [x] **Step 2: register, FAIL; implement; PASS. Commit** `git commit -S -m "loader: lfm2moe layouts and the host repack half - per-expert layout-1 blocks, in_proj B/C/x (and the conv-tile permutation), the tied embedding tiles, the RoPE table (spec 24b)"`.
 
 ### Task 4: the loader
 
@@ -177,8 +179,8 @@ LfmLoaded load_lfm2moe(std::vector<l0::Context*> devices, const std::string& sna
 }
 ```
 
-- [ ] **Step 1: the failing tests:** `lfm2moe_synth_host_test` (host, over Task 1's synthetics when present, SKIP 77 otherwise): every tensor read once or listed skipped (Review Focus 5); the repacked expert / in_proj / embedding bytes equal Task 3's functions over the file's tensors; the int8 head = `quantise_int8_tiled` of the embedding; an export with `lm_head.weight` equal to the embedding skips it, one with a different one is refused naming both. `lfm2moe_load_checkpoint_test <snapshot>` (card, label `checkpoint;lfm2moe`, SKIP 77 without data): the load on one device, `memory_use` per component equal to Task 5's plan, a sampled expert block read back equal to the host repack, both spellings; on two devices with `two(desc, 20)`.
-- [ ] **Step 2: register, FAIL; implement; PASS (host); the card test is the box's** (row 50). **Commit** `git commit -S -m "loader: load_lfm2moe - both expert spellings, per-expert layout-1 blocks, the tied int8 head from the embedding tiles, fp32 small blocks, placement over two cards (spec 24b)"`.
+- [x] **Step 1: the failing tests:** `lfm2moe_synth_host_test` (host, over Task 1's synthetics when present, SKIP 77 otherwise): every tensor read once or listed skipped (Review Focus 5); the repacked expert / in_proj / embedding bytes equal Task 3's functions over the file's tensors; the int8 head = `quantise_int8_tiled` of the embedding; an export with `lm_head.weight` equal to the embedding skips it, one with a different one is refused naming both. `lfm2moe_load_checkpoint_test <snapshot>` (card, label `checkpoint;lfm2moe`, SKIP 77 without data): the load on one device, `memory_use` per component equal to Task 5's plan, a sampled expert block read back equal to the host repack, both spellings; on two devices with `two(desc, 20)`.
+- [x] **Step 2: register, FAIL; implement; PASS (host); the card test is the box's** (row 50). **Commit** `git commit -S -m "loader: load_lfm2moe - both expert spellings, per-expert layout-1 blocks, the tied int8 head from the embedding tiles, fp32 small blocks, placement over two cards (spec 24b)"`.
 
 ### Task 5: the memory plan
 
@@ -202,16 +204,16 @@ std::string describe(const Plan& p);
 }
 ```
 
-- [ ] **Step 1: the failing test** `lfm2moe_plan_test`: one card, int8 head: weights 13.39 GB (the formula), KV 2.684 GB at 131072, the total under a 32 GiB device with the 1.5 GB reserve; `max_len_auto` = 131072 on a 32 GiB device (capped by the trained context, Review Focus 4) and the largest fitting multiple of 256 on a crafted 15 GiB device; an explicit 262144 refused naming `max_position_embeddings`; the bf16-head plan (no int8 copy: the embedding tiles serve as the head); `pp_split` balanced within one layer's bytes; synthetic N = 4 plans.
-- [ ] **Step 2: register, FAIL; implement; PASS. Commit** `git commit -S -m "runtime: the LFM2.5-24B-A2B memory plan - one card at 131072, max-len auto capped at the trained context, the two-card split (spec 24b)"`.
+- [x] **Step 1: the failing test** `lfm2moe_plan_test`: one card, int8 head: weights 13.39 GB (the formula), KV 2.684 GB at 131072, the total under a 32 GiB device with the 1.5 GB reserve; `max_len_auto` = 131072 on a 32 GiB device (capped by the trained context, Review Focus 4) and the largest fitting multiple of 256 on a crafted 15 GiB device; an explicit 262144 refused naming `max_position_embeddings`; the bf16-head plan (no int8 copy: the embedding tiles serve as the head); `pp_split` balanced within one layer's bytes; synthetic N = 4 plans.
+- [x] **Step 2: register, FAIL; implement; PASS. Commit** `git commit -S -m "runtime: the LFM2.5-24B-A2B memory plan - one card at 131072, max-len auto capped at the trained context, the two-card split (spec 24b)"`.
 
 ### Task 6: docs, the box queue row
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-10-15-spec24-lfm2-moe-design.md` ("24b as built"), this plan's status line, `docs/13-loader.md` (an "LFM2.5-24B-A2B" paragraph: the two expert spellings, the tied head from the embedding tiles), `docs/superpowers/plans/box-validation-queue.md` (row 50), `tools/box_validate/stages.sh` (`row 50`)
 
-- [ ] **Step 1: Mac gate:** `tools/mac_check.sh --base main` exit 0 (host PASS incl. `lfm2moe_test`, `lfm2moe_repack_test`, `lfm2moe_rope_test`, `lfm2moe_synth_host_test`, `lfm2moe_plan_test`; Level Zero syntax; kernel_cmdlines +0 / -0 / ~0).
-- [ ] **Step 2: the queue row 50** (`test_box_validate.py` passes; `--dry-run --only r50` prints it):
+- [x] **Step 1: Mac gate:** `tools/mac_check.sh --base main` exit 0 (host PASS incl. `lfm2moe_test`, `lfm2moe_repack_test`, `lfm2moe_rope_test`, `lfm2moe_synth_host_test`, `lfm2moe_plan_test`; Level Zero syntax; kernel_cmdlines +0 / -0 / ~0).
+- [x] **Step 2: the queue row 50** (`test_box_validate.py` passes; `--dry-run --only r50` prints it):
 
 ```text
 row 50 "spec 24b - LFM2.5-24B-A2B: the descriptor, the loader (both expert spellings, the tied int8 head), the memory plan (plan 24b)"
@@ -220,6 +222,6 @@ stage r50.synth      50 default cpu oracle_image              -        "make_syn
 stage r50.load_synth 50 default gpu lfm2moe_synth             r50.synth "lfm2moe_load_checkpoint_test on both synthetics: plan == allocation, blocks read back"
 stage r50.load_real  50 default gpu lfm2moe_rtn               -        "lfm2moe_load_checkpoint_test on 24q's RTN export (one card; two with --split 20 when two GPUs)"
 ```
-- [ ] **Step 3: commit** `git commit -S -m "docs: spec 24 (24b as built), box queue row 50 - the LFM2.5-24B-A2B descriptor and loader"`.
+- [x] **Step 3: commit** `git commit -S -m "docs: spec 24 (24b as built), box queue row 50 - the LFM2.5-24B-A2B descriptor and loader"`.
 
 **Gate for the plan:** Mac - every host test green, both synthetics `ACCEPTED`, kernel_cmdlines unchanged. Box - both synthetics and the RTN export load on one card with the plan equal to the allocation (two cards when present).

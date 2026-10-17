@@ -628,3 +628,80 @@ only). Every number is measured on the Mac (`agnes-ref-img`, torch 2.14.1+cpu, t
   `lfm2moe_oracle.sh` runs on the Mac under the CPU lock.
 - **Pending (box CPU, row 48):** the five test files in the box's image (another torch build), `lfm2moe_32k`, the
   A4 reference (2048 new ids, reasoning first; `score.py --format pythonic`, 0 parse failures the bar).
+
+## 13. 24b as built (2026-10-17; the Mac only - nothing has run on a card)
+
+Plan: `docs/superpowers/plans/2026-10-15-spec24b-lfm2moe-descriptor-loader.md`, branch
+`spec24b-lfm2moe-loader`. Box validation: queue row 50. Every byte figure below is derived from
+`model::lfm2moe()`'s widths (`src/loader/lfm2moe_layout.h`) and cross-checked against §3's table above,
+word for word, by `lfm2moe_repack_test.cc` and `lfm2moe_plan_test.cc` - no test types a constant.
+
+- **The ground truth for names came from 24a, not from this plan's guesses.** `tools/oracle/lfm2moe_ref.py`'s
+  `expected_names` (already built, bitwise tested against transformers 5.19.0) fixed several spellings this
+  plan's prose did not pin precisely: attention's out-projection is `self_attn.out_proj` (not `o_proj`), the
+  q/k per-head norms are `self_attn.q_layernorm` / `k_layernorm`, the conv block's tensors are `conv.conv.weight`
+  / `conv.in_proj` / `conv.out_proj`, the final norm is `model.embedding_norm.weight` (not `model.norm`), and no
+  checkpoint form (bf16 or our int4) ever ships `lm_head.weight` as a REQUIRED tensor (`expected_names` never
+  lists it; an optional one is the loader's own bitwise-tie check). `src/model/lfm2moe.cc` and
+  `src/loader/lfm2moe_repack.cc` use these names directly.
+- **Layout 1 everywhere, not layout 0.** Review Focus 2 (`repack_in_proj`'s false form is exactly
+  `repack_int4_layout1_cols`) settled this for `in_proj`; the same choice was then made for every other
+  per-layer int4 linear (`out_proj`, `q‖k‖v`, attention `out_proj`, the two dense linears) for one reason:
+  Kolibri's GPTQ-native layout 0 exists because ITS loader was written before `loader/int4_layout.h` unified
+  the two layouts (spec 23b); LFM2.5 has no such history, so every linear here is the shared subgroup-tiled
+  layout the newer models (Muse, K2) already use, with S left at 1 (PROVISIONAL, 24c's sweep) - the loader
+  never allocates a separate GPTQ-native `scales` buffer.
+- **No router padding.** Kolibri's `router_n()` rounds its 384 experts up to a power of two for `gemv_bf16`'s
+  16-column tiles. LFM2.5's 64 experts is already a multiple of 16, so `loader::lfm::router_bytes` and the
+  repack are one `repack_bf16_tiled` call with no padded rows and no `router_n()` function at all.
+- **`vocab_used` is not read from a tokenizer at load** - a judgment call, following Kolibri's own precedent
+  (its `vocab_used` is a fixed constant too, never derived from `tokenizer.json`). `load_lfm2moe` always passes
+  `model::lfm2moe().vocab_used` (125017, the published fact) to `lfm2moe_desc`; a checkpoint whose tokenizer
+  genuinely differs (a future sibling model, out of scope by `check_lfm2moe_config`) is not handled. Cost if
+  wrong: the argmax mask stage (24c) would mask the wrong rows on such a checkpoint - never the published one,
+  which this descriptor is pinned to.
+- **24q does not exist yet**, despite this plan's "Dependencies" section saying "Plan 24q Tasks 1-2 merged" -
+  `git log --all` shows only 24q's PLANNING commit, no `rtn_export.py` or `check.py`. Judgment call:
+  `tools/quantize/lfm2moe/make_synth.py` and `check.py` are self-contained (the same shape as Kolibri's and
+  Muse's own `make_synth.py` / `check.py`, which also carry their own packer - not a new pattern), and the RTN
+  packer itself is reused from `tools/oracle/lfm2moe_make_tiny.py` (already proven by
+  `test_lfm2moe_make_tiny.py`'s `int4-g64` variant) rather than a third copy of `src/loader/rtn.h`'s formula.
+  When 24q lands its own packer, `make_synth.py` can be pointed at it; nothing else here depends on the choice.
+  Cost if wrong: none to correctness (the formula is `src/loader/rtn.h`'s, read correctly); some duplicated
+  Python across `tools/quantize/{kolibri,muse,lfm2moe}/make_synth.py` that a shared packer module could remove
+  later.
+- **RTN's `[-8, 7]` asymmetry is real, not a bug.** `--plant-sign`'s `w3 = -w1` test
+  (`tools/quantize/lfm2moe/test_lfm2moe_quant.py`) found that symmetric int4 at zero point 8 represents
+  `[-8, 7]`: whichever tensor's element IS a 64-group's own `amax`, a quotient that the f16-rounded scale
+  pushes fractionally past 7.5 clamps on the positive side while its exact negation does not, at the negative
+  side's extra slot. Measured: 0.858% of a 64-expert MoE layer's elements (one group boundary element roughly
+  half the time). This is RTN's property, not the engine's: the C++ repack (`repack_expert`,
+  `repack_int4_layout1_cols`) moves already-packed int4 words - no re-quantisation - so it never hits this; the
+  router / combine kernels (24c) read the packed bytes as shipped either way.
+- **The bf16 head's replica, two cards.** Spec §4.4 says "the embedding is kept once... one copy serves the
+  gather and the bf16 head" - true on one card (device 0 is also the last device). Over two cards with
+  `--pp 2` and a bf16 head, the LAST device has no copy of device 0's embedding tiles: `load_lfm2moe` uploads a
+  second bf16-tiled copy there (524,288,000 B), counted in `loader::lfm::device_weight_bytes`'s `else if (dev
+  != 0)` branch and `runtime::lfm2moe::plan`'s matching term. Decision 10 defers whether 24c's engine ever
+  serves `--pp 2` with a bf16 head; the bytes are planned regardless. The int8 head needs no replica (it is
+  built fresh on whichever device is last, from the host-mmapped bf16 bytes, not from device 0's tiles).
+- **Every derived figure matches spec 24 §3 exactly:** routed experts 12,192,841,728 B (38 x 320,864,256), the
+  other int4 linears 399,932,928 B (conv 267,386,880 + attention 55,705,600 + dense 76,840,448 - each
+  independently reconciled against §3's "x M params at 0.53125 B / param" row), routers 9,961,472 B, the
+  embedding 524,288,000 B, the int8 head 262,656,000 B: `weight_bytes(lfm2moe(), true)` = 13,391,087,616 B
+  (13.39 GB). KV 20,480 B a position (2,684,354,560 B at 131072, 2.684 GB). The conv rings 1,966,080 B. The one
+  figure that does not land where §3's prose says: "norms / conv taps / biases < 1 MB" measures at ~1.41 MB
+  (40 layers' small blocks summed) - a rounding in the spec's ESTIMATE, not a formula mismatch (the per-layer
+  byte counts above are exact and tested).
+- **The Mac gate (2026-10-17):** `tools/mac_check.sh --base main` section 1 (host) 120/120 PASS, including
+  `lfm2moe_test`, `lfm2moe_repack_test`, `lfm2moe_rope_test` (bitwise transformers 5.19.0's own
+  `Lfm2MoeRotaryEmbedding` at 5 fixed + 1000 random positions), `lfm2moe_plan_test` and
+  `lfm2moe_synth_host_{w,proj}_test` (over two synthetic real-width checkpoints, `make_synth.py --layers 4`,
+  generated on the Mac itself, both expert spellings, 0 unconsumed each); section 3 (kernel_cmdlines) +0 / -0 /
+  ~0 (F0 holds: no kernel exists for this family yet). `lfm2moe_load_checkpoint_test` (the card test) is
+  excluded from the Mac's ctest run by `cmake/host_only.cmake` (it links Level Zero) - row 50's `r50.load_synth`
+  / `r50.load_real` are the box's.
+- **What the box still needs:** `r50.synth` (the Mac already generated and `check.py`-ACCEPTED both synthetic
+  spellings; the box's own run is the same command, for its own record); `r50.load_synth` (the first time
+  `load_lfm2moe` ever touches a card); `r50.load_real`, which needs 24q's export (`have lfm2moe_rtn`, currently
+  always false) - genuinely blocked until 24q runs.
