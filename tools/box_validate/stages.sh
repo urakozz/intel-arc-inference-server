@@ -3421,8 +3421,8 @@ st_r48_a4_ref() {
 # ======================================================================================
 row 50 "spec 24b - LFM2.5-24B-A2B: the descriptor, the loader (both expert spellings, the tied int8 head), the memory plan (plan 24b)"
 rownote 50 "No kernel and no existing loader touched (kernel_cmdlines +0 / -0 / ~0; the int4 layout-1 formula stays loader/int4_layout.h's): G0's g0.sha is the 'nothing moved' check. Written on the Mac: lfm2moe_test, lfm2moe_repack_test, lfm2moe_rope_test (bitwise transformers 5.19.0's Lfm2MoeRotaryEmbedding), lfm2moe_plan_test and lfm2moe_synth_host_{w,proj}_test all ran there, over two synthetic real-width checkpoints (make_synth.py --layers 4) generated on the Mac itself; nothing of load_lfm2moe has touched a card."
-rownote 50 "24q (spec 24 §0's stage) is not built yet: r50.load_real SKIPs 77 'missing data' until an RTN or AutoRound export exists (data key lfm2moe_rtn) - r50.host and r50.synth / r50.load_synth do not wait for it."
-rownote 50 "r50.synth needs only the oracle image (no checkpoint download): make_synth.py draws random weights at the real widths. Disk: ~1.29 GB for each of the two spellings under \$DATA/lfm2moe-synth/{w,proj} (the tree's lfm2moe-synth.partial while writing); RAM: a few GB in the oracle container (the embedding's and the 64-expert MoE layer's fp32 draws before packing)."
+rownote 50 "24q (spec 24 §0's stage) is not built yet: r50.load_real SKIPs 77 'missing data' until an RTN or AutoRound export exists (data key lfm2moe_rtn) - r50.host, r50.pytest and r50.synth / r50.load_synth do not wait for it."
+rownote 50 "r50.synth needs only the oracle image (no checkpoint download): make_synth.py draws random weights at the real widths, via lfm2moe_oracle.sh synth-ckpt (both spellings in one call). Disk: ~1.29 GB for each of the two spellings under \$DATA/oracle-out-lfm2moe-synth/{w,proj} (the tree's oracle-out-lfm2moe-synth.partial while writing, {w,proj}.ACCEPTED written last); RAM: a few GB in the oracle container (the embedding's and the 64-expert MoE layer's fp32 draws before packing). r50.pytest runs test_lfm2moe_quant.py (make_synth / check.py's own tests) via lfm2moe_oracle.sh synth-tests and needs no checkpoint either."
 rownote 50 "Hand back: each load line (layers, expert spelling, int8 / bf16 head, devices, bytes) and its seconds (the int8 head's quantisation time separately), every device's weights line against loader::lfm::device_weight_bytes, the synthetic checkpoints' host-half lines (tensors, 0 unconsumed, both spellings) and the plan lines (one card at 131072; the two-card split by layer bytes)."
 stage r50.host       50 default cpu -                         -        "host: lfm2moe_test, lfm2moe_repack_test, lfm2moe_rope_test, lfm2moe_plan_test, lfm2moe_synth_host_test"
 st_r50_host() {
@@ -3431,34 +3431,27 @@ st_r50_host() {
     'OK|ok$|weight_bytes|max_len_auto|pp_split|0 unconsumed|tensors'
   finish
 }
-stage r50.synth      50 default cpu oracle_image              -        "make_synth.py N 4, both spellings -> \$DATA/lfm2moe-synth/{w,proj}; check.py ACCEPTED"
+stage r50.pytest     50 default cpu oracle_image              -        "the Python tools' tests in the oracle image with the 5.19.0 site: test_lfm2moe_quant.py (make_synth / check.py / the packer's rule) - lfm2moe_oracle.sh synth-tests"
+st_r50_pytest() {
+  chk "tools/box_validate/lfm2moe_oracle.sh $DATA synth-tests" "test_lfm2moe_quant.py"
+  grab_all pytest '^(PASS|FAIL|SKIP) |passed|ACCEPTED|REJECTED' 20
+  finish
+}
+stage r50.synth      50 optin   cpu oracle_image              -        "make_synth.py --layers 4, both spellings -> \$DATA/oracle-out-lfm2moe-synth/{w,proj}; check.py ACCEPTED - lfm2moe_oracle.sh synth-ckpt"
 st_r50_synth() {
-  local site=oracle-out-q4exp-site part=lfm2moe-synth.partial out="$DATA/lfm2moe-synth"
-  x "mkdir -p $part $out"
-  x "tools/oracle/qwen4exp_env.sh $TREE/$site > /dev/null"
-  for s in w proj; do
-    if [ -s "$out/$s/model.safetensors.index.json" ] && [ -f "$out/$s.ACCEPTED" ]; then
-      x "echo r50.synth: $out/$s kept (ACCEPTED)"
-      continue
-    fi
-    chk "tools/oracle/run_in_container.sh 'export PYTHONPATH=/ws/$site && \
-          python3 tools/quantize/lfm2moe/make_synth.py /ws/$part/$s --layers 4 --expert-names $s \
-            > /ws/$part/$s.log 2>&1 && \
-          python3 tools/quantize/lfm2moe/check.py /ws/$part/$s > /ws/$part/$s.check.log 2>&1'" \
-      "make_synth.py --layers 4 --expert-names $s, then check.py"
-    x "mv -f $part/$s $out/$s && mv -f $part/$s.log $out/$s.log && mv -f $part/$s.check.log $out/$s.ACCEPTED"
-  done
-  grab_all synth '^ACCEPTED|REFUSED|^wrote|FAILED' 12
+  chk "tools/box_validate/lfm2moe_oracle.sh $DATA synth-ckpt" "the synthetic LFM2.5-24B-A2B checkpoints (both expert spellings)"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_lfm2moe_synth' $STATE/have.env"
+  grab_all synth '^ACCEPTED|REJECTED|^wrote|FAILED' 12
   finish
 }
-stage r50.load_synth 50 default gpu lfm2moe_synth             r50.synth "lfm2moe_load_checkpoint_test on both synthetics: plan == allocation, blocks read back"
+stage r50.load_synth 50 default gpu lfm2moe_synth             r50.synth "lfm2moe_load_checkpoint_test on both synthetics: one card (int8 and bf16 heads), then --pp 2 split 2 over both (SKIP without the second card) - plan == allocation, every linear's layout read back"
 st_r50_load_synth() {
-  chk "build/tests/lfm2moe_load_checkpoint_test $DATA/lfm2moe-synth/w" "load_lfm2moe on the 'w'-spelling synthetic"
-  chk "build/tests/lfm2moe_load_checkpoint_test $DATA/lfm2moe-synth/proj" "load_lfm2moe on the 'proj'-spelling synthetic"
-  jgrab load-synth '^lfm2moe_load_checkpoint_test$' 'OK|weights|unconsumed'
+  run_tests '^lfm2moe_load_synth_(w|proj|bf16|pp2|pp2_bf16)_test$'
+  jgrab load-synth '^lfm2moe_load_synth' 'OK|weights|unconsumed|SKIP'
   finish
 }
-stage r50.load_real  50 default gpu lfm2moe_rtn               -        "lfm2moe_load_checkpoint_test on 24q's RTN export (one card; two with --split 20 when two GPUs)"
+stage r50.load_real  50 default gpu lfm2moe_rtn               -        "lfm2moe_load_checkpoint_test on 24q's RTN export (one card; two cards with its split=20 positional argument when two GPUs)"
 st_r50_load_real() {
   chk "build/tests/lfm2moe_load_checkpoint_test \$(tools/box_validate/data.sh resolve \"\${SNAP_LFM2MOE_RTN:-?}\")" \
     "load_lfm2moe on 24q's RTN / AutoRound export"

@@ -179,8 +179,8 @@ case "${1:-}" in
     have lfm2moe_a4_ref "oracle-out-lfm2moe-a4/ with LFM2.5's set and 36 <name>.bf16.txt (spec 24a: lfm2moe_oracle.sh a4 - the bf16 original's A4 reference, 24q / 24e score against it)" \
       bash -c 'test -s oracle-out-lfm2moe-a4/set/manifest.json && test "$(ls oracle-out-lfm2moe-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     # Spec 24b Task 1 (queue row 50): the synthetic real-width checkpoints, both expert spellings.
-    have lfm2moe_synth "lfm2moe-synth/{w,proj}/ + check.py ACCEPTED (spec 24b: r50.synth - make_synth.py --layers 4)" \
-      bash -c 'for s in w proj; do test -s lfm2moe-synth/$s/model.safetensors.index.json || exit 1; done'
+    have lfm2moe_synth "oracle-out-lfm2moe-synth/{w,proj}/ + {w,proj}.ACCEPTED (spec 24b: r50.synth - make_synth.py --layers 4)" \
+      bash -c 'for s in w proj; do test -s oracle-out-lfm2moe-synth/$s/model.safetensors.index.json && test -f oracle-out-lfm2moe-synth/$s.ACCEPTED || exit 1; done'
     # Spec 24q (not built when 24b was written: r50.load_real SKIPs 77 until it exists).
     have lfm2moe_rtn "LFM2.5-24B-A2B's RTN int4 g64 export (spec 24 §5: 24q's development checkpoint; not built yet)" \
       bash -c 'false'
