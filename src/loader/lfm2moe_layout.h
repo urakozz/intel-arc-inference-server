@@ -120,4 +120,31 @@ inline size_t weight_bytes(const model::Lfm2MoeDesc& d, bool int8_head) {
   return b;
 }
 
+// Whether device `dev` under placement `p` holds an attention layer (and so needs a RoPE table).
+inline bool device_has_attention(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p, uint32_t dev) {
+  for (uint32_t l = p.first(dev); l < p.end(dev); ++l)
+    if (d.is_attention(l)) return true;
+  return false;
+}
+
+// What `load_lfm2moe` uploads onto device `dev` under placement `p` (loader::load_lfm2moe asserts
+// its own total equals this - the ONE formula the loader and the planner share): its layers'
+// weights, the embedding on device 0 (also the bf16 head there), the final norm and the head
+// (int8, or a replica of the embedding tiles for a bf16 head on a device that is not device 0) on
+// the last device.
+inline size_t device_weight_bytes(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p, uint32_t dev,
+                                  bool int8_head) {
+  size_t b = 0;
+  for (uint32_t l = p.first(dev); l < p.end(dev); ++l) b += layer_weight_bytes(d, l);
+  if (dev == 0) b += embed_tiled_bytes(d);
+  if (dev + 1 == p.devices) {
+    b += size_t(d.hidden) * 4;   // embedding_norm
+    if (int8_head)
+      b += head_int8_bytes(d);
+    else if (dev != 0)
+      b += embed_tiled_bytes(d);   // the bf16 head's own replica of the embedding tiles
+  }
+  return b;
+}
+
 }  // namespace loader::lfm
