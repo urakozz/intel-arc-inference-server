@@ -52,10 +52,7 @@ int main(int argc, char** argv) {
   CHECK_EQ(m.parts.size(), size_t(1));
   const loader::LfmDevicePart& P = m.parts[0];
   CHECK_EQ(P.layers.size(), size_t(d.layers));
-  size_t want = loader::lfm::embed_tiled_bytes(d) + size_t(d.hidden) * 4;
-  want += o.int8_head ? loader::lfm::head_int8_bytes(d) : 0;
-  for (uint32_t l = 0; l < d.layers; ++l) want += loader::lfm::layer_weight_bytes(d, l);
-  CHECK_EQ(P.bytes, want);
+  CHECK_EQ(P.bytes, loader::lfm::device_weight_bytes(d, m.place, 0, o.int8_head));
   CHECK_EQ(P.rope_bytes, loader::lfm::rope_table_bytes(o.max_len));
   CHECK(P.embed_tiles && P.final_norm && P.rope);
   CHECK((o.int8_head && P.head_int8) || (!o.int8_head && !P.head_int8));
