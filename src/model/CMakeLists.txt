@@ -34,6 +34,13 @@ add_library(b70_muse_model STATIC muse_glimmer.cc)
 target_include_directories(b70_muse_model PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_muse_model PUBLIC b70_model)
 
+# --- Spec 24b: LFM2.5-24B-A2B (lfm2_moe) ----------------------------------------------------------
+# The model as data, BESIDE qwen3_5, K2, Kolibri, qwen4_exp and Muse-Glimmer (spec 24 §6): its own table,
+# sharing GemvShape / WeightKind / Fuse from qwen35.h. Host only.
+add_library(b70_lfm2moe_model STATIC lfm2moe.cc)
+target_include_directories(b70_lfm2moe_model PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_lfm2moe_model PUBLIC b70_model)
+
 # --- Spec 19b: the DFlash / DFlash 2 drafter (spec 19 §2) -----------------------------------------
 # The drafter's config as data and its checks against the target it drafts for (model/dflash.h). Host only.
 add_library(b70_dflash_model STATIC dflash.cc)
