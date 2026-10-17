@@ -4228,5 +4228,26 @@ foreach(t lfm2moe_repack_test lfm2moe_rope_test)
   add_test(NAME ${t} COMMAND ${t})
   set_tests_properties(${t} PROPERTIES LABELS lfm2moe)
 endforeach()
-# Tasks 4-5 append to this block as they are built (the loader, the memory plan).
+# Task 4: the loader's host half on the synthetic checkpoints (both expert spellings) - and, on the
+# card, the synthetic checkpoints and 24q's export (not built yet: SKIP 77 "missing data" until then).
+set(B70_LFM2MOE_SNAPSHOT "urakozz/LFM2.5-24B-A2B-W4A16-g64-AutoRound-GPTQ" CACHE STRING
+  "LFM2.5-24B-A2B int4 checkpoint (spec 24q, not built when 24b was written)")
+set(B70_LFM2MOE_SYNTH_DIR "${CMAKE_SOURCE_DIR}/lfm2moe-synth" CACHE PATH
+  "Task 1's synthetic checkpoints (tools/quantize/lfm2moe/make_synth.py, both expert spellings)")
+add_executable(lfm2moe_synth_host_test loader/lfm2moe_synth_host_test.cc)
+target_include_directories(lfm2moe_synth_host_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lfm2moe_synth_host_test PRIVATE b70_lfm2moe_loader)
+add_test(NAME lfm2moe_synth_host_w_test COMMAND lfm2moe_synth_host_test ${B70_LFM2MOE_SYNTH_DIR}/w)
+add_test(NAME lfm2moe_synth_host_proj_test COMMAND lfm2moe_synth_host_test ${B70_LFM2MOE_SYNTH_DIR}/proj)
+set_tests_properties(lfm2moe_synth_host_w_test lfm2moe_synth_host_proj_test PROPERTIES LABELS lfm2moe
+  SKIP_RETURN_CODE 77)
+add_executable(lfm2moe_load_checkpoint_test loader/lfm2moe_load_checkpoint_test.cc)
+target_include_directories(lfm2moe_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lfm2moe_load_checkpoint_test PRIVATE b70_lfm2moe_loader b70_l0)
+add_test(NAME lfm2moe_load_synth_w_test COMMAND lfm2moe_load_checkpoint_test ${B70_LFM2MOE_SYNTH_DIR}/w)
+add_test(NAME lfm2moe_load_synth_proj_test COMMAND lfm2moe_load_checkpoint_test ${B70_LFM2MOE_SYNTH_DIR}/proj)
+add_test(NAME lfm2moe_load_real_test COMMAND lfm2moe_load_checkpoint_test ${B70_LFM2MOE_SNAPSHOT})
+set_tests_properties(lfm2moe_load_synth_w_test lfm2moe_load_synth_proj_test lfm2moe_load_real_test PROPERTIES
+  LABELS "checkpoint;lfm2moe" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+# Task 5 appends to this block as it is built (the memory plan).
 # ==== Spec 24b: LFM2.5-24B-A2B descriptor and loader (label lfm2moe) ==== (end) ====
