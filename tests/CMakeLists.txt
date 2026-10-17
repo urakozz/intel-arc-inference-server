@@ -4206,3 +4206,18 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
 endif()
 # ==== Spec 19d ==== (end) ====
+
+# ==== Spec 24b: LFM2.5-24B-A2B descriptor and loader (label lfm2moe) ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-15-spec24b-lfm2moe-descriptor-loader.md. Box queue row 50 (rows 48-53
+# are spec 24's; 42-47 spec 23's). Host tests first (tools/mac_check.sh); real-checkpoint card tests SKIP 77
+# until 24q's RTN / AutoRound export exists; the synthetic checkpoints (tools/quantize/lfm2moe/make_synth.py,
+# tools/box_validate/stages.sh row 50) carry the card gate before it does.
+# Task 2: the model table.
+add_executable(lfm2moe_test model/lfm2moe_test.cc)
+target_include_directories(lfm2moe_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lfm2moe_test PRIVATE b70_lfm2moe_model)
+add_test(NAME lfm2moe_test COMMAND lfm2moe_test ${CMAKE_SOURCE_DIR}/tests/model/lfm2moe/config.json
+  ${CMAKE_SOURCE_DIR}/tests/model/lfm2moe/synth4.json)
+set_tests_properties(lfm2moe_test PROPERTIES LABELS lfm2moe)
+# Tasks 3-5 append to this block as they are built (the layouts / repack, the loader, the memory plan).
+# ==== Spec 24b: LFM2.5-24B-A2B descriptor and loader (label lfm2moe) ==== (end) ====
