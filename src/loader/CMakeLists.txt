@@ -46,8 +46,9 @@ target_link_libraries(b70_muse_loader PUBLIC b70_loader b70_muse_model b70_muse_
 # --- Spec 24b: LFM2.5-24B-A2B --------------------------------------------------------------------
 # The LFM2.5-24B-A2B loader, beside the others (none touched): the host half (lfm2moe_repack.cc,
 # lfm2moe_rope.cc - no Level Zero, run on any host by tests/loader/lfm2moe_repack_test.cc and
-# lfm2moe_rope_test.cc). Task 4 adds lfm2moe_loader.cc (the upload) to this same library.
-add_library(b70_lfm2moe_loader STATIC lfm2moe_repack.cc lfm2moe_rope.cc)
+# lfm2moe_rope_test.cc / lfm2moe_synth_host_test.cc) and the upload onto one or two devices
+# (lfm2moe_loader.cc, Task 4).
+add_library(b70_lfm2moe_loader STATIC lfm2moe_repack.cc lfm2moe_rope.cc lfm2moe_loader.cc)
 target_include_directories(b70_lfm2moe_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_lfm2moe_loader PUBLIC b70_loader b70_lfm2moe_model b70_l0)
 
