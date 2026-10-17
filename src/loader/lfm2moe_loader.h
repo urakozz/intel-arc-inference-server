@@ -289,6 +289,12 @@ class Lfm2MoeCheckpoint {
       throw std::runtime_error("load_lfm2moe: '" + prefix + "' is K=" + std::to_string(s.K) +
                                " N=" + std::to_string(s.N) + ", the descriptor says K=" + std::to_string(K) +
                                " N=" + std::to_string(N));
+    // I6: g64 only, per linear (LinearSrc::classify leaves `group` at 64 unless it expanded a g128
+    // scales tensor onto the g64 kernels' layout - a checkpoint that mixes g64 and g128 linears
+    // would otherwise pass the config-level check above and only fail here, naming the tensor).
+    if (s.group != 64)
+      throw std::runtime_error("load_lfm2moe: '" + prefix + "' is int4 g" + std::to_string(s.group) +
+                               ", not g64 (spec 24 §5: int4 g64 sym only)");
     for (const std::string& suffix : s.suffixes()) consumed_.insert(prefix + suffix);
     return s;
   }

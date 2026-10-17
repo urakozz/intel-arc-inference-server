@@ -496,8 +496,39 @@ int main() {
       CHECK(threw);
       fs::remove_all(tmp);
     }
+    // I6: a linear shipped int4 g128 (not g64) is refused naming its prefix - K must be >= 128 for a
+    // g128 group to exist at all, so this uses its own slightly wider descriptor.
+    {
+      Lfm2MoeDesc td2 = tiny_desc();
+      td2.layers = 1;
+      td2.hidden = 128;
+      td2.head_dim = 128;
+      td2.dense_inter = 128;
+      td2.kinds = {model::LfmKind::Conv};   // the simplest single layer: dense + conv
+      Tensors ts = build_full_checkpoint(td2, LfmExpertNames::W);
+      const std::string victim = td2.layer_prefix(0) + "conv.in_proj";
+      Tensor& sc = ts.at(victim + ".scales");
+      const std::vector<uint64_t> want_g64_shape = {td2.hidden / 64, 3 * td2.hidden};   // [2, 384]
+      CHECK(sc.shape == want_g64_shape);
+      sc.shape = {td2.hidden / 128, 3 * td2.hidden};                                   // g128: [1, 384]
+      sc.bytes.resize(sc.shape[0] * sc.shape[1] * 2, 0x3C);
+      write_checkpoint(tmp, ts);
+      loader::SafetensorsSet set(tmp.string() + "/");
+      loader::Lfm2MoeCheckpoint ck(td2, set, LfmExpertNames::W);
+      ck.check_names();   // names alone do not catch a group-size change
+      loader::HostLayer host;
+      bool threw = false;
+      try {
+        ck.repack_layer(0, false, host);
+      } catch (const std::runtime_error& e) {
+        const std::string msg = e.what();
+        threw = msg.find(victim) != std::string::npos && msg.find("g128") != std::string::npos;
+      }
+      CHECK(threw);
+      fs::remove_all(tmp);
+    }
     std::printf("  crafted refusals: an unknown tensor, a missing one, expert_bias as BF16, a tied "
-               "lm_head (skipped), a different lm_head (refused naming both)\n");
+               "lm_head (skipped), a different lm_head (refused naming both), a g128 linear (I6)\n");
   }
 
   std::printf("lfm2moe_repack_test: ok\n");
