@@ -4219,5 +4219,14 @@ target_link_libraries(lfm2moe_test PRIVATE b70_lfm2moe_model)
 add_test(NAME lfm2moe_test COMMAND lfm2moe_test ${CMAKE_SOURCE_DIR}/tests/model/lfm2moe/config.json
   ${CMAKE_SOURCE_DIR}/tests/model/lfm2moe/synth4.json)
 set_tests_properties(lfm2moe_test PROPERTIES LABELS lfm2moe)
-# Tasks 3-5 append to this block as they are built (the layouts / repack, the loader, the memory plan).
+# Task 3: the layouts and the host repack half (both expert spellings, the in_proj / conv-tile permutation,
+# the tied embedding tiles, the RoPE table against transformers 5.19.0's).
+foreach(t lfm2moe_repack_test lfm2moe_rope_test)
+  add_executable(${t} loader/${t}.cc)
+  target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(${t} PRIVATE b70_lfm2moe_loader)
+  add_test(NAME ${t} COMMAND ${t})
+  set_tests_properties(${t} PROPERTIES LABELS lfm2moe)
+endforeach()
+# Tasks 4-5 append to this block as they are built (the loader, the memory plan).
 # ==== Spec 24b: LFM2.5-24B-A2B descriptor and loader (label lfm2moe) ==== (end) ====
