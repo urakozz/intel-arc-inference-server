@@ -933,6 +933,49 @@ none of their files. The int4 layouts' byte formulas moved to `loader/int4_layou
   17,409,096,960 B; the load line: `Muse-Glimmer-30B: 52 layers (int4 g64, ... spelling), 809 vision tensors
   skipped, head int8, devices 1, 17409096960 B`.
 
+## LFM2.5-24B-A2B (spec 24b): two expert spellings, the tied head from the embedding tiles
+
+`loader::load_lfm2moe` (`src/loader/lfm2moe_{layout.h,repack.*,loader.*}`) is a loader BESIDE the others; it
+reuses `resolve_snapshot`, `QuantConfig::parse`, `SafetensorsSet`, `assert_quant_invariants` / `check_quant_scan`,
+`LinearSrc::classify`, `DeviceWeight` and `quantise_int8_tiled`, and touches none of their files. Every int4
+linear - per-layer (conv `in_proj` / `out_proj`, attention `q||k||v` / `out_proj`, the two dense linears) and
+per-expert (`gate_up`, `down`) - is the shared subgroup-tiled layout 1 (`loader/int4_layout.h`); there is no
+GPTQ-native layout 0 arm for this family.
+
+- **Our one export, either expert spelling.** Spec 24 §5's AutoRound export is the only form read (no checkpoint
+  arm switch like Kolibri's attention, no vendored third-party spelling like Muse's): every `nn.Linear` int4 g64
+  sym, auto_round:auto_gptq. The routed experts may be named `experts.E.{w1,w3,w2}` (the checkpoint's own,
+  transformers' fusion order) or `experts.E.{gate_proj,up_proj,down_proj}` (AutoRound's generic unfusing) -
+  `detect_expert_names` reads whichever the FIRST expert tensor uses and holds every other expert to it, all or
+  nothing; a checkpoint mixing both is refused naming the mix.
+- **`in_proj`'s B/C/x order, and the arm-c permutation.** A conv layer's `in_proj` (2048 -> 6144) packs its
+  output columns `[0, 2048) B`, `[2048, 4096) C`, `[4096, 6144) x` - `repack_in_proj(..., conv_tiles=false)` is
+  the plain `repack_int4_layout1_cols` of that one tensor. `conv_tiles=true` (spec 24 §4.1's fused decode arm)
+  permutes whole 16-column tiles into 16-channel groups `[B 16 | C 16 | x 16]`, channel tile by channel tile - a
+  tile-granularity permutation of the false layout, not a re-quantisation.
+- **Gate tile then up tile, interleaved in 16s.** Every expert's `gate_up` block is `cols_interleave16(w1, w3)`
+  (or `gate_proj, up_proj`) then layout-1, exactly Kolibri's / Ornith's convention: output n_tile `2t` is gate's
+  column tile `t`, n_tile `2t + 1` is up's. No router padding (64 experts is already a multiple of 16 for
+  `gemv_bf16`'s tiles - unlike Kolibri's 384, which pads to 512).
+- **The tied head, built from the embedding's own bytes.** No `lm_head.*` tensor is required (`tie_word_embeddings`
+  true); an optional one is checked bitwise against `model.embed_tokens.weight` and skipped, or refused naming
+  both if it differs. The embedding is uploaded once, in `gemv_bf16`'s tiled layout, on device 0 (the gather);
+  the int8 head (spec 9's rule, `quantise_int8_tiled`) is built from the SAME host-mmapped bf16 bytes and
+  uploaded on the last device. With a bf16 head on a LAST device that is not device 0 (`--pp 2`), that device
+  gets its own replica of the tiles (524,288,000 B) - the one case where the embedding is not "kept once".
+- **Names both ways.** The text names are exactly `lfm_expected_names` (ground-truthed against
+  `tools/oracle/lfm2moe_ref.py`'s `expected_names`, built in 24a from transformers 5.19.0 itself - attention's
+  output projection is `self_attn.out_proj`, not `o_proj`; the final norm is `model.embedding_norm.weight`, not
+  `model.norm`); every tensor is read exactly once (`unconsumed()` empty), the later layers' consumed by design
+  with `--layers N`.
+- **The memory plan before the first allocation**: `runtime::lfm2moe::plan` + `require_fits` at the 1.5 GB
+  reserve. One card, int8 head, at the trained context (131072): weights 13,391,087,616 B (13.39 GB - routed
+  experts 12,192,841,728, the other int4 linears 399,932,928, routers 9,961,472, the embedding 524,288,000, the
+  int8 head 262,656,000), KV 2,684,354,560 B, the conv rings 1,966,080 B. `--max-len auto` is the largest
+  multiple of 256 that fits and is at most 131072 (`max_position_embeddings`); an explicit value above it is
+  refused naming that key. The two-card split (`pp_split`) balances layer weights alone (`runtime::pp_balance`),
+  device 0's embedding and the last device's final norm / head counted as each side's fixed overhead.
+
 ## Deliberately not loaded
 
 - **`model.visual.*`** (333 tensors, 0.921 GB) - this checkpoint is a

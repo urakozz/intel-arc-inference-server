@@ -3419,6 +3419,54 @@ st_r48_a4_ref() {
 }
 
 # ======================================================================================
+row 50 "spec 24b - LFM2.5-24B-A2B: the descriptor, the loader (both expert spellings, the tied int8 head), the memory plan (plan 24b)"
+rownote 50 "No kernel and no existing loader touched (kernel_cmdlines +0 / -0 / ~0; the int4 layout-1 formula stays loader/int4_layout.h's): G0's g0.sha is the 'nothing moved' check. Written on the Mac: lfm2moe_test, lfm2moe_repack_test, lfm2moe_rope_test (bitwise transformers 5.19.0's Lfm2MoeRotaryEmbedding), lfm2moe_plan_test and lfm2moe_synth_host_{w,proj}_test all ran there, over two synthetic real-width checkpoints (make_synth.py --layers 4) generated on the Mac itself; nothing of load_lfm2moe has touched a card."
+rownote 50 "24q (spec 24 §0's stage) is not built yet: r50.load_real SKIPs 77 'missing data' until an RTN or AutoRound export exists (data key lfm2moe_rtn) - r50.host and r50.synth / r50.load_synth do not wait for it."
+rownote 50 "r50.synth needs only the oracle image (no checkpoint download): make_synth.py draws random weights at the real widths. Disk: ~1.29 GB for each of the two spellings under \$DATA/lfm2moe-synth/{w,proj} (the tree's lfm2moe-synth.partial while writing); RAM: a few GB in the oracle container (the embedding's and the 64-expert MoE layer's fp32 draws before packing)."
+rownote 50 "Hand back: each load line (layers, expert spelling, int8 / bf16 head, devices, bytes) and its seconds (the int8 head's quantisation time separately), every device's weights line against loader::lfm::device_weight_bytes, the synthetic checkpoints' host-half lines (tensors, 0 unconsumed, both spellings) and the plan lines (one card at 131072; the two-card split by layer bytes)."
+stage r50.host       50 default cpu -                         -        "host: lfm2moe_test, lfm2moe_repack_test, lfm2moe_rope_test, lfm2moe_plan_test, lfm2moe_synth_host_test"
+st_r50_host() {
+  run_tests '^(lfm2moe_test|lfm2moe_repack_test|lfm2moe_rope_test|lfm2moe_plan_test|lfm2moe_synth_host_(w|proj)_test)$'
+  jgrab host '^lfm2moe_(test|repack_test|rope_test|plan_test|synth_host_(w|proj)_test)$' \
+    'OK|ok$|weight_bytes|max_len_auto|pp_split|0 unconsumed|tensors'
+  finish
+}
+stage r50.synth      50 default cpu oracle_image              -        "make_synth.py N 4, both spellings -> \$DATA/lfm2moe-synth/{w,proj}; check.py ACCEPTED"
+st_r50_synth() {
+  local site=oracle-out-q4exp-site part=lfm2moe-synth.partial out="$DATA/lfm2moe-synth"
+  x "mkdir -p $part $out"
+  x "tools/oracle/qwen4exp_env.sh $TREE/$site > /dev/null"
+  for s in w proj; do
+    if [ -s "$out/$s/model.safetensors.index.json" ] && [ -f "$out/$s.ACCEPTED" ]; then
+      x "echo r50.synth: $out/$s kept (ACCEPTED)"
+      continue
+    fi
+    chk "tools/oracle/run_in_container.sh 'export PYTHONPATH=/ws/$site && \
+          python3 tools/quantize/lfm2moe/make_synth.py /ws/$part/$s --layers 4 --expert-names $s \
+            > /ws/$part/$s.log 2>&1 && \
+          python3 tools/quantize/lfm2moe/check.py /ws/$part/$s > /ws/$part/$s.check.log 2>&1'" \
+      "make_synth.py --layers 4 --expert-names $s, then check.py"
+    x "mv -f $part/$s $out/$s && mv -f $part/$s.log $out/$s.log && mv -f $part/$s.check.log $out/$s.ACCEPTED"
+  done
+  grab_all synth '^ACCEPTED|REFUSED|^wrote|FAILED' 12
+  finish
+}
+stage r50.load_synth 50 default gpu lfm2moe_synth             r50.synth "lfm2moe_load_checkpoint_test on both synthetics: plan == allocation, blocks read back"
+st_r50_load_synth() {
+  chk "build/tests/lfm2moe_load_checkpoint_test $DATA/lfm2moe-synth/w" "load_lfm2moe on the 'w'-spelling synthetic"
+  chk "build/tests/lfm2moe_load_checkpoint_test $DATA/lfm2moe-synth/proj" "load_lfm2moe on the 'proj'-spelling synthetic"
+  jgrab load-synth '^lfm2moe_load_checkpoint_test$' 'OK|weights|unconsumed'
+  finish
+}
+stage r50.load_real  50 default gpu lfm2moe_rtn               -        "lfm2moe_load_checkpoint_test on 24q's RTN export (one card; two with --split 20 when two GPUs)"
+st_r50_load_real() {
+  chk "build/tests/lfm2moe_load_checkpoint_test \$(tools/box_validate/data.sh resolve \"\${SNAP_LFM2MOE_RTN:-?}\")" \
+    "load_lfm2moe on 24q's RTN / AutoRound export"
+  jgrab load-real '^lfm2moe_load_checkpoint_test$' 'OK|weights|unconsumed'
+  finish
+}
+
+# ======================================================================================
 row 54 "spec 19b - the DFlash drafter on the card: loader::load_drafter (z-lab/Qwen3.8-27B-DFlash2 beside Qwen3.8, bf16 or int8 at load, the target's embedding and head shared), the df_* kernels (embed, norms, the grouped two-tap convs, the block's q / k / v, ring + block attention, top-16 with the vocab mask and the draft vocabulary's id map, the selector walk), the captured draft (87 launches) and projection (8) lists, the planner's drafter term; D0 and D1 (plan 19b)"
 rownote 54 "Written blind on the Mac: no df_* binary has ever been compiled (ocloc is the box's) - r54.kernels' kbins is the first build of the 14 new command lines (kernel_cmdlines +14 / -0 / ~0: 8 df_*, the bf16 head at 7 rows, the compact heads at 7 rows). Nothing binds them without a drafter (19c's --spec dflash): D0 is G0. On the Mac's GPU (tools/mac/clrun/dflash_run, indicative) the whole draft and projection lists ran at the fixture's tiny shapes against the host twin: rows / scores cos 1.0000000 in 8 of 9 cases (one at 0.99999 - Apple's 1 / sqrt is not correctly rounded), every walk equal, a 256-id draft vocabulary bitwise the full head's, v1. The twin (tests/kernels/dflash_ref.h) matches tools/oracle/dflash_ref.py to 6e-7 (dflash_ref_test). The kernels use work-group reductions only (no sub-group ops): their speed on the B70 is unmeasured."
 rownote 54 "Data: the drafter (hf download z-lab/Qwen3.8-27B-DFlash2, 3.85 GB; data key dflash) for r54.load / r54.draft / r54.d1; 19a's tap dumps (the Mac's oracle-out-19a/dumps, 2.7 GB, and oracle-out-19a/draft_vocab.ranked.ids: tools/box_validate.sh --push-data; data key oracle_dflash_dumps) for r54.d1; the gate checkpoint (qwen). r54.d1_ref runs dflash_ref.py in the oracle image: ~15 GB RSS (the drafter fp32 7.2 GB, the target's head and embedding), ~1-2 s a draft on 44 threads, ESTIMATED (16 anchors x 37 dumps x 3 arms ~ 0.5-1 h)."
