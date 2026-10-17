@@ -34,6 +34,7 @@ last row only:    lfm_res_norm _NF + embedding_norm · head (int8 | bf16) · arg
 - **`l0` only:** `--prefill-backend l0-int8` / `sycl-tla` are refused for this model naming spec 24 §11 (int8 prefill is a later probe; `sycl-tla` has no hd64 path here).
 - **Decision 10:** `--pp 2` prefill hands `h` (C x 2048 bf16, 8 MB at C 2048) across once per chunk (spec 16c's sequential walk, Kolibri's).
 - **Decision 12:** family copies (`lfm_pf_*`); `pf_moe_gemm.cl`, `pf_gemm.cl`, `pf_dequant_slab.cl` reused unchanged from new CMake lines (K 2048 N 3072 SILU; K 1536 N 2048; the dense and linear slabs).
+- **Prefill must follow each linear's layout (24b review fix, I1).** 24b's per-`LfmLinear` `{S, layout}` is PROVISIONAL (24c sweeps it) and not necessarily layout 1 for every linear this plan's slabs dequantise: `in_proj` / `out_proj` / the dense down-projection / the routed experts are layout 1, the fused `q||k||v` and dense `gate||up` are layout 0. `pf_dequant_slab.cl`'s existing layout-1 branch (Kolibri's / Muse's convention) covers the former group unchanged; the `q||k||v` and dense `gate||up` slabs need `pf_dequant_slab`'s layout-0 branch (the GPTQ-native `.qweight`/`.scales` pair), not a second kernel - confirm against `model::Lfm2MoeDesc::linears(l)[...].shape.layout` per linear, the same source 24c's decode GEMVs read, rather than assuming layout 1 because every OTHER model this prefill code was copied from happens to use it everywhere.
 
 ## Global Constraints
 
