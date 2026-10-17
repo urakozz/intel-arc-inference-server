@@ -4232,8 +4232,8 @@ endforeach()
 # card, the synthetic checkpoints and 24q's export (not built yet: SKIP 77 "missing data" until then).
 set(B70_LFM2MOE_SNAPSHOT "urakozz/LFM2.5-24B-A2B-W4A16-g64-AutoRound-GPTQ" CACHE STRING
   "LFM2.5-24B-A2B int4 checkpoint (spec 24q, not built when 24b was written)")
-set(B70_LFM2MOE_SYNTH_DIR "${CMAKE_SOURCE_DIR}/lfm2moe-synth" CACHE PATH
-  "Task 1's synthetic checkpoints (tools/quantize/lfm2moe/make_synth.py, both expert spellings)")
+set(B70_LFM2MOE_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-lfm2moe-synth" CACHE PATH
+  "Task 1's synthetic checkpoints (tools/quantize/lfm2moe/make_synth.py, both expert spellings) - the box's \$DATA/oracle-out-lfm2moe-synth, data key lfm2moe_synth (I3)")
 add_executable(lfm2moe_synth_host_test loader/lfm2moe_synth_host_test.cc)
 target_include_directories(lfm2moe_synth_host_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(lfm2moe_synth_host_test PRIVATE b70_lfm2moe_loader)
@@ -4244,10 +4244,17 @@ set_tests_properties(lfm2moe_synth_host_w_test lfm2moe_synth_host_proj_test PROP
 add_executable(lfm2moe_load_checkpoint_test loader/lfm2moe_load_checkpoint_test.cc)
 target_include_directories(lfm2moe_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(lfm2moe_load_checkpoint_test PRIVATE b70_lfm2moe_loader b70_l0)
-add_test(NAME lfm2moe_load_synth_w_test COMMAND lfm2moe_load_checkpoint_test ${B70_LFM2MOE_SYNTH_DIR}/w)
-add_test(NAME lfm2moe_load_synth_proj_test COMMAND lfm2moe_load_checkpoint_test ${B70_LFM2MOE_SYNTH_DIR}/proj)
+add_test(NAME lfm2moe_load_synth_w_test COMMAND lfm2moe_load_checkpoint_test ${B70_LFM2MOE_SYNTH_DIR}/w int8)
+add_test(NAME lfm2moe_load_synth_proj_test COMMAND lfm2moe_load_checkpoint_test ${B70_LFM2MOE_SYNTH_DIR}/proj int8)
+# I4: a one-card bf16-head arm (no int8 copy: the embedding tiles serve as the head), and the
+# two-card split (muse_load_synth_pp2_test's precedent) for both head forms - split 2 of the
+# synthetic's 4 layers.
+add_test(NAME lfm2moe_load_synth_bf16_test COMMAND lfm2moe_load_checkpoint_test ${B70_LFM2MOE_SYNTH_DIR}/w bf16)
+add_test(NAME lfm2moe_load_synth_pp2_test COMMAND lfm2moe_load_checkpoint_test ${B70_LFM2MOE_SYNTH_DIR}/w int8 0 2)
+add_test(NAME lfm2moe_load_synth_pp2_bf16_test COMMAND lfm2moe_load_checkpoint_test ${B70_LFM2MOE_SYNTH_DIR}/w bf16 0 2)
 add_test(NAME lfm2moe_load_real_test COMMAND lfm2moe_load_checkpoint_test ${B70_LFM2MOE_SNAPSHOT})
-set_tests_properties(lfm2moe_load_synth_w_test lfm2moe_load_synth_proj_test lfm2moe_load_real_test PROPERTIES
+set_tests_properties(lfm2moe_load_synth_w_test lfm2moe_load_synth_proj_test lfm2moe_load_synth_bf16_test
+  lfm2moe_load_synth_pp2_test lfm2moe_load_synth_pp2_bf16_test lfm2moe_load_real_test PROPERTIES
   LABELS "checkpoint;lfm2moe" SKIP_RETURN_CODE 77 TIMEOUT 1800)
 # Task 5: the runtime. The memory plan, max-len auto and the two-card split as device-free arithmetic.
 add_executable(lfm2moe_plan_test runtime/lfm2moe_plan_test.cc)

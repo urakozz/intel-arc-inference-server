@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spec 24a: the LFM2.5-24B-A2B (lfm2_moe) CPU reference runs (qwen4exp_oracle.sh's shape) - ON THE BOX CPU, and on
 # the Mac (operator, 2026-10-15: the Mac has the room and the bf16 weights).
-#   tools/box_validate/lfm2moe_oracle.sh <data tree> tests|ppl|hfcheck|golden|export <dir>|a4
+#   tools/box_validate/lfm2moe_oracle.sh <data tree> tests|ppl|hfcheck|golden|export <dir>|a4|synth-ckpt|synth-tests
 #
 # Every mode runs tools/oracle/lfm2moe_ref.py in the oracle image (tools/oracle/run_in_container.sh) with
 # transformers 5.19.0 from a site directory BESIDE the image (tools/oracle/qwen4exp_env.sh: pip --no-deps --target;
@@ -24,6 +24,13 @@
 #                 (<name> = the directory's base name)
 #   a4            tools/toolcall/a4_ref.sh lfm2moe set + ref (36 scenarios, greedy, 2048 new ids, batched)
 #                 -> <data>/oracle-out-lfm2moe-a4/ (DAYS, ESTIMATED; resumable per scenario)
+#   synth-ckpt    spec 24b: tools/quantize/lfm2moe/make_synth.py --layers LFM_SYNTH_LAYERS (4) - a real-width
+#                 synthetic checkpoint, both expert spellings (random weights, src/loader/rtn.h's RTN rule via
+#                 lfm2moe_make_tiny.rtn_int4) - then check.py (names = lfm2moe_ref.expected_names, the data
+#                 asserts) -> <data>/oracle-out-lfm2moe-synth/{w,proj}/ + {w,proj}.ACCEPTED (the check's log;
+#                 written last, it marks done). Needs no checkpoint at all - the oracle image alone.
+#   synth-tests   spec 24b: tools/quantize/lfm2moe/test_lfm2moe_quant.py (make_synth.py / check.py / the
+#                 packer; needs no checkpoint either)
 # Golden runs are per prompt resumable (written into <tree>/oracle-out-lfm2moe*.partial/, moved when complete, the
 # golden file last). Exit 77 (SKIP) when the memory is short (box: MemAvailable < LFM_REF_MIN_GB - 8 tests, 64 real;
 # Mac: the container cap LFM_MEM_GB, default 40, below the floor - 8 tests, 36 real) or the snapshot is absent or
@@ -38,11 +45,11 @@
 #      ORACLE_THREADS.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
-[ $# -ge 2 ] || { echo "usage: $0 <data tree> tests|ppl|hfcheck|golden|export <dir>|a4" >&2; exit 2; }
+[ $# -ge 2 ] || { echo "usage: $0 <data tree> tests|ppl|hfcheck|golden|export <dir>|a4|synth-ckpt|synth-tests" >&2; exit 2; }
 data="$1" mode="$2" arg="${3:-}"
-case "$mode" in tests|ppl|hfcheck|golden|a4) ;;
+case "$mode" in tests|ppl|hfcheck|golden|a4|synth-ckpt|synth-tests) ;;
   export) [ -n "$arg" ] || { echo "lfm2moe_oracle: export needs the export's directory" >&2; exit 2; } ;;
-  *) echo "lfm2moe_oracle: mode $mode is not one of tests|ppl|hfcheck|golden|export <dir>|a4" >&2; exit 2 ;;
+  *) echo "lfm2moe_oracle: mode $mode is not one of tests|ppl|hfcheck|golden|export <dir>|a4|synth-ckpt|synth-tests" >&2; exit 2 ;;
 esac
 mac=0
 [ "$(uname -s)" = Darwin ] && mac=1
@@ -62,11 +69,19 @@ if [ $mac = 1 ]; then
 else
   SITE=oracle-out-q4exp-site
 fi
-case "$mode" in tests) need="${LFM_REF_MIN_GB:-8}"; model="$TINY" ;; *) model="$REAL" ;; esac
-if [ "$mode" != tests ]; then
+case "$mode" in
+  tests) need="${LFM_REF_MIN_GB:-8}"; model="$TINY" ;;
+  synth-ckpt | synth-tests) need="${LFM_REF_MIN_GB:-4}"; model="" ;;   # no checkpoint read at all
+  *) model="$REAL" ;;
+esac
+if [ "$mode" != tests ] && [ "$mode" != synth-ckpt ] && [ "$mode" != synth-tests ]; then
   if [ $mac = 1 ]; then need="${LFM_REF_MIN_GB:-36}"; else need="${LFM_REF_MIN_GB:-64}"; fi
 fi
-snapdir=$(ls -d "$hf/hub/$model"/snapshots/*/ 2>/dev/null | head -1)
+if [ "$mode" = synth-ckpt ] || [ "$mode" = synth-tests ]; then
+  snapdir="(none needed)"
+else
+  snapdir=$(ls -d "$hf/hub/$model"/snapshots/*/ 2>/dev/null | head -1)
+fi
 if [ "$mode" = export ]; then   # the export's own directory is the checkpoint (the bf16 original is not read)
   model="$arg"
   snapdir=""
@@ -106,7 +121,8 @@ if [ "$dry" != 1 ] && [ -z "$snapdir" ]; then
   esac
   exit 77
 fi
-if [ "$dry" != 1 ] && [ "$mode" != tests ] && [ "$mode" != export ] && ls "$hf/hub/$model/blobs/"*.incomplete > /dev/null 2>&1; then
+if [ "$dry" != 1 ] && [ "$mode" != tests ] && [ "$mode" != export ] && [ "$mode" != synth-ckpt ] && [ "$mode" != synth-tests ] \
+   && ls "$hf/hub/$model/blobs/"*.incomplete > /dev/null 2>&1; then
   echo "SKIP_REASON lfm2moe_oracle: the download of $model is not complete ($hf/hub/$model/blobs/*.incomplete)"
   exit 77
 fi
@@ -224,6 +240,37 @@ case "$mode" in
       [ "$rc" = 0 ] && { OUT="$out" FOREGROUND=1 MEM="$a4mem" tools/toolcall/a4_ref.sh lfm2moe ref || rc=1; }
       OUT="$out" tools/toolcall/a4_ref.sh lfm2moe status
     fi
+    ;;
+  synth-ckpt)
+    nl="${LFM_SYNTH_LAYERS:-4}"
+    [[ "$nl" =~ ^[0-9]+$ ]] && [ "$nl" -ge 1 ] && [ "$nl" -le 40 ] || { echo "lfm2moe_oracle: LFM_SYNTH_LAYERS=$nl (1..40)" >&2; exit 2; }
+    out="$data/oracle-out-lfm2moe-synth" part=oracle-out-lfm2moe-synth.partial
+    for spell in w proj; do
+      if [ -f "$out/$spell.ACCEPTED" ] && [ -s "$out/$spell/model.safetensors.index.json" ]; then
+        echo "lfm2moe_oracle: $out/$spell kept (ACCEPTED)"
+        continue
+      fi
+      [ "$dry" = 1 ] || mkdir -p "$out" "$part"
+      echo "lfm2moe_oracle: synth-ckpt $spell - make_synth.py --layers $nl, then check.py ($(date '+%F %T'))"
+      if in_box "python3 tools/quantize/lfm2moe/make_synth.py /ws/$part/$spell --layers $nl --expert-names $spell \
+            > /ws/$part/$spell.log 2>&1 && \
+            python3 tools/quantize/lfm2moe/check.py /ws/$part/$spell > /ws/$part/$spell.check.log 2>&1"; then
+        if [ "$dry" != 1 ]; then
+          tail -1 "$part/$spell.check.log"
+          [ -e "$out/$spell" ] && mv -f "$out/$spell" "$out/$spell.stale.$(date +%s)"
+          mv -f "$part/$spell" "$out/$spell" && mv -f "$part/$spell.log" "$out/$spell.log" && \
+            mv -f "$part/$spell.check.log" "$out/$spell.ACCEPTED"
+          du -sh "$out/$spell"
+        fi
+      else
+        echo "lfm2moe_oracle: synth-ckpt $spell FAILED"
+        tail -20 "$part/$spell.log" "$part/$spell.check.log" 2>/dev/null
+        rc=1
+      fi
+    done
+    ;;
+  synth-tests)
+    in_box "python3 tools/quantize/lfm2moe/test_lfm2moe_quant.py" || rc=1
     ;;
 esac
 exit "$rc"
