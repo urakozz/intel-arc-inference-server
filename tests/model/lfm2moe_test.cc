@@ -94,16 +94,26 @@ int main(int argc, char** argv) {
     const std::vector<model::LfmLinear> l0 = d.linears(0);
     CHECK_EQ(l0.size(), 4u);
     CHECK(l0[0].id == LfmLinearId::InProj && l0[0].shape.K == 2048 && l0[0].shape.N == 6144);
+    CHECK(l0[0].shape.layout == 1 && l0[0].part_n.size() == 1 && l0[0].part_n[0] == 6144);
     CHECK(l0[1].id == LfmLinearId::OutProj && l0[1].shape.K == 2048 && l0[1].shape.N == 2048);
+    CHECK(l0[1].shape.layout == 1);
     CHECK(l0[2].id == LfmLinearId::DenseGateUp && l0[2].shape.K == 2048 && l0[2].shape.N == 23552);
     CHECK(l0[2].fuse == model::Fuse::Interleave16 && l0[2].parts.size() == 2);
+    // PROVISIONAL (spec 24 "24b as built"'s correction): layout 0 for q||k||v and dense gate||up (the
+    // codebase's default for a dense, non-expert linear), layout 1 for in_proj / out_proj / o_proj / dense
+    // down (N = hidden) and every routed-expert block - 24c sweeps these.
+    CHECK(l0[2].shape.layout == 0 && l0[2].part_n.size() == 2 && l0[2].part_n[0] == 11776 &&
+          l0[2].part_n[1] == 11776);
     CHECK(l0[3].id == LfmLinearId::DenseDown && l0[3].shape.K == 11776 && l0[3].shape.N == 2048);
+    CHECK(l0[3].shape.layout == 1);
     // layer 2: the first attention + MoE layer
     const std::vector<model::LfmLinear> l2 = d.linears(2);
     CHECK_EQ(l2.size(), 3u);
     CHECK(l2[0].id == LfmLinearId::Qkv && l2[0].shape.K == 2048 && l2[0].shape.N == 3072);
     CHECK(l2[0].fuse == model::Fuse::Concat && l2[0].parts.size() == 3);
+    CHECK(l2[0].shape.layout == 0 && l2[0].part_n[0] == 2048 && l2[0].part_n[1] == 512 && l2[0].part_n[2] == 512);
     CHECK(l2[1].id == LfmLinearId::OProj && l2[1].shape.K == 2048 && l2[1].shape.N == 2048);
+    CHECK(l2[1].shape.layout == 1);
     CHECK(l2[2].id == LfmLinearId::Router && l2[2].shape.K == 2048 && l2[2].shape.N == 64);
     CHECK(l2[2].kind == model::WeightKind::Bf16);
     // layer 3: conv + MoE

@@ -38,7 +38,7 @@ int main() {
     CHECK_EQ(p.kv, size_t(d.attn_layers()) * 131072 * d.kv_heads * d.head_dim * 2 * 2);
     CHECK(p.kv > size_t(2.68e9) && p.kv < size_t(2.69e9));
     CHECK_EQ(p.conv_rings, loader::lfm::conv_ring_bytes(d));
-    CHECK_EQ(p.rope, loader::lfm::rope_table_bytes(131072));
+    CHECK_EQ(p.rope, loader::lfm::rope_table_bytes(d, 131072));
     CHECK_EQ(p.reserve, size_t(1.5e9));
     const size_t device_32gib = size_t(32) << 30;
     require_fits(p, device_32gib);   // must not throw

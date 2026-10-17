@@ -48,9 +48,11 @@ target_link_libraries(b70_muse_loader PUBLIC b70_loader b70_muse_model b70_muse_
 # lfm2moe_rope.cc - no Level Zero, run on any host by tests/loader/lfm2moe_repack_test.cc and
 # lfm2moe_rope_test.cc / lfm2moe_synth_host_test.cc) and the upload onto one or two devices
 # (lfm2moe_loader.cc, Task 4).
+# b70_lfm2moe_plan (src/runtime/lfm2moe): the memory plan - linked so load_lfm2moe can call
+# runtime::lfm2moe::require_fits before its first allocation (I2, muse_loader.cc's precedent).
 add_library(b70_lfm2moe_loader STATIC lfm2moe_repack.cc lfm2moe_rope.cc lfm2moe_loader.cc)
 target_include_directories(b70_lfm2moe_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(b70_lfm2moe_loader PUBLIC b70_loader b70_lfm2moe_model b70_l0)
+target_link_libraries(b70_lfm2moe_loader PUBLIC b70_loader b70_lfm2moe_model b70_l0 b70_lfm2moe_plan)
 
 # --- Spec 19b: the DFlash drafter ----------------------------------------------------------------
 # Beside the target's loader (not touched): the host half (dflash_repack.cc - the checkpoint held to its config and

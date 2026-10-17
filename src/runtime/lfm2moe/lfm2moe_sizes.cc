@@ -18,7 +18,7 @@ Plan plan(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p, uint32_t de
   pl.weights = loader::lfm::device_weight_bytes(d, p, dev, int8_head);
   pl.kv = size_t(device_attn_layers(d, p, dev)) * max_len * d.kv_heads * d.head_dim * 2 * 2;
   pl.conv_rings = size_t(device_conv_layers(d, p, dev)) * loader::lfm::kConvRing * d.hidden * 2;
-  pl.rope = loader::lfm::device_has_attention(d, p, dev) ? loader::lfm::rope_table_bytes(max_len) : 0;
+  pl.rope = loader::lfm::device_has_attention(d, p, dev) ? loader::lfm::rope_table_bytes(d, max_len) : 0;
   pl.reserve = size_t(kDefaultReserveGb * 1e9);
   return pl;
 }
