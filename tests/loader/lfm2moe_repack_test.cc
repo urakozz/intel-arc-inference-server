@@ -18,6 +18,7 @@
 #include "common/bf16.h"
 #include "common/repack.h"
 #include "loader/lfm2moe_layout.h"
+#include "loader/lfm2moe_loader.h"
 #include "loader/lfm2moe_repack.h"
 #include "loader/quant.h"
 #include "loader/safetensors.h"
@@ -96,6 +97,106 @@ Tensor f16(std::vector<uint64_t> shape, uint16_t fill) {
   return t;
 }
 
+Tensor bf16_t(std::vector<uint64_t> shape) {
+  Tensor t;
+  t.dtype = "BF16";
+  t.shape = std::move(shape);
+  uint64_t n = 1;
+  for (uint64_t s : t.shape) n *= s;
+  t.bytes.assign(n * 2, 0);
+  return t;
+}
+Tensor f32_t(std::vector<uint64_t> shape, float fill = 0.0f) {
+  Tensor t;
+  t.dtype = "F32";
+  t.shape = std::move(shape);
+  uint64_t n = 1;
+  for (uint64_t s : t.shape) n *= s;
+  t.bytes.resize(n * 4);
+  float* p = reinterpret_cast<float*>(t.bytes.data());
+  for (uint64_t i = 0; i < n; ++i) p[i] = fill;
+  return t;
+}
+void int4_set(Tensors& ts, const std::string& base, uint32_t K, uint32_t N) {
+  ts[base + ".qweight"] = i32({K / 8, N}, 0);
+  ts[base + ".qzeros"] = i32({K / 64, N / 8}, 0x77777777u);
+  ts[base + ".scales"] = f16({K / 64, N}, 0x3C00);   // 1.0
+}
+
+// A SMALL but fully valid LFM2.5-24B-A2B-shaped checkpoint (a test copy of the descriptor, as
+// kolibri1_repack_test.cc's - the widths are what the layouts depend on, not the published 40 / 64 /
+// 2048): every tensor lfm_expected_names(d, names) lists, correctly shaped and typed, so
+// check_names() passes and a full repack walk leaves 0 unconsumed - the baseline I5's crafted
+// corruptions below each break exactly one way.
+model::Lfm2MoeDesc tiny_desc() {
+  model::Lfm2MoeDesc d = model::lfm2moe();
+  d.layers = 3;
+  d.hidden = 64;
+  d.q_heads = 1;
+  d.kv_heads = 1;
+  d.head_dim = 64;
+  d.dense_layers = 1;
+  d.dense_inter = 64;
+  // 16, not 2: common::repack_bf16_tiled (the router) addresses output columns in whole 16-wide
+  // tiles - valid for the real model (64 experts, already a multiple of 16; no padding needed,
+  // spec 24 "24b as built"'s note), but a smaller count here would read past the output buffer.
+  d.experts = 16;
+  d.top_k = 1;
+  d.moe_inter = 64;
+  d.vocab = 64;
+  d.kinds = {model::LfmKind::Conv, model::LfmKind::Attention, model::LfmKind::Conv};   // dense-conv, attn+MoE, conv+MoE
+  return d;
+}
+
+Tensors build_full_checkpoint(const Lfm2MoeDesc& d, LfmExpertNames names) {
+  Tensors ts;
+  ts[d.prefix + "embed_tokens.weight"] = bf16_t({d.vocab, d.hidden});
+  ts[d.prefix + "embedding_norm.weight"] = bf16_t({d.hidden});
+  const char* const kW[3] = {"w1", "w3", "w2"};
+  const char* const kProj[3] = {"gate_proj", "up_proj", "down_proj"};
+  const char* const* ex = names == LfmExpertNames::Proj ? kProj : kW;
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    const std::string lp = d.layer_prefix(l);
+    ts[lp + "operator_norm.weight"] = bf16_t({d.hidden});
+    ts[lp + "ffn_norm.weight"] = bf16_t({d.hidden});
+    if (d.is_attention(l)) {
+      ts[lp + "self_attn.q_layernorm.weight"] = bf16_t({d.head_dim});
+      ts[lp + "self_attn.k_layernorm.weight"] = bf16_t({d.head_dim});
+      int4_set(ts, lp + "self_attn.q_proj", d.hidden, d.q_n());
+      int4_set(ts, lp + "self_attn.k_proj", d.hidden, d.kv_n());
+      int4_set(ts, lp + "self_attn.v_proj", d.hidden, d.kv_n());
+      int4_set(ts, lp + "self_attn.out_proj", d.q_n(), d.hidden);
+    } else {
+      ts[lp + "conv.conv.weight"] = bf16_t({d.hidden, 1, d.conv_taps});
+      int4_set(ts, lp + "conv.in_proj", d.hidden, 3 * d.hidden);
+      int4_set(ts, lp + "conv.out_proj", d.hidden, d.hidden);
+    }
+    if (d.is_dense(l)) {
+      int4_set(ts, lp + "feed_forward.w1", d.hidden, d.dense_inter);
+      int4_set(ts, lp + "feed_forward.w3", d.hidden, d.dense_inter);
+      int4_set(ts, lp + "feed_forward.w2", d.dense_inter, d.hidden);
+    } else {
+      ts[lp + "feed_forward.gate.weight"] = bf16_t({d.experts, d.hidden});
+      ts[lp + "feed_forward.expert_bias"] = f32_t({d.experts});
+      for (uint32_t e = 0; e < d.experts; ++e) {
+        const std::string ep = lp + "feed_forward.experts." + std::to_string(e) + ".";
+        int4_set(ts, ep + ex[0], d.hidden, d.moe_inter);
+        int4_set(ts, ep + ex[1], d.hidden, d.moe_inter);
+        int4_set(ts, ep + ex[2], d.moe_inter, d.hidden);
+      }
+    }
+  }
+  return ts;
+}
+
+// Walks every layer (repack_layer), embed(), final_norm() - the full consumption a real load does.
+void full_walk(loader::Lfm2MoeCheckpoint& ck, const Lfm2MoeDesc& d) {
+  loader::HostLayer host;
+  for (uint32_t l = 0; l < d.layers; ++l) ck.repack_layer(l, false, host);
+  ck.embed();
+  ck.final_norm();
+}
+
 }  // namespace
 
 int main() {
@@ -112,7 +213,8 @@ int main() {
     CHECK_EQ(loader::lfm::router_bytes(d), size_t(d.hidden) * d.experts * 2);
     CHECK_EQ(loader::lfm::embed_tiled_bytes(d), size_t(d.hidden) * d.vocab * 2);
     CHECK_EQ(loader::lfm::head_int8_bytes(d), size_t(d.hidden) * d.vocab + size_t(d.vocab) * 4);
-    CHECK_EQ(loader::lfm::rope_table_bytes(131072), size_t(131072) * 2 * 32 * 4);
+    CHECK_EQ(loader::lfm::rope_table_bytes(d, 131072), size_t(131072) * 2 * (d.head_dim / 2) * 4);
+    CHECK_EQ(d.rope_table_bytes(131072), loader::lfm::rope_table_bytes(d, 131072));
     CHECK_EQ(loader::lfm::kv_bytes_per_position(d), size_t(d.attn_layers()) * d.kv_heads * d.head_dim * 2 * 2);
     CHECK_EQ(loader::lfm::conv_ring_bytes(d), size_t(d.conv_layers()) * loader::lfm::kConvRing * d.hidden * 2);
     // the printed figures, cross-checked against spec 24 §3's (derived independently there)
@@ -231,20 +333,44 @@ int main() {
     std::mt19937 rng(7);
     for (auto& w : qw) w = rng();
     for (auto& s : sc) s = uint16_t(rng());
-    const std::vector<uint32_t> flat = loader::repack_in_proj(qw.data(), sc.data(), K, N, false);
-    const std::vector<uint32_t> tiled = loader::repack_in_proj(qw.data(), sc.data(), K, N, true);
-    CHECK_EQ(flat.size(), tiled.size());
+    const loader::HostLinear flat = loader::repack_in_proj(qw.data(), sc.data(), K, N, false);
+    const loader::HostLinear tiled = loader::repack_in_proj(qw.data(), sc.data(), K, N, true);
+    CHECK(flat.scales.empty() && tiled.scales.empty());   // layout 1 (the default)
+    CHECK_EQ(flat.words.size(), tiled.words.size());
     const uint32_t G = K / 64, TILE_W = 136;
     // true_tile[3t + part] == flat_tile[part x (H / 16) + t] (the arm-c permutation, spec 24 §4.1).
     for (uint32_t t = 0; t < H / 16; ++t)
       for (uint32_t part = 0; part < 3; ++part) {
         const uint32_t true_nt = 3 * t + part, flat_nt = part * (H / 16) + t;
         for (uint32_t g = 0; g < G; ++g) {
-          const uint32_t* a = tiled.data() + (size_t(true_nt) * G + g) * TILE_W;
-          const uint32_t* b = flat.data() + (size_t(flat_nt) * G + g) * TILE_W;
+          const uint32_t* a = tiled.words.data() + (size_t(true_nt) * G + g) * TILE_W;
+          const uint32_t* b = flat.words.data() + (size_t(flat_nt) * G + g) * TILE_W;
           CHECK(std::memcmp(a, b, TILE_W * 4) == 0);
         }
       }
+    // I1: "a column map valid in both" - the same permutation at layout 0 (words + separate
+    // scales), independently reconstructed via repack_int4_layout0_cols and compared.
+    {
+      const loader::HostLinear flat0 = loader::repack_in_proj(qw.data(), sc.data(), K, N, false, 0);
+      const loader::HostLinear tiled0 = loader::repack_in_proj(qw.data(), sc.data(), K, N, true, 0);
+      CHECK_EQ(flat0.words.size(), size_t(K / 8) * N);
+      CHECK_EQ(flat0.scales.size(), size_t(K / 64) * N);
+      std::vector<uint32_t> want_words(size_t(K / 8) * N);
+      std::vector<uint16_t> want_scales(size_t(K / 64) * N);
+      common::repack_int4_layout0_cols(K, N, common::cols_concat({{qw.data(), sc.data(), N}}), want_words.data(),
+                                       want_scales.data());
+      CHECK(flat0.words == want_words && flat0.scales == want_scales);
+      // the conv-tile permutation, independently permuted column by column, at layout 0 too.
+      std::vector<common::ColSource> perm_cols(N);
+      uint32_t idx = 0;
+      for (uint32_t t = 0; t < H / 16; ++t)
+        for (uint32_t part = 0; part < 3; ++part)
+          for (uint32_t l = 0; l < 16; ++l) perm_cols[idx++] = {qw.data(), sc.data(), part * H + t * 16 + l, N};
+      std::vector<uint32_t> want_tiled_words(size_t(K / 8) * N);
+      std::vector<uint16_t> want_tiled_scales(size_t(K / 64) * N);
+      common::repack_int4_layout0_cols(K, N, perm_cols, want_tiled_words.data(), want_tiled_scales.data());
+      CHECK(tiled0.words == want_tiled_words && tiled0.scales == want_tiled_scales);
+    }
     std::printf("  repack_in_proj: conv_tiles permutes whole n_tiles; its inverse gives the plain "
                "layout back word for word\n");
   }
@@ -265,6 +391,113 @@ int main() {
         CHECK_EQ(tiled[loader::lfm::lfm_embed_row_index(K, k, n)], full[size_t(n) * K + k]);
     std::printf("  lfm_embed_row_index: every k of 64 ids (incl. 0, 124894, 127999) against the row-major "
                "tensor through the tiles\n");
+  }
+
+  // --- I5: crafted-checkpoint refusal cases (check_names, take()'s dtype refusal, the tied head) ----
+  {
+    const fs::path tmp = fs::temp_directory_path() / ("lfm2moe_repack_crafted_" + std::to_string(::getpid()));
+    const Lfm2MoeDesc td = tiny_desc();
+
+    // the baseline: valid, check_names passes, a full walk leaves 0 unconsumed.
+    {
+      Tensors ts = build_full_checkpoint(td, LfmExpertNames::W);
+      write_checkpoint(tmp, ts);
+      loader::SafetensorsSet set(tmp.string() + "/");
+      loader::Lfm2MoeCheckpoint ck(td, set, LfmExpertNames::W);
+      ck.check_names();   // must not throw
+      full_walk(ck, td);
+      CHECK_EQ(ck.unconsumed(), size_t(0));
+      fs::remove_all(tmp);
+    }
+    // an unknown extra tensor is refused by name.
+    {
+      Tensors ts = build_full_checkpoint(td, LfmExpertNames::W);
+      ts["model.layers.0.something_else.weight"] = bf16_t({4});
+      write_checkpoint(tmp, ts);
+      loader::SafetensorsSet set(tmp.string() + "/");
+      loader::Lfm2MoeCheckpoint ck(td, set, LfmExpertNames::W);
+      bool threw = false;
+      try {
+        ck.check_names();
+      } catch (const std::runtime_error& e) {
+        threw = std::string(e.what()).find("something_else") != std::string::npos;
+      }
+      CHECK(threw);
+      fs::remove_all(tmp);
+    }
+    // a missing required tensor is refused by name.
+    {
+      Tensors ts = build_full_checkpoint(td, LfmExpertNames::W);
+      const std::string victim = td.layer_prefix(2) + "feed_forward.experts.1.w2.qweight";
+      CHECK(ts.erase(victim) == 1);
+      write_checkpoint(tmp, ts);
+      loader::SafetensorsSet set(tmp.string() + "/");
+      loader::Lfm2MoeCheckpoint ck(td, set, LfmExpertNames::W);
+      bool threw = false;
+      try {
+        ck.check_names();
+      } catch (const std::runtime_error& e) {
+        threw = std::string(e.what()).find(victim) != std::string::npos;
+      }
+      CHECK(threw);
+      fs::remove_all(tmp);
+    }
+    // expert_bias shipped as BF16 (not F32) is refused by take()'s dtype check, at repack time.
+    {
+      Tensors ts = build_full_checkpoint(td, LfmExpertNames::W);
+      const std::string name = td.layer_prefix(1) + "feed_forward.expert_bias";
+      ts[name] = bf16_t({td.experts});   // check_names only checks names; the dtype throw is take()'s
+      write_checkpoint(tmp, ts);
+      loader::SafetensorsSet set(tmp.string() + "/");
+      loader::Lfm2MoeCheckpoint ck(td, set, LfmExpertNames::W);
+      ck.check_names();
+      bool threw = false;
+      try {
+        full_walk(ck, td);
+      } catch (const std::runtime_error& e) {
+        threw = std::string(e.what()).find(name) != std::string::npos && std::string(e.what()).find("F32") != std::string::npos;
+      }
+      CHECK(threw);
+      fs::remove_all(tmp);
+    }
+    // the tied head: lm_head.weight present and bitwise == embed_tokens is skipped, not refused.
+    {
+      Tensors ts = build_full_checkpoint(td, LfmExpertNames::W);
+      ts["lm_head.weight"] = ts[td.prefix + "embed_tokens.weight"];   // bitwise copy
+      write_checkpoint(tmp, ts);
+      loader::SafetensorsSet set(tmp.string() + "/");
+      loader::Lfm2MoeCheckpoint ck(td, set, LfmExpertNames::W);
+      ck.check_names();
+      ck.embed();
+      const std::string note = ck.check_tied_lm_head();   // must not throw
+      CHECK(!note.empty());
+      full_walk(ck, td);
+      CHECK_EQ(ck.unconsumed(), size_t(0));   // lm_head.weight is consumed too (M1/I5)
+      fs::remove_all(tmp);
+    }
+    // the tied head: lm_head.weight present and DIFFERENT is refused naming both.
+    {
+      Tensors ts = build_full_checkpoint(td, LfmExpertNames::W);
+      Tensor lm = ts[td.prefix + "embed_tokens.weight"];
+      reinterpret_cast<uint16_t*>(lm.bytes.data())[0] ^= 0xFFFF;   // one bit flip: no longer equal
+      ts["lm_head.weight"] = lm;
+      write_checkpoint(tmp, ts);
+      loader::SafetensorsSet set(tmp.string() + "/");
+      loader::Lfm2MoeCheckpoint ck(td, set, LfmExpertNames::W);
+      ck.check_names();
+      ck.embed();
+      bool threw = false;
+      try {
+        (void)ck.check_tied_lm_head();
+      } catch (const std::runtime_error& e) {
+        const std::string msg = e.what();
+        threw = msg.find("lm_head") != std::string::npos && msg.find("embed_tokens") != std::string::npos;
+      }
+      CHECK(threw);
+      fs::remove_all(tmp);
+    }
+    std::printf("  crafted refusals: an unknown tensor, a missing one, expert_bias as BF16, a tied "
+               "lm_head (skipped), a different lm_head (refused naming both)\n");
   }
 
   std::printf("lfm2moe_repack_test: ok\n");

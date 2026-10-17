@@ -54,6 +54,7 @@ struct LfmLinear {
   WeightKind kind;
   Fuse fuse;
   std::vector<std::string> parts;   // layer-relative checkpoint prefixes, in column order
+  std::vector<uint32_t> part_n;     // each part's output columns, parallel to `parts` (sum = shape.N)
 };
 
 struct Lfm2MoeDesc;
@@ -97,6 +98,8 @@ struct Lfm2MoeDesc {
   uint32_t kv_n() const { return kv_heads * head_dim; }     // 512
   uint32_t qkv_n() const { return q_n() + 2 * kv_n(); }     // 3072: q | k | v
   uint32_t gqa() const { return q_heads / kv_heads; }       // 4
+  // fp32 [max_len][2][head_dim / 2] (loader::lfm_rope_table): cos then sin, bf16-valued.
+  size_t rope_table_bytes(uint32_t max_len) const { return size_t(max_len) * 2 * (head_dim / 2) * 4; }
 
   static std::string layer_prefix(const std::string& model_prefix, uint32_t l);   // "model.layers.<l>."
   std::string layer_prefix(uint32_t l) const { return layer_prefix(prefix, l); }
