@@ -165,16 +165,20 @@ There are three readings of this model's arithmetic, and they disagree:
 3. **transformers 5.19.0's native class** (N:): no puzzle support, clamps the chunk path at `time_step_min` (N:394,
    N:275) but not the recurrent one; another rounding set.
 
-**Decision 1 (proposed):** the reference is **the remote code (R) run through transformers 5.19.0 with the mamba_ssm
-imports replaced by plain-torch restatements of the training kernels' arithmetic** (`tools/oracle/bolt_mamba_ops.py`:
-`rmsnorm_fn` gated, `selective_state_update`, `causal_conv1d_update` / `_fn`, the chunk scan), **an fp32 SSM / conv cache
-passed in explicitly**, and the dt clamp removed (`dt_limit` (0, inf)). The torch path is then routed through those ops
-for both prefill and decode. F1 holds this port **bitwise** to the unmodified remote code **in fp32 mode** (model loaded
-fp32: every cast is the identity and the two readings coincide except for the clamp, which a test exercises separately);
-in bf16 mode the remote fallback's extra roundings and the clamp are listed, measured on the tiny model and on real rows
-(25a), and **not** copied. The engine implements reading 1. *Cost if wrong:* if the operator prefers the torch fallback
-as the reference, every SSM kernel gains bf16 rounding points and the clamp, 25a's sheet changes and 25c's twins are
-re-pinned (~2 days); serving would then disagree with vLLM / NVIDIA's training on 20 % of layer-0 heads.
+**Decision 1 (proposed):** the reference is **the remote code (R) run through transformers 5.19.0 with its kernel path
+enabled on the CPU** - R's `cuda_kernels_forward` (R:384-532), which calls exactly the five training-kernel functions
+(`causal_conv1d_update` / `causal_conv1d_fn`, `selective_state_update`, `mamba_chunk_scan_combined`, `rmsnorm_fn`) and
+passes `dt_limit` (0, inf) - **with plain-torch implementations of those five** (`tools/oracle/bolt_mamba_ops.py`, fp32
+internals, in the order the engine's twin uses) and **an fp32 SSM / conv cache passed in explicitly** (R:1664-1667 would
+build it in the model's dtype). Everything outside the Mamba mixer (norms, attention, router, experts, combine, head, the
+model loop) is R's own code and the port equals R there bitwise, fp32 and bf16. The Mamba mixer is held two ways: to the
+engine's twin bitwise (the ops compute in the twin's order), and to R's torch fallback in fp32 within a measured bound -
+the fallback is the same function summed in other orders (the decode conv's `torch.sum`, the `bmm`, the naive chunk scan),
+except the clamp, which a variant built to trigger it exercises on its own. In bf16 the fallback's extra roundings and the
+clamp are listed, measured on the tiny model and on real rows (25a), and **not** copied. The engine implements reading 1.
+*Cost if wrong:* if the operator prefers the torch fallback as the reference, every SSM kernel gains bf16 rounding points
+and the clamp, 25a's sheet changes and 25c's twins are re-pinned (~2 days); serving would then disagree with vLLM /
+NVIDIA's training on 20 % of layer-0 heads.
 
 ### 2.1 The block (R:802-840), `h` bf16 [T][4096]
 
@@ -512,10 +516,11 @@ Spec 7's store with the hybrid split (Qwen3.8's GDN snapshots, spec 23e / 24e's 
 - **B0, nothing moves.** Every existing kernel binary sha256-identical (G0), `tools/kernel_cmdlines` additions only, no
   existing `.cl` edited (a reused Muse binary is bound by name), every existing suite green; the `quant.cc` relaxations
   leave every existing loader test green and every refusal test still refusing.
-- **B1, the reference** (25a). The port equals the remote code bitwise in fp32 on the tiny variants (prompt and cached
-  decode; chunked = whole; the Mamba state across a chunk boundary), one test per trap of §2 (the clamp, the gated norm's
-  groups, the conv's bias and SiLU before the rounding, `D` skip, the router's fp32 chain and `+ 1e-20`, the ascending-id
-  combine, relu² on bf16, the shared expert on the normed hidden, the latent projections, NoPE, the untied head, the tap
+- **B1, the reference** (25a). Outside the Mamba mixer the port equals R bitwise (fp32 and bf16) on the tiny variants
+  (prompt and cached decode; chunked = whole), the Mamba mixer equals the twin's order bitwise and R's torch fallback in
+  fp32 within the bound 25a measures (the clamp aside); one test per trap of §2 (the clamp, the gated norm's groups, the
+  conv's bias and SiLU before the rounding, `D` skip, the router's fp32 chain and `+ 1e-20`, the ascending-id combine,
+  relu² on bf16, the shared expert on the normed hidden, the latent projections, NoPE, the untied head, the tap
   convention). bf16-mode differences against the remote fallback recorded per op. The real model's perplexity sane on the
   box CPU (g128 dequantised and the BF16 original).
 - **B2, kernels.** Every new kernel against its host twin (`tests/kernels/bolt_ref.h`), bitwise where the arithmetic is
@@ -557,10 +562,11 @@ carries an `ours` stage).
 
 ## 12. Decisions
 
-1. **Decision 1 (proposed) - the reference.** The remote code with plain-torch restatements of the mamba_ssm training
-   kernels (fp32 internals, no dt clamp), an fp32 cache, bitwise in fp32 mode; the torch fallback's bf16 roundings and the
-   0.001 clamp recorded, not copied (§2.0). *Cost if wrong:* ~2 days to re-pin 25a / 25c's twins to the fallback, and the
-   engine would then diverge from vLLM / training on 25 of 128 heads in layer 0 alone.
+1. **Decision 1 (proposed) - the reference.** R with its kernel path enabled through plain-torch implementations of the
+   five mamba_ssm / causal_conv1d functions (fp32 internals, no dt clamp, the twin's summation order), an fp32 cache;
+   bitwise R outside the Mamba mixer, R's torch fallback within a measured fp32 bound inside it; the fallback's bf16
+   roundings and its 0.001 clamp recorded, not copied (§2.0). *Cost if wrong:* ~2 days to re-pin 25a / 25c's twins to the
+   fallback, and the engine would then diverge from vLLM / training on 25 of 128 heads in layer 0 alone.
 2. **Decision 2 (proposed) - SSM state precision: fp32** (the config's `mamba_ssm_cache_dtype`), with bf16 as a measured
    arm (25c: B3 golden and A4 on both; the state traffic 0.336 vs 0.168 GB a token, ~3 % of the step). NVIDIA's recipe
    uses bf16 and the architecture search budgeted 16-bit states. *Cost if wrong:* fp32 wastes ~0.3 ms a token and 80 MiB a
