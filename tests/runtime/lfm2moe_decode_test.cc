@@ -133,11 +133,10 @@ int main(int argc, char** argv) {
     lfm2moe_rig::build(rig, snap, of);
     rl::Lfm2MoeEngine& f = *rig.eng;
     CHECK_EQ(f.launches(), rl::decode_launches(f.model().desc, f.model().place, f.attention(), arms, f.handoff()));
-    if (d.layers == 40) {
-      const size_t want = arms.route && arms.router && arms.conv ? 277
-                          : (arms.route || arms.router) && !arms.conv && !(arms.route && arms.router) ? 345
-                          : arms.conv && !arms.route && !arms.router ? 353 : f.launches();
-      CHECK_EQ(f.launches(), want);
+    if (d.layers == 40 && f.devices() == 1) {   // spec 24 §4.5: 345 / 345 / 353 alone, 277 with all three
+      const int n = int(arms.route) + int(arms.router) + int(arms.conv);
+      if (n == 3) CHECK_EQ(f.launches(), size_t(277));
+      if (n == 1) CHECK_EQ(f.launches(), size_t(arms.conv ? 353 : 345));
     }
     const Snapshot c = run(f, ids);
     same(a, c, ("Review Focus 4: fuse " + rl::lfm_fuse_name(arms) + " against none (" + std::to_string(f.launches()) +

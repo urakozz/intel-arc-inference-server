@@ -4295,7 +4295,8 @@ if(B70_LFM2MOE)
     kernel_lfm_moe_M1_E64_T4_D2048_I1536 kernel_lfm_attn_prep_M1_S1_Q32KV8 kernel_lfm_attn_M1_T32_Q32KV8
     kernel_lfm_attn_eager_M1_T32_Q32KV8 kernel_lfm_silu_mul_M1_I11776_S1
     kernel_gemv_M1_K2048_N6144_S1_L1 kernel_gemv_M1_K2048_N2048_S1_L1 kernel_gemv_M1_K2048_N3072_S1_L0
-    kernel_gemv_M1_K2048_N23552_S1_L0 kernel_gemv_M1_K11776_N2048_S1_L1)
+    kernel_gemv_M1_K2048_N23552_S1_L0 kernel_gemv_M1_K11776_N2048_S1_L1
+    kernel_lfm_res_norm_M1_K2048_W8_S1_R kernel_lfm_moe_M1_E64_T4_D2048_I1536_R kernel_lfm_conv_in_M1_K2048_L1)
   set(B70_LFM2MOE_REUSED_KERNELS kernel_pp_handoff)
   add_executable(lfm2moe_variant_names_test kernels/lfm2moe_variant_names_test.cc)
   target_include_directories(lfm2moe_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -4356,6 +4357,14 @@ if(B70_LFM2MOE)
     ${B70_LFM2MOE_SYNTH_DIR}/oracle-w lfm2moe_short bf16)
   add_test(NAME lfm2moe_golden_synth_short_eager_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_SYNTH_DIR}/w
     ${B70_LFM2MOE_SYNTH_DIR}/oracle-w lfm2moe_short eager)
+  # Task 5: each fused arm against the as-built list, bitwise (Review Focus 4), on the synthetic and the RTN export
+  foreach(arm route router conv all)
+    add_test(NAME lfm2moe_decode_synth_fuse_${arm}_test COMMAND lfm2moe_decode_test ${B70_LFM2MOE_SYNTH_DIR}/w
+      ${_lfm_bench_ids} --fuse ${arm})
+    add_test(NAME lfm2moe_decode_rtn_fuse_${arm}_test COMMAND lfm2moe_decode_test ${B70_LFM2MOE_RTN} ${_lfm_bench_ids}
+      --fuse ${arm})
+    list(APPEND _lfm_tests lfm2moe_decode_synth_fuse_${arm}_test lfm2moe_decode_rtn_fuse_${arm}_test)
+  endforeach()
   list(APPEND _lfm_tests lfm2moe_decode_synth_eager_test lfm2moe_decode_synth_bf16head_test
     lfm2moe_golden_synth_short_bf16head_test lfm2moe_golden_synth_short_eager_test)
   # the real weights: 24q's RTN export (r51.rtn) and its AutoRound export (r51.ours, opt-in)

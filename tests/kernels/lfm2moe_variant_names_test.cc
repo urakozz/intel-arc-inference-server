@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
     for (bool int8 : {false, true})
       for (bool eager : {false, true})
         for (bool two : {false, true})
-          for (int arm = 0; arm < 1; ++arm) {   // the as-built list (Task 5 adds the arms)
+          for (int arm = 0; arm < 8; ++arm) {   // the as-built list and every combination of the fused arms
             kl::Arms arms;
             arms.route = arm & 1;
             arms.router = arm & 2;

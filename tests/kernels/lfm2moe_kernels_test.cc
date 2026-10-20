@@ -17,11 +17,14 @@
 //   6. eager attention (lfm_attn_eager.cl) against attention_eager at 6 / 300 / 3000 / 4097 keys, outputs within 1
 //      ulp; flash (lfm_attn.cl) against the fp64 form at cosine >= 0.99999 (spec 6 K1) at depths 1, 2, 300, 4096,
 //      131072
+//   7. the fused arms (Task 5): lfm_res_norm _R against _S1 + lfm_router; lfm_moe _R against lfm_route +
+//      lfm_moe_gate_up; lfm_conv_in on the conv-tile in_proj against gemv (S 1) + lfm_conv - bitwise
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <random>
 #include <string>
 #include <vector>
@@ -541,6 +544,180 @@ void test_attention(Dev& d) {
   }
 }
 
+// --- 7. the fused arms (Task 5, Review Focus 4): each arm's kernel against the as-built pair, bitwise ------------------
+std::vector<uint32_t> random_words(size_t n, uint32_t seed) {
+  std::mt19937 rng(seed);
+  std::vector<uint32_t> v(n);
+  for (uint32_t& w : v) w = rng();
+  return v;
+}
+std::vector<uint32_t> random_blocks(size_t words, uint32_t seed) {
+  std::vector<uint32_t> v(words);
+  std::mt19937 rng(seed);
+  std::uniform_real_distribution<float> sd(0.01f, 0.05f);
+  for (size_t t = 0; t < words / 136; ++t) {
+    uint32_t* tile = v.data() + t * 136;
+    for (int i = 0; i < 128; ++i) tile[i] = rng();
+    for (int i = 0; i < 8; ++i)
+      tile[128 + i] = uint32_t(common::f32_to_f16(sd(rng))) | (uint32_t(common::f32_to_f16(sd(rng))) << 16);
+  }
+  return v;
+}
+void test_arms(Dev& d) {
+  const uint32_t E = kl::kExperts;
+  const model::Lfm2MoeDesc& desc = model::lfm2moe();
+  {   // router: lfm_res_norm _S1 _R against lfm_res_norm _S1 + lfm_router
+    std::mt19937 rng(21);
+    std::uniform_real_distribution<float> u(-1.f, 1.f);
+    std::vector<float> sl(H), w(H);
+    for (float& v : sl) v = u(rng);
+    for (uint32_t k = 0; k < H; ++k) w[k] = rf(0.5f + float(k % 9) * 0.1f);
+    const std::vector<uint16_t> h = random_bf16(H, -2.f, 2.f, 22), rw = random_bf16(size_t(H) * E, -0.05f, 0.05f, 23);
+    std::vector<uint16_t> tiles(size_t(H) * E);
+    common::repack_bf16_tiled(rw.data(), H, E, tiles.data());
+    l0::Mem hb = d.up(h), sb = d.up(sl), wb = d.up(w), tb = d.up(tiles);
+    l0::Mem o1 = d.zeros(H * 2), x1 = d.zeros(H * 2), o2 = d.zeros(H * 2), x2 = d.zeros(H * 2);
+    l0::Mem l1 = d.zeros(E * 4), l2 = d.zeros(E * 4);
+    l0::Module mn(d.ctx, kernels::path(kl::res_norm_variant(1, 1, false))), mr(d.ctx, kernels::path(kl::router_variant(1))),
+        mf(d.ctx, kernels::path(kl::res_norm_variant(1, 1, true)));
+    l0::Kernel n = mn.kernel("lfm_res_norm");
+    n.group_size(kl::kNormWg);
+    n.arg_ptr(0, hb.ptr());
+    n.arg_ptr(1, sb.ptr());
+    n.arg_ptr(2, wb.ptr());
+    n.arg_ptr(3, o1.ptr());
+    n.arg_ptr(4, x1.ptr());
+    d.run(n, kl::kNormWgs, 1);
+    l0::Kernel r = mr.kernel("lfm_router");
+    r.group_size(kl::kRouterWg);
+    r.arg_ptr(0, x1.ptr());
+    r.arg_ptr(1, tb.ptr());
+    r.arg_ptr(2, l1.ptr());
+    d.run(r, E / 16, 1);
+    l0::Kernel f = mf.kernel("lfm_res_norm");
+    f.group_size(kl::kNormWg);
+    f.arg_ptr(0, hb.ptr());
+    f.arg_ptr(1, sb.ptr());
+    f.arg_ptr(2, wb.ptr());
+    f.arg_ptr(3, o2.ptr());
+    f.arg_ptr(4, x2.ptr());
+    f.arg_ptr(5, tb.ptr());
+    f.arg_ptr(6, l2.ptr());
+    d.run(f, kl::kNormWgs + kl::kNormRouterWgs, 1);
+    CHECK(d.read<uint16_t>(o1, H) == d.read<uint16_t>(o2, H));
+    CHECK(d.read<uint16_t>(x1, H) == d.read<uint16_t>(x2, H));
+    CHECK(d.read<uint32_t>(l1, E) == d.read<uint32_t>(l2, E));
+    std::printf("  7. arm router: lfm_res_norm _S1 _R's h, x and 64 logits bitwise _S1 + lfm_router\n");
+  }
+  {   // route: lfm_moe _R's gate||up (the route recomputed in every work-group) against lfm_route + lfm_moe_gate_up
+    std::mt19937 rng(31);
+    std::uniform_real_distribution<float> u(-3.f, 3.f), ub(-0.05f, 0.05f);
+    std::vector<float> lg(E), bias(E);
+    for (float& v : lg) v = u(rng);
+    for (float& v : bias) v = ub(rng);
+    const std::vector<uint32_t> gu = random_blocks(size_t(E) * lfmref::gate_up_block_words(), 32);
+    const std::vector<uint16_t> x = random_bf16(H, -0.5f, 0.5f, 33);
+    l0::Mem lb = d.up(lg), bb = d.up(bias), gb = d.up(gu), xb = d.up(x);
+    l0::Mem r1 = d.zeros(kl::route::kWords * 4), r2 = d.zeros(kl::route::kWords * 4);
+    l0::Mem h1 = d.zeros(size_t(4) * kl::kInter * 2), h2 = d.zeros(size_t(4) * kl::kInter * 2);
+    l0::Module mt(d.ctx, kernels::path(kl::route_variant(1))), mm(d.ctx, kernels::path(kl::moe_variant(1, false))),
+        mf(d.ctx, kernels::path(kl::moe_variant(1, true)));
+    l0::Kernel t = mt.kernel("lfm_route");
+    t.group_size(kl::kRouteWg);
+    t.arg_ptr(0, lb.ptr());
+    t.arg_ptr(1, bb.ptr());
+    t.arg_ptr(2, r1.ptr());
+    d.run(t, 1, 1);
+    l0::Kernel g = mm.kernel("lfm_moe_gate_up");
+    g.group_size(kl::moe_gate_up_wg());
+    g.arg_ptr(0, r1.ptr());
+    g.arg_ptr(1, xb.ptr());
+    g.arg_ptr(2, gb.ptr());
+    g.arg_ptr(3, h1.ptr());
+    d.run(g, kl::moe_gate_up_groups(), 1);
+    l0::Kernel f = mf.kernel("lfm_moe_gate_up");
+    f.group_size(kl::moe_gate_up_wg());
+    f.arg_ptr(0, lb.ptr());
+    f.arg_ptr(1, bb.ptr());
+    f.arg_ptr(2, r2.ptr());
+    f.arg_ptr(3, xb.ptr());
+    f.arg_ptr(4, gb.ptr());
+    f.arg_ptr(5, h2.ptr());
+    d.run(f, kl::moe_gate_up_groups(), 1);
+    CHECK(d.read<uint32_t>(r1, kl::route::kWords) == d.read<uint32_t>(r2, kl::route::kWords));
+    CHECK(d.read<uint16_t>(h1, size_t(4) * kl::kInter) == d.read<uint16_t>(h2, size_t(4) * kl::kInter));
+    std::printf("  7. arm route: lfm_moe _R's route row and gate||up bitwise lfm_route + lfm_moe_gate_up\n");
+  }
+  {   // conv: lfm_conv_in on the conv-tile in_proj against gemv (S 1) + lfm_conv, positions 0 .. 5 from a garbage ring
+    model::GemvShape s{};
+    for (const model::LfmLinear& ln : desc.linears(0))
+      if (ln.id == model::LfmLinearId::InProj) s = ln.shape;
+    CHECK(s.S == 1);
+    const uint32_t K = H, N = 3 * H;
+    const std::vector<uint32_t> qw = random_words(size_t(K / 8) * N, 41);
+    std::vector<uint16_t> sc(size_t(K / 64) * N);
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<float> sd(0.002f, 0.02f);
+    for (uint16_t& v : sc) v = common::f32_to_f16(sd(rng));
+    const loader::HostLinear plain = loader::repack_in_proj(qw.data(), sc.data(), K, N, false, s.layout),
+                             tiled = loader::repack_in_proj(qw.data(), sc.data(), K, N, true, s.layout);
+    const std::vector<float> taps = [] {
+      std::vector<float> t(size_t(H) * 3);
+      std::mt19937 r(43);
+      std::uniform_real_distribution<float> u(-0.5f, 0.5f);
+      for (float& v : t) v = rf(u(r));
+      return t;
+    }();
+    std::vector<uint16_t> ring0(size_t(kl::kConvRing) * H);
+    for (size_t i = 0; i < ring0.size(); ++i) ring0[i] = uint16_t(0x3F80 + (i * 7919) % 4000);
+    l0::Mem wp = d.up(plain.words), wt = d.up(tiled.words);
+    std::unique_ptr<l0::Mem> sp, st;
+    if (s.layout == 0) {
+      sp = std::make_unique<l0::Mem>(d.upload(plain.scales.data(), plain.scales.size() * 2));
+      st = std::make_unique<l0::Mem>(d.upload(tiled.scales.data(), tiled.scales.size() * 2));
+    }
+    l0::Mem tb = d.up(taps), rp = d.up(ring0), rt = d.up(ring0), slices = d.zeros(size_t(N) * 4);
+    l0::Mem yp = d.zeros(H * 2), yt = d.zeros(H * 2);
+    l0::Module mg(d.ctx, kernels::path(kernels::gemv_variant(1, K, N, 1, s.layout))),
+        mc(d.ctx, kernels::path(kl::conv_variant(1, 1))), mi(d.ctx, kernels::path(kl::conv_in_variant(1, s.layout)));
+    Ctrl ctl(d);
+    for (uint32_t pos = 0; pos < 6; ++pos) {
+      const std::vector<uint16_t> x = random_bf16(H, -1.f, 1.f, 50 + pos);
+      l0::Mem xb = d.up(x);
+      ctl.set(pos, 1);
+      l0::Kernel g = mg.kernel("gemv");
+      g.group_size(64);
+      g.arg_ptr(0, wp.ptr());
+      g.arg_ptr(1, s.layout == 0 ? sp->ptr() : wp.ptr());
+      g.arg_ptr(2, xb.ptr());
+      g.arg_ptr(3, slices.ptr());
+      d.run(g, N / 64, 1);
+      l0::Kernel c = mc.kernel("lfm_conv");
+      c.group_size(kl::kConvWg);
+      c.arg_ptr(0, ctl.m.ptr());
+      c.arg_ptr(1, slices.ptr());
+      c.arg_ptr(2, tb.ptr());
+      c.arg_ptr(3, rp.ptr());
+      c.arg_ptr(4, yp.ptr());
+      d.run(c, H / kl::kConvWg, 1);
+      l0::Kernel i = mi.kernel("lfm_conv_in");
+      i.group_size(kl::kConvInWg);
+      i.arg_ptr(0, ctl.m.ptr());
+      i.arg_ptr(1, wt.ptr());
+      i.arg_ptr(2, s.layout == 0 ? st->ptr() : wt.ptr());
+      i.arg_ptr(3, xb.ptr());
+      i.arg_ptr(4, tb.ptr());
+      i.arg_ptr(5, rt.ptr());
+      i.arg_ptr(6, yt.ptr());
+      d.run(i, H / 16, 1);
+      CHECK(d.read<uint16_t>(yp, H) == d.read<uint16_t>(yt, H));
+      CHECK(d.read<uint16_t>(rp, size_t(kl::kConvRing) * H) == d.read<uint16_t>(rt, size_t(kl::kConvRing) * H));
+    }
+    std::printf("  7. arm conv: lfm_conv_in (conv-tile in_proj, layout %u) bitwise gemv S1 + lfm_conv, y and the ring, "
+                "positions 0 .. 5\n", s.layout);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -553,6 +730,7 @@ int main() {
     test_moe(d);
     test_small(d);
     test_attention(d);
+    test_arms(d);
   } catch (const std::exception& e) {
     std::fprintf(stderr, "lfm2moe_kernels_test: %s\n", e.what());
     return 1;

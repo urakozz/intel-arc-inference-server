@@ -1699,6 +1699,18 @@ if(B70_LFM2MOE)
   set(LFM_ATTN_DEFINES ${CTRL_DEFINES} M=1 TGT=32 Q_HEADS=32 KV_HEADS=8)
   add_ocloc_kernel(lfm_attn_M1_T32_Q32KV8 SOURCE ${LFM_CL}/lfm_attn.cl DEFINES ${LFM_ATTN_DEFINES})
   add_ocloc_kernel(lfm_attn_eager_M1_T32_Q32KV8 SOURCE ${LFM_CL}/lfm_attn_eager.cl DEFINES ${LFM_ATTN_DEFINES})
+  # --- the fused arms (B70_LFM_FUSE, spec 24 §4.5 / decision 6; Task 5) - each bitwise the as-built pair ---
+  # router: the 64 router rows inside a MoE layer's ffn_norm launch (4 more work-groups), at the mixer's split-K;
+  # route: the route recomputed in every gate||up work-group; conv: in_proj's GEMV (split-K 1, the conv-tile columns,
+  # in_proj's layout - 24b's descriptor: 1) with the conv as its epilogue.
+  foreach(S 1)
+    add_ocloc_kernel(lfm_res_norm_M1_K2048_W8_S${S}_R SOURCE ${LFM_CL}/lfm_prep.cl
+                     DEFINES ${LFM_NORM_DEFINES} NORM_S=${S} ROUTER_FUSED=1 ROUTER_E=64)
+  endforeach()
+  add_ocloc_kernel(lfm_moe_M1_E64_T4_D2048_I1536_R SOURCE ${LFM_CL}/lfm_moe.cl
+                   DEFINES M=1 MOE_E=64 MOE_K=4 HIDDEN=2048 INTER=1536 UP_KS=4 DN_KS=2 ROUTE_FUSED=1
+                   DEPENDS ${LFM_CL}/lfm_expert.h OPTIONS -I${LFM_CL})
+  add_ocloc_kernel(lfm_conv_in_M1_K2048_L1 SOURCE ${LFM_CL}/lfm_conv.cl DEFINES ${CTRL_DEFINES} M=1 HIDDEN=2048 CONV_IN_L=1)
 endif()
 # ==== Spec 24c: LFM2.5-24B-A2B decode ==== (end) ====
 
