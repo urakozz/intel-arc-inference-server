@@ -63,8 +63,8 @@ AutoRound at the Bolt pin; vLLM's XPU image for self-generated answers (`GEN_BAC
   `e_score_correction_bias` / `A_log` / `D` / `dt_bias`, a scale that is not F16 (Decision 9), a non-finite or zero scale, a
   `qzeros` word other than 0x77777777, a `g_idx` other than `i // 64` (or absent), or a quantised tensor outside the set.
 - One format: no asymmetric, no g128, no compressed-tensors, no `--model_free`.
-- Box: `tune` holds `flock ~/b70-gpu.lock` for its whole run (both cards; **days** - ESTIMATED in Task 3's dry run) - a box
-  week without other GPU rows; CPU stages check `MemAvailable` (the BF16 original is ~150 GB against ~121 GB of RAM: every
+- Box: `tune` holds `flock ~/b70-gpu.lock` for its whole run (both cards; **~16-40 h** - ESTIMATED in Task 3's dry run) - box
+  days without other GPU rows; CPU stages check `MemAvailable` (the BF16 original is ~150 GB against ~121 GB of RAM: every
   stage reads it disk-streamed or shard by shard; `tune` refuses below 64 GB free, ESTIMATED); detached, polled; `-j44`.
 - Every number measured, or marked derived / estimated / proposed / published; the card says which.
 - No `rm -rf`.
@@ -164,8 +164,8 @@ AutoRound at the Bolt pin; vLLM's XPU image for self-generated answers (`GEN_BAC
     times), F6's table beside SergiioB's published card numbers, the engine command, the licence (OpenMDW-1.1 by link, the
     derivation notice - Decision 20); refuses to render when F6 fails unless `ARM=force`.
 - [ ] **Step 1: the failing tests:** `test_dry_run_prints_every_stage` (the resolved settings, the quantised set, the mix,
-  ESTIMATED RAM / disk / time per stage - the tune's ~32 h at the defaults and ~64 h at `ITERS=800` derived from SergiioB's
-  5 h 57 min scaled by iters x samples x seqlen); `test_tiny_end_to_end` (`--tiny <dir>`: calib -> coverage -> rtn -> eval ->
+  ESTIMATED RAM / disk / time per stage - the tune's ~16-20 h at the defaults and ~32-40 h at `ITERS=800` derived from SergiioB's
+  5 h 57 min scaled by iters x seqlen at a fixed batch, plus the per-block caching of NSAMPLES inputs); `test_tiny_end_to_end` (`--tiny <dir>`: calib -> coverage -> rtn -> eval ->
   check -> card on `pattern12` with `GEN_BACKEND=hf`, `ACCEPTED`); `test_heldout_disjoint`; `test_card_licence`.
 - [ ] **Step 2: implement** (the header documents each stage as `quantize_lfm2moe.sh`'s does); PASS; `--dry-run` prints
   every stage.
@@ -192,14 +192,14 @@ AutoRound at the Bolt pin; vLLM's XPU image for self-generated answers (`GEN_BAC
 - [ ] **Step 1: the queue row 58** (`python3 tools/box_validate/test_box_validate.py` passes; `--dry-run --only r58`):
 
 ```text
-row 58 "spec 25q - Nemotron 3.5 Bolt: our int4 g64 - RTN first (native g64 development checkpoint), then AutoRound on both B70s (days), F6 vs BF16 with SergiioB's g128 as a row (plan 25q)"
+row 58 "spec 25q - Nemotron 3.5 Bolt: our int4 g64 - RTN first (native g64 development checkpoint), then AutoRound on both B70s (~1-2 days), F6 vs BF16 with SergiioB's g128 as a row (plan 25q)"
 stage r58.host     58 default cpu  oracle_image                    -        "test_bolt_quant.py (RTN rule, tiny end to end, refusals, names = AutoRound's)"
 stage r58.rtn      58 default cpu  bolt_bf16                       -        "quantize_bolt.sh --only rtn, --only check: ACCEPTED -> \$DATA/bolt-w4g64/rtn"
 stage r58.rtn_ref  58 optin   cpu  bolt_rtn,oracle_image           r58.rtn  "bolt_oracle.sh export rtn: the native-g64 golden sets"
-stage r58.tune     58 manual  gpu  bolt_bf16,bolt_g128             r58.rtn  "calib, coverage, tune (AutoRound on devices 0,1, DAYS, holds the GPU lock), check - the operator starts it"
+stage r58.tune     58 manual  gpu  bolt_bf16,bolt_g128             r58.rtn  "calib, coverage, tune (AutoRound on devices 0,1, ~16-40 h, holds the GPU lock), check - the operator starts it"
 stage r58.eval     58 optin   cpu  bolt_bf16,bolt_a4_ref           r58.tune "F6: KL / top-1 per set and A4 for rtn, g128 and ours; the int8-head row; f6.md"
 stage r58.ours_ref 58 optin   cpu  bolt_ours,oracle_image          r58.eval "bolt_oracle.sh export ours -> oracle-out-bolt-ours"
-rownote 58 "Publication waits for the operator's go (Decision 20: OpenMDW-1.1). tune: ~32 h at ITERS 400 / NSAMPLES 512 / SEQLEN 2048, ~64 h at ITERS 800 (ESTIMATED)."
+rownote 58 "Publication waits for the operator's go (Decision 20: OpenMDW-1.1). tune: ~16-20 h at ITERS 400 / NSAMPLES 512 / SEQLEN 2048, ~32-40 h at ITERS 800 (ESTIMATED)."
 ```
 - [ ] **Step 2: commit** `git commit -S -m "docs: spec 25 (25q as built), box queue row 58 - our Bolt quantisation"`.
 

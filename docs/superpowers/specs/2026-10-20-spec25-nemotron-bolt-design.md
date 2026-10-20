@@ -200,7 +200,7 @@ dA_h   = exp(dt_h · A_h)
 S[h][p][n] = S[h][p][n] · dA_h + (dt_h · f32(x[h][p])) · f32(B[g][n])           fp32 state (Decision 2)
 y[h][p]    = rne(Σ_n S[h][p][n] · f32(C[g][n]) + D_h · f32(x[h][p]))           the reduction order is 25a's to pin
 v      = f32(y) · silu(f32(z))                  rmsnorm_fn, norm_before_gate false (R:300-308)
-out    = rne(v · rsqrt-free 1/sqrt(mean_{1024-group}(v²) + 1e-5) · w)        per group of 1024 (8 groups)
+out    = rne(v · (1 / sqrt(mean_{1024-group}(v²) + 1e-5)) · w)            per group of 1024 (8 groups)
 mixer  = out_proj(out)                          bf16
 ```
 
@@ -258,7 +258,7 @@ kernel (§6.1). Decision 10 records the combine choice (vLLM's fused path sums i
 | routers, bf16 | 56,623,104 | 0.113 GB | 0.113 GB |
 | `embeddings`, bf16 (a 8 KB row gathered) | 536,870,912 | 1.074 GB | 8 KB |
 | `lm_head`, int8 per row + fp32 scales (spec 9; bf16 1.074 GB) | 536,870,912 | 0.537 GB | 0.537 GB |
-| conv taps / biases, norms, A / D / dt_bias, router biases | 2.77 M | ~7 MB | ~7 MB |
+| conv taps / biases, norms, A / D / dt_bias, router biases (fp32 on the cards) | 2.77 M | ~11 MB | ~11 MB |
 | **total** | **74,042,720,768** | **40.46 GB** | **5.145 GB** |
 
 - **Active per token:** 9,052,880,896 (derived; the card's "9B active"). The g128 checkpoint stores its linears at
@@ -584,9 +584,11 @@ carries an `ours` stage).
    thousands of answers. *Cost if wrong:* int4-generated answers carry the g128 quant's own errors into the calibration
    targets (they are inputs only - AutoRound fits the bf16 block outputs, not the answers - so the effect is distribution
    shift, small); the alternative is days of CPU generation.
-8. **Decision 8 (proposed) - 25q's iteration budget:** `iters` 400, `nsamples` 512, `seqlen` 2048 (5.3x SergiioB's
-   token-iterations: ~32 h on two B70s, ESTIMATED from his 5 h 57 min at 200 / 128 / 1536), with 800 iterations as the
-   arm if the 400 run's A4 gain over RTN is still rising (~64 h). *Cost if wrong:* two to five box days either way; too
+8. **Decision 8 (proposed) - 25q's iteration budget:** `iters` 400, `nsamples` 512, `seqlen` 2048. AutoRound's step works
+   on a mini-batch (`batch_size` 8) drawn from the cached samples, so the tuning time scales with iters x seqlen and
+   `nsamples` adds the per-block input caching: ~2.7x SergiioB's 5 h 57 min at 200 / 128 / 1536, **~16-20 h** on two B70s
+   (ESTIMATED; the first block's time x 88 is the honest figure), with 800 iterations as the arm if the 400 run's A4 gain
+   over RTN is still rising (~32-40 h). *Cost if wrong:* one to two box days either way; too
    few iterations leaves quality on the table, too many burns days for nothing measurable.
 9. **Decision 9 (proposed) - our export's `out_proj` scales F16:** #2512 pins `mixer.out_proj` to bf16 scales in memory;
    the GPTQ export writes F16 (SergiioB's does); 25q's `check.py` asserts F16 everywhere and the loader's exact BF16
