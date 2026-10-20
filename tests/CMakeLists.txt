@@ -4679,6 +4679,16 @@ if(B70_LFM2MOE)
     lfm2moe_snapshot_gpu_rtn_test lfm2moe_snapshot_gpu_rtn_pp_test PROPERTIES LABELS "checkpoint;lfm2moe" SKIP_RETURN_CODE 77
     TIMEOUT 3600)
 endif()
+# Task 5: tools/toolcall/lfm2moe_rules - the A4 run's evidence for decision 7 (how often each lenient reading fired), a plain host
+# program over the parser, and its test on generated files (cut at the first <|im_end|>, a failure counted for a block left as content).
+add_executable(lfm2moe_rules ${CMAKE_SOURCE_DIR}/tools/toolcall/lfm2moe_rules.cc)
+target_include_directories(lfm2moe_rules PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools/toolcall)
+target_link_libraries(lfm2moe_rules PRIVATE b70_server)
+add_executable(lfm2moe_rules_test server/lfm2moe_rules_test.cc)
+target_include_directories(lfm2moe_rules_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tools/toolcall)
+target_link_libraries(lfm2moe_rules_test PRIVATE b70_server)
+add_test(NAME lfm2moe_rules_test COMMAND lfm2moe_rules_test)
+set_tests_properties(lfm2moe_rules_test PROPERTIES LABELS lfm2moe)
 # ... and the same refusals as header-only code, so the Mac runs them: cli::lfm2moe::check_serve_flags (what b70-serve parsed and
 # LFM2.5 has no use for), check_args (b70-decode's, with prefill on) and the trained-context cap.
 add_executable(lfm2moe_serve_args_test server/lfm2moe_serve_args_test.cc)
