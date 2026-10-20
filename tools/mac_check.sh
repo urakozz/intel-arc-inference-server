@@ -225,7 +225,7 @@ if [ $kernels = 1 ]; then
   bin=$out/clrun
   mkdir -p "$bin"
   ok=1 runs="" nfail=0 npass=0
-  for d in gemv_i8w argmax pf_moe k2 moe kolibri qwen4exp offload muse dflash muse_dflash gdn_slots; do
+  for d in gemv_i8w argmax pf_moe k2 moe kolibri qwen4exp offload muse dflash muse_dflash gdn_slots lfm2moe; do
     # gdn_slots_run (spec 19c) needs no host source: the plain gdn_step kernel is its reference.
     # k2_run (spec 18b) checks against tests/kernels/k2_ref.h and builds the RoPE table
     # with the loader's own function, so it also takes two host sources.
@@ -240,6 +240,8 @@ if [ $kernels = 1 ]; then
     [ "$d" = dflash ] && extra="$root/src/loader/safetensors.cc $root/src/loader/lm_head_int8.cc $root/src/model/dflash.cc"
     # muse_dflash_run (spec 23f): the same three (the Muse fixture through dflash_fixture_io.h).
     [ "$d" = muse_dflash ] && extra="$root/src/loader/safetensors.cc $root/src/loader/lm_head_int8.cc $root/src/model/dflash.cc"
+    # lfm2moe_run (spec 24c): lfm2moe_ref.h, its fixture and the loader's RoPE table (lfm_rope_table + the descriptor).
+    [ "$d" = lfm2moe ] && extra="$root/src/loader/lfm2moe_rope.cc $root/src/model/lfm2moe.cc"
     # shellcheck disable=SC2086
     if ! clang++ -std=c++17 -O2 -Wall -Wextra -Werror -DB70_CLRUN_ROOT="\"$root\"" -I"$root/src" -I"$root/tests" \
          "$root/tools/mac/clrun/clrun.cc" "$root/tools/mac/clrun/${d}_run.cc" $extra \
