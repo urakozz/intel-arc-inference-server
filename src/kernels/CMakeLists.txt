@@ -1622,6 +1622,55 @@ if(B70_MUSE AND B70_MUSE_VERIFY_M16 AND B70_MUSE_DFLASH)
 endif()
 # ==== Spec 23f ==== (end) ====
 
+# ==== Spec 24c: LFM2.5-24B-A2B decode (model::lfm2moe()) ==== (begin) ====
+# Additive only: no existing source is edited, so every binary above keeps its name, its command line and its bytes
+# (tools/kernel_cmdlines' diff: additions only - F0). LFM2-only kernels live in src/kernels/lfm2moe/ and are named
+# `lfm_*` with every shape define in the name (src/kernels/lfm2moe_kernels.h is the host half). The reused sources at
+# LFM2's shapes - also the engine's binaries:
+#   gemv.cl        in_proj 2048x6144, out_proj / o_proj 2048x2048, q||k||v 2048x3072, dense gate||up 2048x23552,
+#                  dense down 11776x2048 - every S in {1, 2, 4, 8, 16} dividing K / 64 (184 k-groups at 11776: S <= 8)
+#                  and both layouts: P0's sweep (probe_lfm_step --sweep-s) times them all; the engine binds the
+#                  descriptor's {S, layout} (model::Lfm2MoeDesc::linears, PROVISIONAL)
+#   gemv_i8w.cl / gemv_bf16.cl   the tied head 2048 -> 128000 (int8 the default, spec 9; bf16 over the embedding tiles)
+#   argmax.cl      at VOCAB 128000, VOCAB_USED 125017 (the tokenizer's ids; rows 125017.. never win)
+# P0's stand-ins (plan 24c Task 1; no LFM2 kernel bound): moe.cl at E64 T4 D2048 I1536 (5 slots: the shared one is a
+# 65th block), Kolibri's attention at Q32KV8 (head_dim 128), kol_norm_finish at K 2048 over 8 work-groups, the
+# router as gemv_bf16 at N 64, and Ornith's prep_res_fold_M1_K2048_SP0_G20 (built here only without B70_ORNITH).
+option(B70_LFM2MOE "build the LFM2.5-24B-A2B decode variants (spec 24c)" ON)
+if(B70_LFM2MOE)
+  set(LFM_CL ${CMAKE_CURRENT_SOURCE_DIR}/lfm2moe)
+  foreach(L 0 1)
+    foreach(S 1 2 4 8 16)
+      add_gemv_variant(1 2048 6144 ${S} ${L})     # in_proj (B | C | x)
+      add_gemv_variant(1 2048 2048 ${S} ${L})     # conv out_proj, attention out_proj
+      add_gemv_variant(1 2048 3072 ${S} ${L})     # q||k||v
+      add_gemv_variant(1 2048 23552 ${S} ${L})    # dense gate||up (interleave16)
+      if(NOT S EQUAL 16)
+        add_gemv_variant(1 11776 2048 ${S} ${L})  # dense down
+      endif()
+    endforeach()
+  endforeach()
+  add_gemv_i8w_variant(1 2048 128000)             # the int8 head (spec 9), built from the embedding
+  add_gemv_bf16_variant(1 2048 128000 64 1)       # the bf16 head over the embedding tiles (--lm-head bf16)
+  set(LFM_ARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=128000 VOCAB_USED=125017)
+  add_ocloc_kernel(lfm_argmax_stage1_M1_V128000_U125017 SOURCE ${ARGMAX_CL} DEFINES ${LFM_ARGMAX_DEFINES} M=1)
+  add_ocloc_kernel(lfm_argmax_stage2_V128000 SOURCE ${ARGMAX_CL} DEFINES ${LFM_ARGMAX_DEFINES})
+  # --- P0's stand-ins (tools/probe/probe_lfm_step.cc only) ---
+  add_gemv_bf16_variant(1 2048 64 16 16)          # the router at gemv_bf16's tiny tiling
+  add_ocloc_kernel(moe_M1_E64_T4_D2048_I1536 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/moe.cl
+                   DEFINES UP_KS=4 DN_KS=2 M=1 EXPERTS=64 TOP_K=4 HIDDEN=2048 INTER=1536 ROUTER_N=80)
+  add_ocloc_kernel(kol_attn_prep_M1_N6144_S1_Q32KV8_F SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_prep.cl
+                   DEFINES ${CTRL_DEFINES} M=1 QKV_N=6144 QKV_S=1 Q_HEADS=32 KV_HEADS=8 HD=128 SLIDING=0 RING=0)
+  add_ocloc_kernel(kol_attn_M1_T${ATTN_V2_TGT}_Q32KV8_F SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_attn.cl
+                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} Q_HEADS=32 KV_HEADS=8 WINDOW=0 RING=0)
+  add_ocloc_kernel(kol_norm_M1_K2048_G20_W8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_prep.cl
+                   DEFINES M=1 K=2048 NORM_G=20 NORM_WGS=8)
+  if(NOT B70_ORNITH)
+    add_prep_res_fold(1 2048 0 20)
+  endif()
+endif()
+# ==== Spec 24c: LFM2.5-24B-A2B decode ==== (end) ====
+
 # Spec 16b (pipeline parallel, `--pipeline-handoff peer`): the peer-write hand-off between
 # the two stages' decode lists - pp_send (device 0's last launch) and pp_recv (device 1's
 # first). No defines: the word counts are kernel arguments, so one binary serves every model.

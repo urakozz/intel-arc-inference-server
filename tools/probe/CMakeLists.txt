@@ -679,3 +679,28 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   get_property(D1_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(dflash_d1 ${D1_KERNELS})
 endif()
+
+# --- probe_lfm_step: spec 24c P0 (plan 24c Task 1) ---
+# LFM2.5-24B-A2B's decode step from EXISTING kernels at its shapes (tools/probe/lfm_step_shapes.h: 383 / 277 /
+# GEMV-only / noop lists, interleaved; --sweep-s times every int4 shape at every S and layout). Box queue row 51,
+# stage r51.p0. Plain g++ / Level Zero; the binaries are src/kernels/CMakeLists.txt's spec 24c block.
+if(B70_LFM2MOE)
+  add_executable(probe_lfm_step probe_lfm_step.cc)
+  target_include_directories(probe_lfm_step PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(probe_lfm_step PRIVATE b70_l0 b70_lfm2moe_model)
+  b70_target_kernel_dir(probe_lfm_step)
+  set(_lfm_p0_kernels kernel_noop kernel_gemv_bf16_M1_K2048_N64_C16_S16 kernel_moe_M1_E64_T4_D2048_I1536
+    kernel_kol_attn_prep_M1_N6144_S1_Q32KV8_F kernel_kol_attn_M1_T${ATTN_V2_TGT}_Q32KV8_F kernel_kol_norm_M1_K2048_G20_W8
+    kernel_prep_res_fold_M1_K2048_SP0_G20 kernel_gemv_i8w_M1_K2048_N128000
+    kernel_lfm_argmax_stage1_M1_V128000_U125017 kernel_lfm_argmax_stage2_V128000)
+  foreach(L 0 1)
+    foreach(S 1 2 4 8 16)
+      list(APPEND _lfm_p0_kernels kernel_gemv_M1_K2048_N6144_S${S}_L${L} kernel_gemv_M1_K2048_N2048_S${S}_L${L}
+        kernel_gemv_M1_K2048_N3072_S${S}_L${L} kernel_gemv_M1_K2048_N23552_S${S}_L${L})
+      if(NOT S EQUAL 16)
+        list(APPEND _lfm_p0_kernels kernel_gemv_M1_K11776_N2048_S${S}_L${L})
+      endif()
+    endforeach()
+  endforeach()
+  add_dependencies(probe_lfm_step ${_lfm_p0_kernels})
+endif()
