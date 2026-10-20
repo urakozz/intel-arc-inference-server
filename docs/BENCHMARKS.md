@@ -991,6 +991,22 @@ position on the 13 full layers and up to 81.8 MB of sliding windows - **39.7 / 3
 | DFlash P0: verify cost M = 1..16 and one drafter block | `probe_draft_cost --shapes muse` at depth 4096 / 32768, interleaved pairs, median of 3 | pending (derived: verify 1.00 1.18 1.56 1.79 + 0.305 a row; the block int4 0.182 / int8 0.263 / bf16 0.435 plain steps) | r47.cost |
 | served `--spec dflash` vs `--spec off` / `--spec lookup` (D5) | `b70-serve <muse> --chat-template <the original's>`, one B70, int8 head, llama-benchy pp4096 tg256 and decode at depth 4k / 16k, the agentic session | pending - the rule: dflash becomes the default only at >= 10 % over both on the agentic set and no loss > 3 % | r47.benchy |
 
+## LFM2.5-24B-A2B (spec 24)
+
+**Nothing here is measured yet.** LFM2.5-24B-A2B (`lfm2_moe`, re-quantised by us to int4 g64 - 24q's exports do not
+exist yet) runs its own engine (spec 24c's decode, 24d's prefill; no `lfm_*` binary has been compiled). One card holds
+the whole model and its 131072 positions (13.39 GB of weights with the int8 head + 2.68 GB of KV + 0.79 GB of prefill
+scratch, derived). Decode reads 1.43 GB a token plus 20,480 B of KV a position: a roofline of 411 t/s, ~220 t/s at
+depth 4096 ESTIMATED (spec 24 §3: many small kernels); 383 launches a token (277 with every fused arm).
+
+| what | configuration | number | stage |
+|---|---|---|---|
+| decode tg256 at depth 1024 / 4096 / 32768 / 130816 | one B70, int8 head, flash, `B70_LFM_FUSE` none / each arm / all (interleaved), bf16 head, eager | pending (roofline 411 t/s, ~220 t/s at 4096 ESTIMATED) | r51.speed |
+| prefill pp 4096 / 32768 (spec 24d) | one B70, `l0` backend (bf16 slabs + `pf_gemm_T0`, the grouped MoE on `pf_moe_gemm`, flash at head_dim 64), chunk 2048, int8 head; `b70-decode --bench --prefill-length N`; flash and eager interleaved | pending; ~6,000-7,000 t/s at pp 4096 ESTIMATED (plan 24d: the MoE dequant ~0.21 s a chunk over 38 layers, ~2.7 GB of traffic a layer, against ~0.1 s of DPAS) | r52.speed |
+| prefill phase table | `B70_PREFILL_PROFILE=1`, pp 4096: slab dequant / GEMM, the conv (`gdn_seed` / `gdn_conv` rows), attention prep / flash, the MoE's route / sort / gather / weights / GEMM / combine | pending - the dequant's share against the estimate above decides the next lever (the dequant fused into the grouped GEMM, or int8 prefill: spec 24 §11) | r52.speed |
+| prefill across two cards | `--pp 2`, the chunk crosses by copy (8 MB of h a chunk), sequentially (capacity, not speed) | pending | r52.speed |
+| prefill launches and memory | a chunk at 40 layers; the head; the scratch | 1259 (1 + 2 x 70 + 28 x 31 + 10 x 25) + 4; 788,687,408 B a device (the 512 MiB weight batch the largest) - derived, asserted at the walk and the plan test | r52.f4 |
+
 ## Correctness
 
 Numerics are gated, not eyeballed. The full protocol is in

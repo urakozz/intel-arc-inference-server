@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "kernels/kernels.h"
+#include "kernels/prefill/pf_kernels.h"   // spec 24d: the reused prefill names
 #include "model/lfm2moe.h"
 
 // Spec 24c: LFM2.5-24B-A2B's device binaries by name - the host half of the spec 24c block in
@@ -156,5 +157,78 @@ inline std::vector<std::string> decode_variants(const model::Lfm2MoeDesc& d, boo
   if (two_cards) add(pp_handoff_variant());
   return v;
 }
+
+// ==== Spec 24d: LFM2.5-24B-A2B prefill (begin) =====================================================================
+// One chunk of at most kPfC positions through a device's layers on the Level Zero list (runtime/lfm2moe/
+// lfm2moe_prefill.cc has the walk). The LFM2-only prefill binaries are lfm_pf_* (src/kernels/lfm2moe/
+// lfm_pf_{conv,moe,attn,prep}.cl); 24c's per-row kernels are built again at M = kPfC (the M in the name is the prefill
+// line: the norm _NF / _S1 - every prefill linear is one unsplit GEMM, so S 1 -, the router, the route, the attention
+// prep at S 1 - decode's chains row for row); the rest are reused sources at LFM2's shapes (prefill/pf_dequant_slab.cl
+// at each linear's {K, N, layout} from model::Lfm2MoeDesc::linears - the layout follows the descriptor, never assumed
+// -, pf_gemm_T0, pf_gemm_T0_SILU for the dense gate||up, pf_moe_gemm at K 2048 N 3072 SiLU and K 1536 N 2048). The
+// head after the last chunk is decode's binaries over the last row (decode_variants). runtime/lfm2moe/lfm2moe_sizes.h
+// spells the same constants device-free.
+inline constexpr unsigned kPfC = 2048, kPfTm = 32, kPfSlab = 1024;
+inline constexpr size_t kPfBatchBytes = size_t(512) << 20;    // one weight batch of bf16 expert blocks (Kolibri's)
+inline constexpr unsigned kPfKt = 64, kPfRpw = 16, kPfHpw = 4;  // lfm_pf_attn: key tile, rows, heads a WG (PROVISIONAL)
+inline constexpr unsigned kPfSortWg = 64, kPfGatherWg = 64, kPfCombineWg = 256, kPfDequantWg = 16;
+inline constexpr unsigned kPfConvWg = 256, kPfConvRows = 16, kPfEmbedWg = 256;
+// lfm_pf_moe.cl's header words (H_*): [0] tiles used, [1] 0 (reserved), [2] rows used, [3] C, [4 + e] expert e's rows.
+namespace pf_hdr {
+inline constexpr unsigned kTiles = 0, kRows = 2, kC = 3, kCount = 4;
+inline constexpr unsigned words() { return (kCount + kExperts + 15) / 16 * 16; }   // 80
+}  // namespace pf_hdr
+
+inline std::string pf_embed_variant() { return "lfm_pf_embed_gather_K2048_V128000"; }
+// lfm_pf_conv.cl (lfm_pf_conv_seed + lfm_pf_conv): `tiles` - in_proj in the conv-tile column order (the arm conv's load).
+inline std::string pf_conv_variant(bool tiles) { return std::string("lfm_pf_conv_K2048_C2048") + (tiles ? "_T" : ""); }
+inline std::string pf_moe_variant() { return "lfm_pf_moe_E64_T4_D2048_I1536_TM32"; }
+inline std::string pf_attn_variant(bool eager) {
+  return "lfm_pf_attn_Q32KV8_HPW" + std::to_string(kPfHpw) + "_RPW" + std::to_string(kPfRpw) + "_KT" +
+         std::to_string(kPfKt) + (eager ? "_EAGER" : "");
+}
+inline std::string pf_norm_variant(bool fold) { return res_norm_variant(kPfC, fold ? 1 : 0, false); }
+inline std::string pf_router_variant() { return router_variant(kPfC); }
+inline std::string pf_route_variant() { return route_variant(kPfC); }
+inline std::string pf_attn_prep_variant() { return attn_prep_variant(kPfC, 1); }
+// One int4 linear's 1024-column slab at its OWN layout (24b review I1: model::Lfm2MoeDesc::linears' {S, layout}).
+inline std::string pf_slab_variant(const model::GemvShape& s) { return pf_dequant_slab_variant(s.K, s.N, s.layout); }
+inline std::string pf_gemm_gu_variant() { return pf_moe_gemm_variant(kHidden, 2 * kInter, false, true); }
+inline std::string pf_gemm_dn_variant() { return pf_moe_gemm_variant(kInter, kHidden, false, false); }
+
+// Every binary a prefill chunk of `d` binds (the head is decode's: decode_variants) for an attention form and the
+// in_proj layout (`conv_tiles`: the arm conv's load). tests/kernels/lfm2moe_pf_variant_names_test.cc holds the union
+// to the CMake block's list.
+inline std::vector<std::string> prefill_variants(const model::Lfm2MoeDesc& d, bool eager, bool conv_tiles) {
+  std::vector<std::string> v = {pf_embed_variant(), pf_norm_variant(false), pf_norm_variant(true),
+                                pf_gemm_variant(false)};
+  auto add = [&](const std::string& s) {
+    for (const std::string& x : v)
+      if (x == s) return;
+    v.push_back(s);
+  };
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    for (const model::LfmLinear& ln : d.linears(l)) {
+      if (ln.kind != model::WeightKind::Int4) continue;   // the router: lfm_router at M kPfC
+      add(pf_slab_variant(ln.shape));
+      if (ln.id == model::LfmLinearId::DenseGateUp) add(pf_gemm_silu_variant());
+    }
+    if (d.is_attention(l)) {
+      add(pf_attn_prep_variant());
+      add(pf_attn_variant(eager));
+    } else {
+      add(pf_conv_variant(conv_tiles));
+    }
+    if (!d.is_dense(l)) {
+      add(pf_router_variant());
+      add(pf_route_variant());
+      add(pf_moe_variant());
+      add(pf_gemm_gu_variant());
+      add(pf_gemm_dn_variant());
+    }
+  }
+  return v;
+}
+// ==== Spec 24d: LFM2.5-24B-A2B prefill (end) =======================================================================
 
 }  // namespace kernels::lfm2moe

@@ -22,7 +22,8 @@
 // Spec 24c: LFM2.5-24B-A2B's decode loop - Kolibri's engine (runtime/kolibri/kolibri_engine.h, runtime::Engine's
 // contract) for this family: it owns the weights (each layer on its device: loader::load_lfm2moe's parts), one
 // Lfm2MoeBuffers and one captured list per device, and a token is a replay of the lists. A prompt is fed one id per
-// replay (`ingest`) until 24d's prefill. No MTP (the model has no head). 24e adds the snapshots and the server's calls.
+// replay (`ingest`) or, spec 24d, in chunks (`prefill`, below). No MTP (the model has no head). 24e adds the snapshots
+// and the server's calls.
 //
 // **The list** (runtime/lfm2moe/lfm2moe_capture.h): 383 launches a token on one card, 403 under B70_LFM_ATTN=eager,
 // 277 with every fused arm of B70_LFM_FUSE (each arm bitwise the as-built list); both read at construction.
@@ -35,6 +36,12 @@
 // device 0's after the fence. A lost hand-off host-signals the event, throws naming it, and marks the engine until
 // reset().
 namespace runtime::lfm2moe {
+
+// Spec 24d: prefill() and its accessors are DEFINED in b70_lfm2moe_prefill (runtime/lfm2moe/lfm2moe_prefill_engine.cc),
+// not in b70_lfm2moe_runtime - Kolibri's arrangement (runtime/kolibri/kolibri_engine.h): a target that never prefills
+// links what it always linked; one that does links b70_lfm2moe_prefill. The prefill state is lazy (allocated by the
+// first prefill or prepare_prefill), so a decode-only engine holds exactly what it did.
+struct Lfm2MoePrefillState;   // runtime/lfm2moe/lfm2moe_prefill_engine.cc
 
 class Lfm2MoeEngine {
  public:
@@ -100,10 +107,46 @@ class Lfm2MoeEngine {
   double last_gen_ms() const { return last_gen_ms_; }
   double last_fence_ms() const { return last_fence_ms_; }
   // P4's test hook (PipelineEngine's): the next step submits device 1's list only - a hand-off that never arrives.
+  // Spec 24d: the next prefill CHUNK likewise (device 0's half not appended), unless prefills are replayed.
   void drop_next_handoff() { drop_next_ = true; }
+
+  // --- spec 24d: prefill (defined in b70_lfm2moe_prefill) ---------------------------------------------------------
+  // Runs `ids` from the current pos in chunks of `chunk` (0 = kPfC 2048) through runtime/lfm2moe/lfm2moe_prefill.h's
+  // walk on every device, then the head on the last row: leaves pos += ids.size() on every device and the first
+  // generated id pending in cur_token (Engine::prefill's contract); decode continues from the KV and the conv rings it
+  // wrote. The conv rings, KV, routes and logits are decode's to a cosine bar (the GEMMs' sum order), not bitwise
+  // (plan 24d Review Focus 2); a prompt split into chunks at any offset is bitwise one chunk (Review Focus 1: every
+  // kernel is row-local or keyed to ABSOLUTE positions - the GEMM rows, the conv's per-row chain with its seed, the
+  // sorted MoE rows, the flash tiles from key 0, whose wholly masked tiles add exact zeros, RoPE, the ring slots). A
+  // prompt may be continued by another prefill or by decode, and a prefill
+  // may follow decode steps. Two devices (decision 10): each chunk runs layers [0, s) on device 0, crosses by spec
+  // 16b's `copy` hand-off at chunk size (a second PipelineLink: h [C][2048], and at a dense cut the down's pending
+  // rows), then layers [s, L) and the head on device 1 - sequentially. A lost hand-off host-signals the event, throws
+  // naming it and marks the engine until reset(). B70_LFM_ATTN=eager runs the eager prefill attention too (the
+  // engine's attention(), read at construction); B70_LFM_FUSE's arm conv reads in_proj in the conv-tile order (the
+  // _T conv build). With debug_tap, the last chunk's last row of every layer lands in the tap (read_debug_h).
+  void prefill(const std::vector<uint32_t>& ids, uint32_t chunk = 0);
+  // Allocates every device's prefill scratch, Context and (two devices) the prefill link, and checks every binary the
+  // walk binds exists; prefill() calls it. A CLI calls it before timing the first prefill.
+  void prepare_prefill();
+  // B70_PREFILL_REPLAY's arrangement (Kolibri's): record each chunk's list once per (pos, rows) and device and replay
+  // it; the hand-off's copies and event stay on the immediate lists (never inside a recording; no taps under replay).
+  void set_prefill_replay(bool enabled) { pf_replay_ = enabled ? 1 : 0; }
+  // Launches every device's prefill Context has appended since it was made (0 before the first prefill).
+  size_t prefill_launches() const;
+  size_t prefill_launches(uint32_t dev) const;
+  // u32 [layers][kPfC][16]: every MoE layer's route rows of the last chunk (rows [0, C) written; pf_route_at), each
+  // layer's from the device holding it. Throws before the first prefill.
+  std::vector<uint32_t> read_prefill_routes();
+  bool prefill_ready() const { return pf_bytes_ != 0; }
 
  private:
   struct Stage;
+  // Spec 24d: a device's pieces for the prefill half (b70_lfm2moe_prefill), which cannot see Stage.
+  l0::Context& stage_ctx(uint32_t dev) const;
+  Lfm2MoeBuffers& stage_buffers(uint32_t dev) const;
+  Control* stage_control(uint32_t dev) const;
+  l0::CmdList& stage_imm(uint32_t dev) const;
   void step_once();
   bool settle(uint32_t dev);
   [[noreturn]] void fail(const std::string& what);
@@ -126,6 +169,16 @@ class Lfm2MoeEngine {
   std::map<std::string, std::pair<double, size_t>> prof_us_;
   std::vector<double> prof_wall_us_, prof_sum_us_;
   size_t prof_replays_ = 0;
+  // Spec 24d: set by prepare_prefill (b70_lfm2moe_prefill) - releases a prefill list waiting on a hand-off that will
+  // not come and waits (bounded) for every prefill list to go idle; reset() calls it.
+  std::function<bool()> pf_settle_;
+  // Spec 24d: the prefill state, lazy; declared LAST so it (its Contexts, kernels, recordings and link) is destroyed
+  // before the buffers it points into. The deleter is set where the state is made (b70_lfm2moe_prefill), so this
+  // header names no prefill symbol. pf_dev_bytes_: each device's prefill scratch + prefill link, for memory_use().
+  std::vector<size_t> pf_dev_bytes_;
+  size_t pf_bytes_ = 0;
+  int pf_replay_ = -1;   // -1: B70_PREFILL_REPLAY decides
+  std::unique_ptr<Lfm2MoePrefillState, void (*)(Lfm2MoePrefillState*)> pf_{nullptr, nullptr};
 };
 
 }  // namespace runtime::lfm2moe

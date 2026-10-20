@@ -4409,7 +4409,13 @@ endif()
 # b70-decode's model_type dispatch and LFM2's refusals, before the device: tests/model/lfm2moe/ holds only the
 # checkpoint's config.json (24b), which is all the dispatch and the planner read.
 set(_lfm_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/lfm2moe)
-b70_cli_reject(cli_reject_lfm2moe_prefill ${_lfm_cfg} --ids ${B70_OK_IDS} --n 4 --prefill EXPECT "spec 24d")
+# (24c's cli_reject_lfm2moe_prefill - --prefill naming spec 24d - is gone: LFM2 prefills now; 24d's refusals below.)
+b70_cli_reject(cli_reject_lfm2moe_prefill_int8 ${_lfm_cfg} --bench --prefill-length 64 --prefill-backend l0-int8
+  EXPECT "int8 prefill for this family is a later probe")
+b70_cli_reject(cli_reject_lfm2moe_prefill_sycl ${_lfm_cfg} --ids ${B70_OK_IDS} --n 4 --prefill --prefill-backend sycl-tla
+  EXPECT "no LFM2 walk")
+b70_cli_reject(cli_reject_lfm2moe_prefill_chunk ${_lfm_cfg} --ids ${B70_OK_IDS} --n 4 --prefill --prefill-chunk 4096
+  EXPECT "exceeds LFM2.5-24B-A2B's prefill chunk 2048")
 b70_cli_reject(cli_reject_lfm2moe_mtp ${_lfm_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "no MTP head")
 b70_cli_reject(cli_reject_lfm2moe_kv8 ${_lfm_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "decision 11")
 b70_cli_reject(cli_reject_lfm2moe_layers ${_lfm_cfg} --ids ${B70_OK_IDS} --n 4 --layers 3
@@ -4419,3 +4425,120 @@ if(COMMAND b70_serve_reject)
   set_tests_properties(cli_reject_lfm2moe_serve PROPERTIES LABELS lfm2moe)
 endif()
 # ==== Spec 24c: LFM2.5-24B-A2B decode (label lfm2moe) ==== (end) ====
+
+# ==== Spec 24d: LFM2.5-24B-A2B prefill (labels lfm2moe;prefill) ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-15-spec24d-lfm2moe-prefill.md. Box queue row 52. Host tests first (the Mac:
+# tools/mac_check.sh), then the card's (box only; the checkpoint ones SKIP 77 without the data).
+# Task 1: the prefill kernels' host twin (tests/kernels/lfm2moe_pf_ref.h) - the conv over a chunk against decode's
+# conv_step at every split, torch's chunked conv (fixture (h)), the 64-expert sort and its adversaries, the rank-order
+# combine against decode's chain and torch's, the flash walk in fp64. Headers only.
+add_executable(lfm2moe_pf_ref_test kernels/lfm2moe_pf_ref_test.cc)
+target_include_directories(lfm2moe_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME lfm2moe_pf_ref_test COMMAND lfm2moe_pf_ref_test)
+set_tests_properties(lfm2moe_pf_ref_test PROPERTIES LABELS "lfm2moe;prefill" TIMEOUT 600)
+if(B70_LFM2MOE)
+  # Task 2: every binary the prefill walk binds, both attention forms and both in_proj layouts (src/kernels/
+  # CMakeLists.txt's spec 24d block; after `--` pf_gemm_T0 / pf_gemm_T0_SILU, built in prefill/).
+  set(B70_LFM2MOE_PREFILL_KERNELS
+    kernel_lfm_pf_embed_gather_K2048_V128000 kernel_lfm_pf_conv_K2048_C2048 kernel_lfm_pf_conv_K2048_C2048_T
+    kernel_lfm_pf_moe_E64_T4_D2048_I1536_TM32 kernel_lfm_pf_attn_Q32KV8_HPW4_RPW16_KT64
+    kernel_lfm_pf_attn_Q32KV8_HPW4_RPW16_KT64_EAGER kernel_lfm_res_norm_M2048_K2048_W8_NF
+    kernel_lfm_res_norm_M2048_K2048_W8_S1 kernel_lfm_router_M2048_K2048_E64 kernel_lfm_route_M2048_E64_T4
+    kernel_lfm_attn_prep_M2048_S1_Q32KV8 kernel_pf_dequant_slab_K2048_N6144_L1 kernel_pf_dequant_slab_K2048_N2048_L1
+    kernel_pf_dequant_slab_K2048_N3072_L0 kernel_pf_dequant_slab_K2048_N23552_L0 kernel_pf_dequant_slab_K11776_N2048_L1
+    kernel_pf_moe_gemm_K2048_N3072_SILU kernel_pf_moe_gemm_K1536_N2048)
+  set(B70_LFM2MOE_PREFILL_REUSED kernel_pf_gemm_T0 kernel_pf_gemm_T0_SILU)
+  add_executable(lfm2moe_pf_variant_names_test kernels/lfm2moe_pf_variant_names_test.cc)
+  target_include_directories(lfm2moe_pf_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(lfm2moe_pf_variant_names_test PRIVATE b70_lfm2moe_model)
+  b70_target_kernel_dir(lfm2moe_pf_variant_names_test)
+  add_test(NAME lfm2moe_pf_variant_names_test COMMAND lfm2moe_pf_variant_names_test ${B70_LFM2MOE_PREFILL_KERNELS} --
+    ${B70_LFM2MOE_PREFILL_REUSED})
+  set_tests_properties(lfm2moe_pf_variant_names_test PROPERTIES LABELS "lfm2moe;prefill")
+  # K1 for the prefill on the card, no checkpoint: every prefill kernel at the real shapes against lfm2moe_pf_ref.h.
+  add_executable(lfm2moe_pf_kernels_test kernels/lfm2moe_pf_kernels_test.cc)
+  target_include_directories(lfm2moe_pf_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(lfm2moe_pf_kernels_test PRIVATE b70_prefill_host b70_lfm2moe_loader b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(lfm2moe_pf_kernels_test)
+  endif()
+  b70_target_kernel_dir(lfm2moe_pf_kernels_test)
+  add_dependencies(lfm2moe_pf_kernels_test ${B70_LFM2MOE_PREFILL_KERNELS} ${B70_LFM2MOE_DECODE_KERNELS}
+    ${B70_LFM2MOE_PREFILL_REUSED})
+  add_test(NAME lfm2moe_pf_kernels_test COMMAND lfm2moe_pf_kernels_test)
+  set_tests_properties(lfm2moe_pf_kernels_test PROPERTIES LABELS "lfm2moe;prefill" TIMEOUT 1800)
+  # Task 3: the walk on one card (box only; SKIP 77 without the synthetic checkpoints / 24q's RTN export).
+  #   lfm2moe_prefill_test (F4): the walk's launches and the plan; twice bitwise, recorded == replayed; chunks of 64
+  #       and splits at 1..5 / 64 / 2047 / 2048 / 2049 and chunks of 1 / 2 bitwise one chunk (Review Focus 1); against
+  #       decode's fill within the bars (KV, the live conv slots, the h taps, the routes up to near-ties, the tokens)
+  #   lfm2moe_golden_test's `prefill` mode (F3): tokens tie-aware after the prefill, routes, the h taps
+  add_executable(lfm2moe_prefill_test runtime/lfm2moe_prefill_test.cc)
+  target_include_directories(lfm2moe_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(lfm2moe_prefill_test PRIVATE b70_lfm2moe_prefill b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(lfm2moe_prefill_test)
+  endif()
+  add_dependencies(lfm2moe_prefill_test ${B70_LFM2MOE_PREFILL_KERNELS} ${B70_LFM2MOE_PREFILL_REUSED}
+    ${B70_LFM2MOE_DECODE_KERNELS} kernel_pp_handoff)
+  set(_lfm_pf_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/lfm2moe_short.ids)
+  set(_lfm_pf_tests)
+  foreach(sp w proj)
+    add_test(NAME lfm2moe_prefill_synth_${sp}_test COMMAND lfm2moe_prefill_test ${B70_LFM2MOE_SYNTH_DIR}/${sp} ${_lfm_pf_ids})
+    list(APPEND _lfm_pf_tests lfm2moe_prefill_synth_${sp}_test)
+  endforeach()
+  add_test(NAME lfm2moe_prefill_synth_eager_test COMMAND lfm2moe_prefill_test ${B70_LFM2MOE_SYNTH_DIR}/w ${_lfm_pf_ids} eager)
+  add_test(NAME lfm2moe_prefill_synth_bf16head_test COMMAND lfm2moe_prefill_test ${B70_LFM2MOE_SYNTH_DIR}/w ${_lfm_pf_ids} bf16)
+  add_test(NAME lfm2moe_prefill_synth_fuse_conv_test COMMAND lfm2moe_prefill_test ${B70_LFM2MOE_SYNTH_DIR}/w ${_lfm_pf_ids}
+    --fuse conv)
+  add_test(NAME lfm2moe_prefill_rtn_test COMMAND lfm2moe_prefill_test ${B70_LFM2MOE_RTN} ${_lfm_pf_ids})
+  add_test(NAME lfm2moe_prefill_rtn_eager_test COMMAND lfm2moe_prefill_test ${B70_LFM2MOE_RTN} ${_lfm_pf_ids} eager)
+  list(APPEND _lfm_pf_tests lfm2moe_prefill_synth_eager_test lfm2moe_prefill_synth_bf16head_test
+    lfm2moe_prefill_synth_fuse_conv_test lfm2moe_prefill_rtn_test lfm2moe_prefill_rtn_eager_test)
+  set_tests_properties(${_lfm_pf_tests} PROPERTIES LABELS "checkpoint;lfm2moe;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # F3 on prefill: 24c's golden test in its prefill mode (one chunk, and chunks of 64), the synthetics' sets, the RTN
+  # export (short / 4k / agentic, opt-in 32k), `ours` when it exists; the _eager twins.
+  target_link_libraries(lfm2moe_golden_test PRIVATE b70_lfm2moe_prefill)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(lfm2moe_golden_test)
+  endif()
+  add_dependencies(lfm2moe_golden_test ${B70_LFM2MOE_PREFILL_KERNELS} ${B70_LFM2MOE_PREFILL_REUSED})
+  set(_lfm_gpf_tests)
+  foreach(sp w proj)
+    foreach(p lfm2moe_short lfm2moe_4k lfm2moe_agentic)
+      add_test(NAME lfm2moe_golden_prefill_synth_${sp}_${p}_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_SYNTH_DIR}/${sp}
+        ${B70_LFM2MOE_SYNTH_ORACLE}-${sp} ${p} prefill)
+      list(APPEND _lfm_gpf_tests lfm2moe_golden_prefill_synth_${sp}_${p}_test)
+    endforeach()
+  endforeach()
+  add_test(NAME lfm2moe_golden_prefill_synth_c64_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_SYNTH_DIR}/w
+    ${B70_LFM2MOE_SYNTH_ORACLE}-w lfm2moe_4k prefill:64)
+  add_test(NAME lfm2moe_golden_prefill_synth_eager_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_SYNTH_DIR}/w
+    ${B70_LFM2MOE_SYNTH_ORACLE}-w lfm2moe_short eager prefill)
+  list(APPEND _lfm_gpf_tests lfm2moe_golden_prefill_synth_c64_test lfm2moe_golden_prefill_synth_eager_test)
+  foreach(p lfm2moe_short lfm2moe_4k lfm2moe_agentic)
+    add_test(NAME lfm2moe_golden_prefill_rtn_${p}_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_RTN}
+      ${B70_LFM2MOE_RTN_ORACLE_DIR} ${p} prefill)
+    add_test(NAME lfm2moe_golden_prefill_rtn_${p}_eager_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_RTN}
+      ${B70_LFM2MOE_RTN_ORACLE_DIR} ${p} eager prefill)
+    add_test(NAME lfm2moe_golden_prefill_ours_${p}_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_OURS}
+      ${B70_LFM2MOE_OURS_ORACLE_DIR} ${p} prefill)
+    list(APPEND _lfm_gpf_tests lfm2moe_golden_prefill_rtn_${p}_test lfm2moe_golden_prefill_rtn_${p}_eager_test
+      lfm2moe_golden_prefill_ours_${p}_test)
+  endforeach()
+  set_tests_properties(${_lfm_gpf_tests} PROPERTIES LABELS "checkpoint;golden;lfm2moe;prefill" SKIP_RETURN_CODE 77
+    TIMEOUT 3600)
+  add_test(NAME lfm2moe_golden_prefill_rtn_32k_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_RTN}
+    ${B70_LFM2MOE_RTN_ORACLE_DIR} lfm2moe_32k prefill)
+  set_tests_properties(lfm2moe_golden_prefill_rtn_32k_test PROPERTIES LABELS "checkpoint;golden;lfm2moe;prefill;optin"
+    SKIP_RETURN_CODE 77 TIMEOUT 14400)
+  # Task 4: two cards (decision 10) - 24c's lfm2moe_pp_test gains its prefill section (e): bitwise one card at chunks
+  # 2048 and 64, dense and MoE cuts, the RTN export at split 20, P4 on the prefill hand-off.
+  target_link_libraries(lfm2moe_pp_test PRIVATE b70_lfm2moe_prefill)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(lfm2moe_pp_test)
+  endif()
+  add_dependencies(lfm2moe_pp_test ${B70_LFM2MOE_PREFILL_KERNELS} ${B70_LFM2MOE_PREFILL_REUSED})
+  set_tests_properties(lfm2moe_pp_test PROPERTIES LABELS "checkpoint;lfm2moe;pp;prefill")
+endif()
+# ==== Spec 24d: LFM2.5-24B-A2B prefill ==== (end) ====
