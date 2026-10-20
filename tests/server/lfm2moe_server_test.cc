@@ -10,7 +10,7 @@
 //     length; inside `g(b="unterminat` the unfinished call is not emitted and its text is not content; EOS inside a block likewise
 //     (a closed call: tool_calls; an unfinished one: stop and nothing); generation that ends inside reasoning is reasoning only;
 //   - Review Focus 4: reasoning and content verbatim (newlines kept), keyed on the prompt's <think>;
-//   - decision 8: enable_thinking false is accepted, the prompt is the same, and one stderr line says it was ignored;
+//   - decision 8: enable_thinking false is accepted, the prompt is the same, and one stderr line (the first such request of the process) says it was ignored;
 //     chat_template_kwargs.preserve_thinking reaches the template and a non-boolean is a 400 naming it;
 //   - decision 1 / 2: the sampling a request carries - the vendored generation_config.json's defaults (sampled, T 0.1, top-k 50,
 //     top-p 1.0, penalty 1.05) unless the request names a field, temperature 0 greedy - and the SeenIds a penalised request
@@ -330,6 +330,10 @@ void case_kwargs() {
        at = err.find("enable_thinking ignored: the template always reasons", at + 1))
     ++lines;
   CHECK_EQ(lines, size_t(1));
+  // once per process: the same request again prints nothing (a long-running server would log it on every request otherwise)
+  f.script("r</think>ok");
+  CHECK(capture_stderr([&] { r = post(f, off); }).find("enable_thinking ignored") == std::string::npos);
+  CHECK_EQ(f.tmpl.last_prompt, prompt);   // and is still ignored
   // and a request that does not say so prints nothing of it
   f.script("r</think>ok");
   CHECK(capture_stderr([&] { (void)post(f, body()); }).find("enable_thinking ignored") == std::string::npos);

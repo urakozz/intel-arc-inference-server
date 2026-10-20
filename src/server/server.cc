@@ -169,9 +169,13 @@ Server::Outcome Server::generate(const Request& r,
     throw BadRequest(error.what());
   }
   // Spec 24e (decision 8): LFM2.5's template always opens <think>; enable_thinking false is accepted and has no effect.
+  // The line is printed once per process: a client that always sends enable_thinking:false must not fill the log.
   if (r.chat && opts_.chat_format.kind == ChatFormat::Kind::Lfm2 && !r.enable_thinking) {
-    std::fprintf(stderr, "b70-serve: enable_thinking ignored: the template always reasons\n");
-    std::fflush(stderr);
+    static std::atomic<bool> told{false};
+    if (!told.exchange(true)) {
+      std::fprintf(stderr, "b70-serve: enable_thinking ignored: the template always reasons\n");
+      std::fflush(stderr);
+    }
   }
   outcome.prompt_ids = deps_.tok.encode(prompt);
   const uint32_t max_len = deps_.engine.max_len();

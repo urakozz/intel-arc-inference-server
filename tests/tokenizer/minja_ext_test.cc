@@ -5,6 +5,8 @@
 // transformers' chat-template renderer). The last case is the chat_template capability probe:
 // a template that writes argument names between tags (K2-Horizon's <ifm|arg_key>) supports
 // tool calls, so its tool-call history is rendered by the template, not polyfilled as JSON.
+#include <unistd.h>
+
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -163,6 +165,29 @@ void case_tool_call_probe_pythonic() {
   const std::string got = tmpl.apply(inputs);
   std::printf("tool_call_probe_pythonic: %s\n", got.c_str());
   CHECK_EQ(got, std::string("<user>go<assistant>[read(path=/a, n=3), bare(), empty(), json(k=1), blank(), nul(), padded()]"));
+
+  // The rewrite's "Failed to parse arguments" notice (the blank call) is printed once per process, not once per call: a
+  // long-running server rendering a history with empty arguments must not repeat it. Two more renders of that
+  // history print at most one line between them (zero if an earlier case in this process already printed it).
+  std::fflush(stderr);
+  std::FILE* tmp = std::tmpfile();
+  CHECK(tmp != nullptr);
+  const int saved = dup(2);
+  dup2(fileno(tmp), 2);
+  for (int i = 0; i < 2; ++i) (void)tmpl.apply(inputs);
+  std::fflush(stderr);
+  dup2(saved, 2);
+  close(saved);
+  std::rewind(tmp);
+  std::string err;
+  char buf[256];
+  size_t n;
+  while ((n = std::fread(buf, 1, sizeof buf, tmp)) > 0) err.append(buf, n);
+  std::fclose(tmp);
+  size_t notices = 0;
+  for (size_t at = err.find("Failed to parse arguments"); at != std::string::npos; at = err.find("Failed to parse arguments", at + 1))
+    ++notices;
+  CHECK(notices <= 1);
 }
 
 }  // namespace

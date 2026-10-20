@@ -10,6 +10,7 @@
 
 #include "minja.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -433,7 +434,11 @@ class chat_template {
                                     try {
                                         arguments = json::parse(arguments.get<std::string>());
                                     } catch (const std::exception & ecvt) {
-                                        fprintf(stderr, "Failed to parse arguments: %s\n", ecvt.what());
+                                        // b70 patch (spec 24e): the notice is printed once per process (a server rendering a
+                                        // history with an empty `arguments` string would repeat it on every request).
+                                        static std::atomic<bool> told{false};
+                                        if (!told.exchange(true))
+                                            fprintf(stderr, "Failed to parse arguments: %s\n", ecvt.what());
                                     }
                                 }
                             }
