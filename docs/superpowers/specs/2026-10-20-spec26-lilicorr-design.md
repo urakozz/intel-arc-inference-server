@@ -276,40 +276,42 @@ interface).
 
 ## 10. Decisions
 
-1. **Decision 1 (proposed) - the reference:** `dflash_ref.py`'s new LiLiCorr form, ported from `V/models/lilicorr.py` and the
+The operator approved every proposed decision below as written on 2026-10-20.
+
+1. **Decision 1 (approved, operator 2026-10-20) - the reference:** `dflash_ref.py`'s new LiLiCorr form, ported from `V/models/lilicorr.py` and the
    DFlash 2 speculator (fp32 compute, as its vLLM forms), and **cross-checked once against vLLM's own `LiLiCorrHead`
    module instantiated on CPU** (one-rank process group, unquantised weights) on the tiny drafter - bitwise where both run
    fp32, else to 1e-6. If vLLM cannot be imported on the Mac, the box's vLLM image runs the check. *Cost if wrong:* a
    misread (a bias term, the lattice offset, the anchor's position) costs acceptance silently - D1 compares against our
    port, not against vLLM; the cross-check is the only external anchor (half a day).
-2. **Decision 2 (proposed) - the backbone's format: P0 picks among exact / int8 / int4 g64; the default is int8 per row
+2. **Decision 2 (approved, operator 2026-10-20) - the backbone's format: P0 picks among exact / int8 / int4 g64; the default is int8 per row
    (19b's) unless int4's E_K is within 0.05 of exact's at the chosen K** (23f's rule, which picked int4 for Muse).
    *Cost if wrong:* 0.1-0.3 of a plain step per block, or 0.05+ of acceptance.
-3. **Decision 3 (proposed) - the LiLiCorr head always exact** (W' bf16 + g; 74 MB). *Cost if wrong:* ~0.03 GB a block if
+3. **Decision 3 (approved, operator 2026-10-20) - the LiLiCorr head always exact** (W' bf16 + g; 74 MB). *Cost if wrong:* ~0.03 GB a block if
    int8 would do.
-4. **Decision 4 (proposed) - Mamba state at verify: 19c's slots first** (the operator's "reuse the mechanism"), the
+4. **Decision 4 (approved, operator 2026-10-20) - Mamba state at verify: 19c's slots first** (the operator's "reuse the mechanism"), the
    read-only-verify + replay-at-commit lever built in 26c only if P0's verify cost shows the slot writes above 10 % of a
    verify at the chosen K. *Cost if wrong:* ~1.7 ms a verify at M = 8 and 1.17 GB of memory, or a second commit path to
    prove bitwise.
-5. **Decision 5 (proposed) - K up to 7** (block 8; verify M <= 8), AdaptiveK per request over the measured cost row;
+5. **Decision 5 (approved, operator 2026-10-20) - K up to 7** (block 8; verify M <= 8), AdaptiveK per request over the measured cost row;
    `--spec-max 1..7`, default 7. *Cost if wrong:* none - K is a request-time choice.
-6. **Decision 6 (proposed) - sampled q = softmax(realized lattice scores / T) over the 8 candidates** (vLLM's), lossless
+6. **Decision 6 (approved, operator 2026-10-20) - sampled q = softmax(realized lattice scores / T) over the 8 candidates** (vLLM's), lossless
    through `accept_sparse`. P0 also estimates the alternative that folds the candidates' log-probs in, for the record only.
    *Cost if wrong:* acceptance at T > 0 only; never the output distribution.
-7. **Decision 7 (proposed) - prefill projects each chunk's last 1024 rows**, making every snapshot's ring exact (vs 19d's
+7. **Decision 7 (approved, operator 2026-10-20) - prefill projects each chunk's last 1024 rows**, making every snapshot's ring exact (vs 19d's
    ruled "as the prefill left it" for Qwen3.8). *Cost if wrong:* ~0.6 % of prefill (estimated) for restores the recording
    may show never happen.
-8. **Decision 8 (proposed) - the drafter on device 1 with an embedding replica (1.07 GB)**, taps over the copy hand-off
+8. **Decision 8 (approved, operator 2026-10-20) - the drafter on device 1 with an embedding replica (1.07 GB)**, taps over the copy hand-off
    (19d). *Cost if wrong:* the alternative (drafter on device 0, logits shipped) moves 7 x 131072 fp32 a block across
    PCIe 3.0 - worse.
-9. **Decision 9 (proposed) - accept the target mismatch:** LiLiCorr was trained against the 24GB 2-bit release; our target
+9. **Decision 9 (approved, operator 2026-10-20) - accept the target mismatch:** LiLiCorr was trained against the 24GB 2-bit release; our target
    is SergiioB's g128 (then ours, g64) - its taps are closer to the BF16 original's than the 24GB's are. P0 measures E_K on
    ours; no retraining. *Cost if wrong:* if acceptance on our int4 target is far below the published figures, the speed-up
    is smaller; the engine half is built anyway (ruled), and a retrained drafter would be a new spec.
-10. **Decision 10 (proposed) - the union-aware M-row MoE in 26c** (each expert block read once per verify), with the plain
+10. **Decision 10 (approved, operator 2026-10-20) - the union-aware M-row MoE in 26c** (each expert block read once per verify), with the plain
     M-row form as its bitwise reference; P0's union counts set the expectation. *Cost if wrong:* without it a verify at
     M = 8 reads ~7.2 GB of experts (more than all other weights) and the speed-up shrinks by ~40 % (estimated).
 11. **Decision 11 (ruled by the reference) - the window edge** is vLLM's `|q - k| <= 1023` (the only reference).
-12. **Decision 12 (proposed) - an external acceptance figure from vLLM XPU** serving SergiioB's checkpoint with LiLiCorr on
+12. **Decision 12 (approved, operator 2026-10-20) - an external acceptance figure from vLLM XPU** serving SergiioB's checkpoint with LiLiCorr on
     the box (if the image's DFlash / LiLiCorr path runs on XPU - the card says SM120 only); recorded beside ours, never a
     gate. *Cost if wrong:* a box hour for a number that cannot be had.

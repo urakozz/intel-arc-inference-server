@@ -165,7 +165,7 @@ There are three readings of this model's arithmetic, and they disagree:
 3. **transformers 5.19.0's native class** (N:): no puzzle support, clamps the chunk path at `time_step_min` (N:394,
    N:275) but not the recurrent one; another rounding set.
 
-**Decision 1 (proposed):** the reference is **the remote code (R) run through transformers 5.19.0 with its kernel path
+**Decision 1 (approved, operator 2026-10-20):** the reference is **the remote code (R) run through transformers 5.19.0 with its kernel path
 enabled on the CPU** - R's `cuda_kernels_forward` (R:384-532), which calls exactly the five training-kernel functions
 (`causal_conv1d_update` / `causal_conv1d_fn`, `selective_state_update`, `mamba_chunk_scan_combined`, `rmsnorm_fn`) and
 passes `dt_limit` (0, inf) - **with plain-torch implementations of those five** (`tools/oracle/bolt_mamba_ops.py`, fp32
@@ -562,70 +562,73 @@ carries an `ours` stage).
 
 ## 12. Decisions
 
-1. **Decision 1 (proposed) - the reference.** R with its kernel path enabled through plain-torch implementations of the
+The operator approved every proposed decision below as written on 2026-10-20 (Decisions 3 and 20 of spec 25 were
+ruled separately the same day).
+
+1. **Decision 1 (approved, operator 2026-10-20) - the reference.** R with its kernel path enabled through plain-torch implementations of the
    five mamba_ssm / causal_conv1d functions (fp32 internals, no dt clamp, the twin's summation order), an fp32 cache;
    bitwise R outside the Mamba mixer, R's torch fallback within a measured fp32 bound inside it; the fallback's bf16
    roundings and its 0.001 clamp recorded, not copied (§2.0). *Cost if wrong:* ~2 days to re-pin 25a / 25c's twins to the
    fallback, and the engine would then diverge from vLLM / training on 25 of 128 heads in layer 0 alone.
-2. **Decision 2 (proposed) - SSM state precision: fp32** (the config's `mamba_ssm_cache_dtype`), with bf16 as a measured
+2. **Decision 2 (approved, operator 2026-10-20) - SSM state precision: fp32** (the config's `mamba_ssm_cache_dtype`), with bf16 as a measured
    arm (25c: B3 golden and A4 on both; the state traffic 0.336 vs 0.168 GB a token, ~3 % of the step). NVIDIA's recipe
    uses bf16 and the architecture search budgeted 16-bit states. *Cost if wrong:* fp32 wastes ~0.3 ms a token and 80 MiB a
    snapshot if bf16 is as good; bf16 could cost long-context quality if it is not - the arm decides on data.
 3. **Decision 3 (operator, 2026-10-20) - the shipping checkpoint until 25q passes: SergiioB's g128 via the exact expansion**
    (the operator: "Ship SergiioB's g128 until our g64 passes 25q"), gate Q recorded, not gating. *Cost if wrong:* none to correctness; if his 128-sample / 200-iter
    calibration on generic data loses on A4, users see it until 25q lands.
-4. **Decision 4 (proposed) - placement: two cards (`--pp 2`) by default; one card only through spec 22 (not built here);
+4. **Decision 4 (approved, operator 2026-10-20) - placement: two cards (`--pp 2`) by default; one card only through spec 22 (not built here);
    TP (spec 17) is the decode lever after 25e.** *Cost if wrong:* if the operator needs one-card Bolt, spec 22's 22b-22d
    must be adapted (latent experts, heterogeneous E / I) - a separate spec.
-5. **Decision 5 (proposed) - the loader relaxations of §5.2** (a restating `+:` rule accepted; signed scales audited;
+5. **Decision 5 (approved, operator 2026-10-20) - the loader relaxations of §5.2** (a restating `+:` rule accepted; signed scales audited;
    BF16 scales exact-or-refused in the GPTQ path). *Cost if wrong:* refusing the `+:` rule blocks SergiioB's checkpoint
    entirely; accepting more than a restatement would re-open the broken-MTP-config hazard - the narrow form avoids both.
-6. **Decision 6 (proposed) - when ours replaces SergiioB's:** F6 no worse on every held-out set (KL, top-1) and better or
+6. **Decision 6 (approved, operator 2026-10-20) - when ours replaces SergiioB's:** F6 no worse on every held-out set (KL, top-1) and better or
    equal on A4 agreement with the BF16 original, 0 parse failures beyond the BF16 reference's. *Cost if wrong:* a stricter
    rule keeps a worse quant; a looser one ships a regression on non-coding text.
-7. **Decision 7 (proposed) - who generates 25q's calibration answers:** SergiioB's int4 checkpoint on the box's vLLM XPU
+7. **Decision 7 (approved, operator 2026-10-20) - who generates 25q's calibration answers:** SergiioB's int4 checkpoint on the box's vLLM XPU
    image (TP 2, ~60 t/s published) for the self-generated agentic sessions, plus a public agentic slice rendered through
    Bolt's template (`openbmb/UltraData-SFT-Agent-2609`'s Code-Agent / Tool-Use configs through `AR/` e31b7728's loader -
    licence checked first). The BF16 original cannot run on the cards (139.5 GiB) and is too slow on the box CPU for
    thousands of answers. *Cost if wrong:* int4-generated answers carry the g128 quant's own errors into the calibration
    targets (they are inputs only - AutoRound fits the bf16 block outputs, not the answers - so the effect is distribution
    shift, small); the alternative is days of CPU generation.
-8. **Decision 8 (proposed) - 25q's iteration budget:** `iters` 400, `nsamples` 512, `seqlen` 2048. AutoRound's step works
+8. **Decision 8 (approved, operator 2026-10-20) - 25q's iteration budget:** `iters` 400, `nsamples` 512, `seqlen` 2048. AutoRound's step works
    on a mini-batch (`batch_size` 8) drawn from the cached samples, so the tuning time scales with iters x seqlen and
    `nsamples` adds the per-block input caching: ~2.7x SergiioB's 5 h 57 min at 200 / 128 / 1536, **~16-20 h** on two B70s
    (ESTIMATED; the first block's time x 88 is the honest figure), with 800 iterations as the arm if the 400 run's A4 gain
    over RTN is still rising (~32-40 h). *Cost if wrong:* one to two box days either way; too
    few iterations leaves quality on the table, too many burns days for nothing measurable.
-9. **Decision 9 (proposed) - our export's `out_proj` scales F16:** #2512 pins `mixer.out_proj` to bf16 scales in memory;
+9. **Decision 9 (approved, operator 2026-10-20) - our export's `out_proj` scales F16:** #2512 pins `mixer.out_proj` to bf16 scales in memory;
    the GPTQ export writes F16 (SergiioB's does); 25q's `check.py` asserts F16 everywhere and the loader's exact BF16
    conversion is the fallback. *Cost if wrong:* none (exact either way); a refusal names the element if a bf16 scale is not
    f16-representable.
-10. **Decision 10 (proposed) - the MoE combine order:** the remote code's eager path (ascending expert id, fp32 product
+10. **Decision 10 (approved, operator 2026-10-20) - the MoE combine order:** the remote code's eager path (ascending expert id, fp32 product
     then add, one rounding), as Kolibri's. *Cost if wrong:* an ulp-level difference on rows where vLLM's fused order
     differs; B3 near-ties absorb it.
-11. **Decision 11 (proposed) - `B70_BOLT_TIE_TOL`** from 25a's measured 9th / 10th `sel` gap distribution (1e-3 PROPOSED
+11. **Decision 11 (approved, operator 2026-10-20) - `B70_BOLT_TIE_TOL`** from 25a's measured 9th / 10th `sel` gap distribution (1e-3 PROPOSED
     until then; the fp32 router chain makes ulp-level gaps rarer than LFM2's bf16 chain). *Cost if wrong:* a loose
     tolerance hides a routing bug; a tight one fails determined rows on ulp noise.
-12. **Decision 12 (proposed) - sampling defaults and EOS:** NVIDIA's `generation_config.json` (sampled, T 1.0, top-p 0.95,
+12. **Decision 12 (approved, operator 2026-10-20) - sampling defaults and EOS:** NVIDIA's `generation_config.json` (sampled, T 1.0, top-p 0.95,
     EOS [2, 11]; the card's recommendation), not SergiioB's (EOS 11 only, no sampling keys). *Cost if wrong:* greedy
     users unaffected; sampled agents get the card's recommended distribution.
-13. **Decision 13 (proposed) - reasoning in the API:** `chat_template_kwargs` `enable_thinking` (default true),
+13. **Decision 13 (approved, operator 2026-10-20) - reasoning in the API:** `chat_template_kwargs` `enable_thinking` (default true),
     `medium_effort`, `truncate_history_thinking`, `force_nonempty_content`; OpenAI `reasoning_effort`: `none` / `minimal`
     -> `enable_thinking: false`, `low` / `medium` -> `medium_effort: true`, `high` -> default; an explicit kwarg wins.
     *Cost if wrong:* a client's effort maps to another template switch than it expects; no correctness effect.
-14. **Decision 14 (proposed) - context cap 262144** (`max_position_embeddings`; the card's 256K), `--max-len auto`
+14. **Decision 14 (approved, operator 2026-10-20) - context cap 262144** (`max_position_embeddings`; the card's 256K), `--max-len auto`
     choosing what fits. *Cost if wrong:* none at the cap; above it refused.
-15. **Decision 15 (proposed) - attention kernels: reuse Muse's `mg_attn` (decode, with a ones gate buffer) and
+15. **Decision 15 (approved, operator 2026-10-20) - attention kernels: reuse Muse's `mg_attn` (decode, with a ones gate buffer) and
     `mg_pf_flash_attn` (prefill) binaries from new CMake lines**, since the shape is identical; a gate-free family copy only
     if the ones buffer measures slower. *Cost if wrong:* 8 KB of reads a layer; or a copy later (one day).
-16. **Decision 16 (proposed) - the default decode list:** every fused arm (`router`, `route`, `conv`) that P0 and the
+16. **Decision 16 (approved, operator 2026-10-20) - the default decode list:** every fused arm (`router`, `route`, `conv`) that P0 and the
     interleaved A/B show faster and that is bitwise the as-built list; `B70_BOLT_FUSE` keeps the others selectable; the
     gated norm one launch (recompute) or two (P0 decides). *Cost if wrong:* ~1-3 % of the step.
-17. **Decision 17 (proposed) - KV bf16 only.** 8 KiB a position: int8 KV would save 1 GB at 262144 for a kernel family
+17. **Decision 17 (approved, operator 2026-10-20) - KV bf16 only.** 8 KiB a position: int8 KV would save 1 GB at 262144 for a kernel family
     of its own. *Cost if wrong:* none until batching wants the memory.
-18. **Decision 18 (proposed) - int8 head by default** (spec 9), `--lm-head bf16` selectable. *Cost if wrong:* 0.54 GB a
+18. **Decision 18 (approved, operator 2026-10-20) - int8 head by default** (spec 9), `--lm-head bf16` selectable. *Cost if wrong:* 0.54 GB a
     token less read vs a measured KL; spec 9's evidence on Qwen3.8 applies, 25q's F6 adds Bolt's row.
-19. **Decision 19 (proposed) - family copies** (`nb_*`) for every Kolibri- / LFM2-derived kernel; no existing source
+19. **Decision 19 (approved, operator 2026-10-20) - family copies** (`nb_*`) for every Kolibri- / LFM2-derived kernel; no existing source
     edited. *Cost if wrong:* duplicated code a later refactor can merge.
 20. **Decision 20 (operator, 2026-10-20) - the licence:** the weights are published open weights under OpenMDW-1.1; our
     g64 export may be published and model files (config, template, tokenizer) may be vendored; the empty `LICENSE` file is
