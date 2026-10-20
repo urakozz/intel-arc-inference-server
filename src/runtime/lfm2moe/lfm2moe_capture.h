@@ -37,8 +37,9 @@
 // of the two lists add up to the one-card count (runtime::lfm2moe::device_launches, asserted per device).
 //
 // conv_tiles: the loaded model's in_proj layout (loader::LfmLoaded::conv_tiles) - true exactly under the arm conv.
-// tap (debug): h[cur] copied to tap row l after each layer's last launch (layer l's output, its pending slices - a
-// dense layer's down - not yet folded). prof (--profile): launch i signals prof->events[i] (runtime/capture.h).
+// tap (debug): layer l's whole output copied to tap row l - h[cur] after its last launch, or, for a dense layer (its
+// down slices still pending), after the next norm's fold (at a dense two-card cut: on device 1). prof (--profile):
+// launch i signals prof->events[i] (runtime/capture.h).
 namespace runtime::lfm2moe {
 
 // The hand-off's landing layout for the cut at `p.split` (devices 2): h (kM x hidden bf16) and - when layer split - 1

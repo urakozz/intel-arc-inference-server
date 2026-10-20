@@ -4320,6 +4320,8 @@ endif()
 # spellings; their golden sets: lfm2moe_oracle.sh synth-golden) and on 24q's RTN export (and AutoRound's, `ours`).
 # SKIP 77 without the data.
 if(B70_LFM2MOE)
+  set(B70_LFM2MOE_SYNTH_ORACLE "${CMAKE_SOURCE_DIR}/oracle-out-lfm2moe" CACHE PATH
+    "the synthetics' golden sets: <this>-w / <this>-proj (lfm2moe_oracle.sh export <synth dir>; data key oracle_lfm2moe_synth)")
   set(B70_LFM2MOE_RTN "${CMAKE_SOURCE_DIR}/oracle-out-lfm2moe-rtn/ckpt" CACHE STRING
     "24q's RTN int4 g64 export of LFM2.5-24B-A2B (data key lfm2moe_rtn)")
   set(B70_LFM2MOE_RTN_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-lfm2moe-rtn" CACHE PATH
@@ -4347,16 +4349,16 @@ if(B70_LFM2MOE)
     list(APPEND _lfm_tests lfm2moe_decode_synth_${sp}_test)
     foreach(p lfm2moe_short lfm2moe_4k lfm2moe_agentic)
       add_test(NAME lfm2moe_golden_synth_${sp}_${p}_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_SYNTH_DIR}/${sp}
-        ${B70_LFM2MOE_SYNTH_DIR}/oracle-${sp} ${p})
+        ${B70_LFM2MOE_SYNTH_ORACLE}-${sp} ${p})
       list(APPEND _lfm_tests lfm2moe_golden_synth_${sp}_${p}_test)
     endforeach()
   endforeach()
   add_test(NAME lfm2moe_decode_synth_eager_test COMMAND lfm2moe_decode_test ${B70_LFM2MOE_SYNTH_DIR}/w ${_lfm_bench_ids} eager)
   add_test(NAME lfm2moe_decode_synth_bf16head_test COMMAND lfm2moe_decode_test ${B70_LFM2MOE_SYNTH_DIR}/w ${_lfm_bench_ids} bf16)
   add_test(NAME lfm2moe_golden_synth_short_bf16head_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_SYNTH_DIR}/w
-    ${B70_LFM2MOE_SYNTH_DIR}/oracle-w lfm2moe_short bf16)
+    ${B70_LFM2MOE_SYNTH_ORACLE}-w lfm2moe_short bf16)
   add_test(NAME lfm2moe_golden_synth_short_eager_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_SYNTH_DIR}/w
-    ${B70_LFM2MOE_SYNTH_DIR}/oracle-w lfm2moe_short eager)
+    ${B70_LFM2MOE_SYNTH_ORACLE}-w lfm2moe_short eager)
   # Task 5: each fused arm against the as-built list, bitwise (Review Focus 4), on the synthetic and the RTN export
   foreach(arm route router conv all)
     add_test(NAME lfm2moe_decode_synth_fuse_${arm}_test COMMAND lfm2moe_decode_test ${B70_LFM2MOE_SYNTH_DIR}/w
@@ -4386,6 +4388,23 @@ if(B70_LFM2MOE)
   # the 32k prompt: opt-in (r51.rtn32k), ~33k replays
   set_tests_properties(lfm2moe_golden_rtn_32k_test PROPERTIES LABELS "checkpoint;golden;lfm2moe;optin"
     SKIP_RETURN_CODE 77 TIMEOUT 14400)
+endif()
+# Task 6: two cards on spec 16b's pieces (decision 10) - --pp 1 against --pp 2 bitwise on the synthetic N 4 at a dense
+# cut (split 2: the down slices cross) and a MoE cut (split 3), copy and peer, P4's lost hand-off, replay; the RTN
+# export at splits 20 / 19; the landing layout. SKIP 77 with one GPU or no data.
+if(B70_LFM2MOE)
+  add_executable(lfm2moe_pp_test runtime/lfm2moe_pp_test.cc)
+  target_include_directories(lfm2moe_pp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(lfm2moe_pp_test PRIVATE b70_lfm2moe_runtime b70_l0)
+  add_dependencies(lfm2moe_pp_test ${B70_LFM2MOE_DECODE_KERNELS} kernel_pp_handoff)
+  add_test(NAME lfm2moe_pp_test COMMAND lfm2moe_pp_test ${B70_LFM2MOE_SYNTH_DIR}/w ${B70_LFM2MOE_RTN}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/lfm2moe_short.ids)
+  set_tests_properties(lfm2moe_pp_test PROPERTIES LABELS "checkpoint;lfm2moe;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  add_test(NAME lfm2moe_golden_synth_short_pp2_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_SYNTH_DIR}/w
+    ${B70_LFM2MOE_SYNTH_ORACLE}-w lfm2moe_short pp2:2 peer)
+  set_tests_properties(lfm2moe_golden_synth_short_pp2_test PROPERTIES LABELS "checkpoint;golden;lfm2moe;pp"
+    SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # b70-decode's model_type dispatch and LFM2's refusals, before the device: tests/model/lfm2moe/ holds only the
 # checkpoint's config.json (24b), which is all the dispatch and the planner read.
