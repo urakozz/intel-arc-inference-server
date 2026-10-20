@@ -611,10 +611,12 @@ checkpoints): 40 layers, hidden 2048, 30 short-conv layers and 10 GQA attention 
 all of them), 2 dense SwiGLU layers then 38 MoE layers (64 experts, top-4 x 1536, a sigmoid router with a
 selection-only bias), a tied 128000-row head (125017 real ids), context 131072.
 
-**Status: decode only, never run on a B70** (queue row 51; spec 24c). The whole model and 131072 positions fit **one
-card** (13.39 GB of weights with the int8 head + 2.68 GB of KV, derived); `--pp 2` splits the layers over two cards
-(decision 10: optional). The prompt goes through the decode list one replay per id - prefill is spec 24d, serving
-(`b70-serve`) spec 24e (refused by name until then). Expected (derived): 383 launches a token (403 with
+**Status: decode and prefill, never run on a B70** (queue rows 51 and 52; specs 24c, 24d). The whole model and
+131072 positions fit **one card** (13.39 GB of weights with the int8 head + 2.68 GB of KV, derived; the prefill scratch
+adds 0.79 GB at chunk 2048); `--pp 2` splits the layers over two cards (decision 10: optional). A prompt goes through
+the decode list one replay per id, or - `--prefill` / `--prefill-length` - through the prefill walk in chunks of up to
+2048 rows (1259 launches a chunk at 40 layers, derived; the `l0` backend only); serving (`b70-serve`) is spec 24e
+(refused by name until then). Expected (derived): 383 launches a token (403 with
 `B70_LFM_ATTN=eager`, 277 with `B70_LFM_FUSE=all`), 1.43 GB read a token plus 20,480 B of KV a position - a roofline
 of 411 t/s, ~4.5 ms a token ESTIMATED at depth 4096 (spec 24 §3: the step is many small kernels).
 
@@ -630,11 +632,16 @@ P=tests/golden/prompts/lfm2moe_short.ids
 ./build/src/cli/b70-decode <export> --profile --depth 4096 --steps 32 --repeats 5 # the per-launch anatomy
 B70_LFM_FUSE=all ./build/src/cli/b70-decode <export> --bench --depth 4096 --tg 256   # 277 launches, bitwise none
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode $S --ids $P --n 32 --pp 2 --pipeline-split 2 --pipeline-handoff peer
+./build/src/cli/b70-decode $S --ids $P --n 32 --prefill                          # spec 24d: the prompt prefilled
+./build/src/cli/b70-decode <export> --bench --prefill-length 4096 --tg 32 --max-len auto   # the pp row (2nd line)
+B70_PREFILL_PROFILE=1 ./build/src/cli/b70-decode <export> --bench --prefill-length 4096 --tg 1   # the phase table
+./build/src/cli/b70-decode $S --ids $P --n 32 --prefill --prefill-chunk 64       # smaller chunks: bitwise 2048's
 ```
 
-**Limits.** No prefill (`--prefill*` refused naming spec 24d), no serving (spec 24e), no `--mtp` / `--spec` (no MTP
-head), bf16 KV only (`--kv-cache int8` refused, decision 11), no `--layers` (the whole model fits), context at most
+**Limits.** Prefill on the `l0` backend only (`--prefill-backend l0-int8` / `sycl-tla` refused: spec 24 §11), chunk
+at most 2048; no serving (spec 24e), no `--mtp` / `--spec` (no MTP head), bf16 KV only (`--kv-cache int8` refused, decision 11), no `--layers` (the whole model fits), context at most
 131072, `--device` refused with `--pp 2`.
 
 **Relevant variables:** `B70_LFM_ATTN` (`flash` | `eager`), `B70_LFM_FUSE` (`none` | `all` | a comma list of `route`,
-`router`, `conv`), `B70_LFM_TIE_TOL` (the golden gate's near-tie tolerance, 4e-3).
+`router`, `conv`; the arm `conv` also selects the prefill's conv-tile build), `B70_LFM_TIE_TOL` (the golden gate's
+near-tie tolerance, 4e-3), `B70_PREFILL_REPLAY` (record each chunk's list once and replay it), `B70_PREFILL_PROFILE`.

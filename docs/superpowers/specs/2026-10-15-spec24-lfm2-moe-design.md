@@ -784,3 +784,73 @@ queue row 51 (`tools/box_validate/stages.sh` `row 51`). Every count below is der
   The synthetics' golden sets are the box's (r51.synth_golden: `lfm2moe_oracle.sh export`); none was made on the Mac.
 - **Not done here:** every card stage (P0 first), every kernel's first ocloc build, 24q's exports (the RTN / AutoRound
   gates SKIP), Task 8's speed rows and decision 6's default (`B70_LFM_FUSE` stays `none`).
+
+## 15. 24d as built (2026-10-20; the Mac only - nothing has run on a card, no lfm_pf_* binary has been compiled by ocloc)
+
+Plan: `docs/superpowers/plans/2026-10-15-spec24d-lfm2moe-prefill.md`, branch `spec24d-lfm2moe-prefill`. Box
+validation: queue row 52 (`tools/box_validate/stages.sh` `row 52`). Every count below is derived and asserted by a host
+test or by the walk itself.
+
+- **The walk** (`runtime/lfm2moe/lfm2moe_prefill.{h,cc}`; Kolibri's `kolibri_prefill.cc` shape, one immediate list a
+  device, no host wait inside a chunk): device 0 `lfm_pf_embed_gather` (1); a conv layer 20 (operator norm, in_proj
+  6 slabs x (dequant + `pf_gemm_T0`), `lfm_pf_conv_seed`, `lfm_pf_conv`, out_proj 2 x 2, ffn_norm); an attention
+  layer 14 (norm, q||k||v 3 x 2, `lfm_attn_prep` at M 2048, `lfm_pf_attn`, o_proj 2 x 2, norm); a MoE FFN + 11
+  (`lfm_router` / `lfm_route` at M 2048, sort, gather, gate||up 2 batches x 2, down 1 x 2, the combine with the fold);
+  a dense FFN + 50 (gate||up 23 slabs x (dequant + `pf_gemm_T0_SILU`), down 2 x 2). **1259 launches a chunk at 40
+  layers** (1 + 2 x 70 + 28 x 31 + 10 x 25), the same at every C and on one card or two; the head 4 (decode's M 1
+  norm over the last row, the head GEMV, two argmax stages). The norm sites are 24c's rule at M 2048: `_S1` wherever
+  rows are pending (every ffn_norm; the operator norm after a dense layer), `_NF` otherwise - every prefill linear is
+  ONE unsplit GEMM, so the folds are S 1 whatever decode's S; the residual ping-pongs between `h0` / `h1`, and where
+  each device's walk takes and leaves it (`prefill_resid_in` / `_out`) is a function of the placement alone (the walk
+  asserts it; a replayed recording needs no walk to know it).
+- **Each linear at its own layout** (24b review I1): the slab binary is `pf_dequant_slab_K<K>_N<N>_L<layout>` at the
+  weight's `model::Lfm2MoeDesc::linears` cell - layout 1 for in_proj / out_proj / o_proj / the dense down, layout 0 (the
+  GPTQ-native `.qweight` / separate `.scales`) for q||k||v and the dense gate||up today; `pf_dequant_slab.cl`'s
+  existing LAYOUT 0 / 1 branches, no new kernel. Every LFM2 width is a whole number of 1024-column slabs (the kernel's
+  rule). `lfm2moe_pf_kernels_test` holds each slab to the GPTQ source column (in_proj via `repack_in_proj`, q||k||v and
+  the dense down via `repack_fused_linear`).
+- **The conv over a chunk** (`lfm_pf_conv.cl`, one binary, two entry points, plus a `_T` build for the arm conv's
+  conv-tile in_proj): `lfm_pf_conv_seed` copies the ring slots of p0 - 2 / p0 - 1 into a flat `seed` [2][2048] (0 below
+  position 0) in a launch BEFORE the conv; `lfm_pf_conv` (grid (8, ceil(C / 16)), 16 rows a work-item) recomputes the
+  Bx of its first row's two predecessors from in_proj's rows (`rne(rne(0 + B) · rne(0 + x))`, decode's sum at S 1)
+  and writes only the chunk's last min(C, 2) Bx into the ring; it never reads the ring. Measured on the Mac
+  (`lfm2moe_pf_ref_test`, host): a 2100-position prompt at the real width under 13 schedules (2048 + 52, chunks of 64,
+  1 and 2, splits at 1..5 / 64 / 2047 / 2048 / 2049) is BITWISE decode's `conv_step` one position at a time - y and the
+  ring slots decode reads next -, from a garbage ring; torch's conv over a prompt in chunks of 64 + 6 (fixture case
+  (h), `conv_taps` with the state carried, asserted equal to one call in torch) bitwise; `lfm2moe_run` (UHD 630,
+  indicative) exact at (p0, C) = (0, 1) .. (4097, 300), plain and `_T`.
+- **The grouped MoE** (`lfm_pf_moe.cl`: `kol_pf_moe.cl`'s design minus the shared block): ids staged as uchar, one
+  expert a lane (64 lanes); **tmax = floor((4C + 64 x 31) / 32), 318 at 2048** - the plan's formula carried Kolibri's
+  `+ ceil(C / 32)` shared-tile term, which this model has no use for (the bound Σ ceil(c_e / 32) <= that floor is exact;
+  the host test reaches it with 63 experts at 129 rows and one at 65); header [0] tiles, [1] 0, [2] rows, [3] C,
+  [4 + e] counts (80 words). The dequant reads each expert through `lfm_expert.h`'s macro and skips an expert with no
+  row; the batches are Kolibri's 512 MiB (gate||up 42 blocks a batch -> 2 batches, down 85 -> 1: derived). The combine
+  is `lfm_moe_down`'s epilogue over sorted rows (t_k rounded, rank order, fp32 without fma, one rounding) with the fold
+  in place. Only rows [0, C) are routed (the sort reads C route rows): no padding row reaches an expert.
+- **Flash at head_dim 64** (`lfm_pf_attn.cl`): `kol_pf_attn.cl`'s full path with NDA 4, scale 0.125, the window and the
+  ring removed (every LFM2 attention layer is full); HPW 4, RPW 16, KT 64 PROVISIONAL. Every row's result is a function
+  of its absolute position (the key tiles start at key 0, a wholly masked tile adds exact zeros), so a split ANYWHERE
+  is bitwise one chunk - which is why `lfm2moe_prefill_test` holds every split bitwise, not only multiples of 64.
+- **The engine** (`lfm2moe_prefill_engine.cc`, `b70_lfm2moe_prefill` beside `b70_lfm2moe_runtime`: Kolibri's
+  arrangement): `prefill(ids, chunk)`, `prepare_prefill`, `set_prefill_replay` (`B70_PREFILL_REPLAY`), the launch
+  counters, `read_prefill_routes`; with `debug_tap` the last chunk copies row C - 1 of each layer's output into the
+  decode tap (never under a recording). Two cards: a second `PipelineLink` in copy mode, h [C][2048] a chunk and at a
+  DENSE cut the down's pending fp32 rows [C][2048] in the sums region (24c's dense-cut departure carried to the
+  chunk), sequentially; P4's lost hand-off throws naming device 1 and marks the engine until reset().
+- **The CLI**: `--prefill`, `--bench --prefill-length N` (the pp row), `--prefill-chunk C <= 2048`,
+  `--prefill-backend l0` (l0-int8 / sycl-tla refused naming spec 24 §11); a prefilling run plans the scratch
+  (`runtime::lfm2moe::prefill_sizes`: 788,687,408 B a device, derived; 131072 positions + the prefill still fit one
+  B70: 18.40 GB of 32.53) and the prefill link into `--max-len` and the fit; `B70_PREFILL_PROFILE=1` prints the phase
+  table (the conv's two launches under the `gdn_seed` / `gdn_conv` rows).
+- **Departures from the plan (rulings):** the `_PF` lines are 24c's names at M 2048 (the M in the name is the prefill
+  marker); one conv binary with two entries (`lfm_pf_conv_K2048_C2048`, Kolibri's one-binary-many-entries) instead of
+  two names, plus `_T`; a fourth source `lfm_pf_prep.cl` (the gather from the chunk's ids - decode's gather reads
+  Control's eight cur_token slots); the dense gate||up through `pf_gemm_T0_SILU` (no fp32 [C][23552] partials); the
+  launch formula as Kolibri's `prefill_device_launches(d, placement, dev)` (chunk-independent) instead of a
+  (desc, chunk, B, B') signature; F3 on prefill as the golden test's `prefill[:chunk]` mode (Kolibri's / Muse's
+  precedent) instead of a separate `lfm2moe_prefill_gate_test`; the fixture's "600-id prompt at chunk 64" case replaced
+  by case (h) (the C++ twin has no whole-model forward to compare a prompt's logits with; the engine-level gate is
+  F4's on the card).
+- **Not done here:** every card stage (row 52, after row 51), every lfm_pf_* kernel's first ocloc build, 24q's
+  exports (the RTN / AutoRound gates SKIP), the rate (r52.speed) and the attention tile sweep (HPW / RPW / KT: the
+  variants for it are not built - a sweep adds their CMake lines and names).

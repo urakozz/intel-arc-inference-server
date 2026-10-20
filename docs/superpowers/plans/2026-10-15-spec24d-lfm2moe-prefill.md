@@ -1,6 +1,6 @@
 # Spec 24d - LFM2.5-24B-A2B prefill: the short conv over a chunk with the ring carried, the grouped 64-expert MoE, flash at head_dim 64, on `l0`
 
-**Status (2026-10-15): planned; nothing built.** Box queue row **52** (rows 42-47 are spec 23's). Built blind on the
+**Status (2026-10-20): built on the Mac (branch `spec24d-lfm2moe-prefill`; spec 24 §15 "24d as built"); nothing has run on a card.** Box queue row **52** (rows 42-47 are spec 23's). Built blind on the
 Mac after 24c; every kernel's first compile and run is the box's.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
