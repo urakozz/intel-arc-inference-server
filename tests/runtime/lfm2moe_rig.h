@@ -26,6 +26,7 @@ struct Options {
   bool debug_tap = false;
   bool profile = false;
   uint32_t timeout_ms = 30000;
+  uint32_t prefill_timeout_ms = 120000;   // spec 24d: one prefill wait's bound (PipelineOptions::prefill_timeout_ms)
   runtime::lfm2moe::LfmAttn attn = runtime::lfm2moe::LfmAttn::Flash;
   runtime::lfm2moe::LfmFuse fuse{};
 };
@@ -68,6 +69,7 @@ inline void build(Rig& r, const std::string& snap, const Options& o) {
   runtime::PipelineOptions po;
   po.handoff = o.handoff;
   po.timeout_ms = o.timeout_ms;
+  po.prefill_timeout_ms = o.prefill_timeout_ms;
   r.eng = std::make_unique<runtime::lfm2moe::Lfm2MoeEngine>(r.ctx, std::move(m), o.max_len, o.debug_tap, po, o.profile,
                                                             o.attn, o.fuse);
 }
@@ -84,9 +86,11 @@ inline std::vector<uint32_t> read_ids(const std::string& p, uint32_t vocab) {
   return ids;
 }
 
-// The plan fits one B70 (32.530 GB as Level Zero reports it) with the default reserve.
-inline bool fits_one_card(const model::Lfm2MoeDesc& d, bool int8_head, uint32_t max_len) {
-  runtime::lfm2moe::Plan p = runtime::lfm2moe::plan(d, model::LfmPlacement::one(d), 0, max_len, int8_head);
+// The plan fits one B70 (32.530 GB as Level Zero reports it) with the default reserve (spec 24d: and, `prefill`, the
+// prefill scratch).
+inline bool fits_one_card(const model::Lfm2MoeDesc& d, bool int8_head, uint32_t max_len, bool prefill = false) {
+  runtime::lfm2moe::Plan p = runtime::lfm2moe::plan(d, model::LfmPlacement::one(d), 0, max_len, int8_head,
+                                                    runtime::lfm2moe::LfmAttn::Flash, prefill);
   return p.total() <= size_t(32530000000ull);
 }
 
