@@ -4263,3 +4263,16 @@ target_link_libraries(lfm2moe_plan_test PRIVATE b70_lfm2moe_plan)
 add_test(NAME lfm2moe_plan_test COMMAND lfm2moe_plan_test)
 set_tests_properties(lfm2moe_plan_test PROPERTIES LABELS lfm2moe)
 # ==== Spec 24b: LFM2.5-24B-A2B descriptor and loader (label lfm2moe) ==== (end) ====
+
+# ==== Spec 24c: LFM2.5-24B-A2B decode (label lfm2moe) ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-15-spec24c-lfm2moe-decode.md. Box queue row 51. Host tests first (the
+# Mac: tools/mac_check.sh), then the card's (box only). Real-weight gates SKIP (77) until 24q's export exists;
+# the synthetic checkpoints (24b's make_synth.py --layers 4, both expert spellings) carry F3 / F4 before it.
+# Task 1 (P0): the skeleton lists probe_lfm_step replays hold spec 24 §4.5's counts.
+add_executable(probe_lfm_step_shapes_test kernels/probe_lfm_step_shapes_test.cc)
+target_include_directories(probe_lfm_step_shapes_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+  ${CMAKE_SOURCE_DIR}/tools/probe)
+target_link_libraries(probe_lfm_step_shapes_test PRIVATE b70_lfm2moe_model)
+add_test(NAME probe_lfm_step_shapes_test COMMAND probe_lfm_step_shapes_test)
+set_tests_properties(probe_lfm_step_shapes_test PROPERTIES LABELS lfm2moe)
+# ==== Spec 24c: LFM2.5-24B-A2B decode (label lfm2moe) ==== (end) ====
