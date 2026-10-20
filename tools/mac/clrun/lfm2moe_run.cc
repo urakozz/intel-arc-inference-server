@@ -24,12 +24,14 @@
 #include <cstring>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "clrun.h"
 #include "common/bf16.h"
 #include "common/repack.h"
 #include "kernels/lfm2moe_fixture.h"
+#include "kernels/lfm2moe_pf_ref.h"
 #include "kernels/lfm2moe_ref.h"
 #include "loader/lfm2moe_repack.h"
 #include "model/lfm2moe.h"
@@ -459,6 +461,141 @@ void arm_checks(clrun::Device& dev) {
   }
 }
 
+// --- spec 24d: the plain-OpenCL prefill kernels (lfm_pf_prep.cl, lfm_pf_conv.cl, lfm_pf_moe.cl) -------------------
+// lfm_pf_attn.cl is not run: it is DPAS, 2D block reads and sub-group reductions.
+std::vector<float> rnd(size_t n, float lo, float hi, uint32_t seed) {
+  std::mt19937 g(seed);
+  std::uniform_real_distribution<float> d(lo, hi);
+  std::vector<float> v(n);
+  for (float& x : v) x = d(g);
+  return v;
+}
+std::vector<uint16_t> rnd16(size_t n, float lo, float hi, uint32_t seed) { return bf(rnd(n, lo, hi, seed)); }
+
+void prefill_checks(clrun::Device& dev) {
+  namespace lp = lfmpfref;
+  {   // the chunk's rows out of the tiles
+    const uint32_t C = 40;
+    const std::vector<uint16_t> tiles = rnd16(size_t(H) * 32, -1.f, 1.f, 5);
+    std::vector<uint32_t> ids(C);
+    for (uint32_t m = 0; m < C; ++m) ids[m] = (m * 7 + 3) % 32;
+    clrun::Program p(dev, "src/kernels/lfm2moe/lfm_pf_prep.cl", {"K=2048", "EMBED_V=128000"});
+    clrun::Buffer ib(dev, ids), tb(dev, tiles), hb(dev, size_t(C) * H * 2);
+    p.run("lfm_pf_embed_gather", {256, C}, {256, 1}, ib, tb, hb, C);
+    std::vector<uint16_t> want;
+    for (uint32_t m = 0; m < C; ++m) {
+      const std::vector<uint16_t> r = lr::embed_row(tiles.data(), ids[m]);
+      want.insert(want.end(), r.begin(), r.end());
+    }
+    report("lfm_pf_embed_gather (40 rows from the tiles)", hb.read<uint16_t>(), want, 0);
+  }
+  {   // the conv over a chunk: the seed (a prior launch), then the conv; plain and conv-tile in_proj
+    std::vector<float> taps(size_t(H) * 3);
+    {
+      const std::vector<uint16_t> t = rnd16(taps.size(), -0.6f, 0.6f, 12);
+      for (size_t i = 0; i < t.size(); ++i) taps[i] = f32(t[i]);
+    }
+    const std::vector<uint16_t> garbage = rnd16(size_t(lp::kRing) * H, -50.f, 50.f, 13);
+    for (int tiled = 0; tiled < 2; ++tiled) {
+      clrun::Program p(dev, "src/kernels/lfm2moe/lfm_pf_conv.cl",
+                       with(kCtrlDefs, {"HIDDEN=2048", "PF_C=2048", std::string("CONV_TILES=") + (tiled ? "1" : "0")}));
+      for (const auto& [p0, C] : std::vector<std::pair<uint32_t, uint32_t>>{{0, 1}, {0, 2}, {5, 17}, {30, 64}, {4097, 300}}) {
+        const std::vector<float> plain = rnd(size_t(C) * 3 * H, -3.f, 3.f, 20 + p0 + C);
+        std::vector<float> in = plain;
+        if (tiled)
+          for (uint32_t t = 0; t < C; ++t)
+            for (uint32_t c = 0; c < H; ++c)
+              for (uint32_t part = 0; part < 3; ++part)
+                in[size_t(t) * 3 * H + lp::conv_col(c, part, H, true)] = plain[size_t(t) * 3 * H + lp::conv_col(c, part, H, false)];
+        std::vector<uint32_t> ctl(32, 0);
+        ctl[0] = p0;
+        ctl[1] = C;
+        clrun::Buffer cb(dev, ctl), ib(dev, in), tb(dev, taps), rb(dev, garbage), sb(dev, size_t(2) * H * 2),
+            yb(dev, size_t(C) * H * 2);
+        p.run("lfm_pf_conv_seed", {H}, {256}, cb, rb, sb);
+        p.run("lfm_pf_conv", {H, (C + 15) / 16}, {256, 1}, cb, ib, sb, tb, rb, yb);
+        std::vector<uint16_t> ring = garbage;
+        const std::vector<uint16_t> seed = lp::conv_seed(ring.data(), p0);
+        const std::vector<uint16_t> y = lp::conv_chunk(in.data(), seed.data(), taps.data(), ring.data(), p0, C, H, tiled);
+        const std::string what = std::string("lfm_pf_conv") + (tiled ? " _T" : "") + " (p0 " + std::to_string(p0) +
+                                 ", C " + std::to_string(C) + "): ";
+        report((what + "seed").c_str(), sb.read<uint16_t>(), seed, 0);
+        report((what + "y").c_str(), yb.read<uint16_t>(), y, 0);
+        report((what + "the ring").c_str(), rb.read<uint16_t>(), ring, 0);
+      }
+    }
+  }
+  {   // the MoE block's plain entry points over C = 64: sort, gather, two dequant batches, the combine + fold
+    const uint32_t C = 64, E = lr::kExperts, I = lr::kInter, T = lp::tmax(lp::kC);
+    std::mt19937 g(40);
+    std::uniform_real_distribution<float> dl(-4.f, 4.f), db(-0.05f, 0.05f);
+    std::vector<float> bias(E);
+    for (float& b : bias) b = db(g);
+    std::vector<uint32_t> route(size_t(C) * lr::kWords);
+    for (uint32_t t = 0; t < C; ++t) {
+      std::vector<float> lg(E);
+      for (float& v : lg) v = dl(g);
+      const lr::Route r = lr::route(lg.data(), bias.data());
+      std::copy(r.row, r.row + lr::kWords, route.begin() + size_t(t) * lr::kWords);
+    }
+    const lp::Sorted st = lp::sort(route.data(), C);
+    clrun::Program p(dev, "src/kernels/lfm2moe/lfm_pf_moe.cl",
+                     {"PF_E=64", "PF_K=4", "PF_WG=64", "PF_D=2048", "PF_INTER=1536", "TM=32", "KC=2048"});
+    clrun::Buffer rb(dev, route), hdr(dev, size_t(lp::hdr_words()) * 4), tiles(dev, size_t(T) * 2 * 4),
+        row_tok(dev, size_t(T) * lp::kTm * 4), pair_row(dev, size_t(C) * 4 * 4);
+    const uint32_t tm = lp::tmax(C);
+    p.run("lfm_pf_sort", {64}, {64}, rb, hdr, tiles, row_tok, pair_row, C, tm);
+    const std::vector<uint32_t> hd = hdr.read<uint32_t>();
+    report("lfm_pf_sort: the header", std::vector<uint32_t>(hd.begin(), hd.begin() + lp::kHdrCount + E),
+           std::vector<uint32_t>(st.hdr.begin(), st.hdr.begin() + lp::kHdrCount + E), 0);
+    const std::vector<uint32_t> tl = tiles.read<uint32_t>();
+    report("lfm_pf_sort: the tile table", std::vector<uint32_t>(tl.begin(), tl.begin() + size_t(tm) * 2), st.tiles, 0);
+    const std::vector<uint32_t> rt = row_tok.read<uint32_t>();
+    report("lfm_pf_sort: row_tok", std::vector<uint32_t>(rt.begin(), rt.begin() + st.rows_used()),
+           std::vector<uint32_t>(st.row_tok.begin(), st.row_tok.begin() + st.rows_used()), 0);
+    report("lfm_pf_sort: pair_row", pair_row.read<uint32_t>(), st.pair_row, 0);
+    const std::vector<uint16_t> x = rnd16(size_t(C) * H, -1.f, 1.f, 41);
+    clrun::Buffer xb(dev, x), xg(dev, size_t(st.rows_used()) * H * 2);
+    p.run("lfm_pf_gather", {size_t(st.rows_used()) * 64}, {64}, xb, hdr, row_tok, xg);
+    report("lfm_pf_gather: the sorted A rows", xg.read<uint16_t>(), lp::gather(st, x.data()), 0);
+    std::vector<uint32_t> gu(size_t(E) * lr::gate_up_block_words()), dn(size_t(E) * lr::down_block_words());
+    {
+      std::mt19937 rg(42);
+      std::uniform_real_distribution<float> ds(0.01f, 0.05f);
+      for (std::vector<uint32_t>* blocks : {&gu, &dn})
+        for (size_t t = 0; t < blocks->size() / 136; ++t) {
+          uint32_t* tile = blocks->data() + t * 136;
+          for (int i = 0; i < 128; ++i) tile[i] = rg();
+          for (int i = 0; i < 8; ++i)
+            tile[128 + i] = uint32_t(common::f32_to_f16(ds(rg))) | (uint32_t(common::f32_to_f16(ds(rg))) << 16);
+        }
+    }
+    clrun::Buffer gb(dev, gu), dnb(dev, dn);
+    for (const auto& [b0, b1] : std::vector<std::pair<uint32_t, uint32_t>>{{0, 4}, {60, 64}}) {
+      clrun::Buffer og(dev, size_t(b1 - b0) * H * 2 * I * 2), od(dev, size_t(b1 - b0) * I * H * 2);
+      p.run("lfm_pf_dequant_gu", {size_t(2 * I / 16) * 16, H / 64, b1 - b0}, {16, 1, 1}, gb, hdr, og, b0, b1);
+      p.run("lfm_pf_dequant_dn", {size_t(H / 16) * 16, I / 64, b1 - b0}, {16, 1, 1}, dnb, hdr, od, b0, b1);
+      const std::vector<uint16_t> ogv = og.read<uint16_t>(), odv = od.read<uint16_t>();
+      for (uint32_t e = b0; e < b1; ++e) {
+        const std::string tag = " (expert " + std::to_string(e) + (st.hdr[lp::kHdrCount + e] ? "" : ", unrouted: skipped") + ")";
+        const size_t gn = size_t(H) * 2 * I, dnn = size_t(I) * H;
+        const std::vector<uint16_t> want_g = st.hdr[lp::kHdrCount + e] ? lp::dequant_gu(gu.data(), e) : std::vector<uint16_t>(gn, 0);
+        const std::vector<uint16_t> want_d = st.hdr[lp::kHdrCount + e] ? lp::dequant_dn(dn.data(), e) : std::vector<uint16_t>(dnn, 0);
+        report(("lfm_pf_dequant_gu" + tag).c_str(),
+               std::vector<uint16_t>(ogv.begin() + (e - b0) * gn, ogv.begin() + (e - b0 + 1) * gn), want_g, 0);
+        report(("lfm_pf_dequant_dn" + tag).c_str(),
+               std::vector<uint16_t>(odv.begin() + (e - b0) * dnn, odv.begin() + (e - b0 + 1) * dnn), want_d, 0);
+      }
+    }
+    const std::vector<uint16_t> y = rnd16(size_t(st.rows_used()) * H, -2.f, 2.f, 43), h0 = rnd16(size_t(C) * H, -2.f, 2.f, 44);
+    clrun::Buffer yb(dev, y), hb(dev, h0);
+    p.run("lfm_pf_combine", {H, C}, {256, 1}, rb, pair_row, yb, hb, C);
+    std::vector<uint16_t> hh = h0;
+    lp::combine(route.data(), st, y.data(), hh.data(), C);
+    report("lfm_pf_combine: rank order, rounded products, the fold", hb.read<uint16_t>(), hh, 0);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -470,6 +607,7 @@ int main() {
     moe_checks(dev);
     attention_checks(dev);
     arm_checks(dev);
+    prefill_checks(dev);
   } catch (const std::exception& e) {
     std::fprintf(stderr, "lfm2moe_run: %s\n", e.what());
     return 1;
