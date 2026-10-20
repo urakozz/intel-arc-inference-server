@@ -3570,6 +3570,88 @@ st_r51_speed() {
 }
 
 # ======================================================================================
+row 52 "spec 24d - LFM2.5-24B-A2B prefill: the conv over a chunk with the ring carried, the grouped 64-expert MoE, flash at head_dim 64 (plan 24d)"
+rownote 52 "Written blind on the Mac after row 51 (24c's decode, itself unvalidated): NO lfm_pf_* binary has ever been compiled by ocloc - r52.k1's kbins is the first build of the 18 new command lines (kernel_cmdlines +18 / -0 / ~0: lfm_pf_embed_gather, lfm_pf_conv and its conv-tile _T build, lfm_pf_moe, lfm_pf_attn and _EAGER, 24c's norm _NF / _S1, router, route and attention prep at M 2048, pf_dequant_slab at LFM2's five {K, N, layout} - each linear at the descriptor's own layout, layout 0 for q||k||v and the dense gate||up -, pf_moe_gemm 2048 x 3072 SiLU and 1536 x 2048). No existing .cl edited: G0's sha is F0. On the Mac's GPU (tools/mac/clrun/lfm2moe_run, indicative): the embed gather, the seed + conv at (p0, C) = (0, 1) .. (4097, 300) plain and _T, the sort / gather / both dequants (two batches, skipped experts) / the rank-order combine + fold at C 64 - all exact against tests/kernels/lfm2moe_pf_ref.h. lfm_pf_attn.cl (DPAS, 2D block reads) and the reused GEMMs have never run at these shapes."
+rownote 52 "Bars PROPOSED (spec 20d's family; the tests print the distributions): prefill vs decode's fill - every row of the first attention layer >= 0.999, all rows' median >= 0.9998, p01 >= 0.99; the live conv slots and the last row's h taps >= 0.99; flash vs fp64 >= 0.99999 (spec 6 K1), the eager build vs the reference's rounding points >= 0.9999. The conv, the routes and the combine are bitwise per row against the host twin; any chunk split (1..5, 64, 2047, 2048, 2049, chunks of 1 / 2 / 64) is bitwise one chunk (every kernel row-local or keyed to absolute positions). Routes against decode's within B70_LFM_TIE_TOL (4e-3, RULED)."
+rownote 52 "Data: the synthetics (r50.synth) and their golden sets (r51.synth_golden) for r52.f4 / r52.golden; 24q's RTN export and its golden sets for r52.rtn / r52.speed (SKIP until they exist, as row 51's). Hand back: the kbins list, lfm2moe_pf_kernels_test's lines (slabs, conv, per-row, MoE grouped == dense, flash cosines), lfm2moe_prefill_test's six sections (walk, F4, splits, the KV / conv / tap bars per layer, routing, tokens), the golden gate's lines, lfm2moe_pp_test's (e) lines, and r52.speed's pp rows with the B70_PREFILL_PROFILE phase table (the dequant share against plan 24d's ~6,000-7,000 t/s ESTIMATE at pp 4096)."
+stage r52.k0     52 default cpu -                            g0.sha,g0.bitwise,g0.suite "K0 (F0): pre-existing binaries identical; kernel_cmdlines +18 / -0 / ~0 (no existing .cl edited)"
+st_r52_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r52.host   52 default cpu -                            -        "host: lfm2moe_pf_ref_test (the conv over a chunk vs decode's conv_step at every split, torch's chunked conv, the 64-expert sort / combine, the flash walk in fp64), lfm2moe_pf_variant_names_test, lfm2moe_plan_test (the prefill terms: 1259 launches a chunk, 2 + 1 weight batches, the scratch, the plan at 131072 with it)"
+st_r52_host() {
+  run_tests '^(lfm2moe_pf_ref_test|lfm2moe_pf_variant_names_test|lfm2moe_plan_test)$'
+  jgrab host '^lfm2moe_(pf_ref|pf_variant_names|plan)_test$' 'bitwise|tiles|prefill:|OK|ok'
+  finish
+}
+stage r52.k1     52 default gpu -                            r52.k0   "kbins of the block + lfm2moe_pf_kernels_test: slabs at each linear's layout, the embed gather / seed / conv / sort / combine bitwise, the per-row kernels at M 2048 bitwise, pf_moe_gemm grouped == dense per row, flash vs fp64 0.99999, eager vs the rounding points, a split at 64 bitwise"
+st_r52_k1() {
+  kbins lfm_pf_embed_gather_K2048_V128000 lfm_pf_conv_K2048_C2048 lfm_pf_conv_K2048_C2048_T \
+    lfm_pf_moe_E64_T4_D2048_I1536_TM32 lfm_pf_attn_Q32KV8_HPW4_RPW16_KT64 lfm_pf_attn_Q32KV8_HPW4_RPW16_KT64_EAGER \
+    lfm_res_norm_M2048_K2048_W8_NF lfm_res_norm_M2048_K2048_W8_S1 lfm_router_M2048_K2048_E64 lfm_route_M2048_E64_T4 \
+    lfm_attn_prep_M2048_S1_Q32KV8 pf_dequant_slab_K2048_N6144_L1 pf_dequant_slab_K2048_N2048_L1 \
+    pf_dequant_slab_K2048_N3072_L0 pf_dequant_slab_K2048_N23552_L0 pf_dequant_slab_K11776_N2048_L1 \
+    pf_moe_gemm_K2048_N3072_SILU pf_moe_gemm_K1536_N2048
+  run_tests '^lfm2moe_pf_kernels_test$'
+  jgrab k1 '^lfm2moe_pf_kernels_test$' 'bitwise|exact|cosine|grouped|OK'
+  finish
+}
+stage r52.reject 52 default gpu -                            -        "cli_reject_lfm2moe_prefill_{int8,sycl,chunk} - the l0-only backend and the 2048 chunk, refused before the device"
+st_r52_reject() {
+  run_tests '^cli_reject_lfm2moe_prefill_' '' '' 'ZE_AFFINITY_MASK=0,1'
+  finish
+}
+stage r52.f4     52 default gpu lfm2moe_synth                r52.k1   "lfm2moe_prefill_test on the synthetics (w, proj, eager, bf16 head, --fuse conv): the walk's launches and plan, twice bitwise, recorded == replayed, the chunk splits bitwise, prefill vs decode's fill within the bars, routes up to near-ties, tokens tie-aware"
+st_r52_f4() {
+  run_tests '^lfm2moe_prefill_synth_(w|proj|eager|bf16head|fuse_conv)_test$'
+  jgrab f4 '^lfm2moe_prefill_synth' '^[1-6]\.|split at|chunks of|per attention layer|h at the last row|live slots|OK|FAIL'
+  finish
+}
+stage r52.golden 52 default gpu lfm2moe_synth,oracle_lfm2moe_synth r52.f4 "lfm2moe_golden_test's prefill mode on the synthetics: short / 4k / agentic x both spellings, chunks of 64 on 4k, eager"
+st_r52_golden() {
+  run_tests '^lfm2moe_golden_prefill_synth_'
+  jgrab golden '^lfm2moe_golden_prefill_synth' 'prefill:|gate:|routing:|conv state|^  h |step [0-9]+:|OK'
+  finish
+}
+stage r52.rtn    52 default gpu lfm2moe_rtn,oracle_lfm2moe_rtn r52.f4 "the RTN export: lfm2moe_prefill_test (+ eager) and the golden prefill gate short / 4k / agentic (+ eager twins)"
+st_r52_rtn() {
+  run_tests '^lfm2moe_prefill_rtn(_eager)?_test$|^lfm2moe_golden_prefill_rtn_lfm2moe_(short|4k|agentic)(_eager)?_test$'
+  jgrab rtn '^lfm2moe_(prefill|golden_prefill)_rtn' '^[1-6]\.|split at|prefill:|gate:|routing:|conv state|OK|FAIL'
+  finish
+}
+stage r52.ours   52 optin   gpu lfm2moe_ours,oracle_lfm2moe_ours r52.f4 "24q's AutoRound export: the golden prefill gate (short / 4k / agentic)"
+st_r52_ours() {
+  run_tests '^lfm2moe_golden_prefill_ours_lfm2moe_(short|4k|agentic)_test$'
+  jgrab ours '^lfm2moe_golden_prefill_ours' 'prefill:|gate:|routing:|OK'
+  finish
+}
+stage r52.pp     52 default gpu lfm2moe_synth                r52.f4   "two cards: lfm2moe_pp_test's (e) - the prefill bitwise one card at chunks 2048 / 64, a dense cut (split 2) and a MoE cut (3), each decode hand-off, the RTN export at 20 when present; each card's launches; recorded + replayed; P4 on the prefill hand-off"
+st_r52_pp() {
+  run_tests '^lfm2moe_pp_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab pp '^lfm2moe_pp_test$' '\(e\)|prefill, split|P4|OK'
+  finish
+}
+stage r52.speed  52 optin   gpu lfm2moe_rtn                  r52.rtn  "--bench --prefill-length 4096 / 32768 (median of 3, interleaved with the eager build), B70_PREFILL_PROFILE=1 phase tables at 4096 (the dequant's share: plan 24d's estimate), two cards at 4096"
+st_r52_speed() {
+  local snap='$(tools/box_validate/data.sh resolve "${SNAP_LFM2MOE_RTN:-?}")' r d
+  idle r52-speed
+  x "uptime"
+  for d in 4096 32768; do
+    for r in 1 2 3; do   # interleaved: flash and eager alternate inside a round
+      chk "build/src/cli/b70-decode $snap --bench --prefill-length $d --tg 32 --max-len auto" "pp $d flash round $r"
+      chk "B70_LFM_ATTN=eager build/src/cli/b70-decode $snap --bench --prefill-length $d --tg 32 --max-len auto" "pp $d eager round $r"
+    done
+  done
+  chk "B70_PREFILL_PROFILE=1 build/src/cli/b70-decode $snap --bench --prefill-length 4096 --tg 1 --max-len auto" "the phase table at 4096"
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $snap --bench --prefill-length 4096 --tg 32 --pp 2 --max-len auto" "pp 4096 on two cards"
+  x "uptime"
+  grab_all rows '^\| b70-decode' 40
+  grab_all phases 'prefill phase attribution|^  (norm|slab_|attn_|gdn_seed|gdn_conv|moe_|head|TOTAL)' 40
+  finish
+}
+
+# ======================================================================================
 row 54 "spec 19b - the DFlash drafter on the card: loader::load_drafter (z-lab/Qwen3.8-27B-DFlash2 beside Qwen3.8, bf16 or int8 at load, the target's embedding and head shared), the df_* kernels (embed, norms, the grouped two-tap convs, the block's q / k / v, ring + block attention, top-16 with the vocab mask and the draft vocabulary's id map, the selector walk), the captured draft (87 launches) and projection (8) lists, the planner's drafter term; D0 and D1 (plan 19b)"
 rownote 54 "Written blind on the Mac: no df_* binary has ever been compiled (ocloc is the box's) - r54.kernels' kbins is the first build of the 14 new command lines (kernel_cmdlines +14 / -0 / ~0: 8 df_*, the bf16 head at 7 rows, the compact heads at 7 rows). Nothing binds them without a drafter (19c's --spec dflash): D0 is G0. On the Mac's GPU (tools/mac/clrun/dflash_run, indicative) the whole draft and projection lists ran at the fixture's tiny shapes against the host twin: rows / scores cos 1.0000000 in 8 of 9 cases (one at 0.99999 - Apple's 1 / sqrt is not correctly rounded), every walk equal, a 256-id draft vocabulary bitwise the full head's, v1. The twin (tests/kernels/dflash_ref.h) matches tools/oracle/dflash_ref.py to 6e-7 (dflash_ref_test). The kernels use work-group reductions only (no sub-group ops): their speed on the B70 is unmeasured."
 rownote 54 "Data: the drafter (hf download z-lab/Qwen3.8-27B-DFlash2, 3.85 GB; data key dflash) for r54.load / r54.draft / r54.d1; 19a's tap dumps (the Mac's oracle-out-19a/dumps, 2.7 GB, and oracle-out-19a/draft_vocab.ranked.ids: tools/box_validate.sh --push-data; data key oracle_dflash_dumps) for r54.d1; the gate checkpoint (qwen). r54.d1_ref runs dflash_ref.py in the oracle image: ~15 GB RSS (the drafter fp32 7.2 GB, the target's head and embedding), ~1-2 s a draft on 44 threads, ESTIMATED (16 anchors x 37 dumps x 3 arms ~ 0.5-1 h)."

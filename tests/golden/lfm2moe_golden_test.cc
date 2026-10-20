@@ -26,7 +26,14 @@
 // dequantised bf16 linear round differently, so Bx is not bitwise past the first linear).
 // **The residual** h.L<l> per (row, layer): cosine per row; per layer median >= 0.9998 and min >= 0.99 (PROPOSED).
 //
-// argv: <checkpoint> <oracle dir> <prompt> [bf16] [eager] [pp2 | pp2:<split>] [copy | peer]
+// **F3 on prefill (spec 24d)**: with `prefill` (or `prefill:<chunk>`) the prompt goes through Lfm2MoeEngine::prefill
+// (chunks of 2048, or <chunk>) instead of one replay per id; the gate is the same rule from row T - 1 on (the
+// prefill's head chooses the first token: decode's head binaries over the last row); the routing compares the last
+// chunk's route rows; the h taps are the prefill's (row T - 1 of each layer) and then the decode steps'. The bars are
+// the decode gate's (the h bars, B70_LFM_TIE_TOL): prefill's linears round through bf16-dequantised weights in a DPAS
+// order, the reference through torch's bf16 linear, so neither path is bitwise the reference's.
+//
+// argv: <checkpoint> <oracle dir> <prompt> [bf16] [eager] [pp2 | pp2:<split>] [copy | peer] [prefill | prefill:<chunk>]
 // Exit 77 (SKIP) when the checkpoint or the golden set is absent, or the placement cannot run.
 #include <algorithm>
 #include <cmath>
@@ -128,9 +135,16 @@ int main(int argc, char** argv) {
   o.max_len = kMaxLen;
   o.debug_tap = true;
   o.attn = rl::lfm_attn();
+  bool prefill = false;   // spec 24d: the prompt through Lfm2MoeEngine::prefill
+  uint32_t chunk = 0;
   for (int i = 4; i < argc; ++i) {
     const std::string a = argv[i];
-    if (a == "bf16") {
+    if (a == "prefill") {
+      prefill = true;
+    } else if (a.rfind("prefill:", 0) == 0) {
+      prefill = true;
+      chunk = uint32_t(std::strtoul(a.c_str() + 8, nullptr, 10));
+    } else if (a == "bf16") {
       o.int8_head = false;
     } else if (a == "int8") {
       o.int8_head = true;
@@ -144,7 +158,8 @@ int main(int argc, char** argv) {
     } else if (a == "copy" || a == "peer") {
       o.handoff = a == "peer" ? runtime::PpHandoff::Peer : runtime::PpHandoff::Copy;
     } else {
-      std::fprintf(stderr, "lfm2moe_golden_test: unknown flag %s (bf16, int8, eager, pp2[:split], copy, peer)\n",
+      std::fprintf(stderr, "lfm2moe_golden_test: unknown flag %s (bf16, int8, eager, pp2[:split], copy, peer, "
+                   "prefill[:chunk])\n",
                    a.c_str());
       return 2;
     }
@@ -175,7 +190,7 @@ int main(int argc, char** argv) {
     std::printf("SKIP: %zu ids + %u exceed the trained context %u\n", ids.size(), kGen, pre.trained_max_len);
     return 77;
   }
-  if (o.devices == 1 && !lfm2moe_rig::fits_one_card(pre, o.int8_head, o.max_len)) {
+  if (o.devices == 1 && !lfm2moe_rig::fits_one_card(pre, o.int8_head, o.max_len, prefill)) {
     std::printf("SKIP: %s does not fit one card\n", snap.c_str());
     return 77;
   }
@@ -224,7 +239,36 @@ int main(int argc, char** argv) {
     }
   };
   eng.reset();
-  for (uint32_t t = 0; t < T; ++t) {
+  if (prefill) {
+    // Spec 24d, F3 on prefill: the prompt in one Lfm2MoeEngine::prefill (chunks of `chunk`); the routing on the rows
+    // the last chunk's route buffer holds; the h taps at the last prompt row (the prefill's tap: row T - 1 of each
+    // layer). The 32 teacher-forced steps after it are decode's, as before.
+    eng.prefill(ids, chunk);
+    const uint32_t c = chunk ? chunk : rl::kPfC;
+    const uint32_t row0 = ((T - 1) / c) * c;   // the last chunk's first position
+    const std::vector<uint32_t> r = eng.read_prefill_routes();
+    for (uint32_t t = row0; t < T; ++t)
+      for (uint32_t l = 0; l < d.layers; ++l) {
+        if (d.is_dense(l)) continue;
+        const std::string ls = std::to_string(l);
+        const int32_t* gi = g.i32("route.ids.L" + ls, size_t(rows) * 4) + size_t(t) * 4;
+        const float* gw = g.f32("route.w.L" + ls, size_t(rows) * 4) + size_t(t) * 4;
+        const float gap = g.f32("route.gap.L" + ls, rows)[t];
+        compare_route(r.data() + rl::pf_route_at(l) / 4 + size_t(t - row0) * rl::kRouteWords, gi, gw, gap, rc, first[l],
+                      pname, t, l);
+      }
+    const std::vector<uint16_t> tap = eng.read_debug_h();
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      const std::string n = "h.L" + std::to_string(l);
+      const uint32_t A = uint32_t(g.dim(n, 2, 0)), h0 = rows - A;
+      if (T - 1 < h0) continue;
+      const uint16_t* want = g.bf16(n, size_t(A) * d.hidden) + size_t(T - 1 - h0) * d.hidden;
+      hcos[l].push_back(golden::compare_bf16(tap.data() + size_t(l) * d.hidden, want, d.hidden, sa, sb).cos);
+    }
+    std::printf("  prefill: %u ids in chunks of %u (%zu launches), routing on rows %u..%u, h taps at row %u\n", T, c,
+                eng.prefill_launches(), row0, T - 1, T - 1);
+  }
+  for (uint32_t t = 0; t < T && !prefill; ++t) {
     eng.ingest({ids[t]});
     check_row(t);
   }

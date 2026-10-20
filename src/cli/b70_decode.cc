@@ -1025,8 +1025,9 @@ int run(int argc, char** argv) {
                              " a step at a context depth");
   // Spec 24c: LFM2.5-24B-A2B (model_type lfm2_moe) runs runtime::lfm2moe::Lfm2MoeEngine on one card (or two) -
   // dispatched here, beside Kolibri-1 and Muse-Glimmer and before the Qwen engine's pipeline and kv-cache rules (its
-  // own refusals, cli/lfm2moe_decode.h: the prefill (spec 24d), --mtp / --spec (no MTP head), int8 KV (decision 11),
-  // --layers). A path that does not resolve is not LFM2 - the flows below report it.
+  // own refusals, cli/lfm2moe_decode.h: the prefill's backend and chunk (spec 24d: l0 only, chunk <= 2048), --mtp /
+  // --spec (no MTP head), int8 KV (decision 11), --layers). A path that does not resolve is not LFM2 - the flows below
+  // report it.
   if (cli::lfm2moe::is_lfm2moe(path)) {
     cli::lfm2moe::DecodeArgs la;
     la.path = path;
@@ -1043,7 +1044,11 @@ int run(int argc, char** argv) {
     la.device = device;
     la.int8_head = !have_lm_head || lm_head == loader::LmHeadForm::Int8;
     la.pipe = pipe;
-    la.prefill = prefill || have_prefill_len || have_pp_chunk || have_pp_backend;
+    la.prefill = prefill;           // spec 24d: --ids through Lfm2MoeEngine::prefill
+    la.pp = have_prefill_len;       // --prefill-length N already set depth = N above
+    la.pp_chunk = pp_chunk;
+    la.pp_backend_given = have_pp_backend;
+    la.pp_backend = pp_backend;
     la.mtp = mtp_on || have_mtp || have_spec;
     la.kv8 = kv_cache == runtime::KvCache::Int8;
     la.layers = have_layers;

@@ -118,8 +118,77 @@ size_t decode_launches(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p
   return n;
 }
 
+// --- spec 24d: the prefill chunk ---------------------------------------------------------------------------------
+uint32_t pf_tiles(const model::Lfm2MoeDesc& d, uint32_t C) { return (C * d.top_k + d.experts * (kPfTm - 1)) / kPfTm; }
+size_t pf_block_gu_bytes(const model::Lfm2MoeDesc& d) { return size_t(d.hidden) * 2 * d.moe_inter * 2; }
+size_t pf_block_dn_bytes(const model::Lfm2MoeDesc& d) { return size_t(d.moe_inter) * d.hidden * 2; }
+uint32_t pf_batch_blocks_gu(const model::Lfm2MoeDesc& d) { return uint32_t(kPfBatchBytes / pf_block_gu_bytes(d)); }
+uint32_t pf_batch_blocks_dn(const model::Lfm2MoeDesc& d) { return uint32_t(kPfBatchBytes / pf_block_dn_bytes(d)); }
+uint32_t pf_batches_gu(const model::Lfm2MoeDesc& d) {
+  const uint32_t per = pf_batch_blocks_gu(d);
+  return (d.experts + per - 1) / per;
+}
+uint32_t pf_batches_dn(const model::Lfm2MoeDesc& d) {
+  const uint32_t per = pf_batch_blocks_dn(d);
+  return (d.experts + per - 1) / per;
+}
+
+PrefillSizes prefill_sizes(const model::Lfm2MoeDesc& d) {
+  const size_t C = kPfC, R = size_t(pf_tiles(d, kPfC)) * kPfTm;
+  size_t widest_n = 0, widest_k = 0;
+  for (uint32_t l = 0; l < d.layers; ++l)
+    for (const model::LfmLinear& ln : d.linears(l)) {
+      if (ln.kind != model::WeightKind::Int4) continue;
+      widest_k = std::max<size_t>(widest_k, ln.shape.K);
+      if (ln.id != model::LfmLinearId::DenseGateUp) widest_n = std::max<size_t>(widest_n, ln.shape.N);
+    }
+  PrefillSizes s;
+  s.ids = line(C * 4);
+  s.h0 = s.h1 = s.x = s.y = line(C * d.hidden * 2);
+  s.partials = line(C * widest_n * 4);
+  s.slab = line(widest_k * kPfSlab * 2);
+  s.seed = line(size_t(2) * d.hidden * 2);
+  s.attn_q = line(d.attn_layers() ? C * d.q_n() * 4 : 0);
+  s.logits = line(d.moe_layers() ? C * d.experts * 4 : 0);
+  s.routes = line(size_t(d.layers) * C * kRouteWords * 4);
+  s.hdr = line(size_t(kPfHdrWords) * 4);
+  s.tiles = line(R / kPfTm * 2 * 4);
+  s.row_tok = line(R * 4);
+  s.pair_row = line(C * d.top_k * 4);
+  s.xg = line(d.moe_layers() ? R * d.hidden * 2 : 0);
+  s.moe_h = line(d.moe_layers() ? R * d.moe_inter * 2 : 0);
+  s.s_mlp = line(d.dense_layers && d.layers ? C * d.dense_inter * 2 : 0);
+  s.w = line(d.moe_layers() ? kPfBatchBytes : 0);
+  return s;
+}
+
+PpLandingLayout pf_landing_layout(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p) {
+  const bool dense_cut = p.devices > 1 && d.is_dense(p.split - 1);
+  return pp_landing_layout(size_t(kPfC) * d.hidden * 2, dense_cut ? size_t(kPfC) * d.hidden * 4 : 0);
+}
+size_t pf_link_bytes(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p, uint32_t dev) {
+  return dev == 0 ? kPpStateWords * 4 : pf_landing_layout(d, p).total + kPpStateWords * 4;
+}
+
+size_t prefill_device_launches(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p, uint32_t dev) {
+  size_t n = dev == 0 ? 1 : 0;   // lfm_pf_embed_gather
+  for (uint32_t l = p.first(dev); l < p.end(dev); ++l) {
+    n += 2;                      // operator_norm, ffn_norm
+    for (const model::LfmLinear& ln : d.linears(l))
+      if (ln.kind == model::WeightKind::Int4) n += 2 * pf_slabs(ln.shape.N);   // dequant + GEMM a slab
+    n += 2;                      // conv: seed + conv | attention: prep + flash
+    if (!d.is_dense(l)) n += 5 + 2 * (pf_batches_gu(d) + pf_batches_dn(d));   // router, route, sort, gather, combine
+  }
+  return n;
+}
+size_t prefill_chunk_launches(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p) {
+  size_t n = 0;
+  for (uint32_t dev = 0; dev < p.devices; ++dev) n += prefill_device_launches(d, p, dev);
+  return n;
+}
+
 Plan plan(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p, uint32_t dev, uint32_t max_len,
-         bool int8_head, LfmAttn a) {
+         bool int8_head, LfmAttn a, bool prefill) {
   model::validate(p, d);
   if (max_len > d.trained_max_len)
     throw std::runtime_error("runtime::lfm2moe::plan: max_len " + std::to_string(max_len) +
@@ -135,6 +204,8 @@ Plan plan(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p, uint32_t de
   pl.conv_rings = ps.conv_ring;
   pl.rope = loader::lfm::device_has_attention(d, p, dev) ? loader::lfm::rope_table_bytes(d, max_len) : 0;
   pl.decode_scratch = ps.control + scratch_sizes(d, max_len, a).total();
+  // 24d: what Lfm2MoeEngine::prepare_prefill allocates on the device (the scratch, and on two cards the prefill link).
+  if (prefill) pl.prefill_scratch = prefill_sizes(d).total() + (p.devices > 1 ? pf_link_bytes(d, p, dev) : 0);
   pl.reserve = size_t(kDefaultReserveGb * 1e9);
   return pl;
 }
@@ -151,7 +222,7 @@ void require_fits(const Plan& p, size_t device_bytes) {
 }
 
 uint32_t max_len_auto(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p, size_t device_bytes,
-                      double reserve_gb, bool int8_head, LfmAttn a) {
+                      double reserve_gb, bool int8_head, LfmAttn a, bool prefill) {
   model::validate(p, d);
   const uint32_t cap = d.trained_max_len;
   if (cap < kMaxLenQuantum)
@@ -160,7 +231,7 @@ uint32_t max_len_auto(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p,
   const size_t reserve_bytes = size_t(reserve_gb * 1e9);
   const auto fits = [&](uint32_t len) {
     for (uint32_t dev = 0; dev < p.devices; ++dev) {
-      Plan pl = plan(d, p, dev, len, int8_head, a);
+      Plan pl = plan(d, p, dev, len, int8_head, a, prefill);
       pl.reserve = reserve_bytes;
       if (pl.total() > device_bytes) return false;
     }
@@ -196,6 +267,11 @@ std::string describe(const Plan& p, size_t device_bytes) {
                "total %.3f GB",
                p.max_len, p.weights / 1e9, p.kv / 1e9, p.conv_rings, p.rope, p.reserve / 1e9, p.total() / 1e9);
   std::string out = buf;
+  if (p.prefill_scratch) {   // 24d: a prefilling run's plan (absent from a decode-only line, which stays as it was)
+    char pf[64];
+    std::snprintf(pf, sizeof pf, " (prefill scratch %.3f GB included)", p.prefill_scratch / 1e9);
+    out += pf;
+  }
   if (device_bytes) {
     char tail[64];
     std::snprintf(tail, sizeof tail, " of %.3f GB", device_bytes / 1e9);

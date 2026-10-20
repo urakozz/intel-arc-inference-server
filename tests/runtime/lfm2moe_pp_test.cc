@@ -11,6 +11,10 @@
 //       reset(), and after reset() the run is again bitwise (a)'s
 //   (d) the landing layout: pp_landing_layout(4096, 0) at a MoE cut - h only (the receiving res_norm _NF recomputes
 //       Σ); h + S x 2048 fp32 slices at a dense cut
+//   (e) spec 24d Task 4 (decision 10): the prefill on two cards BITWISE one card's - the first token, the last-row
+//       logits, the KV, the conv rings' live slots, the last chunk's routes, 32 greedy tokens after it - at chunks
+//       2048 and 64, the synthetic at split 2 (dense: the down's pending rows cross) and 3 (MoE), the RTN export at
+//       split 20; each card's prefill launches; recorded + replayed; P4 on the prefill hand-off
 // Exit 77 (SKIP) with one GPU, or without the synthetic checkpoint ((b) alone SKIPs without the RTN export).
 #include <cstdio>
 #include <cstring>
@@ -63,6 +67,102 @@ Snapshot run(rl::Lfm2MoeEngine& e, const std::vector<uint32_t>& ids) {
   }
   for (uint32_t c = 0; c < d.conv_layers(); ++c) s.rings.push_back(e.read_conv_ring(c));
   return s;
+}
+
+// Spec 24d (Task 4, decision 10): the prompt through Lfm2MoeEngine::prefill in chunks of `chunk`, then 32 greedy
+// tokens - the first token, the last-row logits, every attention layer's KV, every conv layer's ring slots decode reads
+// next, the last chunk's route rows, and the 32 tokens; both Control blocks equal after the mirror.
+struct PfSnap {
+  uint32_t first = 0;
+  std::vector<float> logits;
+  std::vector<uint32_t> routes, tokens;
+  std::vector<std::vector<uint16_t>> kv, live;
+  bool operator==(const PfSnap& o) const {
+    return first == o.first && logits == o.logits && routes == o.routes && tokens == o.tokens && kv == o.kv &&
+           live == o.live;
+  }
+};
+PfSnap prefill_run(rl::Lfm2MoeEngine& e, const std::vector<uint32_t>& ids, uint32_t chunk) {
+  const model::Lfm2MoeDesc& d = e.model().desc;
+  const uint32_t n = uint32_t(ids.size());
+  e.reset();
+  e.prefill(ids, chunk);
+  controls_equal(e, "prefill");
+  PfSnap s;
+  s.first = e.pending();
+  s.logits = e.read_logits();
+  s.routes = e.read_prefill_routes();
+  for (uint32_t a = 0; a < d.attn_layers(); ++a) {
+    std::vector<uint16_t> k = e.read_kv(a, 0, n, false), v = e.read_kv(a, 0, n, true);
+    k.insert(k.end(), v.begin(), v.end());
+    s.kv.push_back(std::move(k));
+  }
+  for (uint32_t c = 0; c < d.conv_layers(); ++c) {
+    const std::vector<uint16_t> ring = e.read_conv_ring(c);
+    std::vector<uint16_t> l;
+    for (uint32_t p : {n - 2, n - 1})
+      l.insert(l.end(), ring.begin() + size_t(p % 16) * d.hidden, ring.begin() + size_t(p % 16 + 1) * d.hidden);
+    s.live.push_back(std::move(l));
+  }
+  s.tokens = e.generate(kGen);
+  controls_equal(e, "generate after prefill");
+  return s;
+}
+// One card against two on the prefill, each chunk width; P4 on the prefill hand-off (device 0's half of a chunk
+// dropped: the prefill throws within the bound naming device 1, the next one is refused until reset(), which
+// recovers bitwise); each card's prefill launches are prefill_device_launches'.
+bool prefill_pp(lfm2moe_rig::Rig& rig, const std::string& snap, const std::vector<uint32_t>& ids, uint32_t split,
+                runtime::PpHandoff h) {
+  bool ok = true;
+  for (uint32_t chunk : {2048u, 64u}) {
+    lfm2moe_rig::Options o;
+    o.max_len = kMaxLen;
+    lfm2moe_rig::build(rig, snap, o);
+    const PfSnap one = prefill_run(*rig.eng, ids, chunk);
+    o.devices = 2;
+    o.split = split;
+    o.handoff = h;
+    o.timeout_ms = 5000;
+    o.prefill_timeout_ms = 5000;   // P4's bound below
+    lfm2moe_rig::build(rig, snap, o);
+    rl::Lfm2MoeEngine& e = *rig.eng;
+    const PfSnap two = prefill_run(e, ids, chunk);
+    const size_t chunks = (ids.size() + chunk - 1) / chunk;
+    for (uint32_t i = 0; i < 2; ++i)
+      CHECK_EQ(e.prefill_launches(i), chunks * rl::prefill_device_launches(e.model().desc, e.model().place, i) +
+                                          (i == 1 ? rl::kPrefillHeadLaunches : 0));
+    const bool same = two == one;
+    e.set_prefill_replay(true);
+    (void)prefill_run(e, ids, chunk);   // records
+    const bool rep = prefill_run(e, ids, chunk) == one;
+    e.set_prefill_replay(false);
+    std::printf("  prefill, split %u (%s cut), decode hand-off %s, chunk %u: two cards %s one; recorded + replayed %s\n",
+                split, e.model().desc.is_dense(split - 1) ? "dense" : "MoE", runtime::pp_handoff_name(h), chunk,
+                same ? "bitwise" : "DIFFER FROM", rep ? "bitwise" : "DIFFERS");
+    ok = ok && same && rep;
+    if (chunk == 64) {   // P4 on the prefill hand-off
+      e.reset();
+      e.drop_next_handoff();
+      std::string what;
+      try {
+        e.prefill(ids, chunk);
+      } catch (const std::exception& ex) {
+        what = ex.what();
+      }
+      bool refused = false;
+      try {
+        e.prefill(ids, chunk);
+      } catch (const std::exception&) {
+        refused = true;
+      }
+      const bool back = prefill_run(e, ids, chunk) == one;   // reset() inside recovers
+      const bool p4 = what.find("device 1") != std::string::npos && refused && back;
+      std::printf("  P4: a dropped prefill hand-off threw (\"%.100s\"); the next prefill %s; reset() recovers %s\n",
+                  what.c_str(), refused ? "refused" : "RAN", back ? "bitwise" : "DIFFERENTLY");
+      ok = ok && p4;
+    }
+  }
+  return ok;
 }
 
 Snapshot with(lfm2moe_rig::Rig& rig, const std::string& snap, const std::vector<uint32_t>& ids, uint32_t devices,
@@ -155,6 +255,22 @@ int main(int argc, char** argv) {
       const Snapshot b = with(rig, rtn, ids, 2, 19, h);
       CHECK(a == b);
     }
+  }
+  // (e) spec 24d, the prefill across two cards (decision 10): bitwise one card, chunks 2048 and 64, the synthetic at a
+  // dense cut (split 2: the down's pending rows cross with h) and a MoE cut (split 3), the RTN export at split 20; the
+  // prefill always crosses by copy, whatever the decode hand-off is. The prompt: <ids> cycled to 2100 (two chunks).
+  {
+    std::vector<uint32_t> pf(2100);
+    for (size_t i = 0; i < pf.size(); ++i) pf[i] = ids[i % ids.size()];
+    bool ok = true;
+    std::printf("(e) prefill: --pp 2 against --pp 1\n");
+    for (uint32_t split : {2u, 3u})
+      for (runtime::PpHandoff h : hs) ok = prefill_pp(rig, synth, pf, split, h) && ok;
+    if (!rtn.empty())
+      ok = prefill_pp(rig, rtn, pf, 20, runtime::PpHandoff::Copy) && ok;
+    else
+      std::printf("  RTN: SKIP (no export)\n");
+    CHECK(ok);
   }
   std::puts("lfm2moe_pp_test OK");
   return 0;

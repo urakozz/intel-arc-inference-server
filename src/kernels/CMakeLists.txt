@@ -1714,6 +1714,71 @@ if(B70_LFM2MOE)
 endif()
 # ==== Spec 24c: LFM2.5-24B-A2B decode ==== (end) ====
 
+# ==== Spec 24d: LFM2.5-24B-A2B prefill ==== (begin) ====
+# Additive only, as 24c's block: no existing source is edited, so every binary above (and in prefill/) keeps its name,
+# its command line and its bytes. New LFM2-only sources in src/kernels/lfm2moe/:
+#   lfm_pf_conv.cl    the short conv over a chunk (lfm_pf_conv_seed: the ring's two slots before the chunk into a flat
+#                     seed, a PRIOR launch; lfm_pf_conv: every row recomputes its predecessors' Bx, the chunk's last two
+#                     Bx into the ring) - plain and conv-tile in_proj columns (_T: the arm conv's load)
+#   lfm_pf_moe.cl     the 64-expert sort (uchar ids, one expert a lane, no shared block), gather, the dequant of a
+#                     weight batch (lfm_expert.h's address), the rank-order combine with the residual fold
+#   lfm_pf_attn.cl    flash attention at head_dim 64 over the growing cache (kol_pf_attn.cl's full path), and its eager
+#                     twin (B70_LFM_ATTN=eager); 256 GRF as kol_pf_attn / pf_flash_attn
+#   lfm_pf_prep.cl    the chunk's ids out of the tiled embedding
+# Reused at LFM2's shapes: 24c's lfm_prep.cl / lfm_moe.cl at M = 2048 (kernels::lfm2moe::kPfC: the norm _NF / _S1,
+# the router, the route, the attention prep at S 1 - decode's chains row for row), prefill/pf_dequant_slab.cl at each
+# int4 linear's {K, N, layout} as model::Lfm2MoeDesc::linears gives it (24b's PROVISIONAL picks: layout 1 for in_proj,
+# out_proj / o_proj and the dense down, 0 for q||k||v and the dense gate||up - a re-pick adds its line here and
+# lfm2moe_pf_variant_names_test names the missing binary), prefill/pf_moe_gemm.cl (gate||up 2048 x 3072 SiLU, down
+# 1536 x 2048) and the shape-free pf_gemm_T0 / pf_gemm_T0_SILU (prefill/CMakeLists.txt). What a chunk binds:
+# runtime/lfm2moe/lfm2moe_prefill.cc (derived in runtime/lfm2moe/lfm2moe_sizes.cc: 1259 launches at 40 layers).
+if(B70_LFM2MOE)
+  set(LFM_CL ${CMAKE_CURRENT_SOURCE_DIR}/lfm2moe)
+  set(LFM_PF_REUSE ${CMAKE_CURRENT_SOURCE_DIR}/prefill)
+  add_ocloc_kernel(lfm_pf_embed_gather_K2048_V128000 SOURCE ${LFM_CL}/lfm_pf_prep.cl DEFINES K=2048 EMBED_V=128000)
+  foreach(T 0 1)
+    set(_n lfm_pf_conv_K2048_C2048)
+    if(T)
+      string(APPEND _n _T)
+    endif()
+    add_ocloc_kernel(${_n} SOURCE ${LFM_CL}/lfm_pf_conv.cl DEFINES ${CTRL_DEFINES} HIDDEN=2048 PF_C=2048 CONV_TILES=${T})
+  endforeach()
+  add_ocloc_kernel(lfm_pf_moe_E64_T4_D2048_I1536_TM32 SOURCE ${LFM_CL}/lfm_pf_moe.cl
+                   DEFINES PF_E=64 PF_K=4 PF_WG=64 PF_D=2048 PF_INTER=1536 TM=32 KC=2048
+                   DEPENDS ${LFM_CL}/lfm_expert.h OPTIONS -I${LFM_CL})
+  foreach(EG 0 1)
+    set(_n lfm_pf_attn_Q32KV8_HPW4_RPW16_KT64)
+    if(EG)
+      string(APPEND _n _EAGER)
+    endif()
+    add_ocloc_kernel(${_n} SOURCE ${LFM_CL}/lfm_pf_attn.cl
+                     DEFINES KT=64 RPW=16 HPW=4 Q_HEADS=32 KV_HEADS=8 EXP2=0 EAGER=${EG}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+  endforeach()
+  # 24c's per-row kernels at M = kPfC (2048): every prefill linear is one unsplit GEMM, so the folds are S 1.
+  set(LFM_PF_NORM_DEFINES M=2048 K=2048 NORM_WGS=8 NORM_EPS=1e-5f)
+  add_ocloc_kernel(lfm_res_norm_M2048_K2048_W8_NF SOURCE ${LFM_CL}/lfm_prep.cl DEFINES ${LFM_PF_NORM_DEFINES} NORM_S=0)
+  add_ocloc_kernel(lfm_res_norm_M2048_K2048_W8_S1 SOURCE ${LFM_CL}/lfm_prep.cl DEFINES ${LFM_PF_NORM_DEFINES} NORM_S=1)
+  add_ocloc_kernel(lfm_router_M2048_K2048_E64 SOURCE ${LFM_CL}/lfm_moe.cl DEFINES M=2048 ROUTER_E=64 ROUTER_K=2048)
+  add_ocloc_kernel(lfm_route_M2048_E64_T4 SOURCE ${LFM_CL}/lfm_moe.cl DEFINES M=2048 ROUTE_E=64)
+  add_ocloc_kernel(lfm_attn_prep_M2048_S1_Q32KV8 SOURCE ${LFM_CL}/lfm_prep.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 QKV_S=1 Q_HEADS=32 KV_HEADS=8 HD=64 PREP_EPS=1e-5f)
+  # The reused prefill sources at LFM2's shapes (the descriptor's layouts).
+  foreach(row "2048 6144 1" "2048 2048 1" "2048 3072 0" "2048 23552 0" "11776 2048 1")
+    separate_arguments(f UNIX_COMMAND "${row}")
+    list(GET f 0 K)
+    list(GET f 1 N)
+    list(GET f 2 L)
+    add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L} SOURCE ${LFM_PF_REUSE}/pf_dequant_slab.cl
+                     DEFINES K=${K} N=${N} LAYOUT=${L})
+  endforeach()
+  add_ocloc_kernel(pf_moe_gemm_K2048_N3072_SILU SOURCE ${LFM_PF_REUSE}/pf_moe_gemm.cl
+                   DEFINES K=2048 N=3072 TM=32 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_moe_gemm_K1536_N2048 SOURCE ${LFM_PF_REUSE}/pf_moe_gemm.cl
+                   DEFINES K=1536 N=2048 TM=32 OPTIONS -cl-intel-256-GRF-per-thread)
+endif()
+# ==== Spec 24d: LFM2.5-24B-A2B prefill ==== (end) ====
+
 # Spec 16b (pipeline parallel, `--pipeline-handoff peer`): the peer-write hand-off between
 # the two stages' decode lists - pp_send (device 0's last launch) and pp_recv (device 1's
 # first). No defines: the word counts are kernel arguments, so one binary serves every model.

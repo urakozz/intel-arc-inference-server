@@ -37,6 +37,12 @@ struct Lfm2MoeEngine::Stage {
   std::optional<CapturedStep> step;
 };
 
+// Spec 24d: the prefill half's view of a device (b70_lfm2moe_prefill cannot see Stage).
+l0::Context& Lfm2MoeEngine::stage_ctx(uint32_t dev) const { return st(dev).ctx; }
+Lfm2MoeBuffers& Lfm2MoeEngine::stage_buffers(uint32_t dev) const { return st(dev).buffers; }
+Control* Lfm2MoeEngine::stage_control(uint32_t dev) const { return st(dev).ctl; }
+l0::CmdList& Lfm2MoeEngine::stage_imm(uint32_t dev) const { return st(dev).imm; }
+
 Lfm2MoeEngine::Stage& Lfm2MoeEngine::st(uint32_t dev) const {
   if (dev >= st_.size())
     throw std::out_of_range("runtime::lfm2moe::Lfm2MoeEngine: device " + std::to_string(dev) + " of " +
@@ -109,6 +115,10 @@ bool Lfm2MoeEngine::settle(uint32_t dev) {
 }
 
 void Lfm2MoeEngine::reset() {
+  // Spec 24d: a prefill list may still wait on a hand-off that will not come (P4): release it and drain first.
+  if (pf_settle_ && !pf_settle_())
+    throw std::runtime_error("runtime::lfm2moe::Lfm2MoeEngine::reset: a prefill list is still running after the "
+                             "prefill timeout");
   for (uint32_t i = 0; i < st_.size(); ++i)
     if (!settle(i))
       throw std::runtime_error("runtime::lfm2moe::Lfm2MoeEngine::reset: device " + std::to_string(i) +
@@ -375,6 +385,7 @@ MemoryComponents Lfm2MoeEngine::memory_use(uint32_t dev) const {
   c.kv = b.kv_k.size() + b.kv_v.size();
   c.decode_state = b.control.size() + b.conv_ring.size() + b.scratch_bytes() + (taps_[dev] ? taps_[dev]->size() : 0) +
                    (link_ ? link_->bytes(dev) : 0);
+  c.prefill_scratch = dev < pf_dev_bytes_.size() ? pf_dev_bytes_[dev] : 0;   // spec 24d: after the first prefill
   return c;
 }
 
