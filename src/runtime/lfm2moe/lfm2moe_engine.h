@@ -110,6 +110,30 @@ class Lfm2MoeEngine {
   // Spec 24d: the next prefill CHUNK likewise (device 0's half not appended), unless prefills are replayed.
   void drop_next_handoff() { drop_next_ = true; }
 
+  // --- spec 24e: spec 7's prefix-cache snapshots -----------------------------------------------------------------
+  // LFM2.5's "state" is the two conv-ring rows of positions pos - 1 and pos - 2 per conv layer - all the next conv reads
+  // - and its blocks are the attention layers' KV: runtime/lfm2moe/lfm2moe_sizes.h's state_runs / kv_runs give both host
+  // layouts, which are the same under --pp 1 and --pp 2 (spec 16b's rule: layers in layer order, whichever device holds
+  // them). state_bytes() is 245,760 B and kv_bytes(n) n x 20,480 B at the real shapes (derived). save_state copies the two
+  // rows (zeros for a position before 0); load_state writes them into their slots ((p - 1) % 16, (p - 2) % 16) and sets pos
+  // on every device (n_active 0; the cur_token is the prefill's / ingest's that follows every restore, spec 7 §3.3 step 4).
+  // save_kv / load_kv copy positions [begin, end) of every attention layer; begin == end copies nothing; throws unless
+  // begin <= end <= max_len. Every call runs on the devices' immediate lists with no step in flight (a hand-off that failed
+  // is reset by load_state, which overwrites everything a session reads).
+  size_t state_bytes() const;
+  size_t kv_bytes(uint32_t n_pos) const;
+  void save_state(void* host);
+  void load_state(const void* host, uint32_t pos);
+  void save_kv(uint32_t begin, uint32_t end, void* host);
+  void load_kv(uint32_t begin, uint32_t end, const void* host);
+  // Spec 7's block (runtime::Engine::kBlock); the prefix cache hooks into the chunk walk: with a hook set every chunk ends at
+  // a block end or at the prompt end (runtime::prefill_chunk_rows), and the hook is called on the host after each chunk
+  // whose end is a multiple of kBlock (devices idle, pos == end_pos, n_active 0 on every device) and once at the prompt end
+  // (the first generated id in cur_token). Defined with prefill() in b70_lfm2moe_prefill.
+  static constexpr uint32_t kBlock = 2048;
+  using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
+  void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
+
   // --- spec 24d: prefill (defined in b70_lfm2moe_prefill) ---------------------------------------------------------
   // Runs `ids` from the current pos in chunks of `chunk` (0 = kPfC 2048) through runtime/lfm2moe/lfm2moe_prefill.h's
   // walk on every device, then the head on the last row: leaves pos += ids.size() on every device and the first
@@ -147,6 +171,8 @@ class Lfm2MoeEngine {
   Lfm2MoeBuffers& stage_buffers(uint32_t dev) const;
   Control* stage_control(uint32_t dev) const;
   l0::CmdList& stage_imm(uint32_t dev) const;
+  l0::Mem& snap_mem(uint32_t dev, SnapTensor t) const;   // spec 24e: a snapshot run's allocation
+  void settle_all(const char* what);
   void step_once();
   bool settle(uint32_t dev);
   [[noreturn]] void fail(const std::string& what);
@@ -163,6 +189,7 @@ class Lfm2MoeEngine {
   std::unique_ptr<PipelineLink> link_;
   std::vector<std::unique_ptr<l0::Mem>> taps_;
   bool broken_ = false, drop_next_ = false;
+  BlockHook block_hook_;   // spec 24e: empty = no hook (uniform chunks)
   std::vector<bool> pending_;
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
   // --profile: per label (the launch's kernel and binary, its layer stripped) Σ us and launches a step; the walls.
