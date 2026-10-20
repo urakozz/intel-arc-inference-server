@@ -28,7 +28,7 @@ flags: `--tool-call-parser qwen3_coder`, `--reasoning-parser ultra_v3`, `--mamba
 ## Dependencies and branch points
 
 - **Plans 25c and 25d merged** (decode, prefill, the block hook). 25a's A4 references and agentic transcript.
-- **The vendoring rule (Decision 20):** template / tokenizer fixtures are **generated outputs** (renders, ids, digests), not
+- **The vendoring rule (Decision 20, ruled 2026-10-20: vendoring allowed; generated fixtures remain the default):** template / tokenizer fixtures are **generated outputs** (renders, ids, digests), not
   copies of the model's files; the template itself is read from the snapshot at run time. If the operator rules that the
   files may be vendored, `tests/tokenizer/bolt/` takes them as 23e did.
 - **Not here:** `--spec dflash` (spec 26c), batching.
