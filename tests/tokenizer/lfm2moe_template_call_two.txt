@@ -1,0 +1,12 @@
+<|startoftext|><|im_start|>system
+List of tools: [{"function": {"description": "Read a file from disk.", "name": "read_file", "parameters": {"properties": {"limit": {"type": "integer"}, "offset": {"type": "integer"}, "path": {"description": "Absolute path", "type": "string"}}, "required": ["path"], "type": "object"}}, "type": "function"}, {"function": {"description": "Search file contents (regex).", "name": "grep", "parameters": {"properties": {"flags": {"items": {"type": "string"}, "type": "array"}, "include": {"type": "string"}, "pattern": {"type": "string"}}, "required": ["pattern"], "type": "object"}}, "type": "function"}]<|im_end|>
+<|im_start|>user
+two<|im_end|>
+<|im_start|>assistant
+<|tool_call_start|>[read_file(path='/a.cc'), grep(include='*.h', pattern='x')]<|tool_call_end|><|im_end|>
+<|im_start|>tool
+one<|im_end|>
+<|im_start|>tool
+two<|im_end|>
+<|im_start|>assistant
+<think>

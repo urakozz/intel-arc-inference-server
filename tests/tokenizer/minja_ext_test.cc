@@ -118,6 +118,53 @@ void case_tool_call_probe_attribute() {
   std::printf("tool_call_probe_attribute: %s\n", got.c_str());
 }
 
+// Spec 24e: the same probe for a template that writes a call as a PYTHONIC keyword argument - LFM2.5's
+// `<|tool_call_start|>[fn(k='v', ...)]<|tool_call_end|>` (its chat_template.jinja's render_tool_calls: a mapping
+// `arguments` becomes `name=value` pairs, a non-empty string raises). Without the patch the probe finds no argument
+// name it knows (`argument_needle=` is none of the shapes above), and apply() rewrites the call history into JSON
+// content. The second half: the rewrite that stays on when `arguments` must be an object (a string one is parsed
+// first) must not throw on a call that carries no `arguments` key - the template reads it with .get() and renders `fn()`.
+void case_tool_call_probe_pythonic() {
+  const std::string source =
+      "{%- for m in messages -%}"
+      "{{- '<' + m.role + '>' -}}"
+      "{%- if m.content is string -%}{{- m.content -}}{%- endif -%}"
+      "{%- if m.tool_calls -%}"
+      "{%- set ns = namespace(calls=[]) -%}"
+      "{%- for tc in m.tool_calls -%}"
+      "{%- set fn = tc['function'] if 'function' in tc else tc -%}"
+      "{%- set args = fn.get('arguments') -%}"
+      "{%- set pairs = namespace(items=[]) -%}"
+      "{%- if args is mapping -%}"
+      "{%- for k, v in args.items() -%}{%- set pairs.items = pairs.items + [k + '=' + (v | string)] -%}{%- endfor -%}"
+      "{%- elif args is string and (args | trim) not in ['', '{}', 'null'] -%}"
+      "{{- raise_exception('arguments must be a mapping') -}}"
+      "{%- endif -%}"
+      "{%- set ns.calls = ns.calls + [fn.name + '(' + (pairs.items | join(', ')) + ')'] -%}"
+      "{%- endfor -%}"
+      "{{- '[' + (ns.calls | join(', ')) + ']' -}}"
+      "{%- endif -%}"
+      "{%- endfor -%}";
+  minja::chat_template tmpl(source, "", "");
+  CHECK(tmpl.original_caps().supports_tool_calls);
+  CHECK(tmpl.original_caps().requires_object_arguments);
+  minja::chat_template_inputs inputs;
+  inputs.messages = nlohmann::ordered_json::parse(R"([
+    {"role": "user", "content": "go"},
+    {"role": "assistant", "content": "", "tool_calls": [
+      {"type": "function", "function": {"name": "read", "arguments": {"path": "/a", "n": 3}}},
+      {"type": "function", "function": {"name": "bare"}},
+      {"type": "function", "function": {"name": "empty", "arguments": "{}"}},
+      {"type": "function", "function": {"name": "json", "arguments": "{\"k\": 1}"}},
+      {"type": "function", "function": {"name": "blank", "arguments": ""}},
+      {"type": "function", "function": {"name": "nul", "arguments": "null"}},
+      {"type": "function", "function": {"name": "padded", "arguments": "  {} "}}]}])");
+  inputs.add_generation_prompt = false;
+  const std::string got = tmpl.apply(inputs);
+  std::printf("tool_call_probe_pythonic: %s\n", got.c_str());
+  CHECK_EQ(got, std::string("<user>go<assistant>[read(path=/a, n=3), bare(), empty(), json(k=1), blank(), nul(), padded()]"));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -126,6 +173,7 @@ int main(int argc, char** argv) {
   CHECK_EQ(bad, 0);
   case_tool_call_probe();
   case_tool_call_probe_attribute();
+  case_tool_call_probe_pythonic();
   std::printf("minja_ext_test OK\n");
   return 0;
 }

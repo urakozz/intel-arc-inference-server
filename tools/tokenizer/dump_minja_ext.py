@@ -26,7 +26,9 @@ env.filters["tojson"] = lambda x, indent=None, separators=None, sort_keys=False:
     x, ensure_ascii=False, indent=indent, separators=separators, sort_keys=sort_keys)
 
 ctx = {"n": None, "t": True, "f": False, "one": 1, "s": "text", "e": {}, "l": [],
-       "d": {"k": "v", "n": None, "z": 0}, "pairs": [["a", 1], ["b", 2], ["a", 3]]}
+       "d": {"k": "v", "n": None, "z": 0}, "pairs": [["a", 1], ["b", 2], ["a", 3]],
+       "fl": [1.0, 2.5, 1e20, 1e-07, 0.1, 123456789.125, 1e16, 1e15, 0.0001, 0.00001, -0.0, -3.75, 100.0, 5e-324,
+              1.7976931348623157e308, 0.30000000000000004, 12345678901234567.0, 0.5]}
 
 cases = [
     # undefined is not None: `defined` holds for a None value, fails for a missing one.
@@ -55,6 +57,14 @@ cases = [
                          "{{ d | items | selectattr('0', 'equalto', 'z') | list | tojson }}"),
     ("dict_merge", "{% set m = dict((d | items | list) + (dict(k='w', q=1) | items | rejectattr('0', 'equalto', 'q') | list)) %}"
                    "{{ m | tojson }}"),
+    # b70 patch (spec 24e): `in` over a list is plain equality - a falsy item ('' 0 false none) matches itself.
+    ("in_falsy", "{{ '' in [''] }} {{ 0 in [0] }} {{ false in [false] }} {{ none in [none] }} {{ '' not in [''] }} "
+                 "{{ 1 in [0, 1] }} {{ 'x' in ['', 'y'] }} {{ ('  ' | trim) not in ['', '{}', 'null'] }} "
+                 "{{ ('{}' | trim) not in ['', '{}', 'null'] }} {{ 'x' not in ['', '{}', 'null'] }}"),
+    # b70 patch (spec 24e): str(float) is Python's repr, and a float printed directly or through tojson alike.
+    ("float_str", "{% for x in fl %}{{ x | string }} {% endfor %}| {% for x in fl %}{{ x }} {% endfor %}| "
+                  "{{ 'a=' + (2.5 | string) + ',' + (1.0 | string) }}"),
+    ("float_tojson", "{{ fl | tojson }}"),
     # an empty mapping is falsy.
     ("empty_mapping", "{% if e %}T{% else %}F{% endif %}{% if d %}T{% else %}F{% endif %}"
                       "{{ 'yes' if e else 'no' }}{{ (e or 'fallback') }}"),

@@ -198,10 +198,12 @@ class chat_template {
         // K2-Horizon's <ifm|arg_key>NAME</ifm|arg_key> writes it.
         // b70 patch (spec 23e): `name="argument_needle"` too - an argument name as a double-quoted attribute, as
         // Muse-Glimmer's ATEM <atem:parameter name="NAME"> writes it.
+        // b70 patch (spec 24e): `(argument_needle=` too - a pythonic keyword argument opening the call's
+        // parentheses, as LFM2.5's `name(k='v', ...)` writes it.
         const auto renders_argument = [&](const std::string & s) {
             return contains(s, "<parameter=argument_needle>") || contains(s, "\"argument_needle\":") ||
                    contains(s, "'argument_needle':") || contains(s, ">argument_needle<") ||
-                   contains(s, "name=\"argument_needle\"");
+                   contains(s, "name=\"argument_needle\"") || contains(s, "(argument_needle=");
         };
         out = try_raw_render(json::array({
             dummy_user_msg,
@@ -421,7 +423,10 @@ class chat_template {
                 if (message.contains("tool_calls")) {
                     if (polyfill_object_arguments || polyfill_tool_calls) {
                         for (auto & tool_call : message.at("tool_calls")) {
-                            if (tool_call["type"] == "function") {
+                            // b70 patch (spec 24e): a call without a "function" object or without "arguments" is left
+                            // as it is (a template that reads it with .get() renders `name()`; upstream threw here).
+                            if (tool_call["type"] == "function" && tool_call.contains("function") &&
+                                tool_call.at("function").contains("arguments")) {
                                 auto & function = tool_call.at("function");
                                 auto & arguments = function.at("arguments");
                                 if (arguments.is_string()) {
