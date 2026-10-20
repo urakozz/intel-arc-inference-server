@@ -773,7 +773,7 @@ void case_server() {
     ServeFixture g(/*cache=*/false);
     b = g.out_ids(g.chat(sampled));
     // The same seeded request again on the SAME server draws the same ids (the RNG is re-seeded per request); an unseeded one
-    // continues the stream and differs.
+    // re-seeds from the random device and differs.
     CHECK(g.out_ids(g.chat(sampled)) == b);
     json other = sampled;
     other["seed"] = 99;

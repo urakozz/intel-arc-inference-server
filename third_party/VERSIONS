@@ -1,7 +1,7 @@
 # name        source                              pin                                       sha256
 # json header: third_party/json/nlohmann/json.hpp (kept at the include path minja uses)
 json          https://github.com/nlohmann/json   v3.12.0                                  aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63
-minja         https://github.com/google/minja    021c2293c187789ef13d56c6cfd89c9b134fd80f  3a5738a19c658d34a1de1bf90554510d37dabd8d085f234dde844a693b76f56d 4d44df597258e10734f87d3584a60bfcfa898a5e5eb2842b895637bea406ee6d
+minja         https://github.com/google/minja    021c2293c187789ef13d56c6cfd89c9b134fd80f  3a5738a19c658d34a1de1bf90554510d37dabd8d085f234dde844a693b76f56d 8f4bcfed55bb64ba647421a89b6cb4801c2a7b8f5ae7d2f15f019cb1c3c827b6
 httplib       https://github.com/yhirose/cpp-httplib v0.54.1                                 5933c14b2d0f45212925ed18ca579841f5fce717f431fc20cec712423e905b10
 #
 # minja carries b70 patches (spec 18d; every one marked "b70 patch (spec 18d)" in the source,
@@ -34,4 +34,6 @@ httplib       https://github.com/yhirose/cpp-httplib v0.54.1                    
 #                      std::to_string wrote 1.000000, 0.000000, and nlohmann wrote 1e+15 for Python's 1000000000000000.0).
 #                      `==` on a primitive (None included) is false against an array / object / callable (upstream: `[1] in [none]`
 #                      was true; in_falsy's last five cases).
+#   chat-template.hpp  b70 patch (spec 24e): the rewrite's "Failed to parse arguments" notice is printed once per process
+#                      (tests/tokenizer/minja_ext_test.cc, case_tool_call_probe_pythonic).
 # The Qwen3.8 / Agnes template tests are unchanged by them (byte-identical renders).
