@@ -782,6 +782,23 @@ void case_server() {
     unseeded.erase("seed");
     CHECK(g.out_ids(g.chat(unseeded)) != b);
   }
+  // An unseeded request after a seeded one is not that seed's continuation: two fresh servers that each serve the seeded request
+  // and then the same unseeded one draw different ids (each unseeded request re-seeds from the random device).
+  Ids u1, u2;
+  json unseeded_req = sampled;
+  unseeded_req.erase("seed");
+  {
+    ServeFixture g(/*cache=*/false);
+    (void)g.out_ids(g.chat(sampled));
+    u1 = g.out_ids(g.chat(unseeded_req));
+  }
+  {
+    ServeFixture g(/*cache=*/false);
+    (void)g.out_ids(g.chat(sampled));
+    u2 = g.out_ids(g.chat(unseeded_req));
+  }
+  CHECK(u1.size() >= 8 && u1.size() == u2.size());
+  CHECK(u1 != u2);
   CHECK(a == b);
   CHECK_EQ(reads, a.size());
   for (uint32_t id : a) CHECK(std::find(f.eng.words.begin(), f.eng.words.end(), id) != f.eng.words.end());
