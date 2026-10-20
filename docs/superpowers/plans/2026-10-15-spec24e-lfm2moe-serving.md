@@ -1,7 +1,9 @@
 # Spec 24e - LFM2.5-24B-A2B served: tokenizer, template, the pythonic tool-call parser, `<think>`, sampling defaults and the repetition penalty, prefix-cache snapshots with the conv rings
 
-**Status (2026-10-15): planned; nothing built.** Box queue row **53** (rows 42-47 are spec 23's). Built blind on the
-Mac after 24d; the host half (tokenizer, template, parser, sampler, snapshot layout) is fully testable on the Mac.
+**Status (2026-10-20): built on the Mac (branch `spec24e-lfm2moe-serving`; spec 24 §16 "24e as built"); nothing has run on a
+card.** Box queue row **53** (rows 42-47 are spec 23's). Built blind on the Mac after 24d; the host half (tokenizer, template,
+parser, sampler, snapshot layout, the server over a scripted and a fake engine) is tested on the Mac. The departures from this
+plan (four minja patches, the card tests' names, the parser's readings, the stage list) are listed in §16.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
 

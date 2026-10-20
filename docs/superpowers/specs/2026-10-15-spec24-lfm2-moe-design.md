@@ -391,6 +391,8 @@ per-shape `S` / layout, or merging GEMVs).
   `--prefix-split-last` applies as for Qwen (the generation prompt's last id `<think>` is where the next turn diverges
   when the turn is before the new user message).
 
+*As built (24e): §16 - the list above is the design; the readings that differ (quote recovery by lookahead, when a call is emitted, the 1 MiB rule, sorted argument keys) are listed there.*
+
 ### 4.7 What is reused, adapted or new
 
 | piece | state |
@@ -854,3 +856,95 @@ test or by the walk itself.
 - **Not done here:** every card stage (row 52, after row 51), every lfm_pf_* kernel's first ocloc build, 24q's
   exports (the RTN / AutoRound gates SKIP), the rate (r52.speed) and the attention tile sweep (HPW / RPW / KT: the
   variants for it are not built - a sweep adds their CMake lines and names).
+
+
+## 16. 24e as built (2026-10-20; the Mac only - nothing has run on a card)
+
+Plan: `docs/superpowers/plans/2026-10-15-spec24e-lfm2moe-serving.md`, branch `spec24e-lfm2moe-serving`. Box validation:
+queue row 53 (`tools/box_validate/stages.sh` `row 53`). Every count below is measured by a host test unless marked.
+
+- **Template and tokenizer.** `chat::Template` renders `chat_template.jinja` (sha256 `ea663864...`) byte for byte as
+  transformers 5.19.0's `apply_chat_template` on 32 message lists (`tests/tokenizer/lfm2moe_template_cases.json`: string,
+  int, negative, big-int, float, bool, null, list and nested-dict arguments, quotes / backslashes / newlines / tabs / CR /
+  non-ASCII in a string, two calls, content then calls, a call without `function` or without `arguments`, string arguments
+  `""` / `"{}"` / `"null"`, tool results, reasoning kept and dropped by `preserve_thinking`, the three reasoning field
+  names, `</think>` inside content, content lists / odd parts / a mapping, `CONTINUE_FINAL_MESSAGE_TAG`) and on the 14-message
+  agentic session (33 renders, `lfm2moe_template_test`; fixtures from `tools/tokenizer/dump_lfm2moe.py` in the oracle image with the
+  5.19.0 site, tokenizers 0.23.2). The tokenizer (Rust crate 0.22.2) equals HF's id for id: 125017 ids, the 124 added tokens by
+  name / id / `special` flag (`<|tool_call_start|>` 124905 and `<|tool_call_end|>` 124906 are NOT special), 21 texts, `corpus.txt`'s 10240
+  lines (148,442 ids) and every render's ids (`lfm2moe_tokenizer_test`). **The template needed minja patches** (the plan
+  allowed "only if a gap is found"): the tool-call capability probe did not know `fn(argument_needle=` and so polyfilled every call
+  history into JSON content; the arguments rewrite that stays on when `arguments` must be an object threw on a call without
+  `function` / `arguments`; `x in [..]` skipped falsy items (`'' in ['']` was false, so `(args | trim) not in ["", "{}", "null"]`
+  raised on an empty arguments string); and a float printed through `| string` / `{{ }}` / `tojson` was `std::to_string`'s
+  or nlohmann's, not Python's repr (`1.000000`, `1e+15`). Each is marked `b70 patch (spec 24e)`, tested against Jinja2 3.1.6
+  (`minja_ext_cases.json`: `in_falsy`, `float_str`, `float_tojson`) or by `minja_ext_test`'s pythonic probe case, and recorded
+  in `third_party/VERSIONS`; every other model's template, parser and server test is unchanged. The agentic fixture's ids differ
+  from 24a's golden ids from position 281 on: that is the tool schemas' key order (the server's JSON objects are sorted; 24a rendered
+  the session as written), the known limitation - not a template difference.
+- **The parser** (`src/server/toolcall_lfm2.{h,cc}`, `tests/server/toolcall_lfm2_test.cc`). Every HF render of a call parses
+  back to its message and every parsed turn re-renders to the same bytes (28 calls over 27 cases); the idioms of §4.6 pass as listed,
+  with these as-built readings: (1) **a quote closes a string by lookahead, not by retry**: the candidate closer is accepted
+  only if what follows (after whitespace) is what the grammar allows there - for a keyword argument's value `)` (then the end,
+  `,` or `]`) or `,` followed by `name=` / a quoted name / `)`; in a list `, ] )`; a dict key `:`; a dict value `, }` - so the cost
+  is linear (100,000 quotes in one string: 0.6 ms; 100,000 look-alike closers: 5 ms) and there is no backtracking to bound;
+  `quote_recovered` counts the quotes kept. (2) A string inside a list / dict decodes JSON's set **plus its own quote's escape**
+  (`['it\'s']` -> `it's`; JSON has no single-quoted strings); a top-level string decodes only `\\`, its own quote, `\n`, `\r`.
+  (3) Calls are emitted when the text after their `)` has settled how the last string ended (re-read at every piece while the block
+  is under 4 KiB; above it, after a read that finishes no call, only once the block has grown by an eighth - a 120 KB argument
+  streamed byte by byte: 80 ms), at the latest when the
+  block ends; the deltas do not depend on when. (4) A block is read up to its first 1 MiB; calls closed there are kept and the rest is
+  a dropped tail, with none a complete block is content (a block over 1 MiB with a valid early call keeps it: the spec's "a block
+  > 1 MiB is content" cannot hold together with emitting at `)`). (5) After a valid call, the first thing that is not a call ends the
+  block and the tail is dropped (`dropped_unfinished`); an invalid FIRST call makes the block content. (6) `arguments` objects are
+  nlohmann's: keys sorted, not "in the call's order". (7) The stream is split-invariant (whole = every two-way split = byte at a
+  time = random pieces, outputs and counters) on the cases, 1500 generated outputs and 3000 damaged ones. `PythonicRules`
+  counts only successful parses and reaches `--log-requests` as `parser.rules` (`OutputParser::stats`).
+- **Chat format and sampling.** `ChatFormat::Lfm2`; `Sampling::repetition_penalty` + `const SeenIds* seen`;
+  `apply_repetition_penalty` (HF's rule on gathered-then-scattered distinct ids, ids >= `vocab_used` ignored, before
+  `filter_probs`); `generation_sampling` reads `repetition_penalty` and takes HF's `GenerationConfig` default for a field the file
+  does not name (T 1.0, top-k 50, top-p 1.0, penalty 1.0: Kolibri's and Muse's files name all three, so theirs are unchanged);
+  `generation_eos_ids` (an integer or a list) moved out of `b70_serve.cc` to be testable; a request's `repetition_penalty` is in
+  (0, 2]. The server keeps the request's `SeenIds` (the prompt's distinct ids, then every consumed id) when the penalty is not 1 and
+  hands it to the engine with each step; **an engine that does not apply it ignores the field** (Qwen3.8, Agnes, Ornith, K2,
+  Kolibri, Muse), so no other model's request path changes.
+- **The engine side.** `state_runs` / `kv_runs` (`lfm2moe_sizes.{h,cc}`): the two conv-ring rows (positions pos-1, pos-2; a position
+  below 0 is a zero row written to slot `(q+16) % 16`, which `lfm_conv` never reads) per conv layer, 60 runs of 4096 B = 245,760 B,
+  + the 10 attention layers' K then V (20 runs, 20,480 B a position), one host layout under `--pp 1` and `--pp 2`;
+  `Lfm2MoeEngine::state_bytes` / `save_state` / `load_state` / `kv_bytes` / `save_kv` / `load_kv` / `set_block_hook`
+  (Kolibri's calls on LFM's allocations); the hook in the prefill walk at every block end (`set_ctl(end, 0)` first) and at the prompt end.
+  `cli::lfm2moe::Lfm2MoeEngineAdapterT` (`src/cli/lfm2moe_serve.h`): **the next id is chosen at the start of `step()`**, from the logits row of
+  the previous replay or of the prefill's head - Kolibri's adapter samples at the end of `step()`, before the server has added the
+  consumed id to the request's `SeenIds`; greedy requests keep the device argmax (an id the tokenizer lacks becomes the masked
+  row's argmax), `B70_LFM_PENALTY_GREEDY=1` routes a greedy request with a penalty through the host (default penalty 1.05, so every greedy
+  request unless it sends 1.0); **a seeded request re-seeds the RNG at its first step** - EngineAdapter's and Kolibri's seed once per
+  process, so a second seeded request there continues the first's stream (r28.serve's "seeded twice, identical" probe would
+  differ for them; not changed here). `b70-serve <lfm2moe>`: `serve_lfm2moe` (one card by default, `--pp 2`, `--max-len auto` with the
+  prefill scratch planned in, `B70_LFM_TOKENIZER_JSON`); refusals before the device: `cli::lfm2moe::check_serve_flags`
+  (`--mtp`, `--spec mtp|lookup|dflash`, the proposers' tuning flags, `--draft-vocab`, `--layers` / `--ple-dir` / `--tokenizer`,
+  `--chat-template`), `check_args` (`--kv-cache int8`, the prefill backends, `--device` with `--pp 2`, the split rules) and
+  `check_serve_max_len` (above 131072) - header-only, run on the Mac by `lfm2moe_serve_args_test`, and through the binary on
+  the box by `cli_reject_serve_lfm2moe_*` (21 tests).
+- **Tests (Mac).** `lfm2moe_snapshot_test` (a fake engine with the real ring / KV layouts, one card and two): the layout on the real
+  shapes at 15 positions and 4 placements, save / load bit for bit, restores at 0 / 1 / 2 / 3 / 15 / 16 / 17 / 18 continuing as
+  the cold session (KV, rings, ids), through `PrefixSession` at 2048 / 4096 / 2049 / 5000 / 300 == cold, a snapshot moving between one
+  card and two, and the server over HTTP (greedy == the decode run, a cached second turn, a seeded request reproducible on a
+  fresh and on the same server, the penalty against an independent HF-ordered simulation incl. the greedy route, no undefined id);
+  `lfm2moe_server_test` (scripted engine over HTTP: reasoning + content + a call in the body and streamed, the cut blocks of Review
+  Focus 3, `enable_thinking` ignored with one stderr line, `preserve_thinking`, the sampling a request carries and the `SeenIds`, `parser.rules`
+  in the log); `lfm2moe_sampling_test`; `lfm2moe_rules_test`. Mutations checked: the quote lookahead, the penalty's rule, the
+  `SeenIds` update, the state's positions, the per-request seed - each fails its test.
+- **Box tools.** `engine_generate.sh` runs LFM (2048 new ids); `tools/toolcall/lfm2moe_rules` (decision 7's evidence);
+  `tools/prefix/agentic_loop.py` + `tools/box_validate/agentic_run.sh` (the recorded session as a live loop: the model's own turns
+  fed back, so the reordered-call misses are real); row 53's stages. The synthetic checkpoints carry no tokenizer files:
+  `r53.synth_files` copies them.
+- **Departures from the plan (rulings).** `template_test` is not reused (`lfm2moe_template_test` is its own, with the agentic case); the
+  plan's `sampling_test` / `openai_test` additions live in `lfm2moe_sampling_test` (`sampling_test` links the device runtime and
+  is disabled on the Mac); the card-side `lfm2moe_server_test <ckpt>` is `golden_server_test --chat` + `serve_probe.sh` (the model
+  with random weights never writes a call; the tool-call paths are the host test's); stage ids `r53.snap` / `.server` / `.a4` /
+  `.agentic` became `r53.snap` / `.snap_rtn` / `.serve` / `.chat` / `.real` / `.a4` / `.agentic` / `.opencode` plus `.k0` /
+  `.synth_files`.
+- **Not done here:** every card stage (row 53, after rows 51 and 52), 24q's exports (the RTN / AutoRound gates SKIP), A4 and the
+  agentic hit rate on the engine (decision 5's bar and decision 7's counts are PROPOSED evidence for the operator after `r53.a4`),
+  `--spec lookup` for this family (needs M-row verify lists), a rotated-key-order-preserving `ToolCall` (the prefix cache misses
+  at a call whose arguments the model wrote unsorted).
