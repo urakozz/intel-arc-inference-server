@@ -435,6 +435,9 @@ public:
       }
       return true;
     } else {
+      // b70 patch (spec 24e): a primitive (None included) is never equal to an array, an object or a callable
+      // (Jinja: `[1] in [none]` is false); upstream compared primitive_ only, so a None item equalled any of them.
+      if (other.array_ || other.object_ || other.callable_) return false;
       return primitive_ == other.primitive_;
     }
   }
