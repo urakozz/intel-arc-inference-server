@@ -4571,5 +4571,15 @@ if(B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_LFM_SNAPSHOT_DIR} ${B70_LFM_TOKENIZER_JSON})
   set_tests_properties(lfm2moe_template_test lfm2moe_tokenizer_test PROPERTIES LABELS lfm2moe SKIP_RETURN_CODE 77
     TIMEOUT 300)
+  # Task 2 (host): LFM2.5's reasoning (the output opens inside the prompt's <think>) and pythonic tool calls -
+  # server/toolcall_lfm2.h over the template renders above (a rendered turn parses back to its message and the parsed turn
+  # re-renders to the same bytes, with the snapshot's template), the model-output idioms and the invalid ones, generation cut
+  # inside a block, the limits, a fuzz - every parse whole == split at every byte == byte at a time == random pieces.
+  add_executable(toolcall_lfm2_test server/toolcall_lfm2_test.cc)
+  target_include_directories(toolcall_lfm2_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(toolcall_lfm2_test PRIVATE b70_server b70_tokenizer)
+  add_test(NAME toolcall_lfm2_test COMMAND toolcall_lfm2_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_LFM_SNAPSHOT_DIR})
+  set_tests_properties(toolcall_lfm2_test PROPERTIES LABELS lfm2moe TIMEOUT 600)
 endif()
 # ==== Spec 24e: LFM2.5-24B-A2B serving ==== (end) ====
