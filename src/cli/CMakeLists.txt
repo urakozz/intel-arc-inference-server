@@ -96,3 +96,9 @@ target_link_libraries(b70-decode PRIVATE b70_muse_prefill)
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_muse_prefill)
 endif()
+# Spec 24c: and LFM2.5-24B-A2B's engine (runtime/lfm2moe, src/cli/lfm2moe_decode.h), dispatched on model_type;
+# b70-serve only recognises it to refuse it (spec 24e serves it) - the loader's is_lfm2moe_checkpoint.
+target_link_libraries(b70-decode PRIVATE b70_lfm2moe_runtime)
+if(TARGET b70-serve)
+  target_link_libraries(b70-serve PRIVATE b70_lfm2moe_runtime)
+endif()

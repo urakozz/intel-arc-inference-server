@@ -1,0 +1,131 @@
+#pragma once
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "l0/cmdlist.h"
+#include "l0/context.h"
+#include "l0/fence.h"
+#include "l0/memory.h"
+#include "l0/queue.h"
+#include "loader/lfm2moe_loader.h"
+#include "runtime/capture.h"
+#include "runtime/control.h"
+#include "runtime/lfm2moe/lfm2moe_buffers.h"
+#include "runtime/memory_plan.h"
+#include "runtime/pipeline_engine.h"   // PipelineOptions, PipelineLink (spec 16b's, unchanged)
+
+// Spec 24c: LFM2.5-24B-A2B's decode loop - Kolibri's engine (runtime/kolibri/kolibri_engine.h, runtime::Engine's
+// contract) for this family: it owns the weights (each layer on its device: loader::load_lfm2moe's parts), one
+// Lfm2MoeBuffers and one captured list per device, and a token is a replay of the lists. A prompt is fed one id per
+// replay (`ingest`) until 24d's prefill. No MTP (the model has no head). 24e adds the snapshots and the server's calls.
+//
+// **The list** (runtime/lfm2moe/lfm2moe_capture.h): 383 launches a token on one card, 403 under B70_LFM_ATTN=eager,
+// 277 with every fused arm of B70_LFM_FUSE (each arm bitwise the as-built list); both read at construction.
+// **The profile** (`profile`): the list is built with a kernel-timestamp event per launch (docs/15's instrument,
+// runtime::ProfileEvents); every replay accumulates the per-launch durations and the fence wall, and
+// profile_table() prints the anatomy - never a bench list (a profiled launch carries a host-scope flush).
+// **Two cards** (spec 16b's pieces, decision 10): layers [0, s) and the embedding on device 0, [s, L) and the head on
+// device 1; the host submits list 0 then list 1 and waits on device 1's fence (bounded: PipelineOptions::timeout_ms);
+// the hand-off is h (and, at a dense cut, the pending slices). The token's way back: device 1's Control is copied into
+// device 0's after the fence. A lost hand-off host-signals the event, throws naming it, and marks the engine until
+// reset().
+namespace runtime::lfm2moe {
+
+class Lfm2MoeEngine {
+ public:
+  // `devices[i]` is the context of placement device i (device 1 a view of device 0's context); `model` was loaded
+  // onto them at `max_len` - with conv_tiles exactly when B70_LFM_FUSE has the arm conv. debug_tap: the per-layer
+  // residual copy the golden gate reads (off for speed). profile: the list built with ProfileEvents.
+  Lfm2MoeEngine(std::vector<l0::Context*> devices, loader::LfmLoaded model, uint32_t max_len, bool debug_tap = false,
+                const PipelineOptions& opt = {}, bool profile = false);
+  // The same with an explicit attention form and arm set (tests; the CLI reads the environment).
+  Lfm2MoeEngine(std::vector<l0::Context*> devices, loader::LfmLoaded model, uint32_t max_len, bool debug_tap,
+                const PipelineOptions& opt, bool profile, LfmAttn attn, LfmFuse fuse);
+  ~Lfm2MoeEngine();
+  Lfm2MoeEngine(const Lfm2MoeEngine&) = delete;
+  Lfm2MoeEngine& operator=(const Lfm2MoeEngine&) = delete;
+
+  // Zeroes every device's persistent group (control, KV, conv rings) and the hand-off buffers; clears a failed
+  // hand-off. pos 0: the conv rings need no clearing (positions < 0 read 0).
+  void reset();
+  // One replay per id; ids must be < vocab. pos advances by ids.size().
+  void ingest(const std::vector<uint32_t>& ids);
+  // Greedy-generates n ids (Engine::generate's contract: id i is the previous fence's, the (n+1)-th is left pending).
+  std::vector<uint32_t> generate(uint32_t n, const std::function<void(uint32_t)>& on_token = {});
+  void set_token(uint32_t id);
+  uint32_t pending() const;
+  uint32_t vocab() const { return model_.desc.vocab; }
+
+  // bf16 [layers][hidden] of the last replay, each layer's row from the device holding it (debug_tap).
+  std::vector<uint16_t> read_debug_h();
+  // u32 [moe layers][kRouteWords]: every MoE layer's route row of the last replay (kernels::lfm2moe::route).
+  std::vector<uint32_t> read_routes();
+  // bf16 [16][hidden]: the conv_index-th conv layer's ring (Bx at pos % 16), from the device holding it.
+  std::vector<uint16_t> read_conv_ring(uint32_t conv_index);
+  // bf16 [count][kv_heads][64] of the attn_index-th attention layer's K (or V), positions [first, first + count).
+  std::vector<uint16_t> read_kv(uint32_t attn_index, uint32_t first, uint32_t count, bool v);
+  // Both residual buffers of device `dev` (bf16 [2][hidden]: h0 then h1) - the ping-pong's state.
+  std::vector<uint16_t> read_residuals(uint32_t dev);
+  // fp32 [vocab]: the last replay's logits (the last device's).
+  std::vector<float> read_logits();
+  void read_logits_into(float* host);
+  Control control(uint32_t dev) const;
+
+  // --profile: the anatomy of every profiled replay since construction (or clear_profile): per launch family (the
+  // kernel and its binary) the in-situ us, launches a step, Σ, the fence wall, the gap per launch. MEASURED, profiled.
+  std::string profile_table() const;
+  void clear_profile();
+  size_t profiled_replays() const { return prof_replays_; }
+
+  MemoryComponents memory_use(uint32_t dev) const;
+  std::string memory_line() const;
+
+  uint32_t pos() const;
+  uint32_t max_len() const { return max_len_; }
+  size_t launches() const;
+  size_t launches(uint32_t dev) const;
+  uint32_t devices() const { return uint32_t(st_.size()); }
+  uint32_t split() const { return model_.place.split; }
+  PpHandoff handoff() const { return opt_.handoff; }
+  LfmAttn attention() const { return attn_; }
+  LfmFuse fuse() const { return fuse_; }
+  const loader::LfmLoaded& model() const { return model_; }
+  const CapturedStep& step(uint32_t dev) const;
+  double last_tok_per_s() const { return last_tok_per_s_; }
+  double last_gen_ms() const { return last_gen_ms_; }
+  double last_fence_ms() const { return last_fence_ms_; }
+  // P4's test hook (PipelineEngine's): the next step submits device 1's list only - a hand-off that never arrives.
+  void drop_next_handoff() { drop_next_ = true; }
+
+ private:
+  struct Stage;
+  void step_once();
+  bool settle(uint32_t dev);
+  [[noreturn]] void fail(const std::string& what);
+  Stage& st(uint32_t dev) const;
+  void accumulate_profile(double fence_us);
+
+  loader::LfmLoaded model_;
+  uint32_t max_len_;
+  PipelineOptions opt_;
+  LfmAttn attn_;
+  LfmFuse fuse_;
+  bool profile_;
+  std::vector<std::unique_ptr<Stage>> st_;
+  std::unique_ptr<PipelineLink> link_;
+  std::vector<std::unique_ptr<l0::Mem>> taps_;
+  bool broken_ = false, drop_next_ = false;
+  std::vector<bool> pending_;
+  double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
+  // --profile: per label (the launch's kernel and binary, its layer stripped) Σ us and launches a step; the walls.
+  std::map<std::string, std::pair<double, size_t>> prof_us_;
+  std::vector<double> prof_wall_us_, prof_sum_us_;
+  size_t prof_replays_ = 0;
+};
+
+}  // namespace runtime::lfm2moe
