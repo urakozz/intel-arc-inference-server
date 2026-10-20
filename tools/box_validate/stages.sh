@@ -3546,13 +3546,13 @@ st_r51_pp() {
   jgrab pp '^lfm2moe_(pp_test|golden_synth_short_pp2)' 'landing|device|P4|tokens|gate:|OK'
   finish
 }
-stage r51.speed    51 optin   gpu lfm2moe_rtn                    r51.rtn  "Task 8: decode at depth 1024 / 4096 / 32768 / 131072, B70_LFM_FUSE none vs each arm vs all as interleaved rounds (median of 3), int8 / bf16 head, flash / eager; --profile --repeats 5 at 4096"
+stage r51.speed    51 optin   gpu lfm2moe_rtn                    r51.rtn  "Task 8: decode at depth 1024 / 4096 / 32768 / 130816 (+ 256 decoded = the trained 131072; the deep rows ingest one replay per id: hours, ESTIMATED), B70_LFM_FUSE none vs each arm vs all as interleaved rounds (median of 3), int8 / bf16 head, flash / eager; --profile --repeats 5 at 4096"
 st_r51_speed() {
   local snap='$(tools/box_validate/data.sh resolve "${SNAP_LFM2MOE_RTN:-?}")' r d a i
   local arms=(none route router conv all)
   idle r51-speed
   x "uptime"
-  for d in 1024 4096 32768 131072; do
+  for d in 1024 4096 32768 130816; do   # 130816 + 256 = the trained 131072 (max_len auto caps there)
     for r in 1 2 3; do
       for i in 0 1 2 3 4; do   # rotated per round: interleaved, not sequential arms
         a=${arms[$(((i + r) % 5))]}

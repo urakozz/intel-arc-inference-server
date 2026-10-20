@@ -4385,7 +4385,7 @@ if(B70_LFM2MOE)
     lfm2moe_32k)
   list(APPEND _lfm_tests lfm2moe_golden_rtn_short_bf16head_test lfm2moe_golden_rtn_short_eager_test)
   set_tests_properties(${_lfm_tests} PROPERTIES LABELS "checkpoint;golden;lfm2moe" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  # the 32k prompt: opt-in (r51.rtn32k), ~33k replays
+  # the 32k prompt: opt-in (label optin; no stage runs it - by hand once 24q exists), ~33k replays, max_len 33024
   set_tests_properties(lfm2moe_golden_rtn_32k_test PROPERTIES LABELS "checkpoint;golden;lfm2moe;optin"
     SKIP_RETURN_CODE 77 TIMEOUT 14400)
 endif()

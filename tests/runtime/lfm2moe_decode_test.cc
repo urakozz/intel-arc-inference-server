@@ -126,21 +126,24 @@ int main(int argc, char** argv) {
   std::printf("    both residual buffers equal after the runs; tokens:");
   for (uint32_t t : a.tokens) std::printf(" %u", t);
   std::printf("\n");
-  // 3. the fused arms against the as-built list
+  // 3. the fused arms against the as-built list. `e` and `d` belong to the engine the rebuild below destroys: keep
+  // what is needed from them first (the final review's use-after-free).
+  const size_t base_launches = e.launches();
+  const uint32_t layers = d0.layers;
   if (fuse_given) {
     lfm2moe_rig::Options of = o;
     of.fuse = arms;
     lfm2moe_rig::build(rig, snap, of);
     rl::Lfm2MoeEngine& f = *rig.eng;
     CHECK_EQ(f.launches(), rl::decode_launches(f.model().desc, f.model().place, f.attention(), arms, f.handoff()));
-    if (d.layers == 40 && f.devices() == 1) {   // spec 24 §4.5: 345 / 345 / 353 alone, 277 with all three
+    if (layers == 40 && f.devices() == 1) {   // spec 24 §4.5: 345 / 345 / 353 alone, 277 with all three
       const int n = int(arms.route) + int(arms.router) + int(arms.conv);
       if (n == 3) CHECK_EQ(f.launches(), size_t(277));
       if (n == 1) CHECK_EQ(f.launches(), size_t(arms.conv ? 353 : 345));
     }
     const Snapshot c = run(f, ids);
     same(a, c, ("Review Focus 4: fuse " + rl::lfm_fuse_name(arms) + " against none (" + std::to_string(f.launches()) +
-                " launches against " + std::to_string(e.launches()) + ")").c_str());
+                " launches against " + std::to_string(base_launches) + ")").c_str());
   }
   std::puts("lfm2moe_decode_test OK");
   return 0;
