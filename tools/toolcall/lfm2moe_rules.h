@@ -9,6 +9,12 @@
 // before it is read - the text b70-serve would have parsed. One line a file (calls, reasoning bytes, content bytes, the
 // counters, and a note when a block was left as content) and the totals; the result is the number of files whose
 // tool-call block was NOT read as calls (an invalid block left in the content), so a run with 0 parse failures is 0.
+//
+// What the counters cannot show (the parser's known limits, spec 24 section 16): (a) a Windows path ending in a backslash,
+// `ls(path='C:\dir\')`, and (b) a JSON-format block `[{"name": ..., "arguments": ...}]` leave the block as content (the
+// failure count); (c) a malformed call after a valid one is dropped and only dropped_unfinished counts it; (d) a nested second
+// <|tool_call_start|> inside an open block is a dropped tail; (e) integers past 2^64 become doubles; (f) an unescaped
+// `print('a', end='')` inside a single-quoted argument is mis-split by the quote lookahead.
 #include <cstdio>
 #include <fstream>
 #include <sstream>
