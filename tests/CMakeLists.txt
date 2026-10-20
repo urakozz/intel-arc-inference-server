@@ -4430,4 +4430,36 @@ add_executable(lfm2moe_pf_ref_test kernels/lfm2moe_pf_ref_test.cc)
 target_include_directories(lfm2moe_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME lfm2moe_pf_ref_test COMMAND lfm2moe_pf_ref_test)
 set_tests_properties(lfm2moe_pf_ref_test PROPERTIES LABELS "lfm2moe;prefill" TIMEOUT 600)
+if(B70_LFM2MOE)
+  # Task 2: every binary the prefill walk binds, both attention forms and both in_proj layouts (src/kernels/
+  # CMakeLists.txt's spec 24d block; after `--` pf_gemm_T0 / pf_gemm_T0_SILU, built in prefill/).
+  set(B70_LFM2MOE_PREFILL_KERNELS
+    kernel_lfm_pf_embed_gather_K2048_V128000 kernel_lfm_pf_conv_K2048_C2048 kernel_lfm_pf_conv_K2048_C2048_T
+    kernel_lfm_pf_moe_E64_T4_D2048_I1536_TM32 kernel_lfm_pf_attn_Q32KV8_HPW4_RPW16_KT64
+    kernel_lfm_pf_attn_Q32KV8_HPW4_RPW16_KT64_EAGER kernel_lfm_res_norm_M2048_K2048_W8_NF
+    kernel_lfm_res_norm_M2048_K2048_W8_S1 kernel_lfm_router_M2048_K2048_E64 kernel_lfm_route_M2048_E64_T4
+    kernel_lfm_attn_prep_M2048_S1_Q32KV8 kernel_pf_dequant_slab_K2048_N6144_L1 kernel_pf_dequant_slab_K2048_N2048_L1
+    kernel_pf_dequant_slab_K2048_N3072_L0 kernel_pf_dequant_slab_K2048_N23552_L0 kernel_pf_dequant_slab_K11776_N2048_L1
+    kernel_pf_moe_gemm_K2048_N3072_SILU kernel_pf_moe_gemm_K1536_N2048)
+  set(B70_LFM2MOE_PREFILL_REUSED kernel_pf_gemm_T0 kernel_pf_gemm_T0_SILU)
+  add_executable(lfm2moe_pf_variant_names_test kernels/lfm2moe_pf_variant_names_test.cc)
+  target_include_directories(lfm2moe_pf_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(lfm2moe_pf_variant_names_test PRIVATE b70_lfm2moe_model)
+  b70_target_kernel_dir(lfm2moe_pf_variant_names_test)
+  add_test(NAME lfm2moe_pf_variant_names_test COMMAND lfm2moe_pf_variant_names_test ${B70_LFM2MOE_PREFILL_KERNELS} --
+    ${B70_LFM2MOE_PREFILL_REUSED})
+  set_tests_properties(lfm2moe_pf_variant_names_test PROPERTIES LABELS "lfm2moe;prefill")
+  # K1 for the prefill on the card, no checkpoint: every prefill kernel at the real shapes against lfm2moe_pf_ref.h.
+  add_executable(lfm2moe_pf_kernels_test kernels/lfm2moe_pf_kernels_test.cc)
+  target_include_directories(lfm2moe_pf_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(lfm2moe_pf_kernels_test PRIVATE b70_prefill_host b70_lfm2moe_loader b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(lfm2moe_pf_kernels_test)
+  endif()
+  b70_target_kernel_dir(lfm2moe_pf_kernels_test)
+  add_dependencies(lfm2moe_pf_kernels_test ${B70_LFM2MOE_PREFILL_KERNELS} ${B70_LFM2MOE_DECODE_KERNELS}
+    ${B70_LFM2MOE_PREFILL_REUSED})
+  add_test(NAME lfm2moe_pf_kernels_test COMMAND lfm2moe_pf_kernels_test)
+  set_tests_properties(lfm2moe_pf_kernels_test PROPERTIES LABELS "lfm2moe;prefill" TIMEOUT 1800)
+endif()
 # ==== Spec 24d: LFM2.5-24B-A2B prefill ==== (end) ====
