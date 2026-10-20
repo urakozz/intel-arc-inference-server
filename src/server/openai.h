@@ -49,9 +49,14 @@ Request parse_request(const std::string& body, bool chat);
 // is this one with Sampling{}.
 Request parse_request(const std::string& body, bool chat, const Sampling& defaults);
 // generation_config.json's sampling fields as defaults: do_sample true -> sampled (greedy when it is
-// false or absent, or temperature is 0), temperature / top_p / top_k where present, the rest Sampling{}'s.
+// false or absent, or temperature is 0), temperature / top_p / top_k / repetition_penalty where present, and for a field
+// the file does not name Hugging Face's GenerationConfig default (temperature 1.0, top_k 50, top_p 1.0, penalty 1.0 -
+// spec 24e; before it, Sampling{}'s top_k 20 / top_p 0.95, which no served model's file left to the default).
 // Throws std::invalid_argument naming a field of the wrong type or range.
 Sampling generation_sampling(const nlohmann::json& generation_config);
+// Spec 24e: generation_config.json's `eos_token_id` - an integer or a non-empty list of integers (HF allows both); anything
+// else throws std::invalid_argument naming the key. (b70-serve's eos_ids, which used to hold this, calls it.)
+std::vector<uint32_t> generation_eos_ids(const nlohmann::json& generation_config);
 // Spec 23e: generation_config.json's `stop_strings` - absent: none; a string, or a list of strings (Hugging Face
 // allows both; openvino.genai's reader fixed the string form, d54d3768). Anything else throws std::invalid_argument
 // naming the key. b70-serve merges them with every request's `stop` (Options::stop_strings).

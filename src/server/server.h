@@ -90,6 +90,7 @@ class Server {
     std::string text;      // the content text (completions: the raw text)
     ParsedOutput parsed;   // chat: reasoning, content and tool calls
     std::string raw_text;  // every generated piece, before any parsing or stop
+    nlohmann::json parser_stats;   // spec 24e: the output parser's counters for --log-requests (null: it keeps none)
     double t_first_token = 0;
     PrefixSession::Report prefix;
   };

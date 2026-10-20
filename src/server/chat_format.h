@@ -24,6 +24,14 @@
 //               message's list of text parts is joined with "\n" first (vLLM's "string" content
 //               format). EOS [127906, 127901] and the sampling defaults (generation_config.json:
 //               T 1.0, top-p 0.97, top-k 128 - Options::sampling_defaults) are b70-serve's.
+//   Lfm2        LFM2.5-24B-A2B (model_type lfm2_moe, spec 24e): ChatML with BOS first; the template reads the request's
+//               chat_template_kwargs (preserve_thinking, a bool: keep the reasoning of turns before the last user
+//               message); enable_thinking is accepted and ignored (the template always reasons: the generation prompt
+//               ends in "<think>", so the output opens inside reasoning - spec 24 decision 8); tool calls are pythonic,
+//               <|tool_call_start|>[fn(k=v)]<|tool_call_end|> (server/toolcall_lfm2.h). A message's list of text parts
+//               goes to the template as it is (its parse_content concatenates the parts). EOS [124900], the sampling
+//               defaults (T 0.1, top-k 50, repetition penalty 1.05 - Options::sampling_defaults) and the host-side
+//               repetition penalty are b70-serve's / the engine adapter's.
 //   Muse        Muse-Glimmer-30B (model_type muse_glimmer, spec 23e): the original's chat_template.jinja; the
 //               template reads chat_template_kwargs (reasoning_strength low | medium | high | xhigh - the
 //               OpenAI top-level reasoning_effort is mapped onto it, spec 23 decision 3 -, current_date,
@@ -45,18 +53,21 @@
 namespace server {
 
 struct ChatFormat {
-  enum class Kind { Qwen, K2Horizon, Kolibri, Muse };
+  enum class Kind { Qwen, K2Horizon, Kolibri, Muse, Lfm2 };
   Kind kind = Kind::Qwen;
 
-  // config.json's model_type -> the format; anything but "k2_horizon", "kolibri1" and "muse_glimmer" (or
-  // "muse_glimmer_text") reads as Qwen.
+  // config.json's model_type -> the format; anything but "k2_horizon", "kolibri1", "muse_glimmer" (or
+  // "muse_glimmer_text") and "lfm2_moe" reads as Qwen.
   static ChatFormat for_model_type(const std::string& model_type);
   static ChatFormat k2_horizon() { return ChatFormat{Kind::K2Horizon}; }
   static ChatFormat kolibri() { return ChatFormat{Kind::Kolibri}; }
   static ChatFormat muse() { return ChatFormat{Kind::Muse}; }
+  static ChatFormat lfm2() { return ChatFormat{Kind::Lfm2}; }
   const char* name() const;
   // The request's chat_template_kwargs reach the template beside enable_thinking.
-  bool template_kwargs() const { return kind == Kind::K2Horizon || kind == Kind::Kolibri || kind == Kind::Muse; }
+  bool template_kwargs() const {
+    return kind == Kind::K2Horizon || kind == Kind::Kolibri || kind == Kind::Muse || kind == Kind::Lfm2;
+  }
   // The template reads every message's content as a string (spec 20e: Kolibri-1; spec 23e: Muse-Glimmer).
   bool string_content() const { return kind == Kind::Kolibri || kind == Kind::Muse; }
   // What a list of text parts is joined with: "\n" (Kolibri: vLLM's "string" content format) or "" (Muse: its
@@ -70,7 +81,7 @@ nlohmann::json template_messages(const ChatFormat& format, const nlohmann::json&
 
 // The request's chat_template_kwargs that this format reads, checked before anything runs
 // (a bad value is the client's error, a 400): K2's tool_call_format and reasoning_effort;
-// Kolibri's reasoning_effort (a string of its seven, or null) and preserve_thinking (a bool);
+// Kolibri's reasoning_effort (a string of its seven, or null) and preserve_thinking (a bool); LFM2's preserve_thinking (a bool);
 // Muse's reasoning_strength (low | medium | high | xhigh), current_date / knowledge_cutoff (strings) and
 // tool_namespace_descriptions (an object of strings). Throws std::invalid_argument naming the field.
 void check_template_kwargs(const ChatFormat& format, const nlohmann::json& kwargs);

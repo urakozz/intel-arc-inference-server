@@ -72,9 +72,11 @@ json usage_json(const Request& r, Usage u) {
 }
 
 json tool_call_json(const ToolCall& call) {
+  // (A string argument cut inside a character by the model's output must not throw out of the response body: replace.)
   return {{"id", call.id},
           {"type", "function"},
-          {"function", {{"name", call.name}, {"arguments", call.arguments.dump()}}}};
+          {"function", {{"name", call.name},
+                        {"arguments", call.arguments.dump(-1, ' ', false, json::error_handler_t::replace)}}}};
 }
 
 // Messages as OpenAI clients send them: content may be null (an assistant turn
@@ -135,7 +137,14 @@ std::string frame(json body) {
 Request parse_request(const std::string& body, bool chat) { return parse_request(body, chat, Sampling{}); }
 
 Sampling generation_sampling(const json& g) {
+  // Spec 24e: a field the file does not name takes Hugging Face's GenerationConfig default (temperature 1.0, top_k 50,
+  // top_p 1.0, repetition_penalty 1.0), not Sampling{}'s request defaults (top_k 20, top_p 0.95). Kolibri-1's and
+  // Muse-Glimmer's files name all of temperature, top_p and top_k, so their resolved sampling is as before.
   Sampling s;
+  s.temperature = 1.0f;
+  s.top_k = 50;
+  s.top_p = 1.0f;
+  s.repetition_penalty = 1.0f;
   if (!g.is_object()) throw std::invalid_argument("generation_config.json is not an object");
   const auto number = [&](const char* key, double lo, double hi) {
     const json& v = g.at(key);
@@ -154,6 +163,13 @@ Sampling generation_sampling(const json& g) {
     if (!is_uint(v)) throw std::invalid_argument("generation_config.json top_k is not a non-negative integer");
     s.top_k = v.get<uint32_t>();
   }
+  if (g.contains("repetition_penalty")) {
+    // HF accepts any strictly positive float; the server's request field is held to (0, 2] (vLLM's range), and so is this.
+    const json& v = g.at("repetition_penalty");
+    if (!v.is_number() || !std::isfinite(v.get<double>()) || v.get<double>() <= 0.0 || v.get<double>() > 2.0)
+      throw std::invalid_argument("generation_config.json repetition_penalty is not a number in (0, 2]");
+    s.repetition_penalty = static_cast<float>(v.get<double>());
+  }
   bool sample = false;
   if (g.contains("do_sample")) {
     if (!g.at("do_sample").is_boolean()) throw std::invalid_argument("generation_config.json do_sample is not a boolean");
@@ -161,6 +177,28 @@ Sampling generation_sampling(const json& g) {
   }
   s.greedy = !sample || s.temperature == 0.0f;
   return s;
+}
+
+std::vector<uint32_t> generation_eos_ids(const json& g) {
+  if (!g.is_object() || !g.contains("eos_token_id"))
+    throw std::invalid_argument("generation_config.json has no eos_token_id");
+  const auto add = [](const json& value, std::vector<uint32_t>& ids) {
+    if (!value.is_number_unsigned() && !value.is_number_integer())
+      throw std::invalid_argument("generation_config.json eos_token_id is not an integer");
+    const int64_t id = value.get<int64_t>();
+    if (id < 0 || static_cast<uint64_t>(id) > 0xFFFFFFFFull)
+      throw std::invalid_argument("generation_config.json eos_token_id is out of range");
+    ids.push_back(static_cast<uint32_t>(id));
+  };
+  std::vector<uint32_t> ids;
+  const json& value = g.at("eos_token_id");
+  if (value.is_array()) {
+    for (const json& id : value) add(id, ids);
+  } else {
+    add(value, ids);
+  }
+  if (ids.empty()) throw std::invalid_argument("generation_config.json eos_token_id is empty");
+  return ids;
 }
 
 std::vector<std::string> generation_stop_strings(const json& g) {
@@ -273,6 +311,13 @@ Request parse_request(const std::string& body, bool chat, const Sampling& defaul
   }
   if (request.contains("top_k")) out.sampling.top_k = uint_field(request, "top_k", true);
   if (request.contains("top_p")) out.sampling.top_p = probability_field(request, "top_p", false);
+  if (request.contains("repetition_penalty")) {
+    // vLLM's extension field (spec 24e): Hugging Face's multiplicative penalty over the prompt and the output; 1.0 is none.
+    const json& v = request.at("repetition_penalty");
+    if (!v.is_number() || !std::isfinite(v.get<double>()) || v.get<double>() <= 0.0 || v.get<double>() > 2.0)
+      invalid("repetition_penalty must be a number in (0, 2]");
+    out.sampling.repetition_penalty = static_cast<float>(v.get<double>());
+  }
   if (request.contains("seed")) {
     const json& seed = request.at("seed");
     if (!seed.is_number_unsigned() && !(seed.is_number_integer() && seed.get<int64_t>() >= 0)) {

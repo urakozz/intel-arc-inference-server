@@ -42,6 +42,27 @@ struct TemplateIface {
   }
 };
 
+// Spec 24e (decision 1): the distinct token ids of one request's prompt and output so far - what HF's repetition penalty
+// is applied to. A bit set over the ids (a vocabulary is at most 2^20 ids) plus the list in insertion order.
+class SeenIds {
+ public:
+  static constexpr uint32_t kMaxId = 1u << 20;
+  void add(uint32_t id) {
+    if (id >= kMaxId) throw std::out_of_range("SeenIds: id " + std::to_string(id) + " is outside the vocabulary");
+    if (bits_.size() <= id / 64) bits_.resize(id / 64 + 1, 0);
+    const uint64_t bit = uint64_t(1) << (id % 64);
+    if ((bits_[id / 64] & bit) != 0) return;
+    bits_[id / 64] |= bit;
+    list_.push_back(id);
+  }
+  bool contains(uint32_t id) const { return id / 64 < bits_.size() && (bits_[id / 64] >> (id % 64) & 1) != 0; }
+  const std::vector<uint32_t>& distinct() const { return list_; }
+
+ private:
+  std::vector<uint64_t> bits_;
+  std::vector<uint32_t> list_;
+};
+
 struct Sampling {
   bool greedy = true;
   float temperature = 1.0f;
@@ -56,6 +77,11 @@ struct Sampling {
   // Model properties, set with the server's sampling defaults - never request fields.
   float logit_mult = 1.0f;
   float softcap = 0.0f;
+  // Spec 24e (decision 1): HF's repetition penalty (1.0: none), applied to the host logits row before temperature, top-k and
+  // top-p over `seen` - the distinct ids of the request's prompt and of every id the server has consumed so far, kept by the
+  // server for the request when the penalty is not 1 (null otherwise). An engine adapter that does not apply it ignores both.
+  float repetition_penalty = 1.0f;
+  const SeenIds* seen = nullptr;
 };
 
 struct EngineIface {
