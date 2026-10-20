@@ -86,6 +86,9 @@ __kernel void lfm_res_norm(__global const ushort* restrict h_in, __global const 
   const uint lid = get_local_id(0);
   __local float rs[K];          // the folded row (bf16 values), then (router WGs) the normalised row
   __local float red[WG_NORM];
+#ifdef ROUTER_FUSED
+  __local float rr[8][16];      // the router work-groups' 8 k-span partials of 16 columns
+#endif
   float acc = 0.0f;
   for (uint k = lid; k < K; k += WG_NORM) {
     const float v = lfm_fold(h_in, slices, m, k);
@@ -103,7 +106,6 @@ __kernel void lfm_res_norm(__global const ushort* restrict h_in, __global const 
   if (wg >= NORM_WGS) {   // uniform: a router work-group (the arm `router`)
     for (uint k = lid; k < K; k += WG_NORM) rs[k] = bf16f(lfm_norm_elem(rs[k], rstd, norm_w[k]));
     barrier(CLK_LOCAL_MEM_FENCE);
-    __local float rr[8][16];
     const uint lane = lid % 16, j = lid / 16;   // lanes 0..127: column lane of the n-tile, k-span j
     const uint nt = wg - NORM_WGS;
     if (lid < 128) {

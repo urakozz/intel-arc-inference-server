@@ -241,7 +241,7 @@ if [ $kernels = 1 ]; then
     # muse_dflash_run (spec 23f): the same three (the Muse fixture through dflash_fixture_io.h).
     [ "$d" = muse_dflash ] && extra="$root/src/loader/safetensors.cc $root/src/loader/lm_head_int8.cc $root/src/model/dflash.cc"
     # lfm2moe_run (spec 24c): lfm2moe_ref.h, its fixture and the loader's RoPE table (lfm_rope_table + the descriptor).
-    [ "$d" = lfm2moe ] && extra="$root/src/loader/lfm2moe_rope.cc $root/src/model/lfm2moe.cc"
+    [ "$d" = lfm2moe ] && extra="$root/src/loader/lfm2moe_rope.cc $root/src/loader/lfm2moe_repack.cc $root/src/model/lfm2moe.cc"
     # shellcheck disable=SC2086
     if ! clang++ -std=c++17 -O2 -Wall -Wextra -Werror -DB70_CLRUN_ROOT="\"$root\"" -I"$root/src" -I"$root/tests" \
          "$root/tools/mac/clrun/clrun.cc" "$root/tools/mac/clrun/${d}_run.cc" $extra \
