@@ -231,27 +231,11 @@ std::vector<uint32_t> eos_ids(const std::string& snapshot_dir) {
   if (!input) throw std::runtime_error("cannot open '" + snapshot_dir + "generation_config.json'");
   nlohmann::json config;
   input >> config;
-  if (!config.contains("eos_token_id"))
-    throw std::runtime_error("generation_config.json has no eos_token_id");
-
-  const auto add = [](const nlohmann::json& value, std::vector<uint32_t>& ids) {
-    if (!value.is_number_unsigned() && !value.is_number_integer())
-      throw std::runtime_error("generation_config.json eos_token_id is not an integer");
-    const int64_t id = value.get<int64_t>();
-    if (id < 0 || static_cast<uint64_t>(id) > 0xFFFFFFFFull)
-      throw std::runtime_error("generation_config.json eos_token_id is out of range");
-    ids.push_back(static_cast<uint32_t>(id));
-  };
-
-  std::vector<uint32_t> ids;
-  const nlohmann::json& value = config.at("eos_token_id");
-  if (value.is_array()) {
-    for (const auto& id : value) add(id, ids);
-  } else {
-    add(value, ids);
+  try {
+    return server::generation_eos_ids(config);   // an integer or a list (spec 24e moved the reading out for a test)
+  } catch (const std::invalid_argument& error) {
+    throw std::runtime_error(error.what());
   }
-  if (ids.empty()) throw std::runtime_error("generation_config.json eos_token_id is empty");
-  return ids;
 }
 
 void print_eos(const std::vector<uint32_t>& ids) {

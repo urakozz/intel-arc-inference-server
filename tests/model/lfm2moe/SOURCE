@@ -4,3 +4,6 @@ config.json, copied unchanged (a configuration file, spec 24 §1.4's §4 notice)
 Licence: LFM Open License v1.0 (license: other, license_name: lfm1.0). Spec 24 §1.4 / §10 decision 9
 (operator, 2026-10-15, ruled as recommended): the operator's use is well under the licence's USD 10
 million annual revenue commercial-use threshold (§5).
+
+generation_config.json (spec 24e) is the same snapshot's, copied unchanged - the same configuration-file notice
+(spec 24 §1.4, §4 of the licence). tests/server/lfm2moe_sampling_test.cc and lfm2moe_server_test.cc read it.

@@ -4582,4 +4582,12 @@ if(B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_LFM_SNAPSHOT_DIR})
   set_tests_properties(toolcall_lfm2_test PROPERTIES LABELS lfm2moe TIMEOUT 600)
 endif()
+# Task 3 (host): the repetition penalty on the host sampler (HF's rule and order), SeenIds, the sampling defaults
+# LFM2.5's generation_config.json (vendored at tests/model/lfm2moe/) resolves to, HF's absent-field defaults, the
+# request's repetition_penalty, eos_token_id as an int or a list.
+add_executable(lfm2moe_sampling_test server/lfm2moe_sampling_test.cc)
+target_include_directories(lfm2moe_sampling_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lfm2moe_sampling_test PRIVATE b70_server)
+add_test(NAME lfm2moe_sampling_test COMMAND lfm2moe_sampling_test ${CMAKE_SOURCE_DIR}/tests/model/lfm2moe)
+set_tests_properties(lfm2moe_sampling_test PROPERTIES LABELS lfm2moe)
 # ==== Spec 24e: LFM2.5-24B-A2B serving ==== (end) ====

@@ -61,6 +61,18 @@ FilteredProbs filter_probs(const float* logits, uint32_t vocab_used, const Sampl
   return f;
 }
 
+void apply_repetition_penalty(float* logits, uint32_t vocab_used, const std::vector<uint32_t>& ids, float penalty) {
+  if (penalty == 1.0f) return;
+  std::vector<float> scores;
+  scores.reserve(ids.size());
+  for (uint32_t id : ids) {
+    const float l = id < vocab_used ? logits[id] : 0.0f;
+    scores.push_back(l < 0 ? l * penalty : l / penalty);
+  }
+  for (size_t i = 0; i < ids.size(); ++i)
+    if (ids[i] < vocab_used) logits[ids[i]] = scores[i];
+}
+
 uint32_t draw(const FilteredProbs& f, std::mt19937_64& rng) {
   std::discrete_distribution<uint32_t> d(f.probs.begin(), f.probs.end());
   return f.ids[d(rng)];
