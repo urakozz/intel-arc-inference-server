@@ -1668,6 +1668,34 @@ if(B70_LFM2MOE)
   if(NOT B70_ORNITH)
     add_prep_res_fold(1 2048 0 20)
   endif()
+  # --- the family kernels (src/kernels/lfm2moe/, kernels::lfm2moe's names; Task 3) ---
+  # lfm_prep.cl: the one-launch norm (fold + Σ + the two-rounding x; _NF only normalises) at 8 work-groups
+  # (kNormWgs, PROVISIONAL), over the split-K the descriptor gives out_proj / o_proj / the dense down (S 1 today:
+  # a re-pick adds its S here - lfm2moe_variant_names_test names the missing binary); SiLU x up at 11776; the
+  # attention prep at head_dim 64 (eps 1e-5, RoPE on every attention layer); the gather from the embedding tiles.
+  set(LFM_NORM_DEFINES M=1 K=2048 NORM_WGS=8 NORM_EPS=1e-5f)
+  add_ocloc_kernel(lfm_res_norm_M1_K2048_W8_NF SOURCE ${LFM_CL}/lfm_prep.cl DEFINES ${LFM_NORM_DEFINES} NORM_S=0)
+  foreach(S 1)
+    add_ocloc_kernel(lfm_res_norm_M1_K2048_W8_S${S} SOURCE ${LFM_CL}/lfm_prep.cl DEFINES ${LFM_NORM_DEFINES} NORM_S=${S})
+  endforeach()
+  add_ocloc_kernel(lfm_silu_mul_M1_I11776_S1 SOURCE ${LFM_CL}/lfm_prep.cl DEFINES M=1 SILU_I=11776 SILU_S=1)
+  add_ocloc_kernel(lfm_attn_prep_M1_S1_Q32KV8 SOURCE ${LFM_CL}/lfm_prep.cl
+                   DEFINES ${CTRL_DEFINES} M=1 QKV_S=1 Q_HEADS=32 KV_HEADS=8 HD=64 PREP_EPS=1e-5f)
+  add_ocloc_kernel(lfm_embed_gather_M1_K2048_V128000 SOURCE ${LFM_CL}/lfm_prep.cl
+                   DEFINES ${CTRL_DEFINES} M=1 K=2048 EMBED_V=128000)
+  # lfm_conv.cl: the short conv over the Bx ring, after in_proj's S-slice GEMV.
+  add_ocloc_kernel(lfm_conv_M1_K2048_S1 SOURCE ${LFM_CL}/lfm_conv.cl DEFINES ${CTRL_DEFINES} M=1 HIDDEN=2048 CONV_S=1)
+  # lfm_moe.cl: the router (64 rows, lfm_router's order), the sigmoid-bf16 route, the 4-slot MoE with the fold.
+  # lfm_expert.h (the one expert address) sits beside it: -I the family's directory.
+  add_ocloc_kernel(lfm_router_M1_K2048_E64 SOURCE ${LFM_CL}/lfm_moe.cl DEFINES M=1 ROUTER_E=64 ROUTER_K=2048)
+  add_ocloc_kernel(lfm_route_M1_E64_T4 SOURCE ${LFM_CL}/lfm_moe.cl DEFINES M=1 ROUTE_E=64)
+  add_ocloc_kernel(lfm_moe_M1_E64_T4_D2048_I1536 SOURCE ${LFM_CL}/lfm_moe.cl
+                   DEFINES M=1 MOE_E=64 MOE_K=4 HIDDEN=2048 INTER=1536 UP_KS=4 DN_KS=2
+                   DEPENDS ${LFM_CL}/lfm_expert.h OPTIONS -I${LFM_CL})
+  # lfm_attn.cl (flash, the default) and lfm_attn_eager.cl (B70_LFM_ATTN=eager) at head_dim 64, GQA 4, TGT 32.
+  set(LFM_ATTN_DEFINES ${CTRL_DEFINES} M=1 TGT=32 Q_HEADS=32 KV_HEADS=8)
+  add_ocloc_kernel(lfm_attn_M1_T32_Q32KV8 SOURCE ${LFM_CL}/lfm_attn.cl DEFINES ${LFM_ATTN_DEFINES})
+  add_ocloc_kernel(lfm_attn_eager_M1_T32_Q32KV8 SOURCE ${LFM_CL}/lfm_attn_eager.cl DEFINES ${LFM_ATTN_DEFINES})
 endif()
 # ==== Spec 24c: LFM2.5-24B-A2B decode ==== (end) ====
 

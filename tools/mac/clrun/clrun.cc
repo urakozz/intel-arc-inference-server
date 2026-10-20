@@ -143,7 +143,10 @@ Program::Program(Device& dev, const std::string& cl_path, const std::vector<std:
   std::string opts;  // for the error message only
   for (const std::string& d : defines) opts += " -D" + d;
   const cl_device_id id = dev.id();
-  const cl_int be = clBuildProgram(prog_, 1, &id, "", nullptr, nullptr);
+  // The source's own directory on the include path (spec 24c: lfm_moe.cl includes lfm_expert.h, as ocloc
+  // builds it with -I<that directory>); a source with no #include is unaffected.
+  const std::string inc = "-I" + path.substr(0, path.find_last_of('/'));
+  const cl_int be = clBuildProgram(prog_, 1, &id, inc.c_str(), nullptr, nullptr);
   std::size_t log_len = 0;
   clGetProgramBuildInfo(prog_, id, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_len);
   log_.assign(log_len, '\0');
