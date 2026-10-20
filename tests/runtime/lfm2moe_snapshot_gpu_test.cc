@@ -122,6 +122,8 @@ int run_default(rl::Lfm2MoeEngine& e, const Ids& prompt) {
     ok = report(("a. restore at the block end " + std::to_string(at)).c_str(), finish(e), cold) && ok;
   }
 
+  e.set_block_hook({});   // parts b and c do not need the block-end saves (a full KV copy to the host at every chunk end)
+
   // b / c. request ends: the uncached session (prefill to `at`, save, prefill the rest) against a restore.
   for (uint32_t at : {2049u, 5000u, 300u, 2u, 1u, 0u}) {
     e.reset();
@@ -139,7 +141,6 @@ int run_default(rl::Lfm2MoeEngine& e, const Ids& prompt) {
     const std::string what = std::string(at >= 2049 ? "b" : "c") + ". restore at the request end " + std::to_string(at);
     ok = report(what.c_str(), finish(e), ref) && ok;
   }
-  e.set_block_hook({});
   return ok ? 0 : 1;
 }
 

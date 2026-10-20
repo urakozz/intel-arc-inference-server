@@ -7,8 +7,9 @@
 <transcript.json> is a chat session ({"messages": [...], "tools": [...]}: system, user, then assistant / tool turns -
 tests/golden/prompts/lfm2moe_agentic.json, 24a's). `run` plays the client's side of it: it sends [system, first user]
 and, after every response, appends the MODEL's own turn as an OpenAI client does - content, reasoning_content and
-tool_calls exactly as the server returned them - and then the next recorded tool result (cycled in order, one per call
-the model made; whatever the model called) or, when the model made no call, the next recorded user message; it stops
+tool_calls exactly as the server returned them - and then the next recorded tool result (in order, one per call
+the model made, whatever the model called; a turn with more calls than recorded results left wraps to the first of them, and
+a turn that makes a call when none is left ends the loop) or, when the model made no call, the next recorded user message; it stops
 when the transcript has nothing left to say, the model answered without a call and no user message remains, or after
 --turns requests. Because the assistant turns are the server's own, the prefix cache sees what it would see in a
 real session: a turn the template re-renders in another order than the model generated it (content then calls; the
