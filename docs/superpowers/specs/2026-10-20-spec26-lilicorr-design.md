@@ -193,9 +193,10 @@ conv bases fp32; the biases of the head's projections fp32.
   `ll_select`.
 - **Projection list** (19b's, `proj_n <= 8` rows at `proj_pos`): fc -> hidden_norm -> **the anchor buffer gets the last
   row's normed vector** (new: 4096 fp32) -> per layer k / v -> k_norm -> RoPE -> ring slot `pos % 1024`.
-- **Verify** (26c): spec 25c's decode list at M = K + 1 <= 8 - every `nb_*` kernel and GEMV already built for M <= 8 in
-  25c - writing the six taps of every row (19c's `build_verify_taps`: after block i's output is folded, i.e. inside the
-  next block's norm, the row's residual is copied out).
+- **Verify** (26c): spec 25c's decode list at M = K + 1 <= 8 (25c's kernels take M <= 8 as a define and its twins test
+  M = 1..4 in one launch; 26c compiles M = 2..8 from new CMake lines), writing the six taps of every row (19c's
+  `build_verify_taps`: after block i's output is folded, i.e. inside the next block's norm, the row's residual is copied
+  out).
 - **Mamba state for verify (Decision 4):** 19c's mechanism - `nb_ssm`'s slot build writes the state after row m into slot
   `(live + m) % 8`, the conv ring keeps raw xBC at `(pos + m) % 16`; commit moves `Control.ssm_live = (live + j) % 8` on
   both cards; rejected rows' slots and ring columns are rewritten before anything reads them. Cost: 7 extra state copies
