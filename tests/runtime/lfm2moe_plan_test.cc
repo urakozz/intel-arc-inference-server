@@ -106,6 +106,65 @@ int main() {
     CHECK(split4 >= 1 && split4 < d4.layers);
   }
 
+  // --- spec 24c: the decode list's launch counts (spec 24 §4.5, plan 24c Task 4) -------------------------------
+  {
+    const LfmFuse none{}, all{true, true, true};
+    // 2 dense conv layers x 8 + 28 conv + MoE x 9 + 10 attention + MoE x 11 + the head's 5 (the formula, spelled out)
+    CHECK_EQ(decode_launches(d, one, LfmAttn::Flash, none, runtime::PpHandoff::Copy), size_t(2 * 8 + 28 * 9 + 10 * 11 + 5));
+    CHECK_EQ(decode_launches(d, one, LfmAttn::Flash, none, runtime::PpHandoff::Copy), size_t(383));
+    CHECK_EQ(decode_launches(d, one, LfmAttn::Eager, none, runtime::PpHandoff::Copy), size_t(403));   // +2 a layer
+    CHECK_EQ(decode_launches(d, one, LfmAttn::Flash, LfmFuse{true, false, false}, runtime::PpHandoff::Copy), size_t(345));
+    CHECK_EQ(decode_launches(d, one, LfmAttn::Flash, LfmFuse{false, true, false}, runtime::PpHandoff::Copy), size_t(345));
+    CHECK_EQ(decode_launches(d, one, LfmAttn::Flash, LfmFuse{false, false, true}, runtime::PpHandoff::Copy), size_t(353));
+    CHECK_EQ(decode_launches(d, one, LfmAttn::Flash, all, runtime::PpHandoff::Copy), size_t(277));
+    // the synthetic N 4: dense conv 0, 1 (8 + 8), attention + MoE 2 (11), conv + MoE 3 (9), the head (5)
+    model::Lfm2MoeDesc d4 = d;
+    d4.layers = 4;
+    d4.kinds.assign(d.kinds.begin(), d.kinds.begin() + 4);
+    const model::LfmPlacement one4 = model::LfmPlacement::one(d4);
+    CHECK_EQ(decode_launches(d4, one4, LfmAttn::Flash, none, runtime::PpHandoff::Copy), size_t(8 + 8 + 11 + 9 + 5));
+    CHECK_EQ(decode_launches(d4, one4, LfmAttn::Flash, none, runtime::PpHandoff::Copy), size_t(41));
+    // two cards: +0 with copy (the hand-off is copies and an event), +2 with peer (pp_send, pp_recv)
+    const model::LfmPlacement two = model::LfmPlacement::two(d, 20);
+    CHECK_EQ(decode_launches(d, two, LfmAttn::Flash, none, runtime::PpHandoff::Copy), size_t(383));
+    CHECK_EQ(decode_launches(d, two, LfmAttn::Flash, none, runtime::PpHandoff::Peer), size_t(385));
+    CHECK_EQ(device_launches(d, two, 0, LfmAttn::Flash, none, runtime::PpHandoff::Copy) +
+                 device_launches(d, two, 1, LfmAttn::Flash, none, runtime::PpHandoff::Copy),
+             size_t(383));
+    const model::LfmPlacement two4 = model::LfmPlacement::two(d4, 2);
+    CHECK_EQ(decode_launches(d4, two4, LfmAttn::Flash, all, runtime::PpHandoff::Peer), size_t(41 - 3 - 4 + 2));
+    // the profile's event pool holds every list
+    CHECK(decode_launches(d, one, LfmAttn::Eager, none, runtime::PpHandoff::Peer) <= size_t(1024));
+    // B70_LFM_FUSE / B70_LFM_ATTN parse
+    CHECK(parse_fuse("none").route == false && parse_fuse("all").conv == true);
+    const LfmFuse rc = parse_fuse("route,conv");
+    CHECK(rc.route && !rc.router && rc.conv);
+    refused("B70_LFM_FUSE", [] { (void)parse_fuse("route,bogus"); });
+    refused("B70_LFM_ATTN", [] { (void)parse_attn("fast"); });
+    CHECK(parse_attn("eager") == LfmAttn::Eager && parse_attn("") == LfmAttn::Flash);
+  }
+
+  // --- spec 24c: the decode scratch, and the plan at 131072 on one card ------------------------------------------
+  {
+    const ScratchSizes f = scratch_sizes(d, 131072, LfmAttn::Flash), e = scratch_sizes(d, 131072, LfmAttn::Eager);
+    CHECK_EQ(f.h0, size_t(2048) * 2);
+    CHECK_EQ(f.h1, f.h0);
+    CHECK_EQ(f.slices, size_t(23552) * 4);   // the widest S x N: dense gate||up at S 1 (24b's descriptor)
+    CHECK_EQ(f.routes, size_t(40) * 16 * 4);
+    CHECK_EQ(f.moe_h, size_t(4) * 1536 * 2);
+    CHECK_EQ(f.s_mlp, size_t(11776) * 2);
+    CHECK_EQ(f.logits, size_t(128000) * 4);
+    CHECK_EQ(f.attn_scores, size_t(0));
+    CHECK_EQ(e.attn_scores, size_t(32) * 131072 * 4);   // eager's score row: the term that scales (16 MiB)
+    CHECK_EQ(e.total() - f.total(), e.attn_scores);
+    CHECK(f.total() < size_t(2) << 20);
+    const Plan p = plan(d, one, 0, 131072, true, LfmAttn::Eager);
+    CHECK_EQ(p.decode_scratch, e.total() + size_t(128));   // + the Control block
+    require_fits(p, size_t(32530000000ull));             // the whole model and 131072 positions on one B70
+    std::printf("  decode scratch at 131072: flash %zu B, eager %zu B; %s\n", f.total(), e.total(),
+                describe(p, size_t(32530000000ull)).c_str());
+  }
+
   std::printf("lfm2moe_plan_test: ok\n");
   return 0;
 }
