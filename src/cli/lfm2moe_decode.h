@@ -3,8 +3,12 @@
 // (loader::is_lfm2moe_checkpoint) and, for "lfm2_moe", runs runtime::lfm2moe::Lfm2MoeEngine on one card (the default:
 // the model and its whole 131072-position context fit one B70, spec 24 §3) or two. cli/kolibri_decode.h's shape:
 //
-//   --ids F --n N        the prompt one decode replay per id (24d brings prefill), then N greedy ids on stdout
+//   --ids F --n N        the prompt one decode replay per id, then N greedy ids on stdout
+//   --prefill            (--ids) spec 24d: the prompt through Lfm2MoeEngine::prefill in chunks, then --n greedy ids
 //   --bench [--depth N] [--tg N]   depth N of the bench prompt ingested, N decoded and timed (the bench row on stdout)
+//   --bench --prefill-length N    depth N PREFILLED and timed (the pp row, a second stdout line), then --tg decoded
+//   --prefill-chunk C    the chunk width, <= 2048 (kernels::lfm2moe::kPfC; the default)
+//   --prefill-backend l0 the only backend (spec 24d: l0-int8 is spec 24 §11's later probe, sycl-tla has no walk)
 //   --profile [--depth N] [--steps N] [--repeats R]   depth N ingested, then R x N profiled replays: the per-launch
 //                        anatomy (kernel-timestamp events, docs/15's instrument; never a bench row)
 //   --lm-head bf16|int8  int8 the default (spec 9: built from the tied embedding); bf16 reads the embedding tiles
@@ -13,9 +17,11 @@
 //   --pp N / --pipeline-parallel-size N   1 (the default) or 2 (spec 16b's pieces, decision 10)
 //   --pipeline-split auto|N, --pipeline-handoff copy|peer   --pp 2's
 // B70_LFM_ATTN=flash|eager and B70_LFM_FUSE=none|all|<route,router,conv> pick the list (read at construction).
-// Refused before the device, each by name (tests/CMakeLists.txt's cli_reject_lfm2moe_*): --prefill / --prefill-length
-// / --prefill-chunk / --prefill-backend (spec 24d), --mtp / --spec (no MTP head), --kv-cache int8 (spec 24 decision
-// 11), --layers (Kolibri-1's / Qwen3.8-Flash-Next's development mode), --device with --pp 2.
+// Refused before the device, each by name (tests/CMakeLists.txt's cli_reject_lfm2moe_*): --prefill-backend l0-int8 /
+// sycl-tla, --prefill-chunk above 2048 (spec 24d), --mtp / --spec (no MTP head), --kv-cache int8 (spec 24 decision 11),
+// --layers (Kolibri-1's / Qwen3.8-Flash-Next's development mode), --device with --pp 2. A prefilling run plans the
+// prefill scratch (and, on two cards, the prefill hand-off) into --max-len and the fit; B70_PREFILL_PROFILE=1 prints
+// the prefill's phase table (runtime/prefill/profile.h) after the timed call.
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -35,6 +41,8 @@
 #include "loader/snapshot.h"
 #include "runtime/lfm2moe/lfm2moe_engine.h"
 #include "runtime/lfm2moe/lfm2moe_sizes.h"
+#include "runtime/prefill/profile.h"
+#include "runtime/prefill_backend.h"
 
 namespace cli::lfm2moe {
 
@@ -70,16 +78,27 @@ struct DecodeArgs {
   uint32_t device = l0::Context::kFromEnv;
   bool int8_head = true;        // --lm-head (spec 9's int8 head unless bf16)
   PipelineArgs pipe;            // devices as parsed (1 when --pp was not given)
+  // Spec 24d: --prefill (--ids), --prefill-length N (--bench at depth N: the pp row), --prefill-chunk C (0 = kPfC),
+  // --prefill-backend as parsed (l0 only).
+  bool prefill = false, pp = false, pp_backend_given = false;
+  uint32_t pp_chunk = 0;
+  runtime::PrefillBackend pp_backend = runtime::PrefillBackend::L0;
   // What else was asked for, for the refusals.
-  bool prefill = false, mtp = false, kv8 = false, layers = false;
+  bool mtp = false, kv8 = false, layers = false;
+  bool prefills() const { return prefill || pp; }
 };
 
 // Every refusal that needs no device - in this order, each by name (tests/CMakeLists.txt's cli_reject_lfm2moe_*).
 inline void check_args(const DecodeArgs& a, const model::Lfm2MoeDesc& d) {
-  if (a.prefill)
-    throw std::runtime_error("LFM2.5-24B-A2B's prefill is spec 24d (not built yet): --prefill, --prefill-length, "
-                             "--prefill-chunk and --prefill-backend are refused - the prompt goes through the decode "
-                             "list one replay per id");
+  if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::L0Int8)
+    throw std::runtime_error("LFM2.5-24B-A2B prefills on the l0 backend only (spec 24d), not l0-int8: int8 prefill for "
+                             "this family is a later probe (spec 24 §11) - --prefill-backend l0, or omit it");
+  if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::SyclTla)
+    throw std::runtime_error("LFM2.5-24B-A2B prefills on the l0 backend only (spec 24d), not sycl-tla: sycl-tla has no "
+                             "head_dim 64 path and no LFM2 walk (spec 24 §11) - --prefill-backend l0, or omit it");
+  if (a.pp_chunk > runtime::lfm2moe::kPfC)
+    throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " exceeds LFM2.5-24B-A2B's prefill chunk " +
+                             std::to_string(runtime::lfm2moe::kPfC) + " (the scratch is sized for it)");
   if (a.mtp)
     throw std::runtime_error("LFM2.5-24B-A2B has no MTP head (spec 24 §11): drop --mtp / --spec");
   if (a.kv8)
@@ -147,10 +166,12 @@ inline std::pair<model::LfmPlacement, uint32_t> settle(const model::Lfm2MoeDesc&
   for (uint32_t i = 1; i < p.devices; ++i) smallest = std::min(smallest, dev[i]);
   uint32_t len = a.max_len.value;
   if (a.max_len.is_auto) {
-    len = rl::max_len_auto(d, p, smallest, reserve_gb, a.int8_head, at);
+    len = rl::max_len_auto(d, p, smallest, reserve_gb, a.int8_head, at, a.prefills());
     if (len == 0)
       throw std::runtime_error("--max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) +
-                               " positions fit - " + rl::describe(rl::plan(d, p, 0, runtime::kMinAutoMaxLen, a.int8_head, at), smallest));
+                               " positions fit - " +
+                               rl::describe(rl::plan(d, p, 0, runtime::kMinAutoMaxLen, a.int8_head, at, a.prefills()),
+                                            smallest));
     std::fprintf(stderr, "max_len: auto -> %u (the largest multiple of %u that fits every card with a %.3f GB "
                  "reserve; trained context %u)\n", len, runtime::kMaxLenQuantum, reserve_gb, d.trained_max_len);
   } else {
@@ -160,7 +181,7 @@ inline std::pair<model::LfmPlacement, uint32_t> settle(const model::Lfm2MoeDesc&
     std::fprintf(stderr, "max_len: %u (--max-len)\n", len);
   }
   for (uint32_t i = 0; i < p.devices; ++i) {
-    rl::Plan pl = rl::plan(d, p, i, len, a.int8_head, at);
+    rl::Plan pl = rl::plan(d, p, i, len, a.int8_head, at, a.prefills());
     pl.reserve = size_t(reserve_gb * 1e9);
     rl::require_fits(pl, dev[i]);
     std::fprintf(stderr, "plan, device %u: %s\n", i, rl::describe(pl, dev[i]).c_str());
@@ -230,12 +251,38 @@ int run_decode(const DecodeArgs& a) {
                             runtime::pp_handoff_name(eng.handoff())).c_str() : "",
                eng.launches(), rl::lfm_attn_name(eng.attention()), rl::lfm_fuse_name(eng.fuse()).c_str(),
                a.int8_head ? "int8" : "bf16", eng.max_len());
+  // Spec 24d: the prefill setup (every device's scratch, Context, the prefill hand-off, the binaries' check) happens
+  // here, outside the timed window, which is then the whole prefill() call: first launch to the first generated id in
+  // cur_token (argmax_stage2 is its last launch).
+  const uint32_t chunk = a.pp_chunk ? a.pp_chunk : rl::kPfC;
+  size_t pp_launches0 = 0;
+  if (a.prefills()) {
+    eng.prepare_prefill();
+    pp_launches0 = eng.prefill_launches();
+    std::fprintf(stderr, "prefill: l0 backend, chunk %u, attention %s (B70_LFM_ATTN), %zu launches per chunk (%s) + %zu "
+                 "for the head%s\n", chunk, rl::lfm_attn_name(eng.attention()),
+                 rl::prefill_chunk_launches(eng.model().desc, eng.model().place), devs == 2 ? "both cards" : "one card",
+                 rl::kPrefillHeadLaunches,
+                 devs == 2 ? "; the chunk crosses by copy, sequentially (spec 16c's overlap is a later lever)" : "");
+    runtime::prefill::profile_reset();
+  }
   std::fprintf(stderr, "%s\n", eng.memory_line().c_str());
   const auto t0 = std::chrono::steady_clock::now();
-  eng.ingest(ids);
+  if (a.prefills())
+    eng.prefill(ids, chunk);
+  else
+    eng.ingest(ids);
   const double ingest_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token, one decode replay per id), pos %u\n", ids.size(),
-               ingest_ms, ingest_ms / double(ids.size()), eng.pos());
+  if (a.prefills()) {
+    std::fprintf(stderr, "%s: %zu ids in %.1f ms (%.2f t/s) - device-side, loader excluded, first prefill launch to the "
+                 "first generated id; chunk %u, %zu L0 launches, pos %u\n", a.pp ? "pp" : "prefill", ids.size(),
+                 ingest_ms, ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0, chunk,
+                 eng.prefill_launches() - pp_launches0, eng.pos());
+    if (runtime::prefill::profile_enabled()) runtime::prefill::profile_report("LFM2.5-24B-A2B prefill", ingest_ms);
+  } else {
+    std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token, one decode replay per id), pos %u\n", ids.size(),
+                 ingest_ms, ingest_ms / double(ids.size()), eng.pos());
+  }
   if (a.profile) {
     eng.clear_profile();
     for (uint32_t r = 0; r < a.repeats; ++r) eng.generate(a.steps);
@@ -265,6 +312,12 @@ int run_decode(const DecodeArgs& a) {
               devs == 2 ? (std::string(" pipeline2-") + runtime::pp_handoff_name(eng.handoff()) + "-s" +
                            std::to_string(eng.split())).c_str() : "",
               a.depth, a.tg, eng.last_tok_per_s(), eng.last_gen_ms() / double(a.tg));
+  // Spec 24d: the pp row, a second line as the Kolibri / K2 / Qwen paths print it (depth, chunk, ms, t/s).
+  if (a.pp)
+    std::printf("| b70-decode %s lfm2moe %s-head %s fuse-%s%s l0 pp | %u | %u | %.1f | %.2f |\n", sha,
+                a.int8_head ? "int8" : "bf16", rl::lfm_attn_name(eng.attention()), rl::lfm_fuse_name(eng.fuse()).c_str(),
+                devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "", a.depth, chunk,
+                ingest_ms, ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
   return 0;
 }
 
