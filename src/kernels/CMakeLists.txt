@@ -1685,6 +1685,9 @@ if(B70_LFM2MOE)
                    DEFINES ${CTRL_DEFINES} M=1 K=2048 EMBED_V=128000)
   # lfm_conv.cl: the short conv over the Bx ring, after in_proj's S-slice GEMV.
   add_ocloc_kernel(lfm_conv_M1_K2048_S1 SOURCE ${LFM_CL}/lfm_conv.cl DEFINES ${CTRL_DEFINES} M=1 HIDDEN=2048 CONV_S=1)
+  # Test-only (lfm2moe_kernels_test, Review Focus 1): M = 4 rows a launch - the M-row form 24d's chunk walk and a
+  # future verify list use; no decode list binds it.
+  add_ocloc_kernel(lfm_conv_M4_K2048_S1 SOURCE ${LFM_CL}/lfm_conv.cl DEFINES ${CTRL_DEFINES} M=4 HIDDEN=2048 CONV_S=1)
   # lfm_moe.cl: the router (64 rows, lfm_router's order), the sigmoid-bf16 route, the 4-slot MoE with the fold.
   # lfm_expert.h (the one expert address) sits beside it: -I the family's directory.
   add_ocloc_kernel(lfm_router_M1_K2048_E64 SOURCE ${LFM_CL}/lfm_moe.cl DEFINES M=1 ROUTER_E=64 ROUTER_K=2048)
