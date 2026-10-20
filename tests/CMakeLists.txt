@@ -4419,3 +4419,15 @@ if(COMMAND b70_serve_reject)
   set_tests_properties(cli_reject_lfm2moe_serve PROPERTIES LABELS lfm2moe)
 endif()
 # ==== Spec 24c: LFM2.5-24B-A2B decode (label lfm2moe) ==== (end) ====
+
+# ==== Spec 24d: LFM2.5-24B-A2B prefill (labels lfm2moe;prefill) ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-15-spec24d-lfm2moe-prefill.md. Box queue row 52. Host tests first (the Mac:
+# tools/mac_check.sh), then the card's (box only; the checkpoint ones SKIP 77 without the data).
+# Task 1: the prefill kernels' host twin (tests/kernels/lfm2moe_pf_ref.h) - the conv over a chunk against decode's
+# conv_step at every split, torch's chunked conv (fixture (h)), the 64-expert sort and its adversaries, the rank-order
+# combine against decode's chain and torch's, the flash walk in fp64. Headers only.
+add_executable(lfm2moe_pf_ref_test kernels/lfm2moe_pf_ref_test.cc)
+target_include_directories(lfm2moe_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME lfm2moe_pf_ref_test COMMAND lfm2moe_pf_ref_test)
+set_tests_properties(lfm2moe_pf_ref_test PROPERTIES LABELS "lfm2moe;prefill" TIMEOUT 600)
+# ==== Spec 24d: LFM2.5-24B-A2B prefill ==== (end) ====

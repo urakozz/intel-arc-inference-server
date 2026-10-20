@@ -36,6 +36,10 @@ sum of squares of them is exact in fp32 in ANY order, so the comparison is a bit
   (f) silu_mul    I 11776: g, u bf16 fine (amp 4): rne(rne(silu(g)) x u)
   (g) argmax      128000 fine logits with planted maxima at 125016 (50) and 127999 (100): torch's argmax over the
                   125017 real ids
+  (h) conv chunks spec 24d: the conv over a PROMPT fed in chunks - 70 positions x 256 channels (B, C, x, w fine),
+                  chunk 0 = positions 0 .. 63 from the zero history, chunk 1 = 64 .. 69 seeded with Bx of 62 / 63
+                  (the state the prefill carries), asserted equal to ONE call over all 70: y [70][256] and the
+                  final state (Bx of 68, 69) - tests/kernels/lfm2moe_pf_ref.h conv_chunk's torch twin
 """
 import importlib.util
 import os
@@ -318,6 +322,26 @@ def main() -> None:
     out.append("// (g) argmax: logits fine (t 90, seed 4) [128000], logits[125016] = 50, logits[127999] = 100; torch's argmax over")
     out.append("//     the 125017 real ids")
     out.append(f"inline constexpr unsigned kArgmax = {int(torch.argmax(lg[:VU]))};")
+
+    # (h) the conv over a chunked prompt (spec 24d) ------------------------------------------------------------------
+    CT, CS, CW = 70, 64, 256
+    B = bf(vals(False, 30, CT * CW, 6, amp=2.0).reshape(CT, CW))
+    C = bf(vals(False, 31, CT * CW, 6, amp=2.0).reshape(CT, CW))
+    X = bf(vals(False, 32, CT * CW, 6, amp=2.0).reshape(CT, CW))
+    cw = bf(vals(False, 33, CW * 3, 6, amp=0.5).reshape(CW, 1, 3))
+    bx = B * X
+    y_one = C * ref.conv_taps(bx, cw, torch.zeros(2, CW, dtype=torch.bfloat16))
+    y0 = C[:CS] * ref.conv_taps(bx[:CS], cw, torch.zeros(2, CW, dtype=torch.bfloat16))
+    y1 = C[CS:] * ref.conv_taps(bx[CS:], cw, bx[CS - 2:CS])
+    y_chunks = torch.cat([y0, y1], 0)
+    assert torch.equal(y_chunks.view(torch.int16), y_one.view(torch.int16)), "the chunked conv is not one call"
+    out.append(f"// (h) conv chunks: B, C, x fine (t 30 / 31 / 32, seed 6, amp 2, index p x {CW} + c), w fine (t 33, seed 6,")
+    out.append(f"//     amp 0.5, index c x 3 + j); {CT} positions x {CW} channels, chunk 0 = [0, {CS}) from zeros, chunk 1 =")
+    out.append(f"//     [{CS}, {CT}) seeded with Bx of {CS - 2} / {CS - 1} - equal to one call (asserted): y [{CT}][{CW}], the final")
+    out.append(f"//     state Bx of {CT - 2} / {CT - 1} [2][{CW}]")
+    out.append(f"inline constexpr unsigned kConvChunkT = {CT}, kConvChunkSplit = {CS}, kConvChunkW = {CW};")
+    out.append(hexs("kConvChunkY", bits16(y_one), 4))
+    out.append(hexs("kConvChunkState", bits16(bx[CT - 2:]), 4))
     out.append("}  // namespace lfm2moe_fixture")
     sys.stdout.write("\n".join(out) + "\n")
 
