@@ -10,9 +10,10 @@
 //     argmax; sampled = the logits row read back and filtered as every model's (server::filter_probs at the tokenizer's id
 //     count), the chosen id written by set_token on every device);
 //   - the ids the tokenizer does not define: the head has 128000 rows, tokenizer.json defines 125017 ids (0..125016; rows
-//     125017..127999 have no token - spec 24 §1). Sampling masks them (vocab_used = the tokenizer's count); a greedy device
-//     argmax that lands on one is replaced by the host argmax of the masked row, so the server never streams an id it
-//     cannot detokenise. No kernel changes: the device argmax still ranks every row;
+//     125017..127999 have no token - spec 24 §1). Sampling masks them (vocab_used = the tokenizer's count). LFM's device argmax
+//     is built with VOCAB_USED = 125017, so it already ranks only the defined rows; mask_pending() is the fallback for a
+//     B70_LFM_TOKENIZER_JSON that defines fewer ids than that (a greedy argmax landing on an undefined id is replaced by the
+//     host argmax of the masked row), so the server never streams an id it cannot detokenise. No kernel changes;
 //   - the repetition penalty (spec 24 decision 1): a SAMPLED request with Sampling::repetition_penalty != 1 has the logits row
 //     penalised over the request's distinct prompt and output ids (server::apply_repetition_penalty, HF's rule) before
 //     temperature / top-k / top-p. A greedy request (temperature 0, the gates) keeps the device argmax and ignores the
@@ -21,8 +22,8 @@
 //     argmax (the lowest id among equal maxima, the device argmax's tie rule) becomes the next id;
 //   - a SEEDED sampled request is reproducible: the RNG is re-seeded from the request's seed at its first step (the first step
 //     after a prefill, an ingest, a restore or a reset - every request begins with one of them), so the same request again on a
-//     long-running server draws the same ids; an unseeded request continues the process's stream (seeded once, from the
-//     random device). (EngineAdapter and Kolibri's adapter seed once per process: a second seeded request there continues the
+//     long-running server draws the same ids; an unseeded request re-seeds from the random device at its first step, so
+//     it never continues an earlier seeded request's stream. (EngineAdapter and Kolibri's adapter seed once per process: a second seeded request there continues the
 //     first's stream.)
 //   - the next id is chosen at the START of step(), from the logits row of the previous replay (or of the prefill's head):
 //     the server adds each id it consumes to the request's SeenIds before it calls step() again, so the penalty sees the
@@ -82,10 +83,7 @@ struct Lfm2MoeEngineAdapterT : server::EngineIface {
     // draw from that same row; a greedy one keeps it unless it is a row the tokenizer does not define.
     const bool penalised = sampling.repetition_penalty != 1.0f && sampling.seen != nullptr;
     if (new_request_) {
-      if (sampling.has_seed) {
-        rng_.seed(sampling.seed);
-        rng_seeded_ = true;
-      }
+      rng_.seed(sampling.has_seed ? sampling.seed : uint64_t(std::random_device{}()));
       new_request_ = false;
     }
     if (!sampling.greedy || (penalised && penalty_greedy_)) choose_on_host(sampling, penalised);
@@ -118,8 +116,8 @@ struct Lfm2MoeEngineAdapterT : server::EngineIface {
 
   // The pending id for this request, chosen from the logits row the engine left: penalised first (HF's order: the repetition
   // penalty is a logits processor, temperature / top-k / top-p the warpers after it), then drawn (sampled) or argmaxed
-  // (greedy + B70_LFM_PENALTY_GREEDY). The RNG is seeded from a request's seed at its first step (step()), else once from the random
-  // device.
+  // (greedy + B70_LFM_PENALTY_GREEDY). The RNG is seeded at a request's first step (step()): from the request's seed, else from the
+  // random device.
   void choose_on_host(const server::Sampling& sampling, bool penalised) {
     eng.read_logits_into(host_logits_.data());
     if (penalised)
@@ -130,10 +128,6 @@ struct Lfm2MoeEngineAdapterT : server::EngineIface {
       eng.set_token(uint32_t(std::max_element(row, row + vocab_used_) - row));
       ++penalised_greedy_;
       return;
-    }
-    if (!rng_seeded_) {
-      rng_.seed(std::random_device{}());
-      rng_seeded_ = true;
     }
     eng.set_token(server::draw(server::filter_probs(host_logits_.data(), vocab_used_, sampling), rng_));
   }
@@ -167,7 +161,6 @@ struct Lfm2MoeEngineAdapterT : server::EngineIface {
   bool penalty_greedy_;
   std::vector<float> host_logits_;
   std::mt19937_64 rng_;
-  bool rng_seeded_ = false;
   bool new_request_ = true;   // the next step() is a request's first
   uint32_t gen_tokens_ = 0;
   uint64_t masked_ = 0, penalised_greedy_ = 0;
