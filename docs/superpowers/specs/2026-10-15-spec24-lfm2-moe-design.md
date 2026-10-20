@@ -946,7 +946,8 @@ queue row 53 (`tools/box_validate/stages.sh` `row 53`). Every count below is mea
   with random weights never writes a call; the tool-call paths are the host test's); stage ids `r53.snap` / `.server` / `.a4` /
   `.agentic` became `r53.snap` / `.snap_rtn` / `.serve` / `.chat` / `.real` / `.a4` / `.agentic` / `.opencode` plus `.k0` /
   `.synth_files`.
+- **Parser limits (decision 7's notes).** Known limits of the parser (documented, not changed): (a) an unescaped Windows path ending in a backslash, `ls(path='C:\dir\')`, leaves the string open (the `\'` reads as an escaped quote) and the block becomes content - recovery is deferred; (b) a JSON-format block `[{"name": ..., "arguments": ...}]` is not a pythonic call and becomes content; (c) a malformed call after a valid one is dropped, and only `dropped_unfinished` counts it; (d) a second `<|tool_call_start|>` inside an open block is part of the tail the first non-call text started, so it is dropped; (e) an integer beyond 2^64 becomes a double; (f) an unescaped `print('a', end='')` inside a single-quoted argument is mis-split by the quote lookahead (`', end='` reads as the string's end and a next argument). The counters of `tools/toolcall/lfm2moe_rules` show (c) as `dropped_unfinished` and (a), (b) as a block left as content.
 - **Not done here:** every card stage (row 53, after rows 51 and 52), 24q's exports (the RTN / AutoRound gates SKIP), A4 and the
   agentic hit rate on the engine (decision 5's bar and decision 7's counts are PROPOSED evidence for the operator after `r53.a4`),
   `--spec lookup` for this family (needs M-row verify lists), a rotated-key-order-preserving `ToolCall` (the prefix cache misses
-  at a call whose arguments the model wrote unsorted).
+  at a call whose arguments the model wrote unsorted)), recovery of a string ending in a backslash (a), and counting a malformed call after a valid one other than in `dropped_unfinished` (c).

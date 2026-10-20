@@ -661,6 +661,7 @@ ZE_AFFINITY_MASK=0 ./build/src/cli/b70-serve <export> --port 8000 --prefix-cache
   dict are accepted; a block with no valid call is returned as content; a call cut by `max_tokens` or EOS is
   emitted once if its `)` closed, otherwise dropped (never leaked as content). `--log-requests` records carry
   `parser.rules`, how often each lenient reading fired.
+  Known limits (documented, not changed): (a) an unescaped Windows path ending in a backslash, `ls(path='C:\dir\')`, leaves the string open (the `\'` reads as an escaped quote) and the block becomes content - recovery is deferred; (b) a JSON-format block `[{"name": ..., "arguments": ...}]` is not a pythonic call and becomes content; (c) a malformed call after a valid one is dropped, and only `dropped_unfinished` counts it; (d) a second `<|tool_call_start|>` inside an open block is part of the tail the first non-call text started, so it is dropped; (e) an integer beyond 2^64 becomes a double; (f) an unescaped `print('a', end='')` inside a single-quoted argument is mis-split by the quote lookahead (`', end='` reads as the string's end and a next argument).
 - **Sampling.** A request that names no `temperature` / `top_k` / `top_p` / `repetition_penalty` samples with
   `generation_config.json`'s: sampled, T 0.1, top-k 50, top-p 1.0, repetition penalty 1.05. The penalty is HF's
   (`l < 0 ? l * p : l / p` over the distinct ids of the prompt and the output, before temperature / top-k / top-p) on the
