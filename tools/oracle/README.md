@@ -830,7 +830,7 @@ reasoning first; score with `score.py --format pythonic`).
 **The engine side of A4** (spec 24e, queue row 53): `tools/toolcall/engine_generate.sh <snapshot> tests/golden/toolcall-lfm2moe <out>
 l0` (b70-decode through the prefill path; `N_NEW` defaults to 2048 for `lfm2_moe`) writes `<name>.l0.{ids,txt}` beside the
 reference's `<name>.bf16.*`; `score.py --format pythonic <out> bf16 l0` compares the first call of each (decision 5's bar,
-PROPOSED: >= 33 / 36 with 0 parse failures), and `build/tools/lfm2moe_rules <out>/*.l0.txt` (tools/toolcall/lfm2moe_rules.cc) cuts
+PROPOSED: >= 33 / 36 with 0 parse failures), and `build/tests/lfm2moe_rules <out>/*.l0.txt` (tools/toolcall/lfm2moe_rules.cc) cuts
 each text at its first `<|im_end|>`, reads it with the server's own parser and prints how often each lenient reading fired
 (`PythonicRules`: quote_recovered, quoted_name, bare_call, json_literal, positional_dict, dropped_unfinished, stray_end) and how
 many tool-call blocks the parser left as content - decision 7's evidence; run it on the reference's `.bf16.txt` too (what the
