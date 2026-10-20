@@ -12,7 +12,7 @@
 #include <string>
 
 #include "check.h"
-#include "lfm2moe_rules.h"
+#include "../../tools/toolcall/lfm2moe_rules.h"
 
 namespace {
 
