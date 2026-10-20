@@ -1,6 +1,6 @@
 # Spec 25 - NVIDIA Nemotron 3.5 Bolt 74B-A9B (text only) in the engine
 
-**Status:** design, 2026-10-20, for operator review. Open decisions are marked **Decision N (proposed)** with their
+**Status:** design, 2026-10-20, approved by the operator 2026-10-20. Decisions are marked **Decision N** with their
 cost if wrong and collected in §12. Nothing is built.
 **Plans (2026-10-20):** `docs/superpowers/plans/2026-10-20-spec25{a,q,b,c,d,e}-*.md` - 25a facts and the CPU
 reference, 25q our AutoRound g64 re-quantisation (the recipe; the operator runs it), 25b descriptor / loader /

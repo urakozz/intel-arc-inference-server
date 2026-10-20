@@ -1,6 +1,6 @@
 # Spec 26 - LiLiCorr: NVIDIA's DFlash-family drafter for Nemotron 3.5 Bolt
 
-**Status:** design, 2026-10-20, for operator review. Open decisions are marked **Decision N (proposed)** with their
+**Status:** design, 2026-10-20, approved by the operator 2026-10-20. Decisions are marked **Decision N** with their
 cost if wrong and collected in §10. Nothing is built.
 **Plans (2026-10-20):** `docs/superpowers/plans/2026-10-20-spec26{a,b,c}-*.md` - 26a P0 (the reference, teacher-forced
 acceptance on our target, the verify cost, the projection), 26b the drafter on the card (D1), 26c the engine loop and
