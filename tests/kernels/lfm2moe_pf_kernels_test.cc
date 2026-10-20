@@ -429,13 +429,13 @@ void moe(Dev& dv) {
         if (st.hdr[lp::kHdrCount + e])
           CHECK(dv.rd<uint16_t>(wgu, size_t(H) * 2 * I, size_t(e - b0) * H * 2 * I) == lp::dequant_gu(gu.data(), e));
     // pf_moe_gemm(tiles, A, -, B, -, out, b0, b1, 0), grid (tmax, N / 256)
-    dv.go(kl::pf_gemm_gu_variant(), "pf_moe_gemm", T, 2 * I / kernels::pf_moe::kGemmWgN, 1,
+    dv.go(kl::pf_gemm_gu_variant(), "pf_moe_gemm", lp::tmax(C), 2 * I / kernels::pf_moe::kGemmWgN, 1,
           {PtrArg(sb.tiles.ptr()), PtrArg(xg.ptr()), PtrArg(nullptr), PtrArg(wgu.ptr()), PtrArg(nullptr), PtrArg(hm.ptr()),
            arg_val(b0), arg_val(b1), arg_val(0u)});
   }
   dv.go(kl::pf_moe_variant(), "lfm_pf_dequant_dn", H / 16, I / 64, E,
         {PtrArg(ddn.ptr()), PtrArg(sb.hdr.ptr()), PtrArg(wdn.ptr()), arg_val(0u), arg_val(E)});
-  dv.go(kl::pf_gemm_dn_variant(), "pf_moe_gemm", T, H / kernels::pf_moe::kGemmWgN, 1,
+  dv.go(kl::pf_gemm_dn_variant(), "pf_moe_gemm", lp::tmax(C), H / kernels::pf_moe::kGemmWgN, 1,
         {PtrArg(sb.tiles.ptr()), PtrArg(hm.ptr()), PtrArg(nullptr), PtrArg(wdn.ptr()), PtrArg(nullptr), PtrArg(yg.ptr()),
          arg_val(0u), arg_val(E), arg_val(0u)});
   // GROUPED == DENSE for the busiest expert: its rows [r0, r0 + n) through pf_gemm_T0_SILU / pf_gemm_T0
