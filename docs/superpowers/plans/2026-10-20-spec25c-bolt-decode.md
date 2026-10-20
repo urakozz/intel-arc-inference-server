@@ -217,7 +217,9 @@ nb_mamba.cl
   nb_ssm(ctrl, slices, xc, A, D, dt_bias, state, y)   grid (128 heads x 4 slices of 16 dims, 1), WG 256: lane (p, n-block)
       holds S[h][p][n..] in registers; per row m: dt = softplus(f32(rne(Σ_s slices[m][18432 + h])) + dt_bias[h]); dA =
       exp(dt · A[h]); S = S · dA + (dt · x[m][h][p]) · B[m][g][n]; y[m][h][p] = rne(Σ_n S · C[m][g][n] + D[h] · x[m][h][p])
-      (Σ_n: a fixed sub-group tree); S written back once at the end (the slot build of spec 26c writes after every row)
+      (Σ_n: a fixed sub-group tree); S written back once at the end. The source carries a `SPEC_SLOTS` define from the start
+      (0 here: one live slot, written in place); spec 26c compiles `SPEC_SLOTS 8` - the state after row m into slot
+      `(live + m) % 8`, 19c's `gdn_step` slot form - from new CMake lines without editing the file
   nb_gnorm(slices, y, w, out)           v = f32(y) · silu(f32(rne(Σ_s slices z))); per 1024-group: rstd by one fixed tree
       (every WG of a group recomputes it); out = rne(v · rstd · w)
 nb_moe.cl  (kol_moe.cl's structure: sub-group block reads under cl_intel_subgroups, plain loads otherwise)

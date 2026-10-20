@@ -78,6 +78,10 @@ stages to `tools/box_validate/stages.sh` (the header there says how; `--dry-run 
 it, `python3 tools/box_validate/test_box_validate.py` checks the registry). Remove both when the row
 has passed.
 
+**Reserved, planned (not yet rows):** 57-62 for spec 25 (Nemotron 3.5 Bolt: 25a, 25q, 25b, 25c, 25d, 25e) and 63-65 for
+spec 26 (LiLiCorr: 26a, 26b, 26c) - `docs/superpowers/plans/2026-10-20-spec2{5,6}*.md`; each plan adds its table row and its
+`stages.sh` block when it is built.
+
 | # | merged | what is unvalidated | how to validate |
 |---|---|---|---|
 | 1 | spec 14 (Agnes 3.0 Flash, `ModelDesc`), commit range ending `c104247` | everything that runs on the card; the descriptor refactor's bitwise neutrality for Qwen3.8 | `2026-10-03-spec14-validation-checklist.md`, **G0 first** (Qwen3.8 kernel binaries checksum-identical, full suite, golden and replay bitwise) |
