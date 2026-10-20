@@ -14,7 +14,7 @@
 // sub-group's 8 rows start at p0 = pos + r0; its key tiles run from key 0 up to its last row, absolute multiples of KT.
 // **A wholly masked tile adds exact zeros** (m_safe = (m_new == -INF ? 0 : m_new)), so a row's result depends on the
 // tiles that hold its keys - a function of its ABSOLUTE position alone, whatever chunk or row group it rides in (a
-// split at a multiple of 64 is bitwise).
+// split anywhere is bitwise: the tiles start at key 0 whatever the chunk, and every tile past a row's key is wholly masked).
 //
 // **What is kol_pf_attn's, unchanged in structure:** a sub-group owns 8 query rows of one head; O is NDA = 4 float8
 // (8 rows x 64 dims) in registers; S for one KV tile is KT/16 float8 with the row in the component and the key in the

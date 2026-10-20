@@ -72,6 +72,22 @@ void destroy_prefill(Lfm2MoePrefillState* p) { delete p; }
 void require(bool ok, const std::string& what) {
   if (!ok) throw std::runtime_error("runtime::lfm2moe::Lfm2MoeEngine::prefill: " + what);
 }
+// The __kernel entry points of one prefill binary (kernels::lfm2moe::prefill_variants' names), for the pre-load.
+std::vector<const char*> prefill_entries(const std::string& v) {
+  auto starts = [&](const char* p) { return v.rfind(p, 0) == 0; };
+  if (starts("lfm_pf_embed_gather")) return {"lfm_pf_embed_gather"};
+  if (starts("lfm_pf_conv")) return {"lfm_pf_conv_seed", "lfm_pf_conv"};
+  if (starts("lfm_pf_moe")) return {"lfm_pf_sort", "lfm_pf_gather", "lfm_pf_dequant_gu", "lfm_pf_dequant_dn", "lfm_pf_combine"};
+  if (starts("lfm_pf_attn")) return {"lfm_pf_attn"};
+  if (starts("lfm_res_norm")) return {"lfm_res_norm"};
+  if (starts("lfm_router")) return {"lfm_router"};
+  if (starts("lfm_route")) return {"lfm_route"};
+  if (starts("lfm_attn_prep")) return {"lfm_attn_prep"};
+  if (starts("pf_dequant_slab")) return {"pf_dequant_slab"};
+  if (starts("pf_moe_gemm")) return {"pf_moe_gemm"};
+  if (starts("pf_gemm")) return {"pf_gemm"};
+  throw std::runtime_error("runtime::lfm2moe::prepare_prefill: no entry list for " + v);
+}
 }  // namespace
 
 void Lfm2MoeEngine::prepare_prefill() {
@@ -91,6 +107,24 @@ void Lfm2MoeEngine::prepare_prefill() {
   if (devices() == 2)
     ps->link = std::make_unique<PipelineLink>(stage_ctx(0), stage_ctx(1), pf_landing_layout(d, model_.place),
                                               PpHandoff::Copy);
+  // The route rows are read back whole (read_prefill_routes): zero them once, so rows no chunk wrote (a dense layer's,
+  // rows past the last chunk's C) read the same on every engine.
+  for (uint32_t i = 0; i < devices(); ++i) stage_imm(i).fill(ps->dev[i]->s.routes.ptr(), 0u, ps->dev[i]->s.routes.size());
+  // Every module the walk and the head bind, created here - outside a timed prefill (KernelCache creates lazily).
+  for (uint32_t i = 0; i < devices(); ++i) {
+    prefill::KernelCache& kc = ps->dev[i]->kc;
+    for (const std::string& v : kernels::lfm2moe::prefill_variants(d, eager, model_.conv_tiles))
+      for (const char* e : prefill_entries(v)) (void)kc(v, e);
+  }
+  {   // the head's (decode's binaries, on the last device)
+    namespace kl = kernels::lfm2moe;
+    prefill::KernelCache& kc = ps->dev[devices() - 1]->kc;
+    const bool int8 = bool(model_.parts[devices() - 1].head_int8);
+    (void)kc(kl::res_norm_variant(1, prefill_resid_out(d, model_.place, devices() - 1).pending, false), "lfm_res_norm");
+    (void)kc(kl::head_variant(int8), int8 ? "gemv_i8w" : "gemv_bf16");
+    (void)kc(kl::argmax1_variant(1), "argmax_stage1");
+    (void)kc(kl::argmax2_variant(), "argmax_stage2");
+  }
   pf_dev_bytes_.assign(devices(), 0);
   pf_bytes_ = 0;
   for (uint32_t i = 0; i < devices(); ++i) {
