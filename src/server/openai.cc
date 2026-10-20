@@ -1,6 +1,7 @@
 #include "server/openai.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <iterator>
 #include <limits>
@@ -164,10 +165,10 @@ Sampling generation_sampling(const json& g) {
     s.top_k = v.get<uint32_t>();
   }
   if (g.contains("repetition_penalty")) {
-    // HF accepts any strictly positive float; the server's request field is held to (0, 2] (vLLM's range), and so is this.
+    // HF accepts any strictly positive float (no upper bound), as does vLLM's request field; so does this.
     const json& v = g.at("repetition_penalty");
-    if (!v.is_number() || !std::isfinite(v.get<double>()) || v.get<double>() <= 0.0 || v.get<double>() > 2.0)
-      throw std::invalid_argument("generation_config.json repetition_penalty is not a number in (0, 2]");
+    if (!v.is_number() || !std::isfinite(v.get<double>()) || v.get<double>() <= 0.0 || v.get<double>() > FLT_MAX)
+      throw std::invalid_argument("generation_config.json repetition_penalty is not a finite number > 0");
     s.repetition_penalty = static_cast<float>(v.get<double>());
   }
   bool sample = false;
@@ -311,11 +312,13 @@ Request parse_request(const std::string& body, bool chat, const Sampling& defaul
   }
   if (request.contains("top_k")) out.sampling.top_k = uint_field(request, "top_k", true);
   if (request.contains("top_p")) out.sampling.top_p = probability_field(request, "top_p", false);
-  if (request.contains("repetition_penalty")) {
+  if (request.contains("repetition_penalty") && !request.at("repetition_penalty").is_null()) {
     // vLLM's extension field (spec 24e): Hugging Face's multiplicative penalty over the prompt and the output; 1.0 is none.
+    // vLLM's rule: finite and > 0, no upper bound; null is the same as absent. The check applies to every model's request
+    // (an engine that does not apply the penalty still refuses a malformed value).
     const json& v = request.at("repetition_penalty");
-    if (!v.is_number() || !std::isfinite(v.get<double>()) || v.get<double>() <= 0.0 || v.get<double>() > 2.0)
-      invalid("repetition_penalty must be a number in (0, 2]");
+    if (!v.is_number() || !std::isfinite(v.get<double>()) || v.get<double>() <= 0.0 || v.get<double>() > FLT_MAX)
+      invalid("repetition_penalty must be a finite number > 0");
     out.sampling.repetition_penalty = static_cast<float>(v.get<double>());
   }
   if (request.contains("seed")) {

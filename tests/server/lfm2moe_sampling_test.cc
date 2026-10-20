@@ -194,8 +194,8 @@ void case_defaults(const std::string& dir) {
   CHECK_NEAR(bare.repetition_penalty, 1.0, 0.0);
   CHECK(server::generation_sampling(json::object()).greedy);   // do_sample absent: greedy, as before
 
-  // A penalty outside (0, 2] or not a number is refused naming the key.
-  for (const json& bad : {json(0), json(-1.0), json(2.5), json("1.05"), json(nullptr), json(true)}) {
+  // A penalty that is not a finite number > 0 is refused naming the key (HF: any strictly positive float).
+  for (const json& bad : {json(0), json(-1.0), json("1.05"), json(nullptr), json(true), json(INFINITY), json(NAN)}) {
     bool threw = false;
     try {
       (void)server::generation_sampling({{"do_sample", true}, {"repetition_penalty", bad}});
@@ -205,6 +205,7 @@ void case_defaults(const std::string& dir) {
     CHECK(threw);
   }
   CHECK_NEAR(server::generation_sampling({{"repetition_penalty", 2.0}}).repetition_penalty, 2.0, 0.0);
+  CHECK_NEAR(server::generation_sampling({{"repetition_penalty", 2.5}}).repetition_penalty, 2.5, 0.0);
   std::printf("defaults: ok\n");
 }
 
@@ -246,8 +247,25 @@ void case_request_field() {
   CHECK_NEAR(parse({{"repetition_penalty", 2}}).sampling.repetition_penalty, 2.0, 0.0);
   CHECK_NEAR(parse({{"repetition_penalty", 0.5}}).sampling.repetition_penalty, 0.5, 0.0);
   CHECK_NEAR(parse(json::object()).sampling.repetition_penalty, 1.0, 0.0);
-  for (const json& bad : {json(0), json(-0.5), json(3), json(2.0001), json("1.1"), json(nullptr), json(true)})
+  // vLLM: finite and > 0, no upper bound; null is the same as absent (1.0, here the model's default).
+  CHECK_NEAR(parse({{"repetition_penalty", 2.5}}).sampling.repetition_penalty, 2.5, 0.0);
+  CHECK_NEAR(parse({{"repetition_penalty", 3}}).sampling.repetition_penalty, 3.0, 0.0);
+  CHECK_NEAR(parse({{"repetition_penalty", nullptr}}).sampling.repetition_penalty, 1.0, 0.0);
+  for (const json& bad : {json(0), json(-0.5), json(-3), json("1.1"), json(true), json::array()})
     CHECK(rejected({{"repetition_penalty", bad}}));
+  // inf / nan have no JSON spelling that survives dump(); an overflowing literal parses to inf.
+  for (const char* lit : {"1e999", "-1e999"}) {
+    bool threw = false;
+    try {
+      (void)server::parse_request(
+          std::string("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"repetition_penalty\":") + lit + "}", true);
+    } catch (const server::BadRequest& e) {
+      threw = std::string(e.what()).find("repetition_penalty") != std::string::npos;
+    } catch (const std::exception&) {
+      threw = true;
+    }
+    CHECK(threw);
+  }
   // A request overrides the model's default; a request without it keeps the default.
   server::Sampling defaults;
   defaults.greedy = false;
