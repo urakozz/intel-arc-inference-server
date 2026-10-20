@@ -166,7 +166,16 @@ int main(int argc, char** argv) {
     return 77;
   }
   const model::Lfm2MoeDesc pre = loader::lfm2moe_checkpoint_desc(snap);
-  if (o.devices == 1 && !lfm2moe_rig::fits_one_card(pre, o.int8_head, kMaxLen)) {
+  const std::vector<uint32_t> ids = lfm2moe_rig::read_ids(ids_path, pre.vocab);
+  CHECK(!ids.empty());
+  // max_len: 16384, or the prompt + 32 generated rounded up to 256 when longer (lfm2moe_32k), within the trained
+  // context (the final review: a fixed 16384 made the 32k prompt throw at position 16384).
+  o.max_len = std::max<uint32_t>(kMaxLen, (uint32_t(ids.size()) + kGen + 255) / 256 * 256);
+  if (o.max_len > pre.trained_max_len) {
+    std::printf("SKIP: %zu ids + %u exceed the trained context %u\n", ids.size(), kGen, pre.trained_max_len);
+    return 77;
+  }
+  if (o.devices == 1 && !lfm2moe_rig::fits_one_card(pre, o.int8_head, o.max_len)) {
     std::printf("SKIP: %s does not fit one card\n", snap.c_str());
     return 77;
   }
@@ -181,8 +190,6 @@ int main(int argc, char** argv) {
                                     runtime::pp_handoff_name(eng.handoff())).c_str() : "",
               eng.launches(), double(tie_tol()));
 
-  const std::vector<uint32_t> ids = lfm2moe_rig::read_ids(ids_path, d.vocab);
-  CHECK(!ids.empty());
   golden::Golden g(gpath);
   const uint32_t T = uint32_t(ids.size()), rows = T + kGen;
   const uint32_t lr = uint32_t(g.dim("logits", 2, 0));
