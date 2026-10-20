@@ -4283,4 +4283,34 @@ target_include_directories(lfm2moe_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CM
 target_link_libraries(lfm2moe_ref_test PRIVATE b70_lfm2moe_loader)
 add_test(NAME lfm2moe_ref_test COMMAND lfm2moe_ref_test)
 set_tests_properties(lfm2moe_ref_test PROPERTIES LABELS lfm2moe TIMEOUT 600)
+if(B70_LFM2MOE)
+  # Task 3: every binary an LFM2 decode list binds, any head / attention / card count (src/kernels/CMakeLists.txt's
+  # spec 24c block; the reused gemv / gemv_i8w / gemv_bf16 lines of the block are bound by name). After `--`: the
+  # binaries built outside the block that a list binds (pp_handoff, spec 16b).
+  set(B70_LFM2MOE_DECODE_KERNELS
+    kernel_lfm_embed_gather_M1_K2048_V128000 kernel_lfm_argmax_stage1_M1_V128000_U125017
+    kernel_lfm_argmax_stage2_V128000 kernel_gemv_i8w_M1_K2048_N128000 kernel_gemv_bf16_M1_K2048_N128000
+    kernel_lfm_res_norm_M1_K2048_W8_NF kernel_lfm_res_norm_M1_K2048_W8_S1
+    kernel_lfm_conv_M1_K2048_S1 kernel_lfm_router_M1_K2048_E64 kernel_lfm_route_M1_E64_T4
+    kernel_lfm_moe_M1_E64_T4_D2048_I1536 kernel_lfm_attn_prep_M1_S1_Q32KV8 kernel_lfm_attn_M1_T32_Q32KV8
+    kernel_lfm_attn_eager_M1_T32_Q32KV8 kernel_lfm_silu_mul_M1_I11776_S1
+    kernel_gemv_M1_K2048_N6144_S1_L1 kernel_gemv_M1_K2048_N2048_S1_L1 kernel_gemv_M1_K2048_N3072_S1_L0
+    kernel_gemv_M1_K2048_N23552_S1_L0 kernel_gemv_M1_K11776_N2048_S1_L1)
+  set(B70_LFM2MOE_REUSED_KERNELS kernel_pp_handoff)
+  add_executable(lfm2moe_variant_names_test kernels/lfm2moe_variant_names_test.cc)
+  target_include_directories(lfm2moe_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(lfm2moe_variant_names_test PRIVATE b70_lfm2moe_model)
+  b70_target_kernel_dir(lfm2moe_variant_names_test)
+  add_test(NAME lfm2moe_variant_names_test COMMAND lfm2moe_variant_names_test ${B70_LFM2MOE_DECODE_KERNELS} --
+    ${B70_LFM2MOE_REUSED_KERNELS})
+  set_tests_properties(lfm2moe_variant_names_test PROPERTIES LABELS lfm2moe)
+  # F2 on the card: every LFM2 kernel at the real shapes against lfm2moe_ref.h (no checkpoint).
+  add_executable(lfm2moe_kernels_test kernels/lfm2moe_kernels_test.cc)
+  target_include_directories(lfm2moe_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(lfm2moe_kernels_test PRIVATE b70_l0 b70_lfm2moe_loader)
+  b70_target_kernel_dir(lfm2moe_kernels_test)
+  add_dependencies(lfm2moe_kernels_test ${B70_LFM2MOE_DECODE_KERNELS})
+  add_test(NAME lfm2moe_kernels_test COMMAND lfm2moe_kernels_test)
+  set_tests_properties(lfm2moe_kernels_test PROPERTIES LABELS lfm2moe TIMEOUT 1800)
+endif()
 # ==== Spec 24c: LFM2.5-24B-A2B decode (label lfm2moe) ==== (end) ====
