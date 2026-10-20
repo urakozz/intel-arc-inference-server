@@ -360,6 +360,105 @@ void attention_checks(clrun::Device& dev) {
   }
 }
 
+// Spec 24c Task 5: the fused arms against their as-built pairs (bitwise is the claim; on this device too).
+void arm_checks(clrun::Device& dev) {
+  const uint32_t E = lr::kExperts;
+  std::mt19937 rng(21);
+  std::uniform_real_distribution<float> u(-1.f, 1.f);
+  {   // router: lfm_res_norm _S1 _R against _S1 + lfm_router
+    std::vector<float> sl(H), w(H);
+    for (float& v : sl) v = u(rng);
+    for (uint32_t k = 0; k < H; ++k) w[k] = rf(0.5f + float(k % 9) * 0.1f);
+    std::vector<uint16_t> h(H), rw(size_t(H) * E), tiles(size_t(H) * E);
+    for (uint16_t& v : h) v = rne(2.f * u(rng));
+    for (uint16_t& v : rw) v = rne(0.05f * u(rng));
+    common::repack_bf16_tiled(rw.data(), H, E, tiles.data());
+    clrun::Program pn(dev, "src/kernels/lfm2moe/lfm_prep.cl", {"M=1", "K=2048", "NORM_WGS=8", "NORM_EPS=1e-5f", "NORM_S=1"});
+    clrun::Program pf(dev, "src/kernels/lfm2moe/lfm_prep.cl",
+                      {"M=1", "K=2048", "NORM_WGS=8", "NORM_EPS=1e-5f", "NORM_S=1", "ROUTER_FUSED=1", "ROUTER_E=64"});
+    clrun::Program pr(dev, "src/kernels/lfm2moe/lfm_moe.cl", {"M=1", "ROUTER_E=64", "ROUTER_K=2048"});
+    clrun::Buffer hb(dev, h), sb(dev, sl), wb(dev, w), tb(dev, tiles), o1(dev, H * 2), x1(dev, H * 2), o2(dev, H * 2),
+        x2(dev, H * 2), l1(dev, E * 4), l2(dev, E * 4);
+    pn.run("lfm_res_norm", {8 * 256, 1}, {256, 1}, hb, sb, wb, o1, x1);
+    pr.run("lfm_router", {4 * 128, 1}, {128, 1}, x1, tb, l1);
+    pf.run("lfm_res_norm", {12 * 256, 1}, {256, 1}, hb, sb, wb, o2, x2, tb, l2);
+    const bool ok = o1.read<uint16_t>() == o2.read<uint16_t>() && x1.read<uint16_t>() == x2.read<uint16_t>() &&
+                    l1.read<uint32_t>() == l2.read<uint32_t>();
+    std::printf("lfm2moe_run: %-56s %s\n", "arm router: lfm_res_norm _R vs _S1 + lfm_router", ok ? "exact" : "DISAGREES");
+    if (!ok) ++failures;
+  }
+  {   // route: lfm_moe _R's gate||up vs lfm_route + lfm_moe_gate_up
+    std::vector<float> lg(E), bias(E);
+    for (float& v : lg) v = 3.f * u(rng);
+    for (float& v : bias) v = 0.05f * u(rng);
+    std::vector<uint32_t> gu(size_t(E) * lr::gate_up_block_words());
+    std::mt19937 wr(32);
+    for (size_t t = 0; t < gu.size() / 136; ++t) {
+      for (int i = 0; i < 128; ++i) gu[t * 136 + i] = wr();
+      for (int i = 0; i < 8; ++i) gu[t * 136 + 128 + i] = 0x24002400u;   // f16 0.015625 x 2
+    }
+    std::vector<uint16_t> x(H);
+    for (uint16_t& v : x) v = rne(0.5f * u(rng));
+    clrun::Program pt(dev, "src/kernels/lfm2moe/lfm_moe.cl", {"M=1", "ROUTE_E=64"});
+    const std::vector<std::string> moe = {"M=1", "MOE_E=64", "MOE_K=4", "HIDDEN=2048", "INTER=1536", "UP_KS=4", "DN_KS=2"};
+    clrun::Program pm(dev, "src/kernels/lfm2moe/lfm_moe.cl", moe);
+    clrun::Program pf(dev, "src/kernels/lfm2moe/lfm_moe.cl", with(moe, {"ROUTE_FUSED=1"}));
+    clrun::Buffer lb(dev, lg), bb(dev, bias), gb(dev, gu), xb(dev, x), r1(dev, lr::kWords * 4), r2(dev, lr::kWords * 4),
+        h1(dev, size_t(4) * lr::kInter * 2), h2(dev, size_t(4) * lr::kInter * 2);
+    pt.run("lfm_route", {64, 1}, {64, 1}, lb, bb, r1);
+    pm.run("lfm_moe_gate_up", {size_t(4 * 48) * 256, 1}, {256, 1}, r1, xb, gb, h1);
+    pf.run("lfm_moe_gate_up", {size_t(4 * 48) * 256, 1}, {256, 1}, lb, bb, r2, xb, gb, h2);
+    const bool ok = r1.read<uint32_t>() == r2.read<uint32_t>() && h1.read<uint16_t>() == h2.read<uint16_t>();
+    std::printf("lfm2moe_run: %-56s %s\n", "arm route: lfm_moe _R vs lfm_route + lfm_moe_gate_up", ok ? "exact" : "DISAGREES");
+    if (!ok) ++failures;
+  }
+  for (uint32_t L : {1u, 0u}) {   // conv: lfm_conv_in on the conv-tile in_proj, both layouts
+    // gemv.cl does not build on Apple's OpenCL (as_half without cl_khr_fp16), so the as-built pair here is the host's
+    // gemv order (moe_ref::tile_dot over the whole K: gemv.cl's at split-K 1) + lfm_conv on the device; the device's
+    // own pair is bitwise on the card (lfm2moe_kernels_test 7). Bar 1 ulp: the host does not contract
+    // acc + gacc x scale, a device compiler may.
+    const uint32_t K = H, N = 3 * H;
+    std::vector<uint32_t> qw(size_t(K / 8) * N);
+    std::mt19937 wr(41 + L);
+    for (uint32_t& v : qw) v = wr();
+    std::vector<uint16_t> sc(size_t(K / 64) * N);
+    for (uint16_t& v : sc) v = common::f32_to_f16(0.002f + 0.018f * float(wr() % 1000) / 1000.f);
+    const loader::HostLinear plain1 = loader::repack_in_proj(qw.data(), sc.data(), K, N, false, 1),
+                             tiled = loader::repack_in_proj(qw.data(), sc.data(), K, N, true, L);
+    std::vector<float> taps(size_t(H) * 3);
+    for (float& v : taps) v = rf(0.5f * u(rng));
+    std::vector<uint16_t> ring(size_t(lr::kRing) * H);
+    for (size_t i = 0; i < ring.size(); ++i) ring[i] = uint16_t(0x3F80 + (i * 7919) % 4000);
+    clrun::Program pc(dev, "src/kernels/lfm2moe/lfm_conv.cl", with(kCtrlDefs, {"M=1", "HIDDEN=2048", "CONV_S=1"}));
+    clrun::Program pi(dev, "src/kernels/lfm2moe/lfm_conv.cl",
+                      with(kCtrlDefs, {"M=1", "HIDDEN=2048", "CONV_IN_L=" + std::to_string(L)}));
+    std::vector<uint16_t> no_scales(2, 0);
+    clrun::Buffer wt(dev, tiled.words), st(dev, L == 0 ? tiled.scales : no_scales), tb(dev, taps), rp(dev, ring),
+        rt(dev, ring), yp(dev, H * 2), yt(dev, H * 2);
+    int worst = 0;
+    for (uint32_t pos = 0; pos < 6; ++pos) {
+      std::vector<uint16_t> x(H);
+      for (uint16_t& v : x) v = rne(u(rng));
+      std::vector<uint32_t> ctrl(32, 0);
+      ctrl[0] = pos;
+      ctrl[1] = 1;
+      std::vector<float> s(N);
+      for (uint32_t n = 0; n < N; ++n) s[n] = moe_ref::tile_dot(plain1.words.data(), K, n, x.data(), 0, K / 64);
+      clrun::Buffer cb(dev, ctrl), xb(dev, x), sl(dev, s);
+      pc.run("lfm_conv", {H, 1}, {256, 1}, cb, sl, tb, rp, yp);
+      pi.run("lfm_conv_in", {size_t(H / 16) * 48, 1}, {48, 1}, cb, wt, L == 0 ? st : wt, xb, tb, rt, yt);
+      const std::vector<uint16_t> a = yp.read<uint16_t>(), c = yt.read<uint16_t>(), ra = rp.read<uint16_t>(),
+                                  rc = rt.read<uint16_t>();
+      for (uint32_t i = 0; i < H; ++i) worst = std::max(worst, ulps(a[i], c[i]));
+      for (size_t i = 0; i < ra.size(); ++i) worst = std::max(worst, ulps(ra[i], rc[i]));
+    }
+    const std::string what = "arm conv (layout " + std::to_string(L) + "): lfm_conv_in vs gemv order + lfm_conv";
+    std::printf("lfm2moe_run: %-56s %s (worst %d ulp over y and the ring, positions 0..5, bar 1)\n", what.c_str(),
+                worst <= 1 ? (worst == 0 ? "exact" : "agrees") : "DISAGREES", worst);
+    if (worst > 1) ++failures;
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -370,6 +469,7 @@ int main() {
     conv_checks(dev);
     moe_checks(dev);
     attention_checks(dev);
+    arm_checks(dev);
   } catch (const std::exception& e) {
     std::fprintf(stderr, "lfm2moe_run: %s\n", e.what());
     return 1;
