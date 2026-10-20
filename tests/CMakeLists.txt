@@ -4532,5 +4532,13 @@ if(B70_LFM2MOE)
     ${B70_LFM2MOE_RTN_ORACLE_DIR} lfm2moe_32k prefill)
   set_tests_properties(lfm2moe_golden_prefill_rtn_32k_test PROPERTIES LABELS "checkpoint;golden;lfm2moe;prefill;optin"
     SKIP_RETURN_CODE 77 TIMEOUT 14400)
+  # Task 4: two cards (decision 10) - 24c's lfm2moe_pp_test gains its prefill section (e): bitwise one card at chunks
+  # 2048 and 64, dense and MoE cuts, the RTN export at split 20, P4 on the prefill hand-off.
+  target_link_libraries(lfm2moe_pp_test PRIVATE b70_lfm2moe_prefill)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(lfm2moe_pp_test)
+  endif()
+  add_dependencies(lfm2moe_pp_test ${B70_LFM2MOE_PREFILL_KERNELS} ${B70_LFM2MOE_PREFILL_REUSED})
+  set_tests_properties(lfm2moe_pp_test PROPERTIES LABELS "checkpoint;lfm2moe;pp;prefill")
 endif()
 # ==== Spec 24d: LFM2.5-24B-A2B prefill ==== (end) ====
