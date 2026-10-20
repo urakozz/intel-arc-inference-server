@@ -279,9 +279,13 @@ void test_route(Dev& d) {
     }
     const std::vector<uint32_t> got = run_route(d, tm, l, b);
     const lr::Route rt = lr::route(l.data(), b.data());
-    for (uint32_t w = 0; w < kl::route::kWords; ++w) CHECK_EQ(got[w], rt.row[w]);
+    // The ids exactly (the tie rule); w / sel / d go through sigmoid's exp (the device's against libm's): counted,
+    // as the 64-row case does (the final review: a 1-ulp exp landing on a bf16 tie must not fail F2).
+    for (uint32_t j = 0; j < 4; ++j) CHECK_EQ(got[kl::route::kIds + j], rt.ids[j]);
+    for (uint32_t w = 4; w < kl::route::kWords; ++w) other += got[w] != rt.row[w];
   }
-  std::printf("     crafted rows (tie at the 4th / 5th -> the lower id, all-equal, bias reorders, dominant) bitwise\n");
+  std::printf("     crafted rows (tie at the 4th / 5th -> the lower id, all-equal, bias reorders, dominant): ids exact; %zu "
+              "words off over all 68 rows (sigmoid's exp)\n", other);
 }
 
 // --- 4. the MoE block -------------------------------------------------------------------------------------------
