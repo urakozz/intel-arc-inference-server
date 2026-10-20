@@ -178,7 +178,7 @@ AutoRound at the Bolt pin; vLLM's XPU image for self-generated answers (`GEN_BAC
 - [ ] **Step 2: `calib`, `coverage`, `tune`, `eval`, `check`, `card`** - detached, resumable, `tune` under the GPU lock;
   record the machine, commit, flags, times, peak RAM, token counts, coverage. F6's table and the run record go into 25a's
   facts sheet (a new section) and spec 25 ("25q as built"); Decision 6's rule applied and recorded.
-- [ ] **Step 3: publish** (repo name the operator's) **after the operator's go** (Decision 20), with the card. Then
+- [ ] **Step 3: publish** (repo name the operator's) **after the operator's go** (the licence is ruled - Decision 20, 2026-10-20; the go is for the upload itself), with the card. Then
   `bolt_oracle.sh export $OUT/export` (-> `oracle-out-bolt-ours/`) so 25c-25e's and 26's `ours` stages have their reference.
 - [ ] **Step 4: commit** `git commit -S -m "spec 25q: our Bolt AutoRound g64 - F6, the run record"`.
 
@@ -199,7 +199,7 @@ stage r58.rtn_ref  58 optin   cpu  bolt_rtn,oracle_image           r58.rtn  "bol
 stage r58.tune     58 manual  gpu  bolt_bf16,bolt_g128             r58.rtn  "calib, coverage, tune (AutoRound on devices 0,1, ~16-40 h, holds the GPU lock), check - the operator starts it"
 stage r58.eval     58 optin   cpu  bolt_bf16,bolt_a4_ref           r58.tune "F6: KL / top-1 per set and A4 for rtn, g128 and ours; the int8-head row; f6.md"
 stage r58.ours_ref 58 optin   cpu  bolt_ours,oracle_image          r58.eval "bolt_oracle.sh export ours -> oracle-out-bolt-ours"
-rownote 58 "Publication waits for the operator's go (Decision 20: OpenMDW-1.1). tune: ~16-20 h at ITERS 400 / NSAMPLES 512 / SEQLEN 2048, ~32-40 h at ITERS 800 (ESTIMATED)."
+rownote 58 "Publication waits for the operator's go to upload (Decision 20 ruled: OpenMDW-1.1 open weights, publishable). tune: ~16-20 h at ITERS 400 / NSAMPLES 512 / SEQLEN 2048, ~32-40 h at ITERS 800 (ESTIMATED)."
 ```
 - [ ] **Step 2: commit** `git commit -S -m "docs: spec 25 (25q as built), box queue row 58 - our Bolt quantisation"`.
 

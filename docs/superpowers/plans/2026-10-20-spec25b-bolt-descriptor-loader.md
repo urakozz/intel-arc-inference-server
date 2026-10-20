@@ -31,8 +31,8 @@ planner (`src/loader/bolt_layout.h`).
 - **Plan 25a merged:** `bolt_ref.expected_names` ("gptq-g128", "ar-g64", "bf16"), `bolt_make_tiny.py`'s packers (the
   synthetic generator reuses them until 25q's lands - 24b's precedent; 25q merges the two `check.py`s).
 - **No kernel.** The device half uploads bytes only; 25c binds them. kernel_cmdlines +0.
-- **Decision 20:** no model file is vendored - `tests/model/bolt/` holds a **generator** (`make_config.py`, writing the
-  config from the published values in code) instead of a copied `config.json`, unless the operator rules otherwise.
+- **Decision 20 (ruled 2026-10-20: vendoring allowed):** `tests/model/bolt/` may hold a copied `config.json`; the
+  **generator** (`make_config.py`, writing the config from the published values in code) is optional.
 - **The relaxations touch shared code** (`src/loader/quant.cc`): every existing loader test stays green and every existing
   refusal still refuses (B0).
 

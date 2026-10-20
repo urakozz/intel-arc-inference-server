@@ -142,7 +142,7 @@ quality reference and 25q's quantisation input.
 
 OpenMDW-1.1 on all three repos (the cards' `license_link` https://openmdw.ai/license/1-1/). The BF16 repo's `LICENSE`
 file is listed with **0 bytes** (HF API tree, 2026-10-20). The repository stores no weights and no licence text; 25b
-builds its test config in code rather than vendoring `config.json` until the operator rules on the terms (Decision 20),
+may vendor `config.json` and other model files, and our g64 export may be published (Decision 20, ruled 2026-10-20),
 and 25q's card copies the licence by link and states the derivation.
 
 ## 2. Reference semantics (pinned from source)
@@ -571,8 +571,8 @@ carries an `ours` stage).
    arm (25c: B3 golden and A4 on both; the state traffic 0.336 vs 0.168 GB a token, ~3 % of the step). NVIDIA's recipe
    uses bf16 and the architecture search budgeted 16-bit states. *Cost if wrong:* fp32 wastes ~0.3 ms a token and 80 MiB a
    snapshot if bf16 is as good; bf16 could cost long-context quality if it is not - the arm decides on data.
-3. **Decision 3 (proposed) - the shipping checkpoint until 25q passes: SergiioB's g128 via the exact expansion** (the
-   operator's request), gate Q recorded, not gating. *Cost if wrong:* none to correctness; if his 128-sample / 200-iter
+3. **Decision 3 (operator, 2026-10-20) - the shipping checkpoint until 25q passes: SergiioB's g128 via the exact expansion**
+   (the operator: "Ship SergiioB's g128 until our g64 passes 25q"), gate Q recorded, not gating. *Cost if wrong:* none to correctness; if his 128-sample / 200-iter
    calibration on generic data loses on A4, users see it until 25q lands.
 4. **Decision 4 (proposed) - placement: two cards (`--pp 2`) by default; one card only through spec 22 (not built here);
    TP (spec 17) is the decode lever after 25e.** *Cost if wrong:* if the operator needs one-card Bolt, spec 22's 22b-22d
@@ -627,6 +627,7 @@ carries an `ours` stage).
     token less read vs a measured KL; spec 9's evidence on Qwen3.8 applies, 25q's F6 adds Bolt's row.
 19. **Decision 19 (proposed) - family copies** (`nb_*`) for every Kolibri- / LFM2-derived kernel; no existing source
     edited. *Cost if wrong:* duplicated code a later refactor can merge.
-20. **Decision 20 (operator) - the licence:** OpenMDW-1.1 - may our g64 export be published, and may a test config be
-    vendored (the BF16 repo's LICENSE is an empty file)? Until ruled, nothing of the model is vendored (25b builds its
-    test config in code). *Cost if wrong:* a publication or a vendored file under unclear terms.
+20. **Decision 20 (operator, 2026-10-20) - the licence:** the weights are published open weights under OpenMDW-1.1; our
+    g64 export may be published and model files (config, template, tokenizer) may be vendored; the empty `LICENSE` file is
+    expected to be fixed upstream (the operator: "it's published open weights, of course we can use it"). 25q's card links
+    the licence and states the derivation.
