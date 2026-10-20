@@ -904,10 +904,12 @@ queue row 53 (`tools/box_validate/stages.sh` `row 53`). Every count below is mea
   `apply_repetition_penalty` (HF's rule on gathered-then-scattered distinct ids, ids >= `vocab_used` ignored, before
   `filter_probs`); `generation_sampling` reads `repetition_penalty` and takes HF's `GenerationConfig` default for a field the file
   does not name (T 1.0, top-k 50, top-p 1.0, penalty 1.0: Kolibri's and Muse's files name all three, so theirs are unchanged);
-  `generation_eos_ids` (an integer or a list) moved out of `b70_serve.cc` to be testable; a request's `repetition_penalty` is in
-  (0, 2]. The server keeps the request's `SeenIds` (the prompt's distinct ids, then every consumed id) when the penalty is not 1 and
+  `generation_eos_ids` (an integer or a list) moved out of `b70_serve.cc` to be testable; a request's `repetition_penalty` is any finite
+  number > 0 (vLLM's rule, no upper bound; `null` = absent; the same check holds for `generation_config.json`). The server keeps the request's `SeenIds` (the prompt's distinct ids, then every consumed id) when the penalty is not 1 and
   hands it to the engine with each step; **an engine that does not apply it ignores the field** (Qwen3.8, Agnes, Ornith, K2,
-  Kolibri, Muse), so no other model's request path changes.
+  Kolibri, Muse), so no other model's sampling or output changes. The field's validation is not model-specific, though: a request
+  that sends `repetition_penalty` as 0, a negative, a string, a bool or a non-finite number now gets a 400 on every model (it was
+  ignored before); `null` and any finite value > 0 are accepted.
 - **The engine side.** `state_runs` / `kv_runs` (`lfm2moe_sizes.{h,cc}`): the two conv-ring rows (positions pos-1, pos-2; a position
   below 0 is a zero row written to slot `(q+16) % 16`, which `lfm_conv` never reads) per conv layer, 60 runs of 4096 B = 245,760 B,
   + the 10 attention layers' K then V (20 runs, 20,480 B a position), one host layout under `--pp 1` and `--pp 2`;

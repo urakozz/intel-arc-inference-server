@@ -666,7 +666,8 @@ ZE_AFFINITY_MASK=0 ./build/src/cli/b70-serve <export> --port 8000 --prefix-cache
   (`l < 0 ? l * p : l / p` over the distinct ids of the prompt and the output, before temperature / top-k / top-p) on the
   host sampler; `temperature: 0` is the device argmax and ignores it (vLLM applies it to greedy requests too:
   `B70_LFM_PENALTY_GREEDY=1` routes a greedy request that carries a penalty through the host). A request's
-  `repetition_penalty` is in (0, 2]. A seeded sampled request is reproducible request by request.
+  `repetition_penalty` is any finite number > 0 (vLLM's rule; `null` is absent), checked for every model's request, so a
+  malformed value is a 400 even where the engine ignores the penalty. A seeded sampled request is reproducible request by request.
 - **Prefix cache.** Each snapshot carries the two conv-ring rows of positions pos-1 and pos-2 per conv layer (245,760 B)
   and the attention layers' KV (20,480 B a position).
 - `B70_LFM_TOKENIZER_JSON` names a `tokenizer.json` other than the snapshot's.
