@@ -111,7 +111,7 @@ class AgenticLoop(unittest.TestCase):
         # turn 3: two calls -> two results, in order, the second recorded result next
         m = b[2]["messages"]
         self.assertEqual([x["role"] for x in m][-3:], ["assistant", "tool", "tool"])
-        self.assertEqual([x["content"] for x in m[-2:]], ["RESULT-2", "RESULT-1"])   # the results are cycled
+        self.assertEqual([x["content"] for x in m[-2:]], ["RESULT-2", "RESULT-1"])   # the results are taken in order, wrapping within a turn
         self.assertEqual([x["tool_call_id"] for x in m[-2:]], ["call_B", "call_C"])
         # turn 4: the answer had no call -> the next recorded user message
         m = b[3]["messages"]
