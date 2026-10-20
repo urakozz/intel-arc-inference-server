@@ -1,0 +1,10 @@
+<|startoftext|><|im_start|>system
+You are a coding agent. Be concise.<|im_end|>
+<|im_start|>user
+Find where the planner reads the layer table.<|im_end|>
+<|im_start|>assistant
+Look in kolibri_sizes.h.<|im_end|>
+<|im_start|>user
+Thanks. And the loader?<|im_end|>
+<|im_start|>assistant
+<think>

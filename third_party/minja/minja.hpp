@@ -13,6 +13,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -76,6 +78,47 @@ private:
   Value(const std::shared_ptr<ArrayType> & array) : array_(array) {}
   Value(const std::shared_ptr<ObjectType> & object) : object_(object) {}
   Value(const std::shared_ptr<CallableType> & callable) : object_(std::make_shared<ObjectType>()), callable_(callable) {}
+
+  // b70 patch (spec 24e): str(float) as Python writes it (repr: the shortest digits that read back as the same
+  // double; scientific with a signed, at least two digit exponent when the decimal exponent is below -4 or above 15,
+  // else positional with ".0" for a whole number): 1.0, 2.5, 1e-07, 1e+20, 0.0001. Upstream used std::to_string
+  // ("1.000000", "0.000000"), which Jinja never prints. LFM2.5's format_arg_value writes a float argument with it.
+  static std::string python_float_repr(double v) {
+    if (std::isnan(v)) return "nan";
+    if (std::isinf(v)) return v < 0 ? "-inf" : "inf";
+    char buf[40];
+    int digits = 1;
+    for (; digits <= 17; ++digits) {
+      std::snprintf(buf, sizeof(buf), "%.*e", digits - 1, v);
+      if (std::strtod(buf, nullptr) == v) break;
+    }
+    // buf: [-]d[.ddd]e[+-]XX
+    std::string s(buf);
+    const bool neg = s[0] == '-';
+    if (neg) s.erase(0, 1);
+    const size_t e = s.find('e');
+    int exp10 = std::atoi(s.c_str() + e + 1);
+    std::string mant = s.substr(0, e), ds;
+    for (char c : mant) if (c != '.') ds += c;
+    while (ds.size() > 1 && ds.back() == '0') ds.pop_back();
+    const int n = static_cast<int>(ds.size());
+    std::string out;
+    if (ds == "0") {
+      out = "0.0";
+    } else if (exp10 < -4 || exp10 >= 16) {
+      out = ds.substr(0, 1);
+      if (n > 1) out += "." + ds.substr(1);
+      char eb[16];
+      std::snprintf(eb, sizeof(eb), "e%c%02d", exp10 < 0 ? '-' : '+', exp10 < 0 ? -exp10 : exp10);
+      out += eb;
+    } else {
+      const int decpt = exp10 + 1;   // the value is 0.DIGITS x 10^decpt
+      if (decpt <= 0) out = "0." + std::string(static_cast<size_t>(-decpt), '0') + ds;
+      else if (decpt >= n) out = ds + std::string(static_cast<size_t>(decpt - n), '0') + ".0";
+      else out = ds.substr(0, static_cast<size_t>(decpt)) + "." + ds.substr(static_cast<size_t>(decpt));
+    }
+    return neg ? "-" + out : out;
+  }
 
   /* Python-style string repr */
   static void dump_string(const json & primitive, std::ostringstream & out, char string_quote = '\'') {
@@ -145,6 +188,10 @@ private:
       out << (this->to_bool() ? "True" : "False");
     } else if (is_string() && !to_json) {
       dump_string(primitive_, out, string_quote);
+    } else if (is_number_float() && std::isfinite(primitive_.get<double>())) {
+      // b70 patch (spec 24e): a float inside a list / dict / tojson is Python's repr too (nlohmann writes
+      // 1e+15 where Python and Jinja's tojson write 1000000000000000.0).
+      out << python_float_repr(primitive_.get<double>());
     } else {
       out << primitive_.dump();
     }
@@ -407,8 +454,10 @@ public:
     if (is_null())
       throw std::runtime_error("Undefined value or reference");
     if (array_) {
+      // b70 patch (spec 24e): upstream skipped falsy items (`item.to_bool() && ...`), so `'' in ['']`, `0 in [0]`
+      // and `false in [false]` were false; Jinja's `in` is plain equality (LFM2.5's `(args | trim) not in ["", "{}"]`).
       for (const auto& item : *array_) {
-        if (item.to_bool() && item == value) return true;
+        if (item == value) return true;
       }
       return false;
     } else if (object_) {
@@ -473,7 +522,7 @@ public:
   std::string to_str() const {
     if (is_string()) return get<std::string>();
     if (is_number_integer()) return std::to_string(get<int64_t>());
-    if (is_number_float()) return std::to_string(get<double>());
+    if (is_number_float()) return python_float_repr(get<double>());
     if (is_boolean()) return get<bool>() ? "True" : "False";
     if (is_null()) return "None";
     return dump();

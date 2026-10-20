@@ -1,0 +1,10 @@
+<|startoftext|><|im_start|>user
+q1<|im_end|>
+<|im_start|>assistant
+answer one<|im_end|>
+<|im_start|>user
+q2<|im_end|>
+<|im_start|>assistant
+<think>new</think>  answer two<|im_end|>
+<|im_start|>assistant
+<think>

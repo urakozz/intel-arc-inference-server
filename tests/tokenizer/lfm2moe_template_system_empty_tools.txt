@@ -1,0 +1,6 @@
+<|startoftext|><|im_start|>system
+List of tools: [{"function": {"description": "Read a file from disk.", "name": "read_file", "parameters": {"properties": {"limit": {"type": "integer"}, "offset": {"type": "integer"}, "path": {"description": "Absolute path", "type": "string"}}, "required": ["path"], "type": "object"}}, "type": "function"}]<|im_end|>
+<|im_start|>user
+Find where the planner reads the layer table.<|im_end|>
+<|im_start|>assistant
+<think>

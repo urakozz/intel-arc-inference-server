@@ -1,0 +1,6 @@
+<|startoftext|><|im_start|>user
+continue this<|im_end|>
+<|im_start|>assistant
+The answer starts CONTINUE_FINAL_MESSAGE_TAG <|im_end|>
+<|im_start|>assistant
+<think>

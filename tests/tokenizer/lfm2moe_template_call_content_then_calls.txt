@@ -1,0 +1,14 @@
+<|startoftext|><|im_start|>user
+go<|im_end|>
+<|im_start|>assistant
+Let me look.<|tool_call_start|>[read_file(path='/a.cc'), read_file(path='/b.cc')]<|tool_call_end|><|im_end|>
+<|im_start|>tool
+A<|im_end|>
+<|im_start|>tool
+B<|im_end|>
+<|im_start|>assistant
+Both read.<|im_end|>
+<|im_start|>user
+ok<|im_end|>
+<|im_start|>assistant
+<think>
