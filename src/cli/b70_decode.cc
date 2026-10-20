@@ -38,6 +38,7 @@
 #include "cli/dflash_args.h"   // spec 19c: --spec dflash
 #include "cli/k2_decode.h"
 #include "cli/kolibri_decode.h"
+#include "cli/lfm2moe_decode.h"   // spec 24c: LFM2.5-24B-A2B (model_type lfm2_moe)
 #include "cli/muse_decode.h"
 #include "cli/qwen4exp_decode.h"
 #include "cli/max_len.h"
@@ -190,6 +191,13 @@ void usage() {
       "                 decoded one replay per id: --prefill* (spec 23d), --mtp / --spec (23f),\n"
       "                 --kv-cache int8 and --profile refused. B70_MUSE_ATTN=eager: the\n"
       "                 reference's bf16 attention chain (A/B).\n"
+      "  LFM2.5-24B-A2B (model_type lfm2_moe, spec 24c): one card by default (the model and its\n"
+      "                 131072 positions fit one B70); --lm-head int8 is ITS default (bf16 reads\n"
+      "                 the tied embedding tiles); --profile prints its per-launch anatomy. The\n"
+      "                 prompt is decoded one replay per id: --prefill* (spec 24d), --mtp / --spec\n"
+      "                 (no MTP head), --kv-cache int8 (decision 11) and --layers refused.\n"
+      "                 B70_LFM_ATTN=eager: the reference's bf16 attention chain (A/B);\n"
+      "                 B70_LFM_FUSE=none|all|route,router,conv: the fused arms (bitwise none).\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -1015,6 +1023,32 @@ int run(int argc, char** argv) {
   if (synthetic && depth == 0)
     throw std::runtime_error("--depth 0 would ingest nothing; --bench and --profile both measure"
                              " a step at a context depth");
+  // Spec 24c: LFM2.5-24B-A2B (model_type lfm2_moe) runs runtime::lfm2moe::Lfm2MoeEngine on one card (or two) -
+  // dispatched here, beside Kolibri-1 and Muse-Glimmer and before the Qwen engine's pipeline and kv-cache rules (its
+  // own refusals, cli/lfm2moe_decode.h: the prefill (spec 24d), --mtp / --spec (no MTP head), int8 KV (decision 11),
+  // --layers). A path that does not resolve is not LFM2 - the flows below report it.
+  if (cli::lfm2moe::is_lfm2moe(path)) {
+    cli::lfm2moe::DecodeArgs la;
+    la.path = path;
+    la.ids_path = ids_path;
+    la.n = n;
+    la.bench = bench;
+    la.profile = profile;
+    la.depth = depth;
+    la.tg = tg;
+    la.steps = steps;
+    la.repeats = repeats;
+    la.max_len = max_len_arg;
+    la.reserve = mem_reserve;
+    la.device = device;
+    la.int8_head = !have_lm_head || lm_head == loader::LmHeadForm::Int8;
+    la.pipe = pipe;
+    la.prefill = prefill || have_prefill_len || have_pp_chunk || have_pp_backend;
+    la.mtp = mtp_on || have_mtp || have_spec;
+    la.kv8 = kv_cache == runtime::KvCache::Int8;
+    la.layers = have_layers;
+    return cli::lfm2moe::run_decode<StdoutToStderr>(la);
+  }
   // Spec 23c: Muse-Glimmer-30B (model_type muse_glimmer) runs runtime::muse::MuseEngine on one card (or two) -
   // dispatched here, beside Kolibri-1 and before the Qwen engine's pipeline and kv-cache rules (its own refusals,
   // cli/muse_decode.h: the prefill's backend and chunk (spec 23d), --mtp / --spec, int8 KV (decision 8), --max-len above 131072
