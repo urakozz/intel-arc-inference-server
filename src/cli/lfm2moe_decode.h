@@ -121,6 +121,50 @@ inline void check_args(const DecodeArgs& a, const model::Lfm2MoeDesc& d) {
                              "the first layer of device 1, in [1, " + std::to_string(d.layers - 1) + "]");
 }
 
+// Spec 24e: what b70-serve parsed that LFM2.5-24B-A2B has no use for - refused before the device, each by name
+// (tests/server/lfm2moe_serve_args_test.cc, and cli_reject_serve_lfm2moe_* through the binary on the box).
+struct ServeFlags {
+  bool mtp = false;              // --mtp N | auto
+  std::string spec;              // --spec's value ("" when not given): off | mtp | lookup | dflash
+  bool proposer_tuning = false;  // --mtp-max, --mtp-cost, --spec-min-match, --spec-history, --spec-max, --spec-cost,
+                                 // --draft-model, --draft-format, --draft-q
+  bool draft_vocab = false;      // --draft-vocab, --draft-vocab-ids
+  bool qwen4exp_flags = false;   // --layers, --ple-dir, --tokenizer
+  bool chat_template = false;    // --chat-template
+};
+
+inline void check_serve_flags(const ServeFlags& f) {
+  if (f.mtp || f.spec == "mtp")
+    throw std::runtime_error("LFM2.5-24B-A2B has no MTP head (spec 24 §11): drop --mtp / --spec mtp");
+  if (f.spec == "lookup")
+    throw std::runtime_error("--spec lookup verifies its drafts through the MTP verify lists, which LFM2.5-24B-A2B's engine "
+                             "does not capture (no MTP head, spec 24 §11; prompt lookup needs M-row verify lists for this "
+                             "family - a follow-up): drop --spec lookup");
+  if (f.spec == "dflash")
+    throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter (spec 19c); LFM2.5-24B-A2B has none");
+  if (f.proposer_tuning)
+    throw std::runtime_error("--mtp-max, --mtp-cost, --spec-min-match, --spec-history, --spec-max, --spec-cost, "
+                             "--draft-model, --draft-format and --draft-q belong to a speculative proposer; LFM2.5-24B-A2B "
+                             "has none (no MTP head, no drafter: spec 24 §11)");
+  if (f.draft_vocab)
+    throw std::runtime_error("--draft-vocab and --draft-vocab-ids narrow an MTP head's or a drafter's vocabulary; "
+                             "LFM2.5-24B-A2B has neither");
+  if (f.qwen4exp_flags)
+    throw std::runtime_error("--layers, --ple-dir and --tokenizer belong to Qwen3.8-Flash-Next (model_type qwen4_exp, spec "
+                             "21e); this checkpoint is LFM2.5-24B-A2B (B70_LFM_TOKENIZER_JSON names another tokenizer.json)");
+  if (f.chat_template)
+    throw std::runtime_error("--chat-template is built for Muse-Glimmer-30B only (spec 23e); LFM2.5-24B-A2B renders its own "
+                             "chat_template.jinja");
+}
+
+// The served context is capped at the trained 131072 - refused before the device (settle() refuses it too, after the cards
+// are open).
+inline void check_serve_max_len(const DecodeArgs& a, const model::Lfm2MoeDesc& d) {
+  if (!a.max_len.is_auto && a.max_len.value > d.trained_max_len)
+    throw std::runtime_error("--max-len " + std::to_string(a.max_len.value) + " exceeds LFM2.5-24B-A2B's trained context " +
+                             std::to_string(d.trained_max_len) + " (max_position_embeddings)");
+}
+
 inline std::vector<uint32_t> read_ids(const std::string& path, uint32_t vocab) {
   std::ifstream f(path);
   if (!f) throw std::runtime_error("cannot open --ids file '" + path + "'");

@@ -260,6 +260,59 @@ uint32_t pp_split(const model::Lfm2MoeDesc& d, bool int8_head) {
   return runtime::pp_balance(layer_bytes, dev0_fixed, dev1_fixed).split;
 }
 
+// --- spec 24e: prefix-cache snapshots ------------------------------------------------------------------------------------
+namespace {
+// Layer l's index among the layers of its kind that its device holds (the allocation's layer order).
+uint32_t local_index(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p, uint32_t l) {
+  const uint32_t first = p.first(p.device_of(l));
+  const bool attn = d.is_attention(l);
+  uint32_t n = 0;
+  for (uint32_t k = first; k < l; ++k) n += d.is_attention(k) == attn ? 1 : 0;
+  return n;
+}
+}  // namespace
+
+std::vector<SnapRun> state_runs(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p, uint32_t pos) {
+  model::validate(p, d);
+  constexpr uint32_t R = loader::lfm::kConvRing;
+  if (kStatePositions > R)
+    throw std::invalid_argument("runtime::lfm2moe::state_runs: the ring's " + std::to_string(R) +
+                                " slots cannot hold the state's " + std::to_string(kStatePositions) + " positions");
+  const size_t row = size_t(d.hidden) * 2;
+  std::vector<SnapRun> runs;
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    if (d.is_attention(l)) continue;
+    const uint32_t dev = p.device_of(l);
+    const size_t base = size_t(local_index(d, p, l)) * ring_layer_bytes(d);
+    for (uint32_t j = 0; j < kStatePositions; ++j) {
+      // Position pos - 1 - j; below 0 it is a zero row, kept in the slot a decode at that position would not read.
+      const int64_t q = int64_t(pos) - 1 - int64_t(j);
+      const uint32_t slot = uint32_t((q % int64_t(R) + int64_t(R)) % int64_t(R));
+      runs.push_back({dev, SnapTensor::ConvRing, base + size_t(slot) * row, row, q < 0});
+    }
+  }
+  return runs;
+}
+
+std::vector<SnapRun> kv_runs(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p, uint32_t max_len, uint32_t begin,
+                             uint32_t end) {
+  model::validate(p, d);
+  if (begin > end || end > max_len)
+    throw std::invalid_argument("runtime::lfm2moe::kv_runs: range [" + std::to_string(begin) + ", " +
+                                std::to_string(end) + ") is not within [0, max_len " + std::to_string(max_len) + ")");
+  std::vector<SnapRun> runs;
+  if (begin == end) return runs;
+  const size_t row = size_t(d.kv_n()) * 2;
+  for (SnapTensor t : {SnapTensor::KvK, SnapTensor::KvV}) {
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      if (!d.is_attention(l)) continue;
+      const size_t base = size_t(local_index(d, p, l)) * kv_layer_bytes(d, max_len);
+      runs.push_back({p.device_of(l), t, base + size_t(begin) * row, size_t(end - begin) * row, false});
+    }
+  }
+  return runs;
+}
+
 std::string describe(const Plan& p, size_t device_bytes) {
   char buf[400];
   std::snprintf(buf, sizeof buf,

@@ -104,3 +104,8 @@ if(TARGET b70-serve)
 endif()
 # Spec 24d: and LFM2.5-24B-A2B's prefill (b70_lfm2moe_prefill: Lfm2MoeEngine::prefill, its walk and scratch).
 target_link_libraries(b70-decode PRIVATE b70_lfm2moe_prefill)
+# Spec 24e: b70-serve serves LFM2.5-24B-A2B (src/cli/lfm2moe_serve.h; runtime::lfm2moe::Lfm2MoeEngine behind
+# cli::lfm2moe::Lfm2MoeEngineAdapterT, whose prefill every request runs). Appended, as the lines above.
+if(TARGET b70-serve)
+  target_link_libraries(b70-serve PRIVATE b70_lfm2moe_prefill)
+endif()

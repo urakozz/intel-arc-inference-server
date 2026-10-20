@@ -4420,10 +4420,8 @@ b70_cli_reject(cli_reject_lfm2moe_mtp ${_lfm_cfg} --ids ${B70_OK_IDS} --n 4 --mt
 b70_cli_reject(cli_reject_lfm2moe_kv8 ${_lfm_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "decision 11")
 b70_cli_reject(cli_reject_lfm2moe_layers ${_lfm_cfg} --ids ${B70_OK_IDS} --n 4 --layers 3
   EXPECT "--layers belongs to Kolibri-1")
-if(COMMAND b70_serve_reject)
-  b70_serve_reject(cli_reject_lfm2moe_serve ${_lfm_cfg} EXPECT "spec 24e")
-  set_tests_properties(cli_reject_lfm2moe_serve PROPERTIES LABELS lfm2moe)
-endif()
+# (24c's cli_reject_lfm2moe_serve - b70-serve refusing lfm2_moe naming spec 24e - is gone: spec 24e serves it; its refusals are the
+# cli_reject_serve_lfm2moe_* tests of the spec 24e block.)
 # ==== Spec 24c: LFM2.5-24B-A2B decode (label lfm2moe) ==== (end) ====
 
 # ==== Spec 24d: LFM2.5-24B-A2B prefill (labels lfm2moe;prefill) ==== (begin) ====
@@ -4590,4 +4588,103 @@ target_include_directories(lfm2moe_sampling_test PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_link_libraries(lfm2moe_sampling_test PRIVATE b70_server)
 add_test(NAME lfm2moe_sampling_test COMMAND lfm2moe_sampling_test ${CMAKE_SOURCE_DIR}/tests/model/lfm2moe)
 set_tests_properties(lfm2moe_sampling_test PROPERTIES LABELS lfm2moe)
+# Task 4 (host): the engine behind the server without a device - cli::lfm2moe::Lfm2MoeEngineAdapterT over a fake with
+# Lfm2MoeEngine's interface whose conv rings and attention KV are host buffers in Lfm2MoeBuffers' layout (one card and two):
+# runtime::lfm2moe::state_runs / kv_runs on the real shapes (245,760 B of state, 20,480 B of KV a position, one host layout
+# under --pp 1 and --pp 2), save / load on host buffers, Review Focus 5 (restores at positions 0 / 1 / 2 / 15 / 16 / 17 and,
+# through spec 7's PrefixSession, at 2048, 4096, 2049, 5000 and 300 - every turn == a cold run), a snapshot moving between one
+# card and two, and the server over HTTP (greedy == the decode run, a cached second turn, seeded sampling with the model's
+# defaults, the repetition penalty through the server's SeenIds, no id the tokenizer lacks).
+add_executable(lfm2moe_snapshot_test runtime/lfm2moe_snapshot_test.cc)
+target_include_directories(lfm2moe_snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lfm2moe_snapshot_test PRIVATE b70_server b70_lfm2moe_plan)
+add_test(NAME lfm2moe_snapshot_test COMMAND lfm2moe_snapshot_test)
+set_tests_properties(lfm2moe_snapshot_test PROPERTIES LABELS lfm2moe TIMEOUT 900)
+# Task 4: b70-serve's LFM2 refusals, before the device (tests/model/lfm2moe: config.json - all the dispatch, check_args and
+# the proposer rules read): no MTP head, no verify lists for --spec lookup, no drafter, the proposers' tuning flags and the
+# draft vocabulary, the int8 KV (decision 11), the prefill backends, the other models' flags, --max-len above the trained
+# context, --pp 2's sub-rules.
+if(TARGET b70-serve AND COMMAND b70_serve_reject)
+  set(_lfm_serve_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/lfm2moe)
+  b70_serve_reject(cli_reject_serve_lfm2moe_mtp ${_lfm_serve_cfg} --mtp 1 EXPECT "no MTP head")
+  b70_serve_reject(cli_reject_serve_lfm2moe_mtp_auto ${_lfm_serve_cfg} --mtp auto EXPECT "no MTP head")
+  b70_serve_reject(cli_reject_serve_lfm2moe_spec_mtp ${_lfm_serve_cfg} --spec mtp EXPECT "no MTP head")
+  b70_serve_reject(cli_reject_serve_lfm2moe_lookup ${_lfm_serve_cfg} --spec lookup
+    EXPECT "engine does not capture")
+  b70_serve_reject(cli_reject_serve_lfm2moe_dflash ${_lfm_serve_cfg} --spec dflash
+    EXPECT "built for Qwen3.8 beside its drafter")
+  b70_serve_reject(cli_reject_serve_lfm2moe_spec_max ${_lfm_serve_cfg} --spec-max 2 EXPECT "has none")
+  b70_serve_reject(cli_reject_serve_lfm2moe_mtp_cost ${_lfm_serve_cfg} --mtp-cost "verify=1,2" EXPECT "has none")
+  b70_serve_reject(cli_reject_serve_lfm2moe_draft_vocab ${_lfm_serve_cfg} --draft-vocab 32k EXPECT "has neither")
+  b70_serve_reject(cli_reject_serve_lfm2moe_kv8 ${_lfm_serve_cfg} --kv-cache int8 EXPECT "decision 11")
+  b70_serve_reject(cli_reject_serve_lfm2moe_prefill_int8 ${_lfm_serve_cfg} --prefill-backend l0-int8
+    EXPECT "int8 prefill for this family is a later probe")
+  b70_serve_reject(cli_reject_serve_lfm2moe_prefill_sycl ${_lfm_serve_cfg} --prefill-backend sycl-tla EXPECT "no LFM2 walk")
+  b70_serve_reject(cli_reject_serve_lfm2moe_prefill_name ${_lfm_serve_cfg} --prefill-backend nonsense
+    EXPECT "--prefill-backend expects sycl-tla, l0 or l0-int8")
+  b70_serve_reject(cli_reject_serve_lfm2moe_layers ${_lfm_serve_cfg} --layers 3 EXPECT "belong to Qwen3.8-Flash-Next")
+  b70_serve_reject(cli_reject_serve_lfm2moe_ple ${_lfm_serve_cfg} --ple-dir /nonexistent EXPECT "belong to Qwen3.8-Flash-Next")
+  b70_serve_reject(cli_reject_serve_lfm2moe_tokenizer ${_lfm_serve_cfg} --tokenizer /nonexistent
+    EXPECT "B70_LFM_TOKENIZER_JSON names another")
+  b70_serve_reject(cli_reject_serve_lfm2moe_chat_template ${_lfm_serve_cfg} --chat-template /nonexistent
+    EXPECT "Muse-Glimmer-30B only")
+  b70_serve_reject(cli_reject_serve_lfm2moe_max_len ${_lfm_serve_cfg} --max-len 262144 EXPECT "exceeds LFM2.5-24B-A2B's trained context")
+  b70_serve_reject(cli_reject_serve_lfm2moe_device ${_lfm_serve_cfg} --pp 2 --device 1 EXPECT "--device names one card")
+  b70_serve_reject(cli_reject_serve_lfm2moe_split ${_lfm_serve_cfg} --pipeline-split 3 EXPECT "--pipeline-split belongs to --pp 2")
+  b70_serve_reject(cli_reject_serve_lfm2moe_handoff ${_lfm_serve_cfg} --pipeline-handoff peer
+    EXPECT "--pipeline-handoff belongs to --pp 2")
+  b70_serve_reject(cli_reject_serve_lfm2moe_split_range ${_lfm_serve_cfg} --pp 2 --pipeline-split 40
+    EXPECT "leaves a device no layer")
+  set_tests_properties(cli_reject_serve_lfm2moe_mtp cli_reject_serve_lfm2moe_mtp_auto cli_reject_serve_lfm2moe_spec_mtp
+    cli_reject_serve_lfm2moe_lookup cli_reject_serve_lfm2moe_dflash cli_reject_serve_lfm2moe_spec_max
+    cli_reject_serve_lfm2moe_mtp_cost cli_reject_serve_lfm2moe_draft_vocab cli_reject_serve_lfm2moe_kv8
+    cli_reject_serve_lfm2moe_prefill_int8 cli_reject_serve_lfm2moe_prefill_sycl cli_reject_serve_lfm2moe_prefill_name
+    cli_reject_serve_lfm2moe_layers cli_reject_serve_lfm2moe_ple cli_reject_serve_lfm2moe_tokenizer
+    cli_reject_serve_lfm2moe_chat_template cli_reject_serve_lfm2moe_max_len cli_reject_serve_lfm2moe_device
+    cli_reject_serve_lfm2moe_split cli_reject_serve_lfm2moe_handoff cli_reject_serve_lfm2moe_split_range
+    PROPERTIES LABELS lfm2moe)
+endif()
+# ... the server's LFM2 dispatch over a mock engine: the reasoning / content / tool-call message in the body and in streamed
+# frames, generation cut inside a block (Review Focus 3 end to end), enable_thinking ignored and preserve_thinking passed, the
+# model's sampling defaults and the SeenIds a penalised request hands the engine, parser.rules in the request log.
+add_executable(lfm2moe_server_test server/lfm2moe_server_test.cc)
+target_include_directories(lfm2moe_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lfm2moe_server_test PRIVATE b70_server)
+add_test(NAME lfm2moe_server_test COMMAND lfm2moe_server_test ${CMAKE_SOURCE_DIR}/tests/model/lfm2moe)
+set_tests_properties(lfm2moe_server_test PROPERTIES LABELS lfm2moe TIMEOUT 300)
+# On the card (box only; SKIP 77 without the synthetic sets / the real export): lfm2moe_snapshot_gpu_test - Lfm2MoeEngine's snapshot
+# calls (Review Focus 5): restores at the block ends 2048 / 4096 bitwise the cold run, at the request ends 2049 / 5000 / 300 / 2 /
+# 1 / 0 bitwise the session that never left (KV, conv rings, logits, ids), on one card and on two (pp2:2 on the 4-layer synthetic);
+# `cross`: a snapshot taken on two cards continues on one, and the reverse (spec 16b's rule; two GPUs). B70_LFM2MOE_RTN = 24q's
+# RTN export, one card and two.
+if(B70_LFM2MOE)
+  add_executable(lfm2moe_snapshot_gpu_test runtime/lfm2moe_snapshot_gpu_test.cc)
+  target_include_directories(lfm2moe_snapshot_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(lfm2moe_snapshot_gpu_test PRIVATE b70_lfm2moe_prefill b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(lfm2moe_snapshot_gpu_test)
+  endif()
+  add_dependencies(lfm2moe_snapshot_gpu_test ${B70_LFM2MOE_PREFILL_KERNELS} ${B70_LFM2MOE_PREFILL_REUSED}
+    ${B70_LFM2MOE_DECODE_KERNELS} kernel_pp_handoff)
+  set(_lfm_snap_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/lfm2moe_4k.ids)
+  add_test(NAME lfm2moe_snapshot_gpu_synth_test COMMAND lfm2moe_snapshot_gpu_test ${B70_LFM2MOE_SYNTH_DIR}/w ${_lfm_snap_ids})
+  add_test(NAME lfm2moe_snapshot_gpu_synth_pp_test COMMAND lfm2moe_snapshot_gpu_test ${B70_LFM2MOE_SYNTH_DIR}/w ${_lfm_snap_ids}
+    pp2:2)
+  add_test(NAME lfm2moe_snapshot_gpu_cross_test COMMAND lfm2moe_snapshot_gpu_test ${B70_LFM2MOE_SYNTH_DIR}/w ${_lfm_snap_ids}
+    cross)
+  add_test(NAME lfm2moe_snapshot_gpu_rtn_test COMMAND lfm2moe_snapshot_gpu_test ${B70_LFM2MOE_RTN} ${_lfm_snap_ids})
+  add_test(NAME lfm2moe_snapshot_gpu_rtn_pp_test COMMAND lfm2moe_snapshot_gpu_test ${B70_LFM2MOE_RTN} ${_lfm_snap_ids} pp2)
+  set_tests_properties(lfm2moe_snapshot_gpu_synth_test lfm2moe_snapshot_gpu_synth_pp_test lfm2moe_snapshot_gpu_cross_test
+    lfm2moe_snapshot_gpu_rtn_test lfm2moe_snapshot_gpu_rtn_pp_test PROPERTIES LABELS "checkpoint;lfm2moe" SKIP_RETURN_CODE 77
+    TIMEOUT 3600)
+endif()
+# ... and the same refusals as header-only code, so the Mac runs them: cli::lfm2moe::check_serve_flags (what b70-serve parsed and
+# LFM2.5 has no use for), check_args (b70-decode's, with prefill on) and the trained-context cap.
+add_executable(lfm2moe_serve_args_test server/lfm2moe_serve_args_test.cc)
+target_include_directories(lfm2moe_serve_args_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lfm2moe_serve_args_test PRIVATE b70_lfm2moe_plan PkgConfig::ZE)
+b70_target_kernel_dir(lfm2moe_serve_args_test)   # (kernels/kernels.h, reached through the engine header, wants the define)
+add_test(NAME lfm2moe_serve_args_test COMMAND lfm2moe_serve_args_test)
+set_tests_properties(lfm2moe_serve_args_test PROPERTIES LABELS lfm2moe)
 # ==== Spec 24e: LFM2.5-24B-A2B serving ==== (end) ====

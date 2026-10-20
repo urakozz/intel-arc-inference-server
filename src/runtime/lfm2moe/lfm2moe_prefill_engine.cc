@@ -219,9 +219,13 @@ void Lfm2MoeEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     D.cx.replay(*it->recording);
   };
 
+  // Spec 24e's prefix cache: with a block hook every chunk ends at a block end or at the prompt end - Engine::prefill's rule,
+  // one shared function - so each completed block is a storable one. (kBlock is kPfC, so a chunk of the default width is
+  // cut only where the prompt starts inside a block or ends.)
+  const bool hooked = static_cast<bool>(block_hook_);
   uint32_t C = 0;
   for (size_t off = 0; off < ids.size(); off += C) {
-    C = prefill_chunk_rows(base + uint32_t(off), ids.size() - off, chunk, false, kPfC);
+    C = prefill_chunk_rows(base + uint32_t(off), ids.size() - off, chunk, hooked, kBlock);
     const uint32_t pos = base + uint32_t(off);
     const bool last_chunk = off + C == ids.size();
     wait_all("before a chunk");   // before touching the ids buffer or a Control block
@@ -271,6 +275,14 @@ void Lfm2MoeEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
         fail("device 0's prefill chunk at " + std::to_string(pos) + " did not finish within " +
              std::to_string(opt_.prefill_timeout_ms) + " ms");
     }
+    const uint32_t end = pos + C;
+    if (hooked && off + C < ids.size() && end % kBlock == 0) {
+      // A mid-prompt block end: the KV holds exactly [0, end) and the rings the Bx of end - 1 and end - 2 (the chunk's
+      // last min(C, 2) rows); say so in every Control before the hook runs, so a hook that throws leaves pos matching the
+      // chunks written.
+      set_ctl(end, 0);
+      block_hook_(end, true);
+    }
   }
 
   // The tail on the last device: pos = base + L - 1 and n_active = 1 make argmax_stage2 leave pos = base + L and the
@@ -286,6 +298,10 @@ void Lfm2MoeEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   }
   // The token's way back (16b's mirror): device 0 reads pos and cur_token from its own block next step.
   if (ndev == 2) std::memcpy(stage_control(0), stage_control(1), sizeof(Control));
+  if (hooked) {   // the prompt end, the first generated id in cur_token (spec 24e)
+    const uint32_t end = base + uint32_t(ids.size());
+    block_hook_(end, end % kBlock == 0);
+  }
 }
 
 }  // namespace runtime::lfm2moe

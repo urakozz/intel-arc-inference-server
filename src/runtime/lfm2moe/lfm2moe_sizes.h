@@ -83,6 +83,42 @@ inline size_t kv_layer_bytes(const model::Lfm2MoeDesc& d, uint32_t max_len) {
 }
 inline size_t ring_layer_bytes(const model::Lfm2MoeDesc& d) { return size_t(loader::lfm::kConvRing) * d.hidden * 2; }
 
+// --- spec 24e: prefix-cache snapshots (spec 7's PrefixCache on LFM2.5) -------------------------------------------------
+// What a session leaves behind between replays, besides `pos`: the 10 attention layers' growing KV (the cache's BLOCKS,
+// as every model's) and the 30 conv layers' Bx rings. The conv of the next position p reads Bx of p - 1 and p - 2 (kernel 3)
+// and writes its own, so the whole recurrent "state" at position p is the two ring rows of positions p - 1 and p - 2 per
+// conv layer: 30 x 2 x 2048 x 2 B = 245,760 B at the real shapes (derived), the same at every pos. A position below 0 is a
+// zero row on the host (lfm_conv reads 0 there; a restore at 0 or 1 writes the zeros into the slots).
+//
+// The HOST layouts (spec 16b's rule: --pp 2's is --pp 1's byte for byte, so an entry moves between one card and two
+// unchanged - every layer is addressed through the placement, never by device order):
+//   state  [conv layer, in layer order][j = 0: position pos - 1, j = 1: position pos - 2][hidden] bf16
+//   kv     [K | V][attention layer, in layer order][end - begin][kv_heads x 64] bf16 (runtime::Engine's / Kolibri's order)
+// A run is one contiguous range of one device allocation (`tensor`: the device's kv_k, kv_v or conv_ring), in host order.
+// `zero` runs cover positions before 0 (state runs only): save_state writes zeros to the host for them (the slot is not
+// read), load_state copies the host's zeros into the slot (position q < 0 lives in slot q + 16).
+inline constexpr uint32_t kStatePositions = 2;
+enum class SnapTensor : uint32_t { KvK, KvV, ConvRing };
+struct SnapRun {
+  uint32_t device = 0;
+  SnapTensor tensor = SnapTensor::KvK;
+  size_t offset = 0, bytes = 0;   // within the device allocation
+  bool zero = false;              // a position before 0 (state runs only)
+};
+// 245,760 at the real shapes.
+inline size_t state_snapshot_bytes(const model::Lfm2MoeDesc& d) {
+  return size_t(d.conv_layers()) * kStatePositions * d.hidden * 2;
+}
+// 20,480 B a position at the real shapes.
+inline size_t kv_snapshot_bytes(const model::Lfm2MoeDesc& d, uint32_t n_pos) {
+  return size_t(n_pos) * 2 * d.attn_layers() * d.kv_n() * 2;
+}
+// The ring rows of positions pos - 1 and pos - 2, every conv layer. Throws when the ring cannot hold them.
+std::vector<SnapRun> state_runs(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p, uint32_t pos);
+// Positions [begin, end) of every attention layer, K then V. Throws unless begin <= end <= max_len.
+std::vector<SnapRun> kv_runs(const model::Lfm2MoeDesc& d, const model::LfmPlacement& p, uint32_t max_len, uint32_t begin,
+                             uint32_t end);
+
 // The decode list's launches on one device (the hand-off's copies and barriers excluded; peer's pp_send / pp_recv
 // included), and their sum (spec 24 §4.5):
 //   device 0     lfm_embed_gather
