@@ -759,9 +759,9 @@ void case_server() {
   std::printf("server: greedy chat of %zu prompt ids -> 24 ids == the decode run; again: restored at %u, same ids\n",
               prompt.size(), cached);
 
-  // Sampled with the model's defaults (T 0.1, top-k 50, penalty 1.05; the request names none), seeded: reproducible on a
-  // fresh server, the first id drawn from the prefill's row too (n reads for n ids), only words the row allows.
-  const json sampled = {{"seed", 1234}};
+  // Sampled (a flat row: T 8, so the draws matter; the model's top-p 1.0 and penalty 1.05), seeded: reproducible on a fresh
+  // server and on the same one, the first id drawn from the prefill's row too (n reads for n ids), only words the row allows.
+  const json sampled = {{"seed", 1234}, {"temperature", 8.0}, {"top_k", 24}, {"top_p", 1.0}};   // a flat row: the draws matter
   Ids a, b;
   size_t reads = 0;
   {
@@ -772,11 +772,20 @@ void case_server() {
   {
     ServeFixture g(/*cache=*/false);
     b = g.out_ids(g.chat(sampled));
+    // The same seeded request again on the SAME server draws the same ids (the RNG is re-seeded per request); an unseeded one
+    // continues the stream and differs.
+    CHECK(g.out_ids(g.chat(sampled)) == b);
+    json other = sampled;
+    other["seed"] = 99;
+    CHECK(g.out_ids(g.chat(other)) != b);
+    json unseeded = sampled;
+    unseeded.erase("seed");
+    CHECK(g.out_ids(g.chat(unseeded)) != b);
   }
   CHECK(a == b);
   CHECK_EQ(reads, a.size());
   for (uint32_t id : a) CHECK(std::find(f.eng.words.begin(), f.eng.words.end(), id) != f.eng.words.end());
-  std::printf("server: a seeded request with LFM2's default sampling reproducible (%zu ids, %zu rows read), every id a "
+  std::printf("server: a seeded request (T 8) reproducible on a fresh server and on the same one (%zu ids, %zu rows read), every id a "
               "vocabulary word\n", a.size(), reads);
 
   // Decision 1: the repetition penalty reaches the host sampler through the server's SeenIds. The row is {A 10, B 9.9}, T 0.01,
