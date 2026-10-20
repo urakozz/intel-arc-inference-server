@@ -3460,6 +3460,116 @@ st_r50_load_real() {
 }
 
 # ======================================================================================
+row 51 "spec 24c - LFM2.5-24B-A2B decode: the launch-count P0, short conv / hd64 attention / sigmoid-bf16 route / 64 x 1536 MoE, the fused arms, one card then two (plan 24c)"
+rownote 51 "Written blind on the Mac: NO lfm_* binary has ever been compiled by ocloc (kernel_cmdlines +72 / -0 / ~0: 57 of them P0's lines - every gemv at LFM2's five shapes x S x layout, the head, the argmax at 128000 / 125017, the stand-ins - and 15 family kernels incl. the three fused arms and a test-only M = 4 conv). No existing .cl edited: G0's sha is F0. On the Mac's GPU (tools/mac/clrun/lfm2moe_run, indicative): the norm (_NF, _S1, _S2 against torch's rows), the conv over 18 positions (the ring wraps), the router, the route (incl. a tie at the 4th / 5th, all-equal, a reordering bias, a dominant expert), gate||up, down + the rank-order combine + the fold, the attention prep at 0 / 1 / 4095 / 131071, the gather, the eager attention at 6 / 300 / 3000 keys against torch, and the three arms against their as-built pairs - all exact (silu_mul 1 ulp: exp). lfm_attn.cl (flash: shuffles, 2D block reads) has never run anywhere."
+rownote 51 "P0 first (decision 6): r51.p0 runs probe_lfm_step on the card before any engine stage - the 383-launch skeleton from EXISTING kernels at LFM2's shapes, the 277-launch fused skeleton, the GEMV-only floor and 383 noops, interleaved, at depth 4096 and 32768, with --sweep-s (every int4 shape at S 1/2/4/8/16 x layouts 0/1; the smallest S within 3 % of the best) and --pair (stage A of the two-launch norm). Stand-ins: moe.cl reads 5 slots (x 4/5 PROPOSED), Kolibri's attention is head_dim 128 (x 1/2 PROPOSED), the conv / silu / embed slots are noops. Write the table into docs/probe-lfm2moe-<date>.md (a 'P0' section): step ms per list, the gap per launch, the small-kernel floor, the S picks. The decision rule (PROPOSED): every arm whose skeleton saving is >= 1 % of the step is A/B'd in r51.speed; the S picks become model::Lfm2MoeDesc::linears' {S, layout} (24b's PROVISIONAL S 1 everywhere until then) - a re-pick adds the matching gemv / lfm_res_norm / lfm_conv / lfm_silu_mul lines (lfm2moe_variant_names_test names them)."
+rownote 51 "Tolerances: B70_LFM_TIE_TOL = 4e-3 (RULED 2026-10-16, spec 24 §12) on the 4th / 5th sel; an exact 0 gap is undetermined. The h-tap bars (median >= 0.9998, min >= 0.99 a layer) are PROPOSED; the conv state after the prompt is held to the h min bar (not bitwise: the engine's int4 GEMV and the reference's dequantised bf16 linear round differently). Flash against fp64 at cosine 0.99999 (spec 6 K1)."
+rownote 51 "Data: the synthetics (row 50's r50.synth: oracle-out-lfm2moe-synth/{w,proj}) and their golden sets (r51.synth_golden: lfm2moe_oracle.sh export on each -> \$DATA/oracle-out-lfm2moe-{w,proj}, 4 layers, minutes each, ESTIMATED). 24q's RTN export (data key lfm2moe_rtn) and its golden sets (oracle_lfm2moe_rtn) are not built: r51.rtn / r51.ours / r51.speed SKIP until they exist; configure -DB70_LFM2MOE_RTN=<export dir> -DB70_LFM2MOE_RTN_ORACLE_DIR=<its golden dir> (and _OURS) when they do."
+stage r51.k0       51 default cpu -                              g0.sha,g0.bitwise,g0.suite "K0 (F0): every pre-existing binary identical; kernel_cmdlines +72 / -0 / ~0 (no existing .cl edited)"
+st_r51_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r51.p0       51 default gpu -                              r51.k0   "P0: probe_lfm_step --depth 4096 / 32768, interleaved a / fused / gemv / noop, --sweep-s, --pair (the table decides decision 6's arms and the S picks)"
+st_r51_p0() {
+  idle r51-p0
+  x "uptime"
+  chk "build/tools/probe/probe_lfm_step --depth 4096 --rounds 9 --sweep-s --pair > $STATE/r51-p0-4096.md" "P0 at depth 4096 (+ the S sweep, the norm pair)"
+  chk "build/tools/probe/probe_lfm_step --depth 32768 --rounds 9 > $STATE/r51-p0-32768.md" "P0 at depth 32768"
+  x "cat $STATE/r51-p0-4096.md $STATE/r51-p0-32768.md"
+  grab_all p0 '^\| (a|fused|gemv|noop) \||^- step|gap per launch|roofline|\*\*pick\*\*|--pair' 60
+  finish
+}
+stage r51.host     51 default cpu -                              -        "host: lfm2moe_ref_test, lfm2moe_variant_names_test, lfm2moe_plan_test, probe_lfm_step_shapes_test"
+st_r51_host() {
+  run_tests '^(lfm2moe_ref_test|lfm2moe_variant_names_test|lfm2moe_plan_test|probe_lfm_step_shapes_test)$'
+  jgrab host '^(lfm2moe_(ref|variant_names|plan)_test|probe_lfm_step_shapes_test)$' 'OK|ok|bitwise|launches|decode scratch|differ'
+  finish
+}
+stage r51.k1       51 default gpu -                              r51.k0   "kbins of the block + lfm2moe_kernels_test (F2 bitwise; flash at cosine 0.99999 at 1 .. 131072 keys; each fused arm against its pair)"
+st_r51_k1() {
+  kbins lfm_res_norm_M1_K2048_W8_NF lfm_res_norm_M1_K2048_W8_S1 lfm_res_norm_M1_K2048_W8_S1_R lfm_conv_M1_K2048_S1 \
+    lfm_conv_M4_K2048_S1 lfm_conv_in_M1_K2048_L1 lfm_router_M1_K2048_E64 lfm_route_M1_E64_T4 \
+    lfm_moe_M1_E64_T4_D2048_I1536 lfm_moe_M1_E64_T4_D2048_I1536_R lfm_attn_prep_M1_S1_Q32KV8 lfm_attn_M1_T32_Q32KV8 \
+    lfm_attn_eager_M1_T32_Q32KV8 lfm_silu_mul_M1_I11776_S1 lfm_embed_gather_M1_K2048_V128000 \
+    lfm_argmax_stage1_M1_V128000_U125017 lfm_argmax_stage2_V128000 gemv_i8w_M1_K2048_N128000 gemv_bf16_M1_K2048_N128000 \
+    gemv_M1_K2048_N6144_S1_L1 gemv_M1_K2048_N2048_S1_L1 gemv_M1_K2048_N3072_S1_L0 gemv_M1_K2048_N23552_S1_L0 \
+    gemv_M1_K11776_N2048_S1_L1
+  run_tests '^lfm2moe_kernels_test$'
+  jgrab k1 '^lfm2moe_kernels_test$' 'bitwise|cosine|within|arm|OK'
+  finish
+}
+stage r51.reject   51 default gpu -                              -        "cli_reject_lfm2moe_* (prefill, mtp, kv8, layers, serve) - refused before the device"
+st_r51_reject() {
+  run_tests '^cli_reject_lfm2moe_' '' '' 'ZE_AFFINITY_MASK=0,1'
+  finish
+}
+stage r51.synth_golden 51 optin cpu oracle_image,lfm2moe_synth   -        "the synthetics' golden sets: lfm2moe_oracle.sh export on oracle-out-lfm2moe-synth/w and /proj (short, 4k, agentic; the engine-format reference: int4 dequantised) -> \$DATA/oracle-out-lfm2moe-{w,proj}; then re-links oracle-out*"
+st_r51_synth_golden() {
+  local s
+  for s in w proj; do
+    chk "LFM_PROMPTS='lfm2moe_short lfm2moe_4k lfm2moe_agentic' tools/box_validate/lfm2moe_oracle.sh $DATA export $DATA/oracle-out-lfm2moe-synth/$s" \
+      "the synthetic ($s) golden sets"
+  done
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_oracle_lfm2moe_synth' $STATE/have.env"
+  grab_all gap 'sel gap|^wall' 20
+  finish
+}
+stage r51.k3       51 default gpu lfm2moe_synth                  r51.k1   "lfm2moe_decode_test on the synthetics: plan == allocation, 41 launches, two runs bitwise (tokens, logits, routes, rings, KV, both residuals, every tap), eager / bf16 head, --fuse route / router / conv / all bitwise none"
+st_r51_k3() {
+  run_tests '^lfm2moe_decode_synth_(w|proj|eager|bf16head|fuse_(route|router|conv|all))_test$'
+  jgrab k3 '^lfm2moe_decode_synth' 'plan == allocation|launches|F4|Review Focus 4|memory|OK'
+  finish
+}
+stage r51.golden   51 default gpu lfm2moe_synth,oracle_lfm2moe_synth r51.k3 "lfm2moe_golden_test on the synthetics: tokens tie-aware, routes within B70_LFM_TIE_TOL, conv state, h taps - short / 4k / agentic x both spellings; _bf16head, _eager"
+st_r51_golden() {
+  run_tests '^lfm2moe_golden_synth_(w|proj)_lfm2moe_(short|4k|agentic)_test$|^lfm2moe_golden_synth_short_(bf16head|eager)_test$'
+  jgrab golden '^lfm2moe_golden_synth' 'gate:|routing:|conv state|^  h |step [0-9]+:|OK'
+  finish
+}
+stage r51.rtn      51 default gpu lfm2moe_rtn,oracle_lfm2moe_rtn r51.k3  "the RTN export: decode_test (383 launches, --fuse each arm) and golden_test short / 4k / agentic (+ bf16 head, eager)"
+st_r51_rtn() {
+  run_tests '^lfm2moe_decode_rtn(_fuse_(route|router|conv|all))?_test$|^lfm2moe_golden_rtn_(lfm2moe_(short|4k|agentic)|short_bf16head|short_eager)_test$'
+  jgrab rtn '^lfm2moe_(decode|golden)_rtn' 'plan == allocation|launches|gate:|routing:|conv state|OK'
+  finish
+}
+stage r51.ours     51 optin   gpu lfm2moe_ours,oracle_lfm2moe_ours r51.k3 "24q's AutoRound export: the same golden gates (short / 4k / agentic)"
+st_r51_ours() {
+  run_tests '^lfm2moe_golden_ours_lfm2moe_(short|4k|agentic)_test$'
+  jgrab ours '^lfm2moe_golden_ours' 'gate:|routing:|conv state|OK'
+  finish
+}
+stage r51.pp       51 default gpu lfm2moe_synth                  r51.k3   "lfm2moe_pp_test: two cards bitwise one (copy, peer; a dense cut at split 2 and a MoE cut at 3; P4; replay; the RTN export at 20 / 19 when present) + the golden gate across split 2 (peer)"
+st_r51_pp() {
+  run_tests '^(lfm2moe_pp_test|lfm2moe_golden_synth_short_pp2_test)$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab pp '^lfm2moe_(pp_test|golden_synth_short_pp2)' 'landing|device|P4|tokens|gate:|OK'
+  finish
+}
+stage r51.speed    51 optin   gpu lfm2moe_rtn                    r51.rtn  "Task 8: decode at depth 1024 / 4096 / 32768 / 131072, B70_LFM_FUSE none vs each arm vs all as interleaved rounds (median of 3), int8 / bf16 head, flash / eager; --profile --repeats 5 at 4096"
+st_r51_speed() {
+  local snap='$(tools/box_validate/data.sh resolve "${SNAP_LFM2MOE_RTN:-?}")' r d a i
+  local arms=(none route router conv all)
+  idle r51-speed
+  x "uptime"
+  for d in 1024 4096 32768 131072; do
+    for r in 1 2 3; do
+      for i in 0 1 2 3 4; do   # rotated per round: interleaved, not sequential arms
+        a=${arms[$(((i + r) % 5))]}
+        chk "B70_LFM_FUSE=$a build/src/cli/b70-decode $snap --bench --depth $d --tg 256 --max-len auto" "depth $d fuse $a round $r"
+      done
+    done
+    chk "build/src/cli/b70-decode $snap --bench --depth $d --tg 256 --max-len auto --lm-head bf16" "depth $d bf16 head"
+    chk "B70_LFM_ATTN=eager build/src/cli/b70-decode $snap --bench --depth $d --tg 256 --max-len auto" "depth $d eager"
+  done
+  chk "build/src/cli/b70-decode $snap --profile --depth 4096 --steps 32 --repeats 5" "--profile at 4096"
+  x "uptime"
+  grab_all rows '^\| b70-decode' 80
+  grab_all profile '^\| (lfm_|gemv|argmax)|^MEASURED' 40
+  finish
+}
+
+# ======================================================================================
 row 54 "spec 19b - the DFlash drafter on the card: loader::load_drafter (z-lab/Qwen3.8-27B-DFlash2 beside Qwen3.8, bf16 or int8 at load, the target's embedding and head shared), the df_* kernels (embed, norms, the grouped two-tap convs, the block's q / k / v, ring + block attention, top-16 with the vocab mask and the draft vocabulary's id map, the selector walk), the captured draft (87 launches) and projection (8) lists, the planner's drafter term; D0 and D1 (plan 19b)"
 rownote 54 "Written blind on the Mac: no df_* binary has ever been compiled (ocloc is the box's) - r54.kernels' kbins is the first build of the 14 new command lines (kernel_cmdlines +14 / -0 / ~0: 8 df_*, the bf16 head at 7 rows, the compact heads at 7 rows). Nothing binds them without a drafter (19c's --spec dflash): D0 is G0. On the Mac's GPU (tools/mac/clrun/dflash_run, indicative) the whole draft and projection lists ran at the fixture's tiny shapes against the host twin: rows / scores cos 1.0000000 in 8 of 9 cases (one at 0.99999 - Apple's 1 / sqrt is not correctly rounded), every walk equal, a 256-id draft vocabulary bitwise the full head's, v1. The twin (tests/kernels/dflash_ref.h) matches tools/oracle/dflash_ref.py to 6e-7 (dflash_ref_test). The kernels use work-group reductions only (no sub-group ops): their speed on the B70 is unmeasured."
 rownote 54 "Data: the drafter (hf download z-lab/Qwen3.8-27B-DFlash2, 3.85 GB; data key dflash) for r54.load / r54.draft / r54.d1; 19a's tap dumps (the Mac's oracle-out-19a/dumps, 2.7 GB, and oracle-out-19a/draft_vocab.ranked.ids: tools/box_validate.sh --push-data; data key oracle_dflash_dumps) for r54.d1; the gate checkpoint (qwen). r54.d1_ref runs dflash_ref.py in the oracle image: ~15 GB RSS (the drafter fp32 7.2 GB, the target's head and embedding), ~1-2 s a draft on 44 threads, ESTIMATED (16 anchors x 37 dumps x 3 arms ~ 0.5-1 h)."
