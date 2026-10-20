@@ -298,6 +298,73 @@ size_t Lfm2MoeEngine::launches() const {
 }
 const CapturedStep& Lfm2MoeEngine::step(uint32_t dev) const { return *st(dev).step; }
 
+// --- spec 24e: prefix-cache snapshots (the run lists are runtime/lfm2moe/lfm2moe_sizes.h's) ---------------------------------
+l0::Mem& Lfm2MoeEngine::snap_mem(uint32_t dev, SnapTensor t) const {
+  Lfm2MoeBuffers& b = st(dev).buffers;
+  switch (t) {
+    case SnapTensor::KvK: return b.kv_k;
+    case SnapTensor::KvV: return b.kv_v;
+    default: return b.conv_ring;
+  }
+}
+
+void Lfm2MoeEngine::settle_all(const char* what) {
+  for (uint32_t i = 0; i < st_.size(); ++i)
+    if (!settle(i))
+      throw std::runtime_error(std::string("runtime::lfm2moe::Lfm2MoeEngine::") + what + ": device " + std::to_string(i) +
+                               "'s last step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
+}
+
+size_t Lfm2MoeEngine::state_bytes() const { return state_snapshot_bytes(model_.desc); }
+size_t Lfm2MoeEngine::kv_bytes(uint32_t n_pos) const { return kv_snapshot_bytes(model_.desc, n_pos); }
+
+void Lfm2MoeEngine::save_state(void* host) {
+  settle_all("save_state");
+  auto* h = static_cast<uint8_t*>(host);
+  for (const SnapRun& r : state_runs(model_.desc, model_.place, pos())) {
+    if (r.zero)
+      std::memset(h, 0, r.bytes);   // a position before 0: never read, zero on the host
+    else
+      st(r.device).imm.copy(h, static_cast<const uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, r.bytes);
+    h += r.bytes;
+  }
+}
+
+void Lfm2MoeEngine::load_state(const void* host, uint32_t p) {
+  if (p > max_len_)
+    throw std::runtime_error("runtime::lfm2moe::Lfm2MoeEngine::load_state: pos " + std::to_string(p) + " exceeds max_len " +
+                             std::to_string(max_len_));
+  if (broken_) reset();   // a failed hand-off: the restore below rewrites what the session reads
+  settle_all("load_state");
+  const auto* h = static_cast<const uint8_t*>(host);
+  for (const SnapRun& r : state_runs(model_.desc, model_.place, p)) {
+    st(r.device).imm.copy(static_cast<uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, h, r.bytes);
+    h += r.bytes;
+  }
+  for (auto& s : st_) {
+    s->ctl->pos = p;
+    s->ctl->n_active = 0;
+  }
+}
+
+void Lfm2MoeEngine::save_kv(uint32_t begin, uint32_t end, void* host) {
+  settle_all("save_kv");
+  auto* h = static_cast<uint8_t*>(host);
+  for (const SnapRun& r : kv_runs(model_.desc, model_.place, max_len_, begin, end)) {
+    st(r.device).imm.copy(h, static_cast<const uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, r.bytes);
+    h += r.bytes;
+  }
+}
+
+void Lfm2MoeEngine::load_kv(uint32_t begin, uint32_t end, const void* host) {
+  settle_all("load_kv");
+  const auto* h = static_cast<const uint8_t*>(host);
+  for (const SnapRun& r : kv_runs(model_.desc, model_.place, max_len_, begin, end)) {
+    st(r.device).imm.copy(static_cast<uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, h, r.bytes);
+    h += r.bytes;
+  }
+}
+
 std::vector<uint16_t> Lfm2MoeEngine::read_debug_h() {
   const model::Lfm2MoeDesc& d = model_.desc;
   if (!taps_[0]) throw std::runtime_error("runtime::lfm2moe::Lfm2MoeEngine: constructed without debug_tap");
