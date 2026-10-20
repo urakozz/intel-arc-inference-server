@@ -184,6 +184,16 @@ case "${1:-}" in
     # Spec 24q (not built when 24b was written: r50.load_real SKIPs 77 until it exists).
     have lfm2moe_rtn "LFM2.5-24B-A2B's RTN int4 g64 export (spec 24 §5: 24q's development checkpoint; not built yet)" \
       bash -c 'false'
+    # Spec 24c (queue row 51): the synthetics' golden sets (r51.synth_golden: lfm2moe_oracle.sh export on each),
+    # 24q's golden sets on its exports, and its AutoRound export (none built yet).
+    have oracle_lfm2moe_synth "oracle-out-lfm2moe-{w,proj}/lfm2moe_{short,4k,agentic}.golden.safetensors (spec 24c: r51.synth_golden)" \
+      bash -c 'for s in w proj; do for p in lfm2moe_short lfm2moe_4k lfm2moe_agentic; do test -s oracle-out-lfm2moe-$s/$p.golden.safetensors || exit 1; done; done'
+    have oracle_lfm2moe_rtn "24q's golden sets on the RTN export (lfm2moe_oracle.sh export <the RTN export>; not built yet)" \
+      bash -c 'false'
+    have lfm2moe_ours "24q's AutoRound export ${SNAP_LFM2MOE_OURS:-urakozz/LFM2.5-24B-A2B-W4A16-g64-AutoRound-GPTQ} (not built yet)" \
+      complete "${SNAP_LFM2MOE_OURS:-/nonexistent}"
+    have oracle_lfm2moe_ours "24q's golden sets on the AutoRound export (not built yet)" \
+      bash -c 'false'
     have tok_python "a python with tokenizers (${TOK_PYTHON:-?})" "${TOK_PYTHON:-/nonexistent}" -c 'import tokenizers'
     # shellcheck disable=SC2016 # expanded by the inner bash
     have uvx "uvx (llama-benchy)" bash -c 'command -v uvx || test -x "$HOME/.local/bin/uvx"'

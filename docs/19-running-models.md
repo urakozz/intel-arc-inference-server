@@ -602,3 +602,39 @@ no `--profile`, image / video content refused.
 
 **Relevant variables:** `B70_MUSE_ATTN` (`flash` | `eager`, decode and prefill alike), `B70_PREFILL_REPLAY`,
 `B70_MUSE_TOKENIZER_JSON` (`muse_tokenizer_test`'s tokenizer.json).
+
+## LFM2.5-24B-A2B (spec 24)
+
+`LiquidAI/LFM2.5-24B-A2B` (`model_type lfm2_moe`, LFM Open License v1.0) re-quantised by us to int4 g64 (spec 24 §5:
+24q's RTN / AutoRound export - **neither exists yet**; `make_synth.py --layers 4` gives real-width synthetic
+checkpoints): 40 layers, hidden 2048, 30 short-conv layers and 10 GQA attention layers (32 / 8 heads x 64, RoPE on
+all of them), 2 dense SwiGLU layers then 38 MoE layers (64 experts, top-4 x 1536, a sigmoid router with a
+selection-only bias), a tied 128000-row head (125017 real ids), context 131072.
+
+**Status: decode only, never run on a B70** (queue row 51; spec 24c). The whole model and 131072 positions fit **one
+card** (13.39 GB of weights with the int8 head + 2.68 GB of KV, derived); `--pp 2` splits the layers over two cards
+(decision 10: optional). The prompt goes through the decode list one replay per id - prefill is spec 24d, serving
+(`b70-serve`) spec 24e (refused by name until then). Expected (derived): 383 launches a token (403 with
+`B70_LFM_ATTN=eager`, 277 with `B70_LFM_FUSE=all`), 1.43 GB read a token plus 20,480 B of KV a position - a roofline
+of 411 t/s, ~4.5 ms a token ESTIMATED at depth 4096 (spec 24 §3: the step is many small kernels).
+
+```sh
+S=oracle-out-lfm2moe-synth/w                       # a synthetic checkpoint (24b's make_synth.py --layers 4)
+P=tests/golden/prompts/lfm2moe_short.ids
+
+# every command below: never run on a B70
+./build/tools/probe/probe_lfm_step --depth 4096 --rounds 9 --sweep-s --pair      # P0: the skeleton lists (no model)
+./build/src/cli/b70-decode $S --ids $P --n 32                                     # one card, int8 head
+./build/src/cli/b70-decode $S --ids $P --n 32 --lm-head bf16                      # the head over the embedding tiles
+./build/src/cli/b70-decode <export> --bench --depth 4096 --tg 256 --max-len auto
+./build/src/cli/b70-decode <export> --profile --depth 4096 --steps 32 --repeats 5 # the per-launch anatomy
+B70_LFM_FUSE=all ./build/src/cli/b70-decode <export> --bench --depth 4096 --tg 256   # 277 launches, bitwise none
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode $S --ids $P --n 32 --pp 2 --pipeline-split 2 --pipeline-handoff peer
+```
+
+**Limits.** No prefill (`--prefill*` refused naming spec 24d), no serving (spec 24e), no `--mtp` / `--spec` (no MTP
+head), bf16 KV only (`--kv-cache int8` refused, decision 11), no `--layers` (the whole model fits), context at most
+131072, `--device` refused with `--pp 2`.
+
+**Relevant variables:** `B70_LFM_ATTN` (`flash` | `eager`), `B70_LFM_FUSE` (`none` | `all` | a comma list of `route`,
+`router`, `conv`), `B70_LFM_TIE_TOL` (the golden gate's near-tie tolerance, 4e-3).

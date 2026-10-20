@@ -718,3 +718,69 @@ sum of `layer_weight_bytes`'s own per-layer outputs, `CHECK_EQ`'d against an ind
   spellings; the box's own run is the same command, for its own record); `r50.load_synth` (the first time
   `load_lfm2moe` ever touches a card); `r50.load_real`, which needs 24q's export (`have lfm2moe_rtn`, currently
   always false) - genuinely blocked until 24q runs.
+
+## 14. 24c as built (2026-10-20; the Mac only - nothing has run on a card, no lfm_* binary has been compiled by ocloc)
+
+Plan: `docs/superpowers/plans/2026-10-15-spec24c-lfm2moe-decode.md`, branch `spec24c-lfm2moe-decode`. Box validation:
+queue row 51 (`tools/box_validate/stages.sh` `row 51`). Every count below is derived and asserted by a host test.
+
+- **The list (§4.5), as built** (`runtime/lfm2moe/lfm2moe_capture.{h,cc}`; `runtime::lfm2moe::device_launches`):
+  dense conv 8, conv + MoE 9, attention + MoE 11 (eager 13), the head 5 (the gather first on device 0; the final
+  norm, the head GEMV, two argmax stages last): **383** a token on one card, **403** eager; the arms `route` 345,
+  `router` 345, `conv` 353, all three **277**; the synthetic N 4: 41 (34 with all arms); two cards +0 (`copy`) / +2
+  (`peer`). `lfm2moe_plan_test` asserts every one; `ProfileEvents`' 1024 holds them all.
+- **The norm sites.** One launch a site (`lfm_res_norm`, 8 work-groups of 256 - every work-group folds the whole row
+  and reduces Σ r² by the same fixed tree, writes only its chunk): `_S<s>` folds the pending split-K slices from
+  h[cur] into h[1 - cur] (the residual ping-pongs; the capture asserts a fold never writes the buffer it read), `_NF`
+  only normalises. The plan's per-type table mislabelled two sites; the rule as built: layer 0's operator norm `_NF`
+  (the gathered embedding), layers 1-2's `_S` (the dense down slices), every later operator norm `_NF` (lfm_moe_down
+  folded), every ffn_norm `_S`, the final embedding_norm `_NF` (or `_S` after a dense last layer).
+- **The kernels** (`src/kernels/lfm2moe/`, `kernels::lfm2moe`): `lfm_prep.cl` (`lfm_res_norm` + its `_R` router arm,
+  `lfm_silu_mul` at 11776, `lfm_attn_prep` at head_dim 64 with RoPE on every attention layer, `lfm_embed_gather` from
+  the tiled embedding), `lfm_conv.cl` (`lfm_conv` over the Bx ring; `lfm_conv_in`, the conv arm: gemv.cl's inner loop
+  at split-K 1 on the conv-tile `in_proj` with the conv as its epilogue), `lfm_moe.cl` (`lfm_router` - 64 rows, per
+  column 8 spans of 256 k then a stride-4/2/1 tree, the order the `_R` arm repeats -, `lfm_route` - §2.3's chain,
+  exact ties to the lower id, the route row {ids[4] rank order, w[4], sel[5], d} -, `lfm_moe_gate_up` (+ `_R`: the
+  route recomputed in every work-group) and `lfm_moe_down` - the rank-order fp32 combine from t0, one rounding, the
+  fold), `lfm_expert.h` (the one expert-address macro; ocloc gets `-I` the family directory), `lfm_attn.cl` (kol_attn's
+  full path at head_dim 64: 4 sub-groups, 4 positions a sub-group a wave, 4 elements a lane, scale 0.125),
+  `lfm_attn_eager.cl` (the reference's bf16 chain, four launches). Binary names carry every define (the work-group count
+  `W8` and the layout `L<l>` the plan's examples left out). Reused at LFM2's shapes: gemv.cl at every S x layout of the
+  five int4 shapes, gemv_i8w / gemv_bf16 for the tied head, argmax.cl at 128000 / 125017.
+- **The int4 cells.** The decode list binds `model::Lfm2MoeDesc::linears`' {S, layout} (24b's PROVISIONAL: S 1
+  everywhere; layout 1 for in_proj / out_proj / o_proj / the dense down, 0 for q||k||v and the dense gate||up) - **no S
+  pick has been measured**: P0's `--sweep-s` (r51.p0) produces them; a re-pick edits the descriptor and adds the
+  matching `lfm_res_norm` / `lfm_conv` / `lfm_silu_mul` / `lfm_attn_prep` lines (the names test names any missing one).
+  `GEMV_BLOCK2D` (layout 0 only) is set on no LFM2 cell.
+- **P0's stand-ins** (`tools/probe/probe_lfm_step.cc`, `lfm_step_shapes.h`): moe.cl at E64 T4 D2048 I1536 (5 slots: the
+  shared slot reads a 65th block - x 4/5 PROPOSED), Kolibri's attention at Q32 KV8 (head_dim 128 - x 1/2 PROPOSED),
+  `kol_norm_finish` at K 2048 over 8 work-groups as the ONE launch a norm slot (keeps 383; `--pair` times stage A of
+  the two-launch form separately), the router as `gemv_bf16` N 64, noops for conv / silu / embed. The lists bind 24b's
+  cells, or `--sweep-s`'s picks at 24b's layouts.
+- **Two cards.** The cut hands off h (4 KB) at a MoE cut - `pp_landing_layout(4096, 0)`, the receiving norm `_NF`
+  recomputes Σ. At a DENSE cut (split 1 or 2, e.g. the synthetic N 4 at split 2 that the plan's test names) the down
+  GEMV's slices are still pending: they cross too (S x 2048 fp32 in the landing's sums region) and device 1's first
+  norm is `_S` - departure from §4.5's "h only", which holds for every cut the real model's split picks (20).
+- **The host twin and the fixture.** `tests/kernels/lfm2moe_ref.h` (namespace `lfmref`) against
+  `tools/oracle/lfm2moe_fixture.py`'s torch values (transformers 5.19.0's own RoPE and eager attention, 24a's restated
+  ops): BITWISE on every case, including the fine norm rows, the router's fp32 order (0 of 4096 logits off torch's bf16
+  linear), the whole MoE block on int4 experts whose scales make every dequantised weight a bf16 (0 of 8192 off), and
+  eager outputs at 3000 keys. torch's own tie order at the 4th / 5th is not the lower id (24a): the crafted tie rows
+  compare weights as multisets and assert our rule.
+- **F3's bars as built** (`tests/golden/lfm2moe_golden_test.cc`): tokens tie-aware (golden_common.h); routes as SETS
+  per (row, MoE layer) - one-expert differences within `B70_LFM_TIE_TOL` (default 4e-3, RULED) are near-ties, a 0 gap
+  undetermined, anything else fails; h taps median >= 0.9998 / min >= 0.99 a layer (PROPOSED); the conv state after
+  the prompt to the h min bar and its exact fraction printed - **not bitwise** as the plan asked: the engine's int4 GEMV
+  ((q - 8) x scale in fp32) and the engine-format reference (bf16(q - 8 x scale) through torch's bf16 linear) round
+  differently, so Bx differs past the first in_proj on real or synthetic weights. The kernel test and F4 hold the ring
+  bitwise.
+- **The CLI.** `b70-decode` dispatches `lfm2_moe` before the Qwen rules (`cli/lfm2moe_decode.h`): `--ids`, `--bench`,
+  `--profile` (one ingest at `--depth`, then `--repeats` x `--steps` profiled replays: per kernel+binary in-situ us,
+  Σ, the fence wall, the gap per launch), `--lm-head bf16|int8` (int8 the default), `--max-len N|auto` (16384 default),
+  `--pp 1|2`; refused before the device: `--prefill*` (24d), `--mtp` / `--spec`, `--kv-cache int8` (decision 11),
+  `--layers`. `b70-serve` refuses `lfm2_moe` naming 24e. The bench prompt is `lfm2moe_short.ids`'s first 46 ids (BOS +
+  prose).
+- **Generated data:** `tests/kernels/lfm2moe_fixture.h` (754 KB, committed; the command and versions in its header).
+  The synthetics' golden sets are the box's (r51.synth_golden: `lfm2moe_oracle.sh export`); none was made on the Mac.
+- **Not done here:** every card stage (P0 first), every kernel's first ocloc build, 24q's exports (the RTN / AutoRound
+  gates SKIP), Task 8's speed rows and decision 6's default (`B70_LFM_FUSE` stays `none`).
