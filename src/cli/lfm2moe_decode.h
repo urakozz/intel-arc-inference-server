@@ -93,7 +93,6 @@ inline void check_args(const DecodeArgs& a, const model::Lfm2MoeDesc& d) {
     if (a.pipe.have_handoff) throw std::runtime_error("--pipeline-handoff belongs to --pp 2 (how the residual crosses)");
     return;
   }
-  throw std::runtime_error("--pp 2 for LFM2.5-24B-A2B is plan 24c Task 6 (not built yet): it runs on one card");
   if (a.device != l0::Context::kFromEnv)
     throw std::runtime_error("--pp 2 runs on GPUs 0 and 1 of what Level Zero shows (ZE_AFFINITY_MASK picks which "
                              "two); --device names one card - drop it");
