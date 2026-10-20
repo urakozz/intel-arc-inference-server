@@ -4275,4 +4275,12 @@ target_include_directories(probe_lfm_step_shapes_test PRIVATE ${CMAKE_SOURCE_DIR
 target_link_libraries(probe_lfm_step_shapes_test PRIVATE b70_lfm2moe_model)
 add_test(NAME probe_lfm_step_shapes_test COMMAND probe_lfm_step_shapes_test)
 set_tests_properties(probe_lfm_step_shapes_test PROPERTIES LABELS lfm2moe)
+# Task 2: the kernels' host twin (tests/kernels/lfm2moe_ref.h) against 24a's lfm2moe_ref.py and transformers
+# 5.19.0's own pieces (tests/kernels/lfm2moe_fixture.h, tools/oracle/lfm2moe_fixture.py) and the semantics'
+# properties. Host only (the RoPE table is the loader's own host function).
+add_executable(lfm2moe_ref_test kernels/lfm2moe_ref_test.cc)
+target_include_directories(lfm2moe_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lfm2moe_ref_test PRIVATE b70_lfm2moe_loader)
+add_test(NAME lfm2moe_ref_test COMMAND lfm2moe_ref_test)
+set_tests_properties(lfm2moe_ref_test PROPERTIES LABELS lfm2moe TIMEOUT 600)
 # ==== Spec 24c: LFM2.5-24B-A2B decode (label lfm2moe) ==== (end) ====
