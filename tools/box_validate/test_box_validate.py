@@ -518,6 +518,87 @@ class ServeClientTest(Tmp):
         self.assertIn("the server did not come up", r.stdout)
 
 
+FAKE_AGENT = textwrap.dedent("""\
+    import json, os, sys
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    a = sys.argv[1:]
+    port = int(a[a.index("--port") + 1])
+    logdir = a[a.index("--log-requests") + 1]
+    n = [0]
+    sys.stderr.write("b70-serve: stand-in, prefix cache: 1 GiB\\n")
+    sys.stderr.flush()
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *x):
+            pass
+        def do_GET(self):
+            b = b'{"data": [{"id": "b70"}]}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            assert body["stream"] is True and body["temperature"] == 0 and body["tools"]
+            n[0] += 1
+            if n[0] == 1:
+                assert [m["role"] for m in body["messages"]] == ["system", "user"]
+                delta = {"tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                                         "function": {"name": "read", "arguments": "{}"}}]}
+                prompt, cached, out = 50, 0, 5
+            else:
+                assert [m["role"] for m in body["messages"]] == ["system", "user", "assistant", "tool"]
+                delta = {"content": "done"}
+                prompt, cached, out = 80, 48, 3
+            frames = [{"choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
+                      {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                      {"choices": [], "usage": {"prompt_tokens": prompt, "completion_tokens": out,
+                                                "prompt_tokens_details": {"cached_tokens": cached}}}]
+            text = "".join("data: " + json.dumps(f) + "\\n\\n" for f in frames) + "data: [DONE]\\n\\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(text.encode())
+            ids = list(range(50)) if n[0] == 1 else list(range(50)) + list(range(1000, 1005)) + [7] * 25
+            with open(os.path.join(logdir, "%06d.json" % n[0]), "w") as f:
+                json.dump({"prompt_ids": ids, "out_ids": list(range(1000, 1000 + out))}, f)
+    HTTPServer(("127.0.0.1", port), H).serve_forever()
+    """)
+
+
+class AgenticRunTest(Tmp):
+    """agentic_run.sh + tools/prefix/agentic_loop.py against a stand-in b70-serve (spec 24e Task 5)."""
+
+    def setUp(self):
+        super().setUp()
+        write(self.p("fake-serve"), "#!/bin/sh\nexec " + sys.executable + " " + self.p("fake_agent.py") + ' "$@"\n', 0o755)
+        write(self.p("fake_agent.py"), FAKE_AGENT)
+        write(self.p("t.json"), json.dumps({
+            "tools": [{"type": "function", "function": {"name": "read", "parameters": {"type": "object"}}}],
+            "messages": [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+                         {"role": "assistant", "content": "", "tool_calls": []},
+                         {"role": "tool", "tool_call_id": "c", "content": "RESULT"}]}))
+
+    def test_run_and_report(self):
+        env = dict(os.environ, B70_SERVE=self.p("fake-serve"), PORT=str(free_port()), WAIT="30")
+        r = subprocess.run([os.path.join(HERE, "agentic_run.sh"), self.p("out"), "/snap", self.p("t.json"),
+                            "--prefix-split-last"], capture_output=True, text=True, env=env, timeout=120, cwd=ROOT)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("AGENTIC_RUN rc=0", r.stdout)
+        self.assertIn("hit rate over the session: 48/130 = 36.9 %", r.stdout)
+        self.assertIn("ideal prefix reuse (analyze_log.py's rule): 55 of 130", r.stdout)
+        self.assertIn("b70-serve: stand-in, prefix cache: 1 GiB", r.stdout)          # the server's startup lines
+        with open(self.p("out", "report.md")) as f:
+            self.assertIn("| 2 | 80 | 48 | 60 | 55 |", f.read())
+        self.assertTrue(os.path.exists(self.p("out", "run.json")))
+
+    def test_server_down(self):
+        env = dict(os.environ, B70_SERVE="/usr/bin/false", PORT=str(free_port()), WAIT="5")
+        r = subprocess.run([os.path.join(HERE, "agentic_run.sh"), self.p("down"), "/snap", self.p("t.json")],
+                           capture_output=True, text=True, env=env, timeout=60, cwd=ROOT)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("the server did not come up", r.stdout)
+
+
 class LongIdsAndOracleTest(Tmp):
     def test_long_ids(self):
         out = self.p("long.ids")

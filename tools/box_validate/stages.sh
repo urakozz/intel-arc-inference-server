@@ -3652,6 +3652,136 @@ st_r52_speed() {
 }
 
 # ======================================================================================
+row 53 "spec 24e - LFM2.5-24B-A2B served: the chat template byte-identical to transformers 5.19.0, the tokenizer equal, the pythonic tool-call parser and reasoning (keyed on the prompt's <think>), sampling defaults and HF's repetition penalty on the host sampler, prefix-cache snapshots with the conv rings, b70-serve <lfm2moe> on one card by default; A4 on the engine and the agentic transcript's cache hit rate (plan 24e)"
+rownote 53 "Written blind on the Mac after rows 51 / 52 (24c's decode, 24d's prefill: neither has run on a card): nothing of 24e ran on a card. 24e adds NO kernel (Lfm2MoeEngine's snapshot calls are copies on the immediate lists; kernel_cmdlines +0 / -0 / ~0): G0's g0.sha is the 'nothing moved' check. It does change shared host code - four minja patches (third_party/VERSIONS: the tool-call probe's pythonic marker, the arguments rewrite tolerating a missing function / arguments, 'in' over falsy items, Python's float repr), generation_sampling's absent-field defaults (HF's: T 1.0, top-k 50, top-p 1.0), server.cc (the SeenIds, parser stats), openai.cc, chat_format - r53.k0 re-runs the other models' template / parser / server tests."
+rownote 53 "The synthetic checkpoints (oracle-out-lfm2moe-synth, r50.synth) carry no tokenizer.json / chat_template.jinja / generation_config.json (make_synth.py copies them only with --tokenizer, which lfm2moe_oracle.sh synth-ckpt does not pass): b70-serve needs them, so r53.synth_files copies the four small files from the original's HF snapshot into each (cp -n, idempotent). lfm2moe_template_test / lfm2moe_tokenizer_test read the original's snapshot at 1769516a from the HF cache (B70_LFM_SNAPSHOT_DIR / B70_LFM_TOKENIZER_JSON name another) and SKIP 77 without it."
+rownote 53 "A random-weight synthetic never writes a tool call: the tool-call / reasoning / cut-block paths through HTTP are lfm2moe_server_test's (host, scripted engine); the card stages here prove the engine half (snapshots, startup, the server's greedy chat == b70-decode, seeded sampling) and, with 24q's RTN export, a real model's A4 and the agentic loop."
+rownote 53 "Decision 5's A4 bar (>= 33 / 36 first-call matches, 0 parse failures) and decision 7's rule counts are PROPOSED evidence; the operator rules after r53.a4. The cache's hit rate on the agentic transcript (r53.agentic) has no bar: it is recorded - the turns the template re-renders in another order than generated (a call before its text) are the known misses (spec 24 section 4.6) and are counted."
+stage r53.k0 53 default cpu - g0.sha,g0.bitwise,g0.suite "K0: 24e adds no kernel (every binary identical, G0) and the other models' request path is unchanged - G0's suite and here the host tests that read the patched minja / generation_sampling / server.cc: every template, toolcall and server test, openai_test, minja_ext_test"
+st_r53_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  run_tests '^(template_test|template_agnes_test|template_ornith_test|template_k2_test|template_kolibri_test|template_muse_test|minja_ext_test|toolcall_test|toolcall_k2_test|toolcall_kolibri_test|toolcall_muse_test|openai_test|k2_server_test|kolibri_server_test|muse_server_test|ornith_server_test|qwen4exp_server_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test|spec_accept_test|sampling_test)$' '' 'kv8'
+  finish
+}
+stage r53.host 53 default cpu - - "host: lfm2moe_template_test (32 renders + the agentic session byte-identical to apply_chat_template), lfm2moe_tokenizer_test (125017 ids, the 124 added tokens, 21 texts, corpus.txt, every render's ids), toolcall_lfm2_test (the HF renders parse back and re-render to the same bytes, the idioms, the invalid blocks, cut blocks, the limits, a fuzz - every split), lfm2moe_sampling_test (the penalty, SeenIds, the defaults), lfm2moe_serve_args_test, lfm2moe_server_test (scripted engine over HTTP), lfm2moe_snapshot_test (the layouts on the real shapes, restores at 0 / 1 / 2 / 15 / 16 / 17 / 2048 / 4096 / 2049 / 5000 / 300 == cold, one card <-> two, the server over HTTP), lfm2moe_rules_test, minja_ext_test; the agentic loop's Python test"
+st_r53_host() {
+  run_tests '^(lfm2moe_template_test|lfm2moe_tokenizer_test|toolcall_lfm2_test|lfm2moe_sampling_test|lfm2moe_serve_args_test|lfm2moe_server_test|lfm2moe_snapshot_test|lfm2moe_rules_test|minja_ext_test)$'
+  jgrab snapshot '^lfm2moe_snapshot_test$' 'layout|round trip|restores at|restore at|pp:|server:|OK'
+  jgrab parser '^toolcall_lfm2_test$' 'round trip|fuzz|quotes|OK'
+  chk "python3 tools/prefix/test_agentic_loop.py && python3 tools/box_validate/test_box_validate.py AgenticRunTest" "the agentic loop's Python tests"
+  finish
+}
+stage r53.reject 53 default cpu - - "b70-serve's LFM2 refusals before the device (tests/model/lfm2moe: config.json only): --mtp, --spec mtp|lookup|dflash, the proposers' tuning flags, --draft-vocab, --kv-cache int8, --prefill-backend l0-int8|sycl-tla, the Qwen3.8-Flash-Next flags, --chat-template, --max-len 262144, --pp 2 --device 1, --pipeline-split / -handoff without --pp 2"
+st_r53_reject() {
+  run_tests '^cli_reject_serve_lfm2moe_'
+  finish
+}
+stage r53.synth_files 53 default cpu lfm2moe_synth - "the four small files (tokenizer.json, tokenizer_config.json, generation_config.json, chat_template.jinja) from the original's HF snapshot into each synthetic checkpoint (cp -n): b70-serve needs them"
+st_r53_synth_files() {
+  local hf='${HF_HOME:-$HOME/.cache/huggingface}' src s f
+  src="\$(ls -d $hf/hub/models--LiquidAI--LFM2.5-24B-A2B/snapshots/*/ 2> /dev/null | head -1)"
+  x "test -n \"$src\" && test -s \"$src/chat_template.jinja\""
+  step_rc $? "the original's small files are in the HF cache (hf download LiquidAI/LFM2.5-24B-A2B --include '*.json' '*.jinja' if not)"
+  for s in w proj; do
+    for f in tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja; do
+      x "cp -n \"$src/$f\" oracle-out-lfm2moe-synth/$s/$f"
+    done
+    chk "test -s oracle-out-lfm2moe-synth/$s/tokenizer.json && test -s oracle-out-lfm2moe-synth/$s/chat_template.jinja && test -s oracle-out-lfm2moe-synth/$s/generation_config.json && test -s oracle-out-lfm2moe-synth/$s/tokenizer_config.json" "the synthetic $s carries the tokenizer files"
+  done
+  finish
+}
+stage r53.snap 53 default gpu lfm2moe_synth r52.f4 "Review Focus 5 on the card, synthetic w: lfm2moe_snapshot_gpu_synth_test (one card), _synth_pp_test (--pp 2, split 2), _cross_test (a snapshot taken on two cards continues on one, and the reverse) - the sizes (245,760 B of state, n x 20,480 B of KV at the real widths); restores at the block ends 2048 / 4096 from the hook's own saves BITWISE the cold run (32 ids, logits, KV, the conv rings' last two rows); at the request ends 2049 / 5000 / 300 / 2 / 1 / 0 bitwise the session that never left"
+st_r53_snap() {
+  run_tests '^lfm2moe_snapshot_gpu_synth(_pp)?_test$|^lfm2moe_snapshot_gpu_cross_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab snapshot '^lfm2moe_snapshot_gpu' 'state|restore|snapshot restored|bitwise|DIFFER|OK|FAILED'
+  finish
+}
+stage r53.snap_rtn 53 default gpu lfm2moe_rtn r53.snap "the same on 24q's RTN export: lfm2moe_snapshot_gpu_rtn_test (one card) and _rtn_pp_test (--pp 2, the planner's split)"
+st_r53_snap_rtn() {
+  run_tests '^lfm2moe_snapshot_gpu_rtn(_pp)?_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab snapshot '^lfm2moe_snapshot_gpu' 'state|restore|snapshot restored|bitwise|DIFFER|OK|FAILED'
+  finish
+}
+stage r53.serve 53 default gpu lfm2moe_synth r53.synth_files,r53.snap "b70-serve <synthetic w> startup and requests: one card by default (the startup line: LFM2.5-24B-A2B, lfm2_moe chat format, --pp 1, prefill l0, mtp none, lm_head int8, kv cache bf16, sampling defaults sampled T 0.10 top-p 1.00 top-k 50 repetition penalty 1.05, the conv rings + KV snapshots), --max-len auto planned with the prefill scratch; --pp 2 and --pipeline-handoff peer; a seeded sampled request twice, identical (the adapter re-seeds per request); B70_LFM_PENALTY_GREEDY=1 named in the startup line"
+st_r53_serve() {
+  local ck="oracle-out-lfm2moe-synth/w"
+  x "ZE_AFFINITY_MASK=0 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $ck"
+  step_rc $? "b70-serve <synthetic w>, one card (the default), seeded sampling"
+  x "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_probe.sh $ck --pp 2 --max-len 16384"
+  step_rc $? "b70-serve <synthetic w> --pp 2"
+  x "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_probe.sh $ck --pp 2 --pipeline-handoff peer --max-len 16384"
+  step_rc $? "b70-serve <synthetic w> --pp 2 --pipeline-handoff peer"
+  x "B70_LFM_PENALTY_GREEDY=1 ZE_AFFINITY_MASK=0 PORT=$PORT tools/box_validate/serve_probe.sh $ck --max-len 16384"
+  step_rc $? "b70-serve <synthetic w> with B70_LFM_PENALTY_GREEDY=1 (a greedy request carrying the default penalty goes through the host)"
+  grab_all auto 'max_len: auto ->|^split: ' 6
+  grab_all memory '^memory' 8
+  grab_all startup '^b70-serve: .*LFM2.5-24B-A2B' 4
+  grab_all seeded '^SEEDED ' 4
+  finish
+}
+stage r53.chat 53 default gpu lfm2moe_synth r53.serve "one greedy chat through b70-serve equal to b70-decode on the same ids - golden_server_test --chat on the synthetic w (prose / code / cjk as one user message, 32 ids, temperature 0; b70-decode --ids <prompt_token_ids> --n 32 --prefill --lm-head int8), one card, --pp 2 and --pipeline-handoff peer; run directly (not registered: without a checkpoint it would fail, not SKIP)"
+st_r53_chat() {
+  local ck="oracle-out-lfm2moe-synth/w" a z
+  for a in "--max-len 16384" "--max-len 16384 --pp 2" "--max-len 16384 --pp 2 --pipeline-handoff peer"; do
+    z=0; case "$a" in *"--pp 2"*) z=0,1 ;; esac
+    chk "ZE_AFFINITY_MASK=$z B70_SERVE_ARGS='$a' timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $ck --chat" \
+      "LFM2.5 synthetic, golden_server_test --chat, b70-serve $a"
+  done
+  grab_all chat 'chat of [0-9]+ prompt ids' 9
+  finish
+}
+stage r53.real 53 default gpu lfm2moe_rtn r53.chat,r53.snap_rtn "24q's RTN export on one card: b70-serve startup (--max-len auto -> 131072 with the int8 head and the prefill scratch, derived 18.40 GB of 32.53) with a seeded request twice, then golden_server_test --chat (the server's greedy chat = b70-decode on its prompt_token_ids)"
+st_r53_real() {
+  local snap='$(tools/box_validate/data.sh resolve "${SNAP_LFM2MOE_RTN:-?}")'
+  x "ZE_AFFINITY_MASK=0 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $snap"
+  step_rc $? "b70-serve <RTN export>, one card, auto max_len, seeded sampling"
+  chk "ZE_AFFINITY_MASK=0 B70_SERVE_ARGS='--max-len 32768' timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $snap --chat" \
+    "golden_server_test --chat against the RTN export"
+  grab_all auto 'max_len: auto ->' 4
+  grab_all memory '^memory' 4
+  grab_all startup '^b70-serve: .*LFM2.5-24B-A2B' 2
+  grab_all chat 'chat of [0-9]+ prompt ids' 3
+  finish
+}
+stage r53.a4 53 optin gpu lfm2moe_rtn,lfm2moe_a4_ref r53.real "plan 24e Task 5 Step 1, A4 on the engine: the 36 scenarios of tests/golden/toolcall-lfm2moe (engine_generate.sh l0, 2048 new ids each) on the RTN export against 24a's bf16 reference (oracle-out-lfm2moe-a4): score.py --format pythonic (first-call agreement, decision 5's bar PROPOSED >= 33 / 36; the reference's parse failures), lfm2moe_rules on the engine's and on the reference's texts (decision 7's evidence: how often each lenient reading fired; the engine's blocks left as content = parse failures)"
+st_r53_a4() {
+  local d=$STATE/a4-lfm2moe snap='$(tools/box_validate/data.sh resolve "${SNAP_LFM2MOE_RTN:-?}")'
+  x "mkdir -p $d && cp oracle-out-lfm2moe-a4/*.bf16.txt $d/"
+  chk "ZE_AFFINITY_MASK=0 tools/toolcall/engine_generate.sh $snap tests/golden/toolcall-lfm2moe $d l0" "A4 engine runs, bf16 head"
+  chk "ZE_AFFINITY_MASK=0 LM_HEAD=int8 tools/toolcall/engine_generate.sh $snap tests/golden/toolcall-lfm2moe $d l0" "A4 engine runs, int8 head (the served default)"
+  chk "python3 tools/toolcall/score.py --format pythonic $d bf16 l0 l0-i8head | tee $d/score.md" "scoring against the bf16 reference"
+  x "grep -q '^bf16: 0 parse failure' $d/score.md"
+  step_rc $? "the reference's calls all parse (the parser reads every call the reference wrote)"
+  chk "build/tests/lfm2moe_rules $d/*.l0.txt | tee $d/rules-l0.md" "decision 7: the engine's texts (bf16 head), 0 blocks left as content"
+  chk "build/tests/lfm2moe_rules $d/*.l0-i8head.txt | tee $d/rules-l0-i8head.md" "decision 7: the engine's texts (int8 head)"
+  x "build/tests/lfm2moe_rules $d/*.bf16.txt | tee $d/rules-bf16.md"
+  step_rc $? "decision 7: the reference's own texts (what the bf16 model writes)"
+  grab_all a4 'match|/ 36|parse failure|files,|rules fired' 12
+  finish
+}
+stage r53.agentic 53 optin gpu lfm2moe_rtn r53.real "plan 24e Task 5 Step 2, the agentic transcript (tests/golden/prompts/lfm2moe_agentic.json: 6 tools, a coding session) as a LIVE agent loop through b70-serve on the RTN export, the model's own turns fed back: per turn the prompt length, cached_tokens, TTFT and decode t/s; the hit rate; the turns whose call the template re-renders in another order than generated (the known miss, counted); three arms - the default cache, --prefix-split-last, --prefix-cache-gb 0"
+st_r53_agentic() {
+  local snap='$(tools/box_validate/data.sh resolve "${SNAP_LFM2MOE_RTN:-?}")' t=tests/golden/prompts/lfm2moe_agentic.json
+  idle r53-agentic
+  chk "ZE_AFFINITY_MASK=0 PORT=$PORT tools/box_validate/agentic_run.sh $STATE/agentic-default $snap $t --max-len 65536" "agentic loop, prefix cache auto"
+  chk "ZE_AFFINITY_MASK=0 PORT=$PORT tools/box_validate/agentic_run.sh $STATE/agentic-split $snap $t --max-len 65536 --prefix-split-last" "agentic loop, --prefix-split-last"
+  chk "ZE_AFFINITY_MASK=0 PORT=$PORT tools/box_validate/agentic_run.sh $STATE/agentic-off $snap $t --max-len 65536 --prefix-cache-gb 0" "agentic loop, cache off"
+  x "uptime"
+  grab_all agentic '^hit rate|^turns whose call|^ideal prefix|^\| [0-9]+ \|' 60
+  finish
+}
+stage r53.opencode 53 optin gpu-self lfm2moe_rtn,opencode_log r53.real "the recorded opencode session (OPENCODE_LOG, a b70-serve --log-requests directory) replayed through b70-serve <RTN export> with the prefix cache on, then --prefix-split-last (tools/prefix/replay_ab.sh takes the GPU lock itself): per request cached_tokens and TTFT"
+st_r53_opencode() {
+  local snap='$(tools/box_validate/data.sh resolve "${SNAP_LFM2MOE_RTN:-?}")' arm args
+  for arm in on split; do
+    args=""; [ "$arm" = split ] && args="--prefix-split-last"
+    chk "MODEL=$snap ARMS=on SERVE_ARGS='$args' tools/prefix/replay_ab.sh $OPENCODE_LOG $STATE/r53.opencode.$arm" "replay, cache $arm"
+  done
+  grab_all replay 'prompt|cached|ttft|requests' 60
+  finish
+}
+
+# ======================================================================================
 row 54 "spec 19b - the DFlash drafter on the card: loader::load_drafter (z-lab/Qwen3.8-27B-DFlash2 beside Qwen3.8, bf16 or int8 at load, the target's embedding and head shared), the df_* kernels (embed, norms, the grouped two-tap convs, the block's q / k / v, ring + block attention, top-16 with the vocab mask and the draft vocabulary's id map, the selector walk), the captured draft (87 launches) and projection (8) lists, the planner's drafter term; D0 and D1 (plan 19b)"
 rownote 54 "Written blind on the Mac: no df_* binary has ever been compiled (ocloc is the box's) - r54.kernels' kbins is the first build of the 14 new command lines (kernel_cmdlines +14 / -0 / ~0: 8 df_*, the bf16 head at 7 rows, the compact heads at 7 rows). Nothing binds them without a drafter (19c's --spec dflash): D0 is G0. On the Mac's GPU (tools/mac/clrun/dflash_run, indicative) the whole draft and projection lists ran at the fixture's tiny shapes against the host twin: rows / scores cos 1.0000000 in 8 of 9 cases (one at 0.99999 - Apple's 1 / sqrt is not correctly rounded), every walk equal, a 256-id draft vocabulary bitwise the full head's, v1. The twin (tests/kernels/dflash_ref.h) matches tools/oracle/dflash_ref.py to 6e-7 (dflash_ref_test). The kernels use work-group reductions only (no sub-group ops): their speed on the B70 is unmeasured."
 rownote 54 "Data: the drafter (hf download z-lab/Qwen3.8-27B-DFlash2, 3.85 GB; data key dflash) for r54.load / r54.draft / r54.d1; 19a's tap dumps (the Mac's oracle-out-19a/dumps, 2.7 GB, and oracle-out-19a/draft_vocab.ranked.ids: tools/box_validate.sh --push-data; data key oracle_dflash_dumps) for r54.d1; the gate checkpoint (qwen). r54.d1_ref runs dflash_ref.py in the oracle image: ~15 GB RSS (the drafter fp32 7.2 GB, the target's head and embedding), ~1-2 s a draft on 44 threads, ESTIMATED (16 anchors x 37 dumps x 3 arms ~ 0.5-1 h)."

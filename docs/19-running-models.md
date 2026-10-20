@@ -611,12 +611,12 @@ checkpoints): 40 layers, hidden 2048, 30 short-conv layers and 10 GQA attention 
 all of them), 2 dense SwiGLU layers then 38 MoE layers (64 experts, top-4 x 1536, a sigmoid router with a
 selection-only bias), a tied 128000-row head (125017 real ids), context 131072.
 
-**Status: decode and prefill, never run on a B70** (queue rows 51 and 52; specs 24c, 24d). The whole model and
+**Status: decode, prefill and serving, never run on a B70** (queue rows 51, 52 and 53; specs 24c, 24d, 24e). The whole model and
 131072 positions fit **one card** (13.39 GB of weights with the int8 head + 2.68 GB of KV, derived; the prefill scratch
 adds 0.79 GB at chunk 2048); `--pp 2` splits the layers over two cards (decision 10: optional). A prompt goes through
 the decode list one replay per id, or - `--prefill` / `--prefill-length` - through the prefill walk in chunks of up to
-2048 rows (1259 launches a chunk at 40 layers, derived; the `l0` backend only); serving (`b70-serve`) is spec 24e
-(refused by name until then). Expected (derived): 383 launches a token (403 with
+2048 rows (1259 launches a chunk at 40 layers, derived; the `l0` backend only); `b70-serve` serves it since spec 24e
+(below). Expected (derived): 383 launches a token (403 with
 `B70_LFM_ATTN=eager`, 277 with `B70_LFM_FUSE=all`), 1.43 GB read a token plus 20,480 B of KV a position - a roofline
 of 411 t/s, ~4.5 ms a token ESTIMATED at depth 4096 (spec 24 §3: the step is many small kernels).
 
@@ -638,10 +638,47 @@ B70_PREFILL_PROFILE=1 ./build/src/cli/b70-decode <export> --bench --prefill-leng
 ./build/src/cli/b70-decode $S --ids $P --n 32 --prefill --prefill-chunk 64       # smaller chunks: bitwise 2048's
 ```
 
+**Serving (spec 24e).** `b70-serve <export>` runs the engine on **one card by default** (`--pp 2` for capacity;
+`--pipeline-split`, `--pipeline-handoff` as `b70-decode` takes them), `--max-len auto` up to 131072 with the prefill
+scratch planned in, the int8 head by default, prefill on `l0` only:
+
+```sh
+ZE_AFFINITY_MASK=0 ./build/src/cli/b70-serve <export> --port 8000 --prefix-cache-gb auto --prefix-split-last --log-requests ~/lfm-log
+```
+
+- **Chat template.** The snapshot's `chat_template.jinja` (the model always reasons: the generation prompt ends in
+  `<think>`; `enable_thinking: false` is accepted and ignored, one stderr line says so). `chat_template_kwargs.
+  preserve_thinking` (a boolean, default false) keeps the reasoning of the turns before the last user message. A
+  message's `reasoning_content` / `reasoning` / `thinking` is written back as `<think>...</think>`. Tool schemas and
+  call arguments render with sorted keys (the server's JSON objects are sorted: the prefix cache misses at a call
+  whose arguments the model wrote in another order).
+- **Output.** The output opens inside reasoning (`reasoning_content` in the response, verbatim, no byte stripped),
+  then content and pythonic tool calls `<|tool_call_start|>[fn(k=v, ...)]<|tool_call_end|>` (`tool_calls`, arguments
+  a JSON string of the object). A hand-written literal parser reads them (strings in single / double / triple quotes
+  with the template's escapes, numbers, `True` / `False` / `None` and JSON's `true` / `false` / `null`, lists, tuples,
+  dicts, depth 64, a block read up to 1 MiB); a quote that is not followed by what the grammar allows after a string
+  stays in the string (`'it's'`), quoted names are stripped, a call without the list brackets and a lone positional
+  dict are accepted; a block with no valid call is returned as content; a call cut by `max_tokens` or EOS is
+  emitted once if its `)` closed, otherwise dropped (never leaked as content). `--log-requests` records carry
+  `parser.rules`, how often each lenient reading fired.
+- **Sampling.** A request that names no `temperature` / `top_k` / `top_p` / `repetition_penalty` samples with
+  `generation_config.json`'s: sampled, T 0.1, top-k 50, top-p 1.0, repetition penalty 1.05. The penalty is HF's
+  (`l < 0 ? l * p : l / p` over the distinct ids of the prompt and the output, before temperature / top-k / top-p) on the
+  host sampler; `temperature: 0` is the device argmax and ignores it (vLLM applies it to greedy requests too:
+  `B70_LFM_PENALTY_GREEDY=1` routes a greedy request that carries a penalty through the host). A request's
+  `repetition_penalty` is in (0, 2]. A seeded sampled request is reproducible request by request.
+- **Prefix cache.** Each snapshot carries the two conv-ring rows of positions pos-1 and pos-2 per conv layer (245,760 B)
+  and the attention layers' KV (20,480 B a position).
+- `B70_LFM_TOKENIZER_JSON` names a `tokenizer.json` other than the snapshot's.
+
 **Limits.** Prefill on the `l0` backend only (`--prefill-backend l0-int8` / `sycl-tla` refused: spec 24 §11), chunk
-at most 2048; no serving (spec 24e), no `--mtp` / `--spec` (no MTP head), bf16 KV only (`--kv-cache int8` refused, decision 11), no `--layers` (the whole model fits), context at most
-131072, `--device` refused with `--pp 2`.
+at most 2048; no `--mtp` / `--spec` (no MTP head; `--spec lookup` needs M-row verify lists for this family: a
+follow-up), no `--draft-vocab`, bf16 KV only (`--kv-cache int8` refused, decision 11), no `--layers` (the whole model
+fits), context at most 131072, `--device` refused with `--pp 2`, image / video content refused.
 
 **Relevant variables:** `B70_LFM_ATTN` (`flash` | `eager`), `B70_LFM_FUSE` (`none` | `all` | a comma list of `route`,
 `router`, `conv`; the arm `conv` also selects the prefill's conv-tile build), `B70_LFM_TIE_TOL` (the golden gate's
-near-tie tolerance, 4e-3), `B70_PREFILL_REPLAY` (record each chunk's list once and replay it), `B70_PREFILL_PROFILE`.
+near-tie tolerance, 4e-3), `B70_PREFILL_REPLAY` (record each chunk's list once and replay it), `B70_PREFILL_PROFILE`,
+`B70_LFM_TOKENIZER_JSON` (`b70-serve`'s tokenizer.json; `lfm2moe_tokenizer_test`'s), `B70_LFM_SNAPSHOT_DIR`
+(`lfm2moe_template_test`'s and `toolcall_lfm2_test`'s snapshot), `B70_LFM_PENALTY_GREEDY` (`1`: a greedy request that
+carries a repetition penalty is penalised on the host).
