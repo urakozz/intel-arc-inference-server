@@ -96,8 +96,8 @@
   },
   {
    "name": "in_falsy",
-   "template": "{{ '' in [''] }} {{ 0 in [0] }} {{ false in [false] }} {{ none in [none] }} {{ '' not in [''] }} {{ 1 in [0, 1] }} {{ 'x' in ['', 'y'] }} {{ ('  ' | trim) not in ['', '{}', 'null'] }} {{ ('{}' | trim) not in ['', '{}', 'null'] }} {{ 'x' not in ['', '{}', 'null'] }}",
-   "expected": "True True True True False True False False False True"
+   "template": "{{ '' in [''] }} {{ 0 in [0] }} {{ false in [false] }} {{ none in [none] }} {{ '' not in [''] }} {{ 1 in [0, 1] }} {{ 'x' in ['', 'y'] }} {{ ('  ' | trim) not in ['', '{}', 'null'] }} {{ ('{}' | trim) not in ['', '{}', 'null'] }} {{ 'x' not in ['', '{}', 'null'] }} {{ [1] in [none] }} {{ {} in [none] }} {{ [] in [none] }} {{ none in [[1]] }} {{ none in [{}] }}",
+   "expected": "True True True True False True False False False True False False False False False"
   },
   {
    "name": "float_str",
