@@ -165,6 +165,56 @@ int main() {
                 describe(p, size_t(32530000000ull)).c_str());
   }
 
+  // --- spec 24d: the prefill scratch, the batches, the launch formula, the plan with the prefill -----------------
+  {
+    CHECK_EQ(pf_tiles(d, 2048), uint32_t((2048 * 4 + 64 * 31) / 32));   // 318: no shared-expert term
+    CHECK_EQ(pf_tiles(d, 2048), 318u);
+    CHECK_EQ(pf_tiles(d, 1), 62u);
+    CHECK_EQ(pf_block_gu_bytes(d), size_t(2048) * 3072 * 2);
+    CHECK_EQ(pf_block_dn_bytes(d), size_t(1536) * 2048 * 2);
+    CHECK_EQ(pf_batch_blocks_gu(d), 42u);   // 512 MiB / 12,582,912 B
+    CHECK_EQ(pf_batches_gu(d), 2u);         // derived: B = 2 gate||up batches a layer
+    CHECK_EQ(pf_batch_blocks_dn(d), 85u);
+    CHECK_EQ(pf_batches_dn(d), 1u);         // and B' = 1 down batch
+    const PrefillSizes s = prefill_sizes(d);
+    CHECK_EQ(s.partials, size_t(2048) * 6144 * 4);   // in_proj, the widest N but the dense gate||up's SiLU epilogue
+    CHECK_EQ(s.slab, size_t(11776) * 1024 * 2);      // the dense down, the widest K
+    CHECK_EQ(s.xg, size_t(318) * 32 * 2048 * 2);
+    CHECK_EQ(s.moe_h, size_t(318) * 32 * 1536 * 2);
+    CHECK_EQ(s.s_mlp, size_t(2048) * 11776 * 2);
+    CHECK_EQ(s.w, size_t(512) << 20);
+    CHECK_EQ(s.routes, size_t(40) * 2048 * 16 * 4);
+    CHECK_EQ(s.hdr, size_t(kPfHdrWords) * 4);
+    CHECK(s.total() > size_t(0.7e9) && s.total() < size_t(1.0e9));   // spec 24 §3's "~1 GB at chunk 2048" (estimated)
+    // the launch formula: 1 (the gather) + dense conv 70 x 2 + conv + MoE 31 x 28 + attention + MoE 25 x 10
+    CHECK_EQ(prefill_chunk_launches(d, one), size_t(1 + 2 * 70 + 28 * 31 + 10 * 25));
+    CHECK_EQ(prefill_chunk_launches(d, one), size_t(1259));
+    const model::LfmPlacement two = model::LfmPlacement::two(d, 20);
+    CHECK_EQ(prefill_device_launches(d, two, 0) + prefill_device_launches(d, two, 1), size_t(1259));
+    model::Lfm2MoeDesc d4 = d;
+    d4.layers = 4;
+    d4.kinds.assign(d.kinds.begin(), d.kinds.begin() + 4);
+    const model::LfmPlacement one4 = model::LfmPlacement::one(d4);
+    CHECK_EQ(prefill_chunk_launches(d4, one4), size_t(1 + 70 + 70 + 25 + 31));   // dense conv 0, 1; attn 2; conv 3
+    // the landing: h rows only at a MoE cut, + the dense down's pending rows at a dense cut
+    CHECK_EQ(pf_landing_layout(d, two).sumsq_bytes, size_t(0));
+    CHECK_EQ(pf_landing_layout(d, two).resid_bytes, size_t(2048) * 2048 * 2);
+    CHECK_EQ(pf_landing_layout(d4, model::LfmPlacement::two(d4, 2)).sumsq_bytes, size_t(2048) * 2048 * 4);
+    CHECK_EQ(pf_link_bytes(d, two, 0), runtime::kPpStateWords * 4);
+    CHECK_EQ(pf_link_bytes(d, two, 1), pf_landing_layout(d, two).total + runtime::kPpStateWords * 4);
+    // the plan at 131072 with the prefill scratch still fits one card
+    const Plan p = plan(d, one, 0, 131072, true, LfmAttn::Flash, true);
+    CHECK_EQ(p.prefill_scratch, s.total());
+    CHECK_EQ(plan(d, one, 0, 131072, true).prefill_scratch, size_t(0));
+    require_fits(p, size_t(32530000000ull));
+    CHECK_EQ(max_len_auto(d, one, size_t(32530000000ull), 1.5, true, LfmAttn::Flash, true), d.trained_max_len);
+    const Plan p2 = plan(d, two, 1, 131072, true, LfmAttn::Flash, true);
+    CHECK_EQ(p2.prefill_scratch, s.total() + pf_link_bytes(d, two, 1));
+    std::printf("  prefill: scratch %zu B a device, %zu launches a chunk (40 layers), %u + %u weight batches; %s\n",
+                s.total(), prefill_chunk_launches(d, one), pf_batches_gu(d), pf_batches_dn(d),
+                describe(p, size_t(32530000000ull)).c_str());
+  }
+
   std::printf("lfm2moe_plan_test: ok\n");
   return 0;
 }
