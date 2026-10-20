@@ -4313,4 +4313,81 @@ if(B70_LFM2MOE)
   add_test(NAME lfm2moe_kernels_test COMMAND lfm2moe_kernels_test)
   set_tests_properties(lfm2moe_kernels_test PROPERTIES LABELS lfm2moe TIMEOUT 1800)
 endif()
+# Task 4: the engine on one card. F4 (lfm2moe_decode_test: plan == allocation, the launch count, two runs bitwise -
+# logits, routes, conv rings, KV, both residual buffers, every layer's tap) and F3 (lfm2moe_golden_test: tokens
+# tie-aware, routes within B70_LFM_TIE_TOL, the conv state, the h taps) on the synthetic checkpoints (both expert
+# spellings; their golden sets: lfm2moe_oracle.sh synth-golden) and on 24q's RTN export (and AutoRound's, `ours`).
+# SKIP 77 without the data.
+if(B70_LFM2MOE)
+  set(B70_LFM2MOE_RTN "${CMAKE_SOURCE_DIR}/oracle-out-lfm2moe-rtn/ckpt" CACHE STRING
+    "24q's RTN int4 g64 export of LFM2.5-24B-A2B (data key lfm2moe_rtn)")
+  set(B70_LFM2MOE_RTN_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-lfm2moe-rtn" CACHE PATH
+    "24q's golden sets on the RTN export (<prompt>.golden.safetensors; data key oracle_lfm2moe_rtn)")
+  set(B70_LFM2MOE_OURS "urakozz/LFM2.5-24B-A2B-W4A16-g64-AutoRound-GPTQ" CACHE STRING
+    "24q's AutoRound export (data key lfm2moe_ours)")
+  set(B70_LFM2MOE_OURS_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-lfm2moe-ours" CACHE PATH
+    "24q's golden sets on the AutoRound export (data key oracle_lfm2moe_ours)")
+  set(_lfm_bench_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/lfm2moe_short.ids)
+  foreach(t lfm2moe_decode_test lfm2moe_golden_test)
+    if(t STREQUAL "lfm2moe_decode_test")
+      add_executable(${t} runtime/${t}.cc)
+    else()
+      add_executable(${t} golden/${t}.cc)
+    endif()
+    target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+      ${CMAKE_SOURCE_DIR}/tests/runtime)
+    target_compile_definitions(${t} PRIVATE B70_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(${t} PRIVATE b70_lfm2moe_runtime b70_l0)
+    add_dependencies(${t} ${B70_LFM2MOE_DECODE_KERNELS} kernel_pp_handoff)
+  endforeach()
+  set(_lfm_tests)
+  foreach(sp w proj)
+    add_test(NAME lfm2moe_decode_synth_${sp}_test COMMAND lfm2moe_decode_test ${B70_LFM2MOE_SYNTH_DIR}/${sp} ${_lfm_bench_ids})
+    list(APPEND _lfm_tests lfm2moe_decode_synth_${sp}_test)
+    foreach(p lfm2moe_short lfm2moe_4k lfm2moe_agentic)
+      add_test(NAME lfm2moe_golden_synth_${sp}_${p}_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_SYNTH_DIR}/${sp}
+        ${B70_LFM2MOE_SYNTH_DIR}/oracle-${sp} ${p})
+      list(APPEND _lfm_tests lfm2moe_golden_synth_${sp}_${p}_test)
+    endforeach()
+  endforeach()
+  add_test(NAME lfm2moe_decode_synth_eager_test COMMAND lfm2moe_decode_test ${B70_LFM2MOE_SYNTH_DIR}/w ${_lfm_bench_ids} eager)
+  add_test(NAME lfm2moe_decode_synth_bf16head_test COMMAND lfm2moe_decode_test ${B70_LFM2MOE_SYNTH_DIR}/w ${_lfm_bench_ids} bf16)
+  add_test(NAME lfm2moe_golden_synth_short_bf16head_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_SYNTH_DIR}/w
+    ${B70_LFM2MOE_SYNTH_DIR}/oracle-w lfm2moe_short bf16)
+  add_test(NAME lfm2moe_golden_synth_short_eager_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_SYNTH_DIR}/w
+    ${B70_LFM2MOE_SYNTH_DIR}/oracle-w lfm2moe_short eager)
+  list(APPEND _lfm_tests lfm2moe_decode_synth_eager_test lfm2moe_decode_synth_bf16head_test
+    lfm2moe_golden_synth_short_bf16head_test lfm2moe_golden_synth_short_eager_test)
+  # the real weights: 24q's RTN export (r51.rtn) and its AutoRound export (r51.ours, opt-in)
+  add_test(NAME lfm2moe_decode_rtn_test COMMAND lfm2moe_decode_test ${B70_LFM2MOE_RTN} ${_lfm_bench_ids})
+  list(APPEND _lfm_tests lfm2moe_decode_rtn_test)
+  foreach(p lfm2moe_short lfm2moe_4k lfm2moe_agentic)
+    add_test(NAME lfm2moe_golden_rtn_${p}_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_RTN} ${B70_LFM2MOE_RTN_ORACLE_DIR} ${p})
+    add_test(NAME lfm2moe_golden_ours_${p}_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_OURS} ${B70_LFM2MOE_OURS_ORACLE_DIR} ${p})
+    list(APPEND _lfm_tests lfm2moe_golden_rtn_${p}_test lfm2moe_golden_ours_${p}_test)
+  endforeach()
+  add_test(NAME lfm2moe_golden_rtn_short_bf16head_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_RTN}
+    ${B70_LFM2MOE_RTN_ORACLE_DIR} lfm2moe_short bf16)
+  add_test(NAME lfm2moe_golden_rtn_short_eager_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_RTN}
+    ${B70_LFM2MOE_RTN_ORACLE_DIR} lfm2moe_short eager)
+  add_test(NAME lfm2moe_golden_rtn_32k_test COMMAND lfm2moe_golden_test ${B70_LFM2MOE_RTN} ${B70_LFM2MOE_RTN_ORACLE_DIR}
+    lfm2moe_32k)
+  list(APPEND _lfm_tests lfm2moe_golden_rtn_short_bf16head_test lfm2moe_golden_rtn_short_eager_test)
+  set_tests_properties(${_lfm_tests} PROPERTIES LABELS "checkpoint;golden;lfm2moe" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # the 32k prompt: opt-in (r51.rtn32k), ~33k replays
+  set_tests_properties(lfm2moe_golden_rtn_32k_test PROPERTIES LABELS "checkpoint;golden;lfm2moe;optin"
+    SKIP_RETURN_CODE 77 TIMEOUT 14400)
+endif()
+# b70-decode's model_type dispatch and LFM2's refusals, before the device: tests/model/lfm2moe/ holds only the
+# checkpoint's config.json (24b), which is all the dispatch and the planner read.
+set(_lfm_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/lfm2moe)
+b70_cli_reject(cli_reject_lfm2moe_prefill ${_lfm_cfg} --ids ${B70_OK_IDS} --n 4 --prefill EXPECT "spec 24d")
+b70_cli_reject(cli_reject_lfm2moe_mtp ${_lfm_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "no MTP head")
+b70_cli_reject(cli_reject_lfm2moe_kv8 ${_lfm_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "decision 11")
+b70_cli_reject(cli_reject_lfm2moe_layers ${_lfm_cfg} --ids ${B70_OK_IDS} --n 4 --layers 3
+  EXPECT "--layers belongs to Kolibri-1")
+if(COMMAND b70_serve_reject)
+  b70_serve_reject(cli_reject_lfm2moe_serve ${_lfm_cfg} EXPECT "spec 24e")
+  set_tests_properties(cli_reject_lfm2moe_serve PROPERTIES LABELS lfm2moe)
+endif()
 # ==== Spec 24c: LFM2.5-24B-A2B decode (label lfm2moe) ==== (end) ====

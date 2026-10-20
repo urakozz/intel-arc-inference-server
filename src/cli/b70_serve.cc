@@ -26,6 +26,7 @@
 #include "cli/k2_serve_adapter.h"
 #include "cli/kolibri_decode.h"
 #include "cli/kolibri_serve.h"
+#include "cli/lfm2moe_decode.h"   // spec 24c: is_lfm2moe (b70-serve refuses it until spec 24e)
 #include "cli/muse_decode.h"   // spec 23c: is_muse, check_args
 #include "cli/muse_serve.h"    // spec 23e: MuseEngineAdapterT, the template check
 #include "cli/muse_spec.h"     // spec 23f: --spec dflash / lookup for Muse-Glimmer
@@ -999,6 +1000,12 @@ int run(int argc, char** argv) {
     usage();
     throw std::runtime_error("a snapshot directory or HF repo id is required");
   }
+  // Spec 24c: LFM2.5-24B-A2B decodes (b70-decode) but is not served until spec 24e (its template, the pythonic
+  // tool-call parser, the sampler's repetition penalty, the snapshots carrying the conv rings) - refused before the
+  // device.
+  if (cli::lfm2moe::is_lfm2moe(path))
+    throw std::runtime_error("LFM2.5-24B-A2B (model_type lfm2_moe) is not served yet: b70-serve for it is spec 24e; "
+                             "b70-decode runs it (spec 24c)");
   // Spec 23f: Muse-Glimmer-30B's --spec dflash / lookup are its own (cli/muse_spec.h: K to 15, the assistant, one
   // card) - the Qwen family's spec rules below skip it; its branch further down checks its own.
   const bool muse = cli::muse::is_muse(path);
