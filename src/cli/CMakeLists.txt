@@ -102,3 +102,5 @@ target_link_libraries(b70-decode PRIVATE b70_lfm2moe_runtime)
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_lfm2moe_runtime)
 endif()
+# Spec 24d: and LFM2.5-24B-A2B's prefill (b70_lfm2moe_prefill: Lfm2MoeEngine::prefill, its walk and scratch).
+target_link_libraries(b70-decode PRIVATE b70_lfm2moe_prefill)

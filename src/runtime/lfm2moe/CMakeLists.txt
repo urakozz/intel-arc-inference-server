@@ -13,3 +13,13 @@ add_library(b70_lfm2moe_runtime STATIC lfm2moe_buffers.cc lfm2moe_capture.cc lfm
 target_include_directories(b70_lfm2moe_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_lfm2moe_runtime PUBLIC b70_l0 b70_lfm2moe_loader b70_lfm2moe_plan b70_runtime)
 b70_target_kernel_dir(b70_lfm2moe_runtime)
+
+# Spec 24d: LFM2.5-24B-A2B's prefill (the chunk walk, its scratch, and Lfm2MoeEngine::prefill's definitions) - its own
+# archive, as b70_kolibri_prefill is beside b70_kolibri_runtime: a target that never prefills LFM2 links what it always
+# linked. It runs the prefill path's Level Zero half only (runtime::prefill::Context, KernelCache, gemm_l0), but
+# Context's object names the SYCL side's entry points (libb70_prefill.so when the component is built), so an
+# executable linking this calls b70_link_prefill when B70_PREFILL_ENABLED, as every b70_prefill_host user does.
+add_library(b70_lfm2moe_prefill STATIC lfm2moe_prefill.cc lfm2moe_prefill_engine.cc)
+target_include_directories(b70_lfm2moe_prefill PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_lfm2moe_prefill PUBLIC b70_lfm2moe_runtime b70_prefill_host)
+b70_target_kernel_dir(b70_lfm2moe_prefill)
