@@ -1,0 +1,6 @@
+<|startoftext|><|im_start|>user
+continue<|im_end|>
+<|im_start|>assistant
+x <|tool_call_start|>[bash(command='ls')]<|tool_call_end|>CONTINUE_FINAL_MESSAGE_TAG <|im_end|>
+<|im_start|>assistant
+<think>

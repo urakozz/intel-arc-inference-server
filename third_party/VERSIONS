@@ -1,7 +1,7 @@
 # name        source                              pin                                       sha256
 # json header: third_party/json/nlohmann/json.hpp (kept at the include path minja uses)
 json          https://github.com/nlohmann/json   v3.12.0                                  aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63
-minja         https://github.com/google/minja    021c2293c187789ef13d56c6cfd89c9b134fd80f  345e8dbac339c6a858dae6130dd52e1f0e32fd16fdf843bc5a83c3ad21f63482 5c21ccd1ba70b1d698ca4d3e3784681c4e4d049742bd62fbb854bcd5951f2fee
+minja         https://github.com/google/minja    021c2293c187789ef13d56c6cfd89c9b134fd80f  e4b94cdbdd919518fb06adee4e865978256cf50b60926711bc63546066d87c99 4d44df597258e10734f87d3584a60bfcfa898a5e5eb2842b895637bea406ee6d
 httplib       https://github.com/yhirose/cpp-httplib v0.54.1                                 5933c14b2d0f45212925ed18ca579841f5fce717f431fc20cec712423e905b10
 #
 # minja carries b70 patches (spec 18d; every one marked "b70 patch (spec 18d)" in the source,
@@ -22,4 +22,14 @@ httplib       https://github.com/yhirose/cpp-httplib v0.54.1                    
 #                      double-quoted attribute - Muse-Glimmer's ATEM <atem:parameter name="...">),
 #                      for the same reason (tests/tokenizer/minja_ext_test.cc's
 #                      tool_call_probe_attribute case).
+#                      b70 patch (spec 24e): and `(argument_needle=` (a pythonic keyword argument opening the call's
+#                      parentheses - LFM2.5's `name(k='v')`), for the same reason; and the arguments rewrite that stays
+#                      on when arguments must be an object leaves a call without a "function" object or without
+#                      "arguments" alone (upstream threw; the LFM2.5 template reads them with .get() and renders `name()`).
+#                      Tested by minja_ext_test's tool_call_probe_pythonic case.
+#   minja.hpp          b70 patches (spec 24e), each against Jinja2 3.1.6 in minja_ext_cases.json (in_falsy, float_str,
+#                      float_tojson): `x in [..]` is plain equality (upstream skipped falsy items: `'' in ['']` was false,
+#                      which made LFM2.5's `(args | trim) not in ["", "{}", "null"]` raise on an empty arguments string);
+#                      str(float) / `{{ float }}` / a float inside tojson print as Python's repr (1.0, 1e-07, 1e+20; upstream
+#                      std::to_string wrote 1.000000, 0.000000, and nlohmann wrote 1e+15 for Python's 1000000000000000.0).
 # The Qwen3.8 / Agnes template tests are unchanged by them (byte-identical renders).

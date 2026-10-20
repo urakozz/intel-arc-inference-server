@@ -1,0 +1,13 @@
+<|startoftext|><|im_start|>system
+Sys A. Sys B.<|im_end|>
+<|im_start|>user
+Hello world<|im_end|>
+<|im_start|>assistant
+Hi there<|tool_call_start|>[bash(command='x')]<|tool_call_end|><|im_end|>
+<|im_start|>tool
+out1
+out2<|im_end|>
+<|im_start|>user
+bye<|im_end|>
+<|im_start|>assistant
+<think>

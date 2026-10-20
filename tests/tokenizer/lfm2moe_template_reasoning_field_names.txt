@@ -1,0 +1,12 @@
+<|startoftext|><|im_start|>user
+q<|im_end|>
+<|im_start|>assistant
+<think>T</think>x<|im_end|>
+<|im_start|>assistant
+<think>T2</think>y<|im_end|>
+<|im_start|>assistant
+<think>T3</think>z<|im_end|>
+<|im_start|>assistant
+w<|im_end|>
+<|im_start|>assistant
+<think>

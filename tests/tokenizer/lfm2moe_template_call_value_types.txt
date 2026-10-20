@@ -1,0 +1,8 @@
+<|startoftext|><|im_start|>user
+types<|im_end|>
+<|im_start|>assistant
+<|tool_call_start|>[typed(big=12345678901234, empty='', emptyd={}, emptyl=[], f=2.5, f1=1.0, fbig=1e+20, fexp=1e-07, fl=False, i=3, l=[1, "a", null, true, 2.5], n=None, neg=-7, nested={"a": {"b": [{"c": "d'e"}]}, "z": []}, s='x', t=True)]<|tool_call_end|><|im_end|>
+<|im_start|>tool
+ok<|im_end|>
+<|im_start|>assistant
+<think>

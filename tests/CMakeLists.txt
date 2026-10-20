@@ -4542,3 +4542,34 @@ if(B70_LFM2MOE)
   set_tests_properties(lfm2moe_pp_test PROPERTIES LABELS "checkpoint;lfm2moe;pp;prefill")
 endif()
 # ==== Spec 24d: LFM2.5-24B-A2B prefill ==== (end) ====
+
+# ==== Spec 24e: LFM2.5-24B-A2B serving (label lfm2moe) ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-15-spec24e-lfm2moe-serving.md. Box queue row 53. Host tests first; the
+# checkpoint / card ones SKIP (77) without their data. No LFM file is vendored beyond the fixtures the plan generates
+# (rendered texts and ids of this repo's own conversations, tests/tokenizer/lfm2moe_*) and generation_config.json
+# (a configuration file, tests/model/lfm2moe/); the template and tokenizer.json are read from LiquidAI/LFM2.5-24B-A2B
+# at 1769516a in the HF cache, or B70_LFM_SNAPSHOT_DIR / B70_LFM_TOKENIZER_JSON.
+if(B70_TOKENIZER_ENABLED)
+  set(B70_LFM_SNAPSHOT_DIR
+    "${_b70_hf_home}/hub/models--LiquidAI--LFM2.5-24B-A2B/snapshots/1769516ac588c4c558089c94f27d96b0dc67b183"
+    CACHE PATH "LFM2.5-24B-A2B's snapshot (chat_template.jinja, tokenizer_config.json, generation_config.json) (-D or the environment variable)")
+  set(B70_LFM_TOKENIZER_JSON "${B70_LFM_SNAPSHOT_DIR}/tokenizer.json"
+    CACHE FILEPATH "LFM2.5-24B-A2B's tokenizer.json for lfm2moe_tokenizer_test (-D or the environment variable)")
+  # Task 1: the chat template (chat_template.jinja, sha256 ea663864...) on 30 message lists and the 14-message agentic
+  # session against transformers 5.19.0's apply_chat_template, byte for byte (tools/tokenizer/dump_lfm2moe.py) ...
+  add_executable(lfm2moe_template_test tokenizer/lfm2moe_template_test.cc)
+  target_include_directories(lfm2moe_template_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(lfm2moe_template_test PRIVATE b70_tokenizer b70_third_party_minja)
+  add_test(NAME lfm2moe_template_test COMMAND lfm2moe_template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_LFM_SNAPSHOT_DIR})
+  # ... and the 125017-id tokenizer against HF's: the added tokens (124 of them, both ways, with their `special`
+  # flag), 21 texts, corpus.txt's digests, every render's ids with BOS once.
+  add_executable(lfm2moe_tokenizer_test tokenizer/lfm2moe_tokenizer_test.cc)
+  target_include_directories(lfm2moe_tokenizer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(lfm2moe_tokenizer_test PRIVATE b70_tokenizer)
+  add_test(NAME lfm2moe_tokenizer_test COMMAND lfm2moe_tokenizer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_LFM_SNAPSHOT_DIR} ${B70_LFM_TOKENIZER_JSON})
+  set_tests_properties(lfm2moe_template_test lfm2moe_tokenizer_test PROPERTIES LABELS lfm2moe SKIP_RETURN_CODE 77
+    TIMEOUT 300)
+endif()
+# ==== Spec 24e: LFM2.5-24B-A2B serving ==== (end) ====
