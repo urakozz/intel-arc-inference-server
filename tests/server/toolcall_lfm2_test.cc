@@ -26,6 +26,7 @@
 #include <nlohmann/json.hpp>
 
 #include "check.h"
+#include "server/chat_format.h"
 #include "server/toolcall.h"
 #include "server/toolcall_lfm2.h"
 #include "tokenizer/chat_template.h"
@@ -783,6 +784,80 @@ void fuzz() {
               damaged);
 }
 
+
+// ---------------------------------------------------------------------------------------------------------------
+// The chat format (plan 24e Task 3): what b70-serve selects for config.json's model_type lfm2_moe.
+// ---------------------------------------------------------------------------------------------------------------
+
+template <class F>
+bool throws_naming(F&& f, const char* what) {
+  try {
+    f();
+  } catch (const std::invalid_argument& e) {
+    return std::string(e.what()).find(what) != std::string::npos;
+  }
+  return false;
+}
+
+void chat_format() {
+  using server::ChatFormat;
+  const ChatFormat f = ChatFormat::for_model_type("lfm2_moe");
+  CHECK(f.kind == ChatFormat::Kind::Lfm2);
+  CHECK_EQ(std::string(f.name()), std::string("lfm2_moe"));
+  CHECK(f.template_kwargs());     // the request's chat_template_kwargs reach the template (preserve_thinking)
+  CHECK(!f.string_content());     // content lists go to the template as they are (its parse_content joins the parts)
+  // Every other model type keeps its format; the other LFM2 family members are not this one.
+  CHECK(ChatFormat::for_model_type("qwen3_5").kind == ChatFormat::Kind::Qwen);
+  CHECK(ChatFormat::for_model_type("lfm2").kind == ChatFormat::Kind::Qwen);
+  CHECK(ChatFormat::for_model_type("kolibri1").kind == ChatFormat::Kind::Kolibri);
+  CHECK(ChatFormat::for_model_type("muse_glimmer").kind == ChatFormat::Kind::Muse);
+  CHECK(ChatFormat::for_model_type("k2_horizon").kind == ChatFormat::Kind::K2Horizon);
+
+  const json messages = json::parse(R"([{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]},
+                                        {"role":"assistant","content":null,"tool_calls":[]}])");
+  CHECK_EQ(server::template_messages(f, messages), messages);
+
+  // chat_template_kwargs: preserve_thinking must be a boolean; enable_thinking is accepted (any boolean, ignored: the
+  // template always reasons); anything else passes through to the template unchecked.
+  server::check_template_kwargs(f, json::object());
+  server::check_template_kwargs(f, json::parse(R"({"preserve_thinking": true})"));
+  server::check_template_kwargs(f, json::parse(R"({"preserve_thinking": false, "enable_thinking": false, "x": 1})"));
+  server::check_template_kwargs(f, json(nullptr));
+  CHECK(throws_naming([&] { server::check_template_kwargs(f, json::parse(R"({"preserve_thinking": "yes"})")); },
+                      "preserve_thinking"));
+  CHECK(throws_naming([&] { server::check_template_kwargs(f, json::parse(R"({"preserve_thinking": null})")); },
+                      "preserve_thinking"));
+  CHECK_EQ(server::request_template_kwargs(f, json::parse(R"({"preserve_thinking": true})"), json("high")),
+           json::parse(R"({"preserve_thinking": true})"));   // the OpenAI reasoning_effort is not this model's
+
+  // The output parser: the generation prompt ends in <think>, so the output opens in reasoning.
+  const std::string prompt = "<|startoftext|><|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>";
+  const auto run = [&](const std::string& p, const std::string& text) {
+    std::unique_ptr<server::OutputParser> parser = server::make_output_parser(f, p, json::object(), json::array());
+    std::vector<Delta> deltas = parser->push(text);
+    for (Delta& d : parser->finish()) deltas.push_back(std::move(d));
+    return collect(deltas);
+  };
+  const ParsedOutput a = run(prompt, "think</think>answer" + block("[f(a=1)]"));
+  CHECK_EQ(a.reasoning, std::string("think"));
+  CHECK_EQ(a.content, std::string("answer"));
+  CHECK_EQ(a.tool_calls.size(), size_t(1));
+  CHECK_EQ(a.tool_calls[0].name, std::string("f"));
+  // A prompt that does not end in <think> (not what the template writes): the output is content from its first byte.
+  const ParsedOutput b = run("<|im_start|>assistant\n", "answer</think>");
+  CHECK_EQ(b.reasoning, std::string());
+  CHECK_EQ(b.content, std::string("answer</think>"));
+  // The parser's counters are reachable through the OutputParser interface (--log-requests).
+  std::unique_ptr<server::OutputParser> parser = server::make_output_parser(f, prompt, json::object(), json::array());
+  (void)parser->push("</think>" + block("['g'(\"b\"=true)]"));
+  (void)parser->finish();
+  const json stats = parser->stats();
+  CHECK_EQ(stats.at("rules").at("quoted_name").get<int>(), 2);
+  CHECK_EQ(stats.at("rules").at("json_literal").get<int>(), 1);
+  CHECK(server::make_output_parser(ChatFormat{}, "<think>\n", json::object(), json::array())->stats().is_null());
+  std::printf("chat format: ok\n");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -802,6 +877,7 @@ int main(int argc, char** argv) {
   limits();
   counters();
   fuzz();
+  chat_format();
   std::printf("toolcall_lfm2_test OK\n");
   return 0;
 }

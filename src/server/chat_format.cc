@@ -4,6 +4,7 @@
 
 #include "server/toolcall_k2.h"
 #include "server/toolcall_kolibri.h"
+#include "server/toolcall_lfm2.h"
 #include "server/toolcall_muse.h"
 
 namespace server {
@@ -31,6 +32,7 @@ ChatFormat ChatFormat::for_model_type(const std::string& model_type) {
   if (model_type == "k2_horizon") return k2_horizon();
   if (model_type == "kolibri1") return kolibri();
   if (model_type == "muse_glimmer" || model_type == "muse_glimmer_text") return muse();
+  if (model_type == "lfm2_moe") return lfm2();
   return ChatFormat{};
 }
 
@@ -39,6 +41,7 @@ const char* ChatFormat::name() const {
     case Kind::K2Horizon: return "k2_horizon";
     case Kind::Kolibri: return "kolibri1";
     case Kind::Muse: return "muse";
+    case Kind::Lfm2: return "lfm2_moe";
     default: return "qwen";
   }
 }
@@ -82,6 +85,12 @@ void check_template_kwargs(const ChatFormat& format, const json& kwargs) {
         throw std::invalid_argument("chat_template_kwargs.tool_namespace_descriptions must be an object of strings "
                                     "(namespace -> description)");
     }
+    return;
+  }
+  if (format.kind == ChatFormat::Kind::Lfm2 && kwargs.is_object()) {
+    // The template reads preserve_thinking | default(false); enable_thinking is accepted and ignored (decision 8).
+    if (kwargs.contains("preserve_thinking") && !kwargs.at("preserve_thinking").is_boolean())
+      throw std::invalid_argument("chat_template_kwargs.preserve_thinking must be a boolean");
     return;
   }
   if (format.kind == ChatFormat::Kind::Kolibri && kwargs.is_object()) {
@@ -129,6 +138,8 @@ std::unique_ptr<OutputParser> make_output_parser(const ChatFormat& format, const
   }
   // Kolibri: the model opens its reasoning itself; the parser reads it from the output.
   if (format.kind == ChatFormat::Kind::Kolibri) return std::make_unique<KolibriOutputStream>(tools);
+  // LFM2: the prompt ends in "<think>" and the output opens inside reasoning (spec 24e).
+  if (format.kind == ChatFormat::Kind::Lfm2) return std::make_unique<Lfm2OutputStream>(tools, ends_with(prompt, "<think>"));
   // Muse: the model writes each message's recipient; the parser reads the channels (spec 23e).
   if (format.kind == ChatFormat::Kind::Muse) return std::make_unique<MuseOutputStream>(tools);
   // Qwen: with thinking on, the prompt ends in "<think>\n" and the output opens with reasoning.

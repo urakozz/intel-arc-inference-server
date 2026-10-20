@@ -168,6 +168,11 @@ Server::Outcome Server::generate(const Request& r,
   } catch (const std::exception& error) {
     throw BadRequest(error.what());
   }
+  // Spec 24e (decision 8): LFM2.5's template always opens <think>; enable_thinking false is accepted and has no effect.
+  if (r.chat && opts_.chat_format.kind == ChatFormat::Kind::Lfm2 && !r.enable_thinking) {
+    std::fprintf(stderr, "b70-serve: enable_thinking ignored: the template always reasons\n");
+    std::fflush(stderr);
+  }
   outcome.prompt_ids = deps_.tok.encode(prompt);
   const uint32_t max_len = deps_.engine.max_len();
   if (outcome.prompt_ids.empty()) throw BadRequest("prompt encodes to zero tokens");
@@ -205,6 +210,15 @@ Server::Outcome Server::generate(const Request& r,
 void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t max_tokens,
                            Outcome& outcome, const std::function<void(const Delta&)>& emit) {
   PrefixSession& session = *impl_->prefix;
+  // Spec 24e (decision 1): a request with a repetition penalty carries the distinct ids of its prompt and of every id
+  // consumed so far, for an engine adapter that applies it (the host sampler, before temperature / top-k / top-p).
+  SeenIds seen;
+  Sampling sampling = r.sampling;
+  const bool penalised = sampling.repetition_penalty != 1.0f;
+  if (penalised) {
+    for (uint32_t id : outcome.prompt_ids) seen.add(id);
+    sampling.seen = &seen;
+  }
   std::unique_ptr<StreamerIface> streamer = deps_.tok.streamer();
   if (!streamer) throw BadRequest("tokenizer did not provide a streamer");
 
@@ -280,7 +294,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
       const uint32_t k = policy->next();
       uint32_t proposed = 0;
       burst_head_indexed = false;
-      burst = deps_.engine.step_drafts(r.sampling, [&](uint32_t pending) {
+      burst = deps_.engine.step_drafts(sampling, [&](uint32_t pending) {
         if (burst_head_indexed) throw std::logic_error("EngineIface::step_drafts: propose twice");
         matcher.append(pending);
         burst_head_indexed = true;
@@ -302,10 +316,10 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   };
   const auto next_id = [&]() -> uint32_t {
     if (lookup) return next_lookup();
-    if (!speculative) return deps_.engine.step(r.sampling);
+    if (!speculative) return deps_.engine.step(sampling);
     if (burst_at == burst.size()) {
       const uint32_t k = policy ? policy->next() : deps_.engine.mtp_k();
-      burst = deps_.engine.step_many(r.sampling, k);
+      burst = deps_.engine.step_many(sampling, k);
       burst_at = 0;
       if (burst.empty()) throw std::runtime_error("EngineIface::step_many returned no ids");
       if (policy) policy->observe(k, std::min<uint32_t>(k, uint32_t(burst.size() - 1)));
@@ -315,6 +329,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   for (uint32_t generated = 0; generated < max_tokens; ++generated) {
     const uint32_t id = next_id();
     session.fed(id);
+    if (penalised) seen.add(id);
     if (generated == 0) outcome.t_first_token = steady_seconds();
     const bool is_eos = impl_->eos.count(id) != 0;
     if (is_eos && !r.ignore_eos && outcome.out_ids.size() >= r.min_tokens) {
@@ -345,6 +360,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     deps_.engine.truncate_to(deps_.engine.pos() - static_cast<uint32_t>(burst.size() - burst_at));
   if (outcome.finish_reason == "length") add_text(streamer->flush());
   if (parser && (eos_stop || outcome.finish_reason == "length")) route(parser->finish());
+  if (parser) outcome.parser_stats = parser->stats();
   flush_pending(true);
   if (eos_stop && !outcome.parsed.tool_calls.empty()) outcome.finish_reason = "tool_calls";
   outcome.usage.completion_tokens = static_cast<uint32_t>(outcome.out_ids.size());
@@ -405,6 +421,7 @@ void Server::log_request(bool chat, const std::string& body, double t_start,
       {"out_ids", outcome.out_ids},
       {"response_text", outcome.raw_text},
   };
+  if (!outcome.parser_stats.is_null()) record["parser"] = outcome.parser_stats;   // spec 24e: LFM2's parser.rules
   char name[32];
   std::snprintf(name, sizeof(name), "/%06llu.json",
                 static_cast<unsigned long long>(++impl_->next_log));

@@ -38,6 +38,13 @@ struct FilteredProbs {
 };
 FilteredProbs filter_probs(const float* logits, uint32_t vocab_used, const Sampling& s);
 
+// Spec 24e (decision 1): Hugging Face's repetition penalty (logits_process.py, RepetitionPenaltyLogitsProcessor) on the host
+// logits row, applied BEFORE filter_probs - before temperature, top-k and top-p, HF's order, so the penalty can demote a
+// leader out of the top-k: each listed id's logit l becomes `l < 0 ? l * penalty : l / penalty`. The ids are gathered
+// first and scattered after, as HF does, so an id listed twice is penalised once. Ids at or above `vocab_used` are
+// ignored. A penalty of 1.0 returns without touching the row.
+void apply_repetition_penalty(float* logits, uint32_t vocab_used, const std::vector<uint32_t>& ids, float penalty);
+
 // One draw from the filtered distribution (what `sample()` returns).
 uint32_t draw(const FilteredProbs& f, std::mt19937_64& rng);
 
