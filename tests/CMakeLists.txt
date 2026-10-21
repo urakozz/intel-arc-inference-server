@@ -4710,4 +4710,31 @@ target_include_directories(bolt_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOU
 target_link_libraries(bolt_test PRIVATE b70_bolt_model)
 add_test(NAME bolt_test COMMAND bolt_test ${CMAKE_SOURCE_DIR}/tests/model/bolt/config.json)
 set_tests_properties(bolt_test PROPERTIES LABELS bolt)
+# Task 4: the layouts and the host repack (both spellings to one layout, signed scales, 64 B alignment, the bytes of spec 25
+# §3 re-derived), and the loader's host half over the synthetic checkpoints (make_synth.py: n8-g128 = SergiioB's spelling,
+# n8-g64x = its exact g64 expansion, n8-g64 = a native g64 packing; SKIP 77 until they exist - the box's
+# $DATA/oracle-out-bolt-synth, data key bolt_synth) and, when the HF cache holds the published index, the descriptor's names
+# against the real 112,091.
+set(B70_BOLT_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-bolt-synth" CACHE PATH
+  "Task 1's synthetic checkpoints (tools/quantize/bolt/make_synth.py: n8-g128, n8-g64x, n8-g64, n12-g128, n12-g64x) - the box's \$DATA/oracle-out-bolt-synth, data key bolt_synth")
+add_executable(bolt_repack_test loader/bolt_repack_test.cc)
+target_include_directories(bolt_repack_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(bolt_repack_test PRIVATE b70_bolt_loader)
+add_test(NAME bolt_repack_test COMMAND bolt_repack_test)
+set_tests_properties(bolt_repack_test PROPERTIES LABELS bolt)
+add_executable(bolt_synth_host_test loader/bolt_synth_host_test.cc)
+target_include_directories(bolt_synth_host_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(bolt_synth_host_test PRIVATE b70_bolt_loader)
+add_test(NAME bolt_synth_host_g128_test COMMAND bolt_synth_host_test ${B70_BOLT_SYNTH_DIR}/n8-g128)
+add_test(NAME bolt_synth_host_pair_test COMMAND bolt_synth_host_test ${B70_BOLT_SYNTH_DIR}/n8-g128 ${B70_BOLT_SYNTH_DIR}/n8-g64x)
+add_test(NAME bolt_synth_host_g64_test COMMAND bolt_synth_host_test ${B70_BOLT_SYNTH_DIR}/n8-g64)
+set_tests_properties(bolt_synth_host_g128_test bolt_synth_host_pair_test bolt_synth_host_g64_test PROPERTIES LABELS bolt
+  SKIP_RETURN_CODE 77 TIMEOUT 1800)
+set(B70_BOLT_SNAPSHOT "$ENV{HOME}/.cache/huggingface/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997" CACHE PATH
+  "SergiioB's pinned snapshot (only its small files are read by the host tests; the shards by the box's load tests)")
+add_executable(bolt_names_test loader/bolt_names_test.cc)
+target_include_directories(bolt_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(bolt_names_test PRIVATE b70_bolt_loader)
+add_test(NAME bolt_names_test COMMAND bolt_names_test ${B70_BOLT_SNAPSHOT}/model.safetensors.index.json)
+set_tests_properties(bolt_names_test PROPERTIES LABELS bolt SKIP_RETURN_CODE 77)
 # ==== Spec 25b: Nemotron 3.5 Bolt descriptor and loader (label bolt) ==== (end) ====
