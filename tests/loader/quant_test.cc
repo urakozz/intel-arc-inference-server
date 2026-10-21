@@ -1,8 +1,11 @@
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 #include "check.h"
 #include "common/bf16.h"
@@ -39,7 +42,7 @@ static std::vector<uint8_t> qz_gidx_bytes(uint32_t qzeros_word5, int bad_gidx = 
   return bytes;
 }
 
-int main() {
+int main(int argc, char** argv) {
   using common::json::parse;
   // QuantConfig: accepts the checkpoint's spelling, rejects "+:" rules.
   auto ok = parse(R"({"quantization_config":{"bits":4,"group_size":64,"sym":true,
@@ -392,6 +395,245 @@ int main() {
       threw = std::string(e.what()).find("matches neither") != std::string::npos;
     }
     CHECK(threw);
+  }
+
+  // ===== Spec 25b Task 3: the exact relaxations Nemotron 3.5 Bolt's checkpoint needs (spec 25 §5.2) =====
+  // (a) SergiioB's quantization_config (the published file's, typed here with a subset of its 44 '-:' rules): GPTQ
+  // packing, g128, and ONE '+:' rule that RESTATES the top level. Parsed; the restatement is counted.
+  const std::string sb_head =
+      R"({"quantization_config":{"autoround_version":"0.17.0","bits":4,"damp_percent":0.01,"data_type":"int",
+         "desc_act":false,"group_size":128,"lm_head":false,"low_gpu_mem_usage":true,"provider":"auto-round",
+         "quant_method":"gptq","sym":true,"true_sequential":false,"dynamic":{)";
+  const std::string sb_excl =
+      R"("-:.*embeddings.*":{},"-:.*lm_head.*":{},"-:.*vision_model.*":{},"-:.*vision_projector.*":{},
+         "-:.*language_model\\.model\\.layers\\.10\\.mixer\\.gate.*":{},
+         "-:.*language_model\\.model\\.layers\\.12\\.mixer\\.gate.*":{}})";
+  const std::string sb_rule = R"("+:.*mixer\\.out_proj$":{"bits":4,"group_size":128,"sym":true},)";
+  {
+    const loader::QuantConfig sb = loader::QuantConfig::parse(parse(sb_head + sb_rule + sb_excl + "}}}"));
+    CHECK_EQ(sb.group_size, uint32_t(128));
+    CHECK(sb.sym && !sb.desc_act && sb.desc_act_declared);
+    CHECK_EQ(sb.quant_method, std::string("gptq"));
+    CHECK_EQ(sb.dynamic_rule_count, size_t(6));      // the '-:' exclusions, as before
+    CHECK_EQ(sb.dynamic_restating, size_t(1));       // the '+:' restatement, counted apart
+    // a config with no '+:' rule counts none
+    CHECK_EQ(loader::QuantConfig::parse(parse(sb_head + sb_excl + "}}}")).dynamic_restating, size_t(0));
+    // a restating rule under a g64 top level is the same thing
+    const loader::QuantConfig g64 = loader::QuantConfig::parse(parse(
+        R"({"quantization_config":{"bits":4,"group_size":64,"sym":true,"desc_act":false,"quant_method":"gptq",
+           "dynamic":{"+:.*out_proj$":{"bits":4,"group_size":64,"sym":true}}}})"));
+    CHECK_EQ(g64.dynamic_restating, size_t(1));
+    // two restating rules count two
+    CHECK_EQ(loader::QuantConfig::parse(parse(
+        R"({"quantization_config":{"bits":4,"group_size":128,"sym":true,"desc_act":false,"dynamic":{
+           "+:.*a$":{"bits":4,"group_size":128,"sym":true},"+:.*b$":{"sym":true,"bits":4,"group_size":128}}}})")
+        ).dynamic_restating, size_t(2));
+    if (argc > 1) {   // the published file itself: 44 '-:' rules and the one '+:'
+      std::ifstream f(argv[1]);
+      CHECK(f.good());
+      std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+      const loader::QuantConfig pub = loader::QuantConfig::parse(parse(text));
+      CHECK_EQ(pub.group_size, uint32_t(128));
+      CHECK_EQ(pub.dynamic_rule_count, size_t(44));
+      CHECK_EQ(pub.dynamic_restating, size_t(1));
+    }
+  }
+  // (b) the broken-MTP guard is intact: a '+:' rule that changes bits / group / sym, carries any other key, omits one of
+  // the three, or is empty is still refused, naming the rule; a '-:' rule behaves as before.
+  for (const char* body : {
+           R"({"bits":8,"group_size":128,"sym":true})",                     // bits changed
+           R"({"bits":4,"group_size":64,"sym":true})",                      // group changed under a g128 top level
+           R"({"bits":4,"group_size":128,"sym":false})",                    // sym changed
+           R"({"bits":4,"group_size":128,"sym":true,"data_type":"fp"})",    // another key
+           R"({"bits":4,"group_size":128,"sym":true,"act_bits":8})",        // another key
+           R"({"bits":4,"group_size":128})",                                // a key omitted
+           R"({"bits":16,"data_type":"fp"})",                               // an fp exclusion spelt as a '+:' rule
+           R"({})",                                                         // empty (the pre-25b refusal)
+           R"(7)"}) {                                                       // not an object
+    threw = false;
+    try {
+      loader::QuantConfig::parse(parse(sb_head + R"("+:.*mixer\\.out_proj$":)" + body + "," + sb_excl + "}}}"));
+    } catch (const std::runtime_error& e) {
+      const std::string msg = e.what();
+      threw = msg.find("+:.*mixer") != std::string::npos && msg.find("quantization_config.dynamic") != std::string::npos;
+      if (!threw) std::fprintf(stderr, "refusal of %s named something else: %s\n", body, e.what());
+    }
+    if (!threw) std::fprintf(stderr, "'+:' rule %s was not refused\n", body);
+    CHECK(threw);
+  }
+  threw = false;
+  try {   // a restating rule does not excuse a different TOP level
+    loader::QuantConfig::parse(parse(R"({"quantization_config":{"bits":4,"group_size":128,"sym":true,"desc_act":false,
+        "dynamic":{"+:.*x$":{"bits":4,"group_size":64,"sym":true}}}})"));
+  } catch (const std::runtime_error&) { threw = true; }
+  CHECK(threw);
+
+  // (c) + (d): a GPTQ linear K=256, N=16 at g128 with BF16 `.scales` (a future export's; signed, as AutoRound writes them)
+  // converts exactly through bf16_to_f16_exact, the sign bit survives the exact g128 -> g64 expansion, and assert_quant_
+  // invariants / check_quant_scan accept it. A value f16 cannot hold exactly is refused naming the tensor and the element.
+  {
+    const uint32_t K = 256, N = 16;
+    common::Int4Gptq w = common::Int4Gptq::random(K, N, 21);
+    auto bytes_of = [&](const std::vector<uint16_t>& scales) {
+      std::vector<uint8_t> bytes;
+      auto put = [&bytes](const void* p, size_t n) {
+        const uint8_t* b = static_cast<const uint8_t*>(p);
+        bytes.insert(bytes.end(), b, b + n);
+      };
+      put(w.qweight.data(), w.qweight.size() * 4);   // [0, 2048)
+      put(scales.data(), scales.size() * 2);         // [2048, 2112)
+      const std::vector<uint32_t> qz(2 * N / 8, 0x77777777u);
+      put(qz.data(), qz.size() * 4);                 // [2112, 2128)
+      return bytes;
+    };
+    auto lin_dir = [&](const char* sdtype, const std::vector<uint16_t>& scales) {
+      const std::string hdr = std::string(R"({"lin.qweight":{"dtype":"I32","shape":[32,16],"data_offsets":[0,2048]},)") +
+                              R"("lin.scales":{"dtype":")" + sdtype + R"(","shape":[2,16],"data_offsets":[2048,2112]},)" +
+                              R"("lin.qzeros":{"dtype":"I32","shape":[2,2],"data_offsets":[2112,2128]}})";
+      write_st(dir + "/lin.safetensors", hdr, bytes_of(scales));
+      std::ofstream(dir + "/model.safetensors.index.json")
+          << R"({"weight_map":{"lin.qweight":"lin.safetensors","lin.scales":"lin.safetensors","lin.qzeros":"lin.safetensors"}})";
+    };
+    // 32 scales: signed, normal and f16-subnormal (2^-20 is a bf16 and an exact f16 subnormal), zero never.
+    std::vector<float> vals(2 * N);
+    for (uint32_t i = 0; i < 2 * N; ++i) {
+      const float mag = (i % 5 == 4) ? std::ldexp(1.0f, -20) : 0.0125f * float(1 + i % 7);
+      vals[i] = (i % 2 == 0) ? -mag : mag;
+    }
+    std::vector<uint16_t> bf(vals.size()), h16(vals.size());
+    for (size_t i = 0; i < vals.size(); ++i) {
+      bf[i] = common::f32_to_bf16(vals[i]);
+      h16[i] = common::f32_to_f16(common::bf16_to_f32(bf[i]));
+      CHECK_EQ(common::f16_to_f32(h16[i]), common::bf16_to_f32(bf[i]));   // the test's own values are exact f16
+    }
+    lin_dir("BF16", bf);
+    {
+      loader::SafetensorsSet set(dir + "/");
+      const loader::QuantScan scan = loader::assert_quant_invariants(set);
+      CHECK_EQ(scan.gptq_linears, size_t(1));
+      const loader::QuantConfig q = loader::QuantConfig::parse(parse(
+          R"({"quantization_config":{"bits":4,"group_size":128,"sym":true,"desc_act":false,"quant_method":"gptq"}})"));
+      loader::check_quant_scan(q, scan);
+      const loader::LinearSrc ls = loader::LinearSrc::classify(set, "lin");
+      CHECK(ls.kind == loader::WKind::Int4);
+      CHECK_EQ(ls.group, uint32_t(128));
+      CHECK(ls.expanded_scales != nullptr);
+      CHECK_EQ(ls.scales, ls.expanded_scales->data());
+      CHECK_EQ(ls.expanded_scales->size(), size_t(K / 64) * N);
+      for (uint32_t j = 0; j < 2; ++j)
+        for (uint32_t n = 0; n < N; ++n) {
+          CHECK_EQ(ls.scales[size_t(2 * j) * N + n], h16[size_t(j) * N + n]);       // both g64 rows of g128 row j
+          CHECK_EQ(ls.scales[size_t(2 * j + 1) * N + n], h16[size_t(j) * N + n]);   // bit for bit, SIGN INCLUDED
+          CHECK_EQ(bool(ls.scales[size_t(2 * j) * N + n] & 0x8000u), vals[size_t(j) * N + n] < 0);
+        }
+      // the dequant is (q - 8) x scale with the signed scale
+      common::Int4Gptq got = w;
+      got.scales.assign(ls.scales, ls.scales + size_t(K / 64) * N);
+      for (uint32_t k = 0; k < K; ++k)
+        for (uint32_t n = 0; n < N; ++n) {
+          const int q4 = int((w.qweight[size_t(k / 8) * N + n] >> (4 * (k % 8))) & 0xFu);
+          CHECK_EQ(got.at(k, n), float(q4 - 8) * common::bf16_to_f32(bf[size_t(k / 128) * N + n]));
+        }
+      // the layout-1 and layout-0 repack carry every scale word (sign bit too) verbatim
+      std::vector<uint32_t> t1(size_t(N / 16) * (K / 64) * 136);
+      common::repack_int4_layout1(ls.qweight, ls.scales, K, N, t1.data());
+      for (uint32_t g = 0; g < K / 64; ++g)
+        for (uint32_t l = 0; l < 16; l += 2) {
+          const uint32_t word = t1[size_t(g) * 136 + 128 + l / 2];
+          CHECK_EQ(uint16_t(word & 0xFFFFu), ls.scales[size_t(g) * N + l]);
+          CHECK_EQ(uint16_t(word >> 16), ls.scales[size_t(g) * N + l + 1]);
+        }
+      std::vector<uint32_t> q0(size_t(K / 8) * N);
+      std::vector<uint16_t> s0(size_t(K / 64) * N);
+      common::repack_int4_layout0_cols(K, N, common::cols_concat({{ls.qweight, ls.scales, N}}), q0.data(), s0.data());
+      CHECK(std::memcmp(s0.data(), ls.scales, s0.size() * 2) == 0);
+    }
+    // an f16 export of the same values: the same expanded words (the BF16 path equals the F16 path for exact values)
+    lin_dir("F16", h16);
+    {
+      loader::SafetensorsSet set(dir + "/");
+      const loader::QuantScan scan = loader::assert_quant_invariants(set);
+      CHECK(scan.subnormal_scales > 0);   // the 2^-20 ones, counted not rejected
+      const loader::LinearSrc ls = loader::LinearSrc::classify(set, "lin");
+      for (uint32_t j = 0; j < 2; ++j)
+        for (uint32_t n = 0; n < N; ++n) {
+          CHECK_EQ(ls.scales[size_t(2 * j) * N + n], h16[size_t(j) * N + n]);
+          CHECK_EQ(ls.scales[size_t(2 * j + 1) * N + n], h16[size_t(j) * N + n]);
+        }
+    }
+    // a BF16 g64 linear (4 scale rows) is converted too
+    {
+      std::vector<uint16_t> bf64(size_t(K / 64) * N);
+      for (size_t i = 0; i < bf64.size(); ++i) bf64[i] = bf[i % bf.size()];
+      std::vector<uint8_t> bytes;
+      auto put = [&bytes](const void* p, size_t n) {
+        const uint8_t* b = static_cast<const uint8_t*>(p);
+        bytes.insert(bytes.end(), b, b + n);
+      };
+      put(w.qweight.data(), w.qweight.size() * 4);
+      put(bf64.data(), bf64.size() * 2);   // [2048, 2176)
+      write_st(dir + "/lin.safetensors",
+               R"({"lin.qweight":{"dtype":"I32","shape":[32,16],"data_offsets":[0,2048]},)"
+               R"("lin.scales":{"dtype":"BF16","shape":[4,16],"data_offsets":[2048,2176]}})", bytes);
+      std::ofstream(dir + "/model.safetensors.index.json")
+          << R"({"weight_map":{"lin.qweight":"lin.safetensors","lin.scales":"lin.safetensors"}})";
+      loader::SafetensorsSet set(dir + "/");
+      const loader::LinearSrc ls = loader::LinearSrc::classify(set, "lin");
+      CHECK_EQ(ls.group, uint32_t(64));
+      for (size_t i = 0; i < bf64.size(); ++i)
+        CHECK_EQ(ls.scales[i], common::f32_to_f16(common::bf16_to_f32(bf64[i])));
+    }
+    // a bf16 scale f16 cannot hold exactly is refused naming the tensor and the element - in classify AND in the scan
+    for (const auto& [bad_f, tag] : {std::pair<float, const char*>{std::ldexp(1.0f, -26), "below f16's subnormals"},
+                                      {70000.0f, "above 65504"}, {-std::ldexp(1.0f, -26), "negative, below"}}) {
+      std::vector<uint16_t> evil = bf;
+      evil[5] = common::f32_to_bf16(bad_f);
+      lin_dir("BF16", evil);
+      loader::SafetensorsSet set(dir + "/");
+      threw = false;
+      try {
+        loader::LinearSrc::classify(set, "lin");
+      } catch (const std::runtime_error& e) {
+        const std::string msg = e.what();
+        threw = msg.find("lin.scales[5]") != std::string::npos && msg.find("not exactly representable") != std::string::npos;
+        if (!threw) std::fprintf(stderr, "classify (%s): %s\n", tag, e.what());
+      }
+      CHECK(threw);
+      threw = false;
+      try {
+        loader::assert_quant_invariants(set);
+      } catch (const std::runtime_error& e) {
+        threw = std::string(e.what()).find("lin.scales[5]") != std::string::npos;
+        if (!threw) std::fprintf(stderr, "scan (%s): %s\n", tag, e.what());
+      }
+      CHECK(threw);
+    }
+    // a BF16 NaN scale is refused too (the dequant has no guard)
+    {
+      std::vector<uint16_t> evil = bf;
+      evil[3] = 0x7FC0;
+      lin_dir("BF16", evil);
+      loader::SafetensorsSet set(dir + "/");
+      threw = false;
+      try {
+        loader::LinearSrc::classify(set, "lin");
+      } catch (const std::runtime_error& e) { threw = std::string(e.what()).find("lin.scales[3]") != std::string::npos; }
+      CHECK(threw);
+    }
+    // any OTHER scale dtype is still refused (F32)
+    {
+      write_st(dir + "/lin.safetensors",
+               R"({"lin.qweight":{"dtype":"I32","shape":[32,16],"data_offsets":[0,2048]},)"
+               R"("lin.scales":{"dtype":"F32","shape":[2,16],"data_offsets":[2048,2176]}})",
+               std::vector<uint8_t>(2176, 0));
+      std::ofstream(dir + "/model.safetensors.index.json")
+          << R"({"weight_map":{"lin.qweight":"lin.safetensors","lin.scales":"lin.safetensors"}})";
+      threw = false;
+      try {
+        loader::LinearSrc::classify(loader::SafetensorsSet(dir + "/"), "lin");
+      } catch (const std::runtime_error& e) { threw = std::string(e.what()).find("lin.scales dtype F32") != std::string::npos; }
+      CHECK(threw);
+    }
   }
 
   std::puts("quant_test OK");

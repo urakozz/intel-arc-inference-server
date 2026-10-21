@@ -580,7 +580,7 @@ add_test(NAME draft_vocab_test COMMAND draft_vocab_test)
 add_executable(quant_test loader/quant_test.cc)
 target_include_directories(quant_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(quant_test PRIVATE b70_loader)
-add_test(NAME quant_test COMMAND quant_test)
+add_test(NAME quant_test COMMAND quant_test ${CMAKE_SOURCE_DIR}/tests/model/bolt/config.json)
 
 # Spec 20 §9: the compressed-tensors symmetric pack-quantized loader - exact repack onto
 # the GPTQ layout (g64 / g128, f16 / bf16 scales), the startup note, the refusals, and
