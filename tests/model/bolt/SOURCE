@@ -1,0 +1,11 @@
+config.json in this directory is SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym@b9f381d20cbd4cede9f729c2647d2542c4a35997's
+config.json, copied unchanged (a configuration file; sha256 19308d948b54ecb26df0987762c7be902c4c3a0125105f6737dcee76b0104c71).
+Its `llm_config` is NVIDIA's NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 language model configuration, its `quantization_config`
+is SergiioB's AutoRound 0.17.0 export's.
+
+Licence: OpenMDW-1.1 (license: other, license_name: openmdw-1.1). Spec 25 §1.5 / Decision 20 (operator, 2026-10-20: "it's
+published open weights, of course we can use it"): model files (config, template, tokenizer) may be vendored.
+
+make_config.py (this directory) writes the same published values from code and `--check` holds them to config.json key by
+key: tests/model/bolt_test.cc reads config.json, the synthetic checkpoints (tools/quantize/bolt/make_synth.py) carry
+make_config.py's output.
