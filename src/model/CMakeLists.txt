@@ -46,3 +46,10 @@ target_link_libraries(b70_lfm2moe_model PUBLIC b70_model)
 add_library(b70_dflash_model STATIC dflash.cc)
 target_include_directories(b70_dflash_model PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_dflash_model PUBLIC b70_model)
+
+# --- Spec 25b: Nemotron 3.5 Bolt 74B-A9B (nemotron_h_omni / nemotron_h_puzzle) --------------------------------------
+# The text model as data, BESIDE qwen3_5, K2, Kolibri, qwen4_exp, Muse-Glimmer and LFM2.5 (spec 25 §8): its own table
+# (per-block types, E and I per layer), sharing GemvShape / WeightKind / Fuse from qwen35.h. Host only.
+add_library(b70_bolt_model STATIC bolt.cc)
+target_include_directories(b70_bolt_model PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_bolt_model PUBLIC b70_model)

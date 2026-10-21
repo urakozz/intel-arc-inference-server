@@ -4698,3 +4698,16 @@ b70_target_kernel_dir(lfm2moe_serve_args_test)   # (kernels/kernels.h, reached t
 add_test(NAME lfm2moe_serve_args_test COMMAND lfm2moe_serve_args_test)
 set_tests_properties(lfm2moe_serve_args_test PROPERTIES LABELS lfm2moe)
 # ==== Spec 24e: LFM2.5-24B-A2B serving ==== (end) ====
+
+# ==== Spec 25b: Nemotron 3.5 Bolt descriptor and loader (label bolt) ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-20-spec25b-bolt-descriptor-loader.md. Box queue row 59 (rows 57-62 are spec 25's,
+# 63-65 spec 26's). Host tests first (tools/mac_check.sh); card tests SKIP 77 until their data exists - the synthetic
+# checkpoints (tools/quantize/bolt/make_synth.py, tools/box_validate/stages.sh row 59) carry the card gate before SergiioB's
+# 41.9 GB checkpoint does.
+# Task 2: the model table.
+add_executable(bolt_test model/bolt_test.cc)
+target_include_directories(bolt_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(bolt_test PRIVATE b70_bolt_model)
+add_test(NAME bolt_test COMMAND bolt_test ${CMAKE_SOURCE_DIR}/tests/model/bolt/config.json)
+set_tests_properties(bolt_test PROPERTIES LABELS bolt)
+# ==== Spec 25b: Nemotron 3.5 Bolt descriptor and loader (label bolt) ==== (end) ====
