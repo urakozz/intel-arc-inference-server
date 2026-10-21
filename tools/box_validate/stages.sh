@@ -4053,7 +4053,8 @@ st_r56_d5_pp() {
 
 # ======================================================================================
 row 57 "spec 25a - Nemotron 3.5 Bolt: the facts, the CPU reference (B1), golden sets, the A4 references, the tap dumps, gate Q (plan 25a)"
-rownote 57 "Download first (pinned; df -h ~ first; MemAvailable >= 48 / 96 GB): hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997 (41.9 GB) and hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 567021037ff88364143e24ea05e6abd0f72086ff (149.8 GB). r57.host needs only the pinned small files (the same command with --exclude '*.safetensors')."
+rownote 57 "Download first (pinned; df -h ~ first; MemAvailable >= 48 GB): hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997 (41.9 GB). r57.host needs only its pinned small files (the same command with --exclude '*.safetensors')."
+rownote 57 "The BF16 original (hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 567021037ff88364143e24ea05e6abd0f72086ff, 149.8 GB; MemAvailable >= 96 GB) is downloaded on the box only, for the Bolt BF16 window (docs/box-day-plan.md, Session 12, with row 58) and removed after it: r57.golden_bf16, r57.a4_bf16 and r57.gateq run there. Every other row 57 stage needs only the g128 form."
 rownote 57 "Box CPU only, no card: nothing here takes the GPU lock. Every stage runs tools/box_validate/bolt_oracle.sh in the oracle image with transformers 5.19.0 from <tree>/oracle-out-q4exp-site (tools/oracle/qwen4exp_env.sh). The real stages SKIP 77 'missing data' without the checkpoints, or while they download."
 rownote 57 "Hand back: B70_BOLT_TIE_TOL's evidence (the 'MoE 9th/10th sel gap' lines r57.golden prints, per block and over all), the SSM-state magnitude lines, each prompt's wall / RSS, the perplexities per form, hfcheck's verdict and its fallback lines, the A4 parse failures (score.py --format qwen-think, bar 0 for the BF16 reference) and agreement, gate Q's table (a recorded measurement, Decision 3)."
 stage r57.host       57 default cpu  bolt_small,oracle_image       -  "bolt_oracle.sh tests: test_bolt_ref.py, test_bolt_make_tiny.py, bolt_tiny_check.py, the toolcall tests (the box image's torch: the bitwise claims re-checked there)"
@@ -4088,9 +4089,15 @@ st_r57_golden_bf16() {
   grab_all gap 'sel gap|SSM state|wall' 120
   finish
 }
-stage r57.a4_ref     57 optin   cpu  bolt_g128,bolt_bf16,oracle_image  -  "the A4 references (g128 and BF16) -> oracle-out-bolt-a4 (days, resumable)"
+stage r57.a4_ref     57 optin   cpu  bolt_g128,oracle_image       -  "the A4 reference on the g128 form -> oracle-out-bolt-a4 (the engine's tool-call reference; days, resumable)"
 st_r57_a4_ref() {
   chk "tools/box_validate/bolt_oracle.sh $DATA a4" "the A4 reference on the g128 form (36 scenarios, 2048 new ids, batched)"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  grab_all a4 'scenarios|parse failure|match|^int4:|^bf16:' 16
+  finish
+}
+stage r57.a4_bf16    57 optin   cpu  bolt_bf16,oracle_image       r57.a4_ref  "the A4 reference on the BF16 original -> oracle-out-bolt-a4 (the BF16 window; days, resumable; scores both forms)"
+st_r57_a4_bf16() {
   chk "tools/box_validate/bolt_oracle.sh $DATA a4-bf16" "the A4 reference on the BF16 original"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   grab_all a4 'scenarios|parse failure|match|^int4:|^bf16:' 16
@@ -4103,7 +4110,7 @@ st_r57_taps() {
   grab_all taps 'taps|sources|wall|SKIPPED' 40
   finish
 }
-stage r57.gateq      57 optin   cpu  bolt_a4_ref,oracle_image     r57.a4_ref  "gate Q: g128 vs BF16 (KL / top-1 / A4), recorded"
+stage r57.gateq      57 optin   cpu  bolt_a4_ref,oracle_image     r57.a4_bf16  "gate Q: g128 vs BF16 (KL / top-1 / A4), recorded"
 st_r57_gateq() {
   chk "tools/box_validate/bolt_oracle.sh $DATA gateq" "gate Q (a recorded measurement, Decision 3)"
   grab_all gateq '^PASS|^FAIL|gate Q|A4 pooled|^kl ' 60

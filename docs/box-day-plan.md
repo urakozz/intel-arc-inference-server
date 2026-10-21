@@ -28,6 +28,8 @@ to it.
 | 9b | Qwen3.8-Flash-Next on the synthetic checkpoints (rows 30-34, spec 21) | **both** | `tools/box_validate.sh --only r30,r31,r32,r33,r34 --with r32.ple_rate,r32.bench_attn` | 32 + 2 opt-in | 3.5-6 h (est.) |
 | 9c | spec 22's expert-offload probe (row 36, plan 22a): links, copy / zero-copy rates, capacity, the curves, the projection | **both**, idle | `tools/box_validate.sh --only r36` (+ CPU lane: `--with r36.prune,r36.prune_a4`) | 15 (+ 2 opt-in) | 3-5 h GPU (est.); the CPU opt-ins hours to days |
 | 10 | the rest of the suite | device 0 | `tools/box_validate.sh --only x` | 1 | 0.5-1 h |
+| 11 | Bolt on SergiioB's g128 checkpoint (row 57): the CPU reference, golden sets, the g128 A4 reference, the taps | box CPU, no card | `tools/box_validate.sh --only r57 --with r57.ppl,r57.hfcheck,r57.golden,r57.a4_ref,r57.taps` | 1 + 5 opt-in | hours, then days for `r57.a4_ref` (est.) |
+| 12 | **the Bolt BF16 window** (rows 57, 58): the BF16 original downloaded, our g64 quantisation, the BF16 references, gate Q and F6, then the BF16 original removed | **both** for `r58.tune`, else box CPU | §2, Session 12 | row 58's + 3 opt-in | ~3-6 days (est.) |
 
 **Total, the default set: ~40-63 h of box time, ~51 h central (est.)** - two to two and a half
 days if the sessions run back to back. Sessions 1-10 together run each of the 179 default
@@ -42,6 +44,11 @@ other default stage is). **Session 9c** (row 36, spec 22's expert-offload probe,
 it needs 9b's data and binaries. With 9b and 9c, sessions 1-10 run each of today's 221 default stages
 once; 9b adds ~3.5-6 h (est.) plus its CPU-lane data (§1.6) and, optionally, Intel's real checkpoint
 (§1.3); 9c ~3-5 h of GPU time (est.) plus its opt-in CPU stages.
+
+**Added 2026-10-22: Sessions 11 and 12** for Nemotron 3.5 Bolt (spec 25). Session 11 needs only SergiioB's g128
+checkpoint (41.9 GB). The BF16 original (149.8 GB) is downloaded **on the box only**, for Session 12, and
+removed after it: everything that reads it (row 58's quantisation, the BF16 golden sets, the BF16 A4
+reference, gate Q, F6) runs in that one window.
 
 Row 20 (Kolibri-1 spec 20a, the quantisation) has no runbook stage and needs spec 20
 decision 1; it is not part of the box day. Everything on the real Kolibri int4 checkpoint
@@ -121,6 +128,8 @@ expected, not a failure.
 | Kolibri-1 int4 | does not exist (spec 20b) | ~42.5 GB when it does | `r24.partial`, `r24.pp_real`, `r26.real`, `r28.real` | `kolibri` |
 | tiny qwen4_exp model | `qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next` | 124 MB | `r30.host` (session 9b) | `q4exp_tiny` |
 | Qwen3.8-Flash-Next original, **small files only** | `Qwen/Qwen3.8-Flash-Next` `config.json tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja` | a few MB (never the 360 GB) | `r31.synth` (the synthetic checkpoints), `r34.a4_ref` | `q4exp_orig_small` |
+| Nemotron 3.5 Bolt int4 g128 (SergiioB) | `SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym` `--revision b9f381d20cbd4cede9f729c2647d2542c4a35997` | 41.9 GB | row 57 (Session 11), Session 12, rows 59-65 | `bolt_g128` (`bolt_small`: its small files alone, `--exclude '*.safetensors'`) |
+| Nemotron 3.5 Bolt BF16 original (**Session 12 only**, removed after it) | `nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16` `--revision 567021037ff88364143e24ea05e6abd0f72086ff` | 149.8 GB | `r57.golden_bf16`, `r57.a4_bf16`, `r57.gateq`, row 58 (`r58.rtn`, `r58.tune`, `r58.eval`) | `bolt_bf16` |
 | Intel's Qwen3.8-Flash-Next W4A16 (**optional**, 9b part 2) | `Intel/Qwen3.8-Flash-Next-W4A16-AutoRound` | 181.17 GB (102.4 GB of it the PLE shards) | `r31.load_real`, `r32.partial`, `r33.golden_real` (SKIP "missing data" without it), the opt-in real-weight stages of rows 30-34 | `q4exp_intel` |
 
 ```sh
@@ -188,11 +197,19 @@ alone is made on the box before session 5 - one container run of make_set.py, no
       list. **Session 9b:** +~27 GB for the two Qwen3.8-Flash-Next synthetic checkpoints
       (`r31.synth`, ~13.5 / ~13.7 GB); part 2 adds **~233 GB** (Intel's 181.17 GB + the 51.8 GB
       int8 PLE file `r31.ple_convert` writes beside it) - only if `df -h ~` has it.
+      **Session 11:** +41.9 GB (Bolt g128), plus its golden sets and A4 outputs (unmeasured, budget 5 GB).
+      **Session 12:** +149.8 GB for the BF16 original **while the window lasts**, plus row 58's two g64
+      exports (RTN and ours, ~40.5 GB each - spec 25's 40.46 GB of device bytes; the files ESTIMATED near
+      it) and its calibration data (unmeasured): **want >= 240 GB free when it starts**. After it the
+      BF16 original goes and the two exports stay (~81 GB).
 - [ ] **RAM** (121 GB on the box): one CPU oracle at a time; 9b part 2's `r31.load_real` pins the
       51.8 GB PLE table (MemAvailable - 16 GiB rule: `free -g` >= 70 GB, nothing else running), the
       real-weight references SKIP below MemAvailable 64 GB (`Q4_REF_MIN_GB`); `r14.oracle` needs
       MemAvailable >= 32 GB (`K2_REF_MIN_GB`), `r24.oracle_synth` >= 24 GB (`KOL_REF_MIN_GB`);
       never during `g0.build` (a compile slows a CPU oracle by ~28 %, docs/10, and both want RAM).
+      Bolt (`BOLT_REF_MIN_GB`): the g128 stages want MemAvailable >= 48 GB, the BF16 ones >= 96 GB;
+      `r58.tune` refuses below 64 GB free (ESTIMATED) - so in Session 12 a BF16 CPU stage and `tune`
+      never overlap (121 GB).
 
 ### 1.6 Build, and the optional CPU lane
 
@@ -578,6 +595,53 @@ tools/box_validate.sh --summary          # box-validation-<date>.md: every stage
 `x.rest`: ctest over every registered test no stage has run (new host tests, the routed tests'
 twins), ~0.5-1 h (est.). The summary covers the whole state, so the last one written is the
 day's record.
+
+### Session 11 - Bolt on SergiioB's g128 checkpoint (row 57), box CPU
+
+```sh
+tools/box.sh run 'tools/probe/detach.sh $HOME/dl-bolt.log uvx --from huggingface_hub hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997'
+tools/box_validate.sh --only r57 --with r57.ppl,r57.hfcheck,r57.golden,r57.a4_ref,r57.taps
+```
+
+No card and no GPU lock: it can run beside a GPU session, one CPU oracle at a time and never
+during a build. `r57.host` needs only the small files; the rest SKIP "missing data" until the
+download is complete. `r57.golden` (hours) feeds 25b-25d's gates and `r57.taps` spec 26a;
+`r57.a4_ref` (days, resumable; est.) is the tool-call reference 25e's `r62.a4` scores the engine
+against (`bolt_a4_int4`). `r57.golden_bf16`, `r57.a4_bf16` and `r57.gateq` SKIP here (no BF16):
+they belong to Session 12.
+
+### Session 12 - the Bolt BF16 window (rows 57, 58)
+
+The only time the BF16 original is on the box. Start it when (1) plan 25q is merged (row 58's
+script and stages exist), (2) Session 11's `r57.golden` and `r57.a4_ref` are done, so the window
+holds only work that needs BF16, (3) `df -h ~` has >= 240 GB free (§1.5), and (4) both cards can be
+given to `r58.tune` for up to two days. Everything runs in this order, **serially** (RAM, §1.5):
+
+```sh
+# 1. the download (149.8 GB; 25 min - 1.5 h at an unmeasured 30-100 MB/s)
+tools/box.sh run 'tools/probe/detach.sh $HOME/dl-bolt-bf16.log uvx --from huggingface_hub hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 567021037ff88364143e24ea05e6abd0f72086ff'
+# 2. RTN g64 from the BF16 original (the native-g64 development checkpoint), checked
+tools/box_validate.sh --only r58.host,r58.rtn,r58.rtn_ref
+# 3. the operator starts the tune: calib, coverage, tune on both cards (~16-40 h, the GPU lock), check
+#    (plan 25q Task 4; no other GPU row meanwhile, no BF16 CPU stage either - RAM)
+# 4. the BF16 references and gate Q, box CPU
+tools/box_validate.sh --only r57.golden_bf16,r57.a4_bf16,r57.gateq
+# 5. F6 (KL / top-1 per set and A4 for RTN, SergiioB's g128 and ours against the BF16 original), our export's golden sets
+tools/box_validate.sh --only r58.eval,r58.ours_ref
+```
+
+Then (a Mac edit) gate Q's table into spec 25 (Decision 3: recorded), F6 into plan 25q's card, and
+the operator's call on which g64 export replaces SergiioB's g128 as the served form. Only after
+that does the operator remove the BF16 original from the box's HF cache (nothing after this
+session reads it; to re-run any of these stages, download it again at the same revision).
+
+**Estimate (all ESTIMATED):** download ~1 h, RTN hours, `tune` 16-40 h (plan 25q; 800 iterations
+~32-40 h), `r57.golden_bf16` hours (~1.5x the g128 run, `bolt_oracle.sh`), `r57.a4_bf16` days (36
+scenarios x 2048 new ids on the CPU), gate Q and F6 hours - **~3-6 days** with the BF16 original on
+disk. **The short path** drops the BF16 A4 reference: gate Q and F6 then report KL / top-1 only
+(no A4 column) and the window shrinks by those days; `r58.eval` and `r57.gateq` need
+`bolt_a4_ref` (both forms' A4) as written, so taking the short path means running them without
+that key, a change to make on the Mac before the window.
 
 ## 3. When time is short
 
