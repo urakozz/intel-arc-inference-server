@@ -1,0 +1,273 @@
+{
+ "name": "bolt_agentic",
+ "note": "spec 25a Task 5: an original multi-turn coding session written for this repository (the tool results are this tree's files as of 2026-10-21, frozen here); assistant turns carry reasoning_content and structured tool_calls, which Bolt's template renders as <think>...</think> and Qwen3-Coder XML calls; rendered with add_generation_prompt (enable_thinking true) by bolt_prompts.py",
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a coding agent working in a local checkout of b70-inference-server, an LLM inference engine for the Intel Arc Pro B70 written in C++ with Level Zero kernels, plus Python and shell tooling. The repository is at /work.\n\nYou help the user with software engineering tasks: finding code, explaining it, editing it and running builds and tests. Use the tools you are given to inspect the repository; never guess the contents of a file you have not read. Prefer grep and glob to locate code, read to look at it, edit to change it (the oldString must match the file exactly, including indentation) and bash to run commands.\n\nGuidelines:\n- Be concise. Do not explain what you are about to do at length; act.\n- Make one tool call at a time and wait for its result.\n- Keep edits minimal and in the style of the surrounding code.\n- Paths passed to tools are absolute and start with /work.\n- The C++ tree builds with CMake into /work/build; tests are ctest targets named after their source file (for example tests/prefill/dequant_test.cc is dequant_test). The Python tools run with python3 and their tests with python3 -m pytest.\n- Do not commit, push or change git state unless the user asks."
+  },
+  {
+   "role": "user",
+   "content": "Nemotron Bolt will run on both cards with the layers split by bytes, like Kolibri. Before anyone writes its planner I want to understand the generic pieces: how pp_balance in src/runtime/pipeline_plan.h chooses the split, and whether the per-device budget in src/runtime/memory_plan.h already subtracts the driver reserve. Then make the tie rule of pp_balance explicit in its comment (which split wins when two are equally good) and run the pipeline planner's test."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "reasoning_content": "Two headers are named. pp_balance's declaration and its comment are in pipeline_plan.h; read it whole first.",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/src/runtime/pipeline_plan.h"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "<file>\n00001| #pragma once\n00002| #include <array>\n00003| #include <cstddef>\n00004| #include <cstdint>\n00005| #include <string>\n00006| #include <vector>\n00007| #include \"model/model_desc.h\"\n00008| #include \"runtime/buffer_sizes.h\"\n00009| #include \"runtime/memory_plan.h\"\n00010| \n00011| // Spec 16b (pipeline parallel decode across two B70s): the split and the per-device\n00012| // memory plan, as device-free arithmetic - the planner half of spec 16, beside\n00013| // runtime/memory_plan.h and over the same size functions (runtime/buffer_sizes.h), so\n00014| // tests/runtime/pipeline_plan_test.cc runs on any host.\n00015| //\n00016| // **The split comes from the descriptor.** Layers [0, s) run on device 0 with the\n00017| // embedding; layers [s, layers) on device 1 with the final norm, lm_head and the argmax.\n00018| // Which layers are GDN and which FA, and every byte, are ModelDesc's - so Qwen3.8 (64\n00019| // layers), Agnes (72) and Ornith (40) split without code changes (spec 16b Review Focus 5).\n00020| //\n00021| // **`--pipeline-split auto` balances BYTES, not layers** (spec 16 decision 2, and vLLM's\n00022| // PP = 2 lesson on these cards: an even layer split leaves the lm_head card heavier, and\n00023| // the smaller remainder sets the KV both cards can hold). The bytes are everything the\n00024| // device will hold at the session's max_len: its weights, the RoPE table, its layers' KV\n00025| // and GDN state, the decode scratch, the hand-off buffers.\n00026| namespace runtime {\n00027| \n00028| // --- the hand-off (spec 16 §2 decision 3; 16a would have chosen, 16b builds both) --------\n00029| \n00030| // copy: device 0's list ends with a device-to-device copy of the residual into device 1's\n00031| //       landing buffer and a barrier signalling a cross-device event; device 1's list\n00032| //       starts by waiting on it and copying the landing buffer into its own scratch.\n00033| // peer: device 0's last kernel (pp_send) writes the residual into device 1's landing buffer\n00034| //       and raises a flag with a system-scope release store; device 1's first kernel\n00035| //       (pp_recv) spins on it with system-scope acquire loads, bounded.\n00036| enum class PpHandoff { Copy, Peer };\n00037| inline constexpr PpHandoff kDefaultPpHandoff = PpHandoff::Copy;\n00038| const char* pp_handoff_name(PpHandoff h);\n00039| bool parse_pp_handoff(const std::string& v, PpHandoff& out);   // \"copy\" | \"peer\"\n00040| \n00041| // --- the stages --------------------------------------------------------------------------\n00042| \n00043| inline constexpr uint32_t kPpDevices = 2;   // spec 16 builds and gates two (§7)\n00044| \n00045| // The layers one device runs, and where its GDN / FA layers sit in the model's per-kind\n00046| // order (the index the persistent state is sliced by: GDN 0..gdn_layers-1, FA\n00047| // 0..fa_layers-1). A stage's state holds exactly its own layers, kind-major as the\n00048| // single-card buffers are, so stage 0's slices followed by stage 1's ARE the single-card\n00049| // layout - which is what makes save_state / save_kv identical across --pp 1 and 2.\n00050| struct PpStage {\n00051|   uint32_t first = 0, last = 0;      // layers [first, last)\n00052|   uint32_t gdn_first = 0, gdn = 0;   // its GDN layers: [gdn_first, gdn_first + gdn)\n00053|   uint32_t fa_first = 0, fa = 0;     // its FA layers:  [fa_first, fa_first + fa)\n00054|   uint32_t layers() const { return last - first; }\n00055|   bool has_embed() const { return first == 0; }\n00056|   bool has_head(const model::ModelDesc& d) const { return last == d.layers; }\n00057| };\n00058| PpStage pp_stage(const model::ModelDesc& d, uint32_t first, uint32_t last);\n00059| // Throws std::invalid_argument unless 1 <= split <= layers - 1 and each device holds at least\n00060| // one GDN and one FA layer (its state is one allocation of each kind, sliced per layer).\n00061| void require_split(const model::ModelDesc& d, uint32_t split);\n00062| std::array<PpStage, kPpDevices> pp_stages(const model::ModelDesc& d, uint32_t split);\n00063| \n00064| // The compute launches of a stage's decode list (the hand-off's own launches - pp_send /\n00065| // pp_recv under `peer` - excluded): stage 0 is embed_gather, its layers, and layer s's\n00066| // prep_res_fold (the cut: the fold needs no weight, so device 0 runs it and hands off the\n00067| // folded residual and its sums - 10.9 KB on Qwen3.8 instead of 90 KB of split-K partials);\n00068| // stage 1 is its layers less that fold, and the 5 head launches. The two add up to\n00069| // runtime::decode_launches(d) (capture.cc asserts it at every stage capture).\n00070| size_t pp_stage_launches(const model::ModelDesc& d, const PpStage& st);\n00071| \n00072| // --- the bytes ---------------------------------------------------------------------------\n00073| \n00074| // The loaded weights' device bytes by where they go.\n00075| struct PpWeights {\n00076|   std::vector<size_t> layer;   // per layer: its linears, small blocks, MoE blocks\n00077|   size_t embed = 0;            // device 0: embed_tokens\n00078|   size_t head = 0;             // the last device: lm_head and the final norm\n00079|   // Spec 16d: the MTP head's weights (its linears, norms, FA block, a MoE head's experts) and\n00080|   // the draft vocabulary's compact head + id table, when loaded - both on the last device.\n00081|   // Not in total() or stage(): pp_plan adds them (and the replicated embedding) under\n00082|   // PpExtras::mtp, so every spec 16b / 16c plan is unchanged.\n00083|   size_t mtp = 0, draft_vocab = 0;\n00084|   size_t total() const;\n00085|   // A stage's share: its layers, and the embedding / head when it holds them.\n00086|   size_t stage(const model::ModelDesc& d, const PpStage& st) const;\n00087| };\n00088| // From the descriptor, in the device forms loader::load allocates (int4 layout 0: GPTQ\n00089| // words + f16 scales; layout 1: 136-word tiles with inline scales; bf16 a||b padded to\n00090| // 128 columns; the small blocks of loader/small_layout.h; a MoE layer's blocks of\n00091| // loader/moe_layout.h; lm_head in `lm_head`'s form). Qwen3.8 with its bf16 head sums to\n00092| // the measured load, 18,082,777,088 B. The CLI plans from the LOADED model's allocations\n00093| // instead (runtime::pp_weights(const loader::LoadedModel&), pipeline_place.h) - exact for\n00094| // whatever the checkpoint shipped.\n00095| PpWeights pp_weights(const model::ModelDesc& d, model::WeightKind lm_head);\n00096| \n00097| // The hand-off buffers (runtime::PipelineLink). One landing allocation on device 1 that only\n00098| // device 0 writes: the residual rows (kM x hidden bf16), then on their own page the norm\n00099| // sums (norm_sumsq's size) and the peer path's stamp word, then the flag on a page of its\n00100| // own (spec 16 §2: the peer-written buffer is its own page-aligned allocation, nothing the\n00101| // local device writes in it). Device 1 also keeps pp_recv's state words, device 0 its\n00102| // send counter.\n00103| inline constexpr size_t kPpPage = 4096;\n00104| inline constexpr size_t kPpLandingAlign = 65536;\n00105| inline constexpr size_t kPpStateWords = 16;   // pp_recv's state[] (pp_handoff.cl) and spare\n00106| struct PpLandingLayout {\n00107|   size_t resid_bytes = 0;   // kM rows x hidden bf16 - the allocation; a step moves M rows\n00108|   size_t sumsq_bytes = 0;   // DecodeScratch::norm_sumsq's size\n00109|   size_t sumsq_off = 0;     // page-aligned, after the rows\n00110|   size_t stamp_off = 0;     // the word right after the sums\n00111|   size_t flag_off = 0;      // a page of its own\n00112|   size_t total = 0;\n00113| };\n00114| PpLandingLayout pp_landing_layout(const model::ModelDesc& d);\n00115| // Spec 20c: the same layout from the two regions' sizes alone - the form a model without a\n00116| // ModelDesc (Kolibri-1, its own engine) builds its hand-off with. The ModelDesc form above is\n00117| // this one at (kM rows x hidden bf16, norm_sumsq's size), byte for byte.\n00118| PpLandingLayout pp_landing_layout(size_t resid_bytes, size_t sumsq_bytes);\n00119| // Device d's hand-off bytes: device 0 its send counter, device 1 the landing + state words.\n00120| size_t pp_link_bytes(const model::ModelDesc& d, uint32_t device);\n00121| \n00122| // One device's plan, in memory_line()'s five components: model = its weights + the RoPE\n00123| // table (both devices hold one: every FA layer's attn_prep reads it); kv = its FA layers'\n00124| // K and V; decode_state = control + its GDN state + conv ring + the decode scratch (each\n00125| // device has the whole DecodeScratch: the lists are per device and scratch is per list) +\n00126| // the hand-off buffers. No MTP (16d).\n00127| //\n00128| // Spec 16c, with a prefill path (`pf.prefill`): each device also holds a whole\n00129| // PrefillScratch (eager, and the l0 backend's slab) in prefill_scratch, its own Int8State\n00130| // on l0-int8 (the scratch for the model's widest h8 K, and the column scales of ITS layers'\n00131| // linears only) in int8, and the prefill hand-off (runtime/pipeline_prefill_plan.h:\n00132| // pp_prefill_link_bytes - device 1's two landing slots) in decode_state, as `prefill_link`.\n00133| // The block-end shadows a prefix cache's hook needs are not planned (b70-serve's pipeline is\n00134| // spec 16d). The composed attention and sycl-tla have no pipeline walk: refused.\n00135| // `pp_no_prefill()` (the default everywhere) is spec 16b's decode-only plan, unchanged.\n00136| inline PrefillPath pp_no_prefill() {\n00137|   PrefillPath p;\n00138|   p.prefill = false;\n00139|   return p;\n00140| }\n00141| //\n00142| // Spec 16d (`PpExtras`, b70-serve --pp 2 and MTP across the split; the overloads below take\n00143| // it, the ones without are PpExtras{} and unchanged):\n00144| //   mtp   the MTP head on the last device (spec 16 §3.1): its weights (PpWeights::mtp) and\n00145| //         a REPLICA of the embedding (the operator's choice, as 16b's placement anticipated:\n00146| //         the drafts and the head's KV fill gather embed rows of ids produced on device 1) in\n00147| //         `model`; MtpBuffers (its control, the verify slots of ITS GDN layers, the head's KV\n00148| //         layer, hh / dh, the draft logits) in decode_state; the draft vocabulary's head in\n00149| //         `draft_vocab`. On device 0 only the verify slots of its own GDN layers\n00150| //         (pp_gdn_spec_bytes) in decode_state. With a prefill path, device 1 also holds the\n00151| //         head's prefill hidden rows and two head Control blocks (decode_state) and, on\n00152| //         l0-int8, the L0 slab step_mtp_kv's bf16 linears walk (prefill_scratch).\n00153| //   hook  a spec 7 block hook on the prefill (b70-serve's prefix cache): each device's two\n00154| //         block-end shadows of its GDN state and conv ring (and device 1's two of the head's\n00155| //         hidden row with mtp), in prefill_scratch where PipelineEngine::memory_use counts them.\n00156| //   drafter  (spec 19d, `--spec dflash --pp 2`; not with mtp - one proposer) a DFlash drafter on the last\n00157| //         device beside lm_head: its weights and buffers (DrafterPlan, in `drafter`) and the embedding\n00158| //         replica (in `model`) the draft list gathers; on EACH device the verify slots of its own GDN layers\n00159| //         for TapVerifyDims::kSlots (pp_gdn_spec_bytes(d, gdn, 8), decode_state); with a prefill path, the\n00160| //         last device's two tap stagings (one per chunk in flight, prefill_scratch). A draft vocabulary\n00161| //         (draft_vocab) is the drafter's then.\n00162| struct PpExtras {\n00163|   bool mtp = false;\n00164|   uint32_t draft_vocab = 0;        // |V'| (spec 8 §11), with mtp or a drafter; 0 = the full head drafts\n00165|   bool draft_vocab_int8 = true;    // the compact head's form: the lm_head's (int8 or bf16)\n00166|   bool hook = false;\n00167|   DrafterPlan drafter;             // spec 19d: on() = a DFlash drafter on the last device\n00168| };\n00169| struct PpDevicePlan : MemoryComponents {\n00170|   PpStage stage;\n00171|   size_t weights = 0, rope = 0, link = 0, prefill_link = 0;\n00172|   // Spec 16d's terms, each already inside one of the five components (0 without them).\n00173|   size_t embed_replica = 0, mtp_weights = 0;     // in model\n00174|   size_t mtp_buffers = 0, mtp_prefill = 0;       // in decode_state\n00175|   size_t shadows = 0;                            // in prefill_scratch\n00176|   // Spec 19d's terms (a drafter): its verify slots (decode_state), its prefill tap stagings (prefill_scratch);\n00177|   // its weights and buffers are MemoryComponents::drafter, the replica embed_replica.\n00178|   size_t drafter_slots = 0, drafter_taps = 0;\n00179| };\n00180| struct PpPlan {\n00181|   uint32_t max_len = 0, split = 0;\n00182|   KvCache kv_cache = KvCache::Bf16;\n00183|   PrefillPath prefill = pp_no_prefill();\n00184|   PpExtras extras;\n00185|   std::array<PpDevicePlan, kPpDevices> dev{};\n00186|   size_t max_total() const;\n00187| };\n00188| PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, const PpWeights& w,\n00189|                KvCache kv = default_kv_cache(), const PrefillPath& pf = pp_no_prefill());\n00190| PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, const PpWeights& w,\n00191|                KvCache kv, const PrefillPath& pf, const PpExtras& x);\n00192| \n00193| // Spec 16d: one device's MTP verify slots - gdn_step_slots' `state_spec` for the device's\n00194| // `stage_gdn` GDN layers. The binary bakes one slot's stride as the WHOLE model's\n00195| // (SPEC_SLOT_STRIDE = gdn_layers x one layer's state), and the stage binds its own slice g at\n00196| // `base + g x layer` like every stage buffer, so slots 1 and 2 span the model's stride and\n00197| // slot 3 only the stage's: (kSlots - 2) x gdn_state + stage_gdn x layer. No new binary; the\n00198| // gaps cost (kSlots - 2) x (gdn_layers - stage_gdn) layers' state (Qwen3.8 at the even\n00199| // split: 0.151 GB a card - a stage-stride variant would save it, a box decision).\n00200| // Spec 19d: `slots` = the verify lists' slot count (MtpDims::kSlots = 4 for MTP, TapVerifyDims::kSlots = 8 for a\n00201| // drafter - the gdn_step_slots_M<M>_N<slots> binaries): (slots - 2) whole slots + the stage's share of the last.\n00202| size_t pp_gdn_spec_bytes(const model::ModelDesc& d, uint32_t stage_gdn, uint32_t slots = MtpDims::kSlots);\n00203| // The head's prefill state on the last device (spec 16d): the hidden rows step_mtp_kv\n00204| // writes (mtp_prefill_hidden_bytes) and its two Control blocks (one per chunk in flight).\n00205| size_t pp_mtp_prefill_bytes(const model::ModelDesc& d);\n00206| // The launches of a stage's MTP verify list at any M: the stage's decode list (the rows are\n00207| // in the variants, not the count) and, on the last device, the head's 10-launch KV fill -\n00208| // the two add up to runtime::verify_launches(d) (capture.cc asserts it at every capture).\n00209| size_t pp_stage_verify_launches(const model::ModelDesc& d, const PpStage& st);\n00210| \n00211| // Spec 16d: spec 7's KV snapshot over two devices in the ONE-CARD host order (Engine's\n00212| // kv_runs): per tensor (K, then V) every main layer's rows - device 0's FA layers, then\n00213| // device 1's, which is the model's FA order - then the MTP head's layer when `head` is set\n00214| // (its KvLayout on the last device), then at int8 every layer's scales the same way. Each\n00215| // run is one contiguous device range: `device`, the allocation (`tensor` 0 = K / 1 = V,\n00216| // `head` = MtpBuffers' kv_k / kv_v rather than the stage's), its byte offset and length. So\n00217| // a snapshot moves between --pp 1 and --pp 2 byte for byte, MTP included.\n00218| struct PpKvRun {\n00219|   uint32_t device = 0, tensor = 0;\n00220|   bool head = false;\n00221|   size_t offset = 0, bytes = 0;\n00222| };\n00223| std::vector<PpKvRun> pp_kv_runs(const std::array<KvLayout, kPpDevices>& stage, const KvLayout* head,\n00224|                                 uint32_t begin, uint32_t end);\n00225| \n00226| // The descriptor-free core of the balance: `layer_bytes[l]` is everything layer l puts on\n00227| // its device (weights + its state at the session's length), `dev0_fixed` / `dev1_fixed`\n00228| // what each device holds whatever the split (the embedding, the head, the scratch). The\n00229| // split in [1, n - 1] whose heavier side is smallest, ties to the more even, then the\n00230| // smaller s. pp_auto_split adds the Qwen-family constraint (a GDN and an FA layer per\n00231| // device); K2-Horizon, which has no ModelDesc and its own engine, is planned with this\n00232| // alone (tests/runtime/pipeline_plan_test.cc - PP for K2 is future work).\n00233| struct PpBalance {\n00234|   uint32_t split = 0;\n00235|   size_t dev0 = 0, dev1 = 0;\n00236| };\n00237| PpBalance pp_balance(const std::vector<size_t>& layer_bytes, size_t dev0_fixed, size_t dev1_fixed);\n00238| \n00239| // `--pipeline-split auto` at an explicit max_len: the split whose heavier device holds the\n00240| // fewest bytes; ties go to the smaller difference between the two, then to the smaller s.\n00241| uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len,\n00242|                        KvCache kv = default_kv_cache(), const PrefillPath& pf = pp_no_prefill());\n00243| uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len, KvCache kv,\n00244|                        const PrefillPath& pf, const PpExtras& x);\n00245| \n00246| // `--max-len auto` under a split: the largest multiple of kMaxLenQuantum up to `cap` whose\n00247| // plan + `reserve` fits EACH device (the min over the devices); 0 when not even\n00248| // min(kMinAutoMaxLen, cap) fits. Throws std::invalid_argument when cap < one quantum.\n00249| uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const PpWeights& w,\n00250|                               const std::array<size_t, kPpDevices>& device_bytes,\n00251|                               size_t reserve, uint32_t cap, KvCache kv = default_kv_cache(),\n00252|                               const PrefillPath& pf = pp_no_prefill());\n00253| uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const PpWeights& w,\n00254|                               const std::array<size_t, kPpDevices>& device_bytes,\n00255|                               size_t reserve, uint32_t cap, KvCache kv, const PrefillPath& pf,\n00256|                               const PpExtras& x);\n00257| \n00258| // Both auto: the split whose min-over-devices max_len is the largest, ties broken as\n00259| // pp_auto_split breaks them at that length. {0, 0} when no split fits min(4096, cap).\n00260| struct PpChoice {\n00261|   uint32_t split = 0, max_len = 0;\n00262| };\n00263| PpChoice pp_auto_split_and_len(const model::ModelDesc& d, const PpWeights& w,\n00264|                                const std::array<size_t, kPpDevices>& device_bytes,\n00265|                                size_t reserve, uint32_t cap, KvCache kv = default_kv_cache(),\n00266|                                const PrefillPath& pf = pp_no_prefill());\n00267| PpChoice pp_auto_split_and_len(const model::ModelDesc& d, const PpWeights& w,\n00268|                                const std::array<size_t, kPpDevices>& device_bytes,\n00269|                                size_t reserve, uint32_t cap, KvCache kv, const PrefillPath& pf,\n00270|                                const PpExtras& x);\n00271| \n00272| // \"pipeline plan at max_len N, split s (layers [0, s) | [s, L)):\" and one memory_line()-style\n00273| // line per device (\"device 0: model ... total ... of ...; + reserve\").\n00274| std::string pp_describe(const PpPlan& p, const std::array<size_t, kPpDevices>& device_bytes,\n00275|                         size_t reserve);\n00276| \n00277| }  // namespace runtime\n\n(End of file - total 277 lines)\n</file>"
+  },
+  {
+   "role": "assistant",
+   "content": "The declaration is at the PpBalance struct; looking for the definition and the callers.",
+   "reasoning_content": "The comment says the heavier side is minimised, ties to the more even split, then the smaller s. The definition is not in the header; find where it lives and who calls it.",
+   "tool_calls": [
+    {
+     "id": "call_2",
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "arguments": {
+       "pattern": "pp_balance\\(",
+       "path": "/work/src",
+       "include": "*.{h,cc}"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_2",
+   "content": "Found 6 matches\n/work/src/runtime/pipeline_plan.cc:\n  Line 368: PpBalance pp_balance(const std::vector<size_t>& layer_bytes, size_t dev0_fixed, size_t dev1_fixed) {\n/work/src/runtime/pipeline_plan.h:\n  Line 237: PpBalance pp_balance(const std::vector<size_t>& layer_bytes, size_t dev0_fixed, size_t dev1_fixed);\n/work/src/runtime/kolibri/kolibri_sizes.cc:\n  Line 201: return pp_balance(pp_layer_bytes(d, max_len), dev0, dev1);\n/work/src/runtime/lfm2moe/lfm2moe_sizes.cc:\n  Line 189: return runtime::pp_balance(layer_bytes, dev0_fixed, dev1_fixed).split;\n/work/src/runtime/muse/muse_sizes.cc:\n  Line 48: return model::MusePlacement::two(d, runtime::pp_balance(pp_layer_bytes(d, max_len), dev0, dev1).split);\n/work/src/runtime/qwen4exp/qwen4exp_sizes.cc:\n  Line 288: return pp_balance(pp_layer_bytes(d, max_len), dev0, dev1);"
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "reasoning_content": "Now the budget side: memory_plan.h decides what a device may hold. The question is whether the reserve is taken off before the planner compares the two sides.",
+   "tool_calls": [
+    {
+     "id": "call_3",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/src/runtime/memory_plan.h"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_3",
+   "content": "<file>\n00001| #pragma once\n00002| #include <cstddef>\n00003| #include <cstdint>\n00004| #include <string>\n00005| #include \"model/model_desc.h\"\n00006| #include \"runtime/buffer_sizes.h\"\n00007| #include \"runtime/prefill_backend.h\"\n00008| \n00009| // Spec 6 §10 (max_len auto): the device memory an engine will hold at a max_len,\n00010| // computed before a byte of it is allocated, and the largest max_len that fits.\n00011| //\n00012| // Pure host arithmetic over runtime/buffer_sizes.h - the functions the allocations\n00013| // themselves are sized by - plus the loaded weights' byte count, which only the\n00014| // loader knows. Nothing here reads a device; the device total and the weights come\n00015| // in as numbers, so tests/runtime/memory_plan_test.cc runs on any host and\n00016| // tests/runtime/memory_plan_box_test.cc asserts on the card that every planned\n00017| // component equals what the engine allocated.\n00018| namespace runtime {\n00019| \n00020| // The five figures Engine::memory_line() prints, in its order. `model` is the\n00021| // loader's total (the RoPE table included); `kv` the main model's K and V caches;\n00022| // `decode_state` everything else the decode lists use (the rest of\n00023| // PersistentBuffers, DecodeScratch, and with MTP the head's buffers and the prefill\n00024| // hidden rows); `prefill_scratch` PrefillScratch, eager and lazy; `int8` the h8\n00025| // path's Int8State.\n00026| //\n00027| // `draft_vocab` (spec 8 §11, `--draft-vocab`): the compact draft head and its id table,\n00028| // which the loader allocates OUTSIDE LoadReport::total() (so `model` reads the same with\n00029| // and without it), sized by loader::draft_vocab_bytes. 0 when off.\n00030| //\n00031| // `drafter` (spec 19b, 19c's `--spec dflash`): a DFlash drafter's weights and buffers (DrafterPlan below). 0 when off.\n00032| struct MemoryComponents {\n00033|   size_t model = 0, kv = 0, decode_state = 0, prefill_scratch = 0, int8 = 0;\n00034|   size_t draft_vocab = 0;\n00035|   size_t drafter = 0;\n00036|   size_t total() const { return model + kv + decode_state + prefill_scratch + int8 + draft_vocab + drafter; }\n00037| };\n00038| \n00039| // Spec 19b: a DFlash drafter beside the model - its weights (loader::dflash_weight_bytes) and its buffers\n00040| // (runtime/dflash/dflash_sizes.h: the ring, the taps, the RoPE rows, the draft list's scratch), as\n00041| // runtime::dflash::drafter_plan builds it. The buffers' part that grows with max_len (the drafter's RoPE rows) is\n00042| // per_position; the rest does not move with max_len. All zero = no drafter.\n00043| struct DrafterPlan {\n00044|   size_t weights = 0, fixed = 0, per_position = 0;\n00045|   // Spec 19c: the target layers the drafter taps (its target_layer_ids' count). With a drafter the plan also counts\n00046|   // the ENGINE's side of it (runtime/tap_drafter.h): TapVerifyDims' 7 more GDN state slots for the verify lists at\n00047|   // M <= 8 (in decode_state) and, when the engine prefills, the tap staging (in prefill_scratch, lazy).\n00048|   uint32_t n_taps = 0;\n00049|   bool on() const { return weights != 0; }\n00050|   size_t bytes(uint32_t max_len) const { return weights + fixed + per_position * size_t(max_len); }\n00051| };\n00052| \n00053| // \"<label>: model 18.116 GB, kv 8.590 GB, decode state 0.590 GB, prefill scratch\n00054| // 0.700 GB, int8 0.085 GB, total 28.081 GB of 32.530 GB\" - memory_line()'s format\n00055| // (GB = 1e9 B), one formatter for the measured line and the planned one. With a draft\n00056| // vocabulary a \"draft vocab <GB>,\" term precedes the total; without one the line is\n00057| // exactly the above.\n00058| std::string format_memory(const char* label, const MemoryComponents& c, size_t device_bytes);\n00059| \n00060| // What a session's prefill allocates, which is a property of the backend and the\n00061| // attention path (PrefillScratch's lazy accessors, Engine::prepare_prefill):\n00062| //\n00063| //   l0-int8 (default)   Int8State (xq, xs, w8, every int4 linear's column scales - on a MoE\n00064| //                       model also every layer's expert gate||up array, spec 15d); the L0\n00065| //                       slab only with MTP (step_mtp_kv's bf16 linears walk it).\n00066| //   l0                  the slab ([intermediate][1024] bf16), every int4 linear.\n00067| //   sycl-tla            the bf16 dequant scratch and, its attention always being the\n00068| //                       composed path, pf_s / pf_p.\n00069| //   composed attention  (B70_PREFILL_ATTN=composed on an L0 backend) pf_s / pf_p:\n00070| //                       [GQA group][kC][max_len] fp32 + bf16 - 73,728 B per position\n00071| //                       on Qwen3.8, the only prefill scratch that scales with max_len.\n00072| //                       The default flash path builds neither.\n00073| //\n00074| // `prefill = false` is a decode-only engine (b70-decode without --prefill-length / --prefill):\n00075| // ruling R7 keeps every prefill allocation lazy, so it plans none of them.\n00076| struct PrefillPath {\n00077|   bool prefill = true;\n00078|   PrefillBackend backend = PrefillBackend::L0Int8;\n00079|   bool composed_attn = false;\n00080| };\n00081| \n00082| // Spec 8 §11 (`--draft-vocab`): a draft vocabulary of `rows` ids, its compact head in\n00083| // the lm_head's form (`int8`, else bf16). `rows` = 0 is off. With MTP it adds the\n00084| // loader's compact head + id table (`MemoryComponents::draft_vocab`,\n00085| // loader::draft_vocab_bytes) and MtpBuffers' compact logits (in decode_state,\n00086| // MtpDims::sizes). Neither depends on max_len, but both come out of what auto can give\n00087| // the context. cli::draft_vocab_plan reads it off a loaded model.\n00088| struct DraftVocabPlan {\n00089|   uint32_t rows = 0;\n00090|   bool int8 = true;\n00091| };\n00092| \n00093| struct MemoryPlan : MemoryComponents {\n00094|   uint32_t max_len = 0;\n00095|   bool mtp = false;\n00096|   KvCache kv_cache = KvCache::Bf16;   // spec 12b: the form `kv` (and the MTP head's KV) is in\n00097|   // The finer split, each already counted in one of the five above.\n00098|   size_t rope = 0;           // in model: Qwen35::rope_table_bytes(max_len)\n00099|   size_t mtp_buffers = 0;    // in decode_state: MtpBuffers\n00100|   size_t mtp_hidden = 0;     // in decode_state: Engine::prefill's MTP hidden rows\n00101|   size_t prefill_lazy = 0;   // in prefill_scratch: the lazy buffers `path` builds\n00102|   // Spec 15c, a mixture-of-experts model: the loader's expert blocks, routers and shared\n00103|   // experts (loader::moe_bytes - already inside `model_bytes`, the loaded total), and the\n00104|   // decode MoE scratch (runtime::moe_scratch_layout - inside decode_state). 0 when dense.\n00105|   size_t moe_weights = 0;    // in model\n00106|   size_t moe_scratch = 0;    // in decode_state\n00107|   // Spec 15d: the MoE prefill scratch (runtime::moe_prefill_layout: routing, sorted rows,\n00108|   // expert activations, the per-chunk weight batch) - inside prefill_scratch. 0 when dense.\n00109|   size_t moe_prefill = 0;\n00110|   // Spec 19c, a drafter: the engine's verify slots (in decode_state) and the prefill's tap staging (in\n00111|   // prefill_scratch, counted with prefill only). 0 without a drafter.\n00112|   size_t drafter_slots = 0;\n00113|   size_t drafter_taps = 0;\n00114| };\n00115| \n00116| // `kv` (spec 12b, `--kv-cache`): the KV cache's form - its term follows it (bf16: 64 KiB\n00117| // per position on Qwen3.8; int8: 32 KiB of rows + 256 B of fp16 scales), and so does the\n00118| // MTP head's own layer. The default is runtime::default_kv_cache(), what the engine\n00119| // allocates when nobody passes one, so a plan and an allocation in one process agree.\n00120| //\n00121| // `model_bytes`: everything loader::load() allocated EXCEPT the RoPE table -\n00122| // `report.total() - report.rope_bytes` - i.e. the weights, which do not depend on\n00123| // max_len. The MTP head's weights are in it when the model was loaded with the head\n00124| // (`mtp`); its buffers are planned here. `plan.model` adds the table back at\n00125| // `max_len`, so it equals memory_line()'s `model` once the table has that length.\n00126| // `drafter` (spec 19b): a DFlash drafter's bytes at this max_len go to MemoryComponents::drafter.\n00127| MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t model_bytes,\n00128|                 const PrefillPath& path = {}, const DraftVocabPlan& dv = {},\n00129|                 KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});\n00130| \n00131| // The max_len grid: the L0 prefill backends need max_len % 256 == 0 (spec 2.1 §3.1,\n00132| // prefill/attn.cc), which is also a whole number of decode attention blocks (64).\n00133| constexpr uint32_t kMaxLenQuantum = 256;\n00134| // Below this, auto gives up instead of serving a context nobody asked for.\n00135| constexpr uint32_t kMinAutoMaxLen = 4096;\n00136| // The default --mem-reserve-gb: device memory the plan does not count - the driver's\n00137| // own allocations, the kernel modules and command lists (decode, MTP draft / verify,\n00138| // prefill), the int8 sign tables, Int8State's per-weight colmax temporaries, the\n00139| // allocator's slack. An estimate, NOT a measurement: the box has to confirm or tune\n00140| // it (docs/superpowers/plans/box-validation-queue.md).\n00141| constexpr double kDefaultReserveGb = 1.5;\n00142| \n00143| // The largest multiple of kMaxLenQuantum, at most `cap` (the trained context),\n00144| // whose plan total + `reserve_bytes` <= `device_bytes`. 0 when not even\n00145| // min(kMinAutoMaxLen, cap) fits. Throws std::invalid_argument when `cap` is below\n00146| // one quantum.\n00147| uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,\n00148|                            size_t device_bytes, size_t reserve_bytes, uint32_t cap,\n00149|                            const PrefillPath& path = {}, const DraftVocabPlan& dv = {},\n00150|                            KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});\n00151| \n00152| // One line for the startup log: the plan's five components, the finer split where it\n00153| // is non-zero, the reserve and the device total.\n00154| std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_bytes);\n00155| \n00156| }  // namespace runtime\n\n(End of file - total 156 lines)\n</file>"
+  },
+  {
+   "role": "assistant",
+   "content": "pp_balance minimises the heavier device, breaks ties by the smaller difference and then by the smaller split, and memory_plan.h's budget is the card's capacity less the reserve before any comparison. Making the last tie-break explicit in the comment:",
+   "reasoning_content": "The header already states the order of the tie-breaks; what is missing is the consequence for exactly equal candidates. Keep the edit to the comment, in the file's own style, wrapped near 100 columns.",
+   "tool_calls": [
+    {
+     "id": "call_4",
+     "type": "function",
+     "function": {
+      "name": "edit",
+      "arguments": {
+       "filePath": "/work/src/runtime/pipeline_plan.h",
+       "oldString": "// split in [1, n - 1] whose heavier side is smallest, ties to the more even, then the\n// smaller s. pp_auto_split adds the Qwen-family constraint (a GDN and an FA layer per",
+       "newString": "// split in [1, n - 1] whose heavier side is smallest, ties to the more even, then the\n// smaller s (so two equal answers always pick the earlier cut). pp_auto_split adds the\n// Qwen-family constraint (a GDN and an FA layer per"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_4",
+   "content": "Edit applied successfully."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "reasoning_content": "A comment cannot change behaviour, but the user asked for the test: tests/runtime/pipeline_plan_test.cc is registered as pipeline_plan_test.",
+   "tool_calls": [
+    {
+     "id": "call_5",
+     "type": "function",
+     "function": {
+      "name": "bash",
+      "arguments": {
+       "command": "cd /work/build && ctest -R 'pipeline_plan' --output-on-failure",
+       "description": "Run the pipeline planner test"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_5",
+   "content": "Test project /work/build\n    Start 287: pipeline_plan_test\n1/1 Test #287: pipeline_plan_test ...............   Passed    0.42 sec\n\n100% tests passed, 0 tests failed out of 1\n\nTotal Test time (real) =   0.44 sec"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the local filesystem.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path to the file"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Line to start from"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Number of lines to read"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "Find files by glob pattern.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit",
+    "description": "Replace an exact string in a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "oldString": {
+       "type": "string"
+      },
+      "newString": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "oldString",
+      "newString"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "content"
+     ]
+    }
+   }
+  }
+ ]
+}
