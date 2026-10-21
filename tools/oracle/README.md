@@ -47,6 +47,9 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `lfm2moe_ref.py` | Spec 24a: the LFM2.5-24B-A2B (`lfm2_moe`) CPU reference - transformers **5.19.0**'s own `Lfm2MoeForCausalLM` (refused on another version), eager attention, layer-streamed, routed experts lazy (bf16 per expert from the original, or an int4 g64 export dequantised: the engine-format reference); `run` (golden layout), `ppl`, `hfcheck` (the restated ops chained against transformers' model), `facts`; `expected_names`, `layer_major`, the restated ops 24b / 24c import (`rms_norm`, `route`, `combine`, `expert_outputs`, `short_conv`, `dense_mlp`). `test_lfm2moe_ref.py` (F1, bitwise on the tiny models). "The LFM2.5-24B-A2B reference" below. |
 | `lfm2moe_make_tiny.py`, `lfm2moe_tiny_check.py` | Spec 24a: tiny variants the downloaded tiny lacks (`pattern8` - the real first eight layers at head_dim 64 -, `pattern8-fp32`, `ties`, `int4-g64` in both expert spellings + its dequantised twin; `test_lfm2moe_make_tiny.py`); the downloaded tiny end to end in 5.19.0. |
 | `lfm2moe_facts.py`, `lfm2moe_prompts.py` | Spec 24a: the facts (the rounding chain cited from the installed sources, shard headers, bytes, tokens, template renders, torch's tie order, the conv's accumulation; `docs/probe-lfm2moe-2026-10-15.md`); the golden prompts `tests/golden/prompts/lfm2moe_{short,4k,32k,agentic}.ids`. |
+| `bolt_ref.py` | Spec 25a: the Nemotron 3.5 Bolt 74B-A9B CPU reference - the checkpoint's OWN remote code (`modeling_nemotron_h.py`, imported from the pinned snapshot, sha256-checked, never vendored) through transformers **5.19.0**, its Mamba mixers on the KERNEL path (`cuda_kernels_forward`) with `bolt_mamba_ops`' plain-torch training kernels and an fp32 cache (spec 25 Decision 1), layer-streamed, routed experts lazy (SergiioB's g128 via the exact g64 expansion, our g64, or the BF16 original's `backbone` names); `run` (golden layout + `--taps`), `ppl`, `hfcheck` (the port = its restated chain bitwise; R's torch fallback recorded), `taps` (dump_taps' format), `facts`, `gateq`; `expected_names`, `layer_major`, `Recorder`, the restated ops 25b / 25c import (`rms_norm`, `route`, `combine`, `moe_block`, `mamba_seq` / `mamba_step`), `fallback_forward` (R's fallback with its rounding points as switches). `test_bolt_ref.py` (B1). "The Nemotron 3.5 Bolt reference" below. |
+| `bolt_remote.py`, `bolt_mamba_ops.py` | Spec 25a: the remote code's import under a private package with the `mamba_ssm` / `causal_conv1d` stub, the mixer's dispatch patch (kernel path or R's fallback per instance), the prompt continuation R lacks, the fp32 cache; the five training-kernel functions in plain torch (conv bias-first then taps oldest first, softplus threshold 20 and no dt clamp, the SSM update in mamba_ssm's order with a halving tree over the state, the SSD chunk scan, the gated norm over groups of 1024). |
+| `bolt_make_tiny.py`, `bolt_tiny_check.py` | Spec 25a: tiny `nemotron_h_puzzle` checkpoints in the checkpoint's names (`pattern12` - the real first 12 blocks -, `pattern12-fp32`, `ties`, `dtclamp`, `int4-g64`, `int4-g128-gptq` + dequantised twins; `test_bolt_make_tiny.py`); the remote code end to end in 5.19.0 on both Mamba paths. |
 | `qwen4exp_make_tiny.py` | Tiny `qwen4_exp` variants for the tests (hidden 128, any layer pattern, the four checkpoint forms, tied router rows, `mtp.*`, a dequantised twin) and 21b's int8 PLE file writer. |
 | `offload_curve.py` | Spec 22 P0.6 / P0.7 / P0.8 (plan 22a): from 21a's routing traces - `counts`, `curve` (h(f) for the uniform and per-layer fills, held out by sha256 halves with the A4 scenarios balanced, and in sample), `swap` (spec 22 §4's adaptive swaps simulated), `mtp` (verify unions over K + 1 rows), `prefill` (streamed bytes a chunk), `profile` (the routing profile 22b loads, `spec22-profile-1`); `reap` (REAP / freq masks, `spec22-mask-1`, `--holdout-a4`, decision 9's `--kfold 4 --fold i\|all`), `prune-report` (the pruning curve: KL / argmax, A4 accuracy in sample and 4-fold held out, the gap, the two-card fit), `project` (decode / MTP / prefill t/s from Task 1's budget, probe_offload's `po` lines and the curves; the last line `STOP` or `GO-CANDIDATE`). numpy + safetensors only. `test_offload_curve.py`. The masked reference is `qwen4exp_ref.py --expert-mask` / `maskeval`. |
 | `muse_ref.py` | Spec 23a: the Muse-Glimmer-30B CPU reference - transformers **5.19.0**'s own `MuseGlimmerForConditionalGeneration` text path (refused on another version; the vision modules removed from the meta model), layer-streamed, the GPTQ form's int4 linears dequantised on demand (sym / g_idx asserts), the bf16 original's `.weight` form; `run` (golden layout: raw and capped logits, `cap_tie`, the drafter `taps`), `ppl`, `hfcheck` (streamed = resident = layer-major), `facts`; `expected_names`, `vision_names`, `softcap`, `cap_tie`, `Recorder`, `layer_major`. `test_muse_ref.py` (MG1, bitwise on the tiny variants). "The Muse-Glimmer reference" below. |
@@ -835,6 +838,66 @@ each text at its first `<|im_end|>`, reads it with the server's own parser and p
 (`PythonicRules`: quote_recovered, quoted_name, bare_call, json_literal, positional_dict, dropped_unfinished, stray_end) and how
 many tool-call blocks the parser left as content - decision 7's evidence; run it on the reference's `.bf16.txt` too (what the
 bf16 model itself writes).
+
+### The Nemotron 3.5 Bolt reference (spec 25a, 2026-10-21)
+
+`bolt_ref.py` runs the checkpoint's OWN remote code - R = `modeling_nemotron_h.py` (HF blob `de290021`, byte-identical
+in SergiioB's, NVIDIA's 24GB and BF16 repos) over `modeling_nemotron_h_puzzle.py` - through **transformers 5.19.0**
+(refused on another version; spec 21a's site, `PYTHONPATH=<dir>` first). Nothing of the model is vendored:
+`bolt_remote.load_remote(snapshot)` imports the four text files from the pinned snapshot (sha256-checked) under a
+private package; a tiny variant (no remote code of its own) takes R from the pinned snapshot in the HF cache
+(`$BOLT_SNAPSHOT` overrides). R needs `mamba_ssm` at import (R:60-63) and imports its GPU kernels only on CUDA:
+`bolt_mamba_ops.stub_package()` stands in for them, R's five kernel globals are set to its functions, and the mixer's
+dispatch (R:735-738, the kernel path only on CUDA) is patched to a per-instance `_bolt_path`: `kernel` (the port,
+`cuda_kernels_forward`, spec 25 Decision 1) or `torch` (R's `torch_forward`, untouched - comparisons only). The cache is
+R's `NemotronHHybridDynamicCache` built by us in **fp32** (R:1664-1667 would build it in the model's dtype; `--cache
+bf16` is Decision 2's arm). Two departures from R, each tested: R's kernel path has no prompt continuation (its cached
+branch takes ONE row), so a chunk after a cached prefix runs `bolt_remote.continue_forward` (the same five functions,
+the conv seeded from the cache's raw columns, the scan from its state); the streamed MoE skips R's no-op dummy forward
+of experts no token routes to (`moe_routed_only`: it adds exactly +0, `test_moe_dummy_noop`). The router's
+`e_score_correction_bias` stays fp32 in a bf16 model (5.19.0's `from_pretrained` keeps it so too - `bolt_tiny_check`).
+
+Layer-streamed (`stream.attach`): `embeddings`, `norm_f` and the untied `lm_head` resident; each block materialised by a
+pre-hook; the routed experts filled from the router's forward hook (only the ones a row routes to; `--expert-cache-gb`
+keeps an LRU across steps). Checkpoint forms, read by name: SergiioB's GPTQ (`qweight` / `scales` / `qzeros`
+`0x77777777` / `g_idx == i // 128`, asserted on first read; g128 through the exact g128 -> g64 expansion), our g64
+(no `g_idx`), the BF16 original's `.weight` under `language_model.backbone.*` (`Ckpt` maps R's `model.` to it).
+
+Subcommands (`bolt_ref.py <cmd> -h`): `run <snapshot> --prompt <ids> --out <p>.golden.safetensors [--gen 32]
+[--layers N] [--weights int4|bf16] [--chunk C] [--taps] [--cache fp32|bf16] [--path kernel|torch] [--keep all]`
+(the golden layout in the module docstring: `h.L*`, `route.{ids,w,sel,gap,sum}.L*` - ids ascending, the set -,
+`ssm.L*` fp32 / `conv.L*` the raw columns after the prompt, `tap.L{1,18,35,51,68,85}`, the logits tail and every
+generated row, `tokens`, `nll`; the log prints the 9th / 10th `sel` gap per block - `B70_BOLT_TIE_TOL`'s evidence,
+Decision 11 - and the SSM state magnitudes); `ppl` (no BOS: the template writes none); `hfcheck <snapshot> --layers N
+[--dtype fp32|bf16]` (the port against its restated chain `port_forward` - BITWISE or exit 1 - and R's torch fallback,
+recorded); `taps` (dump_taps' format, `tap_from = n_prompt - 1024`, LiLiCorr's window); `facts` (`bolt_facts.py`);
+`gateq` (`bolt_gateq.py`). `--layers N` needs an attention block among the first N (N >= 8): R's cache takes the
+length from one (R:247-253).
+
+**What is bitwise against what** (`test_bolt_ref.py`, B1, on `bolt_make_tiny.py`'s variants): the streamed port = R
+fully resident on the kernel path (bf16, fp32); with the Mamba outputs fed from one shared source, R as transformers
+runs it (fallback dispatch) = the port at every block and logit, 40 / 300 ids + 8 cached steps; `mamba_seq` /
+`mamba_step` = R's kernel path (prompt, continuation, steps; states too); the ops = the twin's order restated one
+scalar op at a time; `route`, `combine` (ascending id), `moe_block`, `rms_norm`, relu² on bf16, the NoPE attention,
+`layer_major`, `--layers 8`, the int4 forms = the port on their dequantised twins, `expected_names` = the real indexes
+(112,091 GPTQ names, 28,331 BF16 names, vision aside). **Measured, not bitwise:** the port's Mamba vs R's fallback in
+fp32 (1.6e-6 relative as found; past one SSD chunk only after fixing R's state-passing index - R:692-697 sums over the
+target chunk, transformers' native class over the source, N:328-330 - R's fallback itself is ~0.2-1.0 off there);
+chunked vs whole (bf16: bitwise outside the Mamba mixers once the routers are replayed too - torch's fp32 GEMM, the
+router's logits, is row-count dependent on this CPU, its bf16 GEMM is not; fp32: 1.9e-5); the bf16 table of R's
+fallback rounding points (`test_bf16_differences_recorded`). Mutations that must fail: swap z / xBC, drop the conv
+bias, gate before the norm, one norm group, the dt clamp (`dtclamp`: 8e-2 relative, within 7e-7 with the clamp
+switched on in the ops), the bias reordering the top-9, the `+ 1e-20`, ties at the 9th / 10th (torch keeps either id).
+
+```bash
+# from the repo (or worktree) root on the Mac (the 5.19.0 site once, as above); the pinned snapshot's small files in
+# the HF cache; the variants are written to oracle-out-bolt-tiny/ on first use (~1 min)
+docker run --rm --memory 8g --memory-swap 8g --cpus 4 -e OMP_NUM_THREADS=3 -e HF_HUB_OFFLINE=1 \
+  -e PYTHONPATH=/ws/oracle-out-q4exp/site -v ~/.cache/huggingface:/hf:ro -e HF_HOME=/tmp/hf \
+  -v "$PWD":/ws -w /ws agnes-ref-img:latest sh -c \
+  'python3 tools/oracle/bolt_tiny_check.py /hf/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997 && \
+   python3 tools/oracle/test_bolt_make_tiny.py && python3 tools/oracle/test_bolt_ref.py'
+```
 
 ### The Muse-Glimmer reference (spec 23a, 2026-10-15)
 

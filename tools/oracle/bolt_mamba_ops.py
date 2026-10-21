@@ -41,6 +41,7 @@ import torch
 
 CALLS: dict[str, int] = {}          # stub entry -> calls (bolt_tiny_check prints it)
 CHUNK = 128
+DT_CLAMP_TEST: float | None = None  # a TEST switch: the stubs clamp dt at this floor (R's fallback's 0.001) when set
 
 
 def _count(name: str) -> None:
@@ -250,7 +251,7 @@ def _selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None,
     if z is not None or state_batch_indices is not None or not dt_softplus or dt_bias is None:
         raise NotImplementedError("selective_state_update: only R's call (z None, dt_softplus, dt_bias)")
     y, S = ssm_update(state, x, _tied(dt, (2,), "dt"), _tied(A, (1, 2), "A"), B, C,
-                      None if D is None else _tied(D, (1,), "D"), _tied(dt_bias, (1,), "dt_bias"))
+                      None if D is None else _tied(D, (1,), "D"), _tied(dt_bias, (1,), "dt_bias"), DT_CLAMP_TEST)
     state.copy_(S)
     return y
 
@@ -271,6 +272,8 @@ def _mamba_chunk_scan_combined(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bi
     if z is not None or seq_idx is not None or cu_seqlens is not None or return_varlen_states or not dt_softplus:
         raise NotImplementedError("mamba_chunk_scan_combined: only R's call")
     floor = _limit_floor(dt_limit)
+    if DT_CLAMP_TEST is not None:
+        floor = DT_CLAMP_TEST
     outs, finals = [], []
     for b in range(x.shape[0]):
         y, S = ssm_chunk(x[b], dt[b], A, B[b], C[b], D, dt_bias,

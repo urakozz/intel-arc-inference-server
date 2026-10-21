@@ -59,6 +59,8 @@ _NS = None
 
 def _ops():
     global _OPS
+    if _OPS is None and "bolt_mamba_ops" in sys.modules:          # one module object for the stubs and the callers
+        _OPS = sys.modules["bolt_mamba_ops"]
     if _OPS is None:
         spec = importlib.util.spec_from_file_location("bolt_mamba_ops", os.path.join(_HERE, "bolt_mamba_ops.py"))
         mod = importlib.util.module_from_spec(spec)
