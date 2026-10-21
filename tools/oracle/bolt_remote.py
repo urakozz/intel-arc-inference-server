@@ -188,6 +188,9 @@ def load_remote(snapshot: str):
         if got != want:
             raise RuntimeError(f"{p}: sha256 {got}, the pinned revision's is {want} - another revision of the remote "
                                f"code is not the reference")
+    if PKG in sys.modules:
+        raise RuntimeError(f"the remote code is imported already (by another bolt_remote module object, "
+                           f"{sys.modules.get('bolt_remote')}): load bolt_remote once per process via sys.modules")
     install_stub()
     pkg = types.ModuleType(PKG)
     pkg.__path__ = [snapshot]

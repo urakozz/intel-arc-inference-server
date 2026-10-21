@@ -258,6 +258,68 @@ def test_muse_render():
             assert "cfc67e5f" in str(e)
 
 
+def test_bolt_defaults_sorted_thinking_on():
+    """Spec 25a Task 6: Bolt (nemotron_h_omni) renders key-sorted with enable_thinking TRUE and medium_effort, both
+    recorded per scenario (the set's own scenarios say enable_thinking False: Qwen3.8's render)."""
+    tok, out = run("nemotron_h_omni")
+    assert len(tok.calls) == 2
+    for c in tok.calls:
+        assert c["kwargs"] == make_set.BOLT_KWARGS == {"medium_effort": True} and c["enable_thinking"] is True
+        assert keys_sorted(c["msgs"]) and keys_sorted(c["tools"])
+    sc = json.load(open(os.path.join(out, "t1_a.json"), encoding="utf-8"))
+    assert sc["chat_template_kwargs"] == {"medium_effort": True} and sc["enable_thinking"] is True
+
+
+def _bolt_snapshot():
+    import glob
+    for hub in (os.path.join(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")), "hub"), "/hf/hub"):
+        for c in sorted(glob.glob(os.path.join(
+                hub, "models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym", "snapshots", "*"))):
+            if os.path.exists(os.path.join(c, "chat_template.jinja")):
+                return c
+    return None
+
+
+def test_bolt_render_is_apply_chat_template():
+    """The committed set tests/golden/toolcall-bolt: every scenario's ids are apply_chat_template's on its key-sorted
+    messages with the recorded kwargs (re-rendered here byte for byte), the text ends in the reasoning-open generation
+    prompt, holds no BOS, and its history calls are Qwen3-Coder XML. SKIPs without transformers 5.19.0 or the pinned
+    snapshot's small files (the container with the qwen4exp site has both)."""
+    snap = _bolt_snapshot()
+    try:
+        import transformers
+        ok = transformers.__version__ == "5.19.0"
+    except ImportError:
+        ok = False
+    if not (snap and ok):
+        print("  skip test_bolt_render_is_apply_chat_template: needs transformers 5.19.0 and the Bolt snapshot")
+        return
+    from transformers import AutoTokenizer
+    make_set.check_bolt_template(snap)
+    tok = AutoTokenizer.from_pretrained(snap)
+    here = os.path.dirname(os.path.abspath(__file__))
+    d = os.path.join(here, "..", "..", "tests", "golden", "toolcall-bolt")
+    man = json.load(open(os.path.join(d, "manifest.json"), encoding="utf-8"))
+    assert len(man) == 36
+    for e in man:
+        n = e["name"]
+        raw = open(os.path.join(d, f"{n}.ids"), "rb").read()
+        assert hashlib.sha256(raw).hexdigest() == e["sha256"], n
+        sc = json.load(open(os.path.join(d, f"{n}.json"), encoding="utf-8"))
+        assert sc["enable_thinking"] is True and sc["chat_template_kwargs"] == {"medium_effort": True}, n
+        msgs, tools = json.loads(json.dumps([sc["messages"], sc["tools"]], sort_keys=True))
+        text = tok.apply_chat_template(msgs, tools=tools, add_generation_prompt=True, tokenize=False,
+                                       enable_thinking=True, **sc["chat_template_kwargs"])
+        got = [int(x) for x in raw.split()]
+        assert got == tok(text, add_special_tokens=False)["input_ids"], n
+        assert tok.decode(got) == text and 1 not in got, n
+        assert text.startswith("<|im_start|>system\n") and text.endswith("<|im_start|>assistant\n<think>\n"), n
+        assert "{reasoning effort: efficient}<|im_end|>" in text, n
+        if any(m.get("tool_calls") for m in sc["messages"]):
+            assert "<tool_call>\n<function=" in text, n
+    print(f"  bolt: the committed 36 scenarios = apply_chat_template byte for byte (thinking on, medium effort)")
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     for n, f in tests:
