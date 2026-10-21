@@ -85,6 +85,21 @@ struct BoltDesc {
   std::vector<BoltLinear> linears(uint32_t l) const;
 };
 
+// Layers [0, split) on device 0, [split, layers) on device 1 (spec 16b's cut, spec 25 §4.1). One device: devices == 1
+// and split == layers. Device 0 holds the embedding, the last device norm_f and the head.
+struct BoltPlacement {
+  uint32_t devices = 1, split = 0, layers = 0;
+  uint32_t first(uint32_t dev) const { return dev == 0 ? 0 : split; }
+  uint32_t end(uint32_t dev) const { return dev == 0 ? split : layers; }
+  uint32_t device_of(uint32_t layer) const { return devices > 1 && layer >= split ? 1 : 0; }
+  uint32_t count(uint32_t dev) const { return end(dev) - first(dev); }
+  static BoltPlacement one(const BoltDesc& d) { return {1, d.layers, d.layers}; }
+  static BoltPlacement two(const BoltDesc& d, uint32_t split) { return {2, split, d.layers}; }
+};
+// Throws std::invalid_argument unless devices is 1 (split == layers) or 2 (1 <= split <= layers - 1), and the placement
+// covers d's layers.
+void validate(const BoltPlacement& p, const BoltDesc& d);
+
 // The published model (the real 88-block checkpoint). A process-lifetime singleton.
 const BoltDesc& bolt();
 bool is_bolt(const common::json::Value& config);   // model_type nemotron_h_omni over llm_config.model_type nemotron_h_puzzle

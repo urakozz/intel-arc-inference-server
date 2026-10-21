@@ -172,6 +172,23 @@ std::vector<BoltLinear> BoltDesc::linears(uint32_t l) const {
   return v;
 }
 
+void validate(const BoltPlacement& p, const BoltDesc& d) {
+  if (p.layers != d.layers)
+    throw std::invalid_argument("BoltPlacement: placed " + std::to_string(p.layers) + " layers, " + d.name + " has " +
+                                std::to_string(d.layers));
+  if (p.devices == 1) {
+    if (p.split != d.layers)
+      throw std::invalid_argument("BoltPlacement: one device holds every layer (split " + std::to_string(p.split) +
+                                  " != " + std::to_string(d.layers) + ")");
+    return;
+  }
+  if (p.devices != 2)
+    throw std::invalid_argument("BoltPlacement: " + std::to_string(p.devices) + " devices (spec 25 §4.1 builds and gates two)");
+  if (p.split < 1 || p.split + 1 > d.layers)
+    throw std::invalid_argument("BoltPlacement: split " + std::to_string(p.split) + " is outside [1, " +
+                                std::to_string(d.layers > 0 ? d.layers - 1 : 0) + "] - each device must hold at least one layer");
+}
+
 const BoltDesc& bolt() {
   static const BoltDesc d = make_bolt();
   return d;

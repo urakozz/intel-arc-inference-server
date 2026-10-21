@@ -61,3 +61,11 @@ target_link_libraries(b70_lfm2moe_loader PUBLIC b70_loader b70_lfm2moe_model b70
 add_library(b70_dflash_loader STATIC dflash_repack.cc dflash_loader.cc)
 target_include_directories(b70_dflash_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_dflash_loader PUBLIC b70_loader b70_dflash_model b70_l0)
+
+# --- Spec 25b: Nemotron 3.5 Bolt 74B-A9B ---------------------------------------------------------------------------
+# The Bolt loader, beside the others (none touched): the host half (bolt_repack.cc - no Level Zero, run on any host by
+# tests/loader/bolt_repack_test.cc and bolt_synth_host_test.cc; the checkpoint driver BoltCheckpoint is header-only in
+# bolt_loader.h) and the upload onto one or two devices (bolt_loader.cc, Task 5).
+add_library(b70_bolt_loader STATIC bolt_repack.cc)
+target_include_directories(b70_bolt_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_bolt_loader PUBLIC b70_loader b70_bolt_model b70_l0)
