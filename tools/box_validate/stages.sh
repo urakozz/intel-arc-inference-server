@@ -4052,6 +4052,65 @@ st_r56_d5_pp() {
 }
 
 # ======================================================================================
+row 57 "spec 25a - Nemotron 3.5 Bolt: the facts, the CPU reference (B1), golden sets, the A4 references, the tap dumps, gate Q (plan 25a)"
+rownote 57 "Download first (pinned; df -h ~ first; MemAvailable >= 48 / 96 GB): hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997 (41.9 GB) and hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 567021037ff88364143e24ea05e6abd0f72086ff (149.8 GB). r57.host needs only the pinned small files (the same command with --exclude '*.safetensors')."
+rownote 57 "Box CPU only, no card: nothing here takes the GPU lock. Every stage runs tools/box_validate/bolt_oracle.sh in the oracle image with transformers 5.19.0 from <tree>/oracle-out-q4exp-site (tools/oracle/qwen4exp_env.sh). The real stages SKIP 77 'missing data' without the checkpoints, or while they download."
+rownote 57 "Hand back: B70_BOLT_TIE_TOL's evidence (the 'MoE 9th/10th sel gap' lines r57.golden prints, per block and over all), the SSM-state magnitude lines, each prompt's wall / RSS, the perplexities per form, hfcheck's verdict and its fallback lines, the A4 parse failures (score.py --format qwen-think, bar 0 for the BF16 reference) and agreement, gate Q's table (a recorded measurement, Decision 3)."
+stage r57.host       57 default cpu  bolt_small,oracle_image       -  "bolt_oracle.sh tests: test_bolt_ref.py, test_bolt_make_tiny.py, bolt_tiny_check.py, the toolcall tests (the box image's torch: the bitwise claims re-checked there)"
+st_r57_host() {
+  chk "tools/box_validate/bolt_oracle.sh $DATA tests" "the Bolt reference tests (tiny puzzles from the pinned small files)"
+  grab_all tests '^ok |^  |FAIL|SKIP|passed|tiny check' 160
+  finish
+}
+stage r57.ppl        57 optin   cpu  bolt_g128,oracle_image       -  "perplexity on prose / code / agentic, g128 and BF16 (finite; code < 10 ESTIMATED; recorded per text)"
+st_r57_ppl() {
+  chk "tools/box_validate/bolt_oracle.sh $DATA ppl" "the reference's perplexity on each form present"
+  grab_all ppl '^ppl |^wall|not sane|NOT SANE' 12
+  finish
+}
+stage r57.hfcheck    57 optin   cpu  bolt_g128,oracle_image       -  "hfcheck --layers 12: the port = its restated chain BITWISE on real weights (fp32 when RAM allows), R's torch fallback recorded"
+st_r57_hfcheck() {
+  chk "tools/box_validate/bolt_oracle.sh $DATA hfcheck" "hfcheck on each form present"
+  grab_all hfcheck '^hfcheck' 16
+  finish
+}
+stage r57.golden     57 optin   cpu  bolt_g128,oracle_image       -  "golden sets on SergiioB's g128 dequantised -> oracle-out-bolt (gap lines per block, --taps)"
+st_r57_golden() {
+  chk "tools/box_validate/bolt_oracle.sh $DATA golden" "the Bolt golden sets on the g128 form"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  grab_all gap 'sel gap|SSM state|wall' 240
+  finish
+}
+stage r57.golden_bf16 57 optin  cpu  bolt_bf16,oracle_image       -  "golden sets on the BF16 original -> oracle-out-bolt-bf16 (hours)"
+st_r57_golden_bf16() {
+  chk "tools/box_validate/bolt_oracle.sh $DATA golden-bf16" "the Bolt golden sets on the BF16 original"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  grab_all gap 'sel gap|SSM state|wall' 120
+  finish
+}
+stage r57.a4_ref     57 optin   cpu  bolt_g128,bolt_bf16,oracle_image  -  "the A4 references (g128 and BF16) -> oracle-out-bolt-a4 (days, resumable)"
+st_r57_a4_ref() {
+  chk "tools/box_validate/bolt_oracle.sh $DATA a4" "the A4 reference on the g128 form (36 scenarios, 2048 new ids, batched)"
+  chk "tools/box_validate/bolt_oracle.sh $DATA a4-bf16" "the A4 reference on the BF16 original"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  grab_all a4 'scenarios|parse failure|match|^int4:|^bf16:' 16
+  finish
+}
+stage r57.taps       57 optin   cpu  bolt_g128,oracle_image       r57.golden  "tap dumps for spec 26a -> oracle-out-bolt-taps (prose / code / agentic; a4/* after r57.a4_ref)"
+st_r57_taps() {
+  chk "tools/box_validate/bolt_oracle.sh $DATA taps" "the tap dumps (dump_taps' format)"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  grab_all taps 'taps|sources|wall|SKIPPED' 40
+  finish
+}
+stage r57.gateq      57 optin   cpu  bolt_a4_ref,oracle_image     r57.a4_ref  "gate Q: g128 vs BF16 (KL / top-1 / A4), recorded"
+st_r57_gateq() {
+  chk "tools/box_validate/bolt_oracle.sh $DATA gateq" "gate Q (a recorded measurement, Decision 3)"
+  grab_all gateq '^PASS|^FAIL|gate Q|A4 pooled|^kl ' 60
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / muse / dflash labels belong to their rows)"
 st_x_rest() {
