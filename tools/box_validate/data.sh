@@ -194,6 +194,24 @@ case "${1:-}" in
       complete "${SNAP_LFM2MOE_OURS:-/nonexistent}"
     have oracle_lfm2moe_ours "24q's golden sets on the AutoRound export (not built yet)" \
       bash -c 'false'
+    # Queue row 57 (spec 25a, plan 25a): Nemotron 3.5 Bolt - SergiioB's g128 checkpoint (the served one, Decision 3), the
+    # BF16 original (gate Q's reference), the pinned small files (the tiny tests' remote code) and the CPU reference's
+    # outputs (tools/box_validate/bolt_oracle.sh). Download pinned: --revision b9f381d2... / 56702103... (df -h ~ first);
+    # a revision-pinned download writes no refs/main, so the keys name the snapshot directories themselves.
+    have bolt_small "Bolt's pinned small files (hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997 --exclude '*.safetensors')" \
+      bash -c 'ls "${HF_HOME:-$HOME/.cache/huggingface}"/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997/modeling_nemotron_h.py'
+    have bolt_g128 "SergiioB's Bolt int4 g128 ${SNAP_BOLT:-SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym} @ b9f381d2 (41.9 GB; df -h ~ first)" \
+      complete "${SNAP_BOLT:-$hf/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997}"
+    have bolt_bf16 "NVIDIA's Bolt BF16 original ${SNAP_BOLT_BF16:-nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16} @ 56702103 (149.8 GB; gate Q's reference)" \
+      complete "${SNAP_BOLT_BF16:-$hf/hub/models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16/snapshots/567021037ff88364143e24ea05e6abd0f72086ff}"
+    have oracle_bolt "oracle-out-bolt/bolt_{short,4k,agentic,32k}.{ids,golden.safetensors} (spec 25a: bolt_oracle.sh golden - the g128 form, the engine-format reference)" \
+      bash -c 'for p in bolt_short bolt_4k bolt_agentic bolt_32k; do test -s oracle-out-bolt/$p.ids && test -s oracle-out-bolt/$p.golden.safetensors || exit 1; done'
+    have oracle_bolt_bf16 "oracle-out-bolt-bf16/bolt_{short,agentic}.{ids,golden.safetensors} (spec 25a: bolt_oracle.sh golden-bf16)" \
+      bash -c 'for p in bolt_short bolt_agentic; do test -s oracle-out-bolt-bf16/$p.ids && test -s oracle-out-bolt-bf16/$p.golden.safetensors || exit 1; done'
+    have bolt_a4_ref "oracle-out-bolt-a4/ with Bolt's set, 36 <name>.int4.txt and 36 <name>.bf16.txt (spec 25a: bolt_oracle.sh a4 + a4-bf16)" \
+      bash -c 'test -s oracle-out-bolt-a4/set/manifest.json && test "$(ls oracle-out-bolt-a4/*.int4.txt 2>/dev/null | wc -l)" -eq 36 && test "$(ls oracle-out-bolt-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
+    have oracle_bolt_taps "oracle-out-bolt-taps/dumps/*.taps.safetensors (spec 25a: bolt_oracle.sh taps - prose / code / agentic, + a4/* after r57.a4_ref; spec 26a's input)" \
+      bash -c 'ls oracle-out-bolt-taps/dumps/*.taps.safetensors'
     have tok_python "a python with tokenizers (${TOK_PYTHON:-?})" "${TOK_PYTHON:-/nonexistent}" -c 'import tokenizers'
     # shellcheck disable=SC2016 # expanded by the inner bash
     have uvx "uvx (llama-benchy)" bash -c 'command -v uvx || test -x "$HOME/.local/bin/uvx"'
