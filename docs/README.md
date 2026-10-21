@@ -97,6 +97,11 @@ narrative, and the numbered guides cite them where they matter.
   the PLE layout and hash constants (= the formula), the MTP head's wiring (decision 5's reuse is vLLM's
   opt-in), the tokenizer (the pre-tokenizer adds `\p{M}`), torch's tie rule, the derived bytes.
 - [probe-muse-glimmer-2026-10-15.md](probe-muse-glimmer-2026-10-15.md) - spec 23a: Muse-Glimmer-30B from its small files, headers and transformers 5.19.0 - the rounding chain (47 citations held to the source), both checkpoints (GPTQ = our int4 g64 sym), tokens / templates (one BOS), the drafter, the tie_last_hidden_states trap.
+- [probe-bolt-2026-10-21.md](probe-bolt-2026-10-21.md) - spec 25a: Nemotron 3.5 Bolt 74B-A9B - the rounding chain
+  cited into the remote code (63 anchors), both checkpoints from their headers (SergiioB's 112,940 tensors, the BF16
+  original's `backbone` names and 74,042,720,768 parameters), signed / subnormal scales, the dt-clamp census (212 of
+  5,120 heads), tokens and the template (14 renders in `tests/server/bolt_template_cases.json`), torch's tie order and
+  fp32-GEMM row-count dependence, B1's bounds, the bf16 table, and R's fallback state-passing bug past 128 rows.
 - [probe-lfm2moe-2026-10-15.md](probe-lfm2moe-2026-10-15.md) - spec 24a: LFM2.5-24B-A2B (`lfm2_moe`) - the
   rounding chain cited into transformers 5.19.0 (`grouped_mm`, the torch conv path), the checkpoint from its
   headers (7,610 tensors, the derived bytes), tokens (`vocab_used` 125017), the template's pythonic calls and
