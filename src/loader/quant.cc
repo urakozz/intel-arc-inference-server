@@ -317,6 +317,15 @@ LinearSrc classify_ct(const SafetensorsSet& set, const std::string& prefix,
   return s;
 }
 
+// GPTQ `dynamic` "+:" rule value: exactly {bits, group_size, sym}, each equal to the top level's (`q` already holds
+// the top level's bits / group_size / sym when this runs).
+bool restates_top_level(const common::json::Value& v, const QuantConfig& q) {
+  if (!v.is_object() || v.obj().size() != 3) return false;
+  const common::json::Value *b = v.find("bits"), *g = v.find("group_size"), *s = v.find("sym");
+  return b && g && s && b->is_number() && g->is_number() && s->is_bool() && b->num() == double(q.bits) &&
+         g->num() == double(q.group_size) && s->boolean() == q.sym;
+}
+
 }  // namespace
 
 QuantConfig QuantConfig::parse(const common::json::Value& config_json) {
@@ -357,13 +366,24 @@ QuantConfig QuantConfig::parse(const common::json::Value& config_json) {
                              "' is not 'auto_round:auto_gptq' - the qweight[K/8][N] nibble order "
                              "this loader repacks is that format's");
   if (const common::json::Value* dyn = qcv->find("dynamic")) {
-    for (const auto& [rule, unused] : dyn->obj()) {
-      (void)unused;
-      if (rule.rfind("-:", 0) != 0)
-        throw std::runtime_error(
-            "quantization_config.dynamic has a non-exclusion rule '" + rule +
-            "' - this is the broken-MTP-config pattern (BENCHMARKS.md); fix the checkpoint");
-      ++q.dynamic_rule_count;
+    for (const auto& [rule, val] : dyn->obj()) {
+      if (rule.rfind("-:", 0) == 0) {
+        ++q.dynamic_rule_count;
+        continue;
+      }
+      // Spec 25b: a "+:" rule that is exactly a restatement of the top level changes nothing (SergiioB's Bolt export
+      // writes one for `mixer.out_proj`). Exactly {bits, group_size, sym}, each equal - anything else is the
+      // broken-MTP-config pattern (a "+:" rule that CHANGES a module's quantisation) and stays refused.
+      if (rule.rfind("+:", 0) == 0 && restates_top_level(val, q)) {
+        ++q.dynamic_restating;
+        continue;
+      }
+      throw std::runtime_error(
+          "quantization_config.dynamic has a non-exclusion rule '" + rule +
+          "' - this is the broken-MTP-config pattern (BENCHMARKS.md); fix the checkpoint" +
+          (rule.rfind("+:", 0) == 0 ? " (a \"+:\" rule is accepted only as an exact restatement of the top level: "
+                                      "exactly bits, group_size and sym, each equal to it)"
+                                    : ""));
     }
   }
   // auto-round's `extra_config` replaces `dynamic`: a per-module object, not a
@@ -418,7 +438,10 @@ LinearSrc LinearSrc::classify(const SafetensorsSet& set, const std::string& pref
     auto sc = ts.find(prefix + ".scales");
     if (sc == ts.end()) throw std::runtime_error(prefix + ": qweight without scales");
     if (qw->second.dtype != "I32") throw std::runtime_error(prefix + ".qweight dtype " + qw->second.dtype);
-    if (sc->second.dtype != "F16") throw std::runtime_error(prefix + ".scales dtype " + sc->second.dtype);
+    // F16 (every checkpoint we have) or BF16 (spec 25 §5.2 item 3: converted exactly or refused, below).
+    const bool bf16_scales = sc->second.dtype == "BF16";
+    if (sc->second.dtype != "F16" && !bf16_scales)
+      throw std::runtime_error(prefix + ".scales dtype " + sc->second.dtype);
     check_rank2(qw->second, prefix + ".qweight");
     check_rank2(sc->second, prefix + ".scales");
     LinearSrc s;
@@ -438,6 +461,16 @@ LinearSrc LinearSrc::classify(const SafetensorsSet& set, const std::string& pref
     check_align(set.data(sc->second), alignof(uint16_t), prefix + ".scales");
     s.qweight = reinterpret_cast<const uint32_t*>(set.data(qw->second));
     s.scales = reinterpret_cast<const uint16_t*>(set.data(sc->second));
+    if (bf16_scales) {
+      // BF16 scales (spec 25 §5.2 item 3): each value to f16 exactly or a throw naming the tensor and the element
+      // (the sign survives: bf16_to_f16_exact compares the sign bit too). The converted copy is the scales the
+      // kernels read, owned by the LinearSrc like the g128 expansion.
+      const size_t n = size_t(rows) * s.N;
+      auto h = std::make_shared<std::vector<uint16_t>>(n);
+      for (size_t i = 0; i < n; ++i) (*h)[i] = bf16_to_f16_exact(s.scales[i], prefix + ".scales", i);
+      s.scales = h->data();
+      s.expanded_scales = std::move(h);
+    }
     if (rows != s.K / 64) {
       // g128 onto the g64 kernels: g64 rows 2j and 2j+1 are g128 row j. Every
       // weight keeps its own scale, so the dequant is exact; see quant.h.
@@ -573,6 +606,14 @@ QuantScan assert_quant_invariants(const SafetensorsSet& set) {
       check_align(set.data(t), alignof(uint16_t), name);
       const uint16_t* p = reinterpret_cast<const uint16_t*>(set.data(t));
       size_t n = set.bytes(t) / 2;
+      if (t.dtype == "BF16") {
+        // Spec 25 §5.2 item 3: a BF16 scale must survive the exact conversion classify does (or the load throws);
+        // the same NaN / Inf / subnormal accounting as the f16 words.
+        scan.gptq_bf16_scales = true;
+        for (size_t i = 0; i < n; ++i)
+          check_f16_scale(bf16_to_f16_exact(p[i], name, i), name, i, scan.subnormal_scales);
+        continue;
+      }
       for (size_t i = 0; i < n; ++i) {
         const uint32_t exp = (p[i] >> 10) & 0x1Fu, man = p[i] & 0x3FFu;
         if (exp == 0x1Fu)

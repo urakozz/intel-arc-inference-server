@@ -11,6 +11,7 @@
 #include "common/bf16.h"
 #include "common/int4.h"
 #include "common/json.h"
+#include "common/kv8.h"
 #include "common/repack.h"
 #include "loader/quant.h"
 #include "loader/safetensors.h"
@@ -407,7 +408,7 @@ int main(int argc, char** argv) {
   const std::string sb_excl =
       R"("-:.*embeddings.*":{},"-:.*lm_head.*":{},"-:.*vision_model.*":{},"-:.*vision_projector.*":{},
          "-:.*language_model\\.model\\.layers\\.10\\.mixer\\.gate.*":{},
-         "-:.*language_model\\.model\\.layers\\.12\\.mixer\\.gate.*":{}})";
+         "-:.*language_model\\.model\\.layers\\.12\\.mixer\\.gate.*":{})";
   const std::string sb_rule = R"("+:.*mixer\\.out_proj$":{"bits":4,"group_size":128,"sym":true},)";
   {
     const loader::QuantConfig sb = loader::QuantConfig::parse(parse(sb_head + sb_rule + sb_excl + "}}}"));
@@ -503,7 +504,7 @@ int main(int argc, char** argv) {
     std::vector<uint16_t> bf(vals.size()), h16(vals.size());
     for (size_t i = 0; i < vals.size(); ++i) {
       bf[i] = common::f32_to_bf16(vals[i]);
-      h16[i] = common::f32_to_f16(common::bf16_to_f32(bf[i]));
+      h16[i] = common::kv8::f32_to_f16_rne(common::bf16_to_f32(bf[i]));   // (common::f32_to_f16 flushes subnormals)
       CHECK_EQ(common::f16_to_f32(h16[i]), common::bf16_to_f32(bf[i]));   // the test's own values are exact f16
     }
     lin_dir("BF16", bf);
@@ -581,7 +582,7 @@ int main(int argc, char** argv) {
       const loader::LinearSrc ls = loader::LinearSrc::classify(set, "lin");
       CHECK_EQ(ls.group, uint32_t(64));
       for (size_t i = 0; i < bf64.size(); ++i)
-        CHECK_EQ(ls.scales[i], common::f32_to_f16(common::bf16_to_f32(bf64[i])));
+        CHECK_EQ(ls.scales[i], common::kv8::f32_to_f16_rne(common::bf16_to_f32(bf64[i])));
     }
     // a bf16 scale f16 cannot hold exactly is refused naming the tensor and the element - in classify AND in the scan
     for (const auto& [bad_f, tag] : {std::pair<float, const char*>{std::ldexp(1.0f, -26), "below f16's subnormals"},

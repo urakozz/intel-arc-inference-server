@@ -992,6 +992,36 @@ and decode paths must call for each linear.
   refused naming that key. The two-card split (`pp_split`) balances layer weights alone (`runtime::pp_balance`),
   device 0's embedding and the last device's final norm / head counted as each side's fixed overhead.
 
+## Nemotron 3.5 Bolt (spec 25b): the exact relaxations, signed scales, one layout from two sources
+
+Bolt's shipping checkpoint (SergiioB's AutoRound g128 GPTQ export, spec 25 §1.3) needs two loader relaxations and an
+audit, all in `src/loader/quant.{h,cc}` - shared code, so each is the narrowest change and every existing test and
+refusal stays as it was (`tests/loader/quant_test.cc`, the Bolt block, is written first and holds both directions):
+
+- **A restating `+:` dynamic rule is accepted, nothing else.** `QuantConfig::parse` used to refuse every `+:` rule
+  (the broken-MTP-config guard: a `+:` rule that CHANGES a module's quantisation). SergiioB's `dynamic` carries 44 `-:`
+  exclusions and one `"+:.*mixer\\.out_proj$": {"bits": 4, "group_size": 128, "sym": true}` - exactly the top level
+  restated. A `+:` rule whose value is an object of exactly the three keys `bits`, `group_size`, `sym`, each equal to
+  the top level's, is a no-op, counted in `QuantConfig::dynamic_restating` (the 44 `-:` rules stay in
+  `dynamic_rule_count`). A `+:` rule that changes bits, group or sym, carries any other key, omits one of the three, is
+  `{}` or is not an object still throws, naming the rule (`quantization_config.dynamic has a non-exclusion rule
+  '+:...'`). `LinearSrc::classify` still checks every module against its shipped tensors, so a restating rule cannot
+  smuggle a differently-quantised module past the loader.
+- **BF16 GPTQ `.scales` are exact-or-refused.** `classify` (and the `.scales` branch of `assert_quant_invariants`)
+  accept `.scales` stored BF16 beside a GPTQ `.qweight` and convert each value with the existing `bf16_to_f16_exact`
+  (compressed-tensors' converter): a value f16 cannot hold exactly (above 65504, below f16's subnormals' bits, NaN /
+  Inf) throws naming `<linear>.scales[<element>]`. No checkpoint we have ships them (SergiioB's are all F16, and 25q's
+  Decision 9 writes F16); any dtype other than F16 / BF16 is still refused.
+- **Signed scales: audited, nothing to change.** AutoRound's symmetric scale is signed (about half of every Bolt
+  linear's scales are negative - spec 25 §1.3, measured on the synthetics at 50.0 %); the dequant is `(q - 8) x scale`
+  everywhere. The sign is the f16 word's top bit and every path moves f16 words verbatim: the g128 -> g64 expansion
+  (`expand_g128`), the BF16 conversion (`bf16_to_f16_exact` compares the sign bit), `repack_int4_layout0_cols` /
+  `repack_int4_layout1[_cols]` (inline scale words), and `assert_quant_invariants` / `check_quant_scan` only look for
+  NaN / Inf, never for a sign. `quant_test` holds each of them with negative scales (bit for bit, and the dequant
+  `float(q - 8) x scale`); the spec 25b layout tests hold the device buffers.
+- One departure from a helper's name: `common::f32_to_f16` flushes f16 subnormals to zero (a test helper); the loader's
+  exact converter uses `common::kv8::f32_to_f16_rne`, which does not - the tests use the latter.
+
 ## Deliberately not loaded
 
 - **`model.visual.*`** (333 tensors, 0.921 GB) - this checkpoint is a
