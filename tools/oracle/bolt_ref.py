@@ -1215,10 +1215,29 @@ def parse_tap_sources(specs) -> list[dict]:
     return out
 
 
+def parse_golden_sources(specs) -> list[dict]:
+    """--golden NAME:PROMPT_IDS:GOLDEN - the prompt followed by the golden run's greedy `tokens` (its continuation)."""
+    from safetensors import safe_open
+    out = []
+    for s in specs or []:
+        parts = s.split(":")
+        if len(parts) != 3 or "/" not in parts[0]:
+            die(f"--golden {s}: want corpus/label:PROMPT_IDS:GOLDEN")
+        prompt = read_ids(parts[1])
+        with safe_open(parts[2], framework="pt") as h:
+            toks = h.get_tensor("tokens").tolist()
+            if int(h.metadata()["n_prompt"]) != len(prompt):
+                die(f"--golden {s}: the golden's n_prompt {h.metadata()['n_prompt']} != {len(prompt)} prompt ids")
+        if not toks:
+            die(f"--golden {s}: the golden has no generated tokens")
+        out.append({"name": parts[0], "ids": prompt + toks, "n_prompt": len(prompt)})
+    return out
+
+
 def cmd_taps(a) -> None:
     mt = _load("muse_taps")
     dt = _load("dump_taps")
-    sources = parse_tap_sources(a.source)
+    sources = parse_tap_sources(a.source) + parse_golden_sources(a.golden)
     if not sources:
         die("no --source")
     os.makedirs(a.out, exist_ok=True)
@@ -1314,6 +1333,8 @@ def main() -> None:
     t = sub.add_parser("taps")
     common(t)
     t.add_argument("--source", action="append", default=[], help="NAME:IDS:N_PROMPT (NAME corpus/label)")
+    t.add_argument("--golden", action="append", default=[],
+                   help="NAME:PROMPT_IDS:GOLDEN - the prompt + that golden run's greedy tokens")
     t.add_argument("--out", required=True)
     t.add_argument("--topk", type=int, default=64)
     t.add_argument("--window", type=int, default=TAP_WINDOW)

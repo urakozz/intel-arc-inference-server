@@ -49,6 +49,7 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `lfm2moe_facts.py`, `lfm2moe_prompts.py` | Spec 24a: the facts (the rounding chain cited from the installed sources, shard headers, bytes, tokens, template renders, torch's tie order, the conv's accumulation; `docs/probe-lfm2moe-2026-10-15.md`); the golden prompts `tests/golden/prompts/lfm2moe_{short,4k,32k,agentic}.ids`. |
 | `bolt_ref.py` | Spec 25a: the Nemotron 3.5 Bolt 74B-A9B CPU reference - the checkpoint's OWN remote code (`modeling_nemotron_h.py`, imported from the pinned snapshot, sha256-checked, never vendored) through transformers **5.19.0**, its Mamba mixers on the KERNEL path (`cuda_kernels_forward`) with `bolt_mamba_ops`' plain-torch training kernels and an fp32 cache (spec 25 Decision 1), layer-streamed, routed experts lazy (SergiioB's g128 via the exact g64 expansion, our g64, or the BF16 original's `backbone` names); `run` (golden layout + `--taps`), `ppl`, `hfcheck` (the port = its restated chain bitwise; R's torch fallback recorded), `taps` (dump_taps' format), `facts`, `gateq`; `expected_names`, `layer_major`, `Recorder`, the restated ops 25b / 25c import (`rms_norm`, `route`, `combine`, `moe_block`, `mamba_seq` / `mamba_step`), `fallback_forward` (R's fallback with its rounding points as switches). `test_bolt_ref.py` (B1). "The Nemotron 3.5 Bolt reference" below. |
 | `bolt_remote.py`, `bolt_mamba_ops.py` | Spec 25a: the remote code's import under a private package with the `mamba_ssm` / `causal_conv1d` stub, the mixer's dispatch patch (kernel path or R's fallback per instance), the prompt continuation R lacks, the fp32 cache; the five training-kernel functions in plain torch (conv bias-first then taps oldest first, softplus threshold 20 and no dt clamp, the SSM update in mamba_ssm's order with a halving tree over the state, the SSD chunk scan, the gated norm over groups of 1024). |
+| `bolt_facts.py`, `bolt_prompts.py`, `bolt_gateq.py` | Spec 25a: the facts (63 citation anchors in R / N, both repos' shard headers and sampled tensors by HTTP range request, the dt-clamp census, tokens, 14 template renders as `tests/server/bolt_template_cases.json`, torch's tie order / GEMM row-count dependence / 9-element sum; `docs/probe-bolt-2026-10-21.md`); the golden prompts (no BOS); gate Q (`kl` teacher-forced over the BF16 A4 continuations, `verdict` with score.py's qwen-think reader - recorded, Decision 3). |
 | `bolt_make_tiny.py`, `bolt_tiny_check.py` | Spec 25a: tiny `nemotron_h_puzzle` checkpoints in the checkpoint's names (`pattern12` - the real first 12 blocks -, `pattern12-fp32`, `ties`, `dtclamp`, `int4-g64`, `int4-g128-gptq` + dequantised twins; `test_bolt_make_tiny.py`); the remote code end to end in 5.19.0 on both Mamba paths. |
 | `qwen4exp_make_tiny.py` | Tiny `qwen4_exp` variants for the tests (hidden 128, any layer pattern, the four checkpoint forms, tied router rows, `mtp.*`, a dequantised twin) and 21b's int8 PLE file writer. |
 | `offload_curve.py` | Spec 22 P0.6 / P0.7 / P0.8 (plan 22a): from 21a's routing traces - `counts`, `curve` (h(f) for the uniform and per-layer fills, held out by sha256 halves with the A4 scenarios balanced, and in sample), `swap` (spec 22 §4's adaptive swaps simulated), `mtp` (verify unions over K + 1 rows), `prefill` (streamed bytes a chunk), `profile` (the routing profile 22b loads, `spec22-profile-1`); `reap` (REAP / freq masks, `spec22-mask-1`, `--holdout-a4`, decision 9's `--kfold 4 --fold i\|all`), `prune-report` (the pruning curve: KL / argmax, A4 accuracy in sample and 4-fold held out, the gap, the two-card fit), `project` (decode / MTP / prefill t/s from Task 1's budget, probe_offload's `po` lines and the curves; the last line `STOP` or `GO-CANDIDATE`). numpy + safetensors only. `test_offload_curve.py`. The masked reference is `qwen4exp_ref.py --expert-mask` / `maskeval`. |
@@ -898,6 +899,23 @@ docker run --rm --memory 8g --memory-swap 8g --cpus 4 -e OMP_NUM_THREADS=3 -e HF
   'python3 tools/oracle/bolt_tiny_check.py /hf/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997 && \
    python3 tools/oracle/test_bolt_make_tiny.py && python3 tools/oracle/test_bolt_ref.py'
 ```
+
+**Real weights** (`tools/box_validate/bolt_oracle.sh <data> tests|ppl|hfcheck|golden|golden-bf16|export <dir>|a4|a4-bf16|
+taps|gateq`, queue row 57, the box CPU; `DRY_RUN=1` prints every command, the RAM floor and the ESTIMATED times). The
+checkpoints are downloaded by hand, PINNED (a newer revision's remote code is refused by its sha256): `hf download
+SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997`
+(41.9 GB) and `hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 567021037ff88364143e24ea05e6abd0f72086ff`
+(149.8 GB); `df -h ~` first. Floors (ESTIMATED): 48 GB the g128 form, 96 GB the BF16 one, 8 the tests; a Mac
+container (40 GB) runs `tests` only. `golden` -> `oracle-out-bolt/` (the g128 form dequantised: the engine-format
+reference every B3 gate reads, `--taps`), `golden-bf16` -> `oracle-out-bolt-bf16/`, `export <dir>` ->
+`oracle-out-bolt-<name>/` (25q's export, 25b's synthetics), `a4` / `a4-bf16` -> `oracle-out-bolt-a4/<name>.{int4,bf16}.*`
+(`tools/toolcall/a4_ref.sh bolt`, the committed set `tests/golden/toolcall-bolt`: key-sorted, reasoning on,
+`medium_effort`; 2048 new ids; score with `score.py --format qwen-think`), `taps` -> `oracle-out-bolt-taps/dumps/`
+(spec 26a's input), `gateq` -> `oracle-out-bolt-a4/{gateq.json,gateq.log}` (`bolt_gateq.py`, Decision 3: recorded).
+`BOLT_KEEP=all` keeps the dense blocks resident once read (~13.6 GB bf16) - a decode-heavy run's lever;
+`BOLT_EXPERT_CACHE_GB` (oracle_generate) / `--expert-cache-gb` (run) an LRU of dequantised experts.
+Facts: `bolt_facts.py` (`docs/probe-bolt-2026-10-21.md`); golden prompts `tests/golden/prompts/bolt_{short,short_prose,
+short_code,4k,32k,agentic}.ids` (`bolt_prompts.py`; no BOS).
 
 ### The Muse-Glimmer reference (spec 23a, 2026-10-15)
 

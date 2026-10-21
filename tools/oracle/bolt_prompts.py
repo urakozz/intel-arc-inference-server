@@ -10,6 +10,7 @@ no raw prompt starts with one; the text is tools/oracle/tokenize.py's rule (no t
 encoded without special tokens):
 
     bolt_short.ids    prose.txt + code.txt (each encoded alone, concatenated - as the other models' short sets)
+    bolt_short_prose.ids / bolt_short_code.ids   each alone (the tap dumps' prose / code sources, spec 26a)
     bolt_4k.ids       the first 4096 ids of long.txt repeated (joined by blank lines until it is long enough -
     bolt_32k.ids      the first 32768                         long32k.ids' recipe)
     bolt_agentic.ids  bolt_agentic.json (an original session on this repo: reasoning_content and structured
@@ -47,7 +48,8 @@ def build(snapshot: str) -> dict[str, list[int]]:
 
     def enc(t):
         return tok.encode(t, add_special_tokens=False).ids
-    sets = {"bolt_short": enc(text("prose")) + enc(text("code"))}
+    sets = {"bolt_short": enc(text("prose")) + enc(text("code")), "bolt_short_prose": enc(text("prose")),
+            "bolt_short_code": enc(text("code"))}
     long_t = text("long")
     reps = [long_t]
     while len(enc("\n\n".join(reps))) < 32768:
