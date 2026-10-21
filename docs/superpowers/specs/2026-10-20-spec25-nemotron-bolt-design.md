@@ -2,7 +2,7 @@
 
 **Status:** design, 2026-10-20, approved by the operator 2026-10-20. Decisions are marked **Decision N** with their
 cost if wrong and collected in §12. 25a is built on the Mac (§13: the reference, B1 on tiny models; no real
-weight read yet); 25q-25e are not built.
+weight read yet); 25b is built on the Mac (§14: the descriptor, the loader, the plan; no card); 25q, 25c-25e are not built.
 **Plans (2026-10-20):** `docs/superpowers/plans/2026-10-20-spec25{a,q,b,c,d,e}-*.md` - 25a facts and the CPU
 reference, 25q our AutoRound g64 re-quantisation (the recipe; the operator runs it), 25b descriptor / loader /
 memory plan, 25c decode (the launch-count and state-bandwidth P0 first), 25d prefill, 25e serving.
@@ -713,3 +713,62 @@ torch's; the engine's differ by ulps, so B2 is bitwise only where the arithmetic
 - **The bf16 difference table** (`docs/probe-bolt-2026-10-21.md` §6.2): beyond §2.0's list, softplus itself rounds in
   bf16, and the fallback's prefill keeps y fp32 into the gated norm (the kernel path rounds y once); with every point
   switched to the kernel path's semantics the fallback equals the port (fp32 cache: 0 difference on the outputs).
+
+## 14. 25b as built (2026-10-22; the Mac only - no card, no real weight)
+
+Branch `spec25b-bolt-loader`; box queue row 59. Built: `model::BoltDesc` (`src/model/bolt.*`: the per-block types, E and I per
+layer, per-linear `{S, layout}`, `BoltPlacement`), `loader::load_bolt` (`src/loader/bolt_{layout.h,repack.*,loader.*}`, one
+device layout from SergiioB's g128 or our g64), `src/common/exp_torch.h`, the two exact relaxations in `src/loader/quant.{h,cc}`
+(§5.2 items 1 and 3; item 2's audit), `runtime::bolt::plan` (`src/runtime/bolt/`), the synthetic real-width checkpoints
+(`tools/quantize/bolt/{make_synth,check,test_bolt_synth}.py`, `tests/model/bolt/{config.json,make_config.py}`,
+`tools/box_validate/bolt_synth.sh`), the tests `bolt_test`, `quant_test` (extended), `bolt_repack_test`, `bolt_names_test`,
+`bolt_synth_host_{g128,pair,g64}_test`, `bolt_plan_test` and the card test `bolt_load_checkpoint_test`; docs/13's "Nemotron 3.5
+Bolt" section. **Measured on the Mac (all host tests; the card test only compiles - Level Zero syntax):**
+- the descriptor's names equal the published index's 112,091 language names exactly (+ 849 vision / projector tensors skipped by
+  prefix) - the typed pattern and the typed (E, I) table ARE the real ones (`bolt_names_test`); `bolt_test` holds
+  `tests/model/bolt/config.json` (the published one, vendored, Decision 20) to the descriptor and refuses 46 edits by key name;
+  `make_config.py --check` holds the code-typed config to the published file key by key (69 `llm_config` keys, 88 blocks, 44 `-:`
+  rules + 1 `+:`).
+- the synthetic checkpoints (random weights at the real widths, signed scales - 50.0 % negative): N 8 = 3.93 GB (g128), 3.99 GB
+  (g64, exact expansion or native), N 12 = 5.44 / 5.55 GB (§12's ESTIMATE ~5.5 GB); 84 s and 191 s on the Mac; `check.py`
+  ACCEPTED on all; `bolt_ref.build_streamed(weights="int4")` loads the g128 form and its exact g64 expansion and their logits on 16
+  ids are **bitwise equal**; the host half (`bolt_synth_host_*`) repacks every block of N 8, 20,400 sampled words equal the shards',
+  both spellings byte-identical, 0 unconsumed.
+- the bytes of §3, re-derived from `loader/bolt_layout.h` and printed: routed experts 35,139,092,480 B (13,824 experts), Mamba
+  2,328,494,080, attention 151,519,232, MoE dense 1,114,112,000, routers 113,246,208, small blocks 11,061,248, embeddings
+  1,073,741,824, int8 head 537,395,200 B, total 40.469 GB; the int4 linears hold 72,909,586,432 weights (25a's header scan).
+  Split 48 (pp_balance, derived): 19,928,067,776 / 20,540,610,880 B; 262144 positions fit on two 32 GiB cards with the scratch, the
+  drafter, its replica and 7 verify slots reserved (device 1: 27.23 GB of 34.36 GB); one card is refused naming Decision 4; a
+  24 GB pair reaches `max_len` 90368 with the scratch reserved (ESTIMATED scratch).
+
+**Facts that differ from the plan / spec (the body above is left as written; each with its cost if wrong):**
+1. *`exp_torch` is not in `common/`* (it is the kernels' and `tests/kernels/k2_ref.h`'s Sleef softmax exp, and `torch.exp` on an x86
+   fp32 tensor goes to MKL's `vsExp`, which has no host reproduction): `src/common/exp_torch.h` copies the function and the loader's
+   `A = -exp(A_log)` uses it. Measured against `torch.exp` over all 33,266 bf16 values in [-7, 9]: 196 differ, never by more than 1
+   ulp (libm's `expf`: 192). *Cost if wrong:* a 1 ulp difference in `A` before `exp(dt x A)`; 25c's B3 absorbs it (a host function
+   that matches MKL does not exist).
+2. *`BoltLinear` is richer than `{K, N, S, layout}`* (id, `GemvShape`, kind, fuse, parts, part_n - 24b's `LfmLinear`), and the
+   MoE list carries the Router and one expert's up / down shapes; the routed experts are ONE allocation per block (E blocks of up ||
+   down, plan: `base + id x block(I)`), not 24b's two arrays. *Cost if wrong:* 25c's expert kernels bind one buffer and two offsets.
+3. *`load_bolt` takes `l0::Context*` (the repo's device type, not `l0::Device*`), a `BoltLoadOptions` (int8 head, `max_len`,
+   `layers`) and a `BoltPlacement`*, not a `BoltPlan placement` (the plan is computed from them before the first allocation);
+   `BoltDesc::int8_head` is a load / plan option, not a descriptor field (Decision 18); `plan()` gained `int8_head`;
+   `BoltReserve::verify_slots` is a COUNT of extra SSM slots (spec 19c / 26: 7), the other fields bytes. *Cost if wrong:* a signature.
+4. *The `+:` rule must carry exactly {bits, group_size, sym}* - an empty `{}` rule, the pre-25b refusal's own test, stays refused
+   (the plan's "compares the rule's three values" read as: all three present). *Cost if wrong:* a checkpoint whose restating rule
+   omits a key would be refused naming the rule; none seen.
+5. *`A_log` / `D` / `dt_bias` are accepted F32 or BF16* (SergiioB's F32-holding-bf16 and NVIDIA's BF16), `e_score_correction_bias`
+   F32 only; `time_step_limit` must be [0, inf] (the decode chain has no clamp - §2.0); the first attention block need not be in
+   the first N blocks (the engine has no R-cache). *Cost if wrong:* none (stricter than needed only on the bias).
+6. *`cmake/host_only.cmake` is not edited* (the plan lists it): it derives the card tests (`checkpoint` label + `b70_l0`) itself.
+   *`tools/box_validate/bolt_synth.sh`, stages `r59.host` / `r59.pytest` / `r59.synth_host` and data keys `bolt_synth` / `bolt_rtn`
+   are beyond the plan's four stages* (the synthetics need a runner; the host tests need their own stage). `tools/quantize/bolt/
+   check.py` is self-contained (25q merges its own). `model_extra_tensors.safetensors` holds 3 stand-in vision tensors, one more
+   sits in a language shard. *Cost if wrong:* none.
+7. *`common::f32_to_f16` flushes f16 subnormals* (a test helper): the loader's exact BF16 conversion uses `common::kv8::
+   f32_to_f16_rne`; the quant tests were first written with the wrong helper and caught it. *Cost if wrong:* none now.
+
+**Not run (box, row 59):** every card stage - the synthetics on one and two cards (plan == allocation, read-backs), SergiioB's
+41.9 GB checkpoint on two cards (split 48, 262144 positions; load time, RSS, the int8 head's quantisation time), our g64 export
+(25q); the plan's memory figures against the cards' real `memory_bytes` (the Mac assumed 32 GiB); every layout / `S` choice is still
+PROVISIONAL until 25c's P0 sweep.

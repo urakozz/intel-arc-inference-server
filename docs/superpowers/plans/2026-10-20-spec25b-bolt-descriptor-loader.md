@@ -1,6 +1,6 @@
 # Spec 25b - Nemotron 3.5 Bolt: the descriptor, the loader (g128-expanded and native g64, one layout), synthetic checkpoints, the two-card memory plan
 
-**Status (2026-10-20): planned; nothing built.** Box queue row **59**.
+**Status (2026-10-22): built on the Mac (branch `spec25b-bolt-loader`; as built: spec 25 §14); the card stages are box queue row 59.**
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
 
