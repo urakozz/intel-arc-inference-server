@@ -143,7 +143,7 @@ row 62 "spec 25e - Nemotron 3.5 Bolt served: the template / tokenizer identities
 stage r62.host      62 default cpu  -                       -           "template_bolt_test, bolt_tokenizer_test, bolt_stream_test, bolt_request_test, bolt_snapshot_test"
 stage r62.snapshot  62 default gpu  bolt_g128               -           "bolt_snapshot_gpu_test: restores bitwise the cold run, two cards, split change"
 stage r62.chat      62 default gpu  bolt_g128,oracle_bolt   -           "golden_server_test --chat on b70-serve <bolt> == b70-decode"
-stage r62.a4        62 optin   gpu  bolt_g128,bolt_a4_ref   r62.chat    "A4 through b70-serve vs the g128 / BF16 references (B5's engine row)"
+stage r62.a4        62 optin   gpu  bolt_g128,bolt_a4_int4  r62.chat    "A4 through b70-serve vs the g128 reference, and vs the BF16 one when the BF16 window has made it (B5's engine row)"
 stage r62.agentic   62 optin   gpu  bolt_g128               r62.chat    "the agentic transcript with the prefix cache: hit rate, divergence points"
 stage r62.benchy    62 optin   gpu  bolt_g128               r62.chat    "llama-benchy at 886 / 8192 / 32000 / 65536 beside vLLM XPU (row 41's matrix)"
 ```
