@@ -130,8 +130,21 @@ class SkipTiny(Exception):
     pass
 
 
+def bolt_snapshot(tmp: str):
+    """Spec 25a: bolt_make_tiny's pattern12 (the real first 12 blocks, bf16, SergiioB's language_model.model.* names,
+    what the A4 reference loads in the bf16 form) written into tmp; R comes from the pinned snapshot in the HF cache."""
+    try:
+        mk = _load(os.path.join(ORACLE, "bolt_make_tiny.py"), "bolt_make_tiny")
+    except RuntimeError as e:
+        raise SkipTiny(str(e))
+    if mk.br.find_snapshot() is None:
+        raise SkipTiny("the pinned Bolt snapshot is not in the HF cache (its small files)")
+    mk.make(tmp, "pattern12", 3)
+    return "nemotron_h_omni", 131072
+
+
 SNAPSHOTS = {"ornith": ornith_snapshot, "k2": k2_snapshot, "kolibri": kolibri_snapshot, "qwen4exp": qwen4exp_snapshot,
-             "lfm2moe": lfm2moe_snapshot}
+             "lfm2moe": lfm2moe_snapshot, "bolt": bolt_snapshot}
 
 
 # --------------------------------------------------------------------------------------------
@@ -185,7 +198,7 @@ class Counter:
 
     def __init__(self, runner, mtype: str):
         self.layers = self.experts = 0
-        if mtype == "qwen3_5_moe" or mtype in OG.Q4_TYPES or mtype in OG.LFM_TYPES:
+        if mtype == "qwen3_5_moe" or mtype in OG.Q4_TYPES or mtype in OG.LFM_TYPES or mtype in OG.BOLT_TYPES:
             pf = runner.pf
             orig = pf.layer_sd
 
@@ -260,7 +273,8 @@ def check(model: str) -> None:
         # --resident: every layer's dense weights and half the expert layers resident once read
         with open(os.path.join(tmp, "config.json"), encoding="utf-8") as f:
             cfg = json.load(f)
-        L = cfg.get("text_config", cfg)["num_hidden_layers"]
+        L = len(cfg["llm_config"]["block_configs"]) if mtype in OG.BOLT_TYPES else \
+            cfg.get("text_config", cfg)["num_hidden_layers"]
         kept = OG.moe_runner(tmp, mtype, keep=(L, max(1, L // 2)))
         kc = Counter(kept, mtype)
         for label, fn in (("sequential", lambda: run_seq(kept, prompts, caps, eos)),
@@ -429,7 +443,23 @@ def test_plan_real_configs():
     assert p["batch"] == 3 and p["keep_dense"] == p["keep_experts"] == 0   # a count, capped by the scenarios
 
 
-TESTS = [test_plan_real_configs, test_ornith, test_k2, test_kolibri, test_cli_resume, test_qwen4exp, test_lfm2moe]
+def test_bolt():
+    """Spec 25a Task 6: the Bolt reference's batched path (layer_major, an fp32 cache per sequence) = its sequential
+    greedy, ids and every logits row bitwise, on the tiny pattern12."""
+    import transformers
+    if transformers.__version__ != "5.19.0":
+        print(f"  SKIP: transformers {transformers.__version__} (bolt_ref.py needs 5.19.0: the qwen4exp site first on "
+              "PYTHONPATH)")
+        return
+    os.environ.pop("BOLT_LAYERS", None)
+    try:
+        check("bolt")
+    except SkipTiny as e:
+        print(f"  SKIP: {e}")
+
+
+TESTS = [test_plan_real_configs, test_ornith, test_k2, test_kolibri, test_cli_resume, test_qwen4exp, test_lfm2moe,
+         test_bolt]
 
 
 def main() -> None:

@@ -346,6 +346,65 @@ def test_atem_header_while_generating_ends_a_body():
     assert parse_first_call(t, "atem")[:2] == ("call", "read")
 
 
+# ---- Nemotron 3.5 Bolt (spec 25a Task 6): Qwen3-Coder XML behind the reasoning the prompt opens -------------------
+
+def bolt(after_think: str, reasoning: str = "Let me read the file first.\n") -> str:
+    """An output continuing Bolt's prompt (`...<|im_start|>assistant\\n<think>\\n`): reasoning, </think>, the rest."""
+    return reasoning + "</think>" + after_think
+
+
+BOLT_CALL = ("\n<tool_call>\n<function=read>\n<parameter=filePath>\n/work/src/a.cc\n</parameter>\n"
+             "<parameter=limit>\n40\n</parameter>\n</function>\n</tool_call>\n<|im_end|>")
+
+
+def test_qwen_think_reasoning_then_call():
+    assert parse_first_call(bolt("I will read it." + BOLT_CALL), "qwen-think") == (
+        "call", "read", {"filePath": "/work/src/a.cc", "limit": "40"}, 1)
+    two = bolt(BOLT_CALL.replace("<|im_end|>", "") + "<tool_call>\n<function=bash>\n</function>\n</tool_call>")
+    assert parse_first_call(two, "qwen-think")[:2] == ("call", "read") and parse_first_call(two, "qwen-think")[3] == 2
+
+
+def test_qwen_think_call_inside_reasoning_is_reasoning():
+    inside = "I could call <tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>\n"
+    assert parse_first_call(inside, "qwen-think")[0] == "reasoning"            # never closed: all reasoning
+    assert parse_first_call(bolt("Done, nothing to call.<|im_end|>", inside), "qwen-think")[0] == "no call"
+    assert parse_first_call(inside + "</think>", "qwen")[:2] == ("call", "bash")   # the plain Qwen rule would take it
+    assert parse_first_call("<think>\n" + bolt(BOLT_CALL), "qwen-think")[:2] == ("call", "read")   # a leading <think>
+
+
+def test_qwen_think_multiline_and_parameter_like_text():
+    body = "line one\n    line two\n\nline four"
+    t = bolt(f"\n<tool_call>\n<function=write>\n<parameter=content>\n{body}\n</parameter>\n</function>\n</tool_call>")
+    assert parse_first_call(t, "qwen-think")[2] == {"content": body}
+    odd = "see </parameterized> and </parameters> here"
+    t = bolt(f"\n<tool_call>\n<function=write>\n<parameter=content>\n{odd}\n</parameter>\n</function>\n</tool_call>")
+    assert parse_first_call(t, "qwen-think")[2] == {"content": odd}
+    lit = "a </parameter> b"
+    t = bolt(f"\n<tool_call>\n<function=write>\n<parameter=content>\n{lit}\n</parameter>\n</function>\n</tool_call>")
+    assert parse_first_call(t, "qwen-think")[2] == {"content": "a "}               # cut, as vLLM's parser cuts
+    cut = bolt("\n<tool_call>\n<function=read>\n<parameter=filePath>\n/w")
+    assert parse_first_call(cut, "qwen-think")[0] == "incomplete"
+
+
+def test_qwen_think_bolt_template_round_trip():
+    """The assistant spans Bolt's own template rendered (tests/server/bolt_template_cases.json, apply_chat_template in
+    transformers 5.19.0) parse back to the call they render: the name and every argument as the template wrote it
+    (`| string` for scalars - Python's True / None -, tojson for lists and dicts)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "..", "..", "tests", "server", "bolt_template_cases.json"), encoding="utf-8") as f:
+        cases = {c["name"]: c for c in json.load(f)["cases"]}
+    want = {"content before the call, reasoning": ("read", {"filePath": "/w/x"}),
+            "a call: string / number / bool / null / list / dict arguments":
+                ("f", {"s": "a\nb", "n": "3", "x": "2.5", "b": "True", "z": "None", "l": '[1, "two"]', "d": '{"k": "v"}'})}
+    for name, (fn, args) in want.items():
+        text = cases[name]["text"]
+        span = text[text.index("<|im_start|>assistant\n") + len("<|im_start|>assistant\n"):]
+        span = span[: span.index("<|im_end|>") + len("<|im_end|>")]
+        got = parse_first_call(span, "qwen-think")
+        assert got[:3] == ("call", fn, args), (name, got)
+    print(f"  {len(want)} spans of Bolt's own renders parse back to their calls")
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     for n, f in tests:

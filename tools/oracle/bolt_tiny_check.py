@@ -28,10 +28,13 @@ import tempfile  # noqa: E402
 
 import torch  # noqa: E402
 
-spec = importlib.util.spec_from_file_location("bolt_remote", os.path.join(_HERE, "bolt_remote.py"))
-br = importlib.util.module_from_spec(spec)
-sys.modules["bolt_remote"] = br
-spec.loader.exec_module(br)
+if "bolt_remote" in sys.modules:          # one bolt_remote per process (it holds the imported remote code)
+    br = sys.modules["bolt_remote"]
+else:
+    spec = importlib.util.spec_from_file_location("bolt_remote", os.path.join(_HERE, "bolt_remote.py"))
+    br = importlib.util.module_from_spec(spec)
+    sys.modules["bolt_remote"] = br
+    spec.loader.exec_module(br)
 
 PATTERN12 = "MEMEMEM*EMEM"
 E_I = [(16, 64), (20, 128), (24, 192)]          # cycled over the MoE layers

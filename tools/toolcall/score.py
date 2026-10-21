@@ -1,6 +1,6 @@
 """Score tool calls: the first tool call of each output against a reference run.
 
-    score.py [--format qwen|hermes|atem|pythonic] <out dir> <reference run> <candidate run>...
+    score.py [--format qwen|qwen-think|hermes|atem|pythonic] <out dir> <reference run> <candidate run>...
 
 Reads <out dir>/<scenario>.<run>.txt (the generated text, special tokens kept) and compares
 each candidate's first call - its name and raw argument strings - with the reference's.
@@ -51,8 +51,17 @@ Two call syntaxes, told apart by their tags (the two sets share none):
       closed; an unfinished first call is 'incomplete'. The first block's first call wins; values compare as
       JSON values (True == true, tuples == lists).
 
+  qwen-think (Nemotron 3.5 Bolt, spec 25a; `--format qwen-think`): Qwen XML behind the reasoning the prompt
+      opens - Bolt's prompt ends in `<think>\n`, so the output OPENS inside reasoning, closed by </think> (the
+      ultra_v3 / deepseek_r1 reasoning parser's rule: a leading <think>, if the model writes one, is dropped
+      first; an output with no </think> is 'reasoning' - force_nonempty_content is a server option, not
+      the reference's). A <tool_call> inside the reasoning is reasoning text. After </think> the Qwen XML rule
+      above: the first complete <tool_call> block wins, one leading / trailing newline of a value trimmed, a
+      multi-line value kept whole. A value holding the literal text </parameter> is cut there - by vLLM's
+      qwen3_coder parser too (the template writes values raw); </parameterized or </parameters> do not cut.
+
 Kinds: 'call', 'no call', 'incomplete' (a call opened and not closed, or one that does not
-parse), 'reasoning' (K2 / hermes / atem / pythonic: generation ended inside the reasoning).
+parse), 'reasoning' (K2 / hermes / atem / pythonic / qwen-think: generation ended inside the reasoning).
 """
 import json
 import os
@@ -496,6 +505,19 @@ def parse_first_call_atem(text: str, tools=None):
     return ("no call", None, {}, 0)
 
 
+THINK_OPEN, THINK_CLOSE = "<think>", "</think>"
+
+
+def parse_first_call_qwen_think(text: str):
+    """-> (kind, name, params, n_calls) for Bolt's output: reasoning first (the prompt opened it), then Qwen XML."""
+    head, opened, after = text.partition(THINK_OPEN)
+    t = after if opened else text
+    end = t.find(THINK_CLOSE)
+    if end < 0:
+        return ("reasoning", None, {}, 0)
+    return parse_first_call(t[end + len(THINK_CLOSE):], "qwen")
+
+
 def parse_first_call(text: str, fmt: str = "auto", tools=None):
     """-> (kind, name, params, n_calls); kind is 'call', 'no call', 'incomplete' or (K2, hermes, atem,
     pythonic) 'reasoning'. fmt 'hermes' reads Kolibri-1's calls, 'atem' Muse-Glimmer's (`tools`: the
@@ -503,6 +525,8 @@ def parse_first_call(text: str, fmt: str = "auto", tools=None):
     'qwen') K2's tags when present, else Qwen XML."""
     if fmt == "atem":
         return parse_first_call_atem(text, tools)
+    if fmt == "qwen-think":
+        return parse_first_call_qwen_think(text)
     if fmt == "pythonic":
         return parse_first_call_pythonic(text)
     if fmt == "hermes":
@@ -523,8 +547,8 @@ def main() -> None:
     args = sys.argv[1:]
     fmt = "auto"
     if args[:1] == ["--format"]:
-        if len(args) < 2 or args[1] not in ("qwen", "hermes", "atem", "pythonic"):
-            sys.exit("--format expects qwen, hermes, atem or pythonic")
+        if len(args) < 2 or args[1] not in ("qwen", "qwen-think", "hermes", "atem", "pythonic"):
+            sys.exit("--format expects qwen, qwen-think, hermes, atem or pythonic")
         fmt, args = args[1], args[2:]
     if len(args) < 3:
         sys.exit(__doc__)
@@ -554,7 +578,7 @@ def main() -> None:
     print()
     for c in cands:
         print(f"{c}: {matches[c]} / {len(names)} match {ref}")
-    if fmt in ("hermes", "pythonic"):   # KL4's / spec 24 F6's bar: the parser reads every call the reference wrote
+    if fmt in ("hermes", "pythonic", "qwen-think"):   # KL4's / spec 24 F6's / 25 B5's bar: every reference call parses
         bad = [n for n in names if parse_first_call(
             open(os.path.join(out, f"{n}.{ref}.txt"), encoding="utf-8").read(), fmt)[0] == "incomplete"]
         print(f"{ref}: {len(bad)} parse failure(s)" + (f": {', '.join(bad)}" if bad else ""))

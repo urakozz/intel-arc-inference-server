@@ -41,6 +41,16 @@ reasoning-first model), KEY-SORTED like K2 / Kolibri (b70-serve's nlohmann::json
     make_set.py --from <set dir> --model muse --tokenizer <bf16 snapshot> <out dir> [--kwargs JSON]
 is the same call.
 
+Nemotron 3.5 Bolt (config.json model_type nemotron_h_omni, spec 25a Task 6) renders --from the same 36 conversations
+with the checkpoint's own chat_template.jinja (sha256 6521afc7...), KEY-SORTED like K2 / Kolibri / Muse / LFM2.5
+(b70-serve's nlohmann::json), with enable_thinking TRUE (the template's default and the agentic mode: the prompt ends
+in `<|im_start|>assistant\n<think>\n`, every reply reasons first) and the default kwargs {"medium_effort": true}
+(K2's / Muse's precedent for a reasoning-first model: the effort that keeps the reasoning inside the 2048-id budget;
+Decision 13 maps reasoning_effort low / medium to it); each <name>.json records "enable_thinking": true and the kwargs.
+The history calls come out as Qwen3-Coder XML through the template. The plan's spelling
+    make_set.py --from <set dir> --model bolt --tokenizer <Bolt snapshot> <out dir> [--kwargs JSON]
+is the same call; tools/toolcall/a4_ref.sh bolt set copies the committed tests/golden/toolcall-bolt.
+
 --lang de (spec 20e, KL4: Kolibri-1's German A4-style set): the same six templates over the same
 six files with the system prompt and the user turns in German (the DE table below); the tool
 results stay what the tools print. Kolibri-1 (model_type kolibri1) renders from KEY-SORTED
@@ -62,6 +72,9 @@ MIN_IDS, MAX_IDS = 800, 3000
 # shortest scenario in 748 ids (spec 24a: 748..2460, 54768 in all), so its floor is lower; the conversations
 # are unchanged.
 MIN_IDS_FROM = {"lfm2_moe": 600}
+# Spec 25a: Bolt's template writes every tool as an XML block with the Qwen3-Coder calling instructions: the same 36
+# conversations render to 1085..3098 ids (72,519 in all), so its ceiling is higher; the conversations are unchanged.
+MAX_IDS_FROM = {"nemotron_h_omni": 4096}
 
 FILES = [
     "src/runtime/prefill/linear_l0.cc",
@@ -336,7 +349,9 @@ def load_tokenizer(snap: str):
     the tokenizer itself is tokenizer.json either way. Qwen3.8 loads exactly as before."""
     from transformers import AutoTokenizer
     with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:
-        remote = "auto_map" in json.load(f)
+        cfg = json.load(f)
+    # Bolt (nemotron_h_omni): its tokenizer is tokenizer.json; the remote code is the omni / vision processor's
+    remote = "auto_map" in cfg and cfg.get("model_type") not in BOLT_TYPES
     return AutoTokenizer.from_pretrained(snap, trust_remote_code=True) if remote \
         else AutoTokenizer.from_pretrained(snap)
 
@@ -348,7 +363,11 @@ MUSE_TEMPLATE_SHA = "cfc67e5f"      # the original's chat_template.jinja (spec 2
 # Spec 24a: LFM2.5-24B-A2B (lfm2_moe) too - its schemas and call arguments reach the template key-sorted through
 # b70-serve (spec 24 §4.6's known limitation), so its A4 set is rendered that way; the history calls come out
 # pythonic through the template itself, and the prompt ends in "<think>" (the template always reasons).
-SORTED_MODELS = ("k2_horizon", "kolibri1", "muse_glimmer", "lfm2_moe")
+SORTED_MODELS = ("k2_horizon", "kolibri1", "muse_glimmer", "lfm2_moe", "nemotron_h_omni")
+# Spec 25a: Nemotron 3.5 Bolt - reasoning on (the template's default), medium effort (module docstring).
+BOLT_TYPES = ("nemotron_h_omni",)
+BOLT_KWARGS = {"medium_effort": True}
+BOLT_TEMPLATE_SHA = "6521afc7"
 
 
 def check_muse_template(snap: str) -> None:
@@ -358,6 +377,15 @@ def check_muse_template(snap: str) -> None:
     if not sha.startswith(MUSE_TEMPLATE_SHA):
         sys.exit(f"FATAL: {p} is sha256 {sha[:8]}..., not the original's {MUSE_TEMPLATE_SHA}... - render Muse-Glimmer "
                  f"with meta-models/Muse-Glimmer-30B's small files (spec 23 decision 1)")
+
+
+def check_bolt_template(snap: str) -> None:
+    """Refuse a Bolt snapshot whose chat_template.jinja is not the pinned one (spec 25 §7; identical in all three
+    repos, docs/probe-bolt-2026-10-21.md §4)."""
+    p = os.path.join(snap, "chat_template.jinja")
+    sha = hashlib.sha256(open(p, "rb").read()).hexdigest() if os.path.exists(p) else "absent"
+    if not sha.startswith(BOLT_TEMPLATE_SHA):
+        sys.exit(f"FATAL: {p} is sha256 {sha[:8]}..., not the pinned {BOLT_TEMPLATE_SHA}...")
 
 
 def model_type(snap: str) -> str:
@@ -374,9 +402,10 @@ def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=No
     mtype = model_type(snap) if mtype is None else mtype
     k2 = mtype == "k2_horizon"
     muse = mtype == "muse_glimmer"
+    bolt = mtype in BOLT_TYPES
     sort = mtype in SORTED_MODELS
     if kwargs is None:
-        kwargs = dict(K2_KWARGS) if k2 else dict(MUSE_KWARGS) if muse else {}
+        kwargs = dict(K2_KWARGS) if k2 else dict(MUSE_KWARGS) if muse else dict(BOLT_KWARGS) if bolt else {}
     if muse and tok is None:
         check_muse_template(snap)
     tok = load_tokenizer(snap) if tok is None else tok
@@ -390,13 +419,15 @@ def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=No
         msgs, tools = sc["messages"], sc["tools"]
         if sort:   # the server's (nlohmann::json) key order, dump_k2.py's rule
             msgs, tools = json.loads(json.dumps([msgs, tools], sort_keys=True))
+        if bolt:   # Bolt's agentic mode: reasoning on (the set's scenarios say False: Qwen3.8's render)
+            sc = dict(sc, enable_thinking=True)
         r = tok.apply_chat_template(msgs, tools=tools, add_generation_prompt=True,
                                     enable_thinking=sc.get("enable_thinking", False), tokenize=True,
                                     **kwargs)
         ids = [int(x) for x in (r["input_ids"] if hasattr(r, "keys") else r)]
-        lo = MIN_IDS_FROM.get(mtype, MIN_IDS)
-        if not lo <= len(ids) <= MAX_IDS:
-            sys.exit(f"FATAL: {name} renders to {len(ids)} ids, outside {lo} to {MAX_IDS}")
+        lo, hi = MIN_IDS_FROM.get(mtype, MIN_IDS), MAX_IDS_FROM.get(mtype, MAX_IDS)
+        if not lo <= len(ids) <= hi:
+            sys.exit(f"FATAL: {name} renders to {len(ids)} ids, outside {lo} to {hi}")
         text = " ".join(map(str, ids)) + "\n"
         with open(os.path.join(src, f"{name}.ids"), encoding="utf-8") as f:
             same += f.read() == text
@@ -472,10 +503,14 @@ def build_set(snap: str, out: str, lang: str = "en", tok=None, mtype: str | None
 
 def main() -> None:
     if len(sys.argv) in (8, 10) and sys.argv[1] == "--from" and sys.argv[3:7:2] == ["--model", "--tokenizer"]:
-        if sys.argv[4] != "muse":           # the plan's spelling (spec 23a): --model muse --tokenizer SNAP
-            sys.exit("--model expects muse (other models: --from <set> <snapshot> <out>)")
-        if model_type(sys.argv[6]) != "muse_glimmer":
-            sys.exit(f"FATAL: {sys.argv[6]} is not a muse_glimmer snapshot")
+        # the plans' spelling (spec 23a: --model muse; spec 25a: --model bolt) --tokenizer SNAP
+        want = {"muse": ("muse_glimmer",), "bolt": BOLT_TYPES}.get(sys.argv[4])
+        if want is None:
+            sys.exit("--model expects muse or bolt (other models: --from <set> <snapshot> <out>)")
+        if model_type(sys.argv[6]) not in want:
+            sys.exit(f"FATAL: {sys.argv[6]} is not a {' / '.join(want)} snapshot")
+        if sys.argv[4] == "bolt":
+            check_bolt_template(sys.argv[6])
         sys.argv = sys.argv[:3] + [sys.argv[6]] + sys.argv[7:]
     if len(sys.argv) in (5, 7) and sys.argv[1] == "--from":
         kwargs = None

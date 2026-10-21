@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Greedy bf16 baseline for the tool-call set (spec 5 T0, gate A4), on CPU.
 
-    oracle_generate.py [--model kolibri|qwen4exp|muse|lfm2moe] [--form gptq|bf16] [--weights bf16|int4]
+    oracle_generate.py [--model kolibri|qwen4exp|muse|lfm2moe|bolt] [--form gptq|bf16] [--weights bf16|int4]
                        [--device cpu|cuda|xpu] <snapshot> <set dir> <out dir>
                        [--new-tokens N] [--batch 1|N|auto] [--resident none|auto] [--only a,b,..]
                        [--expert-mask FILE]
@@ -60,6 +60,16 @@ The model follows config.json's model_type:
                     cache, eager attention; LFM_LAYERS=N truncates as the engine's --layers N does. Its prompts end
                     in "<think>": every reply reasons first, so the A4 run uses 2048 new ids (a4_ref.sh), and an
                     ESTIMATED wall for the set is printed before the run.
+  nemotron_h_omni   Nemotron 3.5 Bolt 74B-A9B (spec 25a; `--model bolt` says so and checks it): tools/oracle/
+                    bolt_ref.py's layer-streamed model - the checkpoint's own remote code, its Mamba mixers on the
+                    kernel path through bolt_mamba_ops, an fp32 SSM / conv cache (transformers 5.19.0: the qwen4exp
+                    site first on PYTHONPATH) - on the checkpoint given: SergiioB's int4 g128 (or our g64 export)
+                    dequantised, the engine-format reference, or the BF16 original; `--weights` defaults to the
+                    checkpoint's form and is refused when it names the other. The outputs are tagged by the form,
+                    <name>.int4.* / <name>.bf16.* (gate Q compares them). EOS is {2, 11} whatever the
+                    checkpoint's generation_config says (spec 25 Decision 12: SergiioB's lists 11 only). The set
+                    renders reasoning on: 2048 new ids (a4_ref.sh). BOLT_LAYERS=N truncates as --layers N does;
+                    BOLT_EXPERT_CACHE_GB=G keeps dequantised experts in an LRU across steps.
 The MoE paths stop after an EOS id of generation_config.json (kept, as HF generate keeps it)
 or --new-tokens ids (default 192; K2's A4 run uses 512: its replies open with reasoning), and
 also write <out>/<name>.bf16.gap: each greedy step's top-1 minus top-2 logit (compare_ref.py).
@@ -91,6 +101,8 @@ RUN = "bf16"
 NEW_TOKENS = 192
 Q4_TYPES = ("qwen4_exp", "qwen4_exp_text")   # spec 21e: Qwen3.8-Flash-Next (a checkpoint, a text-only export)
 LFM_TYPES = ("lfm2_moe",)                     # spec 24a: LFM2.5-24B-A2B
+BOLT_TYPES = ("nemotron_h_omni",)             # spec 25a: Nemotron 3.5 Bolt 74B-A9B
+BOLT_EOS = {2, 11}                            # spec 25 Decision 12
 
 
 def load_manifest(set_dir: str) -> list[dict]:
@@ -274,6 +286,37 @@ def mem_model(mtype: str, cfg: dict) -> dict:
                 "per_seq": lambda T: T * na * 2 * kvh * hd * 2 + nc * 3 * H * 2 + T * H * 2,
                 "dense": dense, "experts": [ex if i >= nd else 0 for i in range(L)],
                 "what": f"KV bf16 in {na} attention layers + the conv states of {nc}"}
+    if mtype in BOLT_TYPES:             # spec 25a: Bolt (bolt_ref.py, bf16, eager attention, fp32 SSM / conv state)
+        c = cfg.get("llm_config", cfg)
+        blocks = c["block_configs"][: int(os.environ["BOLT_LAYERS"])] if os.environ.get("BOLT_LAYERS") else \
+            c["block_configs"]
+        H, V = c["hidden_size"], c["vocab_size"]
+        nh, P, N, G = c["mamba_num_heads"], c["mamba_head_dim"], c["ssm_state_size"], c["n_groups"]
+        di = nh * P
+        conv = di + 2 * G * N
+        heads, kvh, hd = c["num_attention_heads"], c["num_key_value_heads"], c["head_dim"]
+        lat, sh = c["moe_latent_size"], c["moe_shared_expert_intermediate_size"]
+        dense, ex = [], []
+        for b in blocks:
+            t = b["block_type"]
+            if t == "mamba":
+                dense.append(2 * (H * (di + conv + nh) + di * H + 4 * conv + di + H))
+                ex.append(0)
+            elif t == "attention":
+                dense.append(2 * (2 * H * heads * hd + 2 * H * kvh * hd + H))
+                ex.append(0)
+            else:
+                dense.append(2 * (2 * H * lat + 2 * H * sh + b["n_routed_experts"] * H + H))
+                ex.append(2 * b["n_routed_experts"] * 2 * lat * b["moe_intermediate_size"])
+        nm = sum(1 for b in blocks if b["block_type"] == "mamba")
+        na = sum(1 for b in blocks if b["block_type"] == "attention")
+        state = nm * (nh * P * N * 4 + conv * c["conv_kernel"] * 4)
+        return {"base": 2 * V * H * 2 + max(ex) + 2 * max(dense),
+                # R's head covers every row (R:1731: logits_to_keep is ignored): bf16 + fp32 [T][V]; eager scores
+                "transient": lambda T: T * V * 6 + heads * T * T * 8 + 3 * T * (di + conv) * 4,
+                "per_seq": lambda T: state + T * na * 2 * kvh * hd * 2 + T * H * 2,
+                "dense": dense, "experts": ex,
+                "what": f"KV bf16 in {na} attention blocks + the SSM / conv state fp32 of {nm} ({state / 2**20:.0f} MiB)"}
     L, H, V = cfg["num_hidden_layers"], cfg["hidden_size"], cfg["vocab_size"]
     heads, kvh = cfg["num_attention_heads"], cfg["num_key_value_heads"]
     hd = cfg.get("head_dim") or H // heads
@@ -332,7 +375,8 @@ def mem_limit() -> int | None:
 # mostly the per-step dequant a pass shares, so more.
 MAX_AUTO_BATCH = {"qwen3_5_moe": 4, "k2_horizon": 8, "kolibri1": 4, "qwen4_exp": 4, "qwen4_exp_text": 4,
                   "muse_glimmer": 8,     # Muse: a decode pass is mostly the 52 layers' dequant, shared by the batch
-                  "lfm2_moe": 8}
+                  "lfm2_moe": 8,
+                  "nemotron_h_omni": 4}  # Bolt: 74 B of weights, a pass mostly expert dequant; 4 keeps the state small
 
 
 def batch_plan(mtype: str, cfg: dict, lens: list[int], n: int, cap: int | None, want="auto",
@@ -530,6 +574,36 @@ def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int]
         return SimpleNamespace(generate=generate, new_state=lambda: {"cache": None}, argmax=argmax,
                                step_many=step_many, lazy=model.lfm_lazy, ref=model, pf=model.lfm_pf)
 
+    if mtype in BOLT_TYPES:
+        # Spec 25a: Nemotron 3.5 Bolt - tools/oracle/bolt_ref.py's layer-streamed model (R's own code through
+        # transformers 5.19.0, the Mamba kernel path through bolt_mamba_ops, an fp32 cache), the int4 checkpoint
+        # dequantised or the BF16 original (`weights`, default the checkpoint's form), greedy through its own cache.
+        # The batched path: layer_major's logits of each sequence's LAST row (R's head covers every row either way).
+        BR = load("bolt_ref")
+        cfg = BR.config(snap, int(os.environ["BOLT_LAYERS"]) if os.environ.get("BOLT_LAYERS") else None)
+        form = BR.Ckpt(snap).form()
+        kd = range(min(keep[0], len(cfg["block_configs"])))
+        model = BR.build_streamed(snap, cfg, weights or form, keep=kd,
+                                  expert_cache_gb=float(os.environ.get("BOLT_EXPERT_CACHE_GB") or 0))
+        print(f"Bolt reference: bolt_ref.py, {len(cfg['block_configs'])} blocks, streamed, weights {weights or form} "
+              f"({model.bolt_ckpt.trunk} trunk), Mamba kernel path, fp32 cache, attn eager; resident once read: "
+              f"{len(kd)} blocks", flush=True)
+        major = BR.layer_major(model)
+
+        def generate(ids, n, eos, on_row=None):
+            state = {"cache": BR.new_cache(model)}
+
+            def step(chunk, pos):
+                with torch.no_grad():
+                    o = model(input_ids=torch.tensor([chunk]), past_key_values=state["cache"], use_cache=True)
+                return o.logits[0, -1].float()
+            return greedy(step, ids, n, eos, watch(argmax, on_row))
+
+        def step_many(items):
+            return [lg[-1].float() for lg in major(items)]
+        return SimpleNamespace(generate=generate, new_state=lambda: {"cache": None}, argmax=argmax,
+                               step_many=step_many, lazy=model.bolt_lazy, ref=model, pf=model.bolt_pf)
+
     if mtype == "k2_horizon":
         K2 = load("k2_ref")
         src = K2.Checkpoint(snap)
@@ -568,11 +642,12 @@ def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int]
                            step_many=OR.layer_major(model, pf), lazy=lazy, ref=model, pf=pf)
 
 
-MOE_TYPES = ("qwen3_5_moe", "k2_horizon", "kolibri1", "qwen4_exp", "qwen4_exp_text", "muse_glimmer", "lfm2_moe")
+MOE_TYPES = ("qwen3_5_moe", "k2_horizon", "kolibri1", "qwen4_exp", "qwen4_exp_text", "muse_glimmer", "lfm2_moe",
+             "nemotron_h_omni")
 # --model NAME -> the model_type(s) it must be (spec 21e: qwen4exp - the checkpoints say qwen4_exp, a text-only
 # export qwen4_exp_text; spec 23a: muse; spec 24a: lfm2moe)
 MODELS = {"kolibri": ("kolibri1",), "qwen4exp": ("qwen4_exp", "qwen4_exp_text"), "muse": ("muse_glimmer",),
-          "lfm2moe": ("lfm2_moe",)}
+          "lfm2moe": ("lfm2_moe",), "bolt": BOLT_TYPES}
 
 
 def muse_form(snap: str) -> str:
@@ -652,6 +727,13 @@ def main() -> None:
         sys.exit("--form is Muse-Glimmer's (--model muse)")
     with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:
         is_muse = json.load(f).get("model_type") == "muse_glimmer"
+    with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:
+        is_bolt = json.load(f).get("model_type") in BOLT_TYPES
+    if a["model"] == "bolt" or is_bolt:       # spec 25a: the outputs are tagged by the weights' form (gate Q)
+        got = "int4" if muse_form(snap) == "gptq" else "bf16"
+        if a["weights"] and a["weights"] != got:
+            sys.exit(f"--weights {a['weights']}: {snap} is the {got} form")
+        RUN = got
     if a["model"] == "muse" or is_muse:       # spec 23a: the outputs are tagged by the checkpoint's form, always
         got = muse_form(snap)
         if a["form"] and a["form"] != got:
@@ -679,8 +761,8 @@ def main() -> None:
         sys.exit(f"--model {a['model']}: {snap} is model_type {mtype!r}, not {' or '.join(MODELS[a['model']])}")
     if a["expert_mask"] and mtype not in Q4_TYPES:
         sys.exit(f"--expert-mask is Qwen3.8-Flash-Next's (qwen4_exp) only; {snap} is model_type {mtype!r}")
-    if a["weights"] and mtype not in LFM_TYPES:
-        sys.exit(f"--weights is LFM2.5's (lfm2_moe) only; {snap} is model_type {mtype!r}")
+    if a["weights"] and mtype not in LFM_TYPES + BOLT_TYPES:
+        sys.exit(f"--weights is LFM2.5's (lfm2_moe) and Bolt's (nemotron_h_omni) only; {snap} is model_type {mtype!r}")
     if mtype in MOE_TYPES:
         moe_main(snap, out, todo, prompts, new_tokens, mtype, a["device"], a["batch"], a["keep"], a["expert_mask"],
                  a["weights"])
@@ -777,6 +859,8 @@ def moe_main(snap: str, out: str, todo: list[dict], prompts: dict, new_tokens: i
     with open(os.path.join(snap, "generation_config.json"), encoding="utf-8") as f:
         eos = json.load(f)["eos_token_id"]
     eos = set(eos if isinstance(eos, list) else [eos])
+    if mtype in BOLT_TYPES:     # spec 25 Decision 12: EOS {2, 11} for both checkpoints (SergiioB's config lists 11)
+        eos = set(BOLT_EOS)
     tok = Tokenizer.from_file(os.path.join(snap, "tokenizer.json"))
     print(f"torch {torch.__version__}, threads {torch.get_num_threads()}, eos {sorted(eos)}, "
           f"model_type {mtype}, {new_tokens} new tokens", flush=True)

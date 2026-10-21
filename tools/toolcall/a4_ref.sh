@@ -38,6 +38,19 @@
 #                                                   one detached container a form - with muse_ref.py, 512 new ids,
 #                                                   -> $OUT/<name>.{gptq,bf16}.{ids,txt,gap}, DONE.<form>; score
 #                                                   with `score.py --format atem $OUT bf16 gptq`
+#   tools/toolcall/a4_ref.sh bolt set|ref|status    spec 25a: `set` copies the committed set
+#                                                   tests/golden/toolcall-bolt (make_set.py --from
+#                                                   tests/golden/toolcall --model bolt: the checkpoint's template,
+#                                                   key-sorted, reasoning on, medium_effort) to $OUT/set; `ref`
+#                                                   runs FORM=int4 (SergiioB's g128 checkpoint dequantised through
+#                                                   the exact g64 expansion - the engine-format reference) and
+#                                                   FORM=bf16 (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16) - FORM=both
+#                                                   (default) one after the other on the box - with bolt_ref.py
+#                                                   (the remote code, the Mamba kernel path, an fp32 cache), 2048 new
+#                                                   ids (reasoning first), EOS {2, 11} -> $OUT/<name>.{int4,bf16}.
+#                                                   {ids,txt,gap}, DONE.<form>; score with
+#                                                   `score.py --format qwen-think $OUT bf16 int4`; gate Q:
+#                                                   tools/oracle/bolt_gateq.py
 #
 # The references (tools/toolcall/oracle_generate.py, by config.json's model_type):
 #   ornith  tools/oracle/ornith_ref.py's layer-streamed Qwen3_5MoeForCausalLM on the INT4
@@ -116,7 +129,8 @@
 # directory instead of the HF cache's), NEW_TOKENS, KWARGS (K2's template variables, JSON;
 # default make_set.py's {"tool_call_format": "xml", "reasoning_effort": "low"}), IMAGE, MEM,
 # ORACLE_THREADS (12), HF_CACHE, FORCE, BATCH (auto), RESIDENT (auto), ONLY, NAME, FOREGROUND; qwen4exp only:
-# TOK_DIR (the original's small files for `set`), SITE, Q4_LAYERS, Q4_PLE, MASK; lfm2moe: SITE, LFM_LAYERS.
+# TOK_DIR (the original's small files for `set`), SITE, Q4_LAYERS, Q4_PLE, MASK; lfm2moe: SITE, LFM_LAYERS;
+# bolt: FORM, SITE, BOLT_LAYERS, BOLT_EXPERT_CACHE_GB (an LRU of dequantised experts across decode steps).
 set -eu
 cd "$(dirname "$0")/../.."
 m=${1:-}
@@ -139,6 +153,15 @@ case "$m" in
   kolibri) repo=Aleph-Alpha/Kolibri-1-BF16; new=${NEW_TOKENS:-192} ;;
   qwen4exp) repo=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound; new=${NEW_TOKENS:-192} ;;
   lfm2moe) repo=LiquidAI/LFM2.5-24B-A2B; new=${NEW_TOKENS:-2048} ;;
+  bolt)   # spec 25a: FORM int4 (SergiioB's g128, the served checkpoint) | bf16 (the original) | both (the box)
+    FORM=${FORM:-both}
+    case "$FORM" in
+      int4) repo=SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym ;;
+      bf16) repo=nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 ;;
+      both) repo=- ;;
+      *) echo "a4_ref: FORM is int4, bf16 or both (got $FORM)" >&2; exit 2 ;;
+    esac
+    new=${NEW_TOKENS:-2048} ;;
   *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;;
 esac
 case "$step" in set | ref | status) ;; *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;; esac
@@ -148,6 +171,21 @@ if [ "$m" = muse ] && [ "$step" = set ]; then   # the committed set (spec 23a Ta
   cp tests/golden/toolcall-muse/* "$OUT/set/"
   echo "a4_ref: muse set: tests/golden/toolcall-muse -> $OUT/set ($(ls "$OUT"/set/*.ids | wc -l | tr -d ' ') scenarios)"
   exit 0
+fi
+if [ "$m" = bolt ] && [ "$step" = set ]; then   # the committed set (spec 25a Task 6: the checkpoint's template)
+  OUT=${OUT:-oracle-out-bolt-a4}
+  mkdir -p "$OUT/set"
+  cp tests/golden/toolcall-bolt/* "$OUT/set/"
+  echo "a4_ref: bolt set: tests/golden/toolcall-bolt -> $OUT/set ($(ls "$OUT"/set/*.ids | wc -l | tr -d ' ') scenarios)"
+  exit 0
+fi
+if [ "$m" = bolt ] && [ "$FORM" = both ]; then   # both references, one after the other
+  [ "$step" = status ] && { FORM=int4 "$0" bolt status; exec env FORM=bf16 "$0" bolt status; }
+  [ "$(uname -s)" = Darwin ] && {
+    echo "a4_ref: on the Mac the references run detached, one container at a time: FORM=int4 $0 bolt ref, then FORM=bf16" >&2
+    exit 2; }
+  FORM=int4 "$0" bolt "$step" || exit $?
+  exec env FORM=bf16 "$0" bolt "$step"
 fi
 if [ "$m" = muse ] && [ "$FORM" = both ]; then   # both references, one after the other
   [ "$step" = status ] && { FORM=gptq "$0" muse status; exec env FORM=bf16 "$0" muse status; }
@@ -167,7 +205,7 @@ OUT=${OUT:-oracle-out-$m-a4}
 name_given=${NAME:+1}
 NAME=${NAME:-a4-ref-$m}
 run_tag=bf16      # the outputs' tag: <name>.<run_tag>.{ids,txt,gap} (Muse: the checkpoint's form)
-if [ "$m" = muse ]; then run_tag=$FORM; [ -n "$name_given" ] || NAME=a4-ref-muse-$FORM; fi
+if [ "$m" = muse ] || [ "$m" = bolt ]; then run_tag=$FORM; [ -n "$name_given" ] || NAME=a4-ref-$m-$FORM; fi
 HF=${HF_CACHE:-$HOME/.cache/huggingface}
 THREADS=${ORACLE_THREADS:-12}
 mac=0
@@ -180,7 +218,7 @@ if [ "$step" = status ]; then
   n_set=$(ls "$OUT"/set/*.ids 2> /dev/null | wc -l | tr -d ' ')
   n_ref=$(ls "$OUT"/*."$run_tag".txt 2> /dev/null | wc -l | tr -d ' ')
   dn=DONE
-  [ "$m" = muse ] && dn=DONE.$run_tag
+  { [ "$m" = muse ] || [ "$m" = bolt ]; } && dn=DONE.$run_tag
   [ -f "$OUT/set/SAME" ] && echo "$m: $(cat "$OUT/set/SAME")"
   echo "$m: set $n_set/36 scenarios ($OUT/set), reference $n_ref/36 ($OUT/*.$run_tag.txt)$([ -f "$OUT/$dn" ] && echo ', DONE')"
   tail -3 "$OUT/ref.log" 2> /dev/null || true
@@ -227,6 +265,7 @@ else
   [ "$m" = qwen4exp ] && cmd_ref="$cmd_ref --model qwen4exp"
   [ "$m" = muse ] && cmd_ref="$cmd_ref --model muse --form $FORM"
   [ "$m" = lfm2moe ] && cmd_ref="$cmd_ref --model lfm2moe"
+  [ "$m" = bolt ] && cmd_ref="$cmd_ref --model bolt --weights $FORM"
   BATCH=${BATCH:-auto}
   RESIDENT=${RESIDENT:-auto}
   [[ "$BATCH" =~ ^(auto|[1-9][0-9]*)$ ]] || { echo "a4_ref: BATCH is auto or a count >= 1 (got $BATCH)" >&2; exit 2; }
@@ -239,7 +278,7 @@ else
 fi
 # Spec 22 P0.8: MASK (qwen4exp ref only) - the expert-masked reference, its outputs tagged .mask-<tag>.
 mask_base="" done_file=DONE
-[ "$m" = muse ] && done_file=DONE.$run_tag
+{ [ "$m" = muse ] || [ "$m" = bolt ]; } && done_file=DONE.$run_tag
 if [ -n "${MASK:-}" ]; then
   [ "$m" = qwen4exp ] && [ "$step" = ref ] || { echo "a4_ref: MASK is qwen4exp's ref only" >&2; exit 2; }
   [ -f "$MASK" ] || { echo "a4_ref: MASK=$MASK: no such file" >&2; exit 2; }
@@ -256,12 +295,12 @@ fi
 # reference's knobs passed through.
 pre=""
 q4env=()
-if [ "$m" = qwen4exp ] || [ "$m" = muse ] || [ "$m" = lfm2moe ]; then
+if [ "$m" = qwen4exp ] || [ "$m" = muse ] || [ "$m" = lfm2moe ] || [ "$m" = bolt ]; then
   if [ $mac = 1 ]; then SITE=${SITE:-oracle-out-q4exp/site}; else SITE=${SITE:-oracle-out-q4exp-site}; fi
   [[ "$SITE" =~ ^[A-Za-z0-9_./-]+$ ]] && [ "${SITE#/}" = "$SITE" ] || {
     echo "a4_ref: SITE is a directory inside this tree (got $SITE)" >&2; exit 2; }
   pre="tools/oracle/qwen4exp_env.sh /ws/$SITE > /dev/null && export PYTHONPATH=/ws/$SITE && "
-  for v in Q4_LAYERS Q4_PLE MUSE_LAYERS LFM_LAYERS; do
+  for v in Q4_LAYERS Q4_PLE MUSE_LAYERS LFM_LAYERS BOLT_LAYERS BOLT_EXPERT_CACHE_GB; do
     x=${!v:-}
     [ -n "$x" ] || continue
     [[ "$x" =~ ^[A-Za-z0-9_.:/-]+$ ]] || { echo "a4_ref: $v=$x" >&2; exit 2; }
@@ -321,7 +360,7 @@ fi
 [ $inside = 1 ] || { echo "a4_ref: on the Mac OUT must be a directory inside this tree (got $OUT)" >&2; exit 2; }
 mkdir -p "$OUT/set"
 IMAGE=${IMAGE:-agnes-ref-img:latest}
-if [ "$m" = muse ] || [ "$m" = lfm2moe ]; then MEM=${MEM:-40g}; else MEM=${MEM:-28g}; fi   # Muse: 5.4 GB resident + 2 layers + the batch; LFM2.5: the Mac cap (spec 24a)
+if [ "$m" = muse ] || [ "$m" = lfm2moe ] || [ "$m" = bolt ]; then MEM=${MEM:-40g}; else MEM=${MEM:-28g}; fi   # Muse: 5.4 GB resident + 2 layers + the batch; LFM2.5: the Mac cap (spec 24a)
 others=$(docker ps --filter "ancestor=$IMAGE" --format '{{.Names}}' | grep -vx "$NAME" || true)
 if [ -n "$others" ] && [ "${FORCE:-0}" != 1 ]; then
   echo "a4_ref: another $IMAGE container is running ($others): wait for it, or FORCE=1" >&2; exit 2
