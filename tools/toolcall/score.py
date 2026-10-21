@@ -53,8 +53,8 @@ Two call syntaxes, told apart by their tags (the two sets share none):
 
   qwen-think (Nemotron 3.5 Bolt, spec 25a; `--format qwen-think`): Qwen XML behind the reasoning the prompt
       opens - Bolt's prompt ends in `<think>\n`, so the output OPENS inside reasoning, closed by </think> (the
-      ultra_v3 / deepseek_r1 reasoning parser's rule: a leading <think>, if the model writes one, is dropped
-      first; an output with no </think> is 'reasoning' - force_nonempty_content is a server option, not
+      ultra_v3 / deepseek_r1 reasoning parser's rule: everything up to and including a first <think>, if the
+      model writes one, is dropped first; an output with no </think> is 'reasoning' - force_nonempty_content is a server option, not
       the reference's). A <tool_call> inside the reasoning is reasoning text. After </think> the Qwen XML rule
       above: the first complete <tool_call> block wins, one leading / trailing newline of a value trimmed, a
       multi-line value kept whole. A value holding the literal text </parameter> is cut there - by vLLM's
