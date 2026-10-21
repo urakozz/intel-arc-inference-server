@@ -1,6 +1,6 @@
 # Spec 25a - Nemotron 3.5 Bolt 74B-A9B: the facts, the CPU reference, golden sets, the A4 references, the tap dumps
 
-**Status (2026-10-20): planned; nothing built.** Box queue row **57** (rows 57-62 are spec 25's, 63-65 spec 26's).
+**Status (2026-10-21): built on the Mac (branch `spec25a-bolt-reference`; spec 25 §13 "25a as built") - B1 on the tiny puzzles, the facts sheet `docs/probe-bolt-2026-10-21.md`, the prompts, the A4 set, `bolt_oracle.sh`; no real weight read (not downloaded): Task 7's Steps 2-3 are the box's.** Box queue row **57** (rows 57-62 are spec 25's, 63-65 spec 26's).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
 
@@ -44,9 +44,9 @@
 **Files:**
 - Create: `tools/oracle/bolt_tiny_check.py`, `tools/oracle/bolt_remote.py` (imports the remote modules from the snapshot under a private package name, installs the `mamba_ssm` stub, builds a `NemotronHPuzzleForCausalLM` from a config dict - the omni wrapper is never built)
 
-- [ ] **Step 1: write `bolt_remote.py`** (`load_remote(snapshot) -> module`, `build_lm(cfg_dict, dtype) -> NemotronHPuzzleForCausalLM`, `fp32_cache(model, batch) -> NemotronHHybridDynamicCache` with dtype fp32) **and `bolt_tiny_check.py <snapshot>`**: a random tiny puzzle config with the real model's first 12 block types (`M E M E M E M * E M E M`), hidden 256, Mamba 8 heads x 32 (d_inner 256), `n_groups` 2, state 16, conv 4, attention 16 q / 1 kv x 16, MoE E per layer {16, 20, 24} with I {64, 128, 192}, top-9, latent 64, shared 128, vocab 512; fp32 and bf16; a 24-id prompt with `generate(max_new_tokens=8, do_sample=False)` using our fp32 cache, then the 32 ids as one uncached forward: the last 8 rows' argmax equal; the logits' max |diff| printed in fp32 and bf16 (recorded - 24a found cached vs uncached not bitwise in transformers itself even in fp32); print which mamba path ran (the torch fallback unpatched, `cuda_kernels_forward` with the dispatch patch - R:735-738) and whether the stub's functions were called. Exit 0 only if all hold.
-- [ ] **Step 2: run on the Mac** (the container command of plan 24a Task 1 with the Bolt snapshot mounted read-only). Expected: `tiny check: OK`. If 5.19.0 cannot build the remote class, stop and report (no version switch).
-- [ ] **Step 3: commit** `git commit -S -m "oracle: Bolt's remote code end to end on a tiny puzzle config in transformers 5.19.0 (spec 25a)"`.
+- [x] **Step 1: write `bolt_remote.py`** (`load_remote(snapshot) -> module`, `build_lm(cfg_dict, dtype) -> NemotronHPuzzleForCausalLM`, `fp32_cache(model, batch) -> NemotronHHybridDynamicCache` with dtype fp32) **and `bolt_tiny_check.py <snapshot>`**: a random tiny puzzle config with the real model's first 12 block types (`M E M E M E M * E M E M`), hidden 256, Mamba 8 heads x 32 (d_inner 256), `n_groups` 2, state 16, conv 4, attention 16 q / 1 kv x 16, MoE E per layer {16, 20, 24} with I {64, 128, 192}, top-9, latent 64, shared 128, vocab 512; fp32 and bf16; a 24-id prompt with `generate(max_new_tokens=8, do_sample=False)` using our fp32 cache, then the 32 ids as one uncached forward: the last 8 rows' argmax equal; the logits' max |diff| printed in fp32 and bf16 (recorded - 24a found cached vs uncached not bitwise in transformers itself even in fp32); print which mamba path ran (the torch fallback unpatched, `cuda_kernels_forward` with the dispatch patch - R:735-738) and whether the stub's functions were called. Exit 0 only if all hold.
+- [x] **Step 2: run on the Mac** (the container command of plan 24a Task 1 with the Bolt snapshot mounted read-only). Expected: `tiny check: OK`. If 5.19.0 cannot build the remote class, stop and report (no version switch).
+- [x] **Step 3: commit** `git commit -S -m "oracle: Bolt's remote code end to end on a tiny puzzle config in transformers 5.19.0 (spec 25a)"`.
 
 ### Task 2: the training-kernel ops and the tiny variants (Mac)
 
@@ -62,8 +62,8 @@
   - `dtclamp`: half the heads' `dt_bias` below -6.9 (softplus < 0.001 at dt ~ 0) - where the clamp matters;
   - `int4-g64`: every linear RTN int4 g64 sym in the `auto_round:auto_gptq` bytes (`src/loader/rtn.h`'s rule, **signed** scales allowed by the packer's option `--signed-scales` - AutoRound's form, a group's extreme mapped to -8);
   - `int4-g128-gptq`: SergiioB's spelling - `quant_method` gptq, group 128, `g_idx` = `i // 128`, `qzeros` 0x77777777, F16 signed scales, the `dynamic` object with the restating `+:` `out_proj` rule.
-- [ ] **Step 1: the failing tests** (`test_bolt_make_tiny.py`; and unit tests in the same file for the ops): each variant loads through `bolt_remote.build_lm`; the dequant of both int4 variants equals `(q - 8) x scale` exactly; `rmsnorm_gated` equals NVIDIA's documented formula on random data and DIFFERS from `norm_before_gate=True` and from a group of 8192; `conv_update` with the bias dropped or the SiLU before the bias differs; `ssm_update` with the clamp on differs on `dtclamp`. Run: FAIL (`ModuleNotFoundError`).
-- [ ] **Step 2: implement; PASS. Commit** `git commit -S -m "oracle: Bolt's training-kernel ops (gated norm, conv, SSM update / chunk, no dt clamp) and tiny puzzle variants incl. SergiioB's g128 GPTQ spelling (spec 25a)"`.
+- [x] **Step 1: the failing tests** (`test_bolt_make_tiny.py`; and unit tests in the same file for the ops): each variant loads through `bolt_remote.build_lm`; the dequant of both int4 variants equals `(q - 8) x scale` exactly; `rmsnorm_gated` equals NVIDIA's documented formula on random data and DIFFERS from `norm_before_gate=True` and from a group of 8192; `conv_update` with the bias dropped or the SiLU before the bias differs; `ssm_update` with the clamp on differs on `dtclamp`. Run: FAIL (`ModuleNotFoundError`).
+- [x] **Step 2: implement; PASS. Commit** `git commit -S -m "oracle: Bolt's training-kernel ops (gated norm, conv, SSM update / chunk, no dt clamp) and tiny puzzle variants incl. SergiioB's g128 GPTQ spelling (spec 25a)"`.
 
 ### Task 3: `bolt_ref.py` and B1 (Mac)
 
@@ -98,7 +98,7 @@ def main()                             # run | ppl | facts | hfcheck | taps | ga
 
 `run <snapshot> --prompt <ids> --out <p>.golden.safetensors --gen 32 [--layers N] [--weights int4|bf16] [--chunk C] [--taps] [--cache fp32|bf16]`: the golden layout of plan 24a (`h.L<l>` for the last `--act-tail` rows, `route.{ids,w,sel,gap}.L<l>`, `ssm.L<l>` fp32 [128][64][128] and `conv.L<l>` bf16 [3][10240] after the prompt, `logits` tail + generated rows, `tokens`, `nll`), plus with `--taps` `tap.L{1,18,35,51,68,85}` bf16 for every row (dump_taps' names).
 
-- [ ] **Step 1: the failing tests** (each against the unmodified remote code un-streamed; SKIP with a message when the HF cache lacks the snapshot):
+- [x] **Step 1: the failing tests** (each against the unmodified remote code un-streamed; SKIP with a message when the HF cache lacks the snapshot):
   - `test_non_mamba_bitwise` on `pattern12` and `pattern12-fp32`: with the Mamba mixer's outputs fed from one shared source, every other op's output bitwise R's (Review Focus 1);
   - `test_mamba_vs_fallback_fp32`: a 40-id and a 400-id prompt, then 8 cached steps - the port against R's torch fallback (clamp off by construction: `pattern12-fp32`'s `dt_bias` keeps every head above the clamp) within the measured bound (max relative error per state and output printed; the bar recorded as found);
   - `test_mamba_twin_order`: `bolt_mamba_ops` against an fp64 evaluation and against the summation order 25c's twin will use - bitwise the latter;
@@ -108,8 +108,8 @@ def main()                             # run | ppl | facts | hfcheck | taps | ga
   - `test_mamba_chain` (Review Focus 2's mutations), `test_router_chain` + `test_route_ties` (Review Focus 3; torch's tie order recorded), `test_combine_order` (ascending id equals R; rank order differs on > 0 rows, printed), `test_relu2_bf16`, `test_shared_on_normed_hidden`, `test_latent_projections`;
   - `test_nope` (adding a RoPE changes attention outputs), `test_untied_head`, `test_tap_convention` (Review Focus 4 at layers 1 and 8 of the tiny model);
   - `test_int4_both_spellings`: `build_streamed(weights="int4")` on `int4-g64` and `int4-g128-gptq` equals the port on the dequantised twin (the same weights as plain tensors) bitwise; the g128 dequant equals the g64-expanded dequant bitwise (the expansion is exact).
-- [ ] **Step 2: run, FAIL; implement until PASS.** `hfcheck <snapshot> --layers N` runs R (layer-streamed) against the port on real weights (Task 7).
-- [ ] **Step 3: README section; commit** `git commit -S -m "oracle: bolt_ref.py - Bolt's remote code layer-streamed with the training-kernel ops, B1 on the tiny puzzles - bitwise outside the Mamba mixer, the fallback's bound measured inside it (spec 25a)"`.
+- [x] **Step 2: run, FAIL; implement until PASS.** `hfcheck <snapshot> --layers N` runs R (layer-streamed) against the port on real weights (Task 7).
+- [x] **Step 3: README section; commit** `git commit -S -m "oracle: bolt_ref.py - Bolt's remote code layer-streamed with the training-kernel ops, B1 on the tiny puzzles - bitwise outside the Mamba mixer, the fallback's bound measured inside it (spec 25a)"`.
 
 ### Task 4: the facts sheet (Mac: source, small files, range reads)
 
@@ -117,19 +117,19 @@ def main()                             # run | ppl | facts | hfcheck | taps | ga
 - Create: `docs/probe-bolt-2026-10-<dd>.md`, `tools/oracle/bolt_facts.py` (prints the tables; `--headers` range-reads every shard header of SergiioB's repo at the pinned revision into a cache dir outside the tree; `--sample` reads named tensors' data by range)
 - Modify: `docs/README.md` (one line)
 
-- [ ] **Step 1: the rounding chain**, one row per point with `R:` / `N:` / mamba_ssm citations: the block (R:802-840), the norm (R:760-765), the Mamba mixer (R:384-532 the kernel path, R:535-726 the torch path; spec 25 §2.0's three readings side by side), attention (R:1077-1188), the MoE (R:884-965), the router (R:968-1063), the model loop and the tuple convention (R:1470-1513), the head (R:1731), the cache dtype (R:1664-1667), the puzzle config (RP:68-100).
-- [ ] **Step 2: the checkpoint facts:** the 112,940 names grouped (spec 25 §1.3), dtypes and shapes from every shard header (range reads, ~2 MB each), the per-layer (type, E, I) table, the 849 vision names, the derived parameter counts and bytes of spec 25 §3 re-derived from the headers, the `quantization_config` (the `+:` rule quoted), the sampled tensors (qzeros, g_idx, signed / subnormal scale counts, `A_log` / `D` / `dt_bias` ranges, `e_score_correction_bias` ranges); **the dt-clamp census**: per Mamba layer the heads with `softplus(dt_bias) < 0.001` from the 40 `dt_bias` tensors (512 B each by range read).
-- [ ] **Step 3: tokens and template:** `chat_template.jinja` sha256 `6521afc7...` and its minja feature list (spec 25 §7); rendered examples (no system, system, tools, a tool call with string / number / bool / null / list / dict arguments, tool results grouped, reasoning before / after the last user turn with `truncate_history_thinking` both ways, `enable_thinking` false, `medium_effort`) through `apply_chat_template` - 25e's fixtures; the special / added ids; `fix_mistral_regex`'s no-op finding; whether the golden prompt texts re-tokenise.
-- [ ] **Step 4: torch's CPU `topk(sorted=False)` on tied `sel`** at the 9th / 10th of 240 / 496 (planted ties, 50 rows): which index wins - the engine's rule is the lower id; exact ties are undetermined.
-- [ ] **Step 5: commit** `git commit -S -m "probe: Nemotron 3.5 Bolt facts - rounding chain, checkpoint (headers, signed scales, the dt-clamp census), tokens, template, tie order (spec 25a)"`.
+- [x] **Step 1: the rounding chain**, one row per point with `R:` / `N:` / mamba_ssm citations: the block (R:802-840), the norm (R:760-765), the Mamba mixer (R:384-532 the kernel path, R:535-726 the torch path; spec 25 §2.0's three readings side by side), attention (R:1077-1188), the MoE (R:884-965), the router (R:968-1063), the model loop and the tuple convention (R:1470-1513), the head (R:1731), the cache dtype (R:1664-1667), the puzzle config (RP:68-100).
+- [x] **Step 2: the checkpoint facts:** the 112,940 names grouped (spec 25 §1.3), dtypes and shapes from every shard header (range reads, ~2 MB each), the per-layer (type, E, I) table, the 849 vision names, the derived parameter counts and bytes of spec 25 §3 re-derived from the headers, the `quantization_config` (the `+:` rule quoted), the sampled tensors (qzeros, g_idx, signed / subnormal scale counts, `A_log` / `D` / `dt_bias` ranges, `e_score_correction_bias` ranges); **the dt-clamp census**: per Mamba layer the heads with `softplus(dt_bias) < 0.001` from the 40 `dt_bias` tensors (512 B each by range read).
+- [x] **Step 3: tokens and template:** `chat_template.jinja` sha256 `6521afc7...` and its minja feature list (spec 25 §7); rendered examples (no system, system, tools, a tool call with string / number / bool / null / list / dict arguments, tool results grouped, reasoning before / after the last user turn with `truncate_history_thinking` both ways, `enable_thinking` false, `medium_effort`) through `apply_chat_template` - 25e's fixtures; the special / added ids; `fix_mistral_regex`'s no-op finding; whether the golden prompt texts re-tokenise.
+- [x] **Step 4: torch's CPU `topk(sorted=False)` on tied `sel`** at the 9th / 10th of 240 / 496 (planted ties, 50 rows): which index wins - the engine's rule is the lower id; exact ties are undetermined.
+- [x] **Step 5: commit** `git commit -S -m "probe: Nemotron 3.5 Bolt facts - rounding chain, checkpoint (headers, signed scales, the dt-clamp census), tokens, template, tie order (spec 25a)"`.
 
 ### Task 5: the golden prompts (Mac)
 
 **Files:**
 - Create: `tools/oracle/bolt_prompts.py`, `tests/golden/prompts/bolt_agentic.json`, the ids (`tests/golden/prompts/bolt_{short,4k,32k,agentic}.ids`)
 
-- [ ] **Step 1:** `bolt_prompts.py <snapshot>`: `short` = `prose.txt` + `code.txt` encoded by Bolt's tokenizer without BOS (the template writes none); `4k` / `32k` as plan 24a's; `agentic` = an original multi-turn coding session written for this repo (system prompt, a user task about this repository, assistant turns with `reasoning_content` and Qwen3-Coder XML tool calls given as structured `tool_calls`, tool results holding two files of `src/runtime/`), rendered by the checkpoint's template with `add_generation_prompt=True`, `enable_thinking` true, to ~12k ids. Prints each length; refuses a `32k` shorter than 32768.
-- [ ] **Step 2: commit** the script, the JSON and the ids: `git commit -S -m "tests: Bolt golden prompts - short, 4k, 32k and an agentic session with Qwen3-Coder XML calls (spec 25a)"`.
+- [x] **Step 1:** `bolt_prompts.py <snapshot>`: `short` = `prose.txt` + `code.txt` encoded by Bolt's tokenizer without BOS (the template writes none); `4k` / `32k` as plan 24a's; `agentic` = an original multi-turn coding session written for this repo (system prompt, a user task about this repository, assistant turns with `reasoning_content` and Qwen3-Coder XML tool calls given as structured `tool_calls`, tool results holding two files of `src/runtime/`), rendered by the checkpoint's template with `add_generation_prompt=True`, `enable_thinking` true, to ~12k ids. Prints each length; refuses a `32k` shorter than 32768.
+- [x] **Step 2: commit** the script, the JSON and the ids: `git commit -S -m "tests: Bolt golden prompts - short, 4k, 32k and an agentic session with Qwen3-Coder XML calls (spec 25a)"`.
 
 ### Task 6: the A4 set (Mac)
 
@@ -137,8 +137,8 @@ def main()                             # run | ppl | facts | hfcheck | taps | ga
 - Modify: `tools/toolcall/make_set.py` (`--model bolt`), `tools/toolcall/oracle_generate.py` (`--model bolt` -> `bolt_ref`), `tools/toolcall/a4_ref.sh` (`bolt set|ref|status`), `tools/toolcall/test_make_set.py`, `tools/toolcall/test_score.py` (Bolt's cases)
 - Create: `tests/golden/toolcall-bolt/` (the 36 scenarios' `.ids` / `.json`)
 
-- [ ] **Step 1: the failing tests:** a scenario re-rendered by Bolt's template equals `apply_chat_template` byte for byte; `score.py`'s existing Qwen XML format scores Bolt's outputs (output opening inside reasoning, `</think>`, then content and `<tool_call>` blocks; a call inside reasoning is reasoning; a multi-line parameter value; a value containing `</parameter` text).
-- [ ] **Step 2: implement** (`make_set.py --model bolt --from tests/golden/toolcall --tok <snapshot>`; `oracle_generate.py --model bolt --weights int4|bf16`, 2048 new ids default - reasoning first; `a4_ref.sh bolt set|ref|status`). PASS. **Commit** `git commit -S -m "toolcall: the A4 set through Bolt's template, the bolt reference generator (spec 25a)"`.
+- [x] **Step 1: the failing tests:** a scenario re-rendered by Bolt's template equals `apply_chat_template` byte for byte; `score.py`'s existing Qwen XML format scores Bolt's outputs (output opening inside reasoning, `</think>`, then content and `<tool_call>` blocks; a call inside reasoning is reasoning; a multi-line parameter value; a value containing `</parameter` text).
+- [x] **Step 2: implement** (`make_set.py --model bolt --from tests/golden/toolcall --tok <snapshot>`; `oracle_generate.py --model bolt --weights int4|bf16`, 2048 new ids default - reasoning first; `a4_ref.sh bolt set|ref|status`). PASS. **Commit** `git commit -S -m "toolcall: the A4 set through Bolt's template, the bolt reference generator (spec 25a)"`.
 
 ### Task 7: the box CPU runner and the real-weight runs
 
@@ -149,18 +149,18 @@ def main()                             # run | ppl | facts | hfcheck | taps | ga
 **Interfaces:**
 - Produces: `bolt_oracle.sh <data tree> tests|ppl|hfcheck|golden|golden-bf16|export <dir>|a4|a4-bf16|taps|gateq` (lfm2moe_oracle.sh's shape: resumable per prompt into `*.partial/`, `MemAvailable` floor `BOLT_REF_MIN_GB` - 8 tiny, 48 g128, 96 bf16, ESTIMATED; exit 77 when short or the snapshot is absent; `DRY_RUN=1` prints every command, the floor and an ESTIMATED time per prompt). `golden` -> `oracle-out-bolt/` on SergiioB's checkpoint dequantised (the engine-format reference every B3 gate reads); `golden-bf16` -> `oracle-out-bolt-bf16/`; `export <dir>` -> `oracle-out-bolt-<name>/` (25q's exports, 25b's synthetics); `taps` -> `oracle-out-bolt-taps/` in dump_taps' format over [prompt + the g128 reference's greedy continuation] for the A4 scenarios (512 new ids), `short_code`, `short_prose` and the agentic session (spec 26a's input); `gateq` -> spec 25 B5's table (KL / top-1 on held-out rows, A4 agreement / parse failures, g128 vs BF16).
 
-- [ ] **Step 1: write the script and the `have` lines;** `DRY_RUN=1` prints the plan.
+- [x] **Step 1: write the script and the `have` lines;** `DRY_RUN=1` prints the plan.
 - [ ] **Step 2 (box CPU): B1's real-weight half** - `ppl` (prose / code / agentic; finite; code < 10 ESTIMATED ceiling, recorded per role as 24a found it necessary) on g128 and BF16; `hfcheck --layers 12` (R vs the port on real weights in fp32 mode where RAM allows, else bf16 with the listed differences: 2048 ids + 4 cached steps).
 - [ ] **Step 3 (box CPU): the golden sets, the A4 references, the taps, gate Q** - each log's gap summary (the 9th / 10th `sel` per layer: `B70_BOLT_TIE_TOL`'s evidence, Decision 11), the SSM-state magnitudes per layer, times and RSS. Gate Q is a recorded measurement (spec 25 Decision 3).
-- [ ] **Step 4: commit** `git commit -S -m "oracle: bolt_oracle.sh - resumable golden runs on g128 / BF16 / exports, perplexity, the A4 references, tap dumps, gate Q (spec 25a)"` (outputs are git-ignored data).
+- [x] **Step 4: commit** `git commit -S -m "oracle: bolt_oracle.sh - resumable golden runs on g128 / BF16 / exports, perplexity, the A4 references, tap dumps, gate Q (spec 25a)"` (outputs are git-ignored data).
 
 ### Task 8: docs, the box queue row
 
 **Files:**
 - Modify: spec 25 (a section "25a as built"), this plan's status line, `docs/superpowers/plans/box-validation-queue.md` (row 57), `tools/box_validate/stages.sh` (its `row 57` block)
 
-- [ ] **Step 1:** "25a as built": the ops module's departures from R, the dt-clamp census, the bf16 difference table, the tie order, the gap distributions, per-prompt times.
-- [ ] **Step 2: the queue row 57** and its stages (`python3 tools/box_validate/test_box_validate.py` passes; `tools/box_validate.sh --dry-run --only r57` prints them):
+- [x] **Step 1:** "25a as built": the ops module's departures from R, the dt-clamp census, the bf16 difference table, the tie order, the gap distributions, per-prompt times.
+- [x] **Step 2: the queue row 57** and its stages (`python3 tools/box_validate/test_box_validate.py` passes; `tools/box_validate.sh --dry-run --only r57` prints them):
 
 ```text
 row 57 "spec 25a - Nemotron 3.5 Bolt: the facts, the CPU reference (B1), golden sets, the A4 references, the tap dumps, gate Q (plan 25a)"
@@ -174,6 +174,6 @@ stage r57.taps       57 optin   cpu  bolt_g128,oracle_image       r57.golden "ta
 stage r57.gateq      57 optin   cpu  bolt_a4_ref,oracle_image     r57.a4_ref "gate Q: g128 vs BF16 (KL / top-1 / A4), recorded"
 rownote 57 "Download first: SergiioB's g128 (41.9 GB) and nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 (~150 GB): df -h ~ first; MemAvailable >= 48 / 96 GB."
 ```
-- [ ] **Step 3: commit** `git commit -S -m "docs: spec 25 (25a as built), box queue row 57 - the Bolt reference"`.
+- [x] **Step 3: commit** `git commit -S -m "docs: spec 25 (25a as built), box queue row 57 - the Bolt reference"`.
 
 **Gate for the plan:** Mac - Task 1's tiny check OK; every test of `test_bolt_ref.py` / `test_bolt_make_tiny.py` / the toolcall tests green with the 5.19.0 site; the facts sheet complete (every §2 point cited, the header tables, the dt-clamp census, the template facts, the tie order). Box CPU - perplexity sane, `hfcheck` within its stated mode, the golden sets / A4 references / tap dumps written, gate Q recorded. Hand back the facts sheet's tables, the gap summaries, the dt-clamp census and the bf16 difference table.
