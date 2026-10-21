@@ -1022,6 +1022,54 @@ refusal stays as it was (`tests/loader/quant_test.cc`, the Bolt block, is writte
 - One departure from a helper's name: `common::f32_to_f16` flushes f16 subnormals to zero (a test helper); the loader's
   exact converter uses `common::kv8::f32_to_f16_rne`, which does not - the tests use the latter.
 
+`loader::load_bolt` (`src/loader/bolt_{layout.h,repack.*,loader.*}`, a loader BESIDE the others; it reuses
+`resolve_snapshot`, `QuantConfig::parse`, `SafetensorsSet`, `assert_quant_invariants` / `check_quant_scan`,
+`LinearSrc::classify`, `DeviceWeight` and `quantise_int8_tiled`) reads **either** spelling into one device layout:
+
+- **One layout from two sources.** SergiioB's g128 GPTQ checkpoint (`g_idx` = `i // 128`, signed F16 scales, the restating
+  `+:` rule) goes through `classify`'s exact g128 -> g64 scale expansion; our g64 export (25q: no `g_idx`) is read as it is.
+  A linear's group is decided by its scale rows (a g64 and a g128 linear may even share a checkpoint), never by a label,
+  and the repack only ever sees g64 words and scales - so the same weights packed g64 with each g128 scale written to both
+  g64 rows give **byte-identical** device buffers (`bolt_repack_test`: both layouts, fused, the expert block;
+  `bolt_synth_host_pair_test`: every block of two real-width synthetics, N 8 - 20,400 sampled words equal the shards' too).
+- **Heterogeneous MoE.** E and I come from each block's own `block_configs` entry (`model::BoltDesc::experts / inter`),
+  never the top level's `num_experts` (512, a maximum) or `intermediate_size` (2688, used by no block). One MoE block's routed
+  experts are ONE allocation of E blocks, a block = the expert's up (K 1024, N I) then its down (K I, N 1024), both layout 1,
+  `I x 544` B each: expert `id` is at `id x block(I)` (up) and `+ up(I)` (down), from the layer's own I
+  (`loader/bolt_layout.h`); every size and offset is a multiple of 64 B. The router is bf16 tiles `{4096, E}` (E is a
+  multiple of 16 in every layer: no padding rows).
+- **Per-linear `{S, layout}`** (PROVISIONAL until 25c's P0): layout 1 for every routed expert and every N = 4096 linear
+  (`out_proj`, `o_proj`, `fc2`, `shared_down`), layout 0 for `in_proj` and the fused `q||k||v` (N 4608) and `fc1||shared_up`
+  (N 6400); S 1. `BoltDesc::linears(l)` is the one source; the byte count is the same at either layout.
+- **Kept tensors.** The block norms, conv taps (`[10240][1][4]`, tap 0 the OLDEST position) and bias, the gated-norm weight
+  widened to fp32 (exact); `D`, `dt_bias` verbatim and `A = -exp(A_log)` (fp32; `A_log` / `D` / `dt_bias` accepted F32 -
+  SergiioB's, bf16 values - or BF16 - NVIDIA's original -, each finite, `A_log <= 80`); `e_score_correction_bias` F32. The
+  exp is `common::exp_torch` (`src/common/exp_torch.h`, Sleef's expf u10 in plain C++: the same on every host).
+  **Measured** (tools: a dump of the C++ values compared in the oracle image, torch 2.14.1 CPU, MKL): over all 33,266 bf16
+  values in [-7, 9] (A_log's range is -6.81 .. 8.81) `exp_torch` differs from `torch.exp(x.float())` on 196 values (0.59 %),
+  never by more than 1 ulp; libm's `expf` differs on 192. No host function reproduces torch's MKL `vsExp` bitwise; `A`
+  feeds `exp(dt x A)` on the card, so a 1 ulp difference in a constant is far below the kernels' own tolerance.
+- **What is skipped is named.** The 849 vision / projector tensors of SergiioB's checkpoint (`vision_model.*`,
+  `vision_projector.*`, `mlp1.*`) are skipped by prefix and counted; every other tensor is consumed (unconsumed = 0, the
+  `.qzeros` / `.g_idx` beside a linear excepted: their invariants are `assert_quant_invariants`'s). The trunk is
+  `language_model.model.`; NVIDIA's own `language_model.backbone.` is accepted only when a checkpoint ships it
+  (`bolt_trunk_prefix`; both or neither is refused). `bolt_names_test` holds `bolt_expected_names(model::bolt())` to the
+  published index's 112,091 language names exactly (+ 849 vision) - the typed pattern and the typed (E, I) table are the
+  real ones.
+- **The untied head.** `language_model.lm_head.weight` is its own bf16 tensor: the int8 head (spec 9, Decision 18) is
+  quantised from it on the last device, or its own bf16 tiles are uploaded (`--lm-head bf16`: 1,073,741,824 B against the
+  int8 head's 537,395,200 B); the embedding's tiles stay on device 0 (no replica: unlike LFM2's tied head).
+- **The memory plan before the first allocation** (`runtime::bolt::plan`, `src/runtime/bolt/`): per device its blocks'
+  weights (the loader asserts its allocation equals `loader::bolt::device_weight_bytes`), KV for its attention blocks at
+  `max_len` (8,192 B a position over the 8), one SSM state (fp32, 4 MiB) per Mamba block it holds x (1 + verify slots), the
+  raw-xBC rings, caller-given decode / prefill scratch and - on the last device - spec 26's drafter and its embedding replica,
+  the 1.5 GB reserve. The split is `runtime::pp_balance` over the blocks' weights alone: **48** (device 0 holds blocks 0-47 -
+  22 Mamba, 5 attention - and the embedding: 19,928,067,776 B; device 1 blocks 48-87, norm_f and the int8 head: 20,540,610,880
+  B). `--max-len auto` is the largest multiple of 256 that fits every device and is at most `max_position_embeddings`
+  (262144): on two 32 GiB cards with the scratch, the drafter, its replica and 7 verify slots all reserved it is 262144
+  (device 1: 27.23 GB of 34.36 GB); one 32 GiB card is refused naming the bytes and Decision 4. Every figure is printed by
+  `bolt_repack_test` / `bolt_plan_test`; none is typed.
+
 ## Deliberately not loaded
 
 - **`model.visual.*`** (333 tensors, 0.921 GB) - this checkpoint is a
