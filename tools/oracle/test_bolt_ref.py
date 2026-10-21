@@ -883,6 +883,51 @@ def test_layer_major():
     print("  layer_major (2 items, a prompt and a step) = sequential model calls, bitwise")
 
 
+def test_gateq_tiny():
+    """bolt_gateq.py on the tiny models: kl of int4-g64 against its own dequantised twin is exactly 0 with top-1 1.0
+    (the same weights), against pattern12 (the un-quantised original it was packed from) > 0; the verdict reads the
+    A4 outputs with the qwen-think reader."""
+    import shutil
+    import tempfile
+    gq = _load("bolt_gateq")
+    d = tempfile.mkdtemp(prefix="bolt_gq_")
+    sdir, run = os.path.join(d, "set"), os.path.join(d, "run")
+    os.makedirs(sdir)
+    os.makedirs(run)
+    import hashlib
+    import json
+    man = []
+    for i, n in enumerate(("t1_a", "t2_b")):
+        raw = (" ".join(map(str, rand_ids(20 + 5 * i, 30 + i))) + "\n").encode()
+        open(os.path.join(sdir, f"{n}.ids"), "wb").write(raw)
+        man.append({"name": n, "ids": 20 + 5 * i, "sha256": hashlib.sha256(raw).hexdigest()})
+        open(os.path.join(run, f"{n}.bf16.ids"), "w").write(" ".join(map(str, rand_ids(6, 40 + i))) + "\n")
+    json.dump(man, open(os.path.join(sdir, "manifest.json"), "w"))
+    res = {}
+    for label, bf in (("twin", variant("int4-g64") + "-twin"), ("original", variant("pattern12"))):
+        for f in os.listdir(run):
+            if f.endswith(".rows.safetensors"):
+                os.remove(os.path.join(run, f))
+        out = os.path.join(d, f"{label}.json")
+        gq.main(["kl", run, variant("int4-g64"), "--set", sdir, "--out", out, "--bf16", bf])
+        res[label] = json.load(open(out))["a4"]
+    assert res["twin"]["kl_max"] == 0.0 and res["twin"]["top1"] == 1.0, res["twin"]
+    assert res["original"]["kl_mean"] > 0.0, res["original"]
+    a4 = os.path.join(d, "a4")
+    os.makedirs(a4)
+    call = "x</think>\n<tool_call>\n<function=read>\n<parameter=filePath>\n/w\n</parameter>\n</function>\n</tool_call>"
+    for n in ("t1_a", "t2_b"):
+        open(os.path.join(a4, f"{n}.bf16.txt"), "w").write(call)
+        open(os.path.join(a4, f"{n}.int4.txt"), "w").write(call if n == "t1_a" else "still thinking")
+    t = gq.a4_table(a4)
+    assert t == {"n": 2, "ref_fail": 0, "cand_fail": 0, "agree": 1, "missing": 0}, t
+    ok, lines = gq.verdict(a4, os.path.join(d, "twin.json"))
+    assert not ok and lines[-1].startswith("gate Q: OUTSIDE")
+    shutil.rmtree(d)
+    print(f"  gateq: int4-g64 vs its twin KL {res['twin']['kl_max']} top-1 {res['twin']['top1']}; vs pattern12 KL mean "
+          f"{res['original']['kl_mean']:.3g} top-1 {res['original']['top1']:.3f}; the verdict's A4 table {t}")
+
+
 def test_cli_run():
     import subprocess
     import tempfile
