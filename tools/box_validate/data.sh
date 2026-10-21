@@ -220,6 +220,13 @@ case "${1:-}" in
       bash -c 'test -s oracle-out-bolt-a4/set/manifest.json && test "$(ls oracle-out-bolt-a4/*.int4.txt 2>/dev/null | wc -l)" -eq 36 && test "$(ls oracle-out-bolt-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     have oracle_bolt_taps "oracle-out-bolt-taps/dumps/*.taps.safetensors (spec 25a: bolt_oracle.sh taps - prose / code / agentic, + a4/* after r57.a4_ref; spec 26a's input)" \
       bash -c 'ls oracle-out-bolt-taps/dumps/*.taps.safetensors'
+    # Spec 25b (queue row 59): the synthetic real-width checkpoints (bolt_synth.sh synth-ckpt: N 8 for the host tests, N 12
+    # for the card tests - each in SergiioB's g128 spelling, its exact g64 expansion and a native g64), and our g64 export
+    # (25q: not built when 25b was written; r59.load_rtn SKIPs 77 until it exists).
+    have bolt_synth "oracle-out-bolt-synth/n{8,12}-{g128,g64x,g64}/ + .ACCEPTED (spec 25b: r59.synth - make_synth.py)" \
+      bash -c 'for n in 8 12; do for f in g128 g64x g64; do test -s oracle-out-bolt-synth/n$n-$f/model.safetensors.index.json && test -f oracle-out-bolt-synth/n$n-$f.ACCEPTED || exit 1; done; done'
+    have bolt_rtn "Nemotron 3.5 Bolt's own int4 g64 export (spec 25q's; not built yet)" \
+      bash -c 'false'
     have tok_python "a python with tokenizers (${TOK_PYTHON:-?})" "${TOK_PYTHON:-/nonexistent}" -c 'import tokenizers'
     # shellcheck disable=SC2016 # expanded by the inner bash
     have uvx "uvx (llama-benchy)" bash -c 'command -v uvx || test -x "$HOME/.local/bin/uvx"'
