@@ -214,6 +214,8 @@ case "${1:-}" in
       bash -c 'for p in bolt_short bolt_4k bolt_agentic bolt_32k; do test -s oracle-out-bolt/$p.ids && test -s oracle-out-bolt/$p.golden.safetensors || exit 1; done'
     have oracle_bolt_bf16 "oracle-out-bolt-bf16/bolt_{short,agentic}.{ids,golden.safetensors} (spec 25a: bolt_oracle.sh golden-bf16)" \
       bash -c 'for p in bolt_short bolt_agentic; do test -s oracle-out-bolt-bf16/$p.ids && test -s oracle-out-bolt-bf16/$p.golden.safetensors || exit 1; done'
+    have bolt_a4_int4 "oracle-out-bolt-a4/ with Bolt's set and 36 <name>.int4.txt (spec 25a: bolt_oracle.sh a4 - the g128 reference alone, no BF16 needed)" \
+      bash -c 'test -s oracle-out-bolt-a4/set/manifest.json && test "$(ls oracle-out-bolt-a4/*.int4.txt 2>/dev/null | wc -l)" -eq 36'
     have bolt_a4_ref "oracle-out-bolt-a4/ with Bolt's set, 36 <name>.int4.txt and 36 <name>.bf16.txt (spec 25a: bolt_oracle.sh a4 + a4-bf16)" \
       bash -c 'test -s oracle-out-bolt-a4/set/manifest.json && test "$(ls oracle-out-bolt-a4/*.int4.txt 2>/dev/null | wc -l)" -eq 36 && test "$(ls oracle-out-bolt-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     have oracle_bolt_taps "oracle-out-bolt-taps/dumps/*.taps.safetensors (spec 25a: bolt_oracle.sh taps - prose / code / agentic, + a4/* after r57.a4_ref; spec 26a's input)" \
