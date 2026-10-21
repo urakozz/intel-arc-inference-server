@@ -1,7 +1,8 @@
 # Spec 25 - NVIDIA Nemotron 3.5 Bolt 74B-A9B (text only) in the engine
 
 **Status:** design, 2026-10-20, approved by the operator 2026-10-20. Decisions are marked **Decision N** with their
-cost if wrong and collected in §12. Nothing is built.
+cost if wrong and collected in §12. 25a is built on the Mac (§13: the reference, B1 on tiny models; no real
+weight read yet); 25q-25e are not built.
 **Plans (2026-10-20):** `docs/superpowers/plans/2026-10-20-spec25{a,q,b,c,d,e}-*.md` - 25a facts and the CPU
 reference, 25q our AutoRound g64 re-quantisation (the recipe; the operator runs it), 25b descriptor / loader /
 memory plan, 25c decode (the launch-count and state-bandwidth P0 first), 25d prefill, 25e serving.
@@ -634,3 +635,81 @@ ruled separately the same day).
     g64 export may be published and model files (config, template, tokenizer) may be vendored; the empty `LICENSE` file is
     expected to be fixed upstream (the operator: "it's published open weights, of course we can use it"). 25q's card links
     the licence and states the derivation.
+
+## 13. 25a as built (2026-10-21; the Mac only - no real weight has been read)
+
+Branch `spec25a-bolt-reference`; box queue row 57. Built: `tools/oracle/bolt_remote.py` (R imported from the pinned
+snapshot under a private package, the four text files sha256-checked; the `mamba_ssm` / `causal_conv1d` stub; the
+mixer's dispatch patched per instance, `kernel` or R's `torch`), `bolt_mamba_ops.py` (the five training-kernel
+functions in plain torch), `bolt_ref.py` (the streamed reference, the restated ops 25b / 25c import, `run` / `ppl` /
+`hfcheck` / `taps` / `facts` / `gateq`, `fallback_forward` - R's fallback with its rounding points as switches),
+`bolt_make_tiny.py` + `bolt_tiny_check.py`, `bolt_facts.py` (`docs/probe-bolt-2026-10-21.md`), `bolt_prompts.py`,
+`bolt_gateq.py`, the A4 set `tests/golden/toolcall-bolt`, `score.py --format qwen-think`, `oracle_generate.py --model
+bolt`, `a4_ref.sh bolt`, `tools/box_validate/bolt_oracle.sh`, the template fixtures `tests/server/bolt_template_cases.json`.
+Measured on the Mac (`agnes-ref-img`, torch 2.14.1 CPU, transformers 5.19.0): `test_bolt_ref.py` 26 tests,
+`test_bolt_make_tiny.py` 12, the toolcall tests, `bolt_tiny_check.py` OK; the probe sheet's tables. Not run (the
+weights were not downloaded): every real-weight stage of row 57 - perplexity, `hfcheck` on real weights, the golden
+sets, the A4 references, the tap dumps, gate Q; so the 9th / 10th `sel` gap distributions (B70_BOLT_TIE_TOL,
+Decision 11), the real SSM-state magnitudes and the per-prompt times are NOT measured yet (the DRY_RUN times are
+ESTIMATED).
+
+**The ops' orders (the twin's, 25c generates its host twin from them; each tested one scalar op at a time):** the
+conv seeds the fp32 accumulator with the bias, then adds the taps oldest first (§2.2 wrote `+ b` after the chain;
+causal_conv1d's and vLLM's kernels seed with the bias - bf16 x bf16 products are exact, so only the add order
+matters), `silu(v) = v / (1 + exp(-v))`, one rounding; the SSM update is mamba_ssm's - `dB[n] = B[n] dt`, then
+`S = S dA + dB x` (§2.2 wrote `(dt x) B`), products and adds separately rounded (no fma: the kernels' house rule is
+FP_CONTRACT OFF); `y = tree_n(S C) + x D` with the halving pairwise tree over the 128 state entries (`v[:n/2] +
+v[n/2:]` repeated); the gate is `z sigmoid(z)` (layernorm_gated's form), the group mean the same halving tree / 1024,
+`rstd = 1 / sqrt(ms + eps)`, `(v rstd) w`, one rounding; the chunk scan is the SSD form over 128-row sub-chunks from
+the call's first row, the cumsum sequential, exp(segsum) masked before the exp. Transcendentals (exp, log1p) are
+torch's; the engine's differ by ulps, so B2 is bitwise only where the arithmetic is the same (as for the GDN).
+
+**Rulings (each with its cost if wrong):**
+1. *R's kernel path has no prompt continuation* (its cached branch reads one row, R:397-439): a chunk after a cached
+   prefix runs `bolt_remote.continue_forward` - the same five functions, the conv seeded from the cache's raw
+   columns, the scan from its state. *Cost if wrong:* none to the engine (its prefill is 25d's); the golden sets past
+   4096 ids (chunks of 2048) would carry our continuation's arithmetic, which `test_chunked_equals_whole` bounds.
+2. *The streamed MoE skips R's dummy forward of unrouted experts* (R:941-945 adds exactly +0; tested against R's own
+   `moe`). *Cost if wrong:* none measurable (bitwise on the tiny model); without it every decode step would run up to
+   487 extra expert GEMVs.
+3. *The router's `e_score_correction_bias` stays fp32 in a bf16 model* (5.19.0's `from_pretrained` keeps it fp32 too).
+   *Cost if wrong:* none (the checkpoint's F32 values, the remote code's own intent R:1054-1063).
+4. *A4 renders Bolt with `enable_thinking` true and `medium_effort` true*, key-sorted (b70-serve's order): the
+   agentic mode, the effort that keeps the reasoning inside 2048 new ids (K2's / Muse's precedent). *Cost if wrong:*
+   A4 measures the medium-effort mode; a default-effort set is one `make_set.py --kwargs '{}'` away.
+5. *EOS {2, 11} for both checkpoints* in the references (Decision 12; SergiioB's generation config lists 11 only).
+   *Cost if wrong:* a reply ending in `</s>` would continue past it in a g128-only run - not seen on the tiny model.
+6. *A4 outputs are tagged by form* (`<name>.int4.*` / `<name>.bf16.*`) in one directory; gate Q compares them.
+   *Cost if wrong:* none (names only).
+7. *The tiny variants use vocab 131072* (the real tokenizer's ids are valid; plan Task 1's in-code config keeps 512),
+   and `int4-g128-gptq` sits on a sibling config with every K a multiple of 128 (latent 128, I 128 / 256 / 384).
+   *Cost if wrong:* none (test fixtures).
+8. *Tap dumps start at `n_prompt - 1024`* (LiLiCorr's window, spec 26). *Cost if wrong:* 26a re-dumps with `--window`.
+9. *`bolt_mamba_ops.py` landed in Task 1's commit* (the kernel-path check needs it); Task 2 added its tests.
+
+**Facts that differ from this spec (corrections; the body above is left as written):**
+- **R's torch fallback is wrong past one SSD chunk:** R:692-697 sums the state passing over the TARGET chunk (dim 2);
+  transformers' native class sums over the source (N:328-330). On a 300-row prefill R's state is 0.23 relative off
+  the recurrence, 9.7e-7 with the index fixed - so "what transformers runs on a CPU" is not just differently rounded
+  (§2.0); Decision 1's reference is unaffected.
+- **torch's CPU fp32 GEMM is row-count dependent, its bf16 GEMM is not** (§2.4's "torch's CPU sgemm order"): R's
+  router logits change with the rows a forward carries (every row at M = 1 / 2 / 9 / 64 / 128 of a 512-row batch at
+  [496][4096]); route SETS did not flip on the tiny model, `w` did by an ulp - B3 compares `w` with an ulp tolerance.
+- **The router's sum of the nine s has no fixed order we could name** (torch.sum matches sequential 60 %, the best
+  order-preserving tree 60 %, the best sampled permutation 90 %): §6.1's "Σ ... an ulp-level choice 25a pins against
+  torch's sum" cannot pin it; 25c's twin keeps a fixed order of its own.
+- **`dynamic` has 44 `-:` exclusions** (§1.3: 43) and the one restating `+:` rule.
+- **`e_score_correction_bias` reaches 48.0** (layer 1 is 4.47 .. 4.55, others sit near 10-48, each in a narrow band);
+  the 9th / 10th largest bias of layer 12 are equal.
+- **`A_log` spans -6.81 .. 8.81 and `dt_bias` -11.69 .. 8.50 over all layers** (§1.3 quoted layer 0's); the dt-clamp
+  census is **212 of 5,120 heads** (layer 0: 25 of 128 as §2.0 says; layers 2 / 57: 23 / 25).
+- **The BF16 original stores `A_log` / `D` / `dt_bias` as BF16** (SergiioB F32 holding bf16 values) and names its trunk
+  `language_model.backbone.*` (measured from its index); its headers give 74,042,720,768 parameters - §3's derived
+  total, now measured. Active per token 9,052,884,992 with `norm_f` (§3: 9,052,880,896 without).
+- **The template renders Python's spelling for non-JSON scalars:** a history argument `true` -> `True`, `null` ->
+  `None`, a tool schema's `additionalProperties: false` -> `<additionalProperties>False</additionalProperties>` (§7:
+  25e must reproduce it).
+- **torch's `topk(sorted=False)` keeps either id of an exact tie** (28 / 22 of 50 at 240, 19 / 31 at 496).
+- **The bf16 difference table** (`docs/probe-bolt-2026-10-21.md` §6.2): beyond §2.0's list, softplus itself rounds in
+  bf16, and the fallback's prefill keeps y fp32 into the gated norm (the kernel path rounds y once); with every point
+  switched to the kernel path's semantics the fallback equals the port (fp32 cache: 0 difference on the outputs).
