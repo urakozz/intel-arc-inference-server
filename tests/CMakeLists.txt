@@ -4737,4 +4737,28 @@ target_include_directories(bolt_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMA
 target_link_libraries(bolt_names_test PRIVATE b70_bolt_loader)
 add_test(NAME bolt_names_test COMMAND bolt_names_test ${B70_BOLT_SNAPSHOT}/model.safetensors.index.json)
 set_tests_properties(bolt_names_test PROPERTIES LABELS bolt SKIP_RETURN_CODE 77)
+# Task 5: the loader's device half and the memory plan. The plan is host arithmetic (the two-card split, --max-len auto, the
+# drafter's reserve); the card tests load the synthetic checkpoints in both spellings (n12 = 12 blocks: one card, the bf16 head,
+# and the two-card split 6 | 6) and, SKIP 77 until the checkpoint is on the box, SergiioB's real g128 export on two cards
+# (split 48) and our g64 export (25q) - queue row 59.
+add_executable(bolt_plan_test runtime/bolt_plan_test.cc)
+target_include_directories(bolt_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(bolt_plan_test PRIVATE b70_bolt_plan)
+add_test(NAME bolt_plan_test COMMAND bolt_plan_test)
+set_tests_properties(bolt_plan_test PROPERTIES LABELS bolt)
+set(B70_BOLT_RTN_SNAPSHOT "urakozz/Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ" CACHE STRING
+  "our g64 Bolt export (spec 25q, not built when 25b was written)")
+add_executable(bolt_load_checkpoint_test loader/bolt_load_checkpoint_test.cc)
+target_include_directories(bolt_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(bolt_load_checkpoint_test PRIVATE b70_bolt_loader b70_l0)
+add_test(NAME bolt_load_synth_g128_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SYNTH_DIR}/n12-g128 int8)
+add_test(NAME bolt_load_synth_g64x_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SYNTH_DIR}/n12-g64x int8)
+add_test(NAME bolt_load_synth_bf16_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SYNTH_DIR}/n12-g128 bf16)
+add_test(NAME bolt_load_synth_pp2_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SYNTH_DIR}/n12-g128 int8 0 6)
+add_test(NAME bolt_load_synth_pp2_g64x_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SYNTH_DIR}/n12-g64x bf16 0 6)
+add_test(NAME bolt_load_real_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SNAPSHOT} int8 0 48 262144)
+add_test(NAME bolt_load_rtn_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_RTN_SNAPSHOT} int8 0 48 262144)
+set_tests_properties(bolt_load_synth_g128_test bolt_load_synth_g64x_test bolt_load_synth_bf16_test bolt_load_synth_pp2_test
+  bolt_load_synth_pp2_g64x_test bolt_load_real_test bolt_load_rtn_test PROPERTIES
+  LABELS "checkpoint;bolt" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 # ==== Spec 25b: Nemotron 3.5 Bolt descriptor and loader (label bolt) ==== (end) ====
