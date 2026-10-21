@@ -42,13 +42,20 @@ struct QuantConfig {
   bool desc_act_declared = false;
   std::string quant_method, packing_format;
   size_t dynamic_rule_count = 0;   // GPTQ `dynamic`: "-:" exclusion regexes
+  // GPTQ `dynamic` "+:" rules that RESTATE the top level (spec 25b / spec 25 §5.2: SergiioB's Bolt export carries
+  // `"+:.*mixer\\.out_proj$": {bits 4, group_size 128, sym true}` beside a top level of exactly that): a rule with
+  // exactly the three keys bits / group_size / sym, each equal to the top level's, changes nothing and is counted
+  // here. Every other "+:" rule is still a throw.
+  size_t dynamic_restating = 0;
   // auto-round `extra_config`: one object per module, `bits: 16` meaning "left
   // in fp", `bits: 4` meaning "quantised, and here are its parameters".
   size_t extra_excluded = 0, extra_quantised = 0;
   // Takes the whole config.json value and reads its quantization_config.
   // Throws unless bits==4, group_size is 64 or 128, sym, and desc_act is false
-  // or absent; throws on any "+:" dynamic rule (the known-broken checkpoint
-  // pattern, BENCHMARKS.md); throws on an `extra_config` module that would be
+  // or absent; throws on any "+:" dynamic rule that is not an exact restatement
+  // of the top level (the known-broken checkpoint pattern, BENCHMARKS.md: a
+  // "+:" rule that changes bits / group_size / sym, carries any other key, omits
+  // one of the three or is empty); throws on an `extra_config` module that would be
   // quantised at anything but g64 / g128 sym int4, and on an unknown
   // `quant_method` or `packing_format`.
   //
@@ -146,6 +153,9 @@ struct QuantScan {
   size_t ct_linears = 0, ct_g_idx_tensors = 0, gptq_linears = 0;
   uint32_t ct_group_mask = 0;
   bool ct_bf16_scales = false;
+  // GPTQ `.scales` stored BF16 (spec 25 §5.2 item 3; no checkpoint we have ships them): every value proved
+  // exactly representable in f16, like the compressed-tensors ones.
+  bool gptq_bf16_scales = false;
 };
 
 // Scans every .qzeros word (must be 0x77777777 - GPTQ v1 stores zero-1, i.e.
