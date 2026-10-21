@@ -41,6 +41,12 @@ sys.exit(1 if missing else 0)
 EOF
 }
 
+# bolt_snap <override> <cache dir name> <pinned revision>: the snapshot directory a Bolt key checks - with SNAP_BOLT /
+# SNAP_BOLT_BF16 set (bolt_oracle.sh's spelling: an HF cache directory name) its first snapshot, else the pinned one.
+bolt_snap() {
+  if [ -n "$1" ]; then ls -d "$hf/hub/$1/snapshots/"*/ 2>/dev/null | head -1; else printf '%s\n' "$hf/hub/$2/snapshots/$3"; fi
+}
+
 have() {   # have KEY WHAT CMD...
   local key="$1" what="$2"; shift 2
   if "$@" > /dev/null 2>&1; then echo "HAVE_$key=1  # $what"; else echo "HAVE_$key=0  # missing: $what"; fi
@@ -200,10 +206,10 @@ case "${1:-}" in
     # a revision-pinned download writes no refs/main, so the keys name the snapshot directories themselves.
     have bolt_small "Bolt's pinned small files (hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997 --exclude '*.safetensors')" \
       bash -c 'ls "${HF_HOME:-$HOME/.cache/huggingface}"/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997/modeling_nemotron_h.py'
-    have bolt_g128 "SergiioB's Bolt int4 g128 ${SNAP_BOLT:-SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym} @ b9f381d2 (41.9 GB; df -h ~ first)" \
-      complete "${SNAP_BOLT:-$hf/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997}"
-    have bolt_bf16 "NVIDIA's Bolt BF16 original ${SNAP_BOLT_BF16:-nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16} @ 56702103 (149.8 GB; gate Q's reference)" \
-      complete "${SNAP_BOLT_BF16:-$hf/hub/models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16/snapshots/567021037ff88364143e24ea05e6abd0f72086ff}"
+    have bolt_g128 "SergiioB's Bolt int4 g128 ${SNAP_BOLT:-models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym} @ b9f381d2 (41.9 GB; df -h ~ first)" \
+      complete "$(bolt_snap "${SNAP_BOLT:-}" models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym b9f381d20cbd4cede9f729c2647d2542c4a35997)"
+    have bolt_bf16 "NVIDIA's Bolt BF16 original ${SNAP_BOLT_BF16:-models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16} @ 56702103 (149.8 GB; gate Q's reference)" \
+      complete "$(bolt_snap "${SNAP_BOLT_BF16:-}" models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 567021037ff88364143e24ea05e6abd0f72086ff)"
     have oracle_bolt "oracle-out-bolt/bolt_{short,4k,agentic,32k}.{ids,golden.safetensors} (spec 25a: bolt_oracle.sh golden - the g128 form, the engine-format reference)" \
       bash -c 'for p in bolt_short bolt_4k bolt_agentic bolt_32k; do test -s oracle-out-bolt/$p.ids && test -s oracle-out-bolt/$p.golden.safetensors || exit 1; done'
     have oracle_bolt_bf16 "oracle-out-bolt-bf16/bolt_{short,agentic}.{ids,golden.safetensors} (spec 25a: bolt_oracle.sh golden-bf16)" \
