@@ -60,6 +60,7 @@ mac=0
 [ "$(uname -s)" = Darwin ] && mac=1
 dry="${DRY_RUN:-0}"
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
+export HF_CACHE="${HF_CACHE:-$hf}"    # run_in_container.sh mounts HF_CACHE at /hf: the cache this script reads
 gen="${BOLT_GEN:-32}" tgen="${BOLT_TAPS_GEN:-512}"
 [[ "$gen" =~ ^[0-9]+$ && "$tgen" =~ ^[0-9]+$ ]] || { echo "bolt_oracle: BOLT_GEN / BOLT_TAPS_GEN" >&2; exit 2; }
 keep="${BOLT_KEEP:-}"
