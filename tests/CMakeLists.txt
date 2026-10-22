@@ -4867,6 +4867,12 @@ if(B70_BOLT)
   list(APPEND _bolt_tests bolt_decode_synth_eager_test bolt_decode_synth_bf16head_test bolt_decode_synth_b16state_test
     bolt_decode_synth_pp_test bolt_golden_synth_short_bf16head_test bolt_golden_synth_short_eager_test
     bolt_golden_synth_short_pp2_test)
+  # Task 5: each fused arm against the as-built list, bitwise (Review Focus 5), on the synthetic and the real checkpoint
+  foreach(arm router route conv all)
+    add_test(NAME bolt_decode_synth_fuse_${arm}_test COMMAND bolt_decode_test ${_bs} ${_bolt_ids} --fuse ${arm})
+    add_test(NAME bolt_decode_real_fuse_${arm}_test COMMAND bolt_decode_test ${B70_BOLT_SNAPSHOT} ${_bolt_ids} --fuse ${arm})
+    list(APPEND _bolt_tests bolt_decode_synth_fuse_${arm}_test bolt_decode_real_fuse_${arm}_test)
+  endforeach()
   set_tests_properties(${_bolt_tests} PROPERTIES LABELS "checkpoint;golden;bolt" SKIP_RETURN_CODE 77 TIMEOUT 7200)
 endif()
 # b70-decode's model_type dispatch and Bolt's refusals, before the device: tests/model/bolt/ holds the published config.json
