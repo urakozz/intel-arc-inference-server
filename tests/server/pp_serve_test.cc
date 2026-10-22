@@ -797,17 +797,22 @@ void case_server() {
   // Sampled, seeded: reproducible on a fresh server, every id a word - plain and with MTP.
   const json sampled = {{"temperature", 0.8}, {"top_k", 8}, {"seed", 1234}};
   for (uint32_t mtp_k : {0u, 2u}) {
-    Ids a, b, words;
+    Ids a, b, again, words;
     {
       ServeFixture g(/*cache=*/false, mtp_k, false);
       a = g.chat(sampled).at("choices").at(0).at("token_ids").get<Ids>();
       words = g.eng.words;
+      // The same server again, an unseeded sampled request between: the seed holds per request, not per
+      // process (the box's r12.d2 found the second identical seeded request differing, 2026-10-22).
+      g.chat({{"temperature", 0.8}, {"top_k", 8}});
+      again = g.chat(sampled).at("choices").at(0).at("token_ids").get<Ids>();
     }
     {
       ServeFixture g(/*cache=*/false, mtp_k, false);
       b = g.chat(sampled).at("choices").at(0).at("token_ids").get<Ids>();
     }
     CHECK(a == b);
+    CHECK(a == again);
     CHECK(!a.empty());
     for (uint32_t id : a) CHECK(std::find(words.begin(), words.end(), id) != words.end() || id == 248046);
     std::printf("server --pp 2%s: a seeded sampled request reproducible (%zu ids), every id a word\n",

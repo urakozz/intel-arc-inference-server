@@ -109,6 +109,7 @@ struct PipelineEngineAdapterT : server::EngineIface {
 
   // EngineAdapter's measurement lines: the previous request's, when the next one starts.
   void prefill(const std::vector<uint32_t>& ids) override {
+    rng_seeded = false;   // a new request: its first sampled step reseeds (EngineAdapter's rule)
     if (gen_tokens_ > 0) {
       const double ms =
           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gen_start_).count();
@@ -334,12 +335,13 @@ struct PipelineEngineAdapterT : server::EngineIface {
   void load_kv(uint32_t b, uint32_t e, const void* host) override { eng.load_kv(b, e, host); }
   void set_block_hook(BlockHook hook) override { eng.set_block_hook(std::move(hook)); }
   void ingest(const std::vector<uint32_t>& ids) override {
+    rng_seeded = false;
     flush_commit();
     eng.ingest(ids);
   }
 
   // The step's logits row (device 1's), filtered and drawn as EngineAdapter's sample(); the
-  // id replaces the argmax as the pending id on both devices. The RNG seeds itself once.
+  // id replaces the argmax as the pending id on both devices. The RNG seeds itself once per request.
   void sample_into_pending(const server::Sampling& sampling) {
     seed_rng(sampling);
     float* row = rows_ + size_t(Engine::kMaxDraft) * V_;

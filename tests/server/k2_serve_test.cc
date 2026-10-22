@@ -480,18 +480,24 @@ void case_server() {
 
   // Sampled, seeded: reproducible on a fresh server, and only ids the logits row allows.
   const json sampled = {{"temperature", 0.8}, {"top_k", 8}, {"seed", 1234}};
-  Ids a, b;
+  Ids a, b, again;
   {
     ServeFixture g(/*cache=*/false);
     a = g.chat(sampled).at("choices").at(0).at("token_ids").get<Ids>();
+    // The same server again, an unseeded sampled request between: the seed holds per request, not per
+    // process (the box's r12.d2 found the second identical seeded request differing, 2026-10-22).
+    g.chat({{"temperature", 0.8}, {"top_k", 8}});
+    again = g.chat(sampled).at("choices").at(0).at("token_ids").get<Ids>();
   }
   {
     ServeFixture g(/*cache=*/false);
     b = g.chat(sampled).at("choices").at(0).at("token_ids").get<Ids>();
   }
   CHECK(a == b);
+  CHECK(a == again);
   for (uint32_t id : a) CHECK(std::find(f.eng.words.begin(), f.eng.words.end(), id) != f.eng.words.end());
-  std::printf("server: a seeded sampled request reproducible (%zu ids), every id a vocabulary word\n", a.size());
+  std::printf("server: a seeded sampled request reproducible (%zu ids) on a fresh server and again on the same one, "
+              "every id a vocabulary word\n", a.size());
 }
 
 }  // namespace
