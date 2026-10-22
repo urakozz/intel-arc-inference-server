@@ -5,8 +5,9 @@
 //
 //   1. nb_pf_seed / _conv / _dt / _cb (plain) / _ssd (fp32 and _B16) / _gnorm at (pos, C) = (0, 181), (2085, 300) and
 //      (37, 2048) - bitwise; Review Focus 4: both tilings (W16_R16, W8_R4) ten times each, finite and equal
-//   2. nb_pf_cb_L64_DPAS against the plain build: the worst error relative to Σ_n |C B| (bar 2^-20, PROPOSED) and the scan's y
-//      / state through it (y bf16 differences counted, the state's row-relative error printed)
+//   2. nb_pf_cb_L64_DPAS against the plain build: the worst error relative to Σ_n |C B| (bar 2^-16, PROPOSED: a 128-term fp32
+//      sum's worst case is 128 x 2^-24 = 2^-17 of Σ|terms|, two orders at most twice that) and the scan's y / state through
+//      it (y bf16 differences counted, the state's row-relative error printed)
 //   3. the grouped MoE at I 1536 / 2560: nb_pf_sort, nb_pf_gather, nb_pf_dequant_up / _dn and nb_pf_combine bitwise; the
 //      grouped GEMMs (nb_pf_moe_gemm up relu2 / down) BITWISE pf_gemm_T0 on the busiest expert's rows + the host epilogue,
 //      and against the twin's decode-order rows at cosine >= 0.9999 (PROPOSED); every tile of the table run twice, equal
@@ -262,10 +263,10 @@ void mamba(Dev& dv) {
       }
       if (mx > 0) srel = std::max(srel, dd / mx);
     }
-    CHECK(worst <= std::ldexp(1.0, -20));
+    CHECK(worst <= std::ldexp(1.0, -16));
     std::printf("1. the Mamba chain at (pos %u, C %u, %u sub-chunks): seed, conv, ring, dt, cum, C B^T, y, the state (fp32 "
                 "and _B16), gnorm bitwise the twin; W16_R16 and W8_R4 x10 equal and finite\n", k.pos, k.C, ns);
-    std::printf("2. nb_pf_cb by DPAS vs plain: worst %.3g of sum |C B| (bar 2^-20, PROPOSED); the scan through it: y %zu of %zu "
+    std::printf("2. nb_pf_cb by DPAS vs plain: worst %.3g of sum |C B| (bar 2^-16, PROPOSED); the scan through it: y %zu of %zu "
                 "bf16 values differ, the state row-relative %.3g\n", worst, ydiff, d.y.size(), srel);
   }
 }
@@ -305,7 +306,7 @@ void moe(Dev& dv) {
     std::vector<uint16_t> lat(size_t(C) * br::kLatent);
     for (size_t i = 0; i < lat.size(); ++i) lat[i] = rne(fval(false, 95, uint32_t(i), I));
     const bp::Sorted s = bp::sort(rt.data(), C, E);
-    const uint32_t T = bp::tmax(C, E), R = T * bp::kTm;
+    const uint32_t T = bp::tmax(C, E), R = T * bp::kTm + 256;   // + 256: the dense GEMM's padded rows stay inside
     const std::string v = kb::pf_moe_variant(I);
     l0::Mem drt = dv.up(rt), dl = dv.up(lat), db = dv.up(blocks), hdr = dv.zeros(size_t(bp::kHdrWords) * 4),
             tiles = dv.zeros(size_t(2) * T * 4), row_tok = dv.zeros(size_t(R) * 4),
