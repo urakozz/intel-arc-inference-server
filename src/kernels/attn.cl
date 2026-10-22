@@ -349,24 +349,44 @@ inline float qkv_sum(__global const float* restrict p, uint m, size_t col) {
 //            attn_gate[m][h][i] = f32(rne_bf16(gate column))
 //   kv-head: kv_k[pos+m][j][i]  = rne_bf16(roped)
 //            kv_v[pos+m][j][i]  = rne_bf16(v column)     (never normed or roped)
+//
+// BATCH_ROWS (spec 13 §9, plan 13a; undefined on every existing command line): a ninth argument, the row table
+// `rows` (runtime::BatchRowTable, words BROW_*), and row m's position and KV base come from it - RoPE at the row's
+// position, K / V at kv_base + position - instead of Control::pos + m. The chain is otherwise this one, token for
+// token, so a row equals the M = 1 kernel at that position over that slot's KV.
 // ---------------------------------------------------------------------------
+#ifdef BATCH_ROWS
+#if !defined(BROW_WORDS) || !defined(BROW_POS) || !defined(BROW_KVB)
+#error "attn_prep BATCH_ROWS: the row table's BROW_* words must be defined (src/kernels/CMakeLists.txt)"
+#endif
+#endif
 __attribute__((reqd_work_group_size(WG_PREP, 1, 1)))
 __kernel void attn_prep(__global const uint* restrict ctrl,
                         __global const float* restrict qkv_partials,
                         __global const float* restrict fa_small,
                         __global const float* restrict rope,
                         __global float* restrict attn_q, __global float* restrict attn_gate,
-                        __global ushort* restrict kv_k, __global ushort* restrict kv_v) {
+                        __global ushort* restrict kv_k, __global ushort* restrict kv_v
+#ifdef BATCH_ROWS
+                        , __global const uint* restrict rows
+#endif
+                        ) {
   const uint wg = get_group_id(0);
   const uint m = get_group_id(1);
   const uint i = get_local_id(0);
   __local float red[WG_PREP];   // the norm's sum of squares
   __local float nrm[HD];        // the normalised head, fp32 - RoPE needs dim i+-32
 
+#ifndef BATCH_ROWS
   const uint pos = ctrl[CTRL_POS];
+#endif
   uint n_act = ctrl[CTRL_NACT];
   if (n_act > M) n_act = M;     // the compiled variant is the ceiling
   if (m >= n_act) return;       // uniform across the work-group
+#ifdef BATCH_ROWS
+  const uint pm = rows[m * BROW_WORDS + BROW_POS];    // the row's position
+  const uint kvb = rows[m * BROW_WORDS + BROW_KVB];   // its slot's first KV position
+#endif
 
   const bool is_q = wg < Q_HEADS;
   const uint h = is_q ? wg : wg - Q_HEADS;                  // q-head, or kv-head j
@@ -392,7 +412,11 @@ __kernel void attn_prep(__global const uint* restrict ctrl,
   // One rounded product plus one `fma`, spelled identically in attn_ref.h so
   // the two land on the same bits. cos/sin come from the loader's table, which
   // computed the angles in double (docs/13-loader.md, "The RoPE table").
+#ifndef BATCH_ROWS
   __global const float* restrict cs = rope + (size_t)(pos + m) * 2 * ROT_HALF;
+#else
+  __global const float* restrict cs = rope + (size_t)pm * 2 * ROT_HALF;
+#endif
   float outv;
   if (i < ROT_HALF) {
     const float c = cs[i], s = cs[ROT_HALF + i];
@@ -412,7 +436,11 @@ __kernel void attn_prep(__global const uint* restrict ctrl,
     attn_gate[((size_t)m * Q_HEADS + h) * HD + i] =
         bf16f(rne_bf16(qkv_sum(qkv_partials, m, base + HD + i)));
   } else {
+#ifndef BATCH_ROWS
     const size_t slot = ((size_t)(pos + m) * KV_HEADS + h) * HD + i;
+#else
+    const size_t slot = ((size_t)(kvb + pm) * KV_HEADS + h) * HD + i;
+#endif
     kv_k[slot] = rne_bf16(outv);
     kv_v[slot] = rne_bf16(qkv_sum(qkv_partials, m, V_OFF + (size_t)h * HD + i));
   }
