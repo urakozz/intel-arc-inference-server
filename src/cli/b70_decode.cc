@@ -1027,8 +1027,8 @@ int run(int argc, char** argv) {
   // Spec 25c: Nemotron 3.5 Bolt (model_type nemotron_h_omni over llm_config.model_type nemotron_h_puzzle) runs
   // runtime::bolt::BoltEngine on two cards (the whole model's default, Decision 4) or one (a truncated / synthetic
   // checkpoint) - dispatched here, before the Qwen engine's pipeline and kv-cache rules (its own refusals,
-  // cli/bolt_decode.h: the prefill (spec 25d), --mtp (no MTP head), --spec (spec 26), int8 KV (Decision 17)). A path that
-  // does not resolve is not Bolt - the flows below report it.
+  // cli/bolt_decode.h: the prefill's backend and chunk (spec 25d: l0 only, chunk a multiple of 64 <= 2048), --mtp (no MTP
+  // head), --spec (spec 26), int8 KV (Decision 17)). A path that does not resolve is not Bolt - the flows below report it.
   if (cli::bolt::is_bolt(path)) {
     if (layers_auto) throw std::runtime_error("--layers auto is Qwen3.8-Flash-Next's (spec 21c); Nemotron 3.5 Bolt takes --layers N");
     cli::bolt::DecodeArgs ba;
@@ -1048,7 +1048,11 @@ int run(int argc, char** argv) {
     ba.pipe = pipe;
     ba.pp_given = pp_given;
     ba.layers = layers;
-    ba.prefill = prefill || have_prefill_len || have_pp_chunk || have_pp_backend;
+    ba.prefill = prefill;           // spec 25d: --ids through BoltEngine::prefill
+    ba.pp = have_prefill_len;       // --prefill-length N already set depth = N above
+    ba.pp_chunk = pp_chunk;
+    ba.pp_backend_given = have_pp_backend;
+    ba.pp_backend = pp_backend;
     ba.mtp = mtp_on || have_mtp;
     ba.spec = have_spec;
     ba.kv8 = kv_cache == runtime::KvCache::Int8;
