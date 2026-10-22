@@ -22,6 +22,7 @@ to it.
 | 6 | timed one-card rows, **box idle (RECORD)** | device 0, both idle | `tools/box_validate.sh --only r1.sweep,r1.speed,r2.cost,r2.auto_rows,r3,r6.cost,r8.cost,r8.rows,r11.speed,r16.cost` | 10 | 7-11 h |
 | 6b | DFlash verify cost at M = 5..8 and one block's draft cost (row 29, plan 19a Task 4) | device 0, both idle | `tools/box_validate.sh --only r29.cost` | 1 (opt-in) | 0.25-0.5 h (est.) |
 | 6c | llama-benchy comparison matrix: b70-serve and vLLM, one client and set of flags (row 41) | device 0, both idle | `tools/box_validate.sh --only r41.ours,r41.vllm,r41.vllm_mtp` | 3 (opt-in) | 2-3.5 h (est.) |
+| 6d | the batching probe (row 66, plan 13a): the row builds' check, the step table, the interleave chunk | device 0, both idle for the timed stages | `tools/box_validate.sh --only r66`, then `--only r66.cost,r66.chunk` | 3 + 2 (opt-in) | 0.5 h + 1-2 h (est.) |
 | 7 | pipeline decode, then prefill (rows 22, 23) | **both** | `tools/box_validate.sh --only r22,r23` | 22 | 4.5-7 h |
 | 8 | pipeline integration (row 27) | **both** | `tools/box_validate.sh --only r27` | 14 | 4.5-7 h |
 | 9 | Kolibri-1 on the synthetic checkpoints (rows 24, 26, 28) | **both** | `tools/box_validate.sh --only r24,r26,r28 --with r24.oracle_synth` | 31 | 4.5-7 h |
@@ -475,6 +476,27 @@ after another until spec 13b / 13c's batched decode - recorded as the baseline b
 Estimate 2-3.5 h (est.: 4 server arms x 3 matrices; vLLM's startup with graph capture ~5-15 min a
 launch, 6 launches; each A / B matrix 16 cells x 2 runs).
 Then (a Mac edit) the rows go into docs/BENCHMARKS.md "llama-benchy comparisons".
+
+### Session 6d - the batching probe (row 66, plan 13a), box idle
+
+Added 2026-10-23. Rows of DIFFERENT sequences in one decode step (spec 13 §9): the numbers 13b's three decisions wait
+on - the slots per model, the 8-row budget's allocation and the interleave chunk (docs/probe-batching-2026-10-23.md
+§7). The probe build is its own tree's second build dir, `build-batch-probe` (`-DB70_BATCH_PROBE=ON`, OFF in G0's
+build): the 80 row builds' first ocloc compile, ~10-20 min at -j44 (est.).
+
+```sh
+tools/box_validate.sh --only r66                                # k0, the build, the check (one card, ~20-40 min est.)
+# then, on an idle box (§1.7: both cards free of DRM holders, zero containers, the CPU lane stopped), device 0:
+tools/box_validate.sh --only r66.cost,r66.chunk
+```
+
+`r66.check` runs `probe_batch_step --no-time --no-chunks` five times (Qwen3.8 int8 / bf16 KV, Agnes int8 / bf16 with
+MTP at 2 slots, Agnes int8 `--mtp off` at 4): every arm's rows bitwise their slot's run alone, isolation, the production
+tie - a `check: FAIL` stops 13b (report the CHECK lines first). `r66.cost` times every arm against `1x1@4k` as
+interleaved pairs (median of 3) for Qwen3.8 at both KV forms and Agnes's two layouts; `r66.chunk` one prefill chunk of
+512 / 1024 / 2048 at 4k and 32k beside the 1-row steps. Each run prefills 32k + 3 x 4k (or 32k + 4k) first (~30-60 s,
+est.). Estimate for the timed pair: 1-2 h (est.: ~16 arms x (3 rounds x 2 x 32 replays + warm-up) at 35-100 ms a
+replay per configuration, four configurations, plus the chunk rounds). **Check:** the `IDLE before` / `after` grades.
 
 ### Session 7 - pipeline parallel decode, then prefill (rows 22, 23)
 
