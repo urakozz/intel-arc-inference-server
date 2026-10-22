@@ -5076,4 +5076,20 @@ if(B70_TOKENIZER_ENABLED)
   add_test(NAME bolt_tokenizer_test COMMAND bolt_tokenizer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer ${B70_BOLT_SNAPSHOT})
   set_tests_properties(template_bolt_test bolt_tokenizer_test PROPERTIES LABELS bolt SKIP_RETURN_CODE 77 TIMEOUT 300)
 endif()
+# Task 2 (host): Bolt's output stream - the ultra_v3 reasoning rules over the Qwen XML calls (Review Focus 2 and 3): the
+# hand-written expectations of tests/server/bolt_parse_cases.json (tools/tokenizer/dump_bolt.py parse), the scorer's first
+# calls, the streaming facts, the Qwen stream unchanged, a 2000-output fuzz (whole == bytes == random 1-7 byte pieces).
+add_executable(bolt_stream_test server/bolt_stream_test.cc)
+target_include_directories(bolt_stream_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(bolt_stream_test PRIVATE b70_server)
+add_test(NAME bolt_stream_test COMMAND bolt_stream_test ${CMAKE_SOURCE_DIR}/tests/server)
+set_tests_properties(bolt_stream_test PROPERTIES LABELS bolt TIMEOUT 600)
+# tools/toolcall/bolt_parse_dump: the server's reading of run files, for tools/toolcall/bolt_parser_check.py (row 62's A4 gate:
+# every reference output the scorer reads a call from, the server's parser reads the same call from); its selftest holds the
+# checker to the parse cases above.
+add_executable(bolt_parse_dump ${CMAKE_SOURCE_DIR}/tools/toolcall/bolt_parse_dump.cc)
+target_include_directories(bolt_parse_dump PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(bolt_parse_dump PRIVATE b70_server)
+# (its selftest - python3 tools/toolcall/bolt_parser_check.py --selftest bolt_parse_dump tests/server/bolt_parse_cases.json - is a
+# stage of row 62: host_only.cmake disables a test whose command is not an executable of the tree.)
 # ==== Spec 25e: Nemotron 3.5 Bolt served (label bolt) ==== (end) ====
