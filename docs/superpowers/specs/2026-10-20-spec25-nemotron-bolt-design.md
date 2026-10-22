@@ -1019,8 +1019,8 @@ refusals, `BoltEngineAdapterT`), `b70-serve <bolt>` (`serve_bolt` in `b70_serve.
 bf16_state}`, the tests `template_bolt_test`, `bolt_tokenizer_test`, `bolt_stream_test`, `bolt_request_test`,
 `bolt_serve_args_test`, `bolt_snapshot_test` (host) and `bolt_snapshot_gpu_test` (card), the A4 tooling
 (`tools/toolcall/{bolt_parse_dump.cc, bolt_parser_check.py, serve_a4_texts.py}`, `tools/prefix/agentic_loop.py --extra` and its
-divergence report) and row 62's stages. kernel_cmdlines **+0 / -0 / ~0**; no existing `.cl`, no existing server / template /
-tokenizer test edited. Nothing of the model is vendored but two `generation_config.json` files (`tests/model/bolt/`, Decision 20):
+divergence report) and row 62's stages. kernel_cmdlines **+0 / -0 / ~0**; no existing `.cl`; no existing server / template /
+tokenizer test changes behaviour (ruling 13 lists the one shared test edited, `golden_server_test.cc`, and the shared tool edits). Nothing of the model is vendored but two `generation_config.json` files (`tests/model/bolt/`, Decision 20):
 the fixtures are renders, ids and digests and the template and `tokenizer.json` are read from the pinned snapshot at run time.
 
 **Measured on the Mac** (every number printed by the test named):
@@ -1072,7 +1072,17 @@ the fixtures are renders, ids and digests and the template and `tokenizer.json` 
    field a file leaves out is not used for Bolt. The rule (`cli::bolt::resolve_generation`): `--generation-config FILE` is the operator's
    word; else the snapshot's file when it has sampling keys; else NVIDIA's published T 1.0 / top-p 0.95 / EOS [2, 11] (SergiioB's file
    adds its EOS 11 to that set). PROVISIONAL until the box shows a difference. *Cost:* top-k 50 vs none moves the sampled tail by an
-   amount top-p 0.95 almost always makes invisible.
+   amount top-p 0.95 almost always makes invisible. The explicit file OVERLAYS the published values (a file with only
+   `{"temperature": 0.6}` keeps sampling on, top-p 0.95, EOS [2, 11]; review I2). With no top-k the shared `filter_probs`
+   partial_sorts all 131072 rows a sampled id - MEASURED on the Mac 18.5 ms a row (k 50: 0.31 ms) against a ~16.5 ms decode step -,
+   so Bolt's adapter uses `cli::bolt::filter_probs_top_p` (the same filter, the head sorted in growing prefixes, the normaliser one
+   pass): MEASURED 1.30 ms on a peaked row (12 peaks over N(0, 2); filter_probs 18.86 ms there), 9.60 ms on a flat N(0, 3) row
+   (its worst case: every exp counts). `bolt_sampling_test`: same ids in the same order and kept count on distinct rows, tied rows
+   equal in ranks and values (ascending id among equal logits), the kept count differing only where the cumulative mass is within
+   1e-9 of top_p (45 such cuts), probabilities within 1e-9 relative (the normaliser is summed in id order and rows 40 nats under
+   the top are not added: < 6e-13 of the sum), top-k > 0 and a softcap delegated bitwise (3,136 comparisons), 400 of 400 seeded
+   draws equal. The shared `filter_probs` is NOT changed (a bitwise-identical fast path is impossible: its normaliser is summed in
+   sorted order).
 7. *The template kwargs `medium_effort`, `truncate_history_thinking`, `force_nonempty_content` (and `enable_thinking`) must be booleans*
    (a 400 naming it); the template would read any truthy value. *Cost:* a client sending `"true"` gets an error instead of a silent reading.
 8. *`--chat-template FILE` is accepted for Bolt* (its sha256 is printed and compared with Bolt's `6521afc7` in the startup line); the plan
@@ -1087,6 +1097,14 @@ the fixtures are renders, ids and digests and the template and `tokenizer.json` 
     (`serve_a4_texts.py`), so it also checks that every scenario's prompt ids as the server rendered them equal the reference's.
 12. *The agentic loop gained `--extra JSON`* (Bolt's `chat_template_kwargs` arms) and a divergence line per missed turn (Review Focus 5's
     "first token where each miss diverges"); `agentic_run.sh` passes `EXTRA`.
+13. *Shared test / tool edits* (the plan said none): `golden_server_test.cc` gained `B70_SERVE_DECODE_AFTER=1` (chat mode: collect every
+    response, stop `b70-serve`, THEN run `b70-decode` on each saved prompt - Bolt's 41.9 GB on two cards cannot be resident twice; review C1)
+    and `B70_SERVE_WAIT_S` (seconds, default 120, 0 or not a number is the default); `serve_benchy.sh` gained `WAIT`; `agentic_loop.py` /
+    `agentic_run.sh` the `--extra` / `EXTRA` above. Defaults unchanged for every other caller. *Cost:* none.
+14. *Live output with a `<think>` of its own differs from `ultra_v3`.* ultra_v3 (DeepSeek-R1's partition) drops everything up to and
+    including the start token and then one leading newline; live output never carries one (the prompt wrote it), so the server treats
+    text before / including a stray `<think>` as reasoning, verbatim (case `start_token_in_output`, `differs`). *Cost if wrong:* a
+    model that echoes `<think>` gets it in `reasoning_content` where vLLM would hide it.
 
 **Known limits, recorded:** (a) tool-call arguments and tool schemas render with SORTED keys (the server holds JSON objects sorted): a
 call whose arguments the model wrote in another order re-renders differently, so the prefix cache misses there (spec 24 §4.6); (b) a
