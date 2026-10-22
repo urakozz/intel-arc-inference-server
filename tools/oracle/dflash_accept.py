@@ -6,6 +6,8 @@
                      [--vocab 32k,64k,128k] [--vocab-on bf16] [--draft-vocab-ids FILE]
                      [--k 1-7] [--batch 32] [--drafter SNAP] [--w4a16 SNAP] [--target SNAP]
                      [--sources GLOB] [--dry-run]
+    dflash_accept.py run --model muse|bolt-lilicorr --dumps DIR --out-dir OUT [--q ...] [--temperature T]
+                     [--top-p P] [--drafter SNAP] [--target SNAP]
     dflash_accept.py summary OUT/accept.*.json [--md OUT.md]
 
 **Protocol** (spec 19 §5's loop, teacher-forced; mtp_accept.py is the precedent). A dump
@@ -74,6 +76,22 @@ head (Vishva007/Muse-Glimmer-30B-W4A16-AutoRound: the served checkpoint):
     form) and `--q capped` (the target's multiplier and softcap first: 20 tanh(z 0.196... / 20),
     decision 11) both by default; E_K = 1 + sum prod alpha_j. Rows are counted wherever the
     target row exists (the teacher-forced text stands for the accepted drafts).
+
+**The LiLiCorr form (spec 26a Task 2, `--model bolt-lilicorr`).** nvidia/...-24GB-LiLiCorr (dflash_ref.py's form
+"lilicorr") over bolt_ref.py's taps dumps (tap.L{1,18,35,51,68,85}, tap_from = n_prompt - 1024), beside the target's
+embedding and head (SergiioB's g128 snapshot: what we serve; the drafter was trained against NVIDIA's 2-bit 24GB release,
+spec 26 Decision 9):
+  - the block is ALWAYS 8 rows and the head scores all 7 slots: ONE forward + lattice per anchor gives the drafts of
+    every K = 1..7 (prefixes of the greedy walk; anchors n_prompt <= p <= N - 7);
+  - arms (spec 26 §3, Decision 2; the LiLiCorr head exact in every arm, Decision 3): `exact` (W' + g as decoded), `int8`
+    (per row from W': q independent of g, the row scale fp32(g x s') - lil_int8_simulate), `int4g64` (rtn.h's rule on
+    g x W' in fp64 - rtn_int4_g64_f64); BF16 backbone linears by 19b's / 23f's rules; `h` variants with the target's
+    head int8 per row (spec 25 Decision 18: what b70-serve runs);
+  - the sampled estimate at T 1.0 / top-p 0.95, no top-k (Bolt's published defaults; spec 25 §17 ruling 6): p from the
+    dump's top 64 with the full-vocabulary lse (rows whose 64 hold < top-p counted as `short`); the walk conditioned on
+    the text (slot j's previous index = x[p + j]'s among slot j - 1's candidates, else censored); q `lattice` =
+    softmax(realized / T) (Decision 6) and `lattice+lp` = softmax((realized + lp) / T) (recorded only).
+  SKIP (exit 77) without the drafter's weights in the HF cache (PENDING-WEIGHTS: the hf download line it prints).
 """
 import os
 import sys
@@ -253,7 +271,7 @@ def _attention(d, i, x, qpos, ps, R, ctx):
     BR = x.shape[0]
     B = BR // R
     qp = qpos.reshape(-1)
-    q = ref.linear(x, d.w[L + "q_proj.weight"], d.w.get(L + "q_proj.bias")).view(BR, c.n_heads, c.head_dim)
+    q = d._lin(x, L + "q_proj.weight", L + "q_proj.bias").view(BR, c.n_heads, c.head_dim)
     q = ref.rope(ref.rms_norm(q, d.w[L + "q_norm.weight"], c.eps), qp, c.rope_theta, c.neox)
     kb, vb = d._kv(i, x, qp)
     win = c.windows[i]
@@ -278,13 +296,9 @@ def _attention(d, i, x, qpos, ps, R, ctx):
     v = v.repeat_interleave(g, dim=1)
     s = torch.einsum("qhd,khd->hqk", q, k) * c.head_dim ** -0.5
     s = s.masked_fill(~vis[None], float("-inf"))
-    if c.attention_sink_bias:
-        sink = d.w[L + "attention_sink_bias"].float()[:, None, None].expand(-1, BR, 1)
-        pr = torch.softmax(torch.cat([s, sink], -1), -1)[..., :-1]
-    else:
-        pr = torch.softmax(s, -1)
+    pr = d._softmax_sink(i, s, BR)             # sinks (spec 26 §2.1) - the plain softmax without them
     o = torch.einsum("hqk,khd->qhd", pr, v).reshape(BR, c.n_heads * c.head_dim)
-    return ref.linear(o, d.w[L + "o_proj.weight"], d.w.get(L + "o_proj.bias"))
+    return d._lin(o, L + "o_proj.weight", L + "o_proj.bias")
 
 
 def forward_blocks(d, anchors, ps, K: int, ctx):
@@ -551,6 +565,10 @@ def pool_sampled(entries, kmax: int) -> dict:
         tot = [sum(e["sampled"][qf]["sum"][j] for e in entries if "sampled" in e) for j in range(kmax)]
         alpha = [t / c if c else None for t, c in zip(tot, cnt)]
         out[qf] = {"alpha": alpha, "E": [expected_tokens(alpha[:K]) for K in range(1, kmax + 1)], "counted": cnt}
+        for extra in ("sampled_censored", "sampled_short"):     # the LiLiCorr form's (run_source_lilicorr)
+            if any(extra in e for e in entries):
+                out[qf][extra[len("sampled_"):]] = [sum((e.get(extra) or [0] * kmax)[j] for e in entries)
+                                                     for j in range(kmax)]
     return out
 
 
@@ -690,7 +708,7 @@ def summarize(files, md_out=None, ks=tuple(range(1, KMAX + 1))) -> dict:
         sampled = [(v, summary[v][corp]["sampled"]) for v in sorted(summary, key=_arm_order)
                    if corp in summary[v] and "sampled" in summary[v][corp]]
         if sampled:
-            lines.append(f"\nSampled (the expected-acceptance formula, q = the draft row's top 16 at T): E_K\n")
+            lines.append(f"\nSampled (the expected-acceptance formula, q = the drafter's candidates at T): E_K\n")
             lines.append("| arm | q | " + " | ".join(f"E_{K}" for K in ks) + " | best K |")
             lines.append("|---|---|" + "---:|" * len(ks) + "---:|")
             for v, sm in sampled:
@@ -698,6 +716,10 @@ def summarize(files, md_out=None, ks=tuple(range(1, KMAX + 1))) -> dict:
                     es = [r["E"][K - 1] for K in ks]
                     best = max((e, K) for e, K in zip(es, ks))
                     lines.append(f"| {v} | {qf} | " + " | ".join(f"{e:.2f}" for e in es) + f" | {best[1]} |")
+            notes = [(v, sm[next(iter(sm))]) for v, sm in sampled if "censored" in sm[next(iter(sm))]]
+            for v, r in notes:
+                lines.append(f"\n{v}: rows counted per slot {r['counted']}; censored (the text's token not among the "
+                             f"previous slot's candidates) {r['censored']}; the top-64 holding < top-p {r.get('short')}")
     text = "\n".join(lines)
     print(text)
     if md_out:
@@ -707,9 +729,294 @@ def summarize(files, md_out=None, ks=tuple(range(1, KMAX + 1))) -> dict:
 
 
 def _arm_order(v):
-    base = ["bf16", "int8", "int8h", "w4a16", "int4g64", "int4g64h", "dflash2"]
+    base = ["bf16", "exact", "exacth", "int8", "int8h", "w4a16", "int4g64", "int4g64h", "dflash2"]
     b = v.split("-")[0]
     return (base.index(b) if b in base else 9, v)
+
+
+# ------------------------------------------------------------------------------ the LiLiCorr form (spec 26a)
+
+LIL_DRAFTER = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr"
+LIL_REVISION = "449d24140160b8e51871bfc0f0a7338abf640aa1"
+BOLT_TARGET = "SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym"
+LIL_ARMS = ("exact", "int8", "int4g64", "exacth", "int8h", "int4g64h")
+LIL_QFORMS = ("lattice", "lattice+lp")
+
+
+def lil_backbone_linears(d) -> list[str]:
+    """The drafter's linears the format arms quantise (19b / 23f's set: fc, q / k / v / o, gate / up / down, the two
+    conv kernel projections); the LiLiCorr head (`lilicorr.*`) stays exact in every arm (spec 26 Decision 3)."""
+    return [n for n in d.w if n.endswith(LINEAR_SUFFIXES) and not n.startswith("lilicorr.") and d.w[n].dim() == 2]
+
+
+def int8_rows_g(wp, g: float):
+    """Spec 26 §3's int8 per row from W' (exact), g kept out: s'_r = amax_r(W') / 127 (fp32), q = rint(W' / s'_r) in
+    [-127, 127] - independent of g -, the stored fp32 row scale fp32(g x s'_r). Returns (q int8, stored fp32 [N])."""
+    q, s = rtn_int8_rows(wp)
+    stored = (s.float() * torch.tensor(g, dtype=torch.float32)).float()
+    return q, stored
+
+
+def f64_to_f16_rne(x):
+    """fp64 -> f16 with ONE rounding (to nearest, ties to even, subnormals kept): numpy's double -> half conversion
+    (npy_double_to_half rounds from the double's bits; torch's goes through fp32 first). Returns an f16 tensor."""
+    import numpy as np
+    return torch.from_numpy(np.ascontiguousarray(x.double().numpy()).astype(np.float16))
+
+
+def rtn_int4_g64_f64(w64):
+    """src/loader/rtn.h's rule (rtn_int4_g64) on fp64 values (spec 26 §3: the int4 arm from g x W' in fp64): per output
+    row and group of 64 k, amax = max |w| (exact), s16 = f16(2 amax / 15) (the fp64 quotient rounded ONCE), q =
+    clamp(rint(w / s16) + 8, 0, 15) in fp64 (q = 8 where s16 = 0). Returns (q uint8 [N][K], s16 f16 [N][K/64])."""
+    N, K = w64.shape
+    if K % 64:
+        raise ValueError(f"int4 g64: K {K} is not a multiple of 64")
+    wf = w64.double().reshape(N, K // 64, 64)
+    s16 = f64_to_f16_rne(2.0 * wf.abs().amax(-1) / 15.0)
+    s = s16.double()[..., None]
+    q = torch.where(s > 0, torch.round(wf / torch.where(s > 0, s, torch.ones_like(s))) + 8.0, torch.full_like(wf, 8.0))
+    return q.clamp(0.0, 15.0).to(torch.uint8).reshape(N, K), s16
+
+
+def lil_int8_simulate(d) -> int:
+    """The int8 arm on the backbone: NVFP4 linears by int8_rows_g (their g absorbed into the row scale, removed from
+    d.g), BF16 ones by 19b's rule; dequantised to float32 (simulated)."""
+    n = 0
+    for name in lil_backbone_linears(d):
+        g = d.g.pop(name, None)
+        if g is not None:
+            q, st = int8_rows_g(d.w[name], g)
+        else:
+            q, st = rtn_int8_rows(d.w[name])
+        d.w[name] = q.float() * st[:, None]
+        n += 1
+    return n
+
+
+def lil_int4_simulate(d) -> int:
+    """The int4 g64 arm on the backbone: NVFP4 linears from g x W' in fp64 (rtn_int4_g64_f64), BF16 ones by
+    rtn_int4_g64; dequantised (q - 8) x s16 (exact in fp32); g removed from d.g."""
+    n = 0
+    for name in lil_backbone_linears(d):
+        g = d.g.pop(name, None)
+        if g is not None:
+            q, s16 = rtn_int4_g64_f64(d.w[name].double() * g)
+            N, K = q.shape
+            d.w[name] = ((q.double().reshape(N, K // 64, 64) - 8.0) * s16.double()[..., None]).reshape(N, K).float()
+        else:
+            d.w[name] = int4g64_dequant(d.w[name]).float()
+        n += 1
+    return n
+
+
+def lilicorr_draft(d, head, anchors, ps, ctx):
+    """B LiLiCorr blocks (always 8 rows: forward_blocks at K = 7) -> (cand [B][7][8], lp [B][7][8], lattice
+    [B][7][8][8], greedy ids [B][7], chosen [B][7]): the target head over the 7 mask rows (Head: bf16 / int8 rows), the
+    top 8 (ties lower id) with full-vocabulary log-probs, the anchors' context rows at p - 1, the LiLiCorr head batched,
+    the greedy walk (previous 0, ties to the lower index) - Drafter.draft_block per anchor, batched."""
+    c = d.cfg
+    S, k = c.block_size - 1, c.cand_topk
+    h = forward_blocks(d, anchors, ps, S, ctx)
+    B = len(anchors)
+    hm = h[:, 1:].reshape(B * S, -1)
+    lg = head.logits(hm)
+    cand, v = top_k_fast(lg, k)
+    lp = v - torch.logsumexp(lg, -1, keepdim=True)
+    rows = []
+    for p in torch.as_tensor(ps).tolist():
+        r = ctx.anchor_row(p)
+        if r is None:
+            raise ValueError(f"anchor {p}: the context has no row at {p - 1}")
+        rows.append(r)
+    cand, lp = cand.view(B, S, k), lp.view(B, S, k)
+    lat = d.lilicorr_lattice(cand, lp, hm.view(B, S, -1), torch.stack(rows), torch.ones(B, dtype=torch.bool))
+    ar = torch.arange(B)
+    prev = torch.zeros(B, dtype=torch.long)
+    idx = torch.arange(k)
+    ids, ch = [], []
+    for s in range(S):
+        row = lat[ar, s, prev]
+        best = row.max(-1, keepdim=True).values
+        prev = torch.where(row == best, idx[None], k).min(-1).values
+        ch.append(prev)
+        ids.append(cand[ar, s, prev])
+    return cand, lp, lat, torch.stack(ids, 1), torch.stack(ch, 1)
+
+
+def p_rows_lse(top_ids, top_logits, lse, temp: float, top_p: float):
+    """The target's filtered row from the dump (Bolt: no top-k, 25e's ruling 6; T then top-p, vLLM's order): at T = 1
+    the 64 capped ids' TRUE probabilities exp(logit - lse) (the dump's full-vocabulary logsumexp), else softmax over the
+    64; top-p keeps the ids whose preceding mass is < top_p; renormalised over the kept ids. Returns (ids, probs, short
+    [R] bool: the 64 ids hold less than top_p - the cut lies beyond the dump's cap, so the kept set is the 64)."""
+    v = top_logits.double()
+    p = torch.exp(v - lse.double()[:, None]) if temp == 1.0 else torch.softmax(v / temp, -1)
+    cum = p.cumsum(-1)
+    short = cum[:, -1] < top_p
+    p = p * ((cum - p) < top_p)
+    return top_ids, p / p.sum(-1, keepdim=True), short
+
+
+def run_source_lilicorr(d, head, dump, ks, batch: int, sp: dict, qforms):
+    """Per-K greedy stats (run_source's layout) + per q form the sampled sums for one dump; one 8-row block per anchor
+    gives every K = 1..7 (prefixes of one walk). The sampled estimate at slot j conditions the walk on the TEXT: the
+    previous index is the one whose candidate is the teacher-forced token x[p + j] (slot j - 1's accepted draft); a row
+    where that token is not among slot j - 1's 8 candidates cannot be reached by the walk and is censored at j (counted
+    in `censored`). q = softmax(realized / T) (`lattice`, spec 26 Decision 6) or softmax((realized + lp) / T)
+    (`lattice+lp`, the alternative recorded only)."""
+    taps = dump["taps"]
+    f = dump["tap_from"]
+    n = dump["n"]
+    ctx = d.context_kv({i: taps[i] for i in d.cfg.target_layer_ids}, torch.arange(f, n))
+    x, g = dump["ids"], dump["greedy"]
+    S = d.cfg.block_size - 1
+    anchors = anchors_of(dump["n_prompt"], n, S)
+    res = {}
+    if not anchors:
+        return res, 0
+    ps_all = torch.tensor(anchors)
+    drafts = []
+    ssum = {qf: [0.0] * S for qf in qforms}
+    scnt, scens, sshort = [0] * S, [0] * S, [0] * S
+    T = sp["temp"]
+    for b0 in range(0, len(anchors), batch):
+        ps = ps_all[b0:b0 + batch]
+        cand, lp, lat, ids, _ = lilicorr_draft(d, head, x[ps].tolist(), ps, ctx)
+        drafts.append(ids)
+        ar = torch.arange(len(ps))
+        for j in range(S):
+            ok = (ps + j) <= n - 1
+            prev = torch.zeros(len(ps), dtype=torch.long)
+            if j > 0:
+                tok = x[torch.clamp(ps + j, max=n - 1)]
+                hit = cand[:, j - 1] == tok[:, None]
+                scens[j] += int((ok & ~hit.any(1)).sum())
+                ok = ok & hit.any(1)
+                prev = hit.float().argmax(1)
+            if not bool(ok.any()):
+                continue
+            rr = (ps + j - f)[ok]
+            pi, pp, short = p_rows_lse(dump["top_ids"][rr], dump["top_logits"][rr], dump["lse"][rr], T, sp["top_p"])
+            sshort[j] += int(short.sum())
+            scnt[j] += int(ok.sum())
+            real = lat[ar, j, prev][ok]
+            for qf in qforms:
+                v = real + lp[ok, j] if qf == "lattice+lp" else real
+                qp = torch.softmax(v.double() / T, -1)
+                ssum[qf][j] += float(overlap(pi, pp, cand[ok, j], qp).sum())
+    dr = torch.cat(drafts)
+    for K in ks:
+        length, cens, counted, accepted = accept_rows(dr[:, :K], ps_all, x, g, f)
+        hist = torch.bincount(length[~cens], minlength=K + 1).tolist()
+        res[str(K)] = {"rows": len(anchors), "censored": int(cens.sum()), "hist": hist,
+                       "counted": counted, "accepted": accepted}
+    res["sampled"] = {qf: {"counted": scnt, "sum": ssum[qf]} for qf in qforms}
+    res["sampled_censored"] = scens
+    res["sampled_short"] = sshort
+    n_p = dump["n_prompt"]
+    agree = int((x[n_p:] == g[n_p - 1 - f: n - 1 - f]).sum())
+    return res, agree
+
+
+def lilicorr_sampling(target_dir: str | None, a) -> dict:
+    """T / top-p over the target's generation_config.json (NVIDIA's published 1.0 / 0.95 when absent); no top-k (spec 25
+    §17 ruling 6: the card names none, vLLM applies none)."""
+    gc = {}
+    if target_dir:
+        gp = os.path.join(target_dir, "generation_config.json")
+        if os.path.isfile(gp):
+            with open(gp, encoding="utf-8") as f:
+                gc = json.load(f)
+    return {"temp": a.temperature if a.temperature is not None else float(gc.get("temperature", 1.0)),
+            "top_p": a.top_p if a.top_p is not None else float(gc.get("top_p", 0.95)), "top_k": 0}
+
+
+def cmd_run_lilicorr(a) -> int:
+    """--model bolt-lilicorr: the LiLiCorr drafter's arms over bolt_ref.py taps dumps (module docstring)."""
+    arms = [s for s in a.arms.split(",") if s]
+    bad = [s for s in arms if s not in LIL_ARMS]
+    if bad:
+        raise SystemExit(f"--model bolt-lilicorr: unknown arms {bad} (of {LIL_ARMS})")
+    lo, _, hi = a.k.partition("-")
+    ks = list(range(int(lo), int(hi or lo) + 1))
+    if not (1 <= ks[0] and ks[-1] <= 7):
+        raise SystemExit("--k within 1-7 (the block's 7 drafts)")
+    qforms = [q for q in a.q.split(",") if q]
+    if any(q not in LIL_QFORMS for q in qforms):
+        raise SystemExit(f"--q takes {','.join(LIL_QFORMS)}")
+    files = dump_files(a.dumps, a.sources)
+    os.makedirs(a.out_dir, exist_ok=True)
+    if not files:
+        raise SystemExit(f"no *.taps.safetensors in {a.dumps} (bolt_oracle.sh <data> taps)")
+    _load_deps()
+    heads = [dt.dump_header(f) for f in files]
+    n_anchor = sum(len(anchors_of(int(h["n_prompt"]), int(h["n"]), 7)) for h in heads)
+    n_ctx = sum(int(h["n"]) - int(h["tap_from"]) for h in heads)
+    gflop = (n_anchor * (8 * 2 * 0.975e9 + 7 * 2 * 4096 * 131072 + 56 * 2 * 36.7e6) + n_ctx * 2 * 0.111e9) / 1e9
+    print(f"--model bolt-lilicorr: {len(files)} dumps, {n_anchor} anchors (one 8-row block each: K 1..7 from one walk), "
+          f"{n_ctx} context rows; arms {arms}; q {qforms}; {gflop / 1e3:.1f} TFLOP an arm (ESTIMATED: the block 15.6, the "
+          f"head 7.5, the lattice 4.1 GFLOP an anchor), ~{gflop / ASSUMED_GFLOPS / 60:.0f} min at "
+          f"{ASSUMED_GFLOPS:.0f} GFLOP/s (assumed)")
+    print("memory (ESTIMATED): the drafter float32 4.5 GB (+ the decode transient), Bolt's embedding bf16 1.07 GB and "
+          "head float32 2.1 GB (h arms: int8 0.54 GB), a batch's logits B x 7 x 131072 x 4 B -> ~10-12 GiB peak")
+    if a.dry_run:
+        return 0
+    torch.set_grad_enabled(False)
+    target = a.target or ref.find_snapshot(BOLT_TARGET, ("config.json", "model.safetensors.index.json"))
+    drafter_dir = a.drafter or ref.find_snapshot(LIL_DRAFTER, ("config.json", "model.safetensors"))
+    if drafter_dir is None:
+        print(f"SKIP_REASON dflash_accept: {LIL_DRAFTER} is not in {ref.hf_hub_dir()} (PENDING-WEIGHTS: hf download "
+              f"{LIL_DRAFTER} --revision {LIL_REVISION})")
+        return 77
+    if target is None:
+        print(f"SKIP_REASON dflash_accept: {BOLT_TARGET} is not in {ref.hf_hub_dir()} (the target's embedding / head)")
+        return 77
+    sp = lilicorr_sampling(target, a)
+    t0 = time.time()
+    embed, head_w = ref.read_target_embed_head(target)
+    print(f"target embed / head {time.time() - t0:.0f} s ({target}); sampled at T {sp['temp']}, top-p {sp['top_p']}, "
+          "no top-k", flush=True)
+    for arm in arms:
+        out_path = os.path.join(a.out_dir, f"accept.{arm}.json")
+        state = {"arm": arm, "variants": {arm: {}}, "agree": {}, "meta": {}}
+        if os.path.isfile(out_path):
+            with open(out_path, encoding="utf-8") as f:
+                old = json.load(f)
+            state["variants"][arm].update(old["variants"].get(arm, {}))
+            state["agree"].update(old.get("agree", {}))
+        todo = [f for f in files if dt.dump_header(f)["name"] not in state["variants"][arm]]
+        if not todo:
+            print(f"[{arm}] done", flush=True)
+            continue
+        ta = time.time()
+        d = ref.load_drafter(drafter_dir, embed=embed, lm_head=head_w)
+        base = arm[:-1] if arm.endswith("h") else arm
+        nq = lil_int8_simulate(d) if base == "int8" else lil_int4_simulate(d) if base == "int4g64" else 0
+        head = Head(head_w, int8=arm.endswith("h"))
+        state["meta"] = {"drafter": drafter_dir, "target": target, "quantised": nq,
+                         "head": "int8" if head.int8 else "bf16", "ks": ks, "batch": a.batch, "sampling": sp,
+                         "q": qforms, "threads": torch.get_num_threads(), "global_scales_left": len(d.g)}
+        print(f"[{arm}] drafter loaded {time.time() - ta:.0f} s ({nq} backbone linears quantised, {len(d.g)} NVFP4 "
+              f"linears exact W' + g), head {state['meta']['head']}", flush=True)
+        for fn in todo:
+            dump = dt.load_dump(fn)
+            if sorted(dump["taps"]) != sorted(d.cfg.target_layer_ids):
+                raise SystemExit(f"{fn}: taps {sorted(dump['taps'])} != the drafter's {d.cfg.target_layer_ids}")
+            ts = time.time()
+            r, agree = run_source_lilicorr(d, head, dump, ks, a.batch, sp, qforms)
+            state["variants"][arm][dump["name"]] = r
+            state["agree"][dump["name"]] = [agree, dump["n"] - dump["n_prompt"]]
+            with open(out_path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=1)
+            os.replace(out_path + ".tmp", out_path)
+            e = pool([r], ks)
+            es = " ".join("%.2f" % e[str(K)]["E"] for K in ks if str(K) in e)
+            print(f"[{arm}] {dump['name']}: {len(anchors_of(dump['n_prompt'], dump['n'], 7))} anchors, E_K {es}; "
+                  f"{time.time() - ts:.0f} s", flush=True)
+        del d, head
+    files_out = sorted(glob.glob(os.path.join(a.out_dir, "accept.*.json")))
+    summarize(files_out, os.path.join(a.out_dir, "summary.md"), ks)
+    print(f"wall {time.time() - t0:.0f} s", flush=True)
+    return 0
 
 
 # ------------------------------------------------------------------------------ main
@@ -862,6 +1169,8 @@ def cmd_run_muse(a) -> None:
 def cmd_run(a) -> None:
     if getattr(a, "model", "qwen38") == "muse":
         return cmd_run_muse(a)
+    if getattr(a, "model", "qwen38") == "bolt-lilicorr":
+        sys.exit(cmd_run_lilicorr(a))
     arms = [s for s in a.arms.split(",") if s]
     bad = [s for s in arms if s not in ("bf16", "int8", "int8h", "w4a16")]
     if bad:
@@ -993,9 +1302,10 @@ def main() -> None:
     r.add_argument("--sources", help="fnmatch over the dump file names")
     r.add_argument("--dry-run", action="store_true")
     # spec 23f: the Muse-Glimmer form
-    r.add_argument("--model", default="qwen38", choices=("qwen38", "muse"))
+    r.add_argument("--model", default="qwen38", choices=("qwen38", "muse", "bolt-lilicorr"))
     r.add_argument("--kmax", type=int, help="--model muse: the anchors leave this many drafts (default 15)")
-    r.add_argument("--q", default="raw,capped", help="--model muse: the sampled estimate's q forms")
+    r.add_argument("--q", default="raw,capped", help="the sampled estimate's q forms (muse: raw,capped; bolt-lilicorr: "
+                                                      "lattice,lattice+lp)")
     r.add_argument("--temperature", type=float)
     r.add_argument("--top-k", type=int)
     r.add_argument("--top-p", type=float)
@@ -1013,6 +1323,11 @@ def main() -> None:
                 a.arms = ",".join(MUSE_ARMS)
             if a.k == f"1-{KMAX}":
                 a.k = f"1-{a.kmax or 15}"
+        if a.model == "bolt-lilicorr":
+            if a.arms == "bf16,int8,int8h,w4a16":
+                a.arms = ",".join(LIL_ARMS)
+            if a.q == "raw,capped":
+                a.q = ",".join(LIL_QFORMS)
         cmd_run(a)
 
 
