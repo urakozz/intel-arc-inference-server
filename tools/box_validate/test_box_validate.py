@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -403,6 +404,264 @@ class OrchestratorTest(Tmp):
         self.assertIn("- m: `value 42`", text)
         self.assertIn("something no stage runs", text)
         self.assertIn("$ do it by hand", text)
+
+
+# flock(1) for the Mac (util-linux's on the box): flock(2) through fcntl - the same lock and the same
+# open-file-description semantics, so the lock protocol is tested for real on both. A waiter polls with
+# LOCK_NB: no fairness either way (Linux's flock(2) has none), and Darwin leaves a second blocked shared
+# waiter asleep when an exclusive lock goes.
+FLOCK_PY = textwrap.dedent('''\
+    #!/usr/bin/env python3
+    import fcntl, os, subprocess, sys, time
+    a = sys.argv[1:]
+    op, nb, un, wait, conflict = fcntl.LOCK_EX, False, False, None, 1
+    while a and a[0].startswith("-") and a[0] != "-c":
+        o = a.pop(0)
+        if o in ("-s", "--shared"): op = fcntl.LOCK_SH
+        elif o in ("-x", "-e", "--exclusive"): op = fcntl.LOCK_EX
+        elif o in ("-n", "--nonblock", "--nb"): nb = True
+        elif o in ("-u", "--unlock"): un = True
+        elif o == "-w": wait = float(a.pop(0))
+        elif o == "-E": conflict = int(a.pop(0))
+        elif o == "-o": pass
+        else: sys.exit("flock stand-in: unsupported option " + o)
+    target = a.pop(0)
+    if target.isdigit():
+        fd, cmd = int(target), None
+    else:
+        fd = os.open(target, os.O_RDONLY | os.O_CREAT, 0o666)
+        cmd = ["/bin/sh", "-c", a[1]] if a[:1] == ["-c"] else a
+    if un:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        sys.exit(0)
+    deadline = None if wait is None else time.time() + wait
+    while True:   # polled, not a blocking flock: Darwin wakes one waiter of a released lock, not every shared one
+        try:
+            fcntl.flock(fd, op | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if nb or (deadline is not None and time.time() >= deadline):
+                sys.exit(conflict)
+            time.sleep(0.02)
+    sys.exit(subprocess.call(cmd) if cmd else 0)
+''')
+
+
+def flock_path(bindir):
+    """a PATH with a real flock(1): util-linux's where it exists, else the fcntl stand-in"""
+    if shutil.which("flock"):
+        return os.environ["PATH"]
+    write(os.path.join(bindir, "flock"), FLOCK_PY, 0o755)
+    return bindir + os.pathsep + os.environ["PATH"]
+
+
+def wait_for(cond, timeout=15.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return cond()
+
+
+class GpuLockTest(Tmp):
+    """tools/gpu_lock.sh over real flock(2): two cards side by side, a card job behind its card, a whole-box job
+    waiting for every card job - and, once it waits, ahead of new card jobs (the gate: no starvation)."""
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(self.p("locks"))
+        self.env = {k: v for k, v in os.environ.items() if k != "ZE_AFFINITY_MASK"}
+        self.env.update(PATH=flock_path(self.p("bin")), B70_LOCK_DIR=self.p("locks"))
+        self.procs = {}
+
+    def tearDown(self):
+        for p in self.procs.values():
+            if p.poll() is None:
+                p.kill()
+                p.wait()
+            p.stdout.close()
+        super().tearDown()
+
+    def job(self, name, *lock):
+        """gpu_lock.sh <lock> -- a job that records its ZE_AFFINITY_MASK, says it started, waits for <name>.go"""
+        body = (f'echo "${{ZE_AFFINITY_MASK:-none}}" > {name}.mask; touch {name}.started; '
+                f'while [ ! -e {name}.go ]; do sleep 0.05; done')
+        self.procs[name] = subprocess.Popen([os.path.join(ROOT, "tools", "gpu_lock.sh"), *lock, "--", "sh", "-c", body],
+                                            cwd=self.tmp, env=self.env, stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT, text=True)
+
+    def started(self, name, timeout=15.0):
+        return wait_for(lambda: os.path.exists(self.p(name + ".started")), timeout)
+
+    def done(self, name):
+        write(self.p(name + ".go"), "")
+        out = self.procs[name].communicate(timeout=30)[0]
+        self.assertEqual(self.procs[name].returncode, 0, out)
+        return out
+
+    def mask(self, name):
+        with open(self.p(name + ".mask")) as f:
+            return f.read().strip()
+
+    def status(self):
+        return subprocess.run([os.path.join(ROOT, "tools", "gpu_lock.sh"), "status"], env=self.env,
+                              capture_output=True, text=True).stdout
+
+    def test_protocol(self):
+        self.job("a", "card", "0")
+        self.assertTrue(self.started("a"))
+        self.job("b", "card", "1")                       # the other card: beside a
+        self.assertTrue(self.started("b"))
+        st = self.status()
+        self.assertIn("box     shared", st)
+        self.assertRegex(st, r"card 0 +held")
+        self.assertRegex(st, r"card 1 +held")
+        self.job("c", "card", "0")                       # the same card: behind a
+        self.assertFalse(self.started("c", 0.8))
+        self.job("x", "box")                             # the whole box: waits for a and b
+        self.assertTrue(wait_for(lambda: "gate    held" in self.status()), self.status())
+        self.job("y", "card", "1")                       # a new card-1 job: behind b, then behind x (the gate)
+        self.done("b")
+        self.assertFalse(self.started("y", 0.8))         # card 1 is free, but x waits first
+        self.assertFalse(self.started("x", 0.1))
+        self.done("a")
+        self.assertTrue(self.started("x"))               # a and b gone: x runs, c and y still wait
+        self.assertIn("box     EXCLUSIVE", self.status())
+        self.assertFalse(self.started("c", 0.5))
+        self.assertFalse(self.started("y", 0.1))
+        self.done("x")
+        self.assertTrue(self.started("c"))               # x gone: both card jobs together
+        self.assertTrue(self.started("y"))
+        self.done("c")
+        self.assertIn("waiting for the gate (a whole-box job waits: it runs first)", self.done("y"))
+        self.assertEqual([self.mask(n) for n in "abcxy"], ["0", "1", "0", "none", "1"])
+        self.assertIn("box     free", self.status())
+
+    def test_refusals(self):
+        tool = os.path.join(ROOT, "tools", "gpu_lock.sh")
+        for args in (["card", "x", "--", "true"], ["card", "0,1", "--", "true"], ["box", "--"], ["nothing"]):
+            r = subprocess.run([tool, *args], env=self.env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2, (args, r.stdout, r.stderr))
+        r = subprocess.run([tool, "card", "1", "--", "sh", "-c", "echo $ZE_AFFINITY_MASK; exit 7"], env=self.env,
+                           capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout.strip()), (7, "1"))   # the command's status, the card's mask
+
+
+class TwoOrchestratorsTest(Tmp):
+    """remote.sh twice on one tree and one state, devices 0 and 1, with real locks: a stage is run once (the
+    other orchestrator leaves it), card stages of the two run side by side, G0 waits for the other to finish, a
+    stage left RUNNING by a dead orchestrator runs again, an older one-per-tree orchestrator blocks both."""
+    STUB = textwrap.dedent(r"""
+        row 0 "gate"
+        row 1 "one"
+        stage pre 0 always cpu - - "pre"
+        st_pre() { chk "echo 'HAVE_a=1  # a' > $STATE/have.env" "have"; finish; }
+        stage g0.a 0 g0 cpu - - "g0 a"
+        st_g0_a() { chk "test -f $STATE/../g0_ok" "the g0 marker"; finish; }
+        stage r1.slow 1 default card - - "a card stage that waits for slow.go"
+        st_r1_slow() { chk "echo \$ZE_AFFINITY_MASK >> $STATE/count-slow; touch $STATE/../slow.started; while [ ! -e $STATE/../slow.go ]; do sleep 0.05; done" "slow"; finish; }
+        stage r1.x 1 default card - - "device 0's own"
+        st_r1_x() { chk "echo \$ZE_AFFINITY_MASK > $STATE/x.mask" "x"; finish; }
+        stage r1.y 1 default card - - "device 1's own, beside r1.slow"
+        st_r1_y() { chk "echo \$ZE_AFFINITY_MASK:\$PORT > $STATE/y.mask; test ! -e $STATE/../slow.go" "y while slow runs"; finish; }
+        """)
+
+    def setUp(self):
+        super().setUp()
+        write(self.p("stages.sh"), self.STUB)
+        os.makedirs(self.p("home"))
+        os.makedirs(self.p("base"))
+        self.state = self.p("runs", "s1")
+        self.path = flock_path(self.p("bin"))
+        self.bg = None
+
+    def tearDown(self):
+        if self.bg and self.bg.poll() is None:
+            self.bg.kill()
+            self.bg.wait()
+        if self.bg:
+            self.bg.stdout.close()
+        super().tearDown()
+
+    def env(self, device, **extra):
+        e = {k: v for k, v in os.environ.items() if k not in ("ZE_AFFINITY_MASK", "PORT")}
+        e.update(PATH=self.path, HOME=self.p("home"), BV_STAGES_FILE=self.p("stages.sh"), BV_BASE=self.p("base"),
+                 B70_GIT_SHA="test", DEVICE=str(device))
+        e.update(extra)
+        return e
+
+    def remote(self, device, ids, rc=0, **extra):
+        r = subprocess.run([os.path.join(HERE, "remote.sh"), self.state, *ids], capture_output=True, text=True,
+                           env=self.env(device, **extra))
+        self.assertEqual(r.returncode, rc, r.stdout + r.stderr)
+        return r.stdout
+
+    def status(self, sid):
+        with open(os.path.join(self.state, sid + ".status")) as f:
+            return f.read().rstrip("\n").split("\t")
+
+    def test_two_devices(self):
+        write(self.p("runs", "g0_ok"), "")
+        self.remote(0, ["pre", "g0.a"])
+        self.assertEqual(self.status("g0.a")[1:2] + self.status("g0.a")[7:], ["PASS", "0", "cpu"])
+        self.bg = subprocess.Popen([os.path.join(HERE, "remote.sh"), self.state, "pre", "r1.slow", "r1.x"],
+                                   env=self.env(0), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.assertTrue(wait_for(lambda: os.path.exists(self.p("runs", "slow.started"))))
+        self.assertIn("another validation run on device 0", self.remote(0, ["pre"], rc=3))
+        out = self.remote(1, ["pre", "r1.slow", "r1.y"])           # beside it, on card 1
+        self.assertIn("[d1] r1.slow RUNNING under the other orchestrator on this state - left to it", out)
+        self.assertEqual(self.status("r1.y")[1], "PASS")            # ran while r1.slow held card 0
+        self.assertEqual(self.status("r1.y")[7:], ["1", "card"])
+        with open(os.path.join(self.state, "y.mask")) as f:
+            self.assertEqual(f.read().strip(), "1:8113")            # its card, its port range
+        out = self.remote(1, ["pre", "g0.a"], BV_REDO="g0.a")       # G0 runs alone
+        self.assertIn("g0.a DEFERRED: G0 runs with no other orchestrator on this tree (device 0 active)", out)
+        self.assertEqual(self.status("g0.a")[1:2] + self.status("g0.a")[7:], ["PASS", "0", "cpu"])
+        write(self.p("runs", "slow.go"), "")
+        out = self.bg.communicate(timeout=60)[0]
+        self.assertEqual(self.bg.returncode, 0, out)
+        with open(os.path.join(self.state, "count-slow")) as f:
+            self.assertEqual(f.read().split(), ["0"])               # once, on card 0
+        self.assertEqual(self.status("r1.slow")[7:], ["0", "card"])
+        self.assertEqual(self.status("r1.x")[1], "PASS")
+        with open(os.path.join(self.state, "progress.log")) as f:
+            prog = f.read()
+        self.assertIn("[d0] r1.slow START (card, lock card)", prog)
+        self.assertIn("[d1] r1.y START (card, lock card)", prog)
+        self.assertTrue(os.path.exists(os.path.join(self.state, "meta-0.env")))
+        self.assertTrue(os.path.exists(os.path.join(self.state, "meta-1.env")))
+
+        # a stage left RUNNING by a dead orchestrator (its claim free) runs again - on whichever device asks
+        write(os.path.join(self.state, "r1.x.status"), "r1.x\tRUNNING\t\t2026-10-23 10:00:00\t\t\t\t0\tcard\n")
+        self.remote(1, ["pre", "r1.x"])
+        self.assertEqual(self.status("r1.x")[1:2] + self.status("r1.x")[7:], ["PASS", "1", "card"])
+        # the summary says where each stage ran
+        reg = self.p("registry.tsv")
+        write(reg, "\n".join(["row\t0\tgate", "row\t1\tone", "stage\tg0.a\t0\tg0\tcpu\t-\t-\tg0 a",
+                              "stage\tr1.slow\t1\tdefault\tcard\t-\t-\tslow",
+                              "stage\tr1.y\t1\tdefault\tcard\t-\t-\ty"]) + "\n")
+        md = self.p("summary.md")
+        self.assertEqual(summary.main(["report", "--state", self.state, "--registry", reg, "--out", md]), 0)
+        with open(md) as f:
+            text = f.read()
+        self.assertIn("| `r1.slow` | slow | **PASS** |  | 0 card |", text)
+        self.assertIn("| `r1.y` | y | **PASS** |  | 1 card |", text)
+        self.assertIn("- device 0: started", text)
+        self.assertIn("- device 1: started", text)
+
+    def test_older_orchestrator_blocks(self):
+        os.makedirs(self.p("runs"))
+        holder = subprocess.Popen([sys.executable, "-c", "import fcntl, sys, time; f = open(sys.argv[1], 'w'); "
+                                   "fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); time.sleep(60)",
+                                   self.p("runs", ".run.lock")], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "held")
+            self.assertIn("an older orchestrator", self.remote(1, ["pre"], rc=3))
+        finally:
+            holder.kill()
+            holder.wait()
+            holder.stdout.close()
 
 
 FAKE_SERVE = textwrap.dedent("""\
@@ -1013,6 +1272,80 @@ class DriverTest(unittest.TestCase):
         g0 =[sid for sid, s in stages.items() if s["sel"] == "g0"]
         first = [sid for sid, s in stages.items() if s["sel"] != "always"][: len(g0)]
         self.assertEqual(g0, first, "the G0 stages come first")
+
+    def test_device_and_lock_lines(self):
+        out = self.run_driver("--dry-run", "--device", "1", "--only", "r1.load,r1.speed").stdout
+        self.assertIn("# device 1: ZE_AFFINITY_MASK=1, PORT 8113, orchestrator lock ~/b70-validate/", out)
+        self.assertIn("/.run-1.lock", out)
+        self.assertIn("/orchestrator-1.log", out)
+        self.assertIn(" DEVICE=1 ", out)
+        blk = out.split("--- r1.load ")[1].split("\n--- ")[0]
+        self.assertIn("lock: holds the card lock for device 1 for the whole stage (tools/gpu_lock.sh card 1: "
+                      "~/b70-gpu1.lock exclusive + ~/b70-gpu.lock shared, ZE_AFFINITY_MASK=1)", blk)
+        blk = out.split("--- r1.speed ")[1].split("\n--- ")[0]
+        self.assertIn("lock: holds the whole box for the whole stage (tools/gpu_lock.sh box", blk)
+        self.assertIn("# note: these take the WHOLE box even on device 1: r1.speed", out)
+        out = self.run_driver("--dry-run", "--only", "r1.load").stdout                  # device 0 by default
+        self.assertIn("lock: holds the card lock for device 0", out)
+        self.assertNotIn("# note: these take", out)
+        out = self.run_driver("--dry-run", "--only", "g0").stdout
+        self.assertIn("builds holding ~/b70-validate/", out)
+        self.assertIn("G0 - deferred while another orchestrator is active on this tree", out)
+        self.assertEqual(self.run_driver("--dry-run", "--device", "0,1", ok=False).returncode, 2)
+        out = self.run_driver("--list", "--device", "1").stdout
+        self.assertRegex(out, r"(?m)^r1\.load\*? +1 +default +card +card1 ")
+        self.assertRegex(out, r"(?m)^r1\.speed\*? +1 +default +gpu +box ")
+        self.assertRegex(out, r"(?m)^g0\.build\*? +0 +g0 +cpu +cpu\+build ")
+
+    def test_card_stages_follow_the_rules(self):
+        """A `card` stage (lib.sh) runs beside the other card's stream: one-card correctness only. Its printed body
+        sets no ZE_AFFINITY_MASK, runs nothing timed (interleave / idle / xpu-smi / benchy / ratios / timing rows),
+        nothing on two cards (--pp, SERVE_AFFINITY, a pp-labelled test), takes no lock itself, builds nothing,
+        runs no passkey probe (fixed /tmp directories shared with the oracle container), reads no host-RAM budget
+        (free -g) and writes nothing under ~ outside the state."""
+        reg = tempfile.mktemp(suffix=".tsv")
+        try:
+            self.run_driver("--registry", reg)
+            stages = summary.read_registry(reg)[2]
+        finally:
+            if os.path.exists(reg):
+                os.remove(reg)
+        card = [sid for sid, s in stages.items() if s["kind"] == "card"]
+        self.assertGreater(len(card), 50)
+        out = self.run_driver("--dry-run", "--with", "optin").stdout
+        pp = pp_labelled_tests()
+        self.assertIn("pp_decode_test", pp)
+        self.assertIn("pp_prefix_gpu_split_test", pp)            # through ${_pp_prefix}
+        bad = [r"ZE_AFFINITY_MASK=", r"SERVE_AFFINITY", r"--pp\b", r"interleave\.sh", r"idle\.sh", r"xpu-smi",
+               r"benchy", r"--ratio", r"\bflock\b", r"\bcmake\b", r"(^|\s)ocloc ", r"passkey\.sh", r"free -g",
+               r"matching /\^\\\| b70-decode", r"(>|tee( -a)?)\s*(~|\$HOME)/(?!b70-validate/)"]
+        for sid in card:
+            self.assertNotIn(stages[sid]["sel"], ("always", "g0", "manual"), sid)
+            self.assertIn("--- " + sid + " ", out, sid)
+            body = out.split("--- " + sid + " ")[1].split("\n--- ")[0].split("\n== ")[0]
+            body = body.split("\n    log: ", 1)[1].partition("\n")[2]      # the commands, not the header
+            for b in bad:
+                self.assertNotRegex(body, b, sid)
+            for rx in re.findall(r"--re '([^']*)'", body):
+                self.assertEqual([t for t in pp if re.search(rx, t)], [], (sid, rx))
+
+
+def pp_labelled_tests():
+    """the tests tests/CMakeLists.txt labels `pp` (two cards), ${VAR} lists expanded from set() / list(APPEND)"""
+    with open(os.path.join(ROOT, "tests", "CMakeLists.txt")) as f:
+        text = re.sub(r"(?m)#.*$", "", f.read())
+    lists = {}
+    for m in re.finditer(r"\b(?:set\(\s*(\w+)|list\(\s*APPEND\s+(\w+))([^)]*)\)", text):
+        lists.setdefault(m.group(1) or m.group(2), []).extend(m.group(3).split())
+    names = set()
+    for m in re.finditer(r"set_tests_properties\(([^)]*?)\bPROPERTIES\b([^)]*)\)", text, re.S):
+        labels = re.search(r'LABELS\s+("[^"]*"|\S+)', m.group(2))
+        if not labels or "pp" not in labels.group(1).strip('"').split(";"):
+            continue
+        for n in m.group(1).split():
+            v = re.fullmatch(r"\$\{(\w+)\}", n)
+            names.update(lists.get(v.group(1), []) if v else [n])
+    return names
 
 
 if __name__ == "__main__":
