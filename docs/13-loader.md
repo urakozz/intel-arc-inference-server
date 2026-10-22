@@ -109,7 +109,7 @@ dequantised once with the prefill dequant's arithmetic (`LoadedModel::ab_prefill
 `group_size == 64`, `sym == true`, and `desc_act` is false **or absent** (see
 "The packed-head checkpoint" below - absence is auto-round's spelling of false and is
 proven from the shipped `g_idx` count, not taken on trust). It throws on any
-`+:` dynamic rule - the exact pattern that made a published MTP head unusable
+`+:` dynamic rule that is not an exact restatement of the top level (spec 25b) - the exact pattern that made a published MTP head unusable
 (BENCHMARKS.md); the published checkpoint's copy has been corrected to `-:`. It
 also throws on an unrecognised `quant_method` or `packing_format`, and on an
 `extra_config` module that claims to be packed at anything but g64 symmetric
@@ -1047,7 +1047,7 @@ refusal stays as it was (`tests/loader/quant_test.cc`, the Bolt block, is writte
   exp is `common::exp_torch` (`src/common/exp_torch.h`, Sleef's expf u10 in plain C++: the same on every host).
   **Measured** (tools: a dump of the C++ values compared in the oracle image, torch 2.14.1 CPU, MKL): over all 33,266 bf16
   values in [-7, 9] (A_log's range is -6.81 .. 8.81) `exp_torch` differs from `torch.exp(x.float())` on 196 values (0.59 %),
-  never by more than 1 ulp; libm's `expf` differs on 192. No host function reproduces torch's MKL `vsExp` bitwise; `A`
+  never by more than 1 ulp; libm's `expf` differs on 192 (`tools/oracle/bolt_exp_dump.cc` + `bolt_exp_compare.py` reproduce it). No host function reproduces torch's MKL `vsExp` bitwise; `A`
   feeds `exp(dt x A)` on the card, so a 1 ulp difference in a constant is far below the kernels' own tolerance.
 - **What is skipped is named.** The 849 vision / projector tensors of SergiioB's checkpoint (`vision_model.*`,
   `vision_projector.*`, `mlp1.*`) are skipped by prefix and counted; every other tensor is consumed (unconsumed = 0, the
