@@ -42,6 +42,17 @@
 //               (the template's own render_content does that; joining first keeps a part without "type").
 //               EOS [200001, 200008] (<|eom|> 200007 is NOT one), the sampling defaults (T 1.0, top-k 64,
 //               top-p 0.95) with the model's softcap, and generation_config.json's stop_strings are b70-serve's.
+//   Bolt        Nemotron 3.5 Bolt (model_type nemotron_h_omni over llm_config.model_type nemotron_h_puzzle, spec 25e): ChatML,
+//               the checkpoint's chat_template.jinja (no BOS; the system block is always rendered); the template reads the
+//               request's chat_template_kwargs (enable_thinking - default true -, medium_effort, truncate_history_thinking -
+//               default true -; force_nonempty_content is the OUTPUT parser's; anything else passes through unchecked); the
+//               OpenAI top-level reasoning_effort is mapped (spec 25 decision 13): none / minimal -> enable_thinking false,
+//               low / medium -> medium_effort true, high (and xhigh) -> the default, an explicit kwarg always wins. The
+//               generation prompt ends in "<think>\n" (thinking on: the output OPENS inside reasoning, the `ultra_v3` rules
+//               of server/toolcall_bolt.h) or "<think></think>" (thinking off: everything is content); tool calls are Qwen3-Coder
+//               XML (the Qwen parser, server/toolcall.h). A message's list of parts goes to the template as it is (its
+//               render_content concatenates the text parts). EOS [2, 11] and the sampling defaults (T 1.0, top-p 0.95 -
+//               Options::sampling_defaults) are b70-serve's (src/cli/bolt_serve.h).
 
 #include <memory>
 #include <string>
@@ -53,20 +64,22 @@
 namespace server {
 
 struct ChatFormat {
-  enum class Kind { Qwen, K2Horizon, Kolibri, Muse, Lfm2 };
+  enum class Kind { Qwen, K2Horizon, Kolibri, Muse, Lfm2, Bolt };
   Kind kind = Kind::Qwen;
 
   // config.json's model_type -> the format; anything but "k2_horizon", "kolibri1", "muse_glimmer" (or
-  // "muse_glimmer_text") and "lfm2_moe" reads as Qwen.
+  // "muse_glimmer_text"), "lfm2_moe" and "nemotron_h_omni" reads as Qwen.
   static ChatFormat for_model_type(const std::string& model_type);
   static ChatFormat k2_horizon() { return ChatFormat{Kind::K2Horizon}; }
   static ChatFormat kolibri() { return ChatFormat{Kind::Kolibri}; }
   static ChatFormat muse() { return ChatFormat{Kind::Muse}; }
   static ChatFormat lfm2() { return ChatFormat{Kind::Lfm2}; }
+  static ChatFormat bolt() { return ChatFormat{Kind::Bolt}; }
   const char* name() const;
   // The request's chat_template_kwargs reach the template beside enable_thinking.
   bool template_kwargs() const {
-    return kind == Kind::K2Horizon || kind == Kind::Kolibri || kind == Kind::Muse || kind == Kind::Lfm2;
+    return kind == Kind::K2Horizon || kind == Kind::Kolibri || kind == Kind::Muse || kind == Kind::Lfm2 ||
+           kind == Kind::Bolt;
   }
   // The template reads every message's content as a string (spec 20e: Kolibri-1; spec 23e: Muse-Glimmer).
   bool string_content() const { return kind == Kind::Kolibri || kind == Kind::Muse; }
@@ -83,13 +96,16 @@ nlohmann::json template_messages(const ChatFormat& format, const nlohmann::json&
 // (a bad value is the client's error, a 400): K2's tool_call_format and reasoning_effort;
 // Kolibri's reasoning_effort (a string of its seven, or null) and preserve_thinking (a bool); LFM2's preserve_thinking (a bool);
 // Muse's reasoning_strength (low | medium | high | xhigh), current_date / knowledge_cutoff (strings) and
-// tool_namespace_descriptions (an object of strings). Throws std::invalid_argument naming the field.
+// tool_namespace_descriptions (an object of strings); Bolt's enable_thinking, medium_effort, truncate_history_thinking and
+// force_nonempty_content (booleans). Throws std::invalid_argument naming the field.
 void check_template_kwargs(const ChatFormat& format, const nlohmann::json& kwargs);
 
 // Spec 23e: the kwargs this format's template gets for a request - its chat_template_kwargs, and for Muse the
 // OpenAI top-level `reasoning_effort` (null: absent) as reasoning_strength unless the kwargs name one already (spec
-// 23 decision 3; one of low | medium | high | xhigh, else std::invalid_argument naming reasoning_effort). Every
-// other format: the kwargs unchanged (reasoning_effort ignored, as before).
+// 23 decision 3; one of low | medium | high | xhigh, else std::invalid_argument naming reasoning_effort). Spec 25e: for
+// Bolt (decision 13) none | minimal -> enable_thinking false, low | medium -> medium_effort true, high | xhigh -> nothing,
+// each unless the kwargs name that key already (an explicit kwarg wins); anything else std::invalid_argument naming
+// reasoning_effort. Every other format: the kwargs unchanged (reasoning_effort ignored, as before).
 nlohmann::json request_template_kwargs(const ChatFormat& format, const nlohmann::json& kwargs,
                                        const nlohmann::json& reasoning_effort);
 

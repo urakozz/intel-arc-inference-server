@@ -160,8 +160,12 @@ Server::Outcome Server::generate(const Request& r,
       // Spec 23e: Muse-Glimmer maps the top-level reasoning_effort onto reasoning_strength (decision 3).
       const nlohmann::json kwargs = request_template_kwargs(opts_.chat_format, r.template_kwargs, r.reasoning_effort);
       check_template_kwargs(opts_.chat_format, kwargs);
-      prompt = deps_.tmpl.render_with_kwargs(template_messages(opts_.chat_format, r.messages), r.tools,
-                                             r.enable_thinking, kwargs);
+      // Spec 25e: the kwargs after the reasoning_effort mapping may carry the enable_thinking the request did not (Bolt: none /
+      // minimal); the template variable is that one (for every other format the kwargs' value IS r.enable_thinking).
+      const bool thinking = kwargs.is_object() && kwargs.contains("enable_thinking") && kwargs.at("enable_thinking").is_boolean()
+                                ? kwargs.at("enable_thinking").get<bool>()
+                                : r.enable_thinking;
+      prompt = deps_.tmpl.render_with_kwargs(template_messages(opts_.chat_format, r.messages), r.tools, thinking, kwargs);
     } else {
       prompt = deps_.tmpl.render(r.messages, r.tools, r.enable_thinking);
     }
