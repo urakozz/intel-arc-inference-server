@@ -322,8 +322,8 @@ The operator approved every proposed decision below as written on 2026-10-20.
 Plan 26a, `tools/spec/lilicorr_p0_project.py` (r63.verdict). **Not a gate** (the operator's 2026-10-15 ruling): 26b / 26c are
 built whatever it shows. On 2026-10-23 nothing of the real drafter has been read (its 962 MB of weights were not
 downloaded: PENDING-WEIGHTS) and the real Bolt tap dumps, route records and card costs are the box's (queue row 63), so
-every default below is PROVISIONAL and every cost DERIVED from the bytes (`lilicorr_p0_project.py`'s table, spec 25 §14's
-layout bytes; depth 4096):
+every default below is PROVISIONAL and every cost DERIVED from the bytes (`lilicorr_p0_project.py`'s table over spec 25
+§14's layout bytes, printed by `test_lilicorr_p0_project.py`'s `test_derived`; depth 4096):
 
 | | M = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|

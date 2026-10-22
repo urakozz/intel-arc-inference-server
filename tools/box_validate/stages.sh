@@ -4529,7 +4529,8 @@ st_r63_host() {
   chk "IMAGE=\${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest} SITE=oracle-out-q4exp-site MODEL=lilicorr STEPS=check tools/oracle/dflash_p0.sh" \
     "the reference's and the acceptance's tests in the oracle image (the tiny pair: 25a's tiny Bolt + lilicorr_make_tiny)"
   chk "python3 tools/spec/test_lilicorr_p0_project.py && python3 tools/spec/test_expert_union.py" "the projection's and the union's tests"
-  grab_all host 'lilicorr_cost_names_test OK|mutation|nvfp4:|tiny pair|lilicorr batch|int8 arm|int4 arm|^ok' 40
+  jgrab host '^lilicorr_cost_names_test$' 'OK|names'
+  x "grep -hE 'mutation|nvfp4:|tiny pair|lilicorr batch|int8 arm|int4 arm|^ok' oracle-out-lilicorr-p0/test_dflash_ref.log oracle-out-lilicorr-p0/test_dflash_accept.log | head -60"
   finish
 }
 stage r63.vllmref   63 optin   cpu vllm_image                -        "lilicorr_vllm_check.py in the vLLM image: the head bitwise in fp32"
