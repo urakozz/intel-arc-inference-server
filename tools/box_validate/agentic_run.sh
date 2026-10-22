@@ -7,7 +7,8 @@
 # Writes <out dir>/run.json (one record per request), <out dir>/server-log/ (the server's --log-requests records, which give the
 # report the ideal prefix reuse), <out dir>/server.log and <out dir>/report.md. Exit: the loop's (0 when it ran), 1 when the
 # server did not come up.
-# Env: PORT (8013), WAIT (900 s for /v1/models), TURNS (12), MAX_TOKENS (1024), B70_SERVE (the binary; default this tree's
+# Env: PORT (8013), WAIT (900 s for /v1/models), TURNS (12), MAX_TOKENS (1024), EXTRA (spec 25e: a JSON object merged into every
+# request body - Bolt's chat_template_kwargs arms), B70_SERVE (the binary; default this tree's
 # build/src/cli/b70-serve - test_box_validate.py points it at a stand-in).
 set -u
 cd "$(dirname "$0")/../.." || exit 2
@@ -31,7 +32,7 @@ done
 rc=1
 if [ "$up" = 1 ]; then
   python3 tools/prefix/agentic_loop.py run "$transcript" "http://127.0.0.1:$port" "$out/run.json" \
-    --turns "${TURNS:-12}" --max-tokens "${MAX_TOKENS:-1024}"
+    --turns "${TURNS:-12}" --max-tokens "${MAX_TOKENS:-1024}" ${EXTRA:+--extra "$EXTRA"}
   rc=$?
 else
   echo "agentic_run: the server did not come up"
