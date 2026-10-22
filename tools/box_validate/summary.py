@@ -10,10 +10,12 @@
         and the commands of the opt-in and manual stages that did not run.
 
 State directory (written on the box by tools/box_validate/remote.sh):
-  <id>.status   one line: id, result, rc, start, end, seconds, reason (tab separated)
+  <id>.status   one line: id, result, rc, start, end, seconds, reason, device, lock (tab
+                separated; older states have the first seven)
   <id>.log      the stage's log: METRIC / NOTE / BAD / SKIP_REASON / JUNIT lines among the rest
   <id>.rows     interleave.sh's ROW / WARM lines, for timed stages
-  meta.env      KEY=value lines (shas, trees, times)
+  meta-<D>.env  KEY=value lines (shas, trees, times) of device D's orchestrator (meta.env in
+                older states)
 Registry TSV (written by tools/box_validate.sh from tools/box_validate/stages.sh):
   row<TAB>id<TAB>title | note<TAB>row<TAB>text | stage<TAB>id<TAB>row<TAB>sel<TAB>kind<TAB>needs<TAB>after<TAB>title
   | cmd<TAB>id<TAB>line  (the commands of opt-in and manual stages)
@@ -139,8 +141,34 @@ def read_status(state, sid):
         return None
     with open(path, encoding="utf-8", errors="replace") as f:
         p = f.read().strip().split("\t")
-    p += [""] * (7 - len(p))
-    return dict(result=p[1], rc=p[2], start=p[3], end=p[4], secs=p[5], reason=p[6])
+    p += [""] * (9 - len(p))
+    return dict(result=p[1], rc=p[2], start=p[3], end=p[4], secs=p[5], reason=p[6], device=p[7], lock=p[8])
+
+
+def where(r):
+    """the device a stage ran on and the lock it held: `1 card`, `0 box`, `0 cpu` (empty: not run)"""
+    d, lock = r.get("device", ""), r.get("lock", "")
+    if not d:
+        return ""
+    return f"{d} {lock}" if lock and lock != "none" else d
+
+
+def read_meta(state):
+    """-> (the first value of each key, {device: {key: value}}) from meta.env (older states) and
+    meta-<D>.env (one per orchestrator)"""
+    shared, per = OrderedDict(), OrderedDict()
+    names = sorted(n for n in os.listdir(state) if re.fullmatch(r"meta(-.+)?\.env", n)) if os.path.isdir(state) else []
+    for n in names:
+        kv = OrderedDict()
+        with open(os.path.join(state, n), encoding="utf-8") as f:
+            for line in f:
+                if "=" in line:
+                    k, v = line.rstrip("\n").split("=", 1)
+                    kv[k] = v
+        per[kv.get("device", n[5:-4] or "0")] = kv
+        for k, v in kv.items():
+            shared.setdefault(k, v)
+    return shared, per
 
 
 def read_log(state, sid):
@@ -167,13 +195,9 @@ def hms(secs):
 def cmd_report(a):
     rows, notes, stages, cmds = read_registry(a.registry)
     meta = OrderedDict(kv.split("=", 1) for kv in a.meta or [] if "=" in kv)
-    mp = os.path.join(a.state, "meta.env")
-    if os.path.exists(mp):
-        with open(mp, encoding="utf-8") as f:
-            for line in f:
-                if "=" in line:
-                    k, v = line.rstrip("\n").split("=", 1)
-                    meta.setdefault(k, v)
+    shared, per_device = read_meta(a.state)
+    for k, v in shared.items():
+        meta.setdefault(k, v)
     logdir = a.logdir or a.state
 
     res = OrderedDict()
@@ -191,10 +215,16 @@ def cmd_report(a):
         res[sid] = r
 
     out = [f"# Box validation - {a.date or meta.get('finished', '')[:10] or 'run'}", ""]
-    for k in ("tree_sha", "baseline_sha", "baseline_ref", "state", "tree", "baseline_tree", "started",
-              "finished", "selected"):
+    keys = ["tree_sha", "baseline_sha", "baseline_ref", "state", "tree", "baseline_tree"]
+    if len(per_device) <= 1:
+        keys += ["started", "finished", "selected"]
+    for k in keys:
         if k in meta:
             out.append(f"- {k.replace('_', ' ')}: `{meta[k]}`")
+    if len(per_device) > 1:   # one orchestrator per card on this state
+        for d, kv in per_device.items():
+            out.append(f"- device {d}: started `{kv.get('started', '?')}`, finished `{kv.get('finished', '-')}`, "
+                       f"selected `{kv.get('selected', '')}`")
     g0 = [sid for sid, s in stages.items() if s["sel"] == "g0"]
     g0_ok = all(res[s]["result"] == "PASS" for s in g0)
     out += ["", f"**G0 (bitwise neutrality, stop-the-line): {'PASS' if g0_ok else 'NOT PASSED'}** - "
@@ -213,7 +243,7 @@ def cmd_report(a):
     for rid, title in rows.items():
         ids = [sid for sid, s in stages.items() if s["row"] == rid]
         out += [f"## Row {rid} - {title}", "",
-                "| stage | what | result | reason / notes | time | log |", "|---|---|---|---|---|---|"]
+                "| stage | what | result | reason / notes | device | time | log |", "|---|---|---|---|---|---|---|"]
         numbers = []
         for sid in ids:
             s, r = stages[sid], res[sid]
@@ -226,7 +256,7 @@ def cmd_report(a):
                     extra.append(line.strip()[6:])
             reason = "; ".join([r.get("reason", "")] + extra[:6]).strip("; ")
             logp = os.path.join(logdir, sid + ".log") if log else ""
-            out.append(f"| `{sid}` | {cell(s['title'], 120)} | **{r['result']}** | {cell(reason)} | "
+            out.append(f"| `{sid}` | {cell(s['title'], 120)} | **{r['result']}** | {cell(reason)} | {where(r)} | "
                        f"{hms(r.get('secs', ''))} | {('`' + logp + '`') if logp else ''} |")
             mets = OrderedDict()
             for line in log:
