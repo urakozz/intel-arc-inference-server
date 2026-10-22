@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <stdexcept>
 
 namespace runtime::bolt {
@@ -43,7 +45,7 @@ DevicePlan device_plan(const model::BoltDesc& d, const model::BoltPlacement& p, 
   const uint32_t attn = device_blocks(d, p, dev, model::BoltBlock::Attention);
   const uint32_t mamba = device_blocks(d, p, dev, model::BoltBlock::Mamba);
   pl.kv = size_t(attn) * max_len * d.kv_heads * d.head_dim * 2 * 2;                 // K and V, bf16
-  pl.ssm = loader::bolt::ssm_state_bytes(d, mamba) * (1 + size_t(extra.verify_slots));
+  pl.ssm = loader::bolt::ssm_state_bytes(d, mamba) * (1 + size_t(extra.verify_slots)) / (extra.bf16_state ? 2 : 1);
   pl.conv_rings = loader::bolt::conv_ring_bytes(d, mamba);
   pl.decode_scratch = extra.decode_scratch;
   pl.prefill_scratch = extra.prefill_scratch;
@@ -145,6 +147,172 @@ std::string describe(const DevicePlan& p, size_t device_bytes) {
   std::string s = buf;
   if (device_bytes) s += " of " + std::to_string(double(device_bytes) / 1e9) + " GB";
   return s;
+}
+
+// ==== spec 25c: the decode list ==========================================================================================
+namespace {
+// The kernels' constants the sizes depend on (src/kernels/bolt_kernels.h is their home on the host; this file stays free
+// of the kernel-dir define - bolt_capture.cc checks them against it).
+constexpr uint32_t kAttnTgt = 64, kAttnPart = 130, kArgmaxChunk = 1024, kTopK = 9;
+constexpr size_t kLine = 64;   // an empty group's allocation
+size_t line(size_t b) { return b ? b : kLine; }
+model::GemvShape shape_of(const model::BoltDesc& d, uint32_t l, model::BoltLinearId id) {
+  for (const model::BoltLinear& ln : d.linears(l))
+    if (ln.id == id) return ln.shape;
+  return {0, 0, 0, 0};
+}
+}  // namespace
+
+BoltAttn parse_attn(const std::string& v) {
+  if (v.empty() || v == "flash") return BoltAttn::Flash;
+  if (v == "eager") return BoltAttn::Eager;
+  throw std::runtime_error("B70_BOLT_ATTN=" + v + ": expected flash or eager");
+}
+BoltAttn bolt_attn() {
+  const char* v = std::getenv("B70_BOLT_ATTN");
+  return parse_attn(v ? v : "");
+}
+const char* bolt_attn_name(BoltAttn a) { return a == BoltAttn::Eager ? "eager" : "flash"; }
+
+BoltFuse parse_fuse(const std::string& v) {
+  BoltFuse f;
+  if (v.empty() || v == "none") return f;
+  if (v == "all") return BoltFuse{true, true, true};
+  size_t at = 0;
+  while (at <= v.size()) {
+    const size_t comma = v.find(',', at);
+    const std::string w = v.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+    if (w == "router")
+      f.router = true;
+    else if (w == "route")
+      f.route = true;
+    else if (w == "conv")
+      f.conv = true;
+    else
+      throw std::runtime_error("B70_BOLT_FUSE=" + v + ": '" + w +
+                               "' is not an arm - expected none, all or a comma list of router, route, conv");
+    if (comma == std::string::npos) break;
+    at = comma + 1;
+  }
+  return f;
+}
+BoltFuse bolt_fuse() {
+  const char* v = std::getenv("B70_BOLT_FUSE");
+  return parse_fuse(v ? v : "");
+}
+std::string bolt_fuse_name(BoltFuse f) {
+  if (!f.any()) return "none";
+  if (f.router && f.route && f.conv) return "all";
+  std::string s;
+  if (f.router) s += "router";
+  if (f.route) s += std::string(s.empty() ? "" : ",") + "route";
+  if (f.conv) s += std::string(s.empty() ? "" : ",") + "conv";
+  return s;
+}
+
+BoltState parse_state(const std::string& v) {
+  if (v.empty() || v == "fp32") return BoltState::Fp32;
+  if (v == "bf16") return BoltState::Bf16;
+  throw std::runtime_error("B70_BOLT_SSM=" + v + ": expected fp32 or bf16 (Decision 2)");
+}
+BoltState bolt_state() {
+  const char* v = std::getenv("B70_BOLT_SSM");
+  return parse_state(v ? v : "");
+}
+const char* bolt_state_name(BoltState s) { return s == BoltState::Bf16 ? "bf16" : "fp32"; }
+
+BoltPending pending_of(const model::BoltDesc& d, uint32_t l) {
+  if (d.is_mamba(l)) return {shape_of(d, l, model::BoltLinearId::OutProj).S, 0};
+  if (d.is_attention(l)) return {shape_of(d, l, model::BoltLinearId::OProj).S, 0};
+  return {shape_of(d, l, model::BoltLinearId::Fc2).S, shape_of(d, l, model::BoltLinearId::SharedDown).S};
+}
+BoltPending cut_pending(const model::BoltDesc& d, const model::BoltPlacement& p) {
+  if (p.devices < 2) return {};
+  return pending_of(d, p.split - 1);
+}
+PpLandingLayout landing_layout(const model::BoltDesc& d, const model::BoltPlacement& p) {
+  return pp_landing_layout(size_t(kM) * d.hidden * 2, size_t(cut_pending(d, p).total()) * kM * d.hidden * 4);
+}
+
+ScratchSizes scratch_sizes(const model::BoltDesc& d, uint32_t max_len, BoltAttn a) {
+  ScratchSizes s;
+  size_t widest = 0;
+  uint32_t max_i = 0;
+  bool mamba = false, attn = false, moe = false;
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    for (const model::BoltLinear& ln : d.linears(l))
+      if (ln.kind == model::WeightKind::Int4 && ln.id != model::BoltLinearId::ExpertUp &&
+          ln.id != model::BoltLinearId::ExpertDown)
+        widest = std::max(widest, size_t(ln.shape.S) * ln.shape.N);
+    if (d.is_moe(l)) widest = std::max(widest, size_t(pending_of(d, l).total()) * d.hidden);
+    mamba = mamba || d.is_mamba(l);
+    attn = attn || d.is_attention(l);
+    moe = moe || d.is_moe(l);
+    max_i = std::max(max_i, d.inter.at(l));
+  }
+  const size_t M = kM;
+  s.h0 = s.h1 = s.x = M * d.hidden * 2;
+  s.slices = line(widest * M * 4);
+  s.xc = line(mamba ? M * d.m_conv_dim * 2 : 0);
+  s.y = s.g = line(mamba ? M * d.m_inner * 2 : 0);
+  s.logits_r = line(moe ? M * d.max_experts() * 4 : 0);
+  s.routes = line(size_t(d.layers) * M * kRouteWords * 4);
+  s.lat = line(moe ? M * d.latent * 2 : 0);
+  s.sh = line(moe ? M * d.shared_inter * 2 : 0);
+  s.moe_a = line(moe ? M * kTopK * max_i * 2 : 0);
+  s.moe_r = line(moe ? M * d.latent * 2 : 0);
+  s.attn_q = line(attn ? M * d.q_n() * 4 : 0);
+  s.attn_part = line(attn ? size_t(d.q_heads) * kAttnTgt * M * kAttnPart * 4 : 0);
+  s.attn_out = line(attn ? M * d.q_n() * 2 : 0);
+  s.ones = line(attn ? M * d.q_n() * 2 : 0);
+  s.attn_scores = attn && a == BoltAttn::Eager ? M * d.q_heads * size_t(max_len) * 4 : 0;
+  s.logits = M * d.vocab * 4;
+  s.argmax_part = M * ((d.vocab + kArgmaxChunk - 1) / kArgmaxChunk) * 2 * 4;
+  return s;
+}
+
+PersistentSizes persistent_sizes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, uint32_t max_len,
+                                 BoltState st) {
+  PersistentSizes s;
+  s.control = 128;   // sizeof(runtime::Control), checked in bolt_buffers.cc
+  const uint32_t attn = device_blocks(d, p, dev, model::BoltBlock::Attention);
+  const uint32_t mamba = device_blocks(d, p, dev, model::BoltBlock::Mamba);
+  s.kv_k = s.kv_v = line(size_t(attn) * kv_layer_bytes(d, max_len));
+  s.conv_ring = line(size_t(mamba) * ring_layer_bytes(d));
+  s.ssm = line(size_t(mamba) * ssm_layer_bytes(d, st));
+  return s;
+}
+
+size_t decode_scratch_bytes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, uint32_t max_len,
+                            BoltAttn a, BoltState st) {
+  const PersistentSizes ps = persistent_sizes(d, p, dev, max_len, st);
+  const uint32_t attn = device_blocks(d, p, dev, model::BoltBlock::Attention);
+  const uint32_t mamba = device_blocks(d, p, dev, model::BoltBlock::Mamba);
+  const size_t lines = (attn ? 0 : 2 * kLine) + (mamba ? 0 : 2 * kLine);   // what plan()'s exact terms leave out
+  return ps.control + scratch_sizes(d, max_len, a).total() + lines;
+}
+
+size_t device_launches(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, BoltAttn a, BoltFuse f,
+                       PpHandoff h) {
+  model::validate(p, d);
+  size_t n = 0;
+  for (uint32_t l = p.first(dev); l < p.end(dev); ++l) {
+    if (d.is_mamba(l))
+      n += 6 - (f.conv ? 1 : 0);
+    else if (d.is_attention(l))
+      n += a == BoltAttn::Eager ? 5 : 6;
+    else
+      n += 9 - (f.router ? 1 : 0) - (f.route ? 1 : 0);
+  }
+  if (dev == 0) n += 1;                                     // nb_embed_gather
+  if (dev + 1 == p.devices) n += 4;                         // the final norm, the head, the two argmax stages
+  if (p.devices > 1 && h == PpHandoff::Peer) n += 1;        // pp_send (device 0) / pp_recv (device 1)
+  return n;
+}
+size_t decode_launches(const model::BoltDesc& d, const model::BoltPlacement& p, BoltAttn a, BoltFuse f, PpHandoff h) {
+  size_t n = 0;
+  for (uint32_t dev = 0; dev < p.devices; ++dev) n += device_launches(d, p, dev, a, f, h);
+  return n;
 }
 
 }  // namespace runtime::bolt
