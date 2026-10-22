@@ -1,7 +1,8 @@
 # Spec 13 - batching: several sequences in one decode step
 
-**Status:** design, 2026-09-28, for operator review. Open decisions are marked
-**(decide)**.
+**Status:** design, 2026-09-28; **revised 2026-10-23 (§9, the operator's decisions; §10, the two-card
+replica mode for later)** - §9 supersedes §2's "(decide)" on the layout, §3's "MTP: out of scope", and §7's
+first line. Open decisions are marked **(decide)**.
 
 **Order:** last of specs 10-13: it needs spec 10's decode attention (per-sequence depth
 in the stride), and it is much cheaper in memory after spec 12 (int8 KV).
@@ -106,4 +107,94 @@ A mixed layout (one long slot for the main thread, small slots for subagents, e.
   dense Qwen3.8 the rows share weights and spec 8b's M-row step times apply as written.
 - **§5, measurement:** llama-benchy's total tg at concurrency counts staggered admission inside the
   decode window as slow decode; every concurrency row states how admission was timed.
+
+## 9. Revision - 2026-10-23: MTP in every slot, the layout, the models
+
+What changed on main since §1-§8 were written: spec 12b's int8 KV cache, spec 14's Agnes, spec 19d's speculative
+step under the scheduler (`server::BatchEngineIface::step_spec`, one proposer state per slot, a per-row K from
+`server::AdaptiveK`, tested against the mock in `dflash_scheduler_test`), spec 16's pipeline parallel, and the MoE
+models (specs 15, 18, 20-25). Plan 13c Task 1 (the scheduler against `MockBatchEngine`) is on main; 13a and 13b
+are not built.
+
+**Operator's decisions (2026-10-23):**
+
+1. **MTP and batching together** (vLLM's shape: each sequence contributes K + 1 rows to one verify step). §3's
+   "MTP: out of scope" and §7's "MTP together with batching (a later spec)" are withdrawn. The engine implements
+   `step_spec` with the MTP head per slot; DFlash per slot (spec 19 §5 "Batching") follows on the same row table.
+2. **Layout: one long slot and three short ones** on one card - the main session at 131072 and three subagent
+   slots at 32768, **int8 KV** (spec 12b), MTP on in every slot. The KV form stays engine-wide (one form, so
+   one `_KV8` kernel set); the addressing is per slot (a KV base and a max_len each).
+3. **Models: Qwen3.8 and Agnes first** (the dense hybrids sharing the decode kernels; Agnes's 54 GDN + 18 FA
+   layers from the descriptor, never a Qwen3.8 constant). The MoE models (Ornith, K2, LFM2.5, Muse, Bolt) are
+   per-model follow-ons: their rows route to different experts, so their cost model is spec 26's expert union
+   (plan 26a, `tools/spec/expert_union.py`), not §1's dense M-row table.
+4. **Concurrency on ONE card;** the second card stays free (pipeline parallel, long contexts, another model).
+   The two-card replica mode is §10, written now and built later.
+
+**The row table.** A decode step's rows are (slot, position) pairs: today's M rows of one sequence (MTP verify)
+and §3's rows of different sequences are the same table, and so are their mixes (two slots x (K = 3 + 1) = 8
+rows). Per slot: `Control` (pos, pending token, `gdn_live`), the GDN state and its speculative slots (spec 8's
+`gdn_spec`, 4 per sequence today - the live one and 3), the conv ring, the main KV region, the MTP head's KV
+layer and its `hh` row. `gdn_step` indexes state by the row's slot and speculative index; `attn_prep` /
+decode attention take each row's slot, pos and KV base (v2's per-row stride).
+
+**A row budget instead of an exclusion.** The decode kernels exist up to M = 8 (spec 19a's verify probe). The
+scheduler hands out K under a cap of 8 rows a step (`AdaptiveK` per request, then clipped to the budget, the
+longest-running main session first). Derived from spec 8b's verify costs (1.17 / 1.52 / 1.74 plain steps at
+M = 2 / 3 / 4; M = 5..8 extrapolated at +0.22 a row, unmeasured - plan 19a Task 4, box Session 6b) and the
+measured acceptance (K = 1: 1.92 ids, K = 3: 3.455):
+
+| active slots | K each | rows | ids per plain-step cost (derived) |
+|---|---|---:|---:|
+| 1 | 3 | 4 | ~1.5x (today's `--mtp`) |
+| 4 | 0 | 4 | ~2.3x |
+| 4 | 1 | 8 | ~3.0x |
+
+13a measures the M = 5..8 step and the mixed-row (different slots, different depths) step before 13b fixes the
+budget rule.
+
+**Memory (derived, Qwen3.8, one card: 32.53 GB, `--mem-reserve-gb` 1.5, model 18.1 GB, prefill scratch 0.7 GB;
+int8 KV 33,024 B a position, x 17 / 16 with the MTP head's layer; ~0.62 GB of GDN state + conv ring a slot with
+4 GDN state slots):**
+
+| layout, int8 KV, MTP on | KV | state | fits |
+|---|---:|---:|---|
+| 1 x 131072 (today) | 4.6 GB | 0.6 GB | yes |
+| **1 x 131072 + 3 x 32768** (decided) | 8.0 GB | 2.5 GB | yes, ~1 GB to spare - 13a confirms against `runtime::plan` |
+| 2 x 131072 | 9.2 GB | 1.2 GB | yes |
+| 4 x 65536 | 9.2 GB | 2.5 GB | marginal |
+
+At bf16 KV the decided layout does not fit; `--batch` with bf16 KV shrinks the short slots (the planner's
+auto max_len per slot), it never refuses the main slot's length silently. Agnes's numbers are its descriptor's
+(18 FA layers, 54 GDN) and 13a prints them.
+
+**Prefill while the batch decodes.** An opencode subagent's first prompt is 10-30k ids; a 2048-row chunk costs
+~1 s (measured, spec 2), which stalls every decoding row. Two levers, both measured in 13a: the interleave chunk
+(512 / 1024 / 2048) against the worst inter-token gap of the main session, and the prefix cache (spec 7) - the
+subagents share opencode's system prompt, so a slot restores the shared prefix from host instead of prefilling it.
+**(decide) after 13a:** the chunk size and whether a long admission waits for a quiet tick.
+
+**Gates added to §4:** B1 at mixed K (a slot verifying K = 3 beside a slot at K = 0 equals each alone); B2 with
+`--mtp` on (greedy MTP output identical to plain, per slot, at 4 concurrent requests); B3 for the speculative
+state (a slot's rejected drafts leave every other slot's `gdn_spec` and head KV byte-identical).
+
+**Plans.** 13a, 13b and 13c's remaining tasks are refreshed against this section before 13a starts (one
+implementing agent at a time).
+
+## 10. Later: the two-card replica mode (written 2026-10-23, not built)
+
+**The idea:** card 0 serves the main session with today's single-sequence engine (MTP, the whole card for
+context), card 1 a batch of the subagents (§9's batched engine, or simply a second single-sequence engine).
+No new kernels for the routing half: two engines, one per card, behind one `b70-serve`.
+
+- **Routing:** the scheduler places a request by its conversation - the long-running session (the one whose
+  prefix the cache holds) on card 0, the others on card 1. A request never moves between cards mid-generation;
+  a prefix-cache entry is restorable on either card (the host-side layout is the same).
+- **Memory:** each card loads the model (18.1 GB each for Qwen3.8); card 0 keeps today's full max_len, card 1
+  splits its KV among its slots.
+- **What it excludes:** pipeline parallel (spec 16) and a second model on card 1 while it runs; `--replica` and
+  `--pp 2` are exclusive.
+- **Gates:** B2's concurrency on two cards (each request's ids equal to running alone on its card); the prefix
+  cache's C2 across cards; the device-1 prefill gap (3.4 % slower, measured) recorded, not hidden.
+- **When:** after 13b-13c, on the operator's go.
 
