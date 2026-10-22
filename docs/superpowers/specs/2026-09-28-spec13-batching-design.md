@@ -181,6 +181,48 @@ state (a slot's rejected drafts leave every other slot's `gdn_spec` and head KV 
 **Plans.** 13a, 13b and 13c's remaining tasks are refreshed against this section before 13a starts (one
 implementing agent at a time).
 
+### 9.1 Addendum - 2026-10-23: the memory recomputed, Agnes's layout, the follow-on order
+
+Recomputed from the code's own formulas (buffer_sizes.cc / buffer_sizes.h KvLayout / MtpDims, memory_plan.cc's
+terms; the method reproduces spec 6's measured decode-state and prefill lines byte for byte). Budget 32.53 - 1.5
+reserve = 31.03 GB (the reserve itself is unconfirmed on the box, queue row 7). Weights in the SERVING form: int8
+head + the MTP head (0.849 GB). All derived; nothing batched has run.
+
+| per slot, int8 KV, MTP on | Qwen3.8 | Agnes |
+|---|---:|---:|
+| KV a position (with the head's layer) | 35,088 B | 39,216 B |
+| state a slot (4 GDN states + conv ring) | 0.620 GB | 0.697 GB |
+| shared: weights + MTP head + RoPE at 128k | 17.70 GB | 20.52 GB |
+| shared: decode scratch, MTP rows, prefill, int8 | 0.87 GB | 0.93 GB |
+
+- **Qwen3.8, 1 x 131072 + 3 x 32768: total 29.10 GB, 1.93 GB spare** (the table above §9 said ~1 GB: it counted the
+  bf16 head without the MTP head). 4 x 65536 leaves 0.80 GB.
+- **Agnes, the same layout: 33.24 GB - 2.21 GB over.** **Operator's decision (2026-10-23): Agnes runs a shorter main
+  slot - 1 x 98304 + 3 x 32768, MTP off in the three short slots - 30.22 GB, 0.81 GB spare.** Qwen3.8 keeps 1 x 131072
+  + 3 x 32768 with MTP in every slot. Short slots below 32k are refused as a layout (an opencode subagent's first
+  prompt is 10-30k ids). Under the 8-row budget Agnes's main slot verifies at K = 3 beside three plain short rows
+  (7 rows for ~6.5 ids, against 8 rows for ~7.7 with K = 1 everywhere - derived from the measured acceptance).
+  Rejected for now: the embedding in host USM (2.54 GB back, spec 22 plan 22d Task 5) and a shared pool of
+  speculative GDN states.
+- **What this asks of 13b:** a max_len PER SLOT (`BatchEngineIface::max_len()` is one value today,
+  src/server/batch_engine.h:27); MTP on or off PER SLOT (a slot without speculative GDN states, `MtpDims` refuses
+  fewer than 4 today, buffer_sizes.cc:273); the layout from the planner per model (`runtime::plan` grows a slot list),
+  the extra captured lists (per batch size and per M) counted in it.
+- **The dense gains are an upper bound at depth.** spec 8b's M-row costs are rows of ONE sequence, whose K/V wave
+  attn_v2 shares across the rows (attn_v2.cl:35-36); rows of different slots each read their own KV (~1.08 GB a row at
+  32k on Qwen3.8, derived). 13a measures the mixed-depth step.
+
+**Follow-ons (operator, 2026-10-23), in order, each its own plan after 13b-13c:**
+1. **Ornith** (MoE, 256 experts top-8): shares Qwen's decode list and already has M = 2..4 MoE lists (spec 15);
+   ~1.6x / 2.2x at B = 2 / 4 by bytes (estimated; rows of different sequences route nearly independently, so the gain is
+   the shared non-expert weights, not an expert union).
+2. **Muse-Glimmer** (dense, its own `MuseEngine` and `mg_*` kernels; sliding-window + NoPE attention; bf16 KV; DFlash,
+   no MTP): per-row slot addressing in `mg_attn_prep` / `mg_attn` (a ring base, a full-KV base and a position per row),
+   `step_spec` in MuseEngine, a DFlash ring and taps per slot. Memory is no constraint (4 x 128k fits, estimated).
+3. **LFM2.5** (MoE, 64 experts top-4): needs M-row lists first (kM = 1 today).
+Not in spec 13: Bolt and Kolibri (two cards only - revisit beside the pipeline), K2-Horizon (one card holds ~50k
+positions in all), Qwen3.8-Flash-Next (offload-bound).
+
 ## 10. Later: the two-card replica mode (written 2026-10-23, not built)
 
 **The idea:** card 0 serves the main session with today's single-sequence engine (MTP, the whole card for
