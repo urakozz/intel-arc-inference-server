@@ -12,8 +12,13 @@
 #                           the base tree b70-inference-server.
 #
 # A new remote tree starts empty: its first `tools/box.sh build` is a full build.
-# GPU work from parallel trees must still take the shared lock:
-#   flock ~/b70-gpu.lock <cmd>
+# GPU work from parallel trees must still take the shared locks (tools/gpu_lock.sh,
+# run on the box from the tree):
+#   tools/gpu_lock.sh box -- <cmd>        the whole box: timed, two-card, idle-graded work
+#   tools/gpu_lock.sh card N -- <cmd>     card N only (ZE_AFFINITY_MASK=N), beside a job on
+#                                         the other card
+# `flock ~/b70-gpu.lock <cmd>` still takes the whole box, without the gate's priority over
+# card jobs (docs/box-day-plan.md §1.8).
 b70_remote_dir() {
   if [ -n "${REMOTE_DIR:-}" ]; then
     printf '%s\n' "$REMOTE_DIR"

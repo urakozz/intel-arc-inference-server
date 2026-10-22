@@ -19,8 +19,19 @@ tools/box_validate.sh                # sync, build, run every default stage, wai
   extracts the G0 baseline (default `b32aaaf`, main before the first blind code commit) into
   `~/b70-inference-server-g0-<sha>`, and starts `tools/box_validate/remote.sh` through
   `tools/probe/detach.sh`. The run survives a dropped ssh session or a closed laptop; the Mac only
-  polls. Every GPU stage holds `~/b70-gpu.lock`, builds use `-j44`, and timed stages run
-  interleaved rounds after a warm-up (median of 3, `uptime` and the idle grade recorded).
+  polls. A `gpu` stage holds the whole box, a `card` stage only the orchestrator's card
+  (`tools/gpu_lock.sh`), builds use `-j44`, and timed stages run interleaved rounds after a
+  warm-up (median of 3, `uptime` and the idle grade recorded).
+- **Two streams, one per card.** A second orchestrator, `tools/box_validate.sh --device 1 --only
+  <stages>`, runs beside a device-0 launch on the same state (no sync while the other runs): the
+  two run their `card` stages (one-card correctness: ctest gates, golden / parity checks,
+  refusals) at once, never the same stage, while `gpu` stages (timed, two-card, device-0 series,
+  fixed paths, host-RAM budgets) still take the whole box and are not starved (a gate lock).
+  `--dry-run` / `--list` print each stage's lock; the protocol, which sessions split and the
+  commands are in docs/box-day-plan.md §1.8. **A new stage is `gpu` unless it is clearly
+  one-card correctness**: `card` stages are checked by `test_box_validate.py` (no
+  `ZE_AFFINITY_MASK`, no pp-labelled test, nothing timed, no build, no lock, no passkey probe, no
+  writes under `~` outside the state).
 - **G0 first, stop the line.** `g0.build`, `g0.sha` (sha256 of every kernel binary present in both
   builds), `g0.bitwise` (the golden / prefill / replay gates on both builds, output compared line
   for line with timings dropped) and `g0.suite` (the baseline's whole suite on the new build). Until
