@@ -40,7 +40,8 @@ BV_ROW_IDS=(); BV_ROW_TITLES=(); BV_NOTES=()
 #                    ZE_AFFINITY_MASK, runs no pp-labelled test, builds nothing and writes only
 #                    under $STATE (test_box_validate.py checks the body)
 #         gpu-self - runs a script that takes ~/b70-gpu.lock itself (holding it here would
-#                    deadlock: flock on a second open of the same file blocks)
+#                    deadlock: flock on a second open of the same file blocks) - the old way,
+#                    exclusive without the gate: run these when no card stream runs
 #   NEEDS data keys from tools/box_validate/data.sh (comma list, or -)
 #   AFTER stages that must be PASS first (comma list, or -)
 stage() {

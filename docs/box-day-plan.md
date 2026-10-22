@@ -17,8 +17,8 @@ to it.
 | 1 | **G0, stop the line** | device 0 | `tools/box_validate.sh --only g0` | 4 | 2.5-4.5 h |
 | 2 | one-card gates: Agnes and the Qwen3.8 feature rows | device 0 | `tools/box_validate.sh --only r1,r2,r4,r5,r6,r7,r8,r9,r11,r12,r17,r18 --skip r1.sweep,r1.speed,r2.cost,r2.auto_rows,r6.cost,r8.cost,r8.rows,r11.speed` | 40 | 8-13 h |
 | 3 | Ornith's real checkpoint loads (row 19) | device 0 | `tools/box_validate.sh --only r19` | 3 | ~0.25 h |
-| 4 | Ornith decode, prefill, serving (rows 10, 13, 16) | device 0 | `tools/box_validate.sh --only r10,r13,r16 --skip r16.cost` | 21 | 3-5 h |
-| 5 | K2-Horizon (rows 14, 15, 21, 25) | device 0 | `tools/box_validate.sh --only r14,r15,r21,r25 --with r14.oracle` | 35 | 4.5-7.5 h |
+| 4 | Ornith decode, prefill, serving (rows 10, 13, 16) | device 0 (beside 5 on device 1: §1.8) | `tools/box_validate.sh --only r10,r13,r16 --skip r16.cost` | 21 | 3-5 h |
+| 5 | K2-Horizon (rows 14, 15, 21, 25) | device 0, or device 1 beside 4 (`--device 1`, §1.8) | `tools/box_validate.sh --only r14,r15,r21,r25 --with r14.oracle` | 35 | 4.5-7.5 h |
 | 6 | timed one-card rows, **box idle (RECORD)** | device 0, both idle | `tools/box_validate.sh --only r1.sweep,r1.speed,r2.cost,r2.auto_rows,r3,r6.cost,r8.cost,r8.rows,r11.speed,r16.cost` | 10 | 7-11 h |
 | 6b | DFlash verify cost at M = 5..8 and one block's draft cost (row 29, plan 19a Task 4) | device 0, both idle | `tools/box_validate.sh --only r29.cost` | 1 (opt-in) | 0.25-0.5 h (est.) |
 | 6c | llama-benchy comparison matrix: b70-serve and vLLM, one client and set of flags (row 41) | device 0, both idle | `tools/box_validate.sh --only r41.ours,r41.vllm,r41.vllm_mtp` | 3 (opt-in) | 2-3.5 h (est.) |
@@ -58,12 +58,15 @@ expected, not a failure.
 
 ## How the runbook constrains the plan
 
-- **One orchestrator per tree, one GPU lock per box.** `remote.sh` runs the selected stages
-  strictly in registry order (row order), and every `gpu` stage holds `~/b70-gpu.lock` - one
-  lock for both cards. So no two GPU stages ever overlap, whichever card they use: the
-  single-card sessions leave device 1 idle, and a second orchestrator on `DEVICE=1` would only
-  queue on the same lock. The only real parallelism is CPU work (downloads, the CPU oracles)
-  beside non-timed GPU stages (§1.6).
+- **One orchestrator per tree and card; the whole box or one card per stage.** `remote.sh` runs
+  the selected stages strictly in registry order (row order). A `gpu` stage holds the whole box
+  (`tools/gpu_lock.sh box`: `~/b70-gpu.lock` exclusive), a `card` stage only its orchestrator's
+  card (`tools/gpu_lock.sh card $DEVICE`). One orchestrator never overlaps two GPU stages, but a
+  second one on device 1 (`--device 1 --only <stages>`, the same state) runs its `card` stages
+  beside the first one's - two correctness streams at once (§1.8). Timed, two-card and
+  device-0-only stages stay `gpu`: they wait for both streams' running card stages, and new card
+  stages wait behind them. CPU work (downloads, the CPU oracles) still runs beside non-timed GPU
+  stages (§1.6).
 - **State = commit x baseline.** Results live in
   `~/b70-validate/b70-inference-server-validate/<HEAD sha12>-vs-<baseline sha12>/`. Every
   session must run from the **same commit** with the **same baseline** (default `b32aaaf`), or
@@ -280,6 +283,74 @@ alone is made on the box before session 5 - one container run of make_set.py, no
 - [ ] Rows 22, 23, 24, 26, 27, 28 need **both cards free of other DRM holders** (their GPU
       commands set `ZE_AFFINITY_MASK=0,1` themselves; no other row does). Series rows stay on
       device 0 (`DEVICE` defaults to 0): device 1 is ~3.4 % slower on prefill (docs/10).
+- [ ] No second stream (§1.8) during an idle session: `tools/box_validate.sh --status` lists
+      both orchestrators; `tools/gpu_lock.sh status` on the box shows every GPU lock (`box free`,
+      both cards `free`, the gate `free`).
+
+### 1.8 Two streams, one per card
+
+The lock protocol (`tools/gpu_lock.sh`'s header has it in full; flock(2) on files in `~`):
+
+| job | takes, in this order | runs beside |
+|---|---|---|
+| card N: a `card` stage of the device-N orchestrator, or `tools/gpu_lock.sh card N -- <cmd>` | `~/b70-gpu<N>.lock` exclusive, the gate `~/b70-gpu.wait` for an instant, `~/b70-gpu.lock` **shared**; `ZE_AFFINITY_MASK=N` | a card job on the other card |
+| whole box: a `gpu` stage, or `tools/gpu_lock.sh box -- <cmd>` | the gate exclusive while it waits, then `~/b70-gpu.lock` **exclusive** (the gate dropped) | nothing |
+| whole box, the old way: `flock ~/b70-gpu.lock <cmd>`, `gpu-self` scripts | `~/b70-gpu.lock` exclusive | nothing |
+
+- **The rule:** a card job starts when its card is free and no whole-box job runs **or waits**; a
+  whole-box job starts when no job holds either card. Once a whole-box job waits, new card jobs
+  stop at the gate: the running ones drain and it runs next, so two overlapping card streams
+  cannot starve a timed stage. flock(2) alone would - Linux grants a shared lock whenever no
+  exclusive one is *held*, a waiting one does not stop it. The old `flock ~/b70-gpu.lock` form
+  still works and excludes everything, but has no place at the gate: while card streams run,
+  take the box by hand with `tools/gpu_lock.sh box -- <cmd>` (also under `detach.sh`), and run
+  the opt-in `gpu-self` rows (their scripts lock the old way) only when no card stream runs.
+  Card -> gate -> box is the one order: no deadlock. Never nest (a job holding a lock must not
+  take another: flock on a second open of the same file waits for itself).
+- **Two orchestrators, one tree, one state.** `~/b70-validate/<tree>/.run-<N>.lock` per device
+  (`.current-<N>` names its state; an orchestrator from before this, holding `.run.lock`, blocks
+  both). Each stage is claimed (`<id>.claim`) while it runs: the other orchestrator leaves a
+  claimed stage ("RUNNING under the other orchestrator - left to it"), and a RUNNING status whose
+  claim is free is a dead orchestrator's - it runs again. G0 runs alone (DEFERRED while the other
+  is active); a stage that builds holds `.build.lock`; cpu stages of the two run one at a time
+  (`.cpu.lock`: the CPU oracles' RAM, the host tests' fixed `/tmp` directories). Servers listen on
+  8013 (device 0) / 8113 (device 1). `progress.log` lines say `[d0]` / `[d1]`, each status line
+  and the summary's `device` column the device and lock a stage ran with; `--dry-run` and
+  `--list` print the lock each stage will take.
+- **Launching the second stream** - from the same frozen worktree (§1.1), so the same commit and
+  state, after the first one started:
+  ```sh
+  tools/box_validate.sh --device 1 --only <stages> --no-wait   # the driver sees device 0's run: no sync, no push
+  tools/box_validate.sh --status                               # both orchestrators, every stage with its device
+  ```
+  The driver refuses another state or commit beside a running orchestrator, and `--push-data`
+  (push before the first launch). Device 1 runs correctness only: a timed or series row belongs
+  on device 0 - the device-1 dry-run names every whole-box stage in its selection.
+- **Split by row family, not inside a chain.** `after` / `need_pass` read the shared state: a
+  stage whose prerequisite is RUNNING in the other stream at that moment is SKIP "needs PASS
+  first" (relaunch it later). A `gpu` stage inside a stream still waits for the other stream's
+  running card stage and then holds the whole box.
+- **Host RAM:** two engines load at once (each checkpoint read through the page cache) and each
+  b70-serve's auto prefix cache pins up to 32 GiB, sized from MemAvailable at its start. Stages
+  that check a host-RAM budget (`free -g`: Muse's real checkpoint, Qwen3.8-Flash-Next's 51.8 GB
+  PLE table) and the passkey probes (fixed `/tmp/*passkey` directories) stay `gpu`.
+
+Which sessions split (`tools/box_validate.sh --list --only <rows>` shows each stage's lock):
+
+| sessions / rows | how | notes |
+|---|---|---|
+| 3, 4 and 5 | device 0: session 3, then session 4; device 1: session 5 from the start | rows 14, 15, 21 are `card` + `cpu` only; `r13.cli` (timing rows) and `r25.passkey` take the whole box; `r14.oracle` (cpu, ~20 min) holds the cpu lock, so session 4's host stages wait for it |
+| 6, 6b, 6c, 7, 8, 9c | no split | timed / idle-graded / two-card |
+| 9, 9b | no split by default | the synthetic one-card gates are `card`, but `r24.pp` / `r26.pp` / `r28.*` / `r3x.pp` need both cards; a card-only device-1 stream of row 26 or 33 beside device 0's other rows is possible once row 24 / 32 has passed |
+| later rows (no session yet) | pairs of one-card families: `--only r44,r45` (Muse synthetic) on device 0 with `--device 1 --only r51,r52` (LFM2.5); `--only r54,r55,r56` (DFlash) with `--device 1 --only r60,r61` (Bolt synthetic) | `--skip` the timed stages (`r51.p0`, `r60.p0`, `r60.fuse` - all in the device-1 streams) and run those later on device 0 with the box idle; each row's two-card stages (`*.pp`, `*.synth_pp`, `r60.golden`, `r61.golden`, `r56.pp_serve`) take the whole box when they come |
+
+```sh
+# sessions 3-5 on two cards (the frozen worktree, G0 PASS in this state)
+tools/box_validate.sh --only r19                                                # device 0, ~15 min
+tools/box_validate.sh --device 1 --only r14,r15,r21,r25 --with r14.oracle --no-wait   # device 1: session 5
+tools/box_validate.sh --only r10,r13,r16 --skip r16.cost --no-wait             # device 0: session 4
+tools/box_validate.sh --status
+```
 
 ## 2. The sessions
 
