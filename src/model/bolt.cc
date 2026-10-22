@@ -284,6 +284,15 @@ void check_bolt_config(const common::json::Value& c) {
     const common::json::Value* t = b.find("block_type");
     if (!t || !t->is_string()) bad("'" + at + ".block_type' is " + (t ? show(*t) : std::string("absent")));
     const BoltBlock kind = block_of(t->str(), i);
+    // the four per-block members the config declares (`blockwise_members`): a MoE block carries all four, the others only
+    // block_type - any other key is a block the descriptor does not describe
+    for (const auto& [key, unused] : b.obj()) {
+      (void)unused;
+      const bool ok = key == "block_type" || (kind == BoltBlock::Moe && (key == "moe_intermediate_size" ||
+                                                                          key == "n_routed_experts" || key == "num_experts_per_tok"));
+      if (!ok) bad("'" + at + "' has the key '" + key + "' - a " + t->str() + " block carries " +
+                   (kind == BoltBlock::Moe ? "block_type, n_routed_experts, moe_intermediate_size and num_experts_per_tok" : "block_type only"));
+    }
     if (lt) {
       const common::json::Value& lv = lt->arr()[i];
       if (!lv.is_string() || lv.str() != t->str())
