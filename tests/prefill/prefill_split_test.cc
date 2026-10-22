@@ -290,10 +290,22 @@ int main(int argc, char** argv) {
   // Each bar sits a few times the measured distance below it; a lost conv seed at the
   // split (the fault injected when this test was written) fails the GDN L0 and fa0-3 bars
   // by orders of magnitude (docs/probe-prefill-continuation-2026-09-28.md).
-  const Bars split_bars = int8 ? Bars{0.998, 0.996, 0.999, 0.95, 0.99999}
-                               : Bars{0.9995, 0.999, 0.9998, 0.99, 0.99999};
-  const Bars decode_bars = int8 ? Bars{0.998, 0.995, 0.999, 0.95, 0.9999}
-                                : Bars{0.9995, 0.999, 0.9998, 0.99, 0.99995};
+  Bars split_bars = int8 ? Bars{0.998, 0.996, 0.999, 0.95, 0.99999}
+                         : Bars{0.9995, 0.999, 0.9998, 0.99, 0.99999};
+  Bars decode_bars = int8 ? Bars{0.998, 0.995, 0.999, 0.95, 0.9999}
+                          : Bars{0.9995, 0.999, 0.9998, 0.99, 0.99995};
+  // Agnes (the box's first run, 2026-10-22): every bar holds except fa0-3's, at the same rows
+  // in every split (fa 2-3 row 2154, decode fa 0 rows 2460 / 1577). Worst l0 0.998524 / 0.994215,
+  // l0-int8 0.997800 / 0.988311 (split / decode). Not a continuation bug: against the CPU oracle
+  // (prefill_split_test --oracle, long32k[0, 2600)) rows 2154 / 2460 are 0.9997-0.9999 from it
+  // in the one call, every split and decode alike, top-1 equal; row 1208 is 0.9988 from it in the
+  // one call itself - Agnes amplifies a rounding-sized change more than Qwen3.8 does. Its fa0-3
+  // bars sit ~3.4x the measured distance below; the GDN L0 bars, which a lost conv seed fails by
+  // orders of magnitude, are unchanged.
+  if (e.model().desc->name == "agnes-3.0-flash") {
+    split_bars.shallow = int8 ? 0.993 : 0.995;
+    decode_bars.shallow = int8 ? 0.96 : 0.98;
+  }
 
   e.reset();
   e.prefill(ids);
