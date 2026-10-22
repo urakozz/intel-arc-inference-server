@@ -9,6 +9,7 @@
 #include "common/exp_torch.h"
 #include "common/bf16.h"
 int main(int argc, char** argv) {
+  if (argc < 2) return 2;
   FILE* f = fopen(argv[1], "wb");
   for (uint32_t bits = 0; bits < 0x10000u; ++bits) {
     float x = common::bf16_to_f32(uint16_t(bits));
