@@ -13,7 +13,7 @@
 #   STATE  this run's state directory (logs, status lines, JUnit files)
 #   STAGE  the stage being run; LOG its log file
 #   B70_GIT_SHA, BV_BASE_SHA, JOBS, CMAKE_ARGS, SNAP_QWEN, SNAP_AGNES, SNAP_ORNITH, SNAP_K2, SNAP_KOLIBRI,
-#   PORT, ...
+#   DEVICE (the orchestrator's card: ZE_AFFINITY_MASK), PORT (8013 + 100 x DEVICE), ...
 
 # ---- the registry ---------------------------------------------------------------------
 BV_IDS=(); BV_ROWS=(); BV_SELS=(); BV_KINDS=(); BV_NEEDS=(); BV_AFTERS=(); BV_TITLES=()
@@ -25,8 +25,20 @@ BV_ROW_IDS=(); BV_ROW_TITLES=(); BV_NOTES=()
 #         default - runs unless deselected
 #         optin   - runs only when named (--with / --only)
 #         manual  - never runs: its body prints the commands for the operator
-#   KIND  cpu      - no device; runs without the GPU lock
-#         gpu      - runs holding ~/b70-gpu.lock for the whole stage
+#   KIND  cpu      - no device; runs without a GPU lock (one cpu stage at a time per tree when
+#                    two orchestrators run: <state root>/.cpu.lock)
+#         gpu      - the WHOLE BOX for the whole stage (tools/gpu_lock.sh box: ~/b70-gpu.lock
+#                    exclusive) - every timed stage (interleaved rounds, benches, an idle /
+#                    xpu-smi grade, a RECORD), every two-card one (--pp 2, ZE_AFFINITY_MASK=0,1,
+#                    P2P, offload), every one tied to device 0 (series rows: device 1 is ~3.4 %
+#                    slower on prefill) or to a fixed path / host-RAM budget, and anything unsure
+#         card     - ONE CARD for the whole stage: the orchestrator's device, under
+#                    tools/gpu_lock.sh card $DEVICE (~/b70-gpu<DEVICE>.lock exclusive +
+#                    ~/b70-gpu.lock shared), so a card stage of the device-1 orchestrator runs
+#                    beside one of the device-0 orchestrator. Only one-card correctness (ctest
+#                    gates, golden / parity checks, refusals, load checks) that sets no
+#                    ZE_AFFINITY_MASK, runs no pp-labelled test, builds nothing and writes only
+#                    under $STATE (test_box_validate.py checks the body)
 #         gpu-self - runs a script that takes ~/b70-gpu.lock itself (holding it here would
 #                    deadlock: flock on a second open of the same file blocks)
 #   NEEDS data keys from tools/box_validate/data.sh (comma list, or -)
@@ -55,6 +67,13 @@ bv_field() {   # bv_field ID FIELD  (row sel kind needs after title)
     needs) echo "${BV_NEEDS[$i]}" ;; after) echo "${BV_AFTERS[$i]}" ;; title) echo "${BV_TITLES[$i]}" ;;
   esac
 }
+# bv_builds ID - the stage's body builds in the tree's build dir (cmake / ocloc): two
+# orchestrators on one tree build one at a time (<state root>/.build.lock)
+bv_builds() {
+  declare -f "$(bv_fn "$1")" 2> /dev/null | grep -qE 'cmake (--build|-S)|(^|[^A-Za-z_./-])ocloc |tools/box\.sh build'
+}
+# bv_card_index D - D is one device index (a card lock needs one: DEVICE=0,1 takes the box)
+bv_card_index() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; return 0; }
 
 # bv_defaults - the box-side defaults every stage reads. HOME_R is the box's $HOME (the
 # literal string '$HOME' in a dry-run on the Mac, so the printed paths are the box's).
@@ -70,7 +89,8 @@ bv_defaults() {
   : "${TOK_PYTHON:=$HOME_R/auto-round/.venv/bin/python}"
   : "${JOBS:=44}"
   : "${DEVICE:=0}"
-  : "${PORT:=8013}"
+  # one port range per device: two orchestrators' servers never meet (8013 on device 0, 8113 on 1)
+  if bv_card_index "$DEVICE"; then : "${PORT:=$((8013 + 100 * DEVICE))}"; else : "${PORT:=8013}"; fi
   : "${CMAKE_ARGS:=}"
   : "${B70_GIT_SHA:=unknown}"
   export SNAP_QWEN SNAP_AGNES SNAP_ORNITH SNAP_K2 SNAP_KOLIBRI TOK_PYTHON JOBS DEVICE PORT CMAKE_ARGS B70_GIT_SHA
@@ -206,9 +226,11 @@ run_tests() {
   # one JUnit file per call: a second run_tests in the same stage must not overwrite the first
   BV_CT_N=$((BV_CT_N + 1))
   [ "$BV_CT_N" -gt 1 ] && sfx=".$BV_CT_N"
-  x "ctest --test-dir build --show-only=json-v1 > $STATE/tests.json"
-  x "re=\$(python3 tools/box_validate/junit.py todo $STATE/tests.json --re '$re'$filt --done \"$STATE/*.junit.xml\"); if [ -z \"\$re\" ]; then echo 'every selected test already has a result in this run'; else $envp$(ctest_cmd "$sfx") -R \"\$re\"; fi"
-  x "python3 tools/box_validate/junit.py pick $STATE/tests.json --re '$re'$filt --junit \"$STATE/*.junit.xml\""
+  # the test list per stage: a stage of the other orchestrator may be rewriting its own
+  local tj="$STATE/$STAGE.tests.json"
+  x "ctest --test-dir build --show-only=json-v1 > $tj"
+  x "re=\$(python3 tools/box_validate/junit.py todo $tj --re '$re'$filt --done \"$STATE/*.junit.xml\"); if [ -z \"\$re\" ]; then echo 'every selected test already has a result in this run'; else $envp$(ctest_cmd "$sfx") -R \"\$re\"; fi"
+  x "python3 tools/box_validate/junit.py pick $tj --re '$re'$filt --junit \"$STATE/*.junit.xml\""
   step_rc $? "tests /$re/$filt"
 }
 

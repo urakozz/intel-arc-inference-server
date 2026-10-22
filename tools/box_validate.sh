@@ -31,17 +31,24 @@
 #                    20e); the Agnes checkpoint is skipped when this Mac no longer has it
 #   --out FILE       summary path (default box-validation-<date>.md in the repo root)
 #   --poll SECONDS   poll interval (default 120)
+#   --device N       the card this orchestrator runs on (default 0; ZE_AFFINITY_MASK=N, PORT
+#                    8013 + 100 x N). One orchestrator per device and tree: a `--device 1
+#                    --only <stages>` launch runs beside a device-0 launch on the same state
+#                    (same commit: it does not sync while the other runs). Its `card` stages
+#                    take card N only; `gpu` stages still take the whole box.
 #
 # Everything on the box runs detached (tools/probe/detach.sh) in an orchestrator
 # (tools/box_validate/remote.sh) that survives the ssh session and the Mac: a WiFi drop
 # costs nothing, and re-running the same command re-attaches or resumes - stages already
-# PASS are kept. GPU stages hold ~/b70-gpu.lock for their whole body; builds use -j$JOBS
-# (44); timed stages are interleaved rounds after a warm-up, median of 3, uptime and the
-# idle grade recorded. The stages themselves: tools/box_validate/stages.sh.
+# PASS are kept. `gpu` stages hold the whole box (tools/gpu_lock.sh box), `card` stages one
+# card (tools/gpu_lock.sh card $DEVICE) for their whole body; builds use -j$JOBS (44); timed
+# stages are interleaved rounds after a warm-up, median of 3, uptime and the idle grade
+# recorded. --dry-run / --list print the lock each stage takes. The stages themselves:
+# tools/box_validate/stages.sh.
 #
 # Env: BOX (tools/box.env), REMOTE_DIR / BOX_SUFFIX (default suffix `validate`: the tree
 # ~/b70-inference-server-validate), BASE_DIR (~/b70-inference-server-g0-<sha>), DATA_DIR
-# (the tree holding oracle-out*, default b70-inference-server), JOBS, DEVICE (0), PORT,
+# (the tree holding oracle-out*, default b70-inference-server), JOBS, DEVICE (0, as --device), PORT,
 # CMAKE_ARGS, SNAP_QWEN / SNAP_AGNES / SNAP_ORNITH / SNAP_K2 / SNAP_KOLIBRI, TOK_PYTHON, OPENCODE_LOG,
 # A4_REF_DIR, ORACLE_IMAGE, G0_BITWISE_RE, G0_ALLOW_REMOVED, R10_RUNS, R2_ROUNDS (the server
 # rows' rounds, 3), R8_DRAFT_VOCAB (r8.auto_rows' size, 128k), K2_ORACLE_MODEL /
@@ -81,10 +88,13 @@ while [ $# -gt 0 ]; do
     --push-data) PUSH=1; shift ;;
     --out) need "$@"; OUT="$2"; shift 2 ;;
     --poll) need "$@"; POLL="$2"; shift 2 ;;
+    --device) need "$@"; bv_card_index "$2" || die "--device takes one card index (0, 1), not '$2'"; DEVICE="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument '$1' (--help)" ;;
   esac
 done
+DEVICE="${DEVICE:-0}"
+export DEVICE
 
 # ---- selection ------------------------------------------------------------------------
 # expand "a,b,r11" [noopt] -> the ids those name, in registry order (manual stages never
@@ -165,12 +175,18 @@ remote_env() {
   done
   printf '%s' "$s"
 }
-CHECK_CMD="d=\"\$HOME/b70-validate/$REMOTE_DIR\"; mkdir -p \"\$d\"; n=\$(cat \"\$HOME/$STATE_REL/progress.log\" 2>/dev/null | wc -l); if flock -n \"\$d/.run.lock\" true; then echo \"IDLE \$n\"; else echo \"RUNNING \$n \$(cat \"\$d/.current\" 2>/dev/null)\"; fi"
+# One orchestrator per tree and device: ~/b70-validate/<tree>/.run-<device>.lock (.current-<device>
+# names its state); .run.lock is an orchestrator from before the per-device locks. CHECK_CMD prints
+# LEGACY <state> when one of those runs, OTHER <device> <state> <sha> per other device's active
+# orchestrator, then IDLE <progress lines> / RUNNING <progress lines> <state> for this device.
+RUNS_REL="b70-validate/$REMOTE_DIR"
+ORCH_LOG="orchestrator-$DEVICE.log"
+CHECK_CMD="d=\"\$HOME/$RUNS_REL\"; mkdir -p \"\$d\"; n=\$(cat \"\$HOME/$STATE_REL/progress.log\" 2>/dev/null | wc -l); flock -n \"\$d/.run.lock\" true || echo \"LEGACY \$(cat \"\$d/.current\" 2>/dev/null)\"; for f in \"\$d\"/.run-*.lock; do [ -e \"\$f\" ] || continue; k=\${f##*/.run-}; k=\${k%.lock}; [ \"\$k\" = $DEVICE ] && continue; flock -n \"\$f\" true && continue; c=\$(cat \"\$d/.current-\$k\" 2>/dev/null); echo \"OTHER \$k \$c \$(sed -n 's/^tree_sha=//p' \"\$d/\$c/meta-\$k.env\" 2>/dev/null)\"; done; if flock -n \"\$d/.run-$DEVICE.lock\" true; then echo \"IDLE \$n\"; else echo \"RUNNING \$n \$(cat \"\$d/.current-$DEVICE\" 2>/dev/null)\"; fi"
 BASE_CHECK_CMD="cat \"\$HOME/$BASE_DIR/.b70-baseline-ref\" 2>/dev/null || true"
 BASE_EXTRACT_CMD="mkdir -p \"\$HOME/$BASE_DIR\" && tar -xf - -C \"\$HOME/$BASE_DIR\" && echo $BASE_SHA > \"\$HOME/$BASE_DIR/.b70-baseline-ref\""
-LAUNCH_CMD="mkdir -p \"\$HOME/$STATE_REL\" && env $(remote_env) tools/probe/detach.sh \"\$HOME/$STATE_REL/orchestrator.log\" tools/box_validate/remote.sh \"\$HOME/$STATE_REL\" $SELECTED"
-POLL_CMD="cat \"\$HOME/$STATE_REL/progress.log\" 2>/dev/null; echo @@; tail -1 \"\$HOME/$STATE_REL/orchestrator.log\" 2>/dev/null; echo @@; flock -n \"\$HOME/b70-validate/$REMOTE_DIR/.run.lock\" true && echo idle || echo running"
-STATUS_CMD="cd \"\$HOME/$STATE_REL\" 2>/dev/null && cat *.status 2>/dev/null; echo @@; tail -5 \"\$HOME/$STATE_REL/progress.log\" 2>/dev/null"
+LAUNCH_CMD="mkdir -p \"\$HOME/$STATE_REL\" && env $(remote_env) tools/probe/detach.sh \"\$HOME/$STATE_REL/$ORCH_LOG\" tools/box_validate/remote.sh \"\$HOME/$STATE_REL\" $SELECTED"
+POLL_CMD="cat \"\$HOME/$STATE_REL/progress.log\" 2>/dev/null; echo @@; tail -1 \"\$HOME/$STATE_REL/$ORCH_LOG\" 2>/dev/null; echo @@; flock -n \"\$HOME/$RUNS_REL/.run-$DEVICE.lock\" true && echo idle || echo running"
+STATUS_CMD="cd \"\$HOME/$STATE_REL\" 2>/dev/null && cat *.status 2>/dev/null; echo @@; tail -8 \"\$HOME/$STATE_REL/progress.log\" 2>/dev/null; echo @@; d=\"\$HOME/$RUNS_REL\"; for f in \"\$d\"/.run-*.lock; do [ -e \"\$f\" ] || continue; k=\${f##*/.run-}; k=\${k%.lock}; if flock -n \"\$f\" true; then s=idle; else s=RUNNING; fi; echo \"\$k \$s \$(cat \"\$d/.current-\$k\" 2>/dev/null)\"; done"
 FETCH_SRC="b70-validate/$REMOTE_DIR/$STATE_NAME/"
 LOCAL_DATA="${LOCAL_DATA:-$(cd "$(git rev-parse --git-common-dir)/.." && pwd)}"
 AGNES_HF="models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ"
@@ -211,17 +227,41 @@ dry_body() {   # the body of one stage, printed (DRY=1), in a subshell
   ( set +e; dry_setup; STAGE="$1"; LOG="$STATE/$1.log"; "$(bv_fn "$1")" )
 }
 
+lock_of() {   # lock_of ID - the locks the orchestrator takes for a stage, in words
+  local id="$1" i lock; i=$(bv_index "$id")
+  case "${BV_KINDS[$i]}" in
+    gpu) lock="holds the whole box for the whole stage (tools/gpu_lock.sh box: ~/b70-gpu.lock exclusive, the ~/b70-gpu.wait gate while waiting)" ;;
+    card) if bv_card_index "$DEVICE"; then
+            lock="holds the card lock for device $DEVICE for the whole stage (tools/gpu_lock.sh card $DEVICE: ~/b70-gpu$DEVICE.lock exclusive + ~/b70-gpu.lock shared, ZE_AFFINITY_MASK=$DEVICE) - beside the other card's stream"
+          else lock="holds the whole box (DEVICE=$DEVICE is not one card)"; fi ;;
+    gpu-self) lock="its script takes ~/b70-gpu.lock itself (the whole box)" ;;
+    cpu) if [ "${BV_SELS[$i]}" = always ]; then lock="no GPU lock (no device)"
+         else lock="no GPU lock (no device); one cpu stage at a time on this tree (~/$RUNS_REL/.cpu.lock)"; fi ;;
+    *) lock="no lock" ;;
+  esac
+  bv_builds "$id" && lock="$lock; builds holding ~/$RUNS_REL/.build.lock"
+  [ "${BV_SELS[$i]}" = g0 ] && lock="$lock; G0 - deferred while another orchestrator is active on this tree"
+  printf '%s\n' "$lock"
+}
+
+device_note() {   # a launch on device 1: what still takes the whole box, and what belongs on device 0
+  [ "$DEVICE" = 0 ] && return 0
+  local id g=""
+  for id in $SELECTED; do
+    case "$(bv_field "$id" kind)" in gpu|gpu-self) g="$g $id" ;; esac
+  done
+  [ -n "$g" ] || return 0
+  echo "# note: these take the WHOLE box even on device $DEVICE:$g"
+  echo "#       (a timed / series row belongs on device 0: device 1 is ~3.4 % slower on prefill)"
+}
+
 print_stage() {
   local id="$1" i; i=$(bv_index "$id")
-  local kind="${BV_KINDS[$i]}" lock=""
-  case "$kind" in
-    gpu) lock="holds ~/b70-gpu.lock for the whole stage" ;;
-    gpu-self) lock="its script takes ~/b70-gpu.lock itself" ;;
-    cpu) lock="no GPU lock (no device)" ;;
-  esac
+  local kind="${BV_KINDS[$i]}"
   echo ""
   echo "--- $id  [row ${BV_ROWS[$i]}, ${BV_SELS[$i]}, $kind] ${BV_TITLES[$i]}"
-  echo "    needs: ${BV_NEEDS[$i]}   after: ${BV_AFTERS[$i]}   $lock"
+  echo "    needs: ${BV_NEEDS[$i]}   after: ${BV_AFTERS[$i]}"
+  echo "    lock: $(lock_of "$id")"
   echo "    log: ~/$STATE_REL/$id.log   status: ~/$STATE_REL/$id.status"
   dry_body "$id"
 }
@@ -230,14 +270,21 @@ print_stage() {
 if [ "$MODE" = registry ]; then write_registry "$REGISTRY_OUT"; exit 0; fi
 
 if [ "$MODE" = list ]; then
-  printf '%-18s %-4s %-8s %-9s %-28s %s\n' STAGE ROW SEL KIND NEEDS TITLE
+  printf '%-18s %-4s %-8s %-9s %-12s %-28s %s\n' STAGE ROW SEL KIND LOCK NEEDS TITLE
   for i in "${!BV_IDS[@]}"; do
     mark=""; in_list "${BV_IDS[$i]}" "$SELECTED" && mark="*"
-    printf '%-18s %-4s %-8s %-9s %-28s %s\n' "${BV_IDS[$i]}$mark" "${BV_ROWS[$i]}" "${BV_SELS[$i]}" \
-      "${BV_KINDS[$i]}" "${BV_NEEDS[$i]}" "${BV_TITLES[$i]}"
+    case "${BV_KINDS[$i]}" in
+      gpu) lk=box ;; card) lk="card$DEVICE" ;; gpu-self) lk=self ;;
+      cpu) lk=cpu; [ "${BV_SELS[$i]}" = always ] && lk=- ;; *) lk=- ;;
+    esac
+    bv_builds "${BV_IDS[$i]}" && lk="$lk+build"
+    printf '%-18s %-4s %-8s %-9s %-12s %-28s %s\n' "${BV_IDS[$i]}$mark" "${BV_ROWS[$i]}" "${BV_SELS[$i]}" \
+      "${BV_KINDS[$i]}" "$lk" "${BV_NEEDS[$i]}" "${BV_TITLES[$i]}"
   done
   echo ""
-  echo "* = in this launch's selection ($(echo "$SELECTED" | wc -w | tr -d ' ') stages). Rows:"
+  echo "* = in this launch's selection ($(echo "$SELECTED" | wc -w | tr -d ' ') stages). LOCK: box = the whole box"
+  echo "(~/b70-gpu.lock exclusive), card$DEVICE = card $DEVICE only (--device), self = the stage's script locks,"
+  echo "cpu = one cpu stage at a time per tree, +build = the tree's build lock. Rows:"
   for i in "${!BV_ROW_IDS[@]}"; do printf '  %-3s %s\n' "${BV_ROW_IDS[$i]}" "${BV_ROW_TITLES[$i]}"; done
   exit 0
 fi
@@ -250,8 +297,11 @@ if [ "$MODE" = dry ]; then
   echo "# state: \$BOX:~/$STATE_REL  (fetched to $LOCAL_STATE)"
   echo "# stages ($(echo "$SELECTED" | wc -w | tr -d ' ')): $SELECTED"
   [ -n "$REDO_IDS" ] && echo "# redo: $REDO_IDS"
+  echo "# device $DEVICE: ZE_AFFINITY_MASK=$DEVICE, PORT ${PORT:-$((8013 + 100 * DEVICE))}, orchestrator lock ~/$RUNS_REL/.run-$DEVICE.lock, log ~/$STATE_REL/$ORCH_LOG"
+  device_note
   echo ""
-  echo "== 1. a run already active in this tree? (attach to it instead of launching)"
+  echo "== 1. a run already active in this tree on device $DEVICE? (attach to it instead of launching; another"
+  echo "   device's orchestrator on the same state and commit: launch beside it without syncing)"
   echo "  ssh \$BOX '$CHECK_CMD'"
   if [ "$PUSH" = 1 ]; then
     echo "== 1b. --push-data"
@@ -259,7 +309,7 @@ if [ "$MODE" = dry ]; then
     echo "  rsync -a $LOCAL_DATA/oracle-out-agnes $LOCAL_DATA/oracle-out-agnes-mtp $LOCAL_DATA/oracle-out-ornith $LOCAL_DATA/oracle-out-ornith-mtp $LOCAL_DATA/oracle-out-ornith-a4 $LOCAL_DATA/oracle-out-k2-a4 $LOCAL_DATA/oracle-out-kolibri-a4 \$BOX:$DATA_DIR/   (each that exists)"
   fi
   echo "== 2. sync the tree under test"
-  [ "$SYNC" = 1 ] && echo "  REMOTE_DIR=$REMOTE_DIR tools/box.sh sync" || echo "  (--no-sync)"
+  [ "$SYNC" = 1 ] && echo "  REMOTE_DIR=$REMOTE_DIR tools/box.sh sync   (not while another device's orchestrator runs from the tree)" || echo "  (--no-sync)"
   echo "== 3. the baseline tree (skipped when ~/$BASE_DIR/.b70-baseline-ref already names $BASE_SHA)"
   echo "  ssh \$BOX '$BASE_CHECK_CMD'"
   echo "  git archive --format=tar $BASE_SHA | ssh \$BOX '$BASE_EXTRACT_CMD'"
@@ -268,7 +318,7 @@ if [ "$MODE" = dry ]; then
   echo "== 5. what the orchestrator runs on the box, in order (from ~/$REMOTE_DIR)"
   for id in $SELECTED; do print_stage "$id"; done
   echo ""
-  echo "== 6. poll every ${POLL}s until orchestrator.log ends in ALLDONE (ssh failures are retried)"
+  echo "== 6. poll every ${POLL}s until $ORCH_LOG ends in ALLDONE (ssh failures are retried)"
   echo "  ssh \$BOX '$POLL_CMD'"
   echo "== 7. fetch"
   echo "  rsync -az \$BOX:$FETCH_SRC $LOCAL_STATE/"
@@ -295,9 +345,12 @@ fetch_and_summarise() {
 
 if [ "$MODE" = status ]; then
   out=$("${SSH[@]}" "$BOX" "$STATUS_CMD") || die "ssh failed"
-  echo "state ~/$STATE_REL:"
-  printf '%s\n' "${out%%@@*}" | awk -F'\t' 'NF >= 2 { printf "  %-18s %-8s %s\n", $1, $2, $7 }'
-  echo "recent:"; printf '%s\n' "${out#*@@}" | sed '/^$/d; s/^/  /'
+  rest="${out#*@@}"
+  echo "orchestrators in ~/$RUNS_REL (one per device):"
+  printf '%s\n' "${rest#*@@}" | awk 'NF >= 2 { printf "  device %s: %s%s\n", $1, $2, (NF >= 3 ? ", state " $3 : "") }'
+  echo "state ~/$STATE_REL (DEV: the device that ran the stage and its lock):"
+  printf '%s\n' "${out%%@@*}" | awk -F'\t' 'NF >= 2 { printf "  %-18s %-8s %-8s %s\n", $1, $2, (NF >= 9 ? $8 " " $9 : "-"), $7 }'
+  echo "recent:"; printf '%s\n' "${rest%%@@*}" | sed '/^$/d; s/^/  /'
   exit 0
 fi
 if [ "$MODE" = summary ]; then fetch_and_summarise; exit 0; fi
@@ -330,17 +383,37 @@ poll() {   # poll SEEN - print new progress lines until the orchestrator is done
 }
 
 check=$("${SSH[@]}" "$BOX" "$CHECK_CMD") || die "cannot reach the box (ssh $BOX)"
-seen=$(printf '%s' "$check" | awk '{ print $2 }')
-case "$check" in
+legacy=$(printf '%s\n' "$check" | awk '$1 == "LEGACY" { print $2 }')
+[ -z "$(printf '%s\n' "$check" | grep '^LEGACY')" ] ||
+  die "an orchestrator from before the per-device locks is active in ~/$REMOTE_DIR (state ${legacy:-?}) - wait for it to finish"
+self=$(printf '%s\n' "$check" | tail -1)
+seen=$(printf '%s' "$self" | awk '{ print $2 }')
+case "$self" in
   RUNNING*)
-    current=$(printf '%s' "$check" | awk '{ print $3 }')
-    [ "$current" = "$STATE_NAME" ] || die "another run ($current) is active in ~/$REMOTE_DIR - wait, or --state $current to attach"
+    current=$(printf '%s' "$self" | awk '{ print $3 }')
+    [ "$current" = "$STATE_NAME" ] || die "another run ($current) is active in ~/$REMOTE_DIR on device $DEVICE - wait, or --state $current to attach"
     echo "a run of this state is active on the box: attaching"
     [ "$WAIT" = 1 ] || exit 0
     poll 0 || true
     fetch_and_summarise
     exit 0 ;;
 esac
+# Another device's orchestrator runs from this tree: a second stream shares its state and its
+# commit, and must not sync (box.sh sync rewrites the scripts it is running) or push data under it.
+others=$(printf '%s\n' "$check" | awk '$1 == "OTHER" { print $2 " " $3 " " $4 }')
+if [ -n "$others" ]; then
+  while read -r odev ostate osha; do
+    [ "$ostate" = "$STATE_NAME" ] ||
+      die "device $odev runs state ${ostate:-?} in ~/$REMOTE_DIR - a second stream joins that state (--state $ostate, the same commit)"
+    [ -z "$osha" ] || [ "$osha" = "$SHA" ] ||
+      die "device $odev's orchestrator runs commit $osha, this checkout is $SHA - check out $osha for the second stream"
+    echo "device $odev's orchestrator runs this state from ~/$REMOTE_DIR: launching beside it on device $DEVICE"
+  done <<EOF
+$others
+EOF
+  [ "$PUSH" = 0 ] || die "--push-data while another orchestrator runs from ~/$REMOTE_DIR: push when it is done"
+  if [ "$SYNC" = 1 ]; then echo "not syncing: the tree on the box is this commit, and the other orchestrator runs from it"; SYNC=0; fi
+fi
 
 if [ "$PUSH" = 1 ]; then
   # spec 14 checklist steps 1 and 6: the Mac's complete Agnes checkpoint and golden sets
