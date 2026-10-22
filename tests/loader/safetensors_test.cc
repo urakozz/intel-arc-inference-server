@@ -2,6 +2,7 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 #include "check.h"
 #include "loader/safetensors.h"
@@ -18,7 +19,8 @@ static void write_st(const std::string& path, const std::string& header,
 }
 
 int main() {
-  const std::string dir = "/tmp/b70_st_test";
+  // per process: two box validation streams (one per card) may run this test at once
+  const std::string dir = "/tmp/b70_st_test." + std::to_string(getpid());
   std::remove((dir + "/a.safetensors").c_str());
   std::remove((dir + "/b.safetensors").c_str());
   std::remove((dir + "/model.safetensors.index.json").c_str());

@@ -13,6 +13,7 @@
 #include <fstream>
 #include <random>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include "check.h"
@@ -128,7 +129,8 @@ bool same(const void* a, const void* b, size_t n) { return std::memcmp(a, b, n) 
 
 int main() {
   using loader::LinearSrc;
-  const std::string base = "/tmp/b70_bolt_repack_test";
+  // per process: two box validation streams (one per card) may run this test at once
+  const std::string base = "/tmp/b70_bolt_repack_test." + std::to_string(getpid());
   CHECK(system(("mkdir -p " + base + "/g128 " + base + "/g64 " + base + "/g128e " + base + "/g64e").c_str()) == 0);
 
   // ---------------------------------------------------------------------------------------------------------------
