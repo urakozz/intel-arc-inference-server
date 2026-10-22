@@ -14,7 +14,7 @@ relaxations) and spec 25 §1.3 / §5 for Bolt:
   names                exactly bolt_ref.expected_names(llm_config, form) for the language model (every linear
                        .qweight / .qzeros / .scales [+ .g_idx in the g128 GPTQ form]), plus tensors under the vision
                        prefixes (vision_model. / vision_projector. / mlp1.), which are only counted
-  int4 linears         qweight I32 [K/8][N], scales F16 [K/g][N] (finite, non-zero; NEGATIVE allowed - AutoRound's signed
+  int4 linears         qweight I32 [K/8][N], scales F16 [K/g][N] (finite; zero counted not refused; NEGATIVE allowed - AutoRound's signed
                        scale - and counted), qzeros I32 [K/g][N/8] = 0x77777777, g_idx I32 [K] = i // g (g128 form; absent
                        in the g64 form), K x N the descriptor's shapes
   kept tensors         router gate.weight BF16 [E][4096], e_score_correction_bias F32 [E], A_log / D / dt_bias F32 [128],
@@ -50,6 +50,16 @@ def headers(d: str) -> dict:
                 raise SystemExit(f"{k} appears in two shards")
             out[k] = (fn, v["dtype"], tuple(v["shape"]))
     return out
+
+
+def scale_stats(t: torch.Tensor) -> dict:
+    """One F16 scales tensor: element count, negatives (signed scales are legitimate), f16 subnormals, zeros (counted, not
+    refused - the loader's scan refuses only NaN / Inf) and non-finite values (the one refusal)."""
+    f = t.float()
+    w = t.view(torch.int16)
+    return {"count": f.numel(), "negative": int((f < 0).sum()),
+            "subnormal": int((((w & 0x7C00) == 0) & ((w & 0x3FF) != 0)).sum()),
+            "zero": int((f == 0).sum()), "nonfinite": int((~torch.isfinite(f)).sum())}
 
 
 def parse_quant(cfg: dict, errs: list) -> dict:
@@ -187,7 +197,7 @@ def main() -> int:
 
     # values: every qzeros, every g_idx, every scale
     from safetensors import safe_open
-    neg = tot = sub = 0
+    neg = tot = sub = zero = 0
     for fn, items in sorted(zero_files.items()):
         with safe_open(os.path.join(a.dir, fn), framework="pt") as h:
             for base, s, K, N in items:
@@ -201,14 +211,13 @@ def main() -> int:
                         errs.append(f"{base}.g_idx is not i // {g}")
                 elif s == ".scales":
                     t = h.get_tensor(base + s)
-                    f = t.float()
-                    if not bool(torch.isfinite(f).all()):
+                    st = scale_stats(t)
+                    if st["nonfinite"]:
                         errs.append(f"{base}.scales has NaN / Inf")
-                    if bool((f == 0).any()):
-                        errs.append(f"{base}.scales has a zero scale")
-                    neg += int((f < 0).sum())
-                    tot += f.numel()
-                    sub += int(((t.view(torch.int16) & 0x7C00) == 0).logical_and((t.view(torch.int16) & 0x3FF) != 0).sum())
+                    neg += st["negative"]
+                    tot += st["count"]
+                    sub += st["subnormal"]
+                    zero += st["zero"]
         if len(errs) > 40:
             break
     for e in errs[:40]:
@@ -218,7 +227,8 @@ def main() -> int:
         return 1
     print(f"check: {a.dir}: {len(blocks)} blocks, {n_lin} int4 linears (group {g}, form {form}), {len(got)} language "
           f"tensors + {vision} vision / projector tensors (skipped by prefix); scales {tot}: {neg} negative "
-          f"({100.0 * neg / max(tot, 1):.1f} %), {sub} subnormal")
+          f"({100.0 * neg / max(tot, 1):.1f} %), {sub} subnormal, {zero} zero (counted, not refused: an all-zero group is "
+          f"legitimate and the loader accepts it)")
     print("ACCEPTED")
     return 0
 

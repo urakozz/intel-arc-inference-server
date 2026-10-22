@@ -70,6 +70,18 @@ def test_widths_are_the_real_ones():
     assert len(ei) == 40 and sum(e for e, _ in ei.values()) == 13824
 
 
+def test_check_counts_zero_scales_and_refuses_only_nonfinite():
+    import check
+    def i16(v):
+        return torch.tensor([x - 65536 if x >= 32768 else x for x in v], dtype=torch.int16)
+    bits = i16([0x0000, 0x8000, 0x3C00, 0xBC00, 0x0001, 0x8001, 0x7C00, 0x7E00])
+    st = check.scale_stats(bits.view(torch.float16))
+    assert st == {"count": 8, "negative": 2, "subnormal": 2, "zero": 2, "nonfinite": 2}, st
+    clean = i16([0x0000, 0x0000, 0x3C00]).view(torch.float16)   # an all-zero group is legitimate
+    st = check.scale_stats(clean)
+    assert st["zero"] == 2 and st["nonfinite"] == 0
+
+
 def e2e(g128: str, g64x: str) -> None:
     for d in (g128, g64x):
         r = subprocess.run([sys.executable, os.path.join(_HERE, "check.py"), d], capture_output=True, text=True)
