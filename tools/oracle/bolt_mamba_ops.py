@@ -16,7 +16,12 @@ The orders (each a choice of this file - the GPU kernels' tiled orders are not d
   dt        dt = softplus(f32(dt_raw) + f32(dt_bias)), softplus(v) = v <= 20 ? log1p(exp(v)) : v (mamba_ssm's
             threshold); NO clamp (`dt_clamp` is a test switch only: R's fallback clamps at time_step_min, R:595 /
             R:643, which Decision 1 does not copy).
-  A         A = -exp(f32(A_log)) - torch's fp32 exp, exactly R:416 / R:448.
+  A         A = -exp(f32(A_log)) - torch's fp32 exp, exactly R:416 / R:448. Spec 25c's switch (A_EXP, env
+            B70_BOLT_A_EXP, default "torch"): "engine" computes A with exp_engine - the loader's own function
+            (src/common/exp_torch.h, Sleef's expf u10) in torch fp32 ops - so a Mamba twin held BITWISE against
+            these ops takes the engine's A (25b measured torch.exp (MKL's vsExp) 1 ulp off it on 196 of 33,266 bf16
+            values). R's kernel path computes A itself (R:416, R:448); under "engine" the stubs below recover A_log
+            from R's A (exactly: A_log is a bf16 value, asserted) and use the engine's A instead.
   update    dA = exp(A * dt); dB[n] = f32(B[g][n]) * dt; S = S * dA + dB * f32(x)   (mamba_ssm selective_state_update's
             order: products rounded to fp32, then the add - no fma); y = rne(tree_n(S * f32(C[g][n])) + f32(x) * D)
             with tree_n the halving pairwise tree over the 128 (power of two) state entries:
@@ -31,10 +36,12 @@ The orders (each a choice of this file - the GPU kernels' tiled orders are not d
             d_inner / n_groups): ms = tree(v * v) / group; out = rne((v * (1 / sqrt(ms + eps))) * f32(w)).
 
     conv_update / conv_seq / ssm_update / ssm_chunk / rmsnorm_gated / softplus_mamba / A_from_log / tree_sum
+    exp_engine / engine_A_of     spec 25c: the loader's exp in torch fp32 ops; R's A -> the engine's
     stub_package()  -> {module name: module}  the mamba_ssm / causal_conv1d names R imports (bolt_remote installs them)
 """
 import importlib.machinery
 import math
+import os
 import types
 
 import torch
@@ -42,6 +49,11 @@ import torch
 CALLS: dict[str, int] = {}          # stub entry -> calls (bolt_tiny_check prints it)
 CHUNK = 128
 DT_CLAMP_TEST: float | None = None  # a TEST switch: the stubs clamp dt at this floor (R's fallback's 0.001) when set
+# Spec 25c: which exp computes A = -exp(A_log) - "torch" (R's torch.exp, the reference's default) or "engine" (the
+# loader's src/common/exp_torch.h, exp_engine below). bolt_ref.py run --a-exp sets it; the env var is the default.
+A_EXP: str = os.environ.get("B70_BOLT_A_EXP", "torch")
+if A_EXP not in ("torch", "engine"):
+    raise ValueError(f"B70_BOLT_A_EXP={A_EXP!r}: torch or engine")
 
 
 def _count(name: str) -> None:
@@ -68,9 +80,72 @@ def softplus_mamba(v: torch.Tensor) -> torch.Tensor:
     return torch.where(v <= 20.0, torch.log1p(torch.exp(v)), v)
 
 
-def A_from_log(A_log: torch.Tensor) -> torch.Tensor:
-    """A = -exp(A_log) in fp32 (R:416, R:448: `-torch.exp(self.A_log.float())`)."""
+_F32 = torch.float32
+
+
+def _c32(x: float) -> torch.Tensor:
+    """A C++ `float` constant: the literal rounded once to fp32."""
+    return torch.tensor(x, dtype=_F32)
+
+
+_RLN2 = _c32(1.442695040888963407359924681001892137426645954152985934135449406931)
+_L2U, _L2L = _c32(0.693145751953125), _c32(1.428606765330187045e-06)
+_POLY = [_c32(c) for c in (0.000198527617612853646278381, 0.00139304355252534151077271, 0.00833336077630519866943359,
+                           0.0416664853692054748535156, 0.166666671633720397949219, 0.5)]
+
+
+def _fma32(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+    """fp32 fma(a, b, c) through float64: a x b is exact in float64 (24 + 24 bits); the add rounds once in float64 and
+    once to fp32. In exp_engine's chain the float64 sum is exact (the Cody-Waite reduction; each polynomial step spans
+    <= 51 bits for |s| <= ln2 / 2) except where s is tiny, where a double rounding needs a float64 result ON an fp32
+    midpoint - checked against the C++ function over every bf16 value in [-7, 9] (bolt_exp_compare.py: 0 differ)."""
+    return (a.double() * b.double() + c.double()).to(_F32)
+
+
+def exp_engine(d: torch.Tensor) -> torch.Tensor:
+    """src/common/exp_torch.h's exp_torch (Sleef_expf8_u10 at AVX2 + FMA) in torch fp32 ops, step for step: q =
+    nearest-even(d x 1/ln2); s = fma(q, -L2U, d); s = fma(q, -L2L, s); the u10 polynomial by fma; u = 1 + fma(s^2, u,
+    s); u x 2^(q >> 1) x 2^(q - (q >> 1)); 0 below -104, inf above 100. fp32 in, fp32 out; NaN is not handled."""
+    d = d.to(_F32)
+    q = torch.round(d * _RLN2)                         # an fp32 product, then round-half-even (cvtps2dq)
+    qi = q.to(torch.int32)
+    s = _fma32(q, -_L2U, d)
+    s = _fma32(q, -_L2L, s)
+    u = _POLY[0].expand_as(s)
+    for c in _POLY[1:]:
+        u = _fma32(u, s, c.expand_as(s))
+    ss = s * s
+    u = _fma32(ss, u, s) + _c32(1.0)
+    e1 = qi >> 1
+    e2 = qi - e1
+
+    def pow2(e: torch.Tensor) -> torch.Tensor:
+        return ((e.clamp(-126, 127) + 127) << 23).to(torch.int32).view(_F32)
+    u = u * pow2(e1)
+    u = u * pow2(e2)
+    u = torch.where(d < -104.0, torch.zeros_like(u), u)
+    return torch.where(d > 100.0, torch.full_like(u, math.inf), u)
+
+
+def A_from_log(A_log: torch.Tensor, a_exp: str | None = None) -> torch.Tensor:
+    """A = -exp(A_log) in fp32 (R:416, R:448: `-torch.exp(self.A_log.float())`); a_exp (default A_EXP) "engine":
+    -exp_engine(A_log) - the loader's A (src/loader/bolt_repack.cc bolt_neg_exp)."""
+    a_exp = a_exp or A_EXP
+    if a_exp == "engine":
+        return -exp_engine(A_log.float())
+    if a_exp != "torch":
+        raise ValueError(f"a_exp {a_exp!r}: torch or engine")
     return -torch.exp(A_log.float())
+
+
+def engine_A_of(A: torch.Tensor) -> torch.Tensor:
+    """R's A (= -torch.exp(A_log.float()), the kernel path's own, R:416 / R:448) -> the engine's: A_log is recovered as
+    bf16(log(-A)) - exact, since A_log is a bf16 value and torch.exp is within an ulp; asserted by recomputing R's A
+    bitwise - and A = -exp_engine(A_log)."""
+    A_log = torch.log(-A.float()).to(torch.bfloat16).float()
+    if not torch.equal(-torch.exp(A_log), A.float()):
+        raise RuntimeError("engine_A_of: A is not -torch.exp of a bf16 A_log (B70_BOLT_A_EXP=engine needs R's A)")
+    return -exp_engine(A_log)
 
 
 def silu_conv(v: torch.Tensor) -> torch.Tensor:
@@ -250,7 +325,10 @@ def _selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None,
     _count("selective_state_update")
     if z is not None or state_batch_indices is not None or not dt_softplus or dt_bias is None:
         raise NotImplementedError("selective_state_update: only R's call (z None, dt_softplus, dt_bias)")
-    y, S = ssm_update(state, x, _tied(dt, (2,), "dt"), _tied(A, (1, 2), "A"), B, C,
+    A_h = _tied(A, (1, 2), "A")
+    if A_EXP == "engine":
+        A_h = engine_A_of(A_h)
+    y, S = ssm_update(state, x, _tied(dt, (2,), "dt"), A_h, B, C,
                       None if D is None else _tied(D, (1,), "D"), _tied(dt_bias, (1,), "dt_bias"), DT_CLAMP_TEST)
     state.copy_(S)
     return y
@@ -274,6 +352,8 @@ def _mamba_chunk_scan_combined(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bi
     floor = _limit_floor(dt_limit)
     if DT_CLAMP_TEST is not None:
         floor = DT_CLAMP_TEST
+    if A_EXP == "engine":
+        A = engine_A_of(A)
     outs, finals = [], []
     for b in range(x.shape[0]):
         y, S = ssm_chunk(x[b], dt[b], A, B[b], C[b], D, dt_bias,
