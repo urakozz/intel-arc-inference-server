@@ -320,8 +320,9 @@ The operator approved every proposed decision below as written on 2026-10-20.
 ## 11. P0 verdict (26a) - PENDING the box; the defaults until then are PROVISIONAL
 
 Plan 26a, `tools/spec/lilicorr_p0_project.py` (r63.verdict). **Not a gate** (the operator's 2026-10-15 ruling): 26b / 26c are
-built whatever it shows. On 2026-10-23 nothing of the real drafter has been read (its 962 MB of weights were not
-downloaded: PENDING-WEIGHTS) and the real Bolt tap dumps, route records and card costs are the box's (queue row 63), so
+built whatever it shows. On 2026-10-23 the real drafter's weights are read on the Mac (§12: decoded exactly, the formats'
+bytes and weight error) but its acceptance needs Bolt's real taps, and the tap dumps, route records and card costs are the
+box's (queue row 63), so
 every default below is PROVISIONAL and every cost DERIVED from the bytes (`lilicorr_p0_project.py`'s table over spec 25
 §14's layout bytes, printed by `test_lilicorr_p0_project.py`'s `test_derived`; depth 4096):
 
@@ -336,7 +337,8 @@ exact 0.500, int8 0.306, int4 g64 0.214 plain steps (spec 26 §4's figures, re-d
 distinct experts a MoE block at M = 8 (§4's ESTIMATE; r63.union measures u), the M = 8 verify falls from 2.353 to 1.593.
 
 - **Drafter format (Decision 2): int8 per row** (the default) - PROVISIONAL until r63.accept's E_K (int4 g64 if within
-  0.05 of exact's at the chosen K).
+  0.05 of exact's at the chosen K). Measured on the real weights (§12): int8's weight error ~1 %, int4 g64's ~11 % relative
+  to g x W' - int4 starts behind; only E_K can rule.
 - **K_max (Decision 5): 7**; AdaptiveK picks per request over the cost row above (26c's `MtpCost::bolt_lilicorr` starts from
   it until r63.cost's measured row replaces it).
 - **q form (Decision 6): `lattice`** (softmax of the realized scores / T, vLLM's) - PROVISIONAL until r63.accept's sampled
@@ -349,7 +351,7 @@ distinct experts a MoE block at M = 8 (§4's ESTIMATE; r63.union measures u), th
   u = 30; overall 4.30 -> 1.62x / 2.27x; writing 3.41 -> 1.28x / 1.80x. Decision 9's gap (our int4 target vs the 2-bit one
   the drafter was trained against) is what r63.accept measures.
 
-## 12. 26a as built (2026-10-23; the Mac only - no card, no real weight)
+## 12. 26a as built (2026-10-23; the Mac only - no card; the drafter's real weights read, Bolt's not)
 
 Branch `spec26a-lilicorr-p0`; box queue row 63. Built: `tools/oracle/dflash_ref.py`'s LiLiCorr form (`lilicorr_config_from_dict`,
 `nvfp4_decode` and the NVFP4 reader, `Drafter._lin` / `_softmax_sink`, `lilicorr_lattice` / `lilicorr_walk` /
@@ -358,7 +360,7 @@ Branch `spec26a-lilicorr-p0`; box queue row 63. Built: `tools/oracle/dflash_ref.
 `dflash_accept.py --model bolt-lilicorr` (+ `lilicorr_draft`, `int8_rows_g`, `rtn_int4_g64_f64`, `p_rows_lse`,
 `run_source_lilicorr`), `dflash_p0.sh MODEL=lilicorr` (check / accept / lookup / union), `tools/spec/expert_union.py`,
 `probe_draft_cost --shapes bolt-lilicorr` (+ `draft_cost_shapes.h`'s `bolt_lilicorr`), `tools/spec/lilicorr_p0_project.py`, the
-tests `test_dflash_ref.py`'s 12 `test_lilicorr_*`, `test_dflash_accept.py`'s 5, `test_expert_union.py`,
+tests `test_dflash_ref.py`'s 13 `test_lilicorr_*` (one on the real checkpoint), `test_dflash_accept.py`'s 5, `test_expert_union.py`,
 `test_lilicorr_p0_project.py`, `lilicorr_cost_names_test`; queue row 63's stages and the data key `lilicorr`; the record
 `docs/probe-lilicorr-2026-10-23.md`. kernel_cmdlines **+99 / -0 / ~0** (1,406 -> 1,505); no existing `.cl` edited.
 
@@ -371,6 +373,8 @@ W' moves 2125 / 2304 fc outputs; Review Focus 1-5 each a mutation that moves the
 taps bitwise `run`'s h after blocks 1 / 2 / 4 / 6 / 9 / 10; taps one block early flip 94 / 126 drafts);
 `lilicorr_cost_names_test` (110 names bound, 99 in the block, a stand-in expert block 2.507 MB against the 40 blocks' average
 2.500 MB, the drafter's linears 1.0758 B parameters); `test_box_validate.py` 29 tests.
+
+**The real drafter on the Mac** (its weights reached the Mac's HF cache during this work; `test_lilicorr_real_checkpoint`): 179 tensors (25 NVFP4 linears x U8 / F8_E4M3 / F32 + 104 BF16 - the header's census, the head's linears all with a bias), all 25 decoded exactly in 8 s (W' bf16-exact, no NaN scale; of 54,919,168 scale blocks none zero, none subnormal); **1,112,803,882 parameters** (the card's 1.113 B; 36,750,474 in the head); g in [0.000791, 0.00656], none a power of two; the formats' bytes exact 2.152 GB / int8 1.077 / int4 g64 0.572 + the head 0.074 (spec 26 §4's derived figures, now measured); the weight error against g x W' over the 16 NVFP4 backbone linears (relative, min / median / max): int8 0.0088 / 0.0098 / 0.0130, **int4 g64 0.1070 / 0.1085 / 0.1125** (re-quantising a 4-bit format into another with other groups costs ~11 % - Decision 2's E_K comparison decides whether it matters); one draft on random taps over a random stand-in target: finite, slot 0 a broadcast, 5.3 s on this CPU in fp32. Bolt's own 41.9 GB is not on the Mac, so acceptance on real taps is still the box's.
 
 **Rulings where this differs from the plan's text or a precedent (each with its cost if wrong):**
 1. *The block is always 8 rows and the head scores all 7 slots* (§5.3; the plan's "K = 1..7 from one block"), while vLLM runs a
@@ -411,6 +415,7 @@ taps bitwise `run`'s h after blocks 1 / 2 / 4 / 6 / 9 / 10; taps one block early
 11. *Beyond the plan's row*: stages r63.k0 and r63.union; r63.accept's data keys add `bolt_g128` (the target's embedding /
     head) and `oracle_image`; the x.rest stage skips the new `lilicorr` label. *Cost:* none.
 
-**Not run (box, row 63):** everything with real weights or a card - the cross-check against vLLM's head, the acceptance
+**Not run (box, row 63):** everything with Bolt's real weights or a card - the cross-check against vLLM's head (on the tiny
+head and the real one: `lilicorr_vllm_check.py` runs both when the weights are cached), the acceptance
 tables, lookup on the real continuations, the union counts, the cost probe (no new binary compiled by ocloc), the
 projection with measured numbers, vLLM XPU with LiLiCorr. Every default in §11 is PROVISIONAL until then.
