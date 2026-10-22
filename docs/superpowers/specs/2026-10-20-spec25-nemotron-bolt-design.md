@@ -745,7 +745,10 @@ Bolt" section. **Measured on the Mac (all host tests; the card test only compile
 1. *`exp_torch` is not in `common/`* (it is the kernels' and `tests/kernels/k2_ref.h`'s Sleef softmax exp, and `torch.exp` on an x86
    fp32 tensor goes to MKL's `vsExp`, which has no host reproduction): `src/common/exp_torch.h` copies the function and the loader's
    `A = -exp(A_log)` uses it. Measured against `torch.exp` over all 33,266 bf16 values in [-7, 9]: 196 differ, never by more than 1
-   ulp (libm's `expf`: 192). *Cost if wrong:* a 1 ulp difference in `A` before `exp(dt x A)`; 25c's B3 absorbs it (a host function
+   ulp (libm's `expf`: 192; reproduce with `tools/oracle/bolt_exp_dump.cc` + `bolt_exp_compare.py`). Consequence for 25c: `A` can
+   differ by 1 ulp between the engine and `bolt_ref`, so a Mamba twin held bitwise against `bolt_ref` must take `A` from the engine's
+   arithmetic - 25c adds a `bolt_ref` switch computing `A` with a float32 port of `exp_torch` (recorded in plan 25c's dependencies;
+   not built here). *Cost if wrong:* a 1 ulp difference in `A` before `exp(dt x A)`; 25c's B3 absorbs it (a host function
    that matches MKL does not exist).
 2. *`BoltLinear` is richer than `{K, N, S, layout}`* (id, `GemvShape`, kind, fuse, parts, part_n - 24b's `LfmLinear`), and the
    MoE list carries the Router and one expert's up / down shapes; the routed experts are ONE allocation per block (E blocks of up ||
