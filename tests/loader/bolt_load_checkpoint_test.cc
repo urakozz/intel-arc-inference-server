@@ -92,6 +92,33 @@ int main(int argc, char** argv) {
     if (P.head) CHECK(P.head->kind == (o.int8_head ? model::WeightKind::Int8 : model::WeightKind::Bf16));
   }
 
+  // every device allocation base is a multiple of 64 B (the LSC 2D-load rule; spec 25b Global Constraints): asserted on the
+  // card, not assumed from the layout arithmetic
+  {
+    size_t n_alloc = 0;
+    auto aligned = [&](const l0::Mem* mem) {
+      if (!mem) return;
+      CHECK_EQ(reinterpret_cast<uintptr_t>(mem->ptr()) % loader::bolt::kAlign, uintptr_t(0));
+      ++n_alloc;
+    };
+    auto dw = [&](const std::unique_ptr<loader::DeviceWeight>& w) {
+      if (!w) return;
+      aligned(&w->mem);
+      aligned(w->scales.get());
+    };
+    for (const loader::BoltDevicePart& P : m.parts) {
+      aligned(P.embed_tiles.get());
+      aligned(P.final_norm.get());
+      dw(P.head);
+      for (const loader::BoltLayer& L : P.layers) {
+        for (const auto* w : {&L.in_proj, &L.out_proj, &L.qkv, &L.o_proj, &L.fc1_shared_up, &L.fc2, &L.shared_down, &L.router}) dw(*w);
+        aligned(L.experts.get());
+        aligned(L.small.get());
+      }
+    }
+    std::printf("  %zu device allocations, every base a multiple of %zu B\n", n_alloc, loader::bolt::kAlign);
+  }
+
   loader::SafetensorsSet set(snap);
   const std::string trunk = m.trunk;
   std::mt19937 rng(11);

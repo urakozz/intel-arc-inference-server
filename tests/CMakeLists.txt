@@ -4730,7 +4730,7 @@ add_test(NAME bolt_synth_host_pair_test COMMAND bolt_synth_host_test ${B70_BOLT_
 add_test(NAME bolt_synth_host_g64_test COMMAND bolt_synth_host_test ${B70_BOLT_SYNTH_DIR}/n8-g64)
 set_tests_properties(bolt_synth_host_g128_test bolt_synth_host_pair_test bolt_synth_host_g64_test PROPERTIES LABELS bolt
   SKIP_RETURN_CODE 77 TIMEOUT 1800)
-set(B70_BOLT_SNAPSHOT "$ENV{HOME}/.cache/huggingface/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997" CACHE PATH
+set(B70_BOLT_SNAPSHOT "${_b70_hf_home}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997" CACHE PATH
   "SergiioB's pinned snapshot (only its small files are read by the host tests; the shards by the box's load tests)")
 add_executable(bolt_names_test loader/bolt_names_test.cc)
 target_include_directories(bolt_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -4753,12 +4753,13 @@ target_include_directories(bolt_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}
 target_link_libraries(bolt_load_checkpoint_test PRIVATE b70_bolt_loader b70_l0)
 add_test(NAME bolt_load_synth_g128_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SYNTH_DIR}/n12-g128 int8)
 add_test(NAME bolt_load_synth_g64x_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SYNTH_DIR}/n12-g64x int8)
+add_test(NAME bolt_load_synth_g64_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SYNTH_DIR}/n12-g64 int8)
 add_test(NAME bolt_load_synth_bf16_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SYNTH_DIR}/n12-g128 bf16)
 add_test(NAME bolt_load_synth_pp2_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SYNTH_DIR}/n12-g128 int8 0 6)
 add_test(NAME bolt_load_synth_pp2_g64x_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SYNTH_DIR}/n12-g64x bf16 0 6)
 add_test(NAME bolt_load_real_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SNAPSHOT} int8 0 48 262144)
 add_test(NAME bolt_load_rtn_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_RTN_SNAPSHOT} int8 0 48 262144)
-set_tests_properties(bolt_load_synth_g128_test bolt_load_synth_g64x_test bolt_load_synth_bf16_test bolt_load_synth_pp2_test
+set_tests_properties(bolt_load_synth_g128_test bolt_load_synth_g64x_test bolt_load_synth_g64_test bolt_load_synth_bf16_test bolt_load_synth_pp2_test
   bolt_load_synth_pp2_g64x_test bolt_load_real_test bolt_load_rtn_test PROPERTIES
   LABELS "checkpoint;bolt" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 # ==== Spec 25b: Nemotron 3.5 Bolt descriptor and loader (label bolt) ==== (end) ====
