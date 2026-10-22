@@ -214,7 +214,8 @@ int check_template(const tok::Tokenizer& t, const json& facts, const std::string
   CHECK_EQ(tmpl.eos_token(), std::string("<|im_end|>"));
   int bad = 0;
   for (const char* name : {"thinking", "tool_call_history"}) {
-    const json& c = find_case(cases, name);
+    // A copy: g++'s -Wdangling-reference flags a reference returned while `name`'s std::string is a temporary.
+    const json c = find_case(cases, name);
     const std::string got = tmpl.render(c.at("messages"), c.at("tools"), c.at("think").get<bool>());
     const std::string want = slurp(dir + "/agnes_template_" + name + ".txt");
     if (got != want) {
