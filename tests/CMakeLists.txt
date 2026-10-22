@@ -4987,6 +4987,7 @@ if(B70_BOLT)
   # states, conv columns, KV), the routes up to near-ties, the tokens tie-aware; pp2 bitwise one card. On 25b's synthetic N 12
   # (one card) and SergiioB's export (two cards).
   add_executable(bolt_prefill_test runtime/bolt_prefill_test.cc)
+  b70_target_kernel_dir(bolt_prefill_test)
   target_include_directories(bolt_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime)
   target_link_libraries(bolt_prefill_test PRIVATE b70_bolt_prefill b70_l0)
