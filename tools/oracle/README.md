@@ -28,9 +28,10 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `stream.py` | Layer-streamed weights for `dump.py --stream` / `mtp_ref.py --dump --stream` (spec 14, the Mac path below): the model on `meta`, embed/norm/lm_head resident, each decoder layer materialised by a forward pre-hook and dropped after its forward; plus a bit-exact C++ `dequant_t`, the single-thread grouped conv1d, and a hold mode (a layer stays materialised until every sequence of a layer-major batch has run it). |
 | `dflash_ref.py` | Spec 19a: the CPU reference of the DFlash / DFlash 2 drafters (config reader, drafter + target embed/head loader incl. the W4A16 drafter, `context_kv`, `draft_block`); `test_dflash_ref.py` checks it on tiny random weights. "The DFlash reference" below. |
 | `lilicorr_make_tiny.py` | Spec 26a: a tiny random LiLiCorr drafter in the checkpoint's own names and NVFP4 packing (2 layers at hidden 256, the head at 64, window 16, taps 1 / 2 / 4 / 6 / 9 / 10 of 25a's tiny Bolt) - `dflash_ref.py`'s LiLiCorr form reads it. "The LiLiCorr form" below. |
+| `lilicorr_vllm_check.py` | Spec 26a: `dflash_ref.py`'s LiLiCorr head against vLLM's own `LiLiCorrHead` on CPU (a one-rank gloo group, unquantised fp32 weights): the lattice bitwise or the max |diff| and its reason; runs where vLLM imports (the box's vLLM image), SKIP 77 elsewhere. |
 | `dump_taps.py` | Spec 19a Task 2: the Qwen3.8 bf16 target (layer-streamed, as `kv_int8_probe.py run` builds it) over [prompt + recorded greedy continuation]; per source the residual after the drafter's tap layers (5, 19, 33, 47, 61), the greedy next ids and the top-64 logits. `test_dump_taps.py`: Review Focus 1 (tap i = layer i's OUTPUT) on a tiny checkpoint. "The DFlash P0" below. |
 | `dflash_accept.py` | Spec 19a Task 3: teacher-forced acceptance of the DFlash 2 drafter on those dumps, K = 1..7, arms bf16 / int8 RTN / int8 + int8 head / W4A16, draft vocabularies 32k / 64k / 128k (`loader::select_draft_vocab`); batched over anchors. `test_dflash_accept.py`: the batch against `dflash_ref.draft_block`. |
-| `dflash_p0.sh` | The two above on the Mac in a 28 GB container, resumable, refusing to start beside the 12a repeat; `DRY_RUN=1` plans only. |
+| `dflash_p0.sh` | The two above on the Mac in a 28 GB container, resumable, refusing to start beside the 12a repeat; `DRY_RUN=1` plans only. `MODEL=muse` (spec 23f) and `MODEL=lilicorr` (spec 26a: check / accept / lookup / union) are the later drafters' P0s. |
 | `eagle3_ref.py` | The EAGLE3 K2 P0: the CPU reference of the EAGLE-3 drafter `Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3` (speculators 0.8.0 `Eagle3DraftModel`; the semantics pinned from source in its docstring and `docs/probe-eagle3-k2-2026-10-08.md`): step 0 over the context, the greedy chain, the `d2t` check, the int8 / int4 g64 RTN arms, the derived bytes; `facts`. `test_eagle3_ref.py` holds it to an independent build from transformers' Llama modules in speculators' TTT wiring. "The EAGLE3 K2 P0" below. |
 | `k2_taps.py` | The EAGLE3 K2 P0: `k2_ref.py` over [prompt + K2's recorded continuation], one forward per source: the aux taps (the INPUT of K2 layers 2 / 24 / 45), the pre-norm final hidden, K2's greedy, top-16, and the MoE / MoVA routes. `test_k2_taps.py`: the tap points bitwise against the vendored model with the vLLM plugin's capture emulated. |
 | `eagle3_accept.py` | The EAGLE3 K2 P0: teacher-forced acceptance (K = 1..5, arms bf16 / int8 / int8h / int4h), spec 19e's prompt lookup on the same anchors, and the summary with the derived speed-up. `test_eagle3_accept.py`. |
@@ -531,6 +532,16 @@ Tests (tiny models, a minute; `dflash_p0.sh`'s `check` step runs both):
 docker run --rm --memory 6g -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/oracle/test_dump_taps.py
 docker run --rm --memory 6g -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/oracle/test_dflash_accept.py
 ```
+
+**The LiLiCorr P0 (spec 26a, 2026-10-23; queue row 63).** `MODEL=lilicorr tools/oracle/dflash_p0.sh` over bolt_ref.py's
+tap dumps (`oracle-out-bolt-taps/dumps`, `bolt_oracle.sh <data> taps`): `check` (test_dflash_ref.py, test_dflash_accept.py
+- the tiny pair: 25a's tiny Bolt tapped at `--tap-layers 1,2,4,6,9,10` + `lilicorr_make_tiny.py`), `accept`
+(`dflash_accept.py run --model bolt-lilicorr`: arms `exact` / `int8` / `int4g64` and their int8-head forms; K 1..7 from one
+8-row block an anchor; the sampled estimate for q `lattice` and `lattice+lp` at T 1.0 / top-p 0.95, no top-k; SKIP 77 while
+the drafter's weights are not in the cache), `lookup` (`lookup_accept.py --dumps --max-k 7`), `union`
+(`tools/spec/expert_union.py` over the golden runs' route records) -> `oracle-out-lilicorr-p0/`. Decision 1's cross-check
+`lilicorr_vllm_check.py` needs vLLM itself (not importable in `agnes-ref-img`): the box's vLLM image (r63.vllmref). The record:
+`docs/probe-lilicorr-2026-10-23.md`.
 
 ### The EAGLE3 K2 P0 (2026-10-08)
 

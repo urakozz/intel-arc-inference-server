@@ -82,4 +82,31 @@ M = 8 (spec 26 §4's figure).
 
 ## 4. The verify and block costs (Task 4) - PENDING (box)
 
+`r63.cost`: `probe_draft_cost --shapes bolt-lilicorr --mmax 8 --depth 4096,65536` on one card - Bolt's 88 blocks' GEMVs at
+the descriptor's cells, 25c's `nb_router` and the int8 head + argmax stage 1 at M = 1..8, the routed experts in the plain
+M-row form (9 M stand-in blocks a MoE block, each its own allocation), by part and whole, against M = 1 as interleaved
+pairs; the experts at 9 and 72 blocks a MoE block (the time per block - the union form's cost at u is 40 x u x it); the SSM
+state (`nb_state_rmw` over 40 x 4 MiB) and from its rate the slot form's (1 + M) x 4 MiB and the replay form's 3 x 4 MiB a
+Mamba block; the attention ESTIMATED from 8,192 B of KV a position; one LiLiCorr block per drafter format (the drafter at
+8 rows, the int8 head at 7 + argmax stage 1 as the top-8 + logsumexp stand-in, the bf16 LiLiCorr head as 7 launches of 8
+rows) and the LiLiCorr head alone (spec 26 §5.2 ESTIMATED it at ~0.1-0.2 ms). kernel_cmdlines +99 / -0 / ~0; none of the
+new binaries has been compiled by ocloc; `lilicorr_cost_names_test` holds the 110 names the probe binds to the 99 the block
+builds + 11 of 25c's.
+
 ## 5. The projection and the defaults (Task 5)
+
+`tools/spec/lilicorr_p0_project.py` (r63.verdict, by hand on the box's numbers): LiLiCorr at K = E_K / (verify(K + 1) +
+block), lookup over the same verify costs with a free draft, plain = 1; SPEED-Bench's published acceptance beside ours; the
+defaults. Until the box's numbers exist it runs on the DERIVED cost table (spec 26 §11; depth 4096):
+
+| | M = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| verify, plain M-row MoE (plain steps, DERIVED) | 1.000 | 1.193 | 1.387 | 1.580 | 1.773 | 1.966 | 2.160 | 2.353 |
+| slot writes' share of it (DERIVED) | - | 5.1 % | 6.6 % | 7.7 % | 8.6 % | 9.3 % | 9.8 % | 10.3 % |
+
+One block: exact 0.500 / int8 0.306 / int4 g64 0.214 plain steps (DERIVED). ESTIMATED expectation with SPEED-Bench's
+published acceptance (the 24GB target - Decision 9's gap is what r63.accept measures) and the int8 drafter: coding 5.26 ->
+1.98x plain (plain M-row MoE) / 2.77x (union MoE at u = 30, §4's ESTIMATE); overall 4.30 -> 1.62x / 2.27x; writing 3.41 ->
+1.28x / 1.80x. **The defaults until then (PROVISIONAL, spec 26 §11):** int8 per row, K_max 7 under AdaptiveK, q `lattice`, the
+replay lever not built, the union MoE built in 26c regardless. Outputs on the box: `oracle-out-lilicorr-p0/` (accept/,
+lookup.{txt,json}, union{,.gen}.{txt,json}, project.{md,json}).
