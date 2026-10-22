@@ -2,7 +2,8 @@
 
 **Status:** design, 2026-10-20, approved by the operator 2026-10-20. Decisions are marked **Decision N** with their
 cost if wrong and collected in §12. 25a is built on the Mac (§13: the reference, B1 on tiny models; no real
-weight read yet); 25b is built on the Mac (§14: the descriptor, the loader, the plan; no card); 25q, 25c-25e are not built.
+weight read yet); 25b is built on the Mac (§14: the descriptor, the loader, the plan; no card); 25c is built on the Mac (§15: P0's
+harness, the `nb_*` kernels, `BoltEngine`, the arms; no card); 25q, 25d, 25e are not built.
 **Plans (2026-10-20):** `docs/superpowers/plans/2026-10-20-spec25{a,q,b,c,d,e}-*.md` - 25a facts and the CPU
 reference, 25q our AutoRound g64 re-quantisation (the recipe; the operator runs it), 25b descriptor / loader /
 memory plan, 25c decode (the launch-count and state-bandwidth P0 first), 25d prefill, 25e serving.
@@ -775,3 +776,109 @@ Bolt" section. **Measured on the Mac (all host tests; the card test only compile
 41.9 GB checkpoint on two cards (split 48, 262144 positions; load time, RSS, the int8 head's quantisation time), our g64 export
 (25q); the plan's memory figures against the cards' real `memory_bytes` (the Mac assumed 32 GiB); every layout / `S` choice is still
 PROVISIONAL until 25c's P0 sweep.
+
+## 15. 25c as built (2026-10-22; the Mac only - no card, no real weight)
+
+Branch `spec25c-bolt-decode`; box queue row 60. Built: P0's `tools/probe/probe_bolt_step` (+ `bolt_step_shapes.h`, the lists
+as data), the `nb_*` family (`src/kernels/bolt/nb_{common.h,expert.h,prep.cl,mamba.cl,moe.cl,probe.cl}`, host half
+`src/kernels/bolt_kernels.h`), the host twin `tests/kernels/bolt_ref.h` with its fixture (`tools/oracle/bolt_fixture.py` ->
+`tests/kernels/bolt_fixture.h`), `bolt_ref`'s `A` switch (`B70_BOLT_A_EXP=engine`, `bolt_ref.py run --a-exp`),
+`runtime::bolt::BoltEngine` (`src/runtime/bolt/bolt_{buffers,capture,engine}.*`, the decode scratch and launch counts in
+`bolt_sizes.*`), `b70-decode <bolt>` (`src/cli/bolt_decode.h`), the switches `B70_BOLT_ATTN` / `B70_BOLT_FUSE` / `B70_BOLT_SSM` /
+`B70_BOLT_TIE_TOL`, the tests `probe_bolt_step_shapes_test`, `bolt_ref_test`, `bolt_variant_names_test`, `bolt_plan_test`
+(extended) and the card tests `bolt_kernels_test`, `bolt_decode_test`, `bolt_golden_test`, the Mac driver
+`tools/mac/clrun/bolt_run`. kernel_cmdlines **+115 / -0 / ~0** (1,256 -> 1,371 variants); no existing `.cl` edited.
+
+**The list as built (derived; `bolt_plan_test` asserts every count from `runtime::bolt::decode_launches`, the capture asserts
+its own count equals it, `probe_bolt_step_shapes_test` the P0 lists):**
+```text
+Mamba (40), 6:     nb_res_norm · gemv in_proj (K 4096 N 18560) · nb_conv · nb_ssm · nb_gnorm · gemv out_proj (K 8192)
+attention (8), 6:  nb_res_norm · gemv q||k||v (N 4608) · nb_attn_prep · mg_attn_decode · mg_attn_reduce · gemv o (N 4096)
+                   eager 5: Muse's mg_attn_eager is ONE launch (Decision 15)
+MoE (40), 9:       nb_res_norm · nb_router · nb_route · gemv fc1||shared_up (N 6400) · nb_sh_act · nb_moe_up ·
+                   nb_moe_down · gemv fc2 (K 1024) · gemv shared_down (K 5376)
+head, 5:           nb_embed_gather (device 0) · nb_res_norm (norm_f) · gemv_i8w | gemv_bf16 (N 131072) · nb_argmax x 2
+```
+653 a token; eager **645**; one arm 613; all three arms **533**; two cards +0 (`copy`) / +2 (`peer`: 655); the N 12 synthetic
+92 (76 with every arm, 94 peer). The norm binary at a site is named by what it folds: `_NF` (the first site, nothing pending),
+`_S1` (one slice set - after Mamba / attention), `_S1_T1` (after a MoE block: fc2's and shared_down's slices, §2.4's three
+roundings `rne(h + rne(rne(Σ fc2) + rne(Σ sh)))`), `_S1_R` (the `router` arm, every MoE site). Residual ping-pong `h0` /
+`h1`, the capture asserts the alternation; the debug tap of block l is written by the NEXT norm (the one that folds it); at the
+two-card cut h and the pending slices of block split - 1 always cross (the landing's sums region), device 1's first norm folds
+them and takes that tap. Decode scratch (derived, `bolt_plan_test`): 1,854,912 B under flash at any `max_len`, eager + 4 B x 32 x
+`max_len` (+33,554,432 B at 262144); plan == allocation per device (the card test checks it).
+
+**The arms' binaries:** `router` -> `nb_res_norm_M1_K4096_W8_S1_R` (the E router rows from the identical normalised row,
+`nb_router`'s order: per column 8 lanes of 512 consecutive k, then the stride 4 / 2 / 1 tree); `route` ->
+`nb_moe_up_M1_I<I>_L1024_T9_R` (every up work-group recomputes the 256-lane rank, work-group 0 writes the route row); `conv` ->
+`nb_ssm_M1_H128_P64_N128_G8_S1_C` (+ `_C_B16`; each work-group convolves its 16 x channels and its group's 256 B / C channels,
+the ring's B / C written by work-group (16 g, 0) only). On the Mac's GPU each arm equals its as-built pair bitwise (`bolt_run`);
+on the card `bolt_decode_test --fuse` holds tokens, logits, routes, rings, states, KV and taps bitwise `none` (not run).
+
+**P0 as built (not run; every correction PROPOSED):** the experts are `moe.cl` at **EXPERTS 64** TOP_K 8 D 1024 I 2048 - a pool of
+64 distinct blocks + the shared slot a MoE block, 9 distinct blocks a step from a host-written route row; per-launch byte scale
+Bolt's block over moe.cl's, up `I x 544 / 2,228,224` (moe.cl's gate||up is gated: twice the up bytes) and down
+`I x 544 / 1,114,112` (derived: x 0.5625 and x 1.125 at I 2304, x 0.75 on the pair); the SSM
+step is `gdn_step_M1` at Qwen3.8's shape, x 4/3 (4,194,304 / 3,145,728 B of state); the norm is `lfm_res_norm_M1_K4096_W8_S1`
+(one launch a site; `--pair` times `prep_res_fold` + `kol_norm` as the two-launch form); the routers `gemv_bf16_M1_K4096_N<E>_C16_S16`
+at each block's E; conv / gnorm / route / sh_act / attn_prep / embed slots are `noop`; the state floor is `nb_state_rmw` (new
+`nb_probe.cl`: 4 MiB fp32, 2 MiB bf16 a Mamba block). The `--sweep-s` picks become `BoltDesc::linears`' `{S, layout}`; until
+then every int4 linear is S 1 at 25b's layouts (PROVISIONAL) and the block builds gemv at the 7 shapes x S {1, 2, 4, 8, 16} x
+L {0, 1} (S <= 4 at K 5376) so a re-pick needs no new line.
+
+**B3's bars as built (`bolt_golden_test`, all PROPOSED until the box):** tokens tie-aware (golden_common.h); routes as sets per
+(row, MoE block) - a one-expert difference with the reference's 9th / 10th gap <= `B70_BOLT_TIE_TOL` (1e-3) is a near-tie, a 0
+gap undetermined, anything else FAILS; w per expert with the worst fp32 ulps printed (never bitwise: 25a); the SSM state and
+the last three conv columns after the prompt: cosine >= 0.999 per block, the exact fraction printed; h taps median >= 0.9998 /
+min >= 0.99 a block. Synthetic golden sets: `bolt_oracle.sh export <n12-*>` -> `oracle-out-bolt-n12-{g128,g64x}` (r60.synth_golden).
+
+**Measured on the Mac:**
+- `bolt_ref_test` (the twin against `bolt_ref.py` / `bolt_mamba_ops.py` on the fixture; torch 2.14.1+cpu, transformers 5.19.0):
+  the norm folds bitwise (the fine rows 0 of 20,480 values differ; folding with two roundings instead of three would change
+  5,132); the conv 0 of 36,864 off; `A` bitwise under the switch (`torch.exp` differs on 6 heads' `A`, libm on 9); SSM fp32 y 0
+  of 24,576 differ, the state 369 of 3,456 sampled entries differ (row-relative 2.17e-7: `bolt_mamba_ops`' Σ_n is torch's,
+  the twin's the halving tree), bf16-state arm y 1 value 1 ulp, state 0; gnorm 0 of 32,768; route at E 496 / 240 ids and the top-10
+  sel bitwise, w 98 / 51 of 288 off by <= 2 ulp, Σ 12 / 9 of 32 (25a: torch.sum's order unnamed), the router's order 3.2e-7
+  relative; MoE latent / shared relu² bitwise, d 2 of 9,216 off 1 ulp, the combine 0 of 4,096, an expert block 0 of 16,384;
+  eager attention scores / probs bitwise, outputs 0 ulp at 6 / 300 / 3000 keys, 1 ulp at 262143 (4 heads); argmax edges.
+  `bolt_mamba_ops.exp_engine` vs the C++ `exp_torch` over 33,266 bf16 values: 0 differ; against `torch.exp` on the `A_log` range
+  195 of 33,255 differ by 1 ulp (`test_a_exp_engine`).
+- `bolt_run` (Apple's OpenCL 1.2, indicative): every kernel and arm agrees with the twin - exact except where Apple's
+  division is not correctly rounded (conv, gnorm: <= 1 ulp; route w / Σ / sel: <= 2 fp32 ulp, ids exact); the SSM in every
+  build (`_C`, `_B16`, `SPEC_SLOTS`) exact; up / `_R` / down exact; `mg_attn_eager` exact.
+- `bolt_variant_names_test`: 256 lists (head x attention x cards x arms x state), 41 bound names = 38 block binaries + 3
+  reused (Muse's two attention binaries, `pp_handoff`); every Level Zero source compiles (mac_check section 2).
+
+**Facts that differ from the plan / spec (the body above is left as written; each with its cost if wrong):**
+1. *Eager is 645, not 669*: Muse's `mg_attn_eager` is one launch (Decision 15's reuse), so eager is -1 per attention block, not +2.
+   *Cost:* none (a count).
+2. *E is a kernel argument, not a define*: one router / route / up / down binary per I serves every E (240..496, <= 512, % 16);
+   the names carry no E (`nb_router_M1_K4096`, `nb_route_M1_T9`, `nb_moe_up_M1_I<I>_L1024_T9`), and `res_norm_variant` takes
+   (M, S1, S2, router) instead of (M, S_fold, sources, router, E). *Cost if wrong:* a loop bound per block; none in arithmetic.
+3. *The kernels take the split-K slices' S as a define (`_S1` ...)*: every GEMV's consumer sums its S slices from 0 in ascending
+   order and rounds once, so a P0 re-pick of S adds binaries with the new suffix (the variant functions name them).
+4. *25a's chain where the plan's text differs*: conv bias seeds the accumulator, taps oldest first; SSM `dB = B·dt` then `·x`,
+   products and adds rounded apart (no fma); Σ_n, Σ r² and the gnorm Σ v² are HALVING trees (`v[:n/2] + v[n/2:]`), not
+   pairwise-adjacent; gate `z·(1/(1+exp(-z)))`; sigmoid `1/(exp(0-x)+1)` (torch's vectorised form, bitwise on the fixture).
+   *Cost if wrong:* none against the fixture (bitwise); B3 absorbs residual order differences.
+5. *The route's Σ of the nine s is ascending id* (25a could not pin torch.sum's order) and exact ties go to the lower id (torch
+   keeps either - the fixture's crafted tie rows differ from torch's set there, by design). *Cost:* w within 2 ulp (measured).
+6. *`exp` / `log1p` are Sleef's expf u10 and fdlibm's log1pf in the kernels* (`nb_common.h`), so the twin is bitwise B2;
+   `A` comes from the loader's `exp_torch` and `bolt_ref`'s new switch reproduces it (0 of 33,266 differ). B3 keeps `torch.exp`.
+7. *P0's experts at EXPERTS 64, not 256*: 257 blocks a layer would need ~34 GB on one card; a 64-block pool still re-reads no
+   block inside a step. The plan's "x 9/8 slots" is moot (moe.cl has 9 slots: 8 + shared); a per-block byte scale replaces it.
+   *Cost if wrong:* the expert term's cache behaviour differs from 512-block pools (PROPOSED scale).
+8. *P0's norm stand-in is `lfm_res_norm` (one launch)*, not `prep_res_fold + kol_norm_finish` as one launch (that pair is two
+   launches; it became `--pair`). *Cost:* none (it is what nb_res_norm copies).
+9. *`nb_gnorm` is one work-group a 1024-group* (grid (8, M)) - no recompute, no two-launch split needed. `nb_ssm`'s grid is the
+   plan's (128 heads x 4 slices of 16 dims). *Cost:* 8 work-groups a row (P0 / Task 8 decide if it matters).
+10. *Mac division*: Apple's OpenCL lacks correctly-rounded division, so `bolt_run`'s division-affected checks have 1-2 ulp
+    bars; the card (ocloc, IEEE division) is held bitwise in `bolt_kernels_test`. `clrun` inlines local `#include "x.h"`
+    itself (Apple's `-I` intermittently failed). *Cost:* none on the card.
+11. *Beyond the plan's row*: stages r60.k0, r60.host, r60.reject and r60.synth_golden (the synthetics' golden sets need a
+    runner; data key `oracle_bolt_synth`), and `bolt_decode_test` / `bolt_golden_test` share `tests/runtime/bolt_rig.h`.
+
+**Not run (box, row 60):** everything on a card - P0 (its table decides the S picks and Decision 16's arms), B2 on every kernel
+and arm (`bolt_kernels_test`), B4 / B3 on the N 12 synthetics and SergiioB's checkpoint (two cards, split 48 copy and 40 peer),
+the arms bitwise `none`, the bf16-state arm (Decision 2) and the speed rows (Task 8). Every `{S, layout}`, the tie tolerance,
+the cosine bars and the P0 scale factors are PROVISIONAL / PROPOSED until then.
