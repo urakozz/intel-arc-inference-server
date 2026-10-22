@@ -304,8 +304,8 @@ struct MuseEngineAdapterT : server::EngineIface {
   }
 
   // The logits row of the step just run (the next token's distribution), filtered with the model's cap and drawn as
-  // EngineAdapter's sample(); the id replaces the device argmax as the pending id. An unseeded server's RNG seeds itself
-  // once (EngineAdapter's rule); a seeded request reseeds it at its first sampled step (step()).
+  // EngineAdapter's sample(); the id replaces the device argmax as the pending id. An unseeded request continues the
+  // stream (seeded once); a seeded request reseeds it at its first sampled step (step()).
   void sample_into_pending(const server::Sampling& sampling) {
     if (!rng_seeded_) {
       rng_.seed(sampling.has_seed ? sampling.seed : std::random_device{}());

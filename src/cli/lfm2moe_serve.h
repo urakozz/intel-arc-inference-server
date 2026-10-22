@@ -23,8 +23,8 @@
 //   - a SEEDED sampled request is reproducible: the RNG is re-seeded from the request's seed at its first step (the first step
 //     after a prefill, an ingest, a restore or a reset - every request begins with one of them), so the same request again on a
 //     long-running server draws the same ids; an unseeded request re-seeds from the random device at its first step, so
-//     it never continues an earlier seeded request's stream. (EngineAdapter and Kolibri's adapter seed once per process: a second seeded request there continues the
-//     first's stream.)
+//     it never continues an earlier seeded request's stream. (EngineAdapter, the pipeline, K2 and Kolibri adapters follow the same
+//     per-request rule since 2026-10-23; they seeded once per process before.)
 //   - the next id is chosen at the START of step(), from the logits row of the previous replay (or of the prefill's head):
 //     the server adds each id it consumes to the request's SeenIds before it calls step() again, so the penalty sees the
 //     prompt and every earlier output id, and the first id after a prefill is sampled too when the request samples;

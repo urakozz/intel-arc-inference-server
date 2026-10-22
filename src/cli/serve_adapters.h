@@ -142,6 +142,7 @@ struct EngineAdapter : server::EngineIface {
   // line, delayed by one request -- `tools/serve_bench.sh`'s host-sampling
   // measurement sends one trailing no-op request to flush the last line.
   void prefill(const std::vector<uint32_t>& ids) override {
+    rng_seeded = false;   // a new request: its first sampled step reseeds (seed_rng)
     if (gen_tokens_ > 0) {
       const double ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - gen_start_)
@@ -400,6 +401,7 @@ struct EngineAdapter : server::EngineIface {
   void load_kv(uint32_t b, uint32_t e, const void* host) override { eng.load_kv(b, e, host); }
   void set_block_hook(BlockHook hook) override { eng.set_block_hook(std::move(hook)); }
   void ingest(const std::vector<uint32_t>& ids) override {
+    rng_seeded = false;
     flush_commit();
     eng.ingest(ids);
   }
@@ -413,14 +415,13 @@ struct EngineAdapter : server::EngineIface {
   // sampled; this call replaces the argmax the device just wrote for the
   // step after this one.
   //
-  // The RNG seeds itself once, lazily, on the first sampled token this
-  // adapter ever serves: from the request's `seed` if it gave one, else from
-  // `std::random_device`. It is not reseeded per request after that (the
-  // server is single-stream, so "per request" would mean "every token of
-  // every request after the first restarts the same draw", which is not what
-  // real sampling wants); a `seed`d request run first after server start is
-  // reproducible from that seed, which is what `sampling_test.cc` grades at
-  // the `sample()` level.
+  // The RNG seeds itself once per REQUEST, lazily, on the request's first sampled
+  // token: from the request's `seed` if it gave one, else from `std::random_device`.
+  // prefill() and ingest() re-arm it - every request begins with one of them
+  // (server::PrefixSession::begin) and nothing calls them mid-generation - so the same
+  // seeded request draws the same ids however long the server has run, and an unseeded
+  // one never continues an earlier request's stream (the box's r12.d2, 2026-10-22: a
+  // second identical seeded request differed when the RNG seeded once per process).
   void sample_into_control(const server::Sampling& sampling) {
     seed_rng(sampling);
     imm.copy(host_logits.data(), eng.buffers().logits.ptr(),
