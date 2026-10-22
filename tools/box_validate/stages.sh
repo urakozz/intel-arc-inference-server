@@ -4169,6 +4169,151 @@ st_r59_load_rtn() {
 }
 
 # ======================================================================================
+row 60 "spec 25c - Nemotron 3.5 Bolt decode: P0 (653 / 533 skeletons, GEMV and SSM-state floors, the S sweep), the nb_* kernels, BoltEngine on two cards, the fused arms, the fp32 / bf16 state arm (plan 25c)"
+rownote 60 "Written blind on the Mac (spec 25 §15): NO nb_* binary has been compiled by ocloc (kernel_cmdlines +115 / -0 / ~0: the gemv cells at Bolt's 7 int4 shapes x S x layout, the heads at 131072, P0's stand-ins, nb_state_rmw, the 38 family binaries incl. the arms, the bf16-state builds and test-only M = 4 builds). No existing .cl edited: G0's sha is K0. On the Mac's GPU (tools/mac/clrun/bolt_run, indicative) every kernel and arm agrees with tests/kernels/bolt_ref.h - exact, except Apple's not-correctly-rounded division (conv / gnorm <= 1 ulp, the route's fp32 words <= 2 ulp with ids exact); Muse's mg_attn_eager exact. The flash mg_attn path and the whole engine have never run anywhere."
+rownote 60 "P0 first (Decision 16): r60.p0 runs probe_bolt_step before any engine stage - the 653-launch skeleton from EXISTING kernels at Bolt's shapes, the 533-launch fused skeleton, the GEMV-only list, 653 noops and the SSM-state floor (nb_state_rmw: 4 MiB fp32 / 2 MiB bf16 a Mamba block), interleaved, at depth 4096 and 65536, --sweep-s (every int4 shape at S 1/2/4/8/16 x L 0/1, probe_gemv's 3 % rule) and --pair (the two-launch norm). Stand-ins, PROPOSED scales: moe.cl at E 64 (a 64-block pool + the shared slot a MoE block; up x I*544/2,228,224, down x I*544/1,114,112), gdn_step at Qwen3.8's shape (x 4/3), lfm_res_norm as the one-launch norm; conv / gnorm / route / sh_act / attn_prep / embed are noops. Write the table into docs/probe-bolt-2026-10-21.md (a 'P0' section). The S picks become model::BoltDesc::linears' {S, layout} (25b's PROVISIONAL S 1 until then; the block already builds every cell); every arm whose skeleton saving is >= 1 % of the step is A/B'd in r60.fuse / r60.speed (Decision 16, PROPOSED)."
+rownote 60 "Every stage on the REAL checkpoint needs BOTH cards (Decision 4; split 48 by bytes): its commands set ZE_AFFINITY_MASK=0,1 themselves. The N 12 synthetics (row 59's r59.synth, data key bolt_synth) run on one card, --pp 6,4 and pp2:6 on two. Their golden sets come from r60.synth_golden (bolt_oracle.sh export on n12-g128 / n12-g64x -> \$DATA/oracle-out-bolt-n12-{g128,g64x}, short / 4k / agentic, CPU, hours ESTIMATED; data key oracle_bolt_synth). SergiioB's golden sets are row 57's r57.golden (oracle_bolt)."
+rownote 60 "Tolerances (all PROPOSED): B70_BOLT_TIE_TOL = 1e-3 on the 9th / 10th sel until row 57's gap distribution on the real weights (an exact 0 gap is undetermined); h taps median >= 0.9998 / min >= 0.99 a block; the SSM state and the conv columns after the prompt cosine >= 0.999 a block (not bitwise: the int4 GEMV's fp32 order vs the reference's bf16 linear); flash against fp64 at cosine 0.99999. Decision 2's A4 subset needs b70-serve (spec 25e, not built): r60.state_arm records B3 only."
+rownote 60 "Hand back: P0's tables (step per list, gap per launch, the floors, the S picks, the PROPOSED corrected step); bolt_kernels_test's lines; every plan == allocation / launches line (653 / 645 eager / 533 all arms / 655 peer; the synthetic 92); the B3 gate / routing / SSM / h lines per prompt; the arms' bitwise lines and their A/B ratios; the speed rows and the --profile table."
+stage r60.k0        60 default cpu -                         g0.sha,g0.bitwise,g0.suite "K0 (B0): every pre-existing binary identical; kernel_cmdlines +115 / -0 / ~0 (no existing .cl edited)"
+st_r60_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r60.host      60 default cpu -                         -        "host: probe_bolt_step_shapes_test, bolt_ref_test (the twin against the fixture), bolt_variant_names_test, bolt_plan_test (the launch counts, the decode scratch)"
+st_r60_host() {
+  run_tests '^(probe_bolt_step_shapes_test|bolt_ref_test|bolt_variant_names_test|bolt_plan_test)$'
+  jgrab host '^(probe_bolt_step_shapes_test|bolt_ref_test|bolt_variant_names_test|bolt_plan_test)$' \
+    'OK|ok|bitwise|differ|launches|scratch|lists'
+  finish
+}
+stage r60.p0        60 default gpu -                         r60.k0   "P0: probe_bolt_step at depth 4096 / 65536, interleaved a / fused / gemv / noop / state, --sweep-s, --pair: the table into the facts sheet"
+st_r60_p0() {
+  idle r60-p0
+  x "uptime"
+  chk "build/tools/probe/probe_bolt_step --depth 4096 --rounds 9 --sweep-s --pair > $STATE/r60-p0-4096.md" "P0 at depth 4096 (+ the S sweep, the norm pair)"
+  chk "build/tools/probe/probe_bolt_step --depth 65536 --rounds 9 > $STATE/r60-p0-65536.md" "P0 at depth 65536"
+  x "cat $STATE/r60-p0-4096.md $STATE/r60-p0-65536.md"
+  grab_all p0 '^\| (a|fused|gemv|noop|state) \||^- step|gap per launch|roofline|PROPOSED step|\*\*pick\*\*|--pair' 80
+  finish
+}
+stage r60.k1        60 default gpu -                         r60.k0   "kbins of the block + bolt_kernels_test: B2 on every kernel and arm (bitwise bolt_ref.h; flash at cosine 0.99999 against fp64)"
+st_r60_k1() {
+  kbins nb_res_norm_M1_K4096_W8_NF nb_res_norm_M1_K4096_W8_S1 nb_res_norm_M1_K4096_W8_S1_T1 nb_res_norm_M1_K4096_W8_S1_R \
+    nb_sh_act_M1_L1024_SH5376_S1 nb_attn_prep_M1_KV2_S1 nb_embed_gather_M1_K4096_V131072 nb_conv_M1_C10240_S1 \
+    nb_ssm_M1_H128_P64_N128_G8_S1 nb_ssm_M1_H128_P64_N128_G8_S1_C nb_ssm_M1_H128_P64_N128_G8_S1_B16 \
+    nb_ssm_M1_H128_P64_N128_G8_S1_C_B16 nb_gnorm_M1_D8192_G1024_S1 nb_router_M1_K4096 nb_route_M1_T9 \
+    nb_moe_up_M1_I2560_L1024_T9 nb_moe_up_M1_I2560_L1024_T9_R nb_moe_down_M1_I2560_L1024_T9 \
+    nb_argmax_stage1_M1_V131072 nb_argmax_stage2_V131072 gemv_i8w_M1_K4096_N131072 gemv_bf16_M1_K4096_N131072 \
+    mg_attn_M1_T64_Q32KV2_F mg_attn_eager_M1_T64_Q32KV2_F nb_state_rmw_F32 nb_state_rmw_B16
+  run_tests '^bolt_kernels_test$'
+  jgrab k1 '^bolt_kernels_test$' 'bitwise|cosine|within|arm|OK'
+  finish
+}
+stage r60.reject    60 default gpu -                         -        "cli_reject_bolt_* (prefill, prefill-length, mtp, spec, kv8) - refused before the device"
+st_r60_reject() {
+  run_tests '^cli_reject_bolt_' '' '' 'ZE_AFFINITY_MASK=0,1'
+  finish
+}
+stage r60.synth_golden 60 default cpu oracle_image,bolt_synth -       "the synthetics' golden sets: bolt_oracle.sh export on oracle-out-bolt-synth/n12-g128 and n12-g64x (short, 4k, agentic) -> \$DATA/oracle-out-bolt-n12-{g128,g64x}; then re-links oracle-out*"
+st_r60_synth_golden() {
+  local s
+  for s in n12-g128 n12-g64x; do
+    chk "BOLT_PROMPTS='bolt_short bolt_4k bolt_agentic' tools/box_validate/bolt_oracle.sh $DATA export $DATA/oracle-out-bolt-synth/$s" \
+      "the synthetic ($s) golden sets"
+  done
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_oracle_bolt_synth' $STATE/have.env"
+  grab_all gap 'gap|^wall' 20
+  finish
+}
+stage r60.synth     60 default gpu  bolt_synth               r60.k1   "bolt_decode_test on the N 12 synthetics, one card: plan == allocation, 92 launches, two runs bitwise (tokens, logits, routes, rings, SSM states, KV, both residuals, every tap); eager, bf16 head, bf16 state; --fuse router / route / conv / all bitwise none"
+st_r60_synth() {
+  run_tests '^bolt_decode_synth_(n12-g128|n12-g64x|eager|bf16head|b16state|fuse_(router|route|conv|all))_test$'
+  jgrab synth '^bolt_decode_synth' 'plan == allocation|launches|B4|Review Focus|residual|OK'
+  finish
+}
+stage r60.synth_b3  60 default gpu  bolt_synth,oracle_bolt_synth r60.synth "bolt_golden_test on the synthetics: tokens tie-aware, routes within B70_BOLT_TIE_TOL, SSM state / conv columns by cosine, h taps - short / 4k / agentic x both spellings; bf16 head, eager"
+st_r60_synth_b3() {
+  run_tests '^bolt_golden_synth_n12-(g128|g64x)_bolt_(short|4k|agentic)_test$|^bolt_golden_synth_short_(bf16head|eager)_test$'
+  jgrab synth-b3 '^bolt_golden_synth' 'gate:|routing:|SSM state|conv|^  h |step [0-9]+:|OK'
+  finish
+}
+stage r60.synth_pp  60 default gpu  bolt_synth               r60.synth "two cards on the synthetic: bolt_decode_test --pp 6,4 (copy at 6, peer at 4: bitwise each other AND bitwise one card) + the golden gate across split 6 (peer)"
+st_r60_synth_pp() {
+  run_tests '^bolt_decode_synth_pp_test$|^bolt_golden_synth_short_pp2_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab synth-pp '^bolt_(decode_synth_pp|golden_synth_short_pp2)' 'two cards|split|Review Focus 6|gate:|OK'
+  finish
+}
+stage r60.golden    60 default gpu  bolt_g128,oracle_bolt    r60.k1   "SergiioB's checkpoint, two cards: bolt_decode_test --pp 48,40 (653 launches, B4, split 48 copy bitwise 40 peer); B3 short / 4k / agentic, split 40, bf16 head, eager"
+st_r60_golden() {
+  run_tests '^bolt_decode_real_test$|^bolt_golden_real_(bolt_(short|4k|agentic)|short_split40|short_bf16head|short_eager)_test$' \
+    '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab golden '^bolt_(decode|golden)_real' 'plan == allocation|launches|B4|Review Focus 6|gate:|routing:|SSM state|conv|OK'
+  finish
+}
+stage r60.golden32k 60 optin   gpu  bolt_g128,oracle_bolt    r60.golden "B3 on bolt_32k (32768 ids ingested one replay per id: hours, ESTIMATED)"
+st_r60_golden32k() {
+  run_tests '^bolt_golden_real_32k_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab golden32k '^bolt_golden_real_32k_test$' 'gate:|routing:|SSM state|conv|OK'
+  finish
+}
+stage r60.fuse      60 default gpu  bolt_g128                r60.golden "every arm bitwise none on the real checkpoint (bolt_decode_test --fuse); the arms' A/B at depth 4096 (interleaved, median of 3)"
+st_r60_fuse() {
+  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
+  local k="ZE_AFFINITY_MASK=0,1" a arms="" ratios=""
+  run_tests '^bolt_decode_real_fuse_(router|route|conv|all)_test$' '' '' "$k"
+  jgrab fuse '^bolt_decode_real_fuse' 'Review Focus 5|launches|OK'
+  idle before
+  for a in none router route conv all; do
+    arms="$arms $a '$k B70_BOLT_FUSE=$a $(bench_cmd "$snap" --depth 4096 --tg 256 --max-len 8192)'"
+    [ "$a" = none ] || ratios="$ratios --ratio $a/none"
+  done
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "the Bolt arms at depth 4096"
+  idle after
+  grab_all ratio '^RATIO '
+  grab_all idle '^IDLE '
+  finish
+}
+stage r60.state_arm 60 optin   gpu  bolt_g128,oracle_bolt    r60.golden "B70_BOLT_SSM=bf16 (Decision 2's arm): B3 short / agentic beside fp32's, and its speed at 4096 / 65536 against fp32 (interleaved)"
+st_r60_state_arm() {
+  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
+  local k="ZE_AFFINITY_MASK=0,1" d arms="" ratios=""
+  run_tests '^bolt_golden_real_(short|agentic)_b16state_test$' '' '' "$k"
+  jgrab state '^bolt_golden_real_.*_b16state_test$' 'gate:|routing:|SSM state|conv|^  h |OK'
+  idle before
+  for d in 4096 65536; do
+    arms="$arms d$d-fp32 '$k $(bench_cmd "$snap" --depth $d --tg 256 --max-len 131072)'"
+    arms="$arms d$d-bf16 '$k B70_BOLT_SSM=bf16 $(bench_cmd "$snap" --depth $d --tg 256 --max-len 131072)'"
+    ratios="$ratios --ratio d$d-bf16/d$d-fp32"
+  done
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "the SSM-state arm"
+  idle after
+  grab_all ratio '^RATIO '
+  finish
+}
+stage r60.speed     60 optin   gpu  bolt_g128                r60.golden "Task 8: decode at depth 886 / 8192 / 32000 / 65536 / 131072 / 262000 (tg 128), int8 / bf16 head, flash / eager, the arms (interleaved, median of 3); --profile --repeats 5 at 4096"
+st_r60_speed() {
+  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
+  local k="ZE_AFFINITY_MASK=0,1" d arms ratios
+  x "uptime"
+  for d in 886 8192 32000 65536 131072 262000; do   # the deep rows ingest one replay per id: hours, ESTIMATED
+    idle "d$d"
+    arms="d$d '$k $(bench_cmd "$snap" --depth $d --tg 128 --max-len auto)'"
+    arms="$arms d$d-bf16 '$k $(bench_cmd "$snap" --depth $d --tg 128 --max-len auto --lm-head bf16)'"
+    arms="$arms d$d-eager '$k B70_BOLT_ATTN=eager $(bench_cmd "$snap" --depth $d --tg 128 --max-len auto)'"
+    arms="$arms d$d-all '$k B70_BOLT_FUSE=all $(bench_cmd "$snap" --depth $d --tg 128 --max-len auto)'"
+    ratios="--ratio d$d-bf16/d$d --ratio d$d-eager/d$d --ratio d$d-all/d$d"
+    chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.d$d.rows -r 3 $ratios -- $arms" "decode at depth $d"
+  done
+  chk "$k build/src/cli/b70-decode $snap --profile --depth 4096 --steps 32 --repeats 5" "--profile at 4096"
+  x "uptime"
+  grab_all ratio '^RATIO ' 40
+  grab_all profile '^\| (nb_|gemv|mg_attn|argmax)|^MEASURED' 60
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / muse / dflash labels belong to their rows)"
 st_x_rest() {

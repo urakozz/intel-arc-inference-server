@@ -138,7 +138,13 @@ df_* kernels use work-group reductions only, so all of them run here). Spec 19c 
 8-slot verify build (SPEC_SLOTS, N_SLOTS 8, one layer at Qwen3.8's shapes) against the plain kernel stepping the same
 rows - every row's slot and output bitwise at M = 8 and 5, and a partial acceptance (j = 0 / 3 / 6 / 7 of 7, 2 of 4):
 the live slot after the commit is exactly the state after row j and three new rows from it equal the plain run (the
-stale slots and conv-ring positions of the rejected rows are never read); no host source. A new
+stale slots and conv-ring positions of the rejected rows are never read); no host source. Spec 25c adds `bolt_run`:
+every `nb_*` kernel and fused arm (the norm sites incl. the two-source fold, the conv ring, the SSM step in its fp32,
+bf16-state, `_C` and `SPEC_SLOTS` builds, the gated norm, router, route, experts up / `_R` / down, the shared act, the
+attention prep, the gather, the argmax) and Muse's `mg_attn_eager` at Bolt's shape against `tests/kernels/bolt_ref.h`
+on `bolt_fixture.h` - exact, except where Apple's division is not correctly rounded (conv and gnorm within 1 ulp, the
+route's fp32 words within 2 ulp with the ids exact; the card is held bitwise by `bolt_kernels_test`). `clrun` inlines a
+source's local `#include "x.h"` itself (Apple's compiler intermittently failed to find them through `-I`). A new
 driver is a `tools/mac/clrun/<kernel>_run.cc` with a `main()` over `clrun::Device`,
 `Program` and `Buffer`, and its name in section 5's loop in `tools/mac_check.sh`, which
 builds the drivers into `build/mac-check/clrun/` with `src/` and `tests/` on the include

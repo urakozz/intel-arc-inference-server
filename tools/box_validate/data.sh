@@ -227,6 +227,9 @@ case "${1:-}" in
       bash -c 'for n in 8 12; do for f in g128 g64x g64; do test -s oracle-out-bolt-synth/n$n-$f/model.safetensors.index.json && test -f oracle-out-bolt-synth/n$n-$f.ACCEPTED || exit 1; done; done'
     have bolt_rtn "Nemotron 3.5 Bolt's own int4 g64 export (spec 25q's; not built yet)" \
       bash -c 'false'
+    # Spec 25c (queue row 60): the N 12 synthetics' golden sets (r60.synth_golden: bolt_oracle.sh export on each).
+    have oracle_bolt_synth "oracle-out-bolt-n12-{g128,g64x}/bolt_{short,4k,agentic}.golden.safetensors (spec 25c: r60.synth_golden)" \
+      bash -c 'for s in n12-g128 n12-g64x; do for p in bolt_short bolt_4k bolt_agentic; do test -s oracle-out-bolt-$s/$p.golden.safetensors || exit 1; done; done'
     have tok_python "a python with tokenizers (${TOK_PYTHON:-?})" "${TOK_PYTHON:-/nonexistent}" -c 'import tokenizers'
     # shellcheck disable=SC2016 # expanded by the inner bash
     have uvx "uvx (llama-benchy)" bash -c 'command -v uvx || test -x "$HOME/.local/bin/uvx"'
