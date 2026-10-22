@@ -149,6 +149,23 @@ class AgenticLoop(unittest.TestCase):
         self.assertIn("hit rate of the turns that followed another: 66.7 %", text)
         self.assertIn("ideal prefix reuse (analyze_log.py's rule): 103 of 250", text)
         self.assertIn("in another order than generated: 0 of 2", text)
+        # spec 25e: the first token the miss diverges at - turn 2's prompt matches turn 1's prompt + output for 103 ids, then
+        # has 7 where turn 1's output continued with 1003
+        self.assertIn("turn 2 diverges from the previous prompt + generated ids at token 103: its prompt has id 7, "
+                      "the previous request's text has id 1003", text)
+
+    def test_extra_body_fields(self):
+        # spec 25e: --extra merges into every request body (Bolt's chat_template_kwargs arms)
+        usage = {"prompt_tokens": 10, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 0}}
+        Scripted.script = [([{"content": "a"}], "stop", usage), ([{"content": "b"}], "stop", usage)]
+        agentic_loop.main(["run", self.transcript, self.url, self.out, "--turns", "2", "--extra",
+                           '{"chat_template_kwargs": {"truncate_history_thinking": false}, "reasoning_effort": "high"}'])
+        for body in Scripted.bodies:
+            self.assertEqual(body["chat_template_kwargs"], {"truncate_history_thinking": False})
+            self.assertEqual(body["reasoning_effort"], "high")
+            self.assertEqual(body["temperature"], 0)
+        with self.assertRaises(SystemExit):
+            agentic_loop.main(["run", self.transcript, self.url, self.out, "--extra", "[1]"])
 
 
 if __name__ == "__main__":

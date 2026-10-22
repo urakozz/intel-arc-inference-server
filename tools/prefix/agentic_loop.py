@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Replay a recorded coding session as a LIVE agent loop against b70-serve and measure the prefix cache (spec 24e Task 5).
 
-    agentic_loop.py run <transcript.json> <base url> <out.json> [--turns N] [--max-tokens N] [--seed S]
+    agentic_loop.py run <transcript.json> <base url> <out.json> [--turns N] [--max-tokens N] [--seed S] [--extra JSON]
     agentic_loop.py report <out.json> [<server --log-requests dir>]
 
 <transcript.json> is a chat session ({"messages": [...], "tools": [...]}: system, user, then assistant / tool turns -
@@ -14,6 +14,9 @@ when the transcript has nothing left to say, the model answered without a call a
 --turns requests. Because the assistant turns are the server's own, the prefix cache sees what it would see in a
 real session: a turn the template re-renders in another order than the model generated it (content then calls; the
 model may write a call before its text) is a miss at that point.
+
+--extra JSON (spec 25e): a JSON object merged into every request body - Bolt's {"chat_template_kwargs":
+{"truncate_history_thinking": false}} arm, say; the default sends none, so a model's own template defaults apply.
 
 Per request it records (stream, temperature 0, a fixed seed): prompt tokens, usage.prompt_tokens_details.cached_tokens,
 the time to the first streamed chunk with choices, the total, the completion tokens, the decode rate
@@ -95,6 +98,9 @@ def plan(transcript):
 def cmd_run(a):
     with open(a.transcript, encoding="utf-8") as f:
         t = json.load(f)
+    extra = json.loads(a.extra) if a.extra else {}
+    if not isinstance(extra, dict):
+        sys.exit("--extra must be a JSON object")
     system, users, results = plan(t)
     if not users:
         sys.exit("the transcript has no user message")
@@ -107,6 +113,7 @@ def cmd_run(a):
                 "stream": True, "stream_options": {"include_usage": True}, "max_tokens": a.max_tokens}
         if not body["tools"]:
             del body["tools"]
+        body.update(extra)
         res = stream_request(url, body)
         usage = res["usage"] or {}
         res["turn"] = turn + 1
@@ -163,6 +170,22 @@ def ideal_reuse(log):
     return ideal
 
 
+def divergences(log):
+    """Per request: (k, the prompt's id at k, the previous prompt + generated id at k) where the prompt stops matching the
+    previous request's prompt + generated ids - the first token a miss diverges at (spec 25e Review Focus 5); None for the first
+    request or a prompt that is a prefix of the previous one."""
+    out, prev = [], []
+    for r in log:
+        p = r["prompt_ids"]
+        k = 0
+        n = min(len(p), len(prev))
+        while k < n and p[k] == prev[k]:
+            k += 1
+        out.append(None if not prev or k >= len(p) else (k, p[k], prev[k] if k < len(prev) else None))
+        prev = p + r["out_ids"]
+    return out
+
+
 def cmd_report(a):
     with open(a.run, encoding="utf-8") as f:
         runs = json.load(f)
@@ -187,6 +210,11 @@ def cmd_report(a):
     print(f"turns whose call the template would re-render in another order than generated: {reordered} of {len(runs)}")
     if ideal is not None:
         print(f"ideal prefix reuse (analyze_log.py's rule): {sum(ideal)} of {sum(r.get('prompt_tokens') or 0 for r in runs)}")
+        for r, d in zip(runs, divergences(load_log(a.log))):
+            if d is not None and (r.get("cached_tokens") or 0) < (r.get("prompt_tokens") or 0):
+                other = f"id {d[2]}" if d[2] is not None else "nothing (it ended)"
+                print(f"turn {r['turn']} diverges from the previous prompt + generated ids at token {d[0]}: its prompt has id "
+                      f"{d[1]}, the previous request's text has {other}")
     return 0
 
 
@@ -200,6 +228,7 @@ def main(argv=None):
     r.add_argument("--turns", type=int, default=12)
     r.add_argument("--max-tokens", type=int, default=1024)
     r.add_argument("--seed", type=int, default=0)
+    r.add_argument("--extra", default="", help="a JSON object merged into every request body (e.g. chat_template_kwargs)")
     q = sub.add_parser("report")
     q.add_argument("run")
     q.add_argument("log", nargs="?")
