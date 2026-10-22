@@ -71,6 +71,10 @@ if [ "${MODEL:-qwen38}" = lilicorr ]; then
   oabs=$(cd "$OUT" && pwd -P) sabs="" dmount=()
   [ -d "$SITE" ] && sabs=$(cd "$SITE" && pwd -P)
   [ -d "$DUMPS" ] && dmount=(-v "$(cd "$DUMPS" && pwd -P)":/dumps:ro)
+  # BOLT_TINY_DIR: an existing directory of 25a's tiny Bolt variants for the check's tiny pair (default: the tree's
+  # oracle-out-bolt-tiny, made on first use).
+  tmount=()
+  [ -n "${BOLT_TINY_DIR:-}" ] && tmount=(-v "$(cd "$BOLT_TINY_DIR" && pwd -P)":/bolt-tiny -e BOLT_TINY_DIR=/bolt-tiny)
   # One model computation on the Mac's CPU at a time: every container waits for the shared lock (fcntl, B70_CPU_LOCK).
   lock=(python3 -c 'import fcntl, subprocess, sys
 f = open(sys.argv[1], "a+")
@@ -79,7 +83,8 @@ sys.exit(subprocess.run(sys.argv[2:]).returncode)' "${B70_CPU_LOCK:-/tmp/b70-cpu
   run() {
     echo "--- $(date '+%T') $*"
     /usr/bin/time -p "${lock[@]}" docker run --rm --memory "$MEM" --memory-swap "$MEM" -v "$HF":/hf:ro -v "$PWD":/ws \
-      "${dmount[@]}" -v "$oabs":/out ${sabs:+-v "$sabs":/site:ro -e PYTHONPATH=/site} -e HF_HOME=/hf \
+      -u "$(id -u):$(id -g)" -e HOME=/tmp ${dmount[@]+"${dmount[@]}"} ${tmount[@]+"${tmount[@]}"} \
+      -v "$oabs":/out ${sabs:+-v "$sabs":/site:ro -e PYTHONPATH=/site} -e HF_HOME=/hf \
       -e HF_HUB_OFFLINE=1 -e PYTHONUNBUFFERED=1 -e TQDM_DISABLE=1 -e OMP_NUM_THREADS="$THREADS" \
       -e MKL_NUM_THREADS="$THREADS" -e LILICORR_TINY_DIR=/out/tiny -w /ws "$IMAGE" "$@"
   }
