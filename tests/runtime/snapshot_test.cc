@@ -109,12 +109,19 @@ int main(int argc, char** argv) {
   const auto ids = golden::read_ids("tests/golden/prompts/long32k.ids");
   CHECK(ids.size() > 5000);
   const auto other = repeat_to(golden::read_ids("tests/golden/prompts/code.ids"), 3000);
-  CHECK_EQ(e.state_bytes(), size_t(166723584));
-  // 2048 positions x K and V x 16 FA layers x 4 kv heads x (256 x 2 B) = 134,217,728 at bf16;
-  // x (256 + 2) B = 67,633,152 at int8 (spec 12b: the rows and their fp16 scales).
+  // The sizes are written out per model, not derived from the descriptor (that would check the
+  // formula against itself). State: GDN layers x 48 v-heads x 128 x 128 x 4 B, plus the conv ring
+  // GDN layers x 16 x 10240 x 2 B - Qwen3.8 48 layers: 150,994,944 + 15,728,640; Agnes 54 layers:
+  // 169,869,312 + 17,694,720 (the box's first Agnes run, 2026-10-22, found Qwen3.8's number here).
+  const bool agnes = e.model().desc->name == "agnes-3.0-flash";
+  CHECK_EQ(e.state_bytes(), agnes ? size_t(187564032) : size_t(166723584));
+  // 2048 positions x K and V x FA layers (16 on Qwen3.8, 18 on Agnes) x 4 kv heads x (256 x 2 B)
+  // = 134,217,728 / 150,994,944 at bf16; x (256 + 2) B at int8 (spec 12b: the rows and their
+  // fp16 scales).
+  const size_t fa = agnes ? 18 : 16;
   CHECK_EQ(e.kv_bytes(2048), e.kv_cache() == runtime::KvCache::Int8
-                                 ? size_t(2048) * 2 * 16 * 4 * (256 + 2)
-                                 : size_t(134217728));
+                                 ? size_t(2048) * 2 * fa * 4 * (256 + 2)
+                                 : agnes ? size_t(150994944) : size_t(134217728));
 
   // A and B.
   check_restore(ctx, e, ids, 4395, other);
