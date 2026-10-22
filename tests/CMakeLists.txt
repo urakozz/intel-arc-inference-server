@@ -5067,7 +5067,8 @@ if(B70_TOKENIZER_ENABLED)
   add_executable(template_bolt_test tokenizer/template_bolt_test.cc)
   target_include_directories(template_bolt_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(template_bolt_test PRIVATE b70_tokenizer b70_third_party_minja)
-  add_test(NAME template_bolt_test COMMAND template_bolt_test ${CMAKE_SOURCE_DIR}/tests/tokenizer ${B70_BOLT_SNAPSHOT})
+  add_test(NAME template_bolt_test COMMAND template_bolt_test ${CMAKE_SOURCE_DIR}/tests/tokenizer ${B70_BOLT_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/server/bolt_template_cases.json)
   # ... and the 131072-id tokenizer against HF's: the added tokens, every single id's round trip, 30 texts, corpus.txt's
   # digests, every render's ids (no BOS anywhere).
   add_executable(bolt_tokenizer_test tokenizer/bolt_tokenizer_test.cc)
