@@ -29,6 +29,26 @@ anything except the Python CPU oracle and the reference vLLM stack.
 `tools/box.sh` and the benchmark helpers take the machine from
 `BOX=user@host`; there is no default address worth writing down.
 
+### Versions on the box (read 2026-10-22, after an `apt upgrade`)
+
+| | version |
+|---|---|
+| kernel (running) | 7.3.0-rc4 with the P2P patch (`b70-p2p-exp2`); the upgrade also installed distro 7.0.0-38, so check which entry GRUB boots before a reboot |
+| IGC | 2.41.5 |
+| compute runtime (`libze-intel-gpu1`, `intel-opencl-icd`, `intel-ocloc`) | 26.35.39758.10 |
+| Level Zero loader (`libze1`) | 1.33.1 |
+| oneAPI DPC++ compiler | 2026.2.0 (`compiler/latest`) **and** 2026.1.1, side by side |
+| oneDNN | 2026.1.0 and 2026.0.2, side by side |
+
+The upgrade left the driver stack (IGC, compute runtime, Level Zero) unchanged, so every
+kernel binary and every measured row in BENCHMARKS still comes from the same compiler and
+runtime. Only the oneAPI compiler moved, and the build still pins 2026.1 by path
+(`B70_ICPX` in `cmake/prefill.cmake`): icpx builds only the optional SYCL prefill
+component, and keeping it fixed until a validation run is through means G0 compares code,
+not compilers. Moving to 2026.2 is its own change: set `B70_ICPX` to
+`/opt/intel/oneapi/compiler/2026.2/bin/icpx`, rebuild, and compare the SYCL prefill path's
+gates and rate against 2026.1.
+
 ## Driving a remote build
 
 `tools/box.sh` syncs the tree, configures, builds and runs `ctest` over ssh.
