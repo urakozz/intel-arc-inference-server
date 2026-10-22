@@ -15,9 +15,17 @@
 //                        model is refused by the plan naming the bytes and Decision 4
 //   --pipeline-split auto|N, --pipeline-handoff copy|peer   --pp 2's (auto = runtime::bolt::pp_split: 48)
 //   --layers N           development mode: load only blocks [0, N) (the head reads block N-1's residual)
+//   --prefill            (--ids) spec 25d: the prompt through BoltEngine::prefill in chunks, then --n greedy ids
+//   --bench --prefill-length N    depth N PREFILLED and timed (the pp row, a second stdout line, with its TFLOP/s against
+//                        the descriptor's matmul parameters a token), then --tg decoded
+//   --prefill-chunk C    the chunk width: a multiple of 64, at most 2048 (the default) - every chunk ends on the absolute
+//                        64-grid (runtime::bolt::prefill_chunk_rows)
+//   --prefill-backend l0 the only backend (spec 25d)
 // B70_BOLT_ATTN=flash|eager, B70_BOLT_FUSE=none|all|<router,route,conv> and B70_BOLT_SSM=fp32|bf16 pick the list (read at
-// construction). Refused before the device, each by name (tests/CMakeLists.txt's cli_reject_bolt_*): --prefill /
-// --prefill-length / --prefill-chunk / --prefill-backend (spec 25d), --mtp (Bolt has no MTP head), --spec (spec 26:
+// construction; the prefill follows the attention form and the state precision). B70_PREFILL_PROFILE=1 prints the prefill's
+// phase table (runtime/prefill/profile.h; the Mamba launches under the gdn_* rows) after the timed call. Refused before the
+// device, each by name (tests/CMakeLists.txt's cli_reject_bolt_*): --prefill-backend l0-int8 / sycl-tla and a
+// --prefill-chunk that is not a multiple of 64 or above 2048 (spec 25d), --mtp (Bolt has no MTP head), --spec (spec 26:
 // LiLiCorr), --kv-cache int8 (Decision 17), --device with --pp 2.
 #include <algorithm>
 #include <array>
@@ -40,6 +48,8 @@
 #include "loader/snapshot.h"
 #include "runtime/bolt/bolt_engine.h"
 #include "runtime/bolt/bolt_sizes.h"
+#include "runtime/prefill/profile.h"
+#include "runtime/prefill_backend.h"
 
 namespace cli::bolt {
 
@@ -76,8 +86,14 @@ struct DecodeArgs {
   PipelineArgs pipe;            // devices as parsed (1 when --pp was not given)
   bool pp_given = false;        // --pp / --pipeline-parallel-size on the command line
   uint32_t layers = 0;          // --layers N (0: the checkpoint's)
+  // Spec 25d: --prefill (--ids), --prefill-length N (--bench at depth N: the pp row), --prefill-chunk C (0 = kPfC),
+  // --prefill-backend as parsed (l0 only).
+  bool prefill = false, pp = false, pp_backend_given = false;
+  uint32_t pp_chunk = 0;
+  runtime::PrefillBackend pp_backend = runtime::PrefillBackend::L0;
   // What else was asked for, for the refusals.
-  bool prefill = false, mtp = false, spec = false, kv8 = false;
+  bool mtp = false, spec = false, kv8 = false;
+  bool prefills() const { return prefill || pp; }
 };
 
 // --pp's default: two cards for the whole model (Decision 4), one for a truncated / synthetic one.
@@ -88,9 +104,19 @@ inline uint32_t devices_of(const DecodeArgs& a, const model::BoltDesc& d) {
 
 // Every refusal that needs no device - in this order, each by name (tests/CMakeLists.txt's cli_reject_bolt_*).
 inline void check_args(const DecodeArgs& a, const model::BoltDesc& d) {
-  if (a.prefill)
-    throw std::runtime_error("Nemotron 3.5 Bolt's prefill is spec 25d (not built yet): drop --prefill / --prefill-length / "
-                             "--prefill-chunk / --prefill-backend - the prompt is ingested one decode replay per id");
+  if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::L0Int8)
+    throw std::runtime_error("Nemotron 3.5 Bolt prefills on the l0 backend only (spec 25d), not l0-int8: int8 prefill for "
+                             "this family is out of scope (spec 25 §11) - --prefill-backend l0, or omit it");
+  if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::SyclTla)
+    throw std::runtime_error("Nemotron 3.5 Bolt prefills on the l0 backend only (spec 25d), not sycl-tla: sycl-tla has no "
+                             "Bolt walk (no SSD scan, no latent MoE) - --prefill-backend l0, or omit it");
+  if (a.pp_chunk > runtime::bolt::kPfC)
+    throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " exceeds Nemotron 3.5 Bolt's prefill chunk " +
+                             std::to_string(runtime::bolt::kPfC) + " (the scratch is sized for it)");
+  if (a.pp_chunk && a.pp_chunk % runtime::bolt::kPfSub)
+    throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " is not a multiple of " +
+                             std::to_string(runtime::bolt::kPfSub) + ": the SSD's sub-chunks are absolute 64-row windows "
+                             "and every chunk ends on that grid (spec 25d)");
   if (a.mtp) throw std::runtime_error("Nemotron 3.5 Bolt has no MTP head (spec 25 §0: num_nextn_predict_layers 0): drop --mtp");
   if (a.spec)
     throw std::runtime_error("--spec: Bolt's speculative decoding is spec 26 (the LiLiCorr drafter), not built yet");
@@ -147,12 +173,31 @@ inline size_t read_per_token(const model::BoltDesc& d, bool int8_head) {
 // The plan's BoltReserve for this run: the decode scratch the engine allocates (the largest device's, at the length
 // bound - eager's score row scales with max_len) and the SSM state's precision.
 inline runtime::bolt::BoltReserve reserve_for(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t len,
-                                              runtime::bolt::BoltAttn at, runtime::bolt::BoltState st) {
+                                              runtime::bolt::BoltAttn at, runtime::bolt::BoltState st, bool prefills = false) {
   runtime::bolt::BoltReserve r;
-  for (uint32_t dev = 0; dev < p.devices; ++dev)
+  for (uint32_t dev = 0; dev < p.devices; ++dev) {
     r.decode_scratch = std::max(r.decode_scratch, runtime::bolt::decode_scratch_bytes(d, p, dev, len, at, st));
+    if (prefills)   // spec 25d: the prefill scratch (+ the prefill link on two cards), the largest device's
+      r.prefill_scratch = std::max(r.prefill_scratch, runtime::bolt::prefill_scratch_bytes(d, p, dev));
+  }
   r.bf16_state = st == runtime::bolt::BoltState::Bf16;
   return r;
+}
+
+// The matmul parameters a prefilled token multiplies through (derived from the descriptor): every int4 linear but the
+// routed experts, the routers, top_k routed experts' up + down a MoE block - the pp row's TFLOP/s is 2 x this x t/s (the
+// attention's depth-dependent q K^T / P V and the last row's head excluded).
+inline double prefill_params_per_token(const model::BoltDesc& d) {
+  double n = 0;
+  for (uint32_t l = 0; l < d.layers; ++l)
+    for (const model::BoltLinear& ln : d.linears(l)) {
+      const double kn = double(ln.shape.K) * ln.shape.N;
+      if (ln.id == model::BoltLinearId::ExpertUp || ln.id == model::BoltLinearId::ExpertDown)
+        n += d.top_k * kn;
+      else
+        n += kn;
+    }
+  return n;
 }
 
 // The placement and max_len for this run, from the planner (before the load). Prints the choice and the plan.
@@ -167,7 +212,8 @@ inline runtime::bolt::BoltPlan settle(const model::BoltDesc& d, const DecodeArgs
                                          : model::BoltPlacement::one(d);
   const uint32_t bound = a.max_len.is_auto ? d.max_pos : a.max_len.value;
   const size_t reserve = a.reserve ? a.reserve : size_t(runtime::kDefaultReserveGb * 1e9);
-  const rb::BoltPlan p = rb::plan(d, a.max_len.is_auto ? 0 : a.max_len.value, dev, reserve_for(d, place, bound, at, st),
+  const rb::BoltPlan p = rb::plan(d, a.max_len.is_auto ? 0 : a.max_len.value, dev,
+                                  reserve_for(d, place, bound, at, st, a.prefills()),
                                   devs == 2 ? std::optional<uint32_t>(place.split) : std::nullopt, reserve, a.int8_head);
   if (a.max_len.is_auto)
     std::fprintf(stderr, "max_len: auto -> %u (the largest multiple of 256 that fits every card; trained context %u)\n",
@@ -246,12 +292,41 @@ int run_decode(const DecodeArgs& a) {
   if (a.layers)
     std::fprintf(stderr, "layers: %u of the checkpoint's %u (--layers: development mode; the head reads block %u's "
                  "residual)\n", eng.model().desc.layers, eng.model().checkpoint_layers, eng.model().desc.layers - 1);
+  // Spec 25d: the prefill setup (every device's scratch, Context, the prefill hand-off, the binaries' check) happens here,
+  // outside the timed window, which is then the whole prefill() call: first launch to the first generated id in cur_token.
+  const uint32_t chunk = a.pp_chunk ? a.pp_chunk : rb::kPfC;
+  size_t pp_launches0 = 0;
+  if (a.prefills()) {
+    eng.prepare_prefill();
+    pp_launches0 = eng.prefill_launches();
+    std::fprintf(stderr, "prefill: l0 backend, chunk %u (every chunk ends on the absolute 64-grid), attention %s "
+                 "(B70_BOLT_ATTN), %s SSM state (B70_BOLT_SSM), %zu launches per chunk (%s) + %zu for the head%s\n", chunk,
+                 rb::bolt_attn_name(eng.attention()), rb::bolt_state_name(eng.state()),
+                 rb::prefill_chunk_launches(eng.model().desc, eng.model().place), devs == 2 ? "both cards" : "one card",
+                 rb::kPrefillHeadLaunches,
+                 devs == 2 ? "; the chunk crosses by copy, sequentially (spec 16c's overlap is a later lever)" : "");
+    runtime::prefill::profile_reset();
+  }
   std::fprintf(stderr, "%s\n", eng.memory_line().c_str());
   const auto t0 = std::chrono::steady_clock::now();
-  eng.ingest(ids);
+  if (a.prefills())
+    eng.prefill(ids, chunk);
+  else
+    eng.ingest(ids);
   const double ingest_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token, one decode replay per id), pos %u\n", ids.size(),
-               ingest_ms, ingest_ms / double(ids.size()), eng.pos());
+  const double pp_tps = ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0;
+  const double pp_params = prefill_params_per_token(eng.model().desc);
+  if (a.prefills()) {
+    std::fprintf(stderr, "%s: %zu ids in %.1f ms (%.2f t/s, %.2f TFLOP/s at 2 x %.3f B matmul parameters a token - "
+                 "derived, attention's depth term excluded) - device-side, loader excluded, first prefill launch to the "
+                 "first generated id; chunk %u, %zu L0 launches, pos %u\n", a.pp ? "pp" : "prefill", ids.size(), ingest_ms,
+                 pp_tps, pp_tps * 2.0 * pp_params / 1e12, pp_params / 1e9, chunk, eng.prefill_launches() - pp_launches0,
+                 eng.pos());
+    if (runtime::prefill::profile_enabled()) runtime::prefill::profile_report("Nemotron 3.5 Bolt prefill", ingest_ms);
+  } else {
+    std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token, one decode replay per id), pos %u\n", ids.size(),
+                 ingest_ms, ingest_ms / double(ids.size()), eng.pos());
+  }
   if (a.profile) {
     eng.clear_profile();
     for (uint32_t r = 0; r < a.repeats; ++r) eng.generate(a.steps);
@@ -282,6 +357,12 @@ int run_decode(const DecodeArgs& a) {
               devs == 2 ? (std::string(" pipeline2-") + runtime::pp_handoff_name(eng.handoff()) + "-s" +
                            std::to_string(eng.split())).c_str() : "",
               a.depth, a.tg, eng.last_tok_per_s(), eng.last_gen_ms() / double(a.tg));
+  // Spec 25d: the pp row, a second line as the LFM2 / Kolibri / Qwen paths print it (depth, chunk, ms, t/s).
+  if (a.pp)
+    std::printf("| b70-decode %s bolt %s-head %s ssm-%s%s l0 pp | %u | %u | %.1f | %.2f |\n", sha,
+                a.int8_head ? "int8" : "bf16", rb::bolt_attn_name(eng.attention()), rb::bolt_state_name(eng.state()),
+                devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "", a.depth, chunk,
+                ingest_ms, pp_tps);
   return 0;
 }
 

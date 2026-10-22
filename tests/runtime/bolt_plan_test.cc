@@ -1,10 +1,12 @@
 // Spec 25b Task 5: runtime::bolt's memory plan, max_len auto and the two-card split by bytes, host only. No total is typed:
 // every figure is the sum of the planner's own per-layer outputs, CHECK_EQ'd against an independent accumulation, and printed.
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <vector>
 
 #include "check.h"
+#include "kernels/bolt_pf_ref.h"   // spec 25d: the twin's chunk rule
 #include "loader/bolt_layout.h"
 #include "model/bolt.h"
 #include "runtime/bolt/bolt_sizes.h"
@@ -252,6 +254,87 @@ int main() {
                 decode_launches(d, one, BoltAttn::Flash, all, copy), decode_launches(d, two, BoltAttn::Flash, none, peer),
                 decode_launches(t12, model::BoltPlacement::one(t12), BoltAttn::Flash, none, copy), f.total(),
                 e.attn_scores);
+  }
+
+  {   // spec 25d: the prefill chunk's launches, scratch, hand-off and cuts
+    const model::BoltDesc& d = model::bolt();
+    const model::BoltDesc t12 = model::bolt_truncated(d, 12);
+    const model::BoltPlacement one = model::BoltPlacement::one(d), two = model::BoltPlacement::two(d, pp_split(d, true));
+    CHECK_EQ(pf_batch_experts(1536), 170u);   // 512 MiB / (1024 x I x 2 B)
+    CHECK_EQ(pf_batch_experts(2048), 128u);
+    CHECK_EQ(pf_batch_experts(2304), 113u);
+    CHECK_EQ(pf_batch_experts(2560), 102u);
+    CHECK_EQ(pf_tiles(2048, 496), 1056u);
+    CHECK_EQ(pf_slabs(18560), 19u);
+    CHECK_EQ(pf_ld(18560), kPfInLd);
+    // the formula from an independent accumulation, block kind by kind
+    size_t want = 1, batches = 0, mamba = 0, attn = 0, moe = 0;
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      if (d.is_mamba(l)) {
+        want += 1 + 2 * (19 + 4) + 6;   // norm, in_proj 19 slabs, out_proj 4, seed / conv / dt / cb / ssd / gnorm
+        ++mamba;
+      } else if (d.is_attention(l)) {
+        want += 1 + 2 * (5 + 4) + 2;    // norm, q||k||v 5, o_proj 4, prep / flash
+        ++attn;
+      } else {
+        const uint32_t per = pf_batch_experts(d.inter.at(l)), b = (d.experts.at(l) + per - 1) / per;
+        want += 1 + 2 * (7 + 4 + 4) + 6 + 2 * 2 * b;   // fc1||shared_up 7, fc2 4, shared_down 4; router ... combine
+        batches += b;
+        ++moe;
+      }
+    }
+    CHECK_EQ(mamba, size_t(40));
+    CHECK_EQ(attn, size_t(8));
+    CHECK_EQ(moe, size_t(40));
+    CHECK_EQ(prefill_device_launches(d, one, 0), want);
+    CHECK_EQ(prefill_chunk_launches(d, two), want);   // the two devices' walks add up to one card's
+    CHECK_EQ(prefill_device_launches(d, two, 0) + prefill_device_launches(d, two, 1), want);
+    CHECK_EQ(want, size_t(1) + 40 * 53 + 8 * 21 + 40 * 37 + 4 * batches);
+    // the scratch: each term from its formula; the plan with it still holds 262144 positions on two cards
+    const PrefillSizes ps = prefill_sizes(d);
+    CHECK_EQ(ps.pa, size_t(2048) * 18688 * 4);
+    CHECK_EQ(ps.pb, size_t(2048) * 4096 * 4);
+    CHECK_EQ(ps.slab, size_t(8192) * 1024 * 2);
+    CHECK_EQ(ps.cb, size_t(33) * 8 * 64 * 64 * 4);
+    CHECK_EQ(ps.xg, size_t(1056) * 32 * 1024 * 2);
+    CHECK_EQ(ps.moe_h, size_t(1056) * 32 * 2560 * 2);
+    CHECK_EQ(ps.w, size_t(512) << 20);
+    CHECK_EQ(ps.routes, size_t(88) * 2048 * 48 * 4);
+    const runtime::PpLandingLayout land = pf_landing_layout(d, two);   // block 47 (split 48 - 1) is attention: one pending set
+    CHECK(d.is_attention(two.split - 1));
+    CHECK_EQ(land.resid_bytes, size_t(2048) * 4096 * 2);
+    CHECK_EQ(land.sumsq_bytes, size_t(2048) * 4096 * 4);
+    CHECK_EQ(pf_landing_layout(d, model::BoltPlacement::two(d, 2)).sumsq_bytes, size_t(2) * 2048 * 4096 * 4);   // after MoE 1
+    BoltReserve r;
+    for (uint32_t dev = 0; dev < 2; ++dev) {
+      r.decode_scratch = std::max(r.decode_scratch, decode_scratch_bytes(d, two, dev, 262144, BoltAttn::Flash, BoltState::Fp32));
+      r.prefill_scratch = std::max(r.prefill_scratch, prefill_scratch_bytes(d, two, dev));
+    }
+    const BoltPlan pl = plan(d, 262144, {size_t(32530000000ull), size_t(32530000000ull)}, r, two.split);
+    // the chunk rule: runtime's and the twin's (tests/kernels/bolt_pf_ref.h) the same function
+    size_t cases = 0;
+    for (uint32_t pos = 0; pos < 4200; pos += 37)
+      for (uint32_t chunk = 64; chunk <= 2048; chunk += 192)
+        for (const size_t rem : {size_t(1), size_t(64), size_t(65), size_t(2047), size_t(4100)})
+          for (const bool hooked : {false, true}) {
+            const uint32_t c = prefill_chunk_rows(pos, rem, chunk, hooked);
+            CHECK_EQ(c, boltpf::prefill_chunk_rows(pos, rem, chunk, hooked));
+            CHECK(c > 0 && (c == rem || (pos + c) % 64 == 0));
+            ++cases;
+          }
+    refused("not a multiple of 64", [] { check_prefill_chunk(100); });
+    refused("not a multiple of 64", [] { check_prefill_chunk(4096); });
+    refused("not a multiple of 64", [] { check_prefill_chunk(0); });
+    check_prefill_chunk(64);
+    check_prefill_chunk(2048);
+    std::printf("  prefill: %zu launches a chunk on the real model (one card or two: %zu + %zu; %zu weight batches over the "
+                "40 MoE blocks), N 12: %zu, + %zu for the head; scratch %zu B a device (%.3f GB), the prefill link %zu B on "
+                "device 1; with it 262144 positions still fit two cards (device 0 %.2f GB, device 1 %.2f GB); the chunk rule "
+                "= the twin's on %zu cases\n",
+                want, prefill_device_launches(d, two, 0), prefill_device_launches(d, two, 1), batches,
+                prefill_chunk_launches(t12, model::BoltPlacement::one(t12)), kPrefillHeadLaunches, ps.total(),
+                ps.total() / 1e9, pf_link_bytes(d, two, 1), pl.device[0].total() / 1e9, pl.device[1].total() / 1e9,
+                cases);
   }
 
   std::puts("bolt_plan_test OK");

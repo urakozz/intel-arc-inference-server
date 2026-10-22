@@ -4921,8 +4921,8 @@ endif()
 # b70-decode's model_type dispatch and Bolt's refusals, before the device: tests/model/bolt/ holds the published config.json
 # (25b, vendored), which is all the dispatch and the planner read.
 set(_bolt_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/bolt)
-b70_cli_reject(cli_reject_bolt_prefill ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --prefill EXPECT "spec 25d")
-b70_cli_reject(cli_reject_bolt_prefill_length ${_bolt_cfg} --bench --prefill-length 64 EXPECT "spec 25d")
+# (25c's cli_reject_bolt_prefill / _prefill_length - --prefill naming spec 25d - are gone: Bolt prefills now; 25d's refusals
+# are the spec 25d block's cli_reject_bolt_prefill_*.)
 b70_cli_reject(cli_reject_bolt_mtp ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "no MTP head")
 b70_cli_reject(cli_reject_bolt_spec ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash EXPECT "spec 26")
 b70_cli_reject(cli_reject_bolt_kv8 ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "Decision 17")
@@ -4981,5 +4981,76 @@ if(B70_BOLT)
   add_dependencies(bolt_pf_kernels_test ${B70_BOLT_PREFILL_KERNELS} ${B70_BOLT_PREFILL_REUSED} ${B70_BOLT_PREFILL_SPARE})
   add_test(NAME bolt_pf_kernels_test COMMAND bolt_pf_kernels_test)
   set_tests_properties(bolt_pf_kernels_test PROPERTIES LABELS "bolt;prefill" TIMEOUT 3600)
+  # Task 3: the walk (box only; SKIP 77 without the checkpoints). bolt_prefill_test (B4 on prefill): the walk's launches and
+  # the plan; twice bitwise, recorded == replayed; chunks of 512 / 1024 / 64 and splits at multiples of 64 bitwise one
+  # chunk, a continuation off the grid (Review Focus 1); against decode's fill within the PROPOSED bars (logits, h taps, SSM
+  # states, conv columns, KV), the routes up to near-ties, the tokens tie-aware; pp2 bitwise one card. On 25b's synthetic N 12
+  # (one card) and SergiioB's export (two cards).
+  add_executable(bolt_prefill_test runtime/bolt_prefill_test.cc)
+  target_include_directories(bolt_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(bolt_prefill_test PRIVATE b70_bolt_prefill b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(bolt_prefill_test)
+  endif()
+  add_dependencies(bolt_prefill_test ${B70_BOLT_DECODE_KERNELS} ${B70_BOLT_REUSED_KERNELS} ${B70_BOLT_PREFILL_KERNELS}
+    ${B70_BOLT_PREFILL_REUSED})
+  set(_bolt_pf_tests)
+  foreach(sp n12-g128 n12-g64x)
+    add_test(NAME bolt_prefill_synth_${sp}_test COMMAND bolt_prefill_test ${B70_BOLT_SYNTH_DIR}/${sp} ${_bolt_ids})
+    list(APPEND _bolt_pf_tests bolt_prefill_synth_${sp}_test)
+  endforeach()
+  set(_bs ${B70_BOLT_SYNTH_DIR}/n12-g128)
+  add_test(NAME bolt_prefill_synth_eager_test COMMAND bolt_prefill_test ${_bs} ${_bolt_ids} eager)
+  add_test(NAME bolt_prefill_synth_bf16head_test COMMAND bolt_prefill_test ${_bs} ${_bolt_ids} bf16)
+  add_test(NAME bolt_prefill_synth_b16state_test COMMAND bolt_prefill_test ${_bs} ${_bolt_ids} b16)
+  add_test(NAME bolt_prefill_synth_pp_test COMMAND bolt_prefill_test ${_bs} ${_bolt_ids} pp2:6)
+  add_test(NAME bolt_prefill_real_test COMMAND bolt_prefill_test ${B70_BOLT_SNAPSHOT} ${_bolt_ids})
+  list(APPEND _bolt_pf_tests bolt_prefill_synth_eager_test bolt_prefill_synth_bf16head_test bolt_prefill_synth_b16state_test
+    bolt_prefill_synth_pp_test bolt_prefill_real_test)
+  set_tests_properties(${_bolt_pf_tests} PROPERTIES LABELS "checkpoint;bolt;prefill" SKIP_RETURN_CODE 77 TIMEOUT 7200)
+  # B3 on prefill: 25c's golden test in its prefill mode (one chunk a 2048, and chunks of 512), the synthetics' sets and
+  # SergiioB's (two cards; 25a's golden sets, data key oracle_bolt); the _eager twin; the 32k prompt opt-in.
+  target_link_libraries(bolt_golden_test PRIVATE b70_bolt_prefill)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(bolt_golden_test)
+  endif()
+  add_dependencies(bolt_golden_test ${B70_BOLT_PREFILL_KERNELS} ${B70_BOLT_PREFILL_REUSED})
+  set(_bolt_gpf_tests)
+  foreach(sp n12-g128 n12-g64x)
+    foreach(p bolt_short bolt_4k bolt_agentic)
+      add_test(NAME bolt_golden_prefill_synth_${sp}_${p}_test COMMAND bolt_golden_test ${B70_BOLT_SYNTH_DIR}/${sp}
+        ${B70_BOLT_SYNTH_ORACLE}-${sp} ${p} prefill)
+      list(APPEND _bolt_gpf_tests bolt_golden_prefill_synth_${sp}_${p}_test)
+    endforeach()
+  endforeach()
+  add_test(NAME bolt_golden_prefill_synth_c512_test COMMAND bolt_golden_test ${_bs} ${B70_BOLT_SYNTH_ORACLE}-n12-g128
+    bolt_4k prefill:512)
+  add_test(NAME bolt_golden_prefill_synth_eager_test COMMAND bolt_golden_test ${_bs} ${B70_BOLT_SYNTH_ORACLE}-n12-g128
+    bolt_short eager prefill)
+  list(APPEND _bolt_gpf_tests bolt_golden_prefill_synth_c512_test bolt_golden_prefill_synth_eager_test)
+  foreach(p bolt_short bolt_4k bolt_agentic)
+    add_test(NAME bolt_golden_prefill_real_${p}_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR} ${p}
+      prefill)
+    list(APPEND _bolt_gpf_tests bolt_golden_prefill_real_${p}_test)
+  endforeach()
+  add_test(NAME bolt_golden_prefill_real_short_eager_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT}
+    ${B70_BOLT_ORACLE_DIR} bolt_short eager prefill)
+  list(APPEND _bolt_gpf_tests bolt_golden_prefill_real_short_eager_test)
+  set_tests_properties(${_bolt_gpf_tests} PROPERTIES LABELS "checkpoint;golden;bolt;prefill" SKIP_RETURN_CODE 77
+    TIMEOUT 7200)
+  add_test(NAME bolt_golden_prefill_real_32k_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
+    bolt_32k prefill)
+  set_tests_properties(bolt_golden_prefill_real_32k_test PROPERTIES LABELS "checkpoint;golden;bolt;prefill;optin"
+    SKIP_RETURN_CODE 77 TIMEOUT 14400)
 endif()
+# 25d's refusals, before the device (the vendored config.json is all the dispatch and the planner read).
+b70_cli_reject(cli_reject_bolt_prefill_int8 ${_bolt_cfg} --bench --prefill-length 64 --prefill-backend l0-int8
+  EXPECT "int8 prefill for this family is out of scope")
+b70_cli_reject(cli_reject_bolt_prefill_sycl ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --prefill --prefill-backend sycl-tla
+  EXPECT "no Bolt walk")
+b70_cli_reject(cli_reject_bolt_prefill_chunk ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --prefill --prefill-chunk 4096
+  EXPECT "exceeds Nemotron 3.5 Bolt's prefill chunk 2048")
+b70_cli_reject(cli_reject_bolt_prefill_chunk64 ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --prefill --prefill-chunk 100
+  EXPECT "is not a multiple of 64")
 # ==== Spec 25d: Nemotron 3.5 Bolt prefill (label bolt) ==== (end) ====

@@ -175,4 +175,83 @@ size_t device_launches(const model::BoltDesc& d, const model::BoltPlacement& p, 
 size_t decode_launches(const model::BoltDesc& d, const model::BoltPlacement& p, BoltAttn a, BoltFuse f, PpHandoff h);
 // ==== spec 25c (end) ===================================================================================================
 
+// ==== spec 25d: the prefill chunk's scratch, launches and cuts (begin) =================================================
+// The constants kernels::bolt spells (bolt_prefill.cc static_asserts them equal), device-free here so the host tests and
+// the CLI's planner need no kernel header.
+inline constexpr uint32_t kPfC = 2048, kPfSub = 64, kPfTm = 32, kPfSlab = 1024, kPfInLd = 18688;
+inline constexpr size_t kPfBatchBytes = size_t(512) << 20;   // one weight batch of bf16 expert blocks
+inline constexpr uint32_t kPfHdrWords = 528, kPfMaxSub = 33, kPfTopK = 9;
+
+// Where a prefill cuts a prompt (Review Focus 1, plan 25d's walk rule): at most `chunk` rows (a multiple of 64, at most
+// kPfC), every chunk ending on the ABSOLUTE 64-grid unless the prompt ends first, so a chunk boundary is a sub-chunk
+// boundary of nb_pf_mamba.cl's SSD and a prompt cut at any chunk width is bitwise one chunk; with a block hook (25e) never
+// past the next multiple of `block` (2048: on the grid too). tests/kernels/bolt_pf_ref.h mirrors it (bolt_plan_test).
+uint32_t prefill_chunk_rows(uint32_t pos, size_t remaining, uint32_t chunk, bool hooked, uint32_t block = 2048);
+// Refuses a chunk width the walk does not take: 0 < chunk <= kPfC and chunk % 64 == 0 (throws naming it).
+void check_prefill_chunk(uint32_t chunk);
+
+// The grouped MoE's tile table bound (nb_pf_moe.cl): floor((9 C + E x 31) / 32).
+inline uint32_t pf_tiles(uint32_t C, uint32_t E) { return (C * kPfTopK + E * (kPfTm - 1)) / kPfTm; }
+// Experts a weight batch holds at I (kPfBatchBytes / one expert's bf16 up = down block: 1024 x I x 2 B) and a MoE block's
+// batches (up and down alike).
+inline uint32_t pf_batch_experts(uint32_t I) { return uint32_t(kPfBatchBytes / (size_t(1024) * I * 2)); }
+inline uint32_t pf_batches(const model::BoltDesc& d, uint32_t layer) {
+  const uint32_t per = pf_batch_experts(d.inter.at(layer));
+  return (d.experts.at(layer) + per - 1) / per;
+}
+// A linear's 1024-column slabs (the last one a zero-padded tail of pad256 columns when N is not whole slabs) and its
+// prefill rows' pitch pad256(N).
+inline uint32_t pf_slabs(uint32_t N) { return (N + kPfSlab - 1) / kPfSlab; }
+inline uint32_t pf_ld(uint32_t N) { return (N + 255) / 256 * 256; }
+// Every MoE block's route rows of the last chunk: u32 [layers][kPfC][48] (read_prefill_routes).
+inline size_t pf_route_at(uint32_t layer) { return size_t(layer) * kPfC * kRouteWords * 4; }
+
+// One device's prefill scratch, sized for a chunk of kPfC rows (one constant a device: the largest term is the MoE's sorted
+// rows x the largest I) - every allocation the walk binds, exactly these (runtime/bolt/bolt_prefill.h's BoltPrefillScratch):
+//   ids            u32 [kPfC] (host memory: the chunk's ids)
+//   h0, h1, x      bf16 [kPfC][4096]            the residual (ping-ponged across fold sites), every norm's output
+//   pa             fp32 [kPfC][18688]           every linear's GEMM rows (the widest pitch: in_proj's pad256)
+//   pb             fp32 [kPfC][4096]            the MoE block's second source (shared_down's rows)
+//   slab           bf16 [8192][1024]            one dequantised slab (the largest K)
+//   seed           bf16 [3][10240]              the conv's seed;  xc bf16 [kPfC][10240]
+//   dt, cum        fp32 [kPfC][128]             cb  fp32 [33][8][64][64] (C B^T per sub-chunk and group)
+//   y, g           bf16 [kPfC][8192]            the scan's y (or the attention's out [kPfC][4096]), the gated norm's out
+//   attn_q         fp32 [kPfC][4096]            logits fp32 [kPfC][max E]
+//   routes         u32 [layers][kPfC][48]       lat bf16 [kPfC][1024], sh bf16 [kPfC][5376], r bf16 [kPfC][1024]
+//   hdr, tiles, row_tok, pair_row               u32 [528], [2 x T], [T x 32], [kPfC x 9], T = pf_tiles(kPfC, max E)
+//                                               (1056 at E 496)
+//   xg             bf16 [T x 32][1024]          the gathered latent, then the down GEMM's rows
+//   moe_h          bf16 [T x 32][max I]         the up GEMM's relu2 rows
+//   w              bf16 kPfBatchBytes           one weight batch
+// An empty term (a descriptor without that block kind) is one 64-byte line.
+struct PrefillSizes {
+  size_t ids = 0, h0 = 0, h1 = 0, x = 0, pa = 0, pb = 0, slab = 0, seed = 0, xc = 0, dt = 0, cum = 0, cb = 0, y = 0, g = 0,
+         attn_q = 0, logits = 0, routes = 0, lat = 0, sh = 0, r = 0, hdr = 0, tiles = 0, row_tok = 0, pair_row = 0, xg = 0,
+         moe_h = 0, w = 0;
+  size_t total() const {
+    return ids + h0 + h1 + x + pa + pb + slab + seed + xc + dt + cum + cb + y + g + attn_q + logits + routes + lat + sh + r +
+           hdr + tiles + row_tok + pair_row + xg + moe_h + w;
+  }
+};
+PrefillSizes prefill_sizes(const model::BoltDesc& d);
+// The prefill hand-off between two cards (a second PipelineLink in copy mode, at chunk size): h [kPfC][4096] bf16 and the
+// pending GEMM rows of block split - 1 ([kPfC][4096] fp32 each: o_proj's / out_proj's, or fc2's and shared_down's).
+PpLandingLayout pf_landing_layout(const model::BoltDesc& d, const model::BoltPlacement& p);
+size_t pf_link_bytes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev);
+// What BoltReserve::prefill_scratch must hold for device `dev`: prefill_sizes' total + (two cards) its prefill link.
+size_t prefill_scratch_bytes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev);
+
+// The prefill walk's launches on one device a chunk, the same at every C (runtime/bolt/bolt_prefill.cc asserts it):
+//   device 0     nb_pf_embed_gather                                                                                 1
+//   every block  the norm site (M 2048: _NF / _S1 / _S1_T1) + each int4 linear's 1024-column slabs x (dequant + pf_gemm_T0)
+//   Mamba        + seed, conv, dt, C B^T, scan, gnorm                                       (in_proj 19 slabs, out_proj 4) 53
+//   attention    + nb_attn_prep, mg_pf_flash_attn (flash or eager: one launch)              (q||k||v 5, o_proj 4)     21
+//   MoE          + router, route, nb_sh_act, sort, gather, combine + 2 x (up batches + down batches)
+//                                                          (fc1||shared_up 7, fc2 4, shared_down 4) 37 + 2 x 2 x batches
+// The head (prefill_head, the last chunk only, the last device): 4 (decode's norm at M 1, the head, two argmax stages).
+size_t prefill_device_launches(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev);
+size_t prefill_chunk_launches(const model::BoltDesc& d, const model::BoltPlacement& p);
+inline constexpr size_t kPrefillHeadLaunches = 4;
+// ==== spec 25d (end) ===================================================================================================
+
 }  // namespace runtime::bolt

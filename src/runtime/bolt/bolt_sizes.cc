@@ -315,4 +315,99 @@ size_t decode_launches(const model::BoltDesc& d, const model::BoltPlacement& p, 
   return n;
 }
 
+// ==== spec 25d ===========================================================================================================
+uint32_t prefill_chunk_rows(uint32_t pos, size_t remaining, uint32_t chunk, bool hooked, uint32_t block) {
+  uint32_t c = uint32_t(std::min<size_t>(chunk, remaining));
+  if (c < remaining && (pos + c) % kPfSub != 0) c -= (pos + c) % kPfSub;
+  if (hooked) c = std::min(c, block - pos % block);
+  return c;
+}
+void check_prefill_chunk(uint32_t chunk) {
+  if (chunk == 0 || chunk > kPfC || chunk % kPfSub != 0)
+    throw std::runtime_error("runtime::bolt: prefill chunk " + std::to_string(chunk) + " is not a multiple of " +
+                             std::to_string(kPfSub) + " in (0, " + std::to_string(kPfC) +
+                             "] - the SSD's sub-chunks are absolute 64-row windows, and a chunk ends on that grid");
+}
+
+PrefillSizes prefill_sizes(const model::BoltDesc& d) {
+  bool mamba = false, attn = false, moe = false;
+  uint32_t max_i = 0, max_k = 0, max_ld = d.hidden;
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    mamba = mamba || d.is_mamba(l);
+    attn = attn || d.is_attention(l);
+    moe = moe || d.is_moe(l);
+    max_i = std::max(max_i, d.inter.at(l));
+    for (const model::BoltLinear& ln : d.linears(l))
+      if (ln.kind == model::WeightKind::Int4 && ln.id != model::BoltLinearId::ExpertUp &&
+          ln.id != model::BoltLinearId::ExpertDown)
+      {
+        max_k = std::max(max_k, ln.shape.K);
+        max_ld = std::max(max_ld, pf_ld(ln.shape.N));
+      }
+  }
+  const size_t C = kPfC, H = d.hidden, E = d.max_experts(), T = pf_tiles(kPfC, d.max_experts());
+  PrefillSizes s;
+  s.ids = C * 4;
+  s.h0 = s.h1 = s.x = C * H * 2;
+  s.pa = C * max_ld * 4;   // the widest linear's pitch (in_proj's 18688 on the real model)
+  s.pb = line(moe ? C * H * 4 : 0);
+  s.slab = size_t(max_k) * kPfSlab * 2;
+  s.seed = line(mamba ? size_t(3) * d.m_conv_dim * 2 : 0);
+  s.xc = line(mamba ? C * d.m_conv_dim * 2 : 0);
+  s.dt = s.cum = line(mamba ? C * d.m_heads * 4 : 0);
+  s.cb = line(mamba ? size_t(kPfMaxSub) * d.m_groups * kPfSub * kPfSub * 4 : 0);
+  s.y = line(mamba ? C * d.m_inner * 2 : attn ? C * d.q_n() * 2 : 0);
+  s.g = line(mamba ? C * d.m_inner * 2 : 0);
+  s.attn_q = line(attn ? C * d.q_n() * 4 : 0);
+  s.logits = line(moe ? C * E * 4 : 0);
+  s.routes = line(size_t(d.layers) * C * kRouteWords * 4);
+  s.lat = line(moe ? C * d.latent * 2 : 0);
+  s.sh = line(moe ? C * d.shared_inter * 2 : 0);
+  s.r = line(moe ? C * d.latent * 2 : 0);
+  s.hdr = line(moe ? size_t(kPfHdrWords) * 4 : 0);
+  s.tiles = line(moe ? 2 * T * 4 : 0);
+  s.row_tok = line(moe ? T * kPfTm * 4 : 0);
+  s.pair_row = line(moe ? C * kTopK * 4 : 0);
+  s.xg = line(moe ? T * kPfTm * d.latent * 2 : 0);
+  s.moe_h = line(moe ? T * kPfTm * max_i * 2 : 0);
+  s.w = line(moe ? kPfBatchBytes : 0);
+  return s;
+}
+
+PpLandingLayout pf_landing_layout(const model::BoltDesc& d, const model::BoltPlacement& p) {
+  const uint32_t pend = p.devices > 1 ? (d.is_moe(p.split - 1) ? 2u : 1u) : 0u;   // prefill folds S 1
+  return pp_landing_layout(size_t(kPfC) * d.hidden * 2, size_t(pend) * kPfC * d.hidden * 4);
+}
+size_t pf_link_bytes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev) {
+  if (p.devices < 2) return 0;
+  return dev == 0 ? kPpStateWords * 4 : pf_landing_layout(d, p).total + kPpStateWords * 4;
+}
+size_t prefill_scratch_bytes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev) {
+  return prefill_sizes(d).total() + pf_link_bytes(d, p, dev);
+}
+
+size_t prefill_device_launches(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev) {
+  model::validate(p, d);
+  size_t n = dev == 0 ? 1 : 0;   // nb_pf_embed_gather
+  for (uint32_t l = p.first(dev); l < p.end(dev); ++l) {
+    n += 1;   // the norm site
+    for (const model::BoltLinear& ln : d.linears(l))
+      if (ln.kind == model::WeightKind::Int4 && ln.id != model::BoltLinearId::ExpertUp &&
+          ln.id != model::BoltLinearId::ExpertDown)
+        n += 2 * pf_slabs(ln.shape.N);   // dequant + GEMM a slab
+    if (d.is_mamba(l))
+      n += 6;   // seed, conv, dt, C B^T, scan, gnorm
+    else if (d.is_attention(l))
+      n += 2;   // prep, flash (eager: one launch too)
+    else
+      n += 6 + 2 * 2 * pf_batches(d, l);   // router, route, sh_act, sort, gather, combine; up and down batches
+  }
+  return n;
+}
+size_t prefill_chunk_launches(const model::BoltDesc& d, const model::BoltPlacement& p) {
+  size_t n = 0;
+  for (uint32_t dev = 0; dev < p.devices; ++dev) n += prefill_device_launches(d, p, dev);
+  return n;
+}
+
 }  // namespace runtime::bolt

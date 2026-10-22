@@ -89,14 +89,17 @@ inline std::vector<uint32_t> read_ids(const std::string& p, uint32_t vocab) {
   return ids;
 }
 
-// The plan (with the decode scratch) fits the placement's cards (a B70: 32.530 GB as Level Zero reports it).
-inline bool fits(const model::BoltDesc& d, const Options& o) {
+// The plan (with the decode scratch, and with `prefill` spec 25d's prefill scratch and link) fits the placement's cards (a
+// B70: 32.530 GB as Level Zero reports it).
+inline bool fits(const model::BoltDesc& d, const Options& o, bool prefill = false) {
   try {
     const model::BoltPlacement p = placement(d, o);
     runtime::bolt::BoltReserve r;
-    for (uint32_t dev = 0; dev < p.devices; ++dev)
+    for (uint32_t dev = 0; dev < p.devices; ++dev) {
       r.decode_scratch = std::max(r.decode_scratch,
                                   runtime::bolt::decode_scratch_bytes(d, p, dev, o.max_len, o.attn, o.state));
+      if (prefill) r.prefill_scratch = std::max(r.prefill_scratch, runtime::bolt::prefill_scratch_bytes(d, p, dev));
+    }
     r.bf16_state = o.state == runtime::bolt::BoltState::Bf16;
     runtime::bolt::plan(d, o.max_len, std::vector<size_t>(p.devices, size_t(32530000000ull)), r,
                         p.devices == 2 ? std::optional<uint32_t>(p.split) : std::nullopt,
