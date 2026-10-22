@@ -5055,3 +5055,25 @@ b70_cli_reject(cli_reject_bolt_prefill_chunk ${_bolt_cfg} --ids ${B70_OK_IDS} --
 b70_cli_reject(cli_reject_bolt_prefill_chunk64 ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --prefill --prefill-chunk 100
   EXPECT "is not a multiple of 64")
 # ==== Spec 25d: Nemotron 3.5 Bolt prefill (label bolt) ==== (end) ====
+
+# ==== Spec 25e: Nemotron 3.5 Bolt served (label bolt) ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-20-spec25e-bolt-serving.md. Box queue row 62. Host tests first (the Mac); the card's
+# SKIP (77) without their data. No Bolt file is vendored (Decision 20 allows it; generated fixtures stay the default): the
+# fixtures are renders, ids and digests (tests/tokenizer/bolt_*.json, tools/tokenizer/dump_bolt.py) and the template and
+# tokenizer.json are read at run time from B70_BOLT_SNAPSHOT (SergiioB's pinned snapshot, defined with spec 25b's block).
+if(B70_TOKENIZER_ENABLED)
+  # Task 1: the chat template (sha256 6521afc7...) on 80 message lists byte for byte against transformers 5.19.0's
+  # apply_chat_template, the system block always there (Review Focus 1) ...
+  add_executable(template_bolt_test tokenizer/template_bolt_test.cc)
+  target_include_directories(template_bolt_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(template_bolt_test PRIVATE b70_tokenizer b70_third_party_minja)
+  add_test(NAME template_bolt_test COMMAND template_bolt_test ${CMAKE_SOURCE_DIR}/tests/tokenizer ${B70_BOLT_SNAPSHOT})
+  # ... and the 131072-id tokenizer against HF's: the added tokens, every single id's round trip, 30 texts, corpus.txt's
+  # digests, every render's ids (no BOS anywhere).
+  add_executable(bolt_tokenizer_test tokenizer/bolt_tokenizer_test.cc)
+  target_include_directories(bolt_tokenizer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(bolt_tokenizer_test PRIVATE b70_tokenizer)
+  add_test(NAME bolt_tokenizer_test COMMAND bolt_tokenizer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer ${B70_BOLT_SNAPSHOT})
+  set_tests_properties(template_bolt_test bolt_tokenizer_test PROPERTIES LABELS bolt SKIP_RETURN_CODE 77 TIMEOUT 300)
+endif()
+# ==== Spec 25e: Nemotron 3.5 Bolt served (label bolt) ==== (end) ====
