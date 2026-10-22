@@ -1779,6 +1779,73 @@ if(B70_LFM2MOE)
 endif()
 # ==== Spec 24d: LFM2.5-24B-A2B prefill ==== (end) ====
 
+# ==== Spec 25c: Nemotron 3.5 Bolt decode ==== (begin) ====
+# Additive only: no existing source is edited, so every binary above keeps its name, its command line and its bytes
+# (tools/kernel_cmdlines' diff: additions only - B0). Bolt-only kernels live in src/kernels/bolt/ and are named `nb_*`
+# with every shape define in the name (src/kernels/bolt_kernels.h is the host half). The reused sources at Bolt's shapes -
+# also the engine's binaries:
+#   gemv.cl        in_proj 4096x18560, out_proj 8192x4096, q||k||v 4096x4608, o_proj 4096x4096, fc1||shared_up 4096x6400,
+#                  fc2 1024x4096, shared_down 5376x4096 - every S in {1, 2, 4, 8, 16} dividing K / 64 (84 k-groups at 5376:
+#                  S <= 4) and both layouts: P0's sweep (probe_bolt_step --sweep-s) times them all; the engine binds the
+#                  descriptor's {S, layout} (model::BoltDesc::linears, PROVISIONAL)
+#   gemv_i8w.cl / gemv_bf16.cl   the untied head 4096 -> 131072 (int8 the default, Decision 18; bf16 over its own tiles)
+#   argmax.cl      at VOCAB 131072 = VOCAB_USED (every row a token)
+#   mg_attn.cl / mg_attn_eager.cl   Muse-Glimmer's full (NoPE) decode attention at Q 32 KV 2 head_dim 128 - Bolt's exact
+#                  shape (Decision 15: bound by name with a ones gate; built here only when the Muse block is off)
+# P0's stand-ins (plan 25c Task 1; tools/probe/probe_bolt_step.cc only): the routers as gemv_bf16 at each E, moe.cl at
+# E64 T8 D1024 I2048 (gated; a pool of 64 blocks + the shared slot), lfm_prep.cl's one-launch norm at K 4096, the
+# two-launch norm (prep_res_fold G16 + kol_norm_finish W16) for --pair, nb_probe.cl's state read-modify-write; the SSM
+# step is gdn_step_M1 (Qwen3.8's shape, built above) and the light slots noop.
+option(B70_BOLT "build the Nemotron 3.5 Bolt decode variants (spec 25c)" ON)
+if(B70_BOLT)
+  set(NB_CL ${CMAKE_CURRENT_SOURCE_DIR}/bolt)
+  foreach(L 0 1)
+    foreach(S 1 2 4 8 16)
+      add_gemv_variant(1 4096 18560 ${S} ${L})    # in_proj (z | xBC | dt)
+      add_gemv_variant(1 8192 4096 ${S} ${L})     # out_proj
+      add_gemv_variant(1 4096 4608 ${S} ${L})     # q||k||v
+      add_gemv_variant(1 4096 4096 ${S} ${L})     # o_proj
+      add_gemv_variant(1 4096 6400 ${S} ${L})     # fc1_latent || shared_experts.up
+      add_gemv_variant(1 1024 4096 ${S} ${L})     # fc2_latent
+      if(S LESS_EQUAL 4)
+        add_gemv_variant(1 5376 4096 ${S} ${L})   # shared_experts.down (84 k-groups)
+      endif()
+    endforeach()
+  endforeach()
+  add_gemv_i8w_variant(1 4096 131072)             # the int8 head (spec 9, Decision 18), built from lm_head
+  add_gemv_bf16_variant(1 4096 131072 64 1)       # the bf16 head over lm_head's own tiles (--lm-head bf16)
+  set(NB_ARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=131072 VOCAB_USED=131072)
+  add_ocloc_kernel(nb_argmax_stage1_M1_V131072 SOURCE ${ARGMAX_CL} DEFINES ${NB_ARGMAX_DEFINES} M=1)
+  add_ocloc_kernel(nb_argmax_stage2_V131072 SOURCE ${ARGMAX_CL} DEFINES ${NB_ARGMAX_DEFINES})
+  if(NOT B70_MUSE)
+    set(NB_MG_ATTN_HEADS TGT=64 Q_HEADS=32 KV_HEADS=2)
+    add_ocloc_kernel(mg_attn_M1_T64_Q32KV2_F SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/muse/mg_attn.cl
+                     DEFINES ${CTRL_DEFINES} M=1 ${NB_MG_ATTN_HEADS} WINDOW=0 RING=0)
+    add_ocloc_kernel(mg_attn_eager_M1_T64_Q32KV2_F SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/muse/mg_attn_eager.cl
+                     DEFINES ${CTRL_DEFINES} M=1 ${NB_MG_ATTN_HEADS} WINDOW=0 RING=0)
+  endif()
+  # --- P0's stand-ins (tools/probe/probe_bolt_step.cc only) ---
+  foreach(E 240 304 368 432 496)
+    add_gemv_bf16_variant(1 4096 ${E} 16 16)      # the routers at gemv_bf16's tiny tiling (fp32 logits)
+  endforeach()
+  add_ocloc_kernel(moe_M1_E64_T8_D1024_I2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/moe.cl
+                   DEFINES UP_KS=4 DN_KS=2 M=1 EXPERTS=64 TOP_K=8 HIDDEN=1024 INTER=2048 ROUTER_N=80)
+  add_ocloc_kernel(lfm_res_norm_M1_K4096_W8_S1 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/lfm2moe/lfm_prep.cl
+                   DEFINES M=1 K=4096 NORM_WGS=8 NORM_EPS=1e-5f NORM_S=1)
+  add_prep_res_fold(1 4096 0 16)
+  add_ocloc_kernel(kol_norm_M1_K4096_G16_W16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_prep.cl
+                   DEFINES M=1 K=4096 NORM_G=16 NORM_WGS=16)
+  foreach(B 0 1)
+    if(B)
+      set(_nb_rmw nb_state_rmw_B16)
+    else()
+      set(_nb_rmw nb_state_rmw_F32)
+    endif()
+    add_ocloc_kernel(${_nb_rmw} SOURCE ${NB_CL}/nb_probe.cl DEFINES STATE_BF16=${B})
+  endforeach()
+endif()
+# ==== Spec 25c: Nemotron 3.5 Bolt decode ==== (end) ====
+
 # Spec 16b (pipeline parallel, `--pipeline-handoff peer`): the peer-write hand-off between
 # the two stages' decode lists - pp_send (device 0's last launch) and pp_recv (device 1's
 # first). No defines: the word counts are kernel arguments, so one binary serves every model.
