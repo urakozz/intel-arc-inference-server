@@ -562,6 +562,20 @@ if(B70_MTP)
   get_property(MS_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_mtp_steps ${MS_KERNELS} ${MS_PF_KERNELS})
 endif()
+# --- probe_batch_step: spec 13a, rows of different sequences in one decode step ---
+# Plan: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md, Task 2. Record: docs/probe-batching-2026-10-23.md.
+# Only with -DB70_BATCH_PROBE=ON (src/kernels' row builds; b70_runtime then compiles runtime::build_rows).
+if(B70_BATCH_PROBE)
+  add_executable(probe_batch_step probe_batch_step.cc)
+  target_include_directories(probe_batch_step PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_batch_step PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(probe_batch_step)
+  endif()
+  get_property(BS_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
+  get_property(BS_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
+  add_dependencies(probe_batch_step ${BS_KERNELS} ${BS_PF_KERNELS})
+endif()
 # --- probe_draft_cost: spec 19a Task 4, one DFlash2 block's GEMVs (int8 / bf16 / int4) ---
 # Plan: docs/superpowers/plans/2026-10-05-spec19a-dflash-p0.md, Task 4. Random weights of
 # the drafter's shapes (draft_cost_shapes.h); the binaries are B70_VERIFY_M8's
