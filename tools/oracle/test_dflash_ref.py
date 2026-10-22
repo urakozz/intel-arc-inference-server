@@ -13,6 +13,7 @@ checkpoint-shaped files. The last test runs the real z-lab/Qwen3.8-27B-DFlash2 (
 arm) from the HF cache on random taps and SKIPS when the files are not there.
 """
 import json
+import math
 import os
 import sys
 import tempfile
@@ -926,11 +927,421 @@ def test_muse_review_focus_4():
         print(f"  {what}: logits moved at {moved} / 40 anchors, {flips} / 600 draft ids flipped")
 
 
+# --------------------------------------------------------------------------------------------
+# spec 26a: the LiLiCorr form (Review Focus 1-5 each a mutation that must move the drafts or the lattice)
+
+def _lmt():
+    if "lilicorr_make_tiny" in sys.modules:
+        return sys.modules["lilicorr_make_tiny"]
+    spec = importlib.util.spec_from_file_location("lilicorr_make_tiny", os.path.join(_HERE, "lilicorr_make_tiny.py"))
+    m = importlib.util.module_from_spec(spec)
+    sys.modules["lilicorr_make_tiny"] = m
+    spec.loader.exec_module(m)
+    return m
+
+
+LIL_VOCAB = 2048        # the synthetic target's vocabulary (the mask id 990 a row); the tiny pair uses Bolt's 131072
+
+
+def _lil(seed=0, vocab=LIL_VOCAB, window=16, head_scale=0.15):
+    """A tiny LiLiCorr (lilicorr_make_tiny's tensors, decoded by the reference's NVFP4 reader) over a synthetic target
+    embedding / head (logits ~N(0, 2.4): log-probs spread over a few nats, not one-hot)."""
+    mt = _lmt()
+    cd = mt.tiny_config(vocab=vocab, window=window)
+    cfg = ref.config_from_dict(cd)
+    t = ref._read_nvfp4_tensors(mt.make_tensors(cd, seed), cd["quantization_config"])
+    g = torch.Generator().manual_seed(100 + seed)
+    emb = torch.randn(vocab, cfg.hidden, generator=g).to(torch.bfloat16)
+    head = (torch.randn(vocab, cfg.hidden, generator=g) * head_scale).to(torch.bfloat16)
+    return ref.Drafter(cfg, t, emb, head)
+
+
+def _lil_ctx(d, n, seed=1):
+    g = torch.Generator().manual_seed(seed)
+    taps = {i: torch.randn(n, d.cfg.hidden, generator=g) * 2.0 for i in d.cfg.target_layer_ids}
+    return d.context_kv(taps, torch.arange(n)), taps
+
+
+def _lil_flips(d, ctx, n, mut, anchors=range(20, 40), K=7, T=0.0):
+    """(anchors whose lattice moved, draft ids flipped of len(anchors) x K) under the mutation set `mut`."""
+    base = [d.draft_block(int(a) % LIL_VOCAB, p, K, ctx, T, 5 if T else None) for p, a in zip(anchors, range(n))]
+    d.mut = set(mut)
+    try:
+        alt = [d.draft_block(int(a) % LIL_VOCAB, p, K, ctx, T, 5 if T else None) for p, a in zip(anchors, range(n))]
+    finally:
+        d.mut = set()
+    moved = sum(int(not torch.equal(x.lattice, y.lattice)) for x, y in zip(base, alt))
+    flips = sum(int((x.ids != y.ids).sum()) for x, y in zip(base, alt))
+    return moved, flips
+
+
+REAL_LILICORR = {   # nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr @ 449d2414 config.json, trimmed to what is read
+    "architectures": ["LiLiCorrDraftModel"], "model_type": "qwen3", "block_size": 8,
+    "dflash_config": {"mask_token_id": 990, "target_layer_ids": [1, 18, 35, 51, 68, 85], "use_swa": True,
+                      "swa_window_size": 1024, "causal": False, "attention_sink_bias": True, "projector_type": "lilicorr",
+                      "lilicorr_enabled": True, "lilicorr_candidate_topk": 8, "lilicorr_hidden_size": 1024,
+                      "lilicorr_num_layers": 2, "lilicorr_num_heads": 8, "lilicorr_mlp_ratio": 2.0,
+                      "lilicorr_factor_dim": 1024, "lilicorr_vector_eps": 0.0001, "lilicorr_logit_scale": 8.0,
+                      "conv_kernel_size": 2, "conv_group_size": 16},
+    "hidden_size": 4096, "num_hidden_layers": 5, "num_attention_heads": 32, "num_key_value_heads": 2, "head_dim": 128,
+    "intermediate_size": 12288, "hidden_act": "silu", "rms_norm_eps": 1e-06, "vocab_size": 131072,
+    "attention_bias": False, "rope_theta": 10000.0, "rope_scaling": None, "tie_word_embeddings": False,
+    "layer_types": ["sliding_attention"] * 5, "sliding_window": 1024, "attention_sink_bias": True,
+    "use_sliding_window": True, "max_window_layers": 0,
+    "quantization_config": {"quant_algo": "W4A16_NVFP4", "kv_cache_quant_algo": None, "group_size": 16,
+                            "quant_method": "modelopt_fp4"}}
+
+
+def test_lilicorr_config():
+    c = ref.config_from_dict(REAL_LILICORR)
+    assert (c.form, c.version, c.block_size, c.max_k, c.mask_token_id) == ("lilicorr", 2, 8, 7, 990)
+    assert c.windows == [1024] * 5 and c.causal == [False] * 5 and not c.window_inclusive and c.sinks
+    assert (c.cand_topk, c.lil_hidden, c.lil_layers, c.lil_heads, c.lil_mlp, c.factor_dim) == (8, 1024, 2, 8, 2048, 1024)
+    assert (c.vector_eps, c.lil_logit_scale, c.rope_theta, c.n_kv_heads, c.ffn) == (1e-4, 8.0, 10000.0, 2, 12288)
+    assert c.target_layer_ids == [1, 18, 35, 51, 68, 85] and (c.conv_kernel_size, c.conv_group_size) == (2, 16)
+    shapes = ref.lilicorr_head_shapes(c)
+    n = sum(math.prod(s) for s in shapes.values())
+    assert 36.5e6 < n < 36.9e6, n                     # the card's "37M" (spec 26 §1: ~36.7 M)
+    snap = ref.find_snapshot("nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr")
+    if snap:                                          # the cached config.json itself (the weights may be absent)
+        with open(os.path.join(snap, "config.json")) as f:
+            rc = ref.config_from_dict(json.load(f))
+        assert (rc.windows, rc.cand_topk, rc.lil_mlp, rc.block_size) == (c.windows, c.cand_topk, c.lil_mlp, 8)
+    bad = [("lilicorr_enabled", False, "lilicorr_enabled"), ("lilicorr_candidate_topk", 12, "power of two"),
+           ("causal", True, "causal"), ("conv_kernel_size", 0, "convolutions")]
+    for key, val, what in bad:
+        cd = json.loads(json.dumps(REAL_LILICORR))
+        cd["dflash_config"][key] = val
+        try:
+            ref.config_from_dict(cd)
+            raise AssertionError(f"{key}={val} accepted")
+        except (ValueError, NotImplementedError) as e:
+            assert what in str(e), (key, str(e))
+    for top, val, what in (("has_own_lm_head", True, "has_own_lm_head"), ("draft_vocab_size", 32768, "vocabulary"),
+                           ("quantization_config", {"quant_method": "compressed-tensors"}, "NVFP4")):
+        cd = json.loads(json.dumps(REAL_LILICORR))
+        cd[top] = val
+        try:
+            ref.config_from_dict(cd)
+            raise AssertionError(f"{top} accepted")
+        except (ValueError, NotImplementedError) as e:
+            assert what in str(e), (top, str(e))
+    print(f"lilicorr config: window 1024 (|q - k| <= 1023), sinks, block 8 at the top level, head {n / 1e6:.2f} M "
+          f"parameters; {len(bad) + 3} refusals by name")
+
+
+def test_lilicorr_nvfp4_enumeration():
+    """Review Focus 3: every (e2m1 code, e4m3 scale) product is exactly a bf16 and an f16; the NaN scales refused."""
+    tbl = ref._e4m3_table()
+    via_torch = torch.arange(256, dtype=torch.uint8).view(torch.float8_e4m3fn).double()
+    fin = torch.tensor([c not in ref.E4M3_NAN for c in range(256)])
+    assert torch.equal(tbl[fin], via_torch[fin]) and via_torch[~fin].isnan().all()
+    n, lo, hi = 0, float("inf"), 0.0
+    for code in range(16):
+        for sc in range(256):
+            if sc in ref.E4M3_NAN:
+                w = torch.tensor([[code | (code << 4)] * 8], dtype=torch.uint8)
+                s = torch.tensor([[sc]], dtype=torch.uint8)
+                try:
+                    ref.nvfp4_decode(w, s, 1.0, name="t")
+                    raise AssertionError(f"scale 0x{sc:02x} accepted")
+                except ValueError as e:
+                    assert "weight_scale[0][0]" in str(e) and "NaN" in str(e)
+                continue
+            v = ref.e2m1_value(code) * ref.e4m3_value(sc)                 # python float = fp64, exact here
+            t = torch.tensor(v, dtype=torch.float64)
+            assert t.to(torch.bfloat16).double().item() == v, (code, sc, v)
+            assert t.to(torch.float16).double().item() == v, (code, sc, v)
+            if v != 0.0:
+                lo, hi = min(lo, abs(v)), max(hi, abs(v))
+            n += 1
+    assert n == 16 * 254 and lo == 2.0 ** -10 and hi == 2688.0
+    # the layout: k = 2i in the LOW nibble; one scale per 16 consecutive k; g kept apart
+    codes = torch.arange(32) % 16
+    w = (codes[0::2] | (codes[1::2] << 4)).to(torch.uint8).view(1, 16)
+    s = torch.tensor([[0x38, 0x40]], dtype=torch.uint8)                 # 1.0 and 2.0
+    wp, g = ref.nvfp4_decode(w, s.view(torch.float8_e4m3fn), torch.tensor(0.37, dtype=torch.float32))
+    exp = torch.tensor([ref.e2m1_value(int(c)) for c in codes]) * torch.tensor([1.0] * 16 + [2.0] * 16)
+    assert torch.equal(wp[0], exp.float()) and g == float(torch.tensor(0.37, dtype=torch.float32))
+    try:
+        ref.nvfp4_decode(w, s[:, :1], 1.0, name="t")
+        raise AssertionError("a short scale tensor accepted")
+    except ValueError:
+        pass
+    print(f"nvfp4: {n} (code, scale) products exact in bf16 and f16, |W'| in [2^-10, 2688]; 2 x 16 NaN pairs refused; "
+          f"low nibble = even k, one scale per 16 k")
+
+
+def test_lilicorr_g_on_the_output():
+    """Review Focus 3: y = g x (W' x) (+ b) bitwise; folding g into W' is a different evaluation."""
+    d = _lil()
+    assert len(d.g) == 16 and all(not math.log2(v).is_integer() for v in d.g.values())
+    x = torch.randn(9, 256, generator=torch.Generator().manual_seed(3))
+    for name in ("fc.weight", "layers.1.mlp.down_proj.weight", "layers.0.mlp.gate_proj.weight"):
+        k = d.w[name].shape[1]
+        xx = x.repeat(1, k // 256 + 1)[:, :k]
+        y = d._lin(xx, name)
+        assert torch.equal(y, ref.linear(xx, d.w[name]) * torch.tensor(d.g[name], dtype=torch.float32)), name
+        assert torch.equal(d.w[name], d.w[name].to(torch.bfloat16).float()), name      # W' bf16-exact
+    ctx, _ = _lil_ctx(d, 40)
+    moved, flips = _lil_flips(d, ctx, 20, {"fold_g"})
+    d.mut = {"fold_g"}
+    y2 = d._lin(x.repeat(1, 6), "fc.weight")
+    d.mut = set()
+    diff = int((y2 != d._lin(x.repeat(1, 6), "fc.weight")).sum())
+    assert diff > 0 and moved > 0, (diff, moved)
+    print(f"g on the output: bitwise g x (W' x); folded into W' {diff} / {y2.numel()} fc outputs differ, the lattice "
+          f"moves at {moved} / 20 anchors ({flips} draft ids flip)")
+
+
+def test_lilicorr_anchor():
+    """Review Focus 1: the anchor is hidden_norm(fc(taps)) at p - 1, anchor_valid true; the embedding, the pre-norm row
+    and the row at p - 2 each move the lattice."""
+    d = _lil()
+    ctx, taps = _lil_ctx(d, 40)
+    p = 30
+    o = d.draft_block(5, p, 7, ctx)
+    assert torch.equal(o.anchor, ctx.fc[p - 1].float())
+    a, valid = d.lilicorr_anchor(5, p, ctx)
+    assert valid and torch.equal(a, ctx.fc[p - 1])
+    for mut in ("anchor_embed", "anchor_prenorm", "anchor_p2", "anchor_invalid"):
+        moved, flips = _lil_flips(d, ctx, 20, {mut})
+        assert moved == 20, (mut, moved)
+        print(f"  anchor mutation {mut}: the lattice moves at {moved} / 20 anchors, {flips} / 140 draft ids flip")
+    # the session: commit the prompt rows, draft, commit the anchor + 3 accepted drafts, draft again
+    s = ref.LiLiCorrSession(d)
+    s.commit({i: taps[i][:25] for i in taps}, range(25))
+    o1 = s.draft(7, 7)          # (a context projected over 25 rows vs 40: torch's fp32 GEMM is row-count dependent)
+    assert torch.equal(o1.anchor, s.ctx.fc[24]) and torch.equal(o1.ids, d.draft_block(7, 25, 7, ctx).ids)
+    s.commit({i: taps[i][25:29] for i in taps}, range(25, 29))
+    o2 = s.draft(9, 7)
+    assert int(s.ctx.pos[-1]) == 28 and torch.allclose(o2.anchor, ctx.fc[28], atol=1e-5)
+    assert torch.allclose(o2.lattice, d.draft_block(9, 29, 7, ctx).lattice, atol=1e-4)
+    try:
+        s.commit({i: taps[i][30:31] for i in taps}, [30])
+        raise AssertionError("a gap accepted")
+    except ValueError:
+        pass
+    print("anchor: the normed context row at p - 1 (session: the newest committed row)")
+
+
+def test_lilicorr_lattice_and_walk():
+    """Review Focus 2: start broadcast for slot 0, pair[s - 1] for slots 1..6, scores x 8.0, the slot bias at offset 7,
+    the walk over the lattice alone from previous 0, the log-probs only as features."""
+    d = _lil()
+    ctx, _ = _lil_ctx(d, 40)
+    o = d.draft_block(11, 30, 7, ctx)
+    L = o.lattice
+    assert L.shape == (7, 8, 8) and L.dtype == torch.float32
+    assert all(torch.equal(L[0, 0], L[0, i]) for i in range(8))           # slot 0: broadcast over the previous index
+    prev, ids = 0, []
+    for s in range(7):                                                    # the walk reads the lattice alone
+        row = L[s, prev]
+        j = int(torch.nonzero(row == row.max())[0, 0])
+        assert torch.equal(o.scores[s], row) and int(o.chosen[s]) == j
+        ids.append(int(o.cand_ids[s, j]))
+        prev = j
+    assert o.ids.tolist() == ids
+    d.mut = {"no_scale"}
+    L1 = d.draft_block(11, 30, 7, ctx).lattice
+    d.mut = set()
+    assert torch.equal(L1 * 8.0, L)                                       # x 8.0 (exact: a power of two)
+    # the bias at the trained offset 7: a short lattice (S = 3, vLLM's prefix form) moves under offset S, S = 7 does not
+    hm, cand, lp = o.hidden[1:], o.cand_ids, o.log_probs
+    args = lambda S: (cand[None, :S], lp[None, :S], hm[None, :S], o.anchor[None], torch.tensor([True]))  # noqa: E731
+    base7, base3 = d.lilicorr_lattice(*args(7)), d.lilicorr_lattice(*args(3))
+    d.mut = {"rel_offset_s"}
+    alt7, alt3 = d.lilicorr_lattice(*args(7)), d.lilicorr_lattice(*args(3))
+    d.mut = set()
+    assert torch.equal(base7, alt7) and not torch.equal(base3, alt3)
+    b = d.lilicorr_slot_bias(7)
+    rel, same = d.w["lilicorr.relative_slot_bias"].float(), d.w["lilicorr.same_slot_bias"].float()
+    assert torch.equal(b[:, 9, 2], rel[:, 1 - 0 + 7]) and torch.equal(b[:, 3, 5], rel[:, 7] + same)
+    for mut in ("start_transposed", "pair_shift", "rel_sign", "no_same_slot", "lp_in_walk", "lp_topk",
+                "cross_no_anchor"):
+        moved, flips = _lil_flips(d, ctx, 20, {mut})
+        assert flips > 0 or (mut != "lp_in_walk" and moved > 0), (mut, moved, flips)
+        print(f"  lattice mutation {mut}: the lattice moves at {moved} / 20 anchors, {flips} / 140 draft ids flip")
+    # the walk's start index cannot matter (slot 0 is a broadcast): every start gives the same drafts
+    for start in range(8):
+        pv, got = start, []
+        for s in range(7):
+            j = int(torch.argmax(L[s, pv]))
+            got.append(int(o.cand_ids[s, j]))
+            pv = j
+        assert got == ids
+    print("lattice: slot 0 = start broadcast, x 8.0, offset 7 (S = 3 moves under offset S), the walk = the lattice's "
+          "argmax chain from previous 0")
+
+
+def test_lilicorr_candidates():
+    """The candidates: top 8 by logit (ties to the lower id) with full-vocabulary log-probs; torch.topk's tie order
+    recorded (24a's lesson)."""
+    lg = torch.randn(5, 1000, generator=torch.Generator().manual_seed(4))
+    lg[2, [10, 400, 900]] = 9.0                         # an exact tie at the top
+    lg[3, [5, 6]] = lg[3].max() + 1.0
+    cand, lp = ref.lilicorr_candidates(lg, 8)
+    assert cand[2, :3].tolist() == [10, 400, 900] and cand[3, :2].tolist() == [5, 6]
+    assert torch.allclose(lp, torch.log_softmax(lg, -1).gather(1, cand), atol=1e-6)
+    assert torch.equal(lp, lg.gather(1, cand) - torch.logsumexp(lg, -1, keepdim=True))
+    tv, ti = torch.topk(lg, 8, dim=-1)
+    agree = sum(int(torch.equal(ti[r], cand[r])) for r in range(5))
+    print(f"candidates: top 8 descending, ties to the lower id, lp = logit - lse(all); torch.topk agrees on {agree} / 5 "
+          f"rows (2 with planted exact ties) - recorded, not required")
+
+
+def test_lilicorr_sinks():
+    """Review Focus 4: a per-head logit in the denominator, unscaled, no value row; dropping it moves the drafts."""
+    d = _lil()
+    s = torch.randn(4, 3, 6, generator=torch.Generator().manual_seed(2))
+    pr = d._softmax_sink(0, s, 3)
+    sink = d.w["layers.0.self_attn.attention_sink_bias"].float()
+    exp = torch.exp(s) / (torch.exp(s).sum(-1, keepdim=True) + torch.exp(sink)[:, None, None])
+    assert torch.allclose(pr, exp, rtol=1e-6) and (pr.sum(-1) < 1).all()
+    ctx, _ = _lil_ctx(d, 40)
+    for mut in ("no_sink", "sink_scaled"):
+        moved, flips = _lil_flips(d, ctx, 20, {mut})
+        assert moved == 20 and flips > 0, (mut, moved, flips)
+        print(f"  sink mutation {mut}: the lattice moves at {moved} / 20 anchors, {flips} / 140 draft ids flip")
+    print("sinks: softmax(cat(scores, sink))[:-1], the sink unscaled and valueless")
+
+
+def test_lilicorr_window_edge():
+    """The window |q - k| <= 15 at window 16 (vLLM's; spec 26 Decision 11), rows 0 and 7 at p = 15, 16, 17."""
+    d = _lil()
+    ctx, taps = _lil_ctx(d, 60)
+    for p in (15, 16, 17):
+        kpos = torch.arange(p)
+        qpos = torch.arange(p, p + 8)
+        m = d.attention_mask(0, qpos, kpos)
+        assert m[0].nonzero().flatten().tolist() == [k for k in range(p) if p - k <= 15]
+        assert m[7].nonzero().flatten().tolist() == [k for k in range(p) if p + 7 - k <= 15]
+        # end to end: positions older than p - 15 are never read; p - 15 is
+        # end to end: positions older than p - 15 are never read (masked keys add exact zeros - equal to rounding), p - 15
+        # is
+        full = d.draft_block(3, p, 7, ctx).hidden
+        lo = max(0, p - 15)
+        keep = ref.ContextKV(pos=ctx.pos[lo:], k=[k[lo:] for k in ctx.k], v=[v[lo:] for v in ctx.v], fc=ctx.fc[lo:])
+        assert (d.draft_block(3, p, 7, keep).hidden - full).abs().max() <= 1e-5, p
+        cut = ref.ContextKV(pos=ctx.pos[lo + 1:], k=[k[lo + 1:] for k in ctx.k], v=[v[lo + 1:] for v in ctx.v],
+                            fc=ctx.fc[lo + 1:])
+        assert (d.draft_block(3, p, 7, cut).hidden - full).abs().max() > 1e-3, p
+    base = d.draft_block(3, 17, 7, ctx).hidden
+    old = list(d.cfg.windows)
+    d.cfg.windows = [17] * d.cfg.n_layers           # the inclusive reading (|q - k| <= 16): row 0 at 17 also sees 1
+    try:
+        alt = d.draft_block(3, 17, 7, ctx).hidden
+    finally:
+        d.cfg.windows = old
+    assert (alt - base).abs().max() > 1e-3
+    print("window: row 0 sees p - 15 .. p - 1, row 7 sees p - 8 .. p - 1 at window 16; older rows unread; the "
+          "inclusive reading moves the block")
+
+
+def test_lilicorr_k_prefix():
+    """K = 1..7 from one block are the first K of the K = 7 walk at T 0 (the block keeps 8 rows, the head 7 slots)."""
+    d = _lil()
+    ctx, _ = _lil_ctx(d, 40)
+    for p in (20, 27, 39):
+        o7 = d.draft_block(p, p, 7, ctx)
+        for K in range(1, 8):
+            o = d.draft_block(p, p, K, ctx)
+            assert torch.equal(o.ids, o7.ids[:K]) and torch.equal(o.lattice, o7.lattice)
+            assert torch.equal(o.scores, o7.scores[:K]) and o.q.shape == (K, LIL_VOCAB)
+    print("K = 1..7: prefixes of the K = 7 walk (one 8-row block, the lattice over 7 slots)")
+
+
+def test_lilicorr_sampled():
+    """The sampled walk: reproducible from its seed, keyed like vLLM 3901d56800 (seed ^ (slot << 32), position p + s,
+    the candidate id); q = softmax(realized / T) on the 8 candidates."""
+    d = _lil()
+    ctx, _ = _lil_ctx(d, 40)
+    o1 = d.draft_block(3, 30, 7, ctx, 1.0, 1234)
+    o2 = d.draft_block(3, 30, 7, ctx, 1.0, 1234)
+    assert torch.equal(o1.ids, o2.ids) and torch.equal(o1.chosen, o2.chosen)
+    prev, ids = 0, []
+    for s in range(7):
+        row = o1.lattice[s, prev]
+        u = ref.murmur3_uniform32(1234 ^ (s << 32), 30 + s + ref.DRAFT_NOISE_SALT, o1.cand_ids[s])
+        j = int(torch.argmax(row.double() / 1.0 - torch.log(-torch.log1p(-u))))
+        ids.append(int(o1.cand_ids[s, j]))
+        prev = j
+    assert o1.ids.tolist() == ids
+    qs = torch.gather(o1.q, 1, o1.cand_ids[:7])
+    assert torch.allclose(qs, torch.softmax(o1.scores.double() / 1.0, -1).float(), atol=1e-7)
+    assert torch.allclose(o1.q.sum(-1), torch.ones(7), atol=1e-6)
+    seeds = [d.draft_block(3, 30, 7, ctx, 1.0, s).ids for s in range(12)]
+    assert len({tuple(x.tolist()) for x in seeds}) > 1
+    moved, flips = _lil_flips(d, ctx, 20, {"no_step_seed"}, T=1.0)
+    assert flips > 0
+    print(f"sampled: seed-reproducible, step-seeded (seed ^ (s << 32): without it {flips} / 140 ids move), q = "
+          f"softmax(realized / T) on the candidates")
+
+
+def test_lilicorr_taps_order():
+    """Review Focus 5 (the API half): the taps concatenate in target_layer_ids order before fc; another order moves
+    every context row (test_dflash_accept.py's tiny pair checks the taps ARE the residual after those blocks)."""
+    d = _lil()
+    ctx, taps = _lil_ctx(d, 40)
+    ids = d.cfg.target_layer_ids
+    rev = {a: taps[b] for a, b in zip(ids, reversed(ids))}
+    ctx2 = d.context_kv(rev, torch.arange(40))
+    assert not torch.equal(ctx.fc, ctx2.fc)
+    cat = torch.cat([taps[i] for i in ids], -1)
+    assert torch.equal(ctx.fc_raw, d._lin(cat, "fc.weight"))
+    o, o2 = d.draft_block(5, 30, 7, ctx), d.draft_block(5, 30, 7, ctx2)
+    assert not torch.equal(o.lattice, o2.lattice)
+    print(f"taps: cat in {ids} order -> fc ({cat.shape[1]} = {len(ids)} x {d.cfg.hidden}); reversed moves the lattice")
+
+
+def test_lilicorr_load_from_files():
+    """lilicorr_make_tiny.py's checkpoint read back (NVFP4 decoded) = the in-memory drafter; stray quantised tensors and
+    NaN scales refused naming them."""
+    mt = _lmt()
+    from safetensors.torch import load_file, save_file
+    with tempfile.TemporaryDirectory() as root:
+        dd = mt.make(os.path.join(root, "lil"), seed=0, vocab=LIL_VOCAB)
+        with open(os.path.join(dd, "config.json")) as f:
+            cd = json.load(f)
+        raw = load_file(os.path.join(dd, "model.safetensors"))
+        nq = sum(1 for n in raw if n.endswith(".weight_scale_2"))
+        assert nq == len(mt.nvfp4_names(cd)) == 16 and len(raw) == 16 * 3 + 37 + 13 * 2 + 2
+        mem = _lil()
+        g = torch.Generator().manual_seed(100)
+        emb = torch.randn(LIL_VOCAB, 256, generator=g).to(torch.bfloat16)
+        head = (torch.randn(LIL_VOCAB, 256, generator=g) * 0.15).to(torch.bfloat16)
+        d = ref.load_drafter(dd, embed=emb, lm_head=head)
+        assert set(d.w) == set(mem.w) and all(torch.equal(d.w[n], mem.w[n]) for n in d.w) and d.g == mem.g
+        bad = dict(raw)
+        sc = bad["fc.weight_scale"].view(torch.uint8).clone()
+        sc[3, 5] = 0x7F
+        bad["fc.weight_scale"] = sc.view(torch.float8_e4m3fn)
+        save_file(bad, os.path.join(dd, "model.safetensors"))
+        try:
+            ref.load_drafter(dd, embed=emb, lm_head=head)
+            raise AssertionError("a NaN scale accepted")
+        except ValueError as e:
+            assert "fc: weight_scale[3][5]" in str(e), str(e)
+        bad = dict(raw)
+        bad["layers.0.self_attn.q_proj.weight_scale"] = raw["fc.weight_scale"].clone()
+        save_file(bad, os.path.join(dd, "model.safetensors"))
+        try:
+            ref.load_drafter(dd, embed=emb, lm_head=head)
+            raise AssertionError("a stray scale accepted")
+        except ValueError as e:
+            assert "q_proj.weight_scale" in str(e), str(e)
+    print(f"load: {len(raw)} tensors ({nq} NVFP4 linears x 3 + {len(raw) - 3 * nq} BF16), decoded = in memory; NaN / "
+          "stray scales refused")
+
+
 TESTS = [test_real_configs, test_shapes_and_determinism, test_tap_offset_at_api, test_context_kv_and_rope,
          test_context_window, test_full_attention_layer, test_block_attention_causality, test_conv_lookback, test_v2_layer_wiring,
          test_short_K, test_score_edges_and_anchor, test_walk_tie_rule, test_gumbel, test_d2t,
          test_mask_embedding_and_scale, test_dequant_pack_quantized, test_load_from_files, test_real_checkpoint,
-         test_muse_config, test_muse_equals_transformers, test_muse_window_edge, test_muse_review_focus_4]
+         test_muse_config, test_muse_equals_transformers, test_muse_window_edge, test_muse_review_focus_4,
+         test_lilicorr_config, test_lilicorr_nvfp4_enumeration, test_lilicorr_g_on_the_output, test_lilicorr_anchor,
+         test_lilicorr_lattice_and_walk, test_lilicorr_candidates, test_lilicorr_sinks, test_lilicorr_window_edge,
+         test_lilicorr_k_prefix, test_lilicorr_sampled, test_lilicorr_taps_order, test_lilicorr_load_from_files]
 
 
 def main() -> None:
