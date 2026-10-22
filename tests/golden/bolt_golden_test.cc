@@ -28,7 +28,15 @@
 // round differently from the first in_proj on: 24c's finding).
 // **The residual** h.L<l> per (row, block): cosine per row; per block median >= 0.9998 and min >= 0.99 (PROPOSED).
 //
+// **B3 on prefill (spec 25d)**: with `prefill` (or `prefill:<chunk>`, a multiple of 64) the prompt goes through
+// BoltEngine::prefill instead of one decode replay per id (the first generated id is the prefill head's: decode's head
+// binaries over the last row); the routing compares the last chunk's route rows; the h taps are the prefill's (row T - 1
+// of each block) and then the decode steps'; the SSM state and the conv columns are the prefill's. The bars are the decode
+// gate's (PROPOSED): prefill's linears round through bf16-dequantised weights in a DPAS order and its SSM is the SSD form -
+// both further from the reference than decode's chain, which the bars are meant to absorb (LFM2's / Kolibri's precedent).
+//
 // argv: <checkpoint> <oracle dir> <prompt> [bf16] [eager] [b16] [layers:<N>] [pp2 | pp2:<split>] [copy | peer]
+//       [prefill | prefill:<chunk>]
 // Exit 77 (SKIP) when the checkpoint or the golden set is absent, or the placement cannot run.
 #include <algorithm>
 #include <cmath>
@@ -145,9 +153,16 @@ int main(int argc, char** argv) {
   o.attn = rb::bolt_attn();
   o.state = rb::bolt_state();
   bool devices_given = false;
+  bool prefill = false;   // spec 25d: the prompt through BoltEngine::prefill
+  uint32_t chunk = 0;
   for (int i = 4; i < argc; ++i) {
     const std::string a = argv[i];
-    if (a == "bf16") {
+    if (a == "prefill") {
+      prefill = true;
+    } else if (a.rfind("prefill:", 0) == 0) {
+      prefill = true;
+      chunk = uint32_t(std::strtoul(a.c_str() + 8, nullptr, 10));
+    } else if (a == "bf16") {
       o.int8_head = false;
     } else if (a == "int8") {
       o.int8_head = true;
@@ -167,8 +182,8 @@ int main(int argc, char** argv) {
     } else if (a == "copy" || a == "peer") {
       o.handoff = a == "peer" ? runtime::PpHandoff::Peer : runtime::PpHandoff::Copy;
     } else {
-      std::fprintf(stderr, "bolt_golden_test: unknown flag %s (bf16, int8, eager, b16, layers:N, pp2[:split], copy, peer)\n",
-                   a.c_str());
+      std::fprintf(stderr, "bolt_golden_test: unknown flag %s (bf16, int8, eager, b16, layers:N, pp2[:split], copy, peer, "
+                   "prefill[:chunk])\n", a.c_str());
       return 2;
     }
   }
@@ -193,12 +208,12 @@ int main(int argc, char** argv) {
     std::printf("SKIP: %zu ids + %u exceed the trained context %u\n", ids.size(), kGen, pre.max_pos);
     return 77;
   }
-  if (!devices_given && !bolt_rig::fits(pre, o)) o.devices = 2;   // the real model: two cards (Decision 4)
+  if (!devices_given && !bolt_rig::fits(pre, o, prefill)) o.devices = 2;   // the real model: two cards (Decision 4)
   if (o.devices == 2 && l0::Context::gpu_count() < 2) {
     std::printf("SKIP: two cards needed, Level Zero shows %u\n", l0::Context::gpu_count());
     return 77;
   }
-  if (!bolt_rig::fits(pre, o)) {
+  if (!bolt_rig::fits(pre, o, prefill)) {
     std::printf("SKIP: %s does not fit the placement (%u card(s))\n", snap.c_str(), o.devices);
     return 77;
   }
@@ -227,17 +242,15 @@ int main(int argc, char** argv) {
   std::vector<char> first(d.layers, 0);
   std::vector<std::vector<double>> hcos(d.layers);
   std::vector<double> sa, sb;
-  auto check_row = [&](uint32_t row) {
-    const std::vector<uint32_t> r = eng.read_routes();
-    uint32_t mi = 0;
-    for (uint32_t l = 0; l < d.layers; ++l) {
-      if (!d.is_moe(l)) continue;
-      const std::string ls = std::to_string(l);
-      const int32_t* gi = g.i32("route.ids.L" + ls, size_t(rows) * K) + size_t(row) * K;
-      const float* gw = g.f32("route.w.L" + ls, size_t(rows) * K) + size_t(row) * K;
-      const float gap = g.f32("route.gap.L" + ls, rows)[row];
-      compare_route(r.data() + size_t(mi++) * rb::kRouteWords, gi, gw, gap, rc, first[l], pname, row, l);
-    }
+  // One (row, MoE block)'s route row against the golden set.
+  auto check_route = [&](const uint32_t* r, uint32_t row, uint32_t l) {
+    const std::string ls = std::to_string(l);
+    const int32_t* gi = g.i32("route.ids.L" + ls, size_t(rows) * K) + size_t(row) * K;
+    const float* gw = g.f32("route.w.L" + ls, size_t(rows) * K) + size_t(row) * K;
+    const float gap = g.f32("route.gap.L" + ls, rows)[row];
+    compare_route(r, gi, gw, gap, rc, first[l], pname, row, l);
+  };
+  auto check_taps = [&](uint32_t row) {
     const std::vector<uint16_t> tap = eng.read_debug_h();
     for (uint32_t l = 0; l < d.layers; ++l) {
       const std::string n = "h.L" + std::to_string(l);
@@ -247,10 +260,33 @@ int main(int argc, char** argv) {
       hcos[l].push_back(golden::compare_bf16(tap.data() + size_t(l) * d.hidden, want, d.hidden, sa, sb).cos);
     }
   };
+  auto check_row = [&](uint32_t row) {
+    const std::vector<uint32_t> r = eng.read_routes();
+    uint32_t mi = 0;
+    for (uint32_t l = 0; l < d.layers; ++l)
+      if (d.is_moe(l)) check_route(r.data() + size_t(mi++) * rb::kRouteWords, row, l);
+    check_taps(row);
+  };
   eng.reset();
-  for (uint32_t t = 0; t < T; ++t) {
-    eng.ingest({ids[t]});
-    check_row(t);
+  if (prefill) {
+    // Spec 25d: the prompt in one BoltEngine::prefill (chunks of `chunk`, every chunk on the 64-grid from position 0); the
+    // routing on the rows the last chunk's route buffer holds; the h taps at the last prompt row (the prefill's tap).
+    const uint32_t c = chunk ? chunk : rb::kPfC;
+    rb::check_prefill_chunk(c);
+    eng.prefill(ids, c);
+    const std::vector<uint32_t> r = eng.read_prefill_routes();
+    const uint32_t row0 = ((T - 1) / c) * c;
+    for (uint32_t t = row0; t < T; ++t)
+      for (uint32_t l = 0; l < d.layers; ++l)
+        if (d.is_moe(l)) check_route(r.data() + rb::pf_route_at(l) / 4 + size_t(t - row0) * rb::kRouteWords, t, l);
+    check_taps(T - 1);
+    std::printf("  prefill: %u ids in chunks of %u (%zu launches), routing on rows %u..%u, h taps at row %u\n", T, c,
+                eng.prefill_launches(), row0, T - 1, T - 1);
+  } else {
+    for (uint32_t t = 0; t < T; ++t) {
+      eng.ingest({ids[t]});
+      check_row(t);
+    }
   }
   // The SSM state and the conv columns after the prompt.
   double state_worst = 1.0, conv_worst = 1.0;

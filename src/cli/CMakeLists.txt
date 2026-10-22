@@ -111,3 +111,5 @@ if(TARGET b70-serve)
 endif()
 # Spec 25c: and Nemotron 3.5 Bolt's engine (runtime/bolt, src/cli/bolt_decode.h), dispatched on model_type.
 target_link_libraries(b70-decode PRIVATE b70_bolt_runtime)
+# Spec 25d: and Nemotron 3.5 Bolt's prefill (b70_bolt_prefill: BoltEngine::prefill, its walk and scratch).
+target_link_libraries(b70-decode PRIVATE b70_bolt_prefill)

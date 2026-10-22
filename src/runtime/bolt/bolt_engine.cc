@@ -38,6 +38,11 @@ struct BoltEngine::Stage {
   std::optional<CapturedStep> step;
 };
 
+l0::Context& BoltEngine::stage_ctx(uint32_t dev) const { return st(dev).ctx; }
+BoltBuffers& BoltEngine::stage_buffers(uint32_t dev) const { return st(dev).buffers; }
+Control* BoltEngine::stage_control(uint32_t dev) const { return st(dev).ctl; }
+l0::CmdList& BoltEngine::stage_imm(uint32_t dev) const { return st(dev).imm; }
+
 BoltEngine::Stage& BoltEngine::st(uint32_t dev) const {
   if (dev >= st_.size())
     throw std::out_of_range("runtime::bolt::BoltEngine: device " + std::to_string(dev) + " of " + std::to_string(st_.size()));
@@ -104,6 +109,9 @@ bool BoltEngine::settle(uint32_t dev) {
 }
 
 void BoltEngine::reset() {
+  // Spec 25d: a prefill list may still wait on a hand-off that will not come (P4): release it and drain first.
+  if (pf_settle_ && !pf_settle_())
+    throw std::runtime_error("runtime::bolt::BoltEngine::reset: a prefill list is still running after the prefill timeout");
   for (uint32_t i = 0; i < st_.size(); ++i)
     if (!settle(i))
       throw std::runtime_error("runtime::bolt::BoltEngine::reset: device " + std::to_string(i) +
@@ -384,6 +392,7 @@ MemoryComponents BoltEngine::memory_use(uint32_t dev) const {
   c.kv = b.kv_k.size() + b.kv_v.size();
   c.decode_state = b.control.size() + b.conv_ring.size() + b.ssm.size() + b.scratch_bytes() +
                    (taps_[dev] ? taps_[dev]->size() : 0) + (link_ ? link_->bytes(dev) : 0);
+  c.prefill_scratch = dev < pf_dev_bytes_.size() ? pf_dev_bytes_[dev] : 0;   // spec 25d: after the first prefill
   return c;
 }
 
