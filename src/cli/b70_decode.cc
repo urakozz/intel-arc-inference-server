@@ -39,6 +39,7 @@
 #include "cli/k2_decode.h"
 #include "cli/kolibri_decode.h"
 #include "cli/lfm2moe_decode.h"   // spec 24c: LFM2.5-24B-A2B (model_type lfm2_moe)
+#include "cli/bolt_decode.h"   // spec 25c: Nemotron 3.5 Bolt (nemotron_h_omni over nemotron_h_puzzle)
 #include "cli/muse_decode.h"
 #include "cli/qwen4exp_decode.h"
 #include "cli/max_len.h"
@@ -1023,6 +1024,36 @@ int run(int argc, char** argv) {
   if (synthetic && depth == 0)
     throw std::runtime_error("--depth 0 would ingest nothing; --bench and --profile both measure"
                              " a step at a context depth");
+  // Spec 25c: Nemotron 3.5 Bolt (model_type nemotron_h_omni over llm_config.model_type nemotron_h_puzzle) runs
+  // runtime::bolt::BoltEngine on two cards (the whole model's default, Decision 4) or one (a truncated / synthetic
+  // checkpoint) - dispatched here, before the Qwen engine's pipeline and kv-cache rules (its own refusals,
+  // cli/bolt_decode.h: the prefill (spec 25d), --mtp (no MTP head), --spec (spec 26), int8 KV (Decision 17)). A path that
+  // does not resolve is not Bolt - the flows below report it.
+  if (cli::bolt::is_bolt(path)) {
+    if (layers_auto) throw std::runtime_error("--layers auto is Qwen3.8-Flash-Next's (spec 21c); Nemotron 3.5 Bolt takes --layers N");
+    cli::bolt::DecodeArgs ba;
+    ba.path = path;
+    ba.ids_path = ids_path;
+    ba.n = n;
+    ba.bench = bench;
+    ba.profile = profile;
+    ba.depth = depth;
+    ba.tg = tg;
+    ba.steps = steps;
+    ba.repeats = repeats;
+    ba.max_len = max_len_arg;
+    ba.reserve = mem_reserve;
+    ba.device = device;
+    ba.int8_head = !have_lm_head || lm_head == loader::LmHeadForm::Int8;
+    ba.pipe = pipe;
+    ba.pp_given = pp_given;
+    ba.layers = layers;
+    ba.prefill = prefill || have_prefill_len || have_pp_chunk || have_pp_backend;
+    ba.mtp = mtp_on || have_mtp;
+    ba.spec = have_spec;
+    ba.kv8 = kv_cache == runtime::KvCache::Int8;
+    return cli::bolt::run_decode<StdoutToStderr>(ba);
+  }
   // Spec 24c: LFM2.5-24B-A2B (model_type lfm2_moe) runs runtime::lfm2moe::Lfm2MoeEngine on one card (or two) -
   // dispatched here, beside Kolibri-1 and Muse-Glimmer and before the Qwen engine's pipeline and kv-cache rules (its
   // own refusals, cli/lfm2moe_decode.h: the prefill's backend and chunk (spec 24d: l0 only, chunk <= 2048), --mtp /
