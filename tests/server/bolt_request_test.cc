@@ -382,6 +382,22 @@ void case_generation() {
     CHECK(g2.sampling.greedy);
     CHECK((g2.eos == std::vector<uint32_t>{2, 11}));
   }
+  // A partial explicit file overlays the published values (review I2): temperature alone keeps sampling on, top-p 0.95, EOS [2, 11].
+  {
+    const json partial = {{"temperature", 0.6}};
+    const cli::bolt::Generation g = cli::bolt::resolve_generation(&nvidia, &partial, "p.json");
+    CHECK(!g.sampling.greedy);
+    CHECK_NEAR(g.sampling.temperature, 0.6, 1e-6);
+    CHECK_NEAR(g.sampling.top_p, 0.95, 1e-6);
+    CHECK_EQ(g.sampling.top_k, 0u);
+    CHECK((g.eos == std::vector<uint32_t>{2, 11}));
+    const json top_k_only = {{"top_k", 40}};
+    const cli::bolt::Generation g2 = cli::bolt::resolve_generation(nullptr, &top_k_only, "k.json");
+    CHECK(!g2.sampling.greedy);
+    CHECK_EQ(g2.sampling.top_k, 40u);
+    CHECK_NEAR(g2.sampling.temperature, 1.0, 1e-6);
+    CHECK_NEAR(g2.sampling.top_p, 0.95, 1e-6);
+  }
   // A malformed field is a named error.
   for (const json& bad : {json{{"temperature", "hot"}}, json{{"top_p", 2.0}}, json{{"do_sample", "yes"}},
                           json{{"eos_token_id", "eleven"}}, json{{"eos_token_id", json::array()}}}) {

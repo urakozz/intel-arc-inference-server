@@ -120,6 +120,7 @@ int run_default(rb::BoltEngine& e, const Ids& prompt) {
   e.prefill(prompt);
   CHECK(at_hook.count(2048) && at_hook.count(4096) && at_hook.count(kN));
   const Out cold = finish(e);
+  e.set_block_hook({});   // the cold run's saves are frozen: a hook still set would overwrite at_hook[4096] / [kN] during the restores
   for (uint32_t at : {2048u, 4096u}) {
     e.reset();
     restore(e, at_hook.at(at), at);

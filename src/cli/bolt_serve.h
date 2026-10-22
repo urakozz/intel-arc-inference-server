@@ -29,6 +29,7 @@
 // Also here, host-side and device-free: the generation defaults (Decision 12) and the flags b70-serve refuses for this model.
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <random>
@@ -99,7 +100,12 @@ inline Generation resolve_generation(const nlohmann::json* snapshot, const nlohm
                                      const std::string& explicit_path = "", const std::string& snapshot_path = "") {
   Generation out = published_generation();
   const auto apply_sampling = [&](const nlohmann::json& g) {
-    const server::Sampling s = server::generation_sampling(g);
+    // The file's keys OVERLAY the published values (review I2): {"temperature": 0.6} keeps do_sample true and top_p 0.95; a
+    // field neither names is not HF's default (top-k 50, greedy) but the published one.
+    nlohmann::json merged = {{"do_sample", true}, {"temperature", 1.0}, {"top_p", 0.95}};
+    if (!g.is_object()) throw std::invalid_argument("generation_config.json is not an object");
+    for (auto it = g.begin(); it != g.end(); ++it) merged[it.key()] = it.value();
+    const server::Sampling s = server::generation_sampling(merged);
     out.sampling = s;
     if (!g.contains("top_k")) out.sampling.top_k = 0;
   };
@@ -167,6 +173,57 @@ inline void check_serve_max_len(bool is_auto, uint32_t value, uint32_t trained_m
                              std::to_string(trained_max_len) + " (max_position_embeddings; spec 25 Decision 14)");
 }
 
+// ---- the top-p filter without a top-k (review I1) -------------------------------------------------------------------------------
+// With no top-k (Bolt's default) server::filter_probs partial_sorts the WHOLE 131072-row vocabulary for every sampled id: measured
+// 17.2 ms on the Mac (k 50: 0.15 ms) against a ~16.5 ms decode step. This is the same filter without the full sort: the softmax
+// is normalised once over every row (one pass, no sort; rows more than 40 nats under the top are not added: < 6e-13 of the sum), then the head is sorted in growing prefixes (64, 256, 1024 ...) until the
+// cumulative mass reaches top_p. Same ids in the same descending order and the same kept count as filter_probs on distinct
+// logits (its probabilities differ only in the last bits: the normaliser is summed in id order, not sorted order); among EQUAL
+// logits the order is ascending id (filter_probs' partial_sort leaves it unspecified). It is Bolt's alone - the shared
+// filter_probs and every other model's sampling are untouched. Only for top_k 0 and no softcap / multiplier; else filter_probs.
+inline server::FilteredProbs filter_probs_top_p(const float* logits, uint32_t vocab_used, const server::Sampling& s) {
+  if (s.top_k != 0 || s.softcap > 0.0f || s.logit_mult != 1.0f) return server::filter_probs(logits, vocab_used, s);
+  const float temperature = s.temperature > 0.0f ? s.temperature : 1.0f;
+  float top = logits[0];
+  for (uint32_t i = 1; i < vocab_used; ++i) top = std::max(top, logits[i]);
+  double sum = 0.0;
+  for (uint32_t i = 0; i < vocab_used; ++i) {
+    const double x = static_cast<double>((logits[i] - top) / temperature);
+    if (x > -40.0) sum += std::exp(x);   // a row 40 nats under the top adds < 4.3e-18: dropped (all of them < 6e-13 of the sum)
+  }
+  const double top_p = std::clamp(static_cast<double>(s.top_p), 0.0, 1.0);
+  std::vector<uint32_t> idx(vocab_used);
+  for (uint32_t i = 0; i < vocab_used; ++i) idx[i] = i;
+  const auto before = [logits](uint32_t a, uint32_t b) { return logits[a] > logits[b] || (logits[a] == logits[b] && a < b); };
+  server::FilteredProbs f;
+  size_t sorted = 0;
+  for (size_t n = 64;; n *= 4) {
+    n = std::min<size_t>(n, vocab_used);
+    std::partial_sort(idx.begin() + sorted, idx.begin() + n, idx.end(), before);   // [0, sorted) are already the head
+    sorted = n;
+    double cumulative = 0.0;
+    uint32_t kept = 0;
+    f.probs.assign(n, 0.0);
+    for (size_t i = 0; i < n; ++i) {
+      f.probs[i] = std::exp(static_cast<double>((logits[idx[i]] - top) / temperature)) / sum;   // (kept rows are never pruned out of the sum above: the nucleus holds the mass)
+      cumulative += f.probs[i];
+      if (cumulative >= top_p) {
+        kept = uint32_t(i + 1);
+        break;
+      }
+    }
+    if (kept == 0 && n == vocab_used) kept = uint32_t(n);
+    if (kept != 0) {
+      f.probs.resize(kept);
+      f.ids.assign(idx.begin(), idx.begin() + kept);
+      break;
+    }
+  }
+  f.mass = 0.0;
+  for (double p : f.probs) f.mass += p;
+  return f;
+}
+
 // ---- the adapter ------------------------------------------------------------------------------------------------------------
 template <class Engine>
 struct BoltEngineAdapterT : server::EngineIface {
@@ -232,7 +289,7 @@ struct BoltEngineAdapterT : server::EngineIface {
     eng.read_logits_into(host_logits_.data());
     if (penalised)
       server::apply_repetition_penalty(host_logits_.data(), vocab_used_, sampling.seen->distinct(), sampling.repetition_penalty);
-    eng.set_token(server::draw(server::filter_probs(host_logits_.data(), vocab_used_, sampling), rng_));
+    eng.set_token(server::draw(filter_probs_top_p(host_logits_.data(), vocab_used_, sampling), rng_));
     ++sampled_;
   }
 

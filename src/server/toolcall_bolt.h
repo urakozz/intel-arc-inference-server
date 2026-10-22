@@ -53,7 +53,8 @@ class BoltOutputStream : public OutputParser {
   bool force_;
   std::string buf_;        // Reasoning: the text not yet decided; held in full while force_ is set
   bool closed_ = false;    // Reasoning with force_: "</think>" has been seen (buf_ holds the reasoning up to it)
-  size_t reasoning_len_ = 0;   // closed_: the reasoning's length in buf_; what follows it is content
+  size_t scanned_ = 0;     // force_, not closed: buf_[0, scanned_) holds no "</think>" start (M3: no rescan from 0)
+  size_t reasoning_len_ = 0;  // closed_: the reasoning's length in buf_; what follows it is content
   OutputStream body_;
 };
 

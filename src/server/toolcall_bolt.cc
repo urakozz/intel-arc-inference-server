@@ -71,7 +71,9 @@ void BoltOutputStream::run(std::vector<Delta>& out, bool final) {
   }
   // force_nonempty_content: the reasoning is held until it is known to have content behind it.
   if (!closed_) {
-    const size_t i = buf_.find(kThinkEnd);
+    const size_t tag = std::char_traits<char>::length(kThinkEnd);
+    const size_t i = buf_.find(kThinkEnd, scanned_);
+    scanned_ = buf_.size() >= tag - 1 ? buf_.size() - (tag - 1) : 0;   // a tag may still start in the last 7 bytes
     if (i != std::string::npos) {
       closed_ = true;
       reasoning_len_ = i;
