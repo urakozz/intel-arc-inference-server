@@ -90,6 +90,11 @@ if [ $have_l0 = 0 ]; then
   row host FAIL "-" "no ze_api.h under L0_INCLUDE=$L0_INCLUDE (the host build compiles the loader against it)"
 elif ! (cd "$root" && cmake --preset mac-host > "$out/host-configure.log" 2>&1); then
   row host FAIL "configure" "see $out/host-configure.log"
+elif ! grep -q 'tokenizer component ON' "$out/host-configure.log"; then
+  # AUTO turns the tokenizer OFF without an error when cargo is unusable - a stale cached
+  # B70_CARGO included - and ~140 tokenizer / server tests then never register, so the
+  # section would PASS on what is left. A gate does not shrink silently: fail instead.
+  row host FAIL "configure" "tokenizer component OFF ($(grep -m1 '^B70_CARGO:' "$root/build/mac-host/CMakeCache.txt" | cut -d= -f2- | sed 's/.*NOTFOUND$/no cargo found/') unusable): install cargo (~/.cargo/bin or PATH); a stale path: cmake --preset mac-host -UB70_CARGO"
 elif ! (cd "$root" && cmake --build --preset mac-host -j "$jobs" > "$out/host-build.log" 2>&1); then
   row host FAIL "build" "$(grep -m1 -E 'error:|Error ' "$out/host-build.log" | sed "s|$root/||" | cut -c1-110) - $out/host-build.log"
 else

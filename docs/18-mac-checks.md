@@ -31,8 +31,11 @@ Xcode's clang and CMake (3.22 or later; the box uses 4.2). The Level Zero
 **headers** - not the runtime, which does not exist for macOS: a checkout of
 `https://github.com/oneapi-src/level-zero`, with `L0_INCLUDE` pointing at its
 `include/` (default `~/PycharmProjects/level-zero/include`). `cargo` is
-optional: with it the tokenizer library builds and `template_agnes_test` runs
-against the Agnes snapshot if `~/.cache/huggingface` has it.
+required: it builds the tokenizer library, and without it every tokenizer /
+server test (~140) is never registered. The host section FAILs when the
+configure reports the tokenizer component OFF - including when a cached
+`B70_CARGO` points at a cargo that has since moved; clear it with
+`cmake --preset mac-host -UB70_CARGO`.
 
 ## What each section does
 
