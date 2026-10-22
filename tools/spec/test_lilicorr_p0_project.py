@@ -74,6 +74,16 @@ def test_derived():
     assert vu[0] == v[0] and all(x < y for x, y in zip(vu[1:], v[1:]))
     print(f"derived: a plain step {pg:.3f} GB, verify M = 8 {v[7]:.3f} plain steps (plain experts), {vu[7]:.3f} with a "
           f"union of {u[8][0]}; blocks exact {b['exact']:.3f} / int8 {b['int8']:.3f} / int4 g64 {b['int4g64']:.3f}")
+    for depth in (4096, 65536):
+        vd = lp.derived_verify(depth)
+        sh = lp.slot_share(vd, None, depth)
+        assert all(a < c for a, c in zip(sh[1:], sh[2:]))
+        print(f"  depth {depth}: verify M = 1..8 " + " / ".join(f"{x:.3f}" for x in vd) + "; slot-write share M = 2..8 "
+              + " / ".join(f"{100 * x:.1f} %" for x in sh[1:]))
+    ex = lp.expectation(v, b["int8"], None, None)
+    assert len(ex) == len(lp.SPEED_BENCH) and ex[0].startswith("coding 5.26 ->")
+    for line in ex:
+        print("  " + line)
 
 
 def test_rate():

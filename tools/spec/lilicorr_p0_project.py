@@ -171,6 +171,32 @@ def union_verify(verify: list, union: dict, which: int, probe: dict | None, dept
     return out
 
 
+def slot_share(verify: list, probe: dict | None, depth: int = 4096) -> list:
+    """The slot writes' share of the verify at M = 2..8 (Decision 4's measure): M x 4 MiB a Mamba block over the verify -
+    at the probe's measured state rate, else DERIVED bytes. [None, share_2, .., share_8]."""
+    out = [None]
+    for M in range(2, KMAX + 2):
+        if probe:
+            r = probe["rows"][M]
+            out.append(r["slots_ms"] * M / (1 + M) / r["total_ms"])
+        else:
+            out.append(MAMBA_BLOCKS * M * STATE_MB / 1e3 / (verify[M - 1] * plain_gb(depth)))
+    return out
+
+
+ESTIMATED_U8 = 30          # spec 26 §4's ESTIMATE of the distinct experts a MoE block at M = 8 (r63.union measures it)
+
+
+def expectation(verify: list, block: float, union: dict | None, probe: dict | None, depth: int = 4096) -> list[str]:
+    """SPEED-Bench's published acceptance (K 7, the 24GB target) through these costs: x plain at K 7 with the plain M-row
+    MoE and with the union MoE (u p50 from --union, else spec 26 §4's ESTIMATE u = 30 at M = 8)."""
+    u = union if union else {KMAX + 1: (ESTIMATED_U8, ESTIMATED_U8)}
+    vu = union_verify(verify, u, 0, probe, depth)
+    what = "u p50 measured" if union else f"u = {ESTIMATED_U8} at M = 8, spec 26 §4's ESTIMATE"
+    return [f"{cat} {e:.2f} -> {e / (verify[KMAX] + block):.2f}x plain (plain M-row MoE), {e / (vu[KMAX] + block):.2f}x "
+            f"(union MoE, {what})" for cat, e in SPEED_BENCH.items()]
+
+
 def rate(E, verify, block):
     """[(K, E_K, cost, rate)] and the best."""
     rows = []
@@ -295,7 +321,10 @@ def main(argv=None):
         seqs["all"] = allseqs
     res = project(acc, seqs, verify, block)
     res_u = project(acc, seqs, union_verify(verify, union, 0, probe, depth), block) if union else None
+    sh = slot_share(verify, probe, depth)
     lines = [f"verify M = 1..8 in plain steps ({src}): " + " / ".join(f"{v:.3f}" for v in verify),
+             "the slot writes' share of the verify at M = 2..8 (Decision 4): "
+             + " / ".join(f"{100 * x:.1f} %" for x in sh[1:]),
              "one block in plain steps: " + ", ".join(f"{k} {v:.3f}" for k, v in sorted(block.items())),
              f"E_K: {'sampled, q ' + a.sampled if a.sampled else 'greedy'}", "",
              "| arm | corpus | best K | E_K | LiLiCorr x plain | lookup x plain | LiLiCorr / lookup |"
@@ -323,6 +352,8 @@ def main(argv=None):
         K = res[i8]["all"]["best_k"] if i8 and "all" in res[i8] else None
         if K:
             gain = (verify[K], union_verify(verify, union, 0, probe, depth)[K])
+    lines += ["", "SPEED-Bench's published acceptance through these costs (ESTIMATED; the int8 drafter's block):"]
+    lines += ["- " + x for x in expectation(verify, block["int8"], union, probe, depth)]
     lines += ["", "Defaults (recorded, not a gate - spec 26 §'P0 verdict'):"]
     lines += ["- " + x for x in defaults(res, greedy, sampled, verify, probe, gain)]
     text = "\n".join(lines)
