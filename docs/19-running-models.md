@@ -744,7 +744,8 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <SergiioB snapshot> --port 8000 -
   sampled request is reproducible request by request; `temperature: 0` is the device argmax.
 - **Prefix cache.** A snapshot at an aligned 2048-position block end (and at a request's end) carries, per Mamba block, the
   SSM state (fp32: 4 MiB; 2 MiB with `B70_BOLT_SSM=bf16`, which is another store key) and the three raw conv columns
-  before the position - 170,229,760 B in all (derived) - and the 8 attention blocks' KV, 8,192 B a position. A hit restores
+  before the position - 170,229,760 B in all (derived) - and the 8 attention blocks' KV, 8,192 B a position (one state per
+  block end: a 64k-token prompt writes 32 of them, ~6.0 GB with the KV, derived - size `--prefix-cache-gb` for it). A hit restores
   the largest block end <= the common prefix and prefills the rest. A new user message re-renders every earlier assistant
   turn without its reasoning (`truncate_history_thinking`), so the cache diverges at the first assistant turn before the
   last user message; within one user turn (the agentic tool loop) the re-render equals what was generated.
