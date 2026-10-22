@@ -114,6 +114,20 @@
 #error "attn_v2: M is 1..8"
 #endif
 
+// BATCH_ROWS (spec 13 §9, plan 13a; undefined on every existing command line): rows of DIFFERENT sequences. Both
+// kernels take the row table `rows` (runtime::BatchRowTable, words BROW_*) as a last argument and row m's position
+// and KV base come from it instead of Control::pos + m; attn_decode_v2's K / V arguments are the whole layer
+// (`kv_k_all` / `kv_v_all`), a group reading its slot's keys at kv_base. The groups become the maximal runs of rows
+// of ONE slot at ONE stride (a slot's rows are consecutive positions, so at most two strides a slot, as above): a
+// work-group walks them one after the other, each over its own slot's keys and with its own wave loads - rows of
+// different slots share no K / V wave (spec 13 §9.1: their attention costs add). Row m still sees exactly the
+// blocks, waves and orders of the M = 1 step at its position over its slot's keys, so it is bitwise that step.
+#ifdef BATCH_ROWS
+#if !defined(BROW_WORDS) || !defined(BROW_POS) || !defined(BROW_KVB) || !defined(BROW_SLOT)
+#error "attn_v2 BATCH_ROWS: the row table's BROW_* words must be defined (src/kernels/CMakeLists.txt)"
+#endif
+#endif
+
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 inline ushort rne_bf16(float f) {
   uint u = as_uint(f);
@@ -158,20 +172,32 @@ __attribute__((reqd_work_group_size(WG, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void attn_decode_v2(__global const uint* restrict ctrl,
                              __global const float* restrict attn_q,
+#ifndef BATCH_ROWS
                              __global const ushort* restrict kv_k,
                              __global const ushort* restrict kv_v,
-                             __global float* restrict attn_part) {
+#else
+                             __global const ushort* restrict kv_k_all,
+                             __global const ushort* restrict kv_v_all,
+#endif
+                             __global float* restrict attn_part
+#ifdef BATCH_ROWS
+                             , __global const uint* restrict rows
+#endif
+                             ) {
   const uint j = get_group_id(0);
   const uint blk = get_group_id(1);
   const uint lid = get_local_id(0);
   const uint sgid = lid / SG;
   const uint lane = lid % SG;
 
+#ifndef BATCH_ROWS
   const uint pos = ctrl[CTRL_POS];
+#endif
   uint n_act = ctrl[CTRL_NACT];
   if (n_act > M) n_act = M;
   if (n_act == 0) return;
 
+#ifndef BATCH_ROWS
   // The (at most two) row groups: rows [0, msplit) at s0, [msplit, n_act) at s1.
   const uint s0 = v2_ppw(pos + 1);
   const uint s1 = v2_ppw(pos + n_act);
@@ -181,6 +207,19 @@ __kernel void attn_decode_v2(__global const uint* restrict ctrl,
   const bool live0 = blk * s0 < pos + msplit;
   const bool live1 = msplit < n_act && blk * s1 < pos + n_act;
   if (!live0 && !live1) return;
+#else
+  // The rows' positions, slots and KV bases; the block is live for a row when it starts at or before the row's
+  // position at the row's stride (a group is live iff its last row is).
+  uint rp[M], rs[M], rb[M];
+  bool live = false;
+  for (uint m = 0; m < M; ++m) {
+    rp[m] = m < n_act ? rows[m * BROW_WORDS + BROW_POS] : 0u;
+    rs[m] = m < n_act ? rows[m * BROW_WORDS + BROW_SLOT] : 0u;
+    rb[m] = m < n_act ? rows[m * BROW_WORDS + BROW_KVB] : 0u;
+    if (m < n_act && blk * v2_ppw(rp[m] + 1) <= rp[m]) live = true;
+  }
+  if (!live) return;
+#endif
 
   __local float qpack[NPR * HD];              // [m][qhl][256], 6 KB x M
   __local float sc_x[2][NPR][WAVE_P];         // the wave's raw dots, double buffered
@@ -195,11 +234,22 @@ __kernel void attn_decode_v2(__global const uint* restrict ctrl,
   for (uint q = 0; q < NPR; ++q) { mx[q] = -INFINITY; sm[q] = 0.0f; acc[q] = 0.0f; }
   uint wc = 0;                                // waves run by this work-group: the sc_x buffer
 
+#ifndef BATCH_ROWS
   for (uint g = 0; g < 2; ++g) {
     const uint mlo = g ? msplit : 0u, mhi = g ? n_act : msplit;
     if (mlo >= mhi) continue;                 // uniform
     const uint s = g ? s1 : s0;
     const uint end = pos + mhi;               // positions [0, end) are this group's keys
+#else
+  for (uint mlo = 0, mhi = 0; mlo < n_act; mlo = mhi) {
+    // The group: rows of mlo's slot at mlo's stride (header, BATCH_ROWS); its keys are its slot's [0, end).
+    const uint s = v2_ppw(rp[mlo] + 1);
+    mhi = mlo + 1;
+    while (mhi < n_act && rs[mhi] == rs[mlo] && v2_ppw(rp[mhi] + 1) == s) ++mhi;
+    const uint end = rp[mhi - 1] + 1;
+    __global const ushort* restrict kv_k = kv_k_all + (size_t)rb[mlo] * KV_HEADS * HD;
+    __global const ushort* restrict kv_v = kv_v_all + (size_t)rb[mlo] * KV_HEADS * HD;
+#endif
     const uint bstart = blk * s;
     if (bstart >= end) continue;              // uniform
     const uint bend = min(bstart + s, end);
@@ -239,7 +289,11 @@ __kernel void attn_decode_v2(__global const uint* restrict ctrl,
       for (uint pr = 0; pr < NPR; ++pr) {
         const uint m = pr / GQA;
         if (m < mlo || m >= mhi) continue;    // uniform
+#ifndef BATCH_ROWS
         const uint bound = pos + m;
+#else
+        const uint bound = rp[m];
+#endif
         const float mine = p0 + lane <= bound ? sc_x[buf][pr][lane] * SSCALE : -INFINITY;
         const float nmx = fmax(mx[pr], sub_group_reduce_max(mine));   // max: exact in any order
         float resc, wl;
@@ -286,16 +340,27 @@ __attribute__((reqd_work_group_size(WG, 1, 1)))
 __kernel void attn_reduce_v2(__global const uint* restrict ctrl,
                              __global const float* restrict attn_part,
                              __global const float* restrict attn_gate,
-                             __global ushort* restrict attn_out) {
+                             __global ushort* restrict attn_out
+#ifdef BATCH_ROWS
+                             , __global const uint* restrict rows
+#endif
+                             ) {
   const uint h = get_group_id(0);
   const uint m = get_group_id(1);
   const uint d = get_local_id(0);
   __local float hmx[TGT], hsm[TGT];
+#ifndef BATCH_ROWS
   const uint pos = ctrl[CTRL_POS];
+#endif
   uint n_act = ctrl[CTRL_NACT];
   if (n_act > M) n_act = M;
   if (m >= n_act) return;                    // uniform
+#ifndef BATCH_ROWS
   uint nb = (pos + m) / v2_ppw(pos + m + 1) + 1;
+#else
+  const uint pm = rows[m * BROW_WORDS + BROW_POS];   // the row's position (header, BATCH_ROWS)
+  uint nb = pm / v2_ppw(pm + 1) + 1;
+#endif
   if (nb > TGT) nb = TGT;                    // never taken (header); an overrun guard
   for (uint b = d; b < nb; b += WG) {
     __global const float* restrict p = attn_part + (((size_t)h * TGT + b) * M + m) * PART;

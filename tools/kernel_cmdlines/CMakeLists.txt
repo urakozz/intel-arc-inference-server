@@ -23,4 +23,8 @@ function(add_ocloc_kernel NAME)
   file(APPEND ${CMAKE_BINARY_DIR}/kernels.txt "${NAME} | ${src} | ${d} | ${o}\n")
 endfunction()
 file(WRITE ${CMAKE_BINARY_DIR}/kernels.txt "")
+# Spec 13a: the batching probe's variants are OFF in a default build (B70_BATCH_PROBE) but listed here, so the Mac's
+# section 4 syntax-checks their command lines and section 3 shows them as additions. A tree without the option
+# ignores the cache entry.
+set(B70_BATCH_PROBE ON CACHE BOOL "list the batching probe's kernel variants (spec 13a)")
 add_subdirectory(${TREE}/src/kernels kernels)
