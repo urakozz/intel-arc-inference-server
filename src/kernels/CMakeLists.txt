@@ -1843,6 +1843,88 @@ if(B70_BOLT)
     endif()
     add_ocloc_kernel(${_nb_rmw} SOURCE ${NB_CL}/nb_probe.cl DEFINES STATE_BF16=${B})
   endforeach()
+  # --- the family kernels (src/kernels/bolt/, kernels::bolt's names; Task 3) ---
+  # nb_common.h (bf16, Sleef's exp, fdlibm's log1p - the host twin's own functions) and nb_expert.h (the one expert
+  # address) sit beside the sources: -I the family's directory.
+  set(NB_DEPS DEPENDS ${NB_CL}/nb_common.h ${NB_CL}/nb_expert.h OPTIONS -I${NB_CL})
+  # nb_prep.cl: the one-launch norm site (fold + Σ + one rounding) at 8 work-groups (kNormWgs, PROVISIONAL) over the split-K
+  # the descriptor gives the folded linears (S 1 today: out_proj / o_proj `_S1`, a MoE block's fc2 and shared_down
+  # `_S1_T1`, block 0 `_NF`; the arm router `_R` at a MoE block's norm) - a re-pick adds its S here and
+  # bolt_variant_names_test names the missing binary; the shared expert's relu2 and the latent; the NoPE attention prep;
+  # the gather.
+  set(NB_NORM_DEFINES K=4096 NORM_WGS=8 NORM_EPS=1e-5f)
+  foreach(row "0 0 0" "1 0 0" "1 1 0" "1 0 1")
+    separate_arguments(f UNIX_COMMAND "${row}")
+    list(GET f 0 S1)
+    list(GET f 1 S2)
+    list(GET f 2 R)
+    if(S1 EQUAL 0)
+      set(_n nb_res_norm_M1_K4096_W8_NF)
+    else()
+      set(_n nb_res_norm_M1_K4096_W8_S${S1})
+    endif()
+    set(_d ${NB_NORM_DEFINES} M=1 NORM_S=${S1} NORM_S2=${S2})
+    if(S2 GREATER 0)
+      string(APPEND _n _T${S2})
+    endif()
+    if(R)
+      string(APPEND _n _R)
+      list(APPEND _d ROUTER_FUSED=1)
+    endif()
+    add_ocloc_kernel(${_n} SOURCE ${NB_CL}/nb_prep.cl DEFINES ${_d} ${NB_DEPS})
+  endforeach()
+  add_ocloc_kernel(nb_sh_act_M1_L1024_SH5376_S1 SOURCE ${NB_CL}/nb_prep.cl DEFINES M=1 ACT_S=1 ${NB_DEPS})
+  add_ocloc_kernel(nb_attn_prep_M1_KV2_S1 SOURCE ${NB_CL}/nb_prep.cl DEFINES ${CTRL_DEFINES} M=1 QKV_S=1 ${NB_DEPS})
+  add_ocloc_kernel(nb_embed_gather_M1_K4096_V131072 SOURCE ${NB_CL}/nb_prep.cl
+                   DEFINES ${CTRL_DEFINES} M=1 K=4096 EMBED_V=131072 ${NB_DEPS})
+  # nb_mamba.cl: the conv over the raw-xBC ring, the SSM step (fp32 state; `_B16` Decision 2's bf16 arm; `_C` the arm
+  # conv), the 1024-group gated norm - at in_proj's split-K (S 1).
+  add_ocloc_kernel(nb_conv_M1_C10240_S1 SOURCE ${NB_CL}/nb_mamba.cl DEFINES ${CTRL_DEFINES} M=1 CONV_S=1 ${NB_DEPS})
+  foreach(C 0 1)
+    foreach(B 0 1)
+      set(_n nb_ssm_M1_H128_P64_N128_G8_S1)
+      if(C)
+        string(APPEND _n _C)
+      endif()
+      if(B)
+        string(APPEND _n _B16)
+      endif()
+      add_ocloc_kernel(${_n} SOURCE ${NB_CL}/nb_mamba.cl
+                       DEFINES ${CTRL_DEFINES} M=1 SSM_S=1 SSM_B16=${B} SSM_CONV=${C} ${NB_DEPS})
+    endforeach()
+  endforeach()
+  add_ocloc_kernel(nb_gnorm_M1_D8192_G1024_S1 SOURCE ${NB_CL}/nb_mamba.cl DEFINES M=1 GN_S=1 GN_EPS=1e-5f ${NB_DEPS})
+  # nb_moe.cl: the router (E bf16 rows, nb_router's order; E an argument), the fp32 top-9 route on 256 lanes x 2, the
+  # latent relu2 experts per I (1536 / 2048 / 2304 / 2560) with the ascending-id combine; `_R` the arm route.
+  add_ocloc_kernel(nb_router_M1_K4096 SOURCE ${NB_CL}/nb_moe.cl DEFINES M=1 ROUTER_K=4096 ${NB_DEPS})
+  add_ocloc_kernel(nb_route_M1_T9 SOURCE ${NB_CL}/nb_moe.cl DEFINES M=1 ROUTE_K=9 ${NB_DEPS})
+  foreach(I 1536 2048 2304 2560)
+    add_ocloc_kernel(nb_moe_up_M1_I${I}_L1024_T9 SOURCE ${NB_CL}/nb_moe.cl
+                     DEFINES M=1 MOE_I=${I} UP_KS=4 DN_KS=2 ${NB_DEPS})
+    add_ocloc_kernel(nb_moe_up_M1_I${I}_L1024_T9_R SOURCE ${NB_CL}/nb_moe.cl
+                     DEFINES M=1 MOE_I=${I} UP_KS=4 DN_KS=2 ROUTE_FUSED=1 ${NB_DEPS})
+    add_ocloc_kernel(nb_moe_down_M1_I${I}_L1024_T9 SOURCE ${NB_CL}/nb_moe.cl
+                     DEFINES M=1 MOE_I=${I} UP_KS=4 DN_KS=2 ${NB_DEPS})
+  endforeach()
+  # Test-only (bolt_kernels_test, Review Focus 1-2): M = 4 rows a launch - the M-row form spec 26c's verify lists use; no
+  # decode list binds them.
+  add_ocloc_kernel(nb_conv_M4_C10240_S1 SOURCE ${NB_CL}/nb_mamba.cl DEFINES ${CTRL_DEFINES} M=4 CONV_S=1 ${NB_DEPS})
+  foreach(C 0 1)
+    foreach(B 0 1)
+      set(_n nb_ssm_M4_H128_P64_N128_G8_S1)
+      if(C)
+        string(APPEND _n _C)
+      endif()
+      if(B)
+        string(APPEND _n _B16)
+      endif()
+      add_ocloc_kernel(${_n} SOURCE ${NB_CL}/nb_mamba.cl
+                       DEFINES ${CTRL_DEFINES} M=4 SSM_S=1 SSM_B16=${B} SSM_CONV=${C} ${NB_DEPS})
+    endforeach()
+  endforeach()
+  add_ocloc_kernel(nb_res_norm_M4_K4096_W8_S1_T1 SOURCE ${NB_CL}/nb_prep.cl
+                   DEFINES ${NB_NORM_DEFINES} M=4 NORM_S=1 NORM_S2=1 ${NB_DEPS})
+  add_ocloc_kernel(nb_route_M4_T9 SOURCE ${NB_CL}/nb_moe.cl DEFINES M=4 ROUTE_K=9 ${NB_DEPS})
 endif()
 # ==== Spec 25c: Nemotron 3.5 Bolt decode ==== (end) ====
 
