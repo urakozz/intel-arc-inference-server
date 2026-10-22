@@ -636,16 +636,20 @@ int main(int argc, char** argv) {
     bool bf16;
     const char* name;
   };
-  std::vector<Want> lists;
-  if (o.list == "all")
-    lists = {{List::A, false, "a"}, {List::Fused, false, "fused"}, {List::Gemv, false, "gemv"},
-             {List::Noop, false, "noop"}, {List::State, false, "state"}, {List::State, true, "state16"}};
-  else if (o.list == "a") lists = {{List::A, false, "a"}};
-  else if (o.list == "fused") lists = {{List::Fused, false, "fused"}};
-  else if (o.list == "gemv") lists = {{List::Gemv, false, "gemv"}};
-  else if (o.list == "noop") lists = {{List::Noop, false, "noop"}};
-  else if (o.list == "state") lists = {{List::State, false, "state"}, {List::State, true, "state16"}};
-  else usage("--list is a, fused, gemv, noop, state or all");
+  // Built by returning, not by assigning an initializer list: g++ 15 at -O2 reports a false -Wnonnull
+  // in vector::assign's copy (memmove from a possibly-empty source).
+  const std::vector<Want> lists = [&]() -> std::vector<Want> {
+    if (o.list == "all")
+      return {{List::A, false, "a"}, {List::Fused, false, "fused"}, {List::Gemv, false, "gemv"},
+              {List::Noop, false, "noop"}, {List::State, false, "state"}, {List::State, true, "state16"}};
+    if (o.list == "a") return {{List::A, false, "a"}};
+    if (o.list == "fused") return {{List::Fused, false, "fused"}};
+    if (o.list == "gemv") return {{List::Gemv, false, "gemv"}};
+    if (o.list == "noop") return {{List::Noop, false, "noop"}};
+    if (o.list == "state") return {{List::State, false, "state"}, {List::State, true, "state16"}};
+    usage("--list is a, fused, gemv, noop, state or all");
+    return {};
+  }();
 
   l0::Context ctx(0);
   std::printf("# probe_bolt_step - Nemotron 3.5 Bolt's decode step from existing kernels (spec 25c P0)\n\n"
