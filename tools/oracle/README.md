@@ -27,6 +27,7 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `check.sh` | Re-reads the three written files in a separate process and prints the block quoted under "Sanity checks" below. |
 | `stream.py` | Layer-streamed weights for `dump.py --stream` / `mtp_ref.py --dump --stream` (spec 14, the Mac path below): the model on `meta`, embed/norm/lm_head resident, each decoder layer materialised by a forward pre-hook and dropped after its forward; plus a bit-exact C++ `dequant_t`, the single-thread grouped conv1d, and a hold mode (a layer stays materialised until every sequence of a layer-major batch has run it). |
 | `dflash_ref.py` | Spec 19a: the CPU reference of the DFlash / DFlash 2 drafters (config reader, drafter + target embed/head loader incl. the W4A16 drafter, `context_kv`, `draft_block`); `test_dflash_ref.py` checks it on tiny random weights. "The DFlash reference" below. |
+| `lilicorr_make_tiny.py` | Spec 26a: a tiny random LiLiCorr drafter in the checkpoint's own names and NVFP4 packing (2 layers at hidden 256, the head at 64, window 16, taps 1 / 2 / 4 / 6 / 9 / 10 of 25a's tiny Bolt) - `dflash_ref.py`'s LiLiCorr form reads it. "The LiLiCorr form" below. |
 | `dump_taps.py` | Spec 19a Task 2: the Qwen3.8 bf16 target (layer-streamed, as `kv_int8_probe.py run` builds it) over [prompt + recorded greedy continuation]; per source the residual after the drafter's tap layers (5, 19, 33, 47, 61), the greedy next ids and the top-64 logits. `test_dump_taps.py`: Review Focus 1 (tap i = layer i's OUTPUT) on a tiny checkpoint. "The DFlash P0" below. |
 | `dflash_accept.py` | Spec 19a Task 3: teacher-forced acceptance of the DFlash 2 drafter on those dumps, K = 1..7, arms bf16 / int8 RTN / int8 + int8 head / W4A16, draft vocabularies 32k / 64k / 128k (`loader::select_draft_vocab`); batched over anchors. `test_dflash_accept.py`: the batch against `dflash_ref.draft_block`. |
 | `dflash_p0.sh` | The two above on the Mac in a 28 GB container, resumable, refusing to start beside the 12a repeat; `DRY_RUN=1` plans only. |
@@ -465,6 +466,30 @@ docker run --rm --memory 8g --memory-swap 8g --cpus 4 -e OMP_NUM_THREADS=3 -e HF
   -e PYTHONPATH=/ws/oracle-out-q4exp/site -v ~/.cache/huggingface:/hf:ro -e HF_HOME=/hf \
   -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/oracle/test_dflash_ref.py
 ```
+
+**The LiLiCorr form (spec 26a, 2026-10-23).** A config with `architectures: [LiLiCorrDraftModel]`
+(`nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr` @ `449d2414`) reads as `DFlashConfig(form="lilicorr", version=2)`:
+vLLM's DFlash 2 backbone (5 layers, 32 q / 2 kv x 128, every layer sliding at `|q - k| <= 1023`, non-causal, the two grouped
+convolutions) with attention sinks, `block_size` 8 from the top level, and vLLM 3901d56800's `LiLiCorrHead` in place of the
+candidate selector (`V/models/lilicorr.py`; spec 26 §2). Its parts, each tested on a tiny random drafter
+(`lilicorr_make_tiny.py`) over a synthetic target (`test_lilicorr_*` in `test_dflash_ref.py`):
+- **NVFP4, exactly** (`nvfp4_decode`): `weight` U8 [N][K/2] (k = 2i in the low nibble), `weight_scale` F8_E4M3 [N][K/16],
+  `weight_scale_2` the fp32 g. W' = s_b x e is held as float32 holding bf16-exact values and g rides beside it
+  (`<base>.weight_global` -> `Drafter.g`), applied to the linear's OUTPUT (`Drafter._lin`: `g x (x W'^T) + b`). All
+  16 x 254 finite (code, scale) products are exact in bf16 and f16 (|W'| in [2^-10, 2688]); the two NaN scale codes are
+  refused naming the tensor and element.
+- **The block** is always 8 rows (anchor + 7 masks) and the head always scores 7 slots, so K = 1..7 are prefixes of one
+  walk (spec 26 §5.3; vLLM runs a K-row block at K < 7 - not this form).
+- **Candidates**: the target head's top 8 per mask row (ties to the lower id), log-probs over the WHOLE vocabulary.
+- **The anchor**: `hidden_norm(fc(taps))` at p - 1 (`ContextKV.anchor_row`; `LiLiCorrSession` keeps it as the newest
+  committed row), `anchor_valid` true.
+- **The lattice** [7][8 previous][8 next] x 8.0: slot 0 = `start` broadcast over the previous index, slot s = `pair[s - 1]`;
+  the slot bias at the trained offset 7 for any number of slots; the walk reads the lattice alone from previous 0; sampled
+  draws keyed `seed ^ (slot << 32)` (vLLM 3901d56800's `spec_step_seed`), position p + s, the candidate id.
+- `Drafter.mut` holds test-only mutations (each Review Focus item of plan 26a must move the lattice or the drafts).
+`load_drafter(dir, embed=..., lm_head=...)` takes Bolt's embedding / head (`read_target_embed_head` reads
+`language_model.{model,backbone}.embeddings.weight` and `language_model.lm_head.weight`). The tests take ~10 s in
+`agnes-ref-img`; the real config is checked from the HF cache when present.
 
 ### The DFlash P0 (spec 19a Tasks 2-3, 2026-10-06)
 
