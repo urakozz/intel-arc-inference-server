@@ -4119,10 +4119,10 @@ st_r57_gateq() {
 
 # ======================================================================================
 row 59 "spec 25b - Nemotron 3.5 Bolt: BoltDesc, load_bolt (g128-expanded and native g64 into one layout, the '+:' / BF16-scale / signed-scale relaxations), synthetic checkpoints, the two-card plan (plan 25b)"
-rownote 59 "No kernel touched (kernel_cmdlines +0 / -0 / ~0: G0's sha is the 'nothing moved' check) and no existing loader file but src/loader/quant.{h,cc} (the two exact relaxations: a restating '+:' dynamic rule accepted, BF16 GPTQ scales exact-or-refused; signed scales audited) - r59.host re-runs quant_test and the other loader tests beside the new ones. Written on the Mac: bolt_test, quant_test, bolt_repack_test, bolt_plan_test, bolt_names_test (the descriptor's 112,091 names against the published index, 849 vision tensors skipped by prefix) and bolt_synth_host_{g128,pair,g64}_test over three real-width synthetic checkpoints (make_synth.py --layers 8) all ran there; nothing of load_bolt has touched a card."
+rownote 59 "No kernel touched (kernel_cmdlines +0 / -0 / ~0: G0's sha is the 'nothing moved' check) and no existing loader file but src/loader/quant.{h,cc} (the two exact relaxations: a restating '+:' dynamic rule accepted, BF16 GPTQ scales exact-or-refused; signed scales audited) - r59.host re-runs quant_test, ct_loader_test and dequant_fixture_test (the existing tests that read quant.cc) beside the new bolt tests - not the whole loader suite (r59 does not claim the other families' loaders). Written on the Mac: bolt_test, quant_test, bolt_repack_test, bolt_plan_test, bolt_names_test (the descriptor's 112,091 names against the published index, 849 vision tensors skipped by prefix) and bolt_synth_host_{g128,pair,g64}_test over three real-width synthetic checkpoints (make_synth.py --layers 8) all ran there; nothing of load_bolt has touched a card."
 rownote 59 "r59.synth needs only the oracle image and the pinned small files (hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997 --exclude '*.safetensors'): make_synth.py draws random weights at the real widths, N 8 (~3.9 GB a checkpoint) and N 12 (~5.5 GB) each as SergiioB's g128 GPTQ spelling, its exact g64 expansion and a native g64 packing -> \$DATA/oracle-out-bolt-synth/n{8,12}-{g128,g64x,g64} + .ACCEPTED (~28 GB in all; the Mac: ~2 min a checkpoint at N 8, ~3 min at N 12, MEASURED). r59.load_real needs SergiioB's 41.9 GB checkpoint (data key bolt_g128, row 57's download) and BOTH cards (split 48, --max-len 262144 in the test's arguments): the plan, then every block uploaded, 0 unconsumed. r59.load_rtn needs 25q's export (data key bolt_rtn; not built)."
 rownote 59 "Hand back: each load line (blocks, trunk, g128 / g64 mask, restating '+:' count, int8 / bf16 head, devices, bytes) and its seconds (the int8 head's quantisation time separately), every device's weights line against loader::bolt::device_weight_bytes and runtime::bolt::plan's, the sampled read-backs' counts, the real load's RSS and wall, and the plan lines (the two-card split by block bytes; 262144 positions)."
-stage r59.host       59 default cpu -                         -        "host: quant_test (the relaxations), bolt_test, bolt_repack_test, bolt_plan_test, bolt_names_test, the existing loader suite"
+stage r59.host       59 default cpu -                         -        "host: quant_test (the relaxations), bolt_test, bolt_repack_test, bolt_plan_test, bolt_names_test, ct_loader_test, dequant_fixture_test"
 st_r59_host() {
   run_tests '^(quant_test|ct_loader_test|dequant_fixture_test|bolt_test|bolt_repack_test|bolt_plan_test|bolt_names_test)$'
   jgrab host '^(quant_test|bolt_test|bolt_repack_test|bolt_plan_test|bolt_names_test)$' \
@@ -4149,9 +4149,9 @@ st_r59_synth_host() {
   jgrab synth-host '^bolt_synth_host_' 'OK|sampled|unconsumed|SKIP'
   finish
 }
-stage r59.load_synth 59 default gpu  bolt_synth               r59.synth "bolt_load_checkpoint_test on the N 12 synthetics: one card in both spellings (int8 head), the bf16 head, --pp 2 split 6 over two cards (SKIP without the second card) - plan == allocation, sampled blocks read back equal to the host repack"
+stage r59.load_synth 59 default gpu  bolt_synth               r59.synth "bolt_load_checkpoint_test on the N 12 synthetics: one card in all three spellings (g128, its exact g64 expansion, a native g64; int8 head), the bf16 head, --pp 2 split 6 over two cards (SKIP without the second card) - plan == allocation, sampled blocks read back equal to the host repack"
 st_r59_load_synth() {
-  run_tests '^bolt_load_synth_(g128|g64x|bf16|pp2|pp2_g64x)_test$'
+  run_tests '^bolt_load_synth_(g128|g64x|g64|bf16|pp2|pp2_g64x)_test$'
   jgrab load-synth '^bolt_load_synth' 'OK|weights|unconsumed|SKIP|plan device'
   finish
 }
