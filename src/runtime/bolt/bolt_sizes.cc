@@ -410,4 +410,56 @@ size_t prefill_chunk_launches(const model::BoltDesc& d, const model::BoltPlaceme
   return n;
 }
 
+
+// --- spec 25e: prefix-cache snapshots (the run lists; the engine copies them) ------------------------------------------------
+namespace {
+// Block l's index among the blocks of its kind that its device holds (the allocation's block order).
+uint32_t snap_local_index(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t l) {
+  uint32_t n = 0;
+  for (uint32_t k = p.first(p.device_of(l)); k < l; ++k) n += d.block.at(k) == d.block.at(l) ? 1 : 0;
+  return n;
+}
+}  // namespace
+
+std::vector<SnapRun> state_runs(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t pos, BoltState s) {
+  model::validate(p, d);
+  constexpr uint32_t R = loader::bolt::kConvRing;
+  if (kStateColumns + 1 > R)
+    throw std::invalid_argument("runtime::bolt::state_runs: the ring's " + std::to_string(R) + " slots cannot hold the " +
+                                std::to_string(kStateColumns) + " columns the next position reads plus the one it writes");
+  const size_t row = size_t(d.m_conv_dim) * 2;
+  std::vector<SnapRun> runs;
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    if (!d.is_mamba(l)) continue;
+    const uint32_t dev = p.device_of(l), idx = snap_local_index(d, p, l);
+    runs.push_back({dev, SnapTensor::Ssm, size_t(idx) * ssm_layer_bytes(d, s), ssm_layer_bytes(d, s), false});
+    for (uint32_t j = 0; j < kStateColumns; ++j) {
+      // Position pos - 1 - j; below 0 a zero row, kept in the slot a decode at that position would not read.
+      const int64_t q = int64_t(pos) - 1 - int64_t(j);
+      const uint32_t slot = uint32_t((q % int64_t(R) + int64_t(R)) % int64_t(R));
+      runs.push_back({dev, SnapTensor::ConvRing, size_t(idx) * ring_layer_bytes(d) + size_t(slot) * row, row, q < 0});
+    }
+  }
+  return runs;
+}
+
+std::vector<SnapRun> kv_runs(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t max_len, uint32_t begin,
+                             uint32_t end) {
+  model::validate(p, d);
+  if (begin > end || end > max_len)
+    throw std::invalid_argument("runtime::bolt::kv_runs: range [" + std::to_string(begin) + ", " + std::to_string(end) +
+                                ") is not within [0, max_len " + std::to_string(max_len) + ")");
+  std::vector<SnapRun> runs;
+  if (begin == end) return runs;
+  const size_t row = size_t(d.kv_n()) * 2;
+  for (SnapTensor t : {SnapTensor::KvK, SnapTensor::KvV}) {
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      if (!d.is_attention(l)) continue;
+      const size_t base = size_t(snap_local_index(d, p, l)) * kv_layer_bytes(d, max_len);
+      runs.push_back({p.device_of(l), t, base + size_t(begin) * row, size_t(end - begin) * row, false});
+    }
+  }
+  return runs;
+}
+
 }  // namespace runtime::bolt
