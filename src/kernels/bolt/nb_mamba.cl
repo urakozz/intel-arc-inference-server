@@ -200,9 +200,9 @@ __kernel void nb_ssm(__global const uint* restrict ctrl, __global const float* r
   const size_t row = ((size_t)h * NB_P + p) * NB_N;
 #if SPEC_SLOTS > 0
   const uint live = ctrl[CTRL_LIVE] % SPEC_SLOTS;
-  const __global STATE_T* restrict src = nb_slot(state, state_spec, live);
+  const __global STATE_T* src = nb_slot(state, state_spec, live);   // not restrict: the slots alias `state`
 #else
-  const __global STATE_T* restrict src = state;
+  const __global STATE_T* src = state;   // not restrict: read here, `state` written at the end
 #endif
   float st[SSM_PER];
   for (uint j = 0; j < SSM_PER; ++j) st[j] = STATE_LD(src[row + lane + 16 * j]);
