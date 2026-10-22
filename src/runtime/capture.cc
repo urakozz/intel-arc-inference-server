@@ -14,6 +14,10 @@
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
 #include "runtime/control.h"
+#if B70_BATCH_PROBE
+#include "kernels/batch_kernels.h"
+#include "runtime/batch_rows.h"
+#endif
 
 // capture.cc - the 774-kernel decode step, bound once (645 until spec 1.5's
 // lever L1 split every `prep_res_norm` site into two launches).
@@ -70,6 +74,16 @@ static_assert(offsetof(Control, debug_flag) == kernels::ctrl_index::kDebugFlag *
 static_assert(offsetof(Control, gdn_live) == kernels::ctrl_index::kGdnLive * 4, "CTRL_LIVE moved");
 // Spec 15c: the MoE route row - buffer_sizes.h sizes it, moe.cl (RW) writes it.
 static_assert(kMoeRouteWords == kernels::moe_route::kWords, "the MoE route row's width moved");
+#if B70_BATCH_PROBE
+// Spec 13a: the row table as the BATCH_ROWS builds index it (BROW_DEFINES, src/kernels/CMakeLists.txt) - the host
+// mirror kernels::batch_row against runtime::BatchRow.
+static_assert(kBatchRowWords == kernels::batch_row::kWords, "BROW_WORDS moved");
+static_assert(offsetof(BatchRow, pos) == kernels::batch_row::kPos * 4, "BROW_POS moved");
+static_assert(offsetof(BatchRow, kv_base) == kernels::batch_row::kKvBase * 4, "BROW_KVB moved");
+static_assert(offsetof(BatchRow, src) == kernels::batch_row::kSrc * 4, "BROW_SRC moved");
+static_assert(offsetof(BatchRow, dst) == kernels::batch_row::kDst * 4, "BROW_DST moved");
+static_assert(offsetof(BatchRow, slot) == kernels::batch_row::kSlot * 4, "BROW_SLOT moved");
+#endif
 
 // The captured list's M is `build`'s `M` argument (default 1, what ships). The
 // default build compiles M = 1 only (spec §9: the M loop exists in every
@@ -139,7 +153,13 @@ void require(bool ok, const std::string& what) {
 // list at M rows with the per-row GDN slots over the drafter's slots, and the taps copied after the
 // input fold of every tapped layer's successor; no MTP head anywhere. Spec 19d: `StageVerifyTaps` is that list
 // restricted to one pipeline stage (capture.h, build_stage_verify_taps).
-enum class Mode { Plain, Verify, Draft, Stage, StageVerify, StageDraft, VerifyTaps, StageVerifyTaps };
+// Spec 13a (B70_BATCH_PROBE builds only): `Rows` is build_rows' list (capture.h) - the plain walk with the per-sequence
+// sites bound to their row builds, and the MTP head's KV fill over the rows when it has the head.
+enum class Mode { Plain, Verify, Draft, Stage, StageVerify, StageDraft, VerifyTaps, StageVerifyTaps
+#if B70_BATCH_PROBE
+                  , Rows
+#endif
+};
 
 class Capture {
  public:
@@ -193,6 +213,13 @@ class Capture {
     n_fa_ = st.fa;
     tv_ = &tv;
   }
+#if B70_BATCH_PROBE
+  // Spec 13a: build_rows' list at M rows (the head's buffers from the binding, or none).
+  Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const BatchRowsBind& br, uint32_t cap_m)
+      : Capture(ctx, m, b, nullptr, nullptr, cap_m, br.mtp, Mode::Rows) {
+    br_ = &br;
+  }
+#endif
 
   CapturedStep run() {
     // One layer's K (or V) rows; at int8 (spec 12b) the scales follow every layer's rows
@@ -203,6 +230,10 @@ class Capture {
     if (mode_ == Mode::Stage || mode_ == Mode::StageVerify || mode_ == Mode::StageVerifyTaps) return stage_run();
     if (mode_ == Mode::VerifyTaps)
       check_taps();
+#if B70_BATCH_PROBE
+    else if (mode_ == Mode::Rows)
+      check_rows();
+#endif
     else if (mode_ != Mode::Plain)
       check_mtp();
     if (mode_ == Mode::StageDraft)
@@ -259,6 +290,25 @@ class Capture {
       layer_ = head_layer();
       head_kv_fill(mtp_->hh.ptr());
     }
+#if B70_BATCH_PROBE
+    if (mode_ == Mode::Rows && mtp_) {
+      // Spec 13a: each run's hidden rows into hh rows 0..M-1 - the slot's h_{pos-1}, then the run's own verify rows
+      // but its last (capture.h, build_rows) - and the head's KV fill over them.
+      const size_t row = size_t(d_.hidden) * kBf16;
+      uint32_t r0 = 0;
+      for (size_t i = 0; i < br_->run_lengths.size(); ++i) {
+        const uint32_t n = br_->run_lengths[i];
+        step_.list.copy(at(mtp_->hh, r0 * row), at(*br_->hprev, br_->run_slots[i] * row), row);
+        if (n > 1) step_.list.copy(at(mtp_->hh, (r0 + 1) * row), at(b_.x, r0 * row), (n - 1) * row);
+        r0 += n;
+      }
+      layer_ = head_layer();
+      head_kv_fill(mtp_->hh.ptr());
+    }
+    require(mode_ != Mode::Rows || step_.kernel_count == (mtp_ ? verify_launches(d_) : decode_launches(d_)),
+            "the row list has " + std::to_string(step_.kernel_count) + " launches, not decode_launches() (with "
+            "the head's KV fill verify_launches())");
+#endif
 
     require(gdn == d_.gdn_layers && fa == d_.fa_layers,
             "layer kind counts are not the descriptor's " + std::to_string(d_.gdn_layers) +
@@ -445,6 +495,12 @@ class Capture {
   // control block (the head's `hctl` in the draft list); both read q from attn_q, write
   // partials into attn_part and the gated bf16 rows into attn_out.
   void attn_pair(void* ctrl, const KvLayer& kv) {
+#if B70_BATCH_PROBE
+    if (mode_ == Mode::Rows) {   // spec 13a: the main layers' pair over the row table (the head runs none here)
+      attn_pair_rows(ctrl, kv);
+      return;
+    }
+#endif
     void* kk = kv.k;
     void* vv = kv.v;
     if (kv8_) {
@@ -526,6 +582,114 @@ class Capture {
       launch(k, d_.fa_q_heads, kCapM);
     }
   }
+
+#if B70_BATCH_PROBE
+  // --- spec 13a: the row builds (build_rows, capture.h) ---------------------------------------------------------
+  //
+  // Every site below is its production twin's binding with the `_ROWS` binary (kernels/batch_kernels.h) and the row
+  // table as the last argument; gdn_step also takes the two pools (the layer's slice of each, at the whole-model
+  // strides the binary bakes - its SPEC_SLOT_STRIDE / RING_SLOT_STRIDE).
+
+  // What a row list needs, before a command is appended.
+  void check_rows() {
+    require(br_ != nullptr && br_->rows != nullptr && br_->rows->size() >= sizeof(BatchRowTable),
+            "a row list needs its row table (runtime::BatchRowTable)");
+    require(stage_ == nullptr && tap_ == nullptr && prof_ == nullptr,
+            "a row list is single-card, with no residual tap and no profiling events");
+    require(attn_ == DecodeAttn::V2, "the row builds are decode attention v2's (B70_DECODE_ATTN=v1 has none)");
+    const size_t state = gdn_state_stride() * d_.gdn_layers, ring = conv_ring_stride() * d_.gdn_layers;
+    require(!br_->state_pool || (br_->state_pool->size() >= state && br_->state_pool->size() % state == 0),
+            "the GDN state pool is not whole " + std::to_string(state) + "-byte states");
+    require(!br_->ring_pool || (br_->ring_pool->size() >= ring && br_->ring_pool->size() % ring == 0),
+            "the conv ring pool is not whole " + std::to_string(ring) + "-byte rings");
+    if (!mtp_) return;
+    // The head's KV fill: its buffers in the main cache's form and length, its table, each slot's hidden row and
+    // the shape the gather copies are captured for.
+    require(m_.mtp != nullptr, "a row list with the head needs the loaded MTP head");
+    require(mtp_->max_len == b_.max_len && mtp_->kv_lay.form == b_.kv_lay.form && mtp_->kv_lay.layers == 1 &&
+                mtp_->kv_lay.layer_rows() == kv_stride_,
+            "the head's KV is not one layer of the main cache's form and length");
+    require(mtp_->hh.size() >= size_t(kCapM) * d_.hidden * kBf16, "hh is too small for the rows");
+    require(br_->head_rows != nullptr && br_->head_rows->size() >= sizeof(BatchRowTable) && br_->hprev != nullptr,
+            "a row list with the head needs the head's row table and every slot's hidden row");
+    require(!br_->run_lengths.empty() && br_->run_lengths.size() == br_->run_slots.size(),
+            "a row list with the head needs its shape (run_slots, run_lengths)");
+    uint32_t n = 0, top = 0;
+    for (size_t i = 0; i < br_->run_lengths.size(); ++i) {
+      n += br_->run_lengths[i];
+      if (br_->run_slots[i] + 1 > top) top = br_->run_slots[i] + 1;
+    }
+    require(n == kCapM, "the shape's runs hold " + std::to_string(n) + " rows, not " + std::to_string(kCapM));
+    require(br_->hprev->size() >= size_t(top) * d_.hidden * kBf16, "hprev holds fewer slots than the shape names");
+  }
+
+  // gdn_step's row build: (ctrl, partials, ab_out, gdn_small, conv_ring, state, gdn_o, state_pool, ring_pool, rows).
+  void gdn_step_rows(uint32_t layer, uint32_t g) {
+    l0::Kernel& k = kernel(kernels::gdn_step_rows_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads, d_.gdn_v_heads),
+                           "gdn_step", kWgGdn);
+    k.arg_ptr(0, b_.control.ptr());
+    k.arg_ptr(1, b_.partials.ptr());
+    k.arg_ptr(2, b_.ab_out.ptr());
+    k.arg_ptr(3, small_of(layer).gdn.ptr());
+    k.arg_ptr(4, at(b_.conv_ring, size_t(g) * conv_ring_stride()));
+    k.arg_ptr(5, at(b_.gdn_state, size_t(g) * gdn_state_stride()));
+    k.arg_ptr(6, b_.gdn_o.ptr());
+    // A pool that is not there is never indexed (the table names index 0 / slot 0 only): bind slot 0's slice.
+    k.arg_ptr(7, at(br_->state_pool ? *br_->state_pool : b_.gdn_state, size_t(g) * gdn_state_stride()));
+    k.arg_ptr(8, at(br_->ring_pool ? *br_->ring_pool : b_.conv_ring, size_t(g) * conv_ring_stride()));
+    k.arg_ptr(9, br_->rows->ptr());
+    launch(k, d_.gdn_v_heads, kGdnStateChunks);
+  }
+
+  // attn_prep's (or attn_prep_kv8's) row build over one KV layer; `s1` the MTP head's QKV_S 1 build.
+  void attn_prep_rows(void* ctrl, const void* fa_small, const KvLayer& kv, bool s1, const l0::Mem& rows) {
+    l0::Kernel& k = kernel(kernels::attn_prep_rows_variant(kCapM, s1, kv8_, d_.fa_q_heads, d_.fa_kv_heads),
+                           kv8_ ? "attn_prep_kv8" : "attn_prep", kWgAttn);
+    k.arg_ptr(0, ctrl);
+    k.arg_ptr(1, b_.partials.ptr());
+    k.arg_ptr(2, fa_small);
+    k.arg_ptr(3, m_.rope.ptr());
+    k.arg_ptr(4, b_.attn_q.ptr());
+    k.arg_ptr(5, b_.attn_gate.ptr());
+    k.arg_ptr(6, kv.k);
+    k.arg_ptr(7, kv.v);
+    uint32_t i = 8;
+    if (kv8_) {
+      k.arg_ptr(i++, kv.ks);
+      k.arg_ptr(i++, kv.vs);
+    }
+    k.arg_ptr(i, rows.ptr());
+    launch(k, d_.fa_q_heads + d_.fa_kv_heads, kCapM);
+  }
+
+  // Decode attention v2's row build (bf16 or its kv8 twin): the layer's whole cache, each group at its slot's base.
+  void attn_pair_rows(void* ctrl, const KvLayer& kv) {
+    const std::string v =
+        kernels::attn_v2_rows_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_, d_.fa_q_heads, d_.fa_kv_heads);
+    {
+      l0::Kernel& k = kernel(v, kv8_ ? "attn_decode_v2_kv8" : "attn_decode_v2", kWgAttn);
+      uint32_t i = 0;
+      k.arg_ptr(i++, ctrl);
+      k.arg_ptr(i++, b_.attn_q.ptr());
+      k.arg_ptr(i++, kv.k);
+      if (kv8_) k.arg_ptr(i++, kv.ks);
+      k.arg_ptr(i++, kv.v);
+      if (kv8_) k.arg_ptr(i++, kv.vs);
+      k.arg_ptr(i++, b_.attn_part.ptr());
+      k.arg_ptr(i, br_->rows->ptr());
+      launch(k, d_.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
+    }
+    {
+      l0::Kernel& k = kernel(v, kv8_ ? "attn_reduce_v2_kv8" : "attn_reduce_v2", kWgAttn);
+      k.arg_ptr(0, ctrl);
+      k.arg_ptr(1, b_.attn_part.ptr());
+      k.arg_ptr(2, b_.attn_gate.ptr());
+      k.arg_ptr(3, b_.attn_out.ptr());
+      k.arg_ptr(4, br_->rows->ptr());
+      launch(k, d_.fa_q_heads, kCapM);
+    }
+  }
+#endif
 
   l0::Kernel& kernel(const std::string& variant, const char* entry, uint32_t wg) {
     auto it = step_.modules.find(variant);
@@ -869,6 +1033,9 @@ class Capture {
     // `gdn_small` is the layer's GDN block base as a `const float*` (the
     // kernel finds conv/negA/dt_bias inside it at loader/small_layout.h's
     // offsets, passed to ocloc as NEGA_OFF/DTBIAS_OFF).
+#if B70_BATCH_PROBE
+    if (mode_ == Mode::Rows) gdn_step_rows(layer, g); else   // spec 13a: the BATCH_ROWS build
+#endif
     {
       // Spec 8: the verify list binds the SPEC_SLOTS build, whose eighth argument is
       // this layer's slice of slot 1 (MtpBuffers::gdn_spec is slot-major, so slot s
@@ -928,6 +1095,11 @@ class Capture {
     // - src/kernels/attn.cl (Task 5), grid (24 q-heads + 4 kv-heads, M), WG 256.
     // `fa_small` is the layer's FA block (q_norm ‖ k_norm, fp32 1+w) - the same
     // `SmallTensors::gdn` allocation the GDN layers use for their own block.
+#if B70_BATCH_PROBE
+    if (mode_ == Mode::Rows)   // spec 13a: the row build over the main rows
+      attn_prep_rows(b_.control.ptr(), small_of(layer).gdn.ptr(), kv, false, *br_->rows);
+    else
+#endif
     if (kv8_) {
       // Spec 12b: kv8.cl's attn_prep_kv8 - attn_prep's chain, then q rotated (attn_q stays
       // fp32) and K, V rotated and quantised into the int8 rows + scales. Two more args.
@@ -1349,6 +1521,11 @@ class Capture {
               b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormInput)), b_.x.ptr());
     head_gemv(h.qkv, b_.x.ptr(), b_.partials.ptr());
     const KvLayer kv = head_kv();
+#if B70_BATCH_PROBE
+    if (mode_ == Mode::Rows)   // spec 13a: the head's rows (each at its position - 1, its slot's base)
+      attn_prep_rows(mtp_->hctl.ptr(), h.fa.ptr(), kv, true, *br_->head_rows);
+    else
+#endif
     if (kv8_) {   // spec 12b: the head's KV in the main cache's form
       l0::Kernel& k = kernel(kernels::attn_prep_s1_kv8_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads), "attn_prep_kv8", kWgAttn);
       k.arg_ptr(0, mtp_->hctl.ptr());
@@ -1568,6 +1745,9 @@ class Capture {
   // Spec 19c: a tap drafter's verify list - its slots, taps and copy sites (null / empty otherwise).
   const TapVerify* tv_ = nullptr;
   std::vector<std::vector<uint32_t>> sites_;
+#if B70_BATCH_PROBE
+  const BatchRowsBind* br_ = nullptr;   // spec 13a: build_rows' table, pools and head bindings
+#endif
 };
 
 }  // namespace
@@ -1655,6 +1835,16 @@ CapturedStep build_stage_verify_taps(l0::Context& ctx, const loader::LoadedModel
                            std::to_string(decode_launches(d)));
   return Capture(ctx, m, b, st, link, tv, M).run();
 }
+
+#if B70_BATCH_PROBE
+CapturedStep build_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const BatchRowsBind& br,
+                        uint32_t M) {
+  if (M == 0 || M > DecodeBuffers::kM)
+    throw std::runtime_error("runtime::build_rows: M " + std::to_string(M) + " is outside [1, " +
+                             std::to_string(DecodeBuffers::kM) + "]");
+  return Capture(ctx, m, b, br, M).run();
+}
+#endif
 
 CapturedStep build_stage_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                                const PpStage& st, const MtpBuffers& mtp, uint32_t i) {
