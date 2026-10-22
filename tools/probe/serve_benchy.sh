@@ -4,7 +4,8 @@
 #   tools/probe/serve_benchy.sh [llama-benchy args...]
 # e.g. tools/probe/detach.sh ~/benchy.log tools/probe/serve_benchy.sh --pp 4096 --tg 256
 # Env: MODEL (repo id or snapshot; default the W4A16 g64 checkpoint), MAX_LEN
-# (16384), PORT (8011), SERVE_ARGS (extra b70-serve flags), SERVE_AFFINITY (the server's
+# (16384), PORT (8011), WAIT (seconds to wait for /v1/models, default 600 - a 41.9 GB model on two cards may need more),
+# SERVE_ARGS (extra b70-serve flags), SERVE_AFFINITY (the server's
 # ZE_AFFINITY_MASK, default 0; spec 16d's `SERVE_ARGS='--pp 2'` needs 0,1), BENCHY_VERSION
 # (pins llama-benchy, e.g. 0.4.0 for queue row 41's matrix; unset: whatever uvx resolves).
 set -euo pipefail
@@ -20,7 +21,7 @@ ZE_AFFINITY_MASK="${SERVE_AFFINITY:-0}" build/src/cli/b70-serve "$MODEL" --max-l
   --served-name b70 ${SERVE_ARGS:-} > "$HOME/benchy-serve.log" 2>&1 &
 srv=$!
 trap 'kill $srv 2>/dev/null; wait $srv 2>/dev/null || true' EXIT
-for _ in $(seq 1 600); do
+for _ in $(seq 1 "${WAIT:-600}"); do
   curl -sf "http://127.0.0.1:$PORT/v1/models" > /dev/null && break
   kill -0 $srv 2>/dev/null || { echo "server exited"; cat "$HOME/benchy-serve.log"; exit 1; }
   sleep 1
