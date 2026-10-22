@@ -230,6 +230,9 @@ case "${1:-}" in
     # Spec 25c (queue row 60): the N 12 synthetics' golden sets (r60.synth_golden: bolt_oracle.sh export on each).
     have oracle_bolt_synth "oracle-out-bolt-n12-{g128,g64x}/bolt_{short,4k,agentic}.golden.safetensors (spec 25c: r60.synth_golden)" \
       bash -c 'for s in n12-g128 n12-g64x; do for p in bolt_short bolt_4k bolt_agentic; do test -s oracle-out-bolt-$s/$p.golden.safetensors || exit 1; done; done'
+    # Queue row 63 (spec 26a): the LiLiCorr drafter, pinned (962 MB; a revision-pinned download writes no refs/main).
+    have lilicorr "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr @ 449d2414 (962 MB: hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr --revision 449d24140160b8e51871bfc0f0a7338abf640aa1)" \
+      complete "$(bolt_snap "" models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr 449d24140160b8e51871bfc0f0a7338abf640aa1)"
     have tok_python "a python with tokenizers (${TOK_PYTHON:-?})" "${TOK_PYTHON:-/nonexistent}" -c 'import tokenizers'
     # shellcheck disable=SC2016 # expanded by the inner bash
     have uvx "uvx (llama-benchy)" bash -c 'command -v uvx || test -x "$HOME/.local/bin/uvx"'
