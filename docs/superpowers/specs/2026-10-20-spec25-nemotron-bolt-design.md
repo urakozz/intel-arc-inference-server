@@ -3,7 +3,8 @@
 **Status:** design, 2026-10-20, approved by the operator 2026-10-20. Decisions are marked **Decision N** with their
 cost if wrong and collected in §12. 25a is built on the Mac (§13: the reference, B1 on tiny models; no real
 weight read yet); 25b is built on the Mac (§14: the descriptor, the loader, the plan; no card); 25c is built on the Mac (§15: P0's
-harness, the `nb_*` kernels, `BoltEngine`, the arms; no card); 25q, 25d, 25e are not built.
+harness, the `nb_*` kernels, `BoltEngine`, the arms; no card); 25d is built on the Mac (§16: the SSD prefill, the walk; no card); 25q,
+25e are not built.
 **Plans (2026-10-20):** `docs/superpowers/plans/2026-10-20-spec25{a,q,b,c,d,e}-*.md` - 25a facts and the CPU
 reference, 25q our AutoRound g64 re-quantisation (the recipe; the operator runs it), 25b descriptor / loader /
 memory plan, 25c decode (the launch-count and state-bandwidth P0 first), 25d prefill, 25e serving.
@@ -882,3 +883,126 @@ min >= 0.99 a block. Synthetic golden sets: `bolt_oracle.sh export <n12-*>` -> `
 and arm (`bolt_kernels_test`), B4 / B3 on the N 12 synthetics and SergiioB's checkpoint (two cards, split 48 copy and 40 peer),
 the arms bitwise `none`, the bf16-state arm (Decision 2) and the speed rows (Task 8). Every `{S, layout}`, the tie tolerance,
 the cosine bars and the P0 scale factors are PROVISIONAL / PROPOSED until then.
+
+## 16. 25d as built (2026-10-22; the Mac only - no card, no real weight)
+
+Branch `spec25d-bolt-prefill`; box queue row 61. Built: the prefill host twin `tests/kernels/bolt_pf_ref.h` (`boltpf`, on 25c's
+`boltref`) with its fixture (`tools/oracle/bolt_pf_fixture.py` -> `tests/kernels/bolt_pf_fixture.h`), the `nb_pf_*` family
+(`src/kernels/bolt/nb_pf_{mamba,moe,moe_gemm,prep}.cl`, the host half in `src/kernels/bolt_kernels.h`'s spec 25d block),
+`runtime/bolt/bolt_prefill.{h,cc}` (the walk, its scratch, the head) and `bolt_prefill_engine.cc` (`BoltEngine::prefill`,
+`prepare_prefill`, `set_prefill_replay`, `read_prefill_routes`, the 25e block hook) in a new archive `b70_bolt_prefill`,
+`bolt_sizes.{h,cc}`'s prefill terms, `b70-decode <bolt> --prefill` / `--bench --prefill-length N [--prefill-chunk C]`, the
+tests `bolt_pf_ref_test`, `bolt_pf_variant_names_test`, `bolt_plan_test` (extended) and the card tests `bolt_pf_kernels_test`,
+`bolt_prefill_test`, `bolt_golden_test`'s `prefill[:chunk]` mode, the Mac driver `tools/mac/clrun/bolt_pf_run`.
+kernel_cmdlines **+35 / -0 / ~0** (1,371 -> 1,406 variants); no existing `.cl` edited; 25c's 41 decode names unchanged (pinned
+by `bolt_pf_variant_names_test`).
+
+**The SSD form as built (`nb_pf_mamba.cl`; the twin repeats every line).** Sub-chunks of **64** rows on the ABSOLUTE grid: sub-chunk
+k of a chunk at `pos` holds its rows whose positions lie in one 64-aligned window (the first is partial when `pos % 64 != 0`).
+Per head h, sub-chunk rows s <= t: `a = A dt`, `cum` the sequential fp32 prefix sum from the sub-chunk's first row in this
+chunk; `C B^T` by DPAS (`nb_pf_cb_L64_DPAS`, the walk's; both operands the conv's bf16 outputs) or plain (n ascending from
+0.0f, the twin's order); `M[t][s] = (CB · exp(cum_t - cum_s)) · dt_s` masked BEFORE the exp; `y = rne((Yd + Yo) + x D)` with
+`Yd` sequential from the first term and `Yo = tree_n(S[p][n] · C_t[n]) · exp(cum_t)` (decode's halving tree, the state from
+SLM, every output a work-item - no per-row cross-lane reduction); `S = S · exp(cum_L) + acc`, `acc = Σ_s (B_s[n] w_s) x_s[p]`
+sequential from the first term, `w_s = exp(cum_L - cum_s) dt_s`, so a ONE-row sub-chunk updates the state bitwise as decode's
+`nb_ssm` does (measured, all 128 heads). The fp32 state never meets DPAS. Decision 2's bf16 arm reads the state widened and
+rounds it once at the chunk's end. 128-row sub-chunks were not built (the 64 / 128 choice is PROVISIONAL until r61.speed's
+phase table; a 128 build would move the walk's grid to 128).
+
+**The walk as built (`bolt_prefill.cc`; `prefill_device_launches` derives it, the walk asserts it chunk by chunk,
+`bolt_plan_test` holds it to an independent count).** Device 0 `nb_pf_embed_gather`; every block a norm site at M 2048 (25c's
+`nb_res_norm` binary: `_NF` over the gathered rows, `_S1` after a Mamba / attention block, `_S1_T1` after a MoE block - every
+prefill linear is ONE unsplit GEMM, so S 1 whatever decode's S); every int4 linear as 1024-column slabs of (dequant + `pf_gemm_T0`)
+- `pf_dequant_slab` at the descriptor's layout for the N 4096 ones, 18c's `k2_pf_dequant_slab` (a zero-padded tail slab) for the
+layout-0 ones that are not whole slabs (in_proj 19 slabs, q||k||v 5, fc1||shared_up 7) - into rows of pitch pad256(N); Mamba
+53 (in_proj 38, seed, conv, dt, `C B^T`, scan, gnorm, out_proj 8), attention 21 (q||k||v 10, `nb_attn_prep` at M 2048,
+`mg_pf_flash_attn` flash or its eager build - one launch either way -, o_proj 8), MoE 37 + 4 x batches (router and route at M
+2048 over the chunk's C REAL rows, fc1||shared_up 14, `nb_sh_act`, sort, gather, per 512 MiB weight batch dequant + grouped GEMM
+for up (relu2) and for down, the ascending-id combine, fc2 8 into `pa`, shared_down 8 into `pb`). **4,333 launches a chunk** on
+the real model (one card or two: 2,317 + 2,016; 141 weight batches over the 40 MoE blocks: 170 / 128 / 113 / 102 experts a
+batch at I 1536 / 2048 / 2304 / 2560), **573** on the synthetic N 12, the same at every C; the head 4 (decode's norm at M 1
+folding the last block's S 1 rows with norm_f, the head, two argmax stages). The residual ping-pongs `h0` / `h1`; where each
+device takes and leaves it is a function of the placement (asserted). The chunk rule (`prefill_chunk_rows`): a chunk width
+is a multiple of 64 (refused otherwise, `check_prefill_chunk`), every chunk ends on the absolute 64-grid or at the prompt
+end, and with 25e's block hook at a 2048 block end too - so a prompt cut at any width this takes is bitwise one chunk.
+Two cards: a second `PipelineLink` (copy) at chunk size - h [C][4096] and block s - 1's pending GEMM rows (one [C][4096]
+fp32 set after attention / Mamba, two after MoE) - Kolibri's sequential hand-off per chunk, the bounded wait, P4's
+`drop_next_handoff` on a chunk.
+
+**The scratch (derived, `prefill_sizes`; plan == allocation is `bolt_prefill_test`'s line 1):** **1,251,240,256 B a device**
+(the largest terms: the expert batch 536,870,912, the up rows 1056 x 32 x 2560 x 2 = 173,015,040, `pa` 2048 x 18688 x 4 =
+153,092,096, the gathered latent 69,206,016) and the prefill link 50,339,904 B on device 1 of two; with both, 262144 positions
+still fit two cards (24.17 / 24.23 GB of 32.53 - the plan, `bolt_plan_test`).
+
+**The bars as set (Task 1 measured; every number printed by `bolt_pf_ref_test`):**
+- the algebra in double: the SSD form against the sequential recurrence at sub-chunk lengths 1, 2, 63, 64, 64 + 64 + 53,
+  1 + 1 (pos 63) and 27 + 64 x 4 + 17 (pos 37): worst **3.71e-14** head-relative (bar 1e-12), the state 1.44e-14 (bar 1e-12);
+  through `exp(cum_t - cum_s)` (the kernels' form) the same; row-relative up to 6.13e-12 where a row's y is far below its
+  head's scale (both evaluations lose digits to `C · B`'s cancellation; held at 1e-10) - the dt_bias -10.5 / -11.69 heads and
+  A_log +4.41 / +8.81 included, every value finite
+- fp32, 2048 rows at pos 0 and 37 (32 / 33 sub-chunks), heads 0-6 / 77 / 127: y **1.7e-6** head-relative before the rounding
+  (bar 1e-4), 641 / 648 of 1,179,648 bf16 values differ; the state after 2048 rows cosine **1.000000000** (bar 0.99999),
+  row-relative 6.4e-6
+- against 25a's `ssm_chunk` (torch's einsums) at 64-row sub-chunks: y **0 of 6,336** sampled values differ, the state
+  row-relative 3.2e-7; at the training chunk 128: 1 of 6,336 (1 ulp)
+- the conv over a chunk: decode's `conv_step` row by row bitwise (C 1 / 2 / 3 / 4 at a sequence start, 181 rows at 0 / 1 / 2 / 3
+  / 4097 from a garbage ring, a split at 117 with the seed carried), the next three ring columns bitwise; torch's `conv_seq`
+  (whole = [0, 117) + [117, 181) carried) 0 of 22,528 sampled values differ
+- absolute sub-chunks: the whole Mamba chain over [2085, 2385) = split at 2112 = at 2176 / 2304 = the chunk rule at 64 / 128 /
+  2048, bitwise (out, y, the state, the ring columns); a split off the grid at 2100 changes 2 of 2,457,600 outputs (the walk
+  never cuts there)
+- the grouped MoE (I 128 in the twin): every pair once, expert-major, stable by row; the latent r **bitwise `boltref::moe`** on
+  every row at E 240 and 496; the tile bound 1,056 reached exactly at C 2048 / E 496
+- set from these, PROPOSED for the card (`bolt_prefill_test`): prefill vs decode's fill - logits cosine >= 0.9995, h taps median
+  >= 0.9998 / min >= 0.99, SSM states and conv columns >= 0.999 a block, K / V rows median >= 0.9998 / p01 >= 0.99;
+  `bolt_pf_kernels_test`: `C B^T` by DPAS within 2^-20 of Σ|C B| of the plain build, the grouped up rows' cosine >= 0.9999
+  against the twin's decode order, flash >= 0.99999 against fp64 at 3000 / 65536 / 200000
+
+**Measured on the Mac:** `bolt_pf_ref_test` (above, 33 s); `bolt_pf_run` (Apple's OpenCL on the UHD 630, indicative): the seed, the
+ring writeback, `C B^T` (plain), the scan in fp32 and bf16 state at (0, 181) and (2085, 300) - y and the state over all 128 heads
+EXACT -, the sort (E 240 and the bound at C 2048 / E 496), the gather, the dequant (32 routed experts at I 1536, two batches),
+the combine, the embedding gather, 25c's router / attention prep / shared act at M 2048 exact (the route's ids exact, its fp32
+words within 2 ulp); the conv (5 / 7 values), dt (52 / 85),
+the cumulative sums (<= 2 ulp), gnorm and the norm's x within 1 ulp (Apple's division); **both tilings (W16_R16, W8_R4) x10
+each equal and finite (Review Focus 4)**; the prefill eager attention 21 of 81,920 values within 3 ulp of decode's eager twin
+(Apple's 1 / sum) and **bitwise decode's `mg_attn_eager` kernel on the same device**. `bolt_pf_variant_names_test`: 8 prefill
+lists, 39 bound names = 30 block binaries + 9 reused (pf_gemm_T0, Muse's two prefill attention builds, 25c's head binaries)
++ 5 spare (the second tiling, the N 4096 slabs' other layout); every Level Zero source compiles (mac_check section 2); every new
+command line parses (section 4).
+
+**Facts that differ from the plan (the plan's text is left as written; each with its cost if wrong):**
+1. *`nb_pf_prep.cl` holds only the gather*: the norm folds, the shared act and the KV write are 25c's own binaries at M 2048
+   (24d's `_PF` precedent - decode's chains row for row by construction). *Cost:* none.
+2. *The Mamba consumers are new prefill kernels*, not 25c's `nb_conv` / `nb_ssm` / `nb_gnorm` at M 2048: in_proj's prefill rows sit
+   at pitch pad256(18560) = 18688 (pf_gemm's padded tail slab) where decode's binaries bake 18560. *Cost:* none.
+3. *The double algebra's "1e-12 at every row" is head-relative* (3.71e-14 measured); row-relative it is 6.1e-12 on rows far below
+   their head's scale, held at 1e-10 - the cancellation is in `C · B` itself, not in the SSD form. *Cost if wrong:* none - the
+   identity is measured at 3.7e-14.
+4. *The fp32 "max relative 1e-4 on y" is head-relative* (1.7e-6 measured): row-relative it is 1.9e-3 on the same cancelled rows.
+   *Cost if wrong:* a looser y bar than the plan's text on rows that carry no weight in the head.
+5. *The prefill's conv columns are not decode's bitwise* (the plan's Task 3 wrote "bitwise"): they are the in_proj GEMM's rounded
+   rows (DPAS over bf16-dequantised weights) where decode's are the int4 GEMV's - `bolt_prefill_test` holds them by cosine (0.999,
+   PROPOSED) beside the SSM states. *Cost:* none (25c's own golden bar for them is the same cosine).
+6. *A chunk width is a multiple of 64 and every chunk ends on the absolute grid* (`--prefill-chunk 100` is refused by name): the
+   plan's "the walk enforces it" made concrete. A split OFF the grid (two prefill calls cut at 2085) is another evaluation of that
+   sub-chunk - printed by `bolt_prefill_test`, not gated; Review Focus 1's "a chunk starting at 2048 + 37 vs one at 2048 + 64" is
+   gated as the two continuations of one prefix. *Cost if wrong:* none (25e's block ends are on the grid).
+7. *The slabs*: the N 4096 linears' `pf_dequant_slab` is built in BOTH layouts (the other one spare, so a P0 re-pick of
+   `BoltDesc::linears` needs no new line); a layout-1 linear that is not whole 1024-column slabs is refused naming it (no kernel).
+   *Cost:* 4 spare binaries.
+8. *`nb_pf_moe_gemm.cl` carries both epilogues* (up relu2, down plain - the latter `pf_moe_gemm`'s exact arithmetic): one family
+   file, and `pf_moe_gemm_K2560_N1024` already exists under K2's block with the same defines (reusing that name from a second
+   block would collide). *Cost:* none.
+9. *The engine half is `bolt_prefill_engine.cc` in a new archive `b70_bolt_prefill`* (LFM2's / Kolibri's arrangement; the plan
+   listed only `bolt_prefill.{h,cc}`); `bolt_rig.h::fits` takes the prefill scratch. *Cost:* none.
+10. *TFLOP/s is against 2 x 8,516,009,984 matmul parameters a token* (derived from the descriptor: §3's 9,052,880,896 less the
+    head's 536,870,912, which a prefill runs once a prompt) - 17.03 GFLOP a token; the attention's depth term excluded.
+11. *The Mac driver is `bolt_pf_run` beside `bolt_run`* (25c's untouched; mac_check's section 5 loop gains it).
+12. *Beyond the plan's row*: stages r61.k0, r61.host, r61.reject, r61.synth_b3, r61.synth_pp and r61.golden32k; the old
+    `cli_reject_bolt_prefill` / `_prefill_length` (25c: "spec 25d") are gone, 25d's four refusals (`l0-int8`, `sycl-tla`, a chunk
+    above 2048, a chunk off the 64-grid) replace them.
+
+**Not run (box, row 61):** everything on a card - every `nb_pf_*` binary's first ocloc build, B2 (`bolt_pf_kernels_test`: the DPAS
+`C B^T` and grouped GEMMs, flash at depth), B4 / B3 on prefill (the synthetics, SergiioB's checkpoint on two cards), the rate at
+depth 886 / 8192 / 32000 / 65536 / 131072 beside SergiioB's published 2925 / 2014 / 871 / 486 t/s and the phase tables. The
+sub-chunk length (64), the scan's tiling (W16_R16), the 512 MiB expert batch and every card bar are PROVISIONAL / PROPOSED until then.

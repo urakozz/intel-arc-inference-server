@@ -1,6 +1,6 @@
 # Spec 25d - Nemotron 3.5 Bolt prefill: Mamba-2 in the chunked (SSD) form with an fp32 state, the conv over a chunk with the ring carried, the grouped latent MoE, NoPE flash, on `l0`
 
-**Status (2026-10-20): planned; nothing built.** Box queue row **61**.
+**Status (2026-10-22): built on the Mac (branch `spec25d-bolt-prefill`; as built: spec 25 §16); every card stage and the rate are box queue row 61.**
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
 
