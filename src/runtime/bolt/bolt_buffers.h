@@ -47,7 +47,8 @@ struct BoltBuffers {
   bool holds(uint32_t layer) const { return layer >= placement.first(device) && layer < placement.end(device); }
   size_t persistent_bytes() const { return control.size() + kv_k.size() + kv_v.size() + conv_ring.size() + ssm.size(); }
   size_t scratch_bytes() const;
-  // control (then n_active = 1), the KV, the rings and the states - in construction order.
+  // Zeroes the control block (n_active 0 - ingest / generate set it before every replay), the KV, the rings and the
+  // states, in construction order.
   void zero(l0::CmdList& imm);
 };
 
