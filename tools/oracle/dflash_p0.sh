@@ -34,8 +34,74 @@
 #   accept   dflash_accept.py run --model muse (ARMS default bf16,int8,int8h,int4g64,int4g64h,dflash2; K 1..15 from one
 #            block per anchor; the sampled estimate for q raw and capped) -> OUT/accept/{accept.*.json,summary.md}
 #   lookup   tools/spec/lookup_accept.py --dumps DUMPS --max-k 15 (n = 2..6) -> OUT/lookup.{txt,json}
+#
+# MODEL=lilicorr (spec 26a Tasks 2-3): the LiLiCorr drafter over Bolt's tap dumps (DUMPS, default
+# oracle-out-bolt-taps/dumps - tools/box_validate/bolt_oracle.sh <data> taps makes them), OUT default
+# oracle-out-lilicorr-p0; steps (STEPS, default "check accept lookup"):
+#   check    test_dflash_ref.py (the LiLiCorr form) and test_dflash_accept.py (incl. the tiny pair: 25a's tiny Bolt +
+#            lilicorr_make_tiny; SITE first on PYTHONPATH)
+#   accept   dflash_accept.py run --model bolt-lilicorr (ARMS default exact,int8,int4g64,exacth,int8h,int4g64h; K 1..7
+#            from one 8-row block per anchor; the sampled estimate for q lattice and lattice+lp) -> OUT/accept/; SKIP
+#            (77) while the drafter's weights are not in the HF cache
+#   lookup   tools/spec/lookup_accept.py --dumps DUMPS --max-k 7 -> OUT/lookup.{txt,json}
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 2
+if [ "${MODEL:-qwen38}" = lilicorr ]; then
+  OUT="${OUT:-oracle-out-lilicorr-p0}"
+  DUMPS="${DUMPS:-oracle-out-bolt-taps/dumps}"
+  SITE="${SITE:-oracle-out-q4exp/site}"
+  IMAGE="${IMAGE:-agnes-ref-img:latest}"
+  THREADS="${THREADS:-12}"
+  STEPS="${STEPS:-check accept lookup}"
+  ARMS="${ARMS:-exact,int8,int4g64,exacth,int8h,int4g64h}"
+  MEM="${MEM:-36g}"
+  HF="${HF_HOME:-$HOME/.cache/huggingface}"
+  DRY_RUN="${DRY_RUN:-}"
+  mkdir -p "$OUT"
+  exec > >(tee -a "$OUT/p0.log") 2>&1
+  echo "=== $(date '+%F %T') LiLiCorr P0: steps [$STEPS], arms $ARMS, dumps $DUMPS, out $OUT${DRY_RUN:+ (dry run)}"
+  has() { [[ " $STEPS " == *" $1 "* ]]; }
+  if { has accept || has lookup; } && [ ! -d "$DUMPS" ]; then
+    echo "no $DUMPS (tools/box_validate/bolt_oracle.sh <data> taps first)"
+    exit 2
+  fi
+  oabs=$(cd "$OUT" && pwd -P) sabs="" dmount=()
+  [ -d "$SITE" ] && sabs=$(cd "$SITE" && pwd -P)
+  [ -d "$DUMPS" ] && dmount=(-v "$(cd "$DUMPS" && pwd -P)":/dumps:ro)
+  # One model computation on the Mac's CPU at a time: every container waits for the shared lock (fcntl, B70_CPU_LOCK).
+  lock=(python3 -c 'import fcntl, subprocess, sys
+f = open(sys.argv[1], "a+")
+fcntl.flock(f, fcntl.LOCK_EX)
+sys.exit(subprocess.run(sys.argv[2:]).returncode)' "${B70_CPU_LOCK:-/tmp/b70-cpu-model.lock}")
+  run() {
+    echo "--- $(date '+%T') $*"
+    /usr/bin/time -p "${lock[@]}" docker run --rm --memory "$MEM" --memory-swap "$MEM" -v "$HF":/hf:ro -v "$PWD":/ws \
+      "${dmount[@]}" -v "$oabs":/out ${sabs:+-v "$sabs":/site:ro -e PYTHONPATH=/site} -e HF_HOME=/hf \
+      -e HF_HUB_OFFLINE=1 -e PYTHONUNBUFFERED=1 -e TQDM_DISABLE=1 -e OMP_NUM_THREADS="$THREADS" \
+      -e MKL_NUM_THREADS="$THREADS" -e LILICORR_TINY_DIR=/out/tiny -w /ws "$IMAGE" "$@"
+  }
+  rc=0
+  if has check; then
+    for t in test_dflash_ref test_dflash_accept; do
+      run python3 "tools/oracle/$t.py" > "$OUT/$t.log" 2>&1 || { tail -20 "$OUT/$t.log"; echo "$t FAILED"; exit 1; }
+    done
+    echo "unit tests: PASS (logs in $OUT)"
+  fi
+  if has accept; then
+    run python3 tools/oracle/dflash_accept.py run --model bolt-lilicorr --dumps /dumps --out-dir /out/accept \
+      --arms "$ARMS" --batch "${BATCH:-8}" ${DRY_RUN:+--dry-run}
+    r=$?
+    if [ "$r" = 77 ]; then echo "accept SKIPPED (the drafter's weights: PENDING-WEIGHTS)"; rc=77
+    elif [ "$r" != 0 ]; then echo "accept FAILED"; exit 1; fi
+  fi
+  if has lookup; then
+    python3 tools/spec/lookup_accept.py --dumps "$DUMPS" --max-k 7 --mc-seeds 4 --json "$OUT/lookup.json" \
+      > "$OUT/lookup.txt" || { echo "lookup FAILED"; exit 1; }
+    sed -n '/(all)/,/^Verify share/p' "$OUT/lookup.txt" | head -14
+  fi
+  echo "=== $(date '+%F %T') done"
+  exit "$rc"
+fi
 if [ "${MODEL:-qwen38}" = muse ]; then
   OUT="${OUT:-oracle-out-muse-p0}"
   DUMPS="${DUMPS:-oracle-out-muse-taps/dumps}"

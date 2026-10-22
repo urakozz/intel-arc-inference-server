@@ -494,18 +494,279 @@ def test_muse_run_over_dumps():
           f"{e15['E']:.2f} over the uncensored row), sampled sums raw / capped, resumed, dflash2 SKIPPED")
 
 
+# ------------------------------------------------------------------------------ spec 26a: the LiLiCorr form
+
+def _lil_ctx(d, n, seed=1):
+    g = torch.Generator().manual_seed(seed)
+    taps = {i: torch.randn(n, d.cfg.hidden, generator=g) * 2.0 for i in d.cfg.target_layer_ids}
+    return d.context_kv(taps, torch.arange(n)), taps
+
+
+def test_lilicorr_batch_equals_draft_block():
+    """lilicorr_draft (B blocks, the head over every mask row, the lattice batched) = Drafter.draft_block per anchor:
+    the candidates, the greedy ids of every K (prefixes), the lattice and log-probs to fp32 rounding - anchors before
+    and past the window (16), context rows past the anchor present."""
+    d = T._lil()
+    ctx, _ = _lil_ctx(d, 60)
+    ps = torch.tensor([10, 16, 17, 30, 45, 52])
+    anchors = [int(a) for a in torch.randint(0, T.LIL_VOCAB, (6,), generator=torch.Generator().manual_seed(2))]
+    head = DA.Head(d.lm_head)
+    cand, lp, lat, ids, chosen = DA.lilicorr_draft(d, head, anchors, ps, ctx)
+    worst = 0.0
+    for b, (a, p) in enumerate(zip(anchors, ps.tolist())):
+        o = d.draft_block(a, p, 7, ctx)
+        assert torch.equal(cand[b], o.cand_ids) and torch.equal(ids[b], o.ids) and torch.equal(chosen[b], o.chosen), b
+        worst = max(worst, (lat[b] - o.lattice).abs().max().item(), (lp[b] - o.log_probs).abs().max().item())
+        for K in range(1, 8):
+            assert torch.equal(d.draft_block(a, p, K, ctx).ids, ids[b, :K])
+    assert worst < 1e-4, worst
+    print(f"lilicorr batch: 6 anchors (window 16 crossed) = draft_block per anchor: candidates and ids of every K "
+          f"bitwise, lattice / log-probs within {worst:.2g} (batched GEMMs)")
+
+
+def test_lilicorr_int8_absorbs_g():
+    """Spec 26 §3: the int8 codes come from W' alone (q independent of g), the stored row scale is fp32(g x s');
+    lil_int8_simulate quantises the backbone only (the head stays W' + g)."""
+    d = T._lil()
+    name = "layers.0.mlp.up_proj.weight"
+    wp, g = d.w[name], d.g[name]
+    q1, s1 = DA.int8_rows_g(wp, g)
+    q2, s2 = DA.int8_rows_g(wp, g * 3.7)
+    q0, s0 = DA.rtn_int8_rows(wp)
+    assert torch.equal(q1, q2) and torch.equal(q1, q0)
+    assert torch.equal(s1, (s0.float() * torch.tensor(g, dtype=torch.float32)).float())
+    head_g = {n: v for n, v in d.g.items() if n.startswith("lilicorr.")}
+    n = DA.lil_int8_simulate(d)
+    assert n == len(DA.lil_backbone_linears(d)) == 1 + 2 * 9, n
+    assert d.g == head_g and len(head_g) == 9           # the head's 3 + 2 x 3 NVFP4 linears keep W' + g
+    assert torch.equal(d.w[name], q1.float() * s1[:, None])
+    print(f"int8 arm: codes independent of g (x 3.7 -> the same q), the row scale fp32(g x s'); {n} backbone linears, "
+          f"{len(head_g)} head linears left exact")
+
+
+def test_lilicorr_int4_from_g_w():
+    """The int4 arm = rtn.h's rule on g x W' in fp64 (one rounding to the f16 scale); f64_to_f16_rne rounds once to
+    nearest-even (checked against both f16 neighbours)."""
+    g = torch.Generator().manual_seed(6)
+    x = torch.cat([torch.rand(4000, generator=g, dtype=torch.float64) * 2.0 ** torch.randint(-20, 10, (4000,),
+                                                                                             generator=g).double(),
+                   torch.tensor([1.0 + 2.0 ** -11, 1.0 + 3 * 2.0 ** -11, 2.0 ** -24 * 1.5, 65504.0])])
+    h = DA.f64_to_f16_rne(x).double()
+    up = torch.nextafter(h.half(), torch.tensor(float("inf"), dtype=torch.float16)).double()
+    dn = torch.nextafter(h.half(), torch.tensor(float("-inf"), dtype=torch.float16)).double()
+    assert ((x - h).abs() <= (x - up).abs()).all() and ((x - h).abs() <= (x - dn).abs()).all()
+    assert h[-4].item() == 1.0 and h[-3].item() == 1.0 + 2 * 2.0 ** -10 and h[-2].item() == 2.0 ** -23
+    d = T._lil()
+    name = "fc.weight"
+    wp, gg = d.w[name].clone(), d.g[name]
+    q, s16 = DA.rtn_int4_g64_f64(wp.double() * gg)
+    N, K = q.shape
+    exp = ((q.double().reshape(N, K // 64, 64) - 8.0) * s16.double()[..., None]).reshape(N, K).float()
+    DA.lil_int4_simulate(d)
+    assert torch.equal(d.w[name], exp) and name not in d.g
+    rel = ((exp.double() - wp.double() * gg).norm() / (wp.double() * gg).norm()).item()
+    w16 = torch.randn(64, 256, generator=g).to(torch.bfloat16)
+    qa, sa = DA.rtn_int4_g64(w16)
+    qb, sb = DA.rtn_int4_g64_f64(w16.double())
+    print(f"int4 arm: rtn.h's rule on g x W' in fp64 (fc's relative error {rel:.3f}); on bf16 inputs the fp64 rule and "
+          f"the fp32 one differ in {int((sa != sb).sum())} / {sa.numel()} scales, {int((qa != qb).sum())} / {qa.numel()} "
+          "codes (the quotient's double rounding)")
+
+
+def _lil_files(root, vocab):
+    """The tiny LiLiCorr (checkpoint files) + a Bolt-named target (embedding / head / generation_config)."""
+    from safetensors.torch import save_file
+    mt = T._lmt()
+    dd = mt.make(os.path.join(root, "lil"), seed=0, vocab=vocab)
+    td = os.path.join(root, "bolt")
+    os.makedirs(td)
+    g = torch.Generator().manual_seed(100)
+    emb = torch.randn(vocab, 256, generator=g).to(torch.bfloat16)
+    head = (torch.randn(vocab, 256, generator=g) * 0.15).to(torch.bfloat16)
+    save_file({"language_model.model.embeddings.weight": emb, "language_model.lm_head.weight": head,
+               "vision_model.embeddings.patch_projection.weight": torch.zeros(4, 4)},
+              os.path.join(td, "model.safetensors"))
+    with open(os.path.join(td, "config.json"), "w") as f:
+        json.dump({"model_type": "nemotron_h_omni"}, f)
+    with open(os.path.join(td, "generation_config.json"), "w") as f:
+        json.dump({"temperature": 1.0, "top_p": 0.95, "eos_token_id": [2, 11]}, f)
+    return dd, td
+
+
+def _lil_fake_dump(path, name, d, n_prompt, n, seed, own_at=None, boost=False):
+    """A dump in bolt_ref's taps format over random text; with own_at = p, the text after p follows the drafter's own
+    greedy drafts at p and the greedy row equals the text (every depth accepted there); with boost, the target row
+    after each anchor p puts its mass on the drafter's slot-0 candidates (so the sampled overlaps are not ~0)."""
+    g = torch.Generator().manual_seed(seed)
+    V = d.cfg.vocab
+    ids = torch.randint(0, V, (n,), generator=g)
+    taps = {i: (torch.randn(n, 256, generator=g) * 2).to(torch.bfloat16) for i in d.cfg.target_layer_ids}
+    if own_at is not None:
+        ctx = d.context_kv(taps, torch.arange(n))
+        o = d.draft_block(int(ids[own_at]), own_at, 7, ctx)
+        ids[own_at + 1: own_at + 8] = o.ids
+    greedy = torch.cat([ids[1:], ids[:1]])
+    lg = torch.randn(n, V, generator=g) * 3
+    if boost:
+        ctx = d.context_kv(taps, torch.arange(n))
+        for p in range(n_prompt, n - 6):
+            o = d.draft_block(int(ids[p]), p, 1, ctx)
+            lg[p, o.cand_ids[0]] += 14.0 - torch.arange(8, dtype=torch.float32)
+    top = torch.sort(lg, dim=-1, descending=True, stable=True)
+    res = {"taps": taps, "greedy": greedy, "top_ids": top.indices[:, :64].contiguous(),
+           "top_logits": top.values[:, :64].contiguous(), "lse": torch.logsumexp(lg, -1)}
+    DT.save_dump(path, name, ids.tolist(), n_prompt, 0, res, {"vocab_used": V})
+
+
+def test_lilicorr_run_over_dumps():
+    """cmd_run --model bolt-lilicorr over dumps from checkpoint-shaped files (Bolt's embedding / head names): K 1..7
+    from one block per anchor, a text that follows the drafter's own drafts accepts to depth 7, the sampled sums per q
+    form (lattice+lp differs from lattice), the censored / short counts, resumed, the summary."""
+    with tempfile.TemporaryDirectory() as root:
+        dd, td = _lil_files(root, T.LIL_VOCAB)
+        e, h = ref.read_target_embed_head(td)
+        d = ref.load_drafter(dd, embed=e, lm_head=h)
+        dumps = os.path.join(root, "dumps")
+        os.makedirs(dumps)
+        _lil_fake_dump(os.path.join(dumps, "code__a.taps.safetensors"), "code/a", d, 20, 34, 1, own_at=20)
+        _lil_fake_dump(os.path.join(dumps, "prose__b.taps.safetensors"), "prose/b", d, 30, 70, 2, boost=True)
+        out = os.path.join(root, "out")
+        ns = argparse.Namespace(dumps=dumps, out_dir=out, arms="exact,int8h,int4g64", k="1-7", batch=4, drafter=dd,
+                                target=td, sources=None, dry_run=False, model="bolt-lilicorr",
+                                q="lattice,lattice+lp", temperature=None, top_p=None)
+        assert DA.cmd_run_lilicorr(ns) == 0
+        r = json.load(open(os.path.join(out, "accept.exact.json")))
+        st = r["variants"]["exact"]["code/a"]
+        assert st["7"]["rows"] == len(DA.anchors_of(20, 34, 7)) == 8
+        assert st["7"]["accepted"][6] >= 1 and st["7"]["hist"][7] >= 1, st["7"]
+        sb = r["variants"]["exact"]["prose/b"]
+        assert sorted(sb["sampled"]) == ["lattice", "lattice+lp"] and sb["sampled"]["lattice"]["counted"][0] == 34
+        assert sb["sampled"]["lattice"]["sum"] != sb["sampled"]["lattice+lp"]["sum"]
+        assert sum(sb["sampled_censored"]) > 0 and sb["sampled_censored"][0] == 0
+        assert r["meta"]["global_scales_left"] == 16 and r["meta"]["sampling"]["top_p"] == 0.95
+        r8 = json.load(open(os.path.join(out, "accept.int8h.json")))
+        assert r8["meta"]["quantised"] == 19 and r8["meta"]["global_scales_left"] == 9 and r8["meta"]["head"] == "int8"
+        mt = os.path.getmtime(os.path.join(out, "accept.exact.json"))
+        assert DA.cmd_run_lilicorr(ns) == 0
+        assert os.path.getmtime(os.path.join(out, "accept.exact.json")) == mt
+        summ = DA.summarize(sorted(glob.glob(os.path.join(out, "accept.*.json"))), None, tuple(range(1, 8)))
+        assert set(summ) == {"exact", "int8h", "int4g64"} and "censored" in summ["exact"]["all"]["sampled"]["lattice"]
+        empty = os.path.join(root, "empty-hub")
+        os.makedirs(empty)
+        old = os.environ.get("HF_HUB_CACHE")
+        os.environ["HF_HUB_CACHE"] = empty
+        try:
+            ns.drafter, ns.out_dir = None, os.path.join(root, "out2")
+            assert DA.cmd_run_lilicorr(ns) == 77                   # PENDING-WEIGHTS: SKIP with the download line
+        finally:
+            if old is None:
+                os.environ.pop("HF_HUB_CACHE")
+            else:
+                os.environ["HF_HUB_CACHE"] = old
+    print(f"run --model bolt-lilicorr: K 1..7 from one block, the drafter's own drafts accept to depth 7, sampled "
+          f"lattice / lattice+lp ({sb['sampled']['lattice']['sum'][0]:.2f} vs {sb['sampled']['lattice+lp']['sum'][0]:.2f} "
+          f"at slot 0), censored {sb['sampled_censored']}, resumed")
+
+
+def _bolt_env():
+    """test_bolt_ref's tiny-variant builder (transformers 5.19.0, the pinned Bolt snapshot's small files): SKIP without."""
+    try:
+        import transformers
+    except ImportError:
+        T._skip("transformers is not importable (spec 21a's 5.19.0 site first on PYTHONPATH)")
+    if transformers.__version__ != "5.19.0":
+        T._skip(f"transformers {transformers.__version__}: bolt_ref is held to 5.19.0")
+    tb = _load("test_bolt_ref")
+    try:
+        return tb, tb.variant("pattern12")
+    except tb.Skip as s:
+        T._skip(str(s))
+
+
+def test_lilicorr_tiny_pair():
+    """The tiny pair end to end (25a's tiny Bolt pattern12 + lilicorr_make_tiny at vocab 131072): bolt_ref.py `run`
+    (a greedy continuation) and `taps --tap-layers 1,2,4,6,9,10` write the dump; Review Focus 5 - the dump's tap.L{i} IS
+    the residual after block i (= `run`'s h.L{i} over the same ids, bitwise; test_bolt_ref ties h.L{i} to
+    output_hidden_states[i + 1]) and taps one block early move the drafts; cmd_run --model bolt-lilicorr over it; the
+    batched drafts = draft_block on the real taps."""
+    import subprocess
+
+    def run(*args):
+        r = subprocess.run([sys.executable, *args], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise AssertionError(f"{args[:2]}: exit {r.returncode}\n{r.stdout[-2000:]}\n{r.stderr[-3000:]}")
+    tb, bolt_dir = _bolt_env()
+    repo = os.path.dirname(os.path.dirname(_HERE))
+    lil_dir = os.environ.get("LILICORR_TINY_DIR", os.path.join(repo, "oracle-out-lilicorr-tiny"))
+    if not os.path.isfile(os.path.join(lil_dir, "model.safetensors")):
+        T._lmt().make(lil_dir, seed=0, vocab=131072)
+    taps = "1,2,4,6,9,10"
+    bolt_ref = os.path.join(_HERE, "bolt_ref.py")
+    with tempfile.TemporaryDirectory() as root:
+        ids = torch.randint(0, 131072, (48,), generator=torch.Generator().manual_seed(26)).tolist()
+        pf = os.path.join(root, "p.ids")
+        with open(pf, "w") as f:
+            f.write(" ".join(map(str, ids)))
+        gold = os.path.join(root, "p.golden.safetensors")
+        run(bolt_ref, "run", bolt_dir, "--weights", "bf16", "--prompt", pf, "--out", gold, "--gen", "24")
+        dumps = os.path.join(root, "dumps")
+        run(bolt_ref, "taps", bolt_dir, "--weights", "bf16", "--golden", f"code/tiny:{pf}:{gold}", "--out", dumps, "--tap-layers", taps)
+        dump = DT.load_dump(os.path.join(dumps, "code__tiny.taps.safetensors"))
+        assert dump["layers"] == [1, 2, 4, 6, 9, 10] and dump["tap_from"] == 0 and dump["n"] == 72
+        full = os.path.join(root, "full.ids")
+        with open(full, "w") as f:
+            f.write(" ".join(map(str, dump["ids"].tolist())))
+        g2 = os.path.join(root, "full.golden.safetensors")
+        run(bolt_ref, "run", bolt_dir, "--weights", "bf16", "--prompt", full, "--out", g2, "--gen", "1", "--taps", "--tap-layers", taps)
+        from safetensors import safe_open
+        with safe_open(g2, "pt") as f:
+            hL = {i: f.get_tensor(f"h.L{i}")[:72] for i in range(12)}
+            tL = {i: f.get_tensor(f"tap.L{i}")[:72] for i in (1, 2, 4, 6, 9, 10)}
+        for i in (1, 2, 4, 6, 9, 10):
+            assert torch.equal(dump["taps"][i], tL[i]) and torch.equal(tL[i], hL[i].to(torch.bfloat16)), i
+        e, h = ref.read_target_embed_head(bolt_dir)
+        d = ref.load_drafter(lil_dir, embed=e, lm_head=h)
+        ctx = d.context_kv(dump["taps"], torch.arange(72))
+        early = d.context_kv({i: hL[i - 1].to(torch.bfloat16) for i in (1, 2, 4, 6, 9, 10)}, torch.arange(72))
+        ps = torch.arange(48, 66)
+        x = dump["ids"]
+        cand, lp, lat, ids_b, _ = DA.lilicorr_draft(d, DA.Head(h), x[ps].tolist(), ps, ctx)
+        flips = 0
+        for b, p in enumerate(ps.tolist()):
+            o = d.draft_block(int(x[p]), p, 7, ctx)
+            assert torch.equal(o.ids, ids_b[b]), p
+            flips += int((d.draft_block(int(x[p]), p, 7, early).ids != o.ids).sum())
+        assert flips > 0
+        out = os.path.join(root, "out")
+        ns = argparse.Namespace(dumps=dumps, out_dir=out, arms="exact,int8,int4g64", k="1-7", batch=8, drafter=lil_dir,
+                                target=bolt_dir, sources=None, dry_run=False, model="bolt-lilicorr",
+                                q="lattice,lattice+lp", temperature=None, top_p=None)
+        assert DA.cmd_run_lilicorr(ns) == 0
+        summ = DA.summarize(sorted(glob.glob(os.path.join(out, "accept.*.json"))), None, tuple(range(1, 8)))
+        es = {arm: summ[arm]["all"]["7"]["E"] for arm in summ}
+    print(f"tiny pair: bolt_ref taps (blocks 1 2 4 6 9 10) = run's h.L (the residual after the block), bitwise; taps one "
+          f"block early flip {flips} / 126 drafts; batched = draft_block on 18 anchors; E_7 {es} (random weights)")
+
+
 TESTS = [test_top_k_fast, test_select_draft_vocab, test_int8, test_accept_accounting,
          test_batch_equals_draft_block, test_vocab_mask, test_positive_alignment, test_run_over_dumps,
-         test_muse_batch_equals_draft_block, test_int4g64_equals_rtn_h, test_muse_sampled, test_muse_run_over_dumps]
+         test_muse_batch_equals_draft_block, test_int4g64_equals_rtn_h, test_muse_sampled, test_muse_run_over_dumps,
+         test_lilicorr_batch_equals_draft_block, test_lilicorr_int8_absorbs_g, test_lilicorr_int4_from_g_w,
+         test_lilicorr_run_over_dumps, test_lilicorr_tiny_pair]
 
 
 def main() -> None:
     torch.set_grad_enabled(False)
     only = sys.argv[1:]
+    skipped = 0
     for t in TESTS:
         if not only or t.__name__ in only:
-            t()
-    print("ok")
+            try:
+                t()
+            except T.Skip as s:
+                skipped += 1
+                print(f"SKIP {t.__name__}: {s}")
+    print(f"ok ({skipped} skipped)")
 
 
 if __name__ == "__main__":
