@@ -702,10 +702,10 @@ class Recorder:
     ascending, w, sel top 10, the 9th-10th gap, the sum); taps after TAP_LAYERS (every row, with `taps`). The SSM /
     conv states after the prompt come from the cache (mamba_states). Rows are bucketed by `key` (layer_major's item)."""
 
-    def __init__(self, model, cfg: dict, h_from: int = 0, acts: bool = True, taps: bool = False):
+    def __init__(self, model, cfg: dict, h_from: int = 0, acts: bool = True, taps: bool = False, tap_layers=None):
         self.cfg, self.h_from, self.acts = cfg, h_from, acts
         self.n = len(cfg["block_configs"])
-        self.taps = [i for i in TAP_LAYERS if i < self.n] if taps else []
+        self.taps = [i for i in (tap_layers or TAP_LAYERS) if i < self.n] if taps else []
         self.key = 0
         self.base: dict = {}
         self.rows: dict = {}
@@ -859,7 +859,7 @@ def cmd_run(a) -> None:
           f"moe), hidden {cfg['hidden_size']}, weights {a.weights} ({model.bolt_ckpt.trunk} trunk), {a.dtype}, mamba path "
           f"{a.path}, cache {a.cache}; prompt {T} ids, chunk {chunk or 'whole'}; h from row {h_from}, logits from row "
           f"{log_from}; built {time.time() - t0:.1f}s", flush=True)
-    rec = Recorder(model, cfg, h_from=h_from, taps=a.taps)
+    rec = Recorder(model, cfg, h_from=h_from, taps=a.taps, tap_layers=parse_tap_layers(a.tap_layers))
     rows, nll = [], torch.empty(max(T - 1, 0))
     ids_t = torch.tensor(ids)
 
@@ -1198,6 +1198,17 @@ def cmd_hfcheck(a) -> None:
 TAP_WINDOW = 1024            # LiLiCorr's context window (spec 26): rows older than n_prompt - 1024 are never read
 
 
+def parse_tap_layers(s: str | None) -> list[int]:
+    """--tap-layers (spec 26a): the blocks whose residual is tapped; default LiLiCorr's TAP_LAYERS. A tiny model taps its
+    own blocks (lilicorr_make_tiny.py's 1, 2, 4, 6, 9, 10 on the 12-block tiny Bolt)."""
+    if not s:
+        return list(TAP_LAYERS)
+    out = [int(x) for x in s.split(",") if x]
+    if out != sorted(set(out)):
+        die(f"--tap-layers {s}: strictly increasing block ids")
+    return out
+
+
 def tap_from_of(n_prompt: int, window: int = TAP_WINDOW) -> int:
     return max(0, n_prompt - window)
 
@@ -1246,8 +1257,9 @@ def cmd_taps(a) -> None:
     os.makedirs(a.out, exist_ok=True)
     todo = [s for s in sources if not os.path.exists(os.path.join(a.out, dt.file_name(s["name"])))]
     toks = sum(len(s["ids"]) for s in todo)
+    tl = parse_tap_layers(a.tap_layers)
     print(f"{len(sources)} sources, {len(sources) - len(todo)} already dumped, {toks} ids to teacher-force; taps after "
-          f"blocks {list(TAP_LAYERS)}, tap_from = n_prompt - {a.window}", flush=True)
+          f"blocks {tl}, tap_from = n_prompt - {a.window}", flush=True)
     for s in todo:
         print(f"  {s['name']}: {len(s['ids'])} ids ({s['n_prompt']} prompt), tap_from "
               f"{tap_from_of(s['n_prompt'], a.window)}", flush=True)
@@ -1259,7 +1271,7 @@ def cmd_taps(a) -> None:
     for s in todo:
         ts = time.time()
         f = tap_from_of(s["n_prompt"], a.window)
-        rec = Recorder(model, cfg, acts=False, taps=True)
+        rec = Recorder(model, cfg, acts=False, taps=True, tap_layers=tl)
         parts = []
 
         def on_logits(r0, lg):
@@ -1315,6 +1327,7 @@ def main() -> None:
     r.add_argument("--logits-tail", type=int, default=1024, help="keep logits from row T - L (-1: all)")
     r.add_argument("--act-tail", type=int, default=256, help="keep h past 4096 ids from row T - A")
     r.add_argument("--taps", action="store_true", help="tap.L{1,18,35,51,68,85} for every row")
+    r.add_argument("--tap-layers", default="", help="the tapped blocks (default 1,18,35,51,68,85; spec 26a's tiny pair)")
     r.add_argument("--cache", default="fp32", choices=["fp32", "bf16"], help="the SSM / conv cache dtype (Decision 2)")
     r.add_argument("--path", default="kernel", choices=["kernel", "torch"], help="the Mamba path (torch: R's fallback)")
     r.add_argument("--dtype", default="bf16", choices=["bf16", "fp32"])
@@ -1344,6 +1357,7 @@ def main() -> None:
     t.add_argument("--out", required=True)
     t.add_argument("--topk", type=int, default=64)
     t.add_argument("--window", type=int, default=TAP_WINDOW)
+    t.add_argument("--tap-layers", default="", help="the tapped blocks (default 1,18,35,51,68,85; spec 26a's tiny pair)")
     t.add_argument("--dry-run", action="store_true")
     f = sub.add_parser("facts", add_help=False)
     f.add_argument("rest", nargs=argparse.REMAINDER)
