@@ -50,6 +50,14 @@ the ascending-id combine), `src/kernels/lfm2moe/lfm_{prep,moe,conv}.cl` (the one
   their existing defines if the KV layout matches (Task 3 Step 1 checks), with a ones gate buffer; else `nb_attn` copies.
 - **Decision 2:** the SSM state is fp32 by default; a `B70_BOLT_SSM=bf16` build is built and measured (Task 8), the default
   changes only on the operator's ruling with Task 8's numbers.
+- **`A = -exp(A_log)` differs by up to 1 ulp between the engine and `bolt_ref` (25b, measured):** the loader computes `A` with
+  `common::exp_torch` (Sleef's expf u10 in plain C++, `src/common/exp_torch.h`); `bolt_mamba_ops.A_from_log` is
+  `-torch.exp(A_log.float())`, which on an x86 torch wheel is MKL's `vsExp`. Over every bf16 value in [-7, 9] they differ on 196
+  of 33,266 values, never by more than 1 ulp (`tools/oracle/bolt_exp_compare.py`; spec 25 §14 item 1). So a Mamba twin held
+  BITWISE against `bolt_ref` must take `A` from the engine's arithmetic: **25c's to do** - a `bolt_ref` switch (an env /
+  option, default off) that computes `A` with a float32 port of `exp_torch` (the same fma chain in torch fp32 ops), used by the
+  fixture generator for the twin's golden values; the bitwise gate B2 reads the switched `A`, the B3 golden comparison keeps the
+  plain `torch.exp` and its ulp tolerance. Not implemented in 25b.
 - **Not here:** prefill (25d: `--prefill*` refused naming it), serving (25e), the verify lists at M = 2..8 and the state
   slots (spec 26c - but every kernel takes `M` as a define with `M <= 8` and the twins test M = 1..4 in one launch).
 
