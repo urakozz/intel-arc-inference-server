@@ -271,6 +271,12 @@ int main(int argc, char** argv) {
     too_many.push_back(bc[0]);
     refused(set(cfg, {"llm_config", "block_configs"}, Value::make_arr(too_many)), "block_configs");
   }
+  // an unknown key inside a block entry is refused naming the block index and the key (any kind of block)
+  refused(set(cfg, {"llm_config", "block_configs", "[1]", "n_shared_experts_override"}, N(2)), "block_configs[1]");
+  refused(set(cfg, {"llm_config", "block_configs", "[1]", "n_shared_experts_override"}, N(2)), "n_shared_experts_override");
+  refused(set(cfg, {"llm_config", "block_configs", "[0]", "mamba_num_heads"}, N(64)), "block_configs[0]");
+  refused(set(cfg, {"llm_config", "block_configs", "[7]", "sliding_window"}, N(8)), "sliding_window");
+  refused(set(cfg, {"llm_config", "block_configs", "[0]", "moe_intermediate_size"}, N(2048)), "moe_intermediate_size");
   // the keys the real config carries and the descriptor holds: dropping the required ones is refused too
   refused(erase(cfg, {"llm_config", "hidden_size"}), "hidden_size");
   refused(erase(cfg, {"llm_config", "block_configs", "[1]", "n_routed_experts"}), "n_routed_experts");
