@@ -42,7 +42,7 @@ st_pre() {
   x "command -v xpu-smi > /dev/null && xpu-smi discovery 2>/dev/null | head -30 || echo 'no xpu-smi'"
   idle pre
   chk "tools/box_validate/data.sh link $DATA $TREE $BASE" "linking the oracle-out* data directories"
-  chk "tools/box_validate/data.sh have > $STATE/have.env; cat $STATE/have.env" "listing the data present"
+  chk "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; cat $STATE/have.env" "listing the data present"
   grab_all data '^HAVE_'
   finish
 }
@@ -869,7 +869,7 @@ stage r14.oracle 14 optin cpu k2,oracle_image - "18a's real-weight reference on 
 st_r14_oracle() {
   chk "tools/box_validate/k2_oracle.sh $DATA" "the K2-Horizon reference run"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_(k2|oracle_k2)=' $STATE/have.env"
+  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_(k2|oracle_k2)=' $STATE/have.env"
   grab_all gap 'selection gap' 12
   finish
 }
@@ -1590,7 +1590,7 @@ stage r24.oracle_synth 24 optin cpu oracle_image - "the synthetic golden sets on
 st_r24_oracle_synth() {
   chk "tools/box_validate/kolibri_oracle.sh $DATA synth" "the Kolibri-1 synthetic reference runs"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_(kolibri|oracle_kolibri)' $STATE/have.env"
+  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_(kolibri|oracle_kolibri)' $STATE/have.env"
   grab_all gap 'selection gap' 8
   grab_all bench 'kolibri_bench.ids|re-bake' 4
   finish
@@ -1644,7 +1644,7 @@ stage r24.oracle_real 24 optin cpu kolibri,oracle_image - "the real golden set o
 st_r24_oracle_real() {
   chk "tools/box_validate/kolibri_oracle.sh $DATA real" "the Kolibri-1 reference runs on the real checkpoint"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_(kolibri|oracle_kolibri)' $STATE/have.env"
+  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_(kolibri|oracle_kolibri)' $STATE/have.env"
   grab_all gap 'selection gap' 8
   finish
 }
@@ -2219,7 +2219,7 @@ stage r31.synth 31 optin cpu q4exp_orig_small,oracle_image - "the two synthetic 
 st_r31_synth() {
   chk "tools/box_validate/qwen4exp_oracle.sh $DATA synth-ckpt" "the synthetic qwen4_exp checkpoints"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_(q4exp|oracle_q4exp)' $STATE/have.env"
+  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_(q4exp|oracle_q4exp)' $STATE/have.env"
   grab_all synth '^ACCEPTED|^wrote|REFUSED|synthetic' 12
   finish
 }
@@ -2227,7 +2227,7 @@ stage r31.ple_convert 31 optin cpu q4exp_intel,oracle_image - "the real PLE tabl
 st_r31_ple_convert() {
   x "df -h \$HOME | tail -1; free -g | head -2"
   chk "tools/box_validate/qwen4exp_oracle.sh $DATA ple-int8" "the PLE int8 file"
-  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_q4exp_intel_ple' $STATE/have.env"
+  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_q4exp_intel_ple' $STATE/have.env"
   grab_all ple '^wrote|^ACCEPTED|REFUSED|PLE int8|head 15' 12
   finish
 }
@@ -2299,7 +2299,7 @@ stage r32.oracle_synth 32 optin cpu oracle_q4exp_synth,oracle_image - "the synth
 st_r32_oracle_synth() {
   chk "tools/box_validate/qwen4exp_oracle.sh $DATA synth" "the qwen4_exp synthetic reference runs"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_oracle_q4exp' $STATE/have.env"
+  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_oracle_q4exp' $STATE/have.env"
   grab_all gap 'gap' 24
   finish
 }
@@ -2900,7 +2900,7 @@ stage r43.synth 43 optin cpu oracle_image - "the synthetic real-width checkpoint
 st_r43_synth() {
   chk "tools/box_validate/muse_oracle.sh $DATA synth-ckpt" "the synthetic Muse-Glimmer checkpoint"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_oracle_muse_synth' $STATE/have.env"
+  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_oracle_muse_synth' $STATE/have.env"
   grab_all synth '^ACCEPTED|REFUSED|^wrote|FAILED' 12
   finish
 }
@@ -2964,7 +2964,7 @@ stage r44.oracle_synth 44 optin cpu oracle_image,oracle_muse_synth - "the synthe
 st_r44_oracle_synth() {
   chk "tools/box_validate/muse_oracle.sh $DATA synth" "the Muse-Glimmer synthetic reference runs"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_oracle_muse_synth' $STATE/have.env"
+  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_oracle_muse_synth' $STATE/have.env"
   grab_all gap 'cap_tie|top-1 - top-2 gap|ppl|^wall' 12
   finish
 }
@@ -3441,7 +3441,7 @@ stage r50.synth      50 optin   cpu oracle_image              -        "make_syn
 st_r50_synth() {
   chk "tools/box_validate/lfm2moe_oracle.sh $DATA synth-ckpt" "the synthetic LFM2.5-24B-A2B checkpoints (both expert spellings)"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_lfm2moe_synth' $STATE/have.env"
+  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_lfm2moe_synth' $STATE/have.env"
   grab_all synth '^ACCEPTED|REJECTED|^wrote|FAILED' 12
   finish
 }
@@ -3512,7 +3512,7 @@ st_r51_synth_golden() {
       "the synthetic ($s) golden sets"
   done
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_oracle_lfm2moe_synth' $STATE/have.env"
+  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_oracle_lfm2moe_synth' $STATE/have.env"
   grab_all gap 'sel gap|^wall' 20
   finish
 }
@@ -4133,7 +4133,7 @@ stage r59.synth      59 default cpu oracle_image              -        "make_syn
 st_r59_synth() {
   chk "tools/box_validate/bolt_synth.sh $DATA synth-ckpt" "the synthetic Bolt checkpoints (both spellings, N 8 and 12)"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_bolt_synth' $STATE/have.env"
+  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_bolt_synth' $STATE/have.env"
   grab_all synth '^ACCEPTED|REJECTED|^wrote|FAILED|^check:' 12
   finish
 }
@@ -4223,7 +4223,7 @@ st_r60_synth_golden() {
       "the synthetic ($s) golden sets"
   done
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  x "tools/box_validate/data.sh have > $STATE/have.env; grep -E '^HAVE_oracle_bolt_synth' $STATE/have.env"
+  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_oracle_bolt_synth' $STATE/have.env"
   grab_all gap 'gap|^wall' 20
   finish
 }

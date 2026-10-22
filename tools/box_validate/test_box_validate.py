@@ -997,7 +997,7 @@ class DriverTest(unittest.TestCase):
         for sid, s in stages.items():
             self.assertIn(s["row"], rows, sid)
             self.assertIn(s["sel"], ("always", "g0", "default", "optin", "manual"), sid)
-            self.assertIn(s["kind"], ("cpu", "gpu", "gpu-self", "-"), sid)
+            self.assertIn(s["kind"], ("cpu", "gpu", "card", "gpu-self", "-"), sid)
             fn = "st_" + sid.replace(".", "_").replace("-", "_")
             self.assertRegex(body, r"(?m)^" + re.escape(fn) + r"\(\) \{", sid)
             for k in s["needs"].split(","):
