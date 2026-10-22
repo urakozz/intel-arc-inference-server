@@ -1928,6 +1928,83 @@ if(B70_BOLT)
 endif()
 # ==== Spec 25c: Nemotron 3.5 Bolt decode ==== (end) ====
 
+# ==== Spec 25d: Nemotron 3.5 Bolt prefill ==== (begin) ====
+# Additive only, as 25c's block: no existing source is edited, so every binary above keeps its name, its command line and
+# its bytes (B0). New Bolt-only sources in src/kernels/bolt/ (kernels::bolt's pf_* names, src/kernels/bolt_kernels.h):
+#   nb_pf_mamba.cl     the Mamba-2 mixer over a chunk in the SSD form: the conv's seed (a launch before the conv) and the
+#                      conv with the last three raw columns written back, dt with the cumulative sums of each ABSOLUTE
+#                      64-row sub-chunk, C B^T per (sub-chunk, group) - plain, and by DPAS (`nb_pf_cb_L64_DPAS`, the
+#                      walk's; both operands bf16) -, the scan (Y_diag, Y_off, the fp32 state on the vector path,
+#                      sub-chunk after sub-chunk), the gated norm at the prefill pitch. Tilings (Review Focus 4): SSD_W
+#                      dims a scan work-group, CONV_ROWS rows a conv work-item - W16_R16 the walk's (PROVISIONAL), W8_R4
+#                      the test's second tiling; `_B16` Decision 2's bf16 state (rounded once at the chunk's end)
+#   nb_pf_moe.cl       the sort / gather of the chunk's REAL rows (no padding row routed), the expert dequant into bf16
+#                      batches, the ascending-id combine (decode's epilogue) - per I, E a kernel argument
+#   nb_pf_moe_gemm.cl  a family copy of prefill/pf_moe_gemm.cl's bf16 form: the up GEMM with the relu2 epilogue (K 1024,
+#                      N = I), the down GEMM plain (K = I, N 1024)
+#   nb_pf_prep.cl      the gather of the chunk's ids into the residual
+# Reused sources at Bolt's shapes: nb_prep.cl / nb_moe.cl at M = 2048 (the norm sites `_NF` / `_S1` / `_S1_T1`, the router,
+# the route, the shared expert's relu2 and the latent, the NoPE attention prep at S 1 - decode's chains row for row);
+# prefill/pf_dequant_slab.cl for the N 4096 linears (out_proj 8192, o_proj 4096, fc2 1024, shared_down 5376 - both layouts,
+# so a P0 re-pick needs no new line); k2/k2_pf_linear.cl for the layout-0 linears that are not whole 1024-column slabs
+# (in_proj 18560, q||k||v 4608, fc1||shared_up 6400: one zero-padded tail slab); the shape-free pf_gemm_T0 (prefill/,
+# built there); Muse-Glimmer's mg_pf_flash_attn full (NoPE) build and its eager twin (Decision 15: built here only when
+# the Muse block is off). What a Bolt prefill chunk binds: runtime/bolt/bolt_prefill.cc (derived in bolt_sizes.cc).
+if(B70_BOLT)
+  set(NB_CL ${CMAKE_CURRENT_SOURCE_DIR}/bolt)
+  set(NB_DEPS DEPENDS ${NB_CL}/nb_common.h ${NB_CL}/nb_expert.h OPTIONS -I${NB_CL})
+  foreach(row "16 16 0" "8 4 0" "16 16 1")
+    separate_arguments(f UNIX_COMMAND "${row}")
+    list(GET f 0 W)
+    list(GET f 1 R)
+    list(GET f 2 B)
+    set(_n nb_pf_mamba_L64_W${W}_R${R})
+    if(B)
+      string(APPEND _n _B16)
+    endif()
+    add_ocloc_kernel(${_n} SOURCE ${NB_CL}/nb_pf_mamba.cl DEFINES PF_SUB=64 SSD_W=${W} CONV_ROWS=${R} SSM_B16=${B} ${NB_DEPS})
+  endforeach()
+  add_ocloc_kernel(nb_pf_cb_L64_DPAS SOURCE ${NB_CL}/nb_pf_mamba.cl DEFINES PF_SUB=64 CB_DPAS=1 ${NB_DEPS})
+  foreach(I 1536 2048 2304 2560)
+    add_ocloc_kernel(nb_pf_moe_I${I}_L1024_T9_TM32 SOURCE ${NB_CL}/nb_pf_moe.cl DEFINES MOE_I=${I} TM=32 PF_KC=2048 ${NB_DEPS})
+    add_ocloc_kernel(nb_pf_moe_gemm_K1024_N${I}_RELU2 SOURCE ${NB_CL}/nb_pf_moe_gemm.cl
+                     DEFINES K=1024 N=${I} TM=32 RELU2_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
+    add_ocloc_kernel(nb_pf_moe_gemm_K${I}_N1024 SOURCE ${NB_CL}/nb_pf_moe_gemm.cl
+                     DEFINES K=${I} N=1024 TM=32 RELU2_EPI=0 OPTIONS -cl-intel-256-GRF-per-thread)
+  endforeach()
+  add_ocloc_kernel(nb_pf_embed_gather_K4096_V131072 SOURCE ${NB_CL}/nb_pf_prep.cl DEFINES K=4096 EMBED_V=131072)
+  # 25c's per-row kernels at M = 2048 (S 1: every prefill linear is one unsplit GEMM)
+  set(NB_PF_NORM_DEFINES K=4096 NORM_WGS=8 NORM_EPS=1e-5f M=2048)
+  add_ocloc_kernel(nb_res_norm_M2048_K4096_W8_NF SOURCE ${NB_CL}/nb_prep.cl
+                   DEFINES ${NB_PF_NORM_DEFINES} NORM_S=0 NORM_S2=0 ${NB_DEPS})
+  add_ocloc_kernel(nb_res_norm_M2048_K4096_W8_S1 SOURCE ${NB_CL}/nb_prep.cl
+                   DEFINES ${NB_PF_NORM_DEFINES} NORM_S=1 NORM_S2=0 ${NB_DEPS})
+  add_ocloc_kernel(nb_res_norm_M2048_K4096_W8_S1_T1 SOURCE ${NB_CL}/nb_prep.cl
+                   DEFINES ${NB_PF_NORM_DEFINES} NORM_S=1 NORM_S2=1 ${NB_DEPS})
+  add_ocloc_kernel(nb_router_M2048_K4096 SOURCE ${NB_CL}/nb_moe.cl DEFINES M=2048 ROUTER_K=4096 ${NB_DEPS})
+  add_ocloc_kernel(nb_route_M2048_T9 SOURCE ${NB_CL}/nb_moe.cl DEFINES M=2048 ROUTE_K=9 ${NB_DEPS})
+  add_ocloc_kernel(nb_sh_act_M2048_L1024_SH5376_S1 SOURCE ${NB_CL}/nb_prep.cl DEFINES M=2048 ACT_S=1 ${NB_DEPS})
+  add_ocloc_kernel(nb_attn_prep_M2048_KV2_S1 SOURCE ${NB_CL}/nb_prep.cl DEFINES ${CTRL_DEFINES} M=2048 QKV_S=1 ${NB_DEPS})
+  # the linears' slabs (the descriptor's layouts; both for the N 4096 ones)
+  foreach(K 8192 4096 1024 5376)
+    foreach(L 0 1)
+      add_ocloc_kernel(pf_dequant_slab_K${K}_N4096_L${L} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/pf_dequant_slab.cl
+                       DEFINES K=${K} N=4096 LAYOUT=${L})
+    endforeach()
+  endforeach()
+  foreach(N 18560 4608 6400)
+    add_ocloc_kernel(k2_pf_dequant_slab_K4096_N${N} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_pf_linear.cl DEFINES K=4096 N=${N})
+  endforeach()
+  if(NOT B70_MUSE)
+    add_ocloc_kernel(mg_pf_flash_attn_Q32KV2_F SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/muse/mg_pf_attn.cl
+                     DEFINES KT=64 RPW=8 HPW=4 Q_HEADS=32 KV_HEADS=2 EAGER=0 WINDOW=0 RING=0
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    add_ocloc_kernel(mg_pf_flash_attn_Q32KV2_F_EAGER SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/muse/mg_pf_attn.cl
+                     DEFINES TGT=64 Q_HEADS=32 KV_HEADS=2 EAGER=1 WINDOW=0 RING=0)
+  endif()
+endif()
+# ==== Spec 25d: Nemotron 3.5 Bolt prefill ==== (end) ====
+
 # Spec 16b (pipeline parallel, `--pipeline-handoff peer`): the peer-write hand-off between
 # the two stages' decode lists - pp_send (device 0's last launch) and pp_recv (device 1's
 # first). No defines: the word counts are kernel arguments, so one binary serves every model.

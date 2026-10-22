@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "kernels/kernels.h"
+#include "kernels/prefill/pf_kernels.h"   // spec 25d: the reused prefill names
 #include "model/bolt.h"
 
 // Spec 25c: Nemotron 3.5 Bolt's device binaries by name - the host half of the spec 25c block in src/kernels/
@@ -150,5 +151,105 @@ inline std::vector<std::string> decode_variants(const model::BoltDesc& d, bool i
   if (peer) add(pp_handoff_variant());
   return v;
 }
+
+// ==== Spec 25d: Nemotron 3.5 Bolt prefill (begin) ======================================================================
+// One chunk of at most kPfC rows through a device's blocks on the Level Zero list (runtime/bolt/bolt_prefill.cc has the
+// walk). The Bolt-only prefill binaries are nb_pf_* (src/kernels/bolt/nb_pf_{mamba,moe,moe_gemm,prep}.cl); 25c's per-row
+// kernels are built again at M = kPfC (the M in the name is the prefill line: the norm sites `_NF` / `_S1` / `_S1_T1` -
+// every prefill linear is one unsplit GEMM, so S 1 whatever decode's S -, the router, the route, the shared expert's act,
+// the attention prep at S 1 - decode's chains row for row); the rest are reused sources at Bolt's shapes: prefill/
+// pf_dequant_slab.cl (a layout-1 linear of whole 1024-column slabs), 18c's k2/k2_pf_linear.cl (a layout-0 one, one
+// zero-padded tail slab where N is not whole slabs: in_proj 18560, q||k||v 4608, fc1||shared_up 6400), the shape-free
+// pf_gemm_T0 and Muse's mg_pf_flash_attn full (NoPE) build and its eager twin (Decision 15).
+inline constexpr unsigned kPfC = 2048, kPfSub = 64, kPfTm = 32, kPfSlab = 1024;
+inline constexpr unsigned kPfInLd = 18688;                        // pad256(18560): in_proj's prefill rows' pitch
+inline constexpr size_t kPfBatchBytes = size_t(512) << 20;        // one weight batch of bf16 expert blocks (Kolibri's)
+inline constexpr unsigned kPfSsdW = 16, kPfConvRows = 16;         // nb_pf_ssd's dims a work-group, nb_pf_conv's rows a
+                                                                  // work-item (PROVISIONAL: r61.speed's phase table)
+inline constexpr unsigned kPfWg = 256, kPfDtWg = 128, kPfCbDpasWg = 64, kPfGatherWg = 64, kPfDequantWg = 16;
+inline constexpr unsigned kPfFlashRpw = 8, kPfFlashHpw = 4;       // mg_pf_flash_attn's rows / heads a work-group (Muse's)
+// nb_pf_moe.cl's header words (H_*): [0] tiles used, [1] 0, [2] rows used, [3] C, [4 + e] expert e's rows (e < 512).
+namespace pf_hdr {
+inline constexpr unsigned kTiles = 0, kRows = 2, kC = 3, kCount = 4;
+inline constexpr unsigned words() { return (kCount + kMaxExperts + 15) / 16 * 16; }   // 528
+}  // namespace pf_hdr
+// The chunk's ABSOLUTE 64-row sub-chunks (nb_pf_mamba.cl): ceil((pos % 64 + C) / 64) - 33 at most.
+inline constexpr unsigned pf_nsub(unsigned pos, unsigned C) { return (pos % kPfSub + C + kPfSub - 1) / kPfSub; }
+inline constexpr unsigned kPfMaxSub = (kPfSub - 1 + kPfC + kPfSub - 1) / kPfSub;
+
+// nb_pf_mamba.cl: seed, conv, dt, the plain C B^T, the scan, the gated norm - one binary per tiling and state precision.
+inline std::string pf_mamba_variant(bool bf16_state, unsigned ssd_w = kPfSsdW, unsigned conv_rows = kPfConvRows) {
+  return "nb_pf_mamba_L64_W" + std::to_string(ssd_w) + "_R" + std::to_string(conv_rows) + (bf16_state ? "_B16" : "");
+}
+// nb_pf_mamba.cl's CB_DPAS build: nb_pf_cb by DPAS (the walk's C B^T; its plain twin is the binary above).
+inline std::string pf_cb_dpas_variant() { return "nb_pf_cb_L64_DPAS"; }
+inline std::string pf_moe_variant(unsigned I) { return "nb_pf_moe_I" + std::to_string(I) + "_L1024_T9_TM32"; }
+inline std::string pf_up_gemm_variant(unsigned I) { return "nb_pf_moe_gemm_K1024_N" + std::to_string(I) + "_RELU2"; }
+inline std::string pf_down_gemm_variant(unsigned I) { return "nb_pf_moe_gemm_K" + std::to_string(I) + "_N1024"; }
+inline std::string pf_embed_variant() { return "nb_pf_embed_gather_K4096_V131072"; }
+inline std::string pf_norm_variant(unsigned S1, unsigned S2) { return res_norm_variant(kPfC, S1, S2, false); }
+inline std::string pf_router_variant() { return router_variant(kPfC); }
+inline std::string pf_route_variant() { return route_variant(kPfC); }
+inline std::string pf_sh_act_variant() { return sh_act_variant(kPfC, 1); }
+inline std::string pf_attn_prep_variant() { return attn_prep_variant(kPfC, 1); }
+inline std::string pf_flash_variant(bool eager) { return std::string("mg_pf_flash_attn_Q32KV2_F") + (eager ? "_EAGER" : ""); }
+inline std::string pf_gemm_t0_variant() { return pf_gemm_variant(false); }
+// One int4 linear's slab binary at ITS layout (the descriptor's {K, N, layout}): whole 1024-column slabs -> pf_dequant_slab
+// at that layout; a layout-0 linear with a tail -> 18c's k2_pf_dequant_slab (one zero-padded tail slab of pad256 columns).
+// "" when neither covers it (layout 1 with a tail): the walk refuses it naming the linear (a P0 re-pick to that cell needs
+// its kernel first).
+inline std::string pf_slab_variant(const model::GemvShape& s) {
+  if (s.N % kPfSlab == 0) return pf_dequant_slab_variant(s.K, s.N, s.layout);
+  if (s.layout == 0) return "k2_pf_dequant_slab_K" + std::to_string(s.K) + "_N" + std::to_string(s.N);
+  return "";
+}
+inline bool pf_slab_tail(const model::GemvShape& s) { return s.N % kPfSlab != 0; }
+inline const char* pf_slab_entry(const model::GemvShape& s) {
+  return pf_slab_tail(s) ? "k2_pf_dequant_slab" : "pf_dequant_slab";
+}
+// The prefill rows' pitch of a linear's GEMM output: pad256(N) (the tail slab's padding columns land there).
+inline constexpr unsigned pf_ld(unsigned N) { return (N + 255) / 256 * 256; }
+
+// Every binary a prefill chunk of `d` binds for an attention form and an SSM state precision (the head over the last row
+// is decode's: decode_variants). tests/kernels/bolt_variant_names_test.cc holds the union to the CMake block's list.
+inline std::vector<std::string> prefill_variants(const model::BoltDesc& d, bool eager, bool bf16_state) {
+  std::vector<std::string> v = {pf_embed_variant(), pf_gemm_t0_variant()};
+  auto add = [&](const std::string& s) {
+    for (const std::string& x : v)
+      if (x == s) return;
+    v.push_back(s);
+  };
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    const Pending p = l == 0 ? Pending{} : Pending{1, d.is_moe(l - 1) ? 1u : 0u};   // prefill folds S 1
+    add(pf_norm_variant(p.s1, p.s2));
+    for (const model::BoltLinear& ln : d.linears(l))
+      if (ln.kind == model::WeightKind::Int4 && ln.id != model::BoltLinearId::ExpertUp &&
+          ln.id != model::BoltLinearId::ExpertDown)
+        add(pf_slab_variant(ln.shape));
+    if (d.is_mamba(l)) {
+      add(pf_mamba_variant(bf16_state));
+      add(pf_cb_dpas_variant());
+    } else if (d.is_attention(l)) {
+      add(pf_attn_prep_variant());
+      add(pf_flash_variant(eager));
+    } else {
+      const unsigned I = d.inter.at(l);
+      add(pf_router_variant());
+      add(pf_route_variant());
+      add(pf_sh_act_variant());
+      add(pf_moe_variant(I));
+      add(pf_up_gemm_variant(I));
+      add(pf_down_gemm_variant(I));
+    }
+  }
+  return v;
+}
+// The prefill head over the last row (prefill_head): decode's norm at M 1 folding the last block's S 1 rows, the head, the
+// two argmax stages.
+inline std::vector<std::string> prefill_head_variants(const model::BoltDesc& d, bool int8_head) {
+  const bool moe = d.layers && d.is_moe(d.layers - 1);
+  return {res_norm_variant(1, 1, moe ? 1u : 0u, false), head_variant(int8_head), argmax1_variant(1), argmax2_variant()};
+}
+// ==== Spec 25d: Nemotron 3.5 Bolt prefill (end) ========================================================================
 
 }  // namespace kernels::bolt
