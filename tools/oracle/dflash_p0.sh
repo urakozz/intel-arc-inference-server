@@ -37,13 +37,15 @@
 #
 # MODEL=lilicorr (spec 26a Tasks 2-3): the LiLiCorr drafter over Bolt's tap dumps (DUMPS, default
 # oracle-out-bolt-taps/dumps - tools/box_validate/bolt_oracle.sh <data> taps makes them), OUT default
-# oracle-out-lilicorr-p0; steps (STEPS, default "check accept lookup"):
+# oracle-out-lilicorr-p0; steps (STEPS, default "check accept lookup union"):
 #   check    test_dflash_ref.py (the LiLiCorr form) and test_dflash_accept.py (incl. the tiny pair: 25a's tiny Bolt +
 #            lilicorr_make_tiny; SITE first on PYTHONPATH)
 #   accept   dflash_accept.py run --model bolt-lilicorr (ARMS default exact,int8,int4g64,exacth,int8h,int4g64h; K 1..7
 #            from one 8-row block per anchor; the sampled estimate for q lattice and lattice+lp) -> OUT/accept/; SKIP
 #            (77) while the drafter's weights are not in the HF cache
 #   lookup   tools/spec/lookup_accept.py --dumps DUMPS --max-k 7 -> OUT/lookup.{txt,json}
+#   union    tools/spec/expert_union.py over ROUTES (default: the golden runs' route records in oracle-out-bolt and
+#            oracle-out-bolt-taps.partial/sources, whichever exist) -> OUT/union{,.gen}.{txt,json} (every row; decode rows)
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 2
 if [ "${MODEL:-qwen38}" = lilicorr ]; then
@@ -52,8 +54,9 @@ if [ "${MODEL:-qwen38}" = lilicorr ]; then
   SITE="${SITE:-oracle-out-q4exp/site}"
   IMAGE="${IMAGE:-agnes-ref-img:latest}"
   THREADS="${THREADS:-12}"
-  STEPS="${STEPS:-check accept lookup}"
+  STEPS="${STEPS:-check accept lookup union}"
   ARMS="${ARMS:-exact,int8,int4g64,exacth,int8h,int4g64h}"
+  ROUTES="${ROUTES:-oracle-out-bolt oracle-out-bolt-taps.partial/sources}"
   MEM="${MEM:-36g}"
   HF="${HF_HOME:-$HOME/.cache/huggingface}"
   DRY_RUN="${DRY_RUN:-}"
@@ -98,6 +101,18 @@ sys.exit(subprocess.run(sys.argv[2:]).returncode)' "${B70_CPU_LOCK:-/tmp/b70-cpu
     python3 tools/spec/lookup_accept.py --dumps "$DUMPS" --max-k 7 --mc-seeds 4 --json "$OUT/lookup.json" \
       > "$OUT/lookup.txt" || { echo "lookup FAILED"; exit 1; }
     sed -n '/(all)/,/^Verify share/p' "$OUT/lookup.txt" | head -14
+  fi
+  if has union; then
+    rdirs=()
+    for r in $ROUTES; do ls "$r"/*.golden.safetensors > /dev/null 2>&1 && rdirs+=("$r"); done
+    if [ ${#rdirs[@]} -eq 0 ]; then
+      echo "union SKIPPED: no *.golden.safetensors in $ROUTES (bolt_oracle.sh <data> golden / taps first)"
+    else
+      python3 tools/spec/expert_union.py "${rdirs[@]}" --json "$OUT/union.json" > "$OUT/union.txt" &&
+        python3 tools/spec/expert_union.py "${rdirs[@]}" --rows gen --json "$OUT/union.gen.json" > "$OUT/union.gen.txt" ||
+        { echo "union FAILED"; exit 1; }
+      cat "$OUT/union.txt"
+    fi
   fi
   echo "=== $(date '+%F %T') done"
   exit "$rc"
