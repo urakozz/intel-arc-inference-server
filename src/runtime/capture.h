@@ -257,4 +257,33 @@ CapturedStep build_stage_draft(l0::Context& ctx, const loader::LoadedModel& m, D
 CapturedStep build_stage_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                                      const PpStage& st, const StageLink& link, const TapVerify& tv, uint32_t M);
 
+#if B70_BATCH_PROBE
+// --- spec 13a: rows of different sequences (the batching probe; B70_BATCH_PROBE builds only) ---------------------
+//
+// build_rows: the decode list at M rows whose per-sequence sites read the row table (runtime/batch_rows.h) - gdn_step,
+// attn_prep and decode attention v2 bound to their `_ROWS` builds (kernels/batch_kernels.h), every row-agnostic kernel
+// at M rows exactly as build() binds it. Row m is (position, KV base, GDN src / dst, slot) from `rows`; the KV cache is
+// ONE allocation (DecodeBuffers::kv_k / kv_v at the slots' summed length) in which a slot is a position range; GDN
+// state index 0 is DecodeBuffers::gdn_state and i >= 1 is state_pool's whole-model state i - 1; the conv ring of slot 0
+// is DecodeBuffers::conv_ring and slot s >= 1's is ring_pool's whole-model ring s - 1. The host writes the table, and
+// Control::n_active = M and cur_token[0..M), before every replay; nothing in the list reads Control::pos.
+//
+// With `mtp` the MTP head's KV fill follows over the same rows (build_verify's tail), each run of a slot fed its own
+// hidden rows: hh[r0] <- hprev[slot] (the slot's h_{pos-1}), hh[r0 + j] <- x[r0 + j - 1] for the run's later rows
+// (device copies, captured for `run_slots` / `run_lengths` - the list is then one per shape); the head's attn_prep at
+// `head_rows` (each row's position - 1, its slot's KV base, in the head's own KV layer at the same layout). The host
+// sets the head's control (hctl): n_active = M, cur_token[0..M) the rows' ids. decode_launches (+ 10 with the head).
+struct BatchRowsBind {
+  l0::Mem* rows = nullptr;               // runtime::BatchRowTable, shared
+  const l0::Mem* state_pool = nullptr;   // GDN state indices 1..: one whole-model gdn_state each (null: index 0 only)
+  const l0::Mem* ring_pool = nullptr;    // conv rings of slots 1..: one whole-model conv_ring each (null: slot 0 only)
+  const MtpBuffers* mtp = nullptr;       // the head's buffers (the engine's), or null: the decode list alone
+  l0::Mem* head_rows = nullptr;          // runtime::BatchRowTable for the head's attn_prep
+  const l0::Mem* hprev = nullptr;        // bf16 [slots][hidden]
+  std::vector<uint32_t> run_slots, run_lengths;   // the table's shape (runtime::run_lengths), with the head
+};
+CapturedStep build_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const BatchRowsBind& br,
+                        uint32_t M);
+#endif
+
 }  // namespace runtime
