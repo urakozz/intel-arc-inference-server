@@ -155,6 +155,42 @@ inline size_t ring_layer_bytes(const model::BoltDesc& d) { return size_t(loader:
 inline size_t ssm_layer_bytes(const model::BoltDesc& d, BoltState s) {
   return size_t(d.m_heads) * d.m_head_dim * d.m_state * (s == BoltState::Bf16 ? 2 : 4);
 }
+// --- spec 25e: prefix-cache snapshots (spec 7's PrefixCache on Bolt, spec 25 §6.3) -------------------------------------------
+// What a session leaves behind between replays, besides `pos`: the 8 attention blocks' growing KV (the cache's BLOCKS, as every
+// model's) and, per Mamba block, the SSM state and the raw-xBC conv ring. The recurrent state exists for exactly ONE position - so a
+// snapshot is taken only where a restore can use it (the block ends, spec 7's request end) and a hit restores the largest block end
+// <= the common prefix (vLLM's `--mamba-cache-mode align`, the same idea).
+//   state, per Mamba block in layer order: the SSM state [128][64][128] (fp32, or bf16 under B70_BOLT_SSM=bf16 - 167,772,160 B /
+//   83,886,080 B over the 40 blocks), then the three raw-xBC columns BEFORE pos (positions pos - 1, pos - 2, pos - 3, in this
+//   order, 10240 bf16 each: 2,457,600 B over the 40 blocks), written back at their ring slots (q % 16) on a restore - the decode
+//   conv of pos reads exactly pos - 3 .. pos - 1, and a position below 0 is a zero row on the host (the conv reads 0 there; a
+//   restore at pos 0..2 writes the zeros into the slots, which nothing else reads).
+//   kv     [K | V][attention block, in layer order][end - begin][kv_heads x head_dim] bf16 (runtime::Engine's order): 8,192 B a
+//          position at the real shapes.
+// One host layout for --pp 1 and --pp 2 (spec 16b's rule: an entry moves between one card and two unchanged - every block is
+// addressed through the placement, never by device order). A run is one contiguous range of one device allocation, in host order.
+inline constexpr uint32_t kStateColumns = 3;   // conv_kernel - 1
+enum class SnapTensor : uint32_t { KvK, KvV, ConvRing, Ssm };
+struct SnapRun {
+  uint32_t device = 0;
+  SnapTensor tensor = SnapTensor::KvK;
+  size_t offset = 0, bytes = 0;   // within the device allocation
+  bool zero = false;              // a ring column of a position before 0 (state runs only)
+};
+// 167,772,160 + 2,457,600 = 170,229,760 B (fp32) / 86,343,680 B (bf16) at the real shapes.
+inline size_t state_snapshot_bytes(const model::BoltDesc& d, BoltState s) {
+  return size_t(d.mamba_layers()) * (ssm_layer_bytes(d, s) + size_t(kStateColumns) * d.m_conv_dim * 2);
+}
+// 8,192 B a position at the real shapes.
+inline size_t kv_snapshot_bytes(const model::BoltDesc& d, uint32_t n_pos) {
+  return size_t(n_pos) * 2 * d.attn_layers() * d.kv_n() * 2;
+}
+// Every Mamba block's SSM state and the ring columns of positions pos - 1 .. pos - 3. Throws when the ring cannot hold them.
+std::vector<SnapRun> state_runs(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t pos, BoltState s);
+// Positions [begin, end) of every attention block, K then V. Throws unless begin <= end <= max_len.
+std::vector<SnapRun> kv_runs(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t max_len, uint32_t begin,
+                             uint32_t end);
+
 // What BoltReserve::decode_scratch must hold for device `dev`'s decode list: the control block, scratch_sizes' total and
 // the 64-byte lines of any EMPTY persistent group (plan()'s kv / ssm / conv_rings terms are exact and 0 there) - so plan()
 // IS the allocation (bolt_decode_test checks it on the card).

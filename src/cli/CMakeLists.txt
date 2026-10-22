@@ -113,3 +113,8 @@ endif()
 target_link_libraries(b70-decode PRIVATE b70_bolt_runtime)
 # Spec 25d: and Nemotron 3.5 Bolt's prefill (b70_bolt_prefill: BoltEngine::prefill, its walk and scratch).
 target_link_libraries(b70-decode PRIVATE b70_bolt_prefill)
+# Spec 25e: b70-serve serves Nemotron 3.5 Bolt (src/cli/bolt_serve.h; runtime::bolt::BoltEngine behind cli::bolt::BoltEngineAdapterT,
+# whose prefill every request runs). Appended, as the lines above.
+if(TARGET b70-serve)
+  target_link_libraries(b70-serve PRIVATE b70_bolt_runtime b70_bolt_prefill)
+endif()

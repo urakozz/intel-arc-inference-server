@@ -21,6 +21,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "cli/bolt_decode.h"    // spec 25c: is_bolt, check_args, settle
+#include "cli/bolt_serve.h"     // spec 25e: BoltEngineAdapterT, the generation defaults, the refusals
 #include "cli/dflash_args.h"    // spec 19c: --spec dflash
 #include "cli/k2_decode.h"
 #include "cli/k2_serve_adapter.h"
@@ -128,6 +130,19 @@ void usage() {
                "                 top_p sample with generation_config.json's 1.0 / 64 / 0.95 through the model's\n"
                "                 softcap on the host; --mtp, --spec, --kv-cache int8 and --prefill-backend\n"
                "                 l0-int8|sycl-tla are refused. UNVALIDATED on the cards (queue row 46)\n"
+               "                 Nemotron 3.5 Bolt 74B-A9B (spec 25e, model_type nemotron_h_omni over nemotron_h_puzzle):\n"
+               "                 its own engine on TWO cards by default (--pp 2, --pipeline-split / --pipeline-handoff;\n"
+               "                 the whole model does not fit one), prefill on l0 only, --max-len auto -> up to 262144;\n"
+               "                 [--chat-template FILE] (default: the snapshot's chat_template.jinja; its sha256 is\n"
+               "                 printed), [--generation-config FILE] (sampling defaults and EOS; default: the snapshot's\n"
+               "                 file when it carries sampling keys, else NVIDIA's published T 1.0 / top-p 0.95 / EOS\n"
+               "                 [2, 11]); chat_template_kwargs enable_thinking (default true) / medium_effort /\n"
+               "                 truncate_history_thinking reach the template, force_nonempty_content the reasoning parser\n"
+               "                 (ultra_v3's rules), the OpenAI reasoning_effort maps onto them (none|minimal -> thinking\n"
+               "                 off, low|medium -> medium_effort, high -> default); Qwen3-Coder XML tool calls; hybrid\n"
+               "                 prefix-cache snapshots (SSM states + conv columns + KV at 2048-position block ends);\n"
+               "                 --mtp, --spec, --kv-cache int8 and --prefill-backend l0-int8|sycl-tla are refused.\n"
+               "                 UNVALIDATED on the cards (queue row 62)\n"
                "                 [--pp 1|2] [--pipeline-parallel-size 1|2]   2 (spec 16d): the model's\n"
                "                             layers over GPUs 0 and 1 of what Level Zero shows (Qwen3.8,\n"
                "                             Agnes, Ornith, Kolibri-1 - its default; K2-Horizon is refused).\n"
@@ -554,6 +569,138 @@ int serve_lfm2moe(const Lfm2MoeServe& a, server::Options options) {
   return listen_until_stopped(server, options);
 }
 
+// Spec 25e: Nemotron 3.5 Bolt 74B-A9B served - runtime::bolt::BoltEngine (two cards by default, spec 25 Decision 4: the whole
+// model is 40.46 GB of weights; or one for a synthetic / small checkpoint) behind cli::bolt::BoltEngineAdapterT (the hybrid
+// prefix snapshots: per Mamba block the SSM state and three conv columns, the attention blocks' KV; host sampling), Bolt's chat
+// format (server::ChatFormat::bolt(): the template's kwargs, the ultra_v3 reasoning rules, Qwen3-Coder XML calls), the snapshot's
+// chat_template.jinja (or --chat-template FILE), NVIDIA's sampling defaults and EOS [2, 11] unless the snapshot's
+// generation_config.json carries sampling keys or --generation-config FILE says otherwise (cli::bolt::resolve_generation).
+// b70-decode's flow (cli/bolt_decode.h run_decode): the refusals before the device (cli::bolt::check_args and check_serve_flags,
+// the trained-context cap), both cards in one Level Zero context with peer access when --pp 2, the placement and max_len
+// planned before the load with the prefill scratch (every request prefills), each block loaded straight onto its device.
+struct BoltServe {
+  std::string snapshot_dir;
+  cli::bolt::DecodeArgs args;   // the planner's and the refusals' inputs (prefill on)
+  std::string chat_template;       // --chat-template FILE ("" = the snapshot's)
+  std::string generation_config;   // --generation-config FILE ("" = the snapshot's / published)
+  bool prefix_auto = true;
+  uint32_t prefix_cache_gb = 0;
+};
+
+int serve_bolt(const BoltServe& a, server::Options options) {
+  namespace rb = runtime::bolt;
+  const cli::bolt::DecodeArgs& da = a.args;
+  const model::BoltDesc pre = loader::bolt_checkpoint_desc(a.snapshot_dir, 0);
+  cli::bolt::check_args(da, pre);
+  cli::bolt::check_serve_max_len(da.max_len.is_auto, da.max_len.value, pre.max_pos);   // the trained 262144, before the device
+  // The switches, read once (a bad value throws before the device).
+  const rb::BoltAttn attn = rb::bolt_attn();
+  const rb::BoltFuse fuse = rb::bolt_fuse();
+  const rb::BoltState state = rb::bolt_state();
+  // The generation defaults (Decision 12): the snapshot's generation_config.json when it carries sampling keys, else NVIDIA's
+  // published values; --generation-config FILE is the operator's word.
+  cli::bolt::Generation gen;
+  {
+    const auto read = [](const std::string& path, nlohmann::json& out) {
+      std::ifstream g(path);
+      if (!g) return false;
+      try {
+        g >> out;
+      } catch (const nlohmann::json::exception& error) {
+        throw std::runtime_error("'" + path + "' is not JSON: " + error.what());
+      }
+      return true;
+    };
+    nlohmann::json snap, given;
+    const std::string snap_path = a.snapshot_dir + "generation_config.json";
+    const bool have_snap = read(snap_path, snap);
+    bool have_given = false;
+    if (!a.generation_config.empty()) {
+      have_given = read(a.generation_config, given);
+      if (!have_given) throw std::runtime_error("--generation-config: cannot read '" + a.generation_config + "'");
+    }
+    try {
+      gen = cli::bolt::resolve_generation(have_snap ? &snap : nullptr, have_given ? &given : nullptr, a.generation_config,
+                                          snap_path);
+    } catch (const std::invalid_argument& error) {
+      throw std::runtime_error(error.what());
+    }
+  }
+  TemplateAdapter chat_template = a.chat_template.empty() ? TemplateAdapter(a.snapshot_dir)
+                                                          : TemplateAdapter(a.snapshot_dir, a.chat_template);
+  const std::string template_sha = chat_template.tmpl.source_sha256();
+  TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
+  if (tokenizer.vocab_used() != pre.vocab_used)
+    std::fprintf(stderr, "note: %stokenizer.json defines %u ids, Nemotron 3.5 Bolt's published tokenizer %u (the head has %u "
+                         "rows); sampling masks from %u, and a greedy argmax on a row without a token takes the masked row's "
+                         "argmax\n", a.snapshot_dir.c_str(), tokenizer.vocab_used(), pre.vocab_used, pre.vocab,
+                 tokenizer.vocab_used());
+  const uint32_t devs = cli::bolt::devices_of(da, pre);
+  if (devs == 2) cli::require_two_devices(l0::Context::gpu_count());
+  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(devs == 2 ? 0u : da.device);
+  std::unique_ptr<l0::Context> c1 = devs == 2 ? std::make_unique<l0::Context>(*c0, 1u) : nullptr;
+  std::vector<l0::Context*> ctx = {c0.get()};
+  if (c1) ctx.push_back(c1.get());
+  std::vector<size_t> dev = {c0->memory_bytes()};
+  if (c1) dev.push_back(c1->memory_bytes());
+  if (devs == 1)
+    std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
+                 da.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+  else
+    std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--pp 2: one context]\n", c0->name().c_str(), c0->eu_count(),
+                 c1->name().c_str(), c1->eu_count());
+  if (devs == 2 && !c0->can_access_peer(*c1))
+    throw std::runtime_error("--pp 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and both "
+                             "hand-offs write it (docs/10-the-box.md)");
+  const rb::BoltPlan pl = cli::bolt::settle(pre, da, dev);
+  loader::BoltLoadOptions lo;
+  lo.int8_head = da.int8_head;
+  lo.max_len = pl.max_len;
+  lo.layers = da.layers;
+  loader::BoltLoaded model = [&] {
+    StdoutToStderr redirect;
+    return loader::load_bolt(ctx, a.snapshot_dir, lo, pl.place);
+  }();
+  runtime::PipelineOptions opt;
+  opt.handoff = da.pipe.handoff;
+  rb::BoltEngine engine(ctx, std::move(model), pl.max_len, /*debug_tap=*/false, opt, /*profile=*/false, attn, fuse, state);
+  engine.prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
+  std::fprintf(stderr, "%s\n", engine.memory_line().c_str());
+  cli::bolt::BoltEngineAdapterT<rb::BoltEngine> engine_adapter(engine, tokenizer.vocab_used());
+  options.chat_format = server::ChatFormat::bolt();
+  options.eos_ids = gen.eos;
+  options.sampling_defaults = gen.sampling;
+  options.stop_strings = gen.stops;
+  // Pinned host memory of the one context both cards share: either device's copies reach it.
+  const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
+  server::Server server({tokenizer, chat_template, engine_adapter}, options);
+  const std::string placement =
+      devs == 2 ? std::string("--pp 2 (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
+                      std::to_string(engine.split()) + ": device 0 blocks [0, " + std::to_string(engine.split()) +
+                      "), device 1 [" + std::to_string(engine.split()) + ", " + std::to_string(engine.model().desc.layers) +
+                      "))"
+                : std::string("--pp 1");
+  std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(), options.host.c_str(),
+               options.port, pl.max_len);
+  print_eos(gen.eos);
+  const server::Sampling& s = gen.sampling;
+  std::fprintf(stderr,
+               ", Nemotron 3.5 Bolt (%s chat format, template sha256 %.8s%s), %s, prefill backend l0 (chunk %u), attention %s "
+               "(B70_BOLT_ATTN), fuse %s (B70_BOLT_FUSE), SSM state %s (B70_BOLT_SSM), mtp none, lm_head %s, kv cache bf16, "
+               "sampling defaults %s: %s T %.2f top-p %.2f top-k %s, prefix snapshots at aligned %u-position block ends: %u "
+               "SSM states + conv columns %.1f MB, attention KV %zu B a position\n",
+               options.chat_format.name(), template_sha.c_str(),
+               template_sha == cli::bolt::kTemplateSha256 ? " = Bolt's" : " (NOT Bolt's 6521afc7: --chat-template or another "
+                                                                          "snapshot's)",
+               placement.c_str(), rb::kPfC, rb::bolt_attn_name(engine.attention()), rb::bolt_fuse_name(engine.fuse()).c_str(),
+               rb::bolt_state_name(engine.state()),
+               loader::lm_head_form_name(da.int8_head ? loader::LmHeadForm::Int8 : loader::LmHeadForm::Checkpoint),
+               gen.source.c_str(), s.greedy ? "greedy" : "sampled", s.temperature, s.top_p,
+               s.top_k == 0 ? "none" : std::to_string(s.top_k).c_str(), rb::BoltEngine::kBlock,
+               engine.model().desc.mamba_layers(), double(engine.state_bytes()) / 1e6, engine.kv_bytes(1));
+  return listen_until_stopped(server, options);
+}
+
 // Spec 23e: Muse-Glimmer-30B served - runtime::muse::MuseEngine (one card by default, decision 7; or two, spec 16b's
 // pieces as 23c / 23d built them) behind cli::muse::MuseEngineAdapterT (the rings + full-KV prefix snapshots, host
 // sampling with the model's softcap), Muse's chat format (server::ChatFormat::muse(): the channels, ATEM calls,
@@ -958,7 +1105,8 @@ int run(int argc, char** argv) {
   uint32_t q4_layers = 0;
   bool q4_layers_auto = false, have_q4_layers = false;
   std::string q4_ple_dir, q4_tokenizer;
-  std::string chat_template_file;   // spec 23e: --chat-template FILE (Muse-Glimmer)
+  std::string chat_template_file;   // spec 23e: --chat-template FILE (Muse-Glimmer; spec 25e: Bolt too)
+  std::string generation_config_file;   // spec 25e: --generation-config FILE (Bolt)
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -1079,8 +1227,10 @@ int run(int argc, char** argv) {
       q4_ple_dir = value(i, "--ple-dir");
     } else if (arg == "--tokenizer") {   // spec 21e: Qwen3.8-Flash-Next only
       q4_tokenizer = value(i, "--tokenizer");
-    } else if (arg == "--chat-template") {   // spec 23e: Muse-Glimmer only
+    } else if (arg == "--chat-template") {   // spec 23e: Muse-Glimmer; spec 25e: Bolt
       chat_template_file = value(i, "--chat-template");
+    } else if (arg == "--generation-config") {   // spec 25e: Bolt only
+      generation_config_file = value(i, "--generation-config");
     } else if (!arg.empty() && arg[0] == '-') {
       usage();
       throw std::runtime_error(cli::unknown_option(arg));
@@ -1095,6 +1245,52 @@ int run(int argc, char** argv) {
     usage();
     throw std::runtime_error("a snapshot directory or HF repo id is required");
   }
+  // Spec 25e: Nemotron 3.5 Bolt (model_type nemotron_h_omni over nemotron_h_puzzle) runs runtime::bolt::BoltEngine behind
+  // cli::bolt::BoltEngineAdapterT (two cards by default) - dispatched here, before every other family's rules (its own:
+  // cli::bolt::check_args and check_serve_flags replace them), as b70-decode dispatches it. A path that does not resolve is not
+  // Bolt: the flow below reports it. --generation-config is Bolt's alone.
+  if (cli::bolt::is_bolt(path)) {
+    cli::bolt::ServeFlags flags;
+    flags.mtp = mtp_k > 0 || mtp_auto;
+    flags.spec = spec_arg;
+    flags.proposer_tuning = have_mtp_tuning || have_spec_tuning || have_spec_max || have_spec_cost || dflash.have_model ||
+                            dflash.have_format || have_draft_q;
+    flags.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
+    flags.qwen4exp_flags = have_q4_layers || !q4_ple_dir.empty() || !q4_tokenizer.empty();
+    cli::bolt::check_serve_flags(flags);
+    if (options.host.empty()) throw std::runtime_error("--host must not be empty");
+    if (options.served_model.empty()) throw std::runtime_error("--served-name must not be empty");
+    runtime::PrefillBackend bolt_backend{};
+    if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, bolt_backend))
+      throw std::runtime_error("--prefill-backend expects sycl-tla, l0 or l0-int8, got '" + pp_backend_arg + "'");
+    if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);
+    options.chat_format = server::ChatFormat::bolt();
+    BoltServe bs;
+    bs.snapshot_dir = loader::resolve_snapshot(path);
+    bs.chat_template = chat_template_file;
+    bs.generation_config = generation_config_file;
+    cli::bolt::DecodeArgs& ba = bs.args;
+    ba.path = bs.snapshot_dir;
+    ba.max_len = max_len_arg;   // auto by default: the largest that fits, at most 262144 (Decision 14)
+    ba.reserve = mem_reserve;
+    ba.device = device;
+    ba.int8_head = lm_head == loader::LmHeadForm::Int8;   // int8 by default (Decision 18), as every served model
+    ba.pipe = pipe;
+    ba.pp_given = pp_given;
+    ba.prefill = true;          // every request prefills: the plan carries the prefill scratch
+    ba.pp_backend_given = have_pp_backend;
+    ba.pp_backend = bolt_backend;
+    ba.mtp = false;             // refused above
+    ba.spec = false;            // refused above
+    ba.kv8 = kv_cache == runtime::KvCache::Int8;
+    ba.layers = 0;              // refused above
+    bs.prefix_auto = prefix_auto;
+    bs.prefix_cache_gb = prefix_cache_gb;
+    return serve_bolt(bs, options);
+  }
+  if (!generation_config_file.empty())
+    throw std::runtime_error("--generation-config is built for Nemotron 3.5 Bolt only (spec 25e); the other served models read "
+                             "their snapshot's generation_config.json");
   // Spec 24e: LFM2.5-24B-A2B (model_type lfm2_moe) runs runtime::lfm2moe::Lfm2MoeEngine behind
   // cli::lfm2moe::Lfm2MoeEngineAdapterT (one card by default, --pp 2 for capacity) - dispatched here, before the Qwen family's
   // proposer, kv-cache and --pp rules (its own: cli::lfm2moe::check_args, and what it has none of below, replace them), as
