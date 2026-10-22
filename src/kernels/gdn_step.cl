@@ -243,6 +243,49 @@ inline __global float* slot_base(__global float* s0, __global float* spec, uint 
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// BATCH_ROWS (spec 13 §9, plan 13a): rows of different sequences
+// ---------------------------------------------------------------------------
+// Undefined, this file is byte for byte the kernels above (no existing command line defines it). Defined, the
+// kernel takes three more arguments - `state_pool`, `ring_pool` and the row table `rows` (runtime::BatchRowTable,
+// words BROW_* - src/kernels/CMakeLists.txt) - and row m is (position, src, dst, slot) from the table instead of
+// (Control::pos + m, the one state, the one ring):
+//
+//   * the conv ring is the row's SLOT's: slot 0 is `conv_ring` (the layer's slice of PersistentBuffers::conv_ring),
+//     slot s > 0 is `ring_pool + (s - 1) * RING_SLOT_STRIDE` (one whole-model ring a slot, slot-major); a slot's
+//     FIRST row reads the window from its ring at its position - 1 .. - 3, its later rows take the taps from
+//     registers exactly as the plain kernel's rows m >= 1 do; row m writes its slot's ring at its position % RING;
+//   * the state tile is loaded at a slot's first row from GDN state index `src` (0 = `state`, i > 0 =
+//     `state_pool + (i - 1) * SPEC_SLOT_STRIDE`, SPEC_SLOTS' slot_base) and written after EVERY row to index `dst`.
+//
+// A slot's rows are one run at consecutive positions (runtime::check_rows), so a run is the plain kernel's M loop
+// over that slot and a 1-row run is the M = 1 kernel: the same operations in the same order, row for row - the
+// probe's bitwise claim (tools/mac/clrun/batch_rows_run.cc holds it on the Mac). Safe without a cross-work-group
+// barrier for the in-place kernel's two reasons: each work-item reads and writes only its own 16 cells of any state
+// (a dst is never another run's src - check_rows), and within one slot's ring the written positions (the run's) and
+// the read ones (its first position - 1 .. - 3) are disjoint at RING >= M + 3; two slots never share a ring.
+#ifdef BATCH_ROWS
+#ifdef SPEC_SLOTS
+#error "gdn_step: BATCH_ROWS and SPEC_SLOTS are two different builds"
+#endif
+#if !defined(SPEC_SLOT_STRIDE) || !defined(RING_SLOT_STRIDE)
+#error "gdn_step BATCH_ROWS: SPEC_SLOT_STRIDE (floats per GDN state) and RING_SLOT_STRIDE (ushorts per ring) must be defined"
+#endif
+#if !defined(BROW_WORDS) || !defined(BROW_POS) || !defined(BROW_SRC) || !defined(BROW_DST) || !defined(BROW_SLOT)
+#error "gdn_step BATCH_ROWS: the row table's BROW_* words must be defined (src/kernels/CMakeLists.txt)"
+#endif
+inline __global float* state_at(__global float* s0, __global float* pool, uint i) {
+  return i == 0 ? s0 : pool + (size_t)(i - 1) * SPEC_SLOT_STRIDE;
+}
+inline __global ushort* ring_at(__global ushort* r0, __global ushort* pool, uint s) {
+  return s == 0 ? r0 : pool + (size_t)(s - 1) * RING_SLOT_STRIDE;
+}
+// Row m starts a run when it is the first row or the previous row is another slot's.
+inline bool run_start(__global const uint* rows, uint m) {
+  return m == 0 || rows[m * BROW_WORDS + BROW_SLOT] != rows[(m - 1) * BROW_WORDS + BROW_SLOT];
+}
+#endif
+
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
 // f32 -> bf16, round-to-nearest-even. Same add-and-shift as common::f32_to_bf16
@@ -272,6 +315,10 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
 #ifdef SPEC_SLOTS
                        , __global float* restrict state_spec
 #endif
+#ifdef BATCH_ROWS
+                       , __global float* restrict state_pool, __global ushort* restrict ring_pool,
+                       __global const uint* restrict rows
+#endif
                        ) {
   const uint h = get_group_id(0);          // v-head
   const uint c = get_group_id(1);          // state-column chunk
@@ -285,7 +332,9 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   __local float kv_red[SG][CHUNK_V];       // kv band partials: [band][column − 32c]
   __local float o_red[SG][CHUNK_V];        // o  band partials
 
+#ifndef BATCH_ROWS
   const uint pos = ctrl[CTRL_POS];
+#endif
   uint n_act = ctrl[CTRL_NACT];
   if (n_act > M) n_act = M;                // the compiled variant is the ceiling
   if (n_act == 0) return;                  // uniform across the work-group
@@ -306,6 +355,7 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
     const float w0 = w[0], w1 = w[1], w2 = w[2], w3 = w[3];
     // Ring ownership, argued in the header.
     const bool own_ring = (c == 0) && (which == 2 || (h % V_PER_K) == 0);
+#ifndef BATCH_ROWS
 
     // The window's three older slots: absolute positions pos−3, pos−2, pos−1.
     // A position below zero contributes 0 - the reference's conv state is
@@ -333,6 +383,34 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
       win1 = win2;
       win2 = win3;
     }
+#else
+    // BATCH_ROWS: the same chain per row; a slot's first row reloads the window from that slot's ring.
+    float win0 = 0.0f, win1 = 0.0f, win2 = 0.0f;
+    __global ushort* ring = conv_ring;
+    for (uint m = 0; m < n_act; ++m) {
+      const uint pm = rows[m * BROW_WORDS + BROW_POS];
+      if (run_start(rows, m)) {
+        ring = ring_at(conv_ring, ring_pool, rows[m * BROW_WORDS + BROW_SLOT]);
+        const int p3 = (int)pm - 3, p2 = (int)pm - 2, p1 = (int)pm - 1;
+        win0 = p3 < 0 ? 0.0f : bf16f(ring[((size_t)((uint)p3 % RING)) * CONV_ROWS + ch]);
+        win1 = p2 < 0 ? 0.0f : bf16f(ring[((size_t)((uint)p2 % RING)) * CONV_ROWS + ch]);
+        win2 = p1 < 0 ? 0.0f : bf16f(ring[((size_t)((uint)p1 % RING)) * CONV_ROWS + ch]);
+      }
+      const ushort raw_b =
+          rne_bf16(qkvz_partials[((size_t)(QKVZ_S - 1) * M + m) * QKVZ_N + ch]);
+      if (own_ring) ring[((size_t)(pm % RING)) * CONV_ROWS + ch] = raw_b;
+      const float win3 = bf16f(raw_b);
+      float acc = 0.0f;
+      acc = fma(w0, win0, acc);
+      acc = fma(w1, win1, acc);
+      acc = fma(w2, win2, acc);
+      acc = fma(w3, win3, acc);
+      xs[which][m][i] = rne_bf16(silu_f32(acc));
+      win0 = win1;
+      win1 = win2;
+      win2 = win3;
+    }
+#endif
   }
   barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -345,13 +423,15 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
 #ifdef SPEC_SLOTS
   const uint live = ctrl[CTRL_LIVE] % N_SLOTS;
   const __global float* restrict src = slot_base(state, state_spec, live);
-#else
+#elif !defined(BATCH_ROWS)
   const __global float* restrict src = state;
 #endif
+#ifndef BATCH_ROWS
   for (uint kk = 0; kk < BAND_K; ++kk) {
     S[kk][0] = src[sbase + (size_t)kk * DIM];
     S[kk][1] = src[sbase + (size_t)kk * DIM + SG];
   }
+#endif
 
   const float negA = gdn_small[NEGA_OFF + h];      // the loader's -exp(A_log), fp32
   const float dt_bias = gdn_small[DTBIAS_OFF + h];
@@ -360,6 +440,15 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   // 3. One token at a time: head scalars, l2norm, the recurrence.
   // -------------------------------------------------------------------------
   for (uint m = 0; m < n_act; ++m) {
+#ifdef BATCH_ROWS
+    if (run_start(rows, m)) {   // a slot's first row: its tile from GDN state index src
+      const __global float* src = state_at(state, state_pool, rows[m * BROW_WORDS + BROW_SRC]);
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        S[kk][0] = src[sbase + (size_t)kk * DIM];
+        S[kk][1] = src[sbase + (size_t)kk * DIM + SG];
+      }
+    }
+#endif
     // Head scalars - fp32 from the a‖b linear's bf16 outputs. Every work-item
     // computes them from the same words, so they agree bit for bit.
     const ushort a_b = rne_bf16(ab_out[(size_t)m * AB_STRIDE + h]);        // ref: a_b
@@ -454,13 +543,22 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
       }
     }
 #endif
+#ifdef BATCH_ROWS
+    {   // the state after row m, into GDN state index dst (header, BATCH_ROWS)
+      __global float* dst = state_at(state, state_pool, rows[m * BROW_WORDS + BROW_DST]);
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        dst[sbase + (size_t)kk * DIM] = S[kk][0];
+        dst[sbase + (size_t)kk * DIM + SG] = S[kk][1];
+      }
+    }
+#endif
     barrier(CLK_LOCAL_MEM_FENCE);   // the next token reuses rq/rk/kv_red/o_red
   }
 
   // -------------------------------------------------------------------------
   // 4. The tile goes back once, after every token of this step.
   // -------------------------------------------------------------------------
-#ifndef SPEC_SLOTS
+#if !defined(SPEC_SLOTS) && !defined(BATCH_ROWS)
   for (uint kk = 0; kk < BAND_K; ++kk) {
     state[sbase + (size_t)kk * DIM] = S[kk][0];
     state[sbase + (size_t)kk * DIM + SG] = S[kk][1];

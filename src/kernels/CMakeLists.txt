@@ -2077,6 +2077,56 @@ endif()
 set(B70_LILICORR_P0_KERNELS ${B70_LILICORR_P0_KERNELS} CACHE INTERNAL "spec 26a's probe binaries (lilicorr_cost_names_test)")
 # ==== Spec 26a: LiLiCorr P0 ==== (end) ====
 
+# ==== Spec 13a: the batching probe (rows of different sequences) ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md, Task 2. Record: docs/probe-batching-2026-10-23.md.
+# OFF by default: a default build compiles exactly what it compiled before, and no engine binds any of these - only
+# tools/probe/probe_batch_step through runtime::build_rows (capture.cc, compiled under the same option).
+# tools/kernel_cmdlines lists them (it turns the option on), so the Mac syntax-checks every command line here.
+#   gdn_step_rows_M<M>[_G54]            gdn_step.cl BATCH_ROWS: per row its position, slot (conv ring) and GDN state
+#                                       indices (src at a slot's first row, dst after every row); the strides of one
+#                                       whole-model state and one whole-model ring baked (48 / 54 GDN layers)
+#   attn_prep_M<M>[_S1][_KV8]_ROWS      attn.cl / kv8.cl's writer: RoPE at the row's position, K / V at its slot's
+#                                       KV base + position (_S1: the MTP head's bf16 q||k||v, QKV_S 1)
+#   attn_v2_M<M>_T32[_KV8]_ROWS         attention v2 / its kv8 twin: groups = a slot's rows at one stride, each over
+#                                       its own slot's keys
+# at M = 1..8 (the 8-row budget, spec 13 §9), and Agnes's row-agnostic M = 5..8 rows B70_VERIFY_M8 built for Qwen3.8
+# only (gate||up' 5120 x 38912 S8 L0, down' 19456 x 5120 S4 L0, SiLU at 19456, argmax_stage1 at 248089). Every other
+# binary the probe's lists bind is B70_MTP's (M = 1..4) or B70_VERIFY_M8's (M = 5..8). The source edits are BATCH_ROWS
+# blocks only: no existing command line defines it, so every existing binary's preprocessed source is unchanged.
+# BROW_DEFINES is the row table's word layout (runtime::BatchRow, kernels::batch_row - the host mirror).
+option(B70_BATCH_PROBE "build the batching probe: the row builds, build_rows and probe_batch_step (spec 13a)" OFF)
+if(B70_BATCH_PROBE)
+  if(NOT (B70_MTP AND B70_VERIFY_M8 AND B70_KV8 AND B70_AGNES))
+    message(FATAL_ERROR "B70_BATCH_PROBE needs B70_MTP, B70_VERIFY_M8, B70_KV8 and B70_AGNES (their M-row binaries)")
+  endif()
+  set(BROW_DEFINES BATCH_ROWS=1 BROW_WORDS=8 BROW_POS=0 BROW_KVB=1 BROW_SRC=2 BROW_DST=3 BROW_SLOT=4)
+  # One whole-model GDN state (gdn_layers x 48 x 128 x 128 floats) and conv ring (gdn_layers x 16 x 10240 ushorts).
+  set(BR_GDN_QWEN SPEC_SLOT_STRIDE=37748736 RING_SLOT_STRIDE=7864320)
+  set(BR_GDN_AGNES SPEC_SLOT_STRIDE=42467328 RING_SLOT_STRIDE=8847360)
+  foreach(MM 1 2 3 4 5 6 7 8)
+    add_ocloc_kernel(gdn_step_rows_M${MM} SOURCE ${GDN_CL} DEFINES ${GDN_DEFINES} ${BROW_DEFINES} ${BR_GDN_QWEN} M=${MM})
+    add_ocloc_kernel(gdn_step_rows_M${MM}_G54 SOURCE ${GDN_CL}
+                     DEFINES ${GDN_DEFINES} ${BROW_DEFINES} ${BR_GDN_AGNES} M=${MM})
+    add_ocloc_kernel(attn_prep_M${MM}_ROWS SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} ${BROW_DEFINES} M=${MM})
+    add_ocloc_kernel(attn_prep_M${MM}_S1_ROWS SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=1)
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_ROWS SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                     DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2})
+    add_ocloc_kernel(attn_prep_M${MM}_KV8_ROWS SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=2)
+    add_ocloc_kernel(attn_prep_M${MM}_S1_KV8_ROWS SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=1)
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_KV8_ROWS SOURCE ${KV8_CL}
+                     DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT})
+  endforeach()
+  foreach(MM 5 6 7 8)   # Agnes's decode list at M = 5..8 (B70_VERIFY_M8 built Qwen3.8's)
+    add_gemv_variant(${MM} 5120 38912 8 0)
+    add_gemv_variant(${MM} 19456 5120 4 0)
+    add_ocloc_kernel(prep_silu_mul_M${MM}_I${AGNES_I} SOURCE ${PREP_CL} DEFINES M=${MM} INTERMEDIATE=${AGNES_I})
+    add_ocloc_kernel(argmax_stage1_M${MM}_V248089 SOURCE ${ARGMAX_CL} DEFINES ${AGNES_ARGMAX_DEFINES} M=${MM})
+  endforeach()
+endif()
+# ==== Spec 13a ==== (end) ====
+
 # Spec 16b (pipeline parallel, `--pipeline-handoff peer`): the peer-write hand-off between
 # the two stages' decode lists - pp_send (device 0's last launch) and pp_recv (device 1's
 # first). No defines: the word counts are kernel arguments, so one binary serves every model.

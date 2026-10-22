@@ -66,6 +66,19 @@
 #error "kv8: define exactly one of KV8_PREP, KV8_DEC, KV8_FLASH, KV8_GATE (src/kernels/CMakeLists.txt)"
 #endif
 
+// BATCH_ROWS (spec 13 §9, plan 13a; undefined on every existing command line): the decode writer and reader for rows
+// of DIFFERENT sequences - attn.cl's / attn_v2.cl's BATCH_ROWS builds, whose headers are the contract, over the int8
+// cache: the row table `rows` (runtime::BatchRowTable, words BROW_*) as the last argument, row m's position and KV
+// base (the K / V rows AND their scales at kv_base + position) from it. M = 1..8 (the 8-row budget) in this build.
+#ifdef BATCH_ROWS
+#if !(KV8_PREP || KV8_DEC) || (KV8_PREP && defined(PF) && PF)
+#error "kv8 BATCH_ROWS: the decode writer (KV8_PREP, PF 0) and reader (KV8_DEC) only"
+#endif
+#if !defined(BROW_WORDS) || !defined(BROW_POS) || !defined(BROW_KVB) || !defined(BROW_SLOT)
+#error "kv8 BATCH_ROWS: the row table's BROW_* words must be defined (src/kernels/CMakeLists.txt)"
+#endif
+#endif
+
 #if KV8_DEC || KV8_FLASH
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
@@ -226,7 +239,11 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
                             __global const float* restrict rope,
                             __global float* restrict attn_q, __global float* restrict attn_gate,
                             __global char* restrict kv_k, __global char* restrict kv_v,
-                            __global ushort* restrict k_scale, __global ushort* restrict v_scale) {
+                            __global ushort* restrict k_scale, __global ushort* restrict v_scale
+#ifdef BATCH_ROWS
+                            , __global const uint* restrict rows
+#endif
+                            ) {
   const uint wg = get_group_id(0);
   const uint m = get_group_id(1);
   const uint i = get_local_id(0);
@@ -234,12 +251,18 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
   __local float nrm[HD];       // the normalised head, fp32 - RoPE needs dim i+-32
   __local float xch[HD];       // the FWHT's exchange
 
+#ifndef BATCH_ROWS
   const uint pos = ctrl[CTRL_POS];
+#endif
   uint n_act = ctrl[CTRL_NACT];
 #if !PF
   if (n_act > M) n_act = M;    // the compiled variant is the ceiling
 #endif
   if (m >= n_act) return;      // uniform across the work-group
+#ifdef BATCH_ROWS
+  const uint pm = rows[m * BROW_WORDS + BROW_POS];    // the row's position (BATCH_ROWS, above)
+  const uint kvb = rows[m * BROW_WORDS + BROW_KVB];   // its slot's first KV position
+#endif
 
   const bool is_q = wg < Q_HEADS;
   const uint h = is_q ? wg : wg - Q_HEADS;
@@ -259,7 +282,11 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
   nrm[i] = bf16f(rne_bf16(xf * rstd * nw[i]));
   barrier(CLK_LOCAL_MEM_FENCE);
 
+#ifndef BATCH_ROWS
   __global const float* restrict cs = rope + (size_t)(pos + m) * 2 * ROT_HALF;
+#else
+  __global const float* restrict cs = rope + (size_t)pm * 2 * ROT_HALF;
+#endif
   float outv;
   if (i < ROT_HALF) {
     const float c = cs[i], s = cs[ROT_HALF + i];
@@ -284,7 +311,11 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
         bf16f(rne_bf16(qkv_sum(qkv_partials, m, base + HD + i)));
 #endif
   } else {
+#ifndef BATCH_ROWS
     const size_t row = (size_t)(pos + m) * KV_HEADS + h;
+#else
+    const size_t row = (size_t)(kvb + pm) * KV_HEADS + h;
+#endif
     const float yk = kv8_rotate(bf16f(rne_bf16(outv)), i, xch);
     kv8_store(yk, i, red, kv_k + row * HD, k_scale + row);
     const float vb = bf16f(rne_bf16(qkv_sum(qkv_partials, m, V_OFF + (size_t)h * HD + i)));
@@ -322,8 +353,12 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
 #ifndef TGT
 #error "kv8 dec: TGT must be defined (runtime::DecodeScratch::kAttnV2Blocks)"
 #endif
+#ifndef BATCH_ROWS
 #if M < 1 || M > 4
 #error "kv8 dec: M is 1..4"
+#endif
+#elif M < 1 || M > 8
+#error "kv8 dec BATCH_ROWS: M is 1..8"
 #endif
 #define WAVE_P 16
 #define SG 16
@@ -377,22 +412,36 @@ __attribute__((reqd_work_group_size(KV8_WG, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
                                  __global const float* restrict attn_q,
+#ifndef BATCH_ROWS
                                  __global const char* restrict kv_k,
                                  __global const ushort* restrict k_scale,
                                  __global const char* restrict kv_v,
                                  __global const ushort* restrict v_scale,
-                                 __global float* restrict attn_part) {
+#else
+                                 __global const char* restrict kv_k_all,
+                                 __global const ushort* restrict k_scale_all,
+                                 __global const char* restrict kv_v_all,
+                                 __global const ushort* restrict v_scale_all,
+#endif
+                                 __global float* restrict attn_part
+#ifdef BATCH_ROWS
+                                 , __global const uint* restrict rows
+#endif
+                                 ) {
   const uint j = get_group_id(0);
   const uint blk = get_group_id(1);
   const uint lid = get_local_id(0);
   const uint sgid = lid / SG;
   const uint lane = lid % SG;
 
+#ifndef BATCH_ROWS
   const uint pos = ctrl[CTRL_POS];
+#endif
   uint n_act = ctrl[CTRL_NACT];
   if (n_act > M) n_act = M;
   if (n_act == 0) return;
 
+#ifndef BATCH_ROWS
   const uint s0 = v2_ppw(pos + 1);
   const uint s1 = v2_ppw(pos + n_act);
   uint msplit = 1;
@@ -400,6 +449,17 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
   const bool live0 = blk * s0 < pos + msplit;
   const bool live1 = msplit < n_act && blk * s1 < pos + n_act;
   if (!live0 && !live1) return;
+#else
+  uint rp[M], rs[M], rb[M];   // attn_v2.cl's BATCH_ROWS build, line for line
+  bool live = false;
+  for (uint m = 0; m < M; ++m) {
+    rp[m] = m < n_act ? rows[m * BROW_WORDS + BROW_POS] : 0u;
+    rs[m] = m < n_act ? rows[m * BROW_WORDS + BROW_SLOT] : 0u;
+    rb[m] = m < n_act ? rows[m * BROW_WORDS + BROW_KVB] : 0u;
+    if (m < n_act && blk * v2_ppw(rp[m] + 1) <= rp[m]) live = true;
+  }
+  if (!live) return;
+#endif
 
   __local float qpack[NPR * HD];
   __local float sc_x[2][NPR][WAVE_P];
@@ -414,11 +474,24 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
   for (uint q = 0; q < NPR; ++q) { mx[q] = -INFINITY; sm[q] = 0.0f; acc[q] = 0.0f; }
   uint wc = 0;
 
+#ifndef BATCH_ROWS
   for (uint g = 0; g < 2; ++g) {
     const uint mlo = g ? msplit : 0u, mhi = g ? n_act : msplit;
     if (mlo >= mhi) continue;
     const uint s = g ? s1 : s0;
     const uint end = pos + mhi;
+#else
+  for (uint mlo = 0, mhi = 0; mlo < n_act; mlo = mhi) {
+    const uint s = v2_ppw(rp[mlo] + 1);
+    mhi = mlo + 1;
+    while (mhi < n_act && rs[mhi] == rs[mlo] && v2_ppw(rp[mhi] + 1) == s) ++mhi;
+    const uint end = rp[mhi - 1] + 1;
+    const size_t r0 = (size_t)rb[mlo] * KV_HEADS;   // the slot's first (position, kv head) row
+    __global const char* restrict kv_k = kv_k_all + r0 * HD;
+    __global const ushort* restrict k_scale = k_scale_all + r0;
+    __global const char* restrict kv_v = kv_v_all + r0 * HD;
+    __global const ushort* restrict v_scale = v_scale_all + r0;
+#endif
     const uint bstart = blk * s;
     if (bstart >= end) continue;
     const uint bend = min(bstart + s, end);
@@ -456,7 +529,11 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
       for (uint pr = 0; pr < NPR; ++pr) {
         const uint m = pr / GQA;
         if (m < mlo || m >= mhi) continue;
+#ifndef BATCH_ROWS
         const uint bound = pos + m;
+#else
+        const uint bound = rp[m];
+#endif
         const float mine = p0 + lane <= bound ? sc_x[buf][pr][lane] * SSCALE : -INFINITY;
         const float nmx = fmax(mx[pr], sub_group_reduce_max(mine));
         float resc, wl;
@@ -502,17 +579,28 @@ __attribute__((reqd_work_group_size(KV8_WG, 1, 1)))
 __kernel void attn_reduce_v2_kv8(__global const uint* restrict ctrl,
                                  __global const float* restrict attn_part,
                                  __global const float* restrict attn_gate,
-                                 __global ushort* restrict attn_out) {
+                                 __global ushort* restrict attn_out
+#ifdef BATCH_ROWS
+                                 , __global const uint* restrict rows
+#endif
+                                 ) {
   const uint h = get_group_id(0);
   const uint m = get_group_id(1);
   const uint d = get_local_id(0);
   __local float hmx[TGT], hsm[TGT];
   __local float xch[HD];
+#ifndef BATCH_ROWS
   const uint pos = ctrl[CTRL_POS];
+#endif
   uint n_act = ctrl[CTRL_NACT];
   if (n_act > M) n_act = M;
   if (m >= n_act) return;
+#ifndef BATCH_ROWS
   uint nb = (pos + m) / v2_ppw(pos + m + 1) + 1;
+#else
+  const uint pm = rows[m * BROW_WORDS + BROW_POS];
+  uint nb = pm / v2_ppw(pm + 1) + 1;
+#endif
   if (nb > TGT) nb = TGT;
   for (uint b = d; b < nb; b += KV8_WG) {
     __global const float* restrict p = attn_part + (((size_t)h * TGT + b) * M + m) * PART;
