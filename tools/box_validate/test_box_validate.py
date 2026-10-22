@@ -540,6 +540,9 @@ FAKE_AGENT = textwrap.dedent("""\
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             assert body["stream"] is True and body["temperature"] == 0 and body["tools"]
             n[0] += 1
+            if "chat_template_kwargs" in body:   # agentic_run.sh's EXTRA (spec 25e) reached the request body
+                with open(os.path.join(logdir, "extra.txt"), "w") as f:
+                    f.write(json.dumps(body["chat_template_kwargs"], sort_keys=True))
             if n[0] == 1:
                 assert [m["role"] for m in body["messages"]] == ["system", "user"]
                 delta = {"tool_calls": [{"index": 0, "id": "call_1", "type": "function",
@@ -590,6 +593,22 @@ class AgenticRunTest(Tmp):
         with open(self.p("out", "report.md")) as f:
             self.assertIn("| 2 | 80 | 48 | 60 | 55 |", f.read())
         self.assertTrue(os.path.exists(self.p("out", "run.json")))
+
+    def test_extra_reaches_every_request(self):
+        extra = '{"chat_template_kwargs": {"truncate_history_thinking": false}}'
+        env = dict(os.environ, B70_SERVE=self.p("fake-serve"), PORT=str(free_port()), WAIT="30", EXTRA=extra)
+        r = subprocess.run([os.path.join(HERE, "agentic_run.sh"), self.p("outx"), "/snap", self.p("t.json")],
+                           capture_output=True, text=True, env=env, timeout=120, cwd=ROOT)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(self.p("outx", "server-log", "extra.txt")) as f:
+            self.assertEqual(json.loads(f.read()), {"truncate_history_thinking": False})
+        # without EXTRA no chat_template_kwargs is sent
+        env.pop("EXTRA")
+        env["PORT"] = str(free_port())
+        r = subprocess.run([os.path.join(HERE, "agentic_run.sh"), self.p("outy"), "/snap", self.p("t.json")],
+                           capture_output=True, text=True, env=env, timeout=120, cwd=ROOT)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(self.p("outy", "server-log", "extra.txt")))
 
     def test_server_down(self):
         env = dict(os.environ, B70_SERVE="/usr/bin/false", PORT=str(free_port()), WAIT="5")

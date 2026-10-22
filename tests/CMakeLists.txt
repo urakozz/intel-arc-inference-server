@@ -5178,4 +5178,10 @@ if(B70_BOLT)
     bolt_snapshot_gpu_synth_pp_test bolt_snapshot_gpu_cross_test bolt_snapshot_gpu_real_test
     PROPERTIES LABELS "checkpoint;bolt" SKIP_RETURN_CODE 77 TIMEOUT 7200)
 endif()
+# Review I1: the top-p filter without a top-k (Bolt's sampled steps) against server::filter_probs on randomized rows, and its timing.
+add_executable(bolt_sampling_test server/bolt_sampling_test.cc)
+target_include_directories(bolt_sampling_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(bolt_sampling_test PRIVATE b70_server)
+add_test(NAME bolt_sampling_test COMMAND bolt_sampling_test)
+set_tests_properties(bolt_sampling_test PROPERTIES LABELS bolt TIMEOUT 600)
 # ==== Spec 25e: Nemotron 3.5 Bolt served (label bolt) ==== (end) ====
