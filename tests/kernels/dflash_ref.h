@@ -47,7 +47,12 @@
 
 #include "common/bf16.h"
 
+// No fma contraction in the twin. clang honours the ISO pragma; g++ does not know it (an
+// error under -Werror=unknown-pragmas) and needs none: the tree builds in ISO mode
+// (CMAKE_CXX_EXTENSIONS OFF -> -std=c++17), where g++'s default is -ffp-contract=off.
+#if defined(__clang__)
 #pragma STDC FP_CONTRACT OFF
+#endif
 
 namespace dfref {
 

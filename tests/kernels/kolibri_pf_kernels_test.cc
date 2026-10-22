@@ -316,7 +316,7 @@ std::vector<uint32_t> routers(Dev& dv, uint32_t C, const std::vector<uint16_t>& 
     const kr::Route want = kr::route(logits.data() + size_t(m) * RN, bias.data());
     for (uint32_t j = 0; j < kk::kTopK; ++j) {
       CHECK_EQ(out[size_t(m) * 32 + j], want.ids[j]);
-      worst = std::max(worst, std::llabs(int64_t(out[size_t(m) * 32 + 8 + j]) - int64_t(kr::as_u32(want.w[j]))));
+      worst = std::max<int64_t>(worst, std::llabs(int64_t(out[size_t(m) * 32 + 8 + j]) - int64_t(kr::as_u32(want.w[j]))));
     }
   }
   CHECK(worst <= 2);
