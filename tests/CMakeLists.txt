@@ -5101,4 +5101,80 @@ target_include_directories(bolt_parse_dump PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(bolt_parse_dump PRIVATE b70_server)
 # (its selftest - python3 tools/toolcall/bolt_parser_check.py --selftest bolt_parse_dump tests/server/bolt_parse_cases.json - is a
 # stage of row 62: host_only.cmake disables a test whose command is not an executable of the tree.)
+# Task 4 (host): b70-serve's refusals for Bolt, before the device - cli::bolt::check_serve_flags (what b70-serve parsed and Bolt
+# has no use for), b70-decode's check_args with prefill on, the trained-context cap; the same through the binary are the box's
+# cli_reject_serve_bolt_* tests.
+add_executable(bolt_serve_args_test server/bolt_serve_args_test.cc)
+target_include_directories(bolt_serve_args_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(bolt_serve_args_test PRIVATE b70_bolt_plan b70_server PkgConfig::ZE)
+b70_target_kernel_dir(bolt_serve_args_test)   # (kernels/kernels.h, reached through the engine header, wants the define)
+add_test(NAME bolt_serve_args_test COMMAND bolt_serve_args_test)
+set_tests_properties(bolt_serve_args_test PROPERTIES LABELS bolt)
+# ... and through the binary (box; the vendored config.json is all the dispatch, check_args and the planner read before the device):
+if(TARGET b70-serve AND COMMAND b70_serve_reject)
+  set(_bolt_serve_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/bolt)
+  b70_serve_reject(cli_reject_serve_bolt_mtp ${_bolt_serve_cfg} --mtp 1 EXPECT "no MTP head")
+  b70_serve_reject(cli_reject_serve_bolt_mtp_auto ${_bolt_serve_cfg} --mtp auto EXPECT "no MTP head")
+  b70_serve_reject(cli_reject_serve_bolt_spec_mtp ${_bolt_serve_cfg} --spec mtp EXPECT "no MTP head")
+  b70_serve_reject(cli_reject_serve_bolt_lookup ${_bolt_serve_cfg} --spec lookup EXPECT "spec 26 (the LiLiCorr drafter)")
+  b70_serve_reject(cli_reject_serve_bolt_dflash ${_bolt_serve_cfg} --spec dflash EXPECT "spec 26 (the LiLiCorr drafter)")
+  b70_serve_reject(cli_reject_serve_bolt_spec_max ${_bolt_serve_cfg} --spec-max 2 EXPECT "has none")
+  b70_serve_reject(cli_reject_serve_bolt_draft_vocab ${_bolt_serve_cfg} --draft-vocab 32k EXPECT "has neither")
+  b70_serve_reject(cli_reject_serve_bolt_kv8 ${_bolt_serve_cfg} --kv-cache int8 EXPECT "Decision 17")
+  b70_serve_reject(cli_reject_serve_bolt_prefill_int8 ${_bolt_serve_cfg} --prefill-backend l0-int8
+    EXPECT "int8 prefill for this family is out of scope")
+  b70_serve_reject(cli_reject_serve_bolt_prefill_sycl ${_bolt_serve_cfg} --prefill-backend sycl-tla EXPECT "no Bolt walk")
+  b70_serve_reject(cli_reject_serve_bolt_layers ${_bolt_serve_cfg} --layers 3 EXPECT "belong to Qwen3.8-Flash-Next")
+  b70_serve_reject(cli_reject_serve_bolt_max_len ${_bolt_serve_cfg} --max-len 262145
+    EXPECT "exceeds Nemotron 3.5 Bolt's trained context 262144")
+  b70_serve_reject(cli_reject_serve_bolt_device ${_bolt_serve_cfg} --pp 2 --device 1 EXPECT "--device names one card")
+  b70_serve_reject(cli_reject_serve_bolt_split ${_bolt_serve_cfg} --pp 1 --pipeline-split 3
+    EXPECT "--pipeline-split belongs to --pp 2")
+  b70_serve_reject(cli_reject_serve_bolt_generation_config ${_bolt_serve_cfg} --generation-config /nonexistent/gc.json
+    EXPECT "--generation-config: cannot read")
+  set_tests_properties(cli_reject_serve_bolt_mtp cli_reject_serve_bolt_mtp_auto cli_reject_serve_bolt_spec_mtp
+    cli_reject_serve_bolt_lookup cli_reject_serve_bolt_dflash cli_reject_serve_bolt_spec_max cli_reject_serve_bolt_draft_vocab
+    cli_reject_serve_bolt_kv8 cli_reject_serve_bolt_prefill_int8 cli_reject_serve_bolt_prefill_sycl cli_reject_serve_bolt_layers
+    cli_reject_serve_bolt_max_len cli_reject_serve_bolt_device cli_reject_serve_bolt_split
+    cli_reject_serve_bolt_generation_config PROPERTIES LABELS bolt)
+endif()
+# Task 4 (host): the engine behind the server without a device - cli::bolt::BoltEngineAdapterT over a fake with BoltEngine's
+# interface whose SSM states, conv rings and attention KV are host buffers in BoltBuffers' layout (one card and two): runtime::
+# bolt::state_runs / kv_runs on the real shapes (170,229,760 B of state, 8,192 B of KV a position, one host layout under --pp 1
+# and --pp 2), save / load on host buffers, Review Focus 4 (restores at positions 0 .. 18 and, through spec 7's PrefixSession, at
+# 2048, 4096, 6144, 2049, 5000 and 300 - every turn and the whole memory == a cold run), a snapshot moving between every split,
+# and the server over HTTP (greedy == the decode run, a cached second turn, seeded sampling, no id the tokenizer lacks).
+add_executable(bolt_snapshot_test runtime/bolt_snapshot_test.cc)
+target_include_directories(bolt_snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(bolt_snapshot_test PRIVATE b70_server b70_bolt_plan)
+add_test(NAME bolt_snapshot_test COMMAND bolt_snapshot_test)
+set_tests_properties(bolt_snapshot_test PROPERTIES LABELS bolt TIMEOUT 900)
+# On the card (box only; SKIP 77 without the synthetic sets / the real export): bolt_snapshot_gpu_test - BoltEngine's snapshot calls
+# (Review Focus 4): restores at the block ends 2048 / 4096 (the hook's own saves) bitwise the cold run, at the request ends 2049 /
+# 5000 / 300 / 3 / 2 / 1 / 0 bitwise the session that never left (KV, conv columns, SSM states, logits, ids), on one card and on two
+# (pp2:6 on the 12-block synthetic; SergiioB's export on two); `cross`: a snapshot taken on two cards continues on one, and the
+# reverse (spec 16b's rule; two GPUs); `b16`: the bf16 state arm.
+if(B70_BOLT)
+  add_executable(bolt_snapshot_gpu_test runtime/bolt_snapshot_gpu_test.cc)
+  b70_target_kernel_dir(bolt_snapshot_gpu_test)
+  target_include_directories(bolt_snapshot_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(bolt_snapshot_gpu_test PRIVATE b70_bolt_prefill b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(bolt_snapshot_gpu_test)
+  endif()
+  add_dependencies(bolt_snapshot_gpu_test ${B70_BOLT_DECODE_KERNELS} ${B70_BOLT_REUSED_KERNELS} ${B70_BOLT_PREFILL_KERNELS}
+    ${B70_BOLT_PREFILL_REUSED})
+  set(_bolt_snap_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/bolt_4k.ids)
+  add_test(NAME bolt_snapshot_gpu_synth_test COMMAND bolt_snapshot_gpu_test ${B70_BOLT_SYNTH_DIR}/n12-g128 ${_bolt_snap_ids})
+  add_test(NAME bolt_snapshot_gpu_synth_g64x_test COMMAND bolt_snapshot_gpu_test ${B70_BOLT_SYNTH_DIR}/n12-g64x ${_bolt_snap_ids})
+  add_test(NAME bolt_snapshot_gpu_synth_b16_test COMMAND bolt_snapshot_gpu_test ${B70_BOLT_SYNTH_DIR}/n12-g128 ${_bolt_snap_ids} b16)
+  add_test(NAME bolt_snapshot_gpu_synth_pp_test COMMAND bolt_snapshot_gpu_test ${B70_BOLT_SYNTH_DIR}/n12-g128 ${_bolt_snap_ids}
+    pp2:6)
+  add_test(NAME bolt_snapshot_gpu_cross_test COMMAND bolt_snapshot_gpu_test ${B70_BOLT_SYNTH_DIR}/n12-g128 ${_bolt_snap_ids} cross)
+  add_test(NAME bolt_snapshot_gpu_real_test COMMAND bolt_snapshot_gpu_test ${B70_BOLT_SNAPSHOT} ${_bolt_snap_ids} pp2)
+  set_tests_properties(bolt_snapshot_gpu_synth_test bolt_snapshot_gpu_synth_g64x_test bolt_snapshot_gpu_synth_b16_test
+    bolt_snapshot_gpu_synth_pp_test bolt_snapshot_gpu_cross_test bolt_snapshot_gpu_real_test
+    PROPERTIES LABELS "checkpoint;bolt" SKIP_RETURN_CODE 77 TIMEOUT 7200)
+endif()
 # ==== Spec 25e: Nemotron 3.5 Bolt served (label bolt) ==== (end) ====

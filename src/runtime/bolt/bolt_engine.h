@@ -151,7 +151,27 @@ class BoltEngine {
   using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
   void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
 
+  // --- spec 25e: prefix-cache snapshots (spec 7's engine calls; runtime/bolt/bolt_sizes.h's state_runs / kv_runs give both host
+  // layouts, one for --pp 1 and --pp 2) ------------------------------------------------------------------------------------------
+  // The state is what a session leaves behind besides `pos` and the KV: per Mamba block the SSM state (fp32 or bf16 - the arm
+  // B70_BOLT_SSM) and the raw-xBC columns of positions pos - 1 .. pos - 3, written back at their ring slots by load_state (a
+  // position below 0 a zero row). state_bytes() is 170,229,760 B (86,343,680 with the bf16 arm) and kv_bytes(n) n x 8,192 B at the
+  // real shapes (derived). save_state copies the state of the CURRENT pos (every device idle: the hook runs at a chunk end / the
+  // prompt end, a request-end snapshot after the last fence); load_state writes it and sets pos on every device (n_active 0).
+  // save_kv / load_kv copy positions [begin, end) of every attention block; begin == end copies nothing; throws unless begin <=
+  // end <= max_len. A snapshot is valid only for the SSM state precision it was made with (bf16_state(): the adapter's store
+  // key carries it). A restore after a failed hand-off resets first (it rewrites everything a session reads).
+  size_t state_bytes() const;
+  size_t kv_bytes(uint32_t n_pos) const;
+  bool bf16_state() const { return state_ == BoltState::Bf16; }
+  void save_state(void* host);
+  void load_state(const void* host, uint32_t pos);
+  void save_kv(uint32_t begin, uint32_t end, void* host);
+  void load_kv(uint32_t begin, uint32_t end, const void* host);
+
  private:
+  void settle_all(const char* what);                   // spec 25e: every device idle, or throws naming `what`
+  l0::Mem& snap_mem(uint32_t dev, int tensor) const;   // spec 25e: a SnapTensor's device allocation
   struct Stage;
   // Spec 25d: a device's pieces for the prefill half (b70_bolt_prefill), which cannot see Stage.
   l0::Context& stage_ctx(uint32_t dev) const;
