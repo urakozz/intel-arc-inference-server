@@ -476,125 +476,131 @@ def xml_call(name, params):
 
 
 # Each case: name, rule (what it tests), text (what the model writes after the prompt), thinking (the prompt ends in
-# "<think>\n"), force (force_nonempty_content), tools (names, schema-first typing), expect: reasoning, content, calls
-# [{"name", "arguments"}], and optionally "ours": the fields where the server differs BY DECISION with the reason.
-def case(name, rule, text, thinking=True, force=False, tools=None, calls=None, reasoning="", content="", ours=None,
-         ultra=True):
+# "<think>\n"), force (force_nonempty_content), tools (names, schema-first typing) and `expect` - what the SERVER yields:
+# reasoning, content, tool_calls [{"name", "arguments"}]. `differs` (a note) marks where the server deliberately differs from
+# the reference reading (ultra_v3 for the split, score.py's `qwen-think` for the first call); the cross-check below skips what
+# the case's `skip` list names (a call's surrounding whitespace, the raw-string reader on typed values ...).
+def case(name, rule, text, thinking=True, force=False, tools=None, calls=None, reasoning="", content="", differs=None,
+         skip=()):
     c = {"name": name, "rule": rule, "text": text, "thinking": thinking, "force_nonempty_content": force,
          "tools": tools_of(tools), "expect": {"reasoning": reasoning, "content": content, "tool_calls": calls or []}}
-    if ours:
-        c["ours"] = ours
-    c["ultra_v3_check"] = ultra
+    if differs:
+        c["differs"] = differs
+    c["skip"] = list(skip)
     return c
 
 
 CALL_READ = xml_call("read", [("filePath", "/work/a.cc"), ("offset", "10")])
+READ_A = {"name": "read", "arguments": {"filePath": "/work/a.cc", "offset": 10}}
 PARSE_CASES = [
     case("answer_after_reasoning", "thinking on: the output opens inside reasoning up to </think>; the rest is content",
          "The user wants a summary.\n</think>It prints hello.", reasoning="The user wants a summary.\n",
          content="It prints hello."),
-    case("reasoning_kept_verbatim", "ultra_v3 does not strip the reasoning: its whitespace is the model's (the template re-adds "
-         "<think>\\n ... </think> around it)", "  A thought  \n\n</think>Answer.", reasoning="  A thought  \n\n",
+    case("reasoning_kept_verbatim", "ultra_v3 does not strip the reasoning: its whitespace is the model's (the template "
+         "re-adds <think>\\n ... </think> around it)", "  A thought  \n\n</think>Answer.", reasoning="  A thought  \n\n",
          content="Answer."),
     case("content_kept_after_close", "content is everything after </think>, its leading whitespace included "
          "(DeepSeek-R1's partition)", "r</think>\n\nAnswer.\n", reasoning="r", content="\n\nAnswer.\n"),
     case("empty_reasoning", "an immediate </think>: empty reasoning, content follows", "</think>Answer.", reasoning="",
          content="Answer."),
     case("no_close_is_reasoning", "no </think>: everything is reasoning, content null (force_nonempty_content off)",
-         "Still thinking when max_tokens hit.", reasoning="Still thinking when max_tokens hit.", content=""),
+         "Still thinking when max_tokens hit.", reasoning="Still thinking when max_tokens hit."),
     case("no_close_forced_content", "force_nonempty_content: reasoning that never closed becomes content, reasoning null",
-         "Still thinking when max_tokens hit.", force=True, reasoning="", content="Still thinking when max_tokens hit."),
+         "Still thinking when max_tokens hit.", force=True, content="Still thinking when max_tokens hit."),
     case("close_empty_forced", "force_nonempty_content: </think> then nothing -> final content is None -> the reasoning "
-         "becomes content", "Thought only.</think>", force=True, reasoning="", content="Thought only."),
+         "becomes content", "Thought only.</think>", force=True, content="Thought only."),
     case("close_empty_not_forced", "</think> then nothing, force off: reasoning stays, content null",
-         "Thought only.</think>", reasoning="Thought only.", content=""),
+         "Thought only.</think>", reasoning="Thought only."),
     case("forced_but_content_present", "force_nonempty_content with real content changes nothing",
          "T</think>C", force=True, reasoning="T", content="C"),
     case("forced_close_whitespace_content", "force_nonempty_content: content that is only whitespace is NOT None "
          "(`content or None`): the reasoning stays", "T</think>\n", force=True, reasoning="T", content="\n"),
+    case("forced_empty_output", "force_nonempty_content on an empty output: nothing at all", "", force=True),
     case("thinking_off_everything_content", "enable_thinking false: the prompt ends <think></think>; everything is content",
          "Just an answer.", thinking=False, content="Just an answer."),
     case("thinking_off_stray_close", "enable_thinking false: a stray </think> the model echoes is content",
          "Answer</think> tail", thinking=False, content="Answer</think> tail"),
     case("thinking_off_stray_open_close", "enable_thinking false: even a whole <think>..</think> is content",
-         "<think>x</think>Answer", thinking=False, content="<think>x</think>Answer", ultra=True),
+         "<think>x</think>Answer", thinking=False, content="<think>x</think>Answer"),
     case("thinking_off_force_ignored", "enable_thinking false wins over force_nonempty_content (ultra_v3 returns first)",
          "Answer", thinking=False, force=True, content="Answer"),
     case("second_close_is_content", "only the FIRST </think> splits; a second one is content", "r</think>a</think>b",
          reasoning="r", content="a</think>b"),
     case("call_inside_reasoning_is_reasoning", "a <tool_call> inside reasoning is reasoning text, never a call",
          "I could " + CALL_READ + " but let me think.\n</think>No call.", tools=["read"],
-         reasoning="I could " + CALL_READ + " but let me think.\n", content="No call."),
+         reasoning="I could " + CALL_READ + " but let me think.\n", content="No call.", skip=["scorer"]),
     case("call_after_reasoning", "a call after </think>: the Qwen XML parser's", "Read it.\n</think>" + CALL_READ,
-         tools=["read"], reasoning="Read it.\n", content="",
-         calls=[{"name": "read", "arguments": {"filePath": "/work/a.cc", "offset": 10}}]),
-    case("content_then_call", "content before the call is content; the whitespace between content and call is dropped",
-         "R</think>Let me look.\n\n" + CALL_READ, tools=["read"], reasoning="R", content="Let me look.",
-         calls=[{"name": "read", "arguments": {"filePath": "/work/a.cc", "offset": 10}}]),
-    case("two_calls", "two calls, in order, ids drawn per call", "R</think>" + CALL_READ + "\n" +
-         xml_call("read", [("filePath", "/b")]), tools=["read"], reasoning="R",
-         calls=[{"name": "read", "arguments": {"filePath": "/work/a.cc", "offset": 10}},
-                {"name": "read", "arguments": {"filePath": "/b"}}]),
-    case("schema_first_typing", "schema-first typing: a string-typed parameter keeps its text, others JSON-decode",
-         "R</think>" + xml_call("typed.probe", [("s", "007"), ("sn", "null"), ("i", "007"), ("n", "1.50"), ("b", "true"),
+         tools=["read"], reasoning="Read it.\n", calls=[READ_A], skip=["content"]),
+    case("call_right_after_close_with_newlines", "whitespace between </think> and the call is dropped",
+         "Read it.\n</think>\n\n" + CALL_READ, tools=["read"], reasoning="Read it.\n", calls=[READ_A], skip=["content"]),
+    case("content_then_call", "content before the call is content, verbatim (its trailing whitespace too, as vLLM's "
+         "qwen3_coder returns the text before <tool_call>)", "R</think>Let me look.\n\n" + CALL_READ, tools=["read"],
+         reasoning="R", content="Let me look.\n\n", calls=[READ_A], skip=["content"]),
+    case("two_calls", "two calls, in order", "R</think>" + CALL_READ + "\n" + xml_call("read", [("filePath", "/b")]),
+         tools=["read"], reasoning="R", calls=[READ_A, {"name": "read", "arguments": {"filePath": "/b"}}],
+         skip=["content"]),
+    case("schema_first_typing", "schema-first typing: a string-typed parameter keeps its text, the others JSON-decode",
+         "R</think>" + xml_call("typed.probe", [("s", "007"), ("sn", "null"), ("i", "42"), ("n", "1.50"), ("b", "true"),
                                                 ("o", "{\"a\": [1]}"), ("a", "[1, \"x\"]")]), tools=["typed"],
          reasoning="R", calls=[{"name": "typed.probe", "arguments": {
-             "s": "007", "sn": "null", "i": "007", "n": 1.5, "b": True, "o": {"a": [1]}, "a": [1, "x"]}}],
-         ours={"note": "i: '007' is not JSON (leading zero) and the schema says integer: the raw text is kept (qwen3_coder "
-                       "would int() it to 7)", "arguments": {"s": "007", "sn": "null", "i": "007", "n": 1.5, "b": True,
-                                                              "o": {"a": [1]}, "a": [1, "x"]}}, ultra=True),
+             "s": "007", "sn": "null", "i": 42, "n": 1.5, "b": True, "o": {"a": [1]}, "a": [1, "x"]}}],
+         skip=["content", "scorer"], differs="a string|null parameter written null stays the text 'null' (the Qwen parser's "
+         "schema-first rule, shared with Qwen3.8; vLLM's qwen3_coder returns None); the scorer reads raw strings"),
     case("no_schema_json_else_text", "no schema for the key: JSON-decoded when it parses, else the text",
          "R</think>" + xml_call("mystery", [("a", "{\"k\": 1}"), ("b", "hello"), ("c", "42"), ("d", "true")]),
-         reasoning="R", calls=[{"name": "mystery", "arguments": {"a": {"k": 1}, "b": "hello", "c": 42, "d": True}}]),
+         reasoning="R", calls=[{"name": "mystery", "arguments": {"a": {"k": 1}, "b": "hello", "c": 42, "d": True}}],
+         skip=["content", "scorer"]),
     case("multiline_value", "a multi-line value is kept whole; one newline each side of the value is the format's",
          "R</think>" + xml_call("edit", [("filePath", "x.py"), ("oldString", "def f():\n    return 1\n"),
                                          ("newString", "def f():\n    return 2\n\n")]), tools=["edit"], reasoning="R",
          calls=[{"name": "edit", "arguments": {"filePath": "x.py", "oldString": "def f():\n    return 1\n",
-                                               "newString": "def f():\n    return 2\n\n"}}]),
+                                               "newString": "def f():\n    return 2\n\n"}}], skip=["content"]),
     case("value_with_close_parameter_text", "a </parameter> inside a value that is not followed by the next parameter / "
          "</function> is part of the value (the Qwen parser's rule)",
          "R</think><tool_call>\n<function=edit>\n<parameter=oldString>\na </parameter> b\n</parameter>\n<parameter=newString>\n"
          "x\n</parameter>\n</function>\n</tool_call>", tools=["edit"], reasoning="R",
-         calls=[{"name": "edit", "arguments": {"oldString": "a </parameter> b", "newString": "x"}}],
-         ours={"note": "score.py's qwen-think reader (and vLLM's qwen3_coder) cut the value at the first </parameter>; the "
-                       "server's parser keeps the whole value", "arguments": {"oldString": "a </parameter> b",
-                                                                              "newString": "x"}}),
+         calls=[{"name": "edit", "arguments": {"oldString": "a </parameter> b", "newString": "x"}}], skip=["content", "scorer"],
+         differs="score.py's qwen-think reader (and vLLM's qwen3_coder) cut the value at the first </parameter>; the "
+         "server's parser keeps the whole value"),
     case("call_cut_by_max_tokens_dropped", "a call cut by max_tokens is dropped AND stripped (spec 23 decision 16's rule: an "
          "agent must never execute a truncated edit)", "R</think>Let me edit.\n<tool_call>\n<function=edit>\n"
          "<parameter=filePath>\nx.py\n</parameter>\n<parameter=oldString>\nabc", tools=["edit"], reasoning="R",
-         content="Let me edit.", ours={"note": "the Qwen OutputStream emits a call whose function tag is complete even when a "
-                                              "parameter is cut; Bolt drops it"}, ultra=True),
+         content="Let me edit.\n", skip=["scorer"], differs="the Qwen / Agnes stream emits a call whose function tag is "
+         "complete even when a parameter is cut; Bolt drops it"),
+    case("call_cut_inside_tag_dropped", "generation ends inside the opening tag of a call: nothing of it is content",
+         "R</think>Ok.<tool_call>\n<func", reasoning="R", content="Ok.", skip=["scorer"]),
     case("call_cut_before_function_end_dropped", "all parameters closed but </function> missing: still cut -> dropped",
-         "R</think><tool_call>\n<function=read>\n<parameter=filePath>\n/a\n</parameter>\n", tools=["read"], reasoning="R"),
+         "R</think><tool_call>\n<function=read>\n<parameter=filePath>\n/a\n</parameter>\n", tools=["read"], reasoning="R",
+         skip=["scorer"]),
     case("call_without_close_tag_kept", "</function> present, </tool_call> missing (EOS after the function): the call is "
          "complete and kept", "R</think><tool_call>\n<function=read>\n<parameter=filePath>\n/a\n</parameter>\n</function>",
-         tools=["read"], reasoning="R", calls=[{"name": "read", "arguments": {"filePath": "/a"}}]),
+         tools=["read"], reasoning="R", calls=[{"name": "read", "arguments": {"filePath": "/a"}}], skip=["scorer"]),
     case("malformed_call_is_content", "a closed block without <function=...> is content, not a call",
-         "R</think><tool_call>\nnot a call\n</tool_call>", reasoning="R", content="<tool_call>\nnot a call\n</tool_call>"),
-    case("call_in_content_text_after", "content after a call is content",
-         "R</think>" + CALL_READ + "\nTrailing words.", tools=["read"], reasoning="R", content="Trailing words.",
-         calls=[{"name": "read", "arguments": {"filePath": "/work/a.cc", "offset": 10}}]),
+         "R</think><tool_call>\nnot a call\n</tool_call>", reasoning="R", content="<tool_call>\nnot a call\n</tool_call>",
+         skip=["scorer", "content"]),
+    case("content_after_call", "content after a call is content", "R</think>" + CALL_READ + "\nTrailing words.",
+         tools=["read"], reasoning="R", content="Trailing words.", calls=[READ_A], skip=["content"]),
     case("thinking_off_call", "thinking off: a call is parsed the same way, with no reasoning channel",
-         "Doing it.\n" + CALL_READ, thinking=False, tools=["read"], content="Doing it.",
-         calls=[{"name": "read", "arguments": {"filePath": "/work/a.cc", "offset": 10}}]),
+         "Doing it.\n" + CALL_READ, thinking=False, tools=["read"], content="Doing it.\n", calls=[READ_A], skip=["content"]),
     case("thinking_off_call_cut", "thinking off: a cut call is dropped too", "Doing it.\n<tool_call>\n<function=read>\n"
-         "<parameter=filePath>\n/a", thinking=False, tools=["read"], content="Doing it."),
-    case("force_does_not_parse_calls_in_moved_reasoning", "force_nonempty_content moves reasoning to content AS TEXT: a "
-         "call written in unfinished reasoning is never executed", "Maybe " + CALL_READ, force=True, tools=["read"],
-         content="Maybe " + CALL_READ,
-         ours={"note": "vLLM would run its tool parser over the moved text and return the call; the server keeps it text"}),
+         "<parameter=filePath>\n/a", thinking=False, tools=["read"], content="Doing it.\n", skip=["content", "scorer"]),
+    case("thinking_off_think_tags_before_call", "thinking off: a </think> then a call - all content, the call parsed",
+         "x</think>" + CALL_READ, thinking=False, tools=["read"], content="x</think>", calls=[READ_A], skip=["content"]),
+    case("force_moves_reasoning_as_text", "force_nonempty_content moves reasoning to content AS TEXT: a call written in "
+         "unfinished reasoning is never executed", "Maybe " + CALL_READ, force=True, tools=["read"],
+         content="Maybe " + CALL_READ, skip=["scorer", "content"],
+         differs="vLLM would run its tool parser over the moved text and return the call; the server keeps it text"),
     case("unicode_split_safe", "reasoning, content and arguments carry multi-byte text across any split",
          "Denke nach … 東京 😀\n</think>Grüße 😀" + xml_call("read", [("filePath", "/tmp/ünï/日本語.txt")]), tools=["read"],
          reasoning="Denke nach … 東京 😀\n", content="Grüße 😀",
-         calls=[{"name": "read", "arguments": {"filePath": "/tmp/ünï/日本語.txt"}}]),
+         calls=[{"name": "read", "arguments": {"filePath": "/tmp/ünï/日本語.txt"}}], skip=["content"]),
     case("tag_prefix_in_reasoning", "text that merely starts like </think> is reasoning",
          "a </thin and </thinking> and <thi\n</think>done", reasoning="a </thin and </thinking> and <thi\n", content="done"),
-    case("start_token_in_output", "a <think> the model writes itself: everything up to and including it is dropped "
-         "(DeepSeek-R1's partition) and ONE leading newline of what is left is dropped",
-         "junk<think>\nthe real thought\n</think>ans", reasoning="the real thought\n", content="ans",
-         ours={"note": "live output never carries the start token (the prompt wrote it): the server does NOT drop text before "
-                       "a <think> or a newline - it is reasoning text", "reasoning": "junk<think>\nthe real thought\n",
-               "content": "ans"}),
+    case("start_token_in_output", "a <think> the model writes itself: ultra_v3 (DeepSeek-R1's partition) drops everything up "
+         "to and including it and then ONE leading newline of what is left",
+         "junk<think>\nthe real thought\n</think>ans", reasoning="junk<think>\nthe real thought\n", content="ans",
+         skip=["reasoning", "scorer"], differs="live output never carries the start token (the prompt wrote it): the server "
+         "does NOT drop text before a <think> or a newline - it is reasoning text, verbatim"),
 ]
 
 
@@ -604,30 +610,30 @@ def mode_parse(out_path):
 
     cases = []
     for c in PARSE_CASES:
-        e = c["expect"]
-        if c["thinking"] and c["ultra_v3_check"] and "start_token" not in c["name"]:
-            r, k = ultra_v3(c["text"], False, c["force_nonempty_content"])
-            # ultra_v3 returns reasoning / content for the WHOLE output (content then runs through the tool parser): compare
-            # the reasoning exactly and the content up to the first call.
-            want_r = e["reasoning"] if e["reasoning"] != "" else None
-            if "force" not in c["name"] and "call_inside" not in c["name"] and "tool_call" not in c["text"]:
-                assert (r or None) == want_r, (c["name"], r, want_r)
-        if not c["thinking"]:
-            r, k = ultra_v3(c["text"], True, c["force_nonempty_content"])
-            assert r is None and k == (c["text"] or None), c["name"]
-        # The first call as score.py's qwen-think reads it (the A4 scorer): kind and arguments.
-        if c["thinking"] and "ours" not in c:
-            kind, detail = score.first_call_of("qwen-think", c["text"]) if hasattr(score, "first_call_of") else (None, None)
-            c["score_kind"] = kind
+        e, text, skip = c["expect"], c["text"], c["skip"]
+        thinking, force = c["thinking"], c["force_nonempty_content"]
+        # 1. the split against a restatement of ultra_v3 (reasoning exactly; content exactly when no call is in play).
+        r, k = ultra_v3(text, not thinking, force)
+        moved = thinking and force and r is None and k is not None
+        if "reasoning" not in skip:
+            assert (r or "") == e["reasoning"], (c["name"], r, e["reasoning"])
+        if "content" not in skip and ("<tool_call>" not in text or moved):
+            assert (k or "") == e["content"], (c["name"], k, e["content"])
+        # 2. the first call as score.py's `qwen-think` reads it (the A4 scorer): raw strings.
+        if thinking and "scorer" not in skip:
+            kind, name, params, n = score.parse_first_call(text, "qwen-think")
+            assert (kind == "call") == bool(e["tool_calls"]), (c["name"], kind)
+            if kind == "call":
+                assert name == e["tool_calls"][0]["name"], c["name"]
+                c["scorer"] = {"kind": kind, "name": name, "params": params, "calls": n}
         cases.append(c)
     facts = {"comment": "tools/tokenizer/dump_bolt.py parse; bolt_stream_test holds server::BoltOutputStream to these "
-                        "expectations (whole text, byte at a time, random pieces); `ours` replaces the expectation where the "
-                        "server differs by decision",
-             "response_parser": "ultra_v3",
-             "ultra_v3_sha256": "14e03de5",
-             "cases": cases}
+                        "expectations (the whole text, byte at a time, every two-way split, random pieces); `differs` says "
+                        "where the server deliberately departs from the reference reading",
+             "ultra_v3_sha256_prefix": "14e03de5", "cases": cases}
     write(out_path, facts)
-    print(f"{out_path}: {len(cases)} cases ({sum(1 for c in cases if 'ours' in c)} with a documented difference)")
+    print(f"{out_path}: {len(cases)} cases ({sum(1 for c in cases if 'differs' in c)} with a documented difference, "
+          f"{sum(1 for c in cases if 'scorer' in c)} with the scorer's first call)")
 
 
 def main():

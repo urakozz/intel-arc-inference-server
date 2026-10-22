@@ -57,6 +57,11 @@ class OutputStream : public OutputParser {
   std::vector<Delta> push(const std::string& piece) override;  // a detokenised piece
   std::vector<Delta> finish() override;                         // end of generation
 
+  // Spec 25e (Bolt, spec 23 decision 16's rule): a call still open when generation ends is DROPPED - neither a call nor
+  // content - unless its </function> had closed (only </tool_call> missing: the call is complete). Off (the default): the
+  // Qwen / Agnes behaviour, unchanged - an open call whose function tag is complete is emitted with the parameters that closed.
+  void set_drop_cut_calls(bool on) { drop_cut_calls_ = on; }
+
  private:
   enum class State { ReasoningStart, Reasoning, Body, Call };
   void run(std::vector<Delta>& out, bool final);
@@ -71,6 +76,7 @@ class OutputStream : public OutputParser {
   bool seg_started_ = false;
   uint32_t calls_ = 0;
   uint64_t seed_;
+  bool drop_cut_calls_ = false;
 };
 
 // A call's parameters converted by the tool's schema; exposed for tests.

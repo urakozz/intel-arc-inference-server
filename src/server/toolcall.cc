@@ -323,7 +323,19 @@ void OutputStream::run(std::vector<Delta>& out, bool final) {
         }
         if (closed) continue;
         if (final) {
-          if (!close_call(out, buf_, true)) content(out, std::string(kCallBegin) + buf_);
+          if (drop_cut_calls_) {
+            // Spec 25e: only a call whose </function> closed is complete; a cut one is dropped and stripped. A closed block
+            // that holds no <function=...> at all is not a call: it stays content, as in the Qwen stream.
+            const std::string tail = rtrim(buf_);
+            const size_t fe = std::char_traits<char>::length(kFunctionEnd);
+            if (tail.size() >= fe && tail.compare(tail.size() - fe, fe, kFunctionEnd) == 0) {
+              if (!close_call(out, buf_, true)) content(out, std::string(kCallBegin) + buf_);
+            } else if (buf_.find(kFunction) == std::string::npos && buf_.find(kCallEnd) != std::string::npos) {
+              content(out, std::string(kCallBegin) + buf_);
+            }
+          } else if (!close_call(out, buf_, true)) {
+            content(out, std::string(kCallBegin) + buf_);
+          }
           buf_.clear();
           state_ = State::Body;
           return;

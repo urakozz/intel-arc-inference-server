@@ -1,0 +1,1272 @@
+{
+ "comment": "tools/tokenizer/dump_bolt.py parse; bolt_stream_test holds server::BoltOutputStream to these expectations (the whole text, byte at a time, every two-way split, random pieces); `differs` says where the server deliberately departs from the reference reading",
+ "ultra_v3_sha256_prefix": "14e03de5",
+ "cases": [
+  {
+   "name": "answer_after_reasoning",
+   "rule": "thinking on: the output opens inside reasoning up to </think>; the rest is content",
+   "text": "The user wants a summary.\n</think>It prints hello.",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "The user wants a summary.\n",
+    "content": "It prints hello.",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "reasoning_kept_verbatim",
+   "rule": "ultra_v3 does not strip the reasoning: its whitespace is the model's (the template re-adds <think>\\n ... </think> around it)",
+   "text": "  A thought  \n\n</think>Answer.",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "  A thought  \n\n",
+    "content": "Answer.",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "content_kept_after_close",
+   "rule": "content is everything after </think>, its leading whitespace included (DeepSeek-R1's partition)",
+   "text": "r</think>\n\nAnswer.\n",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "r",
+    "content": "\n\nAnswer.\n",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "empty_reasoning",
+   "rule": "an immediate </think>: empty reasoning, content follows",
+   "text": "</think>Answer.",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "",
+    "content": "Answer.",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "no_close_is_reasoning",
+   "rule": "no </think>: everything is reasoning, content null (force_nonempty_content off)",
+   "text": "Still thinking when max_tokens hit.",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "Still thinking when max_tokens hit.",
+    "content": "",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "no_close_forced_content",
+   "rule": "force_nonempty_content: reasoning that never closed becomes content, reasoning null",
+   "text": "Still thinking when max_tokens hit.",
+   "thinking": true,
+   "force_nonempty_content": true,
+   "tools": null,
+   "expect": {
+    "reasoning": "",
+    "content": "Still thinking when max_tokens hit.",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "close_empty_forced",
+   "rule": "force_nonempty_content: </think> then nothing -> final content is None -> the reasoning becomes content",
+   "text": "Thought only.</think>",
+   "thinking": true,
+   "force_nonempty_content": true,
+   "tools": null,
+   "expect": {
+    "reasoning": "",
+    "content": "Thought only.",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "close_empty_not_forced",
+   "rule": "</think> then nothing, force off: reasoning stays, content null",
+   "text": "Thought only.</think>",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "Thought only.",
+    "content": "",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "forced_but_content_present",
+   "rule": "force_nonempty_content with real content changes nothing",
+   "text": "T</think>C",
+   "thinking": true,
+   "force_nonempty_content": true,
+   "tools": null,
+   "expect": {
+    "reasoning": "T",
+    "content": "C",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "forced_close_whitespace_content",
+   "rule": "force_nonempty_content: content that is only whitespace is NOT None (`content or None`): the reasoning stays",
+   "text": "T</think>\n",
+   "thinking": true,
+   "force_nonempty_content": true,
+   "tools": null,
+   "expect": {
+    "reasoning": "T",
+    "content": "\n",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "forced_empty_output",
+   "rule": "force_nonempty_content on an empty output: nothing at all",
+   "text": "",
+   "thinking": true,
+   "force_nonempty_content": true,
+   "tools": null,
+   "expect": {
+    "reasoning": "",
+    "content": "",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "thinking_off_everything_content",
+   "rule": "enable_thinking false: the prompt ends <think></think>; everything is content",
+   "text": "Just an answer.",
+   "thinking": false,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "",
+    "content": "Just an answer.",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "thinking_off_stray_close",
+   "rule": "enable_thinking false: a stray </think> the model echoes is content",
+   "text": "Answer</think> tail",
+   "thinking": false,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "",
+    "content": "Answer</think> tail",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "thinking_off_stray_open_close",
+   "rule": "enable_thinking false: even a whole <think>..</think> is content",
+   "text": "<think>x</think>Answer",
+   "thinking": false,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "",
+    "content": "<think>x</think>Answer",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "thinking_off_force_ignored",
+   "rule": "enable_thinking false wins over force_nonempty_content (ultra_v3 returns first)",
+   "text": "Answer",
+   "thinking": false,
+   "force_nonempty_content": true,
+   "tools": null,
+   "expect": {
+    "reasoning": "",
+    "content": "Answer",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "second_close_is_content",
+   "rule": "only the FIRST </think> splits; a second one is content",
+   "text": "r</think>a</think>b",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "r",
+    "content": "a</think>b",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "call_inside_reasoning_is_reasoning",
+   "rule": "a <tool_call> inside reasoning is reasoning text, never a call",
+   "text": "I could <tool_call>\n<function=read>\n<parameter=filePath>\n/work/a.cc\n</parameter>\n<parameter=offset>\n10\n</parameter>\n</function>\n</tool_call> but let me think.\n</think>No call.",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "Read a file from the local filesystem.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Absolute path to the file"
+        },
+        "offset": {
+         "type": "integer",
+         "description": "Line to start from"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Number of lines to read"
+        }
+       },
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "I could <tool_call>\n<function=read>\n<parameter=filePath>\n/work/a.cc\n</parameter>\n<parameter=offset>\n10\n</parameter>\n</function>\n</tool_call> but let me think.\n",
+    "content": "No call.",
+    "tool_calls": []
+   },
+   "skip": [
+    "scorer"
+   ]
+  },
+  {
+   "name": "call_after_reasoning",
+   "rule": "a call after </think>: the Qwen XML parser's",
+   "text": "Read it.\n</think><tool_call>\n<function=read>\n<parameter=filePath>\n/work/a.cc\n</parameter>\n<parameter=offset>\n10\n</parameter>\n</function>\n</tool_call>",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "Read a file from the local filesystem.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Absolute path to the file"
+        },
+        "offset": {
+         "type": "integer",
+         "description": "Line to start from"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Number of lines to read"
+        }
+       },
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "Read it.\n",
+    "content": "",
+    "tool_calls": [
+     {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/a.cc",
+       "offset": 10
+      }
+     }
+    ]
+   },
+   "skip": [
+    "content"
+   ],
+   "scorer": {
+    "kind": "call",
+    "name": "read",
+    "params": {
+     "filePath": "/work/a.cc",
+     "offset": "10"
+    },
+    "calls": 1
+   }
+  },
+  {
+   "name": "call_right_after_close_with_newlines",
+   "rule": "whitespace between </think> and the call is dropped",
+   "text": "Read it.\n</think>\n\n<tool_call>\n<function=read>\n<parameter=filePath>\n/work/a.cc\n</parameter>\n<parameter=offset>\n10\n</parameter>\n</function>\n</tool_call>",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "Read a file from the local filesystem.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Absolute path to the file"
+        },
+        "offset": {
+         "type": "integer",
+         "description": "Line to start from"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Number of lines to read"
+        }
+       },
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "Read it.\n",
+    "content": "",
+    "tool_calls": [
+     {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/a.cc",
+       "offset": 10
+      }
+     }
+    ]
+   },
+   "skip": [
+    "content"
+   ],
+   "scorer": {
+    "kind": "call",
+    "name": "read",
+    "params": {
+     "filePath": "/work/a.cc",
+     "offset": "10"
+    },
+    "calls": 1
+   }
+  },
+  {
+   "name": "content_then_call",
+   "rule": "content before the call is content, verbatim (its trailing whitespace too, as vLLM's qwen3_coder returns the text before <tool_call>)",
+   "text": "R</think>Let me look.\n\n<tool_call>\n<function=read>\n<parameter=filePath>\n/work/a.cc\n</parameter>\n<parameter=offset>\n10\n</parameter>\n</function>\n</tool_call>",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "Read a file from the local filesystem.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Absolute path to the file"
+        },
+        "offset": {
+         "type": "integer",
+         "description": "Line to start from"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Number of lines to read"
+        }
+       },
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "R",
+    "content": "Let me look.\n\n",
+    "tool_calls": [
+     {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/a.cc",
+       "offset": 10
+      }
+     }
+    ]
+   },
+   "skip": [
+    "content"
+   ],
+   "scorer": {
+    "kind": "call",
+    "name": "read",
+    "params": {
+     "filePath": "/work/a.cc",
+     "offset": "10"
+    },
+    "calls": 1
+   }
+  },
+  {
+   "name": "two_calls",
+   "rule": "two calls, in order",
+   "text": "R</think><tool_call>\n<function=read>\n<parameter=filePath>\n/work/a.cc\n</parameter>\n<parameter=offset>\n10\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=read>\n<parameter=filePath>\n/b\n</parameter>\n</function>\n</tool_call>",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "Read a file from the local filesystem.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Absolute path to the file"
+        },
+        "offset": {
+         "type": "integer",
+         "description": "Line to start from"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Number of lines to read"
+        }
+       },
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "R",
+    "content": "",
+    "tool_calls": [
+     {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/a.cc",
+       "offset": 10
+      }
+     },
+     {
+      "name": "read",
+      "arguments": {
+       "filePath": "/b"
+      }
+     }
+    ]
+   },
+   "skip": [
+    "content"
+   ],
+   "scorer": {
+    "kind": "call",
+    "name": "read",
+    "params": {
+     "filePath": "/work/a.cc",
+     "offset": "10"
+    },
+    "calls": 2
+   }
+  },
+  {
+   "name": "schema_first_typing",
+   "rule": "schema-first typing: a string-typed parameter keeps its text, the others JSON-decode",
+   "text": "R</think><tool_call>\n<function=typed.probe>\n<parameter=s>\n007\n</parameter>\n<parameter=sn>\nnull\n</parameter>\n<parameter=i>\n42\n</parameter>\n<parameter=n>\n1.50\n</parameter>\n<parameter=b>\ntrue\n</parameter>\n<parameter=o>\n{\"a\": [1]}\n</parameter>\n<parameter=a>\n[1, \"x\"]\n</parameter>\n</function>\n</tool_call>",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "typed.probe",
+      "description": "Every schema type.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "s": {
+         "type": "string"
+        },
+        "i": {
+         "type": "integer"
+        },
+        "n": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "sn": {
+         "type": [
+          "string",
+          "null"
+         ]
+        }
+       },
+       "required": []
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "R",
+    "content": "",
+    "tool_calls": [
+     {
+      "name": "typed.probe",
+      "arguments": {
+       "s": "007",
+       "sn": "null",
+       "i": 42,
+       "n": 1.5,
+       "b": true,
+       "o": {
+        "a": [
+         1
+        ]
+       },
+       "a": [
+        1,
+        "x"
+       ]
+      }
+     }
+    ]
+   },
+   "differs": "a string|null parameter written null stays the text 'null' (the Qwen parser's schema-first rule, shared with Qwen3.8; vLLM's qwen3_coder returns None); the scorer reads raw strings",
+   "skip": [
+    "content",
+    "scorer"
+   ]
+  },
+  {
+   "name": "no_schema_json_else_text",
+   "rule": "no schema for the key: JSON-decoded when it parses, else the text",
+   "text": "R</think><tool_call>\n<function=mystery>\n<parameter=a>\n{\"k\": 1}\n</parameter>\n<parameter=b>\nhello\n</parameter>\n<parameter=c>\n42\n</parameter>\n<parameter=d>\ntrue\n</parameter>\n</function>\n</tool_call>",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "R",
+    "content": "",
+    "tool_calls": [
+     {
+      "name": "mystery",
+      "arguments": {
+       "a": {
+        "k": 1
+       },
+       "b": "hello",
+       "c": 42,
+       "d": true
+      }
+     }
+    ]
+   },
+   "skip": [
+    "content",
+    "scorer"
+   ]
+  },
+  {
+   "name": "multiline_value",
+   "rule": "a multi-line value is kept whole; one newline each side of the value is the format's",
+   "text": "R</think><tool_call>\n<function=edit>\n<parameter=filePath>\nx.py\n</parameter>\n<parameter=oldString>\ndef f():\n    return 1\n\n</parameter>\n<parameter=newString>\ndef f():\n    return 2\n\n\n</parameter>\n</function>\n</tool_call>",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "edit",
+      "description": "Replace text in a file.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string"
+        },
+        "oldString": {
+         "type": "string"
+        },
+        "newString": {
+         "type": "string"
+        },
+        "replaceAll": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "filePath",
+        "oldString",
+        "newString"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "R",
+    "content": "",
+    "tool_calls": [
+     {
+      "name": "edit",
+      "arguments": {
+       "filePath": "x.py",
+       "oldString": "def f():\n    return 1\n",
+       "newString": "def f():\n    return 2\n\n"
+      }
+     }
+    ]
+   },
+   "skip": [
+    "content"
+   ],
+   "scorer": {
+    "kind": "call",
+    "name": "edit",
+    "params": {
+     "filePath": "x.py",
+     "oldString": "def f():\n    return 1\n",
+     "newString": "def f():\n    return 2\n\n"
+    },
+    "calls": 1
+   }
+  },
+  {
+   "name": "value_with_close_parameter_text",
+   "rule": "a </parameter> inside a value that is not followed by the next parameter / </function> is part of the value (the Qwen parser's rule)",
+   "text": "R</think><tool_call>\n<function=edit>\n<parameter=oldString>\na </parameter> b\n</parameter>\n<parameter=newString>\nx\n</parameter>\n</function>\n</tool_call>",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "edit",
+      "description": "Replace text in a file.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string"
+        },
+        "oldString": {
+         "type": "string"
+        },
+        "newString": {
+         "type": "string"
+        },
+        "replaceAll": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "filePath",
+        "oldString",
+        "newString"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "R",
+    "content": "",
+    "tool_calls": [
+     {
+      "name": "edit",
+      "arguments": {
+       "oldString": "a </parameter> b",
+       "newString": "x"
+      }
+     }
+    ]
+   },
+   "differs": "score.py's qwen-think reader (and vLLM's qwen3_coder) cut the value at the first </parameter>; the server's parser keeps the whole value",
+   "skip": [
+    "content",
+    "scorer"
+   ]
+  },
+  {
+   "name": "call_cut_by_max_tokens_dropped",
+   "rule": "a call cut by max_tokens is dropped AND stripped (spec 23 decision 16's rule: an agent must never execute a truncated edit)",
+   "text": "R</think>Let me edit.\n<tool_call>\n<function=edit>\n<parameter=filePath>\nx.py\n</parameter>\n<parameter=oldString>\nabc",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "edit",
+      "description": "Replace text in a file.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string"
+        },
+        "oldString": {
+         "type": "string"
+        },
+        "newString": {
+         "type": "string"
+        },
+        "replaceAll": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "filePath",
+        "oldString",
+        "newString"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "R",
+    "content": "Let me edit.\n",
+    "tool_calls": []
+   },
+   "differs": "the Qwen / Agnes stream emits a call whose function tag is complete even when a parameter is cut; Bolt drops it",
+   "skip": [
+    "scorer"
+   ]
+  },
+  {
+   "name": "call_cut_inside_tag_dropped",
+   "rule": "generation ends inside the opening tag of a call: nothing of it is content",
+   "text": "R</think>Ok.<tool_call>\n<func",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "R",
+    "content": "Ok.",
+    "tool_calls": []
+   },
+   "skip": [
+    "scorer"
+   ]
+  },
+  {
+   "name": "call_cut_before_function_end_dropped",
+   "rule": "all parameters closed but </function> missing: still cut -> dropped",
+   "text": "R</think><tool_call>\n<function=read>\n<parameter=filePath>\n/a\n</parameter>\n",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "Read a file from the local filesystem.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Absolute path to the file"
+        },
+        "offset": {
+         "type": "integer",
+         "description": "Line to start from"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Number of lines to read"
+        }
+       },
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "R",
+    "content": "",
+    "tool_calls": []
+   },
+   "skip": [
+    "scorer"
+   ]
+  },
+  {
+   "name": "call_without_close_tag_kept",
+   "rule": "</function> present, </tool_call> missing (EOS after the function): the call is complete and kept",
+   "text": "R</think><tool_call>\n<function=read>\n<parameter=filePath>\n/a\n</parameter>\n</function>",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "Read a file from the local filesystem.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Absolute path to the file"
+        },
+        "offset": {
+         "type": "integer",
+         "description": "Line to start from"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Number of lines to read"
+        }
+       },
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "R",
+    "content": "",
+    "tool_calls": [
+     {
+      "name": "read",
+      "arguments": {
+       "filePath": "/a"
+      }
+     }
+    ]
+   },
+   "skip": [
+    "scorer"
+   ]
+  },
+  {
+   "name": "malformed_call_is_content",
+   "rule": "a closed block without <function=...> is content, not a call",
+   "text": "R</think><tool_call>\nnot a call\n</tool_call>",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "R",
+    "content": "<tool_call>\nnot a call\n</tool_call>",
+    "tool_calls": []
+   },
+   "skip": [
+    "scorer",
+    "content"
+   ]
+  },
+  {
+   "name": "content_after_call",
+   "rule": "content after a call is content",
+   "text": "R</think><tool_call>\n<function=read>\n<parameter=filePath>\n/work/a.cc\n</parameter>\n<parameter=offset>\n10\n</parameter>\n</function>\n</tool_call>\nTrailing words.",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "Read a file from the local filesystem.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Absolute path to the file"
+        },
+        "offset": {
+         "type": "integer",
+         "description": "Line to start from"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Number of lines to read"
+        }
+       },
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "R",
+    "content": "Trailing words.",
+    "tool_calls": [
+     {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/a.cc",
+       "offset": 10
+      }
+     }
+    ]
+   },
+   "skip": [
+    "content"
+   ],
+   "scorer": {
+    "kind": "call",
+    "name": "read",
+    "params": {
+     "filePath": "/work/a.cc",
+     "offset": "10"
+    },
+    "calls": 1
+   }
+  },
+  {
+   "name": "thinking_off_call",
+   "rule": "thinking off: a call is parsed the same way, with no reasoning channel",
+   "text": "Doing it.\n<tool_call>\n<function=read>\n<parameter=filePath>\n/work/a.cc\n</parameter>\n<parameter=offset>\n10\n</parameter>\n</function>\n</tool_call>",
+   "thinking": false,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "Read a file from the local filesystem.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Absolute path to the file"
+        },
+        "offset": {
+         "type": "integer",
+         "description": "Line to start from"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Number of lines to read"
+        }
+       },
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "",
+    "content": "Doing it.\n",
+    "tool_calls": [
+     {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/a.cc",
+       "offset": 10
+      }
+     }
+    ]
+   },
+   "skip": [
+    "content"
+   ]
+  },
+  {
+   "name": "thinking_off_call_cut",
+   "rule": "thinking off: a cut call is dropped too",
+   "text": "Doing it.\n<tool_call>\n<function=read>\n<parameter=filePath>\n/a",
+   "thinking": false,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "Read a file from the local filesystem.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Absolute path to the file"
+        },
+        "offset": {
+         "type": "integer",
+         "description": "Line to start from"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Number of lines to read"
+        }
+       },
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "",
+    "content": "Doing it.\n",
+    "tool_calls": []
+   },
+   "skip": [
+    "content",
+    "scorer"
+   ]
+  },
+  {
+   "name": "thinking_off_think_tags_before_call",
+   "rule": "thinking off: a </think> then a call - all content, the call parsed",
+   "text": "x</think><tool_call>\n<function=read>\n<parameter=filePath>\n/work/a.cc\n</parameter>\n<parameter=offset>\n10\n</parameter>\n</function>\n</tool_call>",
+   "thinking": false,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "Read a file from the local filesystem.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Absolute path to the file"
+        },
+        "offset": {
+         "type": "integer",
+         "description": "Line to start from"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Number of lines to read"
+        }
+       },
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "",
+    "content": "x</think>",
+    "tool_calls": [
+     {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/a.cc",
+       "offset": 10
+      }
+     }
+    ]
+   },
+   "skip": [
+    "content"
+   ]
+  },
+  {
+   "name": "force_moves_reasoning_as_text",
+   "rule": "force_nonempty_content moves reasoning to content AS TEXT: a call written in unfinished reasoning is never executed",
+   "text": "Maybe <tool_call>\n<function=read>\n<parameter=filePath>\n/work/a.cc\n</parameter>\n<parameter=offset>\n10\n</parameter>\n</function>\n</tool_call>",
+   "thinking": true,
+   "force_nonempty_content": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "Read a file from the local filesystem.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Absolute path to the file"
+        },
+        "offset": {
+         "type": "integer",
+         "description": "Line to start from"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Number of lines to read"
+        }
+       },
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "",
+    "content": "Maybe <tool_call>\n<function=read>\n<parameter=filePath>\n/work/a.cc\n</parameter>\n<parameter=offset>\n10\n</parameter>\n</function>\n</tool_call>",
+    "tool_calls": []
+   },
+   "differs": "vLLM would run its tool parser over the moved text and return the call; the server keeps it text",
+   "skip": [
+    "scorer",
+    "content"
+   ]
+  },
+  {
+   "name": "unicode_split_safe",
+   "rule": "reasoning, content and arguments carry multi-byte text across any split",
+   "text": "Denke nach … 東京 😀\n</think>Grüße 😀<tool_call>\n<function=read>\n<parameter=filePath>\n/tmp/ünï/日本語.txt\n</parameter>\n</function>\n</tool_call>",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "Read a file from the local filesystem.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Absolute path to the file"
+        },
+        "offset": {
+         "type": "integer",
+         "description": "Line to start from"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Number of lines to read"
+        }
+       },
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ],
+   "expect": {
+    "reasoning": "Denke nach … 東京 😀\n",
+    "content": "Grüße 😀",
+    "tool_calls": [
+     {
+      "name": "read",
+      "arguments": {
+       "filePath": "/tmp/ünï/日本語.txt"
+      }
+     }
+    ]
+   },
+   "skip": [
+    "content"
+   ],
+   "scorer": {
+    "kind": "call",
+    "name": "read",
+    "params": {
+     "filePath": "/tmp/ünï/日本語.txt"
+    },
+    "calls": 1
+   }
+  },
+  {
+   "name": "tag_prefix_in_reasoning",
+   "rule": "text that merely starts like </think> is reasoning",
+   "text": "a </thin and </thinking> and <thi\n</think>done",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "a </thin and </thinking> and <thi\n",
+    "content": "done",
+    "tool_calls": []
+   },
+   "skip": []
+  },
+  {
+   "name": "start_token_in_output",
+   "rule": "a <think> the model writes itself: ultra_v3 (DeepSeek-R1's partition) drops everything up to and including it and then ONE leading newline of what is left",
+   "text": "junk<think>\nthe real thought\n</think>ans",
+   "thinking": true,
+   "force_nonempty_content": false,
+   "tools": null,
+   "expect": {
+    "reasoning": "junk<think>\nthe real thought\n",
+    "content": "ans",
+    "tool_calls": []
+   },
+   "differs": "live output never carries the start token (the prompt wrote it): the server does NOT drop text before a <think> or a newline - it is reasoning text, verbatim",
+   "skip": [
+    "reasoning",
+    "scorer"
+   ]
+  }
+ ]
+}

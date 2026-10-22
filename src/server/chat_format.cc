@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 
+#include "server/toolcall_bolt.h"
 #include "server/toolcall_k2.h"
 #include "server/toolcall_kolibri.h"
 #include "server/toolcall_lfm2.h"
@@ -33,6 +34,7 @@ ChatFormat ChatFormat::for_model_type(const std::string& model_type) {
   if (model_type == "kolibri1") return kolibri();
   if (model_type == "muse_glimmer" || model_type == "muse_glimmer_text") return muse();
   if (model_type == "lfm2_moe") return lfm2();
+  if (model_type == "nemotron_h_omni") return bolt();
   return ChatFormat{};
 }
 
@@ -42,6 +44,7 @@ const char* ChatFormat::name() const {
     case Kind::Kolibri: return "kolibri1";
     case Kind::Muse: return "muse";
     case Kind::Lfm2: return "lfm2_moe";
+    case Kind::Bolt: return "bolt";
     default: return "qwen";
   }
 }
@@ -69,6 +72,14 @@ static bool muse_strength(const json& v) {
 }
 
 void check_template_kwargs(const ChatFormat& format, const json& kwargs) {
+  if (format.kind == ChatFormat::Kind::Bolt && kwargs.is_object()) {
+    // The template reads enable_thinking, medium_effort, truncate_history_thinking by truthiness; the output parser reads
+    // force_nonempty_content as `is True`. A non-boolean is the client's error, not a silent truthy / falsy reading.
+    for (const char* key : {"enable_thinking", "medium_effort", "truncate_history_thinking", "force_nonempty_content"})
+      if (kwargs.contains(key) && !kwargs.at(key).is_boolean())
+        throw std::invalid_argument(std::string("chat_template_kwargs.") + key + " must be a boolean");
+    return;
+  }
   if (format.kind == ChatFormat::Kind::Muse && kwargs.is_object()) {
     // Spec 23 decision 3: the card's four strengths (the template takes any truthy string; nothing else is trained).
     if (kwargs.contains("reasoning_strength") && !muse_strength(kwargs.at("reasoning_strength")))
@@ -117,6 +128,20 @@ void check_template_kwargs(const ChatFormat& format, const json& kwargs) {
 }
 
 json request_template_kwargs(const ChatFormat& format, const json& kwargs, const json& reasoning_effort) {
+  if (format.kind == ChatFormat::Kind::Bolt && !reasoning_effort.is_null()) {
+    // Spec 25 decision 13 (OpenAI's levels onto the template's two switches); an explicit kwarg wins.
+    const bool off = reasoning_effort == "none" || reasoning_effort == "minimal";
+    const bool efficient = reasoning_effort == "low" || reasoning_effort == "medium";
+    const bool full = reasoning_effort == "high" || reasoning_effort == "xhigh";
+    if (!off && !efficient && !full)
+      throw std::invalid_argument("reasoning_effort must be one of none, minimal, low, medium, high, xhigh (Nemotron 3.5 "
+                                  "Bolt: none / minimal -> enable_thinking false, low / medium -> medium_effort true, "
+                                  "high -> the default; spec 25 decision 13)");
+    json out = kwargs.is_object() ? kwargs : json::object();
+    if (off && !out.contains("enable_thinking")) out["enable_thinking"] = false;
+    if (efficient && !out.contains("medium_effort")) out["medium_effort"] = true;
+    return out;
+  }
   if (format.kind != ChatFormat::Kind::Muse || reasoning_effort.is_null()) return kwargs;
   if (!muse_strength(reasoning_effort))
     throw std::invalid_argument("reasoning_effort must be one of low, medium, high, xhigh (Muse-Glimmer's reasoning "
@@ -140,6 +165,12 @@ std::unique_ptr<OutputParser> make_output_parser(const ChatFormat& format, const
   if (format.kind == ChatFormat::Kind::Kolibri) return std::make_unique<KolibriOutputStream>(tools);
   // LFM2: the prompt ends in "<think>" and the output opens inside reasoning (spec 24e).
   if (format.kind == ChatFormat::Kind::Lfm2) return std::make_unique<Lfm2OutputStream>(tools, ends_with(prompt, "<think>"));
+  // Bolt: the prompt's end says whether the output opens inside reasoning (the ultra_v3 rules, spec 25e).
+  if (format.kind == ChatFormat::Kind::Bolt) {
+    const bool force = kwargs.is_object() && kwargs.contains("force_nonempty_content") &&
+                       kwargs.at("force_nonempty_content").is_boolean() && kwargs.at("force_nonempty_content").get<bool>();
+    return std::make_unique<BoltOutputStream>(ends_with(prompt, "<think>\n"), force, tools);
+  }
   // Muse: the model writes each message's recipient; the parser reads the channels (spec 23e).
   if (format.kind == ChatFormat::Kind::Muse) return std::make_unique<MuseOutputStream>(tools);
   // Qwen: with thinking on, the prompt ends in "<think>\n" and the output opens with reasoning.
