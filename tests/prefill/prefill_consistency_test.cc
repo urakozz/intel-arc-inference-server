@@ -318,27 +318,48 @@ int main(int argc, char** argv) {
       r.ring = band_bf16(reinterpret_cast<const uint16_t*>(got.conv_ring.data()),
                          reinterpret_cast<const uint16_t*>(ref.conv_ring.data()),
                          got.conv_ring.size() / 2);
-      // Only the rows this prompt actually wrote: [0, T) of each of the 16 FA
-      // layers. Beyond T both sides are the zeros reset() left, so including
-      // them would divide a band by 16384/T of exact agreement.
+      // Only the rows this prompt actually wrote: [0, T) of each FA layer. Beyond T both
+      // sides are the zeros reset() left, so including them would divide a band by
+      // 16384/T of exact agreement. Read through the engine's KvLayout (spec 12b): at
+      // int8 a row is 256 int8 + an fp16 scale stored after every layer's rows, so the
+      // band is over q * scale - the dequantised value, still in the rotated basis (the
+      // rotation is the same on both sides, so it moves nothing the band compares).
       {
-        const size_t layer_words = size_t(kMaxLen) * model::qwen38().fa_kv_heads * Qwen35::kFaHeadDim;
-        const size_t live = size_t(T) * model::qwen38().fa_kv_heads * Qwen35::kFaHeadDim;
-        std::vector<uint16_t> ga, gb;
-        auto gather = [&](const std::vector<uint8_t>& src, std::vector<uint16_t>& dst) {
+        const runtime::KvLayout& lay = eng.buffers().kv_lay;
+        const bool i8 = lay.form == runtime::KvCache::Int8;
+        auto gather = [&](const std::vector<uint8_t>& src, std::vector<float>& dst) {
           dst.clear();
-          dst.reserve(16 * live);
-          const uint16_t* p = reinterpret_cast<const uint16_t*>(src.data());
-          for (uint32_t l = 0; l < 16; ++l)
-            dst.insert(dst.end(), p + size_t(l) * layer_words,
-                       p + size_t(l) * layer_words + live);
+          dst.reserve(size_t(lay.layers) * T * lay.kv_heads * lay.head_dim);
+          for (uint32_t l = 0; l < lay.layers; ++l)
+            for (uint32_t p = 0; p < T; ++p)
+              for (uint32_t h = 0; h < lay.kv_heads; ++h) {
+                const size_t row = lay.rows_offset(l) + size_t(p) * lay.row_bytes() +
+                                   size_t(h) * lay.head_dim * (i8 ? 1 : 2);
+                float scale = 1.0f;
+                if (i8) {
+                  uint16_t s16;
+                  std::memcpy(&s16, src.data() + lay.scales_offset(l) +
+                                        size_t(p) * lay.scale_row_bytes() + size_t(h) * 2, 2);
+                  scale = common::f16_to_f32(s16);
+                }
+                for (uint32_t i = 0; i < lay.head_dim; ++i) {
+                  if (i8) {
+                    dst.push_back(float(int8_t(src[row + i])) * scale);
+                  } else {
+                    uint16_t w;
+                    std::memcpy(&w, src.data() + row + size_t(i) * 2, 2);
+                    dst.push_back(common::bf16_to_f32(w));
+                  }
+                }
+              }
         };
+        std::vector<float> ga, gb;
         gather(got.kv_k, ga);
         gather(ref.kv_k, gb);
-        r.kk = band_bf16(ga.data(), gb.data(), ga.size());
+        r.kk = band_f32(ga.data(), gb.data(), ga.size());
         gather(got.kv_v, ga);
         gather(ref.kv_v, gb);
-        r.vv = band_bf16(ga.data(), gb.data(), ga.size());
+        r.vv = band_f32(ga.data(), gb.data(), ga.size());
       }
       std::printf("  tensor        max rel      mean rel        rms      >1e-2      words\n");
       auto prow = [&](const char* n, const Band& b) {
