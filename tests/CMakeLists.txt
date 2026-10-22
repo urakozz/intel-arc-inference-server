@@ -4938,4 +4938,48 @@ target_include_directories(bolt_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CM
 target_link_libraries(bolt_pf_ref_test PRIVATE b70_bolt_model)
 add_test(NAME bolt_pf_ref_test COMMAND bolt_pf_ref_test)
 set_tests_properties(bolt_pf_ref_test PROPERTIES LABELS bolt TIMEOUT 900)
+if(B70_BOLT)
+  # Task 2: every binary a prefill chunk binds, both attention forms and both SSM state precisions (src/kernels/
+  # CMakeLists.txt's spec 25d block); after `--` the reused binaries built elsewhere (pf_gemm_T0 in prefill/, Muse's
+  # mg_pf_flash_attn pair, 25c's decode binaries the prefill head binds); after the second `--` the block's builds no walk
+  # binds today: the second tiling (bolt_pf_kernels_test's Review Focus 4) and the N 4096 slabs' other layout (a P0 re-pick
+  # of BoltDesc::linears' layout needs no new line). 25c's decode names pinned (41, unchanged).
+  set(B70_BOLT_PREFILL_KERNELS
+    kernel_nb_pf_mamba_L64_W16_R16 kernel_nb_pf_mamba_L64_W16_R16_B16 kernel_nb_pf_cb_L64_DPAS
+    kernel_nb_pf_embed_gather_K4096_V131072 kernel_nb_res_norm_M2048_K4096_W8_NF kernel_nb_res_norm_M2048_K4096_W8_S1
+    kernel_nb_res_norm_M2048_K4096_W8_S1_T1 kernel_nb_router_M2048_K4096 kernel_nb_route_M2048_T9
+    kernel_nb_sh_act_M2048_L1024_SH5376_S1 kernel_nb_attn_prep_M2048_KV2_S1
+    kernel_pf_dequant_slab_K8192_N4096_L1 kernel_pf_dequant_slab_K4096_N4096_L1 kernel_pf_dequant_slab_K1024_N4096_L1
+    kernel_pf_dequant_slab_K5376_N4096_L1 kernel_k2_pf_dequant_slab_K4096_N18560 kernel_k2_pf_dequant_slab_K4096_N4608
+    kernel_k2_pf_dequant_slab_K4096_N6400)
+  foreach(I 1536 2048 2304 2560)
+    list(APPEND B70_BOLT_PREFILL_KERNELS kernel_nb_pf_moe_I${I}_L1024_T9_TM32 kernel_nb_pf_moe_gemm_K1024_N${I}_RELU2
+      kernel_nb_pf_moe_gemm_K${I}_N1024)
+  endforeach()
+  set(B70_BOLT_PREFILL_REUSED kernel_pf_gemm_T0 kernel_mg_pf_flash_attn_Q32KV2_F kernel_mg_pf_flash_attn_Q32KV2_F_EAGER
+    kernel_nb_res_norm_M1_K4096_W8_S1 kernel_nb_res_norm_M1_K4096_W8_S1_T1 kernel_gemv_i8w_M1_K4096_N131072
+    kernel_gemv_bf16_M1_K4096_N131072 kernel_nb_argmax_stage1_M1_V131072 kernel_nb_argmax_stage2_V131072)
+  set(B70_BOLT_PREFILL_SPARE kernel_nb_pf_mamba_L64_W8_R4 kernel_pf_dequant_slab_K8192_N4096_L0
+    kernel_pf_dequant_slab_K4096_N4096_L0 kernel_pf_dequant_slab_K1024_N4096_L0 kernel_pf_dequant_slab_K5376_N4096_L0)
+  add_executable(bolt_pf_variant_names_test kernels/bolt_pf_variant_names_test.cc)
+  target_include_directories(bolt_pf_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(bolt_pf_variant_names_test PRIVATE b70_bolt_model)
+  b70_target_kernel_dir(bolt_pf_variant_names_test)
+  add_test(NAME bolt_pf_variant_names_test COMMAND bolt_pf_variant_names_test ${B70_BOLT_PREFILL_KERNELS} --
+    ${B70_BOLT_PREFILL_REUSED} -- ${B70_BOLT_PREFILL_SPARE})
+  set_tests_properties(bolt_pf_variant_names_test PROPERTIES LABELS bolt)
+  # B2 on prefill, on the card, no checkpoint: every prefill kernel at the real shapes against bolt_pf_ref.h; Review Focus 4
+  # (both tilings x10, finite and equal); C B^T by DPAS against the plain build; the grouped GEMMs = pf_gemm_T0 on an
+  # expert's rows; the slabs; 25c's kernels at M 2048; flash vs fp64 at 3000 / 65536 / 200000, eager bitwise decode's.
+  add_executable(bolt_pf_kernels_test kernels/bolt_pf_kernels_test.cc)
+  target_include_directories(bolt_pf_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(bolt_pf_kernels_test PRIVATE b70_prefill_host b70_bolt_model b70_l0)
+  if(B70_PREFILL_ENABLED)
+    b70_link_prefill(bolt_pf_kernels_test)
+  endif()
+  b70_target_kernel_dir(bolt_pf_kernels_test)
+  add_dependencies(bolt_pf_kernels_test ${B70_BOLT_PREFILL_KERNELS} ${B70_BOLT_PREFILL_REUSED} ${B70_BOLT_PREFILL_SPARE})
+  add_test(NAME bolt_pf_kernels_test COMMAND bolt_pf_kernels_test)
+  set_tests_properties(bolt_pf_kernels_test PROPERTIES LABELS "bolt;prefill" TIMEOUT 3600)
+endif()
 # ==== Spec 25d: Nemotron 3.5 Bolt prefill (label bolt) ==== (end) ====
