@@ -4513,6 +4513,29 @@ st_r62_benchy() {
 }
 
 # ======================================================================================
+row 67 "the prefill memory-bandwidth profile: which kernels reach ~94 % of the card's 638 GB/s (the operator saw 600+ GB/s on hw-smi during r1.features' prefill_split_test, Agnes l0-int8 at long32k, 2026-10-23) - B70_PREFILL_PROFILE's per-phase L0 GPU time at 32k on Agnes and Qwen3.8, l0 and l0-int8; the bytes per phase are derived on the Mac from the shapes, so the GB/s per phase is for the decode kernels' work (decode runs ~445 GB/s effective)"
+rownote 67 "Diagnostic, gates nothing. Run it on an idle card in a timed session (Session 6). Watch hw-smi by hand during the arms for the live GB/s (hw-smi needs sudo and a terminal, so the stage does not log it). Hand back r67.profile's log (the four 'prefill phase attribution' tables and the unprofiled pp32768 rows); the per-phase bytes and GB/s table is a Mac edit into docs/BENCHMARKS.md."
+stage r67.profile 67 optin gpu agnes,qwen -  "B70_PREFILL_PROFILE=1 b70-decode --bench --prefill-length 32768 --tg 16 --max-len 65536 on Agnes and Qwen3.8, --prefill-backend l0 and l0-int8: the per-phase L0 GPU ms; then the same four arms unprofiled (interleaved, median of 3) for the wall each table perturbs"
+st_r67_profile() {
+  local snap m b
+  idle before
+  for m in agnes qwen; do
+    if [ "$m" = agnes ]; then snap=$SNAP_AGNES; else snap=$SNAP_QWEN; fi
+    for b in l0-int8 l0; do
+      chk "B70_PREFILL_PROFILE=1 $(bench_cmd "$snap" --prefill-length 32768 --tg 16 --max-len 65536 --prefill-backend $b)" "the profiled prefill, $m $b"
+    done
+  done
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 -- \
+agnes-l0-int8 '$(bench_cmd "$SNAP_AGNES" --prefill-length 32768 --tg 16 --max-len 65536 --prefill-backend l0-int8)' \
+agnes-l0 '$(bench_cmd "$SNAP_AGNES" --prefill-length 32768 --tg 16 --max-len 65536 --prefill-backend l0)' \
+qwen-l0-int8 '$(bench_cmd "$SNAP_QWEN" --prefill-length 32768 --tg 16 --max-len 65536 --prefill-backend l0-int8)' \
+qwen-l0 '$(bench_cmd "$SNAP_QWEN" --prefill-length 32768 --tg 16 --max-len 65536 --prefill-backend l0)'" "the unprofiled arms"
+  idle after
+  grab_all phases '^(prefill phase attribution|  (norm|dequant|gemm|slab_|i8_|ab_proj|gdn_|silu|attn_|head|TOTAL|instrumented))' 200
+  grab_all idle '^IDLE '
+  finish
+}
+
 row 63 "spec 26a - LiLiCorr P0: the reference (dflash_ref.py's LiLiCorr form, NVFP4 decoded exactly, cross-checked against vLLM's head), acceptance on our Bolt, the expert union, the verify / block costs, the projection (plan 26a)"
 rownote 63 "Download the drafter (962 MB): hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr --revision 449d24140160b8e51871bfc0f0a7338abf640aa1"
 rownote 63 "Written on the Mac (spec 26 §12, docs/probe-lilicorr-2026-10-23.md): the reference's LiLiCorr form is tested on a tiny random drafter (lilicorr_make_tiny.py) - NVFP4's 16 x 254 finite products exact in bf16 and f16, every Review Focus item a mutation that moves the lattice or the drafts - and end to end on 25a's tiny Bolt (bolt_ref.py taps --tap-layers 1,2,4,6,9,10). the real drafter's weights were read on the Mac (decoded exactly, 1,112,803,882 parameters) but never beside Bolt's taps; vLLM is not importable in the Mac's oracle image, so Decision 1's cross-check is r63.vllmref's. kernel_cmdlines +99 / -0 / ~0 (Bolt's 7 GEMVs, nb_router, the int8 head and argmax stage 1 at M = 2..8; the expert stand-in; the drafter at M 8 in three formats; the LiLiCorr head's bf16 shapes) - no existing .cl edited, none of them has been compiled by ocloc."

@@ -470,6 +470,13 @@ the cost tables ~0.3-1 h each.
 **Check:** every row's `IDLE before` / `IDLE after` grade; a row taken ITERATE is still a
 reading, not a record.
 
+**Added 2026-10-23 - row 67, the prefill bandwidth profile** (opt-in, ~20-30 min, est.): hw-smi showed 600+ GB/s of
+the card's 638 GB/s during `r1.features`' Agnes `prefill_split_test` (l0-int8, long32k) - the highest bandwidth any of
+our kernels has reached; decode runs ~445 GB/s effective. Append `,r67.profile` to the launch above (or run it alone,
+idle): `B70_PREFILL_PROFILE=1` per-phase GPU time at 32k on Agnes and Qwen3.8, l0 and l0-int8, then the four arms
+unprofiled. Watch hw-smi by hand during it; the per-phase bytes and GB/s are derived afterwards on the Mac
+(docs/BENCHMARKS.md), to find which kernel streams at ~94 % and what the decode kernels can take from it.
+
 ### Session 6b - DFlash verify cost at M = 5..8 (plan 19a Task 4), box idle
 
 The one number DFlash's go / no-go still needs. P0 (Tasks 2-3, `docs/probe-dflash-2026-10-08.md`)
