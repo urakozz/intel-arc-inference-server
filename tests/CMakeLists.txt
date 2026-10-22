@@ -4927,3 +4927,15 @@ b70_cli_reject(cli_reject_bolt_mtp ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 
 b70_cli_reject(cli_reject_bolt_spec ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash EXPECT "spec 26")
 b70_cli_reject(cli_reject_bolt_kv8 ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "Decision 17")
 # ==== Spec 25c: Nemotron 3.5 Bolt decode (label bolt) ==== (end) ====
+
+# ==== Spec 25d: Nemotron 3.5 Bolt prefill (label bolt) ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-20-spec25d-bolt-prefill.md. Box queue row 61. Host tests first (the Mac).
+# Task 1: the prefill kernels' host twin (tests/kernels/bolt_pf_ref.h) against 25c's decode twin, the algebra (the SSD form is
+# the recurrence), 25a's chunk functions (tests/kernels/bolt_pf_fixture.h, tools/oracle/bolt_pf_fixture.py) and plan 25d's
+# Review Focus 1-3. Host only.
+add_executable(bolt_pf_ref_test kernels/bolt_pf_ref_test.cc)
+target_include_directories(bolt_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(bolt_pf_ref_test PRIVATE b70_bolt_model)
+add_test(NAME bolt_pf_ref_test COMMAND bolt_pf_ref_test)
+set_tests_properties(bolt_pf_ref_test PROPERTIES LABELS bolt TIMEOUT 900)
+# ==== Spec 25d: Nemotron 3.5 Bolt prefill (label bolt) ==== (end) ====
