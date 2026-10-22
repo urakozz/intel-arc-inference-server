@@ -1007,6 +1007,27 @@ depth 4096 ESTIMATED (spec 24 §3: many small kernels); 383 launches a token (27
 | prefill across two cards | `--pp 2`, the chunk crosses by copy (8 MB of h a chunk), sequentially (capacity, not speed) | pending | r52.speed |
 | prefill launches and memory | a chunk at 40 layers; the head; the scratch | 1259 (1 + 2 x 70 + 28 x 31 + 10 x 25) + 4; 788,687,408 B a device (the 512 MiB weight batch the largest) - derived, asserted at the walk and the plan test | r52.f4 |
 
+## Nemotron 3.5 Bolt (spec 25)
+
+**Nothing here is measured on a card yet.** Bolt (`nemotron_h_omni` over `nemotron_h_puzzle`, SergiioB's int4 g128 export,
+41.9 GB on disk) runs its own engine on two cards (spec 25c's decode, 25d's prefill, 25e's serving; no `nb_*` binary has been
+compiled by ocloc). Weights 40.469 GB with the int8 head (derived, spec 25 §14); split 48: 19.93 / 20.54 GB; 262144 positions
+fit two cards (24.17 / 24.23 GB of 32.53 with the scratches, derived). Decode reads ~5.5 GB a token plus 8,192 B of KV a
+position and 0.34 GB of fp32 SSM state; 653 launches a token (533 with every arm). SergiioB's vLLM 0.31 XPU numbers on two B70
+at TP 2 are PUBLISHED, his card, one self-reported run (his flags: fp8 KV, `--block-size 64`, `--enable-prefix-caching
+--mamba-cache-mode align`), never reproduced here.
+
+| what | configuration | number | stage |
+|---|---|---|---|
+| decode at depth 886 / 8192 / 32000 / 65536 | SergiioB's vLLM 0.31 XPU, TP 2, fp8 KV (PUBLISHED) | 60.5 / 50.7 / 33.5 / 23.0 t/s | - |
+| prefill at 886 / 8192 / 32000 / 65536 prompt tokens | the same (PUBLISHED) | 2925 / 2014 / 871 / 486 t/s | - |
+| b70-serve, llama-benchy pp = 886 / 8192 / 32000 / 65536, tg 128, depth 0 | two cards (copy), int8 head, bf16 KV, `--max-len 262144`, `--concurrency 1 --no-cache --exact-tg --latency-mode generation --runs 2`, llama-benchy 0.4.0 | pending | r62.benchy |
+| b70-serve, llama-benchy decode at depth 886 / 8192 / 32000 / 65536 | pp 512, tg 128, the same flags (row 41's D) | pending | r62.benchy |
+| vLLM XPU, the same llama-benchy rows, the same checkpoint | the operator's run (SergiioB's README flags) | pending | r62.benchy (operator) |
+| A4 through b70-serve vs the g128 / BF16 references | 36 scenarios, greedy, up to 2048 new ids, `medium_effort` + thinking on (25a ruling 4); `score.py --format qwen-think` | pending (B5's engine row; the reference's parse failures counted; 0 where the scorer finds a call is the bar PROPOSED) | r62.a4 |
+| the agentic transcript's prefix-cache hit rate | `tests/golden/prompts/bolt_agentic.json` as a live loop, three arms (default, `truncate_history_thinking` false, cache off) | pending; no bar - the miss at each new user message (`truncate_history_thinking`) and at a call whose arguments the model wrote unsorted is recorded with its divergence token | r62.agentic |
+| snapshot sizes | state 170,229,760 B (167,772,160 B of fp32 SSM states + 2,457,600 B of conv columns; 86,343,680 B with `B70_BOLT_SSM=bf16`), KV 8,192 B a position | derived, asserted by `bolt_snapshot_test` (host, measured on the Mac) and `bolt_snapshot_gpu_test` (card) | r62.snap_synth, r62.snapshot |
+
 ## Correctness
 
 Numerics are gated, not eyeballed. The full protocol is in

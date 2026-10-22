@@ -1,6 +1,6 @@
 # Spec 25e - Nemotron 3.5 Bolt served: tokenizer, template, Qwen3-Coder XML tool calls, the ultra_v3 reasoning rules, sampling defaults, hybrid prefix-cache snapshots
 
-**Status (2026-10-20): planned; nothing built.** Box queue row **62**.
+**Status (2026-10-23): built on the Mac (spec 25 §17); nothing run on a card.** Box queue row **62** (stages in `tools/box_validate/stages.sh`; Task 5 is the box's).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
 
@@ -66,13 +66,13 @@ flags: `--tool-call-parser qwen3_coder`, `--reasoning-parser ultra_v3`, `--mamba
   `tests/tokenizer/bolt_templates.json`, `tests/tokenizer/bolt_tokenizer_test.cc`, `tests/tokenizer/template_bolt_test.cc`
 - Modify: `tests/CMakeLists.txt`
 
-- [ ] **Step 1:** `dump_bolt.py` (transformers 5.19.0 from 21a's site, small files only, requests key-sorted): the tokenizer
+- [x] **Step 1:** `dump_bolt.py` (transformers 5.19.0 from 21a's site, small files only, requests key-sorted): the tokenizer
   fixture (131072 ids' round trips digested, the named tokens 0-18 and 990 both ways, texts with every tag, `corpus.txt` in
   digests); the template cases (no system / system; tools with nested parameters, enums, extra keys (`render_extra_keys`),
   `required`; tool calls with string / number / bool / null / list / dict arguments; consecutive tool results grouped into one
   user turn; reasoning before and after the last user turn with `truncate_history_thinking` true and false; `enable_thinking`
   false; `medium_effort`; list-of-parts content; the generation prompt) - each as the render's bytes and its ids.
-- [ ] **Step 2: the failing tests,** then pass them: `template_bolt_test` (byte for byte on every case through
+- [x] **Step 2: the failing tests,** then pass them: `template_bolt_test` (byte for byte on every case through
   `chat::Template`, Review Focus 1), `bolt_tokenizer_test` (id for id; no BOS added anywhere). **Commit** `git commit -S -m "tests: Bolt's template byte-identical and tokenizer id-identical to transformers 5.19.0 (spec 25e)"`.
 
 ### Task 2: the output stream (Mac)
@@ -84,10 +84,10 @@ flags: `--tool-call-parser qwen3_coder`, `--reasoning-parser ultra_v3`, `--mamba
   mode from the prompt's end), the output stream's reasoning rules (`force_nonempty_content`; thinking-off makes a stray
   `</think>` content)
 
-- [ ] **Step 1: the failing tests:** Review Focus 2 and 3 on fixed outputs and a 2000-output fuzz (whole == byte stream ==
+- [x] **Step 1: the failing tests:** Review Focus 2 and 3 on fixed outputs and a 2000-output fuzz (whole == byte stream ==
   random 1-7 byte pieces); the A4 reference outputs of 25a (the model's own calls) parse with 0 failures where 25a's scorer
   found none.
-- [ ] **Step 2: implement; PASS. Commit** `git commit -S -m "server: ChatFormat Bolt - ultra_v3's reasoning rules over the Qwen XML calls, streaming split-invariant (spec 25e)"`.
+- [x] **Step 2: implement; PASS. Commit** `git commit -S -m "server: ChatFormat Bolt - ultra_v3's reasoning rules over the Qwen XML calls, streaming split-invariant (spec 25e)"`.
 
 ### Task 3: the request path and sampling (Mac)
 
@@ -98,10 +98,10 @@ flags: `--tool-call-parser qwen3_coder`, `--reasoning-parser ultra_v3`, `--mamba
   [2, 11] as defaults - read from a `--generation-config FILE` or the snapshot's file when it carries sampling keys, else the
   published values with the startup line saying so), `tests/server/bolt_request_test.cc`
 
-- [ ] **Step 1: the failing tests:** each kwarg reaches the render (byte-checked against Task 1's fixtures); the mapping
+- [x] **Step 1: the failing tests:** each kwarg reaches the render (byte-checked against Task 1's fixtures); the mapping
   table; image / video / audio parts refused (23e's list); EOS on either id; SergiioB's generation config (EOS 11, no sampling)
   plus the published defaults gives Decision 12's set; a seeded sampled request reproducible.
-- [ ] **Step 2: implement; PASS. Commit** `git commit -S -m "server: Bolt's template kwargs, reasoning_effort mapping, NVIDIA's sampling defaults and EOS {2, 11} (spec 25e)"`.
+- [x] **Step 2: implement; PASS. Commit** `git commit -S -m "server: Bolt's template kwargs, reasoning_effort mapping, NVIDIA's sampling defaults and EOS {2, 11} (spec 25e)"`.
 
 ### Task 4: the engine adapter, the snapshots, `b70-serve` (host half on the Mac; card gates)
 
@@ -113,11 +113,11 @@ flags: `--tool-call-parser qwen3_coder`, `--reasoning-parser ultra_v3`, `--mamba
   block hook at aligned block ends only), `src/runtime/bolt/bolt_sizes.{h,cc}` (`state_runs`, `kv_runs`: one host layout by
   layer, independent of the split), `src/cli/b70_serve.cc` (`serve_bolt`), CMake files
 
-- [ ] **Step 1: the failing tests:** host - the state is 167,772,160 B (fp32; 83,886,080 B with the bf16 arm) + 2,457,600 B
+- [x] **Step 1: the failing tests:** host - the state is 167,772,160 B (fp32; 83,886,080 B with the bf16 arm) + 2,457,600 B
   of conv columns, KV 8,192 B a position; restores at 2048 / 4096 / 6144 through `PrefixSession` equal the cold run on the
   mock; a two-card snapshot loads on another split and the reverse; over HTTP (mock) the greedy chat == the decode run, the
   repeat restored (`cached_tokens` reported). Card - Review Focus 4 on the synthetic and SergiioB's checkpoint.
-- [ ] **Step 2: implement** `b70-serve <bolt>`: two cards by default, `--pp 2` / `--pipeline-split` / `--pipeline-handoff`,
+- [x] **Step 2: implement** `b70-serve <bolt>`: two cards by default, `--pp 2` / `--pipeline-split` / `--pipeline-handoff`,
   `--max-len auto` (up to 262144, Decision 14), the int8 head default, the prefix cache with the hybrid snapshot; refused before
   the device by name: `--mtp`, `--spec dflash|lookup` (spec 26c), `--kv-cache int8`, `--prefill-backend l0-int8|sycl-tla`,
   `--max-len` above 262144, `--device` with `--pp 2`. PASS. **Commit** `git commit -S -m "cli: b70-serve <bolt> on two cards - hybrid snapshots at aligned block ends (SSM state, conv columns, KV) (spec 25e)"`.
@@ -136,7 +136,7 @@ flags: `--tool-call-parser qwen3_coder`, `--reasoning-parser ultra_v3`, `--mamba
 - Modify: spec 25 ("25e as built"), this plan's status, `docs/BENCHMARKS.md`, `docs/19-running-models.md` (Bolt's flags),
   `README.md` (CLI table), `box-validation-queue.md` (row 62), `tools/box_validate/stages.sh` (`row 62`)
 
-- [ ] **Step 1:** the row:
+- [x] **Step 1:** the row:
 
 ```text
 row 62 "spec 25e - Nemotron 3.5 Bolt served: the template / tokenizer identities, ultra_v3 reasoning over Qwen XML calls, NVIDIA's sampling defaults, hybrid snapshots at aligned block ends, A4 and llama-benchy (plan 25e)"
@@ -147,7 +147,7 @@ stage r62.a4        62 optin   gpu  bolt_g128,bolt_a4_int4  r62.chat    "A4 thro
 stage r62.agentic   62 optin   gpu  bolt_g128               r62.chat    "the agentic transcript with the prefix cache: hit rate, divergence points"
 stage r62.benchy    62 optin   gpu  bolt_g128               r62.chat    "llama-benchy at 886 / 8192 / 32000 / 65536 beside vLLM XPU (row 41's matrix)"
 ```
-- [ ] **Step 2: commit** `git commit -S -m "docs: spec 25 (25e as built), box queue row 62 - Bolt served"`.
+- [x] **Step 2: commit** `git commit -S -m "docs: spec 25 (25e as built), box queue row 62 - Bolt served"`.
 
 **Gate for the plan:** Mac - the template byte for byte, the tokenizer id for id, every parser / request / snapshot host test,
 every existing server and template test unchanged. Box - snapshots restore bitwise, the server equals `b70-decode`, A4 and the

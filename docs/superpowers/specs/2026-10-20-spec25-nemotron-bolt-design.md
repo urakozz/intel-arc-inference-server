@@ -3,8 +3,8 @@
 **Status:** design, 2026-10-20, approved by the operator 2026-10-20. Decisions are marked **Decision N** with their
 cost if wrong and collected in §12. 25a is built on the Mac (§13: the reference, B1 on tiny models; no real
 weight read yet); 25b is built on the Mac (§14: the descriptor, the loader, the plan; no card); 25c is built on the Mac (§15: P0's
-harness, the `nb_*` kernels, `BoltEngine`, the arms; no card); 25d is built on the Mac (§16: the SSD prefill, the walk; no card); 25q,
-25e are not built.
+harness, the `nb_*` kernels, `BoltEngine`, the arms; no card); 25d is built on the Mac (§16: the SSD prefill, the walk; no card); 25e is built on the Mac (§17: the
+template / tokenizer fixtures, the output stream, the request path, `b70-serve <bolt>`, the hybrid snapshots; no card); 25q is not built.
 **Plans (2026-10-20):** `docs/superpowers/plans/2026-10-20-spec25{a,q,b,c,d,e}-*.md` - 25a facts and the CPU
 reference, 25q our AutoRound g64 re-quantisation (the recipe; the operator runs it), 25b descriptor / loader /
 memory plan, 25c decode (the launch-count and state-bandwidth P0 first), 25d prefill, 25e serving.
@@ -1006,3 +1006,95 @@ command line parses (section 4).
 `C B^T` and grouped GEMMs, flash at depth), B4 / B3 on prefill (the synthetics, SergiioB's checkpoint on two cards), the rate at
 depth 886 / 8192 / 32000 / 65536 / 131072 beside SergiioB's published 2925 / 2014 / 871 / 486 t/s and the phase tables. The
 sub-chunk length (64), the scan's tiling (W16_R16), the 512 MiB expert batch and every card bar are PROVISIONAL / PROPOSED until then.
+
+## 17. 25e as built (2026-10-23; the Mac only - no card, no real weight)
+
+Branch `spec25e-bolt-serving`; box queue row 62. Built: `tools/tokenizer/dump_bolt.py` (`tokenizer` | `templates` | `parse`) and its
+fixtures `tests/tokenizer/bolt_{tokenizer,templates}.json` + `tests/server/bolt_parse_cases.json`, `server::BoltOutputStream`
+(`src/server/toolcall_bolt.{h,cc}`: the `ultra_v3` rules over the Qwen XML stream, which gained ONE opt-in option,
+`set_drop_cut_calls`), `ChatFormat::Kind::Bolt` (the kwargs, the `reasoning_effort` mapping, the output parser from the prompt's
+end; `src/server/chat_format.{h,cc}`, `server.cc`'s template variable), `src/cli/bolt_serve.h` (the generation defaults, the
+refusals, `BoltEngineAdapterT`), `b70-serve <bolt>` (`serve_bolt` in `b70_serve.cc`, `--generation-config`, `--chat-template`),
+`runtime::bolt::{state_runs, kv_runs}` and `BoltEngine::{state_bytes, kv_bytes, save_state, load_state, save_kv, load_kv,
+bf16_state}`, the tests `template_bolt_test`, `bolt_tokenizer_test`, `bolt_stream_test`, `bolt_request_test`,
+`bolt_serve_args_test`, `bolt_snapshot_test` (host) and `bolt_snapshot_gpu_test` (card), the A4 tooling
+(`tools/toolcall/{bolt_parse_dump.cc, bolt_parser_check.py, serve_a4_texts.py}`, `tools/prefix/agentic_loop.py --extra` and its
+divergence report) and row 62's stages. kernel_cmdlines **+0 / -0 / ~0**; no existing `.cl`, no existing server / template /
+tokenizer test edited. Nothing of the model is vendored but two `generation_config.json` files (`tests/model/bolt/`, Decision 20):
+the fixtures are renders, ids and digests and the template and `tokenizer.json` are read from the pinned snapshot at run time.
+
+**Measured on the Mac** (every number printed by the test named):
+- `template_bolt_test`: **80 of 80** cases byte-identical to transformers 5.19.0's `apply_chat_template` through `chat::Template` (no
+  minja patch was needed; 109,517 bytes; 38 of them with no system message and no tools open with `<|im_start|>system\n<|im_end|>\n`
+  - Review Focus 1); 25a's own `bolt_template_cases.json`: 13 of 14 (the 14th was rendered from a Python dict in insertion order,
+  the server's JSON objects are key-sorted - spec 24 §4.6's limitation).
+- `bolt_tokenizer_test`: 131,072 ids; the added tokens 0-21 and 990 both ways with their `special` flag (`<think>` .. `</tool_response>`
+  are NOT special: a decode that skips specials keeps them, the output parser reads them from the text); **every id's single-id decode
+  and re-encode**: 129,637 exact round trips (HF: 129,637), decode digest `a17a755b67009a20`, re-encode `c8a0109933d0c66a`, both equal
+  HF's; 30 texts 0 mismatches (the post-processor adds NO BOS anywhere); `corpus.txt` 10,240 lines / 186,598 ids / 0 chunk mismatches;
+  80 renders' ids (29,205) equal HF's, never a BOS.
+- `bolt_stream_test`: 38 hand-written cases (each names the rule it tests) equal their expectations whole, byte at a time, at every
+  two-way split and in random 1-7 byte pieces (3,432 runs); 7 first calls equal `score.py --format qwen-think`'s by name and every raw
+  argument; a 2,000-output fuzz (34,891 stream runs; 460 with calls, 883 with reasoning, 168 moved by `force_nonempty_content`) equals an
+  independent model of the reasoning rule; the Qwen / Agnes stream is unchanged (its cut call is still emitted).
+- `bolt_request_test` (the real template behind a mock engine): 73 fixture cases POSTed with their messages, tools and kwargs reach the
+  template as exactly transformers' render, 5 more carry a media / non-text part and get a 400; Decision 13's table, an explicit kwarg
+  winning, the 400s; Decision 12's defaults; EOS 2 and 11; the output end to end, body and stream.
+- `bolt_snapshot_test`: state **170,229,760 B** = 167,772,160 B of fp32 SSM states + 2,457,600 B of conv columns (83,886,080 + 2,457,600
+  with the bf16 arm), KV **8,192 B** a position, 160 + 16 runs, one host layout under `--pp 1` and `--pp 2` at splits 3 / 48 / 87;
+  restores at positions 0-18 and, through `PrefixSession` over the adapter, at the block ends 2048 / 4096 / 6144 and the request ends
+  2049 / 5000 / 300, one card and two, equal the cold run in the ids AND the whole memory (every KV row, every SSM state, the ring
+  columns); a snapshot moves bitwise between every pair of 5 placements (25 moves); the server over HTTP: the greedy chat equals the
+  decode run, the repeat restores at 2048, a seeded sampled request is reproducible.
+- `g++ 15.2 -Wall -Wextra -Werror -std=c++17 -fsyntax-only` (the `b70-mac-gcc` image) passes every new and changed host / L0 source; it
+  found one `-Wdangling-reference` in `bolt_request_test.cc` (a `const&` bound to a function that takes a temporary `std::string`).
+
+**Rulings where this section differs from the plan's text (each with its cost if wrong):**
+1. *The reasoning is verbatim, not the Qwen stream's.* The Qwen stream drops one leading newline and `rtrim`s the reasoning; the template
+   re-renders a turn as `<think>\n` + `reasoning_content` + `</think>`, so a stripped reasoning would drift every later prompt from the
+   generated bytes. `BoltOutputStream` streams it byte for byte (holding back only a tail that may become `</think>`); the content after
+   `</think>` is the Qwen stream's (a call directly after it drops the whitespace between). *Cost if wrong:* the client sees a trailing
+   newline in `reasoning_content`.
+2. *`force_nonempty_content` holds the reasoning* (decided at the end of the text, as ultra_v3's `content or None` does: a bare `</think>`
+   at the end counts as no content, any byte after it - whitespace too - as content), so a stream with the flag set streams no reasoning
+   before the first byte behind `</think>`; the moved text is plain content, never parsed for calls (vLLM would). *Cost if wrong:* a client
+   that sets the flag loses live reasoning; a call written in unfinished reasoning is not executed.
+3. *A cut call is dropped by an option on the Qwen stream* (`set_drop_cut_calls`, off for Qwen / Agnes), not by a new call parser: a call
+   whose `</function>` closed but whose `</tool_call>` is missing is kept (complete); one with no `</function>` is dropped; a closed block
+   with no `<function=` is content. A stop string applies to CONTENT only, so a call is never cut by one (the plan's "or a stop string"
+   cannot arise: `finish_reason` is `length` for `max_tokens`, `stop` for a stop string or EOS). *Cost if wrong:* none to Qwen / Agnes (B0).
+4. *The typing is the Qwen parser's, shared with Qwen3.8:* a `string | null` parameter written `null` stays the text `null` (vLLM's
+   `qwen3_coder` returns None), `007` for an integer stays text, `</parameter>` inside a value is kept (the scorer, and vLLM, cut it).
+   Listed in `bolt_parse_cases.json` as `differs`. *Cost if wrong:* an agent gets a string where it expected a null.
+5. *`reasoning_effort` also takes `xhigh`* (-> the default, like `high`): OpenAI's current set. PROVISIONAL. *Cost:* a client sending it
+   would otherwise get a 400.
+6. *Sampling defaults carry NO top-k* (the card names none, vLLM applies none); `server::generation_sampling`'s HF default of 50 for a
+   field a file leaves out is not used for Bolt. The rule (`cli::bolt::resolve_generation`): `--generation-config FILE` is the operator's
+   word; else the snapshot's file when it has sampling keys; else NVIDIA's published T 1.0 / top-p 0.95 / EOS [2, 11] (SergiioB's file
+   adds its EOS 11 to that set). PROVISIONAL until the box shows a difference. *Cost:* top-k 50 vs none moves the sampled tail by an
+   amount top-p 0.95 almost always makes invisible.
+7. *The template kwargs `medium_effort`, `truncate_history_thinking`, `force_nonempty_content` (and `enable_thinking`) must be booleans*
+   (a 400 naming it); the template would read any truthy value. *Cost:* a client sending `"true"` gets an error instead of a silent reading.
+8. *`--chat-template FILE` is accepted for Bolt* (its sha256 is printed and compared with Bolt's `6521afc7` in the startup line); the plan
+   did not say. `--layers` is refused for `b70-serve` (it is `b70-decode`'s development mode). *Cost:* none.
+9. *The store key is "NEMOBOLT", the bf16 SSM-state arm's another* (low bit flipped): its snapshots are half the size and not interchangeable.
+10. *`state_runs` takes the state precision; the three conv columns are positions pos - 1, pos - 2, pos - 3 in that order* (the plan said
+    "three raw columns before the position"). The block hook itself is 25d's (`BoltEngine::set_block_hook`, called at a mid-prompt block
+    end and at the prompt end); 25e adds the snapshot calls the hook's users need. *Cost:* none.
+11. *Row 62 has more stages than the plan's six* (k0, reject, snap_synth, serve, chat_synth: the synthetics' snapshots / startup / chat
+    before SergiioB's 41.9 GB) and `r62.benchy` is `gpu-self` (`serve_benchy.sh` takes the GPU lock itself; the plan's table said `gpu`,
+    which would deadlock). The A4 stage runs through `serve_run.sh` / `serve_client.py` and reads the server's `--log-requests` records
+    (`serve_a4_texts.py`), so it also checks that every scenario's prompt ids as the server rendered them equal the reference's.
+12. *The agentic loop gained `--extra JSON`* (Bolt's `chat_template_kwargs` arms) and a divergence line per missed turn (Review Focus 5's
+    "first token where each miss diverges"); `agentic_run.sh` passes `EXTRA`.
+
+**Known limits, recorded:** (a) tool-call arguments and tool schemas render with SORTED keys (the server holds JSON objects sorted): a
+call whose arguments the model wrote in another order re-renders differently, so the prefix cache misses there (spec 24 §4.6); (b) a
+new user message drops every earlier assistant turn's reasoning (`truncate_history_thinking`), so the cache diverges at the first assistant
+turn before it - r62.agentic records both with the divergence token; (c) the A4 reference outputs of 25a are not on the Mac, so the
+plan's "0 parse failures where the scorer found none" is `bolt_parser_check.py`'s on the box (r62.a4), held on the Mac by its selftest.
+
+**Not run (box, row 62):** everything on a card - `bolt_snapshot_gpu_test` (the synthetics on one card and two, `cross`, bf16 state;
+SergiioB's on two cards), the startup lines, `golden_server_test --chat`, A4 through `b70-serve`, the agentic transcript's three arms,
+llama-benchy beside the operator's vLLM run. PROVISIONAL / PROPOSED until then: the sampling defaults' top-k, `xhigh`, the A4 bar, every
+speed row.
