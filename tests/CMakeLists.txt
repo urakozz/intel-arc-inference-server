@@ -4763,3 +4763,16 @@ set_tests_properties(bolt_load_synth_g128_test bolt_load_synth_g64x_test bolt_lo
   bolt_load_synth_pp2_g64x_test bolt_load_real_test bolt_load_rtn_test PROPERTIES
   LABELS "checkpoint;bolt" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 # ==== Spec 25b: Nemotron 3.5 Bolt descriptor and loader (label bolt) ==== (end) ====
+
+# ==== Spec 25c: Nemotron 3.5 Bolt decode (label bolt) ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-20-spec25c-bolt-decode.md. Box queue row 60. Host tests first (the Mac:
+# tools/mac_check.sh), then the card's (box only). Real-weight gates SKIP (77) until SergiioB's checkpoint and 25a's
+# golden sets are on the box; the synthetic checkpoints (25b's make_synth.py, n12-*) carry B3 / B4 before them.
+# Task 1 (P0): the skeleton lists probe_bolt_step replays hold spec 25 §6.1's counts.
+add_executable(probe_bolt_step_shapes_test kernels/probe_bolt_step_shapes_test.cc)
+target_include_directories(probe_bolt_step_shapes_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+  ${CMAKE_SOURCE_DIR}/tools/probe)
+target_link_libraries(probe_bolt_step_shapes_test PRIVATE b70_bolt_model)
+add_test(NAME probe_bolt_step_shapes_test COMMAND probe_bolt_step_shapes_test)
+set_tests_properties(probe_bolt_step_shapes_test PROPERTIES LABELS bolt)
+# ==== Spec 25c: Nemotron 3.5 Bolt decode (label bolt) ==== (end) ====

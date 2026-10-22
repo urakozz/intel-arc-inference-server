@@ -704,3 +704,33 @@ if(B70_LFM2MOE)
   endforeach()
   add_dependencies(probe_lfm_step ${_lfm_p0_kernels})
 endif()
+
+# --- probe_bolt_step: spec 25c P0 (plan 25c Task 1) ---
+# Nemotron 3.5 Bolt's decode step from EXISTING kernels at its shapes (tools/probe/bolt_step_shapes.h: 653 / 533 /
+# GEMV-only / noop lists and the SSM state's read-modify-write floor, interleaved; --sweep-s times every int4 shape at
+# every S and layout). Box queue row 60, stage r60.p0. Plain g++ / Level Zero; the binaries are src/kernels/
+# CMakeLists.txt's spec 25c block (and gdn_step_M1, noop, Muse's mg_attn - built above or by the Muse block).
+if(B70_BOLT)
+  add_executable(probe_bolt_step probe_bolt_step.cc)
+  target_include_directories(probe_bolt_step PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(probe_bolt_step PRIVATE b70_l0 b70_bolt_model)
+  b70_target_kernel_dir(probe_bolt_step)
+  set(_nb_p0_kernels kernel_noop kernel_gdn_step_M1 kernel_moe_M1_E64_T8_D1024_I2048 kernel_mg_attn_M1_T64_Q32KV2_F
+    kernel_lfm_res_norm_M1_K4096_W8_S1 kernel_prep_res_fold_M1_K4096_SP0_G16 kernel_kol_norm_M1_K4096_G16_W16
+    kernel_gemv_i8w_M1_K4096_N131072 kernel_nb_argmax_stage1_M1_V131072 kernel_nb_argmax_stage2_V131072
+    kernel_nb_state_rmw_F32 kernel_nb_state_rmw_B16)
+  foreach(E 240 304 368 432 496)
+    list(APPEND _nb_p0_kernels kernel_gemv_bf16_M1_K4096_N${E}_C16_S16)
+  endforeach()
+  foreach(L 0 1)
+    foreach(S 1 2 4 8 16)
+      list(APPEND _nb_p0_kernels kernel_gemv_M1_K4096_N18560_S${S}_L${L} kernel_gemv_M1_K8192_N4096_S${S}_L${L}
+        kernel_gemv_M1_K4096_N4608_S${S}_L${L} kernel_gemv_M1_K4096_N4096_S${S}_L${L}
+        kernel_gemv_M1_K4096_N6400_S${S}_L${L} kernel_gemv_M1_K1024_N4096_S${S}_L${L})
+      if(S LESS_EQUAL 4)
+        list(APPEND _nb_p0_kernels kernel_gemv_M1_K5376_N4096_S${S}_L${L})
+      endif()
+    endforeach()
+  endforeach()
+  add_dependencies(probe_bolt_step ${_nb_p0_kernels})
+endif()
