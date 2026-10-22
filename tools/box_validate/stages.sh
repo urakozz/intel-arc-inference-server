@@ -4463,12 +4463,12 @@ st_r62_chat_synth() {
   grab_all chat 'chat of [0-9]+ prompt ids' 9
   finish
 }
-stage r62.chat      62 default gpu  bolt_g128,oracle_bolt   -           "golden_server_test --chat on b70-serve <bolt> == b70-decode"
+stage r62.chat      62 default gpu  bolt_g128               -           "golden_server_test --chat on b70-serve <bolt> == b70-decode (B70_SERVE_DECODE_AFTER=1: the chats are collected, b70-serve is stopped, THEN b70-decode runs on each saved prompt - two copies of 41.9 GB do not fit two cards)"
 st_r62_chat() {
   local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
   x "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $snap"
   step_rc $? "b70-serve <SergiioB's g128>, two cards (the default), --max-len auto, seeded sampling"
-  chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_WAIT_S=3600 B70_SERVE_ARGS='--max-len 32768' timeout 7200 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $snap --chat" \
+  chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_WAIT_S=3600 B70_SERVE_DECODE_AFTER=1 B70_SERVE_ARGS='--max-len 32768' timeout 7200 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $snap --chat" \
     "golden_server_test --chat against SergiioB's g128, two cards"
   grab_all auto 'max_len: auto ->|^split: ' 6
   grab_all memory '^memory' 8

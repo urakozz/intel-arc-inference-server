@@ -129,6 +129,7 @@ void wait_ready(uint16_t port) {
   // Spec 25e: B70_SERVE_WAIT_S (seconds, default 120) - Nemotron 3.5 Bolt's 41.9 GB on two cards takes longer to load.
   uint32_t seconds = 120;
   if (const char* wait = std::getenv("B70_SERVE_WAIT_S")) seconds = static_cast<uint32_t>(std::strtoul(wait, nullptr, 10));
+  if (seconds == 0) seconds = 120;   // 0 or not a number: the default
   for (uint32_t attempt = 0; attempt < seconds * 2; ++attempt) {
     const auto response = client.Get("/v1/models");
     if (response && response->status == 200) return;
@@ -230,6 +231,28 @@ int main(int argc, char** argv) {
       std::string w;
       while (words >> w) serve_args.push_back(w);
     }
+    // Spec 25e: B70_SERVE_DECODE_AFTER=1 (chat mode): collect every chat response first, stop b70-serve, THEN run b70-decode on
+    // each saved prompt - Nemotron 3.5 Bolt's 41.9 GB on two cards cannot be resident twice. Unset: as before.
+    const char* after = std::getenv("B70_SERVE_DECODE_AFTER");
+    const bool decode_after = chat && after != nullptr && std::string(after) == "1";
+    struct Saved {
+      std::string name;
+      std::vector<uint32_t> prompt_ids, served_ids;
+    };
+    std::vector<Saved> saved;
+    const auto compare_chat = [&](const std::string& name, const std::vector<uint32_t>& prompt_ids,
+                                  const std::vector<uint32_t>& served_ids) {
+      const std::string ids_path = write_ids_file(name, prompt_ids);
+      const std::vector<uint32_t> decoded_ids = run_decode(decode, snapshot, ids_path);
+      std::remove(ids_path.c_str());
+      if (decoded_ids.size() != kGenerated)
+        fail(name + " b70-decode returned " + std::to_string(decoded_ids.size()) + " ids, expected 32");
+      const size_t compared = std::min(served_ids.size(), decoded_ids.size());
+      require_equal(name, "chat generated ids", std::vector<uint32_t>(served_ids.begin(), served_ids.begin() + compared),
+                    std::vector<uint32_t>(decoded_ids.begin(), decoded_ids.begin() + compared));
+      std::printf("%s: chat of %zu prompt ids (first %u), %zu/%u generated ids identical to b70-decode\n", name.c_str(),
+                  prompt_ids.size(), prompt_ids.empty() ? 0u : prompt_ids[0], compared, kGenerated);
+    };
     server = spawn(serve_args);
     wait_ready(port);
     httplib::Client client("127.0.0.1", port);
@@ -251,18 +274,11 @@ int main(int argc, char** argv) {
         const std::vector<uint32_t> served_ids =
             body.at("choices").at(0).at("token_ids").get<std::vector<uint32_t>>();
         if (served_ids.size() > kGenerated) fail(name + " server returned more than 32 generated ids");
-        const std::string ids_path = write_ids_file(name, prompt_ids);
-        const std::vector<uint32_t> decoded_ids = run_decode(decode, snapshot, ids_path);
-        std::remove(ids_path.c_str());
-        if (decoded_ids.size() != kGenerated)
-          fail(name + " b70-decode returned " + std::to_string(decoded_ids.size()) + " ids, expected 32");
-        const size_t compared = std::min(served_ids.size(), decoded_ids.size());
-        require_equal(name, "chat generated ids",
-                      std::vector<uint32_t>(served_ids.begin(), served_ids.begin() + compared),
-                      std::vector<uint32_t>(decoded_ids.begin(), decoded_ids.begin() + compared));
-        std::printf("%s: chat of %zu prompt ids (first %u), %zu/%u generated ids identical to b70-decode\n",
-                    name.c_str(), prompt_ids.size(), prompt_ids.empty() ? 0u : prompt_ids[0], compared,
-                    kGenerated);
+        if (decode_after) {   // collected; b70-decode runs once the server is gone (below)
+          saved.push_back({name, prompt_ids, served_ids});
+          continue;
+        }
+        compare_chat(name, prompt_ids, served_ids);
         continue;
       }
       const std::string ids_path = prompts + "/" + name + ".ids";
@@ -292,6 +308,11 @@ int main(int argc, char** argv) {
       std::printf("%s: prompt ids identical, %zu/%u generated ids identical\n", name.c_str(), compared, kGenerated);
     }
 
+    if (decode_after) {
+      stop(server);
+      server = -1;
+      for (const Saved& r : saved) compare_chat(r.name, r.prompt_ids, r.served_ids);
+    }
     stop(server);
     return 0;
   } catch (const std::exception& error) {
