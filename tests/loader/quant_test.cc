@@ -609,6 +609,34 @@ int main(int argc, char** argv) {
       }
       CHECK(threw);
     }
+    // the f16 subnormal boundary: bf16 0x3581 (2^-20 x (1 + 1/128): 8 significant bits where f16's subnormal grid has 4) is
+    // refused naming the element; exactly 2^-24 (bf16 0x3380, f16's smallest subnormal 0x0001) is accepted, bitwise
+    {
+      std::vector<uint16_t> evil = bf;
+      evil[7] = 0x3581;
+      lin_dir("BF16", evil);
+      loader::SafetensorsSet set(dir + "/");
+      threw = false;
+      try {
+        loader::LinearSrc::classify(set, "lin");
+      } catch (const std::runtime_error& e) { threw = std::string(e.what()).find("lin.scales[7]") != std::string::npos; }
+      CHECK(threw);
+      threw = false;
+      try {
+        loader::assert_quant_invariants(set);
+      } catch (const std::runtime_error& e) { threw = std::string(e.what()).find("lin.scales[7]") != std::string::npos; }
+      CHECK(threw);
+      std::vector<uint16_t> ok = bf;
+      ok[7] = 0x3380;
+      ok[8] = 0xB380;   // -2^-24
+      lin_dir("BF16", ok);
+      loader::SafetensorsSet set2(dir + "/");
+      loader::assert_quant_invariants(set2);
+      const loader::LinearSrc ls = loader::LinearSrc::classify(set2, "lin");
+      CHECK_EQ(ls.scales[7], uint16_t(0x0001));
+      CHECK_EQ(ls.scales[8], uint16_t(0x8001));
+      CHECK_EQ(ls.scales[N + 7], uint16_t(0x0001));   // the g64 row 1 copy of g128 row 0 is element 7 of row 0 only; row 2j+1 = row j
+    }
     // a BF16 NaN scale is refused too (the dequant has no guard)
     {
       std::vector<uint16_t> evil = bf;
