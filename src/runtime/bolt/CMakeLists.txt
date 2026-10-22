@@ -4,3 +4,11 @@
 add_library(b70_bolt_plan STATIC bolt_sizes.cc)
 target_include_directories(b70_bolt_plan PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_bolt_plan PUBLIC b70_bolt_model b70_plan)
+
+# Spec 25c: b70_bolt_runtime - the decode buffers, the capture and the decode loop on one or two devices (Level Zero). It
+# links b70_runtime for spec 16b's pieces (runtime::PipelineLink, StageLink, ProfileEvents, the pp_handoff binary) and
+# reads the kernels' names (kernels::bolt, src/kernels/bolt_kernels.h).
+add_library(b70_bolt_runtime STATIC bolt_buffers.cc bolt_capture.cc bolt_engine.cc)
+target_include_directories(b70_bolt_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(b70_bolt_runtime PUBLIC b70_l0 b70_bolt_loader b70_bolt_plan b70_runtime)
+b70_target_kernel_dir(b70_bolt_runtime)
