@@ -4584,6 +4584,58 @@ st_r63_vllm_xpu() {
 }
 
 # ======================================================================================
+row 66 "spec 13a - the batching probe: rows of different sequences in one decode step (the BATCH_ROWS row builds, runtime::build_rows, probe_batch_step under B70_BATCH_PROBE); the check, the step and chunk tables (plan 13a)"
+rownote 66 "Written blind on the Mac (docs/probe-batching-2026-10-23.md): B70_BATCH_PROBE is OFF by default, so G0's build is main's (capture.cc's default token stream and all 105 existing command lines of gdn_step.cl / attn.cl / attn_v2.cl / kv8.cl preprocess to main's tokens; G0's g0.sha holds the binaries). r66.build is the first ocloc compile of the 80 row builds (tools/kernel_cmdlines lists them with the option on: +80 / -0 / ~0) and of build_rows; the Mac ran gdn_step's and attn_prep's row builds bitwise against the production kernels (tools/mac/clrun/batch_rows_run), never attention v2's."
+rownote 66 "Timed stages (r66.cost, r66.chunk): an idle box (box-day plan Session 6d, the idle protocol of section 1.7), BOTH cards free of DRM holders, RECORD grade, device 0, the GPU lock for the whole stage; every arm is an interleaved pair against 1x1@4k after a warm-up, median of 3 (probe_batch_step's module comment). Qwen3.8 at int8 KV is the decided form, bf16 the comparison; Agnes runs its two layouts (2 slots with MTP; 4 with --mtp off)."
+rownote 66 "Hand back: every 'CHECK' line and the 'check:' verdict of r66.check (a FAIL stops 13b); r66.cost's tables ('| arm |' rows, the production verify(0) pair) per model and KV form; r66.chunk's chunk tables; the 'memory:' lines. They fill docs/probe-batching-2026-10-23.md sections 2-4 and the operator's section 7 decisions (the slots per model, the row budget's allocation, the interleave chunk)."
+stage r66.k0    66 default cpu -           g0.sha,g0.bitwise,g0.suite "B0: the default build is main's (G0) - B70_BATCH_PROBE is off there"
+st_r66_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r66.build 66 default cpu -           g0.build "build-batch-probe: -DB70_BATCH_PROBE=ON (the 80 row builds' first ocloc compile, build_rows, probe_batch_step), -j\$JOBS"
+st_r66_build() {
+  chk "cmake -S . -B build-batch-probe -DCMAKE_BUILD_TYPE=Release -DB70_BATCH_PROBE=ON $CMAKE_ARGS > /dev/null && cmake --build build-batch-probe -j$JOBS --target probe_batch_step" \
+    "the probe build"
+  chk "miss=0; for b in gdn_step_rows_M8 gdn_step_rows_M8_G54 attn_prep_M8_ROWS attn_prep_M8_S1_KV8_ROWS attn_v2_M8_T32_ROWS attn_v2_M8_T32_KV8_ROWS gemv_M8_K5120_N38912_S8_L0 argmax_stage1_M8_V248089; do if [ -s build-batch-probe/kernels/\$b.bin ]; then echo \"built \$b\"; else echo \"NOT BUILT \$b\"; miss=1; fi; done; [ \$miss = 0 ]" \
+    "the row builds and Agnes's M = 8 rows are in build-batch-probe/kernels"
+  finish
+}
+stage r66.check 66 default gpu qwen,agnes  r66.build "the check: every arm's rows bitwise their slot's run alone (logits, ids, GDN states, KV and head KV rows), isolation, the production verify / plain tie - Qwen3.8 and Agnes, bf16 and int8 KV, Agnes also --mtp off (4 slots)"
+st_r66_check() {
+  x "uptime"
+  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv int8 --no-time --no-chunks" "Qwen3.8, int8 KV, MTP"
+  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv bf16 --no-time --no-chunks" "Qwen3.8, bf16 KV, MTP"
+  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_AGNES --kv int8 --no-time --no-chunks" "Agnes, int8 KV, MTP (2 slots)"
+  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_AGNES --kv bf16 --no-time --no-chunks" "Agnes, bf16 KV, MTP (2 slots)"
+  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_AGNES --kv int8 --mtp off --no-time --no-chunks" "Agnes, int8 KV, --mtp off (4 slots)"
+  grab_all check '^CHECK |^check: |^probe_batch_step: |^memory: ' 200
+  finish
+}
+stage r66.cost  66 optin   gpu qwen,agnes  r66.check "the step table: every arm against 1x1@4k as interleaved pairs, median of 3 - Qwen3.8 int8 and bf16 KV, Agnes int8 (2 slots, MTP) and --mtp off (4 slots) - idle box, both cards free of DRM holders (timed)"
+st_r66_cost() {
+  idle before
+  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv int8 --no-check --no-chunks --calls 32 --rounds 3" "Qwen3.8, int8 KV (the decided form)"
+  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv bf16 --no-check --no-chunks --calls 32 --rounds 3" "Qwen3.8, bf16 KV"
+  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_AGNES --kv int8 --no-check --no-chunks --calls 32 --rounds 3" "Agnes, int8 KV, MTP (2 slots)"
+  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_AGNES --kv int8 --mtp off --no-check --no-chunks --calls 32 --rounds 3" "Agnes, int8 KV, --mtp off (4 slots)"
+  idle after
+  grab_all cost '^probe_batch_step: |^memory: |^timing: |^\| ' 200
+  grab_all idle '^IDLE '
+  finish
+}
+stage r66.chunk 66 optin   gpu qwen,agnes  r66.check "the interleave chunk: one Engine::prefill chunk of 512 / 1024 / 2048 at depth 4096 and 32768 beside the 1-row steps, rotated rounds, median of 3 - Qwen3.8 and Agnes, int8 KV - idle box (timed)"
+st_r66_chunk() {
+  idle before
+  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv int8 --no-check --arms 1x1@4k,1x1@32k --chunks 512,1024,2048 --chunk-depths 4096,32768" "Qwen3.8, int8 KV"
+  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_AGNES --kv int8 --no-check --arms 1x1@4k,1x1@32k --chunks 512,1024,2048 --chunk-depths 4096,32768" "Agnes, int8 KV"
+  idle after
+  grab_all chunk '^probe_batch_step: |^chunks: |^timing: |^\| ' 80
+  grab_all idle '^IDLE '
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / muse / dflash / bolt / lilicorr labels belong to their rows)"
 st_x_rest() {
