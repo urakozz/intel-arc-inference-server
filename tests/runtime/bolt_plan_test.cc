@@ -179,6 +179,81 @@ int main() {
     std::printf("  12 blocks on one card: %s\n", describe(p.device[0], card32).c_str());
   }
 
+  // --- spec 25c: the decode list's launch counts (spec 25 §6.1's formula), the switches, the decode scratch ------------
+  {
+    const model::BoltPlacement one = model::BoltPlacement::one(d), two = model::BoltPlacement::two(d, split);
+    const BoltFuse none{}, all{true, true, true};
+    const BoltFuse router{true, false, false}, route{false, true, false}, conv{false, false, true};
+    const runtime::PpHandoff copy = runtime::PpHandoff::Copy, peer = runtime::PpHandoff::Peer;
+    // 40 Mamba x 6 + 8 attention x 6 + 40 MoE x 9 + the head's 5
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, none, copy), size_t(40 * 6 + 8 * 6 + 40 * 9 + 5));
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, none, copy), size_t(653));
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Eager, none, copy), size_t(653 - 8));   // Muse's eager: ONE launch
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, router, copy), size_t(653 - 40));
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, route, copy), size_t(653 - 40));
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, conv, copy), size_t(653 - 40));
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, all, copy), size_t(533));
+    CHECK_EQ(decode_launches(d, two, BoltAttn::Flash, none, copy), size_t(653));       // the cut adds no compute launch
+    CHECK_EQ(decode_launches(d, two, BoltAttn::Flash, none, peer), size_t(655));       // pp_send + pp_recv
+    CHECK_EQ(device_launches(d, two, 0, BoltAttn::Flash, none, copy) + device_launches(d, two, 1, BoltAttn::Flash, none, copy),
+             size_t(653));
+    // the synthetic N 12 (M E M E M E M * E M E M): 6 x 6 + 5 x 9 + 1 x 6 + 5 = 92; with every arm 92 - 6 - 10 = 76
+    const model::BoltDesc t12 = model::bolt_truncated(d, 12);
+    CHECK_EQ(decode_launches(t12, model::BoltPlacement::one(t12), BoltAttn::Flash, none, copy), size_t(92));
+    CHECK_EQ(decode_launches(t12, model::BoltPlacement::one(t12), BoltAttn::Flash, all, copy), size_t(76));
+    CHECK_EQ(decode_launches(t12, model::BoltPlacement::two(t12, 6), BoltAttn::Flash, none, peer), size_t(94));
+    CHECK(decode_launches(d, one, BoltAttn::Eager, none, copy) <= 1024);   // runtime::ProfileEvents::kProfileCapacity
+    // the cut's hand-off: block 47 (attention) leaves o_proj's slices; a cut after a MoE block, both of its sources
+    CHECK(d.is_attention(split - 1));
+    CHECK_EQ(cut_pending(d, two).total(), 1u);
+    CHECK_EQ(landing_layout(d, two).sumsq_bytes, size_t(1) * kM * 4096 * 4);
+    const model::BoltPlacement moe_cut = model::BoltPlacement::two(d, 2);   // block 1 is MoE
+    CHECK_EQ(cut_pending(d, moe_cut).s1, 1u);
+    CHECK_EQ(cut_pending(d, moe_cut).s2, 1u);
+    CHECK_EQ(landing_layout(d, moe_cut).sumsq_bytes, size_t(2) * kM * 4096 * 4);
+    CHECK_EQ(landing_layout(d, moe_cut).resid_bytes, size_t(kM) * 4096 * 2);
+    // the switches
+    CHECK(parse_attn("") == BoltAttn::Flash && parse_attn("eager") == BoltAttn::Eager);
+    CHECK(parse_state("") == BoltState::Fp32 && parse_state("bf16") == BoltState::Bf16);
+    CHECK(!parse_fuse("").any() && !parse_fuse("none").any() && bolt_fuse_name(parse_fuse("all")) == "all");
+    CHECK(bolt_fuse_name(parse_fuse("conv,router")) == "router,conv");
+    refused("B70_BOLT_ATTN", [] { parse_attn("flashy"); });
+    refused("B70_BOLT_FUSE", [] { parse_fuse("router,gate"); });
+    refused("Decision 2", [] { parse_state("fp16"); });
+    // the decode scratch: each term from its formula; eager's score row the term that scales with max_len
+    const ScratchSizes f = scratch_sizes(d, 262144, BoltAttn::Flash), e = scratch_sizes(d, 262144, BoltAttn::Eager);
+    CHECK_EQ(f.slices, size_t(18560) * 4);                    // in_proj at S 1 the widest
+    CHECK_EQ(f.moe_a, size_t(9) * 2560 * 2);
+    CHECK_EQ(f.logits_r, size_t(496) * 4);
+    CHECK_EQ(f.routes, size_t(88) * 48 * 4);
+    CHECK_EQ(f.attn_part, size_t(32) * 64 * 130 * 4);
+    CHECK_EQ(f.attn_scores, size_t(0));
+    CHECK_EQ(e.attn_scores, size_t(32) * 262144 * 4);
+    CHECK_EQ(e.total() - f.total(), e.attn_scores);
+    const PersistentSizes p32 = persistent_sizes(d, two, 0, 262144, BoltState::Fp32),
+                          p16 = persistent_sizes(d, two, 0, 262144, BoltState::Bf16);
+    CHECK_EQ(p32.ssm, size_t(22) * 4194304);                   // 22 Mamba blocks on device 0 (spec 25 §3)
+    CHECK_EQ(p16.ssm * 2, p32.ssm);
+    CHECK_EQ(p32.kv_k, size_t(5) * 262144 * 256 * 2);          // attention 7 / 16 / 25 / 36 / 47
+    // plan() with the decode scratch IS the allocation: kv + ssm + conv rings + decode_scratch = persistent + scratch
+    for (uint32_t dev = 0; dev < 2; ++dev)
+      for (BoltState st : {BoltState::Fp32, BoltState::Bf16}) {
+        BoltReserve r;
+        r.decode_scratch = decode_scratch_bytes(d, two, dev, 65536, BoltAttn::Eager, st);
+        r.bf16_state = st == BoltState::Bf16;
+        const DevicePlan pl = device_plan(d, two, dev, 65536, true, r, 0);
+        const PersistentSizes ps = persistent_sizes(d, two, dev, 65536, st);
+        CHECK_EQ(pl.kv + pl.ssm + pl.conv_rings + pl.decode_scratch,
+                 ps.total() + scratch_sizes(d, 65536, BoltAttn::Eager).total());
+      }
+    std::printf("  decode: %zu launches (eager %zu, every arm %zu, two cards peer %zu), N 12: %zu; flash scratch %zu B, eager "
+                "+%zu B at 262144\n",
+                decode_launches(d, one, BoltAttn::Flash, none, copy), decode_launches(d, one, BoltAttn::Eager, none, copy),
+                decode_launches(d, one, BoltAttn::Flash, all, copy), decode_launches(d, two, BoltAttn::Flash, none, peer),
+                decode_launches(t12, model::BoltPlacement::one(t12), BoltAttn::Flash, none, copy), f.total(),
+                e.attn_scores);
+  }
+
   std::puts("bolt_plan_test OK");
   return 0;
 }
