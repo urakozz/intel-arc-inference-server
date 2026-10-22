@@ -691,12 +691,13 @@ NVIDIA's hybrid of 40 Mamba-2 blocks, 8 NoPE attention blocks (GQA 32 / 2, head_
 of 240..496 relu² experts in a 1024 latent, a shared expert), 88 blocks, vocabulary 131072; SergiioB's int4 g128 export
 (41.9 GB on disk; 40.469 GB on the cards with the int8 head, derived - spec 25 §14).
 
-**Status: decode built, never run on a B70** (queue row 60; spec 25c, as built in spec 25 §15). The real model runs on
-**two cards** (Decision 4: `--pp 2` is the default, split 48 by bytes; `--pp 1` is refused naming the bytes); the N 12
-synthetic checkpoints and `--layers N` fit one card. A prompt goes through the decode list one replay per id (prefill is
-spec 25d: `--prefill*` refused). Expected (derived): 653 launches a token (645 with `B70_BOLT_ATTN=eager`, 533 with
-`B70_BOLT_FUSE=all`, +2 with `--pipeline-handoff peer`). P0 (`probe_bolt_step`) runs first on the box and decides the
-GEMV `{S, layout}` picks and which arms are worth keeping.
+**Status: decode, prefill and serving built, never run on a B70** (queue rows 60 / 61 / 62; spec 25c / 25d / 25e, as built in
+spec 25 §15 / §16 / §17). The real model runs on **two cards** (Decision 4: `--pp 2` is the default, split 48 by bytes;
+`--pp 1` is refused naming the bytes); the N 12 synthetic checkpoints and `--layers N` fit one card. Without `--prefill`
+a prompt goes through the decode list one replay per id; `--prefill` / `--bench --prefill-length N` run the `l0` prefill
+(spec 25d). Expected (derived): 653 launches a token (645 with `B70_BOLT_ATTN=eager`, 533 with `B70_BOLT_FUSE=all`, +2 with
+`--pipeline-handoff peer`). P0 (`probe_bolt_step`) runs first on the box and decides the GEMV `{S, layout}` picks and which
+arms are worth keeping.
 
 ```sh
 S=oracle-out-bolt-synth/n12-g128                   # a synthetic checkpoint (25b's make_synth.py, 12 blocks)
@@ -712,9 +713,48 @@ B70_BOLT_FUSE=all ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --b
 B70_BOLT_SSM=bf16 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --bench --depth 4096 --tg 256   # Decision 2's arm
 ```
 
-**Limits.** Decode only (no `b70-serve`: spec 25e); no prefill (25d), no `--mtp` (no MTP head), no `--spec` (spec 26), bf16 KV
-only (`--kv-cache int8` refused, Decision 17), `--layers auto` refused, `--device` refused with `--pp 2`.
+**Serving (spec 25e).** `b70-serve <snapshot>` runs the engine on **two cards by default** (`--pp 1` only for a synthetic /
+small checkpoint; `--pipeline-split`, `--pipeline-handoff` as `b70-decode` takes them), `--max-len auto` up to 262144 with
+the prefill scratch planned in (Decision 14), the int8 head by default, prefill on `l0` only:
+
+```sh
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <SergiioB snapshot> --port 8000 --prefix-cache-gb auto --log-requests ~/bolt-log
+```
+
+- **Chat template.** The snapshot's `chat_template.jinja` (sha256 `6521afc7...`, byte-identical in NVIDIA's and SergiioB's
+  repos; `--chat-template FILE` renders another, its sha256 is printed). ChatML, no BOS, and the system block is ALWAYS
+  rendered (`<|im_start|>system\n<|im_end|>\n` with no system message). `chat_template_kwargs`: `enable_thinking` (default
+  true: the prompt ends `<think>\n`; false: `<think></think>`), `medium_effort` (appends `{reasoning effort: efficient}` to
+  the last user message), `truncate_history_thinking` (default true: the reasoning of turns before the last user message is
+  dropped), each a boolean (a 400 otherwise); the OpenAI `reasoning_effort` maps onto them - `none` / `minimal` ->
+  `enable_thinking` false, `low` / `medium` -> `medium_effort` true, `high` / `xhigh` -> the default, anything else a 400 -,
+  and an explicit kwarg wins. Tool schemas and call arguments render with sorted keys (the server's JSON objects are
+  sorted: the prefix cache misses at a call whose arguments the model wrote in another order). Python's spelling for a
+  history argument (`True`, `None`) is the template's own.
+- **Output.** The output opens inside reasoning when the prompt ends `<think>\n` (`reasoning_content` in the response,
+  VERBATIM - the template re-adds `<think>\n` + reasoning + `</think>`, so a stripped reasoning would drift every later
+  prompt), up to the first `</think>`; then content and Qwen3-Coder XML tool calls (`<tool_call>\n<function=NAME>\n<parameter=
+  KEY>\nVALUE\n</parameter>...`, values typed by the tool's schema first). With thinking off everything is content, a stray
+  `</think>` included. `chat_template_kwargs.force_nonempty_content: true` turns reasoning that never closed (or ended with
+  no content) into content - held back from the stream until decided. A call cut by `max_tokens` or EOS is dropped, never
+  leaked as content; a call inside reasoning is reasoning (the `ultra_v3` reasoning parser's rules; spec 25 §7 and §17).
+- **Sampling.** A request that names no `temperature` / `top_p` / `top_k` samples with NVIDIA's published T 1.0, top-p 0.95,
+  no top-k, and generation ends on EOS **2 or 11** - from the snapshot's `generation_config.json` when it carries sampling
+  keys, else the published values (SergiioB's file lists EOS 11 only); `--generation-config FILE` overrides. A seeded
+  sampled request is reproducible request by request; `temperature: 0` is the device argmax.
+- **Prefix cache.** A snapshot at an aligned 2048-position block end (and at a request's end) carries, per Mamba block, the
+  SSM state (fp32: 4 MiB; 2 MiB with `B70_BOLT_SSM=bf16`, which is another store key) and the three raw conv columns
+  before the position - 170,229,760 B in all (derived) - and the 8 attention blocks' KV, 8,192 B a position. A hit restores
+  the largest block end <= the common prefix and prefills the rest. A new user message re-renders every earlier assistant
+  turn without its reasoning (`truncate_history_thinking`), so the cache diverges at the first assistant turn before the
+  last user message; within one user turn (the agentic tool loop) the re-render equals what was generated.
+- **Request.** Image / video / audio content parts are refused (text only).
+
+**Limits.** No `--mtp` (no MTP head), no `--spec` (spec 26), no `--draft-vocab`, bf16 KV only (`--kv-cache int8` refused,
+Decision 17), prefill on `l0` only (`--prefill-backend l0-int8` / `sycl-tla` refused), context at most 262144, `--layers`
+is `b70-decode`'s development mode only, `--device` refused with `--pp 2`.
 
 **Relevant variables:** `B70_BOLT_ATTN` (`flash` | `eager`), `B70_BOLT_FUSE` (`none` | `all` | a comma list of `router`,
 `route`, `conv`), `B70_BOLT_SSM` (`fp32` | `bf16`), `B70_BOLT_TIE_TOL` (the golden gate's near-tie tolerance, 1e-3 proposed),
-`B70_BOLT_A_EXP` (the reference's `A`: `torch` | `engine`).
+`B70_BOLT_A_EXP` (the reference's `A`: `torch` | `engine`), `B70_BOLT_SNAPSHOT` (`template_bolt_test`'s,
+`bolt_tokenizer_test`'s and `bolt_request_test`'s snapshot).

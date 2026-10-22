@@ -1,7 +1,7 @@
 // Spec 25e Task 1: Nemotron 3.5 Bolt's chat template (chat_template.jinja, sha256 6521afc7..., 12,514 B, byte-identical in
 // NVIDIA's and SergiioB's repos) through chat::Template (minja) against transformers 5.19.0's apply_chat_template, from
 // tools/tokenizer/dump_bolt.py's tests/tokenizer/bolt_templates.json:
-//   template_bolt_test <tests/tokenizer> <snapshot dir>
+//   template_bolt_test <tests/tokenizer> <snapshot dir> [<tests/server/bolt_template_cases.json>]
 // <snapshot dir> (tokenizer_config.json + chat_template.jinja; B70_BOLT_SNAPSHOT replaces it) holds the template: it is read
 // at run time, never copied into the repository (spec 25 Decision 20: vendoring is allowed, generated fixtures are the
 // default). Absent: SKIP (77). Checked:
@@ -15,6 +15,7 @@
 //     by four tokens and miss every prefix-cache entry);
 //   - the generation prompt: "<|im_start|>assistant\n<think>\n", or "<|im_start|>assistant\n<think></think>" with
 //     enable_thinking false;
+//   - spec 25a's own 14 fixtures (the optional third argument) render byte for byte too;
 //   - the source's sha256 is Bolt's; --chat-template FILE (chat::Template's second constructor) renders the same file from
 //     another path identically.
 #include <cstdio>
@@ -65,8 +66,8 @@ bool thinking_of(const Json& c) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 3) {
-    std::fprintf(stderr, "usage: template_bolt_test <tests/tokenizer> <snapshot dir>\n");
+  if (argc != 3 && argc != 4) {
+    std::fprintf(stderr, "usage: template_bolt_test <tests/tokenizer> <snapshot dir> [tests/server/bolt_template_cases.json]\n");
     return 2;
   }
   const std::string dir = argv[1];
@@ -125,6 +126,35 @@ int main(int argc, char** argv) {
   CHECK_EQ(bad, 0);
   CHECK_EQ(identical, facts.at("cases").size());
   CHECK(bare_prompts >= 20);
+
+  // Spec 25a's own fixtures (tests/server/bolt_template_cases.json, tools/oracle/bolt_facts.py: 14 cases rendered by
+  // transformers' apply_chat_template) hold here too - a second, independent corpus of the same renders.
+  if (argc == 4 && exists(argv[3])) {
+    const Json a25 = Json::parse(slurp(argv[3]));
+    size_t same = 0, skipped = 0;
+    for (const Json& c : a25.at("cases")) {
+      // The fixture was rendered from Python dicts in insertion order; the server's JSON objects are key-sorted (spec 24 §4.6's
+      // known limitation, shared by every model), so a case whose call arguments are not written in sorted order cannot match
+      // it byte for byte - Task 1's corpus (key-sorted before rendering) holds those.
+      if (c.at("name") == "a call: string / number / bool / null / list / dict arguments") {
+        ++skipped;
+        continue;
+      }
+      Json kw = c.at("kwargs");
+      kw["add_generation_prompt"] = c.at("add_generation_prompt").get<bool>();
+      const bool thinking = !kw.contains("enable_thinking") || kw.at("enable_thinking").get<bool>();
+      const std::string got = tmpl.render(c.at("messages"), c.at("tools"), thinking, kw);
+      if (got != c.at("text").get<std::string>()) {
+        diff_report("25a: " + c.at("name").get<std::string>(), got, c.at("text"));
+        ++bad;
+      } else {
+        ++same;
+      }
+    }
+    std::printf("25a's fixtures: %zu of %zu cases byte-identical (%zu skipped: arguments in a Python dict's insertion order)\n", same,
+                a25.at("cases").size(), skipped);
+    CHECK_EQ(bad, 0);
+  }
 
   // --chat-template FILE: the same source from another path renders identically.
   {
