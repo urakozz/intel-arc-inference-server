@@ -16,6 +16,14 @@
 #   vllm/model_executor/models/interfaces.py        _maybe_add_hidden_state (the tap offset)
 # This file is a re-implementation in plain torch, not a copy; line references below are to
 # those files at that commit.
+#
+# The LiLiCorr form (spec 26a) follows the same checkout at 3901d56800 (branch b70-xpu-stack), semantics only:
+#   vllm/model_executor/models/lilicorr.py          LiLiCorrHead (the lattice), the backbone class choice (L:)
+#   vllm/v1/worker/gpu/spec_decode/lilicorr/speculator.py   the anchor row (prepare_context_anchor)
+#   vllm/v1/worker/gpu/spec_decode/dflash2/speculator.py    the candidate walk (spec_step_seed keying)
+#   vllm/model_executor/layers/logits_processor.py  get_top_k_tokens(return_log_probs): full-vocabulary log-probs
+#   vllm/model_executor/layers/quantization/utils/nvfp4_emulation_utils.py   NVFP4's nibble order and scales
+# (the head is "adapted from sgl-project/sglang PR #37462" upstream).
 """DFlash / DFlash 2 reference drafter: CPU, float32 compute, deterministic.
 
     cfg = read_config(drafter_dir)
@@ -46,6 +54,16 @@ look-back inside the block, `row % (1 + K) >= tap`) and the candidate selector: 
 mask row from the head, a rank-r bilinear edge score, and a sequential walk whose row-0
 predecessor is the anchor token. DFlash (v1) samples each mask row independently from its own
 full-vocabulary logits. `cfg.version` picks the path.
+
+**The LiLiCorr form** (spec 26a; `architectures: [LiLiCorrDraftModel]`, nvidia/...-24GB-LiLiCorr): the DFlash 2
+backbone above with attention sinks (a per-head logit in the softmax denominator, unscaled, no value) and every layer
+sliding at |q - k| <= window - 1 (1023), non-causal, always the full block (anchor + 7 masks: K = 1..7 are prefixes of
+one walk); the NVFP4 linears decoded exactly (`nvfp4_decode`: W' = s_b x e bf16-exact, g kept apart and applied to the
+linear's output); candidates = the target head's top 8 per mask row with full-vocabulary log-probs
+(`lilicorr_candidates`); the LiLiCorr head (`Drafter.lilicorr_lattice`) scores a lattice [7][8 previous][8 next] from
+the candidates' embeddings, the mask rows' final-normed hidden, five log-prob features and the ANCHOR - hidden_norm(fc(
+taps)) of the newest committed position, p - 1 (`ContextKV.anchor_row`, `LiLiCorrSession`); the walk reads the lattice
+alone (`Drafter.lilicorr_walk`), q = softmax(realized / T) on the 8 candidates.
 
 Run in the oracle container (tools/oracle/README.md, "DFlash reference").
 """
@@ -111,11 +129,26 @@ class DFlashConfig:
     embed_norm: bool = False            # the target's weight-less embedding norm on the rows: never (G:1563-1579)
     head_cap: bool = False              # the target's multiplier / softcap on the draft rows: never (G:1658)
     q_scale: float = 1.0                # q x this after q_norm: 1 for the assistant (no qk_scale_factor, A:181-192)
+    # Spec 26a: the LiLiCorr form (form "lilicorr", version 2: the DFlash 2 backbone with sinks + the lattice head,
+    # module docstring "The LiLiCorr form"). cand_topk = lilicorr_candidate_topk; lil_* the head's widths.
+    cand_topk: int = 0
+    lil_hidden: int = 0
+    lil_layers: int = 0
+    lil_heads: int = 0
+    lil_mlp: int = 0
+    factor_dim: int = 0
+    vector_eps: float = 0.0
+    lil_logit_scale: float = 1.0
+    feature_eps: float = 1e-5           # nn.LayerNorm(5)'s default eps (the head's feature_norm)
     raw: dict = field(default_factory=dict, repr=False)
 
     @property
     def max_k(self) -> int:
         return self.block_size - 1
+
+    @property
+    def sinks(self) -> bool:
+        return self.attention_sink_bias
 
 
 def _layer_causal(c: dict, i: int) -> bool:
@@ -188,9 +221,69 @@ def muse_config_from_dict(c: dict) -> DFlashConfig:
         causal=[False] * n, form="muse", window_inclusive=True, norm_two_roundings=True, raw=c)
 
 
+LILICORR_ARCH = "LiLiCorrDraftModel"
+NVFP4_QUANT = {"quant_method": "modelopt_fp4", "quant_algo": "W4A16_NVFP4", "group_size": 16}
+
+
+def is_lilicorr_config(c: dict) -> bool:
+    return LILICORR_ARCH in (c.get("architectures") or [])
+
+
+def lilicorr_config_from_dict(c: dict) -> DFlashConfig:
+    """LiLiCorrDraftModel (V/models/lilicorr.py:428-476): the DFlash 2 backbone (conv_kernel_size set -> vLLM's
+    DFlash2Qwen3DecoderLayer) read by the vLLM rules (attention resolution, RoPE, taps), block_size at the top level
+    when dflash_config has none (L:438), no candidate selector: the LiLiCorr head scores the candidates (lilicorr_*).
+    Refused by name: lilicorr_enabled false, has_own_lm_head, a draft vocabulary, candidate_topk not a power of two
+    <= 16, K >= block (nothing to refuse here: K is per call), a causal layer, conv taps without groups, any
+    quantization_config but ModelOpt's W4A16 NVFP4 at group 16 (spec 26 §5.1)."""
+    dc = dict(c.get("dflash_config") or {})
+    if not dc.get("lilicorr_enabled", True):
+        raise ValueError("LiLiCorr requires lilicorr_enabled=True (V/models/lilicorr.py:436)")
+    if c.get("has_own_lm_head") or dc.get("has_own_lm_head"):
+        raise NotImplementedError("has_own_lm_head: LiLiCorr here drafts with the target's lm_head (spec 26 §1)")
+    if c.get("draft_vocab_size") and int(c["draft_vocab_size"]) != int(c["vocab_size"]):
+        raise ValueError("LiLiCorr candidates require the full target vocabulary (V/models/lilicorr.py:472)")
+    topk = int(dc["lilicorr_candidate_topk"])
+    if topk <= 0 or topk > 16 or topk & (topk - 1):
+        raise ValueError(f"LiLiCorr candidate_topk {topk} must be a power of two <= 16 (V/models/lilicorr.py:143)")
+    taps, groups = int(dc.get("conv_kernel_size", 0)), int(dc.get("conv_group_size", 0))
+    if taps <= 0 or groups <= 0:
+        raise NotImplementedError(f"LiLiCorr without the DFlash 2 convolutions (taps {taps}, groups {groups})")
+    qc = c.get("quantization_config")
+    if qc is not None and any(qc.get(k) != v for k, v in NVFP4_QUANT.items()):
+        raise NotImplementedError(f"quantization_config {({k: qc.get(k) for k in NVFP4_QUANT})}: only ModelOpt's "
+                                  f"W4A16 NVFP4 at group 16 is read (decoded exactly, spec 26 §3)")
+    block = int(dc.get("block_size", c.get("block_size", 0)))
+    sel = dict(dc)
+    sel.update({"block_size": block, "selector_rank": 0, "selector_top_k": topk})
+    base = dict(c)
+    base["dflash_config"] = sel
+    base["architectures"] = []                  # read by the vLLM DFlash 2 rules below (not this function again)
+    base.pop("quantization_config", None)
+    cfg = config_from_dict(base)
+    if any(cfg.causal):
+        raise NotImplementedError("a causal LiLiCorr layer: the trained form is non-causal (causal: false)")
+    cfg.form = "lilicorr"
+    cfg.selector_rank, cfg.selector_top_k = 0, topk
+    cfg.cand_topk = topk
+    cfg.lil_hidden = int(dc.get("lilicorr_hidden_size") or cfg.hidden)
+    cfg.lil_layers = int(dc["lilicorr_num_layers"])
+    cfg.lil_heads = int(dc["lilicorr_num_heads"])
+    cfg.lil_mlp = int(cfg.lil_hidden * float(dc["lilicorr_mlp_ratio"]))
+    cfg.factor_dim = int(dc["lilicorr_factor_dim"])
+    cfg.vector_eps = float(dc["lilicorr_vector_eps"])
+    cfg.lil_logit_scale = float(dc["lilicorr_logit_scale"])
+    cfg.raw = c
+    if cfg.lil_hidden % cfg.lil_heads:
+        raise ValueError(f"LiLiCorr hidden {cfg.lil_hidden} must be divisible by its {cfg.lil_heads} heads")
+    return cfg
+
+
 def config_from_dict(c: dict) -> DFlashConfig:
     if is_muse_config(c):
         return muse_config_from_dict(c)
+    if is_lilicorr_config(c):
+        return lilicorr_config_from_dict(c)
     dc = dict(c.get("eagle_config") or {})
     dc.update(c.get("dflash_config") or {})
     arch = " ".join(c.get("architectures") or [])
@@ -328,6 +421,74 @@ def dequant_pack_quantized(packed: torch.Tensor, scale: torch.Tensor, shape, gro
     return q.float() * s
 
 
+# --- NVFP4 (ModelOpt W4A16, spec 26 §3): W = g x s_b x e, decoded as W' = s_b x e (exact in bf16 and f16) and g -------
+
+E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)        # the code's low 3 bits; bit 3 is the sign
+E4M3_NAN = (0x7F, 0xFF)                                 # e4m3fn: S.1111.111 is NaN, there is no infinity
+
+
+def e4m3_value(code: int) -> float:
+    """One float8 e4m3fn byte, exactly (bias 7; exponent 0 = subnormal m x 2^-9; S.1111.111 NaN - refused)."""
+    code &= 0xFF
+    if code in E4M3_NAN:
+        raise ValueError(f"e4m3 code 0x{code:02x} is NaN")
+    s = -1.0 if code & 0x80 else 1.0
+    e, m = (code >> 3) & 0xF, code & 0x7
+    return s * (m * 2.0 ** -9 if e == 0 else (1.0 + m / 8.0) * 2.0 ** (e - 7))
+
+
+def e2m1_value(code: int) -> float:
+    return (-1.0 if code & 0x8 else 1.0) * E2M1[code & 0x7]
+
+
+_E4M3_TABLE = None
+
+
+def _e4m3_table() -> torch.Tensor:
+    global _E4M3_TABLE
+    if _E4M3_TABLE is None:
+        _E4M3_TABLE = torch.tensor([float("nan") if c in E4M3_NAN else e4m3_value(c) for c in range(256)],
+                                   dtype=torch.float64)
+    return _E4M3_TABLE
+
+
+def _as_u8(t: torch.Tensor) -> torch.Tensor:
+    return t if t.dtype == torch.uint8 else t.contiguous().view(torch.uint8)
+
+
+def nvfp4_decode(weight_u8: torch.Tensor, scale_e4m3: torch.Tensor, g, group: int = 16,
+                 name: str = "nvfp4") -> tuple[torch.Tensor, float]:
+    """ModelOpt NVFP4 (V/layers/quantization/utils/nvfp4_emulation_utils.py: break_fp4_bytes / dequantize_to_dtype,
+    the checkpoint's linear - unswizzled - scale layout): `weight` U8 [N][K/2], element 2i in the LOW nibble and 2i + 1
+    in the high one; `weight_scale` F8_E4M3 [N][K/16] (one per 16 consecutive k); `weight_scale_2` the fp32 global g.
+    Returns (W' = s_b x e as float32 holding bf16-exact values [N][K], g as a python float). W' is exact in bf16 and in
+    f16 (at most 6 significant bits, |W'| in [2^-10, 2688]); g is NOT folded in (spec 26 §3: y = g x (W' x)). A NaN
+    scale code (0x7F / 0xFF) is refused naming the tensor and the element."""
+    w = _as_u8(weight_u8)
+    s = _as_u8(scale_e4m3)
+    N, K2 = w.shape
+    K = 2 * K2
+    if s.shape != (N, K // group):
+        raise ValueError(f"{name}: weight_scale {tuple(s.shape)} != {(N, K // group)} (U8 {tuple(w.shape)}, group {group})")
+    bad = (s == E4M3_NAN[0]) | (s == E4M3_NAN[1])
+    if bool(bad.any()):
+        r, c = (int(v) for v in bad.nonzero()[0])
+        raise ValueError(f"{name}: weight_scale[{r}][{c}] is an e4m3 NaN code (0x{int(s[r, c]):02x})")
+    gv = float(g.float().reshape(-1)[0]) if isinstance(g, torch.Tensor) else float(g)
+    if isinstance(g, torch.Tensor) and g.numel() != 1:
+        raise ValueError(f"{name}: weight_scale_2 has {g.numel()} values, want one (the per-tensor global scale)")
+    if not math.isfinite(gv):
+        raise ValueError(f"{name}: weight_scale_2 {gv} is not finite")
+    codes = torch.stack([w & 0xF, w >> 4], -1).reshape(N, K).long()
+    e = torch.tensor([e2m1_value(c) for c in range(16)], dtype=torch.float64)[codes]
+    sb = _e4m3_table()[s.long()].repeat_interleave(group, dim=1)
+    wp = e * sb                                                     # exact in fp64 (<= 6 significant bits)
+    out = wp.float()
+    if not torch.equal(out.double(), wp) or not torch.equal(out.to(torch.bfloat16).float(), out):
+        raise AssertionError(f"{name}: W' is not exact in bf16 (impossible for e2m1 x e4m3)")
+    return out, gv
+
+
 def _canon(name: str) -> str:
     """qwen3_dflash.py:397-405's renames, plus a leading `model.`."""
     if name.startswith("model."):
@@ -343,6 +504,8 @@ def read_drafter_tensors(drafter_dir: str, cfg: DFlashConfig) -> dict[str, torch
     wm = _weight_map(drafter_dir)
     raw = _read(wm, list(wm))
     qc = cfg.raw.get("quantization_config")
+    if cfg.form == "lilicorr":
+        return _read_nvfp4_tensors(raw, qc)
     group = bits = None
     if qc is not None:
         if qc.get("quant_method") != "compressed-tensors" or qc.get("format") != "pack-quantized":
@@ -373,6 +536,40 @@ def read_drafter_tensors(drafter_dir: str, cfg: DFlashConfig) -> dict[str, torch
     return t
 
 
+G_SUFFIX = ".weight_global"     # an NVFP4 linear's g under its canonical name (W' stays at `.weight`)
+
+
+def _read_nvfp4_tensors(raw: dict, qc: dict | None) -> dict[str, torch.Tensor]:
+    """The LiLiCorr checkpoint's tensors under canonical names: every NVFP4 linear (`weight` U8 + `weight_scale`
+    F8_E4M3 + `weight_scale_2` F32) as W' (float32, bf16-exact) at `<base>.weight` and its g as a 0-d float64 tensor at
+    `<base>.weight_global` (Drafter keeps it apart and applies it to the linear's output); BF16 tensors as stored. An
+    `input_scale` (W4A16's unused activation scale, V/models/lilicorr.py:502-506) is dropped; anything else quantised
+    (a scale without its U8 weight, a U8 weight without the three) is refused."""
+    group = int((qc or {}).get("group_size", 16))
+    bases = {n[: -len(".weight_scale_2")] for n in raw if n.endswith(".weight_scale_2")}
+    if bases and qc is None:
+        raise ValueError("NVFP4 tensors without a quantization_config")
+    t = {}
+    for n, v in raw.items():
+        base = next((b for b in (n[: -len(sfx)] for sfx in (".weight", ".weight_scale", ".weight_scale_2",
+                                                              ".input_scale") if n.endswith(sfx)) if b in bases), None)
+        if base is not None:
+            if n == base + ".weight":
+                for need in (".weight_scale", ".weight_scale_2"):
+                    if base + need not in raw:
+                        raise KeyError(f"{base}{need} (NVFP4 {base})")
+                if v.dtype != torch.uint8:
+                    raise ValueError(f"{n}: an NVFP4 weight is U8, got {v.dtype}")
+                wp, g = nvfp4_decode(v, raw[base + ".weight_scale"], raw[base + ".weight_scale_2"], group, base)
+                t[_canon(n)] = wp
+                t[_canon(base) + G_SUFFIX] = torch.tensor(g, dtype=torch.float64)
+            continue
+        if n.endswith((".weight_scale", ".weight_scale_2", ".input_scale")) or v.dtype in (torch.uint8,):
+            raise ValueError(f"{n}: a quantised tensor outside a complete NVFP4 linear")
+        t[_canon(n)] = v
+    return t
+
+
 def read_target_embed_head(target_dir: str) -> tuple[torch.Tensor, torch.Tensor]:
     """The target's input embedding and lm_head (bf16 as stored). Names are found by suffix so
     `model.embed_tokens` and `model.language_model.embed_tokens` both work; mtp.* and the
@@ -380,6 +577,9 @@ def read_target_embed_head(target_dir: str) -> tuple[torch.Tensor, torch.Tensor]
     wm = _weight_map(target_dir)
     emb = [n for n in wm if n.endswith("embed_tokens.weight")
            and not n.startswith(("mtp.", "model.visual", "visual"))]
+    if not emb:     # Nemotron-H (Bolt, spec 26): language_model.{model,backbone}.embeddings.weight; vision_model.* skipped
+        emb = [n for n in wm if n.endswith(("model.embeddings.weight", "backbone.embeddings.weight"))
+               and not n.startswith("vision")]
     head = [n for n in wm if n.endswith("lm_head.weight") and not n.startswith("mtp.")]
     if len(emb) != 1 or len(head) > 1:
         raise ValueError(f"target embed/head names ambiguous: {emb} {head}")
@@ -593,6 +793,47 @@ def selector_walk(S: torch.Tensor, cand: torch.Tensor, p: int, temperature: floa
 # the drafter
 
 
+def lilicorr_head_shapes(c: DFlashConfig) -> dict[str, tuple]:
+    """Every tensor of the LiLiCorr head (V/models/lilicorr.py:125-256, the checkpoint's `lilicorr.*` names) and its
+    shape. Every linear carries a bias (ReplicatedLinear / NemotronHMLP with bias=True); the NVFP4 ones (token_proj,
+    pass_hidden_proj, context_proj, layers.N.attn.out_proj, layers.N.mlp.{up,down}_proj) are W' + g by then."""
+    H, Hl, F_, S, k, nh = c.hidden, c.lil_hidden, c.factor_dim, c.block_size - 1, c.cand_topk, c.lil_heads
+    P = "lilicorr."
+    s = {}
+
+    def lin(name, o, i):
+        s[P + name + ".weight"] = (o, i)
+        s[P + name + ".bias"] = (o,)
+    if Hl != H:
+        lin("token_proj", Hl, H)
+    lin("pass_hidden_proj", Hl, H)
+    s[P + "feature_norm.weight"] = (5,)
+    s[P + "feature_norm.bias"] = (5,)
+    lin("feature_mlp.up_proj", Hl, 5)
+    lin("feature_mlp.down_proj", Hl, Hl)
+    s[P + "slot_embedding"] = (1, 1, S, 1, Hl)
+    s[P + "rank_embedding"] = (1, 1, 1, k, Hl)
+    s[P + "relative_slot_bias"] = (nh, 2 * c.block_size - 1)
+    s[P + "same_slot_bias"] = (nh,)
+    lin("context_proj", Hl, H)
+    for i in range(c.lil_layers):
+        L = f"layers.{i}."
+        s[P + L + "attn_norm.weight"] = (Hl,)
+        s[P + L + "attn.in_proj_weight"] = (3 * Hl, Hl)
+        s[P + L + "attn.in_proj_bias"] = (3 * Hl,)
+        lin(L + "attn.out_proj", Hl, Hl)
+        s[P + L + "mlp_norm.weight"] = (Hl,)
+        lin(L + "mlp.up_proj", c.lil_mlp, Hl)
+        lin(L + "mlp.down_proj", Hl, c.lil_mlp)
+    s[P + "output_norm.weight"] = (Hl,)
+    s[P + "anchor_norm.weight"] = (Hl,)
+    lin("factor_input_proj", Hl, 3 * Hl)
+    lin("out_head", F_, Hl)
+    lin("in_head", F_, Hl)
+    lin("anchor_out_head", F_, Hl)
+    return s
+
+
 @dataclass
 class ContextKV:
     """Target-derived K/V of committed positions (spec 19 §2 'State'). k/v: per layer
@@ -601,6 +842,14 @@ class ContextKV:
     k: list[torch.Tensor]
     v: list[torch.Tensor]
     fc: torch.Tensor
+    fc_raw: torch.Tensor | None = None      # fc(taps) before hidden_norm (the vLLM forms; a test's mutation reads it)
+
+    def anchor_row(self, p: int) -> torch.Tensor | None:
+        """LiLiCorr's anchor (spec 26 §2.3): the normed context row of the NEWEST committed position, p - 1 when the
+        block's anchor token sits at p (V/spec_decode/lilicorr/speculator.py:71-87: hidden_norm(fc(taps)) of the last
+        accepted verify row); None when p - 1 is not in the context (anchor_valid false)."""
+        hit = (self.pos == p - 1).nonzero()
+        return None if hit.numel() == 0 else self.fc[int(hit[0, 0])]
 
 
 @dataclass
@@ -614,6 +863,11 @@ class DraftOut:
     q: torch.Tensor             # [K, vocab] draft distribution (see draft_block)
     hidden: torch.Tensor        # [1 + K, H] final-norm hidden rows
     positions: torch.Tensor     # [1 + K] p .. p + K
+    # LiLiCorr (spec 26a): cand_ids / unary are all block_size - 1 slots' (unary = the candidates' log-probs), edges =
+    # lattice [7][8 previous][8 next] (x logit_scale, fp32), scores = the realized rows lattice[s][previous] [K][8]
+    log_probs: torch.Tensor | None = None
+    lattice: torch.Tensor | None = None
+    anchor: torch.Tensor | None = None    # the anchor row the head read (zeros when anchor_valid is false)
 
 
 class Drafter:
@@ -634,7 +888,11 @@ class Drafter:
         if cfg.form == "muse" and cfg.vocab == 0:
             cfg.vocab = cfg.draft_vocab = int(embed.shape[0])   # the assistant's config carries none: the target's
         keep = ("candidate_selector.predecessor_codebook", "candidate_selector.successor_codebook")
-        self.w = {n: (v if n in keep else v.to(self.dtype)) for n, v in tensors.items()}
+        # Spec 26: an NVFP4 linear's g rides beside its W' (G_SUFFIX) and is applied to the linear's output (_lin).
+        self.g = {n[: -len(G_SUFFIX)] + ".weight": float(v) for n, v in tensors.items() if n.endswith(G_SUFFIX)}
+        self.w = {n: (v if n in keep else v.to(self.dtype)) for n, v in tensors.items() if not n.endswith(G_SUFFIX)}
+        # Test-only mutations of the LiLiCorr form (test_dflash_ref.py's Review Focus checks; empty = the reference).
+        self.mut: set[str] = set()
         self.embed = embed
         self.lm_head = lm_head.to(self.dtype) if (upcast_head or cfg.form == "muse") else lm_head
         self.mask_embedding = None if mask_embedding is None else mask_embedding.float()
@@ -662,7 +920,9 @@ class Drafter:
                 for cv in ("attention_conv", "mlp_conv"):
                     exp[L + cv + ".base_kernel"] = (2, c.conv_kernel_size, H)
                     exp[L + cv + ".kernel_projection.weight"] = (2 * c.conv_kernel_size * H // c.conv_group_size, H)
-        if c.version == 2:
+        if c.form == "lilicorr":
+            exp.update(lilicorr_head_shapes(c))
+        elif c.version == 2:
             exp["candidate_selector.hidden_projection.weight"] = (c.selector_rank, H)
             exp["candidate_selector.predecessor_codebook"] = (c.vocab, c.selector_rank)
             exp["candidate_selector.successor_codebook"] = (c.vocab, c.selector_rank)
@@ -684,6 +944,33 @@ class Drafter:
             for i in range(c.n_layers):
                 if f"layers.{i}.self_attn.attention_sink_bias" not in w:
                     raise KeyError(f"layers.{i}.self_attn.attention_sink_bias")
+        if c.form == "lilicorr":
+            sinks = {f"layers.{i}.self_attn.attention_sink_bias" for i in range(c.n_layers)}
+            for n in sinks:
+                if tuple(w[n].shape) != (nh,):
+                    raise ValueError(f"{n}: shape {tuple(w[n].shape)} != {(nh,)}")
+            extra = sorted(set(w) - set(exp) - sinks - {"fc.weight"})
+            if extra:
+                raise ValueError(f"LiLiCorr: tensors this form does not read: {extra[:8]}")
+            stray = sorted(set(self.g) - set(exp) - {"fc.weight"})
+            if stray:
+                raise ValueError(f"LiLiCorr: a global scale without a linear: {stray}")
+
+    # -- linears ----------------------------------------------------------------------------
+
+    def _lin(self, x: torch.Tensor, name: str, bias: str | None = None) -> torch.Tensor:
+        """x @ W.T (+ b) in float32 by checkpoint name. An NVFP4 linear (spec 26 §3) is g x (x @ W'.T) + b: W' exact,
+        g one fp32 multiply on the output (the factorisation that IS exact); mutation `fold_g` folds g into W' instead
+        (Review Focus 3's check). Every other weight: `linear` unchanged (the vLLM / Muse forms are bitwise as before)."""
+        w = self.w[name]
+        b = self.w.get(bias) if bias else None
+        g = self.g.get(name)
+        if g is None:
+            return linear(x, w, b)
+        if "fold_g" in self.mut:
+            return linear(x, (w.float() * g).float(), b)
+        y = linear(x, w) * torch.tensor(g, dtype=torch.float32)
+        return y if b is None else y + b.float()
 
     @property
     def target_hidden(self) -> int:
@@ -709,19 +996,20 @@ class Drafter:
                 raise ValueError(f"tap shape {tuple(x.shape)} != {(pos.shape[0], self.target_hidden)}")
         if c.form == "muse":
             return self._m_context_kv([taps[i] for i in c.target_layer_ids], pos)
-        ctx = rms_norm(linear(torch.cat(xs, -1), self.w["fc.weight"]), self.w["hidden_norm.weight"], c.eps)
+        raw = self._lin(torch.cat(xs, -1), "fc.weight")
+        ctx = rms_norm(raw, self.w["hidden_norm.weight"], c.eps)
         ks, vs = [], []
         for i in range(c.n_layers):
             k, v = self._kv(i, ctx, pos)
             ks.append(k)
             vs.append(v)
-        return ContextKV(pos=pos, k=ks, v=vs, fc=ctx)
+        return ContextKV(pos=pos, k=ks, v=vs, fc=ctx, fc_raw=raw)
 
     def _kv(self, i: int, x: torch.Tensor, pos: torch.Tensor):
         c, L = self.cfg, f"layers.{i}.self_attn."
         N = x.shape[0]
-        k = linear(x, self.w[L + "k_proj.weight"], self.w.get(L + "k_proj.bias")).view(N, c.n_kv_heads, c.head_dim)
-        v = linear(x, self.w[L + "v_proj.weight"], self.w.get(L + "v_proj.bias")).view(N, c.n_kv_heads, c.head_dim)
+        k = self._lin(x, L + "k_proj.weight", L + "k_proj.bias").view(N, c.n_kv_heads, c.head_dim)
+        v = self._lin(x, L + "v_proj.weight", L + "v_proj.bias").view(N, c.n_kv_heads, c.head_dim)
         k = rope(rms_norm(k, self.w[L + "k_norm.weight"], c.eps), pos, c.rope_theta, c.neox)
         if c.v_scale is not None:
             v = v * c.v_scale
@@ -756,7 +1044,7 @@ class Drafter:
     def _attention(self, i: int, x: torch.Tensor, qpos: torch.Tensor, ctx: ContextKV) -> torch.Tensor:
         c, L = self.cfg, f"layers.{i}.self_attn."
         R = x.shape[0]
-        q = linear(x, self.w[L + "q_proj.weight"], self.w.get(L + "q_proj.bias")).view(R, c.n_heads, c.head_dim)
+        q = self._lin(x, L + "q_proj.weight", L + "q_proj.bias").view(R, c.n_heads, c.head_dim)
         q = rope(rms_norm(q, self.w[L + "q_norm.weight"], c.eps), qpos, c.rope_theta, c.neox)
         kb, vb = self._kv(i, x, qpos)
         sel = ctx.pos < qpos[0]
@@ -768,26 +1056,34 @@ class Drafter:
         v = v.repeat_interleave(g, dim=1)
         s = torch.einsum("qhd,khd->hqk", q, k) * c.head_dim ** -0.5
         s = s.masked_fill(~self.attention_mask(i, qpos, kpos)[None], float("-inf"))
-        if c.attention_sink_bias:
-            sink = self.w[L + "attention_sink_bias"].float()[:, None, None].expand(-1, R, 1)
-            pr = torch.softmax(torch.cat([s, sink], -1), -1)[..., :-1]
-        else:
-            pr = torch.softmax(s, -1)
+        pr = self._softmax_sink(i, s, R)
         o = torch.einsum("hqk,khd->qhd", pr, v).reshape(R, c.n_heads * c.head_dim)
-        return linear(o, self.w[L + "o_proj.weight"], self.w.get(L + "o_proj.bias"))
+        return self._lin(o, L + "o_proj.weight", L + "o_proj.bias")
+
+    def _softmax_sink(self, i: int, s: torch.Tensor, R: int) -> torch.Tensor:
+        """softmax over the keys of s [heads, R, Kv]; with sinks (attention_sink_bias) a per-head logit joins the
+        denominator - not scaled by head_dim^-0.5, no value row (Review Focus 4). Mutations: `no_sink`, `sink_scaled`."""
+        c = self.cfg
+        if not c.attention_sink_bias or "no_sink" in self.mut:
+            return torch.softmax(s, -1)
+        sink = self.w[f"layers.{i}.self_attn.attention_sink_bias"].float()
+        if "sink_scaled" in self.mut:
+            sink = sink * c.head_dim ** -0.5
+        sink = sink[:, None, None].expand(-1, R, 1)
+        return torch.softmax(torch.cat([s, sink], -1), -1)[..., :-1]
 
     def _mlp(self, i: int, x: torch.Tensor) -> torch.Tensor:
         L = f"layers.{i}.mlp."
-        g = linear(x, self.w[L + "gate_proj.weight"])
-        u = linear(x, self.w[L + "up_proj.weight"])
-        return linear(torch.nn.functional.silu(g) * u, self.w[L + "down_proj.weight"])
+        g = self._lin(x, L + "gate_proj.weight")
+        u = self._lin(x, L + "up_proj.weight")
+        return self._lin(torch.nn.functional.silu(g) * u, L + "down_proj.weight")
 
     def _conv_prepare(self, i: int, which: str, x: torch.Tensor, block_len: int):
         """DFlashGroupedConv.prepare (qwen3_dflash2.py:217): coefficients from x, side 0
         applied to x now, side 1 kept for finish."""
         c, L = self.cfg, f"layers.{i}.{which}."
         G = c.hidden // c.conv_group_size
-        co = linear(x, self.w[L + "kernel_projection.weight"]).view(x.shape[0], 2, c.conv_kernel_size, G)
+        co = self._lin(x, L + "kernel_projection.weight").view(x.shape[0], 2, c.conv_kernel_size, G)
         base = self.w[L + "base_kernel"]
         return grouped_conv(x, co[:, 0], base[0], block_len, c.conv_group_size), co[:, 1]
 
@@ -844,6 +1140,8 @@ class Drafter:
             raise ValueError(f"K={K} outside 1..{c.max_k} (block_size {c.block_size})")
         if c.form == "muse":
             return self._m_draft_block(anchor_id, p, K, ctx, temperature, seed)
+        if c.form == "lilicorr":
+            return self._l_draft_block(anchor_id, p, K, ctx, temperature, seed)
         h = self.forward_block(self.embed_block(anchor_id, K), p, ctx)
         hm = h[1:]
         T = temperature if temperature > 0 else 1.0
@@ -1039,6 +1337,214 @@ class Drafter:
         q = torch.softmax(lg.double() / T, -1).float()
         return DraftOut(ids=ids, cand_ids=cand, unary=unary, scores=unary, edges=None, chosen=chosen, q=q,
                         hidden=h, positions=torch.arange(p, p + c.block_size))
+
+    # -- the LiLiCorr form (spec 26a): vLLM's LiLiCorrHead + the DFlash 2 walk, float32 -----------------------------
+    #
+    # The backbone is the vLLM DFlash 2 path above (sinks in _softmax_sink, the window |q - k| <= 1023, the NVFP4
+    # linears through _lin). The block ALWAYS has block_size rows (anchor + 7 masks; spec 26 §5.3: rows past K computed
+    # and discarded) and the head always scores all 7 slots, so K = 1..7 from one block are prefixes of one walk.
+
+    def lilicorr_anchor(self, anchor_id: int, p: int, ctx: ContextKV) -> tuple[torch.Tensor, bool]:
+        """(the anchor row [H], anchor_valid): the normed context row at p - 1 (ContextKV.anchor_row); zeros and False
+        when it is not in the context. Mutations (Review Focus 1): `anchor_embed` (the anchor token's embedding row),
+        `anchor_prenorm` (fc's output before hidden_norm), `anchor_p2` (the row at p - 2), `anchor_invalid`."""
+        m = self.mut
+        if "anchor_embed" in m:
+            return self.embed[anchor_id].float(), True
+        q = p - 1 if "anchor_p2" not in m else p - 2
+        row = ctx.anchor_row(q + 1)
+        if row is not None and "anchor_prenorm" in m:
+            if ctx.fc_raw is None:
+                raise ValueError("anchor_prenorm needs the context's pre-norm plane (context_kv keeps it)")
+            row = ctx.fc_raw[int((ctx.pos == q).nonzero()[0, 0])]
+        if row is None or "anchor_invalid" in m:
+            return torch.zeros(self.cfg.hidden), False
+        return row.float(), True
+
+    def _hlin(self, x: torch.Tensor, name: str) -> torch.Tensor:
+        """A head linear by its base name, as vLLM evaluates it: F.linear(x, W, b) - or, for an NVFP4 one,
+        g x F.linear(x, W') + b (spec 26 §3; `fold_g` folds instead)."""
+        w, b = self.w[name + ".weight"], self.w.get(name + ".bias")
+        g = self.g.get(name + ".weight")
+        F_ = torch.nn.functional
+        if g is None:
+            return F_.linear(x, w.float(), None if b is None else b.float())
+        if "fold_g" in self.mut:
+            return F_.linear(x, (w.float() * g).float(), None if b is None else b.float())
+        y = F_.linear(x, w.float()) * torch.tensor(g, dtype=torch.float32)
+        return y if b is None else y + b.float()
+
+    def lilicorr_slot_bias(self, n_slots: int) -> torch.Tensor:
+        """The lattice attention's additive bias [heads][S k][S k] (V/models/lilicorr.py:303-324): per head
+        relative_slot_bias[slot(i) - slot(j) + block_size - 1] (the TRAINED offset, also for S < 7) + same_slot_bias
+        where slot(i) == slot(j). Mutations: `rel_offset_s` (offset = n_slots: the short-draft misread V:315-317 warns
+        about - the same at S = 7, wrong below), `rel_sign` (slot(j) - slot(i)), `no_same_slot`."""
+        c, P, m = self.cfg, "lilicorr.", self.mut
+        slot = torch.arange(n_slots).repeat_interleave(c.cand_topk)
+        rel = slot[:, None] - slot[None, :]
+        if "rel_sign" in m:
+            rel = -rel
+        off = n_slots if "rel_offset_s" in m else (c.block_size - 1)
+        bias = self.w[P + "relative_slot_bias"].float()[:, rel + off]
+        if "no_same_slot" not in m:
+            same = (slot[:, None] == slot[None, :]).float()
+            bias = bias + same[None] * self.w[P + "same_slot_bias"].float()[:, None, None]
+        return bias
+
+    def lilicorr_lattice(self, cand: torch.Tensor, lp: torch.Tensor, rows: torch.Tensor, anchor: torch.Tensor,
+                         valid: torch.Tensor) -> torch.Tensor:
+        """vLLM's LiLiCorrHead.forward (V/models/lilicorr.py:326-425), float32, batched: cand [B][S][k] candidate ids,
+        lp [B][S][k] their full-vocabulary log-probs, rows [B][S][H] the final-normed backbone rows of mask rows
+        1..S ("pass_hidden"), anchor [B][H] the anchor rows, valid [B] bool -> the lattice [B][S][k (previous)][k (next)]
+        x logit_scale: slot 0 = start broadcast over the previous index, slot s >= 1 = pair[s - 1] (Review Focus 2).
+        The log-probs enter only as the five features. Mutations: `lp_topk` (log-probs normalised over the top k only),
+        `start_transposed` (slot 0 = start[previous] broadcast over next), `pair_shift` (slot s scored against itself),
+        `no_scale`, `cross_no_anchor` (W_cross applied to h, not h x a)."""
+        c, P, m = self.cfg, "lilicorr.", self.mut
+        F_ = torch.nn.functional
+        B, S, k = cand.shape
+        Hl, nh = c.lil_hidden, c.lil_heads
+        hd = Hl // nh
+        emb = self.embed[cand.reshape(-1)].float().view(B, S, k, -1)
+        tok = self._hlin(emb, P + "token_proj") if Hl != c.hidden else emb
+        pas = self._hlin(rows.float(), P + "pass_hidden_proj").unsqueeze(-2)
+        lp = lp.float()
+        if "lp_topk" in m:
+            lp = lp - torch.logsumexp(lp, -1, keepdim=True)
+        rank = (torch.arange(k, dtype=torch.float32) / float(k - 1)) if k > 1 else torch.zeros(k)
+        top1 = torch.zeros(k)
+        top1[0] = 1.0
+        f = torch.stack([lp, lp.exp(), lp - lp.max(dim=-1, keepdim=True).values, rank.expand_as(lp),
+                         top1.expand_as(lp)], dim=-1)
+        f = F_.layer_norm(f, (5,), self.w[P + "feature_norm.weight"].float(), self.w[P + "feature_norm.bias"].float(),
+                          c.feature_eps)
+        fm = self._hlin(F_.silu(self._hlin(f, P + "feature_mlp.up_proj")), P + "feature_mlp.down_proj")
+        h = tok + pas
+        h = h + fm
+        h = h + self.w[P + "slot_embedding"].float()[:, 0, :S]
+        h = h + self.w[P + "rank_embedding"].float()[:, 0]
+        h = h.reshape(B, S * k, Hl)
+        a = self._hlin(anchor.float(), P + "context_proj")
+        a = a * valid[:, None].to(a.dtype)
+        bias = self.lilicorr_slot_bias(S)[None]
+        for i in range(c.lil_layers):
+            L = f"{P}layers.{i}."
+            x = F_.rms_norm(h, (Hl,), self.w[L + "attn_norm.weight"].float(), c.eps)
+            qkv = F_.linear(x, self.w[L + "attn.in_proj_weight"].float(), self.w[L + "attn.in_proj_bias"].float())
+            q, kk, v = qkv.chunk(3, dim=-1)
+            q, kk, v = (t.view(B, S * k, nh, hd).transpose(1, 2) for t in (q, kk, v))
+            o = F_.scaled_dot_product_attention(q, kk, v, attn_mask=bias)
+            h = h + self._hlin(o.transpose(1, 2).reshape(B, S * k, Hl), L + "attn.out_proj")
+            x = F_.rms_norm(h, (Hl,), self.w[L + "mlp_norm.weight"].float(), c.eps)
+            h = h + self._hlin(F_.silu(self._hlin(x, L + "mlp.up_proj")), L + "mlp.down_proj")
+        h = F_.rms_norm(h, (Hl,), self.w[P + "output_norm.weight"].float(), c.eps).reshape(B, S, k, Hl)
+        a = F_.rms_norm(a, (Hl,), self.w[P + "anchor_norm.weight"].float(), c.eps)
+        if any(n in self.g for n in (P + "factor_input_proj.weight", P + "out_head.weight", P + "in_head.weight")):
+            raise ValueError("factor_input_proj / out_head / in_head are BF16 in the checkpoint (no global scale)")
+        W = self.w[P + "factor_input_proj.weight"].float()
+        w_self, w_anchor, w_cross = W[:, :Hl].contiguous(), W[:, Hl:2 * Hl].contiguous(), W[:, 2 * Hl:].contiguous()
+        arow = a[:, None, None, :]
+        pre = F_.linear(h, w_self, self.w[P + "factor_input_proj.bias"].float())
+        pre = pre + F_.linear(arow, w_anchor)
+        pre = pre + F_.linear(h if "cross_no_anchor" in m else h * arow, w_cross)
+        fh = F_.silu(pre)
+        ew = torch.cat([self.w[P + "out_head.weight"], self.w[P + "in_head.weight"]], 0).float().contiguous()
+        eb = torch.cat([self.w[P + "out_head.bias"], self.w[P + "in_head.bias"]], 0).float().contiguous()
+        out_v, in_v = F_.normalize(F_.linear(fh, ew, eb).unflatten(-1, (2, c.factor_dim)), dim=-1,
+                                   eps=c.vector_eps).unbind(-2)
+        a_out = F_.normalize(self._hlin(a, P + "anchor_out_head"), dim=-1, eps=c.vector_eps)
+        start = (a_out[:, None, :] * in_v[:, 0, :, :]).sum(dim=-1)                        # [B][k]
+        if "pair_shift" in m:
+            pairs = torch.matmul(out_v[:, 1:], in_v[:, 1:].transpose(-1, -2))
+        else:
+            pairs = torch.matmul(out_v[:, :-1], in_v[:, 1:].transpose(-1, -2))            # [B][S - 1][k][k]
+        scale = 1.0 if "no_scale" in m else c.lil_logit_scale
+        start = scale * start.float()
+        pairs = scale * pairs.float()
+        if "start_transposed" in m:
+            first = start[:, None, :, None].expand(-1, 1, -1, k)
+        else:
+            first = start[:, None, None, :].expand(-1, 1, k, -1)
+        return torch.cat((first, pairs), dim=1)
+
+    def lilicorr_walk(self, lattice: torch.Tensor, cand: torch.Tensor, p: int, K: int, temperature: float = 0.0,
+                      seed: int | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The shared DFlash2 / LiLiCorr walk (V/spec_decode/dflash2/speculator.py:15-75) over one block's lattice
+        [S][k][k]: previous = 0; slot s scores lattice[s][previous] (the lattice ALONE - Review Focus 2), argmax (ties:
+        the lower index) or Gumbel-argmax keyed by (seed ^ (s << 32) - spec_step_seed, vLLM 3901d56800 -, position
+        p + s = the predicted position - 1, candidate id). Returns (chosen [K], ids [K], realized rows [K][k]).
+        Mutation `lp_in_walk` needs the log-probs: see _l_draft_block."""
+        prev = 0
+        idx, real = [], []
+        for s in range(K):
+            row = lattice[s, prev]
+            sd = None if seed is None else (seed if "no_step_seed" in self.mut else seed ^ (s << 32))
+            j = gumbel_argmax(row, cand[s], temperature, sd, p + s)
+            idx.append(j)
+            real.append(row)
+            prev = j
+        it = torch.tensor(idx, dtype=torch.long)
+        return it, cand[torch.arange(K), it], torch.stack(real)
+
+    def _l_draft_block(self, anchor_id: int, p: int, K: int, ctx: ContextKV, temperature: float,
+                       seed: int | None) -> DraftOut:
+        c = self.cfg
+        S = c.block_size - 1
+        h = self.forward_block(self.embed_block(anchor_id, S), p, ctx)
+        hm = h[1:]
+        cand, lp = lilicorr_candidates(self.head_logits(hm), c.cand_topk)
+        anchor, valid = self.lilicorr_anchor(anchor_id, p, ctx)
+        lat = self.lilicorr_lattice(cand[None], lp[None], hm[None], anchor[None], torch.tensor([valid]))[0]
+        walk_lat = lat + lp[:, None, :] if "lp_in_walk" in self.mut else lat
+        chosen, ids, real = self.lilicorr_walk(walk_lat, cand, p, K, temperature, seed)
+        T = temperature if temperature > 0 else 1.0
+        q = torch.zeros(K, c.vocab)
+        q.scatter_(1, cand[:K], torch.softmax(real.double() / T, -1).float())
+        return DraftOut(ids=ids, cand_ids=cand, unary=lp, scores=real, edges=lat, chosen=chosen, q=q, hidden=h,
+                        positions=torch.arange(p, p + c.block_size), log_probs=lp, lattice=lat, anchor=anchor)
+
+
+def lilicorr_candidates(logits: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """V/models/lilicorr.py:478-486 (LogitsProcessor.get_top_k_tokens, return_log_probs): per row the top k ids by
+    logit (descending; exact ties to the lower id - the engine's comparator; torch's topk keeps either, recorded by the
+    tests) and their log-probs = logit - logsumexp over the WHOLE vocabulary (fp32)."""
+    lg = logits.float()
+    cand, v = top_k_stable(lg, k)
+    return cand, v - torch.logsumexp(lg, dim=-1, keepdim=True)
+
+
+class LiLiCorrSession:
+    """One sequence's drafting state as the engine keeps it (spec 26 §5.3-§5.4, 19c's loop): the committed context
+    (every committed position's normed fc row and per-layer K / V - the engine's 1024-row ring holds the window of
+    it) and the anchor = the newest committed row. `commit(taps, positions)` appends verified rows (the anchor token
+    and the accepted drafts of a verify; rejected rows never arrive); `draft(anchor_id, K, ...)` drafts from the
+    position after the last commit."""
+
+    def __init__(self, d: Drafter):
+        if d.cfg.form != "lilicorr":
+            raise ValueError("LiLiCorrSession is the LiLiCorr form's")
+        self.d = d
+        self.ctx: ContextKV | None = None
+
+    @property
+    def next_pos(self) -> int:
+        return 0 if self.ctx is None else int(self.ctx.pos[-1]) + 1
+
+    def commit(self, taps: dict, positions) -> None:
+        pos = torch.as_tensor(positions, dtype=torch.long).reshape(-1)
+        if int(pos[0]) != self.next_pos or not torch.equal(pos, torch.arange(int(pos[0]), int(pos[0]) + len(pos))):
+            raise ValueError(f"commit at {pos.tolist()[:3]}...: rows must continue at {self.next_pos}")
+        new = self.d.context_kv(taps, pos)
+        if self.ctx is None:
+            self.ctx = new
+            return
+        o = self.ctx
+        self.ctx = ContextKV(pos=torch.cat([o.pos, new.pos]), k=[torch.cat([a, b]) for a, b in zip(o.k, new.k)],
+                             v=[torch.cat([a, b]) for a, b in zip(o.v, new.v)], fc=torch.cat([o.fc, new.fc]),
+                             fc_raw=None if o.fc_raw is None or new.fc_raw is None else torch.cat([o.fc_raw, new.fc_raw]))
+
+    def draft(self, anchor_id: int, K: int, temperature: float = 0.0, seed: int | None = None) -> DraftOut:
+        return self.d.draft_block(anchor_id, self.next_pos, K, self.ctx, temperature, seed)
 
 
 class MuseSession:
