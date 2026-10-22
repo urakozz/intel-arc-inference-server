@@ -1,11 +1,13 @@
 # Spec 13a - batching: the probe
 
-**Status (2026-10-23): refreshed against spec 13 §9 / §9.1 / §9.2 (the operator's decisions of 2026-10-23) and main at
-`09681a4`; built on the Mac on branch `spec13a-batching-probe` (Tasks 1-3's Mac halves). Nothing has run on a card:
-every measured cell of `docs/probe-batching-2026-10-23.md` is PENDING (box) until queue row 66.** The plan of
-2026-09-28 (B = 2..4 plain rows, MTP out of scope, `docs/probe-batching-2026-09-28.md`) is superseded: rows are now
-(slot, position, speculative state index) triples, MTP runs in every slot under an 8-row budget, and the models are
-Qwen3.8 (four slots) and Agnes (two with MTP; four with `--mtp off` - spec 13 §9.2).
+**Status (2026-10-23): refreshed against spec 13 §9 / §9.1 / §9.2 (the operator's decisions of 2026-10-23, main at
+`e977458`) and BUILT on the Mac on branch `spec13a-batching-probe` - Tasks 1-4's Mac halves (the audit, the row builds,
+`build_rows`, `probe_batch_step`, the proposal skeleton, queue row 66). Nothing has run on a card: every measured cell of
+`docs/probe-batching-2026-10-23.md` is PENDING (box) until row 66 (`r66.check`, then the opt-in `r66.cost` /
+`r66.chunk` on an idle box).** The plan of 2026-09-28 (B = 2..4 plain rows, MTP out of scope,
+`docs/probe-batching-2026-09-28.md`) is superseded: rows are now (slot, position, speculative state index) triples, MTP
+runs in every slot under an 8-row budget, and the models are Qwen3.8 (four slots) and Agnes (two with MTP; four with
+`--mtp off` - spec 13 §9.2).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One
 > implementing agent for the whole plan; the gates below are the review. Steps use checkbox (`- [ ]`) syntax for
@@ -85,7 +87,7 @@ table (Task 3), not a probe allocation.
 
 ### Task 1: the audit
 
-- [ ] **Step 1:** Every kernel of the decode list (`runtime::build`), the MTP verify list (`build_verify`) and the draft
+- [x] **Step 1:** Every kernel of the decode list (`runtime::build`), the MTP verify list (`build_verify`) and the draft
   list (`build_draft`), for Qwen3.8 and Agnes (the same binaries but `_G54` / `_V248089` / `_I19456`): row-agnostic or
   per-sequence, what rows of different slots need, file:line. `docs/probe-batching-2026-10-23.md` §1. **Commit**
   `probe: batching audit of the decode, verify and draft lists (spec 13a Task 1)`.
@@ -108,19 +110,19 @@ table (Task 3), not a probe allocation.
   totals), `tools/mac/clrun/batch_rows_run.cc` (gdn_step's and attn_prep's row builds against the production kernels
   stepping each sequence alone, bitwise on the Mac's GPU - INDICATIVE).
 
-- [ ] **Step 1 (host):** `batch_rows.h` + `batch_rows_test` (TDD): the rules refuse a split slot, a position gap, a
+- [x] **Step 1 (host):** `batch_rows.h` + `batch_rows_test` (TDD): the rules refuse a split slot, a position gap, a
   repeated destination, a destination equal to another run's source, more than 8 rows; the bases; the memory table
-  reproduces §9.1 (Qwen3.8 1 x 131072 + 3 x 32768: 29.10 GB total, 1.93 GB spare; Agnes 1 x 131072 + 1 x 32768:
-  29.27 GB, 1.76 GB spare; Agnes 1 x 131072 + 3 x 32768: 2.21 GB over with MTP, ~1.1 GB spare with `--mtp off`, 0.47 GB
-  over with MTP in the main slot only) and the largest batch that fits with and without MTP (§9.2's refusal numbers).
+  reproduces §9.1 (Qwen3.8 1 x 131072 + 3 x 32768: 29.09 GB total, 1.94 GB spare (§9.1 adds rounded parts: 29.10 / 1.93); Agnes 1 x 131072 + 1 x 32768:
+  29.27 GB, 1.76 GB spare; Agnes 1 x 131072 + 3 x 32768: 2.21 GB over with MTP, 1.22 GB spare with `--mtp off` (§9.2's
+  ~1.1 is its estimate; the code gives 29.81 GB), 0.47 GB over with MTP in the main slot only) and the largest batch that fits with and without MTP (§9.2's refusal numbers).
   **Commit.**
-- [ ] **Step 2 (kernels):** the `BATCH_ROWS` builds and the CMake block; `clang -E -P` of every existing command line
+- [x] **Step 2 (kernels):** the `BATCH_ROWS` builds and the CMake block; `clang -E -P` of every existing command line
   of the four sources identical to main's; `tools/mac_check.sh --kernels` (cmdlines `+N, -0, ~0`, opencl PASS);
   `batch_rows_run` bitwise. **Commit.**
-- [ ] **Step 3 (capture):** `build_rows` - the walk's per-sequence sites bound to the row builds with the pools and the
+- [x] **Step 3 (capture):** `build_rows` - the walk's per-sequence sites bound to the row builds with the pools and the
   table, the head's KV fill over the rows (per run: hh[r0] <- the slot's h_{pos-1}, hh[r0 + 1 ..] <- x[r0 ..]),
   `decode_launches` (+10 with the head) asserted. **Commit.**
-- [ ] **Step 4 (the probe):** `probe_batch_step <snapshot> [--kv bf16|int8] [--slots ...] [--arms ...] ...`:
+- [x] **Step 4 (the probe):** `probe_batch_step <snapshot> [--kv bf16|int8] [--slots ...] [--arms ...] ...`:
   - one Engine at max_len = the slots' sum (int8 head, MTP head loaded); a state pool (one source per slot + 8
     destinations, one per row - the probe's destinations are shared scratch; 13b gives each slot its own) and a ring
     pool; each slot's sequence (long32k.ids at a slot offset) prefilled into slot 0 and copied out (state, ring, KV
@@ -137,7 +139,7 @@ table (Task 3), not a probe allocation.
 
 ### Task 3: the proposal skeleton
 
-- [ ] In the probe doc: §2 the check, §3 the step table (derived columns filled, measured PENDING (box)), §4 the chunk
+- [x] In the probe doc: §2 the check, §3 the step table (derived columns filled, measured PENDING (box)), §4 the chunk
   table, §5 the memory table from the code (§9.1's method; both models' decided layouts and the alternatives, int8 and
   bf16 KV), §6 the per-row descriptor design for 13b, §7 the decisions the box run feeds (B, chunk size, the budget
   rule) with the rule that turns each measured column into a decision. `docs/README.md` line. **Commit**
@@ -145,7 +147,7 @@ table (Task 3), not a probe allocation.
 
 ### Task 4: the box row
 
-- [ ] Queue row 66 + `tools/box_validate/stages.sh` row 66: `r66.build` (`-DB70_BATCH_PROBE=ON` in
+- [x] Queue row 66 + `tools/box_validate/stages.sh` row 66: `r66.build` (`-DB70_BATCH_PROBE=ON` in
   `build-batch-probe`), `r66.k0` (G0 must pass: the default build is main's), `r66.check` (the bitwise check, both
   models, both KV forms, Agnes also `--mtp off` at 4 slots), `r66.cost` (the timed arms, idle box), `r66.chunk` (the chunk arms); box-day plan Session 6d.
   `python3 tools/box_validate/test_box_validate.py`. **Commit.**
