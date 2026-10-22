@@ -1,7 +1,8 @@
 # Spec 26 - LiLiCorr: NVIDIA's DFlash-family drafter for Nemotron 3.5 Bolt
 
 **Status:** design, 2026-10-20, approved by the operator 2026-10-20. Decisions are marked **Decision N** with their
-cost if wrong and collected in §10. Nothing is built.
+cost if wrong and collected in §10. **26a built on the Mac 2026-10-23** (§12 as built; §11 the P0 verdict - PENDING the
+box, its defaults PROVISIONAL); 26b / 26c not built.
 **Plans (2026-10-20):** `docs/superpowers/plans/2026-10-20-spec26{a,b,c}-*.md` - 26a P0 (the reference, teacher-forced
 acceptance on our target, the verify cost, the projection), 26b the drafter on the card (D1), 26c the engine loop and
 serving (D0, D2-D5). **Box queue rows 63-65** (spec 25 takes 57-62).
@@ -315,3 +316,101 @@ The operator approved every proposed decision below as written on 2026-10-20.
 12. **Decision 12 (approved, operator 2026-10-20) - an external acceptance figure from vLLM XPU** serving SergiioB's checkpoint with LiLiCorr on
     the box (if the image's DFlash / LiLiCorr path runs on XPU - the card says SM120 only); recorded beside ours, never a
     gate. *Cost if wrong:* a box hour for a number that cannot be had.
+
+## 11. P0 verdict (26a) - PENDING the box; the defaults until then are PROVISIONAL
+
+Plan 26a, `tools/spec/lilicorr_p0_project.py` (r63.verdict). **Not a gate** (the operator's 2026-10-15 ruling): 26b / 26c are
+built whatever it shows. On 2026-10-23 nothing of the real drafter has been read (its 962 MB of weights were not
+downloaded: PENDING-WEIGHTS) and the real Bolt tap dumps, route records and card costs are the box's (queue row 63), so
+every default below is PROVISIONAL and every cost DERIVED from the bytes (`lilicorr_p0_project.py`'s table, spec 25 §14's
+layout bytes; depth 4096):
+
+| | M = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| verify, plain M-row MoE (plain steps) | 1.000 | 1.193 | 1.387 | 1.580 | 1.773 | 1.966 | 2.160 | 2.353 |
+| slot writes' share of the verify (Decision 4) | - | 5.1 % | 6.6 % | 7.7 % | 8.6 % | 9.3 % | 9.8 % | 10.3 % |
+
+(a plain step 5.524 GB: the non-expert weights 4.255 GB with the int8 head, 9 x 40 expert blocks of 2.500 MB average
+0.900 GB, the SSM state read + written 0.336 GB, KV 0.034 GB; at depth 65536 the shares are 4.7 .. 9.9 %). One block:
+exact 0.500, int8 0.306, int4 g64 0.214 plain steps (spec 26 §4's figures, re-derived). With the union-aware MoE at u = 30
+distinct experts a MoE block at M = 8 (§4's ESTIMATE; r63.union measures u), the M = 8 verify falls from 2.353 to 1.593.
+
+- **Drafter format (Decision 2): int8 per row** (the default) - PROVISIONAL until r63.accept's E_K (int4 g64 if within
+  0.05 of exact's at the chosen K).
+- **K_max (Decision 5): 7**; AdaptiveK picks per request over the cost row above (26c's `MtpCost::bolt_lilicorr` starts from
+  it until r63.cost's measured row replaces it).
+- **q form (Decision 6): `lattice`** (softmax of the realized scores / T, vLLM's) - PROVISIONAL until r63.accept's sampled
+  estimate compares it with `lattice+lp`.
+- **The replay lever (Decision 4): not built** - the DERIVED slot-write share stays at or below 10 % up to M = 7 (10.3 % at
+  M = 8, depth 4096); r63.cost's measured state rate at the chosen K decides.
+- **The union MoE (Decision 10): built in 26c regardless**; its saving is r63.union's u and r63.cost's time per expert block.
+- **The expectation (ESTIMATED: SPEED-Bench's published sampled acceptance at K 7 on the 24GB target, our DERIVED costs,
+  the int8 drafter):** coding 5.26 tokens a verify -> 1.98x plain with the plain M-row MoE, 2.77x with the union MoE at
+  u = 30; overall 4.30 -> 1.62x / 2.27x; writing 3.41 -> 1.28x / 1.80x. Decision 9's gap (our int4 target vs the 2-bit one
+  the drafter was trained against) is what r63.accept measures.
+
+## 12. 26a as built (2026-10-23; the Mac only - no card, no real weight)
+
+Branch `spec26a-lilicorr-p0`; box queue row 63. Built: `tools/oracle/dflash_ref.py`'s LiLiCorr form (`lilicorr_config_from_dict`,
+`nvfp4_decode` and the NVFP4 reader, `Drafter._lin` / `_softmax_sink`, `lilicorr_lattice` / `lilicorr_walk` /
+`lilicorr_anchor`, `lilicorr_candidates`, `LiLiCorrSession`, `ContextKV.anchor_row`, `Drafter.mut` - test-only mutations),
+`tools/oracle/lilicorr_make_tiny.py`, `tools/oracle/lilicorr_vllm_check.py`, `bolt_ref.py --tap-layers`,
+`dflash_accept.py --model bolt-lilicorr` (+ `lilicorr_draft`, `int8_rows_g`, `rtn_int4_g64_f64`, `p_rows_lse`,
+`run_source_lilicorr`), `dflash_p0.sh MODEL=lilicorr` (check / accept / lookup / union), `tools/spec/expert_union.py`,
+`probe_draft_cost --shapes bolt-lilicorr` (+ `draft_cost_shapes.h`'s `bolt_lilicorr`), `tools/spec/lilicorr_p0_project.py`, the
+tests `test_dflash_ref.py`'s 12 `test_lilicorr_*`, `test_dflash_accept.py`'s 5, `test_expert_union.py`,
+`test_lilicorr_p0_project.py`, `lilicorr_cost_names_test`; queue row 63's stages and the data key `lilicorr`; the record
+`docs/probe-lilicorr-2026-10-23.md`. kernel_cmdlines **+99 / -0 / ~0** (1,406 -> 1,505); no existing `.cl` edited.
+
+**Measured on the Mac** (`agnes-ref-img`, torch 2.14.1+cpu, the 5.19.0 site; every number printed by the test named): NVFP4's
+16 x 254 finite (code, scale) products exact in bf16 and f16, |W'| in [2^-10, 2688], the 2 NaN scale codes refused naming the
+element, the e4m3 table = torch's `float8_e4m3fn` on every finite code; g on the output bitwise `g x (x W'^T)`, folding it into
+W' moves 2125 / 2304 fc outputs; Review Focus 1-5 each a mutation that moves the lattice (20 / 20 anchors) or flips drafts
+(the probe sheet's table: 5 .. 119 of 140); the window edge at 16; K = 1..7 prefixes of one walk; the batch = `draft_block`
+(candidates and ids bitwise, the lattice within 9.5e-6); the int8 codes independent of g; the tiny pair end to end (the dump's
+taps bitwise `run`'s h after blocks 1 / 2 / 4 / 6 / 9 / 10; taps one block early flip 94 / 126 drafts);
+`lilicorr_cost_names_test` (110 names bound, 99 in the block, a stand-in expert block 2.507 MB against the 40 blocks' average
+2.500 MB, the drafter's linears 1.0758 B parameters); `test_box_validate.py` 29 tests.
+
+**Rulings where this differs from the plan's text or a precedent (each with its cost if wrong):**
+1. *The block is always 8 rows and the head scores all 7 slots* (§5.3; the plan's "K = 1..7 from one block"), while vLLM runs a
+   (1 + K)-row block with a K-slot lattice at K < 7 (its docs: "the corresponding prefix of the learned slot embeddings and
+   attention bias"). *Cost if wrong:* drafts at K < 7 differ from vLLM's (the trained K 7 is the same).
+2. *The sampled walk is keyed `seed ^ (slot << 32)`* (vLLM 3901d56800's `spec_step_seed`; 19a's DFlash 2 port at 96b0efe6b0 has
+   no step seed); the noise is `-log(-log1p(-u))` in double (vLLM's fp32 path `_log1p_neg_stable`: picks can differ at
+   near-ties). 26b's `ll_select` must key the same way to compare at T > 0. *Cost:* none to the output distribution.
+3. *`bolt_ref.py` gained `--tap-layers`* (default 1, 18, 35, 51, 68, 85): the tiny Bolt has 12 blocks, so the tiny pair taps
+   1, 2, 4, 6, 9, 10 (the real taps' kinds). *Cost:* none.
+4. *The arms add the int8-head forms* (`exacth`, `int8h`, `int4g64h`: what b70-serve runs, spec 25 Decision 18) beside the
+   plan's three. *Cost:* box CPU hours (ESTIMATED ~0.5 h an arm at 300 GFLOP/s).
+5. *The sampled estimate conditions the walk on the text*: slot j's previous index is the teacher-forced token's among slot
+   j - 1's candidates; a row whose token is not among them is censored at j (counted). The target row is the dump's top 64
+   with its full-vocabulary lse at T 1 (rows whose 64 hold < top-p counted as `short`), no top-k (spec 25 §17 ruling 6).
+   *Cost if wrong:* alpha_j for j >= 1 is biased by the conditioning (upward if the reachable rows are the easier ones).
+6. *The union counts read the golden runs' route records* (25a's `run` - the A4 references record none) and a `--rows gen`
+   form (decode rows only); `r63.union` is its own stage (the plan put it in r63.accept). *Cost:* none.
+7. *The cost probe allocates all 88 blocks on one card* (~15.8 GB, ESTIMATED; the plan's "scaled by the counts" not needed), the GEMVs at
+   the descriptor's {S 1, layout} (25b's PROVISIONAL cells), 25c's `nb_router` at M rows (E an argument - 25c ruling 2), the
+   routed experts as layout-1 GEMV stand-ins at I 2304, the attention ESTIMATED from the KV bytes (23f's form), the state's
+   slot ((1 + M) x 4 MiB) and replay (3 x 4 MiB: the verify's read + the commit's read-modify-write; §5.3's "2 x 4 MiB" is the
+   commit alone) terms DERIVED at a measured `nb_state_rmw` rate, the LiLiCorr head's 56 rows as 7 launches of 8 (re-reads
+   - an upper bound), argmax stage 1 as the top-8 + logsumexp stand-in, the exact arm as bf16 W' (g's multiply not modelled).
+   The ~650 non-GEMV launches a step are not in it: `lilicorr_p0_project.py --plain-ms` (r60's measured step) converts.
+   *Cost if wrong:* the verify's ratio to M = 1 overstated without --plain-ms.
+8. *Decision 1's cross-check cannot run on the Mac*: vLLM's import needs 16 modules `agnes-ref-img` lacks (stubbing pydantic /
+   msgspec breaks vLLM's own classes - measured), so `lilicorr_vllm_check.py` runs in the box's vLLM image (r63.vllmref) on
+   unquantised fp32 weights (fp32(g W') folded on both sides); SKIP 77 if that image's vLLM predates `models/lilicorr.py`.
+   *Cost if wrong:* the port's agreement with vLLM is unproven until then (the mutations hold it to vLLM's text).
+9. *The int4 arm's f16 scale is ONE rounding from fp64* (numpy's double -> half); on bf16 inputs it equals rtn.h's fp32 rule
+   (256 / 256 scales, 16384 / 16384 codes - `test_lilicorr_int4_from_g_w`). 26b's loader reproduces the fp64 rule.
+   *Cost if wrong:* an int4 code differs where 2 amax / 15 rounds differently through fp32.
+10. *Shared reference edits*: `read_target_embed_head` reads Nemotron-H's `language_model.{model,backbone}.embeddings.weight`;
+    the vLLM path's linears go through `Drafter._lin` and its sinks through `_softmax_sink` (`linear` / the softmax unchanged
+    when no g is set - every pre-existing test of `test_dflash_ref.py` / `test_dflash_accept.py` passes, the Muse form still
+    bitwise transformers). *Cost:* none.
+11. *Beyond the plan's row*: stages r63.k0 and r63.union; r63.accept's data keys add `bolt_g128` (the target's embedding /
+    head) and `oracle_image`; the x.rest stage skips the new `lilicorr` label. *Cost:* none.
+
+**Not run (box, row 63):** everything with real weights or a card - the cross-check against vLLM's head, the acceptance
+tables, lookup on the real continuations, the union counts, the cost probe (no new binary compiled by ocloc), the
+projection with measured numbers, vLLM XPU with LiLiCorr. Every default in §11 is PROVISIONAL until then.
