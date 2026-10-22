@@ -19,7 +19,8 @@
 #              table-addressed expert kernels), muse (spec 23c), dflash (spec 19b: the drafter's draft and
 #              projection lists at the fixture's tiny shapes), muse_dflash (spec 23f: the same lists in
 #              Muse-Glimmer's form - 16 rows, mg_dflash.cl, the inclusive window) and gdn_slots (spec 19c: gdn_step's 8-slot verify
-#              build against the plain kernel, partial acceptance) built and run on the Mac's OpenCL GPU
+#              build against the plain kernel, partial acceptance), lfm2moe (spec 24c) and bolt (spec 25c: the Bolt
+#              family's nb_* kernels and Muse's eager attention at Bolt's shape) built and run on the Mac's OpenCL GPU
 #              (gemv_i8w and argmax also at M = 8, spec 19a)
 #              against host references (tools/mac/clrun): INDICATIVE, not a B70 result.
 #
@@ -225,7 +226,7 @@ if [ $kernels = 1 ]; then
   bin=$out/clrun
   mkdir -p "$bin"
   ok=1 runs="" nfail=0 npass=0
-  for d in gemv_i8w argmax pf_moe k2 moe kolibri qwen4exp offload muse dflash muse_dflash gdn_slots lfm2moe; do
+  for d in gemv_i8w argmax pf_moe k2 moe kolibri qwen4exp offload muse dflash muse_dflash gdn_slots lfm2moe bolt; do
     # gdn_slots_run (spec 19c) needs no host source: the plain gdn_step kernel is its reference.
     # k2_run (spec 18b) checks against tests/kernels/k2_ref.h and builds the RoPE table
     # with the loader's own function, so it also takes two host sources.

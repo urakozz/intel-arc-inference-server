@@ -4782,4 +4782,44 @@ target_include_directories(bolt_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE
 target_link_libraries(bolt_ref_test PRIVATE b70_bolt_model)
 add_test(NAME bolt_ref_test COMMAND bolt_ref_test)
 set_tests_properties(bolt_ref_test PROPERTIES LABELS bolt TIMEOUT 600)
+if(B70_BOLT)
+  # Task 3: every binary a Bolt decode list binds, any head / attention / card count / arm / state precision
+  # (src/kernels/CMakeLists.txt's spec 25c block; the reused gemv / gemv_i8w / gemv_bf16 lines of the block are bound by
+  # name). After `--`: the binaries built outside the block that a list binds (Muse's attention - Decision 15 - and
+  # spec 16b's pp_handoff).
+  set(B70_BOLT_DECODE_KERNELS
+    kernel_nb_embed_gather_M1_K4096_V131072 kernel_nb_argmax_stage1_M1_V131072 kernel_nb_argmax_stage2_V131072
+    kernel_gemv_i8w_M1_K4096_N131072 kernel_gemv_bf16_M1_K4096_N131072
+    kernel_nb_res_norm_M1_K4096_W8_NF kernel_nb_res_norm_M1_K4096_W8_S1 kernel_nb_res_norm_M1_K4096_W8_S1_T1
+    kernel_nb_res_norm_M1_K4096_W8_S1_R kernel_nb_sh_act_M1_L1024_SH5376_S1 kernel_nb_attn_prep_M1_KV2_S1
+    kernel_nb_conv_M1_C10240_S1 kernel_nb_ssm_M1_H128_P64_N128_G8_S1 kernel_nb_ssm_M1_H128_P64_N128_G8_S1_C
+    kernel_nb_ssm_M1_H128_P64_N128_G8_S1_B16 kernel_nb_ssm_M1_H128_P64_N128_G8_S1_C_B16 kernel_nb_gnorm_M1_D8192_G1024_S1
+    kernel_nb_router_M1_K4096 kernel_nb_route_M1_T9
+    kernel_gemv_M1_K4096_N18560_S1_L0 kernel_gemv_M1_K8192_N4096_S1_L1 kernel_gemv_M1_K4096_N4608_S1_L0
+    kernel_gemv_M1_K4096_N4096_S1_L1 kernel_gemv_M1_K4096_N6400_S1_L0 kernel_gemv_M1_K1024_N4096_S1_L1
+    kernel_gemv_M1_K5376_N4096_S1_L1)
+  foreach(I 1536 2048 2304 2560)
+    list(APPEND B70_BOLT_DECODE_KERNELS kernel_nb_moe_up_M1_I${I}_L1024_T9 kernel_nb_moe_up_M1_I${I}_L1024_T9_R
+      kernel_nb_moe_down_M1_I${I}_L1024_T9)
+  endforeach()
+  set(B70_BOLT_REUSED_KERNELS kernel_mg_attn_M1_T64_Q32KV2_F kernel_mg_attn_eager_M1_T64_Q32KV2_F kernel_pp_handoff)
+  add_executable(bolt_variant_names_test kernels/bolt_variant_names_test.cc)
+  target_include_directories(bolt_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(bolt_variant_names_test PRIVATE b70_bolt_model)
+  b70_target_kernel_dir(bolt_variant_names_test)
+  add_test(NAME bolt_variant_names_test COMMAND bolt_variant_names_test ${B70_BOLT_DECODE_KERNELS} --
+    ${B70_BOLT_REUSED_KERNELS})
+  set_tests_properties(bolt_variant_names_test PROPERTIES LABELS bolt)
+  # B2 on the card: every Bolt kernel and arm at the real shapes against bolt_ref.h (no checkpoint).
+  add_executable(bolt_kernels_test kernels/bolt_kernels_test.cc)
+  target_include_directories(bolt_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(bolt_kernels_test PRIVATE b70_l0 b70_bolt_model)
+  b70_target_kernel_dir(bolt_kernels_test)
+  add_dependencies(bolt_kernels_test ${B70_BOLT_DECODE_KERNELS} kernel_mg_attn_M1_T64_Q32KV2_F
+    kernel_mg_attn_eager_M1_T64_Q32KV2_F kernel_nb_conv_M4_C10240_S1 kernel_nb_ssm_M4_H128_P64_N128_G8_S1
+    kernel_nb_ssm_M4_H128_P64_N128_G8_S1_C kernel_nb_ssm_M4_H128_P64_N128_G8_S1_B16 kernel_nb_ssm_M4_H128_P64_N128_G8_S1_C_B16
+    kernel_nb_res_norm_M4_K4096_W8_S1_T1 kernel_nb_route_M4_T9)
+  add_test(NAME bolt_kernels_test COMMAND bolt_kernels_test)
+  set_tests_properties(bolt_kernels_test PROPERTIES LABELS bolt TIMEOUT 1800)
+endif()
 # ==== Spec 25c: Nemotron 3.5 Bolt decode (label bolt) ==== (end) ====

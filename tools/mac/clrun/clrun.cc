@@ -46,6 +46,31 @@ std::string slurp(const std::string& path) {
   return s.str();
 }
 
+// Spec 25c: `#include "name"` lines whose file sits in the source's own directory are inlined here (recursively) rather
+// than left to the -I option: Apple's OpenCL compiler fails such an include intermittently ("file not found") when
+// several programs that include one header are built in a row. A `#line` after each keeps the diagnostics' lines.
+std::string inline_includes(const std::string& src, const std::string& dir, int depth = 0) {
+  if (depth > 8) throw Error("#include nesting deeper than 8 under " + dir);
+  std::istringstream in(src);
+  std::string out, line;
+  int n = 0;
+  while (std::getline(in, line)) {
+    ++n;
+    const size_t a = line.find("#include \"");
+    const size_t q = a == std::string::npos ? a : line.find('"', a + 10);
+    if (a != std::string::npos && line.find_first_not_of(" \t") == a && q != std::string::npos) {
+      const std::string name = line.substr(a + 10, q - a - 10);
+      std::ifstream f(dir + "/" + name);
+      if (f) {
+        out += inline_includes(slurp(dir + "/" + name), dir, depth + 1) + "\n#line " + std::to_string(n + 1) + "\n";
+        continue;
+      }
+    }
+    out += line + "\n";
+  }
+  return out;
+}
+
 std::string device_name(cl_device_id d) {
   char buf[256] = {};
   clGetDeviceInfo(d, CL_DEVICE_NAME, sizeof buf - 1, buf, nullptr);
@@ -134,7 +159,7 @@ Program::Program(Device& dev, const std::string& cl_path, const std::vector<std:
     head += "#define " + (eq == std::string::npos ? d : d.substr(0, eq) + " " + d.substr(eq + 1)) + "\n";
   }
   const std::string src = head + slurp(root + "/tools/mac/opencl/intel_shim.h") + "\n#line 1\n" +
-                          slurp(path);
+                          inline_includes(slurp(path), path.substr(0, path.find_last_of('/')));
   const char* s = src.c_str();
   const std::size_t len = src.size();
   cl_int e = CL_SUCCESS;
