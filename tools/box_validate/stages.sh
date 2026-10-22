@@ -4314,6 +4314,90 @@ st_r60_speed() {
 }
 
 # ======================================================================================
+row 61 "spec 25d - Nemotron 3.5 Bolt prefill on l0: absolute SSD sub-chunks with the fp32 state, the conv seed / writeback, the grouped latent MoE over real rows, NoPE flash (plan 25d)"
+rownote 61 "Written blind on the Mac (spec 25 §16) after row 60 (25c's decode: nothing of it has run on a card either): NO nb_pf_* binary has been compiled by ocloc (kernel_cmdlines +35 / -0 / ~0: nb_pf_mamba in two tilings and the bf16-state build, nb_pf_cb by DPAS, nb_pf_moe / nb_pf_moe_gemm up relu2 / down at I 1536 / 2048 / 2304 / 2560, nb_pf_embed_gather, 25c's nb_prep / nb_moe at M 2048, the N 4096 slabs in both layouts, the three k2 tail slabs; Muse's mg_pf_flash_attn pair is bound by name, built here only without the Muse block). No existing .cl edited: G0's sha is K0. On the Mac's GPU (tools/mac/clrun/bolt_pf_run, indicative) every portable prefill kernel agrees with tests/kernels/bolt_pf_ref.h - the seed, C B^T (plain), the scan in fp32 and bf16 state, the sort / gather / dequant / combine, the gather, 25c's kernels at M 2048 exact; the conv, dt, gnorm and the norm within 1-2 ulp (Apple's division); both tilings x10 equal; the prefill eager attention bitwise decode's mg_attn_eager on the same device. The DPAS kernels (nb_pf_cb_L64_DPAS, nb_pf_moe_gemm) and the whole walk have never run anywhere."
+rownote 61 "Every stage on the REAL checkpoint needs BOTH cards (Decision 4): its commands set ZE_AFFINITY_MASK=0,1 themselves; the N 12 synthetics (row 59's r59.synth, data key bolt_synth) run on one card, pp2:6 on two. The synthetics' golden sets are row 60's r60.synth_golden (oracle_bolt_synth); SergiioB's row 57's r57.golden (oracle_bolt). Run row 60 first: the prefill's head, its KV / ring / state hand-over and every comparison against decode's fill use 25c's list."
+rownote 61 "Bars (all PROPOSED, spec 25 §16): bolt_pf_kernels_test - every portable kernel bitwise the twin, C B^T by DPAS within 2^-20 of sum |C B| of the plain build, the grouped GEMMs bitwise pf_gemm_T0 on an expert's rows and the up rows' cosine >= 0.9999 against the twin's decode order, flash >= 0.99999 against fp64 at 3000 / 65536 / 200000, the eager build bitwise decode's eager rows. bolt_prefill_test - prefill vs decode's fill: logits >= 0.9995, h taps median >= 0.9998 / min >= 0.99, SSM states and conv columns >= 0.999 a block, K / V rows median >= 0.9998 / p01 >= 0.99; chunked / split at multiples of 64 bitwise. B3 on prefill: 25c's decode bars."
+rownote 61 "Hand back: bolt_pf_kernels_test's lines (the DPAS C B^T error, the grouped == dense lines, flash cosines); every launches / plan line (4333 a chunk on the real model: 2317 + 2016 on two cards; 573 on the N 12; + 4 for the head; 1,251,240,256 B of scratch a device); bolt_prefill_test's lines 1-7 per checkpoint; the B3 prefill gate / routing / SSM / h lines per prompt; the pp rows at depth 886 / 8192 / 32000 / 65536 / 131072 beside SergiioB's published 2925 / 2014 / 871 / 486 t/s (his 131072 is unpublished) and the phase tables. The SSD's sub-chunk length (64 as built), the scan's tiling (W16_R16) and the expert batch (512 MiB) change only by a commit naming these rows."
+stage r61.k0        61 default cpu -                         g0.sha,g0.bitwise,g0.suite "K0 (B0): every pre-existing binary identical; kernel_cmdlines +35 / -0 / ~0 (no existing .cl edited)"
+st_r61_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r61.host      61 default cpu -                         -        "host: bolt_pf_ref_test (the SSD form vs the recurrence in double and fp32, the conv over a chunk = decode's, absolute sub-chunks, the grouped MoE = decode's per row, the fixture), bolt_pf_variant_names_test (25c's names pinned), bolt_plan_test (the prefill launches, scratch, link, chunk rule)"
+st_r61_host() {
+  run_tests '^(bolt_pf_ref_test|bolt_pf_variant_names_test|bolt_plan_test)$'
+  jgrab host '^(bolt_pf_ref_test|bolt_pf_variant_names_test|bolt_plan_test)$' 'OK|bitwise|relative|cosine|launches|prefill|differ'
+  finish
+}
+stage r61.k1        61 default gpu -                         r61.k0   "kbins of the block + bolt_pf_kernels_test: B2 on prefill (every kernel against bolt_pf_ref.h, both tilings x10 finite and equal, C B^T by DPAS vs plain, grouped == dense, the slabs, flash vs fp64 at 3000 / 65536 / 200000, eager bitwise decode's)"
+st_r61_k1() {
+  kbins nb_pf_mamba_L64_W16_R16 nb_pf_mamba_L64_W8_R4 nb_pf_mamba_L64_W16_R16_B16 nb_pf_cb_L64_DPAS \
+    nb_pf_moe_I1536_L1024_T9_TM32 nb_pf_moe_I2560_L1024_T9_TM32 nb_pf_moe_gemm_K1024_N1536_RELU2 \
+    nb_pf_moe_gemm_K1536_N1024 nb_pf_moe_gemm_K1024_N2560_RELU2 nb_pf_moe_gemm_K2560_N1024 \
+    nb_pf_embed_gather_K4096_V131072 nb_res_norm_M2048_K4096_W8_S1_T1 nb_router_M2048_K4096 nb_route_M2048_T9 \
+    k2_pf_dequant_slab_K4096_N18560 pf_dequant_slab_K8192_N4096_L1 mg_pf_flash_attn_Q32KV2_F mg_pf_flash_attn_Q32KV2_F_EAGER
+  run_tests '^bolt_pf_kernels_test$'
+  jgrab k1 '^bolt_pf_kernels_test$' 'bitwise|cosine|DPAS|grouped|slab|OK'
+  finish
+}
+stage r61.reject    61 default gpu -                         -        "cli_reject_bolt_prefill_{int8,sycl,chunk,chunk64} - the l0-only backend, the 2048 chunk and its 64-grid, refused before the device"
+st_r61_reject() {
+  run_tests '^cli_reject_bolt_prefill_' '' '' 'ZE_AFFINITY_MASK=0,1'
+  finish
+}
+stage r61.synth     61 default gpu  bolt_synth               r61.k1   "bolt_prefill_test on the synthetics (n12-g128, n12-g64x, eager, bf16 head, bf16 state): the walk's launches and plan, twice bitwise, recorded == replayed, chunks / splits at multiples of 64 bitwise, prefill vs decode's fill within the bars, routes up to near-ties, tokens tie-aware"
+st_r61_synth() {
+  run_tests '^bolt_prefill_synth_(n12-g128|n12-g64x|eager|bf16head|b16state)_test$'
+  jgrab synth '^bolt_prefill_synth' '^[1-7]\.|split|chunks|bitwise|cosine|routing|tokens|OK'
+  finish
+}
+stage r61.synth_b3  61 default gpu  bolt_synth,oracle_bolt_synth r61.synth "B3 on prefill: bolt_golden_test's prefill mode on the synthetics - short / 4k / agentic x both spellings, chunks of 512 on 4k, eager"
+st_r61_synth_b3() {
+  run_tests '^bolt_golden_prefill_synth_'
+  jgrab synth-b3 '^bolt_golden_prefill_synth' 'prefill:|gate:|routing:|SSM state|conv|^  h |OK'
+  finish
+}
+stage r61.synth_pp  61 default gpu  bolt_synth               r61.synth "two cards on the synthetic: bolt_prefill_test pp2:6 - the prefill on two cards (the copy hand-off a chunk) bitwise one card"
+st_r61_synth_pp() {
+  run_tests '^bolt_prefill_synth_pp_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab synth-pp '^bolt_prefill_synth_pp_test$' 'pp2|walk|OK'
+  finish
+}
+stage r61.golden    61 default gpu  bolt_g128,oracle_bolt    r61.k1   "SergiioB's checkpoint, two cards: bolt_prefill_test (4333 launches a chunk, B4, prefill vs decode's fill) and B3 after a prefilled prompt - short / 4k / agentic, eager"
+st_r61_golden() {
+  run_tests '^bolt_prefill_real_test$|^bolt_golden_prefill_real_(bolt_(short|4k|agentic)|short_eager)_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab golden '^bolt_(prefill|golden_prefill)_real' '^[1-7]\.|prefill:|gate:|routing:|SSM state|conv|OK'
+  finish
+}
+stage r61.golden32k 61 optin   gpu  bolt_g128,oracle_bolt    r61.golden "B3 on bolt_32k after a prefilled prompt (16 chunks)"
+st_r61_golden32k() {
+  run_tests '^bolt_golden_prefill_real_32k_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab golden32k '^bolt_golden_prefill_real_32k_test$' 'prefill:|gate:|routing:|SSM state|conv|OK'
+  finish
+}
+stage r61.speed     61 optin   gpu  bolt_g128                r61.golden "prefill rate at depth 886 / 8192 / 32000 / 65536 / 131072 beside SergiioB's published table (flash and eager interleaved, median of 3), the phase tables at 4096 and 65536"
+st_r61_speed() {
+  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
+  local k="ZE_AFFINITY_MASK=0,1" d arms ratios
+  x "uptime"
+  for d in 886 8192 32000 65536 131072; do
+    idle "d$d"
+    arms="d$d '$k $(bench_cmd "$snap" --prefill-length $d --tg 32 --max-len auto)'"
+    arms="$arms d$d-eager '$k B70_BOLT_ATTN=eager $(bench_cmd "$snap" --prefill-length $d --tg 32 --max-len auto)'"
+    ratios="--ratio d$d-eager/d$d"
+    chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.d$d.rows -r 3 $ratios -- $arms" "prefill at depth $d"
+  done
+  for d in 4096 65536; do
+    chk "$k B70_PREFILL_PROFILE=1 $(bench_cmd "$snap" --prefill-length $d --tg 1 --max-len auto)" "the phase table at $d"
+  done
+  x "uptime"
+  grab_all rows '^\| b70-decode|^RATIO ' 60
+  grab_all phases 'prefill phase attribution|^  (norm|slab_|attn_|gdn_|moe_|silu|head|TOTAL)|^pp: ' 80
+  finish
+}
+
+# ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / muse / dflash labels belong to their rows)"
 st_x_rest() {
