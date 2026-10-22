@@ -4466,9 +4466,9 @@ st_r62_chat_synth() {
 stage r62.chat      62 default gpu  bolt_g128,oracle_bolt   -           "golden_server_test --chat on b70-serve <bolt> == b70-decode"
 st_r62_chat() {
   local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
-  x "ZE_AFFINITY_MASK=0,1 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $snap"
+  x "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $snap"
   step_rc $? "b70-serve <SergiioB's g128>, two cards (the default), --max-len auto, seeded sampling"
-  chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='--max-len 32768' timeout 7200 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $snap --chat" \
+  chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_WAIT_S=3600 B70_SERVE_ARGS='--max-len 32768' timeout 7200 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $snap --chat" \
     "golden_server_test --chat against SergiioB's g128, two cards"
   grab_all auto 'max_len: auto ->|^split: ' 6
   grab_all memory '^memory' 8
@@ -4481,7 +4481,7 @@ st_r62_a4() {
   local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
   local d=$STATE/a4-bolt set=tests/golden/toolcall-bolt
   x "mkdir -p $d && cp oracle-out-bolt-a4/*.int4.txt $d/ && { cp oracle-out-bolt-a4/*.bf16.txt $d/ 2> /dev/null || true; }"
-  chk "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_run.sh $d/serve serve 1 $snap --max-len 32768 -- --set $set --max-tokens 2048 --stop-at-eos" "A4 through b70-serve (greedy, up to 2048 new ids, the set's chat_template_kwargs)"
+  chk "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_run.sh $d/serve serve 1 $snap --max-len 32768 -- --set $set --max-tokens 2048 --stop-at-eos" "A4 through b70-serve (greedy, up to 2048 new ids, the set's chat_template_kwargs)"
   chk "python3 tools/toolcall/serve_a4_texts.py $d/serve/server-log $set $d serve" "every scenario's prompt ids as the server rendered them equal the reference's (the template and tokenizer on the real tools), the raw texts written"
   chk "python3 tools/toolcall/score.py --format qwen-think $d int4 serve | tee $d/score-int4.md" "scoring b70-serve against SergiioB's g128 reference (25a's int4 run)"
   x "if ls $d/*.bf16.txt > /dev/null 2>&1; then python3 tools/toolcall/score.py --format qwen-think $d bf16 serve | tee $d/score-bf16.md; else echo 'no BF16 reference texts (the BF16 window has not run): skipped'; fi"
@@ -4494,9 +4494,9 @@ stage r62.agentic   62 optin   gpu  bolt_g128               r62.chat    "the age
 st_r62_agentic() {
   local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997' t=tests/golden/prompts/bolt_agentic.json
   idle r62-agentic
-  chk "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/agentic_run.sh $STATE/agentic-default $snap $t --max-len 65536" "agentic loop, prefix cache auto (Bolt's defaults: thinking on, truncate_history_thinking true)"
-  chk "ZE_AFFINITY_MASK=0,1 PORT=$PORT EXTRA='{\"chat_template_kwargs\": {\"truncate_history_thinking\": false}}' tools/box_validate/agentic_run.sh $STATE/agentic-keep $snap $t --max-len 65536" "agentic loop, truncate_history_thinking false"
-  chk "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/agentic_run.sh $STATE/agentic-off $snap $t --max-len 65536 --prefix-cache-gb 0" "agentic loop, cache off"
+  chk "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/agentic_run.sh $STATE/agentic-default $snap $t --max-len 65536" "agentic loop, prefix cache auto (Bolt's defaults: thinking on, truncate_history_thinking true)"
+  chk "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT EXTRA='{\"chat_template_kwargs\": {\"truncate_history_thinking\": false}}' tools/box_validate/agentic_run.sh $STATE/agentic-keep $snap $t --max-len 65536" "agentic loop, truncate_history_thinking false"
+  chk "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/agentic_run.sh $STATE/agentic-off $snap $t --max-len 65536 --prefix-cache-gb 0" "agentic loop, cache off"
   x "uptime"
   grab_all agentic '^hit rate|^turns whose call|^ideal prefix|^turn [0-9]+ diverges|^\| [0-9]+ \|' 90
   finish
@@ -4506,8 +4506,8 @@ st_r62_benchy() {
   local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
   local f="--concurrency 1 --no-cache --exact-tg --latency-mode generation --runs 2"
   say "the operator's vLLM XPU run of the SAME checkpoint first (SergiioB's README: vllm/vllm-openai-xpu, --tensor-parallel-size 2 --dtype bfloat16 --kv-cache-dtype fp8 --attention-backend TRITON_ATTN --max-model-len 262144 --block-size 64 --enable-prefix-caching --mamba-cache-mode align --tool-call-parser qwen3_coder --reasoning-parser-plugin ultra_v3_reasoning_parser.py --reasoning-parser ultra_v3, its patches from the card's b70/), then the same llama-benchy rows against it: uvx llama-benchy@\${BENCHY_VERSION:-0.4.0} --base-url http://127.0.0.1:<port>/v1 --model <served name> $f --pp 886 8192 32000 65536 --tg 128 --depth 0 (the prompt-length rows of SergiioB's table) and $f --pp 512 --tg 128 --depth 886 8192 32000 65536 (decode at depth, row 41's D)"
-  chk "MODEL=$snap MAX_LEN=262144 SERVE_AFFINITY=0,1 BENCHY_VERSION=0.4.0 tools/probe/serve_benchy.sh --pp 886 8192 32000 65536 --tg 128 --depth 0 $f" "b70-serve <bolt> on two cards: pp = prompt length 886 / 8192 / 32000 / 65536, tg 128"
-  chk "MODEL=$snap MAX_LEN=262144 SERVE_AFFINITY=0,1 BENCHY_VERSION=0.4.0 tools/probe/serve_benchy.sh --pp 512 --tg 128 --depth 886 8192 32000 65536 $f" "b70-serve <bolt> on two cards: decode at depth 886 / 8192 / 32000 / 65536"
+  chk "WAIT=3600 MODEL=$snap MAX_LEN=262144 SERVE_AFFINITY=0,1 BENCHY_VERSION=0.4.0 tools/probe/serve_benchy.sh --pp 886 8192 32000 65536 --tg 128 --depth 0 $f" "b70-serve <bolt> on two cards: pp = prompt length 886 / 8192 / 32000 / 65536, tg 128"
+  chk "WAIT=3600 MODEL=$snap MAX_LEN=262144 SERVE_AFFINITY=0,1 BENCHY_VERSION=0.4.0 tools/probe/serve_benchy.sh --pp 512 --tg 128 --depth 886 8192 32000 65536 $f" "b70-serve <bolt> on two cards: decode at depth 886 / 8192 / 32000 / 65536"
   grab_all benchy '^\| ' 80
   finish
 }
