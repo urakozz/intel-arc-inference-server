@@ -240,6 +240,31 @@ embedding stay on the card; when a layout does not fit, the planner shortens the
 spill. (Host-RAM expert offload stays spec 22's, for Qwen3.8-Flash-Next alone.) `--batch` > 1 with `--pp 2` is §9.1
 follow-on 4; with the two-card replica mode, §10.
 
+**MTP trades against slots (operator, 2026-10-23).** With `--mtp off` a slot needs one GDN state instead of four, no
+head KV layer, and the card drops the MTP head (0.849 GB), so a model fits more slots. Agnes on one card, int8 KV
+(derived, the §9.1 method):
+
+| Agnes, one card | total | spare | |
+|---|---:|---:|---|
+| `--batch 2` (128k + 32k), MTP on | 29.27 GB | 1.76 GB | the default batched layout |
+| `--batch 4` (128k + 3 x 32k), `--mtp off` | ~29.9 GB | ~1.1 GB | allowed |
+| `--batch 4`, MTP on in the main slot only | 31.50 GB | -0.47 GB | does not fit |
+| `--batch 4`, MTP on everywhere | 33.24 GB | -2.21 GB | does not fit |
+
+A `--batch` that does not fit is refused at startup with the planner's numbers and the ways out, never silently
+shrunk below the slot lengths above. The message is built from `runtime::plan` (the model, the card's bytes, what the
+asked layout needs, the largest batch that fits with MTP on), so it holds for every model and card; for Agnes:
+
+```
+b70-serve: --batch 4 with MTP does not fit Agnes on one card: 128k + 3 x 32k needs 33.24 GB, the card has 31.03 GB
+(32.53 GB - 1.5 GB reserve). With MTP this card fits --batch 2. For --batch 4, either:
+  - add the second card and run pipeline parallel: --pp 2 (follow-on 4; both cards), or
+  - turn MTP off: --mtp off (128k + 3 x 32k fits, ~1.1 GB spare).
+```
+
+`--mtp auto` with `--batch` asks for the largest batch that fits WITH MTP and says so in the startup line; an explicit
+`--batch` beyond it, with MTP on, is the refusal above. Qwen3.8 fits `--batch 4` with MTP (§9.1), so it never prints it.
+
 ## 10. Later: the two-card replica mode (written 2026-10-23, not built)
 
 **The idea:** card 0 serves the main session with today's single-sequence engine (MTP, the whole card for
