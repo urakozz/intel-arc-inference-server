@@ -5185,3 +5185,26 @@ target_link_libraries(bolt_sampling_test PRIVATE b70_server)
 add_test(NAME bolt_sampling_test COMMAND bolt_sampling_test)
 set_tests_properties(bolt_sampling_test PROPERTIES LABELS bolt TIMEOUT 600)
 # ==== Spec 25e: Nemotron 3.5 Bolt served (label bolt) ==== (end) ====
+
+# ==== Spec 26a: LiLiCorr P0 (label lilicorr) ==== (begin) ====
+# Plan 26a Task 4: every binary `probe_draft_cost --shapes bolt-lilicorr` binds (src/kernels/CMakeLists.txt's spec 26a
+# block, B70_LILICORR_P0_KERNELS, exactly) - after `--` the M = 1 binaries 25c builds that the probe binds too. Host only.
+if(B70_LILICORR_P0 AND B70_BOLT)
+  set(_l26a_reused kernel_nb_router_M1_K4096 kernel_gemv_i8w_M1_K4096_N131072 kernel_nb_argmax_stage1_M1_V131072
+    kernel_nb_state_rmw_F32 kernel_gemv_M1_K4096_N18560_S1_L0 kernel_gemv_M1_K8192_N4096_S1_L1
+    kernel_gemv_M1_K4096_N4608_S1_L0 kernel_gemv_M1_K4096_N4096_S1_L1 kernel_gemv_M1_K4096_N6400_S1_L0
+    kernel_gemv_M1_K1024_N4096_S1_L1 kernel_gemv_M1_K5376_N4096_S1_L1)
+  foreach(t ${B70_LILICORR_P0_KERNELS} ${_l26a_reused})
+    if(NOT TARGET ${t})
+      message(FATAL_ERROR "spec 26a: ${t} is not built (src/kernels/CMakeLists.txt)")
+    endif()
+  endforeach()
+  add_executable(lilicorr_cost_names_test kernels/lilicorr_cost_names_test.cc)
+  target_include_directories(lilicorr_cost_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tools/probe)
+  target_link_libraries(lilicorr_cost_names_test PRIVATE b70_bolt_model)
+  b70_target_kernel_dir(lilicorr_cost_names_test)
+  add_test(NAME lilicorr_cost_names_test COMMAND lilicorr_cost_names_test ${B70_LILICORR_P0_KERNELS} -- ${_l26a_reused})
+  set_tests_properties(lilicorr_cost_names_test PROPERTIES LABELS lilicorr)
+endif()
+# ==== Spec 26a: LiLiCorr P0 (label lilicorr) ==== (end) ====

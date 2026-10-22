@@ -2005,6 +2005,78 @@ if(B70_BOLT)
 endif()
 # ==== Spec 25d: Nemotron 3.5 Bolt prefill ==== (end) ====
 
+# ==== Spec 26a: LiLiCorr P0 - Bolt's verify at M rows, one LiLiCorr block ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-20-spec26a-lilicorr-p0.md, Task 4 (tools/probe/probe_draft_cost.cc --shapes
+# bolt-lilicorr; the shapes in tools/probe/draft_cost_shapes.h's bolt_lilicorr namespace). Additive only: no existing
+# source is edited and no existing name is built here, so every binary above keeps its name, command line and bytes (B0).
+#   the verify at M = 2..8   Bolt's 7 int4 GEMVs at model::BoltDesc::linears' {S 1, layout} (25b's PROVISIONAL cells; M = 1
+#                            is 25c's), 25c's nb_router at M rows, the int8 head and argmax stage 1 at M rows - 26c's verify
+#                            lists will bind the same names
+#   the expert stand-in      ONE routed expert as two layout-1 GEMVs at I 2304 (the 40 blocks' average 2 x I x 544 B is
+#                            2.500 MB; I 2304 gives 2.507 MB): up K 1024 N 2304, down K 2304 N 1024, M 1
+#   one LiLiCorr block       the drafter's linears at M = 8 in int4 g64 (layout 1, S 1), int8 and bf16 (spec 26 §3's exact
+#                            arm reads W' as bf16 - its g is one fp32 multiply on the output), the int8 head at the 7
+#                            draft rows (the verify's M = 7 build) with argmax stage 1 as the top-8 + logsumexp stand-in,
+#                            and the LiLiCorr head's projections in bf16 at 8 / 7 / 1 rows (56 rows as 7 launches of 8)
+option(B70_LILICORR_P0 "build spec 26a's verify-at-M and LiLiCorr block cost variants (probe_draft_cost)" ON)
+set(B70_LILICORR_P0_KERNELS)
+if(B70_LILICORR_P0 AND B70_BOLT)
+  foreach(M 2 3 4 5 6 7 8)
+    foreach(KNL "4096 18560 0" "8192 4096 1" "4096 4608 0" "4096 4096 1" "4096 6400 0" "1024 4096 1" "5376 4096 1")
+      separate_arguments(KNL)
+      list(GET KNL 0 _k)
+      list(GET KNL 1 _n)
+      list(GET KNL 2 _l)
+      add_gemv_variant(${M} ${_k} ${_n} 1 ${_l})
+      list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_M${M}_K${_k}_N${_n}_S1_L${_l})
+    endforeach()
+    add_ocloc_kernel(nb_router_M${M}_K4096 SOURCE ${NB_CL}/nb_moe.cl DEFINES M=${M} ROUTER_K=4096 ${NB_DEPS})
+    add_gemv_i8w_variant(${M} 4096 131072)
+    add_ocloc_kernel(nb_argmax_stage1_M${M}_V131072 SOURCE ${ARGMAX_CL} DEFINES ${NB_ARGMAX_DEFINES} M=${M})
+    list(APPEND B70_LILICORR_P0_KERNELS kernel_nb_router_M${M}_K4096 kernel_gemv_i8w_M${M}_K4096_N131072
+      kernel_nb_argmax_stage1_M${M}_V131072)
+  endforeach()
+  add_gemv_variant(1 1024 2304 1 1)     # the expert stand-in's up
+  add_gemv_variant(1 2304 1024 1 1)     # and down
+  list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_M1_K1024_N2304_S1_L1 kernel_gemv_M1_K2304_N1024_S1_L1)
+  # The drafter (nvidia/...-24GB-LiLiCorr: hidden 4096, 32 q / 2 kv x 128, FF 12288, fc 6 x 4096 -> 4096, the two conv
+  # kernel projections 4096 -> 1024, the commit's ctx k||v 4096 -> 512) at the block's 8 rows.
+  foreach(KN "4096 1024" "4096 4608" "4096 4096" "4096 24576" "12288 4096" "4096 512" "24576 4096")
+    separate_arguments(KN)
+    list(GET KN 0 _k)
+    list(GET KN 1 _n)
+    if(NOT (_k EQUAL 4096 AND _n EQUAL 4096))   # o_proj's gemv_M8_K4096_N4096_S1_L1 is Bolt's o_proj at M 8 (above)
+      add_gemv_variant(8 ${_k} ${_n} 1 1)
+      list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_M8_K${_k}_N${_n}_S1_L1)
+    endif()
+    add_gemv_i8w_variant(8 ${_k} ${_n})
+    list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_i8w_M8_K${_k}_N${_n})
+    if(_n LESS 2048)   # kernels::gemv_bf16_tiling: N / 64 < 32 work-groups -> {16, 16}
+      add_gemv_bf16_variant(8 ${_k} ${_n} 16 16)
+      list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_bf16_M8_K${_k}_N${_n}_C16_S16)
+    else()
+      add_gemv_bf16_variant(8 ${_k} ${_n} 64 1)
+      list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_bf16_M8_K${_k}_N${_n})
+    endif()
+  endforeach()
+  # The LiLiCorr head (hidden 1024, 2 layers, MLP 2048, factor 1024; always bf16 - Decision 3): the shapes not above.
+  foreach(MKN "8 1024 3072" "8 1024 1024" "8 1024 2048" "8 2048 1024" "7 4096 1024" "1 4096 1024" "1 1024 1024")
+    separate_arguments(MKN)
+    list(GET MKN 0 _m)
+    list(GET MKN 1 _k)
+    list(GET MKN 2 _n)
+    if(_n LESS 2048)
+      add_gemv_bf16_variant(${_m} ${_k} ${_n} 16 16)
+      list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_bf16_M${_m}_K${_k}_N${_n}_C16_S16)
+    else()
+      add_gemv_bf16_variant(${_m} ${_k} ${_n} 64 1)
+      list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_bf16_M${_m}_K${_k}_N${_n})
+    endif()
+  endforeach()
+endif()
+set(B70_LILICORR_P0_KERNELS ${B70_LILICORR_P0_KERNELS} CACHE INTERNAL "spec 26a's probe binaries (lilicorr_cost_names_test)")
+# ==== Spec 26a: LiLiCorr P0 ==== (end) ====
+
 # Spec 16b (pipeline parallel, `--pipeline-handoff peer`): the peer-write hand-off between
 # the two stages' decode lists - pp_send (device 0's last launch) and pp_recv (device 1's
 # first). No defines: the word counts are kernel arguments, so one binary serves every model.
