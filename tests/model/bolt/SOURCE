@@ -6,6 +6,13 @@ is SergiioB's AutoRound 0.17.0 export's.
 Licence: OpenMDW-1.1 (license: other, license_name: openmdw-1.1). Spec 25 §1.5 / Decision 20 (operator, 2026-10-20: "it's
 published open weights, of course we can use it"): model files (config, template, tokenizer) may be vendored.
 
+generation_config.nvidia.json is nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB@c6cc2e8ffa353403213d6b9b18aaf8eb684d705a's
+generation_config.json (sha256 c67c90fcadf0e7ef78b663eb159664b36a35ffb9dd2523096e226e5c3d1b0e5f): sampled, temperature 1.0,
+top_p 0.95, eos_token_id [2, 11] - the card's recommended sampling (spec 25 Decision 12). generation_config.sergiio.json is
+SergiioB's export's (@b9f381d2, sha256 83e5a7a0577cb92a5f2454e6cbacea6c4b31b5c3ab947829aa2488eb15faadbf): eos_token_id 11 only,
+no sampling key. Both copied unchanged (configuration files, Decision 20); tests/server/bolt_request_test.cc and
+src/cli/bolt_serve.h's resolve_generation read them (spec 25e).
+
 make_config.py (this directory) writes the same published values from code and `--check` holds them to config.json key by
 key: tests/model/bolt_test.cc reads config.json, the synthetic checkpoints (tools/quantize/bolt/make_synth.py) carry
 make_config.py's output.

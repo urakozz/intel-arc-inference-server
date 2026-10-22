@@ -5075,6 +5075,15 @@ if(B70_TOKENIZER_ENABLED)
   target_link_libraries(bolt_tokenizer_test PRIVATE b70_tokenizer)
   add_test(NAME bolt_tokenizer_test COMMAND bolt_tokenizer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer ${B70_BOLT_SNAPSHOT})
   set_tests_properties(template_bolt_test bolt_tokenizer_test PROPERTIES LABELS bolt SKIP_RETURN_CODE 77 TIMEOUT 300)
+  # Task 3 (host): the request path through the server over a mock engine, with the REAL template: Task 1's renders POSTed with
+  # their kwargs, Decision 13's reasoning_effort table, the kwarg 400s, the media refusals, Decision 12's generation defaults
+  # (tests/model/bolt/generation_config.{nvidia,sergiio}.json) and EOS [2, 11], the output stream end to end.
+  add_executable(bolt_request_test server/bolt_request_test.cc)
+  target_include_directories(bolt_request_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(bolt_request_test PRIVATE b70_server b70_tokenizer b70_third_party_minja)
+  add_test(NAME bolt_request_test COMMAND bolt_request_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${CMAKE_SOURCE_DIR}/tests/model/bolt ${B70_BOLT_SNAPSHOT})
+  set_tests_properties(bolt_request_test PROPERTIES LABELS bolt SKIP_RETURN_CODE 77 TIMEOUT 600)
 endif()
 # Task 2 (host): Bolt's output stream - the ultra_v3 reasoning rules over the Qwen XML calls (Review Focus 2 and 3): the
 # hand-written expectations of tests/server/bolt_parse_cases.json (tools/tokenizer/dump_bolt.py parse), the scorer's first
