@@ -1334,6 +1334,92 @@ def test_lilicorr_load_from_files():
           "stray scales refused")
 
 
+def test_lilicorr_real_checkpoint():
+    """nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr @ 449d2414 from the HF cache (SKIP without its weights): the
+    header's 179 tensors (25 NVFP4 linears x 3 + 104 BF16), every NVFP4 linear decoded exactly (nvfp4_decode asserts W'
+    bf16-exact; no NaN scale), the parameters (the card's 1.113 B), the global scales, the three formats' bytes and their
+    weight error against g x W' (fp64), and one draft on random taps over a random stand-in target embedding / head
+    (Bolt's 41.9 GB checkpoint is the box's) - finite, slot 0 a broadcast, the drafts among the candidates."""
+    import time
+    snap = ref.find_snapshot("nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr", ("config.json", "model.safetensors"))
+    if snap is None:
+        _skip("the LiLiCorr drafter's weights are not in the HF cache (hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-"
+              "A9B-24GB-LiLiCorr --revision 449d24140160b8e51871bfc0f0a7338abf640aa1)")
+    cfg = ref.read_config(snap)
+    wm = ref._weight_map(snap)
+    raw = ref._read(wm, list(wm))
+    kinds = {}
+    for n, v in raw.items():
+        kinds[str(v.dtype)] = kinds.get(str(v.dtype), 0) + 1
+    nq = sum(1 for n in raw if n.endswith(".weight_scale_2"))
+    assert len(raw) == 179 and nq == 25 and kinds.get("torch.bfloat16") == 104, (len(raw), nq, kinds)
+    zero_blocks = sub_blocks = blocks = 0
+    codes = torch.zeros(16, dtype=torch.long)
+    for n in raw:
+        if n.endswith(".weight_scale"):
+            s = raw[n].view(torch.uint8)
+            blocks += s.numel()
+            zero_blocks += int((s == 0).sum())
+            sub_blocks += int(((s & 0x78) == 0).sum()) - int((s == 0).sum())
+            w = raw[n[: -len("_scale")]]
+            codes += torch.bincount(torch.cat([(w & 0xF).flatten(), (w >> 4).flatten()]).long(), minlength=16)
+    t0 = time.time()
+    t = ref.read_drafter_tensors(snap, cfg)
+    t_dec = time.time() - t0
+    gs = {n[: -len(ref.G_SUFFIX)]: float(v) for n, v in t.items() if n.endswith(ref.G_SUFFIX)}
+    assert len(gs) == 25 and all(math.isfinite(g) and g > 0 for g in gs.values())
+    params = sum(v.numel() for n, v in t.items() if not n.endswith(ref.G_SUFFIX))
+    assert 1.112e9 < params < 1.114e9, params                          # the card's "1.113B draft parameters"
+    head_params = sum(v.numel() for n, v in t.items() if n.startswith("lilicorr.") and not n.endswith(ref.G_SUFFIX))
+    pow2 = sum(1 for g in gs.values() if math.log2(g).is_integer())
+    # the formats (spec 26 §3): bytes of the backbone + fc, and the weight error against g x W' (fp64)
+    lin = [n for n in t if n.endswith(".weight") and not n.startswith("lilicorr.") and t[n].dim() == 2]
+    b_exact = sum(t[n].numel() * 2 for n in lin)
+    b_int8 = sum(t[n].numel() + t[n].shape[0] * 4 for n in lin)
+    b_int4 = sum(t[n].numel() // 2 + t[n].numel() // 64 * 2 for n in lin)
+    b_head = sum(v.numel() * 2 for n, v in t.items() if n.startswith("lilicorr.") and not n.endswith(ref.G_SUFFIX))
+    da = importlib.util.spec_from_file_location("dflash_accept_rt", os.path.join(_HERE, "dflash_accept.py"))
+    DA = importlib.util.module_from_spec(da)
+    da.loader.exec_module(DA)
+    DA._load_deps()
+    e8, e4 = [], []
+    for n in lin:
+        if n not in gs and n[: -len(".weight")] not in gs:
+            continue
+        g = gs[n[: -len(".weight")]]
+        w64 = t[n].double() * g
+        q, st = DA.int8_rows_g(t[n].float(), g)
+        e8.append(float((q.double() * st.double()[:, None] - w64).norm() / w64.norm()))
+        q4, s16 = DA.rtn_int4_g64_f64(w64)
+        N, K = q4.shape
+        d4 = (q4.double().reshape(N, K // 64, 64) - 8.0) * s16.double()[..., None]
+        e4.append(float((d4.reshape(N, K) - w64).norm() / w64.norm()))
+    e8.sort()
+    e4.sort()
+    # one draft over a random stand-in target (the drafter's own arithmetic on random taps)
+    gen = torch.Generator().manual_seed(26)
+    emb = (torch.randn(cfg.vocab, cfg.hidden, generator=gen, dtype=torch.bfloat16) * 0.02).to(torch.bfloat16)
+    head = (torch.randn(cfg.vocab, cfg.hidden, generator=gen, dtype=torch.bfloat16) * 0.02).to(torch.bfloat16)
+    d = ref.Drafter(cfg, t, emb, head)
+    del raw, t
+    taps = {i: torch.randn(40, cfg.hidden, generator=gen) for i in cfg.target_layer_ids}
+    ctx = d.context_kv(taps, torch.arange(40))
+    t1 = time.time()
+    o = d.draft_block(11, 40, 7, ctx)
+    t_draft = time.time() - t1
+    assert torch.isfinite(o.lattice).all() and torch.isfinite(o.hidden).all()
+    assert all(torch.equal(o.lattice[0, 0], o.lattice[0, i]) for i in range(8))
+    assert all(int(o.ids[s]) in o.cand_ids[s].tolist() for s in range(7))
+    print(f"real LiLiCorr: 179 tensors ({kinds}), 25 NVFP4 linears decoded exactly in {t_dec:.0f} s; {params:,} parameters "
+          f"({head_params:,} in the head); g in [{min(gs.values()):.3g}, {max(gs.values()):.3g}], {pow2} a power of two; "
+          f"scale blocks {blocks:,}: {zero_blocks:,} zero, {sub_blocks:,} subnormal; e2m1 codes {codes.tolist()}")
+    print(f"  formats (backbone + fc, {len(lin)} linears): exact {b_exact / 1e9:.3f} GB, int8 {b_int8 / 1e9:.3f}, int4 g64 "
+          f"{b_int4 / 1e9:.3f}; the head {b_head / 1e9:.3f} GB; weight error vs g x W' over the {len(e8)} NVFP4 backbone "
+          f"linears: int8 {e8[0]:.4f} / {e8[len(e8) // 2]:.4f} / {e8[-1]:.4f}, int4 g64 {e4[0]:.4f} / {e4[len(e4) // 2]:.4f} / "
+          f"{e4[-1]:.4f} (min / median / max relative)")
+    print(f"  one draft on random taps (a random stand-in target): {t_draft:.2f} s on this CPU (float32), ids {o.ids.tolist()}")
+
+
 TESTS = [test_real_configs, test_shapes_and_determinism, test_tap_offset_at_api, test_context_kv_and_rope,
          test_context_window, test_full_attention_layer, test_block_attention_causality, test_conv_lookback, test_v2_layer_wiring,
          test_short_K, test_score_edges_and_anchor, test_walk_tie_rule, test_gumbel, test_d2t,
@@ -1341,7 +1427,8 @@ TESTS = [test_real_configs, test_shapes_and_determinism, test_tap_offset_at_api,
          test_muse_config, test_muse_equals_transformers, test_muse_window_edge, test_muse_review_focus_4,
          test_lilicorr_config, test_lilicorr_nvfp4_enumeration, test_lilicorr_g_on_the_output, test_lilicorr_anchor,
          test_lilicorr_lattice_and_walk, test_lilicorr_candidates, test_lilicorr_sinks, test_lilicorr_window_edge,
-         test_lilicorr_k_prefix, test_lilicorr_sampled, test_lilicorr_taps_order, test_lilicorr_load_from_files]
+         test_lilicorr_k_prefix, test_lilicorr_sampled, test_lilicorr_taps_order, test_lilicorr_load_from_files,
+         test_lilicorr_real_checkpoint]
 
 
 def main() -> None:
