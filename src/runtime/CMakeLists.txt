@@ -25,6 +25,11 @@ add_library(b70_runtime STATIC buffers.cc capture.cc engine.cc pipeline_place.cc
 target_include_directories(b70_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_runtime PUBLIC b70_l0 b70_model b70_loader b70_plan)
 b70_target_kernel_dir(b70_runtime)
+# Spec 13a: runtime::build_rows (capture.h / capture.cc) exists only in the batching probe's build - the option is
+# src/kernels' B70_BATCH_PROBE (its row builds); a default build compiles capture.cc exactly as before.
+if(B70_BATCH_PROBE)
+  target_compile_definitions(b70_runtime PUBLIC B70_BATCH_PROBE=1)
+endif()
 
 # The prefill path's host half - its own archive, so nothing that links
 # b70_runtime acquires a dependency on libb70_prefill.so. Built in EVERY
