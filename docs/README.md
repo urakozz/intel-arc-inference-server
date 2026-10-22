@@ -92,6 +92,11 @@ narrative, and the numbered guides cite them where they matter.
   prose 2.2); int8 / 4-bit drafters cost nothing; a ranked 32k draft vocabulary too (in-sample ranking: an upper bound). Provisional
   go on code and agentic output (+54-65 % over `--mtp auto`, derived); verify at M = 5..8 is
   the box's to measure (plan 19a Task 4).
+- [probe-batching-2026-10-23.md](probe-batching-2026-10-23.md) - spec 13a: rows of different sequences in one
+  decode step - the audit (six per-sequence kernels, file:line), the `B70_BATCH_PROBE` row builds and
+  `probe_batch_step` (bitwise on the Mac for gdn_step / attn_prep; the box's check PENDING), the step and chunk
+  tables (derived; measured PENDING - queue row 66), the layouts' memory from the code (Qwen3.8 4 slots 1.94 GB
+  spare; Agnes 2 with MTP 1.76, 4 with `--mtp off` 1.22), the row table for 13b.
 - [probe-qwen4exp-2026-10-09.md](probe-qwen4exp-2026-10-09.md) - spec 21a: Qwen3.8-Flash-Next (`qwen4_exp`)
   from its small files, headers and transformers 5.19.0 / vLLM source - the rounding chain, both checkpoints,
   the PLE layout and hash constants (= the formula), the MTP head's wiring (decision 5's reuse is vLLM's
