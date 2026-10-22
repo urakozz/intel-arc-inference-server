@@ -1,6 +1,6 @@
 # Spec 25c - Nemotron 3.5 Bolt decode: the launch-count and state-bandwidth P0 first, then Mamba-2, the latent top-9 MoE and NoPE GQA-16 attention on two cards, the fused arms
 
-**Status (2026-10-20): planned; nothing built.** Box queue row **60**.
+**Status (2026-10-22): built on the Mac (branch `spec25c-bolt-decode`; as built: spec 25 §15); P0, every card stage and Task 8 are box queue row 60.**
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
 

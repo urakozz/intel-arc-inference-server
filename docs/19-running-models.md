@@ -684,3 +684,37 @@ near-tie tolerance, 4e-3), `B70_PREFILL_REPLAY` (record each chunk's list once a
 `B70_LFM_TOKENIZER_JSON` (`b70-serve`'s tokenizer.json; `lfm2moe_tokenizer_test`'s), `B70_LFM_SNAPSHOT_DIR`
 (`lfm2moe_template_test`'s and `toolcall_lfm2_test`'s snapshot), `B70_LFM_PENALTY_GREEDY` (`1`: a greedy request that
 carries a repetition penalty is penalised on the host).
+
+## Nemotron 3.5 Bolt 74B-A9B (spec 25)
+
+NVIDIA's hybrid of 40 Mamba-2 blocks, 8 NoPE attention blocks (GQA 32 / 2, head_dim 128) and 40 latent MoE blocks (top-9
+of 240..496 relu² experts in a 1024 latent, a shared expert), 88 blocks, vocabulary 131072; SergiioB's int4 g128 export
+(41.9 GB on disk; 40.469 GB on the cards with the int8 head, derived - spec 25 §14).
+
+**Status: decode built, never run on a B70** (queue row 60; spec 25c, as built in spec 25 §15). The real model runs on
+**two cards** (Decision 4: `--pp 2` is the default, split 48 by bytes; `--pp 1` is refused naming the bytes); the N 12
+synthetic checkpoints and `--layers N` fit one card. A prompt goes through the decode list one replay per id (prefill is
+spec 25d: `--prefill*` refused). Expected (derived): 653 launches a token (645 with `B70_BOLT_ATTN=eager`, 533 with
+`B70_BOLT_FUSE=all`, +2 with `--pipeline-handoff peer`). P0 (`probe_bolt_step`) runs first on the box and decides the
+GEMV `{S, layout}` picks and which arms are worth keeping.
+
+```sh
+S=oracle-out-bolt-synth/n12-g128                   # a synthetic checkpoint (25b's make_synth.py, 12 blocks)
+P=tests/golden/prompts/bolt_short.ids
+
+# every command below: never run on a B70
+./build/tools/probe/probe_bolt_step --depth 4096 --rounds 9 --sweep-s --pair      # P0: the skeleton lists (no model)
+./build/src/cli/b70-decode $S --ids $P --n 32                                     # one card, int8 head
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <SergiioB snapshot> --ids $P --n 32   # two cards (the default for 88 blocks)
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --bench --depth 4096 --tg 256 --max-len 8192
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --profile --depth 4096 --steps 32 --repeats 5
+B70_BOLT_FUSE=all ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --bench --depth 4096 --tg 256   # 533 launches
+B70_BOLT_SSM=bf16 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --bench --depth 4096 --tg 256   # Decision 2's arm
+```
+
+**Limits.** Decode only (no `b70-serve`: spec 25e); no prefill (25d), no `--mtp` (no MTP head), no `--spec` (spec 26), bf16 KV
+only (`--kv-cache int8` refused, Decision 17), `--layers auto` refused, `--device` refused with `--pp 2`.
+
+**Relevant variables:** `B70_BOLT_ATTN` (`flash` | `eager`), `B70_BOLT_FUSE` (`none` | `all` | a comma list of `router`,
+`route`, `conv`), `B70_BOLT_SSM` (`fp32` | `bf16`), `B70_BOLT_TIE_TOL` (the golden gate's near-tie tolerance, 1e-3 proposed),
+`B70_BOLT_A_EXP` (the reference's `A`: `torch` | `engine`).
