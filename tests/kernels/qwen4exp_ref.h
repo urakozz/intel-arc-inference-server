@@ -532,7 +532,9 @@ inline std::vector<uint16_t> gate_up(const uint32_t* ids, const uint16_t* x, con
 //   r = sum_k f32(rne(f32(rne(down_k)) · w_k)) in fp32, k ascending (the rank order), r_b = rne(r);
 //   sh_b = rne(f32(rne(down_10)) · sg); y = rne(f32(r_b) + f32(sh_b))       NOT folded into H
 inline uint16_t combine(const float* down, const float* w, float sg) {
+#if defined(__clang__)  // g++ does not know the pragma and needs none (ISO -std=c++17: -ffp-contract=off)
 #pragma STDC FP_CONTRACT OFF
+#endif
   float sum = 0.0f;
   for (uint32_t k = 0; k < kTopK; ++k) {
     const float t = rf(rf(down[k]) * w[k]);
