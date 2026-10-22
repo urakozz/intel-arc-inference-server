@@ -197,14 +197,15 @@ head + the MTP head (0.849 GB). All derived; nothing batched has run.
 
 - **Qwen3.8, 1 x 131072 + 3 x 32768: total 29.10 GB, 1.93 GB spare** (the table above §9 said ~1 GB: it counted the
   bf16 head without the MTP head). 4 x 65536 leaves 0.80 GB.
-- **Agnes, the same layout: 33.24 GB - 2.21 GB over.** **Operator's decision (2026-10-23): Agnes runs a shorter main
-  slot - 1 x 98304 + 3 x 32768, MTP off in the three short slots - 30.22 GB, 0.81 GB spare.** Qwen3.8 keeps 1 x 131072
-  + 3 x 32768 with MTP in every slot. Short slots below 32k are refused as a layout (an opencode subagent's first
-  prompt is 10-30k ids). Under the 8-row budget Agnes's main slot verifies at K = 3 beside three plain short rows
-  (7 rows for ~6.5 ids, against 8 rows for ~7.7 with K = 1 everywhere - derived from the measured acceptance).
-  Rejected for now: the embedding in host USM (2.54 GB back, spec 22 plan 22d Task 5) and a shared pool of
-  speculative GDN states.
-- **What this asks of 13b:** a max_len PER SLOT (`BatchEngineIface::max_len()` is one value today,
+- **Agnes, the same layout: 33.24 GB - 2.21 GB over.** **Operator's decision (2026-10-23, replacing the same day's
+  1 x 98304 + 3 x 32768): Agnes batches at concurrency 2 on one card - 1 x 131072 + 1 x 32768, MTP in both slots -
+  29.27 GB, 1.76 GB spare (derived).** The main session keeps its full 128k. Considered: 1 x 131072 + 2 x 32768 with MTP
+  off in the short slots (30.10 GB, 0.93 GB spare), 1 x 98304 + 3 x 32768 (the shorter main slot). Qwen3.8 keeps
+  1 x 131072 + 3 x 32768 with MTP in every slot. Short slots below 32k are refused as a layout (an opencode subagent's
+  first prompt is 10-30k ids). Agnes at concurrency 4 is the pipeline follow-on below. Rejected: the embedding in host
+  USM and every other host-RAM offload for batching (see the server option below), and a shared pool of speculative
+  GDN states.
+- **What this asks of 13b:** the slot count and lengths PER MODEL (Qwen3.8 four slots, Agnes two); a max_len PER SLOT (`BatchEngineIface::max_len()` is one value today,
   src/server/batch_engine.h:27); MTP on or off PER SLOT (a slot without speculative GDN states, `MtpDims` refuses
   fewer than 4 today, buffer_sizes.cc:273); the layout from the planner per model (`runtime::plan` grows a slot list),
   the extra captured lists (per batch size and per M) counted in it.
@@ -220,8 +221,24 @@ head + the MTP head (0.849 GB). All derived; nothing batched has run.
    no MTP): per-row slot addressing in `mg_attn_prep` / `mg_attn` (a ring base, a full-KV base and a position per row),
    `step_spec` in MuseEngine, a DFlash ring and taps per slot. Memory is no constraint (4 x 128k fits, estimated).
 3. **LFM2.5** (MoE, 64 experts top-4): needs M-row lists first (kM = 1 today).
+4. **Batching over the pipeline (operator, 2026-10-23):** Agnes (and Qwen3.8 if it pays) at concurrency 4 on both cards
+   under `--pp 2` - each card holds half the layers (~10 GB of Agnes's weights), so four 128k slots fit with room, and
+   two groups of rows alternate between the stages so both cards work (the pipeline's only decode gain: at batch 1
+   one card waits for the other). The row table in both stages of `runtime::PipelineEngine`, the group scheduling, the
+   handoff per group. Begins only after spec 16's rows 22, 23 and 27 pass on the box and 13b-13c are done; per model
+   and opt-in, since it takes the second card that §9 decision 4 otherwise keeps free.
 Not in spec 13: Bolt and Kolibri (two cards only - revisit beside the pipeline), K2-Horizon (one card holds ~50k
 positions in all), Qwen3.8-Flash-Next (offload-bound).
+
+### 9.2 The server option (operator, 2026-10-23)
+
+Batching is a `b70-serve` option, **off by default**: `--batch N` (N = 1, the default, is today's server - one request
+decodes at a time, the rest queue, and every output stays bitwise today's). `--batch 2..4` turns the slots on, with the
+layout the planner picks for the model (§9.1: Qwen3.8 four slots, Agnes two; a model without a batched engine refuses
+`--batch` > 1 by name). **Batching never offloads to host RAM:** every slot's KV and state, the weights and the
+embedding stay on the card; when a layout does not fit, the planner shortens the short slots or refuses, it does not
+spill. (Host-RAM expert offload stays spec 22's, for Qwen3.8-Flash-Next alone.) `--batch` > 1 with `--pp 2` is §9.1
+follow-on 4; with the two-card replica mode, §10.
 
 ## 10. Later: the two-card replica mode (written 2026-10-23, not built)
 
