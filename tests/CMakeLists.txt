@@ -4775,4 +4775,11 @@ target_include_directories(probe_bolt_step_shapes_test PRIVATE ${CMAKE_SOURCE_DI
 target_link_libraries(probe_bolt_step_shapes_test PRIVATE b70_bolt_model)
 add_test(NAME probe_bolt_step_shapes_test COMMAND probe_bolt_step_shapes_test)
 set_tests_properties(probe_bolt_step_shapes_test PROPERTIES LABELS bolt)
+# Task 2: the kernels' host twin (tests/kernels/bolt_ref.h) against 25a's bolt_ref.py / bolt_mamba_ops.py
+# (tests/kernels/bolt_fixture.h, tools/oracle/bolt_fixture.py) and the semantics' properties. Host only.
+add_executable(bolt_ref_test kernels/bolt_ref_test.cc)
+target_include_directories(bolt_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(bolt_ref_test PRIVATE b70_bolt_model)
+add_test(NAME bolt_ref_test COMMAND bolt_ref_test)
+set_tests_properties(bolt_ref_test PROPERTIES LABELS bolt TIMEOUT 600)
 # ==== Spec 25c: Nemotron 3.5 Bolt decode (label bolt) ==== (end) ====

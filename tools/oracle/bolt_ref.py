@@ -837,8 +837,11 @@ def cmd_run(a) -> None:
     from safetensors.torch import save_file
     t0 = time.time()
     torch.manual_seed(0)
+    if a.a_exp:
+        ops.A_EXP = a.a_exp
     print(f"torch {torch.__version__}, transformers {PINNED_TRANSFORMERS}, intra-op threads {torch.get_num_threads()} "
-          f"(OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS', 'unset')})")
+          f"(OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS', 'unset')}), A = -exp(A_log) by "
+          f"{'the engine exp (exp_torch)' if ops.A_EXP == 'engine' else 'torch.exp'}")
     cfg = config(a.snapshot, a.layers)
     ids = read_ids(a.prompt)
     T = len(ids)
@@ -907,7 +910,7 @@ def cmd_run(a) -> None:
         print(line)
     meta = {"snapshot": os.path.abspath(a.snapshot), "prompt": os.path.abspath(a.prompt), "n_prompt": str(T),
             "gen": str(a.gen), "layers": str(len(ks)), "chunk": str(chunk), "weights": a.weights,
-            "trunk": model.bolt_ckpt.trunk, "dtype": a.dtype, "mamba_path": a.path, "cache": a.cache,
+            "trunk": model.bolt_ckpt.trunk, "dtype": a.dtype, "mamba_path": a.path, "cache": a.cache, "a_exp": ops.A_EXP,
             "h_row0": str(h_from), "logits_row0": str(log_from), "attn_implementation": "eager",
             "tap_layers": json.dumps(rec.taps), "transformers": PINNED_TRANSFORMERS, "torch": torch.__version__,
             "remote_blob": REMOTE_SHA,
@@ -1316,6 +1319,9 @@ def main() -> None:
     r.add_argument("--path", default="kernel", choices=["kernel", "torch"], help="the Mamba path (torch: R's fallback)")
     r.add_argument("--dtype", default="bf16", choices=["bf16", "fp32"])
     r.add_argument("--expert-cache-gb", type=float, default=0.0, help="an LRU of dequantised experts across steps")
+    r.add_argument("--a-exp", choices=["torch", "engine"], default=None,
+                   help="A = -exp(A_log) by torch.exp (R's, the default) or by the engine's exp_torch (spec 25c: the "
+                        "fixture of a twin held bitwise; default: $B70_BOLT_A_EXP or torch)")
     p = sub.add_parser("ppl")
     common(p)
     p.add_argument("--text", action="append", default=[], help="NAME=FILE (the snapshot's tokenizer.json, no BOS)")

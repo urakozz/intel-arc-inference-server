@@ -955,6 +955,25 @@ def test_cli_run():
     print(f"  run: {len(keys)} tensors, the golden layout (route ids ascending, ssm fp32, conv [3][C], taps)")
 
 
+def test_a_exp_engine():
+    """Spec 25c: exp_engine (the loader's src/common/exp_torch.h in torch fp32 ops, the B70_BOLT_A_EXP=engine switch)
+    is within 1 ulp of torch.exp on every bf16 value of A_log's range and differs on > 0 of them (the switch matters);
+    A_from_log takes either; engine_A_of turns R's A into the engine's bitwise; the edges (exp(0) = 1, 0 below -104,
+    inf above 100). The C++ function itself is held to exp_engine by bolt_exp_compare.py (0 differ)."""
+    bits = torch.arange(0, 0x10000, dtype=torch.int32).to(torch.int16).view(BF).float()
+    x = bits[(bits >= -6.81) & (bits <= 8.81)]
+    e, t = ops.exp_engine(x), torch.exp(x)
+    d = (e.view(torch.int32).long() - t.view(torch.int32).long()).abs()
+    assert int(d.max()) <= 1 and int((d != 0).sum()) > 0
+    a_t, a_e = ops.A_from_log(x.to(BF), "torch"), ops.A_from_log(x.to(BF), "engine")
+    assert torch.equal(a_t, -t) and torch.equal(a_e, -e)
+    assert torch.equal(ops.engine_A_of(a_t), a_e)
+    edge = ops.exp_engine(torch.tensor([0.0, -105.0, 101.0]))
+    assert edge[0].item() == 1.0 and edge[1].item() == 0.0 and math.isinf(edge[2].item())
+    print(f"  exp_engine vs torch.exp on A_log's {x.numel()} bf16 values: {int((d != 0).sum())} differ by 1 ulp; "
+          f"A_from_log / engine_A_of switch bitwise")
+
+
 if __name__ == "__main__":
     want = sys.argv[1:]
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)
