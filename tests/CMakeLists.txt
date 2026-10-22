@@ -4873,7 +4873,31 @@ if(B70_BOLT)
     add_test(NAME bolt_decode_real_fuse_${arm}_test COMMAND bolt_decode_test ${B70_BOLT_SNAPSHOT} ${_bolt_ids} --fuse ${arm})
     list(APPEND _bolt_tests bolt_decode_synth_fuse_${arm}_test bolt_decode_real_fuse_${arm}_test)
   endforeach()
+  # Task 6: SergiioB's g128 on two cards - B4 with split 48 (copy) and 40 (peer) bitwise each other; B3 short / 4k /
+  # agentic (32k opt-in); the int8 head (default), the bf16 head, eager
+  add_test(NAME bolt_decode_real_test COMMAND bolt_decode_test ${B70_BOLT_SNAPSHOT} ${_bolt_ids} --pp 48,40)
+  list(APPEND _bolt_tests bolt_decode_real_test)
+  foreach(p bolt_short bolt_4k bolt_agentic)
+    add_test(NAME bolt_golden_real_${p}_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR} ${p})
+    list(APPEND _bolt_tests bolt_golden_real_${p}_test)
+  endforeach()
+  add_test(NAME bolt_golden_real_short_split40_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
+    bolt_short pp2:40 peer)
+  add_test(NAME bolt_golden_real_short_bf16head_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
+    bolt_short bf16)
+  add_test(NAME bolt_golden_real_short_eager_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
+    bolt_short eager)
+  list(APPEND _bolt_tests bolt_golden_real_short_split40_test bolt_golden_real_short_bf16head_test
+    bolt_golden_real_short_eager_test)
   set_tests_properties(${_bolt_tests} PROPERTIES LABELS "checkpoint;golden;bolt" SKIP_RETURN_CODE 77 TIMEOUT 7200)
+  # Decision 2's arm on the real model (r60.state_arm, opt-in) and the 32k prompt (opt-in, ~33k replays)
+  add_test(NAME bolt_golden_real_short_b16state_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
+    bolt_short b16)
+  add_test(NAME bolt_golden_real_agentic_b16state_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
+    bolt_agentic b16)
+  add_test(NAME bolt_golden_real_32k_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR} bolt_32k)
+  set_tests_properties(bolt_golden_real_short_b16state_test bolt_golden_real_agentic_b16state_test bolt_golden_real_32k_test
+    PROPERTIES LABELS "checkpoint;golden;bolt;optin" SKIP_RETURN_CODE 77 TIMEOUT 28800)
 endif()
 # b70-decode's model_type dispatch and Bolt's refusals, before the device: tests/model/bolt/ holds the published config.json
 # (25b, vendored), which is all the dispatch and the planner read.
