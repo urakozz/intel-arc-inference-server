@@ -109,3 +109,5 @@ target_link_libraries(b70-decode PRIVATE b70_lfm2moe_prefill)
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_lfm2moe_prefill)
 endif()
+# Spec 25c: and Nemotron 3.5 Bolt's engine (runtime/bolt, src/cli/bolt_decode.h), dispatched on model_type.
+target_link_libraries(b70-decode PRIVATE b70_bolt_runtime)

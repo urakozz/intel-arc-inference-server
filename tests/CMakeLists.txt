@@ -4821,5 +4821,60 @@ if(B70_BOLT)
     kernel_nb_res_norm_M4_K4096_W8_S1_T1 kernel_nb_route_M4_T9)
   add_test(NAME bolt_kernels_test COMMAND bolt_kernels_test)
   set_tests_properties(bolt_kernels_test PROPERTIES LABELS bolt TIMEOUT 1800)
+  # Task 4-6: the engine. B4 (bolt_decode_test: plan == allocation, the launch count, two runs bitwise - logits, routes,
+  # rings, SSM states, KV, both residual buffers, every block's tap; --fuse <arms> bitwise none; --pp a,b two splits
+  # bitwise each other and one card) and B3 (bolt_golden_test: tokens tie-aware, routes within B70_BOLT_TIE_TOL, the SSM
+  # state and conv columns by cosine, the h taps) on 25b's synthetic N 12 (one card; its golden sets: bolt_oracle.sh export
+  # <synthetic> -> oracle-out-bolt-<name>, data key oracle_bolt_synth) and on SergiioB's g128 checkpoint (two cards, split
+  # 48 and 40; 25a's golden sets, data key oracle_bolt). SKIP 77 without the data.
+  set(B70_BOLT_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-bolt" CACHE PATH
+    "25a's golden sets on SergiioB's g128 export (bolt_oracle.sh golden; data key oracle_bolt)")
+  set(B70_BOLT_SYNTH_ORACLE "${CMAKE_SOURCE_DIR}/oracle-out-bolt" CACHE PATH
+    "the synthetics' golden sets: <this>-n12-g128 / <this>-n12-g64x (bolt_oracle.sh export <synthetic>; data key oracle_bolt_synth)")
+  set(_bolt_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/bolt_short.ids)
+  foreach(t bolt_decode_test bolt_golden_test)
+    if(t STREQUAL "bolt_decode_test")
+      add_executable(${t} runtime/${t}.cc)
+    else()
+      add_executable(${t} golden/${t}.cc)
+    endif()
+    target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/runtime)
+    target_compile_definitions(${t} PRIVATE B70_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(${t} PRIVATE b70_bolt_runtime b70_l0)
+    add_dependencies(${t} ${B70_BOLT_DECODE_KERNELS} ${B70_BOLT_REUSED_KERNELS})
+  endforeach()
+  set(_bolt_tests)
+  foreach(sp n12-g128 n12-g64x)
+    add_test(NAME bolt_decode_synth_${sp}_test COMMAND bolt_decode_test ${B70_BOLT_SYNTH_DIR}/${sp} ${_bolt_ids})
+    list(APPEND _bolt_tests bolt_decode_synth_${sp}_test)
+    foreach(p bolt_short bolt_4k bolt_agentic)
+      add_test(NAME bolt_golden_synth_${sp}_${p}_test COMMAND bolt_golden_test ${B70_BOLT_SYNTH_DIR}/${sp}
+        ${B70_BOLT_SYNTH_ORACLE}-${sp} ${p})
+      list(APPEND _bolt_tests bolt_golden_synth_${sp}_${p}_test)
+    endforeach()
+  endforeach()
+  set(_bs ${B70_BOLT_SYNTH_DIR}/n12-g128)
+  add_test(NAME bolt_decode_synth_eager_test COMMAND bolt_decode_test ${_bs} ${_bolt_ids} eager)
+  add_test(NAME bolt_decode_synth_bf16head_test COMMAND bolt_decode_test ${_bs} ${_bolt_ids} bf16)
+  add_test(NAME bolt_decode_synth_b16state_test COMMAND bolt_decode_test ${_bs} ${_bolt_ids} b16)
+  add_test(NAME bolt_decode_synth_pp_test COMMAND bolt_decode_test ${_bs} ${_bolt_ids} --pp 6,4)
+  add_test(NAME bolt_golden_synth_short_bf16head_test COMMAND bolt_golden_test ${_bs} ${B70_BOLT_SYNTH_ORACLE}-n12-g128
+    bolt_short bf16)
+  add_test(NAME bolt_golden_synth_short_eager_test COMMAND bolt_golden_test ${_bs} ${B70_BOLT_SYNTH_ORACLE}-n12-g128
+    bolt_short eager)
+  add_test(NAME bolt_golden_synth_short_pp2_test COMMAND bolt_golden_test ${_bs} ${B70_BOLT_SYNTH_ORACLE}-n12-g128
+    bolt_short pp2:6 peer)
+  list(APPEND _bolt_tests bolt_decode_synth_eager_test bolt_decode_synth_bf16head_test bolt_decode_synth_b16state_test
+    bolt_decode_synth_pp_test bolt_golden_synth_short_bf16head_test bolt_golden_synth_short_eager_test
+    bolt_golden_synth_short_pp2_test)
+  set_tests_properties(${_bolt_tests} PROPERTIES LABELS "checkpoint;golden;bolt" SKIP_RETURN_CODE 77 TIMEOUT 7200)
 endif()
+# b70-decode's model_type dispatch and Bolt's refusals, before the device: tests/model/bolt/ holds the published config.json
+# (25b, vendored), which is all the dispatch and the planner read.
+set(_bolt_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/bolt)
+b70_cli_reject(cli_reject_bolt_prefill ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --prefill EXPECT "spec 25d")
+b70_cli_reject(cli_reject_bolt_prefill_length ${_bolt_cfg} --bench --prefill-length 64 EXPECT "spec 25d")
+b70_cli_reject(cli_reject_bolt_mtp ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "no MTP head")
+b70_cli_reject(cli_reject_bolt_spec ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash EXPECT "spec 26")
+b70_cli_reject(cli_reject_bolt_kv8 ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "Decision 17")
 # ==== Spec 25c: Nemotron 3.5 Bolt decode (label bolt) ==== (end) ====
