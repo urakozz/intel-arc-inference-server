@@ -162,10 +162,18 @@ int main(int argc, char** argv) {
   // unchanged (two launches per FA layer either way).
   // Spec 9: the int8 head (`--lm-head int8`) is the same one-for-one swap, to
   // `gemv_i8w_M1_K5120_N248320`, so the count stays 19 (v1) / 18 (v2) on every head form.
+  // Spec 12b: the int8 KV cache (the _kv8 twin, B70_KV_CACHE=int8) is the same one-for-one
+  // swap again - attn_prep_M1 and attn_v2_M1_T32 for their `_KV8` binaries - and decodes
+  // through v2 only (capture.cc refuses v1), so 18 holds and the v2 module carries the suffix.
   const bool attn_v2 = runtime::decode_attn() == runtime::DecodeAttn::V2;
-  std::printf("decode attention: %s\n", runtime::decode_attn_name(runtime::decode_attn()));
+  const bool kv8 = b.kv_lay.form == runtime::KvCache::Int8;
+  std::printf("decode attention: %s, kv cache %s\n", runtime::decode_attn_name(runtime::decode_attn()),
+              kv8 ? "int8" : "bf16");
   CHECK_EQ(cap.modules.size(), size_t(attn_v2 ? 18 : 19));
-  CHECK_EQ(cap.modules.count(attn_v2 ? "attn_v2_M1_T32" : "attn_decode_M1_L16384_B64"), size_t(1));
+  CHECK_EQ(cap.modules.count(!attn_v2 ? "attn_decode_M1_L16384_B64"
+                             : kv8    ? "attn_v2_M1_T32_KV8"
+                                      : "attn_v2_M1_T32"),
+           size_t(1));
   {
     const model::WeightKind kind =
         m.linears.at({loader::kTopLevel, model::LinearId::LmHead}).kind;
