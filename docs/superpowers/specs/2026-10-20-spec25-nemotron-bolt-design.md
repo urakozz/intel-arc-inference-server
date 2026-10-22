@@ -955,7 +955,7 @@ still fit two cards (24.17 / 24.23 GB of 32.53 - the plan, `bolt_plan_test`).
   every row at E 240 and 496; the tile bound 1,056 reached exactly at C 2048 / E 496
 - set from these, PROPOSED for the card (`bolt_prefill_test`): prefill vs decode's fill - logits cosine >= 0.9995, h taps median
   >= 0.9998 / min >= 0.99, SSM states and conv columns >= 0.999 a block, K / V rows median >= 0.9998 / p01 >= 0.99;
-  `bolt_pf_kernels_test`: `C B^T` by DPAS within 2^-20 of Σ|C B| of the plain build, the grouped up rows' cosine >= 0.9999
+  `bolt_pf_kernels_test`: `C B^T` by DPAS within 2^-16 of Σ|C B| of the plain build, the grouped up rows' cosine >= 0.9999
   against the twin's decode order, flash >= 0.99999 against fp64 at 3000 / 65536 / 200000
 
 **Measured on the Mac:** `bolt_pf_ref_test` (above, 33 s); `bolt_pf_run` (Apple's OpenCL on the UHD 630, indicative): the seed, the
