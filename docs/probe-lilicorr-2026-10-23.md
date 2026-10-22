@@ -4,15 +4,16 @@ Spec 26 §8 / plan 26a: what NVIDIA's LiLiCorr drafter (`nvidia/NVIDIA-Nemotron-
 `449d2414`) is worth on OUR Bolt (SergiioB's g128 dequantised - what we serve; LiLiCorr was trained against NVIDIA's 2-bit
 24GB release, Decision 9). **P0 sets the defaults and the expectation; it gates nothing** (the operator's 2026-10-15
 ruling: 26b / 26c are built whatever it shows). Every number is **measured on the Mac** unless marked ESTIMATED,
-DERIVED or PENDING (the box's: queue row 63). Nothing of the real drafter has been read: its 962 MB of weights were not
-downloaded when this was written (**PENDING-WEIGHTS**: `hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr
+DERIVED or PENDING (the box's: queue row 63). The drafter's 962 MB of weights reached the Mac's HF cache during this
+work and are read below (§1); the box needs them too (`hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr
 --revision 449d24140160b8e51871bfc0f0a7338abf640aa1`), and the real Bolt tap dumps (row 57's `r57.taps`) are the box's.
 
 ## 1. The reference (Task 1, Mac)
 
 `tools/oracle/dflash_ref.py`'s LiLiCorr form (vLLM 3901d56800's `LiLiCorrHead` + the DFlash 2 backbone with sinks; spec 26
 §2; `tools/oracle/README.md` "The LiLiCorr form"), on a tiny random drafter (`lilicorr_make_tiny.py`: 2 layers at 256, the
-head at 64, window 16, NVFP4-packed with a non-trivial global scale) - `test_dflash_ref.py`'s `test_lilicorr_*`, 12 tests,
+head at 64, window 16, NVFP4-packed with a non-trivial global scale) - `test_dflash_ref.py`'s `test_lilicorr_*`, 12 tests +
+the real checkpoint's,
 ~10 s in `agnes-ref-img`:
 
 - **NVFP4 decodes exactly** (Review Focus 3): all 16 x 254 finite (e2m1 code, e4m3 scale) products are exact in bf16 AND
@@ -53,6 +54,8 @@ head at 64, window 16, NVFP4-packed with a non-trivial global scale) - `test_dfl
 - **The cross-check against vLLM's own `LiLiCorrHead`** (Decision 1; `tools/oracle/lilicorr_vllm_check.py`): vLLM is NOT
   importable in `agnes-ref-img` (16 missing dependencies, and stubbing pydantic / msgspec breaks vLLM's own classes -
   measured 2026-10-23), so it runs on the box in the vLLM image: **PENDING (r63.vllmref)**.
+
+- **The real drafter on the Mac** (its weights reached the Mac's HF cache during this work; `test_lilicorr_real_checkpoint`): 179 tensors (25 NVFP4 linears x U8 / F8_E4M3 / F32 + 104 BF16 - the header's census, the head's linears all with a bias), all 25 decoded exactly in 8 s (W' bf16-exact, no NaN scale; of 54,919,168 scale blocks none zero, none subnormal); **1,112,803,882 parameters** (the card's 1.113 B; 36,750,474 in the head); g in [0.000791, 0.00656], none a power of two; the formats' bytes exact 2.152 GB / int8 1.077 / int4 g64 0.572 + the head 0.074 (spec 26 §4's derived figures, now measured); the weight error against g x W' over the 16 NVFP4 backbone linears (relative, min / median / max): int8 0.0088 / 0.0098 / 0.0130, **int4 g64 0.1070 / 0.1085 / 0.1125** (re-quantising a 4-bit format into another with other groups costs ~11 % - Decision 2's E_K comparison decides whether it matters); one draft on random taps over a random stand-in target: finite, slot 0 a broadcast, 5.3 s on this CPU in fp32. Bolt's own 41.9 GB is not on the Mac, so acceptance on real taps is still the box's.
 
 ## 2. The tiny pair (Task 2, Mac)
 
