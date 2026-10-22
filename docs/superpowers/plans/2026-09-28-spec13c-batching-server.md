@@ -83,7 +83,7 @@ Needs plan 13b and 13a's §7 decisions (chunk size, the budget rule, burst hold 
   line); **B2** golden gates and A4 with 2 and N concurrent requests, `--mtp` off and
   on (each response equal to its serial run under the tie rule; greedy MTP output identical to plain, per slot);
   **B3** prefix caching per slot (spec 7's C2 per slot, a slot reused by a new request); full suite. **Commit**
-  `server: --batch N on the card (spec 13, B2-B3)`.
+  `server: --batch N on the card (spec 13, B2-B3)`. Box queue row: the next free one after 67 (13b's after it).
 
 ### Task 3: speed and record
 

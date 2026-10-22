@@ -114,7 +114,7 @@ design §6) with the box's tables and the operator's §7 decisions.
 ### Task 5: speed and suite
 
 - [ ] Aggregate t/s at B = 2 / slots, 4k each, plain and with `--mtp` (13a's arms through the engine API: host writes,
-  submit, fence); B = 1 within 2 % of today; the full suite; section "Engine" in the probe doc. Box queue row and
+  submit, fence); B = 1 within 2 % of today; the full suite; section "Engine" in the probe doc. Box queue row (the next free one after 67) and
   stages. **Commit** `batching: engine gates and speed (spec 13b)`.
 
 **Gate for the plan:** B1 (incl. mixed K), B3 (incl. speculative state), slot isolation, determinism, `--batch 1`
