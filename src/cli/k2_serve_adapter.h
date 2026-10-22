@@ -57,6 +57,7 @@ struct K2EngineAdapterT : server::EngineIface {
   // request's prefill starts (the first moment the adapter knows it is over).
   void prefill(const std::vector<uint32_t>& ids) override {
     report();
+    rng_seeded_ = false;   // a new request: its first sampled step reseeds
     eng.prefill(ids);
     gen_start_ = std::chrono::steady_clock::now();
   }
@@ -81,11 +82,14 @@ struct K2EngineAdapterT : server::EngineIface {
   void save_kv(uint32_t b, uint32_t e, void* host) override { eng.save_kv(b, e, host); }
   void load_kv(uint32_t b, uint32_t e, const void* host) override { eng.load_kv(b, e, host); }
   void set_block_hook(BlockHook hook) override { eng.set_block_hook(std::move(hook)); }
-  void ingest(const std::vector<uint32_t>& ids) override { eng.ingest(ids); }
+  void ingest(const std::vector<uint32_t>& ids) override {
+    rng_seeded_ = false;
+    eng.ingest(ids);
+  }
 
   // The logits row of the step just run (the next token's distribution), filtered and drawn
   // as EngineAdapter's sample(); the id replaces the device argmax as the pending id. The RNG
-  // seeds itself once, from the first sampled request's seed (EngineAdapter's rule).
+  // seeds itself once per request, from the request's seed (EngineAdapter's rule).
   void sample_into_pending(const server::Sampling& sampling) {
     if (!rng_seeded_) {
       rng_.seed(sampling.has_seed ? sampling.seed : std::random_device{}());
