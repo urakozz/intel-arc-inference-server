@@ -152,6 +152,87 @@ inline std::vector<std::string> decode_variants(const model::BoltDesc& d, bool i
   return v;
 }
 
+// ==== Spec 26c: Bolt's verify lists at M = 1..8 (begin) ===============================================================
+// The decode list at M = K + 1 rows (runtime/bolt/bolt_capture.h build_verify; the CMake spec 26c block builds the names): the
+// anchor and K <= 7 drafts at positions pos .. pos + M - 1 (cur_token[0..M-1] through the gather), every norm site, linear,
+// conv, gated norm, router, route, shared act, attention prep / attention, head and argmax stage 1 at M rows (argmax stage 2
+// is the M-free binary: it writes out_token[0..M-1]); nb_ssm in its SLOT form at every M (`_SL8`: the state after row m into
+// slot (live + m) % 8, live = Control::gdn_live - spec 26 §5.3, Decision 4); the routed experts union-aware (Decision 10:
+// `_U`, three launches - up, down, the combine) or plain at M rows (B70_BOLT_VERIFY_MOE=plain; M = 1 is always plain). The
+// fused arms are not bound (each is bitwise the as-built list, Decision 16). The copy hand-off only (peer is refused by name).
+inline constexpr unsigned kVerifyRows = 8, kSpecSlots = 8;
+inline constexpr unsigned kSlotStride = kMHeads * kMHeadDim * kMState;   // one Mamba block's state, elements (1,048,576)
+inline std::string ssm_slots_variant(unsigned M, unsigned S, bool bf16_state) {
+  return ssm_variant(M, S, false, bf16_state) + "_SL8";
+}
+inline std::string moe_up_union_variant(unsigned M, unsigned I) {
+  return "nb_moe_up_U" + m_(M) + "_I" + std::to_string(I) + "_L1024_T9";
+}
+inline std::string moe_down_union_variant(unsigned M, unsigned I) {
+  return "nb_moe_down_U" + m_(M) + "_I" + std::to_string(I) + "_L1024_T9";
+}
+inline std::string moe_comb_union_variant(unsigned M) { return "nb_moe_comb_U" + m_(M) + "_L1024_T9"; }
+inline constexpr unsigned kCombWg = 256;
+inline constexpr unsigned moe_up_union_groups(unsigned M, unsigned I) { return M * kTopK * (I / 64); }   // M x 9 x I / 64
+inline constexpr unsigned moe_down_union_groups(unsigned M) { return M * kTopK * (kLatent / 64); }       // M x 9 x 16
+inline constexpr unsigned moe_down_union_wg() { return 64 * kDnKs; }                                    // 128
+inline std::string verify_head_variant(unsigned M, bool int8) {
+  return int8 ? gemv_i8w_variant(M, kHidden, kVocab) : gemv_bf16_variant(M, kHidden, kVocab, gemv_bf16_tiling(kVocab));
+}
+inline std::string verify_gemv_name(unsigned M, const model::GemvShape& s) { return gemv_variant(M, s.K, s.N, s.S, s.layout); }
+
+// Every binary a verify list of `d` at M rows binds (runtime/bolt/bolt_capture.cc forms the same names);
+// tests/kernels/bolt_verify_names_test.cc holds the union over M = 1..8 to the CMake block's list.
+inline std::vector<std::string> verify_variants(const model::BoltDesc& d, unsigned M, bool int8_head, bool eager,
+                                                bool bf16_state, bool union_moe) {
+  std::vector<std::string> v = {embed_variant(M), verify_head_variant(M, int8_head), argmax1_variant(M), argmax2_variant()};
+  auto add = [&](const std::string& s) {
+    for (const std::string& x : v)
+      if (x == s) return;
+    v.push_back(s);
+  };
+  const bool u = union_moe && M > 1;
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    const Pending p = l == 0 ? Pending{} : pending_of(d, l - 1);
+    add(res_norm_variant(M, p.s1, p.s2, false));
+    if (d.is_mamba(l)) {
+      const model::GemvShape in = linear_shape(d, l, model::BoltLinearId::InProj);
+      add(verify_gemv_name(M, in));
+      add(conv_variant(M, in.S));
+      add(ssm_slots_variant(M, in.S, bf16_state));
+      add(gnorm_variant(M, in.S));
+      add(verify_gemv_name(M, linear_shape(d, l, model::BoltLinearId::OutProj)));
+    } else if (d.is_attention(l)) {
+      const model::GemvShape qkv = linear_shape(d, l, model::BoltLinearId::Qkv);
+      add(verify_gemv_name(M, qkv));
+      add(attn_prep_variant(M, qkv.S));
+      add(attn_variant(M, eager));
+      add(verify_gemv_name(M, linear_shape(d, l, model::BoltLinearId::OProj)));
+    } else {
+      const unsigned I = d.inter.at(l);
+      add(router_variant(M));
+      add(route_variant(M));
+      const model::GemvShape f1 = linear_shape(d, l, model::BoltLinearId::Fc1SharedUp);
+      add(verify_gemv_name(M, f1));
+      add(sh_act_variant(M, f1.S));
+      if (u) {
+        add(moe_up_union_variant(M, I));
+        add(moe_down_union_variant(M, I));
+        add(moe_comb_union_variant(M));
+      } else {
+        add(moe_up_variant(M, I, false));
+        add(moe_down_variant(M, I));
+      }
+      add(verify_gemv_name(M, linear_shape(d, l, model::BoltLinearId::Fc2)));
+      add(verify_gemv_name(M, linear_shape(d, l, model::BoltLinearId::SharedDown)));
+    }
+  }
+  const Pending last = d.layers ? pending_of(d, d.layers - 1) : Pending{};
+  add(res_norm_variant(M, last.s1, last.s2, false));   // norm_f folds the last block's slices
+  return v;
+}
+// ==== Spec 26c (end) ====================================================================================================
+
 // ==== Spec 25d: Nemotron 3.5 Bolt prefill (begin) ======================================================================
 // One chunk of at most kPfC rows through a device's blocks on the Level Zero list (runtime/bolt/bolt_prefill.cc has the
 // walk). The Bolt-only prefill binaries are nb_pf_* (src/kernels/bolt/nb_pf_{mamba,moe,moe_gemm,prep}.cl); 25c's per-row
