@@ -591,14 +591,38 @@ int main() {
   std::puts("  2. pf_moe_sort: header, padded tile table, pair_row, rows exactly the host walk's");
   // 3. the gathers of the device's own inputs
   {
+    // The walk reads the WHOLE buffers (tmax x TM rows); the gathers write rows
+    // [0, hdr[kHdrRows]) only and the reference holds exactly those, so the comparison is
+    // over the used prefix - as check_sort's row_tok. Comparing the vectors whole compared
+    // two sizes (the box's first run: 824 x 16 rows read, fewer used) and failed on that alone.
     pf_moe_ref::Sorted st = pf_moe_ref::sort(a.route.data(), C, kS);
-    CHECK(a.xg == pf_moe_ref::gather(st, x.data(), kH));
-    CHECK(a.xg8 == pf_moe_ref::gather(st, a.xq_rows.data(), kH));
-    for (uint32_t r = 0; r < st.rows_used(); ++r)
-      CHECK(a.xsg[r] == (st.row_tok[r] == kNone ? 0.0f : a.xs[st.row_tok[r]]));
-    std::puts("  3. pf_moe_gather / _i8: every used row and scale exact");
+    const size_t used = st.rows_used();
+    CHECK_EQ(a.hdr[kernels::pf_moe::kHdrRows], uint32_t(used));
+    CHECK(used <= size_t(a.tmax) * kTm);
+    const std::vector<uint16_t> want = pf_moe_ref::gather(st, x.data(), kH);
+    const std::vector<uint8_t> want8 = pf_moe_ref::gather(st, a.xq_rows.data(), kH);
+    CHECK_EQ(want.size(), used * kH);
+    CHECK_EQ(want8.size(), used * kH);
+    size_t bad = 0, bad8 = 0, bads = 0;
+    for (size_t r = 0; r < used; ++r) {
+      bad += std::memcmp(&a.xg[r * kH], &want[r * kH], kH * 2) != 0;
+      bad8 += std::memcmp(&a.xg8[r * kH], &want8[r * kH], kH) != 0;
+      bads += a.xsg[r] != (st.row_tok[r] == kNone ? 0.0f : a.xs[st.row_tok[r]]);
+    }
+    std::printf("  3. pf_moe_gather / _i8: %zu used rows of %u read (%u tiles of %u); %zu bf16, %zu int8 "
+                "rows and %zu scales differ\n", used, a.tmax * kTm, st.tiles_used(), a.tmax, bad, bad8, bads);
+    CHECK_EQ(bad, size_t(0));
+    CHECK_EQ(bad8, size_t(0));
+    CHECK_EQ(bads, size_t(0));
   }
-  // 4. grouped == dense
+  // 4. grouped == dense. Section 2's crafted sorts rewrote the device header, tile table,
+  // row_tok and pair_row (its last: C = 1, experts 1..8 only), and pf_moe_dequant_* skips a
+  // routed block whose header count is 0 - so the chunk's own sort goes back first, or the
+  // dequant of an expert the C = 1 header does not route is skipped and reads as zeros.
+  d.imm.copy(b.hdr.ptr(), a.hdr.data(), a.hdr.size() * 4);
+  d.imm.copy(b.tiles.ptr(), a.tiles.data(), a.tiles.size() * 4);
+  d.imm.copy(b.row_tok.ptr(), a.row_tok.data(), a.row_tok.size() * 4);
+  d.imm.copy(b.pair_row.ptr(), a.pair_row.data(), a.pair_row.size() * 4);
   std::puts("  4. grouped == dense, bitwise, per (token, expert):");
   for (uint32_t e : sample_experts(a)) grouped_vs_dense(d, k, L, b, a, e);
   // 6. the combine
