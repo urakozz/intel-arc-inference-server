@@ -370,10 +370,14 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
     const size_t o = (size_t(l) * n + p) * 2 * SW;
     return !std::equal(pf_set.begin() + o, pf_set.begin() + o + SW, dec_set.begin() + o);
   });
+  // Operator ruling 2026-10-23: under B70_K2_ATTN=eager (k2_prefill_eager*, ctest label `diagnostic`) sections
+  // 4 / 5 are RECORDED - every number and bar printed, no failure on them; flash, the default, keeps the gates.
+  const bool eager = runtime::k2::k2_attn() == runtime::k2::K2Attn::Eager;
+  const char* const fail_mark = eager ? "  (below the bar: eager, recorded)" : "  ** FAIL **";
   const bool kv_ok = kc.dense_worst >= 0.999 && kc.k_median >= kKMedian && kc.v_median >= kVMedian;
   std::printf("4. prefill KV vs decode's fill (%u rows x %u layers): dense layers' worst %.6f, median %.7f, "
               "p01 %.6f, %u rows < 0.99, worst %.4f (L%u row %u)%s\n", n, d.layers, kc.dense_worst, kc.median,
-              kc.p01, kc.below99, kc.worst, kc.worst_layer, kc.worst_row, kv_ok ? "" : "  ** FAIL **");
+              kc.p01, kc.below99, kc.worst, kc.worst_layer, kc.worst_row, kv_ok ? "" : fail_mark);
   std::printf("   K rows: median %.7f, p01 %.6f, worst %.4f (L%u row %u); V rows with the same MoVA set: median "
               "%.7f, p01 %.6f, worst %.4f (L%u row %u); %u (layer, row) MoVA sets differ (their V worst %.4f)\n",
               kc.k_median, kc.k_p01, kc.k_worst, kc.k_worst_layer, kc.k_worst_row, kc.v_median, kc.v_p01, kc.v_worst,
@@ -382,10 +386,10 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
               "(margin <= %.0e), %llu beyond (%llu of the differing rows MoVA); matched weights worst |dw| %.4f%s\n",
               (unsigned long long)rows, (unsigned long long)exact, (unsigned long long)ties,
               double(kTieTol), (unsigned long long)bad, (unsigned long long)mova_flips, double(worst_w),
-              double(exact) >= kSameSets * double(rows) ? "" : "  ** FAIL **");
+              double(exact) >= kSameSets * double(rows) ? "" : fail_mark);
   std::printf("   sets equal %.4f of the rows (bar %.4f); K median bar %.3f, same-set V median bar %.3f\n",
               rows ? double(exact) / double(rows) : 1.0, kSameSets, kKMedian, kVMedian);
-  ok = ok && kv_ok && double(exact) >= kSameSets * double(rows);
+  ok = ok && (eager || (kv_ok && double(exact) >= kSameSets * double(rows)));
 
   // ---- 6. tokens, ruling A26's rule ------------------------------------------------------
   std::vector<uint32_t> dtok(kGen);
